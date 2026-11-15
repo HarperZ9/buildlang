@@ -1,0 +1,1367 @@
+// ============================================================================
+// BUILD-UNIVERSE: NEXUS PERSISTENCE
+// Save/load system for mod data and state persistence
+// ============================================================================
+
+import nexus::lib::{ModMetadata, Version};
+import nexus::config::ConfigValue;
+
+// ============================================================================
+// REGION: Persistence Error Types
+// ============================================================================
+
+/// Persistence operation errors
+@derive(Debug, Clone)]
+enum PersistenceError {
+    /// File not found
+    NotFound { path: String },
+    /// Permission denied
+    PermissionDenied { path: String },
+    /// Disk full
+    DiskFull { required_bytes: u64, available_bytes: u64 },
+    /// Corrupted data
+    Corrupted { path: String, reason: String },
+    /// Version mismatch
+    VersionMismatch { expected: u32, found: u32 },
+    /// Schema mismatch
+    SchemaMismatch { field: String, expected: String, found: String },
+    /// Serialization error
+    SerializationError { reason: String },
+    /// Deserialization error
+    DeserializationError { reason: String },
+    /// IO error
+    IoError { operation: String, reason: String },
+    /// Locked by another process
+    Locked { path: String },
+    /// Backup failed
+    BackupFailed { reason: String },
+    /// Migration failed
+    MigrationFailed { from: u32, to: u32, reason: String },
+    /// Generic error
+    Other { message: String },
+}
+
+impl PersistenceError {
+    fn to_string(&self) -> String {
+        match self {
+            PersistenceError::NotFound { path } =>
+                format!("File not found: {}", path),
+            PersistenceError::PermissionDenied { path } =>
+                format!("Permission denied: {}", path),
+            PersistenceError::DiskFull { required_bytes, available_bytes } =>
+                format!("Disk full: need {} bytes, have {} bytes", required_bytes, available_bytes),
+            PersistenceError::Corrupted { path, reason } =>
+                format!("Corrupted data in {}: {}", path, reason),
+            PersistenceError::VersionMismatch { expected, found } =>
+                format!("Version mismatch: expected {}, found {}", expected, found),
+            PersistenceError::SchemaMismatch { field, expected, found } =>
+                format!("Schema mismatch for '{}': expected {}, found {}", field, expected, found),
+            PersistenceError::SerializationError { reason } =>
+                format!("Serialization error: {}", reason),
+            PersistenceError::DeserializationError { reason } =>
+                format!("Deserialization error: {}", reason),
+            PersistenceError::IoError { operation, reason } =>
+                format!("IO error during {}: {}", operation, reason),
+            PersistenceError::Locked { path } =>
+                format!("File locked: {}", path),
+            PersistenceError::BackupFailed { reason } =>
+                format!("Backup failed: {}", reason),
+            PersistenceError::MigrationFailed { from, to, reason } =>
+                format!("Migration from v{} to v{} failed: {}", from, to, reason),
+            PersistenceError::Other { message } =>
+                message.clone(),
+        }
+    }
+}
+
+// ============================================================================
+// REGION: Serialization Format
+// ============================================================================
+
+/// Serialization format options
+@derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SerializationFormat {
+    /// Binary format (compact, fast)
+    Binary,
+    /// JSON format (human readable)
+    Json,
+    /// TOML format (config-friendly)
+    Toml,
+    /// MessagePack (compact, cross-platform)
+    MessagePack,
+    /// Custom format
+    Custom,
+}
+
+impl SerializationFormat {
+    fn extension(&self) -> &'static str {
+        match self {
+            SerializationFormat::Binary => ".bin",
+            SerializationFormat::Json => ".json",
+            SerializationFormat::Toml => ".toml",
+            SerializationFormat::MessagePack => ".msgpack",
+            SerializationFormat::Custom => ".dat",
+        }
+    }
+
+    fn from_extension(ext: &str) -> Option<Self> {
+        match ext.to_lowercase().as_str() {
+            ".bin" | "bin" => Some(SerializationFormat::Binary),
+            ".json" | "json" => Some(SerializationFormat::Json),
+            ".toml" | "toml" => Some(SerializationFormat::Toml),
+            ".msgpack" | "msgpack" => Some(SerializationFormat::MessagePack),
+            _ => None,
+        }
+    }
+}
+
+// ============================================================================
+// REGION: Data Types
+// ============================================================================
+
+/// Storable value types
+@derive(Debug, Clone)]
+enum StorageValue {
+    Null,
+    Bool(bool),
+    Int(i64),
+    Float(f64),
+    String(String),
+    Bytes(Vec<u8>),
+    Array(Vec<StorageValue>),
+    Map(HashMap<String, StorageValue>),
+    Timestamp(u64),
+    Uuid(String),
+}
+
+impl StorageValue {
+    fn type_name(&self) -> &'static str {
+        match self {
+            StorageValue::Null => "null",
+            StorageValue::Bool(_) => "bool",
+            StorageValue::Int(_) => "int",
+            StorageValue::Float(_) => "float",
+            StorageValue::String(_) => "string",
+            StorageValue::Bytes(_) => "bytes",
+            StorageValue::Array(_) => "array",
+            StorageValue::Map(_) => "map",
+            StorageValue::Timestamp(_) => "timestamp",
+            StorageValue::Uuid(_) => "uuid",
+        }
+    }
+
+    fn as_bool(&self) -> Option<bool> {
+        match self {
+            StorageValue::Bool(v) => Some(*v),
+            _ => None,
+        }
+    }
+
+    fn as_int(&self) -> Option<i64> {
+        match self {
+            StorageValue::Int(v) => Some(*v),
+            StorageValue::Float(v) => Some(*v as i64),
+            _ => None,
+        }
+    }
+
+    fn as_float(&self) -> Option<f64> {
+        match self {
+            StorageValue::Float(v) => Some(*v),
+            StorageValue::Int(v) => Some(*v as f64),
+            _ => None,
+        }
+    }
+
+    fn as_string(&self) -> Option<&str> {
+        match self {
+            StorageValue::String(v) => Some(v.as_str()),
+            _ => None,
+        }
+    }
+
+    fn as_bytes(&self) -> Option<&[u8]> {
+        match self {
+            StorageValue::Bytes(v) => Some(v.as_slice()),
+            _ => None,
+        }
+    }
+
+    fn as_array(&self) -> Option<&Vec<StorageValue>> {
+        match self {
+            StorageValue::Array(v) => Some(v),
+            _ => None,
+        }
+    }
+
+    fn as_map(&self) -> Option<&HashMap<String, StorageValue>> {
+        match self {
+            StorageValue::Map(v) => Some(v),
+            _ => None,
+        }
+    }
+
+    fn get(&self, key: &str) -> Option<&StorageValue> {
+        match self {
+            StorageValue::Map(m) => m.get(key),
+            _ => None,
+        }
+    }
+
+    fn get_path(&self, path: &str) -> Option<&StorageValue> {
+        let parts: Vec<&str> = path.split('.').collect();
+        let mut current = self;
+
+        for part in parts {
+            current = match current {
+                StorageValue::Map(m) => m.get(part)?,
+                StorageValue::Array(a) => {
+                    let index: usize = part.parse().ok()?;
+                    a.get(index)?
+                }
+                _ => return None,
+            };
+        }
+
+        Some(current)
+    }
+}
+
+// ============================================================================
+// REGION: Save File Header
+// ============================================================================
+
+/// Save file header for versioning and validation
+@derive(Debug, Clone)]
+struct SaveHeader {
+    /// Magic number for validation
+    magic: u32,
+    /// Format version
+    version: u32,
+    /// Mod ID that created this save
+    mod_id: String,
+    /// Mod version
+    mod_version: Version,
+    /// Creation timestamp
+    created_at: u64,
+    /// Last modified timestamp
+    modified_at: u64,
+    /// Checksum of data
+    checksum: u64,
+    /// Compression type
+    compression: CompressionType,
+    /// Encryption type
+    encryption: EncryptionType,
+    /// Custom metadata
+    metadata: HashMap<String, String>,
+}
+
+const SAVE_MAGIC: u32 = 0x4E455853; // "NEXS"
+
+impl SaveHeader {
+    fn new(mod_id: &str, mod_version: Version) -> Self {
+        let now = current_time_ms();
+        SaveHeader {
+            magic: SAVE_MAGIC,
+            version: 1,
+            mod_id: mod_id.to_string(),
+            mod_version,
+            created_at: now,
+            modified_at: now,
+            checksum: 0,
+            compression: CompressionType::None,
+            encryption: EncryptionType::None,
+            metadata: HashMap::new(),
+        }
+    }
+
+    fn validate(&self) -> Result<(), PersistenceError> {
+        if self.magic != SAVE_MAGIC {
+            return Err(PersistenceError::Corrupted {
+                path: String::new(),
+                reason: "Invalid magic number".to_string(),
+            });
+        }
+        Ok(())
+    }
+
+    fn set_metadata(&mut self, key: &str, value: &str) {
+        self.metadata.insert(key.to_string(), value.to_string());
+    }
+
+    fn get_metadata(&self, key: &str) -> Option<&str> {
+        self.metadata.get(key).map(|s| s.as_str())
+    }
+}
+
+/// Compression types
+@derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CompressionType {
+    None,
+    Gzip,
+    Lz4,
+    Zstd,
+}
+
+/// Encryption types
+@derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EncryptionType {
+    None,
+    Aes256,
+    ChaCha20,
+}
+
+// ============================================================================
+// REGION: Save Slot
+// ============================================================================
+
+/// Save slot information
+@derive(Debug, Clone)]
+struct SaveSlot {
+    /// Slot ID (0-based)
+    slot_id: u32,
+    /// Display name
+    name: String,
+    /// File path
+    path: String,
+    /// Save header
+    header: Option<SaveHeader>,
+    /// Preview data
+    preview: Option<SavePreview>,
+    /// File size in bytes
+    size_bytes: u64,
+    /// Whether slot has data
+    occupied: bool,
+    /// Last access time
+    last_accessed: u64,
+}
+
+/// Preview information for save selection UI
+@derive(Debug, Clone)]
+struct SavePreview {
+    /// Screenshot/thumbnail
+    thumbnail: Option<Vec<u8>>,
+    /// Play time
+    play_time_seconds: u64,
+    /// Game progress percentage
+    progress: f32,
+    /// Location/chapter name
+    location: String,
+    /// Character name
+    character_name: Option<String>,
+    /// Custom preview fields
+    custom_fields: HashMap<String, String>,
+}
+
+impl SaveSlot {
+    fn new(slot_id: u32, base_path: &str) -> Self {
+        SaveSlot {
+            slot_id,
+            name: format!("Slot {}", slot_id + 1),
+            path: format!("{}/save_{}.sav", base_path, slot_id),
+            header: None,
+            preview: None,
+            size_bytes: 0,
+            occupied: false,
+            last_accessed: 0,
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        !self.occupied
+    }
+
+    fn formatted_time(&self) -> String {
+        if let Some(ref preview) = self.preview {
+            let hours = preview.play_time_seconds / 3600;
+            let minutes = (preview.play_time_seconds % 3600) / 60;
+            format!("{}h {}m", hours, minutes)
+        } else {
+            "0h 0m".to_string()
+        }
+    }
+}
+
+// ============================================================================
+// REGION: Save Manager
+// ============================================================================
+
+/// Save file manager
+@derive(Debug)]
+struct SaveManager {
+    /// Base save directory
+    save_dir: String,
+    /// Mod ID
+    mod_id: String,
+    /// Mod version
+    mod_version: Version,
+    /// Number of save slots
+    num_slots: u32,
+    /// Save slots
+    slots: Vec<SaveSlot>,
+    /// Autosave slot
+    autosave_slot: Option<SaveSlot>,
+    /// Quicksave slot
+    quicksave_slot: Option<SaveSlot>,
+    /// Serialization format
+    format: SerializationFormat,
+    /// Compression
+    compression: CompressionType,
+    /// Enable backups
+    enable_backups: bool,
+    /// Maximum backups to keep
+    max_backups: u32,
+    /// Cloud save enabled
+    cloud_enabled: bool,
+}
+
+impl SaveManager {
+    fn new(save_dir: &str, mod_id: &str, mod_version: Version) -> Self {
+        let mut manager = SaveManager {
+            save_dir: save_dir.to_string(),
+            mod_id: mod_id.to_string(),
+            mod_version,
+            num_slots: 10,
+            slots: Vec::new(),
+            autosave_slot: None,
+            quicksave_slot: None,
+            format: SerializationFormat::Binary,
+            compression: CompressionType::Lz4,
+            enable_backups: true,
+            max_backups: 3,
+            cloud_enabled: false,
+        };
+
+        manager.initialize_slots();
+        manager
+    }
+
+    fn with_slots(mut self, num_slots: u32) -> Self {
+        self.num_slots = num_slots;
+        self.initialize_slots();
+        self
+    }
+
+    fn with_format(mut self, format: SerializationFormat) -> Self {
+        self.format = format;
+        self
+    }
+
+    fn with_compression(mut self, compression: CompressionType) -> Self {
+        self.compression = compression;
+        self
+    }
+
+    fn with_backups(mut self, enable: bool, max: u32) -> Self {
+        self.enable_backups = enable;
+        self.max_backups = max;
+        self
+    }
+
+    fn initialize_slots(&mut self) {
+        self.slots.clear();
+
+        for i in 0..self.num_slots {
+            let slot = SaveSlot::new(i, &self.save_dir);
+            self.slots.push(slot);
+        }
+
+        self.autosave_slot = Some(SaveSlot {
+            slot_id: u32::MAX - 1,
+            name: "Autosave".to_string(),
+            path: format!("{}/autosave.sav", self.save_dir),
+            header: None,
+            preview: None,
+            size_bytes: 0,
+            occupied: false,
+            last_accessed: 0,
+        });
+
+        self.quicksave_slot = Some(SaveSlot {
+            slot_id: u32::MAX,
+            name: "Quicksave".to_string(),
+            path: format!("{}/quicksave.sav", self.save_dir),
+            header: None,
+            preview: None,
+            size_bytes: 0,
+            occupied: false,
+            last_accessed: 0,
+        });
+
+        self.scan_saves();
+    }
+
+    fn scan_saves(&mut self) {
+        for slot in &mut self.slots {
+            if let Ok(header) = self.read_header(&slot.path) {
+                slot.occupied = true;
+                slot.header = Some(header.clone());
+                slot.last_accessed = header.modified_at;
+
+                // Try to read preview
+                if let Ok(preview) = self.read_preview(&slot.path) {
+                    slot.preview = Some(preview);
+                }
+
+                if let Ok(size) = get_file_size(&slot.path) {
+                    slot.size_bytes = size;
+                }
+            }
+        }
+
+        // Scan autosave
+        if let Some(ref mut slot) = self.autosave_slot {
+            if let Ok(header) = self.read_header(&slot.path) {
+                slot.occupied = true;
+                slot.header = Some(header);
+            }
+        }
+
+        // Scan quicksave
+        if let Some(ref mut slot) = self.quicksave_slot {
+            if let Ok(header) = self.read_header(&slot.path) {
+                slot.occupied = true;
+                slot.header = Some(header);
+            }
+        }
+    }
+
+    fn read_header(&self, path: &str) -> Result<SaveHeader, PersistenceError> {
+        let data = read_file_bytes(path).map_err(|e| PersistenceError::IoError {
+            operation: "read header".to_string(),
+            reason: e,
+        })?;
+
+        self.deserialize_header(&data)
+    }
+
+    fn deserialize_header(&self, data: &[u8]) -> Result<SaveHeader, PersistenceError> {
+        if data.len() < 8 {
+            return Err(PersistenceError::Corrupted {
+                path: String::new(),
+                reason: "File too small".to_string(),
+            });
+        }
+
+        // Read magic and version
+        let magic = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
+        let version = u32::from_le_bytes([data[4], data[5], data[6], data[7]]);
+
+        if magic != SAVE_MAGIC {
+            return Err(PersistenceError::Corrupted {
+                path: String::new(),
+                reason: "Invalid magic number".to_string(),
+            });
+        }
+
+        // Deserialize rest of header based on version
+        // (simplified implementation)
+        Ok(SaveHeader {
+            magic,
+            version,
+            mod_id: self.mod_id.clone(),
+            mod_version: self.mod_version.clone(),
+            created_at: 0,
+            modified_at: 0,
+            checksum: 0,
+            compression: CompressionType::None,
+            encryption: EncryptionType::None,
+            metadata: HashMap::new(),
+        })
+    }
+
+    fn read_preview(&self, path: &str) -> Result<SavePreview, PersistenceError> {
+        // Read preview data from save file
+        // (simplified implementation)
+        Ok(SavePreview {
+            thumbnail: None,
+            play_time_seconds: 0,
+            progress: 0.0,
+            location: String::new(),
+            character_name: None,
+            custom_fields: HashMap::new(),
+        })
+    }
+
+    /// Save data to a slot
+    fn save(&mut self, slot_id: u32, data: &StorageValue) -> Result<(), PersistenceError> {
+        let slot = self.slots.get_mut(slot_id as usize)
+            .ok_or(PersistenceError::NotFound {
+                path: format!("Slot {}", slot_id),
+            })?;
+
+        // Create backup if exists
+        if self.enable_backups && slot.occupied {
+            self.create_backup(&slot.path)?;
+        }
+
+        // Create header
+        let mut header = SaveHeader::new(&self.mod_id, self.mod_version.clone());
+        header.compression = self.compression;
+
+        // Serialize data
+        let serialized = self.serialize(data)?;
+
+        // Compress if needed
+        let compressed = self.compress(&serialized, header.compression)?;
+
+        // Calculate checksum
+        header.checksum = compute_checksum(&compressed);
+
+        // Write file
+        self.write_save(&slot.path, &header, &compressed)?;
+
+        // Update slot info
+        slot.occupied = true;
+        slot.header = Some(header);
+        slot.size_bytes = compressed.len() as u64;
+        slot.last_accessed = current_time_ms();
+
+        Ok(())
+    }
+
+    /// Load data from a slot
+    fn load(&self, slot_id: u32) -> Result<StorageValue, PersistenceError> {
+        let slot = self.slots.get(slot_id as usize)
+            .ok_or(PersistenceError::NotFound {
+                path: format!("Slot {}", slot_id),
+            })?;
+
+        if !slot.occupied {
+            return Err(PersistenceError::NotFound {
+                path: slot.path.clone(),
+            });
+        }
+
+        // Read file
+        let (header, compressed) = self.read_save(&slot.path)?;
+
+        // Verify checksum
+        let checksum = compute_checksum(&compressed);
+        if checksum != header.checksum {
+            return Err(PersistenceError::Corrupted {
+                path: slot.path.clone(),
+                reason: "Checksum mismatch".to_string(),
+            });
+        }
+
+        // Decompress
+        let serialized = self.decompress(&compressed, header.compression)?;
+
+        // Deserialize
+        self.deserialize(&serialized)
+    }
+
+    /// Quick save
+    fn quicksave(&mut self, data: &StorageValue) -> Result<(), PersistenceError> {
+        let path = self.quicksave_slot.as_ref()
+            .map(|s| s.path.clone())
+            .ok_or(PersistenceError::NotFound {
+                path: "Quicksave slot".to_string(),
+            })?;
+
+        let mut header = SaveHeader::new(&self.mod_id, self.mod_version.clone());
+        header.compression = self.compression;
+
+        let serialized = self.serialize(data)?;
+        let compressed = self.compress(&serialized, header.compression)?;
+        header.checksum = compute_checksum(&compressed);
+
+        self.write_save(&path, &header, &compressed)?;
+
+        if let Some(ref mut slot) = self.quicksave_slot {
+            slot.occupied = true;
+            slot.header = Some(header);
+        }
+
+        Ok(())
+    }
+
+    /// Quick load
+    fn quickload(&self) -> Result<StorageValue, PersistenceError> {
+        let slot = self.quicksave_slot.as_ref()
+            .ok_or(PersistenceError::NotFound {
+                path: "Quicksave slot".to_string(),
+            })?;
+
+        if !slot.occupied {
+            return Err(PersistenceError::NotFound {
+                path: slot.path.clone(),
+            });
+        }
+
+        let (header, compressed) = self.read_save(&slot.path)?;
+        let serialized = self.decompress(&compressed, header.compression)?;
+        self.deserialize(&serialized)
+    }
+
+    /// Autosave
+    fn autosave(&mut self, data: &StorageValue) -> Result<(), PersistenceError> {
+        let path = self.autosave_slot.as_ref()
+            .map(|s| s.path.clone())
+            .ok_or(PersistenceError::NotFound {
+                path: "Autosave slot".to_string(),
+            })?;
+
+        let mut header = SaveHeader::new(&self.mod_id, self.mod_version.clone());
+        header.compression = self.compression;
+        header.set_metadata("type", "autosave");
+
+        let serialized = self.serialize(data)?;
+        let compressed = self.compress(&serialized, header.compression)?;
+        header.checksum = compute_checksum(&compressed);
+
+        self.write_save(&path, &header, &compressed)?;
+
+        if let Some(ref mut slot) = self.autosave_slot {
+            slot.occupied = true;
+            slot.header = Some(header);
+        }
+
+        Ok(())
+    }
+
+    /// Delete a save slot
+    fn delete(&mut self, slot_id: u32) -> Result<(), PersistenceError> {
+        let slot = self.slots.get_mut(slot_id as usize)
+            .ok_or(PersistenceError::NotFound {
+                path: format!("Slot {}", slot_id),
+            })?;
+
+        if slot.occupied {
+            delete_file(&slot.path).map_err(|e| PersistenceError::IoError {
+                operation: "delete".to_string(),
+                reason: e,
+            })?;
+
+            slot.occupied = false;
+            slot.header = None;
+            slot.preview = None;
+            slot.size_bytes = 0;
+        }
+
+        Ok(())
+    }
+
+    /// Copy save to another slot
+    fn copy(&mut self, from_slot: u32, to_slot: u32) -> Result<(), PersistenceError> {
+        let data = self.load(from_slot)?;
+        self.save(to_slot, &data)
+    }
+
+    /// Export save to file
+    fn export(&self, slot_id: u32, export_path: &str) -> Result<(), PersistenceError> {
+        let slot = self.slots.get(slot_id as usize)
+            .ok_or(PersistenceError::NotFound {
+                path: format!("Slot {}", slot_id),
+            })?;
+
+        copy_file(&slot.path, export_path).map_err(|e| PersistenceError::IoError {
+            operation: "export".to_string(),
+            reason: e,
+        })
+    }
+
+    /// Import save from file
+    fn import(&mut self, import_path: &str, slot_id: u32) -> Result<(), PersistenceError> {
+        let slot = self.slots.get_mut(slot_id as usize)
+            .ok_or(PersistenceError::NotFound {
+                path: format!("Slot {}", slot_id),
+            })?;
+
+        // Validate imported file
+        let (header, _) = self.read_save(import_path)?;
+
+        if header.mod_id != self.mod_id {
+            return Err(PersistenceError::SchemaMismatch {
+                field: "mod_id".to_string(),
+                expected: self.mod_id.clone(),
+                found: header.mod_id,
+            });
+        }
+
+        copy_file(import_path, &slot.path).map_err(|e| PersistenceError::IoError {
+            operation: "import".to_string(),
+            reason: e,
+        })?;
+
+        slot.occupied = true;
+        slot.header = Some(header);
+
+        Ok(())
+    }
+
+    fn serialize(&self, data: &StorageValue) -> Result<Vec<u8>, PersistenceError> {
+        match self.format {
+            SerializationFormat::Binary => serialize_binary(data),
+            SerializationFormat::Json => serialize_json(data),
+            SerializationFormat::Toml => serialize_toml(data),
+            SerializationFormat::MessagePack => serialize_msgpack(data),
+            SerializationFormat::Custom => Err(PersistenceError::Other {
+                message: "Custom format requires custom serializer".to_string(),
+            }),
+        }
+    }
+
+    fn deserialize(&self, data: &[u8]) -> Result<StorageValue, PersistenceError> {
+        match self.format {
+            SerializationFormat::Binary => deserialize_binary(data),
+            SerializationFormat::Json => deserialize_json(data),
+            SerializationFormat::Toml => deserialize_toml(data),
+            SerializationFormat::MessagePack => deserialize_msgpack(data),
+            SerializationFormat::Custom => Err(PersistenceError::Other {
+                message: "Custom format requires custom deserializer".to_string(),
+            }),
+        }
+    }
+
+    fn compress(&self, data: &[u8], compression: CompressionType) -> Result<Vec<u8>, PersistenceError> {
+        match compression {
+            CompressionType::None => Ok(data.to_vec()),
+            CompressionType::Gzip => compress_gzip(data),
+            CompressionType::Lz4 => compress_lz4(data),
+            CompressionType::Zstd => compress_zstd(data),
+        }
+    }
+
+    fn decompress(&self, data: &[u8], compression: CompressionType) -> Result<Vec<u8>, PersistenceError> {
+        match compression {
+            CompressionType::None => Ok(data.to_vec()),
+            CompressionType::Gzip => decompress_gzip(data),
+            CompressionType::Lz4 => decompress_lz4(data),
+            CompressionType::Zstd => decompress_zstd(data),
+        }
+    }
+
+    fn write_save(&self, path: &str, header: &SaveHeader, data: &[u8]) -> Result<(), PersistenceError> {
+        let mut buffer = Vec::new();
+
+        // Write magic and version
+        buffer.extend_from_slice(&header.magic.to_le_bytes());
+        buffer.extend_from_slice(&header.version.to_le_bytes());
+
+        // Write header length and header
+        let header_bytes = serialize_header(header)?;
+        buffer.extend_from_slice(&(header_bytes.len() as u32).to_le_bytes());
+        buffer.extend_from_slice(&header_bytes);
+
+        // Write data
+        buffer.extend_from_slice(data);
+
+        write_file_bytes(path, &buffer).map_err(|e| PersistenceError::IoError {
+            operation: "write".to_string(),
+            reason: e,
+        })
+    }
+
+    fn read_save(&self, path: &str) -> Result<(SaveHeader, Vec<u8>), PersistenceError> {
+        let data = read_file_bytes(path).map_err(|e| PersistenceError::IoError {
+            operation: "read".to_string(),
+            reason: e,
+        })?;
+
+        if data.len() < 12 {
+            return Err(PersistenceError::Corrupted {
+                path: path.to_string(),
+                reason: "File too small".to_string(),
+            });
+        }
+
+        let header_len = u32::from_le_bytes([data[8], data[9], data[10], data[11]]) as usize;
+
+        if data.len() < 12 + header_len {
+            return Err(PersistenceError::Corrupted {
+                path: path.to_string(),
+                reason: "Invalid header length".to_string(),
+            });
+        }
+
+        let header = deserialize_header(&data[12..12 + header_len])?;
+        let content = data[12 + header_len..].to_vec();
+
+        Ok((header, content))
+    }
+
+    fn create_backup(&self, path: &str) -> Result<(), PersistenceError> {
+        let backup_dir = format!("{}/backups", self.save_dir);
+        ensure_directory(&backup_dir)?;
+
+        let filename = path.split('/').last().unwrap_or("save");
+        let timestamp = current_time_ms();
+        let backup_path = format!("{}/{}_{}", backup_dir, timestamp, filename);
+
+        copy_file(path, &backup_path).map_err(|e| PersistenceError::BackupFailed {
+            reason: e,
+        })?;
+
+        // Cleanup old backups
+        self.cleanup_backups(&backup_dir, filename)?;
+
+        Ok(())
+    }
+
+    fn cleanup_backups(&self, backup_dir: &str, filename: &str) -> Result<(), PersistenceError> {
+        let mut backups: Vec<(String, u64)> = Vec::new();
+
+        if let Ok(entries) = read_directory(backup_dir) {
+            for entry in entries {
+                if entry.ends_with(filename) {
+                    if let Some(time_str) = entry.strip_suffix(&format!("_{}", filename)) {
+                        if let Ok(time) = time_str.parse::<u64>() {
+                            backups.push((entry, time));
+                        }
+                    }
+                }
+            }
+        }
+
+        // Sort by time (newest first)
+        backups.sort_by(|a, b| b.1.cmp(&a.1));
+
+        // Delete excess backups
+        for (path, _) in backups.iter().skip(self.max_backups as usize) {
+            let full_path = format!("{}/{}", backup_dir, path);
+            let _ = delete_file(&full_path);
+        }
+
+        Ok(())
+    }
+
+    fn get_slot(&self, slot_id: u32) -> Option<&SaveSlot> {
+        self.slots.get(slot_id as usize)
+    }
+
+    fn get_slots(&self) -> &[SaveSlot] {
+        &self.slots
+    }
+
+    fn get_occupied_slots(&self) -> Vec<&SaveSlot> {
+        self.slots.iter().filter(|s| s.occupied).collect()
+    }
+
+    fn get_empty_slots(&self) -> Vec<&SaveSlot> {
+        self.slots.iter().filter(|s| !s.occupied).collect()
+    }
+}
+
+// ============================================================================
+// REGION: Key-Value Store
+// ============================================================================
+
+/// Simple key-value persistent storage
+@derive(Debug)]
+struct KeyValueStore {
+    path: String,
+    data: HashMap<String, StorageValue>,
+    dirty: bool,
+    auto_save: bool,
+}
+
+impl KeyValueStore {
+    fn new(path: &str) -> Self {
+        let mut store = KeyValueStore {
+            path: path.to_string(),
+            data: HashMap::new(),
+            dirty: false,
+            auto_save: true,
+        };
+
+        store.load_from_disk();
+        store
+    }
+
+    fn load_from_disk(&mut self) {
+        if let Ok(bytes) = read_file_bytes(&self.path) {
+            if let Ok(value) = deserialize_json(&bytes) {
+                if let StorageValue::Map(map) = value {
+                    self.data = map;
+                }
+            }
+        }
+    }
+
+    fn save_to_disk(&mut self) -> Result<(), PersistenceError> {
+        if !self.dirty {
+            return Ok(());
+        }
+
+        let value = StorageValue::Map(self.data.clone());
+        let bytes = serialize_json(&value)?;
+
+        write_file_bytes(&self.path, &bytes).map_err(|e| PersistenceError::IoError {
+            operation: "save".to_string(),
+            reason: e,
+        })?;
+
+        self.dirty = false;
+        Ok(())
+    }
+
+    fn get(&self, key: &str) -> Option<&StorageValue> {
+        self.data.get(key)
+    }
+
+    fn get_string(&self, key: &str) -> Option<&str> {
+        self.get(key).and_then(|v| v.as_string())
+    }
+
+    fn get_int(&self, key: &str) -> Option<i64> {
+        self.get(key).and_then(|v| v.as_int())
+    }
+
+    fn get_float(&self, key: &str) -> Option<f64> {
+        self.get(key).and_then(|v| v.as_float())
+    }
+
+    fn get_bool(&self, key: &str) -> Option<bool> {
+        self.get(key).and_then(|v| v.as_bool())
+    }
+
+    fn set(&mut self, key: &str, value: StorageValue) {
+        self.data.insert(key.to_string(), value);
+        self.dirty = true;
+
+        if self.auto_save {
+            let _ = self.save_to_disk();
+        }
+    }
+
+    fn set_string(&mut self, key: &str, value: &str) {
+        self.set(key, StorageValue::String(value.to_string()));
+    }
+
+    fn set_int(&mut self, key: &str, value: i64) {
+        self.set(key, StorageValue::Int(value));
+    }
+
+    fn set_float(&mut self, key: &str, value: f64) {
+        self.set(key, StorageValue::Float(value));
+    }
+
+    fn set_bool(&mut self, key: &str, value: bool) {
+        self.set(key, StorageValue::Bool(value));
+    }
+
+    fn remove(&mut self, key: &str) -> Option<StorageValue> {
+        let value = self.data.remove(key);
+        if value.is_some() {
+            self.dirty = true;
+            if self.auto_save {
+                let _ = self.save_to_disk();
+            }
+        }
+        value
+    }
+
+    fn contains(&self, key: &str) -> bool {
+        self.data.contains_key(key)
+    }
+
+    fn keys(&self) -> Vec<&str> {
+        self.data.keys().map(|k| k.as_str()).collect()
+    }
+
+    fn clear(&mut self) {
+        self.data.clear();
+        self.dirty = true;
+        if self.auto_save {
+            let _ = self.save_to_disk();
+        }
+    }
+}
+
+// ============================================================================
+// REGION: Migration System
+// ============================================================================
+
+/// Save data migration
+@derive(Debug)]
+struct SaveMigration {
+    from_version: u32,
+    to_version: u32,
+    migrate: Box<dyn Fn(StorageValue) -> Result<StorageValue, PersistenceError>>,
+}
+
+/// Migration manager
+@derive(Debug)]
+struct MigrationManager {
+    migrations: Vec<SaveMigration>,
+    current_version: u32,
+}
+
+impl MigrationManager {
+    fn new(current_version: u32) -> Self {
+        MigrationManager {
+            migrations: Vec::new(),
+            current_version,
+        }
+    }
+
+    fn register<F>(&mut self, from: u32, to: u32, migrate: F)
+    where
+        F: Fn(StorageValue) -> Result<StorageValue, PersistenceError> + 'static
+    {
+        self.migrations.push(SaveMigration {
+            from_version: from,
+            to_version: to,
+            migrate: Box::new(migrate),
+        });
+    }
+
+    fn migrate(&self, mut data: StorageValue, from_version: u32) -> Result<StorageValue, PersistenceError> {
+        let mut current = from_version;
+
+        while current < self.current_version {
+            let migration = self.migrations.iter()
+                .find(|m| m.from_version == current)
+                .ok_or(PersistenceError::MigrationFailed {
+                    from: current,
+                    to: current + 1,
+                    reason: "No migration found".to_string(),
+                })?;
+
+            data = (migration.migrate)(data)?;
+            current = migration.to_version;
+        }
+
+        Ok(data)
+    }
+
+    fn needs_migration(&self, version: u32) -> bool {
+        version < self.current_version
+    }
+}
+
+// ============================================================================
+// REGION: Helper Functions
+// ============================================================================
+
+fn current_time_ms() -> u64 {
+    0 // Platform implementation
+}
+
+fn read_file_bytes(path: &str) -> Result<Vec<u8>, String> {
+    Err("Not implemented".to_string())
+}
+
+fn write_file_bytes(path: &str, data: &[u8]) -> Result<(), String> {
+    Err("Not implemented".to_string())
+}
+
+fn delete_file(path: &str) -> Result<(), String> {
+    Err("Not implemented".to_string())
+}
+
+fn copy_file(from: &str, to: &str) -> Result<(), String> {
+    Err("Not implemented".to_string())
+}
+
+fn get_file_size(path: &str) -> Result<u64, String> {
+    Err("Not implemented".to_string())
+}
+
+fn read_directory(path: &str) -> Result<Vec<String>, String> {
+    Err("Not implemented".to_string())
+}
+
+fn ensure_directory(path: &str) -> Result<(), PersistenceError> {
+    Ok(()) // Platform implementation
+}
+
+fn compute_checksum(data: &[u8]) -> u64 {
+    // Simple checksum implementation
+    let mut sum: u64 = 0;
+    for byte in data {
+        sum = sum.wrapping_add(*byte as u64);
+    }
+    sum
+}
+
+fn serialize_header(header: &SaveHeader) -> Result<Vec<u8>, PersistenceError> {
+    Ok(Vec::new()) // Platform implementation
+}
+
+fn deserialize_header(data: &[u8]) -> Result<SaveHeader, PersistenceError> {
+    Err(PersistenceError::Other { message: "Not implemented".to_string() })
+}
+
+fn serialize_binary(value: &StorageValue) -> Result<Vec<u8>, PersistenceError> {
+    Ok(Vec::new())
+}
+
+fn deserialize_binary(data: &[u8]) -> Result<StorageValue, PersistenceError> {
+    Ok(StorageValue::Null)
+}
+
+fn serialize_json(value: &StorageValue) -> Result<Vec<u8>, PersistenceError> {
+    Ok(Vec::new())
+}
+
+fn deserialize_json(data: &[u8]) -> Result<StorageValue, PersistenceError> {
+    Ok(StorageValue::Null)
+}
+
+fn serialize_toml(value: &StorageValue) -> Result<Vec<u8>, PersistenceError> {
+    Ok(Vec::new())
+}
+
+fn deserialize_toml(data: &[u8]) -> Result<StorageValue, PersistenceError> {
+    Ok(StorageValue::Null)
+}
+
+fn serialize_msgpack(value: &StorageValue) -> Result<Vec<u8>, PersistenceError> {
+    Ok(Vec::new())
+}
+
+fn deserialize_msgpack(data: &[u8]) -> Result<StorageValue, PersistenceError> {
+    Ok(StorageValue::Null)
+}
+
+fn compress_gzip(data: &[u8]) -> Result<Vec<u8>, PersistenceError> {
+    Ok(data.to_vec())
+}
+
+fn decompress_gzip(data: &[u8]) -> Result<Vec<u8>, PersistenceError> {
+    Ok(data.to_vec())
+}
+
+fn compress_lz4(data: &[u8]) -> Result<Vec<u8>, PersistenceError> {
+    Ok(data.to_vec())
+}
+
+fn decompress_lz4(data: &[u8]) -> Result<Vec<u8>, PersistenceError> {
+    Ok(data.to_vec())
+}
+
+fn compress_zstd(data: &[u8]) -> Result<Vec<u8>, PersistenceError> {
+    Ok(data.to_vec())
+}
+
+fn decompress_zstd(data: &[u8]) -> Result<Vec<u8>, PersistenceError> {
+    Ok(data.to_vec())
+}
+
+// ============================================================================
+// REGION: Unit Tests
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_storage_value_types() {
+        let null = StorageValue::Null;
+        assert_eq!(null.type_name(), "null");
+
+        let boolean = StorageValue::Bool(true);
+        assert_eq!(boolean.as_bool(), Some(true));
+
+        let integer = StorageValue::Int(42);
+        assert_eq!(integer.as_int(), Some(42));
+
+        let float = StorageValue::Float(3.14);
+        assert!((float.as_float().unwrap() - 3.14).abs() < 0.001);
+
+        let string = StorageValue::String("hello".to_string());
+        assert_eq!(string.as_string(), Some("hello"));
+    }
+
+    #[test]
+    fn test_storage_value_path_access() {
+        let mut inner = HashMap::new();
+        inner.insert("name".to_string(), StorageValue::String("test".to_string()));
+        inner.insert("value".to_string(), StorageValue::Int(100));
+
+        let mut outer = HashMap::new();
+        outer.insert("player".to_string(), StorageValue::Map(inner));
+
+        let value = StorageValue::Map(outer);
+
+        assert_eq!(
+            value.get_path("player.name").and_then(|v| v.as_string()),
+            Some("test")
+        );
+        assert_eq!(
+            value.get_path("player.value").and_then(|v| v.as_int()),
+            Some(100)
+        );
+    }
+
+    #[test]
+    fn test_save_header() {
+        let header = SaveHeader::new("test_mod", Version::new(1, 0, 0));
+
+        assert_eq!(header.magic, SAVE_MAGIC);
+        assert_eq!(header.version, 1);
+        assert!(header.validate().is_ok());
+    }
+
+    #[test]
+    fn test_save_slot() {
+        let slot = SaveSlot::new(0, "/saves");
+
+        assert_eq!(slot.slot_id, 0);
+        assert!(slot.is_empty());
+        assert_eq!(slot.path, "/saves/save_0.sav");
+    }
+
+    #[test]
+    fn test_serialization_format() {
+        assert_eq!(SerializationFormat::Json.extension(), ".json");
+        assert_eq!(SerializationFormat::Binary.extension(), ".bin");
+
+        assert_eq!(
+            SerializationFormat::from_extension(".json"),
+            Some(SerializationFormat::Json)
+        );
+    }
+
+    #[test]
+    fn test_key_value_store() {
+        let mut store = KeyValueStore {
+            path: "/test/store.json".to_string(),
+            data: HashMap::new(),
+            dirty: false,
+            auto_save: false,
+        };
+
+        store.set_string("name", "test");
+        store.set_int("count", 42);
+        store.set_bool("enabled", true);
+
+        assert_eq!(store.get_string("name"), Some("test"));
+        assert_eq!(store.get_int("count"), Some(42));
+        assert_eq!(store.get_bool("enabled"), Some(true));
+        assert!(store.dirty);
+    }
+
+    #[test]
+    fn test_migration_manager() {
+        let mut manager = MigrationManager::new(3);
+
+        manager.register(1, 2, |data| {
+            // Migration logic
+            Ok(data)
+        });
+
+        manager.register(2, 3, |data| {
+            // Migration logic
+            Ok(data)
+        });
+
+        assert!(manager.needs_migration(1));
+        assert!(manager.needs_migration(2));
+        assert!(!manager.needs_migration(3));
+    }
+
+    #[test]
+    fn test_checksum() {
+        let data1 = vec![1, 2, 3, 4, 5];
+        let data2 = vec![1, 2, 3, 4, 5];
+        let data3 = vec![1, 2, 3, 4, 6];
+
+        assert_eq!(compute_checksum(&data1), compute_checksum(&data2));
+        assert_ne!(compute_checksum(&data1), compute_checksum(&data3));
+    }
+}

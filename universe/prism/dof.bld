@@ -1,0 +1,1227 @@
+// BUILD-UNIVERSE Prism: Depth of Field Shaders
+// Comprehensive DOF implementations including bokeh, physically-based COC, and various blur techniques
+
+import prism::lib::*;
+import spectrum::color::*;
+
+// ============================================================================
+// DOF CONFIGURATION
+// ============================================================================
+
+@shader_config
+struct DOFConfig {
+    technique: DOFTechnique,
+    quality: DOFQuality,
+    focus_distance: f32,
+    aperture: f32,
+    focal_length: f32,
+    sensor_height: f32,
+    max_coc_radius: f32,
+    bokeh_shape: BokehShape,
+    bokeh_rotation: f32,
+    bokeh_chromatic_aberration: f32,
+    near_blur_enabled: bool,
+    auto_focus: bool,
+    auto_focus_speed: f32,
+    auto_focus_point: Vec2,
+}
+
+enum DOFTechnique {
+    Gaussian,           // Simple gaussian blur
+    Bokeh,              // Sprite-based bokeh
+    HexBokeh,           // Hexagonal bokeh approximation
+    CircularBokeh,      // Circular bokeh with kernel
+    ScatterAsGather,    // Efficient gather-based DOF
+    PhysicalBokeh,      // Physically accurate bokeh
+    TiledBokeh,         // Tile-based for performance
+    HalfResBokeh,       // Half-resolution for performance
+}
+
+enum DOFQuality {
+    Low,        // 16 samples
+    Medium,     // 32 samples
+    High,       // 64 samples
+    Ultra,      // 128 samples
+    Cinematic,  // 256 samples
+}
+
+enum BokehShape {
+    Circle,
+    Hexagon,
+    Octagon,
+    Pentagon,
+    Heart,
+    Star,
+    Custom,
+}
+
+impl DOFConfig {
+    const CINEMATIC: Self = DOFConfig {
+        technique: DOFTechnique::PhysicalBokeh,
+        quality: DOFQuality::Cinematic,
+        focus_distance: 5.0,
+        aperture: 2.8,
+        focal_length: 50.0,
+        sensor_height: 24.0,
+        max_coc_radius: 32.0,
+        bokeh_shape: BokehShape::Circle,
+        bokeh_rotation: 0.0,
+        bokeh_chromatic_aberration: 0.0,
+        near_blur_enabled: true,
+        auto_focus: false,
+        auto_focus_speed: 5.0,
+        auto_focus_point: Vec2::new(0.5, 0.5),
+    };
+
+    const GAME_HIGH: Self = DOFConfig {
+        technique: DOFTechnique::ScatterAsGather,
+        quality: DOFQuality::High,
+        focus_distance: 10.0,
+        aperture: 5.6,
+        focal_length: 35.0,
+        sensor_height: 24.0,
+        max_coc_radius: 16.0,
+        bokeh_shape: BokehShape::Hexagon,
+        bokeh_rotation: 0.0,
+        bokeh_chromatic_aberration: 0.0,
+        near_blur_enabled: true,
+        auto_focus: true,
+        auto_focus_speed: 8.0,
+        auto_focus_point: Vec2::new(0.5, 0.5),
+    };
+
+    const GAME_MEDIUM: Self = DOFConfig {
+        technique: DOFTechnique::HexBokeh,
+        quality: DOFQuality::Medium,
+        focus_distance: 10.0,
+        aperture: 5.6,
+        focal_length: 35.0,
+        sensor_height: 24.0,
+        max_coc_radius: 12.0,
+        bokeh_shape: BokehShape::Hexagon,
+        bokeh_rotation: 0.0,
+        bokeh_chromatic_aberration: 0.0,
+        near_blur_enabled: true,
+        auto_focus: true,
+        auto_focus_speed: 8.0,
+        auto_focus_point: Vec2::new(0.5, 0.5),
+    };
+
+    const GAME_LOW: Self = DOFConfig {
+        technique: DOFTechnique::Gaussian,
+        quality: DOFQuality::Low,
+        focus_distance: 10.0,
+        aperture: 8.0,
+        focal_length: 35.0,
+        sensor_height: 24.0,
+        max_coc_radius: 8.0,
+        bokeh_shape: BokehShape::Circle,
+        bokeh_rotation: 0.0,
+        bokeh_chromatic_aberration: 0.0,
+        near_blur_enabled: false,
+        auto_focus: true,
+        auto_focus_speed: 8.0,
+        auto_focus_point: Vec2::new(0.5, 0.5),
+    };
+}
+
+// ============================================================================
+// COC (CIRCLE OF CONFUSION) CALCULATION
+// ============================================================================
+
+@shader(compute)
+const COC_COMPUTE_SHADER: &str = r#"
+    // Calculate Circle of Confusion for each pixel
+    // Based on thin lens equation
+
+    cbuffer COCParams : register(b0) {
+        float focus_distance;       // Focus plane distance
+        float aperture;             // f-number (e.g., 2.8, 5.6)
+        float focal_length;         // Lens focal length in mm
+        float sensor_height;        // Sensor height in mm
+        float max_coc_radius;       // Maximum CoC radius in pixels
+        float near_plane;
+        float far_plane;
+        float screen_height;
+        float coc_scale;
+        uint use_physical_coc;
+        float padding0;
+        float padding1;
+    };
+
+    Texture2D<float> depth_texture : register(t0);
+    RWTexture2D<float> coc_output : register(u0);
+
+    SamplerState point_sampler : register(s0);
+
+    float linearize_depth(float depth) {
+        return near_plane * far_plane / (far_plane - depth * (far_plane - near_plane));
+    }
+
+    float compute_physical_coc(float object_distance) {
+        // Thin lens equation for CoC
+        // CoC = |S2 - S1| * (f^2 / (N * (S1 - f)))
+        // Where S1 = focus distance, S2 = object distance, f = focal length, N = aperture
+
+        float f = focal_length * 0.001;  // Convert to meters
+        float N = aperture;
+        float S1 = focus_distance;
+        float S2 = object_distance;
+
+        if (abs(S1 - f) < 0.001) return max_coc_radius;
+
+        // Signed CoC (negative = near blur, positive = far blur)
+        float coc = (S2 - S1) * f * f / (N * S2 * (S1 - f));
+
+        // Convert to sensor space then to pixels
+        float coc_mm = abs(coc) * 1000.0;  // Convert to mm
+        float coc_pixels = coc_mm / sensor_height * screen_height;
+
+        // Sign indicates near vs far
+        return sign(S2 - S1) * min(coc_pixels, max_coc_radius);
+    }
+
+    float compute_simple_coc(float object_distance) {
+        float coc = (object_distance - focus_distance) / object_distance;
+        coc *= focal_length / aperture * coc_scale;
+        return clamp(coc, -max_coc_radius, max_coc_radius);
+    }
+
+    [numthreads(8, 8, 1)]
+    void cs_main(uint3 dispatch_id : SV_DispatchThreadID, uint3 group_id : SV_GroupID, uint3 group_thread_id : SV_GroupThreadID) {
+        uint2 pixel = dispatch_id.xy;
+        float2 uv = (float2(pixel) + 0.5) / float2(textureSize(depth_texture, 0));
+
+        float depth = depth_texture.SampleLevel(point_sampler, uv, 0);
+        float linear_depth = linearize_depth(depth);
+
+        float coc;
+        if (use_physical_coc) {
+            coc = compute_physical_coc(linear_depth);
+        } else {
+            coc = compute_simple_coc(linear_depth);
+        }
+
+        coc_output[pixel] = coc;
+    }
+"#;
+
+// ============================================================================
+// GAUSSIAN DOF SHADER
+// ============================================================================
+
+@shader(compute)
+const DOF_GAUSSIAN_HORIZONTAL_SHADER: &str = r#"
+    // Gaussian blur horizontal pass with CoC-weighted sampling
+
+    cbuffer BlurParams : register(b0) {
+        float2 screen_size;
+        float2 inv_screen_size;
+        float max_coc_radius;
+        float blur_scale;
+        float padding0;
+        float padding1;
+    };
+
+    Texture2D<float4> color_texture : register(t0);
+    Texture2D<float> coc_texture : register(t1);
+
+    RWTexture2D<float4> blur_output : register(u0);
+
+    SamplerState linear_sampler : register(s0);
+
+    static const int MAX_SAMPLES = 32;
+
+    float gaussian_weight(float x, float sigma) {
+        return exp(-x * x / (2.0 * sigma * sigma));
+    }
+
+    [numthreads(64, 1, 1)]
+    void cs_main(uint3 dispatch_id : SV_DispatchThreadID) {
+        float2 uv = (float2(dispatch_id.xy) + 0.5) * inv_screen_size;
+
+        float center_coc = abs(coc_texture.SampleLevel(linear_sampler, uv, 0));
+        float blur_radius = center_coc * blur_scale;
+
+        if (blur_radius < 0.5) {
+            blur_output[dispatch_id.xy] = color_texture.SampleLevel(linear_sampler, uv, 0);
+            return;
+        }
+
+        int num_samples = int(min(blur_radius * 2.0 + 1.0, float(MAX_SAMPLES)));
+        float sigma = blur_radius / 3.0;
+
+        float4 color_sum = float4(0.0, 0.0, 0.0, 0.0);
+        float weight_sum = 0.0;
+
+        for (int i = -num_samples / 2; i <= num_samples / 2; i++) {
+            float2 offset_uv = uv + float2(float(i) * inv_screen_size.x, 0.0);
+            float sample_coc = abs(coc_texture.SampleLevel(linear_sampler, offset_uv, 0));
+
+            float weight = gaussian_weight(float(i), sigma);
+
+            // Prevent background bleeding into foreground
+            if (sample_coc < center_coc) {
+                weight *= sample_coc / max(center_coc, 0.001);
+            }
+
+            float4 sample_color = color_texture.SampleLevel(linear_sampler, offset_uv, 0);
+            color_sum += sample_color * weight;
+            weight_sum += weight;
+        }
+
+        blur_output[dispatch_id.xy] = color_sum / max(weight_sum, 0.001);
+    }
+"#;
+
+@shader(compute)
+const DOF_GAUSSIAN_VERTICAL_SHADER: &str = r#"
+    // Gaussian blur vertical pass
+
+    cbuffer BlurParams : register(b0) {
+        float2 screen_size;
+        float2 inv_screen_size;
+        float max_coc_radius;
+        float blur_scale;
+        float padding0;
+        float padding1;
+    };
+
+    Texture2D<float4> color_texture : register(t0);
+    Texture2D<float> coc_texture : register(t1);
+
+    RWTexture2D<float4> blur_output : register(u0);
+
+    SamplerState linear_sampler : register(s0);
+
+    static const int MAX_SAMPLES = 32;
+
+    float gaussian_weight(float x, float sigma) {
+        return exp(-x * x / (2.0 * sigma * sigma));
+    }
+
+    [numthreads(1, 64, 1)]
+    void cs_main(uint3 dispatch_id : SV_DispatchThreadID) {
+        float2 uv = (float2(dispatch_id.xy) + 0.5) * inv_screen_size;
+
+        float center_coc = abs(coc_texture.SampleLevel(linear_sampler, uv, 0));
+        float blur_radius = center_coc * blur_scale;
+
+        if (blur_radius < 0.5) {
+            blur_output[dispatch_id.xy] = color_texture.SampleLevel(linear_sampler, uv, 0);
+            return;
+        }
+
+        int num_samples = int(min(blur_radius * 2.0 + 1.0, float(MAX_SAMPLES)));
+        float sigma = blur_radius / 3.0;
+
+        float4 color_sum = float4(0.0, 0.0, 0.0, 0.0);
+        float weight_sum = 0.0;
+
+        for (int i = -num_samples / 2; i <= num_samples / 2; i++) {
+            float2 offset_uv = uv + float2(0.0, float(i) * inv_screen_size.y);
+            float sample_coc = abs(coc_texture.SampleLevel(linear_sampler, offset_uv, 0));
+
+            float weight = gaussian_weight(float(i), sigma);
+
+            if (sample_coc < center_coc) {
+                weight *= sample_coc / max(center_coc, 0.001);
+            }
+
+            float4 sample_color = color_texture.SampleLevel(linear_sampler, offset_uv, 0);
+            color_sum += sample_color * weight;
+            weight_sum += weight;
+        }
+
+        blur_output[dispatch_id.xy] = color_sum / max(weight_sum, 0.001);
+    }
+"#;
+
+// ============================================================================
+// HEXAGONAL BOKEH DOF SHADER
+// ============================================================================
+
+@shader(compute)
+const DOF_HEX_BOKEH_SHADER: &str = r#"
+    // Hexagonal Bokeh DOF
+    // Uses 3-pass hex blur (McGuire 2012)
+
+    cbuffer HexBokehParams : register(b0) {
+        float2 screen_size;
+        float2 inv_screen_size;
+        float max_coc_radius;
+        float bokeh_rotation;
+        float bokeh_brightness;
+        float bokeh_threshold;
+        uint pass_index;  // 0 = vertical, 1 = diagonal, 2 = rhomboid
+        float padding0;
+        float padding1;
+        float padding2;
+    };
+
+    Texture2D<float4> color_texture : register(t0);
+    Texture2D<float> coc_texture : register(t1);
+    Texture2D<float4> near_coc_color : register(t2);
+
+    RWTexture2D<float4> blur_output : register(u0);
+
+    SamplerState linear_sampler : register(s0);
+
+    static const float PI = 3.14159265359;
+    static const int MAX_SAMPLES = 32;
+
+    float2 rotate_2d(float2 v, float angle) {
+        float c = cos(angle);
+        float s = sin(angle);
+        return float2(v.x * c - v.y * s, v.x * s + v.y * c);
+    }
+
+    [numthreads(8, 8, 1)]
+    void cs_main(uint3 dispatch_id : SV_DispatchThreadID) {
+        float2 uv = (float2(dispatch_id.xy) + 0.5) * inv_screen_size;
+
+        float center_coc = abs(coc_texture.SampleLevel(linear_sampler, uv, 0));
+
+        if (center_coc < 0.5) {
+            blur_output[dispatch_id.xy] = color_texture.SampleLevel(linear_sampler, uv, 0);
+            return;
+        }
+
+        float blur_radius = min(center_coc, max_coc_radius);
+        int num_samples = int(blur_radius * 2.0);
+        num_samples = clamp(num_samples, 4, MAX_SAMPLES);
+
+        // Hex directions based on pass
+        float2 direction;
+        switch (pass_index) {
+            case 0: // Vertical
+                direction = float2(0.0, 1.0);
+                break;
+            case 1: // Diagonal (60 degrees)
+                direction = float2(0.866, 0.5);
+                break;
+            case 2: // Rhomboid combine
+                direction = float2(-0.866, 0.5);
+                break;
+        }
+
+        direction = rotate_2d(direction, bokeh_rotation);
+
+        float4 color_sum = float4(0.0, 0.0, 0.0, 0.0);
+        float weight_sum = 0.0;
+
+        for (int i = -num_samples / 2; i <= num_samples / 2; i++) {
+            float t = float(i) / float(num_samples / 2);
+            float2 offset = direction * t * blur_radius * inv_screen_size;
+            float2 sample_uv = uv + offset;
+
+            if (any(sample_uv < 0.0) || any(sample_uv > 1.0)) continue;
+
+            float sample_coc = abs(coc_texture.SampleLevel(linear_sampler, sample_uv, 0));
+            float4 sample_color = color_texture.SampleLevel(linear_sampler, sample_uv, 0);
+
+            // Bokeh brightness boost
+            float luma = dot(sample_color.rgb, float3(0.299, 0.587, 0.114));
+            float boost = smoothstep(bokeh_threshold, bokeh_threshold + 0.5, luma) * bokeh_brightness;
+            sample_color.rgb *= (1.0 + boost);
+
+            float weight = 1.0;
+
+            // Prevent bleeding
+            if (sample_coc < center_coc * 0.5) {
+                weight *= 0.25;
+            }
+
+            color_sum += sample_color * weight;
+            weight_sum += weight;
+        }
+
+        blur_output[dispatch_id.xy] = color_sum / max(weight_sum, 0.001);
+    }
+"#;
+
+// ============================================================================
+// CIRCULAR BOKEH DOF SHADER (Scatter-as-Gather)
+// ============================================================================
+
+@shader(compute)
+const DOF_CIRCULAR_BOKEH_SHADER: &str = r#"
+    // Circular Bokeh DOF using scatter-as-gather technique
+    // Based on "Next Generation Post Processing in Call of Duty: Advanced Warfare"
+
+    cbuffer CircularBokehParams : register(b0) {
+        float2 screen_size;
+        float2 inv_screen_size;
+        float max_coc_radius;
+        float bokeh_brightness;
+        float bokeh_threshold;
+        float ring_count;
+        float samples_per_ring;
+        float chromatic_aberration;
+        float anamorphic_factor;
+        float padding;
+    };
+
+    Texture2D<float4> color_texture : register(t0);
+    Texture2D<float> coc_texture : register(t1);
+    Texture2D<float4> bokeh_shape : register(t2);  // Custom bokeh shape texture
+
+    RWTexture2D<float4> blur_output : register(u0);
+
+    SamplerState linear_sampler : register(s0);
+    SamplerState point_sampler : register(s1);
+
+    static const float PI = 3.14159265359;
+    static const float GOLDEN_ANGLE = 2.39996323;
+
+    float2 get_bokeh_sample_offset(int sample_index, int total_samples, float coc_radius) {
+        // Sunflower pattern for better distribution
+        float r = sqrt(float(sample_index) / float(total_samples)) * coc_radius;
+        float theta = float(sample_index) * GOLDEN_ANGLE;
+        return float2(cos(theta) * r, sin(theta) * r * anamorphic_factor);
+    }
+
+    [numthreads(8, 8, 1)]
+    void cs_main(uint3 dispatch_id : SV_DispatchThreadID) {
+        float2 uv = (float2(dispatch_id.xy) + 0.5) * inv_screen_size;
+
+        float center_coc = coc_texture.SampleLevel(point_sampler, uv, 0);
+        float abs_coc = abs(center_coc);
+
+        if (abs_coc < 0.5) {
+            blur_output[dispatch_id.xy] = color_texture.SampleLevel(linear_sampler, uv, 0);
+            return;
+        }
+
+        float blur_radius = min(abs_coc, max_coc_radius);
+        int total_samples = int(ring_count * samples_per_ring);
+
+        float4 color_sum = float4(0.0, 0.0, 0.0, 0.0);
+        float4 color_sum_r = float4(0.0, 0.0, 0.0, 0.0);
+        float4 color_sum_b = float4(0.0, 0.0, 0.0, 0.0);
+        float weight_sum = 0.0;
+        float weight_sum_r = 0.0;
+        float weight_sum_b = 0.0;
+
+        // Sample center
+        float4 center_color = color_texture.SampleLevel(linear_sampler, uv, 0);
+        float center_weight = 1.0;
+        color_sum += center_color * center_weight;
+        weight_sum += center_weight;
+
+        // Sample rings
+        for (int i = 0; i < total_samples; i++) {
+            float2 offset = get_bokeh_sample_offset(i + 1, total_samples, blur_radius) * inv_screen_size;
+
+            float2 sample_uv = uv + offset;
+            if (any(sample_uv < 0.0) || any(sample_uv > 1.0)) continue;
+
+            float sample_coc = coc_texture.SampleLevel(point_sampler, sample_uv, 0);
+            float abs_sample_coc = abs(sample_coc);
+
+            // Skip samples that wouldn't contribute (their CoC doesn't reach us)
+            float distance = length(offset * screen_size);
+            if (abs_sample_coc < distance * 0.9) continue;
+
+            float4 sample_color = color_texture.SampleLevel(linear_sampler, sample_uv, 0);
+
+            // Bokeh brightness enhancement
+            float luma = dot(sample_color.rgb, float3(0.299, 0.587, 0.114));
+            float brightness_boost = 1.0 + smoothstep(bokeh_threshold, bokeh_threshold + 0.5, luma) * bokeh_brightness;
+            sample_color.rgb *= brightness_boost;
+
+            // Weight based on sample CoC
+            float weight = saturate(abs_sample_coc / max(distance, 0.001));
+
+            // Handle near/far field separation
+            bool is_foreground = sample_coc < 0.0;
+            bool center_is_foreground = center_coc < 0.0;
+
+            if (is_foreground && !center_is_foreground) {
+                weight *= 0.5;  // Reduce foreground contribution to background
+            } else if (!is_foreground && center_is_foreground) {
+                weight *= 0.25;  // Reduce background contribution to foreground
+            }
+
+            color_sum += sample_color * weight;
+            weight_sum += weight;
+
+            // Chromatic aberration samples
+            if (chromatic_aberration > 0.0) {
+                float2 ca_offset = offset * (1.0 + chromatic_aberration * 0.1);
+
+                float2 uv_r = uv + ca_offset;
+                float2 uv_b = uv + offset * (1.0 - chromatic_aberration * 0.05);
+
+                if (all(uv_r >= 0.0) && all(uv_r <= 1.0)) {
+                    float4 color_r = color_texture.SampleLevel(linear_sampler, uv_r, 0);
+                    color_sum_r += color_r * weight;
+                    weight_sum_r += weight;
+                }
+
+                if (all(uv_b >= 0.0) && all(uv_b <= 1.0)) {
+                    float4 color_b = color_texture.SampleLevel(linear_sampler, uv_b, 0);
+                    color_sum_b += color_b * weight;
+                    weight_sum_b += weight;
+                }
+            }
+        }
+
+        float4 final_color = color_sum / max(weight_sum, 0.001);
+
+        // Apply chromatic aberration
+        if (chromatic_aberration > 0.0 && weight_sum_r > 0.0 && weight_sum_b > 0.0) {
+            float4 color_r = color_sum_r / weight_sum_r;
+            float4 color_b = color_sum_b / weight_sum_b;
+
+            final_color.r = lerp(final_color.r, color_r.r, chromatic_aberration);
+            final_color.b = lerp(final_color.b, color_b.b, chromatic_aberration);
+        }
+
+        blur_output[dispatch_id.xy] = final_color;
+    }
+"#;
+
+// ============================================================================
+// SPRITE-BASED BOKEH DOF SHADER
+// ============================================================================
+
+@shader(compute)
+const DOF_BOKEH_EXTRACT_SHADER: &str = r#"
+    // Extract bright points for sprite-based bokeh
+
+    cbuffer BokehExtractParams : register(b0) {
+        float2 screen_size;
+        float2 inv_screen_size;
+        float brightness_threshold;
+        float brightness_scale;
+        float max_coc_radius;
+        float min_coc_radius;
+        uint max_bokeh_count;
+        float padding0;
+        float padding1;
+        float padding2;
+    };
+
+    Texture2D<float4> color_texture : register(t0);
+    Texture2D<float> coc_texture : register(t1);
+
+    RWStructuredBuffer<float4> bokeh_points : register(u0);  // xyz = position, w = size
+    RWStructuredBuffer<float4> bokeh_colors : register(u1);
+    RWBuffer<uint> bokeh_counter : register(u2);
+
+    SamplerState point_sampler : register(s0);
+
+    [numthreads(8, 8, 1)]
+    void cs_main(uint3 dispatch_id : SV_DispatchThreadID) {
+        float2 uv = (float2(dispatch_id.xy) + 0.5) * inv_screen_size;
+
+        float coc = abs(coc_texture.SampleLevel(point_sampler, uv, 0));
+
+        if (coc < min_coc_radius) return;
+
+        float4 color = color_texture.SampleLevel(point_sampler, uv, 0);
+        float luma = dot(color.rgb, float3(0.299, 0.587, 0.114));
+
+        if (luma < brightness_threshold) return;
+
+        // Atomic add to counter
+        uint bokeh_index;
+        InterlockedAdd(bokeh_counter[0], 1, bokeh_index);
+
+        if (bokeh_index >= max_bokeh_count) return;
+
+        // Store bokeh point
+        bokeh_points[bokeh_index] = float4(uv.x, uv.y, 0.0, min(coc, max_coc_radius));
+        bokeh_colors[bokeh_index] = float4(color.rgb * brightness_scale, 1.0);
+    }
+"#;
+
+@shader(vertex)
+const DOF_BOKEH_SPRITE_VS: &str = r#"
+    // Vertex shader for bokeh sprites
+
+    cbuffer BokehParams : register(b0) {
+        float4x4 projection;
+        float2 screen_size;
+        float2 inv_screen_size;
+        float aspect_ratio;
+        float bokeh_rotation;
+        float padding0;
+        float padding1;
+    };
+
+    StructuredBuffer<float4> bokeh_points : register(t0);
+    StructuredBuffer<float4> bokeh_colors : register(t1);
+
+    struct VSOutput {
+        float4 position : SV_POSITION;
+        float2 uv : TEXCOORD0;
+        float4 color : COLOR0;
+        float size : TEXCOORD1;
+    };
+
+    // Quad vertices
+    static const float2 QUAD_VERTICES[6] = {
+        float2(-1, -1), float2(1, -1), float2(-1, 1),
+        float2(-1, 1), float2(1, -1), float2(1, 1)
+    };
+
+    static const float2 QUAD_UVS[6] = {
+        float2(0, 1), float2(1, 1), float2(0, 0),
+        float2(0, 0), float2(1, 1), float2(1, 0)
+    };
+
+    VSOutput vs_main(uint vertex_id : SV_VertexID, uint instance_id : SV_InstanceID) {
+        VSOutput output;
+
+        float4 bokeh = bokeh_points[instance_id];
+        float4 color = bokeh_colors[instance_id];
+
+        float2 center = bokeh.xy;
+        float size = bokeh.w;
+
+        // Get quad vertex
+        float2 vertex = QUAD_VERTICES[vertex_id];
+        float2 uv = QUAD_UVS[vertex_id];
+
+        // Rotate vertex
+        float c = cos(bokeh_rotation);
+        float s = sin(bokeh_rotation);
+        vertex = float2(vertex.x * c - vertex.y * s, vertex.x * s + vertex.y * c);
+
+        // Scale by size and aspect ratio
+        vertex *= size * inv_screen_size;
+        vertex.x /= aspect_ratio;
+
+        // Position in clip space
+        float2 clip_pos = (center + vertex) * 2.0 - 1.0;
+        clip_pos.y = -clip_pos.y;
+
+        output.position = float4(clip_pos, 0.0, 1.0);
+        output.uv = uv;
+        output.color = color;
+        output.size = size;
+
+        return output;
+    }
+"#;
+
+@shader(fragment)
+const DOF_BOKEH_SPRITE_PS: &str = r#"
+    // Pixel shader for bokeh sprites
+
+    cbuffer BokehShapeParams : register(b0) {
+        uint bokeh_shape;  // 0 = circle, 1 = hexagon, 2 = octagon, etc.
+        float edge_softness;
+        float padding0;
+        float padding1;
+    };
+
+    Texture2D<float4> bokeh_texture : register(t0);
+
+    SamplerState linear_sampler : register(s0);
+
+    struct VSOutput {
+        float4 position : SV_POSITION;
+        float2 uv : TEXCOORD0;
+        float4 color : COLOR0;
+        float size : TEXCOORD1;
+    };
+
+    static const float PI = 3.14159265359;
+
+    float circle_shape(float2 uv) {
+        float dist = length(uv * 2.0 - 1.0);
+        return 1.0 - smoothstep(1.0 - edge_softness, 1.0, dist);
+    }
+
+    float hexagon_shape(float2 uv) {
+        float2 p = uv * 2.0 - 1.0;
+        float2 q = abs(p);
+        float d = max(q.x * 0.866025 + q.y * 0.5, q.y) - 0.5;
+        return 1.0 - smoothstep(-edge_softness, edge_softness, d);
+    }
+
+    float octagon_shape(float2 uv) {
+        float2 p = uv * 2.0 - 1.0;
+        float2 q = abs(p);
+        float d = max(max(q.x, q.y), (q.x + q.y) * 0.7071) - 0.5;
+        return 1.0 - smoothstep(-edge_softness, edge_softness, d);
+    }
+
+    float4 ps_main(VSOutput input) : SV_TARGET {
+        float shape;
+
+        switch (bokeh_shape) {
+            case 0: shape = circle_shape(input.uv); break;
+            case 1: shape = hexagon_shape(input.uv); break;
+            case 2: shape = octagon_shape(input.uv); break;
+            default: shape = bokeh_texture.Sample(linear_sampler, input.uv).r; break;
+        }
+
+        if (shape < 0.01) discard;
+
+        return input.color * shape;
+    }
+"#;
+
+// ============================================================================
+// NEAR/FAR FIELD SEPARATION
+// ============================================================================
+
+@shader(compute)
+const DOF_SEPARATE_FIELDS_SHADER: &str = r#"
+    // Separate near and far field for independent processing
+
+    cbuffer SeparateParams : register(b0) {
+        float2 screen_size;
+        float2 inv_screen_size;
+        float near_far_threshold;
+        float padding0;
+        float padding1;
+        float padding2;
+    };
+
+    Texture2D<float4> color_texture : register(t0);
+    Texture2D<float> coc_texture : register(t1);
+
+    RWTexture2D<float4> near_field : register(u0);
+    RWTexture2D<float4> far_field : register(u1);
+
+    SamplerState point_sampler : register(s0);
+
+    [numthreads(8, 8, 1)]
+    void cs_main(uint3 dispatch_id : SV_DispatchThreadID) {
+        float2 uv = (float2(dispatch_id.xy) + 0.5) * inv_screen_size;
+
+        float4 color = color_texture.SampleLevel(point_sampler, uv, 0);
+        float coc = coc_texture.SampleLevel(point_sampler, uv, 0);
+
+        float near_factor = saturate(-coc / near_far_threshold);
+        float far_factor = saturate(coc / near_far_threshold);
+
+        near_field[dispatch_id.xy] = float4(color.rgb, near_factor);
+        far_field[dispatch_id.xy] = float4(color.rgb, far_factor);
+    }
+"#;
+
+// ============================================================================
+// DOF COMPOSITE SHADER
+// ============================================================================
+
+@shader(compute)
+const DOF_COMPOSITE_SHADER: &str = r#"
+    // Composite DOF layers back together
+
+    cbuffer CompositeParams : register(b0) {
+        float2 screen_size;
+        float2 inv_screen_size;
+        float near_blend_factor;
+        float far_blend_factor;
+        float focus_range;
+        float debug_mode;
+    };
+
+    Texture2D<float4> sharp_color : register(t0);
+    Texture2D<float4> near_blur : register(t1);
+    Texture2D<float4> far_blur : register(t2);
+    Texture2D<float> coc_texture : register(t3);
+
+    RWTexture2D<float4> output_color : register(u0);
+
+    SamplerState linear_sampler : register(s0);
+
+    [numthreads(8, 8, 1)]
+    void cs_main(uint3 dispatch_id : SV_DispatchThreadID) {
+        float2 uv = (float2(dispatch_id.xy) + 0.5) * inv_screen_size;
+
+        float4 sharp = sharp_color.SampleLevel(linear_sampler, uv, 0);
+        float4 near = near_blur.SampleLevel(linear_sampler, uv, 0);
+        float4 far = far_blur.SampleLevel(linear_sampler, uv, 0);
+        float coc = coc_texture.SampleLevel(linear_sampler, uv, 0);
+
+        float near_factor = saturate(-coc * near_blend_factor);
+        float far_factor = saturate(coc * far_blend_factor);
+
+        // Blend layers: far first, then sharp, then near on top
+        float3 result = sharp.rgb;
+
+        // Blend far field
+        result = lerp(result, far.rgb, far_factor * far.a);
+
+        // Blend near field (on top)
+        result = lerp(result, near.rgb, near_factor * near.a);
+
+        // Debug visualization
+        if (debug_mode > 0.5) {
+            if (debug_mode < 1.5) {
+                // Show CoC
+                result = coc > 0.0 ?
+                    float3(0.0, coc / 32.0, 0.0) :
+                    float3(-coc / 32.0, 0.0, 0.0);
+            } else if (debug_mode < 2.5) {
+                // Show near field
+                result = near.rgb * near_factor;
+            } else {
+                // Show far field
+                result = far.rgb * far_factor;
+            }
+        }
+
+        output_color[dispatch_id.xy] = float4(result, 1.0);
+    }
+"#;
+
+// ============================================================================
+// AUTO-FOCUS SHADER
+// ============================================================================
+
+@shader(compute)
+const DOF_AUTO_FOCUS_SHADER: &str = r#"
+    // Calculate auto-focus distance based on center region
+
+    cbuffer AutoFocusParams : register(b0) {
+        float2 focus_point;
+        float focus_region_size;
+        float smoothing_speed;
+        float current_focus_distance;
+        float near_plane;
+        float far_plane;
+        float padding;
+    };
+
+    Texture2D<float> depth_texture : register(t0);
+
+    RWBuffer<float> focus_distance : register(u0);
+
+    SamplerState linear_sampler : register(s0);
+
+    groupshared float shared_depths[64];
+
+    float linearize_depth(float depth) {
+        return near_plane * far_plane / (far_plane - depth * (far_plane - near_plane));
+    }
+
+    [numthreads(8, 8, 1)]
+    void cs_main(uint3 dispatch_id : SV_DispatchThreadID, uint3 group_thread_id : SV_GroupThreadID) {
+        uint thread_index = group_thread_id.y * 8 + group_thread_id.x;
+
+        // Sample depth in focus region
+        float2 offset = (float2(group_thread_id.xy) / 7.0 - 0.5) * focus_region_size;
+        float2 uv = focus_point + offset;
+        uv = clamp(uv, 0.0, 1.0);
+
+        float depth = depth_texture.SampleLevel(linear_sampler, uv, 0);
+        float linear_depth = linearize_depth(depth);
+
+        shared_depths[thread_index] = linear_depth;
+
+        GroupMemoryBarrierWithGroupSync();
+
+        // Parallel reduction to find average
+        if (thread_index < 32) {
+            shared_depths[thread_index] = (shared_depths[thread_index] + shared_depths[thread_index + 32]) * 0.5;
+        }
+        GroupMemoryBarrierWithGroupSync();
+
+        if (thread_index < 16) {
+            shared_depths[thread_index] = (shared_depths[thread_index] + shared_depths[thread_index + 16]) * 0.5;
+        }
+        GroupMemoryBarrierWithGroupSync();
+
+        if (thread_index < 8) {
+            shared_depths[thread_index] = (shared_depths[thread_index] + shared_depths[thread_index + 8]) * 0.5;
+        }
+        GroupMemoryBarrierWithGroupSync();
+
+        if (thread_index < 4) {
+            shared_depths[thread_index] = (shared_depths[thread_index] + shared_depths[thread_index + 4]) * 0.5;
+        }
+        GroupMemoryBarrierWithGroupSync();
+
+        if (thread_index < 2) {
+            shared_depths[thread_index] = (shared_depths[thread_index] + shared_depths[thread_index + 2]) * 0.5;
+        }
+        GroupMemoryBarrierWithGroupSync();
+
+        if (thread_index == 0) {
+            float target_focus = (shared_depths[0] + shared_depths[1]) * 0.5;
+
+            // Smooth transition
+            float new_focus = lerp(current_focus_distance, target_focus, smoothing_speed);
+
+            focus_distance[0] = new_focus;
+        }
+    }
+"#;
+
+// ============================================================================
+// DOF SYSTEM
+// ============================================================================
+
+@system
+struct DOFSystem {
+    config: DOFConfig,
+    coc_texture: Handle<Texture>,
+    near_field_texture: Handle<Texture>,
+    far_field_texture: Handle<Texture>,
+    blur_temp_texture: Handle<Texture>,
+    bokeh_points_buffer: Handle<Buffer>,
+    bokeh_colors_buffer: Handle<Buffer>,
+    bokeh_counter_buffer: Handle<Buffer>,
+    focus_distance_buffer: Handle<Buffer>,
+    coc_pipeline: Handle<ComputePipeline>,
+    blur_h_pipeline: Handle<ComputePipeline>,
+    blur_v_pipeline: Handle<ComputePipeline>,
+    hex_blur_pipeline: Handle<ComputePipeline>,
+    circular_blur_pipeline: Handle<ComputePipeline>,
+    separate_pipeline: Handle<ComputePipeline>,
+    composite_pipeline: Handle<ComputePipeline>,
+    auto_focus_pipeline: Handle<ComputePipeline>,
+    bokeh_extract_pipeline: Handle<ComputePipeline>,
+    bokeh_render_pipeline: Handle<RenderPipeline>,
+    current_focus_distance: f32,
+}
+
+impl DOFSystem {
+    fn new(config: DOFConfig) -> Self {
+        Self {
+            config,
+            coc_texture: Handle::null(),
+            near_field_texture: Handle::null(),
+            far_field_texture: Handle::null(),
+            blur_temp_texture: Handle::null(),
+            bokeh_points_buffer: Handle::null(),
+            bokeh_colors_buffer: Handle::null(),
+            bokeh_counter_buffer: Handle::null(),
+            focus_distance_buffer: Handle::null(),
+            coc_pipeline: Handle::null(),
+            blur_h_pipeline: Handle::null(),
+            blur_v_pipeline: Handle::null(),
+            hex_blur_pipeline: Handle::null(),
+            circular_blur_pipeline: Handle::null(),
+            separate_pipeline: Handle::null(),
+            composite_pipeline: Handle::null(),
+            auto_focus_pipeline: Handle::null(),
+            bokeh_extract_pipeline: Handle::null(),
+            bokeh_render_pipeline: Handle::null(),
+            current_focus_distance: config.focus_distance,
+        }
+    }
+
+    fn initialize(&mut self, device: &RenderDevice, width: u32, height: u32) {
+        // Create textures
+        self.coc_texture = device.create_texture(&TextureDescriptor {
+            size: Extent3d { width, height, depth: 1 },
+            format: TextureFormat::R16Float,
+            usage: TextureUsage::STORAGE | TextureUsage::SAMPLED,
+            ..default()
+        });
+
+        let half_width = width / 2;
+        let half_height = height / 2;
+
+        self.near_field_texture = device.create_texture(&TextureDescriptor {
+            size: Extent3d { width: half_width, height: half_height, depth: 1 },
+            format: TextureFormat::Rgba16Float,
+            usage: TextureUsage::STORAGE | TextureUsage::SAMPLED,
+            ..default()
+        });
+
+        self.far_field_texture = device.create_texture(&TextureDescriptor {
+            size: Extent3d { width: half_width, height: half_height, depth: 1 },
+            format: TextureFormat::Rgba16Float,
+            usage: TextureUsage::STORAGE | TextureUsage::SAMPLED,
+            ..default()
+        });
+
+        self.blur_temp_texture = device.create_texture(&TextureDescriptor {
+            size: Extent3d { width, height, depth: 1 },
+            format: TextureFormat::Rgba16Float,
+            usage: TextureUsage::STORAGE | TextureUsage::SAMPLED,
+            ..default()
+        });
+
+        // Create bokeh buffers
+        let max_bokeh = 65536;
+        self.bokeh_points_buffer = device.create_buffer(&BufferDescriptor {
+            size: (max_bokeh * 16) as u64,
+            usage: BufferUsage::STORAGE,
+            ..default()
+        });
+
+        self.bokeh_colors_buffer = device.create_buffer(&BufferDescriptor {
+            size: (max_bokeh * 16) as u64,
+            usage: BufferUsage::STORAGE,
+            ..default()
+        });
+
+        self.bokeh_counter_buffer = device.create_buffer(&BufferDescriptor {
+            size: 4,
+            usage: BufferUsage::STORAGE,
+            ..default()
+        });
+
+        self.focus_distance_buffer = device.create_buffer(&BufferDescriptor {
+            size: 4,
+            usage: BufferUsage::STORAGE | BufferUsage::COPY_DST,
+            ..default()
+        });
+
+        // Create pipelines
+        self.coc_pipeline = device.create_compute_pipeline(COC_COMPUTE_SHADER);
+        self.blur_h_pipeline = device.create_compute_pipeline(DOF_GAUSSIAN_HORIZONTAL_SHADER);
+        self.blur_v_pipeline = device.create_compute_pipeline(DOF_GAUSSIAN_VERTICAL_SHADER);
+        self.hex_blur_pipeline = device.create_compute_pipeline(DOF_HEX_BOKEH_SHADER);
+        self.circular_blur_pipeline = device.create_compute_pipeline(DOF_CIRCULAR_BOKEH_SHADER);
+        self.separate_pipeline = device.create_compute_pipeline(DOF_SEPARATE_FIELDS_SHADER);
+        self.composite_pipeline = device.create_compute_pipeline(DOF_COMPOSITE_SHADER);
+        self.auto_focus_pipeline = device.create_compute_pipeline(DOF_AUTO_FOCUS_SHADER);
+        self.bokeh_extract_pipeline = device.create_compute_pipeline(DOF_BOKEH_EXTRACT_SHADER);
+
+        // Create bokeh render pipeline
+        self.bokeh_render_pipeline = device.create_render_pipeline(&RenderPipelineDescriptor {
+            vertex: DOF_BOKEH_SPRITE_VS,
+            fragment: DOF_BOKEH_SPRITE_PS,
+            blend: BlendState::ADDITIVE,
+            ..default()
+        });
+    }
+
+    fn render(&mut self,
+              cmd: &mut CommandEncoder,
+              color: &Texture,
+              depth: &Texture,
+              output: &Texture,
+              camera: &Camera,
+              delta_time: f32) {
+        let width = color.width();
+        let height = color.height();
+
+        // Auto-focus if enabled
+        if self.config.auto_focus {
+            self.update_auto_focus(cmd, depth, delta_time);
+        }
+
+        // Calculate CoC
+        self.compute_coc(cmd, depth, camera);
+
+        // Apply DOF based on technique
+        match self.config.technique {
+            DOFTechnique::Gaussian => {
+                self.apply_gaussian_dof(cmd, color, output);
+            }
+            DOFTechnique::HexBokeh => {
+                self.apply_hex_dof(cmd, color, output);
+            }
+            DOFTechnique::CircularBokeh | DOFTechnique::ScatterAsGather => {
+                self.apply_circular_dof(cmd, color, output);
+            }
+            DOFTechnique::Bokeh => {
+                self.apply_sprite_bokeh(cmd, color, output);
+            }
+            _ => {
+                self.apply_circular_dof(cmd, color, output);
+            }
+        }
+    }
+
+    fn compute_coc(&self, cmd: &mut CommandEncoder, depth: &Texture, camera: &Camera) {
+        let mut pass = cmd.begin_compute_pass();
+        pass.set_pipeline(&self.coc_pipeline);
+        // Set bind groups...
+
+        let width = self.coc_texture.width();
+        let height = self.coc_texture.height();
+        pass.dispatch((width + 7) / 8, (height + 7) / 8, 1);
+    }
+
+    fn update_auto_focus(&mut self, cmd: &mut CommandEncoder, depth: &Texture, delta_time: f32) {
+        let mut pass = cmd.begin_compute_pass();
+        pass.set_pipeline(&self.auto_focus_pipeline);
+        // Set bind groups with focus point and current focus distance...
+        pass.dispatch(1, 1, 1);
+
+        // Read back and update current_focus_distance would happen here
+    }
+
+    fn apply_gaussian_dof(&self, cmd: &mut CommandEncoder, color: &Texture, output: &Texture) {
+        // Horizontal pass
+        {
+            let mut pass = cmd.begin_compute_pass();
+            pass.set_pipeline(&self.blur_h_pipeline);
+            // Set bind groups...
+            let width = output.width();
+            let height = output.height();
+            pass.dispatch((width + 63) / 64, height, 1);
+        }
+
+        // Vertical pass
+        {
+            let mut pass = cmd.begin_compute_pass();
+            pass.set_pipeline(&self.blur_v_pipeline);
+            // Set bind groups...
+            let width = output.width();
+            let height = output.height();
+            pass.dispatch(width, (height + 63) / 64, 1);
+        }
+    }
+
+    fn apply_hex_dof(&self, cmd: &mut CommandEncoder, color: &Texture, output: &Texture) {
+        // Three-pass hexagonal blur
+        for pass_idx in 0..3 {
+            let mut pass = cmd.begin_compute_pass();
+            pass.set_pipeline(&self.hex_blur_pipeline);
+            // Set bind groups with pass_index = pass_idx...
+            let width = output.width();
+            let height = output.height();
+            pass.dispatch((width + 7) / 8, (height + 7) / 8, 1);
+        }
+    }
+
+    fn apply_circular_dof(&self, cmd: &mut CommandEncoder, color: &Texture, output: &Texture) {
+        let mut pass = cmd.begin_compute_pass();
+        pass.set_pipeline(&self.circular_blur_pipeline);
+        // Set bind groups...
+        let width = output.width();
+        let height = output.height();
+        pass.dispatch((width + 7) / 8, (height + 7) / 8, 1);
+    }
+
+    fn apply_sprite_bokeh(&self, cmd: &mut CommandEncoder, color: &Texture, output: &Texture) {
+        // Extract bokeh points
+        {
+            let mut pass = cmd.begin_compute_pass();
+            pass.set_pipeline(&self.bokeh_extract_pipeline);
+            // Set bind groups...
+            let width = color.width();
+            let height = color.height();
+            pass.dispatch((width + 7) / 8, (height + 7) / 8, 1);
+        }
+
+        // Render bokeh sprites
+        {
+            let mut pass = cmd.begin_render_pass(&RenderPassDescriptor {
+                color_attachments: &[RenderPassColorAttachment {
+                    view: output,
+                    load_op: LoadOp::Load,
+                    store_op: StoreOp::Store,
+                }],
+                ..default()
+            });
+
+            pass.set_pipeline(&self.bokeh_render_pipeline);
+            // Indirect draw based on bokeh counter...
+        }
+    }
+
+    fn set_focus_distance(&mut self, distance: f32) {
+        self.config.focus_distance = distance;
+        self.current_focus_distance = distance;
+    }
+
+    fn set_aperture(&mut self, aperture: f32) {
+        self.config.aperture = aperture;
+    }
+}

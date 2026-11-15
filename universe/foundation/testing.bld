@@ -1,0 +1,879 @@
+// BUILD Standard Library - Testing Framework
+// Copyright (c) 2024 BUILD Language Project
+// Comprehensive testing utilities with assertions, mocking, and benchmarking
+
+module foundation::testing;
+
+use foundation::core::*;
+use foundation::time::{Instant, Duration};
+use foundation::io_extended::*;
+
+// ============================================================================
+// TEST ATTRIBUTES AND RUNNER
+// ============================================================================
+
+/// Test result
+#[derive(Debug, Clone)]
+pub enum TestResult {
+    Passed,
+    Failed(String),
+    Skipped(String),
+    TimedOut,
+}
+
+/// Test case metadata
+pub struct TestCase {
+    pub name: String,
+    pub module: String,
+    pub file: String,
+    pub line: u32,
+    pub ignored: bool,
+    pub should_panic: Option<String>,
+    pub timeout: Option<Duration>,
+    pub tags: Vec<String>,
+}
+
+/// Test outcome with timing
+pub struct TestOutcome {
+    pub case: TestCase,
+    pub result: TestResult,
+    pub duration: Duration,
+    pub output: String,
+}
+
+/// Test suite containing multiple tests
+pub struct TestSuite {
+    name: String,
+    tests: Vec<Box<dyn Fn() -> TestResult + Send + Sync>>,
+    cases: Vec<TestCase>,
+    before_all: Option<Box<dyn Fn() + Send + Sync>>,
+    after_all: Option<Box<dyn Fn() + Send + Sync>>,
+    before_each: Option<Box<dyn Fn() + Send + Sync>>,
+    after_each: Option<Box<dyn Fn() + Send + Sync>>,
+}
+
+impl TestSuite {
+    pub fn new(name: &str) -> Self {
+        TestSuite {
+            name: name.to_string(),
+            tests: Vec::new(),
+            cases: Vec::new(),
+            before_all: None,
+            after_all: None,
+            before_each: None,
+            after_each: None,
+        }
+    }
+
+    pub fn add_test<F>(self: &mut Self, case: TestCase, test: F)
+    where F: Fn() -> TestResult + Send + Sync + 'static {
+        self.tests.push(Box::new(test));
+        self.cases.push(case);
+    }
+
+    pub fn before_all<F>(self: &mut Self, f: F) where F: Fn() + Send + Sync + 'static {
+        self.before_all = Some(Box::new(f));
+    }
+
+    pub fn after_all<F>(self: &mut Self, f: F) where F: Fn() + Send + Sync + 'static {
+        self.after_all = Some(Box::new(f));
+    }
+
+    pub fn before_each<F>(self: &mut Self, f: F) where F: Fn() + Send + Sync + 'static {
+        self.before_each = Some(Box::new(f));
+    }
+
+    pub fn after_each<F>(self: &mut Self, f: F) where F: Fn() + Send + Sync + 'static {
+        self.after_each = Some(Box::new(f));
+    }
+
+    pub fn run(self: &Self) -> Vec<TestOutcome> {
+        let mut outcomes = Vec::new();
+
+        if let Some(ref before) = self.before_all { before(); }
+
+        for (i, test) in self.tests.iter().enumerate() {
+            let case = &self.cases[i];
+
+            if case.ignored {
+                outcomes.push(TestOutcome {
+                    case: case.clone(),
+                    result: TestResult::Skipped("ignored".to_string()),
+                    duration: Duration::ZERO,
+                    output: String::new(),
+                });
+                continue;
+            }
+
+            if let Some(ref before) = self.before_each { before(); }
+
+            let start = Instant::now();
+            let result = std::panic::catch_unwind(|| test());
+            let duration = start.elapsed();
+
+            let result = match result {
+                Ok(r) => r,
+                Err(e) => {
+                    if case.should_panic.is_some() {
+                        TestResult::Passed
+                    } else {
+                        TestResult::Failed(format!("panicked: {:?}", e))
+                    }
+                }
+            };
+
+            outcomes.push(TestOutcome {
+                case: case.clone(),
+                result,
+                duration,
+                output: String::new(),
+            });
+
+            if let Some(ref after) = self.after_each { after(); }
+        }
+
+        if let Some(ref after) = self.after_all { after(); }
+
+        outcomes
+    }
+}
+
+/// Test runner configuration
+pub struct TestRunner {
+    filter: Option<String>,
+    parallel: bool,
+    num_threads: usize,
+    verbose: bool,
+    color: bool,
+    fail_fast: bool,
+    timeout: Duration,
+}
+
+impl TestRunner {
+    pub fn new() -> Self {
+        TestRunner {
+            filter: None,
+            parallel: true,
+            num_threads: 4,
+            verbose: false,
+            color: true,
+            fail_fast: false,
+            timeout: Duration::from_secs(60),
+        }
+    }
+
+    pub fn filter(mut self: Self, pattern: &str) -> Self {
+        self.filter = Some(pattern.to_string()); self
+    }
+
+    pub fn parallel(mut self: Self, enable: bool) -> Self { self.parallel = enable; self }
+    pub fn threads(mut self: Self, n: usize) -> Self { self.num_threads = n; self }
+    pub fn verbose(mut self: Self, v: bool) -> Self { self.verbose = v; self }
+    pub fn color(mut self: Self, c: bool) -> Self { self.color = c; self }
+    pub fn fail_fast(mut self: Self, f: bool) -> Self { self.fail_fast = f; self }
+    pub fn timeout(mut self: Self, t: Duration) -> Self { self.timeout = t; self }
+
+    pub fn run(self: &Self, suites: &[TestSuite]) -> TestReport {
+        let mut report = TestReport::new();
+        let start = Instant::now();
+
+        for suite in suites {
+            let outcomes = suite.run();
+            for outcome in outcomes {
+                match &outcome.result {
+                    TestResult::Passed => report.passed += 1,
+                    TestResult::Failed(_) => {
+                        report.failed += 1;
+                        report.failures.push(outcome.clone());
+                    }
+                    TestResult::Skipped(_) => report.skipped += 1,
+                    TestResult::TimedOut => {
+                        report.failed += 1;
+                        report.failures.push(outcome.clone());
+                    }
+                }
+                report.outcomes.push(outcome);
+
+                if self.fail_fast && report.failed > 0 { break; }
+            }
+        }
+
+        report.duration = start.elapsed();
+        report
+    }
+}
+
+/// Test execution report
+#[derive(Debug)]
+pub struct TestReport {
+    pub passed: usize,
+    pub failed: usize,
+    pub skipped: usize,
+    pub duration: Duration,
+    pub outcomes: Vec<TestOutcome>,
+    pub failures: Vec<TestOutcome>,
+}
+
+impl TestReport {
+    fn new() -> Self {
+        TestReport {
+            passed: 0, failed: 0, skipped: 0,
+            duration: Duration::ZERO,
+            outcomes: Vec::new(),
+            failures: Vec::new(),
+        }
+    }
+
+    pub fn total(self: &Self) -> usize { self.passed + self.failed + self.skipped }
+    pub fn success(self: &Self) -> bool { self.failed == 0 }
+
+    pub fn print_summary(self: &Self) {
+        println!("\n========== Test Summary ==========");
+        println!("Passed:  {} ", self.passed);
+        println!("Failed:  {} ", self.failed);
+        println!("Skipped: {} ", self.skipped);
+        println!("Total:   {} ", self.total());
+        println!("Duration: {:?}", self.duration);
+
+        if !self.failures.is_empty() {
+            println!("\n---------- Failures ----------");
+            for failure in &self.failures {
+                println!("\n{} ({}:{})", failure.case.name, failure.case.file, failure.case.line);
+                if let TestResult::Failed(msg) = &failure.result {
+                    println!("  {}", msg);
+                }
+            }
+        }
+
+        println!("\n{}", if self.success() { "SUCCESS" } else { "FAILURE" });
+    }
+}
+
+// ============================================================================
+// ASSERTIONS
+// ============================================================================
+
+/// Assertion error with context
+#[derive(Debug)]
+pub struct AssertionError {
+    pub message: String,
+    pub expected: String,
+    pub actual: String,
+    pub file: &'static str,
+    pub line: u32,
+}
+
+impl AssertionError {
+    pub fn new(msg: &str, expected: &str, actual: &str, file: &'static str, line: u32) -> Self {
+        AssertionError {
+            message: msg.to_string(),
+            expected: expected.to_string(),
+            actual: actual.to_string(),
+            file, line,
+        }
+    }
+}
+
+/// Assert that a condition is true
+pub fn assert(condition: bool, message: &str) {
+    if !condition {
+        panic!("Assertion failed: {}", message);
+    }
+}
+
+/// Assert equality with detailed diff
+pub fn assert_eq<T: PartialEq + std::fmt::Debug>(left: T, right: T) {
+    if left != right {
+        panic!("Assertion failed: {:?} != {:?}", left, right);
+    }
+}
+
+/// Assert inequality
+pub fn assert_ne<T: PartialEq + std::fmt::Debug>(left: T, right: T) {
+    if left == right {
+        panic!("Assertion failed: {:?} == {:?} (expected different)", left, right);
+    }
+}
+
+/// Assert that value is true
+pub fn assert_true(value: bool) {
+    if !value { panic!("Assertion failed: expected true, got false"); }
+}
+
+/// Assert that value is false
+pub fn assert_false(value: bool) {
+    if value { panic!("Assertion failed: expected false, got true"); }
+}
+
+/// Assert that Option is Some
+pub fn assert_some<T: std::fmt::Debug>(opt: Option<T>) -> T {
+    match opt {
+        Some(v) => v,
+        None => panic!("Assertion failed: expected Some, got None"),
+    }
+}
+
+/// Assert that Option is None
+pub fn assert_none<T: std::fmt::Debug>(opt: Option<T>) {
+    if opt.is_some() {
+        panic!("Assertion failed: expected None, got {:?}", opt);
+    }
+}
+
+/// Assert that Result is Ok
+pub fn assert_ok<T: std::fmt::Debug, E: std::fmt::Debug>(result: Result<T, E>) -> T {
+    match result {
+        Ok(v) => v,
+        Err(e) => panic!("Assertion failed: expected Ok, got Err({:?})", e),
+    }
+}
+
+/// Assert that Result is Err
+pub fn assert_err<T: std::fmt::Debug, E: std::fmt::Debug>(result: Result<T, E>) -> E {
+    match result {
+        Ok(v) => panic!("Assertion failed: expected Err, got Ok({:?})", v),
+        Err(e) => e,
+    }
+}
+
+/// Assert approximate equality for floats
+pub fn assert_approx_eq(left: f64, right: f64, epsilon: f64) {
+    let diff = (left - right).abs();
+    if diff > epsilon {
+        panic!("Assertion failed: {} !≈ {} (diff: {}, epsilon: {})", left, right, diff, epsilon);
+    }
+}
+
+/// Assert that a value is within a range
+pub fn assert_in_range<T: PartialOrd + std::fmt::Debug>(value: T, min: T, max: T) {
+    if value < min || value > max {
+        panic!("Assertion failed: {:?} not in range [{:?}, {:?}]", value, min, max);
+    }
+}
+
+/// Assert that a string contains a substring
+pub fn assert_contains(haystack: &str, needle: &str) {
+    if !haystack.contains(needle) {
+        panic!("Assertion failed: '{}' does not contain '{}'", haystack, needle);
+    }
+}
+
+/// Assert that a string starts with prefix
+pub fn assert_starts_with(s: &str, prefix: &str) {
+    if !s.starts_with(prefix) {
+        panic!("Assertion failed: '{}' does not start with '{}'", s, prefix);
+    }
+}
+
+/// Assert that a string ends with suffix
+pub fn assert_ends_with(s: &str, suffix: &str) {
+    if !s.ends_with(suffix) {
+        panic!("Assertion failed: '{}' does not end with '{}'", s, suffix);
+    }
+}
+
+/// Assert that a collection is empty
+pub fn assert_empty<T: IntoIterator>(collection: T) where T::IntoIter: ExactSizeIterator {
+    let iter = collection.into_iter();
+    if iter.len() != 0 {
+        panic!("Assertion failed: collection is not empty (len: {})", iter.len());
+    }
+}
+
+/// Assert that a collection has expected length
+pub fn assert_len<T: IntoIterator>(collection: T, expected: usize) where T::IntoIter: ExactSizeIterator {
+    let iter = collection.into_iter();
+    let actual = iter.len();
+    if actual != expected {
+        panic!("Assertion failed: expected len {}, got {}", expected, actual);
+    }
+}
+
+/// Assert that a closure panics
+pub fn assert_panics<F: FnOnce() + std::panic::UnwindSafe>(f: F) {
+    let result = std::panic::catch_unwind(f);
+    if result.is_ok() {
+        panic!("Assertion failed: expected panic, but none occurred");
+    }
+}
+
+/// Assert that a closure panics with specific message
+pub fn assert_panics_with<F: FnOnce() + std::panic::UnwindSafe>(f: F, expected_msg: &str) {
+    let result = std::panic::catch_unwind(f);
+    match result {
+        Ok(_) => panic!("Assertion failed: expected panic, but none occurred"),
+        Err(e) => {
+            let msg = if let Some(s) = e.downcast_ref::<&str>() {
+                *s
+            } else if let Some(s) = e.downcast_ref::<String>() {
+                s.as_str()
+            } else {
+                ""
+            };
+            if !msg.contains(expected_msg) {
+                panic!("Assertion failed: panic message '{}' doesn't contain '{}'", msg, expected_msg);
+            }
+        }
+    }
+}
+
+// ============================================================================
+// MOCKING
+// ============================================================================
+
+/// Mock function call recorder
+pub struct Mock<T> {
+    calls: std::sync::Mutex<Vec<T>>,
+    returns: std::sync::Mutex<Vec<T>>,
+}
+
+impl<T: Clone> Mock<T> {
+    pub fn new() -> Self {
+        Mock {
+            calls: std::sync::Mutex::new(Vec::new()),
+            returns: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+
+    pub fn returns(self: &Self, value: T) {
+        self.returns.lock().unwrap().push(value);
+    }
+
+    pub fn call(self: &Self, arg: T) -> Option<T> {
+        self.calls.lock().unwrap().push(arg);
+        self.returns.lock().unwrap().pop()
+    }
+
+    pub fn calls(self: &Self) -> Vec<T> {
+        self.calls.lock().unwrap().clone()
+    }
+
+    pub fn call_count(self: &Self) -> usize {
+        self.calls.lock().unwrap().len()
+    }
+
+    pub fn was_called(self: &Self) -> bool {
+        self.call_count() > 0
+    }
+
+    pub fn was_called_with(self: &Self, expected: &T) -> bool where T: PartialEq {
+        self.calls.lock().unwrap().iter().any(|c| c == expected)
+    }
+
+    pub fn reset(self: &Self) {
+        self.calls.lock().unwrap().clear();
+        self.returns.lock().unwrap().clear();
+    }
+}
+
+/// Spy that wraps a function and records calls
+pub struct Spy<F, Args, Ret> {
+    func: F,
+    calls: std::sync::Mutex<Vec<Args>>,
+    _ret: std::marker::PhantomData<Ret>,
+}
+
+impl<F, Args: Clone, Ret> Spy<F, Args, Ret>
+where F: Fn(Args) -> Ret {
+    pub fn new(func: F) -> Self {
+        Spy {
+            func,
+            calls: std::sync::Mutex::new(Vec::new()),
+            _ret: std::marker::PhantomData,
+        }
+    }
+
+    pub fn call(self: &Self, args: Args) -> Ret {
+        self.calls.lock().unwrap().push(args.clone());
+        (self.func)(args)
+    }
+
+    pub fn calls(self: &Self) -> Vec<Args> { self.calls.lock().unwrap().clone() }
+    pub fn call_count(self: &Self) -> usize { self.calls.lock().unwrap().len() }
+}
+
+/// Stub that returns predefined values
+pub struct Stub<T> {
+    values: std::sync::Mutex<Vec<T>>,
+    default: Option<T>,
+}
+
+impl<T: Clone> Stub<T> {
+    pub fn new() -> Self { Stub { values: std::sync::Mutex::new(Vec::new()), default: None } }
+
+    pub fn with_default(default: T) -> Self {
+        Stub { values: std::sync::Mutex::new(Vec::new()), default: Some(default) }
+    }
+
+    pub fn returns(self: &Self, value: T) {
+        self.values.lock().unwrap().push(value);
+    }
+
+    pub fn call(self: &Self) -> Option<T> {
+        let mut values = self.values.lock().unwrap();
+        if values.is_empty() { self.default.clone() } else { Some(values.remove(0)) }
+    }
+}
+
+// ============================================================================
+// PROPERTY-BASED TESTING
+// ============================================================================
+
+/// Generate random test data
+pub trait Arbitrary: Sized {
+    fn arbitrary<R: Rng>(rng: &mut R) -> Self;
+    fn shrink(self: &Self) -> Vec<Self> { Vec::new() }
+}
+
+impl Arbitrary for bool {
+    fn arbitrary<R: Rng>(rng: &mut R) -> Self { rng.gen() }
+}
+
+impl Arbitrary for i32 {
+    fn arbitrary<R: Rng>(rng: &mut R) -> Self { rng.gen() }
+    fn shrink(self: &Self) -> Vec<Self> {
+        if *self == 0 { vec![] }
+        else { vec![0, self / 2, self - 1] }
+    }
+}
+
+impl Arbitrary for i64 {
+    fn arbitrary<R: Rng>(rng: &mut R) -> Self { rng.gen() }
+}
+
+impl Arbitrary for u32 {
+    fn arbitrary<R: Rng>(rng: &mut R) -> Self { rng.gen() }
+}
+
+impl Arbitrary for f64 {
+    fn arbitrary<R: Rng>(rng: &mut R) -> Self { rng.gen::<f64>() * 1000.0 - 500.0 }
+}
+
+impl Arbitrary for String {
+    fn arbitrary<R: Rng>(rng: &mut R) -> Self {
+        let len = rng.gen_range(0, 100);
+        (0..len).map(|_| rng.gen_range(b'a', b'z' + 1) as char).collect()
+    }
+
+    fn shrink(self: &Self) -> Vec<Self> {
+        if self.is_empty() { return vec![]; }
+        let mut shrunk = Vec::new();
+        shrunk.push(String::new());
+        if self.len() > 1 { shrunk.push(self[..self.len()/2].to_string()); }
+        shrunk
+    }
+}
+
+impl<T: Arbitrary> Arbitrary for Vec<T> {
+    fn arbitrary<R: Rng>(rng: &mut R) -> Self {
+        let len = rng.gen_range(0, 20);
+        (0..len).map(|_| T::arbitrary(rng)).collect()
+    }
+
+    fn shrink(self: &Self) -> Vec<Self> {
+        if self.is_empty() { return vec![]; }
+        let mut shrunk = Vec::new();
+        shrunk.push(Vec::new());
+        if self.len() > 1 { shrunk.push(self[..self.len()/2].to_vec()); }
+        shrunk
+    }
+}
+
+impl<T: Arbitrary, U: Arbitrary> Arbitrary for (T, U) {
+    fn arbitrary<R: Rng>(rng: &mut R) -> Self {
+        (T::arbitrary(rng), U::arbitrary(rng))
+    }
+}
+
+/// Property-based test configuration
+pub struct PropTest {
+    num_tests: usize,
+    max_shrinks: usize,
+    seed: Option<u64>,
+}
+
+impl PropTest {
+    pub fn new() -> Self {
+        PropTest { num_tests: 100, max_shrinks: 100, seed: None }
+    }
+
+    pub fn num_tests(mut self: Self, n: usize) -> Self { self.num_tests = n; self }
+    pub fn max_shrinks(mut self: Self, n: usize) -> Self { self.max_shrinks = n; self }
+    pub fn seed(mut self: Self, s: u64) -> Self { self.seed = Some(s); self }
+
+    /// Run property test with single argument
+    pub fn for_all<T, F>(self: &Self, property: F) -> PropResult
+    where T: Arbitrary + std::fmt::Debug + Clone, F: Fn(T) -> bool {
+        let mut rng = match self.seed {
+            Some(s) => Rng::with_seed(s),
+            None => Rng::new(),
+        };
+
+        for i in 0..self.num_tests {
+            let value = T::arbitrary(&mut rng);
+            if !property(value.clone()) {
+                // Try to shrink
+                let shrunk = self.shrink_value(value.clone(), &property);
+                return PropResult::Failed {
+                    test_num: i,
+                    original: format!("{:?}", value),
+                    shrunk: shrunk.map(|v| format!("{:?}", v)),
+                };
+            }
+        }
+
+        PropResult::Passed { num_tests: self.num_tests }
+    }
+
+    fn shrink_value<T, F>(self: &Self, value: T, property: &F) -> Option<T>
+    where T: Arbitrary + Clone, F: Fn(T) -> bool {
+        let mut current = value;
+        let mut shrinks = 0;
+
+        while shrinks < self.max_shrinks {
+            let candidates = current.shrink();
+            let mut found_smaller = false;
+
+            for candidate in candidates {
+                if !property(candidate.clone()) {
+                    current = candidate;
+                    found_smaller = true;
+                    shrinks += 1;
+                    break;
+                }
+            }
+
+            if !found_smaller { break; }
+        }
+
+        Some(current)
+    }
+}
+
+#[derive(Debug)]
+pub enum PropResult {
+    Passed { num_tests: usize },
+    Failed { test_num: usize, original: String, shrunk: Option<String> },
+}
+
+impl PropResult {
+    pub fn is_success(self: &Self) -> bool {
+        matches!(self, PropResult::Passed { .. })
+    }
+}
+
+// ============================================================================
+// BENCHMARKING
+// ============================================================================
+
+/// Benchmark configuration
+pub struct Benchmark {
+    name: String,
+    warmup_iterations: usize,
+    measurement_iterations: usize,
+    sample_size: usize,
+}
+
+impl Benchmark {
+    pub fn new(name: &str) -> Self {
+        Benchmark {
+            name: name.to_string(),
+            warmup_iterations: 10,
+            measurement_iterations: 100,
+            sample_size: 10,
+        }
+    }
+
+    pub fn warmup(mut self: Self, n: usize) -> Self { self.warmup_iterations = n; self }
+    pub fn iterations(mut self: Self, n: usize) -> Self { self.measurement_iterations = n; self }
+    pub fn samples(mut self: Self, n: usize) -> Self { self.sample_size = n; self }
+
+    pub fn run<F>(self: &Self, mut f: F) -> BenchmarkResult where F: FnMut() {
+        // Warmup
+        for _ in 0..self.warmup_iterations { f(); }
+
+        // Collect samples
+        let mut samples = Vec::with_capacity(self.sample_size);
+
+        for _ in 0..self.sample_size {
+            let start = Instant::now();
+            for _ in 0..self.measurement_iterations { f(); }
+            let elapsed = start.elapsed();
+            samples.push(elapsed.as_nanos() as f64 / self.measurement_iterations as f64);
+        }
+
+        samples.sort_by(|a, b| a.partial_cmp(b).unwrap());
+
+        let mean = samples.iter().sum::<f64>() / samples.len() as f64;
+        let variance = samples.iter().map(|s| (s - mean).powi(2)).sum::<f64>() / samples.len() as f64;
+        let std_dev = variance.sqrt();
+        let median = samples[samples.len() / 2];
+        let min = samples[0];
+        let max = samples[samples.len() - 1];
+
+        BenchmarkResult {
+            name: self.name.clone(),
+            mean_ns: mean,
+            std_dev_ns: std_dev,
+            median_ns: median,
+            min_ns: min,
+            max_ns: max,
+            iterations: self.measurement_iterations * self.sample_size,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct BenchmarkResult {
+    pub name: String,
+    pub mean_ns: f64,
+    pub std_dev_ns: f64,
+    pub median_ns: f64,
+    pub min_ns: f64,
+    pub max_ns: f64,
+    pub iterations: usize,
+}
+
+impl BenchmarkResult {
+    pub fn print(self: &Self) {
+        println!("Benchmark: {}", self.name);
+        println!("  Mean:   {:.2} ns", self.mean_ns);
+        println!("  Median: {:.2} ns", self.median_ns);
+        println!("  StdDev: {:.2} ns", self.std_dev_ns);
+        println!("  Range:  [{:.2}, {:.2}] ns", self.min_ns, self.max_ns);
+        println!("  Iterations: {}", self.iterations);
+    }
+
+    pub fn ops_per_sec(self: &Self) -> f64 {
+        1_000_000_000.0 / self.mean_ns
+    }
+}
+
+/// Benchmark suite
+pub struct BenchmarkSuite {
+    name: String,
+    benchmarks: Vec<(String, Box<dyn FnMut()>)>,
+    config: Benchmark,
+}
+
+impl BenchmarkSuite {
+    pub fn new(name: &str) -> Self {
+        BenchmarkSuite {
+            name: name.to_string(),
+            benchmarks: Vec::new(),
+            config: Benchmark::new(""),
+        }
+    }
+
+    pub fn add<F>(self: &mut Self, name: &str, f: F) where F: FnMut() + 'static {
+        self.benchmarks.push((name.to_string(), Box::new(f)));
+    }
+
+    pub fn run(self: &mut Self) -> Vec<BenchmarkResult> {
+        println!("\n========== {} ==========", self.name);
+        let mut results = Vec::new();
+
+        for (name, f) in &mut self.benchmarks {
+            let bench = Benchmark::new(name)
+                .warmup(self.config.warmup_iterations)
+                .iterations(self.config.measurement_iterations)
+                .samples(self.config.sample_size);
+
+            let result = bench.run(|| f());
+            result.print();
+            println!();
+            results.push(result);
+        }
+
+        results
+    }
+}
+
+// ============================================================================
+// SIMPLE RNG FOR TESTING
+// ============================================================================
+
+/// Simple PRNG for testing (xorshift64)
+pub struct Rng {
+    state: u64,
+}
+
+impl Rng {
+    pub fn new() -> Self {
+        Rng { state: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos() as u64 }
+    }
+
+    pub fn with_seed(seed: u64) -> Self { Rng { state: seed } }
+
+    pub fn next_u64(self: &mut Self) -> u64 {
+        self.state ^= self.state << 13;
+        self.state ^= self.state >> 7;
+        self.state ^= self.state << 17;
+        self.state
+    }
+
+    pub fn gen<T: FromRng>(self: &mut Self) -> T { T::from_rng(self) }
+
+    pub fn gen_range(self: &mut Self, min: u64, max: u64) -> u64 {
+        min + (self.next_u64() % (max - min))
+    }
+}
+
+pub trait FromRng {
+    fn from_rng(rng: &mut Rng) -> Self;
+}
+
+impl FromRng for bool { fn from_rng(rng: &mut Rng) -> Self { rng.next_u64() % 2 == 0 } }
+impl FromRng for u32 { fn from_rng(rng: &mut Rng) -> Self { rng.next_u64() as u32 } }
+impl FromRng for u64 { fn from_rng(rng: &mut Rng) -> Self { rng.next_u64() } }
+impl FromRng for i32 { fn from_rng(rng: &mut Rng) -> Self { rng.next_u64() as i32 } }
+impl FromRng for i64 { fn from_rng(rng: &mut Rng) -> Self { rng.next_u64() as i64 } }
+impl FromRng for f64 { fn from_rng(rng: &mut Rng) -> Self { (rng.next_u64() as f64) / (u64::MAX as f64) } }
+
+// ============================================================================
+// TESTS
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_assert_eq() {
+        assert_eq(1, 1);
+        assert_eq("hello", "hello");
+    }
+
+    #[test]
+    fn test_assert_approx() {
+        assert_approx_eq(1.0, 1.0001, 0.001);
+    }
+
+    #[test]
+    fn test_mock() {
+        let mock = Mock::<i32>::new();
+        mock.returns(42);
+        assert_eq(mock.call(1), Some(42));
+        assert!(mock.was_called_with(&1));
+    }
+
+    #[test]
+    fn test_property() {
+        let result = PropTest::new().num_tests(50).for_all(|x: i32| {
+            x + 0 == x
+        });
+        assert!(result.is_success());
+    }
+
+    #[test]
+    fn test_benchmark() {
+        let result = Benchmark::new("addition")
+            .warmup(5)
+            .iterations(100)
+            .samples(5)
+            .run(|| { let _ = 1 + 1; });
+
+        assert!(result.mean_ns > 0.0);
+    }
+}

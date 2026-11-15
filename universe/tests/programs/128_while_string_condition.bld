@@ -1,0 +1,20 @@
+fn main() {
+    let mut s = "hello";
+    let mut count = 0;
+
+    while s.len() > 0 {
+        s = s.substring(1, s.len() - 1);
+        count = count + 1;
+    }
+    println!("count = {}", count);
+
+    let mut t = "world";
+    let mut count2 = 0;
+    while t.len() > 0 {
+        t = t.substring(1, t.len() - 1);
+        count2 = count2 + 1;
+    }
+    println!("count2 = {}", count2);
+
+    println!("done");
+}

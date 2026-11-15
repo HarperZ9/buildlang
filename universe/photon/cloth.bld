@@ -1,0 +1,1749 @@
+// cloth.bld - Cloth Simulation and Rendering System
+// Part of the Photon Rendering Module
+// Implements position-based dynamics cloth simulation, GPU cloth rendering, and fabric materials
+
+import std::collections::{HashMap, Vec, VecDeque, HashSet}
+import std::math::{Vec2, Vec3, Vec4, Mat3, Mat4, Quaternion, sqrt, pow, exp, sin, cos, PI, floor, ceil, clamp, lerp, min, max, abs, dot, cross, normalize, length}
+import std::memory::{Arena, Pool, Box, Arc, Rc}
+import std::sync::{Mutex, RwLock, Atomic}
+import std::simd::{f32x4, f32x8, i32x4, i32x8}
+
+// ============================================================================
+// CLOTH PARTICLE REPRESENTATION
+// ============================================================================
+
+/// Cloth particle state
+struct ClothParticle {
+    position: Vec3,
+    prev_position: Vec3,
+    velocity: Vec3,
+    normal: Vec3,
+    mass: f32,
+    inv_mass: f32,
+    uv: Vec2,
+    is_fixed: bool,
+    friction: f32,
+}
+
+impl ClothParticle {
+    fn new(position: Vec3, mass: f32, uv: Vec2) -> Self {
+        Self {
+            position,
+            prev_position: position,
+            velocity: Vec3::ZERO,
+            normal: Vec3::Y,
+            mass,
+            inv_mass: if mass > 0.0 { 1.0 / mass } else { 0.0 },
+            uv,
+            is_fixed: false,
+            friction: 0.5,
+        }
+    }
+
+    fn fix(&mut self) {
+        self.is_fixed = true;
+        self.inv_mass = 0.0;
+    }
+
+    fn unfix(&mut self) {
+        self.is_fixed = false;
+        self.inv_mass = if self.mass > 0.0 { 1.0 / self.mass } else { 0.0 };
+    }
+}
+
+/// GPU-packed cloth particle
+struct GpuClothParticle {
+    position: Vec4,        // xyz = position, w = inv_mass
+    prev_position: Vec4,   // xyz = prev position, w = friction
+    velocity_normal: Vec4, // xy = velocity.xy, zw = normal.xy
+    velocity_normal_z: Vec4, // x = velocity.z, y = normal.z, z = uv.x, w = uv.y
+}
+
+impl GpuClothParticle {
+    fn from_particle(p: &ClothParticle) -> Self {
+        Self {
+            position: Vec4::new(p.position.x, p.position.y, p.position.z, p.inv_mass),
+            prev_position: Vec4::new(p.prev_position.x, p.prev_position.y, p.prev_position.z, p.friction),
+            velocity_normal: Vec4::new(p.velocity.x, p.velocity.y, p.normal.x, p.normal.y),
+            velocity_normal_z: Vec4::new(p.velocity.z, p.normal.z, p.uv.x, p.uv.y),
+        }
+    }
+}
+
+// ============================================================================
+// CLOTH CONSTRAINTS
+// ============================================================================
+
+/// Constraint type
+enum ConstraintType {
+    Distance,      // Maintains distance between two particles
+    Bending,       // Maintains angle between triangles
+    Volume,        // Maintains volume (for inflatable objects)
+    Attachment,    // Attaches particle to world position
+    Collision,     // Collision constraint
+}
+
+/// Distance constraint (stretch/compression)
+struct DistanceConstraint {
+    p0: usize,
+    p1: usize,
+    rest_length: f32,
+    stiffness: f32,
+}
+
+impl DistanceConstraint {
+    fn new(p0: usize, p1: usize, positions: &[ClothParticle], stiffness: f32) -> Self {
+        let rest_length = length(positions[p0].position - positions[p1].position);
+        Self { p0, p1, rest_length, stiffness }
+    }
+
+    fn solve(&self, particles: &mut [ClothParticle]) {
+        let p0 = &particles[self.p0];
+        let p1 = &particles[self.p1];
+
+        let delta = p1.position - p0.position;
+        let dist = length(delta);
+
+        if dist < 0.0001 {
+            return;
+        }
+
+        let diff = (dist - self.rest_length) / dist;
+        let correction = delta * diff * 0.5 * self.stiffness;
+
+        let w0 = p0.inv_mass;
+        let w1 = p1.inv_mass;
+        let sum = w0 + w1;
+
+        if sum > 0.0 {
+            particles[self.p0].position = particles[self.p0].position + correction * (w0 / sum);
+            particles[self.p1].position = particles[self.p1].position - correction * (w1 / sum);
+        }
+    }
+}
+
+/// Bending constraint (dihedral angle)
+struct BendingConstraint {
+    p0: usize,  // Shared edge vertex 0
+    p1: usize,  // Shared edge vertex 1
+    p2: usize,  // Triangle 1 opposite vertex
+    p3: usize,  // Triangle 2 opposite vertex
+    rest_angle: f32,
+    stiffness: f32,
+}
+
+impl BendingConstraint {
+    fn new(p0: usize, p1: usize, p2: usize, p3: usize, positions: &[ClothParticle], stiffness: f32) -> Self {
+        let rest_angle = Self::calculate_dihedral_angle(
+            positions[p0].position,
+            positions[p1].position,
+            positions[p2].position,
+            positions[p3].position,
+        );
+
+        Self { p0, p1, p2, p3, rest_angle, stiffness }
+    }
+
+    fn calculate_dihedral_angle(p0: Vec3, p1: Vec3, p2: Vec3, p3: Vec3) -> f32 {
+        let n1 = normalize(cross(p1 - p0, p2 - p0));
+        let n2 = normalize(cross(p1 - p0, p3 - p0));
+
+        let cos_angle = clamp(dot(n1, n2), -1.0, 1.0);
+        acos(cos_angle)
+    }
+
+    fn solve(&self, particles: &mut [ClothParticle]) {
+        let p0 = particles[self.p0].position;
+        let p1 = particles[self.p1].position;
+        let p2 = particles[self.p2].position;
+        let p3 = particles[self.p3].position;
+
+        let current_angle = Self::calculate_dihedral_angle(p0, p1, p2, p3);
+        let angle_diff = current_angle - self.rest_angle;
+
+        if abs(angle_diff) < 0.001 {
+            return;
+        }
+
+        // Calculate normals
+        let n1 = normalize(cross(p1 - p0, p2 - p0));
+        let n2 = normalize(cross(p1 - p0, p3 - p0));
+
+        // Edge direction
+        let edge = normalize(p1 - p0);
+
+        // Correction force direction
+        let correction = angle_diff * self.stiffness * 0.25;
+
+        // Apply to vertices (simplified)
+        if particles[self.p2].inv_mass > 0.0 {
+            particles[self.p2].position = particles[self.p2].position - n1 * correction;
+        }
+        if particles[self.p3].inv_mass > 0.0 {
+            particles[self.p3].position = particles[self.p3].position + n2 * correction;
+        }
+    }
+}
+
+/// Long range attachment constraint
+struct AttachmentConstraint {
+    particle: usize,
+    target: Vec3,
+    stiffness: f32,
+    max_distance: f32,
+}
+
+impl AttachmentConstraint {
+    fn new(particle: usize, target: Vec3, stiffness: f32, max_distance: f32) -> Self {
+        Self { particle, target, stiffness, max_distance }
+    }
+
+    fn solve(&self, particles: &mut [ClothParticle]) {
+        let p = &particles[self.particle];
+        let delta = self.target - p.position;
+        let dist = length(delta);
+
+        if dist > self.max_distance && p.inv_mass > 0.0 {
+            let correction = delta * (1.0 - self.max_distance / dist) * self.stiffness;
+            particles[self.particle].position = particles[self.particle].position + correction;
+        }
+    }
+
+    fn update_target(&mut self, new_target: Vec3) {
+        self.target = new_target;
+    }
+}
+
+/// Collision constraint with sphere
+struct SphereCollisionConstraint {
+    center: Vec3,
+    radius: f32,
+    friction: f32,
+}
+
+impl SphereCollisionConstraint {
+    fn new(center: Vec3, radius: f32, friction: f32) -> Self {
+        Self { center, radius, friction }
+    }
+
+    fn solve(&self, particles: &mut [ClothParticle]) {
+        for particle in particles.iter_mut() {
+            if particle.inv_mass == 0.0 {
+                continue;
+            }
+
+            let to_particle = particle.position - self.center;
+            let dist = length(to_particle);
+
+            if dist < self.radius {
+                let normal = normalize(to_particle);
+                let penetration = self.radius - dist;
+
+                // Push out
+                particle.position = particle.position + normal * penetration;
+
+                // Apply friction
+                let velocity = particle.position - particle.prev_position;
+                let vn = dot(velocity, normal) * normal;
+                let vt = velocity - vn;
+
+                if length(vt) > 0.001 {
+                    let friction_force = normalize(vt) * min(length(vt), self.friction * length(vn));
+                    particle.position = particle.position - friction_force;
+                }
+            }
+        }
+    }
+}
+
+/// Collision constraint with capsule
+struct CapsuleCollisionConstraint {
+    p0: Vec3,
+    p1: Vec3,
+    radius: f32,
+    friction: f32,
+}
+
+impl CapsuleCollisionConstraint {
+    fn new(p0: Vec3, p1: Vec3, radius: f32, friction: f32) -> Self {
+        Self { p0, p1, radius, friction }
+    }
+
+    fn closest_point_on_segment(&self, point: Vec3) -> Vec3 {
+        let v = self.p1 - self.p0;
+        let w = point - self.p0;
+
+        let c1 = dot(w, v);
+        if c1 <= 0.0 {
+            return self.p0;
+        }
+
+        let c2 = dot(v, v);
+        if c2 <= c1 {
+            return self.p1;
+        }
+
+        let t = c1 / c2;
+        self.p0 + v * t
+    }
+
+    fn solve(&self, particles: &mut [ClothParticle]) {
+        for particle in particles.iter_mut() {
+            if particle.inv_mass == 0.0 {
+                continue;
+            }
+
+            let closest = self.closest_point_on_segment(particle.position);
+            let to_particle = particle.position - closest;
+            let dist = length(to_particle);
+
+            if dist < self.radius {
+                let normal = normalize(to_particle);
+                let penetration = self.radius - dist;
+
+                particle.position = particle.position + normal * penetration;
+
+                // Friction
+                let velocity = particle.position - particle.prev_position;
+                let vn = dot(velocity, normal) * normal;
+                let vt = velocity - vn;
+
+                if length(vt) > 0.001 {
+                    let friction_force = normalize(vt) * min(length(vt), self.friction * length(vn));
+                    particle.position = particle.position - friction_force;
+                }
+            }
+        }
+    }
+}
+
+/// Self-collision constraint using spatial hashing
+struct SelfCollisionConstraint {
+    thickness: f32,
+    friction: f32,
+    hash_grid: HashMap<(i32, i32, i32), Vec<usize>>,
+    cell_size: f32,
+}
+
+impl SelfCollisionConstraint {
+    fn new(thickness: f32, friction: f32) -> Self {
+        Self {
+            thickness,
+            friction,
+            hash_grid: HashMap::new(),
+            cell_size: thickness * 2.0,
+        }
+    }
+
+    fn hash_position(&self, pos: Vec3) -> (i32, i32, i32) {
+        (
+            floor(pos.x / self.cell_size) as i32,
+            floor(pos.y / self.cell_size) as i32,
+            floor(pos.z / self.cell_size) as i32,
+        )
+    }
+
+    fn update_spatial_hash(&mut self, particles: &[ClothParticle]) {
+        self.hash_grid.clear();
+
+        for (i, particle) in particles.iter().enumerate() {
+            let cell = self.hash_position(particle.position);
+            self.hash_grid.entry(cell).or_insert_with(Vec::new).push(i);
+        }
+    }
+
+    fn solve(&self, particles: &mut [ClothParticle], tri_indices: &[(usize, usize, usize)]) {
+        // Point-triangle collision
+        for (i, particle) in particles.iter().enumerate() {
+            if particle.inv_mass == 0.0 {
+                continue;
+            }
+
+            let cell = self.hash_position(particle.position);
+
+            // Check neighboring cells
+            for dz in -1..=1 {
+                for dy in -1..=1 {
+                    for dx in -1..=1 {
+                        let neighbor_cell = (cell.0 + dx, cell.1 + dy, cell.2 + dz);
+
+                        if let Some(indices) = self.hash_grid.get(&neighbor_cell) {
+                            // Check triangles in this cell
+                            for &(t0, t1, t2) in tri_indices {
+                                if t0 == i || t1 == i || t2 == i {
+                                    continue;
+                                }
+
+                                // Point-triangle collision test
+                                // Simplified: just check particle-particle distance
+                                for &other_idx in indices {
+                                    if other_idx == i {
+                                        continue;
+                                    }
+
+                                    let other = &particles[other_idx];
+                                    let delta = particle.position - other.position;
+                                    let dist = length(delta);
+
+                                    if dist < self.thickness && dist > 0.0001 {
+                                        // Collision response would go here
+                                        // Simplified: handled per-particle
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ============================================================================
+// CLOTH MESH
+// ============================================================================
+
+/// Cloth mesh topology
+struct ClothMesh {
+    particles: Vec<ClothParticle>,
+    triangles: Vec<(usize, usize, usize)>,
+    edges: Vec<(usize, usize)>,
+
+    // Constraints
+    distance_constraints: Vec<DistanceConstraint>,
+    bending_constraints: Vec<BendingConstraint>,
+    attachment_constraints: Vec<AttachmentConstraint>,
+
+    // Simulation parameters
+    gravity: Vec3,
+    damping: f32,
+    time_step: f32,
+    sub_steps: u32,
+    constraint_iterations: u32,
+
+    // Wind
+    wind_velocity: Vec3,
+    wind_drag: f32,
+    wind_lift: f32,
+
+    // Collision
+    sphere_colliders: Vec<SphereCollisionConstraint>,
+    capsule_colliders: Vec<CapsuleCollisionConstraint>,
+    self_collision: Option<SelfCollisionConstraint>,
+}
+
+impl ClothMesh {
+    fn new_grid(
+        width: u32,
+        height: u32,
+        spacing: f32,
+        origin: Vec3,
+        mass_per_particle: f32,
+    ) -> Self {
+        let mut particles = Vec::new();
+        let mut triangles = Vec::new();
+        let mut edges = HashSet::new();
+
+        // Create particles
+        for y in 0..height {
+            for x in 0..width {
+                let position = origin + Vec3::new(
+                    x as f32 * spacing,
+                    0.0,
+                    y as f32 * spacing
+                );
+                let uv = Vec2::new(
+                    x as f32 / (width - 1) as f32,
+                    y as f32 / (height - 1) as f32
+                );
+                particles.push(ClothParticle::new(position, mass_per_particle, uv));
+            }
+        }
+
+        // Create triangles and collect edges
+        for y in 0..height - 1 {
+            for x in 0..width - 1 {
+                let i00 = (y * width + x) as usize;
+                let i10 = (y * width + x + 1) as usize;
+                let i01 = ((y + 1) * width + x) as usize;
+                let i11 = ((y + 1) * width + x + 1) as usize;
+
+                // Two triangles per quad
+                triangles.push((i00, i10, i11));
+                triangles.push((i00, i11, i01));
+
+                // Edges (ensure unique)
+                edges.insert((min(i00, i10), max(i00, i10)));
+                edges.insert((min(i10, i11), max(i10, i11)));
+                edges.insert((min(i11, i00), max(i11, i00)));
+                edges.insert((min(i00, i01), max(i00, i01)));
+                edges.insert((min(i01, i11), max(i01, i11)));
+            }
+        }
+
+        let edges: Vec<(usize, usize)> = edges.into_iter().collect();
+
+        // Create distance constraints for all edges
+        let mut distance_constraints = Vec::new();
+        for &(p0, p1) in &edges {
+            distance_constraints.push(DistanceConstraint::new(p0, p1, &particles, 1.0));
+        }
+
+        // Create shear constraints (diagonal)
+        for y in 0..height - 1 {
+            for x in 0..width - 1 {
+                let i00 = (y * width + x) as usize;
+                let i11 = ((y + 1) * width + x + 1) as usize;
+                let i10 = (y * width + x + 1) as usize;
+                let i01 = ((y + 1) * width + x) as usize;
+
+                distance_constraints.push(DistanceConstraint::new(i00, i11, &particles, 0.8));
+                distance_constraints.push(DistanceConstraint::new(i10, i01, &particles, 0.8));
+            }
+        }
+
+        // Create bending constraints
+        let mut bending_constraints = Vec::new();
+        for y in 0..height - 1 {
+            for x in 0..width - 1 {
+                let i00 = (y * width + x) as usize;
+                let i10 = (y * width + x + 1) as usize;
+                let i01 = ((y + 1) * width + x) as usize;
+                let i11 = ((y + 1) * width + x + 1) as usize;
+
+                // Bending along horizontal
+                if x < width - 2 {
+                    let i20 = (y * width + x + 2) as usize;
+                    bending_constraints.push(BendingConstraint::new(i00, i10, i01, i20, &particles, 0.5));
+                }
+
+                // Bending along vertical
+                if y < height - 2 {
+                    let i02 = ((y + 2) * width + x) as usize;
+                    bending_constraints.push(BendingConstraint::new(i00, i01, i10, i02, &particles, 0.5));
+                }
+            }
+        }
+
+        Self {
+            particles,
+            triangles,
+            edges,
+            distance_constraints,
+            bending_constraints,
+            attachment_constraints: Vec::new(),
+            gravity: Vec3::new(0.0, -9.81, 0.0),
+            damping: 0.99,
+            time_step: 1.0 / 60.0,
+            sub_steps: 4,
+            constraint_iterations: 10,
+            wind_velocity: Vec3::ZERO,
+            wind_drag: 0.01,
+            wind_lift: 0.01,
+            sphere_colliders: Vec::new(),
+            capsule_colliders: Vec::new(),
+            self_collision: None,
+        }
+    }
+
+    fn fix_particle(&mut self, index: usize) {
+        self.particles[index].fix();
+    }
+
+    fn fix_top_row(&mut self, width: u32) {
+        for x in 0..width {
+            self.particles[x as usize].fix();
+        }
+    }
+
+    fn add_attachment(&mut self, particle: usize, target: Vec3, stiffness: f32, max_dist: f32) {
+        self.attachment_constraints.push(AttachmentConstraint::new(particle, target, stiffness, max_dist));
+    }
+
+    fn add_sphere_collider(&mut self, center: Vec3, radius: f32, friction: f32) {
+        self.sphere_colliders.push(SphereCollisionConstraint::new(center, radius, friction));
+    }
+
+    fn add_capsule_collider(&mut self, p0: Vec3, p1: Vec3, radius: f32, friction: f32) {
+        self.capsule_colliders.push(CapsuleCollisionConstraint::new(p0, p1, radius, friction));
+    }
+
+    fn enable_self_collision(&mut self, thickness: f32, friction: f32) {
+        self.self_collision = Some(SelfCollisionConstraint::new(thickness, friction));
+    }
+
+    fn simulate(&mut self, dt: f32) {
+        let sub_dt = dt / self.sub_steps as f32;
+
+        for _ in 0..self.sub_steps {
+            self.simulate_step(sub_dt);
+        }
+
+        // Update normals
+        self.compute_normals();
+    }
+
+    fn simulate_step(&mut self, dt: f32) {
+        // Apply external forces
+        for particle in &mut self.particles {
+            if particle.inv_mass == 0.0 {
+                continue;
+            }
+
+            // Gravity
+            particle.velocity = particle.velocity + self.gravity * dt;
+
+            // Damping
+            particle.velocity = particle.velocity * self.damping;
+        }
+
+        // Apply wind
+        self.apply_wind(dt);
+
+        // Predict positions
+        for particle in &mut self.particles {
+            if particle.inv_mass == 0.0 {
+                continue;
+            }
+
+            particle.prev_position = particle.position;
+            particle.position = particle.position + particle.velocity * dt;
+        }
+
+        // Update self-collision spatial hash
+        if let Some(ref mut self_collision) = self.self_collision {
+            self_collision.update_spatial_hash(&self.particles);
+        }
+
+        // Solve constraints
+        for _ in 0..self.constraint_iterations {
+            // Distance constraints
+            for constraint in &self.distance_constraints {
+                constraint.solve(&mut self.particles);
+            }
+
+            // Bending constraints
+            for constraint in &self.bending_constraints {
+                constraint.solve(&mut self.particles);
+            }
+
+            // Attachment constraints
+            for constraint in &self.attachment_constraints {
+                constraint.solve(&mut self.particles);
+            }
+
+            // Collision constraints
+            for collider in &self.sphere_colliders {
+                collider.solve(&mut self.particles);
+            }
+
+            for collider in &self.capsule_colliders {
+                collider.solve(&mut self.particles);
+            }
+
+            // Self-collision
+            if let Some(ref self_collision) = self.self_collision {
+                self_collision.solve(&mut self.particles, &self.triangles);
+            }
+        }
+
+        // Update velocities
+        for particle in &mut self.particles {
+            if particle.inv_mass == 0.0 {
+                continue;
+            }
+
+            particle.velocity = (particle.position - particle.prev_position) / dt;
+        }
+    }
+
+    fn apply_wind(&mut self, dt: f32) {
+        if length(self.wind_velocity) < 0.001 {
+            return;
+        }
+
+        for &(i0, i1, i2) in &self.triangles {
+            let p0 = &self.particles[i0];
+            let p1 = &self.particles[i1];
+            let p2 = &self.particles[i2];
+
+            // Triangle normal
+            let edge1 = p1.position - p0.position;
+            let edge2 = p2.position - p0.position;
+            let normal = normalize(cross(edge1, edge2));
+
+            // Triangle area
+            let area = length(cross(edge1, edge2)) * 0.5;
+
+            // Relative wind velocity
+            let tri_velocity = (p0.velocity + p1.velocity + p2.velocity) / 3.0;
+            let relative_wind = self.wind_velocity - tri_velocity;
+
+            // Wind force components
+            let vn = dot(relative_wind, normal);
+            let vt_vec = relative_wind - normal * vn;
+
+            // Drag force (perpendicular to surface)
+            let drag_force = normal * vn * abs(vn) * self.wind_drag * area;
+
+            // Lift force (tangential)
+            let lift_force = vt_vec * length(relative_wind) * self.wind_lift * area;
+
+            let total_force = (drag_force + lift_force) / 3.0;
+
+            // Apply to each vertex
+            for &idx in &[i0, i1, i2] {
+                if self.particles[idx].inv_mass > 0.0 {
+                    self.particles[idx].velocity = self.particles[idx].velocity + total_force * self.particles[idx].inv_mass * dt;
+                }
+            }
+        }
+    }
+
+    fn compute_normals(&mut self) {
+        // Reset normals
+        for particle in &mut self.particles {
+            particle.normal = Vec3::ZERO;
+        }
+
+        // Accumulate face normals
+        for &(i0, i1, i2) in &self.triangles {
+            let p0 = self.particles[i0].position;
+            let p1 = self.particles[i1].position;
+            let p2 = self.particles[i2].position;
+
+            let edge1 = p1 - p0;
+            let edge2 = p2 - p0;
+            let normal = cross(edge1, edge2);
+
+            self.particles[i0].normal = self.particles[i0].normal + normal;
+            self.particles[i1].normal = self.particles[i1].normal + normal;
+            self.particles[i2].normal = self.particles[i2].normal + normal;
+        }
+
+        // Normalize
+        for particle in &mut self.particles {
+            let len = length(particle.normal);
+            if len > 0.0001 {
+                particle.normal = particle.normal / len;
+            } else {
+                particle.normal = Vec3::Y;
+            }
+        }
+    }
+
+    fn get_aabb(&self) -> (Vec3, Vec3) {
+        let mut min = Vec3::new(f32::MAX, f32::MAX, f32::MAX);
+        let mut max = Vec3::new(f32::MIN, f32::MIN, f32::MIN);
+
+        for particle in &self.particles {
+            min.x = min.x.min(particle.position.x);
+            min.y = min.y.min(particle.position.y);
+            min.z = min.z.min(particle.position.z);
+            max.x = max.x.max(particle.position.x);
+            max.y = max.y.max(particle.position.y);
+            max.z = max.z.max(particle.position.z);
+        }
+
+        (min, max)
+    }
+}
+
+// ============================================================================
+// FABRIC MATERIALS
+// ============================================================================
+
+/// Fabric weave pattern
+enum FabricWeave {
+    Plain,
+    Twill,
+    Satin,
+    Knit,
+    Velvet,
+    Silk,
+    Denim,
+    Leather,
+}
+
+/// Fabric shading model
+enum FabricShadingModel {
+    Lambert,
+    Kajiya,     // For fuzzy fabrics
+    Charlie,    // Sheen model for silk
+    Ashikhmin,  // For velvet
+}
+
+/// Fabric material properties
+struct FabricMaterial {
+    // Base color
+    albedo: Vec3,
+    albedo_texture: Option<TextureHandle>,
+
+    // Fabric properties
+    weave: FabricWeave,
+    shading_model: FabricShadingModel,
+
+    // Sheen (for silk, satin)
+    sheen_color: Vec3,
+    sheen_roughness: f32,
+
+    // Fuzz (for velvet, suede)
+    fuzz_color: Vec3,
+    fuzz_amount: f32,
+
+    // Normal/detail
+    normal_texture: Option<TextureHandle>,
+    detail_scale: f32,
+    weave_texture: Option<TextureHandle>,
+
+    // Subsurface scattering
+    subsurface_color: Vec3,
+    subsurface_radius: f32,
+
+    // Anisotropy (for brushed fabrics)
+    anisotropy: f32,
+    anisotropy_rotation: f32,
+
+    // Metallic threads (for brocade)
+    metallic_thread_color: Vec3,
+    metallic_thread_amount: f32,
+
+    // Transparency (for sheer fabrics)
+    opacity: f32,
+    transmission: f32,
+}
+
+impl FabricMaterial {
+    fn default() -> Self {
+        Self {
+            albedo: Vec3::new(0.8, 0.8, 0.8),
+            albedo_texture: None,
+            weave: FabricWeave::Plain,
+            shading_model: FabricShadingModel::Lambert,
+            sheen_color: Vec3::new(1.0, 1.0, 1.0),
+            sheen_roughness: 0.5,
+            fuzz_color: Vec3::ZERO,
+            fuzz_amount: 0.0,
+            normal_texture: None,
+            detail_scale: 1.0,
+            weave_texture: None,
+            subsurface_color: Vec3::ZERO,
+            subsurface_radius: 0.0,
+            anisotropy: 0.0,
+            anisotropy_rotation: 0.0,
+            metallic_thread_color: Vec3::ZERO,
+            metallic_thread_amount: 0.0,
+            opacity: 1.0,
+            transmission: 0.0,
+        }
+    }
+
+    fn silk() -> Self {
+        Self {
+            shading_model: FabricShadingModel::Charlie,
+            sheen_color: Vec3::new(1.0, 1.0, 1.0),
+            sheen_roughness: 0.3,
+            anisotropy: 0.5,
+            ..Self::default()
+        }
+    }
+
+    fn velvet() -> Self {
+        Self {
+            shading_model: FabricShadingModel::Ashikhmin,
+            fuzz_color: Vec3::new(0.2, 0.1, 0.3),
+            fuzz_amount: 0.8,
+            ..Self::default()
+        }
+    }
+
+    fn denim() -> Self {
+        Self {
+            weave: FabricWeave::Denim,
+            albedo: Vec3::new(0.15, 0.2, 0.35),
+            anisotropy: 0.3,
+            ..Self::default()
+        }
+    }
+
+    fn leather() -> Self {
+        Self {
+            weave: FabricWeave::Leather,
+            albedo: Vec3::new(0.3, 0.2, 0.1),
+            sheen_roughness: 0.4,
+            subsurface_color: Vec3::new(0.5, 0.2, 0.1),
+            subsurface_radius: 0.2,
+            ..Self::default()
+        }
+    }
+}
+
+/// GPU packed fabric material
+struct GpuFabricMaterial {
+    albedo: Vec4,           // xyz = albedo, w = opacity
+    sheen: Vec4,            // xyz = sheen_color, w = sheen_roughness
+    fuzz: Vec4,             // xyz = fuzz_color, w = fuzz_amount
+    subsurface: Vec4,       // xyz = subsurface_color, w = subsurface_radius
+    anisotropy: Vec4,       // x = anisotropy, y = rotation, z = detail_scale, w = transmission
+    metallic_thread: Vec4,  // xyz = color, w = amount
+}
+
+// ============================================================================
+// GPU CLOTH SIMULATION
+// ============================================================================
+
+/// GPU cloth simulation using compute shaders
+struct GpuClothSimulation {
+    particle_buffer: BufferHandle,
+    constraint_buffer: BufferHandle,
+    triangle_buffer: BufferHandle,
+
+    integrate_pipeline: ComputePipelineHandle,
+    distance_constraint_pipeline: ComputePipelineHandle,
+    bending_constraint_pipeline: ComputePipelineHandle,
+    collision_pipeline: ComputePipelineHandle,
+    normal_pipeline: ComputePipelineHandle,
+
+    particle_count: u32,
+    distance_constraint_count: u32,
+    bending_constraint_count: u32,
+    triangle_count: u32,
+}
+
+impl GpuClothSimulation {
+    fn new(device: &Device, mesh: &ClothMesh) -> Self {
+        // Pack particle data
+        let gpu_particles: Vec<GpuClothParticle> = mesh.particles.iter()
+            .map(|p| GpuClothParticle::from_particle(p))
+            .collect();
+
+        let particle_buffer = device.create_buffer_with_data(
+            &BufferDescriptor {
+                size: gpu_particles.len() * std::mem::size_of::<GpuClothParticle>(),
+                usage: BufferUsage::STORAGE | BufferUsage::VERTEX,
+                ..Default::default()
+            },
+            bytemuck::cast_slice(&gpu_particles)
+        );
+
+        // Pack constraints
+        let mut constraint_data: Vec<u32> = Vec::new();
+        for constraint in &mesh.distance_constraints {
+            constraint_data.push(constraint.p0 as u32);
+            constraint_data.push(constraint.p1 as u32);
+            constraint_data.push(constraint.rest_length.to_bits());
+            constraint_data.push(constraint.stiffness.to_bits());
+        }
+
+        let constraint_buffer = device.create_buffer_with_data(
+            &BufferDescriptor {
+                size: constraint_data.len() * 4,
+                usage: BufferUsage::STORAGE,
+                ..Default::default()
+            },
+            bytemuck::cast_slice(&constraint_data)
+        );
+
+        // Pack triangles
+        let triangle_data: Vec<u32> = mesh.triangles.iter()
+            .flat_map(|&(a, b, c)| [a as u32, b as u32, c as u32])
+            .collect();
+
+        let triangle_buffer = device.create_buffer_with_data(
+            &BufferDescriptor {
+                size: triangle_data.len() * 4,
+                usage: BufferUsage::STORAGE,
+                ..Default::default()
+            },
+            bytemuck::cast_slice(&triangle_data)
+        );
+
+        let integrate_pipeline = device.create_compute_pipeline(&ComputePipelineDescriptor {
+            shader: include_str!("shaders/cloth_integrate.wgsl"),
+            entry_point: "main",
+            ..Default::default()
+        });
+
+        let distance_constraint_pipeline = device.create_compute_pipeline(&ComputePipelineDescriptor {
+            shader: include_str!("shaders/cloth_distance.wgsl"),
+            entry_point: "main",
+            ..Default::default()
+        });
+
+        let bending_constraint_pipeline = device.create_compute_pipeline(&ComputePipelineDescriptor {
+            shader: include_str!("shaders/cloth_bending.wgsl"),
+            entry_point: "main",
+            ..Default::default()
+        });
+
+        let collision_pipeline = device.create_compute_pipeline(&ComputePipelineDescriptor {
+            shader: include_str!("shaders/cloth_collision.wgsl"),
+            entry_point: "main",
+            ..Default::default()
+        });
+
+        let normal_pipeline = device.create_compute_pipeline(&ComputePipelineDescriptor {
+            shader: include_str!("shaders/cloth_normals.wgsl"),
+            entry_point: "main",
+            ..Default::default()
+        });
+
+        Self {
+            particle_buffer,
+            constraint_buffer,
+            triangle_buffer,
+            integrate_pipeline,
+            distance_constraint_pipeline,
+            bending_constraint_pipeline,
+            collision_pipeline,
+            normal_pipeline,
+            particle_count: mesh.particles.len() as u32,
+            distance_constraint_count: mesh.distance_constraints.len() as u32,
+            bending_constraint_count: mesh.bending_constraints.len() as u32,
+            triangle_count: mesh.triangles.len() as u32,
+        }
+    }
+
+    fn simulate(&self, encoder: &mut CommandEncoder, uniforms: &ClothSimUniforms, iterations: u32) {
+        // Integration pass
+        {
+            let mut pass = encoder.begin_compute_pass("Cloth Integrate");
+            pass.set_pipeline(&self.integrate_pipeline);
+            pass.set_storage_buffer(0, &self.particle_buffer);
+            pass.set_uniform(1, uniforms);
+            pass.dispatch((self.particle_count + 63) / 64, 1, 1);
+        }
+
+        // Constraint solving iterations
+        for _ in 0..iterations {
+            // Distance constraints
+            {
+                let mut pass = encoder.begin_compute_pass("Cloth Distance Constraints");
+                pass.set_pipeline(&self.distance_constraint_pipeline);
+                pass.set_storage_buffer(0, &self.particle_buffer);
+                pass.set_storage_buffer(1, &self.constraint_buffer);
+                pass.dispatch((self.distance_constraint_count + 63) / 64, 1, 1);
+            }
+
+            // Collision
+            {
+                let mut pass = encoder.begin_compute_pass("Cloth Collision");
+                pass.set_pipeline(&self.collision_pipeline);
+                pass.set_storage_buffer(0, &self.particle_buffer);
+                pass.set_uniform(1, uniforms);
+                pass.dispatch((self.particle_count + 63) / 64, 1, 1);
+            }
+        }
+
+        // Compute normals
+        {
+            let mut pass = encoder.begin_compute_pass("Cloth Normals");
+            pass.set_pipeline(&self.normal_pipeline);
+            pass.set_storage_buffer(0, &self.particle_buffer);
+            pass.set_storage_buffer(1, &self.triangle_buffer);
+            pass.set_uniform(2, &self.triangle_count);
+            pass.dispatch((self.particle_count + 63) / 64, 1, 1);
+        }
+    }
+}
+
+struct ClothSimUniforms {
+    dt: f32,
+    gravity: Vec3,
+    damping: f32,
+    wind_velocity: Vec3,
+    wind_drag: f32,
+    wind_lift: f32,
+    _padding: [f32; 3],
+}
+
+// ============================================================================
+// CLOTH RENDERER
+// ============================================================================
+
+/// Cloth rendering configuration
+struct ClothRenderConfig {
+    use_double_sided: bool,
+    use_shadow_mapping: bool,
+    use_ambient_occlusion: bool,
+    use_tessellation: bool,
+    tessellation_factor: f32,
+}
+
+impl ClothRenderConfig {
+    fn default() -> Self {
+        Self {
+            use_double_sided: true,
+            use_shadow_mapping: true,
+            use_ambient_occlusion: true,
+            use_tessellation: false,
+            tessellation_factor: 4.0,
+        }
+    }
+}
+
+/// GPU uniforms for cloth rendering
+struct ClothRenderUniforms {
+    view_proj: Mat4,
+    model: Mat4,
+    camera_position: Vec3,
+    _pad0: f32,
+    light_direction: Vec3,
+    _pad1: f32,
+    light_color: Vec3,
+    light_intensity: f32,
+    ambient_color: Vec3,
+    _pad2: f32,
+}
+
+/// Cloth renderer
+struct ClothRenderer {
+    config: ClothRenderConfig,
+    pipeline: RenderPipelineHandle,
+    shadow_pipeline: RenderPipelineHandle,
+    double_sided_pipeline: RenderPipelineHandle,
+}
+
+impl ClothRenderer {
+    fn new(device: &Device, config: ClothRenderConfig) -> Self {
+        let pipeline = device.create_render_pipeline(&RenderPipelineDescriptor {
+            vertex_shader: include_str!("shaders/cloth_vertex.wgsl"),
+            fragment_shader: include_str!("shaders/cloth_fragment.wgsl"),
+            targets: vec![ColorTargetState {
+                format: TextureFormat::Rgba16Float,
+                blend: Some(BlendState::ALPHA_BLENDING),
+                write_mask: ColorWrites::ALL,
+            }],
+            depth_stencil: Some(DepthStencilState {
+                format: TextureFormat::Depth32Float,
+                depth_write_enabled: true,
+                depth_compare: CompareFunction::Less,
+                ..Default::default()
+            }),
+            cull_mode: if config.use_double_sided { None } else { Some(Face::Back) },
+            ..Default::default()
+        });
+
+        let shadow_pipeline = device.create_render_pipeline(&RenderPipelineDescriptor {
+            vertex_shader: include_str!("shaders/cloth_shadow.wgsl"),
+            fragment_shader: "",
+            depth_stencil: Some(DepthStencilState {
+                format: TextureFormat::Depth32Float,
+                depth_write_enabled: true,
+                depth_compare: CompareFunction::Less,
+                ..Default::default()
+            }),
+            cull_mode: None,
+            ..Default::default()
+        });
+
+        let double_sided_pipeline = device.create_render_pipeline(&RenderPipelineDescriptor {
+            vertex_shader: include_str!("shaders/cloth_vertex.wgsl"),
+            fragment_shader: include_str!("shaders/cloth_fragment.wgsl"),
+            cull_mode: None,
+            ..Default::default()
+        });
+
+        Self {
+            config,
+            pipeline,
+            shadow_pipeline,
+            double_sided_pipeline,
+        }
+    }
+
+    fn render(
+        &self,
+        encoder: &mut CommandEncoder,
+        color_texture: &TextureHandle,
+        depth_texture: &TextureHandle,
+        gpu_sim: &GpuClothSimulation,
+        uniforms: &ClothRenderUniforms,
+        material: &GpuFabricMaterial,
+    ) {
+        let mut pass = encoder.begin_render_pass(&RenderPassDescriptor {
+            color_attachments: vec![RenderPassColorAttachment {
+                texture: color_texture,
+                load_op: LoadOp::Load,
+                store_op: StoreOp::Store,
+            }],
+            depth_attachment: Some(RenderPassDepthAttachment {
+                texture: depth_texture,
+                load_op: LoadOp::Load,
+                store_op: StoreOp::Store,
+            }),
+            ..Default::default()
+        });
+
+        pass.set_pipeline(if self.config.use_double_sided {
+            &self.double_sided_pipeline
+        } else {
+            &self.pipeline
+        });
+
+        pass.set_storage_buffer(0, &gpu_sim.particle_buffer);
+        pass.set_storage_buffer(1, &gpu_sim.triangle_buffer);
+        pass.set_uniform(2, uniforms);
+        pass.set_uniform(3, material);
+
+        pass.draw(gpu_sim.triangle_count * 3, 1, 0, 0);
+    }
+
+    fn render_shadow(
+        &self,
+        encoder: &mut CommandEncoder,
+        shadow_texture: &TextureHandle,
+        gpu_sim: &GpuClothSimulation,
+        light_view_proj: &Mat4,
+    ) {
+        let mut pass = encoder.begin_render_pass(&RenderPassDescriptor {
+            depth_attachment: Some(RenderPassDepthAttachment {
+                texture: shadow_texture,
+                load_op: LoadOp::Clear(1.0),
+                store_op: StoreOp::Store,
+            }),
+            ..Default::default()
+        });
+
+        pass.set_pipeline(&self.shadow_pipeline);
+        pass.set_storage_buffer(0, &gpu_sim.particle_buffer);
+        pass.set_storage_buffer(1, &gpu_sim.triangle_buffer);
+        pass.set_uniform(2, light_view_proj);
+
+        pass.draw(gpu_sim.triangle_count * 3, 1, 0, 0);
+    }
+}
+
+// ============================================================================
+// WGSL SHADERS
+// ============================================================================
+
+const CLOTH_INTEGRATE_WGSL: &str = r#"
+struct Particle {
+    position: vec4<f32>,        // xyz = pos, w = inv_mass
+    prev_position: vec4<f32>,   // xyz = prev, w = friction
+    velocity_normal: vec4<f32>, // xy = vel.xy, zw = normal.xy
+    velocity_normal_z: vec4<f32>, // x = vel.z, y = normal.z, zw = uv
+}
+
+struct Uniforms {
+    dt: f32,
+    gravity: vec3<f32>,
+    damping: f32,
+    wind_velocity: vec3<f32>,
+    wind_drag: f32,
+    wind_lift: f32,
+}
+
+@group(0) @binding(0) var<storage, read_write> particles: array<Particle>;
+@group(0) @binding(1) var<uniform> uniforms: Uniforms;
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+    let idx = id.x;
+    if (idx >= arrayLength(&particles)) {
+        return;
+    }
+
+    var p = particles[idx];
+    let inv_mass = p.position.w;
+
+    if (inv_mass <= 0.0) {
+        return; // Fixed particle
+    }
+
+    // Get velocity
+    var velocity = vec3<f32>(
+        p.velocity_normal.x,
+        p.velocity_normal.y,
+        p.velocity_normal_z.x
+    );
+
+    // Apply gravity
+    velocity += uniforms.gravity * uniforms.dt;
+
+    // Apply damping
+    velocity *= uniforms.damping;
+
+    // Store previous position
+    p.prev_position = vec4<f32>(p.position.xyz, p.prev_position.w);
+
+    // Update position
+    p.position = vec4<f32>(p.position.xyz + velocity * uniforms.dt, inv_mass);
+
+    // Store velocity back
+    p.velocity_normal.x = velocity.x;
+    p.velocity_normal.y = velocity.y;
+    p.velocity_normal_z.x = velocity.z;
+
+    particles[idx] = p;
+}
+"#;
+
+const CLOTH_DISTANCE_WGSL: &str = r#"
+struct Particle {
+    position: vec4<f32>,
+    prev_position: vec4<f32>,
+    velocity_normal: vec4<f32>,
+    velocity_normal_z: vec4<f32>,
+}
+
+struct Constraint {
+    p0: u32,
+    p1: u32,
+    rest_length: f32,
+    stiffness: f32,
+}
+
+@group(0) @binding(0) var<storage, read_write> particles: array<Particle>;
+@group(0) @binding(1) var<storage, read> constraints: array<Constraint>;
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+    let idx = id.x;
+    if (idx >= arrayLength(&constraints)) {
+        return;
+    }
+
+    let c = constraints[idx];
+    var p0 = particles[c.p0];
+    var p1 = particles[c.p1];
+
+    let delta = p1.position.xyz - p0.position.xyz;
+    let dist = length(delta);
+
+    if (dist < 0.0001) {
+        return;
+    }
+
+    let diff = (dist - c.rest_length) / dist;
+    let correction = delta * diff * 0.5 * c.stiffness;
+
+    let w0 = p0.position.w;
+    let w1 = p1.position.w;
+    let sum = w0 + w1;
+
+    if (sum > 0.0) {
+        particles[c.p0].position = vec4<f32>(
+            p0.position.xyz + correction * (w0 / sum),
+            w0
+        );
+        particles[c.p1].position = vec4<f32>(
+            p1.position.xyz - correction * (w1 / sum),
+            w1
+        );
+    }
+}
+"#;
+
+const CLOTH_NORMALS_WGSL: &str = r#"
+struct Particle {
+    position: vec4<f32>,
+    prev_position: vec4<f32>,
+    velocity_normal: vec4<f32>,
+    velocity_normal_z: vec4<f32>,
+}
+
+@group(0) @binding(0) var<storage, read_write> particles: array<Particle>;
+@group(0) @binding(1) var<storage, read> triangles: array<u32>;
+@group(0) @binding(2) var<uniform> triangle_count: u32;
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+    let idx = id.x;
+    if (idx >= arrayLength(&particles)) {
+        return;
+    }
+
+    var normal = vec3<f32>(0.0);
+
+    // Accumulate normals from adjacent triangles
+    for (var t = 0u; t < triangle_count; t++) {
+        let i0 = triangles[t * 3 + 0];
+        let i1 = triangles[t * 3 + 1];
+        let i2 = triangles[t * 3 + 2];
+
+        if (i0 == idx || i1 == idx || i2 == idx) {
+            let p0 = particles[i0].position.xyz;
+            let p1 = particles[i1].position.xyz;
+            let p2 = particles[i2].position.xyz;
+
+            let e1 = p1 - p0;
+            let e2 = p2 - p0;
+            let n = cross(e1, e2);
+
+            normal += n;
+        }
+    }
+
+    let len = length(normal);
+    if (len > 0.0001) {
+        normal = normal / len;
+    } else {
+        normal = vec3<f32>(0.0, 1.0, 0.0);
+    }
+
+    particles[idx].velocity_normal.z = normal.x;
+    particles[idx].velocity_normal.w = normal.y;
+    particles[idx].velocity_normal_z.y = normal.z;
+}
+"#;
+
+const CLOTH_VERTEX_WGSL: &str = r#"
+struct Particle {
+    position: vec4<f32>,
+    prev_position: vec4<f32>,
+    velocity_normal: vec4<f32>,
+    velocity_normal_z: vec4<f32>,
+}
+
+struct VertexOutput {
+    @builtin(position) clip_position: vec4<f32>,
+    @location(0) world_position: vec3<f32>,
+    @location(1) world_normal: vec3<f32>,
+    @location(2) uv: vec2<f32>,
+    @location(3) tangent: vec3<f32>,
+}
+
+struct Uniforms {
+    view_proj: mat4x4<f32>,
+    model: mat4x4<f32>,
+    camera_position: vec3<f32>,
+}
+
+@group(0) @binding(0) var<storage, read> particles: array<Particle>;
+@group(0) @binding(1) var<storage, read> triangles: array<u32>;
+@group(0) @binding(2) var<uniform> uniforms: Uniforms;
+
+@vertex
+fn main(@builtin(vertex_index) vertex_idx: u32) -> VertexOutput {
+    let tri_idx = vertex_idx / 3u;
+    let vert_in_tri = vertex_idx % 3u;
+
+    let particle_idx = triangles[tri_idx * 3u + vert_in_tri];
+    let p = particles[particle_idx];
+
+    var out: VertexOutput;
+
+    let world_pos = (uniforms.model * vec4<f32>(p.position.xyz, 1.0)).xyz;
+    out.world_position = world_pos;
+    out.clip_position = uniforms.view_proj * vec4<f32>(world_pos, 1.0);
+
+    let normal = vec3<f32>(
+        p.velocity_normal.z,
+        p.velocity_normal.w,
+        p.velocity_normal_z.y
+    );
+    out.world_normal = normalize((uniforms.model * vec4<f32>(normal, 0.0)).xyz);
+
+    out.uv = vec2<f32>(p.velocity_normal_z.z, p.velocity_normal_z.w);
+
+    // Calculate tangent from UV derivatives (simplified)
+    let up = select(vec3<f32>(0.0, 1.0, 0.0), vec3<f32>(1.0, 0.0, 0.0), abs(out.world_normal.y) > 0.99);
+    out.tangent = normalize(cross(up, out.world_normal));
+
+    return out;
+}
+"#;
+
+const CLOTH_FRAGMENT_WGSL: &str = r#"
+struct FragmentInput {
+    @location(0) world_position: vec3<f32>,
+    @location(1) world_normal: vec3<f32>,
+    @location(2) uv: vec2<f32>,
+    @location(3) tangent: vec3<f32>,
+}
+
+struct Uniforms {
+    view_proj: mat4x4<f32>,
+    model: mat4x4<f32>,
+    camera_position: vec3<f32>,
+    _pad0: f32,
+    light_direction: vec3<f32>,
+    _pad1: f32,
+    light_color: vec3<f32>,
+    light_intensity: f32,
+    ambient_color: vec3<f32>,
+}
+
+struct Material {
+    albedo: vec4<f32>,
+    sheen: vec4<f32>,
+    fuzz: vec4<f32>,
+    subsurface: vec4<f32>,
+    anisotropy: vec4<f32>,
+    metallic_thread: vec4<f32>,
+}
+
+@group(0) @binding(2) var<uniform> uniforms: Uniforms;
+@group(0) @binding(3) var<uniform> material: Material;
+
+const PI: f32 = 3.14159265359;
+
+// Charlie sheen distribution (for silk)
+fn d_charlie(roughness: f32, NoH: f32) -> f32 {
+    let invAlpha = 1.0 / roughness;
+    let cos2h = NoH * NoH;
+    let sin2h = 1.0 - cos2h;
+    return (2.0 + invAlpha) * pow(sin2h, invAlpha * 0.5) / (2.0 * PI);
+}
+
+// Ashikhmin velvet BRDF
+fn ashikhmin_velvet(NoL: f32, NoV: f32, fuzz: f32) -> f32 {
+    let facing = 1.0 - pow(1.0 - NoL, 5.0) * pow(1.0 - NoV, 5.0);
+    return fuzz * facing;
+}
+
+@fragment
+fn main(in: FragmentInput) -> @location(0) vec4<f32> {
+    let N = normalize(in.world_normal);
+    let V = normalize(uniforms.camera_position - in.world_position);
+    let L = normalize(-uniforms.light_direction);
+    let H = normalize(L + V);
+
+    let NoL = max(dot(N, L), 0.0);
+    let NoV = max(dot(N, V), 0.0);
+    let NoH = max(dot(N, H), 0.0);
+    let VoH = max(dot(V, H), 0.0);
+
+    // Base diffuse
+    let diffuse = material.albedo.rgb * NoL / PI;
+
+    // Sheen (for silk-like materials)
+    let sheen_d = d_charlie(material.sheen.w, NoH);
+    let sheen = material.sheen.rgb * sheen_d * NoL;
+
+    // Fuzz (for velvet)
+    let fuzz = material.fuzz.rgb * ashikhmin_velvet(NoL, NoV, material.fuzz.w);
+
+    // Subsurface scattering approximation
+    let subsurface_NoL = dot(-N, L) * 0.5 + 0.5;
+    let subsurface = material.subsurface.rgb * subsurface_NoL * material.subsurface.w;
+
+    // Combine
+    let radiance = uniforms.light_color * uniforms.light_intensity;
+    let direct = (diffuse + sheen + fuzz + subsurface) * radiance;
+    let ambient = material.albedo.rgb * uniforms.ambient_color;
+
+    let color = direct + ambient;
+
+    return vec4<f32>(color, material.albedo.w);
+}
+"#;
+
+// ============================================================================
+// UNIT TESTS
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_cloth_particle() {
+        let particle = ClothParticle::new(Vec3::ZERO, 1.0, Vec2::ZERO);
+
+        assert_eq!(particle.position, Vec3::ZERO);
+        assert_eq!(particle.mass, 1.0);
+        assert_eq!(particle.inv_mass, 1.0);
+        assert!(!particle.is_fixed);
+    }
+
+    #[test]
+    fn test_particle_fix() {
+        let mut particle = ClothParticle::new(Vec3::ZERO, 1.0, Vec2::ZERO);
+        particle.fix();
+
+        assert!(particle.is_fixed);
+        assert_eq!(particle.inv_mass, 0.0);
+
+        particle.unfix();
+        assert!(!particle.is_fixed);
+        assert_eq!(particle.inv_mass, 1.0);
+    }
+
+    #[test]
+    fn test_distance_constraint() {
+        let particles = vec![
+            ClothParticle::new(Vec3::new(0.0, 0.0, 0.0), 1.0, Vec2::ZERO),
+            ClothParticle::new(Vec3::new(1.0, 0.0, 0.0), 1.0, Vec2::ZERO),
+        ];
+
+        let constraint = DistanceConstraint::new(0, 1, &particles, 1.0);
+
+        assert_eq!(constraint.rest_length, 1.0);
+    }
+
+    #[test]
+    fn test_distance_constraint_solve() {
+        let mut particles = vec![
+            ClothParticle::new(Vec3::new(0.0, 0.0, 0.0), 1.0, Vec2::ZERO),
+            ClothParticle::new(Vec3::new(2.0, 0.0, 0.0), 1.0, Vec2::ZERO),
+        ];
+
+        let constraint = DistanceConstraint {
+            p0: 0,
+            p1: 1,
+            rest_length: 1.0,
+            stiffness: 1.0,
+        };
+
+        // Particles are 2 units apart, rest length is 1
+        constraint.solve(&mut particles);
+
+        // Should be closer to rest length
+        let new_dist = length(particles[1].position - particles[0].position);
+        assert!(new_dist < 2.0);
+    }
+
+    #[test]
+    fn test_cloth_mesh_grid() {
+        let mesh = ClothMesh::new_grid(4, 4, 1.0, Vec3::ZERO, 1.0);
+
+        assert_eq!(mesh.particles.len(), 16);
+        assert_eq!(mesh.triangles.len(), 18); // (4-1)*(4-1)*2
+    }
+
+    #[test]
+    fn test_cloth_mesh_constraints() {
+        let mesh = ClothMesh::new_grid(3, 3, 1.0, Vec3::ZERO, 1.0);
+
+        // Should have edge constraints
+        assert!(!mesh.distance_constraints.is_empty());
+        // Should have bending constraints
+        assert!(!mesh.bending_constraints.is_empty());
+    }
+
+    #[test]
+    fn test_fix_top_row() {
+        let mut mesh = ClothMesh::new_grid(4, 4, 1.0, Vec3::ZERO, 1.0);
+        mesh.fix_top_row(4);
+
+        for x in 0..4 {
+            assert!(mesh.particles[x].is_fixed);
+        }
+        // Other particles should not be fixed
+        assert!(!mesh.particles[4].is_fixed);
+    }
+
+    #[test]
+    fn test_sphere_collision() {
+        let mut particles = vec![
+            ClothParticle::new(Vec3::new(0.5, 0.0, 0.0), 1.0, Vec2::ZERO),
+        ];
+
+        let collider = SphereCollisionConstraint::new(Vec3::ZERO, 1.0, 0.5);
+        collider.solve(&mut particles);
+
+        // Particle should be pushed to radius
+        let dist = length(particles[0].position);
+        assert!((dist - 1.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_capsule_closest_point() {
+        let capsule = CapsuleCollisionConstraint::new(
+            Vec3::new(0.0, 0.0, 0.0),
+            Vec3::new(0.0, 2.0, 0.0),
+            0.5,
+            0.5
+        );
+
+        // Point at start
+        let p1 = capsule.closest_point_on_segment(Vec3::new(-1.0, 0.0, 0.0));
+        assert!((p1 - Vec3::ZERO).length() < 0.001);
+
+        // Point at end
+        let p2 = capsule.closest_point_on_segment(Vec3::new(1.0, 3.0, 0.0));
+        assert!((p2 - Vec3::new(0.0, 2.0, 0.0)).length() < 0.001);
+
+        // Point in middle
+        let p3 = capsule.closest_point_on_segment(Vec3::new(1.0, 1.0, 0.0));
+        assert!((p3.y - 1.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_fabric_material_presets() {
+        let silk = FabricMaterial::silk();
+        assert!(silk.sheen_roughness < 0.5);
+
+        let velvet = FabricMaterial::velvet();
+        assert!(velvet.fuzz_amount > 0.5);
+
+        let denim = FabricMaterial::denim();
+        assert!(denim.anisotropy > 0.0);
+    }
+
+    #[test]
+    fn test_cloth_render_config() {
+        let config = ClothRenderConfig::default();
+        assert!(config.use_double_sided);
+        assert!(config.use_shadow_mapping);
+    }
+
+    #[test]
+    fn test_bending_angle_calculation() {
+        let p0 = Vec3::new(0.0, 0.0, 0.0);
+        let p1 = Vec3::new(1.0, 0.0, 0.0);
+        let p2 = Vec3::new(0.5, 0.0, 1.0);
+        let p3 = Vec3::new(0.5, 0.0, -1.0);
+
+        let angle = BendingConstraint::calculate_dihedral_angle(p0, p1, p2, p3);
+
+        // Should be approximately PI (180 degrees) for a flat configuration
+        // Actually these are on opposite sides, so angle should be PI
+        assert!(angle > 3.0);
+    }
+
+    #[test]
+    fn test_attachment_constraint() {
+        let mut particles = vec![
+            ClothParticle::new(Vec3::new(5.0, 0.0, 0.0), 1.0, Vec2::ZERO),
+        ];
+
+        let constraint = AttachmentConstraint::new(0, Vec3::ZERO, 1.0, 2.0);
+        constraint.solve(&mut particles);
+
+        // Particle was at distance 5, max_distance is 2, should be pulled in
+        let dist = length(particles[0].position);
+        assert!(dist < 5.0);
+    }
+
+    #[test]
+    fn test_cloth_aabb() {
+        let mut mesh = ClothMesh::new_grid(3, 3, 1.0, Vec3::ZERO, 1.0);
+
+        let (min, max) = mesh.get_aabb();
+
+        assert!(min.x >= 0.0);
+        assert!(max.x <= 2.0);
+        assert!(min.z >= 0.0);
+        assert!(max.z <= 2.0);
+    }
+
+    #[test]
+    fn test_self_collision_hash() {
+        let sc = SelfCollisionConstraint::new(0.1, 0.5);
+
+        let pos1 = Vec3::new(0.0, 0.0, 0.0);
+        let pos2 = Vec3::new(0.5, 0.5, 0.5);
+
+        let hash1 = sc.hash_position(pos1);
+        let hash2 = sc.hash_position(pos2);
+
+        // Different positions should potentially hash to different cells
+        // (depending on cell size)
+    }
+
+    #[test]
+    fn test_compute_normals() {
+        let mut mesh = ClothMesh::new_grid(3, 3, 1.0, Vec3::ZERO, 1.0);
+
+        mesh.compute_normals();
+
+        // All normals should be pointing up for a flat grid
+        for particle in &mesh.particles {
+            assert!((particle.normal.y - 1.0).abs() < 0.1 || particle.normal.y.abs() > 0.9);
+        }
+    }
+}

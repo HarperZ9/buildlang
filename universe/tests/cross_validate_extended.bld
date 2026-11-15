@@ -1,0 +1,75 @@
+// Extended Cross-Validation: Oklab + PQ
+
+const PQ_M1: f64 = 0.1593017578125;
+const PQ_M2: f64 = 78.84375;
+const PQ_C1: f64 = 0.8359375;
+const PQ_C2: f64 = 18.8515625;
+const PQ_C3: f64 = 18.6875;
+
+fn max_f(a: f64, b: f64) -> f64 { if a > b { a } else { b } }
+
+struct Color3 { l: f64, a: f64, b: f64 }
+
+impl Color3 {
+    fn new(l: f64, a: f64, b: f64) -> Self { Self { l: l, a: a, b: b } }
+}
+
+fn signed_cbrt(x: f64) -> f64 {
+    if x >= 0.0 {
+        pow(x, 0.3333333333333333)
+    } else {
+        let neg_result: f64 = pow(0.0 - x, 0.3333333333333333);
+        0.0 - neg_result
+    }
+}
+
+fn linear_srgb_to_oklab(r: f64, g: f64, b: f64) -> Color3 {
+    let l: f64 = 0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b;
+    let m: f64 = 0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b;
+    let s: f64 = 0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b;
+
+    let l_: f64 = signed_cbrt(l);
+    let m_: f64 = signed_cbrt(m);
+    let s_: f64 = signed_cbrt(s);
+
+    Color3::new(
+        0.2104542553 * l_ + 0.7936177850 * m_ - 0.0040720468 * s_,
+        1.9779984951 * l_ - 2.4285922050 * m_ + 0.4505937099 * s_,
+        0.0259040371 * l_ + 0.7827717662 * m_ - 0.8086757660 * s_,
+    )
+}
+
+fn pq_oetf(linear: f64) -> f64 {
+    let y: f64 = max_f(linear / 10000.0, 0.0);
+    let ym1: f64 = pow(y, PQ_M1);
+    let c2_ym1: f64 = PQ_C2 * ym1;
+    let c3_ym1: f64 = PQ_C3 * ym1;
+    let num: f64 = PQ_C1 + c2_ym1;
+    let den: f64 = 1.0 + c3_ym1;
+    pow(num / den, PQ_M2)
+}
+
+fn main() {
+    println!("=== EXTENDED CROSS-VALIDATION (BuildLang) ===");
+    println!("");
+
+    println!("--- Oklab ---");
+    let ok = linear_srgb_to_oklab(1.0, 0.0, 0.0);
+    println!("Oklab(1,0,0): L={} a={} b={}", ok.l, ok.a, ok.b);
+    let ok = linear_srgb_to_oklab(0.0, 1.0, 0.0);
+    println!("Oklab(0,1,0): L={} a={} b={}", ok.l, ok.a, ok.b);
+    let ok = linear_srgb_to_oklab(0.0, 0.0, 1.0);
+    println!("Oklab(0,0,1): L={} a={} b={}", ok.l, ok.a, ok.b);
+    let ok = linear_srgb_to_oklab(0.5, 0.5, 0.5);
+    println!("Oklab(0.5,0.5,0.5): L={} a={} b={}", ok.l, ok.a, ok.b);
+    let ok = linear_srgb_to_oklab(1.0, 1.0, 1.0);
+    println!("Oklab(1,1,1): L={} a={} b={}", ok.l, ok.a, ok.b);
+
+    println!("");
+    println!("--- PQ OETF (HDR) ---");
+    println!("PQ_OETF(0): {}", pq_oetf(0.0));
+    println!("PQ_OETF(1): {}", pq_oetf(1.0));
+    println!("PQ_OETF(100): {}", pq_oetf(100.0));
+    println!("PQ_OETF(1000): {}", pq_oetf(1000.0));
+    println!("PQ_OETF(10000): {}", pq_oetf(10000.0));
+}

@@ -1,0 +1,1765 @@
+// foliage.bld - Foliage and Vegetation Rendering System
+// Part of the Photon Rendering Module
+// Implements GPU instancing for foliage, wind animation, grass rendering, and procedural vegetation
+
+import std::collections::{HashMap, Vec, VecDeque, BinaryHeap}
+import std::math::{Vec2, Vec3, Vec4, Mat3, Mat4, Quaternion, sqrt, pow, exp, sin, cos, tan, PI, floor, ceil, clamp, lerp, min, max, abs, dot, cross, normalize, length}
+import std::memory::{Arena, Pool, Box, Arc, Rc}
+import std::sync::{Mutex, RwLock, Atomic}
+import std::simd::{f32x4, f32x8, i32x4, i32x8}
+
+// ============================================================================
+// FOLIAGE INSTANCE REPRESENTATION
+// ============================================================================
+
+/// Single foliage instance data
+struct FoliageInstance {
+    position: Vec3,
+    rotation: Quaternion,
+    scale: Vec3,
+    color_variation: f32,
+    wind_phase: f32,
+    health: f32,          // For seasonal/damage variation
+    lod_bias: f32,
+}
+
+impl FoliageInstance {
+    fn new(position: Vec3) -> Self {
+        Self {
+            position,
+            rotation: Quaternion::IDENTITY,
+            scale: Vec3::ONE,
+            color_variation: 0.0,
+            wind_phase: 0.0,
+            health: 1.0,
+            lod_bias: 0.0,
+        }
+    }
+
+    fn with_random_rotation(mut self, seed: u32) -> Self {
+        let angle = hash_u32(seed) as f32 / u32::MAX as f32 * 2.0 * PI;
+        self.rotation = Quaternion::from_axis_angle(Vec3::Y, angle);
+        self
+    }
+
+    fn with_random_scale(mut self, seed: u32, min_scale: f32, max_scale: f32) -> Self {
+        let t = hash_u32(seed.wrapping_add(1)) as f32 / u32::MAX as f32;
+        let scale = lerp(min_scale, max_scale, t);
+        self.scale = Vec3::splat(scale);
+        self
+    }
+
+    fn with_color_variation(mut self, seed: u32, amount: f32) -> Self {
+        let t = hash_u32(seed.wrapping_add(2)) as f32 / u32::MAX as f32;
+        self.color_variation = (t - 0.5) * 2.0 * amount;
+        self
+    }
+
+    fn transform_matrix(&self) -> Mat4 {
+        Mat4::from_scale_rotation_translation(
+            self.scale,
+            self.rotation,
+            self.position
+        )
+    }
+}
+
+fn hash_u32(value: u32) -> u32 {
+    let mut x = value;
+    x = ((x >> 16) ^ x).wrapping_mul(0x45d9f3b);
+    x = ((x >> 16) ^ x).wrapping_mul(0x45d9f3b);
+    x = (x >> 16) ^ x;
+    x
+}
+
+/// GPU-packed foliage instance
+struct GpuFoliageInstance {
+    transform_row0: Vec4,  // First row of 3x4 matrix
+    transform_row1: Vec4,  // Second row
+    transform_row2: Vec4,  // Third row
+    params: Vec4,          // x = color_variation, y = wind_phase, z = health, w = lod_bias
+}
+
+impl GpuFoliageInstance {
+    fn from_instance(inst: &FoliageInstance) -> Self {
+        let mat = inst.transform_matrix();
+
+        Self {
+            transform_row0: Vec4::new(mat.x_axis.x, mat.y_axis.x, mat.z_axis.x, mat.w_axis.x),
+            transform_row1: Vec4::new(mat.x_axis.y, mat.y_axis.y, mat.z_axis.y, mat.w_axis.y),
+            transform_row2: Vec4::new(mat.x_axis.z, mat.y_axis.z, mat.z_axis.z, mat.w_axis.z),
+            params: Vec4::new(inst.color_variation, inst.wind_phase, inst.health, inst.lod_bias),
+        }
+    }
+}
+
+// ============================================================================
+// FOLIAGE TYPES
+// ============================================================================
+
+/// Types of foliage
+enum FoliageType {
+    Grass,
+    Bush,
+    Flower,
+    Fern,
+    Tree,
+    DeadTree,
+    Rock,
+    Debris,
+}
+
+/// Foliage LOD level
+struct FoliageLod {
+    mesh: MeshHandle,
+    distance: f32,
+    screen_size_threshold: f32,
+}
+
+/// Foliage asset definition
+struct FoliageAsset {
+    name: String,
+    foliage_type: FoliageType,
+    lods: Vec<FoliageLod>,
+
+    // Material
+    albedo_texture: Option<TextureHandle>,
+    normal_texture: Option<TextureHandle>,
+    alpha_texture: Option<TextureHandle>,
+    subsurface_color: Vec3,
+    two_sided: bool,
+    alpha_cutoff: f32,
+
+    // Wind
+    wind_enabled: bool,
+    wind_strength: f32,
+    wind_frequency: f32,
+    wind_phase_variance: f32,
+
+    // Placement
+    density: f32,
+    min_scale: f32,
+    max_scale: f32,
+    random_rotation: bool,
+    align_to_normal: bool,
+
+    // Shadows
+    cast_shadows: bool,
+    receive_shadows: bool,
+
+    // Culling
+    cull_distance: f32,
+    fade_distance: f32,
+}
+
+impl FoliageAsset {
+    fn grass(name: &str) -> Self {
+        Self {
+            name: name.to_string(),
+            foliage_type: FoliageType::Grass,
+            lods: Vec::new(),
+            albedo_texture: None,
+            normal_texture: None,
+            alpha_texture: None,
+            subsurface_color: Vec3::new(0.2, 0.6, 0.1),
+            two_sided: true,
+            alpha_cutoff: 0.5,
+            wind_enabled: true,
+            wind_strength: 1.0,
+            wind_frequency: 1.5,
+            wind_phase_variance: 0.5,
+            density: 50.0,
+            min_scale: 0.8,
+            max_scale: 1.2,
+            random_rotation: true,
+            align_to_normal: true,
+            cast_shadows: false,
+            receive_shadows: true,
+            cull_distance: 100.0,
+            fade_distance: 80.0,
+        }
+    }
+
+    fn tree(name: &str) -> Self {
+        Self {
+            name: name.to_string(),
+            foliage_type: FoliageType::Tree,
+            lods: Vec::new(),
+            albedo_texture: None,
+            normal_texture: None,
+            alpha_texture: None,
+            subsurface_color: Vec3::new(0.1, 0.4, 0.05),
+            two_sided: true,
+            alpha_cutoff: 0.3,
+            wind_enabled: true,
+            wind_strength: 0.3,
+            wind_frequency: 0.5,
+            wind_phase_variance: 1.0,
+            density: 0.5,
+            min_scale: 0.7,
+            max_scale: 1.3,
+            random_rotation: true,
+            align_to_normal: false,
+            cast_shadows: true,
+            receive_shadows: true,
+            cull_distance: 500.0,
+            fade_distance: 400.0,
+        }
+    }
+}
+
+// ============================================================================
+// FOLIAGE CHUNK
+// ============================================================================
+
+/// Spatial chunk containing foliage instances
+struct FoliageChunk {
+    bounds_min: Vec3,
+    bounds_max: Vec3,
+    center: Vec3,
+    radius: f32,
+
+    instances: Vec<FoliageInstance>,
+    instance_buffer: Option<BufferHandle>,
+    instance_count: u32,
+
+    // Per-LOD draw calls
+    lod_instance_counts: Vec<u32>,
+    lod_instance_offsets: Vec<u32>,
+
+    // State
+    is_visible: bool,
+    current_lod: u32,
+    last_frame_updated: u64,
+}
+
+impl FoliageChunk {
+    fn new(bounds_min: Vec3, bounds_max: Vec3) -> Self {
+        let center = (bounds_min + bounds_max) * 0.5;
+        let extent = bounds_max - bounds_min;
+        let radius = length(extent) * 0.5;
+
+        Self {
+            bounds_min,
+            bounds_max,
+            center,
+            radius,
+            instances: Vec::new(),
+            instance_buffer: None,
+            instance_count: 0,
+            lod_instance_counts: Vec::new(),
+            lod_instance_offsets: Vec::new(),
+            is_visible: false,
+            current_lod: 0,
+            last_frame_updated: 0,
+        }
+    }
+
+    fn add_instance(&mut self, instance: FoliageInstance) {
+        self.instances.push(instance);
+        self.instance_count = self.instances.len() as u32;
+    }
+
+    fn build_instance_buffer(&mut self, device: &Device) {
+        if self.instances.is_empty() {
+            return;
+        }
+
+        let gpu_instances: Vec<GpuFoliageInstance> = self.instances.iter()
+            .map(|i| GpuFoliageInstance::from_instance(i))
+            .collect();
+
+        self.instance_buffer = Some(device.create_buffer_with_data(
+            &BufferDescriptor {
+                size: gpu_instances.len() * std::mem::size_of::<GpuFoliageInstance>(),
+                usage: BufferUsage::VERTEX | BufferUsage::STORAGE,
+                ..Default::default()
+            },
+            bytemuck::cast_slice(&gpu_instances)
+        ));
+    }
+
+    fn distance_to(&self, point: Vec3) -> f32 {
+        length(self.center - point) - self.radius
+    }
+
+    fn is_in_frustum(&self, frustum: &Frustum) -> bool {
+        frustum.contains_sphere(self.center, self.radius)
+    }
+}
+
+// ============================================================================
+// WIND SYSTEM
+// ============================================================================
+
+/// Wind zone type
+enum WindZoneType {
+    Directional,
+    Spherical,
+    Cylindrical,
+    Box,
+}
+
+/// Wind zone for localized wind effects
+struct WindZone {
+    zone_type: WindZoneType,
+    position: Vec3,
+    direction: Vec3,
+    size: Vec3,
+    radius: f32,
+
+    // Wind parameters
+    main_wind: f32,
+    turbulence: f32,
+    pulse_magnitude: f32,
+    pulse_frequency: f32,
+
+    // Falloff
+    falloff: f32,
+}
+
+impl WindZone {
+    fn directional(direction: Vec3, strength: f32) -> Self {
+        Self {
+            zone_type: WindZoneType::Directional,
+            position: Vec3::ZERO,
+            direction: normalize(direction),
+            size: Vec3::ZERO,
+            radius: 0.0,
+            main_wind: strength,
+            turbulence: 0.3,
+            pulse_magnitude: 0.2,
+            pulse_frequency: 1.0,
+            falloff: 0.0,
+        }
+    }
+
+    fn spherical(position: Vec3, radius: f32, strength: f32) -> Self {
+        Self {
+            zone_type: WindZoneType::Spherical,
+            position,
+            direction: Vec3::ZERO,
+            size: Vec3::ZERO,
+            radius,
+            main_wind: strength,
+            turbulence: 0.5,
+            pulse_magnitude: 0.3,
+            pulse_frequency: 2.0,
+            falloff: 1.0,
+        }
+    }
+
+    fn sample(&self, world_pos: Vec3, time: f32) -> Vec3 {
+        match self.zone_type {
+            WindZoneType::Directional => {
+                let pulse = sin(time * self.pulse_frequency * 2.0 * PI) * self.pulse_magnitude;
+                let turbulence = sin(world_pos.x * 0.1 + time) * cos(world_pos.z * 0.1 + time * 0.7) * self.turbulence;
+                self.direction * (self.main_wind + pulse + turbulence)
+            }
+            WindZoneType::Spherical => {
+                let to_center = world_pos - self.position;
+                let dist = length(to_center);
+
+                if dist > self.radius {
+                    return Vec3::ZERO;
+                }
+
+                let falloff = 1.0 - pow(dist / self.radius, self.falloff);
+                let dir = if dist > 0.001 { normalize(to_center) } else { Vec3::Y };
+
+                let pulse = sin(time * self.pulse_frequency * 2.0 * PI) * self.pulse_magnitude;
+                dir * (self.main_wind + pulse) * falloff
+            }
+            _ => Vec3::ZERO,
+        }
+    }
+}
+
+/// Global wind system
+struct WindSystem {
+    global_wind_direction: Vec3,
+    global_wind_strength: f32,
+    global_turbulence: f32,
+
+    zones: Vec<WindZone>,
+
+    // GPU resources
+    wind_texture: TextureHandle,  // 3D noise for turbulence
+    wind_params_buffer: BufferHandle,
+}
+
+impl WindSystem {
+    fn new(device: &Device) -> Self {
+        // Create 3D wind noise texture
+        let wind_texture = Self::create_wind_noise_texture(device, 32);
+
+        let wind_params_buffer = device.create_buffer(&BufferDescriptor {
+            size: 256,  // Space for wind parameters
+            usage: BufferUsage::UNIFORM | BufferUsage::COPY_DST,
+            ..Default::default()
+        });
+
+        Self {
+            global_wind_direction: Vec3::new(1.0, 0.0, 0.0),
+            global_wind_strength: 1.0,
+            global_turbulence: 0.3,
+            zones: vec![WindZone::directional(Vec3::new(1.0, 0.0, 0.3), 1.0)],
+            wind_texture,
+            wind_params_buffer,
+        }
+    }
+
+    fn create_wind_noise_texture(device: &Device, size: u32) -> TextureHandle {
+        let mut data = vec![0u8; (size * size * size * 4) as usize];
+
+        // Generate 3D Perlin-like noise
+        for z in 0..size {
+            for y in 0..size {
+                for x in 0..size {
+                    let idx = ((z * size * size + y * size + x) * 4) as usize;
+
+                    let fx = x as f32 / size as f32;
+                    let fy = y as f32 / size as f32;
+                    let fz = z as f32 / size as f32;
+
+                    // Multi-octave noise
+                    let noise1 = sin(fx * 6.28) * cos(fy * 6.28) * sin(fz * 6.28);
+                    let noise2 = sin(fx * 12.56) * cos(fy * 12.56) * sin(fz * 12.56) * 0.5;
+                    let noise = (noise1 + noise2 + 1.5) * 0.33;
+
+                    let value = (noise * 255.0) as u8;
+                    data[idx + 0] = value;
+                    data[idx + 1] = value;
+                    data[idx + 2] = value;
+                    data[idx + 3] = 255;
+                }
+            }
+        }
+
+        device.create_texture_with_data(&TextureDescriptor {
+            size: (size, size, size),
+            format: TextureFormat::Rgba8Unorm,
+            usage: TextureUsage::SAMPLED,
+            dimension: TextureDimension::D3,
+            ..Default::default()
+        }, &data)
+    }
+
+    fn sample_wind(&self, position: Vec3, time: f32) -> Vec3 {
+        let mut result = Vec3::ZERO;
+
+        // Sample all wind zones
+        for zone in &self.zones {
+            result = result + zone.sample(position, time);
+        }
+
+        result
+    }
+
+    fn update_gpu_params(&self, queue: &Queue, time: f32) {
+        let params = WindGpuParams {
+            direction: self.global_wind_direction,
+            strength: self.global_wind_strength,
+            turbulence: self.global_turbulence,
+            time,
+            _padding: [0.0; 2],
+        };
+
+        queue.write_buffer(&self.wind_params_buffer, 0, bytemuck::bytes_of(&params));
+    }
+}
+
+struct WindGpuParams {
+    direction: Vec3,
+    strength: f32,
+    turbulence: f32,
+    time: f32,
+    _padding: [f32; 2],
+}
+
+// ============================================================================
+// GRASS SYSTEM
+// ============================================================================
+
+/// Grass blade geometry mode
+enum GrassBladeMeshMode {
+    Billboard,      // Camera-facing quads
+    CrossBillboard, // Two crossed quads
+    TriangleFan,    // Triangle fan for round grass
+    Mesh,           // Full mesh per blade
+}
+
+/// Grass blade vertex
+struct GrassVertex {
+    position: Vec3,
+    normal: Vec3,
+    uv: Vec2,
+    color: Vec4,
+}
+
+/// Grass blade parameters
+struct GrassBladeParams {
+    width: f32,
+    height: f32,
+    height_variance: f32,
+    bend: f32,
+    bend_variance: f32,
+    segments: u32,
+    taper: f32,
+}
+
+impl GrassBladeParams {
+    fn default() -> Self {
+        Self {
+            width: 0.05,
+            height: 0.5,
+            height_variance: 0.2,
+            bend: 0.3,
+            bend_variance: 0.1,
+            segments: 4,
+            taper: 0.8,
+        }
+    }
+}
+
+/// GPU-based procedural grass generation
+struct ProceduralGrass {
+    chunk_size: f32,
+    density: f32,
+    blade_params: GrassBladeParams,
+
+    // GPU resources
+    indirect_buffer: BufferHandle,
+    instance_buffer: BufferHandle,
+    grass_compute_pipeline: ComputePipelineHandle,
+    grass_render_pipeline: RenderPipelineHandle,
+
+    // Textures
+    density_map: Option<TextureHandle>,
+    height_map: Option<TextureHandle>,
+    color_map: Option<TextureHandle>,
+}
+
+impl ProceduralGrass {
+    fn new(device: &Device, chunk_size: f32, density: f32) -> Self {
+        let max_instances = (chunk_size * chunk_size * density) as usize;
+
+        let indirect_buffer = device.create_buffer(&BufferDescriptor {
+            size: 16, // DrawIndirect struct size
+            usage: BufferUsage::INDIRECT | BufferUsage::STORAGE,
+            ..Default::default()
+        });
+
+        let instance_buffer = device.create_buffer(&BufferDescriptor {
+            size: max_instances * std::mem::size_of::<GpuGrassInstance>(),
+            usage: BufferUsage::VERTEX | BufferUsage::STORAGE,
+            ..Default::default()
+        });
+
+        let grass_compute_pipeline = device.create_compute_pipeline(&ComputePipelineDescriptor {
+            shader: include_str!("shaders/grass_compute.wgsl"),
+            entry_point: "generate_grass",
+            ..Default::default()
+        });
+
+        let grass_render_pipeline = device.create_render_pipeline(&RenderPipelineDescriptor {
+            vertex_shader: include_str!("shaders/grass_vertex.wgsl"),
+            fragment_shader: include_str!("shaders/grass_fragment.wgsl"),
+            primitive: PrimitiveState {
+                topology: PrimitiveTopology::TriangleStrip,
+                ..Default::default()
+            },
+            targets: vec![ColorTargetState {
+                format: TextureFormat::Rgba16Float,
+                blend: None,
+                write_mask: ColorWrites::ALL,
+            }],
+            depth_stencil: Some(DepthStencilState {
+                format: TextureFormat::Depth32Float,
+                depth_write_enabled: true,
+                depth_compare: CompareFunction::Less,
+                ..Default::default()
+            }),
+            cull_mode: None,  // Two-sided
+            ..Default::default()
+        });
+
+        Self {
+            chunk_size,
+            density,
+            blade_params: GrassBladeParams::default(),
+            indirect_buffer,
+            instance_buffer,
+            grass_compute_pipeline,
+            grass_render_pipeline,
+            density_map: None,
+            height_map: None,
+            color_map: None,
+        }
+    }
+
+    fn generate_chunk(
+        &self,
+        encoder: &mut CommandEncoder,
+        chunk_origin: Vec3,
+        camera_position: Vec3,
+        frustum: &Frustum,
+    ) {
+        let mut pass = encoder.begin_compute_pass("Generate Grass");
+        pass.set_pipeline(&self.grass_compute_pipeline);
+        pass.set_storage_buffer(0, &self.instance_buffer);
+        pass.set_storage_buffer(1, &self.indirect_buffer);
+
+        if let Some(ref density_map) = self.density_map {
+            pass.set_texture(2, density_map);
+        }
+        if let Some(ref height_map) = self.height_map {
+            pass.set_texture(3, height_map);
+        }
+
+        pass.set_uniform(4, &GrassGenerateUniforms {
+            chunk_origin,
+            chunk_size: self.chunk_size,
+            density: self.density,
+            camera_position,
+            frustum_planes: frustum.planes(),
+            blade_params: self.blade_params.clone(),
+        });
+
+        let dispatch_size = ceil(self.chunk_size / 8.0) as u32;
+        pass.dispatch(dispatch_size, dispatch_size, 1);
+    }
+
+    fn render(
+        &self,
+        encoder: &mut CommandEncoder,
+        color_texture: &TextureHandle,
+        depth_texture: &TextureHandle,
+        uniforms: &GrassRenderUniforms,
+        wind_params: &BufferHandle,
+        wind_texture: &TextureHandle,
+    ) {
+        let mut pass = encoder.begin_render_pass(&RenderPassDescriptor {
+            color_attachments: vec![RenderPassColorAttachment {
+                texture: color_texture,
+                load_op: LoadOp::Load,
+                store_op: StoreOp::Store,
+            }],
+            depth_attachment: Some(RenderPassDepthAttachment {
+                texture: depth_texture,
+                load_op: LoadOp::Load,
+                store_op: StoreOp::Store,
+            }),
+            ..Default::default()
+        });
+
+        pass.set_pipeline(&self.grass_render_pipeline);
+        pass.set_vertex_buffer(0, &self.instance_buffer);
+        pass.set_uniform(1, uniforms);
+        pass.set_uniform(2, wind_params);
+        pass.set_texture(3, wind_texture);
+
+        if let Some(ref color_map) = self.color_map {
+            pass.set_texture(4, color_map);
+        }
+
+        pass.draw_indirect(&self.indirect_buffer, 0);
+    }
+}
+
+struct GpuGrassInstance {
+    position: Vec3,
+    height: f32,
+    rotation: f32,
+    bend: f32,
+    color_offset: f32,
+    wind_phase: f32,
+}
+
+struct GrassGenerateUniforms {
+    chunk_origin: Vec3,
+    chunk_size: f32,
+    density: f32,
+    camera_position: Vec3,
+    frustum_planes: [Vec4; 6],
+    blade_params: GrassBladeParams,
+}
+
+struct GrassRenderUniforms {
+    view_proj: Mat4,
+    camera_position: Vec3,
+    time: f32,
+    light_direction: Vec3,
+    light_intensity: f32,
+    ambient_color: Vec3,
+    subsurface_strength: f32,
+}
+
+// ============================================================================
+// TREE SYSTEM
+// ============================================================================
+
+/// Tree LOD level
+enum TreeLodLevel {
+    FullMesh,     // Full 3D mesh
+    SpeedTree,    // Simplified mesh with billboard leaves
+    Billboard,    // Single billboard
+    Impostor,     // Octahedral impostor
+}
+
+/// Tree instance data
+struct TreeInstance {
+    position: Vec3,
+    rotation: Quaternion,
+    scale: f32,
+    tree_type: u32,
+    age: f32,           // For size/appearance variation
+    health: f32,        // For damage/seasonal effects
+    seed: u32,          // For procedural variation
+}
+
+/// Tree billboard data
+struct TreeBillboard {
+    position: Vec3,
+    scale: Vec2,
+    texture_index: u32,
+    rotation: f32,
+    color_tint: Vec3,
+}
+
+/// Tree impostor (octahedral)
+struct TreeImpostor {
+    atlas_texture: TextureHandle,
+    normal_texture: TextureHandle,
+    views_per_axis: u32,
+    size: Vec2,
+}
+
+impl TreeImpostor {
+    fn sample_direction_to_uv(direction: Vec3, views_per_axis: u32) -> Vec2 {
+        // Octahedral mapping
+        let d = direction / (abs(direction.x) + abs(direction.y) + abs(direction.z));
+        let oct = if d.z >= 0.0 {
+            Vec2::new(d.x, d.y)
+        } else {
+            Vec2::new(
+                (1.0 - abs(d.y)) * if d.x >= 0.0 { 1.0 } else { -1.0 },
+                (1.0 - abs(d.x)) * if d.y >= 0.0 { 1.0 } else { -1.0 }
+            )
+        };
+
+        // Map to atlas UV
+        let uv = oct * 0.5 + Vec2::new(0.5, 0.5);
+        uv
+    }
+}
+
+/// Tree branch for procedural generation
+struct TreeBranch {
+    start: Vec3,
+    direction: Vec3,
+    length: f32,
+    radius: f32,
+    parent: Option<usize>,
+    children: Vec<usize>,
+    depth: u32,
+}
+
+/// Procedural tree generator using L-system or space colonization
+struct ProceduralTreeGenerator {
+    // L-system rules
+    axiom: String,
+    rules: HashMap<char, String>,
+    angle: f32,
+    length_factor: f32,
+    radius_factor: f32,
+    iterations: u32,
+}
+
+impl ProceduralTreeGenerator {
+    fn oak() -> Self {
+        let mut rules = HashMap::new();
+        rules.insert('F', "FF+[+F-F-F]-[-F+F+F]".to_string());
+
+        Self {
+            axiom: "F".to_string(),
+            rules,
+            angle: 25.0,
+            length_factor: 0.7,
+            radius_factor: 0.65,
+            iterations: 4,
+        }
+    }
+
+    fn pine() -> Self {
+        let mut rules = HashMap::new();
+        rules.insert('F', "FF".to_string());
+        rules.insert('X', "F[+X]F[-X]+X".to_string());
+
+        Self {
+            axiom: "X".to_string(),
+            rules,
+            angle: 30.0,
+            length_factor: 0.75,
+            radius_factor: 0.6,
+            iterations: 5,
+        }
+    }
+
+    fn generate_l_string(&self) -> String {
+        let mut current = self.axiom.clone();
+
+        for _ in 0..self.iterations {
+            let mut next = String::new();
+            for c in current.chars() {
+                if let Some(replacement) = self.rules.get(&c) {
+                    next.push_str(replacement);
+                } else {
+                    next.push(c);
+                }
+            }
+            current = next;
+        }
+
+        current
+    }
+
+    fn generate_branches(&self, l_string: &str) -> Vec<TreeBranch> {
+        let mut branches = Vec::new();
+        let mut stack: Vec<(Vec3, Vec3, f32, f32, Option<usize>)> = Vec::new();
+
+        let mut position = Vec3::ZERO;
+        let mut direction = Vec3::Y;
+        let mut segment_length = 1.0;
+        let mut radius = 0.1;
+        let mut parent: Option<usize> = None;
+
+        let angle_rad = self.angle.to_radians();
+
+        for c in l_string.chars() {
+            match c {
+                'F' => {
+                    let branch = TreeBranch {
+                        start: position,
+                        direction,
+                        length: segment_length,
+                        radius,
+                        parent,
+                        children: Vec::new(),
+                        depth: stack.len() as u32,
+                    };
+
+                    let branch_idx = branches.len();
+                    if let Some(parent_idx) = parent {
+                        branches[parent_idx].children.push(branch_idx);
+                    }
+
+                    branches.push(branch);
+                    position = position + direction * segment_length;
+                    parent = Some(branch_idx);
+                }
+                '+' => {
+                    let axis = cross(direction, Vec3::Z);
+                    let axis = if length(axis) > 0.001 { normalize(axis) } else { Vec3::X };
+                    direction = Quaternion::from_axis_angle(axis, angle_rad) * direction;
+                }
+                '-' => {
+                    let axis = cross(direction, Vec3::Z);
+                    let axis = if length(axis) > 0.001 { normalize(axis) } else { Vec3::X };
+                    direction = Quaternion::from_axis_angle(axis, -angle_rad) * direction;
+                }
+                '[' => {
+                    stack.push((position, direction, segment_length, radius, parent));
+                    segment_length *= self.length_factor;
+                    radius *= self.radius_factor;
+                }
+                ']' => {
+                    if let Some((pos, dir, len, rad, par)) = stack.pop() {
+                        position = pos;
+                        direction = dir;
+                        segment_length = len;
+                        radius = rad;
+                        parent = par;
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        branches
+    }
+}
+
+// ============================================================================
+// FOLIAGE MANAGER
+// ============================================================================
+
+/// Foliage LOD strategy
+enum FoliageLodStrategy {
+    Distance,
+    ScreenSize,
+    Combined,
+}
+
+/// Foliage culling mode
+enum FoliageCullingMode {
+    Frustum,
+    FrustumOcclusion,
+    HiZ,
+    GpuDriven,
+}
+
+/// Foliage manager configuration
+struct FoliageManagerConfig {
+    max_instances_per_type: u32,
+    chunk_size: f32,
+    lod_strategy: FoliageLodStrategy,
+    culling_mode: FoliageCullingMode,
+    shadow_distance: f32,
+    grass_enabled: bool,
+    grass_density: f32,
+}
+
+impl FoliageManagerConfig {
+    fn default() -> Self {
+        Self {
+            max_instances_per_type: 100000,
+            chunk_size: 32.0,
+            lod_strategy: FoliageLodStrategy::Combined,
+            culling_mode: FoliageCullingMode::FrustumOcclusion,
+            shadow_distance: 50.0,
+            grass_enabled: true,
+            grass_density: 30.0,
+        }
+    }
+}
+
+/// GPU uniforms for foliage rendering
+struct FoliageRenderUniforms {
+    view_proj: Mat4,
+    view: Mat4,
+    camera_position: Vec3,
+    time: f32,
+    light_direction: Vec3,
+    light_intensity: f32,
+    light_color: Vec3,
+    shadow_distance: f32,
+    ambient_color: Vec3,
+    alpha_cutoff: f32,
+}
+
+/// Main foliage manager
+struct FoliageManager {
+    config: FoliageManagerConfig,
+    assets: HashMap<String, FoliageAsset>,
+
+    // Spatial organization
+    chunks: HashMap<(i32, i32), FoliageChunk>,
+    active_chunks: Vec<(i32, i32)>,
+
+    // Wind
+    wind_system: WindSystem,
+
+    // Grass
+    procedural_grass: Option<ProceduralGrass>,
+
+    // GPU resources
+    indirect_buffer: BufferHandle,
+    culling_output_buffer: BufferHandle,
+    foliage_pipeline: RenderPipelineHandle,
+    foliage_shadow_pipeline: RenderPipelineHandle,
+    culling_pipeline: ComputePipelineHandle,
+
+    // Statistics
+    visible_instances: u32,
+    drawn_instances: u32,
+}
+
+impl FoliageManager {
+    fn new(device: &Device, config: FoliageManagerConfig) -> Self {
+        let indirect_buffer = device.create_buffer(&BufferDescriptor {
+            size: 1024 * 16, // Space for multiple draw calls
+            usage: BufferUsage::INDIRECT | BufferUsage::STORAGE,
+            ..Default::default()
+        });
+
+        let culling_output_buffer = device.create_buffer(&BufferDescriptor {
+            size: config.max_instances_per_type as usize * 4,
+            usage: BufferUsage::STORAGE,
+            ..Default::default()
+        });
+
+        let foliage_pipeline = device.create_render_pipeline(&RenderPipelineDescriptor {
+            vertex_shader: include_str!("shaders/foliage_vertex.wgsl"),
+            fragment_shader: include_str!("shaders/foliage_fragment.wgsl"),
+            targets: vec![ColorTargetState {
+                format: TextureFormat::Rgba16Float,
+                blend: None,
+                write_mask: ColorWrites::ALL,
+            }],
+            depth_stencil: Some(DepthStencilState {
+                format: TextureFormat::Depth32Float,
+                depth_write_enabled: true,
+                depth_compare: CompareFunction::Less,
+                ..Default::default()
+            }),
+            cull_mode: None,
+            ..Default::default()
+        });
+
+        let foliage_shadow_pipeline = device.create_render_pipeline(&RenderPipelineDescriptor {
+            vertex_shader: include_str!("shaders/foliage_shadow.wgsl"),
+            fragment_shader: include_str!("shaders/foliage_shadow_frag.wgsl"),
+            depth_stencil: Some(DepthStencilState {
+                format: TextureFormat::Depth32Float,
+                depth_write_enabled: true,
+                depth_compare: CompareFunction::Less,
+                ..Default::default()
+            }),
+            cull_mode: None,
+            ..Default::default()
+        });
+
+        let culling_pipeline = device.create_compute_pipeline(&ComputePipelineDescriptor {
+            shader: include_str!("shaders/foliage_culling.wgsl"),
+            entry_point: "cull_foliage",
+            ..Default::default()
+        });
+
+        let procedural_grass = if config.grass_enabled {
+            Some(ProceduralGrass::new(device, config.chunk_size, config.grass_density))
+        } else {
+            None
+        };
+
+        Self {
+            config,
+            assets: HashMap::new(),
+            chunks: HashMap::new(),
+            active_chunks: Vec::new(),
+            wind_system: WindSystem::new(device),
+            procedural_grass,
+            indirect_buffer,
+            culling_output_buffer,
+            foliage_pipeline,
+            foliage_shadow_pipeline,
+            culling_pipeline,
+            visible_instances: 0,
+            drawn_instances: 0,
+        }
+    }
+
+    fn register_asset(&mut self, asset: FoliageAsset) {
+        self.assets.insert(asset.name.clone(), asset);
+    }
+
+    fn chunk_key(&self, position: Vec3) -> (i32, i32) {
+        (
+            floor(position.x / self.config.chunk_size) as i32,
+            floor(position.z / self.config.chunk_size) as i32,
+        )
+    }
+
+    fn add_instance(&mut self, asset_name: &str, instance: FoliageInstance) {
+        let key = self.chunk_key(instance.position);
+
+        let chunk = self.chunks.entry(key).or_insert_with(|| {
+            let min = Vec3::new(
+                key.0 as f32 * self.config.chunk_size,
+                -1000.0,
+                key.1 as f32 * self.config.chunk_size,
+            );
+            let max = Vec3::new(
+                (key.0 + 1) as f32 * self.config.chunk_size,
+                1000.0,
+                (key.1 + 1) as f32 * self.config.chunk_size,
+            );
+            FoliageChunk::new(min, max)
+        });
+
+        chunk.add_instance(instance);
+    }
+
+    fn build_chunks(&mut self, device: &Device) {
+        for chunk in self.chunks.values_mut() {
+            chunk.build_instance_buffer(device);
+        }
+    }
+
+    fn update(&mut self, camera_position: Vec3, frustum: &Frustum, frame: u64) {
+        self.active_chunks.clear();
+        self.visible_instances = 0;
+
+        for (key, chunk) in &mut self.chunks {
+            // Frustum culling
+            if !chunk.is_in_frustum(frustum) {
+                chunk.is_visible = false;
+                continue;
+            }
+
+            // Distance culling
+            let distance = chunk.distance_to(camera_position);
+            if distance > 500.0 {  // Max foliage distance
+                chunk.is_visible = false;
+                continue;
+            }
+
+            chunk.is_visible = true;
+            chunk.last_frame_updated = frame;
+            self.active_chunks.push(*key);
+            self.visible_instances += chunk.instance_count;
+
+            // Select LOD based on distance
+            chunk.current_lod = if distance < 50.0 {
+                0
+            } else if distance < 100.0 {
+                1
+            } else {
+                2
+            };
+        }
+    }
+
+    fn cull_instances(
+        &self,
+        encoder: &mut CommandEncoder,
+        frustum: &Frustum,
+        camera_position: Vec3,
+    ) {
+        let mut pass = encoder.begin_compute_pass("Foliage Culling");
+        pass.set_pipeline(&self.culling_pipeline);
+
+        for key in &self.active_chunks {
+            if let Some(chunk) = self.chunks.get(key) {
+                if let Some(ref instance_buffer) = chunk.instance_buffer {
+                    pass.set_storage_buffer(0, instance_buffer);
+                    pass.set_storage_buffer(1, &self.culling_output_buffer);
+                    pass.set_storage_buffer(2, &self.indirect_buffer);
+                    pass.set_uniform(3, &CullingUniforms {
+                        frustum_planes: frustum.planes(),
+                        camera_position,
+                        instance_count: chunk.instance_count,
+                    });
+
+                    pass.dispatch((chunk.instance_count + 63) / 64, 1, 1);
+                }
+            }
+        }
+    }
+
+    fn render(
+        &self,
+        encoder: &mut CommandEncoder,
+        color_texture: &TextureHandle,
+        depth_texture: &TextureHandle,
+        uniforms: &FoliageRenderUniforms,
+    ) {
+        // Main foliage pass
+        {
+            let mut pass = encoder.begin_render_pass(&RenderPassDescriptor {
+                color_attachments: vec![RenderPassColorAttachment {
+                    texture: color_texture,
+                    load_op: LoadOp::Load,
+                    store_op: StoreOp::Store,
+                }],
+                depth_attachment: Some(RenderPassDepthAttachment {
+                    texture: depth_texture,
+                    load_op: LoadOp::Load,
+                    store_op: StoreOp::Store,
+                }),
+                ..Default::default()
+            });
+
+            pass.set_pipeline(&self.foliage_pipeline);
+            pass.set_uniform(0, uniforms);
+            pass.set_uniform(1, &self.wind_system.wind_params_buffer);
+            pass.set_texture(2, &self.wind_system.wind_texture);
+
+            for key in &self.active_chunks {
+                if let Some(chunk) = self.chunks.get(key) {
+                    if let Some(ref instance_buffer) = chunk.instance_buffer {
+                        if chunk.is_visible {
+                            // Draw instanced
+                            pass.set_vertex_buffer(1, instance_buffer);
+                            pass.draw_indexed_indirect(&self.indirect_buffer, 0);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Grass pass
+        if let Some(ref grass) = self.procedural_grass {
+            grass.render(
+                encoder,
+                color_texture,
+                depth_texture,
+                &GrassRenderUniforms {
+                    view_proj: uniforms.view_proj,
+                    camera_position: uniforms.camera_position,
+                    time: uniforms.time,
+                    light_direction: uniforms.light_direction,
+                    light_intensity: uniforms.light_intensity,
+                    ambient_color: uniforms.ambient_color,
+                    subsurface_strength: 0.3,
+                },
+                &self.wind_system.wind_params_buffer,
+                &self.wind_system.wind_texture,
+            );
+        }
+    }
+
+    fn render_shadows(
+        &self,
+        encoder: &mut CommandEncoder,
+        shadow_texture: &TextureHandle,
+        light_view_proj: &Mat4,
+    ) {
+        let mut pass = encoder.begin_render_pass(&RenderPassDescriptor {
+            depth_attachment: Some(RenderPassDepthAttachment {
+                texture: shadow_texture,
+                load_op: LoadOp::Load,
+                store_op: StoreOp::Store,
+            }),
+            ..Default::default()
+        });
+
+        pass.set_pipeline(&self.foliage_shadow_pipeline);
+        pass.set_uniform(0, light_view_proj);
+
+        for key in &self.active_chunks {
+            if let Some(chunk) = self.chunks.get(key) {
+                if let Some(ref instance_buffer) = chunk.instance_buffer {
+                    if chunk.is_visible && chunk.distance_to(Vec3::ZERO) < self.config.shadow_distance {
+                        pass.set_vertex_buffer(1, instance_buffer);
+                        pass.draw_indexed_indirect(&self.indirect_buffer, 0);
+                    }
+                }
+            }
+        }
+    }
+}
+
+struct CullingUniforms {
+    frustum_planes: [Vec4; 6],
+    camera_position: Vec3,
+    instance_count: u32,
+}
+
+// ============================================================================
+// WGSL SHADERS
+// ============================================================================
+
+const FOLIAGE_VERTEX_WGSL: &str = r#"
+struct Instance {
+    transform_row0: vec4<f32>,
+    transform_row1: vec4<f32>,
+    transform_row2: vec4<f32>,
+    params: vec4<f32>,
+}
+
+struct VertexInput {
+    @location(0) position: vec3<f32>,
+    @location(1) normal: vec3<f32>,
+    @location(2) uv: vec2<f32>,
+}
+
+struct VertexOutput {
+    @builtin(position) clip_position: vec4<f32>,
+    @location(0) world_position: vec3<f32>,
+    @location(1) world_normal: vec3<f32>,
+    @location(2) uv: vec2<f32>,
+    @location(3) color_variation: f32,
+}
+
+struct Uniforms {
+    view_proj: mat4x4<f32>,
+    view: mat4x4<f32>,
+    camera_position: vec3<f32>,
+    time: f32,
+    light_direction: vec3<f32>,
+    light_intensity: f32,
+    light_color: vec3<f32>,
+    shadow_distance: f32,
+    ambient_color: vec3<f32>,
+    alpha_cutoff: f32,
+}
+
+struct WindParams {
+    direction: vec3<f32>,
+    strength: f32,
+    turbulence: f32,
+    time: f32,
+}
+
+@group(0) @binding(0) var<uniform> uniforms: Uniforms;
+@group(0) @binding(1) var<uniform> wind: WindParams;
+@group(0) @binding(2) var wind_texture: texture_3d<f32>;
+@group(0) @binding(3) var wind_sampler: sampler;
+
+@group(1) @binding(0) var<storage, read> instances: array<Instance>;
+
+fn apply_wind(position: vec3<f32>, world_pos: vec3<f32>, wind_phase: f32) -> vec3<f32> {
+    // Sample wind noise
+    let wind_sample_pos = world_pos * 0.1 + vec3<f32>(wind.time * 0.5, 0.0, wind.time * 0.3);
+    let wind_noise = textureSampleLevel(wind_texture, wind_sampler, wind_sample_pos, 0.0).r * 2.0 - 1.0;
+
+    // Calculate wind influence based on height
+    let height_factor = position.y;  // Assumes Y-up and vertex position is in local space
+    let wind_strength = height_factor * height_factor * wind.strength;
+
+    // Main wind direction with turbulence
+    let turbulent_dir = wind.direction + vec3<f32>(
+        sin(wind.time + wind_phase) * wind.turbulence,
+        0.0,
+        cos(wind.time * 1.3 + wind_phase) * wind.turbulence
+    );
+
+    return position + turbulent_dir * wind_strength * (1.0 + wind_noise * 0.5);
+}
+
+@vertex
+fn main(
+    in: VertexInput,
+    @builtin(instance_index) instance_idx: u32
+) -> VertexOutput {
+    let inst = instances[instance_idx];
+
+    // Reconstruct transform matrix
+    let transform = mat4x4<f32>(
+        vec4<f32>(inst.transform_row0.x, inst.transform_row1.x, inst.transform_row2.x, 0.0),
+        vec4<f32>(inst.transform_row0.y, inst.transform_row1.y, inst.transform_row2.y, 0.0),
+        vec4<f32>(inst.transform_row0.z, inst.transform_row1.z, inst.transform_row2.z, 0.0),
+        vec4<f32>(inst.transform_row0.w, inst.transform_row1.w, inst.transform_row2.w, 1.0)
+    );
+
+    let wind_phase = inst.params.y;
+    let animated_pos = apply_wind(in.position, (transform * vec4<f32>(in.position, 1.0)).xyz, wind_phase);
+
+    let world_pos = (transform * vec4<f32>(animated_pos, 1.0)).xyz;
+    let world_normal = normalize((transform * vec4<f32>(in.normal, 0.0)).xyz);
+
+    var out: VertexOutput;
+    out.clip_position = uniforms.view_proj * vec4<f32>(world_pos, 1.0);
+    out.world_position = world_pos;
+    out.world_normal = world_normal;
+    out.uv = in.uv;
+    out.color_variation = inst.params.x;
+
+    return out;
+}
+"#;
+
+const FOLIAGE_FRAGMENT_WGSL: &str = r#"
+struct FragmentInput {
+    @location(0) world_position: vec3<f32>,
+    @location(1) world_normal: vec3<f32>,
+    @location(2) uv: vec2<f32>,
+    @location(3) color_variation: f32,
+}
+
+struct Uniforms {
+    view_proj: mat4x4<f32>,
+    view: mat4x4<f32>,
+    camera_position: vec3<f32>,
+    time: f32,
+    light_direction: vec3<f32>,
+    light_intensity: f32,
+    light_color: vec3<f32>,
+    shadow_distance: f32,
+    ambient_color: vec3<f32>,
+    alpha_cutoff: f32,
+}
+
+@group(0) @binding(0) var<uniform> uniforms: Uniforms;
+@group(0) @binding(4) var albedo_texture: texture_2d<f32>;
+@group(0) @binding(5) var albedo_sampler: sampler;
+
+const PI: f32 = 3.14159265359;
+
+fn subsurface_scattering(N: vec3<f32>, L: vec3<f32>, V: vec3<f32>, thickness: f32) -> f32 {
+    let H = normalize(L + N * 0.5);
+    let VdotH = max(0.0, dot(V, -H));
+    let scatter = pow(VdotH, 3.0) * thickness;
+    return scatter;
+}
+
+@fragment
+fn main(in: FragmentInput) -> @location(0) vec4<f32> {
+    let albedo_sample = textureSample(albedo_texture, albedo_sampler, in.uv);
+
+    // Alpha test
+    if (albedo_sample.a < uniforms.alpha_cutoff) {
+        discard;
+    }
+
+    let N = normalize(in.world_normal);
+    let V = normalize(uniforms.camera_position - in.world_position);
+    let L = normalize(-uniforms.light_direction);
+
+    // Two-sided lighting
+    var normal = N;
+    if (dot(N, V) < 0.0) {
+        normal = -N;
+    }
+
+    let NoL = max(dot(normal, L), 0.0);
+
+    // Color with variation
+    let base_color = albedo_sample.rgb;
+    let varied_color = base_color * (1.0 + in.color_variation * 0.3);
+
+    // Diffuse
+    let diffuse = varied_color * NoL / PI;
+
+    // Subsurface scattering for leaves
+    let sss = subsurface_scattering(normal, L, V, 0.3) * vec3<f32>(0.5, 0.8, 0.3);
+
+    // Combine
+    let radiance = uniforms.light_color * uniforms.light_intensity;
+    let direct = (diffuse + sss) * radiance;
+    let ambient = varied_color * uniforms.ambient_color;
+
+    return vec4<f32>(direct + ambient, albedo_sample.a);
+}
+"#;
+
+const GRASS_VERTEX_WGSL: &str = r#"
+struct GrassInstance {
+    position: vec3<f32>,
+    height: f32,
+    rotation: f32,
+    bend: f32,
+    color_offset: f32,
+    wind_phase: f32,
+}
+
+struct VertexOutput {
+    @builtin(position) clip_position: vec4<f32>,
+    @location(0) world_position: vec3<f32>,
+    @location(1) normal: vec3<f32>,
+    @location(2) uv: vec2<f32>,
+    @location(3) color_offset: f32,
+}
+
+struct Uniforms {
+    view_proj: mat4x4<f32>,
+    camera_position: vec3<f32>,
+    time: f32,
+    light_direction: vec3<f32>,
+    light_intensity: f32,
+    ambient_color: vec3<f32>,
+    subsurface_strength: f32,
+}
+
+struct WindParams {
+    direction: vec3<f32>,
+    strength: f32,
+    turbulence: f32,
+    time: f32,
+}
+
+@group(0) @binding(0) var<storage, read> instances: array<GrassInstance>;
+@group(0) @binding(1) var<uniform> uniforms: Uniforms;
+@group(0) @binding(2) var<uniform> wind: WindParams;
+@group(0) @binding(3) var wind_texture: texture_3d<f32>;
+@group(0) @binding(4) var wind_sampler: sampler;
+
+const BLADE_SEGMENTS: u32 = 4u;
+const BLADE_WIDTH: f32 = 0.04;
+
+@vertex
+fn main(
+    @builtin(vertex_index) vertex_idx: u32,
+    @builtin(instance_index) instance_idx: u32
+) -> VertexOutput {
+    let grass = instances[instance_idx];
+
+    // Generate blade vertices procedurally
+    let segment = vertex_idx / 2u;
+    let side = vertex_idx % 2u;
+
+    let t = f32(segment) / f32(BLADE_SEGMENTS);
+    let width = BLADE_WIDTH * (1.0 - t * 0.8);  // Taper toward tip
+
+    // Wind influence increases with height
+    let wind_sample_pos = grass.position * 0.05 + vec3<f32>(wind.time * 0.3, 0.0, wind.time * 0.2);
+    let wind_noise = textureSampleLevel(wind_texture, wind_sampler, wind_sample_pos, 0.0).r * 2.0 - 1.0;
+
+    let wind_strength = t * t * wind.strength * (1.0 + wind_noise * 0.5);
+    let wind_offset = wind.direction * wind_strength * sin(wind.time * 2.0 + grass.wind_phase);
+
+    // Bend curve
+    let bend_amount = grass.bend * t * t;
+    let forward_bend = vec3<f32>(sin(grass.rotation), 0.0, cos(grass.rotation)) * bend_amount;
+
+    // Calculate position along blade
+    let height_offset = grass.height * t;
+    var blade_pos = grass.position + vec3<f32>(0.0, height_offset, 0.0);
+    blade_pos += forward_bend * grass.height;
+    blade_pos += wind_offset;
+
+    // Side offset
+    let side_dir = vec3<f32>(cos(grass.rotation), 0.0, -sin(grass.rotation));
+    blade_pos += side_dir * width * (f32(side) - 0.5);
+
+    // Calculate normal (perpendicular to blade direction)
+    let blade_dir = normalize(vec3<f32>(0.0, 1.0, 0.0) + forward_bend + wind_offset);
+    let normal = normalize(cross(blade_dir, side_dir));
+
+    var out: VertexOutput;
+    out.clip_position = uniforms.view_proj * vec4<f32>(blade_pos, 1.0);
+    out.world_position = blade_pos;
+    out.normal = normal;
+    out.uv = vec2<f32>(f32(side), t);
+    out.color_offset = grass.color_offset;
+
+    return out;
+}
+"#;
+
+const GRASS_FRAGMENT_WGSL: &str = r#"
+struct FragmentInput {
+    @location(0) world_position: vec3<f32>,
+    @location(1) normal: vec3<f32>,
+    @location(2) uv: vec2<f32>,
+    @location(3) color_offset: f32,
+}
+
+struct Uniforms {
+    view_proj: mat4x4<f32>,
+    camera_position: vec3<f32>,
+    time: f32,
+    light_direction: vec3<f32>,
+    light_intensity: f32,
+    ambient_color: vec3<f32>,
+    subsurface_strength: f32,
+}
+
+@group(0) @binding(1) var<uniform> uniforms: Uniforms;
+@group(0) @binding(5) var color_map: texture_2d<f32>;
+@group(0) @binding(6) var color_sampler: sampler;
+
+const PI: f32 = 3.14159265359;
+
+@fragment
+fn main(in: FragmentInput) -> @location(0) vec4<f32> {
+    let N = normalize(in.normal);
+    let V = normalize(uniforms.camera_position - in.world_position);
+    let L = normalize(-uniforms.light_direction);
+
+    // Two-sided lighting
+    var normal = N;
+    if (dot(N, V) < 0.0) {
+        normal = -N;
+    }
+
+    let NoL = max(dot(normal, L), 0.0);
+
+    // Base grass color with height gradient
+    let base_color = vec3<f32>(0.2, 0.5, 0.1);
+    let tip_color = vec3<f32>(0.4, 0.6, 0.15);
+    var color = mix(base_color, tip_color, in.uv.y);
+
+    // Color variation
+    color *= (1.0 + in.color_offset * 0.2);
+
+    // Diffuse
+    let diffuse = color * NoL / PI;
+
+    // Subsurface scattering
+    let back_light = max(0.0, dot(-L, normal));
+    let sss = color * back_light * uniforms.subsurface_strength * (1.0 - in.uv.y);
+
+    // Combine
+    let direct = (diffuse + sss) * uniforms.light_intensity;
+    let ambient = color * uniforms.ambient_color;
+
+    // Fade at tip for soft edges
+    let alpha = 1.0 - smoothstep(0.7, 1.0, in.uv.y);
+
+    return vec4<f32>(direct + ambient, alpha);
+}
+"#;
+
+// ============================================================================
+// UNIT TESTS
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_foliage_instance() {
+        let instance = FoliageInstance::new(Vec3::new(10.0, 0.0, 10.0));
+
+        assert_eq!(instance.position, Vec3::new(10.0, 0.0, 10.0));
+        assert_eq!(instance.scale, Vec3::ONE);
+    }
+
+    #[test]
+    fn test_foliage_instance_random() {
+        let instance = FoliageInstance::new(Vec3::ZERO)
+            .with_random_rotation(42)
+            .with_random_scale(42, 0.5, 1.5)
+            .with_color_variation(42, 0.2);
+
+        // Should have non-identity rotation
+        assert!(instance.rotation != Quaternion::IDENTITY);
+        // Scale should be in range
+        assert!(instance.scale.x >= 0.5 && instance.scale.x <= 1.5);
+    }
+
+    #[test]
+    fn test_hash_u32() {
+        let h1 = hash_u32(0);
+        let h2 = hash_u32(1);
+        let h3 = hash_u32(42);
+
+        // Different inputs should produce different outputs
+        assert_ne!(h1, h2);
+        assert_ne!(h2, h3);
+    }
+
+    #[test]
+    fn test_foliage_chunk() {
+        let mut chunk = FoliageChunk::new(
+            Vec3::new(0.0, 0.0, 0.0),
+            Vec3::new(32.0, 100.0, 32.0)
+        );
+
+        assert_eq!(chunk.center, Vec3::new(16.0, 50.0, 16.0));
+        assert!(!chunk.instances.is_empty() == false);
+
+        chunk.add_instance(FoliageInstance::new(Vec3::new(10.0, 0.0, 10.0)));
+        assert_eq!(chunk.instance_count, 1);
+    }
+
+    #[test]
+    fn test_wind_zone_directional() {
+        let zone = WindZone::directional(Vec3::new(1.0, 0.0, 0.0), 2.0);
+
+        let wind = zone.sample(Vec3::ZERO, 0.0);
+        assert!(wind.x > 0.0);
+    }
+
+    #[test]
+    fn test_wind_zone_spherical() {
+        let zone = WindZone::spherical(Vec3::ZERO, 10.0, 5.0);
+
+        // Inside radius
+        let wind_inside = zone.sample(Vec3::new(5.0, 0.0, 0.0), 0.0);
+        assert!(length(wind_inside) > 0.0);
+
+        // Outside radius
+        let wind_outside = zone.sample(Vec3::new(20.0, 0.0, 0.0), 0.0);
+        assert_eq!(wind_outside, Vec3::ZERO);
+    }
+
+    #[test]
+    fn test_grass_blade_params() {
+        let params = GrassBladeParams::default();
+
+        assert!(params.width > 0.0);
+        assert!(params.height > 0.0);
+        assert!(params.segments > 0);
+    }
+
+    #[test]
+    fn test_foliage_asset_grass() {
+        let grass = FoliageAsset::grass("test_grass");
+
+        assert!(grass.wind_enabled);
+        assert!(grass.two_sided);
+        assert!(!grass.cast_shadows);
+    }
+
+    #[test]
+    fn test_foliage_asset_tree() {
+        let tree = FoliageAsset::tree("test_tree");
+
+        assert!(tree.wind_enabled);
+        assert!(tree.cast_shadows);
+        assert!(tree.cull_distance > tree.fade_distance);
+    }
+
+    #[test]
+    fn test_foliage_manager_config() {
+        let config = FoliageManagerConfig::default();
+
+        assert!(config.max_instances_per_type > 0);
+        assert!(config.chunk_size > 0.0);
+        assert!(config.grass_enabled);
+    }
+
+    #[test]
+    fn test_procedural_tree_oak() {
+        let generator = ProceduralTreeGenerator::oak();
+
+        let l_string = generator.generate_l_string();
+        assert!(!l_string.is_empty());
+        assert!(l_string.contains('F'));
+    }
+
+    #[test]
+    fn test_procedural_tree_branches() {
+        let generator = ProceduralTreeGenerator::oak();
+        let l_string = generator.generate_l_string();
+        let branches = generator.generate_branches(&l_string);
+
+        assert!(!branches.is_empty());
+        // First branch should start at origin
+        assert!((branches[0].start - Vec3::ZERO).length() < 0.001);
+    }
+
+    #[test]
+    fn test_tree_impostor_uv() {
+        let uv = TreeImpostor::sample_direction_to_uv(Vec3::new(0.0, 0.0, 1.0), 8);
+
+        // Should be in [0, 1] range
+        assert!(uv.x >= 0.0 && uv.x <= 1.0);
+        assert!(uv.y >= 0.0 && uv.y <= 1.0);
+    }
+
+    #[test]
+    fn test_foliage_chunk_distance() {
+        let chunk = FoliageChunk::new(
+            Vec3::new(0.0, 0.0, 0.0),
+            Vec3::new(32.0, 100.0, 32.0)
+        );
+
+        let distance = chunk.distance_to(Vec3::new(100.0, 0.0, 100.0));
+        assert!(distance > 0.0);
+
+        // Point at center should have negative distance (inside sphere)
+        let center_dist = chunk.distance_to(chunk.center);
+        assert!(center_dist < 0.0);
+    }
+
+    #[test]
+    fn test_gpu_foliage_instance() {
+        let instance = FoliageInstance::new(Vec3::new(5.0, 0.0, 5.0));
+        let gpu = GpuFoliageInstance::from_instance(&instance);
+
+        // Translation should be in the 4th column (w component of rows)
+        assert!((gpu.transform_row0.w - 5.0).abs() < 0.001);
+        assert!((gpu.transform_row2.w - 5.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_transform_matrix() {
+        let mut instance = FoliageInstance::new(Vec3::new(10.0, 5.0, 10.0));
+        instance.scale = Vec3::new(2.0, 2.0, 2.0);
+
+        let mat = instance.transform_matrix();
+
+        // Translation
+        assert!((mat.w_axis.x - 10.0).abs() < 0.001);
+        assert!((mat.w_axis.y - 5.0).abs() < 0.001);
+        assert!((mat.w_axis.z - 10.0).abs() < 0.001);
+
+        // Scale (diagonal elements for identity rotation)
+        assert!((mat.x_axis.x - 2.0).abs() < 0.001);
+    }
+}

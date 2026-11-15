@@ -1,0 +1,141 @@
+// =============================================================================
+// qwhich — Locate a command on PATH (which clone) written in BuildLang
+// =============================================================================
+// Usage:
+//   qwhich gcc              -> /usr/bin/gcc (or "gcc not found")
+//   qwhich python           -> /c/Users/.../python.exe
+//   qwhich -a gcc           -> print ALL matches, not just first
+//   qwhich --help           -> usage
+//
+// Implementation: getenv("PATH"), split on ; (Windows) or : (Unix),
+// for each dir call list_dir and check for match.
+// =============================================================================
+
+fn print_help() ~ Console {
+    println!("qwhich -- locate a command on PATH");
+    println!("");
+    println!("Usage:");
+    println!("  qwhich COMMAND          print first matching path");
+    println!("  qwhich -a COMMAND       print all matching paths");
+    println!("  qwhich --help           display this help and exit");
+}
+
+// Check if a filename matches the target command.
+// On Windows, also check with common extensions (.exe, .cmd, .bat, .com).
+fn name_matches(filename: String, target: String) -> bool {
+    let lower = filename.to_lowercase();
+    let tlow = target.to_lowercase();
+    if lower == tlow { return true; }
+    // Check with extensions
+    let mut ext_idx: i64 = 0;
+    while ext_idx < 4 {
+        let ext = if ext_idx == 0 { ".exe" }
+                  else if ext_idx == 1 { ".cmd" }
+                  else if ext_idx == 2 { ".bat" }
+                  else { ".com" };
+        let with_ext = tlow + ext;
+        if lower == with_ext { return true; }
+        ext_idx = ext_idx + 1;
+    }
+    false
+}
+
+// Search a single directory for the target command.
+// Returns the full path if found, or "" if not.
+fn search_dir(dir: String, target: String) -> String ~ FileSystem {
+    let dir_exists = is_dir(dir);
+    if !dir_exists { return ""; }
+
+    let entries = list_dir(dir);
+    let count = vec_len(entries);
+    let mut i: i64 = 0;
+    while i < count {
+        let entry = vec_get_str(entries, i);
+        if name_matches(entry, target) {
+            // Build full path
+            let dlen = dir.len();
+            let last_char = dir.char_at(dlen - 1);
+            let sep = if last_char == "/" || last_char == "\\" { "" } else { "/" };
+            return dir + sep + entry;
+        }
+        i = i + 1;
+    }
+    ""
+}
+
+fn main() ~ Console + Environment + FileSystem + Process {
+    let nargs = args_count();
+
+    if nargs < 2 {
+        print_help();
+        process_exit(1);
+    }
+
+    let first = args_get(1);
+    if first == "--help" || first == "-h" {
+        print_help();
+        process_exit(0);
+    }
+
+    let mut show_all = false;
+    let mut target = "";
+    if first == "-a" {
+        show_all = true;
+        if nargs < 3 {
+            println!("qwhich: -a requires a command name");
+            process_exit(1);
+        }
+        target = args_get(2);
+    } else {
+        target = first;
+    }
+
+    let path = getenv("PATH");
+    if path.len() == 0 {
+        println!("{}: PATH not set", target);
+        process_exit(1);
+    }
+
+    // Detect separator: Windows uses ;, Unix uses :
+    // Heuristic: if PATH contains ;, use ;. Otherwise use :.
+    let sep = if path.contains(";") { ";" } else { ":" };
+
+    // Walk PATH by scanning for separators manually
+    let path_len = path.len();
+    let sep_len = sep.len();
+    let mut found = false;
+    let mut pos: i64 = 0;
+
+    while pos <= path_len {
+        // Find next separator
+        let rest = path.substring(pos, path_len - pos);
+        let sep_idx = rest.index_of(sep);
+        let dir = if sep_idx < 0 {
+            rest
+        } else {
+            rest.substring(0, sep_idx)
+        };
+
+        if dir.len() > 0 {
+            let result = search_dir(dir, target);
+            if result.len() > 0 {
+                println!("{}", result);
+                found = true;
+                if !show_all {
+                    process_exit(0);
+                }
+            }
+        }
+
+        if sep_idx < 0 {
+            pos = path_len + 1;
+        } else {
+            pos = pos + sep_idx + sep_len;
+        }
+    }
+
+    if !found {
+        println!("{} not found", target);
+        process_exit(1);
+    }
+}

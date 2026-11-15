@@ -1,0 +1,1265 @@
+// BUILD-UNIVERSE Prism: Screen-Space Reflections
+// Comprehensive SSR implementations including Hi-Z tracing, stochastic SSR, and hybrid approaches
+
+import prism::lib::*;
+import spectrum::color::*;
+
+// ============================================================================
+// SSR CONFIGURATION
+// ============================================================================
+
+@shader_config
+struct SSRConfig {
+    technique: SSRTechnique,
+    quality: SSRQuality,
+    max_ray_distance: f32,
+    max_iterations: u32,
+    thickness: f32,
+    stride: u32,
+    jitter_amount: f32,
+    temporal_weight: f32,
+    roughness_threshold: f32,
+    fresnel_power: f32,
+    edge_fade: f32,
+    hi_z_enabled: bool,
+    stochastic_enabled: bool,
+    cone_tracing_enabled: bool,
+}
+
+enum SSRTechnique {
+    Linear,             // Basic linear ray marching
+    HiZ,                // Hierarchical Z-buffer tracing
+    Stochastic,         // Stochastic/importance sampled SSR
+    HybridLinearHiZ,    // Hybrid linear + Hi-Z
+    ConeTracing,        // Cone tracing for rough reflections
+    TemporalFiltered,   // Temporal accumulation SSR
+}
+
+enum SSRQuality {
+    Low,        // 16 iterations, no Hi-Z
+    Medium,     // 32 iterations, Hi-Z level 2
+    High,       // 64 iterations, Hi-Z level 4
+    Ultra,      // 128 iterations, Hi-Z level 6 + temporal
+    Extreme,    // 256 iterations, full Hi-Z + stochastic
+}
+
+impl SSRConfig {
+    const LOW: Self = SSRConfig {
+        technique: SSRTechnique::Linear,
+        quality: SSRQuality::Low,
+        max_ray_distance: 50.0,
+        max_iterations: 16,
+        thickness: 0.5,
+        stride: 4,
+        jitter_amount: 0.0,
+        temporal_weight: 0.0,
+        roughness_threshold: 0.3,
+        fresnel_power: 5.0,
+        edge_fade: 0.1,
+        hi_z_enabled: false,
+        stochastic_enabled: false,
+        cone_tracing_enabled: false,
+    };
+
+    const MEDIUM: Self = SSRConfig {
+        technique: SSRTechnique::HiZ,
+        quality: SSRQuality::Medium,
+        max_ray_distance: 100.0,
+        max_iterations: 32,
+        thickness: 0.3,
+        stride: 2,
+        jitter_amount: 0.25,
+        temporal_weight: 0.5,
+        roughness_threshold: 0.4,
+        fresnel_power: 5.0,
+        edge_fade: 0.15,
+        hi_z_enabled: true,
+        stochastic_enabled: false,
+        cone_tracing_enabled: false,
+    };
+
+    const HIGH: Self = SSRConfig {
+        technique: SSRTechnique::HybridLinearHiZ,
+        quality: SSRQuality::High,
+        max_ray_distance: 200.0,
+        max_iterations: 64,
+        thickness: 0.2,
+        stride: 1,
+        jitter_amount: 0.5,
+        temporal_weight: 0.8,
+        roughness_threshold: 0.5,
+        fresnel_power: 5.0,
+        edge_fade: 0.2,
+        hi_z_enabled: true,
+        stochastic_enabled: true,
+        cone_tracing_enabled: false,
+    };
+
+    const ULTRA: Self = SSRConfig {
+        technique: SSRTechnique::Stochastic,
+        quality: SSRQuality::Ultra,
+        max_ray_distance: 500.0,
+        max_iterations: 128,
+        thickness: 0.1,
+        stride: 1,
+        jitter_amount: 1.0,
+        temporal_weight: 0.9,
+        roughness_threshold: 0.7,
+        fresnel_power: 5.0,
+        edge_fade: 0.25,
+        hi_z_enabled: true,
+        stochastic_enabled: true,
+        cone_tracing_enabled: true,
+    };
+}
+
+// ============================================================================
+// LINEAR SSR SHADER
+// ============================================================================
+
+@shader(compute)
+const SSR_LINEAR_SHADER: &str = r#"
+    // Linear Screen-Space Reflections
+    // Basic ray marching in screen space
+
+    cbuffer SSRParams : register(b0) {
+        float4x4 view;
+        float4x4 projection;
+        float4x4 inv_projection;
+        float4x4 inv_view;
+        float4x4 prev_view_projection;
+        float2 screen_size;
+        float2 inv_screen_size;
+        float max_ray_distance;
+        float thickness;
+        float stride;
+        float jitter_amount;
+        float roughness_threshold;
+        float fresnel_power;
+        float edge_fade;
+        float near_plane;
+        float far_plane;
+        uint max_iterations;
+        uint frame_index;
+        float padding0;
+        float padding1;
+    };
+
+    Texture2D<float4> color_texture : register(t0);
+    Texture2D<float> depth_texture : register(t1);
+    Texture2D<float4> normal_texture : register(t2);
+    Texture2D<float4> roughness_metallic : register(t3);
+    Texture2D<float4> noise_texture : register(t4);
+
+    RWTexture2D<float4> reflection_output : register(u0);
+    RWTexture2D<float2> hit_uv_output : register(u1);
+
+    SamplerState point_sampler : register(s0);
+    SamplerState linear_sampler : register(s1);
+
+    float linearize_depth(float depth) {
+        return near_plane * far_plane / (far_plane - depth * (far_plane - near_plane));
+    }
+
+    float3 get_view_position(float2 uv, float depth) {
+        float4 clip = float4(uv * 2.0 - 1.0, depth, 1.0);
+        clip.y = -clip.y;
+        float4 view_pos = mul(inv_projection, clip);
+        return view_pos.xyz / view_pos.w;
+    }
+
+    float3 get_world_normal(float2 uv) {
+        return normalize(normal_texture.SampleLevel(linear_sampler, uv, 0).xyz * 2.0 - 1.0);
+    }
+
+    float fresnel_schlick(float cos_theta, float f0) {
+        return f0 + (1.0 - f0) * pow(1.0 - cos_theta, fresnel_power);
+    }
+
+    bool ray_march_screen_space(float3 ray_origin, float3 ray_dir, out float2 hit_uv, out float3 hit_point) {
+        float3 ray_end = ray_origin + ray_dir * max_ray_distance;
+
+        // Project ray start and end to screen space
+        float4 start_clip = mul(projection, float4(ray_origin, 1.0));
+        float4 end_clip = mul(projection, float4(ray_end, 1.0));
+
+        float start_k = 1.0 / start_clip.w;
+        float end_k = 1.0 / end_clip.w;
+
+        float3 start_screen = start_clip.xyz * start_k;
+        float3 end_screen = end_clip.xyz * end_k;
+
+        start_screen.xy = start_screen.xy * 0.5 + 0.5;
+        end_screen.xy = end_screen.xy * 0.5 + 0.5;
+        start_screen.y = 1.0 - start_screen.y;
+        end_screen.y = 1.0 - end_screen.y;
+
+        // Convert to pixel coordinates
+        float2 start_pixel = start_screen.xy * screen_size;
+        float2 end_pixel = end_screen.xy * screen_size;
+
+        float2 delta = end_pixel - start_pixel;
+        float step_count = max(abs(delta.x), abs(delta.y));
+
+        if (step_count < 1.0) {
+            hit_uv = float2(-1.0, -1.0);
+            return false;
+        }
+
+        float2 step_size = delta / step_count;
+        float z_step = (end_screen.z - start_screen.z) / step_count;
+        float k_step = (end_k - start_k) / step_count;
+
+        float2 current_pixel = start_pixel;
+        float current_z = start_screen.z;
+        float current_k = start_k;
+
+        uint iterations = min(uint(step_count), max_iterations);
+
+        for (uint i = 0; i < iterations; i++) {
+            current_pixel += step_size * stride;
+            current_z += z_step * stride;
+            current_k += k_step * stride;
+
+            float2 uv = current_pixel * inv_screen_size;
+
+            if (any(uv < 0.0) || any(uv > 1.0)) break;
+
+            float scene_depth = depth_texture.SampleLevel(point_sampler, uv, 0);
+            float ray_depth = current_z / current_k;
+
+            float linear_scene = linearize_depth(scene_depth);
+            float linear_ray = linearize_depth(ray_depth);
+
+            float depth_diff = linear_ray - linear_scene;
+
+            if (depth_diff > 0.0 && depth_diff < thickness) {
+                // Binary search refinement
+                float2 refined_pixel = current_pixel;
+                float refined_z = current_z;
+                float refined_k = current_k;
+
+                for (int j = 0; j < 8; j++) {
+                    float2 mid_step = step_size * stride * 0.5;
+                    float mid_z = z_step * stride * 0.5;
+                    float mid_k = k_step * stride * 0.5;
+
+                    uv = refined_pixel * inv_screen_size;
+                    scene_depth = depth_texture.SampleLevel(point_sampler, uv, 0);
+                    ray_depth = refined_z / refined_k;
+
+                    linear_scene = linearize_depth(scene_depth);
+                    linear_ray = linearize_depth(ray_depth);
+
+                    if (linear_ray > linear_scene) {
+                        refined_pixel -= mid_step;
+                        refined_z -= mid_z;
+                        refined_k -= mid_k;
+                    } else {
+                        refined_pixel += mid_step;
+                        refined_z += mid_z;
+                        refined_k += mid_k;
+                    }
+
+                    step_size *= 0.5;
+                    z_step *= 0.5;
+                    k_step *= 0.5;
+                }
+
+                hit_uv = refined_pixel * inv_screen_size;
+                hit_point = get_view_position(hit_uv, scene_depth);
+                return true;
+            }
+        }
+
+        hit_uv = float2(-1.0, -1.0);
+        return false;
+    }
+
+    float calculate_edge_fade(float2 uv) {
+        float2 edge = abs(uv * 2.0 - 1.0);
+        float fade = 1.0 - pow(max(edge.x, edge.y), 4.0);
+        return saturate(fade / edge_fade);
+    }
+
+    [numthreads(8, 8, 1)]
+    void cs_main(uint3 dispatch_id : SV_DispatchThreadID) {
+        float2 uv = (float2(dispatch_id.xy) + 0.5) * inv_screen_size;
+
+        float depth = depth_texture.SampleLevel(point_sampler, uv, 0);
+        if (depth >= 1.0) {
+            reflection_output[dispatch_id.xy] = float4(0.0, 0.0, 0.0, 0.0);
+            hit_uv_output[dispatch_id.xy] = float2(-1.0, -1.0);
+            return;
+        }
+
+        float4 rm = roughness_metallic.SampleLevel(linear_sampler, uv, 0);
+        float roughness = rm.r;
+        float metallic = rm.g;
+
+        // Skip non-reflective surfaces
+        if (roughness > roughness_threshold && metallic < 0.1) {
+            reflection_output[dispatch_id.xy] = float4(0.0, 0.0, 0.0, 0.0);
+            hit_uv_output[dispatch_id.xy] = float2(-1.0, -1.0);
+            return;
+        }
+
+        float3 view_pos = get_view_position(uv, depth);
+        float3 world_normal = get_world_normal(uv);
+        float3 view_normal = normalize(mul((float3x3)view, world_normal));
+
+        float3 view_dir = normalize(view_pos);
+        float3 reflect_dir = reflect(view_dir, view_normal);
+
+        // Add jitter for temporal stability
+        float2 noise_uv = uv * screen_size / 4.0;
+        float2 jitter = noise_texture.SampleLevel(point_sampler, noise_uv, 0).xy * 2.0 - 1.0;
+        reflect_dir += jitter * jitter_amount * roughness * 0.1;
+        reflect_dir = normalize(reflect_dir);
+
+        float2 hit_uv;
+        float3 hit_point;
+
+        if (ray_march_screen_space(view_pos, reflect_dir, hit_uv, hit_point)) {
+            float4 reflection_color = color_texture.SampleLevel(linear_sampler, hit_uv, 0);
+
+            // Calculate fresnel
+            float n_dot_v = saturate(dot(-view_dir, view_normal));
+            float fresnel = fresnel_schlick(n_dot_v, lerp(0.04, 1.0, metallic));
+
+            // Edge fade
+            float edge_fade_factor = calculate_edge_fade(hit_uv);
+
+            // Distance fade
+            float hit_distance = length(hit_point - view_pos);
+            float distance_fade = 1.0 - saturate(hit_distance / max_ray_distance);
+
+            float confidence = fresnel * edge_fade_factor * distance_fade;
+            confidence *= 1.0 - roughness;
+
+            reflection_output[dispatch_id.xy] = float4(reflection_color.rgb, confidence);
+            hit_uv_output[dispatch_id.xy] = hit_uv;
+        } else {
+            reflection_output[dispatch_id.xy] = float4(0.0, 0.0, 0.0, 0.0);
+            hit_uv_output[dispatch_id.xy] = float2(-1.0, -1.0);
+        }
+    }
+"#;
+
+// ============================================================================
+// HI-Z SSR SHADER
+// ============================================================================
+
+@shader(compute)
+const SSR_HIZ_SHADER: &str = r#"
+    // Hierarchical Z-Buffer Screen-Space Reflections
+    // Uses mip-mapped depth buffer for efficient ray marching
+
+    cbuffer SSRParams : register(b0) {
+        float4x4 view;
+        float4x4 projection;
+        float4x4 inv_projection;
+        float2 screen_size;
+        float2 inv_screen_size;
+        float max_ray_distance;
+        float thickness;
+        float stride_z_cutoff;
+        float jitter_amount;
+        float roughness_threshold;
+        float fresnel_power;
+        float edge_fade;
+        float near_plane;
+        float far_plane;
+        uint max_iterations;
+        uint max_mip_level;
+        uint frame_index;
+        float padding;
+    };
+
+    Texture2D<float4> color_texture : register(t0);
+    Texture2D<float> hi_z_texture : register(t1);
+    Texture2D<float4> normal_texture : register(t2);
+    Texture2D<float4> roughness_metallic : register(t3);
+    Texture2D<float4> noise_texture : register(t4);
+
+    RWTexture2D<float4> reflection_output : register(u0);
+
+    SamplerState point_sampler : register(s0);
+    SamplerState linear_sampler : register(s1);
+
+    static const float HIZ_STOP_LEVEL = 0.0;
+    static const float HIZ_START_LEVEL = 2.0;
+
+    float linearize_depth(float depth) {
+        return near_plane * far_plane / (far_plane - depth * (far_plane - near_plane));
+    }
+
+    float3 get_view_position(float2 uv, float depth) {
+        float4 clip = float4(uv * 2.0 - 1.0, depth, 1.0);
+        clip.y = -clip.y;
+        float4 view_pos = mul(inv_projection, clip);
+        return view_pos.xyz / view_pos.w;
+    }
+
+    float2 get_cell(float2 ray, float2 cell_count) {
+        return floor(ray * cell_count);
+    }
+
+    float2 get_cell_count(float mip_level) {
+        return screen_size / exp2(mip_level);
+    }
+
+    float3 intersect_cell_boundary(float3 o, float3 d, float2 cell, float2 cell_count, float2 cross_step, float2 cross_offset) {
+        float2 cell_size = 1.0 / cell_count;
+        float2 planes = cell * cell_size + cell_size * cross_step;
+
+        float2 solutions = (planes - o.xy) / d.xy;
+        float3 intersection;
+
+        if (solutions.x < solutions.y) {
+            intersection.z = solutions.x;
+            intersection.xy = o.xy + d.xy * solutions.x;
+            intersection.x = (cell.x + cross_step.x + cross_offset.x) / cell_count.x;
+        } else {
+            intersection.z = solutions.y;
+            intersection.xy = o.xy + d.xy * solutions.y;
+            intersection.y = (cell.y + cross_step.y + cross_offset.y) / cell_count.y;
+        }
+
+        return intersection;
+    }
+
+    float get_minimum_depth_plane(float2 ray, float mip_level) {
+        return hi_z_texture.SampleLevel(point_sampler, ray, mip_level);
+    }
+
+    bool crossed_cell_boundary(float2 cell_id_a, float2 cell_id_b) {
+        return any(cell_id_a != cell_id_b);
+    }
+
+    float4 trace_hi_z(float3 origin, float3 direction, out bool hit) {
+        float3 ray = origin;
+        float mip_level = HIZ_START_LEVEL;
+
+        // Cross step: tells us which direction to step
+        float2 cross_step = float2(direction.x >= 0.0 ? 1.0 : -1.0, direction.y >= 0.0 ? 1.0 : -1.0);
+        float2 cross_offset = cross_step * 0.00001;
+        cross_step = saturate(cross_step);
+
+        float2 ray_cross_epsilon = cross_offset / screen_size;
+
+        uint iterations = 0;
+        hit = false;
+
+        while (mip_level >= HIZ_STOP_LEVEL && iterations < max_iterations) {
+            float2 cell_count = get_cell_count(mip_level);
+            float2 old_cell_id = get_cell(ray.xy, cell_count);
+
+            float min_z = get_minimum_depth_plane(ray.xy, mip_level);
+
+            float3 tmp_ray = ray;
+            if (direction.z > 0.0) {
+                float min_minus_ray = min_z - ray.z;
+                tmp_ray = min_minus_ray > 0.0 ? ray + direction * (min_minus_ray / direction.z) : tmp_ray;
+
+                float2 new_cell_id = get_cell(tmp_ray.xy, cell_count);
+
+                if (crossed_cell_boundary(old_cell_id, new_cell_id)) {
+                    tmp_ray = intersect_cell_boundary(ray, direction, old_cell_id, cell_count, cross_step, cross_offset);
+                    mip_level = min(float(max_mip_level), mip_level + 2.0);
+                }
+            } else {
+                tmp_ray = intersect_cell_boundary(ray, direction, old_cell_id, cell_count, cross_step, cross_offset);
+                mip_level = min(float(max_mip_level), mip_level + 2.0);
+            }
+
+            ray = tmp_ray;
+
+            // Check boundaries
+            if (any(ray.xy < 0.0) || any(ray.xy > 1.0) || ray.z > 1.0) {
+                break;
+            }
+
+            mip_level--;
+            iterations++;
+        }
+
+        // Validate hit
+        if (mip_level < HIZ_STOP_LEVEL) {
+            float depth_diff = ray.z - get_minimum_depth_plane(ray.xy, 0.0);
+            if (depth_diff < thickness) {
+                hit = true;
+            }
+        }
+
+        return float4(ray.xy, ray.z, float(iterations) / float(max_iterations));
+    }
+
+    [numthreads(8, 8, 1)]
+    void cs_main(uint3 dispatch_id : SV_DispatchThreadID) {
+        float2 uv = (float2(dispatch_id.xy) + 0.5) * inv_screen_size;
+
+        float depth = hi_z_texture.SampleLevel(point_sampler, uv, 0);
+        if (depth >= 1.0) {
+            reflection_output[dispatch_id.xy] = float4(0.0, 0.0, 0.0, 0.0);
+            return;
+        }
+
+        float4 rm = roughness_metallic.SampleLevel(linear_sampler, uv, 0);
+        float roughness = rm.r;
+        float metallic = rm.g;
+
+        if (roughness > roughness_threshold && metallic < 0.1) {
+            reflection_output[dispatch_id.xy] = float4(0.0, 0.0, 0.0, 0.0);
+            return;
+        }
+
+        float3 view_pos = get_view_position(uv, depth);
+        float3 world_normal = normalize(normal_texture.SampleLevel(linear_sampler, uv, 0).xyz * 2.0 - 1.0);
+        float3 view_normal = normalize(mul((float3x3)view, world_normal));
+
+        float3 view_dir = normalize(view_pos);
+        float3 reflect_dir = reflect(view_dir, view_normal);
+
+        // Convert reflection to screen space direction
+        float3 ray_end = view_pos + reflect_dir * max_ray_distance;
+
+        float4 start_clip = mul(projection, float4(view_pos, 1.0));
+        float4 end_clip = mul(projection, float4(ray_end, 1.0));
+
+        float3 start_screen = start_clip.xyz / start_clip.w;
+        float3 end_screen = end_clip.xyz / end_clip.w;
+
+        start_screen.xy = start_screen.xy * 0.5 + 0.5;
+        end_screen.xy = end_screen.xy * 0.5 + 0.5;
+        start_screen.y = 1.0 - start_screen.y;
+        end_screen.y = 1.0 - end_screen.y;
+
+        float3 direction = normalize(end_screen - start_screen);
+
+        bool hit;
+        float4 result = trace_hi_z(start_screen, direction, hit);
+
+        if (hit) {
+            float4 reflection_color = color_texture.SampleLevel(linear_sampler, result.xy, 0);
+
+            float n_dot_v = saturate(dot(-view_dir, view_normal));
+            float fresnel = lerp(0.04, 1.0, metallic) + (1.0 - lerp(0.04, 1.0, metallic)) * pow(1.0 - n_dot_v, fresnel_power);
+
+            float2 edge = abs(result.xy * 2.0 - 1.0);
+            float edge_fade_factor = 1.0 - pow(max(edge.x, edge.y), 4.0);
+            edge_fade_factor = saturate(edge_fade_factor / edge_fade);
+
+            float confidence = fresnel * edge_fade_factor * (1.0 - result.w) * (1.0 - roughness);
+
+            reflection_output[dispatch_id.xy] = float4(reflection_color.rgb, confidence);
+        } else {
+            reflection_output[dispatch_id.xy] = float4(0.0, 0.0, 0.0, 0.0);
+        }
+    }
+"#;
+
+// ============================================================================
+// STOCHASTIC SSR SHADER
+// ============================================================================
+
+@shader(compute)
+const SSR_STOCHASTIC_SHADER: &str = r#"
+    // Stochastic Screen-Space Reflections
+    // Uses importance sampling for rough reflections
+
+    cbuffer SSRParams : register(b0) {
+        float4x4 view;
+        float4x4 projection;
+        float4x4 inv_projection;
+        float2 screen_size;
+        float2 inv_screen_size;
+        float max_ray_distance;
+        float thickness;
+        uint max_iterations;
+        uint sample_count;
+        float roughness_threshold;
+        float fresnel_power;
+        float edge_fade;
+        float near_plane;
+        float far_plane;
+        uint frame_index;
+        float temporal_weight;
+        float brdf_bias;
+        float padding;
+    };
+
+    Texture2D<float4> color_texture : register(t0);
+    Texture2D<float> depth_texture : register(t1);
+    Texture2D<float4> normal_texture : register(t2);
+    Texture2D<float4> roughness_metallic : register(t3);
+    Texture2D<float4> blue_noise : register(t4);
+    Texture2D<float4> prev_reflection : register(t5);
+    Texture2D<float2> motion_vectors : register(t6);
+
+    RWTexture2D<float4> reflection_output : register(u0);
+    RWTexture2D<float4> ray_direction_pdf : register(u1);
+
+    SamplerState point_sampler : register(s0);
+    SamplerState linear_sampler : register(s1);
+
+    static const float PI = 3.14159265359;
+
+    float linearize_depth(float depth) {
+        return near_plane * far_plane / (far_plane - depth * (far_plane - near_plane));
+    }
+
+    float3 get_view_position(float2 uv, float depth) {
+        float4 clip = float4(uv * 2.0 - 1.0, depth, 1.0);
+        clip.y = -clip.y;
+        float4 view_pos = mul(inv_projection, clip);
+        return view_pos.xyz / view_pos.w;
+    }
+
+    // GGX importance sampling
+    float3 importance_sample_ggx(float2 xi, float3 N, float roughness) {
+        float a = roughness * roughness;
+        float a2 = a * a;
+
+        float phi = 2.0 * PI * xi.x;
+        float cos_theta = sqrt((1.0 - xi.y) / (1.0 + (a2 - 1.0) * xi.y));
+        float sin_theta = sqrt(1.0 - cos_theta * cos_theta);
+
+        float3 H;
+        H.x = cos(phi) * sin_theta;
+        H.y = sin(phi) * sin_theta;
+        H.z = cos_theta;
+
+        float3 up = abs(N.z) < 0.999 ? float3(0.0, 0.0, 1.0) : float3(1.0, 0.0, 0.0);
+        float3 tangent = normalize(cross(up, N));
+        float3 bitangent = cross(N, tangent);
+
+        return normalize(tangent * H.x + bitangent * H.y + N * H.z);
+    }
+
+    float ggx_pdf(float3 N, float3 H, float3 V, float roughness) {
+        float n_dot_h = saturate(dot(N, H));
+        float v_dot_h = saturate(dot(V, H));
+
+        float a = roughness * roughness;
+        float a2 = a * a;
+
+        float d = (n_dot_h * a2 - n_dot_h) * n_dot_h + 1.0;
+        float D = a2 / (PI * d * d);
+
+        return D * n_dot_h / (4.0 * v_dot_h);
+    }
+
+    bool ray_march(float3 origin, float3 direction, out float2 hit_uv, out float hit_depth) {
+        float3 ray_end = origin + direction * max_ray_distance;
+
+        float4 start_clip = mul(projection, float4(origin, 1.0));
+        float4 end_clip = mul(projection, float4(ray_end, 1.0));
+
+        float start_k = 1.0 / start_clip.w;
+        float end_k = 1.0 / end_clip.w;
+
+        float3 start_screen = start_clip.xyz * start_k;
+        float3 end_screen = end_clip.xyz * end_k;
+
+        start_screen.xy = start_screen.xy * 0.5 + 0.5;
+        end_screen.xy = end_screen.xy * 0.5 + 0.5;
+        start_screen.y = 1.0 - start_screen.y;
+        end_screen.y = 1.0 - end_screen.y;
+
+        float2 delta = (end_screen.xy - start_screen.xy) * screen_size;
+        float step_count = length(delta);
+
+        if (step_count < 1.0) {
+            hit_uv = float2(-1.0, -1.0);
+            return false;
+        }
+
+        float3 step = (end_screen - start_screen) / step_count;
+        float3 ray = start_screen;
+
+        uint iterations = min(uint(step_count), max_iterations);
+
+        for (uint i = 0; i < iterations; i++) {
+            ray += step;
+
+            if (any(ray.xy < 0.0) || any(ray.xy > 1.0) || ray.z > 1.0) {
+                break;
+            }
+
+            float scene_depth = depth_texture.SampleLevel(point_sampler, ray.xy, 0);
+            float depth_diff = ray.z - scene_depth;
+
+            if (depth_diff > 0.0 && depth_diff < thickness * (1.0 + float(i) / float(iterations))) {
+                hit_uv = ray.xy;
+                hit_depth = scene_depth;
+                return true;
+            }
+        }
+
+        hit_uv = float2(-1.0, -1.0);
+        return false;
+    }
+
+    [numthreads(8, 8, 1)]
+    void cs_main(uint3 dispatch_id : SV_DispatchThreadID) {
+        float2 uv = (float2(dispatch_id.xy) + 0.5) * inv_screen_size;
+
+        float depth = depth_texture.SampleLevel(point_sampler, uv, 0);
+        if (depth >= 1.0) {
+            reflection_output[dispatch_id.xy] = float4(0.0, 0.0, 0.0, 0.0);
+            return;
+        }
+
+        float4 rm = roughness_metallic.SampleLevel(linear_sampler, uv, 0);
+        float roughness = rm.r;
+        float metallic = rm.g;
+
+        // Clamp roughness for sampling
+        roughness = max(roughness, 0.02);
+
+        float3 view_pos = get_view_position(uv, depth);
+        float3 world_normal = normalize(normal_texture.SampleLevel(linear_sampler, uv, 0).xyz * 2.0 - 1.0);
+        float3 view_normal = normalize(mul((float3x3)view, world_normal));
+        float3 view_dir = normalize(-view_pos);
+
+        // Get blue noise for sampling
+        float2 noise_uv = uv * screen_size / 64.0;
+        noise_uv += float2(frame_index % 8, (frame_index / 8) % 8) / 8.0;
+        float4 noise = blue_noise.SampleLevel(point_sampler, noise_uv, 0);
+
+        // Single sample per pixel (temporal accumulation handles the rest)
+        float2 xi = noise.xy;
+        xi.y = lerp(xi.y, 0.0, brdf_bias);
+
+        float3 H = importance_sample_ggx(xi, view_normal, roughness);
+        float3 L = reflect(-view_dir, H);
+
+        float n_dot_v = saturate(dot(view_normal, view_dir));
+        float n_dot_l = saturate(dot(view_normal, L));
+
+        if (n_dot_l <= 0.0) {
+            reflection_output[dispatch_id.xy] = float4(0.0, 0.0, 0.0, 0.0);
+            return;
+        }
+
+        float pdf = ggx_pdf(view_normal, H, view_dir, roughness);
+
+        float2 hit_uv;
+        float hit_depth;
+
+        if (ray_march(view_pos, L, hit_uv, hit_depth)) {
+            float4 reflection_color = color_texture.SampleLevel(linear_sampler, hit_uv, 0);
+
+            float f0 = lerp(0.04, 1.0, metallic);
+            float fresnel = f0 + (1.0 - f0) * pow(1.0 - n_dot_v, 5.0);
+
+            float2 edge = abs(hit_uv * 2.0 - 1.0);
+            float edge_fade_factor = 1.0 - pow(max(edge.x, edge.y), 4.0);
+            edge_fade_factor = saturate(edge_fade_factor / edge_fade);
+
+            float weight = n_dot_l * fresnel * edge_fade_factor / max(pdf, 0.001);
+
+            // Temporal reprojection
+            float2 motion = motion_vectors.SampleLevel(linear_sampler, uv, 0);
+            float2 prev_uv = uv - motion;
+
+            float4 prev_color = float4(0.0, 0.0, 0.0, 0.0);
+            if (all(prev_uv >= 0.0) && all(prev_uv <= 1.0)) {
+                prev_color = prev_reflection.SampleLevel(linear_sampler, prev_uv, 0);
+            }
+
+            float4 current = float4(reflection_color.rgb * weight, weight);
+            float4 result = lerp(current, prev_color, temporal_weight);
+
+            reflection_output[dispatch_id.xy] = result;
+            ray_direction_pdf[dispatch_id.xy] = float4(L, pdf);
+        } else {
+            // Temporal fallback
+            float2 motion = motion_vectors.SampleLevel(linear_sampler, uv, 0);
+            float2 prev_uv = uv - motion;
+
+            if (all(prev_uv >= 0.0) && all(prev_uv <= 1.0)) {
+                float4 prev_color = prev_reflection.SampleLevel(linear_sampler, prev_uv, 0);
+                reflection_output[dispatch_id.xy] = prev_color * temporal_weight;
+            } else {
+                reflection_output[dispatch_id.xy] = float4(0.0, 0.0, 0.0, 0.0);
+            }
+
+            ray_direction_pdf[dispatch_id.xy] = float4(L, 0.0);
+        }
+    }
+"#;
+
+// ============================================================================
+// HI-Z GENERATION SHADER
+// ============================================================================
+
+@shader(compute)
+const HIZ_GENERATE_SHADER: &str = r#"
+    // Generate Hierarchical Z-buffer mip chain
+    // Uses min/max reduction for proper hierarchy
+
+    cbuffer HiZParams : register(b0) {
+        uint2 output_size;
+        uint mip_level;
+        uint padding;
+    };
+
+    Texture2D<float> input_depth : register(t0);
+    RWTexture2D<float> output_depth : register(u0);
+
+    SamplerState point_sampler : register(s0);
+
+    [numthreads(8, 8, 1)]
+    void cs_main(uint3 dispatch_id : SV_DispatchThreadID) {
+        if (any(dispatch_id.xy >= output_size)) return;
+
+        float2 uv = (float2(dispatch_id.xy) + 0.5) / float2(output_size);
+
+        // Sample 4 texels and take minimum (closest depth)
+        float4 depths;
+        depths.x = input_depth.SampleLevel(point_sampler, uv, mip_level - 1);
+        depths.y = input_depth.SampleLevel(point_sampler, uv + float2(1.0 / float(output_size.x), 0.0), mip_level - 1);
+        depths.z = input_depth.SampleLevel(point_sampler, uv + float2(0.0, 1.0 / float(output_size.y)), mip_level - 1);
+        depths.w = input_depth.SampleLevel(point_sampler, uv + float2(1.0 / float(output_size.x), 1.0 / float(output_size.y)), mip_level - 1);
+
+        // Take minimum for conservative Hi-Z
+        float min_depth = min(min(depths.x, depths.y), min(depths.z, depths.w));
+
+        output_depth[dispatch_id.xy] = min_depth;
+    }
+"#;
+
+// ============================================================================
+// SSR RESOLVE SHADER
+// ============================================================================
+
+@shader(compute)
+const SSR_RESOLVE_SHADER: &str = r#"
+    // Resolve SSR with temporal filtering and fallback
+
+    cbuffer ResolveParams : register(b0) {
+        float2 screen_size;
+        float2 inv_screen_size;
+        float temporal_weight;
+        float intensity;
+        uint frame_index;
+        float padding;
+    };
+
+    Texture2D<float4> ssr_color : register(t0);
+    Texture2D<float4> prev_resolved : register(t1);
+    Texture2D<float4> scene_color : register(t2);
+    Texture2D<float4> roughness_metallic : register(t3);
+    Texture2D<float2> motion_vectors : register(t4);
+    TextureCube<float4> environment_map : register(t5);
+
+    RWTexture2D<float4> resolved_output : register(u0);
+
+    SamplerState point_sampler : register(s0);
+    SamplerState linear_sampler : register(s1);
+
+    float4 sample_with_neighborhood_clamp(Texture2D<float4> tex, float2 uv, float4 prev_sample) {
+        // Neighborhood clamping for temporal stability
+        float4 s0 = tex.SampleLevel(linear_sampler, uv, 0);
+        float4 s1 = tex.SampleLevel(linear_sampler, uv + float2(inv_screen_size.x, 0), 0);
+        float4 s2 = tex.SampleLevel(linear_sampler, uv + float2(-inv_screen_size.x, 0), 0);
+        float4 s3 = tex.SampleLevel(linear_sampler, uv + float2(0, inv_screen_size.y), 0);
+        float4 s4 = tex.SampleLevel(linear_sampler, uv + float2(0, -inv_screen_size.y), 0);
+
+        float4 min_sample = min(min(min(s0, s1), min(s2, s3)), s4);
+        float4 max_sample = max(max(max(s0, s1), max(s2, s3)), s4);
+
+        return clamp(prev_sample, min_sample, max_sample);
+    }
+
+    [numthreads(8, 8, 1)]
+    void cs_main(uint3 dispatch_id : SV_DispatchThreadID) {
+        float2 uv = (float2(dispatch_id.xy) + 0.5) * inv_screen_size;
+
+        float4 ssr = ssr_color.SampleLevel(linear_sampler, uv, 0);
+        float4 rm = roughness_metallic.SampleLevel(linear_sampler, uv, 0);
+        float2 motion = motion_vectors.SampleLevel(linear_sampler, uv, 0);
+
+        float roughness = rm.r;
+        float metallic = rm.g;
+
+        // Reprojection
+        float2 prev_uv = uv - motion;
+        float4 prev_resolved = float4(0.0, 0.0, 0.0, 0.0);
+
+        if (all(prev_uv >= 0.0) && all(prev_uv <= 1.0)) {
+            prev_resolved = prev_resolved.SampleLevel(linear_sampler, prev_uv, 0);
+            prev_resolved = sample_with_neighborhood_clamp(ssr_color, uv, prev_resolved);
+        }
+
+        // Blend current and previous
+        float4 resolved;
+        if (ssr.a > 0.0) {
+            float3 color = ssr.rgb / max(ssr.a, 0.001);
+            resolved = float4(color, ssr.a);
+            resolved = lerp(resolved, prev_resolved, temporal_weight);
+        } else {
+            resolved = prev_resolved * temporal_weight;
+        }
+
+        resolved.rgb *= intensity;
+
+        resolved_output[dispatch_id.xy] = resolved;
+    }
+"#;
+
+// ============================================================================
+// SSR APPLY SHADER
+// ============================================================================
+
+@shader(fragment)
+const SSR_APPLY_SHADER: &str = r#"
+    // Apply SSR to scene with roughness-based blending
+
+    cbuffer ApplyParams : register(b0) {
+        float intensity;
+        float fallback_factor;
+        float roughness_fade_start;
+        float roughness_fade_end;
+    };
+
+    Texture2D<float4> scene_color : register(t0);
+    Texture2D<float4> ssr_color : register(t1);
+    Texture2D<float4> roughness_metallic : register(t2);
+    Texture2D<float4> normal_texture : register(t3);
+    TextureCube<float4> env_map : register(t4);
+
+    SamplerState linear_sampler : register(s0);
+
+    struct VSOutput {
+        float4 position : SV_POSITION;
+        float2 uv : TEXCOORD0;
+    };
+
+    float4 ps_main(VSOutput input) : SV_TARGET {
+        float4 scene = scene_color.Sample(linear_sampler, input.uv);
+        float4 ssr = ssr_color.Sample(linear_sampler, input.uv);
+        float4 rm = roughness_metallic.Sample(linear_sampler, input.uv);
+
+        float roughness = rm.r;
+        float metallic = rm.g;
+
+        // Roughness-based fade
+        float roughness_fade = 1.0 - smoothstep(roughness_fade_start, roughness_fade_end, roughness);
+
+        // SSR confidence
+        float confidence = ssr.a * roughness_fade;
+
+        float3 reflection = ssr.rgb;
+
+        // Apply reflection
+        float3 base_color = scene.rgb;
+        float3 specular_color = lerp(float3(0.04, 0.04, 0.04), base_color, metallic);
+
+        float3 result = lerp(scene.rgb, scene.rgb + reflection * specular_color, confidence * intensity);
+
+        return float4(result, scene.a);
+    }
+"#;
+
+// ============================================================================
+// SSR SYSTEM
+// ============================================================================
+
+@system
+struct SSRSystem {
+    config: SSRConfig,
+    ssr_texture: Handle<Texture>,
+    ssr_texture_prev: Handle<Texture>,
+    resolved_texture: Handle<Texture>,
+    resolved_texture_prev: Handle<Texture>,
+    hit_uv_texture: Handle<Texture>,
+    hi_z_texture: Handle<Texture>,
+    blue_noise_texture: Handle<Texture>,
+    ssr_pipeline: Handle<ComputePipeline>,
+    hi_z_pipeline: Handle<ComputePipeline>,
+    resolve_pipeline: Handle<ComputePipeline>,
+    apply_pipeline: Handle<RenderPipeline>,
+    frame_index: u32,
+}
+
+impl SSRSystem {
+    fn new(config: SSRConfig) -> Self {
+        Self {
+            config,
+            ssr_texture: Handle::null(),
+            ssr_texture_prev: Handle::null(),
+            resolved_texture: Handle::null(),
+            resolved_texture_prev: Handle::null(),
+            hit_uv_texture: Handle::null(),
+            hi_z_texture: Handle::null(),
+            blue_noise_texture: Handle::null(),
+            ssr_pipeline: Handle::null(),
+            hi_z_pipeline: Handle::null(),
+            resolve_pipeline: Handle::null(),
+            apply_pipeline: Handle::null(),
+            frame_index: 0,
+        }
+    }
+
+    fn initialize(&mut self, device: &RenderDevice, width: u32, height: u32) {
+        // Create SSR textures
+        let desc = TextureDescriptor {
+            size: Extent3d { width, height, depth: 1 },
+            format: TextureFormat::Rgba16Float,
+            usage: TextureUsage::STORAGE | TextureUsage::SAMPLED,
+            ..default()
+        };
+
+        self.ssr_texture = device.create_texture(&desc);
+        self.ssr_texture_prev = device.create_texture(&desc);
+        self.resolved_texture = device.create_texture(&desc);
+        self.resolved_texture_prev = device.create_texture(&desc);
+
+        self.hit_uv_texture = device.create_texture(&TextureDescriptor {
+            size: Extent3d { width, height, depth: 1 },
+            format: TextureFormat::Rg16Float,
+            usage: TextureUsage::STORAGE | TextureUsage::SAMPLED,
+            ..default()
+        });
+
+        // Create Hi-Z texture with mips
+        let mip_levels = (width.max(height) as f32).log2().ceil() as u32;
+        self.hi_z_texture = device.create_texture(&TextureDescriptor {
+            size: Extent3d { width, height, depth: 1 },
+            format: TextureFormat::R32Float,
+            mip_level_count: mip_levels,
+            usage: TextureUsage::STORAGE | TextureUsage::SAMPLED,
+            ..default()
+        });
+
+        // Load blue noise
+        self.blue_noise_texture = self.generate_blue_noise(device);
+
+        // Create pipelines
+        self.ssr_pipeline = match self.config.technique {
+            SSRTechnique::Linear => device.create_compute_pipeline(SSR_LINEAR_SHADER),
+            SSRTechnique::HiZ | SSRTechnique::HybridLinearHiZ =>
+                device.create_compute_pipeline(SSR_HIZ_SHADER),
+            SSRTechnique::Stochastic | SSRTechnique::TemporalFiltered =>
+                device.create_compute_pipeline(SSR_STOCHASTIC_SHADER),
+            _ => device.create_compute_pipeline(SSR_HIZ_SHADER),
+        };
+
+        self.hi_z_pipeline = device.create_compute_pipeline(HIZ_GENERATE_SHADER);
+        self.resolve_pipeline = device.create_compute_pipeline(SSR_RESOLVE_SHADER);
+        self.apply_pipeline = device.create_render_pipeline(SSR_APPLY_SHADER);
+    }
+
+    fn generate_blue_noise(&self, device: &RenderDevice) -> Handle<Texture> {
+        // Generate or load blue noise texture
+        let size = 64u32;
+        let mut data = vec![0u8; (size * size * 4) as usize];
+
+        for i in 0..(size * size) as usize {
+            data[i * 4] = rand::random::<u8>();
+            data[i * 4 + 1] = rand::random::<u8>();
+            data[i * 4 + 2] = rand::random::<u8>();
+            data[i * 4 + 3] = rand::random::<u8>();
+        }
+
+        device.create_texture_with_data(&TextureDescriptor {
+            size: Extent3d { width: size, height: size, depth: 1 },
+            format: TextureFormat::Rgba8Unorm,
+            usage: TextureUsage::SAMPLED,
+            ..default()
+        }, &data)
+    }
+
+    fn render(&mut self,
+              cmd: &mut CommandEncoder,
+              color: &Texture,
+              depth: &Texture,
+              normal: &Texture,
+              roughness_metallic: &Texture,
+              motion_vectors: &Texture,
+              output: &Texture,
+              camera: &Camera) {
+        // Generate Hi-Z if needed
+        if self.config.hi_z_enabled {
+            self.generate_hi_z(cmd, depth);
+        }
+
+        // Swap history textures
+        std::mem::swap(&mut self.ssr_texture, &mut self.ssr_texture_prev);
+        std::mem::swap(&mut self.resolved_texture, &mut self.resolved_texture_prev);
+
+        // Compute SSR
+        {
+            let mut pass = cmd.begin_compute_pass();
+            pass.set_pipeline(&self.ssr_pipeline);
+            // Set bind groups...
+            let width = self.ssr_texture.width();
+            let height = self.ssr_texture.height();
+            pass.dispatch((width + 7) / 8, (height + 7) / 8, 1);
+        }
+
+        // Resolve with temporal filtering
+        {
+            let mut pass = cmd.begin_compute_pass();
+            pass.set_pipeline(&self.resolve_pipeline);
+            // Set bind groups...
+            let width = self.resolved_texture.width();
+            let height = self.resolved_texture.height();
+            pass.dispatch((width + 7) / 8, (height + 7) / 8, 1);
+        }
+
+        // Apply to scene
+        {
+            let mut pass = cmd.begin_render_pass(&RenderPassDescriptor {
+                color_attachments: &[RenderPassColorAttachment {
+                    view: output,
+                    load_op: LoadOp::Load,
+                    store_op: StoreOp::Store,
+                }],
+                ..default()
+            });
+
+            pass.set_pipeline(&self.apply_pipeline);
+            pass.draw(0..3, 0..1);
+        }
+
+        self.frame_index += 1;
+    }
+
+    fn generate_hi_z(&self, cmd: &mut CommandEncoder, depth: &Texture) {
+        let mip_levels = self.hi_z_texture.mip_level_count();
+
+        for mip in 1..mip_levels {
+            let mut pass = cmd.begin_compute_pass();
+            pass.set_pipeline(&self.hi_z_pipeline);
+            // Set bind groups for mip generation...
+
+            let width = (self.hi_z_texture.width() >> mip).max(1);
+            let height = (self.hi_z_texture.height() >> mip).max(1);
+            pass.dispatch((width + 7) / 8, (height + 7) / 8, 1);
+        }
+    }
+}
+
+// ============================================================================
+// CONE TRACING SSR (for very rough surfaces)
+// ============================================================================
+
+@shader(compute)
+const SSR_CONE_TRACING_SHADER: &str = r#"
+    // Cone Tracing SSR for rough surfaces
+    // Traces cones instead of rays for pre-filtered reflections
+
+    cbuffer ConeParams : register(b0) {
+        float4x4 view;
+        float4x4 projection;
+        float4x4 inv_projection;
+        float2 screen_size;
+        float2 inv_screen_size;
+        float max_ray_distance;
+        float thickness;
+        uint max_iterations;
+        float near_plane;
+        float far_plane;
+        float cone_angle_start;
+        float cone_angle_growth;
+        float padding;
+    };
+
+    Texture2D<float4> color_texture : register(t0);
+    Texture2D<float> depth_texture : register(t1);
+    Texture2D<float4> normal_texture : register(t2);
+    Texture2D<float4> roughness_metallic : register(t3);
+    Texture2D<float4> color_mip0 : register(t4);
+    Texture2D<float4> color_mip1 : register(t5);
+    Texture2D<float4> color_mip2 : register(t6);
+    Texture2D<float4> color_mip3 : register(t7);
+
+    RWTexture2D<float4> reflection_output : register(u0);
+
+    SamplerState point_sampler : register(s0);
+    SamplerState linear_sampler : register(s1);
+
+    float linearize_depth(float depth) {
+        return near_plane * far_plane / (far_plane - depth * (far_plane - near_plane));
+    }
+
+    float3 get_view_position(float2 uv, float depth) {
+        float4 clip = float4(uv * 2.0 - 1.0, depth, 1.0);
+        clip.y = -clip.y;
+        float4 view_pos = mul(inv_projection, clip);
+        return view_pos.xyz / view_pos.w;
+    }
+
+    float4 sample_color_mip(float2 uv, float mip) {
+        if (mip < 1.0) return lerp(color_mip0.SampleLevel(linear_sampler, uv, 0), color_mip1.SampleLevel(linear_sampler, uv, 0), mip);
+        if (mip < 2.0) return lerp(color_mip1.SampleLevel(linear_sampler, uv, 0), color_mip2.SampleLevel(linear_sampler, uv, 0), mip - 1.0);
+        if (mip < 3.0) return lerp(color_mip2.SampleLevel(linear_sampler, uv, 0), color_mip3.SampleLevel(linear_sampler, uv, 0), mip - 2.0);
+        return color_mip3.SampleLevel(linear_sampler, uv, 0);
+    }
+
+    [numthreads(8, 8, 1)]
+    void cs_main(uint3 dispatch_id : SV_DispatchThreadID) {
+        float2 uv = (float2(dispatch_id.xy) + 0.5) * inv_screen_size;
+
+        float depth = depth_texture.SampleLevel(point_sampler, uv, 0);
+        if (depth >= 1.0) {
+            reflection_output[dispatch_id.xy] = float4(0.0, 0.0, 0.0, 0.0);
+            return;
+        }
+
+        float4 rm = roughness_metallic.SampleLevel(linear_sampler, uv, 0);
+        float roughness = rm.r;
+        float metallic = rm.g;
+
+        float3 view_pos = get_view_position(uv, depth);
+        float3 world_normal = normalize(normal_texture.SampleLevel(linear_sampler, uv, 0).xyz * 2.0 - 1.0);
+        float3 view_normal = normalize(mul((float3x3)view, world_normal));
+
+        float3 view_dir = normalize(view_pos);
+        float3 reflect_dir = reflect(view_dir, view_normal);
+
+        // Cone angle based on roughness
+        float cone_angle = cone_angle_start + roughness * roughness * 0.5;
+
+        float3 ray_pos = view_pos;
+        float ray_distance = 0.0;
+        float current_cone_radius = cone_angle;
+
+        float4 accumulated_color = float4(0.0, 0.0, 0.0, 0.0);
+        float accumulated_alpha = 0.0;
+
+        for (uint i = 0; i < max_iterations && accumulated_alpha < 0.95; i++) {
+            ray_distance += max(current_cone_radius * 2.0, 1.0) / screen_size.y * abs(ray_pos.z);
+            ray_pos = view_pos + reflect_dir * ray_distance;
+
+            float4 proj_pos = mul(projection, float4(ray_pos, 1.0));
+            float2 sample_uv = (proj_pos.xy / proj_pos.w) * 0.5 + 0.5;
+            sample_uv.y = 1.0 - sample_uv.y;
+
+            if (any(sample_uv < 0.0) || any(sample_uv > 1.0) || ray_distance > max_ray_distance) break;
+
+            float sample_depth = depth_texture.SampleLevel(point_sampler, sample_uv, 0);
+            float3 sample_pos = get_view_position(sample_uv, sample_depth);
+
+            float depth_diff = ray_pos.z - sample_pos.z;
+
+            if (depth_diff > 0.0 && depth_diff < thickness + current_cone_radius) {
+                // Sample color at appropriate mip level based on cone radius
+                float mip_level = log2(max(1.0, current_cone_radius * screen_size.y / abs(ray_pos.z)));
+                float4 color = sample_color_mip(sample_uv, mip_level);
+
+                float hit_alpha = 1.0 - accumulated_alpha;
+                accumulated_color += color * hit_alpha;
+                accumulated_alpha += hit_alpha;
+            }
+
+            current_cone_radius += cone_angle_growth * ray_distance;
+        }
+
+        reflection_output[dispatch_id.xy] = float4(accumulated_color.rgb, accumulated_alpha);
+    }
+"#;

@@ -1,0 +1,1851 @@
+// =============================================================================
+// PHOTON ENGINE - DECAL SYSTEM
+// =============================================================================
+// Comprehensive decal rendering system supporting deferred decals, screen-space
+// decals, projected decals, and volume decals with GPU-driven rendering.
+// Based on Harper Engine rendering techniques for dynamic surface details.
+// =============================================================================
+
+import core::memory::{Arena, Pool, Buffer, GpuBuffer};
+import core::math::{Vec2, Vec3, Vec4, Mat4, Quaternion, Transform, AABB, OBB};
+import core::simd::{f32x4, f32x8, SimdMath};
+import photon::gpu::{ComputeShader, RenderPipeline, Texture, Sampler};
+import photon::gbuffer::{GBuffer, GBufferChannel};
+import photon::materials::{DisneyMaterial, PBRTextureSet};
+
+// =============================================================================
+// REGION: DECAL TYPES AND ENUMS
+// =============================================================================
+
+/// Decal projection method
+pub enum DecalProjection {
+    /// Box projection (most common)
+    Box,
+    /// Spherical projection
+    Sphere,
+    /// Cylindrical projection
+    Cylinder,
+    /// Planar projection
+    Plane,
+    /// Mesh-based projection
+    Mesh { mesh_id: u32 },
+    /// Screen-space projection
+    ScreenSpace,
+}
+
+/// Decal blend mode for each channel
+pub enum DecalBlendMode {
+    /// Replace target value
+    Replace,
+    /// Multiply with target
+    Multiply,
+    /// Add to target
+    Add,
+    /// Overlay blend
+    Overlay,
+    /// Alpha blend
+    AlphaBlend,
+    /// Normal blend (special for normals)
+    NormalBlend,
+    /// Height blend with depth
+    HeightBlend,
+}
+
+/// Which GBuffer channels the decal affects
+pub struct DecalChannelMask {
+    /// Affect albedo/base color
+    pub albedo: bool,
+    /// Affect normal map
+    pub normal: bool,
+    /// Affect roughness
+    pub roughness: bool,
+    /// Affect metallic
+    pub metallic: bool,
+    /// Affect ambient occlusion
+    pub ao: bool,
+    /// Affect emission
+    pub emission: bool,
+}
+
+impl DecalChannelMask {
+    /// All channels
+    pub fn all() -> Self {
+        Self {
+            albedo: true,
+            normal: true,
+            roughness: true,
+            metallic: true,
+            ao: true,
+            emission: true,
+        }
+    }
+
+    /// Albedo only
+    pub fn albedo_only() -> Self {
+        Self {
+            albedo: true,
+            normal: false,
+            roughness: false,
+            metallic: false,
+            ao: false,
+            emission: false,
+        }
+    }
+
+    /// Normal only
+    pub fn normal_only() -> Self {
+        Self {
+            albedo: false,
+            normal: true,
+            roughness: false,
+            metallic: false,
+            ao: false,
+            emission: false,
+        }
+    }
+
+    /// Visual channels (albedo, normal, roughness)
+    pub fn visual() -> Self {
+        Self {
+            albedo: true,
+            normal: true,
+            roughness: true,
+            metallic: false,
+            ao: false,
+            emission: false,
+        }
+    }
+}
+
+/// Decal sorting layer
+pub enum DecalSortLayer {
+    /// Background decals (terrain details)
+    Background,
+    /// Default layer
+    Default,
+    /// Foreground (bullet holes, blood splatter)
+    Foreground,
+    /// UI/Debug decals (always on top)
+    Overlay,
+    /// Custom sort order
+    Custom(i32),
+}
+
+impl DecalSortLayer {
+    pub fn sort_order(&self) -> i32 {
+        match self {
+            Self::Background => -100,
+            Self::Default => 0,
+            Self::Foreground => 100,
+            Self::Overlay => 1000,
+            Self::Custom(order) => *order,
+        }
+    }
+}
+
+// =============================================================================
+// REGION: DECAL DATA STRUCTURES
+// =============================================================================
+
+/// Core decal data
+pub struct Decal {
+    /// Unique identifier
+    pub id: u64,
+
+    /// World-space transform
+    pub transform: Transform,
+
+    /// Projection type
+    pub projection: DecalProjection,
+
+    /// Decal size (width, height, depth)
+    pub size: Vec3,
+
+    /// Texture atlas region
+    pub atlas_rect: DecalAtlasRect,
+
+    /// Channel mask
+    pub channel_mask: DecalChannelMask,
+
+    /// Blend modes per channel
+    pub blend_modes: DecalBlendModes,
+
+    /// Opacity (0-1)
+    pub opacity: f32,
+
+    /// Normal fade angle (radians) - fade when surface normal is away from decal
+    pub normal_fade_angle: f32,
+
+    /// Normal fade power
+    pub normal_fade_power: f32,
+
+    /// Distance fade start
+    pub fade_start_distance: f32,
+
+    /// Distance fade end
+    pub fade_end_distance: f32,
+
+    /// Sort layer
+    pub sort_layer: DecalSortLayer,
+
+    /// Lifetime (seconds, 0 = infinite)
+    pub lifetime: f32,
+
+    /// Current age (seconds)
+    pub age: f32,
+
+    /// Fade out duration
+    pub fade_out_duration: f32,
+
+    /// Enabled flag
+    pub enabled: bool,
+
+    /// Casts shadows
+    pub cast_shadows: bool,
+
+    /// Receives shadows
+    pub receive_shadows: bool,
+}
+
+/// Blend modes per channel
+pub struct DecalBlendModes {
+    pub albedo: DecalBlendMode,
+    pub normal: DecalBlendMode,
+    pub roughness: DecalBlendMode,
+    pub metallic: DecalBlendMode,
+    pub ao: DecalBlendMode,
+    pub emission: DecalBlendMode,
+}
+
+impl Default for DecalBlendModes {
+    fn default() -> Self {
+        Self {
+            albedo: DecalBlendMode::AlphaBlend,
+            normal: DecalBlendMode::NormalBlend,
+            roughness: DecalBlendMode::AlphaBlend,
+            metallic: DecalBlendMode::AlphaBlend,
+            ao: DecalBlendMode::Multiply,
+            emission: DecalBlendMode::Add,
+        }
+    }
+}
+
+/// Decal atlas rectangle (normalized coordinates)
+pub struct DecalAtlasRect {
+    /// UV offset
+    pub offset: Vec2,
+    /// UV scale
+    pub scale: Vec2,
+    /// Atlas page index
+    pub page: u32,
+}
+
+impl DecalAtlasRect {
+    /// Full texture
+    pub fn full() -> Self {
+        Self {
+            offset: Vec2::zero(),
+            scale: Vec2::splat(1.0),
+            page: 0,
+        }
+    }
+}
+
+impl Decal {
+    /// Create a new decal
+    pub fn new(position: Vec3, rotation: Quaternion, size: Vec3) -> Self {
+        Self {
+            id: 0,
+            transform: Transform {
+                position,
+                rotation,
+                scale: Vec3::splat(1.0),
+            },
+            projection: DecalProjection::Box,
+            size,
+            atlas_rect: DecalAtlasRect::full(),
+            channel_mask: DecalChannelMask::visual(),
+            blend_modes: DecalBlendModes::default(),
+            opacity: 1.0,
+            normal_fade_angle: 1.57, // 90 degrees
+            normal_fade_power: 2.0,
+            fade_start_distance: 50.0,
+            fade_end_distance: 100.0,
+            sort_layer: DecalSortLayer::Default,
+            lifetime: 0.0,
+            age: 0.0,
+            fade_out_duration: 1.0,
+            enabled: true,
+            cast_shadows: false,
+            receive_shadows: true,
+        }
+    }
+
+    /// Get the oriented bounding box
+    pub fn get_obb(&self) -> OBB {
+        OBB {
+            center: self.transform.position,
+            half_extents: self.size * 0.5,
+            orientation: self.transform.rotation,
+        }
+    }
+
+    /// Get the world-to-decal matrix
+    pub fn get_world_to_decal_matrix(&self) -> Mat4 {
+        let decal_to_world = Mat4::from_transform(&self.transform) *
+                            Mat4::from_scale(self.size);
+        decal_to_world.inverse()
+    }
+
+    /// Check if decal is expired
+    pub fn is_expired(&self) -> bool {
+        self.lifetime > 0.0 && self.age >= self.lifetime
+    }
+
+    /// Get current opacity including fade
+    pub fn get_current_opacity(&self) -> f32 {
+        if self.lifetime <= 0.0 {
+            return self.opacity;
+        }
+
+        let fade_start = self.lifetime - self.fade_out_duration;
+        if self.age < fade_start {
+            self.opacity
+        } else {
+            let t = (self.age - fade_start) / self.fade_out_duration;
+            self.opacity * (1.0 - t.clamp(0.0, 1.0))
+        }
+    }
+}
+
+// =============================================================================
+// REGION: GPU DECAL DATA
+// =============================================================================
+
+/// GPU-compatible decal data
+#[repr(C)]
+pub struct GpuDecalData {
+    /// World to decal matrix (row-major)
+    pub world_to_decal: [f32; 16],
+
+    /// Decal to world matrix (for normals)
+    pub decal_to_world: [f32; 16],
+
+    /// Atlas UV rect (offset.x, offset.y, scale.x, scale.y)
+    pub atlas_rect: [f32; 4],
+
+    /// Opacity, normal fade angle, normal fade power, distance fade start
+    pub params0: [f32; 4],
+
+    /// Distance fade end, sort order, channel mask (bits), blend modes (packed)
+    pub params1: [f32; 4],
+
+    /// Size
+    pub size: [f32; 4],
+}
+
+impl GpuDecalData {
+    pub fn from_decal(decal: &Decal) -> Self {
+        let world_to_decal = decal.get_world_to_decal_matrix();
+        let decal_to_world = world_to_decal.inverse();
+
+        // Pack channel mask into bits
+        let channel_mask_bits =
+            (decal.channel_mask.albedo as u32) |
+            ((decal.channel_mask.normal as u32) << 1) |
+            ((decal.channel_mask.roughness as u32) << 2) |
+            ((decal.channel_mask.metallic as u32) << 3) |
+            ((decal.channel_mask.ao as u32) << 4) |
+            ((decal.channel_mask.emission as u32) << 5);
+
+        Self {
+            world_to_decal: world_to_decal.to_array(),
+            decal_to_world: decal_to_world.to_array(),
+            atlas_rect: [
+                decal.atlas_rect.offset.x,
+                decal.atlas_rect.offset.y,
+                decal.atlas_rect.scale.x,
+                decal.atlas_rect.scale.y,
+            ],
+            params0: [
+                decal.get_current_opacity(),
+                decal.normal_fade_angle,
+                decal.normal_fade_power,
+                decal.fade_start_distance,
+            ],
+            params1: [
+                decal.fade_end_distance,
+                decal.sort_layer.sort_order() as f32,
+                channel_mask_bits as f32,
+                0.0,
+            ],
+            size: [decal.size.x, decal.size.y, decal.size.z, 0.0],
+        }
+    }
+}
+
+// =============================================================================
+// REGION: DECAL ATLAS
+// =============================================================================
+
+/// Decal texture atlas
+pub struct DecalAtlas {
+    /// Atlas pages (array texture)
+    pub pages: Vec<DecalAtlasPage>,
+
+    /// Atlas resolution per page
+    pub page_resolution: u32,
+
+    /// Number of channels (RGBA = 4)
+    pub channels: u32,
+
+    /// GPU texture array
+    pub texture_array: Texture,
+
+    /// Free region allocator
+    allocator: AtlasAllocator,
+
+    /// Registered decal textures
+    registered_textures: Vec<DecalTextureEntry>,
+}
+
+/// Single atlas page
+pub struct DecalAtlasPage {
+    /// Page index
+    pub index: u32,
+
+    /// Allocated regions
+    pub regions: Vec<AtlasRegion>,
+
+    /// Free space remaining
+    pub free_space: u32,
+}
+
+/// Atlas region
+pub struct AtlasRegion {
+    /// Region bounds (pixels)
+    pub bounds: (u32, u32, u32, u32), // x, y, width, height
+
+    /// Owner decal texture ID
+    pub owner_id: u64,
+
+    /// Is free
+    pub is_free: bool,
+}
+
+/// Registered decal texture
+pub struct DecalTextureEntry {
+    /// Unique ID
+    pub id: u64,
+
+    /// Atlas location
+    pub atlas_rect: DecalAtlasRect,
+
+    /// Original texture path (for streaming)
+    pub source_path: Option<String>,
+
+    /// Reference count
+    pub ref_count: u32,
+}
+
+/// Atlas allocator using shelf algorithm
+struct AtlasAllocator {
+    /// Current shelf position
+    shelf_x: u32,
+    shelf_y: u32,
+    shelf_height: u32,
+
+    /// Page index
+    current_page: u32,
+
+    /// Page resolution
+    resolution: u32,
+
+    /// Padding between textures
+    padding: u32,
+}
+
+impl DecalAtlas {
+    /// Create new decal atlas
+    pub fn new(page_resolution: u32, num_pages: u32) -> Self {
+        let texture_array = Texture::create_2d_array(
+            page_resolution,
+            page_resolution,
+            num_pages,
+            TextureFormat::RGBA8Unorm,
+            TextureUsage::Sampled | TextureUsage::CopyDst,
+        );
+
+        let mut pages = Vec::with_capacity(num_pages as usize);
+        for i in 0..num_pages {
+            pages.push(DecalAtlasPage {
+                index: i,
+                regions: Vec::new(),
+                free_space: page_resolution * page_resolution,
+            });
+        }
+
+        Self {
+            pages,
+            page_resolution,
+            channels: 4,
+            texture_array,
+            allocator: AtlasAllocator {
+                shelf_x: 0,
+                shelf_y: 0,
+                shelf_height: 0,
+                current_page: 0,
+                resolution: page_resolution,
+                padding: 2,
+            },
+            registered_textures: Vec::new(),
+        }
+    }
+
+    /// Allocate space for a decal texture
+    pub fn allocate(&mut self, width: u32, height: u32) -> Option<DecalAtlasRect> {
+        let padded_width = width + self.allocator.padding * 2;
+        let padded_height = height + self.allocator.padding * 2;
+
+        // Try to fit on current shelf
+        if self.allocator.shelf_x + padded_width <= self.allocator.resolution {
+            // Fits on current shelf
+            let x = self.allocator.shelf_x + self.allocator.padding;
+            let y = self.allocator.shelf_y + self.allocator.padding;
+
+            self.allocator.shelf_x += padded_width;
+            self.allocator.shelf_height = self.allocator.shelf_height.max(padded_height);
+
+            return Some(DecalAtlasRect {
+                offset: Vec2::new(
+                    x as f32 / self.page_resolution as f32,
+                    y as f32 / self.page_resolution as f32,
+                ),
+                scale: Vec2::new(
+                    width as f32 / self.page_resolution as f32,
+                    height as f32 / self.page_resolution as f32,
+                ),
+                page: self.allocator.current_page,
+            });
+        }
+
+        // Start new shelf
+        self.allocator.shelf_x = 0;
+        self.allocator.shelf_y += self.allocator.shelf_height;
+        self.allocator.shelf_height = 0;
+
+        // Check if new shelf fits on current page
+        if self.allocator.shelf_y + padded_height > self.allocator.resolution {
+            // Need new page
+            self.allocator.current_page += 1;
+            self.allocator.shelf_x = 0;
+            self.allocator.shelf_y = 0;
+            self.allocator.shelf_height = 0;
+
+            if self.allocator.current_page as usize >= self.pages.len() {
+                return None; // Atlas full
+            }
+        }
+
+        // Allocate on new shelf
+        let x = self.allocator.shelf_x + self.allocator.padding;
+        let y = self.allocator.shelf_y + self.allocator.padding;
+
+        self.allocator.shelf_x += padded_width;
+        self.allocator.shelf_height = padded_height;
+
+        Some(DecalAtlasRect {
+            offset: Vec2::new(
+                x as f32 / self.page_resolution as f32,
+                y as f32 / self.page_resolution as f32,
+            ),
+            scale: Vec2::new(
+                width as f32 / self.page_resolution as f32,
+                height as f32 / self.page_resolution as f32,
+            ),
+            page: self.allocator.current_page,
+        })
+    }
+
+    /// Upload texture data to atlas
+    pub fn upload(
+        &mut self,
+        rect: &DecalAtlasRect,
+        data: &[u8],
+        width: u32,
+        height: u32,
+    ) {
+        let x = (rect.offset.x * self.page_resolution as f32) as u32;
+        let y = (rect.offset.y * self.page_resolution as f32) as u32;
+
+        self.texture_array.write_region(
+            x, y, rect.page,
+            width, height, 1,
+            data,
+        );
+    }
+
+    /// Register a decal texture
+    pub fn register_texture(
+        &mut self,
+        texture: &Texture,
+        path: Option<String>,
+    ) -> Option<u64> {
+        let width = texture.width();
+        let height = texture.height();
+
+        // Allocate space
+        let rect = self.allocate(width, height)?;
+
+        // Generate ID
+        let id = self.registered_textures.len() as u64 + 1;
+
+        // Upload texture data
+        let data = texture.read_pixels();
+        self.upload(&rect, &data, width, height);
+
+        // Register
+        self.registered_textures.push(DecalTextureEntry {
+            id,
+            atlas_rect: rect,
+            source_path: path,
+            ref_count: 1,
+        });
+
+        Some(id)
+    }
+
+    /// Get atlas rect for texture ID
+    pub fn get_rect(&self, texture_id: u64) -> Option<&DecalAtlasRect> {
+        self.registered_textures
+            .iter()
+            .find(|e| e.id == texture_id)
+            .map(|e| &e.atlas_rect)
+    }
+}
+
+// Texture format enum
+pub enum TextureFormat {
+    RGBA8Unorm,
+    RGBA16Float,
+    R8Unorm,
+}
+
+// Texture usage flags
+bitflags::bitflags! {
+    pub struct TextureUsage: u32 {
+        const Sampled = 1;
+        const Storage = 2;
+        const RenderTarget = 4;
+        const CopyDst = 8;
+        const CopySrc = 16;
+    }
+}
+
+// =============================================================================
+// REGION: DECAL MANAGER
+// =============================================================================
+
+/// Manages all decals in the scene
+pub struct DecalManager {
+    /// All decals
+    decals: Vec<Decal>,
+
+    /// Free ID list
+    free_ids: Vec<u64>,
+
+    /// Next ID
+    next_id: u64,
+
+    /// Decal atlas
+    pub atlas: DecalAtlas,
+
+    /// GPU decal buffer
+    gpu_buffer: GpuBuffer,
+
+    /// Visible decals (after culling)
+    visible_decals: Vec<usize>,
+
+    /// Sorted decal indices
+    sorted_decals: Vec<usize>,
+
+    /// Buffer dirty flag
+    dirty: bool,
+
+    /// Max decals
+    max_decals: usize,
+}
+
+impl DecalManager {
+    /// Create new decal manager
+    pub fn new(max_decals: usize, atlas_resolution: u32, atlas_pages: u32) -> Self {
+        let gpu_buffer = GpuBuffer::new(
+            max_decals * std::mem::size_of::<GpuDecalData>(),
+            BufferUsage::Storage,
+        );
+
+        Self {
+            decals: Vec::with_capacity(max_decals),
+            free_ids: Vec::new(),
+            next_id: 1,
+            atlas: DecalAtlas::new(atlas_resolution, atlas_pages),
+            gpu_buffer,
+            visible_decals: Vec::with_capacity(max_decals),
+            sorted_decals: Vec::with_capacity(max_decals),
+            dirty: true,
+            max_decals,
+        }
+    }
+
+    /// Add a decal
+    pub fn add(&mut self, mut decal: Decal) -> u64 {
+        if self.decals.len() >= self.max_decals {
+            // Remove oldest expired decal
+            if let Some(idx) = self.find_oldest_expired() {
+                self.remove_at(idx);
+            } else {
+                return 0; // Can't add more
+            }
+        }
+
+        let id = if let Some(id) = self.free_ids.pop() {
+            id
+        } else {
+            let id = self.next_id;
+            self.next_id += 1;
+            id
+        };
+
+        decal.id = id;
+        self.decals.push(decal);
+        self.dirty = true;
+
+        id
+    }
+
+    /// Remove a decal by ID
+    pub fn remove(&mut self, id: u64) -> bool {
+        if let Some(idx) = self.decals.iter().position(|d| d.id == id) {
+            self.remove_at(idx);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Remove decal at index
+    fn remove_at(&mut self, index: usize) {
+        let decal = self.decals.swap_remove(index);
+        self.free_ids.push(decal.id);
+        self.dirty = true;
+    }
+
+    /// Find oldest expired decal
+    fn find_oldest_expired(&self) -> Option<usize> {
+        self.decals
+            .iter()
+            .enumerate()
+            .filter(|(_, d)| d.is_expired())
+            .max_by(|(_, a), (_, b)| a.age.partial_cmp(&b.age).unwrap())
+            .map(|(idx, _)| idx)
+    }
+
+    /// Get decal by ID
+    pub fn get(&self, id: u64) -> Option<&Decal> {
+        self.decals.iter().find(|d| d.id == id)
+    }
+
+    /// Get mutable decal by ID
+    pub fn get_mut(&mut self, id: u64) -> Option<&mut Decal> {
+        self.dirty = true;
+        self.decals.iter_mut().find(|d| d.id == id)
+    }
+
+    /// Update all decals
+    pub fn update(&mut self, delta_time: f32) {
+        let mut expired_indices = Vec::new();
+
+        for (idx, decal) in self.decals.iter_mut().enumerate() {
+            if decal.lifetime > 0.0 {
+                decal.age += delta_time;
+
+                if decal.is_expired() {
+                    expired_indices.push(idx);
+                }
+            }
+        }
+
+        // Remove expired decals (reverse order to maintain indices)
+        for idx in expired_indices.into_iter().rev() {
+            self.remove_at(idx);
+        }
+
+        self.dirty = true;
+    }
+
+    /// Cull and sort decals for rendering
+    pub fn cull_and_sort(
+        &mut self,
+        frustum: &Frustum,
+        camera_position: Vec3,
+    ) {
+        self.visible_decals.clear();
+
+        // Cull against frustum
+        for (idx, decal) in self.decals.iter().enumerate() {
+            if !decal.enabled {
+                continue;
+            }
+
+            let obb = decal.get_obb();
+            let aabb = obb.to_aabb();
+
+            if frustum.intersects_aabb(&aabb) {
+                // Distance culling
+                let distance = (decal.transform.position - camera_position).length();
+                if distance <= decal.fade_end_distance {
+                    self.visible_decals.push(idx);
+                }
+            }
+        }
+
+        // Sort by layer and distance
+        self.sorted_decals = self.visible_decals.clone();
+        self.sorted_decals.sort_by(|&a, &b| {
+            let decal_a = &self.decals[a];
+            let decal_b = &self.decals[b];
+
+            // First by sort layer
+            let layer_cmp = decal_a.sort_layer.sort_order()
+                .cmp(&decal_b.sort_layer.sort_order());
+
+            if layer_cmp != std::cmp::Ordering::Equal {
+                return layer_cmp;
+            }
+
+            // Then by distance (back to front for alpha blending)
+            let dist_a = (decal_a.transform.position - camera_position).length_squared();
+            let dist_b = (decal_b.transform.position - camera_position).length_squared();
+            dist_b.partial_cmp(&dist_a).unwrap_or(std::cmp::Ordering::Equal)
+        });
+    }
+
+    /// Upload visible decals to GPU
+    pub fn upload_gpu_data(&mut self) {
+        if !self.dirty || self.sorted_decals.is_empty() {
+            return;
+        }
+
+        let gpu_data: Vec<GpuDecalData> = self.sorted_decals
+            .iter()
+            .map(|&idx| GpuDecalData::from_decal(&self.decals[idx]))
+            .collect();
+
+        self.gpu_buffer.write(&gpu_data);
+        self.dirty = false;
+    }
+
+    /// Get GPU buffer
+    pub fn get_gpu_buffer(&self) -> &GpuBuffer {
+        &self.gpu_buffer
+    }
+
+    /// Get visible decal count
+    pub fn visible_count(&self) -> usize {
+        self.sorted_decals.len()
+    }
+
+    /// Get total decal count
+    pub fn total_count(&self) -> usize {
+        self.decals.len()
+    }
+}
+
+// Frustum for culling
+pub struct Frustum {
+    planes: [Vec4; 6],
+}
+
+impl Frustum {
+    pub fn intersects_aabb(&self, aabb: &AABB) -> bool {
+        for plane in &self.planes {
+            let p = Vec3::new(
+                if plane.x > 0.0 { aabb.max.x } else { aabb.min.x },
+                if plane.y > 0.0 { aabb.max.y } else { aabb.min.y },
+                if plane.z > 0.0 { aabb.max.z } else { aabb.min.z },
+            );
+
+            if plane.x * p.x + plane.y * p.y + plane.z * p.z + plane.w < 0.0 {
+                return false;
+            }
+        }
+        true
+    }
+}
+
+// =============================================================================
+// REGION: DEFERRED DECAL RENDERER
+// =============================================================================
+
+/// Deferred decal renderer (most common approach)
+pub struct DeferredDecalRenderer {
+    /// Decal shader
+    pub shader: RenderPipeline,
+
+    /// Decal box mesh
+    box_mesh: DecalBoxMesh,
+
+    /// Stencil state
+    stencil_enabled: bool,
+}
+
+/// Box mesh for decal projection
+struct DecalBoxMesh {
+    vertex_buffer: GpuBuffer,
+    index_buffer: GpuBuffer,
+    index_count: u32,
+}
+
+impl DecalBoxMesh {
+    fn new() -> Self {
+        // Unit cube vertices
+        let vertices: [f32; 24 * 3] = [
+            // Front face
+            -0.5, -0.5,  0.5,   0.5, -0.5,  0.5,   0.5,  0.5,  0.5,  -0.5,  0.5,  0.5,
+            // Back face
+            -0.5, -0.5, -0.5,  -0.5,  0.5, -0.5,   0.5,  0.5, -0.5,   0.5, -0.5, -0.5,
+            // Top face
+            -0.5,  0.5, -0.5,  -0.5,  0.5,  0.5,   0.5,  0.5,  0.5,   0.5,  0.5, -0.5,
+            // Bottom face
+            -0.5, -0.5, -0.5,   0.5, -0.5, -0.5,   0.5, -0.5,  0.5,  -0.5, -0.5,  0.5,
+            // Right face
+             0.5, -0.5, -0.5,   0.5,  0.5, -0.5,   0.5,  0.5,  0.5,   0.5, -0.5,  0.5,
+            // Left face
+            -0.5, -0.5, -0.5,  -0.5, -0.5,  0.5,  -0.5,  0.5,  0.5,  -0.5,  0.5, -0.5,
+        ];
+
+        let indices: [u16; 36] = [
+            0, 1, 2, 2, 3, 0,       // Front
+            4, 5, 6, 6, 7, 4,       // Back
+            8, 9, 10, 10, 11, 8,   // Top
+            12, 13, 14, 14, 15, 12, // Bottom
+            16, 17, 18, 18, 19, 16, // Right
+            20, 21, 22, 22, 23, 20, // Left
+        ];
+
+        Self {
+            vertex_buffer: GpuBuffer::from_slice(&vertices),
+            index_buffer: GpuBuffer::from_slice(&indices),
+            index_count: 36,
+        }
+    }
+}
+
+impl DeferredDecalRenderer {
+    /// Create deferred decal renderer
+    pub fn new() -> Self {
+        let shader = RenderPipeline::new(
+            DEFERRED_DECAL_VERTEX_SHADER,
+            DEFERRED_DECAL_PIXEL_SHADER,
+        );
+
+        Self {
+            shader,
+            box_mesh: DecalBoxMesh::new(),
+            stencil_enabled: true,
+        }
+    }
+
+    /// Render decals to GBuffer
+    pub fn render(
+        &self,
+        decal_manager: &DecalManager,
+        gbuffer: &mut GBuffer,
+        depth_texture: &Texture,
+        view_proj: Mat4,
+        inv_view_proj: Mat4,
+    ) {
+        if decal_manager.visible_count() == 0 {
+            return;
+        }
+
+        // Bind GBuffer for writing
+        gbuffer.bind_for_decals();
+
+        // Bind depth for reading
+        self.shader.set_texture(0, depth_texture);
+
+        // Bind decal atlas
+        self.shader.set_texture(1, &decal_manager.atlas.texture_array);
+
+        // Set uniforms
+        self.shader.set_uniform("u_view_proj", view_proj);
+        self.shader.set_uniform("u_inv_view_proj", inv_view_proj);
+
+        // Bind decal buffer
+        self.shader.set_storage_buffer(0, decal_manager.get_gpu_buffer());
+
+        // Draw instanced
+        self.shader.bind();
+        self.box_mesh.vertex_buffer.bind_vertex();
+        self.box_mesh.index_buffer.bind_index();
+
+        // Draw all visible decals as instances
+        self.shader.draw_indexed_instanced(
+            self.box_mesh.index_count,
+            decal_manager.visible_count() as u32,
+        );
+    }
+}
+
+const DEFERRED_DECAL_VERTEX_SHADER: &str = r#"
+    #version 460
+
+    layout(location = 0) in vec3 a_position;
+
+    layout(std430, binding = 0) readonly buffer DecalBuffer {
+        mat4 world_to_decal[];
+        mat4 decal_to_world[];
+        vec4 atlas_rect[];
+        vec4 params0[];
+        vec4 params1[];
+        vec4 size[];
+    } decals;
+
+    uniform mat4 u_view_proj;
+    uniform mat4 u_inv_view_proj;
+
+    out flat int v_instance_id;
+    out vec4 v_screen_pos;
+    out vec3 v_local_pos;
+
+    void main() {
+        int id = gl_InstanceID;
+        v_instance_id = id;
+
+        // Transform box vertex to world space
+        mat4 decal_to_world = decals.decal_to_world[id];
+        vec3 world_pos = (decal_to_world * vec4(a_position, 1.0)).xyz;
+
+        // Local position for projection
+        v_local_pos = a_position;
+
+        // Transform to clip space
+        gl_Position = u_view_proj * vec4(world_pos, 1.0);
+        v_screen_pos = gl_Position;
+    }
+"#;
+
+const DEFERRED_DECAL_PIXEL_SHADER: &str = r#"
+    #version 460
+
+    layout(location = 0) out vec4 o_albedo;
+    layout(location = 1) out vec4 o_normal;
+    layout(location = 2) out vec4 o_material;
+
+    layout(binding = 0) uniform sampler2D u_depth;
+    layout(binding = 1) uniform sampler2DArray u_decal_atlas;
+
+    layout(std430, binding = 0) readonly buffer DecalBuffer {
+        mat4 world_to_decal[];
+        mat4 decal_to_world[];
+        vec4 atlas_rect[];
+        vec4 params0[];
+        vec4 params1[];
+        vec4 size[];
+    } decals;
+
+    uniform mat4 u_inv_view_proj;
+
+    in flat int v_instance_id;
+    in vec4 v_screen_pos;
+    in vec3 v_local_pos;
+
+    void main() {
+        int id = v_instance_id;
+
+        // Get screen UV
+        vec2 screen_uv = (v_screen_pos.xy / v_screen_pos.w) * 0.5 + 0.5;
+
+        // Sample depth and reconstruct world position
+        float depth = texture(u_depth, screen_uv).r;
+        vec4 clip_pos = vec4(screen_uv * 2.0 - 1.0, depth, 1.0);
+        vec4 world_pos = u_inv_view_proj * clip_pos;
+        world_pos /= world_pos.w;
+
+        // Transform to decal space
+        vec4 decal_pos = decals.world_to_decal[id] * world_pos;
+
+        // Clip to decal box
+        if (abs(decal_pos.x) > 0.5 || abs(decal_pos.y) > 0.5 || abs(decal_pos.z) > 0.5) {
+            discard;
+        }
+
+        // Calculate decal UVs
+        vec2 decal_uv = decal_pos.xy + 0.5;
+
+        // Apply atlas rect
+        vec4 atlas = decals.atlas_rect[id];
+        vec2 atlas_uv = atlas.xy + decal_uv * atlas.zw;
+
+        // Sample decal textures
+        vec4 albedo = texture(u_decal_atlas, vec3(atlas_uv, 0.0));
+        vec4 normal = texture(u_decal_atlas, vec3(atlas_uv, 1.0));
+
+        // Get parameters
+        float opacity = decals.params0[id].x * albedo.a;
+        float normal_fade_angle = decals.params0[id].y;
+
+        // TODO: Sample GBuffer normal and apply normal fade
+
+        // Output to GBuffer with alpha blending
+        o_albedo = vec4(albedo.rgb, opacity);
+        o_normal = vec4(normal.rgb * 2.0 - 1.0, opacity);
+        o_material = vec4(0.5, 0.0, 0.0, opacity); // Default roughness/metallic
+    }
+"#;
+
+// =============================================================================
+// REGION: SCREEN-SPACE DECALS
+// =============================================================================
+
+/// Screen-space decal renderer (faster but less accurate)
+pub struct ScreenSpaceDecalRenderer {
+    /// Full-screen shader
+    pub shader: ComputeShader,
+
+    /// Decal list texture
+    decal_tiles: Texture,
+
+    /// Tile size
+    tile_size: u32,
+}
+
+impl ScreenSpaceDecalRenderer {
+    /// Create screen-space decal renderer
+    pub fn new(screen_width: u32, screen_height: u32) -> Self {
+        let tile_size = 16;
+        let tiles_x = (screen_width + tile_size - 1) / tile_size;
+        let tiles_y = (screen_height + tile_size - 1) / tile_size;
+
+        let decal_tiles = Texture::create_2d(
+            tiles_x,
+            tiles_y,
+            TextureFormat::RGBA16Float,
+            TextureUsage::Storage | TextureUsage::Sampled,
+        );
+
+        Self {
+            shader: ComputeShader::new(SCREEN_SPACE_DECAL_SHADER),
+            decal_tiles,
+            tile_size,
+        }
+    }
+
+    /// Build tile list
+    pub fn build_tiles(
+        &mut self,
+        decal_manager: &DecalManager,
+        view_proj: Mat4,
+    ) {
+        // Assign decals to tiles based on screen-space bounds
+        // ...
+    }
+
+    /// Render screen-space decals
+    pub fn render(
+        &self,
+        decal_manager: &DecalManager,
+        gbuffer: &mut GBuffer,
+        depth_texture: &Texture,
+        inv_view_proj: Mat4,
+    ) {
+        self.shader.set_texture(0, depth_texture);
+        self.shader.set_texture(1, &self.decal_tiles);
+        self.shader.set_texture(2, &decal_manager.atlas.texture_array);
+        self.shader.set_storage_buffer(0, decal_manager.get_gpu_buffer());
+        self.shader.set_uniform("u_inv_view_proj", inv_view_proj);
+
+        // Bind GBuffer outputs
+        // ...
+
+        self.shader.dispatch(
+            (gbuffer.width() + 7) / 8,
+            (gbuffer.height() + 7) / 8,
+            1,
+        );
+    }
+}
+
+const SCREEN_SPACE_DECAL_SHADER: &str = r#"
+    #version 460
+
+    layout(local_size_x = 8, local_size_y = 8) in;
+
+    layout(binding = 0) uniform sampler2D u_depth;
+    layout(binding = 1) uniform sampler2D u_decal_tiles;
+    layout(binding = 2) uniform sampler2DArray u_decal_atlas;
+
+    layout(rgba8, binding = 0) uniform image2D u_albedo;
+    layout(rgba16f, binding = 1) uniform image2D u_normal;
+
+    uniform mat4 u_inv_view_proj;
+
+    void main() {
+        ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+
+        // Reconstruct world position from depth
+        // ...
+
+        // Get decals affecting this tile
+        // ...
+
+        // Apply decals in order
+        // ...
+    }
+"#;
+
+// =============================================================================
+// REGION: CLUSTERED DECAL RENDERER
+// =============================================================================
+
+/// Clustered decal renderer (efficient for many decals)
+pub struct ClusteredDecalRenderer {
+    /// Cluster dimensions
+    pub cluster_dims: (u32, u32, u32),
+
+    /// Cluster buffer
+    cluster_buffer: GpuBuffer,
+
+    /// Decal indices buffer
+    decal_indices: GpuBuffer,
+
+    /// Cluster build shader
+    build_shader: ComputeShader,
+
+    /// Render shader
+    render_shader: RenderPipeline,
+}
+
+impl ClusteredDecalRenderer {
+    /// Create clustered decal renderer
+    pub fn new(screen_width: u32, screen_height: u32) -> Self {
+        // 16x8 tiles, 24 depth slices
+        let tile_size_x = 16;
+        let tile_size_y = 8;
+        let depth_slices = 24;
+
+        let cluster_dims = (
+            (screen_width + tile_size_x - 1) / tile_size_x,
+            (screen_height + tile_size_y - 1) / tile_size_y,
+            depth_slices,
+        );
+
+        let num_clusters = cluster_dims.0 * cluster_dims.1 * cluster_dims.2;
+
+        // Each cluster has offset and count
+        let cluster_buffer = GpuBuffer::new(
+            (num_clusters * 2) as usize * 4, // 2 u32s per cluster
+            BufferUsage::Storage,
+        );
+
+        // Max 1024 decal indices per cluster
+        let decal_indices = GpuBuffer::new(
+            num_clusters as usize * 1024 * 4,
+            BufferUsage::Storage,
+        );
+
+        Self {
+            cluster_dims,
+            cluster_buffer,
+            decal_indices,
+            build_shader: ComputeShader::new(CLUSTER_BUILD_SHADER),
+            render_shader: RenderPipeline::new(
+                CLUSTER_RENDER_VERTEX_SHADER,
+                CLUSTER_RENDER_PIXEL_SHADER,
+            ),
+        }
+    }
+
+    /// Build clusters
+    pub fn build_clusters(
+        &mut self,
+        decal_manager: &DecalManager,
+        view_proj: Mat4,
+        near: f32,
+        far: f32,
+    ) {
+        self.build_shader.set_storage_buffer(0, &self.cluster_buffer);
+        self.build_shader.set_storage_buffer(1, &self.decal_indices);
+        self.build_shader.set_storage_buffer(2, decal_manager.get_gpu_buffer());
+
+        self.build_shader.set_uniform("u_view_proj", view_proj);
+        self.build_shader.set_uniform("u_near", near);
+        self.build_shader.set_uniform("u_far", far);
+        self.build_shader.set_uniform("u_cluster_dims", Vec3::new(
+            self.cluster_dims.0 as f32,
+            self.cluster_dims.1 as f32,
+            self.cluster_dims.2 as f32,
+        ));
+        self.build_shader.set_uniform("u_decal_count", decal_manager.visible_count() as i32);
+
+        self.build_shader.dispatch(
+            self.cluster_dims.0,
+            self.cluster_dims.1,
+            self.cluster_dims.2,
+        );
+    }
+
+    /// Render clustered decals
+    pub fn render(
+        &self,
+        decal_manager: &DecalManager,
+        gbuffer: &mut GBuffer,
+        depth_texture: &Texture,
+        inv_view_proj: Mat4,
+    ) {
+        self.render_shader.set_texture(0, depth_texture);
+        self.render_shader.set_texture(1, &decal_manager.atlas.texture_array);
+        self.render_shader.set_storage_buffer(0, decal_manager.get_gpu_buffer());
+        self.render_shader.set_storage_buffer(1, &self.cluster_buffer);
+        self.render_shader.set_storage_buffer(2, &self.decal_indices);
+
+        self.render_shader.set_uniform("u_inv_view_proj", inv_view_proj);
+        self.render_shader.set_uniform("u_cluster_dims", Vec3::new(
+            self.cluster_dims.0 as f32,
+            self.cluster_dims.1 as f32,
+            self.cluster_dims.2 as f32,
+        ));
+
+        // Render full-screen quad
+        self.render_shader.draw_fullscreen();
+    }
+}
+
+const CLUSTER_BUILD_SHADER: &str = r#"
+    #version 460
+
+    layout(local_size_x = 1, local_size_y = 1, local_size_z = 1) in;
+
+    // Cluster assignment shader
+    void main() {
+        // ...
+    }
+"#;
+
+const CLUSTER_RENDER_VERTEX_SHADER: &str = r#"
+    #version 460
+
+    out vec2 v_uv;
+
+    void main() {
+        vec2 vertices[3] = vec2[](
+            vec2(-1.0, -1.0),
+            vec2( 3.0, -1.0),
+            vec2(-1.0,  3.0)
+        );
+        v_uv = vertices[gl_VertexID] * 0.5 + 0.5;
+        gl_Position = vec4(vertices[gl_VertexID], 0.0, 1.0);
+    }
+"#;
+
+const CLUSTER_RENDER_PIXEL_SHADER: &str = r#"
+    #version 460
+
+    layout(location = 0) out vec4 o_albedo;
+
+    in vec2 v_uv;
+
+    // Clustered decal rendering
+    void main() {
+        // ...
+    }
+"#;
+
+// =============================================================================
+// REGION: DECAL SPAWNERS
+// =============================================================================
+
+/// Decal spawner for common effects
+pub struct DecalSpawner {
+    /// Decal manager reference
+    manager_id: u64,
+
+    /// Default lifetime
+    pub default_lifetime: f32,
+
+    /// Default fade out duration
+    pub default_fade_duration: f32,
+
+    /// Random rotation enabled
+    pub random_rotation: bool,
+
+    /// Random scale range
+    pub random_scale_range: (f32, f32),
+}
+
+impl DecalSpawner {
+    /// Create decal spawner
+    pub fn new() -> Self {
+        Self {
+            manager_id: 0,
+            default_lifetime: 30.0,
+            default_fade_duration: 2.0,
+            random_rotation: true,
+            random_scale_range: (0.8, 1.2),
+        }
+    }
+
+    /// Spawn bullet hole decal
+    pub fn spawn_bullet_hole(
+        &self,
+        manager: &mut DecalManager,
+        position: Vec3,
+        normal: Vec3,
+        surface_type: SurfaceType,
+    ) -> u64 {
+        let rotation = Quaternion::from_rotation_arc(Vec3::unit_z(), normal);
+        let size = Vec3::new(0.05, 0.05, 0.02); // 5cm bullet hole
+
+        let mut decal = Decal::new(position + normal * 0.001, rotation, size);
+        decal.sort_layer = DecalSortLayer::Foreground;
+        decal.lifetime = self.default_lifetime;
+        decal.fade_out_duration = self.default_fade_duration;
+        decal.channel_mask = DecalChannelMask::visual();
+
+        // Set atlas rect based on surface type
+        // decal.atlas_rect = ...
+
+        manager.add(decal)
+    }
+
+    /// Spawn blood splatter decal
+    pub fn spawn_blood_splatter(
+        &self,
+        manager: &mut DecalManager,
+        position: Vec3,
+        normal: Vec3,
+        size: f32,
+    ) -> u64 {
+        let rotation = Quaternion::from_rotation_arc(Vec3::unit_z(), normal);
+        let decal_size = Vec3::new(size, size, 0.01);
+
+        let mut decal = Decal::new(position + normal * 0.001, rotation, decal_size);
+        decal.sort_layer = DecalSortLayer::Foreground;
+        decal.lifetime = 60.0; // Blood stays longer
+        decal.fade_out_duration = 5.0;
+        decal.channel_mask = DecalChannelMask::all();
+
+        manager.add(decal)
+    }
+
+    /// Spawn tire track decal
+    pub fn spawn_tire_track(
+        &self,
+        manager: &mut DecalManager,
+        start: Vec3,
+        end: Vec3,
+        normal: Vec3,
+        width: f32,
+    ) -> u64 {
+        let direction = (end - start).normalize();
+        let center = (start + end) * 0.5;
+        let length = (end - start).length();
+
+        let rotation = Quaternion::from_rotation_arc(Vec3::unit_y(), direction);
+        let size = Vec3::new(width, length, 0.01);
+
+        let mut decal = Decal::new(center + normal * 0.001, rotation, size);
+        decal.sort_layer = DecalSortLayer::Background;
+        decal.lifetime = 120.0; // Tire tracks fade slowly
+        decal.fade_out_duration = 30.0;
+        decal.channel_mask.roughness = true;
+        decal.channel_mask.normal = true;
+        decal.channel_mask.albedo = true;
+
+        manager.add(decal)
+    }
+
+    /// Spawn explosion scorch decal
+    pub fn spawn_scorch_mark(
+        &self,
+        manager: &mut DecalManager,
+        position: Vec3,
+        normal: Vec3,
+        radius: f32,
+    ) -> u64 {
+        let rotation = Quaternion::from_rotation_arc(Vec3::unit_z(), normal);
+        let size = Vec3::new(radius * 2.0, radius * 2.0, 0.02);
+
+        let mut decal = Decal::new(position + normal * 0.001, rotation, size);
+        decal.sort_layer = DecalSortLayer::Default;
+        decal.lifetime = 300.0; // Scorch marks are persistent
+        decal.fade_out_duration = 60.0;
+        decal.channel_mask = DecalChannelMask::all();
+        decal.blend_modes.albedo = DecalBlendMode::Multiply;
+
+        manager.add(decal)
+    }
+
+    /// Spawn footprint decal
+    pub fn spawn_footprint(
+        &self,
+        manager: &mut DecalManager,
+        position: Vec3,
+        normal: Vec3,
+        direction: Vec3,
+        is_left_foot: bool,
+    ) -> u64 {
+        let forward = direction.normalize();
+        let right = normal.cross(forward).normalize();
+        let rotation = Quaternion::from_axes(right, normal, forward);
+
+        let size = Vec3::new(0.1, 0.3, 0.01); // Footprint size
+
+        let offset = if is_left_foot { -right * 0.1 } else { right * 0.1 };
+
+        let mut decal = Decal::new(position + offset + normal * 0.001, rotation, size);
+        decal.sort_layer = DecalSortLayer::Background;
+        decal.lifetime = 20.0;
+        decal.fade_out_duration = 5.0;
+        decal.channel_mask = DecalChannelMask::visual();
+
+        manager.add(decal)
+    }
+
+    /// Spawn graffiti decal
+    pub fn spawn_graffiti(
+        &self,
+        manager: &mut DecalManager,
+        position: Vec3,
+        normal: Vec3,
+        rotation: Quaternion,
+        size: Vec2,
+    ) -> u64 {
+        let final_rotation = Quaternion::from_rotation_arc(Vec3::unit_z(), normal) * rotation;
+        let decal_size = Vec3::new(size.x, size.y, 0.01);
+
+        let mut decal = Decal::new(position + normal * 0.001, final_rotation, decal_size);
+        decal.sort_layer = DecalSortLayer::Default;
+        decal.lifetime = 0.0; // Permanent
+        decal.channel_mask = DecalChannelMask::albedo_only();
+
+        manager.add(decal)
+    }
+}
+
+/// Surface type for decal variation
+pub enum SurfaceType {
+    Concrete,
+    Metal,
+    Wood,
+    Dirt,
+    Flesh,
+    Glass,
+    Fabric,
+    Plastic,
+}
+
+// =============================================================================
+// REGION: DECAL POOLING
+// =============================================================================
+
+/// Decal pool for efficient allocation
+pub struct DecalPool {
+    /// Pool of pre-allocated decals
+    pool: Vec<Decal>,
+
+    /// Free list
+    free_list: Vec<usize>,
+
+    /// Active count
+    active_count: usize,
+}
+
+impl DecalPool {
+    /// Create decal pool
+    pub fn new(capacity: usize) -> Self {
+        let mut pool = Vec::with_capacity(capacity);
+        let mut free_list = Vec::with_capacity(capacity);
+
+        for i in 0..capacity {
+            pool.push(Decal::new(Vec3::zero(), Quaternion::identity(), Vec3::one()));
+            free_list.push(capacity - 1 - i);
+        }
+
+        Self {
+            pool,
+            free_list,
+            active_count: 0,
+        }
+    }
+
+    /// Allocate decal from pool
+    pub fn allocate(&mut self) -> Option<&mut Decal> {
+        if let Some(index) = self.free_list.pop() {
+            self.active_count += 1;
+            self.pool[index].enabled = true;
+            Some(&mut self.pool[index])
+        } else {
+            None
+        }
+    }
+
+    /// Free decal back to pool
+    pub fn free(&mut self, index: usize) {
+        if index < self.pool.len() && self.pool[index].enabled {
+            self.pool[index].enabled = false;
+            self.free_list.push(index);
+            self.active_count -= 1;
+        }
+    }
+
+    /// Get active decals
+    pub fn active_decals(&self) -> impl Iterator<Item = &Decal> {
+        self.pool.iter().filter(|d| d.enabled)
+    }
+
+    /// Get active decals mutably
+    pub fn active_decals_mut(&mut self) -> impl Iterator<Item = &mut Decal> {
+        self.pool.iter_mut().filter(|d| d.enabled)
+    }
+}
+
+// =============================================================================
+// REGION: TESTS
+// =============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_decal_creation() {
+        let decal = Decal::new(
+            Vec3::new(1.0, 2.0, 3.0),
+            Quaternion::identity(),
+            Vec3::new(0.5, 0.5, 0.1),
+        );
+
+        assert!(decal.enabled);
+        assert!((decal.opacity - 1.0).abs() < 1e-6);
+        assert!(!decal.is_expired());
+    }
+
+    #[test]
+    fn test_decal_lifetime() {
+        let mut decal = Decal::new(Vec3::zero(), Quaternion::identity(), Vec3::one());
+        decal.lifetime = 5.0;
+        decal.fade_out_duration = 2.0;
+
+        // Before fade
+        decal.age = 2.0;
+        assert!(!decal.is_expired());
+        assert!((decal.get_current_opacity() - 1.0).abs() < 1e-6);
+
+        // During fade
+        decal.age = 4.0;
+        assert!(!decal.is_expired());
+        assert!(decal.get_current_opacity() < 1.0);
+        assert!(decal.get_current_opacity() > 0.0);
+
+        // After lifetime
+        decal.age = 6.0;
+        assert!(decal.is_expired());
+    }
+
+    #[test]
+    fn test_decal_channel_mask() {
+        let all = DecalChannelMask::all();
+        assert!(all.albedo);
+        assert!(all.normal);
+        assert!(all.roughness);
+        assert!(all.metallic);
+        assert!(all.ao);
+        assert!(all.emission);
+
+        let albedo_only = DecalChannelMask::albedo_only();
+        assert!(albedo_only.albedo);
+        assert!(!albedo_only.normal);
+        assert!(!albedo_only.roughness);
+    }
+
+    #[test]
+    fn test_decal_sort_layer() {
+        assert!(DecalSortLayer::Background.sort_order() < DecalSortLayer::Default.sort_order());
+        assert!(DecalSortLayer::Default.sort_order() < DecalSortLayer::Foreground.sort_order());
+        assert!(DecalSortLayer::Foreground.sort_order() < DecalSortLayer::Overlay.sort_order());
+
+        assert_eq!(DecalSortLayer::Custom(50).sort_order(), 50);
+    }
+
+    #[test]
+    fn test_atlas_allocation() {
+        let mut atlas = DecalAtlas::new(1024, 4);
+
+        // Allocate first texture
+        let rect1 = atlas.allocate(128, 128);
+        assert!(rect1.is_some());
+
+        let r1 = rect1.unwrap();
+        assert!(r1.offset.x >= 0.0);
+        assert!(r1.offset.y >= 0.0);
+        assert!(r1.scale.x > 0.0);
+        assert!(r1.scale.y > 0.0);
+
+        // Allocate second texture
+        let rect2 = atlas.allocate(256, 256);
+        assert!(rect2.is_some());
+
+        // Allocate many small textures
+        for _ in 0..50 {
+            let rect = atlas.allocate(64, 64);
+            assert!(rect.is_some());
+        }
+    }
+
+    #[test]
+    fn test_decal_manager() {
+        let mut manager = DecalManager::new(100, 1024, 4);
+
+        // Add decals
+        let id1 = manager.add(Decal::new(Vec3::zero(), Quaternion::identity(), Vec3::one()));
+        let id2 = manager.add(Decal::new(Vec3::unit_x(), Quaternion::identity(), Vec3::one()));
+
+        assert_eq!(manager.total_count(), 2);
+        assert!(manager.get(id1).is_some());
+        assert!(manager.get(id2).is_some());
+
+        // Remove decal
+        assert!(manager.remove(id1));
+        assert_eq!(manager.total_count(), 1);
+        assert!(manager.get(id1).is_none());
+        assert!(manager.get(id2).is_some());
+    }
+
+    #[test]
+    fn test_decal_manager_update() {
+        let mut manager = DecalManager::new(100, 1024, 4);
+
+        // Add decal with short lifetime
+        let mut decal = Decal::new(Vec3::zero(), Quaternion::identity(), Vec3::one());
+        decal.lifetime = 1.0;
+        decal.fade_out_duration = 0.5;
+
+        let id = manager.add(decal);
+        assert_eq!(manager.total_count(), 1);
+
+        // Update past lifetime
+        manager.update(2.0);
+
+        // Decal should be removed
+        assert_eq!(manager.total_count(), 0);
+        assert!(manager.get(id).is_none());
+    }
+
+    #[test]
+    fn test_decal_pool() {
+        let mut pool = DecalPool::new(10);
+
+        assert_eq!(pool.active_count, 0);
+
+        // Allocate decals
+        let decal1 = pool.allocate();
+        assert!(decal1.is_some());
+        assert_eq!(pool.active_count, 1);
+
+        let decal2 = pool.allocate();
+        assert!(decal2.is_some());
+        assert_eq!(pool.active_count, 2);
+
+        // Free a decal
+        pool.free(0);
+        assert_eq!(pool.active_count, 1);
+
+        // Allocate again - should reuse freed slot
+        let decal3 = pool.allocate();
+        assert!(decal3.is_some());
+        assert_eq!(pool.active_count, 2);
+    }
+
+    #[test]
+    fn test_decal_pool_exhaustion() {
+        let mut pool = DecalPool::new(3);
+
+        // Allocate all
+        assert!(pool.allocate().is_some());
+        assert!(pool.allocate().is_some());
+        assert!(pool.allocate().is_some());
+
+        // Pool should be exhausted
+        assert!(pool.allocate().is_none());
+
+        // Free one
+        pool.free(1);
+
+        // Should be able to allocate again
+        assert!(pool.allocate().is_some());
+        assert!(pool.allocate().is_none());
+    }
+
+    #[test]
+    fn test_gpu_decal_data() {
+        let decal = Decal::new(
+            Vec3::new(1.0, 2.0, 3.0),
+            Quaternion::identity(),
+            Vec3::new(0.5, 0.5, 0.1),
+        );
+
+        let gpu_data = GpuDecalData::from_decal(&decal);
+
+        // Check size is correct
+        assert!((gpu_data.size[0] - 0.5).abs() < 1e-6);
+        assert!((gpu_data.size[1] - 0.5).abs() < 1e-6);
+        assert!((gpu_data.size[2] - 0.1).abs() < 1e-6);
+
+        // Check opacity
+        assert!((gpu_data.params0[0] - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_decal_spawner() {
+        let mut manager = DecalManager::new(100, 1024, 4);
+        let spawner = DecalSpawner::new();
+
+        // Spawn bullet hole
+        let id = spawner.spawn_bullet_hole(
+            &mut manager,
+            Vec3::zero(),
+            Vec3::unit_y(),
+            SurfaceType::Concrete,
+        );
+
+        assert!(id > 0);
+        assert_eq!(manager.total_count(), 1);
+
+        let decal = manager.get(id).unwrap();
+        assert!(matches!(decal.sort_layer, DecalSortLayer::Foreground));
+        assert!(decal.lifetime > 0.0);
+    }
+
+    #[test]
+    fn test_blend_modes_default() {
+        let modes = DecalBlendModes::default();
+
+        assert!(matches!(modes.albedo, DecalBlendMode::AlphaBlend));
+        assert!(matches!(modes.normal, DecalBlendMode::NormalBlend));
+        assert!(matches!(modes.ao, DecalBlendMode::Multiply));
+        assert!(matches!(modes.emission, DecalBlendMode::Add));
+    }
+
+    #[test]
+    fn test_atlas_rect_full() {
+        let rect = DecalAtlasRect::full();
+
+        assert!((rect.offset.x - 0.0).abs() < 1e-6);
+        assert!((rect.offset.y - 0.0).abs() < 1e-6);
+        assert!((rect.scale.x - 1.0).abs() < 1e-6);
+        assert!((rect.scale.y - 1.0).abs() < 1e-6);
+        assert_eq!(rect.page, 0);
+    }
+}

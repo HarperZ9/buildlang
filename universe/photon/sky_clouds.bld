@@ -1,0 +1,3110 @@
+// =============================================================================
+// PHOTON ENGINE - SKY AND VOLUMETRIC CLOUD RENDERING SYSTEM
+// =============================================================================
+// Comprehensive physically-based volumetric cloud rendering with ray marching,
+// temporal reprojection, atmospheric integration, and multiple cloud types.
+// Based on Harper Engine WP-143-167 cloud rendering papers.
+// Implements techniques from Horizon Zero Dawn, RDR2, and Flight Simulator.
+// =============================================================================
+
+import core::memory::{Arena, Pool, Buffer, GpuBuffer, AlignedBuffer};
+import core::math::{Vec2, Vec3, Vec4, Mat4, Quaternion, Transform, Frustum};
+import core::simd::{f32x4, f32x8, SimdMath};
+import core::random::{Rng, BlueNoise, Halton};
+import photon::gpu::{ComputeShader, RenderPipeline, Texture, Sampler, BindGroup};
+import photon::color::{Color, ColorSpace, Spectrum};
+import photon::temporal::{TemporalFilter, Jitter, History};
+
+// =============================================================================
+// REGION: CLOUD LAYER TYPES
+// =============================================================================
+
+/// Cloud layer classification based on altitude
+pub enum CloudLayerType {
+    /// Cumulus - Fair weather puffy clouds (0.5-2km)
+    Cumulus,
+    /// Stratocumulus - Low layered bumpy clouds (0.5-2km)
+    Stratocumulus,
+    /// Stratus - Low uniform layer (0-2km)
+    Stratus,
+    /// Altocumulus - Mid-level patchy (2-6km)
+    Altocumulus,
+    /// Altostratus - Mid-level sheet (2-6km)
+    Altostratus,
+    /// Cirrus - High wispy (6-12km)
+    Cirrus,
+    /// Cirrocumulus - High small puffs (6-12km)
+    Cirrocumulus,
+    /// Cirrostratus - High thin veil (6-12km)
+    Cirrostratus,
+    /// Cumulonimbus - Storm clouds (0-12km)
+    Cumulonimbus,
+    /// Nimbostratus - Rain clouds (0-4km)
+    Nimbostratus,
+}
+
+impl CloudLayerType {
+    /// Get altitude range for this cloud type (min, max in meters)
+    pub fn altitude_range(&self) -> (f32, f32) {
+        match self {
+            CloudLayerType::Cumulus => (500.0, 2000.0),
+            CloudLayerType::Stratocumulus => (500.0, 2000.0),
+            CloudLayerType::Stratus => (0.0, 2000.0),
+            CloudLayerType::Altocumulus => (2000.0, 6000.0),
+            CloudLayerType::Altostratus => (2000.0, 6000.0),
+            CloudLayerType::Cirrus => (6000.0, 12000.0),
+            CloudLayerType::Cirrocumulus => (6000.0, 12000.0),
+            CloudLayerType::Cirrostratus => (6000.0, 12000.0),
+            CloudLayerType::Cumulonimbus => (500.0, 12000.0),
+            CloudLayerType::Nimbostratus => (0.0, 4000.0),
+        }
+    }
+
+    /// Get typical density for this cloud type
+    pub fn typical_density(&self) -> f32 {
+        match self {
+            CloudLayerType::Cumulus => 0.3,
+            CloudLayerType::Stratocumulus => 0.4,
+            CloudLayerType::Stratus => 0.5,
+            CloudLayerType::Altocumulus => 0.25,
+            CloudLayerType::Altostratus => 0.35,
+            CloudLayerType::Cirrus => 0.05,
+            CloudLayerType::Cirrocumulus => 0.08,
+            CloudLayerType::Cirrostratus => 0.03,
+            CloudLayerType::Cumulonimbus => 0.6,
+            CloudLayerType::Nimbostratus => 0.55,
+        }
+    }
+
+    /// Get scatter albedo for this cloud type
+    pub fn scatter_albedo(&self) -> f32 {
+        match self {
+            CloudLayerType::Cumulus => 0.99,
+            CloudLayerType::Stratocumulus => 0.98,
+            CloudLayerType::Stratus => 0.97,
+            CloudLayerType::Altocumulus => 0.99,
+            CloudLayerType::Altostratus => 0.98,
+            CloudLayerType::Cirrus => 0.995,
+            CloudLayerType::Cirrocumulus => 0.995,
+            CloudLayerType::Cirrostratus => 0.998,
+            CloudLayerType::Cumulonimbus => 0.96,
+            CloudLayerType::Nimbostratus => 0.95,
+        }
+    }
+}
+
+// =============================================================================
+// REGION: NOISE GENERATION
+// =============================================================================
+
+/// 3D Perlin noise configuration
+pub struct PerlinNoiseConfig {
+    /// Noise frequency
+    pub frequency: f32,
+    /// Number of octaves
+    pub octaves: u32,
+    /// Lacunarity (frequency multiplier per octave)
+    pub lacunarity: f32,
+    /// Persistence (amplitude multiplier per octave)
+    pub persistence: f32,
+    /// Noise offset for animation
+    pub offset: Vec3,
+}
+
+impl Default for PerlinNoiseConfig {
+    fn default() -> Self {
+        Self {
+            frequency: 1.0,
+            octaves: 6,
+            lacunarity: 2.0,
+            persistence: 0.5,
+            offset: Vec3::zero(),
+        }
+    }
+}
+
+/// Worley (cellular) noise configuration
+pub struct WorleyNoiseConfig {
+    /// Cell frequency
+    pub frequency: f32,
+    /// Distance function type
+    pub distance_type: WorleyDistanceType,
+    /// Combine function for F1, F2
+    pub combine_type: WorleyCombineType,
+    /// Jitter amount (0-1)
+    pub jitter: f32,
+}
+
+/// Distance function for Worley noise
+pub enum WorleyDistanceType {
+    Euclidean,
+    Manhattan,
+    Chebyshev,
+    Minkowski(f32),
+}
+
+/// Combine function for Worley noise
+pub enum WorleyCombineType {
+    F1,
+    F2,
+    F2MinusF1,
+    F1PlusF2,
+    F1TimesF2,
+}
+
+impl Default for WorleyNoiseConfig {
+    fn default() -> Self {
+        Self {
+            frequency: 4.0,
+            distance_type: WorleyDistanceType::Euclidean,
+            combine_type: WorleyCombineType::F1,
+            jitter: 1.0,
+        }
+    }
+}
+
+/// Cloud noise texture generator
+pub struct CloudNoiseGenerator {
+    /// 3D base shape noise texture (Perlin-Worley blend)
+    base_shape_texture: Texture,
+    /// 3D detail noise texture (Worley)
+    detail_texture: Texture,
+    /// 2D curl noise for displacement
+    curl_noise_texture: Texture,
+    /// 2D weather map texture
+    weather_map_texture: Texture,
+    /// Blue noise for ray jittering
+    blue_noise_texture: Texture,
+    /// Compute shader for noise generation
+    noise_compute: ComputeShader,
+}
+
+impl CloudNoiseGenerator {
+    /// Create noise generator with specified resolution
+    pub fn new(
+        base_resolution: u32,
+        detail_resolution: u32,
+        weather_resolution: u32,
+    ) -> Self {
+        let base_shape_texture = Texture::new_3d(
+            base_resolution,
+            base_resolution,
+            base_resolution,
+            TextureFormat::Rgba8Unorm,
+        );
+
+        let detail_texture = Texture::new_3d(
+            detail_resolution,
+            detail_resolution,
+            detail_resolution,
+            TextureFormat::Rgba8Unorm,
+        );
+
+        let curl_noise_texture = Texture::new_2d(
+            128,
+            128,
+            TextureFormat::Rg16Float,
+        );
+
+        let weather_map_texture = Texture::new_2d(
+            weather_resolution,
+            weather_resolution,
+            TextureFormat::Rgba8Unorm,
+        );
+
+        let blue_noise_texture = Texture::new_2d(
+            128,
+            128,
+            TextureFormat::R8Unorm,
+        );
+
+        Self {
+            base_shape_texture,
+            detail_texture,
+            curl_noise_texture,
+            weather_map_texture,
+            blue_noise_texture,
+            noise_compute: Self::create_noise_shader(),
+        }
+    }
+
+    /// Generate base shape texture (Perlin-Worley blend)
+    /// R: Perlin-Worley, G: Worley F1, B: Worley F2, A: Worley F2-F1
+    pub fn generate_base_shape(&mut self, config: &PerlinNoiseConfig) {
+        self.noise_compute.dispatch_3d(
+            self.base_shape_texture.width(),
+            self.base_shape_texture.height(),
+            self.base_shape_texture.depth(),
+        );
+    }
+
+    /// Generate detail noise (multi-octave Worley)
+    /// R: Worley 3oct, G: Worley 3oct (different freq), B: Worley 3oct, A: blend
+    pub fn generate_detail_noise(&mut self, config: &WorleyNoiseConfig) {
+        self.noise_compute.set_uniform("noise_type", 1u32);
+        self.noise_compute.dispatch_3d(
+            self.detail_texture.width(),
+            self.detail_texture.height(),
+            self.detail_texture.depth(),
+        );
+    }
+
+    /// Generate curl noise for wind displacement
+    pub fn generate_curl_noise(&mut self) {
+        self.noise_compute.set_uniform("noise_type", 2u32);
+        self.noise_compute.dispatch_2d(
+            self.curl_noise_texture.width(),
+            self.curl_noise_texture.height(),
+        );
+    }
+
+    /// Generate weather map
+    /// R: Coverage, G: Precipitation, B: Cloud type, A: Reserved
+    pub fn generate_weather_map(&mut self, seed: u32, coverage: f32) {
+        self.noise_compute.set_uniform("noise_type", 3u32);
+        self.noise_compute.set_uniform("seed", seed);
+        self.noise_compute.set_uniform("coverage", coverage);
+        self.noise_compute.dispatch_2d(
+            self.weather_map_texture.width(),
+            self.weather_map_texture.height(),
+        );
+    }
+
+    fn create_noise_shader() -> ComputeShader {
+        ComputeShader::from_source(CLOUD_NOISE_SHADER)
+    }
+
+    /// Get base shape texture
+    pub fn base_shape(&self) -> &Texture {
+        &self.base_shape_texture
+    }
+
+    /// Get detail texture
+    pub fn detail(&self) -> &Texture {
+        &self.detail_texture
+    }
+
+    /// Get weather map
+    pub fn weather_map(&self) -> &Texture {
+        &self.weather_map_texture
+    }
+
+    /// Get blue noise texture
+    pub fn blue_noise(&self) -> &Texture {
+        &self.blue_noise_texture
+    }
+}
+
+// =============================================================================
+// REGION: CLOUD LAYER CONFIGURATION
+// =============================================================================
+
+/// Configuration for a single cloud layer
+pub struct CloudLayerConfig {
+    /// Cloud layer type
+    pub layer_type: CloudLayerType,
+    /// Layer bottom altitude in meters
+    pub altitude_bottom: f32,
+    /// Layer top altitude in meters
+    pub altitude_top: f32,
+    /// Cloud coverage (0-1)
+    pub coverage: f32,
+    /// Cloud density multiplier
+    pub density: f32,
+    /// Absorption coefficient
+    pub absorption: f32,
+    /// Scattering albedo
+    pub scatter_albedo: f32,
+    /// Forward scattering (HG phase function g)
+    pub eccentricity: f32,
+    /// Base shape scale
+    pub shape_scale: f32,
+    /// Detail noise scale
+    pub detail_scale: f32,
+    /// Detail noise strength
+    pub detail_strength: f32,
+    /// Wind direction and speed (XY direction, Z speed)
+    pub wind: Vec3,
+    /// Curl noise strength for detail displacement
+    pub curl_strength: f32,
+    /// Height gradient remap curve
+    pub height_gradient: HeightGradient,
+    /// Anvil deformation for cumulonimbus
+    pub anvil_bias: f32,
+    /// Enable precipitation darkening
+    pub precipitation_darkening: bool,
+}
+
+impl CloudLayerConfig {
+    /// Create configuration for cumulus clouds
+    pub fn cumulus() -> Self {
+        Self {
+            layer_type: CloudLayerType::Cumulus,
+            altitude_bottom: 1500.0,
+            altitude_top: 3500.0,
+            coverage: 0.5,
+            density: 0.3,
+            absorption: 0.04,
+            scatter_albedo: 0.99,
+            eccentricity: 0.6,
+            shape_scale: 0.0003,
+            detail_scale: 0.002,
+            detail_strength: 0.35,
+            wind: Vec3::new(1.0, 0.0, 20.0),
+            curl_strength: 0.1,
+            height_gradient: HeightGradient::cumulus(),
+            anvil_bias: 0.0,
+            precipitation_darkening: false,
+        }
+    }
+
+    /// Create configuration for stratocumulus clouds
+    pub fn stratocumulus() -> Self {
+        Self {
+            layer_type: CloudLayerType::Stratocumulus,
+            altitude_bottom: 800.0,
+            altitude_top: 2000.0,
+            coverage: 0.7,
+            density: 0.4,
+            absorption: 0.05,
+            scatter_albedo: 0.98,
+            eccentricity: 0.5,
+            shape_scale: 0.0002,
+            detail_scale: 0.0015,
+            detail_strength: 0.4,
+            wind: Vec3::new(1.0, 0.2, 15.0),
+            curl_strength: 0.08,
+            height_gradient: HeightGradient::stratocumulus(),
+            anvil_bias: 0.0,
+            precipitation_darkening: false,
+        }
+    }
+
+    /// Create configuration for stratus clouds
+    pub fn stratus() -> Self {
+        Self {
+            layer_type: CloudLayerType::Stratus,
+            altitude_bottom: 200.0,
+            altitude_top: 1500.0,
+            coverage: 0.9,
+            density: 0.5,
+            absorption: 0.06,
+            scatter_albedo: 0.97,
+            eccentricity: 0.4,
+            shape_scale: 0.00015,
+            detail_scale: 0.001,
+            detail_strength: 0.2,
+            wind: Vec3::new(1.0, 0.0, 10.0),
+            curl_strength: 0.05,
+            height_gradient: HeightGradient::stratus(),
+            anvil_bias: 0.0,
+            precipitation_darkening: true,
+        }
+    }
+
+    /// Create configuration for cirrus clouds
+    pub fn cirrus() -> Self {
+        Self {
+            layer_type: CloudLayerType::Cirrus,
+            altitude_bottom: 8000.0,
+            altitude_top: 12000.0,
+            coverage: 0.3,
+            density: 0.05,
+            absorption: 0.01,
+            scatter_albedo: 0.995,
+            eccentricity: 0.8,
+            shape_scale: 0.00005,
+            detail_scale: 0.0005,
+            detail_strength: 0.6,
+            wind: Vec3::new(1.0, 0.5, 50.0),
+            curl_strength: 0.2,
+            height_gradient: HeightGradient::cirrus(),
+            anvil_bias: 0.0,
+            precipitation_darkening: false,
+        }
+    }
+
+    /// Create configuration for cumulonimbus (storm) clouds
+    pub fn cumulonimbus() -> Self {
+        Self {
+            layer_type: CloudLayerType::Cumulonimbus,
+            altitude_bottom: 500.0,
+            altitude_top: 12000.0,
+            coverage: 0.3,
+            density: 0.6,
+            absorption: 0.08,
+            scatter_albedo: 0.96,
+            eccentricity: 0.5,
+            shape_scale: 0.0002,
+            detail_scale: 0.0012,
+            detail_strength: 0.3,
+            wind: Vec3::new(1.0, 0.0, 30.0),
+            curl_strength: 0.15,
+            height_gradient: HeightGradient::cumulonimbus(),
+            anvil_bias: 0.3,
+            precipitation_darkening: true,
+        }
+    }
+}
+
+/// Height gradient curve for cloud density falloff
+pub struct HeightGradient {
+    /// Gradient points (normalized height -> density multiplier)
+    pub points: [(f32, f32); 8],
+    /// Number of active points
+    pub point_count: u32,
+}
+
+impl HeightGradient {
+    /// Create cumulus height gradient (rounded bottom, fluffy top)
+    pub fn cumulus() -> Self {
+        Self {
+            points: [
+                (0.0, 0.0),
+                (0.1, 0.6),
+                (0.2, 1.0),
+                (0.4, 1.0),
+                (0.7, 0.6),
+                (0.9, 0.2),
+                (1.0, 0.0),
+                (1.0, 0.0),
+            ],
+            point_count: 7,
+        }
+    }
+
+    /// Create stratocumulus height gradient
+    pub fn stratocumulus() -> Self {
+        Self {
+            points: [
+                (0.0, 0.0),
+                (0.1, 0.8),
+                (0.3, 1.0),
+                (0.6, 1.0),
+                (0.8, 0.6),
+                (1.0, 0.0),
+                (1.0, 0.0),
+                (1.0, 0.0),
+            ],
+            point_count: 6,
+        }
+    }
+
+    /// Create stratus height gradient (uniform layer)
+    pub fn stratus() -> Self {
+        Self {
+            points: [
+                (0.0, 0.2),
+                (0.1, 0.9),
+                (0.2, 1.0),
+                (0.8, 1.0),
+                (0.9, 0.9),
+                (1.0, 0.2),
+                (1.0, 0.0),
+                (1.0, 0.0),
+            ],
+            point_count: 6,
+        }
+    }
+
+    /// Create cirrus height gradient (wispy)
+    pub fn cirrus() -> Self {
+        Self {
+            points: [
+                (0.0, 0.0),
+                (0.2, 0.5),
+                (0.4, 1.0),
+                (0.6, 1.0),
+                (0.8, 0.5),
+                (1.0, 0.0),
+                (1.0, 0.0),
+                (1.0, 0.0),
+            ],
+            point_count: 6,
+        }
+    }
+
+    /// Create cumulonimbus height gradient (tower with anvil)
+    pub fn cumulonimbus() -> Self {
+        Self {
+            points: [
+                (0.0, 0.0),
+                (0.05, 0.5),
+                (0.1, 1.0),
+                (0.5, 1.0),
+                (0.7, 0.8),
+                (0.85, 0.5),
+                (0.95, 0.8), // Anvil
+                (1.0, 0.3),
+            ],
+            point_count: 8,
+        }
+    }
+
+    /// Sample the gradient at normalized height
+    pub fn sample(&self, height: f32) -> f32 {
+        let height = height.clamp(0.0, 1.0);
+
+        for i in 0..(self.point_count as usize - 1) {
+            let (h0, v0) = self.points[i];
+            let (h1, v1) = self.points[i + 1];
+
+            if height >= h0 && height <= h1 {
+                let t = (height - h0) / (h1 - h0);
+                return v0 + t * (v1 - v0);
+            }
+        }
+
+        0.0
+    }
+}
+
+// =============================================================================
+// REGION: VOLUMETRIC CLOUD RENDERER
+// =============================================================================
+
+/// Ray marching quality presets
+pub enum CloudQuality {
+    /// Low quality (mobile, VR)
+    Low,
+    /// Medium quality (balanced)
+    Medium,
+    /// High quality (desktop)
+    High,
+    /// Ultra quality (cinematic)
+    Ultra,
+    /// Custom settings
+    Custom(CloudRayMarchSettings),
+}
+
+/// Ray marching settings for cloud rendering
+pub struct CloudRayMarchSettings {
+    /// Maximum ray marching steps for primary ray
+    pub max_steps: u32,
+    /// Step size in meters (adaptive)
+    pub base_step_size: f32,
+    /// Maximum ray distance in meters
+    pub max_distance: f32,
+    /// Light marching steps per sample
+    pub light_steps: u32,
+    /// Temporal reprojection enabled
+    pub temporal_enabled: bool,
+    /// Upscaling factor (1 = full res, 2 = half res, 4 = quarter)
+    pub upscale_factor: u32,
+    /// Blue noise jittering
+    pub blue_noise_jitter: bool,
+    /// Horizon fade distance
+    pub horizon_fade_distance: f32,
+    /// Enable cone trace for light
+    pub cone_light_march: bool,
+    /// Powder effect strength
+    pub powder_strength: f32,
+    /// Beer-Lambert extinction factor
+    pub beer_factor: f32,
+    /// Multi-scattering approximation octaves
+    pub ms_octaves: u32,
+}
+
+impl CloudRayMarchSettings {
+    pub fn from_quality(quality: CloudQuality) -> Self {
+        match quality {
+            CloudQuality::Low => Self {
+                max_steps: 48,
+                base_step_size: 100.0,
+                max_distance: 50000.0,
+                light_steps: 4,
+                temporal_enabled: true,
+                upscale_factor: 4,
+                blue_noise_jitter: true,
+                horizon_fade_distance: 30000.0,
+                cone_light_march: false,
+                powder_strength: 0.8,
+                beer_factor: 1.0,
+                ms_octaves: 1,
+            },
+            CloudQuality::Medium => Self {
+                max_steps: 96,
+                base_step_size: 50.0,
+                max_distance: 100000.0,
+                light_steps: 6,
+                temporal_enabled: true,
+                upscale_factor: 2,
+                blue_noise_jitter: true,
+                horizon_fade_distance: 50000.0,
+                cone_light_march: false,
+                powder_strength: 0.9,
+                beer_factor: 1.0,
+                ms_octaves: 2,
+            },
+            CloudQuality::High => Self {
+                max_steps: 192,
+                base_step_size: 25.0,
+                max_distance: 200000.0,
+                light_steps: 8,
+                temporal_enabled: true,
+                upscale_factor: 1,
+                blue_noise_jitter: true,
+                horizon_fade_distance: 80000.0,
+                cone_light_march: true,
+                powder_strength: 1.0,
+                beer_factor: 1.0,
+                ms_octaves: 3,
+            },
+            CloudQuality::Ultra => Self {
+                max_steps: 384,
+                base_step_size: 15.0,
+                max_distance: 400000.0,
+                light_steps: 12,
+                temporal_enabled: true,
+                upscale_factor: 1,
+                blue_noise_jitter: true,
+                horizon_fade_distance: 150000.0,
+                cone_light_march: true,
+                powder_strength: 1.0,
+                beer_factor: 1.0,
+                ms_octaves: 4,
+            },
+            CloudQuality::Custom(settings) => settings,
+        }
+    }
+}
+
+/// GPU-packed cloud parameters for shader
+#[repr(C)]
+pub struct GpuCloudParams {
+    /// Layer bottom altitude
+    pub altitude_bottom: f32,
+    /// Layer top altitude
+    pub altitude_top: f32,
+    /// Cloud coverage
+    pub coverage: f32,
+    /// Cloud density
+    pub density: f32,
+    /// Absorption coefficient
+    pub absorption: f32,
+    /// Scatter albedo
+    pub scatter_albedo: f32,
+    /// Phase function eccentricity
+    pub eccentricity: f32,
+    /// Shape noise scale
+    pub shape_scale: f32,
+    /// Detail noise scale
+    pub detail_scale: f32,
+    /// Detail noise strength
+    pub detail_strength: f32,
+    /// Wind direction (normalized)
+    pub wind_dir: Vec2,
+    /// Wind speed
+    pub wind_speed: f32,
+    /// Curl noise strength
+    pub curl_strength: f32,
+    /// Height gradient (packed)
+    pub height_gradient: [f32; 8],
+    /// Anvil bias
+    pub anvil_bias: f32,
+    /// Precipitation darkening
+    pub precipitation_darkening: f32,
+    /// Time offset for animation
+    pub time: f32,
+    /// Padding
+    pub _pad: f32,
+}
+
+/// GPU-packed ray march settings
+#[repr(C)]
+pub struct GpuRayMarchParams {
+    /// Maximum steps
+    pub max_steps: u32,
+    /// Base step size
+    pub base_step_size: f32,
+    /// Maximum ray distance
+    pub max_distance: f32,
+    /// Light march steps
+    pub light_steps: u32,
+    /// Powder effect strength
+    pub powder_strength: f32,
+    /// Beer factor
+    pub beer_factor: f32,
+    /// Multi-scattering octaves
+    pub ms_octaves: u32,
+    /// Horizon fade
+    pub horizon_fade: f32,
+    /// Frame jitter offset
+    pub jitter_offset: Vec2,
+    /// Blue noise texture size
+    pub blue_noise_size: f32,
+    /// Padding
+    pub _pad: f32,
+}
+
+/// Volumetric cloud renderer
+pub struct VolumetricCloudRenderer {
+    /// Cloud layers
+    layers: Vec<CloudLayerConfig>,
+    /// Ray march settings
+    settings: CloudRayMarchSettings,
+    /// Noise generator
+    noise_gen: CloudNoiseGenerator,
+    /// Cloud render target (half/quarter res)
+    cloud_target: Texture,
+    /// Temporal history
+    history_texture: Texture,
+    /// Upscaled output
+    output_texture: Texture,
+    /// Depth aware upscale target
+    depth_aware_target: Texture,
+    /// Compute shader for cloud rendering
+    cloud_compute: ComputeShader,
+    /// Compute shader for temporal reprojection
+    temporal_compute: ComputeShader,
+    /// Compute shader for bilateral upscale
+    upscale_compute: ComputeShader,
+    /// GPU parameter buffer
+    params_buffer: GpuBuffer,
+    /// Frame index for temporal jittering
+    frame_index: u32,
+    /// Planet radius for curvature
+    planet_radius: f32,
+    /// Sun direction
+    sun_direction: Vec3,
+    /// Sun color
+    sun_color: Color,
+    /// Ambient sky color
+    ambient_color: Color,
+}
+
+impl VolumetricCloudRenderer {
+    /// Create new volumetric cloud renderer
+    pub fn new(width: u32, height: u32, quality: CloudQuality) -> Self {
+        let settings = CloudRayMarchSettings::from_quality(quality);
+        let upscale = settings.upscale_factor;
+
+        let cloud_width = width / upscale;
+        let cloud_height = height / upscale;
+
+        Self {
+            layers: Vec::new(),
+            settings,
+            noise_gen: CloudNoiseGenerator::new(128, 32, 1024),
+            cloud_target: Texture::new_2d(cloud_width, cloud_height, TextureFormat::Rgba16Float),
+            history_texture: Texture::new_2d(cloud_width, cloud_height, TextureFormat::Rgba16Float),
+            output_texture: Texture::new_2d(width, height, TextureFormat::Rgba16Float),
+            depth_aware_target: Texture::new_2d(width, height, TextureFormat::Rgba16Float),
+            cloud_compute: ComputeShader::from_source(CLOUD_RAYMARCH_SHADER),
+            temporal_compute: ComputeShader::from_source(CLOUD_TEMPORAL_SHADER),
+            upscale_compute: ComputeShader::from_source(CLOUD_UPSCALE_SHADER),
+            params_buffer: GpuBuffer::new_uniform(4096),
+            frame_index: 0,
+            planet_radius: 6371000.0,
+            sun_direction: Vec3::new(0.0, 1.0, 0.0),
+            sun_color: Color::from_temperature(5778.0),
+            ambient_color: Color::new(0.3, 0.4, 0.6, 1.0),
+        }
+    }
+
+    /// Add a cloud layer
+    pub fn add_layer(&mut self, config: CloudLayerConfig) {
+        self.layers.push(config);
+    }
+
+    /// Remove all cloud layers
+    pub fn clear_layers(&mut self) {
+        self.layers.clear();
+    }
+
+    /// Set sun direction (should be normalized)
+    pub fn set_sun_direction(&mut self, direction: Vec3) {
+        self.sun_direction = direction.normalize();
+    }
+
+    /// Set sun color
+    pub fn set_sun_color(&mut self, color: Color) {
+        self.sun_color = color;
+    }
+
+    /// Set ambient color
+    pub fn set_ambient_color(&mut self, color: Color) {
+        self.ambient_color = color;
+    }
+
+    /// Update weather map
+    pub fn update_weather(&mut self, seed: u32, global_coverage: f32) {
+        self.noise_gen.generate_weather_map(seed, global_coverage);
+    }
+
+    /// Render clouds for current frame
+    pub fn render(
+        &mut self,
+        camera_position: Vec3,
+        view_matrix: Mat4,
+        projection_matrix: Mat4,
+        depth_texture: &Texture,
+        time: f32,
+    ) {
+        // Update GPU parameters
+        self.update_params(camera_position, view_matrix, projection_matrix, time);
+
+        // Raymarch clouds at reduced resolution
+        self.raymarch_clouds(camera_position, view_matrix, projection_matrix);
+
+        // Temporal reprojection
+        if self.settings.temporal_enabled {
+            self.temporal_reproject(view_matrix, projection_matrix);
+        }
+
+        // Upscale to full resolution
+        self.upscale_clouds(depth_texture);
+
+        self.frame_index += 1;
+    }
+
+    fn update_params(
+        &mut self,
+        camera_position: Vec3,
+        view_matrix: Mat4,
+        projection_matrix: Mat4,
+        time: f32,
+    ) {
+        // Pack layer parameters
+        for (i, layer) in self.layers.iter().enumerate() {
+            let gpu_params = GpuCloudParams {
+                altitude_bottom: layer.altitude_bottom,
+                altitude_top: layer.altitude_top,
+                coverage: layer.coverage,
+                density: layer.density,
+                absorption: layer.absorption,
+                scatter_albedo: layer.scatter_albedo,
+                eccentricity: layer.eccentricity,
+                shape_scale: layer.shape_scale,
+                detail_scale: layer.detail_scale,
+                detail_strength: layer.detail_strength,
+                wind_dir: Vec2::new(layer.wind.x, layer.wind.y).normalize(),
+                wind_speed: layer.wind.z,
+                curl_strength: layer.curl_strength,
+                height_gradient: [
+                    layer.height_gradient.points[0].1,
+                    layer.height_gradient.points[1].1,
+                    layer.height_gradient.points[2].1,
+                    layer.height_gradient.points[3].1,
+                    layer.height_gradient.points[4].1,
+                    layer.height_gradient.points[5].1,
+                    layer.height_gradient.points[6].1,
+                    layer.height_gradient.points[7].1,
+                ],
+                anvil_bias: layer.anvil_bias,
+                precipitation_darkening: if layer.precipitation_darkening { 1.0 } else { 0.0 },
+                time,
+                _pad: 0.0,
+            };
+
+            self.params_buffer.write(&gpu_params, i * std::mem::size_of::<GpuCloudParams>());
+        }
+
+        // Pack raymarch settings
+        let jitter = self.compute_jitter();
+        let raymarch_params = GpuRayMarchParams {
+            max_steps: self.settings.max_steps,
+            base_step_size: self.settings.base_step_size,
+            max_distance: self.settings.max_distance,
+            light_steps: self.settings.light_steps,
+            powder_strength: self.settings.powder_strength,
+            beer_factor: self.settings.beer_factor,
+            ms_octaves: self.settings.ms_octaves,
+            horizon_fade: self.settings.horizon_fade_distance,
+            jitter_offset: jitter,
+            blue_noise_size: 128.0,
+            _pad: 0.0,
+        };
+
+        self.params_buffer.write(&raymarch_params, 2048);
+    }
+
+    fn compute_jitter(&self) -> Vec2 {
+        // 4x4 temporal jitter pattern
+        let patterns = [
+            Vec2::new(0.0, 0.0),
+            Vec2::new(0.5, 0.0),
+            Vec2::new(0.0, 0.5),
+            Vec2::new(0.5, 0.5),
+            Vec2::new(0.25, 0.25),
+            Vec2::new(0.75, 0.25),
+            Vec2::new(0.25, 0.75),
+            Vec2::new(0.75, 0.75),
+            Vec2::new(0.125, 0.125),
+            Vec2::new(0.625, 0.125),
+            Vec2::new(0.125, 0.625),
+            Vec2::new(0.625, 0.625),
+            Vec2::new(0.375, 0.375),
+            Vec2::new(0.875, 0.375),
+            Vec2::new(0.375, 0.875),
+            Vec2::new(0.875, 0.875),
+        ];
+
+        patterns[(self.frame_index % 16) as usize]
+    }
+
+    fn raymarch_clouds(
+        &self,
+        camera_position: Vec3,
+        view_matrix: Mat4,
+        projection_matrix: Mat4,
+    ) {
+        self.cloud_compute.set_texture("base_shape", self.noise_gen.base_shape());
+        self.cloud_compute.set_texture("detail_noise", self.noise_gen.detail());
+        self.cloud_compute.set_texture("weather_map", self.noise_gen.weather_map());
+        self.cloud_compute.set_texture("blue_noise", self.noise_gen.blue_noise());
+        self.cloud_compute.set_storage_texture("output", &self.cloud_target);
+        self.cloud_compute.set_buffer("params", &self.params_buffer);
+
+        let inv_view_proj = (projection_matrix * view_matrix).inverse();
+        self.cloud_compute.set_uniform("inv_view_proj", inv_view_proj);
+        self.cloud_compute.set_uniform("camera_position", camera_position);
+        self.cloud_compute.set_uniform("sun_direction", self.sun_direction);
+        self.cloud_compute.set_uniform("sun_color", self.sun_color.to_vec3());
+        self.cloud_compute.set_uniform("ambient_color", self.ambient_color.to_vec3());
+        self.cloud_compute.set_uniform("planet_radius", self.planet_radius);
+        self.cloud_compute.set_uniform("layer_count", self.layers.len() as u32);
+
+        self.cloud_compute.dispatch_2d(
+            self.cloud_target.width(),
+            self.cloud_target.height(),
+        );
+    }
+
+    fn temporal_reproject(&mut self, view_matrix: Mat4, projection_matrix: Mat4) {
+        self.temporal_compute.set_texture("current", &self.cloud_target);
+        self.temporal_compute.set_texture("history", &self.history_texture);
+        self.temporal_compute.set_storage_texture("output", &self.cloud_target);
+
+        self.temporal_compute.set_uniform("blend_factor", 0.05f32);
+        self.temporal_compute.set_uniform("frame_index", self.frame_index);
+
+        self.temporal_compute.dispatch_2d(
+            self.cloud_target.width(),
+            self.cloud_target.height(),
+        );
+
+        // Copy current to history
+        self.cloud_target.copy_to(&mut self.history_texture);
+    }
+
+    fn upscale_clouds(&self, depth_texture: &Texture) {
+        self.upscale_compute.set_texture("cloud_low_res", &self.cloud_target);
+        self.upscale_compute.set_texture("depth", depth_texture);
+        self.upscale_compute.set_storage_texture("output", &self.output_texture);
+        self.upscale_compute.set_uniform("upscale_factor", self.settings.upscale_factor);
+
+        self.upscale_compute.dispatch_2d(
+            self.output_texture.width(),
+            self.output_texture.height(),
+        );
+    }
+
+    /// Get the rendered cloud texture
+    pub fn output(&self) -> &Texture {
+        &self.output_texture
+    }
+}
+
+// =============================================================================
+// REGION: PROCEDURAL SKY RENDERING
+// =============================================================================
+
+/// Sky rendering mode
+pub enum SkyMode {
+    /// Procedural gradient sky
+    Gradient(GradientSky),
+    /// Physically-based atmospheric scattering
+    Physical,
+    /// HDRI environment map
+    Hdri(Texture),
+    /// Procedural with stars
+    Starfield(StarfieldConfig),
+}
+
+/// Gradient sky configuration
+pub struct GradientSky {
+    /// Zenith (straight up) color
+    pub zenith_color: Color,
+    /// Horizon color
+    pub horizon_color: Color,
+    /// Nadir (straight down) color
+    pub nadir_color: Color,
+    /// Sun color
+    pub sun_color: Color,
+    /// Sun size (angular radius in degrees)
+    pub sun_size: f32,
+    /// Sun intensity
+    pub sun_intensity: f32,
+    /// Horizon exponent (controls transition sharpness)
+    pub horizon_exponent: f32,
+}
+
+impl Default for GradientSky {
+    fn default() -> Self {
+        Self {
+            zenith_color: Color::from_hex(0x4B7CBE),
+            horizon_color: Color::from_hex(0xC4D7ED),
+            nadir_color: Color::from_hex(0x6B4423),
+            sun_color: Color::from_hex(0xFFF4E5),
+            sun_size: 0.53,
+            sun_intensity: 100.0,
+            horizon_exponent: 3.0,
+        }
+    }
+}
+
+impl GradientSky {
+    /// Sunset preset
+    pub fn sunset() -> Self {
+        Self {
+            zenith_color: Color::from_hex(0x1B2838),
+            horizon_color: Color::from_hex(0xE86A33),
+            nadir_color: Color::from_hex(0x2D1F1A),
+            sun_color: Color::from_hex(0xFF6B35),
+            sun_size: 0.8,
+            sun_intensity: 80.0,
+            horizon_exponent: 2.0,
+        }
+    }
+
+    /// Night sky preset
+    pub fn night() -> Self {
+        Self {
+            zenith_color: Color::from_hex(0x0B0D13),
+            horizon_color: Color::from_hex(0x1A1F2E),
+            nadir_color: Color::from_hex(0x0A0B0F),
+            sun_color: Color::from_hex(0xE8E4D9),
+            sun_size: 0.25,  // Moon
+            sun_intensity: 0.3,
+            horizon_exponent: 4.0,
+        }
+    }
+
+    /// Overcast preset
+    pub fn overcast() -> Self {
+        Self {
+            zenith_color: Color::from_hex(0x8E99A4),
+            horizon_color: Color::from_hex(0xB8C0C8),
+            nadir_color: Color::from_hex(0x5A6570),
+            sun_color: Color::from_hex(0xFFFFFF),
+            sun_size: 2.0,  // Diffuse
+            sun_intensity: 5.0,
+            horizon_exponent: 1.5,
+        }
+    }
+}
+
+/// Starfield configuration
+pub struct StarfieldConfig {
+    /// Number of stars
+    pub star_count: u32,
+    /// Minimum star brightness
+    pub min_brightness: f32,
+    /// Maximum star brightness
+    pub max_brightness: f32,
+    /// Star twinkle speed
+    pub twinkle_speed: f32,
+    /// Milky way intensity
+    pub milky_way_intensity: f32,
+    /// Galaxy center direction
+    pub galaxy_center: Vec3,
+    /// Enable constellations
+    pub constellations: bool,
+    /// Random seed
+    pub seed: u32,
+}
+
+impl Default for StarfieldConfig {
+    fn default() -> Self {
+        Self {
+            star_count: 10000,
+            min_brightness: 0.01,
+            max_brightness: 1.0,
+            twinkle_speed: 1.0,
+            milky_way_intensity: 0.3,
+            galaxy_center: Vec3::new(0.0, 0.3, 1.0).normalize(),
+            constellations: true,
+            seed: 12345,
+        }
+    }
+}
+
+/// Procedural sky renderer
+pub struct ProceduralSkyRenderer {
+    /// Sky mode
+    mode: SkyMode,
+    /// Sky cubemap (cached)
+    sky_cubemap: Texture,
+    /// Irradiance cubemap (for IBL)
+    irradiance_cubemap: Texture,
+    /// Prefiltered env map (for specular IBL)
+    prefiltered_cubemap: Texture,
+    /// BRDF LUT
+    brdf_lut: Texture,
+    /// Render pipeline
+    sky_pipeline: RenderPipeline,
+    /// Compute shader for cubemap generation
+    cubemap_compute: ComputeShader,
+    /// Sun direction
+    sun_direction: Vec3,
+    /// Time for animation
+    time: f32,
+    /// Needs regeneration
+    dirty: bool,
+}
+
+impl ProceduralSkyRenderer {
+    /// Create new procedural sky renderer
+    pub fn new(cubemap_size: u32) -> Self {
+        Self {
+            mode: SkyMode::Gradient(GradientSky::default()),
+            sky_cubemap: Texture::new_cube(cubemap_size, TextureFormat::Rgba16Float),
+            irradiance_cubemap: Texture::new_cube(32, TextureFormat::Rgba16Float),
+            prefiltered_cubemap: Texture::new_cube_mip(cubemap_size, TextureFormat::Rgba16Float, 5),
+            brdf_lut: Texture::new_2d(512, 512, TextureFormat::Rg16Float),
+            sky_pipeline: RenderPipeline::from_source(SKY_RENDER_SHADER),
+            cubemap_compute: ComputeShader::from_source(SKY_CUBEMAP_SHADER),
+            sun_direction: Vec3::new(0.5, 0.7, 0.3).normalize(),
+            time: 0.0,
+            dirty: true,
+        }
+    }
+
+    /// Set sky mode
+    pub fn set_mode(&mut self, mode: SkyMode) {
+        self.mode = mode;
+        self.dirty = true;
+    }
+
+    /// Set sun direction
+    pub fn set_sun_direction(&mut self, direction: Vec3) {
+        self.sun_direction = direction.normalize();
+        self.dirty = true;
+    }
+
+    /// Update time for animations
+    pub fn update(&mut self, delta_time: f32) {
+        self.time += delta_time;
+    }
+
+    /// Regenerate sky cubemap if needed
+    pub fn regenerate_if_dirty(&mut self) {
+        if !self.dirty {
+            return;
+        }
+
+        match &self.mode {
+            SkyMode::Gradient(config) => {
+                self.generate_gradient_cubemap(config);
+            }
+            SkyMode::Physical => {
+                self.generate_physical_cubemap();
+            }
+            SkyMode::Hdri(texture) => {
+                self.convert_equirect_to_cubemap(texture);
+            }
+            SkyMode::Starfield(config) => {
+                self.generate_starfield_cubemap(config);
+            }
+        }
+
+        self.generate_irradiance_map();
+        self.generate_prefiltered_map();
+
+        self.dirty = false;
+    }
+
+    fn generate_gradient_cubemap(&self, config: &GradientSky) {
+        self.cubemap_compute.set_storage_texture("output", &self.sky_cubemap);
+        self.cubemap_compute.set_uniform("mode", 0u32);
+        self.cubemap_compute.set_uniform("zenith_color", config.zenith_color.to_vec3());
+        self.cubemap_compute.set_uniform("horizon_color", config.horizon_color.to_vec3());
+        self.cubemap_compute.set_uniform("nadir_color", config.nadir_color.to_vec3());
+        self.cubemap_compute.set_uniform("sun_color", config.sun_color.to_vec3());
+        self.cubemap_compute.set_uniform("sun_direction", self.sun_direction);
+        self.cubemap_compute.set_uniform("sun_size", config.sun_size.to_radians());
+        self.cubemap_compute.set_uniform("sun_intensity", config.sun_intensity);
+        self.cubemap_compute.set_uniform("horizon_exponent", config.horizon_exponent);
+
+        let size = self.sky_cubemap.width();
+        self.cubemap_compute.dispatch_3d(size, size, 6);
+    }
+
+    fn generate_physical_cubemap(&self) {
+        self.cubemap_compute.set_storage_texture("output", &self.sky_cubemap);
+        self.cubemap_compute.set_uniform("mode", 1u32);
+        self.cubemap_compute.set_uniform("sun_direction", self.sun_direction);
+
+        let size = self.sky_cubemap.width();
+        self.cubemap_compute.dispatch_3d(size, size, 6);
+    }
+
+    fn convert_equirect_to_cubemap(&self, hdri: &Texture) {
+        self.cubemap_compute.set_texture("equirect_input", hdri);
+        self.cubemap_compute.set_storage_texture("output", &self.sky_cubemap);
+        self.cubemap_compute.set_uniform("mode", 2u32);
+
+        let size = self.sky_cubemap.width();
+        self.cubemap_compute.dispatch_3d(size, size, 6);
+    }
+
+    fn generate_starfield_cubemap(&self, config: &StarfieldConfig) {
+        self.cubemap_compute.set_storage_texture("output", &self.sky_cubemap);
+        self.cubemap_compute.set_uniform("mode", 3u32);
+        self.cubemap_compute.set_uniform("star_count", config.star_count);
+        self.cubemap_compute.set_uniform("min_brightness", config.min_brightness);
+        self.cubemap_compute.set_uniform("max_brightness", config.max_brightness);
+        self.cubemap_compute.set_uniform("twinkle_speed", config.twinkle_speed);
+        self.cubemap_compute.set_uniform("milky_way_intensity", config.milky_way_intensity);
+        self.cubemap_compute.set_uniform("galaxy_center", config.galaxy_center);
+        self.cubemap_compute.set_uniform("seed", config.seed);
+        self.cubemap_compute.set_uniform("time", self.time);
+
+        let size = self.sky_cubemap.width();
+        self.cubemap_compute.dispatch_3d(size, size, 6);
+    }
+
+    fn generate_irradiance_map(&self) {
+        // Convolve sky cubemap for diffuse IBL
+        self.cubemap_compute.set_texture("sky_cubemap", &self.sky_cubemap);
+        self.cubemap_compute.set_storage_texture("output", &self.irradiance_cubemap);
+        self.cubemap_compute.set_uniform("mode", 10u32);  // Irradiance mode
+
+        let size = self.irradiance_cubemap.width();
+        self.cubemap_compute.dispatch_3d(size, size, 6);
+    }
+
+    fn generate_prefiltered_map(&self) {
+        // Generate mip chain for specular IBL
+        for mip in 0..5u32 {
+            let roughness = mip as f32 / 4.0;
+            let size = self.prefiltered_cubemap.width() >> mip;
+
+            self.cubemap_compute.set_texture("sky_cubemap", &self.sky_cubemap);
+            self.cubemap_compute.set_storage_texture_mip("output", &self.prefiltered_cubemap, mip);
+            self.cubemap_compute.set_uniform("mode", 11u32);  // Prefilter mode
+            self.cubemap_compute.set_uniform("roughness", roughness);
+
+            self.cubemap_compute.dispatch_3d(size, size, 6);
+        }
+    }
+
+    /// Render sky to screen
+    pub fn render(&self, view_matrix: Mat4, projection_matrix: Mat4) {
+        self.sky_pipeline.set_texture("sky_cubemap", &self.sky_cubemap);
+        self.sky_pipeline.set_uniform("inv_view_proj", (projection_matrix * view_matrix).inverse());
+        self.sky_pipeline.draw_fullscreen();
+    }
+
+    /// Get sky cubemap for IBL
+    pub fn sky_cubemap(&self) -> &Texture {
+        &self.sky_cubemap
+    }
+
+    /// Get irradiance map for diffuse IBL
+    pub fn irradiance_map(&self) -> &Texture {
+        &self.irradiance_cubemap
+    }
+
+    /// Get prefiltered map for specular IBL
+    pub fn prefiltered_map(&self) -> &Texture {
+        &self.prefiltered_cubemap
+    }
+
+    /// Get BRDF LUT
+    pub fn brdf_lut(&self) -> &Texture {
+        &self.brdf_lut
+    }
+}
+
+// =============================================================================
+// REGION: CLOUD SHADOWS
+// =============================================================================
+
+/// Cloud shadow map renderer
+pub struct CloudShadowRenderer {
+    /// Shadow map texture
+    shadow_map: Texture,
+    /// Shadow map resolution
+    resolution: u32,
+    /// Shadow projection area (meters)
+    projection_size: f32,
+    /// Compute shader
+    shadow_compute: ComputeShader,
+}
+
+impl CloudShadowRenderer {
+    /// Create new cloud shadow renderer
+    pub fn new(resolution: u32, projection_size: f32) -> Self {
+        Self {
+            shadow_map: Texture::new_2d(resolution, resolution, TextureFormat::R16Float),
+            resolution,
+            projection_size,
+            shadow_compute: ComputeShader::from_source(CLOUD_SHADOW_SHADER),
+        }
+    }
+
+    /// Render cloud shadows from sun direction
+    pub fn render(
+        &self,
+        cloud_renderer: &VolumetricCloudRenderer,
+        sun_direction: Vec3,
+        center_position: Vec3,
+    ) {
+        self.shadow_compute.set_texture("base_shape", cloud_renderer.noise_gen.base_shape());
+        self.shadow_compute.set_texture("weather_map", cloud_renderer.noise_gen.weather_map());
+        self.shadow_compute.set_storage_texture("shadow_map", &self.shadow_map);
+        self.shadow_compute.set_buffer("cloud_params", &cloud_renderer.params_buffer);
+
+        self.shadow_compute.set_uniform("sun_direction", sun_direction);
+        self.shadow_compute.set_uniform("center_position", center_position);
+        self.shadow_compute.set_uniform("projection_size", self.projection_size);
+        self.shadow_compute.set_uniform("layer_count", cloud_renderer.layers.len() as u32);
+
+        self.shadow_compute.dispatch_2d(self.resolution, self.resolution);
+    }
+
+    /// Get shadow map texture
+    pub fn shadow_map(&self) -> &Texture {
+        &self.shadow_map
+    }
+
+    /// Get shadow projection matrix
+    pub fn projection_matrix(&self, sun_direction: Vec3, center: Vec3) -> Mat4 {
+        let up = if sun_direction.y.abs() > 0.99 {
+            Vec3::new(1.0, 0.0, 0.0)
+        } else {
+            Vec3::new(0.0, 1.0, 0.0)
+        };
+
+        let view = Mat4::look_at(center + sun_direction * 50000.0, center, up);
+        let proj = Mat4::orthographic(
+            -self.projection_size * 0.5,
+            self.projection_size * 0.5,
+            -self.projection_size * 0.5,
+            self.projection_size * 0.5,
+            0.1,
+            100000.0,
+        );
+
+        proj * view
+    }
+}
+
+// =============================================================================
+// REGION: GOD RAYS / VOLUMETRIC LIGHT SHAFTS
+// =============================================================================
+
+/// God rays (crepuscular rays) renderer
+pub struct GodRaysRenderer {
+    /// Light shaft texture
+    shaft_texture: Texture,
+    /// Temp blur texture
+    blur_texture: Texture,
+    /// Compute shader for ray generation
+    rays_compute: ComputeShader,
+    /// Quality settings
+    quality: GodRaysQuality,
+}
+
+/// God rays quality preset
+pub struct GodRaysQuality {
+    /// Number of samples along ray
+    pub samples: u32,
+    /// Density of rays
+    pub density: f32,
+    /// Decay per sample
+    pub decay: f32,
+    /// Weight multiplier
+    pub weight: f32,
+    /// Exposure
+    pub exposure: f32,
+}
+
+impl Default for GodRaysQuality {
+    fn default() -> Self {
+        Self {
+            samples: 128,
+            density: 1.0,
+            decay: 0.96,
+            weight: 0.4,
+            exposure: 0.3,
+        }
+    }
+}
+
+impl GodRaysRenderer {
+    /// Create new god rays renderer
+    pub fn new(width: u32, height: u32) -> Self {
+        Self {
+            shaft_texture: Texture::new_2d(width / 2, height / 2, TextureFormat::Rgba16Float),
+            blur_texture: Texture::new_2d(width / 2, height / 2, TextureFormat::Rgba16Float),
+            rays_compute: ComputeShader::from_source(GOD_RAYS_SHADER),
+            quality: GodRaysQuality::default(),
+        }
+    }
+
+    /// Set quality settings
+    pub fn set_quality(&mut self, quality: GodRaysQuality) {
+        self.quality = quality;
+    }
+
+    /// Render god rays
+    pub fn render(
+        &self,
+        cloud_texture: &Texture,
+        depth_texture: &Texture,
+        sun_direction: Vec3,
+        view_proj_matrix: Mat4,
+    ) {
+        // Project sun to screen space
+        let sun_clip = view_proj_matrix * Vec4::new(
+            sun_direction.x * 1000000.0,
+            sun_direction.y * 1000000.0,
+            sun_direction.z * 1000000.0,
+            1.0,
+        );
+        let sun_ndc = Vec2::new(
+            sun_clip.x / sun_clip.w,
+            sun_clip.y / sun_clip.w,
+        );
+        let sun_screen = Vec2::new(
+            sun_ndc.x * 0.5 + 0.5,
+            sun_ndc.y * 0.5 + 0.5,
+        );
+
+        self.rays_compute.set_texture("cloud", cloud_texture);
+        self.rays_compute.set_texture("depth", depth_texture);
+        self.rays_compute.set_storage_texture("output", &self.shaft_texture);
+
+        self.rays_compute.set_uniform("sun_screen_pos", sun_screen);
+        self.rays_compute.set_uniform("num_samples", self.quality.samples);
+        self.rays_compute.set_uniform("density", self.quality.density);
+        self.rays_compute.set_uniform("decay", self.quality.decay);
+        self.rays_compute.set_uniform("weight", self.quality.weight);
+        self.rays_compute.set_uniform("exposure", self.quality.exposure);
+
+        self.rays_compute.dispatch_2d(
+            self.shaft_texture.width(),
+            self.shaft_texture.height(),
+        );
+    }
+
+    /// Get god rays texture
+    pub fn output(&self) -> &Texture {
+        &self.shaft_texture
+    }
+}
+
+// =============================================================================
+// REGION: AURORA BOREALIS
+// =============================================================================
+
+/// Aurora borealis (northern lights) renderer
+pub struct AuroraRenderer {
+    /// Aurora output texture
+    aurora_texture: Texture,
+    /// Compute shader
+    aurora_compute: ComputeShader,
+    /// Aurora configuration
+    config: AuroraConfig,
+}
+
+/// Aurora configuration
+pub struct AuroraConfig {
+    /// Primary color
+    pub primary_color: Color,
+    /// Secondary color
+    pub secondary_color: Color,
+    /// Intensity
+    pub intensity: f32,
+    /// Wave speed
+    pub wave_speed: f32,
+    /// Wave frequency
+    pub wave_frequency: f32,
+    /// Curtain height (in degrees from horizon)
+    pub height: f32,
+    /// Curtain thickness
+    pub thickness: f32,
+    /// Flicker speed
+    pub flicker_speed: f32,
+}
+
+impl Default for AuroraConfig {
+    fn default() -> Self {
+        Self {
+            primary_color: Color::from_hex(0x00FF88),
+            secondary_color: Color::from_hex(0xFF00FF),
+            intensity: 1.0,
+            wave_speed: 0.5,
+            wave_frequency: 2.0,
+            height: 15.0,
+            thickness: 5.0,
+            flicker_speed: 2.0,
+        }
+    }
+}
+
+impl AuroraRenderer {
+    /// Create new aurora renderer
+    pub fn new(width: u32, height: u32) -> Self {
+        Self {
+            aurora_texture: Texture::new_2d(width / 2, height / 2, TextureFormat::Rgba16Float),
+            aurora_compute: ComputeShader::from_source(AURORA_SHADER),
+            config: AuroraConfig::default(),
+        }
+    }
+
+    /// Set aurora configuration
+    pub fn set_config(&mut self, config: AuroraConfig) {
+        self.config = config;
+    }
+
+    /// Render aurora
+    pub fn render(&self, time: f32, view_matrix: Mat4, projection_matrix: Mat4) {
+        self.aurora_compute.set_storage_texture("output", &self.aurora_texture);
+        self.aurora_compute.set_uniform("inv_view_proj", (projection_matrix * view_matrix).inverse());
+        self.aurora_compute.set_uniform("time", time);
+        self.aurora_compute.set_uniform("primary_color", self.config.primary_color.to_vec3());
+        self.aurora_compute.set_uniform("secondary_color", self.config.secondary_color.to_vec3());
+        self.aurora_compute.set_uniform("intensity", self.config.intensity);
+        self.aurora_compute.set_uniform("wave_speed", self.config.wave_speed);
+        self.aurora_compute.set_uniform("wave_frequency", self.config.wave_frequency);
+        self.aurora_compute.set_uniform("height", self.config.height);
+        self.aurora_compute.set_uniform("thickness", self.config.thickness);
+        self.aurora_compute.set_uniform("flicker_speed", self.config.flicker_speed);
+
+        self.aurora_compute.dispatch_2d(
+            self.aurora_texture.width(),
+            self.aurora_texture.height(),
+        );
+    }
+
+    /// Get aurora texture
+    pub fn output(&self) -> &Texture {
+        &self.aurora_texture
+    }
+}
+
+// =============================================================================
+// REGION: TIME OF DAY SYSTEM
+// =============================================================================
+
+/// Time of day manager
+pub struct TimeOfDayManager {
+    /// Current time (0-24 hours)
+    time: f32,
+    /// Time scale (1.0 = realtime)
+    time_scale: f32,
+    /// Latitude for sun/moon calculations
+    latitude: f32,
+    /// Day of year (0-365)
+    day_of_year: u32,
+    /// Sun direction cache
+    sun_direction: Vec3,
+    /// Moon direction cache
+    moon_direction: Vec3,
+    /// Moon phase (0-1, 0 = new, 0.5 = full)
+    moon_phase: f32,
+    /// Sky color presets for interpolation
+    sky_presets: TimeOfDayPresets,
+}
+
+/// Time of day color presets
+pub struct TimeOfDayPresets {
+    pub dawn: GradientSky,
+    pub morning: GradientSky,
+    pub noon: GradientSky,
+    pub afternoon: GradientSky,
+    pub sunset: GradientSky,
+    pub dusk: GradientSky,
+    pub night: GradientSky,
+}
+
+impl Default for TimeOfDayPresets {
+    fn default() -> Self {
+        Self {
+            dawn: GradientSky {
+                zenith_color: Color::from_hex(0x1A2744),
+                horizon_color: Color::from_hex(0xFFAA66),
+                nadir_color: Color::from_hex(0x1A1510),
+                sun_color: Color::from_hex(0xFF8844),
+                sun_size: 0.7,
+                sun_intensity: 40.0,
+                horizon_exponent: 2.0,
+            },
+            morning: GradientSky {
+                zenith_color: Color::from_hex(0x5588CC),
+                horizon_color: Color::from_hex(0xAADDFF),
+                nadir_color: Color::from_hex(0x443322),
+                sun_color: Color::from_hex(0xFFEECC),
+                sun_size: 0.55,
+                sun_intensity: 80.0,
+                horizon_exponent: 2.5,
+            },
+            noon: GradientSky::default(),
+            afternoon: GradientSky {
+                zenith_color: Color::from_hex(0x5580BB),
+                horizon_color: Color::from_hex(0xCCDDEE),
+                nadir_color: Color::from_hex(0x554433),
+                sun_color: Color::from_hex(0xFFFFDD),
+                sun_size: 0.55,
+                sun_intensity: 90.0,
+                horizon_exponent: 2.8,
+            },
+            sunset: GradientSky::sunset(),
+            dusk: GradientSky {
+                zenith_color: Color::from_hex(0x0D1626),
+                horizon_color: Color::from_hex(0x664455),
+                nadir_color: Color::from_hex(0x0A0808),
+                sun_color: Color::from_hex(0xFF4422),
+                sun_size: 0.8,
+                sun_intensity: 20.0,
+                horizon_exponent: 1.5,
+            },
+            night: GradientSky::night(),
+        }
+    }
+}
+
+impl TimeOfDayManager {
+    /// Create new time of day manager
+    pub fn new() -> Self {
+        let mut manager = Self {
+            time: 12.0,
+            time_scale: 1.0,
+            latitude: 45.0,
+            day_of_year: 172,  // Summer solstice
+            sun_direction: Vec3::new(0.0, 1.0, 0.0),
+            moon_direction: Vec3::new(0.0, -1.0, 0.0),
+            moon_phase: 0.5,
+            sky_presets: TimeOfDayPresets::default(),
+        };
+        manager.update_celestial_bodies();
+        manager
+    }
+
+    /// Set time directly (0-24 hours)
+    pub fn set_time(&mut self, time: f32) {
+        self.time = time % 24.0;
+        self.update_celestial_bodies();
+    }
+
+    /// Set time scale
+    pub fn set_time_scale(&mut self, scale: f32) {
+        self.time_scale = scale;
+    }
+
+    /// Set latitude for astronomical calculations
+    pub fn set_latitude(&mut self, latitude: f32) {
+        self.latitude = latitude.clamp(-90.0, 90.0);
+        self.update_celestial_bodies();
+    }
+
+    /// Set day of year
+    pub fn set_day_of_year(&mut self, day: u32) {
+        self.day_of_year = day % 366;
+        self.update_celestial_bodies();
+    }
+
+    /// Update time
+    pub fn update(&mut self, delta_seconds: f32) {
+        let hours_per_second = self.time_scale / 3600.0;
+        self.time = (self.time + delta_seconds * hours_per_second) % 24.0;
+        self.update_celestial_bodies();
+    }
+
+    fn update_celestial_bodies(&mut self) {
+        // Calculate sun position using simplified solar position algorithm
+        let day_angle = 2.0 * std::f32::consts::PI * (self.day_of_year as f32 - 81.0) / 365.0;
+        let declination = 23.45_f32.to_radians() * day_angle.sin();
+
+        let hour_angle = ((self.time - 12.0) * 15.0).to_radians();
+        let lat_rad = self.latitude.to_radians();
+
+        let sin_altitude = lat_rad.sin() * declination.sin() +
+                          lat_rad.cos() * declination.cos() * hour_angle.cos();
+        let altitude = sin_altitude.asin();
+
+        let cos_azimuth = (declination.sin() - lat_rad.sin() * sin_altitude) /
+                         (lat_rad.cos() * altitude.cos());
+        let azimuth = if hour_angle > 0.0 {
+            2.0 * std::f32::consts::PI - cos_azimuth.clamp(-1.0, 1.0).acos()
+        } else {
+            cos_azimuth.clamp(-1.0, 1.0).acos()
+        };
+
+        self.sun_direction = Vec3::new(
+            azimuth.sin() * altitude.cos(),
+            altitude.sin(),
+            -azimuth.cos() * altitude.cos(),
+        ).normalize();
+
+        // Simplified moon position (opposite + offset)
+        let moon_offset = (self.moon_phase * 2.0 * std::f32::consts::PI).sin() * 0.3;
+        self.moon_direction = Vec3::new(
+            -self.sun_direction.x + moon_offset,
+            -self.sun_direction.y,
+            -self.sun_direction.z,
+        ).normalize();
+    }
+
+    /// Get current sun direction
+    pub fn sun_direction(&self) -> Vec3 {
+        self.sun_direction
+    }
+
+    /// Get current moon direction
+    pub fn moon_direction(&self) -> Vec3 {
+        self.moon_direction
+    }
+
+    /// Get current time (0-24)
+    pub fn time(&self) -> f32 {
+        self.time
+    }
+
+    /// Is it currently daytime?
+    pub fn is_daytime(&self) -> bool {
+        self.sun_direction.y > -0.1
+    }
+
+    /// Get sun intensity based on altitude
+    pub fn sun_intensity(&self) -> f32 {
+        let altitude = self.sun_direction.y;
+        if altitude > 0.0 {
+            (altitude * 2.0).min(1.0)
+        } else {
+            0.0
+        }
+    }
+
+    /// Get interpolated sky colors for current time
+    pub fn current_sky(&self) -> GradientSky {
+        // Determine time period and blend factor
+        let (preset_a, preset_b, t) = match self.time {
+            t if t < 5.0 => (&self.sky_presets.night, &self.sky_presets.night, 0.0),
+            t if t < 6.0 => (&self.sky_presets.night, &self.sky_presets.dawn, t - 5.0),
+            t if t < 7.0 => (&self.sky_presets.dawn, &self.sky_presets.morning, t - 6.0),
+            t if t < 10.0 => (&self.sky_presets.morning, &self.sky_presets.noon, (t - 7.0) / 3.0),
+            t if t < 14.0 => (&self.sky_presets.noon, &self.sky_presets.noon, 0.0),
+            t if t < 17.0 => (&self.sky_presets.noon, &self.sky_presets.afternoon, (t - 14.0) / 3.0),
+            t if t < 18.5 => (&self.sky_presets.afternoon, &self.sky_presets.sunset, (t - 17.0) / 1.5),
+            t if t < 19.5 => (&self.sky_presets.sunset, &self.sky_presets.dusk, t - 18.5),
+            t if t < 20.5 => (&self.sky_presets.dusk, &self.sky_presets.night, t - 19.5),
+            _ => (&self.sky_presets.night, &self.sky_presets.night, 0.0),
+        };
+
+        Self::lerp_sky(preset_a, preset_b, t)
+    }
+
+    fn lerp_sky(a: &GradientSky, b: &GradientSky, t: f32) -> GradientSky {
+        GradientSky {
+            zenith_color: Color::lerp(&a.zenith_color, &b.zenith_color, t),
+            horizon_color: Color::lerp(&a.horizon_color, &b.horizon_color, t),
+            nadir_color: Color::lerp(&a.nadir_color, &b.nadir_color, t),
+            sun_color: Color::lerp(&a.sun_color, &b.sun_color, t),
+            sun_size: a.sun_size + (b.sun_size - a.sun_size) * t,
+            sun_intensity: a.sun_intensity + (b.sun_intensity - a.sun_intensity) * t,
+            horizon_exponent: a.horizon_exponent + (b.horizon_exponent - a.horizon_exponent) * t,
+        }
+    }
+}
+
+// =============================================================================
+// REGION: WGSL SHADERS
+// =============================================================================
+
+const CLOUD_NOISE_SHADER: &str = r#"
+struct NoiseParams {
+    frequency: f32,
+    octaves: u32,
+    lacunarity: f32,
+    persistence: f32,
+    offset: vec3<f32>,
+    noise_type: u32,
+    seed: u32,
+    coverage: f32,
+}
+
+@group(0) @binding(0) var output_3d: texture_storage_3d<rgba8unorm, write>;
+@group(0) @binding(1) var output_2d: texture_storage_2d<rg16float, write>;
+@group(0) @binding(2) var<uniform> params: NoiseParams;
+
+// Hash function for procedural noise
+fn hash3(p: vec3<f32>) -> vec3<f32> {
+    var q = vec3<f32>(
+        dot(p, vec3<f32>(127.1, 311.7, 74.7)),
+        dot(p, vec3<f32>(269.5, 183.3, 246.1)),
+        dot(p, vec3<f32>(113.5, 271.9, 124.6))
+    );
+    return fract(sin(q) * 43758.5453123);
+}
+
+// 3D Perlin noise
+fn perlin3d(p: vec3<f32>) -> f32 {
+    let i = floor(p);
+    let f = fract(p);
+    let u = f * f * (3.0 - 2.0 * f);
+
+    return mix(mix(mix(dot(hash3(i + vec3<f32>(0.0, 0.0, 0.0)) * 2.0 - 1.0, f - vec3<f32>(0.0, 0.0, 0.0)),
+                       dot(hash3(i + vec3<f32>(1.0, 0.0, 0.0)) * 2.0 - 1.0, f - vec3<f32>(1.0, 0.0, 0.0)), u.x),
+                   mix(dot(hash3(i + vec3<f32>(0.0, 1.0, 0.0)) * 2.0 - 1.0, f - vec3<f32>(0.0, 1.0, 0.0)),
+                       dot(hash3(i + vec3<f32>(1.0, 1.0, 0.0)) * 2.0 - 1.0, f - vec3<f32>(1.0, 1.0, 0.0)), u.x), u.y),
+               mix(mix(dot(hash3(i + vec3<f32>(0.0, 0.0, 1.0)) * 2.0 - 1.0, f - vec3<f32>(0.0, 0.0, 1.0)),
+                       dot(hash3(i + vec3<f32>(1.0, 0.0, 1.0)) * 2.0 - 1.0, f - vec3<f32>(1.0, 0.0, 1.0)), u.x),
+                   mix(dot(hash3(i + vec3<f32>(0.0, 1.0, 1.0)) * 2.0 - 1.0, f - vec3<f32>(0.0, 1.0, 1.0)),
+                       dot(hash3(i + vec3<f32>(1.0, 1.0, 1.0)) * 2.0 - 1.0, f - vec3<f32>(1.0, 1.0, 1.0)), u.x), u.y), u.z);
+}
+
+// 3D Worley noise
+fn worley3d(p: vec3<f32>) -> vec2<f32> {
+    let n = floor(p);
+    let f = fract(p);
+
+    var d1 = 8.0;
+    var d2 = 8.0;
+
+    for (var k = -1; k <= 1; k++) {
+        for (var j = -1; j <= 1; j++) {
+            for (var i = -1; i <= 1; i++) {
+                let g = vec3<f32>(f32(i), f32(j), f32(k));
+                let o = hash3(n + g);
+                let r = g - f + o;
+                let d = dot(r, r);
+
+                if (d < d1) {
+                    d2 = d1;
+                    d1 = d;
+                } else if (d < d2) {
+                    d2 = d;
+                }
+            }
+        }
+    }
+
+    return vec2<f32>(sqrt(d1), sqrt(d2));
+}
+
+// FBM Perlin
+fn fbm_perlin(p: vec3<f32>, octaves: u32) -> f32 {
+    var value = 0.0;
+    var amplitude = 0.5;
+    var frequency = 1.0;
+    var pos = p;
+
+    for (var i = 0u; i < octaves; i++) {
+        value += amplitude * perlin3d(pos * frequency);
+        amplitude *= params.persistence;
+        frequency *= params.lacunarity;
+    }
+
+    return value;
+}
+
+// FBM Worley
+fn fbm_worley(p: vec3<f32>, octaves: u32) -> f32 {
+    var value = 0.0;
+    var amplitude = 0.5;
+    var frequency = 1.0;
+    var pos = p;
+
+    for (var i = 0u; i < octaves; i++) {
+        value += amplitude * worley3d(pos * frequency).x;
+        amplitude *= params.persistence;
+        frequency *= params.lacunarity;
+    }
+
+    return value;
+}
+
+@compute @workgroup_size(8, 8, 8)
+fn generate_3d_noise(@builtin(global_invocation_id) id: vec3<u32>) {
+    let dims = textureDimensions(output_3d);
+    if (any(id >= dims)) { return; }
+
+    let uvw = vec3<f32>(id) / vec3<f32>(dims);
+    let p = (uvw + params.offset) * params.frequency;
+
+    // Perlin-Worley blend for base shape
+    let perlin = fbm_perlin(p, params.octaves) * 0.5 + 0.5;
+    let worley = worley3d(p * 4.0);
+    let perlin_worley = remap(perlin, 0.0, 1.0, worley.x, 1.0);
+
+    // Multi-octave Worley for other channels
+    let worley_fbm = fbm_worley(p * 2.0, 3u);
+    let worley_f2f1 = worley.y - worley.x;
+
+    textureStore(output_3d, id, vec4<f32>(perlin_worley, worley.x, worley_fbm, worley_f2f1));
+}
+
+fn remap(value: f32, low1: f32, high1: f32, low2: f32, high2: f32) -> f32 {
+    return low2 + (value - low1) * (high2 - low2) / (high1 - low1);
+}
+
+@compute @workgroup_size(8, 8, 1)
+fn generate_weather_map(@builtin(global_invocation_id) id: vec3<u32>) {
+    let dims = textureDimensions(output_2d);
+    if (any(id.xy >= dims)) { return; }
+
+    let uv = vec2<f32>(id.xy) / vec2<f32>(dims);
+    let p = vec3<f32>(uv * params.frequency, f32(params.seed) * 0.1);
+
+    // Coverage from low-frequency noise
+    let coverage = fbm_perlin(p * 0.5, 4u) * 0.5 + 0.5;
+    let coverage_shaped = smoothstep(1.0 - params.coverage, 1.0, coverage);
+
+    // Precipitation from high-frequency noise
+    let precipitation = fbm_perlin(p * 2.0, 3u) * 0.5 + 0.5;
+
+    textureStore(output_2d, id.xy, vec4<f32>(coverage_shaped, precipitation, 0.0, 1.0));
+}
+"#;
+
+const CLOUD_RAYMARCH_SHADER: &str = r#"
+struct CloudParams {
+    altitude_bottom: f32,
+    altitude_top: f32,
+    coverage: f32,
+    density: f32,
+    absorption: f32,
+    scatter_albedo: f32,
+    eccentricity: f32,
+    shape_scale: f32,
+    detail_scale: f32,
+    detail_strength: f32,
+    wind_dir: vec2<f32>,
+    wind_speed: f32,
+    curl_strength: f32,
+    height_gradient: array<f32, 8>,
+    anvil_bias: f32,
+    precipitation_darkening: f32,
+    time: f32,
+    _pad: f32,
+}
+
+struct RayMarchParams {
+    max_steps: u32,
+    base_step_size: f32,
+    max_distance: f32,
+    light_steps: u32,
+    powder_strength: f32,
+    beer_factor: f32,
+    ms_octaves: u32,
+    horizon_fade: f32,
+    jitter_offset: vec2<f32>,
+    blue_noise_size: f32,
+    _pad: f32,
+}
+
+@group(0) @binding(0) var base_shape: texture_3d<f32>;
+@group(0) @binding(1) var detail_noise: texture_3d<f32>;
+@group(0) @binding(2) var weather_map: texture_2d<f32>;
+@group(0) @binding(3) var blue_noise: texture_2d<f32>;
+@group(0) @binding(4) var output: texture_storage_2d<rgba16float, write>;
+@group(0) @binding(5) var<storage, read> cloud_params: array<CloudParams>;
+@group(0) @binding(6) var<uniform> raymarch: RayMarchParams;
+@group(0) @binding(7) var<uniform> inv_view_proj: mat4x4<f32>;
+@group(0) @binding(8) var<uniform> camera_position: vec3<f32>;
+@group(0) @binding(9) var<uniform> sun_direction: vec3<f32>;
+@group(0) @binding(10) var<uniform> sun_color: vec3<f32>;
+@group(0) @binding(11) var<uniform> ambient_color: vec3<f32>;
+@group(0) @binding(12) var<uniform> planet_radius: f32;
+@group(0) @binding(13) var<uniform> layer_count: u32;
+
+var<private> noise_sampler: sampler;
+
+// Henyey-Greenstein phase function
+fn hg_phase(cos_theta: f32, g: f32) -> f32 {
+    let g2 = g * g;
+    let denom = 1.0 + g2 - 2.0 * g * cos_theta;
+    return (1.0 - g2) / (4.0 * 3.14159 * pow(denom, 1.5));
+}
+
+// Dual-lobe phase function for multiple scattering
+fn dual_lobe_phase(cos_theta: f32, g: f32) -> f32 {
+    let forward = hg_phase(cos_theta, g);
+    let backward = hg_phase(cos_theta, -g * 0.5);
+    return mix(forward, backward, 0.3);
+}
+
+// Sample height gradient
+fn sample_height_gradient(height_fraction: f32, params: CloudParams) -> f32 {
+    let h = clamp(height_fraction, 0.0, 1.0) * 7.0;
+    let i = u32(h);
+    let f = fract(h);
+    let a = params.height_gradient[i];
+    let b = params.height_gradient[min(i + 1u, 7u)];
+    return mix(a, b, f);
+}
+
+// Sample cloud density at world position
+fn sample_cloud_density(world_pos: vec3<f32>, params: CloudParams) -> f32 {
+    let layer_height = params.altitude_top - params.altitude_bottom;
+    let height_fraction = (world_pos.y - params.altitude_bottom) / layer_height;
+
+    if (height_fraction < 0.0 || height_fraction > 1.0) {
+        return 0.0;
+    }
+
+    // Weather map sample
+    let wind_offset = params.wind_dir * params.wind_speed * params.time;
+    let weather_uv = world_pos.xz * 0.00001 + wind_offset * 0.1;
+    let weather = textureSampleLevel(weather_map, noise_sampler, weather_uv, 0.0);
+
+    // Check coverage
+    if (weather.r < 0.05) {
+        return 0.0;
+    }
+
+    // Height gradient
+    let height_gradient = sample_height_gradient(height_fraction, params);
+
+    // Base shape noise
+    let shape_pos = world_pos * params.shape_scale + vec3<f32>(wind_offset, 0.0);
+    let shape_noise = textureSampleLevel(base_shape, noise_sampler, shape_pos, 0.0);
+
+    var base_density = remap(shape_noise.r, shape_noise.g * 0.625, 1.0, 0.0, 1.0);
+    base_density *= height_gradient;
+
+    // Apply coverage
+    let coverage = weather.r * params.coverage;
+    base_density = remap(base_density, 1.0 - coverage, 1.0, 0.0, 1.0);
+    base_density *= coverage;
+
+    if (base_density <= 0.0) {
+        return 0.0;
+    }
+
+    // Detail erosion
+    let detail_pos = world_pos * params.detail_scale;
+    let detail_noise = textureSampleLevel(detail_noise, noise_sampler, detail_pos, 0.0);
+    let detail_fbm = detail_noise.r * 0.625 + detail_noise.g * 0.25 + detail_noise.b * 0.125;
+
+    let detail_modifier = mix(detail_fbm, 1.0 - detail_fbm, saturate(height_fraction * 5.0));
+    base_density = remap(base_density, detail_modifier * params.detail_strength, 1.0, 0.0, 1.0);
+
+    return max(base_density * params.density, 0.0);
+}
+
+// Light marching for in-scattering
+fn light_march(origin: vec3<f32>, params: CloudParams) -> f32 {
+    let step_size = (params.altitude_top - origin.y) / f32(raymarch.light_steps);
+    var transmittance = 1.0;
+    var pos = origin;
+
+    for (var i = 0u; i < raymarch.light_steps; i++) {
+        pos += sun_direction * step_size;
+        let density = sample_cloud_density(pos, params);
+
+        if (density > 0.0) {
+            transmittance *= exp(-density * step_size * params.absorption);
+        }
+
+        if (transmittance < 0.01) { break; }
+    }
+
+    return transmittance;
+}
+
+// Ray-sphere intersection
+fn ray_sphere_intersect(origin: vec3<f32>, dir: vec3<f32>, center: vec3<f32>, radius: f32) -> vec2<f32> {
+    let oc = origin - center;
+    let a = dot(dir, dir);
+    let b = 2.0 * dot(oc, dir);
+    let c = dot(oc, oc) - radius * radius;
+    let discriminant = b * b - 4.0 * a * c;
+
+    if (discriminant < 0.0) {
+        return vec2<f32>(-1.0, -1.0);
+    }
+
+    let sqrt_d = sqrt(discriminant);
+    return vec2<f32>((-b - sqrt_d) / (2.0 * a), (-b + sqrt_d) / (2.0 * a));
+}
+
+fn remap(value: f32, low1: f32, high1: f32, low2: f32, high2: f32) -> f32 {
+    return low2 + (value - low1) * (high2 - low2) / (high1 - low1);
+}
+
+@compute @workgroup_size(8, 8, 1)
+fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+    let dims = textureDimensions(output);
+    if (any(id.xy >= dims)) { return; }
+
+    // Get jittered UV
+    let blue_noise_uv = vec2<f32>(id.xy) / raymarch.blue_noise_size;
+    let jitter = textureSampleLevel(blue_noise, noise_sampler, blue_noise_uv + raymarch.jitter_offset, 0.0).r;
+
+    let uv = (vec2<f32>(id.xy) + 0.5) / vec2<f32>(dims);
+    let ndc = uv * 2.0 - 1.0;
+
+    // Reconstruct world ray
+    let clip_near = vec4<f32>(ndc, 0.0, 1.0);
+    let clip_far = vec4<f32>(ndc, 1.0, 1.0);
+    var world_near = inv_view_proj * clip_near;
+    var world_far = inv_view_proj * clip_far;
+    world_near /= world_near.w;
+    world_far /= world_far.w;
+
+    let ray_origin = camera_position;
+    let ray_dir = normalize(world_far.xyz - world_near.xyz);
+
+    var total_color = vec3<f32>(0.0);
+    var total_transmittance = 1.0;
+
+    // March through each cloud layer
+    for (var layer = 0u; layer < layer_count; layer++) {
+        let params = cloud_params[layer];
+
+        // Find intersection with cloud layer shells
+        let planet_center = vec3<f32>(0.0, -planet_radius, 0.0);
+        let inner_hit = ray_sphere_intersect(ray_origin, ray_dir, planet_center, planet_radius + params.altitude_bottom);
+        let outer_hit = ray_sphere_intersect(ray_origin, ray_dir, planet_center, planet_radius + params.altitude_top);
+
+        // Determine march bounds
+        var t_min = max(0.0, inner_hit.x);
+        var t_max = outer_hit.y;
+
+        if (t_max <= t_min || t_max < 0.0) {
+            continue;
+        }
+
+        t_min = max(t_min, 0.0);
+        t_max = min(t_max, raymarch.max_distance);
+
+        // Jitter start position
+        let step_size = (t_max - t_min) / f32(raymarch.max_steps);
+        var t = t_min + jitter * step_size;
+
+        let cos_theta = dot(ray_dir, sun_direction);
+        let phase = dual_lobe_phase(cos_theta, params.eccentricity);
+
+        // Ray march
+        for (var i = 0u; i < raymarch.max_steps; i++) {
+            if (t >= t_max || total_transmittance < 0.01) { break; }
+
+            let pos = ray_origin + ray_dir * t;
+            let density = sample_cloud_density(pos, params);
+
+            if (density > 0.0) {
+                // Sample lighting
+                let light_transmittance = light_march(pos, params);
+
+                // Beer-Powder approximation
+                let beer = exp(-density * step_size * params.absorption * raymarch.beer_factor);
+                let powder = 1.0 - exp(-density * step_size * params.absorption * 2.0);
+                let beer_powder = beer * mix(1.0, powder * raymarch.powder_strength, saturate(-cos_theta * 0.5 + 0.5));
+
+                // Multi-scattering approximation
+                var scattering = vec3<f32>(0.0);
+                var attenuation = 1.0;
+                for (var ms = 0u; ms < raymarch.ms_octaves; ms++) {
+                    let ms_phase = hg_phase(cos_theta, params.eccentricity * pow(0.5, f32(ms)));
+                    scattering += attenuation * ms_phase * pow(params.scatter_albedo, f32(ms + 1u)) * light_transmittance;
+                    attenuation *= 0.5;
+                }
+
+                let luminance = sun_color * scattering + ambient_color * params.scatter_albedo * 0.2;
+
+                // Accumulate
+                let sample_transmittance = beer_powder;
+                total_color += luminance * density * total_transmittance * (1.0 - sample_transmittance);
+                total_transmittance *= sample_transmittance;
+            }
+
+            t += step_size;
+        }
+    }
+
+    // Horizon fade
+    let horizon_fade = 1.0 - smoothstep(0.0, -0.1, ray_dir.y);
+    total_transmittance = mix(1.0, total_transmittance, horizon_fade);
+
+    textureStore(output, id.xy, vec4<f32>(total_color, 1.0 - total_transmittance));
+}
+"#;
+
+const CLOUD_TEMPORAL_SHADER: &str = r#"
+@group(0) @binding(0) var current: texture_2d<f32>;
+@group(0) @binding(1) var history: texture_2d<f32>;
+@group(0) @binding(2) var output: texture_storage_2d<rgba16float, write>;
+@group(0) @binding(3) var<uniform> blend_factor: f32;
+@group(0) @binding(4) var<uniform> frame_index: u32;
+
+var<private> linear_sampler: sampler;
+
+@compute @workgroup_size(8, 8, 1)
+fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+    let dims = textureDimensions(output);
+    if (any(id.xy >= dims)) { return; }
+
+    let uv = (vec2<f32>(id.xy) + 0.5) / vec2<f32>(dims);
+
+    let current_sample = textureSampleLevel(current, linear_sampler, uv, 0.0);
+    let history_sample = textureSampleLevel(history, linear_sampler, uv, 0.0);
+
+    // AABB clipping for ghosting reduction
+    var min_color = current_sample.rgb;
+    var max_color = current_sample.rgb;
+
+    // Sample 3x3 neighborhood for color bounds
+    for (var y = -1; y <= 1; y++) {
+        for (var x = -1; x <= 1; x++) {
+            let offset_uv = uv + vec2<f32>(f32(x), f32(y)) / vec2<f32>(dims);
+            let neighbor = textureSampleLevel(current, linear_sampler, offset_uv, 0.0);
+            min_color = min(min_color, neighbor.rgb);
+            max_color = max(max_color, neighbor.rgb);
+        }
+    }
+
+    // Clip history to neighborhood bounds
+    let clipped_history = clamp(history_sample.rgb, min_color, max_color);
+
+    // Blend with adaptive factor based on motion
+    let motion = length(current_sample.rgb - history_sample.rgb);
+    let adaptive_blend = mix(blend_factor, 0.5, saturate(motion * 2.0));
+
+    let result_color = mix(clipped_history, current_sample.rgb, adaptive_blend);
+    let result_alpha = mix(history_sample.a, current_sample.a, adaptive_blend);
+
+    textureStore(output, id.xy, vec4<f32>(result_color, result_alpha));
+}
+"#;
+
+const CLOUD_UPSCALE_SHADER: &str = r#"
+@group(0) @binding(0) var cloud_low_res: texture_2d<f32>;
+@group(0) @binding(1) var depth: texture_2d<f32>;
+@group(0) @binding(2) var output: texture_storage_2d<rgba16float, write>;
+@group(0) @binding(3) var<uniform> upscale_factor: u32;
+
+var<private> linear_sampler: sampler;
+var<private> point_sampler: sampler;
+
+@compute @workgroup_size(8, 8, 1)
+fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+    let dims = textureDimensions(output);
+    if (any(id.xy >= dims)) { return; }
+
+    let uv = (vec2<f32>(id.xy) + 0.5) / vec2<f32>(dims);
+    let low_res_dims = textureDimensions(cloud_low_res);
+
+    // Sample depth for bilateral filtering
+    let center_depth = textureSampleLevel(depth, point_sampler, uv, 0.0).r;
+
+    // Bilateral upscale
+    var total_color = vec4<f32>(0.0);
+    var total_weight = 0.0;
+
+    let kernel_size = 2;
+    for (var y = -kernel_size; y <= kernel_size; y++) {
+        for (var x = -kernel_size; x <= kernel_size; x++) {
+            let offset = vec2<f32>(f32(x), f32(y)) / vec2<f32>(low_res_dims);
+            let sample_uv = uv + offset;
+
+            let cloud_sample = textureSampleLevel(cloud_low_res, linear_sampler, sample_uv, 0.0);
+            let depth_sample = textureSampleLevel(depth, point_sampler, sample_uv, 0.0).r;
+
+            // Spatial weight (Gaussian)
+            let spatial_dist = length(vec2<f32>(f32(x), f32(y)));
+            let spatial_weight = exp(-spatial_dist * spatial_dist * 0.5);
+
+            // Depth weight
+            let depth_diff = abs(center_depth - depth_sample);
+            let depth_weight = exp(-depth_diff * depth_diff * 1000.0);
+
+            let weight = spatial_weight * depth_weight;
+            total_color += cloud_sample * weight;
+            total_weight += weight;
+        }
+    }
+
+    let result = total_color / max(total_weight, 0.0001);
+    textureStore(output, id.xy, result);
+}
+"#;
+
+const CLOUD_SHADOW_SHADER: &str = r#"
+@group(0) @binding(0) var base_shape: texture_3d<f32>;
+@group(0) @binding(1) var weather_map: texture_2d<f32>;
+@group(0) @binding(2) var shadow_map: texture_storage_2d<r16float, write>;
+@group(0) @binding(3) var<storage, read> cloud_params: array<CloudParams>;
+@group(0) @binding(4) var<uniform> sun_direction: vec3<f32>;
+@group(0) @binding(5) var<uniform> center_position: vec3<f32>;
+@group(0) @binding(6) var<uniform> projection_size: f32;
+@group(0) @binding(7) var<uniform> layer_count: u32;
+
+struct CloudParams {
+    altitude_bottom: f32,
+    altitude_top: f32,
+    coverage: f32,
+    density: f32,
+    absorption: f32,
+    scatter_albedo: f32,
+    eccentricity: f32,
+    shape_scale: f32,
+    detail_scale: f32,
+    detail_strength: f32,
+    wind_dir: vec2<f32>,
+    wind_speed: f32,
+    curl_strength: f32,
+    height_gradient: array<f32, 8>,
+    anvil_bias: f32,
+    precipitation_darkening: f32,
+    time: f32,
+    _pad: f32,
+}
+
+var<private> noise_sampler: sampler;
+
+@compute @workgroup_size(8, 8, 1)
+fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+    let dims = textureDimensions(shadow_map);
+    if (any(id.xy >= dims)) { return; }
+
+    let uv = (vec2<f32>(id.xy) + 0.5) / vec2<f32>(dims);
+
+    // World position on shadow plane
+    let world_xz = (uv - 0.5) * projection_size + center_position.xz;
+
+    var total_transmittance = 1.0;
+
+    for (var layer = 0u; layer < layer_count; layer++) {
+        let params = cloud_params[layer];
+
+        // March through cloud layer along sun direction
+        let layer_height = params.altitude_top - params.altitude_bottom;
+        let step_count = 32u;
+        let step_size = layer_height / f32(step_count);
+
+        for (var i = 0u; i < step_count; i++) {
+            let height = params.altitude_bottom + f32(i) * step_size;
+            let world_pos = vec3<f32>(world_xz.x, height, world_xz.y);
+
+            // Sample cloud density (simplified)
+            let weather_uv = world_pos.xz * 0.00001;
+            let weather = textureSampleLevel(weather_map, noise_sampler, weather_uv, 0.0);
+
+            if (weather.r > 0.1) {
+                let height_fraction = (height - params.altitude_bottom) / layer_height;
+                let height_gradient = smoothstep(0.0, 0.2, height_fraction) * smoothstep(1.0, 0.7, height_fraction);
+
+                let shape_pos = world_pos * params.shape_scale;
+                let shape_noise = textureSampleLevel(base_shape, noise_sampler, shape_pos, 0.0);
+
+                var density = shape_noise.r * weather.r * height_gradient * params.density;
+                total_transmittance *= exp(-density * step_size * params.absorption);
+            }
+
+            if (total_transmittance < 0.01) { break; }
+        }
+    }
+
+    textureStore(shadow_map, id.xy, vec4<f32>(total_transmittance, 0.0, 0.0, 1.0));
+}
+"#;
+
+const GOD_RAYS_SHADER: &str = r#"
+@group(0) @binding(0) var cloud: texture_2d<f32>;
+@group(0) @binding(1) var depth: texture_2d<f32>;
+@group(0) @binding(2) var output: texture_storage_2d<rgba16float, write>;
+@group(0) @binding(3) var<uniform> sun_screen_pos: vec2<f32>;
+@group(0) @binding(4) var<uniform> num_samples: u32;
+@group(0) @binding(5) var<uniform> density: f32;
+@group(0) @binding(6) var<uniform> decay: f32;
+@group(0) @binding(7) var<uniform> weight: f32;
+@group(0) @binding(8) var<uniform> exposure: f32;
+
+var<private> linear_sampler: sampler;
+
+@compute @workgroup_size(8, 8, 1)
+fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+    let dims = textureDimensions(output);
+    if (any(id.xy >= dims)) { return; }
+
+    let uv = (vec2<f32>(id.xy) + 0.5) / vec2<f32>(dims);
+
+    // Direction from pixel to sun
+    let delta = (sun_screen_pos - uv) * density / f32(num_samples);
+
+    var illumination_decay = 1.0;
+    var color = vec3<f32>(0.0);
+    var sample_uv = uv;
+
+    for (var i = 0u; i < num_samples; i++) {
+        sample_uv += delta;
+
+        // Sample cloud transmittance (inverted = occlusion)
+        let cloud_sample = textureSampleLevel(cloud, linear_sampler, sample_uv, 0.0);
+        let occlusion = 1.0 - cloud_sample.a;
+
+        // Accumulate
+        color += occlusion * illumination_decay * weight;
+        illumination_decay *= decay;
+    }
+
+    color *= exposure;
+
+    textureStore(output, id.xy, vec4<f32>(color, 1.0));
+}
+"#;
+
+const AURORA_SHADER: &str = r#"
+@group(0) @binding(0) var output: texture_storage_2d<rgba16float, write>;
+@group(0) @binding(1) var<uniform> inv_view_proj: mat4x4<f32>;
+@group(0) @binding(2) var<uniform> time: f32;
+@group(0) @binding(3) var<uniform> primary_color: vec3<f32>;
+@group(0) @binding(4) var<uniform> secondary_color: vec3<f32>;
+@group(0) @binding(5) var<uniform> intensity: f32;
+@group(0) @binding(6) var<uniform> wave_speed: f32;
+@group(0) @binding(7) var<uniform> wave_frequency: f32;
+@group(0) @binding(8) var<uniform> height: f32;
+@group(0) @binding(9) var<uniform> thickness: f32;
+@group(0) @binding(10) var<uniform> flicker_speed: f32;
+
+fn hash(n: f32) -> f32 {
+    return fract(sin(n) * 43758.5453123);
+}
+
+fn noise(x: f32) -> f32 {
+    let i = floor(x);
+    let f = fract(x);
+    let u = f * f * (3.0 - 2.0 * f);
+    return mix(hash(i), hash(i + 1.0), u);
+}
+
+fn fbm(x: f32) -> f32 {
+    var value = 0.0;
+    var amplitude = 0.5;
+    var frequency = 1.0;
+
+    for (var i = 0; i < 5; i++) {
+        value += amplitude * noise(x * frequency);
+        amplitude *= 0.5;
+        frequency *= 2.0;
+    }
+
+    return value;
+}
+
+@compute @workgroup_size(8, 8, 1)
+fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+    let dims = textureDimensions(output);
+    if (any(id.xy >= dims)) { return; }
+
+    let uv = (vec2<f32>(id.xy) + 0.5) / vec2<f32>(dims);
+    let ndc = uv * 2.0 - 1.0;
+
+    // Reconstruct world direction
+    let clip = vec4<f32>(ndc, 1.0, 1.0);
+    var world = inv_view_proj * clip;
+    world /= world.w;
+    let dir = normalize(world.xyz);
+
+    // Only render above horizon
+    if (dir.y < 0.0) {
+        textureStore(output, id.xy, vec4<f32>(0.0, 0.0, 0.0, 0.0));
+        return;
+    }
+
+    // Convert to spherical coordinates
+    let theta = acos(dir.y);
+    let phi = atan2(dir.z, dir.x);
+    let elevation = degrees(theta);
+
+    // Aurora height band
+    let height_deg = height;
+    let band_center = 90.0 - height_deg;
+    let band_half_width = thickness;
+
+    let band_dist = abs(elevation - band_center);
+    var band_factor = 1.0 - smoothstep(0.0, band_half_width, band_dist);
+
+    // Curtain wave pattern
+    let wave_x = phi * wave_frequency + time * wave_speed;
+    let curtain = fbm(wave_x) * 0.5 + 0.5;
+
+    // Vertical rays
+    let ray_factor = pow(fbm(phi * 20.0 + time * 0.5), 2.0);
+
+    // Flicker
+    let flicker = 0.8 + 0.2 * sin(time * flicker_speed + phi * 5.0);
+
+    // Color gradient based on height
+    let color_t = smoothstep(band_center - band_half_width, band_center + band_half_width, elevation);
+    var aurora_color = mix(primary_color, secondary_color, color_t);
+
+    // Combine factors
+    var aurora_intensity = band_factor * curtain * (0.5 + ray_factor * 0.5) * flicker * intensity;
+    aurora_intensity *= smoothstep(85.0, 70.0, elevation); // Fade at zenith
+
+    let final_color = aurora_color * aurora_intensity;
+
+    textureStore(output, id.xy, vec4<f32>(final_color, aurora_intensity));
+}
+"#;
+
+const SKY_RENDER_SHADER: &str = r#"
+@group(0) @binding(0) var sky_cubemap: texture_cube<f32>;
+@group(0) @binding(1) var<uniform> inv_view_proj: mat4x4<f32>;
+
+struct VertexOutput {
+    @builtin(position) position: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+}
+
+@vertex
+fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
+    var positions = array<vec2<f32>, 3>(
+        vec2<f32>(-1.0, -1.0),
+        vec2<f32>(3.0, -1.0),
+        vec2<f32>(-1.0, 3.0)
+    );
+
+    var out: VertexOutput;
+    out.position = vec4<f32>(positions[vertex_index], 0.9999, 1.0);
+    out.uv = positions[vertex_index] * 0.5 + 0.5;
+    return out;
+}
+
+var<private> cube_sampler: sampler;
+
+@fragment
+fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
+    let ndc = in.uv * 2.0 - 1.0;
+    let clip = vec4<f32>(ndc, 1.0, 1.0);
+    var world = inv_view_proj * clip;
+    let dir = normalize(world.xyz / world.w);
+
+    let sky_color = textureSample(sky_cubemap, cube_sampler, dir);
+    return sky_color;
+}
+"#;
+
+const SKY_CUBEMAP_SHADER: &str = r#"
+@group(0) @binding(0) var output: texture_storage_2d_array<rgba16float, write>;
+@group(0) @binding(1) var equirect_input: texture_2d<f32>;
+@group(0) @binding(2) var sky_cubemap: texture_cube<f32>;
+@group(0) @binding(3) var<uniform> mode: u32;
+@group(0) @binding(4) var<uniform> zenith_color: vec3<f32>;
+@group(0) @binding(5) var<uniform> horizon_color: vec3<f32>;
+@group(0) @binding(6) var<uniform> nadir_color: vec3<f32>;
+@group(0) @binding(7) var<uniform> sun_color: vec3<f32>;
+@group(0) @binding(8) var<uniform> sun_direction: vec3<f32>;
+@group(0) @binding(9) var<uniform> sun_size: f32;
+@group(0) @binding(10) var<uniform> sun_intensity: f32;
+@group(0) @binding(11) var<uniform> horizon_exponent: f32;
+@group(0) @binding(12) var<uniform> roughness: f32;
+@group(0) @binding(13) var<uniform> star_count: u32;
+@group(0) @binding(14) var<uniform> time: f32;
+
+var<private> linear_sampler: sampler;
+
+// Get world direction from cubemap face and UV
+fn get_cube_direction(face: u32, uv: vec2<f32>) -> vec3<f32> {
+    let coord = uv * 2.0 - 1.0;
+
+    switch (face) {
+        case 0u: { return normalize(vec3<f32>(1.0, -coord.y, -coord.x)); }   // +X
+        case 1u: { return normalize(vec3<f32>(-1.0, -coord.y, coord.x)); }   // -X
+        case 2u: { return normalize(vec3<f32>(coord.x, 1.0, coord.y)); }     // +Y
+        case 3u: { return normalize(vec3<f32>(coord.x, -1.0, -coord.y)); }   // -Y
+        case 4u: { return normalize(vec3<f32>(coord.x, -coord.y, 1.0)); }    // +Z
+        default: { return normalize(vec3<f32>(-coord.x, -coord.y, -1.0)); }  // -Z
+    }
+}
+
+// Gradient sky
+fn gradient_sky(dir: vec3<f32>) -> vec3<f32> {
+    let up = dir.y;
+
+    // Sky gradient
+    var sky: vec3<f32>;
+    if (up >= 0.0) {
+        let t = pow(up, 1.0 / horizon_exponent);
+        sky = mix(horizon_color, zenith_color, t);
+    } else {
+        let t = pow(-up, 1.0 / horizon_exponent);
+        sky = mix(horizon_color, nadir_color, t);
+    }
+
+    // Sun disc
+    let sun_cos = dot(dir, sun_direction);
+    let sun_disc = smoothstep(cos(sun_size), cos(sun_size * 0.9), sun_cos);
+
+    // Sun glow
+    let sun_glow = pow(max(sun_cos, 0.0), 8.0) * 0.5;
+
+    return sky + sun_color * sun_intensity * (sun_disc + sun_glow);
+}
+
+// Hash function for stars
+fn hash3(p: vec3<f32>) -> f32 {
+    var q = fract(p * 0.1031);
+    q += dot(q, q.zyx + 31.32);
+    return fract((q.x + q.y) * q.z);
+}
+
+// Starfield
+fn starfield(dir: vec3<f32>) -> vec3<f32> {
+    var color = vec3<f32>(0.01, 0.01, 0.02); // Dark sky background
+
+    // Stars
+    let star_scale = 100.0;
+    let star_pos = floor(dir * star_scale);
+    let star_hash = hash3(star_pos);
+
+    if (star_hash > 0.98) {
+        let brightness = pow(star_hash - 0.98, 0.5) * 50.0;
+        let twinkle = sin(time * 2.0 + star_hash * 100.0) * 0.3 + 0.7;
+
+        // Star color based on hash
+        var star_color: vec3<f32>;
+        if (star_hash > 0.995) {
+            star_color = vec3<f32>(1.0, 0.8, 0.6); // Orange star
+        } else if (star_hash > 0.99) {
+            star_color = vec3<f32>(0.8, 0.9, 1.0); // Blue star
+        } else {
+            star_color = vec3<f32>(1.0, 1.0, 1.0); // White star
+        }
+
+        color += star_color * brightness * twinkle;
+    }
+
+    return color;
+}
+
+@compute @workgroup_size(8, 8, 1)
+fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+    let dims = textureDimensions(output);
+    if (any(id.xy >= dims.xy) || id.z >= 6u) { return; }
+
+    let uv = (vec2<f32>(id.xy) + 0.5) / vec2<f32>(dims.xy);
+    let dir = get_cube_direction(id.z, uv);
+
+    var color: vec3<f32>;
+
+    switch (mode) {
+        case 0u: { color = gradient_sky(dir); }
+        case 1u: { color = gradient_sky(dir); } // Physical would be computed differently
+        case 2u: {
+            // Equirectangular to cubemap
+            let phi = atan2(dir.z, dir.x);
+            let theta = acos(dir.y);
+            let equirect_uv = vec2<f32>(phi / (2.0 * 3.14159) + 0.5, theta / 3.14159);
+            color = textureSampleLevel(equirect_input, linear_sampler, equirect_uv, 0.0).rgb;
+        }
+        case 3u: { color = starfield(dir); }
+        case 10u: {
+            // Irradiance convolution (diffuse IBL)
+            var irradiance = vec3<f32>(0.0);
+            let up = vec3<f32>(0.0, 1.0, 0.0);
+            let right = normalize(cross(up, dir));
+            let forward = cross(dir, right);
+
+            let sample_delta = 0.025;
+            var sample_count = 0.0;
+
+            for (var phi = 0.0; phi < 2.0 * 3.14159; phi += sample_delta) {
+                for (var theta = 0.0; theta < 0.5 * 3.14159; theta += sample_delta) {
+                    let tangent_sample = vec3<f32>(sin(theta) * cos(phi), sin(theta) * sin(phi), cos(theta));
+                    let sample_dir = tangent_sample.x * right + tangent_sample.y * forward + tangent_sample.z * dir;
+
+                    irradiance += textureSampleLevel(sky_cubemap, linear_sampler, sample_dir, 0.0).rgb * cos(theta) * sin(theta);
+                    sample_count += 1.0;
+                }
+            }
+
+            color = 3.14159 * irradiance / sample_count;
+        }
+        case 11u: {
+            // Prefiltered environment map (specular IBL)
+            // Importance sample GGX
+            var prefiltered = vec3<f32>(0.0);
+            var total_weight = 0.0;
+            let sample_count = 1024u;
+
+            for (var i = 0u; i < sample_count; i++) {
+                let xi = hammersley(i, sample_count);
+                let h = importance_sample_ggx(xi, dir, roughness);
+                let l = normalize(2.0 * dot(dir, h) * h - dir);
+
+                let n_dot_l = max(dot(dir, l), 0.0);
+                if (n_dot_l > 0.0) {
+                    prefiltered += textureSampleLevel(sky_cubemap, linear_sampler, l, 0.0).rgb * n_dot_l;
+                    total_weight += n_dot_l;
+                }
+            }
+
+            color = prefiltered / total_weight;
+        }
+        default: { color = vec3<f32>(0.0); }
+    }
+
+    textureStore(output, id.xy, i32(id.z), vec4<f32>(color, 1.0));
+}
+
+fn hammersley(i: u32, n: u32) -> vec2<f32> {
+    var bits = i;
+    bits = (bits << 16u) | (bits >> 16u);
+    bits = ((bits & 0x55555555u) << 1u) | ((bits & 0xAAAAAAAAu) >> 1u);
+    bits = ((bits & 0x33333333u) << 2u) | ((bits & 0xCCCCCCCCu) >> 2u);
+    bits = ((bits & 0x0F0F0F0Fu) << 4u) | ((bits & 0xF0F0F0F0u) >> 4u);
+    bits = ((bits & 0x00FF00FFu) << 8u) | ((bits & 0xFF00FF00u) >> 8u);
+    let radical_inverse = f32(bits) * 2.3283064365386963e-10;
+    return vec2<f32>(f32(i) / f32(n), radical_inverse);
+}
+
+fn importance_sample_ggx(xi: vec2<f32>, n: vec3<f32>, roughness: f32) -> vec3<f32> {
+    let a = roughness * roughness;
+
+    let phi = 2.0 * 3.14159 * xi.x;
+    let cos_theta = sqrt((1.0 - xi.y) / (1.0 + (a * a - 1.0) * xi.y));
+    let sin_theta = sqrt(1.0 - cos_theta * cos_theta);
+
+    let h = vec3<f32>(cos(phi) * sin_theta, sin(phi) * sin_theta, cos_theta);
+
+    let up = select(vec3<f32>(0.0, 0.0, 1.0), vec3<f32>(1.0, 0.0, 0.0), abs(n.z) < 0.999);
+    let tangent = normalize(cross(up, n));
+    let bitangent = cross(n, tangent);
+
+    return normalize(tangent * h.x + bitangent * h.y + n * h.z);
+}
+"#;
+
+// =============================================================================
+// REGION: INTEGRATION AND COMPOSITING
+// =============================================================================
+
+/// Unified sky and cloud compositor
+pub struct SkyCloudCompositor {
+    /// Cloud renderer
+    cloud_renderer: VolumetricCloudRenderer,
+    /// Sky renderer
+    sky_renderer: ProceduralSkyRenderer,
+    /// God rays renderer
+    god_rays: GodRaysRenderer,
+    /// Aurora renderer (optional)
+    aurora: Option<AuroraRenderer>,
+    /// Time of day manager
+    time_of_day: TimeOfDayManager,
+    /// Cloud shadow renderer
+    cloud_shadows: CloudShadowRenderer,
+    /// Final composite texture
+    composite_texture: Texture,
+    /// Composite compute shader
+    composite_compute: ComputeShader,
+}
+
+impl SkyCloudCompositor {
+    /// Create new compositor
+    pub fn new(width: u32, height: u32, quality: CloudQuality) -> Self {
+        Self {
+            cloud_renderer: VolumetricCloudRenderer::new(width, height, quality),
+            sky_renderer: ProceduralSkyRenderer::new(256),
+            god_rays: GodRaysRenderer::new(width, height),
+            aurora: None,
+            time_of_day: TimeOfDayManager::new(),
+            cloud_shadows: CloudShadowRenderer::new(2048, 50000.0),
+            composite_texture: Texture::new_2d(width, height, TextureFormat::Rgba16Float),
+            composite_compute: ComputeShader::from_source(COMPOSITE_SHADER),
+        }
+    }
+
+    /// Enable aurora rendering
+    pub fn enable_aurora(&mut self, width: u32, height: u32) {
+        self.aurora = Some(AuroraRenderer::new(width, height));
+    }
+
+    /// Add cloud layer
+    pub fn add_cloud_layer(&mut self, config: CloudLayerConfig) {
+        self.cloud_renderer.add_layer(config);
+    }
+
+    /// Set time of day
+    pub fn set_time(&mut self, time: f32) {
+        self.time_of_day.set_time(time);
+
+        // Update sky based on time
+        let sky_config = self.time_of_day.current_sky();
+        self.sky_renderer.set_mode(SkyMode::Gradient(sky_config));
+        self.sky_renderer.set_sun_direction(self.time_of_day.sun_direction());
+
+        // Update cloud renderer
+        self.cloud_renderer.set_sun_direction(self.time_of_day.sun_direction());
+    }
+
+    /// Update all components
+    pub fn update(&mut self, delta_time: f32) {
+        self.time_of_day.update(delta_time);
+        self.sky_renderer.update(delta_time);
+        self.sky_renderer.regenerate_if_dirty();
+    }
+
+    /// Render complete sky and clouds
+    pub fn render(
+        &mut self,
+        camera_position: Vec3,
+        view_matrix: Mat4,
+        projection_matrix: Mat4,
+        depth_texture: &Texture,
+        time: f32,
+    ) {
+        // Update sun colors based on time of day
+        let sun_intensity = self.time_of_day.sun_intensity();
+        let sun_color = Color::from_temperature(5778.0).scale(sun_intensity);
+        self.cloud_renderer.set_sun_color(sun_color);
+
+        // Render clouds
+        self.cloud_renderer.render(
+            camera_position,
+            view_matrix,
+            projection_matrix,
+            depth_texture,
+            time,
+        );
+
+        // Render cloud shadows
+        self.cloud_shadows.render(
+            &self.cloud_renderer,
+            self.time_of_day.sun_direction(),
+            camera_position,
+        );
+
+        // Render god rays if sun is visible
+        if self.time_of_day.sun_direction().y > -0.1 {
+            let view_proj = projection_matrix * view_matrix;
+            self.god_rays.render(
+                self.cloud_renderer.output(),
+                depth_texture,
+                self.time_of_day.sun_direction(),
+                view_proj,
+            );
+        }
+
+        // Render aurora if night and enabled
+        if let Some(ref aurora) = self.aurora {
+            if !self.time_of_day.is_daytime() {
+                aurora.render(time, view_matrix, projection_matrix);
+            }
+        }
+
+        // Composite all layers
+        self.composite(view_matrix, projection_matrix);
+    }
+
+    fn composite(&self, view_matrix: Mat4, projection_matrix: Mat4) {
+        self.composite_compute.set_texture("sky", self.sky_renderer.sky_cubemap());
+        self.composite_compute.set_texture("clouds", self.cloud_renderer.output());
+        self.composite_compute.set_texture("god_rays", self.god_rays.output());
+
+        if let Some(ref aurora) = self.aurora {
+            self.composite_compute.set_texture("aurora", aurora.output());
+            self.composite_compute.set_uniform("aurora_enabled", 1u32);
+        } else {
+            self.composite_compute.set_uniform("aurora_enabled", 0u32);
+        }
+
+        self.composite_compute.set_storage_texture("output", &self.composite_texture);
+        self.composite_compute.set_uniform("inv_view_proj", (projection_matrix * view_matrix).inverse());
+
+        self.composite_compute.dispatch_2d(
+            self.composite_texture.width(),
+            self.composite_texture.height(),
+        );
+    }
+
+    /// Get final composited output
+    pub fn output(&self) -> &Texture {
+        &self.composite_texture
+    }
+
+    /// Get cloud shadow map
+    pub fn cloud_shadow_map(&self) -> &Texture {
+        self.cloud_shadows.shadow_map()
+    }
+
+    /// Get cloud shadow projection matrix
+    pub fn cloud_shadow_matrix(&self, center: Vec3) -> Mat4 {
+        self.cloud_shadows.projection_matrix(self.time_of_day.sun_direction(), center)
+    }
+}
+
+const COMPOSITE_SHADER: &str = r#"
+@group(0) @binding(0) var sky: texture_cube<f32>;
+@group(0) @binding(1) var clouds: texture_2d<f32>;
+@group(0) @binding(2) var god_rays: texture_2d<f32>;
+@group(0) @binding(3) var aurora: texture_2d<f32>;
+@group(0) @binding(4) var output: texture_storage_2d<rgba16float, write>;
+@group(0) @binding(5) var<uniform> inv_view_proj: mat4x4<f32>;
+@group(0) @binding(6) var<uniform> aurora_enabled: u32;
+
+var<private> linear_sampler: sampler;
+var<private> cube_sampler: sampler;
+
+@compute @workgroup_size(8, 8, 1)
+fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+    let dims = textureDimensions(output);
+    if (any(id.xy >= dims)) { return; }
+
+    let uv = (vec2<f32>(id.xy) + 0.5) / vec2<f32>(dims);
+    let ndc = uv * 2.0 - 1.0;
+
+    // Get world direction
+    let clip = vec4<f32>(ndc, 1.0, 1.0);
+    var world = inv_view_proj * clip;
+    let dir = normalize(world.xyz / world.w);
+
+    // Sample sky
+    var color = textureSample(sky, cube_sampler, dir).rgb;
+
+    // Add aurora behind clouds
+    if (aurora_enabled == 1u) {
+        let aurora_sample = textureSampleLevel(aurora, linear_sampler, uv, 0.0);
+        color += aurora_sample.rgb * aurora_sample.a;
+    }
+
+    // Blend clouds
+    let cloud_sample = textureSampleLevel(clouds, linear_sampler, uv, 0.0);
+    color = mix(color, cloud_sample.rgb, cloud_sample.a);
+
+    // Add god rays
+    let rays = textureSampleLevel(god_rays, linear_sampler, uv, 0.0).rgb;
+    color += rays;
+
+    textureStore(output, id.xy, vec4<f32>(color, 1.0));
+}
+"#;
+
+// =============================================================================
+// REGION: UNIT TESTS
+// =============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_cloud_layer_altitude() {
+        let layer = CloudLayerType::Cumulus;
+        let (min, max) = layer.altitude_range();
+        assert!(min < max);
+        assert!(min >= 0.0);
+    }
+
+    #[test]
+    fn test_height_gradient_sample() {
+        let gradient = HeightGradient::cumulus();
+
+        // Should be 0 at bottom
+        assert!(gradient.sample(0.0) < 0.1);
+
+        // Should be higher in middle
+        assert!(gradient.sample(0.3) > gradient.sample(0.0));
+
+        // Should be 0 at top
+        assert!(gradient.sample(1.0) < 0.1);
+    }
+
+    #[test]
+    fn test_gradient_sky_presets() {
+        let default = GradientSky::default();
+        let sunset = GradientSky::sunset();
+        let night = GradientSky::night();
+
+        // Sunset should have warmer colors
+        assert!(sunset.horizon_color.r > default.horizon_color.r);
+
+        // Night should have lower intensity
+        assert!(night.sun_intensity < default.sun_intensity);
+    }
+
+    #[test]
+    fn test_time_of_day_transitions() {
+        let mut tod = TimeOfDayManager::new();
+
+        // Noon should be daytime
+        tod.set_time(12.0);
+        assert!(tod.is_daytime());
+        assert!(tod.sun_intensity() > 0.0);
+
+        // Midnight should be nighttime
+        tod.set_time(0.0);
+        assert!(!tod.is_daytime());
+    }
+
+    #[test]
+    fn test_cloud_quality_settings() {
+        let low = CloudRayMarchSettings::from_quality(CloudQuality::Low);
+        let high = CloudRayMarchSettings::from_quality(CloudQuality::High);
+
+        assert!(low.max_steps < high.max_steps);
+        assert!(low.upscale_factor > high.upscale_factor);
+    }
+
+    #[test]
+    fn test_sun_position_calculation() {
+        let mut tod = TimeOfDayManager::new();
+        tod.set_latitude(45.0);
+        tod.set_day_of_year(172);  // Summer solstice
+
+        // At noon, sun should be roughly overhead (positive Y)
+        tod.set_time(12.0);
+        assert!(tod.sun_direction().y > 0.5);
+
+        // At midnight, sun should be below horizon
+        tod.set_time(0.0);
+        assert!(tod.sun_direction().y < 0.0);
+    }
+
+    #[test]
+    fn test_cloud_layer_configs() {
+        let cumulus = CloudLayerConfig::cumulus();
+        let cirrus = CloudLayerConfig::cirrus();
+        let cumulonimbus = CloudLayerConfig::cumulonimbus();
+
+        // Cirrus should be higher
+        assert!(cirrus.altitude_bottom > cumulus.altitude_bottom);
+
+        // Cumulonimbus should have highest density
+        assert!(cumulonimbus.density > cumulus.density);
+
+        // Cumulonimbus should have anvil bias
+        assert!(cumulonimbus.anvil_bias > 0.0);
+    }
+
+    #[test]
+    fn test_aurora_config() {
+        let config = AuroraConfig::default();
+
+        assert!(config.intensity > 0.0);
+        assert!(config.height > 0.0);
+        assert!(config.thickness > 0.0);
+    }
+
+    #[test]
+    fn test_god_rays_quality() {
+        let quality = GodRaysQuality::default();
+
+        assert!(quality.samples > 0);
+        assert!(quality.decay > 0.0 && quality.decay < 1.0);
+    }
+
+    #[test]
+    fn test_worley_noise_config() {
+        let config = WorleyNoiseConfig::default();
+
+        assert!(config.frequency > 0.0);
+        assert!(config.jitter >= 0.0 && config.jitter <= 1.0);
+    }
+
+    #[test]
+    fn test_starfield_config() {
+        let config = StarfieldConfig::default();
+
+        assert!(config.star_count > 0);
+        assert!(config.min_brightness < config.max_brightness);
+        assert!(config.galaxy_center.length() > 0.9);
+    }
+}

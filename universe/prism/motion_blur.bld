@@ -1,0 +1,1050 @@
+// BUILD-UNIVERSE Prism: Motion Blur Shaders
+// Comprehensive motion blur implementations including per-object, camera, and tile-based techniques
+
+import prism::lib::*;
+import spectrum::color::*;
+
+// ============================================================================
+// MOTION BLUR CONFIGURATION
+// ============================================================================
+
+@shader_config
+struct MotionBlurConfig {
+    technique: MotionBlurTechnique,
+    quality: MotionBlurQuality,
+    intensity: f32,
+    max_velocity: f32,
+    sample_count: u32,
+    tile_size: u32,
+    center_weight: f32,
+    depth_scale: f32,
+    camera_blur_enabled: bool,
+    object_blur_enabled: bool,
+    reconstruction_enabled: bool,
+    jitter_samples: bool,
+}
+
+enum MotionBlurTechnique {
+    Simple,             // Basic velocity-based blur
+    TileMax,            // Tile-based max velocity (McGuire 2012)
+    TileMaxNeighbor,    // With neighbor max expansion
+    Reconstruction,     // Reconstruction filter (Sousa 2013)
+    PerObject,          // Per-object motion blur
+    Hybrid,             // Combined camera + object blur
+}
+
+enum MotionBlurQuality {
+    Low,        // 4 samples
+    Medium,     // 8 samples
+    High,       // 16 samples
+    Ultra,      // 32 samples
+    Cinematic,  // 64 samples
+}
+
+impl MotionBlurConfig {
+    const CINEMATIC: Self = MotionBlurConfig {
+        technique: MotionBlurTechnique::Reconstruction,
+        quality: MotionBlurQuality::Cinematic,
+        intensity: 1.0,
+        max_velocity: 64.0,
+        sample_count: 64,
+        tile_size: 20,
+        center_weight: 1.0,
+        depth_scale: 1.0,
+        camera_blur_enabled: true,
+        object_blur_enabled: true,
+        reconstruction_enabled: true,
+        jitter_samples: true,
+    };
+
+    const GAME_HIGH: Self = MotionBlurConfig {
+        technique: MotionBlurTechnique::TileMaxNeighbor,
+        quality: MotionBlurQuality::High,
+        intensity: 0.8,
+        max_velocity: 32.0,
+        sample_count: 16,
+        tile_size: 20,
+        center_weight: 1.0,
+        depth_scale: 1.0,
+        camera_blur_enabled: true,
+        object_blur_enabled: true,
+        reconstruction_enabled: true,
+        jitter_samples: true,
+    };
+
+    const GAME_MEDIUM: Self = MotionBlurConfig {
+        technique: MotionBlurTechnique::TileMax,
+        quality: MotionBlurQuality::Medium,
+        intensity: 0.6,
+        max_velocity: 24.0,
+        sample_count: 8,
+        tile_size: 20,
+        center_weight: 1.0,
+        depth_scale: 1.0,
+        camera_blur_enabled: true,
+        object_blur_enabled: false,
+        reconstruction_enabled: false,
+        jitter_samples: false,
+    };
+
+    const GAME_LOW: Self = MotionBlurConfig {
+        technique: MotionBlurTechnique::Simple,
+        quality: MotionBlurQuality::Low,
+        intensity: 0.5,
+        max_velocity: 16.0,
+        sample_count: 4,
+        tile_size: 20,
+        center_weight: 1.0,
+        depth_scale: 1.0,
+        camera_blur_enabled: true,
+        object_blur_enabled: false,
+        reconstruction_enabled: false,
+        jitter_samples: false,
+    };
+}
+
+// ============================================================================
+// VELOCITY BUFFER GENERATION
+// ============================================================================
+
+@shader(vertex)
+const VELOCITY_BUFFER_VS: &str = r#"
+    // Vertex shader for velocity buffer generation
+
+    cbuffer VelocityParams : register(b0) {
+        float4x4 world;
+        float4x4 view_projection;
+        float4x4 prev_world;
+        float4x4 prev_view_projection;
+        float4x4 jitter_matrix;
+        float4x4 prev_jitter_matrix;
+    };
+
+    struct VSInput {
+        float3 position : POSITION;
+        float3 normal : NORMAL;
+        float2 uv : TEXCOORD0;
+    };
+
+    struct VSOutput {
+        float4 position : SV_POSITION;
+        float4 current_pos : TEXCOORD0;
+        float4 prev_pos : TEXCOORD1;
+        float2 uv : TEXCOORD2;
+    };
+
+    VSOutput vs_main(VSInput input) {
+        VSOutput output;
+
+        // Current frame position
+        float4 world_pos = mul(world, float4(input.position, 1.0));
+        float4 clip_pos = mul(view_projection, world_pos);
+        clip_pos = mul(jitter_matrix, clip_pos);
+
+        // Previous frame position
+        float4 prev_world_pos = mul(prev_world, float4(input.position, 1.0));
+        float4 prev_clip_pos = mul(prev_view_projection, prev_world_pos);
+        prev_clip_pos = mul(prev_jitter_matrix, prev_clip_pos);
+
+        output.position = clip_pos;
+        output.current_pos = clip_pos;
+        output.prev_pos = prev_clip_pos;
+        output.uv = input.uv;
+
+        return output;
+    }
+"#;
+
+@shader(fragment)
+const VELOCITY_BUFFER_PS: &str = r#"
+    // Pixel shader for velocity buffer generation
+
+    cbuffer VelocityPixelParams : register(b0) {
+        float2 screen_size;
+        float2 inv_screen_size;
+        float velocity_scale;
+        float max_velocity;
+        float padding0;
+        float padding1;
+    };
+
+    struct VSOutput {
+        float4 position : SV_POSITION;
+        float4 current_pos : TEXCOORD0;
+        float4 prev_pos : TEXCOORD1;
+        float2 uv : TEXCOORD2;
+    };
+
+    float2 ps_main(VSOutput input) : SV_TARGET {
+        // Calculate screen-space velocity
+        float2 current_screen = input.current_pos.xy / input.current_pos.w;
+        float2 prev_screen = input.prev_pos.xy / input.prev_pos.w;
+
+        // Convert from clip space [-1,1] to [0,1]
+        current_screen = current_screen * 0.5 + 0.5;
+        prev_screen = prev_screen * 0.5 + 0.5;
+
+        // Flip Y for screen space
+        current_screen.y = 1.0 - current_screen.y;
+        prev_screen.y = 1.0 - prev_screen.y;
+
+        // Velocity in pixels
+        float2 velocity = (current_screen - prev_screen) * screen_size * velocity_scale;
+
+        // Clamp to max velocity
+        float velocity_length = length(velocity);
+        if (velocity_length > max_velocity) {
+            velocity = velocity / velocity_length * max_velocity;
+        }
+
+        return velocity;
+    }
+"#;
+
+// ============================================================================
+// CAMERA VELOCITY SHADER
+// ============================================================================
+
+@shader(compute)
+const CAMERA_VELOCITY_SHADER: &str = r#"
+    // Generate velocity buffer from camera motion only
+
+    cbuffer CameraVelocityParams : register(b0) {
+        float4x4 inv_view_projection;
+        float4x4 prev_view_projection;
+        float2 screen_size;
+        float2 inv_screen_size;
+        float velocity_scale;
+        float max_velocity;
+        float near_plane;
+        float far_plane;
+    };
+
+    Texture2D<float> depth_texture : register(t0);
+    RWTexture2D<float2> velocity_output : register(u0);
+
+    SamplerState point_sampler : register(s0);
+
+    float linearize_depth(float depth) {
+        return near_plane * far_plane / (far_plane - depth * (far_plane - near_plane));
+    }
+
+    [numthreads(8, 8, 1)]
+    void cs_main(uint3 dispatch_id : SV_DispatchThreadID) {
+        float2 uv = (float2(dispatch_id.xy) + 0.5) * inv_screen_size;
+
+        float depth = depth_texture.SampleLevel(point_sampler, uv, 0);
+
+        // Reconstruct world position
+        float2 clip_xy = uv * 2.0 - 1.0;
+        clip_xy.y = -clip_xy.y;
+
+        float4 clip_pos = float4(clip_xy, depth, 1.0);
+        float4 world_pos = mul(inv_view_projection, clip_pos);
+        world_pos /= world_pos.w;
+
+        // Project to previous frame
+        float4 prev_clip = mul(prev_view_projection, world_pos);
+        float2 prev_screen = prev_clip.xy / prev_clip.w;
+        prev_screen = prev_screen * 0.5 + 0.5;
+        prev_screen.y = 1.0 - prev_screen.y;
+
+        // Calculate velocity
+        float2 velocity = (uv - prev_screen) * screen_size * velocity_scale;
+
+        // Clamp
+        float velocity_length = length(velocity);
+        if (velocity_length > max_velocity) {
+            velocity = velocity / velocity_length * max_velocity;
+        }
+
+        velocity_output[dispatch_id.xy] = velocity;
+    }
+"#;
+
+// ============================================================================
+// SIMPLE MOTION BLUR SHADER
+// ============================================================================
+
+@shader(compute)
+const MOTION_BLUR_SIMPLE_SHADER: &str = r#"
+    // Simple motion blur using velocity buffer
+
+    cbuffer MotionBlurParams : register(b0) {
+        float2 screen_size;
+        float2 inv_screen_size;
+        float intensity;
+        float max_velocity;
+        uint sample_count;
+        float center_weight;
+    };
+
+    Texture2D<float4> color_texture : register(t0);
+    Texture2D<float2> velocity_texture : register(t1);
+
+    RWTexture2D<float4> blur_output : register(u0);
+
+    SamplerState linear_sampler : register(s0);
+
+    [numthreads(8, 8, 1)]
+    void cs_main(uint3 dispatch_id : SV_DispatchThreadID) {
+        float2 uv = (float2(dispatch_id.xy) + 0.5) * inv_screen_size;
+
+        float2 velocity = velocity_texture.SampleLevel(linear_sampler, uv, 0);
+
+        // Skip if velocity is negligible
+        float velocity_length = length(velocity);
+        if (velocity_length < 0.5) {
+            blur_output[dispatch_id.xy] = color_texture.SampleLevel(linear_sampler, uv, 0);
+            return;
+        }
+
+        // Normalize and scale velocity
+        float2 velocity_dir = velocity / velocity_length;
+        velocity_length = min(velocity_length, max_velocity) * intensity;
+        velocity = velocity_dir * velocity_length * inv_screen_size;
+
+        // Sample along velocity vector
+        float4 color_sum = float4(0.0, 0.0, 0.0, 0.0);
+        float weight_sum = 0.0;
+
+        for (uint i = 0; i < sample_count; i++) {
+            float t = (float(i) / float(sample_count - 1)) - 0.5;
+            float2 sample_uv = uv + velocity * t;
+
+            if (any(sample_uv < 0.0) || any(sample_uv > 1.0)) continue;
+
+            float weight = 1.0 - abs(t) * 2.0;  // Triangle filter
+            weight = max(weight, 0.1);
+
+            // Extra weight for center sample
+            if (abs(t) < 0.1) weight *= center_weight;
+
+            float4 sample_color = color_texture.SampleLevel(linear_sampler, sample_uv, 0);
+            color_sum += sample_color * weight;
+            weight_sum += weight;
+        }
+
+        blur_output[dispatch_id.xy] = color_sum / max(weight_sum, 0.001);
+    }
+"#;
+
+// ============================================================================
+// TILE MAX VELOCITY SHADER
+// ============================================================================
+
+@shader(compute)
+const TILE_MAX_VELOCITY_SHADER: &str = r#"
+    // Calculate max velocity per tile
+    // Based on "A Reconstruction Filter for Plausible Motion Blur" (McGuire et al. 2012)
+
+    cbuffer TileMaxParams : register(b0) {
+        uint2 screen_size;
+        uint2 tile_count;
+        uint tile_size;
+        float padding0;
+        float padding1;
+        float padding2;
+    };
+
+    Texture2D<float2> velocity_texture : register(t0);
+    RWTexture2D<float2> tile_max_output : register(u0);
+
+    SamplerState point_sampler : register(s0);
+
+    groupshared float2 shared_velocity[32 * 32];
+
+    float2 velocity_compare(float2 a, float2 b) {
+        return (dot(a, a) > dot(b, b)) ? a : b;
+    }
+
+    [numthreads(32, 32, 1)]
+    void cs_main(uint3 dispatch_id : SV_DispatchThreadID,
+                 uint3 group_id : SV_GroupID,
+                 uint3 group_thread_id : SV_GroupThreadID) {
+        uint thread_idx = group_thread_id.y * 32 + group_thread_id.x;
+
+        // Load velocity for this thread's pixel
+        uint2 pixel = group_id.xy * tile_size + group_thread_id.xy;
+        float2 velocity = float2(0.0, 0.0);
+
+        if (all(pixel < screen_size)) {
+            float2 uv = (float2(pixel) + 0.5) / float2(screen_size);
+            velocity = velocity_texture.SampleLevel(point_sampler, uv, 0);
+        }
+
+        shared_velocity[thread_idx] = velocity;
+        GroupMemoryBarrierWithGroupSync();
+
+        // Parallel reduction to find max
+        for (uint s = 512; s > 0; s >>= 1) {
+            if (thread_idx < s && thread_idx + s < 1024) {
+                shared_velocity[thread_idx] = velocity_compare(
+                    shared_velocity[thread_idx],
+                    shared_velocity[thread_idx + s]
+                );
+            }
+            GroupMemoryBarrierWithGroupSync();
+        }
+
+        // Write result
+        if (thread_idx == 0) {
+            tile_max_output[group_id.xy] = shared_velocity[0];
+        }
+    }
+"#;
+
+// ============================================================================
+// TILE NEIGHBOR MAX SHADER
+// ============================================================================
+
+@shader(compute)
+const TILE_NEIGHBOR_MAX_SHADER: &str = r#"
+    // Expand tile max to include neighboring tiles
+
+    cbuffer NeighborMaxParams : register(b0) {
+        uint2 tile_count;
+        uint padding0;
+        uint padding1;
+    };
+
+    Texture2D<float2> tile_max_texture : register(t0);
+    RWTexture2D<float2> neighbor_max_output : register(u0);
+
+    SamplerState point_sampler : register(s0);
+
+    float2 velocity_compare(float2 a, float2 b) {
+        return (dot(a, a) > dot(b, b)) ? a : b;
+    }
+
+    [numthreads(8, 8, 1)]
+    void cs_main(uint3 dispatch_id : SV_DispatchThreadID) {
+        if (any(dispatch_id.xy >= tile_count)) return;
+
+        float2 max_velocity = float2(0.0, 0.0);
+
+        // Sample 3x3 neighborhood
+        for (int y = -1; y <= 1; y++) {
+            for (int x = -1; x <= 1; x++) {
+                int2 tile_coord = int2(dispatch_id.xy) + int2(x, y);
+
+                if (any(tile_coord < 0) || any(tile_coord >= int2(tile_count))) continue;
+
+                float2 uv = (float2(tile_coord) + 0.5) / float2(tile_count);
+                float2 velocity = tile_max_texture.SampleLevel(point_sampler, uv, 0);
+
+                max_velocity = velocity_compare(max_velocity, velocity);
+            }
+        }
+
+        neighbor_max_output[dispatch_id.xy] = max_velocity;
+    }
+"#;
+
+// ============================================================================
+// RECONSTRUCTION MOTION BLUR SHADER
+// ============================================================================
+
+@shader(compute)
+const MOTION_BLUR_RECONSTRUCTION_SHADER: &str = r#"
+    // Reconstruction filter motion blur
+    // Based on "Next Generation Post Processing in Call of Duty: Advanced Warfare"
+
+    cbuffer ReconstructionParams : register(b0) {
+        float2 screen_size;
+        float2 inv_screen_size;
+        float2 tile_size_inv;
+        float intensity;
+        float max_velocity;
+        uint sample_count;
+        float depth_scale;
+        float soft_z_extent;
+        float jitter;
+        uint frame_index;
+        float padding0;
+        float padding1;
+        float padding2;
+    };
+
+    Texture2D<float4> color_texture : register(t0);
+    Texture2D<float2> velocity_texture : register(t1);
+    Texture2D<float2> tile_max_texture : register(t2);
+    Texture2D<float> depth_texture : register(t3);
+    Texture2D<float4> noise_texture : register(t4);
+
+    RWTexture2D<float4> blur_output : register(u0);
+
+    SamplerState linear_sampler : register(s0);
+    SamplerState point_sampler : register(s1);
+
+    static const float EPSILON = 0.0001;
+
+    float linearize_depth(float depth) {
+        // Assuming reverse-Z
+        return 1.0 / (depth + EPSILON);
+    }
+
+    float soft_depth_compare(float depth_a, float depth_b, float extent) {
+        return saturate(1.0 - (depth_a - depth_b) / extent);
+    }
+
+    float cone(float dist, float velocity_length) {
+        return saturate(1.0 - dist / velocity_length);
+    }
+
+    float cylinder(float dist, float velocity_length) {
+        return 1.0 - smoothstep(0.95 * velocity_length, 1.05 * velocity_length, dist);
+    }
+
+    float2 round_velocity(float2 v, float2 inv_tile_size) {
+        return floor(v * inv_tile_size + 0.5) / inv_tile_size;
+    }
+
+    [numthreads(8, 8, 1)]
+    void cs_main(uint3 dispatch_id : SV_DispatchThreadID) {
+        float2 uv = (float2(dispatch_id.xy) + 0.5) * inv_screen_size;
+
+        // Get tile max velocity
+        float2 tile_uv = uv;
+        float2 tile_velocity = tile_max_texture.SampleLevel(point_sampler, tile_uv, 0);
+        float tile_velocity_length = length(tile_velocity);
+
+        // Early out for static regions
+        if (tile_velocity_length < 0.5) {
+            blur_output[dispatch_id.xy] = color_texture.SampleLevel(linear_sampler, uv, 0);
+            return;
+        }
+
+        // Get center sample
+        float4 center_color = color_texture.SampleLevel(linear_sampler, uv, 0);
+        float2 center_velocity = velocity_texture.SampleLevel(point_sampler, uv, 0);
+        float center_depth = linearize_depth(depth_texture.SampleLevel(point_sampler, uv, 0));
+        float center_velocity_length = length(center_velocity);
+
+        // Jitter sample positions
+        float2 noise_uv = uv * screen_size / 4.0;
+        noise_uv += float2(frame_index % 4, (frame_index / 4) % 4) / 4.0;
+        float random = noise_texture.SampleLevel(point_sampler, noise_uv, 0).x;
+
+        // Accumulate samples
+        float4 color_sum = center_color;
+        float weight_sum = 1.0;
+
+        float2 velocity_dir = center_velocity_length > 0.5 ?
+            center_velocity / center_velocity_length : tile_velocity / tile_velocity_length;
+
+        float blur_length = max(center_velocity_length, tile_velocity_length) * intensity;
+        blur_length = min(blur_length, max_velocity);
+
+        float2 step = velocity_dir * blur_length * inv_screen_size / float(sample_count);
+
+        for (uint i = 1; i < sample_count; i++) {
+            float t = float(i) / float(sample_count - 1) - 0.5;
+            t += (random - 0.5) * jitter / float(sample_count);
+
+            float2 sample_uv = uv + step * t * float(sample_count);
+
+            if (any(sample_uv < 0.0) || any(sample_uv > 1.0)) continue;
+
+            float4 sample_color = color_texture.SampleLevel(linear_sampler, sample_uv, 0);
+            float2 sample_velocity = velocity_texture.SampleLevel(point_sampler, sample_uv, 0);
+            float sample_depth = linearize_depth(depth_texture.SampleLevel(point_sampler, sample_uv, 0));
+            float sample_velocity_length = length(sample_velocity);
+
+            float dist = abs(t) * blur_length;
+
+            // Foreground vs background classification
+            float fore = soft_depth_compare(center_depth, sample_depth, soft_z_extent * depth_scale);
+            float back = soft_depth_compare(sample_depth, center_depth, soft_z_extent * depth_scale);
+
+            // Weight based on velocity and depth
+            float sample_weight = 0.0;
+
+            // Background bleeding onto foreground
+            sample_weight += back * cone(dist, sample_velocity_length);
+
+            // Foreground bleeding onto background
+            sample_weight += fore * cone(dist, center_velocity_length);
+
+            // Mutual blur
+            sample_weight += cylinder(dist, sample_velocity_length) *
+                           cylinder(dist, center_velocity_length) * 2.0;
+
+            sample_weight = saturate(sample_weight);
+
+            color_sum += sample_color * sample_weight;
+            weight_sum += sample_weight;
+        }
+
+        blur_output[dispatch_id.xy] = color_sum / max(weight_sum, 0.001);
+    }
+"#;
+
+// ============================================================================
+// PER-OBJECT MOTION BLUR SHADER
+// ============================================================================
+
+@shader(compute)
+const PER_OBJECT_MOTION_BLUR_SHADER: &str = r#"
+    // Per-object motion blur with proper occlusion handling
+
+    cbuffer PerObjectParams : register(b0) {
+        float2 screen_size;
+        float2 inv_screen_size;
+        float intensity;
+        float max_velocity;
+        uint sample_count;
+        float depth_threshold;
+        float near_plane;
+        float far_plane;
+        float padding0;
+        float padding1;
+    };
+
+    Texture2D<float4> color_texture : register(t0);
+    Texture2D<float2> velocity_texture : register(t1);
+    Texture2D<float> depth_texture : register(t2);
+    Texture2D<uint> object_id_texture : register(t3);
+
+    RWTexture2D<float4> blur_output : register(u0);
+
+    SamplerState linear_sampler : register(s0);
+    SamplerState point_sampler : register(s1);
+
+    float linearize_depth(float depth) {
+        return near_plane * far_plane / (far_plane - depth * (far_plane - near_plane));
+    }
+
+    [numthreads(8, 8, 1)]
+    void cs_main(uint3 dispatch_id : SV_DispatchThreadID) {
+        float2 uv = (float2(dispatch_id.xy) + 0.5) * inv_screen_size;
+
+        float4 center_color = color_texture.SampleLevel(linear_sampler, uv, 0);
+        float2 center_velocity = velocity_texture.SampleLevel(point_sampler, uv, 0);
+        float center_depth = linearize_depth(depth_texture.SampleLevel(point_sampler, uv, 0));
+        uint center_object_id = object_id_texture.Load(int3(dispatch_id.xy, 0));
+
+        float velocity_length = length(center_velocity);
+
+        if (velocity_length < 0.5) {
+            blur_output[dispatch_id.xy] = center_color;
+            return;
+        }
+
+        float2 velocity_dir = center_velocity / velocity_length;
+        velocity_length = min(velocity_length, max_velocity) * intensity;
+
+        float4 color_sum = center_color;
+        float weight_sum = 1.0;
+
+        for (uint i = 1; i < sample_count; i++) {
+            float t = float(i) / float(sample_count - 1) - 0.5;
+            float2 sample_uv = uv + velocity_dir * t * velocity_length * inv_screen_size;
+
+            if (any(sample_uv < 0.0) || any(sample_uv > 1.0)) continue;
+
+            uint2 sample_pixel = uint2(sample_uv * screen_size);
+            uint sample_object_id = object_id_texture.Load(int3(sample_pixel, 0));
+            float sample_depth = linearize_depth(depth_texture.SampleLevel(point_sampler, sample_uv, 0));
+
+            // Only blur within same object or if sample is behind
+            bool same_object = (sample_object_id == center_object_id);
+            bool sample_behind = (sample_depth > center_depth + depth_threshold);
+
+            if (!same_object && !sample_behind) continue;
+
+            float4 sample_color = color_texture.SampleLevel(linear_sampler, sample_uv, 0);
+
+            float weight = 1.0 - abs(t) * 0.5;
+            if (!same_object) weight *= 0.5;
+
+            color_sum += sample_color * weight;
+            weight_sum += weight;
+        }
+
+        blur_output[dispatch_id.xy] = color_sum / max(weight_sum, 0.001);
+    }
+"#;
+
+// ============================================================================
+// MOTION BLUR COMPOSITE SHADER
+// ============================================================================
+
+@shader(fragment)
+const MOTION_BLUR_COMPOSITE_SHADER: &str = r#"
+    // Composite motion blur with optional dithering
+
+    cbuffer CompositeParams : register(b0) {
+        float intensity;
+        float dither_strength;
+        uint frame_index;
+        float padding;
+    };
+
+    Texture2D<float4> sharp_color : register(t0);
+    Texture2D<float4> blur_color : register(t1);
+    Texture2D<float2> velocity_texture : register(t2);
+
+    SamplerState linear_sampler : register(s0);
+
+    struct VSOutput {
+        float4 position : SV_POSITION;
+        float2 uv : TEXCOORD0;
+    };
+
+    // Interleaved gradient noise for dithering
+    float ign(float2 position) {
+        float3 magic = float3(0.06711056, 0.00583715, 52.9829189);
+        return frac(magic.z * frac(dot(position, magic.xy)));
+    }
+
+    float4 ps_main(VSOutput input) : SV_TARGET {
+        float4 sharp = sharp_color.Sample(linear_sampler, input.uv);
+        float4 blur = blur_color.Sample(linear_sampler, input.uv);
+        float2 velocity = velocity_texture.Sample(linear_sampler, input.uv);
+
+        float velocity_length = length(velocity);
+        float blend = saturate(velocity_length / 2.0) * intensity;
+
+        // Dither the blend to reduce banding
+        float dither = ign(input.position.xy + float(frame_index % 16)) * 2.0 - 1.0;
+        blend += dither * dither_strength;
+        blend = saturate(blend);
+
+        return lerp(sharp, blur, blend);
+    }
+"#;
+
+// ============================================================================
+// MOTION VECTOR DILATION SHADER
+// ============================================================================
+
+@shader(compute)
+const MOTION_VECTOR_DILATION_SHADER: &str = r#"
+    // Dilate motion vectors to handle object edges
+
+    cbuffer DilationParams : register(b0) {
+        float2 screen_size;
+        float2 inv_screen_size;
+        int dilation_radius;
+        float depth_threshold;
+        float near_plane;
+        float far_plane;
+    };
+
+    Texture2D<float2> velocity_texture : register(t0);
+    Texture2D<float> depth_texture : register(t1);
+
+    RWTexture2D<float2> dilated_output : register(u0);
+
+    SamplerState point_sampler : register(s0);
+
+    float linearize_depth(float depth) {
+        return near_plane * far_plane / (far_plane - depth * (far_plane - near_plane));
+    }
+
+    [numthreads(8, 8, 1)]
+    void cs_main(uint3 dispatch_id : SV_DispatchThreadID) {
+        float2 uv = (float2(dispatch_id.xy) + 0.5) * inv_screen_size;
+
+        float center_depth = linearize_depth(depth_texture.SampleLevel(point_sampler, uv, 0));
+        float2 center_velocity = velocity_texture.SampleLevel(point_sampler, uv, 0);
+
+        float2 max_velocity = center_velocity;
+        float max_velocity_length_sq = dot(center_velocity, center_velocity);
+
+        // Search neighborhood for foreground motion
+        for (int y = -dilation_radius; y <= dilation_radius; y++) {
+            for (int x = -dilation_radius; x <= dilation_radius; x++) {
+                if (x == 0 && y == 0) continue;
+
+                float2 offset_uv = uv + float2(x, y) * inv_screen_size;
+                if (any(offset_uv < 0.0) || any(offset_uv > 1.0)) continue;
+
+                float sample_depth = linearize_depth(depth_texture.SampleLevel(point_sampler, offset_uv, 0));
+
+                // Only take velocity from closer objects
+                if (sample_depth < center_depth - depth_threshold) {
+                    float2 sample_velocity = velocity_texture.SampleLevel(point_sampler, offset_uv, 0);
+                    float sample_velocity_length_sq = dot(sample_velocity, sample_velocity);
+
+                    if (sample_velocity_length_sq > max_velocity_length_sq) {
+                        max_velocity = sample_velocity;
+                        max_velocity_length_sq = sample_velocity_length_sq;
+                    }
+                }
+            }
+        }
+
+        dilated_output[dispatch_id.xy] = max_velocity;
+    }
+"#;
+
+// ============================================================================
+// MOTION BLUR SYSTEM
+// ============================================================================
+
+@system
+struct MotionBlurSystem {
+    config: MotionBlurConfig,
+    velocity_texture: Handle<Texture>,
+    velocity_dilated_texture: Handle<Texture>,
+    tile_max_texture: Handle<Texture>,
+    neighbor_max_texture: Handle<Texture>,
+    blur_texture: Handle<Texture>,
+    noise_texture: Handle<Texture>,
+    camera_velocity_pipeline: Handle<ComputePipeline>,
+    tile_max_pipeline: Handle<ComputePipeline>,
+    neighbor_max_pipeline: Handle<ComputePipeline>,
+    simple_blur_pipeline: Handle<ComputePipeline>,
+    reconstruction_pipeline: Handle<ComputePipeline>,
+    per_object_pipeline: Handle<ComputePipeline>,
+    dilation_pipeline: Handle<ComputePipeline>,
+    composite_pipeline: Handle<RenderPipeline>,
+    velocity_render_pipeline: Handle<RenderPipeline>,
+    frame_index: u32,
+}
+
+impl MotionBlurSystem {
+    fn new(config: MotionBlurConfig) -> Self {
+        Self {
+            config,
+            velocity_texture: Handle::null(),
+            velocity_dilated_texture: Handle::null(),
+            tile_max_texture: Handle::null(),
+            neighbor_max_texture: Handle::null(),
+            blur_texture: Handle::null(),
+            noise_texture: Handle::null(),
+            camera_velocity_pipeline: Handle::null(),
+            tile_max_pipeline: Handle::null(),
+            neighbor_max_pipeline: Handle::null(),
+            simple_blur_pipeline: Handle::null(),
+            reconstruction_pipeline: Handle::null(),
+            per_object_pipeline: Handle::null(),
+            dilation_pipeline: Handle::null(),
+            composite_pipeline: Handle::null(),
+            velocity_render_pipeline: Handle::null(),
+            frame_index: 0,
+        }
+    }
+
+    fn initialize(&mut self, device: &RenderDevice, width: u32, height: u32) {
+        // Create velocity textures
+        self.velocity_texture = device.create_texture(&TextureDescriptor {
+            size: Extent3d { width, height, depth: 1 },
+            format: TextureFormat::Rg16Float,
+            usage: TextureUsage::RENDER_TARGET | TextureUsage::SAMPLED | TextureUsage::STORAGE,
+            ..default()
+        });
+
+        self.velocity_dilated_texture = device.create_texture(&TextureDescriptor {
+            size: Extent3d { width, height, depth: 1 },
+            format: TextureFormat::Rg16Float,
+            usage: TextureUsage::STORAGE | TextureUsage::SAMPLED,
+            ..default()
+        });
+
+        // Create tile textures
+        let tile_width = (width + self.config.tile_size - 1) / self.config.tile_size;
+        let tile_height = (height + self.config.tile_size - 1) / self.config.tile_size;
+
+        self.tile_max_texture = device.create_texture(&TextureDescriptor {
+            size: Extent3d { width: tile_width, height: tile_height, depth: 1 },
+            format: TextureFormat::Rg16Float,
+            usage: TextureUsage::STORAGE | TextureUsage::SAMPLED,
+            ..default()
+        });
+
+        self.neighbor_max_texture = device.create_texture(&TextureDescriptor {
+            size: Extent3d { width: tile_width, height: tile_height, depth: 1 },
+            format: TextureFormat::Rg16Float,
+            usage: TextureUsage::STORAGE | TextureUsage::SAMPLED,
+            ..default()
+        });
+
+        // Create blur texture
+        self.blur_texture = device.create_texture(&TextureDescriptor {
+            size: Extent3d { width, height, depth: 1 },
+            format: TextureFormat::Rgba16Float,
+            usage: TextureUsage::STORAGE | TextureUsage::SAMPLED,
+            ..default()
+        });
+
+        // Generate noise texture
+        self.noise_texture = self.generate_noise_texture(device);
+
+        // Create pipelines
+        self.camera_velocity_pipeline = device.create_compute_pipeline(CAMERA_VELOCITY_SHADER);
+        self.tile_max_pipeline = device.create_compute_pipeline(TILE_MAX_VELOCITY_SHADER);
+        self.neighbor_max_pipeline = device.create_compute_pipeline(TILE_NEIGHBOR_MAX_SHADER);
+        self.simple_blur_pipeline = device.create_compute_pipeline(MOTION_BLUR_SIMPLE_SHADER);
+        self.reconstruction_pipeline = device.create_compute_pipeline(MOTION_BLUR_RECONSTRUCTION_SHADER);
+        self.per_object_pipeline = device.create_compute_pipeline(PER_OBJECT_MOTION_BLUR_SHADER);
+        self.dilation_pipeline = device.create_compute_pipeline(MOTION_VECTOR_DILATION_SHADER);
+
+        self.velocity_render_pipeline = device.create_render_pipeline(&RenderPipelineDescriptor {
+            vertex: VELOCITY_BUFFER_VS,
+            fragment: VELOCITY_BUFFER_PS,
+            ..default()
+        });
+
+        self.composite_pipeline = device.create_render_pipeline(&RenderPipelineDescriptor {
+            vertex: FULLSCREEN_VS,
+            fragment: MOTION_BLUR_COMPOSITE_SHADER,
+            ..default()
+        });
+    }
+
+    fn generate_noise_texture(&self, device: &RenderDevice) -> Handle<Texture> {
+        let size = 64u32;
+        let mut data = vec![0u8; (size * size * 4) as usize];
+
+        for i in 0..(size * size) as usize {
+            data[i * 4] = rand::random::<u8>();
+            data[i * 4 + 1] = rand::random::<u8>();
+            data[i * 4 + 2] = rand::random::<u8>();
+            data[i * 4 + 3] = rand::random::<u8>();
+        }
+
+        device.create_texture_with_data(&TextureDescriptor {
+            size: Extent3d { width: size, height: size, depth: 1 },
+            format: TextureFormat::Rgba8Unorm,
+            usage: TextureUsage::SAMPLED,
+            ..default()
+        }, &data)
+    }
+
+    fn render(&mut self,
+              cmd: &mut CommandEncoder,
+              color: &Texture,
+              depth: &Texture,
+              output: &Texture,
+              camera: &Camera,
+              prev_view_projection: &Mat4) {
+        let width = color.width();
+        let height = color.height();
+
+        // Generate camera velocity if enabled
+        if self.config.camera_blur_enabled {
+            self.generate_camera_velocity(cmd, depth, camera, prev_view_projection);
+        }
+
+        // Dilate velocity for edge handling
+        self.dilate_velocity(cmd);
+
+        // Apply motion blur based on technique
+        match self.config.technique {
+            MotionBlurTechnique::Simple => {
+                self.apply_simple_blur(cmd, color);
+            }
+            MotionBlurTechnique::TileMax | MotionBlurTechnique::TileMaxNeighbor => {
+                self.compute_tile_max(cmd);
+                if matches!(self.config.technique, MotionBlurTechnique::TileMaxNeighbor) {
+                    self.compute_neighbor_max(cmd);
+                }
+                self.apply_reconstruction_blur(cmd, color, depth);
+            }
+            MotionBlurTechnique::Reconstruction => {
+                self.compute_tile_max(cmd);
+                self.compute_neighbor_max(cmd);
+                self.apply_reconstruction_blur(cmd, color, depth);
+            }
+            MotionBlurTechnique::PerObject => {
+                self.apply_per_object_blur(cmd, color, depth);
+            }
+            _ => {
+                self.apply_reconstruction_blur(cmd, color, depth);
+            }
+        }
+
+        // Composite final result
+        self.composite(cmd, color, output);
+
+        self.frame_index += 1;
+    }
+
+    fn generate_camera_velocity(&self, cmd: &mut CommandEncoder, depth: &Texture,
+                                 camera: &Camera, prev_view_projection: &Mat4) {
+        let mut pass = cmd.begin_compute_pass();
+        pass.set_pipeline(&self.camera_velocity_pipeline);
+        // Set bind groups...
+
+        let width = self.velocity_texture.width();
+        let height = self.velocity_texture.height();
+        pass.dispatch((width + 7) / 8, (height + 7) / 8, 1);
+    }
+
+    fn dilate_velocity(&self, cmd: &mut CommandEncoder) {
+        let mut pass = cmd.begin_compute_pass();
+        pass.set_pipeline(&self.dilation_pipeline);
+        // Set bind groups...
+
+        let width = self.velocity_texture.width();
+        let height = self.velocity_texture.height();
+        pass.dispatch((width + 7) / 8, (height + 7) / 8, 1);
+    }
+
+    fn compute_tile_max(&self, cmd: &mut CommandEncoder) {
+        let mut pass = cmd.begin_compute_pass();
+        pass.set_pipeline(&self.tile_max_pipeline);
+        // Set bind groups...
+
+        let tile_width = self.tile_max_texture.width();
+        let tile_height = self.tile_max_texture.height();
+        pass.dispatch(tile_width, tile_height, 1);
+    }
+
+    fn compute_neighbor_max(&self, cmd: &mut CommandEncoder) {
+        let mut pass = cmd.begin_compute_pass();
+        pass.set_pipeline(&self.neighbor_max_pipeline);
+        // Set bind groups...
+
+        let tile_width = self.neighbor_max_texture.width();
+        let tile_height = self.neighbor_max_texture.height();
+        pass.dispatch((tile_width + 7) / 8, (tile_height + 7) / 8, 1);
+    }
+
+    fn apply_simple_blur(&self, cmd: &mut CommandEncoder, color: &Texture) {
+        let mut pass = cmd.begin_compute_pass();
+        pass.set_pipeline(&self.simple_blur_pipeline);
+        // Set bind groups...
+
+        let width = color.width();
+        let height = color.height();
+        pass.dispatch((width + 7) / 8, (height + 7) / 8, 1);
+    }
+
+    fn apply_reconstruction_blur(&self, cmd: &mut CommandEncoder, color: &Texture, depth: &Texture) {
+        let mut pass = cmd.begin_compute_pass();
+        pass.set_pipeline(&self.reconstruction_pipeline);
+        // Set bind groups...
+
+        let width = color.width();
+        let height = color.height();
+        pass.dispatch((width + 7) / 8, (height + 7) / 8, 1);
+    }
+
+    fn apply_per_object_blur(&self, cmd: &mut CommandEncoder, color: &Texture, depth: &Texture) {
+        let mut pass = cmd.begin_compute_pass();
+        pass.set_pipeline(&self.per_object_pipeline);
+        // Set bind groups...
+
+        let width = color.width();
+        let height = color.height();
+        pass.dispatch((width + 7) / 8, (height + 7) / 8, 1);
+    }
+
+    fn composite(&self, cmd: &mut CommandEncoder, color: &Texture, output: &Texture) {
+        let mut pass = cmd.begin_render_pass(&RenderPassDescriptor {
+            color_attachments: &[RenderPassColorAttachment {
+                view: output,
+                load_op: LoadOp::Clear,
+                store_op: StoreOp::Store,
+            }],
+            ..default()
+        });
+
+        pass.set_pipeline(&self.composite_pipeline);
+        pass.draw(0..3, 0..1);
+    }
+}

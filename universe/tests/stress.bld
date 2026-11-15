@@ -1,0 +1,973 @@
+// ═══════════════════════════════════════════════════════════════════════════════
+// BUILD-UNIVERSE STRESS TEST SUITE v1.0.0
+// "Pushing the System to Its Limits"
+// ═══════════════════════════════════════════════════════════════════════════════
+// Copyright © 2024-2025 Zain Dana Harper. All Rights Reserved.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+module stress_tests
+
+use std::test::{TestSuite, TestResult, assert, assert_eq, assert_approx}
+use std::time::{Duration, Instant}
+use std::sync::{Arc, Mutex, RwLock, atomic::{AtomicU64, Ordering}}
+use std::thread
+use std::collections::{HashMap, BTreeMap, HashSet, VecDeque}
+use std::mem
+
+use foundation::*
+use field_tensor::{MarketTensor4D, Matrix}
+use quantum_finance::TradingEngine
+use axiom::NeuralNetwork
+use oracle::TimeSeriesPredictor
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// CONFIGURATION
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Stress test configuration
+pub struct StressTestConfig {
+    pub max_memory_mb: usize,
+    pub max_duration: Duration,
+    pub parallelism: usize,
+    pub verbose: bool,
+}
+
+impl StressTestConfig {
+    pub fn default() -> Self {
+        StressTestConfig {
+            max_memory_mb: 4096,
+            max_duration: Duration::from_secs(300),
+            parallelism: num_cpus(),
+            verbose: false,
+        }
+    }
+
+    pub fn aggressive() -> Self {
+        StressTestConfig {
+            max_memory_mb: 8192,
+            max_duration: Duration::from_secs(600),
+            parallelism: num_cpus() * 2,
+            verbose: true,
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// LARGE DATA VOLUME TESTS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Test serialization with large data structures
+#[test]
+fn stress_large_json_serialization() -> TestResult {
+    let start = Instant::now();
+
+    // Create large nested structure
+    let mut data = HashMap::new();
+    for i in 0..1000 {
+        let key = format!("key_{}", i);
+        let mut inner = Vec::new();
+        for j in 0..1000 {
+            inner.push(HashMap::from([
+                ("id".to_string(), serde_json::Value::Number(j.into())),
+                ("name".to_string(), serde_json::Value::String(format!("item_{}_{}", i, j))),
+                ("value".to_string(), serde_json::Value::Number(((i * j) as f64 * 0.001).into())),
+                ("nested".to_string(), serde_json::Value::Object(HashMap::from([
+                    ("a".to_string(), serde_json::Value::Number(i.into())),
+                    ("b".to_string(), serde_json::Value::Number(j.into())),
+                ]))),
+            ]));
+        }
+        data.insert(key, inner);
+    }
+
+    // Serialize
+    let json = serialization::json::to_string(&data)?;
+    assert!(json.len() > 100_000_000); // Should be > 100MB
+
+    // Deserialize
+    let restored: HashMap<String, Vec<HashMap<String, serde_json::Value>>> =
+        serialization::json::from_str(&json)?;
+
+    assert_eq!(restored.len(), 1000);
+    assert_eq!(restored.get("key_500").unwrap().len(), 1000);
+
+    println!("Large JSON test: {} bytes in {:?}", json.len(), start.elapsed());
+
+    TestResult::pass()
+}
+
+/// Test MessagePack with large binary data
+#[test]
+fn stress_large_msgpack_binary() -> TestResult {
+    let start = Instant::now();
+
+    // Create large binary payload
+    let large_binary: Vec<u8> = (0..10_000_000).map(|i| (i % 256) as u8).collect();
+
+    // Serialize
+    let msgpack = serialization::msgpack::to_vec(&large_binary)?;
+
+    // Deserialize
+    let restored: Vec<u8> = serialization::msgpack::from_slice(&msgpack)?;
+
+    assert_eq!(restored.len(), 10_000_000);
+    assert_eq!(restored[0], 0);
+    assert_eq!(restored[255], 255);
+    assert_eq!(restored[256], 0);
+
+    println!("Large MessagePack binary: {} bytes in {:?}", msgpack.len(), start.elapsed());
+
+    TestResult::pass()
+}
+
+/// Test Protocol Buffers with deeply nested messages
+#[test]
+fn stress_deep_protobuf_nesting() -> TestResult {
+    let start = Instant::now();
+
+    // Create deeply nested structure (100 levels deep)
+    fn create_nested(depth: usize, max_depth: usize) -> NestedMessage {
+        if depth >= max_depth {
+            NestedMessage {
+                value: depth as i32,
+                name: format!("leaf_{}", depth),
+                child: None,
+            }
+        } else {
+            NestedMessage {
+                value: depth as i32,
+                name: format!("node_{}", depth),
+                child: Some(Box::new(create_nested(depth + 1, max_depth))),
+            }
+        }
+    }
+
+    let nested = create_nested(0, 100);
+
+    // Serialize
+    let bytes = serialization::protobuf::encode(&nested)?;
+
+    // Deserialize
+    let restored: NestedMessage = serialization::protobuf::decode(&bytes)?;
+
+    // Verify depth
+    let mut current = &restored;
+    let mut depth = 0;
+    while let Some(ref child) = current.child {
+        depth += 1;
+        current = child;
+    }
+    assert_eq!(depth, 99);
+
+    println!("Deep protobuf nesting (100 levels): {:?}", start.elapsed());
+
+    TestResult::pass()
+}
+
+/// Test large market tensor operations
+#[test]
+fn stress_large_tensor_operations() -> TestResult {
+    let start = Instant::now();
+
+    // Create large tensor: 5000 time steps, 500 assets, 32 features, 8 derivatives
+    let mut tensor = MarketTensor4D::new(5000, 500, 32, 8);
+
+    // Fill with data
+    for t in 0..5000 {
+        for a in 0..500 {
+            for f in 0..32 {
+                for d in 0..8 {
+                    let value = (t * a + f * d) as f64 * 0.0001;
+                    tensor.set(t, a, f, d, value);
+                }
+            }
+        }
+    }
+
+    println!("Tensor creation: {:?}", start.elapsed());
+    let creation_time = start.elapsed();
+
+    // Compute covariance matrix (500x500)
+    let cov_start = Instant::now();
+    let cov = tensor.asset_covariance();
+    println!("Covariance computation: {:?}", cov_start.elapsed());
+
+    assert_eq!(cov.rows(), 500);
+    assert_eq!(cov.cols(), 500);
+
+    // Verify symmetry
+    for i in 0..500 {
+        for j in i..500 {
+            assert_approx(cov.get(i, j), cov.get(j, i), 1e-10);
+        }
+    }
+
+    // Rolling window computation
+    let rolling_start = Instant::now();
+    for window_end in 100..5000 {
+        let window_start = window_end - 100;
+        let slice = tensor.slice_time(window_start, window_end);
+        let _ = slice.asset_covariance();
+    }
+    println!("Rolling 100-window covariance (4900 iterations): {:?}", rolling_start.elapsed());
+
+    TestResult::pass()
+}
+
+/// Test collection operations at scale
+#[test]
+fn stress_large_collections() -> TestResult {
+    let start = Instant::now();
+
+    // Test HashMap with 10M entries
+    let mut hashmap = HashMap::with_capacity(10_000_000);
+    for i in 0..10_000_000 {
+        hashmap.insert(format!("key_{}", i), i);
+    }
+    println!("HashMap 10M insertions: {:?}", start.elapsed());
+
+    let lookup_start = Instant::now();
+    for i in 0..1_000_000 {
+        let key = format!("key_{}", i * 10);
+        assert_eq!(hashmap.get(&key), Some(&(i * 10)));
+    }
+    println!("HashMap 1M lookups: {:?}", lookup_start.elapsed());
+
+    // Test BTreeMap with 1M entries (more expensive operations)
+    let btree_start = Instant::now();
+    let mut btreemap = BTreeMap::new();
+    for i in 0..1_000_000 {
+        btreemap.insert(i, format!("value_{}", i));
+    }
+    println!("BTreeMap 1M insertions: {:?}", btree_start.elapsed());
+
+    // Range queries
+    let range_start = Instant::now();
+    for base in (0..1_000_000).step_by(10000) {
+        let count = btreemap.range(base..base+1000).count();
+        assert_eq!(count, 1000);
+    }
+    println!("BTreeMap 100 range queries: {:?}", range_start.elapsed());
+
+    // Test Vec operations
+    let vec_start = Instant::now();
+    let mut vec: Vec<i64> = (0..50_000_000).collect();
+    println!("Vec 50M creation: {:?}", vec_start.elapsed());
+
+    let sort_start = Instant::now();
+    vec.sort_unstable();
+    println!("Vec 50M sort: {:?}", sort_start.elapsed());
+
+    TestResult::pass()
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// CONCURRENCY STRESS TESTS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Test concurrent HashMap access
+#[test]
+fn stress_concurrent_hashmap() -> TestResult {
+    let map = Arc::new(RwLock::new(HashMap::new()));
+    let counter = Arc::new(AtomicU64::new(0));
+
+    let num_threads = 16;
+    let ops_per_thread = 100_000;
+
+    let mut handles = Vec::new();
+
+    for thread_id in 0..num_threads {
+        let map = Arc::clone(&map);
+        let counter = Arc::clone(&counter);
+
+        let handle = thread::spawn(move || {
+            for i in 0..ops_per_thread {
+                let key = format!("thread_{}_key_{}", thread_id, i);
+                let value = thread_id * ops_per_thread + i;
+
+                // Write operation
+                {
+                    let mut w = map.write().unwrap();
+                    w.insert(key.clone(), value);
+                }
+
+                // Read operation
+                {
+                    let r = map.read().unwrap();
+                    if let Some(&v) = r.get(&key) {
+                        counter.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+            }
+        });
+
+        handles.push(handle);
+    }
+
+    for handle in handles {
+        handle.join().unwrap();
+    }
+
+    let final_count = counter.load(Ordering::Relaxed);
+    assert!(final_count >= (num_threads * ops_per_thread) as u64 * 8 / 10); // At least 80% success
+
+    let map = map.read().unwrap();
+    assert_eq!(map.len(), (num_threads * ops_per_thread) as usize);
+
+    TestResult::pass()
+}
+
+/// Test concurrent tensor writes
+#[test]
+fn stress_concurrent_tensor_writes() -> TestResult {
+    let tensor = Arc::new(Mutex::new(MarketTensor4D::new(1000, 100, 16, 4)));
+
+    let num_threads = 8;
+    let mut handles = Vec::new();
+
+    for thread_id in 0..num_threads {
+        let tensor = Arc::clone(&tensor);
+        let asset_range_start = thread_id * (100 / num_threads);
+        let asset_range_end = (thread_id + 1) * (100 / num_threads);
+
+        let handle = thread::spawn(move || {
+            for t in 0..1000 {
+                for a in asset_range_start..asset_range_end {
+                    let value = (thread_id * 1000 + t * 100 + a) as f64 * 0.001;
+                    let mut tensor = tensor.lock().unwrap();
+                    tensor.set(t, a, 0, 0, value);
+                }
+            }
+        });
+
+        handles.push(handle);
+    }
+
+    for handle in handles {
+        handle.join().unwrap();
+    }
+
+    // Verify data integrity
+    let tensor = tensor.lock().unwrap();
+    for a in 0..100 {
+        let value = tensor.get(500, a, 0, 0);
+        assert!(value > 0.0);
+    }
+
+    TestResult::pass()
+}
+
+/// Test parallel trading engine execution
+#[test]
+fn stress_parallel_trading_engines() -> TestResult {
+    let num_engines = 100;
+    let mut handles = Vec::new();
+
+    let results = Arc::new(Mutex::new(Vec::new()));
+
+    for engine_id in 0..num_engines {
+        let results = Arc::clone(&results);
+
+        let handle = thread::spawn(move || {
+            let mut engine = TradingEngine::new()
+                .with_capital(100_000.0)
+                .with_commission(0.001);
+
+            // Simulate 252 trading days
+            for day in 0..252 {
+                let price = 100.0 + (day as f64).sin() * 10.0 + engine_id as f64 * 0.1;
+
+                engine.update_prices(&HashMap::from([
+                    ("ASSET".to_string(), price),
+                ]));
+
+                // Generate signals
+                if day % 10 == 0 {
+                    engine.signal("ASSET", if day % 20 == 0 { Signal::Buy } else { Signal::Sell }, 0.5);
+                }
+
+                engine.execute().ok();
+            }
+
+            let equity = engine.equity();
+            results.lock().unwrap().push((engine_id, equity));
+        });
+
+        handles.push(handle);
+    }
+
+    for handle in handles {
+        handle.join().unwrap();
+    }
+
+    let results = results.lock().unwrap();
+    assert_eq!(results.len(), num_engines);
+
+    // All engines should have positive equity
+    for (_, equity) in results.iter() {
+        assert!(*equity > 0.0);
+    }
+
+    TestResult::pass()
+}
+
+/// Test async task spawning under load
+#[test]
+fn stress_async_task_spawning() -> TestResult {
+    use foundation::sync::{spawn, channel};
+
+    let num_tasks = 10_000;
+    let (tx, rx) = channel::<u64>();
+
+    let start = Instant::now();
+
+    for i in 0..num_tasks {
+        let tx = tx.clone();
+        spawn(async move {
+            // Simulate some work
+            let result = (0..1000).fold(0u64, |acc, x| acc.wrapping_add(x * i as u64));
+            tx.send(result).ok();
+        });
+    }
+
+    drop(tx); // Close sender
+
+    // Collect all results
+    let mut count = 0;
+    while let Ok(_) = rx.recv() {
+        count += 1;
+    }
+
+    assert_eq!(count, num_tasks);
+    println!("Spawned and completed {} async tasks in {:?}", num_tasks, start.elapsed());
+
+    TestResult::pass()
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// MEMORY PRESSURE TESTS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Test memory allocation patterns
+#[test]
+fn stress_memory_allocation_churn() -> TestResult {
+    let iterations = 1000;
+    let mut peak_memory = 0usize;
+
+    for iter in 0..iterations {
+        // Allocate varying sizes
+        let size = ((iter % 100) + 1) * 10000;
+        let mut vec: Vec<u8> = vec![0u8; size];
+
+        // Touch memory to ensure allocation
+        for i in 0..size {
+            vec[i] = (i % 256) as u8;
+        }
+
+        peak_memory = peak_memory.max(size);
+
+        // Let it go out of scope for deallocation
+    }
+
+    // Allocate a final large block to verify heap isn't fragmented
+    let final_alloc: Vec<u64> = vec![0; 1_000_000];
+    assert_eq!(final_alloc.len(), 1_000_000);
+
+    TestResult::pass()
+}
+
+/// Test string interning under pressure
+#[test]
+fn stress_string_interning() -> TestResult {
+    let mut strings = HashSet::new();
+
+    // Insert many unique strings
+    for i in 0..1_000_000 {
+        strings.insert(format!("string_number_{}_with_suffix_{}", i, i % 100));
+    }
+
+    assert_eq!(strings.len(), 1_000_000);
+
+    // Insert duplicates (should not increase size)
+    for i in 0..100_000 {
+        strings.insert(format!("string_number_{}_with_suffix_{}", i, i % 100));
+    }
+
+    assert_eq!(strings.len(), 1_000_000);
+
+    // Lookup performance
+    let start = Instant::now();
+    for i in 0..100_000 {
+        let key = format!("string_number_{}_with_suffix_{}", i * 10, (i * 10) % 100);
+        assert!(strings.contains(&key));
+    }
+    println!("100k string lookups: {:?}", start.elapsed());
+
+    TestResult::pass()
+}
+
+/// Test arena allocation patterns
+#[test]
+fn stress_arena_allocation() -> TestResult {
+    // Simulate arena-like allocation with VecDeque
+    let mut arena = VecDeque::with_capacity(10_000_000);
+
+    // Allocate in chunks
+    for chunk in 0..1000 {
+        let chunk_data: Vec<u64> = (0..10000).map(|i| (chunk * 10000 + i) as u64).collect();
+        arena.extend(chunk_data);
+    }
+
+    assert_eq!(arena.len(), 10_000_000);
+
+    // Random access
+    for i in (0..10_000_000).step_by(10000) {
+        assert_eq!(arena[i], i as u64);
+    }
+
+    // Pop from front (arena cleanup simulation)
+    let pop_start = Instant::now();
+    while arena.len() > 1_000_000 {
+        arena.pop_front();
+    }
+    println!("Arena cleanup (9M pops): {:?}", pop_start.elapsed());
+
+    TestResult::pass()
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// EDGE CASE TESTS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Test extreme floating point values
+#[test]
+fn stress_floating_point_edge_cases() -> TestResult {
+    let edge_values = vec![
+        0.0,
+        -0.0,
+        f64::MIN,
+        f64::MAX,
+        f64::MIN_POSITIVE,
+        f64::EPSILON,
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+        1e308,
+        1e-308,
+        2.2250738585072014e-308, // Smallest normal
+    ];
+
+    for &val in &edge_values {
+        // JSON roundtrip
+        if val.is_finite() {
+            let json = serialization::json::to_string(&val)?;
+            let restored: f64 = serialization::json::from_str(&json)?;
+
+            if val == 0.0 {
+                assert!(restored == 0.0);
+            } else {
+                assert!((restored - val).abs() / val.abs() < 1e-10);
+            }
+        }
+
+        // MessagePack roundtrip
+        if val.is_finite() {
+            let msgpack = serialization::msgpack::to_vec(&val)?;
+            let restored: f64 = serialization::msgpack::from_slice(&msgpack)?;
+
+            if val == 0.0 {
+                assert!(restored == 0.0);
+            } else {
+                assert!((restored - val).abs() / val.abs() < 1e-10);
+            }
+        }
+    }
+
+    // Test NaN handling
+    let nan = f64::NAN;
+    let msgpack = serialization::msgpack::to_vec(&nan)?;
+    let restored: f64 = serialization::msgpack::from_slice(&msgpack)?;
+    assert!(restored.is_nan());
+
+    TestResult::pass()
+}
+
+/// Test empty and near-empty structures
+#[test]
+fn stress_empty_structures() -> TestResult {
+    // Empty collections
+    let empty_vec: Vec<i32> = Vec::new();
+    let empty_map: HashMap<String, i32> = HashMap::new();
+    let empty_string = String::new();
+
+    // Serialize all
+    let json = serialization::json::to_string(&(empty_vec.clone(), empty_map.clone(), empty_string.clone()))?;
+
+    // Deserialize
+    let restored: (Vec<i32>, HashMap<String, i32>, String) = serialization::json::from_str(&json)?;
+
+    assert!(restored.0.is_empty());
+    assert!(restored.1.is_empty());
+    assert!(restored.2.is_empty());
+
+    // Empty tensor
+    let tensor = MarketTensor4D::new(0, 0, 0, 0);
+    assert_eq!(tensor.shape[0], 0);
+
+    // Single element collections
+    let single_vec = vec![42];
+    let mut single_map = HashMap::new();
+    single_map.insert("key".to_string(), 1);
+
+    let json = serialization::json::to_string(&(single_vec.clone(), single_map.clone()))?;
+    let restored: (Vec<i32>, HashMap<String, i32>) = serialization::json::from_str(&json)?;
+
+    assert_eq!(restored.0.len(), 1);
+    assert_eq!(restored.1.len(), 1);
+
+    TestResult::pass()
+}
+
+/// Test Unicode edge cases
+#[test]
+fn stress_unicode_edge_cases() -> TestResult {
+    let unicode_strings = vec![
+        "",
+        " ",
+        "Hello, World!",
+        "日本語テスト",
+        "العربية",
+        "🎉🚀💻🔥",
+        "Mixed: Hello 世界 🌍",
+        "\u{0000}",  // Null
+        "\u{FFFF}",  // Max BMP
+        "🏴󠁧󠁢󠁥󠁮󠁧󠁿",  // Flag emoji with ZWJ
+        "\u{200B}", // Zero-width space
+        "Z̤͔ͧ̑̓ä͖̭̈́l̥̻̗̳̿g̲͈͋͒o̫̕",  // Zalgo text
+        "a\u{0308}",  // Decomposed ä
+        "ä",  // Precomposed ä
+        "\u{1F469}\u{200D}\u{1F4BB}",  // Woman technologist
+    ];
+
+    for s in &unicode_strings {
+        // JSON roundtrip
+        let json = serialization::json::to_string(s)?;
+        let restored: String = serialization::json::from_str(&json)?;
+        assert_eq!(&restored, *s);
+
+        // MessagePack roundtrip
+        let msgpack = serialization::msgpack::to_vec(s)?;
+        let restored: String = serialization::msgpack::from_slice(&msgpack)?;
+        assert_eq!(&restored, *s);
+    }
+
+    // Very long Unicode string
+    let long_unicode: String = "日本語".repeat(100_000);
+    let json = serialization::json::to_string(&long_unicode)?;
+    let restored: String = serialization::json::from_str(&json)?;
+    assert_eq!(restored.len(), long_unicode.len());
+
+    TestResult::pass()
+}
+
+/// Test matrix edge cases
+#[test]
+fn stress_matrix_edge_cases() -> TestResult {
+    // 1x1 matrix
+    let tiny = Matrix::new(1, 1);
+    assert_eq!(tiny.rows(), 1);
+    assert_eq!(tiny.cols(), 1);
+
+    // Very wide matrix
+    let wide = Matrix::new(1, 10000);
+    assert_eq!(wide.rows(), 1);
+    assert_eq!(wide.cols(), 10000);
+
+    // Very tall matrix
+    let tall = Matrix::new(10000, 1);
+    assert_eq!(tall.rows(), 10000);
+    assert_eq!(tall.cols(), 1);
+
+    // Matrix with all zeros
+    let zeros = Matrix::zeros(100, 100);
+    let det = zeros.determinant();
+    assert_eq!(det, 0.0);
+
+    // Identity matrix
+    let identity = Matrix::identity(100);
+    let det = identity.determinant();
+    assert_approx(det, 1.0, 1e-10);
+
+    // Matrix inverse of identity
+    let inv = identity.inverse()?;
+    for i in 0..100 {
+        for j in 0..100 {
+            let expected = if i == j { 1.0 } else { 0.0 };
+            assert_approx(inv.get(i, j), expected, 1e-10);
+        }
+    }
+
+    TestResult::pass()
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// PERFORMANCE BOUNDARY TESTS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Test serialization performance bounds
+#[test]
+fn stress_serialization_performance() -> TestResult {
+    let sizes = vec![1_000, 10_000, 100_000, 1_000_000];
+
+    for size in sizes {
+        let data: Vec<i64> = (0..size).collect();
+
+        // JSON
+        let json_start = Instant::now();
+        let json = serialization::json::to_string(&data)?;
+        let json_serialize_time = json_start.elapsed();
+
+        let json_deser_start = Instant::now();
+        let _: Vec<i64> = serialization::json::from_str(&json)?;
+        let json_deserialize_time = json_deser_start.elapsed();
+
+        // MessagePack
+        let msgpack_start = Instant::now();
+        let msgpack = serialization::msgpack::to_vec(&data)?;
+        let msgpack_serialize_time = msgpack_start.elapsed();
+
+        let msgpack_deser_start = Instant::now();
+        let _: Vec<i64> = serialization::msgpack::from_slice(&msgpack)?;
+        let msgpack_deserialize_time = msgpack_deser_start.elapsed();
+
+        // MessagePack should be faster than JSON for large data
+        if size >= 100_000 {
+            assert!(msgpack_serialize_time < json_serialize_time * 2);
+            assert!(msgpack_deserialize_time < json_deserialize_time * 2);
+        }
+
+        // MessagePack should produce smaller output
+        assert!(msgpack.len() < json.len());
+
+        println!("Size {}: JSON {}ms/{}ms ({}B), MsgPack {}ms/{}ms ({}B)",
+            size,
+            json_serialize_time.as_millis(), json_deserialize_time.as_millis(), json.len(),
+            msgpack_serialize_time.as_millis(), msgpack_deserialize_time.as_millis(), msgpack.len()
+        );
+    }
+
+    TestResult::pass()
+}
+
+/// Test matrix operation performance scaling
+#[test]
+fn stress_matrix_performance_scaling() -> TestResult {
+    let sizes = vec![10, 50, 100, 200, 500];
+
+    for size in sizes {
+        let mut a = Matrix::new(size, size);
+        let mut b = Matrix::new(size, size);
+
+        // Fill with random-ish data
+        for i in 0..size {
+            for j in 0..size {
+                a.set(i, j, ((i * j + i + j) as f64).sin());
+                b.set(i, j, ((i * j * 2 + i - j) as f64).cos());
+            }
+        }
+
+        // Matrix multiplication
+        let mul_start = Instant::now();
+        let c = a.mul(&b);
+        let mul_time = mul_start.elapsed();
+
+        // Inversion (for smaller matrices)
+        if size <= 200 {
+            let inv_start = Instant::now();
+            let _ = a.inverse();
+            let inv_time = inv_start.elapsed();
+            println!("Matrix {}x{}: mul {:?}, inv {:?}", size, size, mul_time, inv_time);
+        } else {
+            println!("Matrix {}x{}: mul {:?}", size, size, mul_time);
+        }
+
+        // Verify result dimensions
+        assert_eq!(c.rows(), size);
+        assert_eq!(c.cols(), size);
+    }
+
+    TestResult::pass()
+}
+
+/// Test neural network inference throughput
+#[test]
+fn stress_neural_network_throughput() -> TestResult {
+    use axiom::{Dense, Activation};
+
+    // Create network
+    let mut nn = NeuralNetwork::new()
+        .add(Dense::new(100, 256))
+        .add(Activation::ReLU)
+        .add(Dense::new(256, 128))
+        .add(Activation::ReLU)
+        .add(Dense::new(128, 64))
+        .add(Activation::ReLU)
+        .add(Dense::new(64, 10))
+        .add(Activation::Softmax)
+        .build();
+
+    // Generate batch of inputs
+    let batch_sizes = vec![1, 10, 100, 1000];
+
+    for batch_size in batch_sizes {
+        let inputs: Vec<Vec<f64>> = (0..batch_size)
+            .map(|i| (0..100).map(|j| ((i * j) as f64 * 0.01).sin()).collect())
+            .collect();
+
+        let start = Instant::now();
+        for input in &inputs {
+            let _ = nn.forward(input);
+        }
+        let elapsed = start.elapsed();
+
+        let throughput = batch_size as f64 / elapsed.as_secs_f64();
+        println!("NN batch {}: {:?} ({:.0} samples/sec)", batch_size, elapsed, throughput);
+
+        // Should maintain reasonable throughput
+        assert!(throughput > 100.0); // At least 100 samples/sec
+    }
+
+    TestResult::pass()
+}
+
+/// Test encryption/decryption throughput
+#[test]
+fn stress_crypto_throughput() -> TestResult {
+    let data_sizes = vec![1_000, 10_000, 100_000, 1_000_000];
+
+    for size in data_sizes {
+        let data: Vec<u8> = (0..size).map(|i| (i % 256) as u8).collect();
+        let key = crypto::generate_key(crypto::Algorithm::AES256);
+
+        // Encryption
+        let encrypt_start = Instant::now();
+        let encrypted = crypto::encrypt(&data, &key, crypto::Algorithm::AES256)?;
+        let encrypt_time = encrypt_start.elapsed();
+
+        // Decryption
+        let decrypt_start = Instant::now();
+        let decrypted = crypto::decrypt(&encrypted, &key, crypto::Algorithm::AES256)?;
+        let decrypt_time = decrypt_start.elapsed();
+
+        assert_eq!(decrypted, data);
+
+        let encrypt_throughput = size as f64 / encrypt_time.as_secs_f64() / 1_000_000.0;
+        let decrypt_throughput = size as f64 / decrypt_time.as_secs_f64() / 1_000_000.0;
+
+        println!("Crypto {}B: encrypt {:.1} MB/s, decrypt {:.1} MB/s",
+            size, encrypt_throughput, decrypt_throughput);
+
+        // Should achieve reasonable throughput
+        if size >= 100_000 {
+            assert!(encrypt_throughput > 10.0); // At least 10 MB/s
+            assert!(decrypt_throughput > 10.0);
+        }
+    }
+
+    TestResult::pass()
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// HELPER TYPES
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[derive(Serialize, Deserialize)]
+struct NestedMessage {
+    value: i32,
+    name: String,
+    child: Option<Box<NestedMessage>>,
+}
+
+enum Signal {
+    Buy,
+    Sell,
+    Hold,
+}
+
+fn num_cpus() -> usize {
+    std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// TEST RUNNER
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Run all stress tests
+pub fn run_all_stress_tests(config: &StressTestConfig) -> TestSuite {
+    let mut suite = TestSuite::new("BUILD-UNIVERSE Stress Tests");
+
+    suite.add_group("Large Data Volume", vec![
+        ("large_json_serialization", stress_large_json_serialization),
+        ("large_msgpack_binary", stress_large_msgpack_binary),
+        ("deep_protobuf_nesting", stress_deep_protobuf_nesting),
+        ("large_tensor_operations", stress_large_tensor_operations),
+        ("large_collections", stress_large_collections),
+    ]);
+
+    suite.add_group("Concurrency", vec![
+        ("concurrent_hashmap", stress_concurrent_hashmap),
+        ("concurrent_tensor_writes", stress_concurrent_tensor_writes),
+        ("parallel_trading_engines", stress_parallel_trading_engines),
+        ("async_task_spawning", stress_async_task_spawning),
+    ]);
+
+    suite.add_group("Memory Pressure", vec![
+        ("memory_allocation_churn", stress_memory_allocation_churn),
+        ("string_interning", stress_string_interning),
+        ("arena_allocation", stress_arena_allocation),
+    ]);
+
+    suite.add_group("Edge Cases", vec![
+        ("floating_point_edge_cases", stress_floating_point_edge_cases),
+        ("empty_structures", stress_empty_structures),
+        ("unicode_edge_cases", stress_unicode_edge_cases),
+        ("matrix_edge_cases", stress_matrix_edge_cases),
+    ]);
+
+    suite.add_group("Performance Boundaries", vec![
+        ("serialization_performance", stress_serialization_performance),
+        ("matrix_performance_scaling", stress_matrix_performance_scaling),
+        ("neural_network_throughput", stress_neural_network_throughput),
+        ("crypto_throughput", stress_crypto_throughput),
+    ]);
+
+    suite
+}
+
+/// Main entry point
+pub fn main() -> i32 {
+    let config = StressTestConfig::default();
+    let suite = run_all_stress_tests(&config);
+
+    let results = suite.run();
+
+    println!("\n{}", "═".repeat(70));
+    println!("BUILD-UNIVERSE Stress Test Results");
+    println!("{}", "═".repeat(70));
+    println!("Total:   {}", results.total);
+    println!("Passed:  {} ({}%)", results.passed, results.passed * 100 / results.total.max(1));
+    println!("Failed:  {}", results.failed);
+    println!("{}", "═".repeat(70));
+
+    if results.failed > 0 {
+        println!("\nFailed tests:");
+        for failure in &results.failures {
+            println!("  - {}: {}", failure.name, failure.message);
+        }
+        1
+    } else {
+        println!("\nAll stress tests passed!");
+        0
+    }
+}

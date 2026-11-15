@@ -1,0 +1,1707 @@
+// ============================================================================
+// BUILD-UNIVERSE: NEXUS MOD LOADER
+// Advanced mod loading with async support and dependency resolution
+// ============================================================================
+
+import nexus::lib::{ModMetadata, ModPackage, ModDependency, Version};
+import nexus::compatibility::{CompatibilityChecker, VersionRange};
+import nexus::sandbox::{Sandbox, SandboxPolicy};
+import nexus::hooks::HookManager;
+import nexus::events::EventBus;
+
+// ============================================================================
+// REGION: Load State Machine
+// ============================================================================
+
+/// Mod loading states
+@derive(Debug, Clone, Copy, PartialEq, Eq)
+enum LoadState {
+    /// Not yet discovered
+    Unknown,
+    /// Found but not validated
+    Discovered,
+    /// Metadata parsed and validated
+    Validated,
+    /// Dependencies resolved
+    Resolved,
+    /// Assets loaded
+    AssetsLoaded,
+    /// Scripts compiled
+    Compiled,
+    /// Initialization complete
+    Initialized,
+    /// Active and running
+    Active,
+    /// Temporarily disabled
+    Suspended,
+    /// Unloading in progress
+    Unloading,
+    /// Fully unloaded
+    Unloaded,
+    /// Failed to load
+    Failed,
+}
+
+impl LoadState {
+    fn is_loaded(self) -> bool {
+        match self {
+            LoadState::Initialized | LoadState::Active | LoadState::Suspended => true,
+            _ => false,
+        }
+    }
+
+    fn can_transition_to(self, target: LoadState) -> bool {
+        match (self, target) {
+            (LoadState::Unknown, LoadState::Discovered) => true,
+            (LoadState::Discovered, LoadState::Validated) => true,
+            (LoadState::Discovered, LoadState::Failed) => true,
+            (LoadState::Validated, LoadState::Resolved) => true,
+            (LoadState::Validated, LoadState::Failed) => true,
+            (LoadState::Resolved, LoadState::AssetsLoaded) => true,
+            (LoadState::Resolved, LoadState::Failed) => true,
+            (LoadState::AssetsLoaded, LoadState::Compiled) => true,
+            (LoadState::AssetsLoaded, LoadState::Failed) => true,
+            (LoadState::Compiled, LoadState::Initialized) => true,
+            (LoadState::Compiled, LoadState::Failed) => true,
+            (LoadState::Initialized, LoadState::Active) => true,
+            (LoadState::Active, LoadState::Suspended) => true,
+            (LoadState::Suspended, LoadState::Active) => true,
+            (LoadState::Active, LoadState::Unloading) => true,
+            (LoadState::Suspended, LoadState::Unloading) => true,
+            (LoadState::Unloading, LoadState::Unloaded) => true,
+            _ => false,
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            LoadState::Unknown => "unknown",
+            LoadState::Discovered => "discovered",
+            LoadState::Validated => "validated",
+            LoadState::Resolved => "resolved",
+            LoadState::AssetsLoaded => "assets_loaded",
+            LoadState::Compiled => "compiled",
+            LoadState::Initialized => "initialized",
+            LoadState::Active => "active",
+            LoadState::Suspended => "suspended",
+            LoadState::Unloading => "unloading",
+            LoadState::Unloaded => "unloaded",
+            LoadState::Failed => "failed",
+        }
+    }
+}
+
+// ============================================================================
+// REGION: Load Error Types
+// ============================================================================
+
+/// Errors that can occur during mod loading
+@derive(Debug, Clone)
+enum LoadError {
+    /// Mod directory not found
+    NotFound { path: String },
+    /// Invalid mod structure
+    InvalidStructure { reason: String },
+    /// Metadata parsing failed
+    MetadataError { reason: String },
+    /// Dependency not found
+    MissingDependency { mod_id: String, dependency: String },
+    /// Dependency version mismatch
+    DependencyVersionMismatch {
+        mod_id: String,
+        dependency: String,
+        required: String,
+        found: String
+    },
+    /// Circular dependency detected
+    CircularDependency { chain: Vec<String> },
+    /// Incompatible mods
+    Incompatible { mod_a: String, mod_b: String, reason: String },
+    /// Asset loading failed
+    AssetError { asset: String, reason: String },
+    /// Script compilation failed
+    CompileError { file: String, line: u32, message: String },
+    /// Initialization failed
+    InitError { mod_id: String, reason: String },
+    /// Security policy violation
+    SecurityViolation { mod_id: String, violation: String },
+    /// Resource limit exceeded
+    ResourceLimitExceeded { resource: String, limit: u64, requested: u64 },
+    /// Invalid state transition
+    InvalidStateTransition { from: LoadState, to: LoadState },
+    /// Timeout during loading
+    Timeout { phase: String, timeout_ms: u64 },
+    /// Generic error
+    Other { message: String },
+}
+
+impl LoadError {
+    fn to_string(&self) -> String {
+        match self {
+            LoadError::NotFound { path } =>
+                format!("Mod not found: {}", path),
+            LoadError::InvalidStructure { reason } =>
+                format!("Invalid mod structure: {}", reason),
+            LoadError::MetadataError { reason } =>
+                format!("Metadata error: {}", reason),
+            LoadError::MissingDependency { mod_id, dependency } =>
+                format!("Mod '{}' requires missing dependency '{}'", mod_id, dependency),
+            LoadError::DependencyVersionMismatch { mod_id, dependency, required, found } =>
+                format!("Mod '{}' requires {} {} but found {}", mod_id, dependency, required, found),
+            LoadError::CircularDependency { chain } =>
+                format!("Circular dependency: {}", chain.join(" -> ")),
+            LoadError::Incompatible { mod_a, mod_b, reason } =>
+                format!("'{}' incompatible with '{}': {}", mod_a, mod_b, reason),
+            LoadError::AssetError { asset, reason } =>
+                format!("Asset '{}' failed: {}", asset, reason),
+            LoadError::CompileError { file, line, message } =>
+                format!("Compile error in {}:{}: {}", file, line, message),
+            LoadError::InitError { mod_id, reason } =>
+                format!("Initialization of '{}' failed: {}", mod_id, reason),
+            LoadError::SecurityViolation { mod_id, violation } =>
+                format!("Security violation by '{}': {}", mod_id, violation),
+            LoadError::ResourceLimitExceeded { resource, limit, requested } =>
+                format!("Resource '{}' limit {} exceeded (requested {})", resource, limit, requested),
+            LoadError::InvalidStateTransition { from, to } =>
+                format!("Invalid state transition from {} to {}", from.as_str(), to.as_str()),
+            LoadError::Timeout { phase, timeout_ms } =>
+                format!("Timeout during {} ({}ms)", phase, timeout_ms),
+            LoadError::Other { message } => message.clone(),
+        }
+    }
+}
+
+// ============================================================================
+// REGION: Load Progress
+// ============================================================================
+
+/// Progress information for mod loading
+@derive(Debug, Clone)]
+struct LoadProgress {
+    /// Current phase
+    phase: String,
+    /// Current step within phase
+    step: u32,
+    /// Total steps in phase
+    total_steps: u32,
+    /// Overall progress (0.0 - 1.0)
+    overall: f32,
+    /// Current mod being processed
+    current_mod: Option<String>,
+    /// Bytes loaded (for assets)
+    bytes_loaded: u64,
+    /// Total bytes to load
+    bytes_total: u64,
+    /// Estimated time remaining (ms)
+    eta_ms: Option<u64>,
+}
+
+impl LoadProgress {
+    fn new() -> Self {
+        LoadProgress {
+            phase: "initializing".to_string(),
+            step: 0,
+            total_steps: 0,
+            overall: 0.0,
+            current_mod: None,
+            bytes_loaded: 0,
+            bytes_total: 0,
+            eta_ms: None,
+        }
+    }
+
+    fn phase_progress(&self) -> f32 {
+        if self.total_steps == 0 {
+            0.0
+        } else {
+            self.step as f32 / self.total_steps as f32
+        }
+    }
+
+    fn bytes_progress(&self) -> f32 {
+        if self.bytes_total == 0 {
+            0.0
+        } else {
+            self.bytes_loaded as f32 / self.bytes_total as f32
+        }
+    }
+}
+
+/// Progress callback type
+type ProgressCallback = fn(&LoadProgress);
+
+// ============================================================================
+// REGION: Load Options
+// ============================================================================
+
+/// Configuration for mod loading behavior
+@derive(Debug, Clone)]
+struct LoadOptions {
+    /// Maximum concurrent loads
+    max_concurrent: u32,
+    /// Timeout per mod (ms)
+    timeout_ms: u64,
+    /// Retry count on failure
+    retry_count: u32,
+    /// Verify file checksums
+    verify_checksums: bool,
+    /// Enable hot reloading
+    hot_reload: bool,
+    /// Load disabled mods (for UI purposes)
+    load_disabled: bool,
+    /// Skip incompatibility checks
+    ignore_incompatibilities: bool,
+    /// Skip version checks
+    ignore_versions: bool,
+    /// Enable debug logging
+    debug_logging: bool,
+    /// Asset loading mode
+    asset_mode: AssetLoadMode,
+    /// Script compilation mode
+    compile_mode: CompileMode,
+}
+
+impl LoadOptions {
+    fn default() -> Self {
+        LoadOptions {
+            max_concurrent: 4,
+            timeout_ms: 30000,
+            retry_count: 2,
+            verify_checksums: true,
+            hot_reload: false,
+            load_disabled: false,
+            ignore_incompatibilities: false,
+            ignore_versions: false,
+            debug_logging: false,
+            asset_mode: AssetLoadMode::Lazy,
+            compile_mode: CompileMode::JIT,
+        }
+    }
+
+    fn fast() -> Self {
+        LoadOptions {
+            max_concurrent: 8,
+            timeout_ms: 10000,
+            retry_count: 0,
+            verify_checksums: false,
+            hot_reload: false,
+            load_disabled: false,
+            ignore_incompatibilities: false,
+            ignore_versions: false,
+            debug_logging: false,
+            asset_mode: AssetLoadMode::Lazy,
+            compile_mode: CompileMode::Interpreted,
+        }
+    }
+
+    fn development() -> Self {
+        LoadOptions {
+            max_concurrent: 2,
+            timeout_ms: 60000,
+            retry_count: 0,
+            verify_checksums: false,
+            hot_reload: true,
+            load_disabled: true,
+            ignore_incompatibilities: false,
+            ignore_versions: false,
+            debug_logging: true,
+            asset_mode: AssetLoadMode::OnDemand,
+            compile_mode: CompileMode::Debug,
+        }
+    }
+}
+
+/// Asset loading modes
+@derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AssetLoadMode {
+    /// Load all assets immediately
+    Eager,
+    /// Load assets when first accessed
+    Lazy,
+    /// Load only when explicitly requested
+    OnDemand,
+    /// Stream assets during gameplay
+    Streaming,
+}
+
+/// Script compilation modes
+@derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CompileMode {
+    /// Compile to bytecode ahead of time
+    AOT,
+    /// Just-in-time compilation
+    JIT,
+    /// Interpreted mode (slower but faster startup)
+    Interpreted,
+    /// Debug mode with extra checks
+    Debug,
+}
+
+// ============================================================================
+// REGION: Mod Instance
+// ============================================================================
+
+/// Runtime instance of a loaded mod
+@derive(Debug)]
+struct ModInstance {
+    /// Unique instance ID
+    instance_id: u64,
+    /// Mod metadata
+    metadata: ModMetadata,
+    /// Current load state
+    state: LoadState,
+    /// Load error if failed
+    error: Option<LoadError>,
+    /// Sandbox for this mod
+    sandbox: Option<Sandbox>,
+    /// Loaded assets
+    assets: HashMap<String, AssetHandle>,
+    /// Compiled scripts
+    scripts: HashMap<String, CompiledScript>,
+    /// Registered hooks
+    hooks: Vec<HookHandle>,
+    /// Event subscriptions
+    subscriptions: Vec<SubscriptionHandle>,
+    /// Memory usage (bytes)
+    memory_usage: u64,
+    /// Load timestamp
+    load_time: u64,
+    /// Last access timestamp
+    last_access: u64,
+    /// Custom mod data
+    user_data: HashMap<String, Box<dyn Any>>,
+}
+
+impl ModInstance {
+    fn new(instance_id: u64, metadata: ModMetadata) -> Self {
+        ModInstance {
+            instance_id,
+            metadata,
+            state: LoadState::Unknown,
+            error: None,
+            sandbox: None,
+            assets: HashMap::new(),
+            scripts: HashMap::new(),
+            hooks: Vec::new(),
+            subscriptions: Vec::new(),
+            memory_usage: 0,
+            load_time: 0,
+            last_access: 0,
+            user_data: HashMap::new(),
+        }
+    }
+
+    fn mod_id(&self) -> &str {
+        &self.metadata.id
+    }
+
+    fn version(&self) -> &Version {
+        &self.metadata.version
+    }
+
+    fn is_active(&self) -> bool {
+        self.state == LoadState::Active
+    }
+
+    fn transition_to(&mut self, new_state: LoadState) -> Result<(), LoadError> {
+        if self.state.can_transition_to(new_state) {
+            self.state = new_state;
+            Ok(())
+        } else {
+            Err(LoadError::InvalidStateTransition {
+                from: self.state,
+                to: new_state,
+            })
+        }
+    }
+
+    fn set_error(&mut self, error: LoadError) {
+        self.error = Some(error);
+        self.state = LoadState::Failed;
+    }
+
+    fn cleanup(&mut self) {
+        // Unregister hooks
+        for hook in &self.hooks {
+            // Hook cleanup handled by HookManager
+        }
+        self.hooks.clear();
+
+        // Unsubscribe from events
+        for sub in &self.subscriptions {
+            // Subscription cleanup handled by EventBus
+        }
+        self.subscriptions.clear();
+
+        // Unload assets
+        self.assets.clear();
+
+        // Drop scripts
+        self.scripts.clear();
+
+        // Release sandbox
+        self.sandbox = None;
+
+        // Clear user data
+        self.user_data.clear();
+
+        self.memory_usage = 0;
+    }
+}
+
+// Asset and script handle types
+type AssetHandle = u64;
+type CompiledScript = Vec<u8>;
+type HookHandle = u64;
+type SubscriptionHandle = u64;
+
+// ============================================================================
+// REGION: Load Queue
+// ============================================================================
+
+/// Priority queue for mod loading
+@derive(Debug)]
+struct LoadQueue {
+    /// Pending mods
+    pending: Vec<QueueEntry>,
+    /// Currently loading
+    loading: Vec<QueueEntry>,
+    /// Completed mods
+    completed: Vec<String>,
+    /// Failed mods
+    failed: Vec<(String, LoadError)>,
+    /// Maximum concurrent loads
+    max_concurrent: u32,
+}
+
+@derive(Debug, Clone)]
+struct QueueEntry {
+    mod_id: String,
+    path: String,
+    priority: i32,
+    dependencies_met: bool,
+    retry_count: u32,
+    queued_at: u64,
+}
+
+impl LoadQueue {
+    fn new(max_concurrent: u32) -> Self {
+        LoadQueue {
+            pending: Vec::new(),
+            loading: Vec::new(),
+            completed: Vec::new(),
+            failed: Vec::new(),
+            max_concurrent,
+        }
+    }
+
+    fn enqueue(&mut self, mod_id: String, path: String, priority: i32) {
+        let entry = QueueEntry {
+            mod_id,
+            path,
+            priority,
+            dependencies_met: false,
+            retry_count: 0,
+            queued_at: current_time_ms(),
+        };
+
+        // Insert sorted by priority (higher priority first)
+        let pos = self.pending.iter()
+            .position(|e| e.priority < priority)
+            .unwrap_or(self.pending.len());
+        self.pending.insert(pos, entry);
+    }
+
+    fn dequeue(&mut self) -> Option<QueueEntry> {
+        if self.loading.len() >= self.max_concurrent as usize {
+            return None;
+        }
+
+        // Find first entry with dependencies met
+        let pos = self.pending.iter()
+            .position(|e| e.dependencies_met)?;
+
+        let entry = self.pending.remove(pos);
+        self.loading.push(entry.clone());
+        Some(entry)
+    }
+
+    fn mark_complete(&mut self, mod_id: &str) {
+        if let Some(pos) = self.loading.iter().position(|e| e.mod_id == mod_id) {
+            self.loading.remove(pos);
+            self.completed.push(mod_id.to_string());
+
+            // Update dependencies_met for pending mods
+            for entry in &mut self.pending {
+                // This would check if mod_id was a dependency
+                // Simplified for now
+            }
+        }
+    }
+
+    fn mark_failed(&mut self, mod_id: &str, error: LoadError) {
+        if let Some(pos) = self.loading.iter().position(|e| e.mod_id == mod_id) {
+            self.loading.remove(pos);
+            self.failed.push((mod_id.to_string(), error));
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.pending.is_empty() && self.loading.is_empty()
+    }
+
+    fn total_count(&self) -> usize {
+        self.pending.len() + self.loading.len() + self.completed.len() + self.failed.len()
+    }
+}
+
+// ============================================================================
+// REGION: Async Load Task
+// ============================================================================
+
+/// Async loading task
+@derive(Debug)]
+struct LoadTask {
+    /// Task ID
+    task_id: u64,
+    /// Mod being loaded
+    mod_id: String,
+    /// Current phase
+    phase: LoadPhase,
+    /// Start time
+    start_time: u64,
+    /// Timeout
+    timeout_ms: u64,
+    /// Cancellation flag
+    cancelled: bool,
+    /// Result when complete
+    result: Option<Result<ModInstance, LoadError>>,
+}
+
+@derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LoadPhase {
+    Discovery,
+    Validation,
+    DependencyResolution,
+    AssetLoading,
+    Compilation,
+    Initialization,
+    Activation,
+    Complete,
+}
+
+impl LoadPhase {
+    fn as_str(self) -> &'static str {
+        match self {
+            LoadPhase::Discovery => "discovery",
+            LoadPhase::Validation => "validation",
+            LoadPhase::DependencyResolution => "dependency_resolution",
+            LoadPhase::AssetLoading => "asset_loading",
+            LoadPhase::Compilation => "compilation",
+            LoadPhase::Initialization => "initialization",
+            LoadPhase::Activation => "activation",
+            LoadPhase::Complete => "complete",
+        }
+    }
+
+    fn weight(self) -> f32 {
+        match self {
+            LoadPhase::Discovery => 0.05,
+            LoadPhase::Validation => 0.10,
+            LoadPhase::DependencyResolution => 0.10,
+            LoadPhase::AssetLoading => 0.40,
+            LoadPhase::Compilation => 0.20,
+            LoadPhase::Initialization => 0.10,
+            LoadPhase::Activation => 0.05,
+            LoadPhase::Complete => 0.0,
+        }
+    }
+}
+
+impl LoadTask {
+    fn new(task_id: u64, mod_id: String, timeout_ms: u64) -> Self {
+        LoadTask {
+            task_id,
+            mod_id,
+            phase: LoadPhase::Discovery,
+            start_time: current_time_ms(),
+            timeout_ms,
+            cancelled: false,
+            result: None,
+        }
+    }
+
+    fn is_timed_out(&self) -> bool {
+        current_time_ms() - self.start_time > self.timeout_ms
+    }
+
+    fn cancel(&mut self) {
+        self.cancelled = true;
+    }
+
+    fn advance_phase(&mut self) {
+        self.phase = match self.phase {
+            LoadPhase::Discovery => LoadPhase::Validation,
+            LoadPhase::Validation => LoadPhase::DependencyResolution,
+            LoadPhase::DependencyResolution => LoadPhase::AssetLoading,
+            LoadPhase::AssetLoading => LoadPhase::Compilation,
+            LoadPhase::Compilation => LoadPhase::Initialization,
+            LoadPhase::Initialization => LoadPhase::Activation,
+            LoadPhase::Activation => LoadPhase::Complete,
+            LoadPhase::Complete => LoadPhase::Complete,
+        };
+    }
+
+    fn progress(&self) -> f32 {
+        let mut progress = 0.0;
+        let mut current = LoadPhase::Discovery;
+
+        while current != self.phase && current != LoadPhase::Complete {
+            progress += current.weight();
+            current = match current {
+                LoadPhase::Discovery => LoadPhase::Validation,
+                LoadPhase::Validation => LoadPhase::DependencyResolution,
+                LoadPhase::DependencyResolution => LoadPhase::AssetLoading,
+                LoadPhase::AssetLoading => LoadPhase::Compilation,
+                LoadPhase::Compilation => LoadPhase::Initialization,
+                LoadPhase::Initialization => LoadPhase::Activation,
+                LoadPhase::Activation => LoadPhase::Complete,
+                LoadPhase::Complete => break,
+            };
+        }
+
+        progress
+    }
+}
+
+// ============================================================================
+// REGION: Mod Loader
+// ============================================================================
+
+/// Main mod loader system
+@derive(Debug)]
+struct ModLoader {
+    /// Load options
+    options: LoadOptions,
+    /// Loaded mod instances
+    instances: HashMap<String, ModInstance>,
+    /// Load queue
+    queue: LoadQueue,
+    /// Active load tasks
+    tasks: HashMap<u64, LoadTask>,
+    /// Next task ID
+    next_task_id: u64,
+    /// Next instance ID
+    next_instance_id: u64,
+    /// Compatibility checker
+    compat_checker: CompatibilityChecker,
+    /// Hook manager reference
+    hook_manager: Option<Arc<HookManager>>,
+    /// Event bus reference
+    event_bus: Option<Arc<EventBus>>,
+    /// Progress callback
+    progress_callback: Option<ProgressCallback>,
+    /// Load order (sorted)
+    load_order: Vec<String>,
+    /// Mod search paths
+    search_paths: Vec<String>,
+    /// File watcher for hot reload
+    file_watcher: Option<FileWatcher>,
+}
+
+impl ModLoader {
+    fn new(options: LoadOptions) -> Self {
+        ModLoader {
+            options: options.clone(),
+            instances: HashMap::new(),
+            queue: LoadQueue::new(options.max_concurrent),
+            tasks: HashMap::new(),
+            next_task_id: 1,
+            next_instance_id: 1,
+            compat_checker: CompatibilityChecker::new(),
+            hook_manager: None,
+            event_bus: None,
+            progress_callback: None,
+            load_order: Vec::new(),
+            search_paths: Vec::new(),
+            file_watcher: None,
+        }
+    }
+
+    fn with_hook_manager(mut self, manager: Arc<HookManager>) -> Self {
+        self.hook_manager = Some(manager);
+        self
+    }
+
+    fn with_event_bus(mut self, bus: Arc<EventBus>) -> Self {
+        self.event_bus = Some(bus);
+        self
+    }
+
+    fn set_progress_callback(&mut self, callback: ProgressCallback) {
+        self.progress_callback = Some(callback);
+    }
+
+    fn add_search_path(&mut self, path: String) {
+        if !self.search_paths.contains(&path) {
+            self.search_paths.push(path);
+        }
+    }
+
+    /// Discover mods in search paths
+    fn discover_mods(&mut self) -> Vec<DiscoveredMod> {
+        let mut discovered = Vec::new();
+
+        for search_path in &self.search_paths {
+            if let Ok(entries) = read_directory(search_path) {
+                for entry in entries {
+                    if let Some(mod_info) = self.probe_mod_directory(&entry) {
+                        discovered.push(mod_info);
+                    }
+                }
+            }
+        }
+
+        // Sort by name for consistent ordering
+        discovered.sort_by(|a, b| a.mod_id.cmp(&b.mod_id));
+
+        discovered
+    }
+
+    fn probe_mod_directory(&self, path: &str) -> Option<DiscoveredMod> {
+        // Check for mod manifest
+        let manifest_path = format!("{}/mod.toml", path);
+        if !file_exists(&manifest_path) {
+            return None;
+        }
+
+        // Try to parse basic metadata
+        if let Ok(content) = read_file(&manifest_path) {
+            if let Ok(metadata) = parse_mod_manifest(&content) {
+                return Some(DiscoveredMod {
+                    mod_id: metadata.id.clone(),
+                    path: path.to_string(),
+                    metadata,
+                    enabled: true,
+                });
+            }
+        }
+
+        None
+    }
+
+    /// Queue a mod for loading
+    fn queue_mod(&mut self, mod_id: &str, path: &str, priority: i32) {
+        self.queue.enqueue(mod_id.to_string(), path.to_string(), priority);
+    }
+
+    /// Load all queued mods
+    fn load_all(&mut self) -> LoadResult {
+        let mut result = LoadResult::new();
+
+        // Calculate load order based on dependencies
+        self.calculate_load_order()?;
+
+        // Mark dependencies as met
+        self.update_dependency_status();
+
+        // Process queue
+        while !self.queue.is_empty() {
+            // Start new tasks
+            while let Some(entry) = self.queue.dequeue() {
+                let task_id = self.next_task_id;
+                self.next_task_id += 1;
+
+                let task = LoadTask::new(task_id, entry.mod_id.clone(), self.options.timeout_ms);
+                self.tasks.insert(task_id, task);
+
+                // Start async load
+                self.start_load_task(task_id, &entry.path);
+            }
+
+            // Poll active tasks
+            self.poll_tasks(&mut result);
+
+            // Update progress
+            self.report_progress();
+
+            // Small delay to prevent busy waiting
+            sleep_ms(10);
+        }
+
+        // Wait for remaining tasks
+        while !self.tasks.is_empty() {
+            self.poll_tasks(&mut result);
+            sleep_ms(10);
+        }
+
+        result
+    }
+
+    fn calculate_load_order(&mut self) -> Result<(), LoadError> {
+        // Topological sort based on dependencies
+        let mut order = Vec::new();
+        let mut visited = HashSet::new();
+        let mut in_progress = HashSet::new();
+
+        let mod_ids: Vec<String> = self.queue.pending.iter()
+            .map(|e| e.mod_id.clone())
+            .collect();
+
+        for mod_id in &mod_ids {
+            self.visit_mod(mod_id, &mut order, &mut visited, &mut in_progress)?;
+        }
+
+        self.load_order = order;
+        Ok(())
+    }
+
+    fn visit_mod(
+        &self,
+        mod_id: &str,
+        order: &mut Vec<String>,
+        visited: &mut HashSet<String>,
+        in_progress: &mut HashSet<String>,
+    ) -> Result<(), LoadError> {
+        if visited.contains(mod_id) {
+            return Ok(());
+        }
+
+        if in_progress.contains(mod_id) {
+            // Build cycle chain
+            let chain: Vec<String> = in_progress.iter().cloned().collect();
+            return Err(LoadError::CircularDependency { chain });
+        }
+
+        in_progress.insert(mod_id.to_string());
+
+        // Get dependencies for this mod
+        if let Some(entry) = self.queue.pending.iter().find(|e| e.mod_id == mod_id) {
+            // Would look up actual dependencies from metadata
+            // Simplified for now
+        }
+
+        in_progress.remove(mod_id);
+        visited.insert(mod_id.to_string());
+        order.push(mod_id.to_string());
+
+        Ok(())
+    }
+
+    fn update_dependency_status(&mut self) {
+        for i in 0..self.load_order.len() {
+            let mod_id = &self.load_order[i];
+            if let Some(entry) = self.queue.pending.iter_mut().find(|e| &e.mod_id == mod_id) {
+                // Check if all dependencies are complete
+                entry.dependencies_met = true; // Simplified
+            }
+        }
+    }
+
+    fn start_load_task(&mut self, task_id: u64, path: &str) {
+        // Async load would be spawned here
+        // For now, synchronous loading
+        if let Some(task) = self.tasks.get_mut(&task_id) {
+            self.execute_load_phases(task, path);
+        }
+    }
+
+    fn execute_load_phases(&mut self, task: &mut LoadTask, path: &str) {
+        // Discovery phase
+        task.phase = LoadPhase::Discovery;
+        let manifest_path = format!("{}/mod.toml", path);
+        let manifest_content = match read_file(&manifest_path) {
+            Ok(content) => content,
+            Err(_) => {
+                task.result = Some(Err(LoadError::NotFound { path: path.to_string() }));
+                return;
+            }
+        };
+
+        // Validation phase
+        task.advance_phase();
+        let metadata = match parse_mod_manifest(&manifest_content) {
+            Ok(meta) => meta,
+            Err(e) => {
+                task.result = Some(Err(LoadError::MetadataError { reason: e }));
+                return;
+            }
+        };
+
+        // Create instance
+        let instance_id = self.next_instance_id;
+        self.next_instance_id += 1;
+        let mut instance = ModInstance::new(instance_id, metadata.clone());
+
+        // Dependency resolution phase
+        task.advance_phase();
+        for dep in &metadata.dependencies {
+            if !self.is_dependency_satisfied(dep) {
+                task.result = Some(Err(LoadError::MissingDependency {
+                    mod_id: metadata.id.clone(),
+                    dependency: dep.id.clone(),
+                }));
+                return;
+            }
+        }
+        instance.transition_to(LoadState::Resolved).ok();
+
+        // Asset loading phase
+        task.advance_phase();
+        if let Err(e) = self.load_mod_assets(&mut instance, path) {
+            task.result = Some(Err(e));
+            return;
+        }
+        instance.transition_to(LoadState::AssetsLoaded).ok();
+
+        // Compilation phase
+        task.advance_phase();
+        if let Err(e) = self.compile_mod_scripts(&mut instance, path) {
+            task.result = Some(Err(e));
+            return;
+        }
+        instance.transition_to(LoadState::Compiled).ok();
+
+        // Initialization phase
+        task.advance_phase();
+        if let Err(e) = self.initialize_mod(&mut instance) {
+            task.result = Some(Err(e));
+            return;
+        }
+        instance.transition_to(LoadState::Initialized).ok();
+
+        // Activation phase
+        task.advance_phase();
+        instance.transition_to(LoadState::Active).ok();
+        instance.load_time = current_time_ms();
+        instance.last_access = instance.load_time;
+
+        task.phase = LoadPhase::Complete;
+        task.result = Some(Ok(instance));
+    }
+
+    fn is_dependency_satisfied(&self, dep: &ModDependency) -> bool {
+        if let Some(instance) = self.instances.get(&dep.id) {
+            // Check version compatibility
+            if let Ok(range) = VersionRange::parse(&dep.version) {
+                return range.matches(instance.version());
+            }
+        }
+
+        // Check if it's being loaded or queued
+        self.queue.completed.contains(&dep.id) ||
+        self.queue.loading.iter().any(|e| e.mod_id == dep.id) ||
+        (dep.optional && !self.instances.contains_key(&dep.id))
+    }
+
+    fn load_mod_assets(&self, instance: &mut ModInstance, path: &str) -> Result<(), LoadError> {
+        let assets_path = format!("{}/assets", path);
+
+        if !directory_exists(&assets_path) {
+            return Ok(()); // No assets is fine
+        }
+
+        // Scan and load assets based on mode
+        match self.options.asset_mode {
+            AssetLoadMode::Eager => {
+                // Load all assets now
+                self.load_all_assets(instance, &assets_path)?;
+            }
+            AssetLoadMode::Lazy | AssetLoadMode::OnDemand => {
+                // Just register asset paths
+                self.register_assets(instance, &assets_path)?;
+            }
+            AssetLoadMode::Streaming => {
+                // Setup streaming metadata
+                self.setup_asset_streaming(instance, &assets_path)?;
+            }
+        }
+
+        Ok(())
+    }
+
+    fn load_all_assets(&self, instance: &mut ModInstance, path: &str) -> Result<(), LoadError> {
+        let entries = read_directory(path).map_err(|e| LoadError::AssetError {
+            asset: path.to_string(),
+            reason: e,
+        })?;
+
+        for entry in entries {
+            let handle = load_asset_file(&entry).map_err(|e| LoadError::AssetError {
+                asset: entry.clone(),
+                reason: e,
+            })?;
+
+            let relative_path = entry.strip_prefix(path).unwrap_or(&entry);
+            instance.assets.insert(relative_path.to_string(), handle);
+            instance.memory_usage += get_asset_size(handle);
+        }
+
+        Ok(())
+    }
+
+    fn register_assets(&self, instance: &mut ModInstance, path: &str) -> Result<(), LoadError> {
+        // Just scan and register paths without loading
+        let entries = read_directory_recursive(path).map_err(|e| LoadError::AssetError {
+            asset: path.to_string(),
+            reason: e,
+        })?;
+
+        for entry in entries {
+            let relative_path = entry.strip_prefix(path).unwrap_or(&entry);
+            instance.assets.insert(relative_path.to_string(), 0); // Placeholder handle
+        }
+
+        Ok(())
+    }
+
+    fn setup_asset_streaming(&self, instance: &mut ModInstance, path: &str) -> Result<(), LoadError> {
+        // Setup streaming metadata
+        self.register_assets(instance, path)?;
+        Ok(())
+    }
+
+    fn compile_mod_scripts(&self, instance: &mut ModInstance, path: &str) -> Result<(), LoadError> {
+        let scripts_path = format!("{}/scripts", path);
+
+        if !directory_exists(&scripts_path) {
+            return Ok(()); // No scripts is fine
+        }
+
+        let script_files = glob_files(&scripts_path, "*.qscript")?;
+
+        for script_file in script_files {
+            let source = read_file(&script_file).map_err(|e| LoadError::CompileError {
+                file: script_file.clone(),
+                line: 0,
+                message: e,
+            })?;
+
+            let compiled = match self.options.compile_mode {
+                CompileMode::AOT | CompileMode::JIT => {
+                    compile_script(&source, true)?
+                }
+                CompileMode::Interpreted | CompileMode::Debug => {
+                    compile_script(&source, false)?
+                }
+            };
+
+            let name = script_file.strip_prefix(&scripts_path).unwrap_or(&script_file);
+            instance.scripts.insert(name.to_string(), compiled);
+        }
+
+        Ok(())
+    }
+
+    fn initialize_mod(&mut self, instance: &mut ModInstance) -> Result<(), LoadError> {
+        // Create sandbox if needed
+        let policy = if instance.metadata.trusted {
+            SandboxPolicy::trusted()
+        } else {
+            SandboxPolicy::standard()
+        };
+
+        instance.sandbox = Some(Sandbox::new(&instance.metadata.id, policy));
+
+        // Run mod init script if present
+        if let Some(init_script) = instance.scripts.get("init.qscript") {
+            self.run_init_script(instance, init_script)?;
+        }
+
+        // Register hooks
+        if let Some(ref hook_manager) = self.hook_manager {
+            // Hooks would be registered here
+        }
+
+        // Subscribe to events
+        if let Some(ref event_bus) = self.event_bus {
+            // Event subscriptions would be set up here
+        }
+
+        Ok(())
+    }
+
+    fn run_init_script(&self, instance: &ModInstance, script: &CompiledScript) -> Result<(), LoadError> {
+        // Execute init script in sandbox
+        if let Some(ref sandbox) = instance.sandbox {
+            sandbox.execute(script).map_err(|e| LoadError::InitError {
+                mod_id: instance.mod_id().to_string(),
+                reason: e,
+            })?;
+        }
+        Ok(())
+    }
+
+    fn poll_tasks(&mut self, result: &mut LoadResult) {
+        let completed_tasks: Vec<u64> = self.tasks.iter()
+            .filter(|(_, t)| t.result.is_some() || t.is_timed_out() || t.cancelled)
+            .map(|(id, _)| *id)
+            .collect();
+
+        for task_id in completed_tasks {
+            if let Some(task) = self.tasks.remove(&task_id) {
+                if task.is_timed_out() {
+                    result.add_failure(task.mod_id.clone(), LoadError::Timeout {
+                        phase: task.phase.as_str().to_string(),
+                        timeout_ms: task.timeout_ms,
+                    });
+                    self.queue.mark_failed(&task.mod_id, LoadError::Timeout {
+                        phase: task.phase.as_str().to_string(),
+                        timeout_ms: task.timeout_ms,
+                    });
+                } else if task.cancelled {
+                    result.add_failure(task.mod_id.clone(), LoadError::Other {
+                        message: "Cancelled".to_string(),
+                    });
+                } else if let Some(res) = task.result {
+                    match res {
+                        Ok(instance) => {
+                            let mod_id = instance.mod_id().to_string();
+                            self.instances.insert(mod_id.clone(), instance);
+                            result.add_success(mod_id.clone());
+                            self.queue.mark_complete(&mod_id);
+                        }
+                        Err(e) => {
+                            result.add_failure(task.mod_id.clone(), e.clone());
+                            self.queue.mark_failed(&task.mod_id, e);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn report_progress(&self) {
+        if let Some(callback) = self.progress_callback {
+            let total = self.queue.total_count();
+            let completed = self.queue.completed.len() + self.queue.failed.len();
+
+            let progress = LoadProgress {
+                phase: "loading".to_string(),
+                step: completed as u32,
+                total_steps: total as u32,
+                overall: if total > 0 { completed as f32 / total as f32 } else { 0.0 },
+                current_mod: self.tasks.values().next().map(|t| t.mod_id.clone()),
+                bytes_loaded: 0,
+                bytes_total: 0,
+                eta_ms: None,
+            };
+
+            callback(&progress);
+        }
+    }
+
+    /// Unload a specific mod
+    fn unload_mod(&mut self, mod_id: &str) -> Result<(), LoadError> {
+        let instance = self.instances.get_mut(mod_id)
+            .ok_or(LoadError::NotFound { path: mod_id.to_string() })?;
+
+        // Check if other mods depend on this
+        for (other_id, other) in &self.instances {
+            if other_id != mod_id {
+                for dep in &other.metadata.dependencies {
+                    if dep.id == mod_id && !dep.optional {
+                        return Err(LoadError::Other {
+                            message: format!("Cannot unload '{}': required by '{}'", mod_id, other_id),
+                        });
+                    }
+                }
+            }
+        }
+
+        // Transition to unloading
+        instance.transition_to(LoadState::Unloading)?;
+
+        // Run cleanup
+        instance.cleanup();
+
+        // Transition to unloaded
+        instance.transition_to(LoadState::Unloaded)?;
+
+        // Remove from instances
+        self.instances.remove(mod_id);
+
+        Ok(())
+    }
+
+    /// Reload a mod (hot reload)
+    fn reload_mod(&mut self, mod_id: &str) -> Result<(), LoadError> {
+        if !self.options.hot_reload {
+            return Err(LoadError::Other {
+                message: "Hot reload not enabled".to_string(),
+            });
+        }
+
+        // Get the mod's path
+        let path = self.instances.get(mod_id)
+            .map(|i| i.metadata.path.clone())
+            .ok_or(LoadError::NotFound { path: mod_id.to_string() })?;
+
+        // Unload
+        self.unload_mod(mod_id)?;
+
+        // Reload
+        self.queue_mod(mod_id, &path, 100); // High priority
+        self.update_dependency_status();
+
+        while let Some(entry) = self.queue.dequeue() {
+            let task_id = self.next_task_id;
+            self.next_task_id += 1;
+            let mut task = LoadTask::new(task_id, entry.mod_id.clone(), self.options.timeout_ms);
+            self.execute_load_phases(&mut task, &entry.path);
+
+            if let Some(Ok(instance)) = task.result {
+                let id = instance.mod_id().to_string();
+                self.instances.insert(id.clone(), instance);
+                self.queue.mark_complete(&id);
+            } else if let Some(Err(e)) = task.result {
+                return Err(e);
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Get mod instance
+    fn get_mod(&self, mod_id: &str) -> Option<&ModInstance> {
+        self.instances.get(mod_id)
+    }
+
+    /// Get mutable mod instance
+    fn get_mod_mut(&mut self, mod_id: &str) -> Option<&mut ModInstance> {
+        self.instances.get_mut(mod_id)
+    }
+
+    /// List all loaded mods
+    fn list_mods(&self) -> Vec<&ModInstance> {
+        self.instances.values().collect()
+    }
+
+    /// Get load statistics
+    fn statistics(&self) -> LoadStatistics {
+        let mut stats = LoadStatistics::new();
+
+        for instance in self.instances.values() {
+            stats.total_mods += 1;
+            stats.total_memory += instance.memory_usage;
+            stats.total_assets += instance.assets.len() as u64;
+            stats.total_scripts += instance.scripts.len() as u64;
+            stats.total_hooks += instance.hooks.len() as u64;
+
+            match instance.state {
+                LoadState::Active => stats.active_mods += 1,
+                LoadState::Suspended => stats.suspended_mods += 1,
+                LoadState::Failed => stats.failed_mods += 1,
+                _ => {}
+            }
+        }
+
+        stats
+    }
+}
+
+// ============================================================================
+// REGION: Load Result
+// ============================================================================
+
+/// Result of a load operation
+@derive(Debug)]
+struct LoadResult {
+    /// Successfully loaded mods
+    successes: Vec<String>,
+    /// Failed mods with errors
+    failures: Vec<(String, LoadError)>,
+    /// Warnings
+    warnings: Vec<String>,
+    /// Total time taken (ms)
+    duration_ms: u64,
+}
+
+impl LoadResult {
+    fn new() -> Self {
+        LoadResult {
+            successes: Vec::new(),
+            failures: Vec::new(),
+            warnings: Vec::new(),
+            duration_ms: 0,
+        }
+    }
+
+    fn add_success(&mut self, mod_id: String) {
+        self.successes.push(mod_id);
+    }
+
+    fn add_failure(&mut self, mod_id: String, error: LoadError) {
+        self.failures.push((mod_id, error));
+    }
+
+    fn add_warning(&mut self, message: String) {
+        self.warnings.push(message);
+    }
+
+    fn is_success(&self) -> bool {
+        self.failures.is_empty()
+    }
+
+    fn success_count(&self) -> usize {
+        self.successes.len()
+    }
+
+    fn failure_count(&self) -> usize {
+        self.failures.len()
+    }
+}
+
+// ============================================================================
+// REGION: Load Statistics
+// ============================================================================
+
+@derive(Debug)]
+struct LoadStatistics {
+    total_mods: u64,
+    active_mods: u64,
+    suspended_mods: u64,
+    failed_mods: u64,
+    total_memory: u64,
+    total_assets: u64,
+    total_scripts: u64,
+    total_hooks: u64,
+}
+
+impl LoadStatistics {
+    fn new() -> Self {
+        LoadStatistics {
+            total_mods: 0,
+            active_mods: 0,
+            suspended_mods: 0,
+            failed_mods: 0,
+            total_memory: 0,
+            total_assets: 0,
+            total_scripts: 0,
+            total_hooks: 0,
+        }
+    }
+}
+
+// ============================================================================
+// REGION: Discovered Mod
+// ============================================================================
+
+@derive(Debug, Clone)]
+struct DiscoveredMod {
+    mod_id: String,
+    path: String,
+    metadata: ModMetadata,
+    enabled: bool,
+}
+
+// ============================================================================
+// REGION: File Watcher (Hot Reload)
+// ============================================================================
+
+@derive(Debug)]
+struct FileWatcher {
+    watched_paths: HashMap<String, WatchEntry>,
+    poll_interval_ms: u64,
+    last_poll: u64,
+    pending_changes: Vec<FileChange>,
+}
+
+@derive(Debug, Clone)]
+struct WatchEntry {
+    path: String,
+    mod_id: String,
+    last_modified: u64,
+    checksum: u64,
+}
+
+@derive(Debug, Clone)]
+struct FileChange {
+    path: String,
+    mod_id: String,
+    change_type: FileChangeType,
+    timestamp: u64,
+}
+
+@derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FileChangeType {
+    Created,
+    Modified,
+    Deleted,
+}
+
+impl FileWatcher {
+    fn new(poll_interval_ms: u64) -> Self {
+        FileWatcher {
+            watched_paths: HashMap::new(),
+            poll_interval_ms,
+            last_poll: 0,
+            pending_changes: Vec::new(),
+        }
+    }
+
+    fn watch(&mut self, mod_id: &str, path: &str) {
+        let entry = WatchEntry {
+            path: path.to_string(),
+            mod_id: mod_id.to_string(),
+            last_modified: get_file_modified_time(path).unwrap_or(0),
+            checksum: compute_file_checksum(path).unwrap_or(0),
+        };
+        self.watched_paths.insert(path.to_string(), entry);
+    }
+
+    fn unwatch(&mut self, path: &str) {
+        self.watched_paths.remove(path);
+    }
+
+    fn poll(&mut self) -> Vec<FileChange> {
+        let now = current_time_ms();
+        if now - self.last_poll < self.poll_interval_ms {
+            return Vec::new();
+        }
+        self.last_poll = now;
+
+        let mut changes = Vec::new();
+
+        for (path, entry) in &mut self.watched_paths {
+            if let Ok(modified) = get_file_modified_time(path) {
+                if modified > entry.last_modified {
+                    // File was modified
+                    let new_checksum = compute_file_checksum(path).unwrap_or(0);
+                    if new_checksum != entry.checksum {
+                        changes.push(FileChange {
+                            path: path.clone(),
+                            mod_id: entry.mod_id.clone(),
+                            change_type: FileChangeType::Modified,
+                            timestamp: now,
+                        });
+                        entry.last_modified = modified;
+                        entry.checksum = new_checksum;
+                    }
+                }
+            } else {
+                // File was deleted
+                changes.push(FileChange {
+                    path: path.clone(),
+                    mod_id: entry.mod_id.clone(),
+                    change_type: FileChangeType::Deleted,
+                    timestamp: now,
+                });
+            }
+        }
+
+        // Remove deleted entries
+        for change in &changes {
+            if change.change_type == FileChangeType::Deleted {
+                self.watched_paths.remove(&change.path);
+            }
+        }
+
+        changes
+    }
+}
+
+// ============================================================================
+// REGION: Helper Functions (Stubs)
+// ============================================================================
+
+fn current_time_ms() -> u64 {
+    // Platform time implementation
+    0
+}
+
+fn sleep_ms(ms: u64) {
+    // Platform sleep implementation
+}
+
+fn read_file(path: &str) -> Result<String, String> {
+    // File system implementation
+    Err("Not implemented".to_string())
+}
+
+fn file_exists(path: &str) -> bool {
+    // File system implementation
+    false
+}
+
+fn directory_exists(path: &str) -> bool {
+    // File system implementation
+    false
+}
+
+fn read_directory(path: &str) -> Result<Vec<String>, String> {
+    // File system implementation
+    Err("Not implemented".to_string())
+}
+
+fn read_directory_recursive(path: &str) -> Result<Vec<String>, String> {
+    // File system implementation
+    Err("Not implemented".to_string())
+}
+
+fn glob_files(path: &str, pattern: &str) -> Result<Vec<String>, String> {
+    // File system implementation
+    Err("Not implemented".to_string())
+}
+
+fn load_asset_file(path: &str) -> Result<AssetHandle, String> {
+    // Asset loading implementation
+    Err("Not implemented".to_string())
+}
+
+fn get_asset_size(handle: AssetHandle) -> u64 {
+    // Asset size implementation
+    0
+}
+
+fn compile_script(source: &str, optimize: bool) -> Result<CompiledScript, LoadError> {
+    // Script compilation implementation
+    Err(LoadError::Other { message: "Not implemented".to_string() })
+}
+
+fn parse_mod_manifest(content: &str) -> Result<ModMetadata, String> {
+    // TOML parsing implementation
+    Err("Not implemented".to_string())
+}
+
+fn get_file_modified_time(path: &str) -> Result<u64, String> {
+    // File system implementation
+    Err("Not implemented".to_string())
+}
+
+fn compute_file_checksum(path: &str) -> Result<u64, String> {
+    // Checksum implementation
+    Err("Not implemented".to_string())
+}
+
+// ============================================================================
+// REGION: Unit Tests
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_load_state_transitions() {
+        assert!(LoadState::Unknown.can_transition_to(LoadState::Discovered));
+        assert!(LoadState::Discovered.can_transition_to(LoadState::Validated));
+        assert!(LoadState::Active.can_transition_to(LoadState::Suspended));
+        assert!(!LoadState::Unknown.can_transition_to(LoadState::Active));
+        assert!(!LoadState::Failed.can_transition_to(LoadState::Active));
+    }
+
+    #[test]
+    fn test_load_options_presets() {
+        let default_opts = LoadOptions::default();
+        assert_eq!(default_opts.max_concurrent, 4);
+        assert!(default_opts.verify_checksums);
+
+        let fast_opts = LoadOptions::fast();
+        assert_eq!(fast_opts.max_concurrent, 8);
+        assert!(!fast_opts.verify_checksums);
+
+        let dev_opts = LoadOptions::development();
+        assert!(dev_opts.hot_reload);
+        assert!(dev_opts.debug_logging);
+    }
+
+    #[test]
+    fn test_load_queue() {
+        let mut queue = LoadQueue::new(2);
+
+        queue.enqueue("mod_a".to_string(), "/path/a".to_string(), 10);
+        queue.enqueue("mod_b".to_string(), "/path/b".to_string(), 20);
+        queue.enqueue("mod_c".to_string(), "/path/c".to_string(), 5);
+
+        // Higher priority should come first
+        assert_eq!(queue.pending[0].mod_id, "mod_b");
+        assert_eq!(queue.pending[1].mod_id, "mod_a");
+        assert_eq!(queue.pending[2].mod_id, "mod_c");
+    }
+
+    #[test]
+    fn test_load_progress() {
+        let mut progress = LoadProgress::new();
+        progress.step = 5;
+        progress.total_steps = 10;
+
+        assert!((progress.phase_progress() - 0.5).abs() < 0.001);
+
+        progress.bytes_loaded = 1000;
+        progress.bytes_total = 2000;
+        assert!((progress.bytes_progress() - 0.5).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_load_task_phases() {
+        let mut task = LoadTask::new(1, "test_mod".to_string(), 30000);
+
+        assert_eq!(task.phase, LoadPhase::Discovery);
+        assert!(task.progress() < 0.1);
+
+        task.advance_phase();
+        assert_eq!(task.phase, LoadPhase::Validation);
+
+        task.advance_phase();
+        task.advance_phase();
+        task.advance_phase();
+        assert_eq!(task.phase, LoadPhase::Compilation);
+    }
+
+    #[test]
+    fn test_mod_instance() {
+        let metadata = ModMetadata {
+            id: "test_mod".to_string(),
+            name: "Test Mod".to_string(),
+            version: Version::new(1, 0, 0),
+            dependencies: Vec::new(),
+            ..Default::default()
+        };
+
+        let mut instance = ModInstance::new(1, metadata);
+
+        assert_eq!(instance.mod_id(), "test_mod");
+        assert_eq!(instance.state, LoadState::Unknown);
+
+        instance.transition_to(LoadState::Discovered).ok();
+        assert_eq!(instance.state, LoadState::Discovered);
+    }
+
+    #[test]
+    fn test_load_result() {
+        let mut result = LoadResult::new();
+
+        result.add_success("mod_a".to_string());
+        result.add_success("mod_b".to_string());
+        result.add_failure("mod_c".to_string(), LoadError::NotFound {
+            path: "/bad/path".to_string()
+        });
+
+        assert!(!result.is_success());
+        assert_eq!(result.success_count(), 2);
+        assert_eq!(result.failure_count(), 1);
+    }
+
+    #[test]
+    fn test_file_watcher() {
+        let mut watcher = FileWatcher::new(100);
+
+        watcher.watch("test_mod", "/mods/test/mod.toml");
+        assert!(watcher.watched_paths.contains_key("/mods/test/mod.toml"));
+
+        watcher.unwatch("/mods/test/mod.toml");
+        assert!(!watcher.watched_paths.contains_key("/mods/test/mod.toml"));
+    }
+
+    #[test]
+    fn test_load_error_messages() {
+        let error = LoadError::MissingDependency {
+            mod_id: "mod_a".to_string(),
+            dependency: "mod_b".to_string(),
+        };
+
+        assert!(error.to_string().contains("mod_a"));
+        assert!(error.to_string().contains("mod_b"));
+    }
+}

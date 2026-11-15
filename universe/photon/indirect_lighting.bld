@@ -1,0 +1,2683 @@
+// indirect_lighting.bld - Indirect Lighting Cache and Global Illumination Caching
+// Part of the Photon Rendering Module
+// Implements irradiance probes, radiance caching, light probe grids, and real-time GI approximation
+
+import std::collections::{HashMap, Vec, VecDeque, BinaryHeap}
+import std::math::{Vec2, Vec3, Vec4, Mat3, Mat4, Quaternion, sqrt, pow, exp, sin, cos, PI, floor, ceil, clamp, lerp, min, max, abs, dot, cross, normalize, length}
+import std::memory::{Arena, Pool, Box, Arc, Rc}
+import std::sync::{Mutex, RwLock, Atomic}
+import std::simd::{f32x4, f32x8, i32x4, i32x8}
+
+// ============================================================================
+// SPHERICAL HARMONICS
+// ============================================================================
+
+/// Spherical harmonics order for irradiance encoding
+enum ShOrder {
+    L0,          // 1 coefficient (ambient only)
+    L1,          // 4 coefficients
+    L2,          // 9 coefficients (most common)
+    L3,          // 16 coefficients
+    L4,          // 25 coefficients
+}
+
+impl ShOrder {
+    fn coefficient_count(self) -> u32 {
+        match self {
+            ShOrder::L0 => 1,
+            ShOrder::L1 => 4,
+            ShOrder::L2 => 9,
+            ShOrder::L3 => 16,
+            ShOrder::L4 => 25,
+        }
+    }
+}
+
+/// L2 spherical harmonics coefficients for RGB irradiance
+struct SphericalHarmonicsL2 {
+    // 9 RGB coefficients (27 floats total)
+    coefficients: [Vec3; 9],
+}
+
+impl SphericalHarmonicsL2 {
+    fn new() -> Self {
+        Self {
+            coefficients: [Vec3::ZERO; 9],
+        }
+    }
+
+    fn from_direction_color(direction: Vec3, color: Vec3) -> Self {
+        let mut sh = Self::new();
+        sh.add_directional_light(direction, color);
+        sh
+    }
+
+    /// SH basis function evaluation
+    fn evaluate_basis(direction: Vec3) -> [f32; 9] {
+        let x = direction.x;
+        let y = direction.y;
+        let z = direction.z;
+
+        // Precomputed SH constants
+        let k0 = 0.282095;           // 1 / (2 * sqrt(PI))
+        let k1 = 0.488603;           // sqrt(3) / (2 * sqrt(PI))
+        let k2 = 1.092548;           // sqrt(15) / (2 * sqrt(PI))
+        let k3 = 0.315392;           // sqrt(5) / (4 * sqrt(PI))
+        let k4 = 0.546274;           // sqrt(15) / (4 * sqrt(PI))
+
+        [
+            k0,                       // L0, m=0
+            k1 * y,                   // L1, m=-1
+            k1 * z,                   // L1, m=0
+            k1 * x,                   // L1, m=1
+            k2 * x * y,               // L2, m=-2
+            k2 * y * z,               // L2, m=-1
+            k3 * (3.0 * z * z - 1.0), // L2, m=0
+            k2 * x * z,               // L2, m=1
+            k4 * (x * x - y * y),     // L2, m=2
+        ]
+    }
+
+    /// Add a directional light contribution
+    fn add_directional_light(&mut self, direction: Vec3, color: Vec3) {
+        let basis = Self::evaluate_basis(normalize(direction));
+        for i in 0..9 {
+            self.coefficients[i] = self.coefficients[i] + color * basis[i];
+        }
+    }
+
+    /// Add ambient light contribution (L0 only)
+    fn add_ambient(&mut self, color: Vec3) {
+        let k0 = 0.282095;
+        self.coefficients[0] = self.coefficients[0] + color * k0;
+    }
+
+    /// Evaluate irradiance from SH in a given direction
+    fn evaluate(&self, direction: Vec3) -> Vec3 {
+        let basis = Self::evaluate_basis(normalize(direction));
+
+        // Irradiance convolution with cosine lobe (ZH coefficients)
+        let zh = [
+            PI,                       // A0
+            (2.0 * PI) / 3.0,         // A1
+            PI / 4.0,                 // A2
+        ];
+
+        let mut result = Vec3::ZERO;
+
+        // L0
+        result = result + self.coefficients[0] * basis[0] * zh[0];
+
+        // L1
+        for i in 1..4 {
+            result = result + self.coefficients[i] * basis[i] * zh[1];
+        }
+
+        // L2
+        for i in 4..9 {
+            result = result + self.coefficients[i] * basis[i] * zh[2];
+        }
+
+        // Normalize and clamp
+        result = result * (1.0 / PI);
+        Vec3::new(
+            max(0.0, result.x),
+            max(0.0, result.y),
+            max(0.0, result.z)
+        )
+    }
+
+    /// Blend with another SH
+    fn lerp(a: &Self, b: &Self, t: f32) -> Self {
+        let mut result = Self::new();
+        for i in 0..9 {
+            result.coefficients[i] = a.coefficients[i] * (1.0 - t) + b.coefficients[i] * t;
+        }
+        result
+    }
+
+    /// Scale all coefficients
+    fn scale(&mut self, factor: f32) {
+        for i in 0..9 {
+            self.coefficients[i] = self.coefficients[i] * factor;
+        }
+    }
+
+    /// Pack to GPU format (3 vec4s for efficient transfer)
+    fn pack_for_gpu(&self) -> [Vec4; 7] {
+        [
+            Vec4::new(self.coefficients[0].x, self.coefficients[0].y, self.coefficients[0].z, self.coefficients[1].x),
+            Vec4::new(self.coefficients[1].y, self.coefficients[1].z, self.coefficients[2].x, self.coefficients[2].y),
+            Vec4::new(self.coefficients[2].z, self.coefficients[3].x, self.coefficients[3].y, self.coefficients[3].z),
+            Vec4::new(self.coefficients[4].x, self.coefficients[4].y, self.coefficients[4].z, self.coefficients[5].x),
+            Vec4::new(self.coefficients[5].y, self.coefficients[5].z, self.coefficients[6].x, self.coefficients[6].y),
+            Vec4::new(self.coefficients[6].z, self.coefficients[7].x, self.coefficients[7].y, self.coefficients[7].z),
+            Vec4::new(self.coefficients[8].x, self.coefficients[8].y, self.coefficients[8].z, 0.0),
+        ]
+    }
+}
+
+/// L1 spherical harmonics (simpler, 4 coefficients)
+struct SphericalHarmonicsL1 {
+    coefficients: [Vec3; 4],
+}
+
+impl SphericalHarmonicsL1 {
+    fn new() -> Self {
+        Self {
+            coefficients: [Vec3::ZERO; 4],
+        }
+    }
+
+    fn from_l2(sh_l2: &SphericalHarmonicsL2) -> Self {
+        Self {
+            coefficients: [
+                sh_l2.coefficients[0],
+                sh_l2.coefficients[1],
+                sh_l2.coefficients[2],
+                sh_l2.coefficients[3],
+            ],
+        }
+    }
+
+    fn evaluate(&self, direction: Vec3) -> Vec3 {
+        let d = normalize(direction);
+        let k0 = 0.282095;
+        let k1 = 0.488603;
+
+        let basis = [k0, k1 * d.y, k1 * d.z, k1 * d.x];
+        let zh = [PI, (2.0 * PI) / 3.0];
+
+        let mut result = self.coefficients[0] * basis[0] * zh[0];
+        for i in 1..4 {
+            result = result + self.coefficients[i] * basis[i] * zh[1];
+        }
+
+        result = result * (1.0 / PI);
+        Vec3::new(max(0.0, result.x), max(0.0, result.y), max(0.0, result.z))
+    }
+}
+
+// ============================================================================
+// IRRADIANCE PROBES
+// ============================================================================
+
+/// Probe state for streaming and updates
+enum ProbeState {
+    Invalid,
+    Loading,
+    Valid,
+    Stale,
+    NeedsUpdate,
+}
+
+/// Single irradiance probe
+struct IrradianceProbe {
+    position: Vec3,
+    irradiance_sh: SphericalHarmonicsL2,
+    mean_distance: f32,           // Average visibility distance
+    variance: f32,                // Irradiance variance for interpolation weights
+    state: ProbeState,
+    last_update_frame: u64,
+    update_priority: f32,
+}
+
+impl IrradianceProbe {
+    fn new(position: Vec3) -> Self {
+        Self {
+            position,
+            irradiance_sh: SphericalHarmonicsL2::new(),
+            mean_distance: 1.0,
+            variance: 0.0,
+            state: ProbeState::Invalid,
+            last_update_frame: 0,
+            update_priority: 1.0,
+        }
+    }
+
+    fn sample(&self, direction: Vec3) -> Vec3 {
+        self.irradiance_sh.evaluate(direction)
+    }
+
+    fn is_valid(&self) -> bool {
+        match self.state {
+            ProbeState::Valid | ProbeState::Stale => true,
+            _ => false,
+        }
+    }
+
+    fn mark_for_update(&mut self, priority: f32) {
+        self.state = ProbeState::NeedsUpdate;
+        self.update_priority = priority;
+    }
+}
+
+/// GPU-packed probe data
+struct GpuIrradianceProbe {
+    position: Vec3,
+    mean_distance: f32,
+    sh_packed: [Vec4; 7],
+}
+
+impl GpuIrradianceProbe {
+    fn from_probe(probe: &IrradianceProbe) -> Self {
+        Self {
+            position: probe.position,
+            mean_distance: probe.mean_distance,
+            sh_packed: probe.irradiance_sh.pack_for_gpu(),
+        }
+    }
+}
+
+// ============================================================================
+// PROBE GRID
+// ============================================================================
+
+/// Probe placement strategy
+enum ProbePlacement {
+    UniformGrid { spacing: Vec3 },
+    AdaptiveGrid { min_spacing: f32, max_spacing: f32 },
+    TetrahedralMesh,
+    ImportanceSampled,
+    Manual,
+}
+
+/// Light probe grid for volumetric irradiance
+struct LightProbeGrid {
+    bounds_min: Vec3,
+    bounds_max: Vec3,
+    resolution: (u32, u32, u32),
+    probes: Vec<IrradianceProbe>,
+    placement: ProbePlacement,
+
+    // Spatial lookup
+    probe_spacing: Vec3,
+    inv_probe_spacing: Vec3,
+}
+
+impl LightProbeGrid {
+    fn new(bounds_min: Vec3, bounds_max: Vec3, resolution: (u32, u32, u32)) -> Self {
+        let extent = bounds_max - bounds_min;
+        let probe_spacing = Vec3::new(
+            extent.x / (resolution.0 as f32),
+            extent.y / (resolution.1 as f32),
+            extent.z / (resolution.2 as f32)
+        );
+
+        let total_probes = resolution.0 * resolution.1 * resolution.2;
+        let mut probes = Vec::with_capacity(total_probes as usize);
+
+        // Create uniform probe grid
+        for z in 0..resolution.2 {
+            for y in 0..resolution.1 {
+                for x in 0..resolution.0 {
+                    let position = bounds_min + Vec3::new(
+                        (x as f32 + 0.5) * probe_spacing.x,
+                        (y as f32 + 0.5) * probe_spacing.y,
+                        (z as f32 + 0.5) * probe_spacing.z
+                    );
+                    probes.push(IrradianceProbe::new(position));
+                }
+            }
+        }
+
+        Self {
+            bounds_min,
+            bounds_max,
+            resolution,
+            probes,
+            placement: ProbePlacement::UniformGrid { spacing: probe_spacing },
+            probe_spacing,
+            inv_probe_spacing: Vec3::new(
+                1.0 / probe_spacing.x,
+                1.0 / probe_spacing.y,
+                1.0 / probe_spacing.z
+            ),
+        }
+    }
+
+    /// Get probe index from grid coordinates
+    fn probe_index(&self, x: u32, y: u32, z: u32) -> usize {
+        (z * self.resolution.1 * self.resolution.0 + y * self.resolution.0 + x) as usize
+    }
+
+    /// Get grid coordinates from world position
+    fn world_to_grid(&self, position: Vec3) -> (f32, f32, f32) {
+        let local = (position - self.bounds_min) * self.inv_probe_spacing;
+        (local.x - 0.5, local.y - 0.5, local.z - 0.5)
+    }
+
+    /// Get the 8 probes surrounding a world position
+    fn get_surrounding_probes(&self, position: Vec3) -> [Option<&IrradianceProbe>; 8] {
+        let (gx, gy, gz) = self.world_to_grid(position);
+
+        let x0 = floor(gx) as i32;
+        let y0 = floor(gy) as i32;
+        let z0 = floor(gz) as i32;
+
+        let mut probes = [None; 8];
+
+        for i in 0..8 {
+            let dx = (i & 1) as i32;
+            let dy = ((i >> 1) & 1) as i32;
+            let dz = ((i >> 2) & 1) as i32;
+
+            let x = x0 + dx;
+            let y = y0 + dy;
+            let z = z0 + dz;
+
+            if x >= 0 && x < self.resolution.0 as i32 &&
+               y >= 0 && y < self.resolution.1 as i32 &&
+               z >= 0 && z < self.resolution.2 as i32 {
+                let idx = self.probe_index(x as u32, y as u32, z as u32);
+                if self.probes[idx].is_valid() {
+                    probes[i] = Some(&self.probes[idx]);
+                }
+            }
+        }
+
+        probes
+    }
+
+    /// Trilinear interpolation weights
+    fn trilinear_weights(&self, position: Vec3) -> [f32; 8] {
+        let (gx, gy, gz) = self.world_to_grid(position);
+
+        let fx = gx - floor(gx);
+        let fy = gy - floor(gy);
+        let fz = gz - floor(gz);
+
+        [
+            (1.0 - fx) * (1.0 - fy) * (1.0 - fz),
+            fx * (1.0 - fy) * (1.0 - fz),
+            (1.0 - fx) * fy * (1.0 - fz),
+            fx * fy * (1.0 - fz),
+            (1.0 - fx) * (1.0 - fy) * fz,
+            fx * (1.0 - fy) * fz,
+            (1.0 - fx) * fy * fz,
+            fx * fy * fz,
+        ]
+    }
+
+    /// Sample irradiance at a world position
+    fn sample_irradiance(&self, position: Vec3, normal: Vec3) -> Vec3 {
+        let probes = self.get_surrounding_probes(position);
+        let weights = self.trilinear_weights(position);
+
+        let mut result = Vec3::ZERO;
+        let mut total_weight = 0.0;
+
+        for i in 0..8 {
+            if let Some(probe) = probes[i] {
+                let w = weights[i];
+                if w > 0.0001 {
+                    result = result + probe.sample(normal) * w;
+                    total_weight += w;
+                }
+            }
+        }
+
+        if total_weight > 0.0001 {
+            result * (1.0 / total_weight)
+        } else {
+            Vec3::ZERO
+        }
+    }
+
+    /// Sample with visibility-aware interpolation (backface weighting)
+    fn sample_irradiance_visibility_aware(&self, position: Vec3, normal: Vec3, surface_bias: f32) -> Vec3 {
+        let biased_position = position + normal * surface_bias;
+        let probes = self.get_surrounding_probes(biased_position);
+        let weights = self.trilinear_weights(biased_position);
+
+        let mut result = Vec3::ZERO;
+        let mut total_weight = 0.0;
+
+        for i in 0..8 {
+            if let Some(probe) = probes[i] {
+                let trilinear_weight = weights[i];
+
+                // Backface weighting - prefer probes in front of the surface
+                let to_probe = normalize(probe.position - position);
+                let backface_weight = (dot(to_probe, normal) + 1.0) * 0.5;
+                let smooth_backface = backface_weight * backface_weight + 0.2;
+
+                let w = trilinear_weight * smooth_backface;
+
+                if w > 0.0001 {
+                    result = result + probe.sample(normal) * w;
+                    total_weight += w;
+                }
+            }
+        }
+
+        if total_weight > 0.0001 {
+            result * (1.0 / total_weight)
+        } else {
+            Vec3::ZERO
+        }
+    }
+
+    /// Mark probes for update based on dynamic changes
+    fn invalidate_region(&mut self, center: Vec3, radius: f32) {
+        let radius_sq = radius * radius;
+
+        for probe in &mut self.probes {
+            let dist_sq = length(probe.position - center);
+            let dist_sq = dist_sq * dist_sq;
+
+            if dist_sq < radius_sq {
+                let priority = 1.0 - sqrt(dist_sq) / radius;
+                probe.mark_for_update(priority);
+            }
+        }
+    }
+
+    /// Get probes needing update, sorted by priority
+    fn get_update_queue(&self, max_count: usize) -> Vec<usize> {
+        let mut queue: Vec<(usize, f32)> = self.probes.iter()
+            .enumerate()
+            .filter(|(_, p)| matches!(p.state, ProbeState::NeedsUpdate | ProbeState::Invalid))
+            .map(|(i, p)| (i, p.update_priority))
+            .collect();
+
+        queue.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+        queue.truncate(max_count);
+        queue.iter().map(|(i, _)| *i).collect()
+    }
+
+    /// Pack grid for GPU
+    fn pack_for_gpu(&self) -> Vec<GpuIrradianceProbe> {
+        self.probes.iter()
+            .filter(|p| p.is_valid())
+            .map(|p| GpuIrradianceProbe::from_probe(p))
+            .collect()
+    }
+}
+
+// ============================================================================
+// RADIANCE CACHE
+// ============================================================================
+
+/// Cached radiance sample
+struct RadianceCacheEntry {
+    position: Vec3,
+    normal: Vec3,
+    radiance: Vec3,
+    distance: f32,            // Distance to the surface that was sampled
+    creation_frame: u64,
+    access_count: u32,
+}
+
+/// Spatial hash cell for radiance cache
+struct RadianceCacheCell {
+    entries: Vec<RadianceCacheEntry>,
+    bounds_min: Vec3,
+    bounds_max: Vec3,
+}
+
+impl RadianceCacheCell {
+    fn new(bounds_min: Vec3, bounds_max: Vec3) -> Self {
+        Self {
+            entries: Vec::new(),
+            bounds_min,
+            bounds_max,
+        }
+    }
+
+    fn add_entry(&mut self, entry: RadianceCacheEntry) {
+        self.entries.push(entry);
+    }
+
+    fn query(&self, position: Vec3, normal: Vec3, max_distance: f32, normal_threshold: f32) -> Option<Vec3> {
+        let mut result = Vec3::ZERO;
+        let mut total_weight = 0.0;
+
+        for entry in &self.entries {
+            let dist = length(entry.position - position);
+            if dist < max_distance {
+                let normal_dot = dot(entry.normal, normal);
+                if normal_dot > normal_threshold {
+                    // Weight based on distance and normal alignment
+                    let dist_weight = 1.0 - (dist / max_distance);
+                    let normal_weight = (normal_dot - normal_threshold) / (1.0 - normal_threshold);
+                    let weight = dist_weight * dist_weight * normal_weight;
+
+                    result = result + entry.radiance * weight;
+                    total_weight += weight;
+                }
+            }
+        }
+
+        if total_weight > 0.01 {
+            Some(result * (1.0 / total_weight))
+        } else {
+            None
+        }
+    }
+
+    fn evict_old(&mut self, current_frame: u64, max_age: u64) {
+        self.entries.retain(|e| current_frame - e.creation_frame < max_age);
+    }
+}
+
+/// World-space radiance cache for indirect lighting
+struct RadianceCache {
+    cells: HashMap<(i32, i32, i32), RadianceCacheCell>,
+    cell_size: f32,
+    inv_cell_size: f32,
+    max_entries_per_cell: usize,
+    max_age_frames: u64,
+
+    // Statistics
+    total_entries: usize,
+    cache_hits: u64,
+    cache_misses: u64,
+}
+
+impl RadianceCache {
+    fn new(cell_size: f32, max_entries_per_cell: usize) -> Self {
+        Self {
+            cells: HashMap::new(),
+            cell_size,
+            inv_cell_size: 1.0 / cell_size,
+            max_entries_per_cell,
+            max_age_frames: 120,
+            total_entries: 0,
+            cache_hits: 0,
+            cache_misses: 0,
+        }
+    }
+
+    fn position_to_cell(&self, position: Vec3) -> (i32, i32, i32) {
+        (
+            floor(position.x * self.inv_cell_size) as i32,
+            floor(position.y * self.inv_cell_size) as i32,
+            floor(position.z * self.inv_cell_size) as i32,
+        )
+    }
+
+    fn cell_bounds(&self, cell: (i32, i32, i32)) -> (Vec3, Vec3) {
+        let min = Vec3::new(
+            cell.0 as f32 * self.cell_size,
+            cell.1 as f32 * self.cell_size,
+            cell.2 as f32 * self.cell_size,
+        );
+        let max = min + Vec3::new(self.cell_size, self.cell_size, self.cell_size);
+        (min, max)
+    }
+
+    /// Insert a new radiance sample
+    fn insert(&mut self, position: Vec3, normal: Vec3, radiance: Vec3, distance: f32, frame: u64) {
+        let cell_key = self.position_to_cell(position);
+
+        let cell = self.cells.entry(cell_key).or_insert_with(|| {
+            let (min, max) = self.cell_bounds(cell_key);
+            RadianceCacheCell::new(min, max)
+        });
+
+        if cell.entries.len() < self.max_entries_per_cell {
+            cell.add_entry(RadianceCacheEntry {
+                position,
+                normal,
+                radiance,
+                distance,
+                creation_frame: frame,
+                access_count: 0,
+            });
+            self.total_entries += 1;
+        }
+    }
+
+    /// Query cached radiance at a position
+    fn query(&mut self, position: Vec3, normal: Vec3, search_radius: f32) -> Option<Vec3> {
+        let cell_key = self.position_to_cell(position);
+
+        // Search in surrounding cells
+        let cell_radius = ceil(search_radius * self.inv_cell_size) as i32;
+
+        let mut result = Vec3::ZERO;
+        let mut total_weight = 0.0;
+
+        for dz in -cell_radius..=cell_radius {
+            for dy in -cell_radius..=cell_radius {
+                for dx in -cell_radius..=cell_radius {
+                    let key = (cell_key.0 + dx, cell_key.1 + dy, cell_key.2 + dz);
+
+                    if let Some(cell) = self.cells.get(&key) {
+                        if let Some(radiance) = cell.query(position, normal, search_radius, 0.5) {
+                            // Weight by distance to cell center
+                            let cell_center = (cell.bounds_min + cell.bounds_max) * 0.5;
+                            let dist = length(cell_center - position);
+                            let weight = 1.0 / (1.0 + dist * dist);
+
+                            result = result + radiance * weight;
+                            total_weight += weight;
+                        }
+                    }
+                }
+            }
+        }
+
+        if total_weight > 0.01 {
+            self.cache_hits += 1;
+            Some(result * (1.0 / total_weight))
+        } else {
+            self.cache_misses += 1;
+            None
+        }
+    }
+
+    /// Evict old entries
+    fn evict(&mut self, current_frame: u64) {
+        let mut empty_cells = Vec::new();
+
+        for (key, cell) in &mut self.cells {
+            let old_count = cell.entries.len();
+            cell.evict_old(current_frame, self.max_age_frames);
+            self.total_entries -= old_count - cell.entries.len();
+
+            if cell.entries.is_empty() {
+                empty_cells.push(*key);
+            }
+        }
+
+        for key in empty_cells {
+            self.cells.remove(&key);
+        }
+    }
+
+    /// Clear entire cache
+    fn clear(&mut self) {
+        self.cells.clear();
+        self.total_entries = 0;
+    }
+
+    fn hit_rate(&self) -> f32 {
+        let total = self.cache_hits + self.cache_misses;
+        if total > 0 {
+            self.cache_hits as f32 / total as f32
+        } else {
+            0.0
+        }
+    }
+}
+
+// ============================================================================
+// SCREEN-SPACE INDIRECT DIFFUSE
+// ============================================================================
+
+/// SSGI quality levels
+enum SsgiQuality {
+    Low,      // 1/4 resolution, 4 rays
+    Medium,   // 1/2 resolution, 8 rays
+    High,     // Full resolution, 16 rays
+    Ultra,    // Full resolution, 32 rays
+}
+
+impl SsgiQuality {
+    fn ray_count(&self) -> u32 {
+        match self {
+            SsgiQuality::Low => 4,
+            SsgiQuality::Medium => 8,
+            SsgiQuality::High => 16,
+            SsgiQuality::Ultra => 32,
+        }
+    }
+
+    fn resolution_scale(&self) -> f32 {
+        match self {
+            SsgiQuality::Low => 0.25,
+            SsgiQuality::Medium => 0.5,
+            SsgiQuality::High => 1.0,
+            SsgiQuality::Ultra => 1.0,
+        }
+    }
+}
+
+/// Screen-space global illumination configuration
+struct SsgiConfig {
+    quality: SsgiQuality,
+    max_steps: u32,
+    max_distance: f32,
+    thickness: f32,
+    intensity: f32,
+    ao_intensity: f32,
+    temporal_weight: f32,
+    normal_bias: f32,
+}
+
+impl SsgiConfig {
+    fn default() -> Self {
+        Self {
+            quality: SsgiQuality::Medium,
+            max_steps: 16,
+            max_distance: 5.0,
+            thickness: 0.5,
+            intensity: 1.0,
+            ao_intensity: 0.5,
+            temporal_weight: 0.95,
+            normal_bias: 0.1,
+        }
+    }
+}
+
+/// Screen-space indirect diffuse renderer
+struct SsgiRenderer {
+    config: SsgiConfig,
+    indirect_texture: TextureHandle,
+    history_texture: TextureHandle,
+    noise_texture: TextureHandle,
+    pipeline: ComputePipelineHandle,
+    temporal_pipeline: ComputePipelineHandle,
+    upsample_pipeline: ComputePipelineHandle,
+}
+
+impl SsgiRenderer {
+    fn new(device: &Device, width: u32, height: u32, config: SsgiConfig) -> Self {
+        let scale = config.quality.resolution_scale();
+        let scaled_width = (width as f32 * scale) as u32;
+        let scaled_height = (height as f32 * scale) as u32;
+
+        let indirect_texture = device.create_texture(&TextureDescriptor {
+            size: (scaled_width, scaled_height, 1),
+            format: TextureFormat::Rgba16Float,
+            usage: TextureUsage::STORAGE | TextureUsage::SAMPLED,
+            ..Default::default()
+        });
+
+        let history_texture = device.create_texture(&TextureDescriptor {
+            size: (width, height, 1),
+            format: TextureFormat::Rgba16Float,
+            usage: TextureUsage::STORAGE | TextureUsage::SAMPLED,
+            ..Default::default()
+        });
+
+        let noise_texture = Self::create_blue_noise_texture(device, 64);
+
+        let pipeline = device.create_compute_pipeline(&ComputePipelineDescriptor {
+            shader: include_str!("shaders/ssgi.wgsl"),
+            entry_point: "ssgi_main",
+            ..Default::default()
+        });
+
+        let temporal_pipeline = device.create_compute_pipeline(&ComputePipelineDescriptor {
+            shader: include_str!("shaders/ssgi.wgsl"),
+            entry_point: "ssgi_temporal",
+            ..Default::default()
+        });
+
+        let upsample_pipeline = device.create_compute_pipeline(&ComputePipelineDescriptor {
+            shader: include_str!("shaders/ssgi.wgsl"),
+            entry_point: "ssgi_upsample",
+            ..Default::default()
+        });
+
+        Self {
+            config,
+            indirect_texture,
+            history_texture,
+            noise_texture,
+            pipeline,
+            temporal_pipeline,
+            upsample_pipeline,
+        }
+    }
+
+    fn create_blue_noise_texture(device: &Device, size: u32) -> TextureHandle {
+        // Generate blue noise using void-and-cluster algorithm
+        let mut data = vec![0u8; (size * size) as usize];
+
+        // Simple blue noise approximation
+        for y in 0..size {
+            for x in 0..size {
+                // Use R2 sequence for quasi-random sampling
+                let idx = y * size + x;
+                let phi = 1.324717957244746; // Plastic constant
+                let a1 = 1.0 / phi;
+                let a2 = 1.0 / (phi * phi);
+
+                let u = (0.5 + a1 * idx as f32).fract();
+                let v = (0.5 + a2 * idx as f32).fract();
+
+                data[(y * size + x) as usize] = (u * 255.0) as u8;
+            }
+        }
+
+        device.create_texture_with_data(&TextureDescriptor {
+            size: (size, size, 1),
+            format: TextureFormat::R8Unorm,
+            usage: TextureUsage::SAMPLED,
+            ..Default::default()
+        }, &data)
+    }
+
+    fn render(
+        &mut self,
+        encoder: &mut CommandEncoder,
+        depth_texture: &TextureHandle,
+        normal_texture: &TextureHandle,
+        color_texture: &TextureHandle,
+        motion_vectors: &TextureHandle,
+        view_info: &ViewInfo,
+        frame_index: u32,
+    ) {
+        // Main SSGI pass
+        {
+            let mut pass = encoder.begin_compute_pass("SSGI Main");
+            pass.set_pipeline(&self.pipeline);
+            pass.set_texture(0, depth_texture);
+            pass.set_texture(1, normal_texture);
+            pass.set_texture(2, color_texture);
+            pass.set_texture(3, &self.noise_texture);
+            pass.set_storage_texture(4, &self.indirect_texture);
+            pass.set_uniform(5, &SsgiUniforms {
+                view_proj: view_info.view_proj,
+                inv_view_proj: view_info.inv_view_proj,
+                camera_pos: view_info.camera_position,
+                ray_count: self.config.quality.ray_count(),
+                max_steps: self.config.max_steps,
+                max_distance: self.config.max_distance,
+                thickness: self.config.thickness,
+                intensity: self.config.intensity,
+                frame_index,
+            });
+
+            let scale = self.config.quality.resolution_scale();
+            let width = (view_info.viewport_size.0 as f32 * scale) as u32;
+            let height = (view_info.viewport_size.1 as f32 * scale) as u32;
+            pass.dispatch((width + 7) / 8, (height + 7) / 8, 1);
+        }
+
+        // Temporal accumulation
+        {
+            let mut pass = encoder.begin_compute_pass("SSGI Temporal");
+            pass.set_pipeline(&self.temporal_pipeline);
+            pass.set_texture(0, &self.indirect_texture);
+            pass.set_texture(1, motion_vectors);
+            pass.set_texture(2, depth_texture);
+            pass.set_storage_texture(3, &self.history_texture);
+            pass.set_uniform(4, &TemporalUniforms {
+                temporal_weight: self.config.temporal_weight,
+                frame_index,
+            });
+
+            let (width, height) = view_info.viewport_size;
+            pass.dispatch((width + 7) / 8, (height + 7) / 8, 1);
+        }
+    }
+
+    fn get_result(&self) -> &TextureHandle {
+        &self.history_texture
+    }
+}
+
+// ============================================================================
+// IRRADIANCE FIELD
+// ============================================================================
+
+/// Octahedral encoding for probe irradiance
+struct OctahedralMap {
+    resolution: u32,
+    data: Vec<Vec3>,
+}
+
+impl OctahedralMap {
+    fn new(resolution: u32) -> Self {
+        Self {
+            resolution,
+            data: vec![Vec3::ZERO; (resolution * resolution) as usize],
+        }
+    }
+
+    /// Encode direction to octahedral UV
+    fn direction_to_uv(direction: Vec3) -> Vec2 {
+        let d = normalize(direction);
+        let abs_sum = abs(d.x) + abs(d.y) + abs(d.z);
+        let oct = Vec2::new(d.x / abs_sum, d.y / abs_sum);
+
+        if d.z < 0.0 {
+            Vec2::new(
+                (1.0 - abs(oct.y)) * if oct.x >= 0.0 { 1.0 } else { -1.0 },
+                (1.0 - abs(oct.x)) * if oct.y >= 0.0 { 1.0 } else { -1.0 }
+            )
+        } else {
+            oct
+        }
+    }
+
+    /// Decode UV to direction
+    fn uv_to_direction(uv: Vec2) -> Vec3 {
+        let oct = uv * 2.0 - Vec2::new(1.0, 1.0);
+        let z = 1.0 - abs(oct.x) - abs(oct.y);
+
+        let t = max(-z, 0.0);
+        let x = oct.x + if oct.x >= 0.0 { -t } else { t };
+        let y = oct.y + if oct.y >= 0.0 { -t } else { t };
+
+        normalize(Vec3::new(x, y, z))
+    }
+
+    fn set(&mut self, direction: Vec3, value: Vec3) {
+        let uv = Self::direction_to_uv(direction);
+        let x = ((uv.x * 0.5 + 0.5) * self.resolution as f32) as u32;
+        let y = ((uv.y * 0.5 + 0.5) * self.resolution as f32) as u32;
+        let idx = min(y * self.resolution + x, self.resolution * self.resolution - 1);
+        self.data[idx as usize] = value;
+    }
+
+    fn sample(&self, direction: Vec3) -> Vec3 {
+        let uv = Self::direction_to_uv(direction);
+        let x = (uv.x * 0.5 + 0.5) * (self.resolution - 1) as f32;
+        let y = (uv.y * 0.5 + 0.5) * (self.resolution - 1) as f32;
+
+        // Bilinear interpolation
+        let x0 = floor(x) as u32;
+        let y0 = floor(y) as u32;
+        let x1 = min(x0 + 1, self.resolution - 1);
+        let y1 = min(y0 + 1, self.resolution - 1);
+        let fx = x - x0 as f32;
+        let fy = y - y0 as f32;
+
+        let c00 = self.data[(y0 * self.resolution + x0) as usize];
+        let c10 = self.data[(y0 * self.resolution + x1) as usize];
+        let c01 = self.data[(y1 * self.resolution + x0) as usize];
+        let c11 = self.data[(y1 * self.resolution + x1) as usize];
+
+        let c0 = c00 * (1.0 - fx) + c10 * fx;
+        let c1 = c01 * (1.0 - fx) + c11 * fx;
+
+        c0 * (1.0 - fy) + c1 * fy
+    }
+}
+
+/// Dynamic diffuse global illumination (DDGI) probe
+struct DdgiProbe {
+    position: Vec3,
+    irradiance_map: OctahedralMap,
+    visibility_map: OctahedralMap,
+    state: ProbeState,
+    hysteresis: f32,
+}
+
+impl DdgiProbe {
+    fn new(position: Vec3, irradiance_resolution: u32, visibility_resolution: u32) -> Self {
+        Self {
+            position,
+            irradiance_map: OctahedralMap::new(irradiance_resolution),
+            visibility_map: OctahedralMap::new(visibility_resolution),
+            state: ProbeState::Invalid,
+            hysteresis: 0.97,
+        }
+    }
+
+    fn sample_irradiance(&self, direction: Vec3) -> Vec3 {
+        self.irradiance_map.sample(direction)
+    }
+
+    fn sample_visibility(&self, direction: Vec3) -> f32 {
+        self.visibility_map.sample(direction).x
+    }
+}
+
+/// DDGI volume for real-time global illumination
+struct DdgiVolume {
+    bounds_min: Vec3,
+    bounds_max: Vec3,
+    resolution: (u32, u32, u32),
+    probes: Vec<DdgiProbe>,
+    probe_spacing: Vec3,
+
+    irradiance_resolution: u32,
+    visibility_resolution: u32,
+
+    // GPU resources
+    irradiance_atlas: TextureHandle,
+    visibility_atlas: TextureHandle,
+    ray_data_buffer: BufferHandle,
+
+    // Update state
+    rays_per_probe: u32,
+    probes_updated_per_frame: u32,
+    current_update_index: u32,
+}
+
+impl DdgiVolume {
+    fn new(
+        device: &Device,
+        bounds_min: Vec3,
+        bounds_max: Vec3,
+        resolution: (u32, u32, u32),
+        irradiance_resolution: u32,
+        visibility_resolution: u32,
+    ) -> Self {
+        let extent = bounds_max - bounds_min;
+        let probe_spacing = Vec3::new(
+            extent.x / (resolution.0 as f32),
+            extent.y / (resolution.1 as f32),
+            extent.z / (resolution.2 as f32)
+        );
+
+        let total_probes = resolution.0 * resolution.1 * resolution.2;
+        let mut probes = Vec::with_capacity(total_probes as usize);
+
+        for z in 0..resolution.2 {
+            for y in 0..resolution.1 {
+                for x in 0..resolution.0 {
+                    let position = bounds_min + Vec3::new(
+                        (x as f32 + 0.5) * probe_spacing.x,
+                        (y as f32 + 0.5) * probe_spacing.y,
+                        (z as f32 + 0.5) * probe_spacing.z
+                    );
+                    probes.push(DdgiProbe::new(position, irradiance_resolution, visibility_resolution));
+                }
+            }
+        }
+
+        // Create atlases for probe data
+        let probes_per_row = ceil(sqrt(total_probes as f32)) as u32;
+        let atlas_width = probes_per_row * irradiance_resolution;
+        let atlas_height = ((total_probes + probes_per_row - 1) / probes_per_row) * irradiance_resolution;
+
+        let irradiance_atlas = device.create_texture(&TextureDescriptor {
+            size: (atlas_width, atlas_height, 1),
+            format: TextureFormat::Rgba16Float,
+            usage: TextureUsage::STORAGE | TextureUsage::SAMPLED,
+            ..Default::default()
+        });
+
+        let vis_atlas_width = probes_per_row * visibility_resolution;
+        let vis_atlas_height = ((total_probes + probes_per_row - 1) / probes_per_row) * visibility_resolution;
+
+        let visibility_atlas = device.create_texture(&TextureDescriptor {
+            size: (vis_atlas_width, vis_atlas_height, 1),
+            format: TextureFormat::Rg16Float,
+            usage: TextureUsage::STORAGE | TextureUsage::SAMPLED,
+            ..Default::default()
+        });
+
+        let rays_per_probe = 256;
+        let ray_data_buffer = device.create_buffer(&BufferDescriptor {
+            size: (total_probes * rays_per_probe * 16) as usize, // Vec4 per ray
+            usage: BufferUsage::STORAGE,
+            ..Default::default()
+        });
+
+        Self {
+            bounds_min,
+            bounds_max,
+            resolution,
+            probes,
+            probe_spacing,
+            irradiance_resolution,
+            visibility_resolution,
+            irradiance_atlas,
+            visibility_atlas,
+            ray_data_buffer,
+            rays_per_probe,
+            probes_updated_per_frame: 32,
+            current_update_index: 0,
+        }
+    }
+
+    fn probe_index(&self, x: u32, y: u32, z: u32) -> usize {
+        (z * self.resolution.1 * self.resolution.0 + y * self.resolution.0 + x) as usize
+    }
+
+    fn world_to_grid(&self, position: Vec3) -> Vec3 {
+        let local = (position - self.bounds_min) / self.probe_spacing;
+        Vec3::new(local.x - 0.5, local.y - 0.5, local.z - 0.5)
+    }
+
+    /// Sample irradiance at a world position
+    fn sample_irradiance(&self, position: Vec3, normal: Vec3, view_direction: Vec3) -> Vec3 {
+        let grid_pos = self.world_to_grid(position);
+
+        let x0 = floor(grid_pos.x) as i32;
+        let y0 = floor(grid_pos.y) as i32;
+        let z0 = floor(grid_pos.z) as i32;
+
+        let mut result = Vec3::ZERO;
+        let mut total_weight = 0.0;
+
+        for dz in 0..2 {
+            for dy in 0..2 {
+                for dx in 0..2 {
+                    let x = x0 + dx;
+                    let y = y0 + dy;
+                    let z = z0 + dz;
+
+                    if x >= 0 && x < self.resolution.0 as i32 &&
+                       y >= 0 && y < self.resolution.1 as i32 &&
+                       z >= 0 && z < self.resolution.2 as i32 {
+                        let idx = self.probe_index(x as u32, y as u32, z as u32);
+                        let probe = &self.probes[idx];
+
+                        // Trilinear weight
+                        let fx = grid_pos.x - x0 as f32;
+                        let fy = grid_pos.y - y0 as f32;
+                        let fz = grid_pos.z - z0 as f32;
+
+                        let wx = if dx == 0 { 1.0 - fx } else { fx };
+                        let wy = if dy == 0 { 1.0 - fy } else { fy };
+                        let wz = if dz == 0 { 1.0 - fz } else { fz };
+                        let trilinear = wx * wy * wz;
+
+                        // Backface weight
+                        let to_probe = normalize(probe.position - position);
+                        let backface = (dot(to_probe, normal) + 1.0) * 0.5;
+                        let smooth_backface = backface * backface + 0.2;
+
+                        // Visibility weight
+                        let visibility = probe.sample_visibility(-to_probe);
+
+                        let weight = trilinear * smooth_backface * visibility;
+
+                        if weight > 0.0001 {
+                            let irradiance = probe.sample_irradiance(normal);
+                            result = result + irradiance * weight;
+                            total_weight += weight;
+                        }
+                    }
+                }
+            }
+        }
+
+        if total_weight > 0.0001 {
+            result * (1.0 / total_weight)
+        } else {
+            Vec3::ZERO
+        }
+    }
+
+    /// Update a batch of probes
+    fn update_probes(
+        &mut self,
+        encoder: &mut CommandEncoder,
+        ray_tracer: &RayTracer,
+        scene: &Scene,
+        frame_index: u32,
+    ) {
+        let total_probes = self.probes.len() as u32;
+        let start_index = self.current_update_index;
+        let end_index = min(start_index + self.probes_updated_per_frame, total_probes);
+
+        // Generate rays for probes
+        self.generate_probe_rays(encoder, start_index, end_index, frame_index);
+
+        // Trace rays
+        ray_tracer.trace_rays(encoder, &self.ray_data_buffer, (end_index - start_index) * self.rays_per_probe);
+
+        // Update probe irradiance and visibility
+        self.update_probe_data(encoder, start_index, end_index);
+
+        self.current_update_index = end_index % total_probes;
+    }
+
+    fn generate_probe_rays(&self, encoder: &mut CommandEncoder, start: u32, end: u32, frame: u32) {
+        // GPU compute pass to generate Fibonacci sphere rays with temporal jitter
+        // Implementation would use compute shaders
+    }
+
+    fn update_probe_data(&self, encoder: &mut CommandEncoder, start: u32, end: u32) {
+        // GPU compute pass to update irradiance and visibility atlases
+        // Uses exponential moving average for temporal stability
+    }
+}
+
+// ============================================================================
+// SURFEL GLOBAL ILLUMINATION
+// ============================================================================
+
+/// Surface element for GI caching
+struct Surfel {
+    position: Vec3,
+    normal: Vec3,
+    albedo: Vec3,
+    irradiance: Vec3,
+    radius: f32,
+    life: f32,
+}
+
+impl Surfel {
+    fn new(position: Vec3, normal: Vec3, albedo: Vec3, radius: f32) -> Self {
+        Self {
+            position,
+            normal,
+            albedo,
+            irradiance: Vec3::ZERO,
+            radius,
+            life: 1.0,
+        }
+    }
+
+    fn coverage_at(&self, point: Vec3) -> f32 {
+        let dist = length(point - self.position);
+        if dist < self.radius {
+            let t = dist / self.radius;
+            (1.0 - t * t) * (1.0 - t * t)
+        } else {
+            0.0
+        }
+    }
+}
+
+/// GPU-packed surfel data
+struct GpuSurfel {
+    position: Vec3,
+    radius: f32,
+    normal: Vec3,
+    life: f32,
+    albedo: Vec3,
+    _pad0: f32,
+    irradiance: Vec3,
+    _pad1: f32,
+}
+
+/// Surfel-based global illumination system
+struct SurfelGI {
+    surfels: Vec<Surfel>,
+    max_surfels: usize,
+    surfel_radius: f32,
+
+    // Spatial acceleration
+    grid_cells: HashMap<(i32, i32, i32), Vec<usize>>,
+    cell_size: f32,
+
+    // GPU resources
+    surfel_buffer: BufferHandle,
+    indirect_buffer: BufferHandle,
+
+    // Recycling
+    free_indices: Vec<usize>,
+}
+
+impl SurfelGI {
+    fn new(device: &Device, max_surfels: usize, surfel_radius: f32) -> Self {
+        let surfel_buffer = device.create_buffer(&BufferDescriptor {
+            size: max_surfels * std::mem::size_of::<GpuSurfel>(),
+            usage: BufferUsage::STORAGE | BufferUsage::COPY_DST,
+            ..Default::default()
+        });
+
+        let indirect_buffer = device.create_buffer(&BufferDescriptor {
+            size: max_surfels * 16, // Vec4 per surfel for indirect
+            usage: BufferUsage::STORAGE,
+            ..Default::default()
+        });
+
+        Self {
+            surfels: Vec::with_capacity(max_surfels),
+            max_surfels,
+            surfel_radius,
+            grid_cells: HashMap::new(),
+            cell_size: surfel_radius * 4.0,
+            surfel_buffer,
+            indirect_buffer,
+            free_indices: Vec::new(),
+        }
+    }
+
+    fn position_to_cell(&self, position: Vec3) -> (i32, i32, i32) {
+        (
+            floor(position.x / self.cell_size) as i32,
+            floor(position.y / self.cell_size) as i32,
+            floor(position.z / self.cell_size) as i32,
+        )
+    }
+
+    /// Spawn new surfels from G-buffer
+    fn spawn_surfels(&mut self, positions: &[Vec3], normals: &[Vec3], albedos: &[Vec3]) {
+        for i in 0..positions.len() {
+            if self.surfels.len() >= self.max_surfels && self.free_indices.is_empty() {
+                break;
+            }
+
+            let position = positions[i];
+            let normal = normals[i];
+            let albedo = albedos[i];
+
+            // Check if area is already covered
+            let cell = self.position_to_cell(position);
+            let mut covered = false;
+
+            for dx in -1..=1 {
+                for dy in -1..=1 {
+                    for dz in -1..=1 {
+                        let key = (cell.0 + dx, cell.1 + dy, cell.2 + dz);
+                        if let Some(indices) = self.grid_cells.get(&key) {
+                            for &idx in indices {
+                                if self.surfels[idx].coverage_at(position) > 0.5 {
+                                    covered = true;
+                                    break;
+                                }
+                            }
+                        }
+                        if covered { break; }
+                    }
+                    if covered { break; }
+                }
+                if covered { break; }
+            }
+
+            if !covered {
+                let surfel = Surfel::new(position, normal, albedo, self.surfel_radius);
+
+                let idx = if let Some(free_idx) = self.free_indices.pop() {
+                    self.surfels[free_idx] = surfel;
+                    free_idx
+                } else {
+                    let idx = self.surfels.len();
+                    self.surfels.push(surfel);
+                    idx
+                };
+
+                self.grid_cells.entry(cell).or_insert_with(Vec::new).push(idx);
+            }
+        }
+    }
+
+    /// Query indirect lighting at a point
+    fn query_indirect(&self, position: Vec3, normal: Vec3) -> Vec3 {
+        let cell = self.position_to_cell(position);
+        let mut result = Vec3::ZERO;
+        let mut total_weight = 0.0;
+
+        for dx in -2..=2 {
+            for dy in -2..=2 {
+                for dz in -2..=2 {
+                    let key = (cell.0 + dx, cell.1 + dy, cell.2 + dz);
+                    if let Some(indices) = self.grid_cells.get(&key) {
+                        for &idx in indices {
+                            let surfel = &self.surfels[idx];
+                            let coverage = surfel.coverage_at(position);
+
+                            if coverage > 0.001 {
+                                // Normal weighting
+                                let normal_weight = max(0.0, dot(surfel.normal, normal));
+                                let weight = coverage * normal_weight * surfel.life;
+
+                                if weight > 0.0001 {
+                                    result = result + surfel.irradiance * weight;
+                                    total_weight += weight;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if total_weight > 0.001 {
+            result * (1.0 / total_weight)
+        } else {
+            Vec3::ZERO
+        }
+    }
+
+    /// Update surfel irradiance via ray tracing
+    fn update_irradiance(
+        &mut self,
+        encoder: &mut CommandEncoder,
+        ray_tracer: &RayTracer,
+        surfels_per_frame: usize,
+    ) {
+        // Trace rays from surfels to gather incoming radiance
+        // Implementation would use compute shaders and ray tracing
+    }
+
+    /// Age and recycle surfels
+    fn age_surfels(&mut self, delta_time: f32, decay_rate: f32) {
+        for (idx, surfel) in self.surfels.iter_mut().enumerate() {
+            surfel.life -= decay_rate * delta_time;
+
+            if surfel.life <= 0.0 {
+                // Remove from spatial grid
+                let cell = self.position_to_cell(surfel.position);
+                if let Some(indices) = self.grid_cells.get_mut(&cell) {
+                    indices.retain(|&i| i != idx);
+                }
+
+                self.free_indices.push(idx);
+            }
+        }
+    }
+}
+
+// ============================================================================
+// VOXEL GLOBAL ILLUMINATION
+// ============================================================================
+
+/// Voxel for cone tracing
+struct Voxel {
+    radiance: Vec3,
+    opacity: f32,
+    normal: Vec3,
+}
+
+/// Voxel-based global illumination (VXGI)
+struct VoxelGI {
+    resolution: u32,
+    bounds_min: Vec3,
+    bounds_max: Vec3,
+    voxel_size: f32,
+
+    // Clipmap levels for multi-resolution
+    clipmap_levels: u32,
+    clipmaps: Vec<TextureHandle>,
+
+    // GPU resources
+    voxel_texture: TextureHandle,
+    radiance_texture: TextureHandle,
+    opacity_texture: TextureHandle,
+}
+
+impl VoxelGI {
+    fn new(device: &Device, resolution: u32, bounds_min: Vec3, bounds_max: Vec3, clipmap_levels: u32) -> Self {
+        let extent = bounds_max - bounds_min;
+        let voxel_size = extent.x / resolution as f32;
+
+        let voxel_texture = device.create_texture(&TextureDescriptor {
+            size: (resolution, resolution, resolution),
+            format: TextureFormat::Rgba8Unorm,
+            usage: TextureUsage::STORAGE | TextureUsage::SAMPLED,
+            dimension: TextureDimension::D3,
+            ..Default::default()
+        });
+
+        let radiance_texture = device.create_texture(&TextureDescriptor {
+            size: (resolution, resolution, resolution),
+            format: TextureFormat::Rgba16Float,
+            usage: TextureUsage::STORAGE | TextureUsage::SAMPLED,
+            dimension: TextureDimension::D3,
+            mip_level_count: (resolution as f32).log2() as u32,
+            ..Default::default()
+        });
+
+        let opacity_texture = device.create_texture(&TextureDescriptor {
+            size: (resolution, resolution, resolution),
+            format: TextureFormat::R8Unorm,
+            usage: TextureUsage::STORAGE | TextureUsage::SAMPLED,
+            dimension: TextureDimension::D3,
+            mip_level_count: (resolution as f32).log2() as u32,
+            ..Default::default()
+        });
+
+        let mut clipmaps = Vec::with_capacity(clipmap_levels as usize);
+        for level in 0..clipmap_levels {
+            let level_res = resolution >> level;
+            clipmaps.push(device.create_texture(&TextureDescriptor {
+                size: (level_res, level_res, level_res),
+                format: TextureFormat::Rgba16Float,
+                usage: TextureUsage::STORAGE | TextureUsage::SAMPLED,
+                dimension: TextureDimension::D3,
+                ..Default::default()
+            }));
+        }
+
+        Self {
+            resolution,
+            bounds_min,
+            bounds_max,
+            voxel_size,
+            clipmap_levels,
+            clipmaps,
+            voxel_texture,
+            radiance_texture,
+            opacity_texture,
+        }
+    }
+
+    /// Voxelize the scene
+    fn voxelize(
+        &mut self,
+        encoder: &mut CommandEncoder,
+        scene: &Scene,
+        voxelize_pipeline: &ComputePipelineHandle,
+    ) {
+        // Clear voxel grids
+        encoder.clear_texture(&self.voxel_texture, Vec4::ZERO);
+        encoder.clear_texture(&self.opacity_texture, Vec4::ZERO);
+
+        // Conservative rasterization to voxel grid
+        // Implementation uses geometry shader or compute voxelization
+    }
+
+    /// Inject direct lighting into voxel grid
+    fn inject_lighting(
+        &mut self,
+        encoder: &mut CommandEncoder,
+        lights: &[Light],
+        shadow_maps: &[TextureHandle],
+        inject_pipeline: &ComputePipelineHandle,
+    ) {
+        // Inject light into voxels visible from each light
+    }
+
+    /// Generate mip chain for cone tracing
+    fn generate_mips(&self, encoder: &mut CommandEncoder, mip_pipeline: &ComputePipelineHandle) {
+        let mut current_res = self.resolution;
+
+        for level in 1..(self.resolution as f32).log2() as u32 {
+            current_res /= 2;
+
+            let mut pass = encoder.begin_compute_pass(&format!("Voxel Mip Level {}", level));
+            pass.set_pipeline(mip_pipeline);
+            pass.set_texture(0, &self.radiance_texture);
+            pass.set_storage_texture_mip(1, &self.radiance_texture, level);
+            pass.set_uniform(2, &MipUniforms { src_level: level - 1 });
+            pass.dispatch((current_res + 3) / 4, (current_res + 3) / 4, (current_res + 3) / 4);
+        }
+    }
+
+    /// Cone trace for indirect lighting
+    fn cone_trace(
+        &self,
+        origin: Vec3,
+        direction: Vec3,
+        cone_angle: f32,
+        max_distance: f32,
+    ) -> Vec3 {
+        let mut accumulated_radiance = Vec3::ZERO;
+        let mut accumulated_opacity = 0.0;
+
+        let step_size = self.voxel_size * 0.5;
+        let mut t = step_size;
+
+        while t < max_distance && accumulated_opacity < 0.99 {
+            let position = origin + direction * t;
+
+            // Determine mip level from cone width
+            let cone_width = t * cone_angle;
+            let mip = (cone_width / self.voxel_size).log2().max(0.0);
+
+            // Sample voxel grid with trilinear + mip filtering
+            let (radiance, opacity) = self.sample_voxel(position, mip);
+
+            // Front-to-back compositing
+            let alpha = 1.0 - accumulated_opacity;
+            accumulated_radiance = accumulated_radiance + radiance * alpha * opacity;
+            accumulated_opacity += opacity * alpha;
+
+            // Adaptive step size based on cone width
+            t += max(step_size, cone_width);
+        }
+
+        accumulated_radiance
+    }
+
+    fn sample_voxel(&self, position: Vec3, mip: f32) -> (Vec3, f32) {
+        // Transform to UV coordinates
+        let uv = (position - self.bounds_min) / (self.bounds_max - self.bounds_min);
+
+        if uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0 || uv.z < 0.0 || uv.z > 1.0 {
+            return (Vec3::ZERO, 0.0);
+        }
+
+        // Sample would use hardware trilinear filtering
+        // This is placeholder for CPU reference
+        (Vec3::new(0.1, 0.1, 0.1), 0.1)
+    }
+
+    /// Sample diffuse indirect from multiple cones
+    fn sample_diffuse_indirect(&self, position: Vec3, normal: Vec3) -> Vec3 {
+        let tangent = if abs(normal.y) < 0.999 {
+            normalize(cross(Vec3::Y, normal))
+        } else {
+            Vec3::X
+        };
+        let bitangent = cross(normal, tangent);
+
+        // 6 cones in a hemisphere
+        let cones = [
+            (normal, 60.0_f32.to_radians(), 0.25),                    // Main cone
+            (normalize(normal + tangent * 0.5), 60.0_f32.to_radians(), 0.15),
+            (normalize(normal - tangent * 0.5), 60.0_f32.to_radians(), 0.15),
+            (normalize(normal + bitangent * 0.5), 60.0_f32.to_radians(), 0.15),
+            (normalize(normal - bitangent * 0.5), 60.0_f32.to_radians(), 0.15),
+            (normalize(normal + tangent * 0.3 + bitangent * 0.3), 60.0_f32.to_radians(), 0.15),
+        ];
+
+        let mut result = Vec3::ZERO;
+
+        for (dir, angle, weight) in cones {
+            result = result + self.cone_trace(position + normal * self.voxel_size, dir, angle, 50.0) * weight;
+        }
+
+        result
+    }
+}
+
+// ============================================================================
+// INDIRECT LIGHTING MANAGER
+// ============================================================================
+
+/// Indirect lighting technique
+enum IndirectTechnique {
+    ProbeGrid,
+    Ddgi,
+    Ssgi,
+    Surfel,
+    VoxelGI,
+    Hybrid,
+}
+
+/// Indirect lighting quality
+enum IndirectQuality {
+    Low,
+    Medium,
+    High,
+    Ultra,
+}
+
+/// Configuration for indirect lighting system
+struct IndirectLightingConfig {
+    technique: IndirectTechnique,
+    quality: IndirectQuality,
+
+    // Probe settings
+    probe_grid_resolution: (u32, u32, u32),
+    probes_updated_per_frame: u32,
+
+    // SSGI settings
+    ssgi_config: SsgiConfig,
+
+    // Voxel settings
+    voxel_resolution: u32,
+    voxel_clipmap_levels: u32,
+
+    // Caching
+    use_radiance_cache: bool,
+    cache_cell_size: f32,
+
+    // Temporal
+    temporal_weight: f32,
+
+    // Intensity
+    indirect_intensity: f32,
+}
+
+impl IndirectLightingConfig {
+    fn default() -> Self {
+        Self {
+            technique: IndirectTechnique::Hybrid,
+            quality: IndirectQuality::Medium,
+            probe_grid_resolution: (16, 8, 16),
+            probes_updated_per_frame: 16,
+            ssgi_config: SsgiConfig::default(),
+            voxel_resolution: 128,
+            voxel_clipmap_levels: 4,
+            use_radiance_cache: true,
+            cache_cell_size: 2.0,
+            temporal_weight: 0.95,
+            indirect_intensity: 1.0,
+        }
+    }
+}
+
+/// Main indirect lighting manager
+struct IndirectLightingManager {
+    config: IndirectLightingConfig,
+
+    // Sub-systems
+    probe_grid: Option<LightProbeGrid>,
+    ddgi_volume: Option<DdgiVolume>,
+    ssgi_renderer: Option<SsgiRenderer>,
+    surfel_gi: Option<SurfelGI>,
+    voxel_gi: Option<VoxelGI>,
+    radiance_cache: Option<RadianceCache>,
+
+    // Output
+    indirect_texture: TextureHandle,
+    history_texture: TextureHandle,
+
+    // Statistics
+    frame_count: u64,
+}
+
+impl IndirectLightingManager {
+    fn new(device: &Device, config: IndirectLightingConfig, scene_bounds: (Vec3, Vec3)) -> Self {
+        let (bounds_min, bounds_max) = scene_bounds;
+
+        let probe_grid = match config.technique {
+            IndirectTechnique::ProbeGrid | IndirectTechnique::Hybrid => {
+                Some(LightProbeGrid::new(
+                    bounds_min,
+                    bounds_max,
+                    config.probe_grid_resolution
+                ))
+            }
+            _ => None,
+        };
+
+        let ddgi_volume = match config.technique {
+            IndirectTechnique::Ddgi | IndirectTechnique::Hybrid => {
+                Some(DdgiVolume::new(
+                    device,
+                    bounds_min,
+                    bounds_max,
+                    config.probe_grid_resolution,
+                    8,  // Irradiance resolution
+                    16, // Visibility resolution
+                ))
+            }
+            _ => None,
+        };
+
+        let ssgi_renderer = match config.technique {
+            IndirectTechnique::Ssgi | IndirectTechnique::Hybrid => {
+                Some(SsgiRenderer::new(device, 1920, 1080, config.ssgi_config.clone()))
+            }
+            _ => None,
+        };
+
+        let surfel_gi = match config.technique {
+            IndirectTechnique::Surfel => {
+                Some(SurfelGI::new(device, 100000, 0.5))
+            }
+            _ => None,
+        };
+
+        let voxel_gi = match config.technique {
+            IndirectTechnique::VoxelGI | IndirectTechnique::Hybrid => {
+                Some(VoxelGI::new(
+                    device,
+                    config.voxel_resolution,
+                    bounds_min,
+                    bounds_max,
+                    config.voxel_clipmap_levels
+                ))
+            }
+            _ => None,
+        };
+
+        let radiance_cache = if config.use_radiance_cache {
+            Some(RadianceCache::new(config.cache_cell_size, 256))
+        } else {
+            None
+        };
+
+        let indirect_texture = device.create_texture(&TextureDescriptor {
+            size: (1920, 1080, 1),
+            format: TextureFormat::Rgba16Float,
+            usage: TextureUsage::STORAGE | TextureUsage::SAMPLED,
+            ..Default::default()
+        });
+
+        let history_texture = device.create_texture(&TextureDescriptor {
+            size: (1920, 1080, 1),
+            format: TextureFormat::Rgba16Float,
+            usage: TextureUsage::STORAGE | TextureUsage::SAMPLED,
+            ..Default::default()
+        });
+
+        Self {
+            config,
+            probe_grid,
+            ddgi_volume,
+            ssgi_renderer,
+            surfel_gi,
+            voxel_gi,
+            radiance_cache,
+            indirect_texture,
+            history_texture,
+            frame_count: 0,
+        }
+    }
+
+    /// Update indirect lighting systems
+    fn update(
+        &mut self,
+        encoder: &mut CommandEncoder,
+        scene: &Scene,
+        ray_tracer: &RayTracer,
+        g_buffer: &GBuffer,
+        view_info: &ViewInfo,
+    ) {
+        // Update DDGI probes
+        if let Some(ref mut ddgi) = self.ddgi_volume {
+            ddgi.update_probes(encoder, ray_tracer, scene, self.frame_count as u32);
+        }
+
+        // Update voxel GI
+        if let Some(ref mut voxel) = self.voxel_gi {
+            // Re-voxelize dynamic objects
+            // voxel.voxelize(encoder, scene, &voxelize_pipeline);
+            voxel.generate_mips(encoder, &ComputePipelineHandle::default());
+        }
+
+        // Run SSGI
+        if let Some(ref mut ssgi) = self.ssgi_renderer {
+            ssgi.render(
+                encoder,
+                &g_buffer.depth,
+                &g_buffer.normal,
+                &g_buffer.albedo,
+                &g_buffer.motion,
+                view_info,
+                self.frame_count as u32,
+            );
+        }
+
+        // Evict old radiance cache entries
+        if let Some(ref mut cache) = self.radiance_cache {
+            if self.frame_count % 60 == 0 {
+                cache.evict(self.frame_count);
+            }
+        }
+
+        self.frame_count += 1;
+    }
+
+    /// Sample indirect lighting at a world position
+    fn sample_indirect(&mut self, position: Vec3, normal: Vec3, view_dir: Vec3) -> Vec3 {
+        let mut result = Vec3::ZERO;
+        let mut weight_sum = 0.0;
+
+        // Try radiance cache first
+        if let Some(ref mut cache) = self.radiance_cache {
+            if let Some(cached) = cache.query(position, normal, self.config.cache_cell_size * 2.0) {
+                return cached * self.config.indirect_intensity;
+            }
+        }
+
+        // Sample from probe grid
+        if let Some(ref grid) = self.probe_grid {
+            let probe_indirect = grid.sample_irradiance_visibility_aware(position, normal, 0.1);
+            result = result + probe_indirect;
+            weight_sum += 1.0;
+        }
+
+        // Sample from DDGI
+        if let Some(ref ddgi) = self.ddgi_volume {
+            let ddgi_indirect = ddgi.sample_irradiance(position, normal, view_dir);
+            result = result + ddgi_indirect;
+            weight_sum += 1.0;
+        }
+
+        // Sample from voxel GI
+        if let Some(ref voxel) = self.voxel_gi {
+            let voxel_indirect = voxel.sample_diffuse_indirect(position, normal);
+            result = result + voxel_indirect;
+            weight_sum += 1.0;
+        }
+
+        if weight_sum > 0.0 {
+            result = result * (1.0 / weight_sum);
+        }
+
+        // Store in cache
+        if let Some(ref mut cache) = self.radiance_cache {
+            cache.insert(position, normal, result, 1.0, self.frame_count);
+        }
+
+        result * self.config.indirect_intensity
+    }
+
+    /// Invalidate indirect lighting in a region (for dynamic updates)
+    fn invalidate_region(&mut self, center: Vec3, radius: f32) {
+        if let Some(ref mut grid) = self.probe_grid {
+            grid.invalidate_region(center, radius);
+        }
+
+        if let Some(ref mut cache) = self.radiance_cache {
+            // Could implement spatial invalidation for cache
+        }
+    }
+
+    fn get_indirect_texture(&self) -> &TextureHandle {
+        &self.indirect_texture
+    }
+
+    fn debug_info(&self) -> IndirectLightingDebugInfo {
+        IndirectLightingDebugInfo {
+            cache_hit_rate: self.radiance_cache.as_ref().map(|c| c.hit_rate()).unwrap_or(0.0),
+            cache_entries: self.radiance_cache.as_ref().map(|c| c.total_entries).unwrap_or(0),
+            probe_count: self.probe_grid.as_ref().map(|g| g.probes.len()).unwrap_or(0),
+            surfel_count: self.surfel_gi.as_ref().map(|s| s.surfels.len()).unwrap_or(0),
+        }
+    }
+}
+
+struct IndirectLightingDebugInfo {
+    cache_hit_rate: f32,
+    cache_entries: usize,
+    probe_count: usize,
+    surfel_count: usize,
+}
+
+// ============================================================================
+// WGSL SHADERS
+// ============================================================================
+
+const INDIRECT_LIGHTING_WGSL: &str = r#"
+// Spherical harmonics evaluation
+struct SH_L2 {
+    coefficients: array<vec3<f32>, 9>,
+}
+
+fn sh_basis_l2(direction: vec3<f32>) -> array<f32, 9> {
+    let x = direction.x;
+    let y = direction.y;
+    let z = direction.z;
+
+    let k0 = 0.282095;
+    let k1 = 0.488603;
+    let k2 = 1.092548;
+    let k3 = 0.315392;
+    let k4 = 0.546274;
+
+    return array<f32, 9>(
+        k0,
+        k1 * y,
+        k1 * z,
+        k1 * x,
+        k2 * x * y,
+        k2 * y * z,
+        k3 * (3.0 * z * z - 1.0),
+        k2 * x * z,
+        k4 * (x * x - y * y)
+    );
+}
+
+fn evaluate_sh_irradiance(sh: SH_L2, direction: vec3<f32>) -> vec3<f32> {
+    let basis = sh_basis_l2(normalize(direction));
+
+    let PI = 3.14159265359;
+    let zh = array<f32, 3>(PI, (2.0 * PI) / 3.0, PI / 4.0);
+
+    var result = sh.coefficients[0] * basis[0] * zh[0];
+
+    for (var i = 1; i < 4; i++) {
+        result += sh.coefficients[i] * basis[i] * zh[1];
+    }
+
+    for (var i = 4; i < 9; i++) {
+        result += sh.coefficients[i] * basis[i] * zh[2];
+    }
+
+    return max(result / PI, vec3<f32>(0.0));
+}
+
+// Probe sampling
+struct ProbeData {
+    position: vec3<f32>,
+    mean_distance: f32,
+    sh: array<vec4<f32>, 7>,
+}
+
+@group(0) @binding(0) var<storage, read> probes: array<ProbeData>;
+@group(0) @binding(1) var<uniform> grid_params: GridParams;
+
+struct GridParams {
+    bounds_min: vec3<f32>,
+    _pad0: f32,
+    bounds_max: vec3<f32>,
+    _pad1: f32,
+    resolution: vec3<u32>,
+    _pad2: u32,
+    inv_spacing: vec3<f32>,
+    _pad3: f32,
+}
+
+fn world_to_grid(position: vec3<f32>) -> vec3<f32> {
+    return (position - grid_params.bounds_min) * grid_params.inv_spacing - vec3<f32>(0.5);
+}
+
+fn probe_index(x: u32, y: u32, z: u32) -> u32 {
+    return z * grid_params.resolution.y * grid_params.resolution.x +
+           y * grid_params.resolution.x + x;
+}
+
+fn sample_probe_grid(position: vec3<f32>, normal: vec3<f32>, surface_bias: f32) -> vec3<f32> {
+    let biased_pos = position + normal * surface_bias;
+    let grid_pos = world_to_grid(biased_pos);
+
+    let x0 = u32(floor(grid_pos.x));
+    let y0 = u32(floor(grid_pos.y));
+    let z0 = u32(floor(grid_pos.z));
+
+    let fx = fract(grid_pos.x);
+    let fy = fract(grid_pos.y);
+    let fz = fract(grid_pos.z);
+
+    var result = vec3<f32>(0.0);
+    var total_weight = 0.0;
+
+    for (var dz = 0u; dz < 2u; dz++) {
+        for (var dy = 0u; dy < 2u; dy++) {
+            for (var dx = 0u; dx < 2u; dx++) {
+                let x = x0 + dx;
+                let y = y0 + dy;
+                let z = z0 + dz;
+
+                if (x < grid_params.resolution.x &&
+                    y < grid_params.resolution.y &&
+                    z < grid_params.resolution.z) {
+
+                    let idx = probe_index(x, y, z);
+                    let probe = probes[idx];
+
+                    // Trilinear weight
+                    let wx = select(1.0 - fx, fx, dx == 1u);
+                    let wy = select(1.0 - fy, fy, dy == 1u);
+                    let wz = select(1.0 - fz, fz, dz == 1u);
+                    let trilinear = wx * wy * wz;
+
+                    // Backface weight
+                    let to_probe = normalize(probe.position - position);
+                    let backface = (dot(to_probe, normal) + 1.0) * 0.5;
+                    let smooth_backface = backface * backface + 0.2;
+
+                    let weight = trilinear * smooth_backface;
+
+                    if (weight > 0.0001) {
+                        // Unpack SH and evaluate
+                        var sh: SH_L2;
+                        sh.coefficients[0] = probe.sh[0].xyz;
+                        sh.coefficients[1] = vec3<f32>(probe.sh[0].w, probe.sh[1].xy);
+                        sh.coefficients[2] = vec3<f32>(probe.sh[1].zw, probe.sh[2].x);
+                        sh.coefficients[3] = probe.sh[2].yzw;
+                        sh.coefficients[4] = probe.sh[3].xyz;
+                        sh.coefficients[5] = vec3<f32>(probe.sh[3].w, probe.sh[4].xy);
+                        sh.coefficients[6] = vec3<f32>(probe.sh[4].zw, probe.sh[5].x);
+                        sh.coefficients[7] = probe.sh[5].yzw;
+                        sh.coefficients[8] = probe.sh[6].xyz;
+
+                        let irradiance = evaluate_sh_irradiance(sh, normal);
+                        result += irradiance * weight;
+                        total_weight += weight;
+                    }
+                }
+            }
+        }
+    }
+
+    if (total_weight > 0.0001) {
+        return result / total_weight;
+    }
+    return vec3<f32>(0.0);
+}
+
+// SSGI ray marching
+@group(0) @binding(0) var depth_texture: texture_2d<f32>;
+@group(0) @binding(1) var normal_texture: texture_2d<f32>;
+@group(0) @binding(2) var color_texture: texture_2d<f32>;
+@group(0) @binding(3) var noise_texture: texture_2d<f32>;
+@group(0) @binding(4) var output_texture: texture_storage_2d<rgba16float, write>;
+
+struct SsgiParams {
+    view_proj: mat4x4<f32>,
+    inv_view_proj: mat4x4<f32>,
+    camera_pos: vec3<f32>,
+    ray_count: u32,
+    max_steps: u32,
+    max_distance: f32,
+    thickness: f32,
+    intensity: f32,
+    frame_index: u32,
+}
+
+@group(0) @binding(5) var<uniform> params: SsgiParams;
+
+fn reconstruct_position(uv: vec2<f32>, depth: f32) -> vec3<f32> {
+    let ndc = vec4<f32>(uv * 2.0 - 1.0, depth, 1.0);
+    let world = params.inv_view_proj * ndc;
+    return world.xyz / world.w;
+}
+
+fn project_position(position: vec3<f32>) -> vec3<f32> {
+    let clip = params.view_proj * vec4<f32>(position, 1.0);
+    let ndc = clip.xyz / clip.w;
+    return vec3<f32>(ndc.xy * 0.5 + 0.5, ndc.z);
+}
+
+@compute @workgroup_size(8, 8, 1)
+fn ssgi_main(@builtin(global_invocation_id) id: vec3<u32>) {
+    let dims = textureDimensions(depth_texture);
+    if (id.x >= dims.x || id.y >= dims.y) {
+        return;
+    }
+
+    let uv = (vec2<f32>(id.xy) + 0.5) / vec2<f32>(dims);
+    let depth = textureLoad(depth_texture, vec2<i32>(id.xy), 0).r;
+
+    if (depth >= 1.0) {
+        textureStore(output_texture, vec2<i32>(id.xy), vec4<f32>(0.0));
+        return;
+    }
+
+    let position = reconstruct_position(uv, depth);
+    let normal = textureLoad(normal_texture, vec2<i32>(id.xy), 0).xyz * 2.0 - 1.0;
+
+    // Generate hemisphere samples using noise
+    let noise_uv = vec2<f32>(id.xy % 64u) / 64.0;
+    let noise = textureLoad(noise_texture, vec2<i32>(id.xy % 64u), 0).r;
+
+    var accumulated = vec3<f32>(0.0);
+    var ao = 0.0;
+
+    for (var i = 0u; i < params.ray_count; i++) {
+        // Fibonacci hemisphere sampling with temporal jitter
+        let phi = 2.4 * f32(i) + noise * 6.28318530718;
+        let cos_theta = 1.0 - (f32(i) + 0.5) / f32(params.ray_count);
+        let sin_theta = sqrt(1.0 - cos_theta * cos_theta);
+
+        let local_dir = vec3<f32>(
+            sin_theta * cos(phi),
+            sin_theta * sin(phi),
+            cos_theta
+        );
+
+        // Transform to world space
+        let up = select(vec3<f32>(0.0, 1.0, 0.0), vec3<f32>(1.0, 0.0, 0.0), abs(normal.y) > 0.99);
+        let tangent = normalize(cross(up, normal));
+        let bitangent = cross(normal, tangent);
+
+        let ray_dir = tangent * local_dir.x + bitangent * local_dir.y + normal * local_dir.z;
+
+        // Screen-space ray march
+        var ray_pos = position + normal * 0.01;
+        let step_size = params.max_distance / f32(params.max_steps);
+        var hit = false;
+        var hit_color = vec3<f32>(0.0);
+
+        for (var step = 0u; step < params.max_steps; step++) {
+            ray_pos += ray_dir * step_size;
+
+            let projected = project_position(ray_pos);
+            if (projected.x < 0.0 || projected.x > 1.0 ||
+                projected.y < 0.0 || projected.y > 1.0) {
+                break;
+            }
+
+            let sample_coord = vec2<i32>(projected.xy * vec2<f32>(dims));
+            let sample_depth = textureLoad(depth_texture, sample_coord, 0).r;
+            let sample_pos = reconstruct_position(projected.xy, sample_depth);
+
+            let depth_diff = ray_pos.z - sample_pos.z;
+            if (depth_diff > 0.0 && depth_diff < params.thickness) {
+                hit = true;
+                hit_color = textureLoad(color_texture, sample_coord, 0).rgb;
+                ao += 1.0;
+                break;
+            }
+        }
+
+        if (hit) {
+            accumulated += hit_color * cos_theta;
+        }
+    }
+
+    let indirect = accumulated / f32(params.ray_count) * params.intensity;
+    let occlusion = 1.0 - (ao / f32(params.ray_count));
+
+    textureStore(output_texture, vec2<i32>(id.xy), vec4<f32>(indirect, occlusion));
+}
+
+// Temporal accumulation
+@group(0) @binding(0) var current_texture: texture_2d<f32>;
+@group(0) @binding(1) var motion_texture: texture_2d<f32>;
+@group(0) @binding(2) var depth_current: texture_2d<f32>;
+@group(0) @binding(3) var history_texture: texture_storage_2d<rgba16float, read_write>;
+
+struct TemporalParams {
+    temporal_weight: f32,
+    frame_index: u32,
+}
+
+@group(0) @binding(4) var<uniform> temporal_params: TemporalParams;
+
+@compute @workgroup_size(8, 8, 1)
+fn ssgi_temporal(@builtin(global_invocation_id) id: vec3<u32>) {
+    let dims = textureDimensions(current_texture);
+    if (id.x >= dims.x || id.y >= dims.y) {
+        return;
+    }
+
+    let uv = (vec2<f32>(id.xy) + 0.5) / vec2<f32>(dims);
+    let motion = textureLoad(motion_texture, vec2<i32>(id.xy), 0).xy;
+    let prev_uv = uv - motion;
+
+    let current = textureLoad(current_texture, vec2<i32>(id.xy), 0);
+
+    var weight = temporal_params.temporal_weight;
+
+    // Reject history if outside screen
+    if (prev_uv.x < 0.0 || prev_uv.x > 1.0 || prev_uv.y < 0.0 || prev_uv.y > 1.0) {
+        weight = 0.0;
+    }
+
+    let prev_coord = vec2<i32>(prev_uv * vec2<f32>(dims));
+    let history = textureLoad(history_texture, prev_coord);
+
+    // Neighborhood clamping
+    var min_color = current.rgb;
+    var max_color = current.rgb;
+
+    for (var dy = -1; dy <= 1; dy++) {
+        for (var dx = -1; dx <= 1; dx++) {
+            let neighbor = textureLoad(current_texture, vec2<i32>(id.xy) + vec2<i32>(dx, dy), 0).rgb;
+            min_color = min(min_color, neighbor);
+            max_color = max(max_color, neighbor);
+        }
+    }
+
+    let clamped_history = clamp(history.rgb, min_color, max_color);
+    let blended = mix(current.rgb, clamped_history, weight);
+
+    textureStore(history_texture, vec2<i32>(id.xy), vec4<f32>(blended, current.a));
+}
+
+// Octahedral encoding for DDGI
+fn oct_encode(direction: vec3<f32>) -> vec2<f32> {
+    let d = direction / (abs(direction.x) + abs(direction.y) + abs(direction.z));
+    var oct = vec2<f32>(d.x, d.y);
+
+    if (d.z < 0.0) {
+        oct = (1.0 - abs(oct.yx)) * select(vec2<f32>(-1.0), vec2<f32>(1.0), oct >= vec2<f32>(0.0));
+    }
+
+    return oct * 0.5 + 0.5;
+}
+
+fn oct_decode(oct: vec2<f32>) -> vec3<f32> {
+    var o = oct * 2.0 - 1.0;
+    let z = 1.0 - abs(o.x) - abs(o.y);
+
+    let t = max(-z, 0.0);
+    o.x += select(t, -t, o.x >= 0.0);
+    o.y += select(t, -t, o.y >= 0.0);
+
+    return normalize(vec3<f32>(o.x, o.y, z));
+}
+
+// Voxel cone tracing
+@group(0) @binding(0) var voxel_radiance: texture_3d<f32>;
+@group(0) @binding(1) var voxel_sampler: sampler;
+
+struct VoxelParams {
+    bounds_min: vec3<f32>,
+    _pad0: f32,
+    bounds_max: vec3<f32>,
+    _pad1: f32,
+    voxel_size: f32,
+    max_distance: f32,
+    cone_angle: f32,
+    _pad2: f32,
+}
+
+@group(0) @binding(2) var<uniform> voxel_params: VoxelParams;
+
+fn cone_trace(origin: vec3<f32>, direction: vec3<f32>) -> vec4<f32> {
+    var accumulated_radiance = vec3<f32>(0.0);
+    var accumulated_opacity = 0.0;
+
+    let step_size = voxel_params.voxel_size * 0.5;
+    var t = step_size;
+
+    while (t < voxel_params.max_distance && accumulated_opacity < 0.99) {
+        let pos = origin + direction * t;
+
+        // Transform to voxel UV
+        let uv = (pos - voxel_params.bounds_min) / (voxel_params.bounds_max - voxel_params.bounds_min);
+
+        if (any(uv < vec3<f32>(0.0)) || any(uv > vec3<f32>(1.0))) {
+            break;
+        }
+
+        // Determine mip level from cone width
+        let cone_width = t * voxel_params.cone_angle;
+        let mip = max(0.0, log2(cone_width / voxel_params.voxel_size));
+
+        let sample = textureSampleLevel(voxel_radiance, voxel_sampler, uv, mip);
+        let radiance = sample.rgb;
+        let opacity = sample.a;
+
+        // Front-to-back compositing
+        let alpha = 1.0 - accumulated_opacity;
+        accumulated_radiance += radiance * alpha * opacity;
+        accumulated_opacity += opacity * alpha;
+
+        t += max(step_size, cone_width);
+    }
+
+    return vec4<f32>(accumulated_radiance, accumulated_opacity);
+}
+
+fn diffuse_cone_trace(position: vec3<f32>, normal: vec3<f32>) -> vec3<f32> {
+    let up = select(vec3<f32>(0.0, 1.0, 0.0), vec3<f32>(1.0, 0.0, 0.0), abs(normal.y) > 0.99);
+    let tangent = normalize(cross(up, normal));
+    let bitangent = cross(normal, tangent);
+
+    // 5 cones covering hemisphere
+    var result = vec3<f32>(0.0);
+
+    // Main cone
+    result += cone_trace(position + normal * voxel_params.voxel_size, normal).rgb * 0.25;
+
+    // Side cones
+    let side_angle = 0.57735; // tan(30 degrees)
+    let directions = array<vec3<f32>, 4>(
+        normalize(normal + tangent * side_angle),
+        normalize(normal - tangent * side_angle),
+        normalize(normal + bitangent * side_angle),
+        normalize(normal - bitangent * side_angle)
+    );
+
+    for (var i = 0; i < 4; i++) {
+        result += cone_trace(position + normal * voxel_params.voxel_size, directions[i]).rgb * 0.1875;
+    }
+
+    return result;
+}
+"#;
+
+// ============================================================================
+// UNIT TESTS
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_spherical_harmonics_l2() {
+        let mut sh = SphericalHarmonicsL2::new();
+
+        // Add light from above
+        sh.add_directional_light(Vec3::new(0.0, 1.0, 0.0), Vec3::new(1.0, 1.0, 1.0));
+
+        // Evaluate in the light direction should be bright
+        let up_irradiance = sh.evaluate(Vec3::new(0.0, 1.0, 0.0));
+        assert!(up_irradiance.y > 0.1);
+
+        // Evaluate in opposite direction should be darker
+        let down_irradiance = sh.evaluate(Vec3::new(0.0, -1.0, 0.0));
+        assert!(down_irradiance.y < up_irradiance.y);
+    }
+
+    #[test]
+    fn test_sh_basis_orthogonality() {
+        // Test that basis functions are approximately orthonormal
+        let directions = [
+            Vec3::new(1.0, 0.0, 0.0),
+            Vec3::new(0.0, 1.0, 0.0),
+            Vec3::new(0.0, 0.0, 1.0),
+            Vec3::new(-1.0, 0.0, 0.0),
+            Vec3::new(0.0, -1.0, 0.0),
+            Vec3::new(0.0, 0.0, -1.0),
+        ];
+
+        for dir in &directions {
+            let basis = SphericalHarmonicsL2::evaluate_basis(*dir);
+            assert!(basis.len() == 9);
+
+            // L0 should be constant
+            assert!((basis[0] - 0.282095).abs() < 0.001);
+        }
+    }
+
+    #[test]
+    fn test_sh_lerp() {
+        let mut sh1 = SphericalHarmonicsL2::new();
+        sh1.add_ambient(Vec3::new(1.0, 0.0, 0.0));
+
+        let mut sh2 = SphericalHarmonicsL2::new();
+        sh2.add_ambient(Vec3::new(0.0, 1.0, 0.0));
+
+        let blended = SphericalHarmonicsL2::lerp(&sh1, &sh2, 0.5);
+        let result = blended.evaluate(Vec3::new(0.0, 1.0, 0.0));
+
+        // Should have equal red and green
+        assert!((result.x - result.y).abs() < 0.1);
+    }
+
+    #[test]
+    fn test_octahedral_encoding() {
+        let test_directions = [
+            Vec3::new(1.0, 0.0, 0.0),
+            Vec3::new(0.0, 1.0, 0.0),
+            Vec3::new(0.0, 0.0, 1.0),
+            Vec3::new(0.577, 0.577, 0.577),
+            Vec3::new(-0.577, 0.577, -0.577),
+        ];
+
+        for &dir in &test_directions {
+            let normalized = normalize(dir);
+            let uv = OctahedralMap::direction_to_uv(normalized);
+            let decoded = OctahedralMap::uv_to_direction(uv);
+
+            let error = length(decoded - normalized);
+            assert!(error < 0.001, "Octahedral encode/decode error: {}", error);
+        }
+    }
+
+    #[test]
+    fn test_octahedral_map() {
+        let mut oct = OctahedralMap::new(16);
+
+        let test_dir = Vec3::new(0.0, 1.0, 0.0);
+        let test_value = Vec3::new(1.0, 0.5, 0.25);
+
+        oct.set(test_dir, test_value);
+        let sampled = oct.sample(test_dir);
+
+        assert!((sampled.x - test_value.x).abs() < 0.1);
+    }
+
+    #[test]
+    fn test_light_probe_grid() {
+        let grid = LightProbeGrid::new(
+            Vec3::new(-10.0, -10.0, -10.0),
+            Vec3::new(10.0, 10.0, 10.0),
+            (4, 4, 4)
+        );
+
+        assert_eq!(grid.probes.len(), 64);
+
+        // Test world to grid conversion
+        let (gx, gy, gz) = grid.world_to_grid(Vec3::ZERO);
+        assert!((gx - 1.5).abs() < 0.1);
+        assert!((gy - 1.5).abs() < 0.1);
+        assert!((gz - 1.5).abs() < 0.1);
+    }
+
+    #[test]
+    fn test_trilinear_weights() {
+        let grid = LightProbeGrid::new(
+            Vec3::new(0.0, 0.0, 0.0),
+            Vec3::new(4.0, 4.0, 4.0),
+            (4, 4, 4)
+        );
+
+        // Weights at cell center should sum to 1
+        let weights = grid.trilinear_weights(Vec3::new(0.5, 0.5, 0.5));
+        let sum: f32 = weights.iter().sum();
+        assert!((sum - 1.0).abs() < 0.001);
+
+        // At corner, one weight should be 1, others 0
+        let corner_weights = grid.trilinear_weights(Vec3::new(0.0, 0.0, 0.0));
+        assert!(corner_weights[0] > 0.99);
+    }
+
+    #[test]
+    fn test_radiance_cache() {
+        let mut cache = RadianceCache::new(2.0, 100);
+
+        let position = Vec3::new(1.0, 1.0, 1.0);
+        let normal = Vec3::new(0.0, 1.0, 0.0);
+        let radiance = Vec3::new(0.5, 0.5, 0.5);
+
+        cache.insert(position, normal, radiance, 1.0, 0);
+
+        let result = cache.query(position, normal, 3.0);
+        assert!(result.is_some());
+
+        let queried = result.unwrap();
+        assert!((queried.x - radiance.x).abs() < 0.1);
+    }
+
+    #[test]
+    fn test_radiance_cache_eviction() {
+        let mut cache = RadianceCache::new(1.0, 10);
+        cache.max_age_frames = 10;
+
+        // Insert entries at frame 0
+        cache.insert(Vec3::new(0.0, 0.0, 0.0), Vec3::Y, Vec3::ONE, 1.0, 0);
+        cache.insert(Vec3::new(5.0, 5.0, 5.0), Vec3::Y, Vec3::ONE, 1.0, 0);
+
+        assert_eq!(cache.total_entries, 2);
+
+        // Evict at frame 15 (beyond max_age)
+        cache.evict(15);
+        assert_eq!(cache.total_entries, 0);
+    }
+
+    #[test]
+    fn test_irradiance_probe() {
+        let mut probe = IrradianceProbe::new(Vec3::ZERO);
+
+        assert!(!probe.is_valid());
+        probe.state = ProbeState::Valid;
+        assert!(probe.is_valid());
+
+        probe.irradiance_sh.add_ambient(Vec3::new(0.2, 0.2, 0.2));
+        let sampled = probe.sample(Vec3::new(0.0, 1.0, 0.0));
+        assert!(sampled.x > 0.0);
+    }
+
+    #[test]
+    fn test_surfel_coverage() {
+        let surfel = Surfel::new(
+            Vec3::ZERO,
+            Vec3::Y,
+            Vec3::ONE,
+            1.0
+        );
+
+        // At center, coverage should be 1
+        let coverage_center = surfel.coverage_at(Vec3::ZERO);
+        assert!((coverage_center - 1.0).abs() < 0.001);
+
+        // At edge, coverage should be 0
+        let coverage_edge = surfel.coverage_at(Vec3::new(1.0, 0.0, 0.0));
+        assert!(coverage_edge < 0.001);
+
+        // At half radius, some coverage
+        let coverage_half = surfel.coverage_at(Vec3::new(0.5, 0.0, 0.0));
+        assert!(coverage_half > 0.0 && coverage_half < 1.0);
+    }
+
+    #[test]
+    fn test_ssgi_config() {
+        let config = SsgiConfig::default();
+
+        assert_eq!(config.quality.ray_count(), 8);
+        assert_eq!(config.quality.resolution_scale(), 0.5);
+    }
+
+    #[test]
+    fn test_indirect_lighting_config() {
+        let config = IndirectLightingConfig::default();
+
+        assert!(matches!(config.technique, IndirectTechnique::Hybrid));
+        assert!(matches!(config.quality, IndirectQuality::Medium));
+        assert!(config.use_radiance_cache);
+    }
+
+    #[test]
+    fn test_sh_pack_for_gpu() {
+        let mut sh = SphericalHarmonicsL2::new();
+        sh.add_directional_light(Vec3::new(1.0, 1.0, 0.0).normalize(), Vec3::ONE);
+
+        let packed = sh.pack_for_gpu();
+        assert_eq!(packed.len(), 7);
+
+        // Verify first coefficient is packed correctly
+        assert!((packed[0].x - sh.coefficients[0].x).abs() < 0.001);
+        assert!((packed[0].y - sh.coefficients[0].y).abs() < 0.001);
+        assert!((packed[0].z - sh.coefficients[0].z).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_probe_grid_invalidation() {
+        let mut grid = LightProbeGrid::new(
+            Vec3::new(-10.0, -10.0, -10.0),
+            Vec3::new(10.0, 10.0, 10.0),
+            (4, 4, 4)
+        );
+
+        // Set all probes to valid
+        for probe in &mut grid.probes {
+            probe.state = ProbeState::Valid;
+        }
+
+        // Invalidate region around origin
+        grid.invalidate_region(Vec3::ZERO, 5.0);
+
+        // Some probes should now need update
+        let needs_update = grid.probes.iter()
+            .filter(|p| matches!(p.state, ProbeState::NeedsUpdate))
+            .count();
+
+        assert!(needs_update > 0);
+    }
+
+    #[test]
+    fn test_ddgi_probe() {
+        let probe = DdgiProbe::new(Vec3::ZERO, 8, 16);
+
+        assert!(!matches!(probe.state, ProbeState::Valid));
+        assert_eq!(probe.irradiance_map.resolution, 8);
+        assert_eq!(probe.visibility_map.resolution, 16);
+    }
+
+    #[test]
+    fn test_voxel_cone_trace_bounds() {
+        // Test that cone tracing respects bounds
+        let bounds_min = Vec3::new(-5.0, -5.0, -5.0);
+        let bounds_max = Vec3::new(5.0, 5.0, 5.0);
+
+        // Position outside bounds
+        let outside_pos = Vec3::new(10.0, 10.0, 10.0);
+        let uv = (outside_pos - bounds_min) / (bounds_max - bounds_min);
+
+        assert!(uv.x > 1.0 || uv.y > 1.0 || uv.z > 1.0);
+    }
+
+    #[test]
+    fn test_sh_ambient_symmetry() {
+        let mut sh = SphericalHarmonicsL2::new();
+        sh.add_ambient(Vec3::new(1.0, 1.0, 1.0));
+
+        // Ambient light should be uniform in all directions
+        let up = sh.evaluate(Vec3::new(0.0, 1.0, 0.0));
+        let down = sh.evaluate(Vec3::new(0.0, -1.0, 0.0));
+        let side = sh.evaluate(Vec3::new(1.0, 0.0, 0.0));
+
+        assert!((up.x - down.x).abs() < 0.01);
+        assert!((up.x - side.x).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_radiance_cache_hit_rate() {
+        let mut cache = RadianceCache::new(2.0, 100);
+
+        // Initially no hits or misses
+        assert_eq!(cache.hit_rate(), 0.0);
+
+        // Insert and query
+        let pos = Vec3::new(1.0, 1.0, 1.0);
+        cache.insert(pos, Vec3::Y, Vec3::ONE, 1.0, 0);
+
+        // First query should hit
+        let _ = cache.query(pos, Vec3::Y, 3.0);
+
+        // Query miss in different location
+        let _ = cache.query(Vec3::new(100.0, 100.0, 100.0), Vec3::Y, 1.0);
+
+        // Should have 50% hit rate
+        assert!((cache.hit_rate() - 0.5).abs() < 0.01);
+    }
+}

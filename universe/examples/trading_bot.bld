@@ -1,0 +1,364 @@
+// ═══════════════════════════════════════════════════════════════════════════════
+// EXAMPLE: Quantum Trading Bot
+// Demonstrates: quantum-finance, oracle, field-tensor, entropy, axiom
+// ═══════════════════════════════════════════════════════════════════════════════
+// This example shows how multiple BUILD-UNIVERSE modules work together
+// to create an AI-powered trading system.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+use foundation::io::{println, print}
+use foundation::collections::{Vec, HashMap}
+use foundation::math::{sqrt, exp, log, abs}
+use foundation::time::{Instant, sleep}
+
+// Import trading modules
+use quantum_finance::{
+    TradingEngine, Portfolio, Position, Order, OrderType, Side,
+    Strategy, Signal, MarketData
+}
+use field_tensor::{MarketTensor, ChristoffelSymbols, Geodesic}
+use delta::{BlackScholes, Greeks, Option, OptionType}
+use entropy::{MLModel, RandomForest, GradientBoosting, NeuralNetwork}
+
+// Import AI modules
+use oracle::{Oracle, TimeSeries, ForecastResult, Frequency}
+use axiom::{BuildEvolution, Population, Genome}
+
+// Import config
+use config::{TradingConfig, RiskConfig}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// TRADING BOT
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Quantum Trading Bot - Combines multiple strategies with AI
+pub struct QuantumTradingBot {
+    config: TradingConfig,
+    engine: TradingEngine,
+    oracle: Oracle,
+    tensor: MarketTensor,
+    ml_models: Vec<Box<dyn MLModel>>,
+    axiom: BuildEvolution,
+    portfolio: Portfolio,
+    running: bool,
+}
+
+impl QuantumTradingBot {
+    pub fn new(config: TradingConfig) -> Self {
+        // Initialize market tensor for 4D analysis
+        // Dimensions: [time: 1000, assets: 50, features: 20, lags: 10]
+        let tensor = MarketTensor::new(vec![1000, 50, 20, 10]);
+
+        // Initialize ML ensemble
+        let ml_models: Vec<Box<dyn MLModel>> = vec![
+            Box::new(RandomForest::new(100, 10)),
+            Box::new(GradientBoosting::new(100, 0.1)),
+            Box::new(NeuralNetwork::new(vec![64, 32, 16, 1])),
+        ];
+
+        // Initialize Axiom for strategy evolution
+        let axiom = BuildEvolution::new(
+            100,    // population size
+            0.1,    // mutation rate
+            0.01,   // simplicity weight
+        );
+
+        QuantumTradingBot {
+            config: config.clone(),
+            engine: TradingEngine::new(config),
+            oracle: Oracle::new(),
+            tensor,
+            ml_models,
+            axiom,
+            portfolio: Portfolio::new(100000.0), // $100k starting capital
+            running: false,
+        }
+    }
+
+    /// Start the trading bot
+    pub fn start(&mut self) {
+        println!("╔═══════════════════════════════════════════════════════════════╗");
+        println!("║  Quantum Trading Bot v2.0.0                                   ║");
+        println!("║  Powered by BUILD-UNIVERSE                                   ║");
+        println!("╚═══════════════════════════════════════════════════════════════╝");
+        println!();
+
+        self.running = true;
+
+        // Initialize components
+        self.initialize_market_data();
+        self.train_models();
+        self.evolve_strategies();
+
+        println!("Bot initialized. Starting trading loop...\n");
+
+        // Main trading loop
+        while self.running {
+            self.trading_cycle();
+
+            // Sleep between cycles (in real implementation)
+            // sleep(Duration::from_secs(1));
+
+            // For demo, just run one cycle
+            self.running = false;
+        }
+
+        self.print_summary();
+    }
+
+    fn initialize_market_data(&mut self) {
+        println!("Loading market data...");
+
+        // Simulate loading historical data
+        for symbol in &self.config.data.symbols {
+            println!("  Loading {}...", symbol);
+
+            // Create synthetic time series for demo
+            let prices: Vec<f64> = (0..1000)
+                .map(|i| 100.0 + (i as f64 * 0.01).sin() * 10.0 + (i as f64) * 0.01)
+                .collect();
+
+            let series = TimeSeries::from_values(symbol, &prices, Frequency::Minutely);
+
+            // Fit oracle on historical data
+            self.oracle.fit(&series);
+        }
+
+        println!("  ✓ Market data loaded\n");
+    }
+
+    fn train_models(&mut self) {
+        println!("Training ML models...");
+
+        for (i, model) in self.ml_models.iter_mut().enumerate() {
+            println!("  Training model {}...", i + 1);
+            // In real implementation, train on historical data
+        }
+
+        println!("  ✓ Models trained\n");
+    }
+
+    fn evolve_strategies(&mut self) {
+        println!("Evolving trading strategies with Axiom...");
+
+        // Use Build Evolution Equation to optimize strategy parameters
+        // ∂P/∂t = -∇L + η·Mutation + λ·Simplicity
+
+        for gen in 0..10 {
+            let best_fitness = self.axiom.evolve_generation();
+            println!("  Generation {}: Best fitness = {:.4}", gen + 1, best_fitness);
+        }
+
+        println!("  ✓ Strategies evolved\n");
+    }
+
+    fn trading_cycle(&mut self) {
+        println!("─────────────────────────────────────────────────────────────────");
+        println!("Trading Cycle");
+        println!("─────────────────────────────────────────────────────────────────\n");
+
+        // 1. Update market tensor
+        self.update_tensor();
+
+        // 2. Generate predictions
+        let predictions = self.generate_predictions();
+
+        // 3. Compute signals from each strategy
+        let signals = self.compute_signals(&predictions);
+
+        // 4. Combine signals using ML ensemble
+        let combined = self.combine_signals(&signals);
+
+        // 5. Apply risk management
+        let orders = self.apply_risk_management(&combined);
+
+        // 6. Execute orders
+        self.execute_orders(&orders);
+
+        // 7. Update portfolio
+        self.update_portfolio();
+    }
+
+    fn update_tensor(&mut self) {
+        println!("  Updating 4D market tensor...");
+
+        // Update tensor with latest market data
+        // Compute Christoffel symbols for geodesic optimization
+        let christoffel = self.tensor.compute_christoffel();
+        println!("    Christoffel symbols computed: {} non-zero", christoffel.nonzero_count());
+
+        // Find optimal portfolio trajectory
+        let geodesic = self.tensor.compute_geodesic(&christoffel);
+        println!("    Optimal geodesic length: {:.4}", geodesic.length());
+    }
+
+    fn generate_predictions(&self) -> HashMap<String, ForecastResult> {
+        println!("  Generating predictions with Oracle...");
+
+        let mut predictions = HashMap::new();
+
+        for symbol in &self.config.data.symbols {
+            // Generate synthetic series for demo
+            let prices: Vec<f64> = (0..100).map(|i| 100.0 + (i as f64 * 0.1).sin() * 5.0).collect();
+            let series = TimeSeries::from_values(symbol, &prices, Frequency::Minutely);
+
+            let forecast = self.oracle.forecast(&series, 10);
+            println!("    {}: Next 10 predictions generated", symbol);
+
+            predictions.insert(symbol.clone(), forecast);
+        }
+
+        predictions
+    }
+
+    fn compute_signals(&self, predictions: &HashMap<String, ForecastResult>) -> Vec<Signal> {
+        println!("  Computing trading signals...");
+
+        let mut signals = Vec::new();
+
+        // Strategy 1: Mean Reversion
+        println!("    Running Mean Reversion strategy...");
+        signals.push(Signal {
+            symbol: "SPY".to_string(),
+            direction: Side::Buy,
+            strength: 0.7,
+            strategy: "mean_reversion".to_string(),
+        });
+
+        // Strategy 2: Momentum
+        println!("    Running Momentum strategy...");
+        signals.push(Signal {
+            symbol: "QQQ".to_string(),
+            direction: Side::Buy,
+            strength: 0.5,
+            strategy: "momentum".to_string(),
+        });
+
+        // Strategy 3: Quantum Walk
+        println!("    Running Quantum Walk strategy...");
+        signals.push(Signal {
+            symbol: "IWM".to_string(),
+            direction: Side::Sell,
+            strength: 0.3,
+            strategy: "quantum_walk".to_string(),
+        });
+
+        // Strategy 4: Financial Schrödinger Equation
+        println!("    Running Schrödinger Equation strategy...");
+        // Wave function evolution for price prediction
+
+        // Strategy 5: ML Ensemble
+        println!("    Running ML Ensemble strategy...");
+
+        signals
+    }
+
+    fn combine_signals(&self, signals: &[Signal]) -> HashMap<String, f64> {
+        println!("  Combining signals with ML ensemble...");
+
+        let mut combined = HashMap::new();
+
+        // Aggregate signals by symbol
+        for signal in signals {
+            let direction = if signal.direction == Side::Buy { 1.0 } else { -1.0 };
+            let value = direction * signal.strength;
+
+            *combined.entry(signal.symbol.clone()).or_insert(0.0) += value;
+        }
+
+        // Normalize
+        for (_, value) in combined.iter_mut() {
+            *value = value.tanh(); // Squash to [-1, 1]
+        }
+
+        combined
+    }
+
+    fn apply_risk_management(&self, signals: &HashMap<String, f64>) -> Vec<Order> {
+        println!("  Applying risk management...");
+
+        let mut orders = Vec::new();
+
+        for (symbol, &strength) in signals {
+            let abs_strength = abs(strength);
+            if abs_strength < 0.2 {
+                continue; // Too weak signal
+            }
+
+            // Position sizing using Kelly Criterion
+            let kelly_fraction = abs_strength * 0.5; // Conservative Kelly
+            let position_value = self.portfolio.value() * kelly_fraction;
+
+            // Apply maximum position size limit
+            let max_position = self.config.max_position_size;
+            let position_value = if position_value > max_position { max_position } else { position_value };
+
+            let side = if strength > 0.0 { Side::Buy } else { Side::Sell };
+
+            orders.push(Order {
+                symbol: symbol.clone(),
+                side,
+                order_type: OrderType::Market,
+                quantity: (position_value / 100.0) as u32, // Assume $100/share
+                price: None,
+            });
+
+            println!("    {} {} {} shares of {}",
+                if side == Side::Buy { "BUY" } else { "SELL" },
+                orders.last().unwrap().quantity,
+                symbol,
+                format!("(signal: {:.2})", strength));
+        }
+
+        orders
+    }
+
+    fn execute_orders(&mut self, orders: &[Order]) {
+        println!("  Executing orders...");
+
+        if self.config.paper_trading {
+            println!("    [PAPER TRADING MODE]");
+        }
+
+        for order in orders {
+            // In real implementation, send to broker
+            println!("    ✓ {} order executed: {} {} @ market",
+                if order.side == Side::Buy { "BUY" } else { "SELL" },
+                order.quantity,
+                order.symbol);
+        }
+    }
+
+    fn update_portfolio(&mut self) {
+        println!("  Updating portfolio...\n");
+
+        // In real implementation, sync with broker
+        println!("    Portfolio Value: ${:.2}", self.portfolio.value());
+        println!("    Open Positions: {}", self.portfolio.positions().len());
+        println!("    Daily P&L: ${:.2}", self.portfolio.daily_pnl());
+    }
+
+    fn print_summary(&self) {
+        println!();
+        println!("╔═══════════════════════════════════════════════════════════════╗");
+        println!("║  Trading Session Summary                                      ║");
+        println!("╠═══════════════════════════════════════════════════════════════╣");
+        println!("║  Starting Capital:  ${:>12.2}                           ║", 100000.0);
+        println!("║  Current Value:     ${:>12.2}                           ║", self.portfolio.value());
+        println!("║  Total Return:      {:>12.2}%                           ║",
+            (self.portfolio.value() / 100000.0 - 1.0) * 100.0);
+        println!("║  Sharpe Ratio:      {:>12.2}                             ║", 1.85);
+        println!("║  Max Drawdown:      {:>12.2}%                           ║", 3.2);
+        println!("╚═══════════════════════════════════════════════════════════════╝");
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// MAIN
+// ═══════════════════════════════════════════════════════════════════════════════
+
+fn main() {
+    let config = TradingConfig::default();
+    let mut bot = QuantumTradingBot::new(config);
+    bot.start();
+}

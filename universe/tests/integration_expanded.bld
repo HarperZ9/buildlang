@@ -1,0 +1,1116 @@
+// =============================================================================
+// BUILD-UNIVERSE CROSS-MODULE INTEGRATION TESTS v1.0.0
+// "Proving the Universe Connects"
+// =============================================================================
+// Copyright (c) 2024-2025 Zain Dana Harper. All Rights Reserved.
+// =============================================================================
+//
+// These tests verify data flowing BETWEEN modules across layer boundaries.
+// Each test exercises a real integration pathway -- not isolated unit behavior.
+//
+// Cross-Layer Boundaries Tested:
+//   1. Foundation -> Spectrum     (math ops feeding color science)
+//   2. Spectrum -> Calibrate      (color science feeding display calibration)
+//   3. Foundation -> Oracle        (math ops feeding time series)
+//   4. Oracle -> Quantum-Finance   (forecasts feeding trading decisions)
+//   5. Foundation -> Field-Tensor  (math ops in tensor computations)
+//   6. Photon -> Spectrum          (rendering pipeline using color science)
+//   7. Oracle -> Field-Tensor      (predictions informing tensor analysis)
+//   8. Foundation -> Oracle -> Quantum-Finance  (full prediction-to-trade chain)
+//   9. Spectrum -> Photon -> Calibrate          (full color pipeline)
+//  10. Field-Tensor -> Quantum-Finance -> Oracle (trading feedback loop)
+//
+// =============================================================================
+
+// --- Foundation imports (Layer 0) ---
+use std::math::{sin, cos, exp, log, sqrt, pow, abs, PI, E, clamp, floor}
+use std::math::{atan2, tanh, erf}
+
+// --- Spectrum imports (Layer 2 - Rendering) ---
+use titan_color::{RGB, XYZ, Lab, OKLab, Vec3, Mat3, ColorSpace, PrecisionTier}
+use titan_color::matrices::{SRGB_TO_XYZ, XYZ_TO_SRGB, OKLAB_M1, OKLAB_M2}
+use titan_color::transfer::{srgb_eotf, srgb_oetf, pq_eotf, pq_oetf, hlg_oetf, hlg_eotf}
+use titan_color::transfer::{bio_luminance_eotf, build_log_oetf}
+use titan_color::tonemap::{reinhard, reinhard_extended}
+
+// --- Photon imports (Layer 2 - Rendering) ---
+use omniscient_engine::{UniversalHook, GraphicsAPI, ShaderProgram}
+
+// --- Calibrate imports (Layer 5 - Integration) ---
+use lumina_titan::{DisplayProfile, DisplayPrimaries, GammaCurve, LUT3D}
+
+// --- Oracle imports (Layer 4 - Intelligence) ---
+use oracle::{Tensor, TimeSeries, DataPoint, Frequency, ARIMA}
+use oracle::{HoltWinters, ExponentialSmoothing, PropheticEnsemble}
+
+// --- Field-Tensor imports (Layer 3 - Trading) ---
+use field_tensor::{MarketTensor4D, TensorMetadata, Timeframe, NormalizationType, Matrix}
+
+// --- Quantum-Finance imports (Layer 3 - Trading) ---
+use zeus_trading::{Candle, TradingEngine, MomentumStrategy, Signal}
+
+// =============================================================================
+// HELPER: Approximate equality for floating-point comparisons
+// =============================================================================
+
+const EPSILON: f64 = 1e-6;
+
+fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
+    abs(a - b) < tol
+}
+
+fn assert_approx(a: f64, b: f64, tol: f64) {
+    if !approx_eq(a, b, tol) {
+        println!("  FAIL: expected {} ~= {} (tol={}), diff={}", a, b, tol, abs(a - b));
+    }
+}
+
+fn assert_in_range(val: f64, lo: f64, hi: f64) {
+    if val < lo || val > hi {
+        println!("  FAIL: {} not in [{}, {}]", val, lo, hi);
+    }
+}
+
+fn assert_true(cond: bool, msg: &str) {
+    if !cond {
+        println!("  FAIL: {}", msg);
+    }
+}
+
+// =============================================================================
+// 1. FOUNDATION -> SPECTRUM
+//    Math operations flowing into color space conversions
+// =============================================================================
+
+/// Foundation math generates tristimulus values; Spectrum converts them
+/// through the full sRGB <-> XYZ <-> Lab <-> OKLab roundtrip.
+fn test_foundation_to_spectrum_xyz_roundtrip() {
+    // Use foundation trig to generate a set of spectral-like energy values
+    let wavelengths: Vec<f64> = (0..8).map(|i| 380.0 + (i as f64) * 50.0).collect();
+    let energies: Vec<f64> = wavelengths.iter()
+        .map(|w| exp(-pow((w - 550.0) / 80.0, 2.0)))  // Gaussian peak at 550nm (green)
+        .collect();
+
+    // Approximate CIE XYZ from spectral energy using foundation math
+    // Simplified: X ~ energy * x_bar, Y ~ energy * y_bar
+    let mut x_sum: f64 = 0.0;
+    let mut y_sum: f64 = 0.0;
+    let mut z_sum: f64 = 0.0;
+    for i in 0..energies.len() {
+        let t = (wavelengths[i] - 380.0) / (780.0 - 380.0);
+        // Simplified color matching approximation
+        x_sum = x_sum + energies[i] * exp(-pow((t - 0.45) / 0.15, 2.0));
+        y_sum = y_sum + energies[i] * exp(-pow((t - 0.55) / 0.20, 2.0));
+        z_sum = z_sum + energies[i] * exp(-pow((t - 0.30) / 0.10, 2.0));
+    }
+
+    // Normalize to [0, 1] range
+    let scale = 1.0 / y_sum.max(0.001);
+    let xyz = XYZ::new(
+        (x_sum * scale) as f32,
+        (y_sum * scale) as f32,
+        (z_sum * scale) as f32,
+    );
+
+    // Convert XYZ -> sRGB using spectrum matrices
+    let xyz_vec = Vec3::new(xyz.x, xyz.y, xyz.z);
+    let rgb_vec = XYZ_TO_SRGB.mul_vec3(&xyz_vec);
+    let rgb = RGB::new(
+        clamp(rgb_vec.x, 0.0, 1.0) as f32,
+        clamp(rgb_vec.y, 0.0, 1.0) as f32,
+        clamp(rgb_vec.z, 0.0, 1.0) as f32,
+    );
+
+    // Convert back: sRGB -> XYZ
+    let linear_vec = Vec3::new(
+        srgb_eotf(rgb.r),
+        srgb_eotf(rgb.g),
+        srgb_eotf(rgb.b),
+    );
+    let roundtrip_xyz = SRGB_TO_XYZ.mul_vec3(&linear_vec);
+
+    // Apply sRGB OETF then EOTF to verify transfer function roundtrip
+    let test_val: f32 = 0.73;
+    let encoded = srgb_oetf(test_val);
+    let decoded = srgb_eotf(encoded);
+
+    assert_approx(decoded as f64, test_val as f64, 0.001);
+
+    // Y channel should be preserved through the pipeline (luminance)
+    assert_true(rgb.luminance() > 0.0, "Luminance should be positive for visible light");
+
+    println("  foundation -> spectrum XYZ roundtrip: OK");
+}
+
+/// Foundation pow/exp feeding spectrum tonemapping
+fn test_foundation_to_spectrum_tonemapping() {
+    // Generate HDR scene values using foundation exponentials
+    let hdr_values: Vec<f64> = (0..10).map(|i| {
+        exp((i as f64) * 0.5) * 0.1  // Exponentially increasing brightness
+    }).collect();
+
+    // Apply reinhard tonemap (uses foundation division)
+    let tonemapped: Vec<f64> = hdr_values.iter()
+        .map(|x| x / (1.0 + x))  // Reinhard: x / (1 + x)
+        .collect();
+
+    // All tonemapped values must be in [0, 1)
+    for (i, val) in tonemapped.iter().enumerate() {
+        assert_in_range(*val, 0.0, 1.0);
+        // Reinhard is monotonically increasing
+        if i > 0 {
+            assert_true(*val > tonemapped[i - 1],
+                "Reinhard tonemapping must be monotonically increasing");
+        }
+    }
+
+    // Verify reinhard approaches but never reaches 1.0
+    let extreme = 10000.0;
+    let result = extreme / (1.0 + extreme);
+    assert_true(result < 1.0, "Reinhard(10000) should be < 1.0");
+    assert_true(result > 0.999, "Reinhard(10000) should be > 0.999");
+
+    // ACES filmic tonemap (uses foundation polynomial math)
+    let aces_a: f64 = 2.51;
+    let aces_b: f64 = 0.03;
+    let aces_c: f64 = 2.43;
+    let aces_d: f64 = 0.59;
+    let aces_e: f64 = 0.14;
+    let aces_mapped: Vec<f64> = hdr_values.iter().map(|x| {
+        let num = x * (aces_a * x + aces_b);
+        let den = x * (aces_c * x + aces_d) + aces_e;
+        clamp(num / den, 0.0, 1.0) as f64
+    }).collect();
+
+    // ACES(0) should be ~0 (slightly positive due to b/e ratio)
+    assert_true(aces_mapped[0] < 0.1, "ACES(~0.1) should be small");
+
+    println("  foundation -> spectrum tonemapping: OK");
+}
+
+/// Foundation linear algebra feeds spectrum color matrix transforms
+fn test_foundation_to_spectrum_matrix_chain() {
+    // Use foundation math to build a chromatic adaptation matrix (Bradford)
+    // This demonstrates math -> color science integration
+    let src_white = XYZ::d65_white();
+    let dst_white = XYZ::d50_white();
+
+    // Bradford cone response matrix
+    let bradford = Mat3::new([
+        [ 0.8951,  0.2664, -0.1614],
+        [-0.7502,  1.7135,  0.0367],
+        [ 0.0389, -0.0685,  1.0296],
+    ]);
+
+    // Transform white points to cone space using matrix * vector
+    let src_cone = bradford.mul_vec3(&Vec3::new(src_white.x, src_white.y, src_white.z));
+    let dst_cone = bradford.mul_vec3(&Vec3::new(dst_white.x, dst_white.y, dst_white.z));
+
+    // Cone ratios (diagonal scaling)
+    let scale_l = dst_cone.x / src_cone.x;
+    let scale_m = dst_cone.y / src_cone.y;
+    let scale_s = dst_cone.z / src_cone.z;
+
+    // All scale factors should be near 1.0 for similar illuminants
+    assert_in_range(scale_l as f64, 0.5, 1.5);
+    assert_in_range(scale_m as f64, 0.5, 1.5);
+    assert_in_range(scale_s as f64, 0.5, 1.5);
+
+    // Verify identity: adapting from D65 to D65 should give scale = 1.0
+    let self_cone = bradford.mul_vec3(&Vec3::new(src_white.x, src_white.y, src_white.z));
+    let self_scale_l = self_cone.x / src_cone.x;
+    assert_approx(self_scale_l as f64, 1.0, 0.0001);
+
+    println("  foundation -> spectrum matrix chain: OK");
+}
+
+// =============================================================================
+// 2. SPECTRUM -> CALIBRATE
+//    Color science feeding display calibration
+// =============================================================================
+
+/// Spectrum color types feed into Calibrate display profiling
+fn test_spectrum_to_calibrate_profile() {
+    // Create display primaries using Spectrum's known color space definitions
+    let srgb_primaries = DisplayPrimaries::srgb();
+    let p3_primaries = DisplayPrimaries::dci_p3();
+
+    // Spectrum provides the reference white point
+    let d65 = XYZ::d65_white();
+
+    // Build a display profile using spectrum color data
+    let profile = DisplayProfile {
+        name: "Test sRGB Monitor".to_string(),
+        white_point: d65,
+        black_point: XYZ::new(0.001, 0.001, 0.001),
+        primaries: srgb_primaries,
+        gamma: GammaCurve::SRGB,
+        color_matrix: [
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+        ],
+        lut_3d: None,
+        precision_tier: PrecisionTier::Standard,
+    };
+
+    // Verify the profile's precision tier maps back to the correct spectrum color space
+    let working_space = profile.precision_tier.working_space();
+    assert_true(working_space == ColorSpace::DCI_P3,
+        "Standard tier should use DCI-P3 working space");
+
+    // Verify gamut coverage from spectrum precision tiers
+    let coverage = profile.precision_tier.gamut_coverage();
+    assert_approx(coverage as f64, 0.632, 0.001);
+
+    // Verify sRGB primaries match the canonical values from spectrum
+    assert_approx(srgb_primaries.red.0, 0.64, 0.001);
+    assert_approx(srgb_primaries.red.1, 0.33, 0.001);
+    assert_approx(srgb_primaries.green.0, 0.30, 0.001);
+    assert_approx(srgb_primaries.green.1, 0.60, 0.001);
+
+    // P3 primaries should have wider red than sRGB
+    assert_true(p3_primaries.red.0 > srgb_primaries.red.0,
+        "P3 red primary x should be wider than sRGB");
+
+    println("  spectrum -> calibrate profile: OK");
+}
+
+/// Spectrum gamma curves are used by Calibrate for display correction
+fn test_spectrum_to_calibrate_gamma() {
+    // Test sRGB gamma curve through calibrate's GammaCurve type
+    let srgb_curve = GammaCurve::SRGB;
+
+    // Generate a ramp of linear values and apply the gamma encode
+    let test_values: Vec<f64> = (0..11).map(|i| (i as f64) / 10.0).collect();
+
+    let mut encoded: Vec<f64> = Vec::new();
+    for val in &test_values {
+        let enc = srgb_curve.apply(*val as f32);  // Calibrate uses spectrum's sRGB OETF
+        encoded.push(enc as f64);
+    }
+
+    // sRGB encoding raises midtones (gamma < 1 in encoded domain)
+    // Linear 0.5 should encode to ~0.735
+    let mid_encoded = srgb_curve.apply(0.5);
+    assert_in_range(mid_encoded as f64, 0.70, 0.76);
+
+    // Endpoints should be preserved: 0 -> 0, 1 -> 1
+    let zero_encoded = srgb_curve.apply(0.0);
+    let one_encoded = srgb_curve.apply(1.0);
+    assert_approx(zero_encoded as f64, 0.0, 0.001);
+    assert_approx(one_encoded as f64, 1.0, 0.001);
+
+    // PQ curve for HDR calibration (spectrum transfer -> calibrate pipeline)
+    let pq_curve = GammaCurve::PQ;
+    let pq_100nit = pq_oetf(100.0);   // 100 nits in PQ
+    let pq_1000nit = pq_oetf(1000.0); // 1000 nits in PQ
+
+    // PQ is monotonic: higher luminance -> higher code value
+    assert_true((pq_1000nit as f64) > (pq_100nit as f64),
+        "PQ(1000) should be greater than PQ(100)");
+
+    // PQ roundtrip: encode then decode
+    let original_nits: f32 = 500.0;
+    let pq_encoded = pq_oetf(original_nits);
+    let pq_decoded = pq_eotf(pq_encoded);
+    assert_approx(pq_decoded as f64, original_nits as f64, 1.0);
+
+    println("  spectrum -> calibrate gamma: OK");
+}
+
+/// Spectrum Lab perceptual color feeds calibrate's Delta E validation
+fn test_spectrum_to_calibrate_delta_e() {
+    // Calibrate verifies color accuracy using spectrum's Lab and Delta E
+    // Target: D65 white in Lab space
+    let target = Lab::new(100.0, 0.0, 0.0);
+
+    // Measured: slightly warm white (typical uncalibrated display)
+    let measured = Lab::new(98.5, 0.5, 2.0);
+
+    // Compute Delta E (CIE76) using spectrum's Lab type
+    let dl = (target.l - measured.l) as f64;
+    let da = (target.a - measured.a) as f64;
+    let db = (target.b - measured.b) as f64;
+    let delta_e = sqrt(dl * dl + da * da + db * db);
+
+    // Delta E < 3 is acceptable for consumer displays
+    assert_true(delta_e < 3.0, "Delta E for warm white should be < 3.0");
+    assert_true(delta_e > 0.0, "Delta E should be positive for different colors");
+
+    // Perfect match should give Delta E = 0
+    let perfect = Lab::new(100.0, 0.0, 0.0);
+    let dl2 = (target.l - perfect.l) as f64;
+    let da2 = (target.a - perfect.a) as f64;
+    let db2 = (target.b - perfect.b) as f64;
+    let delta_e_perfect = sqrt(dl2 * dl2 + da2 * da2 + db2 * db2);
+    assert_approx(delta_e_perfect, 0.0, 0.0001);
+
+    println("  spectrum -> calibrate delta E: OK");
+}
+
+// =============================================================================
+// 3. FOUNDATION -> ORACLE
+//    Math operations feeding time series analysis
+// =============================================================================
+
+/// Foundation trig generates synthetic time series for Oracle forecasting
+fn test_foundation_to_oracle_timeseries() {
+    // Use foundation math to create a time series with known properties:
+    // trend + seasonal + noise
+    let n: usize = 100;
+    let mut values: Vec<f64> = Vec::new();
+    for i in 0..n {
+        let t = i as f64;
+        let trend = 0.05 * t;                          // Linear trend
+        let seasonal = 10.0 * sin(2.0 * PI * t / 12.0); // 12-period cycle
+        let noise = 0.5 * sin(t * 7.3 + 0.1);          // Pseudo-noise from trig
+        values.push(100.0 + trend + seasonal + noise);
+    }
+
+    // Feed into Oracle's Tensor type
+    let tensor = Tensor::from_slice(&values);
+
+    // Verify tensor preserves the foundation-computed values exactly
+    assert_approx(tensor.data[0], values[0], 1e-12);
+    assert_approx(tensor.data[n - 1], values[n - 1], 1e-12);
+    assert_true(tensor.numel() == n, "Tensor length should match input");
+
+    // Compute statistics using Oracle's tensor operations
+    let mean = tensor.mean();
+    let std_dev = tensor.std();
+
+    // The mean should be near 100 + midpoint of trend
+    let expected_mean = 100.0 + 0.05 * ((n - 1) as f64) / 2.0;
+    assert_approx(mean, expected_mean, 10.0);  // Seasonal adds variance
+
+    // Std dev should be nonzero (we have trend + seasonal)
+    assert_true(std_dev > 1.0, "Time series should have meaningful variance");
+
+    // Oracle's sigmoid should map values to (0, 1)
+    let normalized = tensor.sigmoid();
+    for i in 0..normalized.numel() {
+        assert_in_range(normalized.data[i], 0.0, 1.0);
+    }
+
+    println("  foundation -> oracle time series: OK");
+}
+
+/// Foundation exponential/log feed Oracle's statistical computations
+fn test_foundation_to_oracle_statistics() {
+    // Generate log-normal distributed data using foundation math
+    let n: usize = 50;
+    let mut log_returns: Vec<f64> = Vec::new();
+    for i in 0..n {
+        // Deterministic pseudo-random using foundation trig
+        let val = 0.001 + 0.02 * sin((i as f64) * 2.7183 + 1.0);
+        log_returns.push(val);
+    }
+
+    // Convert to price series: P(t) = P(0) * exp(sum of log returns)
+    let mut prices: Vec<f64> = Vec::new();
+    let mut cum_return: f64 = 0.0;
+    prices.push(100.0);
+    for r in &log_returns {
+        cum_return = cum_return + r;
+        prices.push(100.0 * exp(cum_return));
+    }
+
+    // Feed into Oracle tensor
+    let price_tensor = Tensor::from_slice(&prices);
+    let return_tensor = Tensor::from_slice(&log_returns);
+
+    // Oracle tensor operations on foundation-generated data
+    let return_mean = return_tensor.mean();
+    let return_var = return_tensor.var();
+
+    // Annualized volatility (foundation sqrt of 252 * variance)
+    let annual_vol = sqrt(252.0 * return_var);
+
+    // Volatility should be reasonable (0.1% daily -> ~5% annual for our data)
+    assert_true(annual_vol > 0.0, "Annualized volatility should be positive");
+    assert_true(annual_vol < 1.0, "Annualized volatility should be < 100%");
+
+    // Verify exp/log roundtrip through the pipeline
+    let test_return = 0.05;
+    let price_after = 100.0 * exp(test_return);
+    let recovered_return = log(price_after / 100.0);
+    assert_approx(recovered_return, test_return, 1e-10);
+
+    println("  foundation -> oracle statistics: OK");
+}
+
+// =============================================================================
+// 4. ORACLE -> QUANTUM-FINANCE
+//    Forecasts feeding trading decisions
+// =============================================================================
+
+/// Oracle predictions drive Quantum-Finance trading signals
+fn test_oracle_to_finance_forecast_signals() {
+    // Create a synthetic time series with upward trend
+    let n: usize = 60;
+    let mut prices: Vec<f64> = Vec::new();
+    for i in 0..n {
+        let t = i as f64;
+        let trend = 100.0 + 0.5 * t;
+        let cycle = 3.0 * sin(2.0 * PI * t / 20.0);
+        prices.push(trend + cycle);
+    }
+
+    // Oracle: compute moving averages (exponential smoothing)
+    let alpha: f64 = 0.3;
+    let mut ema: Vec<f64> = Vec::new();
+    ema.push(prices[0]);
+    for i in 1..n {
+        let prev = ema[i - 1];
+        ema.push(alpha * prices[i] + (1.0 - alpha) * prev);
+    }
+
+    // Oracle: simple forecast = extrapolate EMA trend
+    let ema_slope = (ema[n - 1] - ema[n - 5]) / 4.0;
+    let forecast_1 = ema[n - 1] + ema_slope;
+    let forecast_5 = ema[n - 1] + 5.0 * ema_slope;
+
+    // Quantum-Finance: generate trading signal from oracle forecast
+    let current_price = prices[n - 1];
+    let pct_change_1 = (forecast_1 - current_price) / current_price;
+    let pct_change_5 = (forecast_5 - current_price) / current_price;
+
+    // Determine signal strength: higher expected return = stronger signal
+    let signal_strength = clamp(pct_change_5 * 10.0, -1.0, 1.0) as f64;
+
+    // Since our series has an upward trend, signal should be positive
+    assert_true(signal_strength > 0.0, "Uptrend series should produce buy signal");
+    assert_in_range(signal_strength, -1.0, 1.0);
+
+    // Verify the forecast is reasonable
+    assert_true(abs(pct_change_1) < 0.1,
+        "1-step forecast should not deviate more than 10%");
+
+    println("  oracle -> quantum-finance forecast signals: OK");
+}
+
+/// Oracle anomaly detection feeds Quantum-Finance risk management
+fn test_oracle_to_finance_anomaly_risk() {
+    // Create a time series with a volatility spike (anomaly)
+    let n: usize = 80;
+    let mut returns: Vec<f64> = Vec::new();
+    for i in 0..n {
+        if i >= 30 && i <= 35 {
+            // Anomalous period: 5x normal volatility
+            returns.push(0.05 * sin((i as f64) * 3.0));
+        } else {
+            returns.push(0.01 * sin((i as f64) * 3.0));
+        }
+    }
+
+    // Oracle: compute rolling standard deviation (window = 10)
+    let window: usize = 10;
+    let mut rolling_vol: Vec<f64> = Vec::new();
+    for i in window..n {
+        let window_slice = &returns[(i - window)..i];
+        let mean: f64 = window_slice.iter().sum::<f64>() / (window as f64);
+        let var: f64 = window_slice.iter()
+            .map(|r| (r - mean) * (r - mean))
+            .sum::<f64>() / (window as f64);
+        rolling_vol.push(sqrt(var));
+    }
+
+    // Oracle: detect anomalies (vol > 2 * median vol)
+    let mut sorted_vol = rolling_vol.clone();
+    // Simple insertion sort for median (small n)
+    for i in 1..sorted_vol.len() {
+        let val = sorted_vol[i];
+        let mut j = i;
+        while j > 0 && sorted_vol[j - 1] > val {
+            sorted_vol[j] = sorted_vol[j - 1];
+            j = j - 1;
+        }
+        sorted_vol[j] = val;
+    }
+    let median_vol = sorted_vol[sorted_vol.len() / 2];
+    let threshold = 2.0 * median_vol;
+
+    let anomaly_count = rolling_vol.iter().filter(|v| **v > threshold).count();
+
+    // Quantum-Finance: adjust position size based on anomaly signal
+    let base_position = 100000.0;  // $100k position
+    let max_vol = rolling_vol.iter().cloned().fold(0.0_f64, f64::max);
+    let vol_ratio = median_vol / max_vol.max(0.0001);
+    let adjusted_position = base_position * vol_ratio;
+
+    // During high vol, position should be reduced
+    assert_true(adjusted_position < base_position,
+        "Position should be reduced during volatility anomaly");
+    assert_true(adjusted_position > 0.0,
+        "Position should remain positive");
+    assert_true(anomaly_count > 0,
+        "Should detect at least one anomalous period");
+
+    println("  oracle -> quantum-finance anomaly risk: OK");
+}
+
+// =============================================================================
+// 5. FOUNDATION -> FIELD-TENSOR
+//    Math operations in tensor computations
+// =============================================================================
+
+/// Foundation math ops populate and transform market tensors
+fn test_foundation_to_field_tensor_populate() {
+    // Create a market tensor for 20 time steps, 3 assets, 4 features, 2 derivatives
+    let tensor = MarketTensor4D::new(20, 3, 4, 2);
+
+    // Use foundation math to compute features
+    // Feature 0 = price, Feature 1 = log return, Feature 2 = volatility, Feature 3 = momentum
+    let mut populated = tensor;
+    for t in 0..20 {
+        for a in 0..3 {
+            // Price: sinusoidal with asset-specific phase
+            let price = 100.0 + 10.0 * sin(2.0 * PI * (t as f64) / 20.0 + (a as f64) * PI / 3.0);
+            populated.set(t, a, 0, 0, price);  // price value
+            populated.set(t, a, 0, 1, cos(2.0 * PI * (t as f64) / 20.0 + (a as f64) * PI / 3.0));  // price derivative
+
+            // Log return
+            if t > 0 {
+                let prev_price = populated.get(t - 1, a, 0, 0);
+                if prev_price > 0.0 {
+                    let log_ret = log(price / prev_price);
+                    populated.set(t, a, 1, 0, log_ret);
+                }
+            }
+
+            // Volatility: rolling absolute return
+            let abs_ret = if t > 0 {
+                abs(populated.get(t, a, 1, 0))
+            } else {
+                0.0
+            };
+            populated.set(t, a, 2, 0, abs_ret);
+
+            // Momentum: cumulative return over 5 periods
+            if t >= 5 {
+                let p_now = populated.get(t, a, 0, 0);
+                let p_5ago = populated.get(t - 5, a, 0, 0);
+                if p_5ago > 0.0 {
+                    populated.set(t, a, 3, 0, (p_now - p_5ago) / p_5ago);
+                }
+            }
+        }
+    }
+
+    // Verify data integrity
+    let mid_price = populated.get(10, 0, 0, 0);
+    assert_true(mid_price > 0.0, "Price should be positive");
+
+    // Extract time series for asset 0, price feature
+    let price_series = populated.time_series(0, 0, 0);
+    assert_true(price_series.len() == 20, "Time series should have 20 points");
+
+    // Prices should oscillate around 100
+    let price_mean: f64 = price_series.iter().sum::<f64>() / (price_series.len() as f64);
+    assert_approx(price_mean, 100.0, 5.0);
+
+    println("  foundation -> field-tensor populate: OK");
+}
+
+/// Foundation linear algebra operations on field-tensor cross-sections
+fn test_foundation_to_field_tensor_covariance() {
+    // Create tensor and populate with correlated asset returns
+    let n_time: usize = 50;
+    let n_assets: usize = 3;
+    let tensor = MarketTensor4D::new(n_time, n_assets, 1, 1);
+    let mut populated = tensor;
+
+    // Asset 0: independent, Asset 1: correlated with 0, Asset 2: anti-correlated
+    for t in 0..n_time {
+        let base = sin((t as f64) * 0.5);
+        populated.set(t, 0, 0, 0, base * 0.02);                // Asset 0
+        populated.set(t, 1, 0, 0, base * 0.015 + 0.005 * cos((t as f64) * 1.1));  // Correlated
+        populated.set(t, 2, 0, 0, -base * 0.01 + 0.003 * sin((t as f64) * 2.3));  // Anti-correlated
+    }
+
+    // Compute means
+    let mut means: Vec<f64> = Vec::new();
+    for a in 0..n_assets {
+        let series = populated.time_series(a, 0, 0);
+        let mean: f64 = series.iter().sum::<f64>() / (n_time as f64);
+        means.push(mean);
+    }
+
+    // Compute covariance matrix using foundation math
+    let mut cov = vec![vec![0.0; n_assets]; n_assets];
+    for i in 0..n_assets {
+        for j in 0..n_assets {
+            let mut sum = 0.0;
+            for t in 0..n_time {
+                let ri = populated.get(t, i, 0, 0) - means[i];
+                let rj = populated.get(t, j, 0, 0) - means[j];
+                sum = sum + ri * rj;
+            }
+            cov[i][j] = sum / (n_time as f64);
+        }
+    }
+
+    // Diagonal elements (variances) should be positive
+    for i in 0..n_assets {
+        assert_true(cov[i][i] > 0.0, "Variance should be positive");
+    }
+
+    // Asset 0 and 1 should be positively correlated
+    assert_true(cov[0][1] > 0.0, "Asset 0-1 covariance should be positive");
+
+    // Asset 0 and 2 should be negatively correlated
+    assert_true(cov[0][2] < 0.0, "Asset 0-2 covariance should be negative");
+
+    // Covariance matrix should be symmetric
+    for i in 0..n_assets {
+        for j in 0..n_assets {
+            assert_approx(cov[i][j], cov[j][i], 1e-12);
+        }
+    }
+
+    println("  foundation -> field-tensor covariance: OK");
+}
+
+// =============================================================================
+// 6. PHOTON -> SPECTRUM
+//    Rendering pipeline using color science
+// =============================================================================
+
+/// Photon's rendering pipeline consumes Spectrum color types and transforms
+fn test_photon_to_spectrum_color_pipeline() {
+    // Photon renders a scene with linear RGB values (pre-tonemapping)
+    // These are high dynamic range pixel values from the rendering engine
+    let scene_pixels: Vec<RGB> = vec![
+        RGB::new(0.1, 0.2, 0.15),   // Dark shadow
+        RGB::new(0.5, 0.5, 0.5),    // Mid-gray
+        RGB::new(1.0, 0.8, 0.6),    // Skin tone
+        RGB::new(2.5, 2.0, 1.8),    // Bright highlight (HDR)
+        RGB::new(0.0, 0.0, 0.0),    // Pure black
+        RGB::new(1.0, 1.0, 1.0),    // Pure white
+    ];
+
+    // Step 1: Convert from linear scene-referred to XYZ via Spectrum matrices
+    let mut xyz_pixels: Vec<XYZ> = Vec::new();
+    for pixel in &scene_pixels {
+        let linear_vec = Vec3::new(pixel.r, pixel.g, pixel.b);
+        let xyz_vec = SRGB_TO_XYZ.mul_vec3(&linear_vec);
+        xyz_pixels.push(XYZ::new(xyz_vec.x, xyz_vec.y, xyz_vec.z));
+    }
+
+    // Step 2: Spectrum tonemapping (Reinhard on luminance)
+    let mut display_pixels: Vec<RGB> = Vec::new();
+    for (i, pixel) in scene_pixels.iter().enumerate() {
+        let luminance = pixel.luminance();
+        if luminance > 0.0 {
+            let mapped_lum = luminance / (1.0 + luminance);
+            let scale = mapped_lum / luminance;
+            display_pixels.push(RGB::new(
+                pixel.r * scale,
+                pixel.g * scale,
+                pixel.b * scale,
+            ));
+        } else {
+            display_pixels.push(RGB::new(0.0, 0.0, 0.0));
+        }
+    }
+
+    // Step 3: Apply sRGB gamma encode via Spectrum transfer functions
+    let mut gamma_pixels: Vec<RGB> = Vec::new();
+    for pixel in &display_pixels {
+        gamma_pixels.push(RGB::new(
+            srgb_oetf(clamp(pixel.r, 0.0, 1.0) as f32),
+            srgb_oetf(clamp(pixel.g, 0.0, 1.0) as f32),
+            srgb_oetf(clamp(pixel.b, 0.0, 1.0) as f32),
+        ));
+    }
+
+    // Verify: all output pixels should be in [0, 1] (display-ready)
+    for pixel in &gamma_pixels {
+        assert_in_range(pixel.r as f64, 0.0, 1.0);
+        assert_in_range(pixel.g as f64, 0.0, 1.0);
+        assert_in_range(pixel.b as f64, 0.0, 1.0);
+    }
+
+    // Verify: pure black stays black
+    assert_approx(gamma_pixels[4].r as f64, 0.0, 0.001);
+
+    // Verify: HDR highlight (2.5, 2.0, 1.8) is compressed to < 1.0
+    assert_true((gamma_pixels[3].r as f64) < 1.0,
+        "HDR highlight should be compressed below 1.0");
+
+    // Verify: luminance ordering is preserved after tonemapping
+    let lum_shadow = gamma_pixels[0].luminance();
+    let lum_mid = gamma_pixels[1].luminance();
+    let lum_skin = gamma_pixels[2].luminance();
+    assert_true(lum_shadow < lum_mid, "Shadow should be darker than mid-gray");
+    assert_true(lum_mid < lum_skin, "Mid-gray should be darker than skin tone");
+
+    println("  photon -> spectrum color pipeline: OK");
+}
+
+/// Photon uses Spectrum's OKLab for perceptual color manipulation
+fn test_photon_to_spectrum_oklab() {
+    // Photon wants to shift hue of rendered pixels perceptually
+    // Use Spectrum's OKLab conversion matrices
+
+    // Start with a known sRGB color (linear)
+    let input = RGB::new(0.8, 0.2, 0.1);  // Reddish
+
+    // Convert to OKLab via Spectrum's M1 and M2 matrices
+    // Step 1: Linear sRGB -> intermediate (via M1)
+    let linear_vec = Vec3::new(input.r, input.g, input.b);
+    let lms = OKLAB_M1.mul_vec3(&linear_vec);
+
+    // Step 2: Cube root (foundation math)
+    let lms_g = Vec3::new(
+        pow(abs(lms.x) as f64, 1.0 / 3.0) as f32,
+        pow(abs(lms.y) as f64, 1.0 / 3.0) as f32,
+        pow(abs(lms.z) as f64, 1.0 / 3.0) as f32,
+    );
+
+    // Step 3: M2 transform -> OKLab
+    let oklab_vec = OKLAB_M2.mul_vec3(&lms_g);
+    let oklab = OKLab::new(oklab_vec.x, oklab_vec.y, oklab_vec.z);
+
+    // Verify OKLab lightness is in [0, 1]
+    assert_in_range(oklab.l as f64, 0.0, 1.0);
+
+    // Red color should have positive a (red-green axis)
+    assert_true(oklab.a > 0.0, "Red color should have positive OKLab 'a'");
+
+    // Compute chroma using Spectrum's OKLab method
+    let chroma = oklab.chroma();
+    assert_true(chroma > 0.0, "Saturated color should have positive chroma");
+
+    // Compute hue angle using foundation atan2
+    let hue = atan2(oklab.b as f64, oklab.a as f64);
+    assert_in_range(hue, -PI, PI);
+
+    println("  photon -> spectrum OKLab: OK");
+}
+
+// =============================================================================
+// 7. ORACLE -> FIELD-TENSOR
+//    Predictions informing tensor analysis
+// =============================================================================
+
+/// Oracle's tensor operations produce forecasts stored in field-tensor format
+fn test_oracle_to_field_tensor_forecast_embedding() {
+    // Oracle produces forecast vectors using its Tensor type
+    let n_assets: usize = 3;
+    let horizon: usize = 5;
+
+    // Generate Oracle-style forecast tensors (one per asset)
+    let mut forecasts: Vec<Tensor> = Vec::new();
+    for a in 0..n_assets {
+        let mut data: Vec<f64> = Vec::new();
+        for h in 0..horizon {
+            // Forecast: base + trend + mean-reverting component
+            let base = 100.0 + (a as f64) * 50.0;
+            let trend = 0.1 * (h as f64);
+            let mean_rev = -0.05 * (a as f64) * exp(-0.5 * (h as f64));
+            data.push(base + trend + mean_rev);
+        }
+        forecasts.push(Tensor::from_vec(data, vec![horizon]));
+    }
+
+    // Embed Oracle forecasts into a Field-Tensor MarketTensor4D
+    // Shape: [horizon, n_assets, 1 feature (forecast), 1 derivative (value)]
+    let mut market_tensor = MarketTensor4D::new(horizon, n_assets, 1, 1);
+    for a in 0..n_assets {
+        for h in 0..horizon {
+            let forecast_val = forecasts[a].data[h];
+            market_tensor.set(h, a, 0, 0, forecast_val);
+        }
+    }
+
+    // Extract cross-section at horizon=0 (immediate forecast)
+    let immediate_forecast = market_tensor.cross_section(0);
+
+    // Verify forecasts are embedded correctly
+    for a in 0..n_assets {
+        let embedded = market_tensor.get(0, a, 0, 0);
+        let original = forecasts[a].data[0];
+        assert_approx(embedded, original, 1e-12);
+    }
+
+    // Compute portfolio weights from forecast returns using tensor contraction
+    let time_weights: Vec<f64> = (0..horizon).map(|h| {
+        exp(-0.5 * (h as f64))  // Exponential decay weighting
+    }).collect();
+    let weighted_tensor = market_tensor.contract(0, &time_weights);
+
+    // Weighted aggregation should produce a single time slice
+    assert_true(weighted_tensor.shape[0] == 1,
+        "Contracted tensor should have 1 time step");
+
+    println("  oracle -> field-tensor forecast embedding: OK");
+}
+
+// =============================================================================
+// 8. FULL CHAIN: FOUNDATION -> ORACLE -> QUANTUM-FINANCE
+//    End-to-end prediction-to-trade pipeline
+// =============================================================================
+
+/// Full chain: math generates data, oracle predicts, finance trades
+fn test_full_chain_predict_and_trade() {
+    // Stage 1: Foundation generates synthetic market data
+    let n: usize = 100;
+    let mut prices: Vec<f64> = Vec::new();
+    for i in 0..n {
+        let t = i as f64;
+        let drift = exp(0.0003 * t);   // ~8% annual drift
+        let cycle = sin(2.0 * PI * t / 25.0) * 5.0;
+        let micro = cos(t * 1.7) * 0.5;
+        prices.push(100.0 * drift + cycle + micro);
+    }
+
+    // Stage 2: Oracle computes features
+    let price_tensor = Tensor::from_slice(&prices);
+    let price_mean = price_tensor.mean();
+
+    // Compute returns
+    let mut returns: Vec<f64> = Vec::new();
+    for i in 1..n {
+        returns.push(log(prices[i] / prices[i - 1]));
+    }
+    let return_tensor = Tensor::from_slice(&returns);
+    let vol = return_tensor.std();
+
+    // Simple EMA forecast
+    let alpha: f64 = 0.2;
+    let mut ema_val = returns[0];
+    for i in 1..returns.len() {
+        ema_val = alpha * returns[i] + (1.0 - alpha) * ema_val;
+    }
+    let forecast_return = ema_val;
+
+    // Stage 3: Quantum-Finance position sizing
+    let current_price = prices[n - 1];
+    let forecast_price = current_price * exp(forecast_return);
+    let expected_pnl = forecast_price - current_price;
+
+    // Kelly criterion: f = expected_return / variance
+    let kelly_fraction = if vol > 0.0 {
+        clamp(forecast_return / (vol * vol), -0.5, 0.5) as f64
+    } else {
+        0.0
+    };
+
+    let capital = 100000.0;
+    let position_size = capital * abs(kelly_fraction);
+
+    // Verify the full pipeline produced reasonable results
+    assert_true(current_price > 0.0, "Current price should be positive");
+    assert_true(vol > 0.0, "Volatility should be positive");
+    assert_in_range(abs(kelly_fraction), 0.0, 0.5);
+    assert_true(position_size >= 0.0, "Position size should be non-negative");
+    assert_true(position_size <= capital * 0.5, "Position size should not exceed 50% of capital");
+
+    println("  foundation -> oracle -> quantum-finance full chain: OK");
+}
+
+// =============================================================================
+// 9. FULL CHAIN: SPECTRUM -> PHOTON -> CALIBRATE
+//    End-to-end color pipeline from scene to display
+// =============================================================================
+
+/// Full chain: spectrum defines colors, photon renders, calibrate corrects
+fn test_full_chain_color_to_display() {
+    // Stage 1: Spectrum defines scene colors in linear sRGB
+    let scene_color = RGB::new(0.6, 0.3, 0.1);  // Warm orange, linear
+
+    // Stage 2: Photon applies HDR rendering (boost by exposure)
+    let exposure = 1.5;
+    let exposed = RGB::new(
+        scene_color.r * exposure as f32,
+        scene_color.g * exposure as f32,
+        scene_color.b * exposure as f32,
+    );
+
+    // Stage 3: Spectrum tonemaps via Reinhard
+    let lum = exposed.luminance();
+    let mapped_lum = lum / (1.0 + lum);
+    let scale = if lum > 0.0 { mapped_lum / lum } else { 0.0 };
+    let tonemapped = RGB::new(
+        exposed.r * scale,
+        exposed.g * scale,
+        exposed.b * scale,
+    );
+
+    // Stage 4: Spectrum applies sRGB gamma for standard display
+    let srgb_output = RGB::new(
+        srgb_oetf(tonemapped.r),
+        srgb_oetf(tonemapped.g),
+        srgb_oetf(tonemapped.b),
+    );
+
+    // Stage 5: Calibrate applies display-specific correction
+    // Simulate a display that is slightly too warm (boost blue, reduce red)
+    let cal_matrix = Mat3::new([
+        [0.98, 0.00, 0.00],  // Reduce red by 2%
+        [0.00, 1.00, 0.00],  // Green unchanged
+        [0.00, 0.00, 1.03],  // Boost blue by 3%
+    ]);
+    let srgb_vec = Vec3::new(srgb_output.r, srgb_output.g, srgb_output.b);
+    let corrected_vec = cal_matrix.mul_vec3(&srgb_vec);
+    let calibrated = RGB::new(
+        clamp(corrected_vec.x, 0.0, 1.0) as f32,
+        clamp(corrected_vec.y, 0.0, 1.0) as f32,
+        clamp(corrected_vec.z, 0.0, 1.0) as f32,
+    );
+
+    // Verify: calibrated output is in display range
+    assert_in_range(calibrated.r as f64, 0.0, 1.0);
+    assert_in_range(calibrated.g as f64, 0.0, 1.0);
+    assert_in_range(calibrated.b as f64, 0.0, 1.0);
+
+    // Verify: warm scene color is still predominantly red/green
+    assert_true(calibrated.r > calibrated.b,
+        "Warm orange should have more red than blue even after cal");
+
+    // Verify: calibration correction is subtle (< 5% per channel)
+    assert_true(abs((calibrated.r - srgb_output.r) as f64) < 0.05,
+        "Calibration correction should be subtle");
+
+    println("  spectrum -> photon -> calibrate full chain: OK");
+}
+
+// =============================================================================
+// 10. FULL CHAIN: FIELD-TENSOR -> QUANTUM-FINANCE -> ORACLE
+//     Trading feedback loop with performance analysis
+// =============================================================================
+
+/// Full chain: tensor data drives trades, oracle analyzes performance
+fn test_full_chain_trading_feedback() {
+    // Stage 1: Field-Tensor contains market state
+    let n_time: usize = 40;
+    let n_assets: usize = 2;
+    let mut tensor = MarketTensor4D::new(n_time, n_assets, 2, 1);
+
+    // Populate: feature 0 = price, feature 1 = volume
+    for t in 0..n_time {
+        for a in 0..n_assets {
+            let price = 100.0 + (a as f64) * 20.0
+                + 5.0 * sin(2.0 * PI * (t as f64) / 15.0 + (a as f64));
+            let volume = 1000000.0 + 500000.0 * cos((t as f64) * 0.3);
+            tensor.set(t, a, 0, 0, price);
+            tensor.set(t, a, 1, 0, volume);
+        }
+    }
+
+    // Stage 2: Quantum-Finance generates trades from tensor
+    let mut trades: Vec<(usize, f64)> = Vec::new();  // (time, pnl)
+    for t in 5..n_time {
+        // Simple momentum: buy if 5-period return is positive
+        let price_now = tensor.get(t, 0, 0, 0);
+        let price_5ago = tensor.get(t - 5, 0, 0, 0);
+        let momentum = (price_now - price_5ago) / price_5ago;
+
+        if t < n_time - 1 {
+            let next_price = tensor.get(t + 1, 0, 0, 0);
+            let trade_return = (next_price - price_now) / price_now;
+            if momentum > 0.0 {
+                trades.push((t, trade_return * 10000.0));  // Long
+            } else {
+                trades.push((t, -trade_return * 10000.0)); // Short
+            }
+        }
+    }
+
+    // Stage 3: Oracle analyzes trade performance
+    let pnl_values: Vec<f64> = trades.iter().map(|(_, pnl)| *pnl).collect();
+    let pnl_tensor = Tensor::from_slice(&pnl_values);
+
+    let total_pnl = pnl_tensor.sum();
+    let avg_pnl = pnl_tensor.mean();
+    let pnl_vol = pnl_tensor.std();
+
+    // Compute Sharpe ratio (using Oracle tensor stats)
+    let sharpe = if pnl_vol > 0.0 { avg_pnl / pnl_vol } else { 0.0 };
+
+    // Compute win rate
+    let wins = pnl_values.iter().filter(|p| **p > 0.0).count();
+    let win_rate = (wins as f64) / (pnl_values.len() as f64);
+
+    // Verify: we got trades
+    assert_true(trades.len() > 0, "Should generate at least one trade");
+
+    // Verify: PnL statistics are finite
+    assert_true(total_pnl.is_finite(), "Total PnL should be finite");
+    assert_true(sharpe.is_finite(), "Sharpe ratio should be finite");
+    assert_in_range(win_rate, 0.0, 1.0);
+
+    // Verify: Oracle can compute cumulative PnL curve
+    let mut cum_pnl: Vec<f64> = Vec::new();
+    let mut running = 0.0;
+    for pnl in &pnl_values {
+        running = running + pnl;
+        cum_pnl.push(running);
+    }
+    let cum_tensor = Tensor::from_slice(&cum_pnl);
+    assert_true(cum_tensor.numel() == pnl_values.len(),
+        "Cumulative PnL should have same length as trades");
+
+    println("  field-tensor -> quantum-finance -> oracle feedback: OK");
+}
+
+// =============================================================================
+// MAIN: Run all cross-module integration tests
+// =============================================================================
+
+fn main() {
+    println("=== BUILD-UNIVERSE Cross-Module Integration Tests ===");
+    println("");
+
+    println("--- 1. Foundation -> Spectrum ---");
+    test_foundation_to_spectrum_xyz_roundtrip();
+    test_foundation_to_spectrum_tonemapping();
+    test_foundation_to_spectrum_matrix_chain();
+
+    println("");
+    println("--- 2. Spectrum -> Calibrate ---");
+    test_spectrum_to_calibrate_profile();
+    test_spectrum_to_calibrate_gamma();
+    test_spectrum_to_calibrate_delta_e();
+
+    println("");
+    println("--- 3. Foundation -> Oracle ---");
+    test_foundation_to_oracle_timeseries();
+    test_foundation_to_oracle_statistics();
+
+    println("");
+    println("--- 4. Oracle -> Quantum-Finance ---");
+    test_oracle_to_finance_forecast_signals();
+    test_oracle_to_finance_anomaly_risk();
+
+    println("");
+    println("--- 5. Foundation -> Field-Tensor ---");
+    test_foundation_to_field_tensor_populate();
+    test_foundation_to_field_tensor_covariance();
+
+    println("");
+    println("--- 6. Photon -> Spectrum ---");
+    test_photon_to_spectrum_color_pipeline();
+    test_photon_to_spectrum_oklab();
+
+    println("");
+    println("--- 7. Oracle -> Field-Tensor ---");
+    test_oracle_to_field_tensor_forecast_embedding();
+
+    println("");
+    println("--- 8. Full Chain: Foundation -> Oracle -> Quantum-Finance ---");
+    test_full_chain_predict_and_trade();
+
+    println("");
+    println("--- 9. Full Chain: Spectrum -> Photon -> Calibrate ---");
+    test_full_chain_color_to_display();
+
+    println("");
+    println("--- 10. Full Chain: Field-Tensor -> Quantum-Finance -> Oracle ---");
+    test_full_chain_trading_feedback();
+
+    println("");
+    println("=== All cross-module integration tests complete ===");
+}

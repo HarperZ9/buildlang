@@ -1,0 +1,200 @@
+// ============================================================================
+// ACES REFERENCE RENDERING TRANSFORM (RRT)
+// ============================================================================
+// The Academy Color Encoding System — film industry standard color pipeline.
+// Written in BuildLang. Compiles to C, HLSL, GLSL, SPIR-V, and WASM.
+//
+// Copyright © 2026 Zain Dana Harper. All Rights Reserved.
+// ============================================================================
+
+// Constants
+const RRT_A: f64 = 2.51;
+const RRT_B: f64 = 0.03;
+const RRT_C: f64 = 2.43;
+const RRT_D: f64 = 0.59;
+const RRT_E: f64 = 0.14;
+const SRGB_CUTOFF: f64 = 0.0031308;
+const SRGB_SLOPE: f64 = 12.92;
+const SRGB_ALPHA: f64 = 1.055;
+const SRGB_BETA: f64 = 0.055;
+const PQ_M1: f64 = 0.1593017578125;
+const PQ_M2: f64 = 78.84375;
+const PQ_C1: f64 = 0.8359375;
+const PQ_C2: f64 = 18.8515625;
+const PQ_C3: f64 = 18.6875;
+const HLG_A: f64 = 0.17883277;
+const HLG_B: f64 = 0.28466892;
+const HLG_C: f64 = 0.55991073;
+
+// Utility
+fn clamp_f(x: f64, lo: f64, hi: f64) -> f64 {
+    if x < lo { lo } else if x > hi { hi } else { x }
+}
+
+fn max_f(a: f64, b: f64) -> f64 {
+    if a > b { a } else { b }
+}
+
+// Color type
+struct Color3 { r: f64, g: f64, b: f64 }
+
+impl Color3 {
+    fn new(r: f64, g: f64, b: f64) -> Self { Self { r: r, g: g, b: b } }
+
+    fn clamp(self, lo: f64, hi: f64) -> Self {
+        Self { r: clamp_f(self.r, lo, hi), g: clamp_f(self.g, lo, hi), b: clamp_f(self.b, lo, hi) }
+    }
+
+    fn scale(self, s: f64) -> Self {
+        Self { r: self.r * s, g: self.g * s, b: self.b * s }
+    }
+
+    fn luminance(self) -> f64 {
+        0.2126 * self.r + 0.7152 * self.g + 0.0722 * self.b
+    }
+}
+
+// === ACES TONE MAPPING ===
+
+pub fn aces_tonemap(x: f64) -> f64 {
+    let num = x * (RRT_A * x + RRT_B);
+    let den = x * (RRT_C * x + RRT_D) + RRT_E;
+    num / den
+}
+
+pub fn rrt(scene: Color3) -> Color3 {
+    Color3::new(aces_tonemap(scene.r), aces_tonemap(scene.g), aces_tonemap(scene.b))
+}
+
+// === OUTPUT DEVICE TRANSFORMS ===
+
+pub fn srgb_oetf(linear: f64) -> f64 {
+    if linear <= SRGB_CUTOFF {
+        linear * SRGB_SLOPE
+    } else {
+        let gamma: f64 = pow(linear, 0.4166667);
+        let scaled: f64 = 1.055 * gamma;
+        scaled - 0.055
+    }
+}
+
+pub fn odt_srgb(scene: Color3) -> Color3 {
+    let m = rrt(scene).clamp(0.0, 1.0);
+    Color3::new(srgb_oetf(m.r), srgb_oetf(m.g), srgb_oetf(m.b))
+}
+
+pub fn pq_oetf(linear: f64) -> f64 {
+    let y: f64 = max_f(linear / 10000.0, 0.0);
+    let ym1: f64 = pow(y, PQ_M1);
+    let c2_ym1: f64 = 18.8515625 * ym1;
+    let c3_ym1: f64 = 18.6875 * ym1;
+    let num: f64 = 0.8359375 + c2_ym1;
+    let den: f64 = 1.0 + c3_ym1;
+    pow(num / den, PQ_M2)
+}
+
+pub fn odt_hdr10(scene: Color3) -> Color3 {
+    let m = rrt(scene).clamp(0.0, 1.0).scale(1000.0);
+    Color3::new(pq_oetf(m.r), pq_oetf(m.g), pq_oetf(m.b))
+}
+
+pub fn hlg_oetf(linear: f64) -> f64 {
+    if linear <= 0.08333333 {
+        sqrt(3.0 * linear)
+    } else {
+        HLG_A * (12.0 * linear - HLG_B) + HLG_C
+    }
+}
+
+// === ALTERNATIVE TONE MAPPERS ===
+
+pub fn tonemap_reinhard(x: f64) -> f64 { x / (1.0 + x) }
+
+pub fn tonemap_uncharted2(x: f64) -> f64 {
+    let a: f64 = 0.15;
+    let b: f64 = 0.50;
+    let c: f64 = 0.10;
+    let d: f64 = 0.20;
+    let e: f64 = 0.02;
+    let f: f64 = 0.30;
+    ((x * (a * x + c * b) + d * e) / (x * (a * x + b) + d * f)) - e / f
+}
+
+// === COLOR GRADING ===
+
+pub fn asc_cdl(color: Color3, slope: Color3, offset: Color3, power: Color3) -> Color3 {
+    let vr: f64 = max_f(color.r * slope.r + offset.r, 0.0);
+    let vg: f64 = max_f(color.g * slope.g + offset.g, 0.0);
+    let vb: f64 = max_f(color.b * slope.b + offset.b, 0.0);
+    Color3::new(pow(vr, power.r), pow(vg, power.g), pow(vb, power.b))
+}
+
+pub fn saturate(color: Color3, amount: f64) -> Color3 {
+    let lum = color.luminance();
+    Color3::new(
+        lum + (color.r - lum) * amount,
+        lum + (color.g - lum) * amount,
+        lum + (color.b - lum) * amount,
+    )
+}
+
+pub fn exposure(color: Color3, stops: f64) -> Color3 {
+    let multiplier: f64 = pow(2.0, stops);
+    color.scale(multiplier)
+}
+
+// === FULL PIPELINE ===
+
+pub fn aces_pipeline(scene: Color3, exp: f64, sat: f64, slope: Color3, offset: Color3, power: Color3) -> Color3 {
+    let e = exposure(scene, exp);
+    let g = asc_cdl(e, slope, offset, power);
+    let s = saturate(g, sat);
+    let m = rrt(s).clamp(0.0, 1.0);
+    Color3::new(srgb_oetf(m.r), srgb_oetf(m.g), srgb_oetf(m.b))
+}
+
+// === DEMO ===
+
+fn main() {
+    let scene = Color3::new(2.5, 1.8, 0.6);
+    println!("=== ACES Color Pipeline — Written in BuildLang ===");
+    println!("Scene (linear):  R={} G={} B={}", scene.r, scene.g, scene.b);
+
+    let mapped = rrt(scene);
+    println!("After RRT:       R={} G={} B={}", mapped.r, mapped.g, mapped.b);
+
+    let srgb = odt_srgb(scene);
+    println!("sRGB output:     R={} G={} B={}", srgb.r, srgb.g, srgb.b);
+
+    let hdr = odt_hdr10(scene);
+    println!("HDR10 (PQ):      R={} G={} B={}", hdr.r, hdr.g, hdr.b);
+
+    let slope = Color3::new(1.1, 1.0, 0.9);
+    let offset = Color3::new(0.0, 0.0, 0.0);
+    let power = Color3::new(1.0, 1.0, 1.0);
+
+    // Debug: step through pipeline manually
+    let e = exposure(scene, 0.5);
+    println!("After exposure:  R={} G={} B={}", e.r, e.g, e.b);
+    let g = asc_cdl(e, slope, offset, power);
+    println!("After CDL:       R={} G={} B={}", g.r, g.g, g.b);
+    let s = saturate(g, 1.2);
+    println!("After saturate:  R={} G={} B={}", s.r, s.g, s.b);
+    let m = rrt(s);
+    println!("After RRT:       R={} G={} B={}", m.r, m.g, m.b);
+    let mc = m.clamp(0.0, 1.0);
+    println!("After clamp:     R={} G={} B={}", mc.r, mc.g, mc.b);
+    let fr: f64 = srgb_oetf(mc.r);
+    let fg: f64 = srgb_oetf(mc.g);
+    let fb: f64 = srgb_oetf(mc.b);
+    println!("sRGB each:       R={} G={} B={}", fr, fg, fb);
+    let final_color = Color3::new(fr, fg, fb);
+    println!("Full pipeline:   R={} G={} B={}", final_color.r, final_color.g, final_color.b);
+
+    let test: f64 = 3.0;
+    println!("");
+    println!("=== Tone Mapper Comparison (input={}) ===", test);
+    println!("ACES:            {}", aces_tonemap(test));
+    println!("Reinhard:        {}", tonemap_reinhard(test));
+    println!("Uncharted 2:     {}", tonemap_uncharted2(test));
+}

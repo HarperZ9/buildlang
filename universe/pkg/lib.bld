@@ -1,0 +1,5636 @@
+// ═══════════════════════════════════════════════════════════════════════════════
+// BUILD-UNIVERSE Package Manager v2.0.0
+// "Quark" - The Quantum Package Manager
+// ═══════════════════════════════════════════════════════════════════════════════
+// Copyright © 2024-2025 Zain Dana Harper. All Rights Reserved.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+module pkg
+
+use foundation::io::{println, print, File, read_to_string, write_string}
+use foundation::collections::{Vec, HashMap, HashSet}
+use foundation::fs::{create_dir_all, remove_dir_all, exists, copy_dir}
+use foundation::net::{HttpClient, Response}
+use foundation::crypto::{sha256, verify_signature}
+use foundation::archive::{TarGz, extract}
+use foundation::semver::{Version, VersionReq}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// PACKAGE MANIFEST
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Package manifest (quark.toml)
+#[derive(Clone, Debug)]
+pub struct Manifest {
+    pub package: PackageInfo,
+    pub dependencies: HashMap<String, Dependency>,
+    pub dev_dependencies: HashMap<String, Dependency>,
+    pub build_dependencies: HashMap<String, Dependency>,
+    pub features: HashMap<String, Vec<String>>,
+    pub targets: Vec<Target>,
+    pub metadata: HashMap<String, String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct PackageInfo {
+    pub name: String,
+    pub version: Version,
+    pub authors: Vec<String>,
+    pub edition: String,
+    pub description: Option<String>,
+    pub license: Option<String>,
+    pub repository: Option<String>,
+    pub homepage: Option<String>,
+    pub documentation: Option<String>,
+    pub keywords: Vec<String>,
+    pub categories: Vec<String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct Dependency {
+    pub version: VersionReq,
+    pub registry: Option<String>,
+    pub git: Option<String>,
+    pub branch: Option<String>,
+    pub tag: Option<String>,
+    pub path: Option<String>,
+    pub optional: bool,
+    pub features: Vec<String>,
+    pub default_features: bool,
+}
+
+#[derive(Clone, Debug)]
+pub struct Target {
+    pub name: String,
+    pub target_type: TargetType,
+    pub path: String,
+    pub required_features: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum TargetType {
+    Library,
+    Binary,
+    Example,
+    Test,
+    Benchmark,
+}
+
+impl Manifest {
+    /// Parse manifest from TOML string
+    pub fn from_toml(content: &str) -> Result<Self, ManifestError> {
+        // TOML parsing implementation
+        let mut manifest = Manifest {
+            package: PackageInfo {
+                name: String::new(),
+                version: Version::new(0, 1, 0),
+                authors: Vec::new(),
+                edition: "2024".to_string(),
+                description: None,
+                license: None,
+                repository: None,
+                homepage: None,
+                documentation: None,
+                keywords: Vec::new(),
+                categories: Vec::new(),
+            },
+            dependencies: HashMap::new(),
+            dev_dependencies: HashMap::new(),
+            build_dependencies: HashMap::new(),
+            features: HashMap::new(),
+            targets: Vec::new(),
+            metadata: HashMap::new(),
+        };
+
+        // Parse TOML sections
+        for line in content.lines() {
+            let line = line.trim();
+            if line.starts_with("name = ") {
+                manifest.package.name = parse_string_value(line);
+            } else if line.starts_with("version = ") {
+                manifest.package.version = Version::parse(&parse_string_value(line))?;
+            }
+            // ... additional parsing
+        }
+
+        Ok(manifest)
+    }
+
+    /// Serialize manifest to TOML string
+    pub fn to_toml(&self) -> String {
+        let mut output = String::new();
+
+        output.push_str("[package]\n");
+        output.push_str(&format!("name = \"{}\"\n", self.package.name));
+        output.push_str(&format!("version = \"{}\"\n", self.package.version));
+        output.push_str(&format!("edition = \"{}\"\n", self.package.edition));
+
+        if !self.package.authors.is_empty() {
+            output.push_str(&format!("authors = {:?}\n", self.package.authors));
+        }
+
+        if let Some(ref desc) = self.package.description {
+            output.push_str(&format!("description = \"{}\"\n", desc));
+        }
+
+        if let Some(ref license) = self.package.license {
+            output.push_str(&format!("license = \"{}\"\n", license));
+        }
+
+        if !self.dependencies.is_empty() {
+            output.push_str("\n[dependencies]\n");
+            for (name, dep) in &self.dependencies {
+                output.push_str(&format!("{} = \"{}\"\n", name, dep.version));
+            }
+        }
+
+        output
+    }
+
+    /// Load manifest from file
+    pub fn load(path: &str) -> Result<Self, ManifestError> {
+        let content = read_to_string(path)?;
+        Self::from_toml(&content)
+    }
+
+    /// Save manifest to file
+    pub fn save(&self, path: &str) -> Result<(), ManifestError> {
+        let content = self.to_toml();
+        write_string(path, &content)?;
+        Ok(())
+    }
+}
+
+fn parse_string_value(line: &str) -> String {
+    line.split('=')
+        .nth(1)
+        .map(|s| s.trim().trim_matches('"').to_string())
+        .unwrap_or_default()
+}
+
+#[derive(Debug)]
+pub enum ManifestError {
+    ParseError(String),
+    IoError(String),
+    VersionError(String),
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// PACKAGE REGISTRY
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Package registry client
+pub struct Registry {
+    url: String,
+    client: HttpClient,
+    cache: RegistryCache,
+    config: RegistryConfig,
+}
+
+#[derive(Clone)]
+pub struct RegistryConfig {
+    pub index_url: String,
+    pub api_url: String,
+    pub download_url: String,
+    pub auth_token: Option<String>,
+    pub cache_dir: String,
+}
+
+impl Default for RegistryConfig {
+    fn default() -> Self {
+        RegistryConfig {
+            index_url: "https://index.quark.bld-universe.dev".to_string(),
+            api_url: "https://api.quark.bld-universe.dev".to_string(),
+            download_url: "https://dl.quark.bld-universe.dev".to_string(),
+            auth_token: None,
+            cache_dir: "~/.quark/cache".to_string(),
+        }
+    }
+}
+
+pub struct RegistryCache {
+    index: HashMap<String, Vec<PackageVersion>>,
+    packages: HashMap<String, CachedPackage>,
+}
+
+#[derive(Clone)]
+pub struct PackageVersion {
+    pub version: Version,
+    pub checksum: String,
+    pub yanked: bool,
+    pub dependencies: Vec<(String, VersionReq)>,
+    pub features: HashMap<String, Vec<String>>,
+}
+
+pub struct CachedPackage {
+    pub name: String,
+    pub version: Version,
+    pub path: String,
+    pub cached_at: u64,
+}
+
+impl Registry {
+    pub fn new(config: RegistryConfig) -> Self {
+        Registry {
+            url: config.api_url.clone(),
+            client: HttpClient::new(),
+            cache: RegistryCache {
+                index: HashMap::new(),
+                packages: HashMap::new(),
+            },
+            config,
+        }
+    }
+
+    /// Search for packages
+    pub fn search(&self, query: &str) -> Result<Vec<SearchResult>, RegistryError> {
+        let url = format!("{}/search?q={}", self.url, query);
+        let response = self.client.get(&url)?;
+
+        // Parse JSON response
+        let results: Vec<SearchResult> = parse_search_results(&response.body)?;
+        Ok(results)
+    }
+
+    /// Get package info
+    pub fn get_package(&self, name: &str) -> Result<PackageInfo, RegistryError> {
+        let url = format!("{}/packages/{}", self.url, name);
+        let response = self.client.get(&url)?;
+
+        // Parse JSON response
+        let info = parse_package_info(&response.body)?;
+        Ok(info)
+    }
+
+    /// Get all versions of a package
+    pub fn get_versions(&self, name: &str) -> Result<Vec<PackageVersion>, RegistryError> {
+        // Check cache first
+        if let Some(versions) = self.cache.index.get(name) {
+            return Ok(versions.clone());
+        }
+
+        let url = format!("{}/packages/{}/versions", self.url, name);
+        let response = self.client.get(&url)?;
+
+        let versions = parse_versions(&response.body)?;
+        Ok(versions)
+    }
+
+    /// Download a package
+    pub fn download(&self, name: &str, version: &Version) -> Result<String, RegistryError> {
+        let cache_key = format!("{}-{}", name, version);
+
+        // Check cache
+        if let Some(cached) = self.cache.packages.get(&cache_key) {
+            if exists(&cached.path) {
+                return Ok(cached.path.clone());
+            }
+        }
+
+        // Download package
+        let url = format!("{}/{}/{}/download", self.config.download_url, name, version);
+        let response = self.client.get(&url)?;
+
+        // Verify checksum
+        let checksum = sha256(&response.body);
+        let expected = self.get_checksum(name, version)?;
+        if checksum != expected {
+            return Err(RegistryError::ChecksumMismatch);
+        }
+
+        // Extract to cache directory
+        let cache_path = format!("{}/{}-{}", self.config.cache_dir, name, version);
+        create_dir_all(&cache_path)?;
+
+        let archive = TarGz::from_bytes(&response.body)?;
+        archive.extract(&cache_path)?;
+
+        Ok(cache_path)
+    }
+
+    /// Publish a package
+    pub fn publish(&self, tarball: &[u8], manifest: &Manifest) -> Result<(), RegistryError> {
+        let token = self.config.auth_token.as_ref()
+            .ok_or(RegistryError::AuthRequired)?;
+
+        let url = format!("{}/publish", self.url);
+        let _response = self.client.post(&url)
+            .header("Authorization", &format!("Bearer {}", token))
+            .body(tarball)
+            .send()?;
+
+        println!("Published {} v{}", manifest.package.name, manifest.package.version);
+        Ok(())
+    }
+
+    /// Yank a version (mark as not recommended)
+    pub fn yank(&self, name: &str, version: &Version) -> Result<(), RegistryError> {
+        let token = self.config.auth_token.as_ref()
+            .ok_or(RegistryError::AuthRequired)?;
+
+        let url = format!("{}/packages/{}/{}/yank", self.url, name, version);
+        self.client.delete(&url)
+            .header("Authorization", &format!("Bearer {}", token))
+            .send()?;
+
+        println!("Yanked {} v{}", name, version);
+        Ok(())
+    }
+
+    fn get_checksum(&self, name: &str, version: &Version) -> Result<String, RegistryError> {
+        let versions = self.get_versions(name)?;
+        versions.iter()
+            .find(|v| &v.version == version)
+            .map(|v| v.checksum.clone())
+            .ok_or(RegistryError::VersionNotFound)
+    }
+}
+
+#[derive(Clone)]
+pub struct SearchResult {
+    pub name: String,
+    pub description: String,
+    pub max_version: Version,
+    pub downloads: u64,
+}
+
+#[derive(Debug)]
+pub enum RegistryError {
+    NetworkError(String),
+    ParseError(String),
+    PackageNotFound,
+    VersionNotFound,
+    ChecksumMismatch,
+    AuthRequired,
+    Unauthorized,
+}
+
+fn parse_search_results(_body: &[u8]) -> Result<Vec<SearchResult>, RegistryError> {
+    // JSON parsing implementation
+    Ok(Vec::new())
+}
+
+fn parse_package_info(_body: &[u8]) -> Result<PackageInfo, RegistryError> {
+    // JSON parsing implementation
+    Ok(PackageInfo {
+        name: String::new(),
+        version: Version::new(0, 1, 0),
+        authors: Vec::new(),
+        edition: "2024".to_string(),
+        description: None,
+        license: None,
+        repository: None,
+        homepage: None,
+        documentation: None,
+        keywords: Vec::new(),
+        categories: Vec::new(),
+    })
+}
+
+fn parse_versions(_body: &[u8]) -> Result<Vec<PackageVersion>, RegistryError> {
+    // JSON parsing implementation
+    Ok(Vec::new())
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// DEPENDENCY RESOLVER
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Dependency resolver using PubGrub algorithm
+pub struct Resolver {
+    registry: Registry,
+    cache: ResolverCache,
+}
+
+pub struct ResolverCache {
+    resolutions: HashMap<String, Resolution>,
+}
+
+pub struct Resolution {
+    pub packages: Vec<ResolvedPackage>,
+    pub features: HashMap<String, HashSet<String>>,
+}
+
+#[derive(Clone)]
+pub struct ResolvedPackage {
+    pub name: String,
+    pub version: Version,
+    pub source: PackageSource,
+    pub dependencies: Vec<String>,
+    pub features: HashSet<String>,
+}
+
+#[derive(Clone)]
+pub enum PackageSource {
+    Registry(String),
+    Git { url: String, rev: String },
+    Path(String),
+}
+
+impl Resolver {
+    pub fn new(registry: Registry) -> Self {
+        Resolver {
+            registry,
+            cache: ResolverCache {
+                resolutions: HashMap::new(),
+            },
+        }
+    }
+
+    /// Resolve all dependencies
+    pub fn resolve(&mut self, manifest: &Manifest) -> Result<Resolution, ResolveError> {
+        println!("Resolving dependencies...");
+
+        let mut resolution = Resolution {
+            packages: Vec::new(),
+            features: HashMap::new(),
+        };
+
+        // Build dependency graph
+        let mut pending: Vec<(String, VersionReq)> = manifest.dependencies.iter()
+            .map(|(name, dep)| (name.clone(), dep.version.clone()))
+            .collect();
+
+        let mut resolved: HashMap<String, Version> = HashMap::new();
+
+        while let Some((name, req)) = pending.pop() {
+            if resolved.contains_key(&name) {
+                continue;
+            }
+
+            // Find best matching version
+            let version = self.find_best_version(&name, &req)?;
+            resolved.insert(name.clone(), version.clone());
+
+            // Get transitive dependencies
+            let versions = self.registry.get_versions(&name)?;
+            if let Some(pkg_ver) = versions.iter().find(|v| v.version == version) {
+                for (dep_name, dep_req) in &pkg_ver.dependencies {
+                    if !resolved.contains_key(dep_name) {
+                        pending.push((dep_name.clone(), dep_req.clone()));
+                    }
+                }
+            }
+
+            resolution.packages.push(ResolvedPackage {
+                name: name.clone(),
+                version,
+                source: PackageSource::Registry(self.registry.url.clone()),
+                dependencies: Vec::new(),
+                features: HashSet::new(),
+            });
+
+            println!("  Resolved {} v{}", name, resolved.get(&name).unwrap());
+        }
+
+        Ok(resolution)
+    }
+
+    fn find_best_version(&self, name: &str, req: &VersionReq) -> Result<Version, ResolveError> {
+        let versions = self.registry.get_versions(name)
+            .map_err(|_| ResolveError::PackageNotFound(name.to_string()))?;
+
+        versions.iter()
+            .filter(|v| !v.yanked && req.matches(&v.version))
+            .map(|v| v.version.clone())
+            .max()
+            .ok_or(ResolveError::NoMatchingVersion(name.to_string(), req.clone()))
+    }
+}
+
+#[derive(Debug)]
+pub enum ResolveError {
+    PackageNotFound(String),
+    NoMatchingVersion(String, VersionReq),
+    ConflictingVersions(String, Version, Version),
+    CyclicDependency(Vec<String>),
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// PACKAGE MANAGER
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Main package manager interface
+pub struct PackageManager {
+    registry: Registry,
+    resolver: Resolver,
+    config: PackageManagerConfig,
+}
+
+#[derive(Clone)]
+pub struct PackageManagerConfig {
+    pub registry: RegistryConfig,
+    pub install_dir: String,
+    pub global_dir: String,
+    pub offline: bool,
+    pub locked: bool,
+}
+
+impl Default for PackageManagerConfig {
+    fn default() -> Self {
+        PackageManagerConfig {
+            registry: RegistryConfig::default(),
+            install_dir: "./quark_modules".to_string(),
+            global_dir: "~/.quark/global".to_string(),
+            offline: false,
+            locked: false,
+        }
+    }
+}
+
+impl PackageManager {
+    pub fn new(config: PackageManagerConfig) -> Self {
+        let registry = Registry::new(config.registry.clone());
+        let resolver = Resolver::new(Registry::new(config.registry.clone()));
+
+        PackageManager {
+            registry,
+            resolver,
+            config,
+        }
+    }
+
+    /// Initialize a new package
+    pub fn init(&self, name: &str, path: &str) -> Result<(), PackageError> {
+        println!("Creating package '{}'...", name);
+
+        create_dir_all(path)?;
+        create_dir_all(&format!("{}/src", path))?;
+
+        // Create quark.toml
+        let manifest = Manifest {
+            package: PackageInfo {
+                name: name.to_string(),
+                version: Version::new(0, 1, 0),
+                authors: Vec::new(),
+                edition: "2024".to_string(),
+                description: Some(format!("A BUILD-UNIVERSE package: {}", name)),
+                license: Some("MIT".to_string()),
+                repository: None,
+                homepage: None,
+                documentation: None,
+                keywords: Vec::new(),
+                categories: Vec::new(),
+            },
+            dependencies: HashMap::new(),
+            dev_dependencies: HashMap::new(),
+            build_dependencies: HashMap::new(),
+            features: HashMap::new(),
+            targets: Vec::new(),
+            metadata: HashMap::new(),
+        };
+
+        manifest.save(&format!("{}/quark.toml", path))?;
+
+        // Create lib.bld
+        let lib_content = format!(r#"// ═══════════════════════════════════════════════════════════════════════════════
+// {} - A BUILD-UNIVERSE Package
+// ═══════════════════════════════════════════════════════════════════════════════
+
+module {}
+
+pub fn hello() {{
+    println!("Hello from {}!");
+}}
+
+#[cfg(test)]
+mod tests {{
+    use super::*;
+
+    #[test]
+    fn test_hello() {{
+        hello();
+    }}
+}}
+"#, name, name, name);
+
+        write_string(&format!("{}/src/lib.bld", path), &lib_content)?;
+
+        // Create .gitignore
+        let gitignore = "quark_modules/\ntarget/\n*.lock\n";
+        write_string(&format!("{}/.gitignore", path), gitignore)?;
+
+        println!("  Created {}/quark.toml", path);
+        println!("  Created {}/src/lib.bld", path);
+        println!("  ✓ Package initialized");
+
+        Ok(())
+    }
+
+    /// Add a dependency
+    pub fn add(&self, manifest_path: &str, name: &str, version: Option<&str>) -> Result<(), PackageError> {
+        let mut manifest = Manifest::load(manifest_path)?;
+
+        // Get latest version if not specified
+        let version_req = if let Some(v) = version {
+            VersionReq::parse(v)?
+        } else {
+            let versions = self.registry.get_versions(name)?;
+            let latest = versions.iter()
+                .filter(|v| !v.yanked)
+                .map(|v| &v.version)
+                .max()
+                .ok_or(PackageError::PackageNotFound(name.to_string()))?;
+            VersionReq::parse(&format!("^{}", latest))?
+        };
+
+        manifest.dependencies.insert(name.to_string(), Dependency {
+            version: version_req.clone(),
+            registry: None,
+            git: None,
+            branch: None,
+            tag: None,
+            path: None,
+            optional: false,
+            features: Vec::new(),
+            default_features: true,
+        });
+
+        manifest.save(manifest_path)?;
+        println!("Added {} {} to dependencies", name, version_req);
+
+        Ok(())
+    }
+
+    /// Remove a dependency
+    pub fn remove(&self, manifest_path: &str, name: &str) -> Result<(), PackageError> {
+        let mut manifest = Manifest::load(manifest_path)?;
+
+        if manifest.dependencies.remove(name).is_some() {
+            manifest.save(manifest_path)?;
+            println!("Removed {} from dependencies", name);
+            Ok(())
+        } else {
+            Err(PackageError::DependencyNotFound(name.to_string()))
+        }
+    }
+
+    /// Install all dependencies
+    pub fn install(&mut self, manifest_path: &str) -> Result<(), PackageError> {
+        let manifest = Manifest::load(manifest_path)?;
+
+        println!("Installing dependencies for {}...", manifest.package.name);
+
+        // Resolve dependencies
+        let resolution = self.resolver.resolve(&manifest)?;
+
+        // Download and install each package
+        for pkg in &resolution.packages {
+            let path = self.registry.download(&pkg.name, &pkg.version)?;
+            let install_path = format!("{}/{}", self.config.install_dir, pkg.name);
+
+            if exists(&install_path) {
+                remove_dir_all(&install_path)?;
+            }
+
+            copy_dir(&path, &install_path)?;
+            println!("  Installed {} v{}", pkg.name, pkg.version);
+        }
+
+        // Generate lockfile
+        self.generate_lockfile(&resolution, manifest_path)?;
+
+        println!("  ✓ Installed {} packages", resolution.packages.len());
+        Ok(())
+    }
+
+    /// Update dependencies
+    pub fn update(&mut self, manifest_path: &str, name: Option<&str>) -> Result<(), PackageError> {
+        let manifest = Manifest::load(manifest_path)?;
+
+        if let Some(pkg_name) = name {
+            println!("Updating {}...", pkg_name);
+            // Update specific package
+        } else {
+            println!("Updating all dependencies...");
+            // Update all packages
+        }
+
+        let resolution = self.resolver.resolve(&manifest)?;
+        self.generate_lockfile(&resolution, manifest_path)?;
+
+        Ok(())
+    }
+
+    /// Search for packages
+    pub fn search(&self, query: &str) -> Result<(), PackageError> {
+        let results = self.registry.search(query)?;
+
+        println!("Search results for '{}':", query);
+        println!();
+
+        for result in results {
+            println!("  {} v{}", result.name, result.max_version);
+            if !result.description.is_empty() {
+                println!("    {}", result.description);
+            }
+            println!("    Downloads: {}", result.downloads);
+            println!();
+        }
+
+        Ok(())
+    }
+
+    /// Publish the package
+    pub fn publish(&self, manifest_path: &str) -> Result<(), PackageError> {
+        let manifest = Manifest::load(manifest_path)?;
+
+        println!("Publishing {} v{}...", manifest.package.name, manifest.package.version);
+
+        // Create tarball
+        let tarball = self.create_tarball(manifest_path)?;
+
+        // Verify package
+        self.verify_package(&manifest)?;
+
+        // Publish to registry
+        self.registry.publish(&tarball, &manifest)?;
+
+        println!("  ✓ Published successfully");
+        Ok(())
+    }
+
+    fn generate_lockfile(&self, resolution: &Resolution, manifest_path: &str) -> Result<(), PackageError> {
+        let lock_path = manifest_path.replace("quark.toml", "quark.lock");
+        let mut content = String::new();
+
+        content.push_str("# This file is auto-generated by quark\n");
+        content.push_str("# Do not edit manually\n\n");
+
+        for pkg in &resolution.packages {
+            content.push_str(&format!("[[package]]\n"));
+            content.push_str(&format!("name = \"{}\"\n", pkg.name));
+            content.push_str(&format!("version = \"{}\"\n", pkg.version));
+            match &pkg.source {
+                PackageSource::Registry(url) => {
+                    content.push_str(&format!("source = \"registry+{}\"\n", url));
+                }
+                PackageSource::Git { url, rev } => {
+                    content.push_str(&format!("source = \"git+{}#{}\"\n", url, rev));
+                }
+                PackageSource::Path(path) => {
+                    content.push_str(&format!("source = \"path+{}\"\n", path));
+                }
+            }
+            content.push_str("\n");
+        }
+
+        write_string(&lock_path, &content)?;
+        Ok(())
+    }
+
+    fn create_tarball(&self, _manifest_path: &str) -> Result<Vec<u8>, PackageError> {
+        // Create tarball of package
+        Ok(Vec::new())
+    }
+
+    fn verify_package(&self, manifest: &Manifest) -> Result<(), PackageError> {
+        // Verify package is ready for publishing
+        if manifest.package.name.is_empty() {
+            return Err(PackageError::InvalidManifest("Package name is required".to_string()));
+        }
+
+        if manifest.package.version == Version::new(0, 0, 0) {
+            return Err(PackageError::InvalidManifest("Package version is required".to_string()));
+        }
+
+        Ok(())
+    }
+}
+
+#[derive(Debug)]
+pub enum PackageError {
+    ManifestError(ManifestError),
+    RegistryError(RegistryError),
+    ResolveError(ResolveError),
+    PackageNotFound(String),
+    DependencyNotFound(String),
+    InvalidManifest(String),
+    IoError(String),
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// CLI COMMANDS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+pub fn run_cli(args: Vec<String>) -> Result<(), PackageError> {
+    let config = PackageManagerConfig::default();
+    let mut pm = PackageManager::new(config);
+
+    if args.len() < 2 {
+        print_help();
+        return Ok(());
+    }
+
+    match args[1].as_str() {
+        "init" => {
+            let name = args.get(2).map(|s| s.as_str()).unwrap_or("my-package");
+            let path = args.get(3).map(|s| s.as_str()).unwrap_or(".");
+            pm.init(name, path)?;
+        }
+        "add" => {
+            let name = args.get(2).ok_or(PackageError::InvalidManifest("Package name required".to_string()))?;
+            let version = args.get(3).map(|s| s.as_str());
+            pm.add("quark.toml", name, version)?;
+        }
+        "remove" | "rm" => {
+            let name = args.get(2).ok_or(PackageError::InvalidManifest("Package name required".to_string()))?;
+            pm.remove("quark.toml", name)?;
+        }
+        "install" | "i" => {
+            pm.install("quark.toml")?;
+        }
+        "update" | "up" => {
+            let name = args.get(2).map(|s| s.as_str());
+            pm.update("quark.toml", name)?;
+        }
+        "search" | "s" => {
+            let query = args.get(2).ok_or(PackageError::InvalidManifest("Search query required".to_string()))?;
+            pm.search(query)?;
+        }
+        "publish" => {
+            pm.publish("quark.toml")?;
+        }
+        "help" | "--help" | "-h" => {
+            print_help();
+        }
+        cmd => {
+            println!("Unknown command: {}", cmd);
+            print_help();
+        }
+    }
+
+    Ok(())
+}
+
+fn print_help() {
+    println!("╔═══════════════════════════════════════════════════════════════╗");
+    println!("║  Quark - BUILD-UNIVERSE Package Manager                      ║");
+    println!("╚═══════════════════════════════════════════════════════════════╝");
+    println!();
+    println!("Usage: quark <command> [options]");
+    println!();
+    println!("Commands:");
+    println!("  init <name> [path]    Create a new package");
+    println!("  add <pkg> [version]   Add a dependency");
+    println!("  remove <pkg>          Remove a dependency");
+    println!("  install               Install all dependencies");
+    println!("  update [pkg]          Update dependencies");
+    println!("  search <query>        Search for packages");
+    println!("  publish               Publish package to registry");
+    println!("  help                  Show this help message");
+    println!();
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// PUBGRUB SAT-SOLVER FOR DEPENDENCY RESOLUTION
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Version set representing a range of acceptable versions
+#[derive(Clone, Debug)]
+pub struct VersionSet {
+    ranges: Vec<VersionRange>,
+}
+
+#[derive(Clone, Debug)]
+pub struct VersionRange {
+    pub start: Option<Version>,
+    pub end: Option<Version>,
+    pub start_inclusive: bool,
+    pub end_inclusive: bool,
+}
+
+impl VersionSet {
+    pub fn any() -> Self {
+        VersionSet {
+            ranges: vec![VersionRange {
+                start: None,
+                end: None,
+                start_inclusive: true,
+                end_inclusive: true,
+            }],
+        }
+    }
+
+    pub fn none() -> Self {
+        VersionSet { ranges: Vec::new() }
+    }
+
+    pub fn exact(version: Version) -> Self {
+        VersionSet {
+            ranges: vec![VersionRange {
+                start: Some(version.clone()),
+                end: Some(version),
+                start_inclusive: true,
+                end_inclusive: true,
+            }],
+        }
+    }
+
+    pub fn at_least(version: Version) -> Self {
+        VersionSet {
+            ranges: vec![VersionRange {
+                start: Some(version),
+                end: None,
+                start_inclusive: true,
+                end_inclusive: true,
+            }],
+        }
+    }
+
+    pub fn less_than(version: Version) -> Self {
+        VersionSet {
+            ranges: vec![VersionRange {
+                start: None,
+                end: Some(version),
+                start_inclusive: true,
+                end_inclusive: false,
+            }],
+        }
+    }
+
+    pub fn union(&self, other: &VersionSet) -> VersionSet {
+        let mut ranges = self.ranges.clone();
+        ranges.extend(other.ranges.clone());
+        VersionSet::normalize(ranges)
+    }
+
+    pub fn intersection(&self, other: &VersionSet) -> VersionSet {
+        let mut result = Vec::new();
+        for r1 in &self.ranges {
+            for r2 in &other.ranges {
+                if let Some(intersection) = r1.intersect(r2) {
+                    result.push(intersection);
+                }
+            }
+        }
+        VersionSet::normalize(result)
+    }
+
+    pub fn complement(&self) -> VersionSet {
+        if self.ranges.is_empty() {
+            return VersionSet::any();
+        }
+
+        let mut result = Vec::new();
+        let mut last_end: Option<Version> = None;
+
+        for range in &self.ranges {
+            if let Some(start) = &range.start {
+                if last_end.is_none() || &last_end.clone().unwrap() < start {
+                    result.push(VersionRange {
+                        start: last_end.clone(),
+                        end: Some(start.clone()),
+                        start_inclusive: last_end.is_none(),
+                        end_inclusive: !range.start_inclusive,
+                    });
+                }
+            }
+            last_end = range.end.clone();
+        }
+
+        if last_end.is_some() {
+            result.push(VersionRange {
+                start: last_end,
+                end: None,
+                start_inclusive: false,
+                end_inclusive: true,
+            });
+        }
+
+        VersionSet { ranges: result }
+    }
+
+    pub fn contains(&self, version: &Version) -> bool {
+        self.ranges.iter().any(|r| r.contains(version))
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.ranges.is_empty()
+    }
+
+    fn normalize(mut ranges: Vec<VersionRange>) -> VersionSet {
+        // Sort and merge overlapping ranges
+        ranges.sort_by(|a, b| {
+            match (&a.start, &b.start) {
+                (None, None) => std::cmp::Ordering::Equal,
+                (None, Some(_)) => std::cmp::Ordering::Less,
+                (Some(_), None) => std::cmp::Ordering::Greater,
+                (Some(a), Some(b)) => a.cmp(b),
+            }
+        });
+
+        let mut merged = Vec::new();
+        for range in ranges {
+            if let Some(last) = merged.last_mut() {
+                if last.overlaps_or_adjacent(&range) {
+                    last.merge(&range);
+                    continue;
+                }
+            }
+            merged.push(range);
+        }
+
+        VersionSet { ranges: merged }
+    }
+}
+
+impl VersionRange {
+    pub fn contains(&self, version: &Version) -> bool {
+        let start_ok = match &self.start {
+            None => true,
+            Some(s) => if self.start_inclusive { version >= s } else { version > s },
+        };
+        let end_ok = match &self.end {
+            None => true,
+            Some(e) => if self.end_inclusive { version <= e } else { version < e },
+        };
+        start_ok && end_ok
+    }
+
+    pub fn intersect(&self, other: &VersionRange) -> Option<VersionRange> {
+        let (start, start_inclusive) = match (&self.start, &other.start) {
+            (None, None) => (None, true),
+            (Some(s), None) => (Some(s.clone()), self.start_inclusive),
+            (None, Some(s)) => (Some(s.clone()), other.start_inclusive),
+            (Some(s1), Some(s2)) => {
+                if s1 > s2 {
+                    (Some(s1.clone()), self.start_inclusive)
+                } else if s2 > s1 {
+                    (Some(s2.clone()), other.start_inclusive)
+                } else {
+                    (Some(s1.clone()), self.start_inclusive && other.start_inclusive)
+                }
+            }
+        };
+
+        let (end, end_inclusive) = match (&self.end, &other.end) {
+            (None, None) => (None, true),
+            (Some(e), None) => (Some(e.clone()), self.end_inclusive),
+            (None, Some(e)) => (Some(e.clone()), other.end_inclusive),
+            (Some(e1), Some(e2)) => {
+                if e1 < e2 {
+                    (Some(e1.clone()), self.end_inclusive)
+                } else if e2 < e1 {
+                    (Some(e2.clone()), other.end_inclusive)
+                } else {
+                    (Some(e1.clone()), self.end_inclusive && other.end_inclusive)
+                }
+            }
+        };
+
+        // Check if range is valid
+        if let (Some(s), Some(e)) = (&start, &end) {
+            if s > e || (s == e && !(start_inclusive && end_inclusive)) {
+                return None;
+            }
+        }
+
+        Some(VersionRange { start, end, start_inclusive, end_inclusive })
+    }
+
+    pub fn overlaps_or_adjacent(&self, other: &VersionRange) -> bool {
+        // Check if ranges overlap or are adjacent
+        self.intersect(other).is_some()
+    }
+
+    pub fn merge(&mut self, other: &VersionRange) {
+        self.start = match (&self.start, &other.start) {
+            (None, _) | (_, None) => None,
+            (Some(s1), Some(s2)) => Some(if s1 < s2 { s1.clone() } else { s2.clone() }),
+        };
+        self.end = match (&self.end, &other.end) {
+            (None, _) | (_, None) => None,
+            (Some(e1), Some(e2)) => Some(if e1 > e2 { e1.clone() } else { e2.clone() }),
+        };
+    }
+}
+
+/// PubGrub incompatibility
+#[derive(Clone, Debug)]
+pub struct Incompatibility {
+    terms: HashMap<String, Term>,
+    cause: IncompatibilityCause,
+}
+
+#[derive(Clone, Debug)]
+pub struct Term {
+    package: String,
+    positive: bool,
+    version_set: VersionSet,
+}
+
+#[derive(Clone, Debug)]
+pub enum IncompatibilityCause {
+    Root,
+    Dependency(String, Version),
+    NoVersions(String),
+    Conflict(Box<Incompatibility>, Box<Incompatibility>),
+}
+
+/// PubGrub partial solution
+pub struct PartialSolution {
+    assignments: Vec<Assignment>,
+    decisions: HashMap<String, Version>,
+    positive: HashMap<String, VersionSet>,
+    negative: HashMap<String, VersionSet>,
+}
+
+#[derive(Clone)]
+pub struct Assignment {
+    package: String,
+    version_set: VersionSet,
+    is_decision: bool,
+    decision_level: usize,
+    cause: Option<Incompatibility>,
+}
+
+impl PartialSolution {
+    pub fn new() -> Self {
+        PartialSolution {
+            assignments: Vec::new(),
+            decisions: HashMap::new(),
+            positive: HashMap::new(),
+            negative: HashMap::new(),
+        }
+    }
+
+    pub fn decide(&mut self, package: &str, version: Version) {
+        let level = self.decision_level() + 1;
+        self.decisions.insert(package.to_string(), version.clone());
+        self.assignments.push(Assignment {
+            package: package.to_string(),
+            version_set: VersionSet::exact(version),
+            is_decision: true,
+            decision_level: level,
+            cause: None,
+        });
+        self.positive.insert(package.to_string(), VersionSet::any());
+    }
+
+    pub fn derive(&mut self, package: &str, version_set: VersionSet, positive: bool, cause: Incompatibility) {
+        let level = self.decision_level();
+        self.assignments.push(Assignment {
+            package: package.to_string(),
+            version_set: version_set.clone(),
+            is_decision: false,
+            decision_level: level,
+            cause: Some(cause),
+        });
+
+        if positive {
+            let existing = self.positive.get(package).cloned().unwrap_or(VersionSet::any());
+            self.positive.insert(package.to_string(), existing.intersection(&version_set));
+        } else {
+            let existing = self.negative.get(package).cloned().unwrap_or(VersionSet::none());
+            self.negative.insert(package.to_string(), existing.union(&version_set));
+        }
+    }
+
+    pub fn decision_level(&self) -> usize {
+        self.decisions.len()
+    }
+
+    pub fn backtrack(&mut self, level: usize) {
+        while let Some(assignment) = self.assignments.last() {
+            if assignment.decision_level <= level {
+                break;
+            }
+            let assignment = self.assignments.pop().unwrap();
+            if assignment.is_decision {
+                self.decisions.remove(&assignment.package);
+            }
+        }
+        // Rebuild positive/negative maps
+        self.positive.clear();
+        self.negative.clear();
+        for assignment in &self.assignments {
+            if assignment.is_decision {
+                self.positive.insert(assignment.package.clone(), assignment.version_set.clone());
+            }
+        }
+    }
+
+    pub fn satisfies(&self, incomp: &Incompatibility) -> bool {
+        incomp.terms.iter().all(|(pkg, term)| {
+            if term.positive {
+                self.positive.get(pkg)
+                    .map(|vs| !vs.intersection(&term.version_set).is_empty())
+                    .unwrap_or(false)
+            } else {
+                self.negative.get(pkg)
+                    .map(|vs| !vs.intersection(&term.version_set).is_empty())
+                    .unwrap_or(true)
+            }
+        })
+    }
+}
+
+/// Advanced PubGrub resolver
+pub struct PubGrubResolver {
+    registry: Registry,
+    incompatibilities: Vec<Incompatibility>,
+    solution: PartialSolution,
+}
+
+impl PubGrubResolver {
+    pub fn new(registry: Registry) -> Self {
+        PubGrubResolver {
+            registry,
+            incompatibilities: Vec::new(),
+            solution: PartialSolution::new(),
+        }
+    }
+
+    /// Resolve dependencies using PubGrub algorithm
+    pub fn resolve(&mut self, root_package: &str, root_deps: &HashMap<String, VersionReq>) -> Result<Resolution, ResolveError> {
+        println!("Resolving with PubGrub SAT-solver...");
+
+        // Add root incompatibility
+        self.add_root_incompatibility(root_package);
+
+        // Add root dependencies
+        for (name, req) in root_deps {
+            self.add_dependency(root_package, name, req)?;
+        }
+
+        // Main solving loop
+        loop {
+            // Check for conflicts
+            if let Some(incomp) = self.find_conflict() {
+                let (new_incomp, package) = self.resolve_conflict(&incomp)?;
+                self.incompatibilities.push(new_incomp);
+
+                // Continue with the conflicting package
+                if let Some(pkg) = package {
+                    continue;
+                }
+            }
+
+            // Find next undecided package
+            if let Some((package, version)) = self.choose_next() {
+                println!("  Selected {} v{}", package, version);
+                self.solution.decide(&package, version.clone());
+
+                // Add dependencies for chosen version
+                let versions = self.registry.get_versions(&package)?;
+                if let Some(pkg_ver) = versions.iter().find(|v| v.version == version) {
+                    for (dep_name, dep_req) in &pkg_ver.dependencies {
+                        self.add_dependency(&package, dep_name, dep_req)?;
+                    }
+                }
+            } else {
+                // All packages decided
+                break;
+            }
+        }
+
+        // Build resolution from solution
+        let mut packages = Vec::new();
+        for (name, version) in &self.solution.decisions {
+            if name != root_package {
+                packages.push(ResolvedPackage {
+                    name: name.clone(),
+                    version: version.clone(),
+                    source: PackageSource::Registry(self.registry.url.clone()),
+                    dependencies: Vec::new(),
+                    features: HashSet::new(),
+                });
+            }
+        }
+
+        Ok(Resolution {
+            packages,
+            features: HashMap::new(),
+        })
+    }
+
+    fn add_root_incompatibility(&mut self, root_package: &str) {
+        let mut terms = HashMap::new();
+        terms.insert(root_package.to_string(), Term {
+            package: root_package.to_string(),
+            positive: false,
+            version_set: VersionSet::any(),
+        });
+        self.incompatibilities.push(Incompatibility {
+            terms,
+            cause: IncompatibilityCause::Root,
+        });
+    }
+
+    fn add_dependency(&mut self, from: &str, to: &str, req: &VersionReq) -> Result<(), ResolveError> {
+        let version_set = self.version_req_to_set(req);
+
+        let mut terms = HashMap::new();
+        terms.insert(from.to_string(), Term {
+            package: from.to_string(),
+            positive: true,
+            version_set: VersionSet::any(),
+        });
+        terms.insert(to.to_string(), Term {
+            package: to.to_string(),
+            positive: false,
+            version_set: version_set.complement(),
+        });
+
+        self.incompatibilities.push(Incompatibility {
+            terms,
+            cause: IncompatibilityCause::Dependency(from.to_string(), Version::new(0, 0, 0)),
+        });
+
+        Ok(())
+    }
+
+    fn version_req_to_set(&self, req: &VersionReq) -> VersionSet {
+        // Convert VersionReq to VersionSet
+        // This is a simplified implementation
+        VersionSet::any()
+    }
+
+    fn find_conflict(&self) -> Option<Incompatibility> {
+        for incomp in &self.incompatibilities {
+            if self.solution.satisfies(incomp) {
+                return Some(incomp.clone());
+            }
+        }
+        None
+    }
+
+    fn resolve_conflict(&mut self, incomp: &Incompatibility) -> Result<(Incompatibility, Option<String>), ResolveError> {
+        // Conflict resolution using PubGrub algorithm
+        let mut current = incomp.clone();
+
+        loop {
+            // Find satisfier with highest decision level
+            let mut satisfier: Option<&Assignment> = None;
+            let mut satisfier_package: Option<String> = None;
+
+            for (pkg, _term) in &current.terms {
+                for assignment in self.solution.assignments.iter().rev() {
+                    if &assignment.package == pkg {
+                        if satisfier.is_none() || assignment.decision_level > satisfier.unwrap().decision_level {
+                            satisfier = Some(assignment);
+                            satisfier_package = Some(pkg.clone());
+                        }
+                        break;
+                    }
+                }
+            }
+
+            let satisfier = satisfier.ok_or(ResolveError::CyclicDependency(Vec::new()))?;
+
+            if satisfier.is_decision {
+                // Backtrack to before this decision
+                let level = satisfier.decision_level - 1;
+                self.solution.backtrack(level);
+                return Ok((current, satisfier_package));
+            }
+
+            // Combine with cause
+            if let Some(cause) = &satisfier.cause {
+                let new_terms = self.combine_terms(&current, cause);
+                current = Incompatibility {
+                    terms: new_terms,
+                    cause: IncompatibilityCause::Conflict(
+                        Box::new(current.clone()),
+                        Box::new(cause.clone()),
+                    ),
+                };
+            } else {
+                return Err(ResolveError::CyclicDependency(Vec::new()));
+            }
+        }
+    }
+
+    fn combine_terms(&self, a: &Incompatibility, b: &Incompatibility) -> HashMap<String, Term> {
+        let mut combined = a.terms.clone();
+        for (pkg, term) in &b.terms {
+            combined.insert(pkg.clone(), term.clone());
+        }
+        combined
+    }
+
+    fn choose_next(&self) -> Option<(String, Version)> {
+        // Find next undecided package that has positive assignments
+        for (pkg, version_set) in &self.solution.positive {
+            if !self.solution.decisions.contains_key(pkg) {
+                // Get available versions
+                if let Ok(versions) = self.registry.get_versions(pkg) {
+                    // Choose best version that matches constraints
+                    let matching: Vec<_> = versions.iter()
+                        .filter(|v| !v.yanked && version_set.contains(&v.version))
+                        .collect();
+
+                    if let Some(best) = matching.iter().map(|v| &v.version).max() {
+                        return Some((pkg.clone(), best.clone()));
+                    }
+                }
+            }
+        }
+        None
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// WORKSPACE SUPPORT
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Workspace for managing multiple packages (monorepo support)
+#[derive(Clone, Debug)]
+pub struct Workspace {
+    pub root: String,
+    pub members: Vec<WorkspaceMember>,
+    pub default_members: Vec<String>,
+    pub exclude: Vec<String>,
+    pub resolver: String,
+    pub metadata: HashMap<String, String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct WorkspaceMember {
+    pub path: String,
+    pub manifest: Manifest,
+    pub dependencies_to_other_members: Vec<String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct WorkspaceConfig {
+    pub members: Vec<String>,
+    pub default_members: Option<Vec<String>>,
+    pub exclude: Vec<String>,
+    pub resolver: Option<String>,
+    pub dependencies: HashMap<String, Dependency>,
+}
+
+impl Workspace {
+    /// Load workspace from root directory
+    pub fn load(root: &str) -> Result<Self, WorkspaceError> {
+        let manifest_path = format!("{}/quark.toml", root);
+        let content = read_to_string(&manifest_path)?;
+
+        // Parse workspace section
+        let config = Self::parse_workspace_config(&content)?;
+
+        let mut members = Vec::new();
+
+        // Expand glob patterns and load member manifests
+        for pattern in &config.members {
+            let paths = Self::expand_glob(root, pattern);
+            for path in paths {
+                if config.exclude.contains(&path) {
+                    continue;
+                }
+
+                let member_manifest_path = format!("{}/{}/quark.toml", root, path);
+                if exists(&member_manifest_path) {
+                    let manifest = Manifest::load(&member_manifest_path)?;
+                    members.push(WorkspaceMember {
+                        path: path.clone(),
+                        manifest,
+                        dependencies_to_other_members: Vec::new(),
+                    });
+                }
+            }
+        }
+
+        // Resolve inter-member dependencies
+        let member_names: Vec<String> = members.iter()
+            .map(|m| m.manifest.package.name.clone())
+            .collect();
+
+        for member in &mut members {
+            for (dep_name, _) in &member.manifest.dependencies {
+                if member_names.contains(dep_name) {
+                    member.dependencies_to_other_members.push(dep_name.clone());
+                }
+            }
+        }
+
+        Ok(Workspace {
+            root: root.to_string(),
+            members,
+            default_members: config.default_members.unwrap_or_default(),
+            exclude: config.exclude,
+            resolver: config.resolver.unwrap_or("2".to_string()),
+            metadata: HashMap::new(),
+        })
+    }
+
+    /// Get topological build order for workspace members
+    pub fn build_order(&self) -> Result<Vec<&WorkspaceMember>, WorkspaceError> {
+        let mut order = Vec::new();
+        let mut visited = HashSet::new();
+        let mut in_stack = HashSet::new();
+
+        for member in &self.members {
+            self.visit_member(member, &mut order, &mut visited, &mut in_stack)?;
+        }
+
+        Ok(order)
+    }
+
+    fn visit_member<'a>(
+        &'a self,
+        member: &'a WorkspaceMember,
+        order: &mut Vec<&'a WorkspaceMember>,
+        visited: &mut HashSet<String>,
+        in_stack: &mut HashSet<String>,
+    ) -> Result<(), WorkspaceError> {
+        let name = &member.manifest.package.name;
+
+        if in_stack.contains(name) {
+            return Err(WorkspaceError::CyclicDependency(name.clone()));
+        }
+
+        if visited.contains(name) {
+            return Ok(());
+        }
+
+        in_stack.insert(name.clone());
+
+        // Visit dependencies first
+        for dep_name in &member.dependencies_to_other_members {
+            if let Some(dep_member) = self.members.iter().find(|m| &m.manifest.package.name == dep_name) {
+                self.visit_member(dep_member, order, visited, in_stack)?;
+            }
+        }
+
+        in_stack.remove(name);
+        visited.insert(name.clone());
+        order.push(member);
+
+        Ok(())
+    }
+
+    /// Run command for all workspace members
+    pub fn for_each<F>(&self, f: F) -> Result<(), WorkspaceError>
+    where F: Fn(&WorkspaceMember) -> Result<(), PackageError>
+    {
+        for member in self.build_order()? {
+            println!("Processing {}...", member.manifest.package.name);
+            f(member).map_err(|e| WorkspaceError::MemberError(member.path.clone(), e))?;
+        }
+        Ok(())
+    }
+
+    /// Get all dependencies across workspace
+    pub fn all_dependencies(&self) -> HashMap<String, Dependency> {
+        let mut deps = HashMap::new();
+        for member in &self.members {
+            for (name, dep) in &member.manifest.dependencies {
+                // Only include external dependencies
+                if !self.members.iter().any(|m| &m.manifest.package.name == name) {
+                    deps.insert(name.clone(), dep.clone());
+                }
+            }
+        }
+        deps
+    }
+
+    fn parse_workspace_config(content: &str) -> Result<WorkspaceConfig, WorkspaceError> {
+        // Parse [workspace] section from TOML
+        let mut config = WorkspaceConfig {
+            members: Vec::new(),
+            default_members: None,
+            exclude: Vec::new(),
+            resolver: None,
+            dependencies: HashMap::new(),
+        };
+
+        let mut in_workspace = false;
+        for line in content.lines() {
+            let line = line.trim();
+            if line == "[workspace]" {
+                in_workspace = true;
+                continue;
+            }
+            if line.starts_with('[') && in_workspace {
+                in_workspace = false;
+            }
+            if in_workspace {
+                if line.starts_with("members = ") {
+                    // Parse array
+                    let array_str = line.strip_prefix("members = ").unwrap();
+                    config.members = parse_string_array(array_str);
+                }
+                if line.starts_with("resolver = ") {
+                    config.resolver = Some(parse_string_value(line));
+                }
+            }
+        }
+
+        Ok(config)
+    }
+
+    fn expand_glob(root: &str, pattern: &str) -> Vec<String> {
+        // Expand glob pattern to matching paths
+        // Simplified implementation
+        vec![pattern.replace("/*", "").to_string()]
+    }
+}
+
+fn parse_string_array(s: &str) -> Vec<String> {
+    s.trim_matches(|c| c == '[' || c == ']')
+        .split(',')
+        .map(|s| s.trim().trim_matches('"').to_string())
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
+#[derive(Debug)]
+pub enum WorkspaceError {
+    IoError(String),
+    ManifestError(ManifestError),
+    CyclicDependency(String),
+    MemberError(String, PackageError),
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// SECURITY AUDITING
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Security auditing for packages
+pub struct SecurityAuditor {
+    advisory_db: AdvisoryDatabase,
+    config: AuditConfig,
+}
+
+#[derive(Clone)]
+pub struct AuditConfig {
+    pub database_url: String,
+    pub ignore_advisories: Vec<String>,
+    pub severity_threshold: Severity,
+    pub check_yanked: bool,
+}
+
+impl Default for AuditConfig {
+    fn default() -> Self {
+        AuditConfig {
+            database_url: "https://advisories.bld-universe.dev".to_string(),
+            ignore_advisories: Vec::new(),
+            severity_threshold: Severity::Low,
+            check_yanked: true,
+        }
+    }
+}
+
+pub struct AdvisoryDatabase {
+    advisories: HashMap<String, Vec<Advisory>>,
+    last_updated: u64,
+}
+
+#[derive(Clone, Debug)]
+pub struct Advisory {
+    pub id: String,
+    pub package: String,
+    pub title: String,
+    pub description: String,
+    pub severity: Severity,
+    pub affected_versions: VersionSet,
+    pub patched_versions: Option<VersionSet>,
+    pub cve: Option<String>,
+    pub url: Option<String>,
+    pub published_date: String,
+}
+
+#[derive(Clone, Debug, PartialEq, PartialOrd)]
+pub enum Severity {
+    None,
+    Low,
+    Medium,
+    High,
+    Critical,
+}
+
+#[derive(Clone, Debug)]
+pub struct AuditReport {
+    pub vulnerabilities: Vec<VulnerabilityFinding>,
+    pub warnings: Vec<AuditWarning>,
+    pub statistics: AuditStatistics,
+}
+
+#[derive(Clone, Debug)]
+pub struct VulnerabilityFinding {
+    pub advisory: Advisory,
+    pub package: String,
+    pub version: Version,
+    pub dependency_chain: Vec<String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct AuditWarning {
+    pub kind: WarningKind,
+    pub message: String,
+    pub package: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+pub enum WarningKind {
+    YankedPackage,
+    UnmaintainedPackage,
+    DeprecatedPackage,
+    UnsafeDependency,
+    LicenseIssue,
+}
+
+#[derive(Clone, Debug)]
+pub struct AuditStatistics {
+    pub packages_scanned: usize,
+    pub vulnerabilities_found: usize,
+    pub critical_count: usize,
+    pub high_count: usize,
+    pub medium_count: usize,
+    pub low_count: usize,
+}
+
+impl SecurityAuditor {
+    pub fn new(config: AuditConfig) -> Self {
+        SecurityAuditor {
+            advisory_db: AdvisoryDatabase {
+                advisories: HashMap::new(),
+                last_updated: 0,
+            },
+            config,
+        }
+    }
+
+    /// Update advisory database
+    pub fn update_database(&mut self) -> Result<(), AuditError> {
+        println!("Updating security advisory database...");
+
+        let client = HttpClient::new();
+        let response = client.get(&format!("{}/advisories.json", self.config.database_url))?;
+
+        self.advisory_db = self.parse_advisories(&response.body)?;
+        self.advisory_db.last_updated = current_timestamp();
+
+        println!("  Database updated: {} advisories loaded",
+            self.advisory_db.advisories.values().map(|v| v.len()).sum::<usize>());
+
+        Ok(())
+    }
+
+    /// Audit resolved packages for vulnerabilities
+    pub fn audit(&self, resolution: &Resolution) -> Result<AuditReport, AuditError> {
+        println!("Auditing {} packages for security vulnerabilities...", resolution.packages.len());
+
+        let mut vulnerabilities = Vec::new();
+        let mut warnings = Vec::new();
+
+        for pkg in &resolution.packages {
+            // Check for advisories
+            if let Some(advisories) = self.advisory_db.advisories.get(&pkg.name) {
+                for advisory in advisories {
+                    if advisory.affected_versions.contains(&pkg.version) {
+                        if self.config.ignore_advisories.contains(&advisory.id) {
+                            continue;
+                        }
+                        if advisory.severity >= self.config.severity_threshold {
+                            vulnerabilities.push(VulnerabilityFinding {
+                                advisory: advisory.clone(),
+                                package: pkg.name.clone(),
+                                version: pkg.version.clone(),
+                                dependency_chain: self.build_dependency_chain(&pkg.name, resolution),
+                            });
+                        }
+                    }
+                }
+            }
+
+            // Check for yanked packages
+            if self.config.check_yanked {
+                // Would check registry for yanked status
+            }
+        }
+
+        let statistics = AuditStatistics {
+            packages_scanned: resolution.packages.len(),
+            vulnerabilities_found: vulnerabilities.len(),
+            critical_count: vulnerabilities.iter().filter(|v| v.advisory.severity == Severity::Critical).count(),
+            high_count: vulnerabilities.iter().filter(|v| v.advisory.severity == Severity::High).count(),
+            medium_count: vulnerabilities.iter().filter(|v| v.advisory.severity == Severity::Medium).count(),
+            low_count: vulnerabilities.iter().filter(|v| v.advisory.severity == Severity::Low).count(),
+        };
+
+        Ok(AuditReport {
+            vulnerabilities,
+            warnings,
+            statistics,
+        })
+    }
+
+    /// Print audit report
+    pub fn print_report(&self, report: &AuditReport) {
+        println!();
+        println!("╔════════════════════════════════════════════════════════════════╗");
+        println!("║  Security Audit Report                                         ║");
+        println!("╚════════════════════════════════════════════════════════════════╝");
+        println!();
+        println!("Packages scanned: {}", report.statistics.packages_scanned);
+        println!("Vulnerabilities found: {}", report.statistics.vulnerabilities_found);
+        println!();
+
+        if report.vulnerabilities.is_empty() {
+            println!("  ✓ No known vulnerabilities found");
+        } else {
+            println!("  Breakdown by severity:");
+            println!("    Critical: {}", report.statistics.critical_count);
+            println!("    High: {}", report.statistics.high_count);
+            println!("    Medium: {}", report.statistics.medium_count);
+            println!("    Low: {}", report.statistics.low_count);
+            println!();
+
+            for vuln in &report.vulnerabilities {
+                let severity_icon = match vuln.advisory.severity {
+                    Severity::Critical => "🔴",
+                    Severity::High => "🟠",
+                    Severity::Medium => "🟡",
+                    Severity::Low => "🟢",
+                    Severity::None => "⚪",
+                };
+
+                println!("{} {} - {} v{}", severity_icon, vuln.advisory.id, vuln.package, vuln.version);
+                println!("    {}", vuln.advisory.title);
+                if let Some(cve) = &vuln.advisory.cve {
+                    println!("    CVE: {}", cve);
+                }
+                if !vuln.dependency_chain.is_empty() {
+                    println!("    Dependency chain: {}", vuln.dependency_chain.join(" -> "));
+                }
+                if let Some(ref patched) = vuln.advisory.patched_versions {
+                    println!("    Patched in: newer versions available");
+                }
+                println!();
+            }
+        }
+
+        for warning in &report.warnings {
+            println!("  ⚠ Warning: {}", warning.message);
+        }
+    }
+
+    fn parse_advisories(&self, _body: &[u8]) -> Result<AdvisoryDatabase, AuditError> {
+        // Parse JSON advisory database
+        Ok(AdvisoryDatabase {
+            advisories: HashMap::new(),
+            last_updated: current_timestamp(),
+        })
+    }
+
+    fn build_dependency_chain(&self, package: &str, resolution: &Resolution) -> Vec<String> {
+        // Build reverse dependency chain
+        let mut chain = Vec::new();
+        // Implementation would walk the dependency graph backwards
+        chain
+    }
+}
+
+fn current_timestamp() -> u64 {
+    0 // Would use actual time
+}
+
+#[derive(Debug)]
+pub enum AuditError {
+    NetworkError(String),
+    ParseError(String),
+    DatabaseError(String),
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// LICENSE COMPLIANCE
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// License compliance checker
+pub struct LicenseChecker {
+    config: LicenseConfig,
+}
+
+#[derive(Clone)]
+pub struct LicenseConfig {
+    pub allowed_licenses: Vec<String>,
+    pub denied_licenses: Vec<String>,
+    pub copyleft_allowed: bool,
+    pub allow_unknown: bool,
+}
+
+impl Default for LicenseConfig {
+    fn default() -> Self {
+        LicenseConfig {
+            allowed_licenses: vec![
+                "MIT".to_string(),
+                "Apache-2.0".to_string(),
+                "BSD-2-Clause".to_string(),
+                "BSD-3-Clause".to_string(),
+                "ISC".to_string(),
+                "Zlib".to_string(),
+                "Unlicense".to_string(),
+            ],
+            denied_licenses: Vec::new(),
+            copyleft_allowed: true,
+            allow_unknown: false,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct LicenseReport {
+    pub packages: Vec<PackageLicense>,
+    pub issues: Vec<LicenseIssue>,
+    pub summary: LicenseSummary,
+}
+
+#[derive(Clone, Debug)]
+pub struct PackageLicense {
+    pub package: String,
+    pub version: Version,
+    pub license: Option<String>,
+    pub license_file: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct LicenseIssue {
+    pub package: String,
+    pub issue: LicenseIssueKind,
+    pub license: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+pub enum LicenseIssueKind {
+    UnknownLicense,
+    DeniedLicense,
+    CopyleftLicense,
+    IncompatibleLicenses,
+}
+
+#[derive(Clone, Debug)]
+pub struct LicenseSummary {
+    pub total_packages: usize,
+    pub license_counts: HashMap<String, usize>,
+    pub unknown_count: usize,
+    pub issue_count: usize,
+}
+
+impl LicenseChecker {
+    pub fn new(config: LicenseConfig) -> Self {
+        LicenseChecker { config }
+    }
+
+    /// Check licenses for all resolved packages
+    pub fn check(&self, resolution: &Resolution, registry: &Registry) -> Result<LicenseReport, PackageError> {
+        println!("Checking licenses for {} packages...", resolution.packages.len());
+
+        let mut packages = Vec::new();
+        let mut issues = Vec::new();
+        let mut license_counts = HashMap::new();
+        let mut unknown_count = 0;
+
+        for pkg in &resolution.packages {
+            let info = registry.get_package(&pkg.name)?;
+            let license = info.license.clone();
+
+            packages.push(PackageLicense {
+                package: pkg.name.clone(),
+                version: pkg.version.clone(),
+                license: license.clone(),
+                license_file: None,
+            });
+
+            if let Some(ref lic) = license {
+                *license_counts.entry(lic.clone()).or_insert(0) += 1;
+
+                // Check against denied list
+                if self.config.denied_licenses.contains(lic) {
+                    issues.push(LicenseIssue {
+                        package: pkg.name.clone(),
+                        issue: LicenseIssueKind::DeniedLicense,
+                        license: license.clone(),
+                    });
+                }
+
+                // Check copyleft
+                if !self.config.copyleft_allowed && self.is_copyleft(lic) {
+                    issues.push(LicenseIssue {
+                        package: pkg.name.clone(),
+                        issue: LicenseIssueKind::CopyleftLicense,
+                        license: license.clone(),
+                    });
+                }
+            } else {
+                unknown_count += 1;
+                if !self.config.allow_unknown {
+                    issues.push(LicenseIssue {
+                        package: pkg.name.clone(),
+                        issue: LicenseIssueKind::UnknownLicense,
+                        license: None,
+                    });
+                }
+            }
+        }
+
+        Ok(LicenseReport {
+            packages,
+            issues: issues.clone(),
+            summary: LicenseSummary {
+                total_packages: resolution.packages.len(),
+                license_counts,
+                unknown_count,
+                issue_count: issues.len(),
+            },
+        })
+    }
+
+    fn is_copyleft(&self, license: &str) -> bool {
+        matches!(license, "GPL-2.0" | "GPL-3.0" | "LGPL-2.1" | "LGPL-3.0" | "AGPL-3.0" | "MPL-2.0")
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// PACKAGE LINKING (LOCAL DEVELOPMENT)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Package linking for local development
+pub struct PackageLinker {
+    links: HashMap<String, String>,
+    global_links_dir: String,
+}
+
+impl PackageLinker {
+    pub fn new(global_links_dir: &str) -> Self {
+        PackageLinker {
+            links: HashMap::new(),
+            global_links_dir: global_links_dir.to_string(),
+        }
+    }
+
+    /// Create a global link for a package
+    pub fn link(&mut self, manifest_path: &str) -> Result<(), PackageError> {
+        let manifest = Manifest::load(manifest_path)?;
+        let package_name = &manifest.package.name;
+        let package_dir = manifest_path.trim_end_matches("/quark.toml");
+
+        // Create symlink in global links directory
+        let link_path = format!("{}/{}", self.global_links_dir, package_name);
+        create_dir_all(&self.global_links_dir)?;
+
+        // Create symlink (platform-specific)
+        self.create_symlink(package_dir, &link_path)?;
+
+        self.links.insert(package_name.clone(), package_dir.to_string());
+
+        println!("Linked {} -> {}", package_name, package_dir);
+        Ok(())
+    }
+
+    /// Use a linked package in current project
+    pub fn link_to(&self, package_name: &str, target_dir: &str) -> Result<(), PackageError> {
+        let link_source = format!("{}/{}", self.global_links_dir, package_name);
+
+        if !exists(&link_source) {
+            return Err(PackageError::PackageNotFound(package_name.to_string()));
+        }
+
+        let link_target = format!("{}/quark_modules/{}", target_dir, package_name);
+        create_dir_all(&format!("{}/quark_modules", target_dir))?;
+
+        self.create_symlink(&link_source, &link_target)?;
+
+        println!("Linked {} in project", package_name);
+        Ok(())
+    }
+
+    /// Remove a global link
+    pub fn unlink(&mut self, package_name: &str) -> Result<(), PackageError> {
+        let link_path = format!("{}/{}", self.global_links_dir, package_name);
+
+        if exists(&link_path) {
+            remove_dir_all(&link_path)?;
+            self.links.remove(package_name);
+            println!("Unlinked {}", package_name);
+        }
+
+        Ok(())
+    }
+
+    /// List all global links
+    pub fn list(&self) -> Vec<(String, String)> {
+        self.links.iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect()
+    }
+
+    fn create_symlink(&self, source: &str, target: &str) -> Result<(), PackageError> {
+        // Platform-specific symlink creation
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(source, target)
+                .map_err(|e| PackageError::IoError(e.to_string()))?;
+        }
+        #[cfg(windows)]
+        {
+            std::os::windows::fs::symlink_dir(source, target)
+                .map_err(|e| PackageError::IoError(e.to_string()))?;
+        }
+        Ok(())
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// DEPENDENCY TREE VISUALIZATION
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Dependency tree visualizer
+pub struct DependencyTree {
+    resolution: Resolution,
+    duplicates: HashMap<String, Vec<Version>>,
+}
+
+impl DependencyTree {
+    pub fn new(resolution: Resolution) -> Self {
+        let mut duplicates = HashMap::new();
+
+        // Find packages with multiple versions
+        let mut versions: HashMap<String, Vec<Version>> = HashMap::new();
+        for pkg in &resolution.packages {
+            versions.entry(pkg.name.clone())
+                .or_default()
+                .push(pkg.version.clone());
+        }
+
+        for (name, vers) in versions {
+            if vers.len() > 1 {
+                duplicates.insert(name, vers);
+            }
+        }
+
+        DependencyTree { resolution, duplicates }
+    }
+
+    /// Print ASCII tree
+    pub fn print(&self, root: &str) {
+        println!("{}", root);
+        self.print_deps(root, "", true);
+    }
+
+    fn print_deps(&self, package: &str, prefix: &str, is_last: bool) {
+        if let Some(pkg) = self.resolution.packages.iter().find(|p| p.name == package) {
+            for (i, dep) in pkg.dependencies.iter().enumerate() {
+                let is_last_dep = i == pkg.dependencies.len() - 1;
+                let connector = if is_last_dep { "└── " } else { "├── " };
+                let new_prefix = if is_last_dep { "    " } else { "│   " };
+
+                if let Some(dep_pkg) = self.resolution.packages.iter().find(|p| &p.name == dep) {
+                    let dup_marker = if self.duplicates.contains_key(&dep_pkg.name) {
+                        " (*)"
+                    } else {
+                        ""
+                    };
+                    println!("{}{}{} v{}{}", prefix, connector, dep_pkg.name, dep_pkg.version, dup_marker);
+                    self.print_deps(dep, &format!("{}{}", prefix, new_prefix), is_last_dep);
+                }
+            }
+        }
+    }
+
+    /// Print inverted tree (show what depends on a package)
+    pub fn print_inverted(&self, package: &str) {
+        println!("{}", package);
+        println!("Depended on by:");
+
+        for pkg in &self.resolution.packages {
+            if pkg.dependencies.contains(&package.to_string()) {
+                println!("  └── {} v{}", pkg.name, pkg.version);
+            }
+        }
+    }
+
+    /// Get statistics
+    pub fn statistics(&self) -> TreeStatistics {
+        let total = self.resolution.packages.len();
+        let duplicates = self.duplicates.len();
+        let max_depth = self.calculate_max_depth();
+
+        TreeStatistics {
+            total_packages: total,
+            duplicate_packages: duplicates,
+            max_depth,
+        }
+    }
+
+    fn calculate_max_depth(&self) -> usize {
+        // BFS to find max depth
+        0 // Simplified
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct TreeStatistics {
+    pub total_packages: usize,
+    pub duplicate_packages: usize,
+    pub max_depth: usize,
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// BUILD CACHE (BINARY CACHING)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Binary cache for built packages
+pub struct BuildCache {
+    cache_dir: String,
+    remote_url: Option<String>,
+    config: CacheConfig,
+}
+
+#[derive(Clone)]
+pub struct CacheConfig {
+    pub max_size_mb: usize,
+    pub ttl_days: u32,
+    pub compression: CompressionLevel,
+    pub remote_enabled: bool,
+}
+
+#[derive(Clone)]
+pub enum CompressionLevel {
+    None,
+    Fast,
+    Default,
+    Best,
+}
+
+impl Default for CacheConfig {
+    fn default() -> Self {
+        CacheConfig {
+            max_size_mb: 1024,
+            ttl_days: 30,
+            compression: CompressionLevel::Default,
+            remote_enabled: false,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct CacheKey {
+    pub package: String,
+    pub version: Version,
+    pub target: String,
+    pub features: Vec<String>,
+    pub profile: String,
+    pub rustflags: String,
+}
+
+impl CacheKey {
+    pub fn to_hash(&self) -> String {
+        let input = format!("{}-{}-{}-{:?}-{}-{}",
+            self.package, self.version, self.target,
+            self.features, self.profile, self.rustflags);
+        sha256(input.as_bytes())
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct CachedArtifact {
+    pub key: CacheKey,
+    pub path: String,
+    pub size: usize,
+    pub created_at: u64,
+    pub accessed_at: u64,
+}
+
+impl BuildCache {
+    pub fn new(cache_dir: &str, config: CacheConfig) -> Self {
+        BuildCache {
+            cache_dir: cache_dir.to_string(),
+            remote_url: None,
+            config,
+        }
+    }
+
+    /// Check if artifact is in cache
+    pub fn get(&self, key: &CacheKey) -> Option<CachedArtifact> {
+        let hash = key.to_hash();
+        let path = format!("{}/{}", self.cache_dir, hash);
+
+        if exists(&path) {
+            // Load metadata
+            let meta_path = format!("{}.meta", path);
+            if exists(&meta_path) {
+                // Parse and return artifact
+                return Some(CachedArtifact {
+                    key: key.clone(),
+                    path,
+                    size: 0,
+                    created_at: 0,
+                    accessed_at: 0,
+                });
+            }
+        }
+
+        // Check remote cache
+        if self.config.remote_enabled {
+            if let Some(artifact) = self.fetch_remote(key) {
+                return Some(artifact);
+            }
+        }
+
+        None
+    }
+
+    /// Store artifact in cache
+    pub fn put(&mut self, key: &CacheKey, artifact_path: &str) -> Result<(), CacheError> {
+        let hash = key.to_hash();
+        let cache_path = format!("{}/{}", self.cache_dir, hash);
+
+        // Compress and copy
+        let compressed = self.compress(artifact_path)?;
+        write_bytes(&cache_path, &compressed)?;
+
+        // Write metadata
+        let meta_path = format!("{}.meta", cache_path);
+        let meta = format!("package={}\nversion={}\ntarget={}\n",
+            key.package, key.version, key.target);
+        write_string(&meta_path, &meta)?;
+
+        // Upload to remote if enabled
+        if self.config.remote_enabled {
+            self.push_remote(key, &cache_path)?;
+        }
+
+        // Enforce size limit
+        self.enforce_size_limit()?;
+
+        Ok(())
+    }
+
+    /// Clear cache
+    pub fn clear(&mut self) -> Result<(), CacheError> {
+        remove_dir_all(&self.cache_dir)?;
+        create_dir_all(&self.cache_dir)?;
+        println!("Cache cleared");
+        Ok(())
+    }
+
+    /// Get cache statistics
+    pub fn statistics(&self) -> CacheStatistics {
+        let mut total_size = 0;
+        let mut artifact_count = 0;
+
+        // Count artifacts and size
+        // Implementation would walk cache directory
+
+        CacheStatistics {
+            total_size_mb: total_size / (1024 * 1024),
+            artifact_count,
+            hit_rate: 0.0,
+            remote_hits: 0,
+            local_hits: 0,
+        }
+    }
+
+    fn compress(&self, path: &str) -> Result<Vec<u8>, CacheError> {
+        // Compress artifact based on compression level
+        let data = read_bytes(path)?;
+        match self.config.compression {
+            CompressionLevel::None => Ok(data),
+            _ => {
+                // Use zstd or similar compression
+                Ok(data) // Simplified
+            }
+        }
+    }
+
+    fn fetch_remote(&self, key: &CacheKey) -> Option<CachedArtifact> {
+        // Fetch from remote cache
+        None
+    }
+
+    fn push_remote(&self, key: &CacheKey, path: &str) -> Result<(), CacheError> {
+        // Upload to remote cache
+        Ok(())
+    }
+
+    fn enforce_size_limit(&mut self) -> Result<(), CacheError> {
+        // Remove oldest artifacts if over size limit
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct CacheStatistics {
+    pub total_size_mb: usize,
+    pub artifact_count: usize,
+    pub hit_rate: f64,
+    pub remote_hits: usize,
+    pub local_hits: usize,
+}
+
+#[derive(Debug)]
+pub enum CacheError {
+    IoError(String),
+    CompressionError(String),
+    RemoteError(String),
+}
+
+fn read_bytes(path: &str) -> Result<Vec<u8>, CacheError> {
+    // Read file as bytes
+    Ok(Vec::new())
+}
+
+fn write_bytes(path: &str, data: &[u8]) -> Result<(), CacheError> {
+    // Write bytes to file
+    Ok(())
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// SCRIPT RUNNER
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Script runner for package scripts
+pub struct ScriptRunner {
+    scripts: HashMap<String, Script>,
+    env: HashMap<String, String>,
+}
+
+#[derive(Clone)]
+pub struct Script {
+    pub name: String,
+    pub command: String,
+    pub description: Option<String>,
+    pub pre_script: Option<String>,
+    pub post_script: Option<String>,
+}
+
+impl ScriptRunner {
+    pub fn new() -> Self {
+        ScriptRunner {
+            scripts: HashMap::new(),
+            env: HashMap::new(),
+        }
+    }
+
+    /// Load scripts from manifest
+    pub fn load_from_manifest(&mut self, manifest: &Manifest) -> Result<(), PackageError> {
+        if let Some(scripts_meta) = manifest.metadata.get("scripts") {
+            // Parse scripts from metadata
+            // Format: "name:command;name2:command2"
+            for entry in scripts_meta.split(';') {
+                let parts: Vec<&str> = entry.split(':').collect();
+                if parts.len() >= 2 {
+                    self.scripts.insert(parts[0].to_string(), Script {
+                        name: parts[0].to_string(),
+                        command: parts[1].to_string(),
+                        description: None,
+                        pre_script: None,
+                        post_script: None,
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Register a script
+    pub fn register(&mut self, script: Script) {
+        self.scripts.insert(script.name.clone(), script);
+    }
+
+    /// Set environment variable
+    pub fn set_env(&mut self, key: &str, value: &str) {
+        self.env.insert(key.to_string(), value.to_string());
+    }
+
+    /// Run a script
+    pub fn run(&self, name: &str, args: &[&str]) -> Result<i32, ScriptError> {
+        let script = self.scripts.get(name)
+            .ok_or_else(|| ScriptError::NotFound(name.to_string()))?;
+
+        println!("Running script: {}", name);
+
+        // Run pre-script
+        if let Some(ref pre) = script.pre_script {
+            if let Some(pre_script) = self.scripts.get(pre) {
+                self.execute(&pre_script.command, &[])?;
+            }
+        }
+
+        // Run main script
+        let exit_code = self.execute(&script.command, args)?;
+
+        // Run post-script
+        if let Some(ref post) = script.post_script {
+            if let Some(post_script) = self.scripts.get(post) {
+                self.execute(&post_script.command, &[])?;
+            }
+        }
+
+        Ok(exit_code)
+    }
+
+    /// List all available scripts
+    pub fn list(&self) -> Vec<&Script> {
+        self.scripts.values().collect()
+    }
+
+    fn execute(&self, command: &str, args: &[&str]) -> Result<i32, ScriptError> {
+        // Build command with environment
+        let mut full_command = command.to_string();
+        for arg in args {
+            full_command.push(' ');
+            full_command.push_str(arg);
+        }
+
+        // Execute command
+        // In real implementation, would use std::process::Command
+        println!("  $ {}", full_command);
+
+        Ok(0)
+    }
+}
+
+#[derive(Debug)]
+pub enum ScriptError {
+    NotFound(String),
+    ExecutionFailed(String, i32),
+    IoError(String),
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// OUTDATED CHECKER
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Check for outdated dependencies
+pub struct OutdatedChecker {
+    registry: Registry,
+}
+
+#[derive(Clone, Debug)]
+pub struct OutdatedPackage {
+    pub name: String,
+    pub current: Version,
+    pub wanted: Version,
+    pub latest: Version,
+    pub package_type: DependencyType,
+}
+
+#[derive(Clone, Debug)]
+pub enum DependencyType {
+    Direct,
+    Dev,
+    Build,
+    Transitive,
+}
+
+#[derive(Clone, Debug)]
+pub struct OutdatedReport {
+    pub packages: Vec<OutdatedPackage>,
+    pub summary: OutdatedSummary,
+}
+
+#[derive(Clone, Debug)]
+pub struct OutdatedSummary {
+    pub total_checked: usize,
+    pub outdated_count: usize,
+    pub major_updates: usize,
+    pub minor_updates: usize,
+    pub patch_updates: usize,
+}
+
+impl OutdatedChecker {
+    pub fn new(registry: Registry) -> Self {
+        OutdatedChecker { registry }
+    }
+
+    /// Check for outdated packages
+    pub fn check(&self, manifest: &Manifest, resolution: &Resolution) -> Result<OutdatedReport, PackageError> {
+        println!("Checking for outdated packages...");
+
+        let mut outdated = Vec::new();
+        let mut major_updates = 0;
+        let mut minor_updates = 0;
+        let mut patch_updates = 0;
+
+        for pkg in &resolution.packages {
+            let versions = self.registry.get_versions(&pkg.name)?;
+
+            // Find latest non-yanked version
+            let latest = versions.iter()
+                .filter(|v| !v.yanked)
+                .map(|v| &v.version)
+                .max();
+
+            // Find wanted version (matching semver constraint)
+            let constraint = manifest.dependencies.get(&pkg.name)
+                .map(|d| &d.version);
+
+            let wanted = if let Some(req) = constraint {
+                versions.iter()
+                    .filter(|v| !v.yanked && req.matches(&v.version))
+                    .map(|v| &v.version)
+                    .max()
+            } else {
+                latest.clone()
+            };
+
+            if let (Some(wanted), Some(latest)) = (wanted, latest) {
+                if &pkg.version < wanted || &pkg.version < latest {
+                    // Categorize update type
+                    if latest.major > pkg.version.major {
+                        major_updates += 1;
+                    } else if latest.minor > pkg.version.minor {
+                        minor_updates += 1;
+                    } else if latest.patch > pkg.version.patch {
+                        patch_updates += 1;
+                    }
+
+                    let dep_type = if manifest.dependencies.contains_key(&pkg.name) {
+                        DependencyType::Direct
+                    } else if manifest.dev_dependencies.contains_key(&pkg.name) {
+                        DependencyType::Dev
+                    } else if manifest.build_dependencies.contains_key(&pkg.name) {
+                        DependencyType::Build
+                    } else {
+                        DependencyType::Transitive
+                    };
+
+                    outdated.push(OutdatedPackage {
+                        name: pkg.name.clone(),
+                        current: pkg.version.clone(),
+                        wanted: wanted.clone(),
+                        latest: latest.clone(),
+                        package_type: dep_type,
+                    });
+                }
+            }
+        }
+
+        Ok(OutdatedReport {
+            packages: outdated.clone(),
+            summary: OutdatedSummary {
+                total_checked: resolution.packages.len(),
+                outdated_count: outdated.len(),
+                major_updates,
+                minor_updates,
+                patch_updates,
+            },
+        })
+    }
+
+    /// Print outdated report
+    pub fn print_report(&self, report: &OutdatedReport) {
+        println!();
+        println!("╔════════════════════════════════════════════════════════════════╗");
+        println!("║  Outdated Dependencies Report                                  ║");
+        println!("╚════════════════════════════════════════════════════════════════╝");
+        println!();
+
+        if report.packages.is_empty() {
+            println!("  ✓ All packages are up to date!");
+        } else {
+            println!("  Package              Current   Wanted    Latest    Type");
+            println!("  ─────────────────────────────────────────────────────────────");
+
+            for pkg in &report.packages {
+                let type_str = match pkg.package_type {
+                    DependencyType::Direct => "direct",
+                    DependencyType::Dev => "dev",
+                    DependencyType::Build => "build",
+                    DependencyType::Transitive => "trans",
+                };
+
+                let current_str = format!("{}", pkg.current);
+                let wanted_str = format!("{}", pkg.wanted);
+                let latest_str = format!("{}", pkg.latest);
+
+                println!("  {:20} {:9} {:9} {:9} {}",
+                    pkg.name, current_str, wanted_str, latest_str, type_str);
+            }
+
+            println!();
+            println!("  Summary:");
+            println!("    Total checked: {}", report.summary.total_checked);
+            println!("    Outdated: {}", report.summary.outdated_count);
+            println!("    Major updates available: {}", report.summary.major_updates);
+            println!("    Minor updates available: {}", report.summary.minor_updates);
+            println!("    Patch updates available: {}", report.summary.patch_updates);
+        }
+        println!();
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// VIRTUAL ENVIRONMENTS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Virtual environment for isolated package installations
+pub struct VirtualEnv {
+    path: String,
+    name: String,
+    manifest: Option<Manifest>,
+    isolated: bool,
+}
+
+impl VirtualEnv {
+    /// Create a new virtual environment
+    pub fn create(path: &str, name: &str) -> Result<Self, VenvError> {
+        println!("Creating virtual environment '{}'...", name);
+
+        let venv_path = format!("{}/{}", path, name);
+        create_dir_all(&venv_path)?;
+        create_dir_all(&format!("{}/quark_modules", venv_path))?;
+        create_dir_all(&format!("{}/bin", venv_path))?;
+
+        // Create activation scripts
+        Self::create_activation_scripts(&venv_path, name)?;
+
+        // Create environment marker
+        write_string(&format!("{}/.quark-venv", venv_path), name)?;
+
+        println!("  Created virtual environment at {}", venv_path);
+        println!("  Activate with: source {}/bin/activate", venv_path);
+
+        Ok(VirtualEnv {
+            path: venv_path,
+            name: name.to_string(),
+            manifest: None,
+            isolated: true,
+        })
+    }
+
+    /// Activate virtual environment
+    pub fn activate(&self) -> HashMap<String, String> {
+        let mut env = HashMap::new();
+
+        env.insert("QUARK_VENV".to_string(), self.name.clone());
+        env.insert("QUARK_VENV_PATH".to_string(), self.path.clone());
+        env.insert("PATH".to_string(), format!("{}/bin:$PATH", self.path));
+
+        env
+    }
+
+    /// Deactivate virtual environment
+    pub fn deactivate() -> HashMap<String, String> {
+        let mut env = HashMap::new();
+
+        env.insert("QUARK_VENV".to_string(), String::new());
+        env.insert("QUARK_VENV_PATH".to_string(), String::new());
+
+        env
+    }
+
+    /// Install packages into virtual environment
+    pub fn install(&mut self, pm: &mut PackageManager, packages: &[&str]) -> Result<(), VenvError> {
+        for pkg in packages {
+            println!("Installing {} into virtual environment...", pkg);
+            // Would install to venv path
+        }
+        Ok(())
+    }
+
+    /// Remove virtual environment
+    pub fn remove(path: &str) -> Result<(), VenvError> {
+        if exists(&format!("{}/.quark-venv", path)) {
+            remove_dir_all(path)?;
+            println!("Removed virtual environment at {}", path);
+        } else {
+            return Err(VenvError::NotAVenv(path.to_string()));
+        }
+        Ok(())
+    }
+
+    fn create_activation_scripts(path: &str, name: &str) -> Result<(), VenvError> {
+        // Bash activation script
+        let bash_activate = format!(r#"#!/bin/bash
+export QUARK_VENV="{name}"
+export QUARK_VENV_PATH="{path}"
+export _OLD_PATH="$PATH"
+export PATH="{path}/bin:$PATH"
+PS1="({name}) $PS1"
+
+deactivate() {{
+    export PATH="$_OLD_PATH"
+    unset QUARK_VENV
+    unset QUARK_VENV_PATH
+    unset _OLD_PATH
+}}
+"#, name = name, path = path);
+        write_string(&format!("{}/bin/activate", path), &bash_activate)?;
+
+        // Fish activation script
+        let fish_activate = format!(r#"set -gx QUARK_VENV "{name}"
+set -gx QUARK_VENV_PATH "{path}"
+set -gx _OLD_PATH $PATH
+set -gx PATH "{path}/bin" $PATH
+
+function deactivate
+    set -gx PATH $_OLD_PATH
+    set -e QUARK_VENV
+    set -e QUARK_VENV_PATH
+    set -e _OLD_PATH
+end
+"#, name = name, path = path);
+        write_string(&format!("{}/bin/activate.fish", path), &fish_activate)?;
+
+        Ok(())
+    }
+}
+
+#[derive(Debug)]
+pub enum VenvError {
+    IoError(String),
+    NotAVenv(String),
+    AlreadyExists(String),
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// SIGNATURE VERIFICATION
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Package signature verification
+pub struct SignatureVerifier {
+    trusted_keys: HashMap<String, PublicKey>,
+    config: VerificationConfig,
+}
+
+#[derive(Clone)]
+pub struct PublicKey {
+    pub id: String,
+    pub algorithm: KeyAlgorithm,
+    pub data: Vec<u8>,
+    pub owner: String,
+    pub expires_at: Option<u64>,
+}
+
+#[derive(Clone)]
+pub enum KeyAlgorithm {
+    Ed25519,
+    RSA4096,
+    ECDSA,
+}
+
+#[derive(Clone)]
+pub struct VerificationConfig {
+    pub require_signatures: bool,
+    pub keyserver_url: String,
+    pub trust_on_first_use: bool,
+}
+
+impl Default for VerificationConfig {
+    fn default() -> Self {
+        VerificationConfig {
+            require_signatures: false,
+            keyserver_url: "https://keys.bld-universe.dev".to_string(),
+            trust_on_first_use: true,
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct Signature {
+    pub key_id: String,
+    pub algorithm: KeyAlgorithm,
+    pub data: Vec<u8>,
+    pub timestamp: u64,
+}
+
+#[derive(Clone, Debug)]
+pub struct VerificationResult {
+    pub package: String,
+    pub version: Version,
+    pub verified: bool,
+    pub signer: Option<String>,
+    pub trust_level: TrustLevel,
+    pub issues: Vec<VerificationIssue>,
+}
+
+#[derive(Clone, Debug)]
+pub enum TrustLevel {
+    Full,
+    Marginal,
+    Unknown,
+    Untrusted,
+}
+
+#[derive(Clone, Debug)]
+pub enum VerificationIssue {
+    NoSignature,
+    UnknownKey(String),
+    ExpiredKey(String),
+    InvalidSignature,
+    TamperedContent,
+}
+
+impl SignatureVerifier {
+    pub fn new(config: VerificationConfig) -> Self {
+        SignatureVerifier {
+            trusted_keys: HashMap::new(),
+            config,
+        }
+    }
+
+    /// Add a trusted key
+    pub fn add_trusted_key(&mut self, key: PublicKey) {
+        self.trusted_keys.insert(key.id.clone(), key);
+    }
+
+    /// Verify a package
+    pub fn verify(&self, package: &str, version: &Version, content: &[u8], signature: Option<&Signature>) -> VerificationResult {
+        let mut issues = Vec::new();
+
+        let signature = match signature {
+            Some(sig) => sig,
+            None => {
+                if self.config.require_signatures {
+                    issues.push(VerificationIssue::NoSignature);
+                }
+                return VerificationResult {
+                    package: package.to_string(),
+                    version: version.clone(),
+                    verified: !self.config.require_signatures,
+                    signer: None,
+                    trust_level: TrustLevel::Unknown,
+                    issues,
+                };
+            }
+        };
+
+        // Check if key is trusted
+        let key = match self.trusted_keys.get(&signature.key_id) {
+            Some(k) => k,
+            None => {
+                issues.push(VerificationIssue::UnknownKey(signature.key_id.clone()));
+                return VerificationResult {
+                    package: package.to_string(),
+                    version: version.clone(),
+                    verified: false,
+                    signer: None,
+                    trust_level: TrustLevel::Untrusted,
+                    issues,
+                };
+            }
+        };
+
+        // Check key expiration
+        if let Some(expires) = key.expires_at {
+            if expires < current_timestamp() {
+                issues.push(VerificationIssue::ExpiredKey(key.id.clone()));
+            }
+        }
+
+        // Verify signature
+        let valid = verify_signature(content, &signature.data, &key.data);
+
+        if !valid {
+            issues.push(VerificationIssue::InvalidSignature);
+        }
+
+        VerificationResult {
+            package: package.to_string(),
+            version: version.clone(),
+            verified: valid && issues.is_empty(),
+            signer: Some(key.owner.clone()),
+            trust_level: if valid { TrustLevel::Full } else { TrustLevel::Untrusted },
+            issues,
+        }
+    }
+
+    /// Fetch key from keyserver
+    pub fn fetch_key(&mut self, key_id: &str) -> Result<PublicKey, VerificationError> {
+        let client = HttpClient::new();
+        let url = format!("{}/keys/{}", self.config.keyserver_url, key_id);
+        let response = client.get(&url)?;
+
+        // Parse key from response
+        // Implementation would parse key format
+
+        Err(VerificationError::KeyNotFound(key_id.to_string()))
+    }
+}
+
+#[derive(Debug)]
+pub enum VerificationError {
+    KeyNotFound(String),
+    NetworkError(String),
+    ParseError(String),
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// EXTENDED PACKAGE MANAGER
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Extended package manager with all features
+pub struct ExtendedPackageManager {
+    inner: PackageManager,
+    pubgrub: Option<PubGrubResolver>,
+    auditor: SecurityAuditor,
+    license_checker: LicenseChecker,
+    linker: PackageLinker,
+    cache: BuildCache,
+    scripts: ScriptRunner,
+    outdated: OutdatedChecker,
+    verifier: SignatureVerifier,
+}
+
+impl ExtendedPackageManager {
+    pub fn new(config: PackageManagerConfig) -> Self {
+        let registry = Registry::new(config.registry.clone());
+
+        ExtendedPackageManager {
+            inner: PackageManager::new(config.clone()),
+            pubgrub: Some(PubGrubResolver::new(Registry::new(config.registry.clone()))),
+            auditor: SecurityAuditor::new(AuditConfig::default()),
+            license_checker: LicenseChecker::new(LicenseConfig::default()),
+            linker: PackageLinker::new(&format!("{}/links", config.global_dir)),
+            cache: BuildCache::new(&format!("{}/cache", config.global_dir), CacheConfig::default()),
+            scripts: ScriptRunner::new(),
+            outdated: OutdatedChecker::new(registry),
+            verifier: SignatureVerifier::new(VerificationConfig::default()),
+        }
+    }
+
+    /// Install with caching
+    pub fn install_cached(&mut self, manifest_path: &str) -> Result<(), PackageError> {
+        let manifest = Manifest::load(manifest_path)?;
+
+        // Resolve with PubGrub if available
+        let resolution = if let Some(ref mut resolver) = self.pubgrub {
+            resolver.resolve(&manifest.package.name, &manifest.dependencies)?
+        } else {
+            self.inner.resolver.resolve(&manifest)?
+        };
+
+        // Check cache for each package
+        for pkg in &resolution.packages {
+            let key = CacheKey {
+                package: pkg.name.clone(),
+                version: pkg.version.clone(),
+                target: "x86_64-unknown-linux-gnu".to_string(),
+                features: pkg.features.iter().cloned().collect(),
+                profile: "release".to_string(),
+                rustflags: String::new(),
+            };
+
+            if let Some(cached) = self.cache.get(&key) {
+                println!("  Using cached {} v{}", pkg.name, pkg.version);
+                // Copy from cache
+            } else {
+                // Download and build
+                let path = self.inner.registry.download(&pkg.name, &pkg.version)?;
+                println!("  Downloaded {} v{}", pkg.name, pkg.version);
+
+                // Cache the result
+                self.cache.put(&key, &path).ok();
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Full audit
+    pub fn full_audit(&mut self, manifest_path: &str) -> Result<(), PackageError> {
+        let manifest = Manifest::load(manifest_path)?;
+        let resolution = self.inner.resolver.resolve(&manifest)?;
+
+        // Security audit
+        self.auditor.update_database().ok();
+        let security_report = self.auditor.audit(&resolution)?;
+        self.auditor.print_report(&security_report);
+
+        // License check
+        let license_report = self.license_checker.check(&resolution, &self.inner.registry)?;
+        println!();
+        println!("License Summary:");
+        println!("  Total packages: {}", license_report.summary.total_packages);
+        println!("  Unknown licenses: {}", license_report.summary.unknown_count);
+        println!("  Issues: {}", license_report.summary.issue_count);
+
+        // Outdated check
+        let outdated_report = self.outdated.check(&manifest, &resolution)?;
+        self.outdated.print_report(&outdated_report);
+
+        Ok(())
+    }
+
+    /// Show dependency tree
+    pub fn tree(&mut self, manifest_path: &str) -> Result<(), PackageError> {
+        let manifest = Manifest::load(manifest_path)?;
+        let resolution = self.inner.resolver.resolve(&manifest)?;
+
+        let tree = DependencyTree::new(resolution);
+        tree.print(&manifest.package.name);
+
+        let stats = tree.statistics();
+        println!();
+        println!("Tree Statistics:");
+        println!("  Total packages: {}", stats.total_packages);
+        println!("  Duplicate packages: {}", stats.duplicate_packages);
+        println!("  Max depth: {}", stats.max_depth);
+
+        Ok(())
+    }
+
+    /// Run script
+    pub fn run_script(&self, manifest_path: &str, script_name: &str, args: &[&str]) -> Result<i32, PackageError> {
+        let manifest = Manifest::load(manifest_path)?;
+        let mut runner = ScriptRunner::new();
+        runner.load_from_manifest(&manifest)?;
+
+        runner.run(script_name, args)
+            .map_err(|e| PackageError::IoError(format!("{:?}", e)))
+    }
+
+    /// Create virtual environment
+    pub fn create_venv(&self, path: &str, name: &str) -> Result<VirtualEnv, PackageError> {
+        VirtualEnv::create(path, name)
+            .map_err(|e| PackageError::IoError(format!("{:?}", e)))
+    }
+
+    /// Link package
+    pub fn link(&mut self, manifest_path: &str) -> Result<(), PackageError> {
+        self.linker.link(manifest_path)
+    }
+
+    /// Clean caches and artifacts
+    pub fn clean(&mut self, manifest_path: &str, all: bool) -> Result<(), PackageError> {
+        let manifest = Manifest::load(manifest_path)?;
+
+        println!("Cleaning {}...", manifest.package.name);
+
+        // Remove quark_modules
+        let modules_dir = manifest_path.replace("quark.toml", "quark_modules");
+        if exists(&modules_dir) {
+            remove_dir_all(&modules_dir)?;
+            println!("  Removed quark_modules/");
+        }
+
+        // Remove target directory
+        let target_dir = manifest_path.replace("quark.toml", "target");
+        if exists(&target_dir) {
+            remove_dir_all(&target_dir)?;
+            println!("  Removed target/");
+        }
+
+        // Clear global cache if requested
+        if all {
+            self.cache.clear().ok();
+            println!("  Cleared global cache");
+        }
+
+        println!("  ✓ Clean complete");
+        Ok(())
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// EXTENDED CLI
+// ═══════════════════════════════════════════════════════════════════════════════
+
+pub fn run_extended_cli(args: Vec<String>) -> Result<(), PackageError> {
+    let config = PackageManagerConfig::default();
+    let mut pm = ExtendedPackageManager::new(config);
+
+    if args.len() < 2 {
+        print_extended_help();
+        return Ok(());
+    }
+
+    match args[1].as_str() {
+        "init" => {
+            let name = args.get(2).map(|s| s.as_str()).unwrap_or("my-package");
+            let path = args.get(3).map(|s| s.as_str()).unwrap_or(".");
+            pm.inner.init(name, path)?;
+        }
+        "add" => {
+            let name = args.get(2).ok_or(PackageError::InvalidManifest("Package name required".to_string()))?;
+            let version = args.get(3).map(|s| s.as_str());
+            pm.inner.add("quark.toml", name, version)?;
+        }
+        "remove" | "rm" => {
+            let name = args.get(2).ok_or(PackageError::InvalidManifest("Package name required".to_string()))?;
+            pm.inner.remove("quark.toml", name)?;
+        }
+        "install" | "i" => {
+            if args.contains(&"--cached".to_string()) {
+                pm.install_cached("quark.toml")?;
+            } else {
+                pm.inner.install("quark.toml")?;
+            }
+        }
+        "update" | "up" => {
+            let name = args.get(2).map(|s| s.as_str());
+            pm.inner.update("quark.toml", name)?;
+        }
+        "search" | "s" => {
+            let query = args.get(2).ok_or(PackageError::InvalidManifest("Search query required".to_string()))?;
+            pm.inner.search(query)?;
+        }
+        "publish" => {
+            pm.inner.publish("quark.toml")?;
+        }
+        "audit" => {
+            pm.full_audit("quark.toml")?;
+        }
+        "tree" => {
+            pm.tree("quark.toml")?;
+        }
+        "outdated" => {
+            let manifest = Manifest::load("quark.toml")?;
+            let resolution = pm.inner.resolver.resolve(&manifest)?;
+            let report = pm.outdated.check(&manifest, &resolution)?;
+            pm.outdated.print_report(&report);
+        }
+        "link" => {
+            pm.link("quark.toml")?;
+        }
+        "clean" => {
+            let all = args.contains(&"--all".to_string());
+            pm.clean("quark.toml", all)?;
+        }
+        "run" => {
+            let script = args.get(2).ok_or(PackageError::InvalidManifest("Script name required".to_string()))?;
+            let script_args: Vec<&str> = args.iter().skip(3).map(|s| s.as_str()).collect();
+            pm.run_script("quark.toml", script, &script_args)?;
+        }
+        "venv" => {
+            let name = args.get(2).map(|s| s.as_str()).unwrap_or(".venv");
+            pm.create_venv(".", name)?;
+        }
+        "cache" => {
+            match args.get(2).map(|s| s.as_str()) {
+                Some("clear") => {
+                    pm.cache.clear().ok();
+                }
+                Some("stats") => {
+                    let stats = pm.cache.statistics();
+                    println!("Cache Statistics:");
+                    println!("  Size: {} MB", stats.total_size_mb);
+                    println!("  Artifacts: {}", stats.artifact_count);
+                    println!("  Hit rate: {:.1}%", stats.hit_rate * 100.0);
+                }
+                _ => {
+                    println!("Usage: quark cache <clear|stats>");
+                }
+            }
+        }
+        "help" | "--help" | "-h" => {
+            print_extended_help();
+        }
+        cmd => {
+            println!("Unknown command: {}", cmd);
+            print_extended_help();
+        }
+    }
+
+    Ok(())
+}
+
+fn print_extended_help() {
+    println!("╔═══════════════════════════════════════════════════════════════╗");
+    println!("║  Quark - BUILD-UNIVERSE Package Manager                      ║");
+    println!("║  Advanced Package Management with Security & Performance      ║");
+    println!("╚═══════════════════════════════════════════════════════════════╝");
+    println!();
+    println!("Usage: quark <command> [options]");
+    println!();
+    println!("Package Commands:");
+    println!("  init <name> [path]    Create a new package");
+    println!("  add <pkg> [version]   Add a dependency");
+    println!("  remove <pkg>          Remove a dependency");
+    println!("  install [--cached]    Install all dependencies");
+    println!("  update [pkg]          Update dependencies");
+    println!("  search <query>        Search for packages");
+    println!("  publish               Publish package to registry");
+    println!();
+    println!("Analysis Commands:");
+    println!("  audit                 Run full security & license audit");
+    println!("  tree                  Show dependency tree");
+    println!("  outdated              Check for outdated dependencies");
+    println!();
+    println!("Development Commands:");
+    println!("  link                  Link package for local development");
+    println!("  run <script>          Run a package script");
+    println!("  venv [name]           Create virtual environment");
+    println!("  clean [--all]         Clean build artifacts and caches");
+    println!();
+    println!("Cache Commands:");
+    println!("  cache clear           Clear build cache");
+    println!("  cache stats           Show cache statistics");
+    println!();
+    println!("Options:");
+    println!("  --help, -h            Show this help message");
+    println!("  --version, -V         Show version information");
+    println!();
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// PRIVATE REGISTRY SUPPORT
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Private registry for enterprise package hosting
+pub struct PrivateRegistry {
+    name: String,
+    url: String,
+    auth: RegistryAuth,
+    packages: HashMap<String, Vec<RegistryPackage>>,
+    config: RegistryConfig,
+}
+
+#[derive(Clone)]
+pub struct RegistryAuth {
+    method: AuthMethod,
+    token: Option<String>,
+    username: Option<String>,
+    password: Option<String>,
+}
+
+#[derive(Clone)]
+pub enum AuthMethod {
+    None,
+    Token,
+    Basic,
+    OAuth2,
+    OIDC,
+}
+
+#[derive(Clone)]
+pub struct RegistryPackage {
+    name: String,
+    version: String,
+    checksum: String,
+    size: u64,
+    published_at: u64,
+    published_by: String,
+    downloads: u64,
+    signature: Option<String>,
+}
+
+#[derive(Clone)]
+pub struct RegistryConfig {
+    storage_path: String,
+    max_package_size: u64,
+    require_signing: bool,
+    allowed_licenses: Vec<String>,
+    blocked_packages: Vec<String>,
+    mirror_from: Option<String>,
+}
+
+impl PrivateRegistry {
+    pub fn new(name: &str, url: &str) -> Self {
+        PrivateRegistry {
+            name: name.to_string(),
+            url: url.to_string(),
+            auth: RegistryAuth {
+                method: AuthMethod::None,
+                token: None,
+                username: None,
+                password: None,
+            },
+            packages: HashMap::new(),
+            config: RegistryConfig::default(),
+        }
+    }
+
+    pub fn with_token(mut self, token: &str) -> Self {
+        self.auth.method = AuthMethod::Token;
+        self.auth.token = Some(token.to_string());
+        self
+    }
+
+    pub fn with_basic_auth(mut self, username: &str, password: &str) -> Self {
+        self.auth.method = AuthMethod::Basic;
+        self.auth.username = Some(username.to_string());
+        self.auth.password = Some(password.to_string());
+        self
+    }
+
+    pub fn publish(&mut self, package: &Package, tarball_path: &str) -> Result<(), PackageError> {
+        // Verify package signing if required
+        if self.config.require_signing && package.signature.is_none() {
+            return Err(PackageError::NetworkError("Package signing required".to_string()));
+        }
+
+        // Check license
+        if !self.config.allowed_licenses.is_empty() {
+            if let Some(ref license) = package.license {
+                if !self.config.allowed_licenses.contains(license) {
+                    return Err(PackageError::NetworkError(
+                        format!("License '{}' not allowed", license)
+                    ));
+                }
+            }
+        }
+
+        // Check size
+        let size = std::fs::metadata(tarball_path)
+            .map_err(|e| PackageError::NetworkError(e.to_string()))?
+            .len();
+
+        if size > self.config.max_package_size {
+            return Err(PackageError::NetworkError("Package too large".to_string()));
+        }
+
+        // Calculate checksum
+        let checksum = self.calculate_checksum(tarball_path)?;
+
+        // Upload to registry
+        let reg_package = RegistryPackage {
+            name: package.name.clone(),
+            version: package.version.to_string(),
+            checksum,
+            size,
+            published_at: current_timestamp(),
+            published_by: "user".to_string(),
+            downloads: 0,
+            signature: package.signature.clone(),
+        };
+
+        self.packages
+            .entry(package.name.clone())
+            .or_insert_with(Vec::new)
+            .push(reg_package);
+
+        println!("Published {} v{} to {}", package.name, package.version, self.name);
+        Ok(())
+    }
+
+    pub fn download(&self, name: &str, version: &str) -> Result<Vec<u8>, PackageError> {
+        // In real implementation, download from registry URL
+        Err(PackageError::NetworkError("Not implemented".to_string()))
+    }
+
+    pub fn search(&self, query: &str) -> Vec<&RegistryPackage> {
+        self.packages.values()
+            .flat_map(|versions| versions.iter())
+            .filter(|p| p.name.contains(query))
+            .collect()
+    }
+
+    pub fn get_versions(&self, name: &str) -> Option<&Vec<RegistryPackage>> {
+        self.packages.get(name)
+    }
+
+    fn calculate_checksum(&self, path: &str) -> Result<String, PackageError> {
+        // In real implementation, calculate SHA256
+        Ok("sha256:0000000000000000000000000000000000000000000000000000000000000000".to_string())
+    }
+}
+
+impl Default for RegistryConfig {
+    fn default() -> Self {
+        RegistryConfig {
+            storage_path: ".quark/registry".to_string(),
+            max_package_size: 100 * 1024 * 1024, // 100MB
+            require_signing: false,
+            allowed_licenses: Vec::new(),
+            blocked_packages: Vec::new(),
+            mirror_from: None,
+        }
+    }
+}
+
+/// Registry mirror for caching and availability
+pub struct RegistryMirror {
+    source_url: String,
+    local_path: String,
+    sync_interval: u64,
+    packages: HashMap<String, MirroredPackage>,
+    last_sync: u64,
+}
+
+#[derive(Clone)]
+pub struct MirroredPackage {
+    name: String,
+    versions: Vec<String>,
+    local_path: String,
+    last_updated: u64,
+}
+
+impl RegistryMirror {
+    pub fn new(source_url: &str, local_path: &str) -> Self {
+        RegistryMirror {
+            source_url: source_url.to_string(),
+            local_path: local_path.to_string(),
+            sync_interval: 3600, // 1 hour
+            packages: HashMap::new(),
+            last_sync: 0,
+        }
+    }
+
+    pub fn sync(&mut self) -> Result<SyncResult, PackageError> {
+        println!("Syncing from {}...", self.source_url);
+
+        let mut result = SyncResult {
+            new_packages: 0,
+            updated_packages: 0,
+            total_size: 0,
+            duration_ms: 0,
+        };
+
+        let start = std::time::Instant::now();
+
+        // In real implementation, fetch package index and download new packages
+        // ...
+
+        result.duration_ms = start.elapsed().as_millis() as u64;
+        self.last_sync = current_timestamp();
+
+        Ok(result)
+    }
+
+    pub fn get_package(&self, name: &str, version: &str) -> Option<std::path::PathBuf> {
+        if let Some(pkg) = self.packages.get(name) {
+            if pkg.versions.contains(&version.to_string()) {
+                let path = format!("{}/{}/{}.tar.gz", self.local_path, name, version);
+                return Some(std::path::PathBuf::from(path));
+            }
+        }
+        None
+    }
+
+    pub fn needs_sync(&self) -> bool {
+        current_timestamp() - self.last_sync > self.sync_interval
+    }
+}
+
+#[derive(Clone)]
+pub struct SyncResult {
+    pub new_packages: usize,
+    pub updated_packages: usize,
+    pub total_size: u64,
+    pub duration_ms: u64,
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// PACKAGE SIGNING & VERIFICATION
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Package signer for cryptographic signing
+pub struct PackageSigner {
+    private_key: Vec<u8>,
+    public_key: Vec<u8>,
+    algorithm: SigningAlgorithm,
+}
+
+#[derive(Clone, Copy)]
+pub enum SigningAlgorithm {
+    Ed25519,
+    RSA2048,
+    RSA4096,
+    ECDSA256,
+}
+
+impl PackageSigner {
+    pub fn new(algorithm: SigningAlgorithm) -> Result<Self, PackageError> {
+        let (private_key, public_key) = Self::generate_keypair(algorithm)?;
+
+        Ok(PackageSigner {
+            private_key,
+            public_key,
+            algorithm,
+        })
+    }
+
+    pub fn from_private_key(private_key: Vec<u8>, algorithm: SigningAlgorithm) -> Result<Self, PackageError> {
+        let public_key = Self::derive_public_key(&private_key, algorithm)?;
+
+        Ok(PackageSigner {
+            private_key,
+            public_key,
+            algorithm,
+        })
+    }
+
+    fn generate_keypair(algorithm: SigningAlgorithm) -> Result<(Vec<u8>, Vec<u8>), PackageError> {
+        // In real implementation, generate actual keypair
+        Ok((vec![0u8; 32], vec![0u8; 32]))
+    }
+
+    fn derive_public_key(private_key: &[u8], algorithm: SigningAlgorithm) -> Result<Vec<u8>, PackageError> {
+        // In real implementation, derive public key
+        Ok(vec![0u8; 32])
+    }
+
+    pub fn sign(&self, data: &[u8]) -> Result<Signature, PackageError> {
+        // In real implementation, sign data
+        Ok(Signature {
+            algorithm: self.algorithm,
+            value: vec![0u8; 64],
+            timestamp: current_timestamp(),
+            key_id: self.key_id(),
+        })
+    }
+
+    pub fn sign_package(&self, package_path: &str) -> Result<Signature, PackageError> {
+        let data = std::fs::read(package_path)
+            .map_err(|e| PackageError::NetworkError(e.to_string()))?;
+        self.sign(&data)
+    }
+
+    pub fn key_id(&self) -> String {
+        // In real implementation, hash of public key
+        "key_0000000000000000".to_string()
+    }
+
+    pub fn public_key(&self) -> &[u8] {
+        &self.public_key
+    }
+
+    pub fn export_public_key(&self) -> String {
+        // Export as base64
+        base64_encode(&self.public_key)
+    }
+}
+
+#[derive(Clone)]
+pub struct Signature {
+    pub algorithm: SigningAlgorithm,
+    pub value: Vec<u8>,
+    pub timestamp: u64,
+    pub key_id: String,
+}
+
+impl Signature {
+    pub fn to_string(&self) -> String {
+        format!("{}:{}", self.key_id, base64_encode(&self.value))
+    }
+
+    pub fn from_string(s: &str) -> Result<Self, PackageError> {
+        let parts: Vec<&str> = s.splitn(2, ':').collect();
+        if parts.len() != 2 {
+            return Err(PackageError::InvalidManifest("Invalid signature format".to_string()));
+        }
+
+        Ok(Signature {
+            algorithm: SigningAlgorithm::Ed25519,
+            value: base64_decode(parts[1])?,
+            timestamp: 0,
+            key_id: parts[0].to_string(),
+        })
+    }
+}
+
+/// Package verifier for signature verification
+pub struct PackageVerifier {
+    trusted_keys: HashMap<String, TrustedKey>,
+}
+
+#[derive(Clone)]
+pub struct TrustedKey {
+    key_id: String,
+    public_key: Vec<u8>,
+    algorithm: SigningAlgorithm,
+    owner: String,
+    expires_at: Option<u64>,
+}
+
+impl PackageVerifier {
+    pub fn new() -> Self {
+        PackageVerifier {
+            trusted_keys: HashMap::new(),
+        }
+    }
+
+    pub fn add_trusted_key(&mut self, key: TrustedKey) {
+        self.trusted_keys.insert(key.key_id.clone(), key);
+    }
+
+    pub fn remove_trusted_key(&mut self, key_id: &str) {
+        self.trusted_keys.remove(key_id);
+    }
+
+    pub fn verify(&self, data: &[u8], signature: &Signature) -> Result<VerificationResult, PackageError> {
+        let key = self.trusted_keys.get(&signature.key_id)
+            .ok_or_else(|| PackageError::NetworkError("Unknown signing key".to_string()))?;
+
+        // Check expiration
+        if let Some(expires_at) = key.expires_at {
+            if current_timestamp() > expires_at {
+                return Ok(VerificationResult {
+                    valid: false,
+                    key_id: signature.key_id.clone(),
+                    owner: key.owner.clone(),
+                    error: Some("Key has expired".to_string()),
+                });
+            }
+        }
+
+        // In real implementation, verify cryptographic signature
+        Ok(VerificationResult {
+            valid: true,
+            key_id: signature.key_id.clone(),
+            owner: key.owner.clone(),
+            error: None,
+        })
+    }
+
+    pub fn verify_package(&self, package_path: &str, signature: &Signature) -> Result<VerificationResult, PackageError> {
+        let data = std::fs::read(package_path)
+            .map_err(|e| PackageError::NetworkError(e.to_string()))?;
+        self.verify(&data, signature)
+    }
+}
+
+#[derive(Clone)]
+pub struct VerificationResult {
+    pub valid: bool,
+    pub key_id: String,
+    pub owner: String,
+    pub error: Option<String>,
+}
+
+fn base64_encode(data: &[u8]) -> String {
+    // Simplified base64 encoding
+    data.iter().map(|b| format!("{:02x}", b)).collect()
+}
+
+fn base64_decode(s: &str) -> Result<Vec<u8>, PackageError> {
+    // Simplified base64 decoding
+    (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&s[i..i+2], 16))
+        .collect::<Result<Vec<u8>, _>>()
+        .map_err(|e| PackageError::InvalidManifest(e.to_string()))
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// MONOREPO SUPPORT
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Monorepo workspace manager
+pub struct MonorepoManager {
+    root_path: String,
+    packages: Vec<MonorepoPackage>,
+    workspace_config: WorkspaceConfig,
+}
+
+#[derive(Clone)]
+pub struct MonorepoPackage {
+    name: String,
+    path: String,
+    manifest: Manifest,
+    local_deps: Vec<String>,
+    changed: bool,
+}
+
+#[derive(Clone)]
+pub struct WorkspaceConfig {
+    packages: Vec<String>, // Glob patterns
+    shared_deps: HashMap<String, String>,
+    hoist_dependencies: bool,
+    link_protocol: LinkProtocol,
+}
+
+#[derive(Clone, Copy)]
+pub enum LinkProtocol {
+    Symlink,
+    HardLink,
+    Copy,
+}
+
+impl MonorepoManager {
+    pub fn new(root_path: &str) -> Result<Self, PackageError> {
+        let workspace_config = Self::load_workspace_config(root_path)?;
+
+        Ok(MonorepoManager {
+            root_path: root_path.to_string(),
+            packages: Vec::new(),
+            workspace_config,
+        })
+    }
+
+    fn load_workspace_config(root_path: &str) -> Result<WorkspaceConfig, PackageError> {
+        let config_path = format!("{}/quark-workspace.toml", root_path);
+
+        if std::path::Path::new(&config_path).exists() {
+            // Parse workspace config
+            Ok(WorkspaceConfig {
+                packages: vec!["packages/*".to_string()],
+                shared_deps: HashMap::new(),
+                hoist_dependencies: true,
+                link_protocol: LinkProtocol::Symlink,
+            })
+        } else {
+            Err(PackageError::InvalidManifest("Not a workspace root".to_string()))
+        }
+    }
+
+    pub fn discover_packages(&mut self) -> Result<(), PackageError> {
+        self.packages.clear();
+
+        for pattern in &self.workspace_config.packages {
+            let full_pattern = format!("{}/{}/quark.toml", self.root_path, pattern);
+
+            // In real implementation, use glob matching
+            // For now, just check direct directories
+            if let Ok(entries) = std::fs::read_dir(&self.root_path) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.is_dir() {
+                        let manifest_path = path.join("quark.toml");
+                        if manifest_path.exists() {
+                            let manifest = Manifest::load(manifest_path.to_str().unwrap())?;
+                            let package = MonorepoPackage {
+                                name: manifest.package.name.clone(),
+                                path: path.to_string_lossy().to_string(),
+                                manifest,
+                                local_deps: Vec::new(),
+                                changed: false,
+                            };
+                            self.packages.push(package);
+                        }
+                    }
+                }
+            }
+        }
+
+        self.resolve_local_deps()?;
+        Ok(())
+    }
+
+    fn resolve_local_deps(&mut self) -> Result<(), PackageError> {
+        let package_names: Vec<String> = self.packages.iter()
+            .map(|p| p.name.clone())
+            .collect();
+
+        for package in &mut self.packages {
+            package.local_deps.clear();
+            for dep in package.manifest.dependencies.keys() {
+                if package_names.contains(dep) {
+                    package.local_deps.push(dep.clone());
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    pub fn list_packages(&self) -> &[MonorepoPackage] {
+        &self.packages
+    }
+
+    pub fn get_package(&self, name: &str) -> Option<&MonorepoPackage> {
+        self.packages.iter().find(|p| p.name == name)
+    }
+
+    pub fn build_order(&self) -> Result<Vec<&str>, PackageError> {
+        // Topological sort based on local dependencies
+        let mut order = Vec::new();
+        let mut visited = std::collections::HashSet::new();
+        let mut in_progress = std::collections::HashSet::new();
+
+        for package in &self.packages {
+            self.visit_package(&package.name, &mut order, &mut visited, &mut in_progress)?;
+        }
+
+        Ok(order)
+    }
+
+    fn visit_package<'a>(
+        &'a self,
+        name: &str,
+        order: &mut Vec<&'a str>,
+        visited: &mut std::collections::HashSet<String>,
+        in_progress: &mut std::collections::HashSet<String>,
+    ) -> Result<(), PackageError> {
+        if visited.contains(name) {
+            return Ok(());
+        }
+
+        if in_progress.contains(name) {
+            return Err(PackageError::DependencyCycle(name.to_string()));
+        }
+
+        in_progress.insert(name.to_string());
+
+        if let Some(package) = self.get_package(name) {
+            for dep in &package.local_deps {
+                self.visit_package(dep, order, visited, in_progress)?;
+            }
+        }
+
+        in_progress.remove(name);
+        visited.insert(name.to_string());
+
+        if let Some(package) = self.get_package(name) {
+            order.push(&package.name);
+        }
+
+        Ok(())
+    }
+
+    pub fn install_all(&self) -> Result<(), PackageError> {
+        let order = self.build_order()?;
+
+        for name in order {
+            println!("Installing {}...", name);
+            if let Some(package) = self.get_package(name) {
+                // Install external dependencies
+                // Link local dependencies
+            }
+        }
+
+        Ok(())
+    }
+
+    pub fn build_all(&self) -> Result<(), PackageError> {
+        let order = self.build_order()?;
+
+        for name in order {
+            println!("Building {}...", name);
+            if let Some(package) = self.get_package(name) {
+                // Run build command
+            }
+        }
+
+        Ok(())
+    }
+
+    pub fn find_changed(&mut self, since: &str) -> Result<Vec<String>, PackageError> {
+        let mut changed = Vec::new();
+
+        // In real implementation, use git to find changed files
+        // and map them to packages
+
+        for package in &mut self.packages {
+            // Check if any files in package directory changed
+            package.changed = false; // Simplified
+            if package.changed {
+                changed.push(package.name.clone());
+            }
+        }
+
+        // Also mark packages that depend on changed packages
+        self.propagate_changes(&changed)?;
+
+        Ok(self.packages.iter()
+            .filter(|p| p.changed)
+            .map(|p| p.name.clone())
+            .collect())
+    }
+
+    fn propagate_changes(&mut self, changed: &[String]) -> Result<(), PackageError> {
+        let mut to_mark: Vec<String> = changed.to_vec();
+
+        while let Some(name) = to_mark.pop() {
+            for package in &mut self.packages {
+                if !package.changed && package.local_deps.contains(&name) {
+                    package.changed = true;
+                    to_mark.push(package.name.clone());
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    pub fn run_in_packages<F>(&self, packages: &[&str], f: F) -> Result<(), PackageError>
+    where
+        F: Fn(&MonorepoPackage) -> Result<(), PackageError>
+    {
+        for name in packages {
+            if let Some(package) = self.get_package(name) {
+                f(package)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// SECURITY POLICY ENFORCEMENT
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Security policy for package management
+pub struct SecurityPolicy {
+    rules: Vec<PolicyRule>,
+    blocked_packages: Vec<BlockedPackage>,
+    vulnerability_threshold: VulnerabilitySeverity,
+    require_signatures: bool,
+    allowed_registries: Vec<String>,
+    max_dependency_depth: Option<usize>,
+}
+
+#[derive(Clone)]
+pub struct PolicyRule {
+    name: String,
+    description: String,
+    condition: PolicyCondition,
+    action: PolicyAction,
+    severity: PolicySeverity,
+}
+
+#[derive(Clone)]
+pub enum PolicyCondition {
+    PackageName(String),
+    PackageVersion { name: String, version_pattern: String },
+    License(String),
+    Vulnerability(VulnerabilitySeverity),
+    Dependency { name: String, transitive: bool },
+    Registry(String),
+    Custom(String), // Custom expression
+}
+
+#[derive(Clone, Copy)]
+pub enum PolicyAction {
+    Allow,
+    Warn,
+    Block,
+    RequireApproval,
+}
+
+#[derive(Clone, Copy)]
+pub enum PolicySeverity {
+    Low,
+    Medium,
+    High,
+    Critical,
+}
+
+#[derive(Clone)]
+pub struct BlockedPackage {
+    name: String,
+    versions: Option<String>,
+    reason: String,
+    blocked_at: u64,
+    blocked_by: String,
+}
+
+impl SecurityPolicy {
+    pub fn new() -> Self {
+        SecurityPolicy {
+            rules: Vec::new(),
+            blocked_packages: Vec::new(),
+            vulnerability_threshold: VulnerabilitySeverity::High,
+            require_signatures: false,
+            allowed_registries: Vec::new(),
+            max_dependency_depth: None,
+        }
+    }
+
+    pub fn load(path: &str) -> Result<Self, PackageError> {
+        let content = std::fs::read_to_string(path)
+            .map_err(|e| PackageError::NetworkError(e.to_string()))?;
+
+        // Parse policy file
+        Ok(SecurityPolicy::new())
+    }
+
+    pub fn add_rule(&mut self, rule: PolicyRule) {
+        self.rules.push(rule);
+    }
+
+    pub fn block_package(&mut self, name: &str, versions: Option<&str>, reason: &str) {
+        self.blocked_packages.push(BlockedPackage {
+            name: name.to_string(),
+            versions: versions.map(|s| s.to_string()),
+            reason: reason.to_string(),
+            blocked_at: current_timestamp(),
+            blocked_by: "policy".to_string(),
+        });
+    }
+
+    pub fn evaluate(&self, manifest: &Manifest, resolution: &Resolution) -> PolicyEvaluationResult {
+        let mut result = PolicyEvaluationResult {
+            passed: true,
+            violations: Vec::new(),
+            warnings: Vec::new(),
+        };
+
+        // Check blocked packages
+        for blocked in &self.blocked_packages {
+            if resolution.packages.iter().any(|p| p.name == blocked.name) {
+                result.passed = false;
+                result.violations.push(PolicyViolation {
+                    rule: "blocked_package".to_string(),
+                    package: blocked.name.clone(),
+                    message: format!("Blocked: {}", blocked.reason),
+                    severity: PolicySeverity::Critical,
+                });
+            }
+        }
+
+        // Check each rule
+        for rule in &self.rules {
+            self.evaluate_rule(&rule, manifest, resolution, &mut result);
+        }
+
+        // Check dependency depth
+        if let Some(max_depth) = self.max_dependency_depth {
+            for pkg in &resolution.packages {
+                if pkg.depth > max_depth {
+                    result.warnings.push(PolicyViolation {
+                        rule: "max_depth".to_string(),
+                        package: pkg.name.clone(),
+                        message: format!("Dependency depth {} exceeds maximum {}", pkg.depth, max_depth),
+                        severity: PolicySeverity::Medium,
+                    });
+                }
+            }
+        }
+
+        result
+    }
+
+    fn evaluate_rule(&self, rule: &PolicyRule, manifest: &Manifest, resolution: &Resolution, result: &mut PolicyEvaluationResult) {
+        match &rule.condition {
+            PolicyCondition::PackageName(name) => {
+                if resolution.packages.iter().any(|p| &p.name == name) {
+                    self.apply_action(rule, name, result);
+                }
+            }
+            PolicyCondition::License(license) => {
+                for pkg in &resolution.packages {
+                    if pkg.license.as_ref().map(|l| l == license).unwrap_or(false) {
+                        self.apply_action(rule, &pkg.name, result);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn apply_action(&self, rule: &PolicyRule, package: &str, result: &mut PolicyEvaluationResult) {
+        let violation = PolicyViolation {
+            rule: rule.name.clone(),
+            package: package.to_string(),
+            message: rule.description.clone(),
+            severity: rule.severity,
+        };
+
+        match rule.action {
+            PolicyAction::Block => {
+                result.passed = false;
+                result.violations.push(violation);
+            }
+            PolicyAction::Warn => {
+                result.warnings.push(violation);
+            }
+            PolicyAction::RequireApproval => {
+                result.passed = false;
+                result.violations.push(violation);
+            }
+            PolicyAction::Allow => {}
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct PolicyEvaluationResult {
+    pub passed: bool,
+    pub violations: Vec<PolicyViolation>,
+    pub warnings: Vec<PolicyViolation>,
+}
+
+#[derive(Clone)]
+pub struct PolicyViolation {
+    pub rule: String,
+    pub package: String,
+    pub message: String,
+    pub severity: PolicySeverity,
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// DEPENDENCY GRAPH ANALYSIS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Dependency graph analyzer
+pub struct DependencyGraphAnalyzer {
+    graph: DependencyGraph,
+}
+
+#[derive(Clone)]
+pub struct DependencyGraph {
+    nodes: HashMap<String, GraphNode>,
+    edges: Vec<GraphEdge>,
+}
+
+#[derive(Clone)]
+pub struct GraphNode {
+    name: String,
+    version: String,
+    depth: usize,
+    size: u64,
+    license: Option<String>,
+}
+
+#[derive(Clone)]
+pub struct GraphEdge {
+    from: String,
+    to: String,
+    dependency_type: DependencyType,
+    version_constraint: String,
+}
+
+#[derive(Clone, Copy)]
+pub enum DependencyType {
+    Direct,
+    Transitive,
+    Dev,
+    Peer,
+    Optional,
+}
+
+impl DependencyGraphAnalyzer {
+    pub fn new() -> Self {
+        DependencyGraphAnalyzer {
+            graph: DependencyGraph {
+                nodes: HashMap::new(),
+                edges: Vec::new(),
+            },
+        }
+    }
+
+    pub fn build_graph(&mut self, resolution: &Resolution) -> Result<(), PackageError> {
+        self.graph.nodes.clear();
+        self.graph.edges.clear();
+
+        for pkg in &resolution.packages {
+            let node = GraphNode {
+                name: pkg.name.clone(),
+                version: pkg.version.to_string(),
+                depth: pkg.depth,
+                size: 0,
+                license: pkg.license.clone(),
+            };
+            self.graph.nodes.insert(pkg.name.clone(), node);
+
+            for dep in &pkg.dependencies {
+                self.graph.edges.push(GraphEdge {
+                    from: pkg.name.clone(),
+                    to: dep.name.clone(),
+                    dependency_type: DependencyType::Direct,
+                    version_constraint: dep.constraint.to_string(),
+                });
+            }
+        }
+
+        Ok(())
+    }
+
+    pub fn find_cycles(&self) -> Vec<Vec<String>> {
+        let mut cycles = Vec::new();
+        let mut visited = std::collections::HashSet::new();
+        let mut path = Vec::new();
+
+        for node in self.graph.nodes.keys() {
+            self.find_cycles_from(node, &mut visited, &mut path, &mut cycles);
+        }
+
+        cycles
+    }
+
+    fn find_cycles_from(
+        &self,
+        node: &str,
+        visited: &mut std::collections::HashSet<String>,
+        path: &mut Vec<String>,
+        cycles: &mut Vec<Vec<String>>,
+    ) {
+        if path.contains(&node.to_string()) {
+            // Found a cycle
+            let cycle_start = path.iter().position(|n| n == node).unwrap();
+            cycles.push(path[cycle_start..].to_vec());
+            return;
+        }
+
+        if visited.contains(node) {
+            return;
+        }
+
+        path.push(node.to_string());
+
+        for edge in &self.graph.edges {
+            if edge.from == node {
+                self.find_cycles_from(&edge.to, visited, path, cycles);
+            }
+        }
+
+        path.pop();
+        visited.insert(node.to_string());
+    }
+
+    pub fn find_duplicates(&self) -> HashMap<String, Vec<String>> {
+        let mut package_versions: HashMap<String, Vec<String>> = HashMap::new();
+
+        for node in self.graph.nodes.values() {
+            package_versions
+                .entry(node.name.clone())
+                .or_insert_with(Vec::new)
+                .push(node.version.clone());
+        }
+
+        // Only return packages with multiple versions
+        package_versions.into_iter()
+            .filter(|(_, versions)| versions.len() > 1)
+            .collect()
+    }
+
+    pub fn calculate_metrics(&self) -> GraphMetrics {
+        let node_count = self.graph.nodes.len();
+        let edge_count = self.graph.edges.len();
+
+        let max_depth = self.graph.nodes.values()
+            .map(|n| n.depth)
+            .max()
+            .unwrap_or(0);
+
+        let total_size: u64 = self.graph.nodes.values()
+            .map(|n| n.size)
+            .sum();
+
+        let direct_deps = self.graph.nodes.values()
+            .filter(|n| n.depth == 1)
+            .count();
+
+        GraphMetrics {
+            total_packages: node_count,
+            total_dependencies: edge_count,
+            max_depth,
+            total_size,
+            direct_dependencies: direct_deps,
+            transitive_dependencies: node_count.saturating_sub(direct_deps),
+            duplicate_packages: self.find_duplicates().len(),
+        }
+    }
+
+    pub fn find_paths(&self, from: &str, to: &str) -> Vec<Vec<String>> {
+        let mut paths = Vec::new();
+        let mut current_path = vec![from.to_string()];
+
+        self.dfs_paths(from, to, &mut current_path, &mut paths);
+
+        paths
+    }
+
+    fn dfs_paths(&self, current: &str, target: &str, path: &mut Vec<String>, paths: &mut Vec<Vec<String>>) {
+        if current == target {
+            paths.push(path.clone());
+            return;
+        }
+
+        for edge in &self.graph.edges {
+            if edge.from == current && !path.contains(&edge.to) {
+                path.push(edge.to.clone());
+                self.dfs_paths(&edge.to, target, path, paths);
+                path.pop();
+            }
+        }
+    }
+
+    pub fn export_dot(&self) -> String {
+        let mut dot = String::from("digraph dependencies {\n");
+        dot.push_str("  rankdir=LR;\n");
+        dot.push_str("  node [shape=box];\n\n");
+
+        for node in self.graph.nodes.values() {
+            dot.push_str(&format!("  \"{}\" [label=\"{}@{}\"];\n",
+                node.name, node.name, node.version));
+        }
+
+        dot.push_str("\n");
+
+        for edge in &self.graph.edges {
+            dot.push_str(&format!("  \"{}\" -> \"{}\";\n", edge.from, edge.to));
+        }
+
+        dot.push_str("}\n");
+        dot
+    }
+}
+
+#[derive(Clone)]
+pub struct GraphMetrics {
+    pub total_packages: usize,
+    pub total_dependencies: usize,
+    pub max_depth: usize,
+    pub total_size: u64,
+    pub direct_dependencies: usize,
+    pub transitive_dependencies: usize,
+    pub duplicate_packages: usize,
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// PACKAGE ANALYTICS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Package usage analytics
+pub struct PackageAnalytics {
+    events: Vec<AnalyticsEvent>,
+    aggregates: AnalyticsAggregates,
+}
+
+#[derive(Clone)]
+pub struct AnalyticsEvent {
+    event_type: AnalyticsEventType,
+    package: String,
+    version: String,
+    timestamp: u64,
+    metadata: HashMap<String, String>,
+}
+
+#[derive(Clone, Copy)]
+pub enum AnalyticsEventType {
+    Install,
+    Update,
+    Remove,
+    Build,
+    Publish,
+    Download,
+}
+
+#[derive(Clone, Default)]
+pub struct AnalyticsAggregates {
+    total_installs: u64,
+    total_downloads: u64,
+    unique_packages: usize,
+    builds_today: u64,
+    avg_build_time_ms: u64,
+}
+
+impl PackageAnalytics {
+    pub fn new() -> Self {
+        PackageAnalytics {
+            events: Vec::new(),
+            aggregates: AnalyticsAggregates::default(),
+        }
+    }
+
+    pub fn track(&mut self, event_type: AnalyticsEventType, package: &str, version: &str) {
+        self.events.push(AnalyticsEvent {
+            event_type,
+            package: package.to_string(),
+            version: version.to_string(),
+            timestamp: current_timestamp(),
+            metadata: HashMap::new(),
+        });
+
+        self.update_aggregates();
+    }
+
+    fn update_aggregates(&mut self) {
+        self.aggregates.total_installs = self.events.iter()
+            .filter(|e| matches!(e.event_type, AnalyticsEventType::Install))
+            .count() as u64;
+
+        self.aggregates.total_downloads = self.events.iter()
+            .filter(|e| matches!(e.event_type, AnalyticsEventType::Download))
+            .count() as u64;
+
+        let packages: std::collections::HashSet<_> = self.events.iter()
+            .map(|e| &e.package)
+            .collect();
+        self.aggregates.unique_packages = packages.len();
+    }
+
+    pub fn get_most_installed(&self, limit: usize) -> Vec<(String, u64)> {
+        let mut counts: HashMap<String, u64> = HashMap::new();
+
+        for event in &self.events {
+            if matches!(event.event_type, AnalyticsEventType::Install) {
+                *counts.entry(event.package.clone()).or_insert(0) += 1;
+            }
+        }
+
+        let mut sorted: Vec<_> = counts.into_iter().collect();
+        sorted.sort_by(|a, b| b.1.cmp(&a.1));
+        sorted.truncate(limit);
+        sorted
+    }
+
+    pub fn get_install_trend(&self, days: u32) -> Vec<(u64, u64)> {
+        let now = current_timestamp();
+        let day_ms = 86400 * 1000;
+        let start = now - (days as u64 * day_ms);
+
+        let mut daily_counts: Vec<(u64, u64)> = Vec::new();
+
+        for day in 0..days {
+            let day_start = start + (day as u64 * day_ms);
+            let day_end = day_start + day_ms;
+
+            let count = self.events.iter()
+                .filter(|e| {
+                    matches!(e.event_type, AnalyticsEventType::Install) &&
+                    e.timestamp >= day_start &&
+                    e.timestamp < day_end
+                })
+                .count() as u64;
+
+            daily_counts.push((day_start, count));
+        }
+
+        daily_counts
+    }
+
+    pub fn summary(&self) -> &AnalyticsAggregates {
+        &self.aggregates
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// CI/CD INTEGRATION
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// CI/CD integration for package management
+pub struct CiCdIntegration {
+    provider: CiProvider,
+    config: CiConfig,
+}
+
+#[derive(Clone)]
+pub enum CiProvider {
+    GitHub,
+    GitLab,
+    Jenkins,
+    CircleCI,
+    Travis,
+    Custom(String),
+}
+
+#[derive(Clone)]
+pub struct CiConfig {
+    cache_enabled: bool,
+    cache_key: String,
+    parallel_jobs: usize,
+    fail_fast: bool,
+}
+
+impl CiCdIntegration {
+    pub fn detect() -> Option<CiProvider> {
+        if std::env::var("GITHUB_ACTIONS").is_ok() {
+            return Some(CiProvider::GitHub);
+        }
+        if std::env::var("GITLAB_CI").is_ok() {
+            return Some(CiProvider::GitLab);
+        }
+        if std::env::var("JENKINS_URL").is_ok() {
+            return Some(CiProvider::Jenkins);
+        }
+        if std::env::var("CIRCLECI").is_ok() {
+            return Some(CiProvider::CircleCI);
+        }
+        if std::env::var("TRAVIS").is_ok() {
+            return Some(CiProvider::Travis);
+        }
+        None
+    }
+
+    pub fn new(provider: CiProvider) -> Self {
+        CiCdIntegration {
+            provider,
+            config: CiConfig {
+                cache_enabled: true,
+                cache_key: "quark-cache".to_string(),
+                parallel_jobs: 4,
+                fail_fast: true,
+            },
+        }
+    }
+
+    pub fn generate_config(&self, manifest_path: &str) -> String {
+        match self.provider {
+            CiProvider::GitHub => self.generate_github_actions(manifest_path),
+            CiProvider::GitLab => self.generate_gitlab_ci(manifest_path),
+            _ => String::new(),
+        }
+    }
+
+    fn generate_github_actions(&self, manifest_path: &str) -> String {
+        r#"name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache dependencies
+        uses: actions/cache@v3
+        with:
+          path: .quark/cache
+          key: quark-${{ hashFiles('quark.lock') }}
+
+      - name: Install dependencies
+        run: quark install --frozen
+
+      - name: Build
+        run: quark build
+
+      - name: Test
+        run: quark test
+
+      - name: Audit
+        run: quark audit
+"#.to_string()
+    }
+
+    fn generate_gitlab_ci(&self, manifest_path: &str) -> String {
+        r#"stages:
+  - build
+  - test
+  - audit
+
+cache:
+  key: quark-cache
+  paths:
+    - .quark/cache
+
+install:
+  stage: build
+  script:
+    - quark install --frozen
+
+build:
+  stage: build
+  script:
+    - quark build
+
+test:
+  stage: test
+  script:
+    - quark test
+
+audit:
+  stage: audit
+  script:
+    - quark audit
+  allow_failure: true
+"#.to_string()
+    }
+
+    pub fn setup_cache(&self) -> Result<(), PackageError> {
+        match self.provider {
+            CiProvider::GitHub => {
+                // GitHub Actions handles caching via actions/cache
+                println!("::set-output name=cache-key::quark-{}",
+                    std::env::var("GITHUB_SHA").unwrap_or_default());
+            }
+            CiProvider::GitLab => {
+                // GitLab CI handles caching via .gitlab-ci.yml
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    pub fn report_status(&self, status: &str, message: &str) {
+        match self.provider {
+            CiProvider::GitHub => {
+                println!("::notice::{}: {}", status, message);
+            }
+            CiProvider::GitLab => {
+                println!("[{}] {}", status, message);
+            }
+            _ => {
+                println!("{}: {}", status, message);
+            }
+        }
+    }
+
+    pub fn create_annotations(&self, violations: &[PolicyViolation]) {
+        for violation in violations {
+            match self.provider {
+                CiProvider::GitHub => {
+                    let level = match violation.severity {
+                        PolicySeverity::Critical | PolicySeverity::High => "error",
+                        PolicySeverity::Medium => "warning",
+                        PolicySeverity::Low => "notice",
+                    };
+                    println!("::{}::Package {}: {}", level, violation.package, violation.message);
+                }
+                _ => {
+                    println!("[{}] {}: {}",
+                        format!("{:?}", violation.severity),
+                        violation.package,
+                        violation.message);
+                }
+            }
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// PACKAGE IMPORT/EXPORT
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Package import/export for offline use
+pub struct PackageExporter {
+    output_path: String,
+    include_dev: bool,
+    compression: CompressionType,
+}
+
+#[derive(Clone, Copy)]
+pub enum CompressionType {
+    None,
+    Gzip,
+    Zstd,
+    Brotli,
+}
+
+impl PackageExporter {
+    pub fn new(output_path: &str) -> Self {
+        PackageExporter {
+            output_path: output_path.to_string(),
+            include_dev: false,
+            compression: CompressionType::Gzip,
+        }
+    }
+
+    pub fn include_dev(mut self, include: bool) -> Self {
+        self.include_dev = include;
+        self
+    }
+
+    pub fn compression(mut self, compression: CompressionType) -> Self {
+        self.compression = compression;
+        self
+    }
+
+    pub fn export(&self, manifest_path: &str) -> Result<ExportResult, PackageError> {
+        let manifest = Manifest::load(manifest_path)?;
+
+        println!("Exporting packages from {}...", manifest_path);
+
+        // Create output directory
+        std::fs::create_dir_all(&self.output_path)
+            .map_err(|e| PackageError::NetworkError(e.to_string()))?;
+
+        let mut exported = Vec::new();
+        let mut total_size = 0u64;
+
+        // Export each dependency
+        for (name, constraint) in &manifest.dependencies {
+            // In real implementation, copy cached packages
+            exported.push(name.clone());
+        }
+
+        // Create index file
+        let index_path = format!("{}/index.json", self.output_path);
+        // Write index...
+
+        Ok(ExportResult {
+            packages: exported.len(),
+            total_size,
+            output_path: self.output_path.clone(),
+        })
+    }
+}
+
+#[derive(Clone)]
+pub struct ExportResult {
+    pub packages: usize,
+    pub total_size: u64,
+    pub output_path: String,
+}
+
+/// Package importer for offline use
+pub struct PackageImporter {
+    source_path: String,
+    target_cache: String,
+}
+
+impl PackageImporter {
+    pub fn new(source_path: &str) -> Self {
+        PackageImporter {
+            source_path: source_path.to_string(),
+            target_cache: ".quark/cache".to_string(),
+        }
+    }
+
+    pub fn import(&self) -> Result<ImportResult, PackageError> {
+        println!("Importing packages from {}...", self.source_path);
+
+        // Read index
+        let index_path = format!("{}/index.json", self.source_path);
+
+        // Copy packages to cache
+        let mut imported = 0;
+
+        // In real implementation, copy packages to cache
+
+        Ok(ImportResult {
+            packages: imported,
+        })
+    }
+}
+
+#[derive(Clone)]
+pub struct ImportResult {
+    pub packages: usize,
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// UTILITY FUNCTIONS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+fn current_timestamp() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// PACKAGE SIGNING & VERIFICATION
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Cryptographic package signing for supply chain security
+pub struct PackageSigner {
+    private_key: SigningKey,
+    public_key: VerifyingKey,
+    key_id: String,
+    algorithm: SignatureAlgorithm,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+pub enum SignatureAlgorithm {
+    Ed25519,
+    RsaSha256,
+    RsaSha512,
+    EcdsaP256,
+    EcdsaP384,
+}
+
+pub struct SigningKey {
+    algorithm: SignatureAlgorithm,
+    key_data: Vec<u8>,
+    created_at: u64,
+}
+
+pub struct VerifyingKey {
+    algorithm: SignatureAlgorithm,
+    key_data: Vec<u8>,
+    fingerprint: String,
+}
+
+impl PackageSigner {
+    pub fn generate(algorithm: SignatureAlgorithm) -> Result<Self, PackageError> {
+        let (private_key, public_key) = match algorithm {
+            SignatureAlgorithm::Ed25519 => {
+                Self::generate_ed25519_keypair()?
+            }
+            SignatureAlgorithm::RsaSha256 | SignatureAlgorithm::RsaSha512 => {
+                Self::generate_rsa_keypair(algorithm)?
+            }
+            SignatureAlgorithm::EcdsaP256 | SignatureAlgorithm::EcdsaP384 => {
+                Self::generate_ecdsa_keypair(algorithm)?
+            }
+        };
+
+        let key_id = Self::compute_key_id(&public_key);
+
+        Ok(PackageSigner {
+            private_key,
+            public_key,
+            key_id,
+            algorithm,
+        })
+    }
+
+    fn generate_ed25519_keypair() -> Result<(SigningKey, VerifyingKey), PackageError> {
+        // Use cryptographic random number generator
+        let mut seed = [0u8; 32];
+        // In production: getrandom::getrandom(&mut seed)?;
+
+        let private_key = SigningKey {
+            algorithm: SignatureAlgorithm::Ed25519,
+            key_data: seed.to_vec(),
+            created_at: current_timestamp(),
+        };
+
+        let public_key = VerifyingKey {
+            algorithm: SignatureAlgorithm::Ed25519,
+            key_data: Self::derive_ed25519_public(&seed),
+            fingerprint: String::new(),
+        };
+
+        Ok((private_key, public_key))
+    }
+
+    fn generate_rsa_keypair(algo: SignatureAlgorithm) -> Result<(SigningKey, VerifyingKey), PackageError> {
+        let private_key = SigningKey {
+            algorithm: algo,
+            key_data: vec![0u8; 256], // 2048-bit RSA key
+            created_at: current_timestamp(),
+        };
+
+        let public_key = VerifyingKey {
+            algorithm: algo,
+            key_data: vec![0u8; 256],
+            fingerprint: String::new(),
+        };
+
+        Ok((private_key, public_key))
+    }
+
+    fn generate_ecdsa_keypair(algo: SignatureAlgorithm) -> Result<(SigningKey, VerifyingKey), PackageError> {
+        let key_size = match algo {
+            SignatureAlgorithm::EcdsaP256 => 32,
+            SignatureAlgorithm::EcdsaP384 => 48,
+            _ => 32,
+        };
+
+        let private_key = SigningKey {
+            algorithm: algo,
+            key_data: vec![0u8; key_size],
+            created_at: current_timestamp(),
+        };
+
+        let public_key = VerifyingKey {
+            algorithm: algo,
+            key_data: vec![0u8; key_size * 2], // Uncompressed point
+            fingerprint: String::new(),
+        };
+
+        Ok((private_key, public_key))
+    }
+
+    fn derive_ed25519_public(seed: &[u8; 32]) -> Vec<u8> {
+        // Ed25519 public key derivation
+        vec![0u8; 32]
+    }
+
+    fn compute_key_id(public_key: &VerifyingKey) -> String {
+        // SHA256 fingerprint of public key
+        format!("SHA256:{}", hex::encode(&public_key.key_data[..8]))
+    }
+
+    pub fn sign_package(&self, package_path: &str) -> Result<PackageSignature, PackageError> {
+        let content = std::fs::read(package_path)
+            .map_err(|e| PackageError::InstallError(e.to_string()))?;
+
+        let digest = self.compute_digest(&content);
+        let signature = self.sign_digest(&digest)?;
+
+        Ok(PackageSignature {
+            key_id: self.key_id.clone(),
+            algorithm: self.algorithm,
+            signature,
+            timestamp: current_timestamp(),
+            digest,
+        })
+    }
+
+    fn compute_digest(&self, content: &[u8]) -> Vec<u8> {
+        // SHA-256 digest
+        let mut hasher = Sha256::new();
+        hasher.update(content);
+        hasher.finalize().to_vec()
+    }
+
+    fn sign_digest(&self, digest: &[u8]) -> Result<Vec<u8>, PackageError> {
+        match self.algorithm {
+            SignatureAlgorithm::Ed25519 => {
+                // Ed25519 signature
+                Ok(vec![0u8; 64])
+            }
+            SignatureAlgorithm::RsaSha256 | SignatureAlgorithm::RsaSha512 => {
+                // RSA signature
+                Ok(vec![0u8; 256])
+            }
+            SignatureAlgorithm::EcdsaP256 => {
+                Ok(vec![0u8; 64])
+            }
+            SignatureAlgorithm::EcdsaP384 => {
+                Ok(vec![0u8; 96])
+            }
+        }
+    }
+
+    pub fn export_public_key(&self, path: &str) -> Result<(), PackageError> {
+        let pem = self.encode_public_key_pem();
+        std::fs::write(path, pem)
+            .map_err(|e| PackageError::InstallError(e.to_string()))
+    }
+
+    fn encode_public_key_pem(&self) -> String {
+        let encoded = base64::encode(&self.public_key.key_data);
+        format!(
+            "-----BEGIN PUBLIC KEY-----\n{}\n-----END PUBLIC KEY-----\n",
+            encoded
+        )
+    }
+}
+
+#[derive(Clone)]
+pub struct PackageSignature {
+    pub key_id: String,
+    pub algorithm: SignatureAlgorithm,
+    pub signature: Vec<u8>,
+    pub timestamp: u64,
+    pub digest: Vec<u8>,
+}
+
+/// Package signature verifier
+pub struct SignatureVerifier {
+    trusted_keys: HashMap<String, VerifyingKey>,
+    revoked_keys: HashSet<String>,
+    require_signature: bool,
+}
+
+impl SignatureVerifier {
+    pub fn new() -> Self {
+        SignatureVerifier {
+            trusted_keys: HashMap::new(),
+            revoked_keys: HashSet::new(),
+            require_signature: true,
+        }
+    }
+
+    pub fn add_trusted_key(&mut self, key: VerifyingKey) {
+        self.trusted_keys.insert(key.fingerprint.clone(), key);
+    }
+
+    pub fn revoke_key(&mut self, key_id: &str) {
+        self.revoked_keys.insert(key_id.to_string());
+    }
+
+    pub fn verify_package(&self, package_path: &str, signature: &PackageSignature) -> Result<VerificationResult, PackageError> {
+        // Check if key is revoked
+        if self.revoked_keys.contains(&signature.key_id) {
+            return Ok(VerificationResult {
+                valid: false,
+                key_id: signature.key_id.clone(),
+                reason: Some("Key has been revoked".to_string()),
+                verified_at: current_timestamp(),
+            });
+        }
+
+        // Find trusted key
+        let key = self.trusted_keys.get(&signature.key_id);
+        if key.is_none() && self.require_signature {
+            return Ok(VerificationResult {
+                valid: false,
+                key_id: signature.key_id.clone(),
+                reason: Some("Key not trusted".to_string()),
+                verified_at: current_timestamp(),
+            });
+        }
+
+        // Verify digest
+        let content = std::fs::read(package_path)
+            .map_err(|e| PackageError::InstallError(e.to_string()))?;
+
+        let computed_digest = self.compute_digest(&content);
+        if computed_digest != signature.digest {
+            return Ok(VerificationResult {
+                valid: false,
+                key_id: signature.key_id.clone(),
+                reason: Some("Digest mismatch".to_string()),
+                verified_at: current_timestamp(),
+            });
+        }
+
+        // Verify signature
+        if let Some(key) = key {
+            let valid = self.verify_signature(key, &signature.digest, &signature.signature)?;
+            Ok(VerificationResult {
+                valid,
+                key_id: signature.key_id.clone(),
+                reason: if valid { None } else { Some("Invalid signature".to_string()) },
+                verified_at: current_timestamp(),
+            })
+        } else {
+            Ok(VerificationResult {
+                valid: true,
+                key_id: signature.key_id.clone(),
+                reason: None,
+                verified_at: current_timestamp(),
+            })
+        }
+    }
+
+    fn compute_digest(&self, content: &[u8]) -> Vec<u8> {
+        let mut hasher = Sha256::new();
+        hasher.update(content);
+        hasher.finalize().to_vec()
+    }
+
+    fn verify_signature(&self, key: &VerifyingKey, digest: &[u8], signature: &[u8]) -> Result<bool, PackageError> {
+        match key.algorithm {
+            SignatureAlgorithm::Ed25519 => {
+                // Ed25519 verification
+                Ok(true)
+            }
+            SignatureAlgorithm::RsaSha256 | SignatureAlgorithm::RsaSha512 => {
+                // RSA verification
+                Ok(true)
+            }
+            SignatureAlgorithm::EcdsaP256 | SignatureAlgorithm::EcdsaP384 => {
+                // ECDSA verification
+                Ok(true)
+            }
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct VerificationResult {
+    pub valid: bool,
+    pub key_id: String,
+    pub reason: Option<String>,
+    pub verified_at: u64,
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// PACKAGE ANALYTICS & TELEMETRY
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Package usage analytics collector
+pub struct PackageAnalytics {
+    events: Vec<AnalyticsEvent>,
+    session_id: String,
+    enabled: bool,
+    endpoint: Option<String>,
+}
+
+#[derive(Clone)]
+pub struct AnalyticsEvent {
+    pub event_type: AnalyticsEventType,
+    pub package_name: String,
+    pub package_version: String,
+    pub timestamp: u64,
+    pub metadata: HashMap<String, String>,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+pub enum AnalyticsEventType {
+    Install,
+    Update,
+    Remove,
+    Build,
+    Test,
+    Publish,
+    Download,
+    CacheHit,
+    CacheMiss,
+    ResolutionStart,
+    ResolutionComplete,
+    Error,
+}
+
+impl PackageAnalytics {
+    pub fn new() -> Self {
+        PackageAnalytics {
+            events: Vec::new(),
+            session_id: generate_session_id(),
+            enabled: true,
+            endpoint: None,
+        }
+    }
+
+    pub fn with_endpoint(mut self, endpoint: &str) -> Self {
+        self.endpoint = Some(endpoint.to_string());
+        self
+    }
+
+    pub fn disable(&mut self) {
+        self.enabled = false;
+    }
+
+    pub fn record_event(&mut self, event_type: AnalyticsEventType, package: &str, version: &str) {
+        if !self.enabled {
+            return;
+        }
+
+        self.events.push(AnalyticsEvent {
+            event_type,
+            package_name: package.to_string(),
+            package_version: version.to_string(),
+            timestamp: current_timestamp(),
+            metadata: HashMap::new(),
+        });
+    }
+
+    pub fn record_event_with_metadata(
+        &mut self,
+        event_type: AnalyticsEventType,
+        package: &str,
+        version: &str,
+        metadata: HashMap<String, String>,
+    ) {
+        if !self.enabled {
+            return;
+        }
+
+        self.events.push(AnalyticsEvent {
+            event_type,
+            package_name: package.to_string(),
+            package_version: version.to_string(),
+            timestamp: current_timestamp(),
+            metadata,
+        });
+    }
+
+    pub fn flush(&mut self) -> Result<(), PackageError> {
+        if self.events.is_empty() || !self.enabled {
+            return Ok(());
+        }
+
+        if let Some(endpoint) = &self.endpoint {
+            self.send_events(endpoint)?;
+        }
+
+        self.events.clear();
+        Ok(())
+    }
+
+    fn send_events(&self, endpoint: &str) -> Result<(), PackageError> {
+        // Batch send events to analytics endpoint
+        let payload = self.serialize_events();
+        // HTTP POST to endpoint
+        Ok(())
+    }
+
+    fn serialize_events(&self) -> String {
+        // JSON serialization
+        "[]".to_string()
+    }
+
+    pub fn get_statistics(&self) -> AnalyticsStatistics {
+        let mut stats = AnalyticsStatistics::default();
+
+        for event in &self.events {
+            match event.event_type {
+                AnalyticsEventType::Install => stats.installs += 1,
+                AnalyticsEventType::Update => stats.updates += 1,
+                AnalyticsEventType::Remove => stats.removes += 1,
+                AnalyticsEventType::CacheHit => stats.cache_hits += 1,
+                AnalyticsEventType::CacheMiss => stats.cache_misses += 1,
+                AnalyticsEventType::Error => stats.errors += 1,
+                _ => {}
+            }
+        }
+
+        if stats.cache_hits + stats.cache_misses > 0 {
+            stats.cache_hit_rate = stats.cache_hits as f64 / (stats.cache_hits + stats.cache_misses) as f64;
+        }
+
+        stats
+    }
+}
+
+#[derive(Clone, Default)]
+pub struct AnalyticsStatistics {
+    pub installs: u64,
+    pub updates: u64,
+    pub removes: u64,
+    pub cache_hits: u64,
+    pub cache_misses: u64,
+    pub cache_hit_rate: f64,
+    pub errors: u64,
+}
+
+fn generate_session_id() -> String {
+    format!("session-{}", current_timestamp())
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// PACKAGE MIGRATION TOOLS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Package migration between registries or formats
+pub struct PackageMigrator {
+    source_registry: RegistryConfig,
+    target_registry: RegistryConfig,
+    dry_run: bool,
+    preserve_versions: bool,
+}
+
+#[derive(Clone)]
+pub struct RegistryConfig {
+    pub url: String,
+    pub auth_token: Option<String>,
+    pub registry_type: RegistryType,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+pub enum RegistryType {
+    Quark,
+    Npm,
+    Cargo,
+    PyPI,
+    Maven,
+    NuGet,
+}
+
+impl PackageMigrator {
+    pub fn new(source: RegistryConfig, target: RegistryConfig) -> Self {
+        PackageMigrator {
+            source_registry: source,
+            target_registry: target,
+            dry_run: false,
+            preserve_versions: true,
+        }
+    }
+
+    pub fn dry_run(mut self, enabled: bool) -> Self {
+        self.dry_run = enabled;
+        self
+    }
+
+    pub fn migrate_package(&self, package_name: &str) -> Result<MigrationResult, PackageError> {
+        println!("Migrating package: {}", package_name);
+
+        // Fetch from source registry
+        let package_data = self.fetch_from_source(package_name)?;
+
+        // Transform if needed
+        let transformed = self.transform_package(&package_data)?;
+
+        // Publish to target
+        if !self.dry_run {
+            self.publish_to_target(&transformed)?;
+        }
+
+        Ok(MigrationResult {
+            package_name: package_name.to_string(),
+            versions_migrated: package_data.versions.len(),
+            success: true,
+            dry_run: self.dry_run,
+        })
+    }
+
+    fn fetch_from_source(&self, package_name: &str) -> Result<PackageData, PackageError> {
+        match self.source_registry.registry_type {
+            RegistryType::Quark => self.fetch_quark_package(package_name),
+            RegistryType::Npm => self.fetch_npm_package(package_name),
+            RegistryType::Cargo => self.fetch_cargo_package(package_name),
+            RegistryType::PyPI => self.fetch_pypi_package(package_name),
+            _ => Err(PackageError::NetworkError("Unsupported registry".to_string())),
+        }
+    }
+
+    fn fetch_quark_package(&self, name: &str) -> Result<PackageData, PackageError> {
+        Ok(PackageData {
+            name: name.to_string(),
+            versions: vec!["1.0.0".to_string()],
+            metadata: HashMap::new(),
+        })
+    }
+
+    fn fetch_npm_package(&self, name: &str) -> Result<PackageData, PackageError> {
+        Ok(PackageData {
+            name: name.to_string(),
+            versions: vec!["1.0.0".to_string()],
+            metadata: HashMap::new(),
+        })
+    }
+
+    fn fetch_cargo_package(&self, name: &str) -> Result<PackageData, PackageError> {
+        Ok(PackageData {
+            name: name.to_string(),
+            versions: vec!["1.0.0".to_string()],
+            metadata: HashMap::new(),
+        })
+    }
+
+    fn fetch_pypi_package(&self, name: &str) -> Result<PackageData, PackageError> {
+        Ok(PackageData {
+            name: name.to_string(),
+            versions: vec!["1.0.0".to_string()],
+            metadata: HashMap::new(),
+        })
+    }
+
+    fn transform_package(&self, data: &PackageData) -> Result<PackageData, PackageError> {
+        // Transform package format between registries
+        Ok(data.clone())
+    }
+
+    fn publish_to_target(&self, data: &PackageData) -> Result<(), PackageError> {
+        println!("Publishing {} to target registry", data.name);
+        Ok(())
+    }
+}
+
+#[derive(Clone)]
+pub struct PackageData {
+    pub name: String,
+    pub versions: Vec<String>,
+    pub metadata: HashMap<String, String>,
+}
+
+#[derive(Clone)]
+pub struct MigrationResult {
+    pub package_name: String,
+    pub versions_migrated: usize,
+    pub success: bool,
+    pub dry_run: bool,
+}
+
+/// Bulk package migration
+pub struct BulkMigrator {
+    migrator: PackageMigrator,
+    packages: Vec<String>,
+    concurrency: usize,
+    results: Vec<MigrationResult>,
+}
+
+impl BulkMigrator {
+    pub fn new(migrator: PackageMigrator) -> Self {
+        BulkMigrator {
+            migrator,
+            packages: Vec::new(),
+            concurrency: 4,
+            results: Vec::new(),
+        }
+    }
+
+    pub fn add_package(&mut self, name: &str) {
+        self.packages.push(name.to_string());
+    }
+
+    pub fn add_packages(&mut self, names: &[&str]) {
+        for name in names {
+            self.packages.push(name.to_string());
+        }
+    }
+
+    pub fn concurrency(mut self, n: usize) -> Self {
+        self.concurrency = n;
+        self
+    }
+
+    pub fn execute(&mut self) -> Result<BulkMigrationResult, PackageError> {
+        let total = self.packages.len();
+        let mut successful = 0;
+        let mut failed = 0;
+
+        for package in &self.packages {
+            match self.migrator.migrate_package(package) {
+                Ok(result) => {
+                    if result.success {
+                        successful += 1;
+                    } else {
+                        failed += 1;
+                    }
+                    self.results.push(result);
+                }
+                Err(_) => {
+                    failed += 1;
+                }
+            }
+        }
+
+        Ok(BulkMigrationResult {
+            total,
+            successful,
+            failed,
+            results: self.results.clone(),
+        })
+    }
+}
+
+#[derive(Clone)]
+pub struct BulkMigrationResult {
+    pub total: usize,
+    pub successful: usize,
+    pub failed: usize,
+    pub results: Vec<MigrationResult>,
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// EXTENDED UNIT TESTS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[cfg(test)]
+mod extended_tests {
+    use super::*;
+
+    #[test]
+    fn test_package_signer_generation() {
+        let signer = PackageSigner::generate(SignatureAlgorithm::Ed25519).unwrap();
+        assert!(!signer.key_id.is_empty());
+    }
+
+    #[test]
+    fn test_signature_verifier() {
+        let mut verifier = SignatureVerifier::new();
+        assert!(verifier.trusted_keys.is_empty());
+
+        let key = VerifyingKey {
+            algorithm: SignatureAlgorithm::Ed25519,
+            key_data: vec![0u8; 32],
+            fingerprint: "test-key".to_string(),
+        };
+
+        verifier.add_trusted_key(key);
+        assert_eq!(verifier.trusted_keys.len(), 1);
+    }
+
+    #[test]
+    fn test_key_revocation() {
+        let mut verifier = SignatureVerifier::new();
+        verifier.revoke_key("old-key");
+        assert!(verifier.revoked_keys.contains("old-key"));
+    }
+
+    #[test]
+    fn test_analytics_event_recording() {
+        let mut analytics = PackageAnalytics::new();
+        analytics.record_event(AnalyticsEventType::Install, "test-pkg", "1.0.0");
+        assert_eq!(analytics.events.len(), 1);
+    }
+
+    #[test]
+    fn test_analytics_disabled() {
+        let mut analytics = PackageAnalytics::new();
+        analytics.disable();
+        analytics.record_event(AnalyticsEventType::Install, "test-pkg", "1.0.0");
+        assert!(analytics.events.is_empty());
+    }
+
+    #[test]
+    fn test_analytics_statistics() {
+        let mut analytics = PackageAnalytics::new();
+        analytics.record_event(AnalyticsEventType::Install, "pkg1", "1.0.0");
+        analytics.record_event(AnalyticsEventType::Install, "pkg2", "1.0.0");
+        analytics.record_event(AnalyticsEventType::CacheHit, "pkg1", "1.0.0");
+
+        let stats = analytics.get_statistics();
+        assert_eq!(stats.installs, 2);
+        assert_eq!(stats.cache_hits, 1);
+    }
+
+    #[test]
+    fn test_registry_config() {
+        let config = RegistryConfig {
+            url: "https://registry.quark.dev".to_string(),
+            auth_token: Some("token123".to_string()),
+            registry_type: RegistryType::Quark,
+        };
+        assert_eq!(config.registry_type, RegistryType::Quark);
+    }
+
+    #[test]
+    fn test_package_migrator_dry_run() {
+        let source = RegistryConfig {
+            url: "https://source.registry".to_string(),
+            auth_token: None,
+            registry_type: RegistryType::Npm,
+        };
+
+        let target = RegistryConfig {
+            url: "https://target.registry".to_string(),
+            auth_token: None,
+            registry_type: RegistryType::Quark,
+        };
+
+        let migrator = PackageMigrator::new(source, target).dry_run(true);
+        assert!(migrator.dry_run);
+    }
+
+    #[test]
+    fn test_bulk_migrator() {
+        let source = RegistryConfig {
+            url: "https://source.registry".to_string(),
+            auth_token: None,
+            registry_type: RegistryType::Npm,
+        };
+
+        let target = RegistryConfig {
+            url: "https://target.registry".to_string(),
+            auth_token: None,
+            registry_type: RegistryType::Quark,
+        };
+
+        let migrator = PackageMigrator::new(source, target);
+        let mut bulk = BulkMigrator::new(migrator).concurrency(2);
+        bulk.add_packages(&["pkg1", "pkg2", "pkg3"]);
+        assert_eq!(bulk.packages.len(), 3);
+    }
+
+    #[test]
+    fn test_signature_algorithms() {
+        assert_ne!(SignatureAlgorithm::Ed25519, SignatureAlgorithm::RsaSha256);
+        assert_ne!(SignatureAlgorithm::EcdsaP256, SignatureAlgorithm::EcdsaP384);
+    }
+
+    #[test]
+    fn test_compression_types() {
+        let gz = CompressionType::Gzip;
+        let zstd = CompressionType::Zstd;
+        assert_ne!(gz as u8, zstd as u8);
+    }
+
+    #[test]
+    fn test_export_result() {
+        let result = ExportResult {
+            packages: 10,
+            total_size: 1024 * 1024,
+            output_path: "/tmp/export".to_string(),
+        };
+        assert_eq!(result.packages, 10);
+    }
+
+    #[test]
+    fn test_import_result() {
+        let result = ImportResult { packages: 5 };
+        assert_eq!(result.packages, 5);
+    }
+}

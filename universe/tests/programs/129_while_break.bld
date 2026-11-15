@@ -1,0 +1,21 @@
+fn main() {
+    let mut a = 0;
+    while a < 100 {
+        a = a + 1;
+        if a == 5 {
+            break;
+        }
+    }
+    println!("a = {}", a);
+
+    let mut b = 0;
+    while b < 100 {
+        b = b + 1;
+        if b == 3 {
+            break;
+        }
+    }
+    println!("b = {}", b);
+
+    println!("done");
+}

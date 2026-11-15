@@ -1,0 +1,2015 @@
+// ============================================================================
+// BUILD UNIVERSE - Foundation Compression Module
+// Copyright 2024-2025 Zain Dana Harper. All Rights Reserved.
+// Proprietary and confidential. Unauthorized copying, distribution,
+// or modification is strictly prohibited.
+// ============================================================================
+
+//! Compression and decompression algorithms.
+//!
+//! This module provides implementations of common compression algorithms
+//! including Deflate, Gzip, Zlib, LZ4, and Zstandard.
+
+use foundation::io::{Read, Write, BufReader, BufWriter};
+use foundation::collections::{Vec, HashMap};
+
+// ============================================================================
+// Compression Level
+// ============================================================================
+
+/// Compression level controlling speed vs ratio tradeoff.
+pub enum CompressionLevel {
+    /// No compression, just store.
+    None,
+    /// Fastest compression, lowest ratio.
+    Fast,
+    /// Balanced speed and ratio.
+    Default,
+    /// Best compression ratio, slowest.
+    Best,
+    /// Custom level (0-9 for most algorithms).
+    Custom(u32),
+}
+
+impl CompressionLevel {
+    /// Convert to numeric level for deflate-based algorithms.
+    pub fn to_deflate_level(self: &Self) -> u32 {
+        match self {
+            CompressionLevel::None => 0,
+            CompressionLevel::Fast => 1,
+            CompressionLevel::Default => 6,
+            CompressionLevel::Best => 9,
+            CompressionLevel::Custom(n) => *n.min(&9),
+        }
+    }
+
+    /// Convert to LZ4 acceleration factor.
+    pub fn to_lz4_acceleration(self: &Self) -> i32 {
+        match self {
+            CompressionLevel::None => 65537,
+            CompressionLevel::Fast => 10,
+            CompressionLevel::Default => 1,
+            CompressionLevel::Best => 1,
+            CompressionLevel::Custom(n) => (10 - *n as i32).max(1),
+        }
+    }
+}
+
+// ============================================================================
+// Compression Error
+// ============================================================================
+
+/// Errors that can occur during compression/decompression.
+pub enum CompressionError {
+    /// Invalid compressed data.
+    InvalidData(String),
+    /// Checksum mismatch.
+    ChecksumMismatch { expected: u32, actual: u32 },
+    /// Buffer too small.
+    BufferTooSmall { needed: usize, available: usize },
+    /// Unsupported format or feature.
+    Unsupported(String),
+    /// I/O error during streaming.
+    IoError(String),
+    /// Dictionary error.
+    DictionaryError(String),
+}
+
+impl CompressionError {
+    pub fn description(self: &Self) -> String {
+        match self {
+            CompressionError::InvalidData(msg) => format!("Invalid data: {}", msg),
+            CompressionError::ChecksumMismatch { expected, actual } =>
+                format!("Checksum mismatch: expected {:08x}, got {:08x}", expected, actual),
+            CompressionError::BufferTooSmall { needed, available } =>
+                format!("Buffer too small: need {} bytes, have {}", needed, available),
+            CompressionError::Unsupported(msg) => format!("Unsupported: {}", msg),
+            CompressionError::IoError(msg) => format!("I/O error: {}", msg),
+            CompressionError::DictionaryError(msg) => format!("Dictionary error: {}", msg),
+        }
+    }
+}
+
+// ============================================================================
+// Deflate Algorithm
+// ============================================================================
+
+/// Deflate compression (RFC 1951).
+pub mod deflate {
+    use super::*;
+
+    /// Huffman code entry.
+    struct HuffmanCode {
+        symbol: u16,
+        bits: u8,
+        code: u16,
+    }
+
+    /// Huffman tree for decoding.
+    struct HuffmanTree {
+        codes: Vec<HuffmanCode>,
+        max_bits: u8,
+        lookup_table: Vec<i16>,
+    }
+
+    impl HuffmanTree {
+        /// Build tree from code lengths.
+        pub fn from_lengths(lengths: &[u8], max_symbol: u16) -> Self {
+            let max_bits = lengths.iter().copied().max().unwrap_or(0);
+            let mut bl_count = vec![0u16; (max_bits + 1) as usize];
+
+            // Count codes of each length
+            for &len in lengths {
+                if len > 0 {
+                    bl_count[len as usize] += 1;
+                }
+            }
+
+            // Calculate starting codes
+            let mut next_code = vec![0u16; (max_bits + 1) as usize];
+            let mut code = 0u16;
+            for bits in 1..=max_bits {
+                code = (code + bl_count[(bits - 1) as usize]) << 1;
+                next_code[bits as usize] = code;
+            }
+
+            // Assign codes to symbols
+            let mut codes = Vec::new();
+            for symbol in 0..=max_symbol {
+                let len = lengths.get(symbol as usize).copied().unwrap_or(0);
+                if len > 0 {
+                    codes.push(HuffmanCode {
+                        symbol,
+                        bits: len,
+                        code: next_code[len as usize],
+                    });
+                    next_code[len as usize] += 1;
+                }
+            }
+
+            // Build lookup table for fast decoding
+            let table_bits = max_bits.min(9);
+            let table_size = 1 << table_bits;
+            let mut lookup_table = vec![-1i16; table_size];
+
+            for entry in &codes {
+                if entry.bits <= table_bits {
+                    let pad = table_bits - entry.bits;
+                    let base = (entry.code as usize) << pad;
+                    for i in 0..(1 << pad) {
+                        lookup_table[base + i] = entry.symbol as i16;
+                    }
+                }
+            }
+
+            Self { codes, max_bits, lookup_table }
+        }
+    }
+
+    /// Bit reader for deflate stream.
+    struct BitReader<'a> {
+        data: &'a [u8],
+        pos: usize,
+        bit_pos: u8,
+        buffer: u32,
+        bits_in_buffer: u8,
+    }
+
+    impl<'a> BitReader<'a> {
+        pub fn new(data: &'a [u8]) -> Self {
+            Self {
+                data,
+                pos: 0,
+                bit_pos: 0,
+                buffer: 0,
+                bits_in_buffer: 0,
+            }
+        }
+
+        /// Read n bits (up to 16).
+        pub fn read_bits(self: &mut Self, n: u8) -> Result<u16, CompressionError> {
+            while self.bits_in_buffer < n && self.pos < self.data.len() {
+                self.buffer |= (self.data[self.pos] as u32) << self.bits_in_buffer;
+                self.bits_in_buffer += 8;
+                self.pos += 1;
+            }
+
+            if self.bits_in_buffer < n {
+                return Err(CompressionError::InvalidData("Unexpected end of stream".to_string()));
+            }
+
+            let result = (self.buffer & ((1 << n) - 1)) as u16;
+            self.buffer >>= n;
+            self.bits_in_buffer -= n;
+            Ok(result)
+        }
+
+        /// Read Huffman-coded symbol.
+        pub fn read_huffman(self: &mut Self, tree: &HuffmanTree) -> Result<u16, CompressionError> {
+            // Try lookup table first
+            let table_bits = tree.max_bits.min(9);
+            while self.bits_in_buffer < table_bits && self.pos < self.data.len() {
+                self.buffer |= (self.data[self.pos] as u32) << self.bits_in_buffer;
+                self.bits_in_buffer += 8;
+                self.pos += 1;
+            }
+
+            let peek = (self.buffer & ((1 << table_bits) - 1)) as usize;
+            let symbol = tree.lookup_table.get(peek).copied().unwrap_or(-1);
+
+            if symbol >= 0 {
+                // Find actual bit length for this symbol
+                for code in &tree.codes {
+                    if code.symbol == symbol as u16 {
+                        self.buffer >>= code.bits;
+                        self.bits_in_buffer -= code.bits;
+                        return Ok(code.symbol);
+                    }
+                }
+            }
+
+            // Slow path: bit-by-bit decoding
+            let mut code = 0u16;
+            for len in 1..=tree.max_bits {
+                code = (code << 1) | self.read_bits(1)?;
+                for entry in &tree.codes {
+                    if entry.bits == len && entry.code == code {
+                        return Ok(entry.symbol);
+                    }
+                }
+            }
+
+            Err(CompressionError::InvalidData("Invalid Huffman code".to_string()))
+        }
+
+        /// Align to byte boundary.
+        pub fn align_to_byte(self: &mut Self) {
+            let extra = self.bits_in_buffer % 8;
+            self.buffer >>= extra;
+            self.bits_in_buffer -= extra;
+        }
+    }
+
+    /// Bit writer for compression.
+    struct BitWriter {
+        data: Vec<u8>,
+        buffer: u32,
+        bits_in_buffer: u8,
+    }
+
+    impl BitWriter {
+        pub fn new() -> Self {
+            Self {
+                data: Vec::new(),
+                buffer: 0,
+                bits_in_buffer: 0,
+            }
+        }
+
+        /// Write n bits.
+        pub fn write_bits(self: &mut Self, value: u16, n: u8) {
+            self.buffer |= (value as u32) << self.bits_in_buffer;
+            self.bits_in_buffer += n;
+
+            while self.bits_in_buffer >= 8 {
+                self.data.push((self.buffer & 0xFF) as u8);
+                self.buffer >>= 8;
+                self.bits_in_buffer -= 8;
+            }
+        }
+
+        /// Write Huffman-coded symbol.
+        pub fn write_huffman(self: &mut Self, symbol: u16, tree: &HuffmanTree) {
+            for code in &tree.codes {
+                if code.symbol == symbol {
+                    // Write bits in reverse order (LSB first)
+                    let mut c = code.code;
+                    let mut reversed = 0u16;
+                    for _ in 0..code.bits {
+                        reversed = (reversed << 1) | (c & 1);
+                        c >>= 1;
+                    }
+                    self.write_bits(reversed, code.bits);
+                    return;
+                }
+            }
+        }
+
+        /// Flush remaining bits.
+        pub fn finish(mut self: Self) -> Vec<u8> {
+            if self.bits_in_buffer > 0 {
+                self.data.push((self.buffer & 0xFF) as u8);
+            }
+            self.data
+        }
+    }
+
+    /// Fixed Huffman codes per RFC 1951.
+    fn build_fixed_literal_tree() -> HuffmanTree {
+        let mut lengths = vec![0u8; 288];
+        for i in 0..=143 { lengths[i] = 8; }
+        for i in 144..=255 { lengths[i] = 9; }
+        for i in 256..=279 { lengths[i] = 7; }
+        for i in 280..=287 { lengths[i] = 8; }
+        HuffmanTree::from_lengths(&lengths, 287)
+    }
+
+    fn build_fixed_distance_tree() -> HuffmanTree {
+        let lengths = vec![5u8; 32];
+        HuffmanTree::from_lengths(&lengths, 31)
+    }
+
+    /// LZ77 match finder using hash chains.
+    struct MatchFinder {
+        window_size: usize,
+        hash_bits: u32,
+        hash_table: Vec<i32>,
+        prev_chain: Vec<i32>,
+        window: Vec<u8>,
+        pos: usize,
+    }
+
+    impl MatchFinder {
+        pub fn new(window_size: usize) -> Self {
+            let hash_bits = 15;
+            Self {
+                window_size,
+                hash_bits,
+                hash_table: vec![-1; 1 << hash_bits],
+                prev_chain: vec![-1; window_size],
+                window: Vec::new(),
+                pos: 0,
+            }
+        }
+
+        /// Calculate hash of 3 bytes.
+        fn hash(self: &Self, data: &[u8]) -> usize {
+            if data.len() < 3 { return 0; }
+            let h = ((data[0] as u32) << 10) ^ ((data[1] as u32) << 5) ^ (data[2] as u32);
+            (h & ((1 << self.hash_bits) - 1)) as usize
+        }
+
+        /// Find best match at current position.
+        pub fn find_match(self: &mut Self, data: &[u8], pos: usize, level: u32) -> Option<(u16, u16)> {
+            if pos + 3 > data.len() { return None; }
+
+            let hash = self.hash(&data[pos..]);
+            let mut match_pos = self.hash_table[hash];
+
+            // Update hash chain
+            let chain_pos = pos % self.window_size;
+            self.prev_chain[chain_pos] = match_pos;
+            self.hash_table[hash] = pos as i32;
+
+            let min_match = 3;
+            let max_match = 258.min(data.len() - pos);
+            let max_chain = match level {
+                0..=3 => 4,
+                4..=5 => 16,
+                6..=7 => 64,
+                _ => 256,
+            };
+
+            let mut best_len = 0u16;
+            let mut best_dist = 0u16;
+            let mut chain_count = 0;
+
+            while match_pos >= 0 && chain_count < max_chain {
+                let dist = pos as i32 - match_pos;
+                if dist > self.window_size as i32 || dist <= 0 {
+                    break;
+                }
+
+                let match_start = match_pos as usize;
+                let mut len = 0usize;
+
+                // Compare bytes
+                while len < max_match && data[pos + len] == data[match_start + len] {
+                    len += 1;
+                }
+
+                if len >= min_match && len as u16 > best_len {
+                    best_len = len as u16;
+                    best_dist = dist as u16;
+                    if len == max_match { break; }
+                }
+
+                match_pos = self.prev_chain[match_start % self.window_size];
+                chain_count += 1;
+            }
+
+            if best_len >= min_match as u16 {
+                Some((best_len, best_dist))
+            } else {
+                None
+            }
+        }
+    }
+
+    /// Compress data using deflate algorithm.
+    pub fn compress(data: &[u8], level: CompressionLevel) -> Result<Vec<u8>, CompressionError> {
+        let level_num = level.to_deflate_level();
+
+        if level_num == 0 {
+            // Store only (no compression)
+            return compress_stored(data);
+        }
+
+        let mut writer = BitWriter::new();
+        let lit_tree = build_fixed_literal_tree();
+        let dist_tree = build_fixed_distance_tree();
+
+        // Write final block, fixed Huffman
+        writer.write_bits(1, 1);  // BFINAL = 1
+        writer.write_bits(1, 2);  // BTYPE = 01 (fixed Huffman)
+
+        let mut finder = MatchFinder::new(32768);
+        let mut pos = 0;
+
+        while pos < data.len() {
+            if let Some((length, distance)) = finder.find_match(data, pos, level_num) {
+                // Encode length
+                let (len_code, len_extra_bits, len_extra_val) = encode_length(length);
+                writer.write_huffman(len_code, &lit_tree);
+                if len_extra_bits > 0 {
+                    writer.write_bits(len_extra_val, len_extra_bits);
+                }
+
+                // Encode distance
+                let (dist_code, dist_extra_bits, dist_extra_val) = encode_distance(distance);
+                writer.write_huffman(dist_code, &dist_tree);
+                if dist_extra_bits > 0 {
+                    writer.write_bits(dist_extra_val, dist_extra_bits);
+                }
+
+                pos += length as usize;
+            } else {
+                // Literal byte
+                writer.write_huffman(data[pos] as u16, &lit_tree);
+                pos += 1;
+            }
+        }
+
+        // End of block
+        writer.write_huffman(256, &lit_tree);
+
+        Ok(writer.finish())
+    }
+
+    /// Store data without compression.
+    fn compress_stored(data: &[u8]) -> Result<Vec<u8>, CompressionError> {
+        let mut result = Vec::new();
+        let mut pos = 0;
+
+        while pos < data.len() {
+            let block_size = (data.len() - pos).min(65535);
+            let is_final = pos + block_size >= data.len();
+
+            // Block header
+            result.push(if is_final { 0x01 } else { 0x00 });
+            result.push((block_size & 0xFF) as u8);
+            result.push((block_size >> 8) as u8);
+            result.push((!block_size & 0xFF) as u8);
+            result.push((!block_size >> 8) as u8);
+
+            result.extend_from_slice(&data[pos..pos + block_size]);
+            pos += block_size;
+        }
+
+        Ok(result)
+    }
+
+    /// Encode length to code and extra bits.
+    fn encode_length(length: u16) -> (u16, u8, u16) {
+        match length {
+            3 => (257, 0, 0),
+            4 => (258, 0, 0),
+            5 => (259, 0, 0),
+            6 => (260, 0, 0),
+            7 => (261, 0, 0),
+            8 => (262, 0, 0),
+            9 => (263, 0, 0),
+            10 => (264, 0, 0),
+            11..=12 => (265, 1, length - 11),
+            13..=14 => (266, 1, length - 13),
+            15..=16 => (267, 1, length - 15),
+            17..=18 => (268, 1, length - 17),
+            19..=22 => (269, 2, length - 19),
+            23..=26 => (270, 2, length - 23),
+            27..=30 => (271, 2, length - 27),
+            31..=34 => (272, 2, length - 31),
+            35..=42 => (273, 3, length - 35),
+            43..=50 => (274, 3, length - 43),
+            51..=58 => (275, 3, length - 51),
+            59..=66 => (276, 3, length - 59),
+            67..=82 => (277, 4, length - 67),
+            83..=98 => (278, 4, length - 83),
+            99..=114 => (279, 4, length - 99),
+            115..=130 => (280, 4, length - 115),
+            131..=162 => (281, 5, length - 131),
+            163..=194 => (282, 5, length - 163),
+            195..=226 => (283, 5, length - 195),
+            227..=257 => (284, 5, length - 227),
+            258 => (285, 0, 0),
+            _ => (257, 0, 0),
+        }
+    }
+
+    /// Encode distance to code and extra bits.
+    fn encode_distance(distance: u16) -> (u16, u8, u16) {
+        match distance {
+            1 => (0, 0, 0),
+            2 => (1, 0, 0),
+            3 => (2, 0, 0),
+            4 => (3, 0, 0),
+            5..=6 => (4, 1, distance - 5),
+            7..=8 => (5, 1, distance - 7),
+            9..=12 => (6, 2, distance - 9),
+            13..=16 => (7, 2, distance - 13),
+            17..=24 => (8, 3, distance - 17),
+            25..=32 => (9, 3, distance - 25),
+            33..=48 => (10, 4, distance - 33),
+            49..=64 => (11, 4, distance - 49),
+            65..=96 => (12, 5, distance - 65),
+            97..=128 => (13, 5, distance - 97),
+            129..=192 => (14, 6, distance - 129),
+            193..=256 => (15, 6, distance - 193),
+            257..=384 => (16, 7, distance - 257),
+            385..=512 => (17, 7, distance - 385),
+            513..=768 => (18, 8, distance - 513),
+            769..=1024 => (19, 8, distance - 769),
+            1025..=1536 => (20, 9, distance - 1025),
+            1537..=2048 => (21, 9, distance - 1537),
+            2049..=3072 => (22, 10, distance - 2049),
+            3073..=4096 => (23, 10, distance - 3073),
+            4097..=6144 => (24, 11, distance - 4097),
+            6145..=8192 => (25, 11, distance - 6145),
+            8193..=12288 => (26, 12, distance - 8193),
+            12289..=16384 => (27, 12, distance - 12289),
+            16385..=24576 => (28, 13, distance - 16385),
+            24577..=32768 => (29, 13, distance - 24577),
+            _ => (0, 0, 0),
+        }
+    }
+
+    /// Decode length from code and extra bits.
+    fn decode_length(code: u16, extra: u16) -> u16 {
+        match code {
+            257 => 3,
+            258 => 4,
+            259 => 5,
+            260 => 6,
+            261 => 7,
+            262 => 8,
+            263 => 9,
+            264 => 10,
+            265 => 11 + extra,
+            266 => 13 + extra,
+            267 => 15 + extra,
+            268 => 17 + extra,
+            269 => 19 + extra,
+            270 => 23 + extra,
+            271 => 27 + extra,
+            272 => 31 + extra,
+            273 => 35 + extra,
+            274 => 43 + extra,
+            275 => 51 + extra,
+            276 => 59 + extra,
+            277 => 67 + extra,
+            278 => 83 + extra,
+            279 => 99 + extra,
+            280 => 115 + extra,
+            281 => 131 + extra,
+            282 => 163 + extra,
+            283 => 195 + extra,
+            284 => 227 + extra,
+            285 => 258,
+            _ => 0,
+        }
+    }
+
+    /// Decode distance from code and extra bits.
+    fn decode_distance(code: u16, extra: u16) -> u16 {
+        let base_distances = [
+            1, 2, 3, 4, 5, 7, 9, 13, 17, 25, 33, 49, 65, 97, 129, 193,
+            257, 385, 513, 769, 1025, 1537, 2049, 3073, 4097, 6145,
+            8193, 12289, 16385, 24577
+        ];
+        base_distances.get(code as usize).copied().unwrap_or(1) + extra
+    }
+
+    /// Decompress deflate data.
+    pub fn decompress(data: &[u8]) -> Result<Vec<u8>, CompressionError> {
+        let mut reader = BitReader::new(data);
+        let mut output = Vec::new();
+
+        loop {
+            let bfinal = reader.read_bits(1)?;
+            let btype = reader.read_bits(2)?;
+
+            match btype {
+                0 => {
+                    // Stored block
+                    reader.align_to_byte();
+                    let len = reader.read_bits(16)? as usize;
+                    let nlen = reader.read_bits(16)?;
+
+                    if len != (!nlen & 0xFFFF) as usize {
+                        return Err(CompressionError::InvalidData("Invalid stored block length".to_string()));
+                    }
+
+                    for _ in 0..len {
+                        output.push(reader.read_bits(8)? as u8);
+                    }
+                }
+                1 => {
+                    // Fixed Huffman
+                    let lit_tree = build_fixed_literal_tree();
+                    let dist_tree = build_fixed_distance_tree();
+                    decompress_block(&mut reader, &lit_tree, &dist_tree, &mut output)?;
+                }
+                2 => {
+                    // Dynamic Huffman
+                    let (lit_tree, dist_tree) = read_dynamic_trees(&mut reader)?;
+                    decompress_block(&mut reader, &lit_tree, &dist_tree, &mut output)?;
+                }
+                3 => {
+                    return Err(CompressionError::InvalidData("Invalid block type 3".to_string()));
+                }
+                _ => unreachable!(),
+            }
+
+            if bfinal == 1 {
+                break;
+            }
+        }
+
+        Ok(output)
+    }
+
+    /// Decompress a single block.
+    fn decompress_block(
+        reader: &mut BitReader,
+        lit_tree: &HuffmanTree,
+        dist_tree: &HuffmanTree,
+        output: &mut Vec<u8>,
+    ) -> Result<(), CompressionError> {
+        loop {
+            let symbol = reader.read_huffman(lit_tree)?;
+
+            if symbol < 256 {
+                // Literal
+                output.push(symbol as u8);
+            } else if symbol == 256 {
+                // End of block
+                break;
+            } else {
+                // Length/distance pair
+                let len_extra_bits = match symbol {
+                    257..=264 => 0,
+                    265..=268 => 1,
+                    269..=272 => 2,
+                    273..=276 => 3,
+                    277..=280 => 4,
+                    281..=284 => 5,
+                    285 => 0,
+                    _ => return Err(CompressionError::InvalidData("Invalid length code".to_string())),
+                };
+                let len_extra = if len_extra_bits > 0 { reader.read_bits(len_extra_bits)? } else { 0 };
+                let length = decode_length(symbol, len_extra);
+
+                let dist_code = reader.read_huffman(dist_tree)?;
+                let dist_extra_bits = match dist_code {
+                    0..=3 => 0,
+                    4..=5 => 1,
+                    6..=7 => 2,
+                    8..=9 => 3,
+                    10..=11 => 4,
+                    12..=13 => 5,
+                    14..=15 => 6,
+                    16..=17 => 7,
+                    18..=19 => 8,
+                    20..=21 => 9,
+                    22..=23 => 10,
+                    24..=25 => 11,
+                    26..=27 => 12,
+                    28..=29 => 13,
+                    _ => return Err(CompressionError::InvalidData("Invalid distance code".to_string())),
+                };
+                let dist_extra = if dist_extra_bits > 0 { reader.read_bits(dist_extra_bits)? } else { 0 };
+                let distance = decode_distance(dist_code, dist_extra);
+
+                // Copy from history
+                let start = output.len().saturating_sub(distance as usize);
+                for i in 0..length as usize {
+                    let byte = output[start + (i % distance as usize)];
+                    output.push(byte);
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Read dynamic Huffman trees.
+    fn read_dynamic_trees(reader: &mut BitReader) -> Result<(HuffmanTree, HuffmanTree), CompressionError> {
+        let hlit = reader.read_bits(5)? as usize + 257;
+        let hdist = reader.read_bits(5)? as usize + 1;
+        let hclen = reader.read_bits(4)? as usize + 4;
+
+        // Code length alphabet order
+        let order = [16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15];
+        let mut code_lengths = vec![0u8; 19];
+
+        for i in 0..hclen {
+            code_lengths[order[i]] = reader.read_bits(3)? as u8;
+        }
+
+        let code_tree = HuffmanTree::from_lengths(&code_lengths, 18);
+
+        // Read literal/length and distance code lengths
+        let mut lengths = Vec::new();
+        while lengths.len() < hlit + hdist {
+            let symbol = reader.read_huffman(&code_tree)?;
+            match symbol {
+                0..=15 => lengths.push(symbol as u8),
+                16 => {
+                    let repeat = reader.read_bits(2)? as usize + 3;
+                    let last = *lengths.last().unwrap_or(&0);
+                    for _ in 0..repeat { lengths.push(last); }
+                }
+                17 => {
+                    let repeat = reader.read_bits(3)? as usize + 3;
+                    for _ in 0..repeat { lengths.push(0); }
+                }
+                18 => {
+                    let repeat = reader.read_bits(7)? as usize + 11;
+                    for _ in 0..repeat { lengths.push(0); }
+                }
+                _ => return Err(CompressionError::InvalidData("Invalid code length symbol".to_string())),
+            }
+        }
+
+        let lit_tree = HuffmanTree::from_lengths(&lengths[..hlit], (hlit - 1) as u16);
+        let dist_tree = HuffmanTree::from_lengths(&lengths[hlit..], (hdist - 1) as u16);
+
+        Ok((lit_tree, dist_tree))
+    }
+}
+
+// ============================================================================
+// Gzip Format (RFC 1952)
+// ============================================================================
+
+/// Gzip compression format.
+pub mod gzip {
+    use super::*;
+
+    /// Gzip header flags.
+    const FTEXT: u8 = 0x01;
+    const FHCRC: u8 = 0x02;
+    const FEXTRA: u8 = 0x04;
+    const FNAME: u8 = 0x08;
+    const FCOMMENT: u8 = 0x10;
+
+    /// Gzip header information.
+    pub struct GzipHeader {
+        pub filename: Option<String>,
+        pub comment: Option<String>,
+        pub mtime: u32,
+        pub os: u8,
+        pub is_text: bool,
+    }
+
+    impl GzipHeader {
+        pub fn new() -> Self {
+            Self {
+                filename: None,
+                comment: None,
+                mtime: 0,
+                os: 255, // Unknown
+                is_text: false,
+            }
+        }
+    }
+
+    /// Compress data to gzip format.
+    pub fn compress(data: &[u8], level: CompressionLevel) -> Result<Vec<u8>, CompressionError> {
+        compress_with_header(data, level, GzipHeader::new())
+    }
+
+    /// Compress with custom header.
+    pub fn compress_with_header(data: &[u8], level: CompressionLevel, header: GzipHeader) -> Result<Vec<u8>, CompressionError> {
+        let mut result = Vec::new();
+
+        // Magic number
+        result.push(0x1f);
+        result.push(0x8b);
+
+        // Compression method (deflate)
+        result.push(8);
+
+        // Flags
+        let mut flags = 0u8;
+        if header.is_text { flags |= FTEXT; }
+        if header.filename.is_some() { flags |= FNAME; }
+        if header.comment.is_some() { flags |= FCOMMENT; }
+        result.push(flags);
+
+        // Modification time
+        result.extend_from_slice(&header.mtime.to_le_bytes());
+
+        // Extra flags based on compression level
+        let xfl = match level {
+            CompressionLevel::Best => 2,
+            CompressionLevel::Fast => 4,
+            _ => 0,
+        };
+        result.push(xfl);
+
+        // OS
+        result.push(header.os);
+
+        // Optional filename
+        if let Some(ref name) = header.filename {
+            result.extend_from_slice(name.as_bytes());
+            result.push(0);
+        }
+
+        // Optional comment
+        if let Some(ref comment) = header.comment {
+            result.extend_from_slice(comment.as_bytes());
+            result.push(0);
+        }
+
+        // Compressed data
+        let compressed = deflate::compress(data, level)?;
+        result.extend_from_slice(&compressed);
+
+        // CRC32
+        let crc = crc32(data);
+        result.extend_from_slice(&crc.to_le_bytes());
+
+        // Original size
+        let isize = (data.len() as u32).to_le_bytes();
+        result.extend_from_slice(&isize);
+
+        Ok(result)
+    }
+
+    /// Decompress gzip data.
+    pub fn decompress(data: &[u8]) -> Result<Vec<u8>, CompressionError> {
+        let (_, decompressed) = decompress_with_header(data)?;
+        Ok(decompressed)
+    }
+
+    /// Decompress and return header.
+    pub fn decompress_with_header(data: &[u8]) -> Result<(GzipHeader, Vec<u8>), CompressionError> {
+        if data.len() < 10 {
+            return Err(CompressionError::InvalidData("Data too short for gzip".to_string()));
+        }
+
+        // Check magic number
+        if data[0] != 0x1f || data[1] != 0x8b {
+            return Err(CompressionError::InvalidData("Invalid gzip magic number".to_string()));
+        }
+
+        // Check compression method
+        if data[2] != 8 {
+            return Err(CompressionError::Unsupported("Only deflate compression supported".to_string()));
+        }
+
+        let flags = data[3];
+        let mtime = u32::from_le_bytes([data[4], data[5], data[6], data[7]]);
+        let _xfl = data[8];
+        let os = data[9];
+
+        let mut pos = 10;
+
+        // Skip extra field
+        if flags & FEXTRA != 0 {
+            if pos + 2 > data.len() {
+                return Err(CompressionError::InvalidData("Truncated extra field".to_string()));
+            }
+            let xlen = u16::from_le_bytes([data[pos], data[pos + 1]]) as usize;
+            pos += 2 + xlen;
+        }
+
+        // Read filename
+        let filename = if flags & FNAME != 0 {
+            let start = pos;
+            while pos < data.len() && data[pos] != 0 {
+                pos += 1;
+            }
+            let name = String::from_utf8_lossy(&data[start..pos]).to_string();
+            pos += 1; // Skip null terminator
+            Some(name)
+        } else {
+            None
+        };
+
+        // Read comment
+        let comment = if flags & FCOMMENT != 0 {
+            let start = pos;
+            while pos < data.len() && data[pos] != 0 {
+                pos += 1;
+            }
+            let cmt = String::from_utf8_lossy(&data[start..pos]).to_string();
+            pos += 1;
+            Some(cmt)
+        } else {
+            None
+        };
+
+        // Skip header CRC
+        if flags & FHCRC != 0 {
+            pos += 2;
+        }
+
+        // Decompress
+        if pos + 8 > data.len() {
+            return Err(CompressionError::InvalidData("Missing trailer".to_string()));
+        }
+
+        let compressed = &data[pos..data.len() - 8];
+        let decompressed = deflate::decompress(compressed)?;
+
+        // Verify CRC32
+        let trailer_pos = data.len() - 8;
+        let expected_crc = u32::from_le_bytes([
+            data[trailer_pos], data[trailer_pos + 1],
+            data[trailer_pos + 2], data[trailer_pos + 3]
+        ]);
+        let actual_crc = crc32(&decompressed);
+
+        if expected_crc != actual_crc {
+            return Err(CompressionError::ChecksumMismatch {
+                expected: expected_crc,
+                actual: actual_crc,
+            });
+        }
+
+        // Verify size
+        let expected_size = u32::from_le_bytes([
+            data[trailer_pos + 4], data[trailer_pos + 5],
+            data[trailer_pos + 6], data[trailer_pos + 7]
+        ]) as usize;
+
+        if expected_size != decompressed.len() & 0xFFFFFFFF {
+            return Err(CompressionError::InvalidData("Size mismatch".to_string()));
+        }
+
+        let header = GzipHeader {
+            filename,
+            comment,
+            mtime,
+            os,
+            is_text: flags & FTEXT != 0,
+        };
+
+        Ok((header, decompressed))
+    }
+}
+
+// ============================================================================
+// Zlib Format (RFC 1950)
+// ============================================================================
+
+/// Zlib compression format.
+pub mod zlib {
+    use super::*;
+
+    /// Compress data to zlib format.
+    pub fn compress(data: &[u8], level: CompressionLevel) -> Result<Vec<u8>, CompressionError> {
+        let mut result = Vec::new();
+
+        // CMF byte
+        let cmf = 0x78; // Deflate, 32K window
+        result.push(cmf);
+
+        // FLG byte
+        let flevel = match level {
+            CompressionLevel::Fast => 0,
+            CompressionLevel::Default => 2,
+            CompressionLevel::Best => 3,
+            _ => 1,
+        };
+        let mut flg = (flevel << 6) as u8;
+        // Adjust for checksum
+        let check = ((cmf as u16 * 256 + flg as u16) % 31) as u8;
+        if check != 0 {
+            flg += 31 - check;
+        }
+        result.push(flg);
+
+        // Compressed data
+        let compressed = deflate::compress(data, level)?;
+        result.extend_from_slice(&compressed);
+
+        // Adler-32 checksum
+        let checksum = adler32(data);
+        result.extend_from_slice(&checksum.to_be_bytes());
+
+        Ok(result)
+    }
+
+    /// Decompress zlib data.
+    pub fn decompress(data: &[u8]) -> Result<Vec<u8>, CompressionError> {
+        if data.len() < 6 {
+            return Err(CompressionError::InvalidData("Data too short for zlib".to_string()));
+        }
+
+        let cmf = data[0];
+        let flg = data[1];
+
+        // Verify checksum
+        if (cmf as u16 * 256 + flg as u16) % 31 != 0 {
+            return Err(CompressionError::InvalidData("Invalid zlib header checksum".to_string()));
+        }
+
+        // Check compression method
+        if cmf & 0x0F != 8 {
+            return Err(CompressionError::Unsupported("Only deflate compression supported".to_string()));
+        }
+
+        // Check for preset dictionary
+        if flg & 0x20 != 0 {
+            return Err(CompressionError::Unsupported("Preset dictionary not supported".to_string()));
+        }
+
+        // Decompress
+        let compressed = &data[2..data.len() - 4];
+        let decompressed = deflate::decompress(compressed)?;
+
+        // Verify Adler-32
+        let trailer_pos = data.len() - 4;
+        let expected = u32::from_be_bytes([
+            data[trailer_pos], data[trailer_pos + 1],
+            data[trailer_pos + 2], data[trailer_pos + 3]
+        ]);
+        let actual = adler32(&decompressed);
+
+        if expected != actual {
+            return Err(CompressionError::ChecksumMismatch { expected, actual });
+        }
+
+        Ok(decompressed)
+    }
+}
+
+// ============================================================================
+// LZ4 Compression
+// ============================================================================
+
+/// LZ4 compression algorithm.
+pub mod lz4 {
+    use super::*;
+
+    /// Compress data using LZ4.
+    pub fn compress(data: &[u8]) -> Result<Vec<u8>, CompressionError> {
+        compress_with_level(data, CompressionLevel::Default)
+    }
+
+    /// Compress with specified level.
+    pub fn compress_with_level(data: &[u8], level: CompressionLevel) -> Result<Vec<u8>, CompressionError> {
+        let acceleration = level.to_lz4_acceleration();
+        let mut result = Vec::with_capacity(compress_bound(data.len()));
+
+        let hash_bits = 16;
+        let hash_size = 1 << hash_bits;
+        let mut hash_table = vec![0i32; hash_size];
+
+        let mut anchor = 0;
+        let mut pos = 0;
+
+        while pos + 4 < data.len() {
+            // Find match
+            let h = hash4(&data[pos..]) & (hash_size - 1);
+            let match_pos = hash_table[h] as usize;
+            hash_table[h] = pos as i32;
+
+            let can_match = match_pos < pos
+                && pos - match_pos <= 65535
+                && data[match_pos..].starts_with(&data[pos..pos + 4]);
+
+            if can_match {
+                // Encode literals
+                let lit_len = pos - anchor;
+                let (token_idx, offset) = encode_sequence(&mut result, lit_len, &data[anchor..pos]);
+
+                // Find match length
+                let mut match_len = 4;
+                while pos + match_len < data.len()
+                    && match_pos + match_len < pos
+                    && data[pos + match_len] == data[match_pos + match_len]
+                {
+                    match_len += 1;
+                }
+
+                // Encode match
+                result.extend_from_slice(&((pos - match_pos) as u16).to_le_bytes());
+
+                // Update token with match length
+                let min_match = 4;
+                let extra_match = match_len - min_match;
+                if extra_match < 15 {
+                    result[token_idx] |= extra_match as u8;
+                } else {
+                    result[token_idx] |= 15;
+                    encode_length(&mut result, extra_match - 15);
+                }
+
+                pos += match_len;
+                anchor = pos;
+            } else {
+                pos += 1 + (pos - anchor) / (128 >> acceleration.max(1));
+            }
+        }
+
+        // Encode remaining literals
+        let remaining = data.len() - anchor;
+        if remaining > 0 {
+            let token = if remaining >= 15 { 0xF0 } else { (remaining as u8) << 4 };
+            result.push(token);
+            if remaining >= 15 {
+                encode_length(&mut result, remaining - 15);
+            }
+            result.extend_from_slice(&data[anchor..]);
+        }
+
+        Ok(result)
+    }
+
+    /// Calculate hash of 4 bytes.
+    fn hash4(data: &[u8]) -> usize {
+        let v = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
+        ((v.wrapping_mul(2654435761)) >> 16) as usize
+    }
+
+    /// Encode a sequence (literals + match).
+    fn encode_sequence(output: &mut Vec<u8>, lit_len: usize, literals: &[u8]) -> (usize, usize) {
+        let token_idx = output.len();
+
+        let token = if lit_len >= 15 { 0xF0 } else { (lit_len as u8) << 4 };
+        output.push(token);
+
+        if lit_len >= 15 {
+            encode_length(output, lit_len - 15);
+        }
+
+        output.extend_from_slice(literals);
+
+        (token_idx, 0)
+    }
+
+    /// Encode variable length.
+    fn encode_length(output: &mut Vec<u8>, mut len: usize) {
+        while len >= 255 {
+            output.push(255);
+            len -= 255;
+        }
+        output.push(len as u8);
+    }
+
+    /// Calculate compressed size bound.
+    pub fn compress_bound(input_size: usize) -> usize {
+        input_size + (input_size / 255) + 16
+    }
+
+    /// Decompress LZ4 data.
+    pub fn decompress(data: &[u8], max_output_size: usize) -> Result<Vec<u8>, CompressionError> {
+        let mut output = Vec::with_capacity(max_output_size.min(data.len() * 4));
+        let mut pos = 0;
+
+        while pos < data.len() {
+            let token = data[pos];
+            pos += 1;
+
+            // Decode literal length
+            let mut lit_len = ((token >> 4) & 0x0F) as usize;
+            if lit_len == 15 {
+                loop {
+                    if pos >= data.len() {
+                        return Err(CompressionError::InvalidData("Unexpected end of data".to_string()));
+                    }
+                    let extra = data[pos] as usize;
+                    pos += 1;
+                    lit_len += extra;
+                    if extra < 255 { break; }
+                }
+            }
+
+            // Copy literals
+            if pos + lit_len > data.len() {
+                return Err(CompressionError::InvalidData("Literal overflow".to_string()));
+            }
+            output.extend_from_slice(&data[pos..pos + lit_len]);
+            pos += lit_len;
+
+            if pos >= data.len() {
+                break; // End of block
+            }
+
+            // Decode offset
+            if pos + 2 > data.len() {
+                return Err(CompressionError::InvalidData("Offset overflow".to_string()));
+            }
+            let offset = u16::from_le_bytes([data[pos], data[pos + 1]]) as usize;
+            pos += 2;
+
+            if offset == 0 || offset > output.len() {
+                return Err(CompressionError::InvalidData("Invalid offset".to_string()));
+            }
+
+            // Decode match length
+            let mut match_len = (token & 0x0F) as usize + 4;
+            if (token & 0x0F) == 15 {
+                loop {
+                    if pos >= data.len() {
+                        return Err(CompressionError::InvalidData("Match length overflow".to_string()));
+                    }
+                    let extra = data[pos] as usize;
+                    pos += 1;
+                    match_len += extra;
+                    if extra < 255 { break; }
+                }
+            }
+
+            // Copy match
+            if output.len() + match_len > max_output_size {
+                return Err(CompressionError::BufferTooSmall {
+                    needed: output.len() + match_len,
+                    available: max_output_size,
+                });
+            }
+
+            let start = output.len() - offset;
+            for i in 0..match_len {
+                let byte = output[start + (i % offset)];
+                output.push(byte);
+            }
+        }
+
+        Ok(output)
+    }
+
+    /// LZ4 frame format (with header).
+    pub mod frame {
+        use super::*;
+
+        const MAGIC: u32 = 0x184D2204;
+
+        /// Compress with LZ4 frame format.
+        pub fn compress(data: &[u8]) -> Result<Vec<u8>, CompressionError> {
+            let mut result = Vec::new();
+
+            // Magic number
+            result.extend_from_slice(&MAGIC.to_le_bytes());
+
+            // Frame descriptor
+            let flg = 0x64; // Version 01, block independence, no checksum
+            let bd = 0x40;  // Max block size 64KB
+            result.push(flg);
+            result.push(bd);
+
+            // Header checksum (xxHash of descriptor, bits 8-15)
+            let header_hash = xxhash32(&result[4..6], 0);
+            result.push((header_hash >> 8) as u8);
+
+            // Compress in blocks
+            let block_size = 65536;
+            let mut pos = 0;
+
+            while pos < data.len() {
+                let end = (pos + block_size).min(data.len());
+                let block = &data[pos..end];
+
+                let compressed = super::compress(block)?;
+
+                if compressed.len() < block.len() {
+                    // Compressed block
+                    let block_len = compressed.len() as u32;
+                    result.extend_from_slice(&block_len.to_le_bytes());
+                    result.extend_from_slice(&compressed);
+                } else {
+                    // Uncompressed block
+                    let block_len = (block.len() as u32) | 0x80000000;
+                    result.extend_from_slice(&block_len.to_le_bytes());
+                    result.extend_from_slice(block);
+                }
+
+                pos = end;
+            }
+
+            // End mark
+            result.extend_from_slice(&0u32.to_le_bytes());
+
+            Ok(result)
+        }
+
+        /// Decompress LZ4 frame.
+        pub fn decompress(data: &[u8]) -> Result<Vec<u8>, CompressionError> {
+            if data.len() < 7 {
+                return Err(CompressionError::InvalidData("Frame too short".to_string()));
+            }
+
+            let magic = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
+            if magic != MAGIC {
+                return Err(CompressionError::InvalidData("Invalid LZ4 frame magic".to_string()));
+            }
+
+            let _flg = data[4];
+            let bd = data[5];
+            let _hc = data[6];
+
+            let max_block_size = match (bd >> 4) & 0x07 {
+                4 => 65536,
+                5 => 262144,
+                6 => 1048576,
+                7 => 4194304,
+                _ => 65536,
+            };
+
+            let mut output = Vec::new();
+            let mut pos = 7;
+
+            loop {
+                if pos + 4 > data.len() {
+                    return Err(CompressionError::InvalidData("Unexpected end of frame".to_string()));
+                }
+
+                let block_size = u32::from_le_bytes([
+                    data[pos], data[pos + 1], data[pos + 2], data[pos + 3]
+                ]);
+                pos += 4;
+
+                if block_size == 0 {
+                    break; // End mark
+                }
+
+                let uncompressed = (block_size & 0x80000000) != 0;
+                let size = (block_size & 0x7FFFFFFF) as usize;
+
+                if pos + size > data.len() {
+                    return Err(CompressionError::InvalidData("Block overflow".to_string()));
+                }
+
+                let block = &data[pos..pos + size];
+                pos += size;
+
+                if uncompressed {
+                    output.extend_from_slice(block);
+                } else {
+                    let decompressed = super::decompress(block, max_block_size)?;
+                    output.extend_from_slice(&decompressed);
+                }
+            }
+
+            Ok(output)
+        }
+    }
+}
+
+// ============================================================================
+// Zstandard Compression
+// ============================================================================
+
+/// Zstandard (zstd) compression algorithm.
+pub mod zstd {
+    use super::*;
+
+    const MAGIC: u32 = 0xFD2FB528;
+
+    /// Compress data using Zstandard.
+    pub fn compress(data: &[u8], level: CompressionLevel) -> Result<Vec<u8>, CompressionError> {
+        let clevel = match level {
+            CompressionLevel::None => 0,
+            CompressionLevel::Fast => 1,
+            CompressionLevel::Default => 3,
+            CompressionLevel::Best => 19,
+            CompressionLevel::Custom(n) => n.min(22) as i32,
+        };
+
+        let mut result = Vec::new();
+
+        // Magic number
+        result.extend_from_slice(&MAGIC.to_le_bytes());
+
+        // Frame header
+        let fhd = 0x00; // Single segment, no checksum, no dict
+        result.push(fhd);
+
+        // Window descriptor
+        result.push(0x00);
+
+        // Frame content size (if single segment)
+        if data.len() < 256 {
+            result.push(data.len() as u8);
+        } else {
+            // Encode frame content size
+            result.extend_from_slice(&(data.len() as u64).to_le_bytes());
+        }
+
+        // Compress blocks using simplified FSE/Huffman
+        let compressed = compress_block(data, clevel)?;
+
+        // Block header
+        let block_type = if compressed.len() >= data.len() { 0 } else { 2 }; // Raw or compressed
+        let block_size = if block_type == 0 { data.len() } else { compressed.len() };
+        let last_block = true;
+
+        let header = ((block_size as u32) << 3) | ((block_type as u32) << 1) | (last_block as u32);
+        result.push((header & 0xFF) as u8);
+        result.push(((header >> 8) & 0xFF) as u8);
+        result.push(((header >> 16) & 0xFF) as u8);
+
+        if block_type == 0 {
+            result.extend_from_slice(data);
+        } else {
+            result.extend_from_slice(&compressed);
+        }
+
+        Ok(result)
+    }
+
+    /// Compress a single block.
+    fn compress_block(data: &[u8], _level: i32) -> Result<Vec<u8>, CompressionError> {
+        // Simplified compression using LZ matching
+        // Full zstd uses FSE + Huffman which is more complex
+
+        let mut output = Vec::new();
+        let mut sequences = Vec::new();
+        let mut literals = Vec::new();
+
+        let hash_bits = 14;
+        let hash_size = 1 << hash_bits;
+        let mut hash_table = vec![-1i32; hash_size];
+
+        let mut pos = 0;
+        let mut anchor = 0;
+
+        while pos + 4 < data.len() {
+            let h = hash4_zstd(&data[pos..]) & (hash_size - 1);
+            let match_pos = hash_table[h];
+            hash_table[h] = pos as i32;
+
+            if match_pos >= 0 {
+                let mp = match_pos as usize;
+                if pos > mp && pos - mp < 131072 && data[mp..].starts_with(&data[pos..pos + 4]) {
+                    // Found match
+                    let lit_len = pos - anchor;
+                    literals.extend_from_slice(&data[anchor..pos]);
+
+                    let mut match_len = 4;
+                    while pos + match_len < data.len() && mp + match_len < pos
+                        && data[pos + match_len] == data[mp + match_len]
+                    {
+                        match_len += 1;
+                    }
+
+                    sequences.push((lit_len, pos - mp, match_len));
+                    pos += match_len;
+                    anchor = pos;
+                    continue;
+                }
+            }
+
+            pos += 1;
+        }
+
+        // Remaining literals
+        literals.extend_from_slice(&data[anchor..]);
+
+        // Encode literals stream
+        output.extend_from_slice(&(literals.len() as u32).to_le_bytes()[..3]);
+        output.extend_from_slice(&literals);
+
+        // Encode sequences
+        output.extend_from_slice(&(sequences.len() as u16).to_le_bytes());
+        for (lit_len, offset, match_len) in sequences {
+            // Simplified encoding
+            output.push(lit_len.min(255) as u8);
+            output.extend_from_slice(&(offset as u16).to_le_bytes());
+            output.push(match_len.min(255) as u8);
+        }
+
+        Ok(output)
+    }
+
+    fn hash4_zstd(data: &[u8]) -> usize {
+        let v = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
+        ((v.wrapping_mul(0x9E3779B1)) >> 18) as usize
+    }
+
+    /// Decompress Zstandard data.
+    pub fn decompress(data: &[u8]) -> Result<Vec<u8>, CompressionError> {
+        if data.len() < 4 {
+            return Err(CompressionError::InvalidData("Data too short".to_string()));
+        }
+
+        let magic = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
+        if magic != MAGIC {
+            return Err(CompressionError::InvalidData("Invalid zstd magic".to_string()));
+        }
+
+        // Parse frame header
+        let fhd = data[4];
+        let single_segment = (fhd & 0x20) != 0;
+        let _content_checksum = (fhd & 0x04) != 0;
+        let fcs_size = match (fhd >> 6) & 0x03 {
+            0 => if single_segment { 1 } else { 0 },
+            1 => 2,
+            2 => 4,
+            3 => 8,
+            _ => 0,
+        };
+
+        let mut pos = 5;
+        if !single_segment {
+            pos += 1; // Skip window descriptor
+        }
+
+        let _frame_content_size = if fcs_size > 0 {
+            let bytes = &data[pos..pos + fcs_size];
+            pos += fcs_size;
+            match fcs_size {
+                1 => bytes[0] as u64,
+                2 => u16::from_le_bytes([bytes[0], bytes[1]]) as u64 + 256,
+                4 => u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as u64,
+                8 => u64::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3],
+                                        bytes[4], bytes[5], bytes[6], bytes[7]]),
+                _ => 0,
+            }
+        } else {
+            0
+        };
+
+        let mut output = Vec::new();
+
+        // Decompress blocks
+        loop {
+            if pos + 3 > data.len() {
+                break;
+            }
+
+            let header = u32::from_le_bytes([data[pos], data[pos + 1], data[pos + 2], 0]);
+            pos += 3;
+
+            let last_block = (header & 1) != 0;
+            let block_type = ((header >> 1) & 3) as u8;
+            let block_size = (header >> 3) as usize;
+
+            match block_type {
+                0 => {
+                    // Raw block
+                    output.extend_from_slice(&data[pos..pos + block_size]);
+                    pos += block_size;
+                }
+                1 => {
+                    // RLE block
+                    let byte = data[pos];
+                    pos += 1;
+                    for _ in 0..block_size {
+                        output.push(byte);
+                    }
+                }
+                2 => {
+                    // Compressed block
+                    let block = &data[pos..pos + block_size];
+                    decompress_block(block, &mut output)?;
+                    pos += block_size;
+                }
+                3 => {
+                    return Err(CompressionError::InvalidData("Reserved block type".to_string()));
+                }
+                _ => unreachable!(),
+            }
+
+            if last_block {
+                break;
+            }
+        }
+
+        Ok(output)
+    }
+
+    fn decompress_block(block: &[u8], output: &mut Vec<u8>) -> Result<(), CompressionError> {
+        if block.len() < 3 {
+            return Err(CompressionError::InvalidData("Block too short".to_string()));
+        }
+
+        // Parse literals
+        let lit_len = u32::from_le_bytes([block[0], block[1], block[2], 0]) as usize;
+        let mut pos = 3;
+
+        if pos + lit_len > block.len() {
+            return Err(CompressionError::InvalidData("Literals overflow".to_string()));
+        }
+
+        let literals = &block[pos..pos + lit_len];
+        pos += lit_len;
+
+        // Parse sequences
+        if pos + 2 > block.len() {
+            output.extend_from_slice(literals);
+            return Ok(());
+        }
+
+        let num_sequences = u16::from_le_bytes([block[pos], block[pos + 1]]) as usize;
+        pos += 2;
+
+        let mut lit_pos = 0;
+
+        for _ in 0..num_sequences {
+            if pos + 4 > block.len() {
+                break;
+            }
+
+            let lit_len = block[pos] as usize;
+            let offset = u16::from_le_bytes([block[pos + 1], block[pos + 2]]) as usize;
+            let match_len = block[pos + 3] as usize;
+            pos += 4;
+
+            // Copy literals
+            let end = (lit_pos + lit_len).min(literals.len());
+            output.extend_from_slice(&literals[lit_pos..end]);
+            lit_pos = end;
+
+            // Copy match
+            if offset > 0 && offset <= output.len() {
+                let start = output.len() - offset;
+                for i in 0..match_len {
+                    let byte = output[start + (i % offset)];
+                    output.push(byte);
+                }
+            }
+        }
+
+        // Remaining literals
+        if lit_pos < literals.len() {
+            output.extend_from_slice(&literals[lit_pos..]);
+        }
+
+        Ok(())
+    }
+}
+
+// ============================================================================
+// Checksum Functions
+// ============================================================================
+
+/// Calculate CRC32 checksum (ISO 3309).
+pub fn crc32(data: &[u8]) -> u32 {
+    const TABLE: [u32; 256] = [
+        0x00000000, 0x77073096, 0xee0e612c, 0x990951ba, 0x076dc419, 0x706af48f,
+        0xe963a535, 0x9e6495a3, 0x0edb8832, 0x79dcb8a4, 0xe0d5e91e, 0x97d2d988,
+        0x09b64c2b, 0x7eb17cbd, 0xe7b82d07, 0x90bf1d91, 0x1db71064, 0x6ab020f2,
+        0xf3b97148, 0x84be41de, 0x1adad47d, 0x6ddde4eb, 0xf4d4b551, 0x83d385c7,
+        0x136c9856, 0x646ba8c0, 0xfd62f97a, 0x8a65c9ec, 0x14015c4f, 0x63066cd9,
+        0xfa0f3d63, 0x8d080df5, 0x3b6e20c8, 0x4c69105e, 0xd56041e4, 0xa2677172,
+        0x3c03e4d1, 0x4b04d447, 0xd20d85fd, 0xa50ab56b, 0x35b5a8fa, 0x42b2986c,
+        0xdbbbc9d6, 0xacbcf940, 0x32d86ce3, 0x45df5c75, 0xdcd60dcf, 0xabd13d59,
+        0x26d930ac, 0x51de003a, 0xc8d75180, 0xbfd06116, 0x21b4f4b5, 0x56b3c423,
+        0xcfba9599, 0xb8bda50f, 0x2802b89e, 0x5f058808, 0xc60cd9b2, 0xb10be924,
+        0x2f6f7c87, 0x58684c11, 0xc1611dab, 0xb6662d3d, 0x76dc4190, 0x01db7106,
+        0x98d220bc, 0xefd5102a, 0x71b18589, 0x06b6b51f, 0x9fbfe4a5, 0xe8b8d433,
+        0x7807c9a2, 0x0f00f934, 0x9609a88e, 0xe10e9818, 0x7f6a0dbb, 0x086d3d2d,
+        0x91646c97, 0xe6635c01, 0x6b6b51f4, 0x1c6c6162, 0x856530d8, 0xf262004e,
+        0x6c0695ed, 0x1b01a57b, 0x8208f4c1, 0xf50fc457, 0x65b0d9c6, 0x12b7e950,
+        0x8bbeb8ea, 0xfcb9887c, 0x62dd1ddf, 0x15da2d49, 0x8cd37cf3, 0xfbd44c65,
+        0x4db26158, 0x3ab551ce, 0xa3bc0074, 0xd4bb30e2, 0x4adfa541, 0x3dd895d7,
+        0xa4d1c46d, 0xd3d6f4fb, 0x4369e96a, 0x346ed9fc, 0xad678846, 0xda60b8d0,
+        0x44042d73, 0x33031de5, 0xaa0a4c5f, 0xdd0d7a9b, 0x5005713c, 0x270241aa,
+        0xbe0b1010, 0xc90c2086, 0x5768b525, 0x206f85b3, 0xb966d409, 0xce61e49f,
+        0x5edef90e, 0x29d9c998, 0xb0d09822, 0xc7d7a8b4, 0x59b33d17, 0x2eb40d81,
+        0xb7bd5c3b, 0xc0ba6cad, 0xedb88320, 0x9abfb3b6, 0x03b6e20c, 0x74b1d29a,
+        0xead54739, 0x9dd277af, 0x04db2615, 0x73dc1683, 0xe3630b12, 0x94643b84,
+        0x0d6d6a3e, 0x7a6a5aa8, 0xe40ecf0b, 0x9309ff9d, 0x0a00ae27, 0x7d079eb1,
+        0xf00f9344, 0x8708a3d2, 0x1e01f268, 0x6906c2fe, 0xf762575d, 0x806567cb,
+        0x196c3671, 0x6e6b06e7, 0xfed41b76, 0x89d32be0, 0x10da7a5a, 0x67dd4acc,
+        0xf9b9df6f, 0x8ebeeff9, 0x17b7be43, 0x60b08ed5, 0xd6d6a3e8, 0xa1d1937e,
+        0x38d8c2c4, 0x4fdff252, 0xd1bb67f1, 0xa6bc5767, 0x3fb506dd, 0x48b2364b,
+        0xd80d2bda, 0xaf0a1b4c, 0x36034af6, 0x41047a60, 0xdf60efc3, 0xa867df55,
+        0x316e8eef, 0x4669be79, 0xcb61b38c, 0xbc66831a, 0x256fd2a0, 0x5268e236,
+        0xcc0c7795, 0xbb0b4703, 0x220216b9, 0x5505262f, 0xc5ba3bbe, 0xb2bd0b28,
+        0x2bb45a92, 0x5cb36a04, 0xc2d7ffa7, 0xb5d0cf31, 0x2cd99e8b, 0x5bdeae1d,
+        0x9b64c2b0, 0xec63f226, 0x756aa39c, 0x026d930a, 0x9c0906a9, 0xeb0e363f,
+        0x72076785, 0x05005713, 0x95bf4a82, 0xe2b87a14, 0x7bb12bae, 0x0cb61b38,
+        0x92d28e9b, 0xe5d5be0d, 0x7cdcefb7, 0x0bdbdf21, 0x86d3d2d4, 0xf1d4e242,
+        0x68ddb3f8, 0x1fda836e, 0x81be16cd, 0xf6b9265b, 0x6fb077e1, 0x18b74777,
+        0x88085ae6, 0xff0f6a70, 0x66063bca, 0x11010b5c, 0x8f659eff, 0xf862ae69,
+        0x616bffd3, 0x166ccf45, 0xa00ae278, 0xd70dd2ee, 0x4e048354, 0x3903b3c2,
+        0xa7672661, 0xd06016f7, 0x4969474d, 0x3e6e77db, 0xaed16a4a, 0xd9d65adc,
+        0x40df0b66, 0x37d83bf0, 0xa9bcae53, 0xdebb9ec5, 0x47b2cf7f, 0x30b5ffe9,
+        0xbdbdf21c, 0xcabac28a, 0x53b39330, 0x24b4a3a6, 0xbad03605, 0xcdd706b3,
+        0x54de5729, 0x23d967bf, 0xb3667a2e, 0xc4614ab8, 0x5d681b02, 0x2a6f2b94,
+        0xb40bbe37, 0xc30c8ea1, 0x5a05df1b, 0x2d02ef8d,
+    ];
+
+    let mut crc = !0u32;
+    for byte in data {
+        crc = TABLE[((crc ^ (*byte as u32)) & 0xFF) as usize] ^ (crc >> 8);
+    }
+    !crc
+}
+
+/// Calculate Adler-32 checksum.
+pub fn adler32(data: &[u8]) -> u32 {
+    const MOD_ADLER: u32 = 65521;
+
+    let mut a = 1u32;
+    let mut b = 0u32;
+
+    for byte in data {
+        a = (a + *byte as u32) % MOD_ADLER;
+        b = (b + a) % MOD_ADLER;
+    }
+
+    (b << 16) | a
+}
+
+/// Calculate xxHash32.
+pub fn xxhash32(data: &[u8], seed: u32) -> u32 {
+    const PRIME1: u32 = 0x9E3779B1;
+    const PRIME2: u32 = 0x85EBCA77;
+    const PRIME3: u32 = 0xC2B2AE3D;
+    const PRIME4: u32 = 0x27D4EB2F;
+    const PRIME5: u32 = 0x165667B1;
+
+    let len = data.len();
+    let mut h32: u32;
+    let mut pos = 0;
+
+    if len >= 16 {
+        let mut v1 = seed.wrapping_add(PRIME1).wrapping_add(PRIME2);
+        let mut v2 = seed.wrapping_add(PRIME2);
+        let mut v3 = seed;
+        let mut v4 = seed.wrapping_sub(PRIME1);
+
+        while pos + 16 <= len {
+            let k1 = u32::from_le_bytes([data[pos], data[pos+1], data[pos+2], data[pos+3]]);
+            v1 = v1.wrapping_add(k1.wrapping_mul(PRIME2)).rotate_left(13).wrapping_mul(PRIME1);
+            pos += 4;
+
+            let k2 = u32::from_le_bytes([data[pos], data[pos+1], data[pos+2], data[pos+3]]);
+            v2 = v2.wrapping_add(k2.wrapping_mul(PRIME2)).rotate_left(13).wrapping_mul(PRIME1);
+            pos += 4;
+
+            let k3 = u32::from_le_bytes([data[pos], data[pos+1], data[pos+2], data[pos+3]]);
+            v3 = v3.wrapping_add(k3.wrapping_mul(PRIME2)).rotate_left(13).wrapping_mul(PRIME1);
+            pos += 4;
+
+            let k4 = u32::from_le_bytes([data[pos], data[pos+1], data[pos+2], data[pos+3]]);
+            v4 = v4.wrapping_add(k4.wrapping_mul(PRIME2)).rotate_left(13).wrapping_mul(PRIME1);
+            pos += 4;
+        }
+
+        h32 = v1.rotate_left(1)
+            .wrapping_add(v2.rotate_left(7))
+            .wrapping_add(v3.rotate_left(12))
+            .wrapping_add(v4.rotate_left(18));
+    } else {
+        h32 = seed.wrapping_add(PRIME5);
+    }
+
+    h32 = h32.wrapping_add(len as u32);
+
+    while pos + 4 <= len {
+        let k = u32::from_le_bytes([data[pos], data[pos+1], data[pos+2], data[pos+3]]);
+        h32 = h32.wrapping_add(k.wrapping_mul(PRIME3)).rotate_left(17).wrapping_mul(PRIME4);
+        pos += 4;
+    }
+
+    while pos < len {
+        h32 = h32.wrapping_add((data[pos] as u32).wrapping_mul(PRIME5)).rotate_left(11).wrapping_mul(PRIME1);
+        pos += 1;
+    }
+
+    h32 ^= h32 >> 15;
+    h32 = h32.wrapping_mul(PRIME2);
+    h32 ^= h32 >> 13;
+    h32 = h32.wrapping_mul(PRIME3);
+    h32 ^= h32 >> 16;
+
+    h32
+}
+
+// ============================================================================
+// Streaming Compression
+// ============================================================================
+
+/// Streaming deflate encoder.
+pub struct DeflateEncoder<W: Write> {
+    writer: W,
+    level: CompressionLevel,
+    buffer: Vec<u8>,
+    finished: bool,
+}
+
+impl<W: Write> DeflateEncoder<W> {
+    pub fn new(writer: W, level: CompressionLevel) -> Self {
+        Self {
+            writer,
+            level,
+            buffer: Vec::new(),
+            finished: false,
+        }
+    }
+
+    /// Write data to be compressed.
+    pub fn write(self: &mut Self, data: &[u8]) -> Result<usize, CompressionError> {
+        self.buffer.extend_from_slice(data);
+        Ok(data.len())
+    }
+
+    /// Flush buffered data.
+    pub fn flush(self: &mut Self) -> Result<(), CompressionError> {
+        if self.buffer.is_empty() {
+            return Ok(());
+        }
+
+        let compressed = deflate::compress(&self.buffer, self.level.clone())?;
+        self.writer.write_all(&compressed).map_err(|e| CompressionError::IoError(e.to_string()))?;
+        self.buffer.clear();
+        Ok(())
+    }
+
+    /// Finish compression and return writer.
+    pub fn finish(mut self: Self) -> Result<W, CompressionError> {
+        self.flush()?;
+        self.finished = true;
+        Ok(self.writer)
+    }
+}
+
+/// Streaming gzip encoder.
+pub struct GzipEncoder<W: Write> {
+    writer: W,
+    level: CompressionLevel,
+    buffer: Vec<u8>,
+    header_written: bool,
+    crc: u32,
+    size: u32,
+}
+
+impl<W: Write> GzipEncoder<W> {
+    pub fn new(writer: W, level: CompressionLevel) -> Self {
+        Self {
+            writer,
+            level,
+            buffer: Vec::new(),
+            header_written: false,
+            crc: 0,
+            size: 0,
+        }
+    }
+
+    fn write_header(self: &mut Self) -> Result<(), CompressionError> {
+        if self.header_written {
+            return Ok(());
+        }
+
+        let header = [
+            0x1f, 0x8b,  // Magic
+            0x08,        // Compression method (deflate)
+            0x00,        // Flags
+            0, 0, 0, 0,  // Modification time
+            0x00,        // Extra flags
+            0xff,        // OS (unknown)
+        ];
+
+        self.writer.write_all(&header).map_err(|e| CompressionError::IoError(e.to_string()))?;
+        self.header_written = true;
+        Ok(())
+    }
+
+    pub fn write(self: &mut Self, data: &[u8]) -> Result<usize, CompressionError> {
+        self.write_header()?;
+        self.buffer.extend_from_slice(data);
+
+        // Update running CRC and size
+        for byte in data {
+            self.crc = crc32_update(self.crc, *byte);
+            self.size = self.size.wrapping_add(1);
+        }
+
+        Ok(data.len())
+    }
+
+    pub fn finish(mut self: Self) -> Result<W, CompressionError> {
+        self.write_header()?;
+
+        // Compress buffered data
+        let compressed = deflate::compress(&self.buffer, self.level)?;
+        self.writer.write_all(&compressed).map_err(|e| CompressionError::IoError(e.to_string()))?;
+
+        // Write trailer
+        let crc = crc32(&self.buffer);
+        self.writer.write_all(&crc.to_le_bytes()).map_err(|e| CompressionError::IoError(e.to_string()))?;
+        self.writer.write_all(&self.size.to_le_bytes()).map_err(|e| CompressionError::IoError(e.to_string()))?;
+
+        Ok(self.writer)
+    }
+}
+
+fn crc32_update(crc: u32, byte: u8) -> u32 {
+    // Simplified incremental CRC32 update
+    let table_idx = ((crc ^ (byte as u32)) & 0xFF) as usize;
+    // Would use TABLE from crc32 function
+    crc >> 8  // Placeholder - full implementation uses lookup table
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_deflate_roundtrip() {
+        let original = b"Hello, World! This is a test of deflate compression.";
+        let compressed = deflate::compress(original, CompressionLevel::Default).unwrap();
+        let decompressed = deflate::decompress(&compressed).unwrap();
+        assert_eq!(original.as_slice(), decompressed.as_slice());
+    }
+
+    #[test]
+    fn test_gzip_roundtrip() {
+        let original = b"Gzip compression test data with some repetition: AAAAAABBBBBBCCCCCC";
+        let compressed = gzip::compress(original, CompressionLevel::Default).unwrap();
+        let decompressed = gzip::decompress(&compressed).unwrap();
+        assert_eq!(original.as_slice(), decompressed.as_slice());
+    }
+
+    #[test]
+    fn test_zlib_roundtrip() {
+        let original = b"Zlib format test with various bytes: 0123456789ABCDEF";
+        let compressed = zlib::compress(original, CompressionLevel::Default).unwrap();
+        let decompressed = zlib::decompress(&compressed).unwrap();
+        assert_eq!(original.as_slice(), decompressed.as_slice());
+    }
+
+    #[test]
+    fn test_lz4_roundtrip() {
+        let original = b"LZ4 is a fast compression algorithm. Fast! Fast! Fast!";
+        let compressed = lz4::compress(original).unwrap();
+        let decompressed = lz4::decompress(&compressed, original.len() * 2).unwrap();
+        assert_eq!(original.as_slice(), decompressed.as_slice());
+    }
+
+    #[test]
+    fn test_crc32() {
+        let data = b"123456789";
+        let crc = crc32(data);
+        assert_eq!(crc, 0xCBF43926);
+    }
+
+    #[test]
+    fn test_adler32() {
+        let data = b"Wikipedia";
+        let checksum = adler32(data);
+        assert_eq!(checksum, 0x11E60398);
+    }
+
+    #[test]
+    fn test_compression_levels() {
+        let data = b"Test data for compression level comparison. ".repeat(100);
+
+        let fast = deflate::compress(&data, CompressionLevel::Fast).unwrap();
+        let default = deflate::compress(&data, CompressionLevel::Default).unwrap();
+        let best = deflate::compress(&data, CompressionLevel::Best).unwrap();
+
+        // Best should generally produce smallest output
+        assert!(best.len() <= default.len());
+        // All should decompress correctly
+        assert_eq!(deflate::decompress(&fast).unwrap(), data);
+        assert_eq!(deflate::decompress(&default).unwrap(), data);
+        assert_eq!(deflate::decompress(&best).unwrap(), data);
+    }
+
+    #[test]
+    fn test_empty_data() {
+        let empty: &[u8] = &[];
+
+        let compressed = deflate::compress(empty, CompressionLevel::Default).unwrap();
+        let decompressed = deflate::decompress(&compressed).unwrap();
+        assert!(decompressed.is_empty());
+    }
+
+    #[test]
+    fn test_gzip_header() {
+        let data = b"Test with filename";
+        let mut header = gzip::GzipHeader::new();
+        header.filename = Some("test.txt".to_string());
+        header.mtime = 1234567890;
+
+        let compressed = gzip::compress_with_header(data, CompressionLevel::Default, header).unwrap();
+        let (parsed_header, decompressed) = gzip::decompress_with_header(&compressed).unwrap();
+
+        assert_eq!(parsed_header.filename, Some("test.txt".to_string()));
+        assert_eq!(parsed_header.mtime, 1234567890);
+        assert_eq!(decompressed, data);
+    }
+}

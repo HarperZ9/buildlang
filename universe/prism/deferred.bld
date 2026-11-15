@@ -1,0 +1,1141 @@
+// =============================================================================
+// PRISM: Deferred Rendering Pipeline
+// =============================================================================
+// Complete deferred shading with tiled/clustered lighting and G-Buffer
+// Part of the BUILD-UNIVERSE Rendering Stack
+// =============================================================================
+
+@module prism::deferred
+@version 1.0.0
+@author BUILD Team
+
+// =============================================================================
+// G-BUFFER STRUCTURE
+// =============================================================================
+
+/// G-Buffer configuration
+struct GBufferConfig {
+    width: u32,
+    height: u32,
+
+    // G-Buffer layout
+    albedo_format: TextureFormat,     // RGB = albedo, A = ?
+    normal_format: TextureFormat,     // RG = encoded normal or RGB = normal
+    material_format: TextureFormat,   // R = roughness, G = metallic, B = AO, A = flags
+    emissive_format: TextureFormat,   // RGB = emissive, A = ?
+    velocity_format: TextureFormat,   // RG = screen-space velocity
+    depth_format: TextureFormat,
+
+    // Options
+    encode_normals: bool,             // Use octahedral encoding
+    thin_gbuffer: bool,               // Minimal G-Buffer for mobile
+}
+
+impl GBufferConfig {
+    pub fn default() -> Self {
+        Self {
+            width: 1920,
+            height: 1080,
+            albedo_format: TextureFormat::RGBA8_SRGB,
+            normal_format: TextureFormat::RG16F,
+            material_format: TextureFormat::RGBA8,
+            emissive_format: TextureFormat::R11G11B10F,
+            velocity_format: TextureFormat::RG16F,
+            depth_format: TextureFormat::D32F,
+            encode_normals: true,
+            thin_gbuffer: false,
+        }
+    }
+
+    pub fn thin() -> Self {
+        Self {
+            albedo_format: TextureFormat::RGBA8_SRGB,
+            normal_format: TextureFormat::RGB10A2,
+            material_format: TextureFormat::RGBA8,
+            emissive_format: TextureFormat::RGBA8,
+            velocity_format: TextureFormat::RG8,
+            depth_format: TextureFormat::D24S8,
+            thin_gbuffer: true,
+            ..Self::default()
+        }
+    }
+
+    pub fn hdr() -> Self {
+        Self {
+            albedo_format: TextureFormat::RGBA16F,
+            normal_format: TextureFormat::RG16F,
+            material_format: TextureFormat::RGBA16F,
+            emissive_format: TextureFormat::RGBA16F,
+            velocity_format: TextureFormat::RG16F,
+            depth_format: TextureFormat::D32F,
+            ..Self::default()
+        }
+    }
+}
+
+/// Light types
+#[repr(u32)]
+enum LightType {
+    Directional = 0,
+    Point = 1,
+    Spot = 2,
+    Area = 3,
+}
+
+/// GPU light structure
+#[repr(C)]
+struct GPULight {
+    position: vec3,
+    light_type: u32,
+
+    direction: vec3,
+    range: f32,
+
+    color: vec3,
+    intensity: f32,
+
+    spot_angles: vec2,      // inner, outer
+    area_size: vec2,
+
+    shadow_index: i32,
+    shadow_bias: f32,
+    attenuation: vec2,
+}
+
+// =============================================================================
+// G-BUFFER SHADERS
+// =============================================================================
+
+const GBUFFER_VERTEX_SHADER: &str = r#"
+//-----------------------------------------------------------------------------
+// G-Buffer Fill Vertex Shader
+//-----------------------------------------------------------------------------
+
+cbuffer PerFrame : register(b0) {
+    float4x4 view;
+    float4x4 projection;
+    float4x4 view_projection;
+    float4x4 prev_view_projection;
+
+    float3 camera_position;
+    float time;
+}
+
+cbuffer PerObject : register(b1) {
+    float4x4 world;
+    float4x4 prev_world;
+    float4x4 world_inv_transpose;
+}
+
+struct VSInput {
+    float3 position : POSITION;
+    float3 normal : NORMAL;
+    float4 tangent : TANGENT;
+    float2 texcoord0 : TEXCOORD0;
+    float2 texcoord1 : TEXCOORD1;
+};
+
+struct PSInput {
+    float4 position : SV_POSITION;
+    float3 world_pos : TEXCOORD0;
+    float3 normal : TEXCOORD1;
+    float3 tangent : TEXCOORD2;
+    float3 bitangent : TEXCOORD3;
+    float2 texcoord0 : TEXCOORD4;
+    float2 texcoord1 : TEXCOORD5;
+    float4 curr_pos : TEXCOORD6;
+    float4 prev_pos : TEXCOORD7;
+};
+
+PSInput GBufferVS(VSInput input) {
+    PSInput output;
+
+    float4 world_pos = mul(world, float4(input.position, 1.0));
+    output.position = mul(view_projection, world_pos);
+    output.world_pos = world_pos.xyz;
+
+    output.normal = normalize(mul((float3x3)world_inv_transpose, input.normal));
+    output.tangent = normalize(mul((float3x3)world, input.tangent.xyz));
+    output.bitangent = cross(output.normal, output.tangent) * input.tangent.w;
+
+    output.texcoord0 = input.texcoord0;
+    output.texcoord1 = input.texcoord1;
+
+    // For velocity buffer
+    output.curr_pos = mul(view_projection, world_pos);
+    float4 prev_world_pos = mul(prev_world, float4(input.position, 1.0));
+    output.prev_pos = mul(prev_view_projection, prev_world_pos);
+
+    return output;
+}
+"#;
+
+const GBUFFER_PIXEL_SHADER: &str = r#"
+//-----------------------------------------------------------------------------
+// G-Buffer Fill Pixel Shader
+//-----------------------------------------------------------------------------
+
+cbuffer MaterialParams : register(b2) {
+    float4 base_color_factor;
+    float metallic_factor;
+    float roughness_factor;
+    float normal_scale;
+    float occlusion_strength;
+    float3 emissive_factor;
+    float alpha_cutoff;
+    uint material_flags;
+    float3 _padding;
+}
+
+#define FLAG_HAS_ALBEDO_TEX (1 << 0)
+#define FLAG_HAS_NORMAL_TEX (1 << 1)
+#define FLAG_HAS_METALLIC_ROUGHNESS_TEX (1 << 2)
+#define FLAG_HAS_OCCLUSION_TEX (1 << 3)
+#define FLAG_HAS_EMISSIVE_TEX (1 << 4)
+#define FLAG_ALPHA_MASK (1 << 5)
+#define FLAG_DOUBLE_SIDED (1 << 6)
+#define FLAG_UNLIT (1 << 7)
+
+Texture2D<float4> albedo_tex : register(t0);
+Texture2D<float4> normal_tex : register(t1);
+Texture2D<float4> metallic_roughness_tex : register(t2);
+Texture2D<float> occlusion_tex : register(t3);
+Texture2D<float4> emissive_tex : register(t4);
+
+SamplerState material_sampler : register(s0);
+
+struct PSInput {
+    float4 position : SV_POSITION;
+    float3 world_pos : TEXCOORD0;
+    float3 normal : TEXCOORD1;
+    float3 tangent : TEXCOORD2;
+    float3 bitangent : TEXCOORD3;
+    float2 texcoord0 : TEXCOORD4;
+    float2 texcoord1 : TEXCOORD5;
+    float4 curr_pos : TEXCOORD6;
+    float4 prev_pos : TEXCOORD7;
+    bool is_front_face : SV_IsFrontFace;
+};
+
+struct GBufferOutput {
+    float4 albedo : SV_TARGET0;       // RGB = albedo, A = opacity/flags
+    float4 normal : SV_TARGET1;       // RG = encoded normal (or RGB)
+    float4 material : SV_TARGET2;     // R = roughness, G = metallic, B = AO, A = flags
+    float4 emissive : SV_TARGET3;     // RGB = emissive
+    float2 velocity : SV_TARGET4;     // RG = screen velocity
+};
+
+// Octahedral normal encoding
+float2 OctahedronEncode(float3 n) {
+    n /= (abs(n.x) + abs(n.y) + abs(n.z));
+    if (n.z < 0.0) {
+        n.xy = (1.0 - abs(n.yx)) * (n.xy >= 0.0 ? 1.0 : -1.0);
+    }
+    return n.xy * 0.5 + 0.5;
+}
+
+GBufferOutput GBufferPS(PSInput input) {
+    GBufferOutput output;
+
+    float2 uv = input.texcoord0;
+
+    // Albedo
+    float4 albedo = base_color_factor;
+    if (material_flags & FLAG_HAS_ALBEDO_TEX) {
+        albedo *= albedo_tex.Sample(material_sampler, uv);
+    }
+
+    // Alpha test
+    if (material_flags & FLAG_ALPHA_MASK) {
+        if (albedo.a < alpha_cutoff) {
+            discard;
+        }
+    }
+
+    // Normal
+    float3 N = normalize(input.normal);
+
+    // Handle double-sided
+    if ((material_flags & FLAG_DOUBLE_SIDED) && !input.is_front_face) {
+        N = -N;
+    }
+
+    if (material_flags & FLAG_HAS_NORMAL_TEX) {
+        float3 T = normalize(input.tangent);
+        float3 B = normalize(input.bitangent);
+        float3x3 TBN = float3x3(T, B, N);
+
+        float3 tangent_normal = normal_tex.Sample(material_sampler, uv).xyz * 2.0 - 1.0;
+        tangent_normal.xy *= normal_scale;
+        N = normalize(mul(tangent_normal, TBN));
+    }
+
+    // Metallic/Roughness
+    float metallic = metallic_factor;
+    float roughness = roughness_factor;
+    if (material_flags & FLAG_HAS_METALLIC_ROUGHNESS_TEX) {
+        float4 mr = metallic_roughness_tex.Sample(material_sampler, uv);
+        metallic *= mr.b;
+        roughness *= mr.g;
+    }
+
+    // Occlusion
+    float ao = 1.0;
+    if (material_flags & FLAG_HAS_OCCLUSION_TEX) {
+        ao = lerp(1.0, occlusion_tex.Sample(material_sampler, uv).r, occlusion_strength);
+    }
+
+    // Emissive
+    float3 emissive = emissive_factor;
+    if (material_flags & FLAG_HAS_EMISSIVE_TEX) {
+        emissive *= emissive_tex.Sample(material_sampler, uv).rgb;
+    }
+
+    // Velocity
+    float2 curr_ndc = input.curr_pos.xy / input.curr_pos.w;
+    float2 prev_ndc = input.prev_pos.xy / input.prev_pos.w;
+    float2 velocity = (curr_ndc - prev_ndc) * 0.5;
+
+    // Output
+    output.albedo = float4(albedo.rgb, 1.0);
+    output.normal = float4(OctahedronEncode(N), 0.0, 0.0);
+    output.material = float4(roughness, metallic, ao, 0.0);
+    output.emissive = float4(emissive, 0.0);
+    output.velocity = velocity;
+
+    // Pack flags in material.a if needed
+    float flags_packed = 0.0;
+    if (material_flags & FLAG_UNLIT) flags_packed += 0.5;
+
+    output.material.a = flags_packed;
+
+    return output;
+}
+"#;
+
+// =============================================================================
+// DEFERRED LIGHTING SHADER
+// =============================================================================
+
+const DEFERRED_LIGHTING_SHADER: &str = r#"
+//-----------------------------------------------------------------------------
+// Deferred Lighting Pass
+//-----------------------------------------------------------------------------
+
+#define PI 3.14159265359
+#define MAX_LIGHTS 1024
+
+cbuffer LightingParams : register(b0) {
+    float4x4 inv_view_projection;
+    float4x4 view;
+
+    float3 camera_position;
+    float time;
+
+    float3 ambient_color;
+    float ambient_intensity;
+
+    int num_lights;
+    int enable_shadows;
+    int enable_ao;
+    int debug_mode;
+}
+
+struct Light {
+    float3 position;
+    uint type;
+    float3 direction;
+    float range;
+    float3 color;
+    float intensity;
+    float2 spot_angles;
+    float2 area_size;
+    int shadow_index;
+    float shadow_bias;
+    float2 attenuation;
+};
+
+StructuredBuffer<Light> lights : register(t0);
+
+Texture2D<float4> gbuffer_albedo : register(t1);
+Texture2D<float4> gbuffer_normal : register(t2);
+Texture2D<float4> gbuffer_material : register(t3);
+Texture2D<float4> gbuffer_emissive : register(t4);
+Texture2D<float> gbuffer_depth : register(t5);
+Texture2D<float> ssao_texture : register(t6);
+TextureCube<float4> environment_map : register(t7);
+TextureCube<float4> irradiance_map : register(t8);
+Texture2D<float4> brdf_lut : register(t9);
+Texture2DArray<float> shadow_maps : register(t10);
+
+SamplerState point_clamp : register(s0);
+SamplerState linear_clamp : register(s1);
+SamplerComparisonState shadow_sampler : register(s2);
+
+struct VSOutput {
+    float4 position : SV_POSITION;
+    float2 texcoord : TEXCOORD0;
+};
+
+// Octahedral normal decoding
+float3 OctahedronDecode(float2 f) {
+    f = f * 2.0 - 1.0;
+    float3 n = float3(f.x, f.y, 1.0 - abs(f.x) - abs(f.y));
+    float t = saturate(-n.z);
+    n.xy += n.xy >= 0.0 ? -t : t;
+    return normalize(n);
+}
+
+// Reconstruct world position from depth
+float3 ReconstructPosition(float2 uv, float depth) {
+    float4 clip = float4(uv * 2.0 - 1.0, depth, 1.0);
+    clip.y = -clip.y;
+    float4 world = mul(inv_view_projection, clip);
+    return world.xyz / world.w;
+}
+
+// PBR functions
+float DistributionGGX(float3 N, float3 H, float roughness) {
+    float a = roughness * roughness;
+    float a2 = a * a;
+    float NdotH = max(dot(N, H), 0.0);
+    float NdotH2 = NdotH * NdotH;
+
+    float nom = a2;
+    float denom = (NdotH2 * (a2 - 1.0) + 1.0);
+    denom = PI * denom * denom;
+
+    return nom / max(denom, 0.0001);
+}
+
+float GeometrySchlickGGX(float NdotV, float roughness) {
+    float r = roughness + 1.0;
+    float k = (r * r) / 8.0;
+    return NdotV / (NdotV * (1.0 - k) + k);
+}
+
+float GeometrySmith(float3 N, float3 V, float3 L, float roughness) {
+    float NdotV = max(dot(N, V), 0.0);
+    float NdotL = max(dot(N, L), 0.0);
+    float ggx1 = GeometrySchlickGGX(NdotV, roughness);
+    float ggx2 = GeometrySchlickGGX(NdotL, roughness);
+    return ggx1 * ggx2;
+}
+
+float3 FresnelSchlick(float cosTheta, float3 F0) {
+    return F0 + (1.0 - F0) * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0);
+}
+
+float3 FresnelSchlickRoughness(float cosTheta, float3 F0, float roughness) {
+    return F0 + (max(float3(1.0 - roughness, 1.0 - roughness, 1.0 - roughness), F0) - F0) *
+           pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0);
+}
+
+// Light attenuation
+float GetAttenuation(float distance, float range) {
+    float attenuation = saturate(1.0 - pow(distance / range, 4.0));
+    return attenuation * attenuation / (distance * distance + 1.0);
+}
+
+float GetSpotAttenuation(float3 L, float3 spot_dir, float2 spot_angles) {
+    float cos_angle = dot(-L, spot_dir);
+    float cos_inner = cos(spot_angles.x);
+    float cos_outer = cos(spot_angles.y);
+    return saturate((cos_angle - cos_outer) / (cos_inner - cos_outer));
+}
+
+// Shadow sampling
+float SampleShadow(int shadow_index, float3 world_pos, float bias) {
+    // Would use shadow matrix per light
+    // Simplified placeholder
+    return 1.0;
+}
+
+// Calculate lighting for single light
+float3 CalculateLight(Light light, float3 world_pos, float3 N, float3 V,
+                      float3 albedo, float metallic, float roughness) {
+    float3 L;
+    float attenuation = 1.0;
+
+    if (light.type == 0) { // Directional
+        L = -normalize(light.direction);
+    } else {
+        L = light.position - world_pos;
+        float distance = length(L);
+        L /= distance;
+
+        attenuation = GetAttenuation(distance, light.range);
+
+        if (light.type == 2) { // Spot
+            attenuation *= GetSpotAttenuation(L, light.direction, light.spot_angles);
+        }
+    }
+
+    if (attenuation < 0.001) return float3(0, 0, 0);
+
+    float3 H = normalize(V + L);
+    float NdotL = max(dot(N, L), 0.0);
+
+    if (NdotL < 0.001) return float3(0, 0, 0);
+
+    float3 F0 = lerp(float3(0.04, 0.04, 0.04), albedo, metallic);
+
+    // Cook-Torrance BRDF
+    float NDF = DistributionGGX(N, H, roughness);
+    float G = GeometrySmith(N, V, L, roughness);
+    float3 F = FresnelSchlick(max(dot(H, V), 0.0), F0);
+
+    float3 numerator = NDF * G * F;
+    float denominator = 4.0 * max(dot(N, V), 0.0) * NdotL + 0.0001;
+    float3 specular = numerator / denominator;
+
+    float3 kS = F;
+    float3 kD = (1.0 - kS) * (1.0 - metallic);
+
+    // Shadow
+    float shadow = 1.0;
+    if (enable_shadows && light.shadow_index >= 0) {
+        shadow = SampleShadow(light.shadow_index, world_pos, light.shadow_bias);
+    }
+
+    return (kD * albedo / PI + specular) * light.color * light.intensity * NdotL * attenuation * shadow;
+}
+
+float4 DeferredLightingPS(VSOutput input) : SV_TARGET {
+    float2 uv = input.texcoord;
+
+    // Sample G-Buffer
+    float4 albedo_sample = gbuffer_albedo.Sample(point_clamp, uv);
+    float4 normal_sample = gbuffer_normal.Sample(point_clamp, uv);
+    float4 material_sample = gbuffer_material.Sample(point_clamp, uv);
+    float4 emissive_sample = gbuffer_emissive.Sample(point_clamp, uv);
+    float depth = gbuffer_depth.Sample(point_clamp, uv).r;
+
+    // Early out for sky
+    if (depth >= 1.0) {
+        return float4(0, 0, 0, 0);
+    }
+
+    // Decode G-Buffer
+    float3 albedo = albedo_sample.rgb;
+    float3 N = OctahedronDecode(normal_sample.rg);
+    float roughness = material_sample.r;
+    float metallic = material_sample.g;
+    float ao = material_sample.b;
+    float3 emissive = emissive_sample.rgb;
+
+    // Check for unlit material
+    if (material_sample.a > 0.4) {
+        return float4(albedo + emissive, 1.0);
+    }
+
+    // Reconstruct position
+    float3 world_pos = ReconstructPosition(uv, depth);
+    float3 V = normalize(camera_position - world_pos);
+
+    // SSAO
+    if (enable_ao) {
+        float ssao = ssao_texture.Sample(linear_clamp, uv).r;
+        ao *= ssao;
+    }
+
+    // Accumulate direct lighting
+    float3 Lo = float3(0, 0, 0);
+
+    for (int i = 0; i < num_lights && i < MAX_LIGHTS; i++) {
+        Lo += CalculateLight(lights[i], world_pos, N, V, albedo, metallic, roughness);
+    }
+
+    // Image-based lighting (IBL)
+    float3 F0 = lerp(float3(0.04, 0.04, 0.04), albedo, metallic);
+    float3 F = FresnelSchlickRoughness(max(dot(N, V), 0.0), F0, roughness);
+
+    float3 kS = F;
+    float3 kD = (1.0 - kS) * (1.0 - metallic);
+
+    // Diffuse IBL
+    float3 irradiance = irradiance_map.Sample(linear_clamp, N).rgb;
+    float3 diffuse_ibl = irradiance * albedo;
+
+    // Specular IBL
+    float3 R = reflect(-V, N);
+    float mip_level = roughness * 7.0;  // Assumes 8 mip levels
+    float3 prefiltered = environment_map.SampleLevel(linear_clamp, R, mip_level).rgb;
+    float2 brdf = brdf_lut.Sample(linear_clamp, float2(max(dot(N, V), 0.0), roughness)).rg;
+    float3 specular_ibl = prefiltered * (F * brdf.x + brdf.y);
+
+    float3 ambient = (kD * diffuse_ibl + specular_ibl) * ao * ambient_intensity;
+
+    // Final color
+    float3 color = ambient + Lo + emissive;
+
+    // Debug modes
+    if (debug_mode == 1) return float4(albedo, 1.0);
+    if (debug_mode == 2) return float4(N * 0.5 + 0.5, 1.0);
+    if (debug_mode == 3) return float4(roughness, metallic, ao, 1.0);
+    if (debug_mode == 4) return float4(emissive, 1.0);
+    if (debug_mode == 5) return float4(Lo, 1.0);
+    if (debug_mode == 6) return float4(ambient, 1.0);
+
+    return float4(color, 1.0);
+}
+"#;
+
+// =============================================================================
+// TILED/CLUSTERED LIGHTING COMPUTE SHADERS
+// =============================================================================
+
+const TILED_LIGHTING_SHADER: &str = r#"
+//-----------------------------------------------------------------------------
+// Tiled Deferred Lighting (Forward+ style)
+//-----------------------------------------------------------------------------
+
+#define TILE_SIZE 16
+#define MAX_LIGHTS_PER_TILE 256
+
+cbuffer TiledParams : register(b0) {
+    float4x4 view;
+    float4x4 projection;
+    float4x4 inv_projection;
+
+    uint2 screen_size;
+    uint2 num_tiles;
+
+    uint num_lights;
+    float near_plane;
+    float far_plane;
+    uint _padding;
+}
+
+struct Light {
+    float3 position;
+    uint type;
+    float3 direction;
+    float range;
+    float3 color;
+    float intensity;
+    float2 spot_angles;
+    float2 _padding;
+};
+
+StructuredBuffer<Light> lights : register(t0);
+Texture2D<float> depth_texture : register(t1);
+
+RWStructuredBuffer<uint> light_index_list : register(u0);
+RWTexture2D<uint2> light_grid : register(u1);  // x = offset, y = count
+
+groupshared uint tile_light_indices[MAX_LIGHTS_PER_TILE];
+groupshared uint tile_light_count;
+groupshared uint tile_min_z;
+groupshared uint tile_max_z;
+
+// Build frustum planes for tile
+void BuildFrustumPlanes(uint2 tile_id, out float4 frustum_planes[6]) {
+    float2 tile_scale = 2.0 / float2(num_tiles);
+    float2 tile_bias = tile_scale * float2(tile_id) - 1.0;
+
+    // Extract frustum planes from projection matrix
+    float4 c1 = float4(projection._11 * tile_scale.x, 0, tile_bias.x, 0);
+    float4 c2 = float4(0, -projection._22 * tile_scale.y, tile_bias.y, 0);
+    float4 c4 = float4(0, 0, 1, 0);
+
+    frustum_planes[0] = c4 - c1;  // Right
+    frustum_planes[1] = c4 + c1;  // Left
+    frustum_planes[2] = c4 - c2;  // Top
+    frustum_planes[3] = c4 + c2;  // Bottom
+    frustum_planes[4] = float4(0, 0, 1, -tile_min_z);  // Near
+    frustum_planes[5] = float4(0, 0, -1, tile_max_z);  // Far
+
+    // Normalize
+    for (int i = 0; i < 4; i++) {
+        frustum_planes[i] /= length(frustum_planes[i].xyz);
+    }
+}
+
+// Test sphere against frustum
+bool SphereInFrustum(float3 center, float radius, float4 planes[6]) {
+    for (int i = 0; i < 6; i++) {
+        if (dot(float4(center, 1.0), planes[i]) < -radius) {
+            return false;
+        }
+    }
+    return true;
+}
+
+[numthreads(TILE_SIZE, TILE_SIZE, 1)]
+void TileLightCullingCS(uint3 group_id : SV_GroupID,
+                        uint3 group_thread_id : SV_GroupThreadID,
+                        uint group_index : SV_GroupIndex) {
+    uint2 pixel_coord = group_id.xy * TILE_SIZE + group_thread_id.xy;
+    uint tile_index = group_id.y * num_tiles.x + group_id.x;
+
+    // Initialize shared memory
+    if (group_index == 0) {
+        tile_light_count = 0;
+        tile_min_z = 0xFFFFFFFF;
+        tile_max_z = 0;
+    }
+    GroupMemoryBarrierWithGroupSync();
+
+    // Calculate min/max depth for tile
+    if (pixel_coord.x < screen_size.x && pixel_coord.y < screen_size.y) {
+        float depth = depth_texture[pixel_coord].r;
+
+        // Convert to view space Z
+        float view_z = near_plane * far_plane / (far_plane - depth * (far_plane - near_plane));
+        uint z_int = asuint(view_z);
+
+        InterlockedMin(tile_min_z, z_int);
+        InterlockedMax(tile_max_z, z_int);
+    }
+    GroupMemoryBarrierWithGroupSync();
+
+    // Build frustum for this tile
+    float4 frustum_planes[6];
+    if (group_index == 0) {
+        BuildFrustumPlanes(group_id.xy, frustum_planes);
+    }
+    GroupMemoryBarrierWithGroupSync();
+
+    // Each thread tests a subset of lights
+    uint lights_per_thread = (num_lights + TILE_SIZE * TILE_SIZE - 1) / (TILE_SIZE * TILE_SIZE);
+    uint light_start = group_index * lights_per_thread;
+    uint light_end = min(light_start + lights_per_thread, num_lights);
+
+    for (uint i = light_start; i < light_end; i++) {
+        Light light = lights[i];
+
+        // Transform light to view space
+        float3 light_pos_view = mul(view, float4(light.position, 1.0)).xyz;
+
+        // Test against frustum
+        if (SphereInFrustum(light_pos_view, light.range, frustum_planes)) {
+            uint index;
+            InterlockedAdd(tile_light_count, 1, index);
+            if (index < MAX_LIGHTS_PER_TILE) {
+                tile_light_indices[index] = i;
+            }
+        }
+    }
+    GroupMemoryBarrierWithGroupSync();
+
+    // Write results
+    if (group_index == 0) {
+        uint offset = tile_index * MAX_LIGHTS_PER_TILE;
+        light_grid[group_id.xy] = uint2(offset, min(tile_light_count, MAX_LIGHTS_PER_TILE));
+
+        for (uint i = 0; i < tile_light_count && i < MAX_LIGHTS_PER_TILE; i++) {
+            light_index_list[offset + i] = tile_light_indices[i];
+        }
+    }
+}
+"#;
+
+const CLUSTERED_LIGHTING_SHADER: &str = r#"
+//-----------------------------------------------------------------------------
+// Clustered Deferred Lighting (3D froxel culling)
+//-----------------------------------------------------------------------------
+
+#define CLUSTER_X 16
+#define CLUSTER_Y 9
+#define CLUSTER_Z 24
+#define MAX_LIGHTS_PER_CLUSTER 128
+
+cbuffer ClusteredParams : register(b0) {
+    float4x4 view;
+    float4x4 projection;
+    float4x4 inv_projection;
+
+    uint2 screen_size;
+    float near_plane;
+    float far_plane;
+
+    float log_far_near;
+    float bias;
+    uint num_lights;
+    uint _padding;
+}
+
+struct Light {
+    float3 position;
+    uint type;
+    float3 direction;
+    float range;
+    float3 color;
+    float intensity;
+};
+
+StructuredBuffer<Light> lights : register(t0);
+RWStructuredBuffer<uint> cluster_light_list : register(u0);
+RWTexture3D<uint2> cluster_grid : register(u1);  // x = offset, y = count
+
+// Convert depth to cluster Z slice
+uint GetClusterZ(float depth) {
+    float view_z = near_plane * far_plane / (far_plane - depth * (far_plane - near_plane));
+    return uint(log(view_z / near_plane) / log_far_near * float(CLUSTER_Z));
+}
+
+// Get cluster AABB
+void GetClusterAABB(uint3 cluster_id, out float3 min_pt, out float3 max_pt) {
+    float2 tile_size = float2(screen_size) / float2(CLUSTER_X, CLUSTER_Y);
+    float2 tile_min = tile_size * float2(cluster_id.xy);
+    float2 tile_max = tile_size * float2(cluster_id.xy + 1);
+
+    // Z slices in logarithmic space
+    float z_near = near_plane * pow(far_plane / near_plane, float(cluster_id.z) / float(CLUSTER_Z));
+    float z_far = near_plane * pow(far_plane / near_plane, float(cluster_id.z + 1) / float(CLUSTER_Z));
+
+    // Convert to view space AABB
+    float4 corners[8];
+    corners[0] = mul(inv_projection, float4(tile_min.x / screen_size.x * 2.0 - 1.0,
+                                             1.0 - tile_min.y / screen_size.y * 2.0,
+                                             0.0, 1.0));
+    // ... compute all 8 corners
+
+    min_pt = float3(-1, -1, z_near);  // Simplified
+    max_pt = float3(1, 1, z_far);
+}
+
+// AABB-sphere intersection
+bool SphereIntersectsAABB(float3 center, float radius, float3 aabb_min, float3 aabb_max) {
+    float3 closest = clamp(center, aabb_min, aabb_max);
+    float dist_sq = dot(closest - center, closest - center);
+    return dist_sq <= radius * radius;
+}
+
+[numthreads(1, 1, 1)]
+void ClusterLightCullingCS(uint3 cluster_id : SV_DispatchThreadID) {
+    uint cluster_index = cluster_id.x +
+                         cluster_id.y * CLUSTER_X +
+                         cluster_id.z * CLUSTER_X * CLUSTER_Y;
+
+    float3 aabb_min, aabb_max;
+    GetClusterAABB(cluster_id, aabb_min, aabb_max);
+
+    uint light_count = 0;
+    uint light_indices[MAX_LIGHTS_PER_CLUSTER];
+
+    for (uint i = 0; i < num_lights; i++) {
+        Light light = lights[i];
+
+        // Transform to view space
+        float3 light_pos_view = mul(view, float4(light.position, 1.0)).xyz;
+
+        if (SphereIntersectsAABB(light_pos_view, light.range, aabb_min, aabb_max)) {
+            if (light_count < MAX_LIGHTS_PER_CLUSTER) {
+                light_indices[light_count] = i;
+                light_count++;
+            }
+        }
+    }
+
+    // Write to output
+    uint offset = cluster_index * MAX_LIGHTS_PER_CLUSTER;
+    cluster_grid[cluster_id] = uint2(offset, light_count);
+
+    for (uint i = 0; i < light_count; i++) {
+        cluster_light_list[offset + i] = light_indices[i];
+    }
+}
+"#;
+
+// =============================================================================
+// DEFERRED RENDERING SYSTEM
+// =============================================================================
+
+/// Complete deferred rendering pipeline
+struct DeferredRenderer {
+    config: GBufferConfig,
+
+    // G-Buffer render targets
+    albedo_rt: TextureHandle,
+    normal_rt: TextureHandle,
+    material_rt: TextureHandle,
+    emissive_rt: TextureHandle,
+    velocity_rt: TextureHandle,
+    depth_rt: TextureHandle,
+
+    // Lighting
+    light_buffer: BufferHandle,
+    lights: Vec<GPULight>,
+
+    // Tiled lighting
+    light_index_list: BufferHandle,
+    light_grid: TextureHandle,
+    tile_size: u32,
+
+    // Clustered lighting
+    cluster_light_list: BufferHandle,
+    cluster_grid: TextureHandle,
+    cluster_dims: [u32; 3],
+
+    // IBL
+    environment_map: TextureHandle,
+    irradiance_map: TextureHandle,
+    brdf_lut: TextureHandle,
+
+    // Output
+    hdr_target: TextureHandle,
+}
+
+impl DeferredRenderer {
+    pub fn new(device: &RenderDevice, config: GBufferConfig) -> Self {
+        let width = config.width;
+        let height = config.height;
+
+        // Create G-Buffer render targets
+        let albedo_rt = device.create_render_target(
+            width, height, config.albedo_format
+        );
+        let normal_rt = device.create_render_target(
+            width, height, config.normal_format
+        );
+        let material_rt = device.create_render_target(
+            width, height, config.material_format
+        );
+        let emissive_rt = device.create_render_target(
+            width, height, config.emissive_format
+        );
+        let velocity_rt = device.create_render_target(
+            width, height, config.velocity_format
+        );
+        let depth_rt = device.create_depth_stencil(
+            width, height, config.depth_format
+        );
+
+        // Light buffer
+        let light_buffer = device.create_structured_buffer(
+            1024,
+            std::mem::size_of::<GPULight>(),
+            BufferUsage::ShaderResource
+        );
+
+        // Tiled lighting
+        let tile_size = 16;
+        let tiles_x = (width + tile_size - 1) / tile_size;
+        let tiles_y = (height + tile_size - 1) / tile_size;
+
+        let light_index_list = device.create_structured_buffer(
+            (tiles_x * tiles_y * 256) as usize,
+            4,
+            BufferUsage::UnorderedAccess | BufferUsage::ShaderResource
+        );
+
+        let light_grid = device.create_texture_2d(
+            tiles_x, tiles_y,
+            TextureFormat::RG32U,
+            TextureUsage::UnorderedAccess | TextureUsage::ShaderResource
+        );
+
+        // Clustered lighting
+        let cluster_dims = [16, 9, 24];
+        let cluster_count = cluster_dims[0] * cluster_dims[1] * cluster_dims[2];
+
+        let cluster_light_list = device.create_structured_buffer(
+            (cluster_count * 128) as usize,
+            4,
+            BufferUsage::UnorderedAccess | BufferUsage::ShaderResource
+        );
+
+        let cluster_grid = device.create_texture_3d(
+            cluster_dims[0], cluster_dims[1], cluster_dims[2],
+            TextureFormat::RG32U,
+            TextureUsage::UnorderedAccess | TextureUsage::ShaderResource
+        );
+
+        // IBL textures (placeholder)
+        let environment_map = device.create_cubemap(256, TextureFormat::RGBA16F);
+        let irradiance_map = device.create_cubemap(32, TextureFormat::RGBA16F);
+        let brdf_lut = device.create_texture_2d(512, 512, TextureFormat::RG16F, TextureUsage::ShaderResource);
+
+        // HDR output
+        let hdr_target = device.create_render_target(
+            width, height, TextureFormat::RGBA16F
+        );
+
+        Self {
+            config,
+            albedo_rt,
+            normal_rt,
+            material_rt,
+            emissive_rt,
+            velocity_rt,
+            depth_rt,
+            light_buffer,
+            lights: Vec::new(),
+            light_index_list,
+            light_grid,
+            tile_size,
+            cluster_light_list,
+            cluster_grid,
+            cluster_dims,
+            environment_map,
+            irradiance_map,
+            brdf_lut,
+            hdr_target,
+        }
+    }
+
+    pub fn begin_gbuffer_pass(&self, context: &RenderContext) {
+        context.set_render_targets(&[
+            &self.albedo_rt,
+            &self.normal_rt,
+            &self.material_rt,
+            &self.emissive_rt,
+            &self.velocity_rt,
+        ], Some(&self.depth_rt));
+
+        context.clear_render_targets(&[0.0, 0.0, 0.0, 1.0]);
+        context.clear_depth_stencil(1.0, 0);
+    }
+
+    pub fn end_gbuffer_pass(&self, context: &RenderContext) {
+        context.set_render_targets(&[], None);
+    }
+
+    pub fn add_light(&mut self, light: GPULight) {
+        self.lights.push(light);
+    }
+
+    pub fn clear_lights(&mut self) {
+        self.lights.clear();
+    }
+
+    pub fn cull_lights(&self, context: &ComputeContext, camera: &Camera) {
+        // Update light buffer
+        context.update_buffer(&self.light_buffer, &self.lights);
+
+        // Tiled culling
+        context.bind_compute_shader("tiled_light_culling_cs");
+        context.set_structured_buffer(0, &self.light_buffer);
+        context.set_srv(1, &self.depth_rt);
+        context.set_uav(0, &self.light_index_list);
+        context.set_uav_texture(1, &self.light_grid);
+
+        let tiles_x = (self.config.width + self.tile_size - 1) / self.tile_size;
+        let tiles_y = (self.config.height + self.tile_size - 1) / self.tile_size;
+        context.dispatch(tiles_x, tiles_y, 1);
+
+        // Or clustered culling
+        // context.bind_compute_shader("clustered_light_culling_cs");
+        // context.dispatch(self.cluster_dims[0], self.cluster_dims[1], self.cluster_dims[2]);
+    }
+
+    pub fn lighting_pass(&self, context: &RenderContext, camera: &Camera) {
+        context.set_render_target(&self.hdr_target);
+
+        context.bind_shader("deferred_lighting");
+
+        // G-Buffer inputs
+        context.set_srv(1, &self.albedo_rt);
+        context.set_srv(2, &self.normal_rt);
+        context.set_srv(3, &self.material_rt);
+        context.set_srv(4, &self.emissive_rt);
+        context.set_srv(5, &self.depth_rt);
+
+        // Light data
+        context.set_structured_buffer(0, &self.light_buffer);
+
+        // IBL
+        context.set_srv(7, &self.environment_map);
+        context.set_srv(8, &self.irradiance_map);
+        context.set_srv(9, &self.brdf_lut);
+
+        // Tiled/clustered data
+        context.set_structured_buffer(6, &self.light_index_list);
+        context.set_srv_texture(10, &self.light_grid);
+
+        context.draw_fullscreen_triangle();
+    }
+
+    pub fn get_gbuffer(&self) -> GBufferRef {
+        GBufferRef {
+            albedo: &self.albedo_rt,
+            normal: &self.normal_rt,
+            material: &self.material_rt,
+            emissive: &self.emissive_rt,
+            velocity: &self.velocity_rt,
+            depth: &self.depth_rt,
+        }
+    }
+
+    pub fn get_hdr_target(&self) -> &TextureHandle {
+        &self.hdr_target
+    }
+}
+
+struct GBufferRef<'a> {
+    albedo: &'a TextureHandle,
+    normal: &'a TextureHandle,
+    material: &'a TextureHandle,
+    emissive: &'a TextureHandle,
+    velocity: &'a TextureHandle,
+    depth: &'a TextureHandle,
+}
+
+// Placeholder types
+type TextureHandle = u64;
+type BufferHandle = u64;
+type vec2 = [f32; 2];
+type vec3 = [f32; 3];
+type vec4 = [f32; 4];
+
+enum TextureFormat {
+    RGBA8, RGBA8_SRGB, RGBA16F, RG16F, R11G11B10F, RGB10A2, RG8, D32F, D24S8, RG32U,
+}
+
+enum TextureUsage { ShaderResource, UnorderedAccess }
+enum BufferUsage { ShaderResource, UnorderedAccess }
+
+struct RenderDevice;
+impl RenderDevice {
+    fn create_render_target(&self, _w: u32, _h: u32, _fmt: TextureFormat) -> TextureHandle { 0 }
+    fn create_depth_stencil(&self, _w: u32, _h: u32, _fmt: TextureFormat) -> TextureHandle { 0 }
+    fn create_texture_2d(&self, _w: u32, _h: u32, _fmt: TextureFormat, _usage: TextureUsage) -> TextureHandle { 0 }
+    fn create_texture_3d(&self, _w: u32, _h: u32, _d: u32, _fmt: TextureFormat, _usage: TextureUsage) -> TextureHandle { 0 }
+    fn create_cubemap(&self, _size: u32, _fmt: TextureFormat) -> TextureHandle { 0 }
+    fn create_structured_buffer(&self, _count: usize, _stride: usize, _usage: BufferUsage) -> BufferHandle { 0 }
+}
+
+struct RenderContext;
+impl RenderContext {
+    fn set_render_targets(&self, _targets: &[&TextureHandle], _depth: Option<&TextureHandle>) {}
+    fn set_render_target(&self, _target: &TextureHandle) {}
+    fn clear_render_targets(&self, _color: &[f32; 4]) {}
+    fn clear_depth_stencil(&self, _depth: f32, _stencil: u8) {}
+    fn bind_shader(&self, _name: &str) {}
+    fn set_srv(&self, _slot: u32, _tex: &TextureHandle) {}
+    fn set_srv_texture(&self, _slot: u32, _tex: &TextureHandle) {}
+    fn set_structured_buffer(&self, _slot: u32, _buf: &BufferHandle) {}
+    fn draw_fullscreen_triangle(&self) {}
+}
+
+struct ComputeContext;
+impl ComputeContext {
+    fn update_buffer<T>(&self, _buf: &BufferHandle, _data: &[T]) {}
+    fn bind_compute_shader(&self, _name: &str) {}
+    fn set_structured_buffer(&self, _slot: u32, _buf: &BufferHandle) {}
+    fn set_srv(&self, _slot: u32, _tex: &TextureHandle) {}
+    fn set_uav(&self, _slot: u32, _buf: &BufferHandle) {}
+    fn set_uav_texture(&self, _slot: u32, _tex: &TextureHandle) {}
+    fn dispatch(&self, _x: u32, _y: u32, _z: u32) {}
+}
+
+struct Camera;
+
+// =============================================================================
+// MODULE EXPORTS
+// =============================================================================
+
+pub use GBufferConfig;
+pub use GPULight;
+pub use LightType;
+pub use DeferredRenderer;
+
+pub const SHADERS: &[(&str, &str)] = &[
+    ("gbuffer_vertex", GBUFFER_VERTEX_SHADER),
+    ("gbuffer_pixel", GBUFFER_PIXEL_SHADER),
+    ("deferred_lighting", DEFERRED_LIGHTING_SHADER),
+    ("tiled_lighting", TILED_LIGHTING_SHADER),
+    ("clustered_lighting", CLUSTERED_LIGHTING_SHADER),
+];

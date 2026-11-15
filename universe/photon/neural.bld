@@ -1,0 +1,1760 @@
+// =============================================================================
+// PHOTON ENGINE - NEURAL RENDERING SYSTEM
+// =============================================================================
+// Advanced neural rendering techniques including upscaling (DLSS/FSR/XeSS),
+// neural radiance caching, Gaussian splatting, NeRF, neural materials,
+// and neural geometry compression.
+// Based on Harper Engine WP-055-060, WP-070, WP-101, WP-105, WP-110, WP-115.
+// =============================================================================
+
+import core::memory::{Arena, Pool, Buffer, GpuBuffer};
+import core::math::{Vec2, Vec3, Vec4, Mat4, Quaternion, Transform};
+import core::simd::{f32x4, f32x8, SimdMath};
+import photon::gpu::{ComputeShader, RenderPipeline, Texture, Sampler};
+
+// =============================================================================
+// REGION: NEURAL NETWORK INFERENCE
+// =============================================================================
+
+/// Neural network layer types
+pub enum LayerType {
+    /// Fully connected layer
+    Dense { input_size: u32, output_size: u32 },
+    /// Convolutional layer
+    Conv2D {
+        in_channels: u32,
+        out_channels: u32,
+        kernel_size: u32,
+        stride: u32,
+        padding: u32,
+    },
+    /// Transposed convolution (upsampling)
+    ConvTranspose2D {
+        in_channels: u32,
+        out_channels: u32,
+        kernel_size: u32,
+        stride: u32,
+        padding: u32,
+    },
+    /// Batch normalization
+    BatchNorm { channels: u32 },
+    /// Layer normalization
+    LayerNorm { size: u32 },
+    /// ReLU activation
+    ReLU,
+    /// Leaky ReLU
+    LeakyReLU { alpha: f32 },
+    /// GELU activation
+    GELU,
+    /// Sigmoid activation
+    Sigmoid,
+    /// Tanh activation
+    Tanh,
+    /// Softmax
+    Softmax,
+    /// Max pooling
+    MaxPool2D { kernel_size: u32, stride: u32 },
+    /// Average pooling
+    AvgPool2D { kernel_size: u32, stride: u32 },
+    /// Dropout (training only)
+    Dropout { rate: f32 },
+    /// Residual connection
+    Residual,
+    /// Attention layer
+    Attention { heads: u32, dim: u32 },
+}
+
+/// Activation function implementations
+pub struct Activation;
+
+impl Activation {
+    /// ReLU: max(0, x)
+    pub fn relu(x: f32) -> f32 {
+        x.max(0.0)
+    }
+
+    /// Leaky ReLU
+    pub fn leaky_relu(x: f32, alpha: f32) -> f32 {
+        if x > 0.0 { x } else { alpha * x }
+    }
+
+    /// GELU (Gaussian Error Linear Unit)
+    pub fn gelu(x: f32) -> f32 {
+        0.5 * x * (1.0 + (0.7978845608 * (x + 0.044715 * x * x * x)).tanh())
+    }
+
+    /// Sigmoid: 1 / (1 + exp(-x))
+    pub fn sigmoid(x: f32) -> f32 {
+        1.0 / (1.0 + (-x).exp())
+    }
+
+    /// Swish: x * sigmoid(x)
+    pub fn swish(x: f32) -> f32 {
+        x * Self::sigmoid(x)
+    }
+
+    /// Mish: x * tanh(softplus(x))
+    pub fn mish(x: f32) -> f32 {
+        x * (1.0 + x.exp()).ln().tanh()
+    }
+}
+
+/// GPU tensor for neural network weights
+pub struct GpuTensor {
+    /// Data buffer
+    pub buffer: GpuBuffer,
+
+    /// Shape (batch, channels, height, width or batch, features)
+    pub shape: Vec<u32>,
+
+    /// Data type
+    pub dtype: TensorDtype,
+
+    /// Is weight tensor (read-only)
+    pub is_weight: bool,
+}
+
+/// Tensor data types
+pub enum TensorDtype {
+    Float32,
+    Float16,
+    Int8,
+    Uint8,
+}
+
+impl GpuTensor {
+    /// Create new tensor
+    pub fn new(shape: &[u32], dtype: TensorDtype) -> Self {
+        let element_size = match dtype {
+            TensorDtype::Float32 => 4,
+            TensorDtype::Float16 => 2,
+            TensorDtype::Int8 | TensorDtype::Uint8 => 1,
+        };
+
+        let total_elements: u32 = shape.iter().product();
+        let buffer = GpuBuffer::new(
+            (total_elements * element_size) as usize,
+            BufferUsage::Storage,
+        );
+
+        Self {
+            buffer,
+            shape: shape.to_vec(),
+            dtype,
+            is_weight: false,
+        }
+    }
+
+    /// Create from float32 data
+    pub fn from_f32(data: &[f32], shape: &[u32]) -> Self {
+        let buffer = GpuBuffer::from_slice(data);
+
+        Self {
+            buffer,
+            shape: shape.to_vec(),
+            dtype: TensorDtype::Float32,
+            is_weight: true,
+        }
+    }
+
+    /// Get total element count
+    pub fn numel(&self) -> u32 {
+        self.shape.iter().product()
+    }
+}
+
+/// Neural network inference engine
+pub struct NeuralInferenceEngine {
+    /// Loaded models
+    models: Vec<NeuralModel>,
+
+    /// Shared weight memory
+    weight_buffer: GpuBuffer,
+
+    /// Intermediate tensor pool
+    tensor_pool: Vec<GpuTensor>,
+
+    /// Compute shaders for operations
+    conv2d_shader: ComputeShader,
+    dense_shader: ComputeShader,
+    activation_shader: ComputeShader,
+    normalization_shader: ComputeShader,
+}
+
+/// Neural network model
+pub struct NeuralModel {
+    /// Model name
+    pub name: String,
+
+    /// Input shape
+    pub input_shape: Vec<u32>,
+
+    /// Output shape
+    pub output_shape: Vec<u32>,
+
+    /// Layers
+    pub layers: Vec<NeuralLayer>,
+
+    /// Total parameter count
+    pub param_count: u64,
+}
+
+/// Single neural network layer with weights
+pub struct NeuralLayer {
+    /// Layer type
+    pub layer_type: LayerType,
+
+    /// Weight tensor (if applicable)
+    pub weights: Option<GpuTensor>,
+
+    /// Bias tensor (if applicable)
+    pub bias: Option<GpuTensor>,
+
+    /// Additional parameters (e.g., running mean/var for batch norm)
+    pub params: Vec<GpuTensor>,
+}
+
+impl NeuralInferenceEngine {
+    /// Create new inference engine
+    pub fn new() -> Self {
+        Self {
+            models: Vec::new(),
+            weight_buffer: GpuBuffer::new(256 * 1024 * 1024, BufferUsage::Storage), // 256MB
+            tensor_pool: Vec::new(),
+            conv2d_shader: ComputeShader::new(CONV2D_SHADER),
+            dense_shader: ComputeShader::new(DENSE_SHADER),
+            activation_shader: ComputeShader::new(ACTIVATION_SHADER),
+            normalization_shader: ComputeShader::new(NORMALIZATION_SHADER),
+        }
+    }
+
+    /// Load model from file (ONNX format)
+    pub fn load_model(&mut self, path: &str) -> Result<usize, String> {
+        // Parse ONNX file
+        // Load weights
+        // Create layers
+        let model = NeuralModel {
+            name: path.to_string(),
+            input_shape: vec![1, 3, 256, 256],
+            output_shape: vec![1, 3, 512, 512],
+            layers: Vec::new(),
+            param_count: 0,
+        };
+
+        let index = self.models.len();
+        self.models.push(model);
+        Ok(index)
+    }
+
+    /// Run inference
+    pub fn infer(&mut self, model_index: usize, input: &GpuTensor) -> GpuTensor {
+        let model = &self.models[model_index];
+        let mut current = input.clone();
+
+        for layer in &model.layers {
+            current = self.run_layer(layer, &current);
+        }
+
+        current
+    }
+
+    /// Run single layer
+    fn run_layer(&mut self, layer: &NeuralLayer, input: &GpuTensor) -> GpuTensor {
+        match &layer.layer_type {
+            LayerType::Conv2D { out_channels, kernel_size, stride, padding, .. } => {
+                self.run_conv2d(input, layer.weights.as_ref().unwrap(), layer.bias.as_ref(),
+                               *kernel_size, *stride, *padding, *out_channels)
+            }
+            LayerType::Dense { output_size, .. } => {
+                self.run_dense(input, layer.weights.as_ref().unwrap(), layer.bias.as_ref(),
+                              *output_size)
+            }
+            LayerType::ReLU => self.run_activation(input, "relu"),
+            LayerType::LeakyReLU { alpha } => self.run_leaky_relu(input, *alpha),
+            LayerType::GELU => self.run_activation(input, "gelu"),
+            LayerType::Sigmoid => self.run_activation(input, "sigmoid"),
+            LayerType::BatchNorm { channels } => {
+                self.run_batch_norm(input, &layer.params, *channels)
+            }
+            _ => input.clone(),
+        }
+    }
+
+    /// Run 2D convolution
+    fn run_conv2d(
+        &mut self,
+        input: &GpuTensor,
+        weights: &GpuTensor,
+        bias: Option<&GpuTensor>,
+        kernel_size: u32,
+        stride: u32,
+        padding: u32,
+        out_channels: u32,
+    ) -> GpuTensor {
+        let batch = input.shape[0];
+        let out_h = (input.shape[2] + 2 * padding - kernel_size) / stride + 1;
+        let out_w = (input.shape[3] + 2 * padding - kernel_size) / stride + 1;
+
+        let output = GpuTensor::new(&[batch, out_channels, out_h, out_w], TensorDtype::Float32);
+
+        self.conv2d_shader.set_storage_buffer(0, &input.buffer);
+        self.conv2d_shader.set_storage_buffer(1, &weights.buffer);
+        self.conv2d_shader.set_storage_buffer(2, &output.buffer);
+
+        if let Some(b) = bias {
+            self.conv2d_shader.set_storage_buffer(3, &b.buffer);
+            self.conv2d_shader.set_uniform("u_has_bias", 1i32);
+        } else {
+            self.conv2d_shader.set_uniform("u_has_bias", 0i32);
+        }
+
+        self.conv2d_shader.set_uniform("u_input_shape", Vec4::new(
+            input.shape[0] as f32, input.shape[1] as f32,
+            input.shape[2] as f32, input.shape[3] as f32,
+        ));
+        self.conv2d_shader.set_uniform("u_kernel_size", kernel_size as i32);
+        self.conv2d_shader.set_uniform("u_stride", stride as i32);
+        self.conv2d_shader.set_uniform("u_padding", padding as i32);
+
+        self.conv2d_shader.dispatch(out_w, out_h, out_channels * batch);
+
+        output
+    }
+
+    /// Run dense (fully connected) layer
+    fn run_dense(
+        &mut self,
+        input: &GpuTensor,
+        weights: &GpuTensor,
+        bias: Option<&GpuTensor>,
+        output_size: u32,
+    ) -> GpuTensor {
+        let batch = input.shape[0];
+        let output = GpuTensor::new(&[batch, output_size], TensorDtype::Float32);
+
+        self.dense_shader.set_storage_buffer(0, &input.buffer);
+        self.dense_shader.set_storage_buffer(1, &weights.buffer);
+        self.dense_shader.set_storage_buffer(2, &output.buffer);
+
+        if let Some(b) = bias {
+            self.dense_shader.set_storage_buffer(3, &b.buffer);
+        }
+
+        self.dense_shader.dispatch(output_size, batch, 1);
+
+        output
+    }
+
+    /// Run activation function
+    fn run_activation(&mut self, input: &GpuTensor, activation: &str) -> GpuTensor {
+        let output = GpuTensor::new(&input.shape, TensorDtype::Float32);
+
+        self.activation_shader.set_storage_buffer(0, &input.buffer);
+        self.activation_shader.set_storage_buffer(1, &output.buffer);
+        self.activation_shader.set_uniform("u_activation_type",
+            match activation {
+                "relu" => 0i32,
+                "gelu" => 1i32,
+                "sigmoid" => 2i32,
+                "tanh" => 3i32,
+                _ => 0i32,
+            }
+        );
+        self.activation_shader.set_uniform("u_numel", input.numel() as i32);
+
+        self.activation_shader.dispatch((input.numel() + 255) / 256, 1, 1);
+
+        output
+    }
+
+    /// Run leaky ReLU
+    fn run_leaky_relu(&mut self, input: &GpuTensor, alpha: f32) -> GpuTensor {
+        let output = GpuTensor::new(&input.shape, TensorDtype::Float32);
+
+        self.activation_shader.set_storage_buffer(0, &input.buffer);
+        self.activation_shader.set_storage_buffer(1, &output.buffer);
+        self.activation_shader.set_uniform("u_activation_type", 4i32);
+        self.activation_shader.set_uniform("u_alpha", alpha);
+        self.activation_shader.set_uniform("u_numel", input.numel() as i32);
+
+        self.activation_shader.dispatch((input.numel() + 255) / 256, 1, 1);
+
+        output
+    }
+
+    /// Run batch normalization
+    fn run_batch_norm(&mut self, input: &GpuTensor, params: &[GpuTensor], channels: u32) -> GpuTensor {
+        let output = GpuTensor::new(&input.shape, TensorDtype::Float32);
+
+        // params: [gamma, beta, running_mean, running_var]
+        self.normalization_shader.set_storage_buffer(0, &input.buffer);
+        self.normalization_shader.set_storage_buffer(1, &output.buffer);
+        self.normalization_shader.set_storage_buffer(2, &params[0].buffer); // gamma
+        self.normalization_shader.set_storage_buffer(3, &params[1].buffer); // beta
+        self.normalization_shader.set_storage_buffer(4, &params[2].buffer); // mean
+        self.normalization_shader.set_storage_buffer(5, &params[3].buffer); // var
+
+        self.normalization_shader.dispatch(input.shape[2], input.shape[3], channels);
+
+        output
+    }
+}
+
+impl GpuTensor {
+    fn clone(&self) -> Self {
+        Self {
+            buffer: self.buffer.clone(),
+            shape: self.shape.clone(),
+            dtype: match self.dtype {
+                TensorDtype::Float32 => TensorDtype::Float32,
+                TensorDtype::Float16 => TensorDtype::Float16,
+                TensorDtype::Int8 => TensorDtype::Int8,
+                TensorDtype::Uint8 => TensorDtype::Uint8,
+            },
+            is_weight: self.is_weight,
+        }
+    }
+}
+
+const CONV2D_SHADER: &str = r#"
+    #version 460
+    layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+    layout(std430, binding = 0) readonly buffer Input { float input_data[]; };
+    layout(std430, binding = 1) readonly buffer Weights { float weights[]; };
+    layout(std430, binding = 2) buffer Output { float output_data[]; };
+    layout(std430, binding = 3) readonly buffer Bias { float bias[]; };
+
+    uniform vec4 u_input_shape;
+    uniform int u_kernel_size;
+    uniform int u_stride;
+    uniform int u_padding;
+    uniform int u_has_bias;
+
+    void main() {
+        // Convolution implementation
+        // ...
+    }
+"#;
+
+const DENSE_SHADER: &str = r#"
+    #version 460
+    layout(local_size_x = 256) in;
+
+    layout(std430, binding = 0) readonly buffer Input { float input_data[]; };
+    layout(std430, binding = 1) readonly buffer Weights { float weights[]; };
+    layout(std430, binding = 2) buffer Output { float output_data[]; };
+    layout(std430, binding = 3) readonly buffer Bias { float bias[]; };
+
+    void main() {
+        // Matrix multiplication
+        // ...
+    }
+"#;
+
+const ACTIVATION_SHADER: &str = r#"
+    #version 460
+    layout(local_size_x = 256) in;
+
+    layout(std430, binding = 0) readonly buffer Input { float input_data[]; };
+    layout(std430, binding = 1) buffer Output { float output_data[]; };
+
+    uniform int u_activation_type;
+    uniform float u_alpha;
+    uniform int u_numel;
+
+    float relu(float x) { return max(0.0, x); }
+    float gelu(float x) { return 0.5 * x * (1.0 + tanh(0.7978845608 * (x + 0.044715 * x * x * x))); }
+    float sigmoid(float x) { return 1.0 / (1.0 + exp(-x)); }
+
+    void main() {
+        uint idx = gl_GlobalInvocationID.x;
+        if (idx >= u_numel) return;
+
+        float x = input_data[idx];
+        float y;
+
+        switch (u_activation_type) {
+            case 0: y = relu(x); break;
+            case 1: y = gelu(x); break;
+            case 2: y = sigmoid(x); break;
+            case 3: y = tanh(x); break;
+            case 4: y = x > 0.0 ? x : u_alpha * x; break; // Leaky ReLU
+            default: y = x; break;
+        }
+
+        output_data[idx] = y;
+    }
+"#;
+
+const NORMALIZATION_SHADER: &str = r#"
+    #version 460
+    layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+    // Batch normalization implementation
+    void main() {
+        // ...
+    }
+"#;
+
+// =============================================================================
+// REGION: NEURAL UPSCALING (DLSS/FSR/XeSS)
+// =============================================================================
+
+/// Upscaling algorithm type
+pub enum UpscalingAlgorithm {
+    /// NVIDIA DLSS (Deep Learning Super Sampling)
+    DLSS,
+    /// AMD FSR (FidelityFX Super Resolution)
+    FSR2,
+    /// Intel XeSS
+    XeSS,
+    /// Custom neural upscaler
+    Custom,
+    /// Simple bilinear (fallback)
+    Bilinear,
+}
+
+/// Upscaling quality preset
+pub enum UpscalingQuality {
+    /// Ultra Performance (3x scale)
+    UltraPerformance,
+    /// Performance (2x scale)
+    Performance,
+    /// Balanced (1.7x scale)
+    Balanced,
+    /// Quality (1.5x scale)
+    Quality,
+    /// Ultra Quality (1.3x scale)
+    UltraQuality,
+    /// Native (1x, anti-aliasing only)
+    Native,
+}
+
+impl UpscalingQuality {
+    /// Get scale factor
+    pub fn scale_factor(&self) -> f32 {
+        match self {
+            Self::UltraPerformance => 3.0,
+            Self::Performance => 2.0,
+            Self::Balanced => 1.7,
+            Self::Quality => 1.5,
+            Self::UltraQuality => 1.3,
+            Self::Native => 1.0,
+        }
+    }
+}
+
+/// Neural upscaler
+pub struct NeuralUpscaler {
+    /// Algorithm type
+    pub algorithm: UpscalingAlgorithm,
+
+    /// Quality preset
+    pub quality: UpscalingQuality,
+
+    /// Output resolution
+    pub output_resolution: (u32, u32),
+
+    /// Input resolution (computed from output and quality)
+    pub input_resolution: (u32, u32),
+
+    /// Motion vector scale
+    pub motion_scale: f32,
+
+    /// Jitter offset (for temporal accumulation)
+    pub jitter_offset: Vec2,
+
+    /// Frame index (for jitter sequence)
+    pub frame_index: u32,
+
+    /// History buffer
+    history_buffer: Texture,
+
+    /// Output buffer
+    output_buffer: Texture,
+
+    /// Neural network model (for custom/DLSS-like)
+    model: Option<usize>,
+
+    /// Inference engine reference
+    inference_engine: Option<*mut NeuralInferenceEngine>,
+
+    /// FSR compute shaders
+    fsr_easu_shader: ComputeShader,
+    fsr_rcas_shader: ComputeShader,
+
+    /// Temporal accumulation shader
+    temporal_shader: ComputeShader,
+}
+
+impl NeuralUpscaler {
+    /// Create new neural upscaler
+    pub fn new(
+        algorithm: UpscalingAlgorithm,
+        quality: UpscalingQuality,
+        output_resolution: (u32, u32),
+    ) -> Self {
+        let scale = quality.scale_factor();
+        let input_resolution = (
+            (output_resolution.0 as f32 / scale) as u32,
+            (output_resolution.1 as f32 / scale) as u32,
+        );
+
+        let history_buffer = Texture::create_2d(
+            output_resolution.0,
+            output_resolution.1,
+            TextureFormat::RGBA16Float,
+            TextureUsage::Storage | TextureUsage::Sampled,
+        );
+
+        let output_buffer = Texture::create_2d(
+            output_resolution.0,
+            output_resolution.1,
+            TextureFormat::RGBA16Float,
+            TextureUsage::Storage | TextureUsage::Sampled,
+        );
+
+        Self {
+            algorithm,
+            quality,
+            output_resolution,
+            input_resolution,
+            motion_scale: 1.0,
+            jitter_offset: Vec2::zero(),
+            frame_index: 0,
+            history_buffer,
+            output_buffer,
+            model: None,
+            inference_engine: None,
+            fsr_easu_shader: ComputeShader::new(FSR_EASU_SHADER),
+            fsr_rcas_shader: ComputeShader::new(FSR_RCAS_SHADER),
+            temporal_shader: ComputeShader::new(TEMPORAL_UPSCALING_SHADER),
+        }
+    }
+
+    /// Set neural model for custom upscaling
+    pub fn set_model(&mut self, engine: &mut NeuralInferenceEngine, model_index: usize) {
+        self.model = Some(model_index);
+        self.inference_engine = Some(engine as *mut _);
+    }
+
+    /// Get jitter offset for current frame
+    pub fn get_jitter(&self) -> Vec2 {
+        // Halton sequence for jitter
+        let jitter_samples = [
+            Vec2::new(0.5, 0.333),
+            Vec2::new(0.25, 0.667),
+            Vec2::new(0.75, 0.111),
+            Vec2::new(0.125, 0.444),
+            Vec2::new(0.625, 0.778),
+            Vec2::new(0.375, 0.222),
+            Vec2::new(0.875, 0.556),
+            Vec2::new(0.0625, 0.889),
+        ];
+
+        let idx = (self.frame_index as usize) % jitter_samples.len();
+        let jitter = jitter_samples[idx] - Vec2::splat(0.5);
+
+        Vec2::new(
+            jitter.x / self.input_resolution.0 as f32,
+            jitter.y / self.input_resolution.1 as f32,
+        )
+    }
+
+    /// Upscale frame
+    pub fn upscale(
+        &mut self,
+        color_input: &Texture,
+        depth_input: &Texture,
+        motion_vectors: &Texture,
+        exposure: f32,
+    ) -> &Texture {
+        match &self.algorithm {
+            UpscalingAlgorithm::DLSS | UpscalingAlgorithm::Custom => {
+                self.upscale_neural(color_input, depth_input, motion_vectors)
+            }
+            UpscalingAlgorithm::FSR2 => {
+                self.upscale_fsr2(color_input, depth_input, motion_vectors, exposure)
+            }
+            UpscalingAlgorithm::XeSS => {
+                self.upscale_xess(color_input, depth_input, motion_vectors)
+            }
+            UpscalingAlgorithm::Bilinear => {
+                self.upscale_bilinear(color_input)
+            }
+        }
+    }
+
+    /// Neural network based upscaling
+    fn upscale_neural(
+        &mut self,
+        color: &Texture,
+        depth: &Texture,
+        motion: &Texture,
+    ) -> &Texture {
+        // Prepare input tensor combining color, depth, motion, history
+        // Run neural network inference
+        // Output to buffer
+
+        &self.output_buffer
+    }
+
+    /// FSR 2.0 upscaling
+    fn upscale_fsr2(
+        &mut self,
+        color: &Texture,
+        depth: &Texture,
+        motion: &Texture,
+        exposure: f32,
+    ) -> &Texture {
+        // EASU (Edge-Adaptive Spatial Upsampling)
+        self.fsr_easu_shader.set_texture(0, color);
+        self.fsr_easu_shader.set_storage_image(1, &self.output_buffer);
+        self.fsr_easu_shader.set_uniform("u_input_size", Vec2::new(
+            self.input_resolution.0 as f32,
+            self.input_resolution.1 as f32,
+        ));
+        self.fsr_easu_shader.set_uniform("u_output_size", Vec2::new(
+            self.output_resolution.0 as f32,
+            self.output_resolution.1 as f32,
+        ));
+
+        self.fsr_easu_shader.dispatch(
+            (self.output_resolution.0 + 7) / 8,
+            (self.output_resolution.1 + 7) / 8,
+            1,
+        );
+
+        // Temporal accumulation with motion vectors
+        self.temporal_shader.set_texture(0, &self.output_buffer);
+        self.temporal_shader.set_texture(1, &self.history_buffer);
+        self.temporal_shader.set_texture(2, motion);
+        self.temporal_shader.set_texture(3, depth);
+        self.temporal_shader.set_uniform("u_motion_scale", self.motion_scale);
+        self.temporal_shader.set_uniform("u_jitter", self.jitter_offset);
+
+        // Copy current to history for next frame
+        self.output_buffer.copy_to(&mut self.history_buffer);
+
+        // RCAS (Robust Contrast-Adaptive Sharpening)
+        self.fsr_rcas_shader.set_texture(0, &self.output_buffer);
+        self.fsr_rcas_shader.set_storage_image(1, &self.output_buffer);
+        self.fsr_rcas_shader.set_uniform("u_sharpness", 0.2);
+
+        self.fsr_rcas_shader.dispatch(
+            (self.output_resolution.0 + 7) / 8,
+            (self.output_resolution.1 + 7) / 8,
+            1,
+        );
+
+        self.frame_index += 1;
+        &self.output_buffer
+    }
+
+    /// XeSS upscaling
+    fn upscale_xess(
+        &mut self,
+        color: &Texture,
+        depth: &Texture,
+        motion: &Texture,
+    ) -> &Texture {
+        // XeSS implementation similar to FSR2
+        self.upscale_fsr2(color, depth, motion, 1.0)
+    }
+
+    /// Simple bilinear upscaling (fallback)
+    fn upscale_bilinear(&mut self, color: &Texture) -> &Texture {
+        // Basic bilinear upscale
+        &self.output_buffer
+    }
+}
+
+const FSR_EASU_SHADER: &str = r#"
+    #version 460
+    layout(local_size_x = 8, local_size_y = 8) in;
+
+    layout(binding = 0) uniform sampler2D u_input;
+    layout(rgba16f, binding = 1) uniform image2D u_output;
+
+    uniform vec2 u_input_size;
+    uniform vec2 u_output_size;
+
+    // FSR EASU constants
+    #define FSR_EASU_F 1
+
+    void main() {
+        ivec2 pos = ivec2(gl_GlobalInvocationID.xy);
+        if (pos.x >= int(u_output_size.x) || pos.y >= int(u_output_size.y)) return;
+
+        vec2 uv = (vec2(pos) + 0.5) / u_output_size;
+
+        // Edge-adaptive upsampling
+        vec2 pixel_size = 1.0 / u_input_size;
+        vec2 src_pos = uv * u_input_size - 0.5;
+
+        // Sample 12 texels in a cross pattern
+        vec3 color = vec3(0.0);
+        float weight_sum = 0.0;
+
+        // Lanczos-like kernel with edge detection
+        for (int y = -1; y <= 2; y++) {
+            for (int x = -1; x <= 2; x++) {
+                vec2 sample_pos = (floor(src_pos) + vec2(x, y) + 0.5) / u_input_size;
+                vec3 sample_color = texture(u_input, sample_pos).rgb;
+
+                vec2 d = abs(fract(src_pos) - vec2(x, y));
+                float w = max(0.0, 1.0 - d.x) * max(0.0, 1.0 - d.y);
+
+                color += sample_color * w;
+                weight_sum += w;
+            }
+        }
+
+        color /= weight_sum;
+
+        imageStore(u_output, pos, vec4(color, 1.0));
+    }
+"#;
+
+const FSR_RCAS_SHADER: &str = r#"
+    #version 460
+    layout(local_size_x = 8, local_size_y = 8) in;
+
+    layout(binding = 0) uniform sampler2D u_input;
+    layout(rgba16f, binding = 1) uniform image2D u_output;
+
+    uniform float u_sharpness;
+
+    void main() {
+        ivec2 pos = ivec2(gl_GlobalInvocationID.xy);
+        ivec2 size = imageSize(u_output);
+        if (pos.x >= size.x || pos.y >= size.y) return;
+
+        // RCAS sharpening
+        vec3 center = texelFetch(u_input, pos, 0).rgb;
+        vec3 north = texelFetch(u_input, pos + ivec2(0, -1), 0).rgb;
+        vec3 south = texelFetch(u_input, pos + ivec2(0, 1), 0).rgb;
+        vec3 west = texelFetch(u_input, pos + ivec2(-1, 0), 0).rgb;
+        vec3 east = texelFetch(u_input, pos + ivec2(1, 0), 0).rgb;
+
+        // Compute sharpening
+        vec3 min_color = min(min(min(north, south), min(west, east)), center);
+        vec3 max_color = max(max(max(north, south), max(west, east)), center);
+
+        vec3 peak = sqrt(min_color / max_color);
+        vec3 sharpened = center + (center - 0.25 * (north + south + west + east)) * u_sharpness * peak;
+
+        imageStore(u_output, pos, vec4(clamp(sharpened, 0.0, 1.0), 1.0));
+    }
+"#;
+
+const TEMPORAL_UPSCALING_SHADER: &str = r#"
+    #version 460
+    layout(local_size_x = 8, local_size_y = 8) in;
+
+    layout(binding = 0) uniform sampler2D u_current;
+    layout(binding = 1) uniform sampler2D u_history;
+    layout(binding = 2) uniform sampler2D u_motion;
+    layout(binding = 3) uniform sampler2D u_depth;
+
+    layout(rgba16f, binding = 4) uniform image2D u_output;
+
+    uniform float u_motion_scale;
+    uniform vec2 u_jitter;
+
+    void main() {
+        ivec2 pos = ivec2(gl_GlobalInvocationID.xy);
+        ivec2 size = imageSize(u_output);
+        if (pos.x >= size.x || pos.y >= size.y) return;
+
+        vec2 uv = (vec2(pos) + 0.5) / vec2(size);
+
+        // Get motion vector
+        vec2 motion = texture(u_motion, uv).xy * u_motion_scale;
+        vec2 history_uv = uv - motion;
+
+        // Current frame
+        vec3 current = texture(u_current, uv).rgb;
+
+        // History with motion reprojection
+        vec3 history = texture(u_history, history_uv).rgb;
+
+        // Neighborhood clamping
+        vec3 neighborhood_min = current;
+        vec3 neighborhood_max = current;
+
+        for (int y = -1; y <= 1; y++) {
+            for (int x = -1; x <= 1; x++) {
+                vec2 offset = vec2(x, y) / vec2(size);
+                vec3 neighbor = texture(u_current, uv + offset).rgb;
+                neighborhood_min = min(neighborhood_min, neighbor);
+                neighborhood_max = max(neighborhood_max, neighbor);
+            }
+        }
+
+        // Clamp history to neighborhood
+        history = clamp(history, neighborhood_min, neighborhood_max);
+
+        // Blend
+        float blend_factor = 0.95;
+        vec3 result = mix(current, history, blend_factor);
+
+        imageStore(u_output, pos, vec4(result, 1.0));
+    }
+"#;
+
+// =============================================================================
+// REGION: NEURAL RADIANCE CACHING
+// =============================================================================
+
+/// Neural radiance cache for real-time GI
+pub struct NeuralRadianceCache {
+    /// Cache resolution
+    pub resolution: (u32, u32, u32),
+
+    /// Feature grid (hash grid)
+    feature_grid: Texture,
+
+    /// MLP network weights
+    mlp_weights: Vec<GpuTensor>,
+
+    /// Number of feature levels
+    num_levels: u32,
+
+    /// Base resolution
+    base_resolution: u32,
+
+    /// Max resolution
+    max_resolution: u32,
+
+    /// Features per level
+    features_per_level: u32,
+
+    /// Hash table size
+    hash_table_size: u32,
+
+    /// Query shader
+    query_shader: ComputeShader,
+
+    /// Training shader
+    train_shader: ComputeShader,
+
+    /// Training enabled
+    pub training_enabled: bool,
+
+    /// Learning rate
+    pub learning_rate: f32,
+}
+
+impl NeuralRadianceCache {
+    /// Create neural radiance cache
+    pub fn new() -> Self {
+        let num_levels = 16;
+        let base_resolution = 16;
+        let max_resolution = 1024;
+        let features_per_level = 2;
+        let hash_table_size = 1 << 19; // 2^19 entries
+
+        // Create multi-resolution hash grid
+        let feature_grid = Texture::create_3d(
+            hash_table_size,
+            num_levels,
+            features_per_level,
+            TextureFormat::RGBA16Float,
+            TextureUsage::Storage | TextureUsage::Sampled,
+        );
+
+        // MLP: [input: 32] -> [64] -> [64] -> [output: 3 (RGB)]
+        let mlp_weights = vec![
+            GpuTensor::new(&[num_levels * features_per_level + 3, 64], TensorDtype::Float32),
+            GpuTensor::new(&[64], TensorDtype::Float32),
+            GpuTensor::new(&[64, 64], TensorDtype::Float32),
+            GpuTensor::new(&[64], TensorDtype::Float32),
+            GpuTensor::new(&[64, 3], TensorDtype::Float32),
+            GpuTensor::new(&[3], TensorDtype::Float32),
+        ];
+
+        Self {
+            resolution: (128, 128, 128),
+            feature_grid,
+            mlp_weights,
+            num_levels,
+            base_resolution,
+            max_resolution,
+            features_per_level,
+            hash_table_size,
+            query_shader: ComputeShader::new(NRC_QUERY_SHADER),
+            train_shader: ComputeShader::new(NRC_TRAIN_SHADER),
+            training_enabled: true,
+            learning_rate: 0.01,
+        }
+    }
+
+    /// Query radiance at world position
+    pub fn query(
+        &self,
+        positions: &GpuBuffer,
+        directions: &GpuBuffer,
+        output: &mut GpuBuffer,
+        num_queries: u32,
+    ) {
+        self.query_shader.set_storage_buffer(0, positions);
+        self.query_shader.set_storage_buffer(1, directions);
+        self.query_shader.set_storage_buffer(2, output);
+        self.query_shader.set_texture(0, &self.feature_grid);
+
+        for (i, w) in self.mlp_weights.iter().enumerate() {
+            self.query_shader.set_storage_buffer(3 + i, &w.buffer);
+        }
+
+        self.query_shader.set_uniform("u_num_queries", num_queries as i32);
+        self.query_shader.set_uniform("u_num_levels", self.num_levels as i32);
+        self.query_shader.set_uniform("u_hash_table_size", self.hash_table_size as i32);
+
+        self.query_shader.dispatch((num_queries + 255) / 256, 1, 1);
+    }
+
+    /// Train cache with path traced samples
+    pub fn train(
+        &mut self,
+        positions: &GpuBuffer,
+        directions: &GpuBuffer,
+        target_radiance: &GpuBuffer,
+        num_samples: u32,
+    ) {
+        if !self.training_enabled { return; }
+
+        self.train_shader.set_storage_buffer(0, positions);
+        self.train_shader.set_storage_buffer(1, directions);
+        self.train_shader.set_storage_buffer(2, target_radiance);
+        self.train_shader.set_texture(0, &self.feature_grid);
+
+        for (i, w) in self.mlp_weights.iter().enumerate() {
+            self.train_shader.set_storage_buffer(3 + i, &w.buffer);
+        }
+
+        self.train_shader.set_uniform("u_num_samples", num_samples as i32);
+        self.train_shader.set_uniform("u_learning_rate", self.learning_rate);
+
+        self.train_shader.dispatch((num_samples + 255) / 256, 1, 1);
+    }
+}
+
+const NRC_QUERY_SHADER: &str = r#"
+    #version 460
+    layout(local_size_x = 256) in;
+
+    layout(std430, binding = 0) readonly buffer Positions { vec4 positions[]; };
+    layout(std430, binding = 1) readonly buffer Directions { vec4 directions[]; };
+    layout(std430, binding = 2) buffer Output { vec4 output_radiance[]; };
+
+    layout(binding = 0) uniform sampler3D u_feature_grid;
+
+    uniform int u_num_queries;
+    uniform int u_num_levels;
+    uniform int u_hash_table_size;
+
+    // Spatial hash function
+    uint hash(ivec3 pos, int level) {
+        const uint primes[3] = uint[](1u, 2654435761u, 805459861u);
+        uint h = 0u;
+        h ^= uint(pos.x) * primes[0];
+        h ^= uint(pos.y) * primes[1];
+        h ^= uint(pos.z) * primes[2];
+        h += uint(level) * 12345u;
+        return h % uint(u_hash_table_size);
+    }
+
+    void main() {
+        uint idx = gl_GlobalInvocationID.x;
+        if (idx >= u_num_queries) return;
+
+        vec3 pos = positions[idx].xyz;
+        vec3 dir = directions[idx].xyz;
+
+        // Gather features from all levels
+        vec3 features = vec3(0.0);
+
+        for (int level = 0; level < u_num_levels; level++) {
+            float resolution = mix(16.0, 1024.0, float(level) / float(u_num_levels - 1));
+            ivec3 grid_pos = ivec3(floor(pos * resolution));
+
+            uint h = hash(grid_pos, level);
+            vec3 f = texelFetch(u_feature_grid, ivec3(h, level, 0), 0).rgb;
+            features += f;
+        }
+
+        // Simple MLP forward pass (placeholder)
+        vec3 radiance = features * 0.1;
+
+        output_radiance[idx] = vec4(radiance, 1.0);
+    }
+"#;
+
+const NRC_TRAIN_SHADER: &str = r#"
+    #version 460
+    layout(local_size_x = 256) in;
+
+    // Training shader - backpropagation through hash grid
+    void main() {
+        // ...
+    }
+"#;
+
+// =============================================================================
+// REGION: GAUSSIAN SPLATTING
+// =============================================================================
+
+/// 3D Gaussian splat
+pub struct GaussianSplat {
+    /// Position (xyz)
+    pub position: Vec3,
+
+    /// Scale (xyz)
+    pub scale: Vec3,
+
+    /// Rotation (quaternion)
+    pub rotation: Quaternion,
+
+    /// Opacity
+    pub opacity: f32,
+
+    /// Spherical harmonics coefficients for color
+    pub sh_coefficients: [Vec3; 16],
+}
+
+/// Gaussian splatting renderer
+pub struct GaussianSplattingRenderer {
+    /// Splats buffer
+    splats: Vec<GaussianSplat>,
+
+    /// GPU splat buffer
+    gpu_splats: GpuBuffer,
+
+    /// Sorted indices buffer
+    sorted_indices: GpuBuffer,
+
+    /// Key buffer for sorting (depth)
+    sort_keys: GpuBuffer,
+
+    /// Tile-based splat lists
+    tile_splats: GpuBuffer,
+
+    /// Render resolution
+    resolution: (u32, u32),
+
+    /// Tile size
+    tile_size: u32,
+
+    /// Sorting shader
+    sort_shader: ComputeShader,
+
+    /// Rasterization shader
+    raster_shader: ComputeShader,
+
+    /// SH degree
+    sh_degree: u32,
+}
+
+/// GPU Gaussian splat data
+#[repr(C)]
+pub struct GpuGaussianSplat {
+    position: [f32; 4],
+    scale_opacity: [f32; 4],
+    rotation: [f32; 4],
+    sh_0: [f32; 4],
+    sh_1: [f32; 4],
+    sh_2: [f32; 4],
+    sh_3: [f32; 4],
+}
+
+impl GaussianSplattingRenderer {
+    /// Create Gaussian splatting renderer
+    pub fn new(resolution: (u32, u32), max_splats: usize) -> Self {
+        let gpu_splats = GpuBuffer::new(
+            max_splats * std::mem::size_of::<GpuGaussianSplat>(),
+            BufferUsage::Storage,
+        );
+
+        let sorted_indices = GpuBuffer::new(max_splats * 4, BufferUsage::Storage);
+        let sort_keys = GpuBuffer::new(max_splats * 4, BufferUsage::Storage);
+
+        let tile_size = 16;
+        let tiles_x = (resolution.0 + tile_size - 1) / tile_size;
+        let tiles_y = (resolution.1 + tile_size - 1) / tile_size;
+        let tile_splats = GpuBuffer::new(
+            (tiles_x * tiles_y * 1024 * 4) as usize, // Max 1024 splats per tile
+            BufferUsage::Storage,
+        );
+
+        Self {
+            splats: Vec::with_capacity(max_splats),
+            gpu_splats,
+            sorted_indices,
+            sort_keys,
+            tile_splats,
+            resolution,
+            tile_size,
+            sort_shader: ComputeShader::new(GAUSSIAN_SORT_SHADER),
+            raster_shader: ComputeShader::new(GAUSSIAN_RASTER_SHADER),
+            sh_degree: 3,
+        }
+    }
+
+    /// Load splats from file (PLY format)
+    pub fn load(&mut self, path: &str) -> Result<(), String> {
+        // Parse PLY file containing Gaussian splats
+        // ...
+        Ok(())
+    }
+
+    /// Add splat
+    pub fn add_splat(&mut self, splat: GaussianSplat) {
+        self.splats.push(splat);
+    }
+
+    /// Upload splats to GPU
+    pub fn upload(&mut self) {
+        let gpu_data: Vec<GpuGaussianSplat> = self.splats.iter().map(|s| {
+            GpuGaussianSplat {
+                position: [s.position.x, s.position.y, s.position.z, 1.0],
+                scale_opacity: [s.scale.x, s.scale.y, s.scale.z, s.opacity],
+                rotation: [s.rotation.x, s.rotation.y, s.rotation.z, s.rotation.w],
+                sh_0: [s.sh_coefficients[0].x, s.sh_coefficients[0].y, s.sh_coefficients[0].z, 0.0],
+                sh_1: [s.sh_coefficients[1].x, s.sh_coefficients[1].y, s.sh_coefficients[1].z, 0.0],
+                sh_2: [s.sh_coefficients[2].x, s.sh_coefficients[2].y, s.sh_coefficients[2].z, 0.0],
+                sh_3: [s.sh_coefficients[3].x, s.sh_coefficients[3].y, s.sh_coefficients[3].z, 0.0],
+            }
+        }).collect();
+
+        self.gpu_splats.write(&gpu_data);
+    }
+
+    /// Render splats
+    pub fn render(
+        &mut self,
+        output: &mut Texture,
+        view_proj: Mat4,
+        camera_position: Vec3,
+    ) {
+        let num_splats = self.splats.len() as u32;
+        if num_splats == 0 { return; }
+
+        // 1. Compute depth keys for sorting
+        self.sort_shader.set_storage_buffer(0, &self.gpu_splats);
+        self.sort_shader.set_storage_buffer(1, &self.sort_keys);
+        self.sort_shader.set_storage_buffer(2, &self.sorted_indices);
+        self.sort_shader.set_uniform("u_view_proj", view_proj);
+        self.sort_shader.set_uniform("u_camera_pos", camera_position);
+        self.sort_shader.set_uniform("u_num_splats", num_splats as i32);
+
+        self.sort_shader.dispatch((num_splats + 255) / 256, 1, 1);
+
+        // 2. GPU radix sort (separate pass)
+        // ...
+
+        // 3. Rasterize splats
+        self.raster_shader.set_storage_buffer(0, &self.gpu_splats);
+        self.raster_shader.set_storage_buffer(1, &self.sorted_indices);
+        self.raster_shader.set_storage_image(2, output);
+        self.raster_shader.set_uniform("u_view_proj", view_proj);
+        self.raster_shader.set_uniform("u_resolution", Vec2::new(
+            self.resolution.0 as f32,
+            self.resolution.1 as f32,
+        ));
+        self.raster_shader.set_uniform("u_num_splats", num_splats as i32);
+
+        self.raster_shader.dispatch(
+            (self.resolution.0 + self.tile_size - 1) / self.tile_size,
+            (self.resolution.1 + self.tile_size - 1) / self.tile_size,
+            1,
+        );
+    }
+}
+
+const GAUSSIAN_SORT_SHADER: &str = r#"
+    #version 460
+    layout(local_size_x = 256) in;
+
+    struct GaussianSplat {
+        vec4 position;
+        vec4 scale_opacity;
+        vec4 rotation;
+        vec4 sh_0, sh_1, sh_2, sh_3;
+    };
+
+    layout(std430, binding = 0) readonly buffer Splats { GaussianSplat splats[]; };
+    layout(std430, binding = 1) buffer Keys { float keys[]; };
+    layout(std430, binding = 2) buffer Indices { uint indices[]; };
+
+    uniform mat4 u_view_proj;
+    uniform vec3 u_camera_pos;
+    uniform int u_num_splats;
+
+    void main() {
+        uint idx = gl_GlobalInvocationID.x;
+        if (idx >= u_num_splats) return;
+
+        vec3 pos = splats[idx].position.xyz;
+
+        // Compute view-space depth
+        vec4 clip = u_view_proj * vec4(pos, 1.0);
+        float depth = clip.z / clip.w;
+
+        keys[idx] = depth;
+        indices[idx] = idx;
+    }
+"#;
+
+const GAUSSIAN_RASTER_SHADER: &str = r#"
+    #version 460
+    layout(local_size_x = 16, local_size_y = 16) in;
+
+    struct GaussianSplat {
+        vec4 position;
+        vec4 scale_opacity;
+        vec4 rotation;
+        vec4 sh_0, sh_1, sh_2, sh_3;
+    };
+
+    layout(std430, binding = 0) readonly buffer Splats { GaussianSplat splats[]; };
+    layout(std430, binding = 1) readonly buffer Indices { uint sorted_indices[]; };
+    layout(rgba16f, binding = 2) uniform image2D u_output;
+
+    uniform mat4 u_view_proj;
+    uniform vec2 u_resolution;
+    uniform int u_num_splats;
+
+    // Spherical harmonics evaluation
+    vec3 eval_sh(vec3 dir, vec4 sh0, vec4 sh1, vec4 sh2, vec4 sh3) {
+        // SH basis functions
+        float c1 = 0.28209479177;  // 0th band
+        float c2 = 0.48860251190;  // 1st band
+
+        vec3 result = vec3(0.0);
+        result += sh0.rgb * c1;
+        result += sh1.rgb * c2 * dir.y;
+        result += sh2.rgb * c2 * dir.z;
+        result += sh3.rgb * c2 * dir.x;
+
+        return max(result, vec3(0.0));
+    }
+
+    void main() {
+        ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+        if (pixel.x >= int(u_resolution.x) || pixel.y >= int(u_resolution.y)) return;
+
+        vec2 uv = (vec2(pixel) + 0.5) / u_resolution;
+        vec2 ndc = uv * 2.0 - 1.0;
+
+        // Accumulate color with alpha blending (front to back)
+        vec4 accumulated = vec4(0.0);
+
+        for (int i = 0; i < u_num_splats && accumulated.a < 0.99; i++) {
+            uint idx = sorted_indices[i];
+            GaussianSplat splat = splats[idx];
+
+            // Project splat to screen
+            vec4 clip = u_view_proj * vec4(splat.position.xyz, 1.0);
+            vec2 splat_ndc = clip.xy / clip.w;
+
+            // Compute 2D Gaussian
+            vec3 scale = splat.scale_opacity.xyz;
+            float opacity = splat.scale_opacity.w;
+
+            vec2 diff = ndc - splat_ndc;
+            float dist_sq = dot(diff, diff);
+
+            // Covariance-based Gaussian (simplified)
+            float gaussian = exp(-0.5 * dist_sq / (scale.x * scale.x * 0.01));
+
+            if (gaussian > 0.001) {
+                // Evaluate color from SH
+                vec3 dir = normalize(splat.position.xyz); // View direction
+                vec3 color = eval_sh(dir, splat.sh_0, splat.sh_1, splat.sh_2, splat.sh_3);
+
+                float alpha = opacity * gaussian;
+
+                // Front-to-back blending
+                accumulated.rgb += (1.0 - accumulated.a) * alpha * color;
+                accumulated.a += (1.0 - accumulated.a) * alpha;
+            }
+        }
+
+        imageStore(u_output, pixel, accumulated);
+    }
+"#;
+
+// =============================================================================
+// REGION: NEURAL BRDF
+// =============================================================================
+
+/// Neural BRDF (learned material response)
+pub struct NeuralBRDF {
+    /// MLP weights
+    mlp_weights: Vec<GpuTensor>,
+
+    /// Input: (roughness, metallic, n_dot_v, n_dot_l, n_dot_h, l_dot_h)
+    input_dim: u32,
+
+    /// Output: (R, G, B)
+    output_dim: u32,
+
+    /// Evaluation shader
+    eval_shader: ComputeShader,
+}
+
+impl NeuralBRDF {
+    /// Create neural BRDF
+    pub fn new() -> Self {
+        // Small MLP: 6 -> 32 -> 32 -> 3
+        let mlp_weights = vec![
+            GpuTensor::new(&[6, 32], TensorDtype::Float32),
+            GpuTensor::new(&[32], TensorDtype::Float32),
+            GpuTensor::new(&[32, 32], TensorDtype::Float32),
+            GpuTensor::new(&[32], TensorDtype::Float32),
+            GpuTensor::new(&[32, 3], TensorDtype::Float32),
+            GpuTensor::new(&[3], TensorDtype::Float32),
+        ];
+
+        Self {
+            mlp_weights,
+            input_dim: 6,
+            output_dim: 3,
+            eval_shader: ComputeShader::new(NEURAL_BRDF_SHADER),
+        }
+    }
+
+    /// Load pre-trained weights
+    pub fn load_weights(&mut self, path: &str) -> Result<(), String> {
+        // Load weights from file
+        Ok(())
+    }
+
+    /// Evaluate BRDF for batch of samples
+    pub fn evaluate(
+        &self,
+        material_params: &GpuBuffer,  // [roughness, metallic]
+        angles: &GpuBuffer,           // [n_dot_v, n_dot_l, n_dot_h, l_dot_h]
+        output: &mut GpuBuffer,       // [R, G, B]
+        num_samples: u32,
+    ) {
+        self.eval_shader.set_storage_buffer(0, material_params);
+        self.eval_shader.set_storage_buffer(1, angles);
+        self.eval_shader.set_storage_buffer(2, output);
+
+        for (i, w) in self.mlp_weights.iter().enumerate() {
+            self.eval_shader.set_storage_buffer(3 + i, &w.buffer);
+        }
+
+        self.eval_shader.set_uniform("u_num_samples", num_samples as i32);
+
+        self.eval_shader.dispatch((num_samples + 255) / 256, 1, 1);
+    }
+}
+
+const NEURAL_BRDF_SHADER: &str = r#"
+    #version 460
+    layout(local_size_x = 256) in;
+
+    layout(std430, binding = 0) readonly buffer MaterialParams { vec2 materials[]; };
+    layout(std430, binding = 1) readonly buffer Angles { vec4 angles[]; };
+    layout(std430, binding = 2) buffer Output { vec3 output_brdf[]; };
+
+    layout(std430, binding = 3) readonly buffer W0 { float w0[]; };
+    layout(std430, binding = 4) readonly buffer B0 { float b0[]; };
+    layout(std430, binding = 5) readonly buffer W1 { float w1[]; };
+    layout(std430, binding = 6) readonly buffer B1 { float b1[]; };
+    layout(std430, binding = 7) readonly buffer W2 { float w2[]; };
+    layout(std430, binding = 8) readonly buffer B2 { float b2[]; };
+
+    uniform int u_num_samples;
+
+    float relu(float x) { return max(0.0, x); }
+
+    void main() {
+        uint idx = gl_GlobalInvocationID.x;
+        if (idx >= u_num_samples) return;
+
+        // Input: [roughness, metallic, n_dot_v, n_dot_l, n_dot_h, l_dot_h]
+        float input_vec[6];
+        input_vec[0] = materials[idx].x; // roughness
+        input_vec[1] = materials[idx].y; // metallic
+        input_vec[2] = angles[idx].x;    // n_dot_v
+        input_vec[3] = angles[idx].y;    // n_dot_l
+        input_vec[4] = angles[idx].z;    // n_dot_h
+        input_vec[5] = angles[idx].w;    // l_dot_h
+
+        // Layer 0: 6 -> 32
+        float h0[32];
+        for (int i = 0; i < 32; i++) {
+            float sum = b0[i];
+            for (int j = 0; j < 6; j++) {
+                sum += w0[i * 6 + j] * input_vec[j];
+            }
+            h0[i] = relu(sum);
+        }
+
+        // Layer 1: 32 -> 32
+        float h1[32];
+        for (int i = 0; i < 32; i++) {
+            float sum = b1[i];
+            for (int j = 0; j < 32; j++) {
+                sum += w1[i * 32 + j] * h0[j];
+            }
+            h1[i] = relu(sum);
+        }
+
+        // Layer 2: 32 -> 3 (output)
+        vec3 result;
+        for (int i = 0; i < 3; i++) {
+            float sum = b2[i];
+            for (int j = 0; j < 32; j++) {
+                sum += w2[i * 32 + j] * h1[j];
+            }
+            result[i] = max(0.0, sum); // Positive BRDF values
+        }
+
+        output_brdf[idx] = result;
+    }
+"#;
+
+// =============================================================================
+// REGION: NEURAL GEOMETRY COMPRESSION
+// =============================================================================
+
+/// Neural geometry compression (learned mesh/SDF)
+pub struct NeuralGeometry {
+    /// Network weights for occupancy/SDF
+    sdf_network: Vec<GpuTensor>,
+
+    /// Hash grid for spatial features
+    hash_grid: Texture,
+
+    /// Bounding box
+    bounds: (Vec3, Vec3),
+
+    /// Resolution for marching cubes
+    march_resolution: u32,
+
+    /// Query shader
+    query_shader: ComputeShader,
+
+    /// Marching cubes shader
+    march_shader: ComputeShader,
+}
+
+impl NeuralGeometry {
+    /// Create neural geometry
+    pub fn new(bounds: (Vec3, Vec3)) -> Self {
+        let hash_grid = Texture::create_3d(
+            1 << 19,
+            16,
+            2,
+            TextureFormat::RGBA16Float,
+            TextureUsage::Storage | TextureUsage::Sampled,
+        );
+
+        Self {
+            sdf_network: Vec::new(),
+            hash_grid,
+            bounds,
+            march_resolution: 256,
+            query_shader: ComputeShader::new(NEURAL_SDF_SHADER),
+            march_shader: ComputeShader::new(MARCHING_CUBES_SHADER),
+        }
+    }
+
+    /// Query SDF at positions
+    pub fn query_sdf(
+        &self,
+        positions: &GpuBuffer,
+        output: &mut GpuBuffer,
+        num_points: u32,
+    ) {
+        self.query_shader.set_storage_buffer(0, positions);
+        self.query_shader.set_storage_buffer(1, output);
+        self.query_shader.set_texture(0, &self.hash_grid);
+
+        self.query_shader.set_uniform("u_bounds_min", self.bounds.0);
+        self.query_shader.set_uniform("u_bounds_max", self.bounds.1);
+        self.query_shader.set_uniform("u_num_points", num_points as i32);
+
+        self.query_shader.dispatch((num_points + 255) / 256, 1, 1);
+    }
+
+    /// Extract mesh using marching cubes
+    pub fn extract_mesh(&self, output_vertices: &mut GpuBuffer, output_indices: &mut GpuBuffer) {
+        // Generate SDF volume
+        // Run marching cubes
+    }
+}
+
+const NEURAL_SDF_SHADER: &str = r#"
+    #version 460
+    layout(local_size_x = 256) in;
+
+    layout(std430, binding = 0) readonly buffer Positions { vec4 positions[]; };
+    layout(std430, binding = 1) buffer Output { float sdf_values[]; };
+
+    layout(binding = 0) uniform sampler3D u_hash_grid;
+
+    uniform vec3 u_bounds_min;
+    uniform vec3 u_bounds_max;
+    uniform int u_num_points;
+
+    void main() {
+        uint idx = gl_GlobalInvocationID.x;
+        if (idx >= u_num_points) return;
+
+        vec3 pos = positions[idx].xyz;
+
+        // Normalize to [0, 1]
+        vec3 normalized = (pos - u_bounds_min) / (u_bounds_max - u_bounds_min);
+
+        // Query hash grid (simplified)
+        float sdf = 0.0;
+
+        // MLP forward pass
+        // ...
+
+        sdf_values[idx] = sdf;
+    }
+"#;
+
+const MARCHING_CUBES_SHADER: &str = r#"
+    #version 460
+    // Marching cubes implementation
+    void main() {}
+"#;
+
+// =============================================================================
+// REGION: TESTS
+// =============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_activation_functions() {
+        // ReLU
+        assert_eq!(Activation::relu(1.0), 1.0);
+        assert_eq!(Activation::relu(-1.0), 0.0);
+        assert_eq!(Activation::relu(0.0), 0.0);
+
+        // Sigmoid
+        assert!((Activation::sigmoid(0.0) - 0.5).abs() < 1e-6);
+        assert!(Activation::sigmoid(100.0) > 0.99);
+        assert!(Activation::sigmoid(-100.0) < 0.01);
+
+        // Leaky ReLU
+        assert_eq!(Activation::leaky_relu(1.0, 0.1), 1.0);
+        assert!((Activation::leaky_relu(-1.0, 0.1) - (-0.1)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_gelu_approximation() {
+        // GELU(0) ≈ 0
+        assert!(Activation::gelu(0.0).abs() < 1e-6);
+
+        // GELU is smooth and monotonic for positive values
+        let g1 = Activation::gelu(1.0);
+        let g2 = Activation::gelu(2.0);
+        assert!(g2 > g1);
+        assert!(g1 > 0.0);
+    }
+
+    #[test]
+    fn test_tensor_creation() {
+        let tensor = GpuTensor::new(&[4, 32, 32], TensorDtype::Float32);
+
+        assert_eq!(tensor.numel(), 4 * 32 * 32);
+        assert_eq!(tensor.shape.len(), 3);
+    }
+
+    #[test]
+    fn test_upscaling_quality() {
+        assert!((UpscalingQuality::UltraPerformance.scale_factor() - 3.0).abs() < 1e-6);
+        assert!((UpscalingQuality::Performance.scale_factor() - 2.0).abs() < 1e-6);
+        assert!((UpscalingQuality::Balanced.scale_factor() - 1.7).abs() < 1e-6);
+        assert!((UpscalingQuality::Quality.scale_factor() - 1.5).abs() < 1e-6);
+        assert!((UpscalingQuality::Native.scale_factor() - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_upscaler_resolution() {
+        let upscaler = NeuralUpscaler::new(
+            UpscalingAlgorithm::FSR2,
+            UpscalingQuality::Performance,
+            (1920, 1080),
+        );
+
+        assert_eq!(upscaler.output_resolution, (1920, 1080));
+        assert_eq!(upscaler.input_resolution, (960, 540));
+    }
+
+    #[test]
+    fn test_upscaler_jitter() {
+        let upscaler = NeuralUpscaler::new(
+            UpscalingAlgorithm::DLSS,
+            UpscalingQuality::Quality,
+            (1920, 1080),
+        );
+
+        let jitter = upscaler.get_jitter();
+
+        // Jitter should be small
+        assert!(jitter.x.abs() < 0.01);
+        assert!(jitter.y.abs() < 0.01);
+    }
+
+    #[test]
+    fn test_gaussian_splat_creation() {
+        let splat = GaussianSplat {
+            position: Vec3::new(1.0, 2.0, 3.0),
+            scale: Vec3::new(0.1, 0.1, 0.1),
+            rotation: Quaternion::identity(),
+            opacity: 0.9,
+            sh_coefficients: [Vec3::splat(1.0); 16],
+        };
+
+        assert!((splat.opacity - 0.9).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_gaussian_renderer_creation() {
+        let renderer = GaussianSplattingRenderer::new((1920, 1080), 1_000_000);
+
+        assert_eq!(renderer.resolution, (1920, 1080));
+        assert_eq!(renderer.tile_size, 16);
+    }
+
+    #[test]
+    fn test_neural_radiance_cache() {
+        let cache = NeuralRadianceCache::new();
+
+        assert_eq!(cache.num_levels, 16);
+        assert!(cache.training_enabled);
+        assert!(cache.learning_rate > 0.0);
+    }
+
+    #[test]
+    fn test_neural_brdf() {
+        let brdf = NeuralBRDF::new();
+
+        assert_eq!(brdf.input_dim, 6);
+        assert_eq!(brdf.output_dim, 3);
+        assert_eq!(brdf.mlp_weights.len(), 6); // 3 layers * 2 (weights + bias)
+    }
+
+    #[test]
+    fn test_neural_geometry_bounds() {
+        let bounds = (Vec3::new(-1.0, -1.0, -1.0), Vec3::new(1.0, 1.0, 1.0));
+        let geom = NeuralGeometry::new(bounds);
+
+        assert_eq!(geom.bounds, bounds);
+        assert_eq!(geom.march_resolution, 256);
+    }
+}

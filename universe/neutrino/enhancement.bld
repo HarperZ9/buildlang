@@ -1,0 +1,1684 @@
+// ============================================================================
+// NEUTRINO: Neural Image Enhancement
+// ============================================================================
+// Advanced neural networks for image enhancement including HDR reconstruction,
+// detail enhancement, color correction, and frame generation.
+// ============================================================================
+
+import lib::{Tensor, Shape, DataType, Layer, Conv2d, Linear, BatchNorm2d, LayerNorm};
+import lib::{ReLU, LeakyReLU, GELU, SiLU, Sigmoid, Tanh, PReLU};
+import lib::{PixelShuffle, Upsample, Sequential, ResidualBlock};
+import lib::{MSELoss, L1Loss, PerceptualLoss, SSIMLoss};
+import inference::{InferenceSession, InferenceEngine, InferenceBackend};
+
+// ============================================================================
+// ENHANCEMENT TYPES AND CONFIGURATION
+// ============================================================================
+
+/// Image enhancement type
+pub enum EnhancementType {
+    /// HDR reconstruction from SDR
+    HDRReconstruction,
+    /// Detail and sharpness enhancement
+    DetailEnhancement,
+    /// Low-light enhancement
+    LowLightEnhancement,
+    /// Color correction and grading
+    ColorCorrection,
+    /// Frame interpolation
+    FrameInterpolation,
+    /// Artifact removal (compression, banding)
+    ArtifactRemoval,
+    /// Style transfer
+    StyleTransfer,
+    /// All-in-one enhancement
+    AllInOne,
+}
+
+/// Enhancement quality preset
+pub enum EnhancementQuality {
+    /// Fast - minimal processing
+    Fast,
+    /// Balanced - good quality/performance
+    Balanced,
+    /// Quality - high quality
+    Quality,
+    /// Maximum - best quality
+    Maximum,
+}
+
+impl EnhancementQuality {
+    pub fn num_features(&self) -> usize {
+        match self {
+            EnhancementQuality::Fast => 32,
+            EnhancementQuality::Balanced => 48,
+            EnhancementQuality::Quality => 64,
+            EnhancementQuality::Maximum => 96,
+        }
+    }
+
+    pub fn num_blocks(&self) -> usize {
+        match self {
+            EnhancementQuality::Fast => 4,
+            EnhancementQuality::Balanced => 8,
+            EnhancementQuality::Quality => 12,
+            EnhancementQuality::Maximum => 16,
+        }
+    }
+}
+
+// ============================================================================
+// HDR RECONSTRUCTION
+// ============================================================================
+
+/// Inverse tone mapping network for HDR reconstruction
+pub struct InverseToneMapping {
+    /// Feature extraction
+    feature_extract: Conv2d,
+    /// Residual blocks
+    res_blocks: Vec<ResidualBlock>,
+    /// Highlight reconstruction head
+    highlight_head: Conv2d,
+    /// Base reconstruction head
+    base_head: Conv2d,
+    /// Fusion layer
+    fusion: Conv2d,
+    /// Output layer
+    output: Conv2d,
+    /// Activation
+    activation: LeakyReLU,
+}
+
+impl InverseToneMapping {
+    pub fn new(num_features: usize, num_blocks: usize) -> Self {
+        let feature_extract = Conv2d::new(3, num_features, (3, 3), (1, 1), (1, 1), (1, 1), 1, true);
+
+        let mut res_blocks = Vec::with_capacity(num_blocks);
+        for _ in 0..num_blocks {
+            res_blocks.push(ResidualBlock::new(num_features, num_features));
+        }
+
+        let highlight_head = Conv2d::new(num_features, num_features, (3, 3), (1, 1), (1, 1), (1, 1), 1, true);
+        let base_head = Conv2d::new(num_features, num_features, (3, 3), (1, 1), (1, 1), (1, 1), 1, true);
+        let fusion = Conv2d::new(num_features * 2, num_features, (1, 1), (1, 1), (0, 0), (1, 1), 1, true);
+        let output = Conv2d::new(num_features, 3, (3, 3), (1, 1), (1, 1), (1, 1), 1, true);
+
+        Self {
+            feature_extract,
+            res_blocks,
+            highlight_head,
+            base_head,
+            fusion,
+            output,
+            activation: LeakyReLU::new(0.2),
+        }
+    }
+
+    pub fn forward(&self, sdr_input: &Tensor) -> Tensor {
+        // Extract features
+        let mut features = self.feature_extract.forward(sdr_input);
+        features = self.activation.forward(&features);
+
+        // Residual processing
+        for block in &self.res_blocks {
+            features = block.forward(&features);
+        }
+
+        // Dual-path for base and highlights
+        let base = self.base_head.forward(&features);
+        let base = self.activation.forward(&base);
+
+        let highlights = self.highlight_head.forward(&features);
+        let highlights = SiLU::new().forward(&highlights);
+
+        // Fuse paths
+        let concat = Tensor::cat(&[base, highlights], 1);
+        let fused = self.fusion.forward(&concat);
+        let fused = self.activation.forward(&fused);
+
+        // Output HDR
+        let hdr = self.output.forward(&fused);
+
+        // Residual connection with expansion
+        let expanded = self.expand_dynamic_range(sdr_input);
+        hdr.add(&expanded)
+    }
+
+    fn expand_dynamic_range(&self, sdr: &Tensor) -> Tensor {
+        // Simple expansion: apply inverse gamma and scale
+        let shape = sdr.shape();
+        let mut expanded = Tensor::zeros(
+            &[shape.dim(0), shape.dim(1), shape.dim(2), shape.dim(3)],
+            sdr.dtype(),
+        );
+
+        for b in 0..shape.dim(0) {
+            for c in 0..shape.dim(1) {
+                for y in 0..shape.dim(2) {
+                    for x in 0..shape.dim(3) {
+                        let v = sdr.get_f32(&[b, c, y, x]);
+                        // Inverse gamma (approximate sRGB)
+                        let linear = if v <= 0.04045 {
+                            v / 12.92
+                        } else {
+                            ((v + 0.055) / 1.055).powf(2.4)
+                        };
+                        // Scale to HDR range
+                        expanded.set_f32(&[b, c, y, x], linear * 10.0);
+                    }
+                }
+            }
+        }
+
+        expanded
+    }
+}
+
+/// HDR encoder for multi-exposure fusion
+pub struct MultiExposureFusion {
+    /// Number of exposures
+    num_exposures: usize,
+    /// Per-exposure encoder
+    encoders: Vec<Conv2d>,
+    /// Attention network
+    attention: AttentionFusion,
+    /// Decoder
+    decoder: HDRDecoder,
+}
+
+struct AttentionFusion {
+    query_conv: Conv2d,
+    key_conv: Conv2d,
+    value_conv: Conv2d,
+    output_conv: Conv2d,
+}
+
+impl AttentionFusion {
+    pub fn new(channels: usize) -> Self {
+        Self {
+            query_conv: Conv2d::new(channels, channels / 8, (1, 1), (1, 1), (0, 0), (1, 1), 1, true),
+            key_conv: Conv2d::new(channels, channels / 8, (1, 1), (1, 1), (0, 0), (1, 1), 1, true),
+            value_conv: Conv2d::new(channels, channels, (1, 1), (1, 1), (0, 0), (1, 1), 1, true),
+            output_conv: Conv2d::new(channels, channels, (1, 1), (1, 1), (0, 0), (1, 1), 1, true),
+        }
+    }
+
+    pub fn forward(&self, features: &[Tensor]) -> Tensor {
+        // Stack features along batch dimension for attention
+        let stacked = Tensor::cat(features, 0);
+
+        let q = self.query_conv.forward(&stacked);
+        let k = self.key_conv.forward(&stacked);
+        let v = self.value_conv.forward(&stacked);
+
+        // Compute attention weights
+        let shape = q.shape();
+        let batch = shape.dim(0);
+        let channels = shape.dim(1);
+        let height = shape.dim(2);
+        let width = shape.dim(3);
+
+        // Simplified attention
+        let attn = q.mul(&k);
+        let attn = Sigmoid::new().forward(&attn);
+
+        let attended = v.mul(&attn);
+        self.output_conv.forward(&attended)
+    }
+}
+
+struct HDRDecoder {
+    conv1: Conv2d,
+    conv2: Conv2d,
+    conv3: Conv2d,
+    output: Conv2d,
+}
+
+impl HDRDecoder {
+    pub fn new(in_channels: usize) -> Self {
+        Self {
+            conv1: Conv2d::new(in_channels, 128, (3, 3), (1, 1), (1, 1), (1, 1), 1, true),
+            conv2: Conv2d::new(128, 64, (3, 3), (1, 1), (1, 1), (1, 1), 1, true),
+            conv3: Conv2d::new(64, 32, (3, 3), (1, 1), (1, 1), (1, 1), 1, true),
+            output: Conv2d::new(32, 3, (3, 3), (1, 1), (1, 1), (1, 1), 1, true),
+        }
+    }
+
+    pub fn forward(&self, features: &Tensor) -> Tensor {
+        let mut x = self.conv1.forward(features);
+        x = LeakyReLU::new(0.2).forward(&x);
+
+        x = self.conv2.forward(&x);
+        x = LeakyReLU::new(0.2).forward(&x);
+
+        x = self.conv3.forward(&x);
+        x = LeakyReLU::new(0.2).forward(&x);
+
+        self.output.forward(&x)
+    }
+}
+
+impl MultiExposureFusion {
+    pub fn new(num_exposures: usize, num_features: usize) -> Self {
+        let mut encoders = Vec::with_capacity(num_exposures);
+        for _ in 0..num_exposures {
+            encoders.push(Conv2d::new(3, num_features, (3, 3), (1, 1), (1, 1), (1, 1), 1, true));
+        }
+
+        Self {
+            num_exposures,
+            encoders,
+            attention: AttentionFusion::new(num_features),
+            decoder: HDRDecoder::new(num_features),
+        }
+    }
+
+    pub fn forward(&self, exposures: &[Tensor]) -> Tensor {
+        assert_eq!(exposures.len(), self.num_exposures);
+
+        // Encode each exposure
+        let mut features = Vec::with_capacity(self.num_exposures);
+        for (i, exp) in exposures.iter().enumerate() {
+            let feat = self.encoders[i].forward(exp);
+            let feat = LeakyReLU::new(0.2).forward(&feat);
+            features.push(feat);
+        }
+
+        // Attention-based fusion
+        let fused = self.attention.forward(&features);
+
+        // Decode to HDR
+        self.decoder.forward(&fused)
+    }
+}
+
+// ============================================================================
+// DETAIL ENHANCEMENT
+// ============================================================================
+
+/// Multi-scale detail enhancement network
+pub struct DetailEnhancer {
+    /// Number of scales
+    num_scales: usize,
+    /// Feature channels
+    num_features: usize,
+    /// Scale-specific encoders
+    scale_encoders: Vec<ScaleEncoder>,
+    /// Cross-scale fusion
+    fusion: CrossScaleFusion,
+    /// Detail reconstruction
+    detail_head: Conv2d,
+    /// Structure preservation head
+    structure_head: Conv2d,
+    /// Final output
+    output: Conv2d,
+}
+
+struct ScaleEncoder {
+    conv1: Conv2d,
+    conv2: Conv2d,
+    downsample: Option<Conv2d>,
+}
+
+impl ScaleEncoder {
+    pub fn new(in_channels: usize, out_channels: usize, downsample: bool) -> Self {
+        let ds = if downsample {
+            Some(Conv2d::new(out_channels, out_channels, (3, 3), (2, 2), (1, 1), (1, 1), 1, true))
+        } else {
+            None
+        };
+
+        Self {
+            conv1: Conv2d::new(in_channels, out_channels, (3, 3), (1, 1), (1, 1), (1, 1), 1, true),
+            conv2: Conv2d::new(out_channels, out_channels, (3, 3), (1, 1), (1, 1), (1, 1), 1, true),
+            downsample: ds,
+        }
+    }
+
+    pub fn forward(&self, input: &Tensor) -> Tensor {
+        let mut x = self.conv1.forward(input);
+        x = LeakyReLU::new(0.2).forward(&x);
+        x = self.conv2.forward(&x);
+        x = LeakyReLU::new(0.2).forward(&x);
+
+        if let Some(ref ds) = self.downsample {
+            x = ds.forward(&x);
+            x = LeakyReLU::new(0.2).forward(&x);
+        }
+
+        x
+    }
+}
+
+struct CrossScaleFusion {
+    up_convs: Vec<ConvTranspose2d>,
+    fusion_convs: Vec<Conv2d>,
+}
+
+/// Transposed convolution
+pub struct ConvTranspose2d {
+    in_channels: usize,
+    out_channels: usize,
+    kernel_size: (usize, usize),
+    stride: (usize, usize),
+}
+
+impl ConvTranspose2d {
+    pub fn new(in_ch: usize, out_ch: usize, kernel: (usize, usize), stride: (usize, usize)) -> Self {
+        Self {
+            in_channels: in_ch,
+            out_channels: out_ch,
+            kernel_size: kernel,
+            stride,
+        }
+    }
+
+    pub fn forward(&self, input: &Tensor) -> Tensor {
+        // Upsampling via transposed conv
+        let shape = input.shape();
+        let batch = shape.dim(0);
+        let channels = shape.dim(1);
+        let height = shape.dim(2) * self.stride.0;
+        let width = shape.dim(3) * self.stride.1;
+
+        // Simple nearest neighbor upsample for placeholder
+        let mut output = Tensor::zeros(&[batch, self.out_channels, height, width], input.dtype());
+
+        for b in 0..batch {
+            for c in 0..self.out_channels.min(channels) {
+                for y in 0..height {
+                    for x in 0..width {
+                        let src_y = y / self.stride.0;
+                        let src_x = x / self.stride.1;
+                        let val = input.get_f32(&[b, c, src_y, src_x]);
+                        output.set_f32(&[b, c, y, x], val);
+                    }
+                }
+            }
+        }
+
+        output
+    }
+}
+
+impl CrossScaleFusion {
+    pub fn new(num_scales: usize, num_features: usize) -> Self {
+        let mut up_convs = Vec::new();
+        let mut fusion_convs = Vec::new();
+
+        for _ in 0..(num_scales - 1) {
+            up_convs.push(ConvTranspose2d::new(num_features, num_features, (4, 4), (2, 2)));
+            fusion_convs.push(Conv2d::new(num_features * 2, num_features, (1, 1), (1, 1), (0, 0), (1, 1), 1, true));
+        }
+
+        Self { up_convs, fusion_convs }
+    }
+
+    pub fn forward(&self, scale_features: &[Tensor]) -> Tensor {
+        // Bottom-up fusion
+        let mut fused = scale_features.last().unwrap().clone();
+
+        for i in (0..scale_features.len() - 1).rev() {
+            let upsampled = self.up_convs[i].forward(&fused);
+            let concat = Tensor::cat(&[upsampled, scale_features[i].clone()], 1);
+            fused = self.fusion_convs[i].forward(&concat);
+            fused = LeakyReLU::new(0.2).forward(&fused);
+        }
+
+        fused
+    }
+}
+
+impl DetailEnhancer {
+    pub fn new(num_scales: usize, num_features: usize) -> Self {
+        let mut scale_encoders = Vec::with_capacity(num_scales);
+
+        // First scale: full resolution
+        scale_encoders.push(ScaleEncoder::new(3, num_features, false));
+
+        // Subsequent scales: downsampled
+        for _ in 1..num_scales {
+            scale_encoders.push(ScaleEncoder::new(num_features, num_features, true));
+        }
+
+        Self {
+            num_scales,
+            num_features,
+            scale_encoders,
+            fusion: CrossScaleFusion::new(num_scales, num_features),
+            detail_head: Conv2d::new(num_features, num_features, (3, 3), (1, 1), (1, 1), (1, 1), 1, true),
+            structure_head: Conv2d::new(num_features, num_features, (3, 3), (1, 1), (1, 1), (1, 1), 1, true),
+            output: Conv2d::new(num_features, 3, (3, 3), (1, 1), (1, 1), (1, 1), 1, true),
+        }
+    }
+
+    pub fn forward(&self, input: &Tensor) -> Tensor {
+        // Multi-scale encoding
+        let mut scale_features = Vec::with_capacity(self.num_scales);
+
+        let mut x = self.scale_encoders[0].forward(input);
+        scale_features.push(x.clone());
+
+        for i in 1..self.num_scales {
+            x = self.scale_encoders[i].forward(&x);
+            scale_features.push(x.clone());
+        }
+
+        // Cross-scale fusion
+        let fused = self.fusion.forward(&scale_features);
+
+        // Detail and structure paths
+        let details = self.detail_head.forward(&fused);
+        let details = ReLU::new().forward(&details);
+
+        let structure = self.structure_head.forward(&fused);
+        let structure = Sigmoid::new().forward(&structure);
+
+        // Combine with learned weighting
+        let combined = details.mul(&structure);
+
+        // Output
+        let enhanced = self.output.forward(&combined);
+
+        // Residual
+        input.add(&enhanced)
+    }
+}
+
+/// Laplacian pyramid for multi-scale decomposition
+pub struct LaplacianPyramid {
+    num_levels: usize,
+}
+
+impl LaplacianPyramid {
+    pub fn new(num_levels: usize) -> Self {
+        Self { num_levels }
+    }
+
+    pub fn decompose(&self, image: &Tensor) -> Vec<Tensor> {
+        let mut pyramid = Vec::with_capacity(self.num_levels);
+        let mut current = image.clone();
+
+        for _ in 0..(self.num_levels - 1) {
+            let downsampled = self.downsample(&current);
+            let upsampled = self.upsample(&downsampled, current.shape().dim(2), current.shape().dim(3));
+            let laplacian = current.sub(&upsampled);
+            pyramid.push(laplacian);
+            current = downsampled;
+        }
+
+        // Last level is the residual
+        pyramid.push(current);
+
+        pyramid
+    }
+
+    pub fn reconstruct(&self, pyramid: &[Tensor]) -> Tensor {
+        let mut current = pyramid.last().unwrap().clone();
+
+        for i in (0..pyramid.len() - 1).rev() {
+            let target_h = pyramid[i].shape().dim(2);
+            let target_w = pyramid[i].shape().dim(3);
+            let upsampled = self.upsample(&current, target_h, target_w);
+            current = upsampled.add(&pyramid[i]);
+        }
+
+        current
+    }
+
+    fn downsample(&self, input: &Tensor) -> Tensor {
+        let shape = input.shape();
+        let batch = shape.dim(0);
+        let channels = shape.dim(1);
+        let height = shape.dim(2) / 2;
+        let width = shape.dim(3) / 2;
+
+        let mut output = Tensor::zeros(&[batch, channels, height, width], input.dtype());
+
+        for b in 0..batch {
+            for c in 0..channels {
+                for y in 0..height {
+                    for x in 0..width {
+                        // Simple averaging
+                        let v00 = input.get_f32(&[b, c, y * 2, x * 2]);
+                        let v01 = input.get_f32(&[b, c, y * 2, x * 2 + 1]);
+                        let v10 = input.get_f32(&[b, c, y * 2 + 1, x * 2]);
+                        let v11 = input.get_f32(&[b, c, y * 2 + 1, x * 2 + 1]);
+                        output.set_f32(&[b, c, y, x], (v00 + v01 + v10 + v11) / 4.0);
+                    }
+                }
+            }
+        }
+
+        output
+    }
+
+    fn upsample(&self, input: &Tensor, target_h: usize, target_w: usize) -> Tensor {
+        let shape = input.shape();
+        let batch = shape.dim(0);
+        let channels = shape.dim(1);
+
+        let mut output = Tensor::zeros(&[batch, channels, target_h, target_w], input.dtype());
+
+        let scale_y = target_h as f32 / shape.dim(2) as f32;
+        let scale_x = target_w as f32 / shape.dim(3) as f32;
+
+        for b in 0..batch {
+            for c in 0..channels {
+                for y in 0..target_h {
+                    for x in 0..target_w {
+                        let src_y = (y as f32 / scale_y) as usize;
+                        let src_x = (x as f32 / scale_x) as usize;
+                        let src_y = src_y.min(shape.dim(2) - 1);
+                        let src_x = src_x.min(shape.dim(3) - 1);
+                        let val = input.get_f32(&[b, c, src_y, src_x]);
+                        output.set_f32(&[b, c, y, x], val);
+                    }
+                }
+            }
+        }
+
+        output
+    }
+}
+
+// ============================================================================
+// LOW-LIGHT ENHANCEMENT
+// ============================================================================
+
+/// Low-light image enhancement network
+pub struct LowLightEnhancer {
+    /// Illumination estimation network
+    illum_net: IlluminationNet,
+    /// Reflectance restoration network
+    reflect_net: ReflectanceNet,
+    /// Noise reduction network
+    noise_net: NoiseNet,
+    /// Fusion network
+    fusion_net: FusionNet,
+}
+
+struct IlluminationNet {
+    conv1: Conv2d,
+    conv2: Conv2d,
+    conv3: Conv2d,
+    output: Conv2d,
+}
+
+impl IlluminationNet {
+    pub fn new(num_features: usize) -> Self {
+        Self {
+            conv1: Conv2d::new(3, num_features, (3, 3), (1, 1), (1, 1), (1, 1), 1, true),
+            conv2: Conv2d::new(num_features, num_features, (3, 3), (1, 1), (1, 1), (1, 1), 1, true),
+            conv3: Conv2d::new(num_features, num_features, (3, 3), (1, 1), (1, 1), (1, 1), 1, true),
+            output: Conv2d::new(num_features, 1, (3, 3), (1, 1), (1, 1), (1, 1), 1, true),
+        }
+    }
+
+    pub fn forward(&self, input: &Tensor) -> Tensor {
+        let mut x = self.conv1.forward(input);
+        x = ReLU::new().forward(&x);
+        x = self.conv2.forward(&x);
+        x = ReLU::new().forward(&x);
+        x = self.conv3.forward(&x);
+        x = ReLU::new().forward(&x);
+        let illum = self.output.forward(&x);
+        Sigmoid::new().forward(&illum)
+    }
+}
+
+struct ReflectanceNet {
+    encoder: Vec<Conv2d>,
+    decoder: Vec<Conv2d>,
+}
+
+impl ReflectanceNet {
+    pub fn new(num_features: usize) -> Self {
+        Self {
+            encoder: vec![
+                Conv2d::new(3, num_features, (3, 3), (1, 1), (1, 1), (1, 1), 1, true),
+                Conv2d::new(num_features, num_features * 2, (3, 3), (2, 2), (1, 1), (1, 1), 1, true),
+                Conv2d::new(num_features * 2, num_features * 4, (3, 3), (2, 2), (1, 1), (1, 1), 1, true),
+            ],
+            decoder: vec![
+                Conv2d::new(num_features * 4, num_features * 2, (3, 3), (1, 1), (1, 1), (1, 1), 1, true),
+                Conv2d::new(num_features * 2, num_features, (3, 3), (1, 1), (1, 1), (1, 1), 1, true),
+                Conv2d::new(num_features, 3, (3, 3), (1, 1), (1, 1), (1, 1), 1, true),
+            ],
+        }
+    }
+
+    pub fn forward(&self, input: &Tensor) -> Tensor {
+        // Encoder
+        let mut features = Vec::new();
+        let mut x = input.clone();
+
+        for conv in &self.encoder {
+            x = conv.forward(&x);
+            x = LeakyReLU::new(0.2).forward(&x);
+            features.push(x.clone());
+        }
+
+        // Decoder with skip connections
+        for (i, conv) in self.decoder.iter().enumerate() {
+            if i > 0 {
+                // Upsample
+                let shape = x.shape();
+                let target_h = shape.dim(2) * 2;
+                let target_w = shape.dim(3) * 2;
+                x = upsample_nearest(&x, target_h, target_w);
+            }
+            x = conv.forward(&x);
+            if i < self.decoder.len() - 1 {
+                x = LeakyReLU::new(0.2).forward(&x);
+            }
+        }
+
+        Sigmoid::new().forward(&x)
+    }
+}
+
+fn upsample_nearest(input: &Tensor, target_h: usize, target_w: usize) -> Tensor {
+    let shape = input.shape();
+    let batch = shape.dim(0);
+    let channels = shape.dim(1);
+    let src_h = shape.dim(2);
+    let src_w = shape.dim(3);
+
+    let mut output = Tensor::zeros(&[batch, channels, target_h, target_w], input.dtype());
+
+    for b in 0..batch {
+        for c in 0..channels {
+            for y in 0..target_h {
+                for x in 0..target_w {
+                    let src_y = (y * src_h / target_h).min(src_h - 1);
+                    let src_x = (x * src_w / target_w).min(src_w - 1);
+                    let val = input.get_f32(&[b, c, src_y, src_x]);
+                    output.set_f32(&[b, c, y, x], val);
+                }
+            }
+        }
+    }
+
+    output
+}
+
+struct NoiseNet {
+    conv1: Conv2d,
+    conv2: Conv2d,
+    conv3: Conv2d,
+    output: Conv2d,
+}
+
+impl NoiseNet {
+    pub fn new(num_features: usize) -> Self {
+        Self {
+            conv1: Conv2d::new(3, num_features, (3, 3), (1, 1), (1, 1), (1, 1), 1, true),
+            conv2: Conv2d::new(num_features, num_features, (3, 3), (1, 1), (1, 1), (1, 1), 1, true),
+            conv3: Conv2d::new(num_features, num_features, (3, 3), (1, 1), (1, 1), (1, 1), 1, true),
+            output: Conv2d::new(num_features, 3, (3, 3), (1, 1), (1, 1), (1, 1), 1, true),
+        }
+    }
+
+    pub fn forward(&self, input: &Tensor) -> Tensor {
+        let mut x = self.conv1.forward(input);
+        x = LeakyReLU::new(0.2).forward(&x);
+        x = self.conv2.forward(&x);
+        x = LeakyReLU::new(0.2).forward(&x);
+        x = self.conv3.forward(&x);
+        x = LeakyReLU::new(0.2).forward(&x);
+        self.output.forward(&x)
+    }
+}
+
+struct FusionNet {
+    conv1: Conv2d,
+    conv2: Conv2d,
+    output: Conv2d,
+}
+
+impl FusionNet {
+    pub fn new(num_features: usize) -> Self {
+        Self {
+            conv1: Conv2d::new(7, num_features, (3, 3), (1, 1), (1, 1), (1, 1), 1, true), // input + illum + reflect
+            conv2: Conv2d::new(num_features, num_features, (3, 3), (1, 1), (1, 1), (1, 1), 1, true),
+            output: Conv2d::new(num_features, 3, (3, 3), (1, 1), (1, 1), (1, 1), 1, true),
+        }
+    }
+
+    pub fn forward(&self, input: &Tensor, illum: &Tensor, reflect: &Tensor) -> Tensor {
+        let concat = Tensor::cat(&[input.clone(), illum.clone(), reflect.clone()], 1);
+
+        let mut x = self.conv1.forward(&concat);
+        x = LeakyReLU::new(0.2).forward(&x);
+        x = self.conv2.forward(&x);
+        x = LeakyReLU::new(0.2).forward(&x);
+        self.output.forward(&x)
+    }
+}
+
+impl LowLightEnhancer {
+    pub fn new(num_features: usize) -> Self {
+        Self {
+            illum_net: IlluminationNet::new(num_features),
+            reflect_net: ReflectanceNet::new(num_features),
+            noise_net: NoiseNet::new(num_features),
+            fusion_net: FusionNet::new(num_features),
+        }
+    }
+
+    pub fn forward(&self, input: &Tensor) -> Tensor {
+        // Estimate illumination
+        let illum = self.illum_net.forward(input);
+
+        // Estimate reflectance
+        let reflect = self.reflect_net.forward(input);
+
+        // Denoise
+        let denoised = self.noise_net.forward(input);
+
+        // Adjust illumination
+        let adjusted_illum = self.adjust_illumination(&illum);
+
+        // Reconstruct enhanced image
+        let enhanced = reflect.mul(&adjusted_illum);
+
+        // Final fusion for residual correction
+        let output = self.fusion_net.forward(input, &adjusted_illum, &enhanced);
+
+        // Clamp to valid range
+        clamp_tensor(&output, 0.0, 1.0)
+    }
+
+    fn adjust_illumination(&self, illum: &Tensor) -> Tensor {
+        // Gamma correction to brighten
+        let gamma = 0.4f32;
+        let shape = illum.shape();
+        let mut adjusted = Tensor::zeros(
+            &[shape.dim(0), 3, shape.dim(2), shape.dim(3)],
+            illum.dtype(),
+        );
+
+        for b in 0..shape.dim(0) {
+            for c in 0..3 {
+                for y in 0..shape.dim(2) {
+                    for x in 0..shape.dim(3) {
+                        let v = illum.get_f32(&[b, 0, y, x]);
+                        adjusted.set_f32(&[b, c, y, x], v.powf(gamma));
+                    }
+                }
+            }
+        }
+
+        adjusted
+    }
+}
+
+fn clamp_tensor(input: &Tensor, min_val: f32, max_val: f32) -> Tensor {
+    let shape = input.shape();
+    let mut output = input.clone();
+
+    for b in 0..shape.dim(0) {
+        for c in 0..shape.dim(1) {
+            for y in 0..shape.dim(2) {
+                for x in 0..shape.dim(3) {
+                    let v = input.get_f32(&[b, c, y, x]);
+                    output.set_f32(&[b, c, y, x], v.clamp(min_val, max_val));
+                }
+            }
+        }
+    }
+
+    output
+}
+
+// ============================================================================
+// COLOR CORRECTION
+// ============================================================================
+
+/// Neural color correction network
+pub struct ColorCorrector {
+    /// Feature extraction
+    encoder: ColorEncoder,
+    /// Color transformation prediction
+    transform_head: ColorTransformHead,
+    /// Local adjustment network
+    local_adj: LocalAdjustment,
+}
+
+struct ColorEncoder {
+    conv1: Conv2d,
+    conv2: Conv2d,
+    conv3: Conv2d,
+    global_pool: GlobalAvgPool,
+    fc: Linear,
+}
+
+struct GlobalAvgPool;
+
+impl GlobalAvgPool {
+    pub fn forward(&self, input: &Tensor) -> Tensor {
+        let shape = input.shape();
+        let batch = shape.dim(0);
+        let channels = shape.dim(1);
+        let height = shape.dim(2);
+        let width = shape.dim(3);
+
+        let mut output = Tensor::zeros(&[batch, channels], input.dtype());
+
+        for b in 0..batch {
+            for c in 0..channels {
+                let mut sum = 0.0f32;
+                for y in 0..height {
+                    for x in 0..width {
+                        sum += input.get_f32(&[b, c, y, x]);
+                    }
+                }
+                output.set_f32(&[b, c], sum / (height * width) as f32);
+            }
+        }
+
+        output
+    }
+}
+
+impl ColorEncoder {
+    pub fn new(num_features: usize) -> Self {
+        Self {
+            conv1: Conv2d::new(3, num_features, (3, 3), (2, 2), (1, 1), (1, 1), 1, true),
+            conv2: Conv2d::new(num_features, num_features * 2, (3, 3), (2, 2), (1, 1), (1, 1), 1, true),
+            conv3: Conv2d::new(num_features * 2, num_features * 4, (3, 3), (2, 2), (1, 1), (1, 1), 1, true),
+            global_pool: GlobalAvgPool,
+            fc: Linear::new(num_features * 4, 256, true),
+        }
+    }
+
+    pub fn forward(&self, input: &Tensor) -> Tensor {
+        let mut x = self.conv1.forward(input);
+        x = ReLU::new().forward(&x);
+        x = self.conv2.forward(&x);
+        x = ReLU::new().forward(&x);
+        x = self.conv3.forward(&x);
+        x = ReLU::new().forward(&x);
+
+        let pooled = self.global_pool.forward(&x);
+        self.fc.forward(&pooled)
+    }
+}
+
+struct ColorTransformHead {
+    fc1: Linear,
+    fc2: Linear,
+    fc3: Linear,
+}
+
+impl ColorTransformHead {
+    pub fn new() -> Self {
+        Self {
+            fc1: Linear::new(256, 128, true),
+            fc2: Linear::new(128, 64, true),
+            // Output: 3x4 color matrix (12 params)
+            fc3: Linear::new(64, 12, true),
+        }
+    }
+
+    pub fn forward(&self, features: &Tensor) -> Tensor {
+        let mut x = self.fc1.forward(features);
+        x = ReLU::new().forward(&x);
+        x = self.fc2.forward(&x);
+        x = ReLU::new().forward(&x);
+        self.fc3.forward(&x)
+    }
+}
+
+struct LocalAdjustment {
+    conv1: Conv2d,
+    conv2: Conv2d,
+    output: Conv2d,
+}
+
+impl LocalAdjustment {
+    pub fn new(num_features: usize) -> Self {
+        Self {
+            conv1: Conv2d::new(3, num_features, (3, 3), (1, 1), (1, 1), (1, 1), 1, true),
+            conv2: Conv2d::new(num_features, num_features, (3, 3), (1, 1), (1, 1), (1, 1), 1, true),
+            output: Conv2d::new(num_features, 3, (3, 3), (1, 1), (1, 1), (1, 1), 1, true),
+        }
+    }
+
+    pub fn forward(&self, input: &Tensor) -> Tensor {
+        let mut x = self.conv1.forward(input);
+        x = LeakyReLU::new(0.2).forward(&x);
+        x = self.conv2.forward(&x);
+        x = LeakyReLU::new(0.2).forward(&x);
+        self.output.forward(&x)
+    }
+}
+
+impl ColorCorrector {
+    pub fn new(num_features: usize) -> Self {
+        Self {
+            encoder: ColorEncoder::new(num_features),
+            transform_head: ColorTransformHead::new(),
+            local_adj: LocalAdjustment::new(num_features),
+        }
+    }
+
+    pub fn forward(&self, input: &Tensor) -> Tensor {
+        // Extract global color features
+        let features = self.encoder.forward(input);
+
+        // Predict color transformation matrix
+        let transform_params = self.transform_head.forward(&features);
+
+        // Apply global color transformation
+        let global_corrected = self.apply_color_transform(input, &transform_params);
+
+        // Local adjustments
+        let local_adj = self.local_adj.forward(input);
+
+        // Combine
+        global_corrected.add(&local_adj)
+    }
+
+    fn apply_color_transform(&self, input: &Tensor, params: &Tensor) -> Tensor {
+        let shape = input.shape();
+        let batch = shape.dim(0);
+        let height = shape.dim(2);
+        let width = shape.dim(3);
+
+        let mut output = Tensor::zeros(&[batch, 3, height, width], input.dtype());
+
+        for b in 0..batch {
+            // Extract 3x4 matrix for this batch
+            let m = [
+                [params.get_f32(&[b, 0]), params.get_f32(&[b, 1]), params.get_f32(&[b, 2]), params.get_f32(&[b, 3])],
+                [params.get_f32(&[b, 4]), params.get_f32(&[b, 5]), params.get_f32(&[b, 6]), params.get_f32(&[b, 7])],
+                [params.get_f32(&[b, 8]), params.get_f32(&[b, 9]), params.get_f32(&[b, 10]), params.get_f32(&[b, 11])],
+            ];
+
+            for y in 0..height {
+                for x in 0..width {
+                    let r = input.get_f32(&[b, 0, y, x]);
+                    let g = input.get_f32(&[b, 1, y, x]);
+                    let b_val = input.get_f32(&[b, 2, y, x]);
+
+                    // Apply affine color transform
+                    let new_r = m[0][0] * r + m[0][1] * g + m[0][2] * b_val + m[0][3];
+                    let new_g = m[1][0] * r + m[1][1] * g + m[1][2] * b_val + m[1][3];
+                    let new_b = m[2][0] * r + m[2][1] * g + m[2][2] * b_val + m[2][3];
+
+                    output.set_f32(&[b, 0, y, x], new_r);
+                    output.set_f32(&[b, 1, y, x], new_g);
+                    output.set_f32(&[b, 2, y, x], new_b);
+                }
+            }
+        }
+
+        output
+    }
+}
+
+// ============================================================================
+// FRAME INTERPOLATION
+// ============================================================================
+
+/// Optical flow-based frame interpolation
+pub struct FrameInterpolator {
+    /// Flow estimation network
+    flow_net: FlowNet,
+    /// Warping module
+    warper: Warper,
+    /// Synthesis network
+    synth_net: SynthesisNet,
+    /// Occlusion estimation
+    occlusion_net: OcclusionNet,
+}
+
+struct FlowNet {
+    encoder: Vec<Conv2d>,
+    decoder: Vec<Conv2d>,
+    flow_head: Conv2d,
+}
+
+impl FlowNet {
+    pub fn new(num_features: usize) -> Self {
+        Self {
+            encoder: vec![
+                Conv2d::new(6, num_features, (3, 3), (2, 2), (1, 1), (1, 1), 1, true),
+                Conv2d::new(num_features, num_features * 2, (3, 3), (2, 2), (1, 1), (1, 1), 1, true),
+                Conv2d::new(num_features * 2, num_features * 4, (3, 3), (2, 2), (1, 1), (1, 1), 1, true),
+            ],
+            decoder: vec![
+                Conv2d::new(num_features * 4, num_features * 2, (3, 3), (1, 1), (1, 1), (1, 1), 1, true),
+                Conv2d::new(num_features * 2, num_features, (3, 3), (1, 1), (1, 1), (1, 1), 1, true),
+            ],
+            flow_head: Conv2d::new(num_features, 4, (3, 3), (1, 1), (1, 1), (1, 1), 1, true), // 2 flows
+        }
+    }
+
+    pub fn forward(&self, frame0: &Tensor, frame1: &Tensor) -> (Tensor, Tensor) {
+        let concat = Tensor::cat(&[frame0.clone(), frame1.clone()], 1);
+
+        // Encode
+        let mut x = concat;
+        let mut features = Vec::new();
+        for conv in &self.encoder {
+            x = conv.forward(&x);
+            x = LeakyReLU::new(0.2).forward(&x);
+            features.push(x.clone());
+        }
+
+        // Decode
+        for conv in &self.decoder {
+            let shape = x.shape();
+            x = upsample_nearest(&x, shape.dim(2) * 2, shape.dim(3) * 2);
+            x = conv.forward(&x);
+            x = LeakyReLU::new(0.2).forward(&x);
+        }
+
+        // Upsample to full resolution
+        let shape = frame0.shape();
+        x = upsample_nearest(&x, shape.dim(2), shape.dim(3));
+
+        // Flow prediction
+        let flow = self.flow_head.forward(&x);
+
+        // Split into forward and backward flows
+        let flow_01 = flow.slice(1, 0, 2);
+        let flow_10 = flow.slice(1, 2, 4);
+
+        (flow_01, flow_10)
+    }
+}
+
+struct Warper;
+
+impl Warper {
+    pub fn warp(&self, image: &Tensor, flow: &Tensor) -> Tensor {
+        let shape = image.shape();
+        let batch = shape.dim(0);
+        let channels = shape.dim(1);
+        let height = shape.dim(2);
+        let width = shape.dim(3);
+
+        let mut warped = Tensor::zeros(&[batch, channels, height, width], image.dtype());
+
+        for b in 0..batch {
+            for c in 0..channels {
+                for y in 0..height {
+                    for x in 0..width {
+                        let fx = flow.get_f32(&[b, 0, y, x]);
+                        let fy = flow.get_f32(&[b, 1, y, x]);
+
+                        let src_x = x as f32 + fx;
+                        let src_y = y as f32 + fy;
+
+                        // Bilinear sampling
+                        let val = bilinear_sample(image, b, c, src_y, src_x, height, width);
+                        warped.set_f32(&[b, c, y, x], val);
+                    }
+                }
+            }
+        }
+
+        warped
+    }
+}
+
+fn bilinear_sample(tensor: &Tensor, batch: usize, channel: usize, y: f32, x: f32, height: usize, width: usize) -> f32 {
+    let x0 = x.floor() as i32;
+    let x1 = x0 + 1;
+    let y0 = y.floor() as i32;
+    let y1 = y0 + 1;
+
+    let x_lerp = x - x0 as f32;
+    let y_lerp = y - y0 as f32;
+
+    let x0 = x0.clamp(0, width as i32 - 1) as usize;
+    let x1 = x1.clamp(0, width as i32 - 1) as usize;
+    let y0 = y0.clamp(0, height as i32 - 1) as usize;
+    let y1 = y1.clamp(0, height as i32 - 1) as usize;
+
+    let v00 = tensor.get_f32(&[batch, channel, y0, x0]);
+    let v01 = tensor.get_f32(&[batch, channel, y0, x1]);
+    let v10 = tensor.get_f32(&[batch, channel, y1, x0]);
+    let v11 = tensor.get_f32(&[batch, channel, y1, x1]);
+
+    let v0 = v00 * (1.0 - x_lerp) + v01 * x_lerp;
+    let v1 = v10 * (1.0 - x_lerp) + v11 * x_lerp;
+
+    v0 * (1.0 - y_lerp) + v1 * y_lerp
+}
+
+struct SynthesisNet {
+    conv1: Conv2d,
+    conv2: Conv2d,
+    conv3: Conv2d,
+    output: Conv2d,
+}
+
+impl SynthesisNet {
+    pub fn new(num_features: usize) -> Self {
+        Self {
+            conv1: Conv2d::new(9, num_features, (3, 3), (1, 1), (1, 1), (1, 1), 1, true),
+            conv2: Conv2d::new(num_features, num_features, (3, 3), (1, 1), (1, 1), (1, 1), 1, true),
+            conv3: Conv2d::new(num_features, num_features, (3, 3), (1, 1), (1, 1), (1, 1), 1, true),
+            output: Conv2d::new(num_features, 3, (3, 3), (1, 1), (1, 1), (1, 1), 1, true),
+        }
+    }
+
+    pub fn forward(&self, warped0: &Tensor, warped1: &Tensor, occlusion: &Tensor) -> Tensor {
+        let concat = Tensor::cat(&[warped0.clone(), warped1.clone(), occlusion.clone()], 1);
+
+        let mut x = self.conv1.forward(&concat);
+        x = LeakyReLU::new(0.2).forward(&x);
+        x = self.conv2.forward(&x);
+        x = LeakyReLU::new(0.2).forward(&x);
+        x = self.conv3.forward(&x);
+        x = LeakyReLU::new(0.2).forward(&x);
+        self.output.forward(&x)
+    }
+}
+
+struct OcclusionNet {
+    conv1: Conv2d,
+    conv2: Conv2d,
+    output: Conv2d,
+}
+
+impl OcclusionNet {
+    pub fn new(num_features: usize) -> Self {
+        Self {
+            conv1: Conv2d::new(6, num_features, (3, 3), (1, 1), (1, 1), (1, 1), 1, true),
+            conv2: Conv2d::new(num_features, num_features, (3, 3), (1, 1), (1, 1), (1, 1), 1, true),
+            output: Conv2d::new(num_features, 1, (3, 3), (1, 1), (1, 1), (1, 1), 1, true),
+        }
+    }
+
+    pub fn forward(&self, warped0: &Tensor, warped1: &Tensor) -> Tensor {
+        let concat = Tensor::cat(&[warped0.clone(), warped1.clone()], 1);
+
+        let mut x = self.conv1.forward(&concat);
+        x = LeakyReLU::new(0.2).forward(&x);
+        x = self.conv2.forward(&x);
+        x = LeakyReLU::new(0.2).forward(&x);
+        let occ = self.output.forward(&x);
+        Sigmoid::new().forward(&occ)
+    }
+}
+
+impl FrameInterpolator {
+    pub fn new(num_features: usize) -> Self {
+        Self {
+            flow_net: FlowNet::new(num_features),
+            warper: Warper,
+            synth_net: SynthesisNet::new(num_features),
+            occlusion_net: OcclusionNet::new(num_features),
+        }
+    }
+
+    pub fn interpolate(&self, frame0: &Tensor, frame1: &Tensor, t: f32) -> Tensor {
+        // Estimate bidirectional flows
+        let (flow_01, flow_10) = self.flow_net.forward(frame0, frame1);
+
+        // Scale flows by interpolation factor
+        let flow_t0 = scale_flow(&flow_10, t);
+        let flow_t1 = scale_flow(&flow_01, 1.0 - t);
+
+        // Warp frames to target time
+        let warped0 = self.warper.warp(frame0, &flow_t0);
+        let warped1 = self.warper.warp(frame1, &flow_t1);
+
+        // Estimate occlusion
+        let occlusion = self.occlusion_net.forward(&warped0, &warped1);
+
+        // Synthesize intermediate frame
+        let synthesized = self.synth_net.forward(&warped0, &warped1, &occlusion);
+
+        // Blend warped frames with occlusion mask
+        let blended = blend_with_occlusion(&warped0, &warped1, &occlusion);
+
+        // Add synthesis residual
+        blended.add(&synthesized)
+    }
+
+    pub fn generate_frames(&self, frame0: &Tensor, frame1: &Tensor, num_frames: usize) -> Vec<Tensor> {
+        let mut frames = Vec::with_capacity(num_frames);
+
+        for i in 0..num_frames {
+            let t = (i + 1) as f32 / (num_frames + 1) as f32;
+            frames.push(self.interpolate(frame0, frame1, t));
+        }
+
+        frames
+    }
+}
+
+fn scale_flow(flow: &Tensor, scale: f32) -> Tensor {
+    let shape = flow.shape();
+    let mut scaled = flow.clone();
+
+    for b in 0..shape.dim(0) {
+        for c in 0..shape.dim(1) {
+            for y in 0..shape.dim(2) {
+                for x in 0..shape.dim(3) {
+                    let v = flow.get_f32(&[b, c, y, x]);
+                    scaled.set_f32(&[b, c, y, x], v * scale);
+                }
+            }
+        }
+    }
+
+    scaled
+}
+
+fn blend_with_occlusion(img0: &Tensor, img1: &Tensor, occlusion: &Tensor) -> Tensor {
+    let shape = img0.shape();
+    let mut blended = Tensor::zeros(
+        &[shape.dim(0), shape.dim(1), shape.dim(2), shape.dim(3)],
+        img0.dtype(),
+    );
+
+    for b in 0..shape.dim(0) {
+        for c in 0..shape.dim(1) {
+            for y in 0..shape.dim(2) {
+                for x in 0..shape.dim(3) {
+                    let occ = occlusion.get_f32(&[b, 0, y, x]);
+                    let v0 = img0.get_f32(&[b, c, y, x]);
+                    let v1 = img1.get_f32(&[b, c, y, x]);
+                    blended.set_f32(&[b, c, y, x], v0 * occ + v1 * (1.0 - occ));
+                }
+            }
+        }
+    }
+
+    blended
+}
+
+// ============================================================================
+// ARTIFACT REMOVAL
+// ============================================================================
+
+/// Compression artifact removal network
+pub struct ArtifactRemover {
+    /// Quality factor estimation
+    qf_estimator: QFEstimator,
+    /// Artifact removal network
+    removal_net: RemovalNet,
+}
+
+struct QFEstimator {
+    conv1: Conv2d,
+    conv2: Conv2d,
+    pool: GlobalAvgPool,
+    fc: Linear,
+}
+
+impl QFEstimator {
+    pub fn new(num_features: usize) -> Self {
+        Self {
+            conv1: Conv2d::new(3, num_features, (3, 3), (2, 2), (1, 1), (1, 1), 1, true),
+            conv2: Conv2d::new(num_features, num_features * 2, (3, 3), (2, 2), (1, 1), (1, 1), 1, true),
+            pool: GlobalAvgPool,
+            fc: Linear::new(num_features * 2, 1, true),
+        }
+    }
+
+    pub fn forward(&self, input: &Tensor) -> Tensor {
+        let mut x = self.conv1.forward(input);
+        x = ReLU::new().forward(&x);
+        x = self.conv2.forward(&x);
+        x = ReLU::new().forward(&x);
+        let pooled = self.pool.forward(&x);
+        let qf = self.fc.forward(&pooled);
+        Sigmoid::new().forward(&qf)
+    }
+}
+
+struct RemovalNet {
+    encoder: Vec<Conv2d>,
+    blocks: Vec<ResidualBlock>,
+    decoder: Vec<Conv2d>,
+    output: Conv2d,
+}
+
+impl RemovalNet {
+    pub fn new(num_features: usize, num_blocks: usize) -> Self {
+        let encoder = vec![
+            Conv2d::new(4, num_features, (3, 3), (1, 1), (1, 1), (1, 1), 1, true), // +1 for QF
+            Conv2d::new(num_features, num_features, (3, 3), (1, 1), (1, 1), (1, 1), 1, true),
+        ];
+
+        let mut blocks = Vec::with_capacity(num_blocks);
+        for _ in 0..num_blocks {
+            blocks.push(ResidualBlock::new(num_features, num_features));
+        }
+
+        let decoder = vec![
+            Conv2d::new(num_features, num_features, (3, 3), (1, 1), (1, 1), (1, 1), 1, true),
+        ];
+
+        let output = Conv2d::new(num_features, 3, (3, 3), (1, 1), (1, 1), (1, 1), 1, true);
+
+        Self { encoder, blocks, decoder, output }
+    }
+
+    pub fn forward(&self, input: &Tensor, qf: &Tensor) -> Tensor {
+        // Expand QF to spatial dimensions
+        let shape = input.shape();
+        let qf_spatial = expand_to_spatial(qf, shape.dim(2), shape.dim(3));
+
+        // Concatenate with input
+        let concat = Tensor::cat(&[input.clone(), qf_spatial], 1);
+
+        // Encode
+        let mut x = concat;
+        for conv in &self.encoder {
+            x = conv.forward(&x);
+            x = LeakyReLU::new(0.2).forward(&x);
+        }
+
+        // Residual blocks
+        for block in &self.blocks {
+            x = block.forward(&x);
+        }
+
+        // Decode
+        for conv in &self.decoder {
+            x = conv.forward(&x);
+            x = LeakyReLU::new(0.2).forward(&x);
+        }
+
+        // Output residual
+        let residual = self.output.forward(&x);
+        input.add(&residual)
+    }
+}
+
+fn expand_to_spatial(tensor: &Tensor, height: usize, width: usize) -> Tensor {
+    let shape = tensor.shape();
+    let batch = shape.dim(0);
+
+    let mut expanded = Tensor::zeros(&[batch, 1, height, width], tensor.dtype());
+
+    for b in 0..batch {
+        let val = tensor.get_f32(&[b, 0]);
+        for y in 0..height {
+            for x in 0..width {
+                expanded.set_f32(&[b, 0, y, x], val);
+            }
+        }
+    }
+
+    expanded
+}
+
+impl ArtifactRemover {
+    pub fn new(num_features: usize, num_blocks: usize) -> Self {
+        Self {
+            qf_estimator: QFEstimator::new(num_features),
+            removal_net: RemovalNet::new(num_features, num_blocks),
+        }
+    }
+
+    pub fn forward(&self, input: &Tensor) -> Tensor {
+        // Estimate compression quality
+        let qf = self.qf_estimator.forward(input);
+
+        // Remove artifacts
+        self.removal_net.forward(input, &qf)
+    }
+
+    pub fn forward_with_qf(&self, input: &Tensor, qf: f32) -> Tensor {
+        let shape = input.shape();
+        let batch = shape.dim(0);
+
+        let mut qf_tensor = Tensor::zeros(&[batch, 1], input.dtype());
+        for b in 0..batch {
+            qf_tensor.set_f32(&[b, 0], qf);
+        }
+
+        self.removal_net.forward(input, &qf_tensor)
+    }
+}
+
+// ============================================================================
+// UNIFIED ENHANCEMENT INTERFACE
+// ============================================================================
+
+/// Enhancement configuration
+pub struct EnhancementConfig {
+    /// Enhancement type
+    pub enhancement_type: EnhancementType,
+    /// Quality preset
+    pub quality: EnhancementQuality,
+    /// Strength (0-1)
+    pub strength: f32,
+    /// Enable temporal consistency
+    pub temporal: bool,
+    /// Model path
+    pub model_path: Option<String>,
+}
+
+impl Default for EnhancementConfig {
+    fn default() -> Self {
+        Self {
+            enhancement_type: EnhancementType::AllInOne,
+            quality: EnhancementQuality::Balanced,
+            strength: 1.0,
+            temporal: false,
+            model_path: None,
+        }
+    }
+}
+
+/// Neural image enhancement engine
+pub struct NeuralEnhancer {
+    /// Configuration
+    config: EnhancementConfig,
+    /// HDR reconstructor
+    hdr: Option<InverseToneMapping>,
+    /// Detail enhancer
+    detail: Option<DetailEnhancer>,
+    /// Low-light enhancer
+    lowlight: Option<LowLightEnhancer>,
+    /// Color corrector
+    color: Option<ColorCorrector>,
+    /// Frame interpolator
+    interpolator: Option<FrameInterpolator>,
+    /// Artifact remover
+    artifact: Option<ArtifactRemover>,
+    /// Previous frame for temporal
+    prev_frame: Option<Tensor>,
+}
+
+impl NeuralEnhancer {
+    pub fn new(config: EnhancementConfig) -> Self {
+        let num_features = config.quality.num_features();
+        let num_blocks = config.quality.num_blocks();
+
+        let mut enhancer = Self {
+            config,
+            hdr: None,
+            detail: None,
+            lowlight: None,
+            color: None,
+            interpolator: None,
+            artifact: None,
+            prev_frame: None,
+        };
+
+        enhancer.init_networks(num_features, num_blocks);
+        enhancer
+    }
+
+    fn init_networks(&mut self, num_features: usize, num_blocks: usize) {
+        match self.config.enhancement_type {
+            EnhancementType::HDRReconstruction => {
+                self.hdr = Some(InverseToneMapping::new(num_features, num_blocks));
+            }
+            EnhancementType::DetailEnhancement => {
+                self.detail = Some(DetailEnhancer::new(4, num_features));
+            }
+            EnhancementType::LowLightEnhancement => {
+                self.lowlight = Some(LowLightEnhancer::new(num_features));
+            }
+            EnhancementType::ColorCorrection => {
+                self.color = Some(ColorCorrector::new(num_features));
+            }
+            EnhancementType::FrameInterpolation => {
+                self.interpolator = Some(FrameInterpolator::new(num_features));
+            }
+            EnhancementType::ArtifactRemoval => {
+                self.artifact = Some(ArtifactRemover::new(num_features, num_blocks));
+            }
+            EnhancementType::StyleTransfer => {
+                // Would need style transfer network
+            }
+            EnhancementType::AllInOne => {
+                self.lowlight = Some(LowLightEnhancer::new(num_features));
+                self.detail = Some(DetailEnhancer::new(3, num_features));
+                self.color = Some(ColorCorrector::new(num_features));
+            }
+        }
+    }
+
+    pub fn enhance(&mut self, input: &Tensor) -> Tensor {
+        let mut result = input.clone();
+
+        match self.config.enhancement_type {
+            EnhancementType::HDRReconstruction => {
+                if let Some(ref hdr) = self.hdr {
+                    result = hdr.forward(input);
+                }
+            }
+            EnhancementType::DetailEnhancement => {
+                if let Some(ref detail) = self.detail {
+                    result = detail.forward(input);
+                }
+            }
+            EnhancementType::LowLightEnhancement => {
+                if let Some(ref lowlight) = self.lowlight {
+                    result = lowlight.forward(input);
+                }
+            }
+            EnhancementType::ColorCorrection => {
+                if let Some(ref color) = self.color {
+                    result = color.forward(input);
+                }
+            }
+            EnhancementType::ArtifactRemoval => {
+                if let Some(ref artifact) = self.artifact {
+                    result = artifact.forward(input);
+                }
+            }
+            EnhancementType::AllInOne => {
+                // Apply in sequence
+                if let Some(ref lowlight) = self.lowlight {
+                    result = lowlight.forward(&result);
+                }
+                if let Some(ref detail) = self.detail {
+                    result = detail.forward(&result);
+                }
+                if let Some(ref color) = self.color {
+                    result = color.forward(&result);
+                }
+            }
+            _ => {}
+        }
+
+        // Apply strength blending
+        if self.config.strength < 1.0 {
+            result = blend_tensors(input, &result, self.config.strength);
+        }
+
+        // Store for temporal
+        self.prev_frame = Some(result.clone());
+
+        result
+    }
+
+    pub fn interpolate(&self, frame0: &Tensor, frame1: &Tensor, t: f32) -> Option<Tensor> {
+        if let Some(ref interp) = self.interpolator {
+            Some(interp.interpolate(frame0, frame1, t))
+        } else {
+            None
+        }
+    }
+
+    pub fn generate_intermediate_frames(&self, frame0: &Tensor, frame1: &Tensor, count: usize) -> Vec<Tensor> {
+        if let Some(ref interp) = self.interpolator {
+            interp.generate_frames(frame0, frame1, count)
+        } else {
+            Vec::new()
+        }
+    }
+
+    pub fn reset(&mut self) {
+        self.prev_frame = None;
+    }
+}
+
+fn blend_tensors(a: &Tensor, b: &Tensor, factor: f32) -> Tensor {
+    let shape = a.shape();
+    let mut result = Tensor::zeros(
+        &[shape.dim(0), shape.dim(1), shape.dim(2), shape.dim(3)],
+        a.dtype(),
+    );
+
+    for batch in 0..shape.dim(0) {
+        for c in 0..shape.dim(1) {
+            for y in 0..shape.dim(2) {
+                for x in 0..shape.dim(3) {
+                    let va = a.get_f32(&[batch, c, y, x]);
+                    let vb = b.get_f32(&[batch, c, y, x]);
+                    result.set_f32(&[batch, c, y, x], va * (1.0 - factor) + vb * factor);
+                }
+            }
+        }
+    }
+
+    result
+}
+
+// ============================================================================
+// MODULE EXPORTS
+// ============================================================================
+
+pub mod hdr {
+    pub use super::{InverseToneMapping, MultiExposureFusion};
+}
+
+pub mod detail {
+    pub use super::{DetailEnhancer, LaplacianPyramid};
+}
+
+pub mod lowlight {
+    pub use super::LowLightEnhancer;
+}
+
+pub mod color {
+    pub use super::ColorCorrector;
+}
+
+pub mod interpolation {
+    pub use super::FrameInterpolator;
+}
+
+pub mod artifact {
+    pub use super::ArtifactRemover;
+}
+
+pub mod config {
+    pub use super::{EnhancementConfig, EnhancementType, EnhancementQuality};
+}
+
+pub use hdr::*;
+pub use detail::*;
+pub use lowlight::*;
+pub use color::*;
+pub use interpolation::*;
+pub use artifact::*;
+pub use config::*;
+pub use NeuralEnhancer;

@@ -1,0 +1,1158 @@
+// ============================================================================
+// BUILD-UNIVERSE: NEXUS PUBLIC API
+// Public API surface for mod developers
+// ============================================================================
+
+// Re-export core types for mod development
+pub use nexus::lib::{
+    ModMetadata,
+    ModCategory,
+    ModDependency,
+    Version,
+    ModPackage,
+};
+
+pub use nexus::hooks::{
+    Hook,
+    HookType,
+    HookPriority,
+    HookResult,
+    HookContext,
+    HookManager,
+    PreHook,
+    PostHook,
+    ReplaceHook,
+};
+
+pub use nexus::events::{
+    Event,
+    EventPriority,
+    EventHandler,
+    EventBus,
+    EventDispatcher,
+};
+
+pub use nexus::assets::{
+    AssetType,
+    AssetHandle,
+    AssetPriority,
+    ModAssetManager,
+    VirtualFileSystem,
+};
+
+pub use nexus::config::{
+    ModConfig,
+    ConfigValue,
+    ConfigSchema,
+    ConfigValidator,
+};
+
+pub use nexus::sandbox::{
+    Sandbox,
+    SandboxPolicy,
+    Permission,
+    SecurityContext,
+};
+
+pub use nexus::scripting::{
+    ScriptEngine,
+    ScriptContext,
+    ScriptValue,
+    NativeFunction,
+};
+
+pub use nexus::registry::{
+    ModRegistry,
+    ComponentRegistry,
+    ServiceRegistry,
+    ExtensionPoint,
+};
+
+pub use nexus::compatibility::{
+    CompatibilityChecker,
+    VersionRange,
+    ModCompatInfo,
+};
+
+pub use nexus::loader::{
+    ModLoader,
+    ModInstance,
+    LoadState,
+    LoadOptions,
+    LoadResult,
+};
+
+pub use nexus::ui::{
+    UITheme,
+    Widget,
+    ModManagerUI,
+};
+
+pub use nexus::networking::{
+    RepositoryClient,
+    DownloadManager,
+    ModSync,
+};
+
+pub use nexus::persistence::{
+    SaveManager,
+    KeyValueStore,
+    StorageValue,
+};
+
+pub use nexus::diagnostics::{
+    Logger,
+    ModLogger,
+    LogLevel,
+    Profiler,
+    DebugConsole,
+};
+
+pub use nexus::profiles::{
+    Profile,
+    ProfileManager,
+    ProfileModEntry,
+};
+
+// ============================================================================
+// REGION: Mod Trait
+// ============================================================================
+
+/// Main trait that all mods must implement
+trait Mod {
+    /// Called when the mod is first loaded
+    fn on_load(&mut self, ctx: &mut ModContext) -> Result<(), ModError>;
+
+    /// Called when the mod is being unloaded
+    fn on_unload(&mut self, ctx: &mut ModContext);
+
+    /// Called once per frame (if registered)
+    fn on_update(&mut self, ctx: &mut ModContext, delta_time: f32) {}
+
+    /// Called when mod configuration changes
+    fn on_config_changed(&mut self, ctx: &mut ModContext) {}
+
+    /// Called when another mod sends a message
+    fn on_message(&mut self, ctx: &mut ModContext, from: &str, message: &Message) {}
+
+    /// Get mod metadata
+    fn metadata(&self) -> &ModMetadata;
+
+    /// Get mod configuration schema
+    fn config_schema(&self) -> Option<ConfigSchema> { None }
+
+    /// Get mod commands (for console)
+    fn commands(&self) -> Vec<ModCommand> { Vec::new() }
+}
+
+// ============================================================================
+// REGION: Mod Context
+// ============================================================================
+
+/// Context provided to mods during callbacks
+@derive(Debug)]
+struct ModContext {
+    /// Mod's own ID
+    mod_id: String,
+    /// Mod logger
+    logger: ModLogger,
+    /// Event bus for sending events
+    events: Arc<EventBus>,
+    /// Asset manager
+    assets: Arc<ModAssetManager>,
+    /// Configuration access
+    config: ModConfig,
+    /// Key-value storage
+    storage: KeyValueStore,
+    /// Inter-mod messaging
+    messenger: ModMessenger,
+    /// API access
+    api: ModAPI,
+}
+
+impl ModContext {
+    fn new(
+        mod_id: &str,
+        logger: ModLogger,
+        events: Arc<EventBus>,
+        assets: Arc<ModAssetManager>,
+        config: ModConfig,
+        storage_path: &str,
+    ) -> Self {
+        ModContext {
+            mod_id: mod_id.to_string(),
+            logger,
+            events,
+            assets,
+            config,
+            storage: KeyValueStore::new(&format!("{}/{}.json", storage_path, mod_id)),
+            messenger: ModMessenger::new(mod_id),
+            api: ModAPI::new(),
+        }
+    }
+
+    /// Get mod ID
+    fn mod_id(&self) -> &str {
+        &self.mod_id
+    }
+
+    /// Log a message
+    fn log(&self, level: LogLevel, message: &str) {
+        self.logger.log(level, "mod", message);
+    }
+
+    /// Log debug message
+    fn debug(&self, message: &str) {
+        self.logger.debug(message);
+    }
+
+    /// Log info message
+    fn info(&self, message: &str) {
+        self.logger.info(message);
+    }
+
+    /// Log warning message
+    fn warn(&self, message: &str) {
+        self.logger.warn(message);
+    }
+
+    /// Log error message
+    fn error(&self, message: &str) {
+        self.logger.error(message);
+    }
+
+    /// Emit an event
+    fn emit<E: Event>(&self, event: E) {
+        self.events.emit(event);
+    }
+
+    /// Subscribe to an event
+    fn subscribe<E: Event, F: Fn(&E) + 'static>(&mut self, handler: F) {
+        self.events.subscribe(handler);
+    }
+
+    /// Get a config value
+    fn get_config<T: FromConfigValue>(&self, key: &str) -> Option<T> {
+        self.config.get(key).and_then(|v| T::from_config_value(v))
+    }
+
+    /// Set a config value
+    fn set_config<T: ToConfigValue>(&mut self, key: &str, value: T) {
+        self.config.set(key, value.to_config_value());
+    }
+
+    /// Save persistent data
+    fn save<T: ToStorageValue>(&mut self, key: &str, value: T) {
+        self.storage.set(key, value.to_storage_value());
+    }
+
+    /// Load persistent data
+    fn load<T: FromStorageValue>(&self, key: &str) -> Option<T> {
+        self.storage.get(key).and_then(|v| T::from_storage_value(v))
+    }
+
+    /// Send message to another mod
+    fn send_message(&self, to: &str, message: Message) {
+        self.messenger.send(to, message);
+    }
+
+    /// Get game API
+    fn game(&self) -> &GameAPI {
+        self.api.game()
+    }
+
+    /// Get graphics API
+    fn graphics(&self) -> &GraphicsAPI {
+        self.api.graphics()
+    }
+
+    /// Get input API
+    fn input(&self) -> &InputAPI {
+        self.api.input()
+    }
+
+    /// Get audio API
+    fn audio(&self) -> &AudioAPI {
+        self.api.audio()
+    }
+}
+
+// ============================================================================
+// REGION: Mod Error
+// ============================================================================
+
+/// Errors that can occur in mod operations
+@derive(Debug, Clone)]
+enum ModError {
+    /// Initialization failed
+    InitFailed { reason: String },
+    /// Resource not found
+    ResourceNotFound { resource: String },
+    /// Permission denied
+    PermissionDenied { operation: String },
+    /// Invalid operation
+    InvalidOperation { reason: String },
+    /// Dependency error
+    DependencyError { dependency: String, reason: String },
+    /// Configuration error
+    ConfigError { key: String, reason: String },
+    /// Runtime error
+    RuntimeError { reason: String },
+    /// API error
+    APIError { api: String, reason: String },
+    /// Generic error
+    Other { message: String },
+}
+
+impl ModError {
+    fn to_string(&self) -> String {
+        match self {
+            ModError::InitFailed { reason } =>
+                format!("Initialization failed: {}", reason),
+            ModError::ResourceNotFound { resource } =>
+                format!("Resource not found: {}", resource),
+            ModError::PermissionDenied { operation } =>
+                format!("Permission denied: {}", operation),
+            ModError::InvalidOperation { reason } =>
+                format!("Invalid operation: {}", reason),
+            ModError::DependencyError { dependency, reason } =>
+                format!("Dependency '{}' error: {}", dependency, reason),
+            ModError::ConfigError { key, reason } =>
+                format!("Config '{}' error: {}", key, reason),
+            ModError::RuntimeError { reason } =>
+                format!("Runtime error: {}", reason),
+            ModError::APIError { api, reason } =>
+                format!("API '{}' error: {}", api, reason),
+            ModError::Other { message } =>
+                message.clone(),
+        }
+    }
+}
+
+// ============================================================================
+// REGION: Mod Message
+// ============================================================================
+
+/// Inter-mod message
+@derive(Debug, Clone)]
+struct Message {
+    /// Message type/name
+    msg_type: String,
+    /// Message payload
+    payload: MessagePayload,
+    /// Reply expected
+    expects_reply: bool,
+}
+
+@derive(Debug, Clone)]
+enum MessagePayload {
+    None,
+    Bool(bool),
+    Int(i64),
+    Float(f64),
+    String(String),
+    Bytes(Vec<u8>),
+    Json(String),
+    Custom(Box<dyn Any>),
+}
+
+impl Message {
+    fn new(msg_type: &str) -> Self {
+        Message {
+            msg_type: msg_type.to_string(),
+            payload: MessagePayload::None,
+            expects_reply: false,
+        }
+    }
+
+    fn with_payload(mut self, payload: MessagePayload) -> Self {
+        self.payload = payload;
+        self
+    }
+
+    fn with_string(mut self, value: &str) -> Self {
+        self.payload = MessagePayload::String(value.to_string());
+        self
+    }
+
+    fn with_json<T: Serialize>(mut self, value: &T) -> Self {
+        self.payload = MessagePayload::Json(serialize_json(value));
+        self
+    }
+
+    fn expecting_reply(mut self) -> Self {
+        self.expects_reply = true;
+        self
+    }
+
+    fn get_string(&self) -> Option<&str> {
+        match &self.payload {
+            MessagePayload::String(s) => Some(s),
+            _ => None,
+        }
+    }
+
+    fn get_json<T: Deserialize>(&self) -> Option<T> {
+        match &self.payload {
+            MessagePayload::Json(s) => deserialize_json(s).ok(),
+            _ => None,
+        }
+    }
+}
+
+/// Messenger for inter-mod communication
+@derive(Debug)]
+struct ModMessenger {
+    mod_id: String,
+    outbox: Vec<(String, Message)>,
+    inbox: Vec<(String, Message)>,
+}
+
+impl ModMessenger {
+    fn new(mod_id: &str) -> Self {
+        ModMessenger {
+            mod_id: mod_id.to_string(),
+            outbox: Vec::new(),
+            inbox: Vec::new(),
+        }
+    }
+
+    fn send(&mut self, to: &str, message: Message) {
+        self.outbox.push((to.to_string(), message));
+    }
+
+    fn broadcast(&mut self, message: Message) {
+        self.outbox.push(("*".to_string(), message));
+    }
+
+    fn receive(&mut self) -> Option<(String, Message)> {
+        self.inbox.pop()
+    }
+
+    fn has_messages(&self) -> bool {
+        !self.inbox.is_empty()
+    }
+}
+
+// ============================================================================
+// REGION: Mod Command
+// ============================================================================
+
+/// Console command provided by a mod
+@derive(Debug)]
+struct ModCommand {
+    /// Command name
+    name: String,
+    /// Description
+    description: String,
+    /// Usage string
+    usage: String,
+    /// Required arguments
+    required_args: u32,
+    /// Optional arguments
+    optional_args: u32,
+    /// Handler function
+    handler: Box<dyn Fn(&ModContext, &[&str]) -> CommandResult>,
+}
+
+@derive(Debug)]
+enum CommandResult {
+    Success(String),
+    Error(String),
+    None,
+}
+
+impl ModCommand {
+    fn new(name: &str, handler: impl Fn(&ModContext, &[&str]) -> CommandResult + 'static) -> Self {
+        ModCommand {
+            name: name.to_string(),
+            description: String::new(),
+            usage: name.to_string(),
+            required_args: 0,
+            optional_args: 0,
+            handler: Box::new(handler),
+        }
+    }
+
+    fn with_description(mut self, description: &str) -> Self {
+        self.description = description.to_string();
+        self
+    }
+
+    fn with_usage(mut self, usage: &str) -> Self {
+        self.usage = usage.to_string();
+        self
+    }
+
+    fn with_args(mut self, required: u32, optional: u32) -> Self {
+        self.required_args = required;
+        self.optional_args = optional;
+        self
+    }
+
+    fn execute(&self, ctx: &ModContext, args: &[&str]) -> CommandResult {
+        if args.len() < self.required_args as usize {
+            return CommandResult::Error(format!(
+                "Usage: {}",
+                self.usage
+            ));
+        }
+        (self.handler)(ctx, args)
+    }
+}
+
+// ============================================================================
+// REGION: Mod API
+// ============================================================================
+
+/// Central API access point
+@derive(Debug)]
+struct ModAPI {
+    game: GameAPI,
+    graphics: GraphicsAPI,
+    input: InputAPI,
+    audio: AudioAPI,
+    ui: UIAPI,
+    network: NetworkAPI,
+}
+
+impl ModAPI {
+    fn new() -> Self {
+        ModAPI {
+            game: GameAPI::new(),
+            graphics: GraphicsAPI::new(),
+            input: InputAPI::new(),
+            audio: AudioAPI::new(),
+            ui: UIAPI::new(),
+            network: NetworkAPI::new(),
+        }
+    }
+
+    fn game(&self) -> &GameAPI { &self.game }
+    fn graphics(&self) -> &GraphicsAPI { &self.graphics }
+    fn input(&self) -> &InputAPI { &self.input }
+    fn audio(&self) -> &AudioAPI { &self.audio }
+    fn ui(&self) -> &UIAPI { &self.ui }
+    fn network(&self) -> &NetworkAPI { &self.network }
+}
+
+/// Game API for accessing game state
+@derive(Debug)]
+struct GameAPI {
+    // Internal state
+}
+
+impl GameAPI {
+    fn new() -> Self { GameAPI {} }
+
+    /// Check if game is running
+    fn is_running(&self) -> bool { false }
+
+    /// Check if game is paused
+    fn is_paused(&self) -> bool { false }
+
+    /// Get current game time
+    fn game_time(&self) -> f64 { 0.0 }
+
+    /// Get current frame number
+    fn frame_count(&self) -> u64 { 0 }
+
+    /// Get player position
+    fn player_position(&self) -> (f32, f32, f32) { (0.0, 0.0, 0.0) }
+
+    /// Get camera position
+    fn camera_position(&self) -> (f32, f32, f32) { (0.0, 0.0, 0.0) }
+
+    /// Get camera rotation
+    fn camera_rotation(&self) -> (f32, f32, f32) { (0.0, 0.0, 0.0) }
+
+    /// Get current level/map name
+    fn current_level(&self) -> Option<String> { None }
+
+    /// Get current game state
+    fn game_state(&self) -> GameState { GameState::MainMenu }
+
+    /// Get game version
+    fn version(&self) -> Version { Version::new(1, 0, 0) }
+}
+
+@derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GameState {
+    MainMenu,
+    Loading,
+    Playing,
+    Paused,
+    Cutscene,
+    Inventory,
+    Dialog,
+}
+
+/// Graphics API for rendering
+@derive(Debug)]
+struct GraphicsAPI {
+    // Internal state
+}
+
+impl GraphicsAPI {
+    fn new() -> Self { GraphicsAPI {} }
+
+    /// Get screen resolution
+    fn resolution(&self) -> (u32, u32) { (1920, 1080) }
+
+    /// Get display aspect ratio
+    fn aspect_ratio(&self) -> f32 { 16.0 / 9.0 }
+
+    /// Check if HDR is enabled
+    fn hdr_enabled(&self) -> bool { false }
+
+    /// Get current quality preset
+    fn quality_preset(&self) -> String { "medium".to_string() }
+
+    /// Set shader constant
+    fn set_shader_constant(&self, name: &str, value: ShaderValue) {}
+
+    /// Register custom shader
+    fn register_shader(&self, name: &str, source: &str) -> Result<ShaderId, ModError> {
+        Err(ModError::APIError {
+            api: "graphics".to_string(),
+            reason: "Not implemented".to_string(),
+        })
+    }
+
+    /// Register render pass
+    fn register_render_pass(&self, pass: RenderPass) -> Result<RenderPassId, ModError> {
+        Err(ModError::APIError {
+            api: "graphics".to_string(),
+            reason: "Not implemented".to_string(),
+        })
+    }
+
+    /// Take screenshot
+    fn screenshot(&self, path: &str) -> Result<(), ModError> {
+        Err(ModError::APIError {
+            api: "graphics".to_string(),
+            reason: "Not implemented".to_string(),
+        })
+    }
+}
+
+type ShaderId = u64;
+type RenderPassId = u64;
+
+@derive(Debug, Clone)]
+enum ShaderValue {
+    Float(f32),
+    Vec2(f32, f32),
+    Vec3(f32, f32, f32),
+    Vec4(f32, f32, f32, f32),
+    Int(i32),
+    Bool(bool),
+    Matrix4x4([[f32; 4]; 4]),
+}
+
+@derive(Debug)]
+struct RenderPass {
+    name: String,
+    order: i32,
+    inputs: Vec<String>,
+    outputs: Vec<String>,
+    shader: String,
+}
+
+/// Input API for handling input
+@derive(Debug)]
+struct InputAPI {
+    // Internal state
+}
+
+impl InputAPI {
+    fn new() -> Self { InputAPI {} }
+
+    /// Check if key is pressed
+    fn is_key_pressed(&self, key: Key) -> bool { false }
+
+    /// Check if key was just pressed this frame
+    fn is_key_just_pressed(&self, key: Key) -> bool { false }
+
+    /// Check if key was just released this frame
+    fn is_key_just_released(&self, key: Key) -> bool { false }
+
+    /// Get mouse position
+    fn mouse_position(&self) -> (f32, f32) { (0.0, 0.0) }
+
+    /// Get mouse delta
+    fn mouse_delta(&self) -> (f32, f32) { (0.0, 0.0) }
+
+    /// Check if mouse button is pressed
+    fn is_mouse_pressed(&self, button: MouseButton) -> bool { false }
+
+    /// Get gamepad axis value
+    fn gamepad_axis(&self, gamepad: u32, axis: GamepadAxis) -> f32 { 0.0 }
+
+    /// Check if gamepad button is pressed
+    fn is_gamepad_pressed(&self, gamepad: u32, button: GamepadButton) -> bool { false }
+
+    /// Register keybinding
+    fn register_keybinding(&mut self, name: &str, default_key: Key, callback: impl Fn() + 'static) {}
+}
+
+@derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Key {
+    A, B, C, D, E, F, G, H, I, J, K, L, M,
+    N, O, P, Q, R, S, T, U, V, W, X, Y, Z,
+    Num0, Num1, Num2, Num3, Num4, Num5, Num6, Num7, Num8, Num9,
+    F1, F2, F3, F4, F5, F6, F7, F8, F9, F10, F11, F12,
+    Escape, Enter, Tab, Space, Backspace,
+    Left, Right, Up, Down,
+    LShift, RShift, LCtrl, RCtrl, LAlt, RAlt,
+}
+
+@derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MouseButton {
+    Left,
+    Right,
+    Middle,
+    Button4,
+    Button5,
+}
+
+@derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GamepadAxis {
+    LeftX, LeftY,
+    RightX, RightY,
+    LeftTrigger, RightTrigger,
+}
+
+@derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GamepadButton {
+    A, B, X, Y,
+    DPadUp, DPadDown, DPadLeft, DPadRight,
+    LeftBumper, RightBumper,
+    LeftStick, RightStick,
+    Start, Back, Guide,
+}
+
+/// Audio API for sound
+@derive(Debug)]
+struct AudioAPI {
+    // Internal state
+}
+
+impl AudioAPI {
+    fn new() -> Self { AudioAPI {} }
+
+    /// Play a sound
+    fn play_sound(&self, path: &str) -> Result<SoundHandle, ModError> {
+        Err(ModError::APIError {
+            api: "audio".to_string(),
+            reason: "Not implemented".to_string(),
+        })
+    }
+
+    /// Play music
+    fn play_music(&self, path: &str) -> Result<MusicHandle, ModError> {
+        Err(ModError::APIError {
+            api: "audio".to_string(),
+            reason: "Not implemented".to_string(),
+        })
+    }
+
+    /// Stop sound
+    fn stop_sound(&self, handle: SoundHandle) {}
+
+    /// Set master volume
+    fn set_master_volume(&self, volume: f32) {}
+
+    /// Get master volume
+    fn master_volume(&self) -> f32 { 1.0 }
+
+    /// Set music volume
+    fn set_music_volume(&self, volume: f32) {}
+
+    /// Set SFX volume
+    fn set_sfx_volume(&self, volume: f32) {}
+}
+
+type SoundHandle = u64;
+type MusicHandle = u64;
+
+/// UI API for interface
+@derive(Debug)]
+struct UIAPI {
+    // Internal state
+}
+
+impl UIAPI {
+    fn new() -> Self { UIAPI {} }
+
+    /// Show notification
+    fn notify(&self, message: &str) {}
+
+    /// Show notification with duration
+    fn notify_timed(&self, message: &str, duration_ms: u64) {}
+
+    /// Show error notification
+    fn notify_error(&self, message: &str) {}
+
+    /// Add widget to UI
+    fn add_widget(&mut self, widget: Box<dyn Widget>) -> WidgetId {
+        0
+    }
+
+    /// Remove widget
+    fn remove_widget(&mut self, id: WidgetId) {}
+
+    /// Show/hide widget
+    fn set_widget_visible(&mut self, id: WidgetId, visible: bool) {}
+
+    /// Check if cursor is visible
+    fn is_cursor_visible(&self) -> bool { true }
+
+    /// Set cursor visibility
+    fn set_cursor_visible(&self, visible: bool) {}
+}
+
+type WidgetId = u64;
+
+/// Network API
+@derive(Debug)]
+struct NetworkAPI {
+    // Internal state
+}
+
+impl NetworkAPI {
+    fn new() -> Self { NetworkAPI {} }
+
+    /// Check if in multiplayer
+    fn is_multiplayer(&self) -> bool { false }
+
+    /// Check if hosting
+    fn is_host(&self) -> bool { false }
+
+    /// Get local player ID
+    fn local_player_id(&self) -> Option<PlayerId> { None }
+
+    /// Get all connected players
+    fn players(&self) -> Vec<PlayerId> { Vec::new() }
+
+    /// Send network message
+    fn send(&self, to: PlayerId, data: &[u8]) {}
+
+    /// Broadcast to all players
+    fn broadcast(&self, data: &[u8]) {}
+}
+
+type PlayerId = u64;
+
+// ============================================================================
+// REGION: Conversion Traits
+// ============================================================================
+
+/// Convert from ConfigValue
+trait FromConfigValue: Sized {
+    fn from_config_value(value: &ConfigValue) -> Option<Self>;
+}
+
+/// Convert to ConfigValue
+trait ToConfigValue {
+    fn to_config_value(&self) -> ConfigValue;
+}
+
+/// Convert from StorageValue
+trait FromStorageValue: Sized {
+    fn from_storage_value(value: &StorageValue) -> Option<Self>;
+}
+
+/// Convert to StorageValue
+trait ToStorageValue {
+    fn to_storage_value(&self) -> StorageValue;
+}
+
+// Implement for basic types
+impl FromConfigValue for bool {
+    fn from_config_value(value: &ConfigValue) -> Option<Self> {
+        match value {
+            ConfigValue::Bool(v) => Some(*v),
+            _ => None,
+        }
+    }
+}
+
+impl ToConfigValue for bool {
+    fn to_config_value(&self) -> ConfigValue {
+        ConfigValue::Bool(*self)
+    }
+}
+
+impl FromConfigValue for i64 {
+    fn from_config_value(value: &ConfigValue) -> Option<Self> {
+        match value {
+            ConfigValue::Int(v) => Some(*v),
+            _ => None,
+        }
+    }
+}
+
+impl ToConfigValue for i64 {
+    fn to_config_value(&self) -> ConfigValue {
+        ConfigValue::Int(*self)
+    }
+}
+
+impl FromConfigValue for f64 {
+    fn from_config_value(value: &ConfigValue) -> Option<Self> {
+        match value {
+            ConfigValue::Float(v) => Some(*v),
+            _ => None,
+        }
+    }
+}
+
+impl ToConfigValue for f64 {
+    fn to_config_value(&self) -> ConfigValue {
+        ConfigValue::Float(*self)
+    }
+}
+
+impl FromConfigValue for String {
+    fn from_config_value(value: &ConfigValue) -> Option<Self> {
+        match value {
+            ConfigValue::String(v) => Some(v.clone()),
+            _ => None,
+        }
+    }
+}
+
+impl ToConfigValue for String {
+    fn to_config_value(&self) -> ConfigValue {
+        ConfigValue::String(self.clone())
+    }
+}
+
+// ============================================================================
+// REGION: Macros for Mod Development
+// ============================================================================
+
+/// Macro for declaring a mod
+macro_rules! declare_mod {
+    ($name:ident, $metadata:expr) => {
+        #[no_mangle]
+        pub fn create_mod() -> Box<dyn Mod> {
+            Box::new($name::new())
+        }
+
+        #[no_mangle]
+        pub fn get_metadata() -> ModMetadata {
+            $metadata
+        }
+    };
+}
+
+/// Macro for logging
+macro_rules! log {
+    ($ctx:expr, $level:ident, $($arg:tt)*) => {
+        $ctx.log(LogLevel::$level, &format!($($arg)*))
+    };
+}
+
+/// Macro for debug logging
+macro_rules! debug {
+    ($ctx:expr, $($arg:tt)*) => {
+        $ctx.debug(&format!($($arg)*))
+    };
+}
+
+/// Macro for info logging
+macro_rules! info {
+    ($ctx:expr, $($arg:tt)*) => {
+        $ctx.info(&format!($($arg)*))
+    };
+}
+
+/// Macro for warning logging
+macro_rules! warn {
+    ($ctx:expr, $($arg:tt)*) => {
+        $ctx.warn(&format!($($arg)*))
+    };
+}
+
+/// Macro for error logging
+macro_rules! error {
+    ($ctx:expr, $($arg:tt)*) => {
+        $ctx.error(&format!($($arg)*))
+    };
+}
+
+// ============================================================================
+// REGION: Example Mod Implementation
+// ============================================================================
+
+/// Example mod demonstrating the API
+mod example {
+    use super::*;
+
+    struct ExampleMod {
+        metadata: ModMetadata,
+        counter: u32,
+    }
+
+    impl ExampleMod {
+        fn new() -> Self {
+            ExampleMod {
+                metadata: ModMetadata {
+                    id: "example_mod".to_string(),
+                    name: "Example Mod".to_string(),
+                    version: Version::new(1, 0, 0),
+                    author: "Nexus".to_string(),
+                    description: "An example mod".to_string(),
+                    ..Default::default()
+                },
+                counter: 0,
+            }
+        }
+    }
+
+    impl Mod for ExampleMod {
+        fn on_load(&mut self, ctx: &mut ModContext) -> Result<(), ModError> {
+            ctx.info("Example mod loaded!");
+
+            // Subscribe to events
+            ctx.subscribe(|event: &GameStartEvent| {
+                // Handle game start
+            });
+
+            // Load saved state
+            if let Some(count) = ctx.load::<u32>("counter") {
+                self.counter = count;
+            }
+
+            Ok(())
+        }
+
+        fn on_unload(&mut self, ctx: &mut ModContext) {
+            ctx.info("Example mod unloading...");
+            ctx.save("counter", self.counter);
+        }
+
+        fn on_update(&mut self, ctx: &mut ModContext, delta_time: f32) {
+            self.counter += 1;
+
+            if self.counter % 1000 == 0 {
+                ctx.debug(&format!("Frame {}", self.counter));
+            }
+        }
+
+        fn metadata(&self) -> &ModMetadata {
+            &self.metadata
+        }
+
+        fn commands(&self) -> Vec<ModCommand> {
+            vec![
+                ModCommand::new("example_hello", |ctx, args| {
+                    let name = args.get(0).unwrap_or(&"World");
+                    CommandResult::Success(format!("Hello, {}!", name))
+                })
+                .with_description("Say hello")
+                .with_usage("example_hello [name]")
+                .with_args(0, 1),
+            ]
+        }
+    }
+
+    // Placeholder event type
+    struct GameStartEvent;
+    impl Event for GameStartEvent {}
+}
+
+// ============================================================================
+// REGION: Helper Types and Functions
+// ============================================================================
+
+// Placeholder trait impls
+trait Any {}
+trait Serialize {}
+trait Deserialize {}
+trait Event {}
+
+fn serialize_json<T: Serialize>(value: &T) -> String { String::new() }
+fn deserialize_json<T: Deserialize>(json: &str) -> Result<T, String> { Err("Not implemented".to_string()) }
+
+// Arc wrapper (simplified)
+struct Arc<T>(T);
+impl<T> Arc<T> {
+    fn new(value: T) -> Self { Arc(value) }
+}
+
+// ============================================================================
+// REGION: Unit Tests
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_message() {
+        let msg = Message::new("test")
+            .with_string("Hello");
+
+        assert_eq!(msg.msg_type, "test");
+        assert_eq!(msg.get_string(), Some("Hello"));
+    }
+
+    #[test]
+    fn test_mod_command() {
+        let cmd = ModCommand::new("test", |_, _| CommandResult::Success("OK".to_string()))
+            .with_description("Test command")
+            .with_args(1, 2);
+
+        assert_eq!(cmd.name, "test");
+        assert_eq!(cmd.required_args, 1);
+        assert_eq!(cmd.optional_args, 2);
+    }
+
+    #[test]
+    fn test_mod_error() {
+        let error = ModError::InitFailed { reason: "test".to_string() };
+        assert!(error.to_string().contains("Initialization failed"));
+
+        let error = ModError::ResourceNotFound { resource: "texture.png".to_string() };
+        assert!(error.to_string().contains("texture.png"));
+    }
+
+    #[test]
+    fn test_shader_value() {
+        let _float = ShaderValue::Float(1.0);
+        let _vec3 = ShaderValue::Vec3(1.0, 2.0, 3.0);
+        let _bool = ShaderValue::Bool(true);
+    }
+
+    #[test]
+    fn test_config_value_conversion() {
+        let value = true.to_config_value();
+        assert_eq!(bool::from_config_value(&value), Some(true));
+
+        let value = 42i64.to_config_value();
+        assert_eq!(i64::from_config_value(&value), Some(42));
+
+        let value = "hello".to_string().to_config_value();
+        assert_eq!(String::from_config_value(&value), Some("hello".to_string()));
+    }
+
+    #[test]
+    fn test_game_state() {
+        assert_ne!(GameState::MainMenu, GameState::Playing);
+        assert_eq!(GameState::Paused, GameState::Paused);
+    }
+
+    #[test]
+    fn test_messenger() {
+        let mut messenger = ModMessenger::new("test_mod");
+
+        messenger.send("other_mod", Message::new("ping"));
+        assert_eq!(messenger.outbox.len(), 1);
+
+        messenger.broadcast(Message::new("announcement"));
+        assert_eq!(messenger.outbox.len(), 2);
+    }
+}

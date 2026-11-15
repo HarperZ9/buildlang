@@ -1,0 +1,933 @@
+// =============================================================================
+// BUILD Photon - Subsurface Scattering System
+// =============================================================================
+// Subsurface scattering for skin, wax, marble, leaves,
+// and other translucent materials using screen-space and separable methods.
+
+module photon::subsurface_scattering {
+    use core::mem;
+    use core::simd;
+    use math::{Vec2, Vec3, Vec4, Mat4};
+    use gpu::{Buffer, Texture, Sampler, Pipeline, ComputePipeline, BindGroup, CommandEncoder};
+
+    // =========================================================================
+    // Subsurface Scattering Profiles
+    // =========================================================================
+
+    /// Scattering profile type
+    pub enum SssProfileType {
+        Gaussian,
+        Burley,            // Disney's normalized diffusion
+        SeparableSss,      // Jimenez et al.
+        PreIntegrated,     // Lookup texture based
+        RandomWalk,        // Path-traced SSS (ray tracing)
+    }
+
+    /// Single SSS profile kernel sample
+    #[repr(C, align(16))]
+    pub struct SssKernelSample {
+        pub offset: Vec2,      // Offset in texture space
+        pub weight: Vec3,      // RGB weight
+        pub variance: f32,     // Gaussian variance
+    }
+
+    /// Subsurface scattering profile
+    pub struct SssProfile {
+        pub name: String,
+        pub profile_type: SssProfileType,
+        pub scatter_distance: Vec3,    // Per-channel mean free path
+        pub scatter_color: Vec3,       // Subsurface albedo
+        pub transmittance_tint: Vec3,  // Thin object transmittance
+        pub falloff: Vec3,             // Falloff exponents
+        pub max_radius: f32,           // Maximum blur radius (mm)
+        pub world_scale: f32,          // Millimeters per world unit
+        pub kernel_samples: Vec<SssKernelSample>,
+    }
+
+    impl SssProfile {
+        /// Create a human skin profile
+        pub fn skin() -> Self {
+            Self {
+                name: "Skin".to_string(),
+                profile_type: SssProfileType::Burley,
+                scatter_distance: Vec3::new(1.0, 0.4, 0.2),  // mm
+                scatter_color: Vec3::new(0.8, 0.4, 0.2),
+                transmittance_tint: Vec3::new(1.0, 0.4, 0.25),
+                falloff: Vec3::new(1.0, 1.0, 1.0),
+                max_radius: 5.0,
+                world_scale: 10.0,  // 1 unit = 10mm
+                kernel_samples: Self::generate_burley_kernel(32),
+            }
+        }
+
+        /// Create a marble profile
+        pub fn marble() -> Self {
+            Self {
+                name: "Marble".to_string(),
+                profile_type: SssProfileType::Gaussian,
+                scatter_distance: Vec3::new(8.0, 5.0, 3.0),
+                scatter_color: Vec3::new(0.95, 0.93, 0.88),
+                transmittance_tint: Vec3::new(1.0, 1.0, 0.9),
+                falloff: Vec3::new(1.0, 1.0, 1.0),
+                max_radius: 20.0,
+                world_scale: 10.0,
+                kernel_samples: Self::generate_gaussian_kernel(32),
+            }
+        }
+
+        /// Create a wax/candle profile
+        pub fn wax() -> Self {
+            Self {
+                name: "Wax".to_string(),
+                profile_type: SssProfileType::Burley,
+                scatter_distance: Vec3::new(3.0, 1.5, 0.8),
+                scatter_color: Vec3::new(0.95, 0.85, 0.5),
+                transmittance_tint: Vec3::new(1.0, 0.7, 0.3),
+                falloff: Vec3::new(1.0, 1.0, 1.0),
+                max_radius: 8.0,
+                world_scale: 10.0,
+                kernel_samples: Self::generate_burley_kernel(32),
+            }
+        }
+
+        /// Create a plant leaf profile
+        pub fn leaf() -> Self {
+            Self {
+                name: "Leaf".to_string(),
+                profile_type: SssProfileType::Gaussian,
+                scatter_distance: Vec3::new(2.0, 4.0, 0.5),  // More green scattering
+                scatter_color: Vec3::new(0.3, 0.7, 0.2),
+                transmittance_tint: Vec3::new(0.4, 0.9, 0.3),
+                falloff: Vec3::new(1.0, 1.0, 1.0),
+                max_radius: 5.0,
+                world_scale: 10.0,
+                kernel_samples: Self::generate_gaussian_kernel(24),
+            }
+        }
+
+        /// Create a milk profile
+        pub fn milk() -> Self {
+            Self {
+                name: "Milk".to_string(),
+                profile_type: SssProfileType::Burley,
+                scatter_distance: Vec3::new(10.0, 10.0, 10.0),
+                scatter_color: Vec3::new(0.98, 0.98, 0.95),
+                transmittance_tint: Vec3::new(1.0, 1.0, 0.95),
+                falloff: Vec3::new(1.0, 1.0, 1.0),
+                max_radius: 25.0,
+                world_scale: 10.0,
+                kernel_samples: Self::generate_burley_kernel(32),
+            }
+        }
+
+        /// Generate Gaussian kernel samples
+        fn generate_gaussian_kernel(num_samples: usize) -> Vec<SssKernelSample> {
+            let mut samples = Vec::with_capacity(num_samples);
+
+            for i in 0..num_samples {
+                let t = i as f32 / (num_samples - 1) as f32;
+                let r = t.sqrt() * 3.0;  // Radius in standard deviations
+
+                // Golden angle distribution
+                let theta = i as f32 * 2.399963;  // Golden angle
+
+                let offset = Vec2::new(r * theta.cos(), r * theta.sin());
+
+                // Gaussian weight
+                let weight = (-r * r * 0.5).exp();
+
+                samples.push(SssKernelSample {
+                    offset,
+                    weight: Vec3::new(weight, weight, weight),
+                    variance: 1.0,
+                });
+            }
+
+            // Normalize weights
+            let total: f32 = samples.iter().map(|s| s.weight.x).sum();
+            for sample in &mut samples {
+                sample.weight = sample.weight / total;
+            }
+
+            samples
+        }
+
+        /// Generate Burley (normalized diffusion) kernel samples
+        fn generate_burley_kernel(num_samples: usize) -> Vec<SssKernelSample> {
+            let mut samples = Vec::with_capacity(num_samples);
+
+            // Burley's normalized diffusion profile
+            let burley = |r: f32, d: f32| -> f32 {
+                let s = 1.0 / d;
+                s * ((-r * s).exp() + (-r * s / 3.0).exp()) / (8.0 * std::f32::consts::PI * d * r)
+            };
+
+            for i in 0..num_samples {
+                let t = (i as f32 + 0.5) / num_samples as f32;
+
+                // Importance sample the profile
+                let r = -d_to_r(t) * 3.0;  // Convert uniform to radius
+
+                let theta = i as f32 * 2.399963;
+                let offset = Vec2::new(r * theta.cos(), r * theta.sin());
+
+                // Per-channel weights based on scatter distance
+                // (would use actual scatter_distance in real implementation)
+                let weight = Vec3::new(
+                    burley(r.abs().max(0.0001), 1.0),
+                    burley(r.abs().max(0.0001), 0.4),
+                    burley(r.abs().max(0.0001), 0.2)
+                );
+
+                samples.push(SssKernelSample {
+                    offset,
+                    weight,
+                    variance: 1.0,
+                });
+            }
+
+            samples
+        }
+    }
+
+    /// Helper function for importance sampling Burley profile
+    fn d_to_r(u: f32) -> f32 {
+        // Inverse CDF of Burley profile (approximation)
+        -(u * 4.0).ln() * 0.5
+    }
+
+    // =========================================================================
+    // Screen-Space Subsurface Scattering
+    // =========================================================================
+
+    /// SSSSS (Screen-Space SSS) configuration
+    pub struct SssssConfig {
+        pub quality: SssQuality,
+        pub jitter_samples: bool,
+        pub follow_surface: bool,     // Use depth-guided blur
+        pub normal_correction: bool,
+        pub max_world_radius: f32,
+    }
+
+    pub enum SssQuality {
+        Low,       // 9 samples
+        Medium,    // 17 samples
+        High,      // 25 samples
+        Ultra,     // 49 samples
+    }
+
+    impl SssQuality {
+        pub fn sample_count(&self) -> u32 {
+            match self {
+                SssQuality::Low => 9,
+                SssQuality::Medium => 17,
+                SssQuality::High => 25,
+                SssQuality::Ultra => 49,
+            }
+        }
+    }
+
+    /// Separable SSS renderer (Jimenez et al.)
+    pub struct SeparableSssRenderer {
+        config: SssssConfig,
+        profiles: Vec<SssProfile>,
+        kernel_buffer: Buffer,
+        intermediate_texture: Texture,
+        blur_h_pipeline: ComputePipeline,
+        blur_v_pipeline: ComputePipeline,
+        combine_pipeline: ComputePipeline,
+    }
+
+    impl SeparableSssRenderer {
+        pub fn new(device: &gpu::Device, width: u32, height: u32, config: SssssConfig) -> Self {
+            let intermediate_texture = device.create_texture(&gpu::TextureDesc {
+                width,
+                height,
+                format: gpu::TextureFormat::Rgba16Float,
+                usage: gpu::TextureUsage::STORAGE | gpu::TextureUsage::SAMPLED,
+                ..Default::default()
+            });
+
+            let kernel_buffer = device.create_buffer(&gpu::BufferDesc {
+                size: 64 * mem::size_of::<SssKernelSample>(),
+                usage: gpu::BufferUsage::UNIFORM | gpu::BufferUsage::COPY_DST,
+                ..Default::default()
+            });
+
+            let blur_h_pipeline = device.create_compute_pipeline(&gpu::ComputePipelineDesc {
+                shader: include_str!("shaders/sss_blur_horizontal.wgsl"),
+                entry_point: "blur_horizontal",
+            });
+
+            let blur_v_pipeline = device.create_compute_pipeline(&gpu::ComputePipelineDesc {
+                shader: include_str!("shaders/sss_blur_vertical.wgsl"),
+                entry_point: "blur_vertical",
+            });
+
+            let combine_pipeline = device.create_compute_pipeline(&gpu::ComputePipelineDesc {
+                shader: include_str!("shaders/sss_combine.wgsl"),
+                entry_point: "combine_sss",
+            });
+
+            Self {
+                config,
+                profiles: vec![SssProfile::skin()],
+                kernel_buffer,
+                intermediate_texture,
+                blur_h_pipeline,
+                blur_v_pipeline,
+                combine_pipeline,
+            }
+        }
+
+        pub fn add_profile(&mut self, profile: SssProfile) {
+            self.profiles.push(profile);
+        }
+
+        /// Upload kernel for a specific profile
+        pub fn set_active_profile(&self, queue: &gpu::Queue, profile_index: usize) {
+            if let Some(profile) = self.profiles.get(profile_index) {
+                queue.write_buffer(&self.kernel_buffer, 0,
+                    bytemuck::cast_slice(&profile.kernel_samples));
+            }
+        }
+
+        /// Apply separable SSS blur
+        pub fn apply(&self, encoder: &mut CommandEncoder,
+                     irradiance: &Texture,
+                     depth: &Texture,
+                     sss_strength: &Texture,
+                     output: &Texture,
+                     width: u32, height: u32) {
+            // Horizontal blur pass
+            {
+                let mut pass = encoder.begin_compute_pass(&gpu::ComputePassDesc::default());
+                pass.set_pipeline(&self.blur_h_pipeline);
+
+                let workgroups_x = (width + 7) / 8;
+                let workgroups_y = (height + 7) / 8;
+                pass.dispatch(workgroups_x, workgroups_y, 1);
+            }
+
+            encoder.pipeline_barrier();
+
+            // Vertical blur pass
+            {
+                let mut pass = encoder.begin_compute_pass(&gpu::ComputePassDesc::default());
+                pass.set_pipeline(&self.blur_v_pipeline);
+
+                let workgroups_x = (width + 7) / 8;
+                let workgroups_y = (height + 7) / 8;
+                pass.dispatch(workgroups_x, workgroups_y, 1);
+            }
+        }
+    }
+
+    // =========================================================================
+    // Pre-Integrated Skin Shading
+    // =========================================================================
+
+    /// Pre-integrated skin lookup textures
+    pub struct PreIntegratedSkinLuts {
+        diffuse_lut: Texture,          // NdotL vs curvature
+        specular_lut: Texture,         // Beckmann for skin
+        shadow_penumbra_lut: Texture,  // Soft shadow falloff
+        transmittance_lut: Texture,    // Thin object transmittance
+    }
+
+    impl PreIntegratedSkinLuts {
+        pub fn new(device: &gpu::Device, resolution: u32) -> Self {
+            let create_2d_lut = |name: &str| {
+                device.create_texture(&gpu::TextureDesc {
+                    width: resolution,
+                    height: resolution,
+                    format: gpu::TextureFormat::Rgba16Float,
+                    usage: gpu::TextureUsage::SAMPLED | gpu::TextureUsage::COPY_DST,
+                    ..Default::default()
+                })
+            };
+
+            Self {
+                diffuse_lut: create_2d_lut("SkinDiffuseLut"),
+                specular_lut: create_2d_lut("SkinSpecularLut"),
+                shadow_penumbra_lut: create_2d_lut("SkinShadowLut"),
+                transmittance_lut: create_2d_lut("SkinTransmittanceLut"),
+            }
+        }
+
+        /// Generate the diffuse scattering LUT (CPU)
+        pub fn generate_diffuse_lut(&self, queue: &gpu::Queue, profile: &SssProfile, resolution: u32) {
+            let mut data = Vec::with_capacity((resolution * resolution * 4) as usize);
+
+            for y in 0..resolution {
+                let curvature = y as f32 / (resolution - 1) as f32;
+
+                for x in 0..resolution {
+                    let n_dot_l = x as f32 / (resolution - 1) as f32 * 2.0 - 1.0;
+
+                    // Pre-integrated diffuse with scattering
+                    let diffuse = Self::compute_preintegrated_diffuse(n_dot_l, curvature, profile);
+
+                    data.push(diffuse.x);
+                    data.push(diffuse.y);
+                    data.push(diffuse.z);
+                    data.push(1.0);
+                }
+            }
+
+            queue.write_texture(&self.diffuse_lut, bytemuck::cast_slice(&data));
+        }
+
+        fn compute_preintegrated_diffuse(n_dot_l: f32, curvature: f32, profile: &SssProfile) -> Vec3 {
+            // Integrate the diffuse profile over the hemisphere
+            // considering surface curvature
+            let mut result = Vec3::zero();
+
+            let num_samples = 64;
+            for i in 0..num_samples {
+                let theta = i as f32 / num_samples as f32 * std::f32::consts::PI;
+                let local_n_dot_l = n_dot_l + curvature * theta.sin();
+
+                if local_n_dot_l > 0.0 {
+                    // Weight by diffuse profile
+                    let r = theta / std::f32::consts::PI * profile.max_radius;
+                    let scatter = Self::eval_diffusion_profile(r, profile);
+                    result = result + scatter * local_n_dot_l;
+                }
+            }
+
+            result / num_samples as f32
+        }
+
+        fn eval_diffusion_profile(r: f32, profile: &SssProfile) -> Vec3 {
+            // Evaluate normalized diffusion profile
+            let s = Vec3::new(
+                1.0 / profile.scatter_distance.x.max(0.001),
+                1.0 / profile.scatter_distance.y.max(0.001),
+                1.0 / profile.scatter_distance.z.max(0.001)
+            );
+
+            Vec3::new(
+                s.x * ((-r * s.x).exp() + (-r * s.x / 3.0).exp()) / (8.0 * std::f32::consts::PI),
+                s.y * ((-r * s.y).exp() + (-r * s.y / 3.0).exp()) / (8.0 * std::f32::consts::PI),
+                s.z * ((-r * s.z).exp() + (-r * s.z / 3.0).exp()) / (8.0 * std::f32::consts::PI),
+            )
+        }
+
+        /// Generate transmittance LUT
+        pub fn generate_transmittance_lut(&self, queue: &gpu::Queue, profile: &SssProfile, resolution: u32) {
+            let mut data = Vec::with_capacity((resolution * resolution * 4) as usize);
+
+            for y in 0..resolution {
+                let thickness = (y as f32 / (resolution - 1) as f32) * profile.max_radius * 2.0;
+
+                for x in 0..resolution {
+                    let n_dot_l = (x as f32 / (resolution - 1) as f32) * 2.0 - 1.0;
+
+                    let transmittance = Self::compute_transmittance(thickness, n_dot_l, profile);
+
+                    data.push(transmittance.x);
+                    data.push(transmittance.y);
+                    data.push(transmittance.z);
+                    data.push(1.0);
+                }
+            }
+
+            queue.write_texture(&self.transmittance_lut, bytemuck::cast_slice(&data));
+        }
+
+        fn compute_transmittance(thickness: f32, n_dot_l: f32, profile: &SssProfile) -> Vec3 {
+            // Beer-Lambert law with scattering correction
+            let absorption = Vec3::new(
+                1.0 / profile.scatter_distance.x.max(0.001),
+                1.0 / profile.scatter_distance.y.max(0.001),
+                1.0 / profile.scatter_distance.z.max(0.001)
+            );
+
+            Vec3::new(
+                (-thickness * absorption.x).exp() * n_dot_l.max(0.0).saturating(),
+                (-thickness * absorption.y).exp() * n_dot_l.max(0.0).saturating(),
+                (-thickness * absorption.z).exp() * n_dot_l.max(0.0).saturating(),
+            ) * profile.transmittance_tint
+        }
+    }
+
+    // =========================================================================
+    // Dual-Lobe Specular for Skin
+    // =========================================================================
+
+    /// Dual-lobe specular model for skin
+    pub struct DualLobeSpecular {
+        pub lobe1_roughness: f32,
+        pub lobe1_weight: f32,
+        pub lobe1_f0: Vec3,
+        pub lobe2_roughness: f32,
+        pub lobe2_weight: f32,
+        pub lobe2_f0: Vec3,
+    }
+
+    impl DualLobeSpecular {
+        pub fn skin_default() -> Self {
+            Self {
+                // Primary lobe (oily layer)
+                lobe1_roughness: 0.3,
+                lobe1_weight: 0.85,
+                lobe1_f0: Vec3::new(0.028, 0.028, 0.028),
+
+                // Secondary lobe (subsurface)
+                lobe2_roughness: 0.6,
+                lobe2_weight: 0.15,
+                lobe2_f0: Vec3::new(0.04, 0.02, 0.015),
+            }
+        }
+
+        /// Evaluate dual-lobe specular
+        pub fn evaluate(&self, n_dot_h: f32, n_dot_l: f32, n_dot_v: f32, v_dot_h: f32) -> Vec3 {
+            let spec1 = self.lobe1_weight *
+                Self::ggx_specular(n_dot_h, n_dot_l, n_dot_v, v_dot_h,
+                                  self.lobe1_roughness, self.lobe1_f0);
+
+            let spec2 = self.lobe2_weight *
+                Self::ggx_specular(n_dot_h, n_dot_l, n_dot_v, v_dot_h,
+                                  self.lobe2_roughness, self.lobe2_f0);
+
+            spec1 + spec2
+        }
+
+        fn ggx_specular(n_dot_h: f32, n_dot_l: f32, n_dot_v: f32, v_dot_h: f32,
+                       roughness: f32, f0: Vec3) -> Vec3 {
+            let alpha = roughness * roughness;
+            let alpha2 = alpha * alpha;
+
+            // D term (GGX)
+            let denom = n_dot_h * n_dot_h * (alpha2 - 1.0) + 1.0;
+            let d = alpha2 / (std::f32::consts::PI * denom * denom);
+
+            // G term (Smith)
+            let k = (roughness + 1.0) * (roughness + 1.0) / 8.0;
+            let g1_v = n_dot_v / (n_dot_v * (1.0 - k) + k);
+            let g1_l = n_dot_l / (n_dot_l * (1.0 - k) + k);
+            let g = g1_v * g1_l;
+
+            // F term (Schlick)
+            let f = f0 + (Vec3::new(1.0, 1.0, 1.0) - f0) * (1.0 - v_dot_h).powi(5);
+
+            f * (d * g / (4.0 * n_dot_v * n_dot_l).max(0.001))
+        }
+    }
+
+    // =========================================================================
+    // Thickness Map Generation
+    // =========================================================================
+
+    /// Thickness map generator for thin objects
+    pub struct ThicknessMapGenerator {
+        compute_pipeline: ComputePipeline,
+        ray_directions: Buffer,
+        num_rays: u32,
+    }
+
+    impl ThicknessMapGenerator {
+        pub fn new(device: &gpu::Device, num_rays: u32) -> Self {
+            let compute_pipeline = device.create_compute_pipeline(&gpu::ComputePipelineDesc {
+                shader: include_str!("shaders/thickness_map_generate.wgsl"),
+                entry_point: "compute_thickness",
+            });
+
+            // Generate hemisphere ray directions
+            let mut directions = Vec::with_capacity(num_rays as usize);
+            for i in 0..num_rays {
+                let phi = i as f32 * 2.399963229;  // Golden angle
+                let cos_theta = 1.0 - (i as f32 + 0.5) / num_rays as f32;
+                let sin_theta = (1.0 - cos_theta * cos_theta).sqrt();
+
+                directions.push(Vec4::new(
+                    sin_theta * phi.cos(),
+                    cos_theta,
+                    sin_theta * phi.sin(),
+                    0.0
+                ));
+            }
+
+            let ray_directions = device.create_buffer_init(&gpu::BufferInitDesc {
+                contents: bytemuck::cast_slice(&directions),
+                usage: gpu::BufferUsage::STORAGE,
+            });
+
+            Self {
+                compute_pipeline,
+                ray_directions,
+                num_rays,
+            }
+        }
+
+        /// Generate thickness map from mesh using ray casting
+        pub fn generate(&self, encoder: &mut CommandEncoder,
+                       position_map: &Texture,
+                       normal_map: &Texture,
+                       output: &Texture,
+                       width: u32, height: u32) {
+            let mut pass = encoder.begin_compute_pass(&gpu::ComputePassDesc::default());
+            pass.set_pipeline(&self.compute_pipeline);
+
+            let workgroups_x = (width + 15) / 16;
+            let workgroups_y = (height + 15) / 16;
+            pass.dispatch(workgroups_x, workgroups_y, 1);
+        }
+    }
+
+    // =========================================================================
+    // SSS Material System
+    // =========================================================================
+
+    /// Complete SSS material
+    pub struct SssMaterial {
+        pub base_color: Vec3,
+        pub sss_profile_index: u32,
+        pub sss_strength: f32,
+        pub specular: DualLobeSpecular,
+        pub normal_map: Option<Texture>,
+        pub thickness_map: Option<Texture>,
+        pub curvature_map: Option<Texture>,
+        pub detail_normal_map: Option<Texture>,
+        pub pore_map: Option<Texture>,
+    }
+
+    impl SssMaterial {
+        pub fn skin_material() -> Self {
+            Self {
+                base_color: Vec3::new(0.8, 0.6, 0.5),
+                sss_profile_index: 0,
+                sss_strength: 1.0,
+                specular: DualLobeSpecular::skin_default(),
+                normal_map: None,
+                thickness_map: None,
+                curvature_map: None,
+                detail_normal_map: None,
+                pore_map: None,
+            }
+        }
+    }
+
+    /// GPU SSS material data
+    #[repr(C, align(16))]
+    pub struct GpuSssMaterial {
+        base_color_strength: Vec4,     // xyz: base_color, w: sss_strength
+        scatter_params: Vec4,          // xyz: scatter_distance, w: profile_index
+        specular_params: Vec4,         // x: lobe1_rough, y: lobe2_rough, z: lobe1_weight, w: lobe2_weight
+        lobe1_f0: Vec4,
+        lobe2_f0: Vec4,
+    }
+
+    // =========================================================================
+    // GPU Shaders
+    // =========================================================================
+
+    pub const SSS_BLUR_SHADER: &str = r#"
+struct SssParams {
+    kernel_size: u32,
+    world_radius: f32,
+    fovy: f32,
+    screen_height: f32,
+    scatter_distance: vec3<f32>,
+    strength: f32,
+}
+
+struct KernelSample {
+    offset: vec2<f32>,
+    weight: vec3<f32>,
+    variance: f32,
+}
+
+@group(0) @binding(0) var<uniform> params: SssParams;
+@group(0) @binding(1) var<storage, read> kernel: array<KernelSample>;
+@group(0) @binding(2) var input_texture: texture_2d<f32>;
+@group(0) @binding(3) var depth_texture: texture_2d<f32>;
+@group(0) @binding(4) var sss_mask: texture_2d<f32>;
+@group(0) @binding(5) var output_texture: texture_storage_2d<rgba16float, write>;
+@group(0) @binding(6) var linear_sampler: sampler;
+
+fn linearize_depth(d: f32, near: f32, far: f32) -> f32 {
+    return near * far / (far + d * (near - far));
+}
+
+fn world_units_to_pixels(world_radius: f32, depth: f32) -> f32 {
+    // Convert world-space radius to screen-space pixels
+    let proj_scale = params.screen_height / (2.0 * tan(params.fovy * 0.5));
+    return world_radius * proj_scale / depth;
+}
+
+@compute @workgroup_size(8, 8)
+fn blur_horizontal(@builtin(global_invocation_id) id: vec3<u32>) {
+    let dims = textureDimensions(input_texture);
+    if (id.x >= dims.x || id.y >= dims.y) {
+        return;
+    }
+
+    let coord = vec2<i32>(id.xy);
+    let uv = (vec2<f32>(id.xy) + 0.5) / vec2<f32>(dims);
+
+    // Check SSS mask
+    let mask = textureLoad(sss_mask, coord, 0).r;
+    if (mask < 0.001) {
+        // No SSS, copy input
+        let color = textureLoad(input_texture, coord, 0);
+        textureStore(output_texture, coord, color);
+        return;
+    }
+
+    // Get depth for pixel size calculation
+    let depth = linearize_depth(textureLoad(depth_texture, coord, 0).r, 0.1, 1000.0);
+    let pixel_radius = world_units_to_pixels(params.world_radius, depth);
+
+    // Accumulate samples
+    var total_weight = vec3<f32>(0.0);
+    var result = vec3<f32>(0.0);
+    let center_depth = depth;
+
+    for (var i = 0u; i < params.kernel_size; i++) {
+        let sample = kernel[i];
+        let offset = sample.offset.x * pixel_radius;
+        let sample_uv = uv + vec2<f32>(offset / f32(dims.x), 0.0);
+
+        // Clamp to screen bounds
+        if (sample_uv.x < 0.0 || sample_uv.x > 1.0) {
+            continue;
+        }
+
+        // Sample color and depth
+        let sample_color = textureSampleLevel(input_texture, linear_sampler, sample_uv, 0.0).rgb;
+        let sample_depth = linearize_depth(
+            textureSampleLevel(depth_texture, linear_sampler, sample_uv, 0.0).r,
+            0.1, 1000.0
+        );
+
+        // Depth-based weight falloff
+        let depth_diff = abs(sample_depth - center_depth);
+        let depth_weight = exp(-depth_diff * depth_diff / (params.world_radius * params.world_radius));
+
+        let weight = sample.weight * depth_weight;
+        result += sample_color * weight;
+        total_weight += weight;
+    }
+
+    result /= max(total_weight, vec3<f32>(0.001));
+
+    // Blend with original based on mask strength
+    let original = textureLoad(input_texture, coord, 0).rgb;
+    result = mix(original, result, mask * params.strength);
+
+    textureStore(output_texture, coord, vec4<f32>(result, 1.0));
+}
+
+@compute @workgroup_size(8, 8)
+fn blur_vertical(@builtin(global_invocation_id) id: vec3<u32>) {
+    // Same as horizontal but with vertical offsets
+    let dims = textureDimensions(input_texture);
+    if (id.x >= dims.x || id.y >= dims.y) {
+        return;
+    }
+
+    // ... similar to blur_horizontal with offset.y instead of offset.x
+}
+"#;
+
+    pub const PREINTEGRATED_SKIN_SHADER: &str = r#"
+struct SkinParams {
+    scatter_distance: vec3<f32>,
+    roughness_primary: f32,
+    roughness_secondary: f32,
+    specular_weight: f32,
+    sss_strength: f32,
+    curvature_scale: f32,
+}
+
+@group(0) @binding(0) var<uniform> params: SkinParams;
+@group(0) @binding(1) var diffuse_lut: texture_2d<f32>;
+@group(0) @binding(2) var specular_lut: texture_2d<f32>;
+@group(0) @binding(3) var shadow_lut: texture_2d<f32>;
+@group(0) @binding(4) var transmittance_lut: texture_2d<f32>;
+@group(0) @binding(5) var skin_sampler: sampler;
+
+fn sample_preintegrated_diffuse(n_dot_l: f32, curvature: f32) -> vec3<f32> {
+    let uv = vec2<f32>(
+        n_dot_l * 0.5 + 0.5,
+        saturate(curvature * params.curvature_scale)
+    );
+    return textureSample(diffuse_lut, skin_sampler, uv).rgb;
+}
+
+fn sample_transmittance(thickness: f32, n_dot_l: f32) -> vec3<f32> {
+    let uv = vec2<f32>(
+        n_dot_l * 0.5 + 0.5,
+        saturate(thickness / 10.0)  // Normalize to LUT range
+    );
+    return textureSample(transmittance_lut, skin_sampler, uv).rgb;
+}
+
+fn dual_lobe_specular(n_dot_h: f32, n_dot_l: f32, n_dot_v: f32, v_dot_h: f32) -> vec3<f32> {
+    // Primary lobe (oily surface)
+    let d1 = ggx_d(n_dot_h, params.roughness_primary);
+    let g1 = smith_g(n_dot_l, n_dot_v, params.roughness_primary);
+    let f1 = schlick_f(v_dot_h, vec3<f32>(0.028));
+
+    // Secondary lobe (subsurface)
+    let d2 = ggx_d(n_dot_h, params.roughness_secondary);
+    let g2 = smith_g(n_dot_l, n_dot_v, params.roughness_secondary);
+    let f2 = schlick_f(v_dot_h, vec3<f32>(0.04, 0.02, 0.015));
+
+    let denom = 4.0 * n_dot_l * n_dot_v + 0.001;
+
+    let lobe1 = f1 * d1 * g1 / denom * 0.85;
+    let lobe2 = f2 * d2 * g2 / denom * 0.15;
+
+    return lobe1 + lobe2;
+}
+
+fn ggx_d(n_dot_h: f32, roughness: f32) -> f32 {
+    let a = roughness * roughness;
+    let a2 = a * a;
+    let denom = n_dot_h * n_dot_h * (a2 - 1.0) + 1.0;
+    return a2 / (3.14159 * denom * denom);
+}
+
+fn smith_g(n_dot_l: f32, n_dot_v: f32, roughness: f32) -> f32 {
+    let k = (roughness + 1.0) * (roughness + 1.0) / 8.0;
+    let g_l = n_dot_l / (n_dot_l * (1.0 - k) + k);
+    let g_v = n_dot_v / (n_dot_v * (1.0 - k) + k);
+    return g_l * g_v;
+}
+
+fn schlick_f(v_dot_h: f32, f0: vec3<f32>) -> vec3<f32> {
+    return f0 + (1.0 - f0) * pow(1.0 - v_dot_h, 5.0);
+}
+
+fn evaluate_skin(
+    base_color: vec3<f32>,
+    normal: vec3<f32>,
+    view: vec3<f32>,
+    light: vec3<f32>,
+    light_color: vec3<f32>,
+    curvature: f32,
+    thickness: f32,
+    shadow: f32
+) -> vec3<f32> {
+    let h = normalize(view + light);
+
+    let n_dot_l = dot(normal, light);
+    let n_dot_v = max(dot(normal, view), 0.001);
+    let n_dot_h = max(dot(normal, h), 0.0);
+    let v_dot_h = max(dot(view, h), 0.0);
+
+    // Pre-integrated diffuse with scattering
+    let diffuse_sss = sample_preintegrated_diffuse(n_dot_l, curvature);
+    let diffuse = base_color * diffuse_sss * light_color;
+
+    // Transmittance for backlit areas
+    var transmittance = vec3<f32>(0.0);
+    if (n_dot_l < 0.0) {
+        transmittance = sample_transmittance(thickness, -n_dot_l) * base_color * light_color;
+    }
+
+    // Specular (dual-lobe)
+    let specular = dual_lobe_specular(n_dot_h, max(n_dot_l, 0.0), n_dot_v, v_dot_h) * light_color;
+
+    // Shadow with soft penumbra for SSS
+    let shadow_sss = mix(shadow, 1.0, (1.0 - n_dot_l) * 0.5);
+
+    return (diffuse + transmittance) * shadow_sss + specular * shadow;
+}
+"#;
+
+    // =========================================================================
+    // Unit Tests
+    // =========================================================================
+
+    #[test]
+    fn test_sss_profile_skin() {
+        let skin = SssProfile::skin();
+
+        assert_eq!(skin.name, "Skin");
+        assert!(skin.scatter_distance.x > skin.scatter_distance.y);
+        assert!(skin.max_radius > 0.0);
+        assert!(!skin.kernel_samples.is_empty());
+    }
+
+    #[test]
+    fn test_sss_profile_kernel_normalized() {
+        let profile = SssProfile::skin();
+
+        let total_weight: f32 = profile.kernel_samples.iter()
+            .map(|s| s.weight.x)
+            .sum();
+
+        // Weights should sum to approximately 1
+        assert!((total_weight - 1.0).abs() < 0.1);
+    }
+
+    #[test]
+    fn test_dual_lobe_specular() {
+        let spec = DualLobeSpecular::skin_default();
+
+        assert!(spec.lobe1_weight + spec.lobe2_weight <= 1.01);
+        assert!(spec.lobe1_roughness < spec.lobe2_roughness);
+    }
+
+    #[test]
+    fn test_dual_lobe_evaluate() {
+        let spec = DualLobeSpecular::skin_default();
+
+        // Head-on view and light
+        let result = spec.evaluate(1.0, 1.0, 1.0, 1.0);
+
+        assert!(result.x > 0.0);
+        assert!(result.y > 0.0);
+        assert!(result.z > 0.0);
+    }
+
+    #[test]
+    fn test_sss_quality_samples() {
+        assert_eq!(SssQuality::Low.sample_count(), 9);
+        assert_eq!(SssQuality::Medium.sample_count(), 17);
+        assert_eq!(SssQuality::High.sample_count(), 25);
+        assert_eq!(SssQuality::Ultra.sample_count(), 49);
+    }
+
+    #[test]
+    fn test_sss_material() {
+        let mat = SssMaterial::skin_material();
+
+        assert!(mat.sss_strength > 0.0);
+        assert!(mat.base_color.x > 0.0);
+    }
+
+    #[test]
+    fn test_preintegrated_diffusion_profile() {
+        let profile = SssProfile::skin();
+
+        // Test profile evaluation at various distances
+        let r0 = PreIntegratedSkinLuts::eval_diffusion_profile(0.001, &profile);
+        let r1 = PreIntegratedSkinLuts::eval_diffusion_profile(1.0, &profile);
+        let r5 = PreIntegratedSkinLuts::eval_diffusion_profile(5.0, &profile);
+
+        // Should decay with distance
+        assert!(r0.x > r1.x);
+        assert!(r1.x > r5.x);
+    }
+
+    #[test]
+    fn test_profile_types() {
+        let gaussian = SssProfile::marble();
+        let burley = SssProfile::skin();
+
+        match gaussian.profile_type {
+            SssProfileType::Gaussian => {}
+            _ => panic!("Expected Gaussian"),
+        }
+
+        match burley.profile_type {
+            SssProfileType::Burley => {}
+            _ => panic!("Expected Burley"),
+        }
+    }
+}

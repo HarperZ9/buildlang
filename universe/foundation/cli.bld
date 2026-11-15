@@ -1,0 +1,846 @@
+// BUILD Standard Library - CLI Module
+// Copyright (c) 2024 BUILD Language Project
+// Command-line argument parsing and terminal utilities
+
+module foundation::cli;
+
+use foundation::core::*;
+use foundation::collections::*;
+use foundation::io_extended::*;
+
+// ============================================================================
+// ARGUMENT PARSER
+// ============================================================================
+
+/// Command-line argument parser
+pub struct ArgParser {
+    name: String,
+    version: Option<String>,
+    author: Option<String>,
+    about: Option<String>,
+    args: Vec<ArgDef>,
+    subcommands: Vec<SubCommand>,
+    settings: ParserSettings,
+}
+
+#[derive(Clone)]
+struct ParserSettings {
+    allow_unknown: bool,
+    help_on_empty: bool,
+    version_flag: bool,
+    help_flag: bool,
+}
+
+impl Default for ParserSettings {
+    fn default() -> Self {
+        ParserSettings {
+            allow_unknown: false,
+            help_on_empty: true,
+            version_flag: true,
+            help_flag: true,
+        }
+    }
+}
+
+impl ArgParser {
+    pub fn new(name: &str) -> Self {
+        ArgParser {
+            name: name.to_string(),
+            version: None,
+            author: None,
+            about: None,
+            args: Vec::new(),
+            subcommands: Vec::new(),
+            settings: ParserSettings::default(),
+        }
+    }
+
+    pub fn version(mut self: Self, v: &str) -> Self { self.version = Some(v.to_string()); self }
+    pub fn author(mut self: Self, a: &str) -> Self { self.author = Some(a.to_string()); self }
+    pub fn about(mut self: Self, a: &str) -> Self { self.about = Some(a.to_string()); self }
+
+    pub fn arg(mut self: Self, arg: Arg) -> Self {
+        self.args.push(arg.build());
+        self
+    }
+
+    pub fn subcommand(mut self: Self, cmd: SubCommand) -> Self {
+        self.subcommands.push(cmd);
+        self
+    }
+
+    pub fn allow_unknown(mut self: Self, allow: bool) -> Self {
+        self.settings.allow_unknown = allow; self
+    }
+
+    pub fn parse(self: &Self) -> Result<ArgMatches, ParseError> {
+        let args: Vec<String> = std::env::args().collect();
+        self.parse_from(&args[1..])
+    }
+
+    pub fn parse_from(self: &Self, args: &[String]) -> Result<ArgMatches, ParseError> {
+        let mut matches = ArgMatches::new();
+        let mut positional_index = 0;
+        let mut i = 0;
+
+        while i < args.len() {
+            let arg = &args[i];
+
+            // Check for help/version
+            if self.settings.help_flag && (arg == "-h" || arg == "--help") {
+                return Err(ParseError::HelpRequested(self.help_message()));
+            }
+            if self.settings.version_flag && (arg == "-V" || arg == "--version") {
+                return Err(ParseError::VersionRequested(self.version_message()));
+            }
+
+            // Check for subcommand
+            if let Some(subcmd) = self.subcommands.iter().find(|s| s.name == *arg) {
+                let sub_matches = subcmd.parser.parse_from(&args[i+1..])?;
+                matches.subcommand = Some((subcmd.name.clone(), Box::new(sub_matches)));
+                return Ok(matches);
+            }
+
+            if arg.starts_with("--") {
+                // Long option
+                let (name, value) = if let Some(eq_pos) = arg.find('=') {
+                    (&arg[2..eq_pos], Some(arg[eq_pos+1..].to_string()))
+                } else {
+                    (&arg[2..], None)
+                };
+
+                if let Some(def) = self.find_arg_long(name) {
+                    let value = if def.takes_value {
+                        match value {
+                            Some(v) => v,
+                            None => {
+                                i += 1;
+                                if i >= args.len() {
+                                    return Err(ParseError::MissingValue(name.to_string()));
+                                }
+                                args[i].clone()
+                            }
+                        }
+                    } else {
+                        String::new()
+                    };
+                    matches.insert(&def.name, value);
+                } else if !self.settings.allow_unknown {
+                    return Err(ParseError::UnknownArg(arg.clone()));
+                }
+            } else if arg.starts_with('-') && arg.len() > 1 {
+                // Short option(s)
+                let chars: Vec<char> = arg[1..].chars().collect();
+                for (j, c) in chars.iter().enumerate() {
+                    if let Some(def) = self.find_arg_short(*c) {
+                        if def.takes_value {
+                            let value = if j == chars.len() - 1 {
+                                i += 1;
+                                if i >= args.len() {
+                                    return Err(ParseError::MissingValue(def.name.clone()));
+                                }
+                                args[i].clone()
+                            } else {
+                                chars[j+1..].iter().collect()
+                            };
+                            matches.insert(&def.name, value);
+                            break;
+                        } else {
+                            matches.insert(&def.name, String::new());
+                        }
+                    } else if !self.settings.allow_unknown {
+                        return Err(ParseError::UnknownArg(format!("-{}", c)));
+                    }
+                }
+            } else {
+                // Positional argument
+                let positionals: Vec<_> = self.args.iter()
+                    .filter(|a| a.positional)
+                    .collect();
+
+                if positional_index < positionals.len() {
+                    let def = &positionals[positional_index];
+                    if def.multiple {
+                        matches.insert_multiple(&def.name, arg.clone());
+                    } else {
+                        matches.insert(&def.name, arg.clone());
+                        positional_index += 1;
+                    }
+                } else if !self.settings.allow_unknown {
+                    return Err(ParseError::UnexpectedArg(arg.clone()));
+                }
+            }
+
+            i += 1;
+        }
+
+        // Check required arguments
+        for def in &self.args {
+            if def.required && !matches.contains(&def.name) {
+                return Err(ParseError::MissingRequired(def.name.clone()));
+            }
+        }
+
+        // Apply defaults
+        for def in &self.args {
+            if !matches.contains(&def.name) {
+                if let Some(ref default) = def.default {
+                    matches.insert(&def.name, default.clone());
+                }
+            }
+        }
+
+        Ok(matches)
+    }
+
+    fn find_arg_long(self: &Self, name: &str) -> Option<&ArgDef> {
+        self.args.iter().find(|a| a.long.as_deref() == Some(name))
+    }
+
+    fn find_arg_short(self: &Self, c: char) -> Option<&ArgDef> {
+        self.args.iter().find(|a| a.short == Some(c))
+    }
+
+    fn help_message(self: &Self) -> String {
+        let mut msg = String::new();
+
+        if let Some(ref about) = self.about {
+            msg.push_str(about);
+            msg.push_str("\n\n");
+        }
+
+        msg.push_str(&format!("USAGE:\n    {}", self.name));
+
+        let flags: Vec<_> = self.args.iter().filter(|a| !a.positional && !a.takes_value).collect();
+        let options: Vec<_> = self.args.iter().filter(|a| !a.positional && a.takes_value).collect();
+        let positionals: Vec<_> = self.args.iter().filter(|a| a.positional).collect();
+
+        if !flags.is_empty() { msg.push_str(" [FLAGS]"); }
+        if !options.is_empty() { msg.push_str(" [OPTIONS]"); }
+        for p in &positionals {
+            if p.required {
+                msg.push_str(&format!(" <{}>", p.name.to_uppercase()));
+            } else {
+                msg.push_str(&format!(" [{}]", p.name.to_uppercase()));
+            }
+        }
+
+        if !self.subcommands.is_empty() {
+            msg.push_str(" <SUBCOMMAND>");
+        }
+
+        msg.push_str("\n\n");
+
+        if !flags.is_empty() {
+            msg.push_str("FLAGS:\n");
+            for f in &flags {
+                let short = f.short.map(|c| format!("-{}, ", c)).unwrap_or_default();
+                let long = f.long.as_ref().map(|l| format!("--{}", l)).unwrap_or_default();
+                let help = f.help.as_ref().map(|h| h.as_str()).unwrap_or("");
+                msg.push_str(&format!("    {}{:<20} {}\n", short, long, help));
+            }
+            msg.push('\n');
+        }
+
+        if !options.is_empty() {
+            msg.push_str("OPTIONS:\n");
+            for o in &options {
+                let short = o.short.map(|c| format!("-{}, ", c)).unwrap_or_default();
+                let long = o.long.as_ref().map(|l| format!("--{} <{}>", l, o.value_name.as_deref().unwrap_or("VALUE"))).unwrap_or_default();
+                let help = o.help.as_ref().map(|h| h.as_str()).unwrap_or("");
+                msg.push_str(&format!("    {}{:<30} {}\n", short, long, help));
+            }
+            msg.push('\n');
+        }
+
+        if !positionals.is_empty() {
+            msg.push_str("ARGS:\n");
+            for p in &positionals {
+                let help = p.help.as_ref().map(|h| h.as_str()).unwrap_or("");
+                msg.push_str(&format!("    <{:<20}> {}\n", p.name.to_uppercase(), help));
+            }
+            msg.push('\n');
+        }
+
+        if !self.subcommands.is_empty() {
+            msg.push_str("SUBCOMMANDS:\n");
+            for s in &self.subcommands {
+                let about = s.parser.about.as_ref().map(|a| a.as_str()).unwrap_or("");
+                msg.push_str(&format!("    {:<20} {}\n", s.name, about));
+            }
+        }
+
+        msg
+    }
+
+    fn version_message(self: &Self) -> String {
+        format!("{} {}", self.name, self.version.as_deref().unwrap_or("unknown"))
+    }
+}
+
+/// Argument definition
+#[derive(Clone)]
+struct ArgDef {
+    name: String,
+    short: Option<char>,
+    long: Option<String>,
+    help: Option<String>,
+    takes_value: bool,
+    value_name: Option<String>,
+    required: bool,
+    multiple: bool,
+    positional: bool,
+    default: Option<String>,
+    possible_values: Vec<String>,
+}
+
+/// Argument builder
+pub struct Arg {
+    def: ArgDef,
+}
+
+impl Arg {
+    pub fn new(name: &str) -> Self {
+        Arg {
+            def: ArgDef {
+                name: name.to_string(),
+                short: None,
+                long: None,
+                help: None,
+                takes_value: false,
+                value_name: None,
+                required: false,
+                multiple: false,
+                positional: false,
+                default: None,
+                possible_values: Vec::new(),
+            },
+        }
+    }
+
+    pub fn short(mut self: Self, c: char) -> Self { self.def.short = Some(c); self }
+    pub fn long(mut self: Self, l: &str) -> Self { self.def.long = Some(l.to_string()); self }
+    pub fn help(mut self: Self, h: &str) -> Self { self.def.help = Some(h.to_string()); self }
+    pub fn takes_value(mut self: Self, t: bool) -> Self { self.def.takes_value = t; self }
+    pub fn value_name(mut self: Self, v: &str) -> Self { self.def.value_name = Some(v.to_string()); self }
+    pub fn required(mut self: Self, r: bool) -> Self { self.def.required = r; self }
+    pub fn multiple(mut self: Self, m: bool) -> Self { self.def.multiple = m; self }
+    pub fn index(mut self: Self, _i: usize) -> Self { self.def.positional = true; self }
+    pub fn default_value(mut self: Self, d: &str) -> Self { self.def.default = Some(d.to_string()); self }
+    pub fn possible_values(mut self: Self, vals: &[&str]) -> Self {
+        self.def.possible_values = vals.iter().map(|s| s.to_string()).collect();
+        self
+    }
+
+    fn build(self: Self) -> ArgDef { self.def }
+}
+
+/// Subcommand
+pub struct SubCommand {
+    name: String,
+    parser: ArgParser,
+}
+
+impl SubCommand {
+    pub fn new(name: &str) -> Self {
+        SubCommand {
+            name: name.to_string(),
+            parser: ArgParser::new(name),
+        }
+    }
+
+    pub fn about(mut self: Self, a: &str) -> Self { self.parser = self.parser.about(a); self }
+    pub fn arg(mut self: Self, arg: Arg) -> Self { self.parser = self.parser.arg(arg); self }
+}
+
+/// Parsed argument matches
+#[derive(Debug, Clone)]
+pub struct ArgMatches {
+    values: HashMap<String, Vec<String>>,
+    subcommand: Option<(String, Box<ArgMatches>)>,
+}
+
+impl ArgMatches {
+    fn new() -> Self {
+        ArgMatches { values: HashMap::new(), subcommand: None }
+    }
+
+    fn insert(self: &mut Self, name: &str, value: String) {
+        self.values.entry(name.to_string()).or_insert_with(Vec::new).clear();
+        self.values.get_mut(name).unwrap().push(value);
+    }
+
+    fn insert_multiple(self: &mut Self, name: &str, value: String) {
+        self.values.entry(name.to_string()).or_insert_with(Vec::new).push(value);
+    }
+
+    fn contains(self: &Self, name: &str) -> bool {
+        self.values.contains_key(name)
+    }
+
+    pub fn value_of(self: &Self, name: &str) -> Option<&str> {
+        self.values.get(name).and_then(|v| v.first()).map(|s| s.as_str())
+    }
+
+    pub fn values_of(self: &Self, name: &str) -> Option<&[String]> {
+        self.values.get(name).map(|v| v.as_slice())
+    }
+
+    pub fn is_present(self: &Self, name: &str) -> bool {
+        self.values.contains_key(name)
+    }
+
+    pub fn occurrences_of(self: &Self, name: &str) -> usize {
+        self.values.get(name).map(|v| v.len()).unwrap_or(0)
+    }
+
+    pub fn subcommand(self: &Self) -> Option<(&str, &ArgMatches)> {
+        self.subcommand.as_ref().map(|(n, m)| (n.as_str(), m.as_ref()))
+    }
+
+    pub fn subcommand_name(self: &Self) -> Option<&str> {
+        self.subcommand.as_ref().map(|(n, _)| n.as_str())
+    }
+}
+
+#[derive(Debug)]
+pub enum ParseError {
+    UnknownArg(String),
+    UnexpectedArg(String),
+    MissingValue(String),
+    MissingRequired(String),
+    InvalidValue(String, String),
+    HelpRequested(String),
+    VersionRequested(String),
+}
+
+// ============================================================================
+// TERMINAL UTILITIES
+// ============================================================================
+
+/// Terminal colors
+pub mod color {
+    pub const RESET: &str = "\x1b[0m";
+    pub const BOLD: &str = "\x1b[1m";
+    pub const DIM: &str = "\x1b[2m";
+    pub const ITALIC: &str = "\x1b[3m";
+    pub const UNDERLINE: &str = "\x1b[4m";
+    pub const BLINK: &str = "\x1b[5m";
+    pub const REVERSE: &str = "\x1b[7m";
+    pub const HIDDEN: &str = "\x1b[8m";
+    pub const STRIKETHROUGH: &str = "\x1b[9m";
+
+    // Foreground colors
+    pub const BLACK: &str = "\x1b[30m";
+    pub const RED: &str = "\x1b[31m";
+    pub const GREEN: &str = "\x1b[32m";
+    pub const YELLOW: &str = "\x1b[33m";
+    pub const BLUE: &str = "\x1b[34m";
+    pub const MAGENTA: &str = "\x1b[35m";
+    pub const CYAN: &str = "\x1b[36m";
+    pub const WHITE: &str = "\x1b[37m";
+
+    // Bright foreground
+    pub const BRIGHT_BLACK: &str = "\x1b[90m";
+    pub const BRIGHT_RED: &str = "\x1b[91m";
+    pub const BRIGHT_GREEN: &str = "\x1b[92m";
+    pub const BRIGHT_YELLOW: &str = "\x1b[93m";
+    pub const BRIGHT_BLUE: &str = "\x1b[94m";
+    pub const BRIGHT_MAGENTA: &str = "\x1b[95m";
+    pub const BRIGHT_CYAN: &str = "\x1b[96m";
+    pub const BRIGHT_WHITE: &str = "\x1b[97m";
+
+    // Background colors
+    pub const BG_BLACK: &str = "\x1b[40m";
+    pub const BG_RED: &str = "\x1b[41m";
+    pub const BG_GREEN: &str = "\x1b[42m";
+    pub const BG_YELLOW: &str = "\x1b[43m";
+    pub const BG_BLUE: &str = "\x1b[44m";
+    pub const BG_MAGENTA: &str = "\x1b[45m";
+    pub const BG_CYAN: &str = "\x1b[46m";
+    pub const BG_WHITE: &str = "\x1b[47m";
+
+    pub fn rgb(r: u8, g: u8, b: u8) -> String {
+        format!("\x1b[38;2;{};{};{}m", r, g, b)
+    }
+
+    pub fn bg_rgb(r: u8, g: u8, b: u8) -> String {
+        format!("\x1b[48;2;{};{};{}m", r, g, b)
+    }
+
+    pub fn color256(code: u8) -> String {
+        format!("\x1b[38;5;{}m", code)
+    }
+
+    pub fn bg_color256(code: u8) -> String {
+        format!("\x1b[48;5;{}m", code)
+    }
+}
+
+/// Styled string builder
+pub struct Style {
+    text: String,
+    codes: Vec<&'static str>,
+}
+
+impl Style {
+    pub fn new(text: &str) -> Self {
+        Style { text: text.to_string(), codes: Vec::new() }
+    }
+
+    pub fn bold(mut self: Self) -> Self { self.codes.push(color::BOLD); self }
+    pub fn dim(mut self: Self) -> Self { self.codes.push(color::DIM); self }
+    pub fn italic(mut self: Self) -> Self { self.codes.push(color::ITALIC); self }
+    pub fn underline(mut self: Self) -> Self { self.codes.push(color::UNDERLINE); self }
+
+    pub fn red(mut self: Self) -> Self { self.codes.push(color::RED); self }
+    pub fn green(mut self: Self) -> Self { self.codes.push(color::GREEN); self }
+    pub fn yellow(mut self: Self) -> Self { self.codes.push(color::YELLOW); self }
+    pub fn blue(mut self: Self) -> Self { self.codes.push(color::BLUE); self }
+    pub fn magenta(mut self: Self) -> Self { self.codes.push(color::MAGENTA); self }
+    pub fn cyan(mut self: Self) -> Self { self.codes.push(color::CYAN); self }
+    pub fn white(mut self: Self) -> Self { self.codes.push(color::WHITE); self }
+
+    pub fn to_string(self: &Self) -> String {
+        if self.codes.is_empty() {
+            self.text.clone()
+        } else {
+            format!("{}{}{}", self.codes.join(""), self.text, color::RESET)
+        }
+    }
+}
+
+/// Terminal information
+pub struct Terminal {
+    is_tty: bool,
+    width: usize,
+    height: usize,
+}
+
+impl Terminal {
+    pub fn new() -> Self {
+        Terminal {
+            is_tty: intrinsics::isatty(1),
+            width: intrinsics::terminal_width().unwrap_or(80),
+            height: intrinsics::terminal_height().unwrap_or(24),
+        }
+    }
+
+    pub fn is_tty(self: &Self) -> bool { self.is_tty }
+    pub fn width(self: &Self) -> usize { self.width }
+    pub fn height(self: &Self) -> usize { self.height }
+
+    pub fn clear_screen(self: &Self) { print!("\x1b[2J\x1b[H"); }
+    pub fn clear_line(self: &Self) { print!("\x1b[2K"); }
+    pub fn move_cursor(self: &Self, row: usize, col: usize) {
+        print!("\x1b[{};{}H", row, col);
+    }
+    pub fn hide_cursor(self: &Self) { print!("\x1b[?25l"); }
+    pub fn show_cursor(self: &Self) { print!("\x1b[?25h"); }
+    pub fn save_cursor(self: &Self) { print!("\x1b[s"); }
+    pub fn restore_cursor(self: &Self) { print!("\x1b[u"); }
+}
+
+// ============================================================================
+// PROGRESS BAR
+// ============================================================================
+
+pub struct ProgressBar {
+    total: u64,
+    current: u64,
+    width: usize,
+    message: String,
+    show_percentage: bool,
+    show_count: bool,
+    fill_char: char,
+    empty_char: char,
+}
+
+impl ProgressBar {
+    pub fn new(total: u64) -> Self {
+        ProgressBar {
+            total,
+            current: 0,
+            width: 40,
+            message: String::new(),
+            show_percentage: true,
+            show_count: true,
+            fill_char: '█',
+            empty_char: '░',
+        }
+    }
+
+    pub fn width(mut self: Self, w: usize) -> Self { self.width = w; self }
+    pub fn message(mut self: Self, m: &str) -> Self { self.message = m.to_string(); self }
+    pub fn fill(mut self: Self, c: char) -> Self { self.fill_char = c; self }
+    pub fn empty(mut self: Self, c: char) -> Self { self.empty_char = c; self }
+
+    pub fn set(self: &mut Self, current: u64) {
+        self.current = current.min(self.total);
+        self.draw();
+    }
+
+    pub fn inc(self: &mut Self, delta: u64) {
+        self.set(self.current + delta);
+    }
+
+    pub fn finish(self: &mut Self) {
+        self.set(self.total);
+        println!();
+    }
+
+    fn draw(self: &Self) {
+        let progress = self.current as f64 / self.total as f64;
+        let filled = (progress * self.width as f64) as usize;
+        let empty = self.width - filled;
+
+        let bar: String = std::iter::repeat(self.fill_char).take(filled)
+            .chain(std::iter::repeat(self.empty_char).take(empty))
+            .collect();
+
+        let mut line = format!("\r{} [{}]", self.message, bar);
+
+        if self.show_percentage {
+            line.push_str(&format!(" {:3.0}%", progress * 100.0));
+        }
+
+        if self.show_count {
+            line.push_str(&format!(" {}/{}", self.current, self.total));
+        }
+
+        print!("{}", line);
+        let _ = std::io::stdout().flush();
+    }
+}
+
+/// Spinner for indeterminate progress
+pub struct Spinner {
+    frames: Vec<&'static str>,
+    current: usize,
+    message: String,
+    active: bool,
+}
+
+impl Spinner {
+    pub fn new() -> Self {
+        Spinner {
+            frames: vec!["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"],
+            current: 0,
+            message: String::new(),
+            active: false,
+        }
+    }
+
+    pub fn dots() -> Self { Self::new() }
+
+    pub fn line() -> Self {
+        Spinner {
+            frames: vec!["-", "\\", "|", "/"],
+            current: 0,
+            message: String::new(),
+            active: false,
+        }
+    }
+
+    pub fn message(mut self: Self, m: &str) -> Self {
+        self.message = m.to_string(); self
+    }
+
+    pub fn tick(self: &mut Self) {
+        self.current = (self.current + 1) % self.frames.len();
+        print!("\r{} {}", self.frames[self.current], self.message);
+        let _ = std::io::stdout().flush();
+    }
+
+    pub fn finish(self: &mut Self, message: &str) {
+        print!("\r{} {}\n", color::GREEN, message);
+        print!("{}", color::RESET);
+    }
+}
+
+// ============================================================================
+// TABLE FORMATTING
+// ============================================================================
+
+pub struct Table {
+    headers: Vec<String>,
+    rows: Vec<Vec<String>>,
+    column_widths: Vec<usize>,
+    border: TableBorder,
+}
+
+pub enum TableBorder {
+    None,
+    Ascii,
+    Unicode,
+}
+
+impl Table {
+    pub fn new(headers: Vec<&str>) -> Self {
+        let headers: Vec<String> = headers.iter().map(|s| s.to_string()).collect();
+        let column_widths = headers.iter().map(|h| h.len()).collect();
+        Table {
+            headers,
+            rows: Vec::new(),
+            column_widths,
+            border: TableBorder::Unicode,
+        }
+    }
+
+    pub fn border(mut self: Self, b: TableBorder) -> Self { self.border = b; self }
+
+    pub fn add_row(self: &mut Self, row: Vec<&str>) {
+        let row: Vec<String> = row.iter().map(|s| s.to_string()).collect();
+        for (i, cell) in row.iter().enumerate() {
+            if i < self.column_widths.len() {
+                self.column_widths[i] = self.column_widths[i].max(cell.len());
+            }
+        }
+        self.rows.push(row);
+    }
+
+    pub fn to_string(self: &Self) -> String {
+        let (h, v, c, tl, tr, bl, br, lt, rt, tt, bt) = match self.border {
+            TableBorder::None => (" ", " ", " ", " ", " ", " ", " ", " ", " ", " ", " "),
+            TableBorder::Ascii => ("-", "|", "+", "+", "+", "+", "+", "+", "+", "+", "+"),
+            TableBorder::Unicode => ("─", "│", "┼", "┌", "┐", "└", "┘", "├", "┤", "┬", "┴"),
+        };
+
+        let mut result = String::new();
+
+        // Top border
+        result.push_str(tl);
+        for (i, &w) in self.column_widths.iter().enumerate() {
+            result.push_str(&h.repeat(w + 2));
+            if i < self.column_widths.len() - 1 { result.push_str(tt); }
+        }
+        result.push_str(tr);
+        result.push('\n');
+
+        // Header row
+        result.push_str(v);
+        for (i, header) in self.headers.iter().enumerate() {
+            let w = self.column_widths[i];
+            result.push_str(&format!(" {:^w$} ", header, w = w));
+            result.push_str(v);
+        }
+        result.push('\n');
+
+        // Header separator
+        result.push_str(lt);
+        for (i, &w) in self.column_widths.iter().enumerate() {
+            result.push_str(&h.repeat(w + 2));
+            if i < self.column_widths.len() - 1 { result.push_str(c); }
+        }
+        result.push_str(rt);
+        result.push('\n');
+
+        // Data rows
+        for row in &self.rows {
+            result.push_str(v);
+            for (i, cell) in row.iter().enumerate() {
+                let w = self.column_widths.get(i).copied().unwrap_or(0);
+                result.push_str(&format!(" {:<w$} ", cell, w = w));
+                result.push_str(v);
+            }
+            result.push('\n');
+        }
+
+        // Bottom border
+        result.push_str(bl);
+        for (i, &w) in self.column_widths.iter().enumerate() {
+            result.push_str(&h.repeat(w + 2));
+            if i < self.column_widths.len() - 1 { result.push_str(bt); }
+        }
+        result.push_str(br);
+        result.push('\n');
+
+        result
+    }
+
+    pub fn print(self: &Self) {
+        print!("{}", self.to_string());
+    }
+}
+
+// ============================================================================
+// PROMPTS
+// ============================================================================
+
+/// Read a line from stdin
+pub fn prompt(message: &str) -> String {
+    print!("{}", message);
+    let _ = std::io::stdout().flush();
+
+    let mut input = String::new();
+    let _ = std::io::stdin().read_line(&mut input);
+    input.trim().to_string()
+}
+
+/// Ask a yes/no question
+pub fn confirm(message: &str, default: bool) -> bool {
+    let suffix = if default { " [Y/n]: " } else { " [y/N]: " };
+    let input = prompt(&format!("{}{}", message, suffix)).to_lowercase();
+
+    match input.as_str() {
+        "y" | "yes" => true,
+        "n" | "no" => false,
+        "" => default,
+        _ => default,
+    }
+}
+
+/// Select from a list of options
+pub fn select(message: &str, options: &[&str]) -> Option<usize> {
+    println!("{}", message);
+    for (i, option) in options.iter().enumerate() {
+        println!("  {}. {}", i + 1, option);
+    }
+
+    let input = prompt("Enter number: ");
+    input.parse::<usize>().ok().filter(|&n| n >= 1 && n <= options.len()).map(|n| n - 1)
+}
+
+/// Prompt for password (hidden input)
+pub fn password(message: &str) -> String {
+    print!("{}", message);
+    let _ = std::io::stdout().flush();
+    intrinsics::read_password().unwrap_or_default()
+}
+
+// ============================================================================
+// TESTS
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_arg_parser() {
+        let parser = ArgParser::new("test")
+            .arg(Arg::new("verbose").short('v').long("verbose").help("Verbose output"))
+            .arg(Arg::new("output").short('o').long("output").takes_value(true));
+
+        let matches = parser.parse_from(&["-v".to_string(), "-o".to_string(), "file.txt".to_string()]).unwrap();
+        assert!(matches.is_present("verbose"));
+        assert_eq!(matches.value_of("output"), Some("file.txt"));
+    }
+
+    #[test]
+    fn test_style() {
+        let styled = Style::new("Hello").bold().red().to_string();
+        assert!(styled.contains("\x1b[1m"));
+        assert!(styled.contains("\x1b[31m"));
+    }
+
+    #[test]
+    fn test_table() {
+        let mut table = Table::new(vec!["Name", "Age"]);
+        table.add_row(vec!["Alice", "30"]);
+        table.add_row(vec!["Bob", "25"]);
+        let output = table.to_string();
+        assert!(output.contains("Alice"));
+        assert!(output.contains("Bob"));
+    }
+}

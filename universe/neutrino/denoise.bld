@@ -1,0 +1,2103 @@
+// ============================================================================
+// NEUTRINO: Neural Denoising for Real-Time Ray Tracing
+// ============================================================================
+// Advanced neural denoising networks for Monte Carlo ray tracing including
+// temporal accumulation, auxiliary feature buffers, and kernel prediction.
+// ============================================================================
+
+import lib::{Tensor, Shape, DataType, Layer, Conv2d, Linear, BatchNorm2d, LayerNorm};
+import lib::{ReLU, LeakyReLU, GELU, SiLU, Sigmoid, Tanh};
+import lib::{PixelShuffle, Upsample, Sequential, ResidualBlock};
+import lib::{MSELoss, L1Loss, PerceptualLoss, SSIMLoss};
+import inference::{InferenceSession, InferenceEngine, InferenceBackend};
+
+// ============================================================================
+// DENOISING MODES AND CONFIGURATIONS
+// ============================================================================
+
+/// Denoising quality preset
+pub enum DenoiseQuality {
+    /// Low - fastest, some residual noise
+    Low,
+    /// Medium - balanced quality/performance
+    Medium,
+    /// High - high quality, slower
+    High,
+    /// Ultra - maximum quality
+    Ultra,
+    /// Custom settings
+    Custom { iterations: usize, kernel_size: usize },
+}
+
+impl DenoiseQuality {
+    pub fn iterations(&self) -> usize {
+        match self {
+            DenoiseQuality::Low => 1,
+            DenoiseQuality::Medium => 2,
+            DenoiseQuality::High => 3,
+            DenoiseQuality::Ultra => 4,
+            DenoiseQuality::Custom { iterations, .. } => *iterations,
+        }
+    }
+
+    pub fn kernel_size(&self) -> usize {
+        match self {
+            DenoiseQuality::Low => 3,
+            DenoiseQuality::Medium => 5,
+            DenoiseQuality::High => 7,
+            DenoiseQuality::Ultra => 9,
+            DenoiseQuality::Custom { kernel_size, .. } => *kernel_size,
+        }
+    }
+}
+
+/// Type of auxiliary buffer
+pub enum AuxiliaryBuffer {
+    /// World-space normal
+    Normal,
+    /// Linear depth
+    Depth,
+    /// Albedo (diffuse color)
+    Albedo,
+    /// Motion vectors
+    Motion,
+    /// Roughness
+    Roughness,
+    /// Metallic
+    Metallic,
+    /// Specular
+    Specular,
+    /// Emission
+    Emission,
+    /// Object/Material ID
+    ObjectID,
+    /// World position
+    Position,
+}
+
+/// Denoising method type
+pub enum DenoiseMethod {
+    /// Simple bilateral filter (non-neural baseline)
+    Bilateral,
+    /// A-Trous wavelet filter
+    ATrous,
+    /// Spatiotemporal variance-guided filter (SVGF)
+    SVGF,
+    /// Optix-style AI denoiser
+    OptixStyle,
+    /// Kernel prediction network
+    KernelPrediction,
+    /// U-Net denoiser
+    UNet,
+    /// Recurrent denoiser (temporal)
+    RecurrentTemporal,
+    /// Custom neural network
+    CustomNetwork,
+}
+
+// ============================================================================
+// AUXILIARY FEATURE ENCODING
+// ============================================================================
+
+/// Encodes auxiliary G-buffer features for denoising
+pub struct AuxiliaryEncoder {
+    /// Normal encoder
+    normal_conv: Conv2d,
+    /// Depth encoder
+    depth_conv: Conv2d,
+    /// Albedo encoder
+    albedo_conv: Conv2d,
+    /// Motion encoder
+    motion_conv: Conv2d,
+    /// Feature fusion
+    fusion_conv: Conv2d,
+    /// Output channels
+    out_channels: usize,
+}
+
+impl AuxiliaryEncoder {
+    pub fn new(out_channels: usize) -> Self {
+        let feature_ch = out_channels / 4;
+
+        Self {
+            normal_conv: Conv2d::new(3, feature_ch, (3, 3), (1, 1), (1, 1), (1, 1), 1, true),
+            depth_conv: Conv2d::new(1, feature_ch, (3, 3), (1, 1), (1, 1), (1, 1), 1, true),
+            albedo_conv: Conv2d::new(3, feature_ch, (3, 3), (1, 1), (1, 1), (1, 1), 1, true),
+            motion_conv: Conv2d::new(2, feature_ch, (3, 3), (1, 1), (1, 1), (1, 1), 1, true),
+            fusion_conv: Conv2d::new(feature_ch * 4, out_channels, (1, 1), (1, 1), (0, 0), (1, 1), 1, true),
+            out_channels,
+        }
+    }
+
+    pub fn forward(
+        &self,
+        normal: &Tensor,
+        depth: &Tensor,
+        albedo: &Tensor,
+        motion: &Tensor,
+    ) -> Tensor {
+        let normal_feat = self.normal_conv.forward(normal);
+        let normal_feat = ReLU::new().forward(&normal_feat);
+
+        let depth_feat = self.depth_conv.forward(depth);
+        let depth_feat = ReLU::new().forward(&depth_feat);
+
+        let albedo_feat = self.albedo_conv.forward(albedo);
+        let albedo_feat = ReLU::new().forward(&albedo_feat);
+
+        let motion_feat = self.motion_conv.forward(motion);
+        let motion_feat = ReLU::new().forward(&motion_feat);
+
+        // Concatenate all features
+        let concat = Tensor::cat(&[normal_feat, depth_feat, albedo_feat, motion_feat], 1);
+
+        // Fuse features
+        let fused = self.fusion_conv.forward(&concat);
+        ReLU::new().forward(&fused)
+    }
+}
+
+/// G-buffer container for denoising
+pub struct GBuffer {
+    /// Noisy color
+    pub color: Tensor,
+    /// World-space normals
+    pub normal: Tensor,
+    /// Linear depth
+    pub depth: Tensor,
+    /// Albedo
+    pub albedo: Tensor,
+    /// Motion vectors
+    pub motion: Tensor,
+    /// Optional roughness
+    pub roughness: Option<Tensor>,
+    /// Optional metallic
+    pub metallic: Option<Tensor>,
+    /// Optional emission
+    pub emission: Option<Tensor>,
+    /// Sample count per pixel
+    pub sample_count: Option<Tensor>,
+    /// Variance estimate
+    pub variance: Option<Tensor>,
+}
+
+impl GBuffer {
+    pub fn new(
+        color: Tensor,
+        normal: Tensor,
+        depth: Tensor,
+        albedo: Tensor,
+        motion: Tensor,
+    ) -> Self {
+        Self {
+            color,
+            normal,
+            depth,
+            albedo,
+            motion,
+            roughness: None,
+            metallic: None,
+            emission: None,
+            sample_count: None,
+            variance: None,
+        }
+    }
+
+    pub fn with_material(mut self, roughness: Tensor, metallic: Tensor) -> Self {
+        self.roughness = Some(roughness);
+        self.metallic = Some(metallic);
+        self
+    }
+
+    pub fn with_variance(mut self, variance: Tensor, sample_count: Tensor) -> Self {
+        self.variance = Some(variance);
+        self.sample_count = Some(sample_count);
+        self
+    }
+
+    pub fn dimensions(&self) -> (usize, usize, usize, usize) {
+        let shape = self.color.shape();
+        (shape.dim(0), shape.dim(1), shape.dim(2), shape.dim(3))
+    }
+}
+
+// ============================================================================
+// BILATERAL FILTER (NON-NEURAL BASELINE)
+// ============================================================================
+
+/// Joint bilateral filter for G-buffer guided denoising
+pub struct JointBilateralFilter {
+    /// Spatial sigma
+    sigma_spatial: f32,
+    /// Color sigma
+    sigma_color: f32,
+    /// Normal sigma
+    sigma_normal: f32,
+    /// Depth sigma
+    sigma_depth: f32,
+    /// Kernel radius
+    radius: usize,
+}
+
+impl JointBilateralFilter {
+    pub fn new(
+        sigma_spatial: f32,
+        sigma_color: f32,
+        sigma_normal: f32,
+        sigma_depth: f32,
+        radius: usize,
+    ) -> Self {
+        Self {
+            sigma_spatial,
+            sigma_color,
+            sigma_normal,
+            sigma_depth,
+            radius,
+        }
+    }
+
+    pub fn forward(&self, gbuffer: &GBuffer) -> Tensor {
+        let shape = gbuffer.color.shape();
+        let batch = shape.dim(0);
+        let channels = shape.dim(1);
+        let height = shape.dim(2);
+        let width = shape.dim(3);
+
+        let mut output = Tensor::zeros(&[batch, channels, height, width], gbuffer.color.dtype());
+
+        let radius = self.radius as i32;
+
+        for b in 0..batch {
+            for y in 0..height {
+                for x in 0..width {
+                    let (r, g, b_col) = self.filter_pixel(
+                        &gbuffer.color,
+                        &gbuffer.normal,
+                        &gbuffer.depth,
+                        b,
+                        y,
+                        x,
+                        height,
+                        width,
+                        radius,
+                    );
+
+                    output.set_f32(&[b, 0, y, x], r);
+                    output.set_f32(&[b, 1, y, x], g);
+                    output.set_f32(&[b, 2, y, x], b_col);
+                }
+            }
+        }
+
+        output
+    }
+
+    fn filter_pixel(
+        &self,
+        color: &Tensor,
+        normal: &Tensor,
+        depth: &Tensor,
+        batch: usize,
+        cy: usize,
+        cx: usize,
+        height: usize,
+        width: usize,
+        radius: i32,
+    ) -> (f32, f32, f32) {
+        let center_r = color.get_f32(&[batch, 0, cy, cx]);
+        let center_g = color.get_f32(&[batch, 1, cy, cx]);
+        let center_b = color.get_f32(&[batch, 2, cy, cx]);
+
+        let center_nx = normal.get_f32(&[batch, 0, cy, cx]);
+        let center_ny = normal.get_f32(&[batch, 1, cy, cx]);
+        let center_nz = normal.get_f32(&[batch, 2, cy, cx]);
+
+        let center_d = depth.get_f32(&[batch, 0, cy, cx]);
+
+        let mut sum_r = 0.0f32;
+        let mut sum_g = 0.0f32;
+        let mut sum_b = 0.0f32;
+        let mut weight_sum = 0.0f32;
+
+        for dy in -radius..=radius {
+            for dx in -radius..=radius {
+                let ny = (cy as i32 + dy).clamp(0, height as i32 - 1) as usize;
+                let nx = (cx as i32 + dx).clamp(0, width as i32 - 1) as usize;
+
+                // Spatial weight
+                let spatial_dist_sq = (dx * dx + dy * dy) as f32;
+                let spatial_weight = (-spatial_dist_sq / (2.0 * self.sigma_spatial * self.sigma_spatial)).exp();
+
+                // Color weight
+                let pr = color.get_f32(&[batch, 0, ny, nx]);
+                let pg = color.get_f32(&[batch, 1, ny, nx]);
+                let pb = color.get_f32(&[batch, 2, ny, nx]);
+
+                let color_dist_sq = (pr - center_r).powi(2) + (pg - center_g).powi(2) + (pb - center_b).powi(2);
+                let color_weight = (-color_dist_sq / (2.0 * self.sigma_color * self.sigma_color)).exp();
+
+                // Normal weight
+                let pnx = normal.get_f32(&[batch, 0, ny, nx]);
+                let pny = normal.get_f32(&[batch, 1, ny, nx]);
+                let pnz = normal.get_f32(&[batch, 2, ny, nx]);
+
+                let normal_dot = center_nx * pnx + center_ny * pny + center_nz * pnz;
+                let normal_dist = (1.0 - normal_dot.abs()).max(0.0);
+                let normal_weight = (-normal_dist / (2.0 * self.sigma_normal * self.sigma_normal)).exp();
+
+                // Depth weight
+                let pd = depth.get_f32(&[batch, 0, ny, nx]);
+                let depth_dist = (pd - center_d).abs();
+                let depth_weight = (-depth_dist / (2.0 * self.sigma_depth * self.sigma_depth)).exp();
+
+                // Combined weight
+                let weight = spatial_weight * color_weight * normal_weight * depth_weight;
+
+                sum_r += weight * pr;
+                sum_g += weight * pg;
+                sum_b += weight * pb;
+                weight_sum += weight;
+            }
+        }
+
+        if weight_sum > 0.0 {
+            (sum_r / weight_sum, sum_g / weight_sum, sum_b / weight_sum)
+        } else {
+            (center_r, center_g, center_b)
+        }
+    }
+}
+
+// ============================================================================
+// A-TROUS WAVELET FILTER
+// ============================================================================
+
+/// A-Trous wavelet filter for edge-preserving denoising
+pub struct ATrousFilter {
+    /// Number of iterations
+    iterations: usize,
+    /// Base kernel weights
+    kernel: [f32; 5],
+    /// Color sigma
+    sigma_color: f32,
+    /// Normal sigma
+    sigma_normal: f32,
+    /// Depth sigma
+    sigma_depth: f32,
+}
+
+impl ATrousFilter {
+    pub fn new(iterations: usize, sigma_color: f32, sigma_normal: f32, sigma_depth: f32) -> Self {
+        // B-Spline wavelet kernel
+        let kernel = [1.0/16.0, 4.0/16.0, 6.0/16.0, 4.0/16.0, 1.0/16.0];
+
+        Self {
+            iterations,
+            kernel,
+            sigma_color,
+            sigma_normal,
+            sigma_depth,
+        }
+    }
+
+    pub fn forward(&self, gbuffer: &GBuffer) -> Tensor {
+        let mut current = gbuffer.color.clone();
+
+        for iter in 0..self.iterations {
+            let step_size = 1 << iter; // 1, 2, 4, 8, ...
+            current = self.filter_pass(&current, &gbuffer.normal, &gbuffer.depth, step_size);
+        }
+
+        current
+    }
+
+    fn filter_pass(
+        &self,
+        color: &Tensor,
+        normal: &Tensor,
+        depth: &Tensor,
+        step_size: usize,
+    ) -> Tensor {
+        let shape = color.shape();
+        let batch = shape.dim(0);
+        let channels = shape.dim(1);
+        let height = shape.dim(2);
+        let width = shape.dim(3);
+
+        let mut output = Tensor::zeros(&[batch, channels, height, width], color.dtype());
+
+        for b in 0..batch {
+            for y in 0..height {
+                for x in 0..width {
+                    let filtered = self.filter_pixel_atrous(
+                        color, normal, depth, b, y, x, height, width, step_size,
+                    );
+
+                    for c in 0..channels {
+                        output.set_f32(&[b, c, y, x], filtered[c]);
+                    }
+                }
+            }
+        }
+
+        output
+    }
+
+    fn filter_pixel_atrous(
+        &self,
+        color: &Tensor,
+        normal: &Tensor,
+        depth: &Tensor,
+        batch: usize,
+        cy: usize,
+        cx: usize,
+        height: usize,
+        width: usize,
+        step_size: usize,
+    ) -> [f32; 3] {
+        let center_color = [
+            color.get_f32(&[batch, 0, cy, cx]),
+            color.get_f32(&[batch, 1, cy, cx]),
+            color.get_f32(&[batch, 2, cy, cx]),
+        ];
+
+        let center_normal = [
+            normal.get_f32(&[batch, 0, cy, cx]),
+            normal.get_f32(&[batch, 1, cy, cx]),
+            normal.get_f32(&[batch, 2, cy, cx]),
+        ];
+
+        let center_depth = depth.get_f32(&[batch, 0, cy, cx]);
+
+        let mut sum = [0.0f32; 3];
+        let mut weight_sum = 0.0f32;
+
+        // 5x5 kernel with step size
+        for ky in 0..5 {
+            for kx in 0..5 {
+                let offset_y = (ky as i32 - 2) * step_size as i32;
+                let offset_x = (kx as i32 - 2) * step_size as i32;
+
+                let ny = (cy as i32 + offset_y).clamp(0, height as i32 - 1) as usize;
+                let nx = (cx as i32 + offset_x).clamp(0, width as i32 - 1) as usize;
+
+                // Kernel weight
+                let kernel_weight = self.kernel[ky] * self.kernel[kx];
+
+                // Sample values
+                let sample_color = [
+                    color.get_f32(&[batch, 0, ny, nx]),
+                    color.get_f32(&[batch, 1, ny, nx]),
+                    color.get_f32(&[batch, 2, ny, nx]),
+                ];
+
+                let sample_normal = [
+                    normal.get_f32(&[batch, 0, ny, nx]),
+                    normal.get_f32(&[batch, 1, ny, nx]),
+                    normal.get_f32(&[batch, 2, ny, nx]),
+                ];
+
+                let sample_depth = depth.get_f32(&[batch, 0, ny, nx]);
+
+                // Edge-stopping weights
+                let color_diff = (sample_color[0] - center_color[0]).powi(2)
+                    + (sample_color[1] - center_color[1]).powi(2)
+                    + (sample_color[2] - center_color[2]).powi(2);
+                let color_weight = (-color_diff / (self.sigma_color * self.sigma_color)).exp();
+
+                let normal_dot = center_normal[0] * sample_normal[0]
+                    + center_normal[1] * sample_normal[1]
+                    + center_normal[2] * sample_normal[2];
+                let normal_weight = normal_dot.max(0.0).powf(self.sigma_normal);
+
+                let depth_diff = (sample_depth - center_depth).abs();
+                let depth_weight = (-depth_diff / self.sigma_depth).exp();
+
+                let weight = kernel_weight * color_weight * normal_weight * depth_weight;
+
+                sum[0] += weight * sample_color[0];
+                sum[1] += weight * sample_color[1];
+                sum[2] += weight * sample_color[2];
+                weight_sum += weight;
+            }
+        }
+
+        if weight_sum > 0.0 {
+            [sum[0] / weight_sum, sum[1] / weight_sum, sum[2] / weight_sum]
+        } else {
+            center_color
+        }
+    }
+}
+
+// ============================================================================
+// SVGF (SPATIOTEMPORAL VARIANCE-GUIDED FILTERING)
+// ============================================================================
+
+/// Temporal accumulation state for SVGF
+pub struct TemporalState {
+    /// Accumulated color
+    pub color: Tensor,
+    /// Accumulated moments (mean, variance)
+    pub moments: Tensor,
+    /// History length per pixel
+    pub history_length: Tensor,
+    /// Previous depth
+    pub prev_depth: Tensor,
+    /// Previous normal
+    pub prev_normal: Tensor,
+    /// Frame count
+    pub frame_count: usize,
+    /// Maximum history length
+    pub max_history: usize,
+}
+
+impl TemporalState {
+    pub fn new(width: usize, height: usize, max_history: usize) -> Self {
+        Self {
+            color: Tensor::zeros(&[1, 3, height, width], DataType::Float32),
+            moments: Tensor::zeros(&[1, 2, height, width], DataType::Float32),
+            history_length: Tensor::zeros(&[1, 1, height, width], DataType::Float32),
+            prev_depth: Tensor::zeros(&[1, 1, height, width], DataType::Float32),
+            prev_normal: Tensor::zeros(&[1, 3, height, width], DataType::Float32),
+            frame_count: 0,
+            max_history,
+        }
+    }
+
+    pub fn reset(&mut self) {
+        let shape = self.color.shape();
+        let height = shape.dim(2);
+        let width = shape.dim(3);
+
+        self.color = Tensor::zeros(&[1, 3, height, width], DataType::Float32);
+        self.moments = Tensor::zeros(&[1, 2, height, width], DataType::Float32);
+        self.history_length = Tensor::zeros(&[1, 1, height, width], DataType::Float32);
+        self.frame_count = 0;
+    }
+}
+
+/// SVGF denoiser with temporal accumulation
+pub struct SVGF {
+    /// Temporal state
+    temporal_state: TemporalState,
+    /// A-Trous filter iterations
+    atrous_iterations: usize,
+    /// Temporal alpha (blend factor)
+    temporal_alpha: f32,
+    /// Variance sigma
+    sigma_variance: f32,
+    /// A-Trous filter
+    atrous: ATrousFilter,
+    /// Enable temporal filtering
+    temporal_enabled: bool,
+}
+
+impl SVGF {
+    pub fn new(width: usize, height: usize, atrous_iterations: usize) -> Self {
+        Self {
+            temporal_state: TemporalState::new(width, height, 32),
+            atrous_iterations,
+            temporal_alpha: 0.1,
+            sigma_variance: 4.0,
+            atrous: ATrousFilter::new(atrous_iterations, 0.1, 128.0, 1.0),
+            temporal_enabled: true,
+        }
+    }
+
+    pub fn denoise(&mut self, gbuffer: &GBuffer) -> Tensor {
+        // Step 1: Temporal accumulation
+        let (accumulated, variance) = if self.temporal_enabled {
+            self.temporal_accumulation(gbuffer)
+        } else {
+            (gbuffer.color.clone(), self.estimate_variance(&gbuffer.color))
+        };
+
+        // Step 2: Variance-guided spatial filtering
+        let filtered = self.variance_guided_filter(&accumulated, &variance, gbuffer);
+
+        // Update temporal state
+        self.update_temporal_state(&filtered, &gbuffer.depth, &gbuffer.normal);
+
+        filtered
+    }
+
+    fn temporal_accumulation(&mut self, gbuffer: &GBuffer) -> (Tensor, Tensor) {
+        let shape = gbuffer.color.shape();
+        let batch = shape.dim(0);
+        let height = shape.dim(2);
+        let width = shape.dim(3);
+
+        let mut accumulated = Tensor::zeros(&[batch, 3, height, width], DataType::Float32);
+        let mut variance = Tensor::zeros(&[batch, 1, height, width], DataType::Float32);
+
+        for b in 0..batch {
+            for y in 0..height {
+                for x in 0..width {
+                    // Reproject to find corresponding pixel in previous frame
+                    let motion_x = gbuffer.motion.get_f32(&[b, 0, y, x]);
+                    let motion_y = gbuffer.motion.get_f32(&[b, 1, y, x]);
+
+                    let prev_x = (x as f32 + motion_x).round() as i32;
+                    let prev_y = (y as f32 + motion_y).round() as i32;
+
+                    // Check if reprojection is valid
+                    let valid = self.validate_reprojection(
+                        &gbuffer.depth,
+                        &gbuffer.normal,
+                        b,
+                        y,
+                        x,
+                        prev_y,
+                        prev_x,
+                        height,
+                        width,
+                    );
+
+                    let current_color = [
+                        gbuffer.color.get_f32(&[b, 0, y, x]),
+                        gbuffer.color.get_f32(&[b, 1, y, x]),
+                        gbuffer.color.get_f32(&[b, 2, y, x]),
+                    ];
+
+                    let (acc_color, pixel_variance) = if valid {
+                        let prev_x = prev_x.clamp(0, width as i32 - 1) as usize;
+                        let prev_y = prev_y.clamp(0, height as i32 - 1) as usize;
+
+                        // Get previous values
+                        let prev_color = [
+                            self.temporal_state.color.get_f32(&[0, 0, prev_y, prev_x]),
+                            self.temporal_state.color.get_f32(&[0, 1, prev_y, prev_x]),
+                            self.temporal_state.color.get_f32(&[0, 2, prev_y, prev_x]),
+                        ];
+
+                        let prev_moments = [
+                            self.temporal_state.moments.get_f32(&[0, 0, prev_y, prev_x]),
+                            self.temporal_state.moments.get_f32(&[0, 1, prev_y, prev_x]),
+                        ];
+
+                        let history = self.temporal_state.history_length.get_f32(&[0, 0, prev_y, prev_x]);
+                        let new_history = (history + 1.0).min(self.temporal_state.max_history as f32);
+
+                        // Exponential moving average
+                        let alpha = self.temporal_alpha.max(1.0 / new_history);
+
+                        let acc = [
+                            prev_color[0] * (1.0 - alpha) + current_color[0] * alpha,
+                            prev_color[1] * (1.0 - alpha) + current_color[1] * alpha,
+                            prev_color[2] * (1.0 - alpha) + current_color[2] * alpha,
+                        ];
+
+                        // Update moments for variance estimation
+                        let luminance = 0.2126 * current_color[0] + 0.7152 * current_color[1] + 0.0722 * current_color[2];
+                        let new_mean = prev_moments[0] * (1.0 - alpha) + luminance * alpha;
+                        let new_sq_mean = prev_moments[1] * (1.0 - alpha) + luminance * luminance * alpha;
+                        let var = (new_sq_mean - new_mean * new_mean).max(0.0);
+
+                        // Update history length
+                        self.temporal_state.history_length.set_f32(&[0, 0, y, x], new_history);
+
+                        (acc, var)
+                    } else {
+                        // Disocclusion - use current frame
+                        self.temporal_state.history_length.set_f32(&[0, 0, y, x], 1.0);
+
+                        let luminance = 0.2126 * current_color[0] + 0.7152 * current_color[1] + 0.0722 * current_color[2];
+                        (current_color, luminance * 0.5) // High variance for new pixels
+                    };
+
+                    accumulated.set_f32(&[b, 0, y, x], acc_color[0]);
+                    accumulated.set_f32(&[b, 1, y, x], acc_color[1]);
+                    accumulated.set_f32(&[b, 2, y, x], acc_color[2]);
+                    variance.set_f32(&[b, 0, y, x], pixel_variance);
+                }
+            }
+        }
+
+        (accumulated, variance)
+    }
+
+    fn validate_reprojection(
+        &self,
+        depth: &Tensor,
+        normal: &Tensor,
+        batch: usize,
+        y: usize,
+        x: usize,
+        prev_y: i32,
+        prev_x: i32,
+        height: usize,
+        width: usize,
+    ) -> bool {
+        // Check bounds
+        if prev_x < 0 || prev_x >= width as i32 || prev_y < 0 || prev_y >= height as i32 {
+            return false;
+        }
+
+        let prev_x = prev_x as usize;
+        let prev_y = prev_y as usize;
+
+        // Check depth consistency
+        let curr_depth = depth.get_f32(&[batch, 0, y, x]);
+        let prev_depth = self.temporal_state.prev_depth.get_f32(&[0, 0, prev_y, prev_x]);
+
+        let depth_threshold = curr_depth * 0.1; // 10% threshold
+        if (curr_depth - prev_depth).abs() > depth_threshold {
+            return false;
+        }
+
+        // Check normal consistency
+        let curr_nx = normal.get_f32(&[batch, 0, y, x]);
+        let curr_ny = normal.get_f32(&[batch, 1, y, x]);
+        let curr_nz = normal.get_f32(&[batch, 2, y, x]);
+
+        let prev_nx = self.temporal_state.prev_normal.get_f32(&[0, 0, prev_y, prev_x]);
+        let prev_ny = self.temporal_state.prev_normal.get_f32(&[0, 1, prev_y, prev_x]);
+        let prev_nz = self.temporal_state.prev_normal.get_f32(&[0, 2, prev_y, prev_x]);
+
+        let dot = curr_nx * prev_nx + curr_ny * prev_ny + curr_nz * prev_nz;
+        if dot < 0.9 {
+            return false;
+        }
+
+        true
+    }
+
+    fn estimate_variance(&self, color: &Tensor) -> Tensor {
+        let shape = color.shape();
+        let batch = shape.dim(0);
+        let height = shape.dim(2);
+        let width = shape.dim(3);
+
+        let mut variance = Tensor::zeros(&[batch, 1, height, width], DataType::Float32);
+
+        // 3x3 variance estimation
+        for b in 0..batch {
+            for y in 1..(height - 1) {
+                for x in 1..(width - 1) {
+                    let mut sum = 0.0f32;
+                    let mut sq_sum = 0.0f32;
+                    let count = 9.0f32;
+
+                    for dy in -1i32..=1 {
+                        for dx in -1i32..=1 {
+                            let ny = (y as i32 + dy) as usize;
+                            let nx = (x as i32 + dx) as usize;
+
+                            let r = color.get_f32(&[b, 0, ny, nx]);
+                            let g = color.get_f32(&[b, 1, ny, nx]);
+                            let b_col = color.get_f32(&[b, 2, ny, nx]);
+
+                            let lum = 0.2126 * r + 0.7152 * g + 0.0722 * b_col;
+                            sum += lum;
+                            sq_sum += lum * lum;
+                        }
+                    }
+
+                    let mean = sum / count;
+                    let var = (sq_sum / count - mean * mean).max(0.0);
+                    variance.set_f32(&[b, 0, y, x], var);
+                }
+            }
+        }
+
+        variance
+    }
+
+    fn variance_guided_filter(
+        &self,
+        color: &Tensor,
+        variance: &Tensor,
+        gbuffer: &GBuffer,
+    ) -> Tensor {
+        // Create modified G-buffer with variance-scaled sigmas
+        let modified_gbuffer = GBuffer::new(
+            color.clone(),
+            gbuffer.normal.clone(),
+            gbuffer.depth.clone(),
+            gbuffer.albedo.clone(),
+            gbuffer.motion.clone(),
+        );
+
+        // Apply A-Trous filter with variance guidance
+        let mut current = color.clone();
+
+        for iter in 0..self.atrous_iterations {
+            let step_size = 1 << iter;
+            current = self.atrous_variance_pass(&current, variance, &modified_gbuffer, step_size);
+        }
+
+        current
+    }
+
+    fn atrous_variance_pass(
+        &self,
+        color: &Tensor,
+        variance: &Tensor,
+        gbuffer: &GBuffer,
+        step_size: usize,
+    ) -> Tensor {
+        let shape = color.shape();
+        let batch = shape.dim(0);
+        let channels = shape.dim(1);
+        let height = shape.dim(2);
+        let width = shape.dim(3);
+
+        let mut output = Tensor::zeros(&[batch, channels, height, width], color.dtype());
+
+        let kernel = [1.0/16.0f32, 4.0/16.0, 6.0/16.0, 4.0/16.0, 1.0/16.0];
+
+        for b in 0..batch {
+            for y in 0..height {
+                for x in 0..width {
+                    let center_var = variance.get_f32(&[b, 0, y, x]);
+                    let sigma_l = self.sigma_variance * center_var.sqrt().max(1e-4);
+
+                    let center_color = [
+                        color.get_f32(&[b, 0, y, x]),
+                        color.get_f32(&[b, 1, y, x]),
+                        color.get_f32(&[b, 2, y, x]),
+                    ];
+
+                    let center_normal = [
+                        gbuffer.normal.get_f32(&[b, 0, y, x]),
+                        gbuffer.normal.get_f32(&[b, 1, y, x]),
+                        gbuffer.normal.get_f32(&[b, 2, y, x]),
+                    ];
+
+                    let center_depth = gbuffer.depth.get_f32(&[b, 0, y, x]);
+
+                    let mut sum = [0.0f32; 3];
+                    let mut weight_sum = 0.0f32;
+
+                    for ky in 0..5 {
+                        for kx in 0..5 {
+                            let offset_y = (ky as i32 - 2) * step_size as i32;
+                            let offset_x = (kx as i32 - 2) * step_size as i32;
+
+                            let ny = (y as i32 + offset_y).clamp(0, height as i32 - 1) as usize;
+                            let nx = (x as i32 + offset_x).clamp(0, width as i32 - 1) as usize;
+
+                            let kernel_weight = kernel[ky] * kernel[kx];
+
+                            let sample_color = [
+                                color.get_f32(&[b, 0, ny, nx]),
+                                color.get_f32(&[b, 1, ny, nx]),
+                                color.get_f32(&[b, 2, ny, nx]),
+                            ];
+
+                            let sample_normal = [
+                                gbuffer.normal.get_f32(&[b, 0, ny, nx]),
+                                gbuffer.normal.get_f32(&[b, 1, ny, nx]),
+                                gbuffer.normal.get_f32(&[b, 2, ny, nx]),
+                            ];
+
+                            let sample_depth = gbuffer.depth.get_f32(&[b, 0, ny, nx]);
+
+                            // Luminance-based edge stopping with variance guidance
+                            let center_lum = 0.2126 * center_color[0] + 0.7152 * center_color[1] + 0.0722 * center_color[2];
+                            let sample_lum = 0.2126 * sample_color[0] + 0.7152 * sample_color[1] + 0.0722 * sample_color[2];
+                            let lum_diff = (sample_lum - center_lum).abs();
+                            let lum_weight = (-lum_diff / (sigma_l + 1e-6)).exp();
+
+                            // Normal weight
+                            let normal_dot = center_normal[0] * sample_normal[0]
+                                + center_normal[1] * sample_normal[1]
+                                + center_normal[2] * sample_normal[2];
+                            let normal_weight = normal_dot.max(0.0).powf(128.0);
+
+                            // Depth weight
+                            let depth_diff = (sample_depth - center_depth).abs();
+                            let depth_weight = (-depth_diff * 10.0).exp();
+
+                            let weight = kernel_weight * lum_weight * normal_weight * depth_weight;
+
+                            sum[0] += weight * sample_color[0];
+                            sum[1] += weight * sample_color[1];
+                            sum[2] += weight * sample_color[2];
+                            weight_sum += weight;
+                        }
+                    }
+
+                    if weight_sum > 0.0 {
+                        output.set_f32(&[b, 0, y, x], sum[0] / weight_sum);
+                        output.set_f32(&[b, 1, y, x], sum[1] / weight_sum);
+                        output.set_f32(&[b, 2, y, x], sum[2] / weight_sum);
+                    } else {
+                        output.set_f32(&[b, 0, y, x], center_color[0]);
+                        output.set_f32(&[b, 1, y, x], center_color[1]);
+                        output.set_f32(&[b, 2, y, x], center_color[2]);
+                    }
+                }
+            }
+        }
+
+        output
+    }
+
+    fn update_temporal_state(&mut self, filtered: &Tensor, depth: &Tensor, normal: &Tensor) {
+        self.temporal_state.color = filtered.clone();
+        self.temporal_state.prev_depth = depth.clone();
+        self.temporal_state.prev_normal = normal.clone();
+        self.temporal_state.frame_count += 1;
+    }
+
+    pub fn reset(&mut self) {
+        self.temporal_state.reset();
+    }
+
+    pub fn set_temporal_enabled(&mut self, enabled: bool) {
+        self.temporal_enabled = enabled;
+    }
+}
+
+// ============================================================================
+// KERNEL PREDICTION NETWORK
+// ============================================================================
+
+/// Kernel Prediction Network for denoising
+/// Predicts per-pixel filter kernels instead of directly predicting colors
+pub struct KernelPredictionNetwork {
+    /// Kernel size
+    kernel_size: usize,
+    /// Number of feature channels
+    num_features: usize,
+    /// Encoder
+    encoder: KPNEncoder,
+    /// Decoder
+    decoder: KPNDecoder,
+    /// Kernel head
+    kernel_head: Conv2d,
+}
+
+struct KPNEncoder {
+    conv1: Conv2d,
+    conv2: Conv2d,
+    conv3: Conv2d,
+    conv4: Conv2d,
+    pool: MaxPool2d,
+}
+
+struct KPNDecoder {
+    up1: ConvTranspose2d,
+    conv1: Conv2d,
+    up2: ConvTranspose2d,
+    conv2: Conv2d,
+    up3: ConvTranspose2d,
+    conv3: Conv2d,
+}
+
+/// Transposed convolution for upsampling
+pub struct ConvTranspose2d {
+    weight: Tensor,
+    bias: Option<Tensor>,
+    in_channels: usize,
+    out_channels: usize,
+    kernel_size: (usize, usize),
+    stride: (usize, usize),
+    padding: (usize, usize),
+    output_padding: (usize, usize),
+}
+
+impl ConvTranspose2d {
+    pub fn new(
+        in_channels: usize,
+        out_channels: usize,
+        kernel_size: (usize, usize),
+        stride: (usize, usize),
+        padding: (usize, usize),
+        output_padding: (usize, usize),
+        bias: bool,
+    ) -> Self {
+        let weight = Tensor::randn(
+            &[in_channels, out_channels, kernel_size.0, kernel_size.1],
+            DataType::Float32,
+        );
+
+        let bias_tensor = if bias {
+            Some(Tensor::zeros(&[out_channels], DataType::Float32))
+        } else {
+            None
+        };
+
+        Self {
+            weight,
+            bias: bias_tensor,
+            in_channels,
+            out_channels,
+            kernel_size,
+            stride,
+            padding,
+            output_padding,
+        }
+    }
+
+    pub fn forward(&self, input: &Tensor) -> Tensor {
+        // Transposed convolution implementation
+        let shape = input.shape();
+        let batch = shape.dim(0);
+        let in_c = shape.dim(1);
+        let in_h = shape.dim(2);
+        let in_w = shape.dim(3);
+
+        let out_h = (in_h - 1) * self.stride.0 - 2 * self.padding.0 + self.kernel_size.0 + self.output_padding.0;
+        let out_w = (in_w - 1) * self.stride.1 - 2 * self.padding.1 + self.kernel_size.1 + self.output_padding.1;
+
+        let mut output = Tensor::zeros(&[batch, self.out_channels, out_h, out_w], input.dtype());
+
+        // Simplified transposed conv (full implementation would use GEMM)
+        // This is a placeholder
+
+        output
+    }
+}
+
+/// Max pooling layer
+pub struct MaxPool2d {
+    kernel_size: (usize, usize),
+    stride: (usize, usize),
+}
+
+impl MaxPool2d {
+    pub fn new(kernel_size: (usize, usize), stride: (usize, usize)) -> Self {
+        Self { kernel_size, stride }
+    }
+
+    pub fn forward(&self, input: &Tensor) -> Tensor {
+        let shape = input.shape();
+        let batch = shape.dim(0);
+        let channels = shape.dim(1);
+        let in_h = shape.dim(2);
+        let in_w = shape.dim(3);
+
+        let out_h = (in_h - self.kernel_size.0) / self.stride.0 + 1;
+        let out_w = (in_w - self.kernel_size.1) / self.stride.1 + 1;
+
+        let mut output = Tensor::zeros(&[batch, channels, out_h, out_w], input.dtype());
+
+        for b in 0..batch {
+            for c in 0..channels {
+                for oh in 0..out_h {
+                    for ow in 0..out_w {
+                        let start_h = oh * self.stride.0;
+                        let start_w = ow * self.stride.1;
+
+                        let mut max_val = f32::NEG_INFINITY;
+
+                        for kh in 0..self.kernel_size.0 {
+                            for kw in 0..self.kernel_size.1 {
+                                let h = start_h + kh;
+                                let w = start_w + kw;
+
+                                if h < in_h && w < in_w {
+                                    let val = input.get_f32(&[b, c, h, w]);
+                                    max_val = max_val.max(val);
+                                }
+                            }
+                        }
+
+                        output.set_f32(&[b, c, oh, ow], max_val);
+                    }
+                }
+            }
+        }
+
+        output
+    }
+}
+
+impl KPNEncoder {
+    pub fn new(in_channels: usize, num_features: usize) -> Self {
+        Self {
+            conv1: Conv2d::new(in_channels, num_features, (3, 3), (1, 1), (1, 1), (1, 1), 1, true),
+            conv2: Conv2d::new(num_features, num_features * 2, (3, 3), (1, 1), (1, 1), (1, 1), 1, true),
+            conv3: Conv2d::new(num_features * 2, num_features * 4, (3, 3), (1, 1), (1, 1), (1, 1), 1, true),
+            conv4: Conv2d::new(num_features * 4, num_features * 8, (3, 3), (1, 1), (1, 1), (1, 1), 1, true),
+            pool: MaxPool2d::new((2, 2), (2, 2)),
+        }
+    }
+
+    pub fn forward(&self, input: &Tensor) -> (Tensor, Tensor, Tensor, Tensor) {
+        let mut x1 = self.conv1.forward(input);
+        x1 = LeakyReLU::new(0.1).forward(&x1);
+
+        let x1_pool = self.pool.forward(&x1);
+        let mut x2 = self.conv2.forward(&x1_pool);
+        x2 = LeakyReLU::new(0.1).forward(&x2);
+
+        let x2_pool = self.pool.forward(&x2);
+        let mut x3 = self.conv3.forward(&x2_pool);
+        x3 = LeakyReLU::new(0.1).forward(&x3);
+
+        let x3_pool = self.pool.forward(&x3);
+        let mut x4 = self.conv4.forward(&x3_pool);
+        x4 = LeakyReLU::new(0.1).forward(&x4);
+
+        (x1, x2, x3, x4)
+    }
+}
+
+impl KPNDecoder {
+    pub fn new(num_features: usize) -> Self {
+        Self {
+            up1: ConvTranspose2d::new(num_features * 8, num_features * 4, (2, 2), (2, 2), (0, 0), (0, 0), true),
+            conv1: Conv2d::new(num_features * 8, num_features * 4, (3, 3), (1, 1), (1, 1), (1, 1), 1, true),
+            up2: ConvTranspose2d::new(num_features * 4, num_features * 2, (2, 2), (2, 2), (0, 0), (0, 0), true),
+            conv2: Conv2d::new(num_features * 4, num_features * 2, (3, 3), (1, 1), (1, 1), (1, 1), 1, true),
+            up3: ConvTranspose2d::new(num_features * 2, num_features, (2, 2), (2, 2), (0, 0), (0, 0), true),
+            conv3: Conv2d::new(num_features * 2, num_features, (3, 3), (1, 1), (1, 1), (1, 1), 1, true),
+        }
+    }
+
+    pub fn forward(&self, x4: &Tensor, x3: &Tensor, x2: &Tensor, x1: &Tensor) -> Tensor {
+        let mut x = self.up1.forward(x4);
+        x = Tensor::cat(&[x, x3.clone()], 1);
+        x = self.conv1.forward(&x);
+        x = LeakyReLU::new(0.1).forward(&x);
+
+        x = self.up2.forward(&x);
+        x = Tensor::cat(&[x, x2.clone()], 1);
+        x = self.conv2.forward(&x);
+        x = LeakyReLU::new(0.1).forward(&x);
+
+        x = self.up3.forward(&x);
+        x = Tensor::cat(&[x, x1.clone()], 1);
+        x = self.conv3.forward(&x);
+        LeakyReLU::new(0.1).forward(&x)
+    }
+}
+
+impl KernelPredictionNetwork {
+    pub fn new(kernel_size: usize, num_features: usize) -> Self {
+        // Input: color (3) + normal (3) + depth (1) + albedo (3) = 10 channels
+        let in_channels = 10;
+
+        let kernel_output_channels = kernel_size * kernel_size * 3; // Per-channel kernels
+
+        Self {
+            kernel_size,
+            num_features,
+            encoder: KPNEncoder::new(in_channels, num_features),
+            decoder: KPNDecoder::new(num_features),
+            kernel_head: Conv2d::new(num_features, kernel_output_channels, (1, 1), (1, 1), (0, 0), (1, 1), 1, true),
+        }
+    }
+
+    pub fn forward(&self, gbuffer: &GBuffer) -> Tensor {
+        // Concatenate input features
+        let input = Tensor::cat(&[
+            gbuffer.color.clone(),
+            gbuffer.normal.clone(),
+            gbuffer.depth.clone(),
+            gbuffer.albedo.clone(),
+        ], 1);
+
+        // Encode
+        let (x1, x2, x3, x4) = self.encoder.forward(&input);
+
+        // Decode
+        let features = self.decoder.forward(&x4, &x3, &x2, &x1);
+
+        // Predict kernels
+        let kernels = self.kernel_head.forward(&features);
+
+        // Apply kernels to color
+        self.apply_kernels(&gbuffer.color, &kernels)
+    }
+
+    fn apply_kernels(&self, color: &Tensor, kernels: &Tensor) -> Tensor {
+        let shape = color.shape();
+        let batch = shape.dim(0);
+        let channels = shape.dim(1);
+        let height = shape.dim(2);
+        let width = shape.dim(3);
+
+        let mut output = Tensor::zeros(&[batch, channels, height, width], color.dtype());
+        let half_k = (self.kernel_size / 2) as i32;
+
+        for b in 0..batch {
+            for c in 0..channels {
+                for y in 0..height {
+                    for x in 0..width {
+                        let mut sum = 0.0f32;
+
+                        for ky in 0..self.kernel_size {
+                            for kx in 0..self.kernel_size {
+                                let kernel_idx = c * self.kernel_size * self.kernel_size + ky * self.kernel_size + kx;
+                                let kernel_weight = kernels.get_f32(&[b, kernel_idx, y, x]);
+
+                                let ny = (y as i32 + ky as i32 - half_k).clamp(0, height as i32 - 1) as usize;
+                                let nx = (x as i32 + kx as i32 - half_k).clamp(0, width as i32 - 1) as usize;
+
+                                sum += kernel_weight * color.get_f32(&[b, c, ny, nx]);
+                            }
+                        }
+
+                        output.set_f32(&[b, c, y, x], sum);
+                    }
+                }
+            }
+        }
+
+        output
+    }
+}
+
+// ============================================================================
+// U-NET DENOISER
+// ============================================================================
+
+/// U-Net architecture for image denoising
+pub struct UNetDenoiser {
+    /// Number of feature channels
+    num_features: usize,
+    /// Encoder blocks
+    enc1: UNetBlock,
+    enc2: UNetBlock,
+    enc3: UNetBlock,
+    enc4: UNetBlock,
+    /// Bottleneck
+    bottleneck: UNetBlock,
+    /// Decoder blocks
+    dec4: UNetBlock,
+    dec3: UNetBlock,
+    dec2: UNetBlock,
+    dec1: UNetBlock,
+    /// Skip connection convolutions
+    skip4: Conv2d,
+    skip3: Conv2d,
+    skip2: Conv2d,
+    skip1: Conv2d,
+    /// Max pooling
+    pool: MaxPool2d,
+    /// Output convolution
+    output_conv: Conv2d,
+}
+
+/// U-Net encoder/decoder block
+pub struct UNetBlock {
+    conv1: Conv2d,
+    bn1: BatchNorm2d,
+    conv2: Conv2d,
+    bn2: BatchNorm2d,
+    activation: LeakyReLU,
+}
+
+impl UNetBlock {
+    pub fn new(in_channels: usize, out_channels: usize) -> Self {
+        Self {
+            conv1: Conv2d::new(in_channels, out_channels, (3, 3), (1, 1), (1, 1), (1, 1), 1, true),
+            bn1: BatchNorm2d::new(out_channels, 1e-5, 0.1, true),
+            conv2: Conv2d::new(out_channels, out_channels, (3, 3), (1, 1), (1, 1), (1, 1), 1, true),
+            bn2: BatchNorm2d::new(out_channels, 1e-5, 0.1, true),
+            activation: LeakyReLU::new(0.1),
+        }
+    }
+
+    pub fn forward(&self, input: &Tensor) -> Tensor {
+        let mut x = self.conv1.forward(input);
+        x = self.bn1.forward(&x);
+        x = self.activation.forward(&x);
+        x = self.conv2.forward(&x);
+        x = self.bn2.forward(&x);
+        self.activation.forward(&x)
+    }
+}
+
+impl UNetDenoiser {
+    pub fn new(in_channels: usize, num_features: usize) -> Self {
+        Self {
+            num_features,
+            enc1: UNetBlock::new(in_channels, num_features),
+            enc2: UNetBlock::new(num_features, num_features * 2),
+            enc3: UNetBlock::new(num_features * 2, num_features * 4),
+            enc4: UNetBlock::new(num_features * 4, num_features * 8),
+            bottleneck: UNetBlock::new(num_features * 8, num_features * 16),
+            dec4: UNetBlock::new(num_features * 16 + num_features * 8, num_features * 8),
+            dec3: UNetBlock::new(num_features * 8 + num_features * 4, num_features * 4),
+            dec2: UNetBlock::new(num_features * 4 + num_features * 2, num_features * 2),
+            dec1: UNetBlock::new(num_features * 2 + num_features, num_features),
+            skip4: Conv2d::new(num_features * 8, num_features * 8, (1, 1), (1, 1), (0, 0), (1, 1), 1, true),
+            skip3: Conv2d::new(num_features * 4, num_features * 4, (1, 1), (1, 1), (0, 0), (1, 1), 1, true),
+            skip2: Conv2d::new(num_features * 2, num_features * 2, (1, 1), (1, 1), (0, 0), (1, 1), 1, true),
+            skip1: Conv2d::new(num_features, num_features, (1, 1), (1, 1), (0, 0), (1, 1), 1, true),
+            pool: MaxPool2d::new((2, 2), (2, 2)),
+            output_conv: Conv2d::new(num_features, 3, (1, 1), (1, 1), (0, 0), (1, 1), 1, true),
+        }
+    }
+
+    pub fn forward(&self, gbuffer: &GBuffer) -> Tensor {
+        // Concatenate input features
+        let input = Tensor::cat(&[
+            gbuffer.color.clone(),
+            gbuffer.normal.clone(),
+            gbuffer.depth.clone(),
+            gbuffer.albedo.clone(),
+        ], 1);
+
+        // Encoder
+        let e1 = self.enc1.forward(&input);
+        let p1 = self.pool.forward(&e1);
+
+        let e2 = self.enc2.forward(&p1);
+        let p2 = self.pool.forward(&e2);
+
+        let e3 = self.enc3.forward(&p2);
+        let p3 = self.pool.forward(&e3);
+
+        let e4 = self.enc4.forward(&p3);
+        let p4 = self.pool.forward(&e4);
+
+        // Bottleneck
+        let b = self.bottleneck.forward(&p4);
+
+        // Decoder with skip connections
+        let up4 = self.upsample(&b, e4.shape().dim(2), e4.shape().dim(3));
+        let s4 = self.skip4.forward(&e4);
+        let d4 = self.dec4.forward(&Tensor::cat(&[up4, s4], 1));
+
+        let up3 = self.upsample(&d4, e3.shape().dim(2), e3.shape().dim(3));
+        let s3 = self.skip3.forward(&e3);
+        let d3 = self.dec3.forward(&Tensor::cat(&[up3, s3], 1));
+
+        let up2 = self.upsample(&d3, e2.shape().dim(2), e2.shape().dim(3));
+        let s2 = self.skip2.forward(&e2);
+        let d2 = self.dec2.forward(&Tensor::cat(&[up2, s2], 1));
+
+        let up1 = self.upsample(&d2, e1.shape().dim(2), e1.shape().dim(3));
+        let s1 = self.skip1.forward(&e1);
+        let d1 = self.dec1.forward(&Tensor::cat(&[up1, s1], 1));
+
+        // Output
+        let output = self.output_conv.forward(&d1);
+
+        // Residual connection
+        gbuffer.color.add(&output)
+    }
+
+    fn upsample(&self, input: &Tensor, target_h: usize, target_w: usize) -> Tensor {
+        let shape = input.shape();
+        let batch = shape.dim(0);
+        let channels = shape.dim(1);
+        let in_h = shape.dim(2);
+        let in_w = shape.dim(3);
+
+        let mut output = Tensor::zeros(&[batch, channels, target_h, target_w], input.dtype());
+
+        let scale_h = target_h as f32 / in_h as f32;
+        let scale_w = target_w as f32 / in_w as f32;
+
+        for b in 0..batch {
+            for c in 0..channels {
+                for y in 0..target_h {
+                    for x in 0..target_w {
+                        let src_y = (y as f32 / scale_h) as usize;
+                        let src_x = (x as f32 / scale_w) as usize;
+                        let src_y = src_y.min(in_h - 1);
+                        let src_x = src_x.min(in_w - 1);
+
+                        let val = input.get_f32(&[b, c, src_y, src_x]);
+                        output.set_f32(&[b, c, y, x], val);
+                    }
+                }
+            }
+        }
+
+        output
+    }
+}
+
+// ============================================================================
+// RECURRENT TEMPORAL DENOISER
+// ============================================================================
+
+/// ConvLSTM cell for temporal processing
+pub struct ConvLSTMCell {
+    /// Input channels
+    input_dim: usize,
+    /// Hidden channels
+    hidden_dim: usize,
+    /// Kernel size
+    kernel_size: (usize, usize),
+    /// Input-to-hidden convolution
+    conv_ih: Conv2d,
+    /// Hidden-to-hidden convolution
+    conv_hh: Conv2d,
+}
+
+impl ConvLSTMCell {
+    pub fn new(input_dim: usize, hidden_dim: usize, kernel_size: (usize, usize)) -> Self {
+        let padding = (kernel_size.0 / 2, kernel_size.1 / 2);
+
+        Self {
+            input_dim,
+            hidden_dim,
+            kernel_size,
+            conv_ih: Conv2d::new(input_dim, hidden_dim * 4, kernel_size, (1, 1), padding, (1, 1), 1, true),
+            conv_hh: Conv2d::new(hidden_dim, hidden_dim * 4, kernel_size, (1, 1), padding, (1, 1), 1, true),
+        }
+    }
+
+    pub fn forward(&self, input: &Tensor, h: &Tensor, c: &Tensor) -> (Tensor, Tensor) {
+        let shape = input.shape();
+        let batch = shape.dim(0);
+        let height = shape.dim(2);
+        let width = shape.dim(3);
+
+        // Input-to-hidden
+        let ih = self.conv_ih.forward(input);
+
+        // Hidden-to-hidden
+        let hh = self.conv_hh.forward(h);
+
+        // Sum gates
+        let gates = ih.add(&hh);
+
+        // Split into 4 gates: input, forget, cell, output
+        let gate_size = self.hidden_dim;
+
+        let i_gate = gates.slice(1, 0, gate_size);
+        let f_gate = gates.slice(1, gate_size, gate_size * 2);
+        let g_gate = gates.slice(1, gate_size * 2, gate_size * 3);
+        let o_gate = gates.slice(1, gate_size * 3, gate_size * 4);
+
+        // Apply activations
+        let i_gate = Sigmoid::new().forward(&i_gate);
+        let f_gate = Sigmoid::new().forward(&f_gate);
+        let g_gate = Tanh::new().forward(&g_gate);
+        let o_gate = Sigmoid::new().forward(&o_gate);
+
+        // Update cell state
+        let c_new = f_gate.mul(c).add(&i_gate.mul(&g_gate));
+
+        // Update hidden state
+        let h_new = o_gate.mul(&Tanh::new().forward(&c_new));
+
+        (h_new, c_new)
+    }
+}
+
+/// Recurrent temporal denoiser
+pub struct RecurrentTemporalDenoiser {
+    /// Feature encoder
+    encoder: Conv2d,
+    /// ConvLSTM layers
+    conv_lstm1: ConvLSTMCell,
+    conv_lstm2: ConvLSTMCell,
+    /// Decoder
+    decoder: Sequential,
+    /// Hidden state 1
+    h1: Option<Tensor>,
+    /// Cell state 1
+    c1: Option<Tensor>,
+    /// Hidden state 2
+    h2: Option<Tensor>,
+    /// Cell state 2
+    c2: Option<Tensor>,
+    /// Feature channels
+    num_features: usize,
+}
+
+impl RecurrentTemporalDenoiser {
+    pub fn new(in_channels: usize, num_features: usize) -> Self {
+        let encoder = Conv2d::new(in_channels, num_features, (3, 3), (1, 1), (1, 1), (1, 1), 1, true);
+
+        let conv_lstm1 = ConvLSTMCell::new(num_features, num_features, (3, 3));
+        let conv_lstm2 = ConvLSTMCell::new(num_features, num_features, (3, 3));
+
+        let mut decoder = Sequential::new();
+        decoder.add(Conv2d::new(num_features, num_features, (3, 3), (1, 1), (1, 1), (1, 1), 1, true));
+        decoder.add(ReLU::new());
+        decoder.add(Conv2d::new(num_features, 3, (3, 3), (1, 1), (1, 1), (1, 1), 1, true));
+
+        Self {
+            encoder,
+            conv_lstm1,
+            conv_lstm2,
+            decoder,
+            h1: None,
+            c1: None,
+            h2: None,
+            c2: None,
+            num_features,
+        }
+    }
+
+    pub fn forward(&mut self, gbuffer: &GBuffer) -> Tensor {
+        let shape = gbuffer.color.shape();
+        let batch = shape.dim(0);
+        let height = shape.dim(2);
+        let width = shape.dim(3);
+
+        // Initialize hidden states if needed
+        if self.h1.is_none() {
+            self.h1 = Some(Tensor::zeros(&[batch, self.num_features, height, width], DataType::Float32));
+            self.c1 = Some(Tensor::zeros(&[batch, self.num_features, height, width], DataType::Float32));
+            self.h2 = Some(Tensor::zeros(&[batch, self.num_features, height, width], DataType::Float32));
+            self.c2 = Some(Tensor::zeros(&[batch, self.num_features, height, width], DataType::Float32));
+        }
+
+        // Concatenate input features
+        let input = Tensor::cat(&[
+            gbuffer.color.clone(),
+            gbuffer.normal.clone(),
+            gbuffer.depth.clone(),
+            gbuffer.albedo.clone(),
+        ], 1);
+
+        // Encode
+        let features = self.encoder.forward(&input);
+        let features = ReLU::new().forward(&features);
+
+        // ConvLSTM layers
+        let h1 = self.h1.as_ref().unwrap();
+        let c1 = self.c1.as_ref().unwrap();
+        let (h1_new, c1_new) = self.conv_lstm1.forward(&features, h1, c1);
+
+        let h2 = self.h2.as_ref().unwrap();
+        let c2 = self.c2.as_ref().unwrap();
+        let (h2_new, c2_new) = self.conv_lstm2.forward(&h1_new, h2, c2);
+
+        // Update states
+        self.h1 = Some(h1_new);
+        self.c1 = Some(c1_new);
+        self.h2 = Some(h2_new.clone());
+        self.c2 = Some(c2_new);
+
+        // Decode
+        let output = self.decoder.forward(&h2_new);
+
+        // Residual
+        gbuffer.color.add(&output)
+    }
+
+    pub fn reset(&mut self) {
+        self.h1 = None;
+        self.c1 = None;
+        self.h2 = None;
+        self.c2 = None;
+    }
+}
+
+// ============================================================================
+// OPTIX-STYLE AI DENOISER
+// ============================================================================
+
+/// OptixStyle denoiser using neural network
+pub struct OptixStyleDenoiser {
+    /// Feature encoder
+    aux_encoder: AuxiliaryEncoder,
+    /// Main network
+    main_net: UNetDenoiser,
+    /// Temporal weight network
+    temporal_net: Option<Conv2d>,
+    /// Previous denoised frame
+    prev_denoised: Option<Tensor>,
+    /// Blend weight
+    temporal_blend: f32,
+}
+
+impl OptixStyleDenoiser {
+    pub fn new(num_features: usize, enable_temporal: bool) -> Self {
+        let aux_encoder = AuxiliaryEncoder::new(num_features);
+        let main_net = UNetDenoiser::new(10, num_features); // color + normal + depth + albedo
+
+        let temporal_net = if enable_temporal {
+            Some(Conv2d::new(6, 1, (3, 3), (1, 1), (1, 1), (1, 1), 1, true))
+        } else {
+            None
+        };
+
+        Self {
+            aux_encoder,
+            main_net,
+            temporal_net,
+            prev_denoised: None,
+            temporal_blend: 0.9,
+        }
+    }
+
+    pub fn denoise(&mut self, gbuffer: &GBuffer) -> Tensor {
+        // Main spatial denoising
+        let spatial_denoised = self.main_net.forward(gbuffer);
+
+        // Temporal blending if enabled
+        let output = if let (Some(ref prev), Some(ref temp_net)) = (&self.prev_denoised, &self.temporal_net) {
+            // Warp previous frame using motion vectors
+            let warped = self.warp_frame(prev, &gbuffer.motion);
+
+            // Predict blend weight
+            let concat = Tensor::cat(&[spatial_denoised.clone(), warped.clone()], 1);
+            let weight = temp_net.forward(&concat);
+            let weight = Sigmoid::new().forward(&weight);
+
+            // Blend
+            let blended = self.blend(&spatial_denoised, &warped, &weight);
+            blended
+        } else {
+            spatial_denoised.clone()
+        };
+
+        // Store for next frame
+        self.prev_denoised = Some(output.clone());
+
+        output
+    }
+
+    fn warp_frame(&self, frame: &Tensor, motion: &Tensor) -> Tensor {
+        let shape = frame.shape();
+        let batch = shape.dim(0);
+        let channels = shape.dim(1);
+        let height = shape.dim(2);
+        let width = shape.dim(3);
+
+        let mut warped = Tensor::zeros(&[batch, channels, height, width], frame.dtype());
+
+        for b in 0..batch {
+            for c in 0..channels {
+                for y in 0..height {
+                    for x in 0..width {
+                        let mx = motion.get_f32(&[b, 0, y, x]);
+                        let my = motion.get_f32(&[b, 1, y, x]);
+
+                        let src_x = (x as f32 + mx).round() as i32;
+                        let src_y = (y as f32 + my).round() as i32;
+
+                        if src_x >= 0 && src_x < width as i32 && src_y >= 0 && src_y < height as i32 {
+                            let val = frame.get_f32(&[b, c, src_y as usize, src_x as usize]);
+                            warped.set_f32(&[b, c, y, x], val);
+                        }
+                    }
+                }
+            }
+        }
+
+        warped
+    }
+
+    fn blend(&self, current: &Tensor, previous: &Tensor, weight: &Tensor) -> Tensor {
+        let shape = current.shape();
+        let batch = shape.dim(0);
+        let channels = shape.dim(1);
+        let height = shape.dim(2);
+        let width = shape.dim(3);
+
+        let mut output = Tensor::zeros(&[batch, channels, height, width], current.dtype());
+
+        for b in 0..batch {
+            for c in 0..channels {
+                for y in 0..height {
+                    for x in 0..width {
+                        let w = weight.get_f32(&[b, 0, y, x]);
+                        let curr = current.get_f32(&[b, c, y, x]);
+                        let prev = previous.get_f32(&[b, c, y, x]);
+
+                        let blended = curr * (1.0 - w) + prev * w;
+                        output.set_f32(&[b, c, y, x], blended);
+                    }
+                }
+            }
+        }
+
+        output
+    }
+
+    pub fn reset(&mut self) {
+        self.prev_denoised = None;
+    }
+}
+
+// ============================================================================
+// UNIFIED DENOISING INTERFACE
+// ============================================================================
+
+/// Denoising configuration
+pub struct DenoiseConfig {
+    /// Denoising method
+    pub method: DenoiseMethod,
+    /// Quality preset
+    pub quality: DenoiseQuality,
+    /// Enable temporal filtering
+    pub temporal: bool,
+    /// Custom model path
+    pub model_path: Option<String>,
+    /// Inference backend
+    pub backend: InferenceBackend,
+}
+
+impl Default for DenoiseConfig {
+    fn default() -> Self {
+        Self {
+            method: DenoiseMethod::SVGF,
+            quality: DenoiseQuality::Medium,
+            temporal: true,
+            model_path: None,
+            backend: InferenceBackend::DirectML,
+        }
+    }
+}
+
+/// Neural denoiser engine
+pub struct NeuralDenoiser {
+    /// Configuration
+    config: DenoiseConfig,
+    /// Image dimensions
+    width: usize,
+    height: usize,
+    /// Bilateral filter
+    bilateral: Option<JointBilateralFilter>,
+    /// A-Trous filter
+    atrous: Option<ATrousFilter>,
+    /// SVGF denoiser
+    svgf: Option<SVGF>,
+    /// Kernel prediction network
+    kpn: Option<KernelPredictionNetwork>,
+    /// U-Net denoiser
+    unet: Option<UNetDenoiser>,
+    /// Recurrent denoiser
+    recurrent: Option<RecurrentTemporalDenoiser>,
+    /// Optix-style denoiser
+    optix: Option<OptixStyleDenoiser>,
+    /// Frame count
+    frame_count: usize,
+}
+
+impl NeuralDenoiser {
+    pub fn new(config: DenoiseConfig, width: usize, height: usize) -> Self {
+        let mut denoiser = Self {
+            config,
+            width,
+            height,
+            bilateral: None,
+            atrous: None,
+            svgf: None,
+            kpn: None,
+            unet: None,
+            recurrent: None,
+            optix: None,
+            frame_count: 0,
+        };
+
+        denoiser.init_method();
+        denoiser
+    }
+
+    fn init_method(&mut self) {
+        let iterations = self.config.quality.iterations();
+
+        match self.config.method {
+            DenoiseMethod::Bilateral => {
+                self.bilateral = Some(JointBilateralFilter::new(4.0, 0.1, 0.5, 1.0, 5));
+            }
+            DenoiseMethod::ATrous => {
+                self.atrous = Some(ATrousFilter::new(iterations, 0.1, 128.0, 1.0));
+            }
+            DenoiseMethod::SVGF => {
+                self.svgf = Some(SVGF::new(self.width, self.height, iterations));
+            }
+            DenoiseMethod::KernelPrediction => {
+                let kernel_size = self.config.quality.kernel_size();
+                self.kpn = Some(KernelPredictionNetwork::new(kernel_size, 32));
+            }
+            DenoiseMethod::UNet => {
+                self.unet = Some(UNetDenoiser::new(10, 32));
+            }
+            DenoiseMethod::RecurrentTemporal => {
+                self.recurrent = Some(RecurrentTemporalDenoiser::new(10, 32));
+            }
+            DenoiseMethod::OptixStyle => {
+                self.optix = Some(OptixStyleDenoiser::new(32, self.config.temporal));
+            }
+            DenoiseMethod::CustomNetwork => {
+                // Load ONNX model if path provided
+            }
+        }
+    }
+
+    pub fn denoise(&mut self, gbuffer: &GBuffer) -> Tensor {
+        self.frame_count += 1;
+
+        match self.config.method {
+            DenoiseMethod::Bilateral => {
+                if let Some(ref filter) = self.bilateral {
+                    filter.forward(gbuffer)
+                } else {
+                    gbuffer.color.clone()
+                }
+            }
+            DenoiseMethod::ATrous => {
+                if let Some(ref filter) = self.atrous {
+                    filter.forward(gbuffer)
+                } else {
+                    gbuffer.color.clone()
+                }
+            }
+            DenoiseMethod::SVGF => {
+                if let Some(ref mut svgf) = self.svgf {
+                    svgf.denoise(gbuffer)
+                } else {
+                    gbuffer.color.clone()
+                }
+            }
+            DenoiseMethod::KernelPrediction => {
+                if let Some(ref kpn) = self.kpn {
+                    kpn.forward(gbuffer)
+                } else {
+                    gbuffer.color.clone()
+                }
+            }
+            DenoiseMethod::UNet => {
+                if let Some(ref unet) = self.unet {
+                    unet.forward(gbuffer)
+                } else {
+                    gbuffer.color.clone()
+                }
+            }
+            DenoiseMethod::RecurrentTemporal => {
+                if let Some(ref mut rec) = self.recurrent {
+                    rec.forward(gbuffer)
+                } else {
+                    gbuffer.color.clone()
+                }
+            }
+            DenoiseMethod::OptixStyle => {
+                if let Some(ref mut optix) = self.optix {
+                    optix.denoise(gbuffer)
+                } else {
+                    gbuffer.color.clone()
+                }
+            }
+            DenoiseMethod::CustomNetwork => {
+                gbuffer.color.clone()
+            }
+        }
+    }
+
+    pub fn reset(&mut self) {
+        if let Some(ref mut svgf) = self.svgf {
+            svgf.reset();
+        }
+        if let Some(ref mut rec) = self.recurrent {
+            rec.reset();
+        }
+        if let Some(ref mut optix) = self.optix {
+            optix.reset();
+        }
+        self.frame_count = 0;
+    }
+
+    pub fn set_temporal_enabled(&mut self, enabled: bool) {
+        if let Some(ref mut svgf) = self.svgf {
+            svgf.set_temporal_enabled(enabled);
+        }
+    }
+
+    pub fn method_name(&self) -> &str {
+        match self.config.method {
+            DenoiseMethod::Bilateral => "Joint Bilateral",
+            DenoiseMethod::ATrous => "A-Trous Wavelet",
+            DenoiseMethod::SVGF => "SVGF",
+            DenoiseMethod::KernelPrediction => "Kernel Prediction",
+            DenoiseMethod::UNet => "U-Net",
+            DenoiseMethod::RecurrentTemporal => "Recurrent Temporal",
+            DenoiseMethod::OptixStyle => "Optix-Style AI",
+            DenoiseMethod::CustomNetwork => "Custom",
+        }
+    }
+}
+
+// ============================================================================
+// TRAINING UTILITIES
+// ============================================================================
+
+/// Training loss for denoising
+pub struct DenoiseLoss {
+    /// L1 loss weight
+    l1_weight: f32,
+    /// L2 loss weight
+    l2_weight: f32,
+    /// SSIM loss weight
+    ssim_weight: f32,
+    /// Temporal loss weight
+    temporal_weight: f32,
+    /// Loss functions
+    l1: L1Loss,
+    l2: MSELoss,
+    ssim: SSIMLoss,
+}
+
+impl DenoiseLoss {
+    pub fn new(l1_weight: f32, l2_weight: f32, ssim_weight: f32, temporal_weight: f32) -> Self {
+        Self {
+            l1_weight,
+            l2_weight,
+            ssim_weight,
+            temporal_weight,
+            l1: L1Loss::new(),
+            l2: MSELoss::new(),
+            ssim: SSIMLoss::new(11, 1.5),
+        }
+    }
+
+    pub fn forward(&self, pred: &Tensor, target: &Tensor, prev_pred: Option<&Tensor>, prev_target: Option<&Tensor>) -> f32 {
+        let mut total_loss = 0.0f32;
+
+        // L1 loss
+        total_loss += self.l1_weight * self.l1.forward(pred, target);
+
+        // L2 loss
+        total_loss += self.l2_weight * self.l2.forward(pred, target);
+
+        // SSIM loss (1 - SSIM for minimization)
+        let ssim_val = self.ssim.forward(pred, target);
+        total_loss += self.ssim_weight * (1.0 - ssim_val);
+
+        // Temporal loss
+        if let (Some(pp), Some(pt)) = (prev_pred, prev_target) {
+            let pred_diff = pred.sub(pp);
+            let target_diff = target.sub(pt);
+            let temporal_loss = self.l1.forward(&pred_diff, &target_diff);
+            total_loss += self.temporal_weight * temporal_loss;
+        }
+
+        total_loss
+    }
+}
+
+/// Data augmentation for denoising training
+pub struct DenoiseAugmentation {
+    /// Enable horizontal flip
+    hflip: bool,
+    /// Enable vertical flip
+    vflip: bool,
+    /// Enable rotation
+    rotate: bool,
+    /// Enable noise level variation
+    noise_variation: bool,
+    /// Min noise level
+    min_noise: f32,
+    /// Max noise level
+    max_noise: f32,
+}
+
+impl DenoiseAugmentation {
+    pub fn new() -> Self {
+        Self {
+            hflip: true,
+            vflip: true,
+            rotate: true,
+            noise_variation: true,
+            min_noise: 0.01,
+            max_noise: 0.1,
+        }
+    }
+
+    pub fn apply(&self, gbuffer: &mut GBuffer, rng: &mut XorShift64) {
+        // Random flips and rotations would modify all buffers consistently
+        // For now, this is a placeholder
+
+        // Noise level variation
+        if self.noise_variation {
+            let noise_scale = self.min_noise + rng.next_f32() * (self.max_noise - self.min_noise);
+            // Scale noise in noisy input
+        }
+    }
+}
+
+/// XorShift64 RNG
+pub struct XorShift64 {
+    state: u64,
+}
+
+impl XorShift64 {
+    pub fn new(seed: u64) -> Self {
+        Self { state: seed }
+    }
+
+    pub fn next_f32(&mut self) -> f32 {
+        self.state ^= self.state << 13;
+        self.state ^= self.state >> 7;
+        self.state ^= self.state << 17;
+        (self.state as f32) / (u64::MAX as f32)
+    }
+}
+
+// ============================================================================
+// QUALITY METRICS
+// ============================================================================
+
+/// Compute PSNR between denoised and reference
+pub fn compute_psnr(denoised: &Tensor, reference: &Tensor, max_val: f32) -> f32 {
+    let mse = MSELoss::new().forward(denoised, reference);
+    if mse < 1e-10 {
+        return 100.0;
+    }
+    20.0 * (max_val / mse.sqrt()).log10()
+}
+
+/// Compute SSIM between denoised and reference
+pub fn compute_ssim(denoised: &Tensor, reference: &Tensor) -> f32 {
+    SSIMLoss::new(11, 1.5).forward(denoised, reference)
+}
+
+/// Relative mean squared error
+pub fn compute_rmse(denoised: &Tensor, reference: &Tensor) -> f32 {
+    let mse = MSELoss::new().forward(denoised, reference);
+    mse.sqrt()
+}
+
+/// Benchmark result for denoising
+pub struct DenoiseBenchmark {
+    /// Method name
+    pub method: String,
+    /// Resolution
+    pub resolution: (usize, usize),
+    /// Average time (ms)
+    pub avg_time_ms: f32,
+    /// PSNR
+    pub psnr: f32,
+    /// SSIM
+    pub ssim: f32,
+    /// RMSE
+    pub rmse: f32,
+}
+
+// ============================================================================
+// MODULE EXPORTS
+// ============================================================================
+
+pub mod filters {
+    pub use super::{JointBilateralFilter, ATrousFilter};
+}
+
+pub mod svgf {
+    pub use super::{SVGF, TemporalState};
+}
+
+pub mod networks {
+    pub use super::{KernelPredictionNetwork, UNetDenoiser, RecurrentTemporalDenoiser, OptixStyleDenoiser};
+    pub use super::{UNetBlock, ConvLSTMCell, ConvTranspose2d, MaxPool2d};
+}
+
+pub mod gbuffer {
+    pub use super::{GBuffer, AuxiliaryBuffer, AuxiliaryEncoder};
+}
+
+pub mod config {
+    pub use super::{DenoiseConfig, DenoiseMethod, DenoiseQuality};
+}
+
+pub mod training {
+    pub use super::{DenoiseLoss, DenoiseAugmentation, XorShift64};
+}
+
+pub mod metrics {
+    pub use super::{compute_psnr, compute_ssim, compute_rmse, DenoiseBenchmark};
+}
+
+pub use filters::*;
+pub use svgf::*;
+pub use networks::*;
+pub use gbuffer::*;
+pub use config::*;
+pub use NeuralDenoiser;

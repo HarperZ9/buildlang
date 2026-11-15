@@ -1,0 +1,1386 @@
+// BUILD-UNIVERSE Prism: Screen-Space Ambient Occlusion Shaders
+// Comprehensive SSAO implementations including SSAO, HBAO, GTAO, and more
+
+import prism::lib::*;
+import spectrum::color::*;
+
+// ============================================================================
+// SSAO CONFIGURATION
+// ============================================================================
+
+@shader_config
+struct SSAOConfig {
+    technique: SSAOTechnique,
+    quality: SSAOQuality,
+    radius: f32,
+    bias: f32,
+    intensity: f32,
+    power: f32,
+    sample_count: u32,
+    blur_enabled: bool,
+    blur_sharpness: f32,
+    temporal_enabled: bool,
+    half_resolution: bool,
+    normal_aware: bool,
+}
+
+enum SSAOTechnique {
+    SSAO,           // Basic screen-space AO (Crytek 2007)
+    SSAO_Plus,      // Enhanced SSAO with better sampling
+    HBAO,           // Horizon-Based AO (NVIDIA)
+    HBAO_Plus,      // HBAO+ with improved quality
+    GTAO,           // Ground Truth AO (Activision)
+    GTAO_Temporal,  // GTAO with temporal accumulation
+    VXAO,           // Voxel-based AO
+    RTAO,           // Ray-traced AO fallback
+    MultiScale,     // Multi-scale AO combination
+}
+
+enum SSAOQuality {
+    Low,        // 8 samples, half-res
+    Medium,     // 16 samples, half-res
+    High,       // 32 samples, full-res
+    Ultra,      // 64 samples, full-res + temporal
+    Extreme,    // 128 samples, full-res + temporal + multi-scale
+}
+
+impl SSAOConfig {
+    const LOW: Self = SSAOConfig {
+        technique: SSAOTechnique::SSAO,
+        quality: SSAOQuality::Low,
+        radius: 0.5,
+        bias: 0.025,
+        intensity: 1.0,
+        power: 1.5,
+        sample_count: 8,
+        blur_enabled: true,
+        blur_sharpness: 4.0,
+        temporal_enabled: false,
+        half_resolution: true,
+        normal_aware: false,
+    };
+
+    const MEDIUM: Self = SSAOConfig {
+        technique: SSAOTechnique::HBAO,
+        quality: SSAOQuality::Medium,
+        radius: 0.75,
+        bias: 0.02,
+        intensity: 1.2,
+        power: 1.8,
+        sample_count: 16,
+        blur_enabled: true,
+        blur_sharpness: 8.0,
+        temporal_enabled: false,
+        half_resolution: true,
+        normal_aware: true,
+    };
+
+    const HIGH: Self = SSAOConfig {
+        technique: SSAOTechnique::GTAO,
+        quality: SSAOQuality::High,
+        radius: 1.0,
+        bias: 0.015,
+        intensity: 1.5,
+        power: 2.0,
+        sample_count: 32,
+        blur_enabled: true,
+        blur_sharpness: 16.0,
+        temporal_enabled: true,
+        half_resolution: false,
+        normal_aware: true,
+    };
+
+    const ULTRA: Self = SSAOConfig {
+        technique: SSAOTechnique::GTAO_Temporal,
+        quality: SSAOQuality::Ultra,
+        radius: 1.5,
+        bias: 0.01,
+        intensity: 1.8,
+        power: 2.2,
+        sample_count: 64,
+        blur_enabled: true,
+        blur_sharpness: 32.0,
+        temporal_enabled: true,
+        half_resolution: false,
+        normal_aware: true,
+    };
+}
+
+// ============================================================================
+// CLASSIC SSAO SHADER (Crytek 2007)
+// ============================================================================
+
+@shader(compute)
+const SSAO_CLASSIC_SHADER: &str = r#"
+    // Classic Screen-Space Ambient Occlusion
+    // Based on Crytek's original SSAO implementation
+
+    cbuffer SSAOParams : register(b0) {
+        float4x4 projection;
+        float4x4 inv_projection;
+        float4x4 view;
+        float2 screen_size;
+        float2 inv_screen_size;
+        float radius;
+        float bias;
+        float intensity;
+        float power;
+        uint sample_count;
+        float near_plane;
+        float far_plane;
+        float padding;
+    };
+
+    Texture2D<float> depth_texture : register(t0);
+    Texture2D<float4> normal_texture : register(t1);
+    Texture2D<float4> noise_texture : register(t2);
+    StructuredBuffer<float4> kernel_samples : register(t3);
+
+    RWTexture2D<float> ao_output : register(u0);
+
+    SamplerState point_sampler : register(s0);
+    SamplerState linear_sampler : register(s1);
+
+    float linearize_depth(float depth) {
+        float z = depth * 2.0 - 1.0;
+        return (2.0 * near_plane * far_plane) / (far_plane + near_plane - z * (far_plane - near_plane));
+    }
+
+    float3 reconstruct_position(float2 uv, float depth) {
+        float4 clip_pos = float4(uv * 2.0 - 1.0, depth, 1.0);
+        clip_pos.y = -clip_pos.y;
+        float4 view_pos = mul(inv_projection, clip_pos);
+        return view_pos.xyz / view_pos.w;
+    }
+
+    float3 get_view_normal(float2 uv) {
+        float3 world_normal = normal_texture.SampleLevel(linear_sampler, uv, 0).xyz * 2.0 - 1.0;
+        return normalize(mul((float3x3)view, world_normal));
+    }
+
+    [numthreads(8, 8, 1)]
+    void cs_main(uint3 dispatch_id : SV_DispatchThreadID) {
+        float2 uv = (float2(dispatch_id.xy) + 0.5) * inv_screen_size;
+
+        // Get depth and position
+        float depth = depth_texture.SampleLevel(point_sampler, uv, 0);
+        if (depth >= 1.0) {
+            ao_output[dispatch_id.xy] = 1.0;
+            return;
+        }
+
+        float3 position = reconstruct_position(uv, depth);
+        float3 normal = get_view_normal(uv);
+
+        // Get random rotation vector
+        float2 noise_uv = uv * screen_size / 4.0;
+        float3 random_vec = noise_texture.SampleLevel(point_sampler, noise_uv, 0).xyz * 2.0 - 1.0;
+
+        // Create TBN matrix for hemisphere orientation
+        float3 tangent = normalize(random_vec - normal * dot(random_vec, normal));
+        float3 bitangent = cross(normal, tangent);
+        float3x3 TBN = float3x3(tangent, bitangent, normal);
+
+        // Accumulate occlusion
+        float occlusion = 0.0;
+        float radius_scale = radius / abs(position.z);
+
+        for (uint i = 0; i < sample_count; i++) {
+            // Get sample position in view space
+            float3 sample_dir = mul(TBN, kernel_samples[i].xyz);
+            float3 sample_pos = position + sample_dir * radius;
+
+            // Project to screen space
+            float4 offset = mul(projection, float4(sample_pos, 1.0));
+            offset.xy /= offset.w;
+            offset.xy = offset.xy * 0.5 + 0.5;
+            offset.y = 1.0 - offset.y;
+
+            // Sample depth at offset
+            float sample_depth = depth_texture.SampleLevel(point_sampler, offset.xy, 0);
+            float3 sample_view_pos = reconstruct_position(offset.xy, sample_depth);
+
+            // Range check and accumulate
+            float range_check = smoothstep(0.0, 1.0, radius / abs(position.z - sample_view_pos.z));
+            occlusion += (sample_view_pos.z >= sample_pos.z + bias ? 1.0 : 0.0) * range_check;
+        }
+
+        occlusion = 1.0 - (occlusion / float(sample_count));
+        occlusion = pow(occlusion, power) * intensity;
+
+        ao_output[dispatch_id.xy] = saturate(occlusion);
+    }
+"#;
+
+// ============================================================================
+// HBAO SHADER (Horizon-Based Ambient Occlusion)
+// ============================================================================
+
+@shader(compute)
+const HBAO_SHADER: &str = r#"
+    // Horizon-Based Ambient Occlusion
+    // Based on NVIDIA's HBAO implementation
+    // Uses ray-marching in screen space to find horizon angles
+
+    cbuffer HBAOParams : register(b0) {
+        float4x4 projection;
+        float4x4 inv_projection;
+        float2 screen_size;
+        float2 inv_screen_size;
+        float2 focal_length;
+        float2 inv_focal_length;
+        float radius;
+        float radius_squared;
+        float neg_inv_radius_squared;
+        float max_radius_pixels;
+        float angle_bias;
+        float ao_multiplier;
+        float intensity;
+        uint num_directions;
+        uint num_steps;
+        float near_plane;
+        float far_plane;
+        float padding;
+    };
+
+    Texture2D<float> depth_texture : register(t0);
+    Texture2D<float4> noise_texture : register(t1);
+
+    RWTexture2D<float> ao_output : register(u0);
+
+    SamplerState point_sampler : register(s0);
+
+    static const float PI = 3.14159265359;
+    static const float TWO_PI = 6.28318530718;
+
+    float linearize_depth(float depth) {
+        return near_plane * far_plane / (far_plane - depth * (far_plane - near_plane));
+    }
+
+    float3 uv_to_view(float2 uv, float linear_depth) {
+        return float3((uv * 2.0 - 1.0) * inv_focal_length * linear_depth, linear_depth);
+    }
+
+    float3 get_view_position(float2 uv) {
+        float depth = depth_texture.SampleLevel(point_sampler, uv, 0);
+        float linear_depth = linearize_depth(depth);
+        return uv_to_view(uv, linear_depth);
+    }
+
+    float3 min_diff(float3 P, float3 Pr, float3 Pl) {
+        float3 V1 = Pr - P;
+        float3 V2 = P - Pl;
+        return (dot(V1, V1) < dot(V2, V2)) ? V1 : V2;
+    }
+
+    float falloff(float distance_squared) {
+        return distance_squared * neg_inv_radius_squared + 1.0;
+    }
+
+    float compute_ao(float3 P, float3 N, float3 S) {
+        float3 V = S - P;
+        float VdotV = dot(V, V);
+        float NdotV = dot(N, V) * rsqrt(VdotV);
+
+        return saturate(NdotV - angle_bias) * saturate(falloff(VdotV));
+    }
+
+    [numthreads(8, 8, 1)]
+    void cs_main(uint3 dispatch_id : SV_DispatchThreadID) {
+        float2 uv = (float2(dispatch_id.xy) + 0.5) * inv_screen_size;
+
+        float depth = depth_texture.SampleLevel(point_sampler, uv, 0);
+        if (depth >= 1.0) {
+            ao_output[dispatch_id.xy] = 1.0;
+            return;
+        }
+
+        // Reconstruct view-space position
+        float3 P = get_view_position(uv);
+
+        // Compute view-space normal from depth derivatives
+        float3 Pr = get_view_position(uv + float2(inv_screen_size.x, 0));
+        float3 Pl = get_view_position(uv + float2(-inv_screen_size.x, 0));
+        float3 Pt = get_view_position(uv + float2(0, -inv_screen_size.y));
+        float3 Pb = get_view_position(uv + float2(0, inv_screen_size.y));
+
+        float3 dPdu = min_diff(P, Pr, Pl);
+        float3 dPdv = min_diff(P, Pt, Pb);
+        float3 N = normalize(cross(dPdu, dPdv));
+
+        // Get random rotation
+        float2 noise_uv = uv * screen_size / 4.0;
+        float2 random = noise_texture.SampleLevel(point_sampler, noise_uv, 0).xy;
+
+        // Compute radius in screen space
+        float screen_radius = min(max_radius_pixels, radius / P.z * focal_length.x);
+
+        float ao = 0.0;
+        float angle_step = TWO_PI / float(num_directions);
+        float step_size = screen_radius / float(num_steps);
+
+        for (uint dir = 0; dir < num_directions; dir++) {
+            float angle = angle_step * (float(dir) + random.x);
+            float2 direction = float2(cos(angle), sin(angle));
+
+            float ray_pixels = random.y * step_size + 1.0;
+
+            for (uint step = 0; step < num_steps; step++) {
+                float2 snapped_uv = round(ray_pixels * direction) * inv_screen_size + uv;
+                float3 S = get_view_position(snapped_uv);
+
+                ray_pixels += step_size;
+
+                ao += compute_ao(P, N, S);
+            }
+        }
+
+        ao *= ao_multiplier / float(num_directions * num_steps);
+        ao = saturate(1.0 - ao * intensity);
+
+        ao_output[dispatch_id.xy] = ao;
+    }
+"#;
+
+// ============================================================================
+// HBAO+ SHADER (Enhanced HBAO)
+// ============================================================================
+
+@shader(compute)
+const HBAO_PLUS_SHADER: &str = r#"
+    // HBAO+ - Enhanced Horizon-Based Ambient Occlusion
+    // Includes per-pixel depth layer separation for better quality
+
+    cbuffer HBAOPlusParams : register(b0) {
+        float4x4 projection;
+        float4x4 inv_projection;
+        float4 projection_info;      // x: 2/width, y: 2/height, z: -1/width, w: -1/height
+        float4 projection_scale;     // x: width/2, y: height/2, z: 0, w: 0
+        float2 screen_size;
+        float2 inv_screen_size;
+        float radius;
+        float radius_squared;
+        float neg_inv_radius_squared;
+        float max_radius_pixels;
+        float angle_bias;
+        float ao_multiplier;
+        float intensity;
+        float power_exponent;
+        uint num_directions;
+        uint num_steps;
+        float near_plane;
+        float far_plane;
+        float background_ao;
+        float foreground_ao;
+        float depth_threshold;
+        float padding;
+    };
+
+    Texture2D<float> depth_texture : register(t0);
+    Texture2D<float4> normal_texture : register(t1);
+    Texture2D<float4> noise_texture : register(t2);
+
+    RWTexture2D<float2> ao_output : register(u0);  // x: foreground AO, y: background AO
+
+    SamplerState point_sampler : register(s0);
+    SamplerState linear_sampler : register(s1);
+
+    static const float PI = 3.14159265359;
+    static const float TWO_PI = 6.28318530718;
+
+    float linearize_depth(float depth) {
+        return near_plane * far_plane / (far_plane - depth * (far_plane - near_plane));
+    }
+
+    float3 fetch_view_pos(float2 uv) {
+        float depth = depth_texture.SampleLevel(point_sampler, uv, 0);
+        float linear_z = linearize_depth(depth);
+        return float3((uv * projection_info.xy + projection_info.zw) * linear_z, linear_z);
+    }
+
+    float3 fetch_normal(float2 uv) {
+        return normal_texture.SampleLevel(linear_sampler, uv, 0).xyz * 2.0 - 1.0;
+    }
+
+    float length_squared(float3 v) {
+        return dot(v, v);
+    }
+
+    float compute_horizon_ao(float3 P, float3 N, float3 S, float tangent_angle, float ao_radius_sq) {
+        float3 D = S - P;
+        float D_length_sq = length_squared(D);
+
+        if (D_length_sq > ao_radius_sq) return 0.0;
+
+        float D_length = sqrt(D_length_sq);
+        float horizon_angle = atan2(dot(N, D), D_length);
+
+        if (horizon_angle <= tangent_angle) return 0.0;
+
+        float falloff = saturate(1.0 - D_length_sq / ao_radius_sq);
+        float ao = sin(horizon_angle) - sin(tangent_angle);
+
+        return ao * falloff;
+    }
+
+    float integrate_occlusion(float3 P, float3 N, float2 uv, float2 direction, float step_size, float jitter) {
+        float ao = 0.0;
+        float tangent_angle = angle_bias;
+        float ao_radius_sq = radius_squared;
+
+        float ray_t = jitter * step_size + 1.0;
+
+        [unroll]
+        for (uint step = 0; step < num_steps; step++) {
+            float2 snapped_uv = round(ray_t * direction) * inv_screen_size + uv;
+            float3 S = fetch_view_pos(snapped_uv);
+
+            float3 D = S - P;
+            float D_length_sq = length_squared(D);
+
+            if (D_length_sq < ao_radius_sq) {
+                float D_length = sqrt(D_length_sq);
+                float horizon_angle = atan2(dot(N, D), D_length);
+
+                if (horizon_angle > tangent_angle) {
+                    float falloff = saturate(1.0 - D_length_sq / ao_radius_sq);
+                    ao += (sin(horizon_angle) - sin(tangent_angle)) * falloff;
+                    tangent_angle = horizon_angle;
+                }
+            }
+
+            ray_t += step_size;
+        }
+
+        return ao;
+    }
+
+    [numthreads(8, 8, 1)]
+    void cs_main(uint3 dispatch_id : SV_DispatchThreadID) {
+        float2 uv = (float2(dispatch_id.xy) + 0.5) * inv_screen_size;
+
+        float depth = depth_texture.SampleLevel(point_sampler, uv, 0);
+        if (depth >= 1.0) {
+            ao_output[dispatch_id.xy] = float2(1.0, 1.0);
+            return;
+        }
+
+        float3 P = fetch_view_pos(uv);
+        float3 N = fetch_normal(uv);
+
+        // Get noise
+        float2 noise_uv = uv * screen_size / 4.0;
+        float4 noise = noise_texture.SampleLevel(point_sampler, noise_uv, 0);
+
+        // Screen-space radius
+        float pixel_radius = min(max_radius_pixels, radius / P.z * projection_scale.x);
+        float step_size = pixel_radius / float(num_steps);
+
+        if (pixel_radius < 1.0) {
+            ao_output[dispatch_id.xy] = float2(1.0, 1.0);
+            return;
+        }
+
+        float ao = 0.0;
+        float angle_step = TWO_PI / float(num_directions);
+
+        [unroll]
+        for (uint dir = 0; dir < num_directions; dir++) {
+            float angle = angle_step * (float(dir) + noise.x);
+            float2 direction = float2(cos(angle), sin(angle));
+
+            // Integrate in both directions
+            ao += integrate_occlusion(P, N, uv, direction, step_size, noise.y);
+            ao += integrate_occlusion(P, N, uv, -direction, step_size, noise.z);
+        }
+
+        ao *= ao_multiplier / float(num_directions * 2);
+        ao = pow(saturate(1.0 - ao), power_exponent);
+
+        ao_output[dispatch_id.xy] = float2(ao * foreground_ao, ao * background_ao);
+    }
+"#;
+
+// ============================================================================
+// GTAO SHADER (Ground Truth Ambient Occlusion)
+// ============================================================================
+
+@shader(compute)
+const GTAO_SHADER: &str = r#"
+    // Ground Truth Ambient Occlusion
+    // Based on Activision's GTAO implementation (Jimenez et al. 2016)
+    // Uses spatial-temporal filtering for high quality
+
+    cbuffer GTAOParams : register(b0) {
+        float4x4 view;
+        float4x4 projection;
+        float4x4 inv_projection;
+        float4 projection_info;
+        float2 screen_size;
+        float2 inv_screen_size;
+        float effect_radius;
+        float effect_falloff_range;
+        float radius_multiplier;
+        float final_value_power;
+        float denoise_blur_beta;
+        float sample_distribution_power;
+        float thin_occluder_compensation;
+        float depth_mip_sampling_offset;
+        uint slice_count;
+        uint steps_per_slice;
+        float near_plane;
+        float far_plane;
+        uint frame_index;
+        float temporal_weight;
+        float padding0;
+        float padding1;
+    };
+
+    Texture2D<float> depth_texture : register(t0);
+    Texture2D<float4> normal_texture : register(t1);
+    Texture2D<float4> noise_texture : register(t2);
+    Texture2D<float> prev_ao_texture : register(t3);
+    Texture2D<float2> motion_vectors : register(t4);
+
+    RWTexture2D<float> ao_output : register(u0);
+    RWTexture2D<uint> edge_output : register(u1);
+
+    SamplerState point_sampler : register(s0);
+    SamplerState linear_sampler : register(s1);
+
+    static const float PI = 3.14159265359;
+    static const float HALF_PI = 1.5707963268;
+
+    float linearize_depth(float depth) {
+        return near_plane * far_plane / (far_plane - depth * (far_plane - near_plane));
+    }
+
+    float3 compute_view_space_position(float2 uv, float depth) {
+        float linear_z = linearize_depth(depth);
+        return float3((uv * projection_info.xy + projection_info.zw) * linear_z, linear_z);
+    }
+
+    float3 compute_view_normal(float2 uv) {
+        float3 world_normal = normal_texture.SampleLevel(linear_sampler, uv, 0).xyz * 2.0 - 1.0;
+        return normalize(mul((float3x3)view, world_normal));
+    }
+
+    float fast_sqrt(float x) {
+        return asfloat(0x1fbd1df5 + (asuint(x) >> 1));
+    }
+
+    float fast_acos(float x) {
+        float res = -0.156583 * abs(x) + HALF_PI;
+        res *= fast_sqrt(1.0 - abs(x));
+        return (x >= 0) ? res : PI - res;
+    }
+
+    float compute_inner_integral(float2 h, float n, float2 cos_n) {
+        float2 arc = -cos(2.0 * h - n) + cos_n + 2.0 * h * sin(n);
+        return 0.25 * (arc.x + arc.y);
+    }
+
+    float integrate_arc_cosine_weighted(float horizon_cos0, float horizon_cos1, float3 N, float3 V) {
+        float n = fast_acos(dot(N, V));
+        float2 cos_n = float2(cos(n), cos(n));
+
+        float2 h = float2(fast_acos(horizon_cos0), fast_acos(horizon_cos1));
+        h.x = n + max(-h.x - n, -HALF_PI);
+        h.y = n + min(h.y - n, HALF_PI);
+
+        return compute_inner_integral(h, n, cos_n);
+    }
+
+    float2 rotate_direction(float2 dir, float2 cos_sin) {
+        return float2(
+            dir.x * cos_sin.x - dir.y * cos_sin.y,
+            dir.x * cos_sin.y + dir.y * cos_sin.x
+        );
+    }
+
+    [numthreads(8, 8, 1)]
+    void cs_main(uint3 dispatch_id : SV_DispatchThreadID) {
+        float2 pixel_center = float2(dispatch_id.xy) + 0.5;
+        float2 uv = pixel_center * inv_screen_size;
+
+        float depth = depth_texture.SampleLevel(point_sampler, uv, 0);
+        if (depth >= 1.0) {
+            ao_output[dispatch_id.xy] = 1.0;
+            return;
+        }
+
+        float3 view_pos = compute_view_space_position(uv, depth);
+        float3 view_normal = compute_view_normal(uv);
+        float3 view_dir = normalize(-view_pos);
+
+        // Noise for temporal stability
+        float2 noise_uv = uv * screen_size / 4.0;
+        float4 noise = noise_texture.SampleLevel(point_sampler, noise_uv, 0);
+        float noise_slice = noise.x;
+        float noise_step = noise.y;
+
+        // Temporal jitter
+        noise_slice = frac(noise_slice + float(frame_index % 4) * 0.25);
+
+        float pixel_radius = effect_radius / abs(view_pos.z) * screen_size.y * 0.5;
+        pixel_radius = max(1.0, pixel_radius);
+
+        float visibility = 0.0;
+
+        for (uint slice = 0; slice < slice_count; slice++) {
+            float slice_angle = (PI / float(slice_count)) * (float(slice) + noise_slice);
+            float2 omega = float2(cos(slice_angle), sin(slice_angle));
+            omega *= inv_screen_size;
+
+            float3 ortho_direction = normalize(cross(float3(omega, 0), view_dir));
+            float3 axis = cross(ortho_direction, view_dir);
+            float3 projected_normal = view_normal - axis * dot(view_normal, axis);
+            float sign_n = sign(dot(ortho_direction, projected_normal));
+
+            float projected_normal_length = length(projected_normal);
+            float cos_n = saturate(dot(projected_normal, view_dir) / projected_normal_length);
+            float n = sign_n * fast_acos(cos_n);
+
+            float2 horizons = float2(-1.0, -1.0);
+
+            [unroll]
+            for (uint step = 0; step < steps_per_slice; step++) {
+                float step_noise = frac(noise_step + float(step) / float(steps_per_slice));
+                float t = (float(step) + step_noise) / float(steps_per_slice);
+                t = pow(t, sample_distribution_power);
+
+                float2 step_uv = uv + omega * t * pixel_radius;
+
+                float step_depth = depth_texture.SampleLevel(point_sampler, step_uv, 0);
+                float3 step_view_pos = compute_view_space_position(step_uv, step_depth);
+                float3 delta = step_view_pos - view_pos;
+
+                float delta_length = length(delta);
+                if (delta_length < effect_radius) {
+                    float falloff = saturate(1.0 - delta_length / effect_radius);
+                    falloff = pow(falloff, effect_falloff_range);
+
+                    float3 delta_dir = delta / delta_length;
+                    float front_horizon = dot(delta_dir, view_dir);
+
+                    horizons.y = max(horizons.y, lerp(horizons.y, front_horizon, falloff));
+                }
+
+                step_uv = uv - omega * t * pixel_radius;
+                step_depth = depth_texture.SampleLevel(point_sampler, step_uv, 0);
+                step_view_pos = compute_view_space_position(step_uv, step_depth);
+                delta = step_view_pos - view_pos;
+
+                delta_length = length(delta);
+                if (delta_length < effect_radius) {
+                    float falloff = saturate(1.0 - delta_length / effect_radius);
+                    falloff = pow(falloff, effect_falloff_range);
+
+                    float3 delta_dir = delta / delta_length;
+                    float back_horizon = dot(delta_dir, view_dir);
+
+                    horizons.x = max(horizons.x, lerp(horizons.x, back_horizon, falloff));
+                }
+            }
+
+            float2 h = float2(-fast_acos(horizons.x), fast_acos(horizons.y));
+            h.x = n + max(h.x - n, -HALF_PI);
+            h.y = n + min(h.y - n, HALF_PI);
+
+            float bentAngle = (h.x + h.y) * 0.5;
+            visibility += projected_normal_length * (cos_n + 2.0 * h.x * sin(n) - cos(2.0 * h.x - n) +
+                                                      cos_n + 2.0 * h.y * sin(n) - cos(2.0 * h.y - n)) / 4.0;
+        }
+
+        visibility /= float(slice_count);
+        visibility = pow(visibility, final_value_power);
+
+        // Temporal accumulation
+        if (temporal_weight > 0.0) {
+            float2 motion = motion_vectors.SampleLevel(linear_sampler, uv, 0);
+            float2 prev_uv = uv - motion;
+
+            if (all(prev_uv >= 0.0) && all(prev_uv <= 1.0)) {
+                float prev_ao = prev_ao_texture.SampleLevel(linear_sampler, prev_uv, 0);
+                visibility = lerp(visibility, prev_ao, temporal_weight);
+            }
+        }
+
+        ao_output[dispatch_id.xy] = saturate(visibility);
+    }
+"#;
+
+// ============================================================================
+// MULTI-SCALE SSAO SHADER
+// ============================================================================
+
+@shader(compute)
+const MULTI_SCALE_SSAO_SHADER: &str = r#"
+    // Multi-Scale Ambient Occlusion
+    // Combines multiple SSAO scales for better quality at various distances
+
+    cbuffer MultiScaleParams : register(b0) {
+        float4x4 projection;
+        float4x4 inv_projection;
+        float2 screen_size;
+        float2 inv_screen_size;
+
+        // Scale 0 (fine detail)
+        float radius0;
+        float intensity0;
+        float bias0;
+        float weight0;
+
+        // Scale 1 (medium detail)
+        float radius1;
+        float intensity1;
+        float bias1;
+        float weight1;
+
+        // Scale 2 (large scale)
+        float radius2;
+        float intensity2;
+        float bias2;
+        float weight2;
+
+        uint samples_per_scale;
+        float near_plane;
+        float far_plane;
+        float padding;
+    };
+
+    Texture2D<float> depth_texture : register(t0);
+    Texture2D<float4> normal_texture : register(t1);
+    Texture2D<float4> noise_texture : register(t2);
+    StructuredBuffer<float4> kernel_samples : register(t3);
+
+    RWTexture2D<float4> ao_output : register(u0);  // RGB = bent normal, A = AO
+
+    SamplerState point_sampler : register(s0);
+    SamplerState linear_sampler : register(s1);
+
+    float linearize_depth(float depth) {
+        return near_plane * far_plane / (far_plane - depth * (far_plane - near_plane));
+    }
+
+    float3 reconstruct_position(float2 uv, float depth) {
+        float4 clip_pos = float4(uv * 2.0 - 1.0, depth, 1.0);
+        clip_pos.y = -clip_pos.y;
+        float4 view_pos = mul(inv_projection, clip_pos);
+        return view_pos.xyz / view_pos.w;
+    }
+
+    struct AOResult {
+        float occlusion;
+        float3 bent_normal;
+    };
+
+    AOResult compute_ssao_at_scale(float3 position, float3 normal, float3x3 TBN,
+                                    float radius, float bias, float intensity, uint sample_offset) {
+        AOResult result;
+        result.occlusion = 0.0;
+        result.bent_normal = normal;
+
+        float3 bent_normal_sum = float3(0.0, 0.0, 0.0);
+        float visibility_sum = 0.0;
+
+        for (uint i = 0; i < samples_per_scale; i++) {
+            uint sample_idx = sample_offset + i;
+            float3 sample_dir = mul(TBN, kernel_samples[sample_idx].xyz);
+            float3 sample_pos = position + sample_dir * radius;
+
+            float4 offset = mul(projection, float4(sample_pos, 1.0));
+            offset.xy /= offset.w;
+            offset.xy = offset.xy * 0.5 + 0.5;
+            offset.y = 1.0 - offset.y;
+
+            if (any(offset.xy < 0.0) || any(offset.xy > 1.0)) continue;
+
+            float sample_depth = depth_texture.SampleLevel(point_sampler, offset.xy, 0);
+            float3 sample_view_pos = reconstruct_position(offset.xy, sample_depth);
+
+            float3 diff = sample_view_pos - position;
+            float distance = length(diff);
+            float range_check = smoothstep(0.0, 1.0, radius / (abs(distance) + 0.001));
+
+            float occlusion = (sample_view_pos.z >= sample_pos.z + bias ? 1.0 : 0.0) * range_check;
+            result.occlusion += occlusion;
+
+            float visibility = 1.0 - occlusion;
+            bent_normal_sum += sample_dir * visibility;
+            visibility_sum += visibility;
+        }
+
+        result.occlusion = 1.0 - (result.occlusion / float(samples_per_scale));
+        result.occlusion = pow(result.occlusion, intensity);
+
+        if (visibility_sum > 0.001) {
+            result.bent_normal = normalize(bent_normal_sum / visibility_sum);
+        }
+
+        return result;
+    }
+
+    [numthreads(8, 8, 1)]
+    void cs_main(uint3 dispatch_id : SV_DispatchThreadID) {
+        float2 uv = (float2(dispatch_id.xy) + 0.5) * inv_screen_size;
+
+        float depth = depth_texture.SampleLevel(point_sampler, uv, 0);
+        if (depth >= 1.0) {
+            ao_output[dispatch_id.xy] = float4(0.0, 1.0, 0.0, 1.0);
+            return;
+        }
+
+        float3 position = reconstruct_position(uv, depth);
+        float3 normal = normalize(normal_texture.SampleLevel(linear_sampler, uv, 0).xyz * 2.0 - 1.0);
+
+        // Build TBN matrix
+        float2 noise_uv = uv * screen_size / 4.0;
+        float3 random_vec = noise_texture.SampleLevel(point_sampler, noise_uv, 0).xyz * 2.0 - 1.0;
+        float3 tangent = normalize(random_vec - normal * dot(random_vec, normal));
+        float3 bitangent = cross(normal, tangent);
+        float3x3 TBN = float3x3(tangent, bitangent, normal);
+
+        // Compute AO at each scale
+        AOResult scale0 = compute_ssao_at_scale(position, normal, TBN, radius0, bias0, intensity0, 0);
+        AOResult scale1 = compute_ssao_at_scale(position, normal, TBN, radius1, bias1, intensity1, samples_per_scale);
+        AOResult scale2 = compute_ssao_at_scale(position, normal, TBN, radius2, bias2, intensity2, samples_per_scale * 2);
+
+        // Combine scales
+        float total_weight = weight0 + weight1 + weight2;
+        float combined_ao = (scale0.occlusion * weight0 +
+                            scale1.occlusion * weight1 +
+                            scale2.occlusion * weight2) / total_weight;
+
+        float3 combined_bent_normal = normalize(
+            scale0.bent_normal * weight0 +
+            scale1.bent_normal * weight1 +
+            scale2.bent_normal * weight2
+        );
+
+        ao_output[dispatch_id.xy] = float4(combined_bent_normal * 0.5 + 0.5, combined_ao);
+    }
+"#;
+
+// ============================================================================
+// SSAO BLUR SHADERS
+// ============================================================================
+
+@shader(compute)
+const SSAO_BLUR_HORIZONTAL_SHADER: &str = r#"
+    // Bilateral horizontal blur for SSAO
+    // Preserves edges using depth-aware filtering
+
+    cbuffer BlurParams : register(b0) {
+        float2 screen_size;
+        float2 inv_screen_size;
+        float blur_sharpness;
+        float blur_radius;
+        float near_plane;
+        float far_plane;
+    };
+
+    Texture2D<float> ao_input : register(t0);
+    Texture2D<float> depth_texture : register(t1);
+
+    RWTexture2D<float> ao_output : register(u0);
+
+    SamplerState point_sampler : register(s0);
+
+    float linearize_depth(float depth) {
+        return near_plane * far_plane / (far_plane - depth * (far_plane - near_plane));
+    }
+
+    float cross_bilateral_weight(float r, float center_depth, float sample_depth, float blur_sharpness) {
+        float blur_sigma = blur_radius * 0.5;
+        float blur_falloff = 1.0 / (2.0 * blur_sigma * blur_sigma);
+
+        float diff_depth = abs(center_depth - sample_depth) * blur_sharpness;
+        float w = exp(-r * r * blur_falloff - diff_depth * diff_depth);
+
+        return w;
+    }
+
+    [numthreads(64, 1, 1)]
+    void cs_main(uint3 dispatch_id : SV_DispatchThreadID) {
+        float2 uv = (float2(dispatch_id.xy) + 0.5) * inv_screen_size;
+
+        float center_ao = ao_input.SampleLevel(point_sampler, uv, 0);
+        float center_depth = linearize_depth(depth_texture.SampleLevel(point_sampler, uv, 0));
+
+        float ao_sum = center_ao;
+        float weight_sum = 1.0;
+
+        int radius = int(blur_radius);
+
+        [unroll]
+        for (int i = -radius; i <= radius; i++) {
+            if (i == 0) continue;
+
+            float2 offset_uv = uv + float2(float(i) * inv_screen_size.x, 0.0);
+
+            if (any(offset_uv < 0.0) || any(offset_uv > 1.0)) continue;
+
+            float sample_ao = ao_input.SampleLevel(point_sampler, offset_uv, 0);
+            float sample_depth = linearize_depth(depth_texture.SampleLevel(point_sampler, offset_uv, 0));
+
+            float weight = cross_bilateral_weight(float(abs(i)), center_depth, sample_depth, blur_sharpness);
+
+            ao_sum += sample_ao * weight;
+            weight_sum += weight;
+        }
+
+        ao_output[dispatch_id.xy] = ao_sum / weight_sum;
+    }
+"#;
+
+@shader(compute)
+const SSAO_BLUR_VERTICAL_SHADER: &str = r#"
+    // Bilateral vertical blur for SSAO
+
+    cbuffer BlurParams : register(b0) {
+        float2 screen_size;
+        float2 inv_screen_size;
+        float blur_sharpness;
+        float blur_radius;
+        float near_plane;
+        float far_plane;
+    };
+
+    Texture2D<float> ao_input : register(t0);
+    Texture2D<float> depth_texture : register(t1);
+
+    RWTexture2D<float> ao_output : register(u0);
+
+    SamplerState point_sampler : register(s0);
+
+    float linearize_depth(float depth) {
+        return near_plane * far_plane / (far_plane - depth * (far_plane - near_plane));
+    }
+
+    float cross_bilateral_weight(float r, float center_depth, float sample_depth, float blur_sharpness) {
+        float blur_sigma = blur_radius * 0.5;
+        float blur_falloff = 1.0 / (2.0 * blur_sigma * blur_sigma);
+
+        float diff_depth = abs(center_depth - sample_depth) * blur_sharpness;
+        float w = exp(-r * r * blur_falloff - diff_depth * diff_depth);
+
+        return w;
+    }
+
+    [numthreads(1, 64, 1)]
+    void cs_main(uint3 dispatch_id : SV_DispatchThreadID) {
+        float2 uv = (float2(dispatch_id.xy) + 0.5) * inv_screen_size;
+
+        float center_ao = ao_input.SampleLevel(point_sampler, uv, 0);
+        float center_depth = linearize_depth(depth_texture.SampleLevel(point_sampler, uv, 0));
+
+        float ao_sum = center_ao;
+        float weight_sum = 1.0;
+
+        int radius = int(blur_radius);
+
+        [unroll]
+        for (int i = -radius; i <= radius; i++) {
+            if (i == 0) continue;
+
+            float2 offset_uv = uv + float2(0.0, float(i) * inv_screen_size.y);
+
+            if (any(offset_uv < 0.0) || any(offset_uv > 1.0)) continue;
+
+            float sample_ao = ao_input.SampleLevel(point_sampler, offset_uv, 0);
+            float sample_depth = linearize_depth(depth_texture.SampleLevel(point_sampler, offset_uv, 0));
+
+            float weight = cross_bilateral_weight(float(abs(i)), center_depth, sample_depth, blur_sharpness);
+
+            ao_sum += sample_ao * weight;
+            weight_sum += weight;
+        }
+
+        ao_output[dispatch_id.xy] = ao_sum / weight_sum;
+    }
+"#;
+
+// ============================================================================
+// SSAO APPLY SHADER
+// ============================================================================
+
+@shader(fragment)
+const SSAO_APPLY_SHADER: &str = r#"
+    // Apply SSAO to the scene
+
+    cbuffer ApplyParams : register(b0) {
+        float ao_intensity;
+        float ao_power;
+        float ao_min;
+        float ao_max;
+        float3 ao_color;
+        uint apply_mode;  // 0 = multiply, 1 = soft light, 2 = overlay
+    };
+
+    Texture2D<float4> scene_color : register(t0);
+    Texture2D<float> ao_texture : register(t1);
+
+    SamplerState linear_sampler : register(s0);
+
+    struct VSOutput {
+        float4 position : SV_POSITION;
+        float2 uv : TEXCOORD0;
+    };
+
+    float3 apply_soft_light(float3 base, float blend) {
+        return (blend < 0.5) ?
+            (2.0 * base * blend + base * base * (1.0 - 2.0 * blend)) :
+            (sqrt(base) * (2.0 * blend - 1.0) + 2.0 * base * (1.0 - blend));
+    }
+
+    float3 apply_overlay(float3 base, float blend) {
+        return (base < 0.5) ?
+            (2.0 * base * blend) :
+            (1.0 - 2.0 * (1.0 - base) * (1.0 - blend));
+    }
+
+    float4 ps_main(VSOutput input) : SV_TARGET {
+        float4 color = scene_color.Sample(linear_sampler, input.uv);
+        float ao = ao_texture.Sample(linear_sampler, input.uv);
+
+        ao = pow(ao, ao_power) * ao_intensity;
+        ao = clamp(ao, ao_min, ao_max);
+
+        float3 ao_contribution = lerp(ao_color, float3(1.0, 1.0, 1.0), ao);
+
+        float3 result;
+
+        switch (apply_mode) {
+            case 0: // Multiply
+                result = color.rgb * ao_contribution;
+                break;
+            case 1: // Soft Light
+                result = apply_soft_light(color.rgb, ao);
+                break;
+            case 2: // Overlay
+                result = apply_overlay(color.rgb, ao);
+                break;
+            default:
+                result = color.rgb * ao;
+                break;
+        }
+
+        return float4(result, color.a);
+    }
+"#;
+
+// ============================================================================
+// SSAO SYSTEM
+// ============================================================================
+
+@system
+struct SSAOSystem {
+    config: SSAOConfig,
+    ao_texture: Handle<Texture>,
+    ao_texture_temp: Handle<Texture>,
+    noise_texture: Handle<Texture>,
+    kernel_buffer: Handle<Buffer>,
+    ssao_pipeline: Handle<ComputePipeline>,
+    blur_h_pipeline: Handle<ComputePipeline>,
+    blur_v_pipeline: Handle<ComputePipeline>,
+    apply_pipeline: Handle<RenderPipeline>,
+    frame_index: u32,
+}
+
+impl SSAOSystem {
+    fn new(config: SSAOConfig) -> Self {
+        Self {
+            config,
+            ao_texture: Handle::null(),
+            ao_texture_temp: Handle::null(),
+            noise_texture: Handle::null(),
+            kernel_buffer: Handle::null(),
+            ssao_pipeline: Handle::null(),
+            blur_h_pipeline: Handle::null(),
+            blur_v_pipeline: Handle::null(),
+            apply_pipeline: Handle::null(),
+            frame_index: 0,
+        }
+    }
+
+    fn initialize(&mut self, device: &RenderDevice, width: u32, height: u32) {
+        // Create AO textures
+        let ao_width = if self.config.half_resolution { width / 2 } else { width };
+        let ao_height = if self.config.half_resolution { height / 2 } else { height };
+
+        self.ao_texture = device.create_texture(&TextureDescriptor {
+            size: Extent3d { width: ao_width, height: ao_height, depth: 1 },
+            format: TextureFormat::R16Float,
+            usage: TextureUsage::STORAGE | TextureUsage::SAMPLED,
+            ..default()
+        });
+
+        self.ao_texture_temp = device.create_texture(&TextureDescriptor {
+            size: Extent3d { width: ao_width, height: ao_height, depth: 1 },
+            format: TextureFormat::R16Float,
+            usage: TextureUsage::STORAGE | TextureUsage::SAMPLED,
+            ..default()
+        });
+
+        // Generate noise texture
+        self.noise_texture = self.generate_noise_texture(device);
+
+        // Generate sample kernel
+        self.kernel_buffer = self.generate_kernel(device);
+
+        // Create compute pipelines based on technique
+        self.ssao_pipeline = match self.config.technique {
+            SSAOTechnique::SSAO | SSAOTechnique::SSAO_Plus =>
+                device.create_compute_pipeline(SSAO_CLASSIC_SHADER),
+            SSAOTechnique::HBAO =>
+                device.create_compute_pipeline(HBAO_SHADER),
+            SSAOTechnique::HBAO_Plus =>
+                device.create_compute_pipeline(HBAO_PLUS_SHADER),
+            SSAOTechnique::GTAO | SSAOTechnique::GTAO_Temporal =>
+                device.create_compute_pipeline(GTAO_SHADER),
+            SSAOTechnique::MultiScale =>
+                device.create_compute_pipeline(MULTI_SCALE_SSAO_SHADER),
+            _ => device.create_compute_pipeline(GTAO_SHADER),
+        };
+
+        self.blur_h_pipeline = device.create_compute_pipeline(SSAO_BLUR_HORIZONTAL_SHADER);
+        self.blur_v_pipeline = device.create_compute_pipeline(SSAO_BLUR_VERTICAL_SHADER);
+        self.apply_pipeline = device.create_render_pipeline(SSAO_APPLY_SHADER);
+    }
+
+    fn generate_noise_texture(&self, device: &RenderDevice) -> Handle<Texture> {
+        let size = 4;
+        let mut noise_data = Vec::with_capacity((size * size * 4) as usize);
+
+        for _ in 0..(size * size) {
+            // Random rotation vectors in tangent space
+            let angle = rand::random::<f32>() * std::f32::consts::TAU;
+            noise_data.push((angle.cos() * 0.5 + 0.5) as u8);
+            noise_data.push((angle.sin() * 0.5 + 0.5) as u8);
+            noise_data.push(rand::random::<u8>());
+            noise_data.push(rand::random::<u8>());
+        }
+
+        device.create_texture_with_data(&TextureDescriptor {
+            size: Extent3d { width: size, height: size, depth: 1 },
+            format: TextureFormat::Rgba8Unorm,
+            usage: TextureUsage::SAMPLED,
+            ..default()
+        }, &noise_data)
+    }
+
+    fn generate_kernel(&self, device: &RenderDevice) -> Handle<Buffer> {
+        let mut kernel = Vec::with_capacity(self.config.sample_count as usize);
+
+        for i in 0..self.config.sample_count {
+            // Cosine-weighted hemisphere distribution
+            let u1 = rand::random::<f32>();
+            let u2 = rand::random::<f32>();
+
+            let r = (1.0 - u1 * u1).sqrt();
+            let phi = std::f32::consts::TAU * u2;
+
+            let mut sample = Vec4::new(
+                r * phi.cos(),
+                r * phi.sin(),
+                u1,
+                0.0
+            );
+
+            // Scale samples so they're more aligned to center
+            let mut scale = i as f32 / self.config.sample_count as f32;
+            scale = lerp(0.1, 1.0, scale * scale);
+            sample *= scale;
+
+            kernel.push(sample);
+        }
+
+        device.create_buffer_with_data(
+            BufferUsage::STORAGE,
+            bytemuck::cast_slice(&kernel)
+        )
+    }
+
+    fn render(&mut self,
+              cmd: &mut CommandEncoder,
+              depth_texture: &Texture,
+              normal_texture: &Texture,
+              scene_color: &Texture,
+              output: &Texture,
+              camera: &Camera) {
+        // Compute SSAO
+        {
+            let mut pass = cmd.begin_compute_pass();
+            pass.set_pipeline(&self.ssao_pipeline);
+            pass.set_bind_group(0, &self.create_ssao_bind_group(depth_texture, normal_texture, camera));
+
+            let width = self.ao_texture.width();
+            let height = self.ao_texture.height();
+            pass.dispatch((width + 7) / 8, (height + 7) / 8, 1);
+        }
+
+        // Blur if enabled
+        if self.config.blur_enabled {
+            // Horizontal blur
+            {
+                let mut pass = cmd.begin_compute_pass();
+                pass.set_pipeline(&self.blur_h_pipeline);
+                pass.set_bind_group(0, &self.create_blur_bind_group(
+                    &self.ao_texture,
+                    &self.ao_texture_temp,
+                    depth_texture
+                ));
+
+                let width = self.ao_texture.width();
+                let height = self.ao_texture.height();
+                pass.dispatch((width + 63) / 64, height, 1);
+            }
+
+            // Vertical blur
+            {
+                let mut pass = cmd.begin_compute_pass();
+                pass.set_pipeline(&self.blur_v_pipeline);
+                pass.set_bind_group(0, &self.create_blur_bind_group(
+                    &self.ao_texture_temp,
+                    &self.ao_texture,
+                    depth_texture
+                ));
+
+                let width = self.ao_texture.width();
+                let height = self.ao_texture.height();
+                pass.dispatch(width, (height + 63) / 64, 1);
+            }
+        }
+
+        // Apply to scene
+        {
+            let mut pass = cmd.begin_render_pass(&RenderPassDescriptor {
+                color_attachments: &[RenderPassColorAttachment {
+                    view: output,
+                    load_op: LoadOp::Load,
+                    store_op: StoreOp::Store,
+                }],
+                ..default()
+            });
+
+            pass.set_pipeline(&self.apply_pipeline);
+            pass.set_bind_group(0, &self.create_apply_bind_group(scene_color));
+            pass.draw(0..3, 0..1);
+        }
+
+        self.frame_index += 1;
+    }
+
+    fn create_ssao_bind_group(&self, depth: &Texture, normal: &Texture, camera: &Camera) -> BindGroup {
+        // Implementation creates appropriate bind group for the selected SSAO technique
+        BindGroup::new()
+    }
+
+    fn create_blur_bind_group(&self, input: &Texture, output: &Texture, depth: &Texture) -> BindGroup {
+        BindGroup::new()
+    }
+
+    fn create_apply_bind_group(&self, scene: &Texture) -> BindGroup {
+        BindGroup::new()
+    }
+
+    fn set_quality(&mut self, quality: SSAOQuality) {
+        match quality {
+            SSAOQuality::Low => {
+                self.config.sample_count = 8;
+                self.config.half_resolution = true;
+            }
+            SSAOQuality::Medium => {
+                self.config.sample_count = 16;
+                self.config.half_resolution = true;
+            }
+            SSAOQuality::High => {
+                self.config.sample_count = 32;
+                self.config.half_resolution = false;
+            }
+            SSAOQuality::Ultra => {
+                self.config.sample_count = 64;
+                self.config.half_resolution = false;
+                self.config.temporal_enabled = true;
+            }
+            SSAOQuality::Extreme => {
+                self.config.sample_count = 128;
+                self.config.half_resolution = false;
+                self.config.temporal_enabled = true;
+            }
+        }
+        self.config.quality = quality;
+    }
+}
+
+// ============================================================================
+// UTILITY FUNCTIONS
+// ============================================================================
+
+fn lerp(a: f32, b: f32, t: f32) -> f32 {
+    a + (b - a) * t
+}
+
+fn generate_ssao_kernel(sample_count: u32) -> Vec<Vec4> {
+    let mut kernel = Vec::with_capacity(sample_count as usize);
+
+    for i in 0..sample_count {
+        let u1 = rand::random::<f32>();
+        let u2 = rand::random::<f32>();
+
+        // Cosine-weighted hemisphere sampling
+        let r = (1.0 - u1 * u1).sqrt();
+        let phi = std::f32::consts::TAU * u2;
+
+        let mut sample = Vec4::new(
+            r * phi.cos(),
+            r * phi.sin(),
+            u1,
+            0.0
+        );
+
+        // Scale samples
+        let scale = lerp(0.1, 1.0, (i as f32 / sample_count as f32).powi(2));
+        sample *= scale;
+
+        kernel.push(sample);
+    }
+
+    kernel
+}
+
+fn generate_poisson_disk(count: u32) -> Vec<Vec2> {
+    // Generate blue noise distributed points
+    let mut points = Vec::with_capacity(count as usize);
+    let min_dist = 1.0 / (count as f32).sqrt();
+
+    for _ in 0..count {
+        let mut best_candidate = Vec2::ZERO;
+        let mut best_distance = 0.0;
+
+        for _ in 0..30 {
+            let candidate = Vec2::new(
+                rand::random::<f32>() * 2.0 - 1.0,
+                rand::random::<f32>() * 2.0 - 1.0
+            );
+
+            if candidate.length() > 1.0 { continue; }
+
+            let mut min_point_dist = f32::MAX;
+            for p in &points {
+                let dist = (*p - candidate).length();
+                min_point_dist = min_point_dist.min(dist);
+            }
+
+            if min_point_dist > best_distance {
+                best_distance = min_point_dist;
+                best_candidate = candidate;
+            }
+        }
+
+        points.push(best_candidate);
+    }
+
+    points
+}

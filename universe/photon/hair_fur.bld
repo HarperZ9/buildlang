@@ -1,0 +1,2095 @@
+// hair_fur.bld - Hair and Fur Rendering System
+// Part of the Photon Rendering Module
+// Implements strand-based hair rendering, fur shells, Marschner scattering, and real-time strand simulation
+
+import std::collections::{HashMap, Vec, VecDeque}
+import std::math::{Vec2, Vec3, Vec4, Mat3, Mat4, Quaternion, sqrt, pow, exp, sin, cos, tan, acos, atan2, PI, floor, ceil, clamp, lerp, min, max, abs, dot, cross, normalize, length}
+import std::memory::{Arena, Pool, Box, Arc, Rc}
+import std::sync::{Mutex, RwLock, Atomic}
+import std::simd::{f32x4, f32x8, i32x4, i32x8}
+
+// ============================================================================
+// HAIR STRAND REPRESENTATION
+// ============================================================================
+
+/// Hair strand segment representation
+struct HairSegment {
+    position: Vec3,
+    tangent: Vec3,
+    thickness: f32,
+    texcoord: f32,      // Normalized position along strand (0-1)
+}
+
+/// Complete hair strand (multiple segments)
+struct HairStrand {
+    segments: Vec<HairSegment>,
+    root_position: Vec3,
+    root_normal: Vec3,
+    root_uv: Vec2,
+    strand_id: u32,
+    group_id: u32,
+    length: f32,
+}
+
+impl HairStrand {
+    fn new(root: Vec3, normal: Vec3, uv: Vec2, strand_id: u32, group_id: u32) -> Self {
+        Self {
+            segments: Vec::new(),
+            root_position: root,
+            root_normal: normal,
+            root_uv: uv,
+            strand_id,
+            group_id,
+            length: 0.0,
+        }
+    }
+
+    fn add_segment(&mut self, position: Vec3, thickness: f32) {
+        let tangent = if self.segments.is_empty() {
+            self.root_normal
+        } else {
+            let prev_pos = self.segments.last().unwrap().position;
+            normalize(position - prev_pos)
+        };
+
+        let texcoord = self.segments.len() as f32;
+
+        self.segments.push(HairSegment {
+            position,
+            tangent,
+            thickness,
+            texcoord,
+        });
+    }
+
+    fn finalize(&mut self) {
+        // Calculate total length and normalize texcoords
+        let mut accumulated_length = 0.0;
+        let mut lengths = Vec::with_capacity(self.segments.len());
+
+        for i in 1..self.segments.len() {
+            let dist = length(self.segments[i].position - self.segments[i-1].position);
+            accumulated_length += dist;
+            lengths.push(accumulated_length);
+        }
+
+        self.length = accumulated_length;
+
+        // Normalize texcoords
+        if self.length > 0.0 {
+            for i in 0..self.segments.len() {
+                self.segments[i].texcoord = if i == 0 {
+                    0.0
+                } else {
+                    lengths[i - 1] / self.length
+                };
+            }
+        }
+
+        // Recalculate tangents using Catmull-Rom
+        for i in 1..self.segments.len() - 1 {
+            let p0 = self.segments[i - 1].position;
+            let p2 = self.segments[i + 1].position;
+            self.segments[i].tangent = normalize(p2 - p0);
+        }
+    }
+
+    fn get_position_at(&self, t: f32) -> Vec3 {
+        if self.segments.is_empty() {
+            return self.root_position;
+        }
+
+        let t = clamp(t, 0.0, 1.0);
+
+        // Find segment pair
+        for i in 0..self.segments.len() - 1 {
+            let t0 = self.segments[i].texcoord;
+            let t1 = self.segments[i + 1].texcoord;
+
+            if t >= t0 && t <= t1 {
+                let local_t = (t - t0) / (t1 - t0);
+                return self.segments[i].position * (1.0 - local_t) +
+                       self.segments[i + 1].position * local_t;
+            }
+        }
+
+        self.segments.last().unwrap().position
+    }
+
+    fn get_tangent_at(&self, t: f32) -> Vec3 {
+        if self.segments.is_empty() {
+            return self.root_normal;
+        }
+
+        let t = clamp(t, 0.0, 1.0);
+
+        for i in 0..self.segments.len() - 1 {
+            let t0 = self.segments[i].texcoord;
+            let t1 = self.segments[i + 1].texcoord;
+
+            if t >= t0 && t <= t1 {
+                let local_t = (t - t0) / (t1 - t0);
+                return normalize(
+                    self.segments[i].tangent * (1.0 - local_t) +
+                    self.segments[i + 1].tangent * local_t
+                );
+            }
+        }
+
+        self.segments.last().unwrap().tangent
+    }
+}
+
+/// GPU-packed hair vertex data
+struct GpuHairVertex {
+    position: Vec3,
+    tangent_thickness: Vec4,  // xyz = tangent, w = thickness
+    texcoord_strand_id: Vec4, // x = texcoord, y = strand_id, z = group_id, w = reserved
+}
+
+/// Hair strand group (groom)
+struct HairGroup {
+    name: String,
+    strands: Vec<HairStrand>,
+    material_id: u32,
+
+    // Group properties
+    base_color: Vec3,
+    tip_color: Vec3,
+    root_thickness: f32,
+    tip_thickness: f32,
+    randomize_length: f32,
+    randomize_thickness: f32,
+
+    // Clumping
+    clump_scale: f32,
+    clump_noise: f32,
+    clump_power: f32,
+
+    // GPU data
+    vertex_buffer: Option<BufferHandle>,
+    index_buffer: Option<BufferHandle>,
+    strand_count: u32,
+    segment_count: u32,
+}
+
+impl HairGroup {
+    fn new(name: String, material_id: u32) -> Self {
+        Self {
+            name,
+            strands: Vec::new(),
+            material_id,
+            base_color: Vec3::new(0.3, 0.2, 0.1),
+            tip_color: Vec3::new(0.4, 0.3, 0.2),
+            root_thickness: 0.01,
+            tip_thickness: 0.005,
+            randomize_length: 0.1,
+            randomize_thickness: 0.2,
+            clump_scale: 0.5,
+            clump_noise: 0.2,
+            clump_power: 0.7,
+            vertex_buffer: None,
+            index_buffer: None,
+            strand_count: 0,
+            segment_count: 0,
+        }
+    }
+
+    fn add_strand(&mut self, strand: HairStrand) {
+        self.strands.push(strand);
+    }
+
+    fn build_gpu_buffers(&mut self, device: &Device) {
+        let mut vertices = Vec::new();
+        let mut indices = Vec::new();
+
+        let mut vertex_offset = 0u32;
+
+        for strand in &self.strands {
+            for segment in &strand.segments {
+                vertices.push(GpuHairVertex {
+                    position: segment.position,
+                    tangent_thickness: Vec4::new(
+                        segment.tangent.x,
+                        segment.tangent.y,
+                        segment.tangent.z,
+                        segment.thickness
+                    ),
+                    texcoord_strand_id: Vec4::new(
+                        segment.texcoord,
+                        strand.strand_id as f32,
+                        strand.group_id as f32,
+                        0.0
+                    ),
+                });
+            }
+
+            // Create line strip indices for this strand
+            for i in 0..strand.segments.len() as u32 - 1 {
+                indices.push(vertex_offset + i);
+                indices.push(vertex_offset + i + 1);
+            }
+
+            vertex_offset += strand.segments.len() as u32;
+        }
+
+        self.vertex_buffer = Some(device.create_buffer_with_data(
+            &BufferDescriptor {
+                size: vertices.len() * std::mem::size_of::<GpuHairVertex>(),
+                usage: BufferUsage::VERTEX | BufferUsage::STORAGE,
+                ..Default::default()
+            },
+            bytemuck::cast_slice(&vertices)
+        ));
+
+        self.index_buffer = Some(device.create_buffer_with_data(
+            &BufferDescriptor {
+                size: indices.len() * std::mem::size_of::<u32>(),
+                usage: BufferUsage::INDEX,
+                ..Default::default()
+            },
+            bytemuck::cast_slice(&indices)
+        ));
+
+        self.strand_count = self.strands.len() as u32;
+        self.segment_count = vertex_offset;
+    }
+}
+
+// ============================================================================
+// MARSCHNER HAIR SCATTERING MODEL
+// ============================================================================
+
+/// Hair scattering lobe types
+enum HairLobe {
+    R,    // Reflection
+    TT,   // Transmission-Transmission
+    TRT,  // Transmission-Reflection-Transmission
+    TRRT, // Double internal reflection
+}
+
+/// Marschner hair BSDF parameters
+struct MarschnerParams {
+    // Melanin-based color
+    melanin: f32,
+    melanin_redness: f32,
+    melanin_randomize: f32,
+
+    // Cuticle angles
+    cuticle_angle: f32,       // Degrees, typically 2-3
+    cuticle_angle_randomize: f32,
+
+    // Roughness
+    roughness: f32,
+    roughness_radial: f32,
+    roughness_azimuthal: f32,
+
+    // Index of refraction
+    ior: f32,
+
+    // Direct vs indirect lighting split
+    direct_intensity: f32,
+    indirect_intensity: f32,
+}
+
+impl MarschnerParams {
+    fn default() -> Self {
+        Self {
+            melanin: 0.5,
+            melanin_redness: 0.0,
+            melanin_randomize: 0.1,
+            cuticle_angle: 2.0,
+            cuticle_angle_randomize: 0.5,
+            roughness: 0.3,
+            roughness_radial: 0.3,
+            roughness_azimuthal: 0.5,
+            ior: 1.55,
+            direct_intensity: 1.0,
+            indirect_intensity: 0.5,
+        }
+    }
+
+    fn blonde() -> Self {
+        Self {
+            melanin: 0.2,
+            melanin_redness: 0.2,
+            ..Self::default()
+        }
+    }
+
+    fn brunette() -> Self {
+        Self {
+            melanin: 0.6,
+            melanin_redness: 0.0,
+            ..Self::default()
+        }
+    }
+
+    fn red() -> Self {
+        Self {
+            melanin: 0.4,
+            melanin_redness: 0.8,
+            ..Self::default()
+        }
+    }
+
+    fn black() -> Self {
+        Self {
+            melanin: 1.0,
+            melanin_redness: 0.0,
+            ..Self::default()
+        }
+    }
+
+    fn white() -> Self {
+        Self {
+            melanin: 0.0,
+            melanin_redness: 0.0,
+            ..Self::default()
+        }
+    }
+}
+
+/// Marschner hair BSDF evaluation
+struct MarschnerBsdf {
+    params: MarschnerParams,
+}
+
+impl MarschnerBsdf {
+    fn new(params: MarschnerParams) -> Self {
+        Self { params }
+    }
+
+    /// Calculate absorption coefficient from melanin
+    fn absorption_coefficient(&self) -> Vec3 {
+        // Eumelanin (brown/black) absorption
+        let eumelanin = Vec3::new(0.419, 0.697, 1.37);
+        // Pheomelanin (red/blonde) absorption
+        let pheomelanin = Vec3::new(0.187, 0.4, 1.05);
+
+        let melanin = self.params.melanin;
+        let redness = self.params.melanin_redness;
+
+        eumelanin * melanin * (1.0 - redness) + pheomelanin * melanin * redness
+    }
+
+    /// Fresnel for dielectric
+    fn fresnel_dielectric(&self, cos_theta: f32, eta: f32) -> f32 {
+        let c = cos_theta;
+        let g_squared = eta * eta - 1.0 + c * c;
+
+        if g_squared < 0.0 {
+            return 1.0; // Total internal reflection
+        }
+
+        let g = sqrt(g_squared);
+        let a = (g - c) / (g + c);
+        let b = (c * (g + c) - 1.0) / (c * (g - c) + 1.0);
+
+        0.5 * a * a * (1.0 + b * b)
+    }
+
+    /// Longitudinal scattering function M
+    fn m_function(&self, theta_h: f32, alpha: f32, beta: f32) -> f32 {
+        let gaussian = |x: f32, variance: f32| -> f32 {
+            exp(-x * x / (2.0 * variance * variance)) / (sqrt(2.0 * PI) * variance)
+        };
+
+        gaussian(theta_h - alpha, beta)
+    }
+
+    /// Azimuthal scattering function N
+    fn n_function(&self, phi: f32, p: i32, gamma_t: f32, sigma_a: Vec3) -> Vec3 {
+        let h = sin(gamma_t);
+        let gamma_i = asin(clamp(h, -1.0, 1.0));
+
+        // Fresnel term
+        let f = self.fresnel_dielectric(cos(gamma_i), self.params.ior);
+
+        match p {
+            0 => {
+                // R lobe
+                Vec3::splat(f * 0.25 * cos(phi / 2.0))
+            }
+            1 => {
+                // TT lobe
+                let t = (1.0 - f) * (1.0 - f);
+                let a = (-2.0 * sigma_a * (1.0 + cos(2.0 * gamma_t))).exp();
+                a * t * 0.25 * cos(phi / 2.0)
+            }
+            2 => {
+                // TRT lobe
+                let t = (1.0 - f) * (1.0 - f) * f;
+                let a = (-2.0 * sigma_a * (1.0 + cos(2.0 * gamma_t))).exp();
+                a * a * t * 0.25 * cos(phi / 2.0)
+            }
+            _ => Vec3::ZERO,
+        }
+    }
+
+    /// Evaluate full Marschner BSDF
+    fn evaluate(
+        &self,
+        wi: Vec3,       // Incoming light direction
+        wo: Vec3,       // Outgoing view direction
+        tangent: Vec3,  // Hair tangent
+        normal: Vec3,   // Surface normal (for azimuthal calculation)
+    ) -> Vec3 {
+        // Convert to hair coordinate system
+        let sin_theta_i = dot(wi, tangent);
+        let sin_theta_o = dot(wo, tangent);
+        let cos_theta_i = sqrt(max(0.0, 1.0 - sin_theta_i * sin_theta_i));
+        let cos_theta_o = sqrt(max(0.0, 1.0 - sin_theta_o * sin_theta_o));
+
+        // Half angle
+        let theta_h = (sin_theta_i + sin_theta_o) / 2.0;
+
+        // Difference angle
+        let theta_d = (sin_theta_i - sin_theta_o) / 2.0;
+
+        // Azimuthal angle
+        let wi_perp = normalize(wi - tangent * sin_theta_i);
+        let wo_perp = normalize(wo - tangent * sin_theta_o);
+        let phi = acos(clamp(dot(wi_perp, wo_perp), -1.0, 1.0));
+
+        // Cuticle scale tilt
+        let alpha = self.params.cuticle_angle.to_radians();
+
+        // Roughness
+        let beta_r = self.params.roughness_radial.to_radians();
+        let beta_tt = beta_r / 2.0;
+        let beta_trt = beta_r * 2.0;
+
+        // Absorption
+        let sigma_a = self.absorption_coefficient();
+
+        // Calculate each lobe
+        let mut result = Vec3::ZERO;
+
+        // R lobe (p=0)
+        let m_r = self.m_function(theta_h, -alpha, beta_r);
+        let n_r = self.n_function(phi, 0, 0.0, sigma_a);
+        result = result + n_r * m_r;
+
+        // TT lobe (p=1)
+        let m_tt = self.m_function(theta_h, -alpha / 2.0, beta_tt);
+        let gamma_t = asin(sin_theta_i / self.params.ior);
+        let n_tt = self.n_function(phi, 1, gamma_t, sigma_a);
+        result = result + n_tt * m_tt;
+
+        // TRT lobe (p=2)
+        let m_trt = self.m_function(theta_h, -3.0 * alpha / 2.0, beta_trt);
+        let n_trt = self.n_function(phi, 2, gamma_t, sigma_a);
+        result = result + n_trt * m_trt;
+
+        // Normalize by cosine term
+        result / max(cos_theta_i * cos_theta_o, 0.001)
+    }
+}
+
+// ============================================================================
+// HAIR RENDERING PIPELINE
+// ============================================================================
+
+/// Hair rendering quality
+enum HairQuality {
+    Low,      // Simple Kajiya-Kay, no shadows
+    Medium,   // Marschner R lobe, shadow maps
+    High,     // Full Marschner, deep opacity maps
+    Ultra,    // Full Marschner, ray-traced shadows
+}
+
+/// Hair render mode
+enum HairRenderMode {
+    Lines,        // GPU line primitives
+    TessellatedQuads,  // Tessellation + geometry expansion
+    MeshShader,   // Mesh shader strand generation
+    RayTraced,    // Ray-traced curve primitives
+}
+
+/// Hair rendering configuration
+struct HairRenderConfig {
+    quality: HairQuality,
+    render_mode: HairRenderMode,
+    max_strands: u32,
+    segments_per_strand: u32,
+
+    // Multi-strand AA
+    msaa_samples: u32,
+    use_alpha_to_coverage: bool,
+
+    // Shadow
+    use_deep_opacity_maps: bool,
+    shadow_layers: u32,
+
+    // LOD
+    enable_lod: bool,
+    lod_distances: [f32; 4],
+    lod_strand_counts: [f32; 4],
+}
+
+impl HairRenderConfig {
+    fn default() -> Self {
+        Self {
+            quality: HairQuality::High,
+            render_mode: HairRenderMode::TessellatedQuads,
+            max_strands: 100000,
+            segments_per_strand: 16,
+            msaa_samples: 4,
+            use_alpha_to_coverage: true,
+            use_deep_opacity_maps: true,
+            shadow_layers: 4,
+            enable_lod: true,
+            lod_distances: [10.0, 25.0, 50.0, 100.0],
+            lod_strand_counts: [1.0, 0.5, 0.25, 0.1],
+        }
+    }
+}
+
+/// GPU uniforms for hair rendering
+struct HairUniforms {
+    view_proj: Mat4,
+    view: Mat4,
+    proj: Mat4,
+    camera_position: Vec3,
+    strand_width_scale: f32,
+    light_direction: Vec3,
+    light_intensity: f32,
+    light_color: Vec3,
+    ao_intensity: f32,
+    base_color: Vec3,
+    melanin: f32,
+    tip_color: Vec3,
+    melanin_redness: f32,
+    roughness: f32,
+    ior: f32,
+    cuticle_angle: f32,
+    _padding: f32,
+}
+
+/// Deep opacity map for hair shadows
+struct DeepOpacityMap {
+    texture: TextureHandle,
+    layers: u32,
+    near_plane: f32,
+    far_plane: f32,
+    light_view_proj: Mat4,
+}
+
+impl DeepOpacityMap {
+    fn new(device: &Device, resolution: u32, layers: u32, near: f32, far: f32) -> Self {
+        let texture = device.create_texture(&TextureDescriptor {
+            size: (resolution, resolution, layers),
+            format: TextureFormat::R32Float,
+            usage: TextureUsage::RENDER_TARGET | TextureUsage::SAMPLED,
+            dimension: TextureDimension::D2Array,
+            ..Default::default()
+        });
+
+        Self {
+            texture,
+            layers,
+            near_plane: near,
+            far_plane: far,
+            light_view_proj: Mat4::IDENTITY,
+        }
+    }
+
+    fn layer_depth(&self, layer: u32) -> f32 {
+        let t = layer as f32 / (self.layers - 1) as f32;
+        // Exponential distribution for better near-surface detail
+        self.near_plane + (self.far_plane - self.near_plane) * (exp(t * 2.0) - 1.0) / (exp(2.0) - 1.0)
+    }
+}
+
+/// Hair strand renderer
+struct HairRenderer {
+    config: HairRenderConfig,
+    groups: Vec<HairGroup>,
+
+    // Pipelines
+    depth_prepass_pipeline: RenderPipelineHandle,
+    main_pipeline: RenderPipelineHandle,
+    shadow_pipeline: RenderPipelineHandle,
+    deep_opacity_pipeline: RenderPipelineHandle,
+
+    // Shadow resources
+    deep_opacity_map: Option<DeepOpacityMap>,
+    shadow_map: TextureHandle,
+
+    // Screen-space resources
+    velocity_buffer: TextureHandle,
+
+    // BSDF
+    marschner: MarschnerBsdf,
+}
+
+impl HairRenderer {
+    fn new(device: &Device, config: HairRenderConfig) -> Self {
+        let depth_prepass_pipeline = device.create_render_pipeline(&RenderPipelineDescriptor {
+            vertex_shader: include_str!("shaders/hair_vertex.wgsl"),
+            fragment_shader: include_str!("shaders/hair_depth.wgsl"),
+            primitive: PrimitiveState {
+                topology: PrimitiveTopology::LineList,
+                ..Default::default()
+            },
+            depth_stencil: Some(DepthStencilState {
+                format: TextureFormat::Depth32Float,
+                depth_write_enabled: true,
+                depth_compare: CompareFunction::Less,
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+
+        let main_pipeline = device.create_render_pipeline(&RenderPipelineDescriptor {
+            vertex_shader: include_str!("shaders/hair_vertex.wgsl"),
+            fragment_shader: include_str!("shaders/hair_marschner.wgsl"),
+            primitive: PrimitiveState {
+                topology: PrimitiveTopology::LineList,
+                ..Default::default()
+            },
+            targets: vec![
+                ColorTargetState {
+                    format: TextureFormat::Rgba16Float,
+                    blend: Some(BlendState::ALPHA_BLENDING),
+                    write_mask: ColorWrites::ALL,
+                }
+            ],
+            depth_stencil: Some(DepthStencilState {
+                format: TextureFormat::Depth32Float,
+                depth_write_enabled: false,
+                depth_compare: CompareFunction::LessEqual,
+                ..Default::default()
+            }),
+            multisample: MultisampleState {
+                count: config.msaa_samples,
+                alpha_to_coverage_enabled: config.use_alpha_to_coverage,
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+
+        let shadow_pipeline = device.create_render_pipeline(&RenderPipelineDescriptor {
+            vertex_shader: include_str!("shaders/hair_shadow.wgsl"),
+            fragment_shader: "",
+            primitive: PrimitiveState {
+                topology: PrimitiveTopology::LineList,
+                ..Default::default()
+            },
+            depth_stencil: Some(DepthStencilState {
+                format: TextureFormat::Depth32Float,
+                depth_write_enabled: true,
+                depth_compare: CompareFunction::Less,
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+
+        let deep_opacity_pipeline = device.create_render_pipeline(&RenderPipelineDescriptor {
+            vertex_shader: include_str!("shaders/hair_shadow.wgsl"),
+            fragment_shader: include_str!("shaders/hair_deep_opacity.wgsl"),
+            ..Default::default()
+        });
+
+        let deep_opacity_map = if config.use_deep_opacity_maps {
+            Some(DeepOpacityMap::new(device, 2048, config.shadow_layers, 0.1, 100.0))
+        } else {
+            None
+        };
+
+        let shadow_map = device.create_texture(&TextureDescriptor {
+            size: (2048, 2048, 1),
+            format: TextureFormat::Depth32Float,
+            usage: TextureUsage::RENDER_TARGET | TextureUsage::SAMPLED,
+            ..Default::default()
+        });
+
+        let velocity_buffer = device.create_texture(&TextureDescriptor {
+            size: (1920, 1080, 1),
+            format: TextureFormat::Rg16Float,
+            usage: TextureUsage::RENDER_TARGET | TextureUsage::SAMPLED,
+            ..Default::default()
+        });
+
+        Self {
+            config,
+            groups: Vec::new(),
+            depth_prepass_pipeline,
+            main_pipeline,
+            shadow_pipeline,
+            deep_opacity_pipeline,
+            deep_opacity_map,
+            shadow_map,
+            velocity_buffer,
+            marschner: MarschnerBsdf::new(MarschnerParams::default()),
+        }
+    }
+
+    fn add_group(&mut self, group: HairGroup) {
+        self.groups.push(group);
+    }
+
+    fn render_shadow_pass(
+        &self,
+        encoder: &mut CommandEncoder,
+        light_view_proj: &Mat4,
+    ) {
+        // Regular shadow map
+        {
+            let mut pass = encoder.begin_render_pass(&RenderPassDescriptor {
+                depth_attachment: Some(RenderPassDepthAttachment {
+                    texture: &self.shadow_map,
+                    load_op: LoadOp::Clear(1.0),
+                    store_op: StoreOp::Store,
+                }),
+                ..Default::default()
+            });
+
+            pass.set_pipeline(&self.shadow_pipeline);
+            pass.set_uniform(0, &ShadowUniforms {
+                light_view_proj: *light_view_proj,
+            });
+
+            for group in &self.groups {
+                if let (Some(vb), Some(ib)) = (&group.vertex_buffer, &group.index_buffer) {
+                    pass.set_vertex_buffer(0, vb);
+                    pass.set_index_buffer(ib, IndexFormat::Uint32);
+                    pass.draw_indexed(group.segment_count * 2, 1, 0, 0, 0);
+                }
+            }
+        }
+
+        // Deep opacity maps
+        if let Some(ref dom) = self.deep_opacity_map {
+            for layer in 0..dom.layers {
+                let layer_depth = dom.layer_depth(layer);
+
+                let mut pass = encoder.begin_render_pass(&RenderPassDescriptor {
+                    color_attachments: vec![RenderPassColorAttachment {
+                        texture: &dom.texture,
+                        layer: layer,
+                        load_op: if layer == 0 { LoadOp::Clear(Vec4::ZERO) } else { LoadOp::Load },
+                        store_op: StoreOp::Store,
+                    }],
+                    ..Default::default()
+                });
+
+                pass.set_pipeline(&self.deep_opacity_pipeline);
+                pass.set_uniform(0, &DeepOpacityUniforms {
+                    light_view_proj: *light_view_proj,
+                    layer_depth,
+                    layer_index: layer,
+                });
+
+                for group in &self.groups {
+                    if let (Some(vb), Some(ib)) = (&group.vertex_buffer, &group.index_buffer) {
+                        pass.set_vertex_buffer(0, vb);
+                        pass.set_index_buffer(ib, IndexFormat::Uint32);
+                        pass.draw_indexed(group.segment_count * 2, 1, 0, 0, 0);
+                    }
+                }
+            }
+        }
+    }
+
+    fn render_depth_prepass(
+        &self,
+        encoder: &mut CommandEncoder,
+        depth_texture: &TextureHandle,
+        uniforms: &HairUniforms,
+    ) {
+        let mut pass = encoder.begin_render_pass(&RenderPassDescriptor {
+            depth_attachment: Some(RenderPassDepthAttachment {
+                texture: depth_texture,
+                load_op: LoadOp::Load,
+                store_op: StoreOp::Store,
+            }),
+            ..Default::default()
+        });
+
+        pass.set_pipeline(&self.depth_prepass_pipeline);
+        pass.set_uniform(0, uniforms);
+
+        for group in &self.groups {
+            if let (Some(vb), Some(ib)) = (&group.vertex_buffer, &group.index_buffer) {
+                pass.set_vertex_buffer(0, vb);
+                pass.set_index_buffer(ib, IndexFormat::Uint32);
+                pass.draw_indexed(group.segment_count * 2, 1, 0, 0, 0);
+            }
+        }
+    }
+
+    fn render(
+        &self,
+        encoder: &mut CommandEncoder,
+        color_texture: &TextureHandle,
+        depth_texture: &TextureHandle,
+        uniforms: &HairUniforms,
+        light_view_proj: &Mat4,
+    ) {
+        let mut pass = encoder.begin_render_pass(&RenderPassDescriptor {
+            color_attachments: vec![RenderPassColorAttachment {
+                texture: color_texture,
+                load_op: LoadOp::Load,
+                store_op: StoreOp::Store,
+            }],
+            depth_attachment: Some(RenderPassDepthAttachment {
+                texture: depth_texture,
+                load_op: LoadOp::Load,
+                store_op: StoreOp::Store,
+            }),
+            ..Default::default()
+        });
+
+        pass.set_pipeline(&self.main_pipeline);
+        pass.set_uniform(0, uniforms);
+        pass.set_texture(1, &self.shadow_map);
+
+        if let Some(ref dom) = self.deep_opacity_map {
+            pass.set_texture(2, &dom.texture);
+        }
+
+        for group in &self.groups {
+            if let (Some(vb), Some(ib)) = (&group.vertex_buffer, &group.index_buffer) {
+                pass.set_vertex_buffer(0, vb);
+                pass.set_index_buffer(ib, IndexFormat::Uint32);
+                pass.draw_indexed(group.segment_count * 2, 1, 0, 0, 0);
+            }
+        }
+    }
+}
+
+// ============================================================================
+// FUR SHELL RENDERING
+// ============================================================================
+
+/// Fur shell layer parameters
+struct FurShellLayer {
+    height: f32,
+    density_mult: f32,
+    length_mult: f32,
+    curvature: f32,
+}
+
+/// Fur material properties
+struct FurMaterial {
+    base_color: Vec3,
+    tip_color: Vec3,
+    density: f32,
+    length: f32,
+    thickness: f32,
+    curvature: f32,
+    gravity_strength: f32,
+    wind_strength: f32,
+
+    // Noise for variation
+    length_noise: f32,
+    density_noise: f32,
+    direction_noise: f32,
+
+    // Lighting
+    ambient_occlusion: f32,
+    translucency: f32,
+    specular_power: f32,
+}
+
+impl FurMaterial {
+    fn default() -> Self {
+        Self {
+            base_color: Vec3::new(0.2, 0.15, 0.1),
+            tip_color: Vec3::new(0.3, 0.25, 0.2),
+            density: 50.0,
+            length: 0.1,
+            thickness: 0.003,
+            curvature: 0.2,
+            gravity_strength: 0.3,
+            wind_strength: 0.1,
+            length_noise: 0.2,
+            density_noise: 0.3,
+            direction_noise: 0.1,
+            ambient_occlusion: 0.5,
+            translucency: 0.3,
+            specular_power: 64.0,
+        }
+    }
+}
+
+/// GPU uniforms for fur shell rendering
+struct FurShellUniforms {
+    view_proj: Mat4,
+    model: Mat4,
+    camera_position: Vec3,
+    shell_height: f32,
+    fur_length: f32,
+    fur_density: f32,
+    fur_thickness: f32,
+    curvature: f32,
+    base_color: Vec3,
+    ao_intensity: f32,
+    tip_color: Vec3,
+    translucency: f32,
+    light_direction: Vec3,
+    light_intensity: f32,
+    light_color: Vec3,
+    specular_power: f32,
+    gravity: Vec3,
+    wind_strength: f32,
+    wind_direction: Vec3,
+    time: f32,
+}
+
+/// Fur shell renderer
+struct FurShellRenderer {
+    shell_count: u32,
+    shell_pipeline: RenderPipelineHandle,
+    fin_pipeline: RenderPipelineHandle,
+    noise_texture: TextureHandle,
+    density_texture: TextureHandle,
+    direction_texture: TextureHandle,
+}
+
+impl FurShellRenderer {
+    fn new(device: &Device, shell_count: u32) -> Self {
+        let shell_pipeline = device.create_render_pipeline(&RenderPipelineDescriptor {
+            vertex_shader: include_str!("shaders/fur_shell_vertex.wgsl"),
+            fragment_shader: include_str!("shaders/fur_shell_fragment.wgsl"),
+            targets: vec![ColorTargetState {
+                format: TextureFormat::Rgba16Float,
+                blend: Some(BlendState::ALPHA_BLENDING),
+                write_mask: ColorWrites::ALL,
+            }],
+            depth_stencil: Some(DepthStencilState {
+                format: TextureFormat::Depth32Float,
+                depth_write_enabled: false,
+                depth_compare: CompareFunction::LessEqual,
+                ..Default::default()
+            }),
+            cull_mode: None, // Render both sides
+            ..Default::default()
+        });
+
+        let fin_pipeline = device.create_render_pipeline(&RenderPipelineDescriptor {
+            vertex_shader: include_str!("shaders/fur_fin_vertex.wgsl"),
+            fragment_shader: include_str!("shaders/fur_fin_fragment.wgsl"),
+            targets: vec![ColorTargetState {
+                format: TextureFormat::Rgba16Float,
+                blend: Some(BlendState::ALPHA_BLENDING),
+                write_mask: ColorWrites::ALL,
+            }],
+            ..Default::default()
+        });
+
+        let noise_texture = Self::generate_noise_texture(device, 256);
+        let density_texture = Self::generate_density_texture(device, 256, 50.0);
+        let direction_texture = Self::generate_direction_texture(device, 256);
+
+        Self {
+            shell_count,
+            shell_pipeline,
+            fin_pipeline,
+            noise_texture,
+            density_texture,
+            direction_texture,
+        }
+    }
+
+    fn generate_noise_texture(device: &Device, size: u32) -> TextureHandle {
+        let mut data = vec![0u8; (size * size * 4) as usize];
+
+        // Generate blue noise pattern
+        for y in 0..size {
+            for x in 0..size {
+                let idx = ((y * size + x) * 4) as usize;
+                let hash = Self::hash_2d(x, y);
+
+                data[idx + 0] = ((hash & 0xFF) as f32) as u8;
+                data[idx + 1] = (((hash >> 8) & 0xFF) as f32) as u8;
+                data[idx + 2] = (((hash >> 16) & 0xFF) as f32) as u8;
+                data[idx + 3] = 255;
+            }
+        }
+
+        device.create_texture_with_data(&TextureDescriptor {
+            size: (size, size, 1),
+            format: TextureFormat::Rgba8Unorm,
+            usage: TextureUsage::SAMPLED,
+            ..Default::default()
+        }, &data)
+    }
+
+    fn generate_density_texture(device: &Device, size: u32, density: f32) -> TextureHandle {
+        let mut data = vec![0u8; (size * size) as usize];
+
+        // Create density pattern for fur strands
+        let strand_spacing = 1.0 / density.sqrt();
+        let strand_radius = strand_spacing * 0.3;
+
+        for y in 0..size {
+            for x in 0..size {
+                let fx = x as f32 / size as f32;
+                let fy = y as f32 / size as f32;
+
+                // Grid jittered pattern
+                let hash = Self::hash_2d(x, y);
+                let jitter_x = ((hash & 0xFF) as f32 / 255.0 - 0.5) * strand_spacing * 0.5;
+                let jitter_y = (((hash >> 8) & 0xFF) as f32 / 255.0 - 0.5) * strand_spacing * 0.5;
+
+                let cell_x = (fx / strand_spacing).floor() * strand_spacing + strand_spacing * 0.5;
+                let cell_y = (fy / strand_spacing).floor() * strand_spacing + strand_spacing * 0.5;
+
+                let dist = sqrt((fx - cell_x - jitter_x).powi(2) + (fy - cell_y - jitter_y).powi(2));
+                let alpha = if dist < strand_radius { 255 } else { 0 };
+
+                data[(y * size + x) as usize] = alpha;
+            }
+        }
+
+        device.create_texture_with_data(&TextureDescriptor {
+            size: (size, size, 1),
+            format: TextureFormat::R8Unorm,
+            usage: TextureUsage::SAMPLED,
+            ..Default::default()
+        }, &data)
+    }
+
+    fn generate_direction_texture(device: &Device, size: u32) -> TextureHandle {
+        let mut data = vec![0u8; (size * size * 4) as usize];
+
+        // Generate tangent-space direction map
+        for y in 0..size {
+            for x in 0..size {
+                let idx = ((y * size + x) * 4) as usize;
+                let hash = Self::hash_2d(x, y);
+
+                // Small random offsets from straight up
+                let angle = ((hash & 0xFFFF) as f32 / 65535.0) * 2.0 * PI;
+                let tilt = (((hash >> 16) & 0xFFFF) as f32 / 65535.0) * 0.2;
+
+                let dx = sin(angle) * tilt;
+                let dy = cos(angle) * tilt;
+                let dz = sqrt(1.0 - dx * dx - dy * dy);
+
+                data[idx + 0] = ((dx * 0.5 + 0.5) * 255.0) as u8;
+                data[idx + 1] = ((dy * 0.5 + 0.5) * 255.0) as u8;
+                data[idx + 2] = ((dz * 0.5 + 0.5) * 255.0) as u8;
+                data[idx + 3] = 255;
+            }
+        }
+
+        device.create_texture_with_data(&TextureDescriptor {
+            size: (size, size, 1),
+            format: TextureFormat::Rgba8Unorm,
+            usage: TextureUsage::SAMPLED,
+            ..Default::default()
+        }, &data)
+    }
+
+    fn hash_2d(x: u32, y: u32) -> u32 {
+        let mut n = x.wrapping_add(y.wrapping_mul(57));
+        n = (n << 13) ^ n;
+        n.wrapping_mul(n.wrapping_mul(n.wrapping_mul(15731).wrapping_add(789221)).wrapping_add(1376312589))
+    }
+
+    fn render(
+        &self,
+        encoder: &mut CommandEncoder,
+        color_texture: &TextureHandle,
+        depth_texture: &TextureHandle,
+        mesh: &MeshHandle,
+        uniforms: &FurShellUniforms,
+    ) {
+        // Render shells from innermost to outermost
+        for shell_idx in 0..self.shell_count {
+            let shell_height = (shell_idx as f32 + 1.0) / self.shell_count as f32;
+
+            let mut pass = encoder.begin_render_pass(&RenderPassDescriptor {
+                color_attachments: vec![RenderPassColorAttachment {
+                    texture: color_texture,
+                    load_op: LoadOp::Load,
+                    store_op: StoreOp::Store,
+                }],
+                depth_attachment: Some(RenderPassDepthAttachment {
+                    texture: depth_texture,
+                    load_op: LoadOp::Load,
+                    store_op: StoreOp::Store,
+                }),
+                ..Default::default()
+            });
+
+            pass.set_pipeline(&self.shell_pipeline);
+
+            // Update uniforms with shell height
+            let mut shell_uniforms = uniforms.clone();
+            shell_uniforms.shell_height = shell_height;
+            pass.set_uniform(0, &shell_uniforms);
+
+            pass.set_texture(1, &self.noise_texture);
+            pass.set_texture(2, &self.density_texture);
+            pass.set_texture(3, &self.direction_texture);
+
+            pass.set_vertex_buffer(0, mesh.vertex_buffer());
+            pass.set_index_buffer(mesh.index_buffer(), IndexFormat::Uint32);
+            pass.draw_indexed(mesh.index_count(), 1, 0, 0, 0);
+        }
+    }
+}
+
+// ============================================================================
+// HAIR SIMULATION
+// ============================================================================
+
+/// Hair simulation constraint types
+enum HairConstraint {
+    DistanceConstraint { a: usize, b: usize, rest_length: f32 },
+    BendConstraint { a: usize, b: usize, c: usize, rest_angle: f32, stiffness: f32 },
+    RootConstraint { segment: usize, position: Vec3, normal: Vec3 },
+}
+
+/// Simple hair strand simulation (PBD-based)
+struct HairSimulation {
+    positions: Vec<Vec3>,
+    velocities: Vec<Vec3>,
+    prev_positions: Vec<Vec3>,
+    masses: Vec<f32>,
+    constraints: Vec<HairConstraint>,
+
+    // Simulation parameters
+    gravity: Vec3,
+    damping: f32,
+    stiffness: f32,
+    iterations: u32,
+
+    // Per-strand data
+    strand_starts: Vec<usize>,
+    strand_lengths: Vec<usize>,
+}
+
+impl HairSimulation {
+    fn new(strands: &[HairStrand]) -> Self {
+        let mut positions = Vec::new();
+        let mut velocities = Vec::new();
+        let mut masses = Vec::new();
+        let mut constraints = Vec::new();
+        let mut strand_starts = Vec::new();
+        let mut strand_lengths = Vec::new();
+
+        let mut offset = 0;
+
+        for strand in strands {
+            strand_starts.push(offset);
+            strand_lengths.push(strand.segments.len());
+
+            for (i, segment) in strand.segments.iter().enumerate() {
+                positions.push(segment.position);
+                velocities.push(Vec3::ZERO);
+
+                // Root has infinite mass (fixed)
+                let mass = if i == 0 { f32::INFINITY } else { 1.0 };
+                masses.push(mass);
+
+                // Distance constraints
+                if i > 0 {
+                    let rest_length = length(segment.position - strand.segments[i - 1].position);
+                    constraints.push(HairConstraint::DistanceConstraint {
+                        a: offset + i - 1,
+                        b: offset + i,
+                        rest_length,
+                    });
+                }
+
+                // Bend constraints
+                if i > 1 {
+                    constraints.push(HairConstraint::BendConstraint {
+                        a: offset + i - 2,
+                        b: offset + i - 1,
+                        c: offset + i,
+                        rest_angle: 0.0,
+                        stiffness: 0.5,
+                    });
+                }
+            }
+
+            // Root constraint
+            constraints.push(HairConstraint::RootConstraint {
+                segment: offset,
+                position: strand.root_position,
+                normal: strand.root_normal,
+            });
+
+            offset += strand.segments.len();
+        }
+
+        Self {
+            prev_positions: positions.clone(),
+            positions,
+            velocities,
+            masses,
+            constraints,
+            gravity: Vec3::new(0.0, -9.81, 0.0),
+            damping: 0.99,
+            stiffness: 1.0,
+            iterations: 4,
+            strand_starts,
+            strand_lengths,
+        }
+    }
+
+    fn simulate(&mut self, dt: f32, external_forces: Vec3, collision_spheres: &[(Vec3, f32)]) {
+        let sub_steps = 2;
+        let sub_dt = dt / sub_steps as f32;
+
+        for _ in 0..sub_steps {
+            // Apply external forces
+            for i in 0..self.positions.len() {
+                if self.masses[i].is_finite() {
+                    let force = self.gravity + external_forces;
+                    self.velocities[i] = self.velocities[i] + force * sub_dt;
+                }
+            }
+
+            // Update positions
+            for i in 0..self.positions.len() {
+                if self.masses[i].is_finite() {
+                    self.prev_positions[i] = self.positions[i];
+                    self.positions[i] = self.positions[i] + self.velocities[i] * sub_dt;
+                }
+            }
+
+            // Solve constraints
+            for _ in 0..self.iterations {
+                self.solve_constraints();
+            }
+
+            // Collision
+            for i in 0..self.positions.len() {
+                if self.masses[i].is_finite() {
+                    for &(center, radius) in collision_spheres {
+                        let to_particle = self.positions[i] - center;
+                        let dist = length(to_particle);
+                        if dist < radius {
+                            self.positions[i] = center + normalize(to_particle) * radius;
+                        }
+                    }
+                }
+            }
+
+            // Update velocities
+            for i in 0..self.positions.len() {
+                if self.masses[i].is_finite() {
+                    self.velocities[i] = (self.positions[i] - self.prev_positions[i]) / sub_dt;
+                    self.velocities[i] = self.velocities[i] * self.damping;
+                }
+            }
+        }
+    }
+
+    fn solve_constraints(&mut self) {
+        for constraint in &self.constraints {
+            match constraint {
+                HairConstraint::DistanceConstraint { a, b, rest_length } => {
+                    let pa = self.positions[*a];
+                    let pb = self.positions[*b];
+                    let delta = pb - pa;
+                    let dist = length(delta);
+
+                    if dist > 0.0001 {
+                        let correction = (dist - rest_length) / dist;
+                        let dir = delta * correction;
+
+                        let wa = if self.masses[*a].is_finite() { 1.0 / self.masses[*a] } else { 0.0 };
+                        let wb = if self.masses[*b].is_finite() { 1.0 / self.masses[*b] } else { 0.0 };
+                        let sum = wa + wb;
+
+                        if sum > 0.0 {
+                            self.positions[*a] = self.positions[*a] + dir * (wa / sum) * self.stiffness;
+                            self.positions[*b] = self.positions[*b] - dir * (wb / sum) * self.stiffness;
+                        }
+                    }
+                }
+
+                HairConstraint::BendConstraint { a, b, c, rest_angle, stiffness } => {
+                    let pa = self.positions[*a];
+                    let pb = self.positions[*b];
+                    let pc = self.positions[*c];
+
+                    let v1 = pa - pb;
+                    let v2 = pc - pb;
+
+                    let angle = acos(clamp(dot(normalize(v1), normalize(v2)), -1.0, 1.0));
+                    let angle_diff = angle - rest_angle;
+
+                    if abs(angle_diff) > 0.001 {
+                        let axis = cross(v1, v2);
+                        let axis_len = length(axis);
+
+                        if axis_len > 0.0001 {
+                            let rotation_axis = axis / axis_len;
+                            let correction = angle_diff * stiffness * 0.5;
+
+                            // Simple bend correction (simplified)
+                            let mid = (pa + pc) * 0.5;
+                            let target_b = mid + rotation_axis * (length(pb - mid) * cos(correction));
+
+                            if self.masses[*b].is_finite() {
+                                self.positions[*b] = self.positions[*b] + (target_b - pb) * 0.1;
+                            }
+                        }
+                    }
+                }
+
+                HairConstraint::RootConstraint { segment, position, normal: _ } => {
+                    self.positions[*segment] = *position;
+                }
+            }
+        }
+    }
+
+    fn update_strand_data(&self, strands: &mut [HairStrand]) {
+        for (strand_idx, strand) in strands.iter_mut().enumerate() {
+            let start = self.strand_starts[strand_idx];
+
+            for (seg_idx, segment) in strand.segments.iter_mut().enumerate() {
+                segment.position = self.positions[start + seg_idx];
+
+                // Update tangent
+                if seg_idx < strand.segments.len() - 1 {
+                    segment.tangent = normalize(
+                        self.positions[start + seg_idx + 1] - self.positions[start + seg_idx]
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// GPU hair simulation using compute shaders
+struct GpuHairSimulation {
+    position_buffer: BufferHandle,
+    velocity_buffer: BufferHandle,
+    constraint_buffer: BufferHandle,
+    strand_info_buffer: BufferHandle,
+
+    integrate_pipeline: ComputePipelineHandle,
+    constraint_pipeline: ComputePipelineHandle,
+    collision_pipeline: ComputePipelineHandle,
+
+    particle_count: u32,
+    strand_count: u32,
+}
+
+impl GpuHairSimulation {
+    fn new(device: &Device, strands: &[HairStrand]) -> Self {
+        let mut total_particles = 0u32;
+        for strand in strands {
+            total_particles += strand.segments.len() as u32;
+        }
+
+        let position_buffer = device.create_buffer(&BufferDescriptor {
+            size: (total_particles as usize) * 16, // Vec4
+            usage: BufferUsage::STORAGE | BufferUsage::VERTEX,
+            ..Default::default()
+        });
+
+        let velocity_buffer = device.create_buffer(&BufferDescriptor {
+            size: (total_particles as usize) * 16,
+            usage: BufferUsage::STORAGE,
+            ..Default::default()
+        });
+
+        let constraint_buffer = device.create_buffer(&BufferDescriptor {
+            size: (total_particles as usize) * 32, // Constraint data
+            usage: BufferUsage::STORAGE,
+            ..Default::default()
+        });
+
+        let strand_info_buffer = device.create_buffer(&BufferDescriptor {
+            size: (strands.len()) * 16,
+            usage: BufferUsage::STORAGE,
+            ..Default::default()
+        });
+
+        let integrate_pipeline = device.create_compute_pipeline(&ComputePipelineDescriptor {
+            shader: include_str!("shaders/hair_sim_integrate.wgsl"),
+            entry_point: "main",
+            ..Default::default()
+        });
+
+        let constraint_pipeline = device.create_compute_pipeline(&ComputePipelineDescriptor {
+            shader: include_str!("shaders/hair_sim_constraints.wgsl"),
+            entry_point: "main",
+            ..Default::default()
+        });
+
+        let collision_pipeline = device.create_compute_pipeline(&ComputePipelineDescriptor {
+            shader: include_str!("shaders/hair_sim_collision.wgsl"),
+            entry_point: "main",
+            ..Default::default()
+        });
+
+        Self {
+            position_buffer,
+            velocity_buffer,
+            constraint_buffer,
+            strand_info_buffer,
+            integrate_pipeline,
+            constraint_pipeline,
+            collision_pipeline,
+            particle_count: total_particles,
+            strand_count: strands.len() as u32,
+        }
+    }
+
+    fn simulate(&self, encoder: &mut CommandEncoder, dt: f32, iterations: u32) {
+        // Integration pass
+        {
+            let mut pass = encoder.begin_compute_pass("Hair Integrate");
+            pass.set_pipeline(&self.integrate_pipeline);
+            pass.set_storage_buffer(0, &self.position_buffer);
+            pass.set_storage_buffer(1, &self.velocity_buffer);
+            pass.set_uniform(2, &SimUniforms {
+                dt,
+                gravity: Vec3::new(0.0, -9.81, 0.0),
+                damping: 0.99,
+            });
+            pass.dispatch((self.particle_count + 63) / 64, 1, 1);
+        }
+
+        // Constraint solving
+        for _ in 0..iterations {
+            let mut pass = encoder.begin_compute_pass("Hair Constraints");
+            pass.set_pipeline(&self.constraint_pipeline);
+            pass.set_storage_buffer(0, &self.position_buffer);
+            pass.set_storage_buffer(1, &self.constraint_buffer);
+            pass.set_storage_buffer(2, &self.strand_info_buffer);
+            pass.dispatch((self.strand_count + 63) / 64, 1, 1);
+        }
+
+        // Collision pass
+        {
+            let mut pass = encoder.begin_compute_pass("Hair Collision");
+            pass.set_pipeline(&self.collision_pipeline);
+            pass.set_storage_buffer(0, &self.position_buffer);
+            pass.set_storage_buffer(1, &self.velocity_buffer);
+            pass.dispatch((self.particle_count + 63) / 64, 1, 1);
+        }
+    }
+}
+
+// ============================================================================
+// WGSL SHADERS
+// ============================================================================
+
+const HAIR_VERTEX_WGSL: &str = r#"
+struct VertexInput {
+    @location(0) position: vec3<f32>,
+    @location(1) tangent_thickness: vec4<f32>,
+    @location(2) texcoord_strand_id: vec4<f32>,
+}
+
+struct VertexOutput {
+    @builtin(position) clip_position: vec4<f32>,
+    @location(0) world_position: vec3<f32>,
+    @location(1) tangent: vec3<f32>,
+    @location(2) texcoord: f32,
+    @location(3) strand_id: f32,
+    @location(4) thickness: f32,
+}
+
+struct Uniforms {
+    view_proj: mat4x4<f32>,
+    view: mat4x4<f32>,
+    proj: mat4x4<f32>,
+    camera_position: vec3<f32>,
+    strand_width_scale: f32,
+}
+
+@group(0) @binding(0) var<uniform> uniforms: Uniforms;
+
+@vertex
+fn main(in: VertexInput) -> VertexOutput {
+    var out: VertexOutput;
+
+    out.world_position = in.position;
+    out.tangent = in.tangent_thickness.xyz;
+    out.texcoord = in.texcoord_strand_id.x;
+    out.strand_id = in.texcoord_strand_id.y;
+    out.thickness = in.tangent_thickness.w * uniforms.strand_width_scale;
+
+    out.clip_position = uniforms.view_proj * vec4<f32>(in.position, 1.0);
+
+    return out;
+}
+"#;
+
+const HAIR_MARSCHNER_WGSL: &str = r#"
+struct FragmentInput {
+    @location(0) world_position: vec3<f32>,
+    @location(1) tangent: vec3<f32>,
+    @location(2) texcoord: f32,
+    @location(3) strand_id: f32,
+    @location(4) thickness: f32,
+}
+
+struct Uniforms {
+    view_proj: mat4x4<f32>,
+    view: mat4x4<f32>,
+    proj: mat4x4<f32>,
+    camera_position: vec3<f32>,
+    strand_width_scale: f32,
+    light_direction: vec3<f32>,
+    light_intensity: f32,
+    light_color: vec3<f32>,
+    ao_intensity: f32,
+    base_color: vec3<f32>,
+    melanin: f32,
+    tip_color: vec3<f32>,
+    melanin_redness: f32,
+    roughness: f32,
+    ior: f32,
+    cuticle_angle: f32,
+}
+
+@group(0) @binding(0) var<uniform> uniforms: Uniforms;
+@group(0) @binding(1) var shadow_map: texture_2d<f32>;
+@group(0) @binding(2) var shadow_sampler: sampler;
+
+const PI: f32 = 3.14159265359;
+
+// Melanin-based absorption
+fn absorption_coefficient(melanin: f32, redness: f32) -> vec3<f32> {
+    let eumelanin = vec3<f32>(0.419, 0.697, 1.37);
+    let pheomelanin = vec3<f32>(0.187, 0.4, 1.05);
+    return eumelanin * melanin * (1.0 - redness) + pheomelanin * melanin * redness;
+}
+
+// Fresnel for dielectric
+fn fresnel_dielectric(cos_theta: f32, eta: f32) -> f32 {
+    let c = abs(cos_theta);
+    let g_squared = eta * eta - 1.0 + c * c;
+
+    if (g_squared < 0.0) {
+        return 1.0;
+    }
+
+    let g = sqrt(g_squared);
+    let a = (g - c) / (g + c);
+    let b = (c * (g + c) - 1.0) / (c * (g - c) + 1.0);
+
+    return 0.5 * a * a * (1.0 + b * b);
+}
+
+// Longitudinal scattering (M function)
+fn m_function(theta_h: f32, alpha: f32, beta: f32) -> f32 {
+    let variance = beta * beta;
+    let x = theta_h - alpha;
+    return exp(-x * x / (2.0 * variance)) / (sqrt(2.0 * PI) * beta);
+}
+
+// Azimuthal scattering (N function) - simplified
+fn n_r(phi: f32) -> f32 {
+    return 0.25 * cos(phi * 0.5);
+}
+
+fn n_tt(phi: f32, gamma_t: f32, sigma_a: vec3<f32>) -> vec3<f32> {
+    let a = exp(-2.0 * sigma_a * (1.0 + cos(2.0 * gamma_t)));
+    return a * 0.25 * cos(phi * 0.5);
+}
+
+fn n_trt(phi: f32, gamma_t: f32, sigma_a: vec3<f32>) -> vec3<f32> {
+    let a = exp(-2.0 * sigma_a * (1.0 + cos(2.0 * gamma_t)));
+    return a * a * 0.25 * cos(phi * 0.5);
+}
+
+// Full Marschner BSDF
+fn marschner_bsdf(wi: vec3<f32>, wo: vec3<f32>, tangent: vec3<f32>) -> vec3<f32> {
+    // Project to hair coordinate system
+    let sin_theta_i = dot(wi, tangent);
+    let sin_theta_o = dot(wo, tangent);
+    let cos_theta_i = sqrt(max(0.0, 1.0 - sin_theta_i * sin_theta_i));
+    let cos_theta_o = sqrt(max(0.0, 1.0 - sin_theta_o * sin_theta_o));
+
+    let theta_h = (sin_theta_i + sin_theta_o) * 0.5;
+
+    // Azimuthal angle
+    let wi_perp = normalize(wi - tangent * sin_theta_i);
+    let wo_perp = normalize(wo - tangent * sin_theta_o);
+    let phi = acos(clamp(dot(wi_perp, wo_perp), -1.0, 1.0));
+
+    // Cuticle tilt
+    let alpha = uniforms.cuticle_angle * PI / 180.0;
+
+    // Roughness
+    let beta_r = uniforms.roughness * PI / 180.0;
+    let beta_tt = beta_r * 0.5;
+    let beta_trt = beta_r * 2.0;
+
+    // Absorption
+    let sigma_a = absorption_coefficient(uniforms.melanin, uniforms.melanin_redness);
+
+    // Fresnel
+    let f = fresnel_dielectric(cos_theta_i, uniforms.ior);
+    let gamma_t = asin(sin_theta_i / uniforms.ior);
+
+    // R lobe
+    let m_r = m_function(theta_h, -alpha, beta_r);
+    let result_r = vec3<f32>(f * n_r(phi) * m_r);
+
+    // TT lobe
+    let m_tt = m_function(theta_h, -alpha * 0.5, beta_tt);
+    let result_tt = (1.0 - f) * (1.0 - f) * n_tt(phi, gamma_t, sigma_a) * m_tt;
+
+    // TRT lobe
+    let m_trt = m_function(theta_h, -alpha * 1.5, beta_trt);
+    let result_trt = (1.0 - f) * (1.0 - f) * f * n_trt(phi, gamma_t, sigma_a) * m_trt;
+
+    return (result_r + result_tt + result_trt) / max(cos_theta_i * cos_theta_o, 0.001);
+}
+
+@fragment
+fn main(in: FragmentInput) -> @location(0) vec4<f32> {
+    let tangent = normalize(in.tangent);
+    let view_dir = normalize(uniforms.camera_position - in.world_position);
+    let light_dir = normalize(-uniforms.light_direction);
+
+    // Marschner BSDF
+    let bsdf = marschner_bsdf(light_dir, view_dir, tangent);
+
+    // Base color gradient
+    let color = mix(uniforms.base_color, uniforms.tip_color, in.texcoord);
+
+    // Lighting
+    let radiance = uniforms.light_color * uniforms.light_intensity;
+    let direct = bsdf * radiance * color;
+
+    // Simple ambient
+    let ambient = color * 0.1;
+
+    // Self-shadowing based on texcoord (root is darker)
+    let ao = mix(1.0 - uniforms.ao_intensity, 1.0, in.texcoord);
+
+    let final_color = (direct + ambient) * ao;
+
+    // Alpha based on thickness and view angle
+    let view_tangent_dot = abs(dot(view_dir, tangent));
+    let alpha = smoothstep(0.0, 0.3, 1.0 - view_tangent_dot);
+
+    return vec4<f32>(final_color, alpha);
+}
+"#;
+
+const FUR_SHELL_VERTEX_WGSL: &str = r#"
+struct VertexInput {
+    @location(0) position: vec3<f32>,
+    @location(1) normal: vec3<f32>,
+    @location(2) uv: vec2<f32>,
+}
+
+struct VertexOutput {
+    @builtin(position) clip_position: vec4<f32>,
+    @location(0) world_position: vec3<f32>,
+    @location(1) world_normal: vec3<f32>,
+    @location(2) uv: vec2<f32>,
+    @location(3) shell_height: f32,
+    @location(4) fur_direction: vec3<f32>,
+}
+
+struct Uniforms {
+    view_proj: mat4x4<f32>,
+    model: mat4x4<f32>,
+    camera_position: vec3<f32>,
+    shell_height: f32,
+    fur_length: f32,
+    fur_density: f32,
+    fur_thickness: f32,
+    curvature: f32,
+    gravity: vec3<f32>,
+    wind_strength: f32,
+    wind_direction: vec3<f32>,
+    time: f32,
+}
+
+@group(0) @binding(0) var<uniform> uniforms: Uniforms;
+@group(0) @binding(3) var direction_texture: texture_2d<f32>;
+@group(0) @binding(4) var direction_sampler: sampler;
+
+@vertex
+fn main(in: VertexInput) -> VertexOutput {
+    var out: VertexOutput;
+
+    let world_normal = normalize((uniforms.model * vec4<f32>(in.normal, 0.0)).xyz);
+
+    // Sample direction texture for fur direction variation
+    let dir_sample = textureSampleLevel(direction_texture, direction_sampler, in.uv, 0.0).xyz;
+    let local_offset = (dir_sample * 2.0 - 1.0) * 0.1;
+
+    // Gravity and wind influence increases with height
+    let gravity_influence = uniforms.gravity * uniforms.shell_height * uniforms.shell_height * 0.5;
+
+    // Wind animation
+    let wind_offset = uniforms.wind_direction * sin(uniforms.time * 2.0 + in.position.x * 0.5) *
+                      uniforms.wind_strength * uniforms.shell_height;
+
+    // Curvature (fur bends more at tips)
+    let curvature_offset = world_normal * (1.0 - uniforms.shell_height * uniforms.curvature);
+
+    // Calculate fur direction
+    let fur_dir = normalize(world_normal + gravity_influence + wind_offset + local_offset);
+
+    // Offset position by shell height
+    let shell_offset = fur_dir * uniforms.fur_length * uniforms.shell_height;
+    let world_position = (uniforms.model * vec4<f32>(in.position, 1.0)).xyz + shell_offset;
+
+    out.clip_position = uniforms.view_proj * vec4<f32>(world_position, 1.0);
+    out.world_position = world_position;
+    out.world_normal = world_normal;
+    out.uv = in.uv;
+    out.shell_height = uniforms.shell_height;
+    out.fur_direction = fur_dir;
+
+    return out;
+}
+"#;
+
+const FUR_SHELL_FRAGMENT_WGSL: &str = r#"
+struct FragmentInput {
+    @location(0) world_position: vec3<f32>,
+    @location(1) world_normal: vec3<f32>,
+    @location(2) uv: vec2<f32>,
+    @location(3) shell_height: f32,
+    @location(4) fur_direction: vec3<f32>,
+}
+
+struct Uniforms {
+    view_proj: mat4x4<f32>,
+    model: mat4x4<f32>,
+    camera_position: vec3<f32>,
+    shell_height: f32,
+    fur_length: f32,
+    fur_density: f32,
+    fur_thickness: f32,
+    curvature: f32,
+    base_color: vec3<f32>,
+    ao_intensity: f32,
+    tip_color: vec3<f32>,
+    translucency: f32,
+    light_direction: vec3<f32>,
+    light_intensity: f32,
+    light_color: vec3<f32>,
+    specular_power: f32,
+}
+
+@group(0) @binding(0) var<uniform> uniforms: Uniforms;
+@group(0) @binding(1) var noise_texture: texture_2d<f32>;
+@group(0) @binding(2) var density_texture: texture_2d<f32>;
+
+fn hash(p: vec2<f32>) -> f32 {
+    return fract(sin(dot(p, vec2<f32>(12.9898, 78.233))) * 43758.5453);
+}
+
+@fragment
+fn main(in: FragmentInput) -> @location(0) vec4<f32> {
+    // Sample density texture
+    let density_uv = in.uv * uniforms.fur_density;
+    let density = textureSample(density_texture, noise_texture, density_uv).r;
+
+    // Fur strand visibility (higher shells = sparser)
+    let height_falloff = 1.0 - in.shell_height;
+    let strand_alpha = density * height_falloff;
+
+    // Discard if not on a strand
+    if (strand_alpha < 0.5) {
+        discard;
+    }
+
+    // Noise for variation
+    let noise = textureSample(noise_texture, noise_texture, in.uv * 10.0).rgb;
+
+    // Color gradient from base to tip
+    let color = mix(uniforms.base_color, uniforms.tip_color, in.shell_height);
+
+    // Lighting
+    let light_dir = normalize(-uniforms.light_direction);
+    let view_dir = normalize(uniforms.camera_position - in.world_position);
+
+    // Kajiya-Kay for fur
+    let tangent = normalize(in.fur_direction);
+    let TdotL = dot(tangent, light_dir);
+    let TdotV = dot(tangent, view_dir);
+
+    let sin_TL = sqrt(max(0.0, 1.0 - TdotL * TdotL));
+    let sin_TV = sqrt(max(0.0, 1.0 - TdotV * TdotV));
+
+    let diffuse = sin_TL;
+    let specular = pow(max(0.0, TdotL * TdotV + sin_TL * sin_TV), uniforms.specular_power);
+
+    // Translucency
+    let back_light = max(0.0, dot(-light_dir, in.fur_direction)) * uniforms.translucency;
+
+    // Self-shadowing (darker at base)
+    let ao = mix(1.0 - uniforms.ao_intensity, 1.0, in.shell_height);
+
+    // Final lighting
+    let lighting = (diffuse + specular + back_light) * uniforms.light_intensity * uniforms.light_color;
+    let final_color = color * (lighting + 0.1) * ao;
+
+    // Alpha based on height (thinner tips)
+    let alpha = strand_alpha * (1.0 - in.shell_height * 0.5);
+
+    return vec4<f32>(final_color, alpha);
+}
+"#;
+
+const HAIR_SIM_INTEGRATE_WGSL: &str = r#"
+struct SimUniforms {
+    dt: f32,
+    gravity: vec3<f32>,
+    damping: f32,
+}
+
+@group(0) @binding(0) var<storage, read_write> positions: array<vec4<f32>>;
+@group(0) @binding(1) var<storage, read_write> velocities: array<vec4<f32>>;
+@group(0) @binding(2) var<uniform> uniforms: SimUniforms;
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+    let idx = id.x;
+    if (idx >= arrayLength(&positions)) {
+        return;
+    }
+
+    // w component stores mass (inf = fixed)
+    let mass = positions[idx].w;
+    if (mass <= 0.0) {
+        return; // Fixed particle
+    }
+
+    // Apply gravity
+    velocities[idx] = velocities[idx] + vec4<f32>(uniforms.gravity * uniforms.dt, 0.0);
+
+    // Apply damping
+    velocities[idx] = velocities[idx] * uniforms.damping;
+
+    // Update position (store previous in velocity.w for constraint solving)
+    let prev_pos = positions[idx].xyz;
+    positions[idx] = vec4<f32>(prev_pos + velocities[idx].xyz * uniforms.dt, mass);
+}
+"#;
+
+// ============================================================================
+// UNIT TESTS
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_hair_strand_creation() {
+        let mut strand = HairStrand::new(Vec3::ZERO, Vec3::Y, Vec2::ZERO, 0, 0);
+
+        strand.add_segment(Vec3::new(0.0, 0.0, 0.0), 0.01);
+        strand.add_segment(Vec3::new(0.0, 0.1, 0.0), 0.008);
+        strand.add_segment(Vec3::new(0.0, 0.2, 0.0), 0.006);
+        strand.add_segment(Vec3::new(0.0, 0.3, 0.0), 0.004);
+
+        strand.finalize();
+
+        assert_eq!(strand.segments.len(), 4);
+        assert!((strand.length - 0.3).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_strand_interpolation() {
+        let mut strand = HairStrand::new(Vec3::ZERO, Vec3::Y, Vec2::ZERO, 0, 0);
+
+        strand.add_segment(Vec3::new(0.0, 0.0, 0.0), 0.01);
+        strand.add_segment(Vec3::new(0.0, 1.0, 0.0), 0.01);
+
+        strand.finalize();
+
+        let pos_mid = strand.get_position_at(0.5);
+        assert!((pos_mid.y - 0.5).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_marschner_params() {
+        let blonde = MarschnerParams::blonde();
+        assert!(blonde.melanin < 0.3);
+        assert!(blonde.melanin_redness > 0.1);
+
+        let black = MarschnerParams::black();
+        assert!(black.melanin > 0.9);
+    }
+
+    #[test]
+    fn test_marschner_absorption() {
+        let bsdf = MarschnerBsdf::new(MarschnerParams::black());
+        let absorption = bsdf.absorption_coefficient();
+
+        // Black hair should have high absorption
+        assert!(absorption.x > 0.3);
+        assert!(absorption.y > 0.5);
+        assert!(absorption.z > 1.0);
+    }
+
+    #[test]
+    fn test_marschner_fresnel() {
+        let bsdf = MarschnerBsdf::new(MarschnerParams::default());
+
+        // At grazing angle, should approach 1
+        let grazing = bsdf.fresnel_dielectric(0.1, 1.55);
+        assert!(grazing > 0.5);
+
+        // At normal incidence, should be lower
+        let normal = bsdf.fresnel_dielectric(1.0, 1.55);
+        assert!(normal < grazing);
+    }
+
+    #[test]
+    fn test_hair_group() {
+        let mut group = HairGroup::new("test".to_string(), 0);
+
+        assert_eq!(group.strands.len(), 0);
+
+        let strand = HairStrand::new(Vec3::ZERO, Vec3::Y, Vec2::ZERO, 0, 0);
+        group.add_strand(strand);
+
+        assert_eq!(group.strands.len(), 1);
+    }
+
+    #[test]
+    fn test_fur_material() {
+        let material = FurMaterial::default();
+
+        assert!(material.density > 0.0);
+        assert!(material.length > 0.0);
+        assert!(material.thickness > 0.0);
+    }
+
+    #[test]
+    fn test_deep_opacity_map_layers() {
+        let near = 0.1;
+        let far = 100.0;
+        let layers = 4;
+
+        // Test layer depth distribution
+        for layer in 0..layers {
+            let t = layer as f32 / (layers - 1) as f32;
+            let depth = near + (far - near) * (exp(t * 2.0) - 1.0) / (exp(2.0) - 1.0);
+
+            assert!(depth >= near);
+            assert!(depth <= far);
+
+            if layer > 0 {
+                let prev_t = (layer - 1) as f32 / (layers - 1) as f32;
+                let prev_depth = near + (far - near) * (exp(prev_t * 2.0) - 1.0) / (exp(2.0) - 1.0);
+                assert!(depth > prev_depth);
+            }
+        }
+    }
+
+    #[test]
+    fn test_hair_render_config() {
+        let config = HairRenderConfig::default();
+
+        assert!(config.max_strands > 0);
+        assert!(config.segments_per_strand > 0);
+        assert!(config.msaa_samples >= 1);
+    }
+
+    #[test]
+    fn test_hair_simulation_creation() {
+        let mut strand = HairStrand::new(Vec3::ZERO, Vec3::Y, Vec2::ZERO, 0, 0);
+        strand.add_segment(Vec3::new(0.0, 0.0, 0.0), 0.01);
+        strand.add_segment(Vec3::new(0.0, 0.1, 0.0), 0.01);
+        strand.add_segment(Vec3::new(0.0, 0.2, 0.0), 0.01);
+        strand.finalize();
+
+        let sim = HairSimulation::new(&[strand]);
+
+        assert_eq!(sim.positions.len(), 3);
+        assert_eq!(sim.strand_starts.len(), 1);
+        assert_eq!(sim.strand_lengths[0], 3);
+    }
+
+    #[test]
+    fn test_hair_simulation_root_constraint() {
+        let mut strand = HairStrand::new(Vec3::ZERO, Vec3::Y, Vec2::ZERO, 0, 0);
+        strand.add_segment(Vec3::new(0.0, 0.0, 0.0), 0.01);
+        strand.add_segment(Vec3::new(0.0, 0.1, 0.0), 0.01);
+        strand.finalize();
+
+        let mut sim = HairSimulation::new(&[strand]);
+
+        // Root should be fixed (infinite mass)
+        assert!(sim.masses[0].is_infinite());
+
+        // Simulate
+        sim.simulate(0.016, Vec3::ZERO, &[]);
+
+        // Root position should not change
+        assert!((sim.positions[0] - Vec3::ZERO).length() < 0.001);
+    }
+
+    #[test]
+    fn test_marschner_bsdf_evaluation() {
+        let bsdf = MarschnerBsdf::new(MarschnerParams::default());
+
+        let wi = Vec3::new(0.0, 1.0, 0.0);
+        let wo = Vec3::new(0.0, 0.707, 0.707);
+        let tangent = Vec3::new(1.0, 0.0, 0.0);
+        let normal = Vec3::new(0.0, 1.0, 0.0);
+
+        let result = bsdf.evaluate(wi, wo, tangent, normal);
+
+        // Should return non-negative values
+        assert!(result.x >= 0.0);
+        assert!(result.y >= 0.0);
+        assert!(result.z >= 0.0);
+    }
+
+    #[test]
+    fn test_hash_2d() {
+        let h1 = FurShellRenderer::hash_2d(0, 0);
+        let h2 = FurShellRenderer::hash_2d(1, 0);
+        let h3 = FurShellRenderer::hash_2d(0, 1);
+
+        // Different inputs should produce different outputs
+        assert_ne!(h1, h2);
+        assert_ne!(h1, h3);
+        assert_ne!(h2, h3);
+    }
+
+    #[test]
+    fn test_hair_quality_levels() {
+        let low = HairQuality::Low;
+        let high = HairQuality::Ultra;
+
+        // Just verify enum variants exist
+        match low {
+            HairQuality::Low => {},
+            _ => panic!("Expected Low"),
+        }
+
+        match high {
+            HairQuality::Ultra => {},
+            _ => panic!("Expected Ultra"),
+        }
+    }
+
+    #[test]
+    fn test_lod_distances() {
+        let config = HairRenderConfig::default();
+
+        // LOD distances should be increasing
+        for i in 1..config.lod_distances.len() {
+            assert!(config.lod_distances[i] > config.lod_distances[i - 1]);
+        }
+
+        // Strand counts should be decreasing
+        for i in 1..config.lod_strand_counts.len() {
+            assert!(config.lod_strand_counts[i] <= config.lod_strand_counts[i - 1]);
+        }
+    }
+}

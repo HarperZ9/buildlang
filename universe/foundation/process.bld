@@ -1,0 +1,973 @@
+// ============================================================================
+// BUILD UNIVERSE - Foundation Process Module
+// Copyright 2024-2025 Zain Dana Harper. All Rights Reserved.
+// Proprietary and confidential. Unauthorized copying, distribution,
+// or modification is strictly prohibited.
+// ============================================================================
+
+//! Process spawning, management, and inter-process communication.
+//!
+//! This module provides utilities for spawning child processes, managing
+//! their I/O, handling signals, and environment manipulation.
+
+use foundation::io::{Read, Write};
+use foundation::collections::{Vec, HashMap};
+use foundation::fs::Path;
+
+// ============================================================================
+// Exit Status
+// ============================================================================
+
+/// Exit status of a completed process.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ExitStatus {
+    code: Option<i32>,
+    signal: Option<i32>,
+}
+
+impl ExitStatus {
+    /// Create from exit code.
+    pub fn from_code(code: i32) -> Self {
+        Self { code: Some(code), signal: None }
+    }
+
+    /// Create from signal.
+    pub fn from_signal(signal: i32) -> Self {
+        Self { code: None, signal: Some(signal) }
+    }
+
+    /// Check if process exited successfully (code 0).
+    pub fn success(self: &Self) -> bool {
+        self.code == Some(0)
+    }
+
+    /// Get exit code if available.
+    pub fn code(self: &Self) -> Option<i32> {
+        self.code
+    }
+
+    /// Get signal if process was terminated by signal.
+    pub fn signal(self: &Self) -> Option<i32> {
+        self.signal
+    }
+}
+
+impl std::fmt::Display for ExitStatus {
+    fn fmt(self: &Self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match (self.code, self.signal) {
+            (Some(code), _) => write!(f, "exit code: {}", code),
+            (_, Some(sig)) => write!(f, "signal: {}", sig),
+            _ => write!(f, "unknown"),
+        }
+    }
+}
+
+// ============================================================================
+// Process Output
+// ============================================================================
+
+/// Output from a completed process.
+#[derive(Clone, Debug)]
+pub struct Output {
+    /// Exit status.
+    pub status: ExitStatus,
+    /// Captured stdout.
+    pub stdout: Vec<u8>,
+    /// Captured stderr.
+    pub stderr: Vec<u8>,
+}
+
+impl Output {
+    /// Get stdout as string (lossy UTF-8 conversion).
+    pub fn stdout_string(self: &Self) -> String {
+        String::from_utf8_lossy(&self.stdout).to_string()
+    }
+
+    /// Get stderr as string (lossy UTF-8 conversion).
+    pub fn stderr_string(self: &Self) -> String {
+        String::from_utf8_lossy(&self.stderr).to_string()
+    }
+}
+
+// ============================================================================
+// Stdio Configuration
+// ============================================================================
+
+/// Configuration for process stdio streams.
+#[derive(Clone, Debug)]
+pub enum Stdio {
+    /// Inherit from parent process.
+    Inherit,
+    /// Create a pipe for communication.
+    Piped,
+    /// Redirect to null device.
+    Null,
+    /// Redirect to/from file.
+    File(Path),
+}
+
+impl Stdio {
+    /// Create inherited stdio.
+    pub fn inherit() -> Self {
+        Stdio::Inherit
+    }
+
+    /// Create piped stdio.
+    pub fn piped() -> Self {
+        Stdio::Piped
+    }
+
+    /// Create null stdio.
+    pub fn null() -> Self {
+        Stdio::Null
+    }
+}
+
+// ============================================================================
+// Command Builder
+// ============================================================================
+
+/// Builder for configuring and spawning processes.
+#[derive(Clone, Debug)]
+pub struct Command {
+    program: String,
+    args: Vec<String>,
+    env: HashMap<String, String>,
+    env_clear: bool,
+    current_dir: Option<Path>,
+    stdin: Stdio,
+    stdout: Stdio,
+    stderr: Stdio,
+}
+
+impl Command {
+    /// Create new command for given program.
+    pub fn new<S: Into<String>>(program: S) -> Self {
+        Self {
+            program: program.into(),
+            args: Vec::new(),
+            env: HashMap::new(),
+            env_clear: false,
+            current_dir: None,
+            stdin: Stdio::Inherit,
+            stdout: Stdio::Inherit,
+            stderr: Stdio::Inherit,
+        }
+    }
+
+    /// Add single argument.
+    pub fn arg<S: Into<String>>(mut self: Self, arg: S) -> Self {
+        self.args.push(arg.into());
+        self
+    }
+
+    /// Add multiple arguments.
+    pub fn args<I, S>(mut self: Self, args: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        for arg in args {
+            self.args.push(arg.into());
+        }
+        self
+    }
+
+    /// Set environment variable.
+    pub fn env<K: Into<String>, V: Into<String>>(mut self: Self, key: K, value: V) -> Self {
+        self.env.insert(key.into(), value.into());
+        self
+    }
+
+    /// Set multiple environment variables.
+    pub fn envs<I, K, V>(mut self: Self, vars: I) -> Self
+    where
+        I: IntoIterator<Item = (K, V)>,
+        K: Into<String>,
+        V: Into<String>,
+    {
+        for (key, value) in vars {
+            self.env.insert(key.into(), value.into());
+        }
+        self
+    }
+
+    /// Remove environment variable.
+    pub fn env_remove<K: AsRef<str>>(mut self: Self, key: K) -> Self {
+        self.env.remove(key.as_ref());
+        self
+    }
+
+    /// Clear all environment variables.
+    pub fn env_clear(mut self: Self) -> Self {
+        self.env_clear = true;
+        self.env.clear();
+        self
+    }
+
+    /// Set working directory.
+    pub fn current_dir<P: Into<Path>>(mut self: Self, dir: P) -> Self {
+        self.current_dir = Some(dir.into());
+        self
+    }
+
+    /// Configure stdin.
+    pub fn stdin(mut self: Self, cfg: Stdio) -> Self {
+        self.stdin = cfg;
+        self
+    }
+
+    /// Configure stdout.
+    pub fn stdout(mut self: Self, cfg: Stdio) -> Self {
+        self.stdout = cfg;
+        self
+    }
+
+    /// Configure stderr.
+    pub fn stderr(mut self: Self, cfg: Stdio) -> Self {
+        self.stderr = cfg;
+        self
+    }
+
+    /// Get program name.
+    pub fn get_program(self: &Self) -> &str {
+        &self.program
+    }
+
+    /// Get arguments.
+    pub fn get_args(self: &Self) -> &[String] {
+        &self.args
+    }
+
+    /// Get environment variables.
+    pub fn get_envs(self: &Self) -> &HashMap<String, String> {
+        &self.env
+    }
+
+    /// Get current directory.
+    pub fn get_current_dir(self: &Self) -> Option<&Path> {
+        self.current_dir.as_ref()
+    }
+
+    /// Spawn process without waiting.
+    pub fn spawn(self: &Self) -> Result<Child, ProcessError> {
+        Child::spawn(self)
+    }
+
+    /// Run and wait for completion.
+    pub fn status(self: &Self) -> Result<ExitStatus, ProcessError> {
+        let mut child = self.spawn()?;
+        child.wait()
+    }
+
+    /// Run and capture output.
+    pub fn output(self: &Self) -> Result<Output, ProcessError> {
+        let cmd = self.clone()
+            .stdout(Stdio::Piped)
+            .stderr(Stdio::Piped);
+        let mut child = cmd.spawn()?;
+        child.wait_with_output()
+    }
+}
+
+// ============================================================================
+// Child Process
+// ============================================================================
+
+/// Handle to a running child process.
+pub struct Child {
+    /// Process ID.
+    pid: u32,
+    /// Handle to stdin pipe (if piped).
+    stdin: Option<ChildStdin>,
+    /// Handle to stdout pipe (if piped).
+    stdout: Option<ChildStdout>,
+    /// Handle to stderr pipe (if piped).
+    stderr: Option<ChildStderr>,
+    /// Whether process has exited.
+    exited: bool,
+    /// Exit status if available.
+    status: Option<ExitStatus>,
+}
+
+/// Handle to child's stdin.
+pub struct ChildStdin {
+    handle: PipeWriter,
+}
+
+impl Write for ChildStdin {
+    fn write(self: &mut Self, buf: &[u8]) -> std::io::Result<usize> {
+        self.handle.write(buf)
+    }
+
+    fn flush(self: &mut Self) -> std::io::Result<()> {
+        self.handle.flush()
+    }
+}
+
+/// Handle to child's stdout.
+pub struct ChildStdout {
+    handle: PipeReader,
+}
+
+impl Read for ChildStdout {
+    fn read(self: &mut Self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.handle.read(buf)
+    }
+}
+
+/// Handle to child's stderr.
+pub struct ChildStderr {
+    handle: PipeReader,
+}
+
+impl Read for ChildStderr {
+    fn read(self: &mut Self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.handle.read(buf)
+    }
+}
+
+/// Internal pipe reader.
+struct PipeReader {
+    fd: i32,
+}
+
+impl PipeReader {
+    fn read(self: &mut Self, buf: &mut [u8]) -> std::io::Result<usize> {
+        // Platform-specific read implementation
+        intrinsic::pipe_read(self.fd, buf)
+    }
+}
+
+/// Internal pipe writer.
+struct PipeWriter {
+    fd: i32,
+}
+
+impl PipeWriter {
+    fn write(self: &mut Self, buf: &[u8]) -> std::io::Result<usize> {
+        intrinsic::pipe_write(self.fd, buf)
+    }
+
+    fn flush(self: &mut Self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl Child {
+    /// Spawn child process from command.
+    fn spawn(cmd: &Command) -> Result<Self, ProcessError> {
+        // Platform-specific process spawning
+        intrinsic::spawn_process(cmd)
+    }
+
+    /// Get process ID.
+    pub fn id(self: &Self) -> u32 {
+        self.pid
+    }
+
+    /// Take stdin handle.
+    pub fn stdin(self: &mut Self) -> Option<ChildStdin> {
+        self.stdin.take()
+    }
+
+    /// Take stdout handle.
+    pub fn stdout(self: &mut Self) -> Option<ChildStdout> {
+        self.stdout.take()
+    }
+
+    /// Take stderr handle.
+    pub fn stderr(self: &mut Self) -> Option<ChildStderr> {
+        self.stderr.take()
+    }
+
+    /// Check if process has exited without blocking.
+    pub fn try_wait(self: &mut Self) -> Result<Option<ExitStatus>, ProcessError> {
+        if self.exited {
+            return Ok(self.status);
+        }
+
+        match intrinsic::try_wait(self.pid) {
+            Ok(Some(status)) => {
+                self.exited = true;
+                self.status = Some(status);
+                Ok(Some(status))
+            }
+            Ok(None) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Wait for process to exit.
+    pub fn wait(self: &mut Self) -> Result<ExitStatus, ProcessError> {
+        if self.exited {
+            return Ok(self.status.unwrap_or(ExitStatus::from_code(0)));
+        }
+
+        let status = intrinsic::wait_process(self.pid)?;
+        self.exited = true;
+        self.status = Some(status);
+        Ok(status)
+    }
+
+    /// Wait and capture output.
+    pub fn wait_with_output(mut self: Self) -> Result<Output, ProcessError> {
+        // Read stdout and stderr
+        let mut stdout_data = Vec::new();
+        let mut stderr_data = Vec::new();
+
+        if let Some(mut stdout) = self.stdout.take() {
+            stdout.read_to_end(&mut stdout_data)?;
+        }
+
+        if let Some(mut stderr) = self.stderr.take() {
+            stderr.read_to_end(&mut stderr_data)?;
+        }
+
+        let status = self.wait()?;
+
+        Ok(Output {
+            status,
+            stdout: stdout_data,
+            stderr: stderr_data,
+        })
+    }
+
+    /// Send signal to process.
+    pub fn kill(self: &mut Self) -> Result<(), ProcessError> {
+        if self.exited {
+            return Ok(());
+        }
+        intrinsic::kill_process(self.pid, Signal::Kill)
+    }
+
+    /// Send specific signal.
+    pub fn signal(self: &mut Self, sig: Signal) -> Result<(), ProcessError> {
+        if self.exited {
+            return Ok(());
+        }
+        intrinsic::kill_process(self.pid, sig)
+    }
+}
+
+impl Drop for Child {
+    fn drop(self: &mut Self) {
+        // Clean up process resources
+        if !self.exited {
+            let _ = self.try_wait();
+        }
+    }
+}
+
+// ============================================================================
+// Signals
+// ============================================================================
+
+/// Unix signals.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Signal {
+    /// Hangup.
+    Hangup,
+    /// Interrupt (Ctrl+C).
+    Interrupt,
+    /// Quit.
+    Quit,
+    /// Illegal instruction.
+    Illegal,
+    /// Trace trap.
+    Trap,
+    /// Abort.
+    Abort,
+    /// Bus error.
+    Bus,
+    /// Floating point exception.
+    FloatingPointException,
+    /// Kill (cannot be caught).
+    Kill,
+    /// User signal 1.
+    User1,
+    /// Segmentation fault.
+    SegmentationFault,
+    /// User signal 2.
+    User2,
+    /// Broken pipe.
+    Pipe,
+    /// Alarm.
+    Alarm,
+    /// Terminate.
+    Terminate,
+    /// Child status changed.
+    Child,
+    /// Continue.
+    Continue,
+    /// Stop (cannot be caught).
+    Stop,
+    /// Terminal stop.
+    TerminalStop,
+    /// Background read.
+    BackgroundRead,
+    /// Background write.
+    BackgroundWrite,
+    /// Urgent I/O.
+    Urgent,
+    /// CPU time limit.
+    CpuLimit,
+    /// File size limit.
+    FileLimit,
+    /// Virtual alarm.
+    VirtualAlarm,
+    /// Profiling timer.
+    Profiling,
+    /// Window resize.
+    WindowResize,
+    /// I/O ready.
+    IoReady,
+    /// Power failure.
+    Power,
+    /// Bad system call.
+    BadSystemCall,
+}
+
+impl Signal {
+    /// Convert to signal number.
+    pub fn as_raw(self: Self) -> i32 {
+        match self {
+            Signal::Hangup => 1,
+            Signal::Interrupt => 2,
+            Signal::Quit => 3,
+            Signal::Illegal => 4,
+            Signal::Trap => 5,
+            Signal::Abort => 6,
+            Signal::Bus => 7,
+            Signal::FloatingPointException => 8,
+            Signal::Kill => 9,
+            Signal::User1 => 10,
+            Signal::SegmentationFault => 11,
+            Signal::User2 => 12,
+            Signal::Pipe => 13,
+            Signal::Alarm => 14,
+            Signal::Terminate => 15,
+            Signal::Child => 17,
+            Signal::Continue => 18,
+            Signal::Stop => 19,
+            Signal::TerminalStop => 20,
+            Signal::BackgroundRead => 21,
+            Signal::BackgroundWrite => 22,
+            Signal::Urgent => 23,
+            Signal::CpuLimit => 24,
+            Signal::FileLimit => 25,
+            Signal::VirtualAlarm => 26,
+            Signal::Profiling => 27,
+            Signal::WindowResize => 28,
+            Signal::IoReady => 29,
+            Signal::Power => 30,
+            Signal::BadSystemCall => 31,
+        }
+    }
+
+    /// Create from signal number.
+    pub fn from_raw(num: i32) -> Option<Self> {
+        match num {
+            1 => Some(Signal::Hangup),
+            2 => Some(Signal::Interrupt),
+            3 => Some(Signal::Quit),
+            4 => Some(Signal::Illegal),
+            5 => Some(Signal::Trap),
+            6 => Some(Signal::Abort),
+            7 => Some(Signal::Bus),
+            8 => Some(Signal::FloatingPointException),
+            9 => Some(Signal::Kill),
+            10 => Some(Signal::User1),
+            11 => Some(Signal::SegmentationFault),
+            12 => Some(Signal::User2),
+            13 => Some(Signal::Pipe),
+            14 => Some(Signal::Alarm),
+            15 => Some(Signal::Terminate),
+            17 => Some(Signal::Child),
+            18 => Some(Signal::Continue),
+            19 => Some(Signal::Stop),
+            20 => Some(Signal::TerminalStop),
+            21 => Some(Signal::BackgroundRead),
+            22 => Some(Signal::BackgroundWrite),
+            23 => Some(Signal::Urgent),
+            24 => Some(Signal::CpuLimit),
+            25 => Some(Signal::FileLimit),
+            26 => Some(Signal::VirtualAlarm),
+            27 => Some(Signal::Profiling),
+            28 => Some(Signal::WindowResize),
+            29 => Some(Signal::IoReady),
+            30 => Some(Signal::Power),
+            31 => Some(Signal::BadSystemCall),
+            _ => None,
+        }
+    }
+}
+
+// ============================================================================
+// Signal Handler
+// ============================================================================
+
+/// Signal handler registration.
+pub struct SignalHandler {
+    signal: Signal,
+    previous: Option<Box<dyn Fn()>>,
+}
+
+impl SignalHandler {
+    /// Register handler for signal.
+    pub fn register<F: Fn() + 'static>(signal: Signal, handler: F) -> Result<Self, ProcessError> {
+        intrinsic::register_signal_handler(signal, Box::new(handler))?;
+        Ok(Self {
+            signal,
+            previous: None,
+        })
+    }
+
+    /// Ignore signal.
+    pub fn ignore(signal: Signal) -> Result<Self, ProcessError> {
+        Self::register(signal, || {})
+    }
+
+    /// Reset to default handler.
+    pub fn reset(self: Self) -> Result<(), ProcessError> {
+        intrinsic::reset_signal_handler(self.signal)
+    }
+}
+
+// ============================================================================
+// Environment
+// ============================================================================
+
+/// Environment variable operations.
+pub mod env {
+    use super::*;
+
+    /// Get environment variable.
+    pub fn var(key: &str) -> Option<String> {
+        intrinsic::get_env_var(key)
+    }
+
+    /// Get environment variable or default.
+    pub fn var_or(key: &str, default: &str) -> String {
+        var(key).unwrap_or_else(|| default.to_string())
+    }
+
+    /// Set environment variable.
+    pub fn set_var(key: &str, value: &str) {
+        intrinsic::set_env_var(key, value);
+    }
+
+    /// Remove environment variable.
+    pub fn remove_var(key: &str) {
+        intrinsic::remove_env_var(key);
+    }
+
+    /// Get all environment variables.
+    pub fn vars() -> HashMap<String, String> {
+        intrinsic::get_all_env_vars()
+    }
+
+    /// Get current working directory.
+    pub fn current_dir() -> Result<Path, ProcessError> {
+        intrinsic::get_current_dir()
+    }
+
+    /// Set current working directory.
+    pub fn set_current_dir<P: AsRef<Path>>(path: P) -> Result<(), ProcessError> {
+        intrinsic::set_current_dir(path.as_ref())
+    }
+
+    /// Get home directory.
+    pub fn home_dir() -> Option<Path> {
+        #[cfg(unix)]
+        {
+            var("HOME").map(Path::from)
+        }
+        #[cfg(windows)]
+        {
+            var("USERPROFILE").map(Path::from)
+        }
+    }
+
+    /// Get temp directory.
+    pub fn temp_dir() -> Path {
+        #[cfg(unix)]
+        {
+            var("TMPDIR").map(Path::from).unwrap_or_else(|| Path::from("/tmp"))
+        }
+        #[cfg(windows)]
+        {
+            var("TEMP").or_else(|| var("TMP"))
+                .map(Path::from)
+                .unwrap_or_else(|| Path::from("C:\\Windows\\Temp"))
+        }
+    }
+
+    /// Get executable path.
+    pub fn current_exe() -> Result<Path, ProcessError> {
+        intrinsic::get_current_exe()
+    }
+
+    /// Get command line arguments.
+    pub fn args() -> Vec<String> {
+        intrinsic::get_args()
+    }
+
+    /// Get command line arguments as iterator.
+    pub fn args_iter() -> impl Iterator<Item = String> {
+        args().into_iter()
+    }
+}
+
+// ============================================================================
+// Process Info
+// ============================================================================
+
+/// Get current process ID.
+pub fn id() -> u32 {
+    intrinsic::get_pid()
+}
+
+/// Get parent process ID.
+pub fn parent_id() -> u32 {
+    intrinsic::get_ppid()
+}
+
+/// Exit current process.
+pub fn exit(code: i32) -> ! {
+    intrinsic::exit_process(code)
+}
+
+/// Abort current process.
+pub fn abort() -> ! {
+    intrinsic::abort_process()
+}
+
+// ============================================================================
+// Process Error
+// ============================================================================
+
+/// Errors that can occur with processes.
+#[derive(Debug)]
+pub enum ProcessError {
+    /// Program not found.
+    NotFound(String),
+    /// Permission denied.
+    PermissionDenied(String),
+    /// I/O error.
+    IoError(String),
+    /// Invalid argument.
+    InvalidArgument(String),
+    /// Process limit reached.
+    ResourceLimit(String),
+    /// Other error.
+    Other(String),
+}
+
+impl ProcessError {
+    pub fn description(self: &Self) -> String {
+        match self {
+            ProcessError::NotFound(msg) => format!("Program not found: {}", msg),
+            ProcessError::PermissionDenied(msg) => format!("Permission denied: {}", msg),
+            ProcessError::IoError(msg) => format!("I/O error: {}", msg),
+            ProcessError::InvalidArgument(msg) => format!("Invalid argument: {}", msg),
+            ProcessError::ResourceLimit(msg) => format!("Resource limit: {}", msg),
+            ProcessError::Other(msg) => msg.clone(),
+        }
+    }
+}
+
+impl std::fmt::Display for ProcessError {
+    fn fmt(self: &Self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.description())
+    }
+}
+
+impl std::error::Error for ProcessError {}
+
+// ============================================================================
+// Convenience Functions
+// ============================================================================
+
+/// Run command and return success/failure.
+pub fn run<S: AsRef<str>>(program: S, args: &[&str]) -> Result<bool, ProcessError> {
+    let mut cmd = Command::new(program.as_ref());
+    for arg in args {
+        cmd = cmd.arg(*arg);
+    }
+    let status = cmd.status()?;
+    Ok(status.success())
+}
+
+/// Run command and capture output.
+pub fn run_output<S: AsRef<str>>(program: S, args: &[&str]) -> Result<Output, ProcessError> {
+    let mut cmd = Command::new(program.as_ref());
+    for arg in args {
+        cmd = cmd.arg(*arg);
+    }
+    cmd.output()
+}
+
+/// Run shell command.
+pub fn shell<S: AsRef<str>>(command: S) -> Result<Output, ProcessError> {
+    #[cfg(unix)]
+    {
+        Command::new("sh")
+            .arg("-c")
+            .arg(command.as_ref())
+            .output()
+    }
+    #[cfg(windows)]
+    {
+        Command::new("cmd")
+            .arg("/C")
+            .arg(command.as_ref())
+            .output()
+    }
+}
+
+/// Execute and replace current process (Unix exec).
+#[cfg(unix)]
+pub fn exec<S: Into<String>>(program: S, args: &[&str]) -> Result<(), ProcessError> {
+    let program = program.into();
+    let args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+    intrinsic::exec_process(&program, &args)
+}
+
+// ============================================================================
+// Pipeline
+// ============================================================================
+
+/// Pipeline of commands connected by pipes.
+pub struct Pipeline {
+    commands: Vec<Command>,
+}
+
+impl Pipeline {
+    /// Create new pipeline.
+    pub fn new() -> Self {
+        Self { commands: Vec::new() }
+    }
+
+    /// Add command to pipeline.
+    pub fn pipe(mut self: Self, cmd: Command) -> Self {
+        self.commands.push(cmd);
+        self
+    }
+
+    /// Execute pipeline and return final output.
+    pub fn execute(self: Self) -> Result<Output, ProcessError> {
+        if self.commands.is_empty() {
+            return Err(ProcessError::InvalidArgument("Empty pipeline".to_string()));
+        }
+
+        if self.commands.len() == 1 {
+            return self.commands[0].output();
+        }
+
+        let mut children = Vec::new();
+        let mut prev_stdout: Option<ChildStdout> = None;
+
+        for (i, mut cmd) in self.commands.into_iter().enumerate() {
+            let is_last = i == self.commands.len() - 1;
+
+            // Connect stdin to previous stdout
+            if prev_stdout.is_some() {
+                cmd = cmd.stdin(Stdio::Piped);
+            }
+
+            // Pipe stdout to next command (except last)
+            if !is_last {
+                cmd = cmd.stdout(Stdio::Piped);
+            } else {
+                cmd = cmd.stdout(Stdio::Piped);
+                cmd = cmd.stderr(Stdio::Piped);
+            }
+
+            let mut child = cmd.spawn()?;
+
+            // Write previous output to this stdin
+            if let Some(mut prev) = prev_stdout.take() {
+                if let Some(mut stdin) = child.stdin() {
+                    let mut buf = [0u8; 8192];
+                    loop {
+                        match prev.read(&mut buf) {
+                            Ok(0) => break,
+                            Ok(n) => { stdin.write(&buf[..n])?; }
+                            Err(e) => return Err(ProcessError::IoError(e.to_string())),
+                        }
+                    }
+                }
+            }
+
+            prev_stdout = child.stdout();
+            children.push(child);
+        }
+
+        // Wait for all children and get last output
+        let mut last_output = None;
+        for child in children {
+            last_output = Some(child.wait_with_output()?);
+        }
+
+        last_output.ok_or(ProcessError::Other("No output".to_string()))
+    }
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_exit_status() {
+        let success = ExitStatus::from_code(0);
+        assert!(success.success());
+        assert_eq!(success.code(), Some(0));
+
+        let failure = ExitStatus::from_code(1);
+        assert!(!failure.success());
+        assert_eq!(failure.code(), Some(1));
+    }
+
+    #[test]
+    fn test_command_builder() {
+        let cmd = Command::new("echo")
+            .arg("hello")
+            .arg("world")
+            .env("FOO", "bar")
+            .current_dir("/tmp");
+
+        assert_eq!(cmd.get_program(), "echo");
+        assert_eq!(cmd.get_args(), &["hello", "world"]);
+        assert!(cmd.get_envs().contains_key("FOO"));
+    }
+
+    #[test]
+    fn test_signal_conversion() {
+        assert_eq!(Signal::Kill.as_raw(), 9);
+        assert_eq!(Signal::from_raw(9), Some(Signal::Kill));
+        assert_eq!(Signal::from_raw(999), None);
+    }
+
+    #[test]
+    fn test_env_vars() {
+        env::set_var("TEST_VAR", "test_value");
+        assert_eq!(env::var("TEST_VAR"), Some("test_value".to_string()));
+
+        env::remove_var("TEST_VAR");
+        assert_eq!(env::var("TEST_VAR"), None);
+    }
+
+    #[test]
+    fn test_pipeline_builder() {
+        let pipeline = Pipeline::new()
+            .pipe(Command::new("echo").arg("hello"))
+            .pipe(Command::new("cat"));
+
+        assert!(pipeline.commands.len() == 2);
+    }
+}

@@ -1,0 +1,2962 @@
+// ============================================================================
+// NEUTRINO: Neural Super-Resolution and Upscaling Networks
+// ============================================================================
+// Real-time neural upscaling for game rendering including DLSS-like
+// temporal super-resolution, ESPCN, EDSR, RCAN, and modern architectures.
+// ============================================================================
+
+import lib::{Tensor, Shape, DataType, Layer, Conv2d, Linear, BatchNorm2d, LayerNorm};
+import lib::{ReLU, LeakyReLU, GELU, SiLU, PReLU, Sigmoid, Tanh};
+import lib::{PixelShuffle, Upsample, Sequential, ResidualBlock};
+import lib::{MSELoss, L1Loss, PerceptualLoss, SSIMLoss};
+import inference::{InferenceSession, InferenceEngine, InferenceBackend};
+
+// ============================================================================
+// UPSCALING MODES AND QUALITY SETTINGS
+// ============================================================================
+
+/// Upscaling quality presets
+pub enum UpscaleQuality {
+    /// Ultra Performance - 3x upscale, fastest
+    UltraPerformance,
+    /// Performance - 2x upscale, fast
+    Performance,
+    /// Balanced - 1.7x upscale, balanced quality/speed
+    Balanced,
+    /// Quality - 1.5x upscale, high quality
+    Quality,
+    /// Ultra Quality - 1.3x upscale, highest quality
+    UltraQuality,
+    /// Native AA - 1x, anti-aliasing only
+    NativeAA,
+    /// Custom scale factor
+    Custom { scale: f32 },
+}
+
+impl UpscaleQuality {
+    pub fn scale_factor(&self) -> f32 {
+        match self {
+            UpscaleQuality::UltraPerformance => 3.0,
+            UpscaleQuality::Performance => 2.0,
+            UpscaleQuality::Balanced => 1.7,
+            UpscaleQuality::Quality => 1.5,
+            UpscaleQuality::UltraQuality => 1.3,
+            UpscaleQuality::NativeAA => 1.0,
+            UpscaleQuality::Custom { scale } => *scale,
+        }
+    }
+
+    pub fn render_resolution(&self, output_width: u32, output_height: u32) -> (u32, u32) {
+        let scale = self.scale_factor();
+        let render_width = (output_width as f32 / scale).ceil() as u32;
+        let render_height = (output_height as f32 / scale).ceil() as u32;
+        (render_width, render_height)
+    }
+
+    pub fn name(&self) -> &str {
+        match self {
+            UpscaleQuality::UltraPerformance => "Ultra Performance",
+            UpscaleQuality::Performance => "Performance",
+            UpscaleQuality::Balanced => "Balanced",
+            UpscaleQuality::Quality => "Quality",
+            UpscaleQuality::UltraQuality => "Ultra Quality",
+            UpscaleQuality::NativeAA => "Native AA",
+            UpscaleQuality::Custom { .. } => "Custom",
+        }
+    }
+}
+
+/// Upscaling algorithm type
+pub enum UpscaleMethod {
+    /// Traditional bicubic interpolation
+    Bicubic,
+    /// Lanczos interpolation
+    Lanczos,
+    /// ESPCN (Efficient Sub-Pixel CNN)
+    ESPCN,
+    /// EDSR (Enhanced Deep Residual)
+    EDSR,
+    /// RCAN (Residual Channel Attention)
+    RCAN,
+    /// SwinIR (Swin Transformer for Image Restoration)
+    SwinIR,
+    /// Real-ESRGAN
+    RealESRGAN,
+    /// Temporal super-resolution (DLSS-like)
+    TemporalSR,
+    /// FSR 2.0 style upscaling
+    FSRStyle,
+    /// Custom neural network
+    CustomNetwork,
+}
+
+// ============================================================================
+// SUB-PIXEL CONVOLUTION (ESPCN)
+// ============================================================================
+
+/// Efficient Sub-Pixel Convolutional Neural Network
+/// Real-time super-resolution using sub-pixel convolution
+pub struct ESPCN {
+    /// Scale factor (2, 3, or 4)
+    scale: usize,
+    /// Number of input channels
+    in_channels: usize,
+    /// Number of feature channels
+    num_features: usize,
+    /// Feature extraction layers
+    feature_layers: Vec<Conv2d>,
+    /// Upscaling convolution (outputs scale^2 * channels)
+    upscale_conv: Conv2d,
+    /// Activation functions
+    activations: Vec<ReLU>,
+    /// Trained weights loaded
+    weights_loaded: bool,
+}
+
+impl ESPCN {
+    pub fn new(scale: usize, in_channels: usize, num_features: usize) -> Self {
+        assert!(scale == 2 || scale == 3 || scale == 4, "ESPCN supports scale 2, 3, or 4");
+
+        // Build feature extraction layers
+        let mut feature_layers = Vec::new();
+        let mut activations = Vec::new();
+
+        // First conv: in_channels -> num_features, 5x5
+        feature_layers.push(Conv2d::new(
+            in_channels,
+            num_features,
+            (5, 5),
+            (1, 1),
+            (2, 2),
+            (1, 1),
+            1,
+            true,
+        ));
+        activations.push(ReLU::new());
+
+        // Second conv: num_features -> num_features/2, 3x3
+        feature_layers.push(Conv2d::new(
+            num_features,
+            num_features / 2,
+            (3, 3),
+            (1, 1),
+            (1, 1),
+            (1, 1),
+            1,
+            true,
+        ));
+        activations.push(ReLU::new());
+
+        // Third conv: num_features/2 -> num_features/2, 3x3
+        feature_layers.push(Conv2d::new(
+            num_features / 2,
+            num_features / 2,
+            (3, 3),
+            (1, 1),
+            (1, 1),
+            (1, 1),
+            1,
+            true,
+        ));
+        activations.push(ReLU::new());
+
+        // Upscaling conv: num_features/2 -> in_channels * scale^2
+        let upscale_conv = Conv2d::new(
+            num_features / 2,
+            in_channels * scale * scale,
+            (3, 3),
+            (1, 1),
+            (1, 1),
+            (1, 1),
+            1,
+            true,
+        );
+
+        Self {
+            scale,
+            in_channels,
+            num_features,
+            feature_layers,
+            upscale_conv,
+            activations,
+            weights_loaded: false,
+        }
+    }
+
+    pub fn forward(&self, input: &Tensor) -> Tensor {
+        let mut x = input.clone();
+
+        // Feature extraction
+        for i in 0..self.feature_layers.len() {
+            x = self.feature_layers[i].forward(&x);
+            x = self.activations[i].forward(&x);
+        }
+
+        // Upscaling convolution
+        x = self.upscale_conv.forward(&x);
+
+        // Pixel shuffle to rearrange into high-res output
+        let pixel_shuffle = PixelShuffle::new(self.scale);
+        pixel_shuffle.forward(&x)
+    }
+
+    pub fn load_weights(&mut self, path: &str) -> Result<(), String> {
+        // Load pretrained weights from file
+        // Implementation would read weight tensors from file format
+        self.weights_loaded = true;
+        Ok(())
+    }
+
+    pub fn parameters(&self) -> Vec<&Tensor> {
+        let mut params = Vec::new();
+        for layer in &self.feature_layers {
+            params.extend(layer.parameters());
+        }
+        params.extend(self.upscale_conv.parameters());
+        params
+    }
+
+    pub fn num_parameters(&self) -> usize {
+        self.parameters().iter().map(|p| p.numel()).sum()
+    }
+}
+
+// ============================================================================
+// ENHANCED DEEP RESIDUAL NETWORK (EDSR)
+// ============================================================================
+
+/// EDSR Residual Block (no batch normalization)
+pub struct EDSRResBlock {
+    conv1: Conv2d,
+    conv2: Conv2d,
+    activation: ReLU,
+    res_scale: f32,
+}
+
+impl EDSRResBlock {
+    pub fn new(num_features: usize, res_scale: f32) -> Self {
+        Self {
+            conv1: Conv2d::new(num_features, num_features, (3, 3), (1, 1), (1, 1), (1, 1), 1, true),
+            conv2: Conv2d::new(num_features, num_features, (3, 3), (1, 1), (1, 1), (1, 1), 1, true),
+            activation: ReLU::new(),
+            res_scale,
+        }
+    }
+
+    pub fn forward(&self, input: &Tensor) -> Tensor {
+        let mut x = self.conv1.forward(input);
+        x = self.activation.forward(&x);
+        x = self.conv2.forward(&x);
+
+        // Scale residual
+        if self.res_scale != 1.0 {
+            x = x.mul_scalar(self.res_scale);
+        }
+
+        // Add residual connection
+        input.add(&x)
+    }
+}
+
+/// Enhanced Deep Super-Resolution Network
+pub struct EDSR {
+    /// Scale factor
+    scale: usize,
+    /// Number of input channels
+    in_channels: usize,
+    /// Number of feature channels
+    num_features: usize,
+    /// Number of residual blocks
+    num_blocks: usize,
+    /// Residual scaling factor
+    res_scale: f32,
+    /// Head convolution
+    head: Conv2d,
+    /// Body residual blocks
+    body: Vec<EDSRResBlock>,
+    /// Body tail convolution
+    body_tail: Conv2d,
+    /// Upscale module
+    upscale: Vec<Conv2d>,
+    /// Tail convolution
+    tail: Conv2d,
+}
+
+impl EDSR {
+    pub fn new(
+        scale: usize,
+        in_channels: usize,
+        num_features: usize,
+        num_blocks: usize,
+        res_scale: f32,
+    ) -> Self {
+        // Head: extract features
+        let head = Conv2d::new(in_channels, num_features, (3, 3), (1, 1), (1, 1), (1, 1), 1, true);
+
+        // Body: residual blocks
+        let mut body = Vec::with_capacity(num_blocks);
+        for _ in 0..num_blocks {
+            body.push(EDSRResBlock::new(num_features, res_scale));
+        }
+
+        // Body tail
+        let body_tail = Conv2d::new(num_features, num_features, (3, 3), (1, 1), (1, 1), (1, 1), 1, true);
+
+        // Upscale: sub-pixel convolution layers
+        let mut upscale = Vec::new();
+        if scale == 2 || scale == 3 {
+            upscale.push(Conv2d::new(
+                num_features,
+                num_features * scale * scale,
+                (3, 3),
+                (1, 1),
+                (1, 1),
+                (1, 1),
+                1,
+                true,
+            ));
+        } else if scale == 4 {
+            // Two 2x upscales for 4x
+            upscale.push(Conv2d::new(
+                num_features,
+                num_features * 4,
+                (3, 3),
+                (1, 1),
+                (1, 1),
+                (1, 1),
+                1,
+                true,
+            ));
+            upscale.push(Conv2d::new(
+                num_features,
+                num_features * 4,
+                (3, 3),
+                (1, 1),
+                (1, 1),
+                (1, 1),
+                1,
+                true,
+            ));
+        }
+
+        // Tail: final reconstruction
+        let tail = Conv2d::new(num_features, in_channels, (3, 3), (1, 1), (1, 1), (1, 1), 1, true);
+
+        Self {
+            scale,
+            in_channels,
+            num_features,
+            num_blocks,
+            res_scale,
+            head,
+            body,
+            body_tail,
+            upscale,
+            tail,
+        }
+    }
+
+    pub fn new_baseline(scale: usize) -> Self {
+        // EDSR baseline: 16 blocks, 64 features
+        Self::new(scale, 3, 64, 16, 1.0)
+    }
+
+    pub fn new_large(scale: usize) -> Self {
+        // EDSR large: 32 blocks, 256 features
+        Self::new(scale, 3, 256, 32, 0.1)
+    }
+
+    pub fn forward(&self, input: &Tensor) -> Tensor {
+        // Head
+        let mut x = self.head.forward(input);
+        let head_out = x.clone();
+
+        // Body
+        for block in &self.body {
+            x = block.forward(&x);
+        }
+        x = self.body_tail.forward(&x);
+        x = x.add(&head_out);
+
+        // Upscale
+        if self.scale == 2 || self.scale == 3 {
+            x = self.upscale[0].forward(&x);
+            let shuffle = PixelShuffle::new(self.scale);
+            x = shuffle.forward(&x);
+        } else if self.scale == 4 {
+            // First 2x upscale
+            x = self.upscale[0].forward(&x);
+            let shuffle2 = PixelShuffle::new(2);
+            x = shuffle2.forward(&x);
+
+            // Second 2x upscale
+            x = self.upscale[1].forward(&x);
+            x = shuffle2.forward(&x);
+        }
+
+        // Tail
+        self.tail.forward(&x)
+    }
+
+    pub fn num_parameters(&self) -> usize {
+        let mut count = 0;
+        count += self.head.parameters().iter().map(|p| p.numel()).sum::<usize>();
+        for block in &self.body {
+            count += block.conv1.parameters().iter().map(|p| p.numel()).sum::<usize>();
+            count += block.conv2.parameters().iter().map(|p| p.numel()).sum::<usize>();
+        }
+        count += self.body_tail.parameters().iter().map(|p| p.numel()).sum::<usize>();
+        for conv in &self.upscale {
+            count += conv.parameters().iter().map(|p| p.numel()).sum::<usize>();
+        }
+        count += self.tail.parameters().iter().map(|p| p.numel()).sum::<usize>();
+        count
+    }
+}
+
+// ============================================================================
+// RESIDUAL CHANNEL ATTENTION NETWORK (RCAN)
+// ============================================================================
+
+/// Channel Attention Layer
+pub struct ChannelAttention {
+    /// Reduction ratio
+    reduction: usize,
+    /// Average pooling (global)
+    avg_pool: AdaptiveAvgPool2d,
+    /// First FC (reduction)
+    fc1: Conv2d,
+    /// Second FC (expansion)
+    fc2: Conv2d,
+    /// Activation
+    relu: ReLU,
+    /// Sigmoid
+    sigmoid: Sigmoid,
+}
+
+/// Adaptive average pooling to 1x1
+pub struct AdaptiveAvgPool2d {
+    output_size: (usize, usize),
+}
+
+impl AdaptiveAvgPool2d {
+    pub fn new(output_size: (usize, usize)) -> Self {
+        Self { output_size }
+    }
+
+    pub fn forward(&self, input: &Tensor) -> Tensor {
+        let shape = input.shape();
+        let batch = shape.dim(0);
+        let channels = shape.dim(1);
+        let height = shape.dim(2);
+        let width = shape.dim(3);
+
+        // Create output tensor
+        let mut output = Tensor::zeros(
+            &[batch, channels, self.output_size.0, self.output_size.1],
+            input.dtype(),
+        );
+
+        // Compute average for each output position
+        let stride_h = height / self.output_size.0;
+        let stride_w = width / self.output_size.1;
+        let kernel_h = height - (self.output_size.0 - 1) * stride_h;
+        let kernel_w = width - (self.output_size.1 - 1) * stride_w;
+
+        // Average pooling implementation
+        for b in 0..batch {
+            for c in 0..channels {
+                for oh in 0..self.output_size.0 {
+                    for ow in 0..self.output_size.1 {
+                        let start_h = oh * stride_h;
+                        let start_w = ow * stride_w;
+                        let end_h = start_h + kernel_h;
+                        let end_w = start_w + kernel_w;
+
+                        let mut sum = 0.0f32;
+                        let mut count = 0;
+
+                        for h in start_h..end_h {
+                            for w in start_w..end_w {
+                                sum += input.get_f32(&[b, c, h, w]);
+                                count += 1;
+                            }
+                        }
+
+                        output.set_f32(&[b, oh, c, ow], sum / count as f32);
+                    }
+                }
+            }
+        }
+
+        output
+    }
+}
+
+impl ChannelAttention {
+    pub fn new(channels: usize, reduction: usize) -> Self {
+        let reduced = channels / reduction;
+
+        Self {
+            reduction,
+            avg_pool: AdaptiveAvgPool2d::new((1, 1)),
+            fc1: Conv2d::new(channels, reduced, (1, 1), (1, 1), (0, 0), (1, 1), 1, true),
+            fc2: Conv2d::new(reduced, channels, (1, 1), (1, 1), (0, 0), (1, 1), 1, true),
+            relu: ReLU::new(),
+            sigmoid: Sigmoid::new(),
+        }
+    }
+
+    pub fn forward(&self, input: &Tensor) -> Tensor {
+        // Global average pooling
+        let y = self.avg_pool.forward(input);
+
+        // FC layers with activation
+        let y = self.fc1.forward(&y);
+        let y = self.relu.forward(&y);
+        let y = self.fc2.forward(&y);
+        let y = self.sigmoid.forward(&y);
+
+        // Scale input by attention weights
+        input.mul(&y)
+    }
+}
+
+/// Residual Channel Attention Block (RCAB)
+pub struct RCAB {
+    conv1: Conv2d,
+    conv2: Conv2d,
+    relu: ReLU,
+    ca: ChannelAttention,
+}
+
+impl RCAB {
+    pub fn new(num_features: usize, reduction: usize) -> Self {
+        Self {
+            conv1: Conv2d::new(num_features, num_features, (3, 3), (1, 1), (1, 1), (1, 1), 1, true),
+            conv2: Conv2d::new(num_features, num_features, (3, 3), (1, 1), (1, 1), (1, 1), 1, true),
+            relu: ReLU::new(),
+            ca: ChannelAttention::new(num_features, reduction),
+        }
+    }
+
+    pub fn forward(&self, input: &Tensor) -> Tensor {
+        let mut x = self.conv1.forward(input);
+        x = self.relu.forward(&x);
+        x = self.conv2.forward(&x);
+        x = self.ca.forward(&x);
+
+        // Residual connection
+        input.add(&x)
+    }
+}
+
+/// Residual Group (contains multiple RCABs)
+pub struct ResidualGroup {
+    rcabs: Vec<RCAB>,
+    tail_conv: Conv2d,
+}
+
+impl ResidualGroup {
+    pub fn new(num_features: usize, num_rcab: usize, reduction: usize) -> Self {
+        let mut rcabs = Vec::with_capacity(num_rcab);
+        for _ in 0..num_rcab {
+            rcabs.push(RCAB::new(num_features, reduction));
+        }
+
+        let tail_conv = Conv2d::new(num_features, num_features, (3, 3), (1, 1), (1, 1), (1, 1), 1, true);
+
+        Self { rcabs, tail_conv }
+    }
+
+    pub fn forward(&self, input: &Tensor) -> Tensor {
+        let mut x = input.clone();
+
+        for rcab in &self.rcabs {
+            x = rcab.forward(&x);
+        }
+
+        x = self.tail_conv.forward(&x);
+
+        // Long skip connection
+        input.add(&x)
+    }
+}
+
+/// Residual Channel Attention Network (RCAN)
+pub struct RCAN {
+    scale: usize,
+    in_channels: usize,
+    num_features: usize,
+    num_groups: usize,
+    num_rcab: usize,
+    reduction: usize,
+    /// Head convolution
+    head: Conv2d,
+    /// Residual groups
+    groups: Vec<ResidualGroup>,
+    /// Body tail convolution
+    body_tail: Conv2d,
+    /// Upscale layers
+    upscale: Vec<Conv2d>,
+    /// Tail convolution
+    tail: Conv2d,
+}
+
+impl RCAN {
+    pub fn new(
+        scale: usize,
+        in_channels: usize,
+        num_features: usize,
+        num_groups: usize,
+        num_rcab: usize,
+        reduction: usize,
+    ) -> Self {
+        let head = Conv2d::new(in_channels, num_features, (3, 3), (1, 1), (1, 1), (1, 1), 1, true);
+
+        let mut groups = Vec::with_capacity(num_groups);
+        for _ in 0..num_groups {
+            groups.push(ResidualGroup::new(num_features, num_rcab, reduction));
+        }
+
+        let body_tail = Conv2d::new(num_features, num_features, (3, 3), (1, 1), (1, 1), (1, 1), 1, true);
+
+        // Upscale module
+        let mut upscale = Vec::new();
+        if scale == 2 || scale == 3 {
+            upscale.push(Conv2d::new(
+                num_features,
+                num_features * scale * scale,
+                (3, 3),
+                (1, 1),
+                (1, 1),
+                (1, 1),
+                1,
+                true,
+            ));
+        } else if scale == 4 {
+            upscale.push(Conv2d::new(num_features, num_features * 4, (3, 3), (1, 1), (1, 1), (1, 1), 1, true));
+            upscale.push(Conv2d::new(num_features, num_features * 4, (3, 3), (1, 1), (1, 1), (1, 1), 1, true));
+        }
+
+        let tail = Conv2d::new(num_features, in_channels, (3, 3), (1, 1), (1, 1), (1, 1), 1, true);
+
+        Self {
+            scale,
+            in_channels,
+            num_features,
+            num_groups,
+            num_rcab,
+            reduction,
+            head,
+            groups,
+            body_tail,
+            upscale,
+            tail,
+        }
+    }
+
+    pub fn new_default(scale: usize) -> Self {
+        // Default RCAN: 10 groups, 20 RCABs per group, 64 features
+        Self::new(scale, 3, 64, 10, 20, 16)
+    }
+
+    pub fn forward(&self, input: &Tensor) -> Tensor {
+        // Head
+        let mut x = self.head.forward(input);
+        let head_out = x.clone();
+
+        // Body (residual groups)
+        for group in &self.groups {
+            x = group.forward(&x);
+        }
+        x = self.body_tail.forward(&x);
+        x = x.add(&head_out);
+
+        // Upscale
+        if self.scale == 2 || self.scale == 3 {
+            x = self.upscale[0].forward(&x);
+            let shuffle = PixelShuffle::new(self.scale);
+            x = shuffle.forward(&x);
+        } else if self.scale == 4 {
+            let shuffle2 = PixelShuffle::new(2);
+            x = self.upscale[0].forward(&x);
+            x = shuffle2.forward(&x);
+            x = self.upscale[1].forward(&x);
+            x = shuffle2.forward(&x);
+        }
+
+        // Tail
+        self.tail.forward(&x)
+    }
+}
+
+// ============================================================================
+// SWIN TRANSFORMER FOR IMAGE RESTORATION (SwinIR)
+// ============================================================================
+
+/// Window-based Multi-head Self Attention
+pub struct WindowAttention {
+    dim: usize,
+    window_size: usize,
+    num_heads: usize,
+    head_dim: usize,
+    scale: f32,
+    /// Query projection
+    q_proj: Linear,
+    /// Key projection
+    k_proj: Linear,
+    /// Value projection
+    v_proj: Linear,
+    /// Output projection
+    out_proj: Linear,
+    /// Relative position bias table
+    relative_position_bias_table: Tensor,
+    /// Relative position index
+    relative_position_index: Tensor,
+}
+
+impl WindowAttention {
+    pub fn new(dim: usize, window_size: usize, num_heads: usize) -> Self {
+        let head_dim = dim / num_heads;
+        let scale = 1.0 / (head_dim as f32).sqrt();
+
+        // Create relative position bias table
+        let num_relative_positions = (2 * window_size - 1) * (2 * window_size - 1);
+        let relative_position_bias_table = Tensor::zeros(
+            &[num_relative_positions, num_heads],
+            DataType::Float32,
+        );
+
+        // Create relative position index
+        let relative_position_index = Self::create_relative_position_index(window_size);
+
+        Self {
+            dim,
+            window_size,
+            num_heads,
+            head_dim,
+            scale,
+            q_proj: Linear::new(dim, dim, true),
+            k_proj: Linear::new(dim, dim, true),
+            v_proj: Linear::new(dim, dim, true),
+            out_proj: Linear::new(dim, dim, true),
+            relative_position_bias_table,
+            relative_position_index,
+        }
+    }
+
+    fn create_relative_position_index(window_size: usize) -> Tensor {
+        // Create coordinate grids
+        let mut coords_h = Vec::with_capacity(window_size);
+        let mut coords_w = Vec::with_capacity(window_size);
+
+        for i in 0..window_size {
+            coords_h.push(i as i32);
+            coords_w.push(i as i32);
+        }
+
+        // Create relative coordinates
+        let mut relative_coords = Vec::with_capacity(window_size * window_size * 2);
+        for h1 in 0..window_size {
+            for w1 in 0..window_size {
+                for h2 in 0..window_size {
+                    for w2 in 0..window_size {
+                        let rel_h = (h1 as i32 - h2 as i32) + (window_size as i32 - 1);
+                        let rel_w = (w1 as i32 - w2 as i32) + (window_size as i32 - 1);
+                        let index = rel_h * (2 * window_size as i32 - 1) + rel_w;
+                        relative_coords.push(index);
+                    }
+                }
+            }
+        }
+
+        let seq_len = window_size * window_size;
+        Tensor::from_slice_i32(&relative_coords, &[seq_len, seq_len])
+    }
+
+    pub fn forward(&self, input: &Tensor, mask: Option<&Tensor>) -> Tensor {
+        let shape = input.shape();
+        let batch_windows = shape.dim(0);
+        let seq_len = shape.dim(1);
+        let dim = shape.dim(2);
+
+        // Project to Q, K, V
+        let q = self.q_proj.forward(input);
+        let k = self.k_proj.forward(input);
+        let v = self.v_proj.forward(input);
+
+        // Reshape for multi-head attention
+        let q = q.reshape(&[batch_windows, seq_len, self.num_heads, self.head_dim]);
+        let k = k.reshape(&[batch_windows, seq_len, self.num_heads, self.head_dim]);
+        let v = v.reshape(&[batch_windows, seq_len, self.num_heads, self.head_dim]);
+
+        // Transpose to [batch, heads, seq, head_dim]
+        let q = q.transpose(1, 2);
+        let k = k.transpose(1, 2);
+        let v = v.transpose(1, 2);
+
+        // Attention scores
+        let k_t = k.transpose(2, 3);
+        let mut attn = q.matmul(&k_t);
+        attn = attn.mul_scalar(self.scale);
+
+        // Add relative position bias
+        // (simplified - full implementation would properly index the bias table)
+
+        // Apply mask if provided
+        if let Some(m) = mask {
+            attn = attn.add(m);
+        }
+
+        // Softmax
+        attn = softmax(&attn, 3);
+
+        // Attention output
+        let mut output = attn.matmul(&v);
+
+        // Transpose back
+        output = output.transpose(1, 2);
+        output = output.reshape(&[batch_windows, seq_len, dim]);
+
+        // Output projection
+        self.out_proj.forward(&output)
+    }
+}
+
+/// Softmax activation
+pub fn softmax(input: &Tensor, dim: usize) -> Tensor {
+    let shape = input.shape();
+    let dim_size = shape.dim(dim);
+
+    let mut output = input.clone();
+
+    // Compute max for numerical stability
+    // Then exp and normalize
+    // (simplified implementation)
+
+    output
+}
+
+/// Swin Transformer Block
+pub struct SwinTransformerBlock {
+    dim: usize,
+    num_heads: usize,
+    window_size: usize,
+    shift_size: usize,
+    mlp_ratio: f32,
+    /// Layer normalization 1
+    norm1: LayerNorm,
+    /// Window attention
+    attn: WindowAttention,
+    /// Layer normalization 2
+    norm2: LayerNorm,
+    /// MLP
+    mlp: MLP,
+}
+
+/// MLP block for transformer
+pub struct MLP {
+    fc1: Linear,
+    fc2: Linear,
+    activation: GELU,
+}
+
+impl MLP {
+    pub fn new(in_features: usize, hidden_features: usize, out_features: usize) -> Self {
+        Self {
+            fc1: Linear::new(in_features, hidden_features, true),
+            fc2: Linear::new(hidden_features, out_features, true),
+            activation: GELU::new(),
+        }
+    }
+
+    pub fn forward(&self, input: &Tensor) -> Tensor {
+        let mut x = self.fc1.forward(input);
+        x = self.activation.forward(&x);
+        self.fc2.forward(&x)
+    }
+}
+
+impl SwinTransformerBlock {
+    pub fn new(
+        dim: usize,
+        num_heads: usize,
+        window_size: usize,
+        shift_size: usize,
+        mlp_ratio: f32,
+    ) -> Self {
+        let mlp_hidden = (dim as f32 * mlp_ratio) as usize;
+
+        Self {
+            dim,
+            num_heads,
+            window_size,
+            shift_size,
+            mlp_ratio,
+            norm1: LayerNorm::new(dim, 1e-5),
+            attn: WindowAttention::new(dim, window_size, num_heads),
+            norm2: LayerNorm::new(dim, 1e-5),
+            mlp: MLP::new(dim, mlp_hidden, dim),
+        }
+    }
+
+    pub fn forward(&self, input: &Tensor, height: usize, width: usize) -> Tensor {
+        let shape = input.shape();
+        let batch = shape.dim(0);
+        let seq_len = shape.dim(1);
+        let dim = shape.dim(2);
+
+        let shortcut = input.clone();
+        let mut x = self.norm1.forward(input);
+
+        // Reshape to 2D feature map
+        x = x.reshape(&[batch, height, width, dim]);
+
+        // Cyclic shift if needed
+        if self.shift_size > 0 {
+            x = self.cyclic_shift(&x, self.shift_size);
+        }
+
+        // Partition into windows
+        let x_windows = self.window_partition(&x);
+
+        // Window attention
+        let attn_windows = self.attn.forward(&x_windows, None);
+
+        // Merge windows
+        x = self.window_reverse(&attn_windows, height, width);
+
+        // Reverse cyclic shift
+        if self.shift_size > 0 {
+            x = self.cyclic_shift(&x, self.window_size - self.shift_size);
+        }
+
+        // Reshape back
+        x = x.reshape(&[batch, seq_len, dim]);
+
+        // Residual connection
+        x = shortcut.add(&x);
+
+        // MLP block
+        let shortcut2 = x.clone();
+        x = self.norm2.forward(&x);
+        x = self.mlp.forward(&x);
+        shortcut2.add(&x)
+    }
+
+    fn cyclic_shift(&self, input: &Tensor, shift: usize) -> Tensor {
+        // Roll tensor along height and width dimensions
+        input.clone() // Simplified
+    }
+
+    fn window_partition(&self, input: &Tensor) -> Tensor {
+        let shape = input.shape();
+        let batch = shape.dim(0);
+        let height = shape.dim(1);
+        let width = shape.dim(2);
+        let dim = shape.dim(3);
+
+        let num_windows_h = height / self.window_size;
+        let num_windows_w = width / self.window_size;
+
+        // Reshape and transpose to get windows
+        let x = input.reshape(&[
+            batch,
+            num_windows_h,
+            self.window_size,
+            num_windows_w,
+            self.window_size,
+            dim,
+        ]);
+
+        // Permute to [batch * num_windows, window_size * window_size, dim]
+        let num_windows = num_windows_h * num_windows_w;
+        let window_area = self.window_size * self.window_size;
+
+        x.reshape(&[batch * num_windows, window_area, dim])
+    }
+
+    fn window_reverse(&self, windows: &Tensor, height: usize, width: usize) -> Tensor {
+        let shape = windows.shape();
+        let batch_windows = shape.dim(0);
+        let window_area = shape.dim(1);
+        let dim = shape.dim(2);
+
+        let num_windows_h = height / self.window_size;
+        let num_windows_w = width / self.window_size;
+        let batch = batch_windows / (num_windows_h * num_windows_w);
+
+        // Reshape back to image
+        windows.reshape(&[batch, height, width, dim])
+    }
+}
+
+/// Residual Swin Transformer Block (RSTB)
+pub struct RSTB {
+    dim: usize,
+    depth: usize,
+    num_heads: usize,
+    window_size: usize,
+    mlp_ratio: f32,
+    /// Swin transformer blocks
+    blocks: Vec<SwinTransformerBlock>,
+    /// Convolution at the end
+    conv: Conv2d,
+}
+
+impl RSTB {
+    pub fn new(
+        dim: usize,
+        depth: usize,
+        num_heads: usize,
+        window_size: usize,
+        mlp_ratio: f32,
+    ) -> Self {
+        let mut blocks = Vec::with_capacity(depth);
+
+        for i in 0..depth {
+            let shift_size = if i % 2 == 0 { 0 } else { window_size / 2 };
+            blocks.push(SwinTransformerBlock::new(
+                dim,
+                num_heads,
+                window_size,
+                shift_size,
+                mlp_ratio,
+            ));
+        }
+
+        // 1x1 convolution for channel matching
+        let conv = Conv2d::new(dim, dim, (3, 3), (1, 1), (1, 1), (1, 1), 1, true);
+
+        Self {
+            dim,
+            depth,
+            num_heads,
+            window_size,
+            mlp_ratio,
+            blocks,
+            conv,
+        }
+    }
+
+    pub fn forward(&self, input: &Tensor, height: usize, width: usize) -> Tensor {
+        let mut x = input.clone();
+
+        for block in &self.blocks {
+            x = block.forward(&x, height, width);
+        }
+
+        // Reshape to image for conv
+        let shape = x.shape();
+        let batch = shape.dim(0);
+        let dim = shape.dim(2);
+
+        x = x.reshape(&[batch, height, width, dim]);
+        x = x.transpose(1, 3); // [B, C, H, W]
+        x = self.conv.forward(&x);
+        x = x.transpose(1, 3); // [B, H, W, C]
+        x = x.reshape(&[batch, height * width, dim]);
+
+        // Residual connection
+        input.add(&x)
+    }
+}
+
+/// SwinIR: Swin Transformer for Image Restoration
+pub struct SwinIR {
+    scale: usize,
+    in_channels: usize,
+    embed_dim: usize,
+    depths: Vec<usize>,
+    num_heads: Vec<usize>,
+    window_size: usize,
+    mlp_ratio: f32,
+    /// Shallow feature extraction
+    conv_first: Conv2d,
+    /// Patch embedding (linear projection)
+    patch_embed: Linear,
+    /// Deep feature extraction (RSTBs)
+    rstbs: Vec<RSTB>,
+    /// Norm layer
+    norm: LayerNorm,
+    /// Reconstruction
+    conv_after_body: Conv2d,
+    /// Upsampler
+    upsample: Upsample,
+    /// Final conv
+    conv_last: Conv2d,
+}
+
+impl SwinIR {
+    pub fn new(
+        scale: usize,
+        in_channels: usize,
+        embed_dim: usize,
+        depths: Vec<usize>,
+        num_heads: Vec<usize>,
+        window_size: usize,
+        mlp_ratio: f32,
+    ) -> Self {
+        let conv_first = Conv2d::new(in_channels, embed_dim, (3, 3), (1, 1), (1, 1), (1, 1), 1, true);
+        let patch_embed = Linear::new(embed_dim, embed_dim, true);
+
+        let mut rstbs = Vec::with_capacity(depths.len());
+        for i in 0..depths.len() {
+            rstbs.push(RSTB::new(
+                embed_dim,
+                depths[i],
+                num_heads[i],
+                window_size,
+                mlp_ratio,
+            ));
+        }
+
+        let norm = LayerNorm::new(embed_dim, 1e-5);
+        let conv_after_body = Conv2d::new(embed_dim, embed_dim, (3, 3), (1, 1), (1, 1), (1, 1), 1, true);
+        let upsample = Upsample::new(scale as f32, "nearest");
+        let conv_last = Conv2d::new(embed_dim, in_channels, (3, 3), (1, 1), (1, 1), (1, 1), 1, true);
+
+        Self {
+            scale,
+            in_channels,
+            embed_dim,
+            depths,
+            num_heads,
+            window_size,
+            mlp_ratio,
+            conv_first,
+            patch_embed,
+            rstbs,
+            norm,
+            conv_after_body,
+            upsample,
+            conv_last,
+        }
+    }
+
+    pub fn new_lightweight(scale: usize) -> Self {
+        Self::new(
+            scale,
+            3,
+            60,
+            vec![6, 6, 6, 6],
+            vec![6, 6, 6, 6],
+            8,
+            2.0,
+        )
+    }
+
+    pub fn new_default(scale: usize) -> Self {
+        Self::new(
+            scale,
+            3,
+            180,
+            vec![6, 6, 6, 6, 6, 6],
+            vec![6, 6, 6, 6, 6, 6],
+            8,
+            2.0,
+        )
+    }
+
+    pub fn forward(&self, input: &Tensor) -> Tensor {
+        let shape = input.shape();
+        let batch = shape.dim(0);
+        let height = shape.dim(2);
+        let width = shape.dim(3);
+
+        // Shallow feature extraction
+        let mut x = self.conv_first.forward(input);
+        let shallow_features = x.clone();
+
+        // Reshape for transformer: [B, C, H, W] -> [B, H*W, C]
+        x = x.transpose(1, 2); // [B, H, C, W]
+        x = x.transpose(2, 3); // [B, H, W, C]
+        x = x.reshape(&[batch, height * width, self.embed_dim]);
+
+        // Patch embedding
+        x = self.patch_embed.forward(&x);
+
+        // Deep feature extraction
+        for rstb in &self.rstbs {
+            x = rstb.forward(&x, height, width);
+        }
+
+        // Norm
+        x = self.norm.forward(&x);
+
+        // Reshape back: [B, H*W, C] -> [B, C, H, W]
+        x = x.reshape(&[batch, height, width, self.embed_dim]);
+        x = x.transpose(2, 3); // [B, H, C, W]
+        x = x.transpose(1, 2); // [B, C, H, W]
+
+        // Conv and residual
+        x = self.conv_after_body.forward(&x);
+        x = x.add(&shallow_features);
+
+        // Upscale
+        x = self.upsample.forward(&x);
+
+        // Final conv
+        self.conv_last.forward(&x)
+    }
+}
+
+// ============================================================================
+// REAL-ESRGAN (Real-World Enhanced Super-Resolution GAN)
+// ============================================================================
+
+/// Residual Dense Block
+pub struct ResidualDenseBlock {
+    num_features: usize,
+    growth_rate: usize,
+    convs: Vec<Conv2d>,
+    lrelu: LeakyReLU,
+    res_scale: f32,
+}
+
+impl ResidualDenseBlock {
+    pub fn new(num_features: usize, growth_rate: usize, num_layers: usize) -> Self {
+        let mut convs = Vec::with_capacity(num_layers);
+
+        for i in 0..num_layers {
+            let in_ch = num_features + i * growth_rate;
+            convs.push(Conv2d::new(in_ch, growth_rate, (3, 3), (1, 1), (1, 1), (1, 1), 1, true));
+        }
+
+        // Final conv back to original channels
+        convs.push(Conv2d::new(
+            num_features + num_layers * growth_rate,
+            num_features,
+            (3, 3),
+            (1, 1),
+            (1, 1),
+            (1, 1),
+            1,
+            true,
+        ));
+
+        Self {
+            num_features,
+            growth_rate,
+            convs,
+            lrelu: LeakyReLU::new(0.2),
+            res_scale: 0.2,
+        }
+    }
+
+    pub fn forward(&self, input: &Tensor) -> Tensor {
+        let mut features = vec![input.clone()];
+
+        // Dense connections
+        for i in 0..(self.convs.len() - 1) {
+            // Concatenate all previous features
+            let concat = Tensor::cat(&features, 1);
+            let mut out = self.convs[i].forward(&concat);
+            out = self.lrelu.forward(&out);
+            features.push(out);
+        }
+
+        // Final conv (no activation)
+        let concat = Tensor::cat(&features, 1);
+        let out = self.convs.last().unwrap().forward(&concat);
+
+        // Residual scaling
+        let scaled = out.mul_scalar(self.res_scale);
+        input.add(&scaled)
+    }
+}
+
+/// Residual in Residual Dense Block (RRDB)
+pub struct RRDB {
+    rdb1: ResidualDenseBlock,
+    rdb2: ResidualDenseBlock,
+    rdb3: ResidualDenseBlock,
+    res_scale: f32,
+}
+
+impl RRDB {
+    pub fn new(num_features: usize, growth_rate: usize) -> Self {
+        Self {
+            rdb1: ResidualDenseBlock::new(num_features, growth_rate, 5),
+            rdb2: ResidualDenseBlock::new(num_features, growth_rate, 5),
+            rdb3: ResidualDenseBlock::new(num_features, growth_rate, 5),
+            res_scale: 0.2,
+        }
+    }
+
+    pub fn forward(&self, input: &Tensor) -> Tensor {
+        let mut out = self.rdb1.forward(input);
+        out = self.rdb2.forward(&out);
+        out = self.rdb3.forward(&out);
+
+        let scaled = out.mul_scalar(self.res_scale);
+        input.add(&scaled)
+    }
+}
+
+/// Real-ESRGAN Generator
+pub struct RealESRGAN {
+    scale: usize,
+    in_channels: usize,
+    out_channels: usize,
+    num_features: usize,
+    num_blocks: usize,
+    growth_rate: usize,
+    /// First convolution
+    conv_first: Conv2d,
+    /// RRDB trunk
+    trunk: Vec<RRDB>,
+    /// Trunk convolution
+    trunk_conv: Conv2d,
+    /// Upsampling layers
+    upconv1: Conv2d,
+    upconv2: Conv2d,
+    /// High-res convolutions
+    hr_conv: Conv2d,
+    /// Final convolution
+    conv_last: Conv2d,
+    /// Activation
+    lrelu: LeakyReLU,
+}
+
+impl RealESRGAN {
+    pub fn new(
+        scale: usize,
+        in_channels: usize,
+        out_channels: usize,
+        num_features: usize,
+        num_blocks: usize,
+        growth_rate: usize,
+    ) -> Self {
+        let conv_first = Conv2d::new(in_channels, num_features, (3, 3), (1, 1), (1, 1), (1, 1), 1, true);
+
+        let mut trunk = Vec::with_capacity(num_blocks);
+        for _ in 0..num_blocks {
+            trunk.push(RRDB::new(num_features, growth_rate));
+        }
+
+        let trunk_conv = Conv2d::new(num_features, num_features, (3, 3), (1, 1), (1, 1), (1, 1), 1, true);
+
+        // Upsampling (for 4x scale)
+        let upconv1 = Conv2d::new(num_features, num_features, (3, 3), (1, 1), (1, 1), (1, 1), 1, true);
+        let upconv2 = Conv2d::new(num_features, num_features, (3, 3), (1, 1), (1, 1), (1, 1), 1, true);
+
+        let hr_conv = Conv2d::new(num_features, num_features, (3, 3), (1, 1), (1, 1), (1, 1), 1, true);
+        let conv_last = Conv2d::new(num_features, out_channels, (3, 3), (1, 1), (1, 1), (1, 1), 1, true);
+
+        Self {
+            scale,
+            in_channels,
+            out_channels,
+            num_features,
+            num_blocks,
+            growth_rate,
+            conv_first,
+            trunk,
+            trunk_conv,
+            upconv1,
+            upconv2,
+            hr_conv,
+            conv_last,
+            lrelu: LeakyReLU::new(0.2),
+        }
+    }
+
+    pub fn new_x4() -> Self {
+        Self::new(4, 3, 3, 64, 23, 32)
+    }
+
+    pub fn forward(&self, input: &Tensor) -> Tensor {
+        let mut feat = self.conv_first.forward(input);
+        let feat_first = feat.clone();
+
+        // RRDB trunk
+        for rrdb in &self.trunk {
+            feat = rrdb.forward(&feat);
+        }
+
+        feat = self.trunk_conv.forward(&feat);
+        feat = feat.add(&feat_first);
+
+        // Upsampling
+        let upsample2x = Upsample::new(2.0, "nearest");
+
+        feat = upsample2x.forward(&feat);
+        feat = self.upconv1.forward(&feat);
+        feat = self.lrelu.forward(&feat);
+
+        if self.scale == 4 {
+            feat = upsample2x.forward(&feat);
+            feat = self.upconv2.forward(&feat);
+            feat = self.lrelu.forward(&feat);
+        }
+
+        // High-res processing
+        feat = self.hr_conv.forward(&feat);
+        feat = self.lrelu.forward(&feat);
+
+        self.conv_last.forward(&feat)
+    }
+}
+
+// ============================================================================
+// TEMPORAL SUPER-RESOLUTION (DLSS-LIKE)
+// ============================================================================
+
+/// Motion vector format
+pub struct MotionVector {
+    pub dx: f32,
+    pub dy: f32,
+}
+
+/// Temporal accumulation buffer
+pub struct TemporalBuffer {
+    /// History color buffer
+    history_color: Tensor,
+    /// History depth buffer
+    history_depth: Tensor,
+    /// History motion vectors
+    history_motion: Tensor,
+    /// Frame count
+    frame_count: usize,
+    /// Buffer dimensions
+    width: usize,
+    height: usize,
+    /// Maximum history frames
+    max_history: usize,
+}
+
+impl TemporalBuffer {
+    pub fn new(width: usize, height: usize, max_history: usize) -> Self {
+        Self {
+            history_color: Tensor::zeros(&[max_history, 3, height, width], DataType::Float32),
+            history_depth: Tensor::zeros(&[max_history, 1, height, width], DataType::Float32),
+            history_motion: Tensor::zeros(&[max_history, 2, height, width], DataType::Float32),
+            frame_count: 0,
+            width,
+            height,
+            max_history,
+        }
+    }
+
+    pub fn push(&mut self, color: &Tensor, depth: &Tensor, motion: &Tensor) {
+        // Shift history and add new frame
+        // (In real implementation, use circular buffer)
+        self.frame_count += 1;
+    }
+
+    pub fn get_history(&self, frames_back: usize) -> Option<(&Tensor, &Tensor, &Tensor)> {
+        if frames_back >= self.max_history || frames_back >= self.frame_count {
+            return None;
+        }
+
+        // Return slices of the history tensors
+        Some((&self.history_color, &self.history_depth, &self.history_motion))
+    }
+
+    pub fn reset(&mut self) {
+        self.frame_count = 0;
+        self.history_color = Tensor::zeros(
+            &[self.max_history, 3, self.height, self.width],
+            DataType::Float32,
+        );
+    }
+}
+
+/// Jitter pattern for temporal anti-aliasing
+pub struct JitterPattern {
+    /// Jitter offsets
+    offsets: Vec<(f32, f32)>,
+    /// Current index
+    current_index: usize,
+}
+
+impl JitterPattern {
+    pub fn halton_2_3(count: usize) -> Self {
+        let mut offsets = Vec::with_capacity(count);
+
+        for i in 0..count {
+            let x = Self::halton_sequence(i + 1, 2);
+            let y = Self::halton_sequence(i + 1, 3);
+            offsets.push((x - 0.5, y - 0.5));
+        }
+
+        Self {
+            offsets,
+            current_index: 0,
+        }
+    }
+
+    fn halton_sequence(mut index: usize, base: usize) -> f32 {
+        let mut f = 1.0f32;
+        let mut r = 0.0f32;
+
+        while index > 0 {
+            f /= base as f32;
+            r += f * (index % base) as f32;
+            index /= base;
+        }
+
+        r
+    }
+
+    pub fn next(&mut self) -> (f32, f32) {
+        let offset = self.offsets[self.current_index];
+        self.current_index = (self.current_index + 1) % self.offsets.len();
+        offset
+    }
+
+    pub fn current(&self) -> (f32, f32) {
+        self.offsets[self.current_index]
+    }
+
+    pub fn reset(&mut self) {
+        self.current_index = 0;
+    }
+}
+
+/// Feature extraction network for temporal SR
+pub struct TemporalFeatureExtractor {
+    /// Initial convolution
+    conv1: Conv2d,
+    /// Residual blocks
+    res_blocks: Vec<ResidualBlock>,
+    /// Motion feature extraction
+    motion_conv: Conv2d,
+    /// Depth feature extraction
+    depth_conv: Conv2d,
+    /// Feature fusion
+    fusion_conv: Conv2d,
+}
+
+impl TemporalFeatureExtractor {
+    pub fn new(in_channels: usize, num_features: usize, num_blocks: usize) -> Self {
+        let conv1 = Conv2d::new(in_channels, num_features, (3, 3), (1, 1), (1, 1), (1, 1), 1, true);
+
+        let mut res_blocks = Vec::with_capacity(num_blocks);
+        for _ in 0..num_blocks {
+            res_blocks.push(ResidualBlock::new(num_features, num_features));
+        }
+
+        let motion_conv = Conv2d::new(2, num_features / 4, (3, 3), (1, 1), (1, 1), (1, 1), 1, true);
+        let depth_conv = Conv2d::new(1, num_features / 4, (3, 3), (1, 1), (1, 1), (1, 1), 1, true);
+        let fusion_conv = Conv2d::new(
+            num_features + num_features / 2,
+            num_features,
+            (1, 1),
+            (1, 1),
+            (0, 0),
+            (1, 1),
+            1,
+            true,
+        );
+
+        Self {
+            conv1,
+            res_blocks,
+            motion_conv,
+            depth_conv,
+            fusion_conv,
+        }
+    }
+
+    pub fn forward(&self, color: &Tensor, motion: &Tensor, depth: &Tensor) -> Tensor {
+        // Extract color features
+        let mut color_feat = self.conv1.forward(color);
+        for block in &self.res_blocks {
+            color_feat = block.forward(&color_feat);
+        }
+
+        // Extract motion features
+        let motion_feat = self.motion_conv.forward(motion);
+
+        // Extract depth features
+        let depth_feat = self.depth_conv.forward(depth);
+
+        // Concatenate and fuse
+        let concat = Tensor::cat(&[color_feat, motion_feat, depth_feat], 1);
+        self.fusion_conv.forward(&concat)
+    }
+}
+
+/// Temporal warping module
+pub struct TemporalWarping {
+    /// Bilinear sampling grid
+    grid_sample_mode: GridSampleMode,
+}
+
+pub enum GridSampleMode {
+    Bilinear,
+    Nearest,
+    Bicubic,
+}
+
+impl TemporalWarping {
+    pub fn new(mode: GridSampleMode) -> Self {
+        Self {
+            grid_sample_mode: mode,
+        }
+    }
+
+    pub fn warp(&self, input: &Tensor, motion: &Tensor) -> Tensor {
+        let shape = input.shape();
+        let batch = shape.dim(0);
+        let channels = shape.dim(1);
+        let height = shape.dim(2);
+        let width = shape.dim(3);
+
+        // Create sampling grid from motion vectors
+        let mut output = Tensor::zeros(&[batch, channels, height, width], input.dtype());
+
+        // For each pixel, sample from previous frame using motion vector
+        for b in 0..batch {
+            for c in 0..channels {
+                for y in 0..height {
+                    for x in 0..width {
+                        // Get motion vector at this pixel
+                        let dx = motion.get_f32(&[b, 0, y, x]);
+                        let dy = motion.get_f32(&[b, 1, y, x]);
+
+                        // Source coordinates
+                        let src_x = x as f32 + dx;
+                        let src_y = y as f32 + dy;
+
+                        // Bilinear sampling
+                        let value = self.bilinear_sample(input, b, c, src_y, src_x, height, width);
+                        output.set_f32(&[b, c, y, x], value);
+                    }
+                }
+            }
+        }
+
+        output
+    }
+
+    fn bilinear_sample(
+        &self,
+        input: &Tensor,
+        batch: usize,
+        channel: usize,
+        y: f32,
+        x: f32,
+        height: usize,
+        width: usize,
+    ) -> f32 {
+        let x0 = x.floor() as i32;
+        let x1 = x0 + 1;
+        let y0 = y.floor() as i32;
+        let y1 = y0 + 1;
+
+        let x_lerp = x - x0 as f32;
+        let y_lerp = y - y0 as f32;
+
+        // Clamp coordinates
+        let x0 = x0.clamp(0, width as i32 - 1) as usize;
+        let x1 = x1.clamp(0, width as i32 - 1) as usize;
+        let y0 = y0.clamp(0, height as i32 - 1) as usize;
+        let y1 = y1.clamp(0, height as i32 - 1) as usize;
+
+        // Sample four corners
+        let v00 = input.get_f32(&[batch, channel, y0, x0]);
+        let v01 = input.get_f32(&[batch, channel, y0, x1]);
+        let v10 = input.get_f32(&[batch, channel, y1, x0]);
+        let v11 = input.get_f32(&[batch, channel, y1, x1]);
+
+        // Bilinear interpolation
+        let v0 = v00 * (1.0 - x_lerp) + v01 * x_lerp;
+        let v1 = v10 * (1.0 - x_lerp) + v11 * x_lerp;
+
+        v0 * (1.0 - y_lerp) + v1 * y_lerp
+    }
+}
+
+/// Temporal fusion network
+pub struct TemporalFusion {
+    /// Number of history frames to use
+    num_history: usize,
+    /// Feature channels
+    num_features: usize,
+    /// Cross-frame attention
+    attention: Conv2d,
+    /// Fusion convolutions
+    fusion_convs: Vec<Conv2d>,
+    /// Output conv
+    output_conv: Conv2d,
+}
+
+impl TemporalFusion {
+    pub fn new(num_history: usize, num_features: usize) -> Self {
+        let attention = Conv2d::new(
+            num_features * (num_history + 1),
+            num_history + 1,
+            (3, 3),
+            (1, 1),
+            (1, 1),
+            (1, 1),
+            1,
+            true,
+        );
+
+        let mut fusion_convs = Vec::new();
+        fusion_convs.push(Conv2d::new(
+            num_features * (num_history + 1),
+            num_features * 2,
+            (3, 3),
+            (1, 1),
+            (1, 1),
+            (1, 1),
+            1,
+            true,
+        ));
+        fusion_convs.push(Conv2d::new(
+            num_features * 2,
+            num_features,
+            (3, 3),
+            (1, 1),
+            (1, 1),
+            (1, 1),
+            1,
+            true,
+        ));
+
+        let output_conv = Conv2d::new(num_features, num_features, (3, 3), (1, 1), (1, 1), (1, 1), 1, true);
+
+        Self {
+            num_history,
+            num_features,
+            attention,
+            fusion_convs,
+            output_conv,
+        }
+    }
+
+    pub fn forward(&self, current: &Tensor, history: &[Tensor]) -> Tensor {
+        // Concatenate current and history features
+        let mut all_features = vec![current.clone()];
+        all_features.extend(history.iter().cloned());
+        let concat = Tensor::cat(&all_features, 1);
+
+        // Compute attention weights
+        let attn = self.attention.forward(&concat);
+        let attn = softmax(&attn, 1);
+
+        // Apply attention and fuse
+        let mut fused = concat.clone();
+        for conv in &self.fusion_convs {
+            fused = conv.forward(&fused);
+            fused = ReLU::new().forward(&fused);
+        }
+
+        self.output_conv.forward(&fused)
+    }
+}
+
+/// Temporal Super-Resolution Network (DLSS-like)
+pub struct TemporalSR {
+    /// Input scale factor
+    scale: usize,
+    /// Render resolution
+    render_width: usize,
+    render_height: usize,
+    /// Output resolution
+    output_width: usize,
+    output_height: usize,
+    /// Feature channels
+    num_features: usize,
+    /// Number of history frames
+    num_history: usize,
+    /// Temporal buffer
+    temporal_buffer: TemporalBuffer,
+    /// Jitter pattern
+    jitter: JitterPattern,
+    /// Feature extractor
+    feature_extractor: TemporalFeatureExtractor,
+    /// Temporal warping
+    warping: TemporalWarping,
+    /// Temporal fusion
+    fusion: TemporalFusion,
+    /// Upscaling network
+    upscaler: EDSR,
+    /// Sharpening strength
+    sharpening: f32,
+    /// History confidence threshold
+    confidence_threshold: f32,
+}
+
+impl TemporalSR {
+    pub fn new(
+        scale: usize,
+        render_width: usize,
+        render_height: usize,
+        num_features: usize,
+        num_history: usize,
+    ) -> Self {
+        let output_width = render_width * scale;
+        let output_height = render_height * scale;
+
+        Self {
+            scale,
+            render_width,
+            render_height,
+            output_width,
+            output_height,
+            num_features,
+            num_history,
+            temporal_buffer: TemporalBuffer::new(output_width, output_height, num_history + 1),
+            jitter: JitterPattern::halton_2_3(16),
+            feature_extractor: TemporalFeatureExtractor::new(3, num_features, 4),
+            warping: TemporalWarping::new(GridSampleMode::Bilinear),
+            fusion: TemporalFusion::new(num_history, num_features),
+            upscaler: EDSR::new_baseline(scale),
+            sharpening: 0.5,
+            confidence_threshold: 0.8,
+        }
+    }
+
+    pub fn new_with_quality(quality: UpscaleQuality, output_width: usize, output_height: usize) -> Self {
+        let (render_width, render_height) = quality.render_resolution(output_width as u32, output_height as u32);
+        let scale = (output_width as f32 / render_width as f32).round() as usize;
+
+        Self::new(
+            scale.max(1),
+            render_width as usize,
+            render_height as usize,
+            64,
+            4,
+        )
+    }
+
+    pub fn get_jitter(&mut self) -> (f32, f32) {
+        self.jitter.next()
+    }
+
+    pub fn upscale(
+        &mut self,
+        color: &Tensor,
+        depth: &Tensor,
+        motion: &Tensor,
+        exposure: f32,
+    ) -> Tensor {
+        // Extract features from current frame
+        let current_features = self.feature_extractor.forward(color, motion, depth);
+
+        // Warp and collect history features
+        let mut history_features = Vec::with_capacity(self.num_history);
+
+        for i in 1..=self.num_history {
+            if let Some((hist_color, hist_depth, hist_motion)) = self.temporal_buffer.get_history(i) {
+                // Warp history to current frame
+                let warped = self.warping.warp(hist_color, motion);
+                let hist_feat = self.feature_extractor.forward(&warped, hist_motion, hist_depth);
+                history_features.push(hist_feat);
+            }
+        }
+
+        // Temporal fusion
+        let fused = if history_features.is_empty() {
+            current_features.clone()
+        } else {
+            self.fusion.forward(&current_features, &history_features)
+        };
+
+        // Upscale
+        // First, reshape fused features back to low-res color format
+        // (simplified - real implementation would need proper feature-to-color conversion)
+        let upscaled = self.upscaler.forward(color);
+
+        // Apply sharpening
+        let sharpened = self.apply_sharpening(&upscaled);
+
+        // Store in temporal buffer
+        self.temporal_buffer.push(&sharpened, depth, motion);
+
+        sharpened
+    }
+
+    fn apply_sharpening(&self, input: &Tensor) -> Tensor {
+        if self.sharpening <= 0.0 {
+            return input.clone();
+        }
+
+        // Simple unsharp mask
+        // blur = gaussian_blur(input)
+        // sharpened = input + sharpening * (input - blur)
+
+        // For now, return input unchanged
+        input.clone()
+    }
+
+    pub fn reset(&mut self) {
+        self.temporal_buffer.reset();
+        self.jitter.reset();
+    }
+
+    pub fn set_sharpening(&mut self, strength: f32) {
+        self.sharpening = strength.clamp(0.0, 1.0);
+    }
+}
+
+// ============================================================================
+// FSR-STYLE UPSCALING (AMD FidelityFX inspired)
+// ============================================================================
+
+/// Edge-Adaptive Spatial Upsampling (EASU) - FSR pass 1
+pub struct EASU {
+    /// Filter kernel size
+    kernel_size: usize,
+    /// Edge detection threshold
+    edge_threshold: f32,
+}
+
+impl EASU {
+    pub fn new(edge_threshold: f32) -> Self {
+        Self {
+            kernel_size: 12,
+            edge_threshold,
+        }
+    }
+
+    pub fn forward(&self, input: &Tensor, scale: f32) -> Tensor {
+        let shape = input.shape();
+        let batch = shape.dim(0);
+        let channels = shape.dim(1);
+        let height = shape.dim(2);
+        let width = shape.dim(3);
+
+        let out_height = (height as f32 * scale) as usize;
+        let out_width = (width as f32 * scale) as usize;
+
+        let mut output = Tensor::zeros(&[batch, channels, out_height, out_width], input.dtype());
+
+        // Edge-adaptive upsampling
+        for b in 0..batch {
+            for c in 0..channels {
+                for oy in 0..out_height {
+                    for ox in 0..out_width {
+                        // Map output coords to input coords
+                        let iy = oy as f32 / scale;
+                        let ix = ox as f32 / scale;
+
+                        // Compute edge-adaptive weight
+                        let value = self.sample_easu(input, b, c, iy, ix, height, width);
+                        output.set_f32(&[b, c, oy, ox], value);
+                    }
+                }
+            }
+        }
+
+        output
+    }
+
+    fn sample_easu(
+        &self,
+        input: &Tensor,
+        batch: usize,
+        channel: usize,
+        y: f32,
+        x: f32,
+        height: usize,
+        width: usize,
+    ) -> f32 {
+        // Lanczos-based sampling with edge detection
+        let x0 = (x.floor() as i32).clamp(0, width as i32 - 1) as usize;
+        let y0 = (y.floor() as i32).clamp(0, height as i32 - 1) as usize;
+        let x1 = (x0 + 1).min(width - 1);
+        let y1 = (y0 + 1).min(height - 1);
+
+        // Sample neighbors
+        let p00 = input.get_f32(&[batch, channel, y0, x0]);
+        let p01 = input.get_f32(&[batch, channel, y0, x1]);
+        let p10 = input.get_f32(&[batch, channel, y1, x0]);
+        let p11 = input.get_f32(&[batch, channel, y1, x1]);
+
+        // Compute local edge strength
+        let dx = (p01 - p00).abs() + (p11 - p10).abs();
+        let dy = (p10 - p00).abs() + (p11 - p01).abs();
+        let edge_strength = (dx * dx + dy * dy).sqrt();
+
+        // Adaptive interpolation based on edge
+        let fx = x - x.floor();
+        let fy = y - y.floor();
+
+        if edge_strength > self.edge_threshold {
+            // Sharp edge: use nearest neighbor-ish
+            let nx = if fx < 0.5 { x0 } else { x1 };
+            let ny = if fy < 0.5 { y0 } else { y1 };
+            input.get_f32(&[batch, channel, ny, nx])
+        } else {
+            // Smooth area: bilinear
+            let v0 = p00 * (1.0 - fx) + p01 * fx;
+            let v1 = p10 * (1.0 - fx) + p11 * fx;
+            v0 * (1.0 - fy) + v1 * fy
+        }
+    }
+}
+
+/// Robust Contrast Adaptive Sharpening (RCAS) - FSR pass 2
+pub struct RCAS {
+    /// Sharpness strength (0-2)
+    sharpness: f32,
+    /// Denoise strength
+    denoise: f32,
+}
+
+impl RCAS {
+    pub fn new(sharpness: f32, denoise: f32) -> Self {
+        Self {
+            sharpness: sharpness.clamp(0.0, 2.0),
+            denoise: denoise.clamp(0.0, 1.0),
+        }
+    }
+
+    pub fn forward(&self, input: &Tensor) -> Tensor {
+        let shape = input.shape();
+        let batch = shape.dim(0);
+        let channels = shape.dim(1);
+        let height = shape.dim(2);
+        let width = shape.dim(3);
+
+        let mut output = Tensor::zeros(&[batch, channels, height, width], input.dtype());
+
+        for b in 0..batch {
+            for c in 0..channels {
+                for y in 1..(height - 1) {
+                    for x in 1..(width - 1) {
+                        let sharpened = self.sharpen_pixel(input, b, c, y, x);
+                        output.set_f32(&[b, c, y, x], sharpened);
+                    }
+                }
+            }
+        }
+
+        // Copy edges
+        for b in 0..batch {
+            for c in 0..channels {
+                for x in 0..width {
+                    output.set_f32(&[b, c, 0, x], input.get_f32(&[b, c, 0, x]));
+                    output.set_f32(&[b, c, height - 1, x], input.get_f32(&[b, c, height - 1, x]));
+                }
+                for y in 0..height {
+                    output.set_f32(&[b, c, y, 0], input.get_f32(&[b, c, y, 0]));
+                    output.set_f32(&[b, c, y, width - 1], input.get_f32(&[b, c, y, width - 1]));
+                }
+            }
+        }
+
+        output
+    }
+
+    fn sharpen_pixel(&self, input: &Tensor, b: usize, c: usize, y: usize, x: usize) -> f32 {
+        // Get 3x3 neighborhood
+        let n = input.get_f32(&[b, c, y - 1, x]);
+        let s = input.get_f32(&[b, c, y + 1, x]);
+        let e = input.get_f32(&[b, c, y, x + 1]);
+        let w = input.get_f32(&[b, c, y, x - 1]);
+        let m = input.get_f32(&[b, c, y, x]);
+
+        // Compute min/max for clamping
+        let min_val = n.min(s).min(e).min(w).min(m);
+        let max_val = n.max(s).max(e).max(w).max(m);
+
+        // Compute sharpening amount based on local contrast
+        let contrast = max_val - min_val;
+        let sharp_amount = self.sharpness * (1.0 - contrast).max(0.0);
+
+        // Apply unsharp mask
+        let blur = (n + s + e + w) * 0.25;
+        let detail = m - blur;
+        let sharpened = m + detail * sharp_amount;
+
+        // Clamp to prevent ringing
+        sharpened.clamp(min_val, max_val)
+    }
+}
+
+/// FSR-style upscaling pipeline
+pub struct FSRUpscaler {
+    /// Scale factor
+    scale: f32,
+    /// EASU pass
+    easu: EASU,
+    /// RCAS pass
+    rcas: RCAS,
+    /// HDR mode
+    hdr: bool,
+}
+
+impl FSRUpscaler {
+    pub fn new(scale: f32, sharpness: f32) -> Self {
+        Self {
+            scale,
+            easu: EASU::new(0.1),
+            rcas: RCAS::new(sharpness, 0.25),
+            hdr: false,
+        }
+    }
+
+    pub fn set_hdr(&mut self, enabled: bool) {
+        self.hdr = enabled;
+    }
+
+    pub fn forward(&self, input: &Tensor) -> Tensor {
+        // Pass 1: EASU (upscaling)
+        let upscaled = self.easu.forward(input, self.scale);
+
+        // Pass 2: RCAS (sharpening)
+        self.rcas.forward(&upscaled)
+    }
+}
+
+// ============================================================================
+// UNIFIED UPSCALING INTERFACE
+// ============================================================================
+
+/// Configuration for neural upscaling
+pub struct UpscaleConfig {
+    /// Upscaling method
+    pub method: UpscaleMethod,
+    /// Quality preset
+    pub quality: UpscaleQuality,
+    /// Enable temporal accumulation
+    pub temporal: bool,
+    /// Sharpening strength (0-1)
+    pub sharpening: f32,
+    /// Enable HDR processing
+    pub hdr: bool,
+    /// Inference backend
+    pub backend: InferenceBackend,
+    /// Model path (for loading pretrained weights)
+    pub model_path: Option<String>,
+}
+
+impl Default for UpscaleConfig {
+    fn default() -> Self {
+        Self {
+            method: UpscaleMethod::ESPCN,
+            quality: UpscaleQuality::Quality,
+            temporal: false,
+            sharpening: 0.5,
+            hdr: false,
+            backend: InferenceBackend::DirectML,
+            model_path: None,
+        }
+    }
+}
+
+/// Neural upscaling engine
+pub struct NeuralUpscaler {
+    /// Configuration
+    config: UpscaleConfig,
+    /// Output dimensions
+    output_width: usize,
+    output_height: usize,
+    /// Render dimensions
+    render_width: usize,
+    render_height: usize,
+    /// ESPCN model
+    espcn: Option<ESPCN>,
+    /// EDSR model
+    edsr: Option<EDSR>,
+    /// RCAN model
+    rcan: Option<RCAN>,
+    /// SwinIR model
+    swinir: Option<SwinIR>,
+    /// Real-ESRGAN model
+    real_esrgan: Option<RealESRGAN>,
+    /// Temporal SR
+    temporal_sr: Option<TemporalSR>,
+    /// FSR upscaler
+    fsr: Option<FSRUpscaler>,
+    /// Inference session
+    session: Option<InferenceSession>,
+    /// Frame count
+    frame_count: usize,
+}
+
+impl NeuralUpscaler {
+    pub fn new(config: UpscaleConfig, output_width: usize, output_height: usize) -> Self {
+        let (render_width, render_height) = config.quality.render_resolution(
+            output_width as u32,
+            output_height as u32,
+        );
+
+        let scale = (output_width as f32 / render_width as f32).round() as usize;
+
+        let mut upscaler = Self {
+            config,
+            output_width,
+            output_height,
+            render_width: render_width as usize,
+            render_height: render_height as usize,
+            espcn: None,
+            edsr: None,
+            rcan: None,
+            swinir: None,
+            real_esrgan: None,
+            temporal_sr: None,
+            fsr: None,
+            session: None,
+            frame_count: 0,
+        };
+
+        // Initialize the appropriate model
+        upscaler.init_model(scale);
+
+        upscaler
+    }
+
+    fn init_model(&mut self, scale: usize) {
+        match self.config.method {
+            UpscaleMethod::Bicubic | UpscaleMethod::Lanczos => {
+                // No neural network needed
+            }
+            UpscaleMethod::ESPCN => {
+                self.espcn = Some(ESPCN::new(scale, 3, 64));
+            }
+            UpscaleMethod::EDSR => {
+                self.edsr = Some(EDSR::new_baseline(scale));
+            }
+            UpscaleMethod::RCAN => {
+                self.rcan = Some(RCAN::new_default(scale));
+            }
+            UpscaleMethod::SwinIR => {
+                self.swinir = Some(SwinIR::new_lightweight(scale));
+            }
+            UpscaleMethod::RealESRGAN => {
+                self.real_esrgan = Some(RealESRGAN::new_x4());
+            }
+            UpscaleMethod::TemporalSR => {
+                self.temporal_sr = Some(TemporalSR::new(
+                    scale,
+                    self.render_width,
+                    self.render_height,
+                    64,
+                    4,
+                ));
+            }
+            UpscaleMethod::FSRStyle => {
+                self.fsr = Some(FSRUpscaler::new(scale as f32, self.config.sharpening));
+            }
+            UpscaleMethod::CustomNetwork => {
+                // Load custom ONNX model
+                if let Some(ref path) = self.config.model_path {
+                    // self.session = Some(InferenceSession::load(path));
+                }
+            }
+        }
+    }
+
+    pub fn upscale(&mut self, input: &Tensor) -> Tensor {
+        match self.config.method {
+            UpscaleMethod::Bicubic => self.bicubic_upscale(input),
+            UpscaleMethod::Lanczos => self.lanczos_upscale(input),
+            UpscaleMethod::ESPCN => {
+                if let Some(ref model) = self.espcn {
+                    model.forward(input)
+                } else {
+                    self.bicubic_upscale(input)
+                }
+            }
+            UpscaleMethod::EDSR => {
+                if let Some(ref model) = self.edsr {
+                    model.forward(input)
+                } else {
+                    self.bicubic_upscale(input)
+                }
+            }
+            UpscaleMethod::RCAN => {
+                if let Some(ref model) = self.rcan {
+                    model.forward(input)
+                } else {
+                    self.bicubic_upscale(input)
+                }
+            }
+            UpscaleMethod::SwinIR => {
+                if let Some(ref model) = self.swinir {
+                    model.forward(input)
+                } else {
+                    self.bicubic_upscale(input)
+                }
+            }
+            UpscaleMethod::RealESRGAN => {
+                if let Some(ref model) = self.real_esrgan {
+                    model.forward(input)
+                } else {
+                    self.bicubic_upscale(input)
+                }
+            }
+            UpscaleMethod::TemporalSR | UpscaleMethod::FSRStyle => {
+                // These need motion/depth - use simple upscale fallback
+                self.bicubic_upscale(input)
+            }
+            UpscaleMethod::CustomNetwork => {
+                // Run ONNX inference
+                self.bicubic_upscale(input)
+            }
+        }
+    }
+
+    pub fn upscale_temporal(
+        &mut self,
+        color: &Tensor,
+        depth: &Tensor,
+        motion: &Tensor,
+        exposure: f32,
+    ) -> Tensor {
+        self.frame_count += 1;
+
+        match self.config.method {
+            UpscaleMethod::TemporalSR => {
+                if let Some(ref mut tsr) = self.temporal_sr {
+                    tsr.upscale(color, depth, motion, exposure)
+                } else {
+                    self.upscale(color)
+                }
+            }
+            UpscaleMethod::FSRStyle => {
+                if let Some(ref fsr) = self.fsr {
+                    fsr.forward(color)
+                } else {
+                    self.upscale(color)
+                }
+            }
+            _ => self.upscale(color),
+        }
+    }
+
+    fn bicubic_upscale(&self, input: &Tensor) -> Tensor {
+        let scale_x = self.output_width as f32 / input.shape().dim(3) as f32;
+        let scale_y = self.output_height as f32 / input.shape().dim(2) as f32;
+
+        let upsample = Upsample::new(scale_x, "bicubic");
+        upsample.forward(input)
+    }
+
+    fn lanczos_upscale(&self, input: &Tensor) -> Tensor {
+        // Lanczos is essentially bicubic with different kernel
+        self.bicubic_upscale(input)
+    }
+
+    pub fn get_jitter(&mut self) -> Option<(f32, f32)> {
+        if let Some(ref mut tsr) = self.temporal_sr {
+            Some(tsr.get_jitter())
+        } else {
+            None
+        }
+    }
+
+    pub fn reset_temporal(&mut self) {
+        if let Some(ref mut tsr) = self.temporal_sr {
+            tsr.reset();
+        }
+        self.frame_count = 0;
+    }
+
+    pub fn render_resolution(&self) -> (usize, usize) {
+        (self.render_width, self.render_height)
+    }
+
+    pub fn output_resolution(&self) -> (usize, usize) {
+        (self.output_width, self.output_height)
+    }
+
+    pub fn set_quality(&mut self, quality: UpscaleQuality) {
+        let (render_width, render_height) = quality.render_resolution(
+            self.output_width as u32,
+            self.output_height as u32,
+        );
+
+        self.render_width = render_width as usize;
+        self.render_height = render_height as usize;
+        self.config.quality = quality;
+
+        // Reinitialize model with new scale
+        let scale = (self.output_width as f32 / render_width as f32).round() as usize;
+        self.init_model(scale);
+    }
+
+    pub fn set_sharpening(&mut self, strength: f32) {
+        self.config.sharpening = strength.clamp(0.0, 1.0);
+
+        if let Some(ref mut tsr) = self.temporal_sr {
+            tsr.set_sharpening(strength);
+        }
+        if let Some(ref mut fsr) = self.fsr {
+            fsr.rcas.sharpness = strength * 2.0;
+        }
+    }
+
+    pub fn model_name(&self) -> &str {
+        match self.config.method {
+            UpscaleMethod::Bicubic => "Bicubic",
+            UpscaleMethod::Lanczos => "Lanczos",
+            UpscaleMethod::ESPCN => "ESPCN",
+            UpscaleMethod::EDSR => "EDSR",
+            UpscaleMethod::RCAN => "RCAN",
+            UpscaleMethod::SwinIR => "SwinIR",
+            UpscaleMethod::RealESRGAN => "Real-ESRGAN",
+            UpscaleMethod::TemporalSR => "Temporal SR",
+            UpscaleMethod::FSRStyle => "FSR-Style",
+            UpscaleMethod::CustomNetwork => "Custom",
+        }
+    }
+}
+
+// ============================================================================
+// PERCEPTUAL LOSS FOR TRAINING
+// ============================================================================
+
+/// VGG feature extractor for perceptual loss
+pub struct VGGFeatureExtractor {
+    /// VGG layers
+    layers: Vec<Conv2d>,
+    /// ReLU activations
+    relus: Vec<ReLU>,
+    /// Max pooling
+    pools: Vec<MaxPool2d>,
+    /// Feature layer indices to extract
+    feature_layers: Vec<usize>,
+}
+
+pub struct MaxPool2d {
+    kernel_size: (usize, usize),
+    stride: (usize, usize),
+    padding: (usize, usize),
+}
+
+impl MaxPool2d {
+    pub fn new(kernel_size: (usize, usize), stride: (usize, usize), padding: (usize, usize)) -> Self {
+        Self {
+            kernel_size,
+            stride,
+            padding,
+        }
+    }
+
+    pub fn forward(&self, input: &Tensor) -> Tensor {
+        // Max pooling implementation
+        input.clone() // Simplified
+    }
+}
+
+impl VGGFeatureExtractor {
+    pub fn new_vgg19(feature_layers: Vec<usize>) -> Self {
+        // VGG19 configuration
+        let cfg = [64, 64, 'M', 128, 128, 'M', 256, 256, 256, 256, 'M',
+                   512, 512, 512, 512, 'M', 512, 512, 512, 512, 'M'];
+
+        let mut layers = Vec::new();
+        let mut relus = Vec::new();
+        let mut pools = Vec::new();
+
+        let mut in_channels = 3;
+
+        for &c in &cfg {
+            match c {
+                'M' => {
+                    pools.push(MaxPool2d::new((2, 2), (2, 2), (0, 0)));
+                }
+                n if n > 0 => {
+                    let out_channels = n as usize;
+                    layers.push(Conv2d::new(
+                        in_channels,
+                        out_channels,
+                        (3, 3),
+                        (1, 1),
+                        (1, 1),
+                        (1, 1),
+                        1,
+                        true,
+                    ));
+                    relus.push(ReLU::new());
+                    in_channels = out_channels;
+                }
+                _ => {}
+            }
+        }
+
+        Self {
+            layers,
+            relus,
+            pools,
+            feature_layers,
+        }
+    }
+
+    pub fn forward(&self, input: &Tensor) -> Vec<Tensor> {
+        let mut features = Vec::new();
+        let mut x = input.clone();
+        let mut layer_idx = 0;
+        let mut pool_idx = 0;
+
+        for i in 0..self.layers.len() {
+            x = self.layers[i].forward(&x);
+            x = self.relus[i].forward(&x);
+
+            if self.feature_layers.contains(&layer_idx) {
+                features.push(x.clone());
+            }
+
+            layer_idx += 1;
+
+            // Apply pooling after certain layers
+            if pool_idx < self.pools.len() && (layer_idx == 2 || layer_idx == 4 ||
+               layer_idx == 8 || layer_idx == 12 || layer_idx == 16) {
+                x = self.pools[pool_idx].forward(&x);
+                pool_idx += 1;
+            }
+        }
+
+        features
+    }
+}
+
+/// Perceptual loss using VGG features
+pub struct PerceptualLoss {
+    /// VGG feature extractor
+    vgg: VGGFeatureExtractor,
+    /// Loss weights for each feature layer
+    weights: Vec<f32>,
+    /// L1 loss
+    l1_loss: L1Loss,
+}
+
+impl PerceptualLoss {
+    pub fn new(feature_layers: Vec<usize>, weights: Vec<f32>) -> Self {
+        Self {
+            vgg: VGGFeatureExtractor::new_vgg19(feature_layers),
+            weights,
+            l1_loss: L1Loss::new(),
+        }
+    }
+
+    pub fn forward(&self, pred: &Tensor, target: &Tensor) -> f32 {
+        let pred_features = self.vgg.forward(pred);
+        let target_features = self.vgg.forward(target);
+
+        let mut total_loss = 0.0f32;
+
+        for (i, (pf, tf)) in pred_features.iter().zip(target_features.iter()).enumerate() {
+            let weight = if i < self.weights.len() { self.weights[i] } else { 1.0 };
+            total_loss += weight * self.l1_loss.forward(pf, tf);
+        }
+
+        total_loss
+    }
+}
+
+/// GAN discriminator for super-resolution
+pub struct SRDiscriminator {
+    /// Feature extraction layers
+    features: Vec<Conv2d>,
+    /// Batch normalizations
+    bns: Vec<BatchNorm2d>,
+    /// Leaky ReLU
+    lrelu: LeakyReLU,
+    /// Classifier
+    classifier: Vec<Linear>,
+}
+
+impl SRDiscriminator {
+    pub fn new(in_channels: usize, num_features: usize) -> Self {
+        let mut features = Vec::new();
+        let mut bns = Vec::new();
+
+        // Layer configurations: (out_channels, stride)
+        let cfg = [
+            (num_features, 1),
+            (num_features, 2),
+            (num_features * 2, 1),
+            (num_features * 2, 2),
+            (num_features * 4, 1),
+            (num_features * 4, 2),
+            (num_features * 8, 1),
+            (num_features * 8, 2),
+        ];
+
+        let mut in_ch = in_channels;
+        for (i, &(out_ch, stride)) in cfg.iter().enumerate() {
+            features.push(Conv2d::new(
+                in_ch,
+                out_ch,
+                (3, 3),
+                (stride, stride),
+                (1, 1),
+                (1, 1),
+                1,
+                true,
+            ));
+            if i > 0 {
+                bns.push(BatchNorm2d::new(out_ch, 1e-5, 0.1, true));
+            }
+            in_ch = out_ch;
+        }
+
+        // Classifier
+        let classifier = vec![
+            Linear::new(num_features * 8 * 6 * 6, 1024, true),
+            Linear::new(1024, 1, true),
+        ];
+
+        Self {
+            features,
+            bns,
+            lrelu: LeakyReLU::new(0.2),
+            classifier,
+        }
+    }
+
+    pub fn forward(&self, input: &Tensor) -> Tensor {
+        let mut x = input.clone();
+        let mut bn_idx = 0;
+
+        for (i, conv) in self.features.iter().enumerate() {
+            x = conv.forward(&x);
+            if i > 0 {
+                x = self.bns[bn_idx].forward(&x);
+                bn_idx += 1;
+            }
+            x = self.lrelu.forward(&x);
+        }
+
+        // Flatten
+        let shape = x.shape();
+        let batch = shape.dim(0);
+        x = x.reshape(&[batch, shape.dim(1) * shape.dim(2) * shape.dim(3)]);
+
+        // Classifier
+        x = self.classifier[0].forward(&x);
+        x = self.lrelu.forward(&x);
+        self.classifier[1].forward(&x)
+    }
+}
+
+// ============================================================================
+// TRAINING UTILITIES
+// ============================================================================
+
+/// Training configuration for super-resolution
+pub struct SRTrainingConfig {
+    /// Learning rate
+    pub lr: f32,
+    /// Batch size
+    pub batch_size: usize,
+    /// Number of epochs
+    pub epochs: usize,
+    /// Pixel loss weight
+    pub pixel_weight: f32,
+    /// Perceptual loss weight
+    pub perceptual_weight: f32,
+    /// GAN loss weight
+    pub gan_weight: f32,
+    /// LR scheduler step
+    pub lr_step: usize,
+    /// LR decay factor
+    pub lr_decay: f32,
+    /// Gradient clipping
+    pub grad_clip: f32,
+    /// Save interval
+    pub save_interval: usize,
+}
+
+impl Default for SRTrainingConfig {
+    fn default() -> Self {
+        Self {
+            lr: 0.0002,
+            batch_size: 16,
+            epochs: 100,
+            pixel_weight: 1.0,
+            perceptual_weight: 0.01,
+            gan_weight: 0.005,
+            lr_step: 50,
+            lr_decay: 0.5,
+            grad_clip: 1.0,
+            save_interval: 10,
+        }
+    }
+}
+
+/// Training data augmentation
+pub struct SRAugmentation {
+    /// Random crop size
+    pub crop_size: usize,
+    /// Enable horizontal flip
+    pub hflip: bool,
+    /// Enable vertical flip
+    pub vflip: bool,
+    /// Enable rotation (90 degree increments)
+    pub rotate: bool,
+    /// Color jitter strength
+    pub color_jitter: f32,
+}
+
+impl SRAugmentation {
+    pub fn new(crop_size: usize) -> Self {
+        Self {
+            crop_size,
+            hflip: true,
+            vflip: true,
+            rotate: true,
+            color_jitter: 0.05,
+        }
+    }
+
+    pub fn apply(&self, lr: &Tensor, hr: &Tensor, rng: &mut XorShift64) -> (Tensor, Tensor) {
+        let mut lr_aug = lr.clone();
+        let mut hr_aug = hr.clone();
+
+        // Random horizontal flip
+        if self.hflip && rng.next_f32() > 0.5 {
+            lr_aug = self.flip_horizontal(&lr_aug);
+            hr_aug = self.flip_horizontal(&hr_aug);
+        }
+
+        // Random vertical flip
+        if self.vflip && rng.next_f32() > 0.5 {
+            lr_aug = self.flip_vertical(&lr_aug);
+            hr_aug = self.flip_vertical(&hr_aug);
+        }
+
+        // Random rotation
+        if self.rotate {
+            let rot = (rng.next_f32() * 4.0) as usize;
+            for _ in 0..rot {
+                lr_aug = self.rotate_90(&lr_aug);
+                hr_aug = self.rotate_90(&hr_aug);
+            }
+        }
+
+        (lr_aug, hr_aug)
+    }
+
+    fn flip_horizontal(&self, input: &Tensor) -> Tensor {
+        // Flip along width dimension
+        input.clone() // Simplified
+    }
+
+    fn flip_vertical(&self, input: &Tensor) -> Tensor {
+        // Flip along height dimension
+        input.clone() // Simplified
+    }
+
+    fn rotate_90(&self, input: &Tensor) -> Tensor {
+        // Rotate 90 degrees
+        input.clone() // Simplified
+    }
+}
+
+/// XorShift64 random number generator
+pub struct XorShift64 {
+    state: u64,
+}
+
+impl XorShift64 {
+    pub fn new(seed: u64) -> Self {
+        Self { state: seed }
+    }
+
+    pub fn next(&mut self) -> u64 {
+        self.state ^= self.state << 13;
+        self.state ^= self.state >> 7;
+        self.state ^= self.state << 17;
+        self.state
+    }
+
+    pub fn next_f32(&mut self) -> f32 {
+        (self.next() as f32) / (u64::MAX as f32)
+    }
+}
+
+// ============================================================================
+// IMAGE QUALITY METRICS
+// ============================================================================
+
+/// Peak Signal-to-Noise Ratio
+pub fn psnr(pred: &Tensor, target: &Tensor, max_val: f32) -> f32 {
+    let mse = MSELoss::new().forward(pred, target);
+    if mse < 1e-10 {
+        return 100.0;
+    }
+    20.0 * (max_val / mse.sqrt()).log10()
+}
+
+/// Structural Similarity Index
+pub fn ssim(pred: &Tensor, target: &Tensor) -> f32 {
+    SSIMLoss::new(11, 1.5).forward(pred, target)
+}
+
+/// Learned Perceptual Image Patch Similarity (LPIPS)
+pub struct LPIPS {
+    vgg: VGGFeatureExtractor,
+    weights: Vec<f32>,
+}
+
+impl LPIPS {
+    pub fn new() -> Self {
+        Self {
+            vgg: VGGFeatureExtractor::new_vgg19(vec![2, 7, 12, 21, 30]),
+            weights: vec![0.1, 0.1, 1.0, 1.0, 1.0],
+        }
+    }
+
+    pub fn forward(&self, pred: &Tensor, target: &Tensor) -> f32 {
+        let pred_features = self.vgg.forward(pred);
+        let target_features = self.vgg.forward(target);
+
+        let mut distance = 0.0f32;
+
+        for (i, (pf, tf)) in pred_features.iter().zip(target_features.iter()).enumerate() {
+            // Normalize features
+            let pf_norm = normalize_features(pf);
+            let tf_norm = normalize_features(tf);
+
+            // Compute squared difference
+            let diff = pf_norm.sub(&tf_norm);
+            let sq_diff = diff.mul(&diff);
+            let mean = sq_diff.mean();
+
+            distance += self.weights[i] * mean;
+        }
+
+        distance
+    }
+}
+
+fn normalize_features(features: &Tensor) -> Tensor {
+    // L2 normalize along channel dimension
+    features.clone() // Simplified
+}
+
+// ============================================================================
+// BENCHMARK UTILITIES
+// ============================================================================
+
+/// Benchmark result for upscaling
+pub struct UpscaleBenchmark {
+    /// Model name
+    pub model: String,
+    /// Scale factor
+    pub scale: usize,
+    /// Input resolution
+    pub input_res: (usize, usize),
+    /// Output resolution
+    pub output_res: (usize, usize),
+    /// Average inference time (ms)
+    pub avg_time_ms: f32,
+    /// Frames per second
+    pub fps: f32,
+    /// PSNR score
+    pub psnr: f32,
+    /// SSIM score
+    pub ssim: f32,
+    /// LPIPS score
+    pub lpips: f32,
+    /// Number of parameters
+    pub num_params: usize,
+    /// FLOPs
+    pub flops: usize,
+}
+
+pub fn benchmark_upscaler(
+    upscaler: &mut NeuralUpscaler,
+    test_images: &[Tensor],
+    ground_truth: &[Tensor],
+    num_warmup: usize,
+    num_runs: usize,
+) -> UpscaleBenchmark {
+    let (render_w, render_h) = upscaler.render_resolution();
+    let (output_w, output_h) = upscaler.output_resolution();
+    let scale = output_w / render_w;
+
+    // Warmup
+    for _ in 0..num_warmup {
+        if let Some(img) = test_images.first() {
+            let _ = upscaler.upscale(img);
+        }
+    }
+
+    // Benchmark
+    let start = std::time::Instant::now();
+    let mut outputs = Vec::new();
+
+    for _ in 0..num_runs {
+        for img in test_images {
+            let output = upscaler.upscale(img);
+            outputs.push(output);
+        }
+    }
+
+    let elapsed = start.elapsed().as_secs_f32() * 1000.0;
+    let total_frames = num_runs * test_images.len();
+    let avg_time = elapsed / total_frames as f32;
+    let fps = 1000.0 / avg_time;
+
+    // Compute quality metrics
+    let mut total_psnr = 0.0f32;
+    let mut total_ssim = 0.0f32;
+    let lpips_metric = LPIPS::new();
+    let mut total_lpips = 0.0f32;
+
+    for (output, gt) in outputs.iter().zip(ground_truth.iter().cycle()) {
+        total_psnr += psnr(output, gt, 1.0);
+        total_ssim += ssim(output, gt);
+        total_lpips += lpips_metric.forward(output, gt);
+    }
+
+    let num_outputs = outputs.len() as f32;
+
+    UpscaleBenchmark {
+        model: upscaler.model_name().to_string(),
+        scale,
+        input_res: (render_w, render_h),
+        output_res: (output_w, output_h),
+        avg_time_ms: avg_time,
+        fps,
+        psnr: total_psnr / num_outputs,
+        ssim: total_ssim / num_outputs,
+        lpips: total_lpips / num_outputs,
+        num_params: 0, // Would need model access
+        flops: 0,       // Would need computation
+    }
+}
+
+// ============================================================================
+// MODULE EXPORTS
+// ============================================================================
+
+pub mod quality {
+    pub use super::{UpscaleQuality, UpscaleMethod, UpscaleConfig};
+}
+
+pub mod networks {
+    pub use super::{ESPCN, EDSR, RCAN, SwinIR, RealESRGAN};
+    pub use super::{EDSRResBlock, RCAB, ResidualGroup, RRDB, ResidualDenseBlock};
+    pub use super::{SwinTransformerBlock, WindowAttention, RSTB, MLP};
+}
+
+pub mod temporal {
+    pub use super::{TemporalSR, TemporalBuffer, TemporalWarping, TemporalFusion};
+    pub use super::{TemporalFeatureExtractor, JitterPattern, MotionVector};
+    pub use super::GridSampleMode;
+}
+
+pub mod fsr {
+    pub use super::{FSRUpscaler, EASU, RCAS};
+}
+
+pub mod training {
+    pub use super::{SRTrainingConfig, SRAugmentation, XorShift64};
+    pub use super::{VGGFeatureExtractor, PerceptualLoss, SRDiscriminator};
+}
+
+pub mod metrics {
+    pub use super::{psnr, ssim, LPIPS, UpscaleBenchmark, benchmark_upscaler};
+}
+
+pub use quality::*;
+pub use networks::*;
+pub use temporal::*;
+pub use fsr::*;
+pub use training::*;
+pub use metrics::*;

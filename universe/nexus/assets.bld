@@ -1,0 +1,1195 @@
+// ============================================================================
+// NEXUS - Asset Management System
+// ============================================================================
+// Virtual file system and asset management for mods
+// Supports asset overrides, layering, hot-reload, and caching
+// ============================================================================
+
+module nexus::assets;
+
+use core::io::{File, Path, Directory};
+use core::sync::{Mutex, RwLock, Arc};
+use core::collections::{HashMap, HashSet, Vec, BTreeMap};
+
+// ============================================================================
+// Asset Types
+// ============================================================================
+
+/// Asset type classification
+@derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub enum AssetType {
+    Texture,
+    Mesh,
+    Material,
+    Shader,
+    Sound,
+    Music,
+    Animation,
+    Skeleton,
+    Font,
+    Config,
+    Script,
+    Localization,
+    Video,
+    Binary,
+    Unknown
+}
+
+impl AssetType {
+    pub fn from_extension(ext: &str) -> Self {
+        match ext.to_lowercase().as_str() {
+            "png" | "jpg" | "jpeg" | "dds" | "tga" | "bmp" | "tiff" | "webp" => Self::Texture,
+            "fbx" | "obj" | "gltf" | "glb" | "dae" | "3ds" => Self::Mesh,
+            "mtl" | "mat" => Self::Material,
+            "hlsl" | "glsl" | "frag" | "vert" | "comp" | "fx" | "cso" => Self::Shader,
+            "wav" | "ogg" | "mp3" | "flac" | "aiff" => Self::Sound,
+            "mid" | "midi" | "xm" | "it" | "mod" => Self::Music,
+            "anim" | "animation" => Self::Animation,
+            "skeleton" | "skel" => Self::Skeleton,
+            "ttf" | "otf" | "woff" | "woff2" => Self::Font,
+            "json" | "yaml" | "yml" | "toml" | "xml" | "ini" | "cfg" => Self::Config,
+            "build" | "lua" | "py" | "js" => Self::Script,
+            "po" | "pot" | "strings" | "lang" => Self::Localization,
+            "mp4" | "webm" | "mkv" | "avi" => Self::Video,
+            "bin" | "dat" | "pak" => Self::Binary,
+            _ => Self::Unknown
+        }
+    }
+
+    pub fn is_text(&self) -> bool {
+        matches!(self, Self::Config | Self::Script | Self::Localization | Self::Shader)
+    }
+
+    pub fn is_binary(&self) -> bool {
+        !self.is_text()
+    }
+}
+
+/// Asset priority for layering
+@derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum AssetPriority {
+    Lowest = 0,
+    Low = 250,
+    Normal = 500,
+    High = 750,
+    Highest = 1000,
+    Override = 2000
+}
+
+/// Asset state
+@derive(Clone, Copy, PartialEq, Eq)]
+pub enum AssetState {
+    Unloaded,
+    Loading,
+    Loaded,
+    Failed,
+    Unloading
+}
+
+// ============================================================================
+// Asset Handle
+// ============================================================================
+
+/// Handle to a loaded asset
+@derive(Clone)]
+pub struct AssetHandle {
+    id: u64,
+    path: String,
+    asset_type: AssetType,
+    source_mod: Option<String>,
+    generation: u32
+}
+
+impl AssetHandle {
+    pub fn new(id: u64, path: &str, asset_type: AssetType) -> Self {
+        Self {
+            id,
+            path: path.to_string(),
+            asset_type,
+            source_mod: None,
+            generation: 0
+        }
+    }
+
+    pub fn with_source(mut self, mod_id: &str) -> Self {
+        self.source_mod = Some(mod_id.to_string());
+        self
+    }
+
+    pub fn id(&self) -> u64 { self.id }
+    pub fn path(&self) -> &str { &self.path }
+    pub fn asset_type(&self) -> AssetType { self.asset_type }
+    pub fn source_mod(&self) -> Option<&str> { self.source_mod.as_deref() }
+    pub fn generation(&self) -> u32 { self.generation }
+
+    pub fn is_valid(&self, current_generation: u32) -> bool {
+        self.generation == current_generation
+    }
+}
+
+// ============================================================================
+// Asset Entry
+// ============================================================================
+
+/// Metadata for an asset
+pub struct AssetEntry {
+    path: String,
+    virtual_path: String,
+    asset_type: AssetType,
+    size: u64,
+    hash: u64,
+    source_mod: Option<String>,
+    priority: AssetPriority,
+    state: AssetState,
+    dependencies: Vec<String>,
+    last_modified: u64,
+    loaded_data: Option<AssetData>,
+    handle: Option<AssetHandle>,
+    load_count: u32,
+    error: Option<String>
+}
+
+impl AssetEntry {
+    pub fn new(path: &str, virtual_path: &str, asset_type: AssetType) -> Self {
+        Self {
+            path: path.to_string(),
+            virtual_path: virtual_path.to_string(),
+            asset_type,
+            size: 0,
+            hash: 0,
+            source_mod: None,
+            priority: AssetPriority::Normal,
+            state: AssetState::Unloaded,
+            dependencies: Vec::new(),
+            last_modified: 0,
+            loaded_data: None,
+            handle: None,
+            load_count: 0,
+            error: None
+        }
+    }
+
+    pub fn with_source(mut self, mod_id: &str) -> Self {
+        self.source_mod = Some(mod_id.to_string());
+        self
+    }
+
+    pub fn with_priority(mut self, priority: AssetPriority) -> Self {
+        self.priority = priority;
+        self
+    }
+
+    pub fn path(&self) -> &str { &self.path }
+    pub fn virtual_path(&self) -> &str { &self.virtual_path }
+    pub fn asset_type(&self) -> AssetType { self.asset_type }
+    pub fn size(&self) -> u64 { self.size }
+    pub fn source_mod(&self) -> Option<&str> { self.source_mod.as_deref() }
+    pub fn priority(&self) -> AssetPriority { self.priority }
+    pub fn state(&self) -> AssetState { self.state }
+    pub fn is_loaded(&self) -> bool { self.state == AssetState::Loaded }
+}
+
+/// Loaded asset data
+pub enum AssetData {
+    Binary(Vec<u8>),
+    Text(String),
+    Texture(TextureData),
+    Mesh(MeshData),
+    Sound(SoundData)
+}
+
+/// Texture asset data
+pub struct TextureData {
+    pub width: u32,
+    pub height: u32,
+    pub format: TextureFormat,
+    pub mip_levels: u32,
+    pub data: Vec<u8>
+}
+
+@derive(Clone, Copy)]
+pub enum TextureFormat {
+    RGBA8,
+    RGBA16F,
+    RGBA32F,
+    BC1,
+    BC3,
+    BC5,
+    BC7,
+    R8,
+    RG8,
+    R16F
+}
+
+/// Mesh asset data
+pub struct MeshData {
+    pub vertices: Vec<Vertex>,
+    pub indices: Vec<u32>,
+    pub submeshes: Vec<Submesh>,
+    pub bounds: BoundingBox
+}
+
+pub struct Vertex {
+    pub position: [f32; 3],
+    pub normal: [f32; 3],
+    pub tangent: [f32; 4],
+    pub uv0: [f32; 2],
+    pub uv1: [f32; 2],
+    pub color: [u8; 4]
+}
+
+pub struct Submesh {
+    pub index_start: u32,
+    pub index_count: u32,
+    pub material_index: u32
+}
+
+pub struct BoundingBox {
+    pub min: [f32; 3],
+    pub max: [f32; 3]
+}
+
+/// Sound asset data
+pub struct SoundData {
+    pub sample_rate: u32,
+    pub channels: u8,
+    pub bits_per_sample: u8,
+    pub duration_ms: u32,
+    pub data: Vec<u8>
+}
+
+// ============================================================================
+// Asset Override
+// ============================================================================
+
+/// Asset override definition
+pub struct AssetOverride {
+    original_path: String,
+    override_path: String,
+    source_mod: String,
+    priority: AssetPriority,
+    conditions: Vec<OverrideCondition>,
+    active: bool
+}
+
+impl AssetOverride {
+    pub fn new(original: &str, replacement: &str, mod_id: &str) -> Self {
+        Self {
+            original_path: original.to_string(),
+            override_path: replacement.to_string(),
+            source_mod: mod_id.to_string(),
+            priority: AssetPriority::Normal,
+            conditions: Vec::new(),
+            active: true
+        }
+    }
+
+    pub fn with_priority(mut self, priority: AssetPriority) -> Self {
+        self.priority = priority;
+        self
+    }
+
+    pub fn with_condition(mut self, condition: OverrideCondition) -> Self {
+        self.conditions.push(condition);
+        self
+    }
+
+    pub fn original_path(&self) -> &str { &self.original_path }
+    pub fn override_path(&self) -> &str { &self.override_path }
+    pub fn source_mod(&self) -> &str { &self.source_mod }
+    pub fn priority(&self) -> AssetPriority { self.priority }
+    pub fn is_active(&self) -> bool { self.active }
+
+    pub fn should_apply(&self, context: &OverrideContext) -> bool {
+        if !self.active {
+            return false;
+        }
+
+        for condition in &self.conditions {
+            if !condition.evaluate(context) {
+                return false;
+            }
+        }
+
+        true
+    }
+}
+
+/// Condition for asset override application
+pub enum OverrideCondition {
+    ModLoaded(String),
+    ModNotLoaded(String),
+    ConfigEquals { key: String, value: String },
+    Platform(String),
+    TimeRange { start_hour: u8, end_hour: u8 },
+    Random { probability: f32, seed: u64 },
+    Custom(Box<dyn Fn(&OverrideContext) -> bool + Send + Sync>)
+}
+
+impl OverrideCondition {
+    pub fn evaluate(&self, context: &OverrideContext) -> bool {
+        match self {
+            Self::ModLoaded(mod_id) => context.loaded_mods.contains(mod_id),
+            Self::ModNotLoaded(mod_id) => !context.loaded_mods.contains(mod_id),
+            Self::ConfigEquals { key, value } => {
+                context.config.get(key).map(|v| v == value).unwrap_or(false)
+            }
+            Self::Platform(platform) => &context.platform == platform,
+            Self::TimeRange { start_hour, end_hour } => {
+                let hour = (context.timestamp / 3600000) % 24;
+                hour >= *start_hour as u64 && hour < *end_hour as u64
+            }
+            Self::Random { probability, seed } => {
+                // Simple deterministic pseudo-random
+                let hash = (context.timestamp ^ seed).wrapping_mul(0x517cc1b727220a95);
+                (hash as f64 / u64::MAX as f64) < *probability as f64
+            }
+            Self::Custom(f) => f(context)
+        }
+    }
+}
+
+/// Context for evaluating override conditions
+pub struct OverrideContext {
+    pub loaded_mods: HashSet<String>,
+    pub config: HashMap<String, String>,
+    pub platform: String,
+    pub timestamp: u64
+}
+
+// ============================================================================
+// Asset Pack
+// ============================================================================
+
+/// Collection of assets from a mod
+pub struct AssetPack {
+    mod_id: String,
+    name: String,
+    base_path: Path,
+    assets: HashMap<String, AssetEntry>,
+    overrides: Vec<AssetOverride>,
+    priority: AssetPriority,
+    enabled: bool,
+    total_size: u64
+}
+
+impl AssetPack {
+    pub fn new(mod_id: &str, name: &str, base_path: Path) -> Self {
+        Self {
+            mod_id: mod_id.to_string(),
+            name: name.to_string(),
+            base_path,
+            assets: HashMap::new(),
+            overrides: Vec::new(),
+            priority: AssetPriority::Normal,
+            enabled: true,
+            total_size: 0
+        }
+    }
+
+    pub fn with_priority(mut self, priority: AssetPriority) -> Self {
+        self.priority = priority;
+        self
+    }
+
+    pub fn mod_id(&self) -> &str { &self.mod_id }
+    pub fn name(&self) -> &str { &self.name }
+    pub fn base_path(&self) -> &Path { &self.base_path }
+    pub fn priority(&self) -> AssetPriority { self.priority }
+    pub fn is_enabled(&self) -> bool { self.enabled }
+    pub fn total_size(&self) -> u64 { self.total_size }
+
+    pub fn add_asset(&mut self, entry: AssetEntry) {
+        self.total_size += entry.size;
+        self.assets.insert(entry.virtual_path.clone(), entry);
+    }
+
+    pub fn add_override(&mut self, override_def: AssetOverride) {
+        self.overrides.push(override_def);
+    }
+
+    pub fn get_asset(&self, virtual_path: &str) -> Option<&AssetEntry> {
+        self.assets.get(virtual_path)
+    }
+
+    pub fn has_asset(&self, virtual_path: &str) -> bool {
+        self.assets.contains_key(virtual_path)
+    }
+
+    pub fn asset_count(&self) -> usize {
+        self.assets.len()
+    }
+
+    pub fn overrides(&self) -> &[AssetOverride] {
+        &self.overrides
+    }
+
+    pub fn enable(&mut self) { self.enabled = true; }
+    pub fn disable(&mut self) { self.enabled = false; }
+
+    /// Scan directory for assets
+    pub fn scan_directory(&mut self) -> Result<(), AssetError> {
+        self.scan_directory_recursive(&self.base_path.clone(), "")
+    }
+
+    fn scan_directory_recursive(&mut self, dir: &Path, prefix: &str) -> Result<(), AssetError> {
+        // Would actually scan the filesystem here
+        Ok(())
+    }
+}
+
+// ============================================================================
+// Virtual File System
+// ============================================================================
+
+/// Virtual file system that overlays multiple asset sources
+pub struct VirtualFileSystem {
+    mount_points: Vec<MountPoint>,
+    path_cache: HashMap<String, ResolvedPath>,
+    case_sensitive: bool,
+    enabled: bool
+}
+
+impl VirtualFileSystem {
+    pub fn new() -> Self {
+        Self {
+            mount_points: Vec::new(),
+            path_cache: HashMap::new(),
+            case_sensitive: false,
+            enabled: true
+        }
+    }
+
+    pub fn with_case_sensitive(mut self, sensitive: bool) -> Self {
+        self.case_sensitive = sensitive;
+        self
+    }
+
+    /// Mount a directory or asset pack
+    pub fn mount(&mut self, mount_point: MountPoint) {
+        self.mount_points.push(mount_point);
+        self.mount_points.sort_by(|a, b| b.priority.cmp(&a.priority));
+        self.path_cache.clear();
+    }
+
+    /// Unmount by source ID
+    pub fn unmount(&mut self, source_id: &str) -> bool {
+        let initial_len = self.mount_points.len();
+        self.mount_points.retain(|mp| mp.source_id != source_id);
+        self.path_cache.clear();
+        self.mount_points.len() != initial_len
+    }
+
+    /// Resolve a virtual path to a physical path
+    pub fn resolve(&self, virtual_path: &str) -> Option<ResolvedPath> {
+        if !self.enabled {
+            return None;
+        }
+
+        let normalized = self.normalize_path(virtual_path);
+
+        // Check cache
+        if let Some(cached) = self.path_cache.get(&normalized) {
+            return Some(cached.clone());
+        }
+
+        // Search mount points in priority order
+        for mount in &self.mount_points {
+            if !mount.enabled {
+                continue;
+            }
+
+            if let Some(resolved) = mount.resolve(&normalized) {
+                return Some(resolved);
+            }
+        }
+
+        None
+    }
+
+    /// List files matching a pattern
+    pub fn list(&self, pattern: &str) -> Vec<String> {
+        let mut results = HashSet::new();
+
+        for mount in &self.mount_points {
+            if !mount.enabled {
+                continue;
+            }
+
+            for path in mount.list(pattern) {
+                results.insert(path);
+            }
+        }
+
+        results.into_iter().collect()
+    }
+
+    /// Check if a file exists
+    pub fn exists(&self, virtual_path: &str) -> bool {
+        self.resolve(virtual_path).is_some()
+    }
+
+    /// Read file contents
+    pub fn read(&self, virtual_path: &str) -> Result<Vec<u8>, AssetError> {
+        match self.resolve(virtual_path) {
+            Some(resolved) => {
+                File::read(&resolved.physical_path)
+                    .map_err(|e| AssetError::ReadFailed(virtual_path.to_string(), e.to_string()))
+            }
+            None => Err(AssetError::NotFound(virtual_path.to_string()))
+        }
+    }
+
+    /// Read file as text
+    pub fn read_text(&self, virtual_path: &str) -> Result<String, AssetError> {
+        match self.resolve(virtual_path) {
+            Some(resolved) => {
+                File::read_to_string(&resolved.physical_path)
+                    .map_err(|e| AssetError::ReadFailed(virtual_path.to_string(), e.to_string()))
+            }
+            None => Err(AssetError::NotFound(virtual_path.to_string()))
+        }
+    }
+
+    fn normalize_path(&self, path: &str) -> String {
+        let mut normalized = path.replace('\\', "/");
+
+        if !self.case_sensitive {
+            normalized = normalized.to_lowercase();
+        }
+
+        // Remove leading/trailing slashes
+        normalized = normalized.trim_matches('/').to_string();
+
+        normalized
+    }
+
+    pub fn mount_count(&self) -> usize { self.mount_points.len() }
+    pub fn enable(&mut self) { self.enabled = true; }
+    pub fn disable(&mut self) { self.enabled = false; }
+    pub fn clear_cache(&mut self) { self.path_cache.clear(); }
+}
+
+/// Mount point in the VFS
+pub struct MountPoint {
+    source_id: String,
+    mount_path: String,
+    physical_path: Path,
+    priority: AssetPriority,
+    read_only: bool,
+    enabled: bool,
+    file_index: HashMap<String, String>
+}
+
+impl MountPoint {
+    pub fn new(source_id: &str, physical_path: Path) -> Self {
+        Self {
+            source_id: source_id.to_string(),
+            mount_path: String::new(),
+            physical_path,
+            priority: AssetPriority::Normal,
+            read_only: true,
+            enabled: true,
+            file_index: HashMap::new()
+        }
+    }
+
+    pub fn with_mount_path(mut self, path: &str) -> Self {
+        self.mount_path = path.to_string();
+        self
+    }
+
+    pub fn with_priority(mut self, priority: AssetPriority) -> Self {
+        self.priority = priority;
+        self
+    }
+
+    pub fn resolve(&self, virtual_path: &str) -> Option<ResolvedPath> {
+        // Check if path is under this mount point
+        let relative = if self.mount_path.is_empty() {
+            virtual_path.to_string()
+        } else if virtual_path.starts_with(&self.mount_path) {
+            virtual_path[self.mount_path.len()..].trim_start_matches('/').to_string()
+        } else {
+            return None;
+        };
+
+        // Check file index or physical path
+        if let Some(indexed_path) = self.file_index.get(&relative) {
+            return Some(ResolvedPath {
+                virtual_path: virtual_path.to_string(),
+                physical_path: Path::from(indexed_path),
+                source_id: self.source_id.clone(),
+                priority: self.priority
+            });
+        }
+
+        // Check physical path
+        let physical = self.physical_path.join(&relative);
+        if physical.exists() {
+            return Some(ResolvedPath {
+                virtual_path: virtual_path.to_string(),
+                physical_path: physical,
+                source_id: self.source_id.clone(),
+                priority: self.priority
+            });
+        }
+
+        None
+    }
+
+    pub fn list(&self, pattern: &str) -> Vec<String> {
+        // Would actually list files matching the pattern
+        Vec::new()
+    }
+
+    pub fn index_files(&mut self) -> Result<(), AssetError> {
+        // Would scan and index all files
+        Ok(())
+    }
+}
+
+/// Resolved path from VFS
+@derive(Clone)]
+pub struct ResolvedPath {
+    pub virtual_path: String,
+    pub physical_path: Path,
+    pub source_id: String,
+    pub priority: AssetPriority
+}
+
+// ============================================================================
+// Mod Asset Manager
+// ============================================================================
+
+/// Central asset manager for all mods
+pub struct ModAssetManager {
+    vfs: VirtualFileSystem,
+    packs: HashMap<String, AssetPack>,
+    loaded_assets: HashMap<String, AssetEntry>,
+    asset_handles: HashMap<u64, AssetHandle>,
+    overrides: BTreeMap<String, Vec<AssetOverride>>,
+    override_context: OverrideContext,
+    next_handle_id: u64,
+    generation: u32,
+    cache: AssetCache,
+    loading_queue: Vec<String>,
+    hot_reload_enabled: bool,
+    stats: AssetStats
+}
+
+impl ModAssetManager {
+    pub fn new() -> Self {
+        Self {
+            vfs: VirtualFileSystem::new(),
+            packs: HashMap::new(),
+            loaded_assets: HashMap::new(),
+            asset_handles: HashMap::new(),
+            overrides: BTreeMap::new(),
+            override_context: OverrideContext {
+                loaded_mods: HashSet::new(),
+                config: HashMap::new(),
+                platform: "windows".to_string(),
+                timestamp: 0
+            },
+            next_handle_id: 1,
+            generation: 0,
+            cache: AssetCache::new(256 * 1024 * 1024), // 256 MB cache
+            loading_queue: Vec::new(),
+            hot_reload_enabled: true,
+            stats: AssetStats::new()
+        }
+    }
+
+    /// Register an asset pack
+    pub fn register_pack(&mut self, pack: AssetPack) {
+        let mod_id = pack.mod_id().to_string();
+
+        // Mount pack in VFS
+        let mount = MountPoint::new(&mod_id, pack.base_path().clone())
+            .with_priority(pack.priority());
+        self.vfs.mount(mount);
+
+        // Register overrides
+        for override_def in pack.overrides() {
+            self.overrides
+                .entry(override_def.original_path().to_string())
+                .or_insert_with(Vec::new)
+                .push(override_def.clone());
+        }
+
+        // Update override context
+        self.override_context.loaded_mods.insert(mod_id.clone());
+
+        self.packs.insert(mod_id, pack);
+        self.stats.packs_registered += 1;
+    }
+
+    /// Unregister an asset pack
+    pub fn unregister_pack(&mut self, mod_id: &str) {
+        if let Some(pack) = self.packs.remove(mod_id) {
+            self.vfs.unmount(mod_id);
+            self.override_context.loaded_mods.remove(mod_id);
+
+            // Remove overrides from this mod
+            for overrides in self.overrides.values_mut() {
+                overrides.retain(|o| o.source_mod() != mod_id);
+            }
+
+            // Unload assets from this mod
+            let to_unload: Vec<String> = self.loaded_assets.iter()
+                .filter(|(_, entry)| entry.source_mod() == Some(mod_id))
+                .map(|(path, _)| path.clone())
+                .collect();
+
+            for path in to_unload {
+                self.unload(&path);
+            }
+        }
+    }
+
+    /// Load an asset
+    pub fn load(&mut self, virtual_path: &str) -> Result<AssetHandle, AssetError> {
+        // Check if already loaded
+        if let Some(entry) = self.loaded_assets.get(virtual_path) {
+            if let Some(handle) = &entry.handle {
+                return Ok(handle.clone());
+            }
+        }
+
+        // Apply overrides
+        let resolved_path = self.resolve_with_overrides(virtual_path);
+
+        // Resolve in VFS
+        let resolved = self.vfs.resolve(&resolved_path)
+            .ok_or_else(|| AssetError::NotFound(virtual_path.to_string()))?;
+
+        // Determine asset type
+        let extension = resolved.physical_path.extension().unwrap_or("");
+        let asset_type = AssetType::from_extension(extension);
+
+        // Load data
+        let data = self.vfs.read(&resolved_path)?;
+
+        // Create entry
+        let mut entry = AssetEntry::new(&resolved.physical_path.to_string(), virtual_path, asset_type);
+        entry.size = data.len() as u64;
+        entry.source_mod = Some(resolved.source_id.clone());
+        entry.state = AssetState::Loaded;
+        entry.loaded_data = Some(AssetData::Binary(data));
+        entry.load_count = 1;
+
+        // Create handle
+        let handle = AssetHandle::new(self.next_handle_id, virtual_path, asset_type)
+            .with_source(&resolved.source_id);
+        self.next_handle_id += 1;
+
+        entry.handle = Some(handle.clone());
+        self.asset_handles.insert(handle.id(), handle.clone());
+        self.loaded_assets.insert(virtual_path.to_string(), entry);
+
+        self.stats.assets_loaded += 1;
+        self.stats.bytes_loaded += handle.id();
+
+        Ok(handle)
+    }
+
+    /// Load an asset asynchronously
+    pub fn load_async(&mut self, virtual_path: &str) {
+        if !self.loaded_assets.contains_key(virtual_path) {
+            self.loading_queue.push(virtual_path.to_string());
+        }
+    }
+
+    /// Unload an asset
+    pub fn unload(&mut self, virtual_path: &str) -> bool {
+        if let Some(mut entry) = self.loaded_assets.remove(virtual_path) {
+            if let Some(handle) = entry.handle.take() {
+                self.asset_handles.remove(&handle.id());
+            }
+            entry.state = AssetState::Unloaded;
+            entry.loaded_data = None;
+            self.stats.assets_unloaded += 1;
+            return true;
+        }
+        false
+    }
+
+    /// Get a loaded asset
+    pub fn get(&self, virtual_path: &str) -> Option<&AssetEntry> {
+        self.loaded_assets.get(virtual_path)
+    }
+
+    /// Get asset by handle
+    pub fn get_by_handle(&self, handle: &AssetHandle) -> Option<&AssetEntry> {
+        if handle.is_valid(self.generation) {
+            self.loaded_assets.get(handle.path())
+        } else {
+            None
+        }
+    }
+
+    /// Check if an asset exists
+    pub fn exists(&self, virtual_path: &str) -> bool {
+        let resolved_path = self.resolve_with_overrides(virtual_path);
+        self.vfs.exists(&resolved_path)
+    }
+
+    /// Resolve path with overrides applied
+    fn resolve_with_overrides(&self, virtual_path: &str) -> String {
+        if let Some(overrides) = self.overrides.get(virtual_path) {
+            // Find highest priority applicable override
+            let mut best_override: Option<&AssetOverride> = None;
+
+            for override_def in overrides {
+                if override_def.should_apply(&self.override_context) {
+                    match best_override {
+                        Some(current) if override_def.priority() > current.priority() => {
+                            best_override = Some(override_def);
+                        }
+                        None => {
+                            best_override = Some(override_def);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+
+            if let Some(override_def) = best_override {
+                return override_def.override_path().to_string();
+            }
+        }
+
+        virtual_path.to_string()
+    }
+
+    /// Process loading queue
+    pub fn process_loading_queue(&mut self, max_count: usize) {
+        let to_load: Vec<String> = self.loading_queue.drain(..max_count.min(self.loading_queue.len())).collect();
+
+        for path in to_load {
+            match self.load(&path) {
+                Ok(_) => {}
+                Err(e) => {
+                    self.stats.load_errors += 1;
+                }
+            }
+        }
+    }
+
+    /// Reload an asset (for hot-reload)
+    pub fn reload(&mut self, virtual_path: &str) -> Result<(), AssetError> {
+        if !self.hot_reload_enabled {
+            return Err(AssetError::HotReloadDisabled);
+        }
+
+        // Unload and reload
+        self.unload(virtual_path);
+        self.load(virtual_path)?;
+        self.generation += 1;
+
+        self.stats.hot_reloads += 1;
+        Ok(())
+    }
+
+    /// Invalidate all assets (increment generation)
+    pub fn invalidate_all(&mut self) {
+        self.generation += 1;
+    }
+
+    pub fn vfs(&self) -> &VirtualFileSystem { &self.vfs }
+    pub fn vfs_mut(&mut self) -> &mut VirtualFileSystem { &mut self.vfs }
+    pub fn stats(&self) -> &AssetStats { &self.stats }
+    pub fn generation(&self) -> u32 { self.generation }
+
+    pub fn loaded_count(&self) -> usize { self.loaded_assets.len() }
+    pub fn pack_count(&self) -> usize { self.packs.len() }
+
+    pub fn enable_hot_reload(&mut self) { self.hot_reload_enabled = true; }
+    pub fn disable_hot_reload(&mut self) { self.hot_reload_enabled = false; }
+}
+
+// ============================================================================
+// Asset Cache
+// ============================================================================
+
+/// LRU cache for loaded assets
+pub struct AssetCache {
+    entries: HashMap<String, CacheEntry>,
+    max_size: usize,
+    current_size: usize,
+    access_order: Vec<String>,
+    hit_count: u64,
+    miss_count: u64
+}
+
+struct CacheEntry {
+    data: Vec<u8>,
+    size: usize,
+    last_access: u64,
+    access_count: u32
+}
+
+impl AssetCache {
+    pub fn new(max_size: usize) -> Self {
+        Self {
+            entries: HashMap::new(),
+            max_size,
+            current_size: 0,
+            access_order: Vec::new(),
+            hit_count: 0,
+            miss_count: 0
+        }
+    }
+
+    pub fn get(&mut self, key: &str) -> Option<&[u8]> {
+        if let Some(entry) = self.entries.get_mut(key) {
+            entry.last_access = self.get_timestamp();
+            entry.access_count += 1;
+            self.hit_count += 1;
+
+            // Move to end of access order
+            self.access_order.retain(|k| k != key);
+            self.access_order.push(key.to_string());
+
+            return Some(&entry.data);
+        }
+
+        self.miss_count += 1;
+        None
+    }
+
+    pub fn put(&mut self, key: &str, data: Vec<u8>) {
+        let size = data.len();
+
+        // Evict if necessary
+        while self.current_size + size > self.max_size && !self.access_order.is_empty() {
+            self.evict_oldest();
+        }
+
+        if size <= self.max_size {
+            let entry = CacheEntry {
+                data,
+                size,
+                last_access: self.get_timestamp(),
+                access_count: 1
+            };
+
+            self.entries.insert(key.to_string(), entry);
+            self.access_order.push(key.to_string());
+            self.current_size += size;
+        }
+    }
+
+    pub fn remove(&mut self, key: &str) -> bool {
+        if let Some(entry) = self.entries.remove(key) {
+            self.current_size -= entry.size;
+            self.access_order.retain(|k| k != key);
+            return true;
+        }
+        false
+    }
+
+    pub fn clear(&mut self) {
+        self.entries.clear();
+        self.access_order.clear();
+        self.current_size = 0;
+    }
+
+    fn evict_oldest(&mut self) {
+        if let Some(oldest) = self.access_order.first().cloned() {
+            self.remove(&oldest);
+        }
+    }
+
+    fn get_timestamp(&self) -> u64 {
+        // Would return actual timestamp
+        0
+    }
+
+    pub fn size(&self) -> usize { self.current_size }
+    pub fn max_size(&self) -> usize { self.max_size }
+    pub fn entry_count(&self) -> usize { self.entries.len() }
+    pub fn hit_rate(&self) -> f32 {
+        let total = self.hit_count + self.miss_count;
+        if total == 0 { 0.0 } else { self.hit_count as f32 / total as f32 }
+    }
+}
+
+// ============================================================================
+// Statistics
+// ============================================================================
+
+/// Asset system statistics
+pub struct AssetStats {
+    pub packs_registered: u64,
+    pub assets_loaded: u64,
+    pub assets_unloaded: u64,
+    pub bytes_loaded: u64,
+    pub load_errors: u64,
+    pub hot_reloads: u64,
+    pub cache_hits: u64,
+    pub cache_misses: u64
+}
+
+impl AssetStats {
+    pub fn new() -> Self {
+        Self {
+            packs_registered: 0,
+            assets_loaded: 0,
+            assets_unloaded: 0,
+            bytes_loaded: 0,
+            load_errors: 0,
+            hot_reloads: 0,
+            cache_hits: 0,
+            cache_misses: 0
+        }
+    }
+}
+
+// ============================================================================
+// Errors
+// ============================================================================
+
+@derive(Clone)]
+pub enum AssetError {
+    NotFound(String),
+    ReadFailed(String, String),
+    ParseFailed(String, String),
+    InvalidFormat(String),
+    CorruptedData(String),
+    HotReloadDisabled,
+    CacheFull,
+    IoError(String)
+}
+
+impl AssetError {
+    pub fn message(&self) -> String {
+        match self {
+            Self::NotFound(path) => format!("Asset not found: {}", path),
+            Self::ReadFailed(path, err) => format!("Failed to read {}: {}", path, err),
+            Self::ParseFailed(path, err) => format!("Failed to parse {}: {}", path, err),
+            Self::InvalidFormat(path) => format!("Invalid format: {}", path),
+            Self::CorruptedData(path) => format!("Corrupted data: {}", path),
+            Self::HotReloadDisabled => "Hot reload is disabled".to_string(),
+            Self::CacheFull => "Asset cache is full".to_string(),
+            Self::IoError(err) => format!("I/O error: {}", err)
+        }
+    }
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_asset_type_from_extension() {
+        assert_eq!(AssetType::from_extension("png"), AssetType::Texture);
+        assert_eq!(AssetType::from_extension("fbx"), AssetType::Mesh);
+        assert_eq!(AssetType::from_extension("hlsl"), AssetType::Shader);
+        assert_eq!(AssetType::from_extension("wav"), AssetType::Sound);
+        assert_eq!(AssetType::from_extension("json"), AssetType::Config);
+        assert_eq!(AssetType::from_extension("xyz"), AssetType::Unknown);
+    }
+
+    #[test]
+    fn test_asset_priority_ordering() {
+        assert!(AssetPriority::Lowest < AssetPriority::Low);
+        assert!(AssetPriority::Low < AssetPriority::Normal);
+        assert!(AssetPriority::Normal < AssetPriority::High);
+        assert!(AssetPriority::High < AssetPriority::Highest);
+        assert!(AssetPriority::Highest < AssetPriority::Override);
+    }
+
+    #[test]
+    fn test_asset_handle() {
+        let handle = AssetHandle::new(1, "textures/test.png", AssetType::Texture)
+            .with_source("my_mod");
+
+        assert_eq!(handle.id(), 1);
+        assert_eq!(handle.path(), "textures/test.png");
+        assert_eq!(handle.asset_type(), AssetType::Texture);
+        assert_eq!(handle.source_mod(), Some("my_mod"));
+    }
+
+    #[test]
+    fn test_asset_override() {
+        let override_def = AssetOverride::new(
+            "textures/original.png",
+            "textures/replacement.png",
+            "my_mod"
+        ).with_priority(AssetPriority::High);
+
+        assert_eq!(override_def.original_path(), "textures/original.png");
+        assert_eq!(override_def.override_path(), "textures/replacement.png");
+        assert_eq!(override_def.priority(), AssetPriority::High);
+    }
+
+    #[test]
+    fn test_override_condition() {
+        let context = OverrideContext {
+            loaded_mods: ["mod_a".to_string()].into_iter().collect(),
+            config: [("key".to_string(), "value".to_string())].into_iter().collect(),
+            platform: "windows".to_string(),
+            timestamp: 0
+        };
+
+        let cond_mod_loaded = OverrideCondition::ModLoaded("mod_a".to_string());
+        assert!(cond_mod_loaded.evaluate(&context));
+
+        let cond_mod_not_loaded = OverrideCondition::ModNotLoaded("mod_b".to_string());
+        assert!(cond_mod_not_loaded.evaluate(&context));
+
+        let cond_config = OverrideCondition::ConfigEquals {
+            key: "key".to_string(),
+            value: "value".to_string()
+        };
+        assert!(cond_config.evaluate(&context));
+    }
+
+    #[test]
+    fn test_virtual_file_system() {
+        let vfs = VirtualFileSystem::new();
+        assert_eq!(vfs.mount_count(), 0);
+
+        // Path normalization is tested indirectly
+    }
+
+    #[test]
+    fn test_asset_cache() {
+        let mut cache = AssetCache::new(1000);
+
+        cache.put("key1", vec![1, 2, 3, 4]);
+        assert_eq!(cache.entry_count(), 1);
+
+        let data = cache.get("key1");
+        assert!(data.is_some());
+        assert_eq!(data.unwrap(), &[1, 2, 3, 4]);
+
+        assert!(cache.get("nonexistent").is_none());
+    }
+
+    #[test]
+    fn test_cache_eviction() {
+        let mut cache = AssetCache::new(10);
+
+        cache.put("key1", vec![1, 2, 3, 4, 5]); // 5 bytes
+        cache.put("key2", vec![1, 2, 3, 4, 5]); // 5 bytes, total 10
+
+        // This should evict key1
+        cache.put("key3", vec![1, 2, 3, 4, 5, 6]); // 6 bytes
+
+        assert!(cache.get("key1").is_none());
+    }
+
+    #[test]
+    fn test_mod_asset_manager() {
+        let manager = ModAssetManager::new();
+        assert_eq!(manager.loaded_count(), 0);
+        assert_eq!(manager.pack_count(), 0);
+    }
+}

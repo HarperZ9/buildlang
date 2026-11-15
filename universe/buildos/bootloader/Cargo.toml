@@ -1,0 +1,28 @@
+# ===============================================================================
+# BUILDOS BOOTLOADER
+# ===============================================================================
+# Copyright (c) 2024-2025 Zain Dana Harper. All Rights Reserved.
+# ===============================================================================
+
+[package]
+name = "buildos-bootloader"
+version = "2.0.0"
+edition = "2021"
+authors = ["Zain Dana Harper"]
+license = "Proprietary"
+description = "UEFI bootloader for BuildOS"
+
+[dependencies]
+uefi = "0.31"
+uefi-raw = "0.8"
+log = "0.4"
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+lto = true
+opt-level = "z"
+
+[build-dependencies]

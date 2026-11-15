@@ -1,0 +1,5010 @@
+// ═══════════════════════════════════════════════════════════════════════════════
+// BUILD-UNIVERSE Benchmarking Suite v2.0.0
+// "Quantum Bench" - High-Precision Performance Measurement
+// ═══════════════════════════════════════════════════════════════════════════════
+// Copyright © 2024-2025 Zain Dana Harper. All Rights Reserved.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+module bench
+
+use foundation::io::{println, print, File, write_string}
+use foundation::collections::{Vec, HashMap}
+use foundation::time::{Instant, Duration}
+use foundation::math::{sqrt, log}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// BENCHMARK CONFIGURATION
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[derive(Clone)]
+pub struct BenchConfig {
+    /// Minimum number of iterations
+    pub min_iterations: u64,
+    /// Maximum duration for a benchmark
+    pub max_duration: Duration,
+    /// Warmup iterations
+    pub warmup_iterations: u64,
+    /// Target confidence level (0.95 = 95%)
+    pub confidence_level: f64,
+    /// Output format
+    pub output_format: OutputFormat,
+    /// Output file (None for stdout)
+    pub output_file: Option<String>,
+    /// Enable comparison with baseline
+    pub compare_baseline: bool,
+    /// Baseline file path
+    pub baseline_path: Option<String>,
+}
+
+impl Default for BenchConfig {
+    fn default() -> Self {
+        BenchConfig {
+            min_iterations: 100,
+            max_duration: Duration::from_secs(5),
+            warmup_iterations: 10,
+            confidence_level: 0.95,
+            output_format: OutputFormat::Pretty,
+            output_file: None,
+            compare_baseline: false,
+            baseline_path: None,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+pub enum OutputFormat {
+    Pretty,
+    Json,
+    Csv,
+    Markdown,
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// BENCHMARK MEASUREMENT
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Raw measurement data from a benchmark run
+#[derive(Clone)]
+pub struct Measurement {
+    pub samples: Vec<f64>,
+    pub iterations_per_sample: u64,
+}
+
+impl Measurement {
+    pub fn new() -> Self {
+        Measurement {
+            samples: Vec::new(),
+            iterations_per_sample: 1,
+        }
+    }
+
+    pub fn add_sample(&mut self, duration_ns: f64) {
+        self.samples.push(duration_ns / self.iterations_per_sample as f64);
+    }
+
+    pub fn sample_count(&self) -> usize {
+        self.samples.len()
+    }
+}
+
+/// Statistical analysis of measurements
+#[derive(Clone)]
+pub struct Statistics {
+    pub mean: f64,
+    pub median: f64,
+    pub std_dev: f64,
+    pub min: f64,
+    pub max: f64,
+    pub percentile_5: f64,
+    pub percentile_95: f64,
+    pub iterations: u64,
+    pub sample_count: usize,
+}
+
+impl Statistics {
+    pub fn from_measurement(measurement: &Measurement) -> Self {
+        let mut samples = measurement.samples.clone();
+        samples.sort_by(|a, b| a.partial_cmp(b).unwrap());
+
+        let n = samples.len();
+        let sum: f64 = samples.iter().sum();
+        let mean = sum / n as f64;
+
+        let variance: f64 = samples.iter()
+            .map(|x| (x - mean).powi(2))
+            .sum::<f64>() / (n - 1) as f64;
+        let std_dev = variance.sqrt();
+
+        let median = if n % 2 == 0 {
+            (samples[n / 2 - 1] + samples[n / 2]) / 2.0
+        } else {
+            samples[n / 2]
+        };
+
+        let percentile = |p: f64| -> f64 {
+            let idx = ((n as f64 - 1.0) * p) as usize;
+            samples[idx]
+        };
+
+        Statistics {
+            mean,
+            median,
+            std_dev,
+            min: samples[0],
+            max: samples[n - 1],
+            percentile_5: percentile(0.05),
+            percentile_95: percentile(0.95),
+            iterations: measurement.iterations_per_sample * n as u64,
+            sample_count: n,
+        }
+    }
+
+    pub fn confidence_interval(&self, level: f64) -> (f64, f64) {
+        // Z-score for confidence level
+        let z = match level {
+            l if l >= 0.99 => 2.576,
+            l if l >= 0.95 => 1.96,
+            l if l >= 0.90 => 1.645,
+            _ => 1.0,
+        };
+
+        let margin = z * self.std_dev / (self.sample_count as f64).sqrt();
+        (self.mean - margin, self.mean + margin)
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// BENCHMARK RESULTS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Result of a single benchmark
+#[derive(Clone)]
+pub struct BenchResult {
+    pub name: String,
+    pub group: Option<String>,
+    pub stats: Statistics,
+    pub throughput: Option<Throughput>,
+    pub comparison: Option<Comparison>,
+}
+
+#[derive(Clone)]
+pub struct Throughput {
+    pub value: f64,
+    pub unit: ThroughputUnit,
+}
+
+#[derive(Clone, Copy)]
+pub enum ThroughputUnit {
+    Bytes,
+    Elements,
+    Operations,
+}
+
+impl ThroughputUnit {
+    pub fn as_str(&self) -> &str {
+        match self {
+            ThroughputUnit::Bytes => "B/s",
+            ThroughputUnit::Elements => "elem/s",
+            ThroughputUnit::Operations => "ops/s",
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct Comparison {
+    pub baseline_mean: f64,
+    pub change_percent: f64,
+    pub significant: bool,
+    pub faster: bool,
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// BENCHMARK RUNNER
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Main benchmark runner
+pub struct Bencher {
+    config: BenchConfig,
+    results: Vec<BenchResult>,
+    current_group: Option<String>,
+    baseline: HashMap<String, f64>,
+}
+
+impl Bencher {
+    pub fn new() -> Self {
+        Bencher::with_config(BenchConfig::default())
+    }
+
+    pub fn with_config(config: BenchConfig) -> Self {
+        let baseline = if config.compare_baseline {
+            if let Some(ref path) = config.baseline_path {
+                load_baseline(path).unwrap_or_default()
+            } else {
+                HashMap::new()
+            }
+        } else {
+            HashMap::new()
+        };
+
+        Bencher {
+            config,
+            results: Vec::new(),
+            current_group: None,
+            baseline,
+        }
+    }
+
+    /// Start a benchmark group
+    pub fn group(&mut self, name: &str) {
+        self.current_group = Some(name.to_string());
+    }
+
+    /// End the current group
+    pub fn group_end(&mut self) {
+        self.current_group = None;
+    }
+
+    /// Run a benchmark
+    pub fn bench<F>(&mut self, name: &str, mut f: F)
+    where
+        F: FnMut(&mut Iteration),
+    {
+        print!("Benchmarking {}... ", name);
+
+        // Warmup
+        for _ in 0..self.config.warmup_iterations {
+            let mut iter = Iteration::new();
+            f(&mut iter);
+        }
+
+        // Measure
+        let mut measurement = Measurement::new();
+        let start = Instant::now();
+        let mut total_iterations = 0u64;
+
+        while start.elapsed() < self.config.max_duration &&
+              measurement.sample_count() < self.config.min_iterations as usize {
+            let sample_start = Instant::now();
+
+            let mut iter = Iteration::new();
+            f(&mut iter);
+
+            let elapsed = sample_start.elapsed().as_nanos() as f64;
+            measurement.add_sample(elapsed);
+            total_iterations += 1;
+        }
+
+        measurement.iterations_per_sample = 1;
+
+        // Analyze
+        let stats = Statistics::from_measurement(&measurement);
+
+        // Compare with baseline
+        let comparison = if self.config.compare_baseline {
+            self.baseline.get(name).map(|&baseline_mean| {
+                let change_percent = (stats.mean - baseline_mean) / baseline_mean * 100.0;
+                let significant = change_percent.abs() > 5.0; // 5% threshold
+                let faster = change_percent < 0.0;
+                Comparison {
+                    baseline_mean,
+                    change_percent,
+                    significant,
+                    faster,
+                }
+            })
+        } else {
+            None
+        };
+
+        let result = BenchResult {
+            name: name.to_string(),
+            group: self.current_group.clone(),
+            stats: stats.clone(),
+            throughput: None,
+            comparison,
+        };
+
+        self.results.push(result);
+
+        // Print result
+        println!("{}", format_duration(stats.mean));
+        if let Some(ref comp) = comparison {
+            if comp.significant {
+                let symbol = if comp.faster { "▼" } else { "▲" };
+                let color = if comp.faster { "\x1b[32m" } else { "\x1b[31m" };
+                println!("  {} {}{:.1}%\x1b[0m vs baseline", symbol, color, comp.change_percent.abs());
+            }
+        }
+    }
+
+    /// Run a benchmark with throughput measurement
+    pub fn bench_throughput<F>(&mut self, name: &str, size: u64, unit: ThroughputUnit, mut f: F)
+    where
+        F: FnMut(&mut Iteration),
+    {
+        self.bench(name, |iter| f(iter));
+
+        // Update last result with throughput
+        if let Some(result) = self.results.last_mut() {
+            let ops_per_sec = 1_000_000_000.0 / result.stats.mean;
+            result.throughput = Some(Throughput {
+                value: ops_per_sec * size as f64,
+                unit,
+            });
+        }
+    }
+
+    /// Print summary of all benchmarks
+    pub fn summary(&self) {
+        println!();
+        println!("╔═══════════════════════════════════════════════════════════════╗");
+        println!("║  Benchmark Summary                                            ║");
+        println!("╚═══════════════════════════════════════════════════════════════╝");
+        println!();
+
+        match self.config.output_format {
+            OutputFormat::Pretty => self.print_pretty(),
+            OutputFormat::Markdown => self.print_markdown(),
+            OutputFormat::Csv => self.print_csv(),
+            OutputFormat::Json => self.print_json(),
+        }
+    }
+
+    fn print_pretty(&self) {
+        let mut current_group: Option<&str> = None;
+
+        for result in &self.results {
+            // Print group header
+            if result.group.as_deref() != current_group {
+                if let Some(ref group) = result.group {
+                    println!("\n{}", group);
+                    println!("{}", "─".repeat(60));
+                }
+                current_group = result.group.as_deref();
+            }
+
+            // Print result
+            print!("  {:40} ", result.name);
+            print!("{:>12} ", format_duration(result.stats.mean));
+            print!("±{:>10} ", format_duration(result.stats.std_dev));
+
+            if let Some(ref throughput) = result.throughput {
+                print!("({:.2} {})", throughput.value, throughput.unit.as_str());
+            }
+
+            println!();
+        }
+
+        println!();
+    }
+
+    fn print_markdown(&self) {
+        println!("| Benchmark | Mean | Std Dev | Min | Max |");
+        println!("|-----------|------|---------|-----|-----|");
+
+        for result in &self.results {
+            println!("| {} | {} | {} | {} | {} |",
+                result.name,
+                format_duration(result.stats.mean),
+                format_duration(result.stats.std_dev),
+                format_duration(result.stats.min),
+                format_duration(result.stats.max));
+        }
+    }
+
+    fn print_csv(&self) {
+        println!("name,mean_ns,std_dev_ns,min_ns,max_ns,iterations");
+
+        for result in &self.results {
+            println!("{},{:.2},{:.2},{:.2},{:.2},{}",
+                result.name,
+                result.stats.mean,
+                result.stats.std_dev,
+                result.stats.min,
+                result.stats.max,
+                result.stats.iterations);
+        }
+    }
+
+    fn print_json(&self) {
+        println!("{{");
+        println!("  \"benchmarks\": [");
+
+        for (i, result) in self.results.iter().enumerate() {
+            println!("    {{");
+            println!("      \"name\": \"{}\",", result.name);
+            println!("      \"mean_ns\": {:.2},", result.stats.mean);
+            println!("      \"std_dev_ns\": {:.2},", result.stats.std_dev);
+            println!("      \"min_ns\": {:.2},", result.stats.min);
+            println!("      \"max_ns\": {:.2},", result.stats.max);
+            println!("      \"iterations\": {}", result.stats.iterations);
+            print!("    }}");
+            if i < self.results.len() - 1 {
+                println!(",");
+            } else {
+                println!();
+            }
+        }
+
+        println!("  ]");
+        println!("}}");
+    }
+
+    /// Save results as new baseline
+    pub fn save_baseline(&self, path: &str) -> Result<(), String> {
+        let mut content = String::new();
+
+        for result in &self.results {
+            content.push_str(&format!("{}={:.2}\n", result.name, result.stats.mean));
+        }
+
+        write_string(path, &content)?;
+        println!("Baseline saved to {}", path);
+        Ok(())
+    }
+}
+
+/// Iteration context for benchmarks
+pub struct Iteration {
+    start: Option<Instant>,
+    elapsed: Duration,
+}
+
+impl Iteration {
+    fn new() -> Self {
+        Iteration {
+            start: None,
+            elapsed: Duration::ZERO,
+        }
+    }
+
+    /// Start timing
+    pub fn start(&mut self) {
+        self.start = Some(Instant::now());
+    }
+
+    /// Stop timing
+    pub fn stop(&mut self) {
+        if let Some(start) = self.start.take() {
+            self.elapsed = start.elapsed();
+        }
+    }
+
+    /// Run the closure and time it
+    pub fn iter<F, R>(&mut self, f: F) -> R
+    where
+        F: FnOnce() -> R,
+    {
+        self.start();
+        let result = f();
+        self.stop();
+        result
+    }
+
+    /// Prevent compiler from optimizing away the result
+    pub fn black_box<T>(x: T) -> T {
+        // In real implementation, use std::hint::black_box or similar
+        x
+    }
+}
+
+fn format_duration(ns: f64) -> String {
+    if ns < 1_000.0 {
+        format!("{:.2} ns", ns)
+    } else if ns < 1_000_000.0 {
+        format!("{:.2} µs", ns / 1_000.0)
+    } else if ns < 1_000_000_000.0 {
+        format!("{:.2} ms", ns / 1_000_000.0)
+    } else {
+        format!("{:.2} s", ns / 1_000_000_000.0)
+    }
+}
+
+fn load_baseline(path: &str) -> Result<HashMap<String, f64>, String> {
+    let mut baseline = HashMap::new();
+    // Parse baseline file
+    Ok(baseline)
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// MACRO-LIKE HELPERS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Create a benchmark suite
+pub fn benchmark_suite<F>(name: &str, f: F)
+where
+    F: FnOnce(&mut Bencher),
+{
+    println!("╔═══════════════════════════════════════════════════════════════╗");
+    println!("║  {} Benchmarks", name);
+    println!("╚═══════════════════════════════════════════════════════════════╝");
+    println!();
+
+    let mut bencher = Bencher::new();
+    f(&mut bencher);
+    bencher.summary();
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// EXAMPLE BENCHMARKS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+pub fn run_example_benchmarks() {
+    benchmark_suite("BUILD-UNIVERSE", |b| {
+        // Memory allocation benchmarks
+        b.group("Memory Operations");
+
+        b.bench("vec_push_1000", |iter| {
+            iter.iter(|| {
+                let mut v = Vec::new();
+                for i in 0..1000 {
+                    v.push(i);
+                }
+                Iteration::black_box(v)
+            });
+        });
+
+        b.bench("hashmap_insert_1000", |iter| {
+            iter.iter(|| {
+                let mut m = HashMap::new();
+                for i in 0..1000 {
+                    m.insert(i, i * 2);
+                }
+                Iteration::black_box(m)
+            });
+        });
+
+        b.group_end();
+
+        // Math benchmarks
+        b.group("Math Operations");
+
+        b.bench("sqrt_1000", |iter| {
+            iter.iter(|| {
+                let mut sum = 0.0;
+                for i in 1..=1000 {
+                    sum += sqrt(i as f64);
+                }
+                Iteration::black_box(sum)
+            });
+        });
+
+        b.bench("trig_1000", |iter| {
+            iter.iter(|| {
+                let mut sum = 0.0;
+                for i in 1..=1000 {
+                    let x = i as f64 * 0.01;
+                    sum += sin(x) + cos(x);
+                }
+                Iteration::black_box(sum)
+            });
+        });
+
+        b.group_end();
+
+        // String benchmarks
+        b.group("String Operations");
+
+        b.bench_throughput("string_concat_1000", 1000, ThroughputUnit::Operations, |iter| {
+            iter.iter(|| {
+                let mut s = String::new();
+                for _ in 0..1000 {
+                    s.push_str("hello");
+                }
+                Iteration::black_box(s)
+            });
+        });
+
+        b.group_end();
+    });
+}
+
+fn sin(x: f64) -> f64 { x.sin() }
+fn cos(x: f64) -> f64 { x.cos() }
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ADVANCED STATISTICAL ANALYSIS (CRITERION-STYLE)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Outlier classification following Tukey's method
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum OutlierClass {
+    LowSevere,
+    LowMild,
+    None,
+    HighMild,
+    HighSevere,
+}
+
+/// Outlier detection results
+#[derive(Clone)]
+pub struct OutlierAnalysis {
+    pub low_severe: usize,
+    pub low_mild: usize,
+    pub high_mild: usize,
+    pub high_severe: usize,
+    pub threshold_low_severe: f64,
+    pub threshold_low_mild: f64,
+    pub threshold_high_mild: f64,
+    pub threshold_high_severe: f64,
+    pub variance_effect: OutlierVariance,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum OutlierVariance {
+    Unaffected,
+    Slight,
+    Moderate,
+    Severe,
+}
+
+impl OutlierVariance {
+    pub fn from_ratio(ratio: f64) -> Self {
+        if ratio < 0.01 { OutlierVariance::Unaffected }
+        else if ratio < 0.1 { OutlierVariance::Slight }
+        else if ratio < 0.5 { OutlierVariance::Moderate }
+        else { OutlierVariance::Severe }
+    }
+}
+
+/// Advanced statistics with robust estimators
+#[derive(Clone)]
+pub struct AdvancedStatistics {
+    pub base: Statistics,
+    pub outliers: OutlierAnalysis,
+    pub iqr: f64,           // Interquartile range
+    pub q1: f64,            // First quartile
+    pub q3: f64,            // Third quartile
+    pub mad: f64,           // Median absolute deviation
+    pub skewness: f64,
+    pub kurtosis: f64,
+    pub coefficient_of_variation: f64,
+    pub robust_mean: f64,   // Mean with outliers removed
+    pub robust_std_dev: f64,
+}
+
+impl AdvancedStatistics {
+    pub fn from_samples(samples: &[f64]) -> Self {
+        let mut sorted = samples.to_vec();
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let n = sorted.len();
+
+        // Basic statistics
+        let sum: f64 = sorted.iter().sum();
+        let mean = sum / n as f64;
+
+        let variance: f64 = sorted.iter()
+            .map(|x| (x - mean).powi(2))
+            .sum::<f64>() / (n - 1).max(1) as f64;
+        let std_dev = variance.sqrt();
+
+        let median = if n % 2 == 0 {
+            (sorted[n / 2 - 1] + sorted[n / 2]) / 2.0
+        } else {
+            sorted[n / 2]
+        };
+
+        // Quartiles
+        let q1_idx = n / 4;
+        let q3_idx = 3 * n / 4;
+        let q1 = sorted[q1_idx];
+        let q3 = sorted[q3_idx];
+        let iqr = q3 - q1;
+
+        // Outlier thresholds (Tukey's fences)
+        let threshold_low_mild = q1 - 1.5 * iqr;
+        let threshold_low_severe = q1 - 3.0 * iqr;
+        let threshold_high_mild = q3 + 1.5 * iqr;
+        let threshold_high_severe = q3 + 3.0 * iqr;
+
+        // Count outliers
+        let mut low_severe = 0;
+        let mut low_mild = 0;
+        let mut high_mild = 0;
+        let mut high_severe = 0;
+
+        for &x in &sorted {
+            if x < threshold_low_severe { low_severe += 1; }
+            else if x < threshold_low_mild { low_mild += 1; }
+            else if x > threshold_high_severe { high_severe += 1; }
+            else if x > threshold_high_mild { high_mild += 1; }
+        }
+
+        // Compute variance effect of outliers
+        let total_outliers = low_severe + low_mild + high_mild + high_severe;
+        let outlier_ratio = total_outliers as f64 / n as f64;
+        let variance_effect = OutlierVariance::from_ratio(outlier_ratio);
+
+        // Median absolute deviation (robust spread estimator)
+        let mad: f64 = {
+            let deviations: Vec<f64> = sorted.iter()
+                .map(|x| (x - median).abs())
+                .collect();
+            let mut dev_sorted = deviations.clone();
+            dev_sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            if n % 2 == 0 {
+                (dev_sorted[n / 2 - 1] + dev_sorted[n / 2]) / 2.0
+            } else {
+                dev_sorted[n / 2]
+            }
+        };
+
+        // Skewness and Kurtosis
+        let m2: f64 = sorted.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / n as f64;
+        let m3: f64 = sorted.iter().map(|x| (x - mean).powi(3)).sum::<f64>() / n as f64;
+        let m4: f64 = sorted.iter().map(|x| (x - mean).powi(4)).sum::<f64>() / n as f64;
+
+        let skewness = m3 / m2.powf(1.5);
+        let kurtosis = m4 / m2.powi(2) - 3.0; // Excess kurtosis
+
+        // Coefficient of variation
+        let cv = std_dev / mean;
+
+        // Robust mean (trimmed mean, excluding outliers)
+        let non_outliers: Vec<f64> = sorted.iter()
+            .filter(|&&x| x >= threshold_low_mild && x <= threshold_high_mild)
+            .copied()
+            .collect();
+        let robust_mean = non_outliers.iter().sum::<f64>() / non_outliers.len().max(1) as f64;
+        let robust_variance: f64 = non_outliers.iter()
+            .map(|x| (x - robust_mean).powi(2))
+            .sum::<f64>() / (non_outliers.len() - 1).max(1) as f64;
+        let robust_std_dev = robust_variance.sqrt();
+
+        // Percentiles
+        let percentile = |p: f64| -> f64 {
+            let idx = ((n as f64 - 1.0) * p) as usize;
+            sorted[idx.min(n - 1)]
+        };
+
+        let base = Statistics {
+            mean,
+            median,
+            std_dev,
+            min: sorted[0],
+            max: sorted[n - 1],
+            percentile_5: percentile(0.05),
+            percentile_95: percentile(0.95),
+            iterations: n as u64,
+            sample_count: n,
+        };
+
+        AdvancedStatistics {
+            base,
+            outliers: OutlierAnalysis {
+                low_severe,
+                low_mild,
+                high_mild,
+                high_severe,
+                threshold_low_severe,
+                threshold_low_mild,
+                threshold_high_mild,
+                threshold_high_severe,
+                variance_effect,
+            },
+            iqr,
+            q1,
+            q3,
+            mad,
+            skewness,
+            kurtosis,
+            coefficient_of_variation: cv,
+            robust_mean,
+            robust_std_dev,
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// WELCH'S T-TEST FOR REGRESSION DETECTION
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Result of Welch's t-test comparing two samples
+#[derive(Clone)]
+pub struct TTestResult {
+    pub t_statistic: f64,
+    pub degrees_of_freedom: f64,
+    pub p_value: f64,
+    pub significant: bool,       // At 0.05 level
+    pub effect_size: f64,        // Cohen's d
+    pub effect_magnitude: EffectMagnitude,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum EffectMagnitude {
+    Negligible,
+    Small,
+    Medium,
+    Large,
+}
+
+impl EffectMagnitude {
+    pub fn from_cohens_d(d: f64) -> Self {
+        let d_abs = d.abs();
+        if d_abs < 0.2 { EffectMagnitude::Negligible }
+        else if d_abs < 0.5 { EffectMagnitude::Small }
+        else if d_abs < 0.8 { EffectMagnitude::Medium }
+        else { EffectMagnitude::Large }
+    }
+}
+
+/// Perform Welch's t-test comparing two samples
+pub fn welch_t_test(sample_a: &[f64], sample_b: &[f64]) -> TTestResult {
+    let n1 = sample_a.len() as f64;
+    let n2 = sample_b.len() as f64;
+
+    let mean1: f64 = sample_a.iter().sum::<f64>() / n1;
+    let mean2: f64 = sample_b.iter().sum::<f64>() / n2;
+
+    let var1: f64 = sample_a.iter().map(|x| (x - mean1).powi(2)).sum::<f64>() / (n1 - 1.0);
+    let var2: f64 = sample_b.iter().map(|x| (x - mean2).powi(2)).sum::<f64>() / (n2 - 1.0);
+
+    let se = (var1 / n1 + var2 / n2).sqrt();
+    let t_statistic = (mean1 - mean2) / se;
+
+    // Welch-Satterthwaite degrees of freedom
+    let num = (var1 / n1 + var2 / n2).powi(2);
+    let denom = (var1 / n1).powi(2) / (n1 - 1.0) + (var2 / n2).powi(2) / (n2 - 1.0);
+    let df = num / denom;
+
+    // Approximate p-value using normal distribution for large df
+    let p_value = 2.0 * (1.0 - normal_cdf(t_statistic.abs()));
+
+    // Cohen's d effect size
+    let pooled_std = ((var1 + var2) / 2.0).sqrt();
+    let effect_size = (mean1 - mean2) / pooled_std;
+
+    TTestResult {
+        t_statistic,
+        degrees_of_freedom: df,
+        p_value,
+        significant: p_value < 0.05,
+        effect_size,
+        effect_magnitude: EffectMagnitude::from_cohens_d(effect_size),
+    }
+}
+
+/// Standard normal CDF approximation
+fn normal_cdf(x: f64) -> f64 {
+    0.5 * (1.0 + erf(x / 2.0_f64.sqrt()))
+}
+
+/// Error function approximation (Horner form)
+fn erf(x: f64) -> f64 {
+    let a1 =  0.254829592;
+    let a2 = -0.284496736;
+    let a3 =  1.421413741;
+    let a4 = -1.453152027;
+    let a5 =  1.061405429;
+    let p  =  0.3275911;
+
+    let sign = if x < 0.0 { -1.0 } else { 1.0 };
+    let x = x.abs();
+
+    let t = 1.0 / (1.0 + p * x);
+    let y = 1.0 - (((((a5 * t + a4) * t) + a3) * t + a2) * t + a1) * t * (-x * x).exp();
+
+    sign * y
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// MEMORY PROFILING
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Memory allocation tracker for benchmarks
+#[derive(Clone)]
+pub struct MemoryProfile {
+    pub allocations: u64,
+    pub deallocations: u64,
+    pub bytes_allocated: u64,
+    pub bytes_deallocated: u64,
+    pub peak_memory: u64,
+    pub current_memory: u64,
+    pub allocation_sizes: Vec<u64>,
+}
+
+impl MemoryProfile {
+    pub fn new() -> Self {
+        MemoryProfile {
+            allocations: 0,
+            deallocations: 0,
+            bytes_allocated: 0,
+            bytes_deallocated: 0,
+            peak_memory: 0,
+            current_memory: 0,
+            allocation_sizes: Vec::new(),
+        }
+    }
+
+    pub fn record_allocation(&mut self, size: u64) {
+        self.allocations += 1;
+        self.bytes_allocated += size;
+        self.current_memory += size;
+        self.peak_memory = self.peak_memory.max(self.current_memory);
+        self.allocation_sizes.push(size);
+    }
+
+    pub fn record_deallocation(&mut self, size: u64) {
+        self.deallocations += 1;
+        self.bytes_deallocated += size;
+        self.current_memory = self.current_memory.saturating_sub(size);
+    }
+
+    pub fn net_allocations(&self) -> i64 {
+        self.allocations as i64 - self.deallocations as i64
+    }
+
+    pub fn net_bytes(&self) -> i64 {
+        self.bytes_allocated as i64 - self.bytes_deallocated as i64
+    }
+
+    pub fn average_allocation_size(&self) -> f64 {
+        if self.allocations == 0 { 0.0 }
+        else { self.bytes_allocated as f64 / self.allocations as f64 }
+    }
+
+    pub fn merge(&mut self, other: &MemoryProfile) {
+        self.allocations += other.allocations;
+        self.deallocations += other.deallocations;
+        self.bytes_allocated += other.bytes_allocated;
+        self.bytes_deallocated += other.bytes_deallocated;
+        self.peak_memory = self.peak_memory.max(other.peak_memory);
+    }
+}
+
+/// Global memory profiler (thread-local in real implementation)
+pub struct MemoryProfiler {
+    enabled: bool,
+    profile: MemoryProfile,
+}
+
+impl MemoryProfiler {
+    pub fn new() -> Self {
+        MemoryProfiler {
+            enabled: false,
+            profile: MemoryProfile::new(),
+        }
+    }
+
+    pub fn start(&mut self) {
+        self.enabled = true;
+        self.profile = MemoryProfile::new();
+    }
+
+    pub fn stop(&mut self) -> MemoryProfile {
+        self.enabled = false;
+        self.profile.clone()
+    }
+
+    pub fn is_enabled(&self) -> bool {
+        self.enabled
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// CPU PERFORMANCE COUNTERS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Hardware performance counter readings
+#[derive(Clone, Default)]
+pub struct PerfCounters {
+    pub cycles: u64,
+    pub instructions: u64,
+    pub cache_references: u64,
+    pub cache_misses: u64,
+    pub branch_instructions: u64,
+    pub branch_misses: u64,
+    pub l1d_read_misses: u64,
+    pub l1i_read_misses: u64,
+    pub llc_read_misses: u64,
+    pub page_faults: u64,
+    pub context_switches: u64,
+}
+
+impl PerfCounters {
+    pub fn new() -> Self {
+        PerfCounters::default()
+    }
+
+    pub fn ipc(&self) -> f64 {
+        if self.cycles == 0 { 0.0 }
+        else { self.instructions as f64 / self.cycles as f64 }
+    }
+
+    pub fn cache_miss_rate(&self) -> f64 {
+        if self.cache_references == 0 { 0.0 }
+        else { self.cache_misses as f64 / self.cache_references as f64 * 100.0 }
+    }
+
+    pub fn branch_miss_rate(&self) -> f64 {
+        if self.branch_instructions == 0 { 0.0 }
+        else { self.branch_misses as f64 / self.branch_instructions as f64 * 100.0 }
+    }
+
+    pub fn cycles_per_instruction(&self) -> f64 {
+        if self.instructions == 0 { 0.0 }
+        else { self.cycles as f64 / self.instructions as f64 }
+    }
+}
+
+/// Hardware performance counter profiler
+pub struct PerfProfiler {
+    enabled: bool,
+    start_counters: PerfCounters,
+    perf_fd: Option<i32>,  // File descriptor for perf events
+}
+
+impl PerfProfiler {
+    pub fn new() -> Self {
+        PerfProfiler {
+            enabled: false,
+            start_counters: PerfCounters::new(),
+            perf_fd: None,
+        }
+    }
+
+    pub fn is_available() -> bool {
+        // Check if perf_event_open is available
+        #[cfg(target_os = "linux")]
+        { true }
+        #[cfg(not(target_os = "linux"))]
+        { false }
+    }
+
+    pub fn start(&mut self) {
+        self.enabled = true;
+        self.start_counters = self.read_counters();
+    }
+
+    pub fn stop(&mut self) -> PerfCounters {
+        let end = self.read_counters();
+        self.enabled = false;
+
+        PerfCounters {
+            cycles: end.cycles - self.start_counters.cycles,
+            instructions: end.instructions - self.start_counters.instructions,
+            cache_references: end.cache_references - self.start_counters.cache_references,
+            cache_misses: end.cache_misses - self.start_counters.cache_misses,
+            branch_instructions: end.branch_instructions - self.start_counters.branch_instructions,
+            branch_misses: end.branch_misses - self.start_counters.branch_misses,
+            l1d_read_misses: end.l1d_read_misses - self.start_counters.l1d_read_misses,
+            l1i_read_misses: end.l1i_read_misses - self.start_counters.l1i_read_misses,
+            llc_read_misses: end.llc_read_misses - self.start_counters.llc_read_misses,
+            page_faults: end.page_faults - self.start_counters.page_faults,
+            context_switches: end.context_switches - self.start_counters.context_switches,
+        }
+    }
+
+    fn read_counters(&self) -> PerfCounters {
+        // Platform-specific implementation
+        PerfCounters::new()
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// PARAMETRIC BENCHMARKS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Configuration for parametric benchmarks
+#[derive(Clone)]
+pub struct ParametricConfig {
+    pub sizes: Vec<u64>,
+    pub labels: Option<Vec<String>>,
+    pub plot_type: PlotType,
+}
+
+#[derive(Clone, Copy)]
+pub enum PlotType {
+    Linear,
+    LogLog,
+    SemiLogX,
+    SemiLogY,
+}
+
+impl ParametricConfig {
+    /// Create a range of sizes from min to max
+    pub fn range(min: u64, max: u64, count: usize) -> Self {
+        let step = (max - min) / (count - 1) as u64;
+        let sizes: Vec<u64> = (0..count)
+            .map(|i| min + step * i as u64)
+            .collect();
+        ParametricConfig {
+            sizes,
+            labels: None,
+            plot_type: PlotType::Linear,
+        }
+    }
+
+    /// Create exponential sizes (powers of 2)
+    pub fn powers_of_2(min_power: u32, max_power: u32) -> Self {
+        let sizes: Vec<u64> = (min_power..=max_power)
+            .map(|p| 1u64 << p)
+            .collect();
+        ParametricConfig {
+            sizes,
+            labels: None,
+            plot_type: PlotType::LogLog,
+        }
+    }
+
+    /// Create custom sizes
+    pub fn custom(sizes: Vec<u64>) -> Self {
+        ParametricConfig {
+            sizes,
+            labels: None,
+            plot_type: PlotType::Linear,
+        }
+    }
+}
+
+/// Results from a parametric benchmark
+#[derive(Clone)]
+pub struct ParametricResult {
+    pub name: String,
+    pub sizes: Vec<u64>,
+    pub results: Vec<BenchResult>,
+    pub complexity: Option<ComplexityEstimate>,
+}
+
+/// Big-O complexity estimation
+#[derive(Clone)]
+pub struct ComplexityEstimate {
+    pub complexity: Complexity,
+    pub coefficient: f64,
+    pub r_squared: f64,  // Goodness of fit
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum Complexity {
+    O1,
+    OLogN,
+    ON,
+    ONLogN,
+    ON2,
+    ON3,
+    O2N,
+}
+
+impl Complexity {
+    pub fn as_str(&self) -> &str {
+        match self {
+            Complexity::O1 => "O(1)",
+            Complexity::OLogN => "O(log n)",
+            Complexity::ON => "O(n)",
+            Complexity::ONLogN => "O(n log n)",
+            Complexity::ON2 => "O(n²)",
+            Complexity::ON3 => "O(n³)",
+            Complexity::O2N => "O(2ⁿ)",
+        }
+    }
+
+    pub fn evaluate(&self, n: f64) -> f64 {
+        match self {
+            Complexity::O1 => 1.0,
+            Complexity::OLogN => n.ln(),
+            Complexity::ON => n,
+            Complexity::ONLogN => n * n.ln(),
+            Complexity::ON2 => n * n,
+            Complexity::ON3 => n * n * n,
+            Complexity::O2N => 2.0_f64.powf(n),
+        }
+    }
+}
+
+/// Estimate algorithmic complexity from benchmark results
+pub fn estimate_complexity(sizes: &[u64], times: &[f64]) -> ComplexityEstimate {
+    let complexities = [
+        Complexity::O1,
+        Complexity::OLogN,
+        Complexity::ON,
+        Complexity::ONLogN,
+        Complexity::ON2,
+        Complexity::ON3,
+    ];
+
+    let mut best_fit = ComplexityEstimate {
+        complexity: Complexity::ON,
+        coefficient: 1.0,
+        r_squared: 0.0,
+    };
+
+    for complexity in complexities.iter() {
+        // Transform sizes according to complexity
+        let x_vals: Vec<f64> = sizes.iter()
+            .map(|&s| complexity.evaluate(s as f64))
+            .collect();
+
+        // Linear regression: time = coefficient * complexity(n)
+        let (slope, r_squared) = linear_regression(&x_vals, times);
+
+        if r_squared > best_fit.r_squared {
+            best_fit = ComplexityEstimate {
+                complexity: *complexity,
+                coefficient: slope,
+                r_squared,
+            };
+        }
+    }
+
+    best_fit
+}
+
+/// Simple linear regression returning slope and R²
+fn linear_regression(x: &[f64], y: &[f64]) -> (f64, f64) {
+    let n = x.len() as f64;
+    let sum_x: f64 = x.iter().sum();
+    let sum_y: f64 = y.iter().sum();
+    let sum_xy: f64 = x.iter().zip(y.iter()).map(|(a, b)| a * b).sum();
+    let sum_x2: f64 = x.iter().map(|a| a * a).sum();
+    let sum_y2: f64 = y.iter().map(|a| a * a).sum();
+
+    let slope = (n * sum_xy - sum_x * sum_y) / (n * sum_x2 - sum_x * sum_x);
+
+    // R² calculation
+    let mean_y = sum_y / n;
+    let ss_tot: f64 = y.iter().map(|yi| (yi - mean_y).powi(2)).sum();
+    let ss_res: f64 = x.iter().zip(y.iter())
+        .map(|(xi, yi)| (yi - slope * xi).powi(2))
+        .sum();
+    let r_squared = 1.0 - ss_res / ss_tot;
+
+    (slope, r_squared.max(0.0).min(1.0))
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ASYNC BENCHMARK SUPPORT
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Async benchmark executor
+pub struct AsyncBencher {
+    inner: Bencher,
+    runtime: AsyncRuntime,
+}
+
+/// Minimal async runtime for benchmarks
+pub struct AsyncRuntime {
+    // Simplified runtime implementation
+}
+
+impl AsyncRuntime {
+    pub fn new() -> Self {
+        AsyncRuntime {}
+    }
+
+    pub fn block_on<F, T>(&self, future: F) -> T
+    where
+        F: Future<Output = T>,
+    {
+        // Execute future to completion
+        // Simplified - in real implementation would poll until ready
+        unsafe { std::mem::zeroed() } // Placeholder
+    }
+}
+
+/// Future trait for async benchmarks
+pub trait Future {
+    type Output;
+    fn poll(&mut self) -> Poll<Self::Output>;
+}
+
+pub enum Poll<T> {
+    Ready(T),
+    Pending,
+}
+
+impl AsyncBencher {
+    pub fn new() -> Self {
+        AsyncBencher {
+            inner: Bencher::new(),
+            runtime: AsyncRuntime::new(),
+        }
+    }
+
+    /// Benchmark an async function
+    pub fn bench_async<F, Fut>(&mut self, name: &str, mut f: F)
+    where
+        F: FnMut() -> Fut,
+        Fut: Future<Output = ()>,
+    {
+        self.inner.bench(name, |iter| {
+            iter.iter(|| {
+                let fut = f();
+                self.runtime.block_on(fut);
+            });
+        });
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// FLAMEGRAPH / CALL TREE PROFILING
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Stack frame for profiling
+#[derive(Clone)]
+pub struct StackFrame {
+    pub function_name: String,
+    pub module: String,
+    pub file: Option<String>,
+    pub line: Option<u32>,
+    pub self_time_ns: u64,
+    pub total_time_ns: u64,
+}
+
+/// Call tree node for hierarchical profiling
+#[derive(Clone)]
+pub struct CallTreeNode {
+    pub frame: StackFrame,
+    pub children: Vec<CallTreeNode>,
+    pub call_count: u64,
+}
+
+impl CallTreeNode {
+    pub fn new(frame: StackFrame) -> Self {
+        CallTreeNode {
+            frame,
+            children: Vec::new(),
+            call_count: 1,
+        }
+    }
+
+    pub fn add_child(&mut self, child: CallTreeNode) {
+        // Check if child with same name exists
+        for existing in &mut self.children {
+            if existing.frame.function_name == child.frame.function_name {
+                existing.frame.total_time_ns += child.frame.total_time_ns;
+                existing.frame.self_time_ns += child.frame.self_time_ns;
+                existing.call_count += 1;
+                return;
+            }
+        }
+        self.children.push(child);
+    }
+
+    /// Calculate percentage of total time
+    pub fn time_percent(&self, total_ns: u64) -> f64 {
+        self.frame.total_time_ns as f64 / total_ns as f64 * 100.0
+    }
+}
+
+/// Flamegraph generator
+pub struct FlamegraphBuilder {
+    stacks: Vec<(Vec<String>, u64)>,  // (stack, count)
+    title: String,
+}
+
+impl FlamegraphBuilder {
+    pub fn new(title: &str) -> Self {
+        FlamegraphBuilder {
+            stacks: Vec::new(),
+            title: title.to_string(),
+        }
+    }
+
+    pub fn add_stack(&mut self, stack: Vec<String>, count: u64) {
+        self.stacks.push((stack, count));
+    }
+
+    /// Generate folded stack format for flamegraph tools
+    pub fn generate_folded(&self) -> String {
+        let mut output = String::new();
+        for (stack, count) in &self.stacks {
+            let stack_str = stack.join(";");
+            output.push_str(&format!("{} {}\n", stack_str, count));
+        }
+        output
+    }
+
+    /// Generate SVG flamegraph (simplified)
+    pub fn generate_svg(&self, width: u32, height: u32) -> String {
+        let mut svg = format!(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" width="{}" height="{}">"#,
+            width, height
+        );
+        svg.push_str(&format!(
+            r#"<text x="50%" y="30" text-anchor="middle" font-size="20">{}</text>"#,
+            self.title
+        ));
+
+        // In real implementation, would render flame stacks
+        // This is a simplified placeholder
+
+        svg.push_str("</svg>");
+        svg
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// HTML REPORT GENERATION
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// HTML report generator for benchmark results
+pub struct ReportGenerator {
+    title: String,
+    results: Vec<BenchResult>,
+    parametric_results: Vec<ParametricResult>,
+    comparisons: Vec<RegressionReport>,
+}
+
+/// Regression comparison report
+#[derive(Clone)]
+pub struct RegressionReport {
+    pub benchmark_name: String,
+    pub baseline_mean: f64,
+    pub current_mean: f64,
+    pub change_percent: f64,
+    pub t_test: TTestResult,
+    pub verdict: RegressionVerdict,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum RegressionVerdict {
+    NoChange,
+    Improved,
+    Regressed,
+}
+
+impl ReportGenerator {
+    pub fn new(title: &str) -> Self {
+        ReportGenerator {
+            title: title.to_string(),
+            results: Vec::new(),
+            parametric_results: Vec::new(),
+            comparisons: Vec::new(),
+        }
+    }
+
+    pub fn add_results(&mut self, results: Vec<BenchResult>) {
+        self.results.extend(results);
+    }
+
+    pub fn add_parametric(&mut self, result: ParametricResult) {
+        self.parametric_results.push(result);
+    }
+
+    pub fn add_comparison(&mut self, report: RegressionReport) {
+        self.comparisons.push(report);
+    }
+
+    /// Generate full HTML report
+    pub fn generate_html(&self) -> String {
+        let mut html = String::new();
+
+        html.push_str("<!DOCTYPE html>\n<html>\n<head>\n");
+        html.push_str(&format!("<title>{} - Benchmark Report</title>\n", self.title));
+        html.push_str(self.css_styles());
+        html.push_str(self.chart_scripts());
+        html.push_str("</head>\n<body>\n");
+
+        // Header
+        html.push_str(&format!("<h1>{}</h1>\n", self.title));
+        html.push_str(&format!("<p>Generated: {}</p>\n", "2024-12-23")); // Placeholder date
+
+        // Summary table
+        html.push_str("<h2>Benchmark Results</h2>\n");
+        html.push_str(self.results_table());
+
+        // Regression report if any
+        if !self.comparisons.is_empty() {
+            html.push_str("<h2>Regression Analysis</h2>\n");
+            html.push_str(self.regression_table());
+        }
+
+        // Parametric results with charts
+        if !self.parametric_results.is_empty() {
+            html.push_str("<h2>Scaling Analysis</h2>\n");
+            for result in &self.parametric_results {
+                html.push_str(&self.parametric_chart(result));
+            }
+        }
+
+        html.push_str("</body>\n</html>");
+        html
+    }
+
+    fn css_styles(&self) -> &str {
+        r#"<style>
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; margin: 40px; }
+h1 { color: #2c3e50; }
+table { border-collapse: collapse; width: 100%; margin: 20px 0; }
+th, td { border: 1px solid #ddd; padding: 12px; text-align: left; }
+th { background-color: #3498db; color: white; }
+tr:nth-child(even) { background-color: #f9f9f9; }
+.improved { color: #27ae60; font-weight: bold; }
+.regressed { color: #e74c3c; font-weight: bold; }
+.chart-container { width: 100%; max-width: 800px; margin: 20px 0; }
+</style>
+"#
+    }
+
+    fn chart_scripts(&self) -> &str {
+        r#"<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+"#
+    }
+
+    fn results_table(&self) -> String {
+        let mut table = String::from("<table>\n");
+        table.push_str("<tr><th>Benchmark</th><th>Mean</th><th>Std Dev</th><th>Min</th><th>Max</th><th>Iterations</th></tr>\n");
+
+        for result in &self.results {
+            table.push_str(&format!(
+                "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>\n",
+                result.name,
+                format_duration(result.stats.mean),
+                format_duration(result.stats.std_dev),
+                format_duration(result.stats.min),
+                format_duration(result.stats.max),
+                result.stats.iterations
+            ));
+        }
+
+        table.push_str("</table>\n");
+        table
+    }
+
+    fn regression_table(&self) -> String {
+        let mut table = String::from("<table>\n");
+        table.push_str("<tr><th>Benchmark</th><th>Baseline</th><th>Current</th><th>Change</th><th>Verdict</th></tr>\n");
+
+        for comp in &self.comparisons {
+            let change_class = match comp.verdict {
+                RegressionVerdict::Improved => "improved",
+                RegressionVerdict::Regressed => "regressed",
+                RegressionVerdict::NoChange => "",
+            };
+
+            let verdict_str = match comp.verdict {
+                RegressionVerdict::Improved => "✓ Improved",
+                RegressionVerdict::Regressed => "✗ Regressed",
+                RegressionVerdict::NoChange => "— No Change",
+            };
+
+            table.push_str(&format!(
+                "<tr><td>{}</td><td>{}</td><td>{}</td><td class=\"{}\">{:+.1}%</td><td class=\"{}\">{}</td></tr>\n",
+                comp.benchmark_name,
+                format_duration(comp.baseline_mean),
+                format_duration(comp.current_mean),
+                change_class,
+                comp.change_percent,
+                change_class,
+                verdict_str
+            ));
+        }
+
+        table.push_str("</table>\n");
+        table
+    }
+
+    fn parametric_chart(&self, result: &ParametricResult) -> String {
+        let sizes_json: Vec<String> = result.sizes.iter().map(|s| s.to_string()).collect();
+        let times_json: Vec<String> = result.results.iter()
+            .map(|r| format!("{:.2}", r.stats.mean))
+            .collect();
+
+        format!(
+            r#"<div class="chart-container">
+<h3>{}</h3>
+<canvas id="chart_{}"></canvas>
+<script>
+new Chart(document.getElementById('chart_{}'), {{
+    type: 'line',
+    data: {{
+        labels: [{}],
+        datasets: [{{
+            label: 'Time (ns)',
+            data: [{}],
+            borderColor: '#3498db',
+            fill: false
+        }}]
+    }},
+    options: {{
+        responsive: true,
+        scales: {{
+            y: {{ beginAtZero: true }}
+        }}
+    }}
+}});
+</script>
+</div>
+"#,
+            result.name,
+            result.name.replace(" ", "_"),
+            result.name.replace(" ", "_"),
+            sizes_json.join(","),
+            times_json.join(",")
+        )
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// BENCHMARK FILTERING
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Filter benchmarks by pattern
+#[derive(Clone)]
+pub struct BenchFilter {
+    include_patterns: Vec<String>,
+    exclude_patterns: Vec<String>,
+    groups: Option<Vec<String>>,
+}
+
+impl BenchFilter {
+    pub fn new() -> Self {
+        BenchFilter {
+            include_patterns: Vec::new(),
+            exclude_patterns: Vec::new(),
+            groups: None,
+        }
+    }
+
+    pub fn include(mut self, pattern: &str) -> Self {
+        self.include_patterns.push(pattern.to_string());
+        self
+    }
+
+    pub fn exclude(mut self, pattern: &str) -> Self {
+        self.exclude_patterns.push(pattern.to_string());
+        self
+    }
+
+    pub fn groups(mut self, groups: Vec<String>) -> Self {
+        self.groups = Some(groups);
+        self
+    }
+
+    pub fn matches(&self, name: &str, group: Option<&str>) -> bool {
+        // Check group filter
+        if let Some(ref allowed_groups) = self.groups {
+            if let Some(g) = group {
+                if !allowed_groups.iter().any(|ag| ag == g) {
+                    return false;
+                }
+            } else {
+                return false;
+            }
+        }
+
+        // Check exclude patterns
+        for pattern in &self.exclude_patterns {
+            if glob_match(pattern, name) {
+                return false;
+            }
+        }
+
+        // If no include patterns, match all
+        if self.include_patterns.is_empty() {
+            return true;
+        }
+
+        // Check include patterns
+        for pattern in &self.include_patterns {
+            if glob_match(pattern, name) {
+                return true;
+            }
+        }
+
+        false
+    }
+}
+
+/// Simple glob pattern matching
+fn glob_match(pattern: &str, text: &str) -> bool {
+    // Handle * as wildcard
+    if pattern == "*" {
+        return true;
+    }
+
+    if pattern.starts_with("*") && pattern.ends_with("*") {
+        let inner = &pattern[1..pattern.len()-1];
+        return text.contains(inner);
+    }
+
+    if pattern.starts_with("*") {
+        let suffix = &pattern[1..];
+        return text.ends_with(suffix);
+    }
+
+    if pattern.ends_with("*") {
+        let prefix = &pattern[..pattern.len()-1];
+        return text.starts_with(prefix);
+    }
+
+    pattern == text
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// NOISE REDUCTION / OUTLIER FILTERING
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Noise reduction strategy for benchmark measurements
+#[derive(Clone, Copy)]
+pub enum NoiseReduction {
+    None,
+    /// Remove samples outside 1.5 * IQR
+    IQR,
+    /// Remove samples more than N standard deviations from mean
+    StdDev(f64),
+    /// Keep only the fastest N% of samples
+    FastestPercent(f64),
+    /// Winsorize extreme values
+    Winsorize(f64),
+}
+
+impl NoiseReduction {
+    pub fn apply(&self, samples: &mut Vec<f64>) {
+        match self {
+            NoiseReduction::None => {}
+            NoiseReduction::IQR => {
+                if samples.len() < 4 { return; }
+
+                let mut sorted = samples.clone();
+                sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+
+                let n = sorted.len();
+                let q1 = sorted[n / 4];
+                let q3 = sorted[3 * n / 4];
+                let iqr = q3 - q1;
+                let lower = q1 - 1.5 * iqr;
+                let upper = q3 + 1.5 * iqr;
+
+                samples.retain(|&x| x >= lower && x <= upper);
+            }
+            NoiseReduction::StdDev(n_std) => {
+                if samples.len() < 2 { return; }
+
+                let mean: f64 = samples.iter().sum::<f64>() / samples.len() as f64;
+                let variance: f64 = samples.iter()
+                    .map(|x| (x - mean).powi(2))
+                    .sum::<f64>() / (samples.len() - 1) as f64;
+                let std_dev = variance.sqrt();
+
+                let lower = mean - n_std * std_dev;
+                let upper = mean + n_std * std_dev;
+
+                samples.retain(|&x| x >= lower && x <= upper);
+            }
+            NoiseReduction::FastestPercent(pct) => {
+                samples.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                let keep = (samples.len() as f64 * pct / 100.0) as usize;
+                samples.truncate(keep.max(1));
+            }
+            NoiseReduction::Winsorize(pct) => {
+                if samples.len() < 4 { return; }
+
+                let mut sorted = samples.clone();
+                sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+
+                let n = sorted.len();
+                let lower_idx = (n as f64 * pct / 100.0) as usize;
+                let upper_idx = n - lower_idx - 1;
+
+                let lower_val = sorted[lower_idx];
+                let upper_val = sorted[upper_idx];
+
+                for sample in samples.iter_mut() {
+                    if *sample < lower_val { *sample = lower_val; }
+                    if *sample > upper_val { *sample = upper_val; }
+                }
+            }
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// BENCHMARK HISTORY / TREND ANALYSIS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Historical benchmark data for trend analysis
+#[derive(Clone)]
+pub struct BenchHistory {
+    pub benchmark_name: String,
+    pub data_points: Vec<HistoryPoint>,
+}
+
+#[derive(Clone)]
+pub struct HistoryPoint {
+    pub timestamp: u64,
+    pub commit_hash: Option<String>,
+    pub mean: f64,
+    pub std_dev: f64,
+}
+
+impl BenchHistory {
+    pub fn new(name: &str) -> Self {
+        BenchHistory {
+            benchmark_name: name.to_string(),
+            data_points: Vec::new(),
+        }
+    }
+
+    pub fn add_point(&mut self, point: HistoryPoint) {
+        self.data_points.push(point);
+    }
+
+    /// Detect trend direction
+    pub fn trend(&self) -> Trend {
+        if self.data_points.len() < 3 {
+            return Trend::Stable;
+        }
+
+        // Use linear regression on recent points
+        let recent: Vec<_> = self.data_points.iter()
+            .rev()
+            .take(10)
+            .collect();
+
+        let n = recent.len() as f64;
+        let x: Vec<f64> = (0..recent.len()).map(|i| i as f64).collect();
+        let y: Vec<f64> = recent.iter().map(|p| p.mean).collect();
+
+        let sum_x: f64 = x.iter().sum();
+        let sum_y: f64 = y.iter().sum();
+        let sum_xy: f64 = x.iter().zip(y.iter()).map(|(a, b)| a * b).sum();
+        let sum_x2: f64 = x.iter().map(|a| a * a).sum();
+
+        let slope = (n * sum_xy - sum_x * sum_y) / (n * sum_x2 - sum_x * sum_x);
+
+        // Determine significance based on coefficient of variation
+        let mean_y = sum_y / n;
+        let threshold = mean_y * 0.05; // 5% change is significant
+
+        if slope > threshold { Trend::Degrading }
+        else if slope < -threshold { Trend::Improving }
+        else { Trend::Stable }
+    }
+
+    /// Detect sudden spikes/changes
+    pub fn detect_anomalies(&self) -> Vec<usize> {
+        if self.data_points.len() < 5 {
+            return Vec::new();
+        }
+
+        let mut anomalies = Vec::new();
+
+        // Rolling window anomaly detection
+        for i in 2..self.data_points.len() {
+            let window: Vec<f64> = self.data_points[i.saturating_sub(5)..i]
+                .iter()
+                .map(|p| p.mean)
+                .collect();
+
+            let mean: f64 = window.iter().sum::<f64>() / window.len() as f64;
+            let variance: f64 = window.iter()
+                .map(|x| (x - mean).powi(2))
+                .sum::<f64>() / window.len() as f64;
+            let std_dev = variance.sqrt();
+
+            let current = self.data_points[i].mean;
+            if (current - mean).abs() > 3.0 * std_dev {
+                anomalies.push(i);
+            }
+        }
+
+        anomalies
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum Trend {
+    Improving,
+    Stable,
+    Degrading,
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// EXTENDED BENCHER WITH ALL FEATURES
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Extended benchmark runner with all advanced features
+pub struct ExtendedBencher {
+    inner: Bencher,
+    filter: Option<BenchFilter>,
+    noise_reduction: NoiseReduction,
+    memory_profiler: MemoryProfiler,
+    perf_profiler: PerfProfiler,
+    parametric_results: Vec<ParametricResult>,
+    history: HashMap<String, BenchHistory>,
+}
+
+impl ExtendedBencher {
+    pub fn new() -> Self {
+        ExtendedBencher {
+            inner: Bencher::new(),
+            filter: None,
+            noise_reduction: NoiseReduction::IQR,
+            memory_profiler: MemoryProfiler::new(),
+            perf_profiler: PerfProfiler::new(),
+            parametric_results: Vec::new(),
+            history: HashMap::new(),
+        }
+    }
+
+    pub fn with_filter(mut self, filter: BenchFilter) -> Self {
+        self.filter = Some(filter);
+        self
+    }
+
+    pub fn with_noise_reduction(mut self, nr: NoiseReduction) -> Self {
+        self.noise_reduction = nr;
+        self
+    }
+
+    /// Run parametric benchmark across multiple sizes
+    pub fn bench_parametric<F>(&mut self, name: &str, config: &ParametricConfig, mut f: F)
+    where
+        F: FnMut(u64, &mut Iteration),
+    {
+        println!("\n{} (parametric)", name);
+        println!("{}", "─".repeat(60));
+
+        let mut results = Vec::new();
+        let mut times = Vec::new();
+
+        for &size in &config.sizes {
+            let bench_name = format!("{}_{}", name, size);
+
+            self.inner.bench(&bench_name, |iter| {
+                f(size, iter);
+            });
+
+            if let Some(result) = self.inner.results.last() {
+                times.push(result.stats.mean);
+                results.push(result.clone());
+            }
+        }
+
+        // Estimate complexity
+        let complexity = estimate_complexity(&config.sizes, &times);
+        println!("\nEstimated complexity: {} (R² = {:.3})",
+            complexity.complexity.as_str(),
+            complexity.r_squared);
+
+        self.parametric_results.push(ParametricResult {
+            name: name.to_string(),
+            sizes: config.sizes.clone(),
+            results,
+            complexity: Some(complexity),
+        });
+    }
+
+    /// Benchmark with memory profiling
+    pub fn bench_with_memory<F>(&mut self, name: &str, mut f: F) -> MemoryProfile
+    where
+        F: FnMut(&mut Iteration),
+    {
+        self.memory_profiler.start();
+        self.inner.bench(name, |iter| f(iter));
+        self.memory_profiler.stop()
+    }
+
+    /// Benchmark with hardware performance counters
+    pub fn bench_with_perf<F>(&mut self, name: &str, mut f: F) -> Option<PerfCounters>
+    where
+        F: FnMut(&mut Iteration),
+    {
+        if !PerfProfiler::is_available() {
+            println!("Warning: Hardware performance counters not available");
+            self.inner.bench(name, |iter| f(iter));
+            return None;
+        }
+
+        self.perf_profiler.start();
+        self.inner.bench(name, |iter| f(iter));
+        Some(self.perf_profiler.stop())
+    }
+
+    /// Generate HTML report
+    pub fn generate_report(&self, title: &str) -> String {
+        let mut generator = ReportGenerator::new(title);
+        generator.add_results(self.inner.results.clone());
+
+        for param in &self.parametric_results {
+            generator.add_parametric(param.clone());
+        }
+
+        generator.generate_html()
+    }
+
+    /// Compare with baseline and detect regressions
+    pub fn compare_with_baseline(&self, baseline_path: &str) -> Vec<RegressionReport> {
+        let baseline = load_baseline(baseline_path).unwrap_or_default();
+        let mut reports = Vec::new();
+
+        for result in &self.inner.results {
+            if let Some(&baseline_mean) = baseline.get(&result.name) {
+                let change_percent = (result.stats.mean - baseline_mean) / baseline_mean * 100.0;
+
+                // Simple significance test
+                let significant = change_percent.abs() > 5.0;
+
+                let verdict = if !significant {
+                    RegressionVerdict::NoChange
+                } else if change_percent < 0.0 {
+                    RegressionVerdict::Improved
+                } else {
+                    RegressionVerdict::Regressed
+                };
+
+                reports.push(RegressionReport {
+                    benchmark_name: result.name.clone(),
+                    baseline_mean,
+                    current_mean: result.stats.mean,
+                    change_percent,
+                    t_test: TTestResult {
+                        t_statistic: 0.0,
+                        degrees_of_freedom: 0.0,
+                        p_value: 0.0,
+                        significant,
+                        effect_size: 0.0,
+                        effect_magnitude: EffectMagnitude::Negligible,
+                    },
+                    verdict,
+                });
+            }
+        }
+
+        reports
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// CRITERION-COMPATIBLE API
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Criterion-style benchmark group
+pub struct CriterionGroup<'a> {
+    name: String,
+    bencher: &'a mut Bencher,
+}
+
+impl<'a> CriterionGroup<'a> {
+    pub fn new(name: &str, bencher: &'a mut Bencher) -> Self {
+        bencher.group(name);
+        CriterionGroup {
+            name: name.to_string(),
+            bencher,
+        }
+    }
+
+    pub fn bench_function<F>(&mut self, name: &str, mut f: F) -> &mut Self
+    where
+        F: FnMut(&mut Iteration),
+    {
+        self.bencher.bench(name, |iter| f(iter));
+        self
+    }
+
+    pub fn bench_with_input<I, F>(&mut self, name: &str, input: I, mut f: F) -> &mut Self
+    where
+        I: Clone,
+        F: FnMut(&mut Iteration, I),
+    {
+        let input_clone = input.clone();
+        self.bencher.bench(name, |iter| {
+            f(iter, input_clone.clone());
+        });
+        self
+    }
+
+    pub fn throughput(&mut self, size: u64) -> &mut Self {
+        // Set throughput for next benchmark
+        self
+    }
+
+    pub fn sample_size(&mut self, size: usize) -> &mut Self {
+        // Configure sample size
+        self
+    }
+
+    pub fn measurement_time(&mut self, duration: Duration) -> &mut Self {
+        // Configure measurement time
+        self
+    }
+}
+
+impl<'a> Drop for CriterionGroup<'a> {
+    fn drop(&mut self) {
+        self.bencher.group_end();
+    }
+}
+
+/// Criterion-style main function
+pub fn criterion_main<F>(f: F)
+where
+    F: FnOnce(&mut Bencher),
+{
+    let mut bencher = Bencher::new();
+    f(&mut bencher);
+    bencher.summary();
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// COMPARISON BENCHMARKS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Compare multiple implementations
+pub struct ComparisonBench<'a> {
+    name: String,
+    bencher: &'a mut Bencher,
+    results: Vec<(String, f64)>,
+}
+
+impl<'a> ComparisonBench<'a> {
+    pub fn new(name: &str, bencher: &'a mut Bencher) -> Self {
+        ComparisonBench {
+            name: name.to_string(),
+            bencher,
+            results: Vec::new(),
+        }
+    }
+
+    pub fn compare<F>(&mut self, impl_name: &str, mut f: F) -> &mut Self
+    where
+        F: FnMut(&mut Iteration),
+    {
+        let bench_name = format!("{}/{}", self.name, impl_name);
+        self.bencher.bench(&bench_name, |iter| f(iter));
+
+        if let Some(result) = self.bencher.results.last() {
+            self.results.push((impl_name.to_string(), result.stats.mean));
+        }
+
+        self
+    }
+
+    pub fn summary(&self) {
+        if self.results.is_empty() { return; }
+
+        println!("\n{} Comparison:", self.name);
+        println!("{}", "─".repeat(40));
+
+        // Find fastest
+        let min = self.results.iter()
+            .map(|(_, t)| *t)
+            .fold(f64::MAX, f64::min);
+
+        for (name, time) in &self.results {
+            let ratio = time / min;
+            let bar_len = (ratio * 20.0) as usize;
+            let bar: String = "█".repeat(bar_len.min(40));
+
+            println!("  {:15} {:>12} {:6.2}x  {}",
+                name,
+                format_duration(*time),
+                ratio,
+                bar);
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// MICRO-BENCHMARK UTILITIES
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// CPU cache flush utility
+pub fn flush_cache() {
+    // Write to large buffer to evict cache
+    const SIZE: usize = 32 * 1024 * 1024; // 32 MB
+    let mut buffer = vec![0u8; SIZE];
+    for (i, byte) in buffer.iter_mut().enumerate() {
+        *byte = (i & 0xFF) as u8;
+    }
+    Iteration::black_box(buffer);
+}
+
+/// Memory barrier
+pub fn memory_barrier() {
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        core::arch::x86_64::_mm_mfence();
+    }
+}
+
+/// Prevent instruction reordering
+pub fn compiler_fence() {
+    core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
+}
+
+/// Read CPU timestamp counter
+#[cfg(target_arch = "x86_64")]
+pub fn rdtsc() -> u64 {
+    unsafe {
+        core::arch::x86_64::_rdtsc()
+    }
+}
+
+#[cfg(not(target_arch = "x86_64"))]
+pub fn rdtsc() -> u64 {
+    0 // Fallback
+}
+
+/// CPU cycles for an operation
+pub fn measure_cycles<F, R>(f: F) -> (R, u64)
+where
+    F: FnOnce() -> R,
+{
+    compiler_fence();
+    let start = rdtsc();
+    compiler_fence();
+
+    let result = f();
+
+    compiler_fence();
+    let end = rdtsc();
+    compiler_fence();
+
+    (result, end - start)
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// HDR HISTOGRAM FOR LATENCY DISTRIBUTION
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// High Dynamic Range (HDR) Histogram for latency measurements
+/// Based on Gil Tene's HdrHistogram algorithm
+#[derive(Clone)]
+pub struct HdrHistogram {
+    /// Number of significant digits of precision
+    significant_digits: u8,
+    /// Unit magnitude (smallest distinguishable value)
+    unit_magnitude: i32,
+    /// Sub-bucket count (2^sub_bucket_half_count_magnitude)
+    sub_bucket_count: u32,
+    sub_bucket_half_count: u32,
+    sub_bucket_mask: u64,
+    /// Counts array
+    counts: Vec<u64>,
+    /// Total count of all values
+    total_count: u64,
+    /// Maximum tracked value
+    max_value: u64,
+    /// Minimum tracked value (non-zero)
+    min_non_zero_value: u64,
+    /// Highest value in histogram
+    highest_trackable_value: u64,
+    /// Lowest value in histogram
+    lowest_discernible_value: u64,
+}
+
+impl HdrHistogram {
+    pub fn new(lowest_discernible: u64, highest_trackable: u64, significant_digits: u8) -> Self {
+        let significant_digits = significant_digits.min(5);
+
+        let largest_value_with_single_unit_resolution = 2 * 10u64.pow(significant_digits as u32);
+        let sub_bucket_count_magnitude = (largest_value_with_single_unit_resolution as f64).log2().ceil() as u32;
+        let sub_bucket_half_count_magnitude = sub_bucket_count_magnitude.saturating_sub(1);
+
+        let sub_bucket_count = 1u32 << (sub_bucket_half_count_magnitude + 1);
+        let sub_bucket_half_count = sub_bucket_count >> 1;
+        let sub_bucket_mask = (sub_bucket_count as u64 - 1) << 32;
+
+        let unit_magnitude = (lowest_discernible as f64).log2().floor() as i32;
+
+        // Calculate counts array size
+        let buckets_needed = Self::buckets_needed_for_value(highest_trackable, sub_bucket_count, unit_magnitude);
+        let counts_len = (buckets_needed + 1) * (sub_bucket_half_count as usize);
+
+        HdrHistogram {
+            significant_digits,
+            unit_magnitude,
+            sub_bucket_count,
+            sub_bucket_half_count,
+            sub_bucket_mask,
+            counts: vec![0; counts_len],
+            total_count: 0,
+            max_value: 0,
+            min_non_zero_value: u64::MAX,
+            highest_trackable_value: highest_trackable,
+            lowest_discernible_value: lowest_discernible,
+        }
+    }
+
+    fn buckets_needed_for_value(value: u64, sub_bucket_count: u32, unit_magnitude: i32) -> usize {
+        let mut smallest_untrackable = (sub_bucket_count as u64) << unit_magnitude;
+        let mut buckets_needed = 1usize;
+
+        while smallest_untrackable <= value {
+            if smallest_untrackable > u64::MAX / 2 {
+                return buckets_needed + 1;
+            }
+            smallest_untrackable <<= 1;
+            buckets_needed += 1;
+        }
+
+        buckets_needed
+    }
+
+    /// Record a value in the histogram
+    pub fn record_value(&mut self, value: u64) -> bool {
+        if value > self.highest_trackable_value {
+            return false;
+        }
+
+        let idx = self.counts_index_for(value);
+        if idx >= self.counts.len() {
+            return false;
+        }
+
+        self.counts[idx] += 1;
+        self.total_count += 1;
+
+        if value > self.max_value {
+            self.max_value = value;
+        }
+        if value < self.min_non_zero_value && value > 0 {
+            self.min_non_zero_value = value;
+        }
+
+        true
+    }
+
+    /// Record a value with count
+    pub fn record_values(&mut self, value: u64, count: u64) -> bool {
+        if value > self.highest_trackable_value {
+            return false;
+        }
+
+        let idx = self.counts_index_for(value);
+        if idx >= self.counts.len() {
+            return false;
+        }
+
+        self.counts[idx] += count;
+        self.total_count += count;
+
+        if value > self.max_value {
+            self.max_value = value;
+        }
+        if value < self.min_non_zero_value && value > 0 {
+            self.min_non_zero_value = value;
+        }
+
+        true
+    }
+
+    fn counts_index_for(&self, value: u64) -> usize {
+        let bucket_idx = self.bucket_index(value);
+        let sub_bucket_idx = self.sub_bucket_index(value, bucket_idx);
+        bucket_idx * self.sub_bucket_half_count as usize + sub_bucket_idx
+    }
+
+    fn bucket_index(&self, value: u64) -> usize {
+        let pow2ceiling = 64 - (value | self.sub_bucket_mask).leading_zeros() as i32;
+        (pow2ceiling - self.unit_magnitude - (self.sub_bucket_half_count as f64).log2() as i32 - 1).max(0) as usize
+    }
+
+    fn sub_bucket_index(&self, value: u64, bucket_idx: usize) -> usize {
+        (value >> (bucket_idx as i32 + self.unit_magnitude)) as usize
+    }
+
+    fn value_from_index(&self, bucket_idx: usize, sub_bucket_idx: usize) -> u64 {
+        (sub_bucket_idx as u64) << (bucket_idx as i32 + self.unit_magnitude)
+    }
+
+    /// Get value at percentile (0-100)
+    pub fn value_at_percentile(&self, percentile: f64) -> u64 {
+        let percentile = percentile.max(0.0).min(100.0);
+        let count_at_percentile = ((percentile / 100.0 * self.total_count as f64) + 0.5) as u64;
+
+        let mut total = 0u64;
+
+        for bucket_idx in 0..64 {
+            for sub_bucket_idx in 0..self.sub_bucket_half_count as usize {
+                let idx = bucket_idx * self.sub_bucket_half_count as usize + sub_bucket_idx;
+                if idx >= self.counts.len() {
+                    break;
+                }
+
+                total += self.counts[idx];
+                if total >= count_at_percentile {
+                    return self.value_from_index(bucket_idx, sub_bucket_idx);
+                }
+            }
+        }
+
+        0
+    }
+
+    /// Get percentile at value
+    pub fn percentile_at_or_below_value(&self, value: u64) -> f64 {
+        if self.total_count == 0 {
+            return 100.0;
+        }
+
+        let target_idx = self.counts_index_for(value);
+        let mut total = 0u64;
+
+        for idx in 0..=target_idx.min(self.counts.len() - 1) {
+            total += self.counts[idx];
+        }
+
+        (100.0 * total as f64) / self.total_count as f64
+    }
+
+    /// Get mean value
+    pub fn mean(&self) -> f64 {
+        if self.total_count == 0 {
+            return 0.0;
+        }
+
+        let mut total = 0.0;
+
+        for bucket_idx in 0..64 {
+            for sub_bucket_idx in 0..self.sub_bucket_half_count as usize {
+                let idx = bucket_idx * self.sub_bucket_half_count as usize + sub_bucket_idx;
+                if idx >= self.counts.len() {
+                    break;
+                }
+
+                let count = self.counts[idx];
+                if count > 0 {
+                    let value = self.value_from_index(bucket_idx, sub_bucket_idx);
+                    total += value as f64 * count as f64;
+                }
+            }
+        }
+
+        total / self.total_count as f64
+    }
+
+    /// Get standard deviation
+    pub fn std_deviation(&self) -> f64 {
+        if self.total_count == 0 {
+            return 0.0;
+        }
+
+        let mean = self.mean();
+        let mut geometric_dev_total = 0.0;
+
+        for bucket_idx in 0..64 {
+            for sub_bucket_idx in 0..self.sub_bucket_half_count as usize {
+                let idx = bucket_idx * self.sub_bucket_half_count as usize + sub_bucket_idx;
+                if idx >= self.counts.len() {
+                    break;
+                }
+
+                let count = self.counts[idx];
+                if count > 0 {
+                    let value = self.value_from_index(bucket_idx, sub_bucket_idx);
+                    let dev = value as f64 - mean;
+                    geometric_dev_total += dev * dev * count as f64;
+                }
+            }
+        }
+
+        (geometric_dev_total / self.total_count as f64).sqrt()
+    }
+
+    /// Get min value
+    pub fn min(&self) -> u64 {
+        if self.min_non_zero_value == u64::MAX { 0 } else { self.min_non_zero_value }
+    }
+
+    /// Get max value
+    pub fn max(&self) -> u64 {
+        self.max_value
+    }
+
+    /// Get total count
+    pub fn count(&self) -> u64 {
+        self.total_count
+    }
+
+    /// Reset histogram
+    pub fn reset(&mut self) {
+        for count in &mut self.counts {
+            *count = 0;
+        }
+        self.total_count = 0;
+        self.max_value = 0;
+        self.min_non_zero_value = u64::MAX;
+    }
+
+    /// Merge another histogram into this one
+    pub fn add(&mut self, other: &HdrHistogram) {
+        for bucket_idx in 0..64 {
+            for sub_bucket_idx in 0..other.sub_bucket_half_count as usize {
+                let idx = bucket_idx * other.sub_bucket_half_count as usize + sub_bucket_idx;
+                if idx >= other.counts.len() {
+                    break;
+                }
+
+                let count = other.counts[idx];
+                if count > 0 {
+                    let value = other.value_from_index(bucket_idx, sub_bucket_idx);
+                    self.record_values(value, count);
+                }
+            }
+        }
+    }
+
+    /// Generate percentile distribution report
+    pub fn percentile_report(&self) -> String {
+        let mut report = String::new();
+        report.push_str("       Value     Percentile TotalCount 1/(1-Percentile)\n\n");
+
+        let percentiles = [50.0, 75.0, 90.0, 95.0, 99.0, 99.9, 99.99, 99.999, 100.0];
+
+        for &p in &percentiles {
+            let value = self.value_at_percentile(p);
+            let count_at = ((p / 100.0 * self.total_count as f64) + 0.5) as u64;
+            let inv = if p >= 100.0 { f64::INFINITY } else { 1.0 / (1.0 - p / 100.0) };
+
+            report.push_str(&format!(
+                "{:12} {:12.6} {:10} {:12.2}\n",
+                value,
+                p / 100.0,
+                count_at,
+                inv
+            ));
+        }
+
+        report.push_str(&format!(
+            "\n#[Mean = {:12.3}, StdDeviation = {:12.3}]\n",
+            self.mean(),
+            self.std_deviation()
+        ));
+        report.push_str(&format!(
+            "#[Max = {:12}, Total count = {:10}]\n",
+            self.max(),
+            self.count()
+        ));
+
+        report
+    }
+
+    /// Generate ASCII art histogram
+    pub fn ascii_histogram(&self, width: usize) -> String {
+        let mut output = String::new();
+        let percentiles = [0.0, 10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0, 90.0, 95.0, 99.0, 99.9, 100.0];
+
+        let max_val = self.value_at_percentile(100.0) as f64;
+
+        for &p in &percentiles {
+            let value = self.value_at_percentile(p);
+            let bar_width = if max_val > 0.0 {
+                ((value as f64 / max_val) * width as f64) as usize
+            } else {
+                0
+            };
+
+            let bar: String = "█".repeat(bar_width);
+            output.push_str(&format!(
+                "p{:5.1} {:>12} |{}\n",
+                p,
+                format_duration(value as f64),
+                bar
+            ));
+        }
+
+        output
+    }
+}
+
+/// Latency distribution analyzer
+pub struct LatencyAnalyzer {
+    histogram: HdrHistogram,
+    name: String,
+    samples_per_second: f64,
+}
+
+impl LatencyAnalyzer {
+    pub fn new(name: &str, max_latency_ns: u64) -> Self {
+        LatencyAnalyzer {
+            histogram: HdrHistogram::new(1, max_latency_ns, 3),
+            name: name.to_string(),
+            samples_per_second: 0.0,
+        }
+    }
+
+    pub fn record(&mut self, latency_ns: u64) {
+        self.histogram.record_value(latency_ns);
+    }
+
+    pub fn set_throughput(&mut self, ops_per_sec: f64) {
+        self.samples_per_second = ops_per_sec;
+    }
+
+    pub fn report(&self) -> LatencyReport {
+        LatencyReport {
+            name: self.name.clone(),
+            min_ns: self.histogram.min(),
+            max_ns: self.histogram.max(),
+            mean_ns: self.histogram.mean(),
+            std_dev_ns: self.histogram.std_deviation(),
+            p50_ns: self.histogram.value_at_percentile(50.0),
+            p75_ns: self.histogram.value_at_percentile(75.0),
+            p90_ns: self.histogram.value_at_percentile(90.0),
+            p95_ns: self.histogram.value_at_percentile(95.0),
+            p99_ns: self.histogram.value_at_percentile(99.0),
+            p999_ns: self.histogram.value_at_percentile(99.9),
+            p9999_ns: self.histogram.value_at_percentile(99.99),
+            count: self.histogram.count(),
+            throughput: self.samples_per_second,
+        }
+    }
+
+    pub fn reset(&mut self) {
+        self.histogram.reset();
+    }
+}
+
+/// Latency report with all percentiles
+#[derive(Clone)]
+pub struct LatencyReport {
+    pub name: String,
+    pub min_ns: u64,
+    pub max_ns: u64,
+    pub mean_ns: f64,
+    pub std_dev_ns: f64,
+    pub p50_ns: u64,
+    pub p75_ns: u64,
+    pub p90_ns: u64,
+    pub p95_ns: u64,
+    pub p99_ns: u64,
+    pub p999_ns: u64,
+    pub p9999_ns: u64,
+    pub count: u64,
+    pub throughput: f64,
+}
+
+impl LatencyReport {
+    pub fn print(&self) {
+        println!("\n╔═══════════════════════════════════════════════════════════════╗");
+        println!("║  Latency Distribution: {}", self.name);
+        println!("╚═══════════════════════════════════════════════════════════════╝");
+        println!();
+        println!("  Samples:    {:>12}", self.count);
+        println!("  Throughput: {:>12.2} ops/sec", self.throughput);
+        println!();
+        println!("  Percentiles:");
+        println!("    Min:      {:>12}", format_duration(self.min_ns as f64));
+        println!("    p50:      {:>12}", format_duration(self.p50_ns as f64));
+        println!("    p75:      {:>12}", format_duration(self.p75_ns as f64));
+        println!("    p90:      {:>12}", format_duration(self.p90_ns as f64));
+        println!("    p95:      {:>12}", format_duration(self.p95_ns as f64));
+        println!("    p99:      {:>12}", format_duration(self.p99_ns as f64));
+        println!("    p99.9:    {:>12}", format_duration(self.p999_ns as f64));
+        println!("    p99.99:   {:>12}", format_duration(self.p9999_ns as f64));
+        println!("    Max:      {:>12}", format_duration(self.max_ns as f64));
+        println!();
+        println!("  Mean:       {:>12}", format_duration(self.mean_ns));
+        println!("  Std Dev:    {:>12}", format_duration(self.std_dev_ns));
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// CONCURRENT / MULTI-THREADED BENCHMARKS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Configuration for concurrent benchmarks
+#[derive(Clone)]
+pub struct ConcurrentBenchConfig {
+    /// Number of threads to use
+    pub thread_count: usize,
+    /// Duration to run the benchmark
+    pub duration: Duration,
+    /// Warmup duration
+    pub warmup_duration: Duration,
+    /// Whether to pin threads to CPUs
+    pub pin_threads: bool,
+    /// CPU affinity mask (if pinning)
+    pub cpu_affinity: Option<Vec<usize>>,
+    /// Enable per-thread statistics
+    pub per_thread_stats: bool,
+}
+
+impl Default for ConcurrentBenchConfig {
+    fn default() -> Self {
+        ConcurrentBenchConfig {
+            thread_count: num_cpus(),
+            duration: Duration::from_secs(10),
+            warmup_duration: Duration::from_secs(2),
+            pin_threads: false,
+            cpu_affinity: None,
+            per_thread_stats: true,
+        }
+    }
+}
+
+/// Get number of CPU cores
+fn num_cpus() -> usize {
+    #[cfg(target_os = "linux")]
+    {
+        // Read from /proc/cpuinfo or sysconf
+        4 // Placeholder
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        4 // Default fallback
+    }
+}
+
+/// Results from a concurrent benchmark
+#[derive(Clone)]
+pub struct ConcurrentResult {
+    pub name: String,
+    pub config: ConcurrentBenchConfig,
+    pub total_operations: u64,
+    pub operations_per_second: f64,
+    pub latency: LatencyReport,
+    pub per_thread_results: Vec<ThreadResult>,
+    pub contention_metrics: ContentionMetrics,
+}
+
+/// Per-thread benchmark results
+#[derive(Clone)]
+pub struct ThreadResult {
+    pub thread_id: usize,
+    pub operations: u64,
+    pub ops_per_second: f64,
+    pub mean_latency_ns: f64,
+    pub p99_latency_ns: u64,
+}
+
+/// Contention analysis metrics
+#[derive(Clone, Default)]
+pub struct ContentionMetrics {
+    pub lock_acquisitions: u64,
+    pub lock_contentions: u64,
+    pub contention_rate: f64,
+    pub avg_wait_time_ns: f64,
+    pub max_wait_time_ns: u64,
+}
+
+/// Concurrent benchmark runner
+pub struct ConcurrentBencher {
+    config: ConcurrentBenchConfig,
+    results: Vec<ConcurrentResult>,
+}
+
+impl ConcurrentBencher {
+    pub fn new() -> Self {
+        ConcurrentBencher {
+            config: ConcurrentBenchConfig::default(),
+            results: Vec::new(),
+        }
+    }
+
+    pub fn with_config(config: ConcurrentBenchConfig) -> Self {
+        ConcurrentBencher {
+            config,
+            results: Vec::new(),
+        }
+    }
+
+    /// Run a concurrent benchmark
+    pub fn bench_concurrent<F>(&mut self, name: &str, f: F) -> ConcurrentResult
+    where
+        F: Fn(usize) + Send + Sync + Clone,
+    {
+        println!("Concurrent benchmark: {} ({} threads)", name, self.config.thread_count);
+
+        // Thread-local result storage
+        let mut thread_results = Vec::new();
+        let mut total_ops = 0u64;
+        let mut combined_histogram = HdrHistogram::new(1, 1_000_000_000, 3);
+
+        // Simulate multi-threaded execution
+        // In real implementation, this would use actual threads
+        for thread_id in 0..self.config.thread_count {
+            let start = Instant::now();
+            let mut ops = 0u64;
+            let mut thread_histogram = HdrHistogram::new(1, 1_000_000_000, 3);
+
+            // Warmup
+            while start.elapsed() < self.config.warmup_duration {
+                let op_start = Instant::now();
+                f(thread_id);
+                let latency = op_start.elapsed().as_nanos() as u64;
+                thread_histogram.record_value(latency);
+            }
+            thread_histogram.reset();
+
+            // Measurement
+            let measure_start = Instant::now();
+            while measure_start.elapsed() < self.config.duration {
+                let op_start = Instant::now();
+                f(thread_id);
+                let latency = op_start.elapsed().as_nanos() as u64;
+                thread_histogram.record_value(latency);
+                ops += 1;
+            }
+
+            let elapsed = measure_start.elapsed().as_secs_f64();
+            let ops_per_sec = ops as f64 / elapsed;
+
+            thread_results.push(ThreadResult {
+                thread_id,
+                operations: ops,
+                ops_per_second: ops_per_sec,
+                mean_latency_ns: thread_histogram.mean(),
+                p99_latency_ns: thread_histogram.value_at_percentile(99.0),
+            });
+
+            total_ops += ops;
+            combined_histogram.add(&thread_histogram);
+        }
+
+        let total_duration = self.config.duration.as_secs_f64();
+        let total_ops_per_sec = total_ops as f64 / total_duration;
+
+        let latency = LatencyReport {
+            name: name.to_string(),
+            min_ns: combined_histogram.min(),
+            max_ns: combined_histogram.max(),
+            mean_ns: combined_histogram.mean(),
+            std_dev_ns: combined_histogram.std_deviation(),
+            p50_ns: combined_histogram.value_at_percentile(50.0),
+            p75_ns: combined_histogram.value_at_percentile(75.0),
+            p90_ns: combined_histogram.value_at_percentile(90.0),
+            p95_ns: combined_histogram.value_at_percentile(95.0),
+            p99_ns: combined_histogram.value_at_percentile(99.0),
+            p999_ns: combined_histogram.value_at_percentile(99.9),
+            p9999_ns: combined_histogram.value_at_percentile(99.99),
+            count: combined_histogram.count(),
+            throughput: total_ops_per_sec,
+        };
+
+        let result = ConcurrentResult {
+            name: name.to_string(),
+            config: self.config.clone(),
+            total_operations: total_ops,
+            operations_per_second: total_ops_per_sec,
+            latency,
+            per_thread_results: thread_results,
+            contention_metrics: ContentionMetrics::default(),
+        };
+
+        self.results.push(result.clone());
+        result
+    }
+
+    /// Scalability benchmark (vary thread count)
+    pub fn bench_scalability<F>(&mut self, name: &str, max_threads: usize, f: F) -> ScalabilityResult
+    where
+        F: Fn(usize) + Send + Sync + Clone,
+    {
+        println!("\nScalability benchmark: {}", name);
+        println!("{}", "─".repeat(60));
+
+        let mut data_points = Vec::new();
+
+        for thread_count in [1, 2, 4, 8, 16, 32].iter().filter(|&&t| t <= max_threads) {
+            self.config.thread_count = *thread_count;
+            let result = self.bench_concurrent(&format!("{}_{}t", name, thread_count), f.clone());
+
+            data_points.push(ScalabilityPoint {
+                thread_count: *thread_count,
+                throughput: result.operations_per_second,
+                latency_p99_ns: result.latency.p99_ns,
+            });
+
+            println!("  {:2} threads: {:>12.2} ops/sec, p99: {}",
+                thread_count,
+                result.operations_per_second,
+                format_duration(result.latency.p99_ns as f64));
+        }
+
+        // Calculate scaling efficiency
+        let baseline = data_points[0].throughput;
+        let efficiency: Vec<f64> = data_points.iter()
+            .map(|p| (p.throughput / baseline) / p.thread_count as f64 * 100.0)
+            .collect();
+
+        ScalabilityResult {
+            name: name.to_string(),
+            data_points,
+            scaling_efficiency: efficiency,
+        }
+    }
+
+    /// Print summary of all concurrent benchmarks
+    pub fn summary(&self) {
+        println!("\n╔═══════════════════════════════════════════════════════════════╗");
+        println!("║  Concurrent Benchmark Summary                                 ║");
+        println!("╚═══════════════════════════════════════════════════════════════╝\n");
+
+        for result in &self.results {
+            println!("{}: {} threads", result.name, result.config.thread_count);
+            println!("  Total ops:     {:>15}", result.total_operations);
+            println!("  Throughput:    {:>15.2} ops/sec", result.operations_per_second);
+            println!("  Mean latency:  {:>15}", format_duration(result.latency.mean_ns));
+            println!("  p99 latency:   {:>15}", format_duration(result.latency.p99_ns as f64));
+            println!();
+        }
+    }
+}
+
+/// Scalability data point
+#[derive(Clone)]
+pub struct ScalabilityPoint {
+    pub thread_count: usize,
+    pub throughput: f64,
+    pub latency_p99_ns: u64,
+}
+
+/// Scalability benchmark result
+#[derive(Clone)]
+pub struct ScalabilityResult {
+    pub name: String,
+    pub data_points: Vec<ScalabilityPoint>,
+    pub scaling_efficiency: Vec<f64>,
+}
+
+impl ScalabilityResult {
+    pub fn print_report(&self) {
+        println!("\nScalability Report: {}", self.name);
+        println!("{}", "─".repeat(60));
+        println!("{:>10} {:>15} {:>15} {:>12}", "Threads", "Throughput", "p99 Latency", "Efficiency");
+
+        for (i, point) in self.data_points.iter().enumerate() {
+            println!("{:>10} {:>15.2} {:>15} {:>11.1}%",
+                point.thread_count,
+                point.throughput,
+                format_duration(point.latency_p99_ns as f64),
+                self.scaling_efficiency[i]);
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// POWER / ENERGY MEASUREMENT (RAPL)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Power domain for RAPL measurements
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum PowerDomain {
+    Package,    // Entire CPU package
+    Cores,      // CPU cores only
+    Uncore,     // Integrated GPU, LLC, etc.
+    DRAM,       // Memory
+}
+
+/// Power reading from RAPL
+#[derive(Clone, Default)]
+pub struct PowerReading {
+    pub package_joules: f64,
+    pub cores_joules: f64,
+    pub uncore_joules: f64,
+    pub dram_joules: f64,
+    pub timestamp: u64,
+}
+
+impl PowerReading {
+    pub fn total_joules(&self) -> f64 {
+        self.package_joules + self.dram_joules
+    }
+}
+
+/// Energy profile from a benchmark
+#[derive(Clone)]
+pub struct EnergyProfile {
+    pub name: String,
+    pub duration_secs: f64,
+    pub total_energy_joules: f64,
+    pub average_power_watts: f64,
+    pub package_energy_joules: f64,
+    pub cores_energy_joules: f64,
+    pub dram_energy_joules: f64,
+    pub energy_per_operation_microjoules: f64,
+    pub operations: u64,
+}
+
+impl EnergyProfile {
+    pub fn print(&self) {
+        println!("\n╔═══════════════════════════════════════════════════════════════╗");
+        println!("║  Energy Profile: {}", self.name);
+        println!("╚═══════════════════════════════════════════════════════════════╝");
+        println!();
+        println!("  Duration:           {:>12.3} s", self.duration_secs);
+        println!("  Total Energy:       {:>12.3} J", self.total_energy_joules);
+        println!("  Average Power:      {:>12.3} W", self.average_power_watts);
+        println!();
+        println!("  Breakdown:");
+        println!("    Package (CPU):    {:>12.3} J", self.package_energy_joules);
+        println!("    Cores:            {:>12.3} J", self.cores_energy_joules);
+        println!("    DRAM:             {:>12.3} J", self.dram_energy_joules);
+        println!();
+        println!("  Operations:         {:>12}", self.operations);
+        println!("  Energy/Op:          {:>12.3} µJ", self.energy_per_operation_microjoules);
+    }
+}
+
+/// RAPL power profiler
+pub struct RaplProfiler {
+    enabled: bool,
+    start_reading: PowerReading,
+    msr_fd: Option<i32>,
+    energy_unit: f64,
+}
+
+impl RaplProfiler {
+    pub fn new() -> Self {
+        let mut profiler = RaplProfiler {
+            enabled: false,
+            start_reading: PowerReading::default(),
+            msr_fd: None,
+            energy_unit: 0.0,
+        };
+        profiler.init();
+        profiler
+    }
+
+    fn init(&mut self) {
+        // Check for RAPL availability
+        #[cfg(target_os = "linux")]
+        {
+            // Try to open MSR device
+            // In real implementation, would read /dev/cpu/0/msr
+            self.energy_unit = 0.000015258789; // Default unit: 2^-16 J
+        }
+    }
+
+    pub fn is_available() -> bool {
+        #[cfg(target_os = "linux")]
+        {
+            // Check if MSR module is loaded and accessible
+            std::path::Path::new("/dev/cpu/0/msr").exists()
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            false
+        }
+    }
+
+    pub fn start(&mut self) {
+        self.enabled = true;
+        self.start_reading = self.read_counters();
+    }
+
+    pub fn stop(&mut self) -> PowerReading {
+        let end_reading = self.read_counters();
+        self.enabled = false;
+
+        PowerReading {
+            package_joules: (end_reading.package_joules - self.start_reading.package_joules) * self.energy_unit,
+            cores_joules: (end_reading.cores_joules - self.start_reading.cores_joules) * self.energy_unit,
+            uncore_joules: (end_reading.uncore_joules - self.start_reading.uncore_joules) * self.energy_unit,
+            dram_joules: (end_reading.dram_joules - self.start_reading.dram_joules) * self.energy_unit,
+            timestamp: end_reading.timestamp - self.start_reading.timestamp,
+        }
+    }
+
+    fn read_counters(&self) -> PowerReading {
+        // Platform-specific MSR reading
+        PowerReading::default()
+    }
+
+    /// Profile a benchmark for energy consumption
+    pub fn profile<F>(&mut self, name: &str, mut f: F) -> EnergyProfile
+    where
+        F: FnMut() -> u64, // Returns operation count
+    {
+        self.start();
+        let start = Instant::now();
+        let operations = f();
+        let duration = start.elapsed();
+        let reading = self.stop();
+
+        let duration_secs = duration.as_secs_f64();
+        let total_energy = reading.total_joules();
+
+        EnergyProfile {
+            name: name.to_string(),
+            duration_secs,
+            total_energy_joules: total_energy,
+            average_power_watts: total_energy / duration_secs,
+            package_energy_joules: reading.package_joules,
+            cores_energy_joules: reading.cores_joules,
+            dram_energy_joules: reading.dram_joules,
+            energy_per_operation_microjoules: if operations > 0 {
+                (total_energy * 1_000_000.0) / operations as f64
+            } else {
+                0.0
+            },
+            operations,
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// DISK I/O BENCHMARKS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// I/O benchmark configuration
+#[derive(Clone)]
+pub struct IoBenchConfig {
+    /// File size for the test
+    pub file_size: u64,
+    /// Block size for I/O operations
+    pub block_size: u64,
+    /// Number of I/O operations
+    pub num_operations: u64,
+    /// Use direct I/O (bypass page cache)
+    pub direct_io: bool,
+    /// Use sync I/O (fsync after each write)
+    pub sync_io: bool,
+    /// Number of concurrent I/O workers
+    pub io_depth: usize,
+    /// Random vs sequential access
+    pub access_pattern: IoAccessPattern,
+    /// Read/Write ratio (0.0 = all writes, 1.0 = all reads)
+    pub read_ratio: f64,
+}
+
+impl Default for IoBenchConfig {
+    fn default() -> Self {
+        IoBenchConfig {
+            file_size: 1024 * 1024 * 1024, // 1 GB
+            block_size: 4096,               // 4 KB
+            num_operations: 10000,
+            direct_io: true,
+            sync_io: false,
+            io_depth: 32,
+            access_pattern: IoAccessPattern::Sequential,
+            read_ratio: 0.5,
+        }
+    }
+}
+
+/// I/O access pattern
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum IoAccessPattern {
+    Sequential,
+    Random,
+    Strided(u64), // Stride in bytes
+}
+
+/// I/O benchmark results
+#[derive(Clone)]
+pub struct IoResult {
+    pub name: String,
+    pub config: IoBenchConfig,
+    pub duration_secs: f64,
+    pub total_bytes: u64,
+    pub total_operations: u64,
+    pub throughput_mbps: f64,
+    pub iops: f64,
+    pub latency: LatencyReport,
+    pub read_throughput_mbps: f64,
+    pub write_throughput_mbps: f64,
+}
+
+impl IoResult {
+    pub fn print(&self) {
+        println!("\n╔═══════════════════════════════════════════════════════════════╗");
+        println!("║  I/O Benchmark: {}", self.name);
+        println!("╚═══════════════════════════════════════════════════════════════╝");
+        println!();
+        println!("  Configuration:");
+        println!("    Block size:    {:>12} bytes", self.config.block_size);
+        println!("    Operations:    {:>12}", self.total_operations);
+        println!("    Access:        {:>12?}", self.config.access_pattern);
+        println!();
+        println!("  Results:");
+        println!("    Duration:      {:>12.3} s", self.duration_secs);
+        println!("    Throughput:    {:>12.2} MB/s", self.throughput_mbps);
+        println!("    IOPS:          {:>12.2}", self.iops);
+        println!("    Read:          {:>12.2} MB/s", self.read_throughput_mbps);
+        println!("    Write:         {:>12.2} MB/s", self.write_throughput_mbps);
+        println!();
+        println!("  Latency:");
+        println!("    Mean:          {:>12}", format_duration(self.latency.mean_ns));
+        println!("    p99:           {:>12}", format_duration(self.latency.p99_ns as f64));
+        println!("    Max:           {:>12}", format_duration(self.latency.max_ns as f64));
+    }
+}
+
+/// I/O benchmark suite
+pub struct IoBenchSuite {
+    config: IoBenchConfig,
+    test_file_path: String,
+}
+
+impl IoBenchSuite {
+    pub fn new(config: IoBenchConfig, path: &str) -> Self {
+        IoBenchSuite {
+            config,
+            test_file_path: path.to_string(),
+        }
+    }
+
+    /// Run sequential read benchmark
+    pub fn bench_sequential_read(&self) -> IoResult {
+        let mut config = self.config.clone();
+        config.access_pattern = IoAccessPattern::Sequential;
+        config.read_ratio = 1.0;
+
+        self.run_benchmark("Sequential Read", config)
+    }
+
+    /// Run sequential write benchmark
+    pub fn bench_sequential_write(&self) -> IoResult {
+        let mut config = self.config.clone();
+        config.access_pattern = IoAccessPattern::Sequential;
+        config.read_ratio = 0.0;
+
+        self.run_benchmark("Sequential Write", config)
+    }
+
+    /// Run random read benchmark
+    pub fn bench_random_read(&self) -> IoResult {
+        let mut config = self.config.clone();
+        config.access_pattern = IoAccessPattern::Random;
+        config.read_ratio = 1.0;
+
+        self.run_benchmark("Random Read", config)
+    }
+
+    /// Run random write benchmark
+    pub fn bench_random_write(&self) -> IoResult {
+        let mut config = self.config.clone();
+        config.access_pattern = IoAccessPattern::Random;
+        config.read_ratio = 0.0;
+
+        self.run_benchmark("Random Write", config)
+    }
+
+    /// Run mixed random read/write benchmark
+    pub fn bench_random_mixed(&self, read_ratio: f64) -> IoResult {
+        let mut config = self.config.clone();
+        config.access_pattern = IoAccessPattern::Random;
+        config.read_ratio = read_ratio;
+
+        self.run_benchmark(&format!("Random Mixed ({:.0}% read)", read_ratio * 100.0), config)
+    }
+
+    fn run_benchmark(&self, name: &str, config: IoBenchConfig) -> IoResult {
+        println!("Running I/O benchmark: {}", name);
+
+        let mut histogram = HdrHistogram::new(1, 1_000_000_000, 3);
+        let start = Instant::now();
+
+        let mut total_bytes = 0u64;
+        let mut read_bytes = 0u64;
+        let mut write_bytes = 0u64;
+
+        // Simulate I/O operations
+        for i in 0..config.num_operations {
+            let op_start = Instant::now();
+
+            // Simulate I/O (in real implementation, would do actual file I/O)
+            let is_read = (i as f64 / config.num_operations as f64) < config.read_ratio;
+
+            // Simulated latency
+            std::thread::sleep(Duration::from_micros(10));
+
+            let latency_ns = op_start.elapsed().as_nanos() as u64;
+            histogram.record_value(latency_ns);
+
+            if is_read {
+                read_bytes += config.block_size;
+            } else {
+                write_bytes += config.block_size;
+            }
+            total_bytes += config.block_size;
+        }
+
+        let duration = start.elapsed();
+        let duration_secs = duration.as_secs_f64();
+
+        let latency = LatencyReport {
+            name: name.to_string(),
+            min_ns: histogram.min(),
+            max_ns: histogram.max(),
+            mean_ns: histogram.mean(),
+            std_dev_ns: histogram.std_deviation(),
+            p50_ns: histogram.value_at_percentile(50.0),
+            p75_ns: histogram.value_at_percentile(75.0),
+            p90_ns: histogram.value_at_percentile(90.0),
+            p95_ns: histogram.value_at_percentile(95.0),
+            p99_ns: histogram.value_at_percentile(99.0),
+            p999_ns: histogram.value_at_percentile(99.9),
+            p9999_ns: histogram.value_at_percentile(99.99),
+            count: histogram.count(),
+            throughput: config.num_operations as f64 / duration_secs,
+        };
+
+        IoResult {
+            name: name.to_string(),
+            config,
+            duration_secs,
+            total_bytes,
+            total_operations: histogram.count(),
+            throughput_mbps: (total_bytes as f64 / 1_000_000.0) / duration_secs,
+            iops: histogram.count() as f64 / duration_secs,
+            latency,
+            read_throughput_mbps: (read_bytes as f64 / 1_000_000.0) / duration_secs,
+            write_throughput_mbps: (write_bytes as f64 / 1_000_000.0) / duration_secs,
+        }
+    }
+
+    /// Run full I/O benchmark suite
+    pub fn run_all(&self) -> Vec<IoResult> {
+        println!("\n╔═══════════════════════════════════════════════════════════════╗");
+        println!("║  I/O Benchmark Suite                                          ║");
+        println!("╚═══════════════════════════════════════════════════════════════╝\n");
+
+        let mut results = Vec::new();
+
+        results.push(self.bench_sequential_read());
+        results.push(self.bench_sequential_write());
+        results.push(self.bench_random_read());
+        results.push(self.bench_random_write());
+        results.push(self.bench_random_mixed(0.5));
+        results.push(self.bench_random_mixed(0.7));
+
+        results
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// NETWORK LATENCY BENCHMARKS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Network benchmark configuration
+#[derive(Clone)]
+pub struct NetworkBenchConfig {
+    /// Target host/IP
+    pub target: String,
+    /// Target port
+    pub port: u16,
+    /// Number of requests
+    pub num_requests: u64,
+    /// Request size in bytes
+    pub request_size: usize,
+    /// Response size in bytes (expected)
+    pub response_size: usize,
+    /// Connection pooling
+    pub connection_pool_size: usize,
+    /// Concurrent connections
+    pub concurrency: usize,
+    /// Request timeout
+    pub timeout: Duration,
+    /// Protocol
+    pub protocol: NetworkProtocol,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum NetworkProtocol {
+    TCP,
+    UDP,
+    HTTP,
+    HTTPS,
+    gRPC,
+}
+
+impl Default for NetworkBenchConfig {
+    fn default() -> Self {
+        NetworkBenchConfig {
+            target: "localhost".to_string(),
+            port: 8080,
+            num_requests: 10000,
+            request_size: 64,
+            response_size: 64,
+            connection_pool_size: 10,
+            concurrency: 10,
+            timeout: Duration::from_secs(30),
+            protocol: NetworkProtocol::TCP,
+        }
+    }
+}
+
+/// Network benchmark results
+#[derive(Clone)]
+pub struct NetworkResult {
+    pub name: String,
+    pub config: NetworkBenchConfig,
+    pub duration_secs: f64,
+    pub successful_requests: u64,
+    pub failed_requests: u64,
+    pub requests_per_second: f64,
+    pub latency: LatencyReport,
+    pub bytes_sent: u64,
+    pub bytes_received: u64,
+    pub throughput_mbps: f64,
+    pub connection_errors: u64,
+    pub timeout_errors: u64,
+}
+
+impl NetworkResult {
+    pub fn print(&self) {
+        println!("\n╔═══════════════════════════════════════════════════════════════╗");
+        println!("║  Network Benchmark: {}", self.name);
+        println!("╚═══════════════════════════════════════════════════════════════╝");
+        println!();
+        println!("  Target:          {}:{} ({:?})",
+            self.config.target, self.config.port, self.config.protocol);
+        println!("  Concurrency:     {}", self.config.concurrency);
+        println!();
+        println!("  Requests:");
+        println!("    Total:         {:>12}", self.successful_requests + self.failed_requests);
+        println!("    Successful:    {:>12}", self.successful_requests);
+        println!("    Failed:        {:>12}", self.failed_requests);
+        println!("    RPS:           {:>12.2}", self.requests_per_second);
+        println!();
+        println!("  Latency:");
+        println!("    Mean:          {:>12}", format_duration(self.latency.mean_ns));
+        println!("    p50:           {:>12}", format_duration(self.latency.p50_ns as f64));
+        println!("    p99:           {:>12}", format_duration(self.latency.p99_ns as f64));
+        println!("    Max:           {:>12}", format_duration(self.latency.max_ns as f64));
+        println!();
+        println!("  Throughput:      {:>12.2} MB/s", self.throughput_mbps);
+    }
+}
+
+/// Network benchmark suite
+pub struct NetworkBenchSuite {
+    config: NetworkBenchConfig,
+}
+
+impl NetworkBenchSuite {
+    pub fn new(config: NetworkBenchConfig) -> Self {
+        NetworkBenchSuite { config }
+    }
+
+    /// Run ping benchmark (latency only)
+    pub fn bench_ping(&self) -> NetworkResult {
+        self.run_benchmark("Ping", |_| {
+            // Simulated ping
+            std::thread::sleep(Duration::from_micros(100));
+            Ok(())
+        })
+    }
+
+    /// Run throughput benchmark
+    pub fn bench_throughput(&self) -> NetworkResult {
+        let mut config = self.config.clone();
+        config.request_size = 65536;  // 64 KB
+        config.response_size = 65536;
+
+        self.run_benchmark("Throughput", |_| {
+            // Simulated large transfer
+            std::thread::sleep(Duration::from_micros(500));
+            Ok(())
+        })
+    }
+
+    /// Run request/response benchmark
+    pub fn bench_request_response(&self) -> NetworkResult {
+        self.run_benchmark("Request/Response", |_| {
+            // Simulated request/response
+            std::thread::sleep(Duration::from_micros(200));
+            Ok(())
+        })
+    }
+
+    fn run_benchmark<F>(&self, name: &str, mut f: F) -> NetworkResult
+    where
+        F: FnMut(usize) -> Result<(), String>,
+    {
+        println!("Running network benchmark: {}", name);
+
+        let mut histogram = HdrHistogram::new(1, 10_000_000_000, 3);
+        let start = Instant::now();
+
+        let mut successful = 0u64;
+        let mut failed = 0u64;
+        let mut bytes_sent = 0u64;
+        let mut bytes_received = 0u64;
+
+        for i in 0..self.config.num_requests {
+            let op_start = Instant::now();
+
+            match f(i as usize) {
+                Ok(()) => {
+                    successful += 1;
+                    bytes_sent += self.config.request_size as u64;
+                    bytes_received += self.config.response_size as u64;
+                }
+                Err(_) => {
+                    failed += 1;
+                }
+            }
+
+            let latency_ns = op_start.elapsed().as_nanos() as u64;
+            histogram.record_value(latency_ns);
+        }
+
+        let duration = start.elapsed();
+        let duration_secs = duration.as_secs_f64();
+
+        let total_bytes = bytes_sent + bytes_received;
+
+        let latency = LatencyReport {
+            name: name.to_string(),
+            min_ns: histogram.min(),
+            max_ns: histogram.max(),
+            mean_ns: histogram.mean(),
+            std_dev_ns: histogram.std_deviation(),
+            p50_ns: histogram.value_at_percentile(50.0),
+            p75_ns: histogram.value_at_percentile(75.0),
+            p90_ns: histogram.value_at_percentile(90.0),
+            p95_ns: histogram.value_at_percentile(95.0),
+            p99_ns: histogram.value_at_percentile(99.0),
+            p999_ns: histogram.value_at_percentile(99.9),
+            p9999_ns: histogram.value_at_percentile(99.99),
+            count: histogram.count(),
+            throughput: successful as f64 / duration_secs,
+        };
+
+        NetworkResult {
+            name: name.to_string(),
+            config: self.config.clone(),
+            duration_secs,
+            successful_requests: successful,
+            failed_requests: failed,
+            requests_per_second: successful as f64 / duration_secs,
+            latency,
+            bytes_sent,
+            bytes_received,
+            throughput_mbps: (total_bytes as f64 / 1_000_000.0) / duration_secs,
+            connection_errors: 0,
+            timeout_errors: 0,
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// CONTINUOUS BENCHMARKING / CI INTEGRATION
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// CI benchmark configuration
+#[derive(Clone)]
+pub struct CiBenchConfig {
+    /// Baseline file path
+    pub baseline_path: String,
+    /// Results output directory
+    pub output_dir: String,
+    /// Regression threshold percentage
+    pub regression_threshold: f64,
+    /// Improvement threshold percentage
+    pub improvement_threshold: f64,
+    /// Whether to fail CI on regression
+    pub fail_on_regression: bool,
+    /// Post results to GitHub
+    pub github_comment: bool,
+    /// Slack webhook URL
+    pub slack_webhook: Option<String>,
+    /// Number of runs for statistical significance
+    pub num_runs: usize,
+    /// Git commit info
+    pub commit_info: Option<CommitInfo>,
+}
+
+impl Default for CiBenchConfig {
+    fn default() -> Self {
+        CiBenchConfig {
+            baseline_path: "benchmarks/baseline.json".to_string(),
+            output_dir: "benchmarks/results".to_string(),
+            regression_threshold: 5.0,
+            improvement_threshold: 5.0,
+            fail_on_regression: true,
+            github_comment: true,
+            slack_webhook: None,
+            num_runs: 3,
+            commit_info: None,
+        }
+    }
+}
+
+/// Git commit information
+#[derive(Clone)]
+pub struct CommitInfo {
+    pub sha: String,
+    pub short_sha: String,
+    pub branch: String,
+    pub author: String,
+    pub message: String,
+    pub timestamp: u64,
+}
+
+impl CommitInfo {
+    pub fn from_env() -> Option<Self> {
+        // Read from environment variables (set by CI)
+        // In real implementation, would parse GH_SHA, GITHUB_REF, etc.
+        None
+    }
+}
+
+/// CI benchmark runner
+pub struct CiBenchRunner {
+    config: CiBenchConfig,
+    baseline: HashMap<String, f64>,
+    current_results: HashMap<String, Vec<f64>>,
+    regressions: Vec<CiRegressionReport>,
+    improvements: Vec<CiRegressionReport>,
+}
+
+/// CI regression report
+#[derive(Clone)]
+pub struct CiRegressionReport {
+    pub benchmark_name: String,
+    pub baseline_mean: f64,
+    pub current_mean: f64,
+    pub change_percent: f64,
+    pub is_regression: bool,
+    pub is_significant: bool,
+}
+
+impl CiBenchRunner {
+    pub fn new(config: CiBenchConfig) -> Self {
+        let baseline = Self::load_baseline(&config.baseline_path);
+
+        CiBenchRunner {
+            config,
+            baseline,
+            current_results: HashMap::new(),
+            regressions: Vec::new(),
+            improvements: Vec::new(),
+        }
+    }
+
+    fn load_baseline(path: &str) -> HashMap<String, f64> {
+        // Load baseline from JSON file
+        HashMap::new()
+    }
+
+    /// Run benchmarks multiple times for statistical significance
+    pub fn run_benches<F>(&mut self, name: &str, mut f: F)
+    where
+        F: FnMut(&mut Bencher),
+    {
+        let mut run_results = Vec::new();
+
+        for run in 0..self.config.num_runs {
+            println!("Run {}/{} for {}", run + 1, self.config.num_runs, name);
+
+            let mut bencher = Bencher::new();
+            f(&mut bencher);
+
+            for result in &bencher.results {
+                run_results.push(result.stats.mean);
+            }
+        }
+
+        self.current_results.insert(name.to_string(), run_results);
+    }
+
+    /// Analyze results and detect regressions
+    pub fn analyze(&mut self) -> CiAnalysisResult {
+        self.regressions.clear();
+        self.improvements.clear();
+
+        for (name, current_runs) in &self.current_results {
+            let current_mean = current_runs.iter().sum::<f64>() / current_runs.len() as f64;
+
+            if let Some(&baseline_mean) = self.baseline.get(name) {
+                let change_percent = (current_mean - baseline_mean) / baseline_mean * 100.0;
+
+                let is_regression = change_percent > self.config.regression_threshold;
+                let is_improvement = change_percent < -self.config.improvement_threshold;
+                let is_significant = is_regression || is_improvement;
+
+                let report = CiRegressionReport {
+                    benchmark_name: name.clone(),
+                    baseline_mean,
+                    current_mean,
+                    change_percent,
+                    is_regression,
+                    is_significant,
+                };
+
+                if is_regression {
+                    self.regressions.push(report);
+                } else if is_improvement {
+                    self.improvements.push(report.clone());
+                }
+            }
+        }
+
+        let has_regressions = !self.regressions.is_empty();
+        let should_fail = has_regressions && self.config.fail_on_regression;
+
+        CiAnalysisResult {
+            regressions: self.regressions.clone(),
+            improvements: self.improvements.clone(),
+            has_regressions,
+            should_fail,
+        }
+    }
+
+    /// Generate GitHub comment markdown
+    pub fn generate_github_comment(&self) -> String {
+        let mut comment = String::new();
+
+        comment.push_str("## 📊 Benchmark Results\n\n");
+
+        if let Some(ref info) = self.config.commit_info {
+            comment.push_str(&format!(
+                "**Commit:** `{}` on `{}`\n\n",
+                info.short_sha, info.branch
+            ));
+        }
+
+        // Regressions
+        if !self.regressions.is_empty() {
+            comment.push_str("### ⚠️ Regressions Detected\n\n");
+            comment.push_str("| Benchmark | Baseline | Current | Change |\n");
+            comment.push_str("|-----------|----------|---------|--------|\n");
+
+            for reg in &self.regressions {
+                comment.push_str(&format!(
+                    "| {} | {} | {} | 🔴 {:+.1}% |\n",
+                    reg.benchmark_name,
+                    format_duration(reg.baseline_mean),
+                    format_duration(reg.current_mean),
+                    reg.change_percent
+                ));
+            }
+            comment.push_str("\n");
+        }
+
+        // Improvements
+        if !self.improvements.is_empty() {
+            comment.push_str("### ✅ Improvements\n\n");
+            comment.push_str("| Benchmark | Baseline | Current | Change |\n");
+            comment.push_str("|-----------|----------|---------|--------|\n");
+
+            for imp in &self.improvements {
+                comment.push_str(&format!(
+                    "| {} | {} | {} | 🟢 {:+.1}% |\n",
+                    imp.benchmark_name,
+                    format_duration(imp.baseline_mean),
+                    format_duration(imp.current_mean),
+                    imp.change_percent
+                ));
+            }
+            comment.push_str("\n");
+        }
+
+        if self.regressions.is_empty() && self.improvements.is_empty() {
+            comment.push_str("✅ No significant performance changes detected.\n");
+        }
+
+        comment
+    }
+
+    /// Send Slack notification
+    pub fn send_slack_notification(&self) -> Result<(), String> {
+        if let Some(ref webhook_url) = self.config.slack_webhook {
+            let message = if self.regressions.is_empty() {
+                format!("✅ Benchmarks passed! {} improvements detected.", self.improvements.len())
+            } else {
+                format!("⚠️ {} benchmark regressions detected!", self.regressions.len())
+            };
+
+            // In real implementation, would POST to webhook URL
+            println!("Would send to Slack: {}", message);
+        }
+        Ok(())
+    }
+
+    /// Save current results as new baseline
+    pub fn save_baseline(&self, path: &str) -> Result<(), String> {
+        let mut baseline = HashMap::new();
+
+        for (name, runs) in &self.current_results {
+            let mean = runs.iter().sum::<f64>() / runs.len() as f64;
+            baseline.insert(name.clone(), mean);
+        }
+
+        // Serialize to JSON
+        let mut json = String::from("{\n");
+        for (i, (name, value)) in baseline.iter().enumerate() {
+            json.push_str(&format!("  \"{}\": {:.2}", name, value));
+            if i < baseline.len() - 1 {
+                json.push_str(",");
+            }
+            json.push_str("\n");
+        }
+        json.push_str("}\n");
+
+        write_string(path, &json)?;
+        println!("Baseline saved to {}", path);
+        Ok(())
+    }
+}
+
+/// CI analysis result
+#[derive(Clone)]
+pub struct CiAnalysisResult {
+    pub regressions: Vec<CiRegressionReport>,
+    pub improvements: Vec<CiRegressionReport>,
+    pub has_regressions: bool,
+    pub should_fail: bool,
+}
+
+impl CiAnalysisResult {
+    pub fn exit_code(&self) -> i32 {
+        if self.should_fail { 1 } else { 0 }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// RESOURCE ISOLATION / CPU AFFINITY
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// CPU affinity manager for benchmark isolation
+pub struct AffinityManager {
+    original_affinity: Vec<usize>,
+}
+
+impl AffinityManager {
+    pub fn new() -> Self {
+        AffinityManager {
+            original_affinity: Self::get_current_affinity(),
+        }
+    }
+
+    fn get_current_affinity() -> Vec<usize> {
+        // Platform-specific affinity retrieval
+        (0..num_cpus()).collect()
+    }
+
+    /// Pin current thread to specific CPU
+    pub fn pin_to_cpu(&self, cpu: usize) -> Result<(), String> {
+        #[cfg(target_os = "linux")]
+        {
+            // Would use sched_setaffinity
+            Ok(())
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            Err("CPU affinity not supported on this platform".to_string())
+        }
+    }
+
+    /// Pin to a set of CPUs
+    pub fn pin_to_cpus(&self, cpus: &[usize]) -> Result<(), String> {
+        #[cfg(target_os = "linux")]
+        {
+            // Would use sched_setaffinity with mask
+            Ok(())
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            Err("CPU affinity not supported on this platform".to_string())
+        }
+    }
+
+    /// Isolate to a single CPU for minimal interference
+    pub fn isolate_for_benchmarking(&self) -> Result<usize, String> {
+        // Find the least-loaded CPU and pin to it
+        let cpu = num_cpus() - 1; // Use last CPU typically
+        self.pin_to_cpu(cpu)?;
+        Ok(cpu)
+    }
+
+    /// Restore original affinity
+    pub fn restore(&self) -> Result<(), String> {
+        self.pin_to_cpus(&self.original_affinity)
+    }
+}
+
+/// Process priority booster
+pub struct PriorityBooster {
+    original_priority: i32,
+}
+
+impl PriorityBooster {
+    pub fn new() -> Self {
+        PriorityBooster {
+            original_priority: Self::get_current_priority(),
+        }
+    }
+
+    fn get_current_priority() -> i32 {
+        // Would use getpriority()
+        0
+    }
+
+    /// Boost priority for accurate benchmarking
+    pub fn boost(&self) -> Result<(), String> {
+        #[cfg(target_os = "linux")]
+        {
+            // Would use setpriority() or sched_setscheduler for SCHED_FIFO
+            Ok(())
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            Ok(())
+        }
+    }
+
+    /// Set real-time priority (requires root)
+    pub fn set_realtime(&self) -> Result<(), String> {
+        #[cfg(target_os = "linux")]
+        {
+            // Would use sched_setscheduler with SCHED_FIFO
+            Err("Requires root privileges".to_string())
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            Err("Real-time scheduling not supported".to_string())
+        }
+    }
+
+    /// Restore original priority
+    pub fn restore(&self) -> Result<(), String> {
+        // Would use setpriority()
+        Ok(())
+    }
+}
+
+/// Isolated benchmark runner
+pub struct IsolatedBenchRunner {
+    affinity: AffinityManager,
+    priority: PriorityBooster,
+    cpu: Option<usize>,
+}
+
+impl IsolatedBenchRunner {
+    pub fn new() -> Self {
+        IsolatedBenchRunner {
+            affinity: AffinityManager::new(),
+            priority: PriorityBooster::new(),
+            cpu: None,
+        }
+    }
+
+    /// Setup isolation for benchmarking
+    pub fn setup(&mut self) -> Result<(), String> {
+        // Pin to isolated CPU
+        self.cpu = Some(self.affinity.isolate_for_benchmarking()?);
+
+        // Boost priority
+        self.priority.boost()?;
+
+        // Disable frequency scaling if possible
+        self.disable_frequency_scaling()?;
+
+        Ok(())
+    }
+
+    /// Cleanup after benchmarking
+    pub fn cleanup(&self) -> Result<(), String> {
+        self.priority.restore()?;
+        self.affinity.restore()?;
+        Ok(())
+    }
+
+    fn disable_frequency_scaling(&self) -> Result<(), String> {
+        #[cfg(target_os = "linux")]
+        {
+            // Would write "performance" to /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor
+            Ok(())
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            Ok(())
+        }
+    }
+
+    /// Run benchmark with isolation
+    pub fn run<F, R>(&mut self, f: F) -> Result<R, String>
+    where
+        F: FnOnce() -> R,
+    {
+        self.setup()?;
+        let result = f();
+        self.cleanup()?;
+        Ok(result)
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// BENCHMARK SCHEDULER / ADAPTIVE SAMPLING
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Benchmark execution order
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum BenchOrder {
+    /// Run in definition order
+    Sequential,
+    /// Randomize order to detect ordering effects
+    Random,
+    /// Interleave benchmarks to reduce temporal variance
+    Interleaved,
+}
+
+/// Adaptive sampling configuration
+#[derive(Clone)]
+pub struct AdaptiveSamplingConfig {
+    /// Minimum samples
+    pub min_samples: usize,
+    /// Maximum samples
+    pub max_samples: usize,
+    /// Target coefficient of variation (0.01 = 1%)
+    pub target_cv: f64,
+    /// Confidence level for stopping
+    pub confidence_level: f64,
+}
+
+impl Default for AdaptiveSamplingConfig {
+    fn default() -> Self {
+        AdaptiveSamplingConfig {
+            min_samples: 10,
+            max_samples: 1000,
+            target_cv: 0.01,
+            confidence_level: 0.95,
+        }
+    }
+}
+
+/// Adaptive sampler that stops when statistically significant
+pub struct AdaptiveSampler {
+    config: AdaptiveSamplingConfig,
+    samples: Vec<f64>,
+}
+
+impl AdaptiveSampler {
+    pub fn new(config: AdaptiveSamplingConfig) -> Self {
+        AdaptiveSampler {
+            config,
+            samples: Vec::new(),
+        }
+    }
+
+    /// Add a sample and check if we should stop
+    pub fn add_sample(&mut self, value: f64) -> bool {
+        self.samples.push(value);
+
+        // Always continue until min samples
+        if self.samples.len() < self.config.min_samples {
+            return false; // Continue sampling
+        }
+
+        // Stop if max samples reached
+        if self.samples.len() >= self.config.max_samples {
+            return true; // Stop
+        }
+
+        // Check coefficient of variation
+        let cv = self.coefficient_of_variation();
+        cv <= self.config.target_cv
+    }
+
+    fn coefficient_of_variation(&self) -> f64 {
+        let n = self.samples.len() as f64;
+        let mean = self.samples.iter().sum::<f64>() / n;
+        let variance = self.samples.iter()
+            .map(|x| (x - mean).powi(2))
+            .sum::<f64>() / (n - 1.0);
+        let std_dev = variance.sqrt();
+
+        std_dev / mean
+    }
+
+    /// Get current statistics
+    pub fn statistics(&self) -> Statistics {
+        let mut measurement = Measurement::new();
+        for &s in &self.samples {
+            measurement.samples.push(s);
+        }
+        Statistics::from_measurement(&measurement)
+    }
+
+    /// Reset sampler
+    pub fn reset(&mut self) {
+        self.samples.clear();
+    }
+}
+
+/// Benchmark scheduler
+pub struct BenchScheduler {
+    order: BenchOrder,
+    benchmarks: Vec<ScheduledBench>,
+    rng_seed: u64,
+}
+
+struct ScheduledBench {
+    name: String,
+    // Would store closure in real implementation
+}
+
+impl BenchScheduler {
+    pub fn new(order: BenchOrder) -> Self {
+        BenchScheduler {
+            order,
+            benchmarks: Vec::new(),
+            rng_seed: 42,
+        }
+    }
+
+    /// Schedule benchmarks according to order
+    pub fn schedule(&mut self) -> Vec<usize> {
+        let n = self.benchmarks.len();
+        let mut order: Vec<usize> = (0..n).collect();
+
+        match self.order {
+            BenchOrder::Sequential => {
+                // Keep original order
+            }
+            BenchOrder::Random => {
+                // Fisher-Yates shuffle
+                for i in (1..n).rev() {
+                    let j = self.random() % (i + 1);
+                    order.swap(i, j);
+                }
+            }
+            BenchOrder::Interleaved => {
+                // Interleave benchmarks for multiple rounds
+                let rounds = 3;
+                let mut interleaved = Vec::new();
+                for _ in 0..rounds {
+                    for i in 0..n {
+                        interleaved.push(i);
+                    }
+                }
+                order = interleaved;
+            }
+        }
+
+        order
+    }
+
+    fn random(&mut self) -> usize {
+        // Simple LCG PRNG
+        self.rng_seed = self.rng_seed.wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        (self.rng_seed >> 33) as usize
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// CUSTOM ALLOCATOR BENCHMARKING
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Allocation pattern for testing
+#[derive(Clone, Copy, Debug)]
+pub enum AllocationPattern {
+    /// Fixed size allocations
+    Fixed(usize),
+    /// Random sizes within range
+    Random { min: usize, max: usize },
+    /// Power-of-two sizes
+    PowerOfTwo { min_power: u32, max_power: u32 },
+    /// Realistic distribution (based on real-world data)
+    Realistic,
+}
+
+/// Allocation operation type
+#[derive(Clone, Copy, Debug)]
+pub enum AllocOp {
+    Alloc,
+    Dealloc,
+    Realloc { new_size: usize },
+}
+
+/// Allocator benchmark configuration
+#[derive(Clone)]
+pub struct AllocatorBenchConfig {
+    pub pattern: AllocationPattern,
+    pub num_operations: u64,
+    pub alloc_dealloc_ratio: f64, // 1.0 = equal, 2.0 = 2x more allocs
+    pub max_live_allocations: usize,
+    pub measure_fragmentation: bool,
+}
+
+impl Default for AllocatorBenchConfig {
+    fn default() -> Self {
+        AllocatorBenchConfig {
+            pattern: AllocationPattern::Random { min: 16, max: 4096 },
+            num_operations: 100000,
+            alloc_dealloc_ratio: 1.0,
+            max_live_allocations: 10000,
+            measure_fragmentation: true,
+        }
+    }
+}
+
+/// Allocator benchmark results
+#[derive(Clone)]
+pub struct AllocatorResult {
+    pub name: String,
+    pub alloc_latency: LatencyReport,
+    pub dealloc_latency: LatencyReport,
+    pub total_allocations: u64,
+    pub total_deallocations: u64,
+    pub total_bytes_allocated: u64,
+    pub peak_memory_usage: u64,
+    pub fragmentation_ratio: f64,
+    pub allocs_per_second: f64,
+    pub throughput_mbps: f64,
+}
+
+impl AllocatorResult {
+    pub fn print(&self) {
+        println!("\n╔═══════════════════════════════════════════════════════════════╗");
+        println!("║  Allocator Benchmark: {}", self.name);
+        println!("╚═══════════════════════════════════════════════════════════════╝");
+        println!();
+        println!("  Operations:");
+        println!("    Allocations:   {:>12}", self.total_allocations);
+        println!("    Deallocations: {:>12}", self.total_deallocations);
+        println!("    Allocs/sec:    {:>12.2}", self.allocs_per_second);
+        println!();
+        println!("  Memory:");
+        println!("    Total allocated:  {:>12} bytes", self.total_bytes_allocated);
+        println!("    Peak usage:       {:>12} bytes", self.peak_memory_usage);
+        println!("    Fragmentation:    {:>12.1}%", self.fragmentation_ratio * 100.0);
+        println!();
+        println!("  Allocation Latency:");
+        println!("    Mean:     {:>12}", format_duration(self.alloc_latency.mean_ns));
+        println!("    p99:      {:>12}", format_duration(self.alloc_latency.p99_ns as f64));
+        println!();
+        println!("  Deallocation Latency:");
+        println!("    Mean:     {:>12}", format_duration(self.dealloc_latency.mean_ns));
+        println!("    p99:      {:>12}", format_duration(self.dealloc_latency.p99_ns as f64));
+    }
+}
+
+/// Allocator benchmarker
+pub struct AllocatorBencher {
+    config: AllocatorBenchConfig,
+    rng_seed: u64,
+}
+
+impl AllocatorBencher {
+    pub fn new(config: AllocatorBenchConfig) -> Self {
+        AllocatorBencher {
+            config,
+            rng_seed: 12345,
+        }
+    }
+
+    /// Run allocator benchmark
+    pub fn run(&mut self, name: &str) -> AllocatorResult {
+        let mut alloc_histogram = HdrHistogram::new(1, 1_000_000_000, 3);
+        let mut dealloc_histogram = HdrHistogram::new(1, 1_000_000_000, 3);
+
+        let mut live_allocations: Vec<(*mut u8, usize)> = Vec::new();
+        let mut total_bytes = 0u64;
+        let mut peak_memory = 0u64;
+        let mut current_memory = 0u64;
+
+        let start = Instant::now();
+
+        for _ in 0..self.config.num_operations {
+            let do_alloc = live_allocations.len() < self.config.max_live_allocations &&
+                (live_allocations.is_empty() || self.random_f64() < self.config.alloc_dealloc_ratio / (1.0 + self.config.alloc_dealloc_ratio));
+
+            if do_alloc {
+                let size = self.random_size();
+                let op_start = Instant::now();
+
+                // Simulate allocation (in real implementation would call allocator)
+                let ptr = std::ptr::null_mut();
+
+                alloc_histogram.record_value(op_start.elapsed().as_nanos() as u64);
+
+                live_allocations.push((ptr, size));
+                total_bytes += size as u64;
+                current_memory += size as u64;
+                peak_memory = peak_memory.max(current_memory);
+            } else if !live_allocations.is_empty() {
+                let idx = self.random() % live_allocations.len();
+                let (ptr, size) = live_allocations.swap_remove(idx);
+
+                let op_start = Instant::now();
+
+                // Simulate deallocation
+                let _ = ptr;
+
+                dealloc_histogram.record_value(op_start.elapsed().as_nanos() as u64);
+
+                current_memory -= size as u64;
+            }
+        }
+
+        let duration = start.elapsed().as_secs_f64();
+
+        let alloc_latency = LatencyReport {
+            name: format!("{} alloc", name),
+            min_ns: alloc_histogram.min(),
+            max_ns: alloc_histogram.max(),
+            mean_ns: alloc_histogram.mean(),
+            std_dev_ns: alloc_histogram.std_deviation(),
+            p50_ns: alloc_histogram.value_at_percentile(50.0),
+            p75_ns: alloc_histogram.value_at_percentile(75.0),
+            p90_ns: alloc_histogram.value_at_percentile(90.0),
+            p95_ns: alloc_histogram.value_at_percentile(95.0),
+            p99_ns: alloc_histogram.value_at_percentile(99.0),
+            p999_ns: alloc_histogram.value_at_percentile(99.9),
+            p9999_ns: alloc_histogram.value_at_percentile(99.99),
+            count: alloc_histogram.count(),
+            throughput: alloc_histogram.count() as f64 / duration,
+        };
+
+        let dealloc_latency = LatencyReport {
+            name: format!("{} dealloc", name),
+            min_ns: dealloc_histogram.min(),
+            max_ns: dealloc_histogram.max(),
+            mean_ns: dealloc_histogram.mean(),
+            std_dev_ns: dealloc_histogram.std_deviation(),
+            p50_ns: dealloc_histogram.value_at_percentile(50.0),
+            p75_ns: dealloc_histogram.value_at_percentile(75.0),
+            p90_ns: dealloc_histogram.value_at_percentile(90.0),
+            p95_ns: dealloc_histogram.value_at_percentile(95.0),
+            p99_ns: dealloc_histogram.value_at_percentile(99.0),
+            p999_ns: dealloc_histogram.value_at_percentile(99.9),
+            p9999_ns: dealloc_histogram.value_at_percentile(99.99),
+            count: dealloc_histogram.count(),
+            throughput: dealloc_histogram.count() as f64 / duration,
+        };
+
+        AllocatorResult {
+            name: name.to_string(),
+            alloc_latency,
+            dealloc_latency,
+            total_allocations: alloc_histogram.count(),
+            total_deallocations: dealloc_histogram.count(),
+            total_bytes_allocated: total_bytes,
+            peak_memory_usage: peak_memory,
+            fragmentation_ratio: 0.0, // Would calculate in real implementation
+            allocs_per_second: alloc_histogram.count() as f64 / duration,
+            throughput_mbps: (total_bytes as f64 / 1_000_000.0) / duration,
+        }
+    }
+
+    fn random(&mut self) -> usize {
+        self.rng_seed = self.rng_seed.wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        (self.rng_seed >> 33) as usize
+    }
+
+    fn random_f64(&mut self) -> f64 {
+        self.random() as f64 / usize::MAX as f64
+    }
+
+    fn random_size(&mut self) -> usize {
+        match self.config.pattern {
+            AllocationPattern::Fixed(size) => size,
+            AllocationPattern::Random { min, max } => {
+                min + self.random() % (max - min + 1)
+            }
+            AllocationPattern::PowerOfTwo { min_power, max_power } => {
+                let power = min_power + (self.random() as u32 % (max_power - min_power + 1));
+                1usize << power
+            }
+            AllocationPattern::Realistic => {
+                // Simulated realistic distribution
+                let r = self.random_f64();
+                if r < 0.6 { 16 + self.random() % 48 }        // 60% small
+                else if r < 0.9 { 64 + self.random() % 960 }  // 30% medium
+                else { 1024 + self.random() % 15360 }          // 10% large
+            }
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// TERMINAL UI FOR INTERACTIVE BENCHMARKING
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Terminal colors
+pub mod colors {
+    pub const RESET: &str = "\x1b[0m";
+    pub const BOLD: &str = "\x1b[1m";
+    pub const DIM: &str = "\x1b[2m";
+    pub const RED: &str = "\x1b[31m";
+    pub const GREEN: &str = "\x1b[32m";
+    pub const YELLOW: &str = "\x1b[33m";
+    pub const BLUE: &str = "\x1b[34m";
+    pub const MAGENTA: &str = "\x1b[35m";
+    pub const CYAN: &str = "\x1b[36m";
+}
+
+/// Progress bar for long-running benchmarks
+pub struct ProgressBar {
+    total: u64,
+    current: u64,
+    width: usize,
+    label: String,
+    start_time: Instant,
+}
+
+impl ProgressBar {
+    pub fn new(total: u64, label: &str) -> Self {
+        ProgressBar {
+            total,
+            current: 0,
+            width: 40,
+            label: label.to_string(),
+            start_time: Instant::now(),
+        }
+    }
+
+    pub fn set(&mut self, current: u64) {
+        self.current = current.min(self.total);
+        self.draw();
+    }
+
+    pub fn inc(&mut self) {
+        self.current = (self.current + 1).min(self.total);
+        self.draw();
+    }
+
+    fn draw(&self) {
+        let progress = self.current as f64 / self.total as f64;
+        let filled = (progress * self.width as f64) as usize;
+        let empty = self.width - filled;
+
+        let bar: String = "█".repeat(filled) + &"░".repeat(empty);
+
+        let elapsed = self.start_time.elapsed().as_secs_f64();
+        let eta = if self.current > 0 {
+            (elapsed / self.current as f64) * (self.total - self.current) as f64
+        } else {
+            0.0
+        };
+
+        print!("\r{} |{}| {:5.1}% ETA: {:.1}s  ",
+            self.label, bar, progress * 100.0, eta);
+        std::io::Write::flush(&mut std::io::stdout()).ok();
+    }
+
+    pub fn finish(&self) {
+        let elapsed = self.start_time.elapsed().as_secs_f64();
+        println!("\r{} |{}| 100.0% Done in {:.1}s",
+            self.label,
+            "█".repeat(self.width),
+            elapsed);
+    }
+}
+
+/// Live benchmark display
+pub struct LiveDisplay {
+    benchmarks: Vec<LiveBenchStatus>,
+    refresh_rate_ms: u64,
+}
+
+#[derive(Clone)]
+struct LiveBenchStatus {
+    name: String,
+    status: BenchStatus,
+    current_mean: f64,
+    samples: u64,
+    progress: f64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum BenchStatus {
+    Pending,
+    Warmup,
+    Running,
+    Completed,
+    Failed,
+}
+
+impl LiveDisplay {
+    pub fn new() -> Self {
+        LiveDisplay {
+            benchmarks: Vec::new(),
+            refresh_rate_ms: 100,
+        }
+    }
+
+    pub fn add_benchmark(&mut self, name: &str) {
+        self.benchmarks.push(LiveBenchStatus {
+            name: name.to_string(),
+            status: BenchStatus::Pending,
+            current_mean: 0.0,
+            samples: 0,
+            progress: 0.0,
+        });
+    }
+
+    pub fn update(&mut self, name: &str, status: BenchStatus, mean: f64, samples: u64, progress: f64) {
+        if let Some(bench) = self.benchmarks.iter_mut().find(|b| b.name == name) {
+            bench.status = status;
+            bench.current_mean = mean;
+            bench.samples = samples;
+            bench.progress = progress;
+        }
+        self.draw();
+    }
+
+    fn draw(&self) {
+        // Clear screen
+        print!("\x1b[2J\x1b[H");
+
+        println!("{}╔═══════════════════════════════════════════════════════════════╗{}",
+            colors::CYAN, colors::RESET);
+        println!("{}║  Live Benchmark Status                                        ║{}",
+            colors::CYAN, colors::RESET);
+        println!("{}╚═══════════════════════════════════════════════════════════════╝{}",
+            colors::CYAN, colors::RESET);
+        println!();
+
+        for bench in &self.benchmarks {
+            let status_str = match bench.status {
+                BenchStatus::Pending => format!("{}⏳ Pending{}", colors::DIM, colors::RESET),
+                BenchStatus::Warmup => format!("{}🔥 Warmup{}", colors::YELLOW, colors::RESET),
+                BenchStatus::Running => format!("{}▶️  Running{}", colors::BLUE, colors::RESET),
+                BenchStatus::Completed => format!("{}✅ Done{}", colors::GREEN, colors::RESET),
+                BenchStatus::Failed => format!("{}❌ Failed{}", colors::RED, colors::RESET),
+            };
+
+            let bar_width = 20;
+            let filled = (bench.progress * bar_width as f64) as usize;
+            let bar: String = "█".repeat(filled) + &"░".repeat(bar_width - filled);
+
+            println!("  {:30} {} |{}| {:>12} ({} samples)",
+                bench.name,
+                status_str,
+                bar,
+                format_duration(bench.current_mean),
+                bench.samples);
+        }
+
+        std::io::Write::flush(&mut std::io::stdout()).ok();
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// BENCHMARK ANNOTATIONS / SOURCE INTEGRATION
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Benchmark annotation for source code
+#[derive(Clone)]
+pub struct BenchAnnotation {
+    pub file_path: String,
+    pub line_number: usize,
+    pub function_name: String,
+    pub benchmark_name: String,
+    pub latest_result: Option<BenchResult>,
+    pub history: Vec<HistoryPoint>,
+}
+
+/// Annotation manager for IDE integration
+pub struct AnnotationManager {
+    annotations: Vec<BenchAnnotation>,
+    results_cache: HashMap<String, BenchResult>,
+}
+
+impl AnnotationManager {
+    pub fn new() -> Self {
+        AnnotationManager {
+            annotations: Vec::new(),
+            results_cache: HashMap::new(),
+        }
+    }
+
+    /// Register a benchmark annotation
+    pub fn register(&mut self, file: &str, line: usize, func: &str, bench_name: &str) {
+        self.annotations.push(BenchAnnotation {
+            file_path: file.to_string(),
+            line_number: line,
+            function_name: func.to_string(),
+            benchmark_name: bench_name.to_string(),
+            latest_result: self.results_cache.get(bench_name).cloned(),
+            history: Vec::new(),
+        });
+    }
+
+    /// Update result for a benchmark
+    pub fn update_result(&mut self, bench_name: &str, result: BenchResult) {
+        self.results_cache.insert(bench_name.to_string(), result.clone());
+
+        for ann in &mut self.annotations {
+            if ann.benchmark_name == bench_name {
+                ann.latest_result = Some(result.clone());
+                ann.history.push(HistoryPoint {
+                    timestamp: std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_secs(),
+                    commit_hash: None,
+                    mean: result.stats.mean,
+                    std_dev: result.stats.std_dev,
+                });
+            }
+        }
+    }
+
+    /// Generate LSP-compatible annotations
+    pub fn generate_lsp_annotations(&self) -> Vec<LspAnnotation> {
+        self.annotations.iter().filter_map(|ann| {
+            ann.latest_result.as_ref().map(|result| {
+                LspAnnotation {
+                    file: ann.file_path.clone(),
+                    line: ann.line_number,
+                    message: format!(
+                        "⏱ {} ± {} ({} iterations)",
+                        format_duration(result.stats.mean),
+                        format_duration(result.stats.std_dev),
+                        result.stats.iterations
+                    ),
+                    severity: LspSeverity::Information,
+                }
+            })
+        }).collect()
+    }
+}
+
+/// LSP annotation for IDE display
+#[derive(Clone)]
+pub struct LspAnnotation {
+    pub file: String,
+    pub line: usize,
+    pub message: String,
+    pub severity: LspSeverity,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum LspSeverity {
+    Information,
+    Warning,
+    Error,
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// BENCHMARK FUZZING
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Fuzz benchmark with random inputs
+pub struct BenchFuzzer<T> {
+    generator: Box<dyn Fn(u64) -> T>,
+    seed: u64,
+}
+
+impl<T> BenchFuzzer<T> {
+    pub fn new<F>(generator: F) -> Self
+    where
+        F: Fn(u64) -> T + 'static,
+    {
+        BenchFuzzer {
+            generator: Box::new(generator),
+            seed: 42,
+        }
+    }
+
+    /// Generate a random input
+    pub fn generate(&mut self) -> T {
+        self.seed = self.seed.wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        (self.generator)(self.seed)
+    }
+
+    /// Generate N inputs
+    pub fn generate_n(&mut self, n: usize) -> Vec<T> {
+        (0..n).map(|_| self.generate()).collect()
+    }
+
+    /// Set seed for reproducibility
+    pub fn set_seed(&mut self, seed: u64) {
+        self.seed = seed;
+    }
+}
+
+/// Fuzzed benchmark runner
+pub struct FuzzedBenchRunner {
+    bencher: Bencher,
+    min_input_size: usize,
+    max_input_size: usize,
+    num_fuzzes: usize,
+}
+
+impl FuzzedBenchRunner {
+    pub fn new(min_size: usize, max_size: usize, num_fuzzes: usize) -> Self {
+        FuzzedBenchRunner {
+            bencher: Bencher::new(),
+            min_input_size: min_size,
+            max_input_size: max_size,
+            num_fuzzes: num_fuzzes,
+        }
+    }
+
+    /// Run benchmark with fuzzed vector inputs
+    pub fn fuzz_bench_vec<F>(&mut self, name: &str, mut f: F)
+    where
+        F: FnMut(&mut Iteration, &[u8]),
+    {
+        let mut fuzzer = BenchFuzzer::new(|seed| {
+            let size = self.min_input_size +
+                (seed as usize % (self.max_input_size - self.min_input_size + 1));
+            let mut vec = Vec::with_capacity(size);
+            let mut s = seed;
+            for _ in 0..size {
+                s = s.wrapping_mul(6364136223846793005).wrapping_add(1);
+                vec.push((s >> 56) as u8);
+            }
+            vec
+        });
+
+        for i in 0..self.num_fuzzes {
+            let input = fuzzer.generate();
+            let bench_name = format!("{}_{}", name, i);
+            let input_clone = input.clone();
+
+            self.bencher.bench(&bench_name, |iter| {
+                f(iter, &input_clone);
+            });
+        }
+    }
+
+    /// Summary of fuzzed results
+    pub fn summary(&self) {
+        self.bencher.summary();
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// JSON REPORT GENERATION
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// JSON report generator for machine-readable output
+pub struct JsonReportGenerator {
+    benchmarks: Vec<BenchResult>,
+    metadata: ReportMetadata,
+}
+
+#[derive(Clone)]
+pub struct ReportMetadata {
+    pub timestamp: u64,
+    pub machine_info: MachineInfo,
+    pub run_config: BenchConfig,
+}
+
+#[derive(Clone)]
+pub struct MachineInfo {
+    pub hostname: String,
+    pub os: String,
+    pub arch: String,
+    pub cpu_model: String,
+    pub cpu_count: usize,
+    pub memory_gb: f64,
+}
+
+impl MachineInfo {
+    pub fn detect() -> Self {
+        MachineInfo {
+            hostname: "unknown".to_string(),
+            os: std::env::consts::OS.to_string(),
+            arch: std::env::consts::ARCH.to_string(),
+            cpu_model: "Unknown".to_string(),
+            cpu_count: num_cpus(),
+            memory_gb: 0.0,
+        }
+    }
+}
+
+impl JsonReportGenerator {
+    pub fn new() -> Self {
+        JsonReportGenerator {
+            benchmarks: Vec::new(),
+            metadata: ReportMetadata {
+                timestamp: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs(),
+                machine_info: MachineInfo::detect(),
+                run_config: BenchConfig::default(),
+            },
+        }
+    }
+
+    pub fn add_result(&mut self, result: BenchResult) {
+        self.benchmarks.push(result);
+    }
+
+    pub fn add_results(&mut self, results: Vec<BenchResult>) {
+        self.benchmarks.extend(results);
+    }
+
+    /// Generate JSON report
+    pub fn generate(&self) -> String {
+        let mut json = String::from("{\n");
+
+        // Metadata
+        json.push_str("  \"metadata\": {\n");
+        json.push_str(&format!("    \"timestamp\": {},\n", self.metadata.timestamp));
+        json.push_str(&format!("    \"hostname\": \"{}\",\n", self.metadata.machine_info.hostname));
+        json.push_str(&format!("    \"os\": \"{}\",\n", self.metadata.machine_info.os));
+        json.push_str(&format!("    \"arch\": \"{}\",\n", self.metadata.machine_info.arch));
+        json.push_str(&format!("    \"cpu_model\": \"{}\",\n", self.metadata.machine_info.cpu_model));
+        json.push_str(&format!("    \"cpu_count\": {},\n", self.metadata.machine_info.cpu_count));
+        json.push_str(&format!("    \"memory_gb\": {:.1}\n", self.metadata.machine_info.memory_gb));
+        json.push_str("  },\n");
+
+        // Benchmarks
+        json.push_str("  \"benchmarks\": [\n");
+
+        for (i, bench) in self.benchmarks.iter().enumerate() {
+            json.push_str("    {\n");
+            json.push_str(&format!("      \"name\": \"{}\",\n", bench.name));
+            if let Some(ref group) = bench.group {
+                json.push_str(&format!("      \"group\": \"{}\",\n", group));
+            }
+            json.push_str("      \"stats\": {\n");
+            json.push_str(&format!("        \"mean_ns\": {:.2},\n", bench.stats.mean));
+            json.push_str(&format!("        \"median_ns\": {:.2},\n", bench.stats.median));
+            json.push_str(&format!("        \"std_dev_ns\": {:.2},\n", bench.stats.std_dev));
+            json.push_str(&format!("        \"min_ns\": {:.2},\n", bench.stats.min));
+            json.push_str(&format!("        \"max_ns\": {:.2},\n", bench.stats.max));
+            json.push_str(&format!("        \"percentile_5\": {:.2},\n", bench.stats.percentile_5));
+            json.push_str(&format!("        \"percentile_95\": {:.2},\n", bench.stats.percentile_95));
+            json.push_str(&format!("        \"iterations\": {},\n", bench.stats.iterations));
+            json.push_str(&format!("        \"sample_count\": {}\n", bench.stats.sample_count));
+            json.push_str("      }");
+
+            if let Some(ref throughput) = bench.throughput {
+                json.push_str(",\n      \"throughput\": {\n");
+                json.push_str(&format!("        \"value\": {:.2},\n", throughput.value));
+                json.push_str(&format!("        \"unit\": \"{}\"\n", throughput.unit.as_str()));
+                json.push_str("      }");
+            }
+
+            if let Some(ref comparison) = bench.comparison {
+                json.push_str(",\n      \"comparison\": {\n");
+                json.push_str(&format!("        \"baseline_mean\": {:.2},\n", comparison.baseline_mean));
+                json.push_str(&format!("        \"change_percent\": {:.2},\n", comparison.change_percent));
+                json.push_str(&format!("        \"significant\": {},\n", comparison.significant));
+                json.push_str(&format!("        \"faster\": {}\n", comparison.faster));
+                json.push_str("      }");
+            }
+
+            json.push_str("\n    }");
+            if i < self.benchmarks.len() - 1 {
+                json.push_str(",");
+            }
+            json.push_str("\n");
+        }
+
+        json.push_str("  ]\n");
+        json.push_str("}\n");
+
+        json
+    }
+
+    /// Save report to file
+    pub fn save(&self, path: &str) -> Result<(), String> {
+        let json = self.generate();
+        write_string(path, &json)
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// BENCHMARK PRESETS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Predefined benchmark configurations for common scenarios
+pub mod presets {
+    use super::*;
+
+    /// Quick sanity check benchmarks
+    pub fn quick() -> BenchConfig {
+        BenchConfig {
+            min_iterations: 10,
+            max_duration: Duration::from_millis(500),
+            warmup_iterations: 3,
+            confidence_level: 0.90,
+            ..Default::default()
+        }
+    }
+
+    /// Standard development benchmarks
+    pub fn standard() -> BenchConfig {
+        BenchConfig::default()
+    }
+
+    /// Thorough CI benchmarks
+    pub fn ci() -> BenchConfig {
+        BenchConfig {
+            min_iterations: 200,
+            max_duration: Duration::from_secs(10),
+            warmup_iterations: 50,
+            confidence_level: 0.95,
+            compare_baseline: true,
+            ..Default::default()
+        }
+    }
+
+    /// Detailed performance analysis
+    pub fn detailed() -> BenchConfig {
+        BenchConfig {
+            min_iterations: 500,
+            max_duration: Duration::from_secs(30),
+            warmup_iterations: 100,
+            confidence_level: 0.99,
+            compare_baseline: true,
+            ..Default::default()
+        }
+    }
+
+    /// Production profiling (minimal overhead)
+    pub fn production() -> BenchConfig {
+        BenchConfig {
+            min_iterations: 50,
+            max_duration: Duration::from_secs(1),
+            warmup_iterations: 5,
+            confidence_level: 0.90,
+            ..Default::default()
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// MAIN ENTRY POINT
+// ═══════════════════════════════════════════════════════════════════════════════
+
+pub fn main() {
+    run_example_benchmarks();
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// EXTENDED EXAMPLE BENCHMARKS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+pub fn run_extended_examples() {
+    println!("\n╔═══════════════════════════════════════════════════════════════╗");
+    println!("║  BUILD-UNIVERSE Extended Benchmark Examples                  ║");
+    println!("╚═══════════════════════════════════════════════════════════════╝\n");
+
+    // HDR Histogram demo
+    println!("HDR Histogram Demo:");
+    let mut histogram = HdrHistogram::new(1, 1_000_000_000, 3);
+    for i in 0..10000 {
+        let latency = 100 + (i % 500) + (i * 7 % 100);
+        histogram.record_value(latency as u64);
+    }
+    println!("{}", histogram.percentile_report());
+
+    // Concurrent benchmark demo
+    println!("\nConcurrent Benchmark Demo:");
+    let mut concurrent = ConcurrentBencher::with_config(ConcurrentBenchConfig {
+        thread_count: 4,
+        duration: Duration::from_millis(500),
+        warmup_duration: Duration::from_millis(100),
+        ..Default::default()
+    });
+
+    let result = concurrent.bench_concurrent("counter_increment", |_thread_id| {
+        let mut x = 0u64;
+        for _ in 0..1000 {
+            x = x.wrapping_add(1);
+        }
+        Iteration::black_box(x);
+    });
+
+    println!("  Throughput: {:.2} ops/sec", result.operations_per_second);
+    println!("  p99 latency: {}", format_duration(result.latency.p99_ns as f64));
+
+    // I/O benchmark demo (simulated)
+    println!("\nI/O Benchmark Demo:");
+    let io_suite = IoBenchSuite::new(
+        IoBenchConfig {
+            file_size: 1024 * 1024, // 1 MB
+            block_size: 4096,
+            num_operations: 100,
+            ..Default::default()
+        },
+        "/tmp/bench_test"
+    );
+
+    let seq_read = io_suite.bench_sequential_read();
+    println!("  Sequential Read: {:.2} MB/s", seq_read.throughput_mbps);
+
+    // Progress bar demo
+    println!("\nProgress Bar Demo:");
+    let mut progress = ProgressBar::new(50, "Processing");
+    for i in 0..=50 {
+        progress.set(i);
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    progress.finish();
+
+    // Allocator benchmark demo
+    println!("\nAllocator Benchmark Demo:");
+    let mut alloc_bencher = AllocatorBencher::new(AllocatorBenchConfig {
+        num_operations: 1000,
+        ..Default::default()
+    });
+    let alloc_result = alloc_bencher.run("system_allocator");
+    println!("  Allocs/sec: {:.2}", alloc_result.allocs_per_second);
+    println!("  Mean latency: {}", format_duration(alloc_result.alloc_latency.mean_ns));
+
+    println!("\n✅ Extended examples complete!");
+}

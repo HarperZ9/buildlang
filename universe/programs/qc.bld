@@ -1,0 +1,1898 @@
+// =============================================================================
+// qc - Self-Hosted BuildLang Compiler (tokenizer + parser + C codegen)
+// =============================================================================
+// The definitive self-hosting milestone. A single binary that reads .bld
+// source and emits compilable C code.
+//
+// Built on codegen.bld's proven architecture, expanded to handle:
+//   - Structs (definitions, literals, field access)
+//   - String methods (.len(), .char_at(), .substring(), .starts_with(), etc.)
+//   - Vec<T> type, vec![], vec_push/vec_get/vec_len
+//   - Mutable variables (let mut)
+//   - Builtin functions (args_count, read_file, process_exit, etc.)
+//   - &/&mut references (passed by pointer in C)
+//   - println!/print!/eprintln! macros with format strings
+//   - if/else, while, loop, return, break, continue
+//   - Arithmetic, comparisons, logical operators, compound assignment
+//
+// Usage:
+//   qc file.bld              print C code to stdout
+//   qc file.bld -o out.c     write to file
+//   qc --help                   usage
+// =============================================================================
+
+include!("stdlib/chars.bld");
+include!("stdlib/tokenizer.bld");
+
+
+// ===========================================================================
+// CODE GENERATOR (expanded from codegen.bld)
+// ===========================================================================
+// Two-pass syntax-directed translation:
+//   Pass 1: Scan for structs and fn signatures -> emit typedefs + forward decls
+//   Pass 2: Full codegen with struct/method/builtin awareness
+// ===========================================================================
+
+// --- Struct registry: track known struct names for type mapping ---
+// We use a simple string pool approach: concatenate names with | separator
+struct StructReg {
+    names: String,
+    count: i32,
+}
+
+fn sreg_new() -> StructReg {
+    StructReg { names: "|", count: 0 }
+}
+
+fn sreg_add(sr: &mut StructReg, name: String) {
+    sr.names = sr.names + name + "|";
+    sr.count = sr.count + 1;
+}
+
+fn sreg_has(sr: &StructReg, name: String) -> bool {
+    let needle = "|" + name + "|";
+    sr.names.contains(needle)
+}
+
+struct CG {
+    pool: String,
+    tk: Vec<i32>,
+    ts: Vec<i32>,
+    tl: Vec<i32>,
+    count: i32,
+    pos: i32,
+    out: String,
+    fwd: String,
+    structs: String,
+    indent: i32,
+    sr: StructReg,
+}
+
+fn cg_new(t: &Tok) -> CG {
+    CG {
+        pool: t.pool,
+        tk: t.t_types, ts: t.t_starts, tl: t.t_lens,
+        count: t.count,
+        pos: 0,
+        out: "",
+        fwd: "",
+        structs: "",
+        indent: 0,
+        sr: sreg_new(),
+    }
+}
+
+// --- Token access helpers ---
+fn pk(cg: &CG) -> i32 {
+    if cg.pos >= cg.count { return 0; }
+    vec_get(cg.tk, cg.pos)
+}
+
+fn pk_at(cg: &CG, off: i32) -> i32 {
+    let i = cg.pos + off;
+    if i >= cg.count { return 0; }
+    vec_get(cg.tk, i)
+}
+
+fn ptxt(cg: &CG) -> String {
+    if cg.pos >= cg.count { return ""; }
+    let s = vec_get(cg.ts, cg.pos);
+    let l = vec_get(cg.tl, cg.pos);
+    if l == 0 { return ""; }
+    cg.pool.substring(s, l)
+}
+
+fn ptxt_at(cg: &CG, off: i32) -> String {
+    let i = cg.pos + off;
+    if i >= cg.count { return ""; }
+    let s = vec_get(cg.ts, i);
+    let l = vec_get(cg.tl, i);
+    if l == 0 { return ""; }
+    cg.pool.substring(s, l)
+}
+
+fn adv(cg: &mut CG) {
+    if cg.pos < cg.count { cg.pos = cg.pos + 1; }
+}
+
+fn at_end(cg: &CG) -> bool { cg.pos >= cg.count }
+
+fn expect_kind(cg: &mut CG, kind: i32) -> bool {
+    if pk(cg) == kind { adv(cg); return true; }
+    false
+}
+
+fn expect_text(cg: &mut CG, text: String) -> bool {
+    if ptxt(cg) == text { adv(cg); return true; }
+    false
+}
+
+// --- Output helpers ---
+fn make_indent(n: i32) -> String {
+    let mut out = "";
+    let mut i: i32 = 0;
+    while i < n { out = out + "    "; i = i + 1; }
+    out
+}
+
+fn emit(cg: &mut CG, text: String) {
+    cg.out = cg.out + text;
+}
+
+fn emit_indent(cg: &mut CG) {
+    let pad = make_indent(cg.indent);
+    cg.out = cg.out + pad;
+}
+
+fn emit_line(cg: &mut CG, text: String) {
+    let pad = make_indent(cg.indent);
+    cg.out = cg.out + pad + text + "\n";
+}
+
+fn emit_fwd(cg: &mut CG, text: String) {
+    cg.fwd = cg.fwd + text + "\n";
+}
+
+fn emit_struct(cg: &mut CG, text: String) {
+    cg.structs = cg.structs + text + "\n";
+}
+
+// --- Skip helpers ---
+fn skip_balanced_braces(cg: &mut CG) {
+    if pk(cg) != TK_LBRACE() { return; }
+    adv(cg);
+    let mut depth: i32 = 1;
+    let mut go = true;
+    while go {
+        if at_end(cg) { go = false; }
+        else if pk(cg) == TK_LBRACE() { depth = depth + 1; adv(cg); }
+        else if pk(cg) == TK_RBRACE() {
+            depth = depth - 1; adv(cg);
+            if depth == 0 { go = false; }
+        }
+        else { adv(cg); }
+    }
+}
+
+fn skip_to_semi(cg: &mut CG) {
+    let mut go = true;
+    while go {
+        if at_end(cg) { go = false; }
+        else if pk(cg) == TK_SEMI() { adv(cg); go = false; }
+        else { adv(cg); }
+    }
+}
+
+// ===========================================================================
+// Type mapping: BuildLang types -> C types
+// ===========================================================================
+fn map_type(cg: &CG, ty: String) -> String {
+    if ty == "i64" { return "int64_t"; }
+    if ty == "i32" { return "int32_t"; }
+    if ty == "i16" { return "int16_t"; }
+    if ty == "i8" { return "int8_t"; }
+    if ty == "u64" { return "uint64_t"; }
+    if ty == "u32" { return "uint32_t"; }
+    if ty == "u16" { return "uint16_t"; }
+    if ty == "u8" { return "uint8_t"; }
+    if ty == "f64" { return "double"; }
+    if ty == "f32" { return "float"; }
+    if ty == "bool" { return "int"; }
+    if ty == "String" { return "BuildString"; }
+    if ty == "&str" { return "BuildString"; }
+    if ty == "()" { return "void"; }
+    // Vec<T> -> mapped to our generic vec type
+    if ty == "Vec" { return "BuildVec"; }
+    // Check if it's a known struct name
+    if sreg_has(&cg.sr, ty) { return ty; }
+    // Default: pass through
+    ty
+}
+
+// Parse a type annotation and return the C type string
+fn parse_type(cg: &mut CG) -> String {
+    // Handle & and &mut references -> pointer in C
+    if pk(cg) == TK_BIT_AND() {
+        adv(cg);
+        if ptxt(cg) == "mut" { adv(cg); }
+        let inner = parse_type(cg);
+        return inner + "*";
+    }
+    // Handle main type name
+    let mut name = "";
+    if pk(cg) == TK_IDENT() || pk(cg) == TK_KEYWORD() {
+        name = ptxt(cg);
+        adv(cg);
+    }
+    // Handle :: paths
+    let mut go = true;
+    while go {
+        if pk(cg) == TK_COLONCOLON() {
+            name = name + "::";
+            adv(cg);
+            if pk(cg) == TK_IDENT() || pk(cg) == TK_KEYWORD() {
+                name = name + ptxt(cg);
+                adv(cg);
+            }
+        } else { go = false; }
+    }
+    // Handle <T> generics - consume but use base name
+    if pk(cg) == TK_LT() {
+        adv(cg);
+        let mut depth: i32 = 1;
+        let mut go2 = true;
+        while go2 {
+            if at_end(cg) { go2 = false; }
+            else if pk(cg) == TK_LT() { depth = depth + 1; adv(cg); }
+            else if pk(cg) == TK_GT() {
+                depth = depth - 1; adv(cg);
+                if depth == 0 { go2 = false; }
+            }
+            else { adv(cg); }
+        }
+    }
+    map_type(cg, name)
+}
+
+// Parse type without advancing for reference: just returns a simple mapped type
+fn parse_type_simple(cg: &mut CG) -> String {
+    // Handle & and &mut references
+    let mut is_ref = false;
+    if pk(cg) == TK_BIT_AND() {
+        is_ref = true;
+        adv(cg);
+        if ptxt(cg) == "mut" { adv(cg); }
+    }
+    let mut name = "";
+    if pk(cg) == TK_IDENT() || pk(cg) == TK_KEYWORD() {
+        name = ptxt(cg);
+        adv(cg);
+    }
+    // Handle <T> generics
+    if pk(cg) == TK_LT() {
+        adv(cg);
+        let mut depth: i32 = 1;
+        let mut go = true;
+        while go {
+            if at_end(cg) { go = false; }
+            else if pk(cg) == TK_LT() { depth = depth + 1; adv(cg); }
+            else if pk(cg) == TK_GT() {
+                depth = depth - 1; adv(cg);
+                if depth == 0 { go = false; }
+            }
+            else { adv(cg); }
+        }
+    }
+    let mapped = map_type(cg, name);
+    if is_ref { return mapped + "*"; }
+    mapped
+}
+
+// ===========================================================================
+// Check if a name is a known builtin function
+// ===========================================================================
+fn is_builtin_fn(name: String) -> bool {
+    if name == "args_count" { return true; }
+    if name == "args_get" { return true; }
+    if name == "read_file" { return true; }
+    if name == "read_all" { return true; }
+    if name == "stdin_is_pipe" { return true; }
+    if name == "file_exists" { return true; }
+    if name == "process_exit" { return true; }
+    if name == "write_file" { return true; }
+    if name == "vec_push" { return true; }
+    if name == "vec_get" { return true; }
+    if name == "vec_len" { return true; }
+    if name == "floor" { return true; }
+    if name == "ceil" { return true; }
+    if name == "sqrt" { return true; }
+    if name == "abs" { return true; }
+    if name == "to_string" { return true; }
+    if name == "to_string_f64" { return true; }
+    if name == "to_string_i64" { return true; }
+    if name == "string_new" { return true; }
+    false
+}
+
+// Map a string method to a C runtime call: obj.method(args) -> qrt_method(obj, args)
+fn map_method_call(obj: String, method: String, args: String) -> String {
+    if method == "len" { return "qs_len(" + obj + ")"; }
+    if method == "char_at" { return "qs_char_at(" + obj + ", " + args + ")"; }
+    if method == "substring" { return "qs_substring(" + obj + ", " + args + ")"; }
+    if method == "starts_with" { return "qs_starts_with(" + obj + ", " + args + ")"; }
+    if method == "contains" { return "qs_contains(" + obj + ", " + args + ")"; }
+    if method == "split" { return "qs_split(" + obj + ", " + args + ")"; }
+    if method == "split_whitespace" { return "qs_split_whitespace(" + obj + ")"; }
+    if method == "trim" { return "qs_trim(" + obj + ")"; }
+    if method == "to_lowercase" { return "qs_to_lowercase(" + obj + ")"; }
+    if method == "to_uppercase" { return "qs_to_uppercase(" + obj + ")"; }
+    if method == "parse_int" { return "qs_parse_int(" + obj + ")"; }
+    if method == "parse_float" { return "qs_parse_float(" + obj + ")"; }
+    if method == "replace" { return "qs_replace(" + obj + ", " + args + ")"; }
+    if method == "ends_with" { return "qs_ends_with(" + obj + ", " + args + ")"; }
+    if method == "is_empty" { return "qs_is_empty(" + obj + ")"; }
+    // Unknown method: emit as-is
+    if args == "" {
+        return obj + "." + method + "()"  ;
+    }
+    obj + "." + method + "(" + args + ")"
+}
+
+// Map builtin function calls to C runtime equivalents
+fn map_builtin_call(name: String, args: String) -> String {
+    if name == "args_count" { return "qrt_args_count()"; }
+    if name == "args_get" { return "qrt_args_get(" + args + ")"; }
+    if name == "read_file" { return "qrt_read_file(" + args + ")"; }
+    if name == "read_all" { return "qrt_read_all()"; }
+    if name == "stdin_is_pipe" { return "qrt_stdin_is_pipe()"; }
+    if name == "file_exists" { return "qrt_file_exists(" + args + ")"; }
+    if name == "process_exit" { return "exit(" + args + ")"; }
+    if name == "write_file" { return "qrt_write_file(" + args + ")"; }
+    if name == "vec_push" { return "qv_push(&" + args + ")"; }
+    if name == "vec_get" { return "qv_get(" + args + ")"; }
+    if name == "vec_len" { return "qv_len(" + args + ")"; }
+    if name == "floor" { return "floor(" + args + ")"; }
+    if name == "ceil" { return "ceil(" + args + ")"; }
+    if name == "sqrt" { return "sqrt(" + args + ")"; }
+    if name == "abs" { return "abs(" + args + ")"; }
+    if name == "to_string" { return "qrt_to_string(" + args + ")"; }
+    if name == "to_string_f64" { return "qrt_to_string_f64(" + args + ")"; }
+    if name == "to_string_i64" { return "qrt_to_string_i64(" + args + ")"; }
+    if name == "string_new" { return "qs_new(" + args + ")"; }
+    name + "(" + args + ")"
+}
+
+// ===========================================================================
+// PASS 1: Collect forward declarations + struct definitions
+// ===========================================================================
+fn pass1_scan(cg: &mut CG) {
+    let saved_pos = cg.pos;
+    cg.pos = 0;
+
+    let mut go = true;
+    while go {
+        if at_end(cg) { go = false; }
+        else {
+            let k = pk(cg);
+            let txt = ptxt(cg);
+            // Skip 'pub'
+            if k == TK_KEYWORD() && txt == "pub" { adv(cg); }
+            let k2 = pk(cg);
+            let txt2 = ptxt(cg);
+
+            // --- Struct definition ---
+            if k2 == TK_KEYWORD() && txt2 == "struct" {
+                adv(cg); // skip "struct"
+                let sname = ptxt(cg);
+                adv(cg); // skip name
+                sreg_add(&mut cg.sr, sname);
+
+                // Parse struct body { field: Type, ... }
+                if pk(cg) == TK_LBRACE() {
+                    adv(cg); // skip {
+                    let mut sdef = "typedef struct {\n";
+                    let mut fgo = true;
+                    while fgo {
+                        if at_end(cg) || pk(cg) == TK_RBRACE() { fgo = false; }
+                        else {
+                            let fname = ptxt(cg);
+                            adv(cg); // skip field name
+                            expect_kind(cg, TK_COLON()); // skip :
+                            let ftype = parse_type(cg);
+                            sdef = sdef + "    " + ftype + " " + fname + ";\n";
+                            if pk(cg) == TK_COMMA() { adv(cg); }
+                        }
+                    }
+                    expect_kind(cg, TK_RBRACE());
+                    sdef = sdef + "} " + sname + ";";
+                    emit_struct(cg, sdef);
+                }
+            }
+            // --- Function declaration ---
+            else if k2 == TK_KEYWORD() && txt2 == "fn" {
+                adv(cg); // skip "fn"
+                let name = ptxt(cg);
+                adv(cg); // skip name
+                // Parse params
+                expect_kind(cg, TK_LPAREN());
+                let mut params_c = "";
+                let mut first = true;
+                let mut pgo = true;
+                while pgo {
+                    if at_end(cg) || pk(cg) == TK_RPAREN() { pgo = false; }
+                    else {
+                        if !first { params_c = params_c + ", "; }
+                        first = false;
+                        if ptxt(cg) == "mut" { adv(cg); }
+                        let pname = ptxt(cg);
+                        adv(cg);
+                        expect_kind(cg, TK_COLON());
+                        let pty = parse_type(cg);
+                        params_c = params_c + pty + " " + pname;
+                        if pk(cg) == TK_COMMA() { adv(cg); }
+                        else { pgo = false; }
+                    }
+                }
+                expect_kind(cg, TK_RPAREN());
+                let mut ret_c = "void";
+                if pk(cg) == TK_ARROW() {
+                    adv(cg);
+                    ret_c = parse_type(cg);
+                }
+                if name != "main" {
+                    emit_fwd(cg, ret_c + " " + name + "(" + params_c + ");");
+                }
+                if pk(cg) == TK_LBRACE() { skip_balanced_braces(cg); }
+            }
+            // --- Skip other items ---
+            else {
+                if pk(cg) == TK_LBRACE() { skip_balanced_braces(cg); }
+                else if pk(cg) == TK_SEMI() { adv(cg); }
+                else { adv(cg); }
+            }
+        }
+    }
+
+    cg.pos = saved_pos;
+}
+
+// ===========================================================================
+// PASS 2: Expression codegen
+// ===========================================================================
+
+fn parse_expr(cg: &mut CG) -> String {
+    let left = parse_or_expr(cg);
+    left
+}
+
+fn parse_or_expr(cg: &mut CG) -> String {
+    let mut result = parse_and_expr(cg);
+    let mut go = true;
+    while go {
+        if pk(cg) == TK_OR() {
+            adv(cg);
+            let right = parse_and_expr(cg);
+            result = "(" + result + " || " + right + ")";
+        } else { go = false; }
+    }
+    result
+}
+
+fn parse_and_expr(cg: &mut CG) -> String {
+    let mut result = parse_cmp_expr(cg);
+    let mut go = true;
+    while go {
+        if pk(cg) == TK_AND() {
+            adv(cg);
+            let right = parse_cmp_expr(cg);
+            result = "(" + result + " && " + right + ")";
+        } else { go = false; }
+    }
+    result
+}
+
+fn parse_cmp_expr(cg: &mut CG) -> String {
+    let mut result = parse_add_expr(cg);
+    let k = pk(cg);
+    if k == TK_EQ() { adv(cg); let r = parse_add_expr(cg); result = "QEQ(" + result + ", " + r + ")"; }
+    else if k == TK_NEQ() { adv(cg); let r = parse_add_expr(cg); result = "QNEQ(" + result + ", " + r + ")"; }
+    else if k == TK_LT() { adv(cg); let r = parse_add_expr(cg); result = "(" + result + " < " + r + ")"; }
+    else if k == TK_GT() { adv(cg); let r = parse_add_expr(cg); result = "(" + result + " > " + r + ")"; }
+    else if k == TK_LE() { adv(cg); let r = parse_add_expr(cg); result = "(" + result + " <= " + r + ")"; }
+    else if k == TK_GE() { adv(cg); let r = parse_add_expr(cg); result = "(" + result + " >= " + r + ")"; }
+    result
+}
+
+fn parse_add_expr(cg: &mut CG) -> String {
+    let mut result = parse_mul_expr(cg);
+    let mut go = true;
+    while go {
+        let k = pk(cg);
+        if k == TK_PLUS() { adv(cg); let r = parse_mul_expr(cg); result = "QADD(" + result + ", " + r + ")"; }
+        else if k == TK_MINUS() { adv(cg); let r = parse_mul_expr(cg); result = "(" + result + " - " + r + ")"; }
+        else { go = false; }
+    }
+    result
+}
+
+fn parse_mul_expr(cg: &mut CG) -> String {
+    let mut result = parse_unary_expr(cg);
+    let mut go = true;
+    while go {
+        let k = pk(cg);
+        if k == TK_STAR() { adv(cg); let r = parse_unary_expr(cg); result = "(" + result + " * " + r + ")"; }
+        else if k == TK_SLASH() { adv(cg); let r = parse_unary_expr(cg); result = "(" + result + " / " + r + ")"; }
+        else if k == TK_PERCENT() { adv(cg); let r = parse_unary_expr(cg); result = "(" + result + " % " + r + ")"; }
+        else { go = false; }
+    }
+    result
+}
+
+fn parse_unary_expr(cg: &mut CG) -> String {
+    if pk(cg) == TK_MINUS() { adv(cg); let v = parse_unary_expr(cg); return "(-" + v + ")"; }
+    if pk(cg) == TK_NOT() { adv(cg); let v = parse_unary_expr(cg); return "(!" + v + ")"; }
+    // Skip & and &mut references — pass value for simple cases, pointer for struct refs
+    if pk(cg) == TK_BIT_AND() {
+        adv(cg);
+        let mut is_mut = false;
+        if ptxt(cg) == "mut" { is_mut = true; adv(cg); }
+        let v = parse_unary_expr(cg);
+        // Emit address-of for struct arguments
+        return "&" + v;
+    }
+    parse_postfix_expr(cg)
+}
+
+fn parse_postfix_expr(cg: &mut CG) -> String {
+    let mut result = parse_primary_expr(cg);
+    let mut go = true;
+    while go {
+        if pk(cg) == TK_DOT() {
+            adv(cg);
+            if pk(cg) == TK_IDENT() || pk(cg) == TK_KEYWORD() {
+                let field = ptxt(cg);
+                adv(cg);
+                if pk(cg) == TK_LPAREN() {
+                    // Method call: obj.method(args)
+                    adv(cg);
+                    let args = parse_call_args(cg);
+                    expect_kind(cg, TK_RPAREN());
+                    // Map to runtime call
+                    result = map_method_call(result, field, args);
+                } else {
+                    // Field access: obj.field
+                    // If result starts with & it's a pointer -> use ->
+                    if result.starts_with("&") {
+                        // Actually in C we dereference pointers with ->
+                        // But for simplicity, fields on values use .
+                        result = result + "." + field;
+                    } else {
+                        result = result + "." + field;
+                    }
+                }
+            } else { go = false; }
+        } else if pk(cg) == TK_LPAREN() {
+            // Function call: f(args)
+            adv(cg);
+            let args = parse_call_args(cg);
+            expect_kind(cg, TK_RPAREN());
+            // Check if it's a builtin
+            if is_builtin_fn(result) {
+                result = map_builtin_call(result, args);
+            } else {
+                result = result + "(" + args + ")";
+            }
+        } else if pk(cg) == TK_LBRACK() {
+            // Index: a[i]
+            adv(cg);
+            let idx = parse_expr(cg);
+            expect_kind(cg, TK_RBRACK());
+            result = result + "[" + idx + "]";
+        } else if pk(cg) == TK_NOT() {
+            // Macro call: ident!(args) or ident![args]
+            adv(cg); // skip !
+            if pk(cg) == TK_LPAREN() {
+                adv(cg);
+                let args = parse_call_args(cg);
+                expect_kind(cg, TK_RPAREN());
+                // vec![] handled in primary, this handles other macros
+                result = result + "_macro(" + args + ")";
+            } else if pk(cg) == TK_LBRACK() {
+                adv(cg);
+                let args = parse_call_args(cg);
+                expect_kind(cg, TK_RBRACK());
+                // vec![] -> qv_new()
+                if result == "vec" {
+                    result = "qv_new()";
+                } else {
+                    result = result + "_macro(" + args + ")";
+                }
+            }
+        } else { go = false; }
+    }
+    result
+}
+
+fn parse_call_args(cg: &mut CG) -> String {
+    let mut result = "";
+    let mut first = true;
+    let mut go = true;
+    while go {
+        if at_end(cg) || pk(cg) == TK_RPAREN() || pk(cg) == TK_RBRACK() { go = false; }
+        else {
+            if !first { result = result + ", "; }
+            first = false;
+            let arg = parse_expr(cg);
+            result = result + arg;
+            if pk(cg) == TK_COMMA() { adv(cg); }
+            else { go = false; }
+        }
+    }
+    result
+}
+
+fn parse_primary_expr(cg: &mut CG) -> String {
+    let k = pk(cg);
+
+    // Parenthesized expression
+    if k == TK_LPAREN() {
+        adv(cg);
+        let inner = parse_expr(cg);
+        expect_kind(cg, TK_RPAREN());
+        return "(" + inner + ")";
+    }
+    // Integer literal
+    if k == TK_INT_LIT() {
+        let v = ptxt(cg); adv(cg); return v;
+    }
+    // Float literal
+    if k == TK_FLOAT_LIT() {
+        let v = ptxt(cg); adv(cg); return v;
+    }
+    // String literal -> wrap in qs_from_lit()
+    if k == TK_STR_LIT() {
+        let v = ptxt(cg); adv(cg);
+        return "qs_lit(" + v + ")";
+    }
+    // Char literal
+    if k == TK_CHAR_LIT() {
+        let v = ptxt(cg); adv(cg); return v;
+    }
+    // Keywords: true, false, if-expression
+    if k == TK_KEYWORD() {
+        let txt = ptxt(cg);
+        if txt == "true" { adv(cg); return "1"; }
+        if txt == "false" { adv(cg); return "0"; }
+        // if-expression (used as value)
+        if txt == "if" {
+            adv(cg);
+            let cond = parse_expr(cg);
+            // Parse { expr } else { expr } as ternary
+            expect_kind(cg, TK_LBRACE());
+            let then_val = parse_expr(cg);
+            if pk(cg) == TK_SEMI() { adv(cg); }
+            expect_kind(cg, TK_RBRACE());
+            if ptxt(cg) == "else" {
+                adv(cg);
+                expect_kind(cg, TK_LBRACE());
+                let else_val = parse_expr(cg);
+                if pk(cg) == TK_SEMI() { adv(cg); }
+                expect_kind(cg, TK_RBRACE());
+                return "((" + cond + ") ? (" + then_val + ") : (" + else_val + "))";
+            }
+            return "((" + cond + ") ? (" + then_val + ") : 0)";
+        }
+    }
+    // Identifier or struct literal
+    if k == TK_IDENT() || k == TK_KEYWORD() {
+        let name = ptxt(cg);
+        adv(cg);
+
+        // Handle :: paths
+        let mut path = name;
+        let mut pgo = true;
+        while pgo {
+            if pk(cg) == TK_COLONCOLON() {
+                adv(cg);
+                if pk(cg) == TK_IDENT() || pk(cg) == TK_KEYWORD() {
+                    path = path + "_" + ptxt(cg);
+                    adv(cg);
+                }
+            } else { pgo = false; }
+        }
+
+        // Check for struct literal: Name { field: val, ... }
+        if sreg_has(&cg.sr, path) && pk(cg) == TK_LBRACE() {
+            adv(cg); // skip {
+            let mut lit = "(" + path + "){ ";
+            let mut first = true;
+            let mut sgo = true;
+            while sgo {
+                if at_end(cg) || pk(cg) == TK_RBRACE() { sgo = false; }
+                else {
+                    if !first { lit = lit + ", "; }
+                    first = false;
+                    let fname = ptxt(cg);
+                    adv(cg); // field name
+                    expect_kind(cg, TK_COLON()); // :
+                    let fval = parse_expr(cg);
+                    lit = lit + "." + fname + " = " + fval;
+                    if pk(cg) == TK_COMMA() { adv(cg); }
+                }
+            }
+            expect_kind(cg, TK_RBRACE());
+            lit = lit + " }";
+            return lit;
+        }
+
+        // vec![] macro
+        if path == "vec" && pk(cg) == TK_NOT() {
+            adv(cg); // skip !
+            if pk(cg) == TK_LBRACK() {
+                adv(cg);
+                // Parse optional initial values
+                if pk(cg) == TK_RBRACK() {
+                    adv(cg);
+                    return "qv_new()";
+                }
+                // Has initializers - skip for now, just create empty
+                let mut igo = true;
+                while igo {
+                    if at_end(cg) || pk(cg) == TK_RBRACK() { igo = false; }
+                    else { adv(cg); }
+                }
+                expect_kind(cg, TK_RBRACK());
+                return "qv_new()";
+            }
+        }
+
+        return path;
+    }
+    // Fallback
+    if !at_end(cg) {
+        let v = ptxt(cg); adv(cg); return v;
+    }
+    ""
+}
+
+// ===========================================================================
+// PASS 2: Statement codegen
+// ===========================================================================
+
+// Build a C format string from BuildLang format string.
+// Replace {} with appropriate format specifiers.
+// For the self-hosted compiler, we use a generic approach:
+// - %s for BuildString args (via qs_cstr())
+// - %lld for integer args
+// - %f for float args
+// We'll use a simpler approach: emit all as %s and convert in the call.
+// Actually, use the runtime's qrt_print_fmt() which handles BuildString natively.
+// Simplest approach: keep codegen.bld's %lld for simple cases.
+fn build_c_format(fmt_tok: String, newline: bool) -> String {
+    let flen = fmt_tok.len();
+    let mut inner = fmt_tok;
+    if flen >= 2 {
+        if fmt_tok.starts_with("\"") {
+            inner = fmt_tok.substring(1, flen - 2);
+        }
+    }
+    // Replace {} placeholders - we'll figure out types from context
+    // For now, use %s as our default (BuildString-aware runtime)
+    let ilen = inner.len();
+    let mut result = "";
+    let mut i: i32 = 0;
+    let mut placeholder_count: i32 = 0;
+    while i < ilen {
+        let ch = inner.char_at(i);
+        if ch == "{" && i + 1 < ilen {
+            let next = inner.char_at(i + 1);
+            if next == "}" {
+                result = result + "%s";
+                placeholder_count = placeholder_count + 1;
+                i = i + 2;
+            } else {
+                result = result + ch;
+                i = i + 1;
+            }
+        } else {
+            result = result + ch;
+            i = i + 1;
+        }
+    }
+    if newline { result = result + "\\n"; }
+    result
+}
+
+// Count {} placeholders in a format string token
+fn count_placeholders(fmt_tok: String) -> i32 {
+    let flen = fmt_tok.len();
+    let mut inner = fmt_tok;
+    if flen >= 2 {
+        if fmt_tok.starts_with("\"") {
+            inner = fmt_tok.substring(1, flen - 2);
+        }
+    }
+    let ilen = inner.len();
+    let mut count: i32 = 0;
+    let mut i: i32 = 0;
+    while i < ilen {
+        let ch = inner.char_at(i);
+        if ch == "{" && i + 1 < ilen {
+            let next = inner.char_at(i + 1);
+            if next == "}" { count = count + 1; i = i + 2; }
+            else { i = i + 1; }
+        } else { i = i + 1; }
+    }
+    count
+}
+
+// Codegen println!/print!/eprintln!
+fn codegen_macro_print(cg: &mut CG, macro_name: String) {
+    expect_kind(cg, TK_NOT());
+    expect_kind(cg, TK_LPAREN());
+
+    let is_println = macro_name == "println";
+    let is_eprintln = macro_name == "eprintln";
+
+    // No-arg println!()
+    if pk(cg) == TK_RPAREN() {
+        adv(cg);
+        if pk(cg) == TK_SEMI() { adv(cg); }
+        if is_eprintln {
+            emit_line(cg, "fprintf(stderr, \"\\n\");");
+        } else if is_println {
+            emit_line(cg, "printf(\"\\n\");");
+        } else {
+            emit_line(cg, "printf(\"\");");
+        }
+        return;
+    }
+
+    // First arg: format string
+    let mut c_fmt = "";
+    let mut fmt_tok_raw = "";
+    if pk(cg) == TK_STR_LIT() {
+        fmt_tok_raw = ptxt(cg);
+        adv(cg);
+        c_fmt = build_c_format(fmt_tok_raw, is_println);
+    } else {
+        // Not a string literal — expression
+        let arg = parse_expr(cg);
+        if pk(cg) == TK_RPAREN() { adv(cg); }
+        if pk(cg) == TK_SEMI() { adv(cg); }
+        if is_println {
+            emit_line(cg, "printf(\"%s\\n\", QF(" + arg + "));");
+        } else if is_eprintln {
+            emit_line(cg, "fprintf(stderr, \"%s\\n\", QF(" + arg + "));");
+        } else {
+            emit_line(cg, "printf(\"%s\", QF(" + arg + "));");
+        }
+        return;
+    }
+
+    // Collect remaining args
+    let mut args_parts = "";
+    let mut arg_count: i32 = 0;
+    let mut has_args = false;
+    if pk(cg) == TK_COMMA() {
+        adv(cg);
+        let mut first = true;
+        let mut ago = true;
+        while ago {
+            if at_end(cg) || pk(cg) == TK_RPAREN() { ago = false; }
+            else {
+                if !first { args_parts = args_parts + ", "; }
+                first = false;
+                has_args = true;
+                let arg = parse_expr(cg);
+                // Wrap each arg in QF() for generic %s formatting
+                args_parts = args_parts + "QF(" + arg + ")";
+                arg_count = arg_count + 1;
+                if pk(cg) == TK_COMMA() { adv(cg); }
+                else { ago = false; }
+            }
+        }
+    }
+
+    expect_kind(cg, TK_RPAREN());
+    if pk(cg) == TK_SEMI() { adv(cg); }
+
+    // Build printf call
+    let mut call = "";
+    if is_eprintln {
+        call = "fprintf(stderr, \"" + c_fmt + "\"";
+    } else {
+        call = "printf(\"" + c_fmt + "\"";
+    }
+    if has_args {
+        call = call + ", " + args_parts;
+    }
+    call = call + ");";
+    emit_line(cg, call);
+}
+
+// Parse a statement and emit C code
+fn codegen_stmt(cg: &mut CG) {
+    let k = pk(cg);
+    let txt = ptxt(cg);
+
+    // --- println! / eprintln! / print! ---
+    if k == TK_IDENT() && (txt == "println" || txt == "eprintln" || txt == "print") {
+        if pk_at(cg, 1) == TK_NOT() {
+            let macro_name = txt;
+            adv(cg);
+            codegen_macro_print(cg, macro_name);
+            return;
+        }
+    }
+
+    // --- let binding ---
+    if k == TK_KEYWORD() && txt == "let" {
+        adv(cg); // skip "let"
+        let mut is_mut = false;
+        if ptxt(cg) == "mut" { is_mut = true; adv(cg); }
+        let var_name = ptxt(cg);
+        adv(cg);
+
+        // Optional type annotation
+        let mut explicit_type = "";
+        if pk(cg) == TK_COLON() {
+            adv(cg);
+            explicit_type = parse_type(cg);
+        }
+
+        // = initializer
+        let mut init_val = "";
+        if pk(cg) == TK_ASSIGN() {
+            adv(cg);
+            init_val = parse_expr(cg);
+        }
+        if pk(cg) == TK_SEMI() { adv(cg); }
+
+        // Determine C type
+        let mut c_type = "";
+        if explicit_type != "" {
+            c_type = explicit_type;
+        } else {
+            c_type = infer_type(cg, init_val);
+        }
+
+        if init_val != "" {
+            emit_line(cg, c_type + " " + var_name + " = " + init_val + ";");
+        } else {
+            emit_line(cg, c_type + " " + var_name + ";");
+        }
+        return;
+    }
+
+    // --- if / else ---
+    if k == TK_KEYWORD() && txt == "if" {
+        adv(cg);
+        let cond = parse_expr(cg);
+        emit_line(cg, "if (" + cond + ") {");
+        cg.indent = cg.indent + 1;
+        codegen_block(cg);
+        cg.indent = cg.indent - 1;
+        let mut ego = true;
+        while ego {
+            if ptxt(cg) == "else" {
+                adv(cg);
+                if ptxt(cg) == "if" {
+                    adv(cg);
+                    let cond2 = parse_expr(cg);
+                    emit_line(cg, "} else if (" + cond2 + ") {");
+                    cg.indent = cg.indent + 1;
+                    codegen_block(cg);
+                    cg.indent = cg.indent - 1;
+                } else {
+                    emit_line(cg, "} else {");
+                    cg.indent = cg.indent + 1;
+                    codegen_block(cg);
+                    cg.indent = cg.indent - 1;
+                    ego = false;
+                }
+            } else { ego = false; }
+        }
+        emit_line(cg, "}");
+        return;
+    }
+
+    // --- while ---
+    if k == TK_KEYWORD() && txt == "while" {
+        adv(cg);
+        let cond = parse_expr(cg);
+        emit_line(cg, "while (" + cond + ") {");
+        cg.indent = cg.indent + 1;
+        codegen_block(cg);
+        cg.indent = cg.indent - 1;
+        emit_line(cg, "}");
+        return;
+    }
+
+    // --- loop -> while(1) ---
+    if k == TK_KEYWORD() && txt == "loop" {
+        adv(cg);
+        emit_line(cg, "while (1) {");
+        cg.indent = cg.indent + 1;
+        codegen_block(cg);
+        cg.indent = cg.indent - 1;
+        emit_line(cg, "}");
+        return;
+    }
+
+    // --- for x in collection { ... } ---
+    if k == TK_KEYWORD() && txt == "for" {
+        adv(cg); // skip "for"
+        let var = ptxt(cg);
+        adv(cg); // skip variable name
+        expect_text(cg, "in"); // skip "in"
+        let collection = parse_expr(cg);
+        emit_line(cg, "for (int64_t _fi = 0; _fi < qv_len(" + collection + "); _fi++) {");
+        cg.indent = cg.indent + 1;
+        emit_line(cg, "int64_t " + var + " = qv_get(" + collection + ", _fi);");
+        codegen_block(cg);
+        cg.indent = cg.indent - 1;
+        emit_line(cg, "}");
+        return;
+    }
+
+    // --- return ---
+    if k == TK_KEYWORD() && txt == "return" {
+        adv(cg);
+        if pk(cg) == TK_SEMI() {
+            adv(cg);
+            emit_line(cg, "return;");
+        } else {
+            let val = parse_expr(cg);
+            if pk(cg) == TK_SEMI() { adv(cg); }
+            emit_line(cg, "return " + val + ";");
+        }
+        return;
+    }
+
+    // --- break / continue ---
+    if k == TK_KEYWORD() && (txt == "break" || txt == "continue") {
+        adv(cg);
+        if pk(cg) == TK_SEMI() { adv(cg); }
+        emit_line(cg, txt + ";");
+        return;
+    }
+
+    // --- Expression statement ---
+    let expr = parse_expr(cg);
+
+    // Assignment
+    let ak = pk(cg);
+    if ak == TK_ASSIGN() {
+        adv(cg);
+        let rhs = parse_expr(cg);
+        if pk(cg) == TK_SEMI() { adv(cg); }
+        emit_line(cg, expr + " = " + rhs + ";");
+        return;
+    }
+    // Compound assignments
+    if ak == TK_PLUS_EQ() {
+        adv(cg); let rhs = parse_expr(cg);
+        if pk(cg) == TK_SEMI() { adv(cg); }
+        emit_line(cg, expr + " = QADD(" + expr + ", " + rhs + ");");
+        return;
+    }
+    if ak == TK_MINUS_EQ() {
+        adv(cg); let rhs = parse_expr(cg);
+        if pk(cg) == TK_SEMI() { adv(cg); }
+        emit_line(cg, expr + " -= " + rhs + ";");
+        return;
+    }
+    if ak == TK_STAR_EQ() {
+        adv(cg); let rhs = parse_expr(cg);
+        if pk(cg) == TK_SEMI() { adv(cg); }
+        emit_line(cg, expr + " *= " + rhs + ";");
+        return;
+    }
+    if ak == TK_SLASH_EQ() {
+        adv(cg); let rhs = parse_expr(cg);
+        if pk(cg) == TK_SEMI() { adv(cg); }
+        emit_line(cg, expr + " /= " + rhs + ";");
+        return;
+    }
+
+    if pk(cg) == TK_SEMI() { adv(cg); }
+
+    if expr != "" {
+        emit_line(cg, expr + ";");
+    }
+}
+
+// Infer C type from initializer expression
+fn infer_type(cg: &CG, init: String) -> String {
+    if init == "" { return "int64_t"; }
+    // String literal (wrapped in qs_lit)
+    if init.starts_with("qs_lit(") { return "BuildString"; }
+    // Raw string literal
+    if init.starts_with("\"") { return "BuildString"; }
+    // Boolean values
+    if init == "1" || init == "0" { return "int64_t"; }
+    // Vec
+    if init.starts_with("qv_new") { return "BuildVec"; }
+    // Struct literal
+    if init.starts_with("(") && init.contains("){ ") { return "auto"; }
+    // Float literal
+    if init.contains(".") && !init.contains("(") { return "double"; }
+    // Function calls that return strings
+    if init.starts_with("qrt_args_get") { return "BuildString"; }
+    if init.starts_with("qrt_read_file") { return "BuildString"; }
+    if init.starts_with("qrt_read_all") { return "BuildString"; }
+    // Split functions return QSplitResult
+    if init.starts_with("qs_split") { return "QSplitResult"; }
+    // String methods that return strings
+    if init.starts_with("qs_char_at") { return "BuildString"; }
+    if init.starts_with("qs_substring") { return "BuildString"; }
+    if init.starts_with("qs_trim") { return "BuildString"; }
+    if init.starts_with("qs_to_lowercase") { return "BuildString"; }
+    if init.starts_with("qs_to_uppercase") { return "BuildString"; }
+    if init.starts_with("qs_replace") { return "BuildString"; }
+    if init.starts_with("qs_concat") { return "BuildString"; }
+    if init.starts_with("qs_new") { return "BuildString"; }
+    if init.starts_with("qs_lit") { return "BuildString"; }
+    // Integer-returning string functions
+    if init.starts_with("qs_len") { return "int64_t"; }
+    if init.starts_with("qs_starts_with") { return "int"; }
+    if init.starts_with("qs_ends_with") { return "int"; }
+    if init.starts_with("qs_contains") { return "int"; }
+    if init.starts_with("qs_is_empty") { return "int"; }
+    if init.starts_with("qs_parse_int") { return "int64_t"; }
+    if init.starts_with("qs_parse_float") { return "double"; }
+    // Function calls that return ints
+    if init.starts_with("qrt_args_count") { return "int64_t"; }
+    if init.starts_with("qrt_stdin_is_pipe") { return "int"; }
+    if init.starts_with("qrt_file_exists") { return "int"; }
+    if init.starts_with("qv_get") { return "int64_t"; }
+    if init.starts_with("qv_len") { return "int64_t"; }
+    // QADD inherits type from operands
+    if init.starts_with("QADD") { return "int64_t"; }
+    // Field access patterns
+    if init.contains(".len") { return "int64_t"; }
+    if init.contains(".ptr") { return "const char*"; }
+    if init.contains(".count") { return "int64_t"; }
+    if init.contains(".pos") { return "int64_t"; }
+    // Ternary expression (from if-expression)
+    if init.starts_with("((") && init.contains("?") { return "int64_t"; }
+    // Default
+    "int64_t"
+}
+
+// Parse { stmt; ... }
+fn codegen_block(cg: &mut CG) {
+    codegen_block_inner(cg, false);
+}
+
+// Parse a function body block — last expression becomes `return expr;`
+fn codegen_fn_block(cg: &mut CG) {
+    codegen_block_inner(cg, true);
+}
+
+// Scan forward from current position to find where an if/else chain ends.
+// Returns the position AFTER the entire if/else. Does NOT move cg.pos.
+fn scan_past_if(cg: &CG) -> i32 {
+    let mut p = cg.pos;
+    // Skip "if" keyword
+    if p < cg.count { p = p + 1; }
+    // Skip condition expression (until we hit {)
+    let mut go = true;
+    while go {
+        if p >= cg.count { go = false; }
+        else {
+            let k = vec_get(cg.tk, p);
+            if k == TK_LBRACE() { go = false; }
+            else { p = p + 1; }
+        }
+    }
+    // Skip balanced braces for the if body
+    if p < cg.count {
+        p = p + 1; // skip {
+        let mut depth: i32 = 1;
+        let mut bgo = true;
+        while bgo {
+            if p >= cg.count { bgo = false; }
+            else {
+                let k = vec_get(cg.tk, p);
+                if k == TK_LBRACE() { depth = depth + 1; }
+                else if k == TK_RBRACE() { depth = depth - 1; if depth == 0 { bgo = false; } }
+                p = p + 1;
+            }
+        }
+    }
+    // Check for else
+    if p < cg.count {
+        let s = vec_get(cg.ts, p);
+        let l = vec_get(cg.tl, p);
+        let mut txt = "";
+        if l > 0 { txt = cg.pool.substring(s, l); }
+        if txt == "else" {
+            p = p + 1;
+            // Check for else if
+            if p < cg.count {
+                let s2 = vec_get(cg.ts, p);
+                let l2 = vec_get(cg.tl, p);
+                let mut txt2 = "";
+                if l2 > 0 { txt2 = cg.pool.substring(s2, l2); }
+                if txt2 == "if" {
+                    // Recursion needed but we'll use iteration
+                    // For now, skip the else { ... } block
+                    // Actually, handle else if by scanning forward again
+                    let saved_pos = cg.pos;
+                    // Can't easily recurse without mutable cg, just scan braces
+                }
+            }
+            // Skip the else body (find { and skip balanced braces)
+            let mut fgo = true;
+            while fgo {
+                if p >= cg.count { fgo = false; }
+                else {
+                    let k = vec_get(cg.tk, p);
+                    if k == TK_LBRACE() { fgo = false; }
+                    else { p = p + 1; }
+                }
+            }
+            if p < cg.count {
+                p = p + 1;
+                let mut depth: i32 = 1;
+                let mut bgo = true;
+                while bgo {
+                    if p >= cg.count { bgo = false; }
+                    else {
+                        let k = vec_get(cg.tk, p);
+                        if k == TK_LBRACE() { depth = depth + 1; }
+                        else if k == TK_RBRACE() { depth = depth - 1; if depth == 0 { bgo = false; } }
+                        p = p + 1;
+                    }
+                }
+            }
+        }
+    }
+    p
+}
+
+fn codegen_block_inner(cg: &mut CG, is_fn_body: bool) {
+    if !expect_kind(cg, TK_LBRACE()) { return; }
+    let mut go = true;
+    while go {
+        if at_end(cg) || pk(cg) == TK_RBRACE() { go = false; }
+        else {
+            let k = pk(cg);
+            let txt = ptxt(cg);
+
+            // For fn body: detect if the current `if` is the last statement
+            // and used as an if-expression (followed by } closing the fn body)
+            if is_fn_body && k == TK_KEYWORD() && txt == "if" {
+                let end_pos = scan_past_if(cg);
+                // Check if the token at end_pos is } (closing the function body)
+                let mut at_fn_end = false;
+                if end_pos < cg.count {
+                    let ek = vec_get(cg.tk, end_pos);
+                    if ek == TK_RBRACE() { at_fn_end = true; }
+                } else if end_pos >= cg.count {
+                    at_fn_end = true;
+                }
+
+                if at_fn_end {
+                    // This if/else is an if-expression used as implicit return.
+                    // Parse it as an expression (ternary) and return it.
+                    let expr = parse_expr(cg);
+                    emit_line(cg, "return " + expr + ";");
+                } else {
+                    // Normal if-statement
+                    codegen_stmt(cg);
+                }
+            }
+            // For fn body: bare expression without semicolon at end = implicit return
+            else {
+                let is_keyword_stmt = k == TK_KEYWORD() && (
+                    txt == "let" || txt == "while" || txt == "loop" ||
+                    txt == "for" || txt == "return" || txt == "break" || txt == "continue"
+                );
+                let is_macro = (txt == "println" || txt == "eprintln" || txt == "print") && pk_at(cg, 1) == TK_NOT();
+
+                if is_fn_body && !is_keyword_stmt && !is_macro && k != TK_KEYWORD() || (is_fn_body && !is_keyword_stmt && !is_macro && k == TK_KEYWORD() && txt != "if") {
+                    // Parse as expression and check if it's the last thing before }
+                    let expr = parse_expr(cg);
+                    if pk(cg) == TK_RBRACE() {
+                        // Implicit return
+                        if expr != "" {
+                            emit_line(cg, "return " + expr + ";");
+                        }
+                    } else {
+                        // Normal expression statement
+                        let ak = pk(cg);
+                        if ak == TK_ASSIGN() {
+                            adv(cg);
+                            let rhs = parse_expr(cg);
+                            if pk(cg) == TK_SEMI() { adv(cg); }
+                            emit_line(cg, expr + " = " + rhs + ";");
+                        } else if ak == TK_PLUS_EQ() {
+                            adv(cg); let rhs = parse_expr(cg);
+                            if pk(cg) == TK_SEMI() { adv(cg); }
+                            emit_line(cg, expr + " = QADD(" + expr + ", " + rhs + ");");
+                        } else if ak == TK_MINUS_EQ() {
+                            adv(cg); let rhs = parse_expr(cg);
+                            if pk(cg) == TK_SEMI() { adv(cg); }
+                            emit_line(cg, expr + " -= " + rhs + ";");
+                        } else if ak == TK_STAR_EQ() {
+                            adv(cg); let rhs = parse_expr(cg);
+                            if pk(cg) == TK_SEMI() { adv(cg); }
+                            emit_line(cg, expr + " *= " + rhs + ";");
+                        } else if ak == TK_SLASH_EQ() {
+                            adv(cg); let rhs = parse_expr(cg);
+                            if pk(cg) == TK_SEMI() { adv(cg); }
+                            emit_line(cg, expr + " /= " + rhs + ";");
+                        } else {
+                            if pk(cg) == TK_SEMI() { adv(cg); }
+                            if expr != "" {
+                                emit_line(cg, expr + ";");
+                            }
+                        }
+                    }
+                } else {
+                    codegen_stmt(cg);
+                }
+            }
+        }
+    }
+    expect_kind(cg, TK_RBRACE());
+}
+
+// ===========================================================================
+// PASS 2: Top-level item codegen
+// ===========================================================================
+
+fn codegen_function(cg: &mut CG) {
+    let name = ptxt(cg);
+    adv(cg);
+
+    // Parse params
+    expect_kind(cg, TK_LPAREN());
+    let mut params_c = "";
+    let mut first = true;
+    let mut pgo = true;
+    while pgo {
+        if at_end(cg) || pk(cg) == TK_RPAREN() { pgo = false; }
+        else {
+            if !first { params_c = params_c + ", "; }
+            first = false;
+            if ptxt(cg) == "mut" { adv(cg); }
+            let pname = ptxt(cg);
+            adv(cg);
+            expect_kind(cg, TK_COLON());
+            let pty = parse_type(cg);
+            params_c = params_c + pty + " " + pname;
+            if pk(cg) == TK_COMMA() { adv(cg); }
+            else { pgo = false; }
+        }
+    }
+    expect_kind(cg, TK_RPAREN());
+
+    // Return type
+    let mut ret_c = "void";
+    if pk(cg) == TK_ARROW() {
+        adv(cg);
+        ret_c = parse_type(cg);
+    }
+
+    // Emit function header
+    if name == "main" {
+        emit(cg, "int main(int argc, char** argv) {\n");
+        cg.indent = cg.indent + 1;
+        emit_line(cg, "qrt_init(argc, argv);");
+        codegen_block(cg);
+        emit_line(cg, "return 0;");
+        cg.indent = cg.indent - 1;
+    } else if ret_c != "void" {
+        emit(cg, ret_c + " " + name + "(" + params_c + ") {\n");
+        cg.indent = cg.indent + 1;
+        codegen_fn_block(cg);
+        cg.indent = cg.indent - 1;
+    } else {
+        emit(cg, ret_c + " " + name + "(" + params_c + ") {\n");
+        cg.indent = cg.indent + 1;
+        codegen_block(cg);
+        cg.indent = cg.indent - 1;
+    }
+    emit(cg, "}\n\n");
+}
+
+fn codegen_item(cg: &mut CG) {
+    let k = pk(cg);
+    let txt = ptxt(cg);
+
+    // Skip pub
+    if k == TK_KEYWORD() && txt == "pub" { adv(cg); }
+
+    let k2 = pk(cg);
+    let txt2 = ptxt(cg);
+
+    // fn
+    if k2 == TK_KEYWORD() && txt2 == "fn" {
+        adv(cg);
+        codegen_function(cg);
+        return;
+    }
+
+    // struct -> already handled in pass1, skip body
+    if k2 == TK_KEYWORD() && txt2 == "struct" {
+        adv(cg);
+        if pk(cg) == TK_IDENT() || pk(cg) == TK_KEYWORD() { adv(cg); }
+        if pk(cg) == TK_LBRACE() { skip_balanced_braces(cg); }
+        else if pk(cg) == TK_SEMI() { adv(cg); }
+        return;
+    }
+
+    // enum, impl, trait, mod, type -> skip
+    if k2 == TK_KEYWORD() && (txt2 == "enum" || txt2 == "impl" ||
+       txt2 == "trait" || txt2 == "mod" || txt2 == "type") {
+        adv(cg);
+        if pk(cg) == TK_IDENT() || pk(cg) == TK_KEYWORD() { adv(cg); }
+        if pk(cg) == TK_LBRACE() { skip_balanced_braces(cg); }
+        else if pk(cg) == TK_SEMI() { adv(cg); }
+        return;
+    }
+    if k2 == TK_KEYWORD() && txt2 == "use" {
+        adv(cg);
+        skip_to_semi(cg);
+        return;
+    }
+    if k2 == TK_KEYWORD() && txt2 == "const" {
+        adv(cg);
+        skip_to_semi(cg);
+        return;
+    }
+
+    // Attribute: #[...]
+    if k2 == TK_HASH() {
+        adv(cg);
+        if pk(cg) == TK_LBRACK() {
+            adv(cg);
+            let mut go = true;
+            while go {
+                if at_end(cg) || pk(cg) == TK_RBRACK() { go = false; }
+                else { adv(cg); }
+            }
+            expect_kind(cg, TK_RBRACK());
+        }
+        return;
+    }
+
+    // Unknown: skip
+    if !at_end(cg) { adv(cg); }
+}
+
+fn codegen_module(cg: &mut CG) {
+    let mut go = true;
+    while go {
+        if at_end(cg) { go = false; }
+        else { codegen_item(cg); }
+    }
+}
+
+// ===========================================================================
+// RUNTIME HEADER (embedded minimal C runtime)
+// ===========================================================================
+fn emit_runtime() -> String {
+    let mut rt = "";
+    rt = rt + "/* ================================================================ */\n";
+    rt = rt + "/* qc runtime — minimal BuildLang runtime for generated C code     */\n";
+    rt = rt + "/* ================================================================ */\n";
+    rt = rt + "#include <stdio.h>\n";
+    rt = rt + "#include <stdint.h>\n";
+    rt = rt + "#include <stdlib.h>\n";
+    rt = rt + "#include <string.h>\n";
+    rt = rt + "#include <stdbool.h>\n";
+    rt = rt + "#include <math.h>\n";
+    rt = rt + "#include <ctype.h>\n\n";
+
+    // BuildString: length-prefixed string (ptr + len)
+    rt = rt + "/* --- BuildString --- */\n";
+    rt = rt + "typedef struct { const char* ptr; int64_t len; } BuildString;\n\n";
+
+    rt = rt + "static BuildString qs_lit(const char* s) {\n";
+    rt = rt + "    BuildString qs; qs.ptr = s; qs.len = (int64_t)strlen(s); return qs;\n";
+    rt = rt + "}\n\n";
+
+    rt = rt + "static BuildString qs_new(const char* s, int64_t len) {\n";
+    rt = rt + "    char* buf = (char*)malloc(len + 1);\n";
+    rt = rt + "    memcpy(buf, s, len); buf[len] = 0;\n";
+    rt = rt + "    BuildString qs; qs.ptr = buf; qs.len = len; return qs;\n";
+    rt = rt + "}\n\n";
+
+    rt = rt + "static const char* qs_cstr(BuildString s) { return s.ptr; }\n\n";
+
+    rt = rt + "static int64_t qs_len(BuildString s) { return s.len; }\n\n";
+
+    rt = rt + "static BuildString qs_char_at(BuildString s, int64_t idx) {\n";
+    rt = rt + "    if (idx < 0 || idx >= s.len) return qs_lit(\"\");\n";
+    rt = rt + "    char buf[2]; buf[0] = s.ptr[idx]; buf[1] = 0;\n";
+    rt = rt + "    return qs_new(buf, 1);\n";
+    rt = rt + "}\n\n";
+
+    rt = rt + "static BuildString qs_substring(BuildString s, int64_t start, int64_t len) {\n";
+    rt = rt + "    if (start < 0) start = 0;\n";
+    rt = rt + "    if (start >= s.len) return qs_lit(\"\");\n";
+    rt = rt + "    if (start + len > s.len) len = s.len - start;\n";
+    rt = rt + "    return qs_new(s.ptr + start, len);\n";
+    rt = rt + "}\n\n";
+
+    rt = rt + "static int qs_starts_with(BuildString s, BuildString prefix) {\n";
+    rt = rt + "    if (prefix.len > s.len) return 0;\n";
+    rt = rt + "    return memcmp(s.ptr, prefix.ptr, prefix.len) == 0;\n";
+    rt = rt + "}\n\n";
+
+    rt = rt + "static int qs_ends_with(BuildString s, BuildString suffix) {\n";
+    rt = rt + "    if (suffix.len > s.len) return 0;\n";
+    rt = rt + "    return memcmp(s.ptr + s.len - suffix.len, suffix.ptr, suffix.len) == 0;\n";
+    rt = rt + "}\n\n";
+
+    rt = rt + "static int qs_contains(BuildString s, BuildString needle) {\n";
+    rt = rt + "    if (needle.len == 0) return 1;\n";
+    rt = rt + "    if (needle.len > s.len) return 0;\n";
+    rt = rt + "    return strstr(s.ptr, needle.ptr) != NULL;\n";
+    rt = rt + "}\n\n";
+
+    rt = rt + "static int qs_is_empty(BuildString s) { return s.len == 0; }\n\n";
+
+    rt = rt + "static int qs_eq(BuildString a, BuildString b) {\n";
+    rt = rt + "    if (a.len != b.len) return 0;\n";
+    rt = rt + "    return memcmp(a.ptr, b.ptr, a.len) == 0;\n";
+    rt = rt + "}\n\n";
+
+    rt = rt + "static BuildString qs_concat(BuildString a, BuildString b) {\n";
+    rt = rt + "    int64_t newlen = a.len + b.len;\n";
+    rt = rt + "    char* buf = (char*)malloc(newlen + 1);\n";
+    rt = rt + "    memcpy(buf, a.ptr, a.len);\n";
+    rt = rt + "    memcpy(buf + a.len, b.ptr, b.len);\n";
+    rt = rt + "    buf[newlen] = 0;\n";
+    rt = rt + "    BuildString r; r.ptr = buf; r.len = newlen; return r;\n";
+    rt = rt + "}\n\n";
+
+    rt = rt + "static BuildString qs_trim(BuildString s) {\n";
+    rt = rt + "    int64_t start = 0, end = s.len;\n";
+    rt = rt + "    while (start < end && isspace((unsigned char)s.ptr[start])) start++;\n";
+    rt = rt + "    while (end > start && isspace((unsigned char)s.ptr[end-1])) end--;\n";
+    rt = rt + "    return qs_new(s.ptr + start, end - start);\n";
+    rt = rt + "}\n\n";
+
+    rt = rt + "static BuildString qs_to_lowercase(BuildString s) {\n";
+    rt = rt + "    char* buf = (char*)malloc(s.len + 1);\n";
+    rt = rt + "    for (int64_t i = 0; i < s.len; i++) buf[i] = tolower((unsigned char)s.ptr[i]);\n";
+    rt = rt + "    buf[s.len] = 0;\n";
+    rt = rt + "    BuildString r; r.ptr = buf; r.len = s.len; return r;\n";
+    rt = rt + "}\n\n";
+
+    rt = rt + "static BuildString qs_to_uppercase(BuildString s) {\n";
+    rt = rt + "    char* buf = (char*)malloc(s.len + 1);\n";
+    rt = rt + "    for (int64_t i = 0; i < s.len; i++) buf[i] = toupper((unsigned char)s.ptr[i]);\n";
+    rt = rt + "    buf[s.len] = 0;\n";
+    rt = rt + "    BuildString r; r.ptr = buf; r.len = s.len; return r;\n";
+    rt = rt + "}\n\n";
+
+    rt = rt + "static int64_t qs_parse_int(BuildString s) { return atoll(s.ptr); }\n\n";
+    rt = rt + "static double qs_parse_float(BuildString s) { return atof(s.ptr); }\n\n";
+
+    rt = rt + "static BuildString qs_replace(BuildString s, BuildString old, BuildString new_s) {\n";
+    rt = rt + "    if (old.len == 0) return s;\n";
+    rt = rt + "    /* Simple single-replace */\n";
+    rt = rt + "    const char* p = strstr(s.ptr, old.ptr);\n";
+    rt = rt + "    if (!p) return s;\n";
+    rt = rt + "    int64_t pos = p - s.ptr;\n";
+    rt = rt + "    int64_t newlen = s.len - old.len + new_s.len;\n";
+    rt = rt + "    char* buf = (char*)malloc(newlen + 1);\n";
+    rt = rt + "    memcpy(buf, s.ptr, pos);\n";
+    rt = rt + "    memcpy(buf + pos, new_s.ptr, new_s.len);\n";
+    rt = rt + "    memcpy(buf + pos + new_s.len, s.ptr + pos + old.len, s.len - pos - old.len);\n";
+    rt = rt + "    buf[newlen] = 0;\n";
+    rt = rt + "    BuildString r; r.ptr = buf; r.len = newlen; return r;\n";
+    rt = rt + "}\n\n";
+
+    // BuildVec: dynamic array for i64/i32 values
+    rt = rt + "/* --- BuildVec --- */\n";
+    rt = rt + "typedef struct { int64_t* data; int64_t len; int64_t cap; } BuildVec;\n\n";
+
+    rt = rt + "static BuildVec qv_new(void) {\n";
+    rt = rt + "    BuildVec v; v.data = NULL; v.len = 0; v.cap = 0; return v;\n";
+    rt = rt + "}\n\n";
+
+    rt = rt + "static void qv_push(BuildVec* v, int64_t val) {\n";
+    rt = rt + "    if (v->len >= v->cap) {\n";
+    rt = rt + "        v->cap = v->cap == 0 ? 8 : v->cap * 2;\n";
+    rt = rt + "        v->data = (int64_t*)realloc(v->data, v->cap * sizeof(int64_t));\n";
+    rt = rt + "    }\n";
+    rt = rt + "    v->data[v->len++] = val;\n";
+    rt = rt + "}\n\n";
+
+    rt = rt + "static int64_t qv_get(BuildVec v, int64_t idx) {\n";
+    rt = rt + "    if (idx < 0 || idx >= v.len) return 0;\n";
+    rt = rt + "    return v.data[idx];\n";
+    rt = rt + "}\n\n";
+
+    rt = rt + "static int64_t qv_len(BuildVec v) { return v.len; }\n\n";
+
+    // Split results as a simple struct
+    rt = rt + "/* --- Split result (array of BuildStrings) --- */\n";
+    rt = rt + "typedef struct { BuildString* items; int64_t len; int64_t cap; } QSplitResult;\n\n";
+
+    rt = rt + "static QSplitResult qs_split(BuildString s, BuildString delim) {\n";
+    rt = rt + "    QSplitResult r; r.items = NULL; r.len = 0; r.cap = 0;\n";
+    rt = rt + "    int64_t start = 0;\n";
+    rt = rt + "    for (int64_t i = 0; i <= s.len - delim.len; i++) {\n";
+    rt = rt + "        if (memcmp(s.ptr + i, delim.ptr, delim.len) == 0) {\n";
+    rt = rt + "            if (r.len >= r.cap) { r.cap = r.cap == 0 ? 8 : r.cap * 2; r.items = (BuildString*)realloc(r.items, r.cap * sizeof(BuildString)); }\n";
+    rt = rt + "            r.items[r.len++] = qs_new(s.ptr + start, i - start);\n";
+    rt = rt + "            i += delim.len - 1; start = i + 1;\n";
+    rt = rt + "        }\n";
+    rt = rt + "    }\n";
+    rt = rt + "    if (r.len >= r.cap) { r.cap = r.cap == 0 ? 8 : r.cap * 2; r.items = (BuildString*)realloc(r.items, r.cap * sizeof(BuildString)); }\n";
+    rt = rt + "    r.items[r.len++] = qs_new(s.ptr + start, s.len - start);\n";
+    rt = rt + "    return r;\n";
+    rt = rt + "}\n\n";
+
+    rt = rt + "static QSplitResult qs_split_whitespace(BuildString s) {\n";
+    rt = rt + "    QSplitResult r; r.items = NULL; r.len = 0; r.cap = 0;\n";
+    rt = rt + "    int64_t i = 0;\n";
+    rt = rt + "    while (i < s.len) {\n";
+    rt = rt + "        while (i < s.len && isspace((unsigned char)s.ptr[i])) i++;\n";
+    rt = rt + "        if (i >= s.len) break;\n";
+    rt = rt + "        int64_t start = i;\n";
+    rt = rt + "        while (i < s.len && !isspace((unsigned char)s.ptr[i])) i++;\n";
+    rt = rt + "        if (r.len >= r.cap) { r.cap = r.cap == 0 ? 8 : r.cap * 2; r.items = (BuildString*)realloc(r.items, r.cap * sizeof(BuildString)); }\n";
+    rt = rt + "        r.items[r.len++] = qs_new(s.ptr + start, i - start);\n";
+    rt = rt + "    }\n";
+    rt = rt + "    return r;\n";
+    rt = rt + "}\n\n";
+
+    // Runtime: args, file I/O, etc.
+    rt = rt + "/* --- Runtime globals --- */\n";
+    rt = rt + "static int _qrt_argc; static char** _qrt_argv;\n";
+    rt = rt + "static void qrt_init(int argc, char** argv) { _qrt_argc = argc; _qrt_argv = argv; }\n\n";
+
+    rt = rt + "static int64_t qrt_args_count(void) { return (int64_t)_qrt_argc; }\n\n";
+
+    rt = rt + "static BuildString qrt_args_get(int64_t idx) {\n";
+    rt = rt + "    if (idx < 0 || idx >= _qrt_argc) return qs_lit(\"\");\n";
+    rt = rt + "    return qs_lit(_qrt_argv[idx]);\n";
+    rt = rt + "}\n\n";
+
+    rt = rt + "static BuildString qrt_read_file(BuildString path) {\n";
+    rt = rt + "    FILE* f = fopen(path.ptr, \"rb\");\n";
+    rt = rt + "    if (!f) return qs_lit(\"\");\n";
+    rt = rt + "    fseek(f, 0, SEEK_END); long sz = ftell(f); fseek(f, 0, SEEK_SET);\n";
+    rt = rt + "    char* buf = (char*)malloc(sz + 1);\n";
+    rt = rt + "    fread(buf, 1, sz, f); buf[sz] = 0; fclose(f);\n";
+    rt = rt + "    BuildString r; r.ptr = buf; r.len = sz; return r;\n";
+    rt = rt + "}\n\n";
+
+    rt = rt + "static BuildString qrt_read_all(void) {\n";
+    rt = rt + "    int64_t cap = 4096, len = 0;\n";
+    rt = rt + "    char* buf = (char*)malloc(cap);\n";
+    rt = rt + "    int c;\n";
+    rt = rt + "    while ((c = fgetc(stdin)) != EOF) {\n";
+    rt = rt + "        if (len >= cap - 1) { cap *= 2; buf = (char*)realloc(buf, cap); }\n";
+    rt = rt + "        buf[len++] = (char)c;\n";
+    rt = rt + "    }\n";
+    rt = rt + "    buf[len] = 0;\n";
+    rt = rt + "    BuildString r; r.ptr = buf; r.len = len; return r;\n";
+    rt = rt + "}\n\n";
+
+    rt = rt + "static int qrt_stdin_is_pipe(void) {\n";
+    rt = rt + "#ifdef _WIN32\n";
+    rt = rt + "    return !_isatty(_fileno(stdin));\n";
+    rt = rt + "#else\n";
+    rt = rt + "    return !isatty(fileno(stdin));\n";
+    rt = rt + "#endif\n";
+    rt = rt + "}\n\n";
+
+    rt = rt + "static int qrt_file_exists(BuildString path) {\n";
+    rt = rt + "    FILE* f = fopen(path.ptr, \"r\");\n";
+    rt = rt + "    if (f) { fclose(f); return 1; } return 0;\n";
+    rt = rt + "}\n\n";
+
+    rt = rt + "static void qrt_write_file(BuildString path, BuildString content) {\n";
+    rt = rt + "    FILE* f = fopen(path.ptr, \"wb\");\n";
+    rt = rt + "    if (f) { fwrite(content.ptr, 1, content.len, f); fclose(f); }\n";
+    rt = rt + "}\n\n";
+
+    rt = rt + "static BuildString qrt_to_string(int64_t val) {\n";
+    rt = rt + "    char buf[32]; snprintf(buf, 32, \"%lld\", (long long)val);\n";
+    rt = rt + "    return qs_new(buf, strlen(buf));\n";
+    rt = rt + "}\n\n";
+
+    rt = rt + "static BuildString qrt_to_string_f64(double val) {\n";
+    rt = rt + "    char buf[64]; snprintf(buf, 64, \"%f\", val);\n";
+    rt = rt + "    return qs_new(buf, strlen(buf));\n";
+    rt = rt + "}\n\n";
+
+    rt = rt + "static BuildString qrt_to_string_i64(int64_t val) {\n";
+    rt = rt + "    return qrt_to_string(val);\n";
+    rt = rt + "}\n\n";
+
+    // Generic format macro: converts any value to const char* for printf %s
+    rt = rt + "/* --- Generic format helper (C11 _Generic) --- */\n";
+    rt = rt + "static const char* _qfmt_qs(BuildString s) { return s.ptr; }\n";
+    rt = rt + "static const char* _qfmt_i64(int64_t v) { static _Thread_local char b[4][32]; static _Thread_local int idx=0; idx=(idx+1)%4; snprintf(b[idx],32,\"%lld\",(long long)v); return b[idx]; }\n";
+    rt = rt + "static const char* _qfmt_i32(int32_t v) { static _Thread_local char b[4][32]; static _Thread_local int idx=0; idx=(idx+1)%4; snprintf(b[idx],32,\"%d\",v); return b[idx]; }\n";
+    rt = rt + "static const char* _qfmt_dbl(double v) { static _Thread_local char b[4][64]; static _Thread_local int idx=0; idx=(idx+1)%4; snprintf(b[idx],64,\"%g\",v); return b[idx]; }\n";
+    rt = rt + "static const char* _qfmt_int(int v) { static _Thread_local char b[4][32]; static _Thread_local int idx=0; idx=(idx+1)%4; snprintf(b[idx],32,\"%d\",v); return b[idx]; }\n";
+    rt = rt + "static const char* _qfmt_cstr(const char* s) { return s; }\n";
+    rt = rt + "#define QF(x) _Generic((x), \\\n";
+    rt = rt + "    BuildString: _qfmt_qs, \\\n";
+    rt = rt + "    int64_t: _qfmt_i64, \\\n";
+    rt = rt + "    int32_t: _qfmt_i32, \\\n";
+    rt = rt + "    double: _qfmt_dbl, \\\n";
+    rt = rt + "    float: _qfmt_dbl, \\\n";
+    rt = rt + "    int: _qfmt_int, \\\n";
+    rt = rt + "    const char*: _qfmt_cstr, \\\n";
+    rt = rt + "    char*: _qfmt_cstr \\\n";
+    rt = rt + "    )(x)\n\n";
+
+    // Generic string-aware equality: QEQ(a, b)
+    rt = rt + "/* --- Generic equality (string-aware) --- */\n";
+    rt = rt + "static int _qeq_qs(BuildString a, BuildString b) { return qs_eq(a, b); }\n";
+    rt = rt + "static int _qeq_i64(int64_t a, int64_t b) { return a == b; }\n";
+    rt = rt + "static int _qeq_i32(int32_t a, int32_t b) { return a == b; }\n";
+    rt = rt + "static int _qeq_int(int a, int b) { return a == b; }\n";
+    rt = rt + "static int _qeq_dbl(double a, double b) { return a == b; }\n";
+    rt = rt + "#define QEQ(a, b) _Generic((a), \\\n";
+    rt = rt + "    BuildString: _qeq_qs, \\\n";
+    rt = rt + "    int64_t: _qeq_i64, \\\n";
+    rt = rt + "    int32_t: _qeq_i32, \\\n";
+    rt = rt + "    int: _qeq_int, \\\n";
+    rt = rt + "    double: _qeq_dbl \\\n";
+    rt = rt + "    )(a, b)\n";
+    rt = rt + "#define QNEQ(a, b) (!QEQ(a, b))\n\n";
+
+    // Generic string-aware addition: QADD(a, b)
+    rt = rt + "/* --- Generic addition (string concat aware) --- */\n";
+    rt = rt + "static BuildString _qadd_qs(BuildString a, BuildString b) { return qs_concat(a, b); }\n";
+    rt = rt + "static int64_t _qadd_i64(int64_t a, int64_t b) { return a + b; }\n";
+    rt = rt + "static int32_t _qadd_i32(int32_t a, int32_t b) { return a + b; }\n";
+    rt = rt + "static int _qadd_int(int a, int b) { return a + b; }\n";
+    rt = rt + "static double _qadd_dbl(double a, double b) { return a + b; }\n";
+    rt = rt + "#define QADD(a, b) _Generic((a), \\\n";
+    rt = rt + "    BuildString: _qadd_qs, \\\n";
+    rt = rt + "    int64_t: _qadd_i64, \\\n";
+    rt = rt + "    int32_t: _qadd_i32, \\\n";
+    rt = rt + "    int: _qadd_int, \\\n";
+    rt = rt + "    double: _qadd_dbl \\\n";
+    rt = rt + "    )(a, b)\n\n";
+
+    rt = rt + "#ifdef _WIN32\n";
+    rt = rt + "#include <io.h>\n";
+    rt = rt + "#endif\n\n";
+
+    rt
+}
+
+// ===========================================================================
+// MAIN DRIVER
+// ===========================================================================
+fn generate(cg: &mut CG) -> String {
+    // Pass 1: collect struct definitions + forward declarations
+    pass1_scan(cg);
+
+    // Build header
+    let mut header = "";
+    header = header + "/* Generated by qc - Self-Hosted BuildLang Compiler */\n\n";
+
+    // Emit runtime
+    header = header + emit_runtime();
+
+    // Struct definitions
+    if cg.structs != "" {
+        header = header + "/* --- Struct definitions --- */\n";
+        header = header + cg.structs;
+        header = header + "\n";
+    }
+
+    // Forward declarations
+    if cg.fwd != "" {
+        header = header + "/* --- Forward declarations --- */\n";
+        header = header + cg.fwd;
+        header = header + "\n";
+    }
+
+    // Pass 2: generate function bodies
+    cg.pos = 0;
+    codegen_module(cg);
+
+    header + cg.out
+}
+
+// ===========================================================================
+// HELP
+// ===========================================================================
+fn print_help() ~ Console {
+    println!("qc - Self-Hosted BuildLang Compiler");
+    println!("Tokenizer + Parser + C Code Generator in one binary.");
+    println!("");
+    println!("Usage:");
+    println!("  qc FILE              generate C code, print to stdout");
+    println!("  qc FILE -o OUT.c     generate C code, write to file");
+    println!("  qc --help            display this help and exit");
+    println!("");
+    println!("Translates BuildLang to compilable C:");
+    println!("  fn, let/let mut, if/else, while, loop, for, return");
+    println!("  struct definitions and literals, field access");
+    println!("  String methods, Vec operations, builtin functions");
+    println!("  println!/print!/eprintln! macros with format strings");
+    println!("");
+    println!("Type mapping:");
+    println!("  i64 -> int64_t    i32 -> int32_t    f64 -> double");
+    println!("  f32 -> float      bool -> int        String -> BuildString");
+    println!("  Vec<T> -> BuildVec   &/&mut T -> T*");
+}
+
+// ===========================================================================
+// MAIN
+// ===========================================================================
+fn main() ~ Console + Environment + FileSystem + Process {
+    let nargs = args_count();
+
+    let mut filename = "";
+    let mut has_file = false;
+    let mut out_file = "";
+    let mut has_out = false;
+
+    let mut i: i32 = 1;
+    while i < nargs {
+        let arg = args_get(i);
+        if arg == "--help" || arg == "-h" {
+            print_help();
+            process_exit(0);
+        } else if arg == "-o" {
+            if i + 1 < nargs {
+                i = i + 1;
+                out_file = args_get(i);
+                has_out = true;
+            } else {
+                println!("qc: -o requires an argument");
+                process_exit(2);
+            }
+        } else if arg.starts_with("-") {
+            println!("qc: unknown option '{}'", arg);
+            process_exit(2);
+        } else {
+            filename = arg;
+            has_file = true;
+        }
+        i = i + 1;
+    }
+
+    if !has_file {
+        print_help();
+        process_exit(0);
+    }
+
+    // Read input
+    let exists = file_exists(filename);
+    if !exists {
+        println!("qc: {}: No such file or directory", filename);
+        process_exit(2);
+    }
+    let input = read_file(filename);
+    if input.len() == 0 {
+        process_exit(0);
+    }
+
+    // Tokenize
+    let mut t = tok_new(input);
+    tokenize(&mut t);
+
+    // Generate C code
+    let mut cg = cg_new(&t);
+    let c_code = generate(&mut cg);
+
+    // Output
+    if has_out {
+        write_file(out_file, c_code);
+        println!("qc: wrote {}", out_file);
+    } else {
+        print!("{}", c_code);
+    }
+}

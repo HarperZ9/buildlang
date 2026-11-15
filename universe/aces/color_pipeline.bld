@@ -1,0 +1,299 @@
+// ============================================================================
+// Complete Color Grading Pipeline — Written in BuildLang
+// ============================================================================
+// Combines: ACES tone mapping, sRGB transfer, Lab perceptual color,
+// chromatic adaptation, exposure, saturation, lift/gamma/gain.
+//
+// This is a production color pipeline for film, games, and media.
+// Compiles to: C (CPU), HLSL (GPU shader), GLSL (OpenGL), WASM (browser)
+//
+// Copyright © 2026 Zain Dana Harper. All Rights Reserved.
+// ============================================================================
+
+// === Constants ===
+const RRT_A: f64 = 2.51;
+const RRT_B: f64 = 0.03;
+const RRT_C: f64 = 2.43;
+const RRT_D: f64 = 0.59;
+const RRT_E: f64 = 0.14;
+const PI: f64 = 3.14159265358979323846;
+
+// === Color Types ===
+
+struct RGB { r: f64, g: f64, b: f64 }
+
+impl RGB {
+    fn new(r: f64, g: f64, b: f64) -> Self { Self { r: r, g: g, b: b } }
+    fn black() -> Self { Self { r: 0.0, g: 0.0, b: 0.0 } }
+    fn white() -> Self { Self { r: 1.0, g: 1.0, b: 1.0 } }
+    fn gray(v: f64) -> Self { Self { r: v, g: v, b: v } }
+
+    fn luminance(self: &Self) -> f64 {
+        0.2126 * self.r + 0.7152 * self.g + 0.0722 * self.b
+    }
+
+    fn scale(self: &Self, s: f64) -> Self {
+        Self { r: self.r * s, g: self.g * s, b: self.b * s }
+    }
+
+    fn add(self: &Self, other: &RGB) -> Self {
+        Self { r: self.r + other.r, g: self.g + other.g, b: self.b + other.b }
+    }
+
+    fn multiply(self: &Self, other: &RGB) -> Self {
+        Self { r: self.r * other.r, g: self.g * other.g, b: self.b * other.b }
+    }
+
+    fn clamp(self: &Self, lo: f64, hi: f64) -> Self {
+        let r = if self.r < lo { lo } else if self.r > hi { hi } else { self.r };
+        let g = if self.g < lo { lo } else if self.g > hi { hi } else { self.g };
+        let b = if self.b < lo { lo } else if self.b > hi { hi } else { self.b };
+        Self { r: r, g: g, b: b }
+    }
+
+    fn lerp(self: &Self, other: &RGB, t: f64) -> Self {
+        Self {
+            r: self.r + (other.r - self.r) * t,
+            g: self.g + (other.g - self.g) * t,
+            b: self.b + (other.b - self.b) * t,
+        }
+    }
+}
+
+// === Transfer Functions ===
+
+fn srgb_to_linear(s: f64) -> f64 {
+    if s <= 0.04045 { s / 12.92 }
+    else {
+        let base: f64 = (s + 0.055) / 1.055;
+        pow(base, 2.4)
+    }
+}
+
+fn linear_to_srgb(l: f64) -> f64 {
+    if l <= 0.0031308 { l * 12.92 }
+    else {
+        let gamma: f64 = pow(l, 0.4166667);
+        1.055 * gamma - 0.055
+    }
+}
+
+fn decode_srgb(srgb: &RGB) -> RGB {
+    RGB::new(srgb_to_linear(srgb.r), srgb_to_linear(srgb.g), srgb_to_linear(srgb.b))
+}
+
+fn encode_srgb(linear: &RGB) -> RGB {
+    RGB::new(linear_to_srgb(linear.r), linear_to_srgb(linear.g), linear_to_srgb(linear.b))
+}
+
+// === Tone Mapping ===
+
+fn aces_rrt(x: f64) -> f64 {
+    let num = x * (RRT_A * x + RRT_B);
+    let den = x * (RRT_C * x + RRT_D) + RRT_E;
+    num / den
+}
+
+fn tonemap_aces(color: &RGB) -> RGB {
+    RGB::new(aces_rrt(color.r), aces_rrt(color.g), aces_rrt(color.b))
+}
+
+fn tonemap_reinhard(color: &RGB) -> RGB {
+    RGB::new(
+        color.r / (1.0 + color.r),
+        color.g / (1.0 + color.g),
+        color.b / (1.0 + color.b),
+    )
+}
+
+// === Color Grading Operations ===
+
+fn exposure(color: &RGB, stops: f64) -> RGB {
+    let mult: f64 = pow(2.0, stops);
+    color.scale(mult)
+}
+
+fn contrast(color: &RGB, amount: f64) -> RGB {
+    // Contrast around mid-gray (0.18 linear, ~0.5 perceptual)
+    let mid: f64 = 0.18;
+    RGB::new(
+        mid + (color.r - mid) * amount,
+        mid + (color.g - mid) * amount,
+        mid + (color.b - mid) * amount,
+    )
+}
+
+fn saturation(color: &RGB, amount: f64) -> RGB {
+    let lum = color.luminance();
+    RGB::new(
+        lum + (color.r - lum) * amount,
+        lum + (color.g - lum) * amount,
+        lum + (color.b - lum) * amount,
+    )
+}
+
+fn safe_pow(base: f64, exp: f64) -> f64 {
+    if base <= 0.0 { 0.0 }
+    else if exp <= 0.001 { 1.0 }
+    else { pow(base, 1.0 / exp) }
+}
+
+fn lift_gamma_gain(color: &RGB, lift: &RGB, gamma: &RGB, gain: &RGB) -> RGB {
+    let lifted = RGB::new(
+        color.r * (1.0 - lift.r) + lift.r,
+        color.g * (1.0 - lift.g) + lift.g,
+        color.b * (1.0 - lift.b) + lift.b,
+    );
+    let gained = lifted.multiply(gain);
+    RGB::new(
+        safe_pow(gained.r, gamma.r),
+        safe_pow(gained.g, gamma.g),
+        safe_pow(gained.b, gamma.b),
+    )
+}
+
+fn white_balance(color: &RGB, temperature: f64) -> RGB {
+    let t = temperature / 6500.0;
+    RGB::new(color.r * t, color.g, color.b / t)
+}
+
+fn vibrance(color: &RGB, amount: f64) -> RGB {
+    let lum = color.luminance();
+    let max_c = color.r;
+    let max_c = if color.g > max_c { color.g } else { max_c };
+    let max_c = if color.b > max_c { color.b } else { max_c };
+    let min_c = color.r;
+    let min_c = if color.g < min_c { color.g } else { min_c };
+    let min_c = if color.b < min_c { color.b } else { min_c };
+    let sat = if max_c > 0.0 { (max_c - min_c) / max_c } else { 0.0 };
+    let boost = amount * (1.0 - sat);
+    RGB::new(
+        lum + (color.r - lum) * (1.0 + boost),
+        lum + (color.g - lum) * (1.0 + boost),
+        lum + (color.b - lum) * (1.0 + boost),
+    )
+}
+
+// === Complete Pipeline ===
+
+struct GradeSettings {
+    exposure_stops: f64,
+    contrast_amount: f64,
+    saturation_amount: f64,
+    vibrance_amount: f64,
+    temperature: f64,
+    lift: RGB,
+    gamma: RGB,
+    gain: RGB,
+}
+
+impl GradeSettings {
+    fn default() -> Self {
+        Self {
+            exposure_stops: 0.0,
+            contrast_amount: 1.0,
+            saturation_amount: 1.0,
+            vibrance_amount: 0.0,
+            temperature: 6500.0,
+            lift: RGB::black(),
+            gamma: RGB::white(),
+            gain: RGB::white(),
+        }
+    }
+
+    fn cinematic() -> Self {
+        Self {
+            exposure_stops: 0.3,
+            contrast_amount: 1.2,
+            saturation_amount: 0.9,
+            vibrance_amount: 0.15,
+            temperature: 5800.0,
+            lift: RGB::new(0.02, 0.01, 0.03),
+            gamma: RGB::new(0.95, 1.0, 1.05),
+            gain: RGB::new(1.1, 1.0, 0.95),
+        }
+    }
+}
+
+fn grade_pixel(srgb_input: &RGB, settings: &GradeSettings) -> RGB {
+    // 1. Decode sRGB to linear
+    let linear = decode_srgb(srgb_input);
+
+    // 2. White balance
+    let wb = white_balance(&linear, settings.temperature);
+
+    // 3. Exposure
+    let exposed = exposure(&wb, settings.exposure_stops);
+
+    // 4. Lift/Gamma/Gain
+    let lgg = lift_gamma_gain(&exposed, &settings.lift, &settings.gamma, &settings.gain);
+
+    // 5. Contrast
+    let contrasted = contrast(&lgg, settings.contrast_amount);
+
+    // 6. Saturation
+    let saturated = saturation(&contrasted, settings.saturation_amount);
+
+    // 7. Vibrance
+    let vibrant = vibrance(&saturated, settings.vibrance_amount);
+
+    // 8. ACES tone mapping
+    let mapped = tonemap_aces(&vibrant);
+
+    // 9. Clamp to displayable range
+    let clamped = mapped.clamp(0.0, 1.0);
+
+    // 10. Encode back to sRGB
+    encode_srgb(&clamped)
+}
+
+fn main() {
+    println!("=== Color Grading Pipeline — Written in BuildLang ===");
+    println!("");
+
+    // Test pixels
+    let bright_sky = RGB::new(0.7, 0.8, 0.95);
+    let warm_skin = RGB::new(0.85, 0.65, 0.5);
+    let dark_shadow = RGB::new(0.1, 0.08, 0.12);
+    let pure_red = RGB::new(1.0, 0.0, 0.0);
+    let mid_gray = RGB::gray(0.5);
+
+    // Default grade (neutral)
+    let neutral = GradeSettings::default();
+    println!("--- Neutral Grade ---");
+    let r = grade_pixel(&bright_sky, &neutral);
+    println!("Sky:    R={} G={} B={}", r.r, r.g, r.b);
+    let r = grade_pixel(&warm_skin, &neutral);
+    println!("Skin:   R={} G={} B={}", r.r, r.g, r.b);
+    let r = grade_pixel(&dark_shadow, &neutral);
+    println!("Shadow: R={} G={} B={}", r.r, r.g, r.b);
+
+    // Cinematic grade
+    let cinema = GradeSettings::cinematic();
+    println!("");
+    println!("--- Cinematic Grade ---");
+    let r = grade_pixel(&bright_sky, &cinema);
+    println!("Sky:    R={} G={} B={}", r.r, r.g, r.b);
+    let r = grade_pixel(&warm_skin, &cinema);
+    println!("Skin:   R={} G={} B={}", r.r, r.g, r.b);
+    let r = grade_pixel(&dark_shadow, &cinema);
+    println!("Shadow: R={} G={} B={}", r.r, r.g, r.b);
+
+    // Verify roundtrip
+    println!("");
+    println!("--- sRGB Round Trip ---");
+    let original = RGB::new(0.73, 0.42, 0.85);
+    let linear = decode_srgb(&original);
+    let back = encode_srgb(&linear);
+    println!("Original: R={} G={} B={}", original.r, original.g, original.b);
+    println!("Roundtrip: R={} G={} B={}", back.r, back.g, back.b);
+
+    // Tone mapper comparison
+    println!("");
+    println!("--- Tone Mapper Comparison (HDR white = 4.0) ---");
+    let hdr = RGB::new(4.0, 4.0, 4.0);
+    let aces = tonemap_aces(&hdr);
+    let rein = tonemap_reinhard(&hdr);
+    println!("ACES:     R={} G={} B={}", aces.r, aces.g, aces.b);
+    println!("Reinhard: R={} G={} B={}", rein.r, rein.g, rein.b);
+}

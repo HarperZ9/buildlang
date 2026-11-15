@@ -1,0 +1,560 @@
+// =============================================================================
+// qjoin — Join lines of two files on a common field, written in BuildLang
+// =============================================================================
+// Like SQL INNER JOIN but for text files. Both files must be sorted on the
+// join field.
+//
+// Usage:
+//   qjoin file1.txt file2.txt              join on first field (default)
+//   qjoin -1 2 -2 1 file1 file2           join field 2 of file1 w/ field 1 of file2
+//   qjoin -t, file1.csv file2.csv         comma delimiter
+//   qjoin --help                           usage
+//
+// Algorithm: Sorted-merge join. Advance through both files; when join keys
+// match, output combined line. Since files are sorted on the join field,
+// this runs in O(n+m) time.
+//
+// Design: Lines stored in string pools. Fields split on the fly for
+// comparison and output. All state in a flat struct.
+// =============================================================================
+
+// --- State struct ---
+struct Join {
+    // String pool for file1 lines
+    pool1: String,
+    starts1: Vec<i32>,
+    lens1: Vec<i32>,
+    n1: i32,
+
+    // String pool for file2 lines
+    pool2: String,
+    starts2: Vec<i32>,
+    lens2: Vec<i32>,
+    n2: i32,
+
+    // Field splitter: reusable buffer for split fields
+    f_buf: String,
+    f_starts: Vec<i32>,
+    f_lens: Vec<i32>,
+    f_n: i32,
+}
+
+fn join_new() -> Join {
+    Join {
+        pool1: "", starts1: vec![], lens1: vec![], n1: 0,
+        pool2: "", starts2: vec![], lens2: vec![], n2: 0,
+        f_buf: "", f_starts: vec![], f_lens: vec![], f_n: 0,
+    }
+}
+
+// --- String pool ops for file1 ---
+fn sp1_add(s: &mut Join, text: String) -> i32 {
+    let id = s.n1;
+    let st = s.pool1.len();
+    s.pool1 = s.pool1 + text;
+    let en = s.pool1.len();
+    vec_push(s.starts1, st);
+    vec_push(s.lens1, en - st);
+    s.n1 = s.n1 + 1;
+    id
+}
+
+fn sp1_get(s: &Join, id: i32) -> String {
+    let st = vec_get(s.starts1, id);
+    let ln = vec_get(s.lens1, id);
+    if ln == 0 { return ""; }
+    s.pool1.substring(st, ln)
+}
+
+// --- String pool ops for file2 ---
+fn sp2_add(s: &mut Join, text: String) -> i32 {
+    let id = s.n2;
+    let st = s.pool2.len();
+    s.pool2 = s.pool2 + text;
+    let en = s.pool2.len();
+    vec_push(s.starts2, st);
+    vec_push(s.lens2, en - st);
+    s.n2 = s.n2 + 1;
+    id
+}
+
+fn sp2_get(s: &Join, id: i32) -> String {
+    let st = vec_get(s.starts2, id);
+    let ln = vec_get(s.lens2, id);
+    if ln == 0 { return ""; }
+    s.pool2.substring(st, ln)
+}
+
+// --- Parse file content into lines ---
+fn parse_lines(s: &mut Join, content: String, which: i32) {
+    let clen = content.len();
+    let mut pos: i32 = 0;
+    let mut line_start: i32 = 0;
+    let mut go = true;
+
+    while go {
+        if pos >= clen {
+            let ln = pos - line_start;
+            if ln > 0 {
+                let text = content.substring(line_start, ln);
+                let tlen = text.len();
+                let clean = if tlen > 0 {
+                    let last = text.char_at(tlen - 1);
+                    if last == "\r" {
+                        if tlen == 1 { "" } else { text.substring(0, tlen - 1) }
+                    } else {
+                        text
+                    }
+                } else {
+                    text
+                };
+                if which == 1 {
+                    sp1_add(s, clean);
+                } else {
+                    sp2_add(s, clean);
+                }
+            }
+            go = false;
+        } else {
+            let c = content.char_at(pos);
+            if c == "\n" {
+                let mut ln = pos - line_start;
+                if ln > 0 {
+                    let last_pos = line_start + ln - 1;
+                    let lc = content.char_at(last_pos);
+                    if lc == "\r" { ln = ln - 1; }
+                }
+                let text = if ln > 0 {
+                    content.substring(line_start, ln)
+                } else {
+                    ""
+                };
+                if which == 1 {
+                    sp1_add(s, text);
+                } else {
+                    sp2_add(s, text);
+                }
+                line_start = pos + 1;
+                pos = pos + 1;
+            } else {
+                pos = pos + 1;
+            }
+        }
+    }
+}
+
+// --- Reset field splitter ---
+fn reset_fields(s: &mut Join) {
+    s.f_buf = "";
+    s.f_starts = vec![];
+    s.f_lens = vec![];
+    s.f_n = 0;
+}
+
+// --- Split a line by delimiter, storing fields in Join struct ---
+fn split_line(s: &mut Join, line: String, delim: String) {
+    reset_fields(s);
+    let llen = line.len();
+    let dlen = delim.len();
+
+    if llen == 0 {
+        vec_push(s.f_starts, 0);
+        vec_push(s.f_lens, 0);
+        s.f_n = 1;
+        return;
+    }
+
+    let mut pos: i32 = 0;
+    let mut field_start: i32 = 0;
+    let mut go = true;
+
+    while go {
+        if pos >= llen {
+            let flen = pos - field_start;
+            let ftext = if flen > 0 {
+                line.substring(field_start, flen)
+            } else {
+                ""
+            };
+            let st = s.f_buf.len();
+            s.f_buf = s.f_buf + ftext;
+            let en = s.f_buf.len();
+            vec_push(s.f_starts, st);
+            vec_push(s.f_lens, en - st);
+            s.f_n = s.f_n + 1;
+            go = false;
+        } else {
+            let mut is_delim = false;
+            if pos + dlen <= llen {
+                let chunk = line.substring(pos, dlen);
+                if chunk == delim {
+                    is_delim = true;
+                }
+            }
+
+            if is_delim {
+                let flen = pos - field_start;
+                let ftext = if flen > 0 {
+                    line.substring(field_start, flen)
+                } else {
+                    ""
+                };
+                let st = s.f_buf.len();
+                s.f_buf = s.f_buf + ftext;
+                let en = s.f_buf.len();
+                vec_push(s.f_starts, st);
+                vec_push(s.f_lens, en - st);
+                s.f_n = s.f_n + 1;
+                pos = pos + dlen;
+                field_start = pos;
+            } else {
+                pos = pos + 1;
+            }
+        }
+    }
+}
+
+fn get_field(s: &Join, idx: i32) -> String {
+    if idx < 0 || idx >= s.f_n { return ""; }
+    let st = vec_get(s.f_starts, idx);
+    let ln = vec_get(s.f_lens, idx);
+    if ln == 0 { return ""; }
+    s.f_buf.substring(st, ln)
+}
+
+// --- Extract the join key from a line ---
+// Splits the line, returns field at position `field_num` (1-indexed)
+fn get_join_key(s: &mut Join, line: String, delim: String, field_num: i32) -> String {
+    split_line(s, line, delim);
+    let idx = field_num - 1;
+    get_field(s, idx)
+}
+
+// --- Build output line for a matched pair ---
+// Strategy: split line1, build its part of the output string immediately,
+// then split line2 and build its part. This avoids needing a saved struct.
+fn build_output(s: &mut Join, line1: String, line2: String, delim: String,
+                out_delim: String, field1: i32, field2: i32) -> String {
+    let idx1 = field1 - 1;
+    let idx2 = field2 - 1;
+
+    // Split line1 and extract join key + non-join fields
+    split_line(s, line1, delim);
+    let n1 = s.f_n;
+    let join_key = get_field(s, idx1);
+
+    // Build file1's non-join fields as a single string
+    let mut f1_part = "";
+    let mut i1: i32 = 0;
+    while i1 < n1 {
+        if i1 != idx1 {
+            let val = get_field(s, i1);
+            f1_part = f1_part + out_delim + val;
+        }
+        i1 = i1 + 1;
+    }
+
+    // Split line2 and extract non-join fields
+    split_line(s, line2, delim);
+    let n2 = s.f_n;
+
+    let mut f2_part = "";
+    let mut i2: i32 = 0;
+    while i2 < n2 {
+        if i2 != idx2 {
+            let val = get_field(s, i2);
+            f2_part = f2_part + out_delim + val;
+        }
+        i2 = i2 + 1;
+    }
+
+    // Combine: key + file1 fields + file2 fields
+    join_key + f1_part + f2_part
+}
+
+// --- Sorted-merge join ---
+fn merge_join(s: &mut Join, delim: String, out_delim: String,
+              field1: i32, field2: i32) ~ Console {
+    let mut i1: i32 = 0;
+    let mut i2: i32 = 0;
+
+    let mut go = true;
+    while go {
+        if i1 >= s.n1 || i2 >= s.n2 {
+            go = false;
+        } else {
+            let line1 = sp1_get(s, i1);
+            let key1 = get_join_key(s, line1, delim, field1);
+
+            let line2 = sp2_get(s, i2);
+            let key2 = get_join_key(s, line2, delim, field2);
+
+            let cmp = key1.compare(key2);
+
+            if cmp < 0 {
+                // key1 < key2: advance file1
+                i1 = i1 + 1;
+            } else if cmp > 0 {
+                // key1 > key2: advance file2
+                i2 = i2 + 1;
+            } else {
+                // Keys match — output all pairs with this key
+                // Find extent of matching keys in file1
+                let mut end1 = i1 + 1;
+                let mut scan1 = true;
+                while scan1 {
+                    if end1 >= s.n1 {
+                        scan1 = false;
+                    } else {
+                        let next1 = sp1_get(s, end1);
+                        let nk1 = get_join_key(s, next1, delim, field1);
+                        let nc1 = nk1.compare(key1);
+                        if nc1 == 0 {
+                            end1 = end1 + 1;
+                        } else {
+                            scan1 = false;
+                        }
+                    }
+                }
+
+                // Find extent of matching keys in file2
+                let mut end2 = i2 + 1;
+                let mut scan2 = true;
+                while scan2 {
+                    if end2 >= s.n2 {
+                        scan2 = false;
+                    } else {
+                        let next2 = sp2_get(s, end2);
+                        let nk2 = get_join_key(s, next2, delim, field2);
+                        let nc2 = nk2.compare(key1);
+                        if nc2 == 0 {
+                            end2 = end2 + 1;
+                        } else {
+                            scan2 = false;
+                        }
+                    }
+                }
+
+                // Output cross product of matching ranges
+                let mut a = i1;
+                while a < end1 {
+                    let la = sp1_get(s, a);
+                    let mut b = i2;
+                    while b < end2 {
+                        let lb = sp2_get(s, b);
+                        let out = build_output(s, la, lb, delim, out_delim, field1, field2);
+                        println!("{}", out);
+                        b = b + 1;
+                    }
+                    a = a + 1;
+                }
+
+                i1 = end1;
+                i2 = end2;
+            }
+        }
+    }
+}
+
+// --- Helpers ---
+
+fn is_digit(c: String) -> bool {
+    c == "0" || c == "1" || c == "2" || c == "3" || c == "4" ||
+    c == "5" || c == "6" || c == "7" || c == "8" || c == "9"
+}
+
+fn parse_int(str: String) -> i32 {
+    let slen = str.len();
+    let mut val: i32 = 0;
+    let mut found = false;
+    let mut p: i32 = 0;
+    let mut go = true;
+    while go {
+        if p >= slen {
+            go = false;
+        } else {
+            let c = str.char_at(p);
+            if is_digit(c) {
+                let digit = if c == "0" { 0 }
+                    else if c == "1" { 1 }
+                    else if c == "2" { 2 }
+                    else if c == "3" { 3 }
+                    else if c == "4" { 4 }
+                    else if c == "5" { 5 }
+                    else if c == "6" { 6 }
+                    else if c == "7" { 7 }
+                    else if c == "8" { 8 }
+                    else { 9 };
+                val = val * 10 + digit;
+                found = true;
+                p = p + 1;
+            } else {
+                go = false;
+            }
+        }
+    }
+    if !found { 1 } else { val }
+}
+
+// --- Extract option value: handles -tX, -t'X' forms ---
+fn extract_opt_val(arg: String, prefix_len: i32) -> String {
+    let alen = arg.len();
+    if alen <= prefix_len {
+        return "";
+    }
+    let rest = arg.substring(prefix_len, alen - prefix_len);
+    let rlen = rest.len();
+    if rlen >= 2 {
+        let first = rest.char_at(0);
+        let last = rest.char_at(rlen - 1);
+        if first == "'" && last == "'" {
+            if rlen == 2 { return ""; }
+            return rest.substring(1, rlen - 2);
+        }
+    }
+    rest
+}
+
+// --- Help ---
+fn print_help() ~ Console {
+    println!("qjoin — join lines of two files on a common field");
+    println!("");
+    println!("Usage:");
+    println!("  qjoin [OPTION]... FILE1 FILE2");
+    println!("");
+    println!("Options:");
+    println!("  -1 FIELD   join on FIELD of FILE1 (default: 1)");
+    println!("  -2 FIELD   join on FIELD of FILE2 (default: 1)");
+    println!("  -t CHAR    use CHAR as input and output delimiter (default: space)");
+    println!("  --help     display this help and exit");
+    println!("");
+    println!("Both files must be sorted on the join field.");
+    println!("");
+    println!("Output format: join-key, then remaining fields from FILE1,");
+    println!("then remaining fields from FILE2, separated by the delimiter.");
+    println!("");
+    println!("Examples:");
+    println!("  qjoin file1.txt file2.txt");
+    println!("  qjoin -1 2 -2 1 file1 file2");
+    println!("  qjoin -t, file1.csv file2.csv");
+}
+
+// --- Main ---
+fn main() ~ Console + Environment + FileSystem + Process {
+    let nargs = args_count();
+
+    if nargs < 2 {
+        print_help();
+        process_exit(0);
+    }
+
+    let mut field1: i32 = 1;
+    let mut field2: i32 = 1;
+    let mut delim = " ";
+    let mut has_delim = false;
+    let mut file1 = "";
+    let mut file2 = "";
+    let mut file_count: i32 = 0;
+
+    let mut i: i32 = 1;
+    while i < nargs {
+        let arg = args_get(i);
+
+        if arg == "--help" || arg == "-h" {
+            print_help();
+            process_exit(0);
+        } else if arg == "-1" {
+            i = i + 1;
+            if i < nargs {
+                let val = args_get(i);
+                field1 = parse_int(val);
+            }
+        } else if arg == "-2" {
+            i = i + 1;
+            if i < nargs {
+                let val = args_get(i);
+                field2 = parse_int(val);
+            }
+        } else if arg == "-t" {
+            i = i + 1;
+            if i < nargs {
+                let val = args_get(i);
+                let vlen = val.len();
+                if vlen >= 2 {
+                    let first = val.char_at(0);
+                    let last = val.char_at(vlen - 1);
+                    if first == "'" && last == "'" {
+                        delim = if vlen == 2 { "" }
+                            else { val.substring(1, vlen - 2) };
+                    } else {
+                        delim = val;
+                    }
+                } else {
+                    delim = val;
+                }
+                has_delim = true;
+            }
+        } else if arg.starts_with("-t") {
+            let val = extract_opt_val(arg, 2);
+            if val.len() > 0 {
+                delim = val;
+                has_delim = true;
+            }
+        } else if arg.starts_with("-") {
+            println!("qjoin: unknown option '{}'", arg);
+            process_exit(2);
+        } else {
+            if file_count == 0 {
+                file1 = arg;
+                file_count = 1;
+            } else if file_count == 1 {
+                file2 = arg;
+                file_count = 2;
+            } else {
+                println!("qjoin: too many file arguments");
+                process_exit(2);
+            }
+        }
+
+        i = i + 1;
+    }
+
+    if file_count < 2 {
+        println!("qjoin: missing file operand");
+        println!("Try 'qjoin --help' for usage.");
+        process_exit(2);
+    }
+
+    if field1 < 1 {
+        println!("qjoin: invalid field number for -1");
+        process_exit(2);
+    }
+    if field2 < 1 {
+        println!("qjoin: invalid field number for -2");
+        process_exit(2);
+    }
+
+    // Check files exist
+    if !file_exists(file1) {
+        println!("qjoin: {}: No such file or directory", file1);
+        process_exit(2);
+    }
+    if !file_exists(file2) {
+        println!("qjoin: {}: No such file or directory", file2);
+        process_exit(2);
+    }
+
+    // Read and parse files
+    let content1 = read_file(file1);
+    let content2 = read_file(file2);
+
+    let mut s = join_new();
+    parse_lines(&mut s, content1, 1);
+    parse_lines(&mut s, content2, 2);
+
+    // Output delimiter: same as input delimiter
+    let out_delim = delim;
+
+    // Perform merge join
+    merge_join(&mut s, delim, out_delim, field1, field2);
+}

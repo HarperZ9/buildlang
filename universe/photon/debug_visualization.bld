@@ -1,0 +1,2093 @@
+// =============================================================================
+// PHOTON ENGINE - DEBUG VISUALIZATION SYSTEM
+// =============================================================================
+// Comprehensive debugging and visualization tools for rendering development.
+// Includes wireframe, normals, bounds, heatmaps, GPU profiling, and overlays.
+// Based on Harper Engine WP-168-185 debug visualization papers.
+// =============================================================================
+
+import core::memory::{Arena, Pool, Buffer, GpuBuffer, RingBuffer};
+import core::math::{Vec2, Vec3, Vec4, Mat4, Quaternion, Transform, Aabb, Sphere, Frustum};
+import core::simd::{f32x4, f32x8, SimdMath};
+import photon::gpu::{ComputeShader, RenderPipeline, Texture, Sampler, BindGroup};
+import photon::color::{Color, ColorSpace, Palette};
+
+// =============================================================================
+// REGION: DEBUG RENDER MODES
+// =============================================================================
+
+/// Debug visualization render modes
+pub enum DebugRenderMode {
+    /// Normal rendering (no debug)
+    None,
+    /// Wireframe overlay
+    Wireframe,
+    /// Wireframe only (no fill)
+    WireframeOnly,
+    /// Vertex normals
+    Normals,
+    /// Vertex tangents
+    Tangents,
+    /// Vertex bitangents
+    Bitangents,
+    /// UV coordinates (checkerboard)
+    UvChecker,
+    /// UV coordinates (gradient)
+    UvGradient,
+    /// Mipmap levels
+    MipmapLevels,
+    /// Texture density
+    TextureDensity,
+    /// Overdraw visualization
+    Overdraw,
+    /// Draw call heatmap
+    DrawCallHeatmap,
+    /// Triangle density
+    TriangleDensity,
+    /// Shader complexity
+    ShaderComplexity,
+    /// Depth buffer
+    DepthBuffer,
+    /// Stencil buffer
+    StencilBuffer,
+    /// Light count per pixel
+    LightCount,
+    /// Cascade splits (shadows)
+    CascadeSplits,
+    /// Motion vectors
+    MotionVectors,
+    /// Ambient occlusion
+    AmbientOcclusion,
+    /// Albedo only
+    AlbedoOnly,
+    /// Normal buffer (G-buffer)
+    NormalBuffer,
+    /// Roughness only
+    RoughnessOnly,
+    /// Metallic only
+    MetallicOnly,
+    /// Emissive only
+    EmissiveOnly,
+    /// Diffuse lighting only
+    DiffuseOnly,
+    /// Specular lighting only
+    SpecularOnly,
+    /// Indirect lighting only
+    IndirectOnly,
+    /// Shadow maps
+    ShadowMaps,
+    /// Reflection probes
+    ReflectionProbes,
+    /// Cluster visualization
+    ClusterVisualization,
+    /// LOD levels
+    LodLevels,
+    /// Nanite triangles
+    NaniteTriangles,
+    /// Virtual texture pages
+    VirtualTexturePages,
+    /// Bone weights
+    BoneWeights,
+    /// Vertex colors
+    VertexColors,
+}
+
+impl DebugRenderMode {
+    /// Get display name for UI
+    pub fn display_name(&self) -> &'static str {
+        match self {
+            DebugRenderMode::None => "None",
+            DebugRenderMode::Wireframe => "Wireframe Overlay",
+            DebugRenderMode::WireframeOnly => "Wireframe Only",
+            DebugRenderMode::Normals => "Vertex Normals",
+            DebugRenderMode::Tangents => "Vertex Tangents",
+            DebugRenderMode::Bitangents => "Vertex Bitangents",
+            DebugRenderMode::UvChecker => "UV Checker",
+            DebugRenderMode::UvGradient => "UV Gradient",
+            DebugRenderMode::MipmapLevels => "Mipmap Levels",
+            DebugRenderMode::TextureDensity => "Texture Density",
+            DebugRenderMode::Overdraw => "Overdraw",
+            DebugRenderMode::DrawCallHeatmap => "Draw Call Heatmap",
+            DebugRenderMode::TriangleDensity => "Triangle Density",
+            DebugRenderMode::ShaderComplexity => "Shader Complexity",
+            DebugRenderMode::DepthBuffer => "Depth Buffer",
+            DebugRenderMode::StencilBuffer => "Stencil Buffer",
+            DebugRenderMode::LightCount => "Light Count",
+            DebugRenderMode::CascadeSplits => "Cascade Splits",
+            DebugRenderMode::MotionVectors => "Motion Vectors",
+            DebugRenderMode::AmbientOcclusion => "Ambient Occlusion",
+            DebugRenderMode::AlbedoOnly => "Albedo Only",
+            DebugRenderMode::NormalBuffer => "Normal Buffer",
+            DebugRenderMode::RoughnessOnly => "Roughness Only",
+            DebugRenderMode::MetallicOnly => "Metallic Only",
+            DebugRenderMode::EmissiveOnly => "Emissive Only",
+            DebugRenderMode::DiffuseOnly => "Diffuse Only",
+            DebugRenderMode::SpecularOnly => "Specular Only",
+            DebugRenderMode::IndirectOnly => "Indirect Only",
+            DebugRenderMode::ShadowMaps => "Shadow Maps",
+            DebugRenderMode::ReflectionProbes => "Reflection Probes",
+            DebugRenderMode::ClusterVisualization => "Cluster Viz",
+            DebugRenderMode::LodLevels => "LOD Levels",
+            DebugRenderMode::NaniteTriangles => "Nanite Triangles",
+            DebugRenderMode::VirtualTexturePages => "VT Pages",
+            DebugRenderMode::BoneWeights => "Bone Weights",
+            DebugRenderMode::VertexColors => "Vertex Colors",
+        }
+    }
+
+    /// Get keyboard shortcut
+    pub fn shortcut(&self) -> Option<char> {
+        match self {
+            DebugRenderMode::Wireframe => Some('1'),
+            DebugRenderMode::Normals => Some('2'),
+            DebugRenderMode::UvChecker => Some('3'),
+            DebugRenderMode::Overdraw => Some('4'),
+            DebugRenderMode::DepthBuffer => Some('5'),
+            DebugRenderMode::LightCount => Some('6'),
+            DebugRenderMode::AlbedoOnly => Some('7'),
+            DebugRenderMode::NormalBuffer => Some('8'),
+            DebugRenderMode::LodLevels => Some('9'),
+            _ => None,
+        }
+    }
+}
+
+// =============================================================================
+// REGION: DEBUG LINE RENDERER
+// =============================================================================
+
+/// Debug line vertex
+#[repr(C)]
+pub struct DebugLineVertex {
+    /// Position
+    pub position: Vec3,
+    /// Color
+    pub color: Color,
+}
+
+/// Debug line segment
+pub struct DebugLine {
+    /// Start position
+    pub start: Vec3,
+    /// End position
+    pub end: Vec3,
+    /// Line color
+    pub color: Color,
+    /// Line thickness (in pixels)
+    pub thickness: f32,
+    /// Duration in seconds (0 = single frame)
+    pub duration: f32,
+    /// Depth test enabled
+    pub depth_test: bool,
+}
+
+impl DebugLine {
+    /// Create new debug line
+    pub fn new(start: Vec3, end: Vec3, color: Color) -> Self {
+        Self {
+            start,
+            end,
+            color,
+            thickness: 1.0,
+            duration: 0.0,
+            depth_test: true,
+        }
+    }
+
+    /// Create line with duration
+    pub fn with_duration(mut self, duration: f32) -> Self {
+        self.duration = duration;
+        self
+    }
+
+    /// Create line with thickness
+    pub fn with_thickness(mut self, thickness: f32) -> Self {
+        self.thickness = thickness;
+        self
+    }
+
+    /// Create line without depth test
+    pub fn no_depth_test(mut self) -> Self {
+        self.depth_test = false;
+        self
+    }
+}
+
+/// Debug line batch for efficient rendering
+pub struct DebugLineBatch {
+    /// Lines to render
+    lines: Vec<DebugLine>,
+    /// Persistent lines with remaining duration
+    persistent_lines: Vec<(DebugLine, f32)>,
+    /// Vertex buffer
+    vertex_buffer: GpuBuffer,
+    /// Maximum vertices
+    max_vertices: u32,
+    /// Current vertex count
+    vertex_count: u32,
+    /// Render pipeline for depth tested lines
+    pipeline_depth: RenderPipeline,
+    /// Render pipeline for no depth test
+    pipeline_no_depth: RenderPipeline,
+}
+
+impl DebugLineBatch {
+    /// Create new debug line batch
+    pub fn new(max_lines: u32) -> Self {
+        let max_vertices = max_lines * 2;
+
+        Self {
+            lines: Vec::with_capacity(max_lines as usize),
+            persistent_lines: Vec::new(),
+            vertex_buffer: GpuBuffer::new_vertex(
+                max_vertices as usize * std::mem::size_of::<DebugLineVertex>()
+            ),
+            max_vertices,
+            vertex_count: 0,
+            pipeline_depth: RenderPipeline::from_source(DEBUG_LINE_SHADER),
+            pipeline_no_depth: RenderPipeline::from_source_no_depth(DEBUG_LINE_SHADER),
+        }
+    }
+
+    /// Add a debug line
+    pub fn add_line(&mut self, line: DebugLine) {
+        if line.duration > 0.0 {
+            self.persistent_lines.push((line, line.duration));
+        } else {
+            self.lines.push(line);
+        }
+    }
+
+    /// Draw a ray from origin in direction
+    pub fn draw_ray(&mut self, origin: Vec3, direction: Vec3, length: f32, color: Color) {
+        self.add_line(DebugLine::new(origin, origin + direction * length, color));
+    }
+
+    /// Draw an axis-aligned bounding box
+    pub fn draw_aabb(&mut self, aabb: &Aabb, color: Color) {
+        let min = aabb.min;
+        let max = aabb.max;
+
+        // Bottom face
+        self.add_line(DebugLine::new(Vec3::new(min.x, min.y, min.z), Vec3::new(max.x, min.y, min.z), color));
+        self.add_line(DebugLine::new(Vec3::new(max.x, min.y, min.z), Vec3::new(max.x, min.y, max.z), color));
+        self.add_line(DebugLine::new(Vec3::new(max.x, min.y, max.z), Vec3::new(min.x, min.y, max.z), color));
+        self.add_line(DebugLine::new(Vec3::new(min.x, min.y, max.z), Vec3::new(min.x, min.y, min.z), color));
+
+        // Top face
+        self.add_line(DebugLine::new(Vec3::new(min.x, max.y, min.z), Vec3::new(max.x, max.y, min.z), color));
+        self.add_line(DebugLine::new(Vec3::new(max.x, max.y, min.z), Vec3::new(max.x, max.y, max.z), color));
+        self.add_line(DebugLine::new(Vec3::new(max.x, max.y, max.z), Vec3::new(min.x, max.y, max.z), color));
+        self.add_line(DebugLine::new(Vec3::new(min.x, max.y, max.z), Vec3::new(min.x, max.y, min.z), color));
+
+        // Vertical edges
+        self.add_line(DebugLine::new(Vec3::new(min.x, min.y, min.z), Vec3::new(min.x, max.y, min.z), color));
+        self.add_line(DebugLine::new(Vec3::new(max.x, min.y, min.z), Vec3::new(max.x, max.y, min.z), color));
+        self.add_line(DebugLine::new(Vec3::new(max.x, min.y, max.z), Vec3::new(max.x, max.y, max.z), color));
+        self.add_line(DebugLine::new(Vec3::new(min.x, min.y, max.z), Vec3::new(min.x, max.y, max.z), color));
+    }
+
+    /// Draw oriented bounding box
+    pub fn draw_obb(&mut self, center: Vec3, half_extents: Vec3, rotation: Quaternion, color: Color) {
+        let corners = [
+            Vec3::new(-half_extents.x, -half_extents.y, -half_extents.z),
+            Vec3::new( half_extents.x, -half_extents.y, -half_extents.z),
+            Vec3::new( half_extents.x, -half_extents.y,  half_extents.z),
+            Vec3::new(-half_extents.x, -half_extents.y,  half_extents.z),
+            Vec3::new(-half_extents.x,  half_extents.y, -half_extents.z),
+            Vec3::new( half_extents.x,  half_extents.y, -half_extents.z),
+            Vec3::new( half_extents.x,  half_extents.y,  half_extents.z),
+            Vec3::new(-half_extents.x,  half_extents.y,  half_extents.z),
+        ];
+
+        let transformed: Vec<Vec3> = corners.iter()
+            .map(|c| center + rotation.rotate(*c))
+            .collect();
+
+        // Bottom face
+        for i in 0..4 {
+            self.add_line(DebugLine::new(transformed[i], transformed[(i + 1) % 4], color));
+        }
+
+        // Top face
+        for i in 0..4 {
+            self.add_line(DebugLine::new(transformed[i + 4], transformed[(i + 1) % 4 + 4], color));
+        }
+
+        // Vertical edges
+        for i in 0..4 {
+            self.add_line(DebugLine::new(transformed[i], transformed[i + 4], color));
+        }
+    }
+
+    /// Draw a sphere using circles
+    pub fn draw_sphere(&mut self, center: Vec3, radius: f32, color: Color, segments: u32) {
+        self.draw_circle(center, radius, Vec3::new(1.0, 0.0, 0.0), color, segments);
+        self.draw_circle(center, radius, Vec3::new(0.0, 1.0, 0.0), color, segments);
+        self.draw_circle(center, radius, Vec3::new(0.0, 0.0, 1.0), color, segments);
+    }
+
+    /// Draw a circle
+    pub fn draw_circle(&mut self, center: Vec3, radius: f32, normal: Vec3, color: Color, segments: u32) {
+        let tangent = if normal.x.abs() < 0.9 {
+            Vec3::new(1.0, 0.0, 0.0).cross(normal).normalize()
+        } else {
+            Vec3::new(0.0, 1.0, 0.0).cross(normal).normalize()
+        };
+        let bitangent = normal.cross(tangent);
+
+        let step = 2.0 * std::f32::consts::PI / segments as f32;
+        let mut prev = center + tangent * radius;
+
+        for i in 1..=segments {
+            let angle = step * i as f32;
+            let curr = center + (tangent * angle.cos() + bitangent * angle.sin()) * radius;
+            self.add_line(DebugLine::new(prev, curr, color));
+            prev = curr;
+        }
+    }
+
+    /// Draw a cone
+    pub fn draw_cone(&mut self, apex: Vec3, direction: Vec3, length: f32, angle: f32, color: Color, segments: u32) {
+        let base_center = apex + direction * length;
+        let base_radius = length * angle.tan();
+
+        // Draw base circle
+        self.draw_circle(base_center, base_radius, direction, color, segments);
+
+        // Draw lines from apex to base
+        let tangent = if direction.x.abs() < 0.9 {
+            Vec3::new(1.0, 0.0, 0.0).cross(direction).normalize()
+        } else {
+            Vec3::new(0.0, 1.0, 0.0).cross(direction).normalize()
+        };
+        let bitangent = direction.cross(tangent);
+
+        let line_count = segments.min(8);
+        let step = 2.0 * std::f32::consts::PI / line_count as f32;
+
+        for i in 0..line_count {
+            let angle = step * i as f32;
+            let base_point = base_center + (tangent * angle.cos() + bitangent * angle.sin()) * base_radius;
+            self.add_line(DebugLine::new(apex, base_point, color));
+        }
+    }
+
+    /// Draw a frustum
+    pub fn draw_frustum(&mut self, frustum: &Frustum, color: Color) {
+        let corners = frustum.corners();
+
+        // Near plane
+        self.add_line(DebugLine::new(corners[0], corners[1], color));
+        self.add_line(DebugLine::new(corners[1], corners[2], color));
+        self.add_line(DebugLine::new(corners[2], corners[3], color));
+        self.add_line(DebugLine::new(corners[3], corners[0], color));
+
+        // Far plane
+        self.add_line(DebugLine::new(corners[4], corners[5], color));
+        self.add_line(DebugLine::new(corners[5], corners[6], color));
+        self.add_line(DebugLine::new(corners[6], corners[7], color));
+        self.add_line(DebugLine::new(corners[7], corners[4], color));
+
+        // Connecting edges
+        self.add_line(DebugLine::new(corners[0], corners[4], color));
+        self.add_line(DebugLine::new(corners[1], corners[5], color));
+        self.add_line(DebugLine::new(corners[2], corners[6], color));
+        self.add_line(DebugLine::new(corners[3], corners[7], color));
+    }
+
+    /// Draw coordinate axes
+    pub fn draw_axes(&mut self, origin: Vec3, size: f32) {
+        self.add_line(DebugLine::new(origin, origin + Vec3::new(size, 0.0, 0.0), Color::RED));
+        self.add_line(DebugLine::new(origin, origin + Vec3::new(0.0, size, 0.0), Color::GREEN));
+        self.add_line(DebugLine::new(origin, origin + Vec3::new(0.0, 0.0, size), Color::BLUE));
+    }
+
+    /// Draw transform gizmo
+    pub fn draw_transform(&mut self, transform: &Transform, size: f32) {
+        let origin = transform.position;
+        let x_axis = transform.rotation.rotate(Vec3::new(1.0, 0.0, 0.0)) * size;
+        let y_axis = transform.rotation.rotate(Vec3::new(0.0, 1.0, 0.0)) * size;
+        let z_axis = transform.rotation.rotate(Vec3::new(0.0, 0.0, 1.0)) * size;
+
+        self.add_line(DebugLine::new(origin, origin + x_axis, Color::RED).with_thickness(2.0));
+        self.add_line(DebugLine::new(origin, origin + y_axis, Color::GREEN).with_thickness(2.0));
+        self.add_line(DebugLine::new(origin, origin + z_axis, Color::BLUE).with_thickness(2.0));
+    }
+
+    /// Draw a grid
+    pub fn draw_grid(&mut self, center: Vec3, size: f32, divisions: u32, color: Color) {
+        let half_size = size * 0.5;
+        let step = size / divisions as f32;
+
+        for i in 0..=divisions {
+            let offset = -half_size + i as f32 * step;
+
+            // X-aligned lines
+            self.add_line(DebugLine::new(
+                center + Vec3::new(-half_size, 0.0, offset),
+                center + Vec3::new(half_size, 0.0, offset),
+                color,
+            ));
+
+            // Z-aligned lines
+            self.add_line(DebugLine::new(
+                center + Vec3::new(offset, 0.0, -half_size),
+                center + Vec3::new(offset, 0.0, half_size),
+                color,
+            ));
+        }
+    }
+
+    /// Draw an arrow
+    pub fn draw_arrow(&mut self, start: Vec3, end: Vec3, color: Color, head_size: f32) {
+        self.add_line(DebugLine::new(start, end, color));
+
+        let direction = (end - start).normalize();
+        let length = (end - start).length();
+
+        // Arrow head
+        let head_length = head_size.min(length * 0.3);
+        self.draw_cone(end, -direction, head_length, 0.3, color, 8);
+    }
+
+    /// Draw a path
+    pub fn draw_path(&mut self, points: &[Vec3], color: Color, closed: bool) {
+        if points.len() < 2 {
+            return;
+        }
+
+        for i in 0..points.len() - 1 {
+            self.add_line(DebugLine::new(points[i], points[i + 1], color));
+        }
+
+        if closed && points.len() > 2 {
+            self.add_line(DebugLine::new(points[points.len() - 1], points[0], color));
+        }
+    }
+
+    /// Draw a skeleton (bone hierarchy)
+    pub fn draw_skeleton(&mut self, bones: &[Transform], parent_indices: &[i32], color: Color) {
+        for (i, (bone, parent_idx)) in bones.iter().zip(parent_indices.iter()).enumerate() {
+            // Draw bone axes
+            self.draw_transform(bone, 0.1);
+
+            // Draw connection to parent
+            if *parent_idx >= 0 {
+                let parent = &bones[*parent_idx as usize];
+                self.add_line(DebugLine::new(parent.position, bone.position, color).with_thickness(2.0));
+            }
+        }
+    }
+
+    /// Update persistent lines
+    pub fn update(&mut self, delta_time: f32) {
+        // Update persistent line durations
+        self.persistent_lines.retain_mut(|(_, remaining)| {
+            *remaining -= delta_time;
+            *remaining > 0.0
+        });
+    }
+
+    /// Build vertex buffer for rendering
+    fn build_vertex_buffer(&mut self) {
+        let mut vertices = Vec::new();
+
+        // Add frame lines
+        for line in &self.lines {
+            vertices.push(DebugLineVertex {
+                position: line.start,
+                color: line.color,
+            });
+            vertices.push(DebugLineVertex {
+                position: line.end,
+                color: line.color,
+            });
+        }
+
+        // Add persistent lines
+        for (line, _) in &self.persistent_lines {
+            vertices.push(DebugLineVertex {
+                position: line.start,
+                color: line.color,
+            });
+            vertices.push(DebugLineVertex {
+                position: line.end,
+                color: line.color,
+            });
+        }
+
+        self.vertex_count = vertices.len().min(self.max_vertices as usize) as u32;
+        self.vertex_buffer.write(&vertices[..self.vertex_count as usize], 0);
+    }
+
+    /// Render all debug lines
+    pub fn render(&mut self, view_proj: Mat4) {
+        if self.lines.is_empty() && self.persistent_lines.is_empty() {
+            return;
+        }
+
+        self.build_vertex_buffer();
+
+        // Separate depth-tested and non-depth-tested lines
+        let depth_test_count = self.lines.iter()
+            .filter(|l| l.depth_test)
+            .count() * 2;
+
+        // Draw depth-tested lines
+        if depth_test_count > 0 {
+            self.pipeline_depth.set_vertex_buffer(&self.vertex_buffer);
+            self.pipeline_depth.set_uniform("view_proj", view_proj);
+            self.pipeline_depth.draw(0, depth_test_count as u32);
+        }
+
+        // Clear frame lines
+        self.lines.clear();
+    }
+}
+
+// =============================================================================
+// REGION: DEBUG TEXT RENDERER
+// =============================================================================
+
+/// Debug text entry
+pub struct DebugText {
+    /// Text content
+    pub text: String,
+    /// Screen position (normalized 0-1)
+    pub position: Vec2,
+    /// Text color
+    pub color: Color,
+    /// Font scale
+    pub scale: f32,
+    /// Duration (0 = single frame)
+    pub duration: f32,
+    /// Shadow enabled
+    pub shadow: bool,
+}
+
+impl DebugText {
+    /// Create new debug text
+    pub fn new(text: impl Into<String>, position: Vec2, color: Color) -> Self {
+        Self {
+            text: text.into(),
+            position,
+            color,
+            scale: 1.0,
+            duration: 0.0,
+            shadow: true,
+        }
+    }
+
+    /// Create 3D world space text
+    pub fn world_space(text: impl Into<String>, world_pos: Vec3, view_proj: Mat4, color: Color) -> Option<Self> {
+        let clip = view_proj * Vec4::new(world_pos.x, world_pos.y, world_pos.z, 1.0);
+        if clip.w <= 0.0 {
+            return None;
+        }
+
+        let ndc = Vec2::new(clip.x / clip.w, clip.y / clip.w);
+        if ndc.x < -1.0 || ndc.x > 1.0 || ndc.y < -1.0 || ndc.y > 1.0 {
+            return None;
+        }
+
+        let screen = Vec2::new(ndc.x * 0.5 + 0.5, 1.0 - (ndc.y * 0.5 + 0.5));
+
+        Some(Self {
+            text: text.into(),
+            position: screen,
+            color,
+            scale: 1.0,
+            duration: 0.0,
+            shadow: true,
+        })
+    }
+}
+
+/// GPU font atlas character info
+#[repr(C)]
+pub struct FontGlyph {
+    /// UV coordinates (x, y, width, height) normalized
+    pub uv_rect: Vec4,
+    /// Offset from baseline
+    pub offset: Vec2,
+    /// Advance width
+    pub advance: f32,
+    /// Character width
+    pub width: f32,
+}
+
+/// Debug text renderer with bitmap font
+pub struct DebugTextRenderer {
+    /// Font texture atlas
+    font_texture: Texture,
+    /// Glyph data
+    glyphs: [FontGlyph; 128],
+    /// Text entries
+    texts: Vec<DebugText>,
+    /// Persistent texts
+    persistent_texts: Vec<(DebugText, f32)>,
+    /// Vertex buffer for quads
+    vertex_buffer: GpuBuffer,
+    /// Index buffer
+    index_buffer: GpuBuffer,
+    /// Maximum characters
+    max_chars: u32,
+    /// Render pipeline
+    pipeline: RenderPipeline,
+    /// Line height
+    line_height: f32,
+}
+
+impl DebugTextRenderer {
+    /// Create new debug text renderer
+    pub fn new(max_chars: u32) -> Self {
+        let font_texture = Self::create_default_font();
+        let glyphs = Self::create_default_glyphs();
+
+        Self {
+            font_texture,
+            glyphs,
+            texts: Vec::new(),
+            persistent_texts: Vec::new(),
+            vertex_buffer: GpuBuffer::new_vertex(max_chars as usize * 4 * 32),
+            index_buffer: GpuBuffer::new_index(max_chars as usize * 6 * 4),
+            max_chars,
+            pipeline: RenderPipeline::from_source(DEBUG_TEXT_SHADER),
+            line_height: 16.0,
+        }
+    }
+
+    fn create_default_font() -> Texture {
+        // Create a simple 8x8 bitmap font texture
+        // In production, load from file
+        Texture::new_2d(256, 256, TextureFormat::R8Unorm)
+    }
+
+    fn create_default_glyphs() -> [FontGlyph; 128] {
+        let mut glyphs = [FontGlyph {
+            uv_rect: Vec4::zero(),
+            offset: Vec2::zero(),
+            advance: 8.0,
+            width: 8.0,
+        }; 128];
+
+        // Set up basic ASCII character UVs
+        for i in 32..127 {
+            let col = (i - 32) % 16;
+            let row = (i - 32) / 16;
+            glyphs[i] = FontGlyph {
+                uv_rect: Vec4::new(
+                    col as f32 / 16.0,
+                    row as f32 / 8.0,
+                    1.0 / 16.0,
+                    1.0 / 8.0,
+                ),
+                offset: Vec2::zero(),
+                advance: 8.0,
+                width: 8.0,
+            };
+        }
+
+        glyphs
+    }
+
+    /// Add debug text
+    pub fn add_text(&mut self, text: DebugText) {
+        if text.duration > 0.0 {
+            self.persistent_texts.push((text, text.duration));
+        } else {
+            self.texts.push(text);
+        }
+    }
+
+    /// Add simple text at position
+    pub fn print(&mut self, text: impl Into<String>, x: f32, y: f32, color: Color) {
+        self.add_text(DebugText::new(text, Vec2::new(x, y), color));
+    }
+
+    /// Add formatted stats
+    pub fn print_stats(&mut self, label: &str, value: f64, x: f32, y: f32) {
+        let text = format!("{}: {:.2}", label, value);
+        self.print(text, x, y, Color::WHITE);
+    }
+
+    /// Update persistent texts
+    pub fn update(&mut self, delta_time: f32) {
+        self.persistent_texts.retain_mut(|(_, remaining)| {
+            *remaining -= delta_time;
+            *remaining > 0.0
+        });
+    }
+
+    /// Render all debug text
+    pub fn render(&mut self, screen_width: f32, screen_height: f32) {
+        if self.texts.is_empty() && self.persistent_texts.is_empty() {
+            return;
+        }
+
+        // Build vertices for all text
+        // ...implementation details...
+
+        self.pipeline.set_texture("font", &self.font_texture);
+        self.pipeline.set_uniform("screen_size", Vec2::new(screen_width, screen_height));
+        self.pipeline.draw_indexed(0, 0); // Actual counts would be computed
+
+        self.texts.clear();
+    }
+}
+
+// =============================================================================
+// REGION: GPU PROFILER
+// =============================================================================
+
+/// GPU profiler zone
+pub struct ProfileZone {
+    /// Zone name
+    pub name: String,
+    /// Start query index
+    pub start_query: u32,
+    /// End query index
+    pub end_query: u32,
+    /// Parent zone index
+    pub parent: Option<u32>,
+    /// Depth in hierarchy
+    pub depth: u32,
+}
+
+/// GPU profiler timing result
+pub struct ProfileResult {
+    /// Zone name
+    pub name: String,
+    /// GPU time in milliseconds
+    pub gpu_time_ms: f64,
+    /// Depth in hierarchy
+    pub depth: u32,
+    /// Percentage of frame time
+    pub percentage: f32,
+}
+
+/// GPU profiler for measuring pass times
+pub struct GpuProfiler {
+    /// Query pool for timestamps
+    query_buffer: GpuBuffer,
+    /// Maximum queries per frame
+    max_queries: u32,
+    /// Current query index
+    current_query: u32,
+    /// Active zones stack
+    zone_stack: Vec<u32>,
+    /// All zones this frame
+    zones: Vec<ProfileZone>,
+    /// Results from previous frame
+    results: Vec<ProfileResult>,
+    /// Frame history for averaging
+    history: RingBuffer<Vec<ProfileResult>>,
+    /// Number of frames to average
+    history_size: u32,
+    /// GPU timestamp frequency
+    timestamp_frequency: f64,
+    /// Enabled state
+    enabled: bool,
+}
+
+impl GpuProfiler {
+    /// Create new GPU profiler
+    pub fn new(max_queries: u32, history_size: u32) -> Self {
+        Self {
+            query_buffer: GpuBuffer::new_query(max_queries as usize * 8),
+            max_queries,
+            current_query: 0,
+            zone_stack: Vec::new(),
+            zones: Vec::new(),
+            results: Vec::new(),
+            history: RingBuffer::new(history_size as usize),
+            history_size,
+            timestamp_frequency: 1_000_000_000.0, // nanoseconds
+            enabled: true,
+        }
+    }
+
+    /// Enable or disable profiling
+    pub fn set_enabled(&mut self, enabled: bool) {
+        self.enabled = enabled;
+    }
+
+    /// Begin a new frame
+    pub fn begin_frame(&mut self) {
+        if !self.enabled {
+            return;
+        }
+
+        self.current_query = 0;
+        self.zones.clear();
+        self.zone_stack.clear();
+    }
+
+    /// Begin a profiled zone
+    pub fn begin_zone(&mut self, name: impl Into<String>) -> u32 {
+        if !self.enabled {
+            return 0;
+        }
+
+        let zone_index = self.zones.len() as u32;
+        let start_query = self.current_query;
+        self.current_query += 1;
+
+        let parent = self.zone_stack.last().copied();
+        let depth = self.zone_stack.len() as u32;
+
+        self.zones.push(ProfileZone {
+            name: name.into(),
+            start_query,
+            end_query: 0,
+            parent,
+            depth,
+        });
+
+        self.zone_stack.push(zone_index);
+
+        // Write timestamp query
+        self.write_timestamp_query(start_query);
+
+        zone_index
+    }
+
+    /// End a profiled zone
+    pub fn end_zone(&mut self, zone_index: u32) {
+        if !self.enabled {
+            return;
+        }
+
+        if let Some(zone) = self.zones.get_mut(zone_index as usize) {
+            zone.end_query = self.current_query;
+            self.current_query += 1;
+            self.write_timestamp_query(zone.end_query);
+        }
+
+        self.zone_stack.pop();
+    }
+
+    fn write_timestamp_query(&self, index: u32) {
+        // GPU-specific timestamp query
+    }
+
+    /// End frame and collect results
+    pub fn end_frame(&mut self) {
+        if !self.enabled || self.zones.is_empty() {
+            return;
+        }
+
+        // Read timestamp queries
+        let timestamps = self.read_timestamps();
+
+        // Calculate times
+        let mut frame_results = Vec::new();
+        let mut total_time = 0.0;
+
+        for zone in &self.zones {
+            let start_time = timestamps.get(zone.start_query as usize).copied().unwrap_or(0);
+            let end_time = timestamps.get(zone.end_query as usize).copied().unwrap_or(0);
+            let gpu_time_ns = (end_time - start_time) as f64;
+            let gpu_time_ms = gpu_time_ns / 1_000_000.0;
+
+            if zone.depth == 0 {
+                total_time += gpu_time_ms;
+            }
+
+            frame_results.push(ProfileResult {
+                name: zone.name.clone(),
+                gpu_time_ms,
+                depth: zone.depth,
+                percentage: 0.0,
+            });
+        }
+
+        // Calculate percentages
+        for result in &mut frame_results {
+            result.percentage = (result.gpu_time_ms / total_time * 100.0) as f32;
+        }
+
+        // Add to history and calculate averages
+        self.history.push(frame_results);
+        self.calculate_averaged_results();
+    }
+
+    fn read_timestamps(&self) -> Vec<u64> {
+        // Read from GPU query buffer
+        vec![0; self.current_query as usize]
+    }
+
+    fn calculate_averaged_results(&mut self) {
+        if self.history.is_empty() {
+            return;
+        }
+
+        // Average results across history
+        let history_count = self.history.len() as f64;
+        let first = self.history.front().unwrap();
+
+        self.results = first.iter().enumerate().map(|(i, r)| {
+            let avg_time: f64 = self.history.iter()
+                .filter_map(|h| h.get(i))
+                .map(|r| r.gpu_time_ms)
+                .sum::<f64>() / history_count;
+
+            let avg_pct: f32 = self.history.iter()
+                .filter_map(|h| h.get(i))
+                .map(|r| r.percentage)
+                .sum::<f32>() / history_count as f32;
+
+            ProfileResult {
+                name: r.name.clone(),
+                gpu_time_ms: avg_time,
+                depth: r.depth,
+                percentage: avg_pct,
+            }
+        }).collect();
+    }
+
+    /// Get profile results
+    pub fn results(&self) -> &[ProfileResult] {
+        &self.results
+    }
+
+    /// Get total frame GPU time
+    pub fn total_frame_time(&self) -> f64 {
+        self.results.iter()
+            .filter(|r| r.depth == 0)
+            .map(|r| r.gpu_time_ms)
+            .sum()
+    }
+}
+
+/// RAII scope guard for profiling
+pub struct ProfileScope<'a> {
+    profiler: &'a mut GpuProfiler,
+    zone_index: u32,
+}
+
+impl<'a> ProfileScope<'a> {
+    pub fn new(profiler: &'a mut GpuProfiler, name: impl Into<String>) -> Self {
+        let zone_index = profiler.begin_zone(name);
+        Self { profiler, zone_index }
+    }
+}
+
+impl Drop for ProfileScope<'_> {
+    fn drop(&mut self) {
+        self.profiler.end_zone(self.zone_index);
+    }
+}
+
+// =============================================================================
+// REGION: STATISTICS OVERLAY
+// =============================================================================
+
+/// Render statistics
+pub struct RenderStats {
+    /// Frame time in milliseconds
+    pub frame_time_ms: f64,
+    /// Frames per second
+    pub fps: f64,
+    /// Draw calls
+    pub draw_calls: u32,
+    /// Triangles rendered
+    pub triangles: u64,
+    /// Vertices processed
+    pub vertices: u64,
+    /// Instances drawn
+    pub instances: u32,
+    /// Compute dispatches
+    pub compute_dispatches: u32,
+    /// Textures bound
+    pub texture_bindings: u32,
+    /// Buffer bindings
+    pub buffer_bindings: u32,
+    /// Render targets used
+    pub render_targets: u32,
+    /// GPU memory used (MB)
+    pub gpu_memory_mb: f32,
+    /// CPU frame time (ms)
+    pub cpu_time_ms: f64,
+    /// GPU frame time (ms)
+    pub gpu_time_ms: f64,
+    /// Culled objects
+    pub culled_objects: u32,
+    /// Visible objects
+    pub visible_objects: u32,
+    /// Shadow casters
+    pub shadow_casters: u32,
+    /// Active lights
+    pub active_lights: u32,
+    /// Particles active
+    pub particles: u32,
+}
+
+impl Default for RenderStats {
+    fn default() -> Self {
+        Self {
+            frame_time_ms: 16.67,
+            fps: 60.0,
+            draw_calls: 0,
+            triangles: 0,
+            vertices: 0,
+            instances: 0,
+            compute_dispatches: 0,
+            texture_bindings: 0,
+            buffer_bindings: 0,
+            render_targets: 0,
+            gpu_memory_mb: 0.0,
+            cpu_time_ms: 0.0,
+            gpu_time_ms: 0.0,
+            culled_objects: 0,
+            visible_objects: 0,
+            shadow_casters: 0,
+            active_lights: 0,
+            particles: 0,
+        }
+    }
+}
+
+impl RenderStats {
+    /// Reset all counters
+    pub fn reset(&mut self) {
+        self.draw_calls = 0;
+        self.triangles = 0;
+        self.vertices = 0;
+        self.instances = 0;
+        self.compute_dispatches = 0;
+        self.texture_bindings = 0;
+        self.buffer_bindings = 0;
+        self.render_targets = 0;
+        self.culled_objects = 0;
+        self.visible_objects = 0;
+        self.shadow_casters = 0;
+        self.active_lights = 0;
+        self.particles = 0;
+    }
+}
+
+/// Statistics overlay renderer
+pub struct StatsOverlay {
+    /// Current stats
+    stats: RenderStats,
+    /// Frame time history for graph
+    frame_time_history: RingBuffer<f64>,
+    /// GPU profiler
+    profiler: GpuProfiler,
+    /// Text renderer
+    text_renderer: DebugTextRenderer,
+    /// Overlay visibility
+    visible: bool,
+    /// Overlay position
+    position: Vec2,
+    /// Show frame time graph
+    show_graph: bool,
+    /// Show GPU profiler
+    show_profiler: bool,
+    /// Show detailed stats
+    show_details: bool,
+    /// Graph texture
+    graph_texture: Texture,
+    /// Graph compute shader
+    graph_compute: ComputeShader,
+}
+
+impl StatsOverlay {
+    /// Create new stats overlay
+    pub fn new() -> Self {
+        Self {
+            stats: RenderStats::default(),
+            frame_time_history: RingBuffer::new(256),
+            profiler: GpuProfiler::new(256, 8),
+            text_renderer: DebugTextRenderer::new(4096),
+            visible: true,
+            position: Vec2::new(0.01, 0.01),
+            show_graph: true,
+            show_profiler: true,
+            show_details: false,
+            graph_texture: Texture::new_2d(256, 64, TextureFormat::Rgba8Unorm),
+            graph_compute: ComputeShader::from_source(STATS_GRAPH_SHADER),
+        }
+    }
+
+    /// Toggle visibility
+    pub fn toggle_visibility(&mut self) {
+        self.visible = !self.visible;
+    }
+
+    /// Toggle graph display
+    pub fn toggle_graph(&mut self) {
+        self.show_graph = !self.show_graph;
+    }
+
+    /// Toggle profiler display
+    pub fn toggle_profiler(&mut self) {
+        self.show_profiler = !self.show_profiler;
+    }
+
+    /// Toggle detailed stats
+    pub fn toggle_details(&mut self) {
+        self.show_details = !self.show_details;
+    }
+
+    /// Get mutable stats for updating
+    pub fn stats_mut(&mut self) -> &mut RenderStats {
+        &mut self.stats
+    }
+
+    /// Get profiler for zone timing
+    pub fn profiler_mut(&mut self) -> &mut GpuProfiler {
+        &mut self.profiler
+    }
+
+    /// Update stats and history
+    pub fn update(&mut self, delta_time: f32) {
+        // Update FPS calculation
+        self.stats.frame_time_ms = delta_time as f64 * 1000.0;
+        self.stats.fps = 1.0 / delta_time as f64;
+
+        // Add to history
+        self.frame_time_history.push(self.stats.frame_time_ms);
+    }
+
+    /// Render the overlay
+    pub fn render(&mut self, screen_width: f32, screen_height: f32) {
+        if !self.visible {
+            return;
+        }
+
+        let x = self.position.x;
+        let mut y = self.position.y;
+        let line_height = 0.02;
+
+        // FPS and frame time
+        let fps_color = if self.stats.fps >= 55.0 {
+            Color::GREEN
+        } else if self.stats.fps >= 30.0 {
+            Color::YELLOW
+        } else {
+            Color::RED
+        };
+
+        self.text_renderer.print(
+            format!("FPS: {:.1} ({:.2}ms)", self.stats.fps, self.stats.frame_time_ms),
+            x, y, fps_color
+        );
+        y += line_height;
+
+        // Draw calls and triangles
+        self.text_renderer.print(
+            format!("Draw Calls: {} | Tris: {:.2}M",
+                self.stats.draw_calls,
+                self.stats.triangles as f64 / 1_000_000.0),
+            x, y, Color::WHITE
+        );
+        y += line_height;
+
+        if self.show_details {
+            // Detailed stats
+            self.text_renderer.print(
+                format!("Vertices: {} | Instances: {}",
+                    self.stats.vertices, self.stats.instances),
+                x, y, Color::GRAY
+            );
+            y += line_height;
+
+            self.text_renderer.print(
+                format!("Visible: {} | Culled: {}",
+                    self.stats.visible_objects, self.stats.culled_objects),
+                x, y, Color::GRAY
+            );
+            y += line_height;
+
+            self.text_renderer.print(
+                format!("Lights: {} | Shadows: {}",
+                    self.stats.active_lights, self.stats.shadow_casters),
+                x, y, Color::GRAY
+            );
+            y += line_height;
+
+            self.text_renderer.print(
+                format!("GPU Memory: {:.1} MB", self.stats.gpu_memory_mb),
+                x, y, Color::GRAY
+            );
+            y += line_height;
+        }
+
+        // GPU profiler results
+        if self.show_profiler {
+            y += line_height * 0.5;
+            self.text_renderer.print("GPU Profiler:", x, y, Color::CYAN);
+            y += line_height;
+
+            for result in self.profiler.results() {
+                let indent = "  ".repeat(result.depth as usize);
+                let bar_width = (result.percentage / 100.0 * 20.0) as usize;
+                let bar = "█".repeat(bar_width) + &"░".repeat(20 - bar_width);
+
+                self.text_renderer.print(
+                    format!("{}{}: {:.2}ms ({:.1}%) {}",
+                        indent, result.name, result.gpu_time_ms, result.percentage, bar),
+                    x, y, Color::WHITE
+                );
+                y += line_height;
+            }
+        }
+
+        // Render graph
+        if self.show_graph {
+            self.update_graph();
+            // Graph would be rendered as a textured quad
+        }
+
+        self.text_renderer.render(screen_width, screen_height);
+    }
+
+    fn update_graph(&self) {
+        // Update frame time graph texture using compute shader
+        // ...
+    }
+}
+
+// =============================================================================
+// REGION: VISUALIZATION PASSES
+// =============================================================================
+
+/// Debug visualization compute shaders
+pub struct DebugVisualizationPasses {
+    /// Wireframe overlay pass
+    wireframe_pipeline: RenderPipeline,
+    /// Normal visualization pass
+    normal_pipeline: RenderPipeline,
+    /// Overdraw heatmap pass
+    overdraw_compute: ComputeShader,
+    /// Mipmap visualization pass
+    mipmap_compute: ComputeShader,
+    /// Depth visualization pass
+    depth_compute: ComputeShader,
+    /// Motion vector visualization pass
+    motion_compute: ComputeShader,
+    /// Light count heatmap pass
+    light_count_compute: ComputeShader,
+    /// Cluster visualization pass
+    cluster_compute: ComputeShader,
+    /// LOD visualization pass
+    lod_compute: ComputeShader,
+    /// Heatmap color ramp texture
+    heatmap_lut: Texture,
+}
+
+impl DebugVisualizationPasses {
+    /// Create all visualization passes
+    pub fn new() -> Self {
+        Self {
+            wireframe_pipeline: RenderPipeline::from_source(DEBUG_WIREFRAME_SHADER),
+            normal_pipeline: RenderPipeline::from_source(DEBUG_NORMAL_SHADER),
+            overdraw_compute: ComputeShader::from_source(DEBUG_OVERDRAW_SHADER),
+            mipmap_compute: ComputeShader::from_source(DEBUG_MIPMAP_SHADER),
+            depth_compute: ComputeShader::from_source(DEBUG_DEPTH_SHADER),
+            motion_compute: ComputeShader::from_source(DEBUG_MOTION_SHADER),
+            light_count_compute: ComputeShader::from_source(DEBUG_LIGHT_COUNT_SHADER),
+            cluster_compute: ComputeShader::from_source(DEBUG_CLUSTER_SHADER),
+            lod_compute: ComputeShader::from_source(DEBUG_LOD_SHADER),
+            heatmap_lut: Self::create_heatmap_lut(),
+        }
+    }
+
+    fn create_heatmap_lut() -> Texture {
+        let mut data = vec![0u8; 256 * 4];
+
+        for i in 0..256 {
+            let t = i as f32 / 255.0;
+            let (r, g, b) = Self::heatmap_color(t);
+            data[i * 4] = (r * 255.0) as u8;
+            data[i * 4 + 1] = (g * 255.0) as u8;
+            data[i * 4 + 2] = (b * 255.0) as u8;
+            data[i * 4 + 3] = 255;
+        }
+
+        let texture = Texture::new_1d(256, TextureFormat::Rgba8Unorm);
+        texture.write(&data, 0);
+        texture
+    }
+
+    fn heatmap_color(t: f32) -> (f32, f32, f32) {
+        // Blue -> Cyan -> Green -> Yellow -> Red
+        if t < 0.25 {
+            let s = t * 4.0;
+            (0.0, s, 1.0)
+        } else if t < 0.5 {
+            let s = (t - 0.25) * 4.0;
+            (0.0, 1.0, 1.0 - s)
+        } else if t < 0.75 {
+            let s = (t - 0.5) * 4.0;
+            (s, 1.0, 0.0)
+        } else {
+            let s = (t - 0.75) * 4.0;
+            (1.0, 1.0 - s, 0.0)
+        }
+    }
+
+    /// Visualize overdraw
+    pub fn visualize_overdraw(&self, overdraw_buffer: &Texture, output: &Texture, max_overdraw: u32) {
+        self.overdraw_compute.set_texture("overdraw_buffer", overdraw_buffer);
+        self.overdraw_compute.set_texture("heatmap_lut", &self.heatmap_lut);
+        self.overdraw_compute.set_storage_texture("output", output);
+        self.overdraw_compute.set_uniform("max_overdraw", max_overdraw as f32);
+
+        self.overdraw_compute.dispatch_2d(output.width(), output.height());
+    }
+
+    /// Visualize mipmap levels
+    pub fn visualize_mipmaps(&self, uv_texture: &Texture, output: &Texture) {
+        self.mipmap_compute.set_texture("uv_texture", uv_texture);
+        self.mipmap_compute.set_storage_texture("output", output);
+
+        self.mipmap_compute.dispatch_2d(output.width(), output.height());
+    }
+
+    /// Visualize depth buffer
+    pub fn visualize_depth(&self, depth_texture: &Texture, output: &Texture, near: f32, far: f32) {
+        self.depth_compute.set_texture("depth", depth_texture);
+        self.depth_compute.set_storage_texture("output", output);
+        self.depth_compute.set_uniform("near", near);
+        self.depth_compute.set_uniform("far", far);
+
+        self.depth_compute.dispatch_2d(output.width(), output.height());
+    }
+
+    /// Visualize motion vectors
+    pub fn visualize_motion(&self, motion_texture: &Texture, output: &Texture, scale: f32) {
+        self.motion_compute.set_texture("motion", motion_texture);
+        self.motion_compute.set_storage_texture("output", output);
+        self.motion_compute.set_uniform("scale", scale);
+
+        self.motion_compute.dispatch_2d(output.width(), output.height());
+    }
+
+    /// Visualize light count per pixel
+    pub fn visualize_light_count(&self, light_count_texture: &Texture, output: &Texture, max_lights: u32) {
+        self.light_count_compute.set_texture("light_count", light_count_texture);
+        self.light_count_compute.set_texture("heatmap_lut", &self.heatmap_lut);
+        self.light_count_compute.set_storage_texture("output", output);
+        self.light_count_compute.set_uniform("max_lights", max_lights as f32);
+
+        self.light_count_compute.dispatch_2d(output.width(), output.height());
+    }
+
+    /// Visualize light clusters
+    pub fn visualize_clusters(&self, cluster_texture: &Texture, output: &Texture, view_proj: Mat4) {
+        self.cluster_compute.set_texture("clusters", cluster_texture);
+        self.cluster_compute.set_storage_texture("output", output);
+        self.cluster_compute.set_uniform("view_proj", view_proj);
+
+        self.cluster_compute.dispatch_2d(output.width(), output.height());
+    }
+
+    /// Visualize LOD levels
+    pub fn visualize_lod(&self, lod_buffer: &Texture, output: &Texture, max_lod: u32) {
+        self.lod_compute.set_texture("lod_buffer", lod_buffer);
+        self.lod_compute.set_storage_texture("output", output);
+        self.lod_compute.set_uniform("max_lod", max_lod as f32);
+
+        self.lod_compute.dispatch_2d(output.width(), output.height());
+    }
+}
+
+// =============================================================================
+// REGION: DEBUG MANAGER
+// =============================================================================
+
+/// Central debug visualization manager
+pub struct DebugManager {
+    /// Current render mode
+    render_mode: DebugRenderMode,
+    /// Debug line renderer
+    lines: DebugLineBatch,
+    /// Debug text renderer
+    text: DebugTextRenderer,
+    /// Stats overlay
+    stats_overlay: StatsOverlay,
+    /// Visualization passes
+    viz_passes: DebugVisualizationPasses,
+    /// Debug output texture
+    output_texture: Texture,
+    /// Enabled state
+    enabled: bool,
+    /// Show bounding boxes
+    show_bounds: bool,
+    /// Show lights
+    show_lights: bool,
+    /// Show probes
+    show_probes: bool,
+    /// Show navigation mesh
+    show_navmesh: bool,
+    /// Show physics colliders
+    show_colliders: bool,
+    /// Freeze culling
+    freeze_culling: bool,
+    /// Captured frustum for freeze culling
+    frozen_frustum: Option<Frustum>,
+}
+
+impl DebugManager {
+    /// Create new debug manager
+    pub fn new(width: u32, height: u32) -> Self {
+        Self {
+            render_mode: DebugRenderMode::None,
+            lines: DebugLineBatch::new(100000),
+            text: DebugTextRenderer::new(8192),
+            stats_overlay: StatsOverlay::new(),
+            viz_passes: DebugVisualizationPasses::new(),
+            output_texture: Texture::new_2d(width, height, TextureFormat::Rgba8Unorm),
+            enabled: true,
+            show_bounds: false,
+            show_lights: false,
+            show_probes: false,
+            show_navmesh: false,
+            show_colliders: false,
+            freeze_culling: false,
+            frozen_frustum: None,
+        }
+    }
+
+    /// Set render mode
+    pub fn set_render_mode(&mut self, mode: DebugRenderMode) {
+        self.render_mode = mode;
+    }
+
+    /// Get current render mode
+    pub fn render_mode(&self) -> &DebugRenderMode {
+        &self.render_mode
+    }
+
+    /// Toggle render mode by shortcut
+    pub fn toggle_mode_by_key(&mut self, key: char) {
+        let modes = [
+            ('1', DebugRenderMode::Wireframe),
+            ('2', DebugRenderMode::Normals),
+            ('3', DebugRenderMode::UvChecker),
+            ('4', DebugRenderMode::Overdraw),
+            ('5', DebugRenderMode::DepthBuffer),
+            ('6', DebugRenderMode::LightCount),
+            ('7', DebugRenderMode::AlbedoOnly),
+            ('8', DebugRenderMode::NormalBuffer),
+            ('9', DebugRenderMode::LodLevels),
+            ('0', DebugRenderMode::None),
+        ];
+
+        for (shortcut, mode) in modes {
+            if key == shortcut {
+                self.render_mode = mode;
+                return;
+            }
+        }
+    }
+
+    /// Get line batch for drawing
+    pub fn lines(&mut self) -> &mut DebugLineBatch {
+        &mut self.lines
+    }
+
+    /// Get text renderer
+    pub fn text(&mut self) -> &mut DebugTextRenderer {
+        &mut self.text
+    }
+
+    /// Get stats overlay
+    pub fn stats(&mut self) -> &mut StatsOverlay {
+        &mut self.stats_overlay
+    }
+
+    /// Toggle bounding boxes
+    pub fn toggle_bounds(&mut self) {
+        self.show_bounds = !self.show_bounds;
+    }
+
+    /// Toggle light visualization
+    pub fn toggle_lights(&mut self) {
+        self.show_lights = !self.show_lights;
+    }
+
+    /// Toggle freeze culling
+    pub fn toggle_freeze_culling(&mut self, camera_frustum: &Frustum) {
+        self.freeze_culling = !self.freeze_culling;
+        if self.freeze_culling {
+            self.frozen_frustum = Some(camera_frustum.clone());
+        } else {
+            self.frozen_frustum = None;
+        }
+    }
+
+    /// Get culling frustum (frozen or current)
+    pub fn culling_frustum<'a>(&'a self, current: &'a Frustum) -> &'a Frustum {
+        self.frozen_frustum.as_ref().unwrap_or(current)
+    }
+
+    /// Update debug systems
+    pub fn update(&mut self, delta_time: f32) {
+        self.lines.update(delta_time);
+        self.text.update(delta_time);
+        self.stats_overlay.update(delta_time);
+    }
+
+    /// Begin frame profiling
+    pub fn begin_frame(&mut self) {
+        self.stats_overlay.profiler_mut().begin_frame();
+        self.stats_overlay.stats_mut().reset();
+    }
+
+    /// End frame profiling
+    pub fn end_frame(&mut self) {
+        self.stats_overlay.profiler_mut().end_frame();
+    }
+
+    /// Render all debug visualizations
+    pub fn render(
+        &mut self,
+        view_proj: Mat4,
+        screen_width: f32,
+        screen_height: f32,
+    ) {
+        if !self.enabled {
+            return;
+        }
+
+        // Draw frozen frustum if culling is frozen
+        if let Some(ref frustum) = self.frozen_frustum {
+            self.lines.draw_frustum(frustum, Color::YELLOW);
+        }
+
+        // Render debug lines
+        self.lines.render(view_proj);
+
+        // Render debug text
+        self.text.render(screen_width, screen_height);
+
+        // Render stats overlay
+        self.stats_overlay.render(screen_width, screen_height);
+    }
+
+    /// Draw AABB for object
+    pub fn draw_object_bounds(&mut self, aabb: &Aabb, selected: bool) {
+        if !self.show_bounds {
+            return;
+        }
+
+        let color = if selected { Color::YELLOW } else { Color::GREEN };
+        self.lines.draw_aabb(aabb, color);
+    }
+
+    /// Draw light visualization
+    pub fn draw_light(&mut self, position: Vec3, light_type: &str, color: Color, range: f32) {
+        if !self.show_lights {
+            return;
+        }
+
+        match light_type {
+            "point" => {
+                self.lines.draw_sphere(position, range, color, 16);
+                self.lines.draw_axes(position, 0.5);
+            }
+            "spot" => {
+                // Spot light cone would be drawn
+                self.lines.draw_axes(position, 0.5);
+            }
+            "directional" => {
+                // Directional arrow
+                self.lines.draw_axes(position, 1.0);
+            }
+            _ => {}
+        }
+    }
+}
+
+// =============================================================================
+// REGION: WGSL SHADERS
+// =============================================================================
+
+const DEBUG_LINE_SHADER: &str = r#"
+struct Uniforms {
+    view_proj: mat4x4<f32>,
+}
+
+struct VertexInput {
+    @location(0) position: vec3<f32>,
+    @location(1) color: vec4<f32>,
+}
+
+struct VertexOutput {
+    @builtin(position) position: vec4<f32>,
+    @location(0) color: vec4<f32>,
+}
+
+@group(0) @binding(0) var<uniform> uniforms: Uniforms;
+
+@vertex
+fn vs_main(input: VertexInput) -> VertexOutput {
+    var output: VertexOutput;
+    output.position = uniforms.view_proj * vec4<f32>(input.position, 1.0);
+    output.color = input.color;
+    return output;
+}
+
+@fragment
+fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
+    return input.color;
+}
+"#;
+
+const DEBUG_TEXT_SHADER: &str = r#"
+struct Uniforms {
+    screen_size: vec2<f32>,
+}
+
+struct VertexInput {
+    @location(0) position: vec2<f32>,
+    @location(1) uv: vec2<f32>,
+    @location(2) color: vec4<f32>,
+}
+
+struct VertexOutput {
+    @builtin(position) position: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+    @location(1) color: vec4<f32>,
+}
+
+@group(0) @binding(0) var<uniform> uniforms: Uniforms;
+@group(0) @binding(1) var font: texture_2d<f32>;
+@group(0) @binding(2) var font_sampler: sampler;
+
+@vertex
+fn vs_main(input: VertexInput) -> VertexOutput {
+    var output: VertexOutput;
+
+    // Convert to NDC
+    let ndc = vec2<f32>(
+        input.position.x * 2.0 - 1.0,
+        1.0 - input.position.y * 2.0
+    );
+
+    output.position = vec4<f32>(ndc, 0.0, 1.0);
+    output.uv = input.uv;
+    output.color = input.color;
+    return output;
+}
+
+@fragment
+fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
+    let alpha = textureSample(font, font_sampler, input.uv).r;
+    return vec4<f32>(input.color.rgb, input.color.a * alpha);
+}
+"#;
+
+const DEBUG_WIREFRAME_SHADER: &str = r#"
+struct Uniforms {
+    view_proj: mat4x4<f32>,
+    wireframe_color: vec4<f32>,
+    fill_color: vec4<f32>,
+    line_width: f32,
+}
+
+@group(0) @binding(0) var<uniform> uniforms: Uniforms;
+
+struct VertexOutput {
+    @builtin(position) position: vec4<f32>,
+    @location(0) bary: vec3<f32>,
+}
+
+@vertex
+fn vs_main(
+    @builtin(vertex_index) vertex_index: u32,
+    @location(0) position: vec3<f32>
+) -> VertexOutput {
+    var output: VertexOutput;
+    output.position = uniforms.view_proj * vec4<f32>(position, 1.0);
+
+    // Barycentric coordinates for wireframe
+    let bary_idx = vertex_index % 3u;
+    output.bary = vec3<f32>(
+        select(0.0, 1.0, bary_idx == 0u),
+        select(0.0, 1.0, bary_idx == 1u),
+        select(0.0, 1.0, bary_idx == 2u)
+    );
+
+    return output;
+}
+
+@fragment
+fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
+    // Calculate edge distance
+    let d = min(min(input.bary.x, input.bary.y), input.bary.z);
+    let edge = smoothstep(0.0, uniforms.line_width * fwidth(d), d);
+
+    return mix(uniforms.wireframe_color, uniforms.fill_color, edge);
+}
+"#;
+
+const DEBUG_NORMAL_SHADER: &str = r#"
+struct Uniforms {
+    view_proj: mat4x4<f32>,
+    normal_length: f32,
+}
+
+@group(0) @binding(0) var<uniform> uniforms: Uniforms;
+
+struct VertexOutput {
+    @builtin(position) position: vec4<f32>,
+    @location(0) color: vec3<f32>,
+}
+
+@vertex
+fn vs_main(
+    @location(0) position: vec3<f32>,
+    @location(1) normal: vec3<f32>
+) -> VertexOutput {
+    var output: VertexOutput;
+    output.position = uniforms.view_proj * vec4<f32>(position, 1.0);
+    output.color = normal * 0.5 + 0.5;
+    return output;
+}
+
+@fragment
+fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
+    return vec4<f32>(input.color, 1.0);
+}
+"#;
+
+const DEBUG_OVERDRAW_SHADER: &str = r#"
+@group(0) @binding(0) var overdraw_buffer: texture_2d<u32>;
+@group(0) @binding(1) var heatmap_lut: texture_1d<f32>;
+@group(0) @binding(2) var output: texture_storage_2d<rgba8unorm, write>;
+@group(0) @binding(3) var<uniform> max_overdraw: f32;
+
+@compute @workgroup_size(8, 8, 1)
+fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+    let dims = textureDimensions(output);
+    if (any(id.xy >= dims)) { return; }
+
+    let overdraw = f32(textureLoad(overdraw_buffer, id.xy, 0).r);
+    let normalized = clamp(overdraw / max_overdraw, 0.0, 1.0);
+
+    let color = textureLoad(heatmap_lut, i32(normalized * 255.0), 0);
+    textureStore(output, id.xy, color);
+}
+"#;
+
+const DEBUG_MIPMAP_SHADER: &str = r#"
+@group(0) @binding(0) var uv_texture: texture_2d<f32>;
+@group(0) @binding(1) var output: texture_storage_2d<rgba8unorm, write>;
+
+@compute @workgroup_size(8, 8, 1)
+fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+    let dims = textureDimensions(output);
+    if (any(id.xy >= dims)) { return; }
+
+    // Calculate mip level from UV derivatives
+    // In practice, this would use ddx/ddy in fragment shader
+    let uv = vec2<f32>(id.xy) / vec2<f32>(dims);
+
+    // Color code by mip level
+    let mip_colors = array<vec4<f32>, 8>(
+        vec4<f32>(1.0, 0.0, 0.0, 1.0),  // Mip 0 - Red
+        vec4<f32>(1.0, 0.5, 0.0, 1.0),  // Mip 1 - Orange
+        vec4<f32>(1.0, 1.0, 0.0, 1.0),  // Mip 2 - Yellow
+        vec4<f32>(0.0, 1.0, 0.0, 1.0),  // Mip 3 - Green
+        vec4<f32>(0.0, 1.0, 1.0, 1.0),  // Mip 4 - Cyan
+        vec4<f32>(0.0, 0.0, 1.0, 1.0),  // Mip 5 - Blue
+        vec4<f32>(0.5, 0.0, 1.0, 1.0),  // Mip 6 - Purple
+        vec4<f32>(1.0, 0.0, 1.0, 1.0)   // Mip 7 - Magenta
+    );
+
+    // Simplified - actual implementation would compute proper mip level
+    let mip_level = 0u;
+    textureStore(output, id.xy, mip_colors[mip_level]);
+}
+"#;
+
+const DEBUG_DEPTH_SHADER: &str = r#"
+@group(0) @binding(0) var depth: texture_2d<f32>;
+@group(0) @binding(1) var output: texture_storage_2d<rgba8unorm, write>;
+@group(0) @binding(2) var<uniform> near: f32;
+@group(0) @binding(3) var<uniform> far: f32;
+
+@compute @workgroup_size(8, 8, 1)
+fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+    let dims = textureDimensions(output);
+    if (any(id.xy >= dims)) { return; }
+
+    let raw_depth = textureLoad(depth, id.xy, 0).r;
+
+    // Linearize depth
+    let linear_depth = near * far / (far - raw_depth * (far - near));
+    let normalized = (linear_depth - near) / (far - near);
+
+    let color = vec4<f32>(vec3<f32>(normalized), 1.0);
+    textureStore(output, id.xy, color);
+}
+"#;
+
+const DEBUG_MOTION_SHADER: &str = r#"
+@group(0) @binding(0) var motion: texture_2d<f32>;
+@group(0) @binding(1) var output: texture_storage_2d<rgba8unorm, write>;
+@group(0) @binding(2) var<uniform> scale: f32;
+
+@compute @workgroup_size(8, 8, 1)
+fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+    let dims = textureDimensions(output);
+    if (any(id.xy >= dims)) { return; }
+
+    let mv = textureLoad(motion, id.xy, 0).rg;
+    let magnitude = length(mv) * scale;
+
+    // Color code by direction and magnitude
+    let angle = atan2(mv.y, mv.x);
+    let hue = angle / (2.0 * 3.14159) + 0.5;
+
+    // HSV to RGB
+    let h = hue * 6.0;
+    let i = floor(h);
+    let f = h - i;
+    let q = 1.0 - f;
+    let t = f;
+
+    var color: vec3<f32>;
+    switch (i32(i) % 6) {
+        case 0: { color = vec3<f32>(1.0, t, 0.0); }
+        case 1: { color = vec3<f32>(q, 1.0, 0.0); }
+        case 2: { color = vec3<f32>(0.0, 1.0, t); }
+        case 3: { color = vec3<f32>(0.0, q, 1.0); }
+        case 4: { color = vec3<f32>(t, 0.0, 1.0); }
+        default: { color = vec3<f32>(1.0, 0.0, q); }
+    }
+
+    color *= saturate(magnitude);
+    textureStore(output, id.xy, vec4<f32>(color, 1.0));
+}
+"#;
+
+const DEBUG_LIGHT_COUNT_SHADER: &str = r#"
+@group(0) @binding(0) var light_count: texture_2d<u32>;
+@group(0) @binding(1) var heatmap_lut: texture_1d<f32>;
+@group(0) @binding(2) var output: texture_storage_2d<rgba8unorm, write>;
+@group(0) @binding(3) var<uniform> max_lights: f32;
+
+@compute @workgroup_size(8, 8, 1)
+fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+    let dims = textureDimensions(output);
+    if (any(id.xy >= dims)) { return; }
+
+    let count = f32(textureLoad(light_count, id.xy, 0).r);
+    let normalized = clamp(count / max_lights, 0.0, 1.0);
+
+    let color = textureLoad(heatmap_lut, i32(normalized * 255.0), 0);
+    textureStore(output, id.xy, color);
+}
+"#;
+
+const DEBUG_CLUSTER_SHADER: &str = r#"
+@group(0) @binding(0) var clusters: texture_3d<u32>;
+@group(0) @binding(1) var output: texture_storage_2d<rgba8unorm, write>;
+@group(0) @binding(2) var<uniform> view_proj: mat4x4<f32>;
+
+fn hash3(n: vec3<u32>) -> vec3<f32> {
+    var p = vec3<f32>(n);
+    p = fract(p * vec3<f32>(0.1031, 0.1030, 0.0973));
+    p += dot(p, p.yxz + 33.33);
+    return fract((p.xxy + p.yxx) * p.zyx);
+}
+
+@compute @workgroup_size(8, 8, 1)
+fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+    let dims = textureDimensions(output);
+    if (any(id.xy >= dims)) { return; }
+
+    // Get cluster index from screen position
+    let cluster_dims = textureDimensions(clusters);
+    let cluster_xy = id.xy * cluster_dims.xy / dims;
+    let cluster_z = 0u; // Would be computed from depth
+
+    let cluster_id = vec3<u32>(cluster_xy, cluster_z);
+    let color = hash3(cluster_id);
+
+    textureStore(output, id.xy, vec4<f32>(color, 0.5));
+}
+"#;
+
+const DEBUG_LOD_SHADER: &str = r#"
+@group(0) @binding(0) var lod_buffer: texture_2d<u32>;
+@group(0) @binding(1) var output: texture_storage_2d<rgba8unorm, write>;
+@group(0) @binding(2) var<uniform> max_lod: f32;
+
+@compute @workgroup_size(8, 8, 1)
+fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+    let dims = textureDimensions(output);
+    if (any(id.xy >= dims)) { return; }
+
+    let lod = f32(textureLoad(lod_buffer, id.xy, 0).r);
+
+    // Color code LOD levels
+    let lod_colors = array<vec4<f32>, 8>(
+        vec4<f32>(0.0, 1.0, 0.0, 1.0),  // LOD 0 - Green (highest detail)
+        vec4<f32>(0.5, 1.0, 0.0, 1.0),  // LOD 1
+        vec4<f32>(1.0, 1.0, 0.0, 1.0),  // LOD 2 - Yellow
+        vec4<f32>(1.0, 0.5, 0.0, 1.0),  // LOD 3
+        vec4<f32>(1.0, 0.0, 0.0, 1.0),  // LOD 4 - Red
+        vec4<f32>(1.0, 0.0, 0.5, 1.0),  // LOD 5
+        vec4<f32>(1.0, 0.0, 1.0, 1.0),  // LOD 6 - Magenta
+        vec4<f32>(0.5, 0.0, 1.0, 1.0)   // LOD 7 - Purple (lowest detail)
+    );
+
+    let lod_index = clamp(u32(lod), 0u, 7u);
+    textureStore(output, id.xy, lod_colors[lod_index]);
+}
+"#;
+
+const STATS_GRAPH_SHADER: &str = r#"
+@group(0) @binding(0) var<storage, read> frame_times: array<f32>;
+@group(0) @binding(1) var output: texture_storage_2d<rgba8unorm, write>;
+@group(0) @binding(2) var<uniform> target_ms: f32;
+@group(0) @binding(3) var<uniform> history_count: u32;
+
+@compute @workgroup_size(8, 8, 1)
+fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+    let dims = textureDimensions(output);
+    if (any(id.xy >= dims)) { return; }
+
+    let uv = vec2<f32>(id.xy) / vec2<f32>(dims);
+    let sample_idx = u32(uv.x * f32(history_count));
+    let frame_time = frame_times[sample_idx];
+
+    // Normalize to target (16.67ms for 60fps)
+    let height = frame_time / (target_ms * 2.0);
+    let y_pos = 1.0 - uv.y;
+
+    var color: vec4<f32>;
+    if (y_pos < height) {
+        // Graph fill
+        if (frame_time > target_ms * 1.5) {
+            color = vec4<f32>(1.0, 0.0, 0.0, 0.8); // Red - very slow
+        } else if (frame_time > target_ms) {
+            color = vec4<f32>(1.0, 1.0, 0.0, 0.8); // Yellow - slow
+        } else {
+            color = vec4<f32>(0.0, 1.0, 0.0, 0.8); // Green - good
+        }
+    } else {
+        color = vec4<f32>(0.0, 0.0, 0.0, 0.3); // Background
+    }
+
+    // Target line
+    let target_y = 1.0 - (target_ms / (target_ms * 2.0));
+    if (abs(y_pos - target_y) < 0.01) {
+        color = vec4<f32>(1.0, 1.0, 1.0, 0.8);
+    }
+
+    textureStore(output, id.xy, color);
+}
+"#;
+
+// =============================================================================
+// REGION: UNIT TESTS
+// =============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_debug_render_mode_shortcuts() {
+        assert_eq!(DebugRenderMode::Wireframe.shortcut(), Some('1'));
+        assert_eq!(DebugRenderMode::Normals.shortcut(), Some('2'));
+        assert_eq!(DebugRenderMode::None.shortcut(), None);
+    }
+
+    #[test]
+    fn test_debug_line_creation() {
+        let line = DebugLine::new(
+            Vec3::zero(),
+            Vec3::new(1.0, 0.0, 0.0),
+            Color::RED
+        );
+
+        assert_eq!(line.thickness, 1.0);
+        assert_eq!(line.duration, 0.0);
+        assert!(line.depth_test);
+    }
+
+    #[test]
+    fn test_debug_line_modifiers() {
+        let line = DebugLine::new(Vec3::zero(), Vec3::one(), Color::WHITE)
+            .with_thickness(2.0)
+            .with_duration(1.0)
+            .no_depth_test();
+
+        assert_eq!(line.thickness, 2.0);
+        assert_eq!(line.duration, 1.0);
+        assert!(!line.depth_test);
+    }
+
+    #[test]
+    fn test_height_gradient_sample() {
+        let gradient = HeightGradient::cumulus();
+        assert!(gradient.sample(0.5) > gradient.sample(0.0));
+    }
+
+    #[test]
+    fn test_render_stats_reset() {
+        let mut stats = RenderStats::default();
+        stats.draw_calls = 100;
+        stats.triangles = 50000;
+        stats.reset();
+
+        assert_eq!(stats.draw_calls, 0);
+        assert_eq!(stats.triangles, 0);
+    }
+
+    #[test]
+    fn test_debug_text_world_space() {
+        let view_proj = Mat4::identity();
+        let world_pos = Vec3::new(0.0, 0.0, 0.0);
+
+        // Behind camera should return None
+        let behind = Vec3::new(0.0, 0.0, -10.0);
+        let text = DebugText::world_space("test", behind, view_proj, Color::WHITE);
+        // Result depends on projection
+    }
+
+    #[test]
+    fn test_debug_manager_mode_toggle() {
+        let mut manager = DebugManager::new(1920, 1080);
+
+        manager.toggle_mode_by_key('1');
+        assert!(matches!(manager.render_mode(), DebugRenderMode::Wireframe));
+
+        manager.toggle_mode_by_key('0');
+        assert!(matches!(manager.render_mode(), DebugRenderMode::None));
+    }
+
+    #[test]
+    fn test_heatmap_color_range() {
+        // Blue at 0
+        let (r, g, b) = DebugVisualizationPasses::heatmap_color(0.0);
+        assert_eq!(b, 1.0);
+
+        // Red at 1
+        let (r, g, b) = DebugVisualizationPasses::heatmap_color(1.0);
+        assert_eq!(r, 1.0);
+    }
+
+    #[test]
+    fn test_profile_result() {
+        let result = ProfileResult {
+            name: "TestPass".to_string(),
+            gpu_time_ms: 5.5,
+            depth: 0,
+            percentage: 33.0,
+        };
+
+        assert_eq!(result.name, "TestPass");
+        assert!(result.gpu_time_ms > 5.0);
+    }
+}

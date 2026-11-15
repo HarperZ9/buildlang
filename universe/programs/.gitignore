@@ -1,0 +1,5 @@
+*.c
+*.obj
+*.exe
+*.pdb
+qdb_cl.txt

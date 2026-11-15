@@ -1,0 +1,2371 @@
+// =============================================================================
+// PHOTON ENGINE - Advanced Terrain Rendering System
+// Harper Engine Whitepapers WP-116 to WP-128: Terrain Technology
+// =============================================================================
+//
+// Comprehensive terrain rendering system with:
+// - GPU tessellation and displacement
+// - Geometry clipmaps for LOD
+// - Virtual heightmap streaming
+// - Procedural terrain generation
+// - Multi-layer material blending
+// - Vegetation instancing
+// - Erosion and weathering simulation
+// - Real-time deformation
+// - Cave and overhang support
+// - Planetary scale rendering
+//
+// =============================================================================
+
+use core::memory::{Buffer, Arena, Pool};
+use core::math::{Vec2, Vec3, Vec4, Mat4, Quat, AABB, Transform, Frustum};
+use core::simd::{f32x4, f32x8, simd_operations};
+use photon::lib::{RenderContext, Shader, ComputeShader, Pipeline, Texture, Sampler};
+
+// =============================================================================
+// REGION: Heightmap and Terrain Data (WP-116)
+// =============================================================================
+
+/// Heightmap data structure
+pub struct Heightmap {
+    width: u32,
+    height: u32,
+    data: Vec<f32>,
+    min_height: f32,
+    max_height: f32,
+    horizontal_scale: f32,
+    vertical_scale: f32,
+}
+
+impl Heightmap {
+    pub fn new(width: u32, height: u32) -> Self {
+        Self {
+            width,
+            height,
+            data: vec![0.0; (width * height) as usize],
+            min_height: 0.0,
+            max_height: 1.0,
+            horizontal_scale: 1.0,
+            vertical_scale: 100.0,
+        }
+    }
+
+    pub fn from_image(image_data: &[u8], width: u32, height: u32, bits_per_sample: u32) -> Self {
+        let mut heightmap = Self::new(width, height);
+
+        let max_value = (1u32 << bits_per_sample) - 1;
+        let bytes_per_sample = (bits_per_sample + 7) / 8;
+
+        for y in 0..height {
+            for x in 0..width {
+                let idx = ((y * width + x) * bytes_per_sample) as usize;
+                let value = match bytes_per_sample {
+                    1 => image_data[idx] as u32,
+                    2 => u16::from_le_bytes([image_data[idx], image_data[idx + 1]]) as u32,
+                    4 => u32::from_le_bytes([
+                        image_data[idx], image_data[idx + 1],
+                        image_data[idx + 2], image_data[idx + 3]
+                    ]),
+                    _ => 0,
+                };
+
+                heightmap.data[(y * width + x) as usize] = value as f32 / max_value as f32;
+            }
+        }
+
+        heightmap.calculate_bounds();
+        heightmap
+    }
+
+    fn calculate_bounds(&mut self) {
+        self.min_height = f32::MAX;
+        self.max_height = f32::MIN;
+
+        for &h in &self.data {
+            self.min_height = self.min_height.min(h);
+            self.max_height = self.max_height.max(h);
+        }
+    }
+
+    pub fn sample(&self, x: f32, y: f32) -> f32 {
+        let x = x.clamp(0.0, 1.0) * (self.width - 1) as f32;
+        let y = y.clamp(0.0, 1.0) * (self.height - 1) as f32;
+
+        let x0 = x.floor() as u32;
+        let y0 = y.floor() as u32;
+        let x1 = (x0 + 1).min(self.width - 1);
+        let y1 = (y0 + 1).min(self.height - 1);
+
+        let fx = x.fract();
+        let fy = y.fract();
+
+        let h00 = self.data[(y0 * self.width + x0) as usize];
+        let h10 = self.data[(y0 * self.width + x1) as usize];
+        let h01 = self.data[(y1 * self.width + x0) as usize];
+        let h11 = self.data[(y1 * self.width + x1) as usize];
+
+        // Bilinear interpolation
+        let h0 = h00 + (h10 - h00) * fx;
+        let h1 = h01 + (h11 - h01) * fx;
+
+        (h0 + (h1 - h0) * fy) * self.vertical_scale
+    }
+
+    pub fn sample_normal(&self, x: f32, y: f32) -> Vec3 {
+        let epsilon = 1.0 / self.width as f32;
+
+        let h_left = self.sample(x - epsilon, y);
+        let h_right = self.sample(x + epsilon, y);
+        let h_down = self.sample(x, y - epsilon);
+        let h_up = self.sample(x, y + epsilon);
+
+        let dx = (h_right - h_left) / (2.0 * epsilon * self.horizontal_scale);
+        let dy = (h_up - h_down) / (2.0 * epsilon * self.horizontal_scale);
+
+        Vec3::new(-dx, 1.0, -dy).normalize()
+    }
+
+    pub fn get_height(&self, world_x: f32, world_z: f32) -> f32 {
+        let u = world_x / (self.width as f32 * self.horizontal_scale);
+        let v = world_z / (self.height as f32 * self.horizontal_scale);
+        self.sample(u, v)
+    }
+}
+
+/// Virtual heightmap with streaming support
+pub struct VirtualHeightmap {
+    tile_size: u32,
+    tiles_x: u32,
+    tiles_y: u32,
+    loaded_tiles: HashMap<(u32, u32), HeightmapTile>,
+    pending_loads: Vec<(u32, u32)>,
+    cache_size: u32,
+    lru_queue: VecDeque<(u32, u32)>,
+}
+
+pub struct HeightmapTile {
+    x: u32,
+    y: u32,
+    data: Vec<f32>,
+    min_height: f32,
+    max_height: f32,
+    gpu_texture: Option<Texture>,
+    last_used: u64,
+}
+
+impl VirtualHeightmap {
+    pub fn new(tile_size: u32, tiles_x: u32, tiles_y: u32, cache_size: u32) -> Self {
+        Self {
+            tile_size,
+            tiles_x,
+            tiles_y,
+            loaded_tiles: HashMap::new(),
+            pending_loads: Vec::new(),
+            cache_size,
+            lru_queue: VecDeque::new(),
+        }
+    }
+
+    pub fn update(&mut self, camera_pos: Vec3, context: &RenderContext) {
+        // Calculate which tiles are visible
+        let visible_tiles = self.calculate_visible_tiles(camera_pos);
+
+        // Request loading of needed tiles
+        for (tx, ty) in &visible_tiles {
+            if !self.loaded_tiles.contains_key(&(*tx, *ty)) {
+                self.request_tile(*tx, *ty);
+            }
+        }
+
+        // Evict tiles over cache limit
+        while self.loaded_tiles.len() > self.cache_size as usize {
+            if let Some(oldest) = self.lru_queue.pop_front() {
+                if !visible_tiles.contains(&oldest) {
+                    self.loaded_tiles.remove(&oldest);
+                }
+            }
+        }
+
+        // Process pending loads
+        self.process_pending_loads(context);
+    }
+
+    fn calculate_visible_tiles(&self, camera_pos: Vec3) -> Vec<(u32, u32)> {
+        let mut tiles = Vec::new();
+        let tile_world_size = self.tile_size as f32;
+
+        let center_x = (camera_pos.x / tile_world_size).floor() as i32;
+        let center_y = (camera_pos.z / tile_world_size).floor() as i32;
+
+        // Load tiles in a radius around camera
+        let radius = 5i32;
+        for dy in -radius..=radius {
+            for dx in -radius..=radius {
+                let tx = center_x + dx;
+                let ty = center_y + dy;
+
+                if tx >= 0 && ty >= 0 && tx < self.tiles_x as i32 && ty < self.tiles_y as i32 {
+                    tiles.push((tx as u32, ty as u32));
+                }
+            }
+        }
+
+        tiles
+    }
+
+    fn request_tile(&mut self, tx: u32, ty: u32) {
+        if !self.pending_loads.contains(&(tx, ty)) {
+            self.pending_loads.push((tx, ty));
+        }
+    }
+
+    fn process_pending_loads(&mut self, context: &RenderContext) {
+        // Load up to N tiles per frame
+        let max_loads_per_frame = 4;
+        let mut loaded = 0;
+
+        while loaded < max_loads_per_frame && !self.pending_loads.is_empty() {
+            let (tx, ty) = self.pending_loads.remove(0);
+            let tile = self.load_tile(tx, ty, context);
+            self.loaded_tiles.insert((tx, ty), tile);
+            self.lru_queue.push_back((tx, ty));
+            loaded += 1;
+        }
+    }
+
+    fn load_tile(&self, tx: u32, ty: u32, context: &RenderContext) -> HeightmapTile {
+        // Load from disk or generate procedurally
+        let data = vec![0.0f32; (self.tile_size * self.tile_size) as usize];
+
+        HeightmapTile {
+            x: tx,
+            y: ty,
+            data,
+            min_height: 0.0,
+            max_height: 1.0,
+            gpu_texture: None,
+            last_used: 0,
+        }
+    }
+}
+
+// =============================================================================
+// REGION: Clipmap LOD System (WP-117)
+// =============================================================================
+
+/// Clipmap level configuration
+pub struct ClipmapLevel {
+    level: u32,
+    grid_size: u32,
+    cell_size: f32,
+    texture_size: u32,
+    center: Vec2,
+    heightmap_texture: Texture,
+    normal_texture: Texture,
+    vertex_buffer: Buffer<TerrainVertex>,
+    index_buffer: Buffer<u32>,
+}
+
+/// Clipmap-based terrain LOD
+pub struct TerrainClipmap {
+    levels: Vec<ClipmapLevel>,
+    num_levels: u32,
+    base_grid_size: u32,
+    base_cell_size: f32,
+    viewer_position: Vec3,
+
+    // Shared resources
+    ring_mesh: TerrainRingMesh,
+    interior_mesh: TerrainMesh,
+    trim_meshes: [TerrainMesh; 4],  // L-shaped trim regions
+    fixup_meshes: [TerrainMesh; 4], // Gap-filling strips
+}
+
+/// Terrain vertex format
+@repr(C, align(16))
+pub struct TerrainVertex {
+    position: Vec3,
+    normal: Vec3,
+    texcoord: Vec2,
+    morph_factor: f32,
+}
+
+/// Ring mesh for clipmap levels
+pub struct TerrainRingMesh {
+    vertex_buffer: Buffer<Vec2>,
+    index_buffer: Buffer<u32>,
+    index_count: u32,
+}
+
+pub struct TerrainMesh {
+    vertex_buffer: Buffer<Vec2>,
+    index_buffer: Buffer<u32>,
+    index_count: u32,
+}
+
+impl TerrainClipmap {
+    pub fn new(context: &RenderContext, num_levels: u32, base_grid_size: u32, base_cell_size: f32) -> Self {
+        let mut levels = Vec::with_capacity(num_levels as usize);
+
+        for level in 0..num_levels {
+            let scale = 1 << level;
+            let cell_size = base_cell_size * scale as f32;
+            let texture_size = base_grid_size + 1;
+
+            let heightmap_texture = context.create_texture_2d(
+                texture_size, texture_size,
+                TextureFormat::R32F,
+                &vec![0.0f32; (texture_size * texture_size) as usize],
+            );
+
+            let normal_texture = context.create_texture_2d(
+                texture_size, texture_size,
+                TextureFormat::RGBA8,
+                &vec![0u8; (texture_size * texture_size * 4) as usize],
+            );
+
+            levels.push(ClipmapLevel {
+                level,
+                grid_size: base_grid_size,
+                cell_size,
+                texture_size,
+                center: Vec2::ZERO,
+                heightmap_texture,
+                normal_texture,
+                vertex_buffer: context.create_buffer::<TerrainVertex>(0),
+                index_buffer: context.create_buffer::<u32>(0),
+            });
+        }
+
+        let ring_mesh = Self::create_ring_mesh(context, base_grid_size);
+        let interior_mesh = Self::create_interior_mesh(context, base_grid_size);
+        let trim_meshes = [
+            Self::create_trim_mesh(context, base_grid_size, 0),
+            Self::create_trim_mesh(context, base_grid_size, 1),
+            Self::create_trim_mesh(context, base_grid_size, 2),
+            Self::create_trim_mesh(context, base_grid_size, 3),
+        ];
+        let fixup_meshes = [
+            Self::create_fixup_mesh(context, base_grid_size, 0),
+            Self::create_fixup_mesh(context, base_grid_size, 1),
+            Self::create_fixup_mesh(context, base_grid_size, 2),
+            Self::create_fixup_mesh(context, base_grid_size, 3),
+        ];
+
+        Self {
+            levels,
+            num_levels,
+            base_grid_size,
+            base_cell_size,
+            viewer_position: Vec3::ZERO,
+            ring_mesh,
+            interior_mesh,
+            trim_meshes,
+            fixup_meshes,
+        }
+    }
+
+    fn create_ring_mesh(context: &RenderContext, grid_size: u32) -> TerrainRingMesh {
+        // Create a square ring mesh (outer - inner)
+        let half = grid_size as i32 / 2;
+        let inner_half = half / 2;
+
+        let mut vertices = Vec::new();
+        let mut indices = Vec::new();
+
+        // Generate ring vertices
+        for y in -half..=half {
+            for x in -half..=half {
+                // Skip inner region
+                if x.abs() <= inner_half && y.abs() <= inner_half {
+                    continue;
+                }
+                vertices.push(Vec2::new(x as f32, y as f32));
+            }
+        }
+
+        // Generate indices (simplified)
+        // In practice, this would be more complex to handle the ring topology
+
+        TerrainRingMesh {
+            vertex_buffer: context.create_buffer_with_data(&vertices),
+            index_buffer: context.create_buffer_with_data(&indices),
+            index_count: indices.len() as u32,
+        }
+    }
+
+    fn create_interior_mesh(context: &RenderContext, grid_size: u32) -> TerrainMesh {
+        let half = (grid_size / 4) as i32;
+        let mut vertices = Vec::new();
+        let mut indices = Vec::new();
+
+        for y in -half..=half {
+            for x in -half..=half {
+                vertices.push(Vec2::new(x as f32, y as f32));
+            }
+        }
+
+        let width = (2 * half + 1) as u32;
+        for y in 0..width - 1 {
+            for x in 0..width - 1 {
+                let i = y * width + x;
+                indices.extend_from_slice(&[
+                    i, i + 1, i + width,
+                    i + 1, i + width + 1, i + width,
+                ]);
+            }
+        }
+
+        TerrainMesh {
+            vertex_buffer: context.create_buffer_with_data(&vertices),
+            index_buffer: context.create_buffer_with_data(&indices),
+            index_count: indices.len() as u32,
+        }
+    }
+
+    fn create_trim_mesh(context: &RenderContext, grid_size: u32, direction: u32) -> TerrainMesh {
+        // L-shaped trim region for handling transitions
+        TerrainMesh {
+            vertex_buffer: context.create_buffer::<Vec2>(0),
+            index_buffer: context.create_buffer::<u32>(0),
+            index_count: 0,
+        }
+    }
+
+    fn create_fixup_mesh(context: &RenderContext, grid_size: u32, edge: u32) -> TerrainMesh {
+        // Thin strip to fix T-junction cracks
+        TerrainMesh {
+            vertex_buffer: context.create_buffer::<Vec2>(0),
+            index_buffer: context.create_buffer::<u32>(0),
+            index_count: 0,
+        }
+    }
+
+    pub fn update(&mut self, viewer_position: Vec3, heightmap: &Heightmap, context: &RenderContext) {
+        self.viewer_position = viewer_position;
+
+        for level in &mut self.levels {
+            let scale = 1 << level.level;
+            let new_center = self.snap_to_grid(viewer_position.xz(), level.cell_size * 2.0);
+
+            if new_center != level.center {
+                // Update heightmap texture for this level
+                self.update_level_texture(level, &new_center, heightmap, context);
+                level.center = new_center;
+            }
+        }
+    }
+
+    fn snap_to_grid(&self, pos: Vec2, grid_size: f32) -> Vec2 {
+        Vec2::new(
+            (pos.x / grid_size).floor() * grid_size,
+            (pos.y / grid_size).floor() * grid_size,
+        )
+    }
+
+    fn update_level_texture(&self, level: &mut ClipmapLevel, new_center: &Vec2,
+                             heightmap: &Heightmap, context: &RenderContext) {
+        // Calculate toroidal update region
+        let delta = *new_center - level.center;
+
+        // Update only the changed strips (toroidal addressing)
+        // This minimizes the amount of data transferred to GPU
+    }
+
+    pub fn render(&self, context: &RenderContext, pipeline: &Pipeline) {
+        for (i, level) in self.levels.iter().enumerate() {
+            let is_finest = i == 0;
+
+            // Render interior for finest level
+            if is_finest {
+                self.render_mesh(context, &self.interior_mesh, level, pipeline);
+            }
+
+            // Render ring
+            self.render_ring(context, &self.ring_mesh, level, pipeline);
+
+            // Render trim regions
+            let trim_index = self.calculate_trim_index(level);
+            self.render_mesh(context, &self.trim_meshes[trim_index], level, pipeline);
+
+            // Render fixup strips
+            for edge in 0..4 {
+                if self.needs_fixup(level, edge) {
+                    self.render_mesh(context, &self.fixup_meshes[edge as usize], level, pipeline);
+                }
+            }
+        }
+    }
+
+    fn render_ring(&self, context: &RenderContext, ring: &TerrainRingMesh,
+                   level: &ClipmapLevel, pipeline: &Pipeline) {
+        // Set level-specific uniforms
+        context.set_uniform("u_level_center", level.center);
+        context.set_uniform("u_cell_size", level.cell_size);
+        context.bind_texture(0, &level.heightmap_texture);
+        context.bind_texture(1, &level.normal_texture);
+
+        context.draw_indexed(ring.index_count, 0, 0);
+    }
+
+    fn render_mesh(&self, context: &RenderContext, mesh: &TerrainMesh,
+                   level: &ClipmapLevel, pipeline: &Pipeline) {
+        if mesh.index_count == 0 {
+            return;
+        }
+
+        context.set_uniform("u_level_center", level.center);
+        context.set_uniform("u_cell_size", level.cell_size);
+        context.bind_texture(0, &level.heightmap_texture);
+
+        context.draw_indexed(mesh.index_count, 0, 0);
+    }
+
+    fn calculate_trim_index(&self, level: &ClipmapLevel) -> usize {
+        // Determine which L-shaped trim to use based on viewer position
+        let rel_pos = Vec2::new(
+            self.viewer_position.x - level.center.x,
+            self.viewer_position.z - level.center.y,
+        );
+
+        match (rel_pos.x >= 0.0, rel_pos.y >= 0.0) {
+            (true, true) => 0,
+            (false, true) => 1,
+            (false, false) => 2,
+            (true, false) => 3,
+        }
+    }
+
+    fn needs_fixup(&self, level: &ClipmapLevel, edge: u32) -> bool {
+        // Check if parent level exists and is offset
+        true
+    }
+}
+
+// =============================================================================
+// REGION: GPU Tessellation (WP-118)
+// =============================================================================
+
+/// Tessellation configuration
+pub struct TessellationConfig {
+    min_tess_level: f32,
+    max_tess_level: f32,
+    target_triangle_size: f32,
+    height_displacement_scale: f32,
+    distance_falloff: f32,
+    frustum_cull: bool,
+    backface_cull: bool,
+}
+
+/// GPU tessellation terrain renderer
+pub struct TessellatedTerrain {
+    config: TessellationConfig,
+    patch_buffer: Buffer<TerrainPatch>,
+    tessellation_shader: Shader,
+    displacement_map: Texture,
+    detail_map: Texture,
+
+    // Adaptive tessellation factors
+    tess_factor_buffer: Buffer<TessFactors>,
+    compute_tess_shader: ComputeShader,
+}
+
+@repr(C, align(16))
+pub struct TerrainPatch {
+    corner_positions: [Vec3; 4],
+    corner_heights: [f32; 4],
+    lod_level: u32,
+    flags: u32,
+}
+
+@repr(C, align(16))
+pub struct TessFactors {
+    edge_factors: [f32; 4],
+    inside_factors: [f32; 2],
+}
+
+impl TessellatedTerrain {
+    pub fn new(context: &RenderContext, config: TessellationConfig) -> Self {
+        let tessellation_shader = context.load_shader_with_stages(&[
+            ("terrain.vert", ShaderStage::Vertex),
+            ("terrain.hull", ShaderStage::Hull),
+            ("terrain.domain", ShaderStage::Domain),
+            ("terrain.frag", ShaderStage::Fragment),
+        ]);
+
+        let compute_tess_shader = context.load_compute_shader("terrain_tess_factors.comp");
+
+        Self {
+            config,
+            patch_buffer: context.create_buffer::<TerrainPatch>(0),
+            tessellation_shader,
+            displacement_map: context.create_default_texture(),
+            detail_map: context.create_default_texture(),
+            tess_factor_buffer: context.create_buffer::<TessFactors>(0),
+            compute_tess_shader,
+        }
+    }
+
+    pub fn compute_tessellation_factors(&self, context: &RenderContext, camera: &Camera) {
+        context.set_uniform("u_camera_pos", camera.position);
+        context.set_uniform("u_target_triangle_size", self.config.target_triangle_size);
+        context.set_uniform("u_min_tess", self.config.min_tess_level);
+        context.set_uniform("u_max_tess", self.config.max_tess_level);
+        context.set_uniform("u_distance_falloff", self.config.distance_falloff);
+        context.set_uniform("u_screen_height", camera.viewport_height);
+        context.set_uniform("u_fov", camera.fov);
+
+        let num_patches = self.patch_buffer.len() as u32;
+        context.dispatch_compute(&self.compute_tess_shader, (num_patches + 63) / 64, 1, 1);
+    }
+
+    pub fn render(&self, context: &RenderContext, camera: &Camera) {
+        // Compute tessellation factors
+        self.compute_tessellation_factors(context, camera);
+
+        // Set up render state
+        context.bind_shader(&self.tessellation_shader);
+        context.bind_texture(0, &self.displacement_map);
+        context.bind_texture(1, &self.detail_map);
+
+        context.set_uniform("u_height_scale", self.config.height_displacement_scale);
+        context.set_uniform("u_view_proj", camera.view_projection());
+
+        // Draw patches with tessellation
+        let num_patches = self.patch_buffer.len() as u32;
+        context.draw_patches(num_patches, 4);  // 4 control points per patch
+    }
+}
+
+// =============================================================================
+// REGION: Terrain Materials (WP-119)
+// =============================================================================
+
+/// Terrain layer definition
+pub struct TerrainLayer {
+    diffuse_map: Texture,
+    normal_map: Texture,
+    arm_map: Texture,  // AO, Roughness, Metallic
+    displacement_map: Option<Texture>,
+
+    tiling: Vec2,
+    slope_start: f32,
+    slope_end: f32,
+    height_start: f32,
+    height_end: f32,
+    blend_sharpness: f32,
+}
+
+/// Multi-layer terrain material system
+pub struct TerrainMaterialSystem {
+    layers: Vec<TerrainLayer>,
+    splat_maps: Vec<Texture>,
+    max_layers: u32,
+
+    // Triplanar mapping
+    triplanar_enabled: bool,
+    triplanar_sharpness: f32,
+
+    // Detail mapping
+    detail_enabled: bool,
+    detail_distance: f32,
+
+    // Virtual texturing
+    virtual_texture: Option<VirtualTexture>,
+
+    // Material pipeline
+    material_shader: Shader,
+    splat_compute_shader: ComputeShader,
+}
+
+impl TerrainMaterialSystem {
+    pub fn new(context: &RenderContext, max_layers: u32) -> Self {
+        let material_shader = context.load_shader("terrain_material");
+        let splat_compute_shader = context.load_compute_shader("terrain_splat_blend.comp");
+
+        Self {
+            layers: Vec::new(),
+            splat_maps: Vec::new(),
+            max_layers,
+            triplanar_enabled: true,
+            triplanar_sharpness: 2.0,
+            detail_enabled: true,
+            detail_distance: 100.0,
+            virtual_texture: None,
+            material_shader,
+            splat_compute_shader,
+        }
+    }
+
+    pub fn add_layer(&mut self, layer: TerrainLayer) -> u32 {
+        let id = self.layers.len() as u32;
+        self.layers.push(layer);
+        id
+    }
+
+    pub fn set_splat_map(&mut self, index: u32, splat_map: Texture) {
+        while self.splat_maps.len() <= index as usize {
+            self.splat_maps.push(Texture::default());
+        }
+        self.splat_maps[index as usize] = splat_map;
+    }
+
+    /// Compute procedural splat weights based on height and slope
+    pub fn compute_splat_weights(&self, context: &RenderContext,
+                                  heightmap: &Texture, normal_map: &Texture,
+                                  output: &Texture) {
+        context.bind_texture(0, heightmap);
+        context.bind_texture(1, normal_map);
+
+        // Set layer parameters
+        for (i, layer) in self.layers.iter().enumerate() {
+            context.set_uniform(&format!("u_layer_{}_slope", i), Vec2::new(layer.slope_start, layer.slope_end));
+            context.set_uniform(&format!("u_layer_{}_height", i), Vec2::new(layer.height_start, layer.height_end));
+            context.set_uniform(&format!("u_layer_{}_sharpness", i), layer.blend_sharpness);
+        }
+
+        let (w, h) = output.dimensions();
+        context.dispatch_compute(&self.splat_compute_shader, (w + 7) / 8, (h + 7) / 8, 1);
+    }
+
+    /// Sample terrain material with triplanar mapping
+    pub fn sample_triplanar(&self, world_pos: Vec3, world_normal: Vec3, layer: u32) -> Vec4 {
+        let layer = &self.layers[layer as usize];
+
+        // Calculate blend weights
+        let blend = world_normal.abs();
+        let blend = blend / (blend.x + blend.y + blend.z);
+
+        // Sample each projection
+        let xy_sample = self.sample_layer(layer, world_pos.xy(), 0);
+        let xz_sample = self.sample_layer(layer, Vec2::new(world_pos.x, world_pos.z), 1);
+        let yz_sample = self.sample_layer(layer, Vec2::new(world_pos.y, world_pos.z), 2);
+
+        // Blend projections
+        xy_sample * blend.z + xz_sample * blend.y + yz_sample * blend.x
+    }
+
+    fn sample_layer(&self, layer: &TerrainLayer, uv: Vec2, projection: u32) -> Vec4 {
+        // Sample diffuse texture (would be done in shader)
+        Vec4::ONE
+    }
+
+    pub fn bind(&self, context: &RenderContext) {
+        context.bind_shader(&self.material_shader);
+
+        // Bind all layer textures
+        for (i, layer) in self.layers.iter().enumerate() {
+            let base = i * 4;
+            context.bind_texture((base) as u32, &layer.diffuse_map);
+            context.bind_texture((base + 1) as u32, &layer.normal_map);
+            context.bind_texture((base + 2) as u32, &layer.arm_map);
+            if let Some(ref disp) = layer.displacement_map {
+                context.bind_texture((base + 3) as u32, disp);
+            }
+        }
+
+        // Bind splat maps
+        let splat_base = self.layers.len() * 4;
+        for (i, splat) in self.splat_maps.iter().enumerate() {
+            context.bind_texture((splat_base + i) as u32, splat);
+        }
+
+        context.set_uniform("u_triplanar_enabled", self.triplanar_enabled);
+        context.set_uniform("u_triplanar_sharpness", self.triplanar_sharpness);
+        context.set_uniform("u_detail_enabled", self.detail_enabled);
+        context.set_uniform("u_detail_distance", self.detail_distance);
+        context.set_uniform("u_layer_count", self.layers.len() as u32);
+    }
+}
+
+/// Virtual texture for terrain
+pub struct VirtualTexture {
+    page_table: Texture,
+    physical_cache: Texture,
+    page_size: u32,
+    virtual_size: u32,
+    physical_size: u32,
+    resident_pages: HashMap<(u32, u32, u32), u32>,  // (x, y, mip) -> physical page
+    lru_cache: LRUCache<(u32, u32, u32), u32>,
+}
+
+impl VirtualTexture {
+    pub fn new(context: &RenderContext, virtual_size: u32, page_size: u32, cache_pages: u32) -> Self {
+        let pages_per_side = (cache_pages as f32).sqrt() as u32;
+        let physical_size = pages_per_side * page_size;
+
+        let page_table_size = virtual_size / page_size;
+
+        Self {
+            page_table: context.create_texture_2d(
+                page_table_size, page_table_size,
+                TextureFormat::RGBA8,
+                &vec![0u8; (page_table_size * page_table_size * 4) as usize],
+            ),
+            physical_cache: context.create_texture_2d(
+                physical_size, physical_size,
+                TextureFormat::RGBA8,
+                &vec![0u8; (physical_size * physical_size * 4) as usize],
+            ),
+            page_size,
+            virtual_size,
+            physical_size,
+            resident_pages: HashMap::new(),
+            lru_cache: LRUCache::new(cache_pages as usize),
+        }
+    }
+
+    pub fn request_page(&mut self, x: u32, y: u32, mip: u32) -> Option<u32> {
+        let key = (x, y, mip);
+
+        if let Some(&page) = self.resident_pages.get(&key) {
+            self.lru_cache.touch(&key);
+            return Some(page);
+        }
+
+        // Need to load this page
+        None
+    }
+
+    pub fn load_page(&mut self, x: u32, y: u32, mip: u32, data: &[u8], context: &RenderContext) {
+        let key = (x, y, mip);
+
+        // Find or allocate physical page
+        let physical_page = if let Some(&page) = self.resident_pages.get(&key) {
+            page
+        } else {
+            self.allocate_physical_page(context)
+        };
+
+        // Upload data to physical cache
+        let pages_per_row = self.physical_size / self.page_size;
+        let px = (physical_page % pages_per_row) * self.page_size;
+        let py = (physical_page / pages_per_row) * self.page_size;
+
+        context.update_texture_region(&self.physical_cache, px, py, self.page_size, self.page_size, data);
+
+        // Update page table
+        self.update_page_table(x, y, mip, physical_page, context);
+
+        self.resident_pages.insert(key, physical_page);
+        self.lru_cache.insert(key, physical_page);
+    }
+
+    fn allocate_physical_page(&mut self, context: &RenderContext) -> u32 {
+        let total_pages = (self.physical_size / self.page_size).pow(2);
+
+        if self.resident_pages.len() < total_pages as usize {
+            return self.resident_pages.len() as u32;
+        }
+
+        // Evict LRU page
+        if let Some((evicted_key, evicted_page)) = self.lru_cache.evict() {
+            self.resident_pages.remove(&evicted_key);
+            return evicted_page;
+        }
+
+        0
+    }
+
+    fn update_page_table(&self, x: u32, y: u32, mip: u32, physical_page: u32, context: &RenderContext) {
+        let pages_per_row = self.physical_size / self.page_size;
+        let px = (physical_page % pages_per_row) as u8;
+        let py = (physical_page / pages_per_row) as u8;
+
+        let data = [px, py, mip as u8, 255u8];  // x, y, mip, valid
+
+        let page_table_size = self.virtual_size / self.page_size;
+        let scaled_x = x >> mip;
+        let scaled_y = y >> mip;
+
+        context.update_texture_region(&self.page_table, scaled_x, scaled_y, 1, 1, &data);
+    }
+}
+
+// =============================================================================
+// REGION: Procedural Terrain Generation (WP-120)
+// =============================================================================
+
+/// Noise types for procedural generation
+pub enum NoiseType {
+    Perlin,
+    Simplex,
+    Worley,
+    Value,
+    OpenSimplex,
+    Billow,
+    Ridged,
+    Hybrid,
+}
+
+/// Fractal types
+pub enum FractalType {
+    FBM,
+    Ridged,
+    Billow,
+    Hybrid,
+    Domain Warping,
+}
+
+/// Procedural terrain generator
+pub struct ProceduralTerrainGenerator {
+    seed: u64,
+    noise_type: NoiseType,
+    fractal_type: FractalType,
+    octaves: u32,
+    frequency: f32,
+    lacunarity: f32,
+    persistence: f32,
+    gain: f32,
+    amplitude: f32,
+    offset: f32,
+
+    // Domain warping
+    warp_enabled: bool,
+    warp_amplitude: f32,
+    warp_frequency: f32,
+    warp_octaves: u32,
+
+    // GPU resources
+    noise_compute_shader: ComputeShader,
+    noise_texture: Option<Texture>,
+}
+
+impl ProceduralTerrainGenerator {
+    pub fn new(context: &RenderContext, seed: u64) -> Self {
+        Self {
+            seed,
+            noise_type: NoiseType::Simplex,
+            fractal_type: FractalType::FBM,
+            octaves: 6,
+            frequency: 0.001,
+            lacunarity: 2.0,
+            persistence: 0.5,
+            gain: 2.0,
+            amplitude: 1.0,
+            offset: 0.0,
+            warp_enabled: false,
+            warp_amplitude: 1.0,
+            warp_frequency: 0.01,
+            warp_octaves: 3,
+            noise_compute_shader: context.load_compute_shader("terrain_noise.comp"),
+            noise_texture: None,
+        }
+    }
+
+    pub fn generate_heightmap(&self, context: &RenderContext, width: u32, height: u32) -> Texture {
+        let output = context.create_texture_2d(
+            width, height,
+            TextureFormat::R32F,
+            &vec![0.0f32; (width * height) as usize],
+        );
+
+        // Set uniforms
+        context.set_uniform("u_seed", self.seed as f32);
+        context.set_uniform("u_noise_type", self.noise_type_id());
+        context.set_uniform("u_fractal_type", self.fractal_type_id());
+        context.set_uniform("u_octaves", self.octaves);
+        context.set_uniform("u_frequency", self.frequency);
+        context.set_uniform("u_lacunarity", self.lacunarity);
+        context.set_uniform("u_persistence", self.persistence);
+        context.set_uniform("u_gain", self.gain);
+        context.set_uniform("u_amplitude", self.amplitude);
+        context.set_uniform("u_offset", self.offset);
+
+        context.set_uniform("u_warp_enabled", self.warp_enabled);
+        context.set_uniform("u_warp_amplitude", self.warp_amplitude);
+        context.set_uniform("u_warp_frequency", self.warp_frequency);
+        context.set_uniform("u_warp_octaves", self.warp_octaves);
+
+        // Dispatch compute
+        context.dispatch_compute(&self.noise_compute_shader, (width + 7) / 8, (height + 7) / 8, 1);
+
+        output
+    }
+
+    fn noise_type_id(&self) -> u32 {
+        match self.noise_type {
+            NoiseType::Perlin => 0,
+            NoiseType::Simplex => 1,
+            NoiseType::Worley => 2,
+            NoiseType::Value => 3,
+            NoiseType::OpenSimplex => 4,
+            NoiseType::Billow => 5,
+            NoiseType::Ridged => 6,
+            NoiseType::Hybrid => 7,
+        }
+    }
+
+    fn fractal_type_id(&self) -> u32 {
+        match self.fractal_type {
+            FractalType::FBM => 0,
+            FractalType::Ridged => 1,
+            FractalType::Billow => 2,
+            FractalType::Hybrid => 3,
+            FractalType::DomainWarping => 4,
+        }
+    }
+
+    /// Sample 2D noise at a point
+    pub fn sample(&self, x: f32, y: f32) -> f32 {
+        let mut freq = self.frequency;
+        let mut amp = self.amplitude;
+        let mut sum = 0.0;
+        let mut max_amp = 0.0;
+
+        // Apply domain warping
+        let (wx, wy) = if self.warp_enabled {
+            self.domain_warp(x, y)
+        } else {
+            (x, y)
+        };
+
+        for _ in 0..self.octaves {
+            let noise_value = self.sample_noise(wx * freq, wy * freq);
+
+            let processed = match self.fractal_type {
+                FractalType::FBM => noise_value,
+                FractalType::Ridged => 1.0 - noise_value.abs(),
+                FractalType::Billow => noise_value.abs() * 2.0 - 1.0,
+                FractalType::Hybrid => {
+                    if noise_value > 0.0 { noise_value } else { noise_value.abs() }
+                }
+                FractalType::DomainWarping => noise_value,
+            };
+
+            sum += processed * amp;
+            max_amp += amp;
+
+            freq *= self.lacunarity;
+            amp *= self.persistence;
+        }
+
+        sum / max_amp + self.offset
+    }
+
+    fn sample_noise(&self, x: f32, y: f32) -> f32 {
+        // Simplified noise - full implementation would use proper noise algorithms
+        let n = (x * 12.9898 + y * 78.233 + self.seed as f32).sin() * 43758.5453;
+        n.fract() * 2.0 - 1.0
+    }
+
+    fn domain_warp(&self, x: f32, y: f32) -> (f32, f32) {
+        let mut freq = self.warp_frequency;
+        let mut amp = self.warp_amplitude;
+
+        let mut offset_x = 0.0;
+        let mut offset_y = 0.0;
+
+        for _ in 0..self.warp_octaves {
+            offset_x += self.sample_noise(x * freq, y * freq) * amp;
+            offset_y += self.sample_noise((x + 100.0) * freq, (y + 100.0) * freq) * amp;
+
+            freq *= 2.0;
+            amp *= 0.5;
+        }
+
+        (x + offset_x, y + offset_y)
+    }
+}
+
+// =============================================================================
+// REGION: Erosion Simulation (WP-121)
+// =============================================================================
+
+/// Erosion parameters
+pub struct ErosionParams {
+    // Hydraulic erosion
+    rain_amount: f32,
+    evaporation_rate: f32,
+    sediment_capacity: f32,
+    deposition_rate: f32,
+    erosion_rate: f32,
+    min_slope: f32,
+
+    // Thermal erosion
+    thermal_rate: f32,
+    talus_angle: f32,
+
+    // Iteration settings
+    iterations: u32,
+    delta_time: f32,
+}
+
+/// Hydraulic erosion simulator
+pub struct HydraulicErosion {
+    params: ErosionParams,
+    compute_shader: ComputeShader,
+
+    // Simulation buffers
+    water_height: Buffer<f32>,
+    sediment: Buffer<f32>,
+    velocity: Buffer<Vec2>,
+    flux: Buffer<Vec4>,  // Left, Right, Top, Bottom
+}
+
+impl HydraulicErosion {
+    pub fn new(context: &RenderContext, width: u32, height: u32) -> Self {
+        let size = (width * height) as usize;
+
+        Self {
+            params: ErosionParams::default(),
+            compute_shader: context.load_compute_shader("hydraulic_erosion.comp"),
+            water_height: context.create_buffer_with_data(&vec![0.0f32; size]),
+            sediment: context.create_buffer_with_data(&vec![0.0f32; size]),
+            velocity: context.create_buffer_with_data(&vec![Vec2::ZERO; size]),
+            flux: context.create_buffer_with_data(&vec![Vec4::ZERO; size]),
+        }
+    }
+
+    pub fn simulate(&mut self, context: &RenderContext, heightmap: &mut Buffer<f32>,
+                    width: u32, height: u32) {
+        for _ in 0..self.params.iterations {
+            // Step 1: Add water from rain
+            self.rain_step(context, width, height);
+
+            // Step 2: Calculate water flux
+            self.flux_step(context, heightmap, width, height);
+
+            // Step 3: Apply flux and update water height
+            self.water_step(context, width, height);
+
+            // Step 4: Erosion and deposition
+            self.erosion_step(context, heightmap, width, height);
+
+            // Step 5: Sediment transport
+            self.transport_step(context, width, height);
+
+            // Step 6: Evaporation
+            self.evaporation_step(context, width, height);
+        }
+    }
+
+    fn rain_step(&self, context: &RenderContext, width: u32, height: u32) {
+        context.set_uniform("u_rain_amount", self.params.rain_amount);
+        context.set_uniform("u_delta_time", self.params.delta_time);
+        context.dispatch_compute(&self.compute_shader, (width + 7) / 8, (height + 7) / 8, 1);
+    }
+
+    fn flux_step(&self, context: &RenderContext, heightmap: &Buffer<f32>,
+                 width: u32, height: u32) {
+        // Calculate outflow flux based on height differences
+        context.dispatch_compute(&self.compute_shader, (width + 7) / 8, (height + 7) / 8, 1);
+    }
+
+    fn water_step(&self, context: &RenderContext, width: u32, height: u32) {
+        context.dispatch_compute(&self.compute_shader, (width + 7) / 8, (height + 7) / 8, 1);
+    }
+
+    fn erosion_step(&self, context: &RenderContext, heightmap: &mut Buffer<f32>,
+                    width: u32, height: u32) {
+        context.set_uniform("u_sediment_capacity", self.params.sediment_capacity);
+        context.set_uniform("u_erosion_rate", self.params.erosion_rate);
+        context.set_uniform("u_deposition_rate", self.params.deposition_rate);
+        context.set_uniform("u_min_slope", self.params.min_slope);
+        context.dispatch_compute(&self.compute_shader, (width + 7) / 8, (height + 7) / 8, 1);
+    }
+
+    fn transport_step(&self, context: &RenderContext, width: u32, height: u32) {
+        context.dispatch_compute(&self.compute_shader, (width + 7) / 8, (height + 7) / 8, 1);
+    }
+
+    fn evaporation_step(&self, context: &RenderContext, width: u32, height: u32) {
+        context.set_uniform("u_evaporation_rate", self.params.evaporation_rate);
+        context.dispatch_compute(&self.compute_shader, (width + 7) / 8, (height + 7) / 8, 1);
+    }
+}
+
+impl Default for ErosionParams {
+    fn default() -> Self {
+        Self {
+            rain_amount: 0.01,
+            evaporation_rate: 0.05,
+            sediment_capacity: 0.5,
+            deposition_rate: 0.1,
+            erosion_rate: 0.3,
+            min_slope: 0.01,
+            thermal_rate: 0.5,
+            talus_angle: 40.0,
+            iterations: 100,
+            delta_time: 0.05,
+        }
+    }
+}
+
+/// Thermal erosion simulator
+pub struct ThermalErosion {
+    params: ErosionParams,
+    compute_shader: ComputeShader,
+}
+
+impl ThermalErosion {
+    pub fn new(context: &RenderContext) -> Self {
+        Self {
+            params: ErosionParams::default(),
+            compute_shader: context.load_compute_shader("thermal_erosion.comp"),
+        }
+    }
+
+    pub fn simulate(&self, context: &RenderContext, heightmap: &mut Buffer<f32>,
+                    width: u32, height: u32) {
+        let talus = (self.params.talus_angle * std::f32::consts::PI / 180.0).tan();
+
+        context.set_uniform("u_thermal_rate", self.params.thermal_rate);
+        context.set_uniform("u_talus", talus);
+
+        for _ in 0..self.params.iterations {
+            context.dispatch_compute(&self.compute_shader, (width + 7) / 8, (height + 7) / 8, 1);
+        }
+    }
+}
+
+// =============================================================================
+// REGION: Vegetation System (WP-122)
+// =============================================================================
+
+/// Vegetation layer configuration
+pub struct VegetationLayer {
+    mesh: MeshHandle,
+    lod_meshes: Vec<MeshHandle>,
+    materials: Vec<MaterialHandle>,
+
+    density: f32,
+    min_scale: f32,
+    max_scale: f32,
+    min_height: f32,
+    max_height: f32,
+    min_slope: f32,
+    max_slope: f32,
+    align_to_terrain: bool,
+    random_rotation: bool,
+
+    // Distribution
+    distribution_map: Option<Texture>,
+    noise_scale: f32,
+    noise_threshold: f32,
+}
+
+/// Vegetation instance data
+@repr(C, align(16))
+pub struct VegetationInstance {
+    world_matrix: Mat4,
+    lod_blend: f32,
+    random_value: f32,
+    layer_index: u32,
+    _pad: u32,
+}
+
+/// GPU-driven vegetation system
+pub struct VegetationSystem {
+    layers: Vec<VegetationLayer>,
+    instance_buffer: Buffer<VegetationInstance>,
+    indirect_buffer: Buffer<DrawIndirectArgs>,
+    max_instances: u32,
+
+    // Compute shaders
+    placement_shader: ComputeShader,
+    culling_shader: ComputeShader,
+    lod_shader: ComputeShader,
+
+    // Spatial data structure
+    cell_size: f32,
+    grid_buffer: Buffer<u32>,
+
+    // Wind animation
+    wind_enabled: bool,
+    wind_direction: Vec3,
+    wind_strength: f32,
+    wind_turbulence: f32,
+}
+
+impl VegetationSystem {
+    pub fn new(context: &RenderContext, max_instances: u32) -> Self {
+        Self {
+            layers: Vec::new(),
+            instance_buffer: context.create_buffer::<VegetationInstance>(max_instances as usize),
+            indirect_buffer: context.create_buffer::<DrawIndirectArgs>(16),  // Max 16 layers
+            max_instances,
+            placement_shader: context.load_compute_shader("vegetation_placement.comp"),
+            culling_shader: context.load_compute_shader("vegetation_culling.comp"),
+            lod_shader: context.load_compute_shader("vegetation_lod.comp"),
+            cell_size: 32.0,
+            grid_buffer: context.create_buffer::<u32>(0),
+            wind_enabled: true,
+            wind_direction: Vec3::new(1.0, 0.0, 0.3).normalize(),
+            wind_strength: 1.0,
+            wind_turbulence: 0.5,
+        }
+    }
+
+    pub fn add_layer(&mut self, layer: VegetationLayer) -> u32 {
+        let id = self.layers.len() as u32;
+        self.layers.push(layer);
+        id
+    }
+
+    /// Generate vegetation instances based on terrain
+    pub fn generate(&mut self, context: &RenderContext, heightmap: &Texture,
+                    normal_map: &Texture, bounds: AABB) {
+        context.bind_texture(0, heightmap);
+        context.bind_texture(1, normal_map);
+
+        for (i, layer) in self.layers.iter().enumerate() {
+            context.set_uniform("u_layer_index", i as u32);
+            context.set_uniform("u_density", layer.density);
+            context.set_uniform("u_scale_range", Vec2::new(layer.min_scale, layer.max_scale));
+            context.set_uniform("u_height_range", Vec2::new(layer.min_height, layer.max_height));
+            context.set_uniform("u_slope_range", Vec2::new(layer.min_slope, layer.max_slope));
+            context.set_uniform("u_noise_scale", layer.noise_scale);
+            context.set_uniform("u_noise_threshold", layer.noise_threshold);
+            context.set_uniform("u_align_to_terrain", layer.align_to_terrain);
+            context.set_uniform("u_random_rotation", layer.random_rotation);
+
+            if let Some(ref dist_map) = layer.distribution_map {
+                context.bind_texture(2, dist_map);
+            }
+
+            let area = (bounds.max.x - bounds.min.x) * (bounds.max.z - bounds.min.z);
+            let expected_instances = (area * layer.density) as u32;
+            let groups = (expected_instances + 255) / 256;
+
+            context.dispatch_compute(&self.placement_shader, groups, 1, 1);
+        }
+    }
+
+    /// Cull and LOD select visible instances
+    pub fn update(&mut self, context: &RenderContext, camera: &Camera, frustum: &Frustum) {
+        // Frustum culling
+        context.set_uniform("u_frustum_planes", frustum.planes);
+        context.set_uniform("u_camera_pos", camera.position);
+
+        let groups = (self.max_instances + 255) / 256;
+        context.dispatch_compute(&self.culling_shader, groups, 1, 1);
+
+        // LOD selection
+        for (i, layer) in self.layers.iter().enumerate() {
+            let lod_distances: Vec<f32> = (0..layer.lod_meshes.len())
+                .map(|l| 50.0 * (1 << l) as f32)
+                .collect();
+
+            context.set_uniform("u_layer_index", i as u32);
+            context.set_uniform_array("u_lod_distances", &lod_distances);
+
+            context.dispatch_compute(&self.lod_shader, groups, 1, 1);
+        }
+    }
+
+    /// Render vegetation instances
+    pub fn render(&self, context: &RenderContext, camera: &Camera) {
+        for (i, layer) in self.layers.iter().enumerate() {
+            // Bind layer mesh and materials
+            for mat in &layer.materials {
+                context.bind_material(mat);
+            }
+
+            // Set wind uniforms
+            if self.wind_enabled {
+                context.set_uniform("u_wind_direction", self.wind_direction);
+                context.set_uniform("u_wind_strength", self.wind_strength);
+                context.set_uniform("u_wind_turbulence", self.wind_turbulence);
+                context.set_uniform("u_time", context.get_time());
+            }
+
+            // Draw instanced with indirect
+            context.draw_mesh_instanced_indirect(&layer.mesh, &self.indirect_buffer, i as u32);
+        }
+    }
+}
+
+// =============================================================================
+// REGION: Caves and Overhangs (WP-123)
+// =============================================================================
+
+/// Signed Distance Field terrain representation
+pub struct SDFTerrain {
+    resolution: u32,
+    bounds: AABB,
+    sdf_texture: Texture,
+    gradient_texture: Texture,
+
+    // Generation
+    generator: SDFGenerator,
+
+    // Rendering
+    ray_march_shader: Shader,
+    mesh_extraction_shader: ComputeShader,
+}
+
+/// SDF generation methods
+pub enum SDFGenerator {
+    HeightmapBased { heightmap: Heightmap, cave_density: f32 },
+    Procedural { params: ProceduralSDFParams },
+    Sculpted { brush_history: Vec<SDFBrush> },
+    Imported { file_path: String },
+}
+
+pub struct ProceduralSDFParams {
+    noise_type: NoiseType,
+    frequency: f32,
+    amplitude: f32,
+    octaves: u32,
+    cave_frequency: f32,
+    cave_threshold: f32,
+}
+
+pub struct SDFBrush {
+    position: Vec3,
+    radius: f32,
+    strength: f32,
+    operation: SDFOperation,
+}
+
+pub enum SDFOperation {
+    Add,
+    Subtract,
+    Smooth { blend: f32 },
+    Paint { material: u32 },
+}
+
+impl SDFTerrain {
+    pub fn new(context: &RenderContext, resolution: u32, bounds: AABB) -> Self {
+        let sdf_texture = context.create_texture_3d(
+            resolution, resolution, resolution,
+            TextureFormat::R32F,
+            &vec![0.0f32; (resolution * resolution * resolution) as usize],
+        );
+
+        let gradient_texture = context.create_texture_3d(
+            resolution, resolution, resolution,
+            TextureFormat::RGBA8,
+            &vec![0u8; (resolution * resolution * resolution * 4) as usize],
+        );
+
+        Self {
+            resolution,
+            bounds,
+            sdf_texture,
+            gradient_texture,
+            generator: SDFGenerator::Procedural {
+                params: ProceduralSDFParams {
+                    noise_type: NoiseType::Simplex,
+                    frequency: 0.01,
+                    amplitude: 1.0,
+                    octaves: 4,
+                    cave_frequency: 0.03,
+                    cave_threshold: 0.3,
+                },
+            },
+            ray_march_shader: context.load_shader("sdf_terrain"),
+            mesh_extraction_shader: context.load_compute_shader("marching_cubes.comp"),
+        }
+    }
+
+    pub fn generate(&mut self, context: &RenderContext) {
+        match &self.generator {
+            SDFGenerator::HeightmapBased { heightmap, cave_density } => {
+                self.generate_from_heightmap(context, heightmap, *cave_density);
+            }
+            SDFGenerator::Procedural { params } => {
+                self.generate_procedural(context, params);
+            }
+            _ => {}
+        }
+
+        // Compute gradients for normals
+        self.compute_gradients(context);
+    }
+
+    fn generate_from_heightmap(&self, context: &RenderContext, heightmap: &Heightmap, cave_density: f32) {
+        let compute = context.load_compute_shader("sdf_from_heightmap.comp");
+
+        context.set_uniform("u_cave_density", cave_density);
+        context.set_uniform("u_resolution", self.resolution);
+        context.set_uniform("u_bounds_min", self.bounds.min);
+        context.set_uniform("u_bounds_max", self.bounds.max);
+
+        context.dispatch_compute(&compute,
+            (self.resolution + 7) / 8,
+            (self.resolution + 7) / 8,
+            (self.resolution + 7) / 8,
+        );
+    }
+
+    fn generate_procedural(&self, context: &RenderContext, params: &ProceduralSDFParams) {
+        let compute = context.load_compute_shader("sdf_procedural.comp");
+
+        context.set_uniform("u_frequency", params.frequency);
+        context.set_uniform("u_amplitude", params.amplitude);
+        context.set_uniform("u_octaves", params.octaves);
+        context.set_uniform("u_cave_frequency", params.cave_frequency);
+        context.set_uniform("u_cave_threshold", params.cave_threshold);
+
+        context.dispatch_compute(&compute,
+            (self.resolution + 7) / 8,
+            (self.resolution + 7) / 8,
+            (self.resolution + 7) / 8,
+        );
+    }
+
+    fn compute_gradients(&self, context: &RenderContext) {
+        let compute = context.load_compute_shader("sdf_gradient.comp");
+
+        context.bind_texture(0, &self.sdf_texture);
+
+        context.dispatch_compute(&compute,
+            (self.resolution + 7) / 8,
+            (self.resolution + 7) / 8,
+            (self.resolution + 7) / 8,
+        );
+    }
+
+    /// Apply brush modification to SDF
+    pub fn apply_brush(&mut self, context: &RenderContext, brush: &SDFBrush) {
+        let compute = context.load_compute_shader("sdf_brush.comp");
+
+        context.set_uniform("u_brush_position", brush.position);
+        context.set_uniform("u_brush_radius", brush.radius);
+        context.set_uniform("u_brush_strength", brush.strength);
+        context.set_uniform("u_operation", brush.operation.id());
+
+        let affected_cells = (brush.radius * 2.0 / (self.bounds.size().x / self.resolution as f32)) as u32;
+        context.dispatch_compute(&compute,
+            (affected_cells + 7) / 8,
+            (affected_cells + 7) / 8,
+            (affected_cells + 7) / 8,
+        );
+
+        // Recompute affected gradients
+        self.compute_gradients(context);
+    }
+
+    /// Extract mesh using marching cubes
+    pub fn extract_mesh(&self, context: &RenderContext) -> (Buffer<Vec3>, Buffer<u32>) {
+        let max_triangles = self.resolution * self.resolution * self.resolution * 5;
+
+        let vertex_buffer = context.create_buffer::<Vec3>(max_triangles as usize * 3);
+        let index_buffer = context.create_buffer::<u32>(max_triangles as usize * 3);
+
+        context.bind_texture(0, &self.sdf_texture);
+
+        context.dispatch_compute(&self.mesh_extraction_shader,
+            (self.resolution + 7) / 8,
+            (self.resolution + 7) / 8,
+            (self.resolution + 7) / 8,
+        );
+
+        (vertex_buffer, index_buffer)
+    }
+
+    /// Sample SDF at world position
+    pub fn sample(&self, world_pos: Vec3) -> f32 {
+        let local = (world_pos - self.bounds.min) / self.bounds.size();
+        // Would sample from GPU texture
+        0.0
+    }
+
+    /// Render using ray marching
+    pub fn render(&self, context: &RenderContext, camera: &Camera) {
+        context.bind_shader(&self.ray_march_shader);
+        context.bind_texture(0, &self.sdf_texture);
+        context.bind_texture(1, &self.gradient_texture);
+
+        context.set_uniform("u_camera_pos", camera.position);
+        context.set_uniform("u_view_proj", camera.view_projection());
+        context.set_uniform("u_bounds_min", self.bounds.min);
+        context.set_uniform("u_bounds_max", self.bounds.max);
+
+        context.draw_fullscreen_quad();
+    }
+}
+
+impl SDFOperation {
+    fn id(&self) -> u32 {
+        match self {
+            SDFOperation::Add => 0,
+            SDFOperation::Subtract => 1,
+            SDFOperation::Smooth { .. } => 2,
+            SDFOperation::Paint { .. } => 3,
+        }
+    }
+}
+
+// =============================================================================
+// REGION: Planetary Scale Terrain (WP-124)
+// =============================================================================
+
+/// Planetary terrain configuration
+pub struct PlanetConfig {
+    radius: f64,
+    max_height: f64,
+    subdivisions: u32,
+    face_resolution: u32,
+}
+
+/// Cube-sphere face
+pub struct PlanetFace {
+    direction: Vec3,
+    up: Vec3,
+    right: Vec3,
+    quadtree: QuadTree<TerrainChunk>,
+}
+
+/// Planetary terrain system using cube-sphere projection
+pub struct PlanetaryTerrain {
+    config: PlanetConfig,
+    faces: [PlanetFace; 6],
+    viewer_position: Vec3,
+
+    // LOD
+    lod_distances: Vec<f64>,
+    max_lod: u32,
+
+    // Chunk management
+    active_chunks: HashMap<ChunkId, TerrainChunk>,
+    loading_queue: VecDeque<ChunkId>,
+
+    // Rendering
+    chunk_shader: Shader,
+    atmosphere_shader: Shader,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ChunkId {
+    face: u32,
+    x: u32,
+    y: u32,
+    lod: u32,
+}
+
+pub struct TerrainChunk {
+    id: ChunkId,
+    bounds: AABB,
+    vertex_buffer: Buffer<TerrainVertex>,
+    index_buffer: Buffer<u32>,
+    heightmap: Texture,
+    normal_map: Texture,
+    loaded: bool,
+}
+
+/// Quadtree node for planetary LOD
+pub struct QuadTree<T> {
+    bounds: AABB,
+    children: Option<Box<[QuadTree<T>; 4]>>,
+    data: Option<T>,
+    depth: u32,
+}
+
+impl PlanetaryTerrain {
+    pub fn new(context: &RenderContext, config: PlanetConfig) -> Self {
+        let directions = [
+            Vec3::Y,   // Top
+            -Vec3::Y,  // Bottom
+            Vec3::X,   // Right
+            -Vec3::X,  // Left
+            Vec3::Z,   // Front
+            -Vec3::Z,  // Back
+        ];
+
+        let faces: [PlanetFace; 6] = std::array::from_fn(|i| {
+            let dir = directions[i];
+            let up = if dir.y.abs() > 0.5 { Vec3::Z } else { Vec3::Y };
+            let right = dir.cross(up).normalize();
+            let up = right.cross(dir).normalize();
+
+            PlanetFace {
+                direction: dir,
+                up,
+                right,
+                quadtree: QuadTree::new(AABB::default(), 0),
+            }
+        });
+
+        // Precompute LOD distances
+        let mut lod_distances = Vec::new();
+        let mut distance = config.radius * 0.1;
+        for _ in 0..config.subdivisions {
+            lod_distances.push(distance);
+            distance *= 2.0;
+        }
+
+        Self {
+            config,
+            faces,
+            viewer_position: Vec3::ZERO,
+            lod_distances,
+            max_lod: config.subdivisions,
+            active_chunks: HashMap::new(),
+            loading_queue: VecDeque::new(),
+            chunk_shader: context.load_shader("planet_terrain"),
+            atmosphere_shader: context.load_shader("planet_atmosphere"),
+        }
+    }
+
+    /// Project cube coordinate to sphere surface
+    pub fn cube_to_sphere(&self, cube_pos: Vec3) -> Vec3 {
+        // Normalize and scale to sphere
+        let normalized = cube_pos.normalize();
+
+        // Apply height from terrain
+        let height = self.sample_height(normalized);
+        normalized * (self.config.radius + height) as f32
+    }
+
+    fn sample_height(&self, direction: Vec3) -> f64 {
+        // Sample procedural or stored heightmap
+        0.0
+    }
+
+    /// Update LOD based on viewer position
+    pub fn update(&mut self, viewer_position: Vec3, context: &RenderContext) {
+        self.viewer_position = viewer_position;
+
+        let viewer_distance = viewer_position.length() as f64;
+        let viewer_on_surface = viewer_position.normalize();
+
+        // Update each face's quadtree
+        for face in &mut self.faces {
+            self.update_quadtree(&mut face.quadtree, viewer_position, context);
+        }
+
+        // Process loading queue
+        self.process_loading(context);
+    }
+
+    fn update_quadtree(&mut self, node: &mut QuadTree<TerrainChunk>,
+                        viewer_pos: Vec3, context: &RenderContext) {
+        // Calculate distance to node center
+        let center = self.cube_to_sphere(node.bounds.center());
+        let distance = (center - viewer_pos).length();
+
+        let target_lod = self.calculate_target_lod(distance);
+
+        if target_lod > node.depth && node.depth < self.max_lod {
+            // Split node
+            if node.children.is_none() {
+                node.split();
+            }
+
+            if let Some(ref mut children) = node.children {
+                for child in children.iter_mut() {
+                    self.update_quadtree(child, viewer_pos, context);
+                }
+            }
+        } else if target_lod <= node.depth && node.children.is_some() {
+            // Merge children
+            node.merge();
+        }
+
+        // Ensure chunk is loaded
+        if node.data.is_none() {
+            self.request_chunk(node, context);
+        }
+    }
+
+    fn calculate_target_lod(&self, distance: f32) -> u32 {
+        for (lod, &lod_distance) in self.lod_distances.iter().enumerate() {
+            if distance as f64 <= lod_distance {
+                return lod as u32;
+            }
+        }
+        self.max_lod
+    }
+
+    fn request_chunk(&mut self, node: &QuadTree<TerrainChunk>, context: &RenderContext) {
+        // Queue chunk for loading
+    }
+
+    fn process_loading(&mut self, context: &RenderContext) {
+        // Load queued chunks
+    }
+
+    pub fn render(&self, context: &RenderContext, camera: &Camera) {
+        context.bind_shader(&self.chunk_shader);
+
+        for face in &self.faces {
+            self.render_quadtree(&face.quadtree, context, camera);
+        }
+
+        // Render atmosphere
+        self.render_atmosphere(context, camera);
+    }
+
+    fn render_quadtree(&self, node: &QuadTree<TerrainChunk>, context: &RenderContext, camera: &Camera) {
+        if let Some(ref chunk) = node.data {
+            if chunk.loaded {
+                context.bind_buffer(&chunk.vertex_buffer);
+                context.bind_buffer(&chunk.index_buffer);
+                context.bind_texture(0, &chunk.heightmap);
+                context.bind_texture(1, &chunk.normal_map);
+
+                context.draw_indexed(chunk.index_buffer.len() as u32, 0, 0);
+            }
+        }
+
+        if let Some(ref children) = node.children {
+            for child in children.iter() {
+                self.render_quadtree(child, context, camera);
+            }
+        }
+    }
+
+    fn render_atmosphere(&self, context: &RenderContext, camera: &Camera) {
+        context.bind_shader(&self.atmosphere_shader);
+        context.set_uniform("u_planet_radius", self.config.radius as f32);
+        context.set_uniform("u_atmosphere_radius", (self.config.radius * 1.025) as f32);
+        context.draw_fullscreen_quad();
+    }
+}
+
+impl<T> QuadTree<T> {
+    pub fn new(bounds: AABB, depth: u32) -> Self {
+        Self {
+            bounds,
+            children: None,
+            data: None,
+            depth,
+        }
+    }
+
+    pub fn split(&mut self) {
+        let center = self.bounds.center();
+        let half_size = self.bounds.size() * 0.5;
+
+        let child_bounds: [AABB; 4] = [
+            AABB::from_center_size(center + Vec3::new(-half_size.x * 0.5, 0.0, -half_size.z * 0.5), half_size),
+            AABB::from_center_size(center + Vec3::new(half_size.x * 0.5, 0.0, -half_size.z * 0.5), half_size),
+            AABB::from_center_size(center + Vec3::new(-half_size.x * 0.5, 0.0, half_size.z * 0.5), half_size),
+            AABB::from_center_size(center + Vec3::new(half_size.x * 0.5, 0.0, half_size.z * 0.5), half_size),
+        ];
+
+        self.children = Some(Box::new([
+            QuadTree::new(child_bounds[0], self.depth + 1),
+            QuadTree::new(child_bounds[1], self.depth + 1),
+            QuadTree::new(child_bounds[2], self.depth + 1),
+            QuadTree::new(child_bounds[3], self.depth + 1),
+        ]));
+    }
+
+    pub fn merge(&mut self) {
+        self.children = None;
+    }
+}
+
+// =============================================================================
+// REGION: Terrain Deformation (WP-125)
+// =============================================================================
+
+/// Real-time terrain deformation system
+pub struct TerrainDeformation {
+    deformation_buffer: Buffer<f32>,
+    width: u32,
+    height: u32,
+
+    // Deformation types
+    deformations: Vec<Deformation>,
+
+    // Compute shaders
+    apply_deformation_shader: ComputeShader,
+    smooth_shader: ComputeShader,
+    normalize_shader: ComputeShader,
+}
+
+pub struct Deformation {
+    position: Vec3,
+    radius: f32,
+    depth: f32,
+    falloff: DeformationFalloff,
+    deform_type: DeformationType,
+    time: f32,
+    duration: f32,
+}
+
+pub enum DeformationFalloff {
+    Linear,
+    Quadratic,
+    Smooth,
+    Exponential,
+    Crater,
+}
+
+pub enum DeformationType {
+    Crater,
+    Rut,
+    Footprint,
+    Explosion { ejecta_distance: f32 },
+    Tire { width: f32, length: f32 },
+    Custom { heightfield: Texture },
+}
+
+impl TerrainDeformation {
+    pub fn new(context: &RenderContext, width: u32, height: u32) -> Self {
+        Self {
+            deformation_buffer: context.create_buffer_with_data(&vec![0.0f32; (width * height) as usize]),
+            width,
+            height,
+            deformations: Vec::new(),
+            apply_deformation_shader: context.load_compute_shader("terrain_deform.comp"),
+            smooth_shader: context.load_compute_shader("terrain_smooth.comp"),
+            normalize_shader: context.load_compute_shader("terrain_normalize.comp"),
+        }
+    }
+
+    pub fn add_deformation(&mut self, deformation: Deformation) {
+        self.deformations.push(deformation);
+    }
+
+    pub fn update(&mut self, context: &RenderContext, dt: f32) {
+        // Update deformation timers
+        self.deformations.retain_mut(|d| {
+            d.time += dt;
+            d.time < d.duration || d.duration <= 0.0
+        });
+
+        // Apply active deformations
+        for deformation in &self.deformations {
+            self.apply_deformation(context, deformation);
+        }
+
+        // Smooth edges
+        context.dispatch_compute(&self.smooth_shader,
+            (self.width + 7) / 8,
+            (self.height + 7) / 8,
+            1,
+        );
+    }
+
+    fn apply_deformation(&self, context: &RenderContext, deformation: &Deformation) {
+        context.set_uniform("u_position", deformation.position);
+        context.set_uniform("u_radius", deformation.radius);
+        context.set_uniform("u_depth", deformation.depth);
+        context.set_uniform("u_falloff_type", deformation.falloff.id());
+        context.set_uniform("u_deform_type", deformation.deform_type.id());
+        context.set_uniform("u_time", deformation.time);
+
+        context.dispatch_compute(&self.apply_deformation_shader,
+            (self.width + 7) / 8,
+            (self.height + 7) / 8,
+            1,
+        );
+    }
+
+    pub fn get_deformation_at(&self, x: f32, z: f32) -> f32 {
+        // Sample deformation buffer
+        0.0
+    }
+}
+
+impl DeformationFalloff {
+    fn id(&self) -> u32 {
+        match self {
+            DeformationFalloff::Linear => 0,
+            DeformationFalloff::Quadratic => 1,
+            DeformationFalloff::Smooth => 2,
+            DeformationFalloff::Exponential => 3,
+            DeformationFalloff::Crater => 4,
+        }
+    }
+}
+
+impl DeformationType {
+    fn id(&self) -> u32 {
+        match self {
+            DeformationType::Crater => 0,
+            DeformationType::Rut => 1,
+            DeformationType::Footprint => 2,
+            DeformationType::Explosion { .. } => 3,
+            DeformationType::Tire { .. } => 4,
+            DeformationType::Custom { .. } => 5,
+        }
+    }
+}
+
+// =============================================================================
+// REGION: Complete Terrain System (WP-126)
+// =============================================================================
+
+/// Complete terrain management system
+pub struct TerrainSystem {
+    // Core heightmap data
+    heightmap: Heightmap,
+    virtual_heightmap: Option<VirtualHeightmap>,
+
+    // LOD system
+    clipmap: TerrainClipmap,
+    tessellation: Option<TessellatedTerrain>,
+
+    // Materials
+    material_system: TerrainMaterialSystem,
+
+    // Procedural
+    generator: Option<ProceduralTerrainGenerator>,
+    erosion: Option<HydraulicErosion>,
+
+    // Features
+    vegetation: VegetationSystem,
+    sdf_terrain: Option<SDFTerrain>,
+    deformation: TerrainDeformation,
+
+    // Planetary
+    planetary: Option<PlanetaryTerrain>,
+
+    // Configuration
+    config: TerrainConfig,
+
+    // Bounds and culling
+    bounds: AABB,
+    visible_bounds: AABB,
+}
+
+pub struct TerrainConfig {
+    render_mode: TerrainRenderMode,
+    max_tessellation: f32,
+    lod_bias: f32,
+    detail_distance: f32,
+    shadow_distance: f32,
+    enable_deformation: bool,
+    enable_vegetation: bool,
+}
+
+pub enum TerrainRenderMode {
+    Clipmap,
+    Tessellation,
+    SDF,
+    Planetary,
+    Hybrid,
+}
+
+impl TerrainSystem {
+    pub fn new(context: &RenderContext, heightmap: Heightmap, config: TerrainConfig) -> Self {
+        let bounds = AABB::new(
+            Vec3::ZERO,
+            Vec3::new(
+                heightmap.width as f32 * heightmap.horizontal_scale,
+                heightmap.vertical_scale,
+                heightmap.height as f32 * heightmap.horizontal_scale,
+            ),
+        );
+
+        let clipmap = TerrainClipmap::new(context, 8, 64, 1.0);
+        let material_system = TerrainMaterialSystem::new(context, 8);
+        let vegetation = VegetationSystem::new(context, 100000);
+        let deformation = TerrainDeformation::new(context, heightmap.width, heightmap.height);
+
+        Self {
+            heightmap,
+            virtual_heightmap: None,
+            clipmap,
+            tessellation: None,
+            material_system,
+            generator: None,
+            erosion: None,
+            vegetation,
+            sdf_terrain: None,
+            deformation,
+            planetary: None,
+            config,
+            bounds,
+            visible_bounds: bounds,
+        }
+    }
+
+    pub fn update(&mut self, context: &RenderContext, camera: &Camera, dt: f32) {
+        // Update virtual heightmap streaming
+        if let Some(ref mut vh) = self.virtual_heightmap {
+            vh.update(camera.position, context);
+        }
+
+        // Update LOD system
+        match self.config.render_mode {
+            TerrainRenderMode::Clipmap => {
+                self.clipmap.update(camera.position, &self.heightmap, context);
+            }
+            TerrainRenderMode::Planetary => {
+                if let Some(ref mut planetary) = self.planetary {
+                    planetary.update(camera.position, context);
+                }
+            }
+            _ => {}
+        }
+
+        // Update deformation
+        if self.config.enable_deformation {
+            self.deformation.update(context, dt);
+        }
+
+        // Update vegetation
+        if self.config.enable_vegetation {
+            self.vegetation.update(context, camera, &camera.frustum());
+        }
+    }
+
+    pub fn render(&self, context: &RenderContext, camera: &Camera) {
+        // Bind materials
+        self.material_system.bind(context);
+
+        // Render terrain geometry
+        match self.config.render_mode {
+            TerrainRenderMode::Clipmap => {
+                let pipeline = context.get_pipeline("terrain_clipmap");
+                self.clipmap.render(context, pipeline);
+            }
+            TerrainRenderMode::Tessellation => {
+                if let Some(ref tess) = self.tessellation {
+                    tess.render(context, camera);
+                }
+            }
+            TerrainRenderMode::SDF => {
+                if let Some(ref sdf) = self.sdf_terrain {
+                    sdf.render(context, camera);
+                }
+            }
+            TerrainRenderMode::Planetary => {
+                if let Some(ref planetary) = self.planetary {
+                    planetary.render(context, camera);
+                }
+            }
+            TerrainRenderMode::Hybrid => {
+                // Use clipmap for distance, tessellation for near
+                let pipeline = context.get_pipeline("terrain_clipmap");
+                self.clipmap.render(context, pipeline);
+
+                if let Some(ref tess) = self.tessellation {
+                    tess.render(context, camera);
+                }
+            }
+        }
+
+        // Render vegetation
+        if self.config.enable_vegetation {
+            self.vegetation.render(context, camera);
+        }
+    }
+
+    /// Get terrain height at world position
+    pub fn get_height(&self, x: f32, z: f32) -> f32 {
+        let base_height = self.heightmap.get_height(x, z);
+
+        if self.config.enable_deformation {
+            base_height + self.deformation.get_deformation_at(x, z)
+        } else {
+            base_height
+        }
+    }
+
+    /// Get terrain normal at world position
+    pub fn get_normal(&self, x: f32, z: f32) -> Vec3 {
+        let u = x / (self.heightmap.width as f32 * self.heightmap.horizontal_scale);
+        let v = z / (self.heightmap.height as f32 * self.heightmap.horizontal_scale);
+        self.heightmap.sample_normal(u, v)
+    }
+
+    /// Raycast against terrain
+    pub fn raycast(&self, origin: Vec3, direction: Vec3, max_distance: f32) -> Option<Vec3> {
+        // Binary search terrain intersection
+        let mut t = 0.0;
+        let step = 1.0;
+
+        while t < max_distance {
+            let pos = origin + direction * t;
+            let terrain_height = self.get_height(pos.x, pos.z);
+
+            if pos.y < terrain_height {
+                // Binary search for exact intersection
+                let mut lo = t - step;
+                let mut hi = t;
+
+                for _ in 0..8 {
+                    let mid = (lo + hi) * 0.5;
+                    let mid_pos = origin + direction * mid;
+                    let mid_height = self.get_height(mid_pos.x, mid_pos.z);
+
+                    if mid_pos.y < mid_height {
+                        hi = mid;
+                    } else {
+                        lo = mid;
+                    }
+                }
+
+                let hit_pos = origin + direction * hi;
+                return Some(Vec3::new(hit_pos.x, self.get_height(hit_pos.x, hit_pos.z), hit_pos.z));
+            }
+
+            t += step;
+        }
+
+        None
+    }
+}
+
+// =============================================================================
+// REGION: Tests
+// =============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_heightmap_sampling() {
+        let mut heightmap = Heightmap::new(256, 256);
+
+        // Set some height values
+        for y in 0..256 {
+            for x in 0..256 {
+                let fx = x as f32 / 255.0;
+                let fy = y as f32 / 255.0;
+                heightmap.data[(y * 256 + x) as usize] = (fx * 3.14159).sin() * (fy * 3.14159).cos();
+            }
+        }
+        heightmap.calculate_bounds();
+
+        let height = heightmap.sample(0.5, 0.5);
+        assert!(height.abs() < heightmap.vertical_scale);
+    }
+
+    #[test]
+    fn test_clipmap_creation() {
+        let context = RenderContext::mock();
+        let clipmap = TerrainClipmap::new(&context, 4, 64, 1.0);
+
+        assert_eq!(clipmap.num_levels, 4);
+        assert_eq!(clipmap.base_grid_size, 64);
+    }
+
+    #[test]
+    fn test_procedural_generation() {
+        let context = RenderContext::mock();
+        let generator = ProceduralTerrainGenerator::new(&context, 12345);
+
+        let height1 = generator.sample(0.0, 0.0);
+        let height2 = generator.sample(100.0, 100.0);
+
+        assert!(height1 != height2);
+    }
+
+    #[test]
+    fn test_erosion_params() {
+        let params = ErosionParams::default();
+
+        assert!(params.rain_amount > 0.0);
+        assert!(params.iterations > 0);
+    }
+
+    #[test]
+    fn test_vegetation_layer() {
+        let layer = VegetationLayer {
+            mesh: MeshHandle::default(),
+            lod_meshes: Vec::new(),
+            materials: Vec::new(),
+            density: 0.5,
+            min_scale: 0.8,
+            max_scale: 1.2,
+            min_height: 0.0,
+            max_height: 100.0,
+            min_slope: 0.0,
+            max_slope: 30.0,
+            align_to_terrain: true,
+            random_rotation: true,
+            distribution_map: None,
+            noise_scale: 10.0,
+            noise_threshold: 0.3,
+        };
+
+        assert!(layer.density > 0.0);
+        assert!(layer.max_scale >= layer.min_scale);
+    }
+
+    #[test]
+    fn test_quadtree() {
+        let mut tree: QuadTree<i32> = QuadTree::new(
+            AABB::from_center_size(Vec3::ZERO, Vec3::splat(100.0)),
+            0,
+        );
+
+        assert!(tree.children.is_none());
+
+        tree.split();
+        assert!(tree.children.is_some());
+
+        tree.merge();
+        assert!(tree.children.is_none());
+    }
+
+    #[test]
+    fn test_deformation() {
+        let context = RenderContext::mock();
+        let mut deformation = TerrainDeformation::new(&context, 256, 256);
+
+        deformation.add_deformation(Deformation {
+            position: Vec3::new(128.0, 0.0, 128.0),
+            radius: 10.0,
+            depth: 2.0,
+            falloff: DeformationFalloff::Smooth,
+            deform_type: DeformationType::Crater,
+            time: 0.0,
+            duration: -1.0,
+        });
+
+        assert_eq!(deformation.deformations.len(), 1);
+    }
+
+    #[test]
+    fn test_terrain_config() {
+        let config = TerrainConfig {
+            render_mode: TerrainRenderMode::Clipmap,
+            max_tessellation: 64.0,
+            lod_bias: 1.0,
+            detail_distance: 100.0,
+            shadow_distance: 500.0,
+            enable_deformation: true,
+            enable_vegetation: true,
+        };
+
+        assert!(config.max_tessellation > 0.0);
+    }
+}
+
+// Utility implementations
+struct LRUCache<K, V> {
+    capacity: usize,
+    map: HashMap<K, V>,
+    order: VecDeque<K>,
+}
+
+impl<K: Eq + Hash + Clone, V: Clone> LRUCache<K, V> {
+    fn new(capacity: usize) -> Self {
+        Self {
+            capacity,
+            map: HashMap::new(),
+            order: VecDeque::new(),
+        }
+    }
+
+    fn insert(&mut self, key: K, value: V) {
+        if self.map.len() >= self.capacity {
+            if let Some(oldest) = self.order.pop_front() {
+                self.map.remove(&oldest);
+            }
+        }
+        self.map.insert(key.clone(), value);
+        self.order.push_back(key);
+    }
+
+    fn touch(&mut self, key: &K) {
+        if let Some(pos) = self.order.iter().position(|k| k == key) {
+            self.order.remove(pos);
+            self.order.push_back(key.clone());
+        }
+    }
+
+    fn evict(&mut self) -> Option<(K, V)> {
+        if let Some(key) = self.order.pop_front() {
+            if let Some(value) = self.map.remove(&key) {
+                return Some((key, value));
+            }
+        }
+        None
+    }
+}
+
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::hash::Hash;

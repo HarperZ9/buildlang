@@ -1,0 +1,14 @@
+include!("stdlib/chars.bld");
+
+fn main() ~ Console {
+    println!("alpha a: {}", is_alpha("a"));
+    println!("alpha Z: {}", is_alpha("Z"));
+    println!("alpha 5: {}", is_alpha("5"));
+    println!("digit 5: {}", is_digit("5"));
+    println!("digit x: {}", is_digit("x"));
+    println!("space: {}", is_whitespace(" "));
+    println!("alnum x: {}", is_alnum("x"));
+    println!("alnum 3: {}", is_alnum("3"));
+    println!("hex f: {}", is_hex_digit("f"));
+    println!("hex g: {}", is_hex_digit("g"));
+}

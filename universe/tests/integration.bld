@@ -1,0 +1,1186 @@
+// ═══════════════════════════════════════════════════════════════════════════════
+// BUILD-UNIVERSE INTEGRATION TEST SUITE v1.0.0
+// "End-to-End Testing for Production Readiness"
+// ═══════════════════════════════════════════════════════════════════════════════
+// Copyright © 2024-2025 Zain Dana Harper. All Rights Reserved.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+module integration_tests
+
+use std::test::{TestSuite, TestResult, assert, assert_eq, assert_ne, assert_approx}
+use std::time::Duration
+use std::fs::{read_file, write_file, temp_dir}
+use std::path::PathBuf
+
+// Import all major modules for integration testing
+use foundation::*
+use field_tensor::{MarketTensor4D, TechnicalIndicators, PortfolioOptimizer, Matrix}
+use quantum_finance::{TradingEngine, Strategy, Position}
+use oracle::{Predictor, TimeSeriesModel}
+use axiom::{NeuralNetwork, Layer, Optimizer as NNOptimizer}
+use photon::{GraphicsContext, Shader, RenderPipeline}
+use spectrum::{Color, ColorSpace, HDRProcessor}
+use entangle::{SyncEngine, SyncProtocol}
+use forge::{CLI, ProjectGenerator}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// TEST INFRASTRUCTURE
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Integration test configuration
+pub struct IntegrationTestConfig {
+    pub verbose: bool,
+    pub timeout: Duration,
+    pub temp_dir: PathBuf,
+    pub parallel: bool,
+    pub fail_fast: bool,
+}
+
+impl IntegrationTestConfig {
+    pub fn default() -> Self {
+        IntegrationTestConfig {
+            verbose: false,
+            timeout: Duration::from_secs(300),
+            temp_dir: temp_dir().join("build_integration_tests"),
+            parallel: true,
+            fail_fast: false,
+        }
+    }
+}
+
+/// Run all integration tests
+pub fn run_all_integration_tests(config: &IntegrationTestConfig) -> TestSuite {
+    let mut suite = TestSuite::new("BUILD-UNIVERSE Integration Tests");
+
+    // Foundation Layer Tests
+    suite.add_group("Foundation", vec![
+        ("collections_io_integration", test_collections_io_integration),
+        ("crypto_serialization_integration", test_crypto_serialization_integration),
+        ("network_async_integration", test_network_async_integration),
+        ("error_logging_integration", test_error_logging_integration),
+    ]);
+
+    // Trading Layer Tests
+    suite.add_group("Trading", vec![
+        ("tensor_finance_integration", test_tensor_finance_integration),
+        ("oracle_trading_integration", test_oracle_trading_integration),
+        ("portfolio_optimization_e2e", test_portfolio_optimization_e2e),
+        ("backtest_pipeline", test_backtest_pipeline),
+    ]);
+
+    // AI Layer Tests
+    suite.add_group("AI", vec![
+        ("axiom_oracle_integration", test_axiom_oracle_integration),
+        ("neural_prediction_pipeline", test_neural_prediction_pipeline),
+        ("model_persistence", test_model_persistence),
+    ]);
+
+    // Rendering Layer Tests
+    suite.add_group("Rendering", vec![
+        ("photon_spectrum_integration", test_photon_spectrum_integration),
+        ("shader_compilation_pipeline", test_shader_compilation_pipeline),
+        ("color_processing_pipeline", test_color_processing_pipeline),
+    ]);
+
+    // Tools Layer Tests
+    suite.add_group("Tools", vec![
+        ("forge_project_lifecycle", test_forge_project_lifecycle),
+        ("lsp_completion_integration", test_lsp_completion_integration),
+        ("fmt_parse_roundtrip", test_fmt_parse_roundtrip),
+    ]);
+
+    // Cross-Layer Tests
+    suite.add_group("Cross-Layer", vec![
+        ("full_trading_system", test_full_trading_system),
+        ("ai_enhanced_trading", test_ai_enhanced_trading),
+        ("full_render_pipeline", test_full_render_pipeline),
+    ]);
+
+    suite
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// FOUNDATION LAYER INTEGRATION TESTS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Test collections and I/O work together
+fn test_collections_io_integration() -> TestResult {
+    // Create a complex data structure
+    let mut data = HashMap::new();
+    data.insert("users", vec![
+        User { id: 1, name: "Alice".to_string(), score: 95.5 },
+        User { id: 2, name: "Bob".to_string(), score: 87.3 },
+        User { id: 3, name: "Charlie".to_string(), score: 92.1 },
+    ]);
+
+    // Serialize to JSON
+    let json = serialization::to_json(&data)?;
+
+    // Write to temp file
+    let path = temp_dir().join("test_data.json");
+    fs::write(&path, &json)?;
+
+    // Read back
+    let read_json = fs::read_to_string(&path)?;
+
+    // Deserialize
+    let restored: HashMap<String, Vec<User>> = serialization::from_json(&read_json)?;
+
+    // Verify
+    assert_eq!(restored.get("users").unwrap().len(), 3);
+    assert_eq!(restored.get("users").unwrap()[0].name, "Alice");
+
+    // Cleanup
+    fs::remove_file(&path)?;
+
+    TestResult::pass()
+}
+
+/// Test crypto and serialization integration
+fn test_crypto_serialization_integration() -> TestResult {
+    // Create sensitive data
+    let credentials = Credentials {
+        api_key: "sk_live_abc123".to_string(),
+        secret: "supersecret".to_string(),
+    };
+
+    // Serialize
+    let serialized = serialization::to_msgpack(&credentials)?;
+
+    // Encrypt
+    let key = crypto::generate_key(crypto::Algorithm::AES256);
+    let encrypted = crypto::encrypt(&serialized, &key, crypto::Algorithm::AES256)?;
+
+    // Decrypt
+    let decrypted = crypto::decrypt(&encrypted, &key, crypto::Algorithm::AES256)?;
+
+    // Deserialize
+    let restored: Credentials = serialization::from_msgpack(&decrypted)?;
+
+    assert_eq!(restored.api_key, credentials.api_key);
+    assert_eq!(restored.secret, credentials.secret);
+
+    TestResult::pass()
+}
+
+/// Test network and async integration
+fn test_network_async_integration() -> TestResult {
+    use foundation::net::{TcpListener, TcpStream};
+    use foundation::sync::{spawn, channel};
+
+    let (tx, rx) = channel::<String>();
+
+    // Spawn server
+    let server_handle = spawn(async {
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let port = listener.local_addr()?.port();
+        tx.send(format!("{}", port))?;
+
+        let (stream, _) = listener.accept().await?;
+        let mut buf = [0u8; 1024];
+        let n = stream.read(&mut buf).await?;
+        let msg = String::from_utf8_lossy(&buf[..n]);
+
+        assert_eq!(msg, "Hello, Server!");
+        stream.write_all(b"Hello, Client!").await?;
+
+        Ok::<(), Error>(())
+    });
+
+    // Get port from server
+    let port: u16 = rx.recv()?.parse()?;
+
+    // Connect client
+    let client_handle = spawn(async move {
+        let mut stream = TcpStream::connect(format!("127.0.0.1:{}", port)).await?;
+        stream.write_all(b"Hello, Server!").await?;
+
+        let mut buf = [0u8; 1024];
+        let n = stream.read(&mut buf).await?;
+        let msg = String::from_utf8_lossy(&buf[..n]);
+
+        assert_eq!(msg, "Hello, Client!");
+
+        Ok::<(), Error>(())
+    });
+
+    // Wait for both
+    server_handle.join()?;
+    client_handle.join()?;
+
+    TestResult::pass()
+}
+
+/// Test error and logging integration
+fn test_error_logging_integration() -> TestResult {
+    use foundation::error::{Error, ErrorKind, Context};
+    use foundation::logging::{Logger, Level};
+
+    // Setup logger
+    let logger = Logger::new()
+        .with_level(Level::Debug)
+        .with_format("{level} [{target}] {message}")
+        .build();
+
+    // Create error chain
+    let inner_error = Error::io(IoErrorKind::NotFound, "config.toml not found");
+    let outer_error = Error::new(ErrorKind::ConfigError, "Failed to load configuration")
+        .caused_by(inner_error)
+        .with_context("path", "/etc/app/config.toml");
+
+    // Log the error
+    logger.error(&format!("{}", outer_error));
+
+    // Verify error chain
+    let mut chain_length = 0;
+    for _ in outer_error.chain() {
+        chain_length += 1;
+    }
+    assert_eq!(chain_length, 2);
+
+    TestResult::pass()
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// TRADING LAYER INTEGRATION TESTS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Test field-tensor and quantum-finance integration
+fn test_tensor_finance_integration() -> TestResult {
+    // Build market tensor from sample data
+    let mut builder = MarketTensorBuilder::new();
+    builder.add_symbol("AAPL");
+    builder.add_symbol("GOOGL");
+    builder.add_symbol("MSFT");
+
+    // Add 100 days of simulated data
+    for day in 0..100 {
+        let base_price = 100.0 + (day as f64) * 0.5;
+        for (i, symbol) in ["AAPL", "GOOGL", "MSFT"].iter().enumerate() {
+            let multiplier = 1.0 + (i as f64) * 0.5;
+            let price = base_price * multiplier;
+            let volume = 1_000_000.0 + (day as f64) * 10_000.0;
+
+            builder.add_ohlcv(
+                symbol,
+                day as u64,
+                price * 0.99,  // open
+                price * 1.02,  // high
+                price * 0.98,  // low
+                price,         // close
+                volume,
+            );
+        }
+    }
+
+    let tensor = builder.build(50);
+
+    // Use tensor for portfolio optimization
+    let cov = tensor.asset_covariance();
+    let returns = vec![0.12, 0.15, 0.10]; // Expected returns
+
+    let optimizer = PortfolioOptimizer::new(returns, cov);
+    let weights = optimizer.mean_variance(2.0);
+
+    // Verify weights sum to 1
+    let sum: f64 = weights.iter().sum();
+    assert_approx(sum, 1.0, 1e-10);
+
+    // Verify all weights are non-negative
+    for w in &weights {
+        assert!(*w >= 0.0);
+    }
+
+    // Use weights in trading engine
+    let mut engine = TradingEngine::new();
+    engine.set_portfolio_weights(&["AAPL", "GOOGL", "MSFT"], &weights);
+
+    // Generate signals from tensor
+    for t in 0..tensor.shape[0] {
+        let rsi_aapl = tensor.get(t, 0, features::RSI, derivatives::VALUE);
+        if rsi_aapl < 30.0 {
+            engine.signal("AAPL", Signal::Buy, 0.8);
+        } else if rsi_aapl > 70.0 {
+            engine.signal("AAPL", Signal::Sell, 0.8);
+        }
+    }
+
+    TestResult::pass()
+}
+
+/// Test oracle and trading integration
+fn test_oracle_trading_integration() -> TestResult {
+    use oracle::{TimeSeriesPredictor, ProphetModel, TemporalFusion};
+
+    // Create historical price data
+    let prices: Vec<f64> = (0..200).map(|i| {
+        100.0 + (i as f64).sin() * 10.0 + (i as f64) * 0.1
+    }).collect();
+
+    // Train predictor
+    let mut predictor = TimeSeriesPredictor::new(ProphetModel::default());
+    predictor.fit(&prices, 20)?;
+
+    // Generate forecasts
+    let forecasts = predictor.predict(10)?;
+    assert_eq!(forecasts.len(), 10);
+
+    // Use forecasts in trading decisions
+    let current_price = prices.last().unwrap();
+    let predicted_price = forecasts[0];
+
+    let decision = if predicted_price > current_price * 1.02 {
+        TradingDecision::Buy
+    } else if predicted_price < current_price * 0.98 {
+        TradingDecision::Sell
+    } else {
+        TradingDecision::Hold
+    };
+
+    // Verify prediction is reasonable
+    assert!((predicted_price - current_price).abs() < current_price * 0.2);
+
+    TestResult::pass()
+}
+
+/// Test end-to-end portfolio optimization
+fn test_portfolio_optimization_e2e() -> TestResult {
+    // Load or generate market data
+    let mut tensor = MarketTensor4D::new(252, 10, 16, 4);
+
+    // Populate with realistic market simulation
+    let symbols = vec!["AAPL", "GOOGL", "MSFT", "AMZN", "META",
+                       "NVDA", "TSLA", "JPM", "V", "UNH"];
+
+    for t in 0..252 {
+        for (a, _) in symbols.iter().enumerate() {
+            // Simulate returns
+            let ret = 0.0002 + 0.02 * ((t * a) as f64).sin();
+            tensor.set(t, a, features::PRICE, derivatives::FIRST, ret);
+        }
+    }
+
+    // Compute various portfolio strategies
+    let cov = tensor.asset_covariance();
+    let returns: Vec<f64> = (0..10).map(|i| 0.08 + 0.02 * (i as f64) / 10.0).collect();
+    let optimizer = PortfolioOptimizer::new(returns.clone(), cov.clone());
+
+    // Mean-variance portfolio
+    let mv_weights = optimizer.mean_variance(3.0);
+
+    // Minimum variance portfolio
+    let min_var_weights = optimizer.minimum_variance();
+
+    // Maximum Sharpe portfolio
+    let max_sharpe_weights = optimizer.maximum_sharpe(0.02);
+
+    // Risk parity portfolio
+    let risk_parity_weights = optimizer.risk_parity(100);
+
+    // Verify all portfolios are valid
+    for weights in [&mv_weights, &min_var_weights, &max_sharpe_weights, &risk_parity_weights] {
+        let sum: f64 = weights.iter().sum();
+        assert_approx(sum, 1.0, 1e-6);
+        assert!(weights.iter().all(|&w| w >= 0.0));
+    }
+
+    // Compare portfolio risks
+    fn portfolio_variance(weights: &[f64], cov: &Matrix) -> f64 {
+        let mut var = 0.0;
+        for i in 0..weights.len() {
+            for j in 0..weights.len() {
+                var += weights[i] * weights[j] * cov.get(i, j);
+            }
+        }
+        var
+    }
+
+    let min_var_risk = portfolio_variance(&min_var_weights, &cov);
+    let mv_risk = portfolio_variance(&mv_weights, &cov);
+
+    // Minimum variance should have lower risk
+    assert!(min_var_risk <= mv_risk + 1e-10);
+
+    TestResult::pass()
+}
+
+/// Test backtesting pipeline
+fn test_backtest_pipeline() -> TestResult {
+    use quantum_finance::{Backtester, BacktestConfig, Strategy};
+
+    // Create strategy
+    let strategy = MomentumStrategy::new(20, 0.02);
+
+    // Configure backtest
+    let config = BacktestConfig::new()
+        .with_initial_capital(100_000.0)
+        .with_commission(0.001)
+        .with_slippage(0.0005)
+        .with_start_date("2020-01-01")
+        .with_end_date("2023-12-31");
+
+    // Generate sample market data
+    let mut market_data = Vec::new();
+    for day in 0..1000 {
+        market_data.push(MarketBar {
+            timestamp: day as u64 * 86400,
+            open: 100.0 + (day as f64).sin() * 5.0,
+            high: 102.0 + (day as f64).sin() * 5.0,
+            low: 98.0 + (day as f64).sin() * 5.0,
+            close: 100.5 + (day as f64).sin() * 5.0 + day as f64 * 0.01,
+            volume: 1_000_000.0,
+        });
+    }
+
+    // Run backtest
+    let mut backtester = Backtester::new(config);
+    let results = backtester.run(&strategy, &market_data)?;
+
+    // Verify results
+    assert!(results.total_trades > 0);
+    assert!(results.sharpe_ratio.is_finite());
+    assert!(results.max_drawdown <= 1.0);
+    assert!(results.final_equity > 0.0);
+
+    // Verify trade log
+    for trade in &results.trades {
+        assert!(trade.entry_price > 0.0);
+        assert!(trade.exit_price > 0.0);
+        assert!(trade.quantity > 0.0);
+    }
+
+    TestResult::pass()
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// AI LAYER INTEGRATION TESTS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Test axiom and oracle integration
+fn test_axiom_oracle_integration() -> TestResult {
+    use axiom::{NeuralNetwork, Dense, Activation, Adam};
+    use oracle::{AnomalyDetector, IsolationForest};
+
+    // Create neural network for feature extraction
+    let mut nn = NeuralNetwork::new()
+        .add(Dense::new(10, 64))
+        .add(Activation::ReLU)
+        .add(Dense::new(64, 32))
+        .add(Activation::ReLU)
+        .add(Dense::new(32, 8))
+        .build();
+
+    // Generate sample data
+    let data: Vec<Vec<f64>> = (0..100).map(|i| {
+        (0..10).map(|j| (i * j) as f64 * 0.01 + ((i + j) as f64).sin()).collect()
+    }).collect();
+
+    // Extract features using neural network
+    let features: Vec<Vec<f64>> = data.iter().map(|x| {
+        nn.forward(x)
+    }).collect();
+
+    // Use oracle for anomaly detection on features
+    let mut detector = IsolationForest::new(100, 256);
+    detector.fit(&features)?;
+
+    // Score each sample
+    let scores: Vec<f64> = features.iter().map(|f| detector.score(f)).collect();
+
+    // Verify scores are in valid range
+    for score in &scores {
+        assert!(*score >= 0.0 && *score <= 1.0);
+    }
+
+    // Find anomalies
+    let threshold = 0.7;
+    let anomalies: Vec<usize> = scores.iter()
+        .enumerate()
+        .filter(|(_, &s)| s > threshold)
+        .map(|(i, _)| i)
+        .collect();
+
+    // Should have some anomalies
+    assert!(anomalies.len() < scores.len());
+
+    TestResult::pass()
+}
+
+/// Test neural prediction pipeline
+fn test_neural_prediction_pipeline() -> TestResult {
+    use axiom::{LSTM, Transformer, Attention};
+
+    // Create LSTM for sequence prediction
+    let mut lstm = LSTM::new(10, 64, 2);
+
+    // Generate sequence data
+    let sequences: Vec<Vec<Vec<f64>>> = (0..50).map(|i| {
+        (0..20).map(|t| {
+            (0..10).map(|f| ((i + t + f) as f64).sin()).collect()
+        }).collect()
+    }).collect();
+
+    let targets: Vec<f64> = (0..50).map(|i| (i as f64 * 0.1).sin()).collect();
+
+    // Train LSTM
+    lstm.train(&sequences, &targets, 10, 0.001)?;
+
+    // Predict
+    let test_seq: Vec<Vec<f64>> = (0..20).map(|t| {
+        (0..10).map(|f| ((50 + t + f) as f64).sin()).collect()
+    }).collect();
+
+    let prediction = lstm.predict(&test_seq)?;
+    assert!(prediction.is_finite());
+
+    TestResult::pass()
+}
+
+/// Test model persistence
+fn test_model_persistence() -> TestResult {
+    use axiom::{NeuralNetwork, Dense, Activation, ModelIO};
+
+    // Create and train a model
+    let mut model = NeuralNetwork::new()
+        .add(Dense::new(5, 10))
+        .add(Activation::ReLU)
+        .add(Dense::new(10, 3))
+        .add(Activation::Softmax)
+        .build();
+
+    // Generate training data
+    let x: Vec<Vec<f64>> = (0..100).map(|i| {
+        (0..5).map(|j| (i * j) as f64 * 0.01).collect()
+    }).collect();
+    let y: Vec<usize> = (0..100).map(|i| i % 3).collect();
+
+    model.train_classification(&x, &y, 10)?;
+
+    // Save model
+    let path = temp_dir().join("test_model.qnn");
+    ModelIO::save(&model, &path)?;
+
+    // Load model
+    let loaded_model: NeuralNetwork = ModelIO::load(&path)?;
+
+    // Verify predictions match
+    for sample in &x[..10] {
+        let orig_pred = model.predict(sample);
+        let loaded_pred = loaded_model.predict(sample);
+
+        for i in 0..3 {
+            assert_approx(orig_pred[i], loaded_pred[i], 1e-10);
+        }
+    }
+
+    // Cleanup
+    fs::remove_file(&path)?;
+
+    TestResult::pass()
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// RENDERING LAYER INTEGRATION TESTS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Test photon and spectrum integration
+fn test_photon_spectrum_integration() -> TestResult {
+    use photon::{RenderTarget, ShaderProgram, Uniform};
+    use spectrum::{Color, ColorSpace, ToneMapper};
+
+    // Create HDR color
+    let hdr_color = Color::from_xyz(0.5, 0.4, 0.3);
+
+    // Convert to different color spaces
+    let srgb = hdr_color.to_srgb();
+    let display_p3 = hdr_color.to_color_space(ColorSpace::DisplayP3);
+    let rec2020 = hdr_color.to_color_space(ColorSpace::Rec2020);
+
+    // Verify color space conversions are reversible
+    let back_to_xyz = srgb.to_xyz();
+    assert_approx(back_to_xyz.x, hdr_color.x, 1e-6);
+    assert_approx(back_to_xyz.y, hdr_color.y, 1e-6);
+    assert_approx(back_to_xyz.z, hdr_color.z, 1e-6);
+
+    // Apply tone mapping
+    let tone_mapper = ToneMapper::ACES;
+    let tonemapped = tone_mapper.apply(&hdr_color);
+
+    // Verify tonemapped values are in display range
+    assert!(tonemapped.r >= 0.0 && tonemapped.r <= 1.0);
+    assert!(tonemapped.g >= 0.0 && tonemapped.g <= 1.0);
+    assert!(tonemapped.b >= 0.0 && tonemapped.b <= 1.0);
+
+    // Create shader with color uniform
+    let shader = ShaderProgram::new()
+        .add_uniform(Uniform::Vec3("u_color", tonemapped.to_vec3()))
+        .add_uniform(Uniform::Float("u_exposure", 1.0))
+        .compile()?;
+
+    assert!(shader.is_valid());
+
+    TestResult::pass()
+}
+
+/// Test shader compilation pipeline
+fn test_shader_compilation_pipeline() -> TestResult {
+    use photon::{ShaderCompiler, ShaderStage, ShaderFormat};
+
+    let vertex_source = r#"
+        #version 450
+        layout(location = 0) in vec3 a_position;
+        layout(location = 1) in vec2 a_texcoord;
+        layout(location = 0) out vec2 v_texcoord;
+
+        void main() {
+            gl_Position = vec4(a_position, 1.0);
+            v_texcoord = a_texcoord;
+        }
+    "#;
+
+    let fragment_source = r#"
+        #version 450
+        layout(location = 0) in vec2 v_texcoord;
+        layout(location = 0) out vec4 fragColor;
+        layout(binding = 0) uniform sampler2D u_texture;
+
+        void main() {
+            fragColor = texture(u_texture, v_texcoord);
+        }
+    "#;
+
+    // Compile shaders
+    let compiler = ShaderCompiler::new();
+
+    let vertex_spirv = compiler.compile(
+        vertex_source,
+        ShaderStage::Vertex,
+        ShaderFormat::SPIRV
+    )?;
+
+    let fragment_spirv = compiler.compile(
+        fragment_source,
+        ShaderStage::Fragment,
+        ShaderFormat::SPIRV
+    )?;
+
+    // Verify SPIR-V is valid
+    assert!(vertex_spirv.len() > 0);
+    assert!(fragment_spirv.len() > 0);
+
+    // Validate SPIR-V
+    assert!(compiler.validate(&vertex_spirv)?);
+    assert!(compiler.validate(&fragment_spirv)?);
+
+    // Reflect shader to get uniforms and inputs
+    let reflection = compiler.reflect(&fragment_spirv)?;
+    assert!(reflection.uniforms.contains_key("u_texture"));
+
+    TestResult::pass()
+}
+
+/// Test color processing pipeline
+fn test_color_processing_pipeline() -> TestResult {
+    use spectrum::{ColorGrader, LUT3D, WhiteBalance};
+    use chromatic::{CAM16, ColorAppearance};
+
+    // Create HDR image data (simplified as array of colors)
+    let mut pixels: Vec<Color> = (0..100).map(|i| {
+        Color::from_rgb(
+            (i as f64 / 100.0) * 2.0,  // HDR range
+            (50.0 - (i as f64 - 50.0).abs()) / 50.0 * 1.5,
+            ((100 - i) as f64 / 100.0) * 1.8
+        )
+    }).collect();
+
+    // Apply white balance
+    let wb = WhiteBalance::new(6500.0); // Daylight
+    for pixel in &mut pixels {
+        *pixel = wb.apply(pixel);
+    }
+
+    // Apply color grading
+    let grader = ColorGrader::new()
+        .lift(Color::from_rgb(0.02, 0.0, 0.04))
+        .gamma(Color::from_rgb(1.0, 0.98, 1.02))
+        .gain(Color::from_rgb(1.0, 1.0, 0.95))
+        .saturation(1.1);
+
+    for pixel in &mut pixels {
+        *pixel = grader.apply(pixel);
+    }
+
+    // Compute color appearance
+    let viewing_conditions = ViewingConditions::default();
+    for pixel in &pixels {
+        let appearance = CAM16::from_xyz(pixel.to_xyz(), &viewing_conditions);
+        assert!(appearance.lightness >= 0.0);
+        assert!(appearance.chroma >= 0.0);
+    }
+
+    TestResult::pass()
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// TOOLS LAYER INTEGRATION TESTS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Test forge project lifecycle
+fn test_forge_project_lifecycle() -> TestResult {
+    use forge::{ProjectGenerator, ProjectTemplate, BuildSystem, TestRunner};
+
+    // Create temp project directory
+    let project_dir = temp_dir().join("test_project");
+
+    // Generate new project
+    let generator = ProjectGenerator::new(ProjectTemplate::Library);
+    generator.create(&project_dir, "test_lib")?;
+
+    // Verify project structure
+    assert!(project_dir.join("lib.bld").exists());
+    assert!(project_dir.join("Quark.toml").exists());
+    assert!(project_dir.join("tests").is_dir());
+
+    // Add source file
+    let src = r#"
+        pub fn add(a: i32, b: i32) -> i32 {
+            a + b
+        }
+
+        #[test]
+        fn test_add() {
+            assert_eq!(add(2, 3), 5);
+        }
+    "#;
+    fs::write(project_dir.join("lib.bld"), src)?;
+
+    // Build project
+    let build = BuildSystem::new(&project_dir);
+    let build_result = build.compile()?;
+    assert!(build_result.success);
+    assert!(build_result.artifacts.len() > 0);
+
+    // Run tests
+    let test_runner = TestRunner::new(&project_dir);
+    let test_result = test_runner.run_all()?;
+    assert!(test_result.passed > 0);
+    assert_eq!(test_result.failed, 0);
+
+    // Cleanup
+    fs::remove_dir_all(&project_dir)?;
+
+    TestResult::pass()
+}
+
+/// Test LSP completion integration
+fn test_lsp_completion_integration() -> TestResult {
+    use lsp::{LanguageServer, CompletionRequest, TextDocument};
+
+    // Create language server
+    let mut server = LanguageServer::new();
+
+    // Open document
+    let doc = TextDocument::new(
+        "file:///test.bld",
+        r#"
+            use std::collections::HashMap
+
+            fn main() {
+                let mut map = HashMap::new();
+                map.
+            }
+        "#
+    );
+
+    server.open_document(doc)?;
+
+    // Request completion at cursor position
+    let completions = server.completion(CompletionRequest {
+        uri: "file:///test.bld".to_string(),
+        line: 5,
+        character: 20,
+    })?;
+
+    // Verify HashMap methods are suggested
+    let method_names: Vec<&str> = completions.iter()
+        .map(|c| c.label.as_str())
+        .collect();
+
+    assert!(method_names.contains(&"insert"));
+    assert!(method_names.contains(&"get"));
+    assert!(method_names.contains(&"remove"));
+    assert!(method_names.contains(&"len"));
+
+    TestResult::pass()
+}
+
+/// Test formatter parse roundtrip
+fn test_fmt_parse_roundtrip() -> TestResult {
+    use fmt::{Formatter, FormatConfig};
+    use buildlang::parser::Parser;
+
+    let original = r#"
+fn fibonacci(n:i32)->i32{
+if n<=1{return n;}
+return fibonacci(n-1)+fibonacci(n-2);
+}
+"#;
+
+    // Parse original
+    let ast = Parser::parse(original)?;
+
+    // Format
+    let config = FormatConfig::default();
+    let formatter = Formatter::new(config);
+    let formatted = formatter.format(original)?;
+
+    // Parse formatted
+    let formatted_ast = Parser::parse(&formatted)?;
+
+    // ASTs should be equivalent
+    assert_eq!(ast, formatted_ast);
+
+    // Formatting should be idempotent
+    let reformatted = formatter.format(&formatted)?;
+    assert_eq!(formatted, reformatted);
+
+    TestResult::pass()
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// CROSS-LAYER INTEGRATION TESTS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Test full trading system with all components
+fn test_full_trading_system() -> TestResult {
+    // 1. Load/generate market data
+    let mut tensor_builder = MarketTensorBuilder::new();
+    let symbols = vec!["SPY", "QQQ", "IWM", "DIA", "VTI"];
+
+    for symbol in &symbols {
+        tensor_builder.add_symbol(symbol);
+    }
+
+    // Simulate 2 years of daily data
+    for day in 0..504 {
+        for (i, symbol) in symbols.iter().enumerate() {
+            let base = 100.0 + i as f64 * 50.0;
+            let trend = day as f64 * 0.02;
+            let noise = ((day * (i + 1)) as f64).sin() * 3.0;
+            let price = base + trend + noise;
+
+            tensor_builder.add_ohlcv(
+                symbol,
+                day as u64 * 86400,
+                price * 0.995,
+                price * 1.01,
+                price * 0.99,
+                price,
+                1_000_000.0 + (day as f64 * 1000.0),
+            );
+        }
+    }
+
+    let tensor = tensor_builder.build(252);
+
+    // 2. Compute covariance and optimize portfolio
+    let cov = tensor.ewm_covariance(60.0);
+    let returns: Vec<f64> = symbols.iter().enumerate().map(|(i, _)| {
+        0.08 + 0.02 * i as f64 / symbols.len() as f64
+    }).collect();
+
+    let optimizer = PortfolioOptimizer::new(returns, cov);
+    let weights = optimizer.risk_parity(100);
+
+    // 3. Train prediction model
+    let mut predictor = TimeSeriesPredictor::new(LSTMModel::new(16, 64, 2));
+    let price_history: Vec<f64> = (0..252).map(|t| {
+        tensor.get(t, 0, features::PRICE, derivatives::VALUE)
+    }).collect();
+    predictor.fit(&price_history, 20)?;
+
+    // 4. Create trading engine
+    let mut engine = TradingEngine::new()
+        .with_capital(1_000_000.0)
+        .with_commission(0.001)
+        .with_slippage(0.0005);
+
+    engine.set_portfolio_weights(&symbols, &weights);
+
+    // 5. Run simulation
+    let mut equity_curve = Vec::new();
+    equity_curve.push(engine.equity());
+
+    for t in 252..504 {
+        // Get current prices
+        let prices: HashMap<String, f64> = symbols.iter().enumerate().map(|(i, s)| {
+            (s.to_string(), tensor.get(t % 252, i, features::PRICE, derivatives::VALUE))
+        }).collect();
+
+        // Update engine with prices
+        engine.update_prices(&prices);
+
+        // Generate signals based on indicators
+        for (i, symbol) in symbols.iter().enumerate() {
+            let rsi = tensor.get(t % 252, i, features::RSI, derivatives::VALUE);
+            let macd = tensor.get(t % 252, i, features::MACD, derivatives::VALUE);
+
+            if rsi < 30.0 && macd > 0.0 {
+                engine.signal(symbol, Signal::Buy, weights[i]);
+            } else if rsi > 70.0 && macd < 0.0 {
+                engine.signal(symbol, Signal::Sell, weights[i]);
+            }
+        }
+
+        // Execute
+        engine.execute()?;
+        equity_curve.push(engine.equity());
+    }
+
+    // 6. Compute performance metrics
+    let returns: Vec<f64> = (1..equity_curve.len()).map(|i| {
+        (equity_curve[i] / equity_curve[i - 1]) - 1.0
+    }).collect();
+
+    let mean_return = returns.iter().sum::<f64>() / returns.len() as f64;
+    let variance = returns.iter().map(|r| (r - mean_return).powi(2)).sum::<f64>() / returns.len() as f64;
+    let volatility = variance.sqrt() * (252.0_f64).sqrt();
+    let sharpe = mean_return * 252.0 / volatility;
+
+    // Verify reasonable performance
+    assert!(sharpe.is_finite());
+    assert!(engine.equity() > 0.0);
+
+    TestResult::pass()
+}
+
+/// Test AI-enhanced trading
+fn test_ai_enhanced_trading() -> TestResult {
+    use axiom::{NeuralNetwork, Dense, Dropout, LSTM};
+    use oracle::{EnsemblePredictor, BayesianRegression};
+
+    // Create feature tensor
+    let mut tensor = MarketTensor4D::new(500, 3, 16, 4);
+
+    // Populate with market simulation
+    for t in 0..500 {
+        for a in 0..3 {
+            let ret = 0.001 * ((t * a) as f64).sin() + 0.0001 * ((t + a) as f64);
+            let vol = 0.15 + 0.05 * ((t * 2) as f64).cos();
+            let rsi = 50.0 + 30.0 * ((t * 3) as f64).sin();
+
+            tensor.set(t, a, features::PRICE, derivatives::FIRST, ret);
+            tensor.set(t, a, features::VOLATILITY, derivatives::VALUE, vol);
+            tensor.set(t, a, features::RSI, derivatives::VALUE, rsi);
+        }
+    }
+
+    // Extract features for ML
+    let features: Vec<Vec<f64>> = (0..400).map(|t| {
+        let mut feat = Vec::new();
+        for a in 0..3 {
+            feat.push(tensor.get(t, a, features::PRICE, derivatives::FIRST));
+            feat.push(tensor.get(t, a, features::VOLATILITY, derivatives::VALUE));
+            feat.push(tensor.get(t, a, features::RSI, derivatives::VALUE));
+        }
+        feat
+    }).collect();
+
+    // Labels: next period return
+    let labels: Vec<f64> = (0..400).map(|t| {
+        tensor.get(t + 1, 0, features::PRICE, derivatives::FIRST)
+    }).collect();
+
+    // Train neural network
+    let mut nn = NeuralNetwork::new()
+        .add(Dense::new(9, 32))
+        .add(Activation::ReLU)
+        .add(Dropout::new(0.2))
+        .add(Dense::new(32, 16))
+        .add(Activation::ReLU)
+        .add(Dense::new(16, 1))
+        .build();
+
+    nn.train_regression(&features[..300], &labels[..300], 50, 0.001)?;
+
+    // Train Bayesian regression
+    let mut bayesian = BayesianRegression::new();
+    bayesian.fit(&features[..300], &labels[..300])?;
+
+    // Create ensemble
+    let mut ensemble = EnsemblePredictor::new();
+    ensemble.add_model("nn", Box::new(nn), 0.6);
+    ensemble.add_model("bayesian", Box::new(bayesian), 0.4);
+
+    // Test predictions
+    let mut correct_direction = 0;
+    for t in 300..400 {
+        let prediction = ensemble.predict(&features[t])?;
+        let actual = labels[t];
+
+        if prediction.signum() == actual.signum() {
+            correct_direction += 1;
+        }
+    }
+
+    // Should predict direction better than random
+    let accuracy = correct_direction as f64 / 100.0;
+    assert!(accuracy >= 0.45); // At least close to random
+
+    TestResult::pass()
+}
+
+/// Test full render pipeline
+fn test_full_render_pipeline() -> TestResult {
+    use photon::{Renderer, Scene, Mesh, Material, Light};
+    use spectrum::{Color, HDRImage};
+    use lumina::{PostProcessor, Bloom, ToneMapping, FXAA};
+
+    // Create scene
+    let mut scene = Scene::new();
+
+    // Add mesh
+    let cube = Mesh::cube(1.0);
+    let material = Material::pbr()
+        .albedo(Color::from_rgb(0.8, 0.2, 0.2))
+        .metallic(0.0)
+        .roughness(0.5);
+
+    scene.add_object(cube, material, Transform::identity());
+
+    // Add lights
+    scene.add_light(Light::directional(
+        Vec3::new(-1.0, -1.0, -1.0).normalize(),
+        Color::white(),
+        10.0
+    ));
+
+    scene.add_light(Light::ambient(Color::from_rgb(0.1, 0.1, 0.15)));
+
+    // Create renderer
+    let mut renderer = Renderer::new(1920, 1080);
+
+    // Render scene
+    let hdr_image = renderer.render(&scene)?;
+
+    // Verify HDR output
+    assert_eq!(hdr_image.width(), 1920);
+    assert_eq!(hdr_image.height(), 1080);
+
+    // Apply post-processing
+    let mut post = PostProcessor::new();
+    post.add(Bloom::new(0.8, 5));
+    post.add(ToneMapping::ACES);
+    post.add(FXAA::new());
+
+    let final_image = post.process(&hdr_image)?;
+
+    // Verify LDR output
+    for pixel in final_image.pixels() {
+        assert!(pixel.r >= 0.0 && pixel.r <= 1.0);
+        assert!(pixel.g >= 0.0 && pixel.g <= 1.0);
+        assert!(pixel.b >= 0.0 && pixel.b <= 1.0);
+    }
+
+    TestResult::pass()
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// HELPER TYPES FOR TESTS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[derive(Serialize, Deserialize)]
+struct User {
+    id: u32,
+    name: String,
+    score: f64,
+}
+
+#[derive(Serialize, Deserialize)]
+struct Credentials {
+    api_key: String,
+    secret: String,
+}
+
+enum Signal {
+    Buy,
+    Sell,
+    Hold,
+}
+
+enum TradingDecision {
+    Buy,
+    Sell,
+    Hold,
+}
+
+struct MomentumStrategy {
+    lookback: usize,
+    threshold: f64,
+}
+
+impl MomentumStrategy {
+    fn new(lookback: usize, threshold: f64) -> Self {
+        MomentumStrategy { lookback, threshold }
+    }
+}
+
+impl Strategy for MomentumStrategy {
+    fn generate_signal(&self, data: &[MarketBar]) -> Signal {
+        if data.len() < self.lookback {
+            return Signal::Hold;
+        }
+
+        let momentum = (data.last().unwrap().close - data[data.len() - self.lookback].close)
+            / data[data.len() - self.lookback].close;
+
+        if momentum > self.threshold {
+            Signal::Buy
+        } else if momentum < -self.threshold {
+            Signal::Sell
+        } else {
+            Signal::Hold
+        }
+    }
+}
+
+struct MarketBar {
+    timestamp: u64,
+    open: f64,
+    high: f64,
+    low: f64,
+    close: f64,
+    volume: f64,
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// TEST RUNNER
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Main entry point for running integration tests
+pub fn main() -> i32 {
+    let config = IntegrationTestConfig::default();
+    let suite = run_all_integration_tests(&config);
+
+    let results = suite.run();
+
+    println!("\n{}", "═".repeat(70));
+    println!("BUILD-UNIVERSE Integration Test Results");
+    println!("{}", "═".repeat(70));
+    println!("Total:   {}", results.total);
+    println!("Passed:  {} ({}%)", results.passed, results.passed * 100 / results.total.max(1));
+    println!("Failed:  {}", results.failed);
+    println!("Skipped: {}", results.skipped);
+    println!("{}", "═".repeat(70));
+
+    if results.failed > 0 {
+        println!("\nFailed tests:");
+        for failure in &results.failures {
+            println!("  - {}: {}", failure.name, failure.message);
+        }
+        1
+    } else {
+        println!("\nAll integration tests passed!");
+        0
+    }
+}

@@ -1,0 +1,2750 @@
+// ===============================================================================
+// FOUNDATION STANDARD LIBRARY - I/O MODULE
+// ===============================================================================
+// Copyright (c) 2024-2025 Zain Dana Harper. All Rights Reserved.
+// Copyright (c) 2024-2025 Zain Dana Harper. All Rights Reserved.
+// ===============================================================================
+
+//! # I/O Module
+//!
+//! Comprehensive I/O primitives for the Foundation Standard Library including:
+//! - Async I/O primitives with event-driven architecture
+//! - Memory-mapped file support
+//! - Network sockets (TCP, UDP, Unix domain)
+//! - TLS/SSL support for secure communications
+//!
+//! ## Architecture
+//!
+//! The I/O system is built on an async-first architecture using:
+//! - Completion-based I/O on Windows (IOCP)
+//! - Readiness-based I/O on Unix (epoll/kqueue)
+//! - Zero-copy buffers where possible
+
+// =============================================================================
+// Core I/O Traits
+// =============================================================================
+
+/// Core trait for readable streams
+pub trait Read {
+    /// Read bytes into the buffer, returning bytes read
+    fn read(self: &mut Self, buf: &mut [u8]) -> Result<usize, IoError>;
+
+    /// Read exactly `buf.len()` bytes or error
+    fn read_exact(self: &mut Self, buf: &mut [u8]) -> Result<(), IoError> {
+        let mut offset = 0;
+        while offset < buf.len() {
+            match self.read(&mut buf[offset..]) {
+                Ok(0) => return Err(IoError::UnexpectedEof),
+                Ok(n) => offset += n,
+                Err(e) if e.is_interrupted() => continue,
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(())
+    }
+
+    /// Read all bytes until EOF
+    fn read_to_end(self: &mut Self, buf: &mut Vec<u8>) -> Result<usize, IoError> {
+        let start_len = buf.len();
+        let mut temp = [0u8; 8192];
+        loop {
+            match self.read(&mut temp) {
+                Ok(0) => break,
+                Ok(n) => buf.extend_from_slice(&temp[..n]),
+                Err(e) if e.is_interrupted() => continue,
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(buf.len() - start_len)
+    }
+
+    /// Read all bytes as a string
+    fn read_to_string(self: &mut Self, buf: &mut String) -> Result<usize, IoError> {
+        let mut bytes = Vec::new();
+        let n = self.read_to_end(&mut bytes)?;
+        match String::from_utf8(bytes) {
+            Ok(s) => {
+                buf.push_str(&s);
+                Ok(n)
+            }
+            Err(_) => Err(IoError::InvalidData("invalid UTF-8".to_string())),
+        }
+    }
+
+    /// Create a buffered reader wrapper
+    fn buffered(self) -> BufReader<Self> where Self: Sized {
+        BufReader::new(self)
+    }
+
+    /// Chain this reader with another
+    fn chain<R: Read>(self, next: R) -> Chain<Self, R> where Self: Sized {
+        Chain { first: self, second: next, done_first: false }
+    }
+
+    /// Take at most `limit` bytes
+    fn take(self, limit: u64) -> Take<Self> where Self: Sized {
+        Take { inner: self, limit }
+    }
+}
+
+/// Core trait for writable streams
+pub trait Write {
+    /// Write bytes from the buffer, returning bytes written
+    fn write(self: &mut Self, buf: &[u8]) -> Result<usize, IoError>;
+
+    /// Flush any buffered data
+    fn flush(self: &mut Self) -> Result<(), IoError>;
+
+    /// Write all bytes or error
+    fn write_all(self: &mut Self, buf: &[u8]) -> Result<(), IoError> {
+        let mut offset = 0;
+        while offset < buf.len() {
+            match self.write(&buf[offset..]) {
+                Ok(0) => return Err(IoError::WriteZero),
+                Ok(n) => offset += n,
+                Err(e) if e.is_interrupted() => continue,
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(())
+    }
+
+    /// Write a formatted string
+    fn write_fmt(self: &mut Self, fmt: fmt::Arguments) -> Result<(), IoError> {
+        let s = fmt::format(fmt);
+        self.write_all(s.as_bytes())
+    }
+
+    /// Create a buffered writer wrapper
+    fn buffered(self) -> BufWriter<Self> where Self: Sized {
+        BufWriter::new(self)
+    }
+}
+
+/// Trait for seekable streams
+pub trait Seek {
+    /// Seek to a position, returning new position
+    fn seek(self: &mut Self, pos: SeekFrom) -> Result<u64, IoError>;
+
+    /// Get current position
+    fn stream_position(self: &mut Self) -> Result<u64, IoError> {
+        self.seek(SeekFrom::Current(0))
+    }
+
+    /// Seek to start
+    fn rewind(self: &mut Self) -> Result<(), IoError> {
+        self.seek(SeekFrom::Start(0))?;
+        Ok(())
+    }
+
+    /// Get stream length
+    fn stream_len(self: &mut Self) -> Result<u64, IoError> {
+        let current = self.stream_position()?;
+        let end = self.seek(SeekFrom::End(0))?;
+        self.seek(SeekFrom::Start(current))?;
+        Ok(end)
+    }
+}
+
+/// Seek position specifier
+pub enum SeekFrom {
+    /// Seek from start of stream
+    Start(u64),
+    /// Seek from end of stream (negative = before end)
+    End(i64),
+    /// Seek relative to current position
+    Current(i64),
+}
+
+// =============================================================================
+// Async I/O Traits
+// =============================================================================
+
+/// Async readable stream
+pub trait AsyncRead {
+    /// Asynchronously read bytes into the buffer
+    async fn read(self: &mut Self, buf: &mut [u8]) -> Result<usize, IoError>;
+
+    /// Asynchronously read exactly `buf.len()` bytes
+    async fn read_exact(self: &mut Self, buf: &mut [u8]) -> Result<(), IoError> {
+        let mut offset = 0;
+        while offset < buf.len() {
+            match self.read(&mut buf[offset..]).await {
+                Ok(0) => return Err(IoError::UnexpectedEof),
+                Ok(n) => offset += n,
+                Err(e) if e.is_interrupted() => continue,
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(())
+    }
+
+    /// Read all bytes until EOF
+    async fn read_to_end(self: &mut Self, buf: &mut Vec<u8>) -> Result<usize, IoError> {
+        let start_len = buf.len();
+        let mut temp = [0u8; 8192];
+        loop {
+            match self.read(&mut temp).await {
+                Ok(0) => break,
+                Ok(n) => buf.extend_from_slice(&temp[..n]),
+                Err(e) if e.is_interrupted() => continue,
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(buf.len() - start_len)
+    }
+}
+
+/// Async writable stream
+pub trait AsyncWrite {
+    /// Asynchronously write bytes from the buffer
+    async fn write(self: &mut Self, buf: &[u8]) -> Result<usize, IoError>;
+
+    /// Asynchronously flush buffered data
+    async fn flush(self: &mut Self) -> Result<(), IoError>;
+
+    /// Write all bytes or error
+    async fn write_all(self: &mut Self, buf: &[u8]) -> Result<(), IoError> {
+        let mut offset = 0;
+        while offset < buf.len() {
+            match self.write(&buf[offset..]).await {
+                Ok(0) => return Err(IoError::WriteZero),
+                Ok(n) => offset += n,
+                Err(e) if e.is_interrupted() => continue,
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(())
+    }
+
+    /// Shutdown the write side
+    async fn shutdown(self: &mut Self) -> Result<(), IoError>;
+}
+
+/// Async seekable stream
+pub trait AsyncSeek {
+    /// Asynchronously seek to a position
+    async fn seek(self: &mut Self, pos: SeekFrom) -> Result<u64, IoError>;
+}
+
+// =============================================================================
+// I/O Error Types
+// =============================================================================
+
+/// I/O error type
+pub enum IoError {
+    /// File or resource not found
+    NotFound,
+    /// Permission denied
+    PermissionDenied,
+    /// Connection refused
+    ConnectionRefused,
+    /// Connection reset by peer
+    ConnectionReset,
+    /// Connection aborted
+    ConnectionAborted,
+    /// Not connected
+    NotConnected,
+    /// Address already in use
+    AddrInUse,
+    /// Address not available
+    AddrNotAvailable,
+    /// Network is down
+    NetworkDown,
+    /// Network unreachable
+    NetworkUnreachable,
+    /// Broken pipe
+    BrokenPipe,
+    /// Resource already exists
+    AlreadyExists,
+    /// Would block (non-blocking operation)
+    WouldBlock,
+    /// Not a directory
+    NotADirectory,
+    /// Is a directory
+    IsADirectory,
+    /// Directory not empty
+    DirectoryNotEmpty,
+    /// Read-only filesystem
+    ReadOnlyFilesystem,
+    /// Filesystem loop detected
+    FilesystemLoop,
+    /// Stale file handle
+    StaleHandle,
+    /// Invalid input parameter
+    InvalidInput(String),
+    /// Invalid data encountered
+    InvalidData(String),
+    /// Operation timed out
+    TimedOut,
+    /// Write returned zero bytes
+    WriteZero,
+    /// Unexpected end of file
+    UnexpectedEof,
+    /// Operation interrupted
+    Interrupted,
+    /// Unsupported operation
+    Unsupported,
+    /// Out of memory
+    OutOfMemory,
+    /// Other error with message
+    Other(String),
+    /// TLS/SSL error
+    TlsError(TlsError),
+}
+
+impl IoError {
+    /// Check if this is an interrupted error
+    pub fn is_interrupted(self: &Self) -> bool {
+        matches!(self, IoError::Interrupted)
+    }
+
+    /// Check if this is a would-block error
+    pub fn is_would_block(self: &Self) -> bool {
+        matches!(self, IoError::WouldBlock)
+    }
+
+    /// Check if this is a connection error
+    pub fn is_connection_error(self: &Self) -> bool {
+        matches!(self,
+            IoError::ConnectionRefused |
+            IoError::ConnectionReset |
+            IoError::ConnectionAborted |
+            IoError::NotConnected
+        )
+    }
+
+    /// Get error message
+    pub fn message(self: &Self) -> String {
+        match self {
+            IoError::NotFound => "entity not found".to_string(),
+            IoError::PermissionDenied => "permission denied".to_string(),
+            IoError::ConnectionRefused => "connection refused".to_string(),
+            IoError::ConnectionReset => "connection reset".to_string(),
+            IoError::ConnectionAborted => "connection aborted".to_string(),
+            IoError::NotConnected => "not connected".to_string(),
+            IoError::AddrInUse => "address already in use".to_string(),
+            IoError::AddrNotAvailable => "address not available".to_string(),
+            IoError::NetworkDown => "network is down".to_string(),
+            IoError::NetworkUnreachable => "network unreachable".to_string(),
+            IoError::BrokenPipe => "broken pipe".to_string(),
+            IoError::AlreadyExists => "entity already exists".to_string(),
+            IoError::WouldBlock => "operation would block".to_string(),
+            IoError::NotADirectory => "not a directory".to_string(),
+            IoError::IsADirectory => "is a directory".to_string(),
+            IoError::DirectoryNotEmpty => "directory not empty".to_string(),
+            IoError::ReadOnlyFilesystem => "read-only filesystem".to_string(),
+            IoError::FilesystemLoop => "filesystem loop detected".to_string(),
+            IoError::StaleHandle => "stale file handle".to_string(),
+            IoError::InvalidInput(msg) => format!("invalid input: {}", msg),
+            IoError::InvalidData(msg) => format!("invalid data: {}", msg),
+            IoError::TimedOut => "operation timed out".to_string(),
+            IoError::WriteZero => "write returned zero".to_string(),
+            IoError::UnexpectedEof => "unexpected end of file".to_string(),
+            IoError::Interrupted => "operation interrupted".to_string(),
+            IoError::Unsupported => "unsupported operation".to_string(),
+            IoError::OutOfMemory => "out of memory".to_string(),
+            IoError::Other(msg) => msg.clone(),
+            IoError::TlsError(e) => format!("TLS error: {:?}", e),
+        }
+    }
+}
+
+// =============================================================================
+// Buffered I/O
+// =============================================================================
+
+/// Buffered reader wrapper
+pub struct BufReader<R: Read> {
+    inner: R,
+    buf: Vec<u8>,
+    pos: usize,
+    cap: usize,
+}
+
+impl<R: Read> BufReader<R> {
+    /// Create a new buffered reader with default buffer size (8KB)
+    pub fn new(inner: R) -> Self {
+        Self::with_capacity(8192, inner)
+    }
+
+    /// Create with specified buffer capacity
+    pub fn with_capacity(capacity: usize, inner: R) -> Self {
+        Self {
+            inner,
+            buf: vec![0u8; capacity],
+            pos: 0,
+            cap: 0,
+        }
+    }
+
+    /// Get reference to underlying reader
+    pub fn get_ref(self: &Self) -> &R {
+        &self.inner
+    }
+
+    /// Get mutable reference to underlying reader
+    pub fn get_mut(self: &mut Self) -> &mut R {
+        &mut self.inner
+    }
+
+    /// Consume and return the inner reader
+    pub fn into_inner(self) -> R {
+        self.inner
+    }
+
+    /// Get buffer contents
+    pub fn buffer(self: &Self) -> &[u8] {
+        &self.buf[self.pos..self.cap]
+    }
+
+    /// Get buffer capacity
+    pub fn capacity(self: &Self) -> usize {
+        self.buf.len()
+    }
+
+    /// Fill internal buffer
+    fn fill_buf(self: &mut Self) -> Result<&[u8], IoError> {
+        if self.pos >= self.cap {
+            self.cap = self.inner.read(&mut self.buf)?;
+            self.pos = 0;
+        }
+        Ok(&self.buf[self.pos..self.cap])
+    }
+
+    /// Consume bytes from buffer
+    fn consume(self: &mut Self, amt: usize) {
+        self.pos = (self.pos + amt).min(self.cap);
+    }
+}
+
+impl<R: Read> Read for BufReader<R> {
+    fn read(self: &mut Self, buf: &mut [u8]) -> Result<usize, IoError> {
+        // If buf is larger than internal buffer, read directly
+        if self.pos == self.cap && buf.len() >= self.buf.len() {
+            return self.inner.read(buf);
+        }
+
+        let nread = {
+            let available = self.fill_buf()?;
+            let nread = available.len().min(buf.len());
+            buf[..nread].copy_from_slice(&available[..nread]);
+            nread
+        };
+        self.consume(nread);
+        Ok(nread)
+    }
+}
+
+/// Buffered line reader extension
+pub trait BufRead: Read {
+    /// Get buffer contents
+    fn fill_buf(self: &mut Self) -> Result<&[u8], IoError>;
+
+    /// Consume bytes from buffer
+    fn consume(self: &mut Self, amt: usize);
+
+    /// Read until delimiter, including delimiter
+    fn read_until(self: &mut Self, delim: u8, buf: &mut Vec<u8>) -> Result<usize, IoError> {
+        let mut total = 0;
+        loop {
+            let available = match self.fill_buf() {
+                Ok(b) => b,
+                Err(e) if e.is_interrupted() => continue,
+                Err(e) => return Err(e),
+            };
+
+            if available.is_empty() {
+                break;
+            }
+
+            let (done, used) = match available.iter().position(|&b| b == delim) {
+                Some(i) => {
+                    buf.extend_from_slice(&available[..=i]);
+                    (true, i + 1)
+                }
+                None => {
+                    buf.extend_from_slice(available);
+                    (false, available.len())
+                }
+            };
+
+            self.consume(used);
+            total += used;
+
+            if done {
+                break;
+            }
+        }
+        Ok(total)
+    }
+
+    /// Read a line (including newline)
+    fn read_line(self: &mut Self, buf: &mut String) -> Result<usize, IoError> {
+        let mut bytes = Vec::new();
+        let n = self.read_until(b'\n', &mut bytes)?;
+        match String::from_utf8(bytes) {
+            Ok(s) => {
+                buf.push_str(&s);
+                Ok(n)
+            }
+            Err(_) => Err(IoError::InvalidData("invalid UTF-8".to_string())),
+        }
+    }
+
+    /// Iterator over lines
+    fn lines(self) -> Lines<Self> where Self: Sized {
+        Lines { inner: self }
+    }
+
+    /// Split by delimiter
+    fn split(self, delim: u8) -> Split<Self> where Self: Sized {
+        Split { inner: self, delim }
+    }
+}
+
+impl<R: Read> BufRead for BufReader<R> {
+    fn fill_buf(self: &mut Self) -> Result<&[u8], IoError> {
+        BufReader::fill_buf(self)
+    }
+
+    fn consume(self: &mut Self, amt: usize) {
+        BufReader::consume(self, amt)
+    }
+}
+
+/// Buffered writer wrapper
+pub struct BufWriter<W: Write> {
+    inner: Option<W>,
+    buf: Vec<u8>,
+    panicked: bool,
+}
+
+impl<W: Write> BufWriter<W> {
+    /// Create a new buffered writer with default buffer size (8KB)
+    pub fn new(inner: W) -> Self {
+        Self::with_capacity(8192, inner)
+    }
+
+    /// Create with specified buffer capacity
+    pub fn with_capacity(capacity: usize, inner: W) -> Self {
+        Self {
+            inner: Some(inner),
+            buf: Vec::with_capacity(capacity),
+            panicked: false,
+        }
+    }
+
+    /// Get reference to underlying writer
+    pub fn get_ref(self: &Self) -> &W {
+        self.inner.as_ref().unwrap()
+    }
+
+    /// Get mutable reference to underlying writer
+    pub fn get_mut(self: &mut Self) -> &mut W {
+        self.inner.as_mut().unwrap()
+    }
+
+    /// Get buffer contents
+    pub fn buffer(self: &Self) -> &[u8] {
+        &self.buf
+    }
+
+    /// Get buffer capacity
+    pub fn capacity(self: &Self) -> usize {
+        self.buf.capacity()
+    }
+
+    /// Consume and return the inner writer, flushing first
+    pub fn into_inner(self: mut Self) -> Result<W, IntoInnerError<BufWriter<W>>> {
+        match self.flush_buf() {
+            Ok(()) => Ok(self.inner.take().unwrap()),
+            Err(e) => Err(IntoInnerError { error: e, writer: self }),
+        }
+    }
+
+    /// Flush internal buffer
+    fn flush_buf(self: &mut Self) -> Result<(), IoError> {
+        let mut written = 0;
+        let len = self.buf.len();
+        let mut ret = Ok(());
+
+        while written < len {
+            self.panicked = true;
+            let r = self.inner.as_mut().unwrap().write(&self.buf[written..]);
+            self.panicked = false;
+
+            match r {
+                Ok(0) => {
+                    ret = Err(IoError::WriteZero);
+                    break;
+                }
+                Ok(n) => written += n,
+                Err(e) if e.is_interrupted() => continue,
+                Err(e) => {
+                    ret = Err(e);
+                    break;
+                }
+            }
+        }
+
+        if written > 0 {
+            self.buf.drain(..written);
+        }
+        ret
+    }
+}
+
+impl<W: Write> Write for BufWriter<W> {
+    fn write(self: &mut Self, buf: &[u8]) -> Result<usize, IoError> {
+        if self.buf.len() + buf.len() > self.buf.capacity() {
+            self.flush_buf()?;
+        }
+
+        if buf.len() >= self.buf.capacity() {
+            self.panicked = true;
+            let r = self.inner.as_mut().unwrap().write(buf);
+            self.panicked = false;
+            r
+        } else {
+            self.buf.extend_from_slice(buf);
+            Ok(buf.len())
+        }
+    }
+
+    fn flush(self: &mut Self) -> Result<(), IoError> {
+        self.flush_buf()?;
+        self.inner.as_mut().unwrap().flush()
+    }
+}
+
+impl<W: Write> Drop for BufWriter<W> {
+    fn drop(self: &mut Self) {
+        if self.inner.is_some() && !self.panicked {
+            let _ = self.flush_buf();
+        }
+    }
+}
+
+/// Error returned when into_inner fails
+pub struct IntoInnerError<W> {
+    error: IoError,
+    writer: W,
+}
+
+impl<W> IntoInnerError<W> {
+    /// Get the error
+    pub fn error(self: &Self) -> &IoError {
+        &self.error
+    }
+
+    /// Get the writer back
+    pub fn into_inner(self) -> W {
+        self.writer
+    }
+}
+
+/// Lines iterator
+pub struct Lines<B: BufRead> {
+    inner: B,
+}
+
+impl<B: BufRead> Iterator for Lines<B> {
+    type Item = Result<String, IoError>;
+
+    fn next(self: &mut Self) -> Option<Self::Item> {
+        let mut line = String::new();
+        match self.inner.read_line(&mut line) {
+            Ok(0) => None,
+            Ok(_) => {
+                if line.ends_with('\n') {
+                    line.pop();
+                    if line.ends_with('\r') {
+                        line.pop();
+                    }
+                }
+                Some(Ok(line))
+            }
+            Err(e) => Some(Err(e)),
+        }
+    }
+}
+
+/// Split iterator
+pub struct Split<B: BufRead> {
+    inner: B,
+    delim: u8,
+}
+
+impl<B: BufRead> Iterator for Split<B> {
+    type Item = Result<Vec<u8>, IoError>;
+
+    fn next(self: &mut Self) -> Option<Self::Item> {
+        let mut buf = Vec::new();
+        match self.inner.read_until(self.delim, &mut buf) {
+            Ok(0) => None,
+            Ok(_) => {
+                if buf.last() == Some(&self.delim) {
+                    buf.pop();
+                }
+                Some(Ok(buf))
+            }
+            Err(e) => Some(Err(e)),
+        }
+    }
+}
+
+/// Chain two readers
+pub struct Chain<R1: Read, R2: Read> {
+    first: R1,
+    second: R2,
+    done_first: bool,
+}
+
+impl<R1: Read, R2: Read> Read for Chain<R1, R2> {
+    fn read(self: &mut Self, buf: &mut [u8]) -> Result<usize, IoError> {
+        if !self.done_first {
+            match self.first.read(buf)? {
+                0 => self.done_first = true,
+                n => return Ok(n),
+            }
+        }
+        self.second.read(buf)
+    }
+}
+
+/// Take at most N bytes
+pub struct Take<R: Read> {
+    inner: R,
+    limit: u64,
+}
+
+impl<R: Read> Take<R> {
+    /// Get remaining limit
+    pub fn limit(self: &Self) -> u64 {
+        self.limit
+    }
+
+    /// Set new limit
+    pub fn set_limit(self: &mut Self, limit: u64) {
+        self.limit = limit;
+    }
+
+    /// Get reference to inner reader
+    pub fn get_ref(self: &Self) -> &R {
+        &self.inner
+    }
+
+    /// Get mutable reference to inner reader
+    pub fn get_mut(self: &mut Self) -> &mut R {
+        &mut self.inner
+    }
+
+    /// Consume and return inner reader
+    pub fn into_inner(self) -> R {
+        self.inner
+    }
+}
+
+impl<R: Read> Read for Take<R> {
+    fn read(self: &mut Self, buf: &mut [u8]) -> Result<usize, IoError> {
+        if self.limit == 0 {
+            return Ok(0);
+        }
+
+        let max = (buf.len() as u64).min(self.limit) as usize;
+        let n = self.inner.read(&mut buf[..max])?;
+        self.limit -= n as u64;
+        Ok(n)
+    }
+}
+
+// =============================================================================
+// Memory Mapped Files
+// =============================================================================
+
+/// Memory mapping protection mode
+pub enum Protection {
+    /// Read-only access
+    Read,
+    /// Read and write access
+    ReadWrite,
+    /// Read, write, and execute access (requires special permissions)
+    ReadWriteExecute,
+    /// Copy-on-write mapping
+    CopyOnWrite,
+}
+
+/// Memory mapping options
+pub struct MmapOptions {
+    /// Offset from start of file
+    pub offset: u64,
+    /// Length to map (None = entire file from offset)
+    pub len: Option<usize>,
+    /// Protection mode
+    pub protection: Protection,
+    /// Populate page tables (prefault)
+    pub populate: bool,
+    /// Stack-like mapping (grows down)
+    pub stack: bool,
+    /// Huge pages preference
+    pub huge_pages: Option<HugePageSize>,
+    /// Lock pages in memory
+    pub lock: bool,
+}
+
+impl MmapOptions {
+    /// Create default options (read-only, entire file)
+    pub fn new() -> Self {
+        Self {
+            offset: 0,
+            len: None,
+            protection: Protection::Read,
+            populate: false,
+            stack: false,
+            huge_pages: None,
+            lock: false,
+        }
+    }
+
+    /// Set offset
+    pub fn offset(self: mut Self, offset: u64) -> Self {
+        self.offset = offset;
+        self
+    }
+
+    /// Set length
+    pub fn len(self: mut Self, len: usize) -> Self {
+        self.len = Some(len);
+        self
+    }
+
+    /// Set protection mode
+    pub fn protection(self: mut Self, prot: Protection) -> Self {
+        self.protection = prot;
+        self
+    }
+
+    /// Enable page prefaulting
+    pub fn populate(self: mut Self) -> Self {
+        self.populate = true;
+        self
+    }
+
+    /// Enable huge pages
+    pub fn huge_pages(self: mut Self, size: HugePageSize) -> Self {
+        self.huge_pages = Some(size);
+        self
+    }
+
+    /// Lock pages in memory
+    pub fn lock(self: mut Self) -> Self {
+        self.lock = true;
+        self
+    }
+
+    /// Create mapping from file
+    pub fn map(self: &Self, file: &File) -> Result<Mmap, IoError> {
+        Mmap::from_file_with_options(file, self)
+    }
+
+    /// Create mutable mapping from file
+    pub fn map_mut(self: &Self, file: &File) -> Result<MmapMut, IoError> {
+        MmapMut::from_file_with_options(file, self)
+    }
+}
+
+/// Huge page size options
+pub enum HugePageSize {
+    /// 2MB pages (x86_64)
+    Size2MB,
+    /// 1GB pages (x86_64)
+    Size1GB,
+    /// System default huge page size
+    Default,
+}
+
+/// Read-only memory mapped file
+pub struct Mmap {
+    ptr: *const u8,
+    len: usize,
+    // Platform-specific handle
+    #[cfg(windows)]
+    mapping_handle: usize,
+}
+
+impl Mmap {
+    /// Create anonymous mapping
+    pub fn anonymous(len: usize) -> Result<Self, IoError> {
+        Self::anonymous_with_protection(len, Protection::Read)
+    }
+
+    /// Create anonymous mapping with protection
+    pub fn anonymous_with_protection(len: usize, prot: Protection) -> Result<Self, IoError> {
+        if len == 0 {
+            return Err(IoError::InvalidInput("length must be non-zero".to_string()));
+        }
+
+        // Platform-specific implementation
+        #[cfg(unix)]
+        {
+            // mmap(NULL, len, prot, MAP_ANONYMOUS | MAP_PRIVATE, -1, 0)
+            intrinsic::mmap_anonymous(len, prot)
+        }
+
+        #[cfg(windows)]
+        {
+            // VirtualAlloc with appropriate protection
+            intrinsic::virtual_alloc(len, prot)
+        }
+    }
+
+    /// Map entire file
+    pub fn from_file(file: &File) -> Result<Self, IoError> {
+        MmapOptions::new().map(file)
+    }
+
+    /// Map file with options
+    pub fn from_file_with_options(file: &File, opts: &MmapOptions) -> Result<Self, IoError> {
+        let file_len = file.metadata()?.len();
+        let len = opts.len.unwrap_or((file_len - opts.offset) as usize);
+
+        if opts.offset + len as u64 > file_len {
+            return Err(IoError::InvalidInput("mapping extends past end of file".to_string()));
+        }
+
+        // Platform-specific implementation
+        intrinsic::mmap_file(file, opts.offset, len, &opts.protection, opts.populate)
+    }
+
+    /// Get slice to mapped memory
+    pub fn as_slice(self: &Self) -> &[u8] {
+        unsafe { core::slice::from_raw_parts(self.ptr, self.len) }
+    }
+
+    /// Get length of mapping
+    pub fn len(self: &Self) -> usize {
+        self.len
+    }
+
+    /// Check if mapping is empty
+    pub fn is_empty(self: &Self) -> bool {
+        self.len == 0
+    }
+
+    /// Get raw pointer
+    pub fn as_ptr(self: &Self) -> *const u8 {
+        self.ptr
+    }
+
+    /// Make mapping executable (if allowed by protection)
+    pub fn make_exec(self: &mut Self) -> Result<(), IoError> {
+        intrinsic::mprotect(self.ptr as *mut u8, self.len, Protection::ReadWriteExecute)
+    }
+
+    /// Lock pages in memory
+    pub fn lock(self: &Self) -> Result<(), IoError> {
+        intrinsic::mlock(self.ptr, self.len)
+    }
+
+    /// Unlock pages
+    pub fn unlock(self: &Self) -> Result<(), IoError> {
+        intrinsic::munlock(self.ptr, self.len)
+    }
+
+    /// Advise kernel about access pattern
+    pub fn advise(self: &Self, advice: MmapAdvice) -> Result<(), IoError> {
+        intrinsic::madvise(self.ptr, self.len, advice)
+    }
+}
+
+impl Drop for Mmap {
+    fn drop(self: &mut Self) {
+        if !self.ptr.is_null() {
+            let _ = intrinsic::munmap(self.ptr as *mut u8, self.len);
+        }
+    }
+}
+
+impl Deref for Mmap {
+    type Target = [u8];
+
+    fn deref(self: &Self) -> &[u8] {
+        self.as_slice()
+    }
+}
+
+/// Mutable memory mapped file
+pub struct MmapMut {
+    ptr: *mut u8,
+    len: usize,
+    #[cfg(windows)]
+    mapping_handle: usize,
+}
+
+impl MmapMut {
+    /// Create anonymous mutable mapping
+    pub fn anonymous(len: usize) -> Result<Self, IoError> {
+        if len == 0 {
+            return Err(IoError::InvalidInput("length must be non-zero".to_string()));
+        }
+
+        intrinsic::mmap_anonymous_mut(len)
+    }
+
+    /// Map entire file mutably
+    pub fn from_file(file: &File) -> Result<Self, IoError> {
+        MmapOptions::new().protection(Protection::ReadWrite).map_mut(file)
+    }
+
+    /// Map file with options
+    pub fn from_file_with_options(file: &File, opts: &MmapOptions) -> Result<Self, IoError> {
+        let file_len = file.metadata()?.len();
+        let len = opts.len.unwrap_or((file_len - opts.offset) as usize);
+
+        if opts.offset + len as u64 > file_len {
+            return Err(IoError::InvalidInput("mapping extends past end of file".to_string()));
+        }
+
+        intrinsic::mmap_file_mut(file, opts.offset, len, opts.populate)
+    }
+
+    /// Get slice to mapped memory
+    pub fn as_slice(self: &Self) -> &[u8] {
+        unsafe { core::slice::from_raw_parts(self.ptr, self.len) }
+    }
+
+    /// Get mutable slice to mapped memory
+    pub fn as_mut_slice(self: &mut Self) -> &mut [u8] {
+        unsafe { core::slice::from_raw_parts_mut(self.ptr, self.len) }
+    }
+
+    /// Get length of mapping
+    pub fn len(self: &Self) -> usize {
+        self.len
+    }
+
+    /// Check if mapping is empty
+    pub fn is_empty(self: &Self) -> bool {
+        self.len == 0
+    }
+
+    /// Get raw pointer
+    pub fn as_ptr(self: &Self) -> *const u8 {
+        self.ptr
+    }
+
+    /// Get mutable raw pointer
+    pub fn as_mut_ptr(self: &mut Self) -> *mut u8 {
+        self.ptr
+    }
+
+    /// Flush changes to disk
+    pub fn flush(self: &Self) -> Result<(), IoError> {
+        intrinsic::msync(self.ptr, self.len, MsyncFlags::Sync)
+    }
+
+    /// Flush changes asynchronously
+    pub fn flush_async(self: &Self) -> Result<(), IoError> {
+        intrinsic::msync(self.ptr, self.len, MsyncFlags::Async)
+    }
+
+    /// Flush a range to disk
+    pub fn flush_range(self: &Self, offset: usize, len: usize) -> Result<(), IoError> {
+        if offset + len > self.len {
+            return Err(IoError::InvalidInput("flush range out of bounds".to_string()));
+        }
+        intrinsic::msync(unsafe { self.ptr.add(offset) }, len, MsyncFlags::Sync)
+    }
+
+    /// Make read-only
+    pub fn make_read_only(self) -> Result<Mmap, IoError> {
+        intrinsic::mprotect(self.ptr, self.len, Protection::Read)?;
+        Ok(Mmap {
+            ptr: self.ptr,
+            len: self.len,
+            #[cfg(windows)]
+            mapping_handle: self.mapping_handle,
+        })
+    }
+}
+
+impl Drop for MmapMut {
+    fn drop(self: &mut Self) {
+        if !self.ptr.is_null() {
+            let _ = self.flush();
+            let _ = intrinsic::munmap(self.ptr, self.len);
+        }
+    }
+}
+
+impl Deref for MmapMut {
+    type Target = [u8];
+
+    fn deref(self: &Self) -> &[u8] {
+        self.as_slice()
+    }
+}
+
+impl DerefMut for MmapMut {
+    fn deref_mut(self: &mut Self) -> &mut [u8] {
+        self.as_mut_slice()
+    }
+}
+
+/// Memory mapping advice
+pub enum MmapAdvice {
+    /// No special treatment
+    Normal,
+    /// Expect random page access
+    Random,
+    /// Expect sequential page access
+    Sequential,
+    /// Will need pages soon
+    WillNeed,
+    /// Won't need pages soon
+    DontNeed,
+    /// Free pages (for anonymous mappings)
+    Free,
+}
+
+/// Msync flags
+pub enum MsyncFlags {
+    /// Synchronous flush
+    Sync,
+    /// Asynchronous flush
+    Async,
+    /// Invalidate other mappings
+    Invalidate,
+}
+
+// =============================================================================
+// Network Sockets
+// =============================================================================
+
+/// Socket address types
+pub enum SocketAddr {
+    /// IPv4 address
+    V4(SocketAddrV4),
+    /// IPv6 address
+    V6(SocketAddrV6),
+    /// Unix domain socket path
+    #[cfg(unix)]
+    Unix(SocketAddrUnix),
+}
+
+impl SocketAddr {
+    /// Get port (None for Unix sockets)
+    pub fn port(self: &Self) -> Option<u16> {
+        match self {
+            SocketAddr::V4(addr) => Some(addr.port),
+            SocketAddr::V6(addr) => Some(addr.port),
+            #[cfg(unix)]
+            SocketAddr::Unix(_) => None,
+        }
+    }
+
+    /// Check if IPv4
+    pub fn is_ipv4(self: &Self) -> bool {
+        matches!(self, SocketAddr::V4(_))
+    }
+
+    /// Check if IPv6
+    pub fn is_ipv6(self: &Self) -> bool {
+        matches!(self, SocketAddr::V6(_))
+    }
+}
+
+/// IPv4 socket address
+pub struct SocketAddrV4 {
+    pub ip: Ipv4Addr,
+    pub port: u16,
+}
+
+impl SocketAddrV4 {
+    pub fn new(ip: Ipv4Addr, port: u16) -> Self {
+        Self { ip, port }
+    }
+}
+
+/// IPv6 socket address
+pub struct SocketAddrV6 {
+    pub ip: Ipv6Addr,
+    pub port: u16,
+    pub flowinfo: u32,
+    pub scope_id: u32,
+}
+
+impl SocketAddrV6 {
+    pub fn new(ip: Ipv6Addr, port: u16, flowinfo: u32, scope_id: u32) -> Self {
+        Self { ip, port, flowinfo, scope_id }
+    }
+}
+
+/// Unix domain socket address
+#[cfg(unix)]
+pub struct SocketAddrUnix {
+    pub path: Option<PathBuf>,
+    pub abstract_name: Option<Vec<u8>>,
+}
+
+/// IPv4 address
+pub struct Ipv4Addr {
+    octets: [u8; 4],
+}
+
+impl Ipv4Addr {
+    pub const LOCALHOST: Ipv4Addr = Ipv4Addr { octets: [127, 0, 0, 1] };
+    pub const UNSPECIFIED: Ipv4Addr = Ipv4Addr { octets: [0, 0, 0, 0] };
+    pub const BROADCAST: Ipv4Addr = Ipv4Addr { octets: [255, 255, 255, 255] };
+
+    pub fn new(a: u8, b: u8, c: u8, d: u8) -> Self {
+        Self { octets: [a, b, c, d] }
+    }
+
+    pub fn octets(self: &Self) -> [u8; 4] {
+        self.octets
+    }
+
+    pub fn is_loopback(self: &Self) -> bool {
+        self.octets[0] == 127
+    }
+
+    pub fn is_private(self: &Self) -> bool {
+        match self.octets {
+            [10, ..] => true,
+            [172, b, ..] if b >= 16 && b <= 31 => true,
+            [192, 168, ..] => true,
+            _ => false,
+        }
+    }
+
+    pub fn is_broadcast(self: &Self) -> bool {
+        self.octets == [255, 255, 255, 255]
+    }
+
+    pub fn is_multicast(self: &Self) -> bool {
+        self.octets[0] >= 224 && self.octets[0] <= 239
+    }
+
+    pub fn to_ipv6_mapped(self: &Self) -> Ipv6Addr {
+        Ipv6Addr {
+            octets: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff,
+                     self.octets[0], self.octets[1], self.octets[2], self.octets[3]]
+        }
+    }
+}
+
+/// IPv6 address
+pub struct Ipv6Addr {
+    octets: [u8; 16],
+}
+
+impl Ipv6Addr {
+    pub const LOCALHOST: Ipv6Addr = Ipv6Addr {
+        octets: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]
+    };
+    pub const UNSPECIFIED: Ipv6Addr = Ipv6Addr {
+        octets: [0; 16]
+    };
+
+    pub fn new(a: u16, b: u16, c: u16, d: u16, e: u16, f: u16, g: u16, h: u16) -> Self {
+        Self {
+            octets: [
+                (a >> 8) as u8, a as u8,
+                (b >> 8) as u8, b as u8,
+                (c >> 8) as u8, c as u8,
+                (d >> 8) as u8, d as u8,
+                (e >> 8) as u8, e as u8,
+                (f >> 8) as u8, f as u8,
+                (g >> 8) as u8, g as u8,
+                (h >> 8) as u8, h as u8,
+            ]
+        }
+    }
+
+    pub fn octets(self: &Self) -> [u8; 16] {
+        self.octets
+    }
+
+    pub fn segments(self: &Self) -> [u16; 8] {
+        [
+            u16::from_be_bytes([self.octets[0], self.octets[1]]),
+            u16::from_be_bytes([self.octets[2], self.octets[3]]),
+            u16::from_be_bytes([self.octets[4], self.octets[5]]),
+            u16::from_be_bytes([self.octets[6], self.octets[7]]),
+            u16::from_be_bytes([self.octets[8], self.octets[9]]),
+            u16::from_be_bytes([self.octets[10], self.octets[11]]),
+            u16::from_be_bytes([self.octets[12], self.octets[13]]),
+            u16::from_be_bytes([self.octets[14], self.octets[15]]),
+        ]
+    }
+
+    pub fn is_loopback(self: &Self) -> bool {
+        self.octets == [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]
+    }
+
+    pub fn is_multicast(self: &Self) -> bool {
+        self.octets[0] == 0xff
+    }
+
+    pub fn to_ipv4(self: &Self) -> Option<Ipv4Addr> {
+        match self.octets {
+            [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff, a, b, c, d] => {
+                Some(Ipv4Addr::new(a, b, c, d))
+            }
+            _ => None,
+        }
+    }
+}
+
+/// TCP listener for accepting connections
+pub struct TcpListener {
+    socket: RawSocket,
+    local_addr: SocketAddr,
+}
+
+impl TcpListener {
+    /// Bind to an address
+    pub fn bind(addr: SocketAddr) -> Result<Self, IoError> {
+        let socket = RawSocket::new(addr.socket_type(), SocketProtocol::Tcp)?;
+        socket.set_reuse_addr(true)?;
+        socket.bind(&addr)?;
+        socket.listen(128)?;
+
+        Ok(Self {
+            socket,
+            local_addr: addr,
+        })
+    }
+
+    /// Accept a new connection
+    pub fn accept(self: &Self) -> Result<(TcpStream, SocketAddr), IoError> {
+        let (client_socket, client_addr) = self.socket.accept()?;
+        Ok((TcpStream { socket: client_socket }, client_addr))
+    }
+
+    /// Accept connections asynchronously
+    pub async fn accept_async(self: &Self) -> Result<(TcpStream, SocketAddr), IoError> {
+        let (client_socket, client_addr) = self.socket.accept_async().await?;
+        Ok((TcpStream { socket: client_socket }, client_addr))
+    }
+
+    /// Get local address
+    pub fn local_addr(self: &Self) -> &SocketAddr {
+        &self.local_addr
+    }
+
+    /// Set non-blocking mode
+    pub fn set_nonblocking(self: &Self, nonblocking: bool) -> Result<(), IoError> {
+        self.socket.set_nonblocking(nonblocking)
+    }
+
+    /// Get socket TTL
+    pub fn ttl(self: &Self) -> Result<u32, IoError> {
+        self.socket.ttl()
+    }
+
+    /// Set socket TTL
+    pub fn set_ttl(self: &Self, ttl: u32) -> Result<(), IoError> {
+        self.socket.set_ttl(ttl)
+    }
+
+    /// Iterator over incoming connections
+    pub fn incoming(self: &Self) -> Incoming<'_> {
+        Incoming { listener: self }
+    }
+}
+
+/// Iterator over incoming TCP connections
+pub struct Incoming<'a> {
+    listener: &'a TcpListener,
+}
+
+impl<'a> Iterator for Incoming<'a> {
+    type Item = Result<TcpStream, IoError>;
+
+    fn next(self: &mut Self) -> Option<Self::Item> {
+        Some(self.listener.accept().map(|(stream, _)| stream))
+    }
+}
+
+/// TCP stream for bidirectional communication
+pub struct TcpStream {
+    socket: RawSocket,
+}
+
+impl TcpStream {
+    /// Connect to a remote address
+    pub fn connect(addr: SocketAddr) -> Result<Self, IoError> {
+        let socket = RawSocket::new(addr.socket_type(), SocketProtocol::Tcp)?;
+        socket.connect(&addr)?;
+        Ok(Self { socket })
+    }
+
+    /// Connect with timeout
+    pub fn connect_timeout(addr: SocketAddr, timeout: Duration) -> Result<Self, IoError> {
+        let socket = RawSocket::new(addr.socket_type(), SocketProtocol::Tcp)?;
+        socket.set_nonblocking(true)?;
+
+        match socket.connect(&addr) {
+            Ok(()) => {}
+            Err(IoError::WouldBlock) | Err(IoError::InProgress) => {
+                // Wait for connection with timeout
+                socket.wait_writable(timeout)?;
+                socket.check_error()?;
+            }
+            Err(e) => return Err(e),
+        }
+
+        socket.set_nonblocking(false)?;
+        Ok(Self { socket })
+    }
+
+    /// Connect asynchronously
+    pub async fn connect_async(addr: SocketAddr) -> Result<Self, IoError> {
+        let socket = RawSocket::new(addr.socket_type(), SocketProtocol::Tcp)?;
+        socket.connect_async(&addr).await?;
+        Ok(Self { socket })
+    }
+
+    /// Get peer address
+    pub fn peer_addr(self: &Self) -> Result<SocketAddr, IoError> {
+        self.socket.peer_addr()
+    }
+
+    /// Get local address
+    pub fn local_addr(self: &Self) -> Result<SocketAddr, IoError> {
+        self.socket.local_addr()
+    }
+
+    /// Shutdown read, write, or both
+    pub fn shutdown(self: &Self, how: Shutdown) -> Result<(), IoError> {
+        self.socket.shutdown(how)
+    }
+
+    /// Set read timeout
+    pub fn set_read_timeout(self: &Self, timeout: Option<Duration>) -> Result<(), IoError> {
+        self.socket.set_read_timeout(timeout)
+    }
+
+    /// Set write timeout
+    pub fn set_write_timeout(self: &Self, timeout: Option<Duration>) -> Result<(), IoError> {
+        self.socket.set_write_timeout(timeout)
+    }
+
+    /// Get read timeout
+    pub fn read_timeout(self: &Self) -> Result<Option<Duration>, IoError> {
+        self.socket.read_timeout()
+    }
+
+    /// Get write timeout
+    pub fn write_timeout(self: &Self) -> Result<Option<Duration>, IoError> {
+        self.socket.write_timeout()
+    }
+
+    /// Set TCP nodelay (disable Nagle's algorithm)
+    pub fn set_nodelay(self: &Self, nodelay: bool) -> Result<(), IoError> {
+        self.socket.set_tcp_nodelay(nodelay)
+    }
+
+    /// Get TCP nodelay setting
+    pub fn nodelay(self: &Self) -> Result<bool, IoError> {
+        self.socket.tcp_nodelay()
+    }
+
+    /// Set non-blocking mode
+    pub fn set_nonblocking(self: &Self, nonblocking: bool) -> Result<(), IoError> {
+        self.socket.set_nonblocking(nonblocking)
+    }
+
+    /// Set TCP keepalive
+    pub fn set_keepalive(self: &Self, keepalive: Option<TcpKeepalive>) -> Result<(), IoError> {
+        self.socket.set_tcp_keepalive(keepalive)
+    }
+
+    /// Clone the stream (creates a new handle to same connection)
+    pub fn try_clone(self: &Self) -> Result<Self, IoError> {
+        Ok(Self {
+            socket: self.socket.try_clone()?,
+        })
+    }
+
+    /// Peek at incoming data without consuming it
+    pub fn peek(self: &Self, buf: &mut [u8]) -> Result<usize, IoError> {
+        self.socket.peek(buf)
+    }
+}
+
+impl Read for TcpStream {
+    fn read(self: &mut Self, buf: &mut [u8]) -> Result<usize, IoError> {
+        self.socket.recv(buf)
+    }
+}
+
+impl Write for TcpStream {
+    fn write(self: &mut Self, buf: &[u8]) -> Result<usize, IoError> {
+        self.socket.send(buf)
+    }
+
+    fn flush(self: &mut Self) -> Result<(), IoError> {
+        Ok(()) // TCP is unbuffered at this level
+    }
+}
+
+impl AsyncRead for TcpStream {
+    async fn read(self: &mut Self, buf: &mut [u8]) -> Result<usize, IoError> {
+        self.socket.recv_async(buf).await
+    }
+}
+
+impl AsyncWrite for TcpStream {
+    async fn write(self: &mut Self, buf: &[u8]) -> Result<usize, IoError> {
+        self.socket.send_async(buf).await
+    }
+
+    async fn flush(self: &mut Self) -> Result<(), IoError> {
+        Ok(())
+    }
+
+    async fn shutdown(self: &mut Self) -> Result<(), IoError> {
+        self.socket.shutdown(Shutdown::Write)
+    }
+}
+
+/// TCP keepalive configuration
+pub struct TcpKeepalive {
+    /// Time before sending first probe
+    pub time: Duration,
+    /// Interval between probes
+    pub interval: Duration,
+    /// Number of probes before giving up
+    pub retries: u32,
+}
+
+/// Shutdown mode
+pub enum Shutdown {
+    /// Shutdown read side
+    Read,
+    /// Shutdown write side
+    Write,
+    /// Shutdown both sides
+    Both,
+}
+
+/// UDP socket
+pub struct UdpSocket {
+    socket: RawSocket,
+}
+
+impl UdpSocket {
+    /// Bind to a local address
+    pub fn bind(addr: SocketAddr) -> Result<Self, IoError> {
+        let socket = RawSocket::new(addr.socket_type(), SocketProtocol::Udp)?;
+        socket.set_reuse_addr(true)?;
+        socket.bind(&addr)?;
+        Ok(Self { socket })
+    }
+
+    /// Connect to a remote address (filters incoming and sets default destination)
+    pub fn connect(self: &Self, addr: SocketAddr) -> Result<(), IoError> {
+        self.socket.connect(&addr)
+    }
+
+    /// Send data to connected address
+    pub fn send(self: &Self, buf: &[u8]) -> Result<usize, IoError> {
+        self.socket.send(buf)
+    }
+
+    /// Receive data from connected address
+    pub fn recv(self: &Self, buf: &mut [u8]) -> Result<usize, IoError> {
+        self.socket.recv(buf)
+    }
+
+    /// Send to specific address
+    pub fn send_to(self: &Self, buf: &[u8], addr: SocketAddr) -> Result<usize, IoError> {
+        self.socket.send_to(buf, &addr)
+    }
+
+    /// Receive from any address
+    pub fn recv_from(self: &Self, buf: &mut [u8]) -> Result<(usize, SocketAddr), IoError> {
+        self.socket.recv_from(buf)
+    }
+
+    /// Peek at incoming data
+    pub fn peek(self: &Self, buf: &mut [u8]) -> Result<usize, IoError> {
+        self.socket.peek(buf)
+    }
+
+    /// Peek at incoming data with address
+    pub fn peek_from(self: &Self, buf: &mut [u8]) -> Result<(usize, SocketAddr), IoError> {
+        self.socket.peek_from(buf)
+    }
+
+    /// Get local address
+    pub fn local_addr(self: &Self) -> Result<SocketAddr, IoError> {
+        self.socket.local_addr()
+    }
+
+    /// Get peer address (if connected)
+    pub fn peer_addr(self: &Self) -> Result<SocketAddr, IoError> {
+        self.socket.peer_addr()
+    }
+
+    /// Set non-blocking mode
+    pub fn set_nonblocking(self: &Self, nonblocking: bool) -> Result<(), IoError> {
+        self.socket.set_nonblocking(nonblocking)
+    }
+
+    /// Set broadcast enabled
+    pub fn set_broadcast(self: &Self, broadcast: bool) -> Result<(), IoError> {
+        self.socket.set_broadcast(broadcast)
+    }
+
+    /// Get broadcast setting
+    pub fn broadcast(self: &Self) -> Result<bool, IoError> {
+        self.socket.broadcast()
+    }
+
+    /// Join multicast group
+    pub fn join_multicast_v4(self: &Self, multiaddr: Ipv4Addr, interface: Ipv4Addr) -> Result<(), IoError> {
+        self.socket.join_multicast_v4(&multiaddr, &interface)
+    }
+
+    /// Leave multicast group
+    pub fn leave_multicast_v4(self: &Self, multiaddr: Ipv4Addr, interface: Ipv4Addr) -> Result<(), IoError> {
+        self.socket.leave_multicast_v4(&multiaddr, &interface)
+    }
+
+    /// Set multicast TTL
+    pub fn set_multicast_ttl_v4(self: &Self, ttl: u32) -> Result<(), IoError> {
+        self.socket.set_multicast_ttl_v4(ttl)
+    }
+
+    /// Set multicast loopback
+    pub fn set_multicast_loop_v4(self: &Self, enabled: bool) -> Result<(), IoError> {
+        self.socket.set_multicast_loop_v4(enabled)
+    }
+
+    /// Async send
+    pub async fn send_async(self: &Self, buf: &[u8]) -> Result<usize, IoError> {
+        self.socket.send_async(buf).await
+    }
+
+    /// Async receive
+    pub async fn recv_async(self: &Self, buf: &mut [u8]) -> Result<usize, IoError> {
+        self.socket.recv_async(buf).await
+    }
+
+    /// Async send to
+    pub async fn send_to_async(self: &Self, buf: &[u8], addr: SocketAddr) -> Result<usize, IoError> {
+        self.socket.send_to_async(buf, &addr).await
+    }
+
+    /// Async receive from
+    pub async fn recv_from_async(self: &Self, buf: &mut [u8]) -> Result<(usize, SocketAddr), IoError> {
+        self.socket.recv_from_async(buf).await
+    }
+}
+
+/// Unix domain socket stream (Unix only)
+#[cfg(unix)]
+pub struct UnixStream {
+    socket: RawSocket,
+}
+
+#[cfg(unix)]
+impl UnixStream {
+    /// Connect to a Unix socket path
+    pub fn connect<P: AsRef<Path>>(path: P) -> Result<Self, IoError> {
+        let socket = RawSocket::new_unix(SocketType::Stream)?;
+        socket.connect_unix(path.as_ref())?;
+        Ok(Self { socket })
+    }
+
+    /// Create a connected pair of Unix sockets
+    pub fn pair() -> Result<(Self, Self), IoError> {
+        let (s1, s2) = RawSocket::socketpair(SocketType::Stream)?;
+        Ok((Self { socket: s1 }, Self { socket: s2 }))
+    }
+
+    /// Get peer credentials (PID, UID, GID)
+    pub fn peer_cred(self: &Self) -> Result<UnixCredentials, IoError> {
+        self.socket.peer_cred()
+    }
+}
+
+#[cfg(unix)]
+impl Read for UnixStream {
+    fn read(self: &mut Self, buf: &mut [u8]) -> Result<usize, IoError> {
+        self.socket.recv(buf)
+    }
+}
+
+#[cfg(unix)]
+impl Write for UnixStream {
+    fn write(self: &mut Self, buf: &[u8]) -> Result<usize, IoError> {
+        self.socket.send(buf)
+    }
+
+    fn flush(self: &mut Self) -> Result<(), IoError> {
+        Ok(())
+    }
+}
+
+/// Unix socket credentials
+#[cfg(unix)]
+pub struct UnixCredentials {
+    pub pid: u32,
+    pub uid: u32,
+    pub gid: u32,
+}
+
+/// Unix domain socket listener
+#[cfg(unix)]
+pub struct UnixListener {
+    socket: RawSocket,
+    path: PathBuf,
+}
+
+#[cfg(unix)]
+impl UnixListener {
+    /// Bind to a path
+    pub fn bind<P: AsRef<Path>>(path: P) -> Result<Self, IoError> {
+        let socket = RawSocket::new_unix(SocketType::Stream)?;
+        socket.bind_unix(path.as_ref())?;
+        socket.listen(128)?;
+        Ok(Self {
+            socket,
+            path: path.as_ref().to_path_buf(),
+        })
+    }
+
+    /// Accept a connection
+    pub fn accept(self: &Self) -> Result<(UnixStream, SocketAddrUnix), IoError> {
+        let (client, addr) = self.socket.accept_unix()?;
+        Ok((UnixStream { socket: client }, addr))
+    }
+}
+
+#[cfg(unix)]
+impl Drop for UnixListener {
+    fn drop(self: &mut Self) {
+        // Clean up socket file
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+// =============================================================================
+// TLS/SSL Support
+// =============================================================================
+
+/// TLS error types
+pub enum TlsError {
+    /// Certificate verification failed
+    CertificateVerification(String),
+    /// Handshake failed
+    HandshakeFailed(String),
+    /// Protocol error
+    ProtocolError(String),
+    /// Certificate not found
+    CertificateNotFound,
+    /// Private key not found
+    PrivateKeyNotFound,
+    /// Invalid certificate format
+    InvalidCertificate(String),
+    /// Invalid private key format
+    InvalidPrivateKey(String),
+    /// Hostname verification failed
+    HostnameVerification(String),
+    /// Connection closed unexpectedly
+    ConnectionClosed,
+    /// Alert received from peer
+    AlertReceived(TlsAlert),
+}
+
+/// TLS alert codes
+pub enum TlsAlert {
+    CloseNotify,
+    UnexpectedMessage,
+    BadRecordMac,
+    RecordOverflow,
+    HandshakeFailure,
+    BadCertificate,
+    UnsupportedCertificate,
+    CertificateRevoked,
+    CertificateExpired,
+    CertificateUnknown,
+    IllegalParameter,
+    UnknownCa,
+    AccessDenied,
+    DecodeError,
+    DecryptError,
+    ProtocolVersion,
+    InsufficientSecurity,
+    InternalError,
+    InappropriateFallback,
+    UserCanceled,
+    MissingExtension,
+    UnsupportedExtension,
+    UnrecognizedName,
+    BadCertificateStatusResponse,
+    Unknown(u8),
+}
+
+/// TLS protocol version
+pub enum TlsVersion {
+    /// TLS 1.2
+    Tls12,
+    /// TLS 1.3
+    Tls13,
+}
+
+/// TLS connector for client connections
+pub struct TlsConnector {
+    /// Root certificates
+    root_certs: Vec<Certificate>,
+    /// Client certificate and key (for mTLS)
+    client_cert: Option<(Certificate, PrivateKey)>,
+    /// Minimum TLS version
+    min_version: TlsVersion,
+    /// Maximum TLS version
+    max_version: TlsVersion,
+    /// ALPN protocols
+    alpn_protocols: Vec<String>,
+    /// Verify server hostname
+    verify_hostname: bool,
+    /// Verify server certificate
+    verify_cert: bool,
+    /// Session ticket resumption
+    enable_tickets: bool,
+    /// SNI extension
+    enable_sni: bool,
+}
+
+impl TlsConnector {
+    /// Create a new TLS connector with system root certificates
+    pub fn new() -> Result<Self, TlsError> {
+        Ok(Self {
+            root_certs: intrinsic::load_system_root_certs()?,
+            client_cert: None,
+            min_version: TlsVersion::Tls12,
+            max_version: TlsVersion::Tls13,
+            alpn_protocols: Vec::new(),
+            verify_hostname: true,
+            verify_cert: true,
+            enable_tickets: true,
+            enable_sni: true,
+        })
+    }
+
+    /// Create connector with custom root certificates
+    pub fn with_root_certs(certs: Vec<Certificate>) -> Self {
+        Self {
+            root_certs: certs,
+            client_cert: None,
+            min_version: TlsVersion::Tls12,
+            max_version: TlsVersion::Tls13,
+            alpn_protocols: Vec::new(),
+            verify_hostname: true,
+            verify_cert: true,
+            enable_tickets: true,
+            enable_sni: true,
+        }
+    }
+
+    /// Add root certificate
+    pub fn add_root_cert(self: &mut Self, cert: Certificate) {
+        self.root_certs.push(cert);
+    }
+
+    /// Set client certificate for mTLS
+    pub fn set_client_cert(self: &mut Self, cert: Certificate, key: PrivateKey) {
+        self.client_cert = Some((cert, key));
+    }
+
+    /// Set minimum TLS version
+    pub fn set_min_version(self: &mut Self, version: TlsVersion) {
+        self.min_version = version;
+    }
+
+    /// Set ALPN protocols
+    pub fn set_alpn_protocols(self: &mut Self, protocols: Vec<String>) {
+        self.alpn_protocols = protocols;
+    }
+
+    /// Disable hostname verification (DANGEROUS)
+    pub fn danger_disable_hostname_verification(self: &mut Self) {
+        self.verify_hostname = false;
+    }
+
+    /// Disable certificate verification (DANGEROUS)
+    pub fn danger_disable_cert_verification(self: &mut Self) {
+        self.verify_cert = false;
+    }
+
+    /// Connect to a server
+    pub fn connect<S: Read + Write>(self: &Self, hostname: &str, stream: S) -> Result<TlsStream<S>, TlsError> {
+        let mut tls = TlsState::new_client(self, hostname)?;
+        let mut stream = TlsStream {
+            inner: stream,
+            state: tls,
+            read_buf: Vec::new(),
+            write_buf: Vec::new(),
+        };
+
+        // Perform handshake
+        stream.handshake()?;
+
+        Ok(stream)
+    }
+
+    /// Connect asynchronously
+    pub async fn connect_async<S: AsyncRead + AsyncWrite>(
+        self: &Self,
+        hostname: &str,
+        stream: S
+    ) -> Result<TlsStream<S>, TlsError> {
+        let tls = TlsState::new_client(self, hostname)?;
+        let mut stream = TlsStream {
+            inner: stream,
+            state: tls,
+            read_buf: Vec::new(),
+            write_buf: Vec::new(),
+        };
+
+        // Perform async handshake
+        stream.handshake_async().await?;
+
+        Ok(stream)
+    }
+}
+
+/// TLS acceptor for server connections
+pub struct TlsAcceptor {
+    /// Server certificate chain
+    cert_chain: Vec<Certificate>,
+    /// Server private key
+    private_key: PrivateKey,
+    /// Client CA certificates (for mTLS)
+    client_ca_certs: Vec<Certificate>,
+    /// Require client certificate
+    require_client_cert: bool,
+    /// Minimum TLS version
+    min_version: TlsVersion,
+    /// Maximum TLS version
+    max_version: TlsVersion,
+    /// ALPN protocols
+    alpn_protocols: Vec<String>,
+    /// Session ticket key
+    ticket_key: Option<[u8; 48]>,
+}
+
+impl TlsAcceptor {
+    /// Create a new TLS acceptor
+    pub fn new(cert_chain: Vec<Certificate>, private_key: PrivateKey) -> Self {
+        Self {
+            cert_chain,
+            private_key,
+            client_ca_certs: Vec::new(),
+            require_client_cert: false,
+            min_version: TlsVersion::Tls12,
+            max_version: TlsVersion::Tls13,
+            alpn_protocols: Vec::new(),
+            ticket_key: None,
+        }
+    }
+
+    /// Set client CA certificates for mTLS
+    pub fn set_client_ca_certs(self: &mut Self, certs: Vec<Certificate>) {
+        self.client_ca_certs = certs;
+    }
+
+    /// Require client certificate
+    pub fn require_client_cert(self: &mut Self, require: bool) {
+        self.require_client_cert = require;
+    }
+
+    /// Set ALPN protocols
+    pub fn set_alpn_protocols(self: &mut Self, protocols: Vec<String>) {
+        self.alpn_protocols = protocols;
+    }
+
+    /// Set session ticket key (for session resumption across servers)
+    pub fn set_ticket_key(self: &mut Self, key: [u8; 48]) {
+        self.ticket_key = Some(key);
+    }
+
+    /// Accept a TLS connection
+    pub fn accept<S: Read + Write>(self: &Self, stream: S) -> Result<TlsStream<S>, TlsError> {
+        let tls = TlsState::new_server(self)?;
+        let mut stream = TlsStream {
+            inner: stream,
+            state: tls,
+            read_buf: Vec::new(),
+            write_buf: Vec::new(),
+        };
+
+        // Perform handshake
+        stream.handshake()?;
+
+        Ok(stream)
+    }
+
+    /// Accept asynchronously
+    pub async fn accept_async<S: AsyncRead + AsyncWrite>(
+        self: &Self,
+        stream: S
+    ) -> Result<TlsStream<S>, TlsError> {
+        let tls = TlsState::new_server(self)?;
+        let mut stream = TlsStream {
+            inner: stream,
+            state: tls,
+            read_buf: Vec::new(),
+            write_buf: Vec::new(),
+        };
+
+        // Perform async handshake
+        stream.handshake_async().await?;
+
+        Ok(stream)
+    }
+}
+
+/// X.509 certificate
+pub struct Certificate {
+    der: Vec<u8>,
+}
+
+impl Certificate {
+    /// Parse certificate from PEM
+    pub fn from_pem(pem: &[u8]) -> Result<Vec<Self>, TlsError> {
+        intrinsic::parse_pem_certs(pem)
+    }
+
+    /// Parse certificate from DER
+    pub fn from_der(der: Vec<u8>) -> Result<Self, TlsError> {
+        // Validate DER encoding
+        intrinsic::validate_cert_der(&der)?;
+        Ok(Self { der })
+    }
+
+    /// Get DER encoding
+    pub fn as_der(self: &Self) -> &[u8] {
+        &self.der
+    }
+
+    /// Get subject name
+    pub fn subject(self: &Self) -> Result<String, TlsError> {
+        intrinsic::cert_subject(&self.der)
+    }
+
+    /// Get issuer name
+    pub fn issuer(self: &Self) -> Result<String, TlsError> {
+        intrinsic::cert_issuer(&self.der)
+    }
+
+    /// Get not-before timestamp
+    pub fn not_before(self: &Self) -> Result<DateTime, TlsError> {
+        intrinsic::cert_not_before(&self.der)
+    }
+
+    /// Get not-after timestamp
+    pub fn not_after(self: &Self) -> Result<DateTime, TlsError> {
+        intrinsic::cert_not_after(&self.der)
+    }
+
+    /// Get serial number
+    pub fn serial_number(self: &Self) -> Result<Vec<u8>, TlsError> {
+        intrinsic::cert_serial(&self.der)
+    }
+
+    /// Check if certificate is valid at given time
+    pub fn is_valid_at(self: &Self, time: DateTime) -> Result<bool, TlsError> {
+        let not_before = self.not_before()?;
+        let not_after = self.not_after()?;
+        Ok(time >= not_before && time <= not_after)
+    }
+}
+
+/// Private key
+pub struct PrivateKey {
+    der: Vec<u8>,
+    algorithm: KeyAlgorithm,
+}
+
+impl PrivateKey {
+    /// Parse private key from PEM
+    pub fn from_pem(pem: &[u8]) -> Result<Self, TlsError> {
+        intrinsic::parse_pem_private_key(pem)
+    }
+
+    /// Parse private key from DER (PKCS#8 format)
+    pub fn from_der(der: Vec<u8>) -> Result<Self, TlsError> {
+        let algorithm = intrinsic::detect_key_algorithm(&der)?;
+        Ok(Self { der, algorithm })
+    }
+
+    /// Get algorithm
+    pub fn algorithm(self: &Self) -> KeyAlgorithm {
+        self.algorithm
+    }
+}
+
+/// Key algorithm
+pub enum KeyAlgorithm {
+    Rsa,
+    EcdsaP256,
+    EcdsaP384,
+    Ed25519,
+}
+
+/// TLS stream wrapper
+pub struct TlsStream<S> {
+    inner: S,
+    state: TlsState,
+    read_buf: Vec<u8>,
+    write_buf: Vec<u8>,
+}
+
+impl<S: Read + Write> TlsStream<S> {
+    /// Perform TLS handshake
+    fn handshake(self: &mut Self) -> Result<(), TlsError> {
+        loop {
+            match self.state.handshake_step()? {
+                HandshakeStatus::Complete => break,
+                HandshakeStatus::NeedRead => {
+                    let mut buf = [0u8; 16384];
+                    let n = self.inner.read(&mut buf).map_err(|e| {
+                        TlsError::HandshakeFailed(e.message())
+                    })?;
+                    if n == 0 {
+                        return Err(TlsError::ConnectionClosed);
+                    }
+                    self.state.receive_bytes(&buf[..n])?;
+                }
+                HandshakeStatus::NeedWrite(data) => {
+                    self.inner.write_all(&data).map_err(|e| {
+                        TlsError::HandshakeFailed(e.message())
+                    })?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Get negotiated ALPN protocol
+    pub fn alpn_protocol(self: &Self) -> Option<&str> {
+        self.state.alpn_protocol()
+    }
+
+    /// Get negotiated TLS version
+    pub fn tls_version(self: &Self) -> TlsVersion {
+        self.state.version()
+    }
+
+    /// Get peer certificate (if any)
+    pub fn peer_certificate(self: &Self) -> Option<&Certificate> {
+        self.state.peer_certificate()
+    }
+
+    /// Get the underlying stream
+    pub fn get_ref(self: &Self) -> &S {
+        &self.inner
+    }
+
+    /// Get mutable reference to underlying stream
+    pub fn get_mut(self: &mut Self) -> &mut S {
+        &mut self.inner
+    }
+
+    /// Consume and return the underlying stream
+    pub fn into_inner(self) -> S {
+        self.inner
+    }
+}
+
+impl<S: Read + Write> Read for TlsStream<S> {
+    fn read(self: &mut Self, buf: &mut [u8]) -> Result<usize, IoError> {
+        // First, drain any buffered decrypted data
+        if !self.read_buf.is_empty() {
+            let n = buf.len().min(self.read_buf.len());
+            buf[..n].copy_from_slice(&self.read_buf[..n]);
+            self.read_buf.drain(..n);
+            return Ok(n);
+        }
+
+        // Read encrypted data from underlying stream
+        let mut encrypted = [0u8; 16384];
+        let n = self.inner.read(&mut encrypted)?;
+        if n == 0 {
+            return Ok(0);
+        }
+
+        // Decrypt
+        let decrypted = self.state.decrypt(&encrypted[..n])
+            .map_err(|e| IoError::TlsError(e))?;
+
+        // Return what we can, buffer the rest
+        let copy_len = buf.len().min(decrypted.len());
+        buf[..copy_len].copy_from_slice(&decrypted[..copy_len]);
+        if decrypted.len() > copy_len {
+            self.read_buf.extend_from_slice(&decrypted[copy_len..]);
+        }
+
+        Ok(copy_len)
+    }
+}
+
+impl<S: Read + Write> Write for TlsStream<S> {
+    fn write(self: &mut Self, buf: &[u8]) -> Result<usize, IoError> {
+        // Encrypt and write
+        let encrypted = self.state.encrypt(buf)
+            .map_err(|e| IoError::TlsError(e))?;
+        self.inner.write_all(&encrypted)?;
+        Ok(buf.len())
+    }
+
+    fn flush(self: &mut Self) -> Result<(), IoError> {
+        self.inner.flush()
+    }
+}
+
+impl<S: AsyncRead + AsyncWrite> TlsStream<S> {
+    /// Async handshake
+    async fn handshake_async(self: &mut Self) -> Result<(), TlsError> {
+        loop {
+            match self.state.handshake_step()? {
+                HandshakeStatus::Complete => break,
+                HandshakeStatus::NeedRead => {
+                    let mut buf = [0u8; 16384];
+                    let n = self.inner.read(&mut buf).await.map_err(|e| {
+                        TlsError::HandshakeFailed(e.message())
+                    })?;
+                    if n == 0 {
+                        return Err(TlsError::ConnectionClosed);
+                    }
+                    self.state.receive_bytes(&buf[..n])?;
+                }
+                HandshakeStatus::NeedWrite(data) => {
+                    self.inner.write_all(&data).await.map_err(|e| {
+                        TlsError::HandshakeFailed(e.message())
+                    })?;
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+impl<S: AsyncRead + AsyncWrite> AsyncRead for TlsStream<S> {
+    async fn read(self: &mut Self, buf: &mut [u8]) -> Result<usize, IoError> {
+        // First, drain any buffered decrypted data
+        if !self.read_buf.is_empty() {
+            let n = buf.len().min(self.read_buf.len());
+            buf[..n].copy_from_slice(&self.read_buf[..n]);
+            self.read_buf.drain(..n);
+            return Ok(n);
+        }
+
+        // Read encrypted data
+        let mut encrypted = [0u8; 16384];
+        let n = self.inner.read(&mut encrypted).await?;
+        if n == 0 {
+            return Ok(0);
+        }
+
+        // Decrypt
+        let decrypted = self.state.decrypt(&encrypted[..n])
+            .map_err(|e| IoError::TlsError(e))?;
+
+        let copy_len = buf.len().min(decrypted.len());
+        buf[..copy_len].copy_from_slice(&decrypted[..copy_len]);
+        if decrypted.len() > copy_len {
+            self.read_buf.extend_from_slice(&decrypted[copy_len..]);
+        }
+
+        Ok(copy_len)
+    }
+}
+
+impl<S: AsyncRead + AsyncWrite> AsyncWrite for TlsStream<S> {
+    async fn write(self: &mut Self, buf: &[u8]) -> Result<usize, IoError> {
+        let encrypted = self.state.encrypt(buf)
+            .map_err(|e| IoError::TlsError(e))?;
+        self.inner.write_all(&encrypted).await?;
+        Ok(buf.len())
+    }
+
+    async fn flush(self: &mut Self) -> Result<(), IoError> {
+        self.inner.flush().await
+    }
+
+    async fn shutdown(self: &mut Self) -> Result<(), IoError> {
+        // Send close_notify
+        let alert = self.state.close_notify()
+            .map_err(|e| IoError::TlsError(e))?;
+        self.inner.write_all(&alert).await?;
+        self.inner.shutdown().await
+    }
+}
+
+/// Internal TLS state machine
+struct TlsState {
+    // Internal state - platform specific implementation
+    inner: intrinsic::TlsStateInner,
+}
+
+impl TlsState {
+    fn new_client(connector: &TlsConnector, hostname: &str) -> Result<Self, TlsError> {
+        Ok(Self {
+            inner: intrinsic::tls_client_state(connector, hostname)?,
+        })
+    }
+
+    fn new_server(acceptor: &TlsAcceptor) -> Result<Self, TlsError> {
+        Ok(Self {
+            inner: intrinsic::tls_server_state(acceptor)?,
+        })
+    }
+
+    fn handshake_step(self: &mut Self) -> Result<HandshakeStatus, TlsError> {
+        intrinsic::tls_handshake_step(&mut self.inner)
+    }
+
+    fn receive_bytes(self: &mut Self, data: &[u8]) -> Result<(), TlsError> {
+        intrinsic::tls_receive_bytes(&mut self.inner, data)
+    }
+
+    fn encrypt(self: &mut Self, plaintext: &[u8]) -> Result<Vec<u8>, TlsError> {
+        intrinsic::tls_encrypt(&mut self.inner, plaintext)
+    }
+
+    fn decrypt(self: &mut Self, ciphertext: &[u8]) -> Result<Vec<u8>, TlsError> {
+        intrinsic::tls_decrypt(&mut self.inner, ciphertext)
+    }
+
+    fn close_notify(self: &mut Self) -> Result<Vec<u8>, TlsError> {
+        intrinsic::tls_close_notify(&mut self.inner)
+    }
+
+    fn alpn_protocol(self: &Self) -> Option<&str> {
+        intrinsic::tls_alpn_protocol(&self.inner)
+    }
+
+    fn version(self: &Self) -> TlsVersion {
+        intrinsic::tls_version(&self.inner)
+    }
+
+    fn peer_certificate(self: &Self) -> Option<&Certificate> {
+        intrinsic::tls_peer_certificate(&self.inner)
+    }
+}
+
+/// Handshake status
+enum HandshakeStatus {
+    /// Handshake complete
+    Complete,
+    /// Need to read from underlying stream
+    NeedRead,
+    /// Need to write data to underlying stream
+    NeedWrite(Vec<u8>),
+}
+
+// =============================================================================
+// Async I/O Runtime Integration
+// =============================================================================
+
+/// Async I/O poller (epoll/kqueue/IOCP abstraction)
+pub struct Poller {
+    inner: intrinsic::PollerInner,
+}
+
+impl Poller {
+    /// Create a new poller
+    pub fn new() -> Result<Self, IoError> {
+        Ok(Self {
+            inner: intrinsic::poller_new()?,
+        })
+    }
+
+    /// Register a source for events
+    pub fn register(self: &Self, source: &impl Source, token: usize, interests: Interest) -> Result<(), IoError> {
+        intrinsic::poller_register(&self.inner, source.raw_source(), token, interests)
+    }
+
+    /// Modify registration
+    pub fn modify(self: &Self, source: &impl Source, token: usize, interests: Interest) -> Result<(), IoError> {
+        intrinsic::poller_modify(&self.inner, source.raw_source(), token, interests)
+    }
+
+    /// Deregister a source
+    pub fn deregister(self: &Self, source: &impl Source) -> Result<(), IoError> {
+        intrinsic::poller_deregister(&self.inner, source.raw_source())
+    }
+
+    /// Poll for events
+    pub fn poll(self: &Self, events: &mut Events, timeout: Option<Duration>) -> Result<usize, IoError> {
+        intrinsic::poller_poll(&self.inner, events, timeout)
+    }
+
+    /// Wake up the poller
+    pub fn wake(self: &Self) -> Result<(), IoError> {
+        intrinsic::poller_wake(&self.inner)
+    }
+}
+
+/// Event source trait
+pub trait Source {
+    fn raw_source(self: &Self) -> intrinsic::RawSource;
+}
+
+/// Interest flags for polling
+pub struct Interest {
+    bits: u32,
+}
+
+impl Interest {
+    pub const READABLE: Interest = Interest { bits: 0b0001 };
+    pub const WRITABLE: Interest = Interest { bits: 0b0010 };
+    pub const ERROR: Interest = Interest { bits: 0b0100 };
+    pub const HUP: Interest = Interest { bits: 0b1000 };
+
+    pub fn readable() -> Self {
+        Self::READABLE
+    }
+
+    pub fn writable() -> Self {
+        Self::WRITABLE
+    }
+
+    pub fn all() -> Self {
+        Self { bits: 0b1111 }
+    }
+
+    pub fn is_readable(self: &Self) -> bool {
+        self.bits & Self::READABLE.bits != 0
+    }
+
+    pub fn is_writable(self: &Self) -> bool {
+        self.bits & Self::WRITABLE.bits != 0
+    }
+
+    pub fn add(self: Self, other: Self) -> Self {
+        Self { bits: self.bits | other.bits }
+    }
+}
+
+/// Event container
+pub struct Events {
+    inner: Vec<Event>,
+    capacity: usize,
+}
+
+impl Events {
+    /// Create with capacity
+    pub fn with_capacity(capacity: usize) -> Self {
+        Self {
+            inner: Vec::with_capacity(capacity),
+            capacity,
+        }
+    }
+
+    /// Clear events
+    pub fn clear(self: &mut Self) {
+        self.inner.clear();
+    }
+
+    /// Iterate events
+    pub fn iter(self: &Self) -> impl Iterator<Item = &Event> {
+        self.inner.iter()
+    }
+
+    /// Get number of events
+    pub fn len(self: &Self) -> usize {
+        self.inner.len()
+    }
+
+    /// Check if empty
+    pub fn is_empty(self: &Self) -> bool {
+        self.inner.is_empty()
+    }
+}
+
+/// A single I/O event
+pub struct Event {
+    pub token: usize,
+    pub readable: bool,
+    pub writable: bool,
+    pub error: bool,
+    pub hup: bool,
+}
+
+// =============================================================================
+// Internal Types (Platform Abstraction)
+// =============================================================================
+
+/// Raw socket handle
+struct RawSocket {
+    #[cfg(unix)]
+    fd: i32,
+    #[cfg(windows)]
+    handle: usize,
+}
+
+/// Socket type
+enum SocketType {
+    Stream,
+    Datagram,
+}
+
+/// Socket protocol
+enum SocketProtocol {
+    Tcp,
+    Udp,
+}
+
+// Platform-specific intrinsics module
+mod intrinsic {
+    use super::*;
+
+    // These are implemented by the compiler's FFI layer
+    extern "build" {
+        // Memory mapping
+        pub fn mmap_anonymous(len: usize, prot: Protection) -> Result<Mmap, IoError>;
+        pub fn mmap_anonymous_mut(len: usize) -> Result<MmapMut, IoError>;
+        pub fn mmap_file(file: &File, offset: u64, len: usize, prot: &Protection, populate: bool) -> Result<Mmap, IoError>;
+        pub fn mmap_file_mut(file: &File, offset: u64, len: usize, populate: bool) -> Result<MmapMut, IoError>;
+        pub fn munmap(ptr: *mut u8, len: usize) -> Result<(), IoError>;
+        pub fn mprotect(ptr: *mut u8, len: usize, prot: Protection) -> Result<(), IoError>;
+        pub fn msync(ptr: *const u8, len: usize, flags: MsyncFlags) -> Result<(), IoError>;
+        pub fn mlock(ptr: *const u8, len: usize) -> Result<(), IoError>;
+        pub fn munlock(ptr: *const u8, len: usize) -> Result<(), IoError>;
+        pub fn madvise(ptr: *const u8, len: usize, advice: MmapAdvice) -> Result<(), IoError>;
+
+        // TLS
+        pub fn load_system_root_certs() -> Result<Vec<Certificate>, TlsError>;
+        pub fn parse_pem_certs(pem: &[u8]) -> Result<Vec<Certificate>, TlsError>;
+        pub fn validate_cert_der(der: &[u8]) -> Result<(), TlsError>;
+        pub fn parse_pem_private_key(pem: &[u8]) -> Result<PrivateKey, TlsError>;
+        pub fn detect_key_algorithm(der: &[u8]) -> Result<KeyAlgorithm, TlsError>;
+        pub fn cert_subject(der: &[u8]) -> Result<String, TlsError>;
+        pub fn cert_issuer(der: &[u8]) -> Result<String, TlsError>;
+        pub fn cert_not_before(der: &[u8]) -> Result<DateTime, TlsError>;
+        pub fn cert_not_after(der: &[u8]) -> Result<DateTime, TlsError>;
+        pub fn cert_serial(der: &[u8]) -> Result<Vec<u8>, TlsError>;
+
+        // TLS state machine
+        pub type TlsStateInner;
+        pub fn tls_client_state(connector: &TlsConnector, hostname: &str) -> Result<TlsStateInner, TlsError>;
+        pub fn tls_server_state(acceptor: &TlsAcceptor) -> Result<TlsStateInner, TlsError>;
+        pub fn tls_handshake_step(state: &mut TlsStateInner) -> Result<HandshakeStatus, TlsError>;
+        pub fn tls_receive_bytes(state: &mut TlsStateInner, data: &[u8]) -> Result<(), TlsError>;
+        pub fn tls_encrypt(state: &mut TlsStateInner, plaintext: &[u8]) -> Result<Vec<u8>, TlsError>;
+        pub fn tls_decrypt(state: &mut TlsStateInner, ciphertext: &[u8]) -> Result<Vec<u8>, TlsError>;
+        pub fn tls_close_notify(state: &mut TlsStateInner) -> Result<Vec<u8>, TlsError>;
+        pub fn tls_alpn_protocol(state: &TlsStateInner) -> Option<&str>;
+        pub fn tls_version(state: &TlsStateInner) -> TlsVersion;
+        pub fn tls_peer_certificate(state: &TlsStateInner) -> Option<&Certificate>;
+
+        // Poller
+        pub type PollerInner;
+        pub type RawSource;
+        pub fn poller_new() -> Result<PollerInner, IoError>;
+        pub fn poller_register(poller: &PollerInner, source: RawSource, token: usize, interests: Interest) -> Result<(), IoError>;
+        pub fn poller_modify(poller: &PollerInner, source: RawSource, token: usize, interests: Interest) -> Result<(), IoError>;
+        pub fn poller_deregister(poller: &PollerInner, source: RawSource) -> Result<(), IoError>;
+        pub fn poller_poll(poller: &PollerInner, events: &mut Events, timeout: Option<Duration>) -> Result<usize, IoError>;
+        pub fn poller_wake(poller: &PollerInner) -> Result<(), IoError>;
+    }
+}
+
+// =============================================================================
+// Tests
+// =============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_ipv4_addr() {
+        let addr = Ipv4Addr::new(192, 168, 1, 1);
+        assert!(addr.is_private());
+        assert!(!addr.is_loopback());
+
+        let localhost = Ipv4Addr::LOCALHOST;
+        assert!(localhost.is_loopback());
+        assert!(!localhost.is_private());
+    }
+
+    #[test]
+    fn test_ipv6_addr() {
+        let localhost = Ipv6Addr::LOCALHOST;
+        assert!(localhost.is_loopback());
+
+        let mapped = Ipv4Addr::new(192, 168, 1, 1).to_ipv6_mapped();
+        assert_eq!(mapped.to_ipv4(), Some(Ipv4Addr::new(192, 168, 1, 1)));
+    }
+
+    #[test]
+    fn test_buf_reader() {
+        let data = b"Hello, World!\nLine 2\nLine 3";
+        let mut reader = BufReader::new(Cursor::new(data));
+
+        let mut line = String::new();
+        reader.read_line(&mut line).unwrap();
+        assert_eq!(line, "Hello, World!\n");
+
+        line.clear();
+        reader.read_line(&mut line).unwrap();
+        assert_eq!(line, "Line 2\n");
+    }
+
+    #[test]
+    fn test_take_reader() {
+        let data = b"Hello, World!";
+        let mut reader = Cursor::new(data).take(5);
+
+        let mut buf = [0u8; 10];
+        let n = reader.read(&mut buf).unwrap();
+        assert_eq!(n, 5);
+        assert_eq!(&buf[..5], b"Hello");
+
+        let n = reader.read(&mut buf).unwrap();
+        assert_eq!(n, 0);
+    }
+
+    #[test]
+    fn test_chain_reader() {
+        let data1 = b"Hello, ";
+        let data2 = b"World!";
+        let mut reader = Cursor::new(data1).chain(Cursor::new(data2));
+
+        let mut result = String::new();
+        reader.read_to_string(&mut result).unwrap();
+        assert_eq!(result, "Hello, World!");
+    }
+
+    #[test]
+    fn test_seek_from() {
+        let data = b"Hello, World!";
+        let mut cursor = Cursor::new(data);
+
+        cursor.seek(SeekFrom::Start(7)).unwrap();
+        let mut buf = [0u8; 6];
+        cursor.read(&mut buf).unwrap();
+        assert_eq!(&buf, b"World!");
+
+        cursor.seek(SeekFrom::End(-6)).unwrap();
+        cursor.read(&mut buf).unwrap();
+        assert_eq!(&buf, b"World!");
+    }
+
+    #[test]
+    fn test_io_error() {
+        let err = IoError::NotFound;
+        assert_eq!(err.message(), "entity not found");
+
+        let err = IoError::InvalidInput("bad param".to_string());
+        assert_eq!(err.message(), "invalid input: bad param");
+    }
+}
+
+// =============================================================================
+// Cursor (in-memory stream)
+// =============================================================================
+
+/// In-memory buffer that implements Read, Write, Seek
+pub struct Cursor<T> {
+    inner: T,
+    pos: u64,
+}
+
+impl<T> Cursor<T> {
+    /// Create a new cursor
+    pub fn new(inner: T) -> Self {
+        Self { inner, pos: 0 }
+    }
+
+    /// Get current position
+    pub fn position(self: &Self) -> u64 {
+        self.pos
+    }
+
+    /// Set position
+    pub fn set_position(self: &mut Self, pos: u64) {
+        self.pos = pos;
+    }
+
+    /// Get reference to inner buffer
+    pub fn get_ref(self: &Self) -> &T {
+        &self.inner
+    }
+
+    /// Get mutable reference to inner buffer
+    pub fn get_mut(self: &mut Self) -> &mut T {
+        &mut self.inner
+    }
+
+    /// Consume and return inner buffer
+    pub fn into_inner(self) -> T {
+        self.inner
+    }
+}
+
+impl<T: AsRef<[u8]>> Read for Cursor<T> {
+    fn read(self: &mut Self, buf: &mut [u8]) -> Result<usize, IoError> {
+        let slice = self.inner.as_ref();
+        let pos = self.pos as usize;
+
+        if pos >= slice.len() {
+            return Ok(0);
+        }
+
+        let n = (slice.len() - pos).min(buf.len());
+        buf[..n].copy_from_slice(&slice[pos..pos + n]);
+        self.pos += n as u64;
+        Ok(n)
+    }
+}
+
+impl Write for Cursor<Vec<u8>> {
+    fn write(self: &mut Self, buf: &[u8]) -> Result<usize, IoError> {
+        let pos = self.pos as usize;
+
+        // Extend if needed
+        if pos + buf.len() > self.inner.len() {
+            self.inner.resize(pos + buf.len(), 0);
+        }
+
+        self.inner[pos..pos + buf.len()].copy_from_slice(buf);
+        self.pos += buf.len() as u64;
+        Ok(buf.len())
+    }
+
+    fn flush(self: &mut Self) -> Result<(), IoError> {
+        Ok(())
+    }
+}
+
+impl<T: AsRef<[u8]>> Seek for Cursor<T> {
+    fn seek(self: &mut Self, pos: SeekFrom) -> Result<u64, IoError> {
+        let (base, offset) = match pos {
+            SeekFrom::Start(n) => (0, n as i64),
+            SeekFrom::End(n) => (self.inner.as_ref().len() as i64, n),
+            SeekFrom::Current(n) => (self.pos as i64, n),
+        };
+
+        let new_pos = base.checked_add(offset).ok_or_else(|| {
+            IoError::InvalidInput("seek position overflow".to_string())
+        })?;
+
+        if new_pos < 0 {
+            return Err(IoError::InvalidInput("seek position before start".to_string()));
+        }
+
+        self.pos = new_pos as u64;
+        Ok(self.pos)
+    }
+}

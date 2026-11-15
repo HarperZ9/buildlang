@@ -1,0 +1,465 @@
+include!("stdlib/lines.bld");
+
+// =============================================================================
+// qcut — Field/character extraction (GNU cut clone) written in BuildLang
+// =============================================================================
+// Usage:
+//   echo "one,two,three" | qcut -d',' -f2           -> two
+//   echo "one,two,three" | qcut -d',' -f1,3         -> one,three
+//   echo "abcdefgh" | qcut -c1-5                    -> abcde
+//   echo "abcdefgh" | qcut -c3                      -> c
+//   cat data.csv | qcut -d',' -f1,3                 -> first and third columns
+//   qcut -d':' -f1 /etc/passwd                      -> usernames (file input)
+//   qcut --help                                     -> usage
+//
+// Design: Parse field/char LIST into a flat vec of selected positions stored
+// in a Cut struct. For each input line, split by delimiter and output selected
+// fields/chars. All vecs accessed through struct refs (BuildLang pattern).
+// =============================================================================
+
+// --- Main state struct ---
+struct Cut {
+    // Parsed positions (1-indexed)
+    positions: Vec<i32>,
+    pos_n: i32,
+    // Field splitter: string pool for split fields
+    f_buf: String,
+    f_starts: Vec<i32>,
+    f_lens: Vec<i32>,
+    f_n: i32,
+}
+
+fn cut_new() -> Cut {
+    Cut {
+        positions: vec![], pos_n: 0,
+        f_buf: "", f_starts: vec![], f_lens: vec![], f_n: 0,
+    }
+}
+
+// --- Helpers ---
+
+fn is_digit(c: String) -> bool {
+    c == "0" || c == "1" || c == "2" || c == "3" || c == "4" ||
+    c == "5" || c == "6" || c == "7" || c == "8" || c == "9"
+}
+
+fn parse_int(s: String, pos: i32) -> i32 {
+    let slen = s.len();
+    let mut val: i32 = 0;
+    let mut found = false;
+    let mut p = pos;
+    let mut go = true;
+    while go {
+        if p >= slen {
+            go = false;
+        } else {
+            let c = s.char_at(p);
+            if is_digit(c) {
+                let digit = if c == "0" { 0 }
+                    else if c == "1" { 1 }
+                    else if c == "2" { 2 }
+                    else if c == "3" { 3 }
+                    else if c == "4" { 4 }
+                    else if c == "5" { 5 }
+                    else if c == "6" { 6 }
+                    else if c == "7" { 7 }
+                    else if c == "8" { 8 }
+                    else { 9 };
+                val = val * 10 + digit;
+                found = true;
+                p = p + 1;
+            } else {
+                go = false;
+            }
+        }
+    }
+    if !found { -1 } else { val }
+}
+
+fn digit_count(s: String, pos: i32) -> i32 {
+    let slen = s.len();
+    let mut count: i32 = 0;
+    let mut p = pos;
+    let mut go = true;
+    while go {
+        if p >= slen {
+            go = false;
+        } else {
+            let c = s.char_at(p);
+            if is_digit(c) {
+                count = count + 1;
+                p = p + 1;
+            } else {
+                go = false;
+            }
+        }
+    }
+    count
+}
+
+// --- Parse a LIST string like "1,3-5,7" into positions vec ---
+fn parse_list(s: &mut Cut, list_str: String) {
+    let slen = list_str.len();
+    let mut pos: i32 = 0;
+
+    let mut go = true;
+    while go {
+        if pos >= slen {
+            go = false;
+        } else {
+            let num1 = parse_int(list_str, pos);
+            if num1 < 0 {
+                pos = pos + 1;
+            } else {
+                let dc1 = digit_count(list_str, pos);
+                pos = pos + dc1;
+
+                if pos < slen {
+                    let c = list_str.char_at(pos);
+                    if c == "-" {
+                        pos = pos + 1;
+                        let num2 = parse_int(list_str, pos);
+                        if num2 >= 0 {
+                            let dc2 = digit_count(list_str, pos);
+                            pos = pos + dc2;
+                            let mut v = num1;
+                            while v <= num2 {
+                                vec_push(s.positions, v);
+                                s.pos_n = s.pos_n + 1;
+                                v = v + 1;
+                            }
+                        } else {
+                            vec_push(s.positions, num1);
+                            s.pos_n = s.pos_n + 1;
+                        }
+                    } else {
+                        vec_push(s.positions, num1);
+                        s.pos_n = s.pos_n + 1;
+                        if c == "," {
+                            pos = pos + 1;
+                        }
+                    }
+                } else {
+                    vec_push(s.positions, num1);
+                    s.pos_n = s.pos_n + 1;
+                }
+            }
+        }
+    }
+}
+
+// --- Reset field splitter for reuse each line ---
+fn reset_fields(s: &mut Cut) {
+    s.f_buf = "";
+    s.f_starts = vec![];
+    s.f_lens = vec![];
+    s.f_n = 0;
+}
+
+// --- Split a line by delimiter, storing fields in Cut struct ---
+fn split_line(s: &mut Cut, line: String, delim: String) {
+    reset_fields(s);
+    let llen = line.len();
+    let dlen = delim.len();
+
+    if llen == 0 {
+        vec_push(s.f_starts, 0);
+        vec_push(s.f_lens, 0);
+        s.f_n = 1;
+        return;
+    }
+
+    let mut pos: i32 = 0;
+    let mut field_start: i32 = 0;
+    let mut go = true;
+
+    while go {
+        if pos >= llen {
+            let flen = pos - field_start;
+            let ftext = if flen > 0 {
+                line.substring(field_start, flen)
+            } else {
+                ""
+            };
+            let st = s.f_buf.len();
+            s.f_buf = s.f_buf + ftext;
+            let en = s.f_buf.len();
+            vec_push(s.f_starts, st);
+            vec_push(s.f_lens, en - st);
+            s.f_n = s.f_n + 1;
+            go = false;
+        } else {
+            let mut is_delim = false;
+            if pos + dlen <= llen {
+                let chunk = line.substring(pos, dlen);
+                if chunk == delim {
+                    is_delim = true;
+                }
+            }
+
+            if is_delim {
+                let flen = pos - field_start;
+                let ftext = if flen > 0 {
+                    line.substring(field_start, flen)
+                } else {
+                    ""
+                };
+                let st = s.f_buf.len();
+                s.f_buf = s.f_buf + ftext;
+                let en = s.f_buf.len();
+                vec_push(s.f_starts, st);
+                vec_push(s.f_lens, en - st);
+                s.f_n = s.f_n + 1;
+                pos = pos + dlen;
+                field_start = pos;
+            } else {
+                pos = pos + 1;
+            }
+        }
+    }
+}
+
+fn get_field(s: &Cut, idx: i32) -> String {
+    let st = vec_get(s.f_starts, idx);
+    let ln = vec_get(s.f_lens, idx);
+    if ln == 0 { return ""; }
+    s.f_buf.substring(st, ln)
+}
+
+// --- Process one line in field mode (-f) ---
+fn process_line_fields(s: &mut Cut, line: String, delim: String) ~ Console {
+    split_line(s, line, delim);
+    let mut out = "";
+    let mut first = true;
+    let mut i: i32 = 0;
+    while i < s.pos_n {
+        let p = vec_get(s.positions, i);
+        let idx = p - 1;
+        if idx >= 0 && idx < s.f_n {
+            if !first {
+                out = out + delim;
+            }
+            let val = get_field(s, idx);
+            out = out + val;
+            first = false;
+        }
+        i = i + 1;
+    }
+    println!("{}", out);
+}
+
+// --- Process one line in character mode (-c) ---
+fn process_line_chars(s: &Cut, line: String) ~ Console {
+    let llen = line.len();
+    let mut out = "";
+    let mut i: i32 = 0;
+    while i < s.pos_n {
+        let p = vec_get(s.positions, i);
+        let idx = p - 1;
+        if idx >= 0 && idx < llen {
+            let c = line.char_at(idx);
+            out = out + c;
+        }
+        i = i + 1;
+    }
+    println!("{}", out);
+}
+
+// --- Process input content line by line ---
+fn process_content(s: &mut Cut, content: String, delim: String,
+                   char_mode: bool) ~ Console {
+    let lr = lr_new(content);
+    let mut i: i32 = 0;
+    while i < lr.count {
+        let line = lr_get(&lr, i);
+        // Strip trailing \r
+        let llen = line.len();
+        let clean = if llen > 0 {
+            let last = line.char_at(llen - 1);
+            if last == "\r" {
+                if llen == 1 { "" } else { line.substring(0, llen - 1) }
+            } else {
+                line
+            }
+        } else {
+            line
+        };
+
+        if char_mode {
+            process_line_chars(s, clean);
+        } else {
+            process_line_fields(s, clean, delim);
+        }
+        i = i + 1;
+    }
+}
+
+// --- Help ---
+fn print_help() ~ Console {
+    println!("qcut — remove sections from each line of files");
+    println!("");
+    println!("Usage:");
+    println!("  qcut -d DELIM -f LIST [FILE]");
+    println!("  qcut -c LIST [FILE]");
+    println!("");
+    println!("Options:");
+    println!("  -d DELIM   use DELIM as field delimiter (default: TAB)");
+    println!("  -f LIST    select only these fields (1-indexed)");
+    println!("  -c LIST    select only these character positions");
+    println!("  --help     display this help and exit");
+    println!("");
+    println!("LIST is comma-separated: N, N-M, or combinations like 1,3-5,7");
+    println!("");
+    println!("Examples:");
+    println!("  echo \"one,two,three\" | qcut -d',' -f2");
+    println!("  echo \"abcdefgh\" | qcut -c1-5");
+    println!("  qcut -d':' -f1 /etc/passwd");
+}
+
+// --- Extract option value: handles -dX, -d'X' forms ---
+fn extract_opt_val(arg: String, prefix_len: i32) -> String {
+    let alen = arg.len();
+    if alen <= prefix_len {
+        return "";
+    }
+    let rest = arg.substring(prefix_len, alen - prefix_len);
+    let rlen = rest.len();
+    if rlen >= 2 {
+        let first = rest.char_at(0);
+        let last = rest.char_at(rlen - 1);
+        if first == "'" && last == "'" {
+            if rlen == 2 { return ""; }
+            return rest.substring(1, rlen - 2);
+        }
+    }
+    rest
+}
+
+// --- Main ---
+fn main() ~ Console + Environment + FileSystem + Process {
+    let nargs = args_count();
+
+    if nargs < 2 {
+        print_help();
+        process_exit(0);
+    }
+
+    let mut delim = "\t";
+    let mut field_list = "";
+    let mut char_list = "";
+    let mut filename = "";
+    let mut has_file = false;
+    let mut has_delim = false;
+    let mut has_fields = false;
+    let mut has_chars = false;
+
+    // Parse arguments
+    let mut i: i32 = 1;
+    while i < nargs {
+        let arg = args_get(i);
+
+        if arg == "--help" || arg == "-h" {
+            print_help();
+            process_exit(0);
+        } else if arg == "-d" {
+            i = i + 1;
+            if i < nargs {
+                let val = args_get(i);
+                let vlen = val.len();
+                if vlen >= 2 {
+                    let first = val.char_at(0);
+                    let last = val.char_at(vlen - 1);
+                    if first == "'" && last == "'" {
+                        delim = if vlen == 2 { "" }
+                            else { val.substring(1, vlen - 2) };
+                    } else {
+                        delim = val;
+                    }
+                } else {
+                    delim = val;
+                }
+                has_delim = true;
+            }
+        } else if arg.starts_with("-d") {
+            let val = extract_opt_val(arg, 2);
+            if val.len() > 0 {
+                delim = val;
+                has_delim = true;
+            }
+        } else if arg == "-f" {
+            i = i + 1;
+            if i < nargs {
+                field_list = args_get(i);
+                has_fields = true;
+            }
+        } else if arg.starts_with("-f") {
+            let alen = arg.len();
+            field_list = arg.substring(2, alen - 2);
+            has_fields = true;
+        } else if arg == "-c" {
+            i = i + 1;
+            if i < nargs {
+                char_list = args_get(i);
+                has_chars = true;
+            }
+        } else if arg.starts_with("-c") {
+            let alen = arg.len();
+            char_list = arg.substring(2, alen - 2);
+            has_chars = true;
+        } else if arg.starts_with("-") {
+            println!("qcut: unknown option '{}'", arg);
+            process_exit(2);
+        } else {
+            filename = arg;
+            has_file = true;
+        }
+
+        i = i + 1;
+    }
+
+    if !has_fields && !has_chars {
+        println!("qcut: you must specify a list of fields (-f) or characters (-c)");
+        println!("Try 'qcut --help' for more information.");
+        process_exit(2);
+    }
+
+    if has_fields && has_chars {
+        println!("qcut: only one of -f or -c may be specified");
+        process_exit(2);
+    }
+
+    // Build Cut struct and parse list
+    let mut s = cut_new();
+    let char_mode = has_chars;
+    let list_str = if has_chars { char_list } else { field_list };
+    parse_list(&mut s, list_str);
+
+    if s.pos_n == 0 {
+        println!("qcut: invalid list: '{}'", list_str);
+        process_exit(2);
+    }
+
+    // Read input
+    let input = if has_file {
+        let exists = file_exists(filename);
+        if !exists {
+            println!("qcut: {}: No such file or directory", filename);
+            process_exit(2);
+        }
+        read_file(filename)
+    } else {
+        let piped = stdin_is_pipe();
+        if !piped {
+            print_help();
+            process_exit(0);
+        }
+        read_all()
+    };
+
+    if input.len() == 0 {
+        process_exit(0);
+    }
+
+    // Process
+    process_content(&mut s, input, delim, char_mode);
+}

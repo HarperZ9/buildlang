@@ -1,0 +1,19 @@
+fn factorial(n: i64) -> i64 {
+    if n <= 1 {
+        return 1;
+    }
+    return n * factorial(n - 1);
+}
+
+fn main() ~ Console {
+    let x = factorial(10);
+    println!("{}", x);
+
+    let mut sum = 0;
+    let mut i = 1;
+    while i <= 100 {
+        sum = sum + i;
+        i = i + 1;
+    }
+    println!("{}", sum);
+}

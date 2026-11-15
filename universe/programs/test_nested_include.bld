@@ -1,0 +1,13 @@
+include!("stdlib/string_utils.bld");
+
+fn main() ~ Console {
+    // Test functions from string_utils (which also pulls in chars)
+    let trimmed = trim_left("  hello");
+    println!("trimmed: '{}'", trimmed);
+    println!("starts_with_alpha hello: {}", starts_with_alpha("hello"));
+    println!("starts_with_alpha 123: {}", starts_with_alpha("123"));
+
+    // These come from chars.bld, pulled in transitively
+    println!("is_digit 7: {}", is_digit("7"));
+    println!("is_alpha z: {}", is_alpha("z"));
+}

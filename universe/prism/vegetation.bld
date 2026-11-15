@@ -1,0 +1,1072 @@
+// BUILD-UNIVERSE Prism: Vegetation Rendering Shaders
+// Comprehensive vegetation system including grass, foliage, trees, and procedural generation
+
+import prism::lib::*;
+import spectrum::color::*;
+
+// ============================================================================
+// VEGETATION CONFIGURATION
+// ============================================================================
+
+@shader_config
+struct VegetationConfig {
+    grass_density: f32,
+    grass_height: f32,
+    grass_width: f32,
+    wind_strength: f32,
+    wind_frequency: f32,
+    wind_direction: Vec2,
+    lod_distance_0: f32,
+    lod_distance_1: f32,
+    lod_distance_2: f32,
+    shadow_distance: f32,
+    alpha_cutoff: f32,
+    subsurface_color: Vec3,
+    subsurface_intensity: f32,
+    ao_intensity: f32,
+    color_variation: f32,
+    interaction_enabled: bool,
+    procedural_placement: bool,
+}
+
+impl VegetationConfig {
+    const HIGH_QUALITY: Self = VegetationConfig {
+        grass_density: 1.0,
+        grass_height: 0.5,
+        grass_width: 0.05,
+        wind_strength: 1.0,
+        wind_frequency: 1.0,
+        wind_direction: Vec2::new(1.0, 0.5),
+        lod_distance_0: 20.0,
+        lod_distance_1: 50.0,
+        lod_distance_2: 100.0,
+        shadow_distance: 30.0,
+        alpha_cutoff: 0.5,
+        subsurface_color: Vec3::new(0.2, 0.5, 0.1),
+        subsurface_intensity: 0.5,
+        ao_intensity: 0.5,
+        color_variation: 0.2,
+        interaction_enabled: true,
+        procedural_placement: true,
+    };
+
+    const MEDIUM_QUALITY: Self = VegetationConfig {
+        grass_density: 0.6,
+        grass_height: 0.5,
+        grass_width: 0.06,
+        wind_strength: 1.0,
+        wind_frequency: 1.0,
+        wind_direction: Vec2::new(1.0, 0.5),
+        lod_distance_0: 15.0,
+        lod_distance_1: 35.0,
+        lod_distance_2: 70.0,
+        shadow_distance: 20.0,
+        alpha_cutoff: 0.5,
+        subsurface_color: Vec3::new(0.2, 0.5, 0.1),
+        subsurface_intensity: 0.3,
+        ao_intensity: 0.4,
+        color_variation: 0.15,
+        interaction_enabled: true,
+        procedural_placement: true,
+    };
+
+    const LOW_QUALITY: Self = VegetationConfig {
+        grass_density: 0.3,
+        grass_height: 0.5,
+        grass_width: 0.08,
+        wind_strength: 1.0,
+        wind_frequency: 1.0,
+        wind_direction: Vec2::new(1.0, 0.5),
+        lod_distance_0: 10.0,
+        lod_distance_1: 25.0,
+        lod_distance_2: 50.0,
+        shadow_distance: 10.0,
+        alpha_cutoff: 0.5,
+        subsurface_color: Vec3::new(0.2, 0.5, 0.1),
+        subsurface_intensity: 0.2,
+        ao_intensity: 0.3,
+        color_variation: 0.1,
+        interaction_enabled: false,
+        procedural_placement: true,
+    };
+}
+
+// ============================================================================
+// GRASS BLADE STRUCTURE
+// ============================================================================
+
+struct GrassBlade {
+    position: Vec3,
+    facing: f32,
+    height: f32,
+    width: f32,
+    tilt: f32,
+    bend: f32,
+    color_variation: f32,
+}
+
+// ============================================================================
+// GRASS GENERATION COMPUTE SHADER
+// ============================================================================
+
+@shader(compute)
+const GRASS_GENERATION_SHADER: &str = r#"
+    // Procedural grass blade generation based on terrain
+
+    cbuffer GrassGenParams : register(b0) {
+        float4x4 view_projection;
+        float3 camera_position;
+        float time;
+        float3 terrain_min;
+        float terrain_size;
+        float3 terrain_max;
+        float grass_density;
+        float2 wind_direction;
+        float wind_strength;
+        float wind_frequency;
+        float lod_distance_0;
+        float lod_distance_1;
+        float lod_distance_2;
+        float grass_height;
+        float grass_width;
+        float color_variation;
+        uint max_blades;
+        float padding;
+    };
+
+    Texture2D<float> height_map : register(t0);
+    Texture2D<float4> grass_density_map : register(t1);
+    Texture2D<float4> normal_map : register(t2);
+
+    RWStructuredBuffer<float4> grass_positions : register(u0);  // xyz = position, w = facing
+    RWStructuredBuffer<float4> grass_params : register(u1);     // x = height, y = width, z = tilt, w = color_var
+    RWBuffer<uint> grass_count : register(u2);
+
+    SamplerState linear_sampler : register(s0);
+
+    // Hash functions for randomness
+    float hash(float2 p) {
+        float3 p3 = frac(float3(p.xyx) * 0.1031);
+        p3 += dot(p3, p3.yzx + 33.33);
+        return frac((p3.x + p3.y) * p3.z);
+    }
+
+    float2 hash2(float2 p) {
+        float3 p3 = frac(float3(p.xyx) * float3(0.1031, 0.1030, 0.0973));
+        p3 += dot(p3, p3.yzx + 33.33);
+        return frac((p3.xx + p3.yz) * p3.zy);
+    }
+
+    float noise(float2 p) {
+        float2 i = floor(p);
+        float2 f = frac(p);
+        f = f * f * (3.0 - 2.0 * f);
+
+        float a = hash(i);
+        float b = hash(i + float2(1.0, 0.0));
+        float c = hash(i + float2(0.0, 1.0));
+        float d = hash(i + float2(1.0, 1.0));
+
+        return lerp(lerp(a, b, f.x), lerp(c, d, f.x), f.y);
+    }
+
+    [numthreads(8, 8, 1)]
+    void cs_main(uint3 dispatch_id : SV_DispatchThreadID) {
+        float2 terrain_uv = float2(dispatch_id.xy) / 256.0;  // Assuming 256x256 grid
+
+        // Sample terrain data
+        float height = height_map.SampleLevel(linear_sampler, terrain_uv, 0);
+        float4 density_data = grass_density_map.SampleLevel(linear_sampler, terrain_uv, 0);
+        float3 normal = normal_map.SampleLevel(linear_sampler, terrain_uv, 0).xyz * 2.0 - 1.0;
+
+        float density = density_data.r * grass_density;
+
+        // Skip if density is too low
+        if (density < 0.1) return;
+
+        // World position
+        float3 world_pos = float3(
+            terrain_min.x + terrain_uv.x * terrain_size,
+            height,
+            terrain_min.z + terrain_uv.y * terrain_size
+        );
+
+        // Distance check
+        float distance = length(world_pos - camera_position);
+        if (distance > lod_distance_2) return;
+
+        // LOD-based blade count
+        uint blade_count;
+        if (distance < lod_distance_0) {
+            blade_count = uint(density * 4.0);
+        } else if (distance < lod_distance_1) {
+            blade_count = uint(density * 2.0);
+        } else {
+            blade_count = uint(density);
+        }
+
+        blade_count = max(1, blade_count);
+
+        // Generate blades
+        for (uint i = 0; i < blade_count; i++) {
+            float2 random = hash2(terrain_uv * 1000.0 + float(i) * 0.1);
+
+            // Jitter position within cell
+            float2 jitter = (random - 0.5) * terrain_size / 256.0;
+            float3 blade_pos = world_pos + float3(jitter.x, 0.0, jitter.y);
+
+            // Sample height at jittered position
+            float2 jittered_uv = terrain_uv + jitter / terrain_size;
+            blade_pos.y = height_map.SampleLevel(linear_sampler, jittered_uv, 0);
+
+            // Random facing direction
+            float facing = random.x * 6.28318530718;
+
+            // Random height and width variation
+            float height_var = grass_height * (0.7 + random.y * 0.6);
+            float width_var = grass_width * (0.8 + hash(random) * 0.4);
+
+            // Tilt based on terrain normal
+            float tilt = acos(normal.y) * 0.5;
+
+            // Color variation
+            float color_var = hash(terrain_uv * 500.0 + float(i)) * color_variation;
+
+            // Atomic add to get blade index
+            uint blade_index;
+            InterlockedAdd(grass_count[0], 1, blade_index);
+
+            if (blade_index >= max_blades) return;
+
+            // Store blade data
+            grass_positions[blade_index] = float4(blade_pos, facing);
+            grass_params[blade_index] = float4(height_var, width_var, tilt, color_var);
+        }
+    }
+"#;
+
+// ============================================================================
+// GRASS VERTEX SHADER
+// ============================================================================
+
+@shader(vertex)
+const GRASS_VERTEX_SHADER: &str = r#"
+    // Grass blade vertex shader with wind animation
+
+    cbuffer GrassParams : register(b0) {
+        float4x4 view_projection;
+        float4x4 view;
+        float3 camera_position;
+        float time;
+        float2 wind_direction;
+        float wind_strength;
+        float wind_frequency;
+        float3 sun_direction;
+        float grass_height;
+        float3 grass_base_color;
+        float grass_tip_color_blend;
+        float3 grass_tip_color;
+        float ao_intensity;
+        float lod_distance_0;
+        float lod_distance_1;
+        float lod_distance_2;
+        float fade_distance;
+    };
+
+    StructuredBuffer<float4> grass_positions : register(t0);
+    StructuredBuffer<float4> grass_params : register(t1);
+
+    struct VSOutput {
+        float4 position : SV_POSITION;
+        float3 world_position : TEXCOORD0;
+        float3 normal : TEXCOORD1;
+        float2 uv : TEXCOORD2;
+        float3 color : TEXCOORD3;
+        float ao : TEXCOORD4;
+        float fade : TEXCOORD5;
+    };
+
+    // Bezier curve for blade shape
+    float3 bezier(float3 p0, float3 p1, float3 p2, float t) {
+        float t2 = t * t;
+        float mt = 1.0 - t;
+        float mt2 = mt * mt;
+        return p0 * mt2 + p1 * 2.0 * mt * t + p2 * t2;
+    }
+
+    float3 bezier_derivative(float3 p0, float3 p1, float3 p2, float t) {
+        float mt = 1.0 - t;
+        return 2.0 * (p1 - p0) * mt + 2.0 * (p2 - p1) * t;
+    }
+
+    // Wind noise
+    float wind_noise(float2 p, float t) {
+        float noise = sin(p.x * wind_frequency + t * 2.0) * 0.5 +
+                     sin(p.y * wind_frequency * 0.7 + t * 1.5) * 0.3 +
+                     sin((p.x + p.y) * wind_frequency * 1.3 + t * 3.0) * 0.2;
+        return noise;
+    }
+
+    VSOutput vs_main(uint vertex_id : SV_VertexID, uint instance_id : SV_InstanceID) {
+        VSOutput output;
+
+        // Get blade data
+        float4 blade_pos_facing = grass_positions[instance_id];
+        float4 blade_params = grass_params[instance_id];
+
+        float3 blade_base = blade_pos_facing.xyz;
+        float facing = blade_pos_facing.w;
+        float height = blade_params.x;
+        float width = blade_params.y;
+        float tilt = blade_params.z;
+        float color_var = blade_params.w;
+
+        // Calculate distance fade
+        float distance = length(blade_base - camera_position);
+        float fade = 1.0 - saturate((distance - lod_distance_1) / fade_distance);
+
+        if (fade < 0.01) {
+            output.position = float4(0, 0, 0, 0);
+            return output;
+        }
+
+        // Calculate wind
+        float2 wind_uv = blade_base.xz * 0.1;
+        float wind = wind_noise(wind_uv, time) * wind_strength;
+
+        // Vertex along blade (0-7 for blade geometry)
+        uint segment = vertex_id / 2;
+        uint side = vertex_id % 2;
+
+        float t = float(segment) / 3.0;  // 4 segments, 8 vertices
+
+        // Blade shape with wind
+        float3 p0 = blade_base;
+        float3 p1 = blade_base + float3(
+            sin(facing) * tilt * height * 0.5,
+            height * 0.5,
+            cos(facing) * tilt * height * 0.5
+        );
+        float3 p2 = blade_base + float3(
+            sin(facing) * tilt * height + wind * wind_direction.x * height,
+            height,
+            cos(facing) * tilt * height + wind * wind_direction.y * height
+        );
+
+        float3 blade_point = bezier(p0, p1, p2, t);
+        float3 tangent = normalize(bezier_derivative(p0, p1, p2, t));
+
+        // Width decreases towards tip
+        float local_width = width * (1.0 - t * 0.7);
+
+        // Perpendicular to facing direction for blade width
+        float3 perpendicular = normalize(float3(cos(facing), 0.0, -sin(facing)));
+
+        // Offset for blade width
+        float side_offset = (float(side) - 0.5) * local_width;
+        float3 world_pos = blade_point + perpendicular * side_offset;
+
+        // Calculate normal (facing camera for billboarding effect at distance)
+        float3 to_camera = normalize(camera_position - world_pos);
+        float3 blade_normal = normalize(cross(tangent, perpendicular));
+        blade_normal = normalize(lerp(blade_normal, to_camera, saturate(distance / lod_distance_0 * 0.5)));
+
+        // Output
+        output.position = mul(view_projection, float4(world_pos, 1.0));
+        output.world_position = world_pos;
+        output.normal = blade_normal;
+        output.uv = float2(float(side), t);
+
+        // Color with variation
+        float3 base_color = lerp(grass_base_color, grass_tip_color, t * grass_tip_color_blend);
+        base_color *= (1.0 + color_var);
+        output.color = base_color;
+
+        // Ambient occlusion (darker at base)
+        output.ao = 1.0 - (1.0 - t) * ao_intensity;
+
+        output.fade = fade;
+
+        return output;
+    }
+"#;
+
+// ============================================================================
+// GRASS PIXEL SHADER
+// ============================================================================
+
+@shader(fragment)
+const GRASS_PIXEL_SHADER: &str = r#"
+    // Grass blade pixel shader with subsurface scattering
+
+    cbuffer GrassPixelParams : register(b0) {
+        float3 sun_direction;
+        float3 sun_color;
+        float3 ambient_color;
+        float3 subsurface_color;
+        float subsurface_intensity;
+        float alpha_cutoff;
+        float roughness;
+        float metallic;
+    };
+
+    Texture2D<float4> grass_texture : register(t0);
+    Texture2D<float> shadow_map : register(t1);
+
+    SamplerState linear_sampler : register(s0);
+    SamplerState shadow_sampler : register(s1);
+
+    struct VSOutput {
+        float4 position : SV_POSITION;
+        float3 world_position : TEXCOORD0;
+        float3 normal : TEXCOORD1;
+        float2 uv : TEXCOORD2;
+        float3 color : TEXCOORD3;
+        float ao : TEXCOORD4;
+        float fade : TEXCOORD5;
+    };
+
+    struct PSOutput {
+        float4 color : SV_TARGET0;
+    };
+
+    PSOutput ps_main(VSOutput input) {
+        PSOutput output;
+
+        // Sample grass texture (alpha for shape)
+        float4 tex_sample = grass_texture.Sample(linear_sampler, input.uv);
+
+        // Alpha test
+        float alpha = tex_sample.a * input.fade;
+        if (alpha < alpha_cutoff) {
+            discard;
+        }
+
+        float3 N = normalize(input.normal);
+        float3 L = normalize(-sun_direction);
+
+        // Basic diffuse lighting
+        float NdotL = max(dot(N, L), 0.0);
+
+        // Subsurface scattering approximation
+        float scatter = max(0.0, dot(-N, L)) * subsurface_intensity;
+        float3 sss = subsurface_color * scatter;
+
+        // Combine lighting
+        float3 diffuse = input.color * tex_sample.rgb * NdotL * sun_color;
+        float3 ambient = input.color * tex_sample.rgb * ambient_color * input.ao;
+
+        float3 final_color = diffuse + ambient + sss;
+
+        // Apply fade
+        alpha = saturate(alpha);
+
+        output.color = float4(final_color, alpha);
+        return output;
+    }
+"#;
+
+// ============================================================================
+// FOLIAGE SHADER (Trees, Bushes)
+// ============================================================================
+
+@shader(vertex)
+const FOLIAGE_VERTEX_SHADER: &str = r#"
+    // Foliage vertex shader with hierarchical wind animation
+
+    cbuffer FoliageParams : register(b0) {
+        float4x4 world;
+        float4x4 view_projection;
+        float3 camera_position;
+        float time;
+        float2 wind_direction;
+        float wind_strength;
+        float wind_frequency;
+        float3 pivot_point;       // Tree trunk base
+        float trunk_flexibility;
+        float3 branch_pivot;      // Per-branch pivot
+        float branch_flexibility;
+        float leaf_flutter_strength;
+        float leaf_flutter_frequency;
+        float phase_offset;       // Per-tree variation
+        float padding;
+    };
+
+    struct VSInput {
+        float3 position : POSITION;
+        float3 normal : NORMAL;
+        float2 uv : TEXCOORD0;
+        float4 tangent : TANGENT;
+        float4 color : COLOR0;   // R = branch phase, G = leaf phase, B = stiffness, A = unused
+    };
+
+    struct VSOutput {
+        float4 position : SV_POSITION;
+        float3 world_position : TEXCOORD0;
+        float3 world_normal : TEXCOORD1;
+        float2 uv : TEXCOORD2;
+        float4 tangent : TEXCOORD3;
+        float3 vertex_color : TEXCOORD4;
+    };
+
+    float3 rotate_around_axis(float3 position, float3 axis, float angle) {
+        float c = cos(angle);
+        float s = sin(angle);
+        float t = 1.0 - c;
+
+        float3x3 rotation = float3x3(
+            t * axis.x * axis.x + c,          t * axis.x * axis.y - s * axis.z, t * axis.x * axis.z + s * axis.y,
+            t * axis.x * axis.y + s * axis.z, t * axis.y * axis.y + c,          t * axis.y * axis.z - s * axis.x,
+            t * axis.x * axis.z - s * axis.y, t * axis.y * axis.z + s * axis.x, t * axis.z * axis.z + c
+        );
+
+        return mul(rotation, position);
+    }
+
+    float wind_wave(float2 position, float t, float frequency, float phase) {
+        return sin(position.x * frequency + t * 2.0 + phase) *
+               sin(position.y * frequency * 0.7 + t * 1.5 + phase * 0.5) * 0.5 + 0.5;
+    }
+
+    VSOutput vs_main(VSInput input) {
+        VSOutput output;
+
+        float3 local_pos = input.position;
+        float3 local_normal = input.normal;
+
+        float branch_phase = input.color.r;
+        float leaf_phase = input.color.g;
+        float stiffness = input.color.b;
+
+        // Trunk sway (affects entire tree)
+        float trunk_wind = wind_wave(pivot_point.xz, time, wind_frequency * 0.3, phase_offset);
+        float trunk_angle = trunk_wind * trunk_flexibility * wind_strength * (1.0 - stiffness);
+
+        float3 trunk_axis = normalize(float3(wind_direction.y, 0.0, -wind_direction.x));
+        local_pos = rotate_around_axis(local_pos - pivot_point, trunk_axis, trunk_angle) + pivot_point;
+
+        // Branch sway (affects branches and leaves)
+        float branch_wind = wind_wave(branch_pivot.xz, time, wind_frequency * 0.7, phase_offset + branch_phase * 3.14159);
+        float branch_angle = branch_wind * branch_flexibility * wind_strength * (1.0 - stiffness * 0.5);
+
+        float3 branch_axis = normalize(cross(float3(0, 1, 0), float3(wind_direction.x, 0, wind_direction.y)));
+        float3 offset = local_pos - branch_pivot;
+        local_pos = rotate_around_axis(offset, branch_axis, branch_angle) + branch_pivot;
+
+        // Leaf flutter (high frequency, small amplitude)
+        float flutter = sin(time * leaf_flutter_frequency + leaf_phase * 6.28318) * leaf_flutter_strength;
+        flutter *= (1.0 - stiffness);
+        local_pos += input.normal * flutter;
+
+        // Transform to world space
+        float4 world_pos = mul(world, float4(local_pos, 1.0));
+        float3 world_normal = normalize(mul((float3x3)world, local_normal));
+
+        output.position = mul(view_projection, world_pos);
+        output.world_position = world_pos.xyz;
+        output.world_normal = world_normal;
+        output.uv = input.uv;
+        output.tangent = float4(normalize(mul((float3x3)world, input.tangent.xyz)), input.tangent.w);
+        output.vertex_color = input.color.rgb;
+
+        return output;
+    }
+"#;
+
+@shader(fragment)
+const FOLIAGE_PIXEL_SHADER: &str = r#"
+    // Foliage pixel shader with subsurface scattering and two-sided lighting
+
+    cbuffer FoliagePixelParams : register(b0) {
+        float3 sun_direction;
+        float sun_intensity;
+        float3 sun_color;
+        float3 ambient_color;
+        float ambient_intensity;
+        float3 subsurface_color;
+        float subsurface_intensity;
+        float alpha_cutoff;
+        float roughness;
+        float translucency;
+        float shadow_bias;
+    };
+
+    Texture2D<float4> albedo_map : register(t0);
+    Texture2D<float4> normal_map : register(t1);
+    Texture2D<float> shadow_map : register(t2);
+
+    SamplerState linear_sampler : register(s0);
+    SamplerComparisonState shadow_sampler : register(s1);
+
+    struct VSOutput {
+        float4 position : SV_POSITION;
+        float3 world_position : TEXCOORD0;
+        float3 world_normal : TEXCOORD1;
+        float2 uv : TEXCOORD2;
+        float4 tangent : TEXCOORD3;
+        float3 vertex_color : TEXCOORD4;
+    };
+
+    struct PSOutput {
+        float4 color : SV_TARGET0;
+        float4 normal : SV_TARGET1;
+        float4 material : SV_TARGET2;
+    };
+
+    float3 calculate_normal(VSOutput input) {
+        float3 normal_sample = normal_map.Sample(linear_sampler, input.uv).xyz * 2.0 - 1.0;
+
+        float3 N = normalize(input.world_normal);
+        float3 T = normalize(input.tangent.xyz);
+        float3 B = cross(N, T) * input.tangent.w;
+
+        float3x3 TBN = float3x3(T, B, N);
+        return normalize(mul(normal_sample, TBN));
+    }
+
+    PSOutput ps_main(VSOutput input, bool is_front_face : SV_IsFrontFace) {
+        PSOutput output;
+
+        float4 albedo = albedo_map.Sample(linear_sampler, input.uv);
+
+        // Alpha test
+        if (albedo.a < alpha_cutoff) {
+            discard;
+        }
+
+        float3 N = calculate_normal(input);
+
+        // Flip normal for back faces
+        if (!is_front_face) {
+            N = -N;
+        }
+
+        float3 L = normalize(-sun_direction);
+        float3 V = normalize(camera_position - input.world_position);
+
+        // Two-sided diffuse
+        float NdotL = dot(N, L);
+        float front_diffuse = max(NdotL, 0.0);
+        float back_diffuse = max(-NdotL, 0.0) * translucency;
+
+        // Subsurface scattering for back-lit leaves
+        float3 H = normalize(L + N * 0.5);
+        float VdotH = saturate(dot(V, -H));
+        float sss = pow(VdotH, 3.0) * subsurface_intensity * translucency;
+        float3 subsurface = subsurface_color * sss;
+
+        // Combine lighting
+        float3 diffuse = albedo.rgb * (front_diffuse + back_diffuse) * sun_color * sun_intensity;
+        float3 ambient = albedo.rgb * ambient_color * ambient_intensity;
+
+        float3 final_color = diffuse + ambient + subsurface;
+
+        output.color = float4(final_color, albedo.a);
+        output.normal = float4(N * 0.5 + 0.5, 1.0);
+        output.material = float4(roughness, 0.0, 0.0, 1.0);
+
+        return output;
+    }
+"#;
+
+// ============================================================================
+// BILLBOARD IMPOSTOR SHADER (Distant Trees)
+// ============================================================================
+
+@shader(vertex)
+const IMPOSTOR_VERTEX_SHADER: &str = r#"
+    // Billboard impostor for distant vegetation
+
+    cbuffer ImpostorParams : register(b0) {
+        float4x4 view_projection;
+        float4x4 inv_view;
+        float3 camera_position;
+        float time;
+        float2 wind_direction;
+        float wind_strength;
+        float wind_frequency;
+        float scale;
+        uint impostor_frames;
+        float transition_blend;
+        float padding;
+    };
+
+    struct VSInput {
+        float3 position : POSITION;
+        float2 uv : TEXCOORD0;
+        float4 instance_data : TEXCOORD1;  // xyz = position, w = scale
+        float4 instance_data2 : TEXCOORD2; // xyz = rotation, w = variation
+    };
+
+    struct VSOutput {
+        float4 position : SV_POSITION;
+        float3 world_position : TEXCOORD0;
+        float2 uv : TEXCOORD1;
+        float2 frame_blend : TEXCOORD2;   // x = frame, y = blend
+        float fade : TEXCOORD3;
+    };
+
+    VSOutput vs_main(VSInput input, uint instance_id : SV_InstanceID) {
+        VSOutput output;
+
+        float3 instance_pos = input.instance_data.xyz;
+        float instance_scale = input.instance_data.w * scale;
+        float variation = input.instance_data2.w;
+
+        // Calculate view direction for impostor frame selection
+        float3 view_dir = normalize(instance_pos - camera_position);
+
+        // Calculate frame based on view angle (octahedral mapping)
+        float2 octahedral = float2(
+            atan2(view_dir.x, view_dir.z) / 3.14159265 * 0.5 + 0.5,
+            acos(view_dir.y) / 3.14159265
+        );
+
+        float frame = floor(octahedral.x * float(impostor_frames));
+        float blend = frac(octahedral.x * float(impostor_frames));
+
+        // Billboard vertex position
+        float3 right = float3(inv_view[0][0], inv_view[1][0], inv_view[2][0]);
+        float3 up = float3(0, 1, 0);
+
+        float3 vertex_pos = instance_pos +
+            right * input.position.x * instance_scale +
+            up * input.position.y * instance_scale;
+
+        // Wind sway
+        float wind = sin(instance_pos.x * wind_frequency * 0.5 + time + variation * 3.14159) *
+                    sin(instance_pos.z * wind_frequency * 0.3 + time * 0.7) *
+                    wind_strength;
+
+        vertex_pos.x += wind * input.position.y * 0.1;
+
+        // Distance fade
+        float distance = length(instance_pos - camera_position);
+        float fade = 1.0;  // Could add fade logic here
+
+        output.position = mul(view_projection, float4(vertex_pos, 1.0));
+        output.world_position = vertex_pos;
+        output.uv = input.uv;
+        output.frame_blend = float2(frame, blend);
+        output.fade = fade;
+
+        return output;
+    }
+"#;
+
+@shader(fragment)
+const IMPOSTOR_PIXEL_SHADER: &str = r#"
+    // Billboard impostor pixel shader with frame blending
+
+    cbuffer ImpostorPixelParams : register(b0) {
+        float3 sun_direction;
+        float3 sun_color;
+        float3 ambient_color;
+        float alpha_cutoff;
+        uint impostor_frames;
+        float frame_blend_factor;
+        float padding0;
+        float padding1;
+    };
+
+    Texture2DArray<float4> impostor_atlas : register(t0);
+    Texture2DArray<float4> impostor_normals : register(t1);
+
+    SamplerState linear_sampler : register(s0);
+
+    struct VSOutput {
+        float4 position : SV_POSITION;
+        float3 world_position : TEXCOORD0;
+        float2 uv : TEXCOORD1;
+        float2 frame_blend : TEXCOORD2;
+        float fade : TEXCOORD3;
+    };
+
+    float4 ps_main(VSOutput input) : SV_TARGET {
+        uint frame = uint(input.frame_blend.x);
+        uint next_frame = (frame + 1) % impostor_frames;
+        float blend = input.frame_blend.y * frame_blend_factor;
+
+        // Sample both frames
+        float4 color1 = impostor_atlas.Sample(linear_sampler, float3(input.uv, float(frame)));
+        float4 color2 = impostor_atlas.Sample(linear_sampler, float3(input.uv, float(next_frame)));
+
+        float4 albedo = lerp(color1, color2, blend);
+
+        // Alpha test
+        if (albedo.a < alpha_cutoff) {
+            discard;
+        }
+
+        // Sample normals
+        float3 normal1 = impostor_normals.Sample(linear_sampler, float3(input.uv, float(frame))).xyz * 2.0 - 1.0;
+        float3 normal2 = impostor_normals.Sample(linear_sampler, float3(input.uv, float(next_frame))).xyz * 2.0 - 1.0;
+        float3 normal = normalize(lerp(normal1, normal2, blend));
+
+        // Simple lighting
+        float NdotL = max(dot(normal, -sun_direction), 0.0);
+        float3 diffuse = albedo.rgb * NdotL * sun_color;
+        float3 ambient = albedo.rgb * ambient_color;
+
+        float3 final_color = diffuse + ambient;
+
+        return float4(final_color, albedo.a * input.fade);
+    }
+"#;
+
+// ============================================================================
+// VEGETATION INTERACTION SHADER
+// ============================================================================
+
+@shader(compute)
+const VEGETATION_INTERACTION_SHADER: &str = r#"
+    // Apply player/object interaction to vegetation
+
+    cbuffer InteractionParams : register(b0) {
+        float3 interaction_position;
+        float interaction_radius;
+        float interaction_strength;
+        float recovery_speed;
+        float delta_time;
+        float padding;
+    };
+
+    struct InteractionPoint {
+        float3 position;
+        float radius;
+        float3 velocity;
+        float strength;
+    };
+
+    StructuredBuffer<InteractionPoint> interaction_points : register(t0);
+    RWTexture2D<float4> interaction_map : register(u0);  // RG = offset direction, B = strength, A = unused
+
+    [numthreads(8, 8, 1)]
+    void cs_main(uint3 dispatch_id : SV_DispatchThreadID) {
+        float2 uv = float2(dispatch_id.xy) / 256.0;  // Assuming 256x256 map
+
+        float4 current = interaction_map[dispatch_id.xy];
+
+        // World position for this texel
+        float3 world_pos = float3(uv.x * 100.0, 0.0, uv.y * 100.0);  // Assuming 100m terrain
+
+        // Accumulate interactions
+        float2 total_offset = current.rg;
+        float total_strength = current.b;
+
+        for (uint i = 0; i < 8; i++) {  // Max 8 interaction points
+            InteractionPoint point = interaction_points[i];
+
+            if (point.radius <= 0.0) continue;
+
+            float3 to_point = world_pos - point.position;
+            to_point.y = 0.0;
+            float distance = length(to_point);
+
+            if (distance < point.radius) {
+                float falloff = 1.0 - (distance / point.radius);
+                falloff = falloff * falloff;  // Quadratic falloff
+
+                float2 push_dir = normalize(to_point.xz);
+                push_dir += normalize(point.velocity.xz) * 0.5;
+                push_dir = normalize(push_dir);
+
+                total_offset += push_dir * falloff * point.strength;
+                total_strength = max(total_strength, falloff * point.strength);
+            }
+        }
+
+        // Clamp and decay
+        total_offset = clamp(total_offset, -1.0, 1.0);
+        total_strength *= (1.0 - recovery_speed * delta_time);
+        total_offset *= (1.0 - recovery_speed * delta_time * 0.5);
+
+        interaction_map[dispatch_id.xy] = float4(total_offset, total_strength, 0.0);
+    }
+"#;
+
+// ============================================================================
+// VEGETATION SYSTEM
+// ============================================================================
+
+@system
+struct VegetationSystem {
+    config: VegetationConfig,
+    grass_positions_buffer: Handle<Buffer>,
+    grass_params_buffer: Handle<Buffer>,
+    grass_count_buffer: Handle<Buffer>,
+    grass_indirect_buffer: Handle<Buffer>,
+    interaction_map: Handle<Texture>,
+    impostor_atlas: Handle<Texture>,
+    impostor_normals: Handle<Texture>,
+    grass_gen_pipeline: Handle<ComputePipeline>,
+    grass_render_pipeline: Handle<RenderPipeline>,
+    foliage_render_pipeline: Handle<RenderPipeline>,
+    impostor_render_pipeline: Handle<RenderPipeline>,
+    interaction_pipeline: Handle<ComputePipeline>,
+    grass_count: u32,
+}
+
+impl VegetationSystem {
+    fn new(config: VegetationConfig) -> Self {
+        Self {
+            config,
+            grass_positions_buffer: Handle::null(),
+            grass_params_buffer: Handle::null(),
+            grass_count_buffer: Handle::null(),
+            grass_indirect_buffer: Handle::null(),
+            interaction_map: Handle::null(),
+            impostor_atlas: Handle::null(),
+            impostor_normals: Handle::null(),
+            grass_gen_pipeline: Handle::null(),
+            grass_render_pipeline: Handle::null(),
+            foliage_render_pipeline: Handle::null(),
+            impostor_render_pipeline: Handle::null(),
+            interaction_pipeline: Handle::null(),
+            grass_count: 0,
+        }
+    }
+
+    fn initialize(&mut self, device: &RenderDevice) {
+        let max_grass_blades = 1024 * 1024;  // 1M blades
+
+        // Create grass buffers
+        self.grass_positions_buffer = device.create_buffer(&BufferDescriptor {
+            size: (max_grass_blades * 16) as u64,
+            usage: BufferUsage::STORAGE,
+            ..default()
+        });
+
+        self.grass_params_buffer = device.create_buffer(&BufferDescriptor {
+            size: (max_grass_blades * 16) as u64,
+            usage: BufferUsage::STORAGE,
+            ..default()
+        });
+
+        self.grass_count_buffer = device.create_buffer(&BufferDescriptor {
+            size: 4,
+            usage: BufferUsage::STORAGE | BufferUsage::COPY_SRC,
+            ..default()
+        });
+
+        self.grass_indirect_buffer = device.create_buffer(&BufferDescriptor {
+            size: 16,
+            usage: BufferUsage::INDIRECT | BufferUsage::COPY_DST,
+            ..default()
+        });
+
+        // Create interaction map
+        self.interaction_map = device.create_texture(&TextureDescriptor {
+            size: Extent3d { width: 256, height: 256, depth: 1 },
+            format: TextureFormat::Rgba16Float,
+            usage: TextureUsage::STORAGE | TextureUsage::SAMPLED,
+            ..default()
+        });
+
+        // Create pipelines
+        self.grass_gen_pipeline = device.create_compute_pipeline(GRASS_GENERATION_SHADER);
+        self.interaction_pipeline = device.create_compute_pipeline(VEGETATION_INTERACTION_SHADER);
+
+        self.grass_render_pipeline = device.create_render_pipeline(&RenderPipelineDescriptor {
+            vertex: GRASS_VERTEX_SHADER,
+            fragment: GRASS_PIXEL_SHADER,
+            primitive: PrimitiveState {
+                topology: PrimitiveTopology::TriangleStrip,
+                cull_mode: None,  // Double-sided
+            },
+            blend: BlendState::ALPHA_BLEND,
+            ..default()
+        });
+
+        self.foliage_render_pipeline = device.create_render_pipeline(&RenderPipelineDescriptor {
+            vertex: FOLIAGE_VERTEX_SHADER,
+            fragment: FOLIAGE_PIXEL_SHADER,
+            primitive: PrimitiveState {
+                cull_mode: None,
+            },
+            ..default()
+        });
+
+        self.impostor_render_pipeline = device.create_render_pipeline(&RenderPipelineDescriptor {
+            vertex: IMPOSTOR_VERTEX_SHADER,
+            fragment: IMPOSTOR_PIXEL_SHADER,
+            blend: BlendState::ALPHA_BLEND,
+            ..default()
+        });
+    }
+
+    fn update(&mut self, cmd: &mut CommandEncoder, camera: &Camera, delta_time: f32) {
+        // Update interaction map
+        if self.config.interaction_enabled {
+            self.update_interaction(cmd, delta_time);
+        }
+
+        // Generate grass for visible area
+        if self.config.procedural_placement {
+            self.generate_grass(cmd, camera);
+        }
+    }
+
+    fn update_interaction(&self, cmd: &mut CommandEncoder, delta_time: f32) {
+        let mut pass = cmd.begin_compute_pass();
+        pass.set_pipeline(&self.interaction_pipeline);
+        // Set bind groups...
+        pass.dispatch(32, 32, 1);
+    }
+
+    fn generate_grass(&mut self, cmd: &mut CommandEncoder, camera: &Camera) {
+        // Clear grass count
+        cmd.clear_buffer(&self.grass_count_buffer, 0, 4);
+
+        let mut pass = cmd.begin_compute_pass();
+        pass.set_pipeline(&self.grass_gen_pipeline);
+        // Set bind groups...
+        pass.dispatch(32, 32, 1);
+
+        // Copy count to indirect buffer
+        cmd.copy_buffer_to_buffer(
+            &self.grass_count_buffer, 0,
+            &self.grass_indirect_buffer, 4,
+            4
+        );
+    }
+
+    fn render_grass(&self, pass: &mut RenderPass, camera: &Camera) {
+        pass.set_pipeline(&self.grass_render_pipeline);
+        // Set bind groups...
+        pass.draw_indirect(&self.grass_indirect_buffer, 0);
+    }
+
+    fn render_foliage(&self, pass: &mut RenderPass, meshes: &[FoliageMesh], camera: &Camera) {
+        pass.set_pipeline(&self.foliage_render_pipeline);
+
+        for mesh in meshes {
+            let distance = (mesh.position - camera.position).length();
+
+            if distance > self.config.lod_distance_2 {
+                continue;  // Skip or use impostor
+            }
+
+            // Set mesh-specific bind groups...
+            pass.draw_indexed(mesh.index_count, mesh.instance_count, 0, 0, 0);
+        }
+    }
+
+    fn render_impostors(&self, pass: &mut RenderPass, impostors: &[ImpostorInstance], camera: &Camera) {
+        pass.set_pipeline(&self.impostor_render_pipeline);
+        // Set bind groups...
+        // Draw impostor billboards
+    }
+}
+
+struct FoliageMesh {
+    position: Vec3,
+    index_count: u32,
+    instance_count: u32,
+}
+
+struct ImpostorInstance {
+    position: Vec3,
+    scale: f32,
+    rotation: f32,
+}

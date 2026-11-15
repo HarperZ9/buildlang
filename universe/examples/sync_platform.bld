@@ -1,0 +1,614 @@
+// ═══════════════════════════════════════════════════════════════════════════════
+// EXAMPLE: Cross-Platform Sync System
+// Demonstrates: entangle, calibrate, nova, buildos
+// ═══════════════════════════════════════════════════════════════════════════════
+// This example shows how the integration modules work together to create
+// a cross-platform synchronization and calibration system.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+use foundation::io::{println, print}
+use foundation::collections::{Vec, HashMap}
+use foundation::time::{Instant, Duration}
+
+// Import integration modules
+use entangle::{
+    SyncEngine, Device, DeviceType, SyncProfile,
+    ConflictResolver, DeltaCompressor, P2PNetwork
+}
+use calibrate::{
+    DisplayCalibrator, ICC, ColorProfile,
+    DisplayInfo, CalibrationResult, MeasurementDevice
+}
+use nova::{
+    PresetEngine, RenderPreset, PresetCategory,
+    GameDetector, PerformanceProfile
+}
+use buildos::{Process, Thread, Message, IPC}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// SYNC PLATFORM
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Cross-platform synchronization platform
+pub struct SyncPlatform {
+    sync_engine: SyncEngine,
+    devices: Vec<Device>,
+    profiles: HashMap<String, SyncProfile>,
+    network: P2PNetwork,
+    config: SyncConfig,
+}
+
+#[derive(Clone)]
+pub struct SyncConfig {
+    pub device_name: String,
+    pub sync_interval_ms: u64,
+    pub compression_enabled: bool,
+    pub encryption_enabled: bool,
+    pub max_devices: usize,
+}
+
+impl Default for SyncConfig {
+    fn default() -> Self {
+        SyncConfig {
+            device_name: "BUILD-Device".to_string(),
+            sync_interval_ms: 5000,
+            compression_enabled: true,
+            encryption_enabled: true,
+            max_devices: 10,
+        }
+    }
+}
+
+impl SyncPlatform {
+    pub fn new(config: SyncConfig) -> Self {
+        println!("Initializing Sync Platform...");
+
+        let sync_engine = SyncEngine::new(&config.device_name);
+        let network = P2PNetwork::new(config.encryption_enabled);
+
+        println!("  Device: {}", config.device_name);
+        println!("  Sync interval: {}ms", config.sync_interval_ms);
+        println!("  Compression: {}", config.compression_enabled);
+        println!("  Encryption: {}", config.encryption_enabled);
+
+        SyncPlatform {
+            sync_engine,
+            devices: Vec::new(),
+            profiles: HashMap::new(),
+            network,
+            config,
+        }
+    }
+
+    /// Start the sync service
+    pub fn start(&mut self) {
+        println!("\nStarting Entangle Sync Service...");
+
+        // Discover devices on the network
+        self.discover_devices();
+
+        // Initialize sync profiles
+        self.init_profiles();
+
+        // Start sync loop
+        self.sync_loop();
+    }
+
+    fn discover_devices(&mut self) {
+        println!("  Discovering devices...");
+
+        // Simulate device discovery
+        let mock_devices = vec![
+            Device::new("Desktop-Main", DeviceType::Desktop),
+            Device::new("Laptop-Work", DeviceType::Laptop),
+            Device::new("Phone-Personal", DeviceType::Mobile),
+        ];
+
+        for device in mock_devices {
+            println!("    Found: {} ({:?})", device.name, device.device_type);
+            self.devices.push(device);
+        }
+
+        println!("  {} devices found", self.devices.len());
+    }
+
+    fn init_profiles(&mut self) {
+        println!("  Initializing sync profiles...");
+
+        // Settings sync profile
+        let settings_profile = SyncProfile::new("settings")
+            .with_paths(vec![
+                "~/.config/build/".to_string(),
+                "~/.bld/preferences/".to_string(),
+            ])
+            .with_conflict_strategy(ConflictStrategy::LastWriteWins);
+
+        self.profiles.insert("settings".to_string(), settings_profile);
+
+        // Presets sync profile
+        let presets_profile = SyncProfile::new("presets")
+            .with_paths(vec![
+                "~/.bld/presets/".to_string(),
+                "~/.bld/luts/".to_string(),
+            ])
+            .with_conflict_strategy(ConflictStrategy::Merge);
+
+        self.profiles.insert("presets".to_string(), presets_profile);
+
+        // Calibration sync profile
+        let calibration_profile = SyncProfile::new("calibration")
+            .with_paths(vec![
+                "~/.bld/calibration/".to_string(),
+                "~/.bld/icc/".to_string(),
+            ])
+            .with_conflict_strategy(ConflictStrategy::KeepBoth);
+
+        self.profiles.insert("calibration".to_string(), calibration_profile);
+
+        println!("  {} profiles initialized", self.profiles.len());
+    }
+
+    fn sync_loop(&mut self) {
+        println!("\nRunning sync cycle...");
+
+        for (name, profile) in &self.profiles {
+            println!("  Syncing profile: {}", name);
+
+            // Calculate delta
+            let delta = self.sync_engine.calculate_delta(profile);
+            println!("    Changes: {} files, {} bytes", delta.files, delta.bytes);
+
+            // Compress if enabled
+            let data = if self.config.compression_enabled {
+                let compressed = DeltaCompressor::compress(&delta);
+                println!("    Compressed: {} -> {} bytes ({:.1}%)",
+                    delta.bytes, compressed.len(),
+                    (1.0 - compressed.len() as f64 / delta.bytes as f64) * 100.0);
+                compressed
+            } else {
+                delta.raw_data.clone()
+            };
+
+            // Sync to all devices
+            for device in &self.devices {
+                let result = self.sync_engine.sync_to(&device, &data);
+                match result {
+                    SyncResult::Success => println!("    ✓ Synced to {}", device.name),
+                    SyncResult::Conflict(c) => {
+                        println!("    ⚠ Conflict on {}: {}", device.name, c);
+                        // Resolve conflict
+                        self.resolve_conflict(&c, profile);
+                    }
+                    SyncResult::Error(e) => println!("    ✗ Error on {}: {}", device.name, e),
+                }
+            }
+        }
+    }
+
+    fn resolve_conflict(&self, conflict: &str, profile: &SyncProfile) {
+        let resolver = ConflictResolver::new(profile.conflict_strategy);
+        let resolution = resolver.resolve(conflict);
+        println!("      Resolved: {}", resolution);
+    }
+}
+
+#[derive(Clone, Copy)]
+pub enum ConflictStrategy {
+    LastWriteWins,
+    Merge,
+    KeepBoth,
+    AskUser,
+}
+
+pub enum SyncResult {
+    Success,
+    Conflict(String),
+    Error(String),
+}
+
+pub struct SyncDelta {
+    pub files: usize,
+    pub bytes: usize,
+    pub raw_data: Vec<u8>,
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// DISPLAY CALIBRATION
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Display calibration system using calibrate module
+pub struct DisplayCalibrationSystem {
+    calibrator: DisplayCalibrator,
+    displays: Vec<DisplayInfo>,
+    profiles: HashMap<String, ColorProfile>,
+}
+
+impl DisplayCalibrationSystem {
+    pub fn new() -> Self {
+        println!("Initializing Display Calibration System...");
+
+        let calibrator = DisplayCalibrator::new();
+
+        DisplayCalibrationSystem {
+            calibrator,
+            displays: Vec::new(),
+            profiles: HashMap::new(),
+        }
+    }
+
+    /// Detect connected displays
+    pub fn detect_displays(&mut self) {
+        println!("  Detecting displays...");
+
+        // Simulate display detection
+        self.displays = vec![
+            DisplayInfo {
+                id: "Display1".to_string(),
+                name: "ASUS ProArt PA32UCG".to_string(),
+                resolution: (3840, 2160),
+                refresh_rate: 120,
+                hdr_capable: true,
+                color_depth: 10,
+                gamut: "DCI-P3".to_string(),
+            },
+            DisplayInfo {
+                id: "Display2".to_string(),
+                name: "Dell U2723QE".to_string(),
+                resolution: (3840, 2160),
+                refresh_rate: 60,
+                hdr_capable: true,
+                color_depth: 10,
+                gamut: "sRGB".to_string(),
+            },
+        ];
+
+        for display in &self.displays {
+            println!("    Found: {} ({}x{} @ {}Hz)",
+                display.name, display.resolution.0, display.resolution.1, display.refresh_rate);
+            println!("      HDR: {}, Depth: {}-bit, Gamut: {}",
+                display.hdr_capable, display.color_depth, display.gamut);
+        }
+    }
+
+    /// Calibrate a display
+    pub fn calibrate(&mut self, display_id: &str) -> Result<CalibrationResult, String> {
+        println!("\nCalibrating display: {}", display_id);
+
+        let display = self.displays.iter()
+            .find(|d| d.id == display_id)
+            .ok_or("Display not found")?;
+
+        // Calibration steps
+        println!("  Step 1: Measuring native characteristics...");
+        let native_profile = self.calibrator.measure_native(display);
+        println!("    Native white point: {:?}", native_profile.white_point);
+        println!("    Native gamma: {:.2}", native_profile.gamma);
+
+        println!("  Step 2: Generating calibration LUT...");
+        let lut = self.calibrator.generate_lut(&native_profile, CalibrationTarget::D65_Gamma22);
+        println!("    LUT entries: {}", lut.size);
+
+        println!("  Step 3: Applying calibration...");
+        self.calibrator.apply_lut(display, &lut)?;
+        println!("    ✓ Calibration applied");
+
+        println!("  Step 4: Verifying results...");
+        let verification = self.calibrator.verify(display);
+        println!("    Delta E average: {:.2}", verification.avg_delta_e);
+        println!("    Delta E max: {:.2}", verification.max_delta_e);
+
+        // Generate ICC profile
+        println!("  Step 5: Generating ICC profile...");
+        let icc_profile = ICC::generate(&native_profile, &lut);
+        let profile_path = format!("~/.bld/icc/{}.icc", display_id);
+        icc_profile.save(&profile_path)?;
+        println!("    ✓ Saved to {}", profile_path);
+
+        self.profiles.insert(display_id.to_string(), icc_profile.clone());
+
+        Ok(CalibrationResult {
+            display_id: display_id.to_string(),
+            profile: icc_profile,
+            avg_delta_e: verification.avg_delta_e,
+            max_delta_e: verification.max_delta_e,
+        })
+    }
+}
+
+pub struct CalibrationTarget;
+impl CalibrationTarget {
+    pub const D65_Gamma22: Self = CalibrationTarget;
+}
+
+pub struct NativeProfile {
+    pub white_point: (f64, f64),
+    pub gamma: f64,
+    pub primaries: [(f64, f64); 3],
+}
+
+pub struct CalibrationLUT {
+    pub size: usize,
+    pub data: Vec<u8>,
+}
+
+pub struct VerificationResult {
+    pub avg_delta_e: f64,
+    pub max_delta_e: f64,
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// PRESET MANAGEMENT
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Preset management system using nova module
+pub struct PresetManager {
+    engine: PresetEngine,
+    detector: GameDetector,
+    presets: HashMap<String, RenderPreset>,
+    active_preset: Option<String>,
+}
+
+impl PresetManager {
+    pub fn new() -> Self {
+        println!("Initializing Preset Manager...");
+
+        PresetManager {
+            engine: PresetEngine::new(),
+            detector: GameDetector::new(),
+            presets: HashMap::new(),
+            active_preset: None,
+        }
+    }
+
+    /// Load all presets from disk
+    pub fn load_presets(&mut self, path: &str) {
+        println!("  Loading presets from {}...", path);
+
+        // Simulate loading presets
+        let preset_files = vec![
+            ("cinematic", PresetCategory::Visuals),
+            ("performance", PresetCategory::Performance),
+            ("competitive", PresetCategory::Competitive),
+            ("hdr_vivid", PresetCategory::HDR),
+            ("sdr_balanced", PresetCategory::SDR),
+        ];
+
+        for (name, category) in preset_files {
+            let preset = RenderPreset::new(name, category);
+            self.presets.insert(name.to_string(), preset);
+            println!("    Loaded: {} ({:?})", name, category);
+        }
+
+        println!("  {} presets loaded", self.presets.len());
+    }
+
+    /// Auto-detect running game and apply preset
+    pub fn auto_apply(&mut self) {
+        println!("\n  Auto-detecting game...");
+
+        if let Some(game) = self.detector.detect() {
+            println!("    Detected: {}", game.name);
+
+            // Find best preset for this game
+            if let Some(preset_name) = self.find_preset_for_game(&game) {
+                println!("    Applying preset: {}", preset_name);
+                self.apply_preset(&preset_name);
+            } else {
+                println!("    No specific preset found, using default");
+                self.apply_preset("sdr_balanced");
+            }
+        } else {
+            println!("    No game detected");
+        }
+    }
+
+    fn find_preset_for_game(&self, game: &DetectedGame) -> Option<String> {
+        // Game-specific preset mapping
+        let mappings: HashMap<&str, &str> = [
+            ("Cyberpunk 2077", "cinematic"),
+            ("CS2", "competitive"),
+            ("Elden Ring", "hdr_vivid"),
+        ].into_iter().collect();
+
+        mappings.get(game.name.as_str()).map(|s| s.to_string())
+    }
+
+    pub fn apply_preset(&mut self, name: &str) {
+        if let Some(preset) = self.presets.get(name) {
+            self.engine.apply(preset);
+            self.active_preset = Some(name.to_string());
+            println!("    ✓ Preset applied: {}", name);
+
+            // Log settings
+            println!("    Settings:");
+            for (key, value) in &preset.settings {
+                println!("      {}: {}", key, value);
+            }
+        }
+    }
+
+    /// Create a new preset from current settings
+    pub fn create_preset(&mut self, name: &str, category: PresetCategory) {
+        println!("  Creating new preset: {}", name);
+
+        let current_settings = self.engine.capture_current();
+        let preset = RenderPreset::new(name, category)
+            .with_settings(current_settings);
+
+        self.presets.insert(name.to_string(), preset);
+        println!("    ✓ Preset created");
+    }
+}
+
+pub struct DetectedGame {
+    pub name: String,
+    pub executable: String,
+    pub window_title: String,
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// PERFORMANCE MONITOR
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// System performance monitor
+pub struct PerformanceMonitor {
+    samples: Vec<PerformanceSample>,
+    config: MonitorConfig,
+}
+
+pub struct PerformanceSample {
+    pub timestamp: u64,
+    pub fps: f64,
+    pub frame_time_ms: f64,
+    pub cpu_usage: f64,
+    pub gpu_usage: f64,
+    pub vram_used_mb: f64,
+    pub temperature_c: f64,
+}
+
+pub struct MonitorConfig {
+    pub sample_rate_hz: u32,
+    pub history_size: usize,
+}
+
+impl PerformanceMonitor {
+    pub fn new(config: MonitorConfig) -> Self {
+        PerformanceMonitor {
+            samples: Vec::with_capacity(config.history_size),
+            config,
+        }
+    }
+
+    pub fn sample(&mut self) {
+        // Simulate performance sampling
+        let sample = PerformanceSample {
+            timestamp: Instant::now().elapsed().as_millis() as u64,
+            fps: 120.0 + (rand() - 0.5) * 20.0,
+            frame_time_ms: 8.33 + (rand() - 0.5) * 2.0,
+            cpu_usage: 45.0 + (rand() - 0.5) * 30.0,
+            gpu_usage: 80.0 + (rand() - 0.5) * 15.0,
+            vram_used_mb: 8192.0 + (rand() - 0.5) * 1000.0,
+            temperature_c: 65.0 + (rand() - 0.5) * 10.0,
+        };
+
+        if self.samples.len() >= self.config.history_size {
+            self.samples.remove(0);
+        }
+        self.samples.push(sample);
+    }
+
+    pub fn report(&self) {
+        if self.samples.is_empty() {
+            return;
+        }
+
+        let avg_fps: f64 = self.samples.iter().map(|s| s.fps).sum::<f64>() / self.samples.len() as f64;
+        let avg_frame_time: f64 = self.samples.iter().map(|s| s.frame_time_ms).sum::<f64>() / self.samples.len() as f64;
+        let avg_cpu: f64 = self.samples.iter().map(|s| s.cpu_usage).sum::<f64>() / self.samples.len() as f64;
+        let avg_gpu: f64 = self.samples.iter().map(|s| s.gpu_usage).sum::<f64>() / self.samples.len() as f64;
+
+        let one_percent_low = self.calculate_percentile(1.0);
+        let point_one_percent_low = self.calculate_percentile(0.1);
+
+        println!("  Performance Report:");
+        println!("    Average FPS: {:.1}", avg_fps);
+        println!("    1% Low: {:.1}", one_percent_low);
+        println!("    0.1% Low: {:.1}", point_one_percent_low);
+        println!("    Frame Time: {:.2}ms", avg_frame_time);
+        println!("    CPU Usage: {:.1}%", avg_cpu);
+        println!("    GPU Usage: {:.1}%", avg_gpu);
+    }
+
+    fn calculate_percentile(&self, percentile: f64) -> f64 {
+        let mut fps_values: Vec<f64> = self.samples.iter().map(|s| s.fps).collect();
+        fps_values.sort_by(|a, b| a.partial_cmp(b).unwrap());
+
+        let index = ((percentile / 100.0) * fps_values.len() as f64) as usize;
+        fps_values.get(index).copied().unwrap_or(0.0)
+    }
+}
+
+fn rand() -> f64 {
+    static mut SEED: u64 = 42;
+    unsafe {
+        SEED = SEED.wrapping_mul(1103515245).wrapping_add(12345);
+        ((SEED >> 16) as f64) / 65536.0
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// MAIN
+// ═══════════════════════════════════════════════════════════════════════════════
+
+fn main() {
+    println!("╔═══════════════════════════════════════════════════════════════╗");
+    println!("║  Cross-Platform Sync Demo                                     ║");
+    println!("║  Powered by BUILD-UNIVERSE                                   ║");
+    println!("╚═══════════════════════════════════════════════════════════════╝");
+    println!();
+
+    // Demo 1: Sync Platform
+    println!("═══════════════════════════════════════════════════════════════════");
+    println!("  ENTANGLE: Cross-Platform Sync");
+    println!("═══════════════════════════════════════════════════════════════════");
+
+    let config = SyncConfig {
+        device_name: "BUILD-Desktop".to_string(),
+        ..Default::default()
+    };
+
+    let mut sync_platform = SyncPlatform::new(config);
+    sync_platform.start();
+
+    // Demo 2: Display Calibration
+    println!();
+    println!("═══════════════════════════════════════════════════════════════════");
+    println!("  CALIBRATE: Display Calibration");
+    println!("═══════════════════════════════════════════════════════════════════");
+
+    let mut calibration = DisplayCalibrationSystem::new();
+    calibration.detect_displays();
+
+    match calibration.calibrate("Display1") {
+        Ok(result) => {
+            println!("\n  Calibration complete:");
+            println!("    Profile: {}", result.display_id);
+            println!("    Accuracy: ΔE avg={:.2}, max={:.2}",
+                result.avg_delta_e, result.max_delta_e);
+        }
+        Err(e) => println!("  Calibration failed: {}", e),
+    }
+
+    // Demo 3: Preset Management
+    println!();
+    println!("═══════════════════════════════════════════════════════════════════");
+    println!("  NOVA: Preset Management");
+    println!("═══════════════════════════════════════════════════════════════════");
+
+    let mut presets = PresetManager::new();
+    presets.load_presets("~/.bld/presets/");
+    presets.auto_apply();
+
+    // Demo 4: Performance Monitoring
+    println!();
+    println!("═══════════════════════════════════════════════════════════════════");
+    println!("  Performance Monitor");
+    println!("═══════════════════════════════════════════════════════════════════");
+
+    let mut monitor = PerformanceMonitor::new(MonitorConfig {
+        sample_rate_hz: 60,
+        history_size: 1000,
+    });
+
+    // Collect some samples
+    for _ in 0..100 {
+        monitor.sample();
+    }
+
+    monitor.report();
+
+    println!();
+    println!("═══════════════════════════════════════════════════════════════════");
+    println!("  Cross-Platform Sync demo complete!");
+    println!("═══════════════════════════════════════════════════════════════════");
+}

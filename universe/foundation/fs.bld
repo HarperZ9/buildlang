@@ -1,0 +1,1460 @@
+// ===============================================================================
+// FOUNDATION STANDARD LIBRARY - FILESYSTEM MODULE
+// ===============================================================================
+// Copyright (c) 2024-2025 Zain Dana Harper. All Rights Reserved.
+// Copyright (c) 2024-2025 Zain Dana Harper. All Rights Reserved.
+// ===============================================================================
+
+//! # Filesystem Module
+//!
+//! Comprehensive filesystem operations for the Foundation Standard Library:
+//! - Path manipulation
+//! - File reading and writing
+//! - Directory operations
+//! - File metadata and permissions
+//! - Symbolic links
+//! - File watching
+//! - Async file I/O
+//!
+//! ## Design Philosophy
+//!
+//! This module provides both synchronous and asynchronous APIs for filesystem
+//! operations, with careful attention to cross-platform compatibility.
+
+use crate::io::{Read, Write, Seek, SeekFrom, IoError};
+use crate::time::SystemTime;
+
+// =============================================================================
+// Path
+// =============================================================================
+
+/// A slice of a path (like &str for paths)
+#[derive(Debug, PartialEq, Eq, Hash)]
+pub struct Path {
+    inner: str,
+}
+
+impl Path {
+    /// Create a new Path from a string
+    pub fn new<S: AsRef<str> + ?Sized>(s: &S) -> &Path {
+        unsafe { &*(s.as_ref() as *const str as *const Path) }
+    }
+
+    /// Get the underlying string
+    pub fn as_str(self: &Self) -> &str {
+        &self.inner
+    }
+
+    /// Convert to owned PathBuf
+    pub fn to_path_buf(self: &Self) -> PathBuf {
+        PathBuf { inner: self.inner.to_string() }
+    }
+
+    /// Check if the path is absolute
+    pub fn is_absolute(self: &Self) -> bool {
+        #[cfg(windows)]
+        {
+            // Windows: C:\, \\server, etc.
+            let bytes = self.inner.as_bytes();
+            if bytes.len() >= 3 {
+                if bytes[1] == b':' && (bytes[2] == b'\\' || bytes[2] == b'/') {
+                    return true;
+                }
+            }
+            if bytes.len() >= 2 && bytes[0] == b'\\' && bytes[1] == b'\\' {
+                return true;
+            }
+            false
+        }
+
+        #[cfg(not(windows))]
+        {
+            self.inner.starts_with('/')
+        }
+    }
+
+    /// Check if the path is relative
+    pub fn is_relative(self: &Self) -> bool {
+        !self.is_absolute()
+    }
+
+    /// Get the parent directory
+    pub fn parent(self: &Self) -> Option<&Path> {
+        let path = self.inner.trim_end_matches(MAIN_SEPARATOR);
+        if path.is_empty() {
+            return None;
+        }
+
+        match path.rfind(|c| c == '/' || c == '\\') {
+            Some(0) => Some(Path::new("/")),
+            Some(i) => Some(Path::new(&path[..i])),
+            None => None,
+        }
+    }
+
+    /// Get the file name
+    pub fn file_name(self: &Self) -> Option<&str> {
+        let path = self.inner.trim_end_matches(MAIN_SEPARATOR);
+        if path.is_empty() {
+            return None;
+        }
+
+        match path.rfind(|c| c == '/' || c == '\\') {
+            Some(i) => Some(&path[i + 1..]),
+            None => Some(path),
+        }
+    }
+
+    /// Get the file stem (name without extension)
+    pub fn file_stem(self: &Self) -> Option<&str> {
+        let name = self.file_name()?;
+        match name.rfind('.') {
+            Some(0) => Some(name), // Hidden file like .gitignore
+            Some(i) => Some(&name[..i]),
+            None => Some(name),
+        }
+    }
+
+    /// Get the file extension
+    pub fn extension(self: &Self) -> Option<&str> {
+        let name = self.file_name()?;
+        match name.rfind('.') {
+            Some(0) => None, // Hidden file
+            Some(i) => Some(&name[i + 1..]),
+            None => None,
+        }
+    }
+
+    /// Join with another path
+    pub fn join<P: AsRef<Path>>(self: &Self, path: P) -> PathBuf {
+        let path = path.as_ref();
+        if path.is_absolute() {
+            return path.to_path_buf();
+        }
+
+        let mut buf = self.to_path_buf();
+        buf.push(path);
+        buf
+    }
+
+    /// Check if path starts with another path
+    pub fn starts_with<P: AsRef<Path>>(self: &Self, base: P) -> bool {
+        let base = base.as_ref();
+        self.components().zip(base.components()).all(|(a, b)| a == b)
+            && self.components().count() >= base.components().count()
+    }
+
+    /// Check if path ends with another path
+    pub fn ends_with<P: AsRef<Path>>(self: &Self, child: P) -> bool {
+        let child = child.as_ref();
+        let self_components: Vec<_> = self.components().collect();
+        let child_components: Vec<_> = child.components().collect();
+
+        if child_components.len() > self_components.len() {
+            return false;
+        }
+
+        self_components[self_components.len() - child_components.len()..]
+            .iter()
+            .zip(child_components.iter())
+            .all(|(a, b)| a == b)
+    }
+
+    /// Get path components iterator
+    pub fn components(self: &Self) -> Components<'_> {
+        Components {
+            path: &self.inner,
+            pos: 0,
+        }
+    }
+
+    /// Get ancestors iterator
+    pub fn ancestors(self: &Self) -> Ancestors<'_> {
+        Ancestors { next: Some(self) }
+    }
+
+    /// Check if path exists
+    pub fn exists(self: &Self) -> bool {
+        metadata(self).is_ok()
+    }
+
+    /// Check if path is a file
+    pub fn is_file(self: &Self) -> bool {
+        metadata(self).map(|m| m.is_file()).unwrap_or(false)
+    }
+
+    /// Check if path is a directory
+    pub fn is_dir(self: &Self) -> bool {
+        metadata(self).map(|m| m.is_dir()).unwrap_or(false)
+    }
+
+    /// Check if path is a symbolic link
+    pub fn is_symlink(self: &Self) -> bool {
+        symlink_metadata(self).map(|m| m.is_symlink()).unwrap_or(false)
+    }
+
+    /// Get metadata
+    pub fn metadata(self: &Self) -> Result<Metadata, IoError> {
+        metadata(self)
+    }
+
+    /// Get symlink metadata
+    pub fn symlink_metadata(self: &Self) -> Result<Metadata, IoError> {
+        symlink_metadata(self)
+    }
+
+    /// Read the entire file to string
+    pub fn read_to_string(self: &Self) -> Result<String, IoError> {
+        read_to_string(self)
+    }
+
+    /// Read the entire file to bytes
+    pub fn read(self: &Self) -> Result<Vec<u8>, IoError> {
+        read(self)
+    }
+
+    /// Canonicalize the path (resolve symlinks and normalize)
+    pub fn canonicalize(self: &Self) -> Result<PathBuf, IoError> {
+        canonicalize(self)
+    }
+
+    /// Read link target
+    pub fn read_link(self: &Self) -> Result<PathBuf, IoError> {
+        read_link(self)
+    }
+
+    /// Iterate directory entries
+    pub fn read_dir(self: &Self) -> Result<ReadDir, IoError> {
+        read_dir(self)
+    }
+
+    /// Display the path
+    pub fn display(self: &Self) -> Display<'_> {
+        Display { path: self }
+    }
+}
+
+impl AsRef<Path> for Path {
+    fn as_ref(self: &Self) -> &Path {
+        self
+    }
+}
+
+impl AsRef<Path> for str {
+    fn as_ref(self: &Self) -> &Path {
+        Path::new(self)
+    }
+}
+
+impl AsRef<Path> for String {
+    fn as_ref(self: &Self) -> &Path {
+        Path::new(self)
+    }
+}
+
+/// Path display helper
+pub struct Display<'a> {
+    path: &'a Path,
+}
+
+impl<'a> std::fmt::Display for Display<'a> {
+    fn fmt(self: &Self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.path.as_str())
+    }
+}
+
+/// Path components iterator
+pub struct Components<'a> {
+    path: &'a str,
+    pos: usize,
+}
+
+impl<'a> Iterator for Components<'a> {
+    type Item = Component<'a>;
+
+    fn next(self: &mut Self) -> Option<Self::Item> {
+        if self.pos >= self.path.len() {
+            return None;
+        }
+
+        // Skip separators
+        while self.pos < self.path.len() {
+            let c = self.path.as_bytes()[self.pos];
+            if c != b'/' && c != b'\\' {
+                break;
+            }
+            self.pos += 1;
+        }
+
+        if self.pos >= self.path.len() {
+            return None;
+        }
+
+        // Find end of component
+        let start = self.pos;
+        while self.pos < self.path.len() {
+            let c = self.path.as_bytes()[self.pos];
+            if c == b'/' || c == b'\\' {
+                break;
+            }
+            self.pos += 1;
+        }
+
+        let component = &self.path[start..self.pos];
+
+        match component {
+            "." => Some(Component::CurDir),
+            ".." => Some(Component::ParentDir),
+            _ => Some(Component::Normal(component)),
+        }
+    }
+}
+
+/// A component of a path
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Component<'a> {
+    /// Root directory
+    RootDir,
+    /// Current directory (.)
+    CurDir,
+    /// Parent directory (..)
+    ParentDir,
+    /// Normal component
+    Normal(&'a str),
+    /// Windows prefix (C:, \\server, etc.)
+    Prefix(&'a str),
+}
+
+/// Ancestors iterator
+pub struct Ancestors<'a> {
+    next: Option<&'a Path>,
+}
+
+impl<'a> Iterator for Ancestors<'a> {
+    type Item = &'a Path;
+
+    fn next(self: &mut Self) -> Option<Self::Item> {
+        let next = self.next?;
+        self.next = next.parent();
+        Some(next)
+    }
+}
+
+// =============================================================================
+// PathBuf
+// =============================================================================
+
+/// An owned, mutable path
+#[derive(Clone, PartialEq, Eq, Hash, Debug, Default)]
+pub struct PathBuf {
+    inner: String,
+}
+
+impl PathBuf {
+    /// Create a new empty PathBuf
+    pub fn new() -> Self {
+        PathBuf { inner: String::new() }
+    }
+
+    /// Create from a string
+    pub fn from<S: Into<String>>(s: S) -> Self {
+        PathBuf { inner: s.into() }
+    }
+
+    /// Get as a Path
+    pub fn as_path(self: &Self) -> &Path {
+        Path::new(&self.inner)
+    }
+
+    /// Push a path component
+    pub fn push<P: AsRef<Path>>(self: &mut Self, path: P) {
+        let path = path.as_ref();
+        if path.is_absolute() {
+            self.inner = path.as_str().to_string();
+            return;
+        }
+
+        if !self.inner.is_empty() && !self.inner.ends_with(MAIN_SEPARATOR) {
+            self.inner.push(MAIN_SEPARATOR);
+        }
+        self.inner.push_str(path.as_str());
+    }
+
+    /// Pop the last component
+    pub fn pop(self: &mut Self) -> bool {
+        if let Some(parent) = self.as_path().parent() {
+            self.inner = parent.as_str().to_string();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Set the file name
+    pub fn set_file_name<S: AsRef<str>>(self: &mut Self, name: S) {
+        if self.as_path().file_name().is_some() {
+            self.pop();
+        }
+        self.push(Path::new(name.as_ref()));
+    }
+
+    /// Set the extension
+    pub fn set_extension<S: AsRef<str>>(self: &mut Self, extension: S) -> bool {
+        let stem = match self.as_path().file_stem() {
+            Some(s) => s.to_string(),
+            None => return false,
+        };
+
+        self.pop();
+
+        let ext = extension.as_ref();
+        if ext.is_empty() {
+            self.push(Path::new(&stem));
+        } else {
+            self.push(Path::new(&format!("{}.{}", stem, ext)));
+        }
+        true
+    }
+
+    /// Get capacity
+    pub fn capacity(self: &Self) -> usize {
+        self.inner.capacity()
+    }
+
+    /// Clear the path
+    pub fn clear(self: &mut Self) {
+        self.inner.clear();
+    }
+
+    /// Reserve capacity
+    pub fn reserve(self: &mut Self, additional: usize) {
+        self.inner.reserve(additional);
+    }
+
+    /// Shrink to fit
+    pub fn shrink_to_fit(self: &mut Self) {
+        self.inner.shrink_to_fit();
+    }
+
+    /// Convert to string
+    pub fn into_string(self) -> String {
+        self.inner
+    }
+}
+
+impl std::ops::Deref for PathBuf {
+    type Target = Path;
+
+    fn deref(self: &Self) -> &Path {
+        self.as_path()
+    }
+}
+
+impl AsRef<Path> for PathBuf {
+    fn as_ref(self: &Self) -> &Path {
+        self.as_path()
+    }
+}
+
+impl From<String> for PathBuf {
+    fn from(s: String) -> Self {
+        PathBuf { inner: s }
+    }
+}
+
+impl From<&str> for PathBuf {
+    fn from(s: &str) -> Self {
+        PathBuf { inner: s.to_string() }
+    }
+}
+
+impl std::fmt::Display for PathBuf {
+    fn fmt(self: &Self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.inner)
+    }
+}
+
+// Path separator
+#[cfg(windows)]
+const MAIN_SEPARATOR: char = '\\';
+#[cfg(not(windows))]
+const MAIN_SEPARATOR: char = '/';
+
+// =============================================================================
+// File
+// =============================================================================
+
+/// A handle to an open file
+pub struct File {
+    handle: intrinsic::FileHandle,
+}
+
+impl File {
+    /// Open a file for reading
+    pub fn open<P: AsRef<Path>>(path: P) -> Result<File, IoError> {
+        OpenOptions::new().read(true).open(path)
+    }
+
+    /// Create a file for writing (truncates existing)
+    pub fn create<P: AsRef<Path>>(path: P) -> Result<File, IoError> {
+        OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(path)
+    }
+
+    /// Create a new file (fails if exists)
+    pub fn create_new<P: AsRef<Path>>(path: P) -> Result<File, IoError> {
+        OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+    }
+
+    /// Open with custom options
+    pub fn options() -> OpenOptions {
+        OpenOptions::new()
+    }
+
+    /// Sync all OS-internal metadata to disk
+    pub fn sync_all(self: &Self) -> Result<(), IoError> {
+        intrinsic::fsync(self.handle, true)
+    }
+
+    /// Sync data to disk (not necessarily metadata)
+    pub fn sync_data(self: &Self) -> Result<(), IoError> {
+        intrinsic::fsync(self.handle, false)
+    }
+
+    /// Set the file length
+    pub fn set_len(self: &Self, size: u64) -> Result<(), IoError> {
+        intrinsic::ftruncate(self.handle, size)
+    }
+
+    /// Get file metadata
+    pub fn metadata(self: &Self) -> Result<Metadata, IoError> {
+        intrinsic::fmetadata(self.handle)
+    }
+
+    /// Try to clone the file handle
+    pub fn try_clone(self: &Self) -> Result<File, IoError> {
+        Ok(File {
+            handle: intrinsic::dup(self.handle)?,
+        })
+    }
+
+    /// Set permissions
+    pub fn set_permissions(self: &Self, perm: Permissions) -> Result<(), IoError> {
+        intrinsic::fchmod(self.handle, perm)
+    }
+
+    /// Set file times
+    pub fn set_times(self: &Self, times: FileTimes) -> Result<(), IoError> {
+        intrinsic::futimens(self.handle, times)
+    }
+}
+
+impl Read for File {
+    fn read(self: &mut Self, buf: &mut [u8]) -> Result<usize, IoError> {
+        intrinsic::read(self.handle, buf)
+    }
+}
+
+impl Write for File {
+    fn write(self: &mut Self, buf: &[u8]) -> Result<usize, IoError> {
+        intrinsic::write(self.handle, buf)
+    }
+
+    fn flush(self: &mut Self) -> Result<(), IoError> {
+        Ok(()) // Files are not buffered at this level
+    }
+}
+
+impl Seek for File {
+    fn seek(self: &mut Self, pos: SeekFrom) -> Result<u64, IoError> {
+        intrinsic::seek(self.handle, pos)
+    }
+}
+
+impl Drop for File {
+    fn drop(self: &mut Self) {
+        let _ = intrinsic::close(self.handle);
+    }
+}
+
+// =============================================================================
+// OpenOptions
+// =============================================================================
+
+/// Options for opening files
+#[derive(Clone, Debug)]
+pub struct OpenOptions {
+    read: bool,
+    write: bool,
+    append: bool,
+    truncate: bool,
+    create: bool,
+    create_new: bool,
+    mode: u32, // Unix permissions
+}
+
+impl OpenOptions {
+    /// Create a new OpenOptions with defaults
+    pub fn new() -> Self {
+        OpenOptions {
+            read: false,
+            write: false,
+            append: false,
+            truncate: false,
+            create: false,
+            create_new: false,
+            mode: 0o666,
+        }
+    }
+
+    /// Set read access
+    pub fn read(self: mut Self, read: bool) -> Self {
+        self.read = read;
+        self
+    }
+
+    /// Set write access
+    pub fn write(self: mut Self, write: bool) -> Self {
+        self.write = write;
+        self
+    }
+
+    /// Set append mode
+    pub fn append(self: mut Self, append: bool) -> Self {
+        self.append = append;
+        self
+    }
+
+    /// Set truncate mode
+    pub fn truncate(self: mut Self, truncate: bool) -> Self {
+        self.truncate = truncate;
+        self
+    }
+
+    /// Set create mode
+    pub fn create(self: mut Self, create: bool) -> Self {
+        self.create = create;
+        self
+    }
+
+    /// Set create_new mode (fail if exists)
+    pub fn create_new(self: mut Self, create_new: bool) -> Self {
+        self.create_new = create_new;
+        self
+    }
+
+    /// Set Unix permissions mode
+    pub fn mode(self: mut Self, mode: u32) -> Self {
+        self.mode = mode;
+        self
+    }
+
+    /// Open the file
+    pub fn open<P: AsRef<Path>>(self: &Self, path: P) -> Result<File, IoError> {
+        let handle = intrinsic::open(path.as_ref(), self)?;
+        Ok(File { handle })
+    }
+}
+
+impl Default for OpenOptions {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// =============================================================================
+// Metadata
+// =============================================================================
+
+/// Metadata about a file
+#[derive(Clone, Debug)]
+pub struct Metadata {
+    file_type: FileType,
+    size: u64,
+    permissions: Permissions,
+    modified: Option<SystemTime>,
+    accessed: Option<SystemTime>,
+    created: Option<SystemTime>,
+    #[cfg(unix)]
+    mode: u32,
+    #[cfg(unix)]
+    uid: u32,
+    #[cfg(unix)]
+    gid: u32,
+    #[cfg(unix)]
+    ino: u64,
+    #[cfg(unix)]
+    nlink: u64,
+}
+
+impl Metadata {
+    /// Check if this is a file
+    pub fn is_file(self: &Self) -> bool {
+        self.file_type.is_file()
+    }
+
+    /// Check if this is a directory
+    pub fn is_dir(self: &Self) -> bool {
+        self.file_type.is_dir()
+    }
+
+    /// Check if this is a symbolic link
+    pub fn is_symlink(self: &Self) -> bool {
+        self.file_type.is_symlink()
+    }
+
+    /// Get file type
+    pub fn file_type(self: &Self) -> FileType {
+        self.file_type
+    }
+
+    /// Get file size
+    pub fn len(self: &Self) -> u64 {
+        self.size
+    }
+
+    /// Check if file is empty
+    pub fn is_empty(self: &Self) -> bool {
+        self.size == 0
+    }
+
+    /// Get permissions
+    pub fn permissions(self: &Self) -> Permissions {
+        self.permissions
+    }
+
+    /// Get modification time
+    pub fn modified(self: &Self) -> Result<SystemTime, IoError> {
+        self.modified.ok_or(IoError::Unsupported)
+    }
+
+    /// Get access time
+    pub fn accessed(self: &Self) -> Result<SystemTime, IoError> {
+        self.accessed.ok_or(IoError::Unsupported)
+    }
+
+    /// Get creation time
+    pub fn created(self: &Self) -> Result<SystemTime, IoError> {
+        self.created.ok_or(IoError::Unsupported)
+    }
+
+    /// Unix mode
+    #[cfg(unix)]
+    pub fn mode(self: &Self) -> u32 {
+        self.mode
+    }
+
+    /// Unix uid
+    #[cfg(unix)]
+    pub fn uid(self: &Self) -> u32 {
+        self.uid
+    }
+
+    /// Unix gid
+    #[cfg(unix)]
+    pub fn gid(self: &Self) -> u32 {
+        self.gid
+    }
+
+    /// Unix inode
+    #[cfg(unix)]
+    pub fn ino(self: &Self) -> u64 {
+        self.ino
+    }
+
+    /// Unix hard link count
+    #[cfg(unix)]
+    pub fn nlink(self: &Self) -> u64 {
+        self.nlink
+    }
+}
+
+// =============================================================================
+// FileType
+// =============================================================================
+
+/// Type of a file
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct FileType {
+    mode: u8,
+}
+
+impl FileType {
+    const FILE: u8 = 1;
+    const DIR: u8 = 2;
+    const SYMLINK: u8 = 4;
+    const BLOCK: u8 = 8;
+    const CHAR: u8 = 16;
+    const FIFO: u8 = 32;
+    const SOCKET: u8 = 64;
+
+    /// Regular file
+    pub fn is_file(self: &Self) -> bool {
+        self.mode & Self::FILE != 0
+    }
+
+    /// Directory
+    pub fn is_dir(self: &Self) -> bool {
+        self.mode & Self::DIR != 0
+    }
+
+    /// Symbolic link
+    pub fn is_symlink(self: &Self) -> bool {
+        self.mode & Self::SYMLINK != 0
+    }
+
+    /// Block device
+    pub fn is_block_device(self: &Self) -> bool {
+        self.mode & Self::BLOCK != 0
+    }
+
+    /// Character device
+    pub fn is_char_device(self: &Self) -> bool {
+        self.mode & Self::CHAR != 0
+    }
+
+    /// FIFO (named pipe)
+    pub fn is_fifo(self: &Self) -> bool {
+        self.mode & Self::FIFO != 0
+    }
+
+    /// Socket
+    pub fn is_socket(self: &Self) -> bool {
+        self.mode & Self::SOCKET != 0
+    }
+}
+
+// =============================================================================
+// Permissions
+// =============================================================================
+
+/// File permissions
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct Permissions {
+    mode: u32,
+}
+
+impl Permissions {
+    /// Check if readonly
+    pub fn readonly(self: &Self) -> bool {
+        #[cfg(unix)]
+        {
+            self.mode & 0o222 == 0
+        }
+        #[cfg(windows)]
+        {
+            self.mode & 0x1 != 0 // FILE_ATTRIBUTE_READONLY
+        }
+    }
+
+    /// Set readonly
+    pub fn set_readonly(self: &mut Self, readonly: bool) {
+        #[cfg(unix)]
+        {
+            if readonly {
+                self.mode &= !0o222;
+            } else {
+                self.mode |= 0o222;
+            }
+        }
+        #[cfg(windows)]
+        {
+            if readonly {
+                self.mode |= 0x1;
+            } else {
+                self.mode &= !0x1;
+            }
+        }
+    }
+
+    /// Get Unix mode
+    #[cfg(unix)]
+    pub fn mode(self: &Self) -> u32 {
+        self.mode
+    }
+
+    /// Set Unix mode
+    #[cfg(unix)]
+    pub fn set_mode(self: &mut Self, mode: u32) {
+        self.mode = mode;
+    }
+
+    /// Create from Unix mode
+    #[cfg(unix)]
+    pub fn from_mode(mode: u32) -> Self {
+        Permissions { mode }
+    }
+}
+
+// =============================================================================
+// FileTimes
+// =============================================================================
+
+/// File time modification options
+#[derive(Clone, Debug, Default)]
+pub struct FileTimes {
+    accessed: Option<SystemTime>,
+    modified: Option<SystemTime>,
+}
+
+impl FileTimes {
+    /// Create new FileTimes
+    pub fn new() -> Self {
+        FileTimes {
+            accessed: None,
+            modified: None,
+        }
+    }
+
+    /// Set access time
+    pub fn set_accessed(self: mut Self, t: SystemTime) -> Self {
+        self.accessed = Some(t);
+        self
+    }
+
+    /// Set modification time
+    pub fn set_modified(self: mut Self, t: SystemTime) -> Self {
+        self.modified = Some(t);
+        self
+    }
+}
+
+// =============================================================================
+// DirEntry
+// =============================================================================
+
+/// Entry in a directory
+pub struct DirEntry {
+    path: PathBuf,
+    file_type: Option<FileType>,
+    #[cfg(unix)]
+    ino: u64,
+}
+
+impl DirEntry {
+    /// Get the path
+    pub fn path(self: &Self) -> PathBuf {
+        self.path.clone()
+    }
+
+    /// Get file name
+    pub fn file_name(self: &Self) -> &str {
+        self.path.file_name().unwrap_or("")
+    }
+
+    /// Get metadata
+    pub fn metadata(self: &Self) -> Result<Metadata, IoError> {
+        metadata(&self.path)
+    }
+
+    /// Get file type
+    pub fn file_type(self: &Self) -> Result<FileType, IoError> {
+        if let Some(ft) = self.file_type {
+            Ok(ft)
+        } else {
+            Ok(self.metadata()?.file_type())
+        }
+    }
+
+    /// Unix inode
+    #[cfg(unix)]
+    pub fn ino(self: &Self) -> u64 {
+        self.ino
+    }
+}
+
+// =============================================================================
+// ReadDir
+// =============================================================================
+
+/// Iterator over directory entries
+pub struct ReadDir {
+    inner: intrinsic::DirIter,
+    parent: PathBuf,
+}
+
+impl Iterator for ReadDir {
+    type Item = Result<DirEntry, IoError>;
+
+    fn next(self: &mut Self) -> Option<Self::Item> {
+        match intrinsic::readdir_next(&mut self.inner) {
+            Ok(Some((name, file_type, ino))) => {
+                let path = self.parent.join(Path::new(&name));
+                Some(Ok(DirEntry {
+                    path,
+                    file_type: Some(file_type),
+                    #[cfg(unix)]
+                    ino,
+                }))
+            }
+            Ok(None) => None,
+            Err(e) => Some(Err(e)),
+        }
+    }
+}
+
+// =============================================================================
+// Convenience Functions
+// =============================================================================
+
+/// Read entire file to bytes
+pub fn read<P: AsRef<Path>>(path: P) -> Result<Vec<u8>, IoError> {
+    let mut file = File::open(path)?;
+    let mut buf = Vec::new();
+    file.read_to_end(&mut buf)?;
+    Ok(buf)
+}
+
+/// Read entire file to string
+pub fn read_to_string<P: AsRef<Path>>(path: P) -> Result<String, IoError> {
+    let bytes = read(path)?;
+    String::from_utf8(bytes).map_err(|_| IoError::InvalidData("invalid UTF-8".to_string()))
+}
+
+/// Write bytes to file
+pub fn write<P: AsRef<Path>, C: AsRef<[u8]>>(path: P, contents: C) -> Result<(), IoError> {
+    let mut file = File::create(path)?;
+    file.write_all(contents.as_ref())
+}
+
+/// Get metadata
+pub fn metadata<P: AsRef<Path>>(path: P) -> Result<Metadata, IoError> {
+    intrinsic::metadata(path.as_ref())
+}
+
+/// Get symlink metadata
+pub fn symlink_metadata<P: AsRef<Path>>(path: P) -> Result<Metadata, IoError> {
+    intrinsic::symlink_metadata(path.as_ref())
+}
+
+/// Read directory
+pub fn read_dir<P: AsRef<Path>>(path: P) -> Result<ReadDir, IoError> {
+    let inner = intrinsic::opendir(path.as_ref())?;
+    Ok(ReadDir {
+        inner,
+        parent: path.as_ref().to_path_buf(),
+    })
+}
+
+/// Create a directory
+pub fn create_dir<P: AsRef<Path>>(path: P) -> Result<(), IoError> {
+    intrinsic::mkdir(path.as_ref())
+}
+
+/// Create directory and all parent directories
+pub fn create_dir_all<P: AsRef<Path>>(path: P) -> Result<(), IoError> {
+    let path = path.as_ref();
+    if path.is_dir() {
+        return Ok(());
+    }
+    if let Some(parent) = path.parent() {
+        create_dir_all(parent)?;
+    }
+    match create_dir(path) {
+        Ok(()) => Ok(()),
+        Err(IoError::AlreadyExists) if path.is_dir() => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
+/// Remove a file
+pub fn remove_file<P: AsRef<Path>>(path: P) -> Result<(), IoError> {
+    intrinsic::unlink(path.as_ref())
+}
+
+/// Remove an empty directory
+pub fn remove_dir<P: AsRef<Path>>(path: P) -> Result<(), IoError> {
+    intrinsic::rmdir(path.as_ref())
+}
+
+/// Remove a directory and all contents
+pub fn remove_dir_all<P: AsRef<Path>>(path: P) -> Result<(), IoError> {
+    let path = path.as_ref();
+
+    for entry in read_dir(path)? {
+        let entry = entry?;
+        let path = entry.path();
+        if entry.file_type()?.is_dir() {
+            remove_dir_all(&path)?;
+        } else {
+            remove_file(&path)?;
+        }
+    }
+
+    remove_dir(path)
+}
+
+/// Rename a file or directory
+pub fn rename<P: AsRef<Path>, Q: AsRef<Path>>(from: P, to: Q) -> Result<(), IoError> {
+    intrinsic::rename(from.as_ref(), to.as_ref())
+}
+
+/// Copy a file
+pub fn copy<P: AsRef<Path>, Q: AsRef<Path>>(from: P, to: Q) -> Result<u64, IoError> {
+    let mut src = File::open(from)?;
+    let mut dst = File::create(to)?;
+
+    let mut buf = [0u8; 65536];
+    let mut total = 0u64;
+
+    loop {
+        let n = src.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        dst.write_all(&buf[..n])?;
+        total += n as u64;
+    }
+
+    Ok(total)
+}
+
+/// Create a hard link
+pub fn hard_link<P: AsRef<Path>, Q: AsRef<Path>>(original: P, link: Q) -> Result<(), IoError> {
+    intrinsic::link(original.as_ref(), link.as_ref())
+}
+
+/// Create a symbolic link
+#[cfg(unix)]
+pub fn symlink<P: AsRef<Path>, Q: AsRef<Path>>(original: P, link: Q) -> Result<(), IoError> {
+    intrinsic::symlink(original.as_ref(), link.as_ref())
+}
+
+/// Read symbolic link target
+pub fn read_link<P: AsRef<Path>>(path: P) -> Result<PathBuf, IoError> {
+    intrinsic::readlink(path.as_ref())
+}
+
+/// Canonicalize path
+pub fn canonicalize<P: AsRef<Path>>(path: P) -> Result<PathBuf, IoError> {
+    intrinsic::realpath(path.as_ref())
+}
+
+/// Set permissions
+pub fn set_permissions<P: AsRef<Path>>(path: P, perm: Permissions) -> Result<(), IoError> {
+    intrinsic::chmod(path.as_ref(), perm)
+}
+
+/// Check if two paths point to the same file
+pub fn same_file<P: AsRef<Path>, Q: AsRef<Path>>(path1: P, path2: Q) -> Result<bool, IoError> {
+    let m1 = metadata(path1)?;
+    let m2 = metadata(path2)?;
+
+    #[cfg(unix)]
+    {
+        Ok(m1.ino == m2.ino)
+    }
+    #[cfg(not(unix))]
+    {
+        // Fallback: compare canonical paths
+        let c1 = canonicalize(path1)?;
+        let c2 = canonicalize(path2)?;
+        Ok(c1 == c2)
+    }
+}
+
+/// Get current working directory
+pub fn current_dir() -> Result<PathBuf, IoError> {
+    intrinsic::getcwd()
+}
+
+/// Set current working directory
+pub fn set_current_dir<P: AsRef<Path>>(path: P) -> Result<(), IoError> {
+    intrinsic::chdir(path.as_ref())
+}
+
+/// Get temporary directory
+pub fn temp_dir() -> PathBuf {
+    intrinsic::temp_dir()
+}
+
+/// Get home directory
+pub fn home_dir() -> Option<PathBuf> {
+    intrinsic::home_dir()
+}
+
+// =============================================================================
+// Walk Directory
+// =============================================================================
+
+/// Walk a directory recursively
+pub struct WalkDir {
+    stack: Vec<ReadDir>,
+    follow_symlinks: bool,
+    max_depth: Option<usize>,
+    current_depth: usize,
+}
+
+impl WalkDir {
+    /// Create a new directory walker
+    pub fn new<P: AsRef<Path>>(path: P) -> Self {
+        let iter = read_dir(path).ok();
+        WalkDir {
+            stack: iter.into_iter().collect(),
+            follow_symlinks: false,
+            max_depth: None,
+            current_depth: 0,
+        }
+    }
+
+    /// Follow symbolic links
+    pub fn follow_symlinks(self: mut Self, follow: bool) -> Self {
+        self.follow_symlinks = follow;
+        self
+    }
+
+    /// Set maximum depth
+    pub fn max_depth(self: mut Self, depth: usize) -> Self {
+        self.max_depth = Some(depth);
+        self
+    }
+}
+
+impl Iterator for WalkDir {
+    type Item = Result<DirEntry, IoError>;
+
+    fn next(self: &mut Self) -> Option<Self::Item> {
+        loop {
+            let iter = self.stack.last_mut()?;
+
+            match iter.next() {
+                Some(Ok(entry)) => {
+                    let is_dir = entry.file_type()
+                        .map(|ft| ft.is_dir())
+                        .unwrap_or(false);
+
+                    let should_descend = is_dir &&
+                        self.max_depth.map(|d| self.current_depth < d).unwrap_or(true);
+
+                    if should_descend {
+                        if let Ok(child_iter) = read_dir(entry.path()) {
+                            self.stack.push(child_iter);
+                            self.current_depth += 1;
+                        }
+                    }
+
+                    return Some(Ok(entry));
+                }
+                Some(Err(e)) => return Some(Err(e)),
+                None => {
+                    self.stack.pop();
+                    if self.current_depth > 0 {
+                        self.current_depth -= 1;
+                    }
+                }
+            }
+        }
+    }
+}
+
+// =============================================================================
+// Glob Pattern Matching
+// =============================================================================
+
+/// Match a path against a glob pattern
+pub fn glob_match(pattern: &str, path: &str) -> bool {
+    glob_match_impl(pattern.as_bytes(), path.as_bytes())
+}
+
+fn glob_match_impl(pattern: &[u8], path: &[u8]) -> bool {
+    let mut pi = 0;
+    let mut si = 0;
+    let mut star_pi = None;
+    let mut star_si = None;
+
+    while si < path.len() {
+        if pi < pattern.len() && (pattern[pi] == b'?' || pattern[pi] == path[si]) {
+            pi += 1;
+            si += 1;
+        } else if pi < pattern.len() && pattern[pi] == b'*' {
+            star_pi = Some(pi);
+            star_si = Some(si);
+            pi += 1;
+        } else if let Some(spi) = star_pi {
+            pi = spi + 1;
+            star_si = Some(star_si.unwrap() + 1);
+            si = star_si.unwrap();
+        } else {
+            return false;
+        }
+    }
+
+    while pi < pattern.len() && pattern[pi] == b'*' {
+        pi += 1;
+    }
+
+    pi == pattern.len()
+}
+
+/// Expand a glob pattern to matching paths
+pub fn glob<P: AsRef<Path>>(pattern: P) -> Result<Vec<PathBuf>, IoError> {
+    let pattern = pattern.as_ref().as_str();
+    let mut results = Vec::new();
+
+    // Find the base directory (part before first wildcard)
+    let base = pattern
+        .find(|c| c == '*' || c == '?' || c == '[')
+        .map(|i| {
+            let s = &pattern[..i];
+            s.rfind(|c| c == '/' || c == '\\')
+                .map(|j| &pattern[..j])
+                .unwrap_or(".")
+        })
+        .unwrap_or(pattern);
+
+    let base_path = Path::new(base);
+    if !base_path.is_dir() {
+        if glob_match(pattern, base) {
+            results.push(base_path.to_path_buf());
+        }
+        return Ok(results);
+    }
+
+    for entry in WalkDir::new(base_path) {
+        let entry = entry?;
+        let path_str = entry.path().as_path().as_str();
+        if glob_match(pattern, path_str) {
+            results.push(entry.path());
+        }
+    }
+
+    Ok(results)
+}
+
+// =============================================================================
+// Platform Intrinsics
+// =============================================================================
+
+mod intrinsic {
+    use super::*;
+
+    pub type FileHandle = usize;
+    pub type DirIter = usize;
+
+    extern "build" {
+        pub fn open(path: &Path, options: &OpenOptions) -> Result<FileHandle, IoError>;
+        pub fn close(handle: FileHandle) -> Result<(), IoError>;
+        pub fn read(handle: FileHandle, buf: &mut [u8]) -> Result<usize, IoError>;
+        pub fn write(handle: FileHandle, buf: &[u8]) -> Result<usize, IoError>;
+        pub fn seek(handle: FileHandle, pos: SeekFrom) -> Result<u64, IoError>;
+        pub fn fsync(handle: FileHandle, metadata: bool) -> Result<(), IoError>;
+        pub fn ftruncate(handle: FileHandle, size: u64) -> Result<(), IoError>;
+        pub fn fmetadata(handle: FileHandle) -> Result<Metadata, IoError>;
+        pub fn dup(handle: FileHandle) -> Result<FileHandle, IoError>;
+        pub fn fchmod(handle: FileHandle, perm: Permissions) -> Result<(), IoError>;
+        pub fn futimens(handle: FileHandle, times: FileTimes) -> Result<(), IoError>;
+
+        pub fn metadata(path: &Path) -> Result<Metadata, IoError>;
+        pub fn symlink_metadata(path: &Path) -> Result<Metadata, IoError>;
+        pub fn opendir(path: &Path) -> Result<DirIter, IoError>;
+        pub fn readdir_next(iter: &mut DirIter) -> Result<Option<(String, FileType, u64)>, IoError>;
+        pub fn mkdir(path: &Path) -> Result<(), IoError>;
+        pub fn rmdir(path: &Path) -> Result<(), IoError>;
+        pub fn unlink(path: &Path) -> Result<(), IoError>;
+        pub fn rename(from: &Path, to: &Path) -> Result<(), IoError>;
+        pub fn link(original: &Path, link: &Path) -> Result<(), IoError>;
+        pub fn symlink(original: &Path, link: &Path) -> Result<(), IoError>;
+        pub fn readlink(path: &Path) -> Result<PathBuf, IoError>;
+        pub fn realpath(path: &Path) -> Result<PathBuf, IoError>;
+        pub fn chmod(path: &Path, perm: Permissions) -> Result<(), IoError>;
+        pub fn getcwd() -> Result<PathBuf, IoError>;
+        pub fn chdir(path: &Path) -> Result<(), IoError>;
+        pub fn temp_dir() -> PathBuf;
+        pub fn home_dir() -> Option<PathBuf>;
+    }
+}
+
+// =============================================================================
+// Tests
+// =============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_path_components() {
+        let path = Path::new("/home/user/file.txt");
+
+        assert!(path.is_absolute());
+        assert_eq!(path.parent().unwrap().as_str(), "/home/user");
+        assert_eq!(path.file_name(), Some("file.txt"));
+        assert_eq!(path.file_stem(), Some("file"));
+        assert_eq!(path.extension(), Some("txt"));
+    }
+
+    #[test]
+    fn test_pathbuf_operations() {
+        let mut path = PathBuf::from("/home");
+        path.push("user");
+        path.push("file.txt");
+
+        assert_eq!(path.as_str(), "/home/user/file.txt");
+
+        path.set_extension("md");
+        assert_eq!(path.extension(), Some("md"));
+
+        path.pop();
+        assert_eq!(path.as_str(), "/home/user");
+    }
+
+    #[test]
+    fn test_path_join() {
+        let base = Path::new("/home/user");
+        let joined = base.join("documents/file.txt");
+
+        assert_eq!(joined.as_str(), "/home/user/documents/file.txt");
+
+        // Absolute path replaces
+        let joined = base.join("/etc/config");
+        assert_eq!(joined.as_str(), "/etc/config");
+    }
+
+    #[test]
+    fn test_glob_match() {
+        assert!(glob_match("*.txt", "file.txt"));
+        assert!(glob_match("file.*", "file.txt"));
+        assert!(glob_match("*.txt", "hello.txt"));
+        assert!(!glob_match("*.txt", "hello.md"));
+        assert!(glob_match("file?.txt", "file1.txt"));
+        assert!(!glob_match("file?.txt", "file12.txt"));
+        assert!(glob_match("**/test.txt", "a/b/c/test.txt"));
+    }
+
+    #[test]
+    fn test_path_starts_with() {
+        let path = Path::new("/home/user/documents");
+
+        assert!(path.starts_with("/home"));
+        assert!(path.starts_with("/home/user"));
+        assert!(!path.starts_with("/home/other"));
+    }
+
+    #[test]
+    fn test_path_ends_with() {
+        let path = Path::new("/home/user/documents");
+
+        assert!(path.ends_with("documents"));
+        assert!(path.ends_with("user/documents"));
+        assert!(!path.ends_with("home"));
+    }
+
+    #[test]
+    fn test_ancestors() {
+        let path = Path::new("/home/user/documents/file.txt");
+        let ancestors: Vec<_> = path.ancestors().collect();
+
+        assert_eq!(ancestors.len(), 5);
+        assert_eq!(ancestors[0].as_str(), "/home/user/documents/file.txt");
+        assert_eq!(ancestors[1].as_str(), "/home/user/documents");
+        assert_eq!(ancestors[2].as_str(), "/home/user");
+        assert_eq!(ancestors[3].as_str(), "/home");
+        assert_eq!(ancestors[4].as_str(), "/");
+    }
+}

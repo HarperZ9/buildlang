@@ -1,0 +1,1317 @@
+// ============================================================================
+// BUILD UNIVERSE - Foundation Extended Math Module
+// Copyright 2024-2025 Zain Dana Harper. All Rights Reserved.
+// Proprietary and confidential. Unauthorized copying, distribution,
+// or modification is strictly prohibited.
+// ============================================================================
+
+//! Extended mathematics library.
+//!
+//! Provides linear algebra, statistics, numerical methods, and special functions
+//! for scientific computing and data analysis.
+
+use foundation::collections::Vec;
+
+// ============================================================================
+// Constants
+// ============================================================================
+
+pub const EPSILON: f64 = 2.220446049250313e-16;
+pub const SQRT_2: f64 = 1.4142135623730951;
+pub const SQRT_3: f64 = 1.7320508075688772;
+pub const LN_2: f64 = 0.6931471805599453;
+pub const LN_10: f64 = 2.302585092994046;
+pub const EULER_GAMMA: f64 = 0.5772156649015329;
+
+// ============================================================================
+// Vector Operations (Dense Vectors)
+// ============================================================================
+
+/// Dense vector of f64 values.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Vector {
+    data: Vec<f64>,
+}
+
+impl Vector {
+    /// Create vector from slice.
+    pub fn from_slice(data: &[f64]) -> Self {
+        Self { data: data.to_vec() }
+    }
+
+    /// Create zero vector of given length.
+    pub fn zeros(len: usize) -> Self {
+        Self { data: vec![0.0; len] }
+    }
+
+    /// Create ones vector.
+    pub fn ones(len: usize) -> Self {
+        Self { data: vec![1.0; len] }
+    }
+
+    /// Create vector filled with value.
+    pub fn filled(len: usize, value: f64) -> Self {
+        Self { data: vec![value; len] }
+    }
+
+    /// Create vector from range.
+    pub fn range(start: f64, end: f64, step: f64) -> Self {
+        let mut data = Vec::new();
+        let mut x = start;
+        while x < end {
+            data.push(x);
+            x += step;
+        }
+        Self { data }
+    }
+
+    /// Create linearly spaced vector.
+    pub fn linspace(start: f64, end: f64, num: usize) -> Self {
+        if num == 0 {
+            return Self { data: Vec::new() };
+        }
+        if num == 1 {
+            return Self { data: vec![start] };
+        }
+        let step = (end - start) / (num - 1) as f64;
+        let data: Vec<f64> = (0..num).map(|i| start + i as f64 * step).collect();
+        Self { data }
+    }
+
+    /// Vector length.
+    pub fn len(self: &Self) -> usize {
+        self.data.len()
+    }
+
+    /// Check if empty.
+    pub fn is_empty(self: &Self) -> bool {
+        self.data.is_empty()
+    }
+
+    /// Get element at index.
+    pub fn get(self: &Self, i: usize) -> Option<f64> {
+        self.data.get(i).copied()
+    }
+
+    /// Set element at index.
+    pub fn set(self: &mut Self, i: usize, value: f64) {
+        if i < self.data.len() {
+            self.data[i] = value;
+        }
+    }
+
+    /// Get underlying data.
+    pub fn as_slice(self: &Self) -> &[f64] {
+        &self.data
+    }
+
+    /// Dot product.
+    pub fn dot(self: &Self, other: &Vector) -> f64 {
+        assert_eq!(self.len(), other.len(), "Vector dimensions must match");
+        self.data.iter().zip(other.data.iter()).map(|(a, b)| a * b).sum()
+    }
+
+    /// Euclidean norm (L2).
+    pub fn norm(self: &Self) -> f64 {
+        self.dot(self).sqrt()
+    }
+
+    /// L1 norm (Manhattan).
+    pub fn norm_l1(self: &Self) -> f64 {
+        self.data.iter().map(|x| x.abs()).sum()
+    }
+
+    /// L-infinity norm (Max).
+    pub fn norm_linf(self: &Self) -> f64 {
+        self.data.iter().map(|x| x.abs()).fold(0.0, f64::max)
+    }
+
+    /// P-norm.
+    pub fn norm_p(self: &Self, p: f64) -> f64 {
+        self.data.iter().map(|x| x.abs().powf(p)).sum::<f64>().powf(1.0 / p)
+    }
+
+    /// Normalize to unit vector.
+    pub fn normalize(self: &Self) -> Vector {
+        let n = self.norm();
+        if n == 0.0 {
+            self.clone()
+        } else {
+            self.scale(1.0 / n)
+        }
+    }
+
+    /// Scale by scalar.
+    pub fn scale(self: &Self, s: f64) -> Vector {
+        Vector { data: self.data.iter().map(|x| x * s).collect() }
+    }
+
+    /// Add two vectors.
+    pub fn add(self: &Self, other: &Vector) -> Vector {
+        assert_eq!(self.len(), other.len());
+        Vector {
+            data: self.data.iter().zip(other.data.iter()).map(|(a, b)| a + b).collect()
+        }
+    }
+
+    /// Subtract vectors.
+    pub fn sub(self: &Self, other: &Vector) -> Vector {
+        assert_eq!(self.len(), other.len());
+        Vector {
+            data: self.data.iter().zip(other.data.iter()).map(|(a, b)| a - b).collect()
+        }
+    }
+
+    /// Element-wise multiply.
+    pub fn hadamard(self: &Self, other: &Vector) -> Vector {
+        assert_eq!(self.len(), other.len());
+        Vector {
+            data: self.data.iter().zip(other.data.iter()).map(|(a, b)| a * b).collect()
+        }
+    }
+
+    /// Sum of elements.
+    pub fn sum(self: &Self) -> f64 {
+        self.data.iter().sum()
+    }
+
+    /// Product of elements.
+    pub fn product(self: &Self) -> f64 {
+        self.data.iter().product()
+    }
+
+    /// Mean.
+    pub fn mean(self: &Self) -> f64 {
+        if self.is_empty() { 0.0 } else { self.sum() / self.len() as f64 }
+    }
+
+    /// Minimum value.
+    pub fn min(self: &Self) -> Option<f64> {
+        self.data.iter().copied().reduce(f64::min)
+    }
+
+    /// Maximum value.
+    pub fn max(self: &Self) -> Option<f64> {
+        self.data.iter().copied().reduce(f64::max)
+    }
+
+    /// Index of minimum.
+    pub fn argmin(self: &Self) -> Option<usize> {
+        self.data.iter().enumerate()
+            .min_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+            .map(|(i, _)| i)
+    }
+
+    /// Index of maximum.
+    pub fn argmax(self: &Self) -> Option<usize> {
+        self.data.iter().enumerate()
+            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+            .map(|(i, _)| i)
+    }
+
+    /// Apply function element-wise.
+    pub fn map<F: Fn(f64) -> f64>(self: &Self, f: F) -> Vector {
+        Vector { data: self.data.iter().map(|x| f(*x)).collect() }
+    }
+
+    /// Cross product (3D only).
+    pub fn cross(self: &Self, other: &Vector) -> Vector {
+        assert!(self.len() == 3 && other.len() == 3, "Cross product requires 3D vectors");
+        Vector {
+            data: vec![
+                self.data[1] * other.data[2] - self.data[2] * other.data[1],
+                self.data[2] * other.data[0] - self.data[0] * other.data[2],
+                self.data[0] * other.data[1] - self.data[1] * other.data[0],
+            ]
+        }
+    }
+
+    /// Angle between vectors (radians).
+    pub fn angle(self: &Self, other: &Vector) -> f64 {
+        let cos_theta = self.dot(other) / (self.norm() * other.norm());
+        cos_theta.clamp(-1.0, 1.0).acos()
+    }
+
+    /// Project onto another vector.
+    pub fn project_onto(self: &Self, other: &Vector) -> Vector {
+        let scale = self.dot(other) / other.dot(other);
+        other.scale(scale)
+    }
+}
+
+// ============================================================================
+// Matrix Operations
+// ============================================================================
+
+/// Dense matrix stored in row-major order.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Matrix {
+    rows: usize,
+    cols: usize,
+    data: Vec<f64>,
+}
+
+impl Matrix {
+    /// Create matrix from 2D data.
+    pub fn from_rows(rows: &[Vec<f64>]) -> Self {
+        let nrows = rows.len();
+        let ncols = if nrows > 0 { rows[0].len() } else { 0 };
+        let mut data = Vec::with_capacity(nrows * ncols);
+        for row in rows {
+            assert_eq!(row.len(), ncols, "All rows must have same length");
+            data.extend_from_slice(row);
+        }
+        Self { rows: nrows, cols: ncols, data }
+    }
+
+    /// Create matrix from flat data.
+    pub fn from_flat(rows: usize, cols: usize, data: Vec<f64>) -> Self {
+        assert_eq!(data.len(), rows * cols);
+        Self { rows, cols, data }
+    }
+
+    /// Create zero matrix.
+    pub fn zeros(rows: usize, cols: usize) -> Self {
+        Self { rows, cols, data: vec![0.0; rows * cols] }
+    }
+
+    /// Create ones matrix.
+    pub fn ones(rows: usize, cols: usize) -> Self {
+        Self { rows, cols, data: vec![1.0; rows * cols] }
+    }
+
+    /// Create identity matrix.
+    pub fn identity(n: usize) -> Self {
+        let mut m = Self::zeros(n, n);
+        for i in 0..n {
+            m.set(i, i, 1.0);
+        }
+        m
+    }
+
+    /// Create diagonal matrix from vector.
+    pub fn diagonal(diag: &Vector) -> Self {
+        let n = diag.len();
+        let mut m = Self::zeros(n, n);
+        for i in 0..n {
+            m.set(i, i, diag.get(i).unwrap_or(0.0));
+        }
+        m
+    }
+
+    /// Get dimensions.
+    pub fn shape(self: &Self) -> (usize, usize) {
+        (self.rows, self.cols)
+    }
+
+    /// Get element.
+    pub fn get(self: &Self, row: usize, col: usize) -> f64 {
+        self.data[row * self.cols + col]
+    }
+
+    /// Set element.
+    pub fn set(self: &mut Self, row: usize, col: usize, value: f64) {
+        self.data[row * self.cols + col] = value;
+    }
+
+    /// Get row as vector.
+    pub fn row(self: &Self, i: usize) -> Vector {
+        let start = i * self.cols;
+        Vector::from_slice(&self.data[start..start + self.cols])
+    }
+
+    /// Get column as vector.
+    pub fn col(self: &Self, j: usize) -> Vector {
+        let data: Vec<f64> = (0..self.rows).map(|i| self.get(i, j)).collect();
+        Vector::from_slice(&data)
+    }
+
+    /// Transpose.
+    pub fn transpose(self: &Self) -> Matrix {
+        let mut result = Matrix::zeros(self.cols, self.rows);
+        for i in 0..self.rows {
+            for j in 0..self.cols {
+                result.set(j, i, self.get(i, j));
+            }
+        }
+        result
+    }
+
+    /// Matrix addition.
+    pub fn add(self: &Self, other: &Matrix) -> Matrix {
+        assert_eq!(self.shape(), other.shape());
+        Matrix {
+            rows: self.rows,
+            cols: self.cols,
+            data: self.data.iter().zip(other.data.iter()).map(|(a, b)| a + b).collect(),
+        }
+    }
+
+    /// Matrix subtraction.
+    pub fn sub(self: &Self, other: &Matrix) -> Matrix {
+        assert_eq!(self.shape(), other.shape());
+        Matrix {
+            rows: self.rows,
+            cols: self.cols,
+            data: self.data.iter().zip(other.data.iter()).map(|(a, b)| a - b).collect(),
+        }
+    }
+
+    /// Scalar multiplication.
+    pub fn scale(self: &Self, s: f64) -> Matrix {
+        Matrix {
+            rows: self.rows,
+            cols: self.cols,
+            data: self.data.iter().map(|x| x * s).collect(),
+        }
+    }
+
+    /// Matrix multiplication.
+    pub fn mul(self: &Self, other: &Matrix) -> Matrix {
+        assert_eq!(self.cols, other.rows, "Matrix dimensions incompatible");
+        let mut result = Matrix::zeros(self.rows, other.cols);
+        for i in 0..self.rows {
+            for j in 0..other.cols {
+                let mut sum = 0.0;
+                for k in 0..self.cols {
+                    sum += self.get(i, k) * other.get(k, j);
+                }
+                result.set(i, j, sum);
+            }
+        }
+        result
+    }
+
+    /// Matrix-vector multiplication.
+    pub fn mul_vec(self: &Self, v: &Vector) -> Vector {
+        assert_eq!(self.cols, v.len());
+        let data: Vec<f64> = (0..self.rows).map(|i| self.row(i).dot(v)).collect();
+        Vector::from_slice(&data)
+    }
+
+    /// Frobenius norm.
+    pub fn norm_frobenius(self: &Self) -> f64 {
+        self.data.iter().map(|x| x * x).sum::<f64>().sqrt()
+    }
+
+    /// Trace (sum of diagonal).
+    pub fn trace(self: &Self) -> f64 {
+        let n = self.rows.min(self.cols);
+        (0..n).map(|i| self.get(i, i)).sum()
+    }
+
+    /// Determinant (for small matrices).
+    pub fn det(self: &Self) -> f64 {
+        assert_eq!(self.rows, self.cols, "Determinant requires square matrix");
+        match self.rows {
+            0 => 1.0,
+            1 => self.get(0, 0),
+            2 => self.get(0, 0) * self.get(1, 1) - self.get(0, 1) * self.get(1, 0),
+            3 => {
+                self.get(0, 0) * (self.get(1, 1) * self.get(2, 2) - self.get(1, 2) * self.get(2, 1))
+                - self.get(0, 1) * (self.get(1, 0) * self.get(2, 2) - self.get(1, 2) * self.get(2, 0))
+                + self.get(0, 2) * (self.get(1, 0) * self.get(2, 1) - self.get(1, 1) * self.get(2, 0))
+            }
+            _ => self.lu_decomposition().map(|(l, u, _)| {
+                (0..self.rows).map(|i| u.get(i, i)).product()
+            }).unwrap_or(0.0),
+        }
+    }
+
+    /// LU decomposition with partial pivoting.
+    /// Returns (L, U, P) where PA = LU.
+    pub fn lu_decomposition(self: &Self) -> Option<(Matrix, Matrix, Vec<usize>)> {
+        assert_eq!(self.rows, self.cols);
+        let n = self.rows;
+        let mut u = self.clone();
+        let mut l = Matrix::identity(n);
+        let mut perm: Vec<usize> = (0..n).collect();
+
+        for k in 0..n {
+            // Find pivot
+            let mut max_val = u.get(k, k).abs();
+            let mut max_row = k;
+            for i in k + 1..n {
+                let val = u.get(i, k).abs();
+                if val > max_val {
+                    max_val = val;
+                    max_row = i;
+                }
+            }
+
+            if max_val < EPSILON {
+                return None; // Singular matrix
+            }
+
+            // Swap rows
+            if max_row != k {
+                perm.swap(k, max_row);
+                for j in 0..n {
+                    let tmp = u.get(k, j);
+                    u.set(k, j, u.get(max_row, j));
+                    u.set(max_row, j, tmp);
+                }
+                for j in 0..k {
+                    let tmp = l.get(k, j);
+                    l.set(k, j, l.get(max_row, j));
+                    l.set(max_row, j, tmp);
+                }
+            }
+
+            // Eliminate
+            for i in k + 1..n {
+                let factor = u.get(i, k) / u.get(k, k);
+                l.set(i, k, factor);
+                for j in k..n {
+                    let val = u.get(i, j) - factor * u.get(k, j);
+                    u.set(i, j, val);
+                }
+            }
+        }
+
+        Some((l, u, perm))
+    }
+
+    /// Solve linear system Ax = b.
+    pub fn solve(self: &Self, b: &Vector) -> Option<Vector> {
+        let (l, u, perm) = self.lu_decomposition()?;
+        let n = self.rows;
+
+        // Apply permutation to b
+        let mut pb: Vec<f64> = vec![0.0; n];
+        for i in 0..n {
+            pb[i] = b.get(perm[i]).unwrap_or(0.0);
+        }
+
+        // Forward substitution (Ly = Pb)
+        let mut y = vec![0.0; n];
+        for i in 0..n {
+            let mut sum = pb[i];
+            for j in 0..i {
+                sum -= l.get(i, j) * y[j];
+            }
+            y[i] = sum;
+        }
+
+        // Back substitution (Ux = y)
+        let mut x = vec![0.0; n];
+        for i in (0..n).rev() {
+            let mut sum = y[i];
+            for j in i + 1..n {
+                sum -= u.get(i, j) * x[j];
+            }
+            x[i] = sum / u.get(i, i);
+        }
+
+        Some(Vector::from_slice(&x))
+    }
+
+    /// Matrix inverse.
+    pub fn inverse(self: &Self) -> Option<Matrix> {
+        assert_eq!(self.rows, self.cols);
+        let n = self.rows;
+        let mut cols = Vec::with_capacity(n);
+
+        for j in 0..n {
+            let mut e = Vector::zeros(n);
+            e.set(j, 1.0);
+            cols.push(self.solve(&e)?);
+        }
+
+        let mut result = Matrix::zeros(n, n);
+        for j in 0..n {
+            for i in 0..n {
+                result.set(i, j, cols[j].get(i).unwrap_or(0.0));
+            }
+        }
+
+        Some(result)
+    }
+
+    /// QR decomposition using Gram-Schmidt.
+    pub fn qr_decomposition(self: &Self) -> (Matrix, Matrix) {
+        let m = self.rows;
+        let n = self.cols;
+        let mut q = Matrix::zeros(m, n);
+        let mut r = Matrix::zeros(n, n);
+
+        for j in 0..n {
+            let mut v = self.col(j);
+
+            for i in 0..j {
+                let qi = q.col(i);
+                let rij = qi.dot(&self.col(j));
+                r.set(i, j, rij);
+                v = v.sub(&qi.scale(rij));
+            }
+
+            let norm = v.norm();
+            r.set(j, j, norm);
+
+            if norm > EPSILON {
+                let qj = v.scale(1.0 / norm);
+                for i in 0..m {
+                    q.set(i, j, qj.get(i).unwrap_or(0.0));
+                }
+            }
+        }
+
+        (q, r)
+    }
+
+    /// Eigenvalues using QR algorithm (for symmetric matrices).
+    pub fn eigenvalues(self: &Self, max_iter: usize, tol: f64) -> Vector {
+        assert_eq!(self.rows, self.cols);
+        let n = self.rows;
+        let mut a = self.clone();
+
+        for _ in 0..max_iter {
+            let (q, r) = a.qr_decomposition();
+            a = r.mul(&q);
+
+            // Check convergence (off-diagonal elements)
+            let mut off_diag = 0.0;
+            for i in 0..n {
+                for j in 0..n {
+                    if i != j {
+                        off_diag += a.get(i, j).abs();
+                    }
+                }
+            }
+            if off_diag < tol {
+                break;
+            }
+        }
+
+        // Extract diagonal as eigenvalues
+        let eigs: Vec<f64> = (0..n).map(|i| a.get(i, i)).collect();
+        Vector::from_slice(&eigs)
+    }
+}
+
+// ============================================================================
+// Statistics
+// ============================================================================
+
+pub mod stats {
+    use super::*;
+
+    /// Variance (population).
+    pub fn variance(data: &[f64]) -> f64 {
+        if data.is_empty() { return 0.0; }
+        let mean = data.iter().sum::<f64>() / data.len() as f64;
+        data.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / data.len() as f64
+    }
+
+    /// Variance (sample).
+    pub fn variance_sample(data: &[f64]) -> f64 {
+        if data.len() < 2 { return 0.0; }
+        let mean = data.iter().sum::<f64>() / data.len() as f64;
+        data.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / (data.len() - 1) as f64
+    }
+
+    /// Standard deviation (population).
+    pub fn std_dev(data: &[f64]) -> f64 {
+        variance(data).sqrt()
+    }
+
+    /// Standard deviation (sample).
+    pub fn std_dev_sample(data: &[f64]) -> f64 {
+        variance_sample(data).sqrt()
+    }
+
+    /// Covariance.
+    pub fn covariance(x: &[f64], y: &[f64]) -> f64 {
+        assert_eq!(x.len(), y.len());
+        if x.is_empty() { return 0.0; }
+        let n = x.len() as f64;
+        let mean_x = x.iter().sum::<f64>() / n;
+        let mean_y = y.iter().sum::<f64>() / n;
+        x.iter().zip(y.iter())
+            .map(|(xi, yi)| (xi - mean_x) * (yi - mean_y))
+            .sum::<f64>() / n
+    }
+
+    /// Pearson correlation coefficient.
+    pub fn correlation(x: &[f64], y: &[f64]) -> f64 {
+        let cov = covariance(x, y);
+        let std_x = std_dev(x);
+        let std_y = std_dev(y);
+        if std_x == 0.0 || std_y == 0.0 { 0.0 } else { cov / (std_x * std_y) }
+    }
+
+    /// Median.
+    pub fn median(data: &[f64]) -> f64 {
+        if data.is_empty() { return 0.0; }
+        let mut sorted = data.to_vec();
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let mid = sorted.len() / 2;
+        if sorted.len() % 2 == 0 {
+            (sorted[mid - 1] + sorted[mid]) / 2.0
+        } else {
+            sorted[mid]
+        }
+    }
+
+    /// Percentile (0-100).
+    pub fn percentile(data: &[f64], p: f64) -> f64 {
+        if data.is_empty() { return 0.0; }
+        let mut sorted = data.to_vec();
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let idx = (p / 100.0 * (sorted.len() - 1) as f64).round() as usize;
+        sorted[idx.min(sorted.len() - 1)]
+    }
+
+    /// Mode (most frequent value).
+    pub fn mode(data: &[f64]) -> Option<f64> {
+        use std::collections::HashMap;
+        if data.is_empty() { return None; }
+
+        let mut counts: HashMap<u64, usize> = HashMap::new();
+        for &x in data {
+            *counts.entry(x.to_bits()).or_insert(0) += 1;
+        }
+
+        counts.into_iter()
+            .max_by_key(|(_, count)| *count)
+            .map(|(bits, _)| f64::from_bits(bits))
+    }
+
+    /// Skewness.
+    pub fn skewness(data: &[f64]) -> f64 {
+        if data.len() < 3 { return 0.0; }
+        let n = data.len() as f64;
+        let mean = data.iter().sum::<f64>() / n;
+        let std = std_dev(data);
+        if std == 0.0 { return 0.0; }
+
+        let m3 = data.iter().map(|x| ((x - mean) / std).powi(3)).sum::<f64>() / n;
+        m3
+    }
+
+    /// Kurtosis (excess).
+    pub fn kurtosis(data: &[f64]) -> f64 {
+        if data.len() < 4 { return 0.0; }
+        let n = data.len() as f64;
+        let mean = data.iter().sum::<f64>() / n;
+        let std = std_dev(data);
+        if std == 0.0 { return 0.0; }
+
+        let m4 = data.iter().map(|x| ((x - mean) / std).powi(4)).sum::<f64>() / n;
+        m4 - 3.0  // Excess kurtosis
+    }
+
+    /// Linear regression: returns (slope, intercept, r_squared).
+    pub fn linear_regression(x: &[f64], y: &[f64]) -> (f64, f64, f64) {
+        assert_eq!(x.len(), y.len());
+        if x.is_empty() { return (0.0, 0.0, 0.0); }
+
+        let n = x.len() as f64;
+        let sum_x: f64 = x.iter().sum();
+        let sum_y: f64 = y.iter().sum();
+        let sum_xy: f64 = x.iter().zip(y.iter()).map(|(xi, yi)| xi * yi).sum();
+        let sum_xx: f64 = x.iter().map(|xi| xi * xi).sum();
+        let sum_yy: f64 = y.iter().map(|yi| yi * yi).sum();
+
+        let slope = (n * sum_xy - sum_x * sum_y) / (n * sum_xx - sum_x * sum_x);
+        let intercept = (sum_y - slope * sum_x) / n;
+
+        // R-squared
+        let ss_tot = sum_yy - sum_y * sum_y / n;
+        let ss_res: f64 = x.iter().zip(y.iter())
+            .map(|(xi, yi)| {
+                let pred = slope * xi + intercept;
+                (yi - pred).powi(2)
+            })
+            .sum();
+        let r_squared = if ss_tot == 0.0 { 1.0 } else { 1.0 - ss_res / ss_tot };
+
+        (slope, intercept, r_squared)
+    }
+
+    /// Weighted mean.
+    pub fn weighted_mean(values: &[f64], weights: &[f64]) -> f64 {
+        assert_eq!(values.len(), weights.len());
+        let sum: f64 = values.iter().zip(weights.iter()).map(|(v, w)| v * w).sum();
+        let weight_sum: f64 = weights.iter().sum();
+        if weight_sum == 0.0 { 0.0 } else { sum / weight_sum }
+    }
+
+    /// Geometric mean.
+    pub fn geometric_mean(data: &[f64]) -> f64 {
+        if data.is_empty() { return 0.0; }
+        let log_sum: f64 = data.iter().map(|x| x.ln()).sum();
+        (log_sum / data.len() as f64).exp()
+    }
+
+    /// Harmonic mean.
+    pub fn harmonic_mean(data: &[f64]) -> f64 {
+        if data.is_empty() { return 0.0; }
+        let n = data.len() as f64;
+        let reciprocal_sum: f64 = data.iter().map(|x| 1.0 / x).sum();
+        if reciprocal_sum == 0.0 { 0.0 } else { n / reciprocal_sum }
+    }
+
+    /// Z-score normalization.
+    pub fn z_score(data: &[f64]) -> Vec<f64> {
+        let mean = data.iter().sum::<f64>() / data.len() as f64;
+        let std = std_dev(data);
+        if std == 0.0 {
+            vec![0.0; data.len()]
+        } else {
+            data.iter().map(|x| (x - mean) / std).collect()
+        }
+    }
+
+    /// Min-max normalization to [0, 1].
+    pub fn min_max_scale(data: &[f64]) -> Vec<f64> {
+        if data.is_empty() { return Vec::new(); }
+        let min = data.iter().copied().fold(f64::INFINITY, f64::min);
+        let max = data.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        let range = max - min;
+        if range == 0.0 {
+            vec![0.5; data.len()]
+        } else {
+            data.iter().map(|x| (x - min) / range).collect()
+        }
+    }
+}
+
+// ============================================================================
+// Numerical Methods
+// ============================================================================
+
+pub mod numerical {
+    use super::*;
+
+    /// Find root using Newton-Raphson method.
+    pub fn newton_raphson<F, G>(f: F, df: G, x0: f64, tol: f64, max_iter: usize) -> Option<f64>
+    where
+        F: Fn(f64) -> f64,
+        G: Fn(f64) -> f64,
+    {
+        let mut x = x0;
+        for _ in 0..max_iter {
+            let fx = f(x);
+            let dfx = df(x);
+            if dfx.abs() < EPSILON {
+                return None; // Derivative too small
+            }
+            let x_new = x - fx / dfx;
+            if (x_new - x).abs() < tol {
+                return Some(x_new);
+            }
+            x = x_new;
+        }
+        Some(x)
+    }
+
+    /// Find root using bisection method.
+    pub fn bisection<F>(f: F, mut a: f64, mut b: f64, tol: f64, max_iter: usize) -> Option<f64>
+    where
+        F: Fn(f64) -> f64,
+    {
+        let fa = f(a);
+        let fb = f(b);
+        if fa * fb > 0.0 {
+            return None; // No sign change
+        }
+
+        for _ in 0..max_iter {
+            let c = (a + b) / 2.0;
+            let fc = f(c);
+
+            if fc.abs() < tol || (b - a) / 2.0 < tol {
+                return Some(c);
+            }
+
+            if fa * fc < 0.0 {
+                b = c;
+            } else {
+                a = c;
+            }
+        }
+
+        Some((a + b) / 2.0)
+    }
+
+    /// Find root using secant method.
+    pub fn secant<F>(f: F, x0: f64, x1: f64, tol: f64, max_iter: usize) -> Option<f64>
+    where
+        F: Fn(f64) -> f64,
+    {
+        let mut x_prev = x0;
+        let mut x_curr = x1;
+        let mut f_prev = f(x_prev);
+
+        for _ in 0..max_iter {
+            let f_curr = f(x_curr);
+            if f_curr.abs() < tol {
+                return Some(x_curr);
+            }
+
+            let denominator = f_curr - f_prev;
+            if denominator.abs() < EPSILON {
+                return None;
+            }
+
+            let x_next = x_curr - f_curr * (x_curr - x_prev) / denominator;
+            x_prev = x_curr;
+            f_prev = f_curr;
+            x_curr = x_next;
+
+            if (x_curr - x_prev).abs() < tol {
+                return Some(x_curr);
+            }
+        }
+
+        Some(x_curr)
+    }
+
+    /// Numerical derivative using central difference.
+    pub fn derivative<F>(f: F, x: f64, h: f64) -> f64
+    where
+        F: Fn(f64) -> f64,
+    {
+        (f(x + h) - f(x - h)) / (2.0 * h)
+    }
+
+    /// Second derivative.
+    pub fn second_derivative<F>(f: F, x: f64, h: f64) -> f64
+    where
+        F: Fn(f64) -> f64,
+    {
+        (f(x + h) - 2.0 * f(x) + f(x - h)) / (h * h)
+    }
+
+    /// Numerical integration using Simpson's rule.
+    pub fn integrate_simpson<F>(f: F, a: f64, b: f64, n: usize) -> f64
+    where
+        F: Fn(f64) -> f64,
+    {
+        let n = if n % 2 == 1 { n + 1 } else { n };
+        let h = (b - a) / n as f64;
+
+        let mut sum = f(a) + f(b);
+        for i in 1..n {
+            let x = a + i as f64 * h;
+            sum += if i % 2 == 0 { 2.0 * f(x) } else { 4.0 * f(x) };
+        }
+
+        sum * h / 3.0
+    }
+
+    /// Numerical integration using trapezoidal rule.
+    pub fn integrate_trapezoid<F>(f: F, a: f64, b: f64, n: usize) -> f64
+    where
+        F: Fn(f64) -> f64,
+    {
+        let h = (b - a) / n as f64;
+        let mut sum = (f(a) + f(b)) / 2.0;
+        for i in 1..n {
+            sum += f(a + i as f64 * h);
+        }
+        sum * h
+    }
+
+    /// Gradient descent optimization.
+    pub fn gradient_descent<F, G>(
+        f: F,
+        grad: G,
+        x0: Vector,
+        learning_rate: f64,
+        tol: f64,
+        max_iter: usize,
+    ) -> Vector
+    where
+        F: Fn(&Vector) -> f64,
+        G: Fn(&Vector) -> Vector,
+    {
+        let mut x = x0;
+        for _ in 0..max_iter {
+            let g = grad(&x);
+            if g.norm() < tol {
+                break;
+            }
+            x = x.sub(&g.scale(learning_rate));
+        }
+        x
+    }
+
+    /// Solve ODE using RK4 (Runge-Kutta 4th order).
+    pub fn rk4<F>(f: F, t0: f64, y0: f64, t_end: f64, h: f64) -> Vec<(f64, f64)>
+    where
+        F: Fn(f64, f64) -> f64,
+    {
+        let mut results = vec![(t0, y0)];
+        let mut t = t0;
+        let mut y = y0;
+
+        while t < t_end {
+            let k1 = h * f(t, y);
+            let k2 = h * f(t + h / 2.0, y + k1 / 2.0);
+            let k3 = h * f(t + h / 2.0, y + k2 / 2.0);
+            let k4 = h * f(t + h, y + k3);
+
+            y += (k1 + 2.0 * k2 + 2.0 * k3 + k4) / 6.0;
+            t += h;
+            results.push((t, y));
+        }
+
+        results
+    }
+}
+
+// ============================================================================
+// Special Functions
+// ============================================================================
+
+pub mod special {
+    use super::*;
+
+    /// Gamma function using Lanczos approximation.
+    pub fn gamma(z: f64) -> f64 {
+        if z < 0.5 {
+            std::f64::consts::PI / (std::f64::consts::PI * z).sin() / gamma(1.0 - z)
+        } else {
+            let z = z - 1.0;
+            let g = 7;
+            let c = [
+                0.99999999999980993,
+                676.5203681218851,
+                -1259.1392167224028,
+                771.32342877765313,
+                -176.61502916214059,
+                12.507343278686905,
+                -0.13857109526572012,
+                9.9843695780195716e-6,
+                1.5056327351493116e-7,
+            ];
+
+            let mut x = c[0];
+            for i in 1..g + 2 {
+                x += c[i] / (z + i as f64);
+            }
+
+            let t = z + g as f64 + 0.5;
+            (2.0 * std::f64::consts::PI).sqrt() * t.powf(z + 0.5) * (-t).exp() * x
+        }
+    }
+
+    /// Log gamma function.
+    pub fn lgamma(z: f64) -> f64 {
+        gamma(z).ln()
+    }
+
+    /// Beta function.
+    pub fn beta(a: f64, b: f64) -> f64 {
+        gamma(a) * gamma(b) / gamma(a + b)
+    }
+
+    /// Factorial.
+    pub fn factorial(n: u64) -> f64 {
+        if n <= 1 { 1.0 } else { gamma(n as f64 + 1.0) }
+    }
+
+    /// Binomial coefficient.
+    pub fn binomial(n: u64, k: u64) -> f64 {
+        if k > n { return 0.0; }
+        factorial(n) / (factorial(k) * factorial(n - k))
+    }
+
+    /// Error function.
+    pub fn erf(x: f64) -> f64 {
+        // Horner form approximation
+        let t = 1.0 / (1.0 + 0.5 * x.abs());
+        let tau = t * (-x * x - 1.26551223
+            + t * (1.00002368
+            + t * (0.37409196
+            + t * (0.09678418
+            + t * (-0.18628806
+            + t * (0.27886807
+            + t * (-1.13520398
+            + t * (1.48851587
+            + t * (-0.82215223
+            + t * 0.17087277)))))))));
+        let result = 1.0 - tau.exp();
+        if x >= 0.0 { result } else { -result }
+    }
+
+    /// Complementary error function.
+    pub fn erfc(x: f64) -> f64 {
+        1.0 - erf(x)
+    }
+
+    /// Standard normal CDF.
+    pub fn norm_cdf(x: f64) -> f64 {
+        0.5 * erfc(-x / SQRT_2)
+    }
+
+    /// Standard normal PDF.
+    pub fn norm_pdf(x: f64) -> f64 {
+        (-0.5 * x * x).exp() / (2.0 * std::f64::consts::PI).sqrt()
+    }
+
+    /// Bessel function J0.
+    pub fn bessel_j0(x: f64) -> f64 {
+        if x.abs() < 8.0 {
+            let y = x * x;
+            let p = 57568490574.0 + y * (-13362590354.0 + y * (651619640.7
+                + y * (-11214424.18 + y * (77392.33017 + y * (-184.9052456)))));
+            let q = 57568490411.0 + y * (1029532985.0 + y * (9494680.718
+                + y * (59272.64853 + y * (267.8532712 + y))));
+            p / q
+        } else {
+            let ax = x.abs();
+            let z = 8.0 / ax;
+            let y = z * z;
+            let xx = ax - 0.785398164;
+            let p = 1.0 + y * (-0.1098628627e-2 + y * (0.2734510407e-4
+                + y * (-0.2073370639e-5 + y * 0.2093887211e-6)));
+            let q = -0.1562499995e-1 + y * (0.1430488765e-3
+                + y * (-0.6911147651e-5 + y * (0.7621095161e-6 - y * 0.934935152e-7)));
+            (0.636619772 / ax).sqrt() * (xx.cos() * p - z * xx.sin() * q)
+        }
+    }
+
+    /// Bessel function J1.
+    pub fn bessel_j1(x: f64) -> f64 {
+        let ax = x.abs();
+        if ax < 8.0 {
+            let y = x * x;
+            let p = x * (72362614232.0 + y * (-7895059235.0 + y * (242396853.1
+                + y * (-2972611.439 + y * (15704.48260 + y * (-30.16036606))))));
+            let q = 144725228442.0 + y * (2300535178.0 + y * (18583304.74
+                + y * (99447.43394 + y * (376.9991397 + y))));
+            p / q
+        } else {
+            let z = 8.0 / ax;
+            let y = z * z;
+            let xx = ax - 2.356194491;
+            let p = 1.0 + y * (0.183105e-2 + y * (-0.3516396496e-4
+                + y * (0.2457520174e-5 + y * (-0.240337019e-6))));
+            let q = 0.04687499995 + y * (-0.2002690873e-3
+                + y * (0.8449199096e-5 + y * (-0.88228987e-6 + y * 0.105787412e-6)));
+            let result = (0.636619772 / ax).sqrt() * (xx.cos() * p - z * xx.sin() * q);
+            if x < 0.0 { -result } else { result }
+        }
+    }
+}
+
+// ============================================================================
+// Interpolation
+// ============================================================================
+
+pub mod interpolation {
+    use super::*;
+
+    /// Linear interpolation.
+    pub fn lerp(a: f64, b: f64, t: f64) -> f64 {
+        a + t * (b - a)
+    }
+
+    /// Inverse linear interpolation.
+    pub fn inv_lerp(a: f64, b: f64, v: f64) -> f64 {
+        if a == b { 0.0 } else { (v - a) / (b - a) }
+    }
+
+    /// Remap value from one range to another.
+    pub fn remap(v: f64, in_min: f64, in_max: f64, out_min: f64, out_max: f64) -> f64 {
+        lerp(out_min, out_max, inv_lerp(in_min, in_max, v))
+    }
+
+    /// Smooth step (cubic Hermite).
+    pub fn smoothstep(edge0: f64, edge1: f64, x: f64) -> f64 {
+        let t = ((x - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
+        t * t * (3.0 - 2.0 * t)
+    }
+
+    /// Smoother step (quintic).
+    pub fn smootherstep(edge0: f64, edge1: f64, x: f64) -> f64 {
+        let t = ((x - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
+        t * t * t * (t * (t * 6.0 - 15.0) + 10.0)
+    }
+
+    /// Lagrange interpolation.
+    pub fn lagrange(xs: &[f64], ys: &[f64], x: f64) -> f64 {
+        assert_eq!(xs.len(), ys.len());
+        let n = xs.len();
+        let mut result = 0.0;
+
+        for i in 0..n {
+            let mut term = ys[i];
+            for j in 0..n {
+                if i != j {
+                    term *= (x - xs[j]) / (xs[i] - xs[j]);
+                }
+            }
+            result += term;
+        }
+
+        result
+    }
+
+    /// Cubic spline interpolation.
+    pub struct CubicSpline {
+        xs: Vec<f64>,
+        ys: Vec<f64>,
+        k: Vec<f64>,  // Second derivatives
+    }
+
+    impl CubicSpline {
+        /// Create cubic spline from points.
+        pub fn new(xs: Vec<f64>, ys: Vec<f64>) -> Self {
+            assert_eq!(xs.len(), ys.len());
+            assert!(xs.len() >= 2);
+            let n = xs.len();
+
+            // Natural spline: second derivative = 0 at boundaries
+            let mut k = vec![0.0; n];
+            let mut u = vec![0.0; n];
+
+            for i in 1..n - 1 {
+                let sig = (xs[i] - xs[i - 1]) / (xs[i + 1] - xs[i - 1]);
+                let p = sig * k[i - 1] + 2.0;
+                k[i] = (sig - 1.0) / p;
+                u[i] = (ys[i + 1] - ys[i]) / (xs[i + 1] - xs[i])
+                     - (ys[i] - ys[i - 1]) / (xs[i] - xs[i - 1]);
+                u[i] = (6.0 * u[i] / (xs[i + 1] - xs[i - 1]) - sig * u[i - 1]) / p;
+            }
+
+            for i in (0..n - 1).rev() {
+                k[i] = k[i] * k[i + 1] + u[i];
+            }
+
+            Self { xs, ys, k }
+        }
+
+        /// Interpolate at point x.
+        pub fn interpolate(self: &Self, x: f64) -> f64 {
+            let n = self.xs.len();
+
+            // Find interval
+            let mut lo = 0;
+            let mut hi = n - 1;
+            while hi - lo > 1 {
+                let mid = (lo + hi) / 2;
+                if self.xs[mid] > x {
+                    hi = mid;
+                } else {
+                    lo = mid;
+                }
+            }
+
+            let h = self.xs[hi] - self.xs[lo];
+            let a = (self.xs[hi] - x) / h;
+            let b = (x - self.xs[lo]) / h;
+
+            a * self.ys[lo] + b * self.ys[hi]
+                + ((a * a * a - a) * self.k[lo] + (b * b * b - b) * self.k[hi]) * h * h / 6.0
+        }
+    }
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_vector_operations() {
+        let v1 = Vector::from_slice(&[1.0, 2.0, 3.0]);
+        let v2 = Vector::from_slice(&[4.0, 5.0, 6.0]);
+
+        assert_eq!(v1.dot(&v2), 32.0);
+        assert!((v1.norm() - 3.7416573867739413).abs() < 1e-10);
+
+        let sum = v1.add(&v2);
+        assert_eq!(sum.as_slice(), &[5.0, 7.0, 9.0]);
+    }
+
+    #[test]
+    fn test_matrix_multiply() {
+        let a = Matrix::from_rows(&[
+            vec![1.0, 2.0],
+            vec![3.0, 4.0],
+        ]);
+        let b = Matrix::from_rows(&[
+            vec![5.0, 6.0],
+            vec![7.0, 8.0],
+        ]);
+        let c = a.mul(&b);
+
+        assert_eq!(c.get(0, 0), 19.0);
+        assert_eq!(c.get(0, 1), 22.0);
+        assert_eq!(c.get(1, 0), 43.0);
+        assert_eq!(c.get(1, 1), 50.0);
+    }
+
+    #[test]
+    fn test_matrix_inverse() {
+        let a = Matrix::from_rows(&[
+            vec![4.0, 7.0],
+            vec![2.0, 6.0],
+        ]);
+        let inv = a.inverse().unwrap();
+        let identity = a.mul(&inv);
+
+        assert!((identity.get(0, 0) - 1.0).abs() < 1e-10);
+        assert!((identity.get(1, 1) - 1.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_statistics() {
+        let data = vec![2.0, 4.0, 4.0, 4.0, 5.0, 5.0, 7.0, 9.0];
+
+        assert_eq!(stats::median(&data), 4.5);
+        assert!((stats::variance(&data) - 4.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_linear_regression() {
+        let x = vec![1.0, 2.0, 3.0, 4.0, 5.0];
+        let y = vec![2.0, 4.0, 6.0, 8.0, 10.0];
+
+        let (slope, intercept, r_sq) = stats::linear_regression(&x, &y);
+
+        assert!((slope - 2.0).abs() < 1e-10);
+        assert!((intercept - 0.0).abs() < 1e-10);
+        assert!((r_sq - 1.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_numerical_integration() {
+        // Integrate x^2 from 0 to 1 = 1/3
+        let result = numerical::integrate_simpson(|x| x * x, 0.0, 1.0, 100);
+        assert!((result - 1.0 / 3.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_root_finding() {
+        // Find root of x^2 - 2 (should be sqrt(2))
+        let root = numerical::newton_raphson(
+            |x| x * x - 2.0,
+            |x| 2.0 * x,
+            1.5,
+            1e-10,
+            100
+        ).unwrap();
+
+        assert!((root - SQRT_2).abs() < 1e-8);
+    }
+
+    #[test]
+    fn test_gamma() {
+        assert!((special::gamma(5.0) - 24.0).abs() < 1e-10); // 4! = 24
+        assert!((special::gamma(0.5) - std::f64::consts::PI.sqrt()).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_interpolation() {
+        assert_eq!(interpolation::lerp(0.0, 10.0, 0.5), 5.0);
+        assert_eq!(interpolation::inv_lerp(0.0, 10.0, 5.0), 0.5);
+    }
+}

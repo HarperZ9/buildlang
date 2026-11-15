@@ -1,0 +1,3346 @@
+// =============================================================================
+// PHOTON ENGINE - GPU Particle & VFX System
+// Harper Engine Whitepapers WP-103 to WP-115: Advanced Particle Systems
+// =============================================================================
+//
+// Comprehensive GPU-accelerated particle system with:
+// - Compute shader particle simulation
+// - Multiple emitter types (point, mesh, spline, volume)
+// - Force fields and attractors
+// - Collision detection and response
+// - Ribbons, trails, and beam effects
+// - VFX graph for visual effect authoring
+// - Particle lighting and shadows
+// - LOD and culling optimization
+//
+// =============================================================================
+
+use core::memory::{Buffer, Arena, Pool};
+use core::math::{Vec2, Vec3, Vec4, Mat4, Quat, AABB, Transform};
+use core::simd::{f32x4, f32x8, simd_operations};
+use photon::lib::{RenderContext, Shader, ComputeShader, Pipeline, Texture, Sampler};
+
+// =============================================================================
+// REGION: Particle Data Structures (WP-103)
+// =============================================================================
+
+/// Particle attribute flags for flexible particle data layout
+@flags
+pub enum ParticleAttribute {
+    Position        = 0x0001,
+    Velocity        = 0x0002,
+    Acceleration    = 0x0004,
+    Color           = 0x0008,
+    Size            = 0x0010,
+    Rotation        = 0x0020,
+    AngularVelocity = 0x0040,
+    Age             = 0x0080,
+    Lifetime        = 0x0100,
+    Mass            = 0x0200,
+    Custom0         = 0x0400,
+    Custom1         = 0x0800,
+    Custom2         = 0x1000,
+    Custom3         = 0x2000,
+    SpriteIndex     = 0x4000,
+    SubUV           = 0x8000,
+}
+
+/// Core particle structure with SoA layout for GPU efficiency
+@repr(C, align(16))
+pub struct Particle {
+    position: Vec3,
+    velocity: Vec3,
+    acceleration: Vec3,
+    color: Vec4,
+    size: Vec2,
+    rotation: f32,
+    angular_velocity: f32,
+    age: f32,
+    lifetime: f32,
+    mass: f32,
+    sprite_index: u32,
+    custom_data: Vec4,
+    flags: u32,
+    random_seed: u32,
+}
+
+/// Particle pool with structure-of-arrays layout
+pub struct ParticlePool {
+    // Position data (Vec3 per particle, padded to Vec4)
+    positions: Buffer<Vec4>,
+    // Velocity data
+    velocities: Buffer<Vec4>,
+    // Acceleration data
+    accelerations: Buffer<Vec4>,
+    // Color data (RGBA)
+    colors: Buffer<Vec4>,
+    // Size (xy) + rotation (z) + angular_velocity (w)
+    size_rotation: Buffer<Vec4>,
+    // Age (x) + lifetime (y) + mass (z) + sprite_index (w)
+    age_lifetime_mass: Buffer<Vec4>,
+    // Custom data for user-defined attributes
+    custom_data: Buffer<Vec4>,
+    // Alive/dead state and random seeds
+    state: Buffer<u32>,
+
+    // Pool management
+    capacity: u32,
+    alive_count: u32,
+    dead_indices: Buffer<u32>,
+    alive_indices: Buffer<u32>,
+    draw_args: Buffer<DrawIndirectArgs>,
+    dispatch_args: Buffer<DispatchIndirectArgs>,
+}
+
+impl ParticlePool {
+    pub fn new(context: &RenderContext, capacity: u32) -> Self {
+        let positions = context.create_buffer::<Vec4>(capacity as usize);
+        let velocities = context.create_buffer::<Vec4>(capacity as usize);
+        let accelerations = context.create_buffer::<Vec4>(capacity as usize);
+        let colors = context.create_buffer::<Vec4>(capacity as usize);
+        let size_rotation = context.create_buffer::<Vec4>(capacity as usize);
+        let age_lifetime_mass = context.create_buffer::<Vec4>(capacity as usize);
+        let custom_data = context.create_buffer::<Vec4>(capacity as usize);
+        let state = context.create_buffer::<u32>(capacity as usize);
+        let dead_indices = context.create_buffer::<u32>(capacity as usize);
+        let alive_indices = context.create_buffer::<u32>(capacity as usize);
+        let draw_args = context.create_buffer::<DrawIndirectArgs>(1);
+        let dispatch_args = context.create_buffer::<DispatchIndirectArgs>(1);
+
+        Self {
+            positions, velocities, accelerations, colors,
+            size_rotation, age_lifetime_mass, custom_data, state,
+            capacity, alive_count: 0,
+            dead_indices, alive_indices,
+            draw_args, dispatch_args,
+        }
+    }
+
+    pub fn reset(&mut self, context: &RenderContext) {
+        // Initialize all particles as dead
+        let init_shader = context.get_compute_shader("particle_pool_init");
+        context.dispatch_compute(init_shader, (self.capacity + 63) / 64, 1, 1);
+        self.alive_count = 0;
+    }
+
+    pub fn compact(&mut self, context: &RenderContext) {
+        // Stream compaction to remove dead particles
+        let compact_shader = context.get_compute_shader("particle_compact");
+        context.dispatch_compute(compact_shader, (self.capacity + 255) / 256, 1, 1);
+    }
+}
+
+/// Indirect draw arguments for GPU-driven particle rendering
+@repr(C)
+pub struct DrawIndirectArgs {
+    vertex_count: u32,
+    instance_count: u32,
+    first_vertex: u32,
+    first_instance: u32,
+}
+
+/// Indirect dispatch arguments for compute shaders
+@repr(C)
+pub struct DispatchIndirectArgs {
+    group_count_x: u32,
+    group_count_y: u32,
+    group_count_z: u32,
+}
+
+// =============================================================================
+// REGION: Particle Emitters (WP-104)
+// =============================================================================
+
+/// Emitter shape types
+pub enum EmitterShape {
+    Point,
+    Sphere { radius: f32, surface_only: bool },
+    Hemisphere { radius: f32, surface_only: bool },
+    Cone { angle: f32, length: f32, radius: f32 },
+    Box { half_extents: Vec3, surface_only: bool },
+    Cylinder { radius: f32, height: f32, surface_only: bool },
+    Torus { major_radius: f32, minor_radius: f32 },
+    Mesh { mesh_handle: u64, distribution: MeshDistribution },
+    Spline { control_points: Vec<Vec3>, tangent_aligned: bool },
+    Circle { radius: f32 },
+    Rectangle { half_extents: Vec2 },
+    Edge { start: Vec3, end: Vec3 },
+    SkinnedMesh { mesh_handle: u64, bone_weights: bool },
+}
+
+/// Distribution mode for mesh emitters
+pub enum MeshDistribution {
+    Vertex,
+    Edge,
+    Triangle,
+    TriangleWeighted,  // Weight by triangle area
+    Volume,
+}
+
+/// Emission mode
+pub enum EmissionMode {
+    Continuous { rate: f32 },
+    Burst { count: u32, interval: f32, cycles: i32 },
+    Distance { rate_per_unit: f32 },
+    OnEvent { event_name: String },
+    Manual,
+}
+
+/// Velocity mode for initial particle velocity
+pub enum VelocityMode {
+    Inherit { multiplier: f32 },
+    InCone { angle: f32, speed: Range<f32> },
+    AwayFromCenter { speed: Range<f32> },
+    Tangent { speed: Range<f32> },
+    Random { speed: Range<f32> },
+    AlongNormal { speed: Range<f32> },
+    Orbital { speed: f32, axis: Vec3 },
+    Custom { direction: Vec3, speed: Range<f32> },
+}
+
+/// Parameter over lifetime curve
+pub struct CurveOverLifetime<T> {
+    curve_type: CurveType,
+    keys: Vec<CurveKey<T>>,
+    loop_mode: LoopMode,
+}
+
+pub struct CurveKey<T> {
+    time: f32,
+    value: T,
+    in_tangent: T,
+    out_tangent: T,
+}
+
+pub enum CurveType {
+    Constant,
+    Linear,
+    Bezier,
+    Hermite,
+    CatmullRom,
+}
+
+pub enum LoopMode {
+    Clamp,
+    Loop,
+    PingPong,
+}
+
+/// Gradient for color over lifetime
+pub struct Gradient {
+    color_keys: Vec<GradientColorKey>,
+    alpha_keys: Vec<GradientAlphaKey>,
+    blend_mode: GradientBlendMode,
+}
+
+pub struct GradientColorKey {
+    time: f32,
+    color: Vec3,
+}
+
+pub struct GradientAlphaKey {
+    time: f32,
+    alpha: f32,
+}
+
+pub enum GradientBlendMode {
+    Linear,
+    Step,
+    Smooth,
+}
+
+/// Range for random values
+pub struct Range<T> {
+    min: T,
+    max: T,
+}
+
+impl<T: Copy + std::ops::Sub<Output = T> + std::ops::Mul<f32, Output = T> + std::ops::Add<Output = T>> Range<T> {
+    pub fn evaluate(&self, t: f32) -> T {
+        self.min + (self.max - self.min) * t
+    }
+
+    pub fn random(&self, rng: &mut impl Rng) -> T {
+        self.evaluate(rng.gen())
+    }
+}
+
+/// Main particle emitter configuration
+pub struct ParticleEmitter {
+    // Transform
+    transform: Transform,
+    simulation_space: SimulationSpace,
+
+    // Emission
+    shape: EmitterShape,
+    emission_mode: EmissionMode,
+    max_particles: u32,
+
+    // Initial particle properties
+    start_lifetime: Range<f32>,
+    start_speed: Range<f32>,
+    start_size: Range<Vec2>,
+    start_rotation: Range<f32>,
+    start_color: Gradient,
+    velocity_mode: VelocityMode,
+
+    // Over lifetime modules
+    size_over_lifetime: Option<CurveOverLifetime<Vec2>>,
+    color_over_lifetime: Option<Gradient>,
+    velocity_over_lifetime: Option<CurveOverLifetime<Vec3>>,
+    rotation_over_lifetime: Option<CurveOverLifetime<f32>>,
+    force_over_lifetime: Option<CurveOverLifetime<Vec3>>,
+
+    // Physics
+    gravity_modifier: f32,
+    drag: f32,
+    angular_drag: f32,
+    inherit_velocity: f32,
+
+    // Rendering
+    render_mode: ParticleRenderMode,
+    material: MaterialHandle,
+    sort_mode: ParticleSortMode,
+
+    // Runtime state
+    emission_accumulator: f32,
+    burst_timer: f32,
+    burst_cycle: i32,
+    last_position: Vec3,
+}
+
+pub enum SimulationSpace {
+    Local,
+    World,
+    Custom { transform: Mat4 },
+}
+
+pub enum ParticleRenderMode {
+    Billboard,
+    StretchedBillboard { speed_scale: f32, length_scale: f32 },
+    HorizontalBillboard,
+    VerticalBillboard,
+    Mesh { mesh_handle: u64 },
+    Trail { width_over_trail: CurveOverLifetime<f32>, min_vertex_distance: f32 },
+}
+
+pub enum ParticleSortMode {
+    None,
+    ByDistance,
+    OldestFirst,
+    YoungestFirst,
+    ByDepth,
+}
+
+impl ParticleEmitter {
+    pub fn new() -> Self {
+        Self {
+            transform: Transform::identity(),
+            simulation_space: SimulationSpace::World,
+            shape: EmitterShape::Point,
+            emission_mode: EmissionMode::Continuous { rate: 10.0 },
+            max_particles: 1000,
+            start_lifetime: Range { min: 1.0, max: 2.0 },
+            start_speed: Range { min: 1.0, max: 5.0 },
+            start_size: Range { min: Vec2::splat(0.1), max: Vec2::splat(0.2) },
+            start_rotation: Range { min: 0.0, max: 360.0 },
+            start_color: Gradient::white(),
+            velocity_mode: VelocityMode::InCone { angle: 15.0, speed: Range { min: 1.0, max: 5.0 } },
+            size_over_lifetime: None,
+            color_over_lifetime: None,
+            velocity_over_lifetime: None,
+            rotation_over_lifetime: None,
+            force_over_lifetime: None,
+            gravity_modifier: 1.0,
+            drag: 0.0,
+            angular_drag: 0.0,
+            inherit_velocity: 0.0,
+            render_mode: ParticleRenderMode::Billboard,
+            material: MaterialHandle::default(),
+            sort_mode: ParticleSortMode::ByDistance,
+            emission_accumulator: 0.0,
+            burst_timer: 0.0,
+            burst_cycle: 0,
+            last_position: Vec3::ZERO,
+        }
+    }
+
+    /// Sample emission position from shape
+    fn sample_emission_position(&self, rng: &mut impl Rng) -> (Vec3, Vec3) {
+        match &self.shape {
+            EmitterShape::Point => {
+                (Vec3::ZERO, Vec3::Y)
+            }
+            EmitterShape::Sphere { radius, surface_only } => {
+                let dir = sample_unit_sphere(rng);
+                let dist = if *surface_only { 1.0 } else { rng.gen::<f32>().cbrt() };
+                (dir * *radius * dist, dir)
+            }
+            EmitterShape::Hemisphere { radius, surface_only } => {
+                let mut dir = sample_unit_sphere(rng);
+                dir.y = dir.y.abs();
+                let dist = if *surface_only { 1.0 } else { rng.gen::<f32>().cbrt() };
+                (dir * *radius * dist, dir)
+            }
+            EmitterShape::Cone { angle, length, radius } => {
+                let angle_rad = angle.to_radians();
+                let t = rng.gen::<f32>();
+                let z = t * *length;
+                let r = (t * angle_rad).tan() * z + *radius * rng.gen::<f32>();
+                let theta = rng.gen::<f32>() * std::f32::consts::TAU;
+                let pos = Vec3::new(r * theta.cos(), r * theta.sin(), z);
+                let normal = Vec3::new(theta.cos(), theta.sin(), angle_rad.tan()).normalize();
+                (pos, normal)
+            }
+            EmitterShape::Box { half_extents, surface_only } => {
+                if *surface_only {
+                    let face = rng.gen_range(0..6);
+                    let u = rng.gen::<f32>() * 2.0 - 1.0;
+                    let v = rng.gen::<f32>() * 2.0 - 1.0;
+                    let (pos, normal) = match face {
+                        0 => (Vec3::new(1.0, u, v), Vec3::X),
+                        1 => (Vec3::new(-1.0, u, v), -Vec3::X),
+                        2 => (Vec3::new(u, 1.0, v), Vec3::Y),
+                        3 => (Vec3::new(u, -1.0, v), -Vec3::Y),
+                        4 => (Vec3::new(u, v, 1.0), Vec3::Z),
+                        _ => (Vec3::new(u, v, -1.0), -Vec3::Z),
+                    };
+                    (pos * *half_extents, normal)
+                } else {
+                    let pos = Vec3::new(
+                        (rng.gen::<f32>() * 2.0 - 1.0) * half_extents.x,
+                        (rng.gen::<f32>() * 2.0 - 1.0) * half_extents.y,
+                        (rng.gen::<f32>() * 2.0 - 1.0) * half_extents.z,
+                    );
+                    (pos, Vec3::Y)
+                }
+            }
+            EmitterShape::Cylinder { radius, height, surface_only } => {
+                let theta = rng.gen::<f32>() * std::f32::consts::TAU;
+                let r = if *surface_only { 1.0 } else { rng.gen::<f32>().sqrt() } * *radius;
+                let y = (rng.gen::<f32>() - 0.5) * *height;
+                let pos = Vec3::new(r * theta.cos(), y, r * theta.sin());
+                let normal = Vec3::new(theta.cos(), 0.0, theta.sin());
+                (pos, normal)
+            }
+            EmitterShape::Torus { major_radius, minor_radius } => {
+                let theta = rng.gen::<f32>() * std::f32::consts::TAU;
+                let phi = rng.gen::<f32>() * std::f32::consts::TAU;
+                let center = Vec3::new(
+                    *major_radius * theta.cos(),
+                    0.0,
+                    *major_radius * theta.sin(),
+                );
+                let offset = Vec3::new(
+                    *minor_radius * phi.cos() * theta.cos(),
+                    *minor_radius * phi.sin(),
+                    *minor_radius * phi.cos() * theta.sin(),
+                );
+                (center + offset, offset.normalize())
+            }
+            EmitterShape::Circle { radius } => {
+                let theta = rng.gen::<f32>() * std::f32::consts::TAU;
+                let r = rng.gen::<f32>().sqrt() * *radius;
+                (Vec3::new(r * theta.cos(), 0.0, r * theta.sin()), Vec3::Y)
+            }
+            EmitterShape::Rectangle { half_extents } => {
+                let pos = Vec3::new(
+                    (rng.gen::<f32>() * 2.0 - 1.0) * half_extents.x,
+                    0.0,
+                    (rng.gen::<f32>() * 2.0 - 1.0) * half_extents.y,
+                );
+                (pos, Vec3::Y)
+            }
+            EmitterShape::Edge { start, end } => {
+                let t = rng.gen::<f32>();
+                let pos = *start + (*end - *start) * t;
+                let dir = (*end - *start).normalize();
+                let normal = Vec3::new(-dir.z, 0.0, dir.x);
+                (pos, normal)
+            }
+            _ => (Vec3::ZERO, Vec3::Y),
+        }
+    }
+
+    /// Calculate initial velocity based on velocity mode
+    fn calculate_initial_velocity(&self, position: Vec3, normal: Vec3, rng: &mut impl Rng) -> Vec3 {
+        match &self.velocity_mode {
+            VelocityMode::Inherit { multiplier } => {
+                Vec3::ZERO  // Handled in update with emitter velocity
+            }
+            VelocityMode::InCone { angle, speed } => {
+                let angle_rad = angle.to_radians();
+                let cos_angle = (1.0 - rng.gen::<f32>() * (1.0 - angle_rad.cos())).acos();
+                let phi = rng.gen::<f32>() * std::f32::consts::TAU;
+                let dir = Vec3::new(
+                    cos_angle.sin() * phi.cos(),
+                    cos_angle.cos(),
+                    cos_angle.sin() * phi.sin(),
+                );
+                dir * speed.random(rng)
+            }
+            VelocityMode::AwayFromCenter { speed } => {
+                if position.length_squared() < 0.0001 {
+                    sample_unit_sphere(rng) * speed.random(rng)
+                } else {
+                    position.normalize() * speed.random(rng)
+                }
+            }
+            VelocityMode::Tangent { speed } => {
+                let tangent = if normal.y.abs() > 0.99 {
+                    Vec3::X
+                } else {
+                    normal.cross(Vec3::Y).normalize()
+                };
+                tangent * speed.random(rng)
+            }
+            VelocityMode::Random { speed } => {
+                sample_unit_sphere(rng) * speed.random(rng)
+            }
+            VelocityMode::AlongNormal { speed } => {
+                normal * speed.random(rng)
+            }
+            VelocityMode::Orbital { speed, axis } => {
+                let tangent = axis.cross(position).normalize();
+                tangent * *speed
+            }
+            VelocityMode::Custom { direction, speed } => {
+                direction.normalize() * speed.random(rng)
+            }
+        }
+    }
+}
+
+fn sample_unit_sphere(rng: &mut impl Rng) -> Vec3 {
+    let theta = rng.gen::<f32>() * std::f32::consts::TAU;
+    let z = rng.gen::<f32>() * 2.0 - 1.0;
+    let r = (1.0 - z * z).sqrt();
+    Vec3::new(r * theta.cos(), r * theta.sin(), z)
+}
+
+// =============================================================================
+// REGION: Force Fields (WP-105)
+// =============================================================================
+
+/// Force field types for particle dynamics
+pub enum ForceFieldType {
+    Gravity { direction: Vec3, strength: f32 },
+    Wind { direction: Vec3, strength: f32, turbulence: f32 },
+    Vortex { axis: Vec3, strength: f32, pull: f32 },
+    Attractor { strength: f32, mass: f32, kill_radius: f32 },
+    Repulsor { strength: f32, falloff: ForceFalloff },
+    Turbulence { frequency: f32, amplitude: f32, octaves: u32 },
+    Drag { linear: f32, quadratic: f32 },
+    Curl { strength: f32, frequency: f32 },
+    VectorField { field_texture: TextureHandle, strength: f32 },
+    Orbital { axis: Vec3, speed: f32, radial_pull: f32 },
+    DirectionalField { texture: TextureHandle, direction: Vec3 },
+}
+
+/// Force falloff modes
+pub enum ForceFalloff {
+    None,
+    Linear { distance: f32 },
+    Quadratic { distance: f32 },
+    Exponential { rate: f32 },
+    Curve { curve: CurveOverLifetime<f32> },
+}
+
+/// Force field shape for spatial bounds
+pub enum ForceFieldShape {
+    Infinite,
+    Sphere { radius: f32 },
+    Box { half_extents: Vec3 },
+    Cylinder { radius: f32, height: f32 },
+    Hemisphere { radius: f32 },
+}
+
+/// GPU-friendly force field data
+@repr(C, align(16))
+pub struct ForceFieldGPU {
+    // Transform and shape
+    position: Vec3,
+    force_type: u32,
+    rotation: Quat,
+    shape_type: u32,
+    shape_params: Vec3,
+    _pad0: u32,
+
+    // Force parameters
+    direction: Vec3,
+    strength: f32,
+    falloff_type: u32,
+    falloff_params: Vec3,
+
+    // Additional parameters
+    params0: Vec4,
+    params1: Vec4,
+}
+
+/// Force field manager
+pub struct ForceFieldSystem {
+    force_fields: Vec<ForceField>,
+    gpu_buffer: Buffer<ForceFieldGPU>,
+    max_force_fields: u32,
+    noise_texture: Texture,
+}
+
+pub struct ForceField {
+    transform: Transform,
+    field_type: ForceFieldType,
+    shape: ForceFieldShape,
+    enabled: bool,
+    priority: i32,
+}
+
+impl ForceFieldSystem {
+    pub fn new(context: &RenderContext, max_force_fields: u32) -> Self {
+        let gpu_buffer = context.create_buffer::<ForceFieldGPU>(max_force_fields as usize);
+        let noise_texture = Self::generate_curl_noise_texture(context);
+
+        Self {
+            force_fields: Vec::new(),
+            gpu_buffer,
+            max_force_fields,
+            noise_texture,
+        }
+    }
+
+    fn generate_curl_noise_texture(context: &RenderContext) -> Texture {
+        // Generate 3D curl noise texture for turbulence
+        let size = 128;
+        let mut data = vec![Vec4::ZERO; size * size * size];
+
+        for z in 0..size {
+            for y in 0..size {
+                for x in 0..size {
+                    let pos = Vec3::new(
+                        x as f32 / size as f32,
+                        y as f32 / size as f32,
+                        z as f32 / size as f32,
+                    ) * 4.0;
+
+                    // Compute curl of noise field
+                    let epsilon = 0.01;
+                    let curl = Vec3::new(
+                        (simplex_noise(pos + Vec3::Y * epsilon).z - simplex_noise(pos - Vec3::Y * epsilon).z
+                         - simplex_noise(pos + Vec3::Z * epsilon).y + simplex_noise(pos - Vec3::Z * epsilon).y) / (2.0 * epsilon),
+                        (simplex_noise(pos + Vec3::Z * epsilon).x - simplex_noise(pos - Vec3::Z * epsilon).x
+                         - simplex_noise(pos + Vec3::X * epsilon).z + simplex_noise(pos - Vec3::X * epsilon).z) / (2.0 * epsilon),
+                        (simplex_noise(pos + Vec3::X * epsilon).y - simplex_noise(pos - Vec3::X * epsilon).y
+                         - simplex_noise(pos + Vec3::Y * epsilon).x + simplex_noise(pos - Vec3::Y * epsilon).x) / (2.0 * epsilon),
+                    );
+
+                    data[z * size * size + y * size + x] = Vec4::new(curl.x, curl.y, curl.z, 1.0);
+                }
+            }
+        }
+
+        context.create_texture_3d(size, size, size, TextureFormat::RGBA32F, &data)
+    }
+
+    pub fn add_force_field(&mut self, field: ForceField) -> u32 {
+        let id = self.force_fields.len() as u32;
+        self.force_fields.push(field);
+        id
+    }
+
+    pub fn update_gpu_buffer(&mut self, context: &RenderContext) {
+        let gpu_data: Vec<ForceFieldGPU> = self.force_fields.iter()
+            .filter(|f| f.enabled)
+            .map(|f| f.to_gpu())
+            .collect();
+
+        context.update_buffer(&self.gpu_buffer, &gpu_data);
+    }
+
+    pub fn calculate_force(&self, position: Vec3, velocity: Vec3) -> Vec3 {
+        let mut total_force = Vec3::ZERO;
+
+        for field in &self.force_fields {
+            if !field.enabled {
+                continue;
+            }
+
+            if !field.is_inside(position) {
+                continue;
+            }
+
+            let local_pos = field.transform.inverse().transform_point(position);
+            let force = field.calculate_force(local_pos, velocity);
+            total_force += field.transform.transform_direction(force);
+        }
+
+        total_force
+    }
+}
+
+impl ForceField {
+    fn is_inside(&self, world_pos: Vec3) -> bool {
+        let local_pos = self.transform.inverse().transform_point(world_pos);
+
+        match &self.shape {
+            ForceFieldShape::Infinite => true,
+            ForceFieldShape::Sphere { radius } => local_pos.length() <= *radius,
+            ForceFieldShape::Box { half_extents } => {
+                local_pos.x.abs() <= half_extents.x &&
+                local_pos.y.abs() <= half_extents.y &&
+                local_pos.z.abs() <= half_extents.z
+            }
+            ForceFieldShape::Cylinder { radius, height } => {
+                let horiz_dist = Vec2::new(local_pos.x, local_pos.z).length();
+                horiz_dist <= *radius && local_pos.y.abs() <= *height * 0.5
+            }
+            ForceFieldShape::Hemisphere { radius } => {
+                local_pos.y >= 0.0 && local_pos.length() <= *radius
+            }
+        }
+    }
+
+    fn calculate_force(&self, local_pos: Vec3, velocity: Vec3) -> Vec3 {
+        match &self.field_type {
+            ForceFieldType::Gravity { direction, strength } => {
+                *direction * *strength
+            }
+            ForceFieldType::Wind { direction, strength, turbulence } => {
+                let noise = simplex_noise(local_pos * *turbulence);
+                (*direction + noise * 0.3) * *strength
+            }
+            ForceFieldType::Vortex { axis, strength, pull } => {
+                let to_axis = local_pos - axis.dot(local_pos) * *axis;
+                let tangent = axis.cross(to_axis).normalize();
+                let dist = to_axis.length();
+                tangent * *strength / (dist + 0.1) - to_axis.normalize() * *pull
+            }
+            ForceFieldType::Attractor { strength, mass, kill_radius } => {
+                let dist = local_pos.length();
+                if dist < *kill_radius {
+                    Vec3::ZERO  // Particle will be killed
+                } else {
+                    -local_pos.normalize() * (*strength * *mass) / (dist * dist + 0.1)
+                }
+            }
+            ForceFieldType::Repulsor { strength, falloff } => {
+                let dist = local_pos.length();
+                let falloff_mult = falloff.evaluate(dist);
+                local_pos.normalize() * *strength * falloff_mult
+            }
+            ForceFieldType::Turbulence { frequency, amplitude, octaves } => {
+                let mut force = Vec3::ZERO;
+                let mut freq = *frequency;
+                let mut amp = *amplitude;
+
+                for _ in 0..*octaves {
+                    force += simplex_noise(local_pos * freq) * amp;
+                    freq *= 2.0;
+                    amp *= 0.5;
+                }
+
+                force
+            }
+            ForceFieldType::Drag { linear, quadratic } => {
+                let speed = velocity.length();
+                if speed < 0.001 {
+                    Vec3::ZERO
+                } else {
+                    -velocity.normalize() * (*linear * speed + *quadratic * speed * speed)
+                }
+            }
+            ForceFieldType::Curl { strength, frequency } => {
+                // Sample curl noise
+                let pos = local_pos * *frequency;
+                curl_noise(pos) * *strength
+            }
+            ForceFieldType::Orbital { axis, speed, radial_pull } => {
+                let to_axis = local_pos - axis.dot(local_pos) * *axis;
+                let tangent = axis.cross(to_axis).normalize();
+                tangent * *speed - to_axis.normalize() * *radial_pull
+            }
+            _ => Vec3::ZERO,
+        }
+    }
+
+    fn to_gpu(&self) -> ForceFieldGPU {
+        // Convert to GPU-friendly format
+        ForceFieldGPU {
+            position: self.transform.position,
+            force_type: self.field_type_id(),
+            rotation: self.transform.rotation,
+            shape_type: self.shape_type_id(),
+            shape_params: self.shape_params(),
+            _pad0: 0,
+            direction: self.force_direction(),
+            strength: self.force_strength(),
+            falloff_type: 0,
+            falloff_params: Vec3::ZERO,
+            params0: Vec4::ZERO,
+            params1: Vec4::ZERO,
+        }
+    }
+
+    fn field_type_id(&self) -> u32 {
+        match &self.field_type {
+            ForceFieldType::Gravity { .. } => 0,
+            ForceFieldType::Wind { .. } => 1,
+            ForceFieldType::Vortex { .. } => 2,
+            ForceFieldType::Attractor { .. } => 3,
+            ForceFieldType::Repulsor { .. } => 4,
+            ForceFieldType::Turbulence { .. } => 5,
+            ForceFieldType::Drag { .. } => 6,
+            ForceFieldType::Curl { .. } => 7,
+            ForceFieldType::VectorField { .. } => 8,
+            ForceFieldType::Orbital { .. } => 9,
+            ForceFieldType::DirectionalField { .. } => 10,
+        }
+    }
+
+    fn shape_type_id(&self) -> u32 {
+        match &self.shape {
+            ForceFieldShape::Infinite => 0,
+            ForceFieldShape::Sphere { .. } => 1,
+            ForceFieldShape::Box { .. } => 2,
+            ForceFieldShape::Cylinder { .. } => 3,
+            ForceFieldShape::Hemisphere { .. } => 4,
+        }
+    }
+
+    fn shape_params(&self) -> Vec3 {
+        match &self.shape {
+            ForceFieldShape::Infinite => Vec3::ZERO,
+            ForceFieldShape::Sphere { radius } => Vec3::new(*radius, 0.0, 0.0),
+            ForceFieldShape::Box { half_extents } => *half_extents,
+            ForceFieldShape::Cylinder { radius, height } => Vec3::new(*radius, *height, 0.0),
+            ForceFieldShape::Hemisphere { radius } => Vec3::new(*radius, 0.0, 0.0),
+        }
+    }
+
+    fn force_direction(&self) -> Vec3 {
+        match &self.field_type {
+            ForceFieldType::Gravity { direction, .. } => *direction,
+            ForceFieldType::Wind { direction, .. } => *direction,
+            ForceFieldType::Vortex { axis, .. } => *axis,
+            ForceFieldType::Orbital { axis, .. } => *axis,
+            _ => Vec3::ZERO,
+        }
+    }
+
+    fn force_strength(&self) -> f32 {
+        match &self.field_type {
+            ForceFieldType::Gravity { strength, .. } => *strength,
+            ForceFieldType::Wind { strength, .. } => *strength,
+            ForceFieldType::Vortex { strength, .. } => *strength,
+            ForceFieldType::Attractor { strength, .. } => *strength,
+            ForceFieldType::Repulsor { strength, .. } => *strength,
+            ForceFieldType::Turbulence { amplitude, .. } => *amplitude,
+            ForceFieldType::Curl { strength, .. } => *strength,
+            ForceFieldType::Orbital { speed, .. } => *speed,
+            _ => 0.0,
+        }
+    }
+}
+
+impl ForceFalloff {
+    fn evaluate(&self, distance: f32) -> f32 {
+        match self {
+            ForceFalloff::None => 1.0,
+            ForceFalloff::Linear { distance: d } => (1.0 - distance / *d).max(0.0),
+            ForceFalloff::Quadratic { distance: d } => {
+                let t = (distance / *d).min(1.0);
+                (1.0 - t * t).max(0.0)
+            }
+            ForceFalloff::Exponential { rate } => (-*rate * distance).exp(),
+            ForceFalloff::Curve { curve } => curve.evaluate(distance),
+        }
+    }
+}
+
+fn simplex_noise(pos: Vec3) -> Vec3 {
+    // Simplified noise implementation
+    Vec3::new(
+        ((pos.x * 12.9898 + pos.y * 78.233 + pos.z * 45.164).sin() * 43758.5453).fract() * 2.0 - 1.0,
+        ((pos.x * 23.456 + pos.y * 89.012 + pos.z * 34.567).sin() * 12345.678).fract() * 2.0 - 1.0,
+        ((pos.x * 34.567 + pos.y * 12.345 + pos.z * 78.901).sin() * 65432.109).fract() * 2.0 - 1.0,
+    )
+}
+
+fn curl_noise(pos: Vec3) -> Vec3 {
+    let epsilon = 0.01;
+    Vec3::new(
+        (simplex_noise(pos + Vec3::Y * epsilon).z - simplex_noise(pos - Vec3::Y * epsilon).z
+         - simplex_noise(pos + Vec3::Z * epsilon).y + simplex_noise(pos - Vec3::Z * epsilon).y) / (2.0 * epsilon),
+        (simplex_noise(pos + Vec3::Z * epsilon).x - simplex_noise(pos - Vec3::Z * epsilon).x
+         - simplex_noise(pos + Vec3::X * epsilon).z + simplex_noise(pos - Vec3::X * epsilon).z) / (2.0 * epsilon),
+        (simplex_noise(pos + Vec3::X * epsilon).y - simplex_noise(pos - Vec3::X * epsilon).y
+         - simplex_noise(pos + Vec3::Y * epsilon).x + simplex_noise(pos - Vec3::Y * epsilon).x) / (2.0 * epsilon),
+    )
+}
+
+// =============================================================================
+// REGION: Particle Collision (WP-106)
+// =============================================================================
+
+/// Collision mode for particles
+pub enum CollisionMode {
+    None,
+    World { depth_buffer: TextureHandle },
+    Planes { planes: Vec<Plane> },
+    Signed Distance Fields { sdf_texture: TextureHandle },
+    Mesh { collision_mesh: u64 },
+    Heightmap { heightmap: TextureHandle, scale: Vec3 },
+}
+
+/// Collision response type
+pub enum CollisionResponse {
+    Kill,
+    Bounce { restitution: f32, friction: f32 },
+    Slide { friction: f32 },
+    Stick,
+    Callback { callback_id: u32 },
+}
+
+pub struct Plane {
+    normal: Vec3,
+    distance: f32,
+}
+
+/// Particle collision system
+pub struct ParticleCollisionSystem {
+    mode: CollisionMode,
+    response: CollisionResponse,
+    collision_radius: f32,
+    lifetime_loss: f32,
+    min_kill_speed: f32,
+
+    // GPU resources
+    depth_buffer: Option<TextureHandle>,
+    sdf_texture: Option<Texture>,
+    collision_planes: Buffer<Vec4>,
+}
+
+impl ParticleCollisionSystem {
+    pub fn new(context: &RenderContext) -> Self {
+        Self {
+            mode: CollisionMode::None,
+            response: CollisionResponse::Bounce { restitution: 0.5, friction: 0.3 },
+            collision_radius: 0.01,
+            lifetime_loss: 0.0,
+            min_kill_speed: 0.0,
+            depth_buffer: None,
+            sdf_texture: None,
+            collision_planes: context.create_buffer::<Vec4>(16),
+        }
+    }
+
+    pub fn set_world_collision(&mut self, depth_buffer: TextureHandle) {
+        self.mode = CollisionMode::World { depth_buffer };
+        self.depth_buffer = Some(depth_buffer);
+    }
+
+    pub fn add_collision_plane(&mut self, normal: Vec3, point: Vec3) {
+        let plane = Plane {
+            normal: normal.normalize(),
+            distance: normal.dot(point),
+        };
+
+        if let CollisionMode::Planes { planes } = &mut self.mode {
+            planes.push(plane);
+        } else {
+            self.mode = CollisionMode::Planes { planes: vec![plane] };
+        }
+    }
+
+    /// Check collision using depth buffer reconstruction
+    pub fn check_depth_collision(&self, position: Vec3, velocity: Vec3,
+                                  view_proj: Mat4, inv_view_proj: Mat4,
+                                  context: &RenderContext) -> Option<(Vec3, Vec3)> {
+        // Project position to screen space
+        let clip_pos = view_proj * Vec4::from_point(position);
+        let ndc = clip_pos.xyz() / clip_pos.w;
+
+        if ndc.x < -1.0 || ndc.x > 1.0 || ndc.y < -1.0 || ndc.y > 1.0 {
+            return None;
+        }
+
+        let screen_uv = Vec2::new(
+            ndc.x * 0.5 + 0.5,
+            ndc.y * -0.5 + 0.5,
+        );
+
+        // Sample depth buffer
+        let depth = context.sample_depth(self.depth_buffer.as_ref()?, screen_uv);
+
+        // Reconstruct world position from depth
+        let world_pos = reconstruct_world_position(screen_uv, depth, inv_view_proj);
+
+        // Check if particle is behind the surface
+        let to_surface = world_pos - position;
+        if velocity.dot(to_surface) > 0.0 && to_surface.length() < self.collision_radius {
+            // Estimate surface normal using depth gradient
+            let normal = estimate_normal_from_depth(screen_uv, inv_view_proj, context,
+                                                     self.depth_buffer.as_ref()?);
+            Some((world_pos, normal))
+        } else {
+            None
+        }
+    }
+
+    /// Resolve collision based on response type
+    pub fn resolve_collision(&self, position: &mut Vec3, velocity: &mut Vec3,
+                             hit_point: Vec3, hit_normal: Vec3) {
+        match &self.response {
+            CollisionResponse::Kill => {
+                // Mark particle for death
+            }
+            CollisionResponse::Bounce { restitution, friction } => {
+                // Separate position from surface
+                *position = hit_point + hit_normal * self.collision_radius;
+
+                // Reflect velocity with energy loss
+                let normal_vel = hit_normal * velocity.dot(hit_normal);
+                let tangent_vel = *velocity - normal_vel;
+
+                *velocity = tangent_vel * (1.0 - *friction) - normal_vel * *restitution;
+            }
+            CollisionResponse::Slide { friction } => {
+                *position = hit_point + hit_normal * self.collision_radius;
+
+                // Remove normal component, apply friction to tangent
+                let normal_vel = hit_normal * velocity.dot(hit_normal);
+                let tangent_vel = *velocity - normal_vel;
+
+                *velocity = tangent_vel * (1.0 - *friction);
+            }
+            CollisionResponse::Stick => {
+                *position = hit_point + hit_normal * self.collision_radius;
+                *velocity = Vec3::ZERO;
+            }
+            CollisionResponse::Callback { .. } => {
+                // Handled externally
+            }
+        }
+    }
+}
+
+fn reconstruct_world_position(uv: Vec2, depth: f32, inv_view_proj: Mat4) -> Vec3 {
+    let ndc = Vec4::new(
+        uv.x * 2.0 - 1.0,
+        (1.0 - uv.y) * 2.0 - 1.0,
+        depth,
+        1.0,
+    );
+    let world = inv_view_proj * ndc;
+    world.xyz() / world.w
+}
+
+fn estimate_normal_from_depth(uv: Vec2, inv_view_proj: Mat4,
+                               context: &RenderContext, depth_buffer: &TextureHandle) -> Vec3 {
+    let texel_size = 1.0 / 1920.0;  // Assume 1080p
+
+    let depth_center = context.sample_depth(Some(depth_buffer), uv);
+    let depth_right = context.sample_depth(Some(depth_buffer), uv + Vec2::new(texel_size, 0.0));
+    let depth_up = context.sample_depth(Some(depth_buffer), uv + Vec2::new(0.0, texel_size));
+
+    let pos_center = reconstruct_world_position(uv, depth_center, inv_view_proj);
+    let pos_right = reconstruct_world_position(uv + Vec2::new(texel_size, 0.0), depth_right, inv_view_proj);
+    let pos_up = reconstruct_world_position(uv + Vec2::new(0.0, texel_size), depth_up, inv_view_proj);
+
+    let tangent = pos_right - pos_center;
+    let bitangent = pos_up - pos_center;
+
+    tangent.cross(bitangent).normalize()
+}
+
+// =============================================================================
+// REGION: Trails and Ribbons (WP-107)
+// =============================================================================
+
+/// Trail vertex data
+@repr(C, align(16))
+pub struct TrailVertex {
+    position: Vec3,
+    direction: Vec3,
+    width: f32,
+    color: Vec4,
+    uv: Vec2,
+    age: f32,
+}
+
+/// Trail segment for ribbon rendering
+pub struct TrailSegment {
+    position: Vec3,
+    direction: Vec3,
+    up: Vec3,
+    width: f32,
+    color: Vec4,
+    time: f32,
+}
+
+/// Trail configuration
+pub struct TrailConfig {
+    max_points: u32,
+    min_vertex_distance: f32,
+    width_over_trail: CurveOverLifetime<f32>,
+    color_over_trail: Gradient,
+    texture_mode: TrailTextureMode,
+    alignment: TrailAlignment,
+    lifetime: f32,
+    inherit_color: bool,
+    emit_from_velocity: bool,
+}
+
+pub enum TrailTextureMode {
+    Stretch,
+    Tile { scale: f32 },
+    TilePerSegment,
+}
+
+pub enum TrailAlignment {
+    View,
+    TransformZ,
+    Velocity,
+    Custom { up: Vec3 },
+}
+
+/// Trail renderer for particle trails and ribbons
+pub struct TrailRenderer {
+    config: TrailConfig,
+    trails: Vec<Trail>,
+    vertex_buffer: Buffer<TrailVertex>,
+    index_buffer: Buffer<u32>,
+    max_vertices: u32,
+    max_trails: u32,
+}
+
+pub struct Trail {
+    particle_id: u32,
+    segments: Vec<TrailSegment>,
+    total_length: f32,
+    alive: bool,
+}
+
+impl TrailRenderer {
+    pub fn new(context: &RenderContext, config: TrailConfig, max_trails: u32) -> Self {
+        let max_vertices = max_trails * config.max_points * 2;
+
+        Self {
+            config,
+            trails: Vec::with_capacity(max_trails as usize),
+            vertex_buffer: context.create_buffer::<TrailVertex>(max_vertices as usize),
+            index_buffer: context.create_buffer::<u32>(max_vertices as usize * 3),
+            max_vertices,
+            max_trails,
+        }
+    }
+
+    pub fn add_trail(&mut self, particle_id: u32, start_position: Vec3, start_color: Vec4) {
+        if self.trails.len() >= self.max_trails as usize {
+            // Find oldest dead trail to reuse
+            if let Some(index) = self.trails.iter().position(|t| !t.alive) {
+                self.trails[index] = Trail {
+                    particle_id,
+                    segments: vec![TrailSegment {
+                        position: start_position,
+                        direction: Vec3::Y,
+                        up: Vec3::Z,
+                        width: self.config.width_over_trail.evaluate(0.0),
+                        color: start_color,
+                        time: 0.0,
+                    }],
+                    total_length: 0.0,
+                    alive: true,
+                };
+            }
+            return;
+        }
+
+        self.trails.push(Trail {
+            particle_id,
+            segments: vec![TrailSegment {
+                position: start_position,
+                direction: Vec3::Y,
+                up: Vec3::Z,
+                width: self.config.width_over_trail.evaluate(0.0),
+                color: start_color,
+                time: 0.0,
+            }],
+            total_length: 0.0,
+            alive: true,
+        });
+    }
+
+    pub fn update_trail(&mut self, particle_id: u32, position: Vec3, velocity: Vec3,
+                        color: Vec4, dt: f32) {
+        let trail = match self.trails.iter_mut().find(|t| t.particle_id == particle_id && t.alive) {
+            Some(t) => t,
+            None => return,
+        };
+
+        // Age existing segments
+        for segment in &mut trail.segments {
+            segment.time += dt;
+        }
+
+        // Remove old segments
+        trail.segments.retain(|s| s.time < self.config.lifetime);
+
+        // Check if we need to add a new segment
+        if let Some(last) = trail.segments.last() {
+            let dist = (position - last.position).length();
+
+            if dist >= self.config.min_vertex_distance {
+                let direction = if velocity.length_squared() > 0.001 {
+                    velocity.normalize()
+                } else {
+                    (position - last.position).normalize()
+                };
+
+                let up = match self.config.alignment {
+                    TrailAlignment::View => Vec3::Y,  // Set from view in render
+                    TrailAlignment::TransformZ => Vec3::Z,
+                    TrailAlignment::Velocity => velocity.normalize(),
+                    TrailAlignment::Custom { up } => up,
+                };
+
+                trail.segments.push(TrailSegment {
+                    position,
+                    direction,
+                    up,
+                    width: self.config.width_over_trail.evaluate(0.0),
+                    color: if self.config.inherit_color { color } else { Vec4::ONE },
+                    time: 0.0,
+                });
+
+                trail.total_length += dist;
+            }
+        }
+
+        // Recalculate width and color based on position in trail
+        let num_segments = trail.segments.len();
+        for (i, segment) in trail.segments.iter_mut().enumerate() {
+            let t = i as f32 / num_segments.max(1) as f32;
+            segment.width = self.config.width_over_trail.evaluate(t);
+            if !self.config.inherit_color {
+                let color = self.config.color_over_trail.evaluate(t);
+                segment.color = color;
+            }
+        }
+    }
+
+    pub fn kill_trail(&mut self, particle_id: u32) {
+        if let Some(trail) = self.trails.iter_mut().find(|t| t.particle_id == particle_id) {
+            trail.alive = false;
+        }
+    }
+
+    pub fn build_mesh(&mut self, camera_position: Vec3) -> (Vec<TrailVertex>, Vec<u32>) {
+        let mut vertices = Vec::new();
+        let mut indices = Vec::new();
+
+        for trail in &self.trails {
+            if trail.segments.len() < 2 {
+                continue;
+            }
+
+            let base_vertex = vertices.len() as u32;
+            let mut accumulated_length = 0.0;
+
+            for i in 0..trail.segments.len() {
+                let segment = &trail.segments[i];
+
+                // Calculate view-aligned right vector
+                let to_camera = (camera_position - segment.position).normalize();
+                let right = segment.direction.cross(to_camera).normalize() * segment.width * 0.5;
+
+                // UV based on texture mode
+                let u = match self.config.texture_mode {
+                    TrailTextureMode::Stretch => accumulated_length / trail.total_length,
+                    TrailTextureMode::Tile { scale } => accumulated_length * scale,
+                    TrailTextureMode::TilePerSegment => i as f32,
+                };
+
+                vertices.push(TrailVertex {
+                    position: segment.position + right,
+                    direction: segment.direction,
+                    width: segment.width,
+                    color: segment.color,
+                    uv: Vec2::new(u, 0.0),
+                    age: segment.time,
+                });
+
+                vertices.push(TrailVertex {
+                    position: segment.position - right,
+                    direction: segment.direction,
+                    width: segment.width,
+                    color: segment.color,
+                    uv: Vec2::new(u, 1.0),
+                    age: segment.time,
+                });
+
+                if i > 0 {
+                    accumulated_length += (segment.position - trail.segments[i - 1].position).length();
+                }
+
+                if i < trail.segments.len() - 1 {
+                    let idx = base_vertex + (i as u32) * 2;
+                    indices.extend_from_slice(&[
+                        idx, idx + 1, idx + 2,
+                        idx + 1, idx + 3, idx + 2,
+                    ]);
+                }
+            }
+        }
+
+        (vertices, indices)
+    }
+}
+
+impl Gradient {
+    pub fn white() -> Self {
+        Self {
+            color_keys: vec![
+                GradientColorKey { time: 0.0, color: Vec3::ONE },
+                GradientColorKey { time: 1.0, color: Vec3::ONE },
+            ],
+            alpha_keys: vec![
+                GradientAlphaKey { time: 0.0, alpha: 1.0 },
+                GradientAlphaKey { time: 1.0, alpha: 1.0 },
+            ],
+            blend_mode: GradientBlendMode::Linear,
+        }
+    }
+
+    pub fn evaluate(&self, t: f32) -> Vec4 {
+        // Find color
+        let mut color = Vec3::ONE;
+        for i in 0..self.color_keys.len() - 1 {
+            if t >= self.color_keys[i].time && t <= self.color_keys[i + 1].time {
+                let local_t = (t - self.color_keys[i].time) /
+                              (self.color_keys[i + 1].time - self.color_keys[i].time);
+                color = self.color_keys[i].color.lerp(self.color_keys[i + 1].color, local_t);
+                break;
+            }
+        }
+
+        // Find alpha
+        let mut alpha = 1.0;
+        for i in 0..self.alpha_keys.len() - 1 {
+            if t >= self.alpha_keys[i].time && t <= self.alpha_keys[i + 1].time {
+                let local_t = (t - self.alpha_keys[i].time) /
+                              (self.alpha_keys[i + 1].time - self.alpha_keys[i].time);
+                alpha = self.alpha_keys[i].alpha +
+                        (self.alpha_keys[i + 1].alpha - self.alpha_keys[i].alpha) * local_t;
+                break;
+            }
+        }
+
+        Vec4::new(color.x, color.y, color.z, alpha)
+    }
+}
+
+impl<T: Copy + Default> CurveOverLifetime<T> {
+    pub fn evaluate(&self, t: f32) -> T {
+        if self.keys.is_empty() {
+            return T::default();
+        }
+
+        if self.keys.len() == 1 {
+            return self.keys[0].value;
+        }
+
+        // Find the two keys to interpolate between
+        let t = match self.loop_mode {
+            LoopMode::Clamp => t.clamp(0.0, 1.0),
+            LoopMode::Loop => t.fract(),
+            LoopMode::PingPong => {
+                let t = t % 2.0;
+                if t > 1.0 { 2.0 - t } else { t }
+            }
+        };
+
+        for i in 0..self.keys.len() - 1 {
+            if t >= self.keys[i].time && t <= self.keys[i + 1].time {
+                let local_t = (t - self.keys[i].time) / (self.keys[i + 1].time - self.keys[i].time);
+                // For now, just linear interpolation
+                // Full implementation would use curve_type
+                return self.keys[i].value;  // Simplified
+            }
+        }
+
+        self.keys.last().map(|k| k.value).unwrap_or_default()
+    }
+}
+
+// =============================================================================
+// REGION: Beam Effects (WP-108)
+// =============================================================================
+
+/// Beam effect types
+pub enum BeamType {
+    Straight,
+    Bezier { control_points: Vec<Vec3> },
+    Catenary { sag: f32 },
+    Lightning { segments: u32, amplitude: f32, frequency: f32 },
+    Helix { radius: f32, frequency: f32, phase: f32 },
+}
+
+/// Beam vertex data
+@repr(C, align(16))
+pub struct BeamVertex {
+    position: Vec3,
+    direction: Vec3,
+    width: f32,
+    color: Vec4,
+    uv: Vec2,
+    noise: f32,
+}
+
+/// Beam configuration
+pub struct BeamConfig {
+    beam_type: BeamType,
+    width: f32,
+    width_curve: CurveOverLifetime<f32>,
+    color_gradient: Gradient,
+    texture_scale: f32,
+    noise_frequency: f32,
+    noise_amplitude: f32,
+    segments_per_unit: f32,
+}
+
+/// Single beam instance
+pub struct Beam {
+    start: Vec3,
+    end: Vec3,
+    config: BeamConfig,
+    time: f32,
+    vertices: Vec<BeamVertex>,
+}
+
+/// Beam rendering system
+pub struct BeamRenderer {
+    beams: Vec<Beam>,
+    vertex_buffer: Buffer<BeamVertex>,
+    index_buffer: Buffer<u32>,
+    max_vertices: u32,
+    noise_texture: Texture,
+}
+
+impl BeamRenderer {
+    pub fn new(context: &RenderContext, max_beams: u32, max_segments: u32) -> Self {
+        let max_vertices = max_beams * max_segments * 2;
+
+        Self {
+            beams: Vec::with_capacity(max_beams as usize),
+            vertex_buffer: context.create_buffer::<BeamVertex>(max_vertices as usize),
+            index_buffer: context.create_buffer::<u32>(max_vertices as usize * 3),
+            max_vertices,
+            noise_texture: Self::generate_noise_texture(context),
+        }
+    }
+
+    fn generate_noise_texture(context: &RenderContext) -> Texture {
+        let size = 256;
+        let mut data = vec![0.0f32; size * size];
+
+        for y in 0..size {
+            for x in 0..size {
+                let u = x as f32 / size as f32;
+                let v = y as f32 / size as f32;
+                data[y * size + x] = ((u * 123.456 + v * 789.012).sin() * 43758.5453).fract();
+            }
+        }
+
+        context.create_texture_2d(size, size, TextureFormat::R32F, &data)
+    }
+
+    pub fn add_beam(&mut self, start: Vec3, end: Vec3, config: BeamConfig) -> u32 {
+        let id = self.beams.len() as u32;
+        self.beams.push(Beam {
+            start,
+            end,
+            config,
+            time: 0.0,
+            vertices: Vec::new(),
+        });
+        id
+    }
+
+    pub fn update_beam(&mut self, id: u32, start: Vec3, end: Vec3) {
+        if let Some(beam) = self.beams.get_mut(id as usize) {
+            beam.start = start;
+            beam.end = end;
+        }
+    }
+
+    pub fn update(&mut self, dt: f32) {
+        for beam in &mut self.beams {
+            beam.time += dt;
+            beam.rebuild_vertices();
+        }
+    }
+
+    pub fn build_mesh(&self, camera_position: Vec3) -> (Vec<BeamVertex>, Vec<u32>) {
+        let mut all_vertices = Vec::new();
+        let mut all_indices = Vec::new();
+
+        for beam in &self.beams {
+            let base_vertex = all_vertices.len() as u32;
+
+            for i in 0..beam.vertices.len() {
+                let vertex = &beam.vertices[i];
+
+                // View-aligned width
+                let to_camera = (camera_position - vertex.position).normalize();
+                let right = vertex.direction.cross(to_camera).normalize() * vertex.width * 0.5;
+
+                all_vertices.push(BeamVertex {
+                    position: vertex.position + right,
+                    ..*vertex
+                });
+                all_vertices.push(BeamVertex {
+                    position: vertex.position - right,
+                    ..*vertex
+                });
+
+                if i < beam.vertices.len() - 1 {
+                    let idx = base_vertex + (i as u32) * 2;
+                    all_indices.extend_from_slice(&[
+                        idx, idx + 1, idx + 2,
+                        idx + 1, idx + 3, idx + 2,
+                    ]);
+                }
+            }
+        }
+
+        (all_vertices, all_indices)
+    }
+}
+
+impl Beam {
+    fn rebuild_vertices(&mut self) {
+        self.vertices.clear();
+
+        let length = (self.end - self.start).length();
+        let segments = (length * self.config.segments_per_unit).ceil() as u32;
+        let dir = (self.end - self.start).normalize();
+
+        for i in 0..=segments {
+            let t = i as f32 / segments as f32;
+
+            let base_position = match &self.config.beam_type {
+                BeamType::Straight => {
+                    self.start + (self.end - self.start) * t
+                }
+                BeamType::Bezier { control_points } => {
+                    self.evaluate_bezier(t, control_points)
+                }
+                BeamType::Catenary { sag } => {
+                    let y_offset = *sag * (1.0 - (t * 2.0 - 1.0).powi(2));
+                    self.start + (self.end - self.start) * t + Vec3::Y * y_offset
+                }
+                BeamType::Lightning { segments: _, amplitude, frequency } => {
+                    let noise = (t * *frequency + self.time * 10.0).sin() * *amplitude;
+                    let perp = if dir.y.abs() > 0.99 { Vec3::X } else { dir.cross(Vec3::Y).normalize() };
+                    self.start + (self.end - self.start) * t + perp * noise
+                }
+                BeamType::Helix { radius, frequency, phase } => {
+                    let angle = t * *frequency * std::f32::consts::TAU + *phase + self.time;
+                    let perp1 = if dir.y.abs() > 0.99 { Vec3::X } else { dir.cross(Vec3::Y).normalize() };
+                    let perp2 = dir.cross(perp1).normalize();
+                    let offset = perp1 * angle.cos() * *radius + perp2 * angle.sin() * *radius;
+                    self.start + (self.end - self.start) * t + offset
+                }
+            };
+
+            // Add noise displacement
+            let noise_offset = if self.config.noise_amplitude > 0.0 {
+                let noise_t = t * self.config.noise_frequency + self.time;
+                simplex_noise(Vec3::splat(noise_t)) * self.config.noise_amplitude
+            } else {
+                Vec3::ZERO
+            };
+
+            let position = base_position + noise_offset;
+
+            self.vertices.push(BeamVertex {
+                position,
+                direction: dir,
+                width: self.config.width * self.config.width_curve.evaluate(t),
+                color: self.config.color_gradient.evaluate(t),
+                uv: Vec2::new(t * self.config.texture_scale, 0.5),
+                noise: (t * self.config.noise_frequency + self.time).sin(),
+            });
+        }
+    }
+
+    fn evaluate_bezier(&self, t: f32, control_points: &[Vec3]) -> Vec3 {
+        if control_points.is_empty() {
+            return self.start.lerp(self.end, t);
+        }
+
+        let mut points = vec![self.start];
+        points.extend_from_slice(control_points);
+        points.push(self.end);
+
+        // De Casteljau's algorithm
+        while points.len() > 1 {
+            let mut new_points = Vec::new();
+            for i in 0..points.len() - 1 {
+                new_points.push(points[i].lerp(points[i + 1], t));
+            }
+            points = new_points;
+        }
+
+        points[0]
+    }
+}
+
+// =============================================================================
+// REGION: GPU Particle Simulation (WP-109)
+// =============================================================================
+
+/// GPU particle simulation compute pipeline
+pub struct GPUParticleSimulator {
+    // Compute shaders
+    emit_shader: ComputeShader,
+    simulate_shader: ComputeShader,
+    compact_shader: ComputeShader,
+    sort_shader: ComputeShader,
+    cull_shader: ComputeShader,
+
+    // Buffers
+    particle_pool: ParticlePool,
+    emit_args: Buffer<EmitArgs>,
+    simulation_params: Buffer<SimulationParams>,
+    force_field_buffer: Buffer<ForceFieldGPU>,
+
+    // Sorting
+    sort_keys: Buffer<u64>,
+    sort_indices: Buffer<u32>,
+
+    // Statistics
+    stats_buffer: Buffer<ParticleStats>,
+}
+
+@repr(C, align(16))
+pub struct EmitArgs {
+    emit_count: u32,
+    max_particles: u32,
+    emitter_position: Vec3,
+    emitter_rotation: Quat,
+    emitter_velocity: Vec3,
+
+    start_lifetime_min: f32,
+    start_lifetime_max: f32,
+    start_speed_min: f32,
+    start_speed_max: f32,
+    start_size_min: Vec2,
+    start_size_max: Vec2,
+    start_rotation_min: f32,
+    start_rotation_max: f32,
+    start_color: Vec4,
+
+    shape_type: u32,
+    shape_params: Vec4,
+    velocity_mode: u32,
+    velocity_params: Vec4,
+
+    random_seed: u32,
+    time: f32,
+}
+
+@repr(C, align(16))
+pub struct SimulationParams {
+    delta_time: f32,
+    time: f32,
+    gravity: Vec3,
+    drag: f32,
+
+    force_field_count: u32,
+    collision_mode: u32,
+
+    view_matrix: Mat4,
+    proj_matrix: Mat4,
+    inv_view_proj: Mat4,
+    camera_position: Vec3,
+
+    bounds_min: Vec3,
+    bounds_max: Vec3,
+    kill_on_bounds: u32,
+}
+
+@repr(C)
+pub struct ParticleStats {
+    alive_count: u32,
+    spawned_this_frame: u32,
+    killed_this_frame: u32,
+    max_lifetime: f32,
+}
+
+impl GPUParticleSimulator {
+    pub fn new(context: &RenderContext, max_particles: u32) -> Self {
+        // Load compute shaders
+        let emit_shader = context.load_compute_shader("particle_emit.comp");
+        let simulate_shader = context.load_compute_shader("particle_simulate.comp");
+        let compact_shader = context.load_compute_shader("particle_compact.comp");
+        let sort_shader = context.load_compute_shader("bitonic_sort.comp");
+        let cull_shader = context.load_compute_shader("particle_cull.comp");
+
+        let particle_pool = ParticlePool::new(context, max_particles);
+
+        Self {
+            emit_shader,
+            simulate_shader,
+            compact_shader,
+            sort_shader,
+            cull_shader,
+            particle_pool,
+            emit_args: context.create_buffer::<EmitArgs>(1),
+            simulation_params: context.create_buffer::<SimulationParams>(1),
+            force_field_buffer: context.create_buffer::<ForceFieldGPU>(64),
+            sort_keys: context.create_buffer::<u64>(max_particles as usize),
+            sort_indices: context.create_buffer::<u32>(max_particles as usize),
+            stats_buffer: context.create_buffer::<ParticleStats>(1),
+        }
+    }
+
+    pub fn emit(&mut self, context: &RenderContext, emitter: &ParticleEmitter,
+                emit_count: u32, time: f32) {
+        let emit_args = EmitArgs {
+            emit_count,
+            max_particles: self.particle_pool.capacity,
+            emitter_position: emitter.transform.position,
+            emitter_rotation: emitter.transform.rotation,
+            emitter_velocity: (emitter.transform.position - emitter.last_position) / 0.016,
+            start_lifetime_min: emitter.start_lifetime.min,
+            start_lifetime_max: emitter.start_lifetime.max,
+            start_speed_min: emitter.start_speed.min,
+            start_speed_max: emitter.start_speed.max,
+            start_size_min: emitter.start_size.min,
+            start_size_max: emitter.start_size.max,
+            start_rotation_min: emitter.start_rotation.min,
+            start_rotation_max: emitter.start_rotation.max,
+            start_color: emitter.start_color.evaluate(0.0),
+            shape_type: emitter.shape_type_id(),
+            shape_params: emitter.shape_params(),
+            velocity_mode: emitter.velocity_mode_id(),
+            velocity_params: emitter.velocity_params(),
+            random_seed: (time * 1000.0) as u32,
+            time,
+        };
+
+        context.update_buffer(&self.emit_args, &[emit_args]);
+
+        // Dispatch emit shader
+        let groups = (emit_count + 63) / 64;
+        context.dispatch_compute(&self.emit_shader, groups, 1, 1);
+    }
+
+    pub fn simulate(&mut self, context: &RenderContext, params: SimulationParams) {
+        context.update_buffer(&self.simulation_params, &[params]);
+
+        // Dispatch simulation
+        let groups = (self.particle_pool.capacity + 255) / 256;
+        context.dispatch_compute(&self.simulate_shader, groups, 1, 1);
+
+        // Compact dead particles
+        context.dispatch_compute(&self.compact_shader, groups, 1, 1);
+    }
+
+    pub fn sort(&mut self, context: &RenderContext, camera_position: Vec3) {
+        // Bitonic sort for depth ordering
+        let n = self.particle_pool.capacity;
+        let mut k = 2;
+        while k <= n {
+            let mut j = k / 2;
+            while j > 0 {
+                let groups = (n + 255) / 256;
+                context.dispatch_compute(&self.sort_shader, groups, 1, 1);
+                j /= 2;
+            }
+            k *= 2;
+        }
+    }
+
+    pub fn cull(&mut self, context: &RenderContext, frustum: &[Vec4; 6]) {
+        let groups = (self.particle_pool.capacity + 255) / 256;
+        context.dispatch_compute(&self.cull_shader, groups, 1, 1);
+    }
+
+    pub fn get_draw_args(&self) -> &Buffer<DrawIndirectArgs> {
+        &self.particle_pool.draw_args
+    }
+
+    pub fn get_particle_buffer(&self) -> &ParticlePool {
+        &self.particle_pool
+    }
+}
+
+impl ParticleEmitter {
+    fn shape_type_id(&self) -> u32 {
+        match &self.shape {
+            EmitterShape::Point => 0,
+            EmitterShape::Sphere { .. } => 1,
+            EmitterShape::Hemisphere { .. } => 2,
+            EmitterShape::Cone { .. } => 3,
+            EmitterShape::Box { .. } => 4,
+            EmitterShape::Cylinder { .. } => 5,
+            EmitterShape::Torus { .. } => 6,
+            EmitterShape::Circle { .. } => 7,
+            EmitterShape::Rectangle { .. } => 8,
+            EmitterShape::Edge { .. } => 9,
+            _ => 0,
+        }
+    }
+
+    fn shape_params(&self) -> Vec4 {
+        match &self.shape {
+            EmitterShape::Sphere { radius, surface_only } =>
+                Vec4::new(*radius, if *surface_only { 1.0 } else { 0.0 }, 0.0, 0.0),
+            EmitterShape::Hemisphere { radius, surface_only } =>
+                Vec4::new(*radius, if *surface_only { 1.0 } else { 0.0 }, 0.0, 0.0),
+            EmitterShape::Cone { angle, length, radius } =>
+                Vec4::new(*angle, *length, *radius, 0.0),
+            EmitterShape::Box { half_extents, surface_only } =>
+                Vec4::new(half_extents.x, half_extents.y, half_extents.z,
+                         if *surface_only { 1.0 } else { 0.0 }),
+            EmitterShape::Cylinder { radius, height, surface_only } =>
+                Vec4::new(*radius, *height, if *surface_only { 1.0 } else { 0.0 }, 0.0),
+            EmitterShape::Torus { major_radius, minor_radius } =>
+                Vec4::new(*major_radius, *minor_radius, 0.0, 0.0),
+            EmitterShape::Circle { radius } =>
+                Vec4::new(*radius, 0.0, 0.0, 0.0),
+            EmitterShape::Rectangle { half_extents } =>
+                Vec4::new(half_extents.x, half_extents.y, 0.0, 0.0),
+            _ => Vec4::ZERO,
+        }
+    }
+
+    fn velocity_mode_id(&self) -> u32 {
+        match &self.velocity_mode {
+            VelocityMode::Inherit { .. } => 0,
+            VelocityMode::InCone { .. } => 1,
+            VelocityMode::AwayFromCenter { .. } => 2,
+            VelocityMode::Tangent { .. } => 3,
+            VelocityMode::Random { .. } => 4,
+            VelocityMode::AlongNormal { .. } => 5,
+            VelocityMode::Orbital { .. } => 6,
+            VelocityMode::Custom { .. } => 7,
+        }
+    }
+
+    fn velocity_params(&self) -> Vec4 {
+        match &self.velocity_mode {
+            VelocityMode::Inherit { multiplier } =>
+                Vec4::new(*multiplier, 0.0, 0.0, 0.0),
+            VelocityMode::InCone { angle, speed } =>
+                Vec4::new(*angle, speed.min, speed.max, 0.0),
+            VelocityMode::AwayFromCenter { speed } =>
+                Vec4::new(speed.min, speed.max, 0.0, 0.0),
+            VelocityMode::Tangent { speed } =>
+                Vec4::new(speed.min, speed.max, 0.0, 0.0),
+            VelocityMode::Random { speed } =>
+                Vec4::new(speed.min, speed.max, 0.0, 0.0),
+            VelocityMode::AlongNormal { speed } =>
+                Vec4::new(speed.min, speed.max, 0.0, 0.0),
+            VelocityMode::Orbital { speed, axis } =>
+                Vec4::new(*speed, axis.x, axis.y, axis.z),
+            VelocityMode::Custom { direction, speed } =>
+                Vec4::new(speed.min, speed.max, 0.0, 0.0),
+        }
+    }
+}
+
+// =============================================================================
+// REGION: Particle Rendering (WP-110)
+// =============================================================================
+
+/// Particle render vertex for billboard rendering
+@repr(C, align(16))
+pub struct ParticleRenderVertex {
+    position: Vec3,
+    size: Vec2,
+    rotation: f32,
+    color: Vec4,
+    uv_offset_scale: Vec4,
+    custom: Vec4,
+}
+
+/// Billboard type for particle rendering
+pub enum BillboardMode {
+    ViewAligned,        // Face camera
+    VelocityAligned,    // Stretch along velocity
+    AxisAligned(Vec3),  // Align to specific axis
+    FreeRotation,       // Full 3D rotation
+}
+
+/// Sprite sheet configuration for animated particles
+pub struct SpriteSheet {
+    rows: u32,
+    columns: u32,
+    frame_count: u32,
+    frame_rate: f32,
+    start_frame: u32,
+    animation_mode: AnimationMode,
+}
+
+pub enum AnimationMode {
+    Linear,
+    RandomStart,
+    RandomFrame,
+    PingPong,
+    Lifetime,
+}
+
+/// Soft particles configuration for depth fading
+pub struct SoftParticleConfig {
+    enabled: bool,
+    fade_distance: f32,
+    contrast: f32,
+}
+
+/// Particle material
+pub struct ParticleMaterial {
+    base_texture: Option<TextureHandle>,
+    normal_map: Option<TextureHandle>,
+    emission_map: Option<TextureHandle>,
+    base_color: Vec4,
+    emission_color: Vec3,
+    emission_intensity: f32,
+    blend_mode: BlendMode,
+    lighting_mode: LightingMode,
+    sprite_sheet: Option<SpriteSheet>,
+    soft_particles: SoftParticleConfig,
+    distance_fade: Option<DistanceFade>,
+    shadow_receive: bool,
+    shadow_cast: bool,
+}
+
+pub enum BlendMode {
+    Alpha,
+    Additive,
+    Multiply,
+    Premultiplied,
+    Subtractive,
+}
+
+pub enum LightingMode {
+    Unlit,
+    Lambert,
+    Blinn,
+    PBR,
+}
+
+pub struct DistanceFade {
+    start_distance: f32,
+    end_distance: f32,
+    mode: FadeMode,
+}
+
+pub enum FadeMode {
+    Linear,
+    Quadratic,
+    Exponential,
+}
+
+/// Main particle renderer
+pub struct ParticleRenderer {
+    // Pipelines
+    billboard_pipeline: Pipeline,
+    mesh_pipeline: Pipeline,
+    trail_pipeline: Pipeline,
+
+    // Shaders
+    vertex_shader: Shader,
+    fragment_shader: Shader,
+
+    // Buffers
+    vertex_buffer: Buffer<ParticleRenderVertex>,
+    index_buffer: Buffer<u32>,
+    instance_buffer: Buffer<ParticleInstanceData>,
+
+    // Default resources
+    default_texture: Texture,
+    default_normal: Texture,
+    quad_mesh: MeshHandle,
+
+    // Stats
+    particles_rendered: u32,
+    draw_calls: u32,
+}
+
+@repr(C, align(16))
+pub struct ParticleInstanceData {
+    world_matrix: Mat4,
+    color: Vec4,
+    uv_offset_scale: Vec4,
+    custom: Vec4,
+}
+
+impl ParticleRenderer {
+    pub fn new(context: &RenderContext, max_particles: u32) -> Self {
+        let vertex_shader = context.load_shader("particle.vert");
+        let fragment_shader = context.load_shader("particle.frag");
+
+        let billboard_pipeline = context.create_pipeline(PipelineDesc {
+            vertex_shader: &vertex_shader,
+            fragment_shader: &fragment_shader,
+            blend_state: BlendState::alpha_blend(),
+            depth_state: DepthState::read_only(),
+            cull_mode: CullMode::None,
+            ..Default::default()
+        });
+
+        let mesh_pipeline = context.create_pipeline(PipelineDesc {
+            vertex_shader: context.load_shader("particle_mesh.vert"),
+            fragment_shader: &fragment_shader,
+            blend_state: BlendState::alpha_blend(),
+            depth_state: DepthState::read_only(),
+            cull_mode: CullMode::Back,
+            ..Default::default()
+        });
+
+        let trail_pipeline = context.create_pipeline(PipelineDesc {
+            vertex_shader: context.load_shader("particle_trail.vert"),
+            fragment_shader: context.load_shader("particle_trail.frag"),
+            blend_state: BlendState::alpha_blend(),
+            depth_state: DepthState::read_only(),
+            cull_mode: CullMode::None,
+            ..Default::default()
+        });
+
+        Self {
+            billboard_pipeline,
+            mesh_pipeline,
+            trail_pipeline,
+            vertex_shader,
+            fragment_shader,
+            vertex_buffer: context.create_buffer::<ParticleRenderVertex>(max_particles as usize * 4),
+            index_buffer: context.create_buffer::<u32>(max_particles as usize * 6),
+            instance_buffer: context.create_buffer::<ParticleInstanceData>(max_particles as usize),
+            default_texture: context.create_white_texture(),
+            default_normal: context.create_default_normal_texture(),
+            quad_mesh: context.create_quad_mesh(),
+            particles_rendered: 0,
+            draw_calls: 0,
+        }
+    }
+
+    pub fn render(&mut self, context: &RenderContext,
+                  particle_pool: &ParticlePool,
+                  material: &ParticleMaterial,
+                  camera: &Camera) {
+        self.particles_rendered = 0;
+        self.draw_calls = 0;
+
+        // Set pipeline based on material blend mode
+        let pipeline = match material.blend_mode {
+            BlendMode::Alpha => &self.billboard_pipeline,
+            BlendMode::Additive => &self.billboard_pipeline,  // Different blend state
+            _ => &self.billboard_pipeline,
+        };
+
+        context.bind_pipeline(pipeline);
+
+        // Bind textures
+        context.bind_texture(0, material.base_texture.as_ref()
+            .map(|t| context.get_texture(t))
+            .unwrap_or(&self.default_texture));
+
+        if let Some(sprite_sheet) = &material.sprite_sheet {
+            // Set sprite sheet uniforms
+            context.set_uniform("u_sprite_rows", sprite_sheet.rows as f32);
+            context.set_uniform("u_sprite_cols", sprite_sheet.columns as f32);
+        }
+
+        // Draw particles using indirect draw
+        context.draw_indirect(particle_pool.get_draw_args());
+
+        self.draw_calls += 1;
+    }
+
+    pub fn render_trails(&mut self, context: &RenderContext,
+                         trail_renderer: &TrailRenderer,
+                         material: &ParticleMaterial,
+                         camera: &Camera) {
+        let (vertices, indices) = trail_renderer.build_mesh(camera.position);
+
+        if vertices.is_empty() {
+            return;
+        }
+
+        context.bind_pipeline(&self.trail_pipeline);
+        context.update_buffer(&self.vertex_buffer, &vertices);
+        context.update_buffer(&self.index_buffer, &indices);
+
+        context.draw_indexed(indices.len() as u32, 0, 0);
+        self.draw_calls += 1;
+    }
+}
+
+// =============================================================================
+// REGION: VFX Graph (WP-111)
+// =============================================================================
+
+/// Node types in the VFX graph
+pub enum VFXNodeType {
+    // Context nodes
+    SpawnContext { rate: f32, burst: Option<BurstConfig> },
+    UpdateContext,
+    OutputContext { output_type: VFXOutputType },
+
+    // Attribute nodes
+    GetAttribute { attribute: ParticleAttribute },
+    SetAttribute { attribute: ParticleAttribute },
+
+    // Math nodes
+    Add, Subtract, Multiply, Divide,
+    Lerp, Clamp, Remap,
+    Sin, Cos, Tan,
+    Sqrt, Pow, Abs,
+    Min, Max,
+    Dot, Cross, Normalize, Length,
+
+    // Vector nodes
+    Compose { component_count: u32 },
+    Decompose { component_count: u32 },
+    Transform { space: TransformSpace },
+
+    // Random nodes
+    Random { mode: RandomMode },
+    PerlinNoise { octaves: u32 },
+    SimplexNoise { octaves: u32 },
+    CurlNoise { octaves: u32 },
+
+    // Sampling nodes
+    SampleTexture { texture: TextureHandle },
+    SampleCurve { curve: CurveOverLifetime<f32> },
+    SampleGradient { gradient: Gradient },
+
+    // Logic nodes
+    Compare { op: CompareOp },
+    Branch,
+
+    // Force nodes
+    AddForce,
+    SetVelocity,
+    ConformToSphere,
+    ConformToSDF,
+
+    // Kill nodes
+    Kill,
+    KillByAge,
+    KillByBounds,
+}
+
+pub struct BurstConfig {
+    count: u32,
+    cycles: i32,
+    interval: f32,
+    probability: f32,
+}
+
+pub enum VFXOutputType {
+    Particle,
+    Mesh,
+    DecalProjector,
+    PointLight,
+    SpotLight,
+}
+
+pub enum TransformSpace {
+    Local,
+    World,
+    Camera,
+    Simulation,
+}
+
+pub enum RandomMode {
+    PerParticle,
+    PerComponent,
+    Constant,
+    AnimatedUniform,
+    AnimatedPerParticle,
+}
+
+pub enum CompareOp {
+    Equal,
+    NotEqual,
+    Less,
+    LessEqual,
+    Greater,
+    GreaterEqual,
+}
+
+/// VFX Graph node
+pub struct VFXNode {
+    id: u64,
+    node_type: VFXNodeType,
+    position: Vec2,
+    inputs: Vec<VFXSlot>,
+    outputs: Vec<VFXSlot>,
+    properties: HashMap<String, VFXProperty>,
+}
+
+pub struct VFXSlot {
+    name: String,
+    slot_type: VFXSlotType,
+    connected_to: Option<(u64, u32)>,  // (node_id, slot_index)
+}
+
+pub enum VFXSlotType {
+    Float,
+    Vec2,
+    Vec3,
+    Vec4,
+    Int,
+    Bool,
+    Texture,
+    Curve,
+    Gradient,
+    Any,
+}
+
+pub enum VFXProperty {
+    Float(f32),
+    Vec2(Vec2),
+    Vec3(Vec3),
+    Vec4(Vec4),
+    Int(i32),
+    Bool(bool),
+    Texture(TextureHandle),
+    Curve(CurveOverLifetime<f32>),
+    Gradient(Gradient),
+}
+
+/// VFX Graph system
+pub struct VFXGraph {
+    nodes: HashMap<u64, VFXNode>,
+    connections: Vec<VFXConnection>,
+    spawn_context: Option<u64>,
+    update_context: Option<u64>,
+    output_context: Option<u64>,
+
+    // Compiled graph
+    compiled: Option<CompiledVFXGraph>,
+
+    // Runtime
+    next_node_id: u64,
+}
+
+pub struct VFXConnection {
+    from_node: u64,
+    from_slot: u32,
+    to_node: u64,
+    to_slot: u32,
+}
+
+/// Compiled VFX graph for efficient execution
+pub struct CompiledVFXGraph {
+    spawn_ops: Vec<VFXOp>,
+    update_ops: Vec<VFXOp>,
+    output_ops: Vec<VFXOp>,
+
+    // GPU compute shader code
+    spawn_shader: ComputeShader,
+    update_shader: ComputeShader,
+
+    // Constant buffer
+    constants: Buffer<Vec4>,
+}
+
+/// Low-level VFX operation
+pub enum VFXOp {
+    LoadConstant { dst: u32, value: Vec4 },
+    LoadAttribute { dst: u32, attribute: ParticleAttribute },
+    StoreAttribute { src: u32, attribute: ParticleAttribute },
+    Add { dst: u32, a: u32, b: u32 },
+    Mul { dst: u32, a: u32, b: u32 },
+    Lerp { dst: u32, a: u32, b: u32, t: u32 },
+    Noise { dst: u32, pos: u32, octaves: u32 },
+    SampleTexture { dst: u32, tex: u32, uv: u32 },
+    SampleCurve { dst: u32, curve: u32, t: u32 },
+    Compare { dst: u32, a: u32, b: u32, op: CompareOp },
+    Branch { condition: u32, true_ops: Vec<VFXOp>, false_ops: Vec<VFXOp> },
+    Kill,
+}
+
+impl VFXGraph {
+    pub fn new() -> Self {
+        Self {
+            nodes: HashMap::new(),
+            connections: Vec::new(),
+            spawn_context: None,
+            update_context: None,
+            output_context: None,
+            compiled: None,
+            next_node_id: 1,
+        }
+    }
+
+    pub fn add_node(&mut self, node_type: VFXNodeType) -> u64 {
+        let id = self.next_node_id;
+        self.next_node_id += 1;
+
+        let node = VFXNode {
+            id,
+            node_type,
+            position: Vec2::ZERO,
+            inputs: Vec::new(),
+            outputs: Vec::new(),
+            properties: HashMap::new(),
+        };
+
+        self.nodes.insert(id, node);
+        id
+    }
+
+    pub fn connect(&mut self, from_node: u64, from_slot: u32, to_node: u64, to_slot: u32) {
+        self.connections.push(VFXConnection {
+            from_node,
+            from_slot,
+            to_node,
+            to_slot,
+        });
+
+        // Mark graph as needing recompilation
+        self.compiled = None;
+    }
+
+    pub fn compile(&mut self, context: &RenderContext) -> Result<(), String> {
+        // Topological sort of nodes
+        let spawn_nodes = self.collect_context_nodes(self.spawn_context)?;
+        let update_nodes = self.collect_context_nodes(self.update_context)?;
+        let output_nodes = self.collect_context_nodes(self.output_context)?;
+
+        // Generate operations
+        let spawn_ops = self.generate_ops(&spawn_nodes)?;
+        let update_ops = self.generate_ops(&update_nodes)?;
+        let output_ops = self.generate_ops(&output_nodes)?;
+
+        // Generate compute shaders
+        let spawn_code = self.generate_shader_code(&spawn_ops, "spawn");
+        let update_code = self.generate_shader_code(&update_ops, "update");
+
+        let spawn_shader = context.compile_compute_shader(&spawn_code)?;
+        let update_shader = context.compile_compute_shader(&update_code)?;
+
+        self.compiled = Some(CompiledVFXGraph {
+            spawn_ops,
+            update_ops,
+            output_ops,
+            spawn_shader,
+            update_shader,
+            constants: context.create_buffer::<Vec4>(256),
+        });
+
+        Ok(())
+    }
+
+    fn collect_context_nodes(&self, context_id: Option<u64>) -> Result<Vec<u64>, String> {
+        let context_id = context_id.ok_or("Context node not found")?;
+
+        let mut nodes = Vec::new();
+        let mut visited = HashSet::new();
+        self.collect_nodes_recursive(context_id, &mut nodes, &mut visited);
+
+        Ok(nodes)
+    }
+
+    fn collect_nodes_recursive(&self, node_id: u64, nodes: &mut Vec<u64>, visited: &mut HashSet<u64>) {
+        if visited.contains(&node_id) {
+            return;
+        }
+        visited.insert(node_id);
+
+        // First collect dependencies
+        for conn in &self.connections {
+            if conn.to_node == node_id {
+                self.collect_nodes_recursive(conn.from_node, nodes, visited);
+            }
+        }
+
+        nodes.push(node_id);
+    }
+
+    fn generate_ops(&self, nodes: &[u64]) -> Result<Vec<VFXOp>, String> {
+        let mut ops = Vec::new();
+
+        for &node_id in nodes {
+            let node = self.nodes.get(&node_id).ok_or("Node not found")?;
+
+            match &node.node_type {
+                VFXNodeType::GetAttribute { attribute } => {
+                    ops.push(VFXOp::LoadAttribute {
+                        dst: node_id as u32,
+                        attribute: *attribute,
+                    });
+                }
+                VFXNodeType::SetAttribute { attribute } => {
+                    let src = self.get_input_register(node_id, 0)?;
+                    ops.push(VFXOp::StoreAttribute {
+                        src,
+                        attribute: *attribute,
+                    });
+                }
+                VFXNodeType::Add => {
+                    let a = self.get_input_register(node_id, 0)?;
+                    let b = self.get_input_register(node_id, 1)?;
+                    ops.push(VFXOp::Add {
+                        dst: node_id as u32,
+                        a,
+                        b,
+                    });
+                }
+                VFXNodeType::Multiply => {
+                    let a = self.get_input_register(node_id, 0)?;
+                    let b = self.get_input_register(node_id, 1)?;
+                    ops.push(VFXOp::Mul {
+                        dst: node_id as u32,
+                        a,
+                        b,
+                    });
+                }
+                VFXNodeType::Kill => {
+                    ops.push(VFXOp::Kill);
+                }
+                _ => {}
+            }
+        }
+
+        Ok(ops)
+    }
+
+    fn get_input_register(&self, node_id: u64, slot: u32) -> Result<u32, String> {
+        for conn in &self.connections {
+            if conn.to_node == node_id && conn.to_slot == slot {
+                return Ok(conn.from_node as u32);
+            }
+        }
+        Err(format!("Input slot {} not connected on node {}", slot, node_id))
+    }
+
+    fn generate_shader_code(&self, ops: &[VFXOp], context: &str) -> String {
+        let mut code = String::new();
+        code.push_str("#version 450\n\n");
+        code.push_str("layout(local_size_x = 64) in;\n\n");
+
+        // Generate code for each operation
+        for op in ops {
+            match op {
+                VFXOp::LoadAttribute { dst, attribute } => {
+                    let attr_name = attribute_name(*attribute);
+                    code.push_str(&format!("    vec4 r{} = particles[id].{};\n", dst, attr_name));
+                }
+                VFXOp::StoreAttribute { src, attribute } => {
+                    let attr_name = attribute_name(*attribute);
+                    code.push_str(&format!("    particles[id].{} = r{};\n", attr_name, src));
+                }
+                VFXOp::Add { dst, a, b } => {
+                    code.push_str(&format!("    vec4 r{} = r{} + r{};\n", dst, a, b));
+                }
+                VFXOp::Mul { dst, a, b } => {
+                    code.push_str(&format!("    vec4 r{} = r{} * r{};\n", dst, a, b));
+                }
+                VFXOp::Kill => {
+                    code.push_str("    particles[id].state = 0u; // Dead\n");
+                }
+                _ => {}
+            }
+        }
+
+        code
+    }
+}
+
+fn attribute_name(attr: ParticleAttribute) -> &'static str {
+    match attr {
+        ParticleAttribute::Position => "position",
+        ParticleAttribute::Velocity => "velocity",
+        ParticleAttribute::Acceleration => "acceleration",
+        ParticleAttribute::Color => "color",
+        ParticleAttribute::Size => "size",
+        ParticleAttribute::Rotation => "rotation",
+        ParticleAttribute::AngularVelocity => "angular_velocity",
+        ParticleAttribute::Age => "age",
+        ParticleAttribute::Lifetime => "lifetime",
+        ParticleAttribute::Mass => "mass",
+        _ => "custom",
+    }
+}
+
+// =============================================================================
+// REGION: Particle LOD and Culling (WP-112)
+// =============================================================================
+
+/// LOD level for particle systems
+pub struct ParticleLOD {
+    level: u32,
+    distance: f32,
+    emission_rate_mult: f32,
+    max_particles_mult: f32,
+    simulation_rate: SimulationRate,
+    render_mode: LODRenderMode,
+}
+
+pub enum SimulationRate {
+    Full,
+    HalfRate,
+    QuarterRate,
+    Skip,
+}
+
+pub enum LODRenderMode {
+    Full,
+    Billboard,
+    Impostor { atlas: TextureHandle },
+    Disabled,
+}
+
+/// Particle LOD manager
+pub struct ParticleLODManager {
+    lod_levels: Vec<ParticleLOD>,
+    screen_size_bias: f32,
+    distance_scale: f32,
+    fade_transition: f32,
+}
+
+impl ParticleLODManager {
+    pub fn new() -> Self {
+        Self {
+            lod_levels: vec![
+                ParticleLOD {
+                    level: 0,
+                    distance: 0.0,
+                    emission_rate_mult: 1.0,
+                    max_particles_mult: 1.0,
+                    simulation_rate: SimulationRate::Full,
+                    render_mode: LODRenderMode::Full,
+                },
+                ParticleLOD {
+                    level: 1,
+                    distance: 50.0,
+                    emission_rate_mult: 0.75,
+                    max_particles_mult: 0.75,
+                    simulation_rate: SimulationRate::Full,
+                    render_mode: LODRenderMode::Full,
+                },
+                ParticleLOD {
+                    level: 2,
+                    distance: 100.0,
+                    emission_rate_mult: 0.5,
+                    max_particles_mult: 0.5,
+                    simulation_rate: SimulationRate::HalfRate,
+                    render_mode: LODRenderMode::Billboard,
+                },
+                ParticleLOD {
+                    level: 3,
+                    distance: 200.0,
+                    emission_rate_mult: 0.25,
+                    max_particles_mult: 0.25,
+                    simulation_rate: SimulationRate::QuarterRate,
+                    render_mode: LODRenderMode::Billboard,
+                },
+            ],
+            screen_size_bias: 1.0,
+            distance_scale: 1.0,
+            fade_transition: 10.0,
+        }
+    }
+
+    pub fn calculate_lod(&self, distance: f32, screen_size: f32) -> (u32, f32) {
+        let adjusted_distance = distance * self.distance_scale / (screen_size * self.screen_size_bias).max(0.01);
+
+        let mut selected_level = self.lod_levels.len() - 1;
+        let mut blend = 0.0;
+
+        for (i, lod) in self.lod_levels.iter().enumerate() {
+            if adjusted_distance < lod.distance {
+                if i > 0 {
+                    let prev_dist = self.lod_levels[i - 1].distance;
+                    blend = ((adjusted_distance - prev_dist) / self.fade_transition).clamp(0.0, 1.0);
+                }
+                selected_level = i;
+                break;
+            }
+        }
+
+        (selected_level as u32, blend)
+    }
+
+    pub fn get_lod(&self, level: u32) -> Option<&ParticleLOD> {
+        self.lod_levels.get(level as usize)
+    }
+}
+
+/// Particle frustum culler
+pub struct ParticleCuller {
+    frustum_planes: [Vec4; 6],
+    occlusion_buffer: Option<Buffer<u32>>,
+    cull_shader: ComputeShader,
+}
+
+impl ParticleCuller {
+    pub fn new(context: &RenderContext) -> Self {
+        Self {
+            frustum_planes: [Vec4::ZERO; 6],
+            occlusion_buffer: None,
+            cull_shader: context.load_compute_shader("particle_cull.comp"),
+        }
+    }
+
+    pub fn update_frustum(&mut self, view_proj: Mat4) {
+        // Extract frustum planes from view-projection matrix
+        let m = view_proj;
+
+        // Left plane
+        self.frustum_planes[0] = Vec4::new(
+            m.x.w + m.x.x,
+            m.y.w + m.y.x,
+            m.z.w + m.z.x,
+            m.w.w + m.w.x,
+        ).normalize();
+
+        // Right plane
+        self.frustum_planes[1] = Vec4::new(
+            m.x.w - m.x.x,
+            m.y.w - m.y.x,
+            m.z.w - m.z.x,
+            m.w.w - m.w.x,
+        ).normalize();
+
+        // Bottom plane
+        self.frustum_planes[2] = Vec4::new(
+            m.x.w + m.x.y,
+            m.y.w + m.y.y,
+            m.z.w + m.z.y,
+            m.w.w + m.w.y,
+        ).normalize();
+
+        // Top plane
+        self.frustum_planes[3] = Vec4::new(
+            m.x.w - m.x.y,
+            m.y.w - m.y.y,
+            m.z.w - m.z.y,
+            m.w.w - m.w.y,
+        ).normalize();
+
+        // Near plane
+        self.frustum_planes[4] = Vec4::new(
+            m.x.z,
+            m.y.z,
+            m.z.z,
+            m.w.z,
+        ).normalize();
+
+        // Far plane
+        self.frustum_planes[5] = Vec4::new(
+            m.x.w - m.x.z,
+            m.y.w - m.y.z,
+            m.z.w - m.z.z,
+            m.w.w - m.w.z,
+        ).normalize();
+    }
+
+    pub fn cull_particles(&self, context: &RenderContext, particles: &ParticlePool) {
+        // Set frustum planes
+        context.set_uniform_array("u_frustum_planes", &self.frustum_planes);
+
+        // Dispatch cull shader
+        let groups = (particles.capacity + 255) / 256;
+        context.dispatch_compute(&self.cull_shader, groups, 1, 1);
+    }
+
+    pub fn is_visible(&self, bounds: AABB) -> bool {
+        for plane in &self.frustum_planes {
+            let n = Vec3::new(plane.x, plane.y, plane.z);
+            let d = plane.w;
+
+            // Get positive vertex (furthest along normal)
+            let p = Vec3::new(
+                if n.x >= 0.0 { bounds.max.x } else { bounds.min.x },
+                if n.y >= 0.0 { bounds.max.y } else { bounds.min.y },
+                if n.z >= 0.0 { bounds.max.z } else { bounds.min.z },
+            );
+
+            if n.dot(p) + d < 0.0 {
+                return false;
+            }
+        }
+        true
+    }
+}
+
+// =============================================================================
+// REGION: Particle Lighting and Shadows (WP-113)
+// =============================================================================
+
+/// Particle lighting configuration
+pub struct ParticleLightingConfig {
+    receive_lighting: bool,
+    receive_shadows: bool,
+    cast_shadows: bool,
+    shadow_density: f32,
+
+    // Self-illumination
+    emission_intensity: f32,
+    emission_color: Vec3,
+
+    // Volumetric contribution
+    contribute_to_volumetrics: bool,
+    volumetric_intensity: f32,
+
+    // Light interaction
+    normal_estimation: NormalEstimation,
+    shadow_bias: f32,
+}
+
+pub enum NormalEstimation {
+    None,
+    FromVelocity,
+    SphericalBillboard,
+    Custom { normal: Vec3 },
+}
+
+/// Particle light for light-emitting particles
+pub struct ParticleLight {
+    color: Vec3,
+    intensity: f32,
+    radius: f32,
+    falloff: LightFalloff,
+}
+
+pub enum LightFalloff {
+    Linear,
+    Quadratic,
+    InverseSquare,
+    Custom { exponent: f32 },
+}
+
+/// Particle shadow caster
+pub struct ParticleShadowCaster {
+    shadow_map_resolution: u32,
+    shadow_map: Texture,
+    shadow_matrix: Mat4,
+    depth_bias: f32,
+    normal_bias: f32,
+}
+
+impl ParticleShadowCaster {
+    pub fn new(context: &RenderContext, resolution: u32) -> Self {
+        let shadow_map = context.create_depth_texture(resolution, resolution);
+
+        Self {
+            shadow_map_resolution: resolution,
+            shadow_map,
+            shadow_matrix: Mat4::IDENTITY,
+            depth_bias: 0.001,
+            normal_bias: 0.01,
+        }
+    }
+
+    pub fn render_shadow_map(&mut self, context: &RenderContext,
+                              particles: &ParticlePool,
+                              light_dir: Vec3) {
+        // Calculate shadow matrix
+        self.shadow_matrix = self.calculate_shadow_matrix(particles, light_dir);
+
+        // Render particles to shadow map
+        context.set_render_target(&self.shadow_map);
+        context.clear_depth(1.0);
+
+        // Render particle shadows
+        // ...
+    }
+
+    fn calculate_shadow_matrix(&self, particles: &ParticlePool, light_dir: Vec3) -> Mat4 {
+        // Calculate bounds of particle system
+        // Build orthographic projection for shadow map
+        Mat4::IDENTITY  // Placeholder
+    }
+}
+
+// =============================================================================
+// REGION: Particle Events (WP-114)
+// =============================================================================
+
+/// Particle event types
+pub enum ParticleEvent {
+    Spawn { particle_id: u32 },
+    Death { particle_id: u32, position: Vec3, velocity: Vec3 },
+    Collision { particle_id: u32, position: Vec3, normal: Vec3 },
+    Trigger { particle_id: u32, trigger_id: u32 },
+    Lifetime { particle_id: u32, threshold: f32 },
+    Custom { particle_id: u32, event_id: u32, data: Vec4 },
+}
+
+/// Event listener callback
+pub type ParticleEventCallback = fn(event: &ParticleEvent, emitter: &mut ParticleEmitter);
+
+/// Particle event system
+pub struct ParticleEventSystem {
+    events: Vec<ParticleEvent>,
+    listeners: HashMap<u32, Vec<ParticleEventCallback>>,
+
+    // GPU event buffer for compute-generated events
+    gpu_event_buffer: Buffer<GPUParticleEvent>,
+    event_count_buffer: Buffer<u32>,
+    max_events: u32,
+}
+
+@repr(C)
+pub struct GPUParticleEvent {
+    event_type: u32,
+    particle_id: u32,
+    position: Vec3,
+    velocity: Vec3,
+    normal: Vec3,
+    data: Vec4,
+}
+
+impl ParticleEventSystem {
+    pub fn new(context: &RenderContext, max_events: u32) -> Self {
+        Self {
+            events: Vec::new(),
+            listeners: HashMap::new(),
+            gpu_event_buffer: context.create_buffer::<GPUParticleEvent>(max_events as usize),
+            event_count_buffer: context.create_buffer::<u32>(1),
+            max_events,
+        }
+    }
+
+    pub fn register_listener(&mut self, event_type: u32, callback: ParticleEventCallback) {
+        self.listeners.entry(event_type).or_default().push(callback);
+    }
+
+    pub fn push_event(&mut self, event: ParticleEvent) {
+        self.events.push(event);
+    }
+
+    pub fn dispatch_events(&mut self, emitter: &mut ParticleEmitter) {
+        for event in &self.events {
+            let event_type = match event {
+                ParticleEvent::Spawn { .. } => 0,
+                ParticleEvent::Death { .. } => 1,
+                ParticleEvent::Collision { .. } => 2,
+                ParticleEvent::Trigger { .. } => 3,
+                ParticleEvent::Lifetime { .. } => 4,
+                ParticleEvent::Custom { .. } => 5,
+            };
+
+            if let Some(listeners) = self.listeners.get(&event_type) {
+                for callback in listeners {
+                    callback(event, emitter);
+                }
+            }
+        }
+
+        self.events.clear();
+    }
+
+    pub fn read_gpu_events(&mut self, context: &RenderContext) {
+        let count = context.read_buffer::<u32>(&self.event_count_buffer)[0];
+        let gpu_events = context.read_buffer::<GPUParticleEvent>(&self.gpu_event_buffer);
+
+        for i in 0..count.min(self.max_events) as usize {
+            let gpu_event = &gpu_events[i];
+
+            let event = match gpu_event.event_type {
+                0 => ParticleEvent::Spawn { particle_id: gpu_event.particle_id },
+                1 => ParticleEvent::Death {
+                    particle_id: gpu_event.particle_id,
+                    position: gpu_event.position,
+                    velocity: gpu_event.velocity,
+                },
+                2 => ParticleEvent::Collision {
+                    particle_id: gpu_event.particle_id,
+                    position: gpu_event.position,
+                    normal: gpu_event.normal,
+                },
+                _ => continue,
+            };
+
+            self.events.push(event);
+        }
+
+        // Reset GPU event count
+        context.update_buffer(&self.event_count_buffer, &[0u32]);
+    }
+}
+
+// =============================================================================
+// REGION: Particle System Manager (WP-115)
+// =============================================================================
+
+/// Complete particle system instance
+pub struct ParticleSystem {
+    id: u64,
+    name: String,
+    transform: Transform,
+
+    // Components
+    emitters: Vec<ParticleEmitter>,
+    particle_pool: ParticlePool,
+    gpu_simulator: GPUParticleSimulator,
+    trail_renderer: Option<TrailRenderer>,
+    beam_renderers: Vec<BeamRenderer>,
+
+    // Configuration
+    lod_manager: ParticleLODManager,
+    force_field_system: ForceFieldSystem,
+    collision_system: ParticleCollisionSystem,
+    event_system: ParticleEventSystem,
+
+    // State
+    is_playing: bool,
+    is_paused: bool,
+    time: f32,
+    playback_speed: f32,
+
+    // Bounds
+    bounds: AABB,
+    bounds_mode: BoundsMode,
+}
+
+pub enum BoundsMode {
+    Automatic,
+    Static { bounds: AABB },
+    Custom { callback: fn(&ParticlePool) -> AABB },
+}
+
+/// Particle system manager
+pub struct ParticleSystemManager {
+    systems: HashMap<u64, ParticleSystem>,
+    next_system_id: u64,
+
+    // Rendering
+    renderer: ParticleRenderer,
+
+    // Global settings
+    global_time_scale: f32,
+    max_particles_global: u32,
+    current_particles: u32,
+
+    // LOD
+    global_lod_bias: f32,
+
+    // Culling
+    culler: ParticleCuller,
+
+    // Sorting
+    sorted_systems: Vec<(u64, f32)>,  // (system_id, distance)
+}
+
+impl ParticleSystemManager {
+    pub fn new(context: &RenderContext) -> Self {
+        Self {
+            systems: HashMap::new(),
+            next_system_id: 1,
+            renderer: ParticleRenderer::new(context, 1_000_000),
+            global_time_scale: 1.0,
+            max_particles_global: 1_000_000,
+            current_particles: 0,
+            global_lod_bias: 1.0,
+            culler: ParticleCuller::new(context),
+            sorted_systems: Vec::new(),
+        }
+    }
+
+    pub fn create_system(&mut self, context: &RenderContext, name: &str, max_particles: u32) -> u64 {
+        let id = self.next_system_id;
+        self.next_system_id += 1;
+
+        let system = ParticleSystem {
+            id,
+            name: name.to_string(),
+            transform: Transform::identity(),
+            emitters: Vec::new(),
+            particle_pool: ParticlePool::new(context, max_particles),
+            gpu_simulator: GPUParticleSimulator::new(context, max_particles),
+            trail_renderer: None,
+            beam_renderers: Vec::new(),
+            lod_manager: ParticleLODManager::new(),
+            force_field_system: ForceFieldSystem::new(context, 64),
+            collision_system: ParticleCollisionSystem::new(context),
+            event_system: ParticleEventSystem::new(context, 1024),
+            is_playing: false,
+            is_paused: false,
+            time: 0.0,
+            playback_speed: 1.0,
+            bounds: AABB::default(),
+            bounds_mode: BoundsMode::Automatic,
+        };
+
+        self.systems.insert(id, system);
+        id
+    }
+
+    pub fn update(&mut self, context: &RenderContext, dt: f32, camera: &Camera) {
+        let dt = dt * self.global_time_scale;
+
+        // Update frustum culler
+        self.culler.update_frustum(camera.view_projection());
+
+        // Sort systems by distance for proper blending
+        self.sorted_systems.clear();
+        for (id, system) in &self.systems {
+            let distance = (system.transform.position - camera.position).length();
+            self.sorted_systems.push((*id, distance));
+        }
+        self.sorted_systems.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+
+        // Update each system
+        self.current_particles = 0;
+
+        for (id, _) in &self.sorted_systems {
+            let system = self.systems.get_mut(id).unwrap();
+
+            if !system.is_playing || system.is_paused {
+                continue;
+            }
+
+            // Check visibility
+            if !self.culler.is_visible(system.bounds) {
+                continue;
+            }
+
+            // Calculate LOD
+            let distance = (system.transform.position - camera.position).length();
+            let (lod_level, lod_blend) = system.lod_manager.calculate_lod(
+                distance,
+                1.0  // Screen size placeholder
+            );
+
+            let lod = system.lod_manager.get_lod(lod_level).unwrap();
+
+            // Apply LOD simulation rate
+            let should_simulate = match lod.simulation_rate {
+                SimulationRate::Full => true,
+                SimulationRate::HalfRate => (system.time * 2.0) as u32 % 2 == 0,
+                SimulationRate::QuarterRate => (system.time * 4.0) as u32 % 4 == 0,
+                SimulationRate::Skip => false,
+            };
+
+            if should_simulate {
+                let system_dt = dt * system.playback_speed;
+                system.time += system_dt;
+
+                // Update force fields
+                system.force_field_system.update_gpu_buffer(context);
+
+                // Emit particles from each emitter
+                for emitter in &mut system.emitters {
+                    let emit_rate = match &emitter.emission_mode {
+                        EmissionMode::Continuous { rate } => *rate * lod.emission_rate_mult,
+                        _ => 0.0,
+                    };
+
+                    emitter.emission_accumulator += emit_rate * system_dt;
+                    let emit_count = emitter.emission_accumulator as u32;
+                    emitter.emission_accumulator -= emit_count as f32;
+
+                    if emit_count > 0 {
+                        system.gpu_simulator.emit(context, emitter, emit_count, system.time);
+                    }
+                }
+
+                // Simulate particles
+                let sim_params = SimulationParams {
+                    delta_time: system_dt,
+                    time: system.time,
+                    gravity: Vec3::new(0.0, -9.81, 0.0),
+                    drag: 0.1,
+                    force_field_count: system.force_field_system.force_fields.len() as u32,
+                    collision_mode: 0,
+                    view_matrix: camera.view_matrix(),
+                    proj_matrix: camera.projection_matrix(),
+                    inv_view_proj: camera.view_projection().inverse(),
+                    camera_position: camera.position,
+                    bounds_min: Vec3::splat(-1000.0),
+                    bounds_max: Vec3::splat(1000.0),
+                    kill_on_bounds: 1,
+                };
+
+                system.gpu_simulator.simulate(context, sim_params);
+
+                // Update trails
+                if let Some(trail_renderer) = &mut system.trail_renderer {
+                    // Update trail vertices based on particle positions
+                    // ...
+                }
+
+                // Read and dispatch events
+                system.event_system.read_gpu_events(context);
+                for emitter in &mut system.emitters {
+                    system.event_system.dispatch_events(emitter);
+                }
+            }
+
+            self.current_particles += system.particle_pool.alive_count;
+        }
+    }
+
+    pub fn render(&mut self, context: &RenderContext, camera: &Camera) {
+        // Render in sorted order (back to front for transparency)
+        for (id, _) in &self.sorted_systems {
+            let system = self.systems.get(id).unwrap();
+
+            if !system.is_playing {
+                continue;
+            }
+
+            // Skip invisible systems
+            if !self.culler.is_visible(system.bounds) {
+                continue;
+            }
+
+            // Render based on LOD render mode
+            let distance = (system.transform.position - camera.position).length();
+            let (lod_level, _) = system.lod_manager.calculate_lod(distance, 1.0);
+
+            if let Some(lod) = system.lod_manager.get_lod(lod_level) {
+                match lod.render_mode {
+                    LODRenderMode::Disabled => continue,
+                    _ => {}
+                }
+            }
+
+            // Get material from first emitter
+            let material = if !system.emitters.is_empty() {
+                ParticleMaterial::default()  // Placeholder
+            } else {
+                ParticleMaterial::default()
+            };
+
+            // Render particles
+            self.renderer.render(context, &system.particle_pool, &material, camera);
+
+            // Render trails
+            if let Some(trail_renderer) = &system.trail_renderer {
+                self.renderer.render_trails(context, trail_renderer, &material, camera);
+            }
+        }
+    }
+
+    pub fn play(&mut self, system_id: u64) {
+        if let Some(system) = self.systems.get_mut(&system_id) {
+            system.is_playing = true;
+            system.is_paused = false;
+        }
+    }
+
+    pub fn pause(&mut self, system_id: u64) {
+        if let Some(system) = self.systems.get_mut(&system_id) {
+            system.is_paused = true;
+        }
+    }
+
+    pub fn stop(&mut self, system_id: u64) {
+        if let Some(system) = self.systems.get_mut(&system_id) {
+            system.is_playing = false;
+            system.is_paused = false;
+            system.time = 0.0;
+            // Reset particle pool
+        }
+    }
+
+    pub fn destroy(&mut self, system_id: u64) {
+        self.systems.remove(&system_id);
+    }
+}
+
+impl Default for ParticleMaterial {
+    fn default() -> Self {
+        Self {
+            base_texture: None,
+            normal_map: None,
+            emission_map: None,
+            base_color: Vec4::ONE,
+            emission_color: Vec3::ZERO,
+            emission_intensity: 0.0,
+            blend_mode: BlendMode::Alpha,
+            lighting_mode: LightingMode::Unlit,
+            sprite_sheet: None,
+            soft_particles: SoftParticleConfig {
+                enabled: true,
+                fade_distance: 0.1,
+                contrast: 1.0,
+            },
+            distance_fade: None,
+            shadow_receive: false,
+            shadow_cast: false,
+        }
+    }
+}
+
+// =============================================================================
+// REGION: Tests
+// =============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_particle_pool_creation() {
+        let context = RenderContext::mock();
+        let pool = ParticlePool::new(&context, 1000);
+
+        assert_eq!(pool.capacity, 1000);
+        assert_eq!(pool.alive_count, 0);
+    }
+
+    #[test]
+    fn test_emitter_shape_sampling() {
+        let emitter = ParticleEmitter::new();
+        let mut rng = StdRng::seed_from_u64(12345);
+
+        for _ in 0..100 {
+            let (pos, normal) = emitter.sample_emission_position(&mut rng);
+            assert!(pos.length() < 1000.0);
+            assert!((normal.length() - 1.0).abs() < 0.001);
+        }
+    }
+
+    #[test]
+    fn test_force_field_gravity() {
+        let field = ForceField {
+            transform: Transform::identity(),
+            field_type: ForceFieldType::Gravity {
+                direction: Vec3::new(0.0, -1.0, 0.0),
+                strength: 9.81,
+            },
+            shape: ForceFieldShape::Infinite,
+            enabled: true,
+            priority: 0,
+        };
+
+        let force = field.calculate_force(Vec3::ZERO, Vec3::ZERO);
+        assert!((force.y + 9.81).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_gradient_evaluation() {
+        let gradient = Gradient {
+            color_keys: vec![
+                GradientColorKey { time: 0.0, color: Vec3::ZERO },
+                GradientColorKey { time: 1.0, color: Vec3::ONE },
+            ],
+            alpha_keys: vec![
+                GradientAlphaKey { time: 0.0, alpha: 0.0 },
+                GradientAlphaKey { time: 1.0, alpha: 1.0 },
+            ],
+            blend_mode: GradientBlendMode::Linear,
+        };
+
+        let mid = gradient.evaluate(0.5);
+        assert!((mid.x - 0.5).abs() < 0.1);
+        assert!((mid.w - 0.5).abs() < 0.1);
+    }
+
+    #[test]
+    fn test_trail_renderer() {
+        let context = RenderContext::mock();
+        let config = TrailConfig {
+            max_points: 100,
+            min_vertex_distance: 0.1,
+            width_over_trail: CurveOverLifetime::constant(0.5),
+            color_over_trail: Gradient::white(),
+            texture_mode: TrailTextureMode::Stretch,
+            alignment: TrailAlignment::View,
+            lifetime: 1.0,
+            inherit_color: true,
+            emit_from_velocity: false,
+        };
+
+        let mut trail_renderer = TrailRenderer::new(&context, config, 100);
+        trail_renderer.add_trail(0, Vec3::ZERO, Vec4::ONE);
+        trail_renderer.update_trail(0, Vec3::new(1.0, 0.0, 0.0), Vec3::X, Vec4::ONE, 0.016);
+
+        let (vertices, indices) = trail_renderer.build_mesh(Vec3::new(0.0, 0.0, 10.0));
+        assert!(!vertices.is_empty());
+    }
+
+    #[test]
+    fn test_beam_types() {
+        let mut beam = Beam {
+            start: Vec3::ZERO,
+            end: Vec3::new(10.0, 0.0, 0.0),
+            config: BeamConfig {
+                beam_type: BeamType::Lightning {
+                    segments: 10,
+                    amplitude: 0.5,
+                    frequency: 2.0,
+                },
+                width: 0.1,
+                width_curve: CurveOverLifetime::constant(1.0),
+                color_gradient: Gradient::white(),
+                texture_scale: 1.0,
+                noise_frequency: 1.0,
+                noise_amplitude: 0.0,
+                segments_per_unit: 1.0,
+            },
+            time: 0.0,
+            vertices: Vec::new(),
+        };
+
+        beam.rebuild_vertices();
+        assert!(beam.vertices.len() > 2);
+    }
+
+    #[test]
+    fn test_particle_lod() {
+        let lod_manager = ParticleLODManager::new();
+
+        let (level, _) = lod_manager.calculate_lod(10.0, 1.0);
+        assert_eq!(level, 0);
+
+        let (level, _) = lod_manager.calculate_lod(75.0, 1.0);
+        assert_eq!(level, 2);
+
+        let (level, _) = lod_manager.calculate_lod(300.0, 1.0);
+        assert_eq!(level, 3);
+    }
+
+    #[test]
+    fn test_frustum_culling() {
+        let context = RenderContext::mock();
+        let culler = ParticleCuller::new(&context);
+
+        let bounds = AABB {
+            min: Vec3::new(-1.0, -1.0, -1.0),
+            max: Vec3::new(1.0, 1.0, 1.0),
+        };
+
+        // With default frustum, center box should be visible
+        assert!(culler.is_visible(bounds));
+    }
+
+    #[test]
+    fn test_vfx_graph_creation() {
+        let mut graph = VFXGraph::new();
+
+        let spawn = graph.add_node(VFXNodeType::SpawnContext { rate: 10.0, burst: None });
+        let get_pos = graph.add_node(VFXNodeType::GetAttribute { attribute: ParticleAttribute::Position });
+        let set_vel = graph.add_node(VFXNodeType::SetAttribute { attribute: ParticleAttribute::Velocity });
+
+        graph.connect(get_pos, 0, set_vel, 0);
+
+        assert_eq!(graph.nodes.len(), 3);
+        assert_eq!(graph.connections.len(), 1);
+    }
+}
+
+impl<T: Copy + Default> CurveOverLifetime<T> {
+    pub fn constant(value: T) -> Self {
+        Self {
+            curve_type: CurveType::Constant,
+            keys: vec![CurveKey {
+                time: 0.0,
+                value,
+                in_tangent: T::default(),
+                out_tangent: T::default(),
+            }],
+            loop_mode: LoopMode::Clamp,
+        }
+    }
+}

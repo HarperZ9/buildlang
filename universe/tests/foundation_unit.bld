@@ -1,0 +1,1698 @@
+// ═══════════════════════════════════════════════════════════════════════════════
+// BUILD-UNIVERSE Foundation Unit Tests v1.0.0
+// ═══════════════════════════════════════════════════════════════════════════════
+// Copyright (c) 2024-2025 Zain Dana Harper. All Rights Reserved.
+// ═══════════════════════════════════════════════════════════════════════════════
+//
+// Comprehensive unit tests for the foundation stdlib modules:
+//   math, collections, text, random, error, serialization, encoding
+//
+// ═══════════════════════════════════════════════════════════════════════════════
+
+module foundation_unit_tests
+
+use foundation::math::{
+    PI, TAU, E, PHI, SQRT_2, LN_2, EPSILON,
+    abs, min, max, clamp, sign, copysign,
+    sqrt, cbrt, pow, powi, exp, exp2, expm1,
+    ln, log2, log10, logb, ln1p, hypot,
+    sin, cos, tan, sincos, asin, acos, atan, atan2,
+    sinh, cosh, tanh, asinh, acosh, atanh,
+    floor, ceil, round, trunc, fract, fmod, remainder,
+    lerp, inverse_lerp, remap, smoothstep, smootherstep, step,
+    gamma, lgamma, factorial, binomial, erf, erfc, sigmoid, softplus,
+    gaussian, gaussian_cdf,
+    is_nan, is_infinite, is_finite, is_zero, approx_equal, relative_equal,
+    gcd, lcm, is_prime, next_power_of_2, is_power_of_2, ilog2,
+    radians, degrees,
+}
+use foundation::math::{Vec3, Mat4}
+use foundation::collections::{Vec, HashMap, HashSet, VecDeque, BinaryHeap, BTreeMap}
+use foundation::text::{StringExt, case, similarity}
+use foundation::random::{Rng, SplitMix64, Xorshift128Plus, Xoshiro256StarStar, Pcg32}
+use foundation::error::{
+    SimpleError, CodedError, BoxError, ContextError,
+    Error, ErrorExt, Context, OptionContext,
+    BacktraceStatus,
+}
+use foundation::serialization::json::{self, Value, Number}
+use foundation::encoding::{hex, base64, base32, DecodeError}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// HELPERS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Approximate equality with default tolerance
+fn approx(a: f64, b: f64) -> bool {
+    approx_equal(a, b, 1e-10)
+}
+
+/// Approximate equality with relaxed tolerance
+fn approx_relaxed(a: f64, b: f64) -> bool {
+    approx_equal(a, b, 1e-6)
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// MATH: BASIC FUNCTIONS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+fn test_math_basic() {
+    // abs
+    assert(abs(-5.0) == 5.0);
+    assert(abs(5.0) == 5.0);
+    assert(abs(0.0) == 0.0);
+    assert(abs(-0.0) == 0.0);
+
+    // min / max
+    assert(min(3.0, 7.0) == 3.0);
+    assert(max(3.0, 7.0) == 7.0);
+    assert(min(-1.0, 1.0) == -1.0);
+    assert(max(-1.0, 1.0) == 1.0);
+    assert(min(5.0, 5.0) == 5.0);
+    assert(max(5.0, 5.0) == 5.0);
+
+    // clamp
+    assert(clamp(5.0, 0.0, 10.0) == 5.0);
+    assert(clamp(-5.0, 0.0, 10.0) == 0.0);
+    assert(clamp(15.0, 0.0, 10.0) == 10.0);
+    assert(clamp(0.0, 0.0, 10.0) == 0.0);
+    assert(clamp(10.0, 0.0, 10.0) == 10.0);
+
+    // sign
+    assert(sign(5.0) == 1.0);
+    assert(sign(-5.0) == -1.0);
+    assert(sign(0.0) == 0.0);
+
+    // copysign
+    assert(copysign(5.0, -1.0) == -5.0);
+    assert(copysign(5.0, 1.0) == 5.0);
+    assert(copysign(-5.0, 1.0) == 5.0);
+
+    println("  math_basic: OK");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// MATH: CONSTANTS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+fn test_math_constants() {
+    assert(approx(PI, 3.14159265358979323846));
+    assert(approx(TAU, 2.0 * PI));
+    assert(approx(E, 2.71828182845904523536));
+    assert(approx(PHI, 1.61803398874989484820));
+    assert(approx(SQRT_2, sqrt(2.0)));
+    assert(approx(LN_2, ln(2.0)));
+    assert(EPSILON > 0.0);
+    assert(EPSILON < 1e-15);
+
+    println("  math_constants: OK");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// MATH: POWERS AND ROOTS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+fn test_math_powers() {
+    // sqrt
+    assert(approx(sqrt(25.0), 5.0));
+    assert(approx(sqrt(2.0), SQRT_2));
+    assert(sqrt(0.0) == 0.0);
+    assert(approx(sqrt(1.0), 1.0));
+
+    // cbrt
+    assert(approx(cbrt(27.0), 3.0));
+    assert(approx(cbrt(8.0), 2.0));
+    assert(approx(cbrt(-8.0), -2.0));
+
+    // pow
+    assert(approx(pow(2.0, 10.0), 1024.0));
+    assert(approx(pow(3.0, 3.0), 27.0));
+    assert(approx(pow(5.0, 0.0), 1.0));
+
+    // powi (integer exponent)
+    assert(approx(powi(2.0, 10), 1024.0));
+    assert(approx(powi(3.0, 0), 1.0));
+    assert(approx(powi(2.0, -1), 0.5));
+    assert(approx(powi(2.0, -3), 0.125));
+
+    // exp / exp2
+    assert(approx(exp(0.0), 1.0));
+    assert(approx(exp(1.0), E));
+    assert(approx(exp2(3.0), 8.0));
+    assert(approx(exp2(10.0), 1024.0));
+
+    // expm1
+    assert(approx(expm1(0.0), 0.0));
+    assert(approx_relaxed(expm1(1.0), E - 1.0));
+
+    // ln / log2 / log10
+    assert(approx(ln(1.0), 0.0));
+    assert(approx(ln(E), 1.0));
+    assert(approx(log2(8.0), 3.0));
+    assert(approx(log10(1000.0), 3.0));
+
+    // logb
+    assert(approx(logb(8.0, 2.0), 3.0));
+    assert(approx(logb(81.0, 3.0), 4.0));
+
+    // ln1p
+    assert(approx(ln1p(0.0), 0.0));
+
+    // hypot
+    assert(approx(hypot(3.0, 4.0), 5.0));
+    assert(approx(hypot(5.0, 12.0), 13.0));
+    assert(approx(hypot(0.0, 0.0), 0.0));
+
+    println("  math_powers: OK");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// MATH: TRIGONOMETRIC
+// ═══════════════════════════════════════════════════════════════════════════════
+
+fn test_math_trig() {
+    // sin / cos / tan at key angles
+    assert(approx(sin(0.0), 0.0));
+    assert(approx(cos(0.0), 1.0));
+    assert(approx(tan(0.0), 0.0));
+    assert(approx(sin(PI / 2.0), 1.0));
+    assert(approx(cos(PI / 2.0), 0.0));
+    assert(approx(sin(PI), 0.0));
+    assert(approx(cos(PI), -1.0));
+
+    // sincos
+    let (s, c) = sincos(PI / 4.0);
+    assert(approx(s, c));
+    assert(approx(s * s + c * c, 1.0));
+
+    // Pythagorean identity at several angles
+    let angles = vec![0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 5.0, 6.0];
+    for a in angles.iter() {
+        assert(approx(sin(*a) * sin(*a) + cos(*a) * cos(*a), 1.0));
+    }
+
+    // Inverse trig
+    assert(approx(asin(0.0), 0.0));
+    assert(approx(acos(1.0), 0.0));
+    assert(approx(atan(0.0), 0.0));
+    assert(approx(asin(1.0), PI / 2.0));
+    assert(approx(atan2(1.0, 1.0), PI / 4.0));
+    assert(approx(atan2(0.0, 1.0), 0.0));
+
+    // Degree / radian conversion
+    assert(approx(radians(180.0), PI));
+    assert(approx(radians(90.0), PI / 2.0));
+    assert(approx(degrees(PI), 180.0));
+    assert(approx(degrees(PI / 2.0), 90.0));
+
+    // Roundtrip
+    assert(approx(degrees(radians(45.0)), 45.0));
+
+    println("  math_trig: OK");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// MATH: HYPERBOLIC
+// ═══════════════════════════════════════════════════════════════════════════════
+
+fn test_math_hyperbolic() {
+    // sinh / cosh / tanh at zero
+    assert(approx(sinh(0.0), 0.0));
+    assert(approx(cosh(0.0), 1.0));
+    assert(approx(tanh(0.0), 0.0));
+
+    // Identity: cosh^2(x) - sinh^2(x) = 1
+    let vals = vec![0.5, 1.0, 2.0, 3.0];
+    for x in vals.iter() {
+        let c = cosh(*x);
+        let s = sinh(*x);
+        assert(approx(c * c - s * s, 1.0));
+    }
+
+    // Inverse hyperbolic roundtrips
+    assert(approx(asinh(sinh(1.0)), 1.0));
+    assert(approx(acosh(cosh(2.0)), 2.0));
+    assert(approx_relaxed(atanh(tanh(0.5)), 0.5));
+
+    println("  math_hyperbolic: OK");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// MATH: ROUNDING
+// ═══════════════════════════════════════════════════════════════════════════════
+
+fn test_math_rounding() {
+    // floor
+    assert(floor(2.7) == 2.0);
+    assert(floor(-2.3) == -3.0);
+    assert(floor(3.0) == 3.0);
+
+    // ceil
+    assert(ceil(2.3) == 3.0);
+    assert(ceil(-2.7) == -2.0);
+    assert(ceil(3.0) == 3.0);
+
+    // round
+    assert(round(2.5) == 3.0);
+    assert(round(2.4) == 2.0);
+    assert(round(-2.5) == -3.0);
+
+    // trunc
+    assert(trunc(2.9) == 2.0);
+    assert(trunc(-2.9) == -2.0);
+
+    // fract
+    assert(approx(fract(3.75), 0.75));
+    assert(approx(fract(1.0), 0.0));
+
+    // fmod
+    assert(approx(fmod(7.0, 3.0), 1.0));
+    assert(approx(fmod(10.0, 5.0), 0.0));
+
+    // remainder
+    assert(approx(remainder(7.0, 3.0), 1.0));
+
+    println("  math_rounding: OK");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// MATH: INTERPOLATION
+// ═══════════════════════════════════════════════════════════════════════════════
+
+fn test_math_interpolation() {
+    // lerp
+    assert(approx(lerp(0.0, 10.0, 0.0), 0.0));
+    assert(approx(lerp(0.0, 10.0, 0.5), 5.0));
+    assert(approx(lerp(0.0, 10.0, 1.0), 10.0));
+    assert(approx(lerp(-10.0, 10.0, 0.5), 0.0));
+
+    // inverse_lerp
+    assert(approx(inverse_lerp(0.0, 10.0, 5.0), 0.5));
+    assert(approx(inverse_lerp(0.0, 10.0, 0.0), 0.0));
+    assert(approx(inverse_lerp(0.0, 10.0, 10.0), 1.0));
+
+    // remap
+    assert(approx(remap(5.0, 0.0, 10.0, 0.0, 100.0), 50.0));
+    assert(approx(remap(0.0, 0.0, 10.0, 20.0, 40.0), 20.0));
+
+    // smoothstep
+    assert(approx(smoothstep(0.0, 1.0, 0.0), 0.0));
+    assert(approx(smoothstep(0.0, 1.0, 1.0), 1.0));
+    assert(approx(smoothstep(0.0, 1.0, 0.5), 0.5));
+    assert(smoothstep(0.0, 1.0, -1.0) == 0.0);
+    assert(smoothstep(0.0, 1.0, 2.0) == 1.0);
+
+    // smootherstep
+    assert(approx(smootherstep(0.0, 1.0, 0.0), 0.0));
+    assert(approx(smootherstep(0.0, 1.0, 1.0), 1.0));
+    assert(approx(smootherstep(0.0, 1.0, 0.5), 0.5));
+
+    // step
+    assert(step(0.5, 0.3) == 0.0);
+    assert(step(0.5, 0.7) == 1.0);
+    assert(step(0.5, 0.5) == 1.0);
+
+    println("  math_interpolation: OK");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// MATH: SPECIAL FUNCTIONS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+fn test_math_special() {
+    // factorial
+    assert(approx(factorial(0), 1.0));
+    assert(approx(factorial(1), 1.0));
+    assert(approx(factorial(5), 120.0));
+    assert(approx(factorial(10), 3628800.0));
+
+    // binomial
+    assert(approx(binomial(5, 2), 10.0));
+    assert(approx(binomial(10, 3), 120.0));
+    assert(approx(binomial(5, 0), 1.0));
+    assert(approx(binomial(5, 5), 1.0));
+    assert(approx(binomial(3, 5), 0.0));
+
+    // gamma: Gamma(n) = (n-1)! for positive integers
+    assert(approx_relaxed(gamma(5.0), 24.0));
+    assert(approx_relaxed(gamma(6.0), 120.0));
+
+    // erf
+    assert(approx(erf(0.0), 0.0));
+    assert(erf(3.0) > 0.99);
+    assert(erf(-3.0) < -0.99);
+
+    // erfc
+    assert(approx(erfc(0.0), 1.0));
+    assert(approx_relaxed(erf(1.0) + erfc(1.0), 1.0));
+
+    // sigmoid
+    assert(approx(sigmoid(0.0), 0.5));
+    assert(sigmoid(10.0) > 0.99);
+    assert(sigmoid(-10.0) < 0.01);
+
+    // softplus
+    assert(softplus(0.0) > 0.0);
+    assert(approx_relaxed(softplus(0.0), ln(2.0)));
+    assert(approx_relaxed(softplus(20.0), 20.0));
+
+    // gaussian PDF (peak at mu, sigma=1 peak height = 1/sqrt(2*pi))
+    assert(approx_relaxed(gaussian(0.0, 0.0, 1.0), 1.0 / sqrt(TAU)));
+    assert(gaussian(0.0, 0.0, 1.0) > gaussian(1.0, 0.0, 1.0));
+
+    // gaussian CDF
+    assert(approx_relaxed(gaussian_cdf(0.0, 0.0, 1.0), 0.5));
+    assert(gaussian_cdf(10.0, 0.0, 1.0) > 0.99);
+
+    println("  math_special: OK");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// MATH: PREDICATES
+// ═══════════════════════════════════════════════════════════════════════════════
+
+fn test_math_predicates() {
+    // is_nan
+    assert(is_nan(0.0 / 0.0));
+    assert(!is_nan(1.0));
+    assert(!is_nan(0.0));
+
+    // is_infinite
+    assert(is_infinite(1.0 / 0.0));
+    assert(is_infinite(-1.0 / 0.0));
+    assert(!is_infinite(1.0));
+    assert(!is_infinite(0.0));
+
+    // is_finite
+    assert(is_finite(1.0));
+    assert(is_finite(0.0));
+    assert(!is_finite(1.0 / 0.0));
+    assert(!is_finite(0.0 / 0.0));
+
+    // is_zero
+    assert(is_zero(0.0, 1e-10));
+    assert(is_zero(1e-12, 1e-10));
+    assert(!is_zero(1.0, 1e-10));
+
+    // approx_equal
+    assert(approx_equal(1.0, 1.0 + 1e-12, 1e-10));
+    assert(!approx_equal(1.0, 2.0, 1e-10));
+
+    // relative_equal
+    assert(relative_equal(100.0, 100.0001, 1e-5));
+    assert(!relative_equal(100.0, 101.0, 1e-5));
+
+    println("  math_predicates: OK");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// MATH: NUMERIC UTILITIES
+// ═══════════════════════════════════════════════════════════════════════════════
+
+fn test_math_numeric_utils() {
+    // gcd
+    assert(gcd(12, 8) == 4);
+    assert(gcd(17, 13) == 1);
+    assert(gcd(0, 5) == 5);
+    assert(gcd(100, 75) == 25);
+
+    // lcm
+    assert(lcm(4, 6) == 12);
+    assert(lcm(3, 5) == 15);
+    assert(lcm(7, 7) == 7);
+
+    // is_prime
+    assert(!is_prime(0));
+    assert(!is_prime(1));
+    assert(is_prime(2));
+    assert(is_prime(3));
+    assert(!is_prime(4));
+    assert(is_prime(5));
+    assert(is_prime(97));
+    assert(!is_prime(100));
+
+    // next_power_of_2
+    assert(next_power_of_2(0) == 1);
+    assert(next_power_of_2(1) == 1);
+    assert(next_power_of_2(5) == 8);
+    assert(next_power_of_2(16) == 16);
+    assert(next_power_of_2(17) == 32);
+
+    // is_power_of_2
+    assert(is_power_of_2(1));
+    assert(is_power_of_2(2));
+    assert(is_power_of_2(1024));
+    assert(!is_power_of_2(0));
+    assert(!is_power_of_2(3));
+    assert(!is_power_of_2(100));
+
+    // ilog2
+    assert(ilog2(1) == 0);
+    assert(ilog2(2) == 1);
+    assert(ilog2(8) == 3);
+    assert(ilog2(1024) == 10);
+
+    println("  math_numeric_utils: OK");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// MATH: VEC3 OPERATIONS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+fn test_math_vec3() {
+    // Construction
+    let v = Vec3::new(1.0, 2.0, 3.0);
+    assert(v.x == 1.0);
+    assert(v.y == 2.0);
+    assert(v.z == 3.0);
+
+    let zero = Vec3::zero();
+    assert(zero.x == 0.0 && zero.y == 0.0 && zero.z == 0.0);
+
+    let one = Vec3::one();
+    assert(one.x == 1.0 && one.y == 1.0 && one.z == 1.0);
+
+    // Arithmetic
+    let a = Vec3::new(1.0, 2.0, 3.0);
+    let b = Vec3::new(4.0, 5.0, 6.0);
+
+    let sum = a.add(&b);
+    assert(sum.x == 5.0 && sum.y == 7.0 && sum.z == 9.0);
+
+    let diff = b.sub(&a);
+    assert(diff.x == 3.0 && diff.y == 3.0 && diff.z == 3.0);
+
+    let scaled = a.scale(2.0);
+    assert(scaled.x == 2.0 && scaled.y == 4.0 && scaled.z == 6.0);
+
+    // Dot product
+    assert(approx(a.dot(&b), 1.0 * 4.0 + 2.0 * 5.0 + 3.0 * 6.0));
+
+    // Cross product: i x j = k
+    let i = Vec3::new(1.0, 0.0, 0.0);
+    let j = Vec3::new(0.0, 1.0, 0.0);
+    let k = i.cross(&j);
+    assert(approx(k.x, 0.0) && approx(k.y, 0.0) && approx(k.z, 1.0));
+
+    // Cross product anti-commutativity: a x b = -(b x a)
+    let ab = a.cross(&b);
+    let ba = b.cross(&a);
+    assert(approx(ab.x, -ba.x) && approx(ab.y, -ba.y) && approx(ab.z, -ba.z));
+
+    // Length
+    let v345 = Vec3::new(3.0, 4.0, 0.0);
+    assert(approx(v345.length(), 5.0));
+
+    // Normalize
+    let normalized = v345.normalize();
+    assert(approx(normalized.length(), 1.0));
+    assert(approx(normalized.x, 0.6));
+    assert(approx(normalized.y, 0.8));
+
+    // Zero vector normalize (should return zero)
+    let zero_norm = Vec3::zero().normalize();
+    assert(zero_norm.x == 0.0 && zero_norm.y == 0.0 && zero_norm.z == 0.0);
+
+    // Dot product of perpendicular vectors = 0
+    let perp = Vec3::new(0.0, 0.0, 1.0);
+    assert(approx(i.dot(&perp), 0.0));
+
+    println("  math_vec3: OK");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// MATH: MAT4 IDENTITY
+// ═══════════════════════════════════════════════════════════════════════════════
+
+fn test_math_mat4() {
+    // Identity matrix
+    let id = Mat4::identity();
+    assert(id.m[0][0] == 1.0 && id.m[1][1] == 1.0);
+    assert(id.m[2][2] == 1.0 && id.m[3][3] == 1.0);
+    assert(id.m[0][1] == 0.0 && id.m[0][2] == 0.0 && id.m[0][3] == 0.0);
+    assert(id.m[1][0] == 0.0 && id.m[1][2] == 0.0 && id.m[1][3] == 0.0);
+
+    println("  math_mat4: OK");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// COLLECTIONS: VEC
+// ═══════════════════════════════════════════════════════════════════════════════
+
+fn test_collections_vec() {
+    // Construction and push
+    let mut v: Vec<i32> = Vec::new();
+    assert(v.len() == 0);
+    assert(v.is_empty());
+
+    v.push(10);
+    v.push(20);
+    v.push(30);
+    assert(v.len() == 3);
+    assert(!v.is_empty());
+
+    // get / indexing
+    assert(*v.get(0).unwrap() == 10);
+    assert(*v.get(1).unwrap() == 20);
+    assert(*v.get(2).unwrap() == 30);
+    assert(v.get(3).is_none());
+
+    // first / last
+    assert(*v.first().unwrap() == 10);
+    assert(*v.last().unwrap() == 30);
+
+    // pop
+    let popped = v.pop();
+    assert(popped == Some(30));
+    assert(v.len() == 2);
+
+    // insert
+    v.insert(1, 15);
+    assert(*v.get(0).unwrap() == 10);
+    assert(*v.get(1).unwrap() == 15);
+    assert(*v.get(2).unwrap() == 20);
+
+    // remove
+    let removed = v.remove(1);
+    assert(removed == 15);
+    assert(v.len() == 2);
+
+    // clear
+    v.clear();
+    assert(v.len() == 0);
+    assert(v.is_empty());
+
+    // with_capacity
+    let v2: Vec<i32> = Vec::with_capacity(100);
+    assert(v2.capacity() >= 100);
+    assert(v2.len() == 0);
+
+    // vec! macro
+    let v3 = vec![1, 2, 3, 4, 5];
+    assert(v3.len() == 5);
+    assert(*v3.get(0).unwrap() == 1);
+    assert(*v3.get(4).unwrap() == 5);
+
+    println("  collections_vec: OK");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// COLLECTIONS: VEC SORT & REVERSE
+// ═══════════════════════════════════════════════════════════════════════════════
+
+fn test_collections_vec_sort() {
+    let mut v = vec![5, 2, 8, 1, 9, 3];
+    v.sort();
+    assert(*v.get(0).unwrap() == 1);
+    assert(*v.get(1).unwrap() == 2);
+    assert(*v.get(2).unwrap() == 3);
+    assert(*v.get(3).unwrap() == 5);
+    assert(*v.get(4).unwrap() == 8);
+    assert(*v.get(5).unwrap() == 9);
+
+    // reverse
+    v.reverse();
+    assert(*v.get(0).unwrap() == 9);
+    assert(*v.get(5).unwrap() == 1);
+
+    // sort_by (descending)
+    let mut v2 = vec![3, 1, 4, 1, 5];
+    v2.sort_by(|a, b| b.cmp(a));
+    assert(*v2.get(0).unwrap() == 5);
+    assert(*v2.get(4).unwrap() == 1);
+
+    println("  collections_vec_sort: OK");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// COLLECTIONS: VEC ITERATORS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+fn test_collections_vec_iter() {
+    let v = vec![1, 2, 3, 4, 5];
+
+    // iter + fold (sum)
+    let sum = v.iter().fold(0, |acc, x| acc + *x);
+    assert(sum == 15);
+
+    // iter + map + collect
+    let doubled: Vec<i32> = v.iter().map(|x| *x * 2).collect();
+    assert(doubled.len() == 5);
+    assert(*doubled.get(0).unwrap() == 2);
+    assert(*doubled.get(4).unwrap() == 10);
+
+    // retain
+    let mut v2 = vec![1, 2, 3, 4, 5, 6];
+    v2.retain(|x| *x % 2 == 0);
+    assert(v2.len() == 3);
+    assert(*v2.get(0).unwrap() == 2);
+    assert(*v2.get(1).unwrap() == 4);
+    assert(*v2.get(2).unwrap() == 6);
+
+    println("  collections_vec_iter: OK");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// COLLECTIONS: HASHMAP
+// ═══════════════════════════════════════════════════════════════════════════════
+
+fn test_collections_hashmap() {
+    let mut map: HashMap<String, i32> = HashMap::new();
+    assert(map.len() == 0);
+    assert(map.is_empty());
+
+    // insert
+    assert(map.insert("alpha".to_string(), 1).is_none());
+    assert(map.insert("beta".to_string(), 2).is_none());
+    assert(map.insert("gamma".to_string(), 3).is_none());
+    assert(map.len() == 3);
+
+    // get
+    assert(*map.get(&"alpha".to_string()).unwrap() == 1);
+    assert(*map.get(&"beta".to_string()).unwrap() == 2);
+    assert(*map.get(&"gamma".to_string()).unwrap() == 3);
+    assert(map.get(&"delta".to_string()).is_none());
+
+    // contains_key
+    assert(map.contains_key(&"alpha".to_string()));
+    assert(!map.contains_key(&"delta".to_string()));
+
+    // overwrite
+    let old = map.insert("alpha".to_string(), 100);
+    assert(old == Some(1));
+    assert(*map.get(&"alpha".to_string()).unwrap() == 100);
+    assert(map.len() == 3);
+
+    // remove
+    let removed = map.remove(&"beta".to_string());
+    assert(removed == Some(2));
+    assert(map.len() == 2);
+    assert(map.get(&"beta".to_string()).is_none());
+
+    // clear
+    map.clear();
+    assert(map.len() == 0);
+    assert(map.is_empty());
+
+    println("  collections_hashmap: OK");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// COLLECTIONS: HASHSET
+// ═══════════════════════════════════════════════════════════════════════════════
+
+fn test_collections_hashset() {
+    let mut set: HashSet<i32> = HashSet::new();
+    assert(set.len() == 0);
+    assert(set.is_empty());
+
+    // insert
+    assert(set.insert(1) == true);
+    assert(set.insert(2) == true);
+    assert(set.insert(3) == true);
+    assert(set.len() == 3);
+
+    // duplicate insert returns false
+    assert(set.insert(1) == false);
+    assert(set.len() == 3);
+
+    // contains
+    assert(set.contains(&1));
+    assert(set.contains(&2));
+    assert(!set.contains(&4));
+
+    // remove
+    assert(set.remove(&2) == true);
+    assert(set.len() == 2);
+    assert(!set.contains(&2));
+    assert(set.remove(&2) == false);
+
+    // Set operations
+    let mut a: HashSet<i32> = HashSet::new();
+    a.insert(1);
+    a.insert(2);
+    a.insert(3);
+
+    let mut b: HashSet<i32> = HashSet::new();
+    b.insert(2);
+    b.insert(3);
+    b.insert(4);
+
+    // intersection: {2, 3}
+    let inter: Vec<&i32> = a.intersection(&b).collect();
+    assert(inter.len() == 2);
+
+    // difference: a - b = {1}
+    let diff: Vec<&i32> = a.difference(&b).collect();
+    assert(diff.len() == 1);
+
+    // clear
+    a.clear();
+    assert(a.len() == 0);
+    assert(a.is_empty());
+
+    println("  collections_hashset: OK");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// COLLECTIONS: VECDEQUE
+// ═══════════════════════════════════════════════════════════════════════════════
+
+fn test_collections_vecdeque() {
+    let mut dq: VecDeque<i32> = VecDeque::new();
+    assert(dq.len() == 0);
+    assert(dq.is_empty());
+
+    // push_back / push_front
+    dq.push_back(2);
+    dq.push_back(3);
+    dq.push_front(1);
+    dq.push_front(0);
+    assert(dq.len() == 4);
+
+    // front / back
+    assert(*dq.front().unwrap() == 0);
+    assert(*dq.back().unwrap() == 3);
+
+    // get
+    assert(*dq.get(0).unwrap() == 0);
+    assert(*dq.get(1).unwrap() == 1);
+    assert(*dq.get(2).unwrap() == 2);
+    assert(*dq.get(3).unwrap() == 3);
+
+    // pop_front / pop_back
+    assert(dq.pop_front() == Some(0));
+    assert(dq.pop_back() == Some(3));
+    assert(dq.len() == 2);
+    assert(*dq.front().unwrap() == 1);
+    assert(*dq.back().unwrap() == 2);
+
+    // Empty pops
+    dq.clear();
+    assert(dq.pop_front().is_none());
+    assert(dq.pop_back().is_none());
+
+    println("  collections_vecdeque: OK");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// COLLECTIONS: BINARYHEAP
+// ═══════════════════════════════════════════════════════════════════════════════
+
+fn test_collections_binaryheap() {
+    let mut heap: BinaryHeap<i32> = BinaryHeap::new();
+    assert(heap.len() == 0);
+    assert(heap.is_empty());
+
+    // push + peek (max heap)
+    heap.push(3);
+    heap.push(1);
+    heap.push(4);
+    heap.push(1);
+    heap.push(5);
+    assert(heap.len() == 5);
+    assert(*heap.peek().unwrap() == 5);
+
+    // pop gives max
+    assert(heap.pop() == Some(5));
+    assert(heap.pop() == Some(4));
+    assert(heap.pop() == Some(3));
+    assert(heap.pop() == Some(1));
+    assert(heap.pop() == Some(1));
+    assert(heap.pop().is_none());
+    assert(heap.is_empty());
+
+    println("  collections_binaryheap: OK");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// COLLECTIONS: BTREEMAP
+// ═══════════════════════════════════════════════════════════════════════════════
+
+fn test_collections_btreemap() {
+    let mut bt: BTreeMap<i32, String> = BTreeMap::new();
+    assert(bt.len() == 0);
+    assert(bt.is_empty());
+
+    // insert
+    assert(bt.insert(3, "three".to_string()).is_none());
+    assert(bt.insert(1, "one".to_string()).is_none());
+    assert(bt.insert(2, "two".to_string()).is_none());
+    assert(bt.len() == 3);
+
+    // get
+    assert(*bt.get(&1).unwrap() == "one");
+    assert(*bt.get(&2).unwrap() == "two");
+    assert(*bt.get(&3).unwrap() == "three");
+    assert(bt.get(&4).is_none());
+
+    // contains_key
+    assert(bt.contains_key(&1));
+    assert(!bt.contains_key(&99));
+
+    // overwrite
+    let old = bt.insert(1, "ONE".to_string());
+    assert(old == Some("one".to_string()));
+    assert(*bt.get(&1).unwrap() == "ONE");
+    assert(bt.len() == 3);
+
+    // remove
+    let removed = bt.remove(&2);
+    assert(removed == Some("two".to_string()));
+    assert(bt.len() == 2);
+    assert(bt.get(&2).is_none());
+
+    println("  collections_btreemap: OK");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// TEXT: STRING EXTENSIONS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+fn test_text_string_ext() {
+    // is_blank
+    assert("".is_blank());
+    assert("   ".is_blank());
+    assert("\t\n".is_blank());
+    assert(!"hello".is_blank());
+
+    // truncate
+    assert("hello world".truncate(5) == "he...");
+    assert("hi".truncate(10) == "hi");
+    assert("abcdef".truncate(6) == "abcdef");
+
+    // pad_left / pad_right / center
+    assert("42".pad_left(5, '0') == "00042");
+    assert("hi".pad_right(5, '.') == "hi...");
+    assert("hi".center(6, '-') == "--hi--");
+    assert("long enough".pad_left(5, '0') == "long enough");
+
+    // strip_prefix / strip_suffix
+    assert("hello world".strip_prefix_str("hello ") == "world");
+    assert("hello world".strip_suffix_str(" world") == "hello");
+    assert("hello".strip_prefix_str("xyz") == "hello");
+
+    // repeat
+    assert("ab".repeat(3) == "ababab");
+    assert("x".repeat(0) == "");
+
+    // reverse_graphemes
+    assert("abc".reverse_graphemes() == "cba");
+    assert("".reverse_graphemes() == "");
+
+    // count_occurrences
+    assert("abcabc".count_occurrences("abc") == 2);
+    assert("hello".count_occurrences("xyz") == 0);
+    assert("aaa".count_occurrences("") == 0);
+
+    // word_count
+    assert("hello world foo".word_count() == 3);
+    assert("".word_count() == 0);
+    assert("   ".word_count() == 0);
+    assert("one".word_count() == 1);
+
+    // line_count
+    assert("a\nb\nc".line_count() == 3);
+    assert("".line_count() == 0);
+    assert("single".line_count() == 1);
+
+    // words
+    let w = "hello world foo".words();
+    assert(w.len() == 3);
+    assert(w[0] == "hello");
+    assert(w[2] == "foo");
+
+    // lines_vec
+    let lines = "a\nb\nc".lines_vec();
+    assert(lines.len() == 3);
+    assert(lines[0] == "a");
+    assert(lines[2] == "c");
+
+    println("  text_string_ext: OK");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// TEXT: CASE CONVERSION
+// ═══════════════════════════════════════════════════════════════════════════════
+
+fn test_text_case() {
+    // snake_case
+    assert(case::to_snake_case("HelloWorld") == "hello_world");
+    assert(case::to_snake_case("helloWorld") == "hello_world");
+    assert(case::to_snake_case("hello-world") == "hello_world");
+    assert(case::to_snake_case("hello world") == "hello_world");
+
+    // camelCase
+    assert(case::to_camel_case("hello_world") == "helloWorld");
+    assert(case::to_camel_case("hello-world") == "helloWorld");
+
+    // PascalCase
+    assert(case::to_pascal_case("hello_world") == "HelloWorld");
+
+    // SCREAMING_SNAKE
+    assert(case::to_screaming_snake_case("HelloWorld") == "HELLO_WORLD");
+
+    // kebab-case
+    assert(case::to_kebab_case("HelloWorld") == "hello-world");
+
+    // Title Case
+    assert(case::to_title_case("hello world") == "Hello World");
+
+    // Sentence case
+    assert(case::to_sentence_case("HELLO WORLD") == "Hello world");
+
+    // swap_case
+    assert(case::swap_case("Hello") == "hELLO");
+    assert(case::swap_case("aB") == "Ab");
+
+    println("  text_case: OK");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// TEXT: SIMILARITY
+// ═══════════════════════════════════════════════════════════════════════════════
+
+fn test_text_similarity() {
+    // Levenshtein
+    assert(similarity::levenshtein("kitten", "sitting") == 3);
+    assert(similarity::levenshtein("", "abc") == 3);
+    assert(similarity::levenshtein("abc", "") == 3);
+    assert(similarity::levenshtein("same", "same") == 0);
+
+    // Damerau-Levenshtein (allows transpositions)
+    assert(similarity::damerau_levenshtein("ca", "abc") == 2);
+    assert(similarity::damerau_levenshtein("same", "same") == 0);
+
+    // Jaro
+    assert(approx(similarity::jaro("same", "same"), 1.0));
+    assert(similarity::jaro("abc", "xyz") < 0.5);
+    assert(similarity::jaro("", "abc") == 0.0);
+
+    // Jaro-Winkler
+    assert(approx(similarity::jaro_winkler("same", "same"), 1.0));
+    // Common prefix bonus means JW >= Jaro
+    let jw = similarity::jaro_winkler("martha", "marhta");
+    let j = similarity::jaro("martha", "marhta");
+    assert(jw >= j);
+
+    println("  text_similarity: OK");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// RANDOM: PRNG DETERMINISM
+// ═══════════════════════════════════════════════════════════════════════════════
+
+fn test_random_determinism() {
+    // SplitMix64: same seed => same sequence
+    let mut rng1 = SplitMix64::new(42);
+    let mut rng2 = SplitMix64::new(42);
+    for _ in 0..10 {
+        assert(rng1.next_u64() == rng2.next_u64());
+    }
+
+    // Different seeds => different sequences
+    let mut rng3 = SplitMix64::new(42);
+    let mut rng4 = SplitMix64::new(99);
+    let mut all_same = true;
+    for _ in 0..10 {
+        if rng3.next_u64() != rng4.next_u64() {
+            all_same = false;
+        }
+    }
+    assert(!all_same);
+
+    // Xorshift128Plus determinism
+    let mut xs1 = Xorshift128Plus::new(12345);
+    let mut xs2 = Xorshift128Plus::new(12345);
+    for _ in 0..10 {
+        assert(xs1.next_u64() == xs2.next_u64());
+    }
+
+    // Xoshiro256** determinism
+    let mut xo1 = Xoshiro256StarStar::new(777);
+    let mut xo2 = Xoshiro256StarStar::new(777);
+    for _ in 0..10 {
+        assert(xo1.next_u64() == xo2.next_u64());
+    }
+
+    // PCG determinism
+    let mut pcg1 = Pcg32::new(42, 54);
+    let mut pcg2 = Pcg32::new(42, 54);
+    for _ in 0..10 {
+        assert(pcg1.next_u64() == pcg2.next_u64());
+    }
+
+    println("  random_determinism: OK");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// RANDOM: DISTRIBUTION BOUNDS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+fn test_random_bounds() {
+    let mut rng = Xoshiro256StarStar::new(42);
+
+    // next_f64 in [0, 1)
+    for _ in 0..1000 {
+        let f = rng.next_f64();
+        assert(f >= 0.0 && f < 1.0);
+    }
+
+    // next_f32 in [0, 1)
+    for _ in 0..1000 {
+        let f = rng.next_f32();
+        assert(f >= 0.0 && f < 1.0);
+    }
+
+    // next_f64_range
+    for _ in 0..1000 {
+        let f = rng.next_f64_range(10.0, 20.0);
+        assert(f >= 10.0 && f < 20.0);
+    }
+
+    // next_u64_bounded
+    for _ in 0..1000 {
+        let n = rng.next_u64_bounded(100);
+        assert(n < 100);
+    }
+
+    // next_i64_range
+    for _ in 0..1000 {
+        let n = rng.next_i64_range(-50, 50);
+        assert(n >= -50 && n < 50);
+    }
+
+    // next_bool with p=0 always false, p=1 always true
+    for _ in 0..100 {
+        assert(!rng.next_bool(0.0));
+    }
+    for _ in 0..100 {
+        assert(rng.next_bool(1.0));
+    }
+
+    println("  random_bounds: OK");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// RANDOM: FILL BYTES
+// ═══════════════════════════════════════════════════════════════════════════════
+
+fn test_random_fill_bytes() {
+    let mut rng = SplitMix64::new(42);
+    let mut buf = [0u8; 32];
+    rng.fill_bytes(&mut buf);
+
+    // Not all zeros after filling
+    let mut has_nonzero = false;
+    for b in buf.iter() {
+        if *b != 0 {
+            has_nonzero = true;
+        }
+    }
+    assert(has_nonzero);
+
+    // Deterministic: same seed, same bytes
+    let mut rng2 = SplitMix64::new(42);
+    let mut buf2 = [0u8; 32];
+    rng2.fill_bytes(&mut buf2);
+    for i in 0..32 {
+        assert(buf[i] == buf2[i]);
+    }
+
+    println("  random_fill_bytes: OK");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ERROR: SIMPLE ERROR
+// ═══════════════════════════════════════════════════════════════════════════════
+
+fn test_error_simple() {
+    // Create simple error
+    let err = SimpleError::new("something went wrong");
+    assert(err.message() == "something went wrong");
+
+    // From &str
+    let err2: SimpleError = SimpleError::from("oops");
+    assert(err2.message() == "oops");
+
+    // From String
+    let err3: SimpleError = SimpleError::from("from string".to_string());
+    assert(err3.message() == "from string");
+
+    // Without backtrace
+    let err4 = SimpleError::without_backtrace("no trace");
+    assert(err4.message() == "no trace");
+
+    println("  error_simple: OK");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ERROR: CODED ERROR
+// ═══════════════════════════════════════════════════════════════════════════════
+
+fn test_error_coded() {
+    let err = CodedError::new(404, "not found");
+    assert(err.code == 404);
+    assert(err.message == "not found");
+
+    let err2 = CodedError::new(-1, "unknown");
+    assert(err2.code == -1);
+
+    println("  error_coded: OK");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ERROR: RESULT CONTEXT
+// ═══════════════════════════════════════════════════════════════════════════════
+
+fn test_error_context() {
+    // Ok passes through
+    let ok_result: Result<i32, SimpleError> = Ok(42);
+    let with_ctx = ok_result.context("extra context");
+    assert(with_ctx.is_ok());
+    assert(with_ctx.unwrap() == 42);
+
+    // Err wraps with context
+    let err_result: Result<i32, SimpleError> = Err(SimpleError::new("base error"));
+    let with_ctx = err_result.context("while doing X");
+    assert(with_ctx.is_err());
+
+    // Option context
+    let some_val: Option<i32> = Some(10);
+    let result = some_val.context("not found");
+    assert(result.is_ok());
+    assert(result.unwrap() == 10);
+
+    let none_val: Option<i32> = None;
+    let result = none_val.context("value missing");
+    assert(result.is_err());
+
+    println("  error_context: OK");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ERROR: BACKTRACE STATUS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+fn test_error_backtrace() {
+    use foundation::error::Backtrace;
+
+    // Disabled backtrace
+    let bt = Backtrace::disabled();
+    assert(bt.status() == BacktraceStatus::Disabled);
+    assert(bt.frames().len() == 0);
+
+    // Capture
+    let bt2 = Backtrace::capture();
+    assert(bt2.status() == BacktraceStatus::Captured);
+
+    println("  error_backtrace: OK");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// SERIALIZATION: JSON VALUE
+// ═══════════════════════════════════════════════════════════════════════════════
+
+fn test_json_value() {
+    // Type constructors
+    let null = Value::Null;
+    assert(null.is_null());
+    assert(!null.is_bool());
+
+    let b = Value::Bool(true);
+    assert(b.is_bool());
+    assert(b.as_bool() == Some(true));
+
+    let s = Value::String("hello".to_string());
+    assert(s.is_string());
+    assert(s.as_str() == Some("hello"));
+
+    let arr = Value::Array(vec![
+        Value::Bool(true),
+        Value::Null,
+    ]);
+    assert(arr.is_array());
+    let inner = arr.as_array().unwrap();
+    assert(inner.len() == 2);
+
+    let mut obj_map: HashMap<String, Value> = HashMap::new();
+    obj_map.insert("key".to_string(), Value::String("val".to_string()));
+    let obj = Value::Object(obj_map);
+    assert(obj.is_object());
+    let val = obj.get("key");
+    assert(val.is_some());
+
+    println("  json_value: OK");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// SERIALIZATION: JSON PARSE
+// ═══════════════════════════════════════════════════════════════════════════════
+
+fn test_json_parse() {
+    // Parse null
+    let v = json::parse("null").unwrap();
+    assert(v.is_null());
+
+    // Parse bool
+    let v = json::parse("true").unwrap();
+    assert(v.as_bool() == Some(true));
+    let v = json::parse("false").unwrap();
+    assert(v.as_bool() == Some(false));
+
+    // Parse string
+    let v = json::parse("\"hello\"").unwrap();
+    assert(v.as_str() == Some("hello"));
+
+    // Parse number
+    let v = json::parse("42").unwrap();
+    assert(v.as_i64() == Some(42));
+
+    let v = json::parse("3.14").unwrap();
+    assert(v.as_f64().is_some());
+
+    // Parse array
+    let v = json::parse("[1, 2, 3]").unwrap();
+    assert(v.is_array());
+    let arr = v.as_array().unwrap();
+    assert(arr.len() == 3);
+
+    // Parse object
+    let v = json::parse("{\"name\": \"build\", \"version\": 1}").unwrap();
+    assert(v.is_object());
+    let name = v.get("name");
+    assert(name.is_some());
+    assert(name.unwrap().as_str() == Some("build"));
+
+    // Parse nested
+    let v = json::parse("{\"data\": [1, 2, 3], \"ok\": true}").unwrap();
+    assert(v.get("ok").unwrap().as_bool() == Some(true));
+    assert(v.get("data").unwrap().is_array());
+
+    // Invalid JSON
+    assert(json::parse("{invalid}").is_err());
+    assert(json::parse("").is_err());
+
+    println("  json_parse: OK");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ENCODING: HEX
+// ═══════════════════════════════════════════════════════════════════════════════
+
+fn test_encoding_hex() {
+    // Encode
+    let data: Vec<u8> = vec![0x48, 0x65, 0x6c, 0x6c, 0x6f]; // "Hello"
+    let encoded = hex::encode(&data);
+    assert(encoded == "48656c6c6f");
+
+    // Encode upper
+    let upper = hex::encode_upper(&data);
+    assert(upper == "48656C6C6F");
+
+    // Roundtrip
+    let decoded = hex::decode(&encoded).unwrap();
+    assert(decoded.len() == data.len());
+    for i in 0..data.len() {
+        assert(decoded[i] == data[i]);
+    }
+
+    // Empty
+    let empty_enc = hex::encode(&[]);
+    assert(empty_enc == "");
+    let empty_dec = hex::decode("").unwrap();
+    assert(empty_dec.len() == 0);
+
+    // Validation
+    assert(hex::is_valid("48656c6c6f"));
+    assert(hex::is_valid("AABB"));
+    assert(!hex::is_valid("xyz"));
+    assert(!hex::is_valid("123")); // odd length
+
+    // Invalid decode
+    assert(hex::decode("zz").is_err());
+    assert(hex::decode("123").is_err()); // odd length
+
+    println("  encoding_hex: OK");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ENCODING: BASE64
+// ═══════════════════════════════════════════════════════════════════════════════
+
+fn test_encoding_base64() {
+    // Standard encode/decode roundtrip
+    let data = b"Hello, World!";
+    let encoded = base64::encode(data);
+    let decoded = base64::decode(&encoded).unwrap();
+    assert(decoded.len() == data.len());
+    for i in 0..data.len() {
+        assert(decoded[i] == data[i]);
+    }
+
+    // Known values (RFC 4648 test vectors)
+    assert(base64::encode(b"") == "");
+    assert(base64::encode(b"f") == "Zg==");
+    assert(base64::encode(b"fo") == "Zm8=");
+    assert(base64::encode(b"foo") == "Zm9v");
+    assert(base64::encode(b"foob") == "Zm9vYg==");
+    assert(base64::encode(b"fooba") == "Zm9vYmE=");
+    assert(base64::encode(b"foobar") == "Zm9vYmFy");
+
+    // Decode known values
+    assert(base64::decode("Zm9v").unwrap() == b"foo".to_vec());
+    assert(base64::decode("Zm9vYmFy").unwrap() == b"foobar".to_vec());
+
+    // No-pad variant
+    let no_pad = base64::encode_no_pad(b"f");
+    assert(!no_pad.contains('='));
+
+    // URL-safe variant
+    let url_encoded = base64::encode_url_safe(b"test data?yes=true");
+    assert(!url_encoded.contains('+'));
+    assert(!url_encoded.contains('/'));
+
+    // Roundtrip with binary data
+    let binary: Vec<u8> = (0..256).map(|i| i as u8).collect();
+    let enc = base64::encode(&binary);
+    let dec = base64::decode(&enc).unwrap();
+    assert(dec.len() == 256);
+    for i in 0..256 {
+        assert(dec[i] == i as u8);
+    }
+
+    // Invalid decode
+    assert(base64::decode("!!!").is_err());
+
+    println("  encoding_base64: OK");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ENCODING: BASE32
+// ═══════════════════════════════════════════════════════════════════════════════
+
+fn test_encoding_base32() {
+    // Roundtrip
+    let data = b"Hello";
+    let encoded = base32::encode(data);
+    let decoded = base32::decode(&encoded).unwrap();
+    assert(decoded.len() == data.len());
+    for i in 0..data.len() {
+        assert(decoded[i] == data[i]);
+    }
+
+    // Empty
+    assert(base32::encode(b"") == "");
+    assert(base32::decode("").unwrap().len() == 0);
+
+    println("  encoding_base32: OK");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// CROSS-FEATURE: ENUM + MATCH
+// ═══════════════════════════════════════════════════════════════════════════════
+
+fn test_enum_match() {
+    #[derive(Debug, PartialEq)]
+    enum Shape {
+        Circle(f64),
+        Rectangle(f64, f64),
+        Triangle(f64, f64, f64),
+    }
+
+    fn area(shape: &Shape) -> f64 {
+        match shape {
+            Shape::Circle(r) => PI * r * r,
+            Shape::Rectangle(w, h) => w * h,
+            Shape::Triangle(a, b, c) => {
+                let s = (a + b + c) / 2.0;
+                sqrt(s * (s - a) * (s - b) * (s - c))
+            }
+        }
+    }
+
+    let circle = Shape::Circle(5.0);
+    assert(approx(area(&circle), PI * 25.0));
+
+    let rect = Shape::Rectangle(3.0, 4.0);
+    assert(approx(area(&rect), 12.0));
+
+    let tri = Shape::Triangle(3.0, 4.0, 5.0);
+    assert(approx(area(&tri), 6.0));
+
+    println("  enum_match: OK");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// CROSS-FEATURE: STRUCT + METHODS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+fn test_struct_methods() {
+    struct Counter {
+        count: i32,
+        max: i32,
+    }
+
+    impl Counter {
+        fn new(max: i32) -> Self {
+            Counter { count: 0, max }
+        }
+
+        fn increment(&mut self) -> bool {
+            if self.count < self.max {
+                self.count += 1;
+                true
+            } else {
+                false
+            }
+        }
+
+        fn value(&self) -> i32 {
+            self.count
+        }
+
+        fn is_full(&self) -> bool {
+            self.count >= self.max
+        }
+
+        fn reset(&mut self) {
+            self.count = 0;
+        }
+    }
+
+    let mut c = Counter::new(3);
+    assert(c.value() == 0);
+    assert(!c.is_full());
+
+    assert(c.increment());
+    assert(c.increment());
+    assert(c.increment());
+    assert(c.value() == 3);
+    assert(c.is_full());
+    assert(!c.increment());
+
+    c.reset();
+    assert(c.value() == 0);
+
+    println("  struct_methods: OK");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// CROSS-FEATURE: TUPLE DESTRUCTURING
+// ═══════════════════════════════════════════════════════════════════════════════
+
+fn test_tuple_destructuring() {
+    // Basic tuple
+    let pair: (i32, f64) = (42, 3.14);
+    let (a, b) = pair;
+    assert(a == 42);
+    assert(approx(b, 3.14));
+
+    // Triple
+    let (x, y, z) = (1.0, 2.0, 3.0);
+    assert(x == 1.0 && y == 2.0 && z == 3.0);
+
+    // Nested destructuring
+    let ((a, b), c) = ((1, 2), 3);
+    assert(a == 1 && b == 2 && c == 3);
+
+    // Function returning tuple
+    fn divmod(a: i32, b: i32) -> (i32, i32) {
+        (a / b, a % b)
+    }
+    let (quot, rem) = divmod(17, 5);
+    assert(quot == 3);
+    assert(rem == 2);
+
+    // sincos uses tuple return
+    let (s, c) = sincos(0.0);
+    assert(approx(s, 0.0));
+    assert(approx(c, 1.0));
+
+    println("  tuple_destructuring: OK");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// CROSS-FEATURE: CLOSURES + ITERATORS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+fn test_closures_iterators() {
+    let data = vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+
+    // map
+    let squares: Vec<i32> = data.iter().map(|x| *x * *x).collect();
+    assert(squares.len() == 10);
+    assert(*squares.get(0).unwrap() == 1);
+    assert(*squares.get(2).unwrap() == 9);
+    assert(*squares.get(9).unwrap() == 100);
+
+    // fold (sum of squares)
+    let sum_sq = data.iter().fold(0, |acc, x| acc + *x * *x);
+    assert(sum_sq == 385); // 1+4+9+16+25+36+49+64+81+100
+
+    // Chained: filter + map + collect (even squares)
+    let even_data = vec![1, 2, 3, 4, 5, 6];
+    let even_squares: Vec<i32> = even_data.iter()
+        .filter(|x| **x % 2 == 0)
+        .map(|x| *x * *x)
+        .collect();
+    assert(even_squares.len() == 3);
+    assert(*even_squares.get(0).unwrap() == 4);
+    assert(*even_squares.get(1).unwrap() == 16);
+    assert(*even_squares.get(2).unwrap() == 36);
+
+    // Closure capturing environment
+    let multiplier = 10;
+    let scaled: Vec<i32> = vec![1, 2, 3].iter().map(|x| *x * multiplier).collect();
+    assert(*scaled.get(0).unwrap() == 10);
+    assert(*scaled.get(2).unwrap() == 30);
+
+    println("  closures_iterators: OK");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// CROSS-FEATURE: FOR / WHILE LOOPS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+fn test_loops() {
+    // For loop with range
+    let mut sum = 0;
+    for i in 0..10 {
+        sum += i;
+    }
+    assert(sum == 45);
+
+    // For loop over vec
+    let items = vec![10, 20, 30];
+    let mut total = 0;
+    for item in items.iter() {
+        total += *item;
+    }
+    assert(total == 60);
+
+    // While loop
+    let mut n = 1;
+    let mut count = 0;
+    while n < 1000 {
+        n *= 2;
+        count += 1;
+    }
+    assert(n == 1024);
+    assert(count == 10);
+
+    // Nested loops
+    let mut matrix_sum = 0;
+    for i in 0..3 {
+        for j in 0..3 {
+            matrix_sum += i * 3 + j;
+        }
+    }
+    assert(matrix_sum == 36); // 0+1+2+3+4+5+6+7+8
+
+    println("  loops: OK");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// MAIN: RUN ALL TESTS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+fn main() {
+    println("Foundation Unit Tests");
+    println("=====================");
+    println("");
+
+    // Math
+    println("[Math]");
+    test_math_basic();
+    test_math_constants();
+    test_math_powers();
+    test_math_trig();
+    test_math_hyperbolic();
+    test_math_rounding();
+    test_math_interpolation();
+    test_math_special();
+    test_math_predicates();
+    test_math_numeric_utils();
+    test_math_vec3();
+    test_math_mat4();
+    println("");
+
+    // Collections
+    println("[Collections]");
+    test_collections_vec();
+    test_collections_vec_sort();
+    test_collections_vec_iter();
+    test_collections_hashmap();
+    test_collections_hashset();
+    test_collections_vecdeque();
+    test_collections_binaryheap();
+    test_collections_btreemap();
+    println("");
+
+    // Text
+    println("[Text]");
+    test_text_string_ext();
+    test_text_case();
+    test_text_similarity();
+    println("");
+
+    // Random
+    println("[Random]");
+    test_random_determinism();
+    test_random_bounds();
+    test_random_fill_bytes();
+    println("");
+
+    // Error
+    println("[Error]");
+    test_error_simple();
+    test_error_coded();
+    test_error_context();
+    test_error_backtrace();
+    println("");
+
+    // Serialization
+    println("[Serialization]");
+    test_json_value();
+    test_json_parse();
+    println("");
+
+    // Encoding
+    println("[Encoding]");
+    test_encoding_hex();
+    test_encoding_base64();
+    test_encoding_base32();
+    println("");
+
+    // Cross-Feature
+    println("[Cross-Feature]");
+    test_enum_match();
+    test_struct_methods();
+    test_tuple_destructuring();
+    test_closures_iterators();
+    test_loops();
+    println("");
+
+    println("=====================");
+    println("All foundation tests passed!");
+}

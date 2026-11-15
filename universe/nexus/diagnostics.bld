@@ -1,0 +1,1391 @@
+// ============================================================================
+// BUILD-UNIVERSE: NEXUS DIAGNOSTICS
+// Debugging, profiling, and monitoring tools for mods
+// ============================================================================
+
+import nexus::lib::{ModMetadata, Version};
+import nexus::loader::{ModInstance, LoadState};
+
+// ============================================================================
+// REGION: Log Levels
+// ============================================================================
+
+/// Logging severity levels
+@derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum LogLevel {
+    Trace = 0,
+    Debug = 1,
+    Info = 2,
+    Warn = 3,
+    Error = 4,
+    Fatal = 5,
+}
+
+impl LogLevel {
+    fn as_str(&self) -> &'static str {
+        match self {
+            LogLevel::Trace => "TRACE",
+            LogLevel::Debug => "DEBUG",
+            LogLevel::Info => "INFO",
+            LogLevel::Warn => "WARN",
+            LogLevel::Error => "ERROR",
+            LogLevel::Fatal => "FATAL",
+        }
+    }
+
+    fn from_str(s: &str) -> Option<Self> {
+        match s.to_uppercase().as_str() {
+            "TRACE" => Some(LogLevel::Trace),
+            "DEBUG" => Some(LogLevel::Debug),
+            "INFO" => Some(LogLevel::Info),
+            "WARN" | "WARNING" => Some(LogLevel::Warn),
+            "ERROR" => Some(LogLevel::Error),
+            "FATAL" | "CRITICAL" => Some(LogLevel::Fatal),
+            _ => None,
+        }
+    }
+
+    fn color_code(&self) -> &'static str {
+        match self {
+            LogLevel::Trace => "\x1b[90m",    // Gray
+            LogLevel::Debug => "\x1b[36m",    // Cyan
+            LogLevel::Info => "\x1b[32m",     // Green
+            LogLevel::Warn => "\x1b[33m",     // Yellow
+            LogLevel::Error => "\x1b[31m",    // Red
+            LogLevel::Fatal => "\x1b[35;1m",  // Bold Magenta
+        }
+    }
+}
+
+// ============================================================================
+// REGION: Log Entry
+// ============================================================================
+
+/// Log entry structure
+@derive(Debug, Clone)]
+struct LogEntry {
+    /// Timestamp (ms since epoch)
+    timestamp: u64,
+    /// Log level
+    level: LogLevel,
+    /// Source mod ID
+    mod_id: Option<String>,
+    /// Log category/tag
+    category: String,
+    /// Log message
+    message: String,
+    /// Source file
+    file: Option<String>,
+    /// Source line number
+    line: Option<u32>,
+    /// Additional context
+    context: HashMap<String, String>,
+    /// Stack trace (for errors)
+    stack_trace: Option<Vec<StackFrame>>,
+}
+
+@derive(Debug, Clone)]
+struct StackFrame {
+    function: String,
+    file: String,
+    line: u32,
+    column: u32,
+}
+
+impl LogEntry {
+    fn new(level: LogLevel, category: &str, message: &str) -> Self {
+        LogEntry {
+            timestamp: current_time_ms(),
+            level,
+            mod_id: None,
+            category: category.to_string(),
+            message: message.to_string(),
+            file: None,
+            line: None,
+            context: HashMap::new(),
+            stack_trace: None,
+        }
+    }
+
+    fn with_mod(mut self, mod_id: &str) -> Self {
+        self.mod_id = Some(mod_id.to_string());
+        self
+    }
+
+    fn with_source(mut self, file: &str, line: u32) -> Self {
+        self.file = Some(file.to_string());
+        self.line = Some(line);
+        self
+    }
+
+    fn with_context(mut self, key: &str, value: &str) -> Self {
+        self.context.insert(key.to_string(), value.to_string());
+        self
+    }
+
+    fn with_stack_trace(mut self, trace: Vec<StackFrame>) -> Self {
+        self.stack_trace = Some(trace);
+        self
+    }
+
+    fn formatted(&self, colored: bool) -> String {
+        let timestamp = format_timestamp(self.timestamp);
+        let level = if colored {
+            format!("{}{}\x1b[0m", self.level.color_code(), self.level.as_str())
+        } else {
+            self.level.as_str().to_string()
+        };
+
+        let source = match (&self.mod_id, &self.file, self.line) {
+            (Some(mod_id), Some(file), Some(line)) =>
+                format!("[{}] {}:{}", mod_id, file, line),
+            (Some(mod_id), _, _) =>
+                format!("[{}]", mod_id),
+            (_, Some(file), Some(line)) =>
+                format!("{}:{}", file, line),
+            _ => String::new(),
+        };
+
+        if source.is_empty() {
+            format!("{} [{}] {}: {}", timestamp, level, self.category, self.message)
+        } else {
+            format!("{} [{}] {} {}: {}", timestamp, level, source, self.category, self.message)
+        }
+    }
+}
+
+// ============================================================================
+// REGION: Logger
+// ============================================================================
+
+/// Logger configuration
+@derive(Debug, Clone)]
+struct LoggerConfig {
+    /// Minimum level to log
+    min_level: LogLevel,
+    /// Enable console output
+    console_output: bool,
+    /// Enable file output
+    file_output: bool,
+    /// Log file path
+    file_path: Option<String>,
+    /// Use colored output
+    colored: bool,
+    /// Include timestamps
+    timestamps: bool,
+    /// Include source location
+    source_location: bool,
+    /// Maximum log file size (bytes)
+    max_file_size: u64,
+    /// Number of backup files to keep
+    max_backups: u32,
+    /// Flush interval (ms)
+    flush_interval_ms: u64,
+}
+
+impl LoggerConfig {
+    fn default() -> Self {
+        LoggerConfig {
+            min_level: LogLevel::Info,
+            console_output: true,
+            file_output: true,
+            file_path: Some("logs/nexus.log".to_string()),
+            colored: true,
+            timestamps: true,
+            source_location: false,
+            max_file_size: 10 * 1024 * 1024, // 10 MB
+            max_backups: 5,
+            flush_interval_ms: 1000,
+        }
+    }
+
+    fn debug() -> Self {
+        LoggerConfig {
+            min_level: LogLevel::Debug,
+            console_output: true,
+            file_output: true,
+            file_path: Some("logs/nexus_debug.log".to_string()),
+            colored: true,
+            timestamps: true,
+            source_location: true,
+            max_file_size: 50 * 1024 * 1024, // 50 MB
+            max_backups: 10,
+            flush_interval_ms: 100,
+        }
+    }
+
+    fn release() -> Self {
+        LoggerConfig {
+            min_level: LogLevel::Warn,
+            console_output: false,
+            file_output: true,
+            file_path: Some("logs/nexus.log".to_string()),
+            colored: false,
+            timestamps: true,
+            source_location: false,
+            max_file_size: 5 * 1024 * 1024, // 5 MB
+            max_backups: 3,
+            flush_interval_ms: 5000,
+        }
+    }
+}
+
+/// Main logger
+@derive(Debug)]
+struct Logger {
+    config: LoggerConfig,
+    entries: Vec<LogEntry>,
+    buffer: Vec<LogEntry>,
+    file_handle: Option<FileHandle>,
+    current_file_size: u64,
+    last_flush: u64,
+    listeners: Vec<Box<dyn Fn(&LogEntry)>>,
+    category_levels: HashMap<String, LogLevel>,
+    mod_levels: HashMap<String, LogLevel>,
+}
+
+type FileHandle = u64;
+
+impl Logger {
+    fn new(config: LoggerConfig) -> Self {
+        Logger {
+            config,
+            entries: Vec::new(),
+            buffer: Vec::new(),
+            file_handle: None,
+            current_file_size: 0,
+            last_flush: current_time_ms(),
+            listeners: Vec::new(),
+            category_levels: HashMap::new(),
+            mod_levels: HashMap::new(),
+        }
+    }
+
+    fn init(&mut self) -> Result<(), String> {
+        if self.config.file_output {
+            if let Some(ref path) = self.config.file_path {
+                self.open_log_file(path)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn open_log_file(&mut self, path: &str) -> Result<(), String> {
+        // Platform-specific file opening
+        Ok(())
+    }
+
+    fn set_category_level(&mut self, category: &str, level: LogLevel) {
+        self.category_levels.insert(category.to_string(), level);
+    }
+
+    fn set_mod_level(&mut self, mod_id: &str, level: LogLevel) {
+        self.mod_levels.insert(mod_id.to_string(), level);
+    }
+
+    fn add_listener<F: Fn(&LogEntry) + 'static>(&mut self, listener: F) {
+        self.listeners.push(Box::new(listener));
+    }
+
+    fn should_log(&self, entry: &LogEntry) -> bool {
+        // Check mod-specific level
+        if let Some(ref mod_id) = entry.mod_id {
+            if let Some(&level) = self.mod_levels.get(mod_id) {
+                return entry.level >= level;
+            }
+        }
+
+        // Check category-specific level
+        if let Some(&level) = self.category_levels.get(&entry.category) {
+            return entry.level >= level;
+        }
+
+        // Use global level
+        entry.level >= self.config.min_level
+    }
+
+    fn log(&mut self, entry: LogEntry) {
+        if !self.should_log(&entry) {
+            return;
+        }
+
+        // Notify listeners
+        for listener in &self.listeners {
+            listener(&entry);
+        }
+
+        // Console output
+        if self.config.console_output {
+            println!("{}", entry.formatted(self.config.colored));
+        }
+
+        // Buffer for file output
+        if self.config.file_output {
+            self.buffer.push(entry.clone());
+        }
+
+        // Store entry
+        self.entries.push(entry);
+
+        // Check if we should flush
+        let now = current_time_ms();
+        if now - self.last_flush >= self.config.flush_interval_ms {
+            self.flush();
+        }
+    }
+
+    fn trace(&mut self, category: &str, message: &str) {
+        self.log(LogEntry::new(LogLevel::Trace, category, message));
+    }
+
+    fn debug(&mut self, category: &str, message: &str) {
+        self.log(LogEntry::new(LogLevel::Debug, category, message));
+    }
+
+    fn info(&mut self, category: &str, message: &str) {
+        self.log(LogEntry::new(LogLevel::Info, category, message));
+    }
+
+    fn warn(&mut self, category: &str, message: &str) {
+        self.log(LogEntry::new(LogLevel::Warn, category, message));
+    }
+
+    fn error(&mut self, category: &str, message: &str) {
+        self.log(LogEntry::new(LogLevel::Error, category, message));
+    }
+
+    fn fatal(&mut self, category: &str, message: &str) {
+        self.log(LogEntry::new(LogLevel::Fatal, category, message));
+    }
+
+    fn flush(&mut self) {
+        if self.buffer.is_empty() {
+            return;
+        }
+
+        if self.config.file_output && self.file_handle.is_some() {
+            for entry in &self.buffer {
+                let line = entry.formatted(false) + "\n";
+                self.current_file_size += line.len() as u64;
+                // Write to file
+
+                // Check for rotation
+                if self.current_file_size >= self.config.max_file_size {
+                    self.rotate_log_file();
+                }
+            }
+        }
+
+        self.buffer.clear();
+        self.last_flush = current_time_ms();
+    }
+
+    fn rotate_log_file(&mut self) {
+        if let Some(ref path) = self.config.file_path {
+            // Rotate existing backup files
+            for i in (1..self.config.max_backups).rev() {
+                let from = format!("{}.{}", path, i);
+                let to = format!("{}.{}", path, i + 1);
+                // Rename file
+            }
+
+            // Rename current log to .1
+            let backup = format!("{}.1", path);
+            // Rename and reopen
+        }
+
+        self.current_file_size = 0;
+    }
+
+    fn get_entries(&self) -> &[LogEntry] {
+        &self.entries
+    }
+
+    fn get_entries_by_level(&self, level: LogLevel) -> Vec<&LogEntry> {
+        self.entries.iter().filter(|e| e.level == level).collect()
+    }
+
+    fn get_entries_by_mod(&self, mod_id: &str) -> Vec<&LogEntry> {
+        self.entries.iter()
+            .filter(|e| e.mod_id.as_deref() == Some(mod_id))
+            .collect()
+    }
+
+    fn clear(&mut self) {
+        self.entries.clear();
+    }
+}
+
+// ============================================================================
+// REGION: Mod Logger
+// ============================================================================
+
+/// Per-mod logger wrapper
+@derive(Debug)]
+struct ModLogger {
+    mod_id: String,
+    logger: Arc<Mutex<Logger>>,
+}
+
+impl ModLogger {
+    fn new(mod_id: &str, logger: Arc<Mutex<Logger>>) -> Self {
+        ModLogger {
+            mod_id: mod_id.to_string(),
+            logger,
+        }
+    }
+
+    fn log(&self, level: LogLevel, category: &str, message: &str) {
+        let entry = LogEntry::new(level, category, message)
+            .with_mod(&self.mod_id);
+
+        if let Ok(mut logger) = self.logger.lock() {
+            logger.log(entry);
+        }
+    }
+
+    fn trace(&self, message: &str) {
+        self.log(LogLevel::Trace, "mod", message);
+    }
+
+    fn debug(&self, message: &str) {
+        self.log(LogLevel::Debug, "mod", message);
+    }
+
+    fn info(&self, message: &str) {
+        self.log(LogLevel::Info, "mod", message);
+    }
+
+    fn warn(&self, message: &str) {
+        self.log(LogLevel::Warn, "mod", message);
+    }
+
+    fn error(&self, message: &str) {
+        self.log(LogLevel::Error, "mod", message);
+    }
+}
+
+// ============================================================================
+// REGION: Profiler
+// ============================================================================
+
+/// Profiling sample
+@derive(Debug, Clone)]
+struct ProfileSample {
+    name: String,
+    category: String,
+    start_time: u64,
+    end_time: u64,
+    parent_id: Option<u64>,
+    thread_id: u64,
+    metadata: HashMap<String, String>,
+}
+
+impl ProfileSample {
+    fn duration_us(&self) -> u64 {
+        self.end_time.saturating_sub(self.start_time)
+    }
+
+    fn duration_ms(&self) -> f64 {
+        self.duration_us() as f64 / 1000.0
+    }
+}
+
+/// Profiler for performance measurement
+@derive(Debug)]
+struct Profiler {
+    enabled: bool,
+    samples: Vec<ProfileSample>,
+    active_samples: HashMap<u64, ProfileSample>,
+    next_sample_id: u64,
+    sample_stack: Vec<u64>,
+    frame_start: u64,
+    frame_count: u64,
+    frame_times: VecDeque<u64>,
+    max_samples: usize,
+}
+
+impl Profiler {
+    fn new() -> Self {
+        Profiler {
+            enabled: true,
+            samples: Vec::new(),
+            active_samples: HashMap::new(),
+            next_sample_id: 1,
+            sample_stack: Vec::new(),
+            frame_start: 0,
+            frame_count: 0,
+            frame_times: VecDeque::with_capacity(120),
+            max_samples: 100000,
+        }
+    }
+
+    fn enable(&mut self) {
+        self.enabled = true;
+    }
+
+    fn disable(&mut self) {
+        self.enabled = false;
+    }
+
+    fn begin_frame(&mut self) {
+        self.frame_start = current_time_us();
+    }
+
+    fn end_frame(&mut self) {
+        let frame_time = current_time_us() - self.frame_start;
+        self.frame_count += 1;
+
+        self.frame_times.push_back(frame_time);
+        if self.frame_times.len() > 120 {
+            self.frame_times.pop_front();
+        }
+    }
+
+    fn begin_sample(&mut self, name: &str, category: &str) -> u64 {
+        if !self.enabled {
+            return 0;
+        }
+
+        let sample_id = self.next_sample_id;
+        self.next_sample_id += 1;
+
+        let parent_id = self.sample_stack.last().copied();
+
+        let sample = ProfileSample {
+            name: name.to_string(),
+            category: category.to_string(),
+            start_time: current_time_us(),
+            end_time: 0,
+            parent_id,
+            thread_id: current_thread_id(),
+            metadata: HashMap::new(),
+        };
+
+        self.active_samples.insert(sample_id, sample);
+        self.sample_stack.push(sample_id);
+
+        sample_id
+    }
+
+    fn end_sample(&mut self, sample_id: u64) {
+        if !self.enabled || sample_id == 0 {
+            return;
+        }
+
+        if let Some(mut sample) = self.active_samples.remove(&sample_id) {
+            sample.end_time = current_time_us();
+
+            // Remove from stack
+            if let Some(pos) = self.sample_stack.iter().rposition(|&id| id == sample_id) {
+                self.sample_stack.remove(pos);
+            }
+
+            // Store sample
+            if self.samples.len() < self.max_samples {
+                self.samples.push(sample);
+            }
+        }
+    }
+
+    fn add_sample_metadata(&mut self, sample_id: u64, key: &str, value: &str) {
+        if let Some(sample) = self.active_samples.get_mut(&sample_id) {
+            sample.metadata.insert(key.to_string(), value.to_string());
+        }
+    }
+
+    fn average_frame_time_ms(&self) -> f64 {
+        if self.frame_times.is_empty() {
+            return 0.0;
+        }
+        let sum: u64 = self.frame_times.iter().sum();
+        (sum as f64 / self.frame_times.len() as f64) / 1000.0
+    }
+
+    fn fps(&self) -> f64 {
+        let avg_ms = self.average_frame_time_ms();
+        if avg_ms > 0.0 {
+            1000.0 / avg_ms
+        } else {
+            0.0
+        }
+    }
+
+    fn get_samples(&self) -> &[ProfileSample] {
+        &self.samples
+    }
+
+    fn get_samples_by_category(&self, category: &str) -> Vec<&ProfileSample> {
+        self.samples.iter()
+            .filter(|s| s.category == category)
+            .collect()
+    }
+
+    fn get_hotspots(&self, limit: usize) -> Vec<(&str, u64, u32)> {
+        let mut aggregate: HashMap<&str, (u64, u32)> = HashMap::new();
+
+        for sample in &self.samples {
+            let entry = aggregate.entry(&sample.name).or_insert((0, 0));
+            entry.0 += sample.duration_us();
+            entry.1 += 1;
+        }
+
+        let mut hotspots: Vec<_> = aggregate.into_iter()
+            .map(|(name, (time, count))| (name, time, count))
+            .collect();
+
+        hotspots.sort_by(|a, b| b.1.cmp(&a.1));
+        hotspots.truncate(limit);
+
+        hotspots
+    }
+
+    fn clear(&mut self) {
+        self.samples.clear();
+        self.active_samples.clear();
+        self.sample_stack.clear();
+    }
+
+    fn export_chrome_trace(&self) -> String {
+        let mut events = Vec::new();
+
+        for sample in &self.samples {
+            events.push(format!(
+                r#"{{"name":"{}","cat":"{}","ph":"X","ts":{},"dur":{},"pid":1,"tid":{}}}"#,
+                sample.name,
+                sample.category,
+                sample.start_time,
+                sample.duration_us(),
+                sample.thread_id
+            ));
+        }
+
+        format!("[{}]", events.join(","))
+    }
+}
+
+/// RAII profiling scope guard
+struct ProfileScope<'a> {
+    profiler: &'a mut Profiler,
+    sample_id: u64,
+}
+
+impl<'a> ProfileScope<'a> {
+    fn new(profiler: &'a mut Profiler, name: &str, category: &str) -> Self {
+        let sample_id = profiler.begin_sample(name, category);
+        ProfileScope { profiler, sample_id }
+    }
+}
+
+impl<'a> Drop for ProfileScope<'a> {
+    fn drop(&mut self) {
+        self.profiler.end_sample(self.sample_id);
+    }
+}
+
+// ============================================================================
+// REGION: Memory Tracker
+// ============================================================================
+
+/// Memory allocation tracking
+@derive(Debug)]
+struct MemoryTracker {
+    enabled: bool,
+    allocations: HashMap<u64, AllocationInfo>,
+    total_allocated: u64,
+    peak_allocated: u64,
+    allocation_count: u64,
+    deallocation_count: u64,
+    category_usage: HashMap<String, u64>,
+}
+
+@derive(Debug, Clone)]
+struct AllocationInfo {
+    address: u64,
+    size: u64,
+    category: String,
+    timestamp: u64,
+    stack_trace: Option<Vec<StackFrame>>,
+}
+
+impl MemoryTracker {
+    fn new() -> Self {
+        MemoryTracker {
+            enabled: true,
+            allocations: HashMap::new(),
+            total_allocated: 0,
+            peak_allocated: 0,
+            allocation_count: 0,
+            deallocation_count: 0,
+            category_usage: HashMap::new(),
+        }
+    }
+
+    fn track_alloc(&mut self, address: u64, size: u64, category: &str) {
+        if !self.enabled {
+            return;
+        }
+
+        let info = AllocationInfo {
+            address,
+            size,
+            category: category.to_string(),
+            timestamp: current_time_ms(),
+            stack_trace: None,
+        };
+
+        self.allocations.insert(address, info);
+        self.total_allocated += size;
+        self.allocation_count += 1;
+
+        if self.total_allocated > self.peak_allocated {
+            self.peak_allocated = self.total_allocated;
+        }
+
+        *self.category_usage.entry(category.to_string()).or_insert(0) += size;
+    }
+
+    fn track_free(&mut self, address: u64) {
+        if !self.enabled {
+            return;
+        }
+
+        if let Some(info) = self.allocations.remove(&address) {
+            self.total_allocated -= info.size;
+            self.deallocation_count += 1;
+
+            if let Some(usage) = self.category_usage.get_mut(&info.category) {
+                *usage = usage.saturating_sub(info.size);
+            }
+        }
+    }
+
+    fn track_realloc(&mut self, old_address: u64, new_address: u64, new_size: u64) {
+        if let Some(old_info) = self.allocations.remove(&old_address) {
+            self.total_allocated -= old_info.size;
+            self.total_allocated += new_size;
+
+            let new_info = AllocationInfo {
+                address: new_address,
+                size: new_size,
+                category: old_info.category.clone(),
+                timestamp: current_time_ms(),
+                stack_trace: None,
+            };
+
+            self.allocations.insert(new_address, new_info);
+
+            if self.total_allocated > self.peak_allocated {
+                self.peak_allocated = self.total_allocated;
+            }
+        }
+    }
+
+    fn get_allocated(&self) -> u64 {
+        self.total_allocated
+    }
+
+    fn get_peak(&self) -> u64 {
+        self.peak_allocated
+    }
+
+    fn get_allocation_count(&self) -> u64 {
+        self.allocation_count
+    }
+
+    fn get_category_usage(&self, category: &str) -> u64 {
+        self.category_usage.get(category).copied().unwrap_or(0)
+    }
+
+    fn detect_leaks(&self) -> Vec<&AllocationInfo> {
+        self.allocations.values().collect()
+    }
+
+    fn get_largest_allocations(&self, limit: usize) -> Vec<&AllocationInfo> {
+        let mut allocs: Vec<_> = self.allocations.values().collect();
+        allocs.sort_by(|a, b| b.size.cmp(&a.size));
+        allocs.truncate(limit);
+        allocs
+    }
+
+    fn format_size(bytes: u64) -> String {
+        if bytes >= 1024 * 1024 * 1024 {
+            format!("{:.2} GB", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
+        } else if bytes >= 1024 * 1024 {
+            format!("{:.2} MB", bytes as f64 / (1024.0 * 1024.0))
+        } else if bytes >= 1024 {
+            format!("{:.2} KB", bytes as f64 / 1024.0)
+        } else {
+            format!("{} B", bytes)
+        }
+    }
+
+    fn report(&self) -> String {
+        let mut report = String::new();
+
+        report.push_str("=== Memory Report ===\n");
+        report.push_str(&format!("Current Allocated: {}\n", Self::format_size(self.total_allocated)));
+        report.push_str(&format!("Peak Allocated: {}\n", Self::format_size(self.peak_allocated)));
+        report.push_str(&format!("Total Allocations: {}\n", self.allocation_count));
+        report.push_str(&format!("Total Deallocations: {}\n", self.deallocation_count));
+        report.push_str(&format!("Active Allocations: {}\n", self.allocations.len()));
+
+        report.push_str("\nCategory Usage:\n");
+        let mut categories: Vec<_> = self.category_usage.iter().collect();
+        categories.sort_by(|a, b| b.1.cmp(a.1));
+        for (category, usage) in categories {
+            report.push_str(&format!("  {}: {}\n", category, Self::format_size(*usage)));
+        }
+
+        report
+    }
+}
+
+// ============================================================================
+// REGION: Performance Metrics
+// ============================================================================
+
+/// Performance metrics collection
+@derive(Debug)]
+struct PerformanceMetrics {
+    metrics: HashMap<String, MetricValue>,
+    history: HashMap<String, VecDeque<(u64, f64)>>,
+    history_size: usize,
+}
+
+@derive(Debug, Clone)]
+enum MetricValue {
+    Counter(u64),
+    Gauge(f64),
+    Histogram(Vec<f64>),
+    Timer { count: u64, total_ms: f64, min_ms: f64, max_ms: f64 },
+}
+
+impl PerformanceMetrics {
+    fn new() -> Self {
+        PerformanceMetrics {
+            metrics: HashMap::new(),
+            history: HashMap::new(),
+            history_size: 1000,
+        }
+    }
+
+    fn increment(&mut self, name: &str) {
+        match self.metrics.get_mut(name) {
+            Some(MetricValue::Counter(ref mut c)) => *c += 1,
+            _ => { self.metrics.insert(name.to_string(), MetricValue::Counter(1)); }
+        }
+    }
+
+    fn add(&mut self, name: &str, value: u64) {
+        match self.metrics.get_mut(name) {
+            Some(MetricValue::Counter(ref mut c)) => *c += value,
+            _ => { self.metrics.insert(name.to_string(), MetricValue::Counter(value)); }
+        }
+    }
+
+    fn set_gauge(&mut self, name: &str, value: f64) {
+        self.metrics.insert(name.to_string(), MetricValue::Gauge(value));
+        self.record_history(name, value);
+    }
+
+    fn record_time(&mut self, name: &str, duration_ms: f64) {
+        match self.metrics.get_mut(name) {
+            Some(MetricValue::Timer { count, total_ms, min_ms, max_ms }) => {
+                *count += 1;
+                *total_ms += duration_ms;
+                if duration_ms < *min_ms { *min_ms = duration_ms; }
+                if duration_ms > *max_ms { *max_ms = duration_ms; }
+            }
+            _ => {
+                self.metrics.insert(name.to_string(), MetricValue::Timer {
+                    count: 1,
+                    total_ms: duration_ms,
+                    min_ms: duration_ms,
+                    max_ms: duration_ms,
+                });
+            }
+        }
+    }
+
+    fn record_histogram(&mut self, name: &str, value: f64) {
+        match self.metrics.get_mut(name) {
+            Some(MetricValue::Histogram(ref mut values)) => {
+                values.push(value);
+            }
+            _ => {
+                self.metrics.insert(name.to_string(), MetricValue::Histogram(vec![value]));
+            }
+        }
+    }
+
+    fn record_history(&mut self, name: &str, value: f64) {
+        let history = self.history.entry(name.to_string())
+            .or_insert_with(|| VecDeque::with_capacity(self.history_size));
+
+        history.push_back((current_time_ms(), value));
+
+        while history.len() > self.history_size {
+            history.pop_front();
+        }
+    }
+
+    fn get(&self, name: &str) -> Option<&MetricValue> {
+        self.metrics.get(name)
+    }
+
+    fn get_counter(&self, name: &str) -> u64 {
+        match self.metrics.get(name) {
+            Some(MetricValue::Counter(c)) => *c,
+            _ => 0,
+        }
+    }
+
+    fn get_gauge(&self, name: &str) -> f64 {
+        match self.metrics.get(name) {
+            Some(MetricValue::Gauge(g)) => *g,
+            _ => 0.0,
+        }
+    }
+
+    fn get_timer_avg(&self, name: &str) -> f64 {
+        match self.metrics.get(name) {
+            Some(MetricValue::Timer { count, total_ms, .. }) if *count > 0 => {
+                *total_ms / *count as f64
+            }
+            _ => 0.0,
+        }
+    }
+
+    fn get_history(&self, name: &str) -> Option<&VecDeque<(u64, f64)>> {
+        self.history.get(name)
+    }
+
+    fn clear(&mut self) {
+        self.metrics.clear();
+        self.history.clear();
+    }
+}
+
+// ============================================================================
+// REGION: Debug Console
+// ============================================================================
+
+/// In-game debug console
+@derive(Debug)]
+struct DebugConsole {
+    visible: bool,
+    command_history: Vec<String>,
+    history_index: usize,
+    current_input: String,
+    output_lines: VecDeque<ConsoleLine>,
+    max_output_lines: usize,
+    commands: HashMap<String, ConsoleCommand>,
+    variables: HashMap<String, String>,
+}
+
+@derive(Debug, Clone)]
+struct ConsoleLine {
+    text: String,
+    color: ConsoleColor,
+    timestamp: u64,
+}
+
+@derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConsoleColor {
+    White,
+    Gray,
+    Red,
+    Yellow,
+    Green,
+    Cyan,
+    Blue,
+}
+
+type ConsoleCommand = Box<dyn Fn(&[&str]) -> String>;
+
+impl DebugConsole {
+    fn new() -> Self {
+        let mut console = DebugConsole {
+            visible: false,
+            command_history: Vec::new(),
+            history_index: 0,
+            current_input: String::new(),
+            output_lines: VecDeque::with_capacity(1000),
+            max_output_lines: 1000,
+            commands: HashMap::new(),
+            variables: HashMap::new(),
+        };
+
+        console.register_builtin_commands();
+        console
+    }
+
+    fn register_builtin_commands(&mut self) {
+        self.register("help", Box::new(|_args| {
+            "Available commands: help, clear, echo, set, get, list".to_string()
+        }));
+
+        self.register("clear", Box::new(|_args| {
+            "".to_string() // Console clears output
+        }));
+
+        self.register("echo", Box::new(|args| {
+            args.join(" ")
+        }));
+    }
+
+    fn register(&mut self, name: &str, command: ConsoleCommand) {
+        self.commands.insert(name.to_string(), command);
+    }
+
+    fn toggle(&mut self) {
+        self.visible = !self.visible;
+    }
+
+    fn print(&mut self, text: &str) {
+        self.print_colored(text, ConsoleColor::White);
+    }
+
+    fn print_colored(&mut self, text: &str, color: ConsoleColor) {
+        self.output_lines.push_back(ConsoleLine {
+            text: text.to_string(),
+            color,
+            timestamp: current_time_ms(),
+        });
+
+        while self.output_lines.len() > self.max_output_lines {
+            self.output_lines.pop_front();
+        }
+    }
+
+    fn error(&mut self, text: &str) {
+        self.print_colored(&format!("Error: {}", text), ConsoleColor::Red);
+    }
+
+    fn warning(&mut self, text: &str) {
+        self.print_colored(&format!("Warning: {}", text), ConsoleColor::Yellow);
+    }
+
+    fn success(&mut self, text: &str) {
+        self.print_colored(text, ConsoleColor::Green);
+    }
+
+    fn execute(&mut self, input: &str) {
+        let input = input.trim();
+        if input.is_empty() {
+            return;
+        }
+
+        // Add to history
+        self.command_history.push(input.to_string());
+        self.history_index = self.command_history.len();
+
+        // Parse command
+        let parts: Vec<&str> = input.split_whitespace().collect();
+        let command_name = parts[0];
+        let args = &parts[1..];
+
+        // Echo the command
+        self.print_colored(&format!("> {}", input), ConsoleColor::Gray);
+
+        // Execute
+        if let Some(command) = self.commands.get(command_name) {
+            let output = command(args);
+            if !output.is_empty() {
+                self.print(&output);
+            }
+
+            if command_name == "clear" {
+                self.output_lines.clear();
+            }
+        } else {
+            self.error(&format!("Unknown command: {}", command_name));
+        }
+    }
+
+    fn set_variable(&mut self, name: &str, value: &str) {
+        self.variables.insert(name.to_string(), value.to_string());
+    }
+
+    fn get_variable(&self, name: &str) -> Option<&str> {
+        self.variables.get(name).map(|s| s.as_str())
+    }
+
+    fn history_up(&mut self) {
+        if self.history_index > 0 {
+            self.history_index -= 1;
+            self.current_input = self.command_history[self.history_index].clone();
+        }
+    }
+
+    fn history_down(&mut self) {
+        if self.history_index < self.command_history.len() {
+            self.history_index += 1;
+            if self.history_index == self.command_history.len() {
+                self.current_input.clear();
+            } else {
+                self.current_input = self.command_history[self.history_index].clone();
+            }
+        }
+    }
+
+    fn autocomplete(&self, partial: &str) -> Vec<&str> {
+        self.commands.keys()
+            .filter(|name| name.starts_with(partial))
+            .map(|s| s.as_str())
+            .collect()
+    }
+}
+
+// ============================================================================
+// REGION: Diagnostics Manager
+// ============================================================================
+
+/// Central diagnostics management
+@derive(Debug)]
+struct DiagnosticsManager {
+    logger: Arc<Mutex<Logger>>,
+    profiler: Profiler,
+    memory_tracker: MemoryTracker,
+    metrics: PerformanceMetrics,
+    console: DebugConsole,
+    mod_diagnostics: HashMap<String, ModDiagnostics>,
+}
+
+@derive(Debug)]
+struct ModDiagnostics {
+    mod_id: String,
+    load_time_ms: f64,
+    init_time_ms: f64,
+    frame_time_ms: f64,
+    memory_usage: u64,
+    error_count: u64,
+    warning_count: u64,
+}
+
+impl DiagnosticsManager {
+    fn new(logger_config: LoggerConfig) -> Self {
+        DiagnosticsManager {
+            logger: Arc::new(Mutex::new(Logger::new(logger_config))),
+            profiler: Profiler::new(),
+            memory_tracker: MemoryTracker::new(),
+            metrics: PerformanceMetrics::new(),
+            console: DebugConsole::new(),
+            mod_diagnostics: HashMap::new(),
+        }
+    }
+
+    fn get_logger(&self) -> Arc<Mutex<Logger>> {
+        Arc::clone(&self.logger)
+    }
+
+    fn create_mod_logger(&self, mod_id: &str) -> ModLogger {
+        ModLogger::new(mod_id, Arc::clone(&self.logger))
+    }
+
+    fn register_mod(&mut self, mod_id: &str) {
+        self.mod_diagnostics.insert(mod_id.to_string(), ModDiagnostics {
+            mod_id: mod_id.to_string(),
+            load_time_ms: 0.0,
+            init_time_ms: 0.0,
+            frame_time_ms: 0.0,
+            memory_usage: 0,
+            error_count: 0,
+            warning_count: 0,
+        });
+    }
+
+    fn update_mod_diagnostics(&mut self, mod_id: &str, update: impl FnOnce(&mut ModDiagnostics)) {
+        if let Some(diag) = self.mod_diagnostics.get_mut(mod_id) {
+            update(diag);
+        }
+    }
+
+    fn get_mod_diagnostics(&self, mod_id: &str) -> Option<&ModDiagnostics> {
+        self.mod_diagnostics.get(mod_id)
+    }
+
+    fn generate_report(&self) -> String {
+        let mut report = String::new();
+
+        report.push_str("=== NEXUS DIAGNOSTICS REPORT ===\n\n");
+
+        // Performance
+        report.push_str(&format!("FPS: {:.1}\n", self.profiler.fps()));
+        report.push_str(&format!("Frame Time: {:.2}ms\n", self.profiler.average_frame_time_ms()));
+
+        // Memory
+        report.push_str(&format!("\n{}", self.memory_tracker.report()));
+
+        // Hotspots
+        report.push_str("\nTop Hotspots:\n");
+        for (name, time, count) in self.profiler.get_hotspots(10) {
+            report.push_str(&format!("  {}: {:.2}ms ({} calls)\n", name, time as f64 / 1000.0, count));
+        }
+
+        // Per-mod stats
+        report.push_str("\nMod Statistics:\n");
+        for diag in self.mod_diagnostics.values() {
+            report.push_str(&format!(
+                "  {}: load={:.1}ms, init={:.1}ms, frame={:.2}ms, mem={}, errors={}\n",
+                diag.mod_id,
+                diag.load_time_ms,
+                diag.init_time_ms,
+                diag.frame_time_ms,
+                MemoryTracker::format_size(diag.memory_usage),
+                diag.error_count
+            ));
+        }
+
+        report
+    }
+}
+
+// ============================================================================
+// REGION: Helper Functions
+// ============================================================================
+
+fn current_time_ms() -> u64 { 0 }
+fn current_time_us() -> u64 { 0 }
+fn current_thread_id() -> u64 { 0 }
+
+fn format_timestamp(ms: u64) -> String {
+    let secs = ms / 1000;
+    let millis = ms % 1000;
+    let mins = secs / 60;
+    let hours = mins / 60;
+    format!("{:02}:{:02}:{:02}.{:03}", hours % 24, mins % 60, secs % 60, millis)
+}
+
+// Thread-safe wrapper types (stubs)
+struct Arc<T>(T);
+impl<T> Arc<T> {
+    fn new(value: T) -> Self { Arc(value) }
+    fn clone(this: &Self) -> Self where T: Clone { Arc(this.0.clone()) }
+}
+struct Mutex<T>(T);
+impl<T> Mutex<T> {
+    fn new(value: T) -> Self { Mutex(value) }
+    fn lock(&self) -> Result<&mut T, ()> { Err(()) }
+}
+struct VecDeque<T>(Vec<T>);
+impl<T> VecDeque<T> {
+    fn with_capacity(cap: usize) -> Self { VecDeque(Vec::with_capacity(cap)) }
+    fn new() -> Self { VecDeque(Vec::new()) }
+    fn push_back(&mut self, value: T) { self.0.push(value); }
+    fn pop_front(&mut self) -> Option<T> { if self.0.is_empty() { None } else { Some(self.0.remove(0)) } }
+    fn len(&self) -> usize { self.0.len() }
+    fn is_empty(&self) -> bool { self.0.is_empty() }
+    fn iter(&self) -> impl Iterator<Item = &T> { self.0.iter() }
+    fn clear(&mut self) { self.0.clear(); }
+}
+
+// ============================================================================
+// REGION: Unit Tests
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_log_levels() {
+        assert!(LogLevel::Error > LogLevel::Warn);
+        assert!(LogLevel::Warn > LogLevel::Info);
+        assert!(LogLevel::Info > LogLevel::Debug);
+        assert!(LogLevel::Debug > LogLevel::Trace);
+
+        assert_eq!(LogLevel::from_str("INFO"), Some(LogLevel::Info));
+        assert_eq!(LogLevel::from_str("error"), Some(LogLevel::Error));
+    }
+
+    #[test]
+    fn test_log_entry() {
+        let entry = LogEntry::new(LogLevel::Info, "test", "Hello World")
+            .with_mod("my_mod")
+            .with_source("main.qscript", 42);
+
+        assert_eq!(entry.level, LogLevel::Info);
+        assert_eq!(entry.category, "test");
+        assert_eq!(entry.mod_id, Some("my_mod".to_string()));
+        assert_eq!(entry.line, Some(42));
+    }
+
+    #[test]
+    fn test_logger_config() {
+        let debug = LoggerConfig::debug();
+        assert_eq!(debug.min_level, LogLevel::Debug);
+        assert!(debug.source_location);
+
+        let release = LoggerConfig::release();
+        assert_eq!(release.min_level, LogLevel::Warn);
+        assert!(!release.console_output);
+    }
+
+    #[test]
+    fn test_profiler() {
+        let mut profiler = Profiler::new();
+
+        let sample_id = profiler.begin_sample("test_function", "core");
+        assert_ne!(sample_id, 0);
+
+        profiler.end_sample(sample_id);
+
+        assert_eq!(profiler.samples.len(), 1);
+        assert_eq!(profiler.samples[0].name, "test_function");
+    }
+
+    #[test]
+    fn test_memory_tracker() {
+        let mut tracker = MemoryTracker::new();
+
+        tracker.track_alloc(0x1000, 1024, "textures");
+        assert_eq!(tracker.get_allocated(), 1024);
+        assert_eq!(tracker.get_category_usage("textures"), 1024);
+
+        tracker.track_free(0x1000);
+        assert_eq!(tracker.get_allocated(), 0);
+    }
+
+    #[test]
+    fn test_performance_metrics() {
+        let mut metrics = PerformanceMetrics::new();
+
+        metrics.increment("frame_count");
+        metrics.increment("frame_count");
+        assert_eq!(metrics.get_counter("frame_count"), 2);
+
+        metrics.set_gauge("fps", 60.0);
+        assert!((metrics.get_gauge("fps") - 60.0).abs() < 0.001);
+
+        metrics.record_time("render", 16.5);
+        metrics.record_time("render", 17.5);
+        assert!((metrics.get_timer_avg("render") - 17.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_debug_console() {
+        let mut console = DebugConsole::new();
+
+        console.print("Hello World");
+        assert_eq!(console.output_lines.len(), 1);
+
+        console.error("Something went wrong");
+        assert_eq!(console.output_lines.len(), 2);
+    }
+
+    #[test]
+    fn test_format_size() {
+        assert_eq!(MemoryTracker::format_size(512), "512 B");
+        assert_eq!(MemoryTracker::format_size(1024), "1.00 KB");
+        assert_eq!(MemoryTracker::format_size(1048576), "1.00 MB");
+        assert_eq!(MemoryTracker::format_size(1073741824), "1.00 GB");
+    }
+
+    #[test]
+    fn test_format_timestamp() {
+        assert_eq!(format_timestamp(0), "00:00:00.000");
+        assert_eq!(format_timestamp(3661500), "01:01:01.500");
+    }
+}

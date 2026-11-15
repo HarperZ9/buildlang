@@ -1,0 +1,734 @@
+// BUILD Standard Library - Encoding Module
+// Copyright (c) 2024 BUILD Language Project
+// Binary and text encoding/decoding utilities
+
+module foundation::encoding;
+
+use foundation::core::*;
+
+// ============================================================================
+// HEX ENCODING
+// ============================================================================
+
+pub mod hex {
+    const HEX_CHARS: &[u8] = b"0123456789abcdef";
+    const HEX_CHARS_UPPER: &[u8] = b"0123456789ABCDEF";
+
+    /// Encode bytes to lowercase hex string
+    pub fn encode(data: &[u8]) -> String {
+        let mut result = String::with_capacity(data.len() * 2);
+        for byte in data {
+            result.push(HEX_CHARS[(byte >> 4) as usize] as char);
+            result.push(HEX_CHARS[(byte & 0xf) as usize] as char);
+        }
+        result
+    }
+
+    /// Encode bytes to uppercase hex string
+    pub fn encode_upper(data: &[u8]) -> String {
+        let mut result = String::with_capacity(data.len() * 2);
+        for byte in data {
+            result.push(HEX_CHARS_UPPER[(byte >> 4) as usize] as char);
+            result.push(HEX_CHARS_UPPER[(byte & 0xf) as usize] as char);
+        }
+        result
+    }
+
+    /// Decode hex string to bytes
+    pub fn decode(s: &str) -> Result<Vec<u8>, DecodeError> {
+        if s.len() % 2 != 0 {
+            return Err(DecodeError::InvalidLength);
+        }
+
+        let mut result = Vec::with_capacity(s.len() / 2);
+        let bytes = s.as_bytes();
+
+        for i in (0..bytes.len()).step_by(2) {
+            let high = hex_char_to_nibble(bytes[i])?;
+            let low = hex_char_to_nibble(bytes[i + 1])?;
+            result.push((high << 4) | low);
+        }
+
+        Ok(result)
+    }
+
+    fn hex_char_to_nibble(c: u8) -> Result<u8, DecodeError> {
+        match c {
+            b'0'..=b'9' => Ok(c - b'0'),
+            b'a'..=b'f' => Ok(c - b'a' + 10),
+            b'A'..=b'F' => Ok(c - b'A' + 10),
+            _ => Err(DecodeError::InvalidChar(c as char)),
+        }
+    }
+
+    /// Check if string is valid hex
+    pub fn is_valid(s: &str) -> bool {
+        s.len() % 2 == 0 && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f' | b'A'..=b'F'))
+    }
+}
+
+// ============================================================================
+// BASE64 ENCODING (RFC 4648)
+// ============================================================================
+
+pub mod base64 {
+    const STANDARD: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const URL_SAFE: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+
+    #[derive(Clone, Copy)]
+    pub enum Variant {
+        Standard,
+        UrlSafe,
+    }
+
+    /// Encode bytes to base64 with padding
+    pub fn encode(data: &[u8]) -> String {
+        encode_config(data, Variant::Standard, true)
+    }
+
+    /// Encode bytes to base64 without padding
+    pub fn encode_no_pad(data: &[u8]) -> String {
+        encode_config(data, Variant::Standard, false)
+    }
+
+    /// Encode bytes to URL-safe base64
+    pub fn encode_url_safe(data: &[u8]) -> String {
+        encode_config(data, Variant::UrlSafe, false)
+    }
+
+    /// Encode with configuration
+    pub fn encode_config(data: &[u8], variant: Variant, pad: bool) -> String {
+        let alphabet = match variant {
+            Variant::Standard => STANDARD,
+            Variant::UrlSafe => URL_SAFE,
+        };
+
+        let mut result = String::with_capacity((data.len() + 2) / 3 * 4);
+
+        for chunk in data.chunks(3) {
+            let n = match chunk.len() {
+                3 => ((chunk[0] as u32) << 16) | ((chunk[1] as u32) << 8) | (chunk[2] as u32),
+                2 => ((chunk[0] as u32) << 16) | ((chunk[1] as u32) << 8),
+                1 => (chunk[0] as u32) << 16,
+                _ => unreachable!(),
+            };
+
+            result.push(alphabet[((n >> 18) & 0x3F) as usize] as char);
+            result.push(alphabet[((n >> 12) & 0x3F) as usize] as char);
+
+            if chunk.len() > 1 {
+                result.push(alphabet[((n >> 6) & 0x3F) as usize] as char);
+            } else if pad {
+                result.push('=');
+            }
+
+            if chunk.len() > 2 {
+                result.push(alphabet[(n & 0x3F) as usize] as char);
+            } else if pad {
+                result.push('=');
+            }
+        }
+
+        result
+    }
+
+    /// Decode base64 string
+    pub fn decode(s: &str) -> Result<Vec<u8>, DecodeError> {
+        decode_config(s, Variant::Standard)
+    }
+
+    /// Decode URL-safe base64 string
+    pub fn decode_url_safe(s: &str) -> Result<Vec<u8>, DecodeError> {
+        decode_config(s, Variant::UrlSafe)
+    }
+
+    /// Decode with configuration
+    pub fn decode_config(s: &str, variant: Variant) -> Result<Vec<u8>, DecodeError> {
+        let s = s.trim_end_matches('=');
+        if s.is_empty() { return Ok(Vec::new()); }
+
+        let decode_char = |c: u8| -> Result<u8, DecodeError> {
+            match variant {
+                Variant::Standard => match c {
+                    b'A'..=b'Z' => Ok(c - b'A'),
+                    b'a'..=b'z' => Ok(c - b'a' + 26),
+                    b'0'..=b'9' => Ok(c - b'0' + 52),
+                    b'+' => Ok(62),
+                    b'/' => Ok(63),
+                    _ => Err(DecodeError::InvalidChar(c as char)),
+                },
+                Variant::UrlSafe => match c {
+                    b'A'..=b'Z' => Ok(c - b'A'),
+                    b'a'..=b'z' => Ok(c - b'a' + 26),
+                    b'0'..=b'9' => Ok(c - b'0' + 52),
+                    b'-' => Ok(62),
+                    b'_' => Ok(63),
+                    _ => Err(DecodeError::InvalidChar(c as char)),
+                },
+            }
+        };
+
+        let bytes = s.as_bytes();
+        let mut result = Vec::with_capacity(bytes.len() * 3 / 4);
+
+        for chunk in bytes.chunks(4) {
+            let mut n = 0u32;
+            for (i, &c) in chunk.iter().enumerate() {
+                n |= (decode_char(c)? as u32) << (18 - i * 6);
+            }
+
+            result.push((n >> 16) as u8);
+            if chunk.len() > 2 { result.push((n >> 8) as u8); }
+            if chunk.len() > 3 { result.push(n as u8); }
+        }
+
+        Ok(result)
+    }
+}
+
+// ============================================================================
+// BASE32 ENCODING (RFC 4648)
+// ============================================================================
+
+pub mod base32 {
+    const STANDARD: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+    const HEX: &[u8] = b"0123456789ABCDEFGHIJKLMNOPQRSTUV";
+
+    #[derive(Clone, Copy)]
+    pub enum Variant { Standard, Hex }
+
+    /// Encode bytes to base32
+    pub fn encode(data: &[u8]) -> String {
+        encode_config(data, Variant::Standard, true)
+    }
+
+    pub fn encode_config(data: &[u8], variant: Variant, pad: bool) -> String {
+        let alphabet = match variant {
+            Variant::Standard => STANDARD,
+            Variant::Hex => HEX,
+        };
+
+        let mut result = String::new();
+        let mut buffer = 0u64;
+        let mut bits = 0;
+
+        for &byte in data {
+            buffer = (buffer << 8) | (byte as u64);
+            bits += 8;
+
+            while bits >= 5 {
+                bits -= 5;
+                result.push(alphabet[((buffer >> bits) & 0x1F) as usize] as char);
+            }
+        }
+
+        if bits > 0 {
+            result.push(alphabet[((buffer << (5 - bits)) & 0x1F) as usize] as char);
+        }
+
+        if pad {
+            while result.len() % 8 != 0 { result.push('='); }
+        }
+
+        result
+    }
+
+    /// Decode base32 string
+    pub fn decode(s: &str) -> Result<Vec<u8>, DecodeError> {
+        decode_config(s, Variant::Standard)
+    }
+
+    pub fn decode_config(s: &str, variant: Variant) -> Result<Vec<u8>, DecodeError> {
+        let s = s.trim_end_matches('=').to_uppercase();
+        if s.is_empty() { return Ok(Vec::new()); }
+
+        let decode_char = |c: u8| -> Result<u8, DecodeError> {
+            match variant {
+                Variant::Standard => match c {
+                    b'A'..=b'Z' => Ok(c - b'A'),
+                    b'2'..=b'7' => Ok(c - b'2' + 26),
+                    _ => Err(DecodeError::InvalidChar(c as char)),
+                },
+                Variant::Hex => match c {
+                    b'0'..=b'9' => Ok(c - b'0'),
+                    b'A'..=b'V' => Ok(c - b'A' + 10),
+                    _ => Err(DecodeError::InvalidChar(c as char)),
+                },
+            }
+        };
+
+        let mut result = Vec::new();
+        let mut buffer = 0u64;
+        let mut bits = 0;
+
+        for c in s.bytes() {
+            buffer = (buffer << 5) | (decode_char(c)? as u64);
+            bits += 5;
+
+            if bits >= 8 {
+                bits -= 8;
+                result.push((buffer >> bits) as u8);
+            }
+        }
+
+        Ok(result)
+    }
+}
+
+// ============================================================================
+// ASCII85 / BASE85 ENCODING
+// ============================================================================
+
+pub mod ascii85 {
+    /// Encode bytes to Ascii85
+    pub fn encode(data: &[u8]) -> String {
+        let mut result = String::new();
+        result.push_str("<~");
+
+        for chunk in data.chunks(4) {
+            let mut n = 0u32;
+            for (i, &byte) in chunk.iter().enumerate() {
+                n |= (byte as u32) << (24 - i * 8);
+            }
+
+            if chunk.len() == 4 && n == 0 {
+                result.push('z');
+            } else {
+                let mut chars = [0u8; 5];
+                for i in (0..5).rev() {
+                    chars[i] = (n % 85) as u8 + 33;
+                    n /= 85;
+                }
+
+                for i in 0..(chunk.len() + 1) {
+                    result.push(chars[i] as char);
+                }
+            }
+        }
+
+        result.push_str("~>");
+        result
+    }
+
+    /// Decode Ascii85 string
+    pub fn decode(s: &str) -> Result<Vec<u8>, DecodeError> {
+        let s = s.trim();
+        let s = if s.starts_with("<~") && s.ends_with("~>") {
+            &s[2..s.len()-2]
+        } else {
+            s
+        };
+
+        let mut result = Vec::new();
+        let mut group = [0u8; 5];
+        let mut count = 0;
+
+        for c in s.bytes() {
+            if c == b' ' || c == b'\n' || c == b'\r' || c == b'\t' {
+                continue;
+            }
+
+            if c == b'z' {
+                if count != 0 { return Err(DecodeError::InvalidFormat); }
+                result.extend_from_slice(&[0, 0, 0, 0]);
+            } else if c >= 33 && c <= 117 {
+                group[count] = c - 33;
+                count += 1;
+
+                if count == 5 {
+                    let n = group.iter().fold(0u32, |acc, &x| acc * 85 + x as u32);
+                    result.push((n >> 24) as u8);
+                    result.push((n >> 16) as u8);
+                    result.push((n >> 8) as u8);
+                    result.push(n as u8);
+                    count = 0;
+                }
+            } else {
+                return Err(DecodeError::InvalidChar(c as char));
+            }
+        }
+
+        if count > 0 {
+            for i in count..5 { group[i] = 84; }
+            let n = group.iter().fold(0u32, |acc, &x| acc * 85 + x as u32);
+            for i in 0..(count - 1) {
+                result.push((n >> (24 - i * 8)) as u8);
+            }
+        }
+
+        Ok(result)
+    }
+}
+
+// ============================================================================
+// PERCENT ENCODING (URL encoding)
+// ============================================================================
+
+pub mod percent {
+    /// Characters that don't need encoding in URLs
+    fn is_unreserved(c: u8) -> bool {
+        c.is_ascii_alphanumeric() || c == b'-' || c == b'_' || c == b'.' || c == b'~'
+    }
+
+    /// Encode for use in URL path
+    pub fn encode_path(s: &str) -> String {
+        encode_set(s, |c| is_unreserved(c) || c == b'/')
+    }
+
+    /// Encode for use in URL query string
+    pub fn encode_query(s: &str) -> String {
+        encode_set(s, |c| is_unreserved(c))
+    }
+
+    /// Encode with custom set of allowed characters
+    pub fn encode_set<F: Fn(u8) -> bool>(s: &str, allowed: F) -> String {
+        let mut result = String::with_capacity(s.len());
+
+        for byte in s.bytes() {
+            if allowed(byte) {
+                result.push(byte as char);
+            } else {
+                result.push('%');
+                result.push_str(&format!("{:02X}", byte));
+            }
+        }
+
+        result
+    }
+
+    /// Decode percent-encoded string
+    pub fn decode(s: &str) -> Result<String, super::DecodeError> {
+        let mut result = Vec::new();
+        let bytes = s.as_bytes();
+        let mut i = 0;
+
+        while i < bytes.len() {
+            if bytes[i] == b'%' && i + 2 < bytes.len() {
+                let high = super::hex::decode(&s[i+1..i+2]).map_err(|_| super::DecodeError::InvalidFormat)?;
+                let low = super::hex::decode(&s[i+2..i+3]).map_err(|_| super::DecodeError::InvalidFormat)?;
+                result.push((high[0] << 4) | low[0]);
+                i += 3;
+            } else if bytes[i] == b'+' {
+                result.push(b' ');
+                i += 1;
+            } else {
+                result.push(bytes[i]);
+                i += 1;
+            }
+        }
+
+        String::from_utf8(result).map_err(|_| super::DecodeError::InvalidUtf8)
+    }
+}
+
+// ============================================================================
+// PUNYCODE (RFC 3492) - for internationalized domain names
+// ============================================================================
+
+pub mod punycode {
+    const BASE: u32 = 36;
+    const TMIN: u32 = 1;
+    const TMAX: u32 = 26;
+    const SKEW: u32 = 38;
+    const DAMP: u32 = 700;
+    const INITIAL_BIAS: u32 = 72;
+    const INITIAL_N: u32 = 128;
+
+    /// Encode Unicode string to Punycode
+    pub fn encode(input: &str) -> String {
+        let mut output = String::new();
+        let mut basic_count = 0;
+
+        // Copy basic (ASCII) characters
+        for c in input.chars() {
+            if c.is_ascii() {
+                output.push(c);
+                basic_count += 1;
+            }
+        }
+
+        if basic_count > 0 && basic_count < input.chars().count() {
+            output.push('-');
+        }
+
+        let mut n = INITIAL_N;
+        let mut delta = 0u32;
+        let mut bias = INITIAL_BIAS;
+        let mut h = basic_count;
+        let input_len = input.chars().count();
+
+        while h < input_len {
+            let m = input.chars()
+                .filter(|&c| (c as u32) >= n)
+                .map(|c| c as u32)
+                .min()
+                .unwrap();
+
+            delta = delta.wrapping_add((m - n).wrapping_mul((h + 1) as u32));
+            n = m;
+
+            for c in input.chars() {
+                let code = c as u32;
+                if code < n { delta = delta.wrapping_add(1); }
+                if code == n {
+                    let mut q = delta;
+                    let mut k = BASE;
+
+                    loop {
+                        let t = if k <= bias { TMIN }
+                               else if k >= bias + TMAX { TMAX }
+                               else { k - bias };
+
+                        if q < t { break; }
+
+                        output.push(encode_digit(t + (q - t) % (BASE - t)));
+                        q = (q - t) / (BASE - t);
+                        k += BASE;
+                    }
+
+                    output.push(encode_digit(q));
+                    bias = adapt(delta, (h + 1) as u32, h == basic_count);
+                    delta = 0;
+                    h += 1;
+                }
+            }
+
+            delta = delta.wrapping_add(1);
+            n = n.wrapping_add(1);
+        }
+
+        output
+    }
+
+    /// Decode Punycode to Unicode string
+    pub fn decode(input: &str) -> Result<String, super::DecodeError> {
+        let mut output: Vec<char> = Vec::new();
+
+        let (basic, encoded) = match input.rfind('-') {
+            Some(pos) => (&input[..pos], &input[pos+1..]),
+            None => ("", input),
+        };
+
+        for c in basic.chars() {
+            output.push(c);
+        }
+
+        let mut n = INITIAL_N;
+        let mut i = 0u32;
+        let mut bias = INITIAL_BIAS;
+
+        let encoded_chars: Vec<char> = encoded.chars().collect();
+        let mut idx = 0;
+
+        while idx < encoded_chars.len() {
+            let old_i = i;
+            let mut w = 1u32;
+            let mut k = BASE;
+
+            loop {
+                if idx >= encoded_chars.len() {
+                    return Err(super::DecodeError::InvalidFormat);
+                }
+
+                let digit = decode_digit(encoded_chars[idx])
+                    .ok_or(super::DecodeError::InvalidChar(encoded_chars[idx]))?;
+                idx += 1;
+
+                i = i.wrapping_add(digit.wrapping_mul(w));
+
+                let t = if k <= bias { TMIN }
+                       else if k >= bias + TMAX { TMAX }
+                       else { k - bias };
+
+                if digit < t { break; }
+                w = w.wrapping_mul(BASE - t);
+                k += BASE;
+            }
+
+            let len = (output.len() + 1) as u32;
+            bias = adapt(i - old_i, len, old_i == 0);
+            n = n.wrapping_add(i / len);
+            i %= len;
+
+            if let Some(c) = char::from_u32(n) {
+                output.insert(i as usize, c);
+            } else {
+                return Err(super::DecodeError::InvalidFormat);
+            }
+
+            i += 1;
+        }
+
+        Ok(output.into_iter().collect())
+    }
+
+    fn encode_digit(d: u32) -> char {
+        if d < 26 { (b'a' + d as u8) as char }
+        else { (b'0' + (d - 26) as u8) as char }
+    }
+
+    fn decode_digit(c: char) -> Option<u32> {
+        match c {
+            'a'..='z' => Some(c as u32 - 'a' as u32),
+            'A'..='Z' => Some(c as u32 - 'A' as u32),
+            '0'..='9' => Some(c as u32 - '0' as u32 + 26),
+            _ => None,
+        }
+    }
+
+    fn adapt(mut delta: u32, num_points: u32, first_time: bool) -> u32 {
+        delta = if first_time { delta / DAMP } else { delta / 2 };
+        delta += delta / num_points;
+
+        let mut k = 0;
+        while delta > ((BASE - TMIN) * TMAX) / 2 {
+            delta /= BASE - TMIN;
+            k += BASE;
+        }
+
+        k + ((BASE - TMIN + 1) * delta) / (delta + SKEW)
+    }
+}
+
+// ============================================================================
+// QUOTED-PRINTABLE (RFC 2045)
+// ============================================================================
+
+pub mod quoted_printable {
+    /// Encode to quoted-printable
+    pub fn encode(data: &[u8]) -> String {
+        let mut result = String::new();
+        let mut line_len = 0;
+
+        for &byte in data {
+            let encoded = if byte == b' ' || byte == b'\t' {
+                format!("{}", byte as char)
+            } else if byte >= 33 && byte <= 126 && byte != b'=' {
+                format!("{}", byte as char)
+            } else {
+                format!("={:02X}", byte)
+            };
+
+            if line_len + encoded.len() > 75 {
+                result.push_str("=\r\n");
+                line_len = 0;
+            }
+
+            result.push_str(&encoded);
+            line_len += encoded.len();
+        }
+
+        result
+    }
+
+    /// Decode quoted-printable
+    pub fn decode(s: &str) -> Result<Vec<u8>, super::DecodeError> {
+        let mut result = Vec::new();
+        let bytes = s.as_bytes();
+        let mut i = 0;
+
+        while i < bytes.len() {
+            if bytes[i] == b'=' {
+                if i + 2 >= bytes.len() {
+                    // Soft line break
+                    if bytes.get(i + 1) == Some(&b'\r') || bytes.get(i + 1) == Some(&b'\n') {
+                        i += 2;
+                        if i < bytes.len() && bytes[i] == b'\n' { i += 1; }
+                        continue;
+                    }
+                    return Err(super::DecodeError::InvalidFormat);
+                }
+
+                let hex = &s[i+1..i+3];
+                let byte = u8::from_str_radix(hex, 16)
+                    .map_err(|_| super::DecodeError::InvalidFormat)?;
+                result.push(byte);
+                i += 3;
+            } else {
+                result.push(bytes[i]);
+                i += 1;
+            }
+        }
+
+        Ok(result)
+    }
+}
+
+// ============================================================================
+// ERRORS
+// ============================================================================
+
+#[derive(Debug, Clone)]
+pub enum DecodeError {
+    InvalidChar(char),
+    InvalidLength,
+    InvalidFormat,
+    InvalidUtf8,
+}
+
+impl std::fmt::Display for DecodeError {
+    fn fmt(self: &Self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self {
+            DecodeError::InvalidChar(c) => write!(f, "Invalid character: '{}'", c),
+            DecodeError::InvalidLength => write!(f, "Invalid input length"),
+            DecodeError::InvalidFormat => write!(f, "Invalid format"),
+            DecodeError::InvalidUtf8 => write!(f, "Invalid UTF-8"),
+        }
+    }
+}
+
+// ============================================================================
+// TESTS
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_hex() {
+        assert_eq!(hex::encode(b"hello"), "68656c6c6f");
+        assert_eq!(hex::encode_upper(b"hello"), "68656C6C6F");
+        assert_eq!(hex::decode("68656c6c6f").unwrap(), b"hello");
+    }
+
+    #[test]
+    fn test_base64() {
+        assert_eq!(base64::encode(b"hello"), "aGVsbG8=");
+        assert_eq!(base64::encode_no_pad(b"hello"), "aGVsbG8");
+        assert_eq!(base64::decode("aGVsbG8=").unwrap(), b"hello");
+        assert_eq!(base64::decode("aGVsbG8").unwrap(), b"hello");
+    }
+
+    #[test]
+    fn test_base64_url_safe() {
+        assert_eq!(base64::encode_url_safe(b"\xfb\xef\xbe"), "-e--");
+        assert_eq!(base64::decode_url_safe("-e--").unwrap(), b"\xfb\xef\xbe");
+    }
+
+    #[test]
+    fn test_base32() {
+        assert_eq!(base32::encode(b"hello"), "NBSWY3DP");
+        assert_eq!(base32::decode("NBSWY3DP").unwrap(), b"hello");
+    }
+
+    #[test]
+    fn test_ascii85() {
+        let encoded = ascii85::encode(b"hello");
+        assert!(encoded.starts_with("<~") && encoded.ends_with("~>"));
+        assert_eq!(ascii85::decode(&encoded).unwrap(), b"hello");
+    }
+
+    #[test]
+    fn test_percent() {
+        assert_eq!(percent::encode_query("hello world"), "hello%20world");
+        assert_eq!(percent::decode("hello%20world").unwrap(), "hello world");
+    }
+
+    #[test]
+    fn test_punycode() {
+        // "münchen" -> "mnchen-3ya"
+        let encoded = punycode::encode("münchen");
+        assert!(encoded.contains("mnchen"));
+    }
+}

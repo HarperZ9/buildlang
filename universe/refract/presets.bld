@@ -1,0 +1,1643 @@
+// ============================================================================
+// REFRACT: ENB Preset Management System
+// Loading, saving, interpolation, and hot-reloading of ENB presets
+// ============================================================================
+
+import core::io
+import core::collections
+
+// ============================================================================
+// INI FILE PARSING
+// ============================================================================
+
+/// INI file value types
+pub enum IniValue {
+    Int(i64),
+    Float(f64),
+    Bool(bool),
+    String(String),
+    Color(Vec3),
+    ColorAlpha(Vec4),
+    Vector2(Vec2),
+    Vector3(Vec3),
+    Vector4(Vec4),
+    KeyBinding(KeyBinding),
+}
+
+impl IniValue {
+    pub fn as_float(&self) -> Option<f64> {
+        match self {
+            IniValue::Float(v) => Some(*v),
+            IniValue::Int(v) => Some(*v as f64),
+            _ => None
+        }
+    }
+
+    pub fn as_int(&self) -> Option<i64> {
+        match self {
+            IniValue::Int(v) => Some(*v),
+            IniValue::Float(v) => Some(*v as i64),
+            _ => None
+        }
+    }
+
+    pub fn as_bool(&self) -> Option<bool> {
+        match self {
+            IniValue::Bool(v) => Some(*v),
+            IniValue::Int(v) => Some(*v != 0),
+            _ => None
+        }
+    }
+
+    pub fn as_string(&self) -> Option<&str> {
+        match self {
+            IniValue::String(s) => Some(s),
+            _ => None
+        }
+    }
+
+    pub fn as_color(&self) -> Option<Vec3> {
+        match self {
+            IniValue::Color(c) => Some(*c),
+            IniValue::Vector3(v) => Some(*v),
+            _ => None
+        }
+    }
+
+    pub fn as_vec4(&self) -> Option<Vec4> {
+        match self {
+            IniValue::ColorAlpha(c) => Some(*c),
+            IniValue::Vector4(v) => Some(*v),
+            _ => None
+        }
+    }
+
+    /// Lerp between two INI values
+    pub fn lerp(&self, other: &IniValue, t: f32) -> Option<IniValue> {
+        match (self, other) {
+            (IniValue::Float(a), IniValue::Float(b)) => {
+                Some(IniValue::Float(*a + (*b - *a) * t as f64))
+            }
+            (IniValue::Int(a), IniValue::Int(b)) => {
+                Some(IniValue::Int((*a as f64 + (*b - *a) as f64 * t as f64) as i64))
+            }
+            (IniValue::Color(a), IniValue::Color(b)) => {
+                Some(IniValue::Color(Vec3::lerp(*a, *b, t)))
+            }
+            (IniValue::ColorAlpha(a), IniValue::ColorAlpha(b)) => {
+                Some(IniValue::ColorAlpha(Vec4::lerp(*a, *b, t)))
+            }
+            (IniValue::Vector2(a), IniValue::Vector2(b)) => {
+                Some(IniValue::Vector2(Vec2::lerp(*a, *b, t)))
+            }
+            (IniValue::Vector3(a), IniValue::Vector3(b)) => {
+                Some(IniValue::Vector3(Vec3::lerp(*a, *b, t)))
+            }
+            (IniValue::Vector4(a), IniValue::Vector4(b)) => {
+                Some(IniValue::Vector4(Vec4::lerp(*a, *b, t)))
+            }
+            // Non-interpolatable types
+            (IniValue::Bool(_), IniValue::Bool(b)) => {
+                Some(IniValue::Bool(if t > 0.5 { *b } else { self.as_bool().unwrap() }))
+            }
+            (IniValue::String(_), IniValue::String(s)) => {
+                Some(IniValue::String(if t > 0.5 { s.clone() } else { self.as_string().unwrap().to_string() }))
+            }
+            _ => None
+        }
+    }
+
+    pub fn to_ini_string(&self) -> String {
+        match self {
+            IniValue::Int(v) => v.to_string(),
+            IniValue::Float(v) => format!("{:.6}", v),
+            IniValue::Bool(v) => if *v { "true".to_string() } else { "false".to_string() },
+            IniValue::String(s) => s.clone(),
+            IniValue::Color(c) => format!("{},{},{}",
+                (c.x * 255.0) as u8, (c.y * 255.0) as u8, (c.z * 255.0) as u8),
+            IniValue::ColorAlpha(c) => format!("{},{},{},{}",
+                (c.x * 255.0) as u8, (c.y * 255.0) as u8, (c.z * 255.0) as u8, (c.w * 255.0) as u8),
+            IniValue::Vector2(v) => format!("{:.6},{:.6}", v.x, v.y),
+            IniValue::Vector3(v) => format!("{:.6},{:.6},{:.6}", v.x, v.y, v.z),
+            IniValue::Vector4(v) => format!("{:.6},{:.6},{:.6},{:.6}", v.x, v.y, v.z, v.w),
+            IniValue::KeyBinding(k) => k.to_string(),
+        }
+    }
+}
+
+/// Key binding for ENB hotkeys
+pub struct KeyBinding {
+    pub key_code: u32,
+    pub shift: bool,
+    pub ctrl: bool,
+    pub alt: bool,
+}
+
+impl KeyBinding {
+    pub fn new(key_code: u32) -> Self {
+        Self { key_code, shift: false, ctrl: false, alt: false }
+    }
+
+    pub fn with_modifiers(key_code: u32, shift: bool, ctrl: bool, alt: bool) -> Self {
+        Self { key_code, shift, ctrl, alt }
+    }
+
+    pub fn to_string(&self) -> String {
+        let mut result = String::new();
+        if self.ctrl { result.push_str("Ctrl+"); }
+        if self.shift { result.push_str("Shift+"); }
+        if self.alt { result.push_str("Alt+"); }
+        result.push_str(&self.key_code.to_string());
+        result
+    }
+
+    pub fn from_string(s: &str) -> Option<Self> {
+        let mut shift = false;
+        let mut ctrl = false;
+        let mut alt = false;
+        let mut key_str = s;
+
+        for modifier in s.split('+') {
+            match modifier.to_lowercase().as_str() {
+                "ctrl" => ctrl = true,
+                "shift" => shift = true,
+                "alt" => alt = true,
+                _ => key_str = modifier,
+            }
+        }
+
+        key_str.parse::<u32>().ok().map(|key_code| {
+            Self { key_code, shift, ctrl, alt }
+        })
+    }
+}
+
+/// INI section containing key-value pairs
+pub struct IniSection {
+    name: String,
+    values: HashMap<String, IniValue>,
+    comments: HashMap<String, String>,  // Comments for each key
+    order: Vec<String>,  // Preserve insertion order
+}
+
+impl IniSection {
+    pub fn new(name: &str) -> Self {
+        Self {
+            name: name.to_string(),
+            values: HashMap::new(),
+            comments: HashMap::new(),
+            order: Vec::new(),
+        }
+    }
+
+    pub fn get(&self, key: &str) -> Option<&IniValue> {
+        self.values.get(key)
+    }
+
+    pub fn set(&mut self, key: &str, value: IniValue) {
+        if !self.values.contains_key(key) {
+            self.order.push(key.to_string());
+        }
+        self.values.insert(key.to_string(), value);
+    }
+
+    pub fn set_with_comment(&mut self, key: &str, value: IniValue, comment: &str) {
+        self.set(key, value);
+        self.comments.insert(key.to_string(), comment.to_string());
+    }
+
+    pub fn remove(&mut self, key: &str) {
+        self.values.remove(key);
+        self.comments.remove(key);
+        self.order.retain(|k| k != key);
+    }
+
+    pub fn keys(&self) -> impl Iterator<Item = &String> {
+        self.order.iter()
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (&String, &IniValue)> {
+        self.order.iter().filter_map(move |k| {
+            self.values.get(k).map(|v| (k, v))
+        })
+    }
+}
+
+/// Complete INI file representation
+pub struct IniFile {
+    sections: HashMap<String, IniSection>,
+    section_order: Vec<String>,
+    global_section: IniSection,  // Values before any section
+    header_comments: Vec<String>,
+}
+
+impl IniFile {
+    pub fn new() -> Self {
+        Self {
+            sections: HashMap::new(),
+            section_order: Vec::new(),
+            global_section: IniSection::new(""),
+            header_comments: Vec::new(),
+        }
+    }
+
+    pub fn parse(content: &str) -> Result<Self, IniParseError> {
+        let mut file = IniFile::new();
+        let mut current_section: Option<String> = None;
+        let mut pending_comment: Option<String> = None;
+
+        for (line_num, line) in content.lines().enumerate() {
+            let line = line.trim();
+
+            // Skip empty lines
+            if line.is_empty() {
+                continue;
+            }
+
+            // Comments
+            if line.starts_with(';') || line.starts_with('#') || line.starts_with("//") {
+                let comment = line.trim_start_matches(|c| c == ';' || c == '#' || c == '/').trim();
+                if current_section.is_none() {
+                    file.header_comments.push(comment.to_string());
+                } else {
+                    pending_comment = Some(comment.to_string());
+                }
+                continue;
+            }
+
+            // Section header
+            if line.starts_with('[') && line.ends_with(']') {
+                let section_name = &line[1..line.len()-1];
+                current_section = Some(section_name.to_string());
+                if !file.sections.contains_key(section_name) {
+                    file.sections.insert(section_name.to_string(), IniSection::new(section_name));
+                    file.section_order.push(section_name.to_string());
+                }
+                pending_comment = None;
+                continue;
+            }
+
+            // Key-value pair
+            if let Some(eq_pos) = line.find('=') {
+                let key = line[..eq_pos].trim();
+                let value_str = line[eq_pos+1..].trim();
+
+                // Remove inline comments
+                let value_str = if let Some(comment_pos) = value_str.find(';') {
+                    value_str[..comment_pos].trim()
+                } else {
+                    value_str
+                };
+
+                let value = Self::parse_value(value_str);
+
+                if let Some(ref section_name) = current_section {
+                    if let Some(section) = file.sections.get_mut(section_name) {
+                        if let Some(comment) = pending_comment.take() {
+                            section.set_with_comment(key, value, &comment);
+                        } else {
+                            section.set(key, value);
+                        }
+                    }
+                } else {
+                    if let Some(comment) = pending_comment.take() {
+                        file.global_section.set_with_comment(key, value, &comment);
+                    } else {
+                        file.global_section.set(key, value);
+                    }
+                }
+            }
+        }
+
+        Ok(file)
+    }
+
+    fn parse_value(s: &str) -> IniValue {
+        // Try bool
+        match s.to_lowercase().as_str() {
+            "true" | "yes" | "on" | "1" => return IniValue::Bool(true),
+            "false" | "no" | "off" | "0" => return IniValue::Bool(false),
+            _ => {}
+        }
+
+        // Try int
+        if let Ok(i) = s.parse::<i64>() {
+            return IniValue::Int(i);
+        }
+
+        // Try float
+        if let Ok(f) = s.parse::<f64>() {
+            return IniValue::Float(f);
+        }
+
+        // Try color (comma-separated values)
+        let parts: Vec<&str> = s.split(',').map(|p| p.trim()).collect();
+        if parts.len() == 3 {
+            if let (Ok(r), Ok(g), Ok(b)) = (
+                parts[0].parse::<f64>(),
+                parts[1].parse::<f64>(),
+                parts[2].parse::<f64>()
+            ) {
+                // Check if values are 0-255 range (color) or 0-1 range (vector)
+                if r > 1.0 || g > 1.0 || b > 1.0 {
+                    return IniValue::Color(Vec3::new(r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0));
+                } else {
+                    return IniValue::Vector3(Vec3::new(r as f32, g as f32, b as f32));
+                }
+            }
+        }
+
+        if parts.len() == 4 {
+            if let (Ok(r), Ok(g), Ok(b), Ok(a)) = (
+                parts[0].parse::<f64>(),
+                parts[1].parse::<f64>(),
+                parts[2].parse::<f64>(),
+                parts[3].parse::<f64>()
+            ) {
+                if r > 1.0 || g > 1.0 || b > 1.0 || a > 1.0 {
+                    return IniValue::ColorAlpha(Vec4::new(
+                        r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0, a as f32 / 255.0
+                    ));
+                } else {
+                    return IniValue::Vector4(Vec4::new(r as f32, g as f32, b as f32, a as f32));
+                }
+            }
+        }
+
+        if parts.len() == 2 {
+            if let (Ok(x), Ok(y)) = (parts[0].parse::<f64>(), parts[1].parse::<f64>()) {
+                return IniValue::Vector2(Vec2::new(x as f32, y as f32));
+            }
+        }
+
+        // Default to string
+        IniValue::String(s.to_string())
+    }
+
+    pub fn get_section(&self, name: &str) -> Option<&IniSection> {
+        self.sections.get(name)
+    }
+
+    pub fn get_section_mut(&mut self, name: &str) -> Option<&mut IniSection> {
+        self.sections.get_mut(name)
+    }
+
+    pub fn create_section(&mut self, name: &str) -> &mut IniSection {
+        if !self.sections.contains_key(name) {
+            self.sections.insert(name.to_string(), IniSection::new(name));
+            self.section_order.push(name.to_string());
+        }
+        self.sections.get_mut(name).unwrap()
+    }
+
+    pub fn get_value(&self, section: &str, key: &str) -> Option<&IniValue> {
+        self.sections.get(section).and_then(|s| s.get(key))
+    }
+
+    pub fn set_value(&mut self, section: &str, key: &str, value: IniValue) {
+        self.create_section(section).set(key, value);
+    }
+
+    pub fn to_string(&self) -> String {
+        let mut result = String::new();
+
+        // Header comments
+        for comment in &self.header_comments {
+            result.push_str(&format!("; {}\n", comment));
+        }
+        if !self.header_comments.is_empty() {
+            result.push('\n');
+        }
+
+        // Global section
+        for (key, value) in self.global_section.iter() {
+            if let Some(comment) = self.global_section.comments.get(key) {
+                result.push_str(&format!("; {}\n", comment));
+            }
+            result.push_str(&format!("{}={}\n", key, value.to_ini_string()));
+        }
+
+        // Named sections
+        for section_name in &self.section_order {
+            if let Some(section) = self.sections.get(section_name) {
+                result.push_str(&format!("\n[{}]\n", section_name));
+                for (key, value) in section.iter() {
+                    if let Some(comment) = section.comments.get(key) {
+                        result.push_str(&format!("; {}\n", comment));
+                    }
+                    result.push_str(&format!("{}={}\n", key, value.to_ini_string()));
+                }
+            }
+        }
+
+        result
+    }
+
+    pub fn save(&self, path: &str) -> Result<(), std::io::Error> {
+        std::fs::write(path, self.to_string())
+    }
+
+    pub fn load(path: &str) -> Result<Self, IniParseError> {
+        let content = std::fs::read_to_string(path)
+            .map_err(|e| IniParseError::IoError(e.to_string()))?;
+        Self::parse(&content)
+    }
+}
+
+#[derive(Debug)]
+pub enum IniParseError {
+    IoError(String),
+    ParseError { line: usize, message: String },
+}
+
+// ============================================================================
+// ENB PRESET STRUCTURE
+// ============================================================================
+
+/// ENB effect parameters
+pub struct EffectParameters {
+    pub enabled: bool,
+    pub values: HashMap<String, IniValue>,
+}
+
+impl EffectParameters {
+    pub fn new() -> Self {
+        Self {
+            enabled: true,
+            values: HashMap::new(),
+        }
+    }
+
+    pub fn lerp(&self, other: &EffectParameters, t: f32) -> EffectParameters {
+        let mut result = EffectParameters::new();
+        result.enabled = if t > 0.5 { other.enabled } else { self.enabled };
+
+        // Lerp common values
+        for (key, value) in &self.values {
+            if let Some(other_value) = other.values.get(key) {
+                if let Some(lerped) = value.lerp(other_value, t) {
+                    result.values.insert(key.clone(), lerped);
+                }
+            } else {
+                result.values.insert(key.clone(), value.clone());
+            }
+        }
+
+        // Add values only in other
+        for (key, value) in &other.values {
+            if !self.values.contains_key(key) {
+                result.values.insert(key.clone(), value.clone());
+            }
+        }
+
+        result
+    }
+}
+
+impl Clone for IniValue {
+    fn clone(&self) -> Self {
+        match self {
+            IniValue::Int(v) => IniValue::Int(*v),
+            IniValue::Float(v) => IniValue::Float(*v),
+            IniValue::Bool(v) => IniValue::Bool(*v),
+            IniValue::String(s) => IniValue::String(s.clone()),
+            IniValue::Color(c) => IniValue::Color(*c),
+            IniValue::ColorAlpha(c) => IniValue::ColorAlpha(*c),
+            IniValue::Vector2(v) => IniValue::Vector2(*v),
+            IniValue::Vector3(v) => IniValue::Vector3(*v),
+            IniValue::Vector4(v) => IniValue::Vector4(*v),
+            IniValue::KeyBinding(k) => IniValue::KeyBinding(KeyBinding {
+                key_code: k.key_code,
+                shift: k.shift,
+                ctrl: k.ctrl,
+                alt: k.alt,
+            }),
+        }
+    }
+}
+
+/// Weather-specific settings within a preset
+pub struct WeatherSettings {
+    pub weather_id: u32,
+    pub weather_name: String,
+    pub parameters: HashMap<String, EffectParameters>,
+}
+
+impl WeatherSettings {
+    pub fn new(id: u32, name: &str) -> Self {
+        Self {
+            weather_id: id,
+            weather_name: name.to_string(),
+            parameters: HashMap::new(),
+        }
+    }
+}
+
+/// Time of day settings
+pub struct TimeOfDaySettings {
+    pub dawn: HashMap<String, EffectParameters>,
+    pub day: HashMap<String, EffectParameters>,
+    pub dusk: HashMap<String, EffectParameters>,
+    pub night: HashMap<String, EffectParameters>,
+    pub interior: HashMap<String, EffectParameters>,
+}
+
+impl TimeOfDaySettings {
+    pub fn new() -> Self {
+        Self {
+            dawn: HashMap::new(),
+            day: HashMap::new(),
+            dusk: HashMap::new(),
+            night: HashMap::new(),
+            interior: HashMap::new(),
+        }
+    }
+
+    pub fn get_for_time(&self, hour: f32, is_interior: bool) -> &HashMap<String, EffectParameters> {
+        if is_interior {
+            return &self.interior;
+        }
+
+        // Determine time of day based on hour
+        if hour >= 5.0 && hour < 8.0 {
+            &self.dawn
+        } else if hour >= 8.0 && hour < 17.0 {
+            &self.day
+        } else if hour >= 17.0 && hour < 20.0 {
+            &self.dusk
+        } else {
+            &self.night
+        }
+    }
+}
+
+/// Complete ENB preset
+pub struct ENBPreset {
+    pub name: String,
+    pub author: String,
+    pub version: String,
+    pub description: String,
+    pub target_game: String,
+    pub enb_version: String,
+
+    // Global effect settings
+    pub global_settings: HashMap<String, EffectParameters>,
+
+    // Weather-specific settings
+    pub weather_settings: Vec<WeatherSettings>,
+
+    // Time of day settings
+    pub time_of_day: TimeOfDaySettings,
+
+    // File references
+    pub shader_files: Vec<String>,
+    pub texture_files: Vec<String>,
+    pub lut_files: Vec<String>,
+
+    // Source INI files
+    pub enbseries_ini: Option<IniFile>,
+    pub enblocal_ini: Option<IniFile>,
+    pub enbeffect_fx_params: Option<IniFile>,
+}
+
+impl ENBPreset {
+    pub fn new(name: &str) -> Self {
+        Self {
+            name: name.to_string(),
+            author: String::new(),
+            version: "1.0".to_string(),
+            description: String::new(),
+            target_game: String::new(),
+            enb_version: String::new(),
+            global_settings: HashMap::new(),
+            weather_settings: Vec::new(),
+            time_of_day: TimeOfDaySettings::new(),
+            shader_files: Vec::new(),
+            texture_files: Vec::new(),
+            lut_files: Vec::new(),
+            enbseries_ini: None,
+            enblocal_ini: None,
+            enbeffect_fx_params: None,
+        }
+    }
+
+    /// Load preset from ENB directory
+    pub fn load_from_directory(path: &str) -> Result<Self, PresetError> {
+        let mut preset = ENBPreset::new(
+            std::path::Path::new(path)
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| "Unknown".to_string())
+                .as_str()
+        );
+
+        // Load main INI files
+        let enbseries_path = format!("{}/enbseries.ini", path);
+        if std::path::Path::new(&enbseries_path).exists() {
+            preset.enbseries_ini = Some(IniFile::load(&enbseries_path)
+                .map_err(|e| PresetError::ParseError(format!("{:?}", e)))?);
+        }
+
+        let enblocal_path = format!("{}/enblocal.ini", path);
+        if std::path::Path::new(&enblocal_path).exists() {
+            preset.enblocal_ini = Some(IniFile::load(&enblocal_path)
+                .map_err(|e| PresetError::ParseError(format!("{:?}", e)))?);
+        }
+
+        // Parse enbseries.ini into structured format
+        if let Some(ref ini) = preset.enbseries_ini {
+            preset.parse_enbseries_ini(ini)?;
+        }
+
+        // Scan for shader files
+        preset.scan_files(path)?;
+
+        // Load weather configurations
+        preset.load_weather_configs(path)?;
+
+        Ok(preset)
+    }
+
+    fn parse_enbseries_ini(&mut self, ini: &IniFile) -> Result<(), PresetError> {
+        // Map INI sections to effect parameters
+        let effect_sections = [
+            ("EFFECT", "bloom"),
+            ("SSAO_SSIL", "ssao"),
+            ("SKYLIGHTING", "skylighting"),
+            ("ENVIRONMENT", "environment"),
+            ("COLORCORRECTION", "color_correction"),
+            ("SHADOW", "shadow"),
+            ("REFLECTION", "reflection"),
+            ("ADAPTATION", "adaptation"),
+            ("DEPTHOFFIELD", "dof"),
+            ("RAIN", "rain"),
+            ("WATER", "water"),
+            ("VOLUMETRICFOG", "volumetric_fog"),
+            ("MIST", "mist"),
+            ("CLOUDS", "clouds"),
+            ("NIGHTEYE", "night_eye"),
+            ("SUBSURFACESCATTERING", "subsurface"),
+            ("COMPLEXFIRELIGHTS", "fire_lights"),
+            ("COMPLEXPARTICLELIGHTS", "particle_lights"),
+        ];
+
+        for (section_name, effect_name) in effect_sections {
+            if let Some(section) = ini.get_section(section_name) {
+                let mut params = EffectParameters::new();
+
+                // Check for enable flag
+                if let Some(enabled) = section.get("EnableEffect").or(section.get("Enable")) {
+                    params.enabled = enabled.as_bool().unwrap_or(true);
+                }
+
+                // Copy all values
+                for (key, value) in section.iter() {
+                    params.values.insert(key.clone(), value.clone());
+                }
+
+                self.global_settings.insert(effect_name.to_string(), params);
+            }
+        }
+
+        // Parse global section for author/version info
+        if let Some(global) = ini.get_section("GLOBAL") {
+            if let Some(author) = global.get("Author") {
+                if let Some(s) = author.as_string() {
+                    self.author = s.to_string();
+                }
+            }
+            if let Some(version) = global.get("Version") {
+                if let Some(s) = version.as_string() {
+                    self.version = s.to_string();
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn scan_files(&mut self, path: &str) -> Result<(), PresetError> {
+        // Scan for shader files
+        let shader_extensions = ["fx", "hlsl", "fxh"];
+        let texture_extensions = ["dds", "png", "tga", "bmp"];
+        let lut_extensions = ["cube", "3dl"];
+
+        if let Ok(entries) = std::fs::read_dir(path) {
+            for entry in entries.flatten() {
+                let entry_path = entry.path();
+                if let Some(ext) = entry_path.extension() {
+                    let ext_str = ext.to_string_lossy().to_lowercase();
+
+                    if shader_extensions.contains(&ext_str.as_str()) {
+                        self.shader_files.push(entry_path.to_string_lossy().to_string());
+                    } else if texture_extensions.contains(&ext_str.as_str()) {
+                        self.texture_files.push(entry_path.to_string_lossy().to_string());
+                    } else if lut_extensions.contains(&ext_str.as_str()) {
+                        self.lut_files.push(entry_path.to_string_lossy().to_string());
+                    }
+                }
+            }
+        }
+
+        // Scan enbseries subfolder
+        let enb_subfolder = format!("{}/enbseries", path);
+        if std::path::Path::new(&enb_subfolder).exists() {
+            if let Ok(entries) = std::fs::read_dir(&enb_subfolder) {
+                for entry in entries.flatten() {
+                    let entry_path = entry.path();
+                    if let Some(ext) = entry_path.extension() {
+                        let ext_str = ext.to_string_lossy().to_lowercase();
+
+                        if shader_extensions.contains(&ext_str.as_str()) {
+                            self.shader_files.push(entry_path.to_string_lossy().to_string());
+                        } else if texture_extensions.contains(&ext_str.as_str()) {
+                            self.texture_files.push(entry_path.to_string_lossy().to_string());
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn load_weather_configs(&mut self, path: &str) -> Result<(), PresetError> {
+        // Look for weather INI files in enbseries folder
+        let weather_folder = format!("{}/enbseries", path);
+
+        if let Ok(entries) = std::fs::read_dir(&weather_folder) {
+            for entry in entries.flatten() {
+                let entry_path = entry.path();
+                let file_name = entry_path.file_name()
+                    .map(|n| n.to_string_lossy().to_lowercase())
+                    .unwrap_or_default();
+
+                // Weather files often named like "enbweather_XX.ini"
+                if file_name.starts_with("enbweather") && file_name.ends_with(".ini") {
+                    if let Ok(ini) = IniFile::load(&entry_path.to_string_lossy()) {
+                        self.parse_weather_ini(&ini, &file_name)?;
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn parse_weather_ini(&mut self, ini: &IniFile, filename: &str) -> Result<(), PresetError> {
+        // Extract weather ID from filename or INI
+        let weather_id = self.extract_weather_id(filename);
+        let weather_name = self.get_weather_name(weather_id);
+
+        let mut settings = WeatherSettings::new(weather_id, &weather_name);
+
+        // Parse each section as effect parameters
+        for section_name in &ini.section_order {
+            if let Some(section) = ini.get_section(section_name) {
+                let mut params = EffectParameters::new();
+
+                for (key, value) in section.iter() {
+                    params.values.insert(key.clone(), value.clone());
+                }
+
+                settings.parameters.insert(section_name.clone(), params);
+            }
+        }
+
+        self.weather_settings.push(settings);
+
+        Ok(())
+    }
+
+    fn extract_weather_id(&self, filename: &str) -> u32 {
+        // Try to extract hex ID from filename like "enbweather_10D2E4.ini"
+        let without_prefix = filename.trim_start_matches("enbweather_");
+        let without_ext = without_prefix.trim_end_matches(".ini");
+
+        u32::from_str_radix(without_ext, 16).unwrap_or(0)
+    }
+
+    fn get_weather_name(&self, id: u32) -> String {
+        // Known Skyrim weather form IDs
+        match id {
+            0x10E1F2 => "Clear".to_string(),
+            0x10E1F6 => "Cloudy".to_string(),
+            0x10E1F8 => "Foggy".to_string(),
+            0x10E1FA => "Overcast".to_string(),
+            0x10E1FC => "Rain".to_string(),
+            0x10E200 => "Storm".to_string(),
+            0x10E202 => "Snow".to_string(),
+            0x10E204 => "Blizzard".to_string(),
+            _ => format!("Weather_{:X}", id),
+        }
+    }
+
+    /// Save preset to directory
+    pub fn save_to_directory(&self, path: &str) -> Result<(), PresetError> {
+        std::fs::create_dir_all(path)
+            .map_err(|e| PresetError::IoError(e.to_string()))?;
+
+        // Save enbseries.ini
+        if let Some(ref ini) = self.enbseries_ini {
+            ini.save(&format!("{}/enbseries.ini", path))
+                .map_err(|e| PresetError::IoError(e.to_string()))?;
+        }
+
+        // Save enblocal.ini
+        if let Some(ref ini) = self.enblocal_ini {
+            ini.save(&format!("{}/enblocal.ini", path))
+                .map_err(|e| PresetError::IoError(e.to_string()))?;
+        }
+
+        Ok(())
+    }
+}
+
+#[derive(Debug)]
+pub enum PresetError {
+    IoError(String),
+    ParseError(String),
+    NotFound(String),
+}
+
+// ============================================================================
+// PRESET INTERPOLATION
+// ============================================================================
+
+/// Interpolation curve types
+pub enum InterpolationCurve {
+    Linear,
+    EaseIn,
+    EaseOut,
+    EaseInOut,
+    Smoothstep,
+    Bezier { p1: Vec2, p2: Vec2 },
+    Custom(Box<dyn Fn(f32) -> f32 + Send + Sync>),
+}
+
+impl InterpolationCurve {
+    pub fn evaluate(&self, t: f32) -> f32 {
+        let t = t.clamp(0.0, 1.0);
+
+        match self {
+            InterpolationCurve::Linear => t,
+            InterpolationCurve::EaseIn => t * t,
+            InterpolationCurve::EaseOut => 1.0 - (1.0 - t) * (1.0 - t),
+            InterpolationCurve::EaseInOut => {
+                if t < 0.5 {
+                    2.0 * t * t
+                } else {
+                    1.0 - (-2.0 * t + 2.0).powi(2) / 2.0
+                }
+            }
+            InterpolationCurve::Smoothstep => t * t * (3.0 - 2.0 * t),
+            InterpolationCurve::Bezier { p1, p2 } => {
+                self.cubic_bezier(t, p1.x, p1.y, p2.x, p2.y)
+            }
+            InterpolationCurve::Custom(f) => f(t),
+        }
+    }
+
+    fn cubic_bezier(&self, t: f32, x1: f32, y1: f32, x2: f32, y2: f32) -> f32 {
+        // Solve for x to find t_bezier, then evaluate y
+        let mut t_bezier = t;
+
+        // Newton-Raphson iteration to solve for t given x
+        for _ in 0..8 {
+            let x = self.bezier_x(t_bezier, x1, x2) - t;
+            let dx = self.bezier_dx(t_bezier, x1, x2);
+            if dx.abs() < 1e-6 { break; }
+            t_bezier -= x / dx;
+            t_bezier = t_bezier.clamp(0.0, 1.0);
+        }
+
+        self.bezier_y(t_bezier, y1, y2)
+    }
+
+    fn bezier_x(&self, t: f32, x1: f32, x2: f32) -> f32 {
+        let t2 = t * t;
+        let t3 = t2 * t;
+        let mt = 1.0 - t;
+        let mt2 = mt * mt;
+
+        3.0 * mt2 * t * x1 + 3.0 * mt * t2 * x2 + t3
+    }
+
+    fn bezier_y(&self, t: f32, y1: f32, y2: f32) -> f32 {
+        let t2 = t * t;
+        let t3 = t2 * t;
+        let mt = 1.0 - t;
+        let mt2 = mt * mt;
+
+        3.0 * mt2 * t * y1 + 3.0 * mt * t2 * y2 + t3
+    }
+
+    fn bezier_dx(&self, t: f32, x1: f32, x2: f32) -> f32 {
+        let t2 = t * t;
+        let mt = 1.0 - t;
+
+        3.0 * mt * mt * x1 + 6.0 * mt * t * (x2 - x1) + 3.0 * t2 * (1.0 - x2)
+    }
+}
+
+/// Preset interpolator for smooth transitions
+pub struct PresetInterpolator {
+    source_preset: Option<ENBPreset>,
+    target_preset: Option<ENBPreset>,
+    curve: InterpolationCurve,
+    progress: f32,
+    duration: f32,
+    elapsed: f32,
+    active: bool,
+}
+
+impl PresetInterpolator {
+    pub fn new() -> Self {
+        Self {
+            source_preset: None,
+            target_preset: None,
+            curve: InterpolationCurve::Smoothstep,
+            progress: 0.0,
+            duration: 1.0,
+            elapsed: 0.0,
+            active: false,
+        }
+    }
+
+    pub fn start_transition(&mut self, from: ENBPreset, to: ENBPreset, duration: f32) {
+        self.source_preset = Some(from);
+        self.target_preset = Some(to);
+        self.duration = duration;
+        self.elapsed = 0.0;
+        self.progress = 0.0;
+        self.active = true;
+    }
+
+    pub fn update(&mut self, delta_time: f32) {
+        if !self.active { return; }
+
+        self.elapsed += delta_time;
+        let linear_t = (self.elapsed / self.duration).clamp(0.0, 1.0);
+        self.progress = self.curve.evaluate(linear_t);
+
+        if self.elapsed >= self.duration {
+            self.active = false;
+            self.progress = 1.0;
+        }
+    }
+
+    pub fn get_interpolated_value(&self, section: &str, key: &str) -> Option<IniValue> {
+        let (source, target) = match (&self.source_preset, &self.target_preset) {
+            (Some(s), Some(t)) => (s, t),
+            _ => return None,
+        };
+
+        let source_value = source.global_settings.get(section)
+            .and_then(|s| s.values.get(key));
+        let target_value = target.global_settings.get(section)
+            .and_then(|s| s.values.get(key));
+
+        match (source_value, target_value) {
+            (Some(s), Some(t)) => s.lerp(t, self.progress),
+            (Some(s), None) => Some(s.clone()),
+            (None, Some(t)) => Some(t.clone()),
+            (None, None) => None,
+        }
+    }
+
+    pub fn is_active(&self) -> bool {
+        self.active
+    }
+
+    pub fn progress(&self) -> f32 {
+        self.progress
+    }
+
+    pub fn set_curve(&mut self, curve: InterpolationCurve) {
+        self.curve = curve;
+    }
+
+    /// Get fully interpolated effect parameters
+    pub fn get_interpolated_params(&self, effect_name: &str) -> Option<EffectParameters> {
+        let (source, target) = match (&self.source_preset, &self.target_preset) {
+            (Some(s), Some(t)) => (s, t),
+            _ => return None,
+        };
+
+        let source_params = source.global_settings.get(effect_name);
+        let target_params = target.global_settings.get(effect_name);
+
+        match (source_params, target_params) {
+            (Some(s), Some(t)) => Some(s.lerp(t, self.progress)),
+            (Some(s), None) => Some(s.clone()),
+            (None, Some(t)) => Some(t.clone()),
+            (None, None) => None,
+        }
+    }
+}
+
+impl Clone for EffectParameters {
+    fn clone(&self) -> Self {
+        Self {
+            enabled: self.enabled,
+            values: self.values.clone(),
+        }
+    }
+}
+
+// ============================================================================
+// HOT RELOAD SYSTEM
+// ============================================================================
+
+/// File change type
+pub enum FileChangeType {
+    Created,
+    Modified,
+    Deleted,
+}
+
+/// File change event
+pub struct FileChange {
+    pub path: String,
+    pub change_type: FileChangeType,
+    pub timestamp: u64,
+}
+
+/// Hot reload configuration
+pub struct HotReloadConfig {
+    pub enabled: bool,
+    pub poll_interval_ms: u32,
+    pub debounce_ms: u32,
+    pub reload_shaders: bool,
+    pub reload_textures: bool,
+    pub reload_ini: bool,
+}
+
+impl Default for HotReloadConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            poll_interval_ms: 500,
+            debounce_ms: 100,
+            reload_shaders: true,
+            reload_textures: true,
+            reload_ini: true,
+        }
+    }
+}
+
+/// Hot reload system for preset files
+pub struct HotReloader {
+    config: HotReloadConfig,
+    watched_files: HashMap<String, u64>,  // Path -> last modification time
+    pending_changes: Vec<FileChange>,
+    last_poll_time: u64,
+    debounce_timer: HashMap<String, u64>,
+    callbacks: Vec<Box<dyn Fn(&FileChange) + Send + Sync>>,
+}
+
+impl HotReloader {
+    pub fn new(config: HotReloadConfig) -> Self {
+        Self {
+            config,
+            watched_files: HashMap::new(),
+            pending_changes: Vec::new(),
+            last_poll_time: 0,
+            debounce_timer: HashMap::new(),
+            callbacks: Vec::new(),
+        }
+    }
+
+    pub fn watch_file(&mut self, path: &str) {
+        if let Ok(metadata) = std::fs::metadata(path) {
+            if let Ok(modified) = metadata.modified() {
+                let timestamp = modified.duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                self.watched_files.insert(path.to_string(), timestamp);
+            }
+        }
+    }
+
+    pub fn watch_directory(&mut self, path: &str, extensions: &[&str]) {
+        if let Ok(entries) = std::fs::read_dir(path) {
+            for entry in entries.flatten() {
+                let entry_path = entry.path();
+                if let Some(ext) = entry_path.extension() {
+                    let ext_str = ext.to_string_lossy().to_lowercase();
+                    if extensions.iter().any(|e| e.to_lowercase() == ext_str) {
+                        self.watch_file(&entry_path.to_string_lossy());
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn add_callback<F>(&mut self, callback: F)
+    where
+        F: Fn(&FileChange) + Send + Sync + 'static
+    {
+        self.callbacks.push(Box::new(callback));
+    }
+
+    pub fn poll(&mut self, current_time: u64) -> Vec<FileChange> {
+        if !self.config.enabled {
+            return Vec::new();
+        }
+
+        if current_time - self.last_poll_time < self.config.poll_interval_ms as u64 {
+            return Vec::new();
+        }
+
+        self.last_poll_time = current_time;
+        let mut changes = Vec::new();
+
+        for (path, last_modified) in self.watched_files.iter_mut() {
+            if let Ok(metadata) = std::fs::metadata(path) {
+                if let Ok(modified) = metadata.modified() {
+                    let timestamp = modified.duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0);
+
+                    if timestamp > *last_modified {
+                        // Check debounce
+                        if let Some(debounce_start) = self.debounce_timer.get(path) {
+                            if current_time - debounce_start < self.config.debounce_ms as u64 {
+                                continue;
+                            }
+                        }
+
+                        self.debounce_timer.insert(path.clone(), current_time);
+                        *last_modified = timestamp;
+
+                        changes.push(FileChange {
+                            path: path.clone(),
+                            change_type: FileChangeType::Modified,
+                            timestamp,
+                        });
+                    }
+                }
+            } else {
+                // File was deleted
+                changes.push(FileChange {
+                    path: path.clone(),
+                    change_type: FileChangeType::Deleted,
+                    timestamp: current_time,
+                });
+            }
+        }
+
+        // Invoke callbacks
+        for change in &changes {
+            for callback in &self.callbacks {
+                callback(change);
+            }
+        }
+
+        changes
+    }
+
+    pub fn process_change(&self, change: &FileChange, preset: &mut ENBPreset) -> Result<(), PresetError> {
+        let ext = std::path::Path::new(&change.path)
+            .extension()
+            .map(|e| e.to_string_lossy().to_lowercase())
+            .unwrap_or_default();
+
+        match change.change_type {
+            FileChangeType::Modified => {
+                match ext.as_str() {
+                    "ini" if self.config.reload_ini => {
+                        // Reload INI file
+                        if change.path.contains("enbseries.ini") {
+                            preset.enbseries_ini = Some(IniFile::load(&change.path)
+                                .map_err(|e| PresetError::ParseError(format!("{:?}", e)))?);
+                            if let Some(ref ini) = preset.enbseries_ini {
+                                preset.parse_enbseries_ini(ini)?;
+                            }
+                        } else if change.path.contains("enblocal.ini") {
+                            preset.enblocal_ini = Some(IniFile::load(&change.path)
+                                .map_err(|e| PresetError::ParseError(format!("{:?}", e)))?);
+                        }
+                    }
+                    "fx" | "hlsl" | "fxh" if self.config.reload_shaders => {
+                        // Mark shaders for reload (handled by shader system)
+                    }
+                    "dds" | "png" | "tga" if self.config.reload_textures => {
+                        // Mark textures for reload (handled by texture system)
+                    }
+                    _ => {}
+                }
+            }
+            FileChangeType::Deleted => {
+                // Handle deleted files
+            }
+            FileChangeType::Created => {
+                // Handle new files
+            }
+        }
+
+        Ok(())
+    }
+}
+
+// ============================================================================
+// PRESET MANAGER
+// ============================================================================
+
+/// Preset manager for handling multiple presets
+pub struct PresetManager {
+    presets: HashMap<String, ENBPreset>,
+    active_preset: Option<String>,
+    preset_directory: String,
+    interpolator: PresetInterpolator,
+    hot_reloader: HotReloader,
+    auto_save: bool,
+}
+
+impl PresetManager {
+    pub fn new(preset_directory: &str) -> Self {
+        Self {
+            presets: HashMap::new(),
+            active_preset: None,
+            preset_directory: preset_directory.to_string(),
+            interpolator: PresetInterpolator::new(),
+            hot_reloader: HotReloader::new(HotReloadConfig::default()),
+            auto_save: false,
+        }
+    }
+
+    pub fn scan_presets(&mut self) -> Result<Vec<String>, PresetError> {
+        let mut found_presets = Vec::new();
+
+        if let Ok(entries) = std::fs::read_dir(&self.preset_directory) {
+            for entry in entries.flatten() {
+                let entry_path = entry.path();
+                if entry_path.is_dir() {
+                    // Check if directory contains enbseries.ini
+                    let ini_path = entry_path.join("enbseries.ini");
+                    if ini_path.exists() {
+                        let name = entry_path.file_name()
+                            .map(|n| n.to_string_lossy().to_string())
+                            .unwrap_or_default();
+                        found_presets.push(name);
+                    }
+                }
+            }
+        }
+
+        Ok(found_presets)
+    }
+
+    pub fn load_preset(&mut self, name: &str) -> Result<(), PresetError> {
+        let path = format!("{}/{}", self.preset_directory, name);
+        let preset = ENBPreset::load_from_directory(&path)?;
+        self.presets.insert(name.to_string(), preset);
+        Ok(())
+    }
+
+    pub fn activate_preset(&mut self, name: &str, transition_duration: f32) -> Result<(), PresetError> {
+        if !self.presets.contains_key(name) {
+            self.load_preset(name)?;
+        }
+
+        if transition_duration > 0.0 {
+            // Smooth transition
+            if let Some(current_name) = &self.active_preset {
+                if let Some(current) = self.presets.remove(current_name) {
+                    if let Some(target) = self.presets.remove(name) {
+                        self.interpolator.start_transition(current.clone(), target.clone(), transition_duration);
+                        self.presets.insert(current_name.clone(), current);
+                        self.presets.insert(name.to_string(), target);
+                    }
+                }
+            }
+        }
+
+        // Set up hot reloading for active preset
+        let path = format!("{}/{}", self.preset_directory, name);
+        self.hot_reloader.watch_directory(&path, &["ini", "fx", "hlsl", "dds"]);
+
+        self.active_preset = Some(name.to_string());
+        Ok(())
+    }
+
+    pub fn get_active_preset(&self) -> Option<&ENBPreset> {
+        self.active_preset.as_ref().and_then(|name| self.presets.get(name))
+    }
+
+    pub fn get_active_preset_mut(&mut self) -> Option<&mut ENBPreset> {
+        let name = self.active_preset.clone();
+        name.and_then(move |n| self.presets.get_mut(&n))
+    }
+
+    pub fn update(&mut self, delta_time: f32, current_time: u64) {
+        // Update interpolator
+        self.interpolator.update(delta_time);
+
+        // Check for file changes
+        let changes = self.hot_reloader.poll(current_time);
+        for change in changes {
+            if let Some(preset) = self.get_active_preset_mut() {
+                let _ = self.hot_reloader.process_change(&change, preset);
+            }
+        }
+    }
+
+    pub fn save_active_preset(&self) -> Result<(), PresetError> {
+        if let Some(name) = &self.active_preset {
+            if let Some(preset) = self.presets.get(name) {
+                let path = format!("{}/{}", self.preset_directory, name);
+                preset.save_to_directory(&path)?;
+            }
+        }
+        Ok(())
+    }
+
+    pub fn create_preset(&mut self, name: &str, base_preset: Option<&str>) -> Result<(), PresetError> {
+        let preset = if let Some(base_name) = base_preset {
+            if let Some(base) = self.presets.get(base_name) {
+                // Clone from base
+                ENBPreset {
+                    name: name.to_string(),
+                    author: base.author.clone(),
+                    version: "1.0".to_string(),
+                    description: format!("Based on {}", base_name),
+                    target_game: base.target_game.clone(),
+                    enb_version: base.enb_version.clone(),
+                    global_settings: base.global_settings.clone(),
+                    weather_settings: Vec::new(),
+                    time_of_day: TimeOfDaySettings::new(),
+                    shader_files: base.shader_files.clone(),
+                    texture_files: base.texture_files.clone(),
+                    lut_files: base.lut_files.clone(),
+                    enbseries_ini: base.enbseries_ini.clone(),
+                    enblocal_ini: base.enblocal_ini.clone(),
+                    enbeffect_fx_params: None,
+                }
+            } else {
+                return Err(PresetError::NotFound(base_name.to_string()));
+            }
+        } else {
+            ENBPreset::new(name)
+        };
+
+        self.presets.insert(name.to_string(), preset);
+        Ok(())
+    }
+
+    pub fn delete_preset(&mut self, name: &str) -> Result<(), PresetError> {
+        if Some(name.to_string()) == self.active_preset {
+            self.active_preset = None;
+        }
+        self.presets.remove(name);
+
+        let path = format!("{}/{}", self.preset_directory, name);
+        if std::path::Path::new(&path).exists() {
+            std::fs::remove_dir_all(&path)
+                .map_err(|e| PresetError::IoError(e.to_string()))?;
+        }
+
+        Ok(())
+    }
+
+    pub fn list_presets(&self) -> Vec<&str> {
+        self.presets.keys().map(|s| s.as_str()).collect()
+    }
+
+    /// Get current effect value (considering interpolation)
+    pub fn get_effect_value(&self, effect: &str, key: &str) -> Option<IniValue> {
+        if self.interpolator.is_active() {
+            return self.interpolator.get_interpolated_value(effect, key);
+        }
+
+        self.get_active_preset()
+            .and_then(|p| p.global_settings.get(effect))
+            .and_then(|e| e.values.get(key))
+            .cloned()
+    }
+}
+
+impl Clone for IniFile {
+    fn clone(&self) -> Self {
+        Self {
+            sections: self.sections.clone(),
+            section_order: self.section_order.clone(),
+            global_section: self.global_section.clone(),
+            header_comments: self.header_comments.clone(),
+        }
+    }
+}
+
+impl Clone for IniSection {
+    fn clone(&self) -> Self {
+        Self {
+            name: self.name.clone(),
+            values: self.values.clone(),
+            comments: self.comments.clone(),
+            order: self.order.clone(),
+        }
+    }
+}
+
+impl Clone for ENBPreset {
+    fn clone(&self) -> Self {
+        Self {
+            name: self.name.clone(),
+            author: self.author.clone(),
+            version: self.version.clone(),
+            description: self.description.clone(),
+            target_game: self.target_game.clone(),
+            enb_version: self.enb_version.clone(),
+            global_settings: self.global_settings.clone(),
+            weather_settings: Vec::new(),  // Simplified clone
+            time_of_day: TimeOfDaySettings::new(),
+            shader_files: self.shader_files.clone(),
+            texture_files: self.texture_files.clone(),
+            lut_files: self.lut_files.clone(),
+            enbseries_ini: self.enbseries_ini.clone(),
+            enblocal_ini: self.enblocal_ini.clone(),
+            enbeffect_fx_params: None,
+        }
+    }
+}
+
+// ============================================================================
+// PRESET EXPORT/IMPORT
+// ============================================================================
+
+/// Export format options
+pub enum PresetExportFormat {
+    Directory,      // Standard ENB directory structure
+    ZipArchive,     // Compressed archive
+    Json,           // JSON representation
+    Binary,         // Compact binary format
+}
+
+/// Preset exporter
+pub struct PresetExporter;
+
+impl PresetExporter {
+    pub fn export(preset: &ENBPreset, path: &str, format: PresetExportFormat) -> Result<(), PresetError> {
+        match format {
+            PresetExportFormat::Directory => {
+                preset.save_to_directory(path)
+            }
+            PresetExportFormat::ZipArchive => {
+                Self::export_zip(preset, path)
+            }
+            PresetExportFormat::Json => {
+                Self::export_json(preset, path)
+            }
+            PresetExportFormat::Binary => {
+                Self::export_binary(preset, path)
+            }
+        }
+    }
+
+    fn export_zip(preset: &ENBPreset, path: &str) -> Result<(), PresetError> {
+        // Would use zip crate to create archive
+        // For now, just save to directory
+        let temp_dir = format!("{}_temp", path);
+        preset.save_to_directory(&temp_dir)?;
+
+        // Compress to zip (placeholder)
+
+        Ok(())
+    }
+
+    fn export_json(preset: &ENBPreset, path: &str) -> Result<(), PresetError> {
+        let json = Self::preset_to_json(preset);
+        std::fs::write(path, json)
+            .map_err(|e| PresetError::IoError(e.to_string()))
+    }
+
+    fn preset_to_json(preset: &ENBPreset) -> String {
+        let mut json = String::new();
+        json.push_str("{\n");
+        json.push_str(&format!("  \"name\": \"{}\",\n", preset.name));
+        json.push_str(&format!("  \"author\": \"{}\",\n", preset.author));
+        json.push_str(&format!("  \"version\": \"{}\",\n", preset.version));
+        json.push_str("  \"effects\": {\n");
+
+        let mut first = true;
+        for (name, params) in &preset.global_settings {
+            if !first { json.push_str(",\n"); }
+            first = false;
+            json.push_str(&format!("    \"{}\": {{\n", name));
+            json.push_str(&format!("      \"enabled\": {},\n", params.enabled));
+            json.push_str("      \"values\": {\n");
+
+            let mut first_value = true;
+            for (key, value) in &params.values {
+                if !first_value { json.push_str(",\n"); }
+                first_value = false;
+                json.push_str(&format!("        \"{}\": \"{}\"", key, value.to_ini_string()));
+            }
+
+            json.push_str("\n      }\n");
+            json.push_str("    }");
+        }
+
+        json.push_str("\n  }\n");
+        json.push_str("}\n");
+
+        json
+    }
+
+    fn export_binary(preset: &ENBPreset, path: &str) -> Result<(), PresetError> {
+        // Binary format for compact storage
+        // Header: magic (4) + version (4) + name_len (4) + name + ...
+        let mut data = Vec::new();
+
+        // Magic
+        data.extend_from_slice(b"ENBP");
+
+        // Version
+        data.extend_from_slice(&1u32.to_le_bytes());
+
+        // Name
+        let name_bytes = preset.name.as_bytes();
+        data.extend_from_slice(&(name_bytes.len() as u32).to_le_bytes());
+        data.extend_from_slice(name_bytes);
+
+        // Effect count
+        data.extend_from_slice(&(preset.global_settings.len() as u32).to_le_bytes());
+
+        for (name, params) in &preset.global_settings {
+            // Effect name
+            let name_bytes = name.as_bytes();
+            data.extend_from_slice(&(name_bytes.len() as u32).to_le_bytes());
+            data.extend_from_slice(name_bytes);
+
+            // Enabled flag
+            data.push(if params.enabled { 1 } else { 0 });
+
+            // Value count
+            data.extend_from_slice(&(params.values.len() as u32).to_le_bytes());
+
+            for (key, value) in &params.values {
+                // Key
+                let key_bytes = key.as_bytes();
+                data.extend_from_slice(&(key_bytes.len() as u32).to_le_bytes());
+                data.extend_from_slice(key_bytes);
+
+                // Value as string
+                let value_str = value.to_ini_string();
+                let value_bytes = value_str.as_bytes();
+                data.extend_from_slice(&(value_bytes.len() as u32).to_le_bytes());
+                data.extend_from_slice(value_bytes);
+            }
+        }
+
+        std::fs::write(path, data)
+            .map_err(|e| PresetError::IoError(e.to_string()))
+    }
+}
+
+// ============================================================================
+// MODULE EXPORTS
+// ============================================================================
+
+pub mod ini {
+    pub use super::{
+        IniValue,
+        IniSection,
+        IniFile,
+        IniParseError,
+        KeyBinding,
+    };
+}
+
+pub mod preset {
+    pub use super::{
+        EffectParameters,
+        WeatherSettings,
+        TimeOfDaySettings,
+        ENBPreset,
+        PresetError,
+    };
+}
+
+pub mod interpolation {
+    pub use super::{
+        InterpolationCurve,
+        PresetInterpolator,
+    };
+}
+
+pub mod hotreload {
+    pub use super::{
+        FileChangeType,
+        FileChange,
+        HotReloadConfig,
+        HotReloader,
+    };
+}
+
+pub mod manager {
+    pub use super::{
+        PresetManager,
+        PresetExporter,
+        PresetExportFormat,
+    };
+}

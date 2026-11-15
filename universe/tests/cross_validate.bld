@@ -1,0 +1,148 @@
+// Cross-Validation: BuildLang spectrum/* vs Python build-color
+// Run this program and compare output with the Python equivalent.
+
+// ACES constants
+const RRT_A: f64 = 2.51;
+const RRT_B: f64 = 0.03;
+const RRT_C: f64 = 2.43;
+const RRT_D: f64 = 0.59;
+const RRT_E: f64 = 0.14;
+
+// sRGB constants
+const SRGB_CUTOFF: f64 = 0.0031308;
+const SRGB_SLOPE: f64 = 12.92;
+
+// === TONE MAPPING ===
+
+fn aces_filmic(x: f64) -> f64 {
+    let num = x * (RRT_A * x + RRT_B);
+    let den = x * (RRT_C * x + RRT_D) + RRT_E;
+    num / den
+}
+
+fn reinhard(x: f64) -> f64 {
+    x / (1.0 + x)
+}
+
+fn reinhard_extended(x: f64, white: f64) -> f64 {
+    let num = x * (1.0 + x / (white * white));
+    num / (1.0 + x)
+}
+
+// === sRGB TRANSFER ===
+
+fn srgb_to_linear(s: f64) -> f64 {
+    if s <= 0.04045 {
+        s / 12.92
+    } else {
+        let base: f64 = (s + 0.055) / 1.055;
+        pow(base, 2.4)
+    }
+}
+
+fn linear_to_srgb(l: f64) -> f64 {
+    if l <= SRGB_CUTOFF {
+        l * SRGB_SLOPE
+    } else {
+        let gamma: f64 = pow(l, 0.4166667);
+        1.055 * gamma - 0.055
+    }
+}
+
+// === Lab ===
+
+fn lab_f(t: f64) -> f64 {
+    let epsilon: f64 = 0.008856;
+    let kappa: f64 = 903.3;
+    if t > epsilon {
+        pow(t, 0.333333333)
+    } else {
+        (kappa * t + 16.0) / 116.0
+    }
+}
+
+fn xyz_to_lab_l(y: f64) -> f64 {
+    116.0 * lab_f(y) - 16.0
+}
+
+fn xyz_to_lab_a(x: f64, y: f64) -> f64 {
+    500.0 * (lab_f(x / 0.95047) - lab_f(y))
+}
+
+fn xyz_to_lab_b(y: f64, z: f64) -> f64 {
+    200.0 * (lab_f(y) - lab_f(z / 1.08883))
+}
+
+// === Oklab ===
+
+fn linear_srgb_to_oklab_l(r: f64, g: f64, b: f64) -> f64 {
+    let l: f64 = 0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b;
+    let m: f64 = 0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b;
+    let s: f64 = 0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b;
+    let l3: f64 = pow(l, 0.333333333);
+    let m3: f64 = pow(m, 0.333333333);
+    let s3: f64 = pow(s, 0.333333333);
+    0.2104542553 * l3 + 0.7936177850 * m3 - 0.0040720468 * s3
+}
+
+// === CIEDE2000 ===
+
+fn ciede2000_simple(l1: f64, a1: f64, b1: f64, l2: f64, a2: f64, b2: f64) -> f64 {
+    let dl = l2 - l1;
+    let da = a2 - a1;
+    let db = b2 - b1;
+    sqrt(dl * dl + da * da + db * db)
+}
+
+fn main() {
+    println!("=== BuildLang Cross-Validation Output ===");
+    println!("Compare these values with Python build-color");
+    println!("");
+
+    // Tone mapping
+    println!("--- Tone Mapping ---");
+    let inputs = vec![0.0, 0.1, 0.25, 0.5, 1.0, 2.0, 4.0, 10.0];
+    for i in 0..8 {
+        let x: f64 = if i == 0 { 0.0 }
+            else if i == 1 { 0.1 }
+            else if i == 2 { 0.25 }
+            else if i == 3 { 0.5 }
+            else if i == 4 { 1.0 }
+            else if i == 5 { 2.0 }
+            else if i == 6 { 4.0 }
+            else { 10.0 };
+        println!("ACES({}): {}", x, aces_filmic(x));
+        println!("Reinhard({}): {}", x, reinhard(x));
+    }
+
+    // sRGB transfer
+    println!("");
+    println!("--- sRGB Transfer ---");
+    println!("to_linear(0.0): {}", srgb_to_linear(0.0));
+    println!("to_linear(0.5): {}", srgb_to_linear(0.5));
+    println!("to_linear(1.0): {}", srgb_to_linear(1.0));
+    println!("from_linear(0.0): {}", linear_to_srgb(0.0));
+    println!("from_linear(0.5): {}", linear_to_srgb(0.5));
+    println!("from_linear(1.0): {}", linear_to_srgb(1.0));
+
+    // Round-trip test
+    println!("");
+    println!("--- Round Trip ---");
+    let original: f64 = 0.73;
+    let linear: f64 = srgb_to_linear(original);
+    let back: f64 = linear_to_srgb(linear);
+    println!("sRGB {} -> linear {} -> sRGB {}", original, linear, back);
+
+    // Lab
+    println!("");
+    println!("--- Lab ---");
+    println!("L(Y=1.0): {}", xyz_to_lab_l(1.0));
+    println!("L(Y=0.5): {}", xyz_to_lab_l(0.5));
+    println!("L(Y=0.18): {}", xyz_to_lab_l(0.18));
+
+    // Delta E (simplified CIE76)
+    println!("");
+    println!("--- Delta E (CIE76) ---");
+    println!("dE(50,20,10 vs 55,25,15): {}", ciede2000_simple(50.0, 20.0, 10.0, 55.0, 25.0, 15.0));
+    println!("dE(100,0,0 vs 0,0,0): {}", ciede2000_simple(100.0, 0.0, 0.0, 0.0, 0.0, 0.0));
+}

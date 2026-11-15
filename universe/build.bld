@@ -1,0 +1,623 @@
+// ═══════════════════════════════════════════════════════════════════════════════
+// BUILD-UNIVERSE Build System v2.0.0
+// "Compile the Universe"
+// ═══════════════════════════════════════════════════════════════════════════════
+// Copyright © 2024-2025 Zain Dana Harper. All Rights Reserved.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+module build
+
+use std::io::{File, read_to_string}
+use std::process::{Command, Output}
+use std::collections::{HashMap, Vec, HashSet}
+use std::path::{Path, PathBuf}
+use std::fs::{create_dir_all, copy, remove_dir_all}
+use std::time::Instant
+use std::env
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// BUILD CONFIGURATION
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Build profile
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Profile {
+    Debug,
+    Release,
+    Distribution,
+}
+
+impl Profile {
+    pub fn optimization_level(&self) -> u8 {
+        match self {
+            Profile::Debug => 0,
+            Profile::Release => 2,
+            Profile::Distribution => 3,
+        }
+    }
+
+    pub fn debug_info(&self) -> bool {
+        match self {
+            Profile::Debug => true,
+            Profile::Release => true,
+            Profile::Distribution => false,
+        }
+    }
+
+    pub fn name(&self) -> &'static str {
+        match self {
+            Profile::Debug => "debug",
+            Profile::Release => "release",
+            Profile::Distribution => "dist",
+        }
+    }
+}
+
+/// Target platform
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Target {
+    NativeWindows,
+    NativeLinux,
+    NativeMacOS,
+    WebAssembly,
+    BuildOS,
+}
+
+impl Target {
+    pub fn triple(&self) -> &'static str {
+        match self {
+            Target::NativeWindows => "x86_64-pc-windows-msvc",
+            Target::NativeLinux => "x86_64-unknown-linux-gnu",
+            Target::NativeMacOS => "aarch64-apple-darwin",
+            Target::WebAssembly => "wasm32-wasi",
+            Target::BuildOS => "x86_64-buildos",
+        }
+    }
+
+    pub fn extension(&self) -> &'static str {
+        match self {
+            Target::NativeWindows => ".exe",
+            Target::NativeLinux => "",
+            Target::NativeMacOS => "",
+            Target::WebAssembly => ".wasm",
+            Target::BuildOS => "",
+        }
+    }
+}
+
+/// Build configuration
+#[derive(Debug, Clone)]
+pub struct BuildConfig {
+    pub profile: Profile,
+    pub target: Target,
+    pub jobs: usize,
+    pub verbose: bool,
+    pub features: Vec<String>,
+    pub output_dir: PathBuf,
+}
+
+impl BuildConfig {
+    pub fn default() -> Self {
+        BuildConfig {
+            profile: Profile::Release,
+            target: Target::NativeWindows,
+            jobs: 8,
+            verbose: false,
+            features: vec!["std".to_string(), "alloc".to_string()],
+            output_dir: PathBuf::from("target"),
+        }
+    }
+
+    pub fn debug() -> Self {
+        let mut config = Self::default();
+        config.profile = Profile::Debug;
+        config
+    }
+
+    pub fn release() -> Self {
+        Self::default()
+    }
+
+    pub fn distribution() -> Self {
+        let mut config = Self::default();
+        config.profile = Profile::Distribution;
+        config
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// MODULE DEPENDENCY GRAPH
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Dependency node
+#[derive(Debug, Clone)]
+struct ModuleNode {
+    name: String,
+    path: PathBuf,
+    dependencies: Vec<String>,
+    is_rust: bool,  // true = Rust project, false = BuildLang
+    compiled: bool,
+}
+
+/// Build dependency graph
+pub struct DependencyGraph {
+    nodes: HashMap<String, ModuleNode>,
+    build_order: Vec<String>,
+}
+
+impl DependencyGraph {
+    pub fn new() -> Self {
+        let mut graph = DependencyGraph {
+            nodes: HashMap::new(),
+            build_order: Vec::new(),
+        };
+        graph.discover_modules();
+        graph.compute_order();
+        graph
+    }
+
+    fn discover_modules(&mut self) {
+        // Foundation Layer
+        self.add_module("buildlang", "buildlang", vec![], true);
+        self.add_module("foundation", "foundation", vec!["buildlang"], false);
+
+        // Core Layer
+        self.add_module("buildos", "buildos", vec!["buildlang", "foundation"], true);
+        self.add_module("axiom", "axiom", vec!["buildlang", "foundation"], false);
+
+        // Rendering Layer
+        self.add_module("spectrum", "spectrum", vec!["foundation"], false);
+        self.add_module("chromatic", "chromatic", vec!["foundation", "spectrum"], false);
+        self.add_module("photon", "photon", vec!["foundation", "spectrum"], false);
+        self.add_module("lumina", "lumina", vec!["photon", "spectrum", "chromatic"], false);
+        self.add_module("neutrino", "neutrino", vec!["photon", "axiom"], false);
+        self.add_module("prism", "prism", vec!["photon"], false);
+        self.add_module("refract", "refract", vec!["photon", "prism"], false);
+        self.add_module("nexus", "nexus", vec!["photon"], false);
+
+        // Trading Layer
+        self.add_module("oracle", "oracle", vec!["foundation"], false);
+        self.add_module("field-tensor", "field-tensor", vec!["foundation"], false);
+        self.add_module("delta", "delta", vec!["foundation", "field-tensor"], false);
+        self.add_module("entropy", "entropy", vec!["foundation", "oracle"], false);
+        self.add_module("quantum-finance", "quantum-finance",
+            vec!["foundation", "oracle", "field-tensor"], false);
+
+        // Intelligence Layer
+        self.add_module("wavelength", "wavelength", vec!["foundation", "oracle"], false);
+
+        // Integration Layer
+        self.add_module("entangle", "entangle", vec!["foundation"], false);
+        self.add_module("calibrate", "calibrate", vec!["spectrum", "chromatic"], false);
+        self.add_module("nova", "nova", vec!["photon", "lumina"], false);
+
+        // Tools Layer
+        self.add_module("forge", "forge", vec!["foundation", "buildlang"], false);
+
+        // Universe Coordinator
+        self.add_module("universe", "universe", vec![
+            "buildlang", "foundation", "buildos", "axiom",
+            "photon", "spectrum", "chromatic", "lumina", "neutrino", "prism", "refract", "nexus",
+            "oracle", "field-tensor", "delta", "entropy", "quantum-finance",
+            "wavelength", "entangle", "calibrate", "nova", "forge"
+        ], false);
+    }
+
+    fn add_module(&mut self, name: &str, path: &str, deps: Vec<&str>, is_rust: bool) {
+        self.nodes.insert(name.to_string(), ModuleNode {
+            name: name.to_string(),
+            path: PathBuf::from(path),
+            dependencies: deps.iter().map(|s| s.to_string()).collect(),
+            is_rust,
+            compiled: false,
+        });
+    }
+
+    fn compute_order(&mut self) {
+        let mut visited: HashSet<String> = HashSet::new();
+        let mut order: Vec<String> = Vec::new();
+
+        fn visit(name: &str, nodes: &HashMap<String, ModuleNode>,
+                 visited: &mut HashSet<String>, order: &mut Vec<String>) {
+            if visited.contains(name) {
+                return;
+            }
+
+            if let Some(node) = nodes.get(name) {
+                for dep in &node.dependencies {
+                    visit(dep, nodes, visited, order);
+                }
+            }
+
+            visited.insert(name.to_string());
+            order.push(name.to_string());
+        }
+
+        for name in self.nodes.keys().cloned().collect::<Vec<_>>() {
+            visit(&name, &self.nodes, &mut visited, &mut order);
+        }
+
+        self.build_order = order;
+    }
+
+    pub fn get_build_order(&self) -> &[String] {
+        &self.build_order
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// BUILD ENGINE
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Build result
+#[derive(Debug)]
+pub struct BuildResult {
+    pub module: String,
+    pub success: bool,
+    pub duration_ms: u64,
+    pub output: String,
+    pub artifacts: Vec<PathBuf>,
+}
+
+/// Build statistics
+#[derive(Debug, Default)]
+pub struct BuildStats {
+    pub total_modules: usize,
+    pub succeeded: usize,
+    pub failed: usize,
+    pub skipped: usize,
+    pub total_duration_ms: u64,
+    pub lines_compiled: usize,
+}
+
+/// The main build engine
+pub struct BuildEngine {
+    config: BuildConfig,
+    graph: DependencyGraph,
+    results: Vec<BuildResult>,
+    stats: BuildStats,
+}
+
+impl BuildEngine {
+    pub fn new(config: BuildConfig) -> Self {
+        BuildEngine {
+            config,
+            graph: DependencyGraph::new(),
+            results: Vec::new(),
+            stats: BuildStats::default(),
+        }
+    }
+
+    /// Build the entire universe
+    pub fn build_all(&mut self) -> Result<BuildStats, String> {
+        println!("╔═══════════════════════════════════════════════════════════════╗");
+        println!("║  BUILD-UNIVERSE Build System v2.0.0                          ║");
+        println!("║  Building {} modules...                                        ║", self.graph.build_order.len());
+        println!("╚═══════════════════════════════════════════════════════════════╝");
+        println!();
+
+        let start = Instant::now();
+        let build_order = self.graph.get_build_order().to_vec();
+
+        self.stats.total_modules = build_order.len();
+
+        for module_name in &build_order {
+            match self.build_module(module_name) {
+                Ok(result) => {
+                    if result.success {
+                        self.stats.succeeded += 1;
+                        println!("  ✓ {} ({} ms)", module_name, result.duration_ms);
+                    } else {
+                        self.stats.failed += 1;
+                        println!("  ✗ {} - FAILED", module_name);
+                        if self.config.verbose {
+                            println!("    {}", result.output);
+                        }
+                    }
+                    self.results.push(result);
+                }
+                Err(e) => {
+                    self.stats.failed += 1;
+                    println!("  ✗ {} - ERROR: {}", module_name, e);
+                }
+            }
+        }
+
+        self.stats.total_duration_ms = start.elapsed().as_millis() as u64;
+
+        println!();
+        println!("╔═══════════════════════════════════════════════════════════════╗");
+        println!("║  Build Complete                                               ║");
+        println!("║  Succeeded: {} │ Failed: {} │ Duration: {}ms            ║",
+            self.stats.succeeded, self.stats.failed, self.stats.total_duration_ms);
+        println!("╚═══════════════════════════════════════════════════════════════╝");
+
+        if self.stats.failed > 0 {
+            Err(format!("{} module(s) failed to build", self.stats.failed))
+        } else {
+            Ok(self.stats.clone())
+        }
+    }
+
+    /// Build a single module
+    fn build_module(&mut self, name: &str) -> Result<BuildResult, String> {
+        let node = self.graph.nodes.get(name)
+            .ok_or_else(|| format!("Module '{}' not found", name))?;
+
+        let start = Instant::now();
+
+        let (success, output, artifacts) = if node.is_rust {
+            self.build_rust_module(name, &node.path)?
+        } else {
+            self.build_build_module(name, &node.path)?
+        };
+
+        Ok(BuildResult {
+            module: name.to_string(),
+            success,
+            duration_ms: start.elapsed().as_millis() as u64,
+            output,
+            artifacts,
+        })
+    }
+
+    /// Build a Rust module
+    fn build_rust_module(&self, name: &str, path: &Path) -> Result<(bool, String, Vec<PathBuf>), String> {
+        let mut cmd_args = vec![
+            "build".to_string(),
+            format!("--manifest-path={}/Cargo.toml", path.display()),
+        ];
+
+        if self.config.profile == Profile::Release || self.config.profile == Profile::Distribution {
+            cmd_args.push("--release".to_string());
+        }
+
+        // In a real implementation, we'd run cargo here
+        // For now, simulate success
+        Ok((true, format!("Built Rust module: {}", name), vec![]))
+    }
+
+    /// Build a BuildLang module
+    fn build_build_module(&self, name: &str, path: &Path) -> Result<(bool, String, Vec<PathBuf>), String> {
+        let source_file = path.join("lib.bld");
+
+        if !source_file.exists() {
+            return Err(format!("Source file not found: {}", source_file.display()));
+        }
+
+        let output_dir = self.config.output_dir
+            .join(self.config.profile.name())
+            .join(name);
+
+        // In a real implementation, we'd invoke the BuildLang compiler
+        // build build --input <source> --output <output_dir> --opt-level <level>
+
+        let cmd_args = vec![
+            "build".to_string(),
+            format!("--input={}", source_file.display()),
+            format!("--output={}", output_dir.display()),
+            format!("--opt-level={}", self.config.profile.optimization_level()),
+            format!("--target={}", self.config.target.triple()),
+        ];
+
+        if self.config.profile.debug_info() {
+            // cmd_args.push("--debug-info".to_string());
+        }
+
+        for feature in &self.config.features {
+            // cmd_args.push(format!("--feature={}", feature));
+        }
+
+        // Simulate compilation
+        Ok((true, format!("Compiled BuildLang module: {}", name), vec![output_dir]))
+    }
+
+    /// Build specific modules
+    pub fn build_modules(&mut self, modules: &[&str]) -> Result<BuildStats, String> {
+        for name in modules {
+            if !self.graph.nodes.contains_key(*name) {
+                return Err(format!("Unknown module: {}", name));
+            }
+        }
+
+        // Build dependencies first
+        let mut to_build: Vec<String> = Vec::new();
+        for name in modules {
+            self.collect_dependencies(name, &mut to_build);
+        }
+
+        self.stats.total_modules = to_build.len();
+
+        let start = Instant::now();
+
+        for module_name in &to_build {
+            match self.build_module(module_name) {
+                Ok(result) => {
+                    if result.success {
+                        self.stats.succeeded += 1;
+                    } else {
+                        self.stats.failed += 1;
+                    }
+                    self.results.push(result);
+                }
+                Err(_) => {
+                    self.stats.failed += 1;
+                }
+            }
+        }
+
+        self.stats.total_duration_ms = start.elapsed().as_millis() as u64;
+        Ok(self.stats.clone())
+    }
+
+    fn collect_dependencies(&self, name: &str, result: &mut Vec<String>) {
+        if result.contains(&name.to_string()) {
+            return;
+        }
+
+        if let Some(node) = self.graph.nodes.get(name) {
+            for dep in &node.dependencies {
+                self.collect_dependencies(dep, result);
+            }
+        }
+
+        result.push(name.to_string());
+    }
+
+    /// Clean build artifacts
+    pub fn clean(&self) -> Result<(), String> {
+        println!("Cleaning build artifacts...");
+        if self.config.output_dir.exists() {
+            remove_dir_all(&self.config.output_dir)
+                .map_err(|e| format!("Failed to clean: {}", e))?;
+        }
+        println!("Clean complete.");
+        Ok(())
+    }
+
+    /// Get build results
+    pub fn results(&self) -> &[BuildResult] {
+        &self.results
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// CLI INTERFACE
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Parse command line arguments and run the build
+pub fn main() -> Result<(), String> {
+    let args: Vec<String> = env::args().collect();
+
+    let mut config = BuildConfig::default();
+    let mut command = "build";
+    let mut modules: Vec<&str> = Vec::new();
+
+    let mut i = 1;
+    while i < args.len() {
+        match args[i].as_str() {
+            "build" | "clean" | "test" | "check" => {
+                command = &args[i];
+            }
+            "--release" => {
+                config.profile = Profile::Release;
+            }
+            "--debug" => {
+                config.profile = Profile::Debug;
+            }
+            "--dist" => {
+                config.profile = Profile::Distribution;
+            }
+            "-v" | "--verbose" => {
+                config.verbose = true;
+            }
+            "-j" | "--jobs" => {
+                i += 1;
+                if i < args.len() {
+                    config.jobs = args[i].parse().unwrap_or(8);
+                }
+            }
+            "--target" => {
+                i += 1;
+                if i < args.len() {
+                    config.target = match args[i].as_str() {
+                        "windows" => Target::NativeWindows,
+                        "linux" => Target::NativeLinux,
+                        "macos" => Target::NativeMacOS,
+                        "wasm" => Target::WebAssembly,
+                        "buildos" => Target::BuildOS,
+                        _ => return Err(format!("Unknown target: {}", args[i])),
+                    };
+                }
+            }
+            arg if !arg.starts_with('-') => {
+                modules.push(arg);
+            }
+            _ => {
+                return Err(format!("Unknown argument: {}", args[i]));
+            }
+        }
+        i += 1;
+    }
+
+    let mut engine = BuildEngine::new(config);
+
+    match command {
+        "build" => {
+            if modules.is_empty() {
+                engine.build_all()?;
+            } else {
+                engine.build_modules(&modules)?;
+            }
+        }
+        "clean" => {
+            engine.clean()?;
+        }
+        "test" => {
+            println!("Running tests...");
+            // Would run test suite
+        }
+        "check" => {
+            println!("Checking syntax and types...");
+            // Would run type checker without codegen
+        }
+        _ => {
+            return Err(format!("Unknown command: {}", command));
+        }
+    }
+
+    Ok(())
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// TESTS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_dependency_order() {
+        let graph = DependencyGraph::new();
+        let order = graph.get_build_order();
+
+        // buildlang must come before everything
+        let ql_pos = order.iter().position(|s| s == "buildlang").unwrap();
+
+        // foundation depends on buildlang
+        let fd_pos = order.iter().position(|s| s == "foundation").unwrap();
+        assert!(ql_pos < fd_pos);
+
+        // photon depends on foundation and spectrum
+        let sp_pos = order.iter().position(|s| s == "spectrum").unwrap();
+        let ph_pos = order.iter().position(|s| s == "photon").unwrap();
+        assert!(fd_pos < ph_pos);
+        assert!(sp_pos < ph_pos);
+
+        // universe comes last
+        let un_pos = order.iter().position(|s| s == "universe").unwrap();
+        assert_eq!(un_pos, order.len() - 1);
+    }
+
+    #[test]
+    fn test_build_config() {
+        let debug = BuildConfig::debug();
+        assert_eq!(debug.profile.optimization_level(), 0);
+        assert!(debug.profile.debug_info());
+
+        let release = BuildConfig::release();
+        assert_eq!(release.profile.optimization_level(), 2);
+
+        let dist = BuildConfig::distribution();
+        assert_eq!(dist.profile.optimization_level(), 3);
+        assert!(!dist.profile.debug_info());
+    }
+
+    #[test]
+    fn test_target_triples() {
+        assert_eq!(Target::NativeWindows.triple(), "x86_64-pc-windows-msvc");
+        assert_eq!(Target::WebAssembly.triple(), "wasm32-wasi");
+        assert_eq!(Target::BuildOS.triple(), "x86_64-buildos");
+    }
+}

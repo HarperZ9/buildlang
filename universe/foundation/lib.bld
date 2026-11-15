@@ -1,0 +1,1335 @@
+// ===========================================================================
+// HARPER STANDARD LIBRARY v1.0.0
+// ===========================================================================
+// Copyright 2024-2025 Zain Dana Harper. All Rights Reserved.
+// ===========================================================================
+//
+// Standard Library Modules:
+// 1. std::math - Mathematical functions and constants
+// 2. std::string - String manipulation
+// 3. std::collections - Data structures
+// 4. std::io - Input/Output operations
+// 5. std::ai - AI/ML primitives
+// 6. std::graph - Graph data structures and algorithms
+//
+// ===========================================================================
+
+// ===========================================================================
+// MODULE 1: std::math
+// ===========================================================================
+
+pub mod math {
+    // Constants
+    pub const PI: f64 = 3.14159265358979323846;
+    pub const E: f64 = 2.71828182845904523536;
+    pub const TAU: f64 = 6.28318530717958647692;
+    pub const PHI: f64 = 1.61803398874989484820;
+    pub const SQRT2: f64 = 1.41421356237309504880;
+    pub const LN2: f64 = 0.69314718055994530942;
+    pub const LN10: f64 = 2.30258509299404568402;
+
+    // Basic functions (intrinsic implementations)
+    pub fn abs(x: f64) -> f64 { if x < 0.0 { -x } else { x } }
+    pub fn min(a: f64, b: f64) -> f64 { if a < b { a } else { b } }
+    pub fn max(a: f64, b: f64) -> f64 { if a > b { a } else { b } }
+    pub fn clamp(x: f64, lo: f64, hi: f64) -> f64 { min(max(x, lo), hi) }
+
+    pub fn min_usize(a: usize, b: usize) -> usize { if a < b { a } else { b } }
+    pub fn max_usize(a: usize, b: usize) -> usize { if a > b { a } else { b } }
+
+    // Rounding
+    pub fn floor(x: f64) -> f64 { intrinsic::floor(x) }
+    pub fn ceil(x: f64) -> f64 { intrinsic::ceil(x) }
+    pub fn round(x: f64) -> f64 { intrinsic::round(x) }
+    pub fn trunc(x: f64) -> f64 { intrinsic::trunc(x) }
+    pub fn fract(x: f64) -> f64 { x - floor(x) }
+
+    // Powers and roots
+    pub fn sqrt(x: f64) -> f64 { intrinsic::sqrt(x) }
+    pub fn cbrt(x: f64) -> f64 { pow(x, 1.0 / 3.0) }
+    pub fn pow(base: f64, exp: f64) -> f64 { intrinsic::pow(base, exp) }
+    pub fn exp(x: f64) -> f64 { intrinsic::exp(x) }
+    pub fn exp2(x: f64) -> f64 { intrinsic::exp2(x) }
+    pub fn expm1(x: f64) -> f64 { exp(x) - 1.0 }
+
+    // Logarithms
+    pub fn log(x: f64) -> f64 { intrinsic::log(x) }
+    pub fn log2(x: f64) -> f64 { intrinsic::log2(x) }
+    pub fn log10(x: f64) -> f64 { intrinsic::log10(x) }
+    pub fn log1p(x: f64) -> f64 { log(1.0 + x) }
+
+    // Trigonometric
+    pub fn sin(x: f64) -> f64 { intrinsic::sin(x) }
+    pub fn cos(x: f64) -> f64 { intrinsic::cos(x) }
+    pub fn tan(x: f64) -> f64 { intrinsic::tan(x) }
+    pub fn asin(x: f64) -> f64 { intrinsic::asin(x) }
+    pub fn acos(x: f64) -> f64 { intrinsic::acos(x) }
+    pub fn atan(x: f64) -> f64 { intrinsic::atan(x) }
+    pub fn atan2(y: f64, x: f64) -> f64 { intrinsic::atan2(y, x) }
+
+    // Hyperbolic
+    pub fn sinh(x: f64) -> f64 { (exp(x) - exp(0.0 - x)) / 2.0 }
+    pub fn cosh(x: f64) -> f64 { (exp(x) + exp(0.0 - x)) / 2.0 }
+    pub fn tanh(x: f64) -> f64 {
+        let ex = exp(x);
+        let enx = exp(0.0 - x);
+        (ex - enx) / (ex + enx)
+    }
+    pub fn asinh(x: f64) -> f64 { log(x + sqrt(x * x + 1.0)) }
+    pub fn acosh(x: f64) -> f64 { log(x + sqrt(x * x - 1.0)) }
+    pub fn atanh(x: f64) -> f64 { 0.5 * log((1.0 + x) / (1.0 - x)) }
+
+    // Special functions
+    pub fn erf(x: f64) -> f64 {
+        // Approximation using Horner's method
+        let a1 =  0.254829592;
+        let a2 = -0.284496736;
+        let a3 =  1.421413741;
+        let a4 = -1.453152027;
+        let a5 =  1.061405429;
+        let p  =  0.3275911;
+
+        let sign = if x < 0.0 { -1.0 } else { 1.0 };
+        let ax = abs(x);
+        let t = 1.0 / (1.0 + p * ax);
+        let y = 1.0 - (((((a5 * t + a4) * t) + a3) * t + a2) * t + a1) * t * exp(0.0 - ax * ax);
+        sign * y
+    }
+
+    pub fn gamma(x: f64) -> f64 {
+        // Lanczos approximation
+        let g = 7;
+        let c0 = 0.99999999999980993;
+        let c1 = 676.5203681218851;
+        let c2 = -1259.1392167224028;
+        let c3 = 771.32342877765313;
+        let c4 = -176.61502916214059;
+        let c5 = 12.507343278686905;
+        let c6 = -0.13857109526572012;
+        let c7 = 9.9843695780195716e-6;
+        let c8 = 1.5056327351493116e-7;
+
+        if x < 0.5 {
+            PI / (sin(PI * x) * gamma(1.0 - x))
+        } else {
+            let xm = x - 1.0;
+            let t = xm + 7.0 + 0.5;
+            let a = c0
+                + c1 / (xm + 1.0)
+                + c2 / (xm + 2.0)
+                + c3 / (xm + 3.0)
+                + c4 / (xm + 4.0)
+                + c5 / (xm + 5.0)
+                + c6 / (xm + 6.0)
+                + c7 / (xm + 7.0)
+                + c8 / (xm + 8.0);
+            sqrt(2.0 * PI) * pow(t, xm + 0.5) * exp(0.0 - t) * a
+        }
+    }
+
+    // Linear interpolation
+    pub fn lerp(a: f64, b: f64, t: f64) -> f64 { a + (b - a) * t }
+    pub fn smoothstep(edge0: f64, edge1: f64, x: f64) -> f64 {
+        let t = clamp((x - edge0) / (edge1 - edge0), 0.0, 1.0);
+        t * t * (3.0 - 2.0 * t)
+    }
+
+    // Degree/radian conversion
+    pub fn radians(degrees: f64) -> f64 { degrees * PI / 180.0 }
+    pub fn degrees(radians: f64) -> f64 { radians * 180.0 / PI }
+
+    // Float utilities
+    pub fn is_nan(x: f64) -> bool { x != x }
+    pub fn is_finite(x: f64) -> bool { !is_nan(x) && x < 1.0e308 && x > -1.0e308 }
+
+    // Vector operations
+    pub struct Vec2 { pub x: f64, pub y: f64 }
+    pub struct Vec3 { pub x: f64, pub y: f64, pub z: f64 }
+    pub struct Vec4 { pub x: f64, pub y: f64, pub z: f64, pub w: f64 }
+
+    impl Vec3 {
+        pub fn new(x: f64, y: f64, z: f64) -> Vec3 { Vec3 { x, y, z } }
+        pub fn zero() -> Vec3 { Vec3::new(0.0, 0.0, 0.0) }
+        pub fn one() -> Vec3 { Vec3::new(1.0, 1.0, 1.0) }
+
+        pub fn dot(&self, other: &Vec3) -> f64 {
+            self.x * other.x + self.y * other.y + self.z * other.z
+        }
+
+        pub fn cross(&self, other: &Vec3) -> Vec3 {
+            Vec3::new(
+                self.y * other.z - self.z * other.y,
+                self.z * other.x - self.x * other.z,
+                self.x * other.y - self.y * other.x,
+            )
+        }
+
+        pub fn length(&self) -> f64 { sqrt(self.dot(self)) }
+
+        pub fn normalize(&self) -> Vec3 {
+            let len = self.length();
+            if len > 0.0 {
+                Vec3::new(self.x / len, self.y / len, self.z / len)
+            } else {
+                Vec3::new(self.x, self.y, self.z)
+            }
+        }
+
+        pub fn add(&self, other: &Vec3) -> Vec3 {
+            Vec3::new(self.x + other.x, self.y + other.y, self.z + other.z)
+        }
+
+        pub fn sub(&self, other: &Vec3) -> Vec3 {
+            Vec3::new(self.x - other.x, self.y - other.y, self.z - other.z)
+        }
+
+        pub fn scale(&self, s: f64) -> Vec3 {
+            Vec3::new(self.x * s, self.y * s, self.z * s)
+        }
+    }
+
+    // Matrix operations
+    pub struct Mat4 {
+        pub m: [[f64; 4]; 4],
+    }
+
+    impl Mat4 {
+        pub fn identity() -> Mat4 {
+            Mat4 { m: [
+                [1.0, 0.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0, 0.0],
+                [0.0, 0.0, 1.0, 0.0],
+                [0.0, 0.0, 0.0, 1.0],
+            ]}
+        }
+
+        pub fn translation(x: f64, y: f64, z: f64) -> Mat4 {
+            Mat4 { m: [
+                [1.0, 0.0, 0.0, x],
+                [0.0, 1.0, 0.0, y],
+                [0.0, 0.0, 1.0, z],
+                [0.0, 0.0, 0.0, 1.0],
+            ]}
+        }
+
+        pub fn scale_matrix(x: f64, y: f64, z: f64) -> Mat4 {
+            Mat4 { m: [
+                [x, 0.0, 0.0, 0.0],
+                [0.0, y, 0.0, 0.0],
+                [0.0, 0.0, z, 0.0],
+                [0.0, 0.0, 0.0, 1.0],
+            ]}
+        }
+
+        pub fn rotation_x(angle: f64) -> Mat4 {
+            let c = cos(angle);
+            let s = sin(angle);
+            Mat4 { m: [
+                [1.0, 0.0, 0.0, 0.0],
+                [0.0, c, 0.0 - s, 0.0],
+                [0.0, s, c, 0.0],
+                [0.0, 0.0, 0.0, 1.0],
+            ]}
+        }
+
+        pub fn mul(&self, other: &Mat4) -> Mat4 {
+            let mut result = [[0.0; 4]; 4];
+            for i in 0..4 {
+                for j in 0..4 {
+                    for k in 0..4 {
+                        result[i][j] = result[i][j] + self.m[i][k] * other.m[k][j];
+                    }
+                }
+            }
+            Mat4 { m: result }
+        }
+
+        pub fn perspective(fov: f64, aspect: f64, near: f64, far: f64) -> Mat4 {
+            let f = 1.0 / tan(fov / 2.0);
+            Mat4 { m: [
+                [f / aspect, 0.0, 0.0, 0.0],
+                [0.0, f, 0.0, 0.0],
+                [0.0, 0.0, (far + near) / (near - far), (2.0 * far * near) / (near - far)],
+                [0.0, 0.0, -1.0, 0.0],
+            ]}
+        }
+    }
+}
+
+// ===========================================================================
+// MODULE 2: std::string
+// ===========================================================================
+
+pub mod string {
+    use std::collections::Vec;
+
+    // String builder for efficient concatenation
+    pub struct StringBuilder {
+        buffer: Vec<char>,
+    }
+
+    impl StringBuilder {
+        pub fn new() -> StringBuilder { StringBuilder { buffer: Vec::new() } }
+
+        pub fn push(&mut self, c: char) { self.buffer.push(c); }
+
+        pub fn push_str(&mut self, s: &str) {
+            for c in s.chars() { self.buffer.push(c); }
+        }
+
+        pub fn build(&self) -> String {
+            self.buffer.iter().collect()
+        }
+
+        pub fn len(&self) -> usize { self.buffer.len() }
+        pub fn is_empty(&self) -> bool { self.buffer.is_empty() }
+        pub fn clear(&mut self) { self.buffer.clear(); }
+    }
+
+    // String functions
+    pub fn trim(s: &str) -> String {
+        let bytes = s.as_bytes();
+        let mut start: usize = 0;
+        let mut end: usize = bytes.len();
+
+        while start < end && bytes[start] == 32 { start = start + 1; }
+        while end > start && bytes[end - 1] == 32 { end = end - 1; }
+
+        let mut result = String::new();
+        let mut i = start;
+        while i < end {
+            let chars: Vec<char> = s.chars().collect();
+            if i < chars.len() {
+                result.push(chars[i]);
+            }
+            i = i + 1;
+        }
+        result
+    }
+
+    pub fn to_uppercase(s: &str) -> String {
+        let mut result = String::new();
+        for c in s.chars() {
+            if c >= 'a' && c <= 'z' {
+                let code = c as u32 - 32;
+                result.push(char::from(code as u8));
+            } else {
+                result.push(c);
+            }
+        }
+        result
+    }
+
+    pub fn to_lowercase(s: &str) -> String {
+        let mut result = String::new();
+        for c in s.chars() {
+            if c >= 'A' && c <= 'Z' {
+                let code = c as u32 + 32;
+                result.push(char::from(code as u8));
+            } else {
+                result.push(c);
+            }
+        }
+        result
+    }
+
+    pub fn contains(s: &str, pattern: &str) -> bool {
+        s.contains(pattern)
+    }
+
+    pub fn starts_with(s: &str, prefix: &str) -> bool {
+        s.starts_with(prefix)
+    }
+
+    pub fn ends_with(s: &str, suffix: &str) -> bool {
+        s.ends_with(suffix)
+    }
+
+    pub fn replace(s: &str, from: &str, to: &str) -> String {
+        s.replace(from, to)
+    }
+
+    pub fn repeat(s: &str, n: usize) -> String {
+        let mut result = String::new();
+        let mut i: usize = 0;
+        while i < n {
+            result.push_str(s);
+            i = i + 1;
+        }
+        result
+    }
+
+    pub fn reverse(s: &str) -> String {
+        let chars: Vec<char> = s.chars().collect();
+        let mut result = String::new();
+        let len = chars.len();
+        if len > 0 {
+            let mut i = len;
+            while i > 0 {
+                i = i - 1;
+                result.push(chars[i]);
+            }
+        }
+        result
+    }
+}
+
+// ===========================================================================
+// MODULE 3: std::collections
+// ===========================================================================
+
+pub mod collections {
+    // Vec<T> and HashMap<K,V> are provided as compiler built-in types.
+    // They support: .push(), .pop(), .len(), .is_empty(), .get(), indexing.
+    // Do NOT redefine them here -- the compiler maps them to C runtime functions.
+
+    // Additional collection types built on top of the built-in Vec:
+
+    // Double-ended queue
+    pub struct VecDeque<T> {
+        data: Vec<T>,
+    }
+
+    impl<T> VecDeque<T> {
+        pub fn new() -> VecDeque<T> {
+            VecDeque {
+                data: Vec::new(),
+            }
+        }
+
+        pub fn push_back(&mut self, value: T) {
+            self.data.push(value);
+        }
+
+        pub fn pop_front(&mut self) -> Option<T> {
+            if self.data.is_empty() {
+                None
+            } else {
+                Some(self.data.remove(0))
+            }
+        }
+
+        pub fn pop_back(&mut self) -> Option<T> {
+            self.data.pop()
+        }
+
+        pub fn len(&self) -> usize { self.data.len() }
+        pub fn is_empty(&self) -> bool { self.data.is_empty() }
+    }
+
+    // Binary heap (priority queue)
+    pub struct BinaryHeap<T: Ord> {
+        data: Vec<T>,
+    }
+
+    impl<T: Ord> BinaryHeap<T> {
+        pub fn new() -> BinaryHeap<T> { BinaryHeap { data: Vec::new() } }
+
+        pub fn push(&mut self, value: T) {
+            self.data.push(value);
+            self.sift_up(self.data.len() - 1);
+        }
+
+        pub fn pop(&mut self) -> Option<T> {
+            if self.data.is_empty() { return None; }
+            let last_idx = self.data.len() - 1;
+            self.data.swap(0, last_idx);
+            let result = self.data.pop();
+            if !self.data.is_empty() {
+                self.sift_down(0);
+            }
+            result
+        }
+
+        pub fn peek(&self) -> Option<&T> {
+            self.data.first()
+        }
+
+        pub fn len(&self) -> usize { self.data.len() }
+        pub fn is_empty(&self) -> bool { self.data.is_empty() }
+
+        fn sift_up(&mut self, mut idx: usize) {
+            while idx > 0 {
+                let parent = (idx - 1) / 2;
+                if self.data[idx] <= self.data[parent] { break; }
+                self.data.swap(idx, parent);
+                idx = parent;
+            }
+        }
+
+        fn sift_down(&mut self, mut idx: usize) {
+            let len = self.data.len();
+            loop {
+                let left = 2 * idx + 1;
+                let right = 2 * idx + 2;
+                let mut largest = idx;
+
+                if left < len && self.data[left] > self.data[largest] {
+                    largest = left;
+                }
+                if right < len && self.data[right] > self.data[largest] {
+                    largest = right;
+                }
+
+                if largest == idx { break; }
+                self.data.swap(idx, largest);
+                idx = largest;
+            }
+        }
+    }
+
+    // Ordered set (sorted Vec)
+    pub struct BTreeSet<T: Ord> {
+        data: Vec<T>,
+    }
+
+    impl<T: Ord> BTreeSet<T> {
+        pub fn new() -> BTreeSet<T> { BTreeSet { data: Vec::new() } }
+
+        pub fn insert(&mut self, value: T) -> bool {
+            match self.data.binary_search(&value) {
+                Ok(_) => false,
+                Err(idx) => {
+                    self.data.insert(idx, value);
+                    true
+                }
+            }
+        }
+
+        pub fn contains(&self, value: &T) -> bool {
+            self.data.binary_search(value).is_ok()
+        }
+
+        pub fn remove(&mut self, value: &T) -> bool {
+            match self.data.binary_search(value) {
+                Ok(idx) => {
+                    self.data.remove(idx);
+                    true
+                }
+                Err(_) => false,
+            }
+        }
+
+        pub fn len(&self) -> usize { self.data.len() }
+        pub fn is_empty(&self) -> bool { self.data.is_empty() }
+    }
+}
+
+// ===========================================================================
+// MODULE 4: std::io
+// ===========================================================================
+
+pub mod io {
+    // I/O error types
+    #[derive(Debug)]
+    pub enum IoError {
+        NotFound,
+        PermissionDenied,
+        ConnectionRefused,
+        ConnectionReset,
+        BrokenPipe,
+        AlreadyExists,
+        WouldBlock,
+        InvalidInput,
+        InvalidData,
+        TimedOut,
+        WriteZero,
+        UnexpectedEof,
+        Other(String),
+    }
+
+    // Buffered reader
+    pub struct BufReader {
+        buffer: Vec<u8>,
+        pos: usize,
+        cap: usize,
+    }
+
+    impl BufReader {
+        pub fn new() -> BufReader {
+            BufReader {
+                buffer: Vec::new(),
+                pos: 0,
+                cap: 0,
+            }
+        }
+
+        pub fn from_bytes(data: Vec<u8>) -> BufReader {
+            let cap = data.len();
+            BufReader {
+                buffer: data,
+                pos: 0,
+                cap: cap,
+            }
+        }
+
+        pub fn read_line(&mut self, buf: &mut String) -> Result<usize, IoError> {
+            let mut total: usize = 0;
+            while self.pos < self.cap {
+                let byte = self.buffer[self.pos];
+                self.pos = self.pos + 1;
+                total = total + 1;
+                if byte == 10 {
+                    break;
+                }
+            }
+            Ok(total)
+        }
+
+        pub fn is_eof(&self) -> bool {
+            self.pos >= self.cap
+        }
+    }
+
+    // Standard streams
+    pub struct Stdin;
+    pub struct Stdout;
+    pub struct Stderr;
+
+    pub fn stdin() -> Stdin { Stdin }
+    pub fn stdout() -> Stdout { Stdout }
+    pub fn stderr() -> Stderr { Stderr }
+
+    // Convenience functions
+    pub fn print(s: &str) {
+        // System call to write to stdout
+    }
+
+    pub fn println(s: &str) {
+        print(s);
+        print("\n");
+    }
+
+    pub fn eprint(s: &str) {
+        // System call to write to stderr
+    }
+
+    pub fn eprintln(s: &str) {
+        eprint(s);
+        eprint("\n");
+    }
+}
+
+// ===========================================================================
+// MODULE 5: std::ai - AI/ML Primitives
+// ===========================================================================
+
+pub mod ai {
+    use std::collections::Vec;
+    use std::math::{exp, log, sqrt, tanh};
+
+    // Tensor - multi-dimensional array for ML
+    pub struct Tensor {
+        pub data: Vec<f32>,
+        shape: Vec<usize>,
+        strides: Vec<usize>,
+    }
+
+    impl Tensor {
+        pub fn new(shape: Vec<usize>) -> Tensor {
+            let mut size: usize = 1;
+            let mut i: usize = 0;
+            while i < shape.len() {
+                size = size * shape[i];
+                i = i + 1;
+            }
+            let strides = Tensor::compute_strides(&shape);
+            let mut data = Vec::new();
+            let mut j: usize = 0;
+            while j < size {
+                data.push(0.0);
+                j = j + 1;
+            }
+            Tensor {
+                data: data,
+                shape: shape,
+                strides: strides,
+            }
+        }
+
+        pub fn from_data(data: Vec<f32>, shape: Vec<usize>) -> Tensor {
+            let strides = Tensor::compute_strides(&shape);
+            Tensor { data: data, shape: shape, strides: strides }
+        }
+
+        fn compute_strides(shape: &Vec<usize>) -> Vec<usize> {
+            let len = shape.len();
+            let mut strides = Vec::new();
+            let mut i: usize = 0;
+            while i < len {
+                strides.push(1);
+                i = i + 1;
+            }
+            if len > 1 {
+                let mut idx = len - 2;
+                loop {
+                    strides[idx] = strides[idx + 1] * shape[idx + 1];
+                    if idx == 0 { break; }
+                    idx = idx - 1;
+                }
+            }
+            strides
+        }
+
+        pub fn shape(&self) -> &Vec<usize> { &self.shape }
+        pub fn ndim(&self) -> usize { self.shape.len() }
+        pub fn size(&self) -> usize { self.data.len() }
+
+        pub fn get(&self, indices: &Vec<usize>) -> f32 {
+            let idx = self.linear_index(indices);
+            self.data[idx]
+        }
+
+        pub fn set(&mut self, indices: &Vec<usize>, value: f32) {
+            let idx = self.linear_index(indices);
+            self.data[idx] = value;
+        }
+
+        fn linear_index(&self, indices: &Vec<usize>) -> usize {
+            let mut idx: usize = 0;
+            let mut i: usize = 0;
+            while i < indices.len() {
+                idx = idx + indices[i] * self.strides[i];
+                i = i + 1;
+            }
+            idx
+        }
+
+        // Matrix multiplication
+        pub fn matmul(&self, other: &Tensor) -> Tensor {
+            let m = self.shape[0];
+            let n = other.shape[1];
+            let k = self.shape[1];
+
+            let result_shape = vec![m, n];
+            let mut result = Tensor::new(result_shape);
+
+            let mut i: usize = 0;
+            while i < m {
+                let mut j: usize = 0;
+                while j < n {
+                    let mut sum: f32 = 0.0;
+                    let mut l: usize = 0;
+                    while l < k {
+                        let idx_a = vec![i, l];
+                        let idx_b = vec![l, j];
+                        sum = sum + self.get(&idx_a) * other.get(&idx_b);
+                        l = l + 1;
+                    }
+                    let idx_r = vec![i, j];
+                    result.set(&idx_r, sum);
+                    j = j + 1;
+                }
+                i = i + 1;
+            }
+
+            result
+        }
+
+        // Element-wise operations
+        pub fn add(&self, other: &Tensor) -> Tensor {
+            let mut data = Vec::new();
+            let mut i: usize = 0;
+            while i < self.data.len() {
+                data.push(self.data[i] + other.data[i]);
+                i = i + 1;
+            }
+            Tensor::from_data(data, self.shape.clone())
+        }
+
+        pub fn sub(&self, other: &Tensor) -> Tensor {
+            let mut data = Vec::new();
+            let mut i: usize = 0;
+            while i < self.data.len() {
+                data.push(self.data[i] - other.data[i]);
+                i = i + 1;
+            }
+            Tensor::from_data(data, self.shape.clone())
+        }
+
+        pub fn mul(&self, other: &Tensor) -> Tensor {
+            let mut data = Vec::new();
+            let mut i: usize = 0;
+            while i < self.data.len() {
+                data.push(self.data[i] * other.data[i]);
+                i = i + 1;
+            }
+            Tensor::from_data(data, self.shape.clone())
+        }
+
+        pub fn scale(&self, s: f32) -> Tensor {
+            let mut data = Vec::new();
+            let mut i: usize = 0;
+            while i < self.data.len() {
+                data.push(self.data[i] * s);
+                i = i + 1;
+            }
+            Tensor::from_data(data, self.shape.clone())
+        }
+
+        // Activation functions
+        pub fn relu(&self) -> Tensor {
+            let mut data = Vec::new();
+            let mut i: usize = 0;
+            while i < self.data.len() {
+                let x = self.data[i];
+                if x > 0.0 {
+                    data.push(x);
+                } else {
+                    data.push(0.0);
+                }
+                i = i + 1;
+            }
+            Tensor::from_data(data, self.shape.clone())
+        }
+
+        pub fn sigmoid(&self) -> Tensor {
+            let mut data = Vec::new();
+            let mut i: usize = 0;
+            while i < self.data.len() {
+                let x = self.data[i] as f64;
+                let val = 1.0 / (1.0 + exp(0.0 - x));
+                data.push(val as f32);
+                i = i + 1;
+            }
+            Tensor::from_data(data, self.shape.clone())
+        }
+
+        pub fn tanh_act(&self) -> Tensor {
+            let mut data = Vec::new();
+            let mut i: usize = 0;
+            while i < self.data.len() {
+                let x = self.data[i] as f64;
+                let val = tanh(x);
+                data.push(val as f32);
+                i = i + 1;
+            }
+            Tensor::from_data(data, self.shape.clone())
+        }
+
+        pub fn softmax(&self) -> Tensor {
+            // Find max value
+            let mut max_val: f32 = self.data[0];
+            let mut i: usize = 1;
+            while i < self.data.len() {
+                if self.data[i] > max_val {
+                    max_val = self.data[i];
+                }
+                i = i + 1;
+            }
+            // Compute exp(x - max) and sum
+            let mut exp_data = Vec::new();
+            let mut sum: f32 = 0.0;
+            let mut j: usize = 0;
+            while j < self.data.len() {
+                let val = exp((self.data[j] - max_val) as f64) as f32;
+                exp_data.push(val);
+                sum = sum + val;
+                j = j + 1;
+            }
+            // Normalize
+            let mut data = Vec::new();
+            let mut k: usize = 0;
+            while k < exp_data.len() {
+                data.push(exp_data[k] / sum);
+                k = k + 1;
+            }
+            Tensor::from_data(data, self.shape.clone())
+        }
+
+        // Reduction operations
+        pub fn sum(&self) -> f32 {
+            let mut total: f32 = 0.0;
+            let mut i: usize = 0;
+            while i < self.data.len() {
+                total = total + self.data[i];
+                i = i + 1;
+            }
+            total
+        }
+
+        pub fn mean(&self) -> f32 {
+            self.sum() / self.data.len() as f32
+        }
+
+        pub fn max_value(&self) -> f32 {
+            let mut m: f32 = self.data[0];
+            let mut i: usize = 1;
+            while i < self.data.len() {
+                if self.data[i] > m {
+                    m = self.data[i];
+                }
+                i = i + 1;
+            }
+            m
+        }
+
+        pub fn argmax(&self) -> usize {
+            let mut best_idx: usize = 0;
+            let mut best_val: f32 = self.data[0];
+            let mut i: usize = 1;
+            while i < self.data.len() {
+                if self.data[i] > best_val {
+                    best_val = self.data[i];
+                    best_idx = i;
+                }
+                i = i + 1;
+            }
+            best_idx
+        }
+    }
+
+    // Dense (fully connected) layer
+    pub struct Dense {
+        weights: Tensor,
+        bias: Tensor,
+    }
+
+    impl Dense {
+        pub fn new(input_size: usize, output_size: usize) -> Dense {
+            // Deterministic Xavier initialization using simple PRNG
+            let scale = sqrt(2.0 / (input_size + output_size) as f64) as f32;
+
+            let mut weights_data = Vec::new();
+            let total = input_size * output_size;
+            let mut seed: u64 = 42;
+            let mut i: usize = 0;
+            while i < total {
+                // Simple LCG PRNG for deterministic init
+                seed = seed * 6364136223846793005 + 1442695040888963407;
+                let raw = ((seed >> 33) as f64) / 2147483648.0 - 1.0;
+                weights_data.push((raw as f32) * scale);
+                i = i + 1;
+            }
+
+            let weight_shape = vec![input_size, output_size];
+            let bias_shape = vec![output_size];
+            Dense {
+                weights: Tensor::from_data(weights_data, weight_shape),
+                bias: Tensor::new(bias_shape),
+            }
+        }
+
+        pub fn forward(&self, input: &Tensor) -> Tensor {
+            input.matmul(&self.weights).add(&self.bias)
+        }
+    }
+
+    // Simple feedforward neural network
+    pub struct NeuralNetwork {
+        layers: Vec<Dense>,
+        use_relu: bool,
+    }
+
+    impl NeuralNetwork {
+        pub fn new(layer_sizes: Vec<usize>, use_relu: bool) -> NeuralNetwork {
+            let mut layers = Vec::new();
+            let mut i: usize = 0;
+            while i + 1 < layer_sizes.len() {
+                layers.push(Dense::new(layer_sizes[i], layer_sizes[i + 1]));
+                i = i + 1;
+            }
+
+            NeuralNetwork { layers: layers, use_relu: use_relu }
+        }
+
+        pub fn forward(&self, input: &Tensor) -> Tensor {
+            let mut x = Tensor::from_data(input.data.clone(), input.shape.clone());
+
+            let mut i: usize = 0;
+            while i < self.layers.len() {
+                x = self.layers[i].forward(&x);
+
+                // Apply activation (except last layer)
+                if i < self.layers.len() - 1 {
+                    if self.use_relu {
+                        x = x.relu();
+                    } else {
+                        x = x.sigmoid();
+                    }
+                }
+                i = i + 1;
+            }
+
+            x
+        }
+
+        pub fn predict(&self, input: &Tensor) -> usize {
+            let output = self.forward(input);
+            output.argmax()
+        }
+    }
+
+    // Loss functions
+    pub fn mse_loss(predicted: &Tensor, target: &Tensor) -> f32 {
+        let diff = predicted.sub(target);
+        let squared = diff.mul(&diff);
+        squared.mean()
+    }
+
+    pub fn cross_entropy_loss(predicted: &Tensor, target: &Tensor) -> f32 {
+        let epsilon: f32 = 1e-7;
+        let mut loss: f32 = 0.0;
+        let mut i: usize = 0;
+        while i < predicted.size() {
+            let mut p = predicted.data[i];
+            if p < epsilon { p = epsilon; }
+            if p > 1.0 - epsilon { p = 1.0 - epsilon; }
+            let t = target.data[i];
+            loss = loss - t * (log(p as f64) as f32) - (1.0 - t) * (log((1.0 - p) as f64) as f32);
+            i = i + 1;
+        }
+        loss / predicted.size() as f32
+    }
+
+    // Embedding layer
+    pub struct Embedding {
+        weights: Tensor,
+        vocab_size: usize,
+        embed_dim: usize,
+    }
+
+    impl Embedding {
+        pub fn new(vocab_size: usize, embed_dim: usize) -> Embedding {
+            // Deterministic initialization
+            let mut weights_data = Vec::new();
+            let total = vocab_size * embed_dim;
+            let mut seed: u64 = 123;
+            let mut i: usize = 0;
+            while i < total {
+                seed = seed * 6364136223846793005 + 1442695040888963407;
+                let raw = ((seed >> 33) as f64) / 2147483648.0 - 1.0;
+                weights_data.push((raw * 0.1) as f32);
+                i = i + 1;
+            }
+
+            let shape = vec![vocab_size, embed_dim];
+            Embedding {
+                weights: Tensor::from_data(weights_data, shape),
+                vocab_size: vocab_size,
+                embed_dim: embed_dim,
+            }
+        }
+
+        pub fn forward(&self, indices: &Vec<usize>) -> Tensor {
+            let result_shape = vec![indices.len(), self.embed_dim];
+            let mut result = Tensor::new(result_shape);
+
+            let mut i: usize = 0;
+            while i < indices.len() {
+                let idx = indices[i];
+                let mut j: usize = 0;
+                while j < self.embed_dim {
+                    let src_idx = vec![idx, j];
+                    let dst_idx = vec![i, j];
+                    result.set(&dst_idx, self.weights.get(&src_idx));
+                    j = j + 1;
+                }
+                i = i + 1;
+            }
+
+            result
+        }
+    }
+}
+
+// ===========================================================================
+// MODULE 6: graph - Graph Data Structures and Algorithms
+// ===========================================================================
+
+pub mod graph {
+    use std::collections::{HashMap, HashSet, VecDeque};
+
+    // Directed graph with weighted edges
+    pub struct DiGraph {
+        nodes: Vec<String>,
+        edges: HashMap<String, Vec<(String, f64)>>,
+    }
+
+    impl DiGraph {
+        pub fn new() -> DiGraph {
+            DiGraph { nodes: Vec::new(), edges: HashMap::new() }
+        }
+
+        pub fn add_node(&mut self, node: String) {
+            let mut found = false;
+            let mut i: usize = 0;
+            while i < self.nodes.len() {
+                if self.nodes[i] == node {
+                    found = true;
+                }
+                i = i + 1;
+            }
+            if !found {
+                self.nodes.push(node);
+            }
+        }
+
+        pub fn add_edge(&mut self, from: String, to: String, weight: f64) {
+            self.add_node(from.clone());
+            self.add_node(to.clone());
+            let edges = self.edges.entry(from).or_insert_with(Vec::new);
+            edges.push((to, weight));
+        }
+
+        pub fn neighbors(&self, node: &String) -> Vec<String> {
+            match self.edges.get(node) {
+                Some(edges) => {
+                    let mut result = Vec::new();
+                    let mut i: usize = 0;
+                    while i < edges.len() {
+                        result.push(edges[i].0.clone());
+                        i = i + 1;
+                    }
+                    result
+                }
+                None => Vec::new(),
+            }
+        }
+
+        pub fn edges_from(&self, node: &String) -> Vec<(String, f64)> {
+            match self.edges.get(node) {
+                Some(edges) => edges.clone(),
+                None => Vec::new(),
+            }
+        }
+
+        pub fn node_count(&self) -> usize { self.nodes.len() }
+
+        pub fn edge_count(&self) -> usize {
+            let mut count: usize = 0;
+            for (_key, edges) in &self.edges {
+                count = count + edges.len();
+            }
+            count
+        }
+
+        // Dijkstra's shortest path
+        pub fn dijkstra(&self, start: &String, end: &String) -> Option<(f64, Vec<String>)> {
+            let mut dist: HashMap<String, f64> = HashMap::new();
+            let mut prev: HashMap<String, String> = HashMap::new();
+            let mut visited: HashSet<String> = HashSet::new();
+
+            dist.insert(start.clone(), 0.0);
+
+            loop {
+                // Find unvisited node with smallest distance
+                let mut current: Option<String> = None;
+                let mut current_dist: f64 = 1.0e308;
+
+                for (node, d) in &dist {
+                    if !visited.contains(node) && *d < current_dist {
+                        current = Some(node.clone());
+                        current_dist = *d;
+                    }
+                }
+
+                match current {
+                    None => break,
+                    Some(node) => {
+                        if &node == end {
+                            // Reconstruct path
+                            let mut path = Vec::new();
+                            let mut cur = node.clone();
+                            path.push(cur.clone());
+                            while let Some(p) = prev.get(&cur) {
+                                path.push(p.clone());
+                                cur = p.clone();
+                            }
+                            // Reverse path
+                            let mut reversed = Vec::new();
+                            let mut idx = path.len();
+                            while idx > 0 {
+                                idx = idx - 1;
+                                reversed.push(path[idx].clone());
+                            }
+                            return Some((current_dist, reversed));
+                        }
+
+                        visited.insert(node.clone());
+
+                        let edges = self.edges_from(&node);
+                        let mut i: usize = 0;
+                        while i < edges.len() {
+                            let neighbor = &edges[i].0;
+                            let weight = edges[i].1;
+                            let next_cost = current_dist + weight;
+
+                            let should_update = match dist.get(neighbor) {
+                                Some(d) => next_cost < *d,
+                                None => true,
+                            };
+
+                            if should_update {
+                                dist.insert(neighbor.clone(), next_cost);
+                                prev.insert(neighbor.clone(), node.clone());
+                            }
+                            i = i + 1;
+                        }
+                    }
+                }
+            }
+            None
+        }
+
+        // Breadth-first search
+        pub fn bfs(&self, start: &String) -> Vec<String> {
+            let mut visited: HashSet<String> = HashSet::new();
+            let mut queue = VecDeque::new();
+            let mut result = Vec::new();
+
+            visited.insert(start.clone());
+            queue.push_back(start.clone());
+
+            while !queue.is_empty() {
+                match queue.pop_front() {
+                    Some(node) => {
+                        result.push(node.clone());
+                        let nbrs = self.neighbors(&node);
+                        let mut i: usize = 0;
+                        while i < nbrs.len() {
+                            if !visited.contains(&nbrs[i]) {
+                                visited.insert(nbrs[i].clone());
+                                queue.push_back(nbrs[i].clone());
+                            }
+                            i = i + 1;
+                        }
+                    }
+                    None => {}
+                }
+            }
+            result
+        }
+
+        // Depth-first search
+        pub fn dfs(&self, start: &String) -> Vec<String> {
+            let mut visited: HashSet<String> = HashSet::new();
+            let mut stack = Vec::new();
+            let mut result = Vec::new();
+
+            stack.push(start.clone());
+
+            while !stack.is_empty() {
+                match stack.pop() {
+                    Some(node) => {
+                        if visited.contains(&node) { continue; }
+                        visited.insert(node.clone());
+                        result.push(node.clone());
+                        let nbrs = self.neighbors(&node);
+                        let mut i: usize = 0;
+                        while i < nbrs.len() {
+                            if !visited.contains(&nbrs[i]) {
+                                stack.push(nbrs[i].clone());
+                            }
+                            i = i + 1;
+                        }
+                    }
+                    None => {}
+                }
+            }
+            result
+        }
+
+        // Topological sort (returns None if cycle exists)
+        pub fn topological_sort(&self) -> Option<Vec<String>> {
+            let mut in_degree: HashMap<String, usize> = HashMap::new();
+
+            // Initialize in-degrees to 0
+            let mut i: usize = 0;
+            while i < self.nodes.len() {
+                in_degree.insert(self.nodes[i].clone(), 0);
+                i = i + 1;
+            }
+
+            // Count incoming edges
+            for (_from, edges) in &self.edges {
+                let mut j: usize = 0;
+                while j < edges.len() {
+                    let to = &edges[j].0;
+                    let current = match in_degree.get(to) {
+                        Some(d) => *d,
+                        None => 0,
+                    };
+                    in_degree.insert(to.clone(), current + 1);
+                    j = j + 1;
+                }
+            }
+
+            let mut queue = VecDeque::new();
+            for (node, deg) in &in_degree {
+                if *deg == 0 {
+                    queue.push_back(node.clone());
+                }
+            }
+
+            let mut result = Vec::new();
+
+            while !queue.is_empty() {
+                match queue.pop_front() {
+                    Some(node) => {
+                        result.push(node.clone());
+                        let nbrs = self.neighbors(&node);
+                        let mut k: usize = 0;
+                        while k < nbrs.len() {
+                            let neighbor = &nbrs[k];
+                            let current = match in_degree.get(neighbor) {
+                                Some(d) => *d,
+                                None => 0,
+                            };
+                            if current > 0 {
+                                in_degree.insert(neighbor.clone(), current - 1);
+                                if current - 1 == 0 {
+                                    queue.push_back(neighbor.clone());
+                                }
+                            }
+                            k = k + 1;
+                        }
+                    }
+                    None => {}
+                }
+            }
+
+            if result.len() == self.nodes.len() {
+                Some(result)
+            } else {
+                None
+            }
+        }
+    }
+
+    // Undirected graph (wraps DiGraph by adding edges in both directions)
+    pub struct UndirectedGraph {
+        inner: DiGraph,
+    }
+
+    impl UndirectedGraph {
+        pub fn new() -> UndirectedGraph {
+            UndirectedGraph { inner: DiGraph::new() }
+        }
+
+        pub fn add_node(&mut self, node: String) {
+            self.inner.add_node(node);
+        }
+
+        pub fn add_edge(&mut self, a: String, b: String, weight: f64) {
+            self.inner.add_edge(a.clone(), b.clone(), weight);
+            self.inner.add_edge(b, a, weight);
+        }
+
+        pub fn neighbors(&self, node: &String) -> Vec<String> {
+            self.inner.neighbors(node)
+        }
+
+        pub fn bfs(&self, start: &String) -> Vec<String> {
+            self.inner.bfs(start)
+        }
+
+        pub fn dfs(&self, start: &String) -> Vec<String> {
+            self.inner.dfs(start)
+        }
+
+        pub fn dijkstra(&self, start: &String, end: &String) -> Option<(f64, Vec<String>)> {
+            self.inner.dijkstra(start, end)
+        }
+    }
+}

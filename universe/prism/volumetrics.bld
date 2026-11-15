@@ -1,0 +1,1190 @@
+// BUILD-UNIVERSE Prism: Volumetric Rendering Shaders
+// Comprehensive volumetric effects including fog, god rays, clouds, and participating media
+
+import prism::lib::*;
+import spectrum::color::*;
+
+// ============================================================================
+// VOLUMETRIC CONFIGURATION
+// ============================================================================
+
+@shader_config
+struct VolumetricConfig {
+    technique: VolumetricTechnique,
+    quality: VolumetricQuality,
+    density: f32,
+    scattering: f32,
+    absorption: f32,
+    anisotropy: f32,
+    max_distance: f32,
+    step_count: u32,
+    temporal_reprojection: bool,
+    bilateral_blur: bool,
+    half_resolution: bool,
+    color: Vec3,
+    ambient_intensity: f32,
+    light_intensity: f32,
+}
+
+enum VolumetricTechnique {
+    RayMarching,            // Classic ray marching
+    Froxel,                 // Frustum voxels (Ubisoft/DICE)
+    AnalyticFog,           // Analytical exponential fog
+    HeightFog,              // Height-based fog
+    VolumetricShadows,      // Volumetric shadows only
+    FullVolumetric,         // Complete participating media
+}
+
+enum VolumetricQuality {
+    Low,        // 16 steps, half-res
+    Medium,     // 32 steps, half-res
+    High,       // 64 steps, full-res
+    Ultra,      // 128 steps, full-res + temporal
+    Cinematic,  // 256 steps, full-res + temporal + high-quality blur
+}
+
+impl VolumetricConfig {
+    const HIGH_QUALITY: Self = VolumetricConfig {
+        technique: VolumetricTechnique::Froxel,
+        quality: VolumetricQuality::High,
+        density: 0.02,
+        scattering: 0.8,
+        absorption: 0.1,
+        anisotropy: 0.7,
+        max_distance: 500.0,
+        step_count: 64,
+        temporal_reprojection: true,
+        bilateral_blur: true,
+        half_resolution: false,
+        color: Vec3::new(1.0, 1.0, 1.0),
+        ambient_intensity: 0.1,
+        light_intensity: 1.0,
+    };
+
+    const MEDIUM_QUALITY: Self = VolumetricConfig {
+        technique: VolumetricTechnique::Froxel,
+        quality: VolumetricQuality::Medium,
+        density: 0.02,
+        scattering: 0.8,
+        absorption: 0.1,
+        anisotropy: 0.7,
+        max_distance: 300.0,
+        step_count: 32,
+        temporal_reprojection: true,
+        bilateral_blur: true,
+        half_resolution: true,
+        color: Vec3::new(1.0, 1.0, 1.0),
+        ambient_intensity: 0.1,
+        light_intensity: 1.0,
+    };
+
+    const LOW_QUALITY: Self = VolumetricConfig {
+        technique: VolumetricTechnique::AnalyticFog,
+        quality: VolumetricQuality::Low,
+        density: 0.02,
+        scattering: 0.8,
+        absorption: 0.1,
+        anisotropy: 0.5,
+        max_distance: 200.0,
+        step_count: 16,
+        temporal_reprojection: false,
+        bilateral_blur: true,
+        half_resolution: true,
+        color: Vec3::new(1.0, 1.0, 1.0),
+        ambient_intensity: 0.1,
+        light_intensity: 1.0,
+    };
+}
+
+// ============================================================================
+// FROXEL VOLUMETRIC SHADER (Clustered Volumetrics)
+// ============================================================================
+
+@shader(compute)
+const FROXEL_INJECT_SHADER: &str = r#"
+    // Inject density and lighting into froxel grid
+    // Based on "Physically Based and Unified Volumetric Rendering in Frostbite"
+
+    cbuffer FroxelParams : register(b0) {
+        float4x4 inv_view_projection;
+        float4x4 view;
+        float4x4 shadow_matrix;
+        float3 camera_position;
+        float time;
+        float3 froxel_dim;
+        float near_plane;
+        float3 fog_color;
+        float far_plane;
+        float density;
+        float scattering;
+        float absorption;
+        float anisotropy;
+        float3 sun_direction;
+        float sun_intensity;
+        float3 sun_color;
+        float ambient_intensity;
+        float3 ambient_color;
+        float height_fog_density;
+        float height_fog_falloff;
+        float height_fog_offset;
+        float noise_scale;
+        float noise_intensity;
+        uint frame_index;
+        float temporal_blend;
+        float padding0;
+        float padding1;
+    };
+
+    Texture3D<float4> prev_volume : register(t0);
+    Texture2D<float> shadow_map : register(t1);
+    Texture3D<float> noise_texture : register(t2);
+
+    RWTexture3D<float4> current_volume : register(u0);  // RGB = in-scattered light, A = extinction
+
+    SamplerState linear_sampler : register(s0);
+    SamplerComparisonState shadow_sampler : register(s1);
+
+    static const float PI = 3.14159265359;
+
+    float3 froxel_to_world(float3 froxel_coord) {
+        // Convert froxel coordinate to world position
+        float2 uv = froxel_coord.xy / froxel_dim.xy;
+        float z = froxel_coord.z / froxel_dim.z;
+
+        // Exponential depth distribution
+        float linear_z = near_plane * pow(far_plane / near_plane, z);
+
+        float4 clip = float4(uv * 2.0 - 1.0, 0.5, 1.0);
+        clip.y = -clip.y;
+        float4 world = mul(inv_view_projection, clip);
+        world /= world.w;
+
+        float3 ray_dir = normalize(world.xyz - camera_position);
+        return camera_position + ray_dir * linear_z;
+    }
+
+    float henyey_greenstein(float cos_theta, float g) {
+        float g2 = g * g;
+        float denom = 1.0 + g2 - 2.0 * g * cos_theta;
+        return (1.0 - g2) / (4.0 * PI * pow(denom, 1.5));
+    }
+
+    float sample_shadow(float3 world_pos) {
+        float4 shadow_coord = mul(shadow_matrix, float4(world_pos, 1.0));
+        shadow_coord.xyz /= shadow_coord.w;
+        shadow_coord.xy = shadow_coord.xy * 0.5 + 0.5;
+        shadow_coord.y = 1.0 - shadow_coord.y;
+
+        if (any(shadow_coord.xy < 0.0) || any(shadow_coord.xy > 1.0)) {
+            return 1.0;
+        }
+
+        return shadow_map.SampleCmpLevelZero(shadow_sampler, shadow_coord.xy, shadow_coord.z);
+    }
+
+    float sample_density(float3 world_pos) {
+        float base_density = density;
+
+        // Height fog
+        float height = world_pos.y - height_fog_offset;
+        float height_fog = height_fog_density * exp(-height * height_fog_falloff);
+        base_density += height_fog;
+
+        // Noise
+        float3 noise_coord = world_pos * noise_scale + time * 0.1;
+        float noise = noise_texture.SampleLevel(linear_sampler, noise_coord, 0);
+        base_density *= 1.0 + (noise - 0.5) * noise_intensity;
+
+        return max(base_density, 0.0);
+    }
+
+    [numthreads(8, 8, 1)]
+    void cs_main(uint3 dispatch_id : SV_DispatchThreadID) {
+        if (any(dispatch_id >= uint3(froxel_dim))) return;
+
+        float3 froxel_coord = float3(dispatch_id) + 0.5;
+        float3 world_pos = froxel_to_world(froxel_coord);
+
+        // Sample density
+        float local_density = sample_density(world_pos);
+
+        // Extinction coefficient
+        float extinction = local_density * (scattering + absorption);
+
+        // Phase function for sun
+        float3 view_dir = normalize(world_pos - camera_position);
+        float cos_theta = dot(view_dir, -sun_direction);
+        float phase = henyey_greenstein(cos_theta, anisotropy);
+
+        // Shadow
+        float shadow = sample_shadow(world_pos);
+
+        // In-scattered light
+        float3 in_scatter = float3(0.0, 0.0, 0.0);
+
+        // Sun contribution
+        in_scatter += sun_color * sun_intensity * phase * shadow * scattering * local_density;
+
+        // Ambient contribution (isotropic)
+        in_scatter += ambient_color * ambient_intensity * scattering * local_density / (4.0 * PI);
+
+        // Apply fog color
+        in_scatter *= fog_color;
+
+        // Temporal reprojection
+        float3 prev_coord = froxel_coord;  // Would need motion vectors for proper reprojection
+        float4 prev_value = prev_volume.SampleLevel(linear_sampler, prev_coord / froxel_dim, 0);
+
+        float4 current_value = float4(in_scatter, extinction);
+        current_value = lerp(current_value, prev_value, temporal_blend);
+
+        current_volume[dispatch_id] = current_value;
+    }
+"#;
+
+@shader(compute)
+const FROXEL_SCATTER_SHADER: &str = r#"
+    // Accumulate scattering through froxel volume (front to back)
+
+    cbuffer ScatterParams : register(b0) {
+        float3 froxel_dim;
+        float slice_thickness;
+        float near_plane;
+        float far_plane;
+        float padding0;
+        float padding1;
+    };
+
+    Texture3D<float4> froxel_volume : register(t0);  // RGB = in-scatter, A = extinction
+
+    RWTexture3D<float4> scattered_volume : register(u0);  // RGB = accumulated in-scatter, A = transmittance
+
+    [numthreads(8, 8, 1)]
+    void cs_main(uint3 dispatch_id : SV_DispatchThreadID) {
+        if (any(dispatch_id.xy >= uint2(froxel_dim.xy))) return;
+
+        float3 accumulated_scatter = float3(0.0, 0.0, 0.0);
+        float transmittance = 1.0;
+
+        // March through slices front to back
+        for (uint z = 0; z < uint(froxel_dim.z); z++) {
+            uint3 coord = uint3(dispatch_id.xy, z);
+            float4 froxel = froxel_volume[coord];
+
+            float3 in_scatter = froxel.rgb;
+            float extinction = froxel.a;
+
+            // Slice thickness in world units (exponential distribution)
+            float z_start = near_plane * pow(far_plane / near_plane, float(z) / froxel_dim.z);
+            float z_end = near_plane * pow(far_plane / near_plane, float(z + 1) / froxel_dim.z);
+            float thickness = z_end - z_start;
+
+            // Beer-Lambert law
+            float slice_transmittance = exp(-extinction * thickness);
+
+            // Accumulate scattering
+            float3 scatter_slice = in_scatter * thickness * transmittance;
+            accumulated_scatter += scatter_slice;
+
+            transmittance *= slice_transmittance;
+
+            // Store integrated result
+            scattered_volume[coord] = float4(accumulated_scatter, transmittance);
+        }
+    }
+"#;
+
+// ============================================================================
+// VOLUMETRIC RAY MARCHING SHADER
+// ============================================================================
+
+@shader(compute)
+const VOLUMETRIC_RAYMARCH_SHADER: &str = r#"
+    // Classic volumetric ray marching
+
+    cbuffer RayMarchParams : register(b0) {
+        float4x4 inv_view_projection;
+        float4x4 shadow_matrix;
+        float3 camera_position;
+        float time;
+        float2 screen_size;
+        float2 inv_screen_size;
+        float3 sun_direction;
+        float sun_intensity;
+        float3 sun_color;
+        float3 fog_color;
+        float density;
+        float scattering;
+        float anisotropy;
+        float near_plane;
+        float far_plane;
+        float max_distance;
+        uint step_count;
+        float jitter_strength;
+        uint frame_index;
+    };
+
+    Texture2D<float> depth_texture : register(t0);
+    Texture2D<float> shadow_map : register(t1);
+    Texture2D<float4> blue_noise : register(t2);
+
+    RWTexture2D<float4> volumetric_output : register(u0);
+
+    SamplerState point_sampler : register(s0);
+    SamplerComparisonState shadow_sampler : register(s1);
+
+    static const float PI = 3.14159265359;
+
+    float linearize_depth(float depth) {
+        return near_plane * far_plane / (far_plane - depth * (far_plane - near_plane));
+    }
+
+    float3 get_world_position(float2 uv, float depth) {
+        float4 clip = float4(uv * 2.0 - 1.0, depth, 1.0);
+        clip.y = -clip.y;
+        float4 world = mul(inv_view_projection, clip);
+        return world.xyz / world.w;
+    }
+
+    float henyey_greenstein(float cos_theta, float g) {
+        float g2 = g * g;
+        float denom = 1.0 + g2 - 2.0 * g * cos_theta;
+        return (1.0 - g2) / (4.0 * PI * pow(denom, 1.5));
+    }
+
+    float sample_shadow(float3 world_pos) {
+        float4 shadow_coord = mul(shadow_matrix, float4(world_pos, 1.0));
+        shadow_coord.xyz /= shadow_coord.w;
+        shadow_coord.xy = shadow_coord.xy * 0.5 + 0.5;
+        shadow_coord.y = 1.0 - shadow_coord.y;
+
+        if (any(shadow_coord.xy < 0.0) || any(shadow_coord.xy > 1.0)) return 1.0;
+
+        return shadow_map.SampleCmpLevelZero(shadow_sampler, shadow_coord.xy, shadow_coord.z);
+    }
+
+    [numthreads(8, 8, 1)]
+    void cs_main(uint3 dispatch_id : SV_DispatchThreadID) {
+        float2 uv = (float2(dispatch_id.xy) + 0.5) * inv_screen_size;
+
+        float depth = depth_texture.SampleLevel(point_sampler, uv, 0);
+        float linear_depth = linearize_depth(depth);
+
+        float3 world_pos = get_world_position(uv, depth);
+        float3 ray_dir = normalize(world_pos - camera_position);
+
+        float ray_length = min(linear_depth, max_distance);
+
+        // Jitter start position
+        float2 noise_uv = uv * screen_size / 64.0 + float(frame_index % 16) / 16.0;
+        float jitter = blue_noise.SampleLevel(point_sampler, noise_uv, 0).r;
+
+        float step_size = ray_length / float(step_count);
+        float ray_pos = jitter * step_size * jitter_strength;
+
+        float3 accumulated_light = float3(0.0, 0.0, 0.0);
+        float transmittance = 1.0;
+
+        // Phase function
+        float cos_theta = dot(ray_dir, -sun_direction);
+        float phase = henyey_greenstein(cos_theta, anisotropy);
+
+        [loop]
+        for (uint i = 0; i < step_count && transmittance > 0.001; i++) {
+            float3 sample_pos = camera_position + ray_dir * ray_pos;
+
+            // Sample shadow at this position
+            float shadow = sample_shadow(sample_pos);
+
+            // Density at this position (could add height/noise here)
+            float local_density = density;
+
+            // Extinction
+            float extinction = local_density * scattering;
+            float step_transmittance = exp(-extinction * step_size);
+
+            // In-scattered light
+            float3 in_scatter = sun_color * sun_intensity * phase * shadow * local_density * scattering;
+            in_scatter *= fog_color;
+
+            // Accumulate
+            accumulated_light += in_scatter * transmittance * step_size;
+            transmittance *= step_transmittance;
+
+            ray_pos += step_size;
+        }
+
+        volumetric_output[dispatch_id.xy] = float4(accumulated_light, transmittance);
+    }
+"#;
+
+// ============================================================================
+// VOLUMETRIC GOD RAYS SHADER
+// ============================================================================
+
+@shader(compute)
+const GOD_RAYS_SHADER: &str = r#"
+    // Screen-space god rays (radial blur from light source)
+
+    cbuffer GodRaysParams : register(b0) {
+        float2 screen_size;
+        float2 inv_screen_size;
+        float2 light_screen_pos;
+        float density;
+        float weight;
+        float decay;
+        float exposure;
+        uint sample_count;
+        float padding;
+    };
+
+    Texture2D<float4> occlusion_texture : register(t0);  // Pre-rendered light occlusion
+
+    RWTexture2D<float4> god_rays_output : register(u0);
+
+    SamplerState linear_sampler : register(s0);
+
+    [numthreads(8, 8, 1)]
+    void cs_main(uint3 dispatch_id : SV_DispatchThreadID) {
+        float2 uv = (float2(dispatch_id.xy) + 0.5) * inv_screen_size;
+
+        float2 delta_uv = (uv - light_screen_pos) * density / float(sample_count);
+
+        float2 sample_uv = uv;
+        float illumination_decay = 1.0;
+
+        float4 accumulated = float4(0.0, 0.0, 0.0, 0.0);
+
+        for (uint i = 0; i < sample_count; i++) {
+            sample_uv -= delta_uv;
+
+            if (any(sample_uv < 0.0) || any(sample_uv > 1.0)) break;
+
+            float4 sample_color = occlusion_texture.SampleLevel(linear_sampler, sample_uv, 0);
+
+            sample_color *= illumination_decay * weight;
+            accumulated += sample_color;
+
+            illumination_decay *= decay;
+        }
+
+        accumulated *= exposure;
+
+        god_rays_output[dispatch_id.xy] = accumulated;
+    }
+"#;
+
+// ============================================================================
+// HEIGHT FOG SHADER
+// ============================================================================
+
+@shader(fragment)
+const HEIGHT_FOG_SHADER: &str = r#"
+    // Analytical height fog with exponential falloff
+
+    cbuffer HeightFogParams : register(b0) {
+        float4x4 inv_view_projection;
+        float3 camera_position;
+        float fog_density;
+        float3 fog_color;
+        float fog_height;
+        float3 sun_direction;
+        float fog_falloff;
+        float3 sun_color;
+        float sun_intensity;
+        float inscatter_intensity;
+        float anisotropy;
+        float near_plane;
+        float far_plane;
+    };
+
+    Texture2D<float4> scene_color : register(t0);
+    Texture2D<float> depth_texture : register(t1);
+
+    SamplerState linear_sampler : register(s0);
+
+    struct VSOutput {
+        float4 position : SV_POSITION;
+        float2 uv : TEXCOORD0;
+    };
+
+    static const float PI = 3.14159265359;
+
+    float linearize_depth(float depth) {
+        return near_plane * far_plane / (far_plane - depth * (far_plane - near_plane));
+    }
+
+    float3 get_world_position(float2 uv, float depth) {
+        float4 clip = float4(uv * 2.0 - 1.0, depth, 1.0);
+        clip.y = -clip.y;
+        float4 world = mul(inv_view_projection, clip);
+        return world.xyz / world.w;
+    }
+
+    float henyey_greenstein(float cos_theta, float g) {
+        float g2 = g * g;
+        float denom = 1.0 + g2 - 2.0 * g * cos_theta;
+        return (1.0 - g2) / (4.0 * PI * pow(denom, 1.5));
+    }
+
+    // Integrate fog along ray analytically
+    float compute_fog_integral(float3 ray_start, float3 ray_end, float falloff, float height_offset) {
+        float3 ray_dir = ray_end - ray_start;
+        float ray_length = length(ray_dir);
+        ray_dir /= ray_length;
+
+        float start_height = ray_start.y - height_offset;
+        float end_height = ray_end.y - height_offset;
+
+        // For nearly horizontal rays
+        if (abs(ray_dir.y) < 0.001) {
+            return ray_length * exp(-start_height * falloff);
+        }
+
+        // Analytical integral of exp(-h * falloff) dh
+        float a = exp(-start_height * falloff);
+        float b = exp(-end_height * falloff);
+
+        return (a - b) * ray_length / (falloff * (end_height - start_height));
+    }
+
+    float4 ps_main(VSOutput input) : SV_TARGET {
+        float4 scene = scene_color.Sample(linear_sampler, input.uv);
+        float depth = depth_texture.Sample(linear_sampler, input.uv);
+
+        if (depth >= 1.0) {
+            return scene;
+        }
+
+        float3 world_pos = get_world_position(input.uv, depth);
+        float3 ray_dir = normalize(world_pos - camera_position);
+
+        // Compute fog amount
+        float fog_integral = compute_fog_integral(camera_position, world_pos, fog_falloff, fog_height);
+        float fog_amount = 1.0 - exp(-fog_density * fog_integral);
+
+        // Phase function for in-scattering
+        float cos_theta = dot(ray_dir, -sun_direction);
+        float phase = henyey_greenstein(cos_theta, anisotropy);
+
+        // In-scattered light
+        float3 inscatter = fog_color * sun_color * sun_intensity * phase * inscatter_intensity;
+
+        // Combine
+        float3 result = lerp(scene.rgb, fog_color + inscatter, fog_amount);
+
+        return float4(result, scene.a);
+    }
+"#;
+
+// ============================================================================
+// VOLUMETRIC BILATERAL BLUR SHADER
+// ============================================================================
+
+@shader(compute)
+const VOLUMETRIC_BLUR_HORIZONTAL_SHADER: &str = r#"
+    // Bilateral blur for volumetric texture (depth-aware)
+
+    cbuffer BlurParams : register(b0) {
+        float2 screen_size;
+        float2 inv_screen_size;
+        float blur_radius;
+        float depth_weight;
+        float near_plane;
+        float far_plane;
+    };
+
+    Texture2D<float4> volumetric_input : register(t0);
+    Texture2D<float> depth_texture : register(t1);
+
+    RWTexture2D<float4> blur_output : register(u0);
+
+    SamplerState point_sampler : register(s0);
+    SamplerState linear_sampler : register(s1);
+
+    float linearize_depth(float depth) {
+        return near_plane * far_plane / (far_plane - depth * (far_plane - near_plane));
+    }
+
+    [numthreads(64, 1, 1)]
+    void cs_main(uint3 dispatch_id : SV_DispatchThreadID) {
+        float2 uv = (float2(dispatch_id.xy) + 0.5) * inv_screen_size;
+
+        float center_depth = linearize_depth(depth_texture.SampleLevel(point_sampler, uv, 0));
+        float4 center_vol = volumetric_input.SampleLevel(point_sampler, uv, 0);
+
+        float4 sum = center_vol;
+        float weight_sum = 1.0;
+
+        int radius = int(blur_radius);
+
+        for (int i = -radius; i <= radius; i++) {
+            if (i == 0) continue;
+
+            float2 offset_uv = uv + float2(float(i) * inv_screen_size.x, 0.0);
+            if (any(offset_uv < 0.0) || any(offset_uv > 1.0)) continue;
+
+            float sample_depth = linearize_depth(depth_texture.SampleLevel(point_sampler, offset_uv, 0));
+            float4 sample_vol = volumetric_input.SampleLevel(linear_sampler, offset_uv, 0);
+
+            float depth_diff = abs(center_depth - sample_depth);
+            float w = exp(-float(i * i) / (2.0 * blur_radius * blur_radius));
+            w *= exp(-depth_diff * depth_weight);
+
+            sum += sample_vol * w;
+            weight_sum += w;
+        }
+
+        blur_output[dispatch_id.xy] = sum / weight_sum;
+    }
+"#;
+
+@shader(compute)
+const VOLUMETRIC_BLUR_VERTICAL_SHADER: &str = r#"
+    // Bilateral blur vertical pass
+
+    cbuffer BlurParams : register(b0) {
+        float2 screen_size;
+        float2 inv_screen_size;
+        float blur_radius;
+        float depth_weight;
+        float near_plane;
+        float far_plane;
+    };
+
+    Texture2D<float4> volumetric_input : register(t0);
+    Texture2D<float> depth_texture : register(t1);
+
+    RWTexture2D<float4> blur_output : register(u0);
+
+    SamplerState point_sampler : register(s0);
+    SamplerState linear_sampler : register(s1);
+
+    float linearize_depth(float depth) {
+        return near_plane * far_plane / (far_plane - depth * (far_plane - near_plane));
+    }
+
+    [numthreads(1, 64, 1)]
+    void cs_main(uint3 dispatch_id : SV_DispatchThreadID) {
+        float2 uv = (float2(dispatch_id.xy) + 0.5) * inv_screen_size;
+
+        float center_depth = linearize_depth(depth_texture.SampleLevel(point_sampler, uv, 0));
+        float4 center_vol = volumetric_input.SampleLevel(point_sampler, uv, 0);
+
+        float4 sum = center_vol;
+        float weight_sum = 1.0;
+
+        int radius = int(blur_radius);
+
+        for (int i = -radius; i <= radius; i++) {
+            if (i == 0) continue;
+
+            float2 offset_uv = uv + float2(0.0, float(i) * inv_screen_size.y);
+            if (any(offset_uv < 0.0) || any(offset_uv > 1.0)) continue;
+
+            float sample_depth = linearize_depth(depth_texture.SampleLevel(point_sampler, offset_uv, 0));
+            float4 sample_vol = volumetric_input.SampleLevel(linear_sampler, offset_uv, 0);
+
+            float depth_diff = abs(center_depth - sample_depth);
+            float w = exp(-float(i * i) / (2.0 * blur_radius * blur_radius));
+            w *= exp(-depth_diff * depth_weight);
+
+            sum += sample_vol * w;
+            weight_sum += w;
+        }
+
+        blur_output[dispatch_id.xy] = sum / weight_sum;
+    }
+"#;
+
+// ============================================================================
+// VOLUMETRIC COMPOSITE SHADER
+// ============================================================================
+
+@shader(fragment)
+const VOLUMETRIC_COMPOSITE_SHADER: &str = r#"
+    // Composite volumetrics with scene
+
+    cbuffer CompositeParams : register(b0) {
+        float intensity;
+        float fog_factor;
+        float padding0;
+        float padding1;
+    };
+
+    Texture2D<float4> scene_color : register(t0);
+    Texture2D<float4> volumetric_texture : register(t1);
+
+    SamplerState linear_sampler : register(s0);
+
+    struct VSOutput {
+        float4 position : SV_POSITION;
+        float2 uv : TEXCOORD0;
+    };
+
+    float4 ps_main(VSOutput input) : SV_TARGET {
+        float4 scene = scene_color.Sample(linear_sampler, input.uv);
+        float4 vol = volumetric_texture.Sample(linear_sampler, input.uv);
+
+        // vol.rgb = in-scattered light, vol.a = transmittance
+        float3 inscatter = vol.rgb * intensity;
+        float transmittance = vol.a;
+
+        // Apply volumetric fog
+        float3 result = scene.rgb * transmittance + inscatter;
+
+        return float4(result, scene.a);
+    }
+"#;
+
+// ============================================================================
+// LOCAL VOLUMETRIC LIGHT SHADER
+// ============================================================================
+
+@shader(compute)
+const LOCAL_VOLUMETRIC_LIGHT_SHADER: &str = r#"
+    // Volumetric lighting for local lights (spot/point)
+
+    cbuffer LocalLightParams : register(b0) {
+        float4x4 inv_view_projection;
+        float4x4 light_view_projection;
+        float3 camera_position;
+        float time;
+        float2 screen_size;
+        float2 inv_screen_size;
+        float3 light_position;
+        float light_radius;
+        float3 light_color;
+        float light_intensity;
+        float3 light_direction;
+        float spot_angle_cos;
+        float spot_outer_angle_cos;
+        float density;
+        float scattering;
+        float anisotropy;
+        uint step_count;
+        float near_plane;
+        float far_plane;
+        float padding;
+    };
+
+    Texture2D<float> depth_texture : register(t0);
+    Texture2D<float> shadow_map : register(t1);
+    Texture2D<float4> blue_noise : register(t2);
+
+    RWTexture2D<float4> volumetric_output : register(u0);
+
+    SamplerState point_sampler : register(s0);
+    SamplerComparisonState shadow_sampler : register(s1);
+
+    static const float PI = 3.14159265359;
+
+    float linearize_depth(float depth) {
+        return near_plane * far_plane / (far_plane - depth * (far_plane - near_plane));
+    }
+
+    float3 get_world_position(float2 uv, float depth) {
+        float4 clip = float4(uv * 2.0 - 1.0, depth, 1.0);
+        clip.y = -clip.y;
+        float4 world = mul(inv_view_projection, clip);
+        return world.xyz / world.w;
+    }
+
+    float henyey_greenstein(float cos_theta, float g) {
+        float g2 = g * g;
+        float denom = 1.0 + g2 - 2.0 * g * cos_theta;
+        return (1.0 - g2) / (4.0 * PI * pow(denom, 1.5));
+    }
+
+    float get_spot_attenuation(float3 L, float3 light_dir) {
+        float cos_angle = dot(L, light_dir);
+        if (cos_angle < spot_outer_angle_cos) return 0.0;
+        if (cos_angle > spot_angle_cos) return 1.0;
+        return smoothstep(spot_outer_angle_cos, spot_angle_cos, cos_angle);
+    }
+
+    float sample_shadow(float3 world_pos) {
+        float4 shadow_coord = mul(light_view_projection, float4(world_pos, 1.0));
+        shadow_coord.xyz /= shadow_coord.w;
+        shadow_coord.xy = shadow_coord.xy * 0.5 + 0.5;
+        shadow_coord.y = 1.0 - shadow_coord.y;
+
+        if (any(shadow_coord.xy < 0.0) || any(shadow_coord.xy > 1.0)) return 0.0;
+
+        return shadow_map.SampleCmpLevelZero(shadow_sampler, shadow_coord.xy, shadow_coord.z);
+    }
+
+    [numthreads(8, 8, 1)]
+    void cs_main(uint3 dispatch_id : SV_DispatchThreadID) {
+        float2 uv = (float2(dispatch_id.xy) + 0.5) * inv_screen_size;
+
+        float depth = depth_texture.SampleLevel(point_sampler, uv, 0);
+        float linear_depth = linearize_depth(depth);
+
+        float3 world_pos = get_world_position(uv, depth);
+        float3 ray_dir = normalize(world_pos - camera_position);
+
+        // Calculate intersection with light volume
+        float3 to_light = light_position - camera_position;
+        float3 closest_point = camera_position + ray_dir * max(0.0, dot(to_light, ray_dir));
+        float closest_dist = length(closest_point - light_position);
+
+        if (closest_dist > light_radius) {
+            volumetric_output[dispatch_id.xy] = float4(0.0, 0.0, 0.0, 1.0);
+            return;
+        }
+
+        // Ray march within light volume
+        float ray_length = min(linear_depth, length(to_light) + light_radius);
+        float step_size = ray_length / float(step_count);
+
+        // Jitter
+        float2 noise_uv = uv * screen_size / 64.0;
+        float jitter = blue_noise.SampleLevel(point_sampler, noise_uv, 0).r;
+
+        float3 accumulated_light = float3(0.0, 0.0, 0.0);
+        float transmittance = 1.0;
+
+        for (uint i = 0; i < step_count; i++) {
+            float t = (float(i) + jitter) * step_size;
+            float3 sample_pos = camera_position + ray_dir * t;
+
+            float3 to_sample = sample_pos - light_position;
+            float distance_to_light = length(to_sample);
+
+            if (distance_to_light > light_radius) continue;
+
+            float3 L = -normalize(to_sample);
+
+            // Attenuation
+            float attenuation = 1.0 - smoothstep(0.0, light_radius, distance_to_light);
+            attenuation *= get_spot_attenuation(L, light_direction);
+
+            if (attenuation < 0.001) continue;
+
+            // Shadow
+            float shadow = sample_shadow(sample_pos);
+
+            // Phase function
+            float cos_theta = dot(ray_dir, L);
+            float phase = henyey_greenstein(cos_theta, anisotropy);
+
+            // In-scatter
+            float3 in_scatter = light_color * light_intensity * attenuation * shadow * phase * density;
+
+            accumulated_light += in_scatter * transmittance * step_size;
+            transmittance *= exp(-density * scattering * step_size);
+        }
+
+        volumetric_output[dispatch_id.xy] = float4(accumulated_light, transmittance);
+    }
+"#;
+
+// ============================================================================
+// VOLUMETRIC SYSTEM
+// ============================================================================
+
+@system
+struct VolumetricSystem {
+    config: VolumetricConfig,
+    froxel_volume: Handle<Texture>,
+    froxel_volume_prev: Handle<Texture>,
+    scattered_volume: Handle<Texture>,
+    volumetric_texture: Handle<Texture>,
+    volumetric_temp: Handle<Texture>,
+    noise_texture: Handle<Texture>,
+    blue_noise_texture: Handle<Texture>,
+    froxel_inject_pipeline: Handle<ComputePipeline>,
+    froxel_scatter_pipeline: Handle<ComputePipeline>,
+    raymarch_pipeline: Handle<ComputePipeline>,
+    godray_pipeline: Handle<ComputePipeline>,
+    local_light_pipeline: Handle<ComputePipeline>,
+    blur_h_pipeline: Handle<ComputePipeline>,
+    blur_v_pipeline: Handle<ComputePipeline>,
+    composite_pipeline: Handle<RenderPipeline>,
+    height_fog_pipeline: Handle<RenderPipeline>,
+    frame_index: u32,
+}
+
+impl VolumetricSystem {
+    fn new(config: VolumetricConfig) -> Self {
+        Self {
+            config,
+            froxel_volume: Handle::null(),
+            froxel_volume_prev: Handle::null(),
+            scattered_volume: Handle::null(),
+            volumetric_texture: Handle::null(),
+            volumetric_temp: Handle::null(),
+            noise_texture: Handle::null(),
+            blue_noise_texture: Handle::null(),
+            froxel_inject_pipeline: Handle::null(),
+            froxel_scatter_pipeline: Handle::null(),
+            raymarch_pipeline: Handle::null(),
+            godray_pipeline: Handle::null(),
+            local_light_pipeline: Handle::null(),
+            blur_h_pipeline: Handle::null(),
+            blur_v_pipeline: Handle::null(),
+            composite_pipeline: Handle::null(),
+            height_fog_pipeline: Handle::null(),
+            frame_index: 0,
+        }
+    }
+
+    fn initialize(&mut self, device: &RenderDevice, width: u32, height: u32) {
+        // Froxel dimensions
+        let froxel_width = (width + 7) / 8;
+        let froxel_height = (height + 7) / 8;
+        let froxel_depth = 128;
+
+        // Create froxel volumes
+        self.froxel_volume = device.create_texture(&TextureDescriptor {
+            size: Extent3d {
+                width: froxel_width,
+                height: froxel_height,
+                depth: froxel_depth,
+            },
+            format: TextureFormat::Rgba16Float,
+            dimension: TextureDimension::D3,
+            usage: TextureUsage::STORAGE | TextureUsage::SAMPLED,
+            ..default()
+        });
+
+        self.froxel_volume_prev = device.create_texture(&TextureDescriptor {
+            size: Extent3d {
+                width: froxel_width,
+                height: froxel_height,
+                depth: froxel_depth,
+            },
+            format: TextureFormat::Rgba16Float,
+            dimension: TextureDimension::D3,
+            usage: TextureUsage::STORAGE | TextureUsage::SAMPLED,
+            ..default()
+        });
+
+        self.scattered_volume = device.create_texture(&TextureDescriptor {
+            size: Extent3d {
+                width: froxel_width,
+                height: froxel_height,
+                depth: froxel_depth,
+            },
+            format: TextureFormat::Rgba16Float,
+            dimension: TextureDimension::D3,
+            usage: TextureUsage::STORAGE | TextureUsage::SAMPLED,
+            ..default()
+        });
+
+        // Volumetric textures
+        let vol_width = if self.config.half_resolution { width / 2 } else { width };
+        let vol_height = if self.config.half_resolution { height / 2 } else { height };
+
+        self.volumetric_texture = device.create_texture(&TextureDescriptor {
+            size: Extent3d { width: vol_width, height: vol_height, depth: 1 },
+            format: TextureFormat::Rgba16Float,
+            usage: TextureUsage::STORAGE | TextureUsage::SAMPLED,
+            ..default()
+        });
+
+        self.volumetric_temp = device.create_texture(&TextureDescriptor {
+            size: Extent3d { width: vol_width, height: vol_height, depth: 1 },
+            format: TextureFormat::Rgba16Float,
+            usage: TextureUsage::STORAGE | TextureUsage::SAMPLED,
+            ..default()
+        });
+
+        // Generate noise textures
+        self.noise_texture = self.generate_3d_noise(device, 64);
+        self.blue_noise_texture = self.generate_blue_noise(device, 64);
+
+        // Create pipelines
+        self.froxel_inject_pipeline = device.create_compute_pipeline(FROXEL_INJECT_SHADER);
+        self.froxel_scatter_pipeline = device.create_compute_pipeline(FROXEL_SCATTER_SHADER);
+        self.raymarch_pipeline = device.create_compute_pipeline(VOLUMETRIC_RAYMARCH_SHADER);
+        self.godray_pipeline = device.create_compute_pipeline(GOD_RAYS_SHADER);
+        self.local_light_pipeline = device.create_compute_pipeline(LOCAL_VOLUMETRIC_LIGHT_SHADER);
+        self.blur_h_pipeline = device.create_compute_pipeline(VOLUMETRIC_BLUR_HORIZONTAL_SHADER);
+        self.blur_v_pipeline = device.create_compute_pipeline(VOLUMETRIC_BLUR_VERTICAL_SHADER);
+
+        self.composite_pipeline = device.create_render_pipeline(&RenderPipelineDescriptor {
+            vertex: FULLSCREEN_VS,
+            fragment: VOLUMETRIC_COMPOSITE_SHADER,
+            ..default()
+        });
+
+        self.height_fog_pipeline = device.create_render_pipeline(&RenderPipelineDescriptor {
+            vertex: FULLSCREEN_VS,
+            fragment: HEIGHT_FOG_SHADER,
+            ..default()
+        });
+    }
+
+    fn generate_3d_noise(&self, device: &RenderDevice, size: u32) -> Handle<Texture> {
+        let mut data = vec![0u8; (size * size * size) as usize];
+
+        for i in 0..data.len() {
+            data[i] = rand::random::<u8>();
+        }
+
+        device.create_texture_with_data(&TextureDescriptor {
+            size: Extent3d { width: size, height: size, depth: size },
+            format: TextureFormat::R8Unorm,
+            dimension: TextureDimension::D3,
+            usage: TextureUsage::SAMPLED,
+            ..default()
+        }, &data)
+    }
+
+    fn generate_blue_noise(&self, device: &RenderDevice, size: u32) -> Handle<Texture> {
+        let mut data = vec![0u8; (size * size * 4) as usize];
+
+        for i in 0..(size * size) as usize {
+            data[i * 4] = rand::random::<u8>();
+            data[i * 4 + 1] = rand::random::<u8>();
+            data[i * 4 + 2] = rand::random::<u8>();
+            data[i * 4 + 3] = rand::random::<u8>();
+        }
+
+        device.create_texture_with_data(&TextureDescriptor {
+            size: Extent3d { width: size, height: size, depth: 1 },
+            format: TextureFormat::Rgba8Unorm,
+            usage: TextureUsage::SAMPLED,
+            ..default()
+        }, &data)
+    }
+
+    fn render(&mut self,
+              cmd: &mut CommandEncoder,
+              depth: &Texture,
+              shadow_map: &Texture,
+              scene_color: &Texture,
+              output: &Texture,
+              camera: &Camera,
+              sun: &DirectionalLight) {
+        // Swap froxel volumes for temporal
+        std::mem::swap(&mut self.froxel_volume, &mut self.froxel_volume_prev);
+
+        match self.config.technique {
+            VolumetricTechnique::Froxel => {
+                self.render_froxel(cmd, depth, shadow_map, camera, sun);
+            }
+            VolumetricTechnique::RayMarching => {
+                self.render_raymarch(cmd, depth, shadow_map, camera, sun);
+            }
+            VolumetricTechnique::HeightFog | VolumetricTechnique::AnalyticFog => {
+                self.render_height_fog(cmd, depth, scene_color, output, camera, sun);
+                self.frame_index += 1;
+                return;
+            }
+            _ => {
+                self.render_froxel(cmd, depth, shadow_map, camera, sun);
+            }
+        }
+
+        // Blur if enabled
+        if self.config.bilateral_blur {
+            self.blur_volumetrics(cmd, depth);
+        }
+
+        // Composite
+        self.composite(cmd, scene_color, output);
+
+        self.frame_index += 1;
+    }
+
+    fn render_froxel(&self, cmd: &mut CommandEncoder, depth: &Texture,
+                     shadow_map: &Texture, camera: &Camera, sun: &DirectionalLight) {
+        // Inject density and lighting
+        {
+            let mut pass = cmd.begin_compute_pass();
+            pass.set_pipeline(&self.froxel_inject_pipeline);
+            // Set bind groups...
+            pass.dispatch(
+                (self.froxel_volume.width() + 7) / 8,
+                (self.froxel_volume.height() + 7) / 8,
+                1
+            );
+        }
+
+        // Scatter accumulation
+        {
+            let mut pass = cmd.begin_compute_pass();
+            pass.set_pipeline(&self.froxel_scatter_pipeline);
+            // Set bind groups...
+            pass.dispatch(
+                (self.scattered_volume.width() + 7) / 8,
+                (self.scattered_volume.height() + 7) / 8,
+                1
+            );
+        }
+    }
+
+    fn render_raymarch(&self, cmd: &mut CommandEncoder, depth: &Texture,
+                       shadow_map: &Texture, camera: &Camera, sun: &DirectionalLight) {
+        let mut pass = cmd.begin_compute_pass();
+        pass.set_pipeline(&self.raymarch_pipeline);
+        // Set bind groups...
+
+        let width = self.volumetric_texture.width();
+        let height = self.volumetric_texture.height();
+        pass.dispatch((width + 7) / 8, (height + 7) / 8, 1);
+    }
+
+    fn render_height_fog(&self, cmd: &mut CommandEncoder, depth: &Texture,
+                         scene_color: &Texture, output: &Texture,
+                         camera: &Camera, sun: &DirectionalLight) {
+        let mut pass = cmd.begin_render_pass(&RenderPassDescriptor {
+            color_attachments: &[RenderPassColorAttachment {
+                view: output,
+                load_op: LoadOp::Clear,
+                store_op: StoreOp::Store,
+            }],
+            ..default()
+        });
+
+        pass.set_pipeline(&self.height_fog_pipeline);
+        pass.draw(0..3, 0..1);
+    }
+
+    fn blur_volumetrics(&self, cmd: &mut CommandEncoder, depth: &Texture) {
+        // Horizontal
+        {
+            let mut pass = cmd.begin_compute_pass();
+            pass.set_pipeline(&self.blur_h_pipeline);
+            // Set bind groups...
+
+            let width = self.volumetric_texture.width();
+            let height = self.volumetric_texture.height();
+            pass.dispatch((width + 63) / 64, height, 1);
+        }
+
+        // Vertical
+        {
+            let mut pass = cmd.begin_compute_pass();
+            pass.set_pipeline(&self.blur_v_pipeline);
+            // Set bind groups...
+
+            let width = self.volumetric_texture.width();
+            let height = self.volumetric_texture.height();
+            pass.dispatch(width, (height + 63) / 64, 1);
+        }
+    }
+
+    fn composite(&self, cmd: &mut CommandEncoder, scene_color: &Texture, output: &Texture) {
+        let mut pass = cmd.begin_render_pass(&RenderPassDescriptor {
+            color_attachments: &[RenderPassColorAttachment {
+                view: output,
+                load_op: LoadOp::Clear,
+                store_op: StoreOp::Store,
+            }],
+            ..default()
+        });
+
+        pass.set_pipeline(&self.composite_pipeline);
+        pass.draw(0..3, 0..1);
+    }
+}
+
+struct DirectionalLight {
+    direction: Vec3,
+    color: Vec3,
+    intensity: f32,
+}

@@ -1,0 +1,1725 @@
+// =============================================================================
+// PRISM: Water and Ocean Rendering Shaders
+// =============================================================================
+// FFT-based ocean simulation, water surfaces, caustics, and underwater effects
+// Part of the BUILD-UNIVERSE Rendering Stack
+// =============================================================================
+
+@module prism::water
+@version 1.0.0
+@author BUILD Team
+
+// =============================================================================
+// OCEAN DATA STRUCTURES
+// =============================================================================
+
+/// Ocean simulation parameters
+struct OceanParams {
+    // FFT grid
+    fft_resolution: u32,              // Power of 2 (256, 512, 1024)
+    patch_size: f32,                  // World units per patch
+
+    // Wind
+    wind_direction: vec2,
+    wind_speed: f32,
+
+    // Waves
+    amplitude: f32,
+    choppiness: f32,
+    wave_scale: f32,
+
+    // Phillips spectrum
+    phillips_constant: f32,
+    suppression_factor: f32,          // Small wave suppression
+
+    // Appearance
+    water_color: vec3,
+    scatter_color: vec3,
+    foam_color: vec3,
+    foam_threshold: f32,
+    foam_intensity: f32,
+
+    // Reflections
+    fresnel_power: f32,
+    reflectivity: f32,
+    refraction_strength: f32,
+
+    // Time
+    time: f32,
+    time_scale: f32,
+
+    // LOD
+    tessellation_factor: f32,
+    max_tessellation: f32,
+    lod_distances: vec4,
+}
+
+impl OceanParams {
+    pub fn default() -> Self {
+        Self {
+            fft_resolution: 512,
+            patch_size: 1000.0,
+
+            wind_direction: vec2(0.8, 0.6).normalize(),
+            wind_speed: 20.0,
+
+            amplitude: 0.5,
+            choppiness: 1.5,
+            wave_scale: 1.0,
+
+            phillips_constant: 0.0002,
+            suppression_factor: 0.001,
+
+            water_color: vec3(0.02, 0.06, 0.12),
+            scatter_color: vec3(0.05, 0.15, 0.2),
+            foam_color: vec3(0.9, 0.95, 1.0),
+            foam_threshold: 0.5,
+            foam_intensity: 1.0,
+
+            fresnel_power: 5.0,
+            reflectivity: 0.04,
+            refraction_strength: 0.1,
+
+            time: 0.0,
+            time_scale: 1.0,
+
+            tessellation_factor: 64.0,
+            max_tessellation: 64.0,
+            lod_distances: vec4(100.0, 500.0, 2000.0, 10000.0),
+        }
+    }
+
+    pub fn calm() -> Self {
+        Self {
+            wind_speed: 5.0,
+            amplitude: 0.15,
+            choppiness: 0.8,
+            foam_threshold: 0.8,
+            ..Self::default()
+        }
+    }
+
+    pub fn stormy() -> Self {
+        Self {
+            wind_speed: 50.0,
+            amplitude: 2.0,
+            choppiness: 2.5,
+            foam_threshold: 0.2,
+            foam_intensity: 2.0,
+            water_color: vec3(0.01, 0.03, 0.05),
+            scatter_color: vec3(0.02, 0.08, 0.1),
+            ..Self::default()
+        }
+    }
+
+    pub fn tropical() -> Self {
+        Self {
+            wind_speed: 8.0,
+            amplitude: 0.2,
+            water_color: vec3(0.01, 0.1, 0.15),
+            scatter_color: vec3(0.05, 0.25, 0.3),
+            ..Self::default()
+        }
+    }
+}
+
+/// River/lake water parameters
+struct WaterParams {
+    // Flow
+    flow_direction: vec2,
+    flow_speed: f32,
+
+    // Waves
+    wave_amplitude: f32,
+    wave_frequency: f32,
+    wave_speed: f32,
+
+    // Layers
+    num_wave_layers: i32,
+
+    // Appearance
+    shallow_color: vec3,
+    deep_color: vec3,
+    depth_scale: f32,
+    clarity: f32,
+    foam_color: vec3,
+    foam_scale: f32,
+
+    // Fresnel
+    fresnel_bias: f32,
+    fresnel_power: f32,
+    fresnel_scale: f32,
+
+    // Refraction
+    refraction_strength: f32,
+
+    // Caustics
+    caustics_enabled: bool,
+    caustics_intensity: f32,
+    caustics_scale: f32,
+
+    time: f32,
+}
+
+impl WaterParams {
+    pub fn river() -> Self {
+        Self {
+            flow_direction: vec2(1.0, 0.0),
+            flow_speed: 1.5,
+            wave_amplitude: 0.05,
+            wave_frequency: 2.0,
+            wave_speed: 1.0,
+            num_wave_layers: 4,
+            shallow_color: vec3(0.1, 0.4, 0.3),
+            deep_color: vec3(0.02, 0.1, 0.15),
+            depth_scale: 5.0,
+            clarity: 0.5,
+            foam_color: vec3(0.95, 0.98, 1.0),
+            foam_scale: 0.5,
+            fresnel_bias: 0.1,
+            fresnel_power: 4.0,
+            fresnel_scale: 1.0,
+            refraction_strength: 0.08,
+            caustics_enabled: true,
+            caustics_intensity: 0.8,
+            caustics_scale: 0.5,
+            time: 0.0,
+        }
+    }
+
+    pub fn lake() -> Self {
+        Self {
+            flow_direction: vec2(0.0, 0.0),
+            flow_speed: 0.0,
+            wave_amplitude: 0.02,
+            wave_frequency: 1.0,
+            wave_speed: 0.5,
+            num_wave_layers: 3,
+            shallow_color: vec3(0.15, 0.5, 0.4),
+            deep_color: vec3(0.01, 0.05, 0.1),
+            depth_scale: 10.0,
+            clarity: 0.8,
+            ..Self::river()
+        }
+    }
+
+    pub fn murky() -> Self {
+        Self {
+            clarity: 0.1,
+            shallow_color: vec3(0.15, 0.12, 0.08),
+            deep_color: vec3(0.05, 0.04, 0.03),
+            depth_scale: 2.0,
+            caustics_enabled: false,
+            ..Self::river()
+        }
+    }
+}
+
+// =============================================================================
+// FFT OCEAN COMPUTE SHADERS
+// =============================================================================
+
+const OCEAN_FFT_SHADERS: &str = r#"
+//-----------------------------------------------------------------------------
+// FFT Ocean Simulation (Tessendorf 2001)
+//-----------------------------------------------------------------------------
+
+#define PI 3.14159265359
+#define G 9.81
+
+cbuffer OceanFFTParams : register(b0) {
+    uint fft_resolution;
+    float patch_size;
+    float2 wind_direction;
+
+    float wind_speed;
+    float amplitude;
+    float phillips_constant;
+    float suppression_factor;
+
+    float time;
+    float choppiness;
+    float2 _padding;
+}
+
+// Complex number operations
+float2 ComplexMult(float2 a, float2 b) {
+    return float2(a.x * b.x - a.y * b.y, a.x * b.y + a.y * b.x);
+}
+
+float2 ComplexExp(float theta) {
+    return float2(cos(theta), sin(theta));
+}
+
+float2 ComplexConj(float2 c) {
+    return float2(c.x, -c.y);
+}
+
+// Phillips spectrum
+float PhillipsSpectrum(float2 k) {
+    float k_length = length(k);
+    if (k_length < 0.00001) return 0.0;
+
+    float k_length2 = k_length * k_length;
+    float k_length4 = k_length2 * k_length2;
+
+    float L = wind_speed * wind_speed / G;
+    float L2 = L * L;
+
+    float damping = exp(-k_length2 * suppression_factor * suppression_factor);
+    float phillips = phillips_constant * exp(-1.0 / (k_length2 * L2)) / k_length4 * damping;
+
+    // Directional spreading
+    float2 k_normalized = k / k_length;
+    float k_dot_w = dot(k_normalized, wind_direction);
+    phillips *= k_dot_w * k_dot_w;
+
+    // Suppress waves traveling against wind
+    if (k_dot_w < 0.0) phillips *= 0.25;
+
+    return phillips;
+}
+
+// Dispersion relation
+float Dispersion(float k_length) {
+    return sqrt(G * k_length);
+}
+
+// Initial spectrum (H0)
+// Precomputed at startup
+RWTexture2D<float4> h0_texture : register(u0);  // H0(k) and H0(-k)
+RWTexture2D<float4> omega_texture : register(u1); // Angular frequencies
+
+[numthreads(16, 16, 1)]
+void ComputeInitialSpectrum(uint3 id : SV_DispatchThreadID) {
+    int N = (int)fft_resolution;
+    float n = (float)id.x - N / 2.0;
+    float m = (float)id.y - N / 2.0;
+
+    float2 k = float2(2.0 * PI * n / patch_size, 2.0 * PI * m / patch_size);
+
+    float k_length = length(k);
+    float phillips = sqrt(PhillipsSpectrum(k) / 2.0);
+    float phillips_neg = sqrt(PhillipsSpectrum(-k) / 2.0);
+
+    // Gaussian random numbers (precomputed)
+    float2 gaussian = GetGaussianRandom(id.xy);
+
+    float2 h0_k = gaussian * phillips;
+    float2 h0_neg_k = gaussian * phillips_neg;
+
+    h0_texture[id.xy] = float4(h0_k, h0_neg_k);
+
+    float omega = Dispersion(k_length);
+    omega_texture[id.xy] = float4(omega, 0, 0, 0);
+}
+
+// Time-dependent spectrum (H(k,t))
+RWTexture2D<float2> ht_x : register(u0);  // Height displacement X
+RWTexture2D<float2> ht_y : register(u1);  // Height displacement Y (vertical)
+RWTexture2D<float2> ht_z : register(u2);  // Height displacement Z
+
+Texture2D<float4> h0_input : register(t0);
+Texture2D<float4> omega_input : register(t1);
+
+[numthreads(16, 16, 1)]
+void ComputeTimeSpectrum(uint3 id : SV_DispatchThreadID) {
+    int N = (int)fft_resolution;
+    float n = (float)id.x - N / 2.0;
+    float m = (float)id.y - N / 2.0;
+
+    float2 k = float2(2.0 * PI * n / patch_size, 2.0 * PI * m / patch_size);
+    float k_length = max(length(k), 0.00001);
+
+    float4 h0_data = h0_input[id.xy];
+    float2 h0_k = h0_data.xy;
+    float2 h0_neg_k = h0_data.zw;
+
+    float omega = omega_input[id.xy].x;
+    float omega_t = omega * time;
+
+    // H(k,t) = h0(k) * exp(i*omega*t) + conj(h0(-k)) * exp(-i*omega*t)
+    float2 exp_pos = ComplexExp(omega_t);
+    float2 exp_neg = ComplexExp(-omega_t);
+
+    float2 h = ComplexMult(h0_k, exp_pos) + ComplexMult(ComplexConj(h0_neg_k), exp_neg);
+
+    // Horizontal displacement using gradient
+    float2 k_normalized = k / k_length;
+    float2 ih = float2(-h.y, h.x);  // i * h
+
+    float2 displacement_x = ComplexMult(ih, float2(k_normalized.x, 0)) * choppiness;
+    float2 displacement_z = ComplexMult(ih, float2(k_normalized.y, 0)) * choppiness;
+
+    ht_x[id.xy] = displacement_x;
+    ht_y[id.xy] = h * amplitude;
+    ht_z[id.xy] = displacement_z;
+}
+
+// Butterfly FFT passes
+groupshared float2 ping_pong[2][1024];
+
+RWTexture2D<float2> fft_input : register(u0);
+RWTexture2D<float2> fft_output : register(u1);
+
+[numthreads(1024, 1, 1)]
+void FFTHorizontal(uint3 group_id : SV_GroupID, uint3 thread_id : SV_GroupThreadID) {
+    uint N = fft_resolution;
+    uint row = group_id.x;
+    uint col = thread_id.x;
+
+    // Load row into shared memory
+    ping_pong[0][col] = fft_input[uint2(col, row)];
+    GroupMemoryBarrierWithGroupSync();
+
+    // Butterfly passes
+    uint src = 0;
+    for (uint s = 1; s < N; s <<= 1) {
+        uint dst = 1 - src;
+
+        uint k = (col * N / (2 * s)) % N;
+        uint partner = col ^ s;
+
+        float theta = -2.0 * PI * k / N;
+        float2 twiddle = ComplexExp(theta);
+
+        float2 a = ping_pong[src][col];
+        float2 b = ping_pong[src][partner];
+
+        if ((col & s) == 0) {
+            ping_pong[dst][col] = a + ComplexMult(twiddle, b);
+        } else {
+            ping_pong[dst][col] = ping_pong[src][partner - s] - ComplexMult(twiddle, a);
+        }
+
+        GroupMemoryBarrierWithGroupSync();
+        src = dst;
+    }
+
+    // Write result with bit reversal
+    uint reversed = reversebits(col) >> (32 - log2(N));
+    fft_output[uint2(reversed, row)] = ping_pong[src][col];
+}
+
+[numthreads(1024, 1, 1)]
+void FFTVertical(uint3 group_id : SV_GroupID, uint3 thread_id : SV_GroupThreadID) {
+    uint N = fft_resolution;
+    uint col = group_id.x;
+    uint row = thread_id.x;
+
+    ping_pong[0][row] = fft_input[uint2(col, row)];
+    GroupMemoryBarrierWithGroupSync();
+
+    uint src = 0;
+    for (uint s = 1; s < N; s <<= 1) {
+        uint dst = 1 - src;
+
+        uint k = (row * N / (2 * s)) % N;
+        uint partner = row ^ s;
+
+        float theta = -2.0 * PI * k / N;
+        float2 twiddle = ComplexExp(theta);
+
+        float2 a = ping_pong[src][row];
+        float2 b = ping_pong[src][partner];
+
+        if ((row & s) == 0) {
+            ping_pong[dst][row] = a + ComplexMult(twiddle, b);
+        } else {
+            ping_pong[dst][row] = ping_pong[src][partner - s] - ComplexMult(twiddle, a);
+        }
+
+        GroupMemoryBarrierWithGroupSync();
+        src = dst;
+    }
+
+    uint reversed = reversebits(row) >> (32 - log2(N));
+    fft_output[uint2(col, reversed)] = ping_pong[src][row];
+}
+
+// Final displacement and normal computation
+RWTexture2D<float4> displacement_map : register(u0);  // XYZ displacement
+RWTexture2D<float4> normal_map : register(u1);        // Normal + foam
+RWTexture2D<float> folding_map : register(u2);        // Jacobian for foam
+
+Texture2D<float2> height_real : register(t0);
+Texture2D<float2> disp_x_real : register(t1);
+Texture2D<float2> disp_z_real : register(t2);
+
+[numthreads(16, 16, 1)]
+void ComputeDisplacementNormal(uint3 id : SV_DispatchThreadID) {
+    int N = (int)fft_resolution;
+
+    // Sign correction for FFT
+    float sign = ((id.x + id.y) % 2 == 0) ? 1.0 : -1.0;
+
+    float height = height_real[id.xy].x * sign;
+    float disp_x = disp_x_real[id.xy].x * sign;
+    float disp_z = disp_z_real[id.xy].x * sign;
+
+    displacement_map[id.xy] = float4(disp_x, height, disp_z, 1.0);
+
+    // Compute normal from height gradient
+    int2 left = int2((id.x - 1 + N) % N, id.y);
+    int2 right = int2((id.x + 1) % N, id.y);
+    int2 bottom = int2(id.x, (id.y - 1 + N) % N);
+    int2 top = int2(id.x, (id.y + 1) % N);
+
+    float sign_l = ((left.x + left.y) % 2 == 0) ? 1.0 : -1.0;
+    float sign_r = ((right.x + right.y) % 2 == 0) ? 1.0 : -1.0;
+    float sign_b = ((bottom.x + bottom.y) % 2 == 0) ? 1.0 : -1.0;
+    float sign_t = ((top.x + top.y) % 2 == 0) ? 1.0 : -1.0;
+
+    float h_left = height_real[left].x * sign_l;
+    float h_right = height_real[right].x * sign_r;
+    float h_bottom = height_real[bottom].x * sign_b;
+    float h_top = height_real[top].x * sign_t;
+
+    float texel_size = patch_size / float(N);
+    float3 normal = normalize(float3(
+        (h_left - h_right) / (2.0 * texel_size),
+        1.0,
+        (h_bottom - h_top) / (2.0 * texel_size)
+    ));
+
+    // Compute Jacobian for foam detection
+    float dx_x = (disp_x_real[right].x * sign_r - disp_x_real[left].x * sign_l) / (2.0 * texel_size);
+    float dz_z = (disp_z_real[top].x * sign_t - disp_z_real[bottom].x * sign_b) / (2.0 * texel_size);
+    float jacobian = (1.0 + dx_x) * (1.0 + dz_z);
+
+    // Negative jacobian = wave folding = foam
+    float foam = saturate(-jacobian + 0.5);
+
+    normal_map[id.xy] = float4(normal * 0.5 + 0.5, foam);
+    folding_map[id.xy] = jacobian;
+}
+
+// Gaussian random number generation
+float2 GetGaussianRandom(uint2 coord) {
+    // Use blue noise or precomputed texture
+    // Simplified Box-Muller here
+    float u1 = frac(sin(dot(float2(coord), float2(12.9898, 78.233))) * 43758.5453);
+    float u2 = frac(sin(dot(float2(coord), float2(93.9898, 67.345))) * 24634.6345);
+
+    float r = sqrt(-2.0 * log(max(u1, 0.0001)));
+    float theta = 2.0 * PI * u2;
+
+    return float2(r * cos(theta), r * sin(theta));
+}
+"#;
+
+// =============================================================================
+// OCEAN SURFACE SHADER
+// =============================================================================
+
+const OCEAN_SURFACE_SHADER: &str = r#"
+//-----------------------------------------------------------------------------
+// Ocean Surface Rendering with Tessellation
+//-----------------------------------------------------------------------------
+
+cbuffer OceanParams : register(b0) {
+    float4x4 world;
+    float4x4 view_projection;
+    float4x4 inv_view_projection;
+
+    float3 camera_position;
+    float patch_size;
+
+    float3 water_color;
+    float amplitude;
+
+    float3 scatter_color;
+    float choppiness;
+
+    float3 foam_color;
+    float foam_threshold;
+    float foam_intensity;
+
+    float3 sun_direction;
+    float fresnel_power;
+    float reflectivity;
+    float refraction_strength;
+
+    float4 lod_distances;
+    float tessellation_factor;
+    float max_tessellation;
+    float time;
+    float _padding;
+}
+
+Texture2D<float4> displacement_map : register(t0);
+Texture2D<float4> normal_map : register(t1);
+Texture2D<float> foam_map : register(t2);
+TextureCube<float4> environment_map : register(t3);
+Texture2D<float4> scene_color : register(t4);
+Texture2D<float> scene_depth : register(t5);
+Texture2D<float> foam_texture : register(t6);
+
+SamplerState linear_wrap : register(s0);
+SamplerState linear_clamp : register(s1);
+
+struct VSInput {
+    float3 position : POSITION;
+    float2 texcoord : TEXCOORD0;
+};
+
+struct HSInput {
+    float3 position : POSITION;
+    float2 texcoord : TEXCOORD0;
+    float tessellation : TESSELLATION;
+};
+
+struct HSConstOutput {
+    float edges[4] : SV_TessFactor;
+    float inside[2] : SV_InsideTessFactor;
+};
+
+struct DSOutput {
+    float4 position : SV_POSITION;
+    float3 world_pos : TEXCOORD0;
+    float2 texcoord : TEXCOORD1;
+    float3 normal : TEXCOORD2;
+    float foam : TEXCOORD3;
+    float4 screen_pos : TEXCOORD4;
+};
+
+// Vertex shader - prepare for hull shader
+HSInput OceanVS(VSInput input) {
+    HSInput output;
+
+    output.position = input.position;
+    output.texcoord = input.texcoord;
+
+    // LOD based tessellation
+    float3 world_pos = mul(world, float4(input.position, 1.0)).xyz;
+    float dist = distance(world_pos, camera_position);
+
+    float lod = saturate(1.0 - (dist - lod_distances.x) / (lod_distances.w - lod_distances.x));
+    output.tessellation = lerp(1.0, max_tessellation, lod * lod);
+
+    return output;
+}
+
+// Hull shader constants
+HSConstOutput OceanHSConst(InputPatch<HSInput, 4> patch) {
+    HSConstOutput output;
+
+    float avg_tess = (patch[0].tessellation + patch[1].tessellation +
+                      patch[2].tessellation + patch[3].tessellation) * 0.25;
+
+    output.edges[0] = avg_tess;
+    output.edges[1] = avg_tess;
+    output.edges[2] = avg_tess;
+    output.edges[3] = avg_tess;
+    output.inside[0] = avg_tess;
+    output.inside[1] = avg_tess;
+
+    return output;
+}
+
+// Hull shader
+[domain("quad")]
+[partitioning("fractional_even")]
+[outputtopology("triangle_cw")]
+[outputcontrolpoints(4)]
+[patchconstantfunc("OceanHSConst")]
+HSInput OceanHS(InputPatch<HSInput, 4> patch, uint id : SV_OutputControlPointID) {
+    return patch[id];
+}
+
+// Domain shader - apply displacement
+[domain("quad")]
+DSOutput OceanDS(HSConstOutput constants, float2 uv : SV_DomainLocation,
+                 OutputPatch<HSInput, 4> patch) {
+    DSOutput output;
+
+    // Bilinear interpolation
+    float3 p0 = lerp(patch[0].position, patch[1].position, uv.x);
+    float3 p1 = lerp(patch[3].position, patch[2].position, uv.x);
+    float3 position = lerp(p0, p1, uv.y);
+
+    float2 t0 = lerp(patch[0].texcoord, patch[1].texcoord, uv.x);
+    float2 t1 = lerp(patch[3].texcoord, patch[2].texcoord, uv.x);
+    float2 texcoord = lerp(t0, t1, uv.y);
+
+    // Sample displacement
+    float4 displacement = displacement_map.SampleLevel(linear_wrap, texcoord, 0);
+    position += displacement.xyz;
+
+    // Sample normal and foam
+    float4 normal_foam = normal_map.SampleLevel(linear_wrap, texcoord, 0);
+    float3 normal = normal_foam.xyz * 2.0 - 1.0;
+    float foam = normal_foam.w;
+
+    // Transform
+    float3 world_pos = mul(world, float4(position, 1.0)).xyz;
+    output.position = mul(view_projection, float4(world_pos, 1.0));
+    output.world_pos = world_pos;
+    output.texcoord = texcoord;
+    output.normal = mul((float3x3)world, normal);
+    output.foam = foam;
+    output.screen_pos = output.position;
+
+    return output;
+}
+
+// Fresnel approximation
+float Fresnel(float3 view, float3 normal, float power) {
+    return reflectivity + (1.0 - reflectivity) * pow(1.0 - saturate(dot(view, normal)), power);
+}
+
+// Pixel shader
+float4 OceanPS(DSOutput input) : SV_TARGET {
+    float3 normal = normalize(input.normal);
+    float3 view = normalize(camera_position - input.world_pos);
+
+    // Screen UV for refraction
+    float2 screen_uv = (input.screen_pos.xy / input.screen_pos.w) * 0.5 + 0.5;
+    screen_uv.y = 1.0 - screen_uv.y;
+
+    // Refracted UV
+    float2 refract_offset = normal.xz * refraction_strength;
+    float2 refract_uv = screen_uv + refract_offset;
+
+    // Depth-based absorption
+    float scene_z = scene_depth.Sample(linear_clamp, refract_uv).r;
+    float water_depth = input.screen_pos.w;
+    float depth_diff = max(scene_z - water_depth, 0.0);
+    float absorption = 1.0 - exp(-depth_diff * 0.1);
+
+    // Refracted scene color with absorption
+    float3 refracted = scene_color.Sample(linear_clamp, refract_uv).rgb;
+    refracted = lerp(refracted, scatter_color, absorption);
+
+    // Reflection
+    float3 reflect_dir = reflect(-view, normal);
+    float3 reflected = environment_map.Sample(linear_wrap, reflect_dir).rgb;
+
+    // Fresnel blend
+    float fresnel = Fresnel(view, normal, fresnel_power);
+    float3 color = lerp(refracted, reflected, fresnel);
+
+    // Subsurface scattering approximation
+    float3 half_vec = normalize(sun_direction + normal);
+    float sss = pow(saturate(dot(view, -half_vec)), 4.0);
+    color += scatter_color * sss * 0.5;
+
+    // Specular
+    float3 H = normalize(sun_direction + view);
+    float spec = pow(saturate(dot(normal, H)), 256.0);
+    color += float3(1, 1, 1) * spec;
+
+    // Foam
+    if (input.foam > foam_threshold) {
+        float foam_amount = saturate((input.foam - foam_threshold) / (1.0 - foam_threshold));
+        float foam_detail = foam_texture.Sample(linear_wrap, input.texcoord * 10.0).r;
+        foam_amount *= foam_detail * foam_intensity;
+        color = lerp(color, foam_color, foam_amount);
+    }
+
+    return float4(color, 1.0);
+}
+"#;
+
+// =============================================================================
+// WATER SURFACE SHADER (Rivers, Lakes, Pools)
+// =============================================================================
+
+const WATER_SURFACE_SHADER: &str = r#"
+//-----------------------------------------------------------------------------
+// General Water Surface Shader
+//-----------------------------------------------------------------------------
+
+cbuffer WaterParams : register(b0) {
+    float4x4 world;
+    float4x4 view_projection;
+
+    float3 camera_position;
+    float time;
+
+    float2 flow_direction;
+    float flow_speed;
+    float wave_amplitude;
+
+    float wave_frequency;
+    float wave_speed;
+    int num_wave_layers;
+    float _pad0;
+
+    float3 shallow_color;
+    float depth_scale;
+
+    float3 deep_color;
+    float clarity;
+
+    float3 foam_color;
+    float foam_scale;
+
+    float fresnel_bias;
+    float fresnel_power;
+    float fresnel_scale;
+    float refraction_strength;
+
+    float caustics_intensity;
+    float caustics_scale;
+    float2 _pad1;
+}
+
+Texture2D<float4> normal_map : register(t0);
+Texture2D<float4> flow_map : register(t1);
+TextureCube<float4> environment_map : register(t2);
+Texture2D<float4> scene_color : register(t3);
+Texture2D<float> scene_depth : register(t4);
+Texture2D<float> foam_texture : register(t5);
+Texture2D<float> caustics_texture : register(t6);
+
+SamplerState linear_wrap : register(s0);
+SamplerState linear_clamp : register(s1);
+
+struct VSInput {
+    float3 position : POSITION;
+    float2 texcoord : TEXCOORD0;
+    float3 normal : NORMAL;
+    float4 tangent : TANGENT;
+};
+
+struct PSInput {
+    float4 position : SV_POSITION;
+    float3 world_pos : TEXCOORD0;
+    float2 texcoord : TEXCOORD1;
+    float3 normal : TEXCOORD2;
+    float3 tangent : TEXCOORD3;
+    float3 bitangent : TEXCOORD4;
+    float4 screen_pos : TEXCOORD5;
+};
+
+// Gerstner wave
+float3 GerstnerWave(float2 pos, float2 direction, float amplitude, float frequency, float speed, float phase) {
+    float k = 2.0 * 3.14159 * frequency;
+    float c = sqrt(9.81 / k);
+    float2 d = normalize(direction);
+    float f = k * (dot(d, pos) - c * speed * time) + phase;
+
+    float a = amplitude;
+    float3 result;
+    result.x = d.x * a * cos(f);
+    result.y = a * sin(f);
+    result.z = d.y * a * cos(f);
+
+    return result;
+}
+
+PSInput WaterVS(VSInput input) {
+    PSInput output;
+
+    float3 position = input.position;
+
+    // Add wave displacement
+    float3 wave_offset = float3(0, 0, 0);
+    float2 pos_2d = position.xz;
+
+    for (int i = 0; i < num_wave_layers; i++) {
+        float angle = float(i) * 2.39996;  // Golden angle
+        float2 dir = float2(cos(angle), sin(angle));
+        float amp = wave_amplitude / float(i + 1);
+        float freq = wave_frequency * float(i + 1) * 0.5;
+        float phase = float(i) * 1.23456;
+
+        wave_offset += GerstnerWave(pos_2d, dir + flow_direction, amp, freq, wave_speed, phase);
+    }
+
+    position += wave_offset;
+
+    float3 world_pos = mul(world, float4(position, 1.0)).xyz;
+    output.position = mul(view_projection, float4(world_pos, 1.0));
+    output.world_pos = world_pos;
+    output.texcoord = input.texcoord;
+
+    float3 world_normal = mul((float3x3)world, input.normal);
+    float3 world_tangent = mul((float3x3)world, input.tangent.xyz);
+
+    output.normal = world_normal;
+    output.tangent = world_tangent;
+    output.bitangent = cross(world_normal, world_tangent) * input.tangent.w;
+    output.screen_pos = output.position;
+
+    return output;
+}
+
+// Flow map sampling for animated normals
+float3 SampleFlowNormal(float2 uv, float2 flow, float time_offset) {
+    float phase0 = frac(time * flow_speed + time_offset);
+    float phase1 = frac(time * flow_speed + time_offset + 0.5);
+
+    float2 uv0 = uv - flow * phase0;
+    float2 uv1 = uv - flow * phase1;
+
+    float3 normal0 = normal_map.Sample(linear_wrap, uv0).xyz * 2.0 - 1.0;
+    float3 normal1 = normal_map.Sample(linear_wrap, uv1).xyz * 2.0 - 1.0;
+
+    float blend = abs(2.0 * phase0 - 1.0);
+    return lerp(normal0, normal1, blend);
+}
+
+float4 WaterPS(PSInput input) : SV_TARGET {
+    // Flow map for directional normals
+    float2 flow = flow_map.Sample(linear_wrap, input.texcoord).rg * 2.0 - 1.0;
+    flow = flow * 0.5 + flow_direction;
+
+    // Sample normals with flow
+    float3 normal_ts = SampleFlowNormal(input.texcoord * 4.0, flow, 0.0);
+    normal_ts += SampleFlowNormal(input.texcoord * 8.0, flow * 0.5, 0.25) * 0.5;
+    normal_ts = normalize(normal_ts);
+
+    // Transform to world space
+    float3x3 TBN = float3x3(
+        normalize(input.tangent),
+        normalize(input.bitangent),
+        normalize(input.normal)
+    );
+    float3 normal = normalize(mul(normal_ts, TBN));
+
+    float3 view = normalize(camera_position - input.world_pos);
+
+    // Screen UV
+    float2 screen_uv = (input.screen_pos.xy / input.screen_pos.w) * 0.5 + 0.5;
+    screen_uv.y = 1.0 - screen_uv.y;
+
+    // Refraction
+    float2 refract_uv = screen_uv + normal.xz * refraction_strength;
+    float3 refracted = scene_color.Sample(linear_clamp, refract_uv).rgb;
+
+    // Depth
+    float scene_z = scene_depth.Sample(linear_clamp, refract_uv).r;
+    float water_depth = input.screen_pos.w;
+    float depth = max(scene_z - water_depth, 0.0) * depth_scale;
+
+    // Color based on depth
+    float depth_factor = 1.0 - exp(-depth * 0.5);
+    float3 water_tint = lerp(shallow_color, deep_color, depth_factor);
+
+    // Apply absorption
+    float3 absorbed = lerp(refracted, water_tint, depth_factor * (1.0 - clarity));
+
+    // Caustics
+    if (caustics_intensity > 0.0 && depth < 5.0) {
+        float2 caustic_uv = input.world_pos.xz * caustics_scale + normal.xz * 0.1;
+        float caustic = caustics_texture.Sample(linear_wrap, caustic_uv + time * 0.1).r;
+        caustic += caustics_texture.Sample(linear_wrap, caustic_uv * 1.3 - time * 0.15).r;
+        caustic = caustic * 0.5;
+        absorbed += caustic * caustics_intensity * (1.0 - depth_factor);
+    }
+
+    // Reflection
+    float3 reflect_dir = reflect(-view, normal);
+    float3 reflected = environment_map.Sample(linear_wrap, reflect_dir).rgb;
+
+    // Fresnel
+    float fresnel = fresnel_bias + fresnel_scale * pow(1.0 - saturate(dot(view, normal)), fresnel_power);
+    float3 color = lerp(absorbed, reflected, fresnel);
+
+    // Foam at edges
+    float edge_foam = saturate(1.0 - depth * 2.0);
+    if (edge_foam > 0.01) {
+        float foam = foam_texture.Sample(linear_wrap, input.texcoord * foam_scale + flow * time * 0.1).r;
+        foam *= edge_foam;
+        color = lerp(color, foam_color, foam * 0.8);
+    }
+
+    // Specular
+    float3 sun_dir = normalize(float3(0.5, 0.8, 0.3));
+    float3 H = normalize(sun_dir + view);
+    float spec = pow(saturate(dot(normal, H)), 128.0);
+    color += spec * 0.5;
+
+    return float4(color, 1.0);
+}
+"#;
+
+// =============================================================================
+// UNDERWATER SHADER
+// =============================================================================
+
+const UNDERWATER_SHADER: &str = r#"
+//-----------------------------------------------------------------------------
+// Underwater Post-Processing Effects
+//-----------------------------------------------------------------------------
+
+cbuffer UnderwaterParams : register(b0) {
+    float3 water_color;
+    float depth;
+
+    float3 fog_color;
+    float fog_density;
+
+    float3 caustic_color;
+    float caustic_intensity;
+
+    float distortion_strength;
+    float distortion_speed;
+    float time;
+    float visibility;
+
+    float3 surface_normal;
+    float water_surface_y;
+
+    float3 camera_position;
+    float _padding;
+}
+
+Texture2D<float4> scene_texture : register(t0);
+Texture2D<float> depth_texture : register(t1);
+Texture2D<float> caustics_texture : register(t2);
+Texture2D<float2> distortion_texture : register(t3);
+
+SamplerState linear_clamp : register(s0);
+SamplerState linear_wrap : register(s1);
+
+struct VSOutput {
+    float4 position : SV_POSITION;
+    float2 texcoord : TEXCOORD0;
+};
+
+float4 UnderwaterPS(VSOutput input) : SV_TARGET {
+    float2 uv = input.texcoord;
+
+    // Wavey distortion
+    float2 distort_uv = uv * 5.0 + time * distortion_speed;
+    float2 distortion = distortion_texture.Sample(linear_wrap, distort_uv).rg * 2.0 - 1.0;
+    distortion *= distortion_strength;
+
+    // Apply distortion near edges more
+    float edge_mask = 1.0 - saturate(length(uv - 0.5) * 1.5);
+    uv += distortion * edge_mask;
+
+    // Sample scene
+    float4 scene = scene_texture.Sample(linear_clamp, uv);
+    float scene_depth = depth_texture.Sample(linear_clamp, uv).r;
+
+    // Distance-based fog
+    float fog_factor = 1.0 - exp(-scene_depth * fog_density / visibility);
+    float3 color = lerp(scene.rgb, fog_color, fog_factor);
+
+    // Color absorption (red absorbs first, then green)
+    float3 absorption = float3(
+        exp(-scene_depth * 0.15),
+        exp(-scene_depth * 0.05),
+        exp(-scene_depth * 0.02)
+    );
+    color *= absorption;
+
+    // Add water tint
+    color = lerp(color, color * water_color, 0.3);
+
+    // Caustics on nearby surfaces
+    if (scene_depth < visibility * 0.5) {
+        float2 caustic_uv = uv * 3.0;
+        float caustic1 = caustics_texture.Sample(linear_wrap, caustic_uv + time * 0.1).r;
+        float caustic2 = caustics_texture.Sample(linear_wrap, caustic_uv * 1.3 - time * 0.08).r;
+        float caustic = min(caustic1, caustic2);
+        caustic = pow(caustic, 0.5);
+
+        float caustic_mask = 1.0 - saturate(scene_depth / (visibility * 0.3));
+        color += caustic_color * caustic * caustic_intensity * caustic_mask;
+    }
+
+    // God rays from surface
+    float surface_ray = 0.0;
+    if (camera_position.y < water_surface_y) {
+        float2 surface_uv = uv;
+        surface_uv.y = 1.0 - surface_uv.y;
+        float ray_density = 0.0;
+
+        for (int i = 0; i < 16; i++) {
+            float2 sample_uv = lerp(uv, float2(0.5, 0.0), float(i) / 16.0);
+            float sample_depth = depth_texture.Sample(linear_clamp, sample_uv).r;
+            ray_density += step(sample_depth, 0.99) * (1.0 - float(i) / 16.0);
+        }
+        ray_density /= 16.0;
+        color += float3(0.1, 0.2, 0.3) * ray_density * 0.5;
+    }
+
+    // Vignette
+    float vignette = 1.0 - pow(length(input.texcoord - 0.5) * 1.2, 2.0);
+    color *= vignette;
+
+    return float4(color, 1.0);
+}
+"#;
+
+// =============================================================================
+// CAUSTICS SHADER
+// =============================================================================
+
+const CAUSTICS_SHADER: &str = r#"
+//-----------------------------------------------------------------------------
+// Animated Caustics Generation
+//-----------------------------------------------------------------------------
+
+cbuffer CausticsParams : register(b0) {
+    float time;
+    float speed;
+    float scale;
+    float intensity;
+
+    float3 light_direction;
+    float refraction_index;
+
+    int octaves;
+    float persistence;
+    float2 _padding;
+}
+
+// Voronoi-based caustics
+float Voronoi(float2 uv) {
+    float2 p = floor(uv);
+    float2 f = frac(uv);
+
+    float min_dist = 1.0;
+    float second_min = 1.0;
+
+    for (int j = -1; j <= 1; j++) {
+        for (int i = -1; i <= 1; i++) {
+            float2 neighbor = float2(i, j);
+            float2 point = Hash2(p + neighbor);
+
+            // Animate
+            point = 0.5 + 0.5 * sin(time * speed + 6.2831 * point);
+
+            float2 diff = neighbor + point - f;
+            float dist = length(diff);
+
+            if (dist < min_dist) {
+                second_min = min_dist;
+                min_dist = dist;
+            } else if (dist < second_min) {
+                second_min = dist;
+            }
+        }
+    }
+
+    return second_min - min_dist;
+}
+
+float2 Hash2(float2 p) {
+    p = float2(dot(p, float2(127.1, 311.7)),
+               dot(p, float2(269.5, 183.3)));
+    return frac(sin(p) * 43758.5453);
+}
+
+// Multi-octave caustics
+float Caustics(float2 uv) {
+    float value = 0.0;
+    float amplitude = 1.0;
+    float frequency = 1.0;
+
+    for (int i = 0; i < octaves; i++) {
+        value += Voronoi(uv * frequency * scale) * amplitude;
+        frequency *= 2.0;
+        amplitude *= persistence;
+    }
+
+    return pow(value, 2.0) * intensity;
+}
+
+// Raymarched caustics for more accuracy
+float RaymarchedCaustics(float2 uv, float water_depth) {
+    float caustic = 0.0;
+    int samples = 8;
+
+    for (int i = 0; i < samples; i++) {
+        float t = float(i) / float(samples);
+        float2 offset = float2(
+            sin(time * 0.5 + t * 6.28) * 0.1,
+            cos(time * 0.7 + t * 6.28) * 0.1
+        );
+
+        // Simulate refraction through wavy surface
+        float2 sample_uv = uv + offset * water_depth * 0.1;
+        caustic += Voronoi(sample_uv * scale);
+    }
+
+    return pow(caustic / float(samples), 1.5) * intensity;
+}
+
+struct VSOutput {
+    float4 position : SV_POSITION;
+    float2 texcoord : TEXCOORD0;
+};
+
+float4 CausticsPS(VSOutput input) : SV_TARGET {
+    float2 uv = input.texcoord;
+
+    // Two layers of caustics
+    float c1 = Caustics(uv + float2(time * 0.02, 0));
+    float c2 = Caustics(uv * 1.3 + float2(0, time * 0.015));
+
+    float caustic = min(c1, c2);
+    caustic = pow(caustic, 0.8);
+
+    return float4(caustic, caustic, caustic, 1.0);
+}
+
+// Apply caustics to scene
+Texture2D<float4> scene_texture : register(t0);
+Texture2D<float> depth_texture : register(t1);
+Texture2D<float4> caustics_map : register(t2);
+
+float4 ApplyCausticsPS(VSOutput input) : SV_TARGET {
+    float4 scene = scene_texture.Sample(linear_clamp, input.texcoord);
+    float depth = depth_texture.Sample(linear_clamp, input.texcoord).r;
+
+    // Only apply to submerged surfaces
+    // This would need world position and water surface check
+
+    float2 caustic_uv = input.texcoord * 5.0;
+    float caustic = caustics_map.Sample(linear_wrap, caustic_uv).r;
+
+    // Fade with depth
+    float caustic_fade = exp(-depth * 0.5);
+    scene.rgb += caustic * caustic_fade * float3(0.8, 0.9, 1.0);
+
+    return scene;
+}
+"#;
+
+// =============================================================================
+// WATER INTERACTION SHADER
+// =============================================================================
+
+const WATER_INTERACTION_SHADER: &str = r#"
+//-----------------------------------------------------------------------------
+// Water Interaction (Ripples, Splashes, Wakes)
+//-----------------------------------------------------------------------------
+
+cbuffer RippleParams : register(b0) {
+    float time;
+    float damping;
+    float propagation_speed;
+    float interaction_radius;
+
+    int num_interactions;
+    float3 _padding;
+}
+
+struct Interaction {
+    float3 position;
+    float strength;
+    float time_created;
+    float radius;
+    float2 velocity;  // For wakes
+};
+
+StructuredBuffer<Interaction> interactions : register(t0);
+
+RWTexture2D<float2> height_velocity : register(u0);  // .x = height, .y = velocity
+
+// Wave equation simulation
+[numthreads(16, 16, 1)]
+void SimulateRipplesCS(uint3 id : SV_DispatchThreadID) {
+    uint2 dims;
+    height_velocity.GetDimensions(dims.x, dims.y);
+
+    if (id.x >= dims.x || id.y >= dims.y) return;
+
+    float2 current = height_velocity[id.xy];
+    float height = current.x;
+    float velocity = current.y;
+
+    // Sample neighbors for Laplacian
+    float left = height_velocity[uint2((id.x - 1 + dims.x) % dims.x, id.y)].x;
+    float right = height_velocity[uint2((id.x + 1) % dims.x, id.y)].x;
+    float up = height_velocity[uint2(id.x, (id.y - 1 + dims.y) % dims.y)].x;
+    float down = height_velocity[uint2(id.x, (id.y + 1) % dims.y)].x;
+
+    float laplacian = (left + right + up + down) / 4.0 - height;
+
+    // Wave equation: acceleration = c^2 * laplacian
+    float acceleration = propagation_speed * propagation_speed * laplacian;
+
+    // Update with damping
+    velocity += acceleration;
+    velocity *= damping;
+    height += velocity;
+
+    // Add new interactions
+    float2 world_pos = float2(id.xy) / float2(dims) * 100.0 - 50.0;  // Assuming 100x100 world units
+
+    for (int i = 0; i < num_interactions; i++) {
+        Interaction inter = interactions[i];
+        float age = time - inter.time_created;
+
+        if (age < 0.0 || age > 5.0) continue;
+
+        float dist = length(world_pos - inter.position.xz);
+
+        // Circular ripple
+        float ripple_radius = age * propagation_speed * 10.0;
+        float ring_dist = abs(dist - ripple_radius);
+
+        if (ring_dist < inter.radius) {
+            float strength = inter.strength * exp(-age * 2.0);
+            strength *= 1.0 - ring_dist / inter.radius;
+            strength *= sin(dist * 10.0 - age * 20.0);
+            velocity += strength * 0.1;
+        }
+
+        // Wake (for moving objects)
+        if (length(inter.velocity) > 0.01) {
+            float2 wake_dir = normalize(inter.velocity);
+            float2 to_point = world_pos - inter.position.xz;
+
+            float along = dot(to_point, -wake_dir);
+            float across = abs(dot(to_point, float2(-wake_dir.y, wake_dir.x)));
+
+            if (along > 0.0 && along < 20.0 && across < along * 0.5) {
+                float wake_strength = inter.strength * exp(-along * 0.1);
+                wake_strength *= cos(along * 0.5) * exp(-across * 0.2);
+                velocity += wake_strength * 0.05;
+            }
+        }
+    }
+
+    height_velocity[id.xy] = float2(height, velocity);
+}
+
+// Convert height map to normal map
+RWTexture2D<float4> ripple_normal : register(u0);
+Texture2D<float2> height_input : register(t0);
+
+[numthreads(16, 16, 1)]
+void HeightToNormalCS(uint3 id : SV_DispatchThreadID) {
+    uint2 dims;
+    height_input.GetDimensions(dims.x, dims.y);
+
+    float left = height_input[uint2((id.x - 1 + dims.x) % dims.x, id.y)].x;
+    float right = height_input[uint2((id.x + 1) % dims.x, id.y)].x;
+    float up = height_input[uint2(id.x, (id.y - 1 + dims.y) % dims.y)].x;
+    float down = height_input[uint2(id.x, (id.y + 1) % dims.y)].x;
+
+    float3 normal = normalize(float3(left - right, 2.0, up - down));
+
+    ripple_normal[id.xy] = float4(normal * 0.5 + 0.5, 1.0);
+}
+"#;
+
+// =============================================================================
+// OCEAN SIMULATION SYSTEM
+// =============================================================================
+
+/// Complete ocean simulation and rendering
+struct OceanSystem {
+    params: OceanParams,
+
+    // FFT simulation
+    fft_resolution: u32,
+    h0_texture: TextureHandle,
+    omega_texture: TextureHandle,
+    ht_textures: [TextureHandle; 3],  // X, Y, Z displacement spectra
+    fft_temp: [TextureHandle; 3],
+
+    // Output textures
+    displacement_map: TextureHandle,
+    normal_map: TextureHandle,
+    folding_map: TextureHandle,
+
+    // Mesh
+    ocean_mesh: MeshHandle,
+
+    // State
+    needs_spectrum_update: bool,
+}
+
+impl OceanSystem {
+    pub fn new(device: &RenderDevice, params: OceanParams) -> Self {
+        let res = params.fft_resolution;
+
+        // Create FFT textures
+        let h0_texture = device.create_texture_2d(
+            res, res,
+            TextureFormat::RGBA32F,
+            TextureUsage::ShaderResource | TextureUsage::UnorderedAccess
+        );
+
+        let omega_texture = device.create_texture_2d(
+            res, res,
+            TextureFormat::R32F,
+            TextureUsage::ShaderResource | TextureUsage::UnorderedAccess
+        );
+
+        let ht_textures = [
+            device.create_texture_2d(res, res, TextureFormat::RG32F, TextureUsage::ShaderResource | TextureUsage::UnorderedAccess),
+            device.create_texture_2d(res, res, TextureFormat::RG32F, TextureUsage::ShaderResource | TextureUsage::UnorderedAccess),
+            device.create_texture_2d(res, res, TextureFormat::RG32F, TextureUsage::ShaderResource | TextureUsage::UnorderedAccess),
+        ];
+
+        let fft_temp = [
+            device.create_texture_2d(res, res, TextureFormat::RG32F, TextureUsage::ShaderResource | TextureUsage::UnorderedAccess),
+            device.create_texture_2d(res, res, TextureFormat::RG32F, TextureUsage::ShaderResource | TextureUsage::UnorderedAccess),
+            device.create_texture_2d(res, res, TextureFormat::RG32F, TextureUsage::ShaderResource | TextureUsage::UnorderedAccess),
+        ];
+
+        let displacement_map = device.create_texture_2d(
+            res, res,
+            TextureFormat::RGBA16F,
+            TextureUsage::ShaderResource | TextureUsage::UnorderedAccess
+        );
+
+        let normal_map = device.create_texture_2d(
+            res, res,
+            TextureFormat::RGBA8,
+            TextureUsage::ShaderResource | TextureUsage::UnorderedAccess
+        );
+
+        let folding_map = device.create_texture_2d(
+            res, res,
+            TextureFormat::R16F,
+            TextureUsage::ShaderResource | TextureUsage::UnorderedAccess
+        );
+
+        // Create ocean mesh (will be tessellated)
+        let ocean_mesh = Self::create_ocean_mesh(device, 64);
+
+        Self {
+            params,
+            fft_resolution: res,
+            h0_texture,
+            omega_texture,
+            ht_textures,
+            fft_temp,
+            displacement_map,
+            normal_map,
+            folding_map,
+            ocean_mesh,
+            needs_spectrum_update: true,
+        }
+    }
+
+    fn create_ocean_mesh(device: &RenderDevice, subdivisions: u32) -> MeshHandle {
+        // Create a grid of quads for tessellation
+        // Each quad will be tessellated based on camera distance
+        0 // placeholder
+    }
+
+    pub fn compute_initial_spectrum(&mut self, context: &ComputeContext) {
+        if !self.needs_spectrum_update {
+            return;
+        }
+
+        context.bind_compute_shader("ocean_initial_spectrum_cs");
+        context.set_constant_buffer(0, &self.create_fft_params());
+        context.set_uav(0, &self.h0_texture);
+        context.set_uav(1, &self.omega_texture);
+
+        let groups = self.fft_resolution / 16;
+        context.dispatch(groups, groups, 1);
+
+        self.needs_spectrum_update = false;
+    }
+
+    pub fn update(&mut self, context: &ComputeContext, delta_time: f32) {
+        self.params.time += delta_time * self.params.time_scale;
+
+        // Compute time-dependent spectrum
+        context.bind_compute_shader("ocean_time_spectrum_cs");
+        context.set_constant_buffer(0, &self.create_fft_params());
+        context.set_srv(0, &self.h0_texture);
+        context.set_srv(1, &self.omega_texture);
+        context.set_uav(0, &self.ht_textures[0]);
+        context.set_uav(1, &self.ht_textures[1]);
+        context.set_uav(2, &self.ht_textures[2]);
+
+        let groups = self.fft_resolution / 16;
+        context.dispatch(groups, groups, 1);
+
+        // Perform FFT on each channel
+        for i in 0..3 {
+            self.perform_fft(context, i);
+        }
+
+        // Compute final displacement and normals
+        context.bind_compute_shader("ocean_displacement_normal_cs");
+        context.set_srv(0, &self.fft_temp[1]);  // Height (Y)
+        context.set_srv(1, &self.fft_temp[0]);  // X displacement
+        context.set_srv(2, &self.fft_temp[2]);  // Z displacement
+        context.set_uav(0, &self.displacement_map);
+        context.set_uav(1, &self.normal_map);
+        context.set_uav(2, &self.folding_map);
+        context.dispatch(groups, groups, 1);
+    }
+
+    fn perform_fft(&self, context: &ComputeContext, channel: usize) {
+        // Horizontal FFT pass
+        context.bind_compute_shader("ocean_fft_horizontal_cs");
+        context.set_uav(0, &self.ht_textures[channel]);
+        context.set_uav(1, &self.fft_temp[channel]);
+        context.dispatch(self.fft_resolution, 1, 1);
+
+        // Vertical FFT pass
+        context.bind_compute_shader("ocean_fft_vertical_cs");
+        context.set_uav(0, &self.fft_temp[channel]);
+        context.set_uav(1, &self.ht_textures[channel]);  // Reuse as output
+        context.dispatch(self.fft_resolution, 1, 1);
+
+        // Copy back to temp for final processing
+        context.copy_texture(&self.ht_textures[channel], &self.fft_temp[channel]);
+    }
+
+    fn create_fft_params(&self) -> OceanFFTParamsBuffer {
+        OceanFFTParamsBuffer {
+            fft_resolution: self.fft_resolution,
+            patch_size: self.params.patch_size,
+            wind_direction: self.params.wind_direction,
+            wind_speed: self.params.wind_speed,
+            amplitude: self.params.amplitude,
+            phillips_constant: self.params.phillips_constant,
+            suppression_factor: self.params.suppression_factor,
+            time: self.params.time,
+            choppiness: self.params.choppiness,
+        }
+    }
+
+    pub fn render(&self, context: &RenderContext, camera: &Camera,
+                  scene_color: &TextureHandle, scene_depth: &TextureHandle,
+                  environment: &TextureHandle) {
+        context.bind_shader("ocean_surface");
+        context.set_vertex_buffer(&self.ocean_mesh);
+
+        context.set_srv(0, &self.displacement_map);
+        context.set_srv(1, &self.normal_map);
+        context.set_srv(2, &self.folding_map);
+        context.set_srv(3, environment);
+        context.set_srv(4, scene_color);
+        context.set_srv(5, scene_depth);
+
+        context.set_constant_buffer(0, &self.create_render_params(camera));
+
+        context.draw_indexed(0, 0);
+    }
+
+    fn create_render_params(&self, camera: &Camera) -> OceanRenderParamsBuffer {
+        OceanRenderParamsBuffer {
+            camera_position: camera.position,
+            patch_size: self.params.patch_size,
+            water_color: self.params.water_color,
+            amplitude: self.params.amplitude,
+            scatter_color: self.params.scatter_color,
+            choppiness: self.params.choppiness,
+            foam_color: self.params.foam_color,
+            foam_threshold: self.params.foam_threshold,
+            foam_intensity: self.params.foam_intensity,
+            fresnel_power: self.params.fresnel_power,
+            reflectivity: self.params.reflectivity,
+            refraction_strength: self.params.refraction_strength,
+            lod_distances: self.params.lod_distances,
+            tessellation_factor: self.params.tessellation_factor,
+            max_tessellation: self.params.max_tessellation,
+            time: self.params.time,
+        }
+    }
+
+    pub fn set_params(&mut self, params: OceanParams) {
+        // Check if spectrum needs regeneration
+        if params.wind_speed != self.params.wind_speed ||
+           params.wind_direction != self.params.wind_direction ||
+           params.phillips_constant != self.params.phillips_constant {
+            self.needs_spectrum_update = true;
+        }
+        self.params = params;
+    }
+
+    pub fn get_height_at(&self, x: f32, z: f32) -> f32 {
+        // Sample displacement map to get height
+        // Would need CPU readback or compute shader for physics
+        0.0
+    }
+}
+
+// Buffer structures
+#[repr(C)]
+struct OceanFFTParamsBuffer {
+    fft_resolution: u32,
+    patch_size: f32,
+    wind_direction: vec2,
+    wind_speed: f32,
+    amplitude: f32,
+    phillips_constant: f32,
+    suppression_factor: f32,
+    time: f32,
+    choppiness: f32,
+}
+
+#[repr(C)]
+struct OceanRenderParamsBuffer {
+    camera_position: vec3,
+    patch_size: f32,
+    water_color: vec3,
+    amplitude: f32,
+    scatter_color: vec3,
+    choppiness: f32,
+    foam_color: vec3,
+    foam_threshold: f32,
+    foam_intensity: f32,
+    fresnel_power: f32,
+    reflectivity: f32,
+    refraction_strength: f32,
+    lod_distances: vec4,
+    tessellation_factor: f32,
+    max_tessellation: f32,
+    time: f32,
+}
+
+/// Water interaction system for ripples
+struct WaterInteractionSystem {
+    height_velocity_texture: TextureHandle,
+    normal_texture: TextureHandle,
+    interactions: Vec<WaterInteraction>,
+    resolution: u32,
+}
+
+struct WaterInteraction {
+    position: vec3,
+    strength: f32,
+    time_created: f32,
+    radius: f32,
+    velocity: vec2,
+}
+
+impl WaterInteractionSystem {
+    pub fn new(device: &RenderDevice, resolution: u32) -> Self {
+        let height_velocity = device.create_texture_2d(
+            resolution, resolution,
+            TextureFormat::RG16F,
+            TextureUsage::ShaderResource | TextureUsage::UnorderedAccess
+        );
+
+        let normal = device.create_texture_2d(
+            resolution, resolution,
+            TextureFormat::RGBA8,
+            TextureUsage::ShaderResource | TextureUsage::UnorderedAccess
+        );
+
+        Self {
+            height_velocity_texture: height_velocity,
+            normal_texture: normal,
+            interactions: Vec::new(),
+            resolution,
+        }
+    }
+
+    pub fn add_ripple(&mut self, position: vec3, strength: f32, time: f32) {
+        self.interactions.push(WaterInteraction {
+            position,
+            strength,
+            time_created: time,
+            radius: 0.5,
+            velocity: [0.0, 0.0],
+        });
+    }
+
+    pub fn add_wake(&mut self, position: vec3, velocity: vec2, strength: f32, time: f32) {
+        self.interactions.push(WaterInteraction {
+            position,
+            strength,
+            time_created: time,
+            radius: 1.0,
+            velocity,
+        });
+    }
+
+    pub fn update(&mut self, context: &ComputeContext, time: f32, delta_time: f32) {
+        // Remove old interactions
+        self.interactions.retain(|i| time - i.time_created < 5.0);
+
+        // Update simulation
+        context.bind_compute_shader("water_ripple_simulate_cs");
+        context.set_constant_buffer(0, &RippleParamsBuffer {
+            time,
+            damping: 0.995,
+            propagation_speed: 5.0,
+            interaction_radius: 1.0,
+            num_interactions: self.interactions.len() as i32,
+        });
+        context.set_structured_buffer(0, &self.interactions);
+        context.set_uav(0, &self.height_velocity_texture);
+
+        let groups = self.resolution / 16;
+        context.dispatch(groups, groups, 1);
+
+        // Generate normal map
+        context.bind_compute_shader("water_height_to_normal_cs");
+        context.set_srv(0, &self.height_velocity_texture);
+        context.set_uav(0, &self.normal_texture);
+        context.dispatch(groups, groups, 1);
+    }
+
+    pub fn get_normal_texture(&self) -> &TextureHandle {
+        &self.normal_texture
+    }
+}
+
+#[repr(C)]
+struct RippleParamsBuffer {
+    time: f32,
+    damping: f32,
+    propagation_speed: f32,
+    interaction_radius: f32,
+    num_interactions: i32,
+}
+
+// Placeholder types
+type TextureHandle = u64;
+type MeshHandle = u64;
+type vec2 = [f32; 2];
+type vec3 = [f32; 3];
+type vec4 = [f32; 4];
+
+struct RenderDevice;
+impl RenderDevice {
+    fn create_texture_2d(&self, _w: u32, _h: u32, _fmt: TextureFormat, _usage: TextureUsage) -> TextureHandle { 0 }
+}
+
+struct RenderContext;
+impl RenderContext {
+    fn bind_shader(&self, _name: &str) {}
+    fn set_vertex_buffer(&self, _mesh: &MeshHandle) {}
+    fn set_srv(&self, _slot: u32, _tex: &TextureHandle) {}
+    fn set_constant_buffer<T>(&self, _slot: u32, _data: &T) {}
+    fn draw_indexed(&self, _start: u32, _count: u32) {}
+}
+
+struct ComputeContext;
+impl ComputeContext {
+    fn bind_compute_shader(&self, _name: &str) {}
+    fn set_constant_buffer<T>(&self, _slot: u32, _data: &T) {}
+    fn set_srv(&self, _slot: u32, _tex: &TextureHandle) {}
+    fn set_uav(&self, _slot: u32, _tex: &TextureHandle) {}
+    fn set_structured_buffer<T>(&self, _slot: u32, _data: &[T]) {}
+    fn dispatch(&self, _x: u32, _y: u32, _z: u32) {}
+    fn copy_texture(&self, _src: &TextureHandle, _dst: &TextureHandle) {}
+}
+
+struct Camera {
+    position: vec3,
+}
+
+enum TextureFormat { RGBA32F, RGBA16F, RGBA8, RG32F, RG16F, R32F, R16F }
+enum TextureUsage { ShaderResource, UnorderedAccess }
+
+// =============================================================================
+// MODULE EXPORTS
+// =============================================================================
+
+pub use OceanParams;
+pub use WaterParams;
+pub use OceanSystem;
+pub use WaterInteractionSystem;
+
+pub const SHADERS: &[(&str, &str)] = &[
+    ("ocean_fft", OCEAN_FFT_SHADERS),
+    ("ocean_surface", OCEAN_SURFACE_SHADER),
+    ("water_surface", WATER_SURFACE_SHADER),
+    ("underwater", UNDERWATER_SHADER),
+    ("caustics", CAUSTICS_SHADER),
+    ("water_interaction", WATER_INTERACTION_SHADER),
+];

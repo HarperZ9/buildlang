@@ -1,0 +1,1806 @@
+// =============================================================================
+// PHOTON ENGINE - ANTIALIASING SYSTEMS
+// =============================================================================
+// Comprehensive antialiasing techniques including TAA, FXAA, SMAA, MSAA resolve,
+// and advanced temporal upscaling. Based on Harper Engine WP-211-235 AA papers.
+// =============================================================================
+
+import core::memory::{Arena, Pool, Buffer, GpuBuffer};
+import core::math::{Vec2, Vec3, Vec4, Mat4, saturate, lerp};
+import photon::gpu::{ComputeShader, RenderPipeline, Texture, Sampler, BindGroup};
+import photon::color::{Color, Luminance};
+import photon::temporal::{Jitter, History, MotionVectors};
+
+// =============================================================================
+// REGION: ANTIALIASING MODE SELECTION
+// =============================================================================
+
+/// Antialiasing technique selection
+pub enum AntialiasingMode {
+    /// No antialiasing
+    None,
+    /// Fast Approximate Anti-Aliasing
+    Fxaa(FxaaQuality),
+    /// Subpixel Morphological Anti-Aliasing
+    Smaa(SmaaQuality),
+    /// Temporal Anti-Aliasing
+    Taa(TaaConfig),
+    /// Multi-Sample Anti-Aliasing (with resolve)
+    Msaa(MsaaConfig),
+    /// Deep Learning Super Sampling style
+    Dlss(DlssConfig),
+    /// FidelityFX Super Resolution style
+    Fsr(FsrConfig),
+    /// Combined TAA + FXAA
+    TaaFxaa(TaaConfig, FxaaQuality),
+}
+
+// =============================================================================
+// REGION: FXAA - FAST APPROXIMATE ANTI-ALIASING
+// =============================================================================
+
+/// FXAA quality presets
+#[derive(Clone, Copy)]
+pub enum FxaaQuality {
+    /// Low quality (fastest)
+    Low,
+    /// Medium quality (balanced)
+    Medium,
+    /// High quality (default)
+    High,
+    /// Ultra quality (best edges)
+    Ultra,
+    /// Custom settings
+    Custom(FxaaSettings),
+}
+
+/// FXAA configuration settings
+#[derive(Clone, Copy)]
+pub struct FxaaSettings {
+    /// Edge threshold - minimum contrast to detect edge (0.063 - 0.333)
+    pub edge_threshold: f32,
+    /// Edge threshold minimum - darker areas need higher threshold
+    pub edge_threshold_min: f32,
+    /// Subpixel quality - amount of subpixel aliasing removal (0 - 1)
+    pub subpixel_quality: f32,
+    /// Search iterations
+    pub iterations: u32,
+}
+
+impl FxaaSettings {
+    pub fn from_quality(quality: FxaaQuality) -> Self {
+        match quality {
+            FxaaQuality::Low => Self {
+                edge_threshold: 0.250,
+                edge_threshold_min: 0.0833,
+                subpixel_quality: 0.50,
+                iterations: 3,
+            },
+            FxaaQuality::Medium => Self {
+                edge_threshold: 0.166,
+                edge_threshold_min: 0.0625,
+                subpixel_quality: 0.65,
+                iterations: 5,
+            },
+            FxaaQuality::High => Self {
+                edge_threshold: 0.125,
+                edge_threshold_min: 0.0312,
+                subpixel_quality: 0.75,
+                iterations: 8,
+            },
+            FxaaQuality::Ultra => Self {
+                edge_threshold: 0.063,
+                edge_threshold_min: 0.0156,
+                subpixel_quality: 1.00,
+                iterations: 12,
+            },
+            FxaaQuality::Custom(settings) => settings,
+        }
+    }
+}
+
+/// GPU-packed FXAA parameters
+#[repr(C)]
+pub struct GpuFxaaParams {
+    /// Inverse screen dimensions
+    pub rcp_frame: Vec2,
+    /// Edge threshold
+    pub edge_threshold: f32,
+    /// Edge threshold minimum
+    pub edge_threshold_min: f32,
+    /// Subpixel quality
+    pub subpixel_quality: f32,
+    /// Search iterations
+    pub iterations: u32,
+    /// Padding
+    pub _pad: Vec2,
+}
+
+/// FXAA renderer
+pub struct FxaaRenderer {
+    /// Quality settings
+    settings: FxaaSettings,
+    /// Output texture
+    output: Texture,
+    /// Compute shader
+    compute: ComputeShader,
+    /// Parameters buffer
+    params_buffer: GpuBuffer,
+}
+
+impl FxaaRenderer {
+    /// Create new FXAA renderer
+    pub fn new(width: u32, height: u32, quality: FxaaQuality) -> Self {
+        Self {
+            settings: FxaaSettings::from_quality(quality),
+            output: Texture::new_2d(width, height, TextureFormat::Rgba16Float),
+            compute: ComputeShader::from_source(FXAA_SHADER),
+            params_buffer: GpuBuffer::new_uniform(64),
+        }
+    }
+
+    /// Set quality
+    pub fn set_quality(&mut self, quality: FxaaQuality) {
+        self.settings = FxaaSettings::from_quality(quality);
+    }
+
+    /// Apply FXAA to input texture
+    pub fn apply(&self, input: &Texture) {
+        let params = GpuFxaaParams {
+            rcp_frame: Vec2::new(1.0 / input.width() as f32, 1.0 / input.height() as f32),
+            edge_threshold: self.settings.edge_threshold,
+            edge_threshold_min: self.settings.edge_threshold_min,
+            subpixel_quality: self.settings.subpixel_quality,
+            iterations: self.settings.iterations,
+            _pad: Vec2::zero(),
+        };
+
+        self.params_buffer.write(&params, 0);
+
+        self.compute.set_texture("input", input);
+        self.compute.set_storage_texture("output", &self.output);
+        self.compute.set_buffer("params", &self.params_buffer);
+
+        self.compute.dispatch_2d(self.output.width(), self.output.height());
+    }
+
+    /// Get output texture
+    pub fn output(&self) -> &Texture {
+        &self.output
+    }
+}
+
+// =============================================================================
+// REGION: SMAA - SUBPIXEL MORPHOLOGICAL ANTI-ALIASING
+// =============================================================================
+
+/// SMAA quality presets
+#[derive(Clone, Copy)]
+pub enum SmaaQuality {
+    /// Low quality
+    Low,
+    /// Medium quality
+    Medium,
+    /// High quality
+    High,
+    /// Ultra quality
+    Ultra,
+}
+
+/// SMAA configuration
+#[derive(Clone, Copy)]
+pub struct SmaaConfig {
+    /// Edge detection threshold
+    pub threshold: f32,
+    /// Maximum search distance
+    pub max_search_steps: u32,
+    /// Maximum diagonal search distance
+    pub max_search_steps_diag: u32,
+    /// Corner rounding
+    pub corner_rounding: u32,
+    /// Enable predication (depth-based edge detection)
+    pub predication: bool,
+    /// Predication threshold
+    pub predication_threshold: f32,
+}
+
+impl SmaaConfig {
+    pub fn from_quality(quality: SmaaQuality) -> Self {
+        match quality {
+            SmaaQuality::Low => Self {
+                threshold: 0.15,
+                max_search_steps: 4,
+                max_search_steps_diag: 0,
+                corner_rounding: 0,
+                predication: false,
+                predication_threshold: 0.01,
+            },
+            SmaaQuality::Medium => Self {
+                threshold: 0.1,
+                max_search_steps: 8,
+                max_search_steps_diag: 0,
+                corner_rounding: 25,
+                predication: false,
+                predication_threshold: 0.01,
+            },
+            SmaaQuality::High => Self {
+                threshold: 0.1,
+                max_search_steps: 16,
+                max_search_steps_diag: 8,
+                corner_rounding: 25,
+                predication: true,
+                predication_threshold: 0.01,
+            },
+            SmaaQuality::Ultra => Self {
+                threshold: 0.05,
+                max_search_steps: 32,
+                max_search_steps_diag: 16,
+                corner_rounding: 25,
+                predication: true,
+                predication_threshold: 0.01,
+            },
+        }
+    }
+}
+
+/// SMAA renderer (3-pass: edge detection, blend weight, neighborhood blending)
+pub struct SmaaRenderer {
+    /// Configuration
+    config: SmaaConfig,
+    /// Edge detection output
+    edges_texture: Texture,
+    /// Blend weights texture
+    blend_texture: Texture,
+    /// Final output
+    output: Texture,
+    /// Area lookup texture
+    area_tex: Texture,
+    /// Search lookup texture
+    search_tex: Texture,
+    /// Edge detection pass
+    edge_detect_compute: ComputeShader,
+    /// Blend weight pass
+    blend_weight_compute: ComputeShader,
+    /// Neighborhood blend pass
+    neighborhood_compute: ComputeShader,
+    /// Parameters buffer
+    params_buffer: GpuBuffer,
+}
+
+impl SmaaRenderer {
+    /// Create new SMAA renderer
+    pub fn new(width: u32, height: u32, quality: SmaaQuality) -> Self {
+        Self {
+            config: SmaaConfig::from_quality(quality),
+            edges_texture: Texture::new_2d(width, height, TextureFormat::Rg8Unorm),
+            blend_texture: Texture::new_2d(width, height, TextureFormat::Rgba8Unorm),
+            output: Texture::new_2d(width, height, TextureFormat::Rgba16Float),
+            area_tex: Self::create_area_texture(),
+            search_tex: Self::create_search_texture(),
+            edge_detect_compute: ComputeShader::from_source(SMAA_EDGE_DETECT_SHADER),
+            blend_weight_compute: ComputeShader::from_source(SMAA_BLEND_WEIGHT_SHADER),
+            neighborhood_compute: ComputeShader::from_source(SMAA_NEIGHBORHOOD_SHADER),
+            params_buffer: GpuBuffer::new_uniform(64),
+        }
+    }
+
+    fn create_area_texture() -> Texture {
+        // Pre-computed area texture for blend weight calculation
+        // 160x560 texture with signed distance field data
+        let texture = Texture::new_2d(160, 560, TextureFormat::Rg8Unorm);
+        // Would be filled with pre-computed SMAA area data
+        texture
+    }
+
+    fn create_search_texture() -> Texture {
+        // Pre-computed search texture
+        // 64x16 texture for edge search
+        let texture = Texture::new_2d(64, 16, TextureFormat::R8Unorm);
+        // Would be filled with pre-computed search data
+        texture
+    }
+
+    /// Set quality
+    pub fn set_quality(&mut self, quality: SmaaQuality) {
+        self.config = SmaaConfig::from_quality(quality);
+    }
+
+    /// Apply SMAA (3-pass)
+    pub fn apply(&self, input: &Texture, depth: Option<&Texture>) {
+        let width = input.width();
+        let height = input.height();
+        let rcp_frame = Vec2::new(1.0 / width as f32, 1.0 / height as f32);
+
+        // Pass 1: Edge detection
+        self.edge_detect_compute.set_texture("input", input);
+        if let Some(d) = depth {
+            self.edge_detect_compute.set_texture("depth", d);
+            self.edge_detect_compute.set_uniform("use_predication", 1u32);
+        } else {
+            self.edge_detect_compute.set_uniform("use_predication", 0u32);
+        }
+        self.edge_detect_compute.set_storage_texture("edges", &self.edges_texture);
+        self.edge_detect_compute.set_uniform("rcp_frame", rcp_frame);
+        self.edge_detect_compute.set_uniform("threshold", self.config.threshold);
+        self.edge_detect_compute.dispatch_2d(width, height);
+
+        // Pass 2: Blend weight calculation
+        self.blend_weight_compute.set_texture("edges", &self.edges_texture);
+        self.blend_weight_compute.set_texture("area_tex", &self.area_tex);
+        self.blend_weight_compute.set_texture("search_tex", &self.search_tex);
+        self.blend_weight_compute.set_storage_texture("blend", &self.blend_texture);
+        self.blend_weight_compute.set_uniform("rcp_frame", rcp_frame);
+        self.blend_weight_compute.set_uniform("max_search_steps", self.config.max_search_steps);
+        self.blend_weight_compute.set_uniform("max_search_steps_diag", self.config.max_search_steps_diag);
+        self.blend_weight_compute.set_uniform("corner_rounding", self.config.corner_rounding);
+        self.blend_weight_compute.dispatch_2d(width, height);
+
+        // Pass 3: Neighborhood blending
+        self.neighborhood_compute.set_texture("input", input);
+        self.neighborhood_compute.set_texture("blend", &self.blend_texture);
+        self.neighborhood_compute.set_storage_texture("output", &self.output);
+        self.neighborhood_compute.set_uniform("rcp_frame", rcp_frame);
+        self.neighborhood_compute.dispatch_2d(width, height);
+    }
+
+    /// Get output texture
+    pub fn output(&self) -> &Texture {
+        &self.output
+    }
+}
+
+// =============================================================================
+// REGION: TAA - TEMPORAL ANTI-ALIASING
+// =============================================================================
+
+/// TAA configuration
+#[derive(Clone, Copy)]
+pub struct TaaConfig {
+    /// Number of jitter samples per frame
+    pub jitter_samples: u32,
+    /// History blend factor (lower = more temporal stability, higher = more responsive)
+    pub blend_factor: f32,
+    /// Motion-based rejection threshold
+    pub motion_rejection: f32,
+    /// Enable variance clipping
+    pub variance_clipping: bool,
+    /// Variance clip gamma
+    pub variance_gamma: f32,
+    /// Enable velocity weighting
+    pub velocity_weighting: bool,
+    /// Sharpening strength (0 = none, 1 = max)
+    pub sharpening: f32,
+    /// Anti-flickering strength
+    pub anti_flicker: f32,
+    /// Jitter pattern
+    pub jitter_pattern: JitterPattern,
+}
+
+impl Default for TaaConfig {
+    fn default() -> Self {
+        Self {
+            jitter_samples: 8,
+            blend_factor: 0.1,
+            motion_rejection: 0.5,
+            variance_clipping: true,
+            variance_gamma: 1.0,
+            velocity_weighting: true,
+            sharpening: 0.25,
+            anti_flicker: 0.75,
+            jitter_pattern: JitterPattern::Halton23,
+        }
+    }
+}
+
+/// Jitter pattern for temporal sampling
+#[derive(Clone, Copy)]
+pub enum JitterPattern {
+    /// Halton 2,3 sequence
+    Halton23,
+    /// Blue noise based
+    BlueNoise,
+    /// Martin-Roberts R2 sequence
+    R2,
+    /// Uniform grid with random offset
+    UniformRandom,
+    /// MSAA-like pattern
+    MsaaPattern,
+}
+
+impl JitterPattern {
+    /// Get jitter offset for frame index
+    pub fn get_offset(&self, frame: u32, total_samples: u32) -> Vec2 {
+        let idx = frame % total_samples;
+
+        match self {
+            JitterPattern::Halton23 => {
+                Vec2::new(
+                    Self::halton(idx, 2),
+                    Self::halton(idx, 3),
+                ) - Vec2::new(0.5, 0.5)
+            }
+            JitterPattern::BlueNoise => {
+                // Would sample from blue noise texture
+                Self::blue_noise_sample(idx, total_samples)
+            }
+            JitterPattern::R2 => {
+                let g = 1.32471795724474602596;
+                let a1 = 1.0 / g;
+                let a2 = 1.0 / (g * g);
+                Vec2::new(
+                    (0.5 + a1 * idx as f32) % 1.0 - 0.5,
+                    (0.5 + a2 * idx as f32) % 1.0 - 0.5,
+                )
+            }
+            JitterPattern::UniformRandom => {
+                let n = (total_samples as f32).sqrt() as u32;
+                let x = (idx % n) as f32 / n as f32;
+                let y = (idx / n) as f32 / n as f32;
+                Vec2::new(x - 0.5, y - 0.5)
+            }
+            JitterPattern::MsaaPattern => {
+                Self::msaa_pattern(idx)
+            }
+        }
+    }
+
+    fn halton(index: u32, base: u32) -> f32 {
+        let mut result = 0.0;
+        let mut f = 1.0 / base as f32;
+        let mut i = index;
+
+        while i > 0 {
+            result += f * (i % base) as f32;
+            i /= base;
+            f /= base as f32;
+        }
+
+        result
+    }
+
+    fn blue_noise_sample(idx: u32, _total: u32) -> Vec2 {
+        // Simplified - would use actual blue noise
+        Vec2::new(
+            Self::halton(idx * 7 + 1, 2) - 0.5,
+            Self::halton(idx * 7 + 1, 3) - 0.5,
+        )
+    }
+
+    fn msaa_pattern(idx: u32) -> Vec2 {
+        let patterns_8x = [
+            Vec2::new( 1.0/16.0, -3.0/16.0),
+            Vec2::new(-1.0/16.0,  3.0/16.0),
+            Vec2::new( 5.0/16.0,  1.0/16.0),
+            Vec2::new(-3.0/16.0, -5.0/16.0),
+            Vec2::new(-5.0/16.0,  5.0/16.0),
+            Vec2::new(-7.0/16.0, -1.0/16.0),
+            Vec2::new( 3.0/16.0,  7.0/16.0),
+            Vec2::new( 7.0/16.0, -7.0/16.0),
+        ];
+        patterns_8x[(idx % 8) as usize]
+    }
+}
+
+/// GPU-packed TAA parameters
+#[repr(C)]
+pub struct GpuTaaParams {
+    /// Jitter offset for current frame
+    pub jitter: Vec2,
+    /// Previous jitter offset
+    pub prev_jitter: Vec2,
+    /// Inverse screen dimensions
+    pub rcp_frame: Vec2,
+    /// History blend factor
+    pub blend_factor: f32,
+    /// Motion rejection threshold
+    pub motion_rejection: f32,
+    /// Variance clip gamma
+    pub variance_gamma: f32,
+    /// Sharpening strength
+    pub sharpening: f32,
+    /// Anti-flicker strength
+    pub anti_flicker: f32,
+    /// Frame index
+    pub frame_index: u32,
+}
+
+/// Temporal Anti-Aliasing renderer
+pub struct TaaRenderer {
+    /// Configuration
+    config: TaaConfig,
+    /// Current frame history buffer
+    history_a: Texture,
+    /// Previous frame history buffer
+    history_b: Texture,
+    /// Which history buffer is current
+    current_history: bool,
+    /// Output texture
+    output: Texture,
+    /// Resolve compute shader
+    resolve_compute: ComputeShader,
+    /// Sharpen compute shader
+    sharpen_compute: ComputeShader,
+    /// Parameters buffer
+    params_buffer: GpuBuffer,
+    /// Frame counter
+    frame_index: u32,
+    /// Previous jitter
+    prev_jitter: Vec2,
+}
+
+impl TaaRenderer {
+    /// Create new TAA renderer
+    pub fn new(width: u32, height: u32, config: TaaConfig) -> Self {
+        Self {
+            config,
+            history_a: Texture::new_2d(width, height, TextureFormat::Rgba16Float),
+            history_b: Texture::new_2d(width, height, TextureFormat::Rgba16Float),
+            current_history: false,
+            output: Texture::new_2d(width, height, TextureFormat::Rgba16Float),
+            resolve_compute: ComputeShader::from_source(TAA_RESOLVE_SHADER),
+            sharpen_compute: ComputeShader::from_source(TAA_SHARPEN_SHADER),
+            params_buffer: GpuBuffer::new_uniform(64),
+            frame_index: 0,
+            prev_jitter: Vec2::zero(),
+        }
+    }
+
+    /// Get current jitter offset (in pixels)
+    pub fn get_jitter(&self) -> Vec2 {
+        self.config.jitter_pattern.get_offset(self.frame_index, self.config.jitter_samples)
+    }
+
+    /// Get jitter matrix for projection modification
+    pub fn get_jitter_matrix(&self, width: u32, height: u32) -> Mat4 {
+        let jitter = self.get_jitter();
+        let offset = Vec2::new(
+            jitter.x * 2.0 / width as f32,
+            jitter.y * 2.0 / height as f32,
+        );
+
+        Mat4::from_translation(Vec3::new(offset.x, offset.y, 0.0))
+    }
+
+    /// Apply TAA resolve
+    pub fn resolve(
+        &mut self,
+        current_color: &Texture,
+        depth: &Texture,
+        motion_vectors: &Texture,
+    ) {
+        let width = current_color.width();
+        let height = current_color.height();
+        let jitter = self.get_jitter();
+
+        // Get history and output references
+        let (history_in, history_out) = if self.current_history {
+            (&self.history_a, &self.history_b)
+        } else {
+            (&self.history_b, &self.history_a)
+        };
+
+        // Update parameters
+        let params = GpuTaaParams {
+            jitter,
+            prev_jitter: self.prev_jitter,
+            rcp_frame: Vec2::new(1.0 / width as f32, 1.0 / height as f32),
+            blend_factor: self.config.blend_factor,
+            motion_rejection: self.config.motion_rejection,
+            variance_gamma: self.config.variance_gamma,
+            sharpening: self.config.sharpening,
+            anti_flicker: self.config.anti_flicker,
+            frame_index: self.frame_index,
+        };
+
+        self.params_buffer.write(&params, 0);
+
+        // TAA resolve pass
+        self.resolve_compute.set_texture("current", current_color);
+        self.resolve_compute.set_texture("history", history_in);
+        self.resolve_compute.set_texture("depth", depth);
+        self.resolve_compute.set_texture("motion", motion_vectors);
+        self.resolve_compute.set_storage_texture("output", history_out);
+        self.resolve_compute.set_buffer("params", &self.params_buffer);
+        self.resolve_compute.set_uniform("variance_clipping", if self.config.variance_clipping { 1u32 } else { 0u32 });
+        self.resolve_compute.set_uniform("velocity_weighting", if self.config.velocity_weighting { 1u32 } else { 0u32 });
+
+        self.resolve_compute.dispatch_2d(width, height);
+
+        // Optional sharpening pass
+        if self.config.sharpening > 0.0 {
+            self.sharpen_compute.set_texture("input", history_out);
+            self.sharpen_compute.set_storage_texture("output", &self.output);
+            self.sharpen_compute.set_uniform("sharpness", self.config.sharpening);
+            self.sharpen_compute.dispatch_2d(width, height);
+        } else {
+            // Copy to output
+            history_out.copy_to(&mut self.output);
+        }
+
+        // Swap history buffers
+        self.current_history = !self.current_history;
+        self.prev_jitter = jitter;
+        self.frame_index += 1;
+    }
+
+    /// Reset history (call on camera cut or teleport)
+    pub fn reset_history(&mut self, current_frame: &Texture) {
+        current_frame.copy_to(&mut self.history_a);
+        current_frame.copy_to(&mut self.history_b);
+        self.frame_index = 0;
+    }
+
+    /// Get output texture
+    pub fn output(&self) -> &Texture {
+        &self.output
+    }
+}
+
+// =============================================================================
+// REGION: MSAA RESOLVE
+// =============================================================================
+
+/// MSAA configuration
+#[derive(Clone, Copy)]
+pub struct MsaaConfig {
+    /// Sample count (2, 4, 8, 16)
+    pub sample_count: u32,
+    /// Custom resolve mode
+    pub resolve_mode: MsaaResolveMode,
+    /// Enable centroid sampling
+    pub centroid_sampling: bool,
+}
+
+impl Default for MsaaConfig {
+    fn default() -> Self {
+        Self {
+            sample_count: 4,
+            resolve_mode: MsaaResolveMode::Average,
+            centroid_sampling: false,
+        }
+    }
+}
+
+/// MSAA resolve modes
+#[derive(Clone, Copy)]
+pub enum MsaaResolveMode {
+    /// Simple average of samples
+    Average,
+    /// Box filter
+    Box,
+    /// Triangle filter
+    Triangle,
+    /// Gaussian filter
+    Gaussian,
+    /// Keep closest sample (for depth)
+    Closest,
+    /// Custom weighted resolve
+    Custom,
+}
+
+/// MSAA resolve renderer
+pub struct MsaaResolver {
+    /// Configuration
+    config: MsaaConfig,
+    /// Output texture
+    output: Texture,
+    /// Depth output (resolved)
+    depth_output: Texture,
+    /// Resolve compute shader
+    resolve_compute: ComputeShader,
+    /// Depth resolve compute shader
+    depth_resolve_compute: ComputeShader,
+}
+
+impl MsaaResolver {
+    /// Create new MSAA resolver
+    pub fn new(width: u32, height: u32, config: MsaaConfig) -> Self {
+        Self {
+            config,
+            output: Texture::new_2d(width, height, TextureFormat::Rgba16Float),
+            depth_output: Texture::new_2d(width, height, TextureFormat::Depth32Float),
+            resolve_compute: ComputeShader::from_source(MSAA_RESOLVE_SHADER),
+            depth_resolve_compute: ComputeShader::from_source(MSAA_DEPTH_RESOLVE_SHADER),
+        }
+    }
+
+    /// Resolve MSAA color buffer
+    pub fn resolve_color(&self, msaa_color: &Texture) {
+        self.resolve_compute.set_texture("msaa_input", msaa_color);
+        self.resolve_compute.set_storage_texture("output", &self.output);
+        self.resolve_compute.set_uniform("sample_count", self.config.sample_count);
+        self.resolve_compute.set_uniform("resolve_mode", self.config.resolve_mode as u32);
+
+        self.resolve_compute.dispatch_2d(self.output.width(), self.output.height());
+    }
+
+    /// Resolve MSAA depth buffer
+    pub fn resolve_depth(&self, msaa_depth: &Texture, mode: DepthResolveMode) {
+        self.depth_resolve_compute.set_texture("msaa_depth", msaa_depth);
+        self.depth_resolve_compute.set_storage_texture("output", &self.depth_output);
+        self.depth_resolve_compute.set_uniform("sample_count", self.config.sample_count);
+        self.depth_resolve_compute.set_uniform("mode", mode as u32);
+
+        self.depth_resolve_compute.dispatch_2d(self.depth_output.width(), self.depth_output.height());
+    }
+
+    /// Get resolved color
+    pub fn color_output(&self) -> &Texture {
+        &self.output
+    }
+
+    /// Get resolved depth
+    pub fn depth_output(&self) -> &Texture {
+        &self.depth_output
+    }
+}
+
+/// Depth resolve mode
+#[derive(Clone, Copy)]
+pub enum DepthResolveMode {
+    /// Minimum depth (closest)
+    Min,
+    /// Maximum depth (furthest)
+    Max,
+    /// Average depth
+    Average,
+    /// First sample
+    Sample0,
+}
+
+// =============================================================================
+// REGION: TEMPORAL UPSCALING (DLSS/FSR STYLE)
+// =============================================================================
+
+/// DLSS-style temporal upscaling configuration
+#[derive(Clone, Copy)]
+pub struct DlssConfig {
+    /// Upscale factor (1.0 = native, 2.0 = 2x upscale)
+    pub upscale_factor: f32,
+    /// Quality preset
+    pub quality: DlssQuality,
+    /// Sharpening
+    pub sharpening: f32,
+    /// Enable auto-exposure
+    pub auto_exposure: bool,
+}
+
+/// DLSS quality presets
+#[derive(Clone, Copy)]
+pub enum DlssQuality {
+    /// Ultra Performance (3x upscale)
+    UltraPerformance,
+    /// Performance (2x upscale)
+    Performance,
+    /// Balanced (1.7x upscale)
+    Balanced,
+    /// Quality (1.5x upscale)
+    Quality,
+    /// Ultra Quality (1.3x upscale)
+    UltraQuality,
+    /// DLAA (no upscale, just AA)
+    Dlaa,
+}
+
+impl DlssConfig {
+    pub fn from_quality(quality: DlssQuality) -> Self {
+        let upscale = match quality {
+            DlssQuality::UltraPerformance => 3.0,
+            DlssQuality::Performance => 2.0,
+            DlssQuality::Balanced => 1.7,
+            DlssQuality::Quality => 1.5,
+            DlssQuality::UltraQuality => 1.3,
+            DlssQuality::Dlaa => 1.0,
+        };
+
+        Self {
+            upscale_factor: upscale,
+            quality,
+            sharpening: 0.0,
+            auto_exposure: true,
+        }
+    }
+
+    /// Get render resolution for given output resolution
+    pub fn render_resolution(&self, output_width: u32, output_height: u32) -> (u32, u32) {
+        let render_width = (output_width as f32 / self.upscale_factor) as u32;
+        let render_height = (output_height as f32 / self.upscale_factor) as u32;
+        (render_width.max(1), render_height.max(1))
+    }
+}
+
+/// FSR-style upscaling configuration
+#[derive(Clone, Copy)]
+pub struct FsrConfig {
+    /// Upscale factor
+    pub upscale_factor: f32,
+    /// Quality preset
+    pub quality: FsrQuality,
+    /// Sharpening (RCAS)
+    pub sharpening: f32,
+    /// Enable FSR 2.0 temporal mode
+    pub temporal: bool,
+}
+
+/// FSR quality presets
+#[derive(Clone, Copy)]
+pub enum FsrQuality {
+    /// Ultra Performance (3x)
+    UltraPerformance,
+    /// Performance (2x)
+    Performance,
+    /// Balanced (1.7x)
+    Balanced,
+    /// Quality (1.5x)
+    Quality,
+    /// Ultra Quality (1.3x)
+    UltraQuality,
+    /// Native AA only
+    NativeAA,
+}
+
+impl FsrConfig {
+    pub fn from_quality(quality: FsrQuality) -> Self {
+        let upscale = match quality {
+            FsrQuality::UltraPerformance => 3.0,
+            FsrQuality::Performance => 2.0,
+            FsrQuality::Balanced => 1.7,
+            FsrQuality::Quality => 1.5,
+            FsrQuality::UltraQuality => 1.3,
+            FsrQuality::NativeAA => 1.0,
+        };
+
+        Self {
+            upscale_factor: upscale,
+            quality,
+            sharpening: 0.2,
+            temporal: true,
+        }
+    }
+}
+
+/// Temporal upscaler (DLSS/FSR2 style)
+pub struct TemporalUpscaler {
+    /// Output resolution
+    output_width: u32,
+    output_height: u32,
+    /// Render resolution
+    render_width: u32,
+    render_height: u32,
+    /// Upscale factor
+    upscale_factor: f32,
+    /// History buffer A
+    history_a: Texture,
+    /// History buffer B
+    history_b: Texture,
+    /// Lock texture for disocclusion
+    lock_texture: Texture,
+    /// Upscaled output
+    output: Texture,
+    /// Current history index
+    current_history: bool,
+    /// Upscale compute shader
+    upscale_compute: ComputeShader,
+    /// Accumulate compute shader
+    accumulate_compute: ComputeShader,
+    /// Sharpen compute shader (RCAS)
+    sharpen_compute: ComputeShader,
+    /// Parameters buffer
+    params_buffer: GpuBuffer,
+    /// Frame index
+    frame_index: u32,
+    /// Sharpening strength
+    sharpening: f32,
+}
+
+impl TemporalUpscaler {
+    /// Create new temporal upscaler
+    pub fn new(output_width: u32, output_height: u32, upscale_factor: f32, sharpening: f32) -> Self {
+        let render_width = (output_width as f32 / upscale_factor) as u32;
+        let render_height = (output_height as f32 / upscale_factor) as u32;
+
+        Self {
+            output_width,
+            output_height,
+            render_width,
+            render_height,
+            upscale_factor,
+            history_a: Texture::new_2d(output_width, output_height, TextureFormat::Rgba16Float),
+            history_b: Texture::new_2d(output_width, output_height, TextureFormat::Rgba16Float),
+            lock_texture: Texture::new_2d(output_width, output_height, TextureFormat::R16Float),
+            output: Texture::new_2d(output_width, output_height, TextureFormat::Rgba16Float),
+            current_history: false,
+            upscale_compute: ComputeShader::from_source(TEMPORAL_UPSCALE_SHADER),
+            accumulate_compute: ComputeShader::from_source(TEMPORAL_ACCUMULATE_SHADER),
+            sharpen_compute: ComputeShader::from_source(RCAS_SHADER),
+            params_buffer: GpuBuffer::new_uniform(128),
+            frame_index: 0,
+            sharpening,
+        }
+    }
+
+    /// Get render resolution
+    pub fn render_resolution(&self) -> (u32, u32) {
+        (self.render_width, self.render_height)
+    }
+
+    /// Get jitter for current frame
+    pub fn get_jitter(&self) -> Vec2 {
+        JitterPattern::Halton23.get_offset(self.frame_index, 8)
+    }
+
+    /// Upscale with temporal accumulation
+    pub fn upscale(
+        &mut self,
+        color: &Texture,
+        depth: &Texture,
+        motion_vectors: &Texture,
+        exposure: f32,
+    ) {
+        let jitter = self.get_jitter();
+
+        let (history_in, history_out) = if self.current_history {
+            (&self.history_a, &self.history_b)
+        } else {
+            (&self.history_b, &self.history_a)
+        };
+
+        // Upscale and accumulate
+        self.upscale_compute.set_texture("color", color);
+        self.upscale_compute.set_texture("depth", depth);
+        self.upscale_compute.set_texture("motion", motion_vectors);
+        self.upscale_compute.set_texture("history", history_in);
+        self.upscale_compute.set_texture("lock", &self.lock_texture);
+        self.upscale_compute.set_storage_texture("output", history_out);
+        self.upscale_compute.set_storage_texture("lock_out", &self.lock_texture);
+
+        self.upscale_compute.set_uniform("jitter", jitter);
+        self.upscale_compute.set_uniform("render_size", Vec2::new(self.render_width as f32, self.render_height as f32));
+        self.upscale_compute.set_uniform("output_size", Vec2::new(self.output_width as f32, self.output_height as f32));
+        self.upscale_compute.set_uniform("upscale_factor", self.upscale_factor);
+        self.upscale_compute.set_uniform("exposure", exposure);
+        self.upscale_compute.set_uniform("frame_index", self.frame_index);
+
+        self.upscale_compute.dispatch_2d(self.output_width, self.output_height);
+
+        // Apply RCAS sharpening
+        if self.sharpening > 0.0 {
+            self.sharpen_compute.set_texture("input", history_out);
+            self.sharpen_compute.set_storage_texture("output", &self.output);
+            self.sharpen_compute.set_uniform("sharpness", self.sharpening);
+            self.sharpen_compute.dispatch_2d(self.output_width, self.output_height);
+        } else {
+            history_out.copy_to(&mut self.output);
+        }
+
+        self.current_history = !self.current_history;
+        self.frame_index += 1;
+    }
+
+    /// Reset history
+    pub fn reset(&mut self) {
+        self.history_a.clear(Vec4::zero());
+        self.history_b.clear(Vec4::zero());
+        self.lock_texture.clear(Vec4::zero());
+        self.frame_index = 0;
+    }
+
+    /// Get output
+    pub fn output(&self) -> &Texture {
+        &self.output
+    }
+}
+
+// =============================================================================
+// REGION: EDGE ANTI-ALIASING
+// =============================================================================
+
+/// Geometry edge anti-aliasing using distance-to-edge
+pub struct GeometricEdgeAA {
+    /// Edge detection texture
+    edge_texture: Texture,
+    /// Output texture
+    output: Texture,
+    /// Edge detection shader
+    edge_detect: ComputeShader,
+    /// Blend shader
+    blend_shader: ComputeShader,
+}
+
+impl GeometricEdgeAA {
+    /// Create new geometric edge AA
+    pub fn new(width: u32, height: u32) -> Self {
+        Self {
+            edge_texture: Texture::new_2d(width, height, TextureFormat::Rgba16Float),
+            output: Texture::new_2d(width, height, TextureFormat::Rgba16Float),
+            edge_detect: ComputeShader::from_source(GEOMETRIC_EDGE_DETECT_SHADER),
+            blend_shader: ComputeShader::from_source(GEOMETRIC_EDGE_BLEND_SHADER),
+        }
+    }
+
+    /// Apply geometric edge AA (requires distance-to-edge in alpha or separate buffer)
+    pub fn apply(&self, color: &Texture, normal_depth: &Texture) {
+        // Detect edges from normal and depth discontinuities
+        self.edge_detect.set_texture("color", color);
+        self.edge_detect.set_texture("normal_depth", normal_depth);
+        self.edge_detect.set_storage_texture("edges", &self.edge_texture);
+        self.edge_detect.dispatch_2d(self.edge_texture.width(), self.edge_texture.height());
+
+        // Blend along edges
+        self.blend_shader.set_texture("color", color);
+        self.blend_shader.set_texture("edges", &self.edge_texture);
+        self.blend_shader.set_storage_texture("output", &self.output);
+        self.blend_shader.dispatch_2d(self.output.width(), self.output.height());
+    }
+
+    /// Get output
+    pub fn output(&self) -> &Texture {
+        &self.output
+    }
+}
+
+// =============================================================================
+// REGION: WGSL SHADERS
+// =============================================================================
+
+const FXAA_SHADER: &str = r#"
+struct FxaaParams {
+    rcp_frame: vec2<f32>,
+    edge_threshold: f32,
+    edge_threshold_min: f32,
+    subpixel_quality: f32,
+    iterations: u32,
+    _pad: vec2<f32>,
+}
+
+@group(0) @binding(0) var input: texture_2d<f32>;
+@group(0) @binding(1) var output: texture_storage_2d<rgba16float, write>;
+@group(0) @binding(2) var<uniform> params: FxaaParams;
+
+var<private> linear_sampler: sampler;
+
+fn rgb_to_luma(color: vec3<f32>) -> f32 {
+    return dot(color, vec3<f32>(0.299, 0.587, 0.114));
+}
+
+fn fxaa_quality_subpix(subpix_quality: f32, luma_range: f32, luma_m: f32) -> f32 {
+    let subpix_a = clamp(luma_range / luma_m, 0.0, 1.0);
+    let subpix_b = (-2.0 * subpix_a + 3.0) * subpix_a * subpix_a;
+    return subpix_b * subpix_b * subpix_quality;
+}
+
+@compute @workgroup_size(8, 8, 1)
+fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+    let dims = textureDimensions(output);
+    if (any(id.xy >= dims)) { return; }
+
+    let uv = (vec2<f32>(id.xy) + 0.5) * params.rcp_frame;
+
+    // Sample center and neighbors
+    let rgb_m = textureSampleLevel(input, linear_sampler, uv, 0.0).rgb;
+    let rgb_n = textureSampleLevel(input, linear_sampler, uv + vec2<f32>(0.0, -1.0) * params.rcp_frame, 0.0).rgb;
+    let rgb_s = textureSampleLevel(input, linear_sampler, uv + vec2<f32>(0.0, 1.0) * params.rcp_frame, 0.0).rgb;
+    let rgb_e = textureSampleLevel(input, linear_sampler, uv + vec2<f32>(1.0, 0.0) * params.rcp_frame, 0.0).rgb;
+    let rgb_w = textureSampleLevel(input, linear_sampler, uv + vec2<f32>(-1.0, 0.0) * params.rcp_frame, 0.0).rgb;
+
+    let luma_m = rgb_to_luma(rgb_m);
+    let luma_n = rgb_to_luma(rgb_n);
+    let luma_s = rgb_to_luma(rgb_s);
+    let luma_e = rgb_to_luma(rgb_e);
+    let luma_w = rgb_to_luma(rgb_w);
+
+    let luma_min = min(luma_m, min(min(luma_n, luma_s), min(luma_e, luma_w)));
+    let luma_max = max(luma_m, max(max(luma_n, luma_s), max(luma_e, luma_w)));
+    let luma_range = luma_max - luma_min;
+
+    // Early exit for non-edges
+    if (luma_range < max(params.edge_threshold_min, luma_max * params.edge_threshold)) {
+        textureStore(output, id.xy, vec4<f32>(rgb_m, 1.0));
+        return;
+    }
+
+    // Compute local contrast
+    let luma_nw = rgb_to_luma(textureSampleLevel(input, linear_sampler, uv + vec2<f32>(-1.0, -1.0) * params.rcp_frame, 0.0).rgb);
+    let luma_ne = rgb_to_luma(textureSampleLevel(input, linear_sampler, uv + vec2<f32>(1.0, -1.0) * params.rcp_frame, 0.0).rgb);
+    let luma_sw = rgb_to_luma(textureSampleLevel(input, linear_sampler, uv + vec2<f32>(-1.0, 1.0) * params.rcp_frame, 0.0).rgb);
+    let luma_se = rgb_to_luma(textureSampleLevel(input, linear_sampler, uv + vec2<f32>(1.0, 1.0) * params.rcp_frame, 0.0).rgb);
+
+    let luma_ns = luma_n + luma_s;
+    let luma_we = luma_w + luma_e;
+
+    let luma_nwne = luma_nw + luma_ne;
+    let luma_swse = luma_sw + luma_se;
+
+    // Edge detection
+    let edge_horz = abs((-2.0 * luma_w) + luma_nwne) + abs((-2.0 * luma_m) + luma_ns) * 2.0 + abs((-2.0 * luma_e) + luma_swse);
+    let edge_vert = abs((-2.0 * luma_n) + luma_nwne) + abs((-2.0 * luma_m) + luma_we) * 2.0 + abs((-2.0 * luma_s) + luma_swse);
+    let is_horizontal = edge_horz >= edge_vert;
+
+    let step_length = select(params.rcp_frame.x, params.rcp_frame.y, is_horizontal);
+
+    var luma_neg = select(luma_w, luma_n, is_horizontal);
+    var luma_pos = select(luma_e, luma_s, is_horizontal);
+
+    let gradient_neg = abs(luma_neg - luma_m);
+    let gradient_pos = abs(luma_pos - luma_m);
+
+    let luma_local_average: f32;
+    if (gradient_neg < gradient_pos) {
+        luma_neg = luma_pos;
+        luma_local_average = luma_m + luma_pos * 0.5;
+    } else {
+        luma_local_average = luma_m + luma_neg * 0.5;
+    }
+
+    // Subpixel anti-aliasing
+    let subpix = fxaa_quality_subpix(params.subpixel_quality, luma_range, luma_m);
+
+    // Final blend
+    let final_offset = subpix * step_length;
+    let final_uv = select(
+        uv + vec2<f32>(0.0, final_offset),
+        uv + vec2<f32>(final_offset, 0.0),
+        is_horizontal
+    );
+
+    let final_color = textureSampleLevel(input, linear_sampler, final_uv, 0.0).rgb;
+    textureStore(output, id.xy, vec4<f32>(final_color, 1.0));
+}
+"#;
+
+const TAA_RESOLVE_SHADER: &str = r#"
+struct TaaParams {
+    jitter: vec2<f32>,
+    prev_jitter: vec2<f32>,
+    rcp_frame: vec2<f32>,
+    blend_factor: f32,
+    motion_rejection: f32,
+    variance_gamma: f32,
+    sharpening: f32,
+    anti_flicker: f32,
+    frame_index: u32,
+}
+
+@group(0) @binding(0) var current: texture_2d<f32>;
+@group(0) @binding(1) var history: texture_2d<f32>;
+@group(0) @binding(2) var depth: texture_2d<f32>;
+@group(0) @binding(3) var motion: texture_2d<f32>;
+@group(0) @binding(4) var output: texture_storage_2d<rgba16float, write>;
+@group(0) @binding(5) var<uniform> params: TaaParams;
+@group(0) @binding(6) var<uniform> variance_clipping: u32;
+@group(0) @binding(7) var<uniform> velocity_weighting: u32;
+
+var<private> linear_sampler: sampler;
+var<private> point_sampler: sampler;
+
+fn rgb_to_ycocg(rgb: vec3<f32>) -> vec3<f32> {
+    let y = dot(rgb, vec3<f32>(0.25, 0.5, 0.25));
+    let co = dot(rgb, vec3<f32>(0.5, 0.0, -0.5));
+    let cg = dot(rgb, vec3<f32>(-0.25, 0.5, -0.25));
+    return vec3<f32>(y, co, cg);
+}
+
+fn ycocg_to_rgb(ycocg: vec3<f32>) -> vec3<f32> {
+    let y = ycocg.x;
+    let co = ycocg.y;
+    let cg = ycocg.z;
+    return vec3<f32>(y + co - cg, y + cg, y - co - cg);
+}
+
+fn clip_aabb(aabb_min: vec3<f32>, aabb_max: vec3<f32>, prev_sample: vec3<f32>, avg: vec3<f32>) -> vec3<f32> {
+    let p_clip = 0.5 * (aabb_max + aabb_min);
+    let e_clip = 0.5 * (aabb_max - aabb_min) + 0.001;
+    let v_clip = prev_sample - p_clip;
+    let v_unit = v_clip / e_clip;
+    let a_unit = abs(v_unit);
+    let ma_unit = max(a_unit.x, max(a_unit.y, a_unit.z));
+
+    if (ma_unit > 1.0) {
+        return p_clip + v_clip / ma_unit;
+    }
+    return prev_sample;
+}
+
+@compute @workgroup_size(8, 8, 1)
+fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+    let dims = textureDimensions(output);
+    if (any(id.xy >= dims)) { return; }
+
+    let uv = (vec2<f32>(id.xy) + 0.5) * params.rcp_frame;
+
+    // Get motion vector and reproject
+    let motion_vec = textureSampleLevel(motion, linear_sampler, uv, 0.0).rg;
+    let history_uv = uv - motion_vec;
+
+    // Sample current frame (with jitter compensation)
+    let current_sample = textureSampleLevel(current, linear_sampler, uv, 0.0).rgb;
+
+    // Sample history
+    var history_sample = textureSampleLevel(history, linear_sampler, history_uv, 0.0).rgb;
+
+    // Variance clipping in YCoCg space
+    if (variance_clipping == 1u) {
+        var m1 = vec3<f32>(0.0);
+        var m2 = vec3<f32>(0.0);
+
+        // Sample 3x3 neighborhood
+        for (var y = -1; y <= 1; y++) {
+            for (var x = -1; x <= 1; x++) {
+                let offset = vec2<f32>(f32(x), f32(y)) * params.rcp_frame;
+                let sample = rgb_to_ycocg(textureSampleLevel(current, linear_sampler, uv + offset, 0.0).rgb);
+                m1 += sample;
+                m2 += sample * sample;
+            }
+        }
+
+        m1 /= 9.0;
+        m2 /= 9.0;
+
+        let sigma = sqrt(max(m2 - m1 * m1, vec3<f32>(0.0)));
+        let gamma = params.variance_gamma;
+
+        let aabb_min = m1 - gamma * sigma;
+        let aabb_max = m1 + gamma * sigma;
+
+        let history_ycocg = rgb_to_ycocg(history_sample);
+        let clipped = clip_aabb(aabb_min, aabb_max, history_ycocg, m1);
+        history_sample = ycocg_to_rgb(clipped);
+    }
+
+    // Compute blend factor
+    var blend = params.blend_factor;
+
+    // Motion-based blend factor adjustment
+    if (velocity_weighting == 1u) {
+        let velocity = length(motion_vec) * vec2<f32>(dims).x;
+        blend = mix(blend, 0.5, saturate(velocity * params.motion_rejection));
+    }
+
+    // Check if history is valid
+    if (history_uv.x < 0.0 || history_uv.x > 1.0 || history_uv.y < 0.0 || history_uv.y > 1.0) {
+        blend = 1.0; // No valid history, use current frame
+    }
+
+    // Blend
+    let result = mix(history_sample, current_sample, blend);
+
+    textureStore(output, id.xy, vec4<f32>(result, 1.0));
+}
+"#;
+
+const TAA_SHARPEN_SHADER: &str = r#"
+@group(0) @binding(0) var input: texture_2d<f32>;
+@group(0) @binding(1) var output: texture_storage_2d<rgba16float, write>;
+@group(0) @binding(2) var<uniform> sharpness: f32;
+
+var<private> linear_sampler: sampler;
+
+@compute @workgroup_size(8, 8, 1)
+fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+    let dims = textureDimensions(output);
+    if (any(id.xy >= dims)) { return; }
+
+    let uv = (vec2<f32>(id.xy) + 0.5) / vec2<f32>(dims);
+    let texel = 1.0 / vec2<f32>(dims);
+
+    let center = textureSampleLevel(input, linear_sampler, uv, 0.0).rgb;
+    let n = textureSampleLevel(input, linear_sampler, uv + vec2<f32>(0.0, -texel.y), 0.0).rgb;
+    let s = textureSampleLevel(input, linear_sampler, uv + vec2<f32>(0.0, texel.y), 0.0).rgb;
+    let e = textureSampleLevel(input, linear_sampler, uv + vec2<f32>(texel.x, 0.0), 0.0).rgb;
+    let w = textureSampleLevel(input, linear_sampler, uv + vec2<f32>(-texel.x, 0.0), 0.0).rgb;
+
+    let sharpened = center + (center * 4.0 - n - s - e - w) * sharpness;
+
+    textureStore(output, id.xy, vec4<f32>(max(sharpened, vec3<f32>(0.0)), 1.0));
+}
+"#;
+
+const SMAA_EDGE_DETECT_SHADER: &str = r#"
+@group(0) @binding(0) var input: texture_2d<f32>;
+@group(0) @binding(1) var depth: texture_2d<f32>;
+@group(0) @binding(2) var edges: texture_storage_2d<rg8unorm, write>;
+@group(0) @binding(3) var<uniform> rcp_frame: vec2<f32>;
+@group(0) @binding(4) var<uniform> threshold: f32;
+@group(0) @binding(5) var<uniform> use_predication: u32;
+
+var<private> linear_sampler: sampler;
+
+fn rgb_to_luma(rgb: vec3<f32>) -> f32 {
+    return dot(rgb, vec3<f32>(0.2126, 0.7152, 0.0722));
+}
+
+@compute @workgroup_size(8, 8, 1)
+fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+    let dims = textureDimensions(edges);
+    if (any(id.xy >= dims)) { return; }
+
+    let uv = (vec2<f32>(id.xy) + 0.5) * rcp_frame;
+
+    // Sample luminances
+    let l = rgb_to_luma(textureSampleLevel(input, linear_sampler, uv, 0.0).rgb);
+    let l_left = rgb_to_luma(textureSampleLevel(input, linear_sampler, uv + vec2<f32>(-1.0, 0.0) * rcp_frame, 0.0).rgb);
+    let l_top = rgb_to_luma(textureSampleLevel(input, linear_sampler, uv + vec2<f32>(0.0, -1.0) * rcp_frame, 0.0).rgb);
+
+    // Calculate deltas
+    var delta = vec2<f32>(abs(l - l_left), abs(l - l_top));
+
+    // Apply threshold
+    var edge = vec2<f32>(
+        select(0.0, 1.0, delta.x >= threshold),
+        select(0.0, 1.0, delta.y >= threshold)
+    );
+
+    textureStore(edges, id.xy, vec4<f32>(edge, 0.0, 1.0));
+}
+"#;
+
+const SMAA_BLEND_WEIGHT_SHADER: &str = r#"
+@group(0) @binding(0) var edges: texture_2d<f32>;
+@group(0) @binding(1) var area_tex: texture_2d<f32>;
+@group(0) @binding(2) var search_tex: texture_2d<f32>;
+@group(0) @binding(3) var blend: texture_storage_2d<rgba8unorm, write>;
+@group(0) @binding(4) var<uniform> rcp_frame: vec2<f32>;
+@group(0) @binding(5) var<uniform> max_search_steps: u32;
+@group(0) @binding(6) var<uniform> max_search_steps_diag: u32;
+@group(0) @binding(7) var<uniform> corner_rounding: u32;
+
+var<private> linear_sampler: sampler;
+var<private> point_sampler: sampler;
+
+// Simplified blend weight calculation
+@compute @workgroup_size(8, 8, 1)
+fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+    let dims = textureDimensions(blend);
+    if (any(id.xy >= dims)) { return; }
+
+    let uv = (vec2<f32>(id.xy) + 0.5) * rcp_frame;
+
+    let e = textureSampleLevel(edges, point_sampler, uv, 0.0).rg;
+
+    var weights = vec4<f32>(0.0);
+
+    // Horizontal edge
+    if (e.x > 0.0) {
+        // Search for edge pattern
+        var d = 0.0;
+        for (var i = 1u; i <= max_search_steps; i++) {
+            let offset = vec2<f32>(f32(i), 0.0) * rcp_frame;
+            let e_sample = textureSampleLevel(edges, point_sampler, uv + offset, 0.0).r;
+            if (e_sample < 0.5) { break; }
+            d = f32(i);
+        }
+        weights.r = d / f32(max_search_steps);
+    }
+
+    // Vertical edge
+    if (e.y > 0.0) {
+        var d = 0.0;
+        for (var i = 1u; i <= max_search_steps; i++) {
+            let offset = vec2<f32>(0.0, f32(i)) * rcp_frame;
+            let e_sample = textureSampleLevel(edges, point_sampler, uv + offset, 0.0).g;
+            if (e_sample < 0.5) { break; }
+            d = f32(i);
+        }
+        weights.g = d / f32(max_search_steps);
+    }
+
+    textureStore(blend, id.xy, weights);
+}
+"#;
+
+const SMAA_NEIGHBORHOOD_SHADER: &str = r#"
+@group(0) @binding(0) var input: texture_2d<f32>;
+@group(0) @binding(1) var blend: texture_2d<f32>;
+@group(0) @binding(2) var output: texture_storage_2d<rgba16float, write>;
+@group(0) @binding(3) var<uniform> rcp_frame: vec2<f32>;
+
+var<private> linear_sampler: sampler;
+
+@compute @workgroup_size(8, 8, 1)
+fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+    let dims = textureDimensions(output);
+    if (any(id.xy >= dims)) { return; }
+
+    let uv = (vec2<f32>(id.xy) + 0.5) * rcp_frame;
+
+    // Get blend weights for this pixel and neighbors
+    let a = textureSampleLevel(blend, linear_sampler, uv, 0.0);
+    let b = textureSampleLevel(blend, linear_sampler, uv + vec2<f32>(1.0, 0.0) * rcp_frame, 0.0);
+    let c = textureSampleLevel(blend, linear_sampler, uv + vec2<f32>(0.0, 1.0) * rcp_frame, 0.0);
+
+    // Calculate offsets
+    let offset = vec4<f32>(a.r, a.g, b.r, c.g);
+
+    // Blend neighborhood
+    var color = textureSampleLevel(input, linear_sampler, uv, 0.0).rgb;
+
+    if (offset.x > 0.0) {
+        let neighbor = textureSampleLevel(input, linear_sampler, uv + vec2<f32>(-offset.x, 0.0) * rcp_frame, 0.0).rgb;
+        color = mix(color, neighbor, offset.x * 0.5);
+    }
+    if (offset.y > 0.0) {
+        let neighbor = textureSampleLevel(input, linear_sampler, uv + vec2<f32>(0.0, -offset.y) * rcp_frame, 0.0).rgb;
+        color = mix(color, neighbor, offset.y * 0.5);
+    }
+
+    textureStore(output, id.xy, vec4<f32>(color, 1.0));
+}
+"#;
+
+const MSAA_RESOLVE_SHADER: &str = r#"
+@group(0) @binding(0) var msaa_input: texture_multisampled_2d<f32>;
+@group(0) @binding(1) var output: texture_storage_2d<rgba16float, write>;
+@group(0) @binding(2) var<uniform> sample_count: u32;
+@group(0) @binding(3) var<uniform> resolve_mode: u32;
+
+@compute @workgroup_size(8, 8, 1)
+fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+    let dims = textureDimensions(output);
+    if (any(id.xy >= dims)) { return; }
+
+    var color = vec4<f32>(0.0);
+
+    // Average all samples
+    for (var i = 0u; i < sample_count; i++) {
+        color += textureLoad(msaa_input, id.xy, i32(i));
+    }
+
+    color /= f32(sample_count);
+
+    textureStore(output, id.xy, color);
+}
+"#;
+
+const MSAA_DEPTH_RESOLVE_SHADER: &str = r#"
+@group(0) @binding(0) var msaa_depth: texture_depth_multisampled_2d;
+@group(0) @binding(1) var output: texture_storage_2d<r32float, write>;
+@group(0) @binding(2) var<uniform> sample_count: u32;
+@group(0) @binding(3) var<uniform> mode: u32;
+
+@compute @workgroup_size(8, 8, 1)
+fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+    let dims = textureDimensions(output);
+    if (any(id.xy >= dims)) { return; }
+
+    var result: f32;
+
+    switch (mode) {
+        case 0u: { // Min (closest)
+            result = 1.0;
+            for (var i = 0u; i < sample_count; i++) {
+                result = min(result, textureLoad(msaa_depth, id.xy, i32(i)));
+            }
+        }
+        case 1u: { // Max (furthest)
+            result = 0.0;
+            for (var i = 0u; i < sample_count; i++) {
+                result = max(result, textureLoad(msaa_depth, id.xy, i32(i)));
+            }
+        }
+        case 2u: { // Average
+            result = 0.0;
+            for (var i = 0u; i < sample_count; i++) {
+                result += textureLoad(msaa_depth, id.xy, i32(i));
+            }
+            result /= f32(sample_count);
+        }
+        default: { // Sample 0
+            result = textureLoad(msaa_depth, id.xy, 0);
+        }
+    }
+
+    textureStore(output, id.xy, vec4<f32>(result, 0.0, 0.0, 1.0));
+}
+"#;
+
+const TEMPORAL_UPSCALE_SHADER: &str = r#"
+@group(0) @binding(0) var color: texture_2d<f32>;
+@group(0) @binding(1) var depth: texture_2d<f32>;
+@group(0) @binding(2) var motion: texture_2d<f32>;
+@group(0) @binding(3) var history: texture_2d<f32>;
+@group(0) @binding(4) var lock: texture_2d<f32>;
+@group(0) @binding(5) var output: texture_storage_2d<rgba16float, write>;
+@group(0) @binding(6) var lock_out: texture_storage_2d<r16float, write>;
+@group(0) @binding(7) var<uniform> jitter: vec2<f32>;
+@group(0) @binding(8) var<uniform> render_size: vec2<f32>;
+@group(0) @binding(9) var<uniform> output_size: vec2<f32>;
+@group(0) @binding(10) var<uniform> upscale_factor: f32;
+@group(0) @binding(11) var<uniform> exposure: f32;
+@group(0) @binding(12) var<uniform> frame_index: u32;
+
+var<private> linear_sampler: sampler;
+var<private> point_sampler: sampler;
+
+fn lanczos_weight(x: f32, a: f32) -> f32 {
+    if (abs(x) < 0.001) { return 1.0; }
+    if (abs(x) >= a) { return 0.0; }
+    let pi_x = x * 3.14159265;
+    return a * sin(pi_x) * sin(pi_x / a) / (pi_x * pi_x);
+}
+
+@compute @workgroup_size(8, 8, 1)
+fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+    let dims = vec2<u32>(output_size);
+    if (any(id.xy >= dims)) { return; }
+
+    let output_uv = (vec2<f32>(id.xy) + 0.5) / output_size;
+
+    // Map output pixel to render space
+    let render_uv = output_uv;
+    let render_pixel = render_uv * render_size - 0.5 + jitter;
+
+    // Lanczos 2 upscaling
+    var upscaled = vec3<f32>(0.0);
+    var weight_sum = 0.0;
+
+    let base_pixel = floor(render_pixel);
+    for (var y = -1; y <= 2; y++) {
+        for (var x = -1; x <= 2; x++) {
+            let sample_pixel = base_pixel + vec2<f32>(f32(x), f32(y));
+            let sample_uv = (sample_pixel + 0.5) / render_size;
+
+            let offset = render_pixel - sample_pixel;
+            let weight = lanczos_weight(offset.x, 2.0) * lanczos_weight(offset.y, 2.0);
+
+            let sample = textureSampleLevel(color, linear_sampler, sample_uv, 0.0).rgb;
+            upscaled += sample * weight;
+            weight_sum += weight;
+        }
+    }
+
+    upscaled /= max(weight_sum, 0.001);
+
+    // Temporal accumulation
+    let motion_vec = textureSampleLevel(motion, linear_sampler, render_uv, 0.0).rg;
+    let history_uv = output_uv - motion_vec;
+
+    var history_sample = textureSampleLevel(history, linear_sampler, history_uv, 0.0).rgb;
+    let lock_value = textureSampleLevel(lock, linear_sampler, history_uv, 0.0).r;
+
+    // Reject history on disocclusion
+    let velocity_length = length(motion_vec * output_size);
+    let rejection = saturate(velocity_length * 0.1);
+
+    // Blend with history
+    let blend = mix(0.05, 0.5, rejection);
+    let result = mix(history_sample, upscaled, blend);
+
+    textureStore(output, id.xy, vec4<f32>(result, 1.0));
+    textureStore(lock_out, id.xy, vec4<f32>(1.0 - rejection, 0.0, 0.0, 1.0));
+}
+"#;
+
+const RCAS_SHADER: &str = r#"
+// Robust Contrast Adaptive Sharpening (AMD FSR RCAS)
+@group(0) @binding(0) var input: texture_2d<f32>;
+@group(0) @binding(1) var output: texture_storage_2d<rgba16float, write>;
+@group(0) @binding(2) var<uniform> sharpness: f32;
+
+var<private> linear_sampler: sampler;
+
+@compute @workgroup_size(8, 8, 1)
+fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+    let dims = textureDimensions(output);
+    if (any(id.xy >= dims)) { return; }
+
+    let texel = 1.0 / vec2<f32>(dims);
+    let uv = (vec2<f32>(id.xy) + 0.5) * texel;
+
+    // Sample 5-tap cross pattern
+    let e = textureSampleLevel(input, linear_sampler, uv, 0.0).rgb;
+    let n = textureSampleLevel(input, linear_sampler, uv + vec2<f32>(0.0, -texel.y), 0.0).rgb;
+    let s = textureSampleLevel(input, linear_sampler, uv + vec2<f32>(0.0, texel.y), 0.0).rgb;
+    let w = textureSampleLevel(input, linear_sampler, uv + vec2<f32>(-texel.x, 0.0), 0.0).rgb;
+    let ee = textureSampleLevel(input, linear_sampler, uv + vec2<f32>(texel.x, 0.0), 0.0).rgb;
+
+    // Compute min/max for clamping
+    let mn = min(e, min(min(n, s), min(w, ee)));
+    let mx = max(e, max(max(n, s), max(w, ee)));
+
+    // Compute peak
+    let peak = 1.0 / (1.0 + 4.0 * sharpness);
+    let wn = sharpness * peak;
+    let we = 1.0 - 4.0 * wn;
+
+    // Apply filter
+    var sharpened = e * we + (n + s + w + ee) * wn;
+
+    // Clamp to prevent ringing
+    sharpened = clamp(sharpened, mn, mx);
+
+    textureStore(output, id.xy, vec4<f32>(sharpened, 1.0));
+}
+"#;
+
+const TEMPORAL_ACCUMULATE_SHADER: &str = r#"
+@group(0) @binding(0) var current: texture_2d<f32>;
+@group(0) @binding(1) var history: texture_2d<f32>;
+@group(0) @binding(2) var output: texture_storage_2d<rgba16float, write>;
+@group(0) @binding(3) var<uniform> blend: f32;
+
+var<private> linear_sampler: sampler;
+
+@compute @workgroup_size(8, 8, 1)
+fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+    let dims = textureDimensions(output);
+    if (any(id.xy >= dims)) { return; }
+
+    let uv = (vec2<f32>(id.xy) + 0.5) / vec2<f32>(dims);
+
+    let current_sample = textureSampleLevel(current, linear_sampler, uv, 0.0).rgb;
+    let history_sample = textureSampleLevel(history, linear_sampler, uv, 0.0).rgb;
+
+    let result = mix(history_sample, current_sample, blend);
+
+    textureStore(output, id.xy, vec4<f32>(result, 1.0));
+}
+"#;
+
+const GEOMETRIC_EDGE_DETECT_SHADER: &str = r#"
+@group(0) @binding(0) var color: texture_2d<f32>;
+@group(0) @binding(1) var normal_depth: texture_2d<f32>;
+@group(0) @binding(2) var edges: texture_storage_2d<rgba16float, write>;
+
+@compute @workgroup_size(8, 8, 1)
+fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+    let dims = textureDimensions(edges);
+    if (any(id.xy >= dims)) { return; }
+
+    let texel = 1.0 / vec2<f32>(dims);
+    let uv = (vec2<f32>(id.xy) + 0.5) * texel;
+
+    // Sample normal and depth at neighbors
+    let center = textureLoad(normal_depth, id.xy, 0);
+    let left = textureLoad(normal_depth, id.xy - vec2<u32>(1, 0), 0);
+    let right = textureLoad(normal_depth, id.xy + vec2<u32>(1, 0), 0);
+    let top = textureLoad(normal_depth, id.xy - vec2<u32>(0, 1), 0);
+    let bottom = textureLoad(normal_depth, id.xy + vec2<u32>(0, 1), 0);
+
+    // Detect edges from normal discontinuity
+    let normal_edge = 1.0 - min(
+        min(dot(center.xyz, left.xyz), dot(center.xyz, right.xyz)),
+        min(dot(center.xyz, top.xyz), dot(center.xyz, bottom.xyz))
+    );
+
+    // Detect edges from depth discontinuity
+    let depth_edge = max(
+        max(abs(center.w - left.w), abs(center.w - right.w)),
+        max(abs(center.w - top.w), abs(center.w - bottom.w))
+    );
+
+    let edge_strength = max(normal_edge * 2.0, depth_edge * 10.0);
+
+    textureStore(edges, id.xy, vec4<f32>(edge_strength, 0.0, 0.0, 1.0));
+}
+"#;
+
+const GEOMETRIC_EDGE_BLEND_SHADER: &str = r#"
+@group(0) @binding(0) var color: texture_2d<f32>;
+@group(0) @binding(1) var edges: texture_2d<f32>;
+@group(0) @binding(2) var output: texture_storage_2d<rgba16float, write>;
+
+var<private> linear_sampler: sampler;
+
+@compute @workgroup_size(8, 8, 1)
+fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+    let dims = textureDimensions(output);
+    if (any(id.xy >= dims)) { return; }
+
+    let texel = 1.0 / vec2<f32>(dims);
+    let uv = (vec2<f32>(id.xy) + 0.5) * texel;
+
+    let edge = textureSampleLevel(edges, linear_sampler, uv, 0.0).r;
+
+    if (edge > 0.1) {
+        // Blend with neighbors along edge
+        var blended = vec3<f32>(0.0);
+        var weight = 0.0;
+
+        for (var y = -1; y <= 1; y++) {
+            for (var x = -1; x <= 1; x++) {
+                let offset = vec2<f32>(f32(x), f32(y)) * texel;
+                let sample = textureSampleLevel(color, linear_sampler, uv + offset, 0.0).rgb;
+                let w = 1.0 / (1.0 + f32(abs(x) + abs(y)));
+                blended += sample * w;
+                weight += w;
+            }
+        }
+
+        blended /= weight;
+        let center = textureSampleLevel(color, linear_sampler, uv, 0.0).rgb;
+        let result = mix(center, blended, saturate(edge));
+
+        textureStore(output, id.xy, vec4<f32>(result, 1.0));
+    } else {
+        let center = textureSampleLevel(color, linear_sampler, uv, 0.0);
+        textureStore(output, id.xy, center);
+    }
+}
+"#;
+
+// =============================================================================
+// REGION: UNIT TESTS
+// =============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_fxaa_quality_settings() {
+        let low = FxaaSettings::from_quality(FxaaQuality::Low);
+        let ultra = FxaaSettings::from_quality(FxaaQuality::Ultra);
+
+        assert!(ultra.edge_threshold < low.edge_threshold);
+        assert!(ultra.iterations > low.iterations);
+    }
+
+    #[test]
+    fn test_jitter_pattern_halton() {
+        let jitter1 = JitterPattern::Halton23.get_offset(0, 8);
+        let jitter2 = JitterPattern::Halton23.get_offset(1, 8);
+
+        assert!(jitter1 != jitter2);
+        assert!(jitter1.x >= -0.5 && jitter1.x <= 0.5);
+        assert!(jitter1.y >= -0.5 && jitter1.y <= 0.5);
+    }
+
+    #[test]
+    fn test_jitter_pattern_r2() {
+        let jitter = JitterPattern::R2.get_offset(0, 16);
+        assert!(jitter.x >= -0.5 && jitter.x <= 0.5);
+    }
+
+    #[test]
+    fn test_taa_config_default() {
+        let config = TaaConfig::default();
+        assert_eq!(config.jitter_samples, 8);
+        assert!(config.blend_factor > 0.0 && config.blend_factor < 1.0);
+    }
+
+    #[test]
+    fn test_dlss_quality_upscale() {
+        let performance = DlssConfig::from_quality(DlssQuality::Performance);
+        let quality = DlssConfig::from_quality(DlssQuality::Quality);
+
+        assert!(performance.upscale_factor > quality.upscale_factor);
+    }
+
+    #[test]
+    fn test_dlss_render_resolution() {
+        let config = DlssConfig::from_quality(DlssQuality::Performance);
+        let (render_w, render_h) = config.render_resolution(1920, 1080);
+
+        assert!(render_w < 1920);
+        assert!(render_h < 1080);
+        assert_eq!(render_w, 960);
+        assert_eq!(render_h, 540);
+    }
+
+    #[test]
+    fn test_smaa_config_presets() {
+        let low = SmaaConfig::from_quality(SmaaQuality::Low);
+        let ultra = SmaaConfig::from_quality(SmaaQuality::Ultra);
+
+        assert!(ultra.max_search_steps > low.max_search_steps);
+        assert!(ultra.threshold < low.threshold);
+    }
+
+    #[test]
+    fn test_msaa_config_default() {
+        let config = MsaaConfig::default();
+        assert_eq!(config.sample_count, 4);
+    }
+
+    #[test]
+    fn test_halton_sequence() {
+        // Halton base 2 should give known values
+        let h0 = JitterPattern::halton(0, 2);
+        let h1 = JitterPattern::halton(1, 2);
+        let h2 = JitterPattern::halton(2, 2);
+
+        assert!((h0 - 0.0).abs() < 0.001);
+        assert!((h1 - 0.5).abs() < 0.001);
+        assert!((h2 - 0.25).abs() < 0.001);
+    }
+}

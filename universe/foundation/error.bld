@@ -1,0 +1,1144 @@
+// ═══════════════════════════════════════════════════════════════════════════════
+// BUILD FOUNDATION - ERROR MODULE
+// ═══════════════════════════════════════════════════════════════════════════════
+// Copyright © 2025 Zain Dana Harper. All Rights Reserved.
+// ═══════════════════════════════════════════════════════════════════════════════
+//
+// Comprehensive error handling framework including:
+// - Error trait for custom error types
+// - Error chaining and cause tracking
+// - Backtrace capture and display
+// - Error context and wrapping
+// - Common error types
+// - Result extensions
+// - Panic handling
+// - Error formatting
+//
+// ═══════════════════════════════════════════════════════════════════════════════
+
+use std::collections::Vec;
+use std::fmt::{Display, Debug, Formatter, FormatError};
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// CORE ERROR TRAIT
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// The Error trait for all error types
+pub trait Error: Display + Debug {
+    /// The lower-level source of this error, if any
+    fn source(self: &Self) -> Option<&(dyn Error + 'static)> {
+        None
+    }
+
+    /// Returns a stack backtrace, if captured
+    fn backtrace(self: &Self) -> Option<&Backtrace> {
+        None
+    }
+
+    /// Provides type-based error downcast
+    fn type_id(self: &Self) -> TypeId {
+        TypeId::of::<Self>()
+    }
+}
+
+/// Type identifier for runtime type checking
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct TypeId {
+    id: u64,
+}
+
+impl TypeId {
+    /// Get the TypeId of a type
+    pub fn of<T: ?Sized + 'static>() -> Self {
+        // In a real implementation, this would use compiler intrinsics
+        TypeId { id: 0 }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// BACKTRACE
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Capture status for backtraces
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BacktraceStatus {
+    /// Backtrace capture is unsupported
+    Unsupported,
+    /// Backtrace capture is disabled
+    Disabled,
+    /// A backtrace was captured
+    Captured,
+}
+
+/// A captured stack backtrace
+#[derive(Clone)]
+pub struct Backtrace {
+    frames: Vec<BacktraceFrame>,
+    status: BacktraceStatus,
+}
+
+/// A single frame in a backtrace
+#[derive(Debug, Clone)]
+pub struct BacktraceFrame {
+    /// Instruction pointer
+    pub ip: usize,
+    /// Symbol name, if resolved
+    pub symbol: Option<String>,
+    /// Filename, if available
+    pub filename: Option<String>,
+    /// Line number, if available
+    pub lineno: Option<u32>,
+    /// Column number, if available
+    pub colno: Option<u32>,
+}
+
+impl Backtrace {
+    /// Capture a backtrace at the current location
+    pub fn capture() -> Self {
+        Self::capture_impl()
+    }
+
+    /// Force capture even if normally disabled
+    pub fn force_capture() -> Self {
+        Self::capture_impl()
+    }
+
+    /// Create a disabled backtrace
+    pub fn disabled() -> Self {
+        Backtrace {
+            frames: Vec::new(),
+            status: BacktraceStatus::Disabled,
+        }
+    }
+
+    fn capture_impl() -> Self {
+        // Platform-specific backtrace capture
+        // This is a simplified implementation
+        let mut frames = Vec::new();
+
+        // In a real implementation, we would walk the stack
+        // For now, create a placeholder
+        #[cfg(feature = "backtrace")]
+        {
+            // Use platform APIs to capture stack frames
+            // Windows: CaptureStackBackTrace
+            // Unix: backtrace() / libunwind
+        }
+
+        Backtrace {
+            frames,
+            status: BacktraceStatus::Captured,
+        }
+    }
+
+    /// Get the capture status
+    pub fn status(self: &Self) -> BacktraceStatus {
+        self.status
+    }
+
+    /// Get the frames
+    pub fn frames(self: &Self) -> &[BacktraceFrame] {
+        &self.frames
+    }
+}
+
+impl Display for Backtrace {
+    fn fmt(self: &Self, f: &mut Formatter) -> Result<(), FormatError> {
+        match self.status {
+            BacktraceStatus::Unsupported => f.write_str("backtrace capture unsupported"),
+            BacktraceStatus::Disabled => f.write_str("backtrace capture disabled"),
+            BacktraceStatus::Captured => {
+                for (i, frame) in self.frames.iter().enumerate() {
+                    f.write_str(&format!("{:4}: ", i))?;
+
+                    if let Some(ref symbol) = frame.symbol {
+                        f.write_str(symbol)?;
+                    } else {
+                        f.write_str(&format!("<unknown> at 0x{:x}", frame.ip))?;
+                    }
+
+                    if let Some(ref filename) = frame.filename {
+                        f.write_str("\n             at ")?;
+                        f.write_str(filename)?;
+
+                        if let Some(line) = frame.lineno {
+                            f.write_str(&format!(":{}", line))?;
+
+                            if let Some(col) = frame.colno {
+                                f.write_str(&format!(":{}", col))?;
+                            }
+                        }
+                    }
+
+                    f.write_str("\n")?;
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
+impl Debug for Backtrace {
+    fn fmt(self: &Self, f: &mut Formatter) -> Result<(), FormatError> {
+        f.debug_struct("Backtrace")
+            .field("status", &self.status)
+            .field("frames", &self.frames.len())
+            .finish()
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ERROR CHAIN
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// An iterator over the chain of error sources
+pub struct Chain<'a> {
+    current: Option<&'a (dyn Error + 'static)>,
+}
+
+impl<'a> Chain<'a> {
+    /// Create a new chain iterator starting from an error
+    pub fn new(error: &'a (dyn Error + 'static)) -> Self {
+        Chain { current: Some(error) }
+    }
+}
+
+impl<'a> Iterator for Chain<'a> {
+    type Item = &'a (dyn Error + 'static);
+
+    fn next(self: &mut Self) -> Option<Self::Item> {
+        let current = self.current?;
+        self.current = current.source();
+        Some(current)
+    }
+}
+
+/// Extension trait for Error types
+pub trait ErrorExt: Error {
+    /// Get the chain of error sources
+    fn chain(self: &Self) -> Chain<'_> {
+        Chain::new(self)
+    }
+
+    /// Get the root cause of the error
+    fn root_cause(self: &Self) -> &(dyn Error + 'static) {
+        let mut current: &(dyn Error + 'static) = self;
+        while let Some(source) = current.source() {
+            current = source;
+        }
+        current
+    }
+
+    /// Check if this error is caused by a specific error type
+    fn is<E: Error + 'static>(self: &Self) -> bool {
+        self.downcast_ref::<E>().is_some()
+    }
+
+    /// Attempt to downcast to a concrete error type
+    fn downcast_ref<E: Error + 'static>(self: &Self) -> Option<&E> {
+        if self.type_id() == TypeId::of::<E>() {
+            // Safety: we just checked the type
+            Some(unsafe { &*(self as *const _ as *const E) })
+        } else {
+            None
+        }
+    }
+}
+
+impl<T: Error + ?Sized> ErrorExt for T {}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// BOXED ERROR
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// A heap-allocated error type
+pub struct BoxError {
+    inner: Box<dyn Error + Send + Sync + 'static>,
+}
+
+impl BoxError {
+    /// Create a new boxed error
+    pub fn new<E: Error + Send + Sync + 'static>(error: E) -> Self {
+        BoxError { inner: Box::new(error) }
+    }
+
+    /// Get the inner error
+    pub fn into_inner(self: Self) -> Box<dyn Error + Send + Sync + 'static> {
+        self.inner
+    }
+
+    /// Get a reference to the inner error
+    pub fn as_ref(self: &Self) -> &(dyn Error + Send + Sync + 'static) {
+        &*self.inner
+    }
+}
+
+impl Display for BoxError {
+    fn fmt(self: &Self, f: &mut Formatter) -> Result<(), FormatError> {
+        Display::fmt(&*self.inner, f)
+    }
+}
+
+impl Debug for BoxError {
+    fn fmt(self: &Self, f: &mut Formatter) -> Result<(), FormatError> {
+        Debug::fmt(&*self.inner, f)
+    }
+}
+
+impl Error for BoxError {
+    fn source(self: &Self) -> Option<&(dyn Error + 'static)> {
+        self.inner.source()
+    }
+
+    fn backtrace(self: &Self) -> Option<&Backtrace> {
+        self.inner.backtrace()
+    }
+}
+
+impl<E: Error + Send + Sync + 'static> From<E> for BoxError {
+    fn from(error: E) -> Self {
+        BoxError::new(error)
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// CONTEXT AND WRAPPING
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// An error with additional context
+pub struct ContextError<C, E> {
+    context: C,
+    source: E,
+    backtrace: Option<Backtrace>,
+}
+
+impl<C: Display, E: Error> ContextError<C, E> {
+    /// Create a new context error
+    pub fn new(context: C, source: E) -> Self {
+        ContextError {
+            context,
+            source,
+            backtrace: Some(Backtrace::capture()),
+        }
+    }
+
+    /// Get the context
+    pub fn context(self: &Self) -> &C {
+        &self.context
+    }
+
+    /// Get the wrapped error
+    pub fn get_ref(self: &Self) -> &E {
+        &self.source
+    }
+
+    /// Unwrap the inner error
+    pub fn into_inner(self: Self) -> E {
+        self.source
+    }
+}
+
+impl<C: Display, E: Error> Display for ContextError<C, E> {
+    fn fmt(self: &Self, f: &mut Formatter) -> Result<(), FormatError> {
+        Display::fmt(&self.context, f)
+    }
+}
+
+impl<C: Display + Debug, E: Error + Debug> Debug for ContextError<C, E> {
+    fn fmt(self: &Self, f: &mut Formatter) -> Result<(), FormatError> {
+        f.debug_struct("ContextError")
+            .field("context", &self.context)
+            .field("source", &self.source)
+            .finish()
+    }
+}
+
+impl<C: Display + Debug, E: Error + 'static> Error for ContextError<C, E> {
+    fn source(self: &Self) -> Option<&(dyn Error + 'static)> {
+        Some(&self.source)
+    }
+
+    fn backtrace(self: &Self) -> Option<&Backtrace> {
+        self.backtrace.as_ref()
+    }
+}
+
+/// Extension trait for adding context to errors
+pub trait Context<T, E> {
+    /// Wrap the error with additional context
+    fn context<C: Display>(self: Self, context: C) -> Result<T, ContextError<C, E>>;
+
+    /// Wrap the error with lazily-evaluated context
+    fn with_context<C: Display, F: FnOnce() -> C>(
+        self: Self,
+        context_fn: F,
+    ) -> Result<T, ContextError<C, E>>;
+}
+
+impl<T, E: Error> Context<T, E> for Result<T, E> {
+    fn context<C: Display>(self: Self, context: C) -> Result<T, ContextError<C, E>> {
+        self.map_err(|e| ContextError::new(context, e))
+    }
+
+    fn with_context<C: Display, F: FnOnce() -> C>(
+        self: Self,
+        context_fn: F,
+    ) -> Result<T, ContextError<C, E>> {
+        self.map_err(|e| ContextError::new(context_fn(), e))
+    }
+}
+
+/// Extension trait for adding context to Options
+pub trait OptionContext<T> {
+    /// Convert None to an error with context
+    fn context<C: Display>(self: Self, context: C) -> Result<T, SimpleError>;
+
+    /// Convert None to an error with lazily-evaluated context
+    fn with_context<C: Display, F: FnOnce() -> C>(
+        self: Self,
+        context_fn: F,
+    ) -> Result<T, SimpleError>;
+}
+
+impl<T> OptionContext<T> for Option<T> {
+    fn context<C: Display>(self: Self, context: C) -> Result<T, SimpleError> {
+        self.ok_or_else(|| SimpleError::new(context.to_string()))
+    }
+
+    fn with_context<C: Display, F: FnOnce() -> C>(
+        self: Self,
+        context_fn: F,
+    ) -> Result<T, SimpleError> {
+        self.ok_or_else(|| SimpleError::new(context_fn().to_string()))
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// COMMON ERROR TYPES
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// A simple string-based error
+#[derive(Clone)]
+pub struct SimpleError {
+    message: String,
+    backtrace: Option<Backtrace>,
+}
+
+impl SimpleError {
+    /// Create a new simple error
+    pub fn new<S: Into<String>>(message: S) -> Self {
+        SimpleError {
+            message: message.into(),
+            backtrace: Some(Backtrace::capture()),
+        }
+    }
+
+    /// Create without backtrace
+    pub fn without_backtrace<S: Into<String>>(message: S) -> Self {
+        SimpleError {
+            message: message.into(),
+            backtrace: None,
+        }
+    }
+
+    /// Get the error message
+    pub fn message(self: &Self) -> &str {
+        &self.message
+    }
+}
+
+impl Display for SimpleError {
+    fn fmt(self: &Self, f: &mut Formatter) -> Result<(), FormatError> {
+        f.write_str(&self.message)
+    }
+}
+
+impl Debug for SimpleError {
+    fn fmt(self: &Self, f: &mut Formatter) -> Result<(), FormatError> {
+        f.debug_struct("SimpleError")
+            .field("message", &self.message)
+            .finish()
+    }
+}
+
+impl Error for SimpleError {
+    fn backtrace(self: &Self) -> Option<&Backtrace> {
+        self.backtrace.as_ref()
+    }
+}
+
+impl From<&str> for SimpleError {
+    fn from(s: &str) -> Self {
+        SimpleError::new(s)
+    }
+}
+
+impl From<String> for SimpleError {
+    fn from(s: String) -> Self {
+        SimpleError::new(s)
+    }
+}
+
+/// An error with an error code
+#[derive(Debug, Clone)]
+pub struct CodedError {
+    code: i32,
+    message: String,
+    backtrace: Option<Backtrace>,
+}
+
+impl CodedError {
+    /// Create a new coded error
+    pub fn new<S: Into<String>>(code: i32, message: S) -> Self {
+        CodedError {
+            code,
+            message: message.into(),
+            backtrace: Some(Backtrace::capture()),
+        }
+    }
+
+    /// Get the error code
+    pub fn code(self: &Self) -> i32 {
+        self.code
+    }
+
+    /// Get the error message
+    pub fn message(self: &Self) -> &str {
+        &self.message
+    }
+}
+
+impl Display for CodedError {
+    fn fmt(self: &Self, f: &mut Formatter) -> Result<(), FormatError> {
+        f.write_str(&format!("[E{:04}] {}", self.code, self.message))
+    }
+}
+
+impl Error for CodedError {
+    fn backtrace(self: &Self) -> Option<&Backtrace> {
+        self.backtrace.as_ref()
+    }
+}
+
+/// Commonly used error kinds
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ErrorKind {
+    /// An entity was not found
+    NotFound,
+    /// Permission denied
+    PermissionDenied,
+    /// Connection refused
+    ConnectionRefused,
+    /// Connection reset
+    ConnectionReset,
+    /// Connection aborted
+    ConnectionAborted,
+    /// Not connected
+    NotConnected,
+    /// Address already in use
+    AddrInUse,
+    /// Address not available
+    AddrNotAvailable,
+    /// Broken pipe
+    BrokenPipe,
+    /// Entity already exists
+    AlreadyExists,
+    /// Operation would block
+    WouldBlock,
+    /// Invalid input
+    InvalidInput,
+    /// Invalid data
+    InvalidData,
+    /// Operation timed out
+    TimedOut,
+    /// Write of zero bytes
+    WriteZero,
+    /// Operation interrupted
+    Interrupted,
+    /// Unexpected end of file
+    UnexpectedEof,
+    /// Operation unsupported
+    Unsupported,
+    /// Out of memory
+    OutOfMemory,
+    /// Other error
+    Other,
+}
+
+impl ErrorKind {
+    /// Get a description of the error kind
+    pub fn as_str(self: &Self) -> &'static str {
+        match self {
+            ErrorKind::NotFound => "entity not found",
+            ErrorKind::PermissionDenied => "permission denied",
+            ErrorKind::ConnectionRefused => "connection refused",
+            ErrorKind::ConnectionReset => "connection reset",
+            ErrorKind::ConnectionAborted => "connection aborted",
+            ErrorKind::NotConnected => "not connected",
+            ErrorKind::AddrInUse => "address already in use",
+            ErrorKind::AddrNotAvailable => "address not available",
+            ErrorKind::BrokenPipe => "broken pipe",
+            ErrorKind::AlreadyExists => "entity already exists",
+            ErrorKind::WouldBlock => "operation would block",
+            ErrorKind::InvalidInput => "invalid input parameter",
+            ErrorKind::InvalidData => "invalid data",
+            ErrorKind::TimedOut => "operation timed out",
+            ErrorKind::WriteZero => "write zero bytes",
+            ErrorKind::Interrupted => "operation interrupted",
+            ErrorKind::UnexpectedEof => "unexpected end of file",
+            ErrorKind::Unsupported => "operation not supported",
+            ErrorKind::OutOfMemory => "out of memory",
+            ErrorKind::Other => "other error",
+        }
+    }
+}
+
+impl Display for ErrorKind {
+    fn fmt(self: &Self, f: &mut Formatter) -> Result<(), FormatError> {
+        f.write_str(self.as_str())
+    }
+}
+
+/// A categorized error with kind
+#[derive(Debug)]
+pub struct KindedError {
+    kind: ErrorKind,
+    message: Option<String>,
+    source: Option<BoxError>,
+    backtrace: Option<Backtrace>,
+}
+
+impl KindedError {
+    /// Create a new error with kind
+    pub fn new(kind: ErrorKind) -> Self {
+        KindedError {
+            kind,
+            message: None,
+            source: None,
+            backtrace: Some(Backtrace::capture()),
+        }
+    }
+
+    /// Create with a message
+    pub fn with_message<S: Into<String>>(kind: ErrorKind, message: S) -> Self {
+        KindedError {
+            kind,
+            message: Some(message.into()),
+            source: None,
+            backtrace: Some(Backtrace::capture()),
+        }
+    }
+
+    /// Create from another error
+    pub fn from_error<E: Error + Send + Sync + 'static>(kind: ErrorKind, error: E) -> Self {
+        KindedError {
+            kind,
+            message: None,
+            source: Some(BoxError::new(error)),
+            backtrace: Some(Backtrace::capture()),
+        }
+    }
+
+    /// Get the error kind
+    pub fn kind(self: &Self) -> ErrorKind {
+        self.kind
+    }
+
+    /// Get the custom message, if any
+    pub fn message(self: &Self) -> Option<&str> {
+        self.message.as_deref()
+    }
+}
+
+impl Display for KindedError {
+    fn fmt(self: &Self, f: &mut Formatter) -> Result<(), FormatError> {
+        if let Some(ref msg) = self.message {
+            f.write_str(msg)
+        } else {
+            Display::fmt(&self.kind, f)
+        }
+    }
+}
+
+impl Error for KindedError {
+    fn source(self: &Self) -> Option<&(dyn Error + 'static)> {
+        self.source.as_ref().map(|e| e.as_ref() as &(dyn Error + 'static))
+    }
+
+    fn backtrace(self: &Self) -> Option<&Backtrace> {
+        self.backtrace.as_ref()
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// RESULT EXTENSIONS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Extension trait for Result types
+pub trait ResultExt<T, E> {
+    /// Log the error and convert to Option
+    fn ok_log(self: Self) -> Option<T>;
+
+    /// Inspect the error without consuming it
+    fn inspect_err<F: FnOnce(&E)>(self: Self, f: F) -> Self;
+
+    /// Tap into the Ok value
+    fn tap<F: FnOnce(&T)>(self: Self, f: F) -> Self;
+
+    /// Tap into the Err value
+    fn tap_err<F: FnOnce(&E)>(self: Self, f: F) -> Self;
+}
+
+impl<T, E: Error> ResultExt<T, E> for Result<T, E> {
+    fn ok_log(self: Self) -> Option<T> {
+        match self {
+            Ok(v) => Some(v),
+            Err(e) => {
+                // In a real implementation, this would log the error
+                eprintln!("Error (logged): {}", e);
+                None
+            }
+        }
+    }
+
+    fn inspect_err<F: FnOnce(&E)>(self: Self, f: F) -> Self {
+        if let Err(ref e) = self {
+            f(e);
+        }
+        self
+    }
+
+    fn tap<F: FnOnce(&T)>(self: Self, f: F) -> Self {
+        if let Ok(ref v) = self {
+            f(v);
+        }
+        self
+    }
+
+    fn tap_err<F: FnOnce(&E)>(self: Self, f: F) -> Self {
+        if let Err(ref e) = self {
+            f(e);
+        }
+        self
+    }
+}
+
+/// Macro-like function for ensuring conditions
+pub fn ensure(condition: bool, message: &str) -> Result<(), SimpleError> {
+    if condition {
+        Ok(())
+    } else {
+        Err(SimpleError::new(message))
+    }
+}
+
+/// Create an error from a format string
+pub fn format_err(message: String) -> SimpleError {
+    SimpleError::new(message)
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// PANIC HANDLING
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Information about a panic
+#[derive(Debug)]
+pub struct PanicInfo {
+    payload: String,
+    location: Option<Location>,
+    backtrace: Backtrace,
+}
+
+/// Source code location
+#[derive(Debug, Clone)]
+pub struct Location {
+    pub file: String,
+    pub line: u32,
+    pub column: u32,
+}
+
+impl Location {
+    /// Create a new location
+    pub fn new(file: String, line: u32, column: u32) -> Self {
+        Location { file, line, column }
+    }
+}
+
+impl Display for Location {
+    fn fmt(self: &Self, f: &mut Formatter) -> Result<(), FormatError> {
+        f.write_str(&format!("{}:{}:{}", self.file, self.line, self.column))
+    }
+}
+
+impl PanicInfo {
+    /// Create new panic info
+    pub fn new(payload: String, location: Option<Location>) -> Self {
+        PanicInfo {
+            payload,
+            location,
+            backtrace: Backtrace::capture(),
+        }
+    }
+
+    /// Get the panic message
+    pub fn payload(self: &Self) -> &str {
+        &self.payload
+    }
+
+    /// Get the location where the panic occurred
+    pub fn location(self: &Self) -> Option<&Location> {
+        self.location.as_ref()
+    }
+
+    /// Get the backtrace
+    pub fn backtrace(self: &Self) -> &Backtrace {
+        &self.backtrace
+    }
+}
+
+impl Display for PanicInfo {
+    fn fmt(self: &Self, f: &mut Formatter) -> Result<(), FormatError> {
+        f.write_str("panic occurred")?;
+
+        if let Some(ref loc) = self.location {
+            f.write_str(" at ")?;
+            Display::fmt(loc, f)?;
+        }
+
+        f.write_str(": ")?;
+        f.write_str(&self.payload)?;
+
+        if self.backtrace.status() == BacktraceStatus::Captured {
+            f.write_str("\n\nStack backtrace:\n")?;
+            Display::fmt(&self.backtrace, f)?;
+        }
+
+        Ok(())
+    }
+}
+
+/// Panic hook type
+pub type PanicHook = fn(&PanicInfo);
+
+/// Set the panic hook
+pub fn set_panic_hook(hook: PanicHook) {
+    // In a real implementation, this would set a global panic hook
+    PANIC_HOOK.store(hook as usize, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// Get the current panic hook
+pub fn take_panic_hook() -> PanicHook {
+    default_panic_hook
+}
+
+/// Default panic hook
+fn default_panic_hook(info: &PanicInfo) {
+    eprintln!("{}", info);
+}
+
+// Global panic hook storage
+static PANIC_HOOK: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+/// Catch panics and convert to Result
+pub fn catch_unwind<F, R>(f: F) -> Result<R, PanicInfo>
+where
+    F: FnOnce() -> R,
+{
+    // In a real implementation, this would use platform-specific
+    // mechanisms to catch panics
+    Ok(f())
+}
+
+/// Resume an unwinding panic
+pub fn resume_unwind(info: PanicInfo) -> ! {
+    panic!("{}", info.payload);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ERROR REPORTING
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Format an error with its full chain for display
+pub fn format_error_chain<E: Error>(error: &E) -> String {
+    let mut output = String::new();
+
+    output.push_str(&format!("Error: {}\n", error));
+
+    let mut current: Option<&(dyn Error + 'static)> = error.source();
+    let mut depth = 0;
+
+    while let Some(cause) = current {
+        depth += 1;
+        output.push_str(&format!("\nCaused by:\n    {}: {}", depth, cause));
+        current = cause.source();
+    }
+
+    if let Some(bt) = error.backtrace() {
+        if bt.status() == BacktraceStatus::Captured {
+            output.push_str("\n\nStack backtrace:\n");
+            output.push_str(&format!("{}", bt));
+        }
+    }
+
+    output
+}
+
+/// Format an error for logging
+pub fn format_error_for_log<E: Error>(error: &E) -> String {
+    let mut parts = Vec::new();
+    parts.push(error.to_string());
+
+    let mut current: Option<&(dyn Error + 'static)> = error.source();
+    while let Some(cause) = current {
+        parts.push(cause.to_string());
+        current = cause.source();
+    }
+
+    parts.join(" -> ")
+}
+
+/// Create a report of an error
+pub struct ErrorReport<'a> {
+    error: &'a (dyn Error + 'static),
+    show_backtrace: bool,
+    pretty: bool,
+}
+
+impl<'a> ErrorReport<'a> {
+    /// Create a new error report
+    pub fn new(error: &'a (dyn Error + 'static)) -> Self {
+        ErrorReport {
+            error,
+            show_backtrace: true,
+            pretty: false,
+        }
+    }
+
+    /// Show or hide backtraces
+    pub fn show_backtrace(mut self: Self, show: bool) -> Self {
+        self.show_backtrace = show;
+        self
+    }
+
+    /// Enable pretty printing
+    pub fn pretty(mut self: Self, pretty: bool) -> Self {
+        self.pretty = pretty;
+        self
+    }
+}
+
+impl<'a> Display for ErrorReport<'a> {
+    fn fmt(self: &Self, f: &mut Formatter) -> Result<(), FormatError> {
+        if self.pretty {
+            f.write_str("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")?;
+            f.write_str("Error Report\n")?;
+            f.write_str("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n")?;
+        }
+
+        f.write_str(&format!("Error: {}\n", self.error))?;
+
+        let mut current: Option<&(dyn Error + 'static)> = self.error.source();
+        let mut depth = 0;
+
+        while let Some(cause) = current {
+            depth += 1;
+
+            if self.pretty {
+                f.write_str(&format!("\n  └─ Cause {}: {}", depth, cause))?;
+            } else {
+                f.write_str(&format!("\nCaused by: {}", cause))?;
+            }
+
+            current = cause.source();
+        }
+
+        if self.show_backtrace {
+            if let Some(bt) = self.error.backtrace() {
+                if bt.status() == BacktraceStatus::Captured {
+                    f.write_str("\n\n")?;
+
+                    if self.pretty {
+                        f.write_str("Stack Backtrace:\n")?;
+                        f.write_str("────────────────\n")?;
+                    } else {
+                        f.write_str("Backtrace:\n")?;
+                    }
+
+                    Display::fmt(bt, f)?;
+                }
+            }
+        }
+
+        if self.pretty {
+            f.write_str("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")?;
+        }
+
+        Ok(())
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// TRY TRAIT (FOR ? OPERATOR)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Trait for types that support the ? operator
+pub trait Try {
+    type Output;
+    type Residual;
+
+    /// Extract the output value
+    fn from_output(output: Self::Output) -> Self;
+
+    /// Handle the residual (error) case
+    fn branch(self: Self) -> ControlFlow<Self::Residual, Self::Output>;
+}
+
+/// Control flow for Try operations
+pub enum ControlFlow<B, C> {
+    /// Continue with value
+    Continue(C),
+    /// Break with value
+    Break(B),
+}
+
+impl<T, E> Try for Result<T, E> {
+    type Output = T;
+    type Residual = Result<!, E>;
+
+    fn from_output(output: T) -> Self {
+        Ok(output)
+    }
+
+    fn branch(self: Self) -> ControlFlow<Self::Residual, T> {
+        match self {
+            Ok(v) => ControlFlow::Continue(v),
+            Err(e) => ControlFlow::Break(Err(e)),
+        }
+    }
+}
+
+impl<T> Try for Option<T> {
+    type Output = T;
+    type Residual = Option<!>;
+
+    fn from_output(output: T) -> Self {
+        Some(output)
+    }
+
+    fn branch(self: Self) -> ControlFlow<Self::Residual, T> {
+        match self {
+            Some(v) => ControlFlow::Continue(v),
+            None => ControlFlow::Break(None),
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// TESTS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_simple_error() {
+        let err = SimpleError::new("something went wrong");
+        assert_eq!(err.message(), "something went wrong");
+        assert_eq!(format!("{}", err), "something went wrong");
+    }
+
+    #[test]
+    fn test_coded_error() {
+        let err = CodedError::new(404, "not found");
+        assert_eq!(err.code(), 404);
+        assert!(format!("{}", err).contains("404"));
+    }
+
+    #[test]
+    fn test_error_kind() {
+        let err = KindedError::new(ErrorKind::NotFound);
+        assert_eq!(err.kind(), ErrorKind::NotFound);
+    }
+
+    #[test]
+    fn test_error_chain() {
+        let inner = SimpleError::new("inner error");
+        let outer = ContextError::new("outer context", inner);
+
+        assert!(outer.source().is_some());
+    }
+
+    #[test]
+    fn test_context() {
+        let result: Result<(), SimpleError> = Err(SimpleError::new("oops"));
+        let with_context = result.context("while doing something");
+
+        assert!(with_context.is_err());
+        let err = with_context.unwrap_err();
+        assert!(err.source().is_some());
+    }
+
+    #[test]
+    fn test_option_context() {
+        let opt: Option<i32> = None;
+        let result = opt.context("missing value");
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_result_ext() {
+        let result: Result<i32, SimpleError> = Ok(42);
+        let mut tapped = false;
+
+        result.tap(|v| {
+            assert_eq!(*v, 42);
+            tapped = true;
+        });
+
+        // Note: can't assert tapped because we consumed the result
+    }
+
+    #[test]
+    fn test_format_error_chain() {
+        let err = SimpleError::new("base error");
+        let formatted = format_error_chain(&err);
+        assert!(formatted.contains("base error"));
+    }
+
+    #[test]
+    fn test_error_report() {
+        let err = SimpleError::new("test error");
+        let report = ErrorReport::new(&err).show_backtrace(false);
+        let formatted = format!("{}", report);
+        assert!(formatted.contains("test error"));
+    }
+
+    #[test]
+    fn test_ensure() {
+        assert!(ensure(true, "should not fail").is_ok());
+        assert!(ensure(false, "should fail").is_err());
+    }
+
+    #[test]
+    fn test_location() {
+        let loc = Location::new("test.rs".to_string(), 42, 10);
+        assert_eq!(format!("{}", loc), "test.rs:42:10");
+    }
+
+    #[test]
+    fn test_backtrace() {
+        let bt = Backtrace::capture();
+        assert!(bt.status() == BacktraceStatus::Captured ||
+                bt.status() == BacktraceStatus::Disabled);
+    }
+
+    #[test]
+    fn test_box_error() {
+        let err = SimpleError::new("boxed");
+        let boxed = BoxError::new(err);
+        assert!(format!("{}", boxed).contains("boxed"));
+    }
+}

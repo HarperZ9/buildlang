@@ -1,0 +1,1936 @@
+// =============================================================================
+// PHOTON ENGINE - MESH PROCESSING AND OPTIMIZATION UTILITIES
+// =============================================================================
+// Comprehensive mesh processing tools including simplification, optimization,
+// LOD generation, mesh generation, analysis, and GPU-accelerated operations.
+// Based on Harper Engine WP-186-210 mesh processing papers.
+// =============================================================================
+
+import core::memory::{Arena, Pool, Buffer, GpuBuffer, AlignedBuffer};
+import core::math::{Vec2, Vec3, Vec4, Mat4, Quaternion, Transform, Aabb, Plane};
+import core::simd::{f32x4, f32x8, SimdMath};
+import core::collections::{HashMap, HashSet, PriorityQueue, SparseSet};
+import photon::gpu::{ComputeShader, GpuBuffer};
+
+// =============================================================================
+// REGION: MESH DATA STRUCTURES
+// =============================================================================
+
+/// Vertex with full attributes
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct Vertex {
+    /// Position
+    pub position: Vec3,
+    /// Normal
+    pub normal: Vec3,
+    /// Tangent (with bitangent sign in w)
+    pub tangent: Vec4,
+    /// Primary UV coordinates
+    pub uv0: Vec2,
+    /// Secondary UV coordinates (lightmap)
+    pub uv1: Vec2,
+    /// Vertex color
+    pub color: Vec4,
+    /// Bone indices (for skinning)
+    pub bone_indices: [u16; 4],
+    /// Bone weights (for skinning)
+    pub bone_weights: [f32; 4],
+}
+
+impl Vertex {
+    /// Create simple vertex with position only
+    pub fn from_position(position: Vec3) -> Self {
+        Self {
+            position,
+            normal: Vec3::new(0.0, 1.0, 0.0),
+            tangent: Vec4::new(1.0, 0.0, 0.0, 1.0),
+            uv0: Vec2::zero(),
+            uv1: Vec2::zero(),
+            color: Vec4::one(),
+            bone_indices: [0; 4],
+            bone_weights: [1.0, 0.0, 0.0, 0.0],
+        }
+    }
+
+    /// Interpolate between two vertices
+    pub fn lerp(a: &Self, b: &Self, t: f32) -> Self {
+        Self {
+            position: Vec3::lerp(&a.position, &b.position, t),
+            normal: Vec3::lerp(&a.normal, &b.normal, t).normalize(),
+            tangent: Vec4::lerp(&a.tangent, &b.tangent, t),
+            uv0: Vec2::lerp(&a.uv0, &b.uv0, t),
+            uv1: Vec2::lerp(&a.uv1, &b.uv1, t),
+            color: Vec4::lerp(&a.color, &b.color, t),
+            bone_indices: a.bone_indices, // Use first vertex's bones
+            bone_weights: [
+                a.bone_weights[0] * (1.0 - t) + b.bone_weights[0] * t,
+                a.bone_weights[1] * (1.0 - t) + b.bone_weights[1] * t,
+                a.bone_weights[2] * (1.0 - t) + b.bone_weights[2] * t,
+                a.bone_weights[3] * (1.0 - t) + b.bone_weights[3] * t,
+            ],
+        }
+    }
+}
+
+/// Triangle face
+#[derive(Clone, Copy, Default)]
+pub struct Triangle {
+    /// Vertex indices
+    pub indices: [u32; 3],
+    /// Material/submesh ID
+    pub material_id: u32,
+}
+
+impl Triangle {
+    pub fn new(i0: u32, i1: u32, i2: u32) -> Self {
+        Self {
+            indices: [i0, i1, i2],
+            material_id: 0,
+        }
+    }
+
+    /// Calculate face normal from vertices
+    pub fn compute_normal(&self, vertices: &[Vertex]) -> Vec3 {
+        let v0 = vertices[self.indices[0] as usize].position;
+        let v1 = vertices[self.indices[1] as usize].position;
+        let v2 = vertices[self.indices[2] as usize].position;
+
+        let e1 = v1 - v0;
+        let e2 = v2 - v0;
+
+        e1.cross(e2).normalize()
+    }
+
+    /// Calculate triangle area
+    pub fn area(&self, vertices: &[Vertex]) -> f32 {
+        let v0 = vertices[self.indices[0] as usize].position;
+        let v1 = vertices[self.indices[1] as usize].position;
+        let v2 = vertices[self.indices[2] as usize].position;
+
+        let e1 = v1 - v0;
+        let e2 = v2 - v0;
+
+        e1.cross(e2).length() * 0.5
+    }
+}
+
+/// Half-edge for mesh connectivity
+#[derive(Clone, Copy, Default)]
+pub struct HalfEdge {
+    /// Target vertex index
+    pub vertex: u32,
+    /// Opposite half-edge index (u32::MAX if boundary)
+    pub opposite: u32,
+    /// Next half-edge in face
+    pub next: u32,
+    /// Previous half-edge in face
+    pub prev: u32,
+    /// Face index
+    pub face: u32,
+}
+
+/// Complete mesh data structure
+pub struct Mesh {
+    /// Vertex data
+    pub vertices: Vec<Vertex>,
+    /// Triangle indices
+    pub indices: Vec<u32>,
+    /// Triangles (optional, derived from indices)
+    pub triangles: Vec<Triangle>,
+    /// Bounding box
+    pub bounds: Aabb,
+    /// Submesh ranges (start, count) per material
+    pub submeshes: Vec<(u32, u32)>,
+    /// Name
+    pub name: String,
+}
+
+impl Mesh {
+    /// Create empty mesh
+    pub fn new() -> Self {
+        Self {
+            vertices: Vec::new(),
+            indices: Vec::new(),
+            triangles: Vec::new(),
+            bounds: Aabb::empty(),
+            submeshes: Vec::new(),
+            name: String::new(),
+        }
+    }
+
+    /// Create mesh from vertices and indices
+    pub fn from_data(vertices: Vec<Vertex>, indices: Vec<u32>) -> Self {
+        let mut mesh = Self {
+            vertices,
+            indices,
+            triangles: Vec::new(),
+            bounds: Aabb::empty(),
+            submeshes: vec![(0, 0)],
+            name: String::new(),
+        };
+
+        mesh.rebuild_triangles();
+        mesh.recalculate_bounds();
+        mesh.submeshes[0].1 = mesh.indices.len() as u32;
+
+        mesh
+    }
+
+    /// Rebuild triangle list from indices
+    pub fn rebuild_triangles(&mut self) {
+        self.triangles.clear();
+        self.triangles.reserve(self.indices.len() / 3);
+
+        for chunk in self.indices.chunks(3) {
+            if chunk.len() == 3 {
+                self.triangles.push(Triangle::new(chunk[0], chunk[1], chunk[2]));
+            }
+        }
+    }
+
+    /// Recalculate bounding box
+    pub fn recalculate_bounds(&mut self) {
+        self.bounds = Aabb::empty();
+        for vertex in &self.vertices {
+            self.bounds.expand_to_include(vertex.position);
+        }
+    }
+
+    /// Get vertex count
+    pub fn vertex_count(&self) -> usize {
+        self.vertices.len()
+    }
+
+    /// Get triangle count
+    pub fn triangle_count(&self) -> usize {
+        self.indices.len() / 3
+    }
+
+    /// Clone mesh
+    pub fn clone(&self) -> Self {
+        Self {
+            vertices: self.vertices.clone(),
+            indices: self.indices.clone(),
+            triangles: self.triangles.clone(),
+            bounds: self.bounds,
+            submeshes: self.submeshes.clone(),
+            name: self.name.clone(),
+        }
+    }
+}
+
+// =============================================================================
+// REGION: MESH SIMPLIFICATION
+// =============================================================================
+
+/// Quadric error metric for edge collapse
+#[derive(Clone, Copy, Default)]
+struct QuadricErrorMetric {
+    /// Quadric matrix (symmetric 4x4, stored as 10 values)
+    /// [a, b, c, d, e, f, g, h, i, j]
+    /// | a b c d |
+    /// | b e f g |
+    /// | c f h i |
+    /// | d g i j |
+    q: [f64; 10],
+}
+
+impl QuadricErrorMetric {
+    /// Create quadric from plane
+    fn from_plane(plane: &Plane) -> Self {
+        let a = plane.normal.x as f64;
+        let b = plane.normal.y as f64;
+        let c = plane.normal.z as f64;
+        let d = plane.d as f64;
+
+        Self {
+            q: [
+                a * a, a * b, a * c, a * d,
+                b * b, b * c, b * d,
+                c * c, c * d,
+                d * d,
+            ],
+        }
+    }
+
+    /// Add two quadrics
+    fn add(&self, other: &Self) -> Self {
+        let mut result = Self::default();
+        for i in 0..10 {
+            result.q[i] = self.q[i] + other.q[i];
+        }
+        result
+    }
+
+    /// Evaluate error at position
+    fn evaluate(&self, pos: Vec3) -> f64 {
+        let x = pos.x as f64;
+        let y = pos.y as f64;
+        let z = pos.z as f64;
+
+        let q = &self.q;
+
+        x * (q[0] * x + q[1] * y + q[2] * z + q[3]) +
+        y * (q[1] * x + q[4] * y + q[5] * z + q[6]) +
+        z * (q[2] * x + q[5] * y + q[7] * z + q[8]) +
+            (q[3] * x + q[6] * y + q[8] * z + q[9])
+    }
+
+    /// Find optimal position minimizing error
+    fn find_optimal_position(&self, v1: Vec3, v2: Vec3) -> Vec3 {
+        // Try to solve the linear system for optimal position
+        // If degenerate, fall back to midpoint
+
+        let q = &self.q;
+
+        // Construct 3x3 matrix and solve
+        let det = q[0] * (q[4] * q[7] - q[5] * q[5]) -
+                  q[1] * (q[1] * q[7] - q[5] * q[2]) +
+                  q[2] * (q[1] * q[5] - q[4] * q[2]);
+
+        if det.abs() > 1e-10 {
+            // Solve using Cramer's rule
+            let inv_det = 1.0 / det;
+
+            let x = inv_det * (
+                -q[3] * (q[4] * q[7] - q[5] * q[5]) +
+                 q[6] * (q[1] * q[7] - q[2] * q[5]) -
+                 q[8] * (q[1] * q[5] - q[2] * q[4])
+            );
+
+            let y = inv_det * (
+                -q[0] * (q[6] * q[7] - q[5] * q[8]) +
+                 q[3] * (q[1] * q[7] - q[2] * q[5]) -
+                 q[2] * (q[1] * q[8] - q[6] * q[2])
+            );
+
+            let z = inv_det * (
+                -q[0] * (q[4] * q[8] - q[6] * q[5]) +
+                 q[1] * (q[1] * q[8] - q[6] * q[2]) -
+                 q[3] * (q[1] * q[5] - q[4] * q[2])
+            );
+
+            return Vec3::new(x as f32, y as f32, z as f32);
+        }
+
+        // Fall back to midpoint or one of the endpoints
+        let mid = (v1 + v2) * 0.5;
+        let e1 = self.evaluate(v1);
+        let e2 = self.evaluate(v2);
+        let em = self.evaluate(mid);
+
+        if em <= e1 && em <= e2 {
+            mid
+        } else if e1 <= e2 {
+            v1
+        } else {
+            v2
+        }
+    }
+}
+
+/// Edge collapse candidate
+struct EdgeCollapse {
+    /// First vertex index
+    v1: u32,
+    /// Second vertex index
+    v2: u32,
+    /// Optimal collapse position
+    optimal_pos: Vec3,
+    /// Collapse error cost
+    error: f64,
+}
+
+impl PartialEq for EdgeCollapse {
+    fn eq(&self, other: &Self) -> bool {
+        self.error == other.error
+    }
+}
+
+impl Eq for EdgeCollapse {}
+
+impl PartialOrd for EdgeCollapse {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        // Reverse ordering for min-heap
+        other.error.partial_cmp(&self.error)
+    }
+}
+
+impl Ord for EdgeCollapse {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.partial_cmp(other).unwrap_or(std::cmp::Ordering::Equal)
+    }
+}
+
+/// Mesh simplifier using quadric error metrics
+pub struct MeshSimplifier {
+    /// Vertex quadrics
+    quadrics: Vec<QuadricErrorMetric>,
+    /// Edge collapse priority queue
+    heap: PriorityQueue<EdgeCollapse>,
+    /// Vertex to triangle adjacency
+    vertex_triangles: Vec<Vec<u32>>,
+    /// Collapsed vertex mapping (vertex -> collapsed_to)
+    collapsed_to: Vec<u32>,
+    /// Triangle validity flags
+    valid_triangles: Vec<bool>,
+    /// Edge hash map for quick lookup
+    edges: HashMap<(u32, u32), usize>,
+    /// Preserve boundary edges more
+    boundary_weight: f32,
+    /// Preserve UV seams
+    preserve_uv_seams: bool,
+    /// Maximum edge length ratio for collapse
+    max_edge_ratio: f32,
+}
+
+impl MeshSimplifier {
+    /// Create new mesh simplifier
+    pub fn new() -> Self {
+        Self {
+            quadrics: Vec::new(),
+            heap: PriorityQueue::new(),
+            vertex_triangles: Vec::new(),
+            collapsed_to: Vec::new(),
+            valid_triangles: Vec::new(),
+            edges: HashMap::new(),
+            boundary_weight: 100.0,
+            preserve_uv_seams: true,
+            max_edge_ratio: 10.0,
+        }
+    }
+
+    /// Set boundary preservation weight
+    pub fn set_boundary_weight(&mut self, weight: f32) {
+        self.boundary_weight = weight;
+    }
+
+    /// Enable/disable UV seam preservation
+    pub fn set_preserve_uv_seams(&mut self, preserve: bool) {
+        self.preserve_uv_seams = preserve;
+    }
+
+    /// Simplify mesh to target triangle count
+    pub fn simplify(&mut self, mesh: &Mesh, target_triangles: usize) -> Mesh {
+        self.initialize(mesh);
+        self.build_edge_heap(mesh);
+
+        let mut current_triangles = mesh.triangle_count();
+        let target = target_triangles.max(4); // At least a tetrahedron
+
+        while current_triangles > target && !self.heap.is_empty() {
+            if let Some(collapse) = self.heap.pop() {
+                // Check if edge is still valid
+                let v1 = self.find_representative(collapse.v1);
+                let v2 = self.find_representative(collapse.v2);
+
+                if v1 == v2 {
+                    continue; // Already collapsed
+                }
+
+                // Perform collapse
+                let removed = self.collapse_edge(mesh, v1, v2, collapse.optimal_pos);
+                current_triangles -= removed;
+            }
+        }
+
+        self.build_result_mesh(mesh)
+    }
+
+    /// Simplify mesh to target error threshold
+    pub fn simplify_to_error(&mut self, mesh: &Mesh, max_error: f64) -> Mesh {
+        self.initialize(mesh);
+        self.build_edge_heap(mesh);
+
+        while !self.heap.is_empty() {
+            if let Some(collapse) = self.heap.pop() {
+                if collapse.error > max_error {
+                    break;
+                }
+
+                let v1 = self.find_representative(collapse.v1);
+                let v2 = self.find_representative(collapse.v2);
+
+                if v1 != v2 {
+                    self.collapse_edge(mesh, v1, v2, collapse.optimal_pos);
+                }
+            }
+        }
+
+        self.build_result_mesh(mesh)
+    }
+
+    fn initialize(&mut self, mesh: &Mesh) {
+        let vertex_count = mesh.vertices.len();
+        let triangle_count = mesh.triangle_count();
+
+        // Initialize quadrics to zero
+        self.quadrics = vec![QuadricErrorMetric::default(); vertex_count];
+
+        // Build vertex-triangle adjacency and compute quadrics
+        self.vertex_triangles = vec![Vec::new(); vertex_count];
+
+        for (tri_idx, chunk) in mesh.indices.chunks(3).enumerate() {
+            if chunk.len() != 3 {
+                continue;
+            }
+
+            let v0 = chunk[0] as usize;
+            let v1 = chunk[1] as usize;
+            let v2 = chunk[2] as usize;
+
+            // Add to adjacency
+            self.vertex_triangles[v0].push(tri_idx as u32);
+            self.vertex_triangles[v1].push(tri_idx as u32);
+            self.vertex_triangles[v2].push(tri_idx as u32);
+
+            // Compute face plane and add to vertex quadrics
+            let p0 = mesh.vertices[v0].position;
+            let p1 = mesh.vertices[v1].position;
+            let p2 = mesh.vertices[v2].position;
+
+            let normal = (p1 - p0).cross(p2 - p0).normalize();
+            let d = -normal.dot(p0);
+            let plane = Plane { normal, d };
+            let quadric = QuadricErrorMetric::from_plane(&plane);
+
+            self.quadrics[v0] = self.quadrics[v0].add(&quadric);
+            self.quadrics[v1] = self.quadrics[v1].add(&quadric);
+            self.quadrics[v2] = self.quadrics[v2].add(&quadric);
+        }
+
+        // Initialize collapse tracking
+        self.collapsed_to = (0..vertex_count as u32).collect();
+        self.valid_triangles = vec![true; triangle_count];
+    }
+
+    fn build_edge_heap(&mut self, mesh: &Mesh) {
+        self.edges.clear();
+        self.heap = PriorityQueue::new();
+
+        for chunk in mesh.indices.chunks(3) {
+            if chunk.len() != 3 {
+                continue;
+            }
+
+            for i in 0..3 {
+                let v1 = chunk[i].min(chunk[(i + 1) % 3]);
+                let v2 = chunk[i].max(chunk[(i + 1) % 3]);
+
+                let key = (v1, v2);
+                if !self.edges.contains_key(&key) {
+                    self.edges.insert(key, self.heap.len());
+                    self.add_edge_to_heap(mesh, v1, v2);
+                }
+            }
+        }
+    }
+
+    fn add_edge_to_heap(&mut self, mesh: &Mesh, v1: u32, v2: u32) {
+        let q = self.quadrics[v1 as usize].add(&self.quadrics[v2 as usize]);
+        let p1 = mesh.vertices[v1 as usize].position;
+        let p2 = mesh.vertices[v2 as usize].position;
+
+        let optimal_pos = q.find_optimal_position(p1, p2);
+        let error = q.evaluate(optimal_pos);
+
+        self.heap.push(EdgeCollapse {
+            v1,
+            v2,
+            optimal_pos,
+            error,
+        });
+    }
+
+    fn find_representative(&self, v: u32) -> u32 {
+        let mut current = v;
+        while self.collapsed_to[current as usize] != current {
+            current = self.collapsed_to[current as usize];
+        }
+        current
+    }
+
+    fn collapse_edge(&mut self, mesh: &Mesh, v1: u32, v2: u32, new_pos: Vec3) -> usize {
+        // Mark v2 as collapsed to v1
+        self.collapsed_to[v2 as usize] = v1;
+
+        // Update v1's quadric
+        self.quadrics[v1 as usize] = self.quadrics[v1 as usize].add(&self.quadrics[v2 as usize]);
+
+        // Invalidate triangles containing both v1 and v2
+        let mut removed = 0;
+        for &tri_idx in &self.vertex_triangles[v2 as usize] {
+            if !self.valid_triangles[tri_idx as usize] {
+                continue;
+            }
+
+            let chunk = &mesh.indices[tri_idx as usize * 3..tri_idx as usize * 3 + 3];
+            let has_v1 = chunk.iter().any(|&v| self.find_representative(v) == v1);
+            let has_v2 = chunk.iter().any(|&v| v == v2);
+
+            if has_v1 && has_v2 {
+                self.valid_triangles[tri_idx as usize] = false;
+                removed += 1;
+            }
+        }
+
+        // Transfer v2's triangles to v1
+        let v2_triangles = std::mem::take(&mut self.vertex_triangles[v2 as usize]);
+        self.vertex_triangles[v1 as usize].extend(v2_triangles);
+
+        removed
+    }
+
+    fn build_result_mesh(&self, original: &Mesh) -> Mesh {
+        let mut new_vertices: Vec<Vertex> = Vec::new();
+        let mut new_indices: Vec<u32> = Vec::new();
+        let mut vertex_map: HashMap<u32, u32> = HashMap::new();
+
+        // Collect valid triangles with remapped vertices
+        for (tri_idx, valid) in self.valid_triangles.iter().enumerate() {
+            if !valid {
+                continue;
+            }
+
+            let chunk = &original.indices[tri_idx * 3..tri_idx * 3 + 3];
+            let mut tri_indices = [0u32; 3];
+
+            for (i, &old_idx) in chunk.iter().enumerate() {
+                let rep = self.find_representative(old_idx);
+
+                let new_idx = *vertex_map.entry(rep).or_insert_with(|| {
+                    let idx = new_vertices.len() as u32;
+                    new_vertices.push(original.vertices[rep as usize].clone());
+                    idx
+                });
+
+                tri_indices[i] = new_idx;
+            }
+
+            // Check for degenerate triangle
+            if tri_indices[0] != tri_indices[1] &&
+               tri_indices[1] != tri_indices[2] &&
+               tri_indices[2] != tri_indices[0] {
+                new_indices.extend_from_slice(&tri_indices);
+            }
+        }
+
+        Mesh::from_data(new_vertices, new_indices)
+    }
+}
+
+/// Generate LOD chain for mesh
+pub struct LodGenerator {
+    /// Simplifier instance
+    simplifier: MeshSimplifier,
+    /// LOD reduction ratios
+    lod_ratios: Vec<f32>,
+    /// Minimum triangles per LOD
+    min_triangles: u32,
+}
+
+impl LodGenerator {
+    /// Create LOD generator with default settings
+    pub fn new() -> Self {
+        Self {
+            simplifier: MeshSimplifier::new(),
+            lod_ratios: vec![1.0, 0.5, 0.25, 0.125, 0.0625],
+            min_triangles: 64,
+        }
+    }
+
+    /// Set custom LOD ratios
+    pub fn set_lod_ratios(&mut self, ratios: Vec<f32>) {
+        self.lod_ratios = ratios;
+    }
+
+    /// Generate LOD chain
+    pub fn generate_lods(&mut self, mesh: &Mesh) -> Vec<Mesh> {
+        let base_triangles = mesh.triangle_count();
+        let mut lods = Vec::with_capacity(self.lod_ratios.len());
+
+        // LOD 0 is always the original mesh
+        lods.push(mesh.clone());
+
+        // Generate simplified LODs
+        for &ratio in self.lod_ratios.iter().skip(1) {
+            let target = ((base_triangles as f32 * ratio) as usize).max(self.min_triangles as usize);
+            let simplified = self.simplifier.simplify(mesh, target);
+            lods.push(simplified);
+        }
+
+        lods
+    }
+
+    /// Generate LOD with screen size thresholds
+    pub fn generate_lods_with_thresholds(&mut self, mesh: &Mesh) -> Vec<(Mesh, f32)> {
+        let lods = self.generate_lods(mesh);
+
+        // Calculate screen size thresholds based on triangle reduction
+        lods.into_iter().enumerate().map(|(i, lod)| {
+            let threshold = 0.5_f32.powi(i as i32); // Halve screen size per LOD
+            (lod, threshold)
+        }).collect()
+    }
+}
+
+// =============================================================================
+// REGION: MESH OPTIMIZATION
+// =============================================================================
+
+/// Vertex cache optimizer using Tom Forsyth's algorithm
+pub struct VertexCacheOptimizer {
+    /// Cache size to optimize for
+    cache_size: u32,
+    /// Vertex scores
+    scores: Vec<f32>,
+    /// Vertex last use position
+    last_use: Vec<i32>,
+    /// Triangles using each vertex
+    vertex_triangles: Vec<Vec<u32>>,
+    /// Triangle scores
+    triangle_scores: Vec<f32>,
+    /// Triangle added flags
+    triangle_added: Vec<bool>,
+}
+
+impl VertexCacheOptimizer {
+    /// Create optimizer for specified cache size
+    pub fn new(cache_size: u32) -> Self {
+        Self {
+            cache_size,
+            scores: Vec::new(),
+            last_use: Vec::new(),
+            vertex_triangles: Vec::new(),
+            triangle_scores: Vec::new(),
+            triangle_added: Vec::new(),
+        }
+    }
+
+    /// Optimize mesh for vertex cache
+    pub fn optimize(&mut self, mesh: &mut Mesh) {
+        self.initialize(mesh);
+
+        let triangle_count = mesh.triangle_count();
+        let mut new_indices = Vec::with_capacity(mesh.indices.len());
+        let mut cache: Vec<u32> = Vec::with_capacity(self.cache_size as usize);
+
+        for _ in 0..triangle_count {
+            // Find best triangle
+            let best_tri = self.find_best_triangle();
+            if best_tri == u32::MAX {
+                break;
+            }
+
+            self.triangle_added[best_tri as usize] = true;
+
+            // Add triangle indices
+            let base = best_tri as usize * 3;
+            for i in 0..3 {
+                let vertex = mesh.indices[base + i];
+                new_indices.push(vertex);
+
+                // Update cache
+                if let Some(pos) = cache.iter().position(|&v| v == vertex) {
+                    cache.remove(pos);
+                }
+                cache.insert(0, vertex);
+                if cache.len() > self.cache_size as usize {
+                    cache.pop();
+                }
+
+                self.last_use[vertex as usize] = new_indices.len() as i32;
+            }
+
+            // Update scores
+            self.update_scores(&cache);
+        }
+
+        mesh.indices = new_indices;
+    }
+
+    fn initialize(&mut self, mesh: &Mesh) {
+        let vertex_count = mesh.vertices.len();
+        let triangle_count = mesh.triangle_count();
+
+        self.scores = vec![0.0; vertex_count];
+        self.last_use = vec![-1; vertex_count];
+        self.vertex_triangles = vec![Vec::new(); vertex_count];
+        self.triangle_scores = vec![0.0; triangle_count];
+        self.triangle_added = vec![false; triangle_count];
+
+        // Build vertex-triangle adjacency
+        for (tri_idx, chunk) in mesh.indices.chunks(3).enumerate() {
+            for &vertex in chunk {
+                self.vertex_triangles[vertex as usize].push(tri_idx as u32);
+            }
+        }
+
+        // Initial vertex scores based on valence
+        for i in 0..vertex_count {
+            self.scores[i] = self.calculate_vertex_score(i, -1);
+        }
+
+        // Initial triangle scores
+        for tri in 0..triangle_count {
+            self.update_triangle_score(mesh, tri as u32);
+        }
+    }
+
+    fn calculate_vertex_score(&self, vertex: usize, cache_position: i32) -> f32 {
+        if self.vertex_triangles[vertex].iter().all(|&t| self.triangle_added[t as usize]) {
+            return -1.0; // No more triangles to add
+        }
+
+        let mut score = 0.0;
+
+        // Cache position score
+        if cache_position >= 0 {
+            if cache_position < 3 {
+                score = 0.75;
+            } else {
+                let cache_pos = cache_position as f32;
+                let cache_size = self.cache_size as f32;
+                score = (1.0 - (cache_pos - 3.0) / (cache_size - 3.0)).powf(1.5);
+            }
+        }
+
+        // Valence score (prefer low-valence vertices)
+        let remaining = self.vertex_triangles[vertex].iter()
+            .filter(|&&t| !self.triangle_added[t as usize])
+            .count();
+
+        if remaining > 0 {
+            score += 2.0 / (remaining as f32).sqrt();
+        }
+
+        score
+    }
+
+    fn update_triangle_score(&mut self, mesh: &Mesh, tri: u32) {
+        let base = tri as usize * 3;
+        let mut score = 0.0;
+
+        for i in 0..3 {
+            let vertex = mesh.indices[base + i] as usize;
+            score += self.scores[vertex];
+        }
+
+        self.triangle_scores[tri as usize] = score;
+    }
+
+    fn find_best_triangle(&self) -> u32 {
+        let mut best_score = f32::MIN;
+        let mut best_tri = u32::MAX;
+
+        for (tri, &score) in self.triangle_scores.iter().enumerate() {
+            if !self.triangle_added[tri] && score > best_score {
+                best_score = score;
+                best_tri = tri as u32;
+            }
+        }
+
+        best_tri
+    }
+
+    fn update_scores(&mut self, cache: &[u32]) {
+        for (pos, &vertex) in cache.iter().enumerate() {
+            self.scores[vertex as usize] = self.calculate_vertex_score(vertex as usize, pos as i32);
+        }
+    }
+}
+
+/// Overdraw optimizer
+pub struct OverdrawOptimizer {
+    /// Cluster faces for optimization
+    clusters: Vec<Vec<u32>>,
+}
+
+impl OverdrawOptimizer {
+    /// Create new overdraw optimizer
+    pub fn new() -> Self {
+        Self {
+            clusters: Vec::new(),
+        }
+    }
+
+    /// Optimize mesh for reduced overdraw
+    pub fn optimize(&mut self, mesh: &mut Mesh) {
+        self.cluster_faces(mesh);
+        self.sort_clusters_front_to_back(mesh);
+        self.rebuild_indices(mesh);
+    }
+
+    fn cluster_faces(&mut self, mesh: &Mesh) {
+        // Simple clustering based on face normals
+        self.clusters.clear();
+
+        let mut face_assigned = vec![false; mesh.triangle_count()];
+
+        for (face_idx, chunk) in mesh.indices.chunks(3).enumerate() {
+            if face_assigned[face_idx] {
+                continue;
+            }
+
+            let mut cluster = vec![face_idx as u32];
+            face_assigned[face_idx] = true;
+
+            // Get face normal
+            let v0 = mesh.vertices[chunk[0] as usize].position;
+            let v1 = mesh.vertices[chunk[1] as usize].position;
+            let v2 = mesh.vertices[chunk[2] as usize].position;
+            let normal = (v1 - v0).cross(v2 - v0).normalize();
+
+            // Find similar faces
+            for (other_idx, other_chunk) in mesh.indices.chunks(3).enumerate() {
+                if face_assigned[other_idx] {
+                    continue;
+                }
+
+                let ov0 = mesh.vertices[other_chunk[0] as usize].position;
+                let ov1 = mesh.vertices[other_chunk[1] as usize].position;
+                let ov2 = mesh.vertices[other_chunk[2] as usize].position;
+                let other_normal = (ov1 - ov0).cross(ov2 - ov0).normalize();
+
+                if normal.dot(other_normal) > 0.9 {
+                    cluster.push(other_idx as u32);
+                    face_assigned[other_idx] = true;
+                }
+            }
+
+            self.clusters.push(cluster);
+        }
+    }
+
+    fn sort_clusters_front_to_back(&mut self, mesh: &Mesh) {
+        // Sort by average depth (for typical forward rendering)
+        self.clusters.sort_by(|a, b| {
+            let center_a = self.cluster_center(mesh, a);
+            let center_b = self.cluster_center(mesh, b);
+            center_a.z.partial_cmp(&center_b.z).unwrap_or(std::cmp::Ordering::Equal)
+        });
+    }
+
+    fn cluster_center(&self, mesh: &Mesh, cluster: &[u32]) -> Vec3 {
+        let mut sum = Vec3::zero();
+        let mut count = 0;
+
+        for &face_idx in cluster {
+            let base = face_idx as usize * 3;
+            for i in 0..3 {
+                sum = sum + mesh.vertices[mesh.indices[base + i] as usize].position;
+                count += 1;
+            }
+        }
+
+        sum * (1.0 / count as f32)
+    }
+
+    fn rebuild_indices(&self, mesh: &mut Mesh) {
+        let mut new_indices = Vec::with_capacity(mesh.indices.len());
+
+        for cluster in &self.clusters {
+            for &face_idx in cluster {
+                let base = face_idx as usize * 3;
+                new_indices.extend_from_slice(&mesh.indices[base..base + 3]);
+            }
+        }
+
+        mesh.indices = new_indices;
+    }
+}
+
+// =============================================================================
+// REGION: MESH GENERATION
+// =============================================================================
+
+/// Procedural mesh generator
+pub struct MeshGenerator;
+
+impl MeshGenerator {
+    /// Generate a unit cube
+    pub fn cube() -> Mesh {
+        let vertices = vec![
+            // Front face
+            Vertex { position: Vec3::new(-0.5, -0.5,  0.5), normal: Vec3::new(0.0, 0.0, 1.0), uv0: Vec2::new(0.0, 0.0), ..Default::default() },
+            Vertex { position: Vec3::new( 0.5, -0.5,  0.5), normal: Vec3::new(0.0, 0.0, 1.0), uv0: Vec2::new(1.0, 0.0), ..Default::default() },
+            Vertex { position: Vec3::new( 0.5,  0.5,  0.5), normal: Vec3::new(0.0, 0.0, 1.0), uv0: Vec2::new(1.0, 1.0), ..Default::default() },
+            Vertex { position: Vec3::new(-0.5,  0.5,  0.5), normal: Vec3::new(0.0, 0.0, 1.0), uv0: Vec2::new(0.0, 1.0), ..Default::default() },
+            // Back face
+            Vertex { position: Vec3::new(-0.5, -0.5, -0.5), normal: Vec3::new(0.0, 0.0, -1.0), uv0: Vec2::new(1.0, 0.0), ..Default::default() },
+            Vertex { position: Vec3::new( 0.5, -0.5, -0.5), normal: Vec3::new(0.0, 0.0, -1.0), uv0: Vec2::new(0.0, 0.0), ..Default::default() },
+            Vertex { position: Vec3::new( 0.5,  0.5, -0.5), normal: Vec3::new(0.0, 0.0, -1.0), uv0: Vec2::new(0.0, 1.0), ..Default::default() },
+            Vertex { position: Vec3::new(-0.5,  0.5, -0.5), normal: Vec3::new(0.0, 0.0, -1.0), uv0: Vec2::new(1.0, 1.0), ..Default::default() },
+            // Top face
+            Vertex { position: Vec3::new(-0.5,  0.5, -0.5), normal: Vec3::new(0.0, 1.0, 0.0), uv0: Vec2::new(0.0, 0.0), ..Default::default() },
+            Vertex { position: Vec3::new( 0.5,  0.5, -0.5), normal: Vec3::new(0.0, 1.0, 0.0), uv0: Vec2::new(1.0, 0.0), ..Default::default() },
+            Vertex { position: Vec3::new( 0.5,  0.5,  0.5), normal: Vec3::new(0.0, 1.0, 0.0), uv0: Vec2::new(1.0, 1.0), ..Default::default() },
+            Vertex { position: Vec3::new(-0.5,  0.5,  0.5), normal: Vec3::new(0.0, 1.0, 0.0), uv0: Vec2::new(0.0, 1.0), ..Default::default() },
+            // Bottom face
+            Vertex { position: Vec3::new(-0.5, -0.5, -0.5), normal: Vec3::new(0.0, -1.0, 0.0), uv0: Vec2::new(0.0, 1.0), ..Default::default() },
+            Vertex { position: Vec3::new( 0.5, -0.5, -0.5), normal: Vec3::new(0.0, -1.0, 0.0), uv0: Vec2::new(1.0, 1.0), ..Default::default() },
+            Vertex { position: Vec3::new( 0.5, -0.5,  0.5), normal: Vec3::new(0.0, -1.0, 0.0), uv0: Vec2::new(1.0, 0.0), ..Default::default() },
+            Vertex { position: Vec3::new(-0.5, -0.5,  0.5), normal: Vec3::new(0.0, -1.0, 0.0), uv0: Vec2::new(0.0, 0.0), ..Default::default() },
+            // Right face
+            Vertex { position: Vec3::new( 0.5, -0.5, -0.5), normal: Vec3::new(1.0, 0.0, 0.0), uv0: Vec2::new(1.0, 0.0), ..Default::default() },
+            Vertex { position: Vec3::new( 0.5,  0.5, -0.5), normal: Vec3::new(1.0, 0.0, 0.0), uv0: Vec2::new(1.0, 1.0), ..Default::default() },
+            Vertex { position: Vec3::new( 0.5,  0.5,  0.5), normal: Vec3::new(1.0, 0.0, 0.0), uv0: Vec2::new(0.0, 1.0), ..Default::default() },
+            Vertex { position: Vec3::new( 0.5, -0.5,  0.5), normal: Vec3::new(1.0, 0.0, 0.0), uv0: Vec2::new(0.0, 0.0), ..Default::default() },
+            // Left face
+            Vertex { position: Vec3::new(-0.5, -0.5, -0.5), normal: Vec3::new(-1.0, 0.0, 0.0), uv0: Vec2::new(0.0, 0.0), ..Default::default() },
+            Vertex { position: Vec3::new(-0.5,  0.5, -0.5), normal: Vec3::new(-1.0, 0.0, 0.0), uv0: Vec2::new(0.0, 1.0), ..Default::default() },
+            Vertex { position: Vec3::new(-0.5,  0.5,  0.5), normal: Vec3::new(-1.0, 0.0, 0.0), uv0: Vec2::new(1.0, 1.0), ..Default::default() },
+            Vertex { position: Vec3::new(-0.5, -0.5,  0.5), normal: Vec3::new(-1.0, 0.0, 0.0), uv0: Vec2::new(1.0, 0.0), ..Default::default() },
+        ];
+
+        let indices = vec![
+            0, 1, 2, 0, 2, 3,       // Front
+            4, 6, 5, 4, 7, 6,       // Back
+            8, 9, 10, 8, 10, 11,    // Top
+            12, 14, 13, 12, 15, 14, // Bottom
+            16, 17, 18, 16, 18, 19, // Right
+            20, 22, 21, 20, 23, 22, // Left
+        ];
+
+        Mesh::from_data(vertices, indices)
+    }
+
+    /// Generate a UV sphere
+    pub fn sphere(radius: f32, segments: u32, rings: u32) -> Mesh {
+        let mut vertices = Vec::new();
+        let mut indices = Vec::new();
+
+        for ring in 0..=rings {
+            let phi = std::f32::consts::PI * ring as f32 / rings as f32;
+            let sin_phi = phi.sin();
+            let cos_phi = phi.cos();
+
+            for segment in 0..=segments {
+                let theta = 2.0 * std::f32::consts::PI * segment as f32 / segments as f32;
+                let sin_theta = theta.sin();
+                let cos_theta = theta.cos();
+
+                let x = sin_phi * cos_theta;
+                let y = cos_phi;
+                let z = sin_phi * sin_theta;
+
+                let position = Vec3::new(x * radius, y * radius, z * radius);
+                let normal = Vec3::new(x, y, z);
+                let uv = Vec2::new(segment as f32 / segments as f32, ring as f32 / rings as f32);
+
+                vertices.push(Vertex {
+                    position,
+                    normal,
+                    uv0: uv,
+                    tangent: Vec4::new(-sin_theta, 0.0, cos_theta, 1.0),
+                    ..Default::default()
+                });
+            }
+        }
+
+        for ring in 0..rings {
+            for segment in 0..segments {
+                let current = ring * (segments + 1) + segment;
+                let next = current + segments + 1;
+
+                indices.push(current);
+                indices.push(next);
+                indices.push(current + 1);
+
+                indices.push(current + 1);
+                indices.push(next);
+                indices.push(next + 1);
+            }
+        }
+
+        Mesh::from_data(vertices, indices)
+    }
+
+    /// Generate a cylinder
+    pub fn cylinder(radius: f32, height: f32, segments: u32) -> Mesh {
+        let mut vertices = Vec::new();
+        let mut indices = Vec::new();
+
+        let half_height = height * 0.5;
+
+        // Side vertices
+        for i in 0..=segments {
+            let theta = 2.0 * std::f32::consts::PI * i as f32 / segments as f32;
+            let x = theta.cos() * radius;
+            let z = theta.sin() * radius;
+            let u = i as f32 / segments as f32;
+
+            // Bottom
+            vertices.push(Vertex {
+                position: Vec3::new(x, -half_height, z),
+                normal: Vec3::new(theta.cos(), 0.0, theta.sin()),
+                uv0: Vec2::new(u, 0.0),
+                ..Default::default()
+            });
+
+            // Top
+            vertices.push(Vertex {
+                position: Vec3::new(x, half_height, z),
+                normal: Vec3::new(theta.cos(), 0.0, theta.sin()),
+                uv0: Vec2::new(u, 1.0),
+                ..Default::default()
+            });
+        }
+
+        // Side indices
+        for i in 0..segments {
+            let base = i * 2;
+            indices.push(base);
+            indices.push(base + 1);
+            indices.push(base + 2);
+
+            indices.push(base + 1);
+            indices.push(base + 3);
+            indices.push(base + 2);
+        }
+
+        // Top cap
+        let top_center_idx = vertices.len() as u32;
+        vertices.push(Vertex {
+            position: Vec3::new(0.0, half_height, 0.0),
+            normal: Vec3::new(0.0, 1.0, 0.0),
+            uv0: Vec2::new(0.5, 0.5),
+            ..Default::default()
+        });
+
+        for i in 0..segments {
+            let theta = 2.0 * std::f32::consts::PI * i as f32 / segments as f32;
+            let x = theta.cos() * radius;
+            let z = theta.sin() * radius;
+
+            vertices.push(Vertex {
+                position: Vec3::new(x, half_height, z),
+                normal: Vec3::new(0.0, 1.0, 0.0),
+                uv0: Vec2::new(theta.cos() * 0.5 + 0.5, theta.sin() * 0.5 + 0.5),
+                ..Default::default()
+            });
+        }
+
+        for i in 0..segments {
+            indices.push(top_center_idx);
+            indices.push(top_center_idx + 1 + i);
+            indices.push(top_center_idx + 1 + (i + 1) % segments);
+        }
+
+        // Bottom cap
+        let bottom_center_idx = vertices.len() as u32;
+        vertices.push(Vertex {
+            position: Vec3::new(0.0, -half_height, 0.0),
+            normal: Vec3::new(0.0, -1.0, 0.0),
+            uv0: Vec2::new(0.5, 0.5),
+            ..Default::default()
+        });
+
+        for i in 0..segments {
+            let theta = 2.0 * std::f32::consts::PI * i as f32 / segments as f32;
+            let x = theta.cos() * radius;
+            let z = theta.sin() * radius;
+
+            vertices.push(Vertex {
+                position: Vec3::new(x, -half_height, z),
+                normal: Vec3::new(0.0, -1.0, 0.0),
+                uv0: Vec2::new(theta.cos() * 0.5 + 0.5, theta.sin() * 0.5 + 0.5),
+                ..Default::default()
+            });
+        }
+
+        for i in 0..segments {
+            indices.push(bottom_center_idx);
+            indices.push(bottom_center_idx + 1 + (i + 1) % segments);
+            indices.push(bottom_center_idx + 1 + i);
+        }
+
+        Mesh::from_data(vertices, indices)
+    }
+
+    /// Generate a plane
+    pub fn plane(width: f32, depth: f32, subdivisions_x: u32, subdivisions_z: u32) -> Mesh {
+        let mut vertices = Vec::new();
+        let mut indices = Vec::new();
+
+        let half_width = width * 0.5;
+        let half_depth = depth * 0.5;
+
+        for z in 0..=subdivisions_z {
+            for x in 0..=subdivisions_x {
+                let u = x as f32 / subdivisions_x as f32;
+                let v = z as f32 / subdivisions_z as f32;
+
+                let position = Vec3::new(
+                    (u - 0.5) * width,
+                    0.0,
+                    (v - 0.5) * depth,
+                );
+
+                vertices.push(Vertex {
+                    position,
+                    normal: Vec3::new(0.0, 1.0, 0.0),
+                    tangent: Vec4::new(1.0, 0.0, 0.0, 1.0),
+                    uv0: Vec2::new(u, v),
+                    ..Default::default()
+                });
+            }
+        }
+
+        for z in 0..subdivisions_z {
+            for x in 0..subdivisions_x {
+                let current = z * (subdivisions_x + 1) + x;
+                let next = current + subdivisions_x + 1;
+
+                indices.push(current);
+                indices.push(next);
+                indices.push(current + 1);
+
+                indices.push(current + 1);
+                indices.push(next);
+                indices.push(next + 1);
+            }
+        }
+
+        Mesh::from_data(vertices, indices)
+    }
+
+    /// Generate a torus
+    pub fn torus(major_radius: f32, minor_radius: f32, major_segments: u32, minor_segments: u32) -> Mesh {
+        let mut vertices = Vec::new();
+        let mut indices = Vec::new();
+
+        for i in 0..=major_segments {
+            let u = i as f32 / major_segments as f32;
+            let theta = u * std::f32::consts::TAU;
+            let cos_theta = theta.cos();
+            let sin_theta = theta.sin();
+
+            for j in 0..=minor_segments {
+                let v = j as f32 / minor_segments as f32;
+                let phi = v * std::f32::consts::TAU;
+                let cos_phi = phi.cos();
+                let sin_phi = phi.sin();
+
+                let x = (major_radius + minor_radius * cos_phi) * cos_theta;
+                let y = minor_radius * sin_phi;
+                let z = (major_radius + minor_radius * cos_phi) * sin_theta;
+
+                let nx = cos_phi * cos_theta;
+                let ny = sin_phi;
+                let nz = cos_phi * sin_theta;
+
+                vertices.push(Vertex {
+                    position: Vec3::new(x, y, z),
+                    normal: Vec3::new(nx, ny, nz),
+                    uv0: Vec2::new(u, v),
+                    ..Default::default()
+                });
+            }
+        }
+
+        for i in 0..major_segments {
+            for j in 0..minor_segments {
+                let current = i * (minor_segments + 1) + j;
+                let next = current + minor_segments + 1;
+
+                indices.push(current);
+                indices.push(next);
+                indices.push(current + 1);
+
+                indices.push(current + 1);
+                indices.push(next);
+                indices.push(next + 1);
+            }
+        }
+
+        Mesh::from_data(vertices, indices)
+    }
+
+    /// Generate a cone
+    pub fn cone(radius: f32, height: f32, segments: u32) -> Mesh {
+        let mut vertices = Vec::new();
+        let mut indices = Vec::new();
+
+        let half_height = height * 0.5;
+
+        // Apex
+        let apex_idx = 0u32;
+        vertices.push(Vertex {
+            position: Vec3::new(0.0, half_height, 0.0),
+            normal: Vec3::new(0.0, 1.0, 0.0),
+            uv0: Vec2::new(0.5, 0.0),
+            ..Default::default()
+        });
+
+        // Side vertices
+        for i in 0..=segments {
+            let theta = 2.0 * std::f32::consts::PI * i as f32 / segments as f32;
+            let x = theta.cos() * radius;
+            let z = theta.sin() * radius;
+
+            let slope = radius / height;
+            let ny = 1.0 / (1.0 + slope * slope).sqrt();
+            let nxz = slope * ny;
+
+            vertices.push(Vertex {
+                position: Vec3::new(x, -half_height, z),
+                normal: Vec3::new(theta.cos() * nxz, ny, theta.sin() * nxz),
+                uv0: Vec2::new(i as f32 / segments as f32, 1.0),
+                ..Default::default()
+            });
+        }
+
+        // Side faces
+        for i in 0..segments {
+            indices.push(apex_idx);
+            indices.push(1 + i);
+            indices.push(1 + i + 1);
+        }
+
+        // Bottom cap
+        let center_idx = vertices.len() as u32;
+        vertices.push(Vertex {
+            position: Vec3::new(0.0, -half_height, 0.0),
+            normal: Vec3::new(0.0, -1.0, 0.0),
+            uv0: Vec2::new(0.5, 0.5),
+            ..Default::default()
+        });
+
+        for i in 0..segments {
+            let theta = 2.0 * std::f32::consts::PI * i as f32 / segments as f32;
+            let x = theta.cos() * radius;
+            let z = theta.sin() * radius;
+
+            vertices.push(Vertex {
+                position: Vec3::new(x, -half_height, z),
+                normal: Vec3::new(0.0, -1.0, 0.0),
+                uv0: Vec2::new(theta.cos() * 0.5 + 0.5, theta.sin() * 0.5 + 0.5),
+                ..Default::default()
+            });
+        }
+
+        for i in 0..segments {
+            indices.push(center_idx);
+            indices.push(center_idx + 1 + (i + 1) % segments);
+            indices.push(center_idx + 1 + i);
+        }
+
+        Mesh::from_data(vertices, indices)
+    }
+
+    /// Generate an icosphere
+    pub fn icosphere(radius: f32, subdivisions: u32) -> Mesh {
+        // Start with icosahedron
+        let t = (1.0 + 5.0_f32.sqrt()) / 2.0;
+
+        let mut vertices = vec![
+            Vec3::new(-1.0, t, 0.0).normalize() * radius,
+            Vec3::new(1.0, t, 0.0).normalize() * radius,
+            Vec3::new(-1.0, -t, 0.0).normalize() * radius,
+            Vec3::new(1.0, -t, 0.0).normalize() * radius,
+            Vec3::new(0.0, -1.0, t).normalize() * radius,
+            Vec3::new(0.0, 1.0, t).normalize() * radius,
+            Vec3::new(0.0, -1.0, -t).normalize() * radius,
+            Vec3::new(0.0, 1.0, -t).normalize() * radius,
+            Vec3::new(t, 0.0, -1.0).normalize() * radius,
+            Vec3::new(t, 0.0, 1.0).normalize() * radius,
+            Vec3::new(-t, 0.0, -1.0).normalize() * radius,
+            Vec3::new(-t, 0.0, 1.0).normalize() * radius,
+        ];
+
+        let mut triangles = vec![
+            [0, 11, 5], [0, 5, 1], [0, 1, 7], [0, 7, 10], [0, 10, 11],
+            [1, 5, 9], [5, 11, 4], [11, 10, 2], [10, 7, 6], [7, 1, 8],
+            [3, 9, 4], [3, 4, 2], [3, 2, 6], [3, 6, 8], [3, 8, 9],
+            [4, 9, 5], [2, 4, 11], [6, 2, 10], [8, 6, 7], [9, 8, 1],
+        ];
+
+        // Subdivide
+        for _ in 0..subdivisions {
+            let mut new_triangles = Vec::new();
+            let mut midpoint_cache: HashMap<(u32, u32), u32> = HashMap::new();
+
+            for tri in &triangles {
+                let a = Self::get_midpoint(&mut vertices, &mut midpoint_cache, tri[0], tri[1], radius);
+                let b = Self::get_midpoint(&mut vertices, &mut midpoint_cache, tri[1], tri[2], radius);
+                let c = Self::get_midpoint(&mut vertices, &mut midpoint_cache, tri[2], tri[0], radius);
+
+                new_triangles.push([tri[0], a, c]);
+                new_triangles.push([tri[1], b, a]);
+                new_triangles.push([tri[2], c, b]);
+                new_triangles.push([a, b, c]);
+            }
+
+            triangles = new_triangles;
+        }
+
+        // Convert to mesh format
+        let mesh_vertices: Vec<Vertex> = vertices.iter().map(|&pos| {
+            let normal = pos.normalize();
+            let uv = Vec2::new(
+                0.5 + normal.z.atan2(normal.x) / std::f32::consts::TAU,
+                0.5 - normal.y.asin() / std::f32::consts::PI,
+            );
+            Vertex {
+                position: pos,
+                normal,
+                uv0: uv,
+                ..Default::default()
+            }
+        }).collect();
+
+        let indices: Vec<u32> = triangles.iter()
+            .flat_map(|tri| tri.iter().copied())
+            .collect();
+
+        Mesh::from_data(mesh_vertices, indices)
+    }
+
+    fn get_midpoint(
+        vertices: &mut Vec<Vec3>,
+        cache: &mut HashMap<(u32, u32), u32>,
+        i1: u32,
+        i2: u32,
+        radius: f32,
+    ) -> u32 {
+        let key = if i1 < i2 { (i1, i2) } else { (i2, i1) };
+
+        if let Some(&idx) = cache.get(&key) {
+            return idx;
+        }
+
+        let p1 = vertices[i1 as usize];
+        let p2 = vertices[i2 as usize];
+        let midpoint = ((p1 + p2) * 0.5).normalize() * radius;
+
+        let idx = vertices.len() as u32;
+        vertices.push(midpoint);
+        cache.insert(key, idx);
+
+        idx
+    }
+}
+
+// =============================================================================
+// REGION: MESH ANALYSIS
+// =============================================================================
+
+/// Mesh quality metrics
+pub struct MeshQualityMetrics {
+    /// Average triangle aspect ratio
+    pub avg_aspect_ratio: f32,
+    /// Worst triangle aspect ratio
+    pub max_aspect_ratio: f32,
+    /// Number of degenerate triangles
+    pub degenerate_triangles: u32,
+    /// Number of duplicate vertices
+    pub duplicate_vertices: u32,
+    /// Number of unused vertices
+    pub unused_vertices: u32,
+    /// Mesh is watertight (closed)
+    pub is_watertight: bool,
+    /// Number of boundary edges
+    pub boundary_edges: u32,
+    /// Number of non-manifold edges
+    pub non_manifold_edges: u32,
+    /// Average vertex valence
+    pub avg_valence: f32,
+    /// Estimated vertex cache efficiency (ACMR)
+    pub cache_efficiency: f32,
+}
+
+/// Mesh analyzer
+pub struct MeshAnalyzer;
+
+impl MeshAnalyzer {
+    /// Analyze mesh quality
+    pub fn analyze(mesh: &Mesh) -> MeshQualityMetrics {
+        let mut metrics = MeshQualityMetrics {
+            avg_aspect_ratio: 0.0,
+            max_aspect_ratio: 0.0,
+            degenerate_triangles: 0,
+            duplicate_vertices: 0,
+            unused_vertices: 0,
+            is_watertight: true,
+            boundary_edges: 0,
+            non_manifold_edges: 0,
+            avg_valence: 0.0,
+            cache_efficiency: 0.0,
+        };
+
+        // Analyze triangles
+        let mut total_aspect = 0.0;
+        for chunk in mesh.indices.chunks(3) {
+            if chunk.len() != 3 {
+                continue;
+            }
+
+            let v0 = mesh.vertices[chunk[0] as usize].position;
+            let v1 = mesh.vertices[chunk[1] as usize].position;
+            let v2 = mesh.vertices[chunk[2] as usize].position;
+
+            let e0 = (v1 - v0).length();
+            let e1 = (v2 - v1).length();
+            let e2 = (v0 - v2).length();
+
+            let s = (e0 + e1 + e2) * 0.5;
+            let area = (s * (s - e0) * (s - e1) * (s - e2)).sqrt();
+
+            if area < 1e-10 {
+                metrics.degenerate_triangles += 1;
+                continue;
+            }
+
+            let longest = e0.max(e1).max(e2);
+            let aspect_ratio = longest * longest / (4.0 * 3.0_f32.sqrt() * area);
+
+            total_aspect += aspect_ratio;
+            metrics.max_aspect_ratio = metrics.max_aspect_ratio.max(aspect_ratio);
+        }
+
+        let valid_triangles = mesh.triangle_count() as u32 - metrics.degenerate_triangles;
+        if valid_triangles > 0 {
+            metrics.avg_aspect_ratio = total_aspect / valid_triangles as f32;
+        }
+
+        // Analyze edges
+        let mut edge_count: HashMap<(u32, u32), u32> = HashMap::new();
+        for chunk in mesh.indices.chunks(3) {
+            if chunk.len() != 3 {
+                continue;
+            }
+
+            for i in 0..3 {
+                let e0 = chunk[i].min(chunk[(i + 1) % 3]);
+                let e1 = chunk[i].max(chunk[(i + 1) % 3]);
+                *edge_count.entry((e0, e1)).or_insert(0) += 1;
+            }
+        }
+
+        for &count in edge_count.values() {
+            if count == 1 {
+                metrics.boundary_edges += 1;
+            } else if count > 2 {
+                metrics.non_manifold_edges += 1;
+            }
+        }
+
+        metrics.is_watertight = metrics.boundary_edges == 0 && metrics.non_manifold_edges == 0;
+
+        // Analyze vertices
+        let mut vertex_used = vec![false; mesh.vertices.len()];
+        let mut vertex_valence = vec![0u32; mesh.vertices.len()];
+
+        for &idx in &mesh.indices {
+            vertex_used[idx as usize] = true;
+            vertex_valence[idx as usize] += 1;
+        }
+
+        metrics.unused_vertices = vertex_used.iter().filter(|&&used| !used).count() as u32;
+
+        let used_count = mesh.vertices.len() as u32 - metrics.unused_vertices;
+        if used_count > 0 {
+            let total_valence: u32 = vertex_valence.iter().sum();
+            metrics.avg_valence = total_valence as f32 / used_count as f32;
+        }
+
+        // Estimate cache efficiency (simplified ACMR)
+        metrics.cache_efficiency = Self::estimate_cache_efficiency(mesh);
+
+        // Check for duplicate vertices
+        metrics.duplicate_vertices = Self::count_duplicate_vertices(mesh);
+
+        metrics
+    }
+
+    fn estimate_cache_efficiency(mesh: &Mesh) -> f32 {
+        // Simulate post-transform vertex cache
+        const CACHE_SIZE: usize = 32;
+        let mut cache: Vec<u32> = Vec::with_capacity(CACHE_SIZE);
+        let mut cache_misses = 0u32;
+
+        for &idx in &mesh.indices {
+            if !cache.contains(&idx) {
+                cache_misses += 1;
+                cache.insert(0, idx);
+                if cache.len() > CACHE_SIZE {
+                    cache.pop();
+                }
+            } else {
+                // Move to front
+                cache.retain(|&v| v != idx);
+                cache.insert(0, idx);
+            }
+        }
+
+        // ACMR (Average Cache Miss Ratio)
+        let triangle_count = mesh.triangle_count();
+        if triangle_count > 0 {
+            cache_misses as f32 / triangle_count as f32
+        } else {
+            0.0
+        }
+    }
+
+    fn count_duplicate_vertices(mesh: &Mesh) -> u32 {
+        let mut position_map: HashMap<[u32; 3], u32> = HashMap::new();
+        let mut duplicates = 0u32;
+
+        for vertex in &mesh.vertices {
+            let key = [
+                vertex.position.x.to_bits(),
+                vertex.position.y.to_bits(),
+                vertex.position.z.to_bits(),
+            ];
+
+            let count = position_map.entry(key).or_insert(0);
+            if *count > 0 {
+                duplicates += 1;
+            }
+            *count += 1;
+        }
+
+        duplicates
+    }
+}
+
+// =============================================================================
+// REGION: MESH UTILITIES
+// =============================================================================
+
+/// Mesh utility functions
+pub struct MeshUtils;
+
+impl MeshUtils {
+    /// Recalculate normals from face data
+    pub fn recalculate_normals(mesh: &mut Mesh) {
+        // Clear existing normals
+        for vertex in &mut mesh.vertices {
+            vertex.normal = Vec3::zero();
+        }
+
+        // Accumulate face normals
+        for chunk in mesh.indices.chunks(3) {
+            if chunk.len() != 3 {
+                continue;
+            }
+
+            let v0 = mesh.vertices[chunk[0] as usize].position;
+            let v1 = mesh.vertices[chunk[1] as usize].position;
+            let v2 = mesh.vertices[chunk[2] as usize].position;
+
+            let normal = (v1 - v0).cross(v2 - v0);
+
+            for &idx in chunk {
+                mesh.vertices[idx as usize].normal = mesh.vertices[idx as usize].normal + normal;
+            }
+        }
+
+        // Normalize
+        for vertex in &mut mesh.vertices {
+            vertex.normal = vertex.normal.normalize();
+        }
+    }
+
+    /// Calculate tangents using MikkTSpace algorithm
+    pub fn calculate_tangents(mesh: &mut Mesh) {
+        let triangle_count = mesh.triangle_count();
+
+        for tri_idx in 0..triangle_count {
+            let base = tri_idx * 3;
+            let i0 = mesh.indices[base] as usize;
+            let i1 = mesh.indices[base + 1] as usize;
+            let i2 = mesh.indices[base + 2] as usize;
+
+            let v0 = mesh.vertices[i0].position;
+            let v1 = mesh.vertices[i1].position;
+            let v2 = mesh.vertices[i2].position;
+
+            let uv0 = mesh.vertices[i0].uv0;
+            let uv1 = mesh.vertices[i1].uv0;
+            let uv2 = mesh.vertices[i2].uv0;
+
+            let e1 = v1 - v0;
+            let e2 = v2 - v0;
+
+            let duv1 = uv1 - uv0;
+            let duv2 = uv2 - uv0;
+
+            let f = 1.0 / (duv1.x * duv2.y - duv2.x * duv1.y);
+
+            let tangent = Vec3::new(
+                f * (duv2.y * e1.x - duv1.y * e2.x),
+                f * (duv2.y * e1.y - duv1.y * e2.y),
+                f * (duv2.y * e1.z - duv1.y * e2.z),
+            ).normalize();
+
+            let bitangent = Vec3::new(
+                f * (-duv2.x * e1.x + duv1.x * e2.x),
+                f * (-duv2.x * e1.y + duv1.x * e2.y),
+                f * (-duv2.x * e1.z + duv1.x * e2.z),
+            ).normalize();
+
+            // Handedness
+            let normal = mesh.vertices[i0].normal;
+            let handedness = if normal.cross(tangent).dot(bitangent) < 0.0 { -1.0 } else { 1.0 };
+
+            for &idx in &[i0, i1, i2] {
+                mesh.vertices[idx].tangent = Vec4::new(tangent.x, tangent.y, tangent.z, handedness);
+            }
+        }
+    }
+
+    /// Weld vertices within epsilon distance
+    pub fn weld_vertices(mesh: &mut Mesh, epsilon: f32) {
+        let vertex_count = mesh.vertices.len();
+        let mut vertex_map: Vec<u32> = (0..vertex_count as u32).collect();
+        let epsilon_sq = epsilon * epsilon;
+
+        for i in 0..vertex_count {
+            if vertex_map[i] != i as u32 {
+                continue; // Already mapped
+            }
+
+            let pos_i = mesh.vertices[i].position;
+
+            for j in (i + 1)..vertex_count {
+                if vertex_map[j] != j as u32 {
+                    continue;
+                }
+
+                let pos_j = mesh.vertices[j].position;
+                if (pos_i - pos_j).length_squared() < epsilon_sq {
+                    vertex_map[j] = i as u32;
+                }
+            }
+        }
+
+        // Remap indices
+        for idx in &mut mesh.indices {
+            *idx = vertex_map[*idx as usize];
+        }
+
+        // Compact vertices
+        let mut new_vertices = Vec::new();
+        let mut compact_map = vec![u32::MAX; vertex_count];
+
+        for idx in &mut mesh.indices {
+            let old_idx = *idx as usize;
+            if compact_map[old_idx] == u32::MAX {
+                compact_map[old_idx] = new_vertices.len() as u32;
+                new_vertices.push(mesh.vertices[old_idx].clone());
+            }
+            *idx = compact_map[old_idx];
+        }
+
+        mesh.vertices = new_vertices;
+    }
+
+    /// Remove duplicate triangles
+    pub fn remove_duplicate_triangles(mesh: &mut Mesh) {
+        let mut seen: HashSet<[u32; 3]> = HashSet::new();
+        let mut new_indices = Vec::new();
+
+        for chunk in mesh.indices.chunks(3) {
+            if chunk.len() != 3 {
+                continue;
+            }
+
+            let mut tri = [chunk[0], chunk[1], chunk[2]];
+            tri.sort();
+
+            if seen.insert(tri) {
+                new_indices.extend_from_slice(chunk);
+            }
+        }
+
+        mesh.indices = new_indices;
+    }
+
+    /// Flip mesh normals (inside out)
+    pub fn flip_normals(mesh: &mut Mesh) {
+        // Flip vertex normals
+        for vertex in &mut mesh.vertices {
+            vertex.normal = -vertex.normal;
+        }
+
+        // Flip winding order
+        for chunk in mesh.indices.chunks_mut(3) {
+            if chunk.len() == 3 {
+                chunk.swap(1, 2);
+            }
+        }
+    }
+
+    /// Transform mesh by matrix
+    pub fn transform(mesh: &mut Mesh, matrix: &Mat4) {
+        let normal_matrix = matrix.inverse().transpose();
+
+        for vertex in &mut mesh.vertices {
+            let pos4 = Vec4::new(vertex.position.x, vertex.position.y, vertex.position.z, 1.0);
+            let transformed = *matrix * pos4;
+            vertex.position = Vec3::new(transformed.x, transformed.y, transformed.z);
+
+            let norm4 = Vec4::new(vertex.normal.x, vertex.normal.y, vertex.normal.z, 0.0);
+            let transformed_normal = normal_matrix * norm4;
+            vertex.normal = Vec3::new(transformed_normal.x, transformed_normal.y, transformed_normal.z).normalize();
+        }
+
+        mesh.recalculate_bounds();
+    }
+
+    /// Merge multiple meshes into one
+    pub fn merge(meshes: &[&Mesh]) -> Mesh {
+        let total_vertices: usize = meshes.iter().map(|m| m.vertices.len()).sum();
+        let total_indices: usize = meshes.iter().map(|m| m.indices.len()).sum();
+
+        let mut result = Mesh::new();
+        result.vertices.reserve(total_vertices);
+        result.indices.reserve(total_indices);
+
+        let mut vertex_offset = 0u32;
+
+        for mesh in meshes {
+            result.vertices.extend_from_slice(&mesh.vertices);
+
+            for &idx in &mesh.indices {
+                result.indices.push(idx + vertex_offset);
+            }
+
+            vertex_offset += mesh.vertices.len() as u32;
+        }
+
+        result.rebuild_triangles();
+        result.recalculate_bounds();
+        result
+    }
+
+    /// Split mesh by material ID
+    pub fn split_by_material(mesh: &Mesh) -> Vec<Mesh> {
+        let mut material_meshes: HashMap<u32, (Vec<Vertex>, Vec<u32>)> = HashMap::new();
+
+        for chunk in mesh.indices.chunks(3) {
+            if chunk.len() != 3 {
+                continue;
+            }
+
+            // Get material from first vertex or default to 0
+            let material_id = 0u32; // Would come from triangle data
+
+            let (vertices, indices) = material_meshes.entry(material_id).or_insert((Vec::new(), Vec::new()));
+
+            for &old_idx in chunk {
+                let new_idx = vertices.len() as u32;
+                vertices.push(mesh.vertices[old_idx as usize].clone());
+                indices.push(new_idx);
+            }
+        }
+
+        material_meshes.into_iter()
+            .map(|(_, (vertices, indices))| Mesh::from_data(vertices, indices))
+            .collect()
+    }
+}
+
+// =============================================================================
+// REGION: UNIT TESTS
+// =============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_vertex_lerp() {
+        let a = Vertex::from_position(Vec3::zero());
+        let b = Vertex::from_position(Vec3::new(2.0, 0.0, 0.0));
+
+        let mid = Vertex::lerp(&a, &b, 0.5);
+        assert!((mid.position.x - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_cube_generation() {
+        let cube = MeshGenerator::cube();
+
+        assert_eq!(cube.vertices.len(), 24); // 4 vertices per face * 6 faces
+        assert_eq!(cube.triangle_count(), 12); // 2 triangles per face * 6 faces
+    }
+
+    #[test]
+    fn test_sphere_generation() {
+        let sphere = MeshGenerator::sphere(1.0, 16, 8);
+
+        assert!(sphere.vertices.len() > 0);
+        assert!(sphere.triangle_count() > 0);
+    }
+
+    #[test]
+    fn test_mesh_simplification() {
+        let sphere = MeshGenerator::sphere(1.0, 32, 16);
+        let original_tris = sphere.triangle_count();
+
+        let mut simplifier = MeshSimplifier::new();
+        let simplified = simplifier.simplify(&sphere, original_tris / 4);
+
+        assert!(simplified.triangle_count() <= original_tris / 4 + 10);
+        assert!(simplified.triangle_count() > 0);
+    }
+
+    #[test]
+    fn test_mesh_analysis() {
+        let cube = MeshGenerator::cube();
+        let metrics = MeshAnalyzer::analyze(&cube);
+
+        assert_eq!(metrics.degenerate_triangles, 0);
+        assert!(metrics.is_watertight);
+    }
+
+    #[test]
+    fn test_normal_recalculation() {
+        let mut cube = MeshGenerator::cube();
+        MeshUtils::recalculate_normals(&mut cube);
+
+        for vertex in &cube.vertices {
+            assert!((vertex.normal.length() - 1.0).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn test_mesh_merge() {
+        let cube1 = MeshGenerator::cube();
+        let cube2 = MeshGenerator::cube();
+
+        let merged = MeshUtils::merge(&[&cube1, &cube2]);
+
+        assert_eq!(merged.vertices.len(), cube1.vertices.len() * 2);
+        assert_eq!(merged.triangle_count(), cube1.triangle_count() * 2);
+    }
+
+    #[test]
+    fn test_lod_generation() {
+        let sphere = MeshGenerator::sphere(1.0, 32, 16);
+        let mut lod_gen = LodGenerator::new();
+
+        let lods = lod_gen.generate_lods(&sphere);
+
+        assert!(lods.len() >= 2);
+        assert!(lods[1].triangle_count() < lods[0].triangle_count());
+    }
+
+    #[test]
+    fn test_quadric_error() {
+        let plane = Plane {
+            normal: Vec3::new(0.0, 1.0, 0.0),
+            d: 0.0,
+        };
+
+        let quadric = QuadricErrorMetric::from_plane(&plane);
+        let error_at_origin = quadric.evaluate(Vec3::zero());
+        let error_above = quadric.evaluate(Vec3::new(0.0, 1.0, 0.0));
+
+        assert!(error_at_origin < error_above);
+    }
+}

@@ -1,0 +1,1529 @@
+// ===============================================================================
+// FOUNDATION STANDARD LIBRARY - TIME MODULE
+// ===============================================================================
+// Copyright (c) 2024-2025 Zain Dana Harper. All Rights Reserved.
+// Copyright (c) 2024-2025 Zain Dana Harper. All Rights Reserved.
+// ===============================================================================
+
+//! # Time Module
+//!
+//! Comprehensive time and date handling for the Foundation Standard Library:
+//! - Duration and Instant for measuring time
+//! - DateTime for calendar dates and times
+//! - Timezone support
+//! - Formatting and parsing
+//! - Timer and scheduling utilities
+//!
+//! ## Design Philosophy
+//!
+//! This module follows the principle of separating monotonic time (Instant)
+//! from wall-clock time (DateTime), ensuring correct behavior for timing
+//! operations even across system clock adjustments.
+
+// =============================================================================
+// Duration
+// =============================================================================
+
+/// A span of time, represented in seconds and nanoseconds.
+/// Always non-negative.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+pub struct Duration {
+    secs: u64,
+    nanos: u32, // Always < 1_000_000_000
+}
+
+impl Duration {
+    /// Zero duration
+    pub const ZERO: Duration = Duration { secs: 0, nanos: 0 };
+
+    /// Maximum duration
+    pub const MAX: Duration = Duration { secs: u64::MAX, nanos: 999_999_999 };
+
+    /// One second
+    pub const SECOND: Duration = Duration { secs: 1, nanos: 0 };
+
+    /// One millisecond
+    pub const MILLISECOND: Duration = Duration { secs: 0, nanos: 1_000_000 };
+
+    /// One microsecond
+    pub const MICROSECOND: Duration = Duration { secs: 0, nanos: 1_000 };
+
+    /// One nanosecond
+    pub const NANOSECOND: Duration = Duration { secs: 0, nanos: 1 };
+
+    /// Create a new duration from seconds and nanoseconds
+    pub fn new(secs: u64, nanos: u32) -> Self {
+        let extra_secs = (nanos / 1_000_000_000) as u64;
+        let nanos = nanos % 1_000_000_000;
+        Duration {
+            secs: secs.saturating_add(extra_secs),
+            nanos,
+        }
+    }
+
+    /// Create from seconds
+    pub fn from_secs(secs: u64) -> Self {
+        Duration { secs, nanos: 0 }
+    }
+
+    /// Create from milliseconds
+    pub fn from_millis(millis: u64) -> Self {
+        Duration {
+            secs: millis / 1000,
+            nanos: ((millis % 1000) * 1_000_000) as u32,
+        }
+    }
+
+    /// Create from microseconds
+    pub fn from_micros(micros: u64) -> Self {
+        Duration {
+            secs: micros / 1_000_000,
+            nanos: ((micros % 1_000_000) * 1000) as u32,
+        }
+    }
+
+    /// Create from nanoseconds
+    pub fn from_nanos(nanos: u64) -> Self {
+        Duration {
+            secs: nanos / 1_000_000_000,
+            nanos: (nanos % 1_000_000_000) as u32,
+        }
+    }
+
+    /// Create from floating-point seconds
+    pub fn from_secs_f64(secs: f64) -> Self {
+        if secs < 0.0 || secs.is_nan() {
+            return Duration::ZERO;
+        }
+        if secs >= u64::MAX as f64 {
+            return Duration::MAX;
+        }
+        let whole_secs = secs.trunc() as u64;
+        let nanos = ((secs.fract()) * 1_000_000_000.0) as u32;
+        Duration { secs: whole_secs, nanos }
+    }
+
+    /// Create from floating-point seconds (f32)
+    pub fn from_secs_f32(secs: f32) -> Self {
+        Self::from_secs_f64(secs as f64)
+    }
+
+    /// Get whole seconds
+    pub fn as_secs(self: &Self) -> u64 {
+        self.secs
+    }
+
+    /// Get subsecond nanoseconds
+    pub fn subsec_nanos(self: &Self) -> u32 {
+        self.nanos
+    }
+
+    /// Get subsecond microseconds
+    pub fn subsec_micros(self: &Self) -> u32 {
+        self.nanos / 1000
+    }
+
+    /// Get subsecond milliseconds
+    pub fn subsec_millis(self: &Self) -> u32 {
+        self.nanos / 1_000_000
+    }
+
+    /// Get total milliseconds
+    pub fn as_millis(self: &Self) -> u128 {
+        self.secs as u128 * 1000 + self.nanos as u128 / 1_000_000
+    }
+
+    /// Get total microseconds
+    pub fn as_micros(self: &Self) -> u128 {
+        self.secs as u128 * 1_000_000 + self.nanos as u128 / 1000
+    }
+
+    /// Get total nanoseconds
+    pub fn as_nanos(self: &Self) -> u128 {
+        self.secs as u128 * 1_000_000_000 + self.nanos as u128
+    }
+
+    /// Get as floating-point seconds
+    pub fn as_secs_f64(self: &Self) -> f64 {
+        self.secs as f64 + self.nanos as f64 / 1_000_000_000.0
+    }
+
+    /// Get as floating-point seconds (f32)
+    pub fn as_secs_f32(self: &Self) -> f32 {
+        self.as_secs_f64() as f32
+    }
+
+    /// Check if zero
+    pub fn is_zero(self: &Self) -> bool {
+        self.secs == 0 && self.nanos == 0
+    }
+
+    /// Checked addition
+    pub fn checked_add(self: &Self, rhs: Duration) -> Option<Duration> {
+        let mut secs = self.secs.checked_add(rhs.secs)?;
+        let mut nanos = self.nanos + rhs.nanos;
+        if nanos >= 1_000_000_000 {
+            nanos -= 1_000_000_000;
+            secs = secs.checked_add(1)?;
+        }
+        Some(Duration { secs, nanos })
+    }
+
+    /// Saturating addition
+    pub fn saturating_add(self: &Self, rhs: Duration) -> Duration {
+        self.checked_add(rhs).unwrap_or(Duration::MAX)
+    }
+
+    /// Checked subtraction
+    pub fn checked_sub(self: &Self, rhs: Duration) -> Option<Duration> {
+        let mut secs = self.secs.checked_sub(rhs.secs)?;
+        let nanos = if self.nanos >= rhs.nanos {
+            self.nanos - rhs.nanos
+        } else {
+            secs = secs.checked_sub(1)?;
+            1_000_000_000 + self.nanos - rhs.nanos
+        };
+        Some(Duration { secs, nanos })
+    }
+
+    /// Saturating subtraction
+    pub fn saturating_sub(self: &Self, rhs: Duration) -> Duration {
+        self.checked_sub(rhs).unwrap_or(Duration::ZERO)
+    }
+
+    /// Checked multiplication
+    pub fn checked_mul(self: &Self, rhs: u32) -> Option<Duration> {
+        let total_nanos = self.nanos as u64 * rhs as u64;
+        let extra_secs = total_nanos / 1_000_000_000;
+        let nanos = (total_nanos % 1_000_000_000) as u32;
+
+        let secs = self.secs
+            .checked_mul(rhs as u64)?
+            .checked_add(extra_secs)?;
+
+        Some(Duration { secs, nanos })
+    }
+
+    /// Saturating multiplication
+    pub fn saturating_mul(self: &Self, rhs: u32) -> Duration {
+        self.checked_mul(rhs).unwrap_or(Duration::MAX)
+    }
+
+    /// Checked division
+    pub fn checked_div(self: &Self, rhs: u32) -> Option<Duration> {
+        if rhs == 0 {
+            return None;
+        }
+
+        let secs = self.secs / rhs as u64;
+        let carry = self.secs % rhs as u64;
+        let extra_nanos = carry * 1_000_000_000 / rhs as u64;
+        let nanos = (self.nanos as u64 / rhs as u64 + extra_nanos) as u32;
+
+        Some(Duration { secs, nanos })
+    }
+
+    /// Multiply by f64
+    pub fn mul_f64(self: &Self, rhs: f64) -> Duration {
+        Duration::from_secs_f64(self.as_secs_f64() * rhs)
+    }
+
+    /// Divide by f64
+    pub fn div_f64(self: &Self, rhs: f64) -> Duration {
+        Duration::from_secs_f64(self.as_secs_f64() / rhs)
+    }
+
+    /// Divide durations, returning ratio
+    pub fn div_duration(self: &Self, rhs: Duration) -> f64 {
+        self.as_secs_f64() / rhs.as_secs_f64()
+    }
+}
+
+impl std::ops::Add for Duration {
+    type Output = Duration;
+
+    fn add(self, rhs: Duration) -> Duration {
+        self.checked_add(rhs).expect("overflow when adding durations")
+    }
+}
+
+impl std::ops::Sub for Duration {
+    type Output = Duration;
+
+    fn sub(self, rhs: Duration) -> Duration {
+        self.checked_sub(rhs).expect("overflow when subtracting durations")
+    }
+}
+
+impl std::ops::Mul<u32> for Duration {
+    type Output = Duration;
+
+    fn mul(self, rhs: u32) -> Duration {
+        self.checked_mul(rhs).expect("overflow when multiplying duration")
+    }
+}
+
+impl std::ops::Div<u32> for Duration {
+    type Output = Duration;
+
+    fn div(self, rhs: u32) -> Duration {
+        self.checked_div(rhs).expect("divide by zero")
+    }
+}
+
+impl std::ops::AddAssign for Duration {
+    fn add_assign(self: &mut Self, rhs: Duration) {
+        *self = *self + rhs;
+    }
+}
+
+impl std::ops::SubAssign for Duration {
+    fn sub_assign(self: &mut Self, rhs: Duration) {
+        *self = *self - rhs;
+    }
+}
+
+impl Default for Duration {
+    fn default() -> Self {
+        Duration::ZERO
+    }
+}
+
+// =============================================================================
+// Instant
+// =============================================================================
+
+/// A measurement of a monotonically nondecreasing clock.
+/// Opaque and useful only for measuring elapsed time.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+pub struct Instant {
+    inner: u64, // Platform-specific representation
+}
+
+impl Instant {
+    /// Get current instant
+    pub fn now() -> Self {
+        Instant {
+            inner: intrinsic::monotonic_now(),
+        }
+    }
+
+    /// Get elapsed time since this instant
+    pub fn elapsed(self: &Self) -> Duration {
+        Instant::now().duration_since(*self)
+    }
+
+    /// Get duration between two instants
+    pub fn duration_since(self: &Self, earlier: Instant) -> Duration {
+        self.checked_duration_since(earlier).unwrap_or(Duration::ZERO)
+    }
+
+    /// Checked duration between two instants
+    pub fn checked_duration_since(self: &Self, earlier: Instant) -> Option<Duration> {
+        if self.inner >= earlier.inner {
+            Some(intrinsic::instant_to_duration(self.inner - earlier.inner))
+        } else {
+            None
+        }
+    }
+
+    /// Saturating duration since
+    pub fn saturating_duration_since(self: &Self, earlier: Instant) -> Duration {
+        self.checked_duration_since(earlier).unwrap_or(Duration::ZERO)
+    }
+
+    /// Add duration to instant
+    pub fn checked_add(self: &Self, duration: Duration) -> Option<Instant> {
+        let nanos = intrinsic::duration_to_nanos(&duration);
+        self.inner.checked_add(nanos).map(|inner| Instant { inner })
+    }
+
+    /// Subtract duration from instant
+    pub fn checked_sub(self: &Self, duration: Duration) -> Option<Instant> {
+        let nanos = intrinsic::duration_to_nanos(&duration);
+        self.inner.checked_sub(nanos).map(|inner| Instant { inner })
+    }
+}
+
+impl std::ops::Add<Duration> for Instant {
+    type Output = Instant;
+
+    fn add(self, rhs: Duration) -> Instant {
+        self.checked_add(rhs).expect("overflow when adding duration to instant")
+    }
+}
+
+impl std::ops::Sub<Duration> for Instant {
+    type Output = Instant;
+
+    fn sub(self, rhs: Duration) -> Instant {
+        self.checked_sub(rhs).expect("overflow when subtracting duration from instant")
+    }
+}
+
+impl std::ops::Sub<Instant> for Instant {
+    type Output = Duration;
+
+    fn sub(self, rhs: Instant) -> Duration {
+        self.duration_since(rhs)
+    }
+}
+
+impl std::ops::AddAssign<Duration> for Instant {
+    fn add_assign(self: &mut Self, rhs: Duration) {
+        *self = *self + rhs;
+    }
+}
+
+impl std::ops::SubAssign<Duration> for Instant {
+    fn sub_assign(self: &mut Self, rhs: Duration) {
+        *self = *self - rhs;
+    }
+}
+
+// =============================================================================
+// SystemTime
+// =============================================================================
+
+/// A measurement of the system clock, useful for talking to external entities.
+/// Unlike Instant, this may go backwards (e.g., NTP adjustments).
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+pub struct SystemTime {
+    /// Seconds since UNIX epoch
+    secs: i64,
+    /// Nanoseconds within the second
+    nanos: u32,
+}
+
+impl SystemTime {
+    /// The UNIX epoch (1970-01-01 00:00:00 UTC)
+    pub const UNIX_EPOCH: SystemTime = SystemTime { secs: 0, nanos: 0 };
+
+    /// Get current system time
+    pub fn now() -> Self {
+        intrinsic::system_time_now()
+    }
+
+    /// Duration elapsed since this time
+    pub fn elapsed(self: &Self) -> Result<Duration, SystemTimeError> {
+        SystemTime::now().duration_since(*self)
+    }
+
+    /// Duration since another system time
+    pub fn duration_since(self: &Self, earlier: SystemTime) -> Result<Duration, SystemTimeError> {
+        if self.secs > earlier.secs ||
+           (self.secs == earlier.secs && self.nanos >= earlier.nanos) {
+            let secs = (self.secs - earlier.secs) as u64;
+            let nanos = if self.nanos >= earlier.nanos {
+                self.nanos - earlier.nanos
+            } else {
+                // Borrow from seconds
+                return Ok(Duration::new(secs - 1, 1_000_000_000 + self.nanos - earlier.nanos));
+            };
+            Ok(Duration::new(secs, nanos))
+        } else {
+            Err(SystemTimeError {
+                duration: earlier.duration_since(*self).unwrap(),
+            })
+        }
+    }
+
+    /// Add duration
+    pub fn checked_add(self: &Self, duration: Duration) -> Option<SystemTime> {
+        let mut secs = self.secs.checked_add(duration.secs as i64)?;
+        let mut nanos = self.nanos + duration.nanos;
+        if nanos >= 1_000_000_000 {
+            nanos -= 1_000_000_000;
+            secs = secs.checked_add(1)?;
+        }
+        Some(SystemTime { secs, nanos })
+    }
+
+    /// Subtract duration
+    pub fn checked_sub(self: &Self, duration: Duration) -> Option<SystemTime> {
+        let mut secs = self.secs.checked_sub(duration.secs as i64)?;
+        let nanos = if self.nanos >= duration.nanos {
+            self.nanos - duration.nanos
+        } else {
+            secs = secs.checked_sub(1)?;
+            1_000_000_000 + self.nanos - duration.nanos
+        };
+        Some(SystemTime { secs, nanos })
+    }
+}
+
+impl std::ops::Add<Duration> for SystemTime {
+    type Output = SystemTime;
+
+    fn add(self, rhs: Duration) -> SystemTime {
+        self.checked_add(rhs).expect("overflow when adding duration to system time")
+    }
+}
+
+impl std::ops::Sub<Duration> for SystemTime {
+    type Output = SystemTime;
+
+    fn sub(self, rhs: Duration) -> SystemTime {
+        self.checked_sub(rhs).expect("overflow when subtracting duration from system time")
+    }
+}
+
+/// Error returned when system time is earlier than expected
+#[derive(Debug, Clone)]
+pub struct SystemTimeError {
+    duration: Duration,
+}
+
+impl SystemTimeError {
+    /// Get the duration difference
+    pub fn duration(self: &Self) -> Duration {
+        self.duration
+    }
+}
+
+// =============================================================================
+// DateTime
+// =============================================================================
+
+/// A calendar date and time with timezone awareness
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct DateTime {
+    /// Year (e.g., 2024)
+    pub year: i32,
+    /// Month (1-12)
+    pub month: u8,
+    /// Day of month (1-31)
+    pub day: u8,
+    /// Hour (0-23)
+    pub hour: u8,
+    /// Minute (0-59)
+    pub minute: u8,
+    /// Second (0-59, may be 60 for leap seconds)
+    pub second: u8,
+    /// Nanoseconds (0-999_999_999)
+    pub nanosecond: u32,
+    /// Timezone offset from UTC in seconds
+    pub tz_offset: i32,
+}
+
+impl DateTime {
+    /// Create a new DateTime
+    pub fn new(
+        year: i32,
+        month: u8,
+        day: u8,
+        hour: u8,
+        minute: u8,
+        second: u8,
+    ) -> Option<Self> {
+        if !Self::is_valid_date(year, month, day) {
+            return None;
+        }
+        if hour > 23 || minute > 59 || second > 59 {
+            return None;
+        }
+
+        Some(DateTime {
+            year,
+            month,
+            day,
+            hour,
+            minute,
+            second,
+            nanosecond: 0,
+            tz_offset: 0,
+        })
+    }
+
+    /// Create from UNIX timestamp (UTC)
+    pub fn from_timestamp(secs: i64, nanos: u32) -> Self {
+        let days = secs.div_euclid(86400);
+        let day_secs = secs.rem_euclid(86400) as u32;
+
+        let hour = (day_secs / 3600) as u8;
+        let minute = ((day_secs % 3600) / 60) as u8;
+        let second = (day_secs % 60) as u8;
+
+        let (year, month, day) = Self::days_to_ymd(days as i32 + 719468);
+
+        DateTime {
+            year,
+            month,
+            day,
+            hour,
+            minute,
+            second,
+            nanosecond: nanos,
+            tz_offset: 0,
+        }
+    }
+
+    /// Get current UTC time
+    pub fn now_utc() -> Self {
+        let st = SystemTime::now();
+        Self::from_timestamp(st.secs, st.nanos)
+    }
+
+    /// Get current local time
+    pub fn now_local() -> Self {
+        let mut dt = Self::now_utc();
+        let offset = intrinsic::local_tz_offset();
+        dt.tz_offset = offset;
+        dt.add_seconds(offset as i64);
+        dt
+    }
+
+    /// Convert to UNIX timestamp
+    pub fn timestamp(self: &Self) -> i64 {
+        let days = Self::ymd_to_days(self.year, self.month, self.day) - 719468;
+        let secs = days as i64 * 86400
+            + self.hour as i64 * 3600
+            + self.minute as i64 * 60
+            + self.second as i64
+            - self.tz_offset as i64;
+        secs
+    }
+
+    /// Convert to SystemTime
+    pub fn to_system_time(self: &Self) -> SystemTime {
+        SystemTime {
+            secs: self.timestamp(),
+            nanos: self.nanosecond,
+        }
+    }
+
+    /// Get day of week (0 = Monday, 6 = Sunday)
+    pub fn weekday(self: &Self) -> Weekday {
+        let days = Self::ymd_to_days(self.year, self.month, self.day);
+        Weekday::from_days(days)
+    }
+
+    /// Get day of year (1-366)
+    pub fn day_of_year(self: &Self) -> u16 {
+        let mut day = self.day as u16;
+        for m in 1..self.month {
+            day += Self::days_in_month(self.year, m) as u16;
+        }
+        day
+    }
+
+    /// Get ISO week number (1-53)
+    pub fn iso_week(self: &Self) -> u8 {
+        let doy = self.day_of_year() as i32;
+        let dow = self.weekday().num_days_from_monday() as i32;
+        let week = (doy - dow + 10) / 7;
+
+        if week < 1 {
+            // Last week of previous year
+            let prev_dec_31 = DateTime::new(self.year - 1, 12, 31, 0, 0, 0).unwrap();
+            prev_dec_31.iso_week()
+        } else if week > 52 {
+            // Check if it's week 1 of next year
+            let jan_1_next = DateTime::new(self.year + 1, 1, 1, 0, 0, 0).unwrap();
+            let jan_1_dow = jan_1_next.weekday().num_days_from_monday();
+            if jan_1_dow <= 3 {
+                1
+            } else {
+                week as u8
+            }
+        } else {
+            week as u8
+        }
+    }
+
+    /// Check if year is a leap year
+    pub fn is_leap_year(year: i32) -> bool {
+        (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0)
+    }
+
+    /// Get days in a month
+    pub fn days_in_month(year: i32, month: u8) -> u8 {
+        match month {
+            1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+            4 | 6 | 9 | 11 => 30,
+            2 => if Self::is_leap_year(year) { 29 } else { 28 },
+            _ => 0,
+        }
+    }
+
+    /// Validate a date
+    fn is_valid_date(year: i32, month: u8, day: u8) -> bool {
+        if month < 1 || month > 12 {
+            return false;
+        }
+        if day < 1 || day > Self::days_in_month(year, month) {
+            return false;
+        }
+        true
+    }
+
+    /// Convert year/month/day to days since epoch
+    fn ymd_to_days(year: i32, month: u8, day: u8) -> i32 {
+        let y = year as i32 - (month <= 2) as i32;
+        let era = if y >= 0 { y } else { y - 399 } / 400;
+        let yoe = (y - era * 400) as u32;
+        let doy = (153 * (month as u32 + if month > 2 { 0 } else { 12 } - 3) + 2) / 5 + day as u32 - 1;
+        let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+        era * 146097 + doe as i32
+    }
+
+    /// Convert days since epoch to year/month/day
+    fn days_to_ymd(days: i32) -> (i32, u8, u8) {
+        let era = if days >= 0 { days } else { days - 146096 } / 146097;
+        let doe = (days - era * 146097) as u32;
+        let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+        let y = yoe as i32 + era * 400;
+        let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+        let mp = (5 * doy + 2) / 153;
+        let d = (doy - (153 * mp + 2) / 5 + 1) as u8;
+        let m = (mp + if mp < 10 { 3 } else { 3 - 12 }) as u8;
+        let y = y + (m <= 2) as i32;
+        (y, m, d)
+    }
+
+    /// Add seconds to datetime (mutates in place)
+    fn add_seconds(self: &mut Self, secs: i64) {
+        let ts = self.timestamp() + secs;
+        let new = Self::from_timestamp(ts, self.nanosecond);
+        self.year = new.year;
+        self.month = new.month;
+        self.day = new.day;
+        self.hour = new.hour;
+        self.minute = new.minute;
+        self.second = new.second;
+    }
+
+    /// Add duration
+    pub fn checked_add(self: &Self, duration: Duration) -> Option<DateTime> {
+        let ts = self.timestamp().checked_add(duration.secs as i64)?;
+        let nanos = self.nanosecond + duration.nanos;
+        let (extra_secs, nanos) = if nanos >= 1_000_000_000 {
+            (1, nanos - 1_000_000_000)
+        } else {
+            (0, nanos)
+        };
+        let ts = ts.checked_add(extra_secs)?;
+
+        let mut result = Self::from_timestamp(ts, nanos);
+        result.tz_offset = self.tz_offset;
+        Some(result)
+    }
+
+    /// Subtract duration
+    pub fn checked_sub(self: &Self, duration: Duration) -> Option<DateTime> {
+        let ts = self.timestamp().checked_sub(duration.secs as i64)?;
+        let (ts, nanos) = if self.nanosecond >= duration.nanos {
+            (ts, self.nanosecond - duration.nanos)
+        } else {
+            (ts - 1, 1_000_000_000 + self.nanosecond - duration.nanos)
+        };
+
+        let mut result = Self::from_timestamp(ts, nanos);
+        result.tz_offset = self.tz_offset;
+        Some(result)
+    }
+
+    /// Convert to different timezone
+    pub fn with_timezone(self: &Self, offset_seconds: i32) -> DateTime {
+        let utc_ts = self.timestamp();
+        let mut result = Self::from_timestamp(utc_ts + offset_seconds as i64, self.nanosecond);
+        result.tz_offset = offset_seconds;
+        result
+    }
+
+    /// Convert to UTC
+    pub fn to_utc(self: &Self) -> DateTime {
+        self.with_timezone(0)
+    }
+
+    /// Format datetime
+    pub fn format(self: &Self, fmt: &str) -> String {
+        let mut result = String::new();
+        let mut chars = fmt.chars().peekable();
+
+        while let Some(c) = chars.next() {
+            if c == '%' {
+                match chars.next() {
+                    Some('Y') => result.push_str(&format!("{:04}", self.year)),
+                    Some('m') => result.push_str(&format!("{:02}", self.month)),
+                    Some('d') => result.push_str(&format!("{:02}", self.day)),
+                    Some('H') => result.push_str(&format!("{:02}", self.hour)),
+                    Some('M') => result.push_str(&format!("{:02}", self.minute)),
+                    Some('S') => result.push_str(&format!("{:02}", self.second)),
+                    Some('f') => result.push_str(&format!("{:09}", self.nanosecond)),
+                    Some('3') => result.push_str(&format!("{:03}", self.nanosecond / 1_000_000)),
+                    Some('6') => result.push_str(&format!("{:06}", self.nanosecond / 1_000)),
+                    Some('z') => {
+                        let sign = if self.tz_offset >= 0 { '+' } else { '-' };
+                        let abs_offset = self.tz_offset.abs();
+                        let hours = abs_offset / 3600;
+                        let minutes = (abs_offset % 3600) / 60;
+                        result.push_str(&format!("{}{:02}:{:02}", sign, hours, minutes));
+                    }
+                    Some('Z') => {
+                        if self.tz_offset == 0 {
+                            result.push('Z');
+                        } else {
+                            let sign = if self.tz_offset >= 0 { '+' } else { '-' };
+                            let abs_offset = self.tz_offset.abs();
+                            let hours = abs_offset / 3600;
+                            let minutes = (abs_offset % 3600) / 60;
+                            result.push_str(&format!("{}{:02}:{:02}", sign, hours, minutes));
+                        }
+                    }
+                    Some('a') => result.push_str(self.weekday().short_name()),
+                    Some('A') => result.push_str(self.weekday().name()),
+                    Some('b') => result.push_str(month_short_name(self.month)),
+                    Some('B') => result.push_str(month_name(self.month)),
+                    Some('w') => result.push_str(&format!("{}", self.weekday().num_days_from_sunday())),
+                    Some('j') => result.push_str(&format!("{:03}", self.day_of_year())),
+                    Some('W') => result.push_str(&format!("{:02}", self.iso_week())),
+                    Some('%') => result.push('%'),
+                    Some(other) => {
+                        result.push('%');
+                        result.push(other);
+                    }
+                    None => result.push('%'),
+                }
+            } else {
+                result.push(c);
+            }
+        }
+
+        result
+    }
+
+    /// Format as ISO 8601
+    pub fn to_iso8601(self: &Self) -> String {
+        self.format("%Y-%m-%dT%H:%M:%S%Z")
+    }
+
+    /// Format as RFC 3339
+    pub fn to_rfc3339(self: &Self) -> String {
+        self.format("%Y-%m-%dT%H:%M:%S.%3%Z")
+    }
+
+    /// Parse from ISO 8601 string
+    pub fn parse_iso8601(s: &str) -> Option<DateTime> {
+        // Basic parsing: YYYY-MM-DDTHH:MM:SS[.fff][Z|±HH:MM]
+        let bytes = s.as_bytes();
+        if bytes.len() < 19 {
+            return None;
+        }
+
+        let year = parse_int(&s[0..4])? as i32;
+        if bytes[4] != b'-' { return None; }
+        let month = parse_int(&s[5..7])? as u8;
+        if bytes[7] != b'-' { return None; }
+        let day = parse_int(&s[8..10])? as u8;
+        if bytes[10] != b'T' && bytes[10] != b' ' { return None; }
+        let hour = parse_int(&s[11..13])? as u8;
+        if bytes[13] != b':' { return None; }
+        let minute = parse_int(&s[14..16])? as u8;
+        if bytes[16] != b':' { return None; }
+        let second = parse_int(&s[17..19])? as u8;
+
+        let mut pos = 19;
+        let mut nanosecond = 0u32;
+
+        // Parse fractional seconds
+        if pos < bytes.len() && bytes[pos] == b'.' {
+            pos += 1;
+            let start = pos;
+            while pos < bytes.len() && bytes[pos].is_ascii_digit() {
+                pos += 1;
+            }
+            let frac_str = &s[start..pos];
+            let mut frac = parse_int(frac_str)? as u32;
+            let digits = pos - start;
+            for _ in digits..9 {
+                frac *= 10;
+            }
+            for _ in 9..digits {
+                frac /= 10;
+            }
+            nanosecond = frac;
+        }
+
+        // Parse timezone
+        let mut tz_offset = 0i32;
+        if pos < bytes.len() {
+            match bytes[pos] {
+                b'Z' => tz_offset = 0,
+                b'+' | b'-' => {
+                    let sign = if bytes[pos] == b'+' { 1 } else { -1 };
+                    pos += 1;
+                    if pos + 2 > bytes.len() { return None; }
+                    let tz_hours = parse_int(&s[pos..pos+2])? as i32;
+                    pos += 2;
+                    if pos < bytes.len() && bytes[pos] == b':' {
+                        pos += 1;
+                    }
+                    let tz_minutes = if pos + 2 <= bytes.len() {
+                        parse_int(&s[pos..pos+2])? as i32
+                    } else {
+                        0
+                    };
+                    tz_offset = sign * (tz_hours * 3600 + tz_minutes * 60);
+                }
+                _ => {}
+            }
+        }
+
+        Some(DateTime {
+            year,
+            month,
+            day,
+            hour,
+            minute,
+            second,
+            nanosecond,
+            tz_offset,
+        })
+    }
+}
+
+impl std::ops::Add<Duration> for DateTime {
+    type Output = DateTime;
+
+    fn add(self, rhs: Duration) -> DateTime {
+        self.checked_add(rhs).expect("overflow when adding duration to datetime")
+    }
+}
+
+impl std::ops::Sub<Duration> for DateTime {
+    type Output = DateTime;
+
+    fn sub(self, rhs: Duration) -> DateTime {
+        self.checked_sub(rhs).expect("overflow when subtracting duration from datetime")
+    }
+}
+
+impl std::ops::Sub<DateTime> for DateTime {
+    type Output = Duration;
+
+    fn sub(self, rhs: DateTime) -> Duration {
+        let diff = self.timestamp() - rhs.timestamp();
+        if diff >= 0 {
+            let nanos = if self.nanosecond >= rhs.nanosecond {
+                self.nanosecond - rhs.nanosecond
+            } else {
+                1_000_000_000 + self.nanosecond - rhs.nanosecond
+            };
+            Duration::new(diff as u64 - (self.nanosecond < rhs.nanosecond) as u64, nanos)
+        } else {
+            Duration::ZERO
+        }
+    }
+}
+
+impl PartialOrd for DateTime {
+    fn partial_cmp(self: &Self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for DateTime {
+    fn cmp(self: &Self, other: &Self) -> std::cmp::Ordering {
+        self.timestamp().cmp(&other.timestamp())
+            .then(self.nanosecond.cmp(&other.nanosecond))
+    }
+}
+
+/// Parse integer from string
+fn parse_int(s: &str) -> Option<u64> {
+    s.parse().ok()
+}
+
+/// Get month name
+fn month_name(month: u8) -> &'static str {
+    match month {
+        1 => "January",
+        2 => "February",
+        3 => "March",
+        4 => "April",
+        5 => "May",
+        6 => "June",
+        7 => "July",
+        8 => "August",
+        9 => "September",
+        10 => "October",
+        11 => "November",
+        12 => "December",
+        _ => "",
+    }
+}
+
+/// Get short month name
+fn month_short_name(month: u8) -> &'static str {
+    match month {
+        1 => "Jan",
+        2 => "Feb",
+        3 => "Mar",
+        4 => "Apr",
+        5 => "May",
+        6 => "Jun",
+        7 => "Jul",
+        8 => "Aug",
+        9 => "Sep",
+        10 => "Oct",
+        11 => "Nov",
+        12 => "Dec",
+        _ => "",
+    }
+}
+
+// =============================================================================
+// Weekday
+// =============================================================================
+
+/// Day of the week
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Weekday {
+    Monday,
+    Tuesday,
+    Wednesday,
+    Thursday,
+    Friday,
+    Saturday,
+    Sunday,
+}
+
+impl Weekday {
+    /// Get weekday from days since epoch
+    fn from_days(days: i32) -> Self {
+        match days.rem_euclid(7) {
+            0 => Weekday::Monday,
+            1 => Weekday::Tuesday,
+            2 => Weekday::Wednesday,
+            3 => Weekday::Thursday,
+            4 => Weekday::Friday,
+            5 => Weekday::Saturday,
+            6 => Weekday::Sunday,
+            _ => unreachable!(),
+        }
+    }
+
+    /// Days from Monday (0-6)
+    pub fn num_days_from_monday(self: &Self) -> u8 {
+        match self {
+            Weekday::Monday => 0,
+            Weekday::Tuesday => 1,
+            Weekday::Wednesday => 2,
+            Weekday::Thursday => 3,
+            Weekday::Friday => 4,
+            Weekday::Saturday => 5,
+            Weekday::Sunday => 6,
+        }
+    }
+
+    /// Days from Sunday (0-6)
+    pub fn num_days_from_sunday(self: &Self) -> u8 {
+        match self {
+            Weekday::Sunday => 0,
+            Weekday::Monday => 1,
+            Weekday::Tuesday => 2,
+            Weekday::Wednesday => 3,
+            Weekday::Thursday => 4,
+            Weekday::Friday => 5,
+            Weekday::Saturday => 6,
+        }
+    }
+
+    /// Get weekday name
+    pub fn name(self: &Self) -> &'static str {
+        match self {
+            Weekday::Monday => "Monday",
+            Weekday::Tuesday => "Tuesday",
+            Weekday::Wednesday => "Wednesday",
+            Weekday::Thursday => "Thursday",
+            Weekday::Friday => "Friday",
+            Weekday::Saturday => "Saturday",
+            Weekday::Sunday => "Sunday",
+        }
+    }
+
+    /// Get short weekday name
+    pub fn short_name(self: &Self) -> &'static str {
+        match self {
+            Weekday::Monday => "Mon",
+            Weekday::Tuesday => "Tue",
+            Weekday::Wednesday => "Wed",
+            Weekday::Thursday => "Thu",
+            Weekday::Friday => "Fri",
+            Weekday::Saturday => "Sat",
+            Weekday::Sunday => "Sun",
+        }
+    }
+
+    /// Get next weekday
+    pub fn succ(self: &Self) -> Weekday {
+        match self {
+            Weekday::Monday => Weekday::Tuesday,
+            Weekday::Tuesday => Weekday::Wednesday,
+            Weekday::Wednesday => Weekday::Thursday,
+            Weekday::Thursday => Weekday::Friday,
+            Weekday::Friday => Weekday::Saturday,
+            Weekday::Saturday => Weekday::Sunday,
+            Weekday::Sunday => Weekday::Monday,
+        }
+    }
+
+    /// Get previous weekday
+    pub fn pred(self: &Self) -> Weekday {
+        match self {
+            Weekday::Monday => Weekday::Sunday,
+            Weekday::Tuesday => Weekday::Monday,
+            Weekday::Wednesday => Weekday::Tuesday,
+            Weekday::Thursday => Weekday::Wednesday,
+            Weekday::Friday => Weekday::Thursday,
+            Weekday::Saturday => Weekday::Friday,
+            Weekday::Sunday => Weekday::Saturday,
+        }
+    }
+}
+
+// =============================================================================
+// Timer
+// =============================================================================
+
+/// A simple timer for measuring elapsed time
+pub struct Timer {
+    start: Instant,
+    laps: Vec<Duration>,
+}
+
+impl Timer {
+    /// Create and start a new timer
+    pub fn start() -> Self {
+        Timer {
+            start: Instant::now(),
+            laps: Vec::new(),
+        }
+    }
+
+    /// Get elapsed time since start
+    pub fn elapsed(self: &Self) -> Duration {
+        self.start.elapsed()
+    }
+
+    /// Record a lap
+    pub fn lap(self: &mut Self) -> Duration {
+        let elapsed = self.elapsed();
+        let last_lap = self.laps.last().copied().unwrap_or(Duration::ZERO);
+        let lap_duration = elapsed.saturating_sub(last_lap);
+        self.laps.push(elapsed);
+        lap_duration
+    }
+
+    /// Get all lap times
+    pub fn laps(self: &Self) -> &[Duration] {
+        &self.laps
+    }
+
+    /// Reset the timer
+    pub fn reset(self: &mut Self) {
+        self.start = Instant::now();
+        self.laps.clear();
+    }
+}
+
+/// Measure execution time of a function
+pub fn measure<F, T>(f: F) -> (T, Duration)
+where
+    F: FnOnce() -> T,
+{
+    let start = Instant::now();
+    let result = f();
+    let elapsed = start.elapsed();
+    (result, elapsed)
+}
+
+/// Sleep for a duration
+pub fn sleep(duration: Duration) {
+    intrinsic::sleep(duration);
+}
+
+/// Sleep until an instant
+pub fn sleep_until(deadline: Instant) {
+    let now = Instant::now();
+    if let Some(duration) = deadline.checked_duration_since(now) {
+        sleep(duration);
+    }
+}
+
+// =============================================================================
+// Interval Timer
+// =============================================================================
+
+/// Periodic timer for regular intervals
+pub struct Interval {
+    period: Duration,
+    next: Instant,
+}
+
+impl Interval {
+    /// Create a new interval timer
+    pub fn new(period: Duration) -> Self {
+        Interval {
+            period,
+            next: Instant::now() + period,
+        }
+    }
+
+    /// Wait for next tick
+    pub fn tick(self: &mut Self) -> Instant {
+        let now = Instant::now();
+        if now < self.next {
+            sleep_until(self.next);
+        }
+        let result = self.next;
+        self.next = self.next + self.period;
+        result
+    }
+
+    /// Get period
+    pub fn period(self: &Self) -> Duration {
+        self.period
+    }
+
+    /// Reset the interval
+    pub fn reset(self: &mut Self) {
+        self.next = Instant::now() + self.period;
+    }
+}
+
+// =============================================================================
+// Timeout
+// =============================================================================
+
+/// Timeout for limiting operation duration
+pub struct Timeout {
+    deadline: Instant,
+}
+
+impl Timeout {
+    /// Create a new timeout
+    pub fn new(duration: Duration) -> Self {
+        Timeout {
+            deadline: Instant::now() + duration,
+        }
+    }
+
+    /// Create a timeout that never expires
+    pub fn never() -> Self {
+        Timeout {
+            deadline: Instant::now() + Duration::from_secs(u64::MAX / 2),
+        }
+    }
+
+    /// Check if expired
+    pub fn is_expired(self: &Self) -> bool {
+        Instant::now() >= self.deadline
+    }
+
+    /// Get remaining time
+    pub fn remaining(self: &Self) -> Duration {
+        self.deadline.saturating_duration_since(Instant::now())
+    }
+
+    /// Get deadline
+    pub fn deadline(self: &Self) -> Instant {
+        self.deadline
+    }
+}
+
+// =============================================================================
+// Stopwatch
+// =============================================================================
+
+/// Pauseable stopwatch
+pub struct Stopwatch {
+    accumulated: Duration,
+    start: Option<Instant>,
+}
+
+impl Stopwatch {
+    /// Create a new stopwatch (not started)
+    pub fn new() -> Self {
+        Stopwatch {
+            accumulated: Duration::ZERO,
+            start: None,
+        }
+    }
+
+    /// Create and start a new stopwatch
+    pub fn start_new() -> Self {
+        Stopwatch {
+            accumulated: Duration::ZERO,
+            start: Some(Instant::now()),
+        }
+    }
+
+    /// Start or resume the stopwatch
+    pub fn start(self: &mut Self) {
+        if self.start.is_none() {
+            self.start = Some(Instant::now());
+        }
+    }
+
+    /// Stop/pause the stopwatch
+    pub fn stop(self: &mut Self) {
+        if let Some(start) = self.start.take() {
+            self.accumulated += start.elapsed();
+        }
+    }
+
+    /// Reset to zero
+    pub fn reset(self: &mut Self) {
+        self.accumulated = Duration::ZERO;
+        self.start = None;
+    }
+
+    /// Restart (reset and start)
+    pub fn restart(self: &mut Self) {
+        self.accumulated = Duration::ZERO;
+        self.start = Some(Instant::now());
+    }
+
+    /// Get elapsed time
+    pub fn elapsed(self: &Self) -> Duration {
+        self.accumulated + self.start.map(|s| s.elapsed()).unwrap_or(Duration::ZERO)
+    }
+
+    /// Check if running
+    pub fn is_running(self: &Self) -> bool {
+        self.start.is_some()
+    }
+}
+
+impl Default for Stopwatch {
+    fn default() -> Self {
+        Stopwatch::new()
+    }
+}
+
+// =============================================================================
+// Rate Limiter
+// =============================================================================
+
+/// Token bucket rate limiter
+pub struct RateLimiter {
+    tokens: f64,
+    max_tokens: f64,
+    refill_rate: f64, // tokens per second
+    last_update: Instant,
+}
+
+impl RateLimiter {
+    /// Create a new rate limiter
+    pub fn new(max_tokens: f64, refill_rate: f64) -> Self {
+        RateLimiter {
+            tokens: max_tokens,
+            max_tokens,
+            refill_rate,
+            last_update: Instant::now(),
+        }
+    }
+
+    /// Try to acquire tokens
+    pub fn try_acquire(self: &mut Self, tokens: f64) -> bool {
+        self.refill();
+        if self.tokens >= tokens {
+            self.tokens -= tokens;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Acquire tokens, blocking if necessary
+    pub fn acquire(self: &mut Self, tokens: f64) {
+        self.refill();
+        if self.tokens < tokens {
+            let needed = tokens - self.tokens;
+            let wait_secs = needed / self.refill_rate;
+            sleep(Duration::from_secs_f64(wait_secs));
+            self.refill();
+        }
+        self.tokens -= tokens;
+    }
+
+    /// Get available tokens
+    pub fn available(self: &mut Self) -> f64 {
+        self.refill();
+        self.tokens
+    }
+
+    /// Refill tokens based on elapsed time
+    fn refill(self: &mut Self) {
+        let now = Instant::now();
+        let elapsed = now.duration_since(self.last_update);
+        let new_tokens = elapsed.as_secs_f64() * self.refill_rate;
+        self.tokens = (self.tokens + new_tokens).min(self.max_tokens);
+        self.last_update = now;
+    }
+}
+
+// =============================================================================
+// Platform Intrinsics
+// =============================================================================
+
+mod intrinsic {
+    use super::*;
+
+    extern "build" {
+        /// Get monotonic clock time in nanoseconds
+        pub fn monotonic_now() -> u64;
+
+        /// Get system time
+        pub fn system_time_now() -> SystemTime;
+
+        /// Convert instant difference to duration
+        pub fn instant_to_duration(nanos: u64) -> Duration;
+
+        /// Convert duration to nanoseconds
+        pub fn duration_to_nanos(duration: &Duration) -> u64;
+
+        /// Get local timezone offset in seconds
+        pub fn local_tz_offset() -> i32;
+
+        /// Sleep for duration
+        pub fn sleep(duration: Duration);
+    }
+}
+
+// =============================================================================
+// Tests
+// =============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_duration_creation() {
+        let d = Duration::from_secs(5);
+        assert_eq!(d.as_secs(), 5);
+        assert_eq!(d.subsec_nanos(), 0);
+
+        let d = Duration::from_millis(1500);
+        assert_eq!(d.as_secs(), 1);
+        assert_eq!(d.subsec_millis(), 500);
+
+        let d = Duration::from_secs_f64(2.5);
+        assert_eq!(d.as_secs(), 2);
+        assert_eq!(d.subsec_nanos(), 500_000_000);
+    }
+
+    #[test]
+    fn test_duration_arithmetic() {
+        let a = Duration::from_secs(2);
+        let b = Duration::from_millis(500);
+
+        let sum = a + b;
+        assert_eq!(sum.as_millis(), 2500);
+
+        let diff = a - b;
+        assert_eq!(diff.as_millis(), 1500);
+
+        let product = a * 3;
+        assert_eq!(product.as_secs(), 6);
+    }
+
+    #[test]
+    fn test_datetime_creation() {
+        let dt = DateTime::new(2024, 6, 15, 14, 30, 0).unwrap();
+        assert_eq!(dt.year, 2024);
+        assert_eq!(dt.month, 6);
+        assert_eq!(dt.day, 15);
+        assert_eq!(dt.hour, 14);
+        assert_eq!(dt.minute, 30);
+    }
+
+    #[test]
+    fn test_datetime_from_timestamp() {
+        // Unix epoch
+        let dt = DateTime::from_timestamp(0, 0);
+        assert_eq!(dt.year, 1970);
+        assert_eq!(dt.month, 1);
+        assert_eq!(dt.day, 1);
+        assert_eq!(dt.hour, 0);
+
+        // 2024-01-01 00:00:00 UTC
+        let dt = DateTime::from_timestamp(1704067200, 0);
+        assert_eq!(dt.year, 2024);
+        assert_eq!(dt.month, 1);
+        assert_eq!(dt.day, 1);
+    }
+
+    #[test]
+    fn test_datetime_format() {
+        let dt = DateTime::new(2024, 12, 25, 10, 30, 45).unwrap();
+
+        assert_eq!(dt.format("%Y-%m-%d"), "2024-12-25");
+        assert_eq!(dt.format("%H:%M:%S"), "10:30:45");
+        assert_eq!(dt.format("%A"), "Wednesday");
+    }
+
+    #[test]
+    fn test_datetime_parse() {
+        let dt = DateTime::parse_iso8601("2024-12-25T10:30:45Z").unwrap();
+        assert_eq!(dt.year, 2024);
+        assert_eq!(dt.month, 12);
+        assert_eq!(dt.day, 25);
+        assert_eq!(dt.hour, 10);
+        assert_eq!(dt.minute, 30);
+        assert_eq!(dt.second, 45);
+        assert_eq!(dt.tz_offset, 0);
+
+        let dt = DateTime::parse_iso8601("2024-06-15T14:30:00+05:30").unwrap();
+        assert_eq!(dt.tz_offset, 5 * 3600 + 30 * 60);
+    }
+
+    #[test]
+    fn test_leap_year() {
+        assert!(DateTime::is_leap_year(2024));
+        assert!(!DateTime::is_leap_year(2023));
+        assert!(DateTime::is_leap_year(2000));
+        assert!(!DateTime::is_leap_year(1900));
+    }
+
+    #[test]
+    fn test_weekday() {
+        // 2024-01-01 was a Monday
+        let dt = DateTime::new(2024, 1, 1, 0, 0, 0).unwrap();
+        assert_eq!(dt.weekday(), Weekday::Monday);
+
+        // 2024-12-25 is a Wednesday
+        let dt = DateTime::new(2024, 12, 25, 0, 0, 0).unwrap();
+        assert_eq!(dt.weekday(), Weekday::Wednesday);
+    }
+
+    #[test]
+    fn test_stopwatch() {
+        let mut sw = Stopwatch::new();
+        assert!(!sw.is_running());
+
+        sw.start();
+        assert!(sw.is_running());
+
+        sw.stop();
+        assert!(!sw.is_running());
+
+        let e1 = sw.elapsed();
+        let e2 = sw.elapsed();
+        assert_eq!(e1, e2); // Stopped, so should be same
+    }
+
+    #[test]
+    fn test_timer() {
+        let mut timer = Timer::start();
+
+        let lap1 = timer.lap();
+        let lap2 = timer.lap();
+
+        assert!(timer.elapsed() >= lap1);
+        assert!(timer.laps().len() == 2);
+    }
+}

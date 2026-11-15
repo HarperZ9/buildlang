@@ -1,0 +1,1691 @@
+// ============================================================================
+// BUILD-UNIVERSE: Wavelength Audio Processing Module
+// ============================================================================
+// Copyright © 2024-2025 Zain Dana Harper. All Rights Reserved.
+// Copyright (c) 2024-2025 Zain Dana Harper. All Rights Reserved.
+// ============================================================================
+// Comprehensive audio processing, analysis, and synthesis
+// ============================================================================
+
+use foundation::collections::{Vec, HashMap, VecDeque, BinaryHeap};
+use foundation::math::{Matrix, Vector, sqrt, log, exp, abs, min, max, pow, sin, cos, floor, ceil};
+use foundation::sync::{Arc, RwLock, Mutex};
+use foundation::io::{Result, Error};
+
+// ============================================================================
+// AUDIO CORE TYPES
+// ============================================================================
+
+/// Audio sample format
+@derive(Clone, Copy, Debug, PartialEq)]
+pub enum SampleFormat {
+    I16,        // 16-bit signed integer
+    I24,        // 24-bit signed integer
+    I32,        // 32-bit signed integer
+    F32,        // 32-bit float
+    F64,        // 64-bit float
+}
+
+/// Audio channel layout
+@derive(Clone, Debug, PartialEq)]
+pub enum ChannelLayout {
+    Mono,
+    Stereo,
+    Surround51,     // 5.1 surround
+    Surround71,     // 7.1 surround
+    Quad,           // Quadraphonic
+    Custom(Vec<ChannelPosition>),
+}
+
+@derive(Clone, Copy, Debug, PartialEq)]
+pub enum ChannelPosition {
+    FrontLeft,
+    FrontRight,
+    FrontCenter,
+    LFE,            // Low-frequency effects (subwoofer)
+    BackLeft,
+    BackRight,
+    SideLeft,
+    SideRight,
+}
+
+/// Audio stream metadata
+@derive(Clone, Debug)]
+pub struct AudioMetadata {
+    pub sample_rate: Int,
+    pub channels: Int,
+    pub sample_format: SampleFormat,
+    pub channel_layout: ChannelLayout,
+    pub bit_depth: Int,
+    pub duration_seconds: Float,
+    pub total_samples: Int,
+}
+
+/// Multi-channel audio buffer
+@derive(Clone, Debug)]
+pub struct AudioBuffer {
+    pub channels: Vec<Vec<Float>>,      // Channel data as Float
+    pub sample_rate: Int,
+    pub channel_layout: ChannelLayout,
+}
+
+impl AudioBuffer {
+    pub fn new(sample_rate: Int, channel_layout: ChannelLayout) -> Self {
+        let n_channels = match &channel_layout {
+            ChannelLayout::Mono => 1,
+            ChannelLayout::Stereo => 2,
+            ChannelLayout::Quad => 4,
+            ChannelLayout::Surround51 => 6,
+            ChannelLayout::Surround71 => 8,
+            ChannelLayout::Custom(positions) => positions.len() as Int,
+        };
+
+        Self {
+            channels: (0..n_channels).map(|_| Vec::new()).collect(),
+            sample_rate,
+            channel_layout,
+        }
+    }
+
+    pub fn mono(sample_rate: Int) -> Self {
+        Self::new(sample_rate, ChannelLayout::Mono)
+    }
+
+    pub fn stereo(sample_rate: Int) -> Self {
+        Self::new(sample_rate, ChannelLayout::Stereo)
+    }
+
+    pub fn from_interleaved(data: &[Float], sample_rate: Int, n_channels: Int) -> Self {
+        let channel_layout = if n_channels == 1 {
+            ChannelLayout::Mono
+        } else {
+            ChannelLayout::Stereo
+        };
+
+        let mut buffer = Self::new(sample_rate, channel_layout);
+        let samples_per_channel = data.len() / n_channels as usize;
+
+        for c in 0..n_channels as usize {
+            buffer.channels[c] = (0..samples_per_channel)
+                .map(|i| data[i * n_channels as usize + c])
+                .collect();
+        }
+
+        buffer
+    }
+
+    pub fn to_interleaved(&self) -> Vec<Float> {
+        let n_channels = self.channels.len();
+        let n_samples = self.channels.get(0).map(|c| c.len()).unwrap_or(0);
+
+        let mut result = Vec::with_capacity(n_samples * n_channels);
+
+        for i in 0..n_samples {
+            for c in 0..n_channels {
+                result.push(self.channels[c].get(i).cloned().unwrap_or(0.0));
+            }
+        }
+
+        result
+    }
+
+    pub fn duration(&self) -> Float {
+        let n_samples = self.channels.get(0).map(|c| c.len()).unwrap_or(0);
+        n_samples as Float / self.sample_rate as Float
+    }
+
+    pub fn n_samples(&self) -> Int {
+        self.channels.get(0).map(|c| c.len()).unwrap_or(0) as Int
+    }
+
+    pub fn n_channels(&self) -> Int {
+        self.channels.len() as Int
+    }
+
+    /// Mix down to mono
+    pub fn to_mono(&self) -> AudioBuffer {
+        let n_samples = self.n_samples() as usize;
+        let n_channels = self.n_channels();
+
+        let mut mono_data = vec![0.0; n_samples];
+
+        for i in 0..n_samples {
+            let mut sum = 0.0;
+            for c in 0..n_channels as usize {
+                sum += self.channels[c].get(i).cloned().unwrap_or(0.0);
+            }
+            mono_data[i] = sum / n_channels as Float;
+        }
+
+        AudioBuffer {
+            channels: vec![mono_data],
+            sample_rate: self.sample_rate,
+            channel_layout: ChannelLayout::Mono,
+        }
+    }
+
+    /// Convert mono to stereo
+    pub fn to_stereo(&self) -> AudioBuffer {
+        if self.n_channels() >= 2 {
+            return self.clone();
+        }
+
+        let mono = self.channels.get(0).cloned().unwrap_or(Vec::new());
+
+        AudioBuffer {
+            channels: vec![mono.clone(), mono],
+            sample_rate: self.sample_rate,
+            channel_layout: ChannelLayout::Stereo,
+        }
+    }
+
+    /// Resample to different sample rate
+    pub fn resample(&self, target_rate: Int) -> AudioBuffer {
+        if target_rate == self.sample_rate {
+            return self.clone();
+        }
+
+        let ratio = target_rate as Float / self.sample_rate as Float;
+        let mut resampled = AudioBuffer::new(target_rate, self.channel_layout.clone());
+
+        for c in 0..self.n_channels() as usize {
+            let n_out = (self.channels[c].len() as Float * ratio) as usize;
+            let mut out_channel = Vec::with_capacity(n_out);
+
+            for i in 0..n_out {
+                let src_idx = i as Float / ratio;
+                let idx = src_idx as usize;
+                let frac = src_idx - idx as Float;
+
+                let s1 = self.channels[c].get(idx).cloned().unwrap_or(0.0);
+                let s2 = self.channels[c].get(idx + 1).cloned().unwrap_or(s1);
+
+                // Linear interpolation
+                out_channel.push(s1 * (1.0 - frac) + s2 * frac);
+            }
+
+            resampled.channels.push(out_channel);
+        }
+
+        resampled.channels = resampled.channels.into_iter().skip(self.n_channels() as usize).collect();
+
+        resampled
+    }
+
+    /// Normalize audio to peak level
+    pub fn normalize(&mut self, target_peak: Float) {
+        let mut max_val: Float = 0.0;
+
+        for channel in &self.channels {
+            for &sample in channel {
+                if abs(sample) > max_val {
+                    max_val = abs(sample);
+                }
+            }
+        }
+
+        if max_val > 0.0 {
+            let gain = target_peak / max_val;
+            for channel in &mut self.channels {
+                for sample in channel {
+                    *sample *= gain;
+                }
+            }
+        }
+    }
+
+    /// Apply gain
+    pub fn apply_gain(&mut self, gain_db: Float) {
+        let gain = pow(10.0, gain_db / 20.0);
+        for channel in &mut self.channels {
+            for sample in channel {
+                *sample *= gain;
+            }
+        }
+    }
+
+    /// Concatenate with another buffer
+    pub fn append(&mut self, other: &AudioBuffer) {
+        for c in 0..min(self.n_channels(), other.n_channels()) as usize {
+            self.channels[c].extend(&other.channels[c]);
+        }
+    }
+
+    /// Extract region
+    pub fn slice(&self, start_sample: Int, end_sample: Int) -> AudioBuffer {
+        let mut sliced = AudioBuffer::new(self.sample_rate, self.channel_layout.clone());
+
+        let start = max(0, start_sample) as usize;
+        let end = min(self.n_samples(), end_sample) as usize;
+
+        for c in 0..self.n_channels() as usize {
+            sliced.channels.push(self.channels[c][start..end].to_vec());
+        }
+
+        sliced.channels = sliced.channels.into_iter().skip(self.n_channels() as usize).collect();
+
+        sliced
+    }
+}
+
+// ============================================================================
+// FFT AND SPECTRAL ANALYSIS
+// ============================================================================
+
+/// FFT implementation for spectral analysis
+pub struct FFT {
+    size: usize,
+    window: Vec<Float>,
+    twiddle_real: Vec<Float>,
+    twiddle_imag: Vec<Float>,
+}
+
+impl FFT {
+    pub fn new(size: usize) -> Self {
+        let mut fft = Self {
+            size,
+            window: vec![1.0; size],
+            twiddle_real: vec![0.0; size / 2],
+            twiddle_imag: vec![0.0; size / 2],
+        };
+
+        // Precompute twiddle factors
+        for i in 0..size / 2 {
+            let theta = -2.0 * 3.14159265359 * i as Float / size as Float;
+            fft.twiddle_real[i] = cos(theta);
+            fft.twiddle_imag[i] = sin(theta);
+        }
+
+        fft
+    }
+
+    pub fn with_window(mut self, window_type: WindowType) -> Self {
+        self.window = self.compute_window(window_type);
+        self
+    }
+
+    fn compute_window(&self, window_type: WindowType) -> Vec<Float> {
+        let n = self.size;
+        let mut window = vec![0.0; n];
+
+        match window_type {
+            WindowType::Rectangular => {
+                for i in 0..n {
+                    window[i] = 1.0;
+                }
+            }
+            WindowType::Hanning => {
+                for i in 0..n {
+                    window[i] = 0.5 * (1.0 - cos(2.0 * 3.14159265359 * i as Float / (n - 1) as Float));
+                }
+            }
+            WindowType::Hamming => {
+                for i in 0..n {
+                    window[i] = 0.54 - 0.46 * cos(2.0 * 3.14159265359 * i as Float / (n - 1) as Float);
+                }
+            }
+            WindowType::Blackman => {
+                let a0 = 0.42;
+                let a1 = 0.5;
+                let a2 = 0.08;
+                for i in 0..n {
+                    let theta = 2.0 * 3.14159265359 * i as Float / (n - 1) as Float;
+                    window[i] = a0 - a1 * cos(theta) + a2 * cos(2.0 * theta);
+                }
+            }
+            WindowType::Kaiser { beta } => {
+                let bessel_i0_beta = self.bessel_i0(beta);
+                for i in 0..n {
+                    let x = 2.0 * i as Float / (n - 1) as Float - 1.0;
+                    window[i] = self.bessel_i0(beta * sqrt(1.0 - x * x)) / bessel_i0_beta;
+                }
+            }
+            WindowType::Gaussian { sigma } => {
+                for i in 0..n {
+                    let x = (i as Float - (n - 1) as Float / 2.0) / (sigma * (n - 1) as Float / 2.0);
+                    window[i] = exp(-0.5 * x * x);
+                }
+            }
+        }
+
+        window
+    }
+
+    fn bessel_i0(&self, x: Float) -> Float {
+        let mut sum = 1.0;
+        let mut term = 1.0;
+
+        for k in 1..50 {
+            term *= (x / (2.0 * k as Float)) * (x / (2.0 * k as Float));
+            sum += term;
+            if term < 1e-10 {
+                break;
+            }
+        }
+
+        sum
+    }
+
+    /// Forward FFT
+    pub fn forward(&self, real: &[Float], imag: &[Float]) -> (Vec<Float>, Vec<Float>) {
+        let n = self.size;
+        let mut out_real = vec![0.0; n];
+        let mut out_imag = vec![0.0; n];
+
+        // Apply window and copy
+        for i in 0..n {
+            out_real[i] = real.get(i).cloned().unwrap_or(0.0) * self.window[i];
+            out_imag[i] = imag.get(i).cloned().unwrap_or(0.0) * self.window[i];
+        }
+
+        // Bit reversal
+        self.bit_reverse(&mut out_real, &mut out_imag);
+
+        // Cooley-Tukey FFT
+        let mut m = 2;
+        while m <= n {
+            let half_m = m / 2;
+            let step = n / m;
+
+            let mut k = 0;
+            while k < n {
+                for j in 0..half_m {
+                    let w_idx = j * step;
+                    let w_re = self.twiddle_real.get(w_idx).cloned().unwrap_or(1.0);
+                    let w_im = self.twiddle_imag.get(w_idx).cloned().unwrap_or(0.0);
+
+                    let u_re = out_real[k + j];
+                    let u_im = out_imag[k + j];
+
+                    let v_re = out_real[k + j + half_m];
+                    let v_im = out_imag[k + j + half_m];
+
+                    let t_re = w_re * v_re - w_im * v_im;
+                    let t_im = w_re * v_im + w_im * v_re;
+
+                    out_real[k + j] = u_re + t_re;
+                    out_imag[k + j] = u_im + t_im;
+                    out_real[k + j + half_m] = u_re - t_re;
+                    out_imag[k + j + half_m] = u_im - t_im;
+                }
+                k += m;
+            }
+            m *= 2;
+        }
+
+        (out_real, out_imag)
+    }
+
+    /// Inverse FFT
+    pub fn inverse(&self, real: &[Float], imag: &[Float]) -> (Vec<Float>, Vec<Float>) {
+        let n = self.size;
+
+        // Conjugate input
+        let conj_imag: Vec<Float> = imag.iter().map(|&x| -x).collect();
+
+        // Forward FFT
+        let (mut out_real, mut out_imag) = self.forward(real, &conj_imag);
+
+        // Conjugate and scale output
+        let scale = 1.0 / n as Float;
+        for i in 0..n {
+            out_real[i] *= scale;
+            out_imag[i] = -out_imag[i] * scale;
+        }
+
+        (out_real, out_imag)
+    }
+
+    /// Bit reversal permutation
+    fn bit_reverse(&self, real: &mut [Float], imag: &mut [Float]) {
+        let n = self.size;
+        let mut j = 0;
+
+        for i in 0..n {
+            if i < j {
+                real.swap(i, j);
+                imag.swap(i, j);
+            }
+
+            let mut m = n / 2;
+            while m >= 1 && j >= m {
+                j -= m;
+                m /= 2;
+            }
+            j += m;
+        }
+    }
+
+    /// Compute magnitude spectrum
+    pub fn magnitude_spectrum(&self, data: &[Float]) -> Vec<Float> {
+        let imag = vec![0.0; self.size];
+        let (real, imag) = self.forward(data, &imag);
+
+        real.iter().zip(imag.iter())
+            .map(|(&r, &i)| sqrt(r * r + i * i))
+            .collect()
+    }
+
+    /// Compute power spectrum
+    pub fn power_spectrum(&self, data: &[Float]) -> Vec<Float> {
+        let imag = vec![0.0; self.size];
+        let (real, imag) = self.forward(data, &imag);
+
+        real.iter().zip(imag.iter())
+            .map(|(&r, &i)| r * r + i * i)
+            .collect()
+    }
+
+    /// Compute phase spectrum
+    pub fn phase_spectrum(&self, data: &[Float]) -> Vec<Float> {
+        let imag = vec![0.0; self.size];
+        let (real, imag) = self.forward(data, &imag);
+
+        real.iter().zip(imag.iter())
+            .map(|(&r, &i)| atan2(i, r))
+            .collect()
+    }
+}
+
+@derive(Clone, Copy, Debug)]
+pub enum WindowType {
+    Rectangular,
+    Hanning,
+    Hamming,
+    Blackman,
+    Kaiser { beta: Float },
+    Gaussian { sigma: Float },
+}
+
+// ============================================================================
+// STFT (SHORT-TIME FOURIER TRANSFORM)
+// ============================================================================
+
+/// STFT for time-frequency analysis
+pub struct STFT {
+    fft: FFT,
+    hop_size: usize,
+    window_type: WindowType,
+}
+
+impl STFT {
+    pub fn new(fft_size: usize, hop_size: usize, window_type: WindowType) -> Self {
+        Self {
+            fft: FFT::new(fft_size).with_window(window_type),
+            hop_size,
+            window_type,
+        }
+    }
+
+    /// Compute STFT of audio signal
+    pub fn analyze(&self, audio: &[Float]) -> Spectrogram {
+        let n = audio.len();
+        let fft_size = self.fft.size;
+        let n_frames = (n - fft_size) / self.hop_size + 1;
+        let n_bins = fft_size / 2 + 1;
+
+        let mut magnitudes = Vec::with_capacity(n_frames);
+        let mut phases = Vec::with_capacity(n_frames);
+
+        for frame in 0..n_frames {
+            let start = frame * self.hop_size;
+            let end = start + fft_size;
+
+            let frame_data: Vec<Float> = (start..end)
+                .map(|i| audio.get(i).cloned().unwrap_or(0.0))
+                .collect();
+
+            let imag = vec![0.0; fft_size];
+            let (real, imag) = self.fft.forward(&frame_data, &imag);
+
+            let mut frame_mag = Vec::with_capacity(n_bins);
+            let mut frame_phase = Vec::with_capacity(n_bins);
+
+            for i in 0..n_bins {
+                let r = real[i];
+                let im = imag[i];
+                frame_mag.push(sqrt(r * r + im * im));
+                frame_phase.push(atan2(im, r));
+            }
+
+            magnitudes.push(frame_mag);
+            phases.push(frame_phase);
+        }
+
+        Spectrogram {
+            magnitudes,
+            phases,
+            fft_size,
+            hop_size: self.hop_size,
+            n_frames,
+            n_bins,
+        }
+    }
+
+    /// Inverse STFT (overlap-add synthesis)
+    pub fn synthesize(&self, spectrogram: &Spectrogram) -> Vec<Float> {
+        let fft_size = self.fft.size;
+        let n_samples = (spectrogram.n_frames - 1) * self.hop_size + fft_size;
+
+        let mut output = vec![0.0; n_samples];
+        let mut window_sum = vec![0.0; n_samples];
+
+        let window = self.fft.window.clone();
+
+        for frame in 0..spectrogram.n_frames {
+            // Reconstruct complex spectrum
+            let mut real = vec![0.0; fft_size];
+            let mut imag = vec![0.0; fft_size];
+
+            for i in 0..spectrogram.n_bins {
+                let mag = spectrogram.magnitudes[frame][i];
+                let phase = spectrogram.phases[frame][i];
+                real[i] = mag * cos(phase);
+                imag[i] = mag * sin(phase);
+
+                // Mirror for negative frequencies
+                if i > 0 && i < spectrogram.n_bins - 1 {
+                    real[fft_size - i] = real[i];
+                    imag[fft_size - i] = -imag[i];
+                }
+            }
+
+            // Inverse FFT
+            let (frame_real, _) = self.fft.inverse(&real, &imag);
+
+            // Overlap-add
+            let start = frame * self.hop_size;
+            for i in 0..fft_size {
+                output[start + i] += frame_real[i] * window[i];
+                window_sum[start + i] += window[i] * window[i];
+            }
+        }
+
+        // Normalize by window sum
+        for i in 0..n_samples {
+            if window_sum[i] > 1e-10 {
+                output[i] /= window_sum[i];
+            }
+        }
+
+        output
+    }
+}
+
+/// Spectrogram representation
+@derive(Clone, Debug)]
+pub struct Spectrogram {
+    pub magnitudes: Vec<Vec<Float>>,    // [frame][bin]
+    pub phases: Vec<Vec<Float>>,        // [frame][bin]
+    pub fft_size: usize,
+    pub hop_size: usize,
+    pub n_frames: usize,
+    pub n_bins: usize,
+}
+
+impl Spectrogram {
+    /// Convert to power spectrogram (dB)
+    pub fn to_db(&self, ref_power: Float) -> Vec<Vec<Float>> {
+        self.magnitudes.iter()
+            .map(|frame| {
+                frame.iter()
+                    .map(|&m| {
+                        let power = m * m;
+                        10.0 * log(power / ref_power + 1e-10) / log(10.0)
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// Convert to mel spectrogram
+    pub fn to_mel(&self, sample_rate: Int, n_mels: Int) -> MelSpectrogram {
+        let mel_bank = MelFilterBank::new(self.n_bins, sample_rate, n_mels, 0.0, sample_rate as Float / 2.0);
+
+        let mel_magnitudes: Vec<Vec<Float>> = self.magnitudes.iter()
+            .map(|frame| mel_bank.apply(frame))
+            .collect();
+
+        MelSpectrogram {
+            magnitudes: mel_magnitudes,
+            n_mels,
+            sample_rate,
+            hop_size: self.hop_size,
+            n_frames: self.n_frames,
+        }
+    }
+}
+
+/// Mel spectrogram
+@derive(Clone, Debug)]
+pub struct MelSpectrogram {
+    pub magnitudes: Vec<Vec<Float>>,
+    pub n_mels: Int,
+    pub sample_rate: Int,
+    pub hop_size: usize,
+    pub n_frames: usize,
+}
+
+impl MelSpectrogram {
+    /// Convert to MFCC (Mel-frequency cepstral coefficients)
+    pub fn to_mfcc(&self, n_mfcc: Int) -> Vec<Vec<Float>> {
+        let n_mels = self.n_mels as usize;
+        let n_coeff = n_mfcc as usize;
+
+        // DCT-II matrix
+        let mut dct_matrix = Matrix::zeros(n_coeff, n_mels);
+        for k in 0..n_coeff {
+            for n in 0..n_mels {
+                dct_matrix[(k, n)] = cos(3.14159265359 * k as Float * (n as Float + 0.5) / n_mels as Float);
+            }
+        }
+
+        // Apply DCT to log mel spectrum
+        self.magnitudes.iter()
+            .map(|frame| {
+                let log_mel: Vec<Float> = frame.iter()
+                    .map(|&m| log(m + 1e-10))
+                    .collect();
+
+                let mut mfcc = vec![0.0; n_coeff];
+                for k in 0..n_coeff {
+                    for n in 0..n_mels {
+                        mfcc[k] += dct_matrix[(k, n)] * log_mel[n];
+                    }
+                }
+                mfcc
+            })
+            .collect()
+    }
+}
+
+// ============================================================================
+// MEL FILTER BANK
+// ============================================================================
+
+/// Mel-scale filter bank
+pub struct MelFilterBank {
+    filters: Vec<Vec<Float>>,
+    n_bins: usize,
+    n_mels: Int,
+}
+
+impl MelFilterBank {
+    pub fn new(n_bins: usize, sample_rate: Int, n_mels: Int, f_min: Float, f_max: Float) -> Self {
+        let mel_min = Self::hz_to_mel(f_min);
+        let mel_max = Self::hz_to_mel(f_max);
+
+        // Mel points evenly spaced
+        let mel_points: Vec<Float> = (0..n_mels + 2)
+            .map(|i| mel_min + i as Float * (mel_max - mel_min) / (n_mels + 1) as Float)
+            .collect();
+
+        // Convert back to Hz and then to FFT bins
+        let hz_points: Vec<Float> = mel_points.iter()
+            .map(|&m| Self::mel_to_hz(m))
+            .collect();
+
+        let bin_points: Vec<usize> = hz_points.iter()
+            .map(|&f| {
+                let bin = (n_bins as Float * 2.0 * f / sample_rate as Float) as usize;
+                bin.min(n_bins - 1)
+            })
+            .collect();
+
+        // Create triangular filters
+        let mut filters = Vec::with_capacity(n_mels as usize);
+
+        for i in 0..n_mels as usize {
+            let mut filter = vec![0.0; n_bins];
+
+            let start = bin_points[i];
+            let center = bin_points[i + 1];
+            let end = bin_points[i + 2];
+
+            // Rising slope
+            for k in start..center {
+                if center > start {
+                    filter[k] = (k - start) as Float / (center - start) as Float;
+                }
+            }
+
+            // Falling slope
+            for k in center..end {
+                if end > center {
+                    filter[k] = (end - k) as Float / (end - center) as Float;
+                }
+            }
+
+            filters.push(filter);
+        }
+
+        Self { filters, n_bins, n_mels }
+    }
+
+    pub fn apply(&self, spectrum: &[Float]) -> Vec<Float> {
+        self.filters.iter()
+            .map(|filter| {
+                filter.iter().zip(spectrum.iter())
+                    .map(|(&f, &s)| f * s)
+                    .sum()
+            })
+            .collect()
+    }
+
+    fn hz_to_mel(hz: Float) -> Float {
+        2595.0 * log(1.0 + hz / 700.0) / log(10.0)
+    }
+
+    fn mel_to_hz(mel: Float) -> Float {
+        700.0 * (pow(10.0, mel / 2595.0) - 1.0)
+    }
+}
+
+// ============================================================================
+// AUDIO FILTERS
+// ============================================================================
+
+/// Biquad filter implementation
+pub struct BiquadFilter {
+    b0: Float, b1: Float, b2: Float,
+    a1: Float, a2: Float,
+    z1: Float, z2: Float,
+}
+
+impl BiquadFilter {
+    /// Create lowpass filter
+    pub fn lowpass(sample_rate: Float, cutoff: Float, q: Float) -> Self {
+        let omega = 2.0 * 3.14159265359 * cutoff / sample_rate;
+        let sin_omega = sin(omega);
+        let cos_omega = cos(omega);
+        let alpha = sin_omega / (2.0 * q);
+
+        let b0 = (1.0 - cos_omega) / 2.0;
+        let b1 = 1.0 - cos_omega;
+        let b2 = (1.0 - cos_omega) / 2.0;
+        let a0 = 1.0 + alpha;
+        let a1 = -2.0 * cos_omega;
+        let a2 = 1.0 - alpha;
+
+        Self {
+            b0: b0 / a0, b1: b1 / a0, b2: b2 / a0,
+            a1: a1 / a0, a2: a2 / a0,
+            z1: 0.0, z2: 0.0,
+        }
+    }
+
+    /// Create highpass filter
+    pub fn highpass(sample_rate: Float, cutoff: Float, q: Float) -> Self {
+        let omega = 2.0 * 3.14159265359 * cutoff / sample_rate;
+        let sin_omega = sin(omega);
+        let cos_omega = cos(omega);
+        let alpha = sin_omega / (2.0 * q);
+
+        let b0 = (1.0 + cos_omega) / 2.0;
+        let b1 = -(1.0 + cos_omega);
+        let b2 = (1.0 + cos_omega) / 2.0;
+        let a0 = 1.0 + alpha;
+        let a1 = -2.0 * cos_omega;
+        let a2 = 1.0 - alpha;
+
+        Self {
+            b0: b0 / a0, b1: b1 / a0, b2: b2 / a0,
+            a1: a1 / a0, a2: a2 / a0,
+            z1: 0.0, z2: 0.0,
+        }
+    }
+
+    /// Create bandpass filter
+    pub fn bandpass(sample_rate: Float, center: Float, q: Float) -> Self {
+        let omega = 2.0 * 3.14159265359 * center / sample_rate;
+        let sin_omega = sin(omega);
+        let cos_omega = cos(omega);
+        let alpha = sin_omega / (2.0 * q);
+
+        let b0 = alpha;
+        let b1 = 0.0;
+        let b2 = -alpha;
+        let a0 = 1.0 + alpha;
+        let a1 = -2.0 * cos_omega;
+        let a2 = 1.0 - alpha;
+
+        Self {
+            b0: b0 / a0, b1: b1 / a0, b2: b2 / a0,
+            a1: a1 / a0, a2: a2 / a0,
+            z1: 0.0, z2: 0.0,
+        }
+    }
+
+    /// Create notch filter
+    pub fn notch(sample_rate: Float, center: Float, q: Float) -> Self {
+        let omega = 2.0 * 3.14159265359 * center / sample_rate;
+        let sin_omega = sin(omega);
+        let cos_omega = cos(omega);
+        let alpha = sin_omega / (2.0 * q);
+
+        let b0 = 1.0;
+        let b1 = -2.0 * cos_omega;
+        let b2 = 1.0;
+        let a0 = 1.0 + alpha;
+        let a1 = -2.0 * cos_omega;
+        let a2 = 1.0 - alpha;
+
+        Self {
+            b0: b0 / a0, b1: b1 / a0, b2: b2 / a0,
+            a1: a1 / a0, a2: a2 / a0,
+            z1: 0.0, z2: 0.0,
+        }
+    }
+
+    /// Create peak EQ filter
+    pub fn peak_eq(sample_rate: Float, center: Float, q: Float, gain_db: Float) -> Self {
+        let a = pow(10.0, gain_db / 40.0);
+        let omega = 2.0 * 3.14159265359 * center / sample_rate;
+        let sin_omega = sin(omega);
+        let cos_omega = cos(omega);
+        let alpha = sin_omega / (2.0 * q);
+
+        let b0 = 1.0 + alpha * a;
+        let b1 = -2.0 * cos_omega;
+        let b2 = 1.0 - alpha * a;
+        let a0 = 1.0 + alpha / a;
+        let a1 = -2.0 * cos_omega;
+        let a2 = 1.0 - alpha / a;
+
+        Self {
+            b0: b0 / a0, b1: b1 / a0, b2: b2 / a0,
+            a1: a1 / a0, a2: a2 / a0,
+            z1: 0.0, z2: 0.0,
+        }
+    }
+
+    /// Create low shelf filter
+    pub fn low_shelf(sample_rate: Float, cutoff: Float, gain_db: Float, slope: Float) -> Self {
+        let a = pow(10.0, gain_db / 40.0);
+        let omega = 2.0 * 3.14159265359 * cutoff / sample_rate;
+        let sin_omega = sin(omega);
+        let cos_omega = cos(omega);
+        let alpha = sin_omega / 2.0 * sqrt((a + 1.0 / a) * (1.0 / slope - 1.0) + 2.0);
+
+        let sqrt_a = sqrt(a);
+
+        let b0 = a * ((a + 1.0) - (a - 1.0) * cos_omega + 2.0 * sqrt_a * alpha);
+        let b1 = 2.0 * a * ((a - 1.0) - (a + 1.0) * cos_omega);
+        let b2 = a * ((a + 1.0) - (a - 1.0) * cos_omega - 2.0 * sqrt_a * alpha);
+        let a0 = (a + 1.0) + (a - 1.0) * cos_omega + 2.0 * sqrt_a * alpha;
+        let a1 = -2.0 * ((a - 1.0) + (a + 1.0) * cos_omega);
+        let a2 = (a + 1.0) + (a - 1.0) * cos_omega - 2.0 * sqrt_a * alpha;
+
+        Self {
+            b0: b0 / a0, b1: b1 / a0, b2: b2 / a0,
+            a1: a1 / a0, a2: a2 / a0,
+            z1: 0.0, z2: 0.0,
+        }
+    }
+
+    /// Create high shelf filter
+    pub fn high_shelf(sample_rate: Float, cutoff: Float, gain_db: Float, slope: Float) -> Self {
+        let a = pow(10.0, gain_db / 40.0);
+        let omega = 2.0 * 3.14159265359 * cutoff / sample_rate;
+        let sin_omega = sin(omega);
+        let cos_omega = cos(omega);
+        let alpha = sin_omega / 2.0 * sqrt((a + 1.0 / a) * (1.0 / slope - 1.0) + 2.0);
+
+        let sqrt_a = sqrt(a);
+
+        let b0 = a * ((a + 1.0) + (a - 1.0) * cos_omega + 2.0 * sqrt_a * alpha);
+        let b1 = -2.0 * a * ((a - 1.0) + (a + 1.0) * cos_omega);
+        let b2 = a * ((a + 1.0) + (a - 1.0) * cos_omega - 2.0 * sqrt_a * alpha);
+        let a0 = (a + 1.0) - (a - 1.0) * cos_omega + 2.0 * sqrt_a * alpha;
+        let a1 = 2.0 * ((a - 1.0) - (a + 1.0) * cos_omega);
+        let a2 = (a + 1.0) - (a - 1.0) * cos_omega - 2.0 * sqrt_a * alpha;
+
+        Self {
+            b0: b0 / a0, b1: b1 / a0, b2: b2 / a0,
+            a1: a1 / a0, a2: a2 / a0,
+            z1: 0.0, z2: 0.0,
+        }
+    }
+
+    /// Process single sample
+    pub fn process(&mut self, input: Float) -> Float {
+        let output = self.b0 * input + self.z1;
+        self.z1 = self.b1 * input - self.a1 * output + self.z2;
+        self.z2 = self.b2 * input - self.a2 * output;
+        output
+    }
+
+    /// Process buffer in place
+    pub fn process_buffer(&mut self, buffer: &mut [Float]) {
+        for sample in buffer.iter_mut() {
+            *sample = self.process(*sample);
+        }
+    }
+
+    /// Reset filter state
+    pub fn reset(&mut self) {
+        self.z1 = 0.0;
+        self.z2 = 0.0;
+    }
+}
+
+/// Parametric EQ with multiple bands
+pub struct ParametricEQ {
+    bands: Vec<BiquadFilter>,
+}
+
+impl ParametricEQ {
+    pub fn new() -> Self {
+        Self { bands: Vec::new() }
+    }
+
+    pub fn add_lowpass(&mut self, sample_rate: Float, cutoff: Float, q: Float) {
+        self.bands.push(BiquadFilter::lowpass(sample_rate, cutoff, q));
+    }
+
+    pub fn add_highpass(&mut self, sample_rate: Float, cutoff: Float, q: Float) {
+        self.bands.push(BiquadFilter::highpass(sample_rate, cutoff, q));
+    }
+
+    pub fn add_peak(&mut self, sample_rate: Float, center: Float, q: Float, gain_db: Float) {
+        self.bands.push(BiquadFilter::peak_eq(sample_rate, center, q, gain_db));
+    }
+
+    pub fn add_low_shelf(&mut self, sample_rate: Float, cutoff: Float, gain_db: Float) {
+        self.bands.push(BiquadFilter::low_shelf(sample_rate, cutoff, gain_db, 0.9));
+    }
+
+    pub fn add_high_shelf(&mut self, sample_rate: Float, cutoff: Float, gain_db: Float) {
+        self.bands.push(BiquadFilter::high_shelf(sample_rate, cutoff, gain_db, 0.9));
+    }
+
+    pub fn process(&mut self, buffer: &mut [Float]) {
+        for band in &mut self.bands {
+            band.process_buffer(buffer);
+        }
+    }
+
+    pub fn reset(&mut self) {
+        for band in &mut self.bands {
+            band.reset();
+        }
+    }
+}
+
+// ============================================================================
+// DYNAMICS PROCESSING
+// ============================================================================
+
+/// Compressor for dynamic range control
+pub struct Compressor {
+    threshold_db: Float,
+    ratio: Float,
+    attack_ms: Float,
+    release_ms: Float,
+    knee_db: Float,
+    makeup_gain_db: Float,
+
+    sample_rate: Float,
+    envelope: Float,
+    gain_reduction_db: Float,
+}
+
+impl Compressor {
+    pub fn new(sample_rate: Float) -> Self {
+        Self {
+            threshold_db: -20.0,
+            ratio: 4.0,
+            attack_ms: 10.0,
+            release_ms: 100.0,
+            knee_db: 0.0,
+            makeup_gain_db: 0.0,
+            sample_rate,
+            envelope: 0.0,
+            gain_reduction_db: 0.0,
+        }
+    }
+
+    pub fn with_threshold(mut self, db: Float) -> Self {
+        self.threshold_db = db;
+        self
+    }
+
+    pub fn with_ratio(mut self, ratio: Float) -> Self {
+        self.ratio = ratio.max(1.0);
+        self
+    }
+
+    pub fn with_attack(mut self, ms: Float) -> Self {
+        self.attack_ms = ms.max(0.1);
+        self
+    }
+
+    pub fn with_release(mut self, ms: Float) -> Self {
+        self.release_ms = ms.max(1.0);
+        self
+    }
+
+    pub fn with_knee(mut self, db: Float) -> Self {
+        self.knee_db = db.max(0.0);
+        self
+    }
+
+    pub fn with_makeup_gain(mut self, db: Float) -> Self {
+        self.makeup_gain_db = db;
+        self
+    }
+
+    /// Process single sample
+    pub fn process(&mut self, input: Float) -> Float {
+        // Compute input level in dB
+        let input_db = 20.0 * log(abs(input) + 1e-10) / log(10.0);
+
+        // Envelope follower
+        let attack_coeff = exp(-1.0 / (self.attack_ms * 0.001 * self.sample_rate));
+        let release_coeff = exp(-1.0 / (self.release_ms * 0.001 * self.sample_rate));
+
+        if input_db > self.envelope {
+            self.envelope = attack_coeff * self.envelope + (1.0 - attack_coeff) * input_db;
+        } else {
+            self.envelope = release_coeff * self.envelope + (1.0 - release_coeff) * input_db;
+        }
+
+        // Compute gain reduction with soft knee
+        let over_threshold = self.envelope - self.threshold_db;
+
+        self.gain_reduction_db = if over_threshold <= -self.knee_db / 2.0 {
+            0.0
+        } else if over_threshold >= self.knee_db / 2.0 {
+            over_threshold * (1.0 - 1.0 / self.ratio)
+        } else {
+            // Soft knee region
+            let knee_factor = (over_threshold + self.knee_db / 2.0) / self.knee_db;
+            knee_factor * knee_factor * over_threshold * (1.0 - 1.0 / self.ratio)
+        };
+
+        // Apply gain
+        let total_gain_db = -self.gain_reduction_db + self.makeup_gain_db;
+        let gain = pow(10.0, total_gain_db / 20.0);
+
+        input * gain
+    }
+
+    /// Process buffer
+    pub fn process_buffer(&mut self, buffer: &mut [Float]) {
+        for sample in buffer.iter_mut() {
+            *sample = self.process(*sample);
+        }
+    }
+
+    /// Get current gain reduction
+    pub fn get_gain_reduction_db(&self) -> Float {
+        self.gain_reduction_db
+    }
+}
+
+/// Limiter for brick-wall limiting
+pub struct Limiter {
+    threshold_db: Float,
+    release_ms: Float,
+    lookahead_samples: usize,
+
+    sample_rate: Float,
+    delay_buffer: VecDeque<Float>,
+    gain: Float,
+}
+
+impl Limiter {
+    pub fn new(sample_rate: Float) -> Self {
+        let lookahead_ms = 5.0;
+        let lookahead_samples = (lookahead_ms * 0.001 * sample_rate) as usize;
+
+        Self {
+            threshold_db: -0.1,
+            release_ms: 100.0,
+            lookahead_samples,
+            sample_rate,
+            delay_buffer: VecDeque::with_capacity(lookahead_samples),
+            gain: 1.0,
+        }
+    }
+
+    pub fn with_threshold(mut self, db: Float) -> Self {
+        self.threshold_db = db;
+        self
+    }
+
+    pub fn process(&mut self, input: Float) -> Float {
+        // Add to delay buffer
+        self.delay_buffer.push_back(input);
+
+        if self.delay_buffer.len() <= self.lookahead_samples {
+            return 0.0;  // Not enough samples yet
+        }
+
+        // Get delayed sample
+        let delayed = self.delay_buffer.pop_front().unwrap_or(0.0);
+
+        // Find peak in lookahead buffer
+        let mut peak = 0.0;
+        for &sample in &self.delay_buffer {
+            if abs(sample) > peak {
+                peak = abs(sample);
+            }
+        }
+
+        // Compute required gain
+        let threshold_linear = pow(10.0, self.threshold_db / 20.0);
+        let target_gain = if peak > threshold_linear {
+            threshold_linear / peak
+        } else {
+            1.0
+        };
+
+        // Smooth gain changes
+        let release_coeff = exp(-1.0 / (self.release_ms * 0.001 * self.sample_rate));
+
+        if target_gain < self.gain {
+            self.gain = target_gain;  // Instant attack
+        } else {
+            self.gain = release_coeff * self.gain + (1.0 - release_coeff) * target_gain;
+        }
+
+        delayed * self.gain
+    }
+
+    pub fn process_buffer(&mut self, buffer: &mut [Float]) {
+        for sample in buffer.iter_mut() {
+            *sample = self.process(*sample);
+        }
+    }
+}
+
+/// Noise gate
+pub struct NoiseGate {
+    threshold_db: Float,
+    attack_ms: Float,
+    hold_ms: Float,
+    release_ms: Float,
+    range_db: Float,
+
+    sample_rate: Float,
+    envelope: Float,
+    gain: Float,
+    hold_counter: Int,
+}
+
+impl NoiseGate {
+    pub fn new(sample_rate: Float) -> Self {
+        Self {
+            threshold_db: -40.0,
+            attack_ms: 1.0,
+            hold_ms: 50.0,
+            release_ms: 100.0,
+            range_db: -80.0,
+            sample_rate,
+            envelope: 0.0,
+            gain: 0.0,
+            hold_counter: 0,
+        }
+    }
+
+    pub fn with_threshold(mut self, db: Float) -> Self {
+        self.threshold_db = db;
+        self
+    }
+
+    pub fn with_range(mut self, db: Float) -> Self {
+        self.range_db = db.min(0.0);
+        self
+    }
+
+    pub fn process(&mut self, input: Float) -> Float {
+        // Envelope follower
+        let input_abs = abs(input);
+        let attack_coeff = exp(-1.0 / (self.attack_ms * 0.001 * self.sample_rate));
+        let release_coeff = exp(-1.0 / (self.release_ms * 0.001 * self.sample_rate));
+
+        if input_abs > self.envelope {
+            self.envelope = attack_coeff * self.envelope + (1.0 - attack_coeff) * input_abs;
+        } else {
+            self.envelope = release_coeff * self.envelope + (1.0 - release_coeff) * input_abs;
+        }
+
+        let envelope_db = 20.0 * log(self.envelope + 1e-10) / log(10.0);
+
+        // Gate logic
+        let hold_samples = (self.hold_ms * 0.001 * self.sample_rate) as Int;
+
+        let target_gain = if envelope_db > self.threshold_db {
+            self.hold_counter = hold_samples;
+            1.0
+        } else if self.hold_counter > 0 {
+            self.hold_counter -= 1;
+            1.0
+        } else {
+            pow(10.0, self.range_db / 20.0)
+        };
+
+        // Smooth gain
+        if target_gain > self.gain {
+            self.gain = attack_coeff * self.gain + (1.0 - attack_coeff) * target_gain;
+        } else {
+            self.gain = release_coeff * self.gain + (1.0 - release_coeff) * target_gain;
+        }
+
+        input * self.gain
+    }
+
+    pub fn process_buffer(&mut self, buffer: &mut [Float]) {
+        for sample in buffer.iter_mut() {
+            *sample = self.process(*sample);
+        }
+    }
+}
+
+// ============================================================================
+// AUDIO EFFECTS
+// ============================================================================
+
+/// Delay effect
+pub struct Delay {
+    delay_line: VecDeque<Float>,
+    delay_samples: usize,
+    feedback: Float,
+    wet_mix: Float,
+}
+
+impl Delay {
+    pub fn new(sample_rate: Float, delay_ms: Float, feedback: Float, wet_mix: Float) -> Self {
+        let delay_samples = (delay_ms * 0.001 * sample_rate) as usize;
+
+        Self {
+            delay_line: VecDeque::from(vec![0.0; delay_samples]),
+            delay_samples,
+            feedback: feedback.clamp(0.0, 0.99),
+            wet_mix: wet_mix.clamp(0.0, 1.0),
+        }
+    }
+
+    pub fn process(&mut self, input: Float) -> Float {
+        let delayed = self.delay_line.pop_front().unwrap_or(0.0);
+        self.delay_line.push_back(input + delayed * self.feedback);
+
+        input * (1.0 - self.wet_mix) + delayed * self.wet_mix
+    }
+
+    pub fn process_buffer(&mut self, buffer: &mut [Float]) {
+        for sample in buffer.iter_mut() {
+            *sample = self.process(*sample);
+        }
+    }
+
+    pub fn set_delay_time(&mut self, sample_rate: Float, delay_ms: Float) {
+        let new_samples = (delay_ms * 0.001 * sample_rate) as usize;
+
+        while self.delay_line.len() > new_samples {
+            self.delay_line.pop_front();
+        }
+        while self.delay_line.len() < new_samples {
+            self.delay_line.push_back(0.0);
+        }
+
+        self.delay_samples = new_samples;
+    }
+}
+
+/// Reverb effect using Schroeder algorithm
+pub struct Reverb {
+    comb_filters: Vec<CombFilter>,
+    allpass_filters: Vec<AllpassFilter>,
+    wet_mix: Float,
+    decay: Float,
+}
+
+struct CombFilter {
+    buffer: VecDeque<Float>,
+    feedback: Float,
+}
+
+impl CombFilter {
+    fn new(delay_samples: usize, feedback: Float) -> Self {
+        Self {
+            buffer: VecDeque::from(vec![0.0; delay_samples]),
+            feedback,
+        }
+    }
+
+    fn process(&mut self, input: Float) -> Float {
+        let output = self.buffer.pop_front().unwrap_or(0.0);
+        self.buffer.push_back(input + output * self.feedback);
+        output
+    }
+}
+
+struct AllpassFilter {
+    buffer: VecDeque<Float>,
+    coefficient: Float,
+}
+
+impl AllpassFilter {
+    fn new(delay_samples: usize, coefficient: Float) -> Self {
+        Self {
+            buffer: VecDeque::from(vec![0.0; delay_samples]),
+            coefficient,
+        }
+    }
+
+    fn process(&mut self, input: Float) -> Float {
+        let delayed = self.buffer.pop_front().unwrap_or(0.0);
+        let output = -self.coefficient * input + delayed;
+        self.buffer.push_back(input + self.coefficient * output);
+        output
+    }
+}
+
+impl Reverb {
+    pub fn new(sample_rate: Float, room_size: Float, decay: Float, wet_mix: Float) -> Self {
+        let base_delay = (room_size * 0.001 * sample_rate) as usize;
+
+        // Comb filter delays (prime numbers for less coloration)
+        let comb_delays = [1687, 1601, 2053, 2251];
+        let comb_filters: Vec<CombFilter> = comb_delays.iter()
+            .map(|&d| {
+                let delay = (d as Float * base_delay as Float / 1687.0) as usize;
+                let fb = pow(0.001, delay as Float / (decay * sample_rate));
+                CombFilter::new(delay.max(1), fb)
+            })
+            .collect();
+
+        // Allpass filter delays
+        let allpass_delays = [225, 556, 441, 341];
+        let allpass_filters: Vec<AllpassFilter> = allpass_delays.iter()
+            .map(|&d| {
+                let delay = (d as Float * base_delay as Float / 1687.0) as usize;
+                AllpassFilter::new(delay.max(1), 0.5)
+            })
+            .collect();
+
+        Self {
+            comb_filters,
+            allpass_filters,
+            wet_mix: wet_mix.clamp(0.0, 1.0),
+            decay,
+        }
+    }
+
+    pub fn process(&mut self, input: Float) -> Float {
+        // Sum comb filter outputs
+        let mut comb_sum = 0.0;
+        for comb in &mut self.comb_filters {
+            comb_sum += comb.process(input);
+        }
+        comb_sum /= self.comb_filters.len() as Float;
+
+        // Series allpass filters
+        let mut output = comb_sum;
+        for allpass in &mut self.allpass_filters {
+            output = allpass.process(output);
+        }
+
+        input * (1.0 - self.wet_mix) + output * self.wet_mix
+    }
+
+    pub fn process_buffer(&mut self, buffer: &mut [Float]) {
+        for sample in buffer.iter_mut() {
+            *sample = self.process(*sample);
+        }
+    }
+}
+
+/// Chorus effect
+pub struct Chorus {
+    delay_line: VecDeque<Float>,
+    lfo_phase: Float,
+    lfo_rate: Float,
+    depth: Float,
+    wet_mix: Float,
+    base_delay: usize,
+    sample_rate: Float,
+}
+
+impl Chorus {
+    pub fn new(sample_rate: Float, rate_hz: Float, depth_ms: Float, wet_mix: Float) -> Self {
+        let base_delay_ms = 7.0;
+        let max_delay_ms = base_delay_ms + depth_ms;
+        let max_samples = (max_delay_ms * 0.001 * sample_rate) as usize + 1;
+
+        Self {
+            delay_line: VecDeque::from(vec![0.0; max_samples]),
+            lfo_phase: 0.0,
+            lfo_rate: rate_hz,
+            depth: depth_ms,
+            wet_mix: wet_mix.clamp(0.0, 1.0),
+            base_delay: (base_delay_ms * 0.001 * sample_rate) as usize,
+            sample_rate,
+        }
+    }
+
+    pub fn process(&mut self, input: Float) -> Float {
+        // Update LFO
+        self.lfo_phase += 2.0 * 3.14159265359 * self.lfo_rate / self.sample_rate;
+        if self.lfo_phase > 2.0 * 3.14159265359 {
+            self.lfo_phase -= 2.0 * 3.14159265359;
+        }
+
+        let lfo = sin(self.lfo_phase);
+        let delay_samples = self.base_delay as Float + lfo * self.depth * 0.001 * self.sample_rate;
+
+        // Push input
+        self.delay_line.push_back(input);
+        if self.delay_line.len() > self.base_delay * 3 {
+            self.delay_line.pop_front();
+        }
+
+        // Interpolated read
+        let idx = self.delay_line.len() as Float - delay_samples - 1.0;
+        let idx_floor = idx.max(0.0) as usize;
+        let frac = idx - idx_floor as Float;
+
+        let s1 = self.delay_line.get(idx_floor).cloned().unwrap_or(0.0);
+        let s2 = self.delay_line.get(idx_floor + 1).cloned().unwrap_or(s1);
+        let delayed = s1 * (1.0 - frac) + s2 * frac;
+
+        input * (1.0 - self.wet_mix) + delayed * self.wet_mix
+    }
+
+    pub fn process_buffer(&mut self, buffer: &mut [Float]) {
+        for sample in buffer.iter_mut() {
+            *sample = self.process(*sample);
+        }
+    }
+}
+
+// ============================================================================
+// PITCH DETECTION
+// ============================================================================
+
+/// Pitch detector using autocorrelation
+pub struct PitchDetector {
+    sample_rate: Float,
+    min_frequency: Float,
+    max_frequency: Float,
+    buffer: Vec<Float>,
+    window_size: usize,
+}
+
+impl PitchDetector {
+    pub fn new(sample_rate: Float) -> Self {
+        let min_frequency = 50.0;
+        let max_frequency = 2000.0;
+        let window_size = (sample_rate / min_frequency * 2.0) as usize;
+
+        Self {
+            sample_rate,
+            min_frequency,
+            max_frequency,
+            buffer: Vec::with_capacity(window_size),
+            window_size,
+        }
+    }
+
+    pub fn with_frequency_range(mut self, min_hz: Float, max_hz: Float) -> Self {
+        self.min_frequency = min_hz;
+        self.max_frequency = max_hz;
+        self.window_size = (self.sample_rate / min_hz * 2.0) as usize;
+        self
+    }
+
+    /// Add samples and detect pitch
+    pub fn process(&mut self, samples: &[Float]) -> Option<PitchResult> {
+        self.buffer.extend(samples);
+
+        if self.buffer.len() < self.window_size {
+            return None;
+        }
+
+        // Use most recent window
+        let window = &self.buffer[self.buffer.len() - self.window_size..];
+
+        // Compute autocorrelation
+        let min_lag = (self.sample_rate / self.max_frequency) as usize;
+        let max_lag = (self.sample_rate / self.min_frequency) as usize;
+
+        let mut best_correlation = 0.0;
+        let mut best_lag = min_lag;
+
+        for lag in min_lag..=max_lag.min(self.window_size / 2) {
+            let mut correlation = 0.0;
+            let mut energy1 = 0.0;
+            let mut energy2 = 0.0;
+
+            for i in 0..self.window_size - lag {
+                correlation += window[i] * window[i + lag];
+                energy1 += window[i] * window[i];
+                energy2 += window[i + lag] * window[i + lag];
+            }
+
+            let normalized = correlation / (sqrt(energy1 * energy2) + 1e-10);
+
+            if normalized > best_correlation {
+                best_correlation = normalized;
+                best_lag = lag;
+            }
+        }
+
+        // Trim buffer
+        if self.buffer.len() > self.window_size * 2 {
+            self.buffer.drain(0..self.window_size);
+        }
+
+        if best_correlation > 0.8 {
+            let frequency = self.sample_rate / best_lag as Float;
+            Some(PitchResult {
+                frequency,
+                confidence: best_correlation,
+                midi_note: Self::frequency_to_midi(frequency),
+            })
+        } else {
+            None
+        }
+    }
+
+    fn frequency_to_midi(frequency: Float) -> Int {
+        (12.0 * log(frequency / 440.0) / log(2.0) + 69.0).round() as Int
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct PitchResult {
+    pub frequency: Float,
+    pub confidence: Float,
+    pub midi_note: Int,
+}
+
+// ============================================================================
+// HELPER FUNCTIONS
+// ============================================================================
+
+fn atan2(y: Float, x: Float) -> Float {
+    if x > 0.0 {
+        (y / x).atan_approx()
+    } else if x < 0.0 {
+        if y >= 0.0 {
+            (y / x).atan_approx() + 3.14159265359
+        } else {
+            (y / x).atan_approx() - 3.14159265359
+        }
+    } else {
+        if y > 0.0 { 3.14159265359 / 2.0 }
+        else if y < 0.0 { -3.14159265359 / 2.0 }
+        else { 0.0 }
+    }
+}
+
+trait AtanApprox {
+    fn atan_approx(self) -> Float;
+}
+
+impl AtanApprox for Float {
+    fn atan_approx(self) -> Float {
+        let x = self;
+        if abs(x) > 1.0 {
+            let sign = if x > 0.0 { 1.0 } else { -1.0 };
+            3.14159265359 / 2.0 * sign - (1.0 / x).atan_approx()
+        } else {
+            // Polynomial approximation
+            x - x * x * x / 3.0 + x * x * x * x * x / 5.0 - x * x * x * x * x * x * x / 7.0
+        }
+    }
+}
+
+// ============================================================================
+// TESTS
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_audio_buffer() {
+        let mut buffer = AudioBuffer::stereo(44100);
+        assert_eq!(buffer.n_channels(), 2);
+        assert_eq!(buffer.sample_rate, 44100);
+    }
+
+    #[test]
+    fn test_fft() {
+        let fft = FFT::new(256);
+        let signal: Vec<Float> = (0..256)
+            .map(|i| sin(2.0 * 3.14159265359 * 10.0 * i as Float / 256.0))
+            .collect();
+
+        let spectrum = fft.magnitude_spectrum(&signal);
+        assert_eq!(spectrum.len(), 256);
+    }
+
+    #[test]
+    fn test_biquad_filter() {
+        let mut filter = BiquadFilter::lowpass(44100.0, 1000.0, 0.707);
+        let output = filter.process(1.0);
+        assert!(output.is_finite());
+    }
+
+    #[test]
+    fn test_compressor() {
+        let mut comp = Compressor::new(44100.0)
+            .with_threshold(-20.0)
+            .with_ratio(4.0);
+
+        let output = comp.process(0.5);
+        assert!(output.is_finite());
+    }
+
+    #[test]
+    fn test_reverb() {
+        let mut reverb = Reverb::new(44100.0, 50.0, 2.0, 0.3);
+        let output = reverb.process(1.0);
+        assert!(output.is_finite());
+    }
+}

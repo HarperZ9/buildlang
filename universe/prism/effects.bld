@@ -1,0 +1,1445 @@
+// =============================================================================
+// PRISM: Visual Effects Shaders
+// =============================================================================
+// Particles, decals, distortion, and special visual effects
+// Part of the BUILD-UNIVERSE Rendering Stack
+// =============================================================================
+
+@module prism::effects
+@version 1.0.0
+@author BUILD Team
+
+// =============================================================================
+// PARTICLE SYSTEM DATA STRUCTURES
+// =============================================================================
+
+/// Particle emitter configuration
+struct ParticleEmitterConfig {
+    // Emission
+    emission_rate: f32,
+    burst_count: u32,
+    max_particles: u32,
+
+    // Shape
+    emitter_shape: EmitterShape,
+    emitter_size: vec3,
+    emitter_radius: f32,
+
+    // Initial velocity
+    velocity_min: vec3,
+    velocity_max: vec3,
+    velocity_type: VelocityType,
+
+    // Lifetime
+    lifetime_min: f32,
+    lifetime_max: f32,
+
+    // Size
+    size_start_min: f32,
+    size_start_max: f32,
+    size_end_min: f32,
+    size_end_max: f32,
+    size_curve: CurveType,
+
+    // Color
+    color_start: vec4,
+    color_end: vec4,
+    color_curve: CurveType,
+
+    // Physics
+    gravity: vec3,
+    drag: f32,
+    turbulence_strength: f32,
+    turbulence_frequency: f32,
+
+    // Rendering
+    blend_mode: BlendMode,
+    soft_particles: bool,
+    soft_depth: f32,
+    billboard_type: BillboardType,
+
+    // Animation
+    sprite_sheet_size: vec2,
+    animation_speed: f32,
+    random_start_frame: bool,
+}
+
+enum EmitterShape {
+    Point,
+    Sphere,
+    Hemisphere,
+    Cone,
+    Box,
+    Circle,
+    Ring,
+    Mesh,
+}
+
+enum VelocityType {
+    Constant,
+    Random,
+    Radial,
+    Tangent,
+    DirectionRandom,
+}
+
+enum CurveType {
+    Linear,
+    EaseIn,
+    EaseOut,
+    EaseInOut,
+    Bezier,
+    Custom,
+}
+
+enum BlendMode {
+    Alpha,
+    Additive,
+    Multiply,
+    Premultiplied,
+    SoftAdditive,
+}
+
+enum BillboardType {
+    CameraFacing,
+    VelocityAligned,
+    AxisAligned,
+    StretchedBillboard,
+    Mesh,
+}
+
+impl ParticleEmitterConfig {
+    pub fn fire() -> Self {
+        Self {
+            emission_rate: 100.0,
+            burst_count: 0,
+            max_particles: 1000,
+            emitter_shape: EmitterShape::Cone,
+            emitter_size: vec3(0.5, 1.0, 0.5),
+            emitter_radius: 0.3,
+            velocity_min: vec3(-0.5, 2.0, -0.5),
+            velocity_max: vec3(0.5, 4.0, 0.5),
+            velocity_type: VelocityType::Random,
+            lifetime_min: 0.5,
+            lifetime_max: 1.5,
+            size_start_min: 0.2,
+            size_start_max: 0.4,
+            size_end_min: 0.0,
+            size_end_max: 0.1,
+            size_curve: CurveType::EaseIn,
+            color_start: vec4(1.0, 0.7, 0.2, 1.0),
+            color_end: vec4(1.0, 0.2, 0.0, 0.0),
+            color_curve: CurveType::EaseIn,
+            gravity: vec3(0.0, 0.5, 0.0),  // Slight upward
+            drag: 0.5,
+            turbulence_strength: 0.5,
+            turbulence_frequency: 2.0,
+            blend_mode: BlendMode::Additive,
+            soft_particles: true,
+            soft_depth: 0.5,
+            billboard_type: BillboardType::CameraFacing,
+            sprite_sheet_size: vec2(4.0, 4.0),
+            animation_speed: 30.0,
+            random_start_frame: true,
+        }
+    }
+
+    pub fn smoke() -> Self {
+        Self {
+            emission_rate: 30.0,
+            lifetime_min: 2.0,
+            lifetime_max: 4.0,
+            size_start_min: 0.3,
+            size_start_max: 0.5,
+            size_end_min: 1.5,
+            size_end_max: 2.5,
+            color_start: vec4(0.3, 0.3, 0.3, 0.8),
+            color_end: vec4(0.2, 0.2, 0.2, 0.0),
+            gravity: vec3(0.0, 0.3, 0.0),
+            drag: 1.5,
+            blend_mode: BlendMode::Alpha,
+            ..Self::fire()
+        }
+    }
+
+    pub fn sparks() -> Self {
+        Self {
+            emission_rate: 50.0,
+            burst_count: 20,
+            lifetime_min: 0.3,
+            lifetime_max: 1.0,
+            size_start_min: 0.02,
+            size_start_max: 0.05,
+            size_end_min: 0.0,
+            size_end_max: 0.01,
+            color_start: vec4(1.0, 0.9, 0.6, 1.0),
+            color_end: vec4(1.0, 0.5, 0.2, 0.0),
+            gravity: vec3(0.0, -9.81, 0.0),
+            drag: 0.2,
+            billboard_type: BillboardType::StretchedBillboard,
+            ..Self::fire()
+        }
+    }
+
+    pub fn dust() -> Self {
+        Self {
+            emission_rate: 20.0,
+            lifetime_min: 3.0,
+            lifetime_max: 6.0,
+            size_start_min: 0.1,
+            size_start_max: 0.3,
+            size_end_min: 0.5,
+            size_end_max: 1.0,
+            color_start: vec4(0.6, 0.5, 0.4, 0.5),
+            color_end: vec4(0.5, 0.4, 0.3, 0.0),
+            gravity: vec3(0.0, -0.1, 0.0),
+            turbulence_strength: 0.3,
+            blend_mode: BlendMode::Alpha,
+            ..Self::fire()
+        }
+    }
+
+    pub fn rain() -> Self {
+        Self {
+            emission_rate: 500.0,
+            emitter_shape: EmitterShape::Box,
+            emitter_size: vec3(20.0, 0.1, 20.0),
+            velocity_min: vec3(-0.5, -15.0, -0.5),
+            velocity_max: vec3(0.5, -20.0, 0.5),
+            lifetime_min: 0.5,
+            lifetime_max: 1.0,
+            size_start_min: 0.01,
+            size_start_max: 0.02,
+            size_end_min: 0.01,
+            size_end_max: 0.02,
+            color_start: vec4(0.7, 0.8, 0.9, 0.6),
+            color_end: vec4(0.7, 0.8, 0.9, 0.3),
+            gravity: vec3(0.0, 0.0, 0.0),  // Already has velocity
+            billboard_type: BillboardType::StretchedBillboard,
+            blend_mode: BlendMode::Alpha,
+            ..Self::fire()
+        }
+    }
+
+    pub fn snow() -> Self {
+        Self {
+            emission_rate: 200.0,
+            emitter_shape: EmitterShape::Box,
+            emitter_size: vec3(20.0, 0.1, 20.0),
+            velocity_min: vec3(-0.5, -1.0, -0.5),
+            velocity_max: vec3(0.5, -2.0, 0.5),
+            lifetime_min: 5.0,
+            lifetime_max: 8.0,
+            size_start_min: 0.02,
+            size_start_max: 0.05,
+            size_end_min: 0.02,
+            size_end_max: 0.05,
+            color_start: vec4(1.0, 1.0, 1.0, 0.9),
+            color_end: vec4(1.0, 1.0, 1.0, 0.0),
+            gravity: vec3(0.0, 0.0, 0.0),
+            turbulence_strength: 1.0,
+            turbulence_frequency: 0.5,
+            blend_mode: BlendMode::Alpha,
+            ..Self::fire()
+        }
+    }
+
+    pub fn magic() -> Self {
+        Self {
+            emission_rate: 40.0,
+            emitter_shape: EmitterShape::Sphere,
+            emitter_radius: 0.5,
+            velocity_type: VelocityType::Radial,
+            lifetime_min: 1.0,
+            lifetime_max: 2.0,
+            size_start_min: 0.1,
+            size_start_max: 0.2,
+            size_end_min: 0.0,
+            size_end_max: 0.0,
+            color_start: vec4(0.3, 0.7, 1.0, 1.0),
+            color_end: vec4(0.8, 0.4, 1.0, 0.0),
+            gravity: vec3(0.0, 0.2, 0.0),
+            turbulence_strength: 0.8,
+            blend_mode: BlendMode::Additive,
+            ..Self::fire()
+        }
+    }
+}
+
+/// GPU particle structure
+#[repr(C)]
+struct GPUParticle {
+    position: vec3,
+    lifetime: f32,
+    velocity: vec3,
+    max_lifetime: f32,
+    size: vec2,
+    rotation: f32,
+    rotation_speed: f32,
+    color: vec4,
+    uv_offset: vec2,
+    flags: u32,
+    _padding: f32,
+}
+
+// =============================================================================
+// GPU PARTICLE COMPUTE SHADERS
+// =============================================================================
+
+const PARTICLE_COMPUTE_SHADERS: &str = r#"
+//-----------------------------------------------------------------------------
+// GPU Particle System Compute Shaders
+//-----------------------------------------------------------------------------
+
+#define MAX_PARTICLES 100000
+
+cbuffer EmitterParams : register(b0) {
+    float3 emitter_position;
+    float emission_rate;
+
+    float3 emitter_size;
+    float emitter_radius;
+
+    float3 velocity_min;
+    float delta_time;
+
+    float3 velocity_max;
+    float time;
+
+    float3 gravity;
+    float drag;
+
+    float4 color_start;
+    float4 color_end;
+
+    float lifetime_min;
+    float lifetime_max;
+    float size_start;
+    float size_end;
+
+    float turbulence_strength;
+    float turbulence_frequency;
+    int emitter_shape;
+    int velocity_type;
+}
+
+struct Particle {
+    float3 position;
+    float lifetime;
+    float3 velocity;
+    float max_lifetime;
+    float2 size;
+    float rotation;
+    float rotation_speed;
+    float4 color;
+    float2 uv_offset;
+    uint flags;
+    float _padding;
+};
+
+// Buffers
+RWStructuredBuffer<Particle> particles : register(u0);
+RWStructuredBuffer<uint> alive_list : register(u1);
+RWStructuredBuffer<uint> dead_list : register(u2);
+RWStructuredBuffer<uint> counters : register(u3);  // [0]=alive, [1]=dead, [2]=emit
+
+AppendStructuredBuffer<uint> alive_append : register(u4);
+ConsumeStructuredBuffer<uint> dead_consume : register(u5);
+
+// Random number generation
+uint WangHash(uint seed) {
+    seed = (seed ^ 61) ^ (seed >> 16);
+    seed *= 9;
+    seed = seed ^ (seed >> 4);
+    seed *= 0x27d4eb2d;
+    seed = seed ^ (seed >> 15);
+    return seed;
+}
+
+float Random(inout uint seed) {
+    seed = WangHash(seed);
+    return float(seed) / 4294967295.0;
+}
+
+float3 RandomInSphere(inout uint seed) {
+    float u = Random(seed) * 2.0 - 1.0;
+    float theta = Random(seed) * 6.28318;
+    float r = sqrt(1.0 - u * u);
+    return float3(r * cos(theta), r * sin(theta), u);
+}
+
+float3 RandomInCone(inout uint seed, float3 direction, float angle) {
+    float cos_angle = cos(angle);
+    float z = Random(seed) * (1.0 - cos_angle) + cos_angle;
+    float phi = Random(seed) * 6.28318;
+    float r = sqrt(1.0 - z * z);
+
+    float3 local = float3(r * cos(phi), r * sin(phi), z);
+
+    // Rotate to align with direction
+    float3 up = abs(direction.y) < 0.999 ? float3(0, 1, 0) : float3(1, 0, 0);
+    float3 right = normalize(cross(up, direction));
+    up = cross(direction, right);
+
+    return right * local.x + up * local.y + direction * local.z;
+}
+
+// Curl noise for turbulence
+float3 CurlNoise(float3 pos, float freq) {
+    float eps = 0.01;
+    float3 dx = float3(eps, 0, 0);
+    float3 dy = float3(0, eps, 0);
+    float3 dz = float3(0, 0, eps);
+
+    float3 p = pos * freq;
+
+    // Using simplex noise derivatives (simplified)
+    float n = SimplexNoise(p);
+    float nx = SimplexNoise(p + dx) - SimplexNoise(p - dx);
+    float ny = SimplexNoise(p + dy) - SimplexNoise(p - dy);
+    float nz = SimplexNoise(p + dz) - SimplexNoise(p - dz);
+
+    return float3(
+        ny - nz,
+        nz - nx,
+        nx - ny
+    ) / (2.0 * eps);
+}
+
+// Simplex noise (simplified 3D)
+float SimplexNoise(float3 v) {
+    // ... (full implementation from terrain shader)
+    return frac(sin(dot(v, float3(12.9898, 78.233, 45.543))) * 43758.5453);
+}
+
+// Emit particles
+[numthreads(64, 1, 1)]
+void EmitParticlesCS(uint3 id : SV_DispatchThreadID) {
+    uint emit_count = counters[2];
+    if (id.x >= emit_count) return;
+
+    // Try to get a dead particle
+    uint dead_count;
+    InterlockedAdd(counters[1], -1, dead_count);
+
+    if (dead_count <= 0) {
+        InterlockedAdd(counters[1], 1);
+        return;
+    }
+
+    uint particle_index = dead_list[dead_count - 1];
+
+    // Initialize particle
+    uint seed = particle_index * 1973 + uint(time * 1000.0);
+
+    Particle p;
+    p.lifetime = lerp(lifetime_min, lifetime_max, Random(seed));
+    p.max_lifetime = p.lifetime;
+
+    // Position based on emitter shape
+    if (emitter_shape == 0) { // Point
+        p.position = emitter_position;
+    } else if (emitter_shape == 1) { // Sphere
+        p.position = emitter_position + RandomInSphere(seed) * emitter_radius;
+    } else if (emitter_shape == 2) { // Hemisphere
+        float3 dir = RandomInSphere(seed);
+        dir.y = abs(dir.y);
+        p.position = emitter_position + dir * emitter_radius;
+    } else if (emitter_shape == 3) { // Cone
+        p.position = emitter_position;
+    } else if (emitter_shape == 4) { // Box
+        p.position = emitter_position + float3(
+            (Random(seed) - 0.5) * emitter_size.x,
+            (Random(seed) - 0.5) * emitter_size.y,
+            (Random(seed) - 0.5) * emitter_size.z
+        );
+    }
+
+    // Velocity based on type
+    if (velocity_type == 0) { // Constant
+        p.velocity = (velocity_min + velocity_max) * 0.5;
+    } else if (velocity_type == 1) { // Random
+        p.velocity = lerp(velocity_min, velocity_max,
+                          float3(Random(seed), Random(seed), Random(seed)));
+    } else if (velocity_type == 2) { // Radial
+        float3 dir = normalize(p.position - emitter_position);
+        if (length(dir) < 0.001) dir = RandomInSphere(seed);
+        float speed = lerp(length(velocity_min), length(velocity_max), Random(seed));
+        p.velocity = dir * speed;
+    } else if (velocity_type == 3) { // Tangent
+        float3 radial = normalize(p.position - emitter_position);
+        float3 tangent = normalize(cross(radial, float3(0, 1, 0)));
+        float speed = lerp(length(velocity_min), length(velocity_max), Random(seed));
+        p.velocity = tangent * speed;
+    }
+
+    // Size and color
+    p.size = float2(size_start, size_start);
+    p.rotation = Random(seed) * 6.28318;
+    p.rotation_speed = (Random(seed) - 0.5) * 2.0;
+    p.color = color_start;
+    p.uv_offset = float2(0, 0);
+    p.flags = 1;  // Alive
+
+    particles[particle_index] = p;
+
+    // Add to alive list
+    uint alive_index;
+    InterlockedAdd(counters[0], 1, alive_index);
+    alive_list[alive_index] = particle_index;
+}
+
+// Update particles
+[numthreads(256, 1, 1)]
+void UpdateParticlesCS(uint3 id : SV_DispatchThreadID) {
+    uint alive_count = counters[0];
+    if (id.x >= alive_count) return;
+
+    uint particle_index = alive_list[id.x];
+    Particle p = particles[particle_index];
+
+    if (p.flags == 0) return;  // Dead particle
+
+    // Update lifetime
+    p.lifetime -= delta_time;
+
+    if (p.lifetime <= 0.0) {
+        // Kill particle
+        p.flags = 0;
+        particles[particle_index] = p;
+
+        // Add to dead list
+        uint dead_index;
+        InterlockedAdd(counters[1], 1, dead_index);
+        dead_list[dead_index] = particle_index;
+        return;
+    }
+
+    // Age factor [0, 1]
+    float t = 1.0 - (p.lifetime / p.max_lifetime);
+
+    // Apply forces
+    float3 acceleration = gravity;
+
+    // Drag
+    acceleration -= p.velocity * drag;
+
+    // Turbulence
+    if (turbulence_strength > 0.001) {
+        float3 curl = CurlNoise(p.position + time * 0.5, turbulence_frequency);
+        acceleration += curl * turbulence_strength;
+    }
+
+    // Integrate
+    p.velocity += acceleration * delta_time;
+    p.position += p.velocity * delta_time;
+
+    // Update size
+    p.size = lerp(float2(size_start, size_start), float2(size_end, size_end), t);
+
+    // Update color
+    p.color = lerp(color_start, color_end, t);
+
+    // Update rotation
+    p.rotation += p.rotation_speed * delta_time;
+
+    particles[particle_index] = p;
+}
+
+// Sort particles for correct alpha blending
+[numthreads(256, 1, 1)]
+void BitonicSortCS(uint3 id : SV_DispatchThreadID) {
+    // Bitonic sort implementation for distance-based sorting
+    // ... (complex sorting algorithm)
+}
+"#;
+
+// =============================================================================
+// PARTICLE RENDERING SHADER
+// =============================================================================
+
+const PARTICLE_RENDER_SHADER: &str = r#"
+//-----------------------------------------------------------------------------
+// GPU Particle Rendering Shader
+//-----------------------------------------------------------------------------
+
+cbuffer ParticleRenderParams : register(b0) {
+    float4x4 view;
+    float4x4 projection;
+    float4x4 inv_view;
+
+    float3 camera_position;
+    float soft_depth;
+
+    float3 camera_right;
+    float near_plane;
+
+    float3 camera_up;
+    float far_plane;
+
+    int billboard_type;
+    int sprite_cols;
+    int sprite_rows;
+    float animation_speed;
+}
+
+struct Particle {
+    float3 position;
+    float lifetime;
+    float3 velocity;
+    float max_lifetime;
+    float2 size;
+    float rotation;
+    float rotation_speed;
+    float4 color;
+    float2 uv_offset;
+    uint flags;
+    float _padding;
+};
+
+StructuredBuffer<Particle> particles : register(t0);
+StructuredBuffer<uint> alive_list : register(t1);
+Texture2D<float4> particle_texture : register(t2);
+Texture2D<float> depth_texture : register(t3);
+SamplerState linear_sampler : register(s0);
+
+struct VSOutput {
+    float4 position : SV_POSITION;
+    float2 texcoord : TEXCOORD0;
+    float4 color : COLOR0;
+    float depth : TEXCOORD1;
+};
+
+// Vertex shader (instanced quad rendering)
+VSOutput ParticleVS(uint vertex_id : SV_VertexID, uint instance_id : SV_InstanceID) {
+    VSOutput output;
+
+    uint particle_index = alive_list[instance_id];
+    Particle p = particles[particle_index];
+
+    if (p.flags == 0) {
+        output.position = float4(0, 0, 0, 0);
+        return output;
+    }
+
+    // Quad vertices
+    float2 corners[4] = {
+        float2(-0.5, -0.5),
+        float2(0.5, -0.5),
+        float2(-0.5, 0.5),
+        float2(0.5, 0.5)
+    };
+    float2 corner = corners[vertex_id];
+
+    // Apply rotation
+    float c = cos(p.rotation);
+    float s = sin(p.rotation);
+    float2 rotated = float2(
+        corner.x * c - corner.y * s,
+        corner.x * s + corner.y * c
+    );
+
+    // Billboard
+    float3 world_offset;
+
+    if (billboard_type == 0) { // Camera facing
+        world_offset = camera_right * rotated.x * p.size.x +
+                       camera_up * rotated.y * p.size.y;
+    } else if (billboard_type == 1) { // Velocity aligned
+        float3 velocity_dir = normalize(p.velocity);
+        if (length(p.velocity) < 0.001) velocity_dir = camera_up;
+
+        float3 right = normalize(cross(velocity_dir, camera_position - p.position));
+        world_offset = right * rotated.x * p.size.x +
+                       velocity_dir * rotated.y * p.size.y;
+    } else if (billboard_type == 2) { // Axis aligned (Y-up)
+        float3 to_camera = normalize(camera_position - p.position);
+        float3 right = normalize(cross(float3(0, 1, 0), to_camera));
+        world_offset = right * rotated.x * p.size.x +
+                       float3(0, 1, 0) * rotated.y * p.size.y;
+    } else if (billboard_type == 3) { // Stretched
+        float3 velocity_dir = normalize(p.velocity);
+        float speed = length(p.velocity);
+        float stretch = 1.0 + speed * 0.1;
+
+        float3 right = normalize(cross(velocity_dir, camera_position - p.position));
+        world_offset = right * rotated.x * p.size.x +
+                       velocity_dir * rotated.y * p.size.y * stretch;
+    }
+
+    float3 world_pos = p.position + world_offset;
+
+    output.position = mul(projection, mul(view, float4(world_pos, 1.0)));
+    output.depth = output.position.w;
+
+    // UV with sprite animation
+    float t = 1.0 - (p.lifetime / p.max_lifetime);
+    int frame = int(t * sprite_cols * sprite_rows * animation_speed) % (sprite_cols * sprite_rows);
+    int frame_x = frame % sprite_cols;
+    int frame_y = frame / sprite_cols;
+
+    float2 uv = (corner + 0.5) / float2(sprite_cols, sprite_rows);
+    uv += float2(frame_x, frame_y) / float2(sprite_cols, sprite_rows);
+    uv += p.uv_offset;
+
+    output.texcoord = uv;
+    output.color = p.color;
+
+    return output;
+}
+
+float4 ParticlePS(VSOutput input) : SV_TARGET {
+    float4 tex_color = particle_texture.Sample(linear_sampler, input.texcoord);
+    float4 color = tex_color * input.color;
+
+    // Soft particles
+    if (soft_depth > 0.001) {
+        float2 screen_uv = input.position.xy / float2(1920, 1080);  // Would be actual size
+        float scene_depth = depth_texture.Sample(linear_sampler, screen_uv).r;
+        scene_depth = far_plane * near_plane / (far_plane - scene_depth * (far_plane - near_plane));
+
+        float depth_diff = scene_depth - input.depth;
+        float soft_factor = saturate(depth_diff / soft_depth);
+        color.a *= soft_factor;
+    }
+
+    return color;
+}
+"#;
+
+// =============================================================================
+// DECAL SHADER
+// =============================================================================
+
+const DECAL_SHADER: &str = r#"
+//-----------------------------------------------------------------------------
+// Deferred Decal Projection
+//-----------------------------------------------------------------------------
+
+cbuffer DecalParams : register(b0) {
+    float4x4 decal_to_world;
+    float4x4 world_to_decal;
+    float4x4 view_projection;
+    float4x4 inv_view_projection;
+
+    float4 decal_color;
+
+    float angle_fade_start;
+    float angle_fade_end;
+    float depth_fade;
+    float opacity;
+
+    float normal_strength;
+    float roughness_mod;
+    float metallic_mod;
+    int blend_mode;
+}
+
+Texture2D<float4> decal_albedo : register(t0);
+Texture2D<float4> decal_normal : register(t1);
+Texture2D<float4> decal_mask : register(t2);    // R=rough, G=metal, B=AO
+Texture2D<float> gbuffer_depth : register(t3);
+Texture2D<float4> gbuffer_normal : register(t4);
+
+SamplerState decal_sampler : register(s0);
+
+struct VSOutput {
+    float4 position : SV_POSITION;
+    float4 screen_pos : TEXCOORD0;
+};
+
+// Reconstruct world position from depth
+float3 ReconstructPosition(float2 uv, float depth) {
+    float4 clip = float4(uv * 2.0 - 1.0, depth, 1.0);
+    clip.y = -clip.y;
+    float4 world = mul(inv_view_projection, clip);
+    return world.xyz / world.w;
+}
+
+struct DecalOutput {
+    float4 albedo : SV_TARGET0;
+    float4 normal : SV_TARGET1;
+    float4 material : SV_TARGET2;
+};
+
+DecalOutput DecalPS(VSOutput input) {
+    DecalOutput output;
+
+    // Screen UV
+    float2 screen_uv = (input.screen_pos.xy / input.screen_pos.w) * 0.5 + 0.5;
+    screen_uv.y = 1.0 - screen_uv.y;
+
+    // Sample scene depth and reconstruct position
+    float depth = gbuffer_depth.Sample(decal_sampler, screen_uv).r;
+    float3 world_pos = ReconstructPosition(screen_uv, depth);
+
+    // Transform to decal space
+    float3 decal_pos = mul(world_to_decal, float4(world_pos, 1.0)).xyz;
+
+    // Clip to decal bounds
+    if (any(abs(decal_pos) > 0.5)) {
+        discard;
+    }
+
+    // Decal UV
+    float2 decal_uv = decal_pos.xy + 0.5;
+
+    // Angle-based fade
+    float3 surface_normal = gbuffer_normal.Sample(decal_sampler, screen_uv).xyz * 2.0 - 1.0;
+    float3 decal_forward = normalize(mul((float3x3)decal_to_world, float3(0, 0, 1)));
+    float angle = abs(dot(surface_normal, decal_forward));
+    float angle_fade = smoothstep(angle_fade_end, angle_fade_start, angle);
+
+    if (angle_fade < 0.01) {
+        discard;
+    }
+
+    // Edge fade
+    float edge_fade = 1.0;
+    edge_fade *= 1.0 - smoothstep(0.4, 0.5, abs(decal_pos.x));
+    edge_fade *= 1.0 - smoothstep(0.4, 0.5, abs(decal_pos.y));
+    edge_fade *= 1.0 - smoothstep(0.4, 0.5, abs(decal_pos.z));
+
+    // Sample decal textures
+    float4 albedo = decal_albedo.Sample(decal_sampler, decal_uv);
+    float4 normal_sample = decal_normal.Sample(decal_sampler, decal_uv);
+    float4 mask = decal_mask.Sample(decal_sampler, decal_uv);
+
+    // Calculate final opacity
+    float final_opacity = albedo.a * opacity * angle_fade * edge_fade;
+
+    // Blend modes
+    if (blend_mode == 0) { // Normal blend
+        output.albedo = float4(albedo.rgb * decal_color.rgb, final_opacity);
+    } else if (blend_mode == 1) { // Multiply
+        output.albedo = float4(albedo.rgb, final_opacity);
+    } else if (blend_mode == 2) { // Additive
+        output.albedo = float4(albedo.rgb * decal_color.rgb * final_opacity, 0);
+    }
+
+    // Normal blending
+    float3 decal_n = normal_sample.xyz * 2.0 - 1.0;
+    decal_n.xy *= normal_strength;
+    output.normal = float4(decal_n * 0.5 + 0.5, final_opacity);
+
+    // Material properties
+    output.material = float4(
+        mask.r + roughness_mod,
+        mask.g + metallic_mod,
+        mask.b,
+        final_opacity
+    );
+
+    return output;
+}
+"#;
+
+// =============================================================================
+// DISTORTION SHADER
+// =============================================================================
+
+const DISTORTION_SHADER: &str = r#"
+//-----------------------------------------------------------------------------
+// Screen-Space Distortion Effects
+//-----------------------------------------------------------------------------
+
+cbuffer DistortionParams : register(b0) {
+    float4x4 view_projection;
+    float3 camera_position;
+    float time;
+
+    float distortion_strength;
+    float refraction_index;
+    float chromatic_aberration;
+    float _padding;
+}
+
+Texture2D<float4> scene_texture : register(t0);
+Texture2D<float4> distortion_buffer : register(t1);  // RG = normal, B = strength
+Texture2D<float> depth_texture : register(t2);
+SamplerState linear_clamp : register(s0);
+
+struct VSOutput {
+    float4 position : SV_POSITION;
+    float2 texcoord : TEXCOORD0;
+};
+
+float4 DistortionPS(VSOutput input) : SV_TARGET {
+    float2 uv = input.texcoord;
+
+    // Sample distortion buffer
+    float4 distortion = distortion_buffer.Sample(linear_clamp, uv);
+    float2 distort_normal = distortion.rg * 2.0 - 1.0;
+    float strength = distortion.b * distortion_strength;
+
+    if (strength < 0.001) {
+        return scene_texture.Sample(linear_clamp, uv);
+    }
+
+    // Apply distortion offset
+    float2 offset = distort_normal * strength;
+
+    // Chromatic aberration
+    if (chromatic_aberration > 0.001) {
+        float2 offset_r = offset * (1.0 + chromatic_aberration);
+        float2 offset_g = offset;
+        float2 offset_b = offset * (1.0 - chromatic_aberration);
+
+        float r = scene_texture.Sample(linear_clamp, uv + offset_r).r;
+        float g = scene_texture.Sample(linear_clamp, uv + offset_g).g;
+        float b = scene_texture.Sample(linear_clamp, uv + offset_b).b;
+
+        return float4(r, g, b, 1.0);
+    }
+
+    return scene_texture.Sample(linear_clamp, uv + offset);
+}
+
+// Heat haze distortion for particles/effects
+float4 HeatHazePS(VSOutput input) : SV_TARGET {
+    float2 uv = input.texcoord;
+
+    // Animated noise-based distortion
+    float2 noise_uv = uv * 10.0 + time * 0.5;
+    float noise = SimplexNoise2D(noise_uv);
+    float noise2 = SimplexNoise2D(noise_uv * 1.3 + 100.0);
+
+    float2 offset = float2(noise, noise2) * 0.01;
+
+    return scene_texture.Sample(linear_clamp, uv + offset);
+}
+
+float SimplexNoise2D(float2 v) {
+    return frac(sin(dot(v, float2(12.9898, 78.233))) * 43758.5453);
+}
+"#;
+
+// =============================================================================
+// LENS EFFECTS SHADER
+// =============================================================================
+
+const LENS_EFFECTS_SHADER: &str = r#"
+//-----------------------------------------------------------------------------
+// Lens Effects (Flares, Glints, Anamorphic)
+//-----------------------------------------------------------------------------
+
+cbuffer LensParams : register(b0) {
+    float3 sun_screen_pos;
+    float sun_visibility;
+
+    float flare_intensity;
+    float flare_threshold;
+    float ghost_count;
+    float ghost_spacing;
+
+    float4 flare_color;
+
+    float halo_radius;
+    float halo_width;
+    float chromatic_distortion;
+    float anamorphic_ratio;
+}
+
+Texture2D<float4> scene_texture : register(t0);
+Texture2D<float4> flare_texture : register(t1);  // Flare/starburst texture
+Texture2D<float4> dirt_texture : register(t2);   // Lens dirt
+SamplerState linear_clamp : register(s0);
+SamplerState linear_wrap : register(s1);
+
+struct VSOutput {
+    float4 position : SV_POSITION;
+    float2 texcoord : TEXCOORD0;
+};
+
+// Extract bright pixels for flare source
+float4 BrightPassPS(VSOutput input) : SV_TARGET {
+    float4 color = scene_texture.Sample(linear_clamp, input.texcoord);
+    float brightness = dot(color.rgb, float3(0.2126, 0.7152, 0.0722));
+
+    if (brightness > flare_threshold) {
+        return color * ((brightness - flare_threshold) / (1.0 - flare_threshold));
+    }
+
+    return float4(0, 0, 0, 0);
+}
+
+// Generate lens ghosts
+float4 GhostsPS(VSOutput input) : SV_TARGET {
+    float2 uv = input.texcoord;
+    float2 ghost_vec = (float2(0.5, 0.5) - uv) * ghost_spacing;
+
+    float4 result = float4(0, 0, 0, 0);
+
+    for (int i = 0; i < int(ghost_count); i++) {
+        float2 ghost_uv = uv + ghost_vec * float(i);
+
+        // Chromatic aberration per ghost
+        float3 ghost_color;
+        float offset = chromatic_distortion * 0.01 * float(i);
+
+        ghost_color.r = scene_texture.Sample(linear_clamp, ghost_uv + float2(offset, 0)).r;
+        ghost_color.g = scene_texture.Sample(linear_clamp, ghost_uv).g;
+        ghost_color.b = scene_texture.Sample(linear_clamp, ghost_uv - float2(offset, 0)).b;
+
+        // Falloff based on distance
+        float falloff = 1.0 / (1.0 + float(i) * 0.5);
+
+        // Color shift
+        float3 tint = lerp(float3(1, 1, 1), flare_color.rgb, float(i) / ghost_count);
+
+        result.rgb += ghost_color * tint * falloff;
+    }
+
+    return result * flare_intensity * sun_visibility;
+}
+
+// Lens halo
+float4 HaloPS(VSOutput input) : SV_TARGET {
+    float2 uv = input.texcoord;
+    float2 center_vec = uv - float2(0.5, 0.5);
+    float dist = length(center_vec);
+
+    // Ring halo
+    float ring = 1.0 - abs(dist - halo_radius) / halo_width;
+    ring = saturate(ring);
+    ring = pow(ring, 2.0);
+
+    // Chromatic ring
+    float3 halo_color;
+    float offset = chromatic_distortion * 0.02;
+
+    halo_color.r = ring * (1.0 - abs(dist - halo_radius - offset) / halo_width);
+    halo_color.g = ring;
+    halo_color.b = ring * (1.0 - abs(dist - halo_radius + offset) / halo_width);
+
+    return float4(saturate(halo_color) * flare_color.rgb, 1.0) * flare_intensity * sun_visibility;
+}
+
+// Anamorphic flare (horizontal streak)
+float4 AnamorphicPS(VSOutput input) : SV_TARGET {
+    float2 uv = input.texcoord;
+
+    float4 result = float4(0, 0, 0, 0);
+    int samples = 16;
+    float step_size = anamorphic_ratio / float(samples);
+
+    for (int i = -samples; i <= samples; i++) {
+        float2 sample_uv = uv + float2(float(i) * step_size, 0);
+        float weight = 1.0 - abs(float(i)) / float(samples);
+        weight = pow(weight, 2.0);
+
+        result += scene_texture.Sample(linear_clamp, sample_uv) * weight;
+    }
+
+    result /= float(samples);
+
+    // Tint
+    result.rgb *= flare_color.rgb;
+
+    return result * flare_intensity;
+}
+
+// Starburst pattern
+float4 StarburstPS(VSOutput input) : SV_TARGET {
+    float2 uv = input.texcoord;
+    float2 sun_uv = sun_screen_pos.xy;
+
+    float2 to_sun = sun_uv - uv;
+    float dist = length(to_sun);
+    float angle = atan2(to_sun.y, to_sun.x);
+
+    // Rotating starburst
+    float2 starburst_uv = float2(angle / 6.28318 + 0.5, dist * 2.0);
+    float4 starburst = flare_texture.Sample(linear_wrap, starburst_uv);
+
+    // Falloff
+    float falloff = 1.0 / (1.0 + dist * 10.0);
+
+    return starburst * flare_color * flare_intensity * falloff * sun_visibility;
+}
+
+// Combine all lens effects
+float4 LensFlareCompositePS(VSOutput input) : SV_TARGET {
+    float2 uv = input.texcoord;
+
+    float4 scene = scene_texture.Sample(linear_clamp, uv);
+
+    // Add lens dirt
+    float4 dirt = dirt_texture.Sample(linear_wrap, uv * 2.0);
+    float brightness = dot(scene.rgb, float3(0.2126, 0.7152, 0.0722));
+    scene.rgb += scene.rgb * dirt.rgb * brightness * 0.5;
+
+    return scene;
+}
+"#;
+
+// =============================================================================
+// VOLUMETRIC EFFECTS SHADER
+// =============================================================================
+
+const VOLUMETRIC_EFFECTS_SHADER: &str = r#"
+//-----------------------------------------------------------------------------
+// Volumetric Lighting and Fog
+//-----------------------------------------------------------------------------
+
+#define MAX_STEPS 64
+
+cbuffer VolumetricParams : register(b0) {
+    float4x4 inv_view_projection;
+    float4x4 shadow_matrix;
+
+    float3 camera_position;
+    float scattering;
+
+    float3 light_direction;
+    float absorption;
+
+    float3 light_color;
+    float anisotropy;
+
+    float3 fog_color;
+    float density;
+
+    float max_distance;
+    float step_scale;
+    float time;
+    float noise_scale;
+}
+
+Texture2D<float> depth_texture : register(t0);
+Texture2D<float> shadow_map : register(t1);
+Texture3D<float> noise_texture : register(t2);
+SamplerState linear_clamp : register(s0);
+SamplerState linear_wrap : register(s1);
+
+// Henyey-Greenstein phase function
+float HenyeyGreenstein(float cos_theta, float g) {
+    float g2 = g * g;
+    return (1.0 - g2) / (4.0 * 3.14159 * pow(1.0 + g2 - 2.0 * g * cos_theta, 1.5));
+}
+
+// Sample shadow map with PCF
+float SampleShadow(float3 world_pos) {
+    float4 shadow_coord = mul(shadow_matrix, float4(world_pos, 1.0));
+    shadow_coord.xyz /= shadow_coord.w;
+    shadow_coord.xy = shadow_coord.xy * 0.5 + 0.5;
+    shadow_coord.y = 1.0 - shadow_coord.y;
+
+    if (any(shadow_coord.xy < 0.0) || any(shadow_coord.xy > 1.0)) {
+        return 1.0;
+    }
+
+    float shadow = 0.0;
+    float2 texel_size = 1.0 / float2(2048, 2048);
+
+    for (int x = -1; x <= 1; x++) {
+        for (int y = -1; y <= 1; y++) {
+            float2 offset = float2(x, y) * texel_size;
+            float depth = shadow_map.Sample(linear_clamp, shadow_coord.xy + offset).r;
+            shadow += shadow_coord.z < depth + 0.001 ? 1.0 : 0.0;
+        }
+    }
+
+    return shadow / 9.0;
+}
+
+struct VSOutput {
+    float4 position : SV_POSITION;
+    float2 texcoord : TEXCOORD0;
+    float3 view_ray : TEXCOORD1;
+};
+
+float4 VolumetricLightPS(VSOutput input) : SV_TARGET {
+    float depth = depth_texture.Sample(linear_clamp, input.texcoord).r;
+    float3 view_dir = normalize(input.view_ray);
+
+    // Calculate march distance
+    float scene_depth = LinearizeDepth(depth);
+    float march_dist = min(scene_depth, max_distance);
+
+    // Jitter for temporal stability
+    float jitter = frac(sin(dot(input.texcoord, float2(12.9898, 78.233)) + time) * 43758.5453);
+
+    // Raymarch
+    float3 accumulated = float3(0, 0, 0);
+    float transmittance = 1.0;
+
+    float step_size = march_dist / float(MAX_STEPS) * step_scale;
+    float3 ray_pos = camera_position + view_dir * step_size * jitter;
+
+    float cos_theta = dot(view_dir, -light_direction);
+    float phase = HenyeyGreenstein(cos_theta, anisotropy);
+
+    for (int i = 0; i < MAX_STEPS && transmittance > 0.01; i++) {
+        // Sample noise for density variation
+        float3 noise_pos = ray_pos * noise_scale + time * 0.1;
+        float noise = noise_texture.Sample(linear_wrap, noise_pos).r;
+        float local_density = density * (0.5 + noise * 0.5);
+
+        // Sample shadow
+        float shadow = SampleShadow(ray_pos);
+
+        // Accumulate in-scattering
+        float3 in_scatter = light_color * scattering * phase * shadow * local_density;
+
+        // Beer-Lambert absorption
+        float extinction = (scattering + absorption) * local_density;
+        float step_transmittance = exp(-extinction * step_size);
+
+        // Integrate
+        accumulated += in_scatter * transmittance * (1.0 - step_transmittance);
+        transmittance *= step_transmittance;
+
+        ray_pos += view_dir * step_size;
+    }
+
+    // Add ambient fog
+    accumulated += fog_color * (1.0 - transmittance) * 0.1;
+
+    return float4(accumulated, 1.0 - transmittance);
+}
+
+float LinearizeDepth(float d) {
+    float near = 0.1;
+    float far = 1000.0;
+    return near * far / (far - d * (far - near));
+}
+"#;
+
+// =============================================================================
+// EFFECTS SYSTEM
+// =============================================================================
+
+/// GPU particle system manager
+struct ParticleSystem {
+    emitters: Vec<ParticleEmitter>,
+    max_particles: u32,
+
+    // GPU buffers
+    particle_buffer: BufferHandle,
+    alive_list: BufferHandle,
+    dead_list: BufferHandle,
+    counters: BufferHandle,
+
+    // Indirect draw
+    indirect_args: BufferHandle,
+}
+
+struct ParticleEmitter {
+    config: ParticleEmitterConfig,
+    position: vec3,
+    rotation: vec4,
+    enabled: bool,
+    emit_accumulator: f32,
+}
+
+impl ParticleSystem {
+    pub fn new(device: &RenderDevice, max_particles: u32) -> Self {
+        let particle_buffer = device.create_structured_buffer(
+            max_particles as usize,
+            std::mem::size_of::<GPUParticle>(),
+            BufferUsage::ShaderResource | BufferUsage::UnorderedAccess
+        );
+
+        let alive_list = device.create_structured_buffer(
+            max_particles as usize,
+            4,
+            BufferUsage::ShaderResource | BufferUsage::UnorderedAccess
+        );
+
+        let dead_list = device.create_structured_buffer(
+            max_particles as usize,
+            4,
+            BufferUsage::ShaderResource | BufferUsage::UnorderedAccess
+        );
+
+        let counters = device.create_structured_buffer(
+            4,
+            4,
+            BufferUsage::UnorderedAccess
+        );
+
+        let indirect_args = device.create_buffer(
+            16,
+            BufferUsage::IndirectArgs | BufferUsage::UnorderedAccess
+        );
+
+        Self {
+            emitters: Vec::new(),
+            max_particles,
+            particle_buffer,
+            alive_list,
+            dead_list,
+            counters,
+            indirect_args,
+        }
+    }
+
+    pub fn add_emitter(&mut self, config: ParticleEmitterConfig, position: vec3) -> usize {
+        self.emitters.push(ParticleEmitter {
+            config,
+            position,
+            rotation: [0.0, 0.0, 0.0, 1.0],
+            enabled: true,
+            emit_accumulator: 0.0,
+        });
+        self.emitters.len() - 1
+    }
+
+    pub fn update(&mut self, context: &ComputeContext, delta_time: f32, time: f32) {
+        // Calculate emission counts
+        for emitter in &mut self.emitters {
+            if !emitter.enabled { continue; }
+
+            emitter.emit_accumulator += emitter.config.emission_rate * delta_time;
+        }
+
+        // Emit new particles
+        context.bind_compute_shader("particle_emit_cs");
+        // Set buffers and params...
+        // context.dispatch(...)
+
+        // Update existing particles
+        context.bind_compute_shader("particle_update_cs");
+        // context.dispatch(...)
+
+        // Optional: Sort for blending
+        // context.bind_compute_shader("particle_sort_cs");
+        // context.dispatch(...)
+    }
+
+    pub fn render(&self, context: &RenderContext, camera: &Camera) {
+        context.bind_shader("particle_render");
+
+        context.set_structured_buffer(0, &self.particle_buffer);
+        context.set_structured_buffer(1, &self.alive_list);
+
+        // Draw indirect
+        context.draw_instanced_indirect(&self.indirect_args);
+    }
+
+    pub fn burst(&mut self, emitter_index: usize, count: u32) {
+        if let Some(emitter) = self.emitters.get_mut(emitter_index) {
+            emitter.emit_accumulator += count as f32;
+        }
+    }
+}
+
+/// Decal manager
+struct DecalSystem {
+    decals: Vec<Decal>,
+    max_decals: u32,
+    decal_buffer: BufferHandle,
+}
+
+struct Decal {
+    transform: mat4,
+    albedo: TextureHandle,
+    normal: TextureHandle,
+    mask: TextureHandle,
+    color: vec4,
+    lifetime: f32,
+    fade_time: f32,
+}
+
+impl DecalSystem {
+    pub fn new(device: &RenderDevice, max_decals: u32) -> Self {
+        let decal_buffer = device.create_structured_buffer(
+            max_decals as usize,
+            std::mem::size_of::<DecalGPU>(),
+            BufferUsage::ShaderResource
+        );
+
+        Self {
+            decals: Vec::new(),
+            max_decals,
+            decal_buffer,
+        }
+    }
+
+    pub fn spawn(&mut self, position: vec3, normal: vec3, size: vec3,
+                 albedo: TextureHandle, normal_tex: TextureHandle, mask: TextureHandle) {
+        // Create transform matrix
+        let up = if normal.1.abs() > 0.99 { [1.0, 0.0, 0.0] } else { [0.0, 1.0, 0.0] };
+        // Build rotation from normal...
+
+        self.decals.push(Decal {
+            transform: [[1.0; 4]; 4],
+            albedo,
+            normal: normal_tex,
+            mask,
+            color: [1.0, 1.0, 1.0, 1.0],
+            lifetime: 30.0,
+            fade_time: 5.0,
+        });
+    }
+
+    pub fn update(&mut self, delta_time: f32) {
+        for decal in &mut self.decals {
+            decal.lifetime -= delta_time;
+        }
+
+        self.decals.retain(|d| d.lifetime > 0.0);
+    }
+
+    pub fn render(&self, context: &RenderContext, gbuffer: &GBuffer) {
+        context.bind_shader("decal");
+        // Render each decal as deferred pass
+    }
+}
+
+#[repr(C)]
+struct DecalGPU {
+    transform: [[f32; 4]; 4],
+    inv_transform: [[f32; 4]; 4],
+    color: [f32; 4],
+    params: [f32; 4],
+}
+
+// Placeholder types
+type BufferHandle = u64;
+type TextureHandle = u64;
+type vec2 = [f32; 2];
+type vec3 = [f32; 3];
+type vec4 = [f32; 4];
+type mat4 = [[f32; 4]; 4];
+
+struct RenderDevice;
+impl RenderDevice {
+    fn create_structured_buffer(&self, _count: usize, _stride: usize, _usage: BufferUsage) -> BufferHandle { 0 }
+    fn create_buffer(&self, _size: usize, _usage: BufferUsage) -> BufferHandle { 0 }
+}
+
+struct ComputeContext;
+impl ComputeContext {
+    fn bind_compute_shader(&self, _name: &str) {}
+}
+
+struct RenderContext;
+impl RenderContext {
+    fn bind_shader(&self, _name: &str) {}
+    fn set_structured_buffer(&self, _slot: u32, _buf: &BufferHandle) {}
+    fn draw_instanced_indirect(&self, _args: &BufferHandle) {}
+}
+
+struct Camera;
+struct GBuffer;
+
+enum BufferUsage { ShaderResource, UnorderedAccess, IndirectArgs }
+
+// =============================================================================
+// MODULE EXPORTS
+// =============================================================================
+
+pub use ParticleEmitterConfig;
+pub use ParticleSystem;
+pub use DecalSystem;
+
+pub const SHADERS: &[(&str, &str)] = &[
+    ("particle_compute", PARTICLE_COMPUTE_SHADERS),
+    ("particle_render", PARTICLE_RENDER_SHADER),
+    ("decal", DECAL_SHADER),
+    ("distortion", DISTORTION_SHADER),
+    ("lens_effects", LENS_EFFECTS_SHADER),
+    ("volumetric_effects", VOLUMETRIC_EFFECTS_SHADER),
+];

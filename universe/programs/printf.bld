@@ -1,0 +1,224 @@
+// qprintf — Format string output, written in BuildLang
+// Specifiers: %s %d %f %x %o %c %%  |  Escapes: \n \t \\ \"
+// Usage: qprintf FORMAT [ARG...]
+
+fn is_digit(c: String) -> bool {
+    c == "0" || c == "1" || c == "2" || c == "3" || c == "4" ||
+    c == "5" || c == "6" || c == "7" || c == "8" || c == "9"
+}
+
+fn digit_val(c: String) -> i32 {
+    if c == "1" { return 1; } if c == "2" { return 2; } if c == "3" { return 3; }
+    if c == "4" { return 4; } if c == "5" { return 5; } if c == "6" { return 6; }
+    if c == "7" { return 7; } if c == "8" { return 8; } if c == "9" { return 9; }
+    0
+}
+
+fn digit_char(d: i32) -> String {
+    if d == 0 { "0" } else if d == 1 { "1" } else if d == 2 { "2" }
+    else if d == 3 { "3" } else if d == 4 { "4" } else if d == 5 { "5" }
+    else if d == 6 { "6" } else if d == 7 { "7" } else if d == 8 { "8" }
+    else { "9" }
+}
+
+fn hex_char(d: i32) -> String {
+    if d < 10 { return digit_char(d); }
+    if d == 10 { "a" } else if d == 11 { "b" } else if d == 12 { "c" }
+    else if d == 13 { "d" } else if d == 14 { "e" } else { "f" }
+}
+
+// Convert integer to string in given base (2-16)
+fn int_to_base(val: i32, base: i32) -> String {
+    if val == 0 { return "0"; }
+    let mut n = val;
+    let mut neg = false;
+    if n < 0 { neg = true; n = 0 - n; }
+    let mut out = "";
+    while n > 0 {
+        let d = n % base;
+        out = hex_char(d) + out;
+        n = n / base;
+    }
+    if neg { out = "-" + out; }
+    out
+}
+
+fn pad_left(s: String, width: i32, fill: String) -> String {
+    let slen = s.len();
+    if slen >= width { return s; }
+    let mut out = "";
+    let mut i: i32 = 0;
+    while i < width - slen { out = out + fill; i = i + 1; }
+    out + s
+}
+
+fn format_float(val: f64, prec: i32) -> String {
+    let neg = val < 0.0;
+    let mut abs_val = val;
+    if neg { abs_val = 0.0 - val; }
+    // Floor to integer part
+    let mut int_f: f64 = 0.0;
+    let mut tmp = abs_val;
+    while tmp >= 1.0 { int_f = int_f + 1.0; tmp = tmp - 1.0; }
+    let frac = abs_val - int_f;
+    // Convert int_f to i32
+    let mut int_i: i32 = 0;
+    let mut tmp2 = int_f;
+    while tmp2 >= 1.0 { int_i = int_i + 1; tmp2 = tmp2 - 1.0; }
+    let int_str = int_to_base(int_i, 10);
+    let prefix = if neg { "-" + int_str } else { int_str };
+    if prec == 0 { return prefix; }
+    // Fractional digits
+    let mut frac_str = "";
+    let mut f = frac;
+    let mut p: i32 = 0;
+    while p < prec {
+        f = f * 10.0;
+        let mut d: i32 = 0;
+        while f >= 1.0 { d = d + 1; f = f - 1.0; }
+        if p == prec - 1 && f >= 0.5 { d = d + 1; }
+        frac_str = frac_str + digit_char(d);
+        p = p + 1;
+    }
+    prefix + "." + frac_str
+}
+
+fn process_escapes(s: String) -> String {
+    let len = s.len();
+    let mut out = "";
+    let mut i: i32 = 0;
+    while i < len {
+        let c = s.char_at(i);
+        if c == "\\" && i + 1 < len {
+            let nx = s.char_at(i + 1);
+            if nx == "n" { out = out + "\n"; i = i + 2; }
+            else if nx == "t" { out = out + "\t"; i = i + 2; }
+            else if nx == "\\" { out = out + "\\"; i = i + 2; }
+            else if nx == "\"" { out = out + "\""; i = i + 2; }
+            else { out = out + c; i = i + 1; }
+        } else {
+            out = out + c; i = i + 1;
+        }
+    }
+    out
+}
+
+// Parse width/precision digits starting at pos, returns (value, new_pos)
+fn parse_digits(fmt: String, pos: i32, flen: i32) -> i32 {
+    let mut val: i32 = 0;
+    let mut p = pos;
+    let mut go = true;
+    while go {
+        if p >= flen { go = false; }
+        else {
+            let wc = fmt.char_at(p);
+            if is_digit(wc) { val = val * 10 + digit_val(wc); p = p + 1; }
+            else { go = false; }
+        }
+    }
+    val
+}
+
+fn count_digits(fmt: String, pos: i32, flen: i32) -> i32 {
+    let mut count: i32 = 0;
+    let mut p = pos;
+    let mut go = true;
+    while go {
+        if p >= flen { go = false; }
+        else {
+            let wc = fmt.char_at(p);
+            if is_digit(wc) { count = count + 1; p = p + 1; }
+            else { go = false; }
+        }
+    }
+    count
+}
+
+fn format_spec(spec: String, arg_val: String, width: i32, zero_pad: bool, prec: i32) ~ Console {
+    if spec == "s" {
+        let r = if width > 0 { pad_left(arg_val, width, " ") } else { arg_val };
+        print!("{}", r);
+    } else if spec == "d" {
+        let n = arg_val.parse_int();
+        let s = int_to_base(n, 10);
+        let fill = if zero_pad { "0" } else { " " };
+        let r = if width > 0 { pad_left(s, width, fill) } else { s };
+        print!("{}", r);
+    } else if spec == "f" {
+        let v = arg_val.parse_float();
+        let p = if prec < 0 { 6 } else { prec };
+        let s = format_float(v, p);
+        let r = if width > 0 { pad_left(s, width, " ") } else { s };
+        print!("{}", r);
+    } else if spec == "x" {
+        let n = arg_val.parse_int();
+        let s = int_to_base(n, 16);
+        let fill = if zero_pad { "0" } else { " " };
+        let r = if width > 0 { pad_left(s, width, fill) } else { s };
+        print!("{}", r);
+    } else if spec == "o" {
+        let n = arg_val.parse_int();
+        let s = int_to_base(n, 8);
+        let fill = if zero_pad { "0" } else { " " };
+        let r = if width > 0 { pad_left(s, width, fill) } else { s };
+        print!("{}", r);
+    } else if spec == "c" {
+        if arg_val.len() > 0 { print!("{}", arg_val.char_at(0)); }
+    } else {
+        print!("%{}", spec);
+    }
+}
+
+fn do_printf(fmt_raw: String, arg_start: i32, nargs: i32) ~ Console + Environment {
+    let fmt = process_escapes(fmt_raw);
+    let flen = fmt.len();
+    let mut pos: i32 = 0;
+    let mut arg_idx = arg_start;
+    while pos < flen {
+        let c = fmt.char_at(pos);
+        if c == "%" {
+            pos = pos + 1;
+            if pos >= flen { return; }
+            let nx = fmt.char_at(pos);
+            if nx == "%" { print!("%"); pos = pos + 1; }
+            else {
+                let mut zero_pad = false;
+                if pos < flen && fmt.char_at(pos) == "0" { zero_pad = true; pos = pos + 1; }
+                let width = parse_digits(fmt, pos, flen);
+                pos = pos + count_digits(fmt, pos, flen);
+                let mut prec: i32 = -1;
+                if pos < flen && fmt.char_at(pos) == "." {
+                    pos = pos + 1;
+                    prec = parse_digits(fmt, pos, flen);
+                    pos = pos + count_digits(fmt, pos, flen);
+                }
+                if pos >= flen { return; }
+                let spec = fmt.char_at(pos);
+                pos = pos + 1;
+                let arg_val = if arg_idx < nargs { args_get(arg_idx) } else { "" };
+                arg_idx = arg_idx + 1;
+                format_spec(spec, arg_val, width, zero_pad, prec);
+            }
+        } else {
+            print!("{}", c); pos = pos + 1;
+        }
+    }
+}
+
+fn print_help() ~ Console {
+    println!("qprintf — format and print data");
+    println!("");
+    println!("Usage: qprintf FORMAT [ARG...]");
+    println!("");
+    println!("Specifiers: %s (string), %d (int), %f (float), %x (hex), %o (octal), %c (char), %% (literal)");
+    println!("Modifiers:  %Nd (width), %0Nd (zero-pad), %.Nf (precision)");
+    println!("Escapes:    \\n (newline), \\t (tab), \\\\ (backslash)");
+}
+
+fn main() ~ Console + Environment + Process {
+    let nargs = args_count();
+    if nargs < 2 { print_help(); process_exit(0); }
+    let first = args_get(1);
+    if first == "--help" || first == "-h" { print_help(); process_exit(0); }
+    do_printf(first, 2, nargs);
+}

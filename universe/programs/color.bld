@@ -1,0 +1,213 @@
+// BuildLang Color Space Converter
+//
+// Converts sRGB colors to CIE XYZ, CIE Lab, and OKLab color spaces.
+// Demonstrates: struct types, methods, math functions, formatted output.
+//
+// Color science references:
+//   sRGB → XYZ: IEC 61966-2-1 (D65 illuminant, 2° observer)
+//   XYZ → Lab:  CIE 1976 L*a*b*
+//   OKLab:      Björn Ottosson (2020), "A perceptual color space for image processing"
+//
+// All matrices and constants are standard values from the specifications.
+
+// --- Color types ---
+
+struct RGB {
+    r: f64,
+    g: f64,
+    b: f64,
+}
+
+struct XYZ {
+    x: f64,
+    y: f64,
+    z: f64,
+}
+
+struct Lab {
+    l: f64,
+    a: f64,
+    b: f64,
+}
+
+struct OKLab {
+    l: f64,
+    a: f64,
+    b: f64,
+}
+
+// --- sRGB transfer function ---
+
+impl RGB {
+    fn new(r: f64, g: f64, b: f64) -> RGB {
+        RGB { r, g, b }
+    }
+
+    // sRGB → linear: remove gamma curve (IEC 61966-2-1)
+    fn linearize_component(c: f64) -> f64 {
+        if c <= 0.04045 {
+            c / 12.92
+        } else {
+            pow((c + 0.055) / 1.055, 2.4)
+        }
+    }
+
+    fn to_linear(&self) -> RGB {
+        RGB::new(
+            RGB::linearize_component(self.r),
+            RGB::linearize_component(self.g),
+            RGB::linearize_component(self.b),
+        )
+    }
+}
+
+// --- sRGB → CIE XYZ (D65) ---
+
+impl XYZ {
+    fn new(x: f64, y: f64, z: f64) -> XYZ {
+        XYZ { x, y, z }
+    }
+
+    // sRGB to XYZ matrix (D65 illuminant, IEC 61966-2-1)
+    fn from_linear_rgb(rgb: &RGB) -> XYZ {
+        XYZ::new(
+            0.4124564 * rgb.r + 0.3575761 * rgb.g + 0.1804375 * rgb.b,
+            0.2126729 * rgb.r + 0.7151522 * rgb.g + 0.0721750 * rgb.b,
+            0.0193339 * rgb.r + 0.1191920 * rgb.g + 0.9503041 * rgb.b,
+        )
+    }
+}
+
+// --- CIE XYZ → CIE L*a*b* ---
+
+impl Lab {
+    fn new(l: f64, a: f64, b: f64) -> Lab {
+        Lab { l, a, b }
+    }
+
+    // CIE Lab transfer function (must be defined before from_xyz for forward reference)
+    fn f(t: f64) -> f64 {
+        let delta = 6.0 / 29.0;
+        if t > delta * delta * delta {
+            pow(t, 1.0 / 3.0)
+        } else {
+            t / (3.0 * delta * delta) + 4.0 / 29.0
+        }
+    }
+
+    // CIE 1976 L*a*b* from XYZ (D65 white point)
+    fn from_xyz(xyz: &XYZ) -> Lab {
+        // D65 reference white
+        let xn = 0.95047;
+        let yn = 1.00000;
+        let zn = 1.08883;
+
+        let fx = Lab::f(xyz.x / xn);
+        let fy = Lab::f(xyz.y / yn);
+        let fz = Lab::f(xyz.z / zn);
+
+        Lab::new(
+            116.0 * fy - 16.0,
+            500.0 * (fx - fy),
+            200.0 * (fy - fz),
+        )
+    }
+}
+
+// --- OKLab (Björn Ottosson 2020) ---
+
+impl OKLab {
+    fn new(l: f64, a: f64, b: f64) -> OKLab {
+        OKLab { l, a, b }
+    }
+
+    fn from_linear_rgb(rgb: &RGB) -> OKLab {
+        // Step 1: linear sRGB → LMS (Ottosson's M1 matrix)
+        let l = 0.4122214708 * rgb.r + 0.5363325363 * rgb.g + 0.0514459929 * rgb.b;
+        let m = 0.2119034982 * rgb.r + 0.6806995451 * rgb.g + 0.1073969566 * rgb.b;
+        let s = 0.0883024619 * rgb.r + 0.2817188376 * rgb.g + 0.6299787005 * rgb.b;
+
+        // Step 2: cube root (perceptual nonlinearity)
+        let l_ = pow(l, 1.0 / 3.0);
+        let m_ = pow(m, 1.0 / 3.0);
+        let s_ = pow(s, 1.0 / 3.0);
+
+        // Step 3: LMS' → OKLab (Ottosson's M2 matrix)
+        OKLab::new(
+            0.2104542553 * l_ + 0.7936177850 * m_ - 0.0040720468 * s_,
+            1.9779984951 * l_ - 2.4285922050 * m_ + 0.4505937099 * s_,
+            0.0259040371 * l_ + 0.7827717662 * m_ - 0.8086757660 * s_,
+        )
+    }
+}
+
+// --- Delta E (color difference) ---
+
+fn delta_e_76(a: &Lab, b: &Lab) -> f64 {
+    let dl = a.l - b.l;
+    let da = a.a - b.a;
+    let db = a.b - b.b;
+    sqrt(dl * dl + da * da + db * db)
+}
+
+fn delta_e_ok(a: &OKLab, b: &OKLab) -> f64 {
+    let dl = a.l - b.l;
+    let da = a.a - b.a;
+    let db = a.b - b.b;
+    sqrt(dl * dl + da * da + db * db)
+}
+
+// --- Entry point ---
+
+fn convert(r: f64, g: f64, b: f64) -> Lab ~ Console {
+    let rgb = RGB::new(r, g, b);
+    let lin = rgb.to_linear();
+    let xyz = XYZ::from_linear_rgb(&lin);
+    let lab = Lab::from_xyz(&xyz);
+    let ok = OKLab::from_linear_rgb(&lin);
+
+    println!("  sRGB:  ({}, {}, {})", r, g, b);
+    println!("  XYZ:   ({}, {}, {})", xyz.x, xyz.y, xyz.z);
+    println!("  Lab:   ({}, {}, {})", lab.l, lab.a, lab.b);
+    println!("  OKLab: ({}, {}, {})", ok.l, ok.a, ok.b);
+    lab
+}
+
+fn main() ~ Console {
+    println!("=== BuildLang Color Space Converter ===");
+    println!("=== Cross-validation: CIE 1976 + Ottosson 2020 ===");
+    println!("");
+
+    println!("Red:");
+    let red_lab = convert(1.0, 0.0, 0.0);
+    println!("");
+
+    println!("Green:");
+    let green_lab = convert(0.0, 1.0, 0.0);
+    println!("");
+
+    println!("Blue:");
+    let blue_lab = convert(0.0, 0.0, 1.0);
+    println!("");
+
+    println!("White:");
+    convert(1.0, 1.0, 1.0);
+    println!("");
+
+    println!("Gray 50%:");
+    let gray_lab = convert(0.5, 0.5, 0.5);
+    println!("");
+
+    println!("Orange:");
+    convert(1.0, 0.5, 0.0);
+    println!("");
+
+    // Delta E
+    let de_rg = delta_e_76(&red_lab, &green_lab);
+    let de_rb = delta_e_76(&red_lab, &blue_lab);
+    let de_gray_red = delta_e_76(&gray_lab, &red_lab);
+    println!("Delta E (CIE76):");
+    println!("  Red-Green: {}", de_rg);
+    println!("  Red-Blue:  {}", de_rb);
+    println!("  Gray-Red:  {}", de_gray_red);
+}

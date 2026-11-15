@@ -1,0 +1,4211 @@
+// ===============================================================================
+// FOUNDATION STANDARD LIBRARY - SERIALIZATION MODULE
+// ===============================================================================
+// Copyright (c) 2024-2025 Zain Dana Harper. All Rights Reserved.
+// Copyright (c) 2024-2025 Zain Dana Harper. All Rights Reserved.
+// ===============================================================================
+
+//! # Serialization Module
+//!
+//! Comprehensive serialization support for the Foundation Standard Library:
+//! - JSON (RFC 8259 compliant)
+//! - MessagePack (efficient binary format)
+//! - Protocol Buffers (schema-based binary format)
+//!
+//! ## Design Philosophy
+//!
+//! The serialization framework uses a trait-based approach that allows types to
+//! define how they are serialized/deserialized without tying them to a specific
+//! format. This enables the same types to be used with JSON, MessagePack, or
+//! Protocol Buffers interchangeably.
+
+// =============================================================================
+// Core Serialization Traits
+// =============================================================================
+
+/// Trait for types that can be serialized
+pub trait Serialize {
+    /// Serialize this value using the given serializer
+    fn serialize<S: Serializer>(self: &Self, serializer: S) -> Result<S::Ok, S::Error>;
+}
+
+/// Trait for types that can be deserialized
+pub trait Deserialize: Sized {
+    /// Deserialize a value using the given deserializer
+    fn deserialize<D: Deserializer>(deserializer: D) -> Result<Self, D::Error>;
+}
+
+/// Serializer interface
+pub trait Serializer: Sized {
+    /// Output type on success
+    type Ok;
+    /// Error type
+    type Error: SerializeError;
+    /// State for serializing sequences
+    type SerializeSeq: SerializeSeq<Ok = Self::Ok, Error = Self::Error>;
+    /// State for serializing maps
+    type SerializeMap: SerializeMap<Ok = Self::Ok, Error = Self::Error>;
+    /// State for serializing structs
+    type SerializeStruct: SerializeStruct<Ok = Self::Ok, Error = Self::Error>;
+    /// State for serializing struct variants
+    type SerializeStructVariant: SerializeStructVariant<Ok = Self::Ok, Error = Self::Error>;
+    /// State for serializing tuple variants
+    type SerializeTupleVariant: SerializeTupleVariant<Ok = Self::Ok, Error = Self::Error>;
+
+    // Primitive types
+    fn serialize_bool(self, v: bool) -> Result<Self::Ok, Self::Error>;
+    fn serialize_i8(self, v: i8) -> Result<Self::Ok, Self::Error>;
+    fn serialize_i16(self, v: i16) -> Result<Self::Ok, Self::Error>;
+    fn serialize_i32(self, v: i32) -> Result<Self::Ok, Self::Error>;
+    fn serialize_i64(self, v: i64) -> Result<Self::Ok, Self::Error>;
+    fn serialize_i128(self, v: i128) -> Result<Self::Ok, Self::Error>;
+    fn serialize_u8(self, v: u8) -> Result<Self::Ok, Self::Error>;
+    fn serialize_u16(self, v: u16) -> Result<Self::Ok, Self::Error>;
+    fn serialize_u32(self, v: u32) -> Result<Self::Ok, Self::Error>;
+    fn serialize_u64(self, v: u64) -> Result<Self::Ok, Self::Error>;
+    fn serialize_u128(self, v: u128) -> Result<Self::Ok, Self::Error>;
+    fn serialize_f32(self, v: f32) -> Result<Self::Ok, Self::Error>;
+    fn serialize_f64(self, v: f64) -> Result<Self::Ok, Self::Error>;
+    fn serialize_char(self, v: char) -> Result<Self::Ok, Self::Error>;
+    fn serialize_str(self, v: &str) -> Result<Self::Ok, Self::Error>;
+    fn serialize_bytes(self, v: &[u8]) -> Result<Self::Ok, Self::Error>;
+    fn serialize_none(self) -> Result<Self::Ok, Self::Error>;
+    fn serialize_some<T: Serialize>(self, value: &T) -> Result<Self::Ok, Self::Error>;
+    fn serialize_unit(self) -> Result<Self::Ok, Self::Error>;
+    fn serialize_unit_struct(self, name: &'static str) -> Result<Self::Ok, Self::Error>;
+    fn serialize_unit_variant(
+        self,
+        name: &'static str,
+        variant_index: u32,
+        variant: &'static str,
+    ) -> Result<Self::Ok, Self::Error>;
+    fn serialize_newtype_struct<T: Serialize>(
+        self,
+        name: &'static str,
+        value: &T,
+    ) -> Result<Self::Ok, Self::Error>;
+    fn serialize_newtype_variant<T: Serialize>(
+        self,
+        name: &'static str,
+        variant_index: u32,
+        variant: &'static str,
+        value: &T,
+    ) -> Result<Self::Ok, Self::Error>;
+    fn serialize_seq(self, len: Option<usize>) -> Result<Self::SerializeSeq, Self::Error>;
+    fn serialize_tuple(self, len: usize) -> Result<Self::SerializeSeq, Self::Error>;
+    fn serialize_tuple_struct(
+        self,
+        name: &'static str,
+        len: usize,
+    ) -> Result<Self::SerializeSeq, Self::Error>;
+    fn serialize_tuple_variant(
+        self,
+        name: &'static str,
+        variant_index: u32,
+        variant: &'static str,
+        len: usize,
+    ) -> Result<Self::SerializeTupleVariant, Self::Error>;
+    fn serialize_map(self, len: Option<usize>) -> Result<Self::SerializeMap, Self::Error>;
+    fn serialize_struct(
+        self,
+        name: &'static str,
+        len: usize,
+    ) -> Result<Self::SerializeStruct, Self::Error>;
+    fn serialize_struct_variant(
+        self,
+        name: &'static str,
+        variant_index: u32,
+        variant: &'static str,
+        len: usize,
+    ) -> Result<Self::SerializeStructVariant, Self::Error>;
+}
+
+/// Sequence serialization state
+pub trait SerializeSeq {
+    type Ok;
+    type Error: SerializeError;
+
+    fn serialize_element<T: Serialize>(self: &mut Self, value: &T) -> Result<(), Self::Error>;
+    fn end(self) -> Result<Self::Ok, Self::Error>;
+}
+
+/// Map serialization state
+pub trait SerializeMap {
+    type Ok;
+    type Error: SerializeError;
+
+    fn serialize_key<T: Serialize>(self: &mut Self, key: &T) -> Result<(), Self::Error>;
+    fn serialize_value<T: Serialize>(self: &mut Self, value: &T) -> Result<(), Self::Error>;
+    fn serialize_entry<K: Serialize, V: Serialize>(
+        self: &mut Self,
+        key: &K,
+        value: &V,
+    ) -> Result<(), Self::Error> {
+        self.serialize_key(key)?;
+        self.serialize_value(value)
+    }
+    fn end(self) -> Result<Self::Ok, Self::Error>;
+}
+
+/// Struct serialization state
+pub trait SerializeStruct {
+    type Ok;
+    type Error: SerializeError;
+
+    fn serialize_field<T: Serialize>(
+        self: &mut Self,
+        key: &'static str,
+        value: &T,
+    ) -> Result<(), Self::Error>;
+    fn skip_field(self: &mut Self, key: &'static str) -> Result<(), Self::Error> {
+        let _ = key;
+        Ok(())
+    }
+    fn end(self) -> Result<Self::Ok, Self::Error>;
+}
+
+/// Struct variant serialization state
+pub trait SerializeStructVariant {
+    type Ok;
+    type Error: SerializeError;
+
+    fn serialize_field<T: Serialize>(
+        self: &mut Self,
+        key: &'static str,
+        value: &T,
+    ) -> Result<(), Self::Error>;
+    fn end(self) -> Result<Self::Ok, Self::Error>;
+}
+
+/// Tuple variant serialization state
+pub trait SerializeTupleVariant {
+    type Ok;
+    type Error: SerializeError;
+
+    fn serialize_field<T: Serialize>(self: &mut Self, value: &T) -> Result<(), Self::Error>;
+    fn end(self) -> Result<Self::Ok, Self::Error>;
+}
+
+/// Serialization error trait
+pub trait SerializeError: std::error::Error + Sized {
+    fn custom<T: Display>(msg: T) -> Self;
+}
+
+/// Deserializer interface
+pub trait Deserializer: Sized {
+    type Error: DeserializeError;
+
+    fn deserialize_any<V: Visitor>(self, visitor: V) -> Result<V::Value, Self::Error>;
+    fn deserialize_bool<V: Visitor>(self, visitor: V) -> Result<V::Value, Self::Error>;
+    fn deserialize_i8<V: Visitor>(self, visitor: V) -> Result<V::Value, Self::Error>;
+    fn deserialize_i16<V: Visitor>(self, visitor: V) -> Result<V::Value, Self::Error>;
+    fn deserialize_i32<V: Visitor>(self, visitor: V) -> Result<V::Value, Self::Error>;
+    fn deserialize_i64<V: Visitor>(self, visitor: V) -> Result<V::Value, Self::Error>;
+    fn deserialize_i128<V: Visitor>(self, visitor: V) -> Result<V::Value, Self::Error>;
+    fn deserialize_u8<V: Visitor>(self, visitor: V) -> Result<V::Value, Self::Error>;
+    fn deserialize_u16<V: Visitor>(self, visitor: V) -> Result<V::Value, Self::Error>;
+    fn deserialize_u32<V: Visitor>(self, visitor: V) -> Result<V::Value, Self::Error>;
+    fn deserialize_u64<V: Visitor>(self, visitor: V) -> Result<V::Value, Self::Error>;
+    fn deserialize_u128<V: Visitor>(self, visitor: V) -> Result<V::Value, Self::Error>;
+    fn deserialize_f32<V: Visitor>(self, visitor: V) -> Result<V::Value, Self::Error>;
+    fn deserialize_f64<V: Visitor>(self, visitor: V) -> Result<V::Value, Self::Error>;
+    fn deserialize_char<V: Visitor>(self, visitor: V) -> Result<V::Value, Self::Error>;
+    fn deserialize_str<V: Visitor>(self, visitor: V) -> Result<V::Value, Self::Error>;
+    fn deserialize_string<V: Visitor>(self, visitor: V) -> Result<V::Value, Self::Error>;
+    fn deserialize_bytes<V: Visitor>(self, visitor: V) -> Result<V::Value, Self::Error>;
+    fn deserialize_byte_buf<V: Visitor>(self, visitor: V) -> Result<V::Value, Self::Error>;
+    fn deserialize_option<V: Visitor>(self, visitor: V) -> Result<V::Value, Self::Error>;
+    fn deserialize_unit<V: Visitor>(self, visitor: V) -> Result<V::Value, Self::Error>;
+    fn deserialize_unit_struct<V: Visitor>(
+        self,
+        name: &'static str,
+        visitor: V,
+    ) -> Result<V::Value, Self::Error>;
+    fn deserialize_newtype_struct<V: Visitor>(
+        self,
+        name: &'static str,
+        visitor: V,
+    ) -> Result<V::Value, Self::Error>;
+    fn deserialize_seq<V: Visitor>(self, visitor: V) -> Result<V::Value, Self::Error>;
+    fn deserialize_tuple<V: Visitor>(self, len: usize, visitor: V) -> Result<V::Value, Self::Error>;
+    fn deserialize_tuple_struct<V: Visitor>(
+        self,
+        name: &'static str,
+        len: usize,
+        visitor: V,
+    ) -> Result<V::Value, Self::Error>;
+    fn deserialize_map<V: Visitor>(self, visitor: V) -> Result<V::Value, Self::Error>;
+    fn deserialize_struct<V: Visitor>(
+        self,
+        name: &'static str,
+        fields: &'static [&'static str],
+        visitor: V,
+    ) -> Result<V::Value, Self::Error>;
+    fn deserialize_enum<V: Visitor>(
+        self,
+        name: &'static str,
+        variants: &'static [&'static str],
+        visitor: V,
+    ) -> Result<V::Value, Self::Error>;
+    fn deserialize_identifier<V: Visitor>(self, visitor: V) -> Result<V::Value, Self::Error>;
+    fn deserialize_ignored_any<V: Visitor>(self, visitor: V) -> Result<V::Value, Self::Error>;
+}
+
+/// Visitor trait for deserialization
+pub trait Visitor: Sized {
+    type Value;
+
+    fn expecting(self: &Self, formatter: &mut fmt::Formatter) -> fmt::Result;
+
+    fn visit_bool<E: DeserializeError>(self, v: bool) -> Result<Self::Value, E> {
+        Err(E::invalid_type(Unexpected::Bool(v), &self))
+    }
+
+    fn visit_i8<E: DeserializeError>(self, v: i8) -> Result<Self::Value, E> {
+        self.visit_i64(v as i64)
+    }
+
+    fn visit_i16<E: DeserializeError>(self, v: i16) -> Result<Self::Value, E> {
+        self.visit_i64(v as i64)
+    }
+
+    fn visit_i32<E: DeserializeError>(self, v: i32) -> Result<Self::Value, E> {
+        self.visit_i64(v as i64)
+    }
+
+    fn visit_i64<E: DeserializeError>(self, v: i64) -> Result<Self::Value, E> {
+        Err(E::invalid_type(Unexpected::Signed(v), &self))
+    }
+
+    fn visit_i128<E: DeserializeError>(self, v: i128) -> Result<Self::Value, E> {
+        let _ = v;
+        Err(E::invalid_type(Unexpected::Other("i128"), &self))
+    }
+
+    fn visit_u8<E: DeserializeError>(self, v: u8) -> Result<Self::Value, E> {
+        self.visit_u64(v as u64)
+    }
+
+    fn visit_u16<E: DeserializeError>(self, v: u16) -> Result<Self::Value, E> {
+        self.visit_u64(v as u64)
+    }
+
+    fn visit_u32<E: DeserializeError>(self, v: u32) -> Result<Self::Value, E> {
+        self.visit_u64(v as u64)
+    }
+
+    fn visit_u64<E: DeserializeError>(self, v: u64) -> Result<Self::Value, E> {
+        Err(E::invalid_type(Unexpected::Unsigned(v), &self))
+    }
+
+    fn visit_u128<E: DeserializeError>(self, v: u128) -> Result<Self::Value, E> {
+        let _ = v;
+        Err(E::invalid_type(Unexpected::Other("u128"), &self))
+    }
+
+    fn visit_f32<E: DeserializeError>(self, v: f32) -> Result<Self::Value, E> {
+        self.visit_f64(v as f64)
+    }
+
+    fn visit_f64<E: DeserializeError>(self, v: f64) -> Result<Self::Value, E> {
+        Err(E::invalid_type(Unexpected::Float(v), &self))
+    }
+
+    fn visit_char<E: DeserializeError>(self, v: char) -> Result<Self::Value, E> {
+        Err(E::invalid_type(Unexpected::Char(v), &self))
+    }
+
+    fn visit_str<E: DeserializeError>(self, v: &str) -> Result<Self::Value, E> {
+        Err(E::invalid_type(Unexpected::Str(v), &self))
+    }
+
+    fn visit_borrowed_str<E: DeserializeError>(self, v: &str) -> Result<Self::Value, E> {
+        self.visit_str(v)
+    }
+
+    fn visit_string<E: DeserializeError>(self, v: String) -> Result<Self::Value, E> {
+        self.visit_str(&v)
+    }
+
+    fn visit_bytes<E: DeserializeError>(self, v: &[u8]) -> Result<Self::Value, E> {
+        Err(E::invalid_type(Unexpected::Bytes(v), &self))
+    }
+
+    fn visit_borrowed_bytes<E: DeserializeError>(self, v: &[u8]) -> Result<Self::Value, E> {
+        self.visit_bytes(v)
+    }
+
+    fn visit_byte_buf<E: DeserializeError>(self, v: Vec<u8>) -> Result<Self::Value, E> {
+        self.visit_bytes(&v)
+    }
+
+    fn visit_none<E: DeserializeError>(self) -> Result<Self::Value, E> {
+        Err(E::invalid_type(Unexpected::Option, &self))
+    }
+
+    fn visit_some<D: Deserializer>(self, deserializer: D) -> Result<Self::Value, D::Error> {
+        let _ = deserializer;
+        Err(D::Error::invalid_type(Unexpected::Option, &self))
+    }
+
+    fn visit_unit<E: DeserializeError>(self) -> Result<Self::Value, E> {
+        Err(E::invalid_type(Unexpected::Unit, &self))
+    }
+
+    fn visit_newtype_struct<D: Deserializer>(self, deserializer: D) -> Result<Self::Value, D::Error> {
+        let _ = deserializer;
+        Err(D::Error::invalid_type(Unexpected::NewtypeStruct, &self))
+    }
+
+    fn visit_seq<A: SeqAccess>(self, seq: A) -> Result<Self::Value, A::Error> {
+        let _ = seq;
+        Err(A::Error::invalid_type(Unexpected::Seq, &self))
+    }
+
+    fn visit_map<A: MapAccess>(self, map: A) -> Result<Self::Value, A::Error> {
+        let _ = map;
+        Err(A::Error::invalid_type(Unexpected::Map, &self))
+    }
+
+    fn visit_enum<A: EnumAccess>(self, data: A) -> Result<Self::Value, A::Error> {
+        let _ = data;
+        Err(A::Error::invalid_type(Unexpected::Enum, &self))
+    }
+}
+
+/// Access to sequence elements during deserialization
+pub trait SeqAccess {
+    type Error: DeserializeError;
+
+    fn next_element<T: Deserialize>(self: &mut Self) -> Result<Option<T>, Self::Error>;
+    fn size_hint(self: &Self) -> Option<usize> {
+        None
+    }
+}
+
+/// Access to map entries during deserialization
+pub trait MapAccess {
+    type Error: DeserializeError;
+
+    fn next_key<K: Deserialize>(self: &mut Self) -> Result<Option<K>, Self::Error>;
+    fn next_value<V: Deserialize>(self: &mut Self) -> Result<V, Self::Error>;
+    fn next_entry<K: Deserialize, V: Deserialize>(
+        self: &mut Self,
+    ) -> Result<Option<(K, V)>, Self::Error> {
+        match self.next_key()? {
+            Some(key) => {
+                let value = self.next_value()?;
+                Ok(Some((key, value)))
+            }
+            None => Ok(None),
+        }
+    }
+    fn size_hint(self: &Self) -> Option<usize> {
+        None
+    }
+}
+
+/// Access to enum variants during deserialization
+pub trait EnumAccess {
+    type Error: DeserializeError;
+    type Variant: VariantAccess<Error = Self::Error>;
+
+    fn variant<V: Deserialize>(self) -> Result<(V, Self::Variant), Self::Error>;
+}
+
+/// Access to enum variant data
+pub trait VariantAccess {
+    type Error: DeserializeError;
+
+    fn unit_variant(self) -> Result<(), Self::Error>;
+    fn newtype_variant<T: Deserialize>(self) -> Result<T, Self::Error>;
+    fn tuple_variant<V: Visitor>(self, len: usize, visitor: V) -> Result<V::Value, Self::Error>;
+    fn struct_variant<V: Visitor>(
+        self,
+        fields: &'static [&'static str],
+        visitor: V,
+    ) -> Result<V::Value, Self::Error>;
+}
+
+/// Deserialization error trait
+pub trait DeserializeError: std::error::Error + Sized {
+    fn custom<T: Display>(msg: T) -> Self;
+    fn invalid_type(unexp: Unexpected, exp: &dyn Expected) -> Self;
+    fn invalid_value(unexp: Unexpected, exp: &dyn Expected) -> Self;
+    fn invalid_length(len: usize, exp: &dyn Expected) -> Self;
+    fn unknown_variant(variant: &str, expected: &'static [&'static str]) -> Self;
+    fn unknown_field(field: &str, expected: &'static [&'static str]) -> Self;
+    fn missing_field(field: &'static str) -> Self;
+    fn duplicate_field(field: &'static str) -> Self;
+}
+
+/// Unexpected value type
+pub enum Unexpected<'a> {
+    Bool(bool),
+    Unsigned(u64),
+    Signed(i64),
+    Float(f64),
+    Char(char),
+    Str(&'a str),
+    Bytes(&'a [u8]),
+    Unit,
+    Option,
+    NewtypeStruct,
+    Seq,
+    Map,
+    Enum,
+    UnitVariant,
+    NewtypeVariant,
+    TupleVariant,
+    StructVariant,
+    Other(&'static str),
+}
+
+impl<'a> Display for Unexpected<'a> {
+    fn fmt(self: &Self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            Unexpected::Bool(v) => write!(f, "boolean `{}`", v),
+            Unexpected::Unsigned(v) => write!(f, "integer `{}`", v),
+            Unexpected::Signed(v) => write!(f, "integer `{}`", v),
+            Unexpected::Float(v) => write!(f, "floating point `{}`", v),
+            Unexpected::Char(v) => write!(f, "character `{}`", v),
+            Unexpected::Str(v) => write!(f, "string {:?}", v),
+            Unexpected::Bytes(_) => write!(f, "byte array"),
+            Unexpected::Unit => write!(f, "unit value"),
+            Unexpected::Option => write!(f, "Option value"),
+            Unexpected::NewtypeStruct => write!(f, "newtype struct"),
+            Unexpected::Seq => write!(f, "sequence"),
+            Unexpected::Map => write!(f, "map"),
+            Unexpected::Enum => write!(f, "enum"),
+            Unexpected::UnitVariant => write!(f, "unit variant"),
+            Unexpected::NewtypeVariant => write!(f, "newtype variant"),
+            Unexpected::TupleVariant => write!(f, "tuple variant"),
+            Unexpected::StructVariant => write!(f, "struct variant"),
+            Unexpected::Other(v) => write!(f, "{}", v),
+        }
+    }
+}
+
+/// Expected value description
+pub trait Expected {
+    fn fmt(self: &Self, f: &mut fmt::Formatter) -> fmt::Result;
+}
+
+impl<'a, T: Visitor> Expected for T {
+    fn fmt(self: &Self, f: &mut fmt::Formatter) -> fmt::Result {
+        self.expecting(f)
+    }
+}
+
+// =============================================================================
+// JSON Serialization
+// =============================================================================
+
+pub mod json {
+    use super::*;
+
+    /// JSON value type
+    #[derive(Clone, Debug, PartialEq)]
+    pub enum Value {
+        Null,
+        Bool(bool),
+        Number(Number),
+        String(String),
+        Array(Vec<Value>),
+        Object(HashMap<String, Value>),
+    }
+
+    impl Value {
+        /// Check if null
+        pub fn is_null(self: &Self) -> bool {
+            matches!(self, Value::Null)
+        }
+
+        /// Check if boolean
+        pub fn is_bool(self: &Self) -> bool {
+            matches!(self, Value::Bool(_))
+        }
+
+        /// Check if number
+        pub fn is_number(self: &Self) -> bool {
+            matches!(self, Value::Number(_))
+        }
+
+        /// Check if string
+        pub fn is_string(self: &Self) -> bool {
+            matches!(self, Value::String(_))
+        }
+
+        /// Check if array
+        pub fn is_array(self: &Self) -> bool {
+            matches!(self, Value::Array(_))
+        }
+
+        /// Check if object
+        pub fn is_object(self: &Self) -> bool {
+            matches!(self, Value::Object(_))
+        }
+
+        /// Get as bool
+        pub fn as_bool(self: &Self) -> Option<bool> {
+            match self {
+                Value::Bool(b) => Some(*b),
+                _ => None,
+            }
+        }
+
+        /// Get as i64
+        pub fn as_i64(self: &Self) -> Option<i64> {
+            match self {
+                Value::Number(n) => n.as_i64(),
+                _ => None,
+            }
+        }
+
+        /// Get as u64
+        pub fn as_u64(self: &Self) -> Option<u64> {
+            match self {
+                Value::Number(n) => n.as_u64(),
+                _ => None,
+            }
+        }
+
+        /// Get as f64
+        pub fn as_f64(self: &Self) -> Option<f64> {
+            match self {
+                Value::Number(n) => n.as_f64(),
+                _ => None,
+            }
+        }
+
+        /// Get as string
+        pub fn as_str(self: &Self) -> Option<&str> {
+            match self {
+                Value::String(s) => Some(s),
+                _ => None,
+            }
+        }
+
+        /// Get as array
+        pub fn as_array(self: &Self) -> Option<&Vec<Value>> {
+            match self {
+                Value::Array(arr) => Some(arr),
+                _ => None,
+            }
+        }
+
+        /// Get as mutable array
+        pub fn as_array_mut(self: &mut Self) -> Option<&mut Vec<Value>> {
+            match self {
+                Value::Array(arr) => Some(arr),
+                _ => None,
+            }
+        }
+
+        /// Get as object
+        pub fn as_object(self: &Self) -> Option<&HashMap<String, Value>> {
+            match self {
+                Value::Object(obj) => Some(obj),
+                _ => None,
+            }
+        }
+
+        /// Get as mutable object
+        pub fn as_object_mut(self: &mut Self) -> Option<&mut HashMap<String, Value>> {
+            match self {
+                Value::Object(obj) => Some(obj),
+                _ => None,
+            }
+        }
+
+        /// Index by key (objects) or index (arrays)
+        pub fn get(self: &Self, index: &str) -> Option<&Value> {
+            match self {
+                Value::Object(obj) => obj.get(index),
+                Value::Array(arr) => {
+                    let idx: usize = index.parse().ok()?;
+                    arr.get(idx)
+                }
+                _ => None,
+            }
+        }
+
+        /// Index by numeric index
+        pub fn get_index(self: &Self, index: usize) -> Option<&Value> {
+            match self {
+                Value::Array(arr) => arr.get(index),
+                _ => None,
+            }
+        }
+    }
+
+    /// JSON number type
+    #[derive(Clone, Debug)]
+    pub enum Number {
+        Integer(i64),
+        Float(f64),
+    }
+
+    impl Number {
+        pub fn as_i64(self: &Self) -> Option<i64> {
+            match self {
+                Number::Integer(i) => Some(*i),
+                Number::Float(f) => {
+                    if f.fract() == 0.0 && *f >= i64::MIN as f64 && *f <= i64::MAX as f64 {
+                        Some(*f as i64)
+                    } else {
+                        None
+                    }
+                }
+            }
+        }
+
+        pub fn as_u64(self: &Self) -> Option<u64> {
+            match self {
+                Number::Integer(i) if *i >= 0 => Some(*i as u64),
+                Number::Float(f) if f.fract() == 0.0 && *f >= 0.0 && *f <= u64::MAX as f64 => {
+                    Some(*f as u64)
+                }
+                _ => None,
+            }
+        }
+
+        pub fn as_f64(self: &Self) -> Option<f64> {
+            match self {
+                Number::Integer(i) => Some(*i as f64),
+                Number::Float(f) => Some(*f),
+            }
+        }
+    }
+
+    impl PartialEq for Number {
+        fn eq(self: &Self, other: &Self) -> bool {
+            match (self, other) {
+                (Number::Integer(a), Number::Integer(b)) => a == b,
+                (Number::Float(a), Number::Float(b)) => a == b,
+                (Number::Integer(a), Number::Float(b)) => (*a as f64) == *b,
+                (Number::Float(a), Number::Integer(b)) => *a == (*b as f64),
+            }
+        }
+    }
+
+    /// JSON error type
+    #[derive(Debug)]
+    pub enum Error {
+        /// Syntax error at position
+        Syntax { line: usize, column: usize, msg: String },
+        /// Unexpected end of input
+        Eof,
+        /// Invalid number
+        InvalidNumber(String),
+        /// Invalid escape sequence
+        InvalidEscape(char),
+        /// Invalid unicode escape
+        InvalidUnicode(String),
+        /// Trailing characters
+        TrailingCharacters,
+        /// Key must be string
+        KeyMustBeString,
+        /// Custom error
+        Custom(String),
+        /// Maximum depth exceeded
+        MaxDepthExceeded,
+    }
+
+    impl Display for Error {
+        fn fmt(self: &Self, f: &mut fmt::Formatter) -> fmt::Result {
+            match self {
+                Error::Syntax { line, column, msg } => {
+                    write!(f, "syntax error at line {}, column {}: {}", line, column, msg)
+                }
+                Error::Eof => write!(f, "unexpected end of input"),
+                Error::InvalidNumber(s) => write!(f, "invalid number: {}", s),
+                Error::InvalidEscape(c) => write!(f, "invalid escape sequence: \\{}", c),
+                Error::InvalidUnicode(s) => write!(f, "invalid unicode escape: {}", s),
+                Error::TrailingCharacters => write!(f, "trailing characters after JSON value"),
+                Error::KeyMustBeString => write!(f, "object key must be a string"),
+                Error::Custom(msg) => write!(f, "{}", msg),
+                Error::MaxDepthExceeded => write!(f, "maximum nesting depth exceeded"),
+            }
+        }
+    }
+
+    impl std::error::Error for Error {}
+
+    impl SerializeError for Error {
+        fn custom<T: Display>(msg: T) -> Self {
+            Error::Custom(msg.to_string())
+        }
+    }
+
+    impl DeserializeError for Error {
+        fn custom<T: Display>(msg: T) -> Self {
+            Error::Custom(msg.to_string())
+        }
+
+        fn invalid_type(unexp: Unexpected, exp: &dyn Expected) -> Self {
+            Error::Custom(format!("invalid type: expected {}, found {}",
+                format_expected(exp), unexp))
+        }
+
+        fn invalid_value(unexp: Unexpected, exp: &dyn Expected) -> Self {
+            Error::Custom(format!("invalid value: expected {}, found {}",
+                format_expected(exp), unexp))
+        }
+
+        fn invalid_length(len: usize, exp: &dyn Expected) -> Self {
+            Error::Custom(format!("invalid length {}, expected {}",
+                len, format_expected(exp)))
+        }
+
+        fn unknown_variant(variant: &str, expected: &'static [&'static str]) -> Self {
+            Error::Custom(format!("unknown variant `{}`, expected one of {:?}",
+                variant, expected))
+        }
+
+        fn unknown_field(field: &str, expected: &'static [&'static str]) -> Self {
+            Error::Custom(format!("unknown field `{}`, expected one of {:?}",
+                field, expected))
+        }
+
+        fn missing_field(field: &'static str) -> Self {
+            Error::Custom(format!("missing field `{}`", field))
+        }
+
+        fn duplicate_field(field: &'static str) -> Self {
+            Error::Custom(format!("duplicate field `{}`", field))
+        }
+    }
+
+    fn format_expected(exp: &dyn Expected) -> String {
+        let mut buf = String::new();
+        let _ = exp.fmt(&mut fmt::Formatter::new(&mut buf));
+        buf
+    }
+
+    /// Parse JSON from string
+    pub fn from_str<T: Deserialize>(s: &str) -> Result<T, Error> {
+        let mut parser = Parser::new(s);
+        let value = parser.parse_value()?;
+        parser.skip_whitespace();
+        if !parser.is_at_end() {
+            return Err(Error::TrailingCharacters);
+        }
+        // TODO: Convert Value to T using Deserializer
+        T::deserialize(ValueDeserializer { value })
+    }
+
+    /// Parse JSON into Value
+    pub fn parse(s: &str) -> Result<Value, Error> {
+        let mut parser = Parser::new(s);
+        let value = parser.parse_value()?;
+        parser.skip_whitespace();
+        if !parser.is_at_end() {
+            return Err(Error::TrailingCharacters);
+        }
+        Ok(value)
+    }
+
+    /// Serialize to JSON string
+    pub fn to_string<T: Serialize>(value: &T) -> Result<String, Error> {
+        let mut output = String::new();
+        let serializer = JsonSerializer::new(&mut output);
+        value.serialize(serializer)?;
+        Ok(output)
+    }
+
+    /// Serialize to pretty-printed JSON string
+    pub fn to_string_pretty<T: Serialize>(value: &T) -> Result<String, Error> {
+        let mut output = String::new();
+        let serializer = JsonSerializer::pretty(&mut output);
+        value.serialize(serializer)?;
+        Ok(output)
+    }
+
+    /// JSON parser
+    struct Parser<'a> {
+        input: &'a str,
+        pos: usize,
+        line: usize,
+        column: usize,
+        max_depth: usize,
+        current_depth: usize,
+    }
+
+    impl<'a> Parser<'a> {
+        fn new(input: &'a str) -> Self {
+            Self {
+                input,
+                pos: 0,
+                line: 1,
+                column: 1,
+                max_depth: 128,
+                current_depth: 0,
+            }
+        }
+
+        fn is_at_end(self: &Self) -> bool {
+            self.pos >= self.input.len()
+        }
+
+        fn peek(self: &Self) -> Option<char> {
+            self.input[self.pos..].chars().next()
+        }
+
+        fn advance(self: &mut Self) -> Option<char> {
+            let c = self.peek()?;
+            self.pos += c.len_utf8();
+            if c == '\n' {
+                self.line += 1;
+                self.column = 1;
+            } else {
+                self.column += 1;
+            }
+            Some(c)
+        }
+
+        fn skip_whitespace(self: &mut Self) {
+            while let Some(c) = self.peek() {
+                if c.is_whitespace() {
+                    self.advance();
+                } else {
+                    break;
+                }
+            }
+        }
+
+        fn error(self: &Self, msg: &str) -> Error {
+            Error::Syntax {
+                line: self.line,
+                column: self.column,
+                msg: msg.to_string(),
+            }
+        }
+
+        fn parse_value(self: &mut Self) -> Result<Value, Error> {
+            self.skip_whitespace();
+
+            if self.is_at_end() {
+                return Err(Error::Eof);
+            }
+
+            match self.peek().unwrap() {
+                'n' => self.parse_null(),
+                't' | 'f' => self.parse_bool(),
+                '"' => self.parse_string().map(Value::String),
+                '[' => self.parse_array(),
+                '{' => self.parse_object(),
+                c if c == '-' || c.is_ascii_digit() => self.parse_number(),
+                c => Err(self.error(&format!("unexpected character: {}", c))),
+            }
+        }
+
+        fn parse_null(self: &mut Self) -> Result<Value, Error> {
+            if self.consume_literal("null") {
+                Ok(Value::Null)
+            } else {
+                Err(self.error("expected 'null'"))
+            }
+        }
+
+        fn parse_bool(self: &mut Self) -> Result<Value, Error> {
+            if self.consume_literal("true") {
+                Ok(Value::Bool(true))
+            } else if self.consume_literal("false") {
+                Ok(Value::Bool(false))
+            } else {
+                Err(self.error("expected 'true' or 'false'"))
+            }
+        }
+
+        fn consume_literal(self: &mut Self, literal: &str) -> bool {
+            if self.input[self.pos..].starts_with(literal) {
+                for _ in literal.chars() {
+                    self.advance();
+                }
+                true
+            } else {
+                false
+            }
+        }
+
+        fn parse_string(self: &mut Self) -> Result<String, Error> {
+            if self.advance() != Some('"') {
+                return Err(self.error("expected '\"'"));
+            }
+
+            let mut result = String::new();
+
+            loop {
+                match self.advance() {
+                    None => return Err(Error::Eof),
+                    Some('"') => break,
+                    Some('\\') => {
+                        result.push(self.parse_escape()?);
+                    }
+                    Some(c) if c.is_control() => {
+                        return Err(self.error("control character in string"));
+                    }
+                    Some(c) => result.push(c),
+                }
+            }
+
+            Ok(result)
+        }
+
+        fn parse_escape(self: &mut Self) -> Result<char, Error> {
+            match self.advance() {
+                None => Err(Error::Eof),
+                Some('"') => Ok('"'),
+                Some('\\') => Ok('\\'),
+                Some('/') => Ok('/'),
+                Some('b') => Ok('\x08'),
+                Some('f') => Ok('\x0C'),
+                Some('n') => Ok('\n'),
+                Some('r') => Ok('\r'),
+                Some('t') => Ok('\t'),
+                Some('u') => self.parse_unicode_escape(),
+                Some(c) => Err(Error::InvalidEscape(c)),
+            }
+        }
+
+        fn parse_unicode_escape(self: &mut Self) -> Result<char, Error> {
+            let mut hex = String::new();
+            for _ in 0..4 {
+                match self.advance() {
+                    Some(c) if c.is_ascii_hexdigit() => hex.push(c),
+                    _ => return Err(Error::InvalidUnicode(hex)),
+                }
+            }
+
+            let code = u16::from_str_radix(&hex, 16)
+                .map_err(|_| Error::InvalidUnicode(hex.clone()))?;
+
+            // Handle surrogate pairs
+            if (0xD800..=0xDBFF).contains(&code) {
+                // High surrogate, expect low surrogate
+                if self.advance() != Some('\\') || self.advance() != Some('u') {
+                    return Err(Error::InvalidUnicode("incomplete surrogate pair".to_string()));
+                }
+
+                let mut low_hex = String::new();
+                for _ in 0..4 {
+                    match self.advance() {
+                        Some(c) if c.is_ascii_hexdigit() => low_hex.push(c),
+                        _ => return Err(Error::InvalidUnicode(low_hex)),
+                    }
+                }
+
+                let low = u16::from_str_radix(&low_hex, 16)
+                    .map_err(|_| Error::InvalidUnicode(low_hex))?;
+
+                if !(0xDC00..=0xDFFF).contains(&low) {
+                    return Err(Error::InvalidUnicode("invalid low surrogate".to_string()));
+                }
+
+                let codepoint = 0x10000 + ((code as u32 - 0xD800) << 10) + (low as u32 - 0xDC00);
+                char::from_u32(codepoint).ok_or_else(|| Error::InvalidUnicode(format!("U+{:X}", codepoint)))
+            } else {
+                char::from_u32(code as u32).ok_or_else(|| Error::InvalidUnicode(hex))
+            }
+        }
+
+        fn parse_number(self: &mut Self) -> Result<Value, Error> {
+            let start = self.pos;
+
+            // Optional minus
+            if self.peek() == Some('-') {
+                self.advance();
+            }
+
+            // Integer part
+            match self.peek() {
+                Some('0') => {
+                    self.advance();
+                }
+                Some(c) if c.is_ascii_digit() && c != '0' => {
+                    while let Some(c) = self.peek() {
+                        if c.is_ascii_digit() {
+                            self.advance();
+                        } else {
+                            break;
+                        }
+                    }
+                }
+                _ => return Err(self.error("expected digit")),
+            }
+
+            // Fractional part
+            let mut is_float = false;
+            if self.peek() == Some('.') {
+                is_float = true;
+                self.advance();
+                if !self.peek().map(|c| c.is_ascii_digit()).unwrap_or(false) {
+                    return Err(self.error("expected digit after decimal point"));
+                }
+                while let Some(c) = self.peek() {
+                    if c.is_ascii_digit() {
+                        self.advance();
+                    } else {
+                        break;
+                    }
+                }
+            }
+
+            // Exponent
+            if let Some('e' | 'E') = self.peek() {
+                is_float = true;
+                self.advance();
+                if let Some('+' | '-') = self.peek() {
+                    self.advance();
+                }
+                if !self.peek().map(|c| c.is_ascii_digit()).unwrap_or(false) {
+                    return Err(self.error("expected digit in exponent"));
+                }
+                while let Some(c) = self.peek() {
+                    if c.is_ascii_digit() {
+                        self.advance();
+                    } else {
+                        break;
+                    }
+                }
+            }
+
+            let num_str = &self.input[start..self.pos];
+
+            if is_float {
+                let f: f64 = num_str.parse()
+                    .map_err(|_| Error::InvalidNumber(num_str.to_string()))?;
+                Ok(Value::Number(Number::Float(f)))
+            } else {
+                let i: i64 = num_str.parse()
+                    .map_err(|_| Error::InvalidNumber(num_str.to_string()))?;
+                Ok(Value::Number(Number::Integer(i)))
+            }
+        }
+
+        fn parse_array(self: &mut Self) -> Result<Value, Error> {
+            if self.advance() != Some('[') {
+                return Err(self.error("expected '['"));
+            }
+
+            self.current_depth += 1;
+            if self.current_depth > self.max_depth {
+                return Err(Error::MaxDepthExceeded);
+            }
+
+            let mut array = Vec::new();
+            self.skip_whitespace();
+
+            if self.peek() == Some(']') {
+                self.advance();
+                self.current_depth -= 1;
+                return Ok(Value::Array(array));
+            }
+
+            loop {
+                array.push(self.parse_value()?);
+                self.skip_whitespace();
+
+                match self.advance() {
+                    Some(',') => {
+                        self.skip_whitespace();
+                    }
+                    Some(']') => break,
+                    _ => return Err(self.error("expected ',' or ']'")),
+                }
+            }
+
+            self.current_depth -= 1;
+            Ok(Value::Array(array))
+        }
+
+        fn parse_object(self: &mut Self) -> Result<Value, Error> {
+            if self.advance() != Some('{') {
+                return Err(self.error("expected '{'"));
+            }
+
+            self.current_depth += 1;
+            if self.current_depth > self.max_depth {
+                return Err(Error::MaxDepthExceeded);
+            }
+
+            let mut object = HashMap::new();
+            self.skip_whitespace();
+
+            if self.peek() == Some('}') {
+                self.advance();
+                self.current_depth -= 1;
+                return Ok(Value::Object(object));
+            }
+
+            loop {
+                self.skip_whitespace();
+                if self.peek() != Some('"') {
+                    return Err(Error::KeyMustBeString);
+                }
+                let key = self.parse_string()?;
+
+                self.skip_whitespace();
+                if self.advance() != Some(':') {
+                    return Err(self.error("expected ':'"));
+                }
+
+                let value = self.parse_value()?;
+                object.insert(key, value);
+
+                self.skip_whitespace();
+                match self.advance() {
+                    Some(',') => {}
+                    Some('}') => break,
+                    _ => return Err(self.error("expected ',' or '}'")),
+                }
+            }
+
+            self.current_depth -= 1;
+            Ok(Value::Object(object))
+        }
+    }
+
+    /// JSON serializer
+    struct JsonSerializer<'a> {
+        output: &'a mut String,
+        pretty: bool,
+        indent: usize,
+        current_indent: usize,
+    }
+
+    impl<'a> JsonSerializer<'a> {
+        fn new(output: &'a mut String) -> Self {
+            Self {
+                output,
+                pretty: false,
+                indent: 0,
+                current_indent: 0,
+            }
+        }
+
+        fn pretty(output: &'a mut String) -> Self {
+            Self {
+                output,
+                pretty: true,
+                indent: 2,
+                current_indent: 0,
+            }
+        }
+
+        fn write_indent(self: &mut Self) {
+            if self.pretty {
+                for _ in 0..self.current_indent {
+                    self.output.push(' ');
+                }
+            }
+        }
+
+        fn write_newline(self: &mut Self) {
+            if self.pretty {
+                self.output.push('\n');
+            }
+        }
+
+        fn write_string(self: &mut Self, s: &str) {
+            self.output.push('"');
+            for c in s.chars() {
+                match c {
+                    '"' => self.output.push_str("\\\""),
+                    '\\' => self.output.push_str("\\\\"),
+                    '\n' => self.output.push_str("\\n"),
+                    '\r' => self.output.push_str("\\r"),
+                    '\t' => self.output.push_str("\\t"),
+                    c if c.is_control() => {
+                        write!(self.output, "\\u{:04x}", c as u32).unwrap();
+                    }
+                    c => self.output.push(c),
+                }
+            }
+            self.output.push('"');
+        }
+    }
+
+    impl<'a> Serializer for JsonSerializer<'a> {
+        type Ok = ();
+        type Error = Error;
+        type SerializeSeq = JsonSeqSerializer<'a>;
+        type SerializeMap = JsonMapSerializer<'a>;
+        type SerializeStruct = JsonStructSerializer<'a>;
+        type SerializeStructVariant = JsonStructVariantSerializer<'a>;
+        type SerializeTupleVariant = JsonTupleVariantSerializer<'a>;
+
+        fn serialize_bool(self: mut Self, v: bool) -> Result<(), Error> {
+            self.output.push_str(if v { "true" } else { "false" });
+            Ok(())
+        }
+
+        fn serialize_i8(self: mut Self, v: i8) -> Result<(), Error> {
+            self.serialize_i64(v as i64)
+        }
+
+        fn serialize_i16(self: mut Self, v: i16) -> Result<(), Error> {
+            self.serialize_i64(v as i64)
+        }
+
+        fn serialize_i32(self: mut Self, v: i32) -> Result<(), Error> {
+            self.serialize_i64(v as i64)
+        }
+
+        fn serialize_i64(self: mut Self, v: i64) -> Result<(), Error> {
+            write!(self.output, "{}", v).unwrap();
+            Ok(())
+        }
+
+        fn serialize_i128(self: mut Self, v: i128) -> Result<(), Error> {
+            write!(self.output, "{}", v).unwrap();
+            Ok(())
+        }
+
+        fn serialize_u8(self: mut Self, v: u8) -> Result<(), Error> {
+            self.serialize_u64(v as u64)
+        }
+
+        fn serialize_u16(self: mut Self, v: u16) -> Result<(), Error> {
+            self.serialize_u64(v as u64)
+        }
+
+        fn serialize_u32(self: mut Self, v: u32) -> Result<(), Error> {
+            self.serialize_u64(v as u64)
+        }
+
+        fn serialize_u64(self: mut Self, v: u64) -> Result<(), Error> {
+            write!(self.output, "{}", v).unwrap();
+            Ok(())
+        }
+
+        fn serialize_u128(self: mut Self, v: u128) -> Result<(), Error> {
+            write!(self.output, "{}", v).unwrap();
+            Ok(())
+        }
+
+        fn serialize_f32(self: mut Self, v: f32) -> Result<(), Error> {
+            self.serialize_f64(v as f64)
+        }
+
+        fn serialize_f64(self: mut Self, v: f64) -> Result<(), Error> {
+            if v.is_finite() {
+                write!(self.output, "{}", v).unwrap();
+            } else {
+                self.output.push_str("null");
+            }
+            Ok(())
+        }
+
+        fn serialize_char(self: mut Self, v: char) -> Result<(), Error> {
+            self.serialize_str(&v.to_string())
+        }
+
+        fn serialize_str(self: mut Self, v: &str) -> Result<(), Error> {
+            self.write_string(v);
+            Ok(())
+        }
+
+        fn serialize_bytes(self: mut Self, v: &[u8]) -> Result<(), Error> {
+            // Encode as base64
+            let encoded = base64_encode(v);
+            self.serialize_str(&encoded)
+        }
+
+        fn serialize_none(self: mut Self) -> Result<(), Error> {
+            self.output.push_str("null");
+            Ok(())
+        }
+
+        fn serialize_some<T: Serialize>(self: mut Self, value: &T) -> Result<(), Error> {
+            value.serialize(self)
+        }
+
+        fn serialize_unit(self: mut Self) -> Result<(), Error> {
+            self.output.push_str("null");
+            Ok(())
+        }
+
+        fn serialize_unit_struct(self: mut Self, _name: &'static str) -> Result<(), Error> {
+            self.serialize_unit()
+        }
+
+        fn serialize_unit_variant(
+            self: mut Self,
+            _name: &'static str,
+            _variant_index: u32,
+            variant: &'static str,
+        ) -> Result<(), Error> {
+            self.serialize_str(variant)
+        }
+
+        fn serialize_newtype_struct<T: Serialize>(
+            self: mut Self,
+            _name: &'static str,
+            value: &T,
+        ) -> Result<(), Error> {
+            value.serialize(self)
+        }
+
+        fn serialize_newtype_variant<T: Serialize>(
+            self: mut Self,
+            _name: &'static str,
+            _variant_index: u32,
+            variant: &'static str,
+            value: &T,
+        ) -> Result<(), Error> {
+            self.output.push('{');
+            self.write_string(variant);
+            self.output.push(':');
+            value.serialize(JsonSerializer::new(self.output))?;
+            self.output.push('}');
+            Ok(())
+        }
+
+        fn serialize_seq(self: mut Self, _len: Option<usize>) -> Result<Self::SerializeSeq, Error> {
+            self.output.push('[');
+            self.current_indent += self.indent;
+            Ok(JsonSeqSerializer {
+                output: self.output,
+                pretty: self.pretty,
+                indent: self.indent,
+                current_indent: self.current_indent,
+                first: true,
+            })
+        }
+
+        fn serialize_tuple(self: mut Self, len: usize) -> Result<Self::SerializeSeq, Error> {
+            self.serialize_seq(Some(len))
+        }
+
+        fn serialize_tuple_struct(
+            self: mut Self,
+            _name: &'static str,
+            len: usize,
+        ) -> Result<Self::SerializeSeq, Error> {
+            self.serialize_seq(Some(len))
+        }
+
+        fn serialize_tuple_variant(
+            self: mut Self,
+            _name: &'static str,
+            _variant_index: u32,
+            variant: &'static str,
+            _len: usize,
+        ) -> Result<Self::SerializeTupleVariant, Error> {
+            self.output.push('{');
+            self.write_string(variant);
+            self.output.push_str(":[");
+            self.current_indent += self.indent;
+            Ok(JsonTupleVariantSerializer {
+                output: self.output,
+                pretty: self.pretty,
+                indent: self.indent,
+                current_indent: self.current_indent,
+                first: true,
+            })
+        }
+
+        fn serialize_map(self: mut Self, _len: Option<usize>) -> Result<Self::SerializeMap, Error> {
+            self.output.push('{');
+            self.current_indent += self.indent;
+            Ok(JsonMapSerializer {
+                output: self.output,
+                pretty: self.pretty,
+                indent: self.indent,
+                current_indent: self.current_indent,
+                first: true,
+            })
+        }
+
+        fn serialize_struct(
+            self: mut Self,
+            _name: &'static str,
+            _len: usize,
+        ) -> Result<Self::SerializeStruct, Error> {
+            self.output.push('{');
+            self.current_indent += self.indent;
+            Ok(JsonStructSerializer {
+                output: self.output,
+                pretty: self.pretty,
+                indent: self.indent,
+                current_indent: self.current_indent,
+                first: true,
+            })
+        }
+
+        fn serialize_struct_variant(
+            self: mut Self,
+            _name: &'static str,
+            _variant_index: u32,
+            variant: &'static str,
+            _len: usize,
+        ) -> Result<Self::SerializeStructVariant, Error> {
+            self.output.push('{');
+            self.write_string(variant);
+            self.output.push_str(":{");
+            self.current_indent += self.indent * 2;
+            Ok(JsonStructVariantSerializer {
+                output: self.output,
+                pretty: self.pretty,
+                indent: self.indent,
+                current_indent: self.current_indent,
+                first: true,
+            })
+        }
+    }
+
+    struct JsonSeqSerializer<'a> {
+        output: &'a mut String,
+        pretty: bool,
+        indent: usize,
+        current_indent: usize,
+        first: bool,
+    }
+
+    impl<'a> SerializeSeq for JsonSeqSerializer<'a> {
+        type Ok = ();
+        type Error = Error;
+
+        fn serialize_element<T: Serialize>(self: &mut Self, value: &T) -> Result<(), Error> {
+            if !self.first {
+                self.output.push(',');
+            }
+            if self.pretty {
+                self.output.push('\n');
+                for _ in 0..self.current_indent {
+                    self.output.push(' ');
+                }
+            }
+            self.first = false;
+            value.serialize(JsonSerializer {
+                output: self.output,
+                pretty: self.pretty,
+                indent: self.indent,
+                current_indent: self.current_indent,
+            })
+        }
+
+        fn end(self: mut Self) -> Result<(), Error> {
+            self.current_indent -= self.indent;
+            if self.pretty && !self.first {
+                self.output.push('\n');
+                for _ in 0..self.current_indent {
+                    self.output.push(' ');
+                }
+            }
+            self.output.push(']');
+            Ok(())
+        }
+    }
+
+    struct JsonMapSerializer<'a> {
+        output: &'a mut String,
+        pretty: bool,
+        indent: usize,
+        current_indent: usize,
+        first: bool,
+    }
+
+    impl<'a> SerializeMap for JsonMapSerializer<'a> {
+        type Ok = ();
+        type Error = Error;
+
+        fn serialize_key<T: Serialize>(self: &mut Self, key: &T) -> Result<(), Error> {
+            if !self.first {
+                self.output.push(',');
+            }
+            if self.pretty {
+                self.output.push('\n');
+                for _ in 0..self.current_indent {
+                    self.output.push(' ');
+                }
+            }
+            self.first = false;
+            key.serialize(JsonSerializer {
+                output: self.output,
+                pretty: self.pretty,
+                indent: self.indent,
+                current_indent: self.current_indent,
+            })?;
+            self.output.push(':');
+            if self.pretty {
+                self.output.push(' ');
+            }
+            Ok(())
+        }
+
+        fn serialize_value<T: Serialize>(self: &mut Self, value: &T) -> Result<(), Error> {
+            value.serialize(JsonSerializer {
+                output: self.output,
+                pretty: self.pretty,
+                indent: self.indent,
+                current_indent: self.current_indent,
+            })
+        }
+
+        fn end(self: mut Self) -> Result<(), Error> {
+            self.current_indent -= self.indent;
+            if self.pretty && !self.first {
+                self.output.push('\n');
+                for _ in 0..self.current_indent {
+                    self.output.push(' ');
+                }
+            }
+            self.output.push('}');
+            Ok(())
+        }
+    }
+
+    struct JsonStructSerializer<'a> {
+        output: &'a mut String,
+        pretty: bool,
+        indent: usize,
+        current_indent: usize,
+        first: bool,
+    }
+
+    impl<'a> SerializeStruct for JsonStructSerializer<'a> {
+        type Ok = ();
+        type Error = Error;
+
+        fn serialize_field<T: Serialize>(
+            self: &mut Self,
+            key: &'static str,
+            value: &T,
+        ) -> Result<(), Error> {
+            if !self.first {
+                self.output.push(',');
+            }
+            if self.pretty {
+                self.output.push('\n');
+                for _ in 0..self.current_indent {
+                    self.output.push(' ');
+                }
+            }
+            self.first = false;
+
+            // Write key
+            self.output.push('"');
+            self.output.push_str(key);
+            self.output.push('"');
+            self.output.push(':');
+            if self.pretty {
+                self.output.push(' ');
+            }
+
+            value.serialize(JsonSerializer {
+                output: self.output,
+                pretty: self.pretty,
+                indent: self.indent,
+                current_indent: self.current_indent,
+            })
+        }
+
+        fn end(self: mut Self) -> Result<(), Error> {
+            self.current_indent -= self.indent;
+            if self.pretty && !self.first {
+                self.output.push('\n');
+                for _ in 0..self.current_indent {
+                    self.output.push(' ');
+                }
+            }
+            self.output.push('}');
+            Ok(())
+        }
+    }
+
+    struct JsonStructVariantSerializer<'a> {
+        output: &'a mut String,
+        pretty: bool,
+        indent: usize,
+        current_indent: usize,
+        first: bool,
+    }
+
+    impl<'a> SerializeStructVariant for JsonStructVariantSerializer<'a> {
+        type Ok = ();
+        type Error = Error;
+
+        fn serialize_field<T: Serialize>(
+            self: &mut Self,
+            key: &'static str,
+            value: &T,
+        ) -> Result<(), Error> {
+            if !self.first {
+                self.output.push(',');
+            }
+            if self.pretty {
+                self.output.push('\n');
+                for _ in 0..self.current_indent {
+                    self.output.push(' ');
+                }
+            }
+            self.first = false;
+
+            self.output.push('"');
+            self.output.push_str(key);
+            self.output.push('"');
+            self.output.push(':');
+            if self.pretty {
+                self.output.push(' ');
+            }
+
+            value.serialize(JsonSerializer {
+                output: self.output,
+                pretty: self.pretty,
+                indent: self.indent,
+                current_indent: self.current_indent,
+            })
+        }
+
+        fn end(self: mut Self) -> Result<(), Error> {
+            self.current_indent -= self.indent * 2;
+            if self.pretty && !self.first {
+                self.output.push('\n');
+                for _ in 0..(self.current_indent + self.indent) {
+                    self.output.push(' ');
+                }
+            }
+            self.output.push_str("}}");
+            Ok(())
+        }
+    }
+
+    struct JsonTupleVariantSerializer<'a> {
+        output: &'a mut String,
+        pretty: bool,
+        indent: usize,
+        current_indent: usize,
+        first: bool,
+    }
+
+    impl<'a> SerializeTupleVariant for JsonTupleVariantSerializer<'a> {
+        type Ok = ();
+        type Error = Error;
+
+        fn serialize_field<T: Serialize>(self: &mut Self, value: &T) -> Result<(), Error> {
+            if !self.first {
+                self.output.push(',');
+            }
+            if self.pretty {
+                self.output.push('\n');
+                for _ in 0..self.current_indent {
+                    self.output.push(' ');
+                }
+            }
+            self.first = false;
+
+            value.serialize(JsonSerializer {
+                output: self.output,
+                pretty: self.pretty,
+                indent: self.indent,
+                current_indent: self.current_indent,
+            })
+        }
+
+        fn end(self: mut Self) -> Result<(), Error> {
+            self.current_indent -= self.indent;
+            if self.pretty && !self.first {
+                self.output.push('\n');
+                for _ in 0..self.current_indent {
+                    self.output.push(' ');
+                }
+            }
+            self.output.push_str("]}");
+            Ok(())
+        }
+    }
+
+    /// Value deserializer
+    struct ValueDeserializer {
+        value: Value,
+    }
+
+    impl Deserializer for ValueDeserializer {
+        type Error = Error;
+
+        fn deserialize_any<V: Visitor>(self, visitor: V) -> Result<V::Value, Error> {
+            match self.value {
+                Value::Null => visitor.visit_unit(),
+                Value::Bool(b) => visitor.visit_bool(b),
+                Value::Number(Number::Integer(i)) => visitor.visit_i64(i),
+                Value::Number(Number::Float(f)) => visitor.visit_f64(f),
+                Value::String(s) => visitor.visit_string(s),
+                Value::Array(arr) => {
+                    visitor.visit_seq(SeqDeserializer { iter: arr.into_iter() })
+                }
+                Value::Object(obj) => {
+                    visitor.visit_map(MapDeserializer { iter: obj.into_iter(), value: None })
+                }
+            }
+        }
+
+        fn deserialize_bool<V: Visitor>(self, visitor: V) -> Result<V::Value, Error> {
+            match self.value {
+                Value::Bool(b) => visitor.visit_bool(b),
+                _ => Err(Error::Custom("expected boolean".to_string())),
+            }
+        }
+
+        fn deserialize_i8<V: Visitor>(self, visitor: V) -> Result<V::Value, Error> {
+            self.deserialize_i64(visitor)
+        }
+
+        fn deserialize_i16<V: Visitor>(self, visitor: V) -> Result<V::Value, Error> {
+            self.deserialize_i64(visitor)
+        }
+
+        fn deserialize_i32<V: Visitor>(self, visitor: V) -> Result<V::Value, Error> {
+            self.deserialize_i64(visitor)
+        }
+
+        fn deserialize_i64<V: Visitor>(self, visitor: V) -> Result<V::Value, Error> {
+            match self.value {
+                Value::Number(Number::Integer(i)) => visitor.visit_i64(i),
+                Value::Number(Number::Float(f)) => visitor.visit_i64(f as i64),
+                _ => Err(Error::Custom("expected integer".to_string())),
+            }
+        }
+
+        fn deserialize_i128<V: Visitor>(self, visitor: V) -> Result<V::Value, Error> {
+            self.deserialize_i64(visitor)
+        }
+
+        fn deserialize_u8<V: Visitor>(self, visitor: V) -> Result<V::Value, Error> {
+            self.deserialize_u64(visitor)
+        }
+
+        fn deserialize_u16<V: Visitor>(self, visitor: V) -> Result<V::Value, Error> {
+            self.deserialize_u64(visitor)
+        }
+
+        fn deserialize_u32<V: Visitor>(self, visitor: V) -> Result<V::Value, Error> {
+            self.deserialize_u64(visitor)
+        }
+
+        fn deserialize_u64<V: Visitor>(self, visitor: V) -> Result<V::Value, Error> {
+            match self.value {
+                Value::Number(Number::Integer(i)) if i >= 0 => visitor.visit_u64(i as u64),
+                Value::Number(Number::Float(f)) if f >= 0.0 => visitor.visit_u64(f as u64),
+                _ => Err(Error::Custom("expected unsigned integer".to_string())),
+            }
+        }
+
+        fn deserialize_u128<V: Visitor>(self, visitor: V) -> Result<V::Value, Error> {
+            self.deserialize_u64(visitor)
+        }
+
+        fn deserialize_f32<V: Visitor>(self, visitor: V) -> Result<V::Value, Error> {
+            self.deserialize_f64(visitor)
+        }
+
+        fn deserialize_f64<V: Visitor>(self, visitor: V) -> Result<V::Value, Error> {
+            match self.value {
+                Value::Number(Number::Float(f)) => visitor.visit_f64(f),
+                Value::Number(Number::Integer(i)) => visitor.visit_f64(i as f64),
+                _ => Err(Error::Custom("expected float".to_string())),
+            }
+        }
+
+        fn deserialize_char<V: Visitor>(self, visitor: V) -> Result<V::Value, Error> {
+            match self.value {
+                Value::String(s) if s.len() == 1 => {
+                    visitor.visit_char(s.chars().next().unwrap())
+                }
+                _ => Err(Error::Custom("expected single character".to_string())),
+            }
+        }
+
+        fn deserialize_str<V: Visitor>(self, visitor: V) -> Result<V::Value, Error> {
+            self.deserialize_string(visitor)
+        }
+
+        fn deserialize_string<V: Visitor>(self, visitor: V) -> Result<V::Value, Error> {
+            match self.value {
+                Value::String(s) => visitor.visit_string(s),
+                _ => Err(Error::Custom("expected string".to_string())),
+            }
+        }
+
+        fn deserialize_bytes<V: Visitor>(self, visitor: V) -> Result<V::Value, Error> {
+            self.deserialize_byte_buf(visitor)
+        }
+
+        fn deserialize_byte_buf<V: Visitor>(self, visitor: V) -> Result<V::Value, Error> {
+            match self.value {
+                Value::String(s) => {
+                    let bytes = base64_decode(&s)
+                        .map_err(|_| Error::Custom("invalid base64".to_string()))?;
+                    visitor.visit_byte_buf(bytes)
+                }
+                Value::Array(arr) => {
+                    let bytes: Result<Vec<u8>, _> = arr
+                        .into_iter()
+                        .map(|v| match v {
+                            Value::Number(Number::Integer(i)) if i >= 0 && i <= 255 => Ok(i as u8),
+                            _ => Err(Error::Custom("expected byte array".to_string())),
+                        })
+                        .collect();
+                    visitor.visit_byte_buf(bytes?)
+                }
+                _ => Err(Error::Custom("expected bytes".to_string())),
+            }
+        }
+
+        fn deserialize_option<V: Visitor>(self, visitor: V) -> Result<V::Value, Error> {
+            match self.value {
+                Value::Null => visitor.visit_none(),
+                _ => visitor.visit_some(self),
+            }
+        }
+
+        fn deserialize_unit<V: Visitor>(self, visitor: V) -> Result<V::Value, Error> {
+            match self.value {
+                Value::Null => visitor.visit_unit(),
+                _ => Err(Error::Custom("expected null".to_string())),
+            }
+        }
+
+        fn deserialize_unit_struct<V: Visitor>(
+            self,
+            _name: &'static str,
+            visitor: V,
+        ) -> Result<V::Value, Error> {
+            self.deserialize_unit(visitor)
+        }
+
+        fn deserialize_newtype_struct<V: Visitor>(
+            self,
+            _name: &'static str,
+            visitor: V,
+        ) -> Result<V::Value, Error> {
+            visitor.visit_newtype_struct(self)
+        }
+
+        fn deserialize_seq<V: Visitor>(self, visitor: V) -> Result<V::Value, Error> {
+            match self.value {
+                Value::Array(arr) => {
+                    visitor.visit_seq(SeqDeserializer { iter: arr.into_iter() })
+                }
+                _ => Err(Error::Custom("expected array".to_string())),
+            }
+        }
+
+        fn deserialize_tuple<V: Visitor>(self, _len: usize, visitor: V) -> Result<V::Value, Error> {
+            self.deserialize_seq(visitor)
+        }
+
+        fn deserialize_tuple_struct<V: Visitor>(
+            self,
+            _name: &'static str,
+            _len: usize,
+            visitor: V,
+        ) -> Result<V::Value, Error> {
+            self.deserialize_seq(visitor)
+        }
+
+        fn deserialize_map<V: Visitor>(self, visitor: V) -> Result<V::Value, Error> {
+            match self.value {
+                Value::Object(obj) => {
+                    visitor.visit_map(MapDeserializer { iter: obj.into_iter(), value: None })
+                }
+                _ => Err(Error::Custom("expected object".to_string())),
+            }
+        }
+
+        fn deserialize_struct<V: Visitor>(
+            self,
+            _name: &'static str,
+            _fields: &'static [&'static str],
+            visitor: V,
+        ) -> Result<V::Value, Error> {
+            self.deserialize_map(visitor)
+        }
+
+        fn deserialize_enum<V: Visitor>(
+            self,
+            _name: &'static str,
+            _variants: &'static [&'static str],
+            visitor: V,
+        ) -> Result<V::Value, Error> {
+            visitor.visit_enum(EnumDeserializer { value: self.value })
+        }
+
+        fn deserialize_identifier<V: Visitor>(self, visitor: V) -> Result<V::Value, Error> {
+            self.deserialize_string(visitor)
+        }
+
+        fn deserialize_ignored_any<V: Visitor>(self, visitor: V) -> Result<V::Value, Error> {
+            visitor.visit_unit()
+        }
+    }
+
+    struct SeqDeserializer {
+        iter: std::vec::IntoIter<Value>,
+    }
+
+    impl SeqAccess for SeqDeserializer {
+        type Error = Error;
+
+        fn next_element<T: Deserialize>(self: &mut Self) -> Result<Option<T>, Error> {
+            match self.iter.next() {
+                Some(value) => T::deserialize(ValueDeserializer { value }).map(Some),
+                None => Ok(None),
+            }
+        }
+
+        fn size_hint(self: &Self) -> Option<usize> {
+            let (lower, upper) = self.iter.size_hint();
+            Some(upper.unwrap_or(lower))
+        }
+    }
+
+    struct MapDeserializer {
+        iter: std::collections::hash_map::IntoIter<String, Value>,
+        value: Option<Value>,
+    }
+
+    impl MapAccess for MapDeserializer {
+        type Error = Error;
+
+        fn next_key<K: Deserialize>(self: &mut Self) -> Result<Option<K>, Error> {
+            match self.iter.next() {
+                Some((key, value)) => {
+                    self.value = Some(value);
+                    K::deserialize(ValueDeserializer {
+                        value: Value::String(key),
+                    })
+                    .map(Some)
+                }
+                None => Ok(None),
+            }
+        }
+
+        fn next_value<V: Deserialize>(self: &mut Self) -> Result<V, Error> {
+            let value = self.value.take().ok_or_else(|| {
+                Error::Custom("value called before key".to_string())
+            })?;
+            V::deserialize(ValueDeserializer { value })
+        }
+    }
+
+    struct EnumDeserializer {
+        value: Value,
+    }
+
+    impl EnumAccess for EnumDeserializer {
+        type Error = Error;
+        type Variant = VariantDeserializer;
+
+        fn variant<V: Deserialize>(self) -> Result<(V, Self::Variant), Error> {
+            match self.value {
+                Value::String(s) => {
+                    let variant = V::deserialize(ValueDeserializer {
+                        value: Value::String(s),
+                    })?;
+                    Ok((variant, VariantDeserializer { value: Value::Null }))
+                }
+                Value::Object(mut obj) if obj.len() == 1 => {
+                    let (key, value) = obj.drain().next().unwrap();
+                    let variant = V::deserialize(ValueDeserializer {
+                        value: Value::String(key),
+                    })?;
+                    Ok((variant, VariantDeserializer { value }))
+                }
+                _ => Err(Error::Custom("expected string or object".to_string())),
+            }
+        }
+    }
+
+    struct VariantDeserializer {
+        value: Value,
+    }
+
+    impl VariantAccess for VariantDeserializer {
+        type Error = Error;
+
+        fn unit_variant(self) -> Result<(), Error> {
+            match self.value {
+                Value::Null => Ok(()),
+                _ => Err(Error::Custom("expected unit variant".to_string())),
+            }
+        }
+
+        fn newtype_variant<T: Deserialize>(self) -> Result<T, Error> {
+            T::deserialize(ValueDeserializer { value: self.value })
+        }
+
+        fn tuple_variant<V: Visitor>(self, _len: usize, visitor: V) -> Result<V::Value, Error> {
+            match self.value {
+                Value::Array(arr) => {
+                    visitor.visit_seq(SeqDeserializer { iter: arr.into_iter() })
+                }
+                _ => Err(Error::Custom("expected array".to_string())),
+            }
+        }
+
+        fn struct_variant<V: Visitor>(
+            self,
+            _fields: &'static [&'static str],
+            visitor: V,
+        ) -> Result<V::Value, Error> {
+            match self.value {
+                Value::Object(obj) => {
+                    visitor.visit_map(MapDeserializer { iter: obj.into_iter(), value: None })
+                }
+                _ => Err(Error::Custom("expected object".to_string())),
+            }
+        }
+    }
+
+    // Base64 encoding/decoding helpers
+    fn base64_encode(data: &[u8]) -> String {
+        const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        let mut result = String::with_capacity((data.len() + 2) / 3 * 4);
+
+        for chunk in data.chunks(3) {
+            let mut buf = [0u8; 4];
+            let n = chunk.len();
+
+            let b0 = chunk[0] as usize;
+            let b1 = if n > 1 { chunk[1] as usize } else { 0 };
+            let b2 = if n > 2 { chunk[2] as usize } else { 0 };
+
+            buf[0] = CHARS[b0 >> 2];
+            buf[1] = CHARS[((b0 & 0x03) << 4) | (b1 >> 4)];
+            buf[2] = if n > 1 { CHARS[((b1 & 0x0f) << 2) | (b2 >> 6)] } else { b'=' };
+            buf[3] = if n > 2 { CHARS[b2 & 0x3f] } else { b'=' };
+
+            result.push(buf[0] as char);
+            result.push(buf[1] as char);
+            result.push(buf[2] as char);
+            result.push(buf[3] as char);
+        }
+
+        result
+    }
+
+    fn base64_decode(data: &str) -> Result<Vec<u8>, ()> {
+        fn decode_char(c: char) -> Result<u8, ()> {
+            match c {
+                'A'..='Z' => Ok(c as u8 - b'A'),
+                'a'..='z' => Ok(c as u8 - b'a' + 26),
+                '0'..='9' => Ok(c as u8 - b'0' + 52),
+                '+' => Ok(62),
+                '/' => Ok(63),
+                '=' => Ok(0),
+                _ => Err(()),
+            }
+        }
+
+        let data = data.trim();
+        if data.len() % 4 != 0 {
+            return Err(());
+        }
+
+        let mut result = Vec::with_capacity(data.len() / 4 * 3);
+
+        for chunk in data.as_bytes().chunks(4) {
+            let c0 = decode_char(chunk[0] as char)?;
+            let c1 = decode_char(chunk[1] as char)?;
+            let c2 = decode_char(chunk[2] as char)?;
+            let c3 = decode_char(chunk[3] as char)?;
+
+            result.push((c0 << 2) | (c1 >> 4));
+            if chunk[2] != b'=' {
+                result.push((c1 << 4) | (c2 >> 2));
+            }
+            if chunk[3] != b'=' {
+                result.push((c2 << 6) | c3);
+            }
+        }
+
+        Ok(result)
+    }
+}
+
+// =============================================================================
+// MessagePack Serialization
+// =============================================================================
+
+pub mod msgpack {
+    use super::*;
+
+    /// MessagePack error type
+    #[derive(Debug)]
+    pub enum Error {
+        /// Unexpected end of input
+        Eof,
+        /// Invalid format byte
+        InvalidFormat(u8),
+        /// Invalid UTF-8 in string
+        InvalidUtf8,
+        /// Integer overflow
+        IntegerOverflow,
+        /// Custom error
+        Custom(String),
+        /// I/O error
+        Io(IoError),
+    }
+
+    impl Display for Error {
+        fn fmt(self: &Self, f: &mut fmt::Formatter) -> fmt::Result {
+            match self {
+                Error::Eof => write!(f, "unexpected end of input"),
+                Error::InvalidFormat(b) => write!(f, "invalid format byte: 0x{:02x}", b),
+                Error::InvalidUtf8 => write!(f, "invalid UTF-8 in string"),
+                Error::IntegerOverflow => write!(f, "integer overflow"),
+                Error::Custom(msg) => write!(f, "{}", msg),
+                Error::Io(e) => write!(f, "I/O error: {}", e.message()),
+            }
+        }
+    }
+
+    impl std::error::Error for Error {}
+
+    impl SerializeError for Error {
+        fn custom<T: Display>(msg: T) -> Self {
+            Error::Custom(msg.to_string())
+        }
+    }
+
+    impl DeserializeError for Error {
+        fn custom<T: Display>(msg: T) -> Self {
+            Error::Custom(msg.to_string())
+        }
+
+        fn invalid_type(unexp: Unexpected, exp: &dyn Expected) -> Self {
+            Error::Custom(format!("invalid type: {:?}, expected {:?}", unexp, exp))
+        }
+
+        fn invalid_value(unexp: Unexpected, exp: &dyn Expected) -> Self {
+            Error::Custom(format!("invalid value: {:?}, expected {:?}", unexp, exp))
+        }
+
+        fn invalid_length(len: usize, exp: &dyn Expected) -> Self {
+            Error::Custom(format!("invalid length: {}, expected {:?}", len, exp))
+        }
+
+        fn unknown_variant(variant: &str, expected: &'static [&'static str]) -> Self {
+            Error::Custom(format!("unknown variant: {}, expected {:?}", variant, expected))
+        }
+
+        fn unknown_field(field: &str, expected: &'static [&'static str]) -> Self {
+            Error::Custom(format!("unknown field: {}, expected {:?}", field, expected))
+        }
+
+        fn missing_field(field: &'static str) -> Self {
+            Error::Custom(format!("missing field: {}", field))
+        }
+
+        fn duplicate_field(field: &'static str) -> Self {
+            Error::Custom(format!("duplicate field: {}", field))
+        }
+    }
+
+    // Format markers
+    const FIXINT_POS_MAX: u8 = 0x7f;
+    const FIXMAP_MIN: u8 = 0x80;
+    const FIXMAP_MAX: u8 = 0x8f;
+    const FIXARRAY_MIN: u8 = 0x90;
+    const FIXARRAY_MAX: u8 = 0x9f;
+    const FIXSTR_MIN: u8 = 0xa0;
+    const FIXSTR_MAX: u8 = 0xbf;
+    const NIL: u8 = 0xc0;
+    const FALSE: u8 = 0xc2;
+    const TRUE: u8 = 0xc3;
+    const BIN8: u8 = 0xc4;
+    const BIN16: u8 = 0xc5;
+    const BIN32: u8 = 0xc6;
+    const EXT8: u8 = 0xc7;
+    const EXT16: u8 = 0xc8;
+    const EXT32: u8 = 0xc9;
+    const FLOAT32: u8 = 0xca;
+    const FLOAT64: u8 = 0xcb;
+    const UINT8: u8 = 0xcc;
+    const UINT16: u8 = 0xcd;
+    const UINT32: u8 = 0xce;
+    const UINT64: u8 = 0xcf;
+    const INT8: u8 = 0xd0;
+    const INT16: u8 = 0xd1;
+    const INT32: u8 = 0xd2;
+    const INT64: u8 = 0xd3;
+    const FIXEXT1: u8 = 0xd4;
+    const FIXEXT2: u8 = 0xd5;
+    const FIXEXT4: u8 = 0xd6;
+    const FIXEXT8: u8 = 0xd7;
+    const FIXEXT16: u8 = 0xd8;
+    const STR8: u8 = 0xd9;
+    const STR16: u8 = 0xda;
+    const STR32: u8 = 0xdb;
+    const ARRAY16: u8 = 0xdc;
+    const ARRAY32: u8 = 0xdd;
+    const MAP16: u8 = 0xde;
+    const MAP32: u8 = 0xdf;
+    const FIXINT_NEG_MIN: u8 = 0xe0;
+
+    /// Serialize value to MessagePack bytes
+    pub fn to_vec<T: Serialize>(value: &T) -> Result<Vec<u8>, Error> {
+        let mut output = Vec::new();
+        let serializer = MsgPackSerializer::new(&mut output);
+        value.serialize(serializer)?;
+        Ok(output)
+    }
+
+    /// Deserialize MessagePack bytes to value
+    pub fn from_slice<T: Deserialize>(data: &[u8]) -> Result<T, Error> {
+        let mut reader = MsgPackReader::new(data);
+        T::deserialize(MsgPackDeserializer::new(&mut reader))
+    }
+
+    /// MessagePack serializer
+    struct MsgPackSerializer<'a> {
+        output: &'a mut Vec<u8>,
+    }
+
+    impl<'a> MsgPackSerializer<'a> {
+        fn new(output: &'a mut Vec<u8>) -> Self {
+            Self { output }
+        }
+
+        fn write_u8(self: &mut Self, v: u8) {
+            self.output.push(v);
+        }
+
+        fn write_u16(self: &mut Self, v: u16) {
+            self.output.extend_from_slice(&v.to_be_bytes());
+        }
+
+        fn write_u32(self: &mut Self, v: u32) {
+            self.output.extend_from_slice(&v.to_be_bytes());
+        }
+
+        fn write_u64(self: &mut Self, v: u64) {
+            self.output.extend_from_slice(&v.to_be_bytes());
+        }
+
+        fn write_bytes(self: &mut Self, data: &[u8]) {
+            self.output.extend_from_slice(data);
+        }
+    }
+
+    impl<'a> Serializer for MsgPackSerializer<'a> {
+        type Ok = ();
+        type Error = Error;
+        type SerializeSeq = MsgPackSeqSerializer<'a>;
+        type SerializeMap = MsgPackMapSerializer<'a>;
+        type SerializeStruct = MsgPackStructSerializer<'a>;
+        type SerializeStructVariant = MsgPackStructVariantSerializer<'a>;
+        type SerializeTupleVariant = MsgPackTupleVariantSerializer<'a>;
+
+        fn serialize_bool(self: mut Self, v: bool) -> Result<(), Error> {
+            self.write_u8(if v { TRUE } else { FALSE });
+            Ok(())
+        }
+
+        fn serialize_i8(self: mut Self, v: i8) -> Result<(), Error> {
+            if v >= -32 {
+                self.write_u8(v as u8);
+            } else {
+                self.write_u8(INT8);
+                self.write_u8(v as u8);
+            }
+            Ok(())
+        }
+
+        fn serialize_i16(self: mut Self, v: i16) -> Result<(), Error> {
+            if v >= i8::MIN as i16 && v <= i8::MAX as i16 {
+                self.serialize_i8(v as i8)
+            } else {
+                self.write_u8(INT16);
+                self.write_u16(v as u16);
+                Ok(())
+            }
+        }
+
+        fn serialize_i32(self: mut Self, v: i32) -> Result<(), Error> {
+            if v >= i16::MIN as i32 && v <= i16::MAX as i32 {
+                self.serialize_i16(v as i16)
+            } else {
+                self.write_u8(INT32);
+                self.write_u32(v as u32);
+                Ok(())
+            }
+        }
+
+        fn serialize_i64(self: mut Self, v: i64) -> Result<(), Error> {
+            if v >= i32::MIN as i64 && v <= i32::MAX as i64 {
+                self.serialize_i32(v as i32)
+            } else {
+                self.write_u8(INT64);
+                self.write_u64(v as u64);
+                Ok(())
+            }
+        }
+
+        fn serialize_i128(self: mut Self, v: i128) -> Result<(), Error> {
+            if v >= i64::MIN as i128 && v <= i64::MAX as i128 {
+                self.serialize_i64(v as i64)
+            } else {
+                Err(Error::IntegerOverflow)
+            }
+        }
+
+        fn serialize_u8(self: mut Self, v: u8) -> Result<(), Error> {
+            if v <= FIXINT_POS_MAX {
+                self.write_u8(v);
+            } else {
+                self.write_u8(UINT8);
+                self.write_u8(v);
+            }
+            Ok(())
+        }
+
+        fn serialize_u16(self: mut Self, v: u16) -> Result<(), Error> {
+            if v <= u8::MAX as u16 {
+                self.serialize_u8(v as u8)
+            } else {
+                self.write_u8(UINT16);
+                self.write_u16(v);
+                Ok(())
+            }
+        }
+
+        fn serialize_u32(self: mut Self, v: u32) -> Result<(), Error> {
+            if v <= u16::MAX as u32 {
+                self.serialize_u16(v as u16)
+            } else {
+                self.write_u8(UINT32);
+                self.write_u32(v);
+                Ok(())
+            }
+        }
+
+        fn serialize_u64(self: mut Self, v: u64) -> Result<(), Error> {
+            if v <= u32::MAX as u64 {
+                self.serialize_u32(v as u32)
+            } else {
+                self.write_u8(UINT64);
+                self.write_u64(v);
+                Ok(())
+            }
+        }
+
+        fn serialize_u128(self: mut Self, v: u128) -> Result<(), Error> {
+            if v <= u64::MAX as u128 {
+                self.serialize_u64(v as u64)
+            } else {
+                Err(Error::IntegerOverflow)
+            }
+        }
+
+        fn serialize_f32(self: mut Self, v: f32) -> Result<(), Error> {
+            self.write_u8(FLOAT32);
+            self.write_u32(v.to_bits());
+            Ok(())
+        }
+
+        fn serialize_f64(self: mut Self, v: f64) -> Result<(), Error> {
+            self.write_u8(FLOAT64);
+            self.write_u64(v.to_bits());
+            Ok(())
+        }
+
+        fn serialize_char(self: mut Self, v: char) -> Result<(), Error> {
+            let mut buf = [0u8; 4];
+            let s = v.encode_utf8(&mut buf);
+            self.serialize_str(s)
+        }
+
+        fn serialize_str(self: mut Self, v: &str) -> Result<(), Error> {
+            let len = v.len();
+            if len <= 31 {
+                self.write_u8(FIXSTR_MIN | len as u8);
+            } else if len <= u8::MAX as usize {
+                self.write_u8(STR8);
+                self.write_u8(len as u8);
+            } else if len <= u16::MAX as usize {
+                self.write_u8(STR16);
+                self.write_u16(len as u16);
+            } else {
+                self.write_u8(STR32);
+                self.write_u32(len as u32);
+            }
+            self.write_bytes(v.as_bytes());
+            Ok(())
+        }
+
+        fn serialize_bytes(self: mut Self, v: &[u8]) -> Result<(), Error> {
+            let len = v.len();
+            if len <= u8::MAX as usize {
+                self.write_u8(BIN8);
+                self.write_u8(len as u8);
+            } else if len <= u16::MAX as usize {
+                self.write_u8(BIN16);
+                self.write_u16(len as u16);
+            } else {
+                self.write_u8(BIN32);
+                self.write_u32(len as u32);
+            }
+            self.write_bytes(v);
+            Ok(())
+        }
+
+        fn serialize_none(self: mut Self) -> Result<(), Error> {
+            self.write_u8(NIL);
+            Ok(())
+        }
+
+        fn serialize_some<T: Serialize>(self: mut Self, value: &T) -> Result<(), Error> {
+            value.serialize(self)
+        }
+
+        fn serialize_unit(self: mut Self) -> Result<(), Error> {
+            self.write_u8(NIL);
+            Ok(())
+        }
+
+        fn serialize_unit_struct(self: mut Self, _name: &'static str) -> Result<(), Error> {
+            self.serialize_unit()
+        }
+
+        fn serialize_unit_variant(
+            self: mut Self,
+            _name: &'static str,
+            variant_index: u32,
+            _variant: &'static str,
+        ) -> Result<(), Error> {
+            self.serialize_u32(variant_index)
+        }
+
+        fn serialize_newtype_struct<T: Serialize>(
+            self: mut Self,
+            _name: &'static str,
+            value: &T,
+        ) -> Result<(), Error> {
+            value.serialize(self)
+        }
+
+        fn serialize_newtype_variant<T: Serialize>(
+            self: mut Self,
+            _name: &'static str,
+            variant_index: u32,
+            _variant: &'static str,
+            value: &T,
+        ) -> Result<(), Error> {
+            // Encode as a map with variant index as key
+            self.write_u8(FIXMAP_MIN | 1);
+            self.serialize_u32(variant_index)?;
+            value.serialize(MsgPackSerializer::new(self.output))
+        }
+
+        fn serialize_seq(self: mut Self, len: Option<usize>) -> Result<Self::SerializeSeq, Error> {
+            let len = len.expect("sequence length required for msgpack");
+            if len <= 15 {
+                self.write_u8(FIXARRAY_MIN | len as u8);
+            } else if len <= u16::MAX as usize {
+                self.write_u8(ARRAY16);
+                self.write_u16(len as u16);
+            } else {
+                self.write_u8(ARRAY32);
+                self.write_u32(len as u32);
+            }
+            Ok(MsgPackSeqSerializer { output: self.output })
+        }
+
+        fn serialize_tuple(self: mut Self, len: usize) -> Result<Self::SerializeSeq, Error> {
+            self.serialize_seq(Some(len))
+        }
+
+        fn serialize_tuple_struct(
+            self: mut Self,
+            _name: &'static str,
+            len: usize,
+        ) -> Result<Self::SerializeSeq, Error> {
+            self.serialize_seq(Some(len))
+        }
+
+        fn serialize_tuple_variant(
+            self: mut Self,
+            _name: &'static str,
+            variant_index: u32,
+            _variant: &'static str,
+            len: usize,
+        ) -> Result<Self::SerializeTupleVariant, Error> {
+            self.write_u8(FIXMAP_MIN | 1);
+            self.serialize_u32(variant_index)?;
+
+            if len <= 15 {
+                self.write_u8(FIXARRAY_MIN | len as u8);
+            } else if len <= u16::MAX as usize {
+                self.write_u8(ARRAY16);
+                self.write_u16(len as u16);
+            } else {
+                self.write_u8(ARRAY32);
+                self.write_u32(len as u32);
+            }
+
+            Ok(MsgPackTupleVariantSerializer { output: self.output })
+        }
+
+        fn serialize_map(self: mut Self, len: Option<usize>) -> Result<Self::SerializeMap, Error> {
+            let len = len.expect("map length required for msgpack");
+            if len <= 15 {
+                self.write_u8(FIXMAP_MIN | len as u8);
+            } else if len <= u16::MAX as usize {
+                self.write_u8(MAP16);
+                self.write_u16(len as u16);
+            } else {
+                self.write_u8(MAP32);
+                self.write_u32(len as u32);
+            }
+            Ok(MsgPackMapSerializer { output: self.output })
+        }
+
+        fn serialize_struct(
+            self: mut Self,
+            _name: &'static str,
+            len: usize,
+        ) -> Result<Self::SerializeStruct, Error> {
+            if len <= 15 {
+                self.write_u8(FIXMAP_MIN | len as u8);
+            } else if len <= u16::MAX as usize {
+                self.write_u8(MAP16);
+                self.write_u16(len as u16);
+            } else {
+                self.write_u8(MAP32);
+                self.write_u32(len as u32);
+            }
+            Ok(MsgPackStructSerializer { output: self.output })
+        }
+
+        fn serialize_struct_variant(
+            self: mut Self,
+            _name: &'static str,
+            variant_index: u32,
+            _variant: &'static str,
+            len: usize,
+        ) -> Result<Self::SerializeStructVariant, Error> {
+            self.write_u8(FIXMAP_MIN | 1);
+            self.serialize_u32(variant_index)?;
+
+            if len <= 15 {
+                self.write_u8(FIXMAP_MIN | len as u8);
+            } else if len <= u16::MAX as usize {
+                self.write_u8(MAP16);
+                self.write_u16(len as u16);
+            } else {
+                self.write_u8(MAP32);
+                self.write_u32(len as u32);
+            }
+
+            Ok(MsgPackStructVariantSerializer { output: self.output })
+        }
+    }
+
+    struct MsgPackSeqSerializer<'a> {
+        output: &'a mut Vec<u8>,
+    }
+
+    impl<'a> SerializeSeq for MsgPackSeqSerializer<'a> {
+        type Ok = ();
+        type Error = Error;
+
+        fn serialize_element<T: Serialize>(self: &mut Self, value: &T) -> Result<(), Error> {
+            value.serialize(MsgPackSerializer::new(self.output))
+        }
+
+        fn end(self) -> Result<(), Error> {
+            Ok(())
+        }
+    }
+
+    struct MsgPackMapSerializer<'a> {
+        output: &'a mut Vec<u8>,
+    }
+
+    impl<'a> SerializeMap for MsgPackMapSerializer<'a> {
+        type Ok = ();
+        type Error = Error;
+
+        fn serialize_key<T: Serialize>(self: &mut Self, key: &T) -> Result<(), Error> {
+            key.serialize(MsgPackSerializer::new(self.output))
+        }
+
+        fn serialize_value<T: Serialize>(self: &mut Self, value: &T) -> Result<(), Error> {
+            value.serialize(MsgPackSerializer::new(self.output))
+        }
+
+        fn end(self) -> Result<(), Error> {
+            Ok(())
+        }
+    }
+
+    struct MsgPackStructSerializer<'a> {
+        output: &'a mut Vec<u8>,
+    }
+
+    impl<'a> SerializeStruct for MsgPackStructSerializer<'a> {
+        type Ok = ();
+        type Error = Error;
+
+        fn serialize_field<T: Serialize>(
+            self: &mut Self,
+            key: &'static str,
+            value: &T,
+        ) -> Result<(), Error> {
+            key.serialize(MsgPackSerializer::new(self.output))?;
+            value.serialize(MsgPackSerializer::new(self.output))
+        }
+
+        fn end(self) -> Result<(), Error> {
+            Ok(())
+        }
+    }
+
+    struct MsgPackStructVariantSerializer<'a> {
+        output: &'a mut Vec<u8>,
+    }
+
+    impl<'a> SerializeStructVariant for MsgPackStructVariantSerializer<'a> {
+        type Ok = ();
+        type Error = Error;
+
+        fn serialize_field<T: Serialize>(
+            self: &mut Self,
+            key: &'static str,
+            value: &T,
+        ) -> Result<(), Error> {
+            key.serialize(MsgPackSerializer::new(self.output))?;
+            value.serialize(MsgPackSerializer::new(self.output))
+        }
+
+        fn end(self) -> Result<(), Error> {
+            Ok(())
+        }
+    }
+
+    struct MsgPackTupleVariantSerializer<'a> {
+        output: &'a mut Vec<u8>,
+    }
+
+    impl<'a> SerializeTupleVariant for MsgPackTupleVariantSerializer<'a> {
+        type Ok = ();
+        type Error = Error;
+
+        fn serialize_field<T: Serialize>(self: &mut Self, value: &T) -> Result<(), Error> {
+            value.serialize(MsgPackSerializer::new(self.output))
+        }
+
+        fn end(self) -> Result<(), Error> {
+            Ok(())
+        }
+    }
+
+    /// MessagePack reader
+    struct MsgPackReader<'a> {
+        data: &'a [u8],
+        pos: usize,
+    }
+
+    impl<'a> MsgPackReader<'a> {
+        fn new(data: &'a [u8]) -> Self {
+            Self { data, pos: 0 }
+        }
+
+        fn read_u8(self: &mut Self) -> Result<u8, Error> {
+            if self.pos >= self.data.len() {
+                return Err(Error::Eof);
+            }
+            let v = self.data[self.pos];
+            self.pos += 1;
+            Ok(v)
+        }
+
+        fn read_u16(self: &mut Self) -> Result<u16, Error> {
+            if self.pos + 2 > self.data.len() {
+                return Err(Error::Eof);
+            }
+            let v = u16::from_be_bytes([self.data[self.pos], self.data[self.pos + 1]]);
+            self.pos += 2;
+            Ok(v)
+        }
+
+        fn read_u32(self: &mut Self) -> Result<u32, Error> {
+            if self.pos + 4 > self.data.len() {
+                return Err(Error::Eof);
+            }
+            let v = u32::from_be_bytes([
+                self.data[self.pos],
+                self.data[self.pos + 1],
+                self.data[self.pos + 2],
+                self.data[self.pos + 3],
+            ]);
+            self.pos += 4;
+            Ok(v)
+        }
+
+        fn read_u64(self: &mut Self) -> Result<u64, Error> {
+            if self.pos + 8 > self.data.len() {
+                return Err(Error::Eof);
+            }
+            let v = u64::from_be_bytes([
+                self.data[self.pos],
+                self.data[self.pos + 1],
+                self.data[self.pos + 2],
+                self.data[self.pos + 3],
+                self.data[self.pos + 4],
+                self.data[self.pos + 5],
+                self.data[self.pos + 6],
+                self.data[self.pos + 7],
+            ]);
+            self.pos += 8;
+            Ok(v)
+        }
+
+        fn read_bytes(self: &mut Self, len: usize) -> Result<&'a [u8], Error> {
+            if self.pos + len > self.data.len() {
+                return Err(Error::Eof);
+            }
+            let v = &self.data[self.pos..self.pos + len];
+            self.pos += len;
+            Ok(v)
+        }
+    }
+
+    /// MessagePack deserializer
+    struct MsgPackDeserializer<'a, 'de> {
+        reader: &'a mut MsgPackReader<'de>,
+    }
+
+    impl<'a, 'de> MsgPackDeserializer<'a, 'de> {
+        fn new(reader: &'a mut MsgPackReader<'de>) -> Self {
+            Self { reader }
+        }
+
+        fn peek_byte(self: &Self) -> Result<u8, Error> {
+            if self.reader.pos >= self.reader.data.len() {
+                return Err(Error::Eof);
+            }
+            Ok(self.reader.data[self.reader.pos])
+        }
+
+        fn read_str_data(self: &mut Self) -> Result<&'de str, Error> {
+            let marker = self.reader.read_u8()?;
+            let len = match marker {
+                m if m >= FIXSTR_MIN && m <= FIXSTR_MAX => (m - FIXSTR_MIN) as usize,
+                STR8 => self.reader.read_u8()? as usize,
+                STR16 => self.reader.read_u16()? as usize,
+                STR32 => self.reader.read_u32()? as usize,
+                _ => return Err(Error::InvalidType("expected string")),
+            };
+            let bytes = self.reader.read_bytes(len)?;
+            std::str::from_utf8(bytes).map_err(|_| Error::InvalidUtf8)
+        }
+
+        fn read_bin_data(self: &mut Self) -> Result<&'de [u8], Error> {
+            let marker = self.reader.read_u8()?;
+            let len = match marker {
+                BIN8 => self.reader.read_u8()? as usize,
+                BIN16 => self.reader.read_u16()? as usize,
+                BIN32 => self.reader.read_u32()? as usize,
+                _ => return Err(Error::InvalidType("expected binary")),
+            };
+            self.reader.read_bytes(len)
+        }
+    }
+
+    impl<'a, 'de> Deserializer for MsgPackDeserializer<'a, 'de> {
+        type Error = Error;
+
+        fn deserialize_any<V: Visitor>(self, visitor: V) -> Result<V::Value, Self::Error> {
+            let marker = self.peek_byte()?;
+            match marker {
+                NIL => {
+                    self.reader.read_u8()?;
+                    visitor.visit_unit()
+                }
+                FALSE => {
+                    self.reader.read_u8()?;
+                    visitor.visit_bool(false)
+                }
+                TRUE => {
+                    self.reader.read_u8()?;
+                    visitor.visit_bool(true)
+                }
+                m if m <= FIXINT_POS_MAX => {
+                    self.reader.read_u8()?;
+                    visitor.visit_u8(m)
+                }
+                m if m >= FIXINT_NEG_MIN => {
+                    self.reader.read_u8()?;
+                    visitor.visit_i8(m as i8)
+                }
+                UINT8 => {
+                    self.reader.read_u8()?;
+                    visitor.visit_u8(self.reader.read_u8()?)
+                }
+                UINT16 => {
+                    self.reader.read_u8()?;
+                    visitor.visit_u16(self.reader.read_u16()?)
+                }
+                UINT32 => {
+                    self.reader.read_u8()?;
+                    visitor.visit_u32(self.reader.read_u32()?)
+                }
+                UINT64 => {
+                    self.reader.read_u8()?;
+                    visitor.visit_u64(self.reader.read_u64()?)
+                }
+                INT8 => {
+                    self.reader.read_u8()?;
+                    visitor.visit_i8(self.reader.read_u8()? as i8)
+                }
+                INT16 => {
+                    self.reader.read_u8()?;
+                    visitor.visit_i16(self.reader.read_u16()? as i16)
+                }
+                INT32 => {
+                    self.reader.read_u8()?;
+                    visitor.visit_i32(self.reader.read_u32()? as i32)
+                }
+                INT64 => {
+                    self.reader.read_u8()?;
+                    visitor.visit_i64(self.reader.read_u64()? as i64)
+                }
+                FLOAT32 => {
+                    self.reader.read_u8()?;
+                    let bits = self.reader.read_u32()?;
+                    visitor.visit_f32(f32::from_bits(bits))
+                }
+                FLOAT64 => {
+                    self.reader.read_u8()?;
+                    let bits = self.reader.read_u64()?;
+                    visitor.visit_f64(f64::from_bits(bits))
+                }
+                m if m >= FIXSTR_MIN && m <= FIXSTR_MAX => {
+                    let s = self.read_str_data()?;
+                    visitor.visit_borrowed_str(s)
+                }
+                STR8 | STR16 | STR32 => {
+                    let s = self.read_str_data()?;
+                    visitor.visit_borrowed_str(s)
+                }
+                BIN8 | BIN16 | BIN32 => {
+                    let bytes = self.read_bin_data()?;
+                    visitor.visit_borrowed_bytes(bytes)
+                }
+                m if m >= FIXARRAY_MIN && m <= FIXARRAY_MAX => {
+                    self.deserialize_seq(visitor)
+                }
+                ARRAY16 | ARRAY32 => self.deserialize_seq(visitor),
+                m if m >= FIXMAP_MIN && m <= FIXMAP_MAX => {
+                    self.deserialize_map(visitor)
+                }
+                MAP16 | MAP32 => self.deserialize_map(visitor),
+                _ => Err(Error::InvalidType("unsupported MessagePack type")),
+            }
+        }
+
+        fn deserialize_bool<V: Visitor>(self, visitor: V) -> Result<V::Value, Self::Error> {
+            let marker = self.reader.read_u8()?;
+            match marker {
+                FALSE => visitor.visit_bool(false),
+                TRUE => visitor.visit_bool(true),
+                _ => Err(Error::InvalidType("expected boolean")),
+            }
+        }
+
+        fn deserialize_i8<V: Visitor>(self, visitor: V) -> Result<V::Value, Self::Error> {
+            let marker = self.reader.read_u8()?;
+            match marker {
+                m if m <= FIXINT_POS_MAX => visitor.visit_i8(m as i8),
+                m if m >= FIXINT_NEG_MIN => visitor.visit_i8(m as i8),
+                INT8 => visitor.visit_i8(self.reader.read_u8()? as i8),
+                _ => Err(Error::InvalidType("expected i8")),
+            }
+        }
+
+        fn deserialize_i16<V: Visitor>(self, visitor: V) -> Result<V::Value, Self::Error> {
+            let marker = self.reader.read_u8()?;
+            match marker {
+                m if m <= FIXINT_POS_MAX => visitor.visit_i16(m as i16),
+                m if m >= FIXINT_NEG_MIN => visitor.visit_i16(m as i8 as i16),
+                INT8 => visitor.visit_i16(self.reader.read_u8()? as i8 as i16),
+                INT16 => visitor.visit_i16(self.reader.read_u16()? as i16),
+                _ => Err(Error::InvalidType("expected i16")),
+            }
+        }
+
+        fn deserialize_i32<V: Visitor>(self, visitor: V) -> Result<V::Value, Self::Error> {
+            let marker = self.reader.read_u8()?;
+            match marker {
+                m if m <= FIXINT_POS_MAX => visitor.visit_i32(m as i32),
+                m if m >= FIXINT_NEG_MIN => visitor.visit_i32(m as i8 as i32),
+                INT8 => visitor.visit_i32(self.reader.read_u8()? as i8 as i32),
+                INT16 => visitor.visit_i32(self.reader.read_u16()? as i16 as i32),
+                INT32 => visitor.visit_i32(self.reader.read_u32()? as i32),
+                _ => Err(Error::InvalidType("expected i32")),
+            }
+        }
+
+        fn deserialize_i64<V: Visitor>(self, visitor: V) -> Result<V::Value, Self::Error> {
+            let marker = self.reader.read_u8()?;
+            match marker {
+                m if m <= FIXINT_POS_MAX => visitor.visit_i64(m as i64),
+                m if m >= FIXINT_NEG_MIN => visitor.visit_i64(m as i8 as i64),
+                INT8 => visitor.visit_i64(self.reader.read_u8()? as i8 as i64),
+                INT16 => visitor.visit_i64(self.reader.read_u16()? as i16 as i64),
+                INT32 => visitor.visit_i64(self.reader.read_u32()? as i32 as i64),
+                INT64 => visitor.visit_i64(self.reader.read_u64()? as i64),
+                _ => Err(Error::InvalidType("expected i64")),
+            }
+        }
+
+        fn deserialize_i128<V: Visitor>(self, visitor: V) -> Result<V::Value, Self::Error> {
+            // MessagePack doesn't have native i128, deserialize as i64
+            let value = self.deserialize_i64(I64Visitor)?;
+            visitor.visit_i128(value as i128)
+        }
+
+        fn deserialize_u8<V: Visitor>(self, visitor: V) -> Result<V::Value, Self::Error> {
+            let marker = self.reader.read_u8()?;
+            match marker {
+                m if m <= FIXINT_POS_MAX => visitor.visit_u8(m),
+                UINT8 => visitor.visit_u8(self.reader.read_u8()?),
+                _ => Err(Error::InvalidType("expected u8")),
+            }
+        }
+
+        fn deserialize_u16<V: Visitor>(self, visitor: V) -> Result<V::Value, Self::Error> {
+            let marker = self.reader.read_u8()?;
+            match marker {
+                m if m <= FIXINT_POS_MAX => visitor.visit_u16(m as u16),
+                UINT8 => visitor.visit_u16(self.reader.read_u8()? as u16),
+                UINT16 => visitor.visit_u16(self.reader.read_u16()?),
+                _ => Err(Error::InvalidType("expected u16")),
+            }
+        }
+
+        fn deserialize_u32<V: Visitor>(self, visitor: V) -> Result<V::Value, Self::Error> {
+            let marker = self.reader.read_u8()?;
+            match marker {
+                m if m <= FIXINT_POS_MAX => visitor.visit_u32(m as u32),
+                UINT8 => visitor.visit_u32(self.reader.read_u8()? as u32),
+                UINT16 => visitor.visit_u32(self.reader.read_u16()? as u32),
+                UINT32 => visitor.visit_u32(self.reader.read_u32()?),
+                _ => Err(Error::InvalidType("expected u32")),
+            }
+        }
+
+        fn deserialize_u64<V: Visitor>(self, visitor: V) -> Result<V::Value, Self::Error> {
+            let marker = self.reader.read_u8()?;
+            match marker {
+                m if m <= FIXINT_POS_MAX => visitor.visit_u64(m as u64),
+                UINT8 => visitor.visit_u64(self.reader.read_u8()? as u64),
+                UINT16 => visitor.visit_u64(self.reader.read_u16()? as u64),
+                UINT32 => visitor.visit_u64(self.reader.read_u32()? as u64),
+                UINT64 => visitor.visit_u64(self.reader.read_u64()?),
+                _ => Err(Error::InvalidType("expected u64")),
+            }
+        }
+
+        fn deserialize_u128<V: Visitor>(self, visitor: V) -> Result<V::Value, Self::Error> {
+            // MessagePack doesn't have native u128, deserialize as u64
+            let value = self.deserialize_u64(U64Visitor)?;
+            visitor.visit_u128(value as u128)
+        }
+
+        fn deserialize_f32<V: Visitor>(self, visitor: V) -> Result<V::Value, Self::Error> {
+            let marker = self.reader.read_u8()?;
+            match marker {
+                FLOAT32 => {
+                    let bits = self.reader.read_u32()?;
+                    visitor.visit_f32(f32::from_bits(bits))
+                }
+                _ => Err(Error::InvalidType("expected f32")),
+            }
+        }
+
+        fn deserialize_f64<V: Visitor>(self, visitor: V) -> Result<V::Value, Self::Error> {
+            let marker = self.reader.read_u8()?;
+            match marker {
+                FLOAT32 => {
+                    let bits = self.reader.read_u32()?;
+                    visitor.visit_f64(f32::from_bits(bits) as f64)
+                }
+                FLOAT64 => {
+                    let bits = self.reader.read_u64()?;
+                    visitor.visit_f64(f64::from_bits(bits))
+                }
+                _ => Err(Error::InvalidType("expected f64")),
+            }
+        }
+
+        fn deserialize_char<V: Visitor>(self, visitor: V) -> Result<V::Value, Self::Error> {
+            let s = self.read_str_data()?;
+            let mut chars = s.chars();
+            match (chars.next(), chars.next()) {
+                (Some(c), None) => visitor.visit_char(c),
+                _ => Err(Error::InvalidType("expected single character")),
+            }
+        }
+
+        fn deserialize_str<V: Visitor>(self, visitor: V) -> Result<V::Value, Self::Error> {
+            let s = self.read_str_data()?;
+            visitor.visit_borrowed_str(s)
+        }
+
+        fn deserialize_string<V: Visitor>(self, visitor: V) -> Result<V::Value, Self::Error> {
+            let s = self.read_str_data()?;
+            visitor.visit_string(s.to_string())
+        }
+
+        fn deserialize_bytes<V: Visitor>(self, visitor: V) -> Result<V::Value, Self::Error> {
+            let bytes = self.read_bin_data()?;
+            visitor.visit_borrowed_bytes(bytes)
+        }
+
+        fn deserialize_byte_buf<V: Visitor>(self, visitor: V) -> Result<V::Value, Self::Error> {
+            let bytes = self.read_bin_data()?;
+            visitor.visit_byte_buf(bytes.to_vec())
+        }
+
+        fn deserialize_option<V: Visitor>(self, visitor: V) -> Result<V::Value, Self::Error> {
+            let marker = self.peek_byte()?;
+            if marker == NIL {
+                self.reader.read_u8()?;
+                visitor.visit_none()
+            } else {
+                visitor.visit_some(self)
+            }
+        }
+
+        fn deserialize_unit<V: Visitor>(self, visitor: V) -> Result<V::Value, Self::Error> {
+            let marker = self.reader.read_u8()?;
+            if marker == NIL {
+                visitor.visit_unit()
+            } else {
+                Err(Error::InvalidType("expected nil"))
+            }
+        }
+
+        fn deserialize_unit_struct<V: Visitor>(
+            self,
+            _name: &'static str,
+            visitor: V,
+        ) -> Result<V::Value, Self::Error> {
+            self.deserialize_unit(visitor)
+        }
+
+        fn deserialize_newtype_struct<V: Visitor>(
+            self,
+            _name: &'static str,
+            visitor: V,
+        ) -> Result<V::Value, Self::Error> {
+            visitor.visit_newtype_struct(self)
+        }
+
+        fn deserialize_seq<V: Visitor>(self, visitor: V) -> Result<V::Value, Self::Error> {
+            let marker = self.reader.read_u8()?;
+            let len = match marker {
+                m if m >= FIXARRAY_MIN && m <= FIXARRAY_MAX => (m - FIXARRAY_MIN) as usize,
+                ARRAY16 => self.reader.read_u16()? as usize,
+                ARRAY32 => self.reader.read_u32()? as usize,
+                _ => return Err(Error::InvalidType("expected array")),
+            };
+            visitor.visit_seq(MsgPackSeqAccess::new(self.reader, len))
+        }
+
+        fn deserialize_tuple<V: Visitor>(self, _len: usize, visitor: V) -> Result<V::Value, Self::Error> {
+            self.deserialize_seq(visitor)
+        }
+
+        fn deserialize_tuple_struct<V: Visitor>(
+            self,
+            _name: &'static str,
+            _len: usize,
+            visitor: V,
+        ) -> Result<V::Value, Self::Error> {
+            self.deserialize_seq(visitor)
+        }
+
+        fn deserialize_map<V: Visitor>(self, visitor: V) -> Result<V::Value, Self::Error> {
+            let marker = self.reader.read_u8()?;
+            let len = match marker {
+                m if m >= FIXMAP_MIN && m <= FIXMAP_MAX => (m - FIXMAP_MIN) as usize,
+                MAP16 => self.reader.read_u16()? as usize,
+                MAP32 => self.reader.read_u32()? as usize,
+                _ => return Err(Error::InvalidType("expected map")),
+            };
+            visitor.visit_map(MsgPackMapAccess::new(self.reader, len))
+        }
+
+        fn deserialize_struct<V: Visitor>(
+            self,
+            _name: &'static str,
+            _fields: &'static [&'static str],
+            visitor: V,
+        ) -> Result<V::Value, Self::Error> {
+            // Structs are serialized as maps in MessagePack
+            self.deserialize_map(visitor)
+        }
+
+        fn deserialize_enum<V: Visitor>(
+            self,
+            _name: &'static str,
+            _variants: &'static [&'static str],
+            visitor: V,
+        ) -> Result<V::Value, Self::Error> {
+            let marker = self.peek_byte()?;
+            match marker {
+                // Unit variant encoded as string
+                m if (m >= FIXSTR_MIN && m <= FIXSTR_MAX) || m == STR8 || m == STR16 || m == STR32 => {
+                    visitor.visit_enum(MsgPackEnumAccess::Unit(self))
+                }
+                // Struct variant encoded as map with single key
+                m if (m >= FIXMAP_MIN && m <= FIXMAP_MAX) || m == MAP16 || m == MAP32 => {
+                    self.reader.read_u8()?;
+                    visitor.visit_enum(MsgPackEnumAccess::Variant(self))
+                }
+                _ => Err(Error::InvalidType("expected enum")),
+            }
+        }
+
+        fn deserialize_identifier<V: Visitor>(self, visitor: V) -> Result<V::Value, Self::Error> {
+            self.deserialize_str(visitor)
+        }
+
+        fn deserialize_ignored_any<V: Visitor>(self, visitor: V) -> Result<V::Value, Self::Error> {
+            self.deserialize_any(visitor)
+        }
+    }
+
+    /// Helper visitor for i64 deserialization
+    struct I64Visitor;
+    impl Visitor for I64Visitor {
+        type Value = i64;
+        fn expecting(self: &Self, f: &mut fmt::Formatter) -> fmt::Result {
+            write!(f, "an i64 value")
+        }
+        fn visit_i64<E: DeserializeError>(self, v: i64) -> Result<Self::Value, E> {
+            Ok(v)
+        }
+    }
+
+    /// Helper visitor for u64 deserialization
+    struct U64Visitor;
+    impl Visitor for U64Visitor {
+        type Value = u64;
+        fn expecting(self: &Self, f: &mut fmt::Formatter) -> fmt::Result {
+            write!(f, "a u64 value")
+        }
+        fn visit_u64<E: DeserializeError>(self, v: u64) -> Result<Self::Value, E> {
+            Ok(v)
+        }
+    }
+
+    /// Sequence access for MessagePack arrays
+    struct MsgPackSeqAccess<'a, 'de> {
+        reader: &'a mut MsgPackReader<'de>,
+        remaining: usize,
+    }
+
+    impl<'a, 'de> MsgPackSeqAccess<'a, 'de> {
+        fn new(reader: &'a mut MsgPackReader<'de>, len: usize) -> Self {
+            Self { reader, remaining: len }
+        }
+    }
+
+    impl<'a, 'de> SeqAccess for MsgPackSeqAccess<'a, 'de> {
+        type Error = Error;
+
+        fn next_element<T: Deserialize>(self: &mut Self) -> Result<Option<T>, Self::Error> {
+            if self.remaining == 0 {
+                return Ok(None);
+            }
+            self.remaining -= 1;
+            let de = MsgPackDeserializer::new(self.reader);
+            T::deserialize(de).map(Some)
+        }
+
+        fn size_hint(self: &Self) -> Option<usize> {
+            Some(self.remaining)
+        }
+    }
+
+    /// Map access for MessagePack maps
+    struct MsgPackMapAccess<'a, 'de> {
+        reader: &'a mut MsgPackReader<'de>,
+        remaining: usize,
+    }
+
+    impl<'a, 'de> MsgPackMapAccess<'a, 'de> {
+        fn new(reader: &'a mut MsgPackReader<'de>, len: usize) -> Self {
+            Self { reader, remaining: len }
+        }
+    }
+
+    impl<'a, 'de> MapAccess for MsgPackMapAccess<'a, 'de> {
+        type Error = Error;
+
+        fn next_key<K: Deserialize>(self: &mut Self) -> Result<Option<K>, Self::Error> {
+            if self.remaining == 0 {
+                return Ok(None);
+            }
+            self.remaining -= 1;
+            let de = MsgPackDeserializer::new(self.reader);
+            K::deserialize(de).map(Some)
+        }
+
+        fn next_value<V: Deserialize>(self: &mut Self) -> Result<V, Self::Error> {
+            let de = MsgPackDeserializer::new(self.reader);
+            V::deserialize(de)
+        }
+
+        fn size_hint(self: &Self) -> Option<usize> {
+            Some(self.remaining)
+        }
+    }
+
+    /// Enum access for MessagePack enum variants
+    enum MsgPackEnumAccess<'a, 'de> {
+        Unit(&'a mut MsgPackDeserializer<'a, 'de>),
+        Variant(&'a mut MsgPackDeserializer<'a, 'de>),
+    }
+
+    impl<'a, 'de> EnumAccess for MsgPackEnumAccess<'a, 'de> {
+        type Error = Error;
+        type Variant = MsgPackVariantAccess<'a, 'de>;
+
+        fn variant<V: Deserialize>(self) -> Result<(V, Self::Variant), Self::Error> {
+            match self {
+                MsgPackEnumAccess::Unit(de) => {
+                    let variant = V::deserialize(MsgPackDeserializer::new(de.reader))?;
+                    Ok((variant, MsgPackVariantAccess::Unit))
+                }
+                MsgPackEnumAccess::Variant(de) => {
+                    let variant = V::deserialize(MsgPackDeserializer::new(de.reader))?;
+                    Ok((variant, MsgPackVariantAccess::Variant(de)))
+                }
+            }
+        }
+    }
+
+    /// Variant access for MessagePack enum variant data
+    enum MsgPackVariantAccess<'a, 'de> {
+        Unit,
+        Variant(&'a mut MsgPackDeserializer<'a, 'de>),
+    }
+
+    impl<'a, 'de> VariantAccess for MsgPackVariantAccess<'a, 'de> {
+        type Error = Error;
+
+        fn unit_variant(self) -> Result<(), Self::Error> {
+            match self {
+                MsgPackVariantAccess::Unit => Ok(()),
+                MsgPackVariantAccess::Variant(_) => Err(Error::InvalidType("expected unit variant")),
+            }
+        }
+
+        fn newtype_variant<T: Deserialize>(self) -> Result<T, Self::Error> {
+            match self {
+                MsgPackVariantAccess::Unit => Err(Error::InvalidType("expected newtype variant")),
+                MsgPackVariantAccess::Variant(de) => T::deserialize(MsgPackDeserializer::new(de.reader)),
+            }
+        }
+
+        fn tuple_variant<V: Visitor>(self, _len: usize, visitor: V) -> Result<V::Value, Self::Error> {
+            match self {
+                MsgPackVariantAccess::Unit => Err(Error::InvalidType("expected tuple variant")),
+                MsgPackVariantAccess::Variant(de) => de.deserialize_seq(visitor),
+            }
+        }
+
+        fn struct_variant<V: Visitor>(
+            self,
+            _fields: &'static [&'static str],
+            visitor: V,
+        ) -> Result<V::Value, Self::Error> {
+            match self {
+                MsgPackVariantAccess::Unit => Err(Error::InvalidType("expected struct variant")),
+                MsgPackVariantAccess::Variant(de) => de.deserialize_map(visitor),
+            }
+        }
+    }
+}
+
+// =============================================================================
+// Implement Serialize for common types
+// =============================================================================
+
+impl Serialize for bool {
+    fn serialize<S: Serializer>(self: &Self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_bool(*self)
+    }
+}
+
+impl Serialize for i8 {
+    fn serialize<S: Serializer>(self: &Self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_i8(*self)
+    }
+}
+
+impl Serialize for i16 {
+    fn serialize<S: Serializer>(self: &Self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_i16(*self)
+    }
+}
+
+impl Serialize for i32 {
+    fn serialize<S: Serializer>(self: &Self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_i32(*self)
+    }
+}
+
+impl Serialize for i64 {
+    fn serialize<S: Serializer>(self: &Self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_i64(*self)
+    }
+}
+
+impl Serialize for u8 {
+    fn serialize<S: Serializer>(self: &Self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_u8(*self)
+    }
+}
+
+impl Serialize for u16 {
+    fn serialize<S: Serializer>(self: &Self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_u16(*self)
+    }
+}
+
+impl Serialize for u32 {
+    fn serialize<S: Serializer>(self: &Self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_u32(*self)
+    }
+}
+
+impl Serialize for u64 {
+    fn serialize<S: Serializer>(self: &Self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_u64(*self)
+    }
+}
+
+impl Serialize for f32 {
+    fn serialize<S: Serializer>(self: &Self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_f32(*self)
+    }
+}
+
+impl Serialize for f64 {
+    fn serialize<S: Serializer>(self: &Self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_f64(*self)
+    }
+}
+
+impl Serialize for str {
+    fn serialize<S: Serializer>(self: &Self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self)
+    }
+}
+
+impl Serialize for String {
+    fn serialize<S: Serializer>(self: &Self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self)
+    }
+}
+
+impl<T: Serialize> Serialize for Option<T> {
+    fn serialize<S: Serializer>(self: &Self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            Some(v) => serializer.serialize_some(v),
+            None => serializer.serialize_none(),
+        }
+    }
+}
+
+impl<T: Serialize> Serialize for Vec<T> {
+    fn serialize<S: Serializer>(self: &Self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut seq = serializer.serialize_seq(Some(self.len()))?;
+        for elem in self {
+            seq.serialize_element(elem)?;
+        }
+        seq.end()
+    }
+}
+
+impl<K: Serialize, V: Serialize> Serialize for HashMap<K, V> {
+    fn serialize<S: Serializer>(self: &Self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut map = serializer.serialize_map(Some(self.len()))?;
+        for (k, v) in self {
+            map.serialize_entry(k, v)?;
+        }
+        map.end()
+    }
+}
+
+// =============================================================================
+// Protocol Buffers (Protobuf) Serialization
+// =============================================================================
+
+/// Protocol Buffers wire format implementation.
+/// Provides binary serialization compatible with Google's Protocol Buffers.
+pub mod protobuf {
+    use super::{Serialize, Deserialize, Error};
+
+    /// Wire types used in Protocol Buffers encoding.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum WireType {
+        /// Variable-length integer (int32, int64, uint32, uint64, sint32, sint64, bool, enum)
+        Varint = 0,
+        /// Fixed 64-bit (fixed64, sfixed64, double)
+        Fixed64 = 1,
+        /// Length-delimited (string, bytes, embedded messages, packed repeated fields)
+        LengthDelimited = 2,
+        /// Deprecated start group
+        StartGroup = 3,
+        /// Deprecated end group
+        EndGroup = 4,
+        /// Fixed 32-bit (fixed32, sfixed32, float)
+        Fixed32 = 5,
+    }
+
+    impl WireType {
+        /// Create WireType from raw value.
+        pub fn from_u8(value: u8) -> Option<WireType> {
+            match value {
+                0 => Some(WireType::Varint),
+                1 => Some(WireType::Fixed64),
+                2 => Some(WireType::LengthDelimited),
+                3 => Some(WireType::StartGroup),
+                4 => Some(WireType::EndGroup),
+                5 => Some(WireType::Fixed32),
+                _ => None,
+            }
+        }
+    }
+
+    /// Protobuf encoding errors.
+    #[derive(Debug, Clone)]
+    pub enum ProtobufError {
+        /// Buffer is too small.
+        BufferTooSmall,
+        /// Invalid wire type.
+        InvalidWireType(u8),
+        /// Invalid varint encoding.
+        InvalidVarint,
+        /// Unexpected end of data.
+        UnexpectedEof,
+        /// Invalid UTF-8 string.
+        InvalidUtf8,
+        /// Field not found.
+        FieldNotFound(u32),
+        /// Type mismatch.
+        TypeMismatch { expected: WireType, found: WireType },
+        /// Nested message error.
+        NestedError(String),
+    }
+
+    impl Error for ProtobufError {
+        fn custom(msg: impl Into<String>) -> Self {
+            ProtobufError::NestedError(msg.into())
+        }
+    }
+
+    /// Protobuf encoder for writing binary data.
+    pub struct Encoder {
+        buffer: Vec<u8>,
+    }
+
+    impl Encoder {
+        /// Create a new encoder.
+        pub fn new() -> Self {
+            Self { buffer: Vec::new() }
+        }
+
+        /// Create encoder with capacity.
+        pub fn with_capacity(capacity: usize) -> Self {
+            Self { buffer: Vec::with_capacity(capacity) }
+        }
+
+        /// Get the encoded bytes.
+        pub fn into_bytes(self) -> Vec<u8> {
+            self.buffer
+        }
+
+        /// Get reference to encoded bytes.
+        pub fn as_bytes(&self) -> &[u8] {
+            &self.buffer
+        }
+
+        /// Get current length.
+        pub fn len(&self) -> usize {
+            self.buffer.len()
+        }
+
+        /// Write a raw byte.
+        pub fn write_byte(&mut self, byte: u8) {
+            self.buffer.push(byte);
+        }
+
+        /// Write raw bytes.
+        pub fn write_bytes(&mut self, bytes: &[u8]) {
+            self.buffer.extend_from_slice(bytes);
+        }
+
+        /// Encode a varint (variable-length integer).
+        pub fn write_varint(&mut self, mut value: u64) {
+            loop {
+                let mut byte = (value & 0x7F) as u8;
+                value >>= 7;
+                if value != 0 {
+                    byte |= 0x80; // Set continuation bit
+                }
+                self.buffer.push(byte);
+                if value == 0 {
+                    break;
+                }
+            }
+        }
+
+        /// Encode a signed varint using ZigZag encoding.
+        pub fn write_svarint(&mut self, value: i64) {
+            // ZigZag encoding: (n << 1) ^ (n >> 63)
+            let encoded = ((value << 1) ^ (value >> 63)) as u64;
+            self.write_varint(encoded);
+        }
+
+        /// Encode a field tag.
+        pub fn write_tag(&mut self, field_number: u32, wire_type: WireType) {
+            let tag = ((field_number as u64) << 3) | (wire_type as u64);
+            self.write_varint(tag);
+        }
+
+        /// Encode a bool field.
+        pub fn write_bool(&mut self, field_number: u32, value: bool) {
+            self.write_tag(field_number, WireType::Varint);
+            self.write_varint(if value { 1 } else { 0 });
+        }
+
+        /// Encode an int32 field.
+        pub fn write_int32(&mut self, field_number: u32, value: i32) {
+            self.write_tag(field_number, WireType::Varint);
+            self.write_varint(value as u64);
+        }
+
+        /// Encode an int64 field.
+        pub fn write_int64(&mut self, field_number: u32, value: i64) {
+            self.write_tag(field_number, WireType::Varint);
+            self.write_varint(value as u64);
+        }
+
+        /// Encode a uint32 field.
+        pub fn write_uint32(&mut self, field_number: u32, value: u32) {
+            self.write_tag(field_number, WireType::Varint);
+            self.write_varint(value as u64);
+        }
+
+        /// Encode a uint64 field.
+        pub fn write_uint64(&mut self, field_number: u32, value: u64) {
+            self.write_tag(field_number, WireType::Varint);
+            self.write_varint(value);
+        }
+
+        /// Encode a sint32 field (signed ZigZag).
+        pub fn write_sint32(&mut self, field_number: u32, value: i32) {
+            self.write_tag(field_number, WireType::Varint);
+            self.write_svarint(value as i64);
+        }
+
+        /// Encode a sint64 field (signed ZigZag).
+        pub fn write_sint64(&mut self, field_number: u32, value: i64) {
+            self.write_tag(field_number, WireType::Varint);
+            self.write_svarint(value);
+        }
+
+        /// Encode a fixed32 field.
+        pub fn write_fixed32(&mut self, field_number: u32, value: u32) {
+            self.write_tag(field_number, WireType::Fixed32);
+            self.buffer.extend_from_slice(&value.to_le_bytes());
+        }
+
+        /// Encode a fixed64 field.
+        pub fn write_fixed64(&mut self, field_number: u32, value: u64) {
+            self.write_tag(field_number, WireType::Fixed64);
+            self.buffer.extend_from_slice(&value.to_le_bytes());
+        }
+
+        /// Encode a sfixed32 field.
+        pub fn write_sfixed32(&mut self, field_number: u32, value: i32) {
+            self.write_tag(field_number, WireType::Fixed32);
+            self.buffer.extend_from_slice(&value.to_le_bytes());
+        }
+
+        /// Encode a sfixed64 field.
+        pub fn write_sfixed64(&mut self, field_number: u32, value: i64) {
+            self.write_tag(field_number, WireType::Fixed64);
+            self.buffer.extend_from_slice(&value.to_le_bytes());
+        }
+
+        /// Encode a float field.
+        pub fn write_float(&mut self, field_number: u32, value: f32) {
+            self.write_tag(field_number, WireType::Fixed32);
+            self.buffer.extend_from_slice(&value.to_le_bytes());
+        }
+
+        /// Encode a double field.
+        pub fn write_double(&mut self, field_number: u32, value: f64) {
+            self.write_tag(field_number, WireType::Fixed64);
+            self.buffer.extend_from_slice(&value.to_le_bytes());
+        }
+
+        /// Encode a string field.
+        pub fn write_string(&mut self, field_number: u32, value: &str) {
+            self.write_tag(field_number, WireType::LengthDelimited);
+            self.write_varint(value.len() as u64);
+            self.buffer.extend_from_slice(value.as_bytes());
+        }
+
+        /// Encode a bytes field.
+        pub fn write_bytes_field(&mut self, field_number: u32, value: &[u8]) {
+            self.write_tag(field_number, WireType::LengthDelimited);
+            self.write_varint(value.len() as u64);
+            self.buffer.extend_from_slice(value);
+        }
+
+        /// Encode an embedded message field.
+        pub fn write_message<M: ProtobufMessage>(&mut self, field_number: u32, message: &M) {
+            let mut sub_encoder = Encoder::new();
+            message.encode(&mut sub_encoder);
+            let bytes = sub_encoder.into_bytes();
+
+            self.write_tag(field_number, WireType::LengthDelimited);
+            self.write_varint(bytes.len() as u64);
+            self.buffer.extend_from_slice(&bytes);
+        }
+
+        /// Encode a packed repeated field of varints.
+        pub fn write_packed_varints(&mut self, field_number: u32, values: &[u64]) {
+            let mut sub_encoder = Encoder::new();
+            for value in values {
+                sub_encoder.write_varint(*value);
+            }
+            let bytes = sub_encoder.into_bytes();
+
+            self.write_tag(field_number, WireType::LengthDelimited);
+            self.write_varint(bytes.len() as u64);
+            self.buffer.extend_from_slice(&bytes);
+        }
+
+        /// Encode a packed repeated field of fixed32.
+        pub fn write_packed_fixed32(&mut self, field_number: u32, values: &[u32]) {
+            self.write_tag(field_number, WireType::LengthDelimited);
+            self.write_varint((values.len() * 4) as u64);
+            for value in values {
+                self.buffer.extend_from_slice(&value.to_le_bytes());
+            }
+        }
+
+        /// Encode a packed repeated field of fixed64.
+        pub fn write_packed_fixed64(&mut self, field_number: u32, values: &[u64]) {
+            self.write_tag(field_number, WireType::LengthDelimited);
+            self.write_varint((values.len() * 8) as u64);
+            for value in values {
+                self.buffer.extend_from_slice(&value.to_le_bytes());
+            }
+        }
+    }
+
+    impl Default for Encoder {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+
+    /// Protobuf decoder for reading binary data.
+    pub struct Decoder<'a> {
+        data: &'a [u8],
+        pos: usize,
+    }
+
+    impl<'a> Decoder<'a> {
+        /// Create a new decoder.
+        pub fn new(data: &'a [u8]) -> Self {
+            Self { data, pos: 0 }
+        }
+
+        /// Check if decoder has more data.
+        pub fn has_more(&self) -> bool {
+            self.pos < self.data.len()
+        }
+
+        /// Get remaining bytes.
+        pub fn remaining(&self) -> usize {
+            self.data.len() - self.pos
+        }
+
+        /// Get current position.
+        pub fn position(&self) -> usize {
+            self.pos
+        }
+
+        /// Read a single byte.
+        pub fn read_byte(&mut self) -> Result<u8, ProtobufError> {
+            if self.pos >= self.data.len() {
+                return Err(ProtobufError::UnexpectedEof);
+            }
+            let byte = self.data[self.pos];
+            self.pos += 1;
+            Ok(byte)
+        }
+
+        /// Read n bytes.
+        pub fn read_bytes(&mut self, n: usize) -> Result<&'a [u8], ProtobufError> {
+            if self.pos + n > self.data.len() {
+                return Err(ProtobufError::UnexpectedEof);
+            }
+            let bytes = &self.data[self.pos..self.pos + n];
+            self.pos += n;
+            Ok(bytes)
+        }
+
+        /// Decode a varint.
+        pub fn read_varint(&mut self) -> Result<u64, ProtobufError> {
+            let mut result: u64 = 0;
+            let mut shift = 0;
+
+            loop {
+                if shift >= 64 {
+                    return Err(ProtobufError::InvalidVarint);
+                }
+
+                let byte = self.read_byte()?;
+                result |= ((byte & 0x7F) as u64) << shift;
+
+                if byte & 0x80 == 0 {
+                    break;
+                }
+
+                shift += 7;
+            }
+
+            Ok(result)
+        }
+
+        /// Decode a signed varint (ZigZag).
+        pub fn read_svarint(&mut self) -> Result<i64, ProtobufError> {
+            let n = self.read_varint()?;
+            // ZigZag decode: (n >> 1) ^ -(n & 1)
+            Ok(((n >> 1) as i64) ^ (-((n & 1) as i64)))
+        }
+
+        /// Read a field tag (field number + wire type).
+        pub fn read_tag(&mut self) -> Result<(u32, WireType), ProtobufError> {
+            let tag = self.read_varint()?;
+            let field_number = (tag >> 3) as u32;
+            let wire_type_raw = (tag & 0x07) as u8;
+
+            let wire_type = WireType::from_u8(wire_type_raw)
+                .ok_or(ProtobufError::InvalidWireType(wire_type_raw))?;
+
+            Ok((field_number, wire_type))
+        }
+
+        /// Read a bool value.
+        pub fn read_bool(&mut self) -> Result<bool, ProtobufError> {
+            Ok(self.read_varint()? != 0)
+        }
+
+        /// Read an int32 value.
+        pub fn read_int32(&mut self) -> Result<i32, ProtobufError> {
+            Ok(self.read_varint()? as i32)
+        }
+
+        /// Read an int64 value.
+        pub fn read_int64(&mut self) -> Result<i64, ProtobufError> {
+            Ok(self.read_varint()? as i64)
+        }
+
+        /// Read a uint32 value.
+        pub fn read_uint32(&mut self) -> Result<u32, ProtobufError> {
+            Ok(self.read_varint()? as u32)
+        }
+
+        /// Read a uint64 value.
+        pub fn read_uint64(&mut self) -> Result<u64, ProtobufError> {
+            self.read_varint()
+        }
+
+        /// Read a sint32 value.
+        pub fn read_sint32(&mut self) -> Result<i32, ProtobufError> {
+            Ok(self.read_svarint()? as i32)
+        }
+
+        /// Read a sint64 value.
+        pub fn read_sint64(&mut self) -> Result<i64, ProtobufError> {
+            self.read_svarint()
+        }
+
+        /// Read a fixed32 value.
+        pub fn read_fixed32(&mut self) -> Result<u32, ProtobufError> {
+            let bytes = self.read_bytes(4)?;
+            Ok(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+        }
+
+        /// Read a fixed64 value.
+        pub fn read_fixed64(&mut self) -> Result<u64, ProtobufError> {
+            let bytes = self.read_bytes(8)?;
+            Ok(u64::from_le_bytes([
+                bytes[0], bytes[1], bytes[2], bytes[3],
+                bytes[4], bytes[5], bytes[6], bytes[7],
+            ]))
+        }
+
+        /// Read a sfixed32 value.
+        pub fn read_sfixed32(&mut self) -> Result<i32, ProtobufError> {
+            let bytes = self.read_bytes(4)?;
+            Ok(i32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+        }
+
+        /// Read a sfixed64 value.
+        pub fn read_sfixed64(&mut self) -> Result<i64, ProtobufError> {
+            let bytes = self.read_bytes(8)?;
+            Ok(i64::from_le_bytes([
+                bytes[0], bytes[1], bytes[2], bytes[3],
+                bytes[4], bytes[5], bytes[6], bytes[7],
+            ]))
+        }
+
+        /// Read a float value.
+        pub fn read_float(&mut self) -> Result<f32, ProtobufError> {
+            let bytes = self.read_bytes(4)?;
+            Ok(f32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+        }
+
+        /// Read a double value.
+        pub fn read_double(&mut self) -> Result<f64, ProtobufError> {
+            let bytes = self.read_bytes(8)?;
+            Ok(f64::from_le_bytes([
+                bytes[0], bytes[1], bytes[2], bytes[3],
+                bytes[4], bytes[5], bytes[6], bytes[7],
+            ]))
+        }
+
+        /// Read a length-delimited field as bytes.
+        pub fn read_length_delimited(&mut self) -> Result<&'a [u8], ProtobufError> {
+            let len = self.read_varint()? as usize;
+            self.read_bytes(len)
+        }
+
+        /// Read a string value.
+        pub fn read_string(&mut self) -> Result<&'a str, ProtobufError> {
+            let bytes = self.read_length_delimited()?;
+            std::str::from_utf8(bytes).map_err(|_| ProtobufError::InvalidUtf8)
+        }
+
+        /// Read an embedded message.
+        pub fn read_message<M: ProtobufMessage>(&mut self) -> Result<M, ProtobufError> {
+            let bytes = self.read_length_delimited()?;
+            let mut sub_decoder = Decoder::new(bytes);
+            M::decode(&mut sub_decoder)
+        }
+
+        /// Skip a field based on wire type.
+        pub fn skip_field(&mut self, wire_type: WireType) -> Result<(), ProtobufError> {
+            match wire_type {
+                WireType::Varint => {
+                    self.read_varint()?;
+                }
+                WireType::Fixed64 => {
+                    self.read_bytes(8)?;
+                }
+                WireType::LengthDelimited => {
+                    let len = self.read_varint()? as usize;
+                    self.read_bytes(len)?;
+                }
+                WireType::Fixed32 => {
+                    self.read_bytes(4)?;
+                }
+                WireType::StartGroup | WireType::EndGroup => {
+                    // Groups are deprecated, skip until end group
+                    // For simplicity, just skip the tag byte
+                }
+            }
+            Ok(())
+        }
+
+        /// Read packed varints.
+        pub fn read_packed_varints(&mut self) -> Result<Vec<u64>, ProtobufError> {
+            let bytes = self.read_length_delimited()?;
+            let mut sub_decoder = Decoder::new(bytes);
+            let mut values = Vec::new();
+
+            while sub_decoder.has_more() {
+                values.push(sub_decoder.read_varint()?);
+            }
+
+            Ok(values)
+        }
+
+        /// Read packed fixed32 values.
+        pub fn read_packed_fixed32(&mut self) -> Result<Vec<u32>, ProtobufError> {
+            let bytes = self.read_length_delimited()?;
+            let mut values = Vec::with_capacity(bytes.len() / 4);
+
+            for chunk in bytes.chunks_exact(4) {
+                values.push(u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
+            }
+
+            Ok(values)
+        }
+
+        /// Read packed fixed64 values.
+        pub fn read_packed_fixed64(&mut self) -> Result<Vec<u64>, ProtobufError> {
+            let bytes = self.read_length_delimited()?;
+            let mut values = Vec::with_capacity(bytes.len() / 8);
+
+            for chunk in bytes.chunks_exact(8) {
+                values.push(u64::from_le_bytes([
+                    chunk[0], chunk[1], chunk[2], chunk[3],
+                    chunk[4], chunk[5], chunk[6], chunk[7],
+                ]));
+            }
+
+            Ok(values)
+        }
+    }
+
+    /// Trait for types that can be serialized as Protobuf messages.
+    pub trait ProtobufMessage: Sized {
+        /// Encode this message to the encoder.
+        fn encode(&self, encoder: &mut Encoder);
+
+        /// Decode this message from the decoder.
+        fn decode(decoder: &mut Decoder) -> Result<Self, ProtobufError>;
+
+        /// Encode to bytes.
+        fn to_bytes(&self) -> Vec<u8> {
+            let mut encoder = Encoder::new();
+            self.encode(&mut encoder);
+            encoder.into_bytes()
+        }
+
+        /// Decode from bytes.
+        fn from_bytes(data: &[u8]) -> Result<Self, ProtobufError> {
+            let mut decoder = Decoder::new(data);
+            Self::decode(&mut decoder)
+        }
+    }
+
+    /// Helper struct for building messages dynamically.
+    pub struct MessageBuilder {
+        encoder: Encoder,
+    }
+
+    impl MessageBuilder {
+        /// Create a new message builder.
+        pub fn new() -> Self {
+            Self { encoder: Encoder::new() }
+        }
+
+        /// Add a bool field.
+        pub fn bool_field(mut self, field_number: u32, value: bool) -> Self {
+            self.encoder.write_bool(field_number, value);
+            self
+        }
+
+        /// Add an int32 field.
+        pub fn int32_field(mut self, field_number: u32, value: i32) -> Self {
+            self.encoder.write_int32(field_number, value);
+            self
+        }
+
+        /// Add an int64 field.
+        pub fn int64_field(mut self, field_number: u32, value: i64) -> Self {
+            self.encoder.write_int64(field_number, value);
+            self
+        }
+
+        /// Add a uint32 field.
+        pub fn uint32_field(mut self, field_number: u32, value: u32) -> Self {
+            self.encoder.write_uint32(field_number, value);
+            self
+        }
+
+        /// Add a uint64 field.
+        pub fn uint64_field(mut self, field_number: u32, value: u64) -> Self {
+            self.encoder.write_uint64(field_number, value);
+            self
+        }
+
+        /// Add a string field.
+        pub fn string_field(mut self, field_number: u32, value: &str) -> Self {
+            self.encoder.write_string(field_number, value);
+            self
+        }
+
+        /// Add a bytes field.
+        pub fn bytes_field(mut self, field_number: u32, value: &[u8]) -> Self {
+            self.encoder.write_bytes_field(field_number, value);
+            self
+        }
+
+        /// Add a float field.
+        pub fn float_field(mut self, field_number: u32, value: f32) -> Self {
+            self.encoder.write_float(field_number, value);
+            self
+        }
+
+        /// Add a double field.
+        pub fn double_field(mut self, field_number: u32, value: f64) -> Self {
+            self.encoder.write_double(field_number, value);
+            self
+        }
+
+        /// Add a nested message field.
+        pub fn message_field<M: ProtobufMessage>(mut self, field_number: u32, message: &M) -> Self {
+            self.encoder.write_message(field_number, message);
+            self
+        }
+
+        /// Build the message bytes.
+        pub fn build(self) -> Vec<u8> {
+            self.encoder.into_bytes()
+        }
+    }
+
+    impl Default for MessageBuilder {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+
+    /// Encode a value to protobuf bytes.
+    pub fn encode<T: ProtobufMessage>(value: &T) -> Vec<u8> {
+        value.to_bytes()
+    }
+
+    /// Decode a value from protobuf bytes.
+    pub fn decode<T: ProtobufMessage>(data: &[u8]) -> Result<T, ProtobufError> {
+        T::from_bytes(data)
+    }
+
+    /// Calculate the size of a varint.
+    pub fn varint_size(value: u64) -> usize {
+        if value == 0 { return 1; }
+        let bits = 64 - value.leading_zeros() as usize;
+        (bits + 6) / 7
+    }
+
+    /// Calculate the size of a signed varint.
+    pub fn svarint_size(value: i64) -> usize {
+        let encoded = ((value << 1) ^ (value >> 63)) as u64;
+        varint_size(encoded)
+    }
+
+    /// Calculate the size of a tag.
+    pub fn tag_size(field_number: u32) -> usize {
+        varint_size((field_number as u64) << 3)
+    }
+}
+
+// =============================================================================
+// Tests
+// =============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use super::json;
+
+    #[test]
+    fn test_json_parse_null() {
+        let value = json::parse("null").unwrap();
+        assert!(value.is_null());
+    }
+
+    #[test]
+    fn test_json_parse_bool() {
+        assert_eq!(json::parse("true").unwrap(), json::Value::Bool(true));
+        assert_eq!(json::parse("false").unwrap(), json::Value::Bool(false));
+    }
+
+    #[test]
+    fn test_json_parse_number() {
+        let value = json::parse("42").unwrap();
+        assert_eq!(value.as_i64(), Some(42));
+
+        let value = json::parse("-123").unwrap();
+        assert_eq!(value.as_i64(), Some(-123));
+
+        let value = json::parse("3.14").unwrap();
+        assert!((value.as_f64().unwrap() - 3.14).abs() < 0.001);
+
+        let value = json::parse("1.5e10").unwrap();
+        assert!((value.as_f64().unwrap() - 1.5e10).abs() < 1.0);
+    }
+
+    #[test]
+    fn test_json_parse_string() {
+        let value = json::parse(r#""hello""#).unwrap();
+        assert_eq!(value.as_str(), Some("hello"));
+
+        let value = json::parse(r#""hello\nworld""#).unwrap();
+        assert_eq!(value.as_str(), Some("hello\nworld"));
+
+        let value = json::parse(r#""tab\there""#).unwrap();
+        assert_eq!(value.as_str(), Some("tab\there"));
+    }
+
+    #[test]
+    fn test_json_parse_array() {
+        let value = json::parse("[1, 2, 3]").unwrap();
+        let arr = value.as_array().unwrap();
+        assert_eq!(arr.len(), 3);
+        assert_eq!(arr[0].as_i64(), Some(1));
+        assert_eq!(arr[1].as_i64(), Some(2));
+        assert_eq!(arr[2].as_i64(), Some(3));
+    }
+
+    #[test]
+    fn test_json_parse_object() {
+        let value = json::parse(r#"{"name": "Alice", "age": 30}"#).unwrap();
+        let obj = value.as_object().unwrap();
+        assert_eq!(obj.get("name").unwrap().as_str(), Some("Alice"));
+        assert_eq!(obj.get("age").unwrap().as_i64(), Some(30));
+    }
+
+    #[test]
+    fn test_json_serialize_primitives() {
+        assert_eq!(json::to_string(&true).unwrap(), "true");
+        assert_eq!(json::to_string(&42i32).unwrap(), "42");
+        assert_eq!(json::to_string(&"hello").unwrap(), "\"hello\"");
+    }
+
+    #[test]
+    fn test_json_serialize_array() {
+        let arr = vec![1, 2, 3];
+        assert_eq!(json::to_string(&arr).unwrap(), "[1,2,3]");
+    }
+
+    #[test]
+    fn test_json_roundtrip() {
+        let original = r#"{"name":"Bob","scores":[90,85,92],"active":true}"#;
+        let parsed = json::parse(original).unwrap();
+        // Note: Object key order may differ, so we just verify parsing worked
+        assert!(parsed.is_object());
+        assert_eq!(parsed.get("name").unwrap().as_str(), Some("Bob"));
+    }
+
+    #[test]
+    fn test_base64() {
+        let data = b"Hello, World!";
+        let encoded = json::base64_encode(data);
+        let decoded = json::base64_decode(&encoded).unwrap();
+        assert_eq!(decoded, data);
+    }
+}

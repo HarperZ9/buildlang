@@ -1,0 +1,367 @@
+// =============================================================================
+// qwatch — File snapshot & change detection tool written in BuildLang
+// =============================================================================
+// Snapshot-and-diff tool for detecting file changes. Takes a snapshot of file
+// sizes in a directory tree, saves state to a file, and compares against a
+// previous snapshot to report additions, deletions, and size changes.
+//
+// Usage:
+//   qwatch src/                     report all file sizes (scan mode)
+//   qwatch -s src/ state.txt        save snapshot to state file
+//   qwatch -c src/ state.txt        compare current state vs saved snapshot
+//   qwatch -e build src/           only watch files with .bld extension
+//   qwatch -r src/                  recursively scan (default for directories)
+//   qwatch --help                   usage
+//
+// State file format (one line per file):
+//   <size>\t<path>
+//
+// Algorithm: Iterative DFS with vec_new_str stack (same as qfind/qloc).
+// =============================================================================
+
+fn print_help() ~ Console {
+    println!("qwatch -- file snapshot & change detection tool");
+    println!("");
+    println!("Usage:");
+    println!("  qwatch PATH                  scan and report file sizes");
+    println!("  qwatch -s PATH STATE         save snapshot to STATE file");
+    println!("  qwatch -c PATH STATE         compare current vs saved snapshot");
+    println!("  qwatch -e EXT PATH           filter by file extension (e.g. build)");
+    println!("  qwatch --help                display this help and exit");
+    println!("");
+    println!("State file format: <size>\\t<path> (one entry per line)");
+}
+
+// Should skip this directory during traversal?
+fn should_skip_dir(name: String) -> bool {
+    if name == ".git" { return true; }
+    if name == "node_modules" { return true; }
+    if name == "__pycache__" { return true; }
+    if name == "target" { return true; }
+    if name == "build" { return true; }
+    if name == "dist" { return true; }
+    if name == ".cache" { return true; }
+    false
+}
+
+// Check if a filename ends with the given extension.
+fn has_extension(name: String, ext: String) -> bool {
+    let dot_ext = "." + ext;
+    name.ends_with(dot_ext)
+}
+
+// Collect all files under a path into parallel vecs (paths + sizes).
+// If ext_filter is non-empty, only include files matching that extension.
+fn collect_files(root: String, ext_filter: String,
+                 paths: Vec<String>, sizes: Vec<i32>) ~ FileSystem {
+    let root_is_dir = is_dir(root);
+
+    if !root_is_dir {
+        // Single file
+        let filt_len = ext_filter.len();
+        if filt_len > 0 {
+            if !has_extension(root, ext_filter) {
+                return;
+            }
+        }
+        let sz = file_size(root);
+        vec_push_str(paths, root);
+        vec_push(sizes, sz);
+        return;
+    }
+
+    // Iterative DFS
+    let dir_stack = vec_new_str();
+    vec_push_str(dir_stack, root);
+
+    let mut stack_done = false;
+    while !stack_done {
+        let slen = vec_len(dir_stack);
+        if slen == 0 {
+            stack_done = true;
+        } else {
+            let dirpath = vec_get_str(dir_stack, slen - 1);
+            vec_pop(dir_stack);
+
+            let entries = list_dir(dirpath);
+            let n = vec_len(entries);
+            let mut ei: i64 = 0;
+
+            while ei < n {
+                let name = vec_get_str(entries, ei);
+                let full = dirpath + "/" + name;
+                let entry_is_dir = is_dir(full);
+
+                if entry_is_dir {
+                    let skip = should_skip_dir(name);
+                    if !skip {
+                        vec_push_str(dir_stack, full);
+                    }
+                } else {
+                    let filt_len = ext_filter.len();
+                    let mut include = true;
+                    if filt_len > 0 {
+                        if !has_extension(name, ext_filter) {
+                            include = false;
+                        }
+                    }
+                    if include {
+                        let sz = file_size(full);
+                        vec_push_str(paths, full);
+                        vec_push(sizes, sz);
+                    }
+                }
+
+                ei = ei + 1;
+            }
+        }
+    }
+}
+
+// Format a snapshot as a string: "<size>\t<path>\n" per entry.
+fn format_snapshot(paths: Vec<String>, sizes: Vec<i32>) -> String {
+    let n = vec_len(paths);
+    let mut out = "";
+    let mut i: i64 = 0;
+    while i < n {
+        let p = vec_get_str(paths, i);
+        let sz = vec_get(sizes, i);
+        let sz_str = to_string_i32(sz);
+        out = out + sz_str + "\t" + p + "\n";
+        i = i + 1;
+    }
+    out
+}
+
+// Parse a saved state file into parallel vecs.
+fn parse_state(content: String, paths: Vec<String>, sizes: Vec<i32>) {
+    let clen = content.len();
+    let mut pos: i64 = 0;
+
+    let mut go = true;
+    while go {
+        if pos >= clen {
+            go = false;
+        } else {
+            let rest = content.substring(pos, clen - pos);
+            let nl_idx = rest.index_of("\n");
+            let line = if nl_idx < 0 { rest } else { rest.substring(0, nl_idx) };
+            if nl_idx < 0 { pos = clen; } else { pos = pos + nl_idx + 1; }
+
+            let line_len = line.len();
+            if line_len > 0 {
+                // Find the tab separator
+                let tab_idx = line.index_of("\t");
+                if tab_idx > 0 {
+                    let sz_str = line.substring(0, tab_idx);
+                    let path = line.substring(tab_idx + 1, line_len - tab_idx - 1);
+                    let sz = sz_str.parse_int();
+                    vec_push_str(paths, path);
+                    vec_push(sizes, sz);
+                }
+            }
+        }
+    }
+}
+
+// Print a right-aligned number with padding.
+fn print_padded_num(val: i64, width: i64) ~ Console {
+    let s = to_string_i32(val);
+    let slen = s.len();
+    let pad = width - slen;
+    let mut p: i64 = 0;
+    while p < pad {
+        print!(" ");
+        p = p + 1;
+    }
+    print!("{}", val);
+}
+
+fn main() ~ Console + Environment + FileSystem + Process {
+    let nargs = args_count();
+
+    if nargs < 2 {
+        print_help();
+        process_exit(0);
+    }
+
+    // Defaults
+    let mut root_path = "";
+    let mut state_file = "";
+    // mode: 0=scan, 1=save, 2=compare
+    let mut mode: i64 = 0;
+    let mut ext_filter = "";
+
+    // Parse arguments
+    let mut i: i64 = 1;
+    while i < nargs {
+        let arg = args_get(i);
+
+        if arg == "--help" || arg == "-h" {
+            print_help();
+            process_exit(0);
+        } else if arg == "-s" {
+            mode = 1;
+            i = i + 1;
+        } else if arg == "-c" {
+            mode = 2;
+            i = i + 1;
+        } else if arg == "-e" {
+            if i + 1 < nargs {
+                ext_filter = args_get(i + 1);
+                i = i + 2;
+            } else {
+                println!("qwatch: -e requires an extension argument");
+                process_exit(1);
+            }
+        } else if arg == "-r" {
+            // Recursive is default; accept and ignore
+            i = i + 1;
+        } else if !arg.starts_with("-") {
+            if root_path.len() == 0 {
+                root_path = arg;
+            } else if state_file.len() == 0 {
+                state_file = arg;
+            }
+            i = i + 1;
+        } else {
+            println!("qwatch: unknown option '{}'", arg);
+            process_exit(1);
+        }
+    }
+
+    if root_path.len() == 0 {
+        println!("qwatch: missing PATH argument");
+        process_exit(1);
+    }
+
+    // Validate path
+    let exists = file_exists(root_path);
+    let isdir = is_dir(root_path);
+    if !exists && !isdir {
+        println!("qwatch: '{}': No such file or directory", root_path);
+        process_exit(1);
+    }
+
+    // Collect current files
+    let cur_paths = vec_new_str();
+    let cur_sizes: Vec<i32> = vec![];
+    collect_files(root_path, ext_filter, cur_paths, cur_sizes);
+
+    let file_count = vec_len(cur_paths);
+
+    if mode == 0 {
+        // Scan mode: print all files with sizes
+        println!("qwatch: scanning {} ({} files)", root_path, file_count);
+        println!("");
+
+        let mut total_size: i64 = 0;
+        let mut fi: i64 = 0;
+        while fi < file_count {
+            let p = vec_get_str(cur_paths, fi);
+            let sz = vec_get(cur_sizes, fi);
+            print_padded_num(sz, 10);
+            println!("  {}", p);
+            total_size = total_size + sz;
+            fi = fi + 1;
+        }
+
+        println!("");
+        print_padded_num(total_size, 10);
+        println!("  total ({} files)", file_count);
+    } else if mode == 1 {
+        // Save mode: write snapshot to state file
+        if state_file.len() == 0 {
+            println!("qwatch: -s requires a state file argument");
+            println!("Usage: qwatch -s PATH STATE_FILE");
+            process_exit(1);
+        }
+        let snapshot = format_snapshot(cur_paths, cur_sizes);
+        write_file(state_file, snapshot);
+        println!("qwatch: saved snapshot of {} files to {}", file_count, state_file);
+    } else if mode == 2 {
+        // Compare mode: diff current vs saved snapshot
+        if state_file.len() == 0 {
+            println!("qwatch: -c requires a state file argument");
+            println!("Usage: qwatch -c PATH STATE_FILE");
+            process_exit(1);
+        }
+        if !file_exists(state_file) {
+            println!("qwatch: state file '{}' not found", state_file);
+            println!("Run 'qwatch -s {} {}' first to create a snapshot.", root_path, state_file);
+            process_exit(1);
+        }
+
+        let old_content = read_file(state_file);
+        let old_paths = vec_new_str();
+        let old_sizes: Vec<i32> = vec![];
+        parse_state(old_content, old_paths, old_sizes);
+
+        let old_count = vec_len(old_paths);
+
+        // Compare: for each current file, look for it in old state
+        let mut added: i64 = 0;
+        let mut changed: i64 = 0;
+        let mut ci: i64 = 0;
+        while ci < file_count {
+            let cp = vec_get_str(cur_paths, ci);
+            let csz = vec_get(cur_sizes, ci);
+
+            // Linear search in old state
+            let mut found = false;
+            let mut old_sz: i64 = 0;
+            let mut oi: i64 = 0;
+            while oi < old_count {
+                let op = vec_get_str(old_paths, oi);
+                if op == cp {
+                    found = true;
+                    old_sz = vec_get(old_sizes, oi);
+                    oi = old_count; // break
+                }
+                oi = oi + 1;
+            }
+
+            if !found {
+                println!("  [ADDED]    {}", cp);
+                added = added + 1;
+            } else if csz != old_sz {
+                println!("  [CHANGED]  {} ({} -> {} bytes)", cp, old_sz, csz);
+                changed = changed + 1;
+            }
+
+            ci = ci + 1;
+        }
+
+        // Check for deleted files (in old but not in current)
+        let mut deleted: i64 = 0;
+        let mut di: i64 = 0;
+        while di < old_count {
+            let op = vec_get_str(old_paths, di);
+            let mut found = false;
+            let mut ci2: i64 = 0;
+            while ci2 < file_count {
+                let cp = vec_get_str(cur_paths, ci2);
+                if cp == op {
+                    found = true;
+                    ci2 = file_count; // break
+                }
+                ci2 = ci2 + 1;
+            }
+            if !found {
+                println!("  [DELETED]  {}", op);
+                deleted = deleted + 1;
+            }
+            di = di + 1;
+        }
+
+        // Summary
+        println!("");
+        let total_changes = added + changed + deleted;
+        if total_changes == 0 {
+            println!("qwatch: no changes detected ({} files)", file_count);
+        } else {
+            println!("qwatch: {} change(s): {} added, {} changed, {} deleted",
+                     total_changes, added, changed, deleted);
+        }
+    }
+}

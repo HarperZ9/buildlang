@@ -1,0 +1,1086 @@
+// ============================================================================
+// NEXUS - Compatibility System
+// ============================================================================
+// Mod compatibility checking, version management, and conflict resolution
+// Ensures mods work together without issues
+// ============================================================================
+
+module nexus::compatibility;
+
+use core::collections::{HashMap, HashSet, Vec, BTreeMap};
+
+// ============================================================================
+// Version Types
+// ============================================================================
+
+/// Semantic version with extended support
+@derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Version {
+    major: u32,
+    minor: u32,
+    patch: u32,
+    prerelease: Option<String>,
+    build_metadata: Option<String>
+}
+
+impl Version {
+    pub fn new(major: u32, minor: u32, patch: u32) -> Self {
+        Self {
+            major,
+            minor,
+            patch,
+            prerelease: None,
+            build_metadata: None
+        }
+    }
+
+    pub fn with_prerelease(mut self, pre: &str) -> Self {
+        self.prerelease = Some(pre.to_string());
+        self
+    }
+
+    pub fn with_build(mut self, build: &str) -> Self {
+        self.build_metadata = Some(build.to_string());
+        self
+    }
+
+    pub fn parse(s: &str) -> Result<Self, VersionError> {
+        let s = s.trim();
+
+        // Remove 'v' prefix if present
+        let s = s.strip_prefix('v').unwrap_or(s);
+
+        // Parse build metadata
+        let (main, build) = match s.split_once('+') {
+            Some((m, b)) => (m, Some(b.to_string())),
+            None => (s, None)
+        };
+
+        // Parse prerelease
+        let (version_str, prerelease) = match main.split_once('-') {
+            Some((v, p)) => (v, Some(p.to_string())),
+            None => (main, None)
+        };
+
+        // Parse version numbers
+        let parts: Vec<&str> = version_str.split('.').collect();
+        if parts.len() < 1 || parts.len() > 3 {
+            return Err(VersionError::InvalidFormat(s.to_string()));
+        }
+
+        let major = parts[0].parse()
+            .map_err(|_| VersionError::InvalidFormat(s.to_string()))?;
+        let minor = parts.get(1).map(|s| s.parse()).transpose()
+            .map_err(|_| VersionError::InvalidFormat(s.to_string()))?
+            .unwrap_or(0);
+        let patch = parts.get(2).map(|s| s.parse()).transpose()
+            .map_err(|_| VersionError::InvalidFormat(s.to_string()))?
+            .unwrap_or(0);
+
+        Ok(Self {
+            major,
+            minor,
+            patch,
+            prerelease,
+            build_metadata: build
+        })
+    }
+
+    pub fn major(&self) -> u32 { self.major }
+    pub fn minor(&self) -> u32 { self.minor }
+    pub fn patch(&self) -> u32 { self.patch }
+    pub fn prerelease(&self) -> Option<&str> { self.prerelease.as_deref() }
+    pub fn build_metadata(&self) -> Option<&str> { self.build_metadata.as_deref() }
+
+    pub fn is_prerelease(&self) -> bool {
+        self.prerelease.is_some()
+    }
+
+    pub fn is_stable(&self) -> bool {
+        !self.is_prerelease() && self.major > 0
+    }
+
+    pub fn to_string(&self) -> String {
+        let mut s = format!("{}.{}.{}", self.major, self.minor, self.patch);
+        if let Some(ref pre) = self.prerelease {
+            s.push('-');
+            s.push_str(pre);
+        }
+        if let Some(ref build) = self.build_metadata {
+            s.push('+');
+            s.push_str(build);
+        }
+        s
+    }
+
+    /// Check if this version is compatible with another (same major, >= minor.patch)
+    pub fn is_compatible_with(&self, other: &Version) -> bool {
+        if self.major != other.major {
+            return false;
+        }
+        if self.major == 0 {
+            // 0.x.y versions are not considered stable, require exact minor match
+            return self.minor == other.minor && self.patch >= other.patch;
+        }
+        // For major > 0, any version with same major is compatible
+        true
+    }
+
+    /// Check if this version satisfies a requirement
+    pub fn satisfies(&self, requirement: &VersionRange) -> bool {
+        requirement.contains(self)
+    }
+}
+
+/// Version range for dependency requirements
+@derive(Clone)]
+pub enum VersionRange {
+    Exact(Version),
+    GreaterThan(Version),
+    GreaterThanOrEqual(Version),
+    LessThan(Version),
+    LessThanOrEqual(Version),
+    Range { min: Version, max: Version, inclusive_min: bool, inclusive_max: bool },
+    Compatible(Version),  // ^X.Y.Z
+    Approximate(Version), // ~X.Y.Z
+    Wildcard { major: Option<u32>, minor: Option<u32> },
+    Or(Vec<VersionRange>),
+    And(Vec<VersionRange>),
+    Any
+}
+
+impl VersionRange {
+    pub fn parse(s: &str) -> Result<Self, VersionError> {
+        let s = s.trim();
+
+        if s == "*" || s.is_empty() {
+            return Ok(Self::Any);
+        }
+
+        // Handle OR (||)
+        if s.contains("||") {
+            let parts: Vec<&str> = s.split("||").collect();
+            let ranges: Result<Vec<VersionRange>, _> = parts.iter()
+                .map(|p| VersionRange::parse(p.trim()))
+                .collect();
+            return Ok(Self::Or(ranges?));
+        }
+
+        // Handle AND (space or &&)
+        if s.contains(" ") && !s.starts_with(">=") && !s.starts_with("<=") {
+            let parts: Vec<&str> = s.split_whitespace().collect();
+            let ranges: Result<Vec<VersionRange>, _> = parts.iter()
+                .map(|p| VersionRange::parse(p.trim()))
+                .collect();
+            return Ok(Self::And(ranges?));
+        }
+
+        // Handle caret (^) - compatible
+        if s.starts_with('^') {
+            let version = Version::parse(&s[1..])?;
+            return Ok(Self::Compatible(version));
+        }
+
+        // Handle tilde (~) - approximate
+        if s.starts_with('~') {
+            let version = Version::parse(&s[1..])?;
+            return Ok(Self::Approximate(version));
+        }
+
+        // Handle range operators
+        if s.starts_with(">=") {
+            let version = Version::parse(&s[2..].trim())?;
+            return Ok(Self::GreaterThanOrEqual(version));
+        }
+        if s.starts_with('>') {
+            let version = Version::parse(&s[1..].trim())?;
+            return Ok(Self::GreaterThan(version));
+        }
+        if s.starts_with("<=") {
+            let version = Version::parse(&s[2..].trim())?;
+            return Ok(Self::LessThanOrEqual(version));
+        }
+        if s.starts_with('<') {
+            let version = Version::parse(&s[1..].trim())?;
+            return Ok(Self::LessThan(version));
+        }
+        if s.starts_with('=') {
+            let version = Version::parse(&s[1..].trim())?;
+            return Ok(Self::Exact(version));
+        }
+
+        // Handle hyphen range (1.0.0 - 2.0.0)
+        if s.contains(" - ") {
+            let parts: Vec<&str> = s.split(" - ").collect();
+            if parts.len() == 2 {
+                let min = Version::parse(parts[0].trim())?;
+                let max = Version::parse(parts[1].trim())?;
+                return Ok(Self::Range {
+                    min,
+                    max,
+                    inclusive_min: true,
+                    inclusive_max: true
+                });
+            }
+        }
+
+        // Handle wildcards
+        if s.contains('*') || s.contains('x') || s.contains('X') {
+            let parts: Vec<&str> = s.split('.').collect();
+            let major = parts.get(0)
+                .filter(|p| !p.contains('*') && !p.eq_ignore_ascii_case(&"x"))
+                .and_then(|p| p.parse().ok());
+            let minor = parts.get(1)
+                .filter(|p| !p.contains('*') && !p.eq_ignore_ascii_case(&"x"))
+                .and_then(|p| p.parse().ok());
+            return Ok(Self::Wildcard { major, minor });
+        }
+
+        // Default to exact version
+        let version = Version::parse(s)?;
+        Ok(Self::Compatible(version))
+    }
+
+    pub fn contains(&self, version: &Version) -> bool {
+        match self {
+            Self::Exact(v) => version == v,
+            Self::GreaterThan(v) => version > v,
+            Self::GreaterThanOrEqual(v) => version >= v,
+            Self::LessThan(v) => version < v,
+            Self::LessThanOrEqual(v) => version <= v,
+            Self::Range { min, max, inclusive_min, inclusive_max } => {
+                let min_ok = if *inclusive_min { version >= min } else { version > min };
+                let max_ok = if *inclusive_max { version <= max } else { version < max };
+                min_ok && max_ok
+            }
+            Self::Compatible(v) => {
+                if v.major == 0 {
+                    version.major == 0 && version.minor == v.minor && version.patch >= v.patch
+                } else {
+                    version.major == v.major &&
+                    (version.minor > v.minor ||
+                     (version.minor == v.minor && version.patch >= v.patch))
+                }
+            }
+            Self::Approximate(v) => {
+                version.major == v.major && version.minor == v.minor && version.patch >= v.patch
+            }
+            Self::Wildcard { major, minor } => {
+                if let Some(maj) = major {
+                    if version.major != *maj {
+                        return false;
+                    }
+                }
+                if let Some(min) = minor {
+                    if version.minor != *min {
+                        return false;
+                    }
+                }
+                true
+            }
+            Self::Or(ranges) => ranges.iter().any(|r| r.contains(version)),
+            Self::And(ranges) => ranges.iter().all(|r| r.contains(version)),
+            Self::Any => true
+        }
+    }
+
+    pub fn to_string(&self) -> String {
+        match self {
+            Self::Exact(v) => format!("={}", v.to_string()),
+            Self::GreaterThan(v) => format!(">{}", v.to_string()),
+            Self::GreaterThanOrEqual(v) => format!(">={}", v.to_string()),
+            Self::LessThan(v) => format!("<{}", v.to_string()),
+            Self::LessThanOrEqual(v) => format!("<={}", v.to_string()),
+            Self::Range { min, max, .. } => {
+                format!("{} - {}", min.to_string(), max.to_string())
+            }
+            Self::Compatible(v) => format!("^{}", v.to_string()),
+            Self::Approximate(v) => format!("~{}", v.to_string()),
+            Self::Wildcard { major, minor } => {
+                match (major, minor) {
+                    (Some(maj), Some(min)) => format!("{}.{}.*", maj, min),
+                    (Some(maj), None) => format!("{}.*", maj),
+                    _ => "*".to_string()
+                }
+            }
+            Self::Or(ranges) => {
+                ranges.iter().map(|r| r.to_string()).collect::<Vec<_>>().join(" || ")
+            }
+            Self::And(ranges) => {
+                ranges.iter().map(|r| r.to_string()).collect::<Vec<_>>().join(" ")
+            }
+            Self::Any => "*".to_string()
+        }
+    }
+}
+
+// ============================================================================
+// Compatibility Checker
+// ============================================================================
+
+/// Main compatibility checker
+pub struct CompatibilityChecker {
+    known_conflicts: Vec<ConflictRule>,
+    known_patches: Vec<CompatibilityPatch>,
+    mod_info: HashMap<String, ModCompatInfo>,
+    api_versions: HashMap<String, Version>,
+    game_version: Option<Version>
+}
+
+impl CompatibilityChecker {
+    pub fn new() -> Self {
+        Self {
+            known_conflicts: Vec::new(),
+            known_patches: Vec::new(),
+            mod_info: HashMap::new(),
+            api_versions: HashMap::new(),
+            game_version: None
+        }
+    }
+
+    pub fn set_game_version(&mut self, version: Version) {
+        self.game_version = Some(version);
+    }
+
+    pub fn set_api_version(&mut self, api: &str, version: Version) {
+        self.api_versions.insert(api.to_string(), version);
+    }
+
+    /// Register mod compatibility information
+    pub fn register_mod(&mut self, info: ModCompatInfo) {
+        self.mod_info.insert(info.mod_id.clone(), info);
+    }
+
+    /// Add a known conflict rule
+    pub fn add_conflict_rule(&mut self, rule: ConflictRule) {
+        self.known_conflicts.push(rule);
+    }
+
+    /// Add a compatibility patch
+    pub fn add_patch(&mut self, patch: CompatibilityPatch) {
+        self.known_patches.push(patch);
+    }
+
+    /// Check compatibility between a set of mods
+    pub fn check(&self, mod_ids: &[String]) -> CompatibilityResult {
+        let mut result = CompatibilityResult::new();
+
+        // Check each mod pair for conflicts
+        for i in 0..mod_ids.len() {
+            for j in (i + 1)..mod_ids.len() {
+                let conflicts = self.check_pair(&mod_ids[i], &mod_ids[j]);
+                result.conflicts.extend(conflicts);
+            }
+        }
+
+        // Check dependencies
+        for mod_id in mod_ids {
+            let dep_issues = self.check_dependencies(mod_id, mod_ids);
+            result.dependency_issues.extend(dep_issues);
+        }
+
+        // Check game version compatibility
+        if let Some(ref game_version) = self.game_version {
+            for mod_id in mod_ids {
+                if let Some(info) = self.mod_info.get(mod_id) {
+                    if let Some(ref req) = info.game_version_req {
+                        if !req.contains(game_version) {
+                            result.warnings.push(CompatibilityWarning {
+                                mod_id: mod_id.clone(),
+                                warning_type: WarningType::GameVersionMismatch,
+                                message: format!(
+                                    "Mod {} requires game version {}, but {} is installed",
+                                    mod_id, req.to_string(), game_version.to_string()
+                                )
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        // Check API versions
+        for mod_id in mod_ids {
+            if let Some(info) = self.mod_info.get(mod_id) {
+                for (api, req) in &info.api_requirements {
+                    if let Some(available) = self.api_versions.get(api) {
+                        if !req.contains(available) {
+                            result.warnings.push(CompatibilityWarning {
+                                mod_id: mod_id.clone(),
+                                warning_type: WarningType::ApiVersionMismatch,
+                                message: format!(
+                                    "Mod {} requires {} {}, but {} is available",
+                                    mod_id, api, req.to_string(), available.to_string()
+                                )
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        // Find applicable patches
+        for conflict in &result.conflicts {
+            for patch in &self.known_patches {
+                if patch.applies_to(&conflict.mod_a, &conflict.mod_b) {
+                    result.suggested_patches.push(patch.clone());
+                }
+            }
+        }
+
+        result.is_compatible = result.conflicts.is_empty() && result.dependency_issues.is_empty();
+
+        result
+    }
+
+    fn check_pair(&self, mod_a: &str, mod_b: &str) -> Vec<Conflict> {
+        let mut conflicts = Vec::new();
+
+        // Check explicit conflict rules
+        for rule in &self.known_conflicts {
+            if rule.matches(mod_a, mod_b) {
+                conflicts.push(Conflict {
+                    mod_a: mod_a.to_string(),
+                    mod_b: mod_b.to_string(),
+                    conflict_type: rule.conflict_type.clone(),
+                    severity: rule.severity,
+                    description: rule.description.clone(),
+                    resolution: rule.resolution.clone()
+                });
+            }
+        }
+
+        // Check declared conflicts in mod info
+        if let Some(info_a) = self.mod_info.get(mod_a) {
+            for declared in &info_a.conflicts {
+                if declared.mod_id == mod_b {
+                    if let Some(ref version_req) = declared.version_range {
+                        if let Some(info_b) = self.mod_info.get(mod_b) {
+                            if version_req.contains(&info_b.version) {
+                                conflicts.push(Conflict {
+                                    mod_a: mod_a.to_string(),
+                                    mod_b: mod_b.to_string(),
+                                    conflict_type: ConflictType::DeclaredIncompatible,
+                                    severity: ConflictSeverity::Error,
+                                    description: declared.reason.clone(),
+                                    resolution: None
+                                });
+                            }
+                        }
+                    } else {
+                        conflicts.push(Conflict {
+                            mod_a: mod_a.to_string(),
+                            mod_b: mod_b.to_string(),
+                            conflict_type: ConflictType::DeclaredIncompatible,
+                            severity: ConflictSeverity::Error,
+                            description: declared.reason.clone(),
+                            resolution: None
+                        });
+                    }
+                }
+            }
+        }
+
+        conflicts
+    }
+
+    fn check_dependencies(&self, mod_id: &str, available_mods: &[String]) -> Vec<DependencyIssue> {
+        let mut issues = Vec::new();
+
+        let info = match self.mod_info.get(mod_id) {
+            Some(i) => i,
+            None => return issues
+        };
+
+        for dep in &info.dependencies {
+            // Check if dependency is available
+            if !available_mods.contains(&dep.mod_id) {
+                if !dep.optional {
+                    issues.push(DependencyIssue {
+                        mod_id: mod_id.to_string(),
+                        dependency: dep.mod_id.clone(),
+                        issue_type: DependencyIssueType::Missing,
+                        message: format!("Required dependency {} is missing", dep.mod_id)
+                    });
+                }
+                continue;
+            }
+
+            // Check version requirement
+            if let Some(ref version_req) = dep.version_range {
+                if let Some(dep_info) = self.mod_info.get(&dep.mod_id) {
+                    if !version_req.contains(&dep_info.version) {
+                        issues.push(DependencyIssue {
+                            mod_id: mod_id.to_string(),
+                            dependency: dep.mod_id.clone(),
+                            issue_type: DependencyIssueType::VersionMismatch,
+                            message: format!(
+                                "Dependency {} requires version {}, but {} is installed",
+                                dep.mod_id, version_req.to_string(), dep_info.version.to_string()
+                            )
+                        });
+                    }
+                }
+            }
+        }
+
+        issues
+    }
+
+    /// Calculate optimal load order
+    pub fn calculate_load_order(&self, mod_ids: &[String]) -> Result<Vec<String>, CompatibilityError> {
+        let mut order = Vec::new();
+        let mut visited = HashSet::new();
+        let mut in_progress = HashSet::new();
+
+        for mod_id in mod_ids {
+            self.visit_for_order(mod_id, mod_ids, &mut visited, &mut in_progress, &mut order)?;
+        }
+
+        Ok(order)
+    }
+
+    fn visit_for_order(
+        &self,
+        mod_id: &str,
+        available: &[String],
+        visited: &mut HashSet<String>,
+        in_progress: &mut HashSet<String>,
+        order: &mut Vec<String>
+    ) -> Result<(), CompatibilityError> {
+        if visited.contains(mod_id) {
+            return Ok(());
+        }
+
+        if in_progress.contains(mod_id) {
+            return Err(CompatibilityError::CircularDependency(mod_id.to_string()));
+        }
+
+        in_progress.insert(mod_id.to_string());
+
+        // Process dependencies first
+        if let Some(info) = self.mod_info.get(mod_id) {
+            for dep in &info.dependencies {
+                if available.contains(&dep.mod_id) {
+                    self.visit_for_order(&dep.mod_id, available, visited, in_progress, order)?;
+                }
+            }
+
+            // Process load-after hints
+            for after in &info.load_after {
+                if available.contains(after) {
+                    self.visit_for_order(after, available, visited, in_progress, order)?;
+                }
+            }
+        }
+
+        in_progress.remove(mod_id);
+        visited.insert(mod_id.to_string());
+        order.push(mod_id.to_string());
+
+        Ok(())
+    }
+}
+
+// ============================================================================
+// Mod Compatibility Info
+// ============================================================================
+
+/// Compatibility information for a mod
+pub struct ModCompatInfo {
+    pub mod_id: String,
+    pub version: Version,
+    pub game_version_req: Option<VersionRange>,
+    pub api_requirements: HashMap<String, VersionRange>,
+    pub dependencies: Vec<DependencyInfo>,
+    pub conflicts: Vec<ConflictInfo>,
+    pub load_before: Vec<String>,
+    pub load_after: Vec<String>,
+    pub provides: Vec<String>,
+    pub replaces: Vec<String>
+}
+
+impl ModCompatInfo {
+    pub fn new(mod_id: &str, version: Version) -> Self {
+        Self {
+            mod_id: mod_id.to_string(),
+            version,
+            game_version_req: None,
+            api_requirements: HashMap::new(),
+            dependencies: Vec::new(),
+            conflicts: Vec::new(),
+            load_before: Vec::new(),
+            load_after: Vec::new(),
+            provides: Vec::new(),
+            replaces: Vec::new()
+        }
+    }
+
+    pub fn with_game_version(mut self, req: VersionRange) -> Self {
+        self.game_version_req = Some(req);
+        self
+    }
+
+    pub fn with_api_requirement(mut self, api: &str, req: VersionRange) -> Self {
+        self.api_requirements.insert(api.to_string(), req);
+        self
+    }
+
+    pub fn with_dependency(mut self, dep: DependencyInfo) -> Self {
+        self.dependencies.push(dep);
+        self
+    }
+
+    pub fn with_conflict(mut self, conflict: ConflictInfo) -> Self {
+        self.conflicts.push(conflict);
+        self
+    }
+
+    pub fn load_before(mut self, mod_id: &str) -> Self {
+        self.load_before.push(mod_id.to_string());
+        self
+    }
+
+    pub fn load_after(mut self, mod_id: &str) -> Self {
+        self.load_after.push(mod_id.to_string());
+        self
+    }
+}
+
+/// Dependency information
+pub struct DependencyInfo {
+    pub mod_id: String,
+    pub version_range: Option<VersionRange>,
+    pub optional: bool
+}
+
+impl DependencyInfo {
+    pub fn required(mod_id: &str) -> Self {
+        Self {
+            mod_id: mod_id.to_string(),
+            version_range: None,
+            optional: false
+        }
+    }
+
+    pub fn optional(mod_id: &str) -> Self {
+        Self {
+            mod_id: mod_id.to_string(),
+            version_range: None,
+            optional: true
+        }
+    }
+
+    pub fn with_version(mut self, req: VersionRange) -> Self {
+        self.version_range = Some(req);
+        self
+    }
+}
+
+/// Conflict declaration
+pub struct ConflictInfo {
+    pub mod_id: String,
+    pub version_range: Option<VersionRange>,
+    pub reason: String
+}
+
+impl ConflictInfo {
+    pub fn new(mod_id: &str, reason: &str) -> Self {
+        Self {
+            mod_id: mod_id.to_string(),
+            version_range: None,
+            reason: reason.to_string()
+        }
+    }
+
+    pub fn with_version(mut self, range: VersionRange) -> Self {
+        self.version_range = Some(range);
+        self
+    }
+}
+
+// ============================================================================
+// Conflict Rules
+// ============================================================================
+
+/// Rule for detecting conflicts
+pub struct ConflictRule {
+    pub mod_a_pattern: String,
+    pub mod_b_pattern: String,
+    pub version_a: Option<VersionRange>,
+    pub version_b: Option<VersionRange>,
+    pub conflict_type: ConflictType,
+    pub severity: ConflictSeverity,
+    pub description: String,
+    pub resolution: Option<ConflictResolution>
+}
+
+impl ConflictRule {
+    pub fn new(mod_a: &str, mod_b: &str, conflict_type: ConflictType) -> Self {
+        Self {
+            mod_a_pattern: mod_a.to_string(),
+            mod_b_pattern: mod_b.to_string(),
+            version_a: None,
+            version_b: None,
+            conflict_type,
+            severity: ConflictSeverity::Warning,
+            description: String::new(),
+            resolution: None
+        }
+    }
+
+    pub fn with_severity(mut self, severity: ConflictSeverity) -> Self {
+        self.severity = severity;
+        self
+    }
+
+    pub fn with_description(mut self, desc: &str) -> Self {
+        self.description = desc.to_string();
+        self
+    }
+
+    pub fn with_resolution(mut self, resolution: ConflictResolution) -> Self {
+        self.resolution = Some(resolution);
+        self
+    }
+
+    pub fn matches(&self, mod_a: &str, mod_b: &str) -> bool {
+        (self.pattern_matches(&self.mod_a_pattern, mod_a) &&
+         self.pattern_matches(&self.mod_b_pattern, mod_b)) ||
+        (self.pattern_matches(&self.mod_a_pattern, mod_b) &&
+         self.pattern_matches(&self.mod_b_pattern, mod_a))
+    }
+
+    fn pattern_matches(&self, pattern: &str, mod_id: &str) -> bool {
+        if pattern == "*" {
+            return true;
+        }
+        if pattern.ends_with('*') {
+            return mod_id.starts_with(&pattern[..pattern.len()-1]);
+        }
+        pattern == mod_id
+    }
+}
+
+/// Types of conflicts
+@derive(Clone)]
+pub enum ConflictType {
+    DeclaredIncompatible,
+    FileOverwrite,
+    FunctionHook,
+    ResourceId,
+    LoadOrder,
+    Feature,
+    Version,
+    Custom(String)
+}
+
+/// Conflict severity
+@derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ConflictSeverity {
+    Info = 0,
+    Warning = 1,
+    Error = 2,
+    Critical = 3
+}
+
+/// Conflict resolution suggestion
+@derive(Clone)]
+pub enum ConflictResolution {
+    DisableOne(String),
+    LoadOrder { first: String, second: String },
+    InstallPatch(String),
+    UpgradeVersion { mod_id: String, version: String },
+    UseAlternative(String),
+    Manual(String)
+}
+
+// ============================================================================
+// Compatibility Patch
+// ============================================================================
+
+/// A patch that fixes compatibility between mods
+@derive(Clone)]
+pub struct CompatibilityPatch {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    pub mod_a: String,
+    pub mod_b: String,
+    pub version_a: Option<VersionRange>,
+    pub version_b: Option<VersionRange>,
+    pub patch_mod: String,
+    pub patch_version: Version,
+    pub auto_apply: bool
+}
+
+impl CompatibilityPatch {
+    pub fn new(id: &str, mod_a: &str, mod_b: &str, patch_mod: &str) -> Self {
+        Self {
+            id: id.to_string(),
+            name: id.to_string(),
+            description: String::new(),
+            mod_a: mod_a.to_string(),
+            mod_b: mod_b.to_string(),
+            version_a: None,
+            version_b: None,
+            patch_mod: patch_mod.to_string(),
+            patch_version: Version::new(1, 0, 0),
+            auto_apply: false
+        }
+    }
+
+    pub fn applies_to(&self, mod_a: &str, mod_b: &str) -> bool {
+        (self.mod_a == mod_a && self.mod_b == mod_b) ||
+        (self.mod_a == mod_b && self.mod_b == mod_a)
+    }
+}
+
+// ============================================================================
+// Results
+// ============================================================================
+
+/// Result of compatibility check
+pub struct CompatibilityResult {
+    pub is_compatible: bool,
+    pub conflicts: Vec<Conflict>,
+    pub dependency_issues: Vec<DependencyIssue>,
+    pub warnings: Vec<CompatibilityWarning>,
+    pub suggested_patches: Vec<CompatibilityPatch>
+}
+
+impl CompatibilityResult {
+    pub fn new() -> Self {
+        Self {
+            is_compatible: true,
+            conflicts: Vec::new(),
+            dependency_issues: Vec::new(),
+            warnings: Vec::new(),
+            suggested_patches: Vec::new()
+        }
+    }
+
+    pub fn has_errors(&self) -> bool {
+        !self.conflicts.is_empty() || !self.dependency_issues.is_empty()
+    }
+
+    pub fn has_warnings(&self) -> bool {
+        !self.warnings.is_empty()
+    }
+}
+
+/// Detected conflict
+pub struct Conflict {
+    pub mod_a: String,
+    pub mod_b: String,
+    pub conflict_type: ConflictType,
+    pub severity: ConflictSeverity,
+    pub description: String,
+    pub resolution: Option<ConflictResolution>
+}
+
+/// Dependency issue
+pub struct DependencyIssue {
+    pub mod_id: String,
+    pub dependency: String,
+    pub issue_type: DependencyIssueType,
+    pub message: String
+}
+
+pub enum DependencyIssueType {
+    Missing,
+    VersionMismatch,
+    Circular
+}
+
+/// Compatibility warning
+pub struct CompatibilityWarning {
+    pub mod_id: String,
+    pub warning_type: WarningType,
+    pub message: String
+}
+
+pub enum WarningType {
+    GameVersionMismatch,
+    ApiVersionMismatch,
+    DeprecatedApi,
+    UntestedCombination,
+    PerformanceImpact
+}
+
+// ============================================================================
+// Errors
+// ============================================================================
+
+@derive(Clone)]
+pub enum VersionError {
+    InvalidFormat(String),
+    InvalidPrerelease(String)
+}
+
+impl VersionError {
+    pub fn message(&self) -> String {
+        match self {
+            Self::InvalidFormat(s) => format!("Invalid version format: {}", s),
+            Self::InvalidPrerelease(s) => format!("Invalid prerelease: {}", s)
+        }
+    }
+}
+
+@derive(Clone)]
+pub enum CompatibilityError {
+    CircularDependency(String),
+    MissingDependency { mod_id: String, dependency: String },
+    VersionConflict { mod_id: String, required: String, available: String }
+}
+
+impl CompatibilityError {
+    pub fn message(&self) -> String {
+        match self {
+            Self::CircularDependency(id) => format!("Circular dependency detected: {}", id),
+            Self::MissingDependency { mod_id, dependency } => {
+                format!("Mod {} is missing dependency: {}", mod_id, dependency)
+            }
+            Self::VersionConflict { mod_id, required, available } => {
+                format!("Mod {} requires version {}, but {} is available", mod_id, required, available)
+            }
+        }
+    }
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_version_parsing() {
+        let v1 = Version::parse("1.2.3").unwrap();
+        assert_eq!(v1.major(), 1);
+        assert_eq!(v1.minor(), 2);
+        assert_eq!(v1.patch(), 3);
+
+        let v2 = Version::parse("2.0.0-beta.1").unwrap();
+        assert_eq!(v2.prerelease(), Some("beta.1"));
+
+        let v3 = Version::parse("1.0.0+build.123").unwrap();
+        assert_eq!(v3.build_metadata(), Some("build.123"));
+
+        let v4 = Version::parse("v1.0.0").unwrap();
+        assert_eq!(v4.major(), 1);
+    }
+
+    #[test]
+    fn test_version_comparison() {
+        let v1 = Version::new(1, 0, 0);
+        let v2 = Version::new(1, 1, 0);
+        let v3 = Version::new(2, 0, 0);
+
+        assert!(v1 < v2);
+        assert!(v2 < v3);
+        assert!(v1 < v3);
+    }
+
+    #[test]
+    fn test_version_compatibility() {
+        let v1 = Version::new(1, 0, 0);
+        let v2 = Version::new(1, 2, 0);
+        let v3 = Version::new(2, 0, 0);
+
+        assert!(v2.is_compatible_with(&v1));
+        assert!(!v3.is_compatible_with(&v1));
+    }
+
+    #[test]
+    fn test_version_range_exact() {
+        let range = VersionRange::Exact(Version::new(1, 0, 0));
+
+        assert!(range.contains(&Version::new(1, 0, 0)));
+        assert!(!range.contains(&Version::new(1, 0, 1)));
+    }
+
+    #[test]
+    fn test_version_range_compatible() {
+        let range = VersionRange::Compatible(Version::new(1, 2, 0));
+
+        assert!(range.contains(&Version::new(1, 2, 0)));
+        assert!(range.contains(&Version::new(1, 3, 0)));
+        assert!(range.contains(&Version::new(1, 2, 5)));
+        assert!(!range.contains(&Version::new(1, 1, 0)));
+        assert!(!range.contains(&Version::new(2, 0, 0)));
+    }
+
+    #[test]
+    fn test_version_range_parsing() {
+        let range1 = VersionRange::parse("^1.2.0").unwrap();
+        assert!(range1.contains(&Version::new(1, 3, 0)));
+
+        let range2 = VersionRange::parse(">=1.0.0").unwrap();
+        assert!(range2.contains(&Version::new(2, 0, 0)));
+
+        let range3 = VersionRange::parse("*").unwrap();
+        assert!(range3.contains(&Version::new(999, 999, 999)));
+    }
+
+    #[test]
+    fn test_compatibility_checker() {
+        let mut checker = CompatibilityChecker::new();
+
+        checker.register_mod(ModCompatInfo::new("mod_a", Version::new(1, 0, 0)));
+        checker.register_mod(ModCompatInfo::new("mod_b", Version::new(1, 0, 0)));
+
+        let result = checker.check(&vec!["mod_a".to_string(), "mod_b".to_string()]);
+        assert!(result.is_compatible);
+    }
+
+    #[test]
+    fn test_conflict_detection() {
+        let mut checker = CompatibilityChecker::new();
+
+        let mod_a = ModCompatInfo::new("mod_a", Version::new(1, 0, 0))
+            .with_conflict(ConflictInfo::new("mod_b", "Incompatible"));
+
+        checker.register_mod(mod_a);
+        checker.register_mod(ModCompatInfo::new("mod_b", Version::new(1, 0, 0)));
+
+        let result = checker.check(&vec!["mod_a".to_string(), "mod_b".to_string()]);
+        assert!(!result.is_compatible);
+        assert_eq!(result.conflicts.len(), 1);
+    }
+
+    #[test]
+    fn test_dependency_checking() {
+        let mut checker = CompatibilityChecker::new();
+
+        let mod_a = ModCompatInfo::new("mod_a", Version::new(1, 0, 0))
+            .with_dependency(DependencyInfo::required("mod_b"));
+
+        checker.register_mod(mod_a);
+
+        // mod_b is missing
+        let result = checker.check(&vec!["mod_a".to_string()]);
+        assert!(!result.is_compatible);
+        assert_eq!(result.dependency_issues.len(), 1);
+    }
+
+    #[test]
+    fn test_load_order() {
+        let mut checker = CompatibilityChecker::new();
+
+        let mod_a = ModCompatInfo::new("mod_a", Version::new(1, 0, 0))
+            .with_dependency(DependencyInfo::required("mod_b"));
+
+        checker.register_mod(mod_a);
+        checker.register_mod(ModCompatInfo::new("mod_b", Version::new(1, 0, 0)));
+
+        let order = checker.calculate_load_order(&vec!["mod_a".to_string(), "mod_b".to_string()]).unwrap();
+
+        // mod_b should come before mod_a
+        let pos_a = order.iter().position(|m| m == "mod_a").unwrap();
+        let pos_b = order.iter().position(|m| m == "mod_b").unwrap();
+        assert!(pos_b < pos_a);
+    }
+}

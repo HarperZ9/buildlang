@@ -1,0 +1,1428 @@
+// ============================================================================
+// BUILD-UNIVERSE: NEXUS NETWORKING
+// Network communication for mod repositories and multiplayer mod sync
+// ============================================================================
+
+import nexus::lib::{ModMetadata, Version};
+import nexus::compatibility::VersionRange;
+
+// ============================================================================
+// REGION: Network Error Types
+// ============================================================================
+
+/// Network operation errors
+@derive(Debug, Clone)]
+enum NetworkError {
+    /// Connection failed
+    ConnectionFailed { host: String, reason: String },
+    /// DNS resolution failed
+    DnsError { host: String },
+    /// Connection timed out
+    Timeout { operation: String, timeout_ms: u64 },
+    /// SSL/TLS error
+    TlsError { reason: String },
+    /// HTTP error response
+    HttpError { status: u16, message: String },
+    /// Invalid response format
+    InvalidResponse { reason: String },
+    /// Rate limited
+    RateLimited { retry_after_ms: u64 },
+    /// Authentication required
+    AuthRequired,
+    /// Authentication failed
+    AuthFailed { reason: String },
+    /// Not found
+    NotFound { resource: String },
+    /// Server error
+    ServerError { status: u16, message: String },
+    /// Network unreachable
+    NetworkUnreachable,
+    /// Request cancelled
+    Cancelled,
+    /// Generic error
+    Other { message: String },
+}
+
+impl NetworkError {
+    fn is_retryable(&self) -> bool {
+        match self {
+            NetworkError::ConnectionFailed { .. } => true,
+            NetworkError::Timeout { .. } => true,
+            NetworkError::RateLimited { .. } => true,
+            NetworkError::ServerError { status, .. } => *status >= 500,
+            NetworkError::NetworkUnreachable => true,
+            _ => false,
+        }
+    }
+
+    fn to_string(&self) -> String {
+        match self {
+            NetworkError::ConnectionFailed { host, reason } =>
+                format!("Failed to connect to {}: {}", host, reason),
+            NetworkError::DnsError { host } =>
+                format!("DNS resolution failed for {}", host),
+            NetworkError::Timeout { operation, timeout_ms } =>
+                format!("{} timed out after {}ms", operation, timeout_ms),
+            NetworkError::TlsError { reason } =>
+                format!("TLS error: {}", reason),
+            NetworkError::HttpError { status, message } =>
+                format!("HTTP {} {}", status, message),
+            NetworkError::InvalidResponse { reason } =>
+                format!("Invalid response: {}", reason),
+            NetworkError::RateLimited { retry_after_ms } =>
+                format!("Rate limited, retry after {}ms", retry_after_ms),
+            NetworkError::AuthRequired =>
+                "Authentication required".to_string(),
+            NetworkError::AuthFailed { reason } =>
+                format!("Authentication failed: {}", reason),
+            NetworkError::NotFound { resource } =>
+                format!("Not found: {}", resource),
+            NetworkError::ServerError { status, message } =>
+                format!("Server error {}: {}", status, message),
+            NetworkError::NetworkUnreachable =>
+                "Network unreachable".to_string(),
+            NetworkError::Cancelled =>
+                "Request cancelled".to_string(),
+            NetworkError::Other { message } =>
+                message.clone(),
+        }
+    }
+}
+
+// ============================================================================
+// REGION: HTTP Client
+// ============================================================================
+
+/// HTTP request method
+@derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HttpMethod {
+    GET,
+    POST,
+    PUT,
+    PATCH,
+    DELETE,
+    HEAD,
+    OPTIONS,
+}
+
+impl HttpMethod {
+    fn as_str(&self) -> &'static str {
+        match self {
+            HttpMethod::GET => "GET",
+            HttpMethod::POST => "POST",
+            HttpMethod::PUT => "PUT",
+            HttpMethod::PATCH => "PATCH",
+            HttpMethod::DELETE => "DELETE",
+            HttpMethod::HEAD => "HEAD",
+            HttpMethod::OPTIONS => "OPTIONS",
+        }
+    }
+}
+
+/// HTTP request
+@derive(Debug, Clone)]
+struct HttpRequest {
+    method: HttpMethod,
+    url: String,
+    headers: HashMap<String, String>,
+    body: Option<Vec<u8>>,
+    timeout_ms: u64,
+    follow_redirects: bool,
+    max_redirects: u32,
+}
+
+impl HttpRequest {
+    fn get(url: &str) -> Self {
+        HttpRequest {
+            method: HttpMethod::GET,
+            url: url.to_string(),
+            headers: HashMap::new(),
+            body: None,
+            timeout_ms: 30000,
+            follow_redirects: true,
+            max_redirects: 5,
+        }
+    }
+
+    fn post(url: &str) -> Self {
+        HttpRequest {
+            method: HttpMethod::POST,
+            url: url.to_string(),
+            headers: HashMap::new(),
+            body: None,
+            timeout_ms: 30000,
+            follow_redirects: true,
+            max_redirects: 5,
+        }
+    }
+
+    fn with_header(mut self, key: &str, value: &str) -> Self {
+        self.headers.insert(key.to_string(), value.to_string());
+        self
+    }
+
+    fn with_json_body<T: Serialize>(mut self, body: &T) -> Self {
+        self.headers.insert("Content-Type".to_string(), "application/json".to_string());
+        self.body = Some(serialize_json(body));
+        self
+    }
+
+    fn with_body(mut self, body: Vec<u8>) -> Self {
+        self.body = Some(body);
+        self
+    }
+
+    fn with_timeout(mut self, timeout_ms: u64) -> Self {
+        self.timeout_ms = timeout_ms;
+        self
+    }
+
+    fn with_bearer_token(self, token: &str) -> Self {
+        self.with_header("Authorization", &format!("Bearer {}", token))
+    }
+}
+
+/// HTTP response
+@derive(Debug)]
+struct HttpResponse {
+    status: u16,
+    headers: HashMap<String, String>,
+    body: Vec<u8>,
+    elapsed_ms: u64,
+}
+
+impl HttpResponse {
+    fn is_success(&self) -> bool {
+        self.status >= 200 && self.status < 300
+    }
+
+    fn is_redirect(&self) -> bool {
+        self.status >= 300 && self.status < 400
+    }
+
+    fn is_client_error(&self) -> bool {
+        self.status >= 400 && self.status < 500
+    }
+
+    fn is_server_error(&self) -> bool {
+        self.status >= 500
+    }
+
+    fn text(&self) -> Result<String, NetworkError> {
+        String::from_utf8(self.body.clone())
+            .map_err(|_| NetworkError::InvalidResponse {
+                reason: "Invalid UTF-8".to_string()
+            })
+    }
+
+    fn json<T: Deserialize>(&self) -> Result<T, NetworkError> {
+        let text = self.text()?;
+        deserialize_json(&text)
+            .map_err(|e| NetworkError::InvalidResponse {
+                reason: format!("JSON parse error: {}", e)
+            })
+    }
+
+    fn header(&self, key: &str) -> Option<&str> {
+        self.headers.get(key).map(|s| s.as_str())
+    }
+}
+
+/// HTTP client with connection pooling
+@derive(Debug)]
+struct HttpClient {
+    base_url: Option<String>,
+    default_headers: HashMap<String, String>,
+    timeout_ms: u64,
+    max_connections: u32,
+    user_agent: String,
+    proxy: Option<ProxyConfig>,
+    retry_config: RetryConfig,
+}
+
+@derive(Debug, Clone)]
+struct ProxyConfig {
+    host: String,
+    port: u16,
+    username: Option<String>,
+    password: Option<String>,
+}
+
+@derive(Debug, Clone)]
+struct RetryConfig {
+    max_retries: u32,
+    initial_delay_ms: u64,
+    max_delay_ms: u64,
+    exponential_base: f32,
+}
+
+impl RetryConfig {
+    fn default() -> Self {
+        RetryConfig {
+            max_retries: 3,
+            initial_delay_ms: 1000,
+            max_delay_ms: 30000,
+            exponential_base: 2.0,
+        }
+    }
+
+    fn none() -> Self {
+        RetryConfig {
+            max_retries: 0,
+            initial_delay_ms: 0,
+            max_delay_ms: 0,
+            exponential_base: 1.0,
+        }
+    }
+
+    fn delay_for_attempt(&self, attempt: u32) -> u64 {
+        let delay = self.initial_delay_ms as f32 * self.exponential_base.powi(attempt as i32);
+        (delay as u64).min(self.max_delay_ms)
+    }
+}
+
+impl HttpClient {
+    fn new() -> Self {
+        HttpClient {
+            base_url: None,
+            default_headers: HashMap::new(),
+            timeout_ms: 30000,
+            max_connections: 10,
+            user_agent: "Nexus/1.0".to_string(),
+            proxy: None,
+            retry_config: RetryConfig::default(),
+        }
+    }
+
+    fn with_base_url(mut self, url: &str) -> Self {
+        self.base_url = Some(url.to_string());
+        self
+    }
+
+    fn with_default_header(mut self, key: &str, value: &str) -> Self {
+        self.default_headers.insert(key.to_string(), value.to_string());
+        self
+    }
+
+    fn with_timeout(mut self, timeout_ms: u64) -> Self {
+        self.timeout_ms = timeout_ms;
+        self
+    }
+
+    fn with_proxy(mut self, proxy: ProxyConfig) -> Self {
+        self.proxy = Some(proxy);
+        self
+    }
+
+    fn with_retry(mut self, config: RetryConfig) -> Self {
+        self.retry_config = config;
+        self
+    }
+
+    fn resolve_url(&self, url: &str) -> String {
+        if url.starts_with("http://") || url.starts_with("https://") {
+            url.to_string()
+        } else if let Some(ref base) = self.base_url {
+            format!("{}{}", base.trim_end_matches('/'), url)
+        } else {
+            url.to_string()
+        }
+    }
+
+    fn execute(&self, mut request: HttpRequest) -> Result<HttpResponse, NetworkError> {
+        request.url = self.resolve_url(&request.url);
+
+        // Add default headers
+        for (key, value) in &self.default_headers {
+            if !request.headers.contains_key(key) {
+                request.headers.insert(key.clone(), value.clone());
+            }
+        }
+
+        // Add User-Agent
+        if !request.headers.contains_key("User-Agent") {
+            request.headers.insert("User-Agent".to_string(), self.user_agent.clone());
+        }
+
+        // Execute with retry
+        let mut last_error = None;
+        for attempt in 0..=self.retry_config.max_retries {
+            if attempt > 0 {
+                let delay = self.retry_config.delay_for_attempt(attempt - 1);
+                sleep_ms(delay);
+            }
+
+            match self.execute_once(&request) {
+                Ok(response) => return Ok(response),
+                Err(e) if e.is_retryable() && attempt < self.retry_config.max_retries => {
+                    last_error = Some(e);
+                    continue;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+
+        Err(last_error.unwrap_or(NetworkError::Other {
+            message: "Unknown error".to_string()
+        }))
+    }
+
+    fn execute_once(&self, request: &HttpRequest) -> Result<HttpResponse, NetworkError> {
+        // Platform-specific HTTP implementation would go here
+        // This is a stub
+        Err(NetworkError::Other { message: "Not implemented".to_string() })
+    }
+
+    fn get(&self, url: &str) -> Result<HttpResponse, NetworkError> {
+        self.execute(HttpRequest::get(url))
+    }
+
+    fn post(&self, url: &str) -> Result<HttpResponse, NetworkError> {
+        self.execute(HttpRequest::post(url))
+    }
+
+    fn post_json<T: Serialize>(&self, url: &str, body: &T) -> Result<HttpResponse, NetworkError> {
+        self.execute(HttpRequest::post(url).with_json_body(body))
+    }
+}
+
+// ============================================================================
+// REGION: WebSocket Client
+// ============================================================================
+
+/// WebSocket connection state
+@derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WebSocketState {
+    Connecting,
+    Open,
+    Closing,
+    Closed,
+    Failed,
+}
+
+/// WebSocket message types
+@derive(Debug, Clone)]
+enum WebSocketMessage {
+    Text(String),
+    Binary(Vec<u8>),
+    Ping(Vec<u8>),
+    Pong(Vec<u8>),
+    Close { code: u16, reason: String },
+}
+
+/// WebSocket client
+@derive(Debug)]
+struct WebSocketClient {
+    url: String,
+    state: WebSocketState,
+    protocols: Vec<String>,
+    headers: HashMap<String, String>,
+    on_message: Option<Box<dyn Fn(WebSocketMessage)>>,
+    on_open: Option<Box<dyn Fn()>>,
+    on_close: Option<Box<dyn Fn(u16, String)>>,
+    on_error: Option<Box<dyn Fn(NetworkError)>>,
+    reconnect_config: ReconnectConfig,
+    message_queue: Vec<WebSocketMessage>,
+}
+
+@derive(Debug, Clone)]
+struct ReconnectConfig {
+    enabled: bool,
+    max_attempts: u32,
+    initial_delay_ms: u64,
+    max_delay_ms: u64,
+}
+
+impl ReconnectConfig {
+    fn default() -> Self {
+        ReconnectConfig {
+            enabled: true,
+            max_attempts: 5,
+            initial_delay_ms: 1000,
+            max_delay_ms: 30000,
+        }
+    }
+
+    fn disabled() -> Self {
+        ReconnectConfig {
+            enabled: false,
+            max_attempts: 0,
+            initial_delay_ms: 0,
+            max_delay_ms: 0,
+        }
+    }
+}
+
+impl WebSocketClient {
+    fn new(url: &str) -> Self {
+        WebSocketClient {
+            url: url.to_string(),
+            state: WebSocketState::Closed,
+            protocols: Vec::new(),
+            headers: HashMap::new(),
+            on_message: None,
+            on_open: None,
+            on_close: None,
+            on_error: None,
+            reconnect_config: ReconnectConfig::default(),
+            message_queue: Vec::new(),
+        }
+    }
+
+    fn with_protocol(mut self, protocol: &str) -> Self {
+        self.protocols.push(protocol.to_string());
+        self
+    }
+
+    fn with_header(mut self, key: &str, value: &str) -> Self {
+        self.headers.insert(key.to_string(), value.to_string());
+        self
+    }
+
+    fn with_reconnect(mut self, config: ReconnectConfig) -> Self {
+        self.reconnect_config = config;
+        self
+    }
+
+    fn on_message<F: Fn(WebSocketMessage) + 'static>(mut self, callback: F) -> Self {
+        self.on_message = Some(Box::new(callback));
+        self
+    }
+
+    fn on_open<F: Fn() + 'static>(mut self, callback: F) -> Self {
+        self.on_open = Some(Box::new(callback));
+        self
+    }
+
+    fn on_close<F: Fn(u16, String) + 'static>(mut self, callback: F) -> Self {
+        self.on_close = Some(Box::new(callback));
+        self
+    }
+
+    fn on_error<F: Fn(NetworkError) + 'static>(mut self, callback: F) -> Self {
+        self.on_error = Some(Box::new(callback));
+        self
+    }
+
+    fn connect(&mut self) -> Result<(), NetworkError> {
+        self.state = WebSocketState::Connecting;
+        // Platform-specific WebSocket implementation
+        self.state = WebSocketState::Open;
+
+        if let Some(ref callback) = self.on_open {
+            callback();
+        }
+
+        // Send queued messages
+        for msg in self.message_queue.drain(..) {
+            self.send_message(msg)?;
+        }
+
+        Ok(())
+    }
+
+    fn disconnect(&mut self, code: u16, reason: &str) {
+        if self.state == WebSocketState::Open {
+            self.state = WebSocketState::Closing;
+            // Send close frame
+            self.state = WebSocketState::Closed;
+
+            if let Some(ref callback) = self.on_close {
+                callback(code, reason.to_string());
+            }
+        }
+    }
+
+    fn send(&mut self, data: &str) -> Result<(), NetworkError> {
+        self.send_message(WebSocketMessage::Text(data.to_string()))
+    }
+
+    fn send_binary(&mut self, data: Vec<u8>) -> Result<(), NetworkError> {
+        self.send_message(WebSocketMessage::Binary(data))
+    }
+
+    fn send_message(&mut self, message: WebSocketMessage) -> Result<(), NetworkError> {
+        if self.state != WebSocketState::Open {
+            // Queue message for when connection opens
+            self.message_queue.push(message);
+            return Ok(());
+        }
+
+        // Platform-specific send implementation
+        Ok(())
+    }
+
+    fn is_connected(&self) -> bool {
+        self.state == WebSocketState::Open
+    }
+}
+
+// ============================================================================
+// REGION: Repository Client
+// ============================================================================
+
+/// Mod repository API client
+@derive(Debug)]
+struct RepositoryClient {
+    http: HttpClient,
+    api_url: String,
+    auth_token: Option<String>,
+    cache: RepositoryCache,
+}
+
+/// Repository response types
+@derive(Debug, Clone)]
+struct ModInfo {
+    id: String,
+    name: String,
+    version: Version,
+    author: String,
+    description: String,
+    downloads: u64,
+    rating: f32,
+    tags: Vec<String>,
+    dependencies: Vec<DependencyInfo>,
+    download_url: String,
+    checksum: String,
+    size_bytes: u64,
+    created_at: u64,
+    updated_at: u64,
+}
+
+@derive(Debug, Clone)]
+struct DependencyInfo {
+    id: String,
+    version_range: String,
+    optional: bool,
+}
+
+@derive(Debug, Clone)]
+struct SearchResult {
+    mods: Vec<ModInfo>,
+    total: u64,
+    page: u32,
+    per_page: u32,
+}
+
+@derive(Debug, Clone)]
+struct ModVersion {
+    version: Version,
+    download_url: String,
+    checksum: String,
+    size_bytes: u64,
+    changelog: String,
+    release_date: u64,
+    game_versions: Vec<String>,
+}
+
+/// Search parameters
+@derive(Debug, Clone, Default)]
+struct SearchParams {
+    query: Option<String>,
+    tags: Vec<String>,
+    author: Option<String>,
+    game_version: Option<String>,
+    sort_by: SortField,
+    sort_order: SortOrder,
+    page: u32,
+    per_page: u32,
+}
+
+@derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SortField {
+    Relevance,
+    Downloads,
+    Rating,
+    Updated,
+    Created,
+    Name,
+}
+
+impl Default for SortField {
+    fn default() -> Self { SortField::Relevance }
+}
+
+@derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SortOrder {
+    Ascending,
+    Descending,
+}
+
+impl Default for SortOrder {
+    fn default() -> Self { SortOrder::Descending }
+}
+
+impl SearchParams {
+    fn new() -> Self {
+        SearchParams {
+            page: 1,
+            per_page: 20,
+            ..Default::default()
+        }
+    }
+
+    fn with_query(mut self, query: &str) -> Self {
+        self.query = Some(query.to_string());
+        self
+    }
+
+    fn with_tag(mut self, tag: &str) -> Self {
+        self.tags.push(tag.to_string());
+        self
+    }
+
+    fn with_author(mut self, author: &str) -> Self {
+        self.author = Some(author.to_string());
+        self
+    }
+
+    fn with_sort(mut self, field: SortField, order: SortOrder) -> Self {
+        self.sort_by = field;
+        self.sort_order = order;
+        self
+    }
+
+    fn with_pagination(mut self, page: u32, per_page: u32) -> Self {
+        self.page = page;
+        self.per_page = per_page;
+        self
+    }
+
+    fn to_query_string(&self) -> String {
+        let mut params = Vec::new();
+
+        if let Some(ref q) = self.query {
+            params.push(format!("q={}", url_encode(q)));
+        }
+
+        for tag in &self.tags {
+            params.push(format!("tag={}", url_encode(tag)));
+        }
+
+        if let Some(ref author) = self.author {
+            params.push(format!("author={}", url_encode(author)));
+        }
+
+        if let Some(ref version) = self.game_version {
+            params.push(format!("game_version={}", url_encode(version)));
+        }
+
+        let sort = match self.sort_by {
+            SortField::Relevance => "relevance",
+            SortField::Downloads => "downloads",
+            SortField::Rating => "rating",
+            SortField::Updated => "updated",
+            SortField::Created => "created",
+            SortField::Name => "name",
+        };
+        params.push(format!("sort={}", sort));
+
+        let order = match self.sort_order {
+            SortOrder::Ascending => "asc",
+            SortOrder::Descending => "desc",
+        };
+        params.push(format!("order={}", order));
+
+        params.push(format!("page={}", self.page));
+        params.push(format!("per_page={}", self.per_page));
+
+        params.join("&")
+    }
+}
+
+/// Repository cache
+@derive(Debug)]
+struct RepositoryCache {
+    entries: HashMap<String, CacheEntry>,
+    max_age_ms: u64,
+    max_entries: usize,
+}
+
+@derive(Debug)]
+struct CacheEntry {
+    data: Vec<u8>,
+    timestamp: u64,
+    etag: Option<String>,
+}
+
+impl RepositoryCache {
+    fn new(max_age_ms: u64, max_entries: usize) -> Self {
+        RepositoryCache {
+            entries: HashMap::new(),
+            max_age_ms,
+            max_entries,
+        }
+    }
+
+    fn get(&self, key: &str) -> Option<&CacheEntry> {
+        self.entries.get(key).filter(|e| {
+            current_time_ms() - e.timestamp < self.max_age_ms
+        })
+    }
+
+    fn set(&mut self, key: String, data: Vec<u8>, etag: Option<String>) {
+        if self.entries.len() >= self.max_entries {
+            // Evict oldest entry
+            if let Some(oldest_key) = self.oldest_key() {
+                self.entries.remove(&oldest_key);
+            }
+        }
+
+        self.entries.insert(key, CacheEntry {
+            data,
+            timestamp: current_time_ms(),
+            etag,
+        });
+    }
+
+    fn oldest_key(&self) -> Option<String> {
+        self.entries.iter()
+            .min_by_key(|(_, e)| e.timestamp)
+            .map(|(k, _)| k.clone())
+    }
+
+    fn invalidate(&mut self, key: &str) {
+        self.entries.remove(key);
+    }
+
+    fn clear(&mut self) {
+        self.entries.clear();
+    }
+}
+
+impl RepositoryClient {
+    fn new(api_url: &str) -> Self {
+        RepositoryClient {
+            http: HttpClient::new().with_base_url(api_url),
+            api_url: api_url.to_string(),
+            auth_token: None,
+            cache: RepositoryCache::new(300000, 100), // 5 min cache, 100 entries
+        }
+    }
+
+    fn with_auth(mut self, token: &str) -> Self {
+        self.auth_token = Some(token.to_string());
+        self.http = self.http.with_default_header("Authorization", &format!("Bearer {}", token));
+        self
+    }
+
+    /// Search for mods
+    fn search(&self, params: SearchParams) -> Result<SearchResult, NetworkError> {
+        let url = format!("/api/mods?{}", params.to_query_string());
+        let response = self.http.get(&url)?;
+
+        if !response.is_success() {
+            return Err(NetworkError::HttpError {
+                status: response.status,
+                message: response.text().unwrap_or_default(),
+            });
+        }
+
+        response.json()
+    }
+
+    /// Get mod by ID
+    fn get_mod(&self, mod_id: &str) -> Result<ModInfo, NetworkError> {
+        let url = format!("/api/mods/{}", mod_id);
+        let response = self.http.get(&url)?;
+
+        if response.status == 404 {
+            return Err(NetworkError::NotFound {
+                resource: format!("Mod '{}'", mod_id),
+            });
+        }
+
+        if !response.is_success() {
+            return Err(NetworkError::HttpError {
+                status: response.status,
+                message: response.text().unwrap_or_default(),
+            });
+        }
+
+        response.json()
+    }
+
+    /// Get mod versions
+    fn get_versions(&self, mod_id: &str) -> Result<Vec<ModVersion>, NetworkError> {
+        let url = format!("/api/mods/{}/versions", mod_id);
+        let response = self.http.get(&url)?;
+
+        if !response.is_success() {
+            return Err(NetworkError::HttpError {
+                status: response.status,
+                message: response.text().unwrap_or_default(),
+            });
+        }
+
+        response.json()
+    }
+
+    /// Get specific version
+    fn get_version(&self, mod_id: &str, version: &Version) -> Result<ModVersion, NetworkError> {
+        let url = format!("/api/mods/{}/versions/{}", mod_id, version);
+        let response = self.http.get(&url)?;
+
+        if !response.is_success() {
+            return Err(NetworkError::HttpError {
+                status: response.status,
+                message: response.text().unwrap_or_default(),
+            });
+        }
+
+        response.json()
+    }
+
+    /// Download mod file
+    fn download(&self, mod_id: &str, version: &Version) -> Result<DownloadHandle, NetworkError> {
+        let mod_version = self.get_version(mod_id, version)?;
+
+        Ok(DownloadHandle {
+            url: mod_version.download_url,
+            checksum: mod_version.checksum,
+            size_bytes: mod_version.size_bytes,
+            downloaded_bytes: 0,
+            state: DownloadState::Pending,
+            data: Vec::new(),
+        })
+    }
+
+    /// Check for updates
+    fn check_updates(&self, mods: &[(String, Version)]) -> Result<Vec<UpdateInfo>, NetworkError> {
+        #[derive(Serialize)]
+        struct UpdateCheckRequest {
+            mods: Vec<(String, String)>,
+        }
+
+        let request = UpdateCheckRequest {
+            mods: mods.iter()
+                .map(|(id, v)| (id.clone(), v.to_string()))
+                .collect(),
+        };
+
+        let response = self.http.post_json("/api/updates/check", &request)?;
+
+        if !response.is_success() {
+            return Err(NetworkError::HttpError {
+                status: response.status,
+                message: response.text().unwrap_or_default(),
+            });
+        }
+
+        response.json()
+    }
+}
+
+@derive(Debug, Clone)]
+struct UpdateInfo {
+    mod_id: String,
+    current_version: Version,
+    latest_version: Version,
+    changelog: String,
+    download_url: String,
+}
+
+// ============================================================================
+// REGION: Download Manager
+// ============================================================================
+
+/// Download state
+@derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DownloadState {
+    Pending,
+    Downloading,
+    Paused,
+    Verifying,
+    Complete,
+    Failed,
+    Cancelled,
+}
+
+/// Download handle
+@derive(Debug)]
+struct DownloadHandle {
+    url: String,
+    checksum: String,
+    size_bytes: u64,
+    downloaded_bytes: u64,
+    state: DownloadState,
+    data: Vec<u8>,
+}
+
+impl DownloadHandle {
+    fn progress(&self) -> f32 {
+        if self.size_bytes == 0 {
+            0.0
+        } else {
+            self.downloaded_bytes as f32 / self.size_bytes as f32
+        }
+    }
+}
+
+/// Download manager for parallel downloads
+@derive(Debug)]
+struct DownloadManager {
+    http: HttpClient,
+    downloads: HashMap<String, ActiveDownload>,
+    max_concurrent: u32,
+    download_path: String,
+    on_progress: Option<Box<dyn Fn(&str, f32)>>,
+    on_complete: Option<Box<dyn Fn(&str, Result<String, NetworkError>)>>,
+}
+
+@derive(Debug)]
+struct ActiveDownload {
+    id: String,
+    handle: DownloadHandle,
+    started_at: u64,
+    output_path: String,
+    retry_count: u32,
+}
+
+impl DownloadManager {
+    fn new(download_path: &str) -> Self {
+        DownloadManager {
+            http: HttpClient::new().with_timeout(60000),
+            downloads: HashMap::new(),
+            max_concurrent: 3,
+            download_path: download_path.to_string(),
+            on_progress: None,
+            on_complete: None,
+        }
+    }
+
+    fn with_max_concurrent(mut self, max: u32) -> Self {
+        self.max_concurrent = max;
+        self
+    }
+
+    fn on_progress<F: Fn(&str, f32) + 'static>(mut self, callback: F) -> Self {
+        self.on_progress = Some(Box::new(callback));
+        self
+    }
+
+    fn on_complete<F: Fn(&str, Result<String, NetworkError>) + 'static>(mut self, callback: F) -> Self {
+        self.on_complete = Some(Box::new(callback));
+        self
+    }
+
+    fn queue(&mut self, id: &str, handle: DownloadHandle) -> Result<(), NetworkError> {
+        let output_path = format!("{}/{}", self.download_path, id);
+
+        let download = ActiveDownload {
+            id: id.to_string(),
+            handle,
+            started_at: 0,
+            output_path,
+            retry_count: 0,
+        };
+
+        self.downloads.insert(id.to_string(), download);
+        self.start_next();
+
+        Ok(())
+    }
+
+    fn start_next(&mut self) {
+        let active = self.downloads.values()
+            .filter(|d| d.handle.state == DownloadState::Downloading)
+            .count() as u32;
+
+        if active >= self.max_concurrent {
+            return;
+        }
+
+        // Find next pending download
+        if let Some(id) = self.downloads.iter()
+            .find(|(_, d)| d.handle.state == DownloadState::Pending)
+            .map(|(id, _)| id.clone())
+        {
+            if let Some(download) = self.downloads.get_mut(&id) {
+                download.handle.state = DownloadState::Downloading;
+                download.started_at = current_time_ms();
+                // Start async download
+            }
+        }
+    }
+
+    fn pause(&mut self, id: &str) -> Result<(), NetworkError> {
+        if let Some(download) = self.downloads.get_mut(id) {
+            if download.handle.state == DownloadState::Downloading {
+                download.handle.state = DownloadState::Paused;
+            }
+        }
+        Ok(())
+    }
+
+    fn resume(&mut self, id: &str) -> Result<(), NetworkError> {
+        if let Some(download) = self.downloads.get_mut(id) {
+            if download.handle.state == DownloadState::Paused {
+                download.handle.state = DownloadState::Pending;
+                self.start_next();
+            }
+        }
+        Ok(())
+    }
+
+    fn cancel(&mut self, id: &str) -> Result<(), NetworkError> {
+        if let Some(download) = self.downloads.get_mut(id) {
+            download.handle.state = DownloadState::Cancelled;
+        }
+        self.start_next();
+        Ok(())
+    }
+
+    fn get_progress(&self, id: &str) -> Option<f32> {
+        self.downloads.get(id).map(|d| d.handle.progress())
+    }
+
+    fn get_state(&self, id: &str) -> Option<DownloadState> {
+        self.downloads.get(id).map(|d| d.handle.state)
+    }
+
+    fn total_progress(&self) -> f32 {
+        let total_bytes: u64 = self.downloads.values()
+            .map(|d| d.handle.size_bytes)
+            .sum();
+
+        let downloaded_bytes: u64 = self.downloads.values()
+            .map(|d| d.handle.downloaded_bytes)
+            .sum();
+
+        if total_bytes == 0 {
+            0.0
+        } else {
+            downloaded_bytes as f32 / total_bytes as f32
+        }
+    }
+}
+
+// ============================================================================
+// REGION: Multiplayer Mod Sync
+// ============================================================================
+
+/// Multiplayer mod synchronization
+@derive(Debug)]
+struct ModSync {
+    ws: WebSocketClient,
+    session_id: Option<String>,
+    peer_id: String,
+    peers: HashMap<String, PeerInfo>,
+    mod_list: Vec<SyncModInfo>,
+    state: SyncState,
+    on_sync_required: Option<Box<dyn Fn(Vec<SyncModInfo>)>>,
+}
+
+@derive(Debug, Clone)]
+struct PeerInfo {
+    id: String,
+    name: String,
+    mods: Vec<SyncModInfo>,
+    ready: bool,
+}
+
+@derive(Debug, Clone)]
+struct SyncModInfo {
+    mod_id: String,
+    version: Version,
+    checksum: String,
+    required: bool,
+}
+
+@derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SyncState {
+    Disconnected,
+    Connecting,
+    Syncing,
+    Ready,
+    Mismatched,
+}
+
+/// Sync protocol messages
+@derive(Debug, Clone)]
+enum SyncMessage {
+    /// Join session request
+    Join { peer_id: String, name: String },
+    /// Session joined
+    Joined { session_id: String, peers: Vec<PeerInfo> },
+    /// Peer joined
+    PeerJoined { peer: PeerInfo },
+    /// Peer left
+    PeerLeft { peer_id: String },
+    /// Share mod list
+    ModList { mods: Vec<SyncModInfo> },
+    /// Request mod sync
+    SyncRequest { required_mods: Vec<SyncModInfo> },
+    /// Mark as ready
+    Ready { peer_id: String },
+    /// Sync complete
+    SyncComplete,
+    /// Error
+    Error { message: String },
+}
+
+impl ModSync {
+    fn new(server_url: &str) -> Self {
+        let ws = WebSocketClient::new(server_url)
+            .with_protocol("nexus-sync-v1")
+            .with_reconnect(ReconnectConfig::default());
+
+        ModSync {
+            ws,
+            session_id: None,
+            peer_id: generate_peer_id(),
+            peers: HashMap::new(),
+            mod_list: Vec::new(),
+            state: SyncState::Disconnected,
+            on_sync_required: None,
+        }
+    }
+
+    fn on_sync_required<F: Fn(Vec<SyncModInfo>) + 'static>(mut self, callback: F) -> Self {
+        self.on_sync_required = Some(Box::new(callback));
+        self
+    }
+
+    fn connect(&mut self, session_id: &str, name: &str) -> Result<(), NetworkError> {
+        self.state = SyncState::Connecting;
+        self.ws.connect()?;
+
+        // Send join message
+        let msg = SyncMessage::Join {
+            peer_id: self.peer_id.clone(),
+            name: name.to_string(),
+        };
+        self.send_message(msg)?;
+
+        self.session_id = Some(session_id.to_string());
+        Ok(())
+    }
+
+    fn disconnect(&mut self) {
+        self.ws.disconnect(1000, "Leaving session");
+        self.state = SyncState::Disconnected;
+        self.peers.clear();
+    }
+
+    fn set_mod_list(&mut self, mods: Vec<SyncModInfo>) {
+        self.mod_list = mods.clone();
+
+        if self.ws.is_connected() {
+            let msg = SyncMessage::ModList { mods };
+            let _ = self.send_message(msg);
+        }
+    }
+
+    fn mark_ready(&mut self) -> Result<(), NetworkError> {
+        let msg = SyncMessage::Ready {
+            peer_id: self.peer_id.clone(),
+        };
+        self.send_message(msg)
+    }
+
+    fn send_message(&mut self, msg: SyncMessage) -> Result<(), NetworkError> {
+        let json = serialize_json(&msg);
+        let text = String::from_utf8(json).map_err(|_| NetworkError::Other {
+            message: "Serialization failed".to_string()
+        })?;
+        self.ws.send(&text)
+    }
+
+    fn handle_message(&mut self, msg: SyncMessage) {
+        match msg {
+            SyncMessage::Joined { session_id, peers } => {
+                self.session_id = Some(session_id);
+                for peer in peers {
+                    self.peers.insert(peer.id.clone(), peer);
+                }
+                self.state = SyncState::Syncing;
+            }
+            SyncMessage::PeerJoined { peer } => {
+                self.peers.insert(peer.id.clone(), peer);
+            }
+            SyncMessage::PeerLeft { peer_id } => {
+                self.peers.remove(&peer_id);
+            }
+            SyncMessage::ModList { mods } => {
+                // Check compatibility
+                self.check_compatibility(&mods);
+            }
+            SyncMessage::SyncRequest { required_mods } => {
+                if let Some(ref callback) = self.on_sync_required {
+                    callback(required_mods);
+                }
+            }
+            SyncMessage::SyncComplete => {
+                self.state = SyncState::Ready;
+            }
+            SyncMessage::Error { message } => {
+                // Handle error
+            }
+            _ => {}
+        }
+    }
+
+    fn check_compatibility(&mut self, peer_mods: &[SyncModInfo]) {
+        let mut missing = Vec::new();
+        let mut mismatched = Vec::new();
+
+        for required in peer_mods.iter().filter(|m| m.required) {
+            if let Some(local) = self.mod_list.iter().find(|m| m.mod_id == required.mod_id) {
+                if local.version != required.version || local.checksum != required.checksum {
+                    mismatched.push(required.clone());
+                }
+            } else {
+                missing.push(required.clone());
+            }
+        }
+
+        if !missing.is_empty() || !mismatched.is_empty() {
+            self.state = SyncState::Mismatched;
+        }
+    }
+
+    fn is_synced(&self) -> bool {
+        self.state == SyncState::Ready
+    }
+
+    fn get_peers(&self) -> Vec<&PeerInfo> {
+        self.peers.values().collect()
+    }
+}
+
+// ============================================================================
+// REGION: Helper Functions
+// ============================================================================
+
+fn current_time_ms() -> u64 {
+    // Platform time implementation
+    0
+}
+
+fn sleep_ms(ms: u64) {
+    // Platform sleep implementation
+}
+
+fn url_encode(s: &str) -> String {
+    // URL encoding implementation
+    s.replace(" ", "%20")
+}
+
+fn generate_peer_id() -> String {
+    // Generate unique ID
+    format!("peer_{}", current_time_ms())
+}
+
+fn serialize_json<T: Serialize>(value: &T) -> Vec<u8> {
+    // JSON serialization
+    Vec::new()
+}
+
+fn deserialize_json<T: Deserialize>(json: &str) -> Result<T, String> {
+    // JSON deserialization
+    Err("Not implemented".to_string())
+}
+
+// Placeholder traits
+trait Serialize {}
+trait Deserialize {}
+
+// ============================================================================
+// REGION: Unit Tests
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_network_error_retryable() {
+        assert!(NetworkError::Timeout { operation: "test".to_string(), timeout_ms: 1000 }.is_retryable());
+        assert!(NetworkError::ServerError { status: 503, message: "Unavailable".to_string() }.is_retryable());
+        assert!(!NetworkError::NotFound { resource: "test".to_string() }.is_retryable());
+        assert!(!NetworkError::AuthFailed { reason: "test".to_string() }.is_retryable());
+    }
+
+    #[test]
+    fn test_http_request_builder() {
+        let request = HttpRequest::get("https://example.com/api")
+            .with_header("Accept", "application/json")
+            .with_timeout(5000);
+
+        assert_eq!(request.method, HttpMethod::GET);
+        assert!(request.headers.contains_key("Accept"));
+        assert_eq!(request.timeout_ms, 5000);
+    }
+
+    #[test]
+    fn test_retry_config() {
+        let config = RetryConfig::default();
+
+        assert_eq!(config.delay_for_attempt(0), 1000);
+        assert_eq!(config.delay_for_attempt(1), 2000);
+        assert_eq!(config.delay_for_attempt(2), 4000);
+
+        // Should cap at max delay
+        assert!(config.delay_for_attempt(10) <= config.max_delay_ms);
+    }
+
+    #[test]
+    fn test_search_params() {
+        let params = SearchParams::new()
+            .with_query("shader")
+            .with_tag("graphics")
+            .with_sort(SortField::Downloads, SortOrder::Descending);
+
+        let query = params.to_query_string();
+        assert!(query.contains("q=shader"));
+        assert!(query.contains("tag=graphics"));
+        assert!(query.contains("sort=downloads"));
+    }
+
+    #[test]
+    fn test_repository_cache() {
+        let mut cache = RepositoryCache::new(60000, 10);
+
+        cache.set("key1".to_string(), vec![1, 2, 3], Some("etag1".to_string()));
+
+        let entry = cache.get("key1");
+        assert!(entry.is_some());
+        assert_eq!(entry.unwrap().data, vec![1, 2, 3]);
+
+        cache.invalidate("key1");
+        assert!(cache.get("key1").is_none());
+    }
+
+    #[test]
+    fn test_download_handle_progress() {
+        let handle = DownloadHandle {
+            url: "https://example.com/mod.zip".to_string(),
+            checksum: "abc123".to_string(),
+            size_bytes: 1000,
+            downloaded_bytes: 500,
+            state: DownloadState::Downloading,
+            data: Vec::new(),
+        };
+
+        assert!((handle.progress() - 0.5).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_websocket_state() {
+        let ws = WebSocketClient::new("wss://example.com/sync");
+        assert_eq!(ws.state, WebSocketState::Closed);
+        assert!(!ws.is_connected());
+    }
+
+    #[test]
+    fn test_sync_mod_info() {
+        let info = SyncModInfo {
+            mod_id: "test_mod".to_string(),
+            version: Version::new(1, 0, 0),
+            checksum: "abc123".to_string(),
+            required: true,
+        };
+
+        assert!(info.required);
+        assert_eq!(info.mod_id, "test_mod");
+    }
+}

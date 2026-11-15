@@ -1,0 +1,2507 @@
+// =============================================================================
+// BUILD Photon - Light Clustering and Tiled Deferred Rendering
+// =============================================================================
+// Clustered and tiled lighting system for handling many lights
+// efficiently using spatial data structures and GPU compute.
+
+module photon::light_clustering {
+    use core::mem;
+    use core::simd;
+    use math::{Vec2, Vec3, Vec4, Mat4, Quat, Frustum, Aabb, Sphere};
+    use gpu::{Buffer, Texture, Sampler, Pipeline, ComputePipeline, BindGroup, CommandEncoder};
+
+    // =========================================================================
+    // Light Types
+    // =========================================================================
+
+    /// Light type enumeration
+    pub enum LightType {
+        Point,
+        Spot,
+        Directional,
+        Area,
+        Capsule,
+        Line,
+        Disc,
+        Sphere,
+        Rect,
+        Tube,
+        Ies,           // IES profile light
+        Projector,     // Texture projector
+    }
+
+    /// Point light data
+    pub struct PointLight {
+        position: Vec3,
+        radius: f32,
+        color: Vec3,
+        intensity: f32,
+        attenuation_constant: f32,
+        attenuation_linear: f32,
+        attenuation_quadratic: f32,
+        shadow_map_index: i32,
+        light_mask: u32,
+        flags: LightFlags,
+    }
+
+    impl PointLight {
+        pub fn new(position: Vec3, radius: f32, color: Vec3, intensity: f32) -> Self {
+            Self {
+                position,
+                radius,
+                color,
+                intensity,
+                attenuation_constant: 1.0,
+                attenuation_linear: 0.09,
+                attenuation_quadratic: 0.032,
+                shadow_map_index: -1,
+                light_mask: 0xFFFFFFFF,
+                flags: LightFlags::default(),
+            }
+        }
+
+        /// Calculate light attenuation at a given distance
+        pub fn attenuation(&self, distance: f32) -> f32 {
+            if distance >= self.radius {
+                return 0.0;
+            }
+
+            let att = 1.0 / (self.attenuation_constant +
+                           self.attenuation_linear * distance +
+                           self.attenuation_quadratic * distance * distance);
+
+            // Smooth falloff at edge
+            let edge_factor = 1.0 - (distance / self.radius).powi(4);
+            att * edge_factor.max(0.0)
+        }
+
+        /// Get bounding sphere for culling
+        pub fn bounding_sphere(&self) -> Sphere {
+            Sphere::new(self.position, self.radius)
+        }
+    }
+
+    /// Spot light data
+    pub struct SpotLight {
+        position: Vec3,
+        direction: Vec3,
+        radius: f32,
+        inner_cone_angle: f32,  // Radians
+        outer_cone_angle: f32,  // Radians
+        color: Vec3,
+        intensity: f32,
+        shadow_map_index: i32,
+        projector_texture_index: i32,
+        light_mask: u32,
+        flags: LightFlags,
+    }
+
+    impl SpotLight {
+        pub fn new(position: Vec3, direction: Vec3, radius: f32,
+                   inner_angle: f32, outer_angle: f32, color: Vec3, intensity: f32) -> Self {
+            Self {
+                position,
+                direction: direction.normalize(),
+                radius,
+                inner_cone_angle: inner_angle,
+                outer_cone_angle: outer_angle,
+                color,
+                intensity,
+                shadow_map_index: -1,
+                projector_texture_index: -1,
+                light_mask: 0xFFFFFFFF,
+                flags: LightFlags::default(),
+            }
+        }
+
+        /// Calculate spot light cone attenuation
+        pub fn cone_attenuation(&self, light_to_surface: Vec3) -> f32 {
+            let cos_theta = light_to_surface.normalize().dot(-self.direction);
+            let cos_inner = self.inner_cone_angle.cos();
+            let cos_outer = self.outer_cone_angle.cos();
+
+            ((cos_theta - cos_outer) / (cos_inner - cos_outer)).clamp(0.0, 1.0)
+        }
+
+        /// Get bounding cone for culling (approximated as sphere)
+        pub fn bounding_sphere(&self) -> Sphere {
+            // Approximate cone with a sphere at the center
+            let cone_height = self.radius;
+            let cone_base_radius = self.outer_cone_angle.tan() * cone_height;
+            let center = self.position + self.direction * (cone_height * 0.5);
+            let radius = (cone_height * 0.5).hypot(cone_base_radius);
+            Sphere::new(center, radius)
+        }
+    }
+
+    /// Area light types
+    pub struct RectAreaLight {
+        position: Vec3,
+        normal: Vec3,
+        tangent: Vec3,
+        width: f32,
+        height: f32,
+        color: Vec3,
+        intensity: f32,
+        two_sided: bool,
+        flags: LightFlags,
+    }
+
+    impl RectAreaLight {
+        pub fn new(position: Vec3, normal: Vec3, tangent: Vec3,
+                   width: f32, height: f32, color: Vec3, intensity: f32) -> Self {
+            Self {
+                position,
+                normal: normal.normalize(),
+                tangent: tangent.normalize(),
+                width,
+                height,
+                color,
+                intensity,
+                two_sided: false,
+                flags: LightFlags::default(),
+            }
+        }
+
+        /// Get corner positions of the rect light
+        pub fn corners(&self) -> [Vec3; 4] {
+            let bitangent = self.normal.cross(self.tangent);
+            let half_w = self.width * 0.5;
+            let half_h = self.height * 0.5;
+
+            [
+                self.position - self.tangent * half_w - bitangent * half_h,
+                self.position + self.tangent * half_w - bitangent * half_h,
+                self.position + self.tangent * half_w + bitangent * half_h,
+                self.position - self.tangent * half_w + bitangent * half_h,
+            ]
+        }
+
+        /// Approximate bounding sphere
+        pub fn bounding_sphere(&self) -> Sphere {
+            let radius = (self.width * 0.5).hypot(self.height * 0.5) +
+                        self.intensity.sqrt() * 5.0; // Heuristic influence radius
+            Sphere::new(self.position, radius)
+        }
+    }
+
+    pub struct DiscAreaLight {
+        position: Vec3,
+        normal: Vec3,
+        radius: f32,
+        color: Vec3,
+        intensity: f32,
+        two_sided: bool,
+        flags: LightFlags,
+    }
+
+    pub struct SphereAreaLight {
+        position: Vec3,
+        radius: f32,
+        color: Vec3,
+        intensity: f32,
+        flags: LightFlags,
+    }
+
+    pub struct TubeLight {
+        start: Vec3,
+        end: Vec3,
+        radius: f32,
+        color: Vec3,
+        intensity: f32,
+        flags: LightFlags,
+    }
+
+    impl TubeLight {
+        pub fn new(start: Vec3, end: Vec3, radius: f32, color: Vec3, intensity: f32) -> Self {
+            Self { start, end, radius, color, intensity, flags: LightFlags::default() }
+        }
+
+        pub fn length(&self) -> f32 {
+            (self.end - self.start).length()
+        }
+
+        pub fn direction(&self) -> Vec3 {
+            (self.end - self.start).normalize()
+        }
+
+        pub fn center(&self) -> Vec3 {
+            (self.start + self.end) * 0.5
+        }
+
+        pub fn bounding_sphere(&self) -> Sphere {
+            let center = self.center();
+            let half_length = self.length() * 0.5;
+            Sphere::new(center, half_length + self.radius)
+        }
+    }
+
+    /// IES light profile
+    pub struct IesLight {
+        position: Vec3,
+        direction: Vec3,
+        radius: f32,
+        color: Vec3,
+        intensity: f32,
+        profile_texture_index: i32,
+        rotation: f32,
+        flags: LightFlags,
+    }
+
+    /// Light flags
+    #[flags]
+    pub struct LightFlags {
+        enabled: bool,
+        cast_shadows: bool,
+        volumetric: bool,
+        affect_specular: bool,
+        affect_diffuse: bool,
+        static_light: bool,
+        baked: bool,
+    }
+
+    impl LightFlags {
+        pub fn default() -> Self {
+            Self {
+                enabled: true,
+                cast_shadows: false,
+                volumetric: false,
+                affect_specular: true,
+                affect_diffuse: true,
+                static_light: false,
+                baked: false,
+            }
+        }
+    }
+
+    // =========================================================================
+    // GPU Light Data Structures
+    // =========================================================================
+
+    /// GPU-packed point light (64 bytes for alignment)
+    #[repr(C, align(16))]
+    pub struct GpuPointLight {
+        position_radius: Vec4,          // xyz: position, w: radius
+        color_intensity: Vec4,          // xyz: color, w: intensity
+        attenuation_shadow: Vec4,       // xyz: attenuation, w: shadow_map_index
+        mask_flags: Vec4,               // x: mask, y: flags, zw: reserved
+    }
+
+    impl GpuPointLight {
+        pub fn from_point_light(light: &PointLight) -> Self {
+            Self {
+                position_radius: Vec4::new(light.position.x, light.position.y,
+                                          light.position.z, light.radius),
+                color_intensity: Vec4::new(light.color.x, light.color.y,
+                                          light.color.z, light.intensity),
+                attenuation_shadow: Vec4::new(light.attenuation_constant,
+                                             light.attenuation_linear,
+                                             light.attenuation_quadratic,
+                                             light.shadow_map_index as f32),
+                mask_flags: Vec4::new(light.light_mask as f32, 0.0, 0.0, 0.0),
+            }
+        }
+    }
+
+    /// GPU-packed spot light (96 bytes)
+    #[repr(C, align(16))]
+    pub struct GpuSpotLight {
+        position_radius: Vec4,          // xyz: position, w: radius
+        direction_inner: Vec4,          // xyz: direction, w: cos(inner_angle)
+        color_intensity: Vec4,          // xyz: color, w: intensity
+        outer_shadow_proj: Vec4,        // x: cos(outer_angle), y: shadow_index, z: projector_index, w: reserved
+        mask_flags: Vec4,               // x: mask, y: flags, zw: reserved
+        reserved: Vec4,                 // Padding
+    }
+
+    impl GpuSpotLight {
+        pub fn from_spot_light(light: &SpotLight) -> Self {
+            Self {
+                position_radius: Vec4::new(light.position.x, light.position.y,
+                                          light.position.z, light.radius),
+                direction_inner: Vec4::new(light.direction.x, light.direction.y,
+                                          light.direction.z, light.inner_cone_angle.cos()),
+                color_intensity: Vec4::new(light.color.x, light.color.y,
+                                          light.color.z, light.intensity),
+                outer_shadow_proj: Vec4::new(light.outer_cone_angle.cos(),
+                                            light.shadow_map_index as f32,
+                                            light.projector_texture_index as f32, 0.0),
+                mask_flags: Vec4::new(light.light_mask as f32, 0.0, 0.0, 0.0),
+                reserved: Vec4::zero(),
+            }
+        }
+    }
+
+    /// GPU-packed area light (128 bytes)
+    #[repr(C, align(16))]
+    pub struct GpuAreaLight {
+        corners: [Vec4; 4],             // Four corner positions (w unused)
+        color_intensity: Vec4,          // xyz: color, w: intensity
+        normal_two_sided: Vec4,         // xyz: normal, w: two_sided flag
+        mask_flags: Vec4,               // x: mask, y: flags, zw: reserved
+        reserved: Vec4,                 // Padding
+    }
+
+    // =========================================================================
+    // Cluster Data Structure (Clustered Forward/Deferred)
+    // =========================================================================
+
+    /// Cluster configuration
+    pub struct ClusterConfig {
+        tile_size_x: u32,
+        tile_size_y: u32,
+        num_slices_z: u32,
+        near_plane: f32,
+        far_plane: f32,
+        log_base: f32,              // For logarithmic depth slicing
+        max_lights_per_cluster: u32,
+        screen_width: u32,
+        screen_height: u32,
+    }
+
+    impl ClusterConfig {
+        pub fn new(screen_width: u32, screen_height: u32) -> Self {
+            Self {
+                tile_size_x: 64,
+                tile_size_y: 64,
+                num_slices_z: 24,
+                near_plane: 0.1,
+                far_plane: 1000.0,
+                log_base: 2.0,
+                max_lights_per_cluster: 256,
+                screen_width,
+                screen_height,
+            }
+        }
+
+        pub fn num_tiles_x(&self) -> u32 {
+            (self.screen_width + self.tile_size_x - 1) / self.tile_size_x
+        }
+
+        pub fn num_tiles_y(&self) -> u32 {
+            (self.screen_height + self.tile_size_y - 1) / self.tile_size_y
+        }
+
+        pub fn num_clusters(&self) -> u32 {
+            self.num_tiles_x() * self.num_tiles_y() * self.num_slices_z
+        }
+
+        /// Calculate the depth slice for a given view-space depth
+        pub fn depth_to_slice(&self, view_depth: f32) -> u32 {
+            if view_depth < self.near_plane {
+                return 0;
+            }
+            if view_depth >= self.far_plane {
+                return self.num_slices_z - 1;
+            }
+
+            // Logarithmic slice distribution for better near-field precision
+            let log_near = self.near_plane.ln();
+            let log_far = self.far_plane.ln();
+            let log_depth = view_depth.ln();
+
+            let slice = ((log_depth - log_near) / (log_far - log_near) *
+                        self.num_slices_z as f32) as u32;
+            slice.min(self.num_slices_z - 1)
+        }
+
+        /// Get the near/far planes for a depth slice
+        pub fn slice_bounds(&self, slice: u32) -> (f32, f32) {
+            let log_near = self.near_plane.ln();
+            let log_far = self.far_plane.ln();
+            let log_range = log_far - log_near;
+
+            let t0 = slice as f32 / self.num_slices_z as f32;
+            let t1 = (slice + 1) as f32 / self.num_slices_z as f32;
+
+            let near = (log_near + t0 * log_range).exp();
+            let far = (log_near + t1 * log_range).exp();
+            (near, far)
+        }
+    }
+
+    /// GPU cluster AABB (for building cluster bounds)
+    #[repr(C, align(16))]
+    pub struct GpuClusterAabb {
+        min: Vec4,
+        max: Vec4,
+    }
+
+    /// GPU light index list entry
+    #[repr(C)]
+    pub struct GpuLightGridEntry {
+        offset: u32,                    // Offset into light index list
+        count_point: u16,               // Number of point lights
+        count_spot: u16,                // Number of spot lights
+        count_area: u16,                // Number of area lights
+        reserved: u16,
+    }
+
+    /// Clustered lighting data
+    pub struct ClusteredLightingData {
+        config: ClusterConfig,
+        cluster_aabbs: Buffer,          // Array of GpuClusterAabb
+        light_grid: Buffer,             // Array of GpuLightGridEntry per cluster
+        light_indices: Buffer,          // Flat array of light indices
+        point_lights: Buffer,           // Array of GpuPointLight
+        spot_lights: Buffer,            // Array of GpuSpotLight
+        area_lights: Buffer,            // Array of GpuAreaLight
+        num_point_lights: u32,
+        num_spot_lights: u32,
+        num_area_lights: u32,
+        cluster_build_pipeline: ComputePipeline,
+        light_cull_pipeline: ComputePipeline,
+    }
+
+    impl ClusteredLightingData {
+        pub fn new(device: &gpu::Device, config: ClusterConfig) -> Self {
+            let num_clusters = config.num_clusters() as usize;
+
+            // Create cluster AABB buffer
+            let cluster_aabbs = device.create_buffer(&gpu::BufferDesc {
+                size: num_clusters * mem::size_of::<GpuClusterAabb>(),
+                usage: gpu::BufferUsage::STORAGE | gpu::BufferUsage::COPY_DST,
+                ..Default::default()
+            });
+
+            // Create light grid buffer
+            let light_grid = device.create_buffer(&gpu::BufferDesc {
+                size: num_clusters * mem::size_of::<GpuLightGridEntry>(),
+                usage: gpu::BufferUsage::STORAGE,
+                ..Default::default()
+            });
+
+            // Create light index buffer (dynamically sized, start with max)
+            let max_light_indices = num_clusters * config.max_lights_per_cluster as usize;
+            let light_indices = device.create_buffer(&gpu::BufferDesc {
+                size: max_light_indices * mem::size_of::<u32>(),
+                usage: gpu::BufferUsage::STORAGE,
+                ..Default::default()
+            });
+
+            // Light buffers (initial size, will resize as needed)
+            let initial_lights = 1024;
+
+            let point_lights = device.create_buffer(&gpu::BufferDesc {
+                size: initial_lights * mem::size_of::<GpuPointLight>(),
+                usage: gpu::BufferUsage::STORAGE | gpu::BufferUsage::COPY_DST,
+                ..Default::default()
+            });
+
+            let spot_lights = device.create_buffer(&gpu::BufferDesc {
+                size: initial_lights * mem::size_of::<GpuSpotLight>(),
+                usage: gpu::BufferUsage::STORAGE | gpu::BufferUsage::COPY_DST,
+                ..Default::default()
+            });
+
+            let area_lights = device.create_buffer(&gpu::BufferDesc {
+                size: initial_lights * mem::size_of::<GpuAreaLight>(),
+                usage: gpu::BufferUsage::STORAGE | gpu::BufferUsage::COPY_DST,
+                ..Default::default()
+            });
+
+            // Create compute pipelines
+            let cluster_build_pipeline = Self::create_cluster_build_pipeline(device);
+            let light_cull_pipeline = Self::create_light_cull_pipeline(device);
+
+            Self {
+                config,
+                cluster_aabbs,
+                light_grid,
+                light_indices,
+                point_lights,
+                spot_lights,
+                area_lights,
+                num_point_lights: 0,
+                num_spot_lights: 0,
+                num_area_lights: 0,
+                cluster_build_pipeline,
+                light_cull_pipeline,
+            }
+        }
+
+        fn create_cluster_build_pipeline(device: &gpu::Device) -> ComputePipeline {
+            device.create_compute_pipeline(&gpu::ComputePipelineDesc {
+                shader: include_str!("shaders/cluster_build.wgsl"),
+                entry_point: "build_clusters",
+            })
+        }
+
+        fn create_light_cull_pipeline(device: &gpu::Device) -> ComputePipeline {
+            device.create_compute_pipeline(&gpu::ComputePipelineDesc {
+                shader: include_str!("shaders/light_cull.wgsl"),
+                entry_point: "cull_lights",
+            })
+        }
+
+        /// Upload light data to GPU
+        pub fn upload_lights(&mut self, queue: &gpu::Queue,
+                            point_lights: &[PointLight],
+                            spot_lights: &[SpotLight],
+                            area_lights: &[RectAreaLight]) {
+            // Convert to GPU format
+            let gpu_point: Vec<GpuPointLight> = point_lights.iter()
+                .map(|l| GpuPointLight::from_point_light(l))
+                .collect();
+
+            let gpu_spot: Vec<GpuSpotLight> = spot_lights.iter()
+                .map(|l| GpuSpotLight::from_spot_light(l))
+                .collect();
+
+            // Upload to GPU
+            if !gpu_point.is_empty() {
+                queue.write_buffer(&self.point_lights, 0,
+                    bytemuck::cast_slice(&gpu_point));
+            }
+
+            if !gpu_spot.is_empty() {
+                queue.write_buffer(&self.spot_lights, 0,
+                    bytemuck::cast_slice(&gpu_spot));
+            }
+
+            self.num_point_lights = point_lights.len() as u32;
+            self.num_spot_lights = spot_lights.len() as u32;
+            self.num_area_lights = area_lights.len() as u32;
+        }
+
+        /// Build cluster AABBs and cull lights
+        pub fn update(&self, encoder: &mut CommandEncoder,
+                      view_matrix: &Mat4,
+                      projection_matrix: &Mat4) {
+            // First pass: Build cluster AABBs
+            {
+                let mut pass = encoder.begin_compute_pass(&gpu::ComputePassDesc::default());
+                pass.set_pipeline(&self.cluster_build_pipeline);
+
+                let workgroups_x = (self.config.num_tiles_x() + 7) / 8;
+                let workgroups_y = (self.config.num_tiles_y() + 7) / 8;
+                let workgroups_z = (self.config.num_slices_z + 3) / 4;
+
+                pass.dispatch(workgroups_x, workgroups_y, workgroups_z);
+            }
+
+            // Barrier between passes
+            encoder.pipeline_barrier();
+
+            // Second pass: Cull lights to clusters
+            {
+                let mut pass = encoder.begin_compute_pass(&gpu::ComputePassDesc::default());
+                pass.set_pipeline(&self.light_cull_pipeline);
+
+                let workgroups = (self.config.num_clusters() + 63) / 64;
+                pass.dispatch(workgroups, 1, 1);
+            }
+        }
+    }
+
+    // =========================================================================
+    // Tiled Lighting (2D tiles for forward+ rendering)
+    // =========================================================================
+
+    /// Tile configuration for 2D tiled lighting
+    pub struct TileConfig {
+        tile_size: u32,                 // Typically 16x16 or 32x32
+        max_lights_per_tile: u32,
+        screen_width: u32,
+        screen_height: u32,
+    }
+
+    impl TileConfig {
+        pub fn new(screen_width: u32, screen_height: u32) -> Self {
+            Self {
+                tile_size: 16,
+                max_lights_per_tile: 256,
+                screen_width,
+                screen_height,
+            }
+        }
+
+        pub fn num_tiles_x(&self) -> u32 {
+            (self.screen_width + self.tile_size - 1) / self.tile_size
+        }
+
+        pub fn num_tiles_y(&self) -> u32 {
+            (self.screen_height + self.tile_size - 1) / self.tile_size
+        }
+
+        pub fn num_tiles(&self) -> u32 {
+            self.num_tiles_x() * self.num_tiles_y()
+        }
+    }
+
+    /// GPU tile data
+    #[repr(C)]
+    pub struct GpuTileData {
+        min_depth: f32,
+        max_depth: f32,
+        light_count: u32,
+        light_offset: u32,
+    }
+
+    /// Tiled deferred lighting system
+    pub struct TiledDeferredLighting {
+        config: TileConfig,
+
+        // G-Buffer textures
+        gbuffer_albedo: Texture,        // RGB: Albedo, A: Metallic
+        gbuffer_normal: Texture,        // RGB: Normal (octahedral), A: Roughness
+        gbuffer_depth: Texture,         // Depth buffer
+        gbuffer_emissive: Texture,      // RGB: Emissive, A: AO
+        gbuffer_velocity: Texture,      // RG: Motion vectors
+
+        // Light buffers
+        tile_data: Buffer,              // Per-tile min/max depth and light counts
+        light_indices: Buffer,          // Light indices per tile
+        point_lights: Buffer,
+        spot_lights: Buffer,
+
+        // Pipelines
+        depth_prepass_pipeline: Pipeline,
+        tile_depth_bounds_pipeline: ComputePipeline,
+        light_cull_pipeline: ComputePipeline,
+        lighting_pipeline: ComputePipeline,
+        composite_pipeline: Pipeline,
+
+        // Bind groups
+        gbuffer_bind_group: BindGroup,
+        lighting_bind_group: BindGroup,
+    }
+
+    impl TiledDeferredLighting {
+        pub fn new(device: &gpu::Device, config: TileConfig) -> Self {
+            let (width, height) = (config.screen_width, config.screen_height);
+
+            // Create G-Buffer textures
+            let gbuffer_albedo = device.create_texture(&gpu::TextureDesc {
+                width,
+                height,
+                format: gpu::TextureFormat::Rgba8Unorm,
+                usage: gpu::TextureUsage::RENDER_TARGET | gpu::TextureUsage::SAMPLED,
+                ..Default::default()
+            });
+
+            let gbuffer_normal = device.create_texture(&gpu::TextureDesc {
+                width,
+                height,
+                format: gpu::TextureFormat::Rgba16Float,
+                usage: gpu::TextureUsage::RENDER_TARGET | gpu::TextureUsage::SAMPLED,
+                ..Default::default()
+            });
+
+            let gbuffer_depth = device.create_texture(&gpu::TextureDesc {
+                width,
+                height,
+                format: gpu::TextureFormat::Depth32Float,
+                usage: gpu::TextureUsage::RENDER_TARGET | gpu::TextureUsage::SAMPLED,
+                ..Default::default()
+            });
+
+            let gbuffer_emissive = device.create_texture(&gpu::TextureDesc {
+                width,
+                height,
+                format: gpu::TextureFormat::Rgba16Float,
+                usage: gpu::TextureUsage::RENDER_TARGET | gpu::TextureUsage::SAMPLED,
+                ..Default::default()
+            });
+
+            let gbuffer_velocity = device.create_texture(&gpu::TextureDesc {
+                width,
+                height,
+                format: gpu::TextureFormat::Rg16Float,
+                usage: gpu::TextureUsage::RENDER_TARGET | gpu::TextureUsage::SAMPLED,
+                ..Default::default()
+            });
+
+            // Create tile buffers
+            let num_tiles = config.num_tiles() as usize;
+
+            let tile_data = device.create_buffer(&gpu::BufferDesc {
+                size: num_tiles * mem::size_of::<GpuTileData>(),
+                usage: gpu::BufferUsage::STORAGE,
+                ..Default::default()
+            });
+
+            let max_light_indices = num_tiles * config.max_lights_per_tile as usize;
+            let light_indices = device.create_buffer(&gpu::BufferDesc {
+                size: max_light_indices * mem::size_of::<u32>(),
+                usage: gpu::BufferUsage::STORAGE,
+                ..Default::default()
+            });
+
+            // Light buffers
+            let max_lights = 4096;
+            let point_lights = device.create_buffer(&gpu::BufferDesc {
+                size: max_lights * mem::size_of::<GpuPointLight>(),
+                usage: gpu::BufferUsage::STORAGE | gpu::BufferUsage::COPY_DST,
+                ..Default::default()
+            });
+
+            let spot_lights = device.create_buffer(&gpu::BufferDesc {
+                size: max_lights * mem::size_of::<GpuSpotLight>(),
+                usage: gpu::BufferUsage::STORAGE | gpu::BufferUsage::COPY_DST,
+                ..Default::default()
+            });
+
+            // Create pipelines
+            let depth_prepass_pipeline = Self::create_depth_prepass_pipeline(device);
+            let tile_depth_bounds_pipeline = Self::create_tile_depth_bounds_pipeline(device);
+            let light_cull_pipeline = Self::create_light_cull_pipeline(device);
+            let lighting_pipeline = Self::create_lighting_pipeline(device);
+            let composite_pipeline = Self::create_composite_pipeline(device);
+
+            // Create bind groups (placeholder, would need proper setup)
+            let gbuffer_bind_group = device.create_bind_group(&gpu::BindGroupDesc::default());
+            let lighting_bind_group = device.create_bind_group(&gpu::BindGroupDesc::default());
+
+            Self {
+                config,
+                gbuffer_albedo,
+                gbuffer_normal,
+                gbuffer_depth,
+                gbuffer_emissive,
+                gbuffer_velocity,
+                tile_data,
+                light_indices,
+                point_lights,
+                spot_lights,
+                depth_prepass_pipeline,
+                tile_depth_bounds_pipeline,
+                light_cull_pipeline,
+                lighting_pipeline,
+                composite_pipeline,
+                gbuffer_bind_group,
+                lighting_bind_group,
+            }
+        }
+
+        fn create_depth_prepass_pipeline(device: &gpu::Device) -> Pipeline {
+            device.create_render_pipeline(&gpu::RenderPipelineDesc {
+                vertex_shader: include_str!("shaders/depth_prepass.wgsl"),
+                fragment_shader: None,
+                depth_format: Some(gpu::TextureFormat::Depth32Float),
+                ..Default::default()
+            })
+        }
+
+        fn create_tile_depth_bounds_pipeline(device: &gpu::Device) -> ComputePipeline {
+            device.create_compute_pipeline(&gpu::ComputePipelineDesc {
+                shader: include_str!("shaders/tile_depth_bounds.wgsl"),
+                entry_point: "compute_tile_depth_bounds",
+            })
+        }
+
+        fn create_light_cull_pipeline(device: &gpu::Device) -> ComputePipeline {
+            device.create_compute_pipeline(&gpu::ComputePipelineDesc {
+                shader: include_str!("shaders/tiled_light_cull.wgsl"),
+                entry_point: "cull_lights_to_tiles",
+            })
+        }
+
+        fn create_lighting_pipeline(device: &gpu::Device) -> ComputePipeline {
+            device.create_compute_pipeline(&gpu::ComputePipelineDesc {
+                shader: include_str!("shaders/tiled_deferred_lighting.wgsl"),
+                entry_point: "deferred_lighting",
+            })
+        }
+
+        fn create_composite_pipeline(device: &gpu::Device) -> Pipeline {
+            device.create_render_pipeline(&gpu::RenderPipelineDesc {
+                vertex_shader: include_str!("shaders/fullscreen_quad.wgsl"),
+                fragment_shader: Some(include_str!("shaders/composite.wgsl")),
+                ..Default::default()
+            })
+        }
+
+        /// Execute the tiled deferred lighting pass
+        pub fn execute(&self, encoder: &mut CommandEncoder) {
+            // 1. Compute tile depth bounds from depth buffer
+            {
+                let mut pass = encoder.begin_compute_pass(&gpu::ComputePassDesc::default());
+                pass.set_pipeline(&self.tile_depth_bounds_pipeline);
+
+                let workgroups_x = self.config.num_tiles_x();
+                let workgroups_y = self.config.num_tiles_y();
+                pass.dispatch(workgroups_x, workgroups_y, 1);
+            }
+
+            encoder.pipeline_barrier();
+
+            // 2. Cull lights to tiles
+            {
+                let mut pass = encoder.begin_compute_pass(&gpu::ComputePassDesc::default());
+                pass.set_pipeline(&self.light_cull_pipeline);
+
+                let workgroups_x = self.config.num_tiles_x();
+                let workgroups_y = self.config.num_tiles_y();
+                pass.dispatch(workgroups_x, workgroups_y, 1);
+            }
+
+            encoder.pipeline_barrier();
+
+            // 3. Compute lighting using tiled light lists
+            {
+                let mut pass = encoder.begin_compute_pass(&gpu::ComputePassDesc::default());
+                pass.set_pipeline(&self.lighting_pipeline);
+
+                let workgroups_x = (self.config.screen_width + 7) / 8;
+                let workgroups_y = (self.config.screen_height + 7) / 8;
+                pass.dispatch(workgroups_x, workgroups_y, 1);
+            }
+        }
+    }
+
+    // =========================================================================
+    // Fine-Grained Tiled Lighting (FPTL - Fine Pruned Tiled Lighting)
+    // =========================================================================
+
+    /// FPTL configuration (used in Unity HDRP style)
+    pub struct FptlConfig {
+        coarse_tile_size: u32,          // 64x64
+        fine_tile_size: u32,            // 8x8
+        max_lights_per_coarse_tile: u32,
+        max_lights_per_fine_tile: u32,
+        screen_width: u32,
+        screen_height: u32,
+    }
+
+    impl FptlConfig {
+        pub fn new(screen_width: u32, screen_height: u32) -> Self {
+            Self {
+                coarse_tile_size: 64,
+                fine_tile_size: 8,
+                max_lights_per_coarse_tile: 256,
+                max_lights_per_fine_tile: 32,
+                screen_width,
+                screen_height,
+            }
+        }
+    }
+
+    /// Fine-Pruned Tiled Lighting system
+    pub struct FptlLighting {
+        config: FptlConfig,
+        coarse_tile_buffer: Buffer,
+        fine_tile_buffer: Buffer,
+        light_bounds_buffer: Buffer,    // Screen-space bounds per light
+        coarse_cull_pipeline: ComputePipeline,
+        fine_cull_pipeline: ComputePipeline,
+    }
+
+    impl FptlLighting {
+        pub fn new(device: &gpu::Device, config: FptlConfig) -> Self {
+            let num_coarse_tiles = ((config.screen_width + config.coarse_tile_size - 1) /
+                                    config.coarse_tile_size) *
+                                   ((config.screen_height + config.coarse_tile_size - 1) /
+                                    config.coarse_tile_size);
+
+            let num_fine_tiles = ((config.screen_width + config.fine_tile_size - 1) /
+                                  config.fine_tile_size) *
+                                 ((config.screen_height + config.fine_tile_size - 1) /
+                                  config.fine_tile_size);
+
+            let coarse_tile_buffer = device.create_buffer(&gpu::BufferDesc {
+                size: (num_coarse_tiles as usize) * config.max_lights_per_coarse_tile as usize * 4,
+                usage: gpu::BufferUsage::STORAGE,
+                ..Default::default()
+            });
+
+            let fine_tile_buffer = device.create_buffer(&gpu::BufferDesc {
+                size: (num_fine_tiles as usize) * config.max_lights_per_fine_tile as usize * 4,
+                usage: gpu::BufferUsage::STORAGE,
+                ..Default::default()
+            });
+
+            let light_bounds_buffer = device.create_buffer(&gpu::BufferDesc {
+                size: 4096 * 16, // 4096 lights, 16 bytes each (AABB)
+                usage: gpu::BufferUsage::STORAGE,
+                ..Default::default()
+            });
+
+            let coarse_cull_pipeline = device.create_compute_pipeline(&gpu::ComputePipelineDesc {
+                shader: include_str!("shaders/fptl_coarse_cull.wgsl"),
+                entry_point: "coarse_cull",
+            });
+
+            let fine_cull_pipeline = device.create_compute_pipeline(&gpu::ComputePipelineDesc {
+                shader: include_str!("shaders/fptl_fine_cull.wgsl"),
+                entry_point: "fine_cull",
+            });
+
+            Self {
+                config,
+                coarse_tile_buffer,
+                fine_tile_buffer,
+                light_bounds_buffer,
+                coarse_cull_pipeline,
+                fine_cull_pipeline,
+            }
+        }
+
+        /// Calculate screen-space bounds for all lights
+        pub fn compute_light_bounds(&self, encoder: &mut CommandEncoder) {
+            // Compute screen-space AABB for each light
+        }
+
+        /// Two-phase culling: coarse then fine
+        pub fn cull_lights(&self, encoder: &mut CommandEncoder) {
+            // Phase 1: Coarse culling
+            {
+                let mut pass = encoder.begin_compute_pass(&gpu::ComputePassDesc::default());
+                pass.set_pipeline(&self.coarse_cull_pipeline);
+
+                let coarse_tiles_x = (self.config.screen_width + self.config.coarse_tile_size - 1) /
+                                     self.config.coarse_tile_size;
+                let coarse_tiles_y = (self.config.screen_height + self.config.coarse_tile_size - 1) /
+                                     self.config.coarse_tile_size;
+                pass.dispatch(coarse_tiles_x, coarse_tiles_y, 1);
+            }
+
+            encoder.pipeline_barrier();
+
+            // Phase 2: Fine culling (within coarse tiles)
+            {
+                let mut pass = encoder.begin_compute_pass(&gpu::ComputePassDesc::default());
+                pass.set_pipeline(&self.fine_cull_pipeline);
+
+                let fine_tiles_x = (self.config.screen_width + self.config.fine_tile_size - 1) /
+                                   self.config.fine_tile_size;
+                let fine_tiles_y = (self.config.screen_height + self.config.fine_tile_size - 1) /
+                                   self.config.fine_tile_size;
+                pass.dispatch(fine_tiles_x, fine_tiles_y, 1);
+            }
+        }
+    }
+
+    // =========================================================================
+    // Light BVH (Bounding Volume Hierarchy for lights)
+    // =========================================================================
+
+    /// BVH node for spatial light organization
+    pub struct LightBvhNode {
+        bounds: Aabb,
+        left_child: i32,                // Index of left child (-1 if leaf)
+        right_child: i32,               // Index of right child (-1 if leaf)
+        light_index: i32,               // Light index if leaf (-1 if internal)
+        light_count: u32,               // Number of lights in subtree
+    }
+
+    /// GPU-packed BVH node
+    #[repr(C, align(16))]
+    pub struct GpuLightBvhNode {
+        bounds_min: Vec4,               // xyz: min, w: left_child
+        bounds_max: Vec4,               // xyz: max, w: right_child
+        light_index_count: Vec4,        // x: light_index, y: light_count, zw: reserved
+        reserved: Vec4,
+    }
+
+    /// Light BVH for efficient light queries
+    pub struct LightBvh {
+        nodes: Vec<LightBvhNode>,
+        light_indices: Vec<u32>,
+        gpu_nodes: Buffer,
+        gpu_light_indices: Buffer,
+        needs_rebuild: bool,
+    }
+
+    impl LightBvh {
+        pub fn new(device: &gpu::Device) -> Self {
+            let gpu_nodes = device.create_buffer(&gpu::BufferDesc {
+                size: 4096 * mem::size_of::<GpuLightBvhNode>(),
+                usage: gpu::BufferUsage::STORAGE | gpu::BufferUsage::COPY_DST,
+                ..Default::default()
+            });
+
+            let gpu_light_indices = device.create_buffer(&gpu::BufferDesc {
+                size: 4096 * mem::size_of::<u32>(),
+                usage: gpu::BufferUsage::STORAGE | gpu::BufferUsage::COPY_DST,
+                ..Default::default()
+            });
+
+            Self {
+                nodes: Vec::new(),
+                light_indices: Vec::new(),
+                gpu_nodes,
+                gpu_light_indices,
+                needs_rebuild: true,
+            }
+        }
+
+        /// Build BVH from light bounds
+        pub fn build(&mut self, light_bounds: &[Sphere]) {
+            self.nodes.clear();
+            self.light_indices.clear();
+
+            if light_bounds.is_empty() {
+                return;
+            }
+
+            // Compute centroids and overall bounds
+            let mut centroids: Vec<(usize, Vec3)> = light_bounds.iter()
+                .enumerate()
+                .map(|(i, s)| (i, s.center))
+                .collect();
+
+            self.build_recursive(&centroids, light_bounds);
+            self.needs_rebuild = false;
+        }
+
+        fn build_recursive(&mut self, centroids: &[(usize, Vec3)], light_bounds: &[Sphere]) -> i32 {
+            if centroids.is_empty() {
+                return -1;
+            }
+
+            if centroids.len() == 1 {
+                // Leaf node
+                let (light_idx, _) = centroids[0];
+                let node = LightBvhNode {
+                    bounds: Aabb::from_sphere(&light_bounds[light_idx]),
+                    left_child: -1,
+                    right_child: -1,
+                    light_index: light_idx as i32,
+                    light_count: 1,
+                };
+                let node_idx = self.nodes.len() as i32;
+                self.nodes.push(node);
+                self.light_indices.push(light_idx as u32);
+                return node_idx;
+            }
+
+            // Compute bounds of all lights
+            let mut bounds = Aabb::empty();
+            for (light_idx, _) in centroids {
+                bounds = bounds.union(&Aabb::from_sphere(&light_bounds[*light_idx]));
+            }
+
+            // Find split axis (longest extent)
+            let extent = bounds.max - bounds.min;
+            let axis = if extent.x > extent.y && extent.x > extent.z { 0 }
+                       else if extent.y > extent.z { 1 }
+                       else { 2 };
+
+            // Sort centroids along split axis
+            let mut sorted_centroids = centroids.to_vec();
+            sorted_centroids.sort_by(|a, b| {
+                let va = match axis { 0 => a.1.x, 1 => a.1.y, _ => a.1.z };
+                let vb = match axis { 0 => b.1.x, 1 => b.1.y, _ => b.1.z };
+                va.partial_cmp(&vb).unwrap()
+            });
+
+            // Split in half
+            let mid = sorted_centroids.len() / 2;
+            let (left_centroids, right_centroids) = sorted_centroids.split_at(mid);
+
+            // Recursively build children
+            let left_child = self.build_recursive(left_centroids, light_bounds);
+            let right_child = self.build_recursive(right_centroids, light_bounds);
+
+            // Create internal node
+            let node = LightBvhNode {
+                bounds,
+                left_child,
+                right_child,
+                light_index: -1,
+                light_count: centroids.len() as u32,
+            };
+            let node_idx = self.nodes.len() as i32;
+            self.nodes.push(node);
+
+            node_idx
+        }
+
+        /// Upload BVH to GPU
+        pub fn upload(&self, queue: &gpu::Queue) {
+            let gpu_nodes: Vec<GpuLightBvhNode> = self.nodes.iter()
+                .map(|n| GpuLightBvhNode {
+                    bounds_min: Vec4::new(n.bounds.min.x, n.bounds.min.y, n.bounds.min.z,
+                                         n.left_child as f32),
+                    bounds_max: Vec4::new(n.bounds.max.x, n.bounds.max.y, n.bounds.max.z,
+                                         n.right_child as f32),
+                    light_index_count: Vec4::new(n.light_index as f32, n.light_count as f32, 0.0, 0.0),
+                    reserved: Vec4::zero(),
+                })
+                .collect();
+
+            if !gpu_nodes.is_empty() {
+                queue.write_buffer(&self.gpu_nodes, 0, bytemuck::cast_slice(&gpu_nodes));
+            }
+            if !self.light_indices.is_empty() {
+                queue.write_buffer(&self.gpu_light_indices, 0,
+                    bytemuck::cast_slice(&self.light_indices));
+            }
+        }
+
+        /// Query lights intersecting a frustum (CPU)
+        pub fn query_frustum(&self, frustum: &Frustum) -> Vec<u32> {
+            let mut result = Vec::new();
+            if !self.nodes.is_empty() {
+                self.query_frustum_recursive(0, frustum, &mut result);
+            }
+            result
+        }
+
+        fn query_frustum_recursive(&self, node_idx: usize, frustum: &Frustum, result: &mut Vec<u32>) {
+            let node = &self.nodes[node_idx];
+
+            // Check if node bounds intersect frustum
+            if !frustum.intersects_aabb(&node.bounds) {
+                return;
+            }
+
+            if node.light_index >= 0 {
+                // Leaf node
+                result.push(node.light_index as u32);
+            } else {
+                // Internal node
+                if node.left_child >= 0 {
+                    self.query_frustum_recursive(node.left_child as usize, frustum, result);
+                }
+                if node.right_child >= 0 {
+                    self.query_frustum_recursive(node.right_child as usize, frustum, result);
+                }
+            }
+        }
+    }
+
+    // =========================================================================
+    // Light Probe Grid Integration
+    // =========================================================================
+
+    /// Cluster-based light probe placement
+    pub struct ClusteredLightProbes {
+        probe_positions: Vec<Vec3>,
+        probe_sh_coefficients: Vec<[Vec3; 9]>,  // L2 SH
+        probe_grid: Buffer,
+        probe_sh_buffer: Buffer,
+        update_pipeline: ComputePipeline,
+    }
+
+    impl ClusteredLightProbes {
+        pub fn new(device: &gpu::Device, max_probes: usize) -> Self {
+            let probe_grid = device.create_buffer(&gpu::BufferDesc {
+                size: max_probes * 16, // Vec4 per probe position
+                usage: gpu::BufferUsage::STORAGE | gpu::BufferUsage::COPY_DST,
+                ..Default::default()
+            });
+
+            let probe_sh_buffer = device.create_buffer(&gpu::BufferDesc {
+                size: max_probes * 9 * 16, // 9 Vec4 coefficients per probe
+                usage: gpu::BufferUsage::STORAGE | gpu::BufferUsage::COPY_DST,
+                ..Default::default()
+            });
+
+            let update_pipeline = device.create_compute_pipeline(&gpu::ComputePipelineDesc {
+                shader: include_str!("shaders/probe_update.wgsl"),
+                entry_point: "update_probes",
+            });
+
+            Self {
+                probe_positions: Vec::new(),
+                probe_sh_coefficients: Vec::new(),
+                probe_grid,
+                probe_sh_buffer,
+                update_pipeline,
+            }
+        }
+
+        /// Sample irradiance at a world position using trilinear interpolation
+        pub fn sample_irradiance(&self, position: Vec3, normal: Vec3) -> Vec3 {
+            // Find nearest probes and interpolate
+            let mut irradiance = Vec3::zero();
+            let mut total_weight = 0.0;
+
+            for (i, probe_pos) in self.probe_positions.iter().enumerate() {
+                let dist = (*probe_pos - position).length();
+                let weight = 1.0 / (dist + 0.001);
+
+                // Evaluate SH in normal direction
+                let sh = &self.probe_sh_coefficients[i];
+                let probe_irradiance = Self::evaluate_sh_irradiance(sh, normal);
+
+                irradiance = irradiance + probe_irradiance * weight;
+                total_weight += weight;
+            }
+
+            if total_weight > 0.0 {
+                irradiance = irradiance / total_weight;
+            }
+
+            irradiance
+        }
+
+        fn evaluate_sh_irradiance(sh: &[Vec3; 9], normal: Vec3) -> Vec3 {
+            let n = normal;
+
+            // L0
+            let mut result = sh[0] * 0.282095;
+
+            // L1
+            result = result + sh[1] * (0.488603 * n.y);
+            result = result + sh[2] * (0.488603 * n.z);
+            result = result + sh[3] * (0.488603 * n.x);
+
+            // L2
+            result = result + sh[4] * (1.092548 * n.x * n.y);
+            result = result + sh[5] * (1.092548 * n.y * n.z);
+            result = result + sh[6] * (0.315392 * (3.0 * n.z * n.z - 1.0));
+            result = result + sh[7] * (1.092548 * n.x * n.z);
+            result = result + sh[8] * (0.546274 * (n.x * n.x - n.y * n.y));
+
+            result
+        }
+    }
+
+    // =========================================================================
+    // Shadow Mapping Integration
+    // =========================================================================
+
+    /// Shadow map atlas for many lights
+    pub struct ShadowMapAtlas {
+        atlas_texture: Texture,
+        atlas_size: u32,
+        tile_size: u32,
+        allocations: Vec<ShadowTileAllocation>,
+        free_tiles: Vec<u32>,
+    }
+
+    struct ShadowTileAllocation {
+        light_index: u32,
+        tile_index: u32,
+        viewport: [f32; 4],             // x, y, width, height in UV space
+        projection_matrix: Mat4,
+    }
+
+    impl ShadowMapAtlas {
+        pub fn new(device: &gpu::Device, atlas_size: u32, tile_size: u32) -> Self {
+            let atlas_texture = device.create_texture(&gpu::TextureDesc {
+                width: atlas_size,
+                height: atlas_size,
+                format: gpu::TextureFormat::Depth16Unorm,
+                usage: gpu::TextureUsage::RENDER_TARGET | gpu::TextureUsage::SAMPLED,
+                ..Default::default()
+            });
+
+            let tiles_per_side = atlas_size / tile_size;
+            let total_tiles = tiles_per_side * tiles_per_side;
+            let free_tiles: Vec<u32> = (0..total_tiles).collect();
+
+            Self {
+                atlas_texture,
+                atlas_size,
+                tile_size,
+                allocations: Vec::new(),
+                free_tiles,
+            }
+        }
+
+        /// Allocate a shadow map tile for a light
+        pub fn allocate(&mut self, light_index: u32, projection: Mat4) -> Option<[f32; 4]> {
+            if self.free_tiles.is_empty() {
+                return None;
+            }
+
+            let tile_index = self.free_tiles.pop().unwrap();
+            let tiles_per_side = self.atlas_size / self.tile_size;
+
+            let tile_x = tile_index % tiles_per_side;
+            let tile_y = tile_index / tiles_per_side;
+
+            let uv_scale = 1.0 / tiles_per_side as f32;
+            let viewport = [
+                tile_x as f32 * uv_scale,
+                tile_y as f32 * uv_scale,
+                uv_scale,
+                uv_scale,
+            ];
+
+            self.allocations.push(ShadowTileAllocation {
+                light_index,
+                tile_index,
+                viewport,
+                projection_matrix: projection,
+            });
+
+            Some(viewport)
+        }
+
+        /// Free a shadow map tile
+        pub fn free(&mut self, light_index: u32) {
+            if let Some(idx) = self.allocations.iter().position(|a| a.light_index == light_index) {
+                let tile_index = self.allocations[idx].tile_index;
+                self.free_tiles.push(tile_index);
+                self.allocations.swap_remove(idx);
+            }
+        }
+
+        /// Get viewport for a light's shadow map
+        pub fn get_viewport(&self, light_index: u32) -> Option<[f32; 4]> {
+            self.allocations.iter()
+                .find(|a| a.light_index == light_index)
+                .map(|a| a.viewport)
+        }
+    }
+
+    // =========================================================================
+    // Virtual Shadow Maps
+    // =========================================================================
+
+    /// Virtual shadow map page
+    pub struct VsmPage {
+        page_id: u32,
+        mip_level: u32,
+        x: u32,
+        y: u32,
+        is_cached: bool,
+        last_used_frame: u32,
+    }
+
+    /// Virtual Shadow Map system (similar to UE5)
+    pub struct VirtualShadowMap {
+        page_table: Texture,            // Page table texture
+        physical_pages: Texture,        // Physical shadow page pool
+        page_size: u32,
+        virtual_resolution: u32,
+        physical_pool_size: u32,
+        pages: Vec<VsmPage>,
+        free_physical_pages: Vec<u32>,
+        page_request_buffer: Buffer,
+        page_render_pipeline: Pipeline,
+        page_table_update_pipeline: ComputePipeline,
+    }
+
+    impl VirtualShadowMap {
+        pub fn new(device: &gpu::Device, virtual_resolution: u32,
+                   physical_pool_pages: u32, page_size: u32) -> Self {
+            let page_table_size = virtual_resolution / page_size;
+
+            let page_table = device.create_texture(&gpu::TextureDesc {
+                width: page_table_size,
+                height: page_table_size,
+                mip_levels: 8, // Multiple mip levels for different shadow LODs
+                format: gpu::TextureFormat::R32Uint,
+                usage: gpu::TextureUsage::STORAGE | gpu::TextureUsage::SAMPLED,
+                ..Default::default()
+            });
+
+            let pool_side = (physical_pool_pages as f32).sqrt().ceil() as u32;
+            let physical_pages = device.create_texture(&gpu::TextureDesc {
+                width: pool_side * page_size,
+                height: pool_side * page_size,
+                format: gpu::TextureFormat::Depth16Unorm,
+                usage: gpu::TextureUsage::RENDER_TARGET | gpu::TextureUsage::SAMPLED,
+                ..Default::default()
+            });
+
+            let page_request_buffer = device.create_buffer(&gpu::BufferDesc {
+                size: 65536 * 4, // Max page requests
+                usage: gpu::BufferUsage::STORAGE,
+                ..Default::default()
+            });
+
+            let page_render_pipeline = device.create_render_pipeline(&gpu::RenderPipelineDesc {
+                vertex_shader: include_str!("shaders/vsm_render.wgsl"),
+                fragment_shader: None,
+                depth_format: Some(gpu::TextureFormat::Depth16Unorm),
+                ..Default::default()
+            });
+
+            let page_table_update_pipeline = device.create_compute_pipeline(&gpu::ComputePipelineDesc {
+                shader: include_str!("shaders/vsm_page_table.wgsl"),
+                entry_point: "update_page_table",
+            });
+
+            let free_physical_pages: Vec<u32> = (0..physical_pool_pages).collect();
+
+            Self {
+                page_table,
+                physical_pages,
+                page_size,
+                virtual_resolution,
+                physical_pool_size: physical_pool_pages,
+                pages: Vec::new(),
+                free_physical_pages,
+                page_request_buffer,
+                page_render_pipeline,
+                page_table_update_pipeline,
+            }
+        }
+
+        /// Request a page at a specific virtual address
+        pub fn request_page(&mut self, mip_level: u32, virtual_x: u32, virtual_y: u32) -> bool {
+            // Check if page already exists
+            let existing = self.pages.iter()
+                .find(|p| p.mip_level == mip_level && p.x == virtual_x && p.y == virtual_y);
+
+            if existing.is_some() {
+                return true;
+            }
+
+            // Allocate new physical page
+            if let Some(physical_page) = self.free_physical_pages.pop() {
+                self.pages.push(VsmPage {
+                    page_id: physical_page,
+                    mip_level,
+                    x: virtual_x,
+                    y: virtual_y,
+                    is_cached: false,
+                    last_used_frame: 0,
+                });
+                return true;
+            }
+
+            // TODO: Evict least recently used page
+            false
+        }
+
+        /// Sample virtual shadow map
+        pub fn sample(&self, shadow_coord: Vec3, mip_level: f32) -> f32 {
+            // GPU shader would do this, but conceptually:
+            // 1. Look up page table at shadow_coord / page_size
+            // 2. Get physical page address
+            // 3. Sample physical page at offset within page
+            1.0
+        }
+    }
+
+    // =========================================================================
+    // Light Manager
+    // =========================================================================
+
+    /// Unified light management system
+    pub struct LightManager {
+        point_lights: Vec<PointLight>,
+        spot_lights: Vec<SpotLight>,
+        rect_area_lights: Vec<RectAreaLight>,
+        disc_area_lights: Vec<DiscAreaLight>,
+        sphere_area_lights: Vec<SphereAreaLight>,
+        tube_lights: Vec<TubeLight>,
+        ies_lights: Vec<IesLight>,
+
+        clustered_lighting: ClusteredLightingData,
+        tiled_deferred: TiledDeferredLighting,
+        light_bvh: LightBvh,
+        shadow_atlas: ShadowMapAtlas,
+
+        dirty: bool,
+    }
+
+    impl LightManager {
+        pub fn new(device: &gpu::Device, screen_width: u32, screen_height: u32) -> Self {
+            let cluster_config = ClusterConfig::new(screen_width, screen_height);
+            let tile_config = TileConfig::new(screen_width, screen_height);
+
+            Self {
+                point_lights: Vec::new(),
+                spot_lights: Vec::new(),
+                rect_area_lights: Vec::new(),
+                disc_area_lights: Vec::new(),
+                sphere_area_lights: Vec::new(),
+                tube_lights: Vec::new(),
+                ies_lights: Vec::new(),
+
+                clustered_lighting: ClusteredLightingData::new(device, cluster_config),
+                tiled_deferred: TiledDeferredLighting::new(device, tile_config),
+                light_bvh: LightBvh::new(device),
+                shadow_atlas: ShadowMapAtlas::new(device, 4096, 512),
+
+                dirty: true,
+            }
+        }
+
+        pub fn add_point_light(&mut self, light: PointLight) -> usize {
+            self.point_lights.push(light);
+            self.dirty = true;
+            self.point_lights.len() - 1
+        }
+
+        pub fn add_spot_light(&mut self, light: SpotLight) -> usize {
+            self.spot_lights.push(light);
+            self.dirty = true;
+            self.spot_lights.len() - 1
+        }
+
+        pub fn add_rect_area_light(&mut self, light: RectAreaLight) -> usize {
+            self.rect_area_lights.push(light);
+            self.dirty = true;
+            self.rect_area_lights.len() - 1
+        }
+
+        pub fn add_tube_light(&mut self, light: TubeLight) -> usize {
+            self.tube_lights.push(light);
+            self.dirty = true;
+            self.tube_lights.len() - 1
+        }
+
+        pub fn remove_point_light(&mut self, index: usize) {
+            if index < self.point_lights.len() {
+                self.point_lights.swap_remove(index);
+                self.dirty = true;
+            }
+        }
+
+        pub fn get_point_light(&self, index: usize) -> Option<&PointLight> {
+            self.point_lights.get(index)
+        }
+
+        pub fn get_point_light_mut(&mut self, index: usize) -> Option<&mut PointLight> {
+            self.dirty = true;
+            self.point_lights.get_mut(index)
+        }
+
+        /// Update GPU data
+        pub fn update(&mut self, queue: &gpu::Queue) {
+            if !self.dirty {
+                return;
+            }
+
+            // Upload lights to clustered lighting system
+            self.clustered_lighting.upload_lights(queue,
+                &self.point_lights,
+                &self.spot_lights,
+                &self.rect_area_lights);
+
+            // Rebuild BVH
+            let all_bounds: Vec<Sphere> = self.point_lights.iter()
+                .map(|l| l.bounding_sphere())
+                .chain(self.spot_lights.iter().map(|l| l.bounding_sphere()))
+                .collect();
+
+            self.light_bvh.build(&all_bounds);
+            self.light_bvh.upload(queue);
+
+            self.dirty = false;
+        }
+
+        /// Execute light culling passes
+        pub fn cull_lights(&self, encoder: &mut CommandEncoder,
+                          view: &Mat4, projection: &Mat4) {
+            self.clustered_lighting.update(encoder, view, projection);
+        }
+
+        /// Get total light count
+        pub fn total_light_count(&self) -> usize {
+            self.point_lights.len() +
+            self.spot_lights.len() +
+            self.rect_area_lights.len() +
+            self.disc_area_lights.len() +
+            self.sphere_area_lights.len() +
+            self.tube_lights.len() +
+            self.ies_lights.len()
+        }
+
+        /// Cull lights against a frustum
+        pub fn cull_against_frustum(&self, frustum: &Frustum) -> Vec<u32> {
+            self.light_bvh.query_frustum(frustum)
+        }
+    }
+
+    // =========================================================================
+    // WGSL Shaders
+    // =========================================================================
+
+    pub const CLUSTER_BUILD_SHADER: &str = r#"
+struct ClusterConfig {
+    tile_size: vec2<u32>,
+    num_slices: u32,
+    near_plane: f32,
+    far_plane: f32,
+    screen_size: vec2<u32>,
+    log_base: f32,
+}
+
+struct ClusterAabb {
+    min: vec4<f32>,
+    max: vec4<f32>,
+}
+
+@group(0) @binding(0) var<uniform> config: ClusterConfig;
+@group(0) @binding(1) var<uniform> inverse_projection: mat4x4<f32>;
+@group(0) @binding(2) var<storage, read_write> cluster_aabbs: array<ClusterAabb>;
+
+fn screen_to_view(screen: vec4<f32>) -> vec4<f32> {
+    // Convert screen coordinates to NDC
+    var ndc: vec2<f32>;
+    ndc.x = screen.x / f32(config.screen_size.x) * 2.0 - 1.0;
+    ndc.y = (1.0 - screen.y / f32(config.screen_size.y)) * 2.0 - 1.0;
+
+    // Unproject to view space
+    let clip = vec4<f32>(ndc.x, ndc.y, screen.z, 1.0);
+    var view = inverse_projection * clip;
+    view = view / view.w;
+
+    return view;
+}
+
+fn slice_to_depth(slice: u32) -> f32 {
+    let log_near = log(config.near_plane);
+    let log_far = log(config.far_plane);
+    let log_range = log_far - log_near;
+
+    let t = f32(slice) / f32(config.num_slices);
+    return exp(log_near + t * log_range);
+}
+
+@compute @workgroup_size(8, 8, 4)
+fn build_clusters(@builtin(global_invocation_id) id: vec3<u32>) {
+    let num_tiles_x = (config.screen_size.x + config.tile_size.x - 1u) / config.tile_size.x;
+    let num_tiles_y = (config.screen_size.y + config.tile_size.y - 1u) / config.tile_size.y;
+
+    if (id.x >= num_tiles_x || id.y >= num_tiles_y || id.z >= config.num_slices) {
+        return;
+    }
+
+    let cluster_index = id.x + id.y * num_tiles_x + id.z * num_tiles_x * num_tiles_y;
+
+    // Screen space bounds of this tile
+    let tile_min = vec2<f32>(id.xy * config.tile_size);
+    let tile_max = vec2<f32>((id.xy + vec2<u32>(1u, 1u)) * config.tile_size);
+
+    // Depth bounds of this slice
+    let near_depth = slice_to_depth(id.z);
+    let far_depth = slice_to_depth(id.z + 1u);
+
+    // Convert depth to NDC z
+    let near_ndc = (config.far_plane * config.near_plane) /
+                   (near_depth * (config.far_plane - config.near_plane)) -
+                   config.far_plane / (config.far_plane - config.near_plane);
+    let far_ndc = (config.far_plane * config.near_plane) /
+                  (far_depth * (config.far_plane - config.near_plane)) -
+                  config.far_plane / (config.far_plane - config.near_plane);
+
+    // Calculate 8 corners of the cluster frustum in view space
+    let corners = array<vec4<f32>, 8>(
+        screen_to_view(vec4<f32>(tile_min.x, tile_min.y, near_ndc, 1.0)),
+        screen_to_view(vec4<f32>(tile_max.x, tile_min.y, near_ndc, 1.0)),
+        screen_to_view(vec4<f32>(tile_min.x, tile_max.y, near_ndc, 1.0)),
+        screen_to_view(vec4<f32>(tile_max.x, tile_max.y, near_ndc, 1.0)),
+        screen_to_view(vec4<f32>(tile_min.x, tile_min.y, far_ndc, 1.0)),
+        screen_to_view(vec4<f32>(tile_max.x, tile_min.y, far_ndc, 1.0)),
+        screen_to_view(vec4<f32>(tile_min.x, tile_max.y, far_ndc, 1.0)),
+        screen_to_view(vec4<f32>(tile_max.x, tile_max.y, far_ndc, 1.0))
+    );
+
+    // Compute AABB
+    var aabb_min = corners[0].xyz;
+    var aabb_max = corners[0].xyz;
+
+    for (var i = 1u; i < 8u; i++) {
+        aabb_min = min(aabb_min, corners[i].xyz);
+        aabb_max = max(aabb_max, corners[i].xyz);
+    }
+
+    cluster_aabbs[cluster_index].min = vec4<f32>(aabb_min, 0.0);
+    cluster_aabbs[cluster_index].max = vec4<f32>(aabb_max, 0.0);
+}
+"#;
+
+    pub const LIGHT_CULL_SHADER: &str = r#"
+struct ClusterAabb {
+    min: vec4<f32>,
+    max: vec4<f32>,
+}
+
+struct PointLight {
+    position_radius: vec4<f32>,
+    color_intensity: vec4<f32>,
+    attenuation_shadow: vec4<f32>,
+    mask_flags: vec4<f32>,
+}
+
+struct SpotLight {
+    position_radius: vec4<f32>,
+    direction_inner: vec4<f32>,
+    color_intensity: vec4<f32>,
+    outer_shadow_proj: vec4<f32>,
+    mask_flags: vec4<f32>,
+    reserved: vec4<f32>,
+}
+
+struct LightGridEntry {
+    offset: u32,
+    count_point: u32,
+    count_spot: u32,
+    reserved: u32,
+}
+
+struct LightCullParams {
+    num_clusters: u32,
+    num_point_lights: u32,
+    num_spot_lights: u32,
+    max_lights_per_cluster: u32,
+}
+
+@group(0) @binding(0) var<uniform> params: LightCullParams;
+@group(0) @binding(1) var<storage, read> cluster_aabbs: array<ClusterAabb>;
+@group(0) @binding(2) var<storage, read> point_lights: array<PointLight>;
+@group(0) @binding(3) var<storage, read> spot_lights: array<SpotLight>;
+@group(0) @binding(4) var<storage, read_write> light_grid: array<LightGridEntry>;
+@group(0) @binding(5) var<storage, read_write> light_indices: array<u32>;
+@group(0) @binding(6) var<storage, read_write> global_light_count: atomic<u32>;
+
+fn sphere_aabb_intersection(center: vec3<f32>, radius: f32, aabb_min: vec3<f32>, aabb_max: vec3<f32>) -> bool {
+    let closest = clamp(center, aabb_min, aabb_max);
+    let dist_sq = dot(center - closest, center - closest);
+    return dist_sq <= radius * radius;
+}
+
+fn cone_aabb_intersection(apex: vec3<f32>, dir: vec3<f32>, range: f32, cos_angle: f32,
+                          aabb_min: vec3<f32>, aabb_max: vec3<f32>) -> bool {
+    // Approximate cone with sphere for now
+    let center = apex + dir * range * 0.5;
+    let radius = range * 0.5 + tan(acos(cos_angle)) * range;
+    return sphere_aabb_intersection(center, radius, aabb_min, aabb_max);
+}
+
+var<workgroup> local_point_lights: array<u32, 256>;
+var<workgroup> local_spot_lights: array<u32, 256>;
+var<workgroup> local_point_count: atomic<u32>;
+var<workgroup> local_spot_count: atomic<u32>;
+
+@compute @workgroup_size(64)
+fn cull_lights(@builtin(global_invocation_id) global_id: vec3<u32>,
+               @builtin(local_invocation_id) local_id: vec3<u32>,
+               @builtin(workgroup_id) workgroup_id: vec3<u32>) {
+    let cluster_index = global_id.x;
+
+    if (cluster_index >= params.num_clusters) {
+        return;
+    }
+
+    // Reset local counts
+    if (local_id.x == 0u) {
+        atomicStore(&local_point_count, 0u);
+        atomicStore(&local_spot_count, 0u);
+    }
+    workgroupBarrier();
+
+    let aabb = cluster_aabbs[cluster_index];
+
+    // Each thread tests a subset of lights
+    let lights_per_thread_point = (params.num_point_lights + 63u) / 64u;
+    let lights_per_thread_spot = (params.num_spot_lights + 63u) / 64u;
+
+    // Test point lights
+    for (var i = 0u; i < lights_per_thread_point; i++) {
+        let light_idx = local_id.x * lights_per_thread_point + i;
+        if (light_idx < params.num_point_lights) {
+            let light = point_lights[light_idx];
+            let center = light.position_radius.xyz;
+            let radius = light.position_radius.w;
+
+            if (sphere_aabb_intersection(center, radius, aabb.min.xyz, aabb.max.xyz)) {
+                let slot = atomicAdd(&local_point_count, 1u);
+                if (slot < 256u) {
+                    local_point_lights[slot] = light_idx;
+                }
+            }
+        }
+    }
+
+    // Test spot lights
+    for (var i = 0u; i < lights_per_thread_spot; i++) {
+        let light_idx = local_id.x * lights_per_thread_spot + i;
+        if (light_idx < params.num_spot_lights) {
+            let light = spot_lights[light_idx];
+            let apex = light.position_radius.xyz;
+            let dir = light.direction_inner.xyz;
+            let range = light.position_radius.w;
+            let cos_outer = light.outer_shadow_proj.x;
+
+            if (cone_aabb_intersection(apex, dir, range, cos_outer, aabb.min.xyz, aabb.max.xyz)) {
+                let slot = atomicAdd(&local_spot_count, 1u);
+                if (slot < 256u) {
+                    local_spot_lights[slot] = light_idx;
+                }
+            }
+        }
+    }
+
+    workgroupBarrier();
+
+    // Write results to global buffer
+    if (local_id.x == 0u) {
+        let point_count = atomicLoad(&local_point_count);
+        let spot_count = atomicLoad(&local_spot_count);
+        let total_count = point_count + spot_count;
+
+        // Allocate space in global light index buffer
+        let offset = atomicAdd(&global_light_count, total_count);
+
+        // Write grid entry
+        light_grid[cluster_index].offset = offset;
+        light_grid[cluster_index].count_point = point_count;
+        light_grid[cluster_index].count_spot = spot_count;
+
+        // Write light indices
+        for (var i = 0u; i < point_count; i++) {
+            light_indices[offset + i] = local_point_lights[i];
+        }
+        for (var i = 0u; i < spot_count; i++) {
+            light_indices[offset + point_count + i] = local_spot_lights[i];
+        }
+    }
+}
+"#;
+
+    pub const TILED_LIGHT_CULL_SHADER: &str = r#"
+struct TileData {
+    min_depth: f32,
+    max_depth: f32,
+    light_count: u32,
+    light_offset: u32,
+}
+
+struct PointLight {
+    position_radius: vec4<f32>,
+    color_intensity: vec4<f32>,
+    attenuation_shadow: vec4<f32>,
+    mask_flags: vec4<f32>,
+}
+
+struct TileCullParams {
+    tile_size: u32,
+    num_tiles_x: u32,
+    num_tiles_y: u32,
+    num_point_lights: u32,
+    screen_width: u32,
+    screen_height: u32,
+    max_lights_per_tile: u32,
+    padding: u32,
+}
+
+@group(0) @binding(0) var<uniform> params: TileCullParams;
+@group(0) @binding(1) var<uniform> view_proj: mat4x4<f32>;
+@group(0) @binding(2) var depth_texture: texture_2d<f32>;
+@group(0) @binding(3) var<storage, read> point_lights: array<PointLight>;
+@group(0) @binding(4) var<storage, read_write> tile_data: array<TileData>;
+@group(0) @binding(5) var<storage, read_write> light_indices: array<u32>;
+@group(0) @binding(6) var<storage, read_write> global_light_offset: atomic<u32>;
+
+var<workgroup> min_depth: atomic<u32>;
+var<workgroup> max_depth: atomic<u32>;
+var<workgroup> visible_lights: array<u32, 256>;
+var<workgroup> visible_light_count: atomic<u32>;
+
+fn linearize_depth(d: f32, near: f32, far: f32) -> f32 {
+    return near * far / (far + d * (near - far));
+}
+
+fn float_to_uint(f: f32) -> u32 {
+    return bitcast<u32>(f);
+}
+
+fn uint_to_float(u: u32) -> f32 {
+    return bitcast<f32>(u);
+}
+
+fn sphere_frustum_intersection(center: vec3<f32>, radius: f32,
+                               tile_min: vec2<f32>, tile_max: vec2<f32>,
+                               z_near: f32, z_far: f32) -> bool {
+    // Project sphere center to screen space
+    let clip = view_proj * vec4<f32>(center, 1.0);
+    let ndc = clip.xyz / clip.w;
+    let screen = (ndc.xy * 0.5 + 0.5) * vec2<f32>(f32(params.screen_width), f32(params.screen_height));
+
+    // Check XY bounds
+    let closest_x = clamp(screen.x, tile_min.x, tile_max.x);
+    let closest_y = clamp(screen.y, tile_min.y, tile_max.y);
+
+    let screen_radius = radius / -center.z * f32(params.screen_height) * 0.5;
+    let dist_sq = (screen.x - closest_x) * (screen.x - closest_x) +
+                  (screen.y - closest_y) * (screen.y - closest_y);
+
+    if (dist_sq > screen_radius * screen_radius) {
+        return false;
+    }
+
+    // Check Z bounds
+    let light_z_near = -center.z - radius;
+    let light_z_far = -center.z + radius;
+
+    return light_z_far >= z_near && light_z_near <= z_far;
+}
+
+@compute @workgroup_size(16, 16)
+fn cull_lights_to_tiles(@builtin(global_invocation_id) global_id: vec3<u32>,
+                        @builtin(local_invocation_id) local_id: vec3<u32>,
+                        @builtin(workgroup_id) workgroup_id: vec3<u32>) {
+    let tile_idx = workgroup_id.x + workgroup_id.y * params.num_tiles_x;
+    let thread_idx = local_id.x + local_id.y * 16u;
+
+    // Initialize shared memory
+    if (thread_idx == 0u) {
+        atomicStore(&min_depth, 0xFFFFFFFFu);
+        atomicStore(&max_depth, 0u);
+        atomicStore(&visible_light_count, 0u);
+    }
+    workgroupBarrier();
+
+    // Compute pixel coordinates
+    let pixel = vec2<i32>(
+        i32(workgroup_id.x * params.tile_size + local_id.x),
+        i32(workgroup_id.y * params.tile_size + local_id.y)
+    );
+
+    // Sample depth and compute min/max
+    if (pixel.x < i32(params.screen_width) && pixel.y < i32(params.screen_height)) {
+        let depth = textureLoad(depth_texture, pixel, 0).r;
+        let linear_depth = linearize_depth(depth, 0.1, 1000.0);
+        let depth_uint = float_to_uint(linear_depth);
+
+        atomicMin(&min_depth, depth_uint);
+        atomicMax(&max_depth, depth_uint);
+    }
+
+    workgroupBarrier();
+
+    // Load depth bounds
+    let z_near = uint_to_float(atomicLoad(&min_depth));
+    let z_far = uint_to_float(atomicLoad(&max_depth));
+
+    // Tile screen bounds
+    let tile_min = vec2<f32>(f32(workgroup_id.x * params.tile_size),
+                             f32(workgroup_id.y * params.tile_size));
+    let tile_max = vec2<f32>(tile_min.x + f32(params.tile_size),
+                             tile_min.y + f32(params.tile_size));
+
+    // Each thread tests a subset of lights
+    let lights_per_thread = (params.num_point_lights + 255u) / 256u;
+
+    for (var i = 0u; i < lights_per_thread; i++) {
+        let light_idx = thread_idx * lights_per_thread + i;
+        if (light_idx < params.num_point_lights) {
+            let light = point_lights[light_idx];
+            let center = light.position_radius.xyz;
+            let radius = light.position_radius.w;
+
+            if (sphere_frustum_intersection(center, radius, tile_min, tile_max, z_near, z_far)) {
+                let slot = atomicAdd(&visible_light_count, 1u);
+                if (slot < 256u) {
+                    visible_lights[slot] = light_idx;
+                }
+            }
+        }
+    }
+
+    workgroupBarrier();
+
+    // Write results
+    if (thread_idx == 0u) {
+        let count = atomicLoad(&visible_light_count);
+        let offset = atomicAdd(&global_light_offset, count);
+
+        tile_data[tile_idx].min_depth = z_near;
+        tile_data[tile_idx].max_depth = z_far;
+        tile_data[tile_idx].light_count = count;
+        tile_data[tile_idx].light_offset = offset;
+
+        for (var i = 0u; i < count; i++) {
+            light_indices[offset + i] = visible_lights[i];
+        }
+    }
+}
+"#;
+
+    pub const DEFERRED_LIGHTING_SHADER: &str = r#"
+struct TileData {
+    min_depth: f32,
+    max_depth: f32,
+    light_count: u32,
+    light_offset: u32,
+}
+
+struct PointLight {
+    position_radius: vec4<f32>,
+    color_intensity: vec4<f32>,
+    attenuation_shadow: vec4<f32>,
+    mask_flags: vec4<f32>,
+}
+
+struct LightingParams {
+    tile_size: u32,
+    num_tiles_x: u32,
+    screen_width: u32,
+    screen_height: u32,
+    view_pos: vec3<f32>,
+    padding: f32,
+}
+
+@group(0) @binding(0) var<uniform> params: LightingParams;
+@group(0) @binding(1) var<uniform> inverse_view_proj: mat4x4<f32>;
+@group(0) @binding(2) var gbuffer_albedo: texture_2d<f32>;
+@group(0) @binding(3) var gbuffer_normal: texture_2d<f32>;
+@group(0) @binding(4) var gbuffer_depth: texture_2d<f32>;
+@group(0) @binding(5) var<storage, read> tile_data: array<TileData>;
+@group(0) @binding(6) var<storage, read> light_indices: array<u32>;
+@group(0) @binding(7) var<storage, read> point_lights: array<PointLight>;
+@group(0) @binding(8) var output_texture: texture_storage_2d<rgba16float, write>;
+
+fn reconstruct_position(uv: vec2<f32>, depth: f32) -> vec3<f32> {
+    let ndc = vec4<f32>(uv * 2.0 - 1.0, depth, 1.0);
+    var world = inverse_view_proj * ndc;
+    world = world / world.w;
+    return world.xyz;
+}
+
+fn decode_octahedral_normal(encoded: vec2<f32>) -> vec3<f32> {
+    var n = vec3<f32>(encoded.x, encoded.y, 1.0 - abs(encoded.x) - abs(encoded.y));
+    if (n.z < 0.0) {
+        n = vec3<f32>(
+            (1.0 - abs(n.y)) * select(-1.0, 1.0, n.x >= 0.0),
+            (1.0 - abs(n.x)) * select(-1.0, 1.0, n.y >= 0.0),
+            n.z
+        );
+    }
+    return normalize(n);
+}
+
+fn ggx_distribution(n_dot_h: f32, roughness: f32) -> f32 {
+    let a = roughness * roughness;
+    let a2 = a * a;
+    let denom = n_dot_h * n_dot_h * (a2 - 1.0) + 1.0;
+    return a2 / (3.14159 * denom * denom);
+}
+
+fn schlick_fresnel(cos_theta: f32, f0: vec3<f32>) -> vec3<f32> {
+    return f0 + (1.0 - f0) * pow(1.0 - cos_theta, 5.0);
+}
+
+fn smith_ggx_geometry(n_dot_v: f32, n_dot_l: f32, roughness: f32) -> f32 {
+    let k = (roughness + 1.0) * (roughness + 1.0) / 8.0;
+    let g1_v = n_dot_v / (n_dot_v * (1.0 - k) + k);
+    let g1_l = n_dot_l / (n_dot_l * (1.0 - k) + k);
+    return g1_v * g1_l;
+}
+
+fn calculate_attenuation(distance: f32, radius: f32,
+                         constant: f32, linear: f32, quadratic: f32) -> f32 {
+    if (distance >= radius) {
+        return 0.0;
+    }
+
+    let att = 1.0 / (constant + linear * distance + quadratic * distance * distance);
+    let edge = 1.0 - pow(distance / radius, 4.0);
+    return att * max(edge, 0.0);
+}
+
+@compute @workgroup_size(8, 8)
+fn deferred_lighting(@builtin(global_invocation_id) global_id: vec3<u32>) {
+    let pixel = vec2<i32>(global_id.xy);
+
+    if (pixel.x >= i32(params.screen_width) || pixel.y >= i32(params.screen_height)) {
+        return;
+    }
+
+    // Sample G-Buffer
+    let albedo_metallic = textureLoad(gbuffer_albedo, pixel, 0);
+    let normal_roughness = textureLoad(gbuffer_normal, pixel, 0);
+    let depth = textureLoad(gbuffer_depth, pixel, 0).r;
+
+    // Early out for sky
+    if (depth >= 1.0) {
+        textureStore(output_texture, pixel, vec4<f32>(0.0, 0.0, 0.0, 1.0));
+        return;
+    }
+
+    // Decode G-Buffer
+    let albedo = albedo_metallic.rgb;
+    let metallic = albedo_metallic.a;
+    let normal = decode_octahedral_normal(normal_roughness.rg);
+    let roughness = normal_roughness.a;
+
+    // Reconstruct position
+    let uv = (vec2<f32>(pixel) + 0.5) / vec2<f32>(f32(params.screen_width), f32(params.screen_height));
+    let world_pos = reconstruct_position(uv, depth);
+
+    // View direction
+    let v = normalize(params.view_pos - world_pos);
+    let n_dot_v = max(dot(normal, v), 0.001);
+
+    // Calculate F0
+    var f0 = vec3<f32>(0.04);
+    f0 = mix(f0, albedo, metallic);
+
+    // Get tile light list
+    let tile_x = u32(pixel.x) / params.tile_size;
+    let tile_y = u32(pixel.y) / params.tile_size;
+    let tile_idx = tile_x + tile_y * params.num_tiles_x;
+
+    let tile = tile_data[tile_idx];
+
+    // Accumulate lighting
+    var total_radiance = vec3<f32>(0.0);
+
+    for (var i = 0u; i < tile.light_count; i++) {
+        let light_idx = light_indices[tile.light_offset + i];
+        let light = point_lights[light_idx];
+
+        let light_pos = light.position_radius.xyz;
+        let radius = light.position_radius.w;
+        let light_color = light.color_intensity.rgb;
+        let intensity = light.color_intensity.w;
+
+        // Light vector
+        let l = light_pos - world_pos;
+        let distance = length(l);
+        let l_norm = l / distance;
+
+        // Half vector
+        let h = normalize(v + l_norm);
+
+        // Dots
+        let n_dot_l = max(dot(normal, l_norm), 0.0);
+        let n_dot_h = max(dot(normal, h), 0.0);
+        let v_dot_h = max(dot(v, h), 0.0);
+
+        if (n_dot_l <= 0.0) {
+            continue;
+        }
+
+        // Attenuation
+        let att_params = light.attenuation_shadow.xyz;
+        let attenuation = calculate_attenuation(distance, radius,
+                                                att_params.x, att_params.y, att_params.z);
+
+        if (attenuation <= 0.0) {
+            continue;
+        }
+
+        // Specular BRDF (Cook-Torrance)
+        let d = ggx_distribution(n_dot_h, roughness);
+        let f = schlick_fresnel(v_dot_h, f0);
+        let g = smith_ggx_geometry(n_dot_v, n_dot_l, roughness);
+
+        let specular = (d * f * g) / (4.0 * n_dot_v * n_dot_l + 0.001);
+
+        // Diffuse BRDF (Lambertian)
+        let k_d = (1.0 - f) * (1.0 - metallic);
+        let diffuse = k_d * albedo / 3.14159;
+
+        // Combine
+        let radiance = light_color * intensity * attenuation;
+        total_radiance += (diffuse + specular) * radiance * n_dot_l;
+    }
+
+    // Ambient (placeholder)
+    let ambient = vec3<f32>(0.03) * albedo;
+    total_radiance += ambient;
+
+    textureStore(output_texture, pixel, vec4<f32>(total_radiance, 1.0));
+}
+"#;
+
+    pub const CLUSTERED_FORWARD_SHADER: &str = r#"
+// Fragment shader for clustered forward rendering
+
+struct ClusterConfig {
+    tile_size: vec2<u32>,
+    num_slices: u32,
+    near_plane: f32,
+    far_plane: f32,
+    num_tiles_x: u32,
+    num_tiles_y: u32,
+    log_depth_scale: f32,
+}
+
+struct LightGridEntry {
+    offset: u32,
+    count_point: u32,
+    count_spot: u32,
+    reserved: u32,
+}
+
+struct PointLight {
+    position_radius: vec4<f32>,
+    color_intensity: vec4<f32>,
+    attenuation_shadow: vec4<f32>,
+    mask_flags: vec4<f32>,
+}
+
+@group(1) @binding(0) var<uniform> config: ClusterConfig;
+@group(1) @binding(1) var<storage, read> light_grid: array<LightGridEntry>;
+@group(1) @binding(2) var<storage, read> light_indices: array<u32>;
+@group(1) @binding(3) var<storage, read> point_lights: array<PointLight>;
+
+fn get_cluster_index(frag_coord: vec2<f32>, view_depth: f32) -> u32 {
+    // Tile indices
+    let tile_x = u32(frag_coord.x) / config.tile_size.x;
+    let tile_y = u32(frag_coord.y) / config.tile_size.y;
+
+    // Depth slice (logarithmic distribution)
+    let log_near = log(config.near_plane);
+    let log_far = log(config.far_plane);
+    let log_depth = log(view_depth);
+
+    let slice = u32((log_depth - log_near) / (log_far - log_near) * f32(config.num_slices));
+    let clamped_slice = clamp(slice, 0u, config.num_slices - 1u);
+
+    return tile_x + tile_y * config.num_tiles_x +
+           clamped_slice * config.num_tiles_x * config.num_tiles_y;
+}
+
+fn evaluate_clustered_lights(frag_coord: vec2<f32>, view_depth: f32,
+                             world_pos: vec3<f32>, normal: vec3<f32>,
+                             albedo: vec3<f32>, roughness: f32, metallic: f32,
+                             view_dir: vec3<f32>) -> vec3<f32> {
+    let cluster_idx = get_cluster_index(frag_coord, view_depth);
+    let grid_entry = light_grid[cluster_idx];
+
+    var f0 = vec3<f32>(0.04);
+    f0 = mix(f0, albedo, metallic);
+
+    let n_dot_v = max(dot(normal, view_dir), 0.001);
+
+    var total_radiance = vec3<f32>(0.0);
+
+    // Process point lights
+    for (var i = 0u; i < grid_entry.count_point; i++) {
+        let light_idx = light_indices[grid_entry.offset + i];
+        let light = point_lights[light_idx];
+
+        let light_pos = light.position_radius.xyz;
+        let radius = light.position_radius.w;
+        let light_color = light.color_intensity.rgb;
+        let intensity = light.color_intensity.w;
+
+        let l = light_pos - world_pos;
+        let distance = length(l);
+
+        if (distance >= radius) {
+            continue;
+        }
+
+        let l_norm = l / distance;
+        let n_dot_l = max(dot(normal, l_norm), 0.0);
+
+        if (n_dot_l <= 0.0) {
+            continue;
+        }
+
+        // Attenuation
+        let att_params = light.attenuation_shadow.xyz;
+        let base_att = 1.0 / (att_params.x + att_params.y * distance + att_params.z * distance * distance);
+        let edge = 1.0 - pow(distance / radius, 4.0);
+        let attenuation = base_att * max(edge, 0.0);
+
+        // Simple lighting for forward pass (can be expanded)
+        let h = normalize(view_dir + l_norm);
+        let n_dot_h = max(dot(normal, h), 0.0);
+
+        let diffuse = albedo * (1.0 - metallic) / 3.14159;
+        let spec_power = max((1.0 - roughness) * 128.0, 1.0);
+        let specular = pow(n_dot_h, spec_power) * f0;
+
+        let radiance = light_color * intensity * attenuation * n_dot_l;
+        total_radiance += (diffuse + specular) * radiance;
+    }
+
+    return total_radiance;
+}
+"#;
+
+    // =========================================================================
+    // Unit Tests
+    // =========================================================================
+
+    #[test]
+    fn test_point_light_attenuation() {
+        let light = PointLight::new(
+            Vec3::new(0.0, 5.0, 0.0),
+            10.0,
+            Vec3::new(1.0, 1.0, 1.0),
+            100.0
+        );
+
+        // At distance 0, max attenuation
+        let att0 = light.attenuation(0.0);
+        assert!(att0 > 0.9);
+
+        // At radius, zero attenuation
+        let att_radius = light.attenuation(10.0);
+        assert!(att_radius < 0.001);
+
+        // Beyond radius, zero attenuation
+        let att_beyond = light.attenuation(15.0);
+        assert_eq!(att_beyond, 0.0);
+    }
+
+    #[test]
+    fn test_spot_light_cone_attenuation() {
+        let light = SpotLight::new(
+            Vec3::zero(),
+            Vec3::new(0.0, -1.0, 0.0),
+            20.0,
+            0.3,   // ~17 degrees inner
+            0.5,   // ~29 degrees outer
+            Vec3::new(1.0, 1.0, 1.0),
+            100.0
+        );
+
+        // Dead center (looking straight down)
+        let center_att = light.cone_attenuation(Vec3::new(0.0, 1.0, 0.0));
+        assert_eq!(center_att, 1.0);
+
+        // At edge
+        let edge_att = light.cone_attenuation(Vec3::new(0.5, 0.866, 0.0).normalize());
+        assert!(edge_att < 1.0 && edge_att > 0.0);
+    }
+
+    #[test]
+    fn test_cluster_config_depth_slicing() {
+        let config = ClusterConfig::new(1920, 1080);
+
+        // Near plane should map to slice 0
+        let slice_near = config.depth_to_slice(0.1);
+        assert_eq!(slice_near, 0);
+
+        // Far plane should map to last slice
+        let slice_far = config.depth_to_slice(1000.0);
+        assert_eq!(slice_far, config.num_slices_z - 1);
+
+        // Mid-log depth
+        let mid_depth = (0.1_f32 * 1000.0).sqrt(); // Geometric mean
+        let slice_mid = config.depth_to_slice(mid_depth);
+        assert!(slice_mid > 0 && slice_mid < config.num_slices_z - 1);
+    }
+
+    #[test]
+    fn test_cluster_config_dimensions() {
+        let config = ClusterConfig::new(1920, 1080);
+
+        let tiles_x = config.num_tiles_x();
+        let tiles_y = config.num_tiles_y();
+
+        assert_eq!(tiles_x, 30);  // 1920 / 64
+        assert_eq!(tiles_y, 17);  // ceil(1080 / 64)
+
+        let num_clusters = config.num_clusters();
+        assert_eq!(num_clusters, 30 * 17 * 24);
+    }
+
+    #[test]
+    fn test_tile_config() {
+        let config = TileConfig::new(1920, 1080);
+
+        let tiles_x = config.num_tiles_x();
+        let tiles_y = config.num_tiles_y();
+
+        assert_eq!(tiles_x, 120);  // 1920 / 16
+        assert_eq!(tiles_y, 68);   // ceil(1080 / 16)
+    }
+
+    #[test]
+    fn test_rect_area_light_corners() {
+        let light = RectAreaLight::new(
+            Vec3::new(0.0, 5.0, 0.0),
+            Vec3::new(0.0, -1.0, 0.0),
+            Vec3::new(1.0, 0.0, 0.0),
+            2.0,
+            1.0,
+            Vec3::new(1.0, 1.0, 1.0),
+            100.0
+        );
+
+        let corners = light.corners();
+
+        // Check corners form a 2x1 rectangle
+        let diagonal1 = (corners[0] - corners[2]).length();
+        let diagonal2 = (corners[1] - corners[3]).length();
+
+        let expected_diagonal = (2.0_f32.powi(2) + 1.0_f32.powi(2)).sqrt();
+        assert!((diagonal1 - expected_diagonal).abs() < 0.001);
+        assert!((diagonal2 - expected_diagonal).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_tube_light() {
+        let light = TubeLight::new(
+            Vec3::new(0.0, 0.0, 0.0),
+            Vec3::new(10.0, 0.0, 0.0),
+            0.5,
+            Vec3::new(1.0, 1.0, 1.0),
+            100.0
+        );
+
+        assert_eq!(light.length(), 10.0);
+        assert_eq!(light.center(), Vec3::new(5.0, 0.0, 0.0));
+
+        let bounds = light.bounding_sphere();
+        assert_eq!(bounds.center, Vec3::new(5.0, 0.0, 0.0));
+        assert!((bounds.radius - 5.5).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_light_bvh_build() {
+        let bounds = vec![
+            Sphere::new(Vec3::new(0.0, 0.0, 0.0), 1.0),
+            Sphere::new(Vec3::new(5.0, 0.0, 0.0), 1.0),
+            Sphere::new(Vec3::new(10.0, 0.0, 0.0), 1.0),
+            Sphere::new(Vec3::new(15.0, 0.0, 0.0), 1.0),
+        ];
+
+        let mut bvh = LightBvh {
+            nodes: Vec::new(),
+            light_indices: Vec::new(),
+            gpu_nodes: unsafe { mem::zeroed() },
+            gpu_light_indices: unsafe { mem::zeroed() },
+            needs_rebuild: true,
+        };
+
+        bvh.build(&bounds);
+
+        // Should have 7 nodes (4 leaves + 3 internal)
+        assert_eq!(bvh.nodes.len(), 7);
+        assert_eq!(bvh.light_indices.len(), 4);
+    }
+
+    #[test]
+    fn test_shadow_atlas_allocation() {
+        let mut atlas = ShadowMapAtlas {
+            atlas_texture: unsafe { mem::zeroed() },
+            atlas_size: 4096,
+            tile_size: 1024,
+            allocations: Vec::new(),
+            free_tiles: (0..16).collect(),
+        };
+
+        // Allocate first tile
+        let viewport1 = atlas.allocate(0, Mat4::identity());
+        assert!(viewport1.is_some());
+
+        let v1 = viewport1.unwrap();
+        assert_eq!(v1[2], 0.25);  // 1/4 of atlas
+        assert_eq!(v1[3], 0.25);
+
+        // Allocate more
+        for i in 1..16 {
+            let v = atlas.allocate(i, Mat4::identity());
+            assert!(v.is_some());
+        }
+
+        // Atlas full
+        let v_full = atlas.allocate(16, Mat4::identity());
+        assert!(v_full.is_none());
+
+        // Free and reallocate
+        atlas.free(5);
+        let v_reuse = atlas.allocate(16, Mat4::identity());
+        assert!(v_reuse.is_some());
+    }
+
+    #[test]
+    fn test_clustered_light_probe_sh_evaluation() {
+        // L2 SH coefficients for a solid white environment
+        let sh: [Vec3; 9] = [
+            Vec3::new(1.0, 1.0, 1.0),  // L0
+            Vec3::zero(), Vec3::zero(), Vec3::zero(),  // L1
+            Vec3::zero(), Vec3::zero(), Vec3::zero(), Vec3::zero(), Vec3::zero(),  // L2
+        ];
+
+        // Should get constant irradiance in any direction
+        let irr_up = ClusteredLightProbes::evaluate_sh_irradiance(&sh, Vec3::new(0.0, 1.0, 0.0));
+        let irr_down = ClusteredLightProbes::evaluate_sh_irradiance(&sh, Vec3::new(0.0, -1.0, 0.0));
+
+        // L0 only contributes constant term
+        assert!((irr_up.x - 0.282095).abs() < 0.001);
+        assert!((irr_down.x - 0.282095).abs() < 0.001);
+    }
+}

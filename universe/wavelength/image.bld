@@ -1,0 +1,2300 @@
+// ============================================================================
+// WAVELENGTH IMAGE PROCESSING MODULE
+// Comprehensive image manipulation, filters, and transformations
+// ============================================================================
+
+import std::memory::{Buffer, Arena, Pool};
+import std::math::{Vector2, Vector3, Vector4, Matrix3x3, Matrix4x4, clamp, lerp};
+import std::collections::{Array, HashMap};
+import std::simd::{simd_f32x8, simd_i32x8};
+
+// ============================================================================
+// IMAGE REPRESENTATION
+// ============================================================================
+
+/// Image pixel type
+enum ImageType {
+    RGB8,       // 8-bit per channel RGB
+    RGBA8,      // 8-bit per channel RGBA
+    RGB16,      // 16-bit per channel RGB
+    RGBA16,     // 16-bit per channel RGBA
+    RGB32F,     // 32-bit float per channel RGB
+    RGBA32F,    // 32-bit float per channel RGBA
+    Gray8,      // 8-bit grayscale
+    Gray16,     // 16-bit grayscale
+    Gray32F,    // 32-bit float grayscale
+    CMYK8,      // 8-bit CMYK
+}
+
+/// Image structure
+struct Image {
+    width: u32,
+    height: u32,
+    image_type: ImageType,
+    data: Buffer<u8>,
+    stride: u32,
+    icc_profile: ?Buffer<u8>,
+    metadata: ImageMetadata,
+
+    fn new(width: u32, height: u32, image_type: ImageType) -> Self {
+        let (bytes_per_pixel, stride) = Self::calculate_stride(width, image_type);
+        let data = Buffer::zeroed(stride as usize * height as usize);
+
+        Self {
+            width,
+            height,
+            image_type,
+            data,
+            stride,
+            icc_profile: None,
+            metadata: ImageMetadata::new(),
+        }
+    }
+
+    fn calculate_stride(width: u32, image_type: ImageType) -> (u32, u32) {
+        let bytes_per_pixel = match image_type {
+            ImageType::RGB8 => 3,
+            ImageType::RGBA8 => 4,
+            ImageType::RGB16 => 6,
+            ImageType::RGBA16 => 8,
+            ImageType::RGB32F => 12,
+            ImageType::RGBA32F => 16,
+            ImageType::Gray8 => 1,
+            ImageType::Gray16 => 2,
+            ImageType::Gray32F => 4,
+            ImageType::CMYK8 => 4,
+        };
+        let stride = (width * bytes_per_pixel + 3) & !3;  // 4-byte aligned
+        (bytes_per_pixel, stride)
+    }
+
+    fn bytes_per_pixel(self) -> u32 {
+        Self::calculate_stride(1, self.image_type).0
+    }
+
+    fn channels(self) -> u32 {
+        match self.image_type {
+            ImageType::RGB8 | ImageType::RGB16 | ImageType::RGB32F => 3,
+            ImageType::RGBA8 | ImageType::RGBA16 | ImageType::RGBA32F | ImageType::CMYK8 => 4,
+            ImageType::Gray8 | ImageType::Gray16 | ImageType::Gray32F => 1,
+        }
+    }
+
+    fn get_pixel(self, x: u32, y: u32) -> Pixel {
+        if x >= self.width || y >= self.height {
+            return Pixel::black();
+        }
+
+        let idx = (y * self.stride + x * self.bytes_per_pixel()) as usize;
+        let data = self.data.as_slice();
+
+        match self.image_type {
+            ImageType::RGB8 => Pixel::from_rgb8(data[idx], data[idx + 1], data[idx + 2]),
+            ImageType::RGBA8 => Pixel::from_rgba8(data[idx], data[idx + 1], data[idx + 2], data[idx + 3]),
+            ImageType::Gray8 => Pixel::from_gray8(data[idx]),
+            ImageType::RGB16 => {
+                let r = u16::from_le_bytes([data[idx], data[idx + 1]]);
+                let g = u16::from_le_bytes([data[idx + 2], data[idx + 3]]);
+                let b = u16::from_le_bytes([data[idx + 4], data[idx + 5]]);
+                Pixel::from_rgb16(r, g, b)
+            }
+            ImageType::RGBA16 => {
+                let r = u16::from_le_bytes([data[idx], data[idx + 1]]);
+                let g = u16::from_le_bytes([data[idx + 2], data[idx + 3]]);
+                let b = u16::from_le_bytes([data[idx + 4], data[idx + 5]]);
+                let a = u16::from_le_bytes([data[idx + 6], data[idx + 7]]);
+                Pixel::from_rgba16(r, g, b, a)
+            }
+            ImageType::RGB32F => {
+                let r = f32::from_le_bytes([data[idx], data[idx + 1], data[idx + 2], data[idx + 3]]);
+                let g = f32::from_le_bytes([data[idx + 4], data[idx + 5], data[idx + 6], data[idx + 7]]);
+                let b = f32::from_le_bytes([data[idx + 8], data[idx + 9], data[idx + 10], data[idx + 11]]);
+                Pixel { r, g, b, a: 1.0 }
+            }
+            ImageType::RGBA32F => {
+                let r = f32::from_le_bytes([data[idx], data[idx + 1], data[idx + 2], data[idx + 3]]);
+                let g = f32::from_le_bytes([data[idx + 4], data[idx + 5], data[idx + 6], data[idx + 7]]);
+                let b = f32::from_le_bytes([data[idx + 8], data[idx + 9], data[idx + 10], data[idx + 11]]);
+                let a = f32::from_le_bytes([data[idx + 12], data[idx + 13], data[idx + 14], data[idx + 15]]);
+                Pixel { r, g, b, a }
+            }
+            _ => Pixel::black(),
+        }
+    }
+
+    fn set_pixel(mut self, x: u32, y: u32, pixel: Pixel) {
+        if x >= self.width || y >= self.height {
+            return;
+        }
+
+        let idx = (y * self.stride + x * self.bytes_per_pixel()) as usize;
+        let data = self.data.as_mut_slice();
+
+        match self.image_type {
+            ImageType::RGB8 => {
+                data[idx] = (pixel.r * 255.0).clamp(0.0, 255.0) as u8;
+                data[idx + 1] = (pixel.g * 255.0).clamp(0.0, 255.0) as u8;
+                data[idx + 2] = (pixel.b * 255.0).clamp(0.0, 255.0) as u8;
+            }
+            ImageType::RGBA8 => {
+                data[idx] = (pixel.r * 255.0).clamp(0.0, 255.0) as u8;
+                data[idx + 1] = (pixel.g * 255.0).clamp(0.0, 255.0) as u8;
+                data[idx + 2] = (pixel.b * 255.0).clamp(0.0, 255.0) as u8;
+                data[idx + 3] = (pixel.a * 255.0).clamp(0.0, 255.0) as u8;
+            }
+            ImageType::Gray8 => {
+                let gray = 0.299 * pixel.r + 0.587 * pixel.g + 0.114 * pixel.b;
+                data[idx] = (gray * 255.0).clamp(0.0, 255.0) as u8;
+            }
+            ImageType::RGB16 => {
+                let r = (pixel.r * 65535.0).clamp(0.0, 65535.0) as u16;
+                let g = (pixel.g * 65535.0).clamp(0.0, 65535.0) as u16;
+                let b = (pixel.b * 65535.0).clamp(0.0, 65535.0) as u16;
+                data[idx..idx + 2].copy_from_slice(&r.to_le_bytes());
+                data[idx + 2..idx + 4].copy_from_slice(&g.to_le_bytes());
+                data[idx + 4..idx + 6].copy_from_slice(&b.to_le_bytes());
+            }
+            ImageType::RGBA16 => {
+                let r = (pixel.r * 65535.0).clamp(0.0, 65535.0) as u16;
+                let g = (pixel.g * 65535.0).clamp(0.0, 65535.0) as u16;
+                let b = (pixel.b * 65535.0).clamp(0.0, 65535.0) as u16;
+                let a = (pixel.a * 65535.0).clamp(0.0, 65535.0) as u16;
+                data[idx..idx + 2].copy_from_slice(&r.to_le_bytes());
+                data[idx + 2..idx + 4].copy_from_slice(&g.to_le_bytes());
+                data[idx + 4..idx + 6].copy_from_slice(&b.to_le_bytes());
+                data[idx + 6..idx + 8].copy_from_slice(&a.to_le_bytes());
+            }
+            ImageType::RGB32F => {
+                data[idx..idx + 4].copy_from_slice(&pixel.r.to_le_bytes());
+                data[idx + 4..idx + 8].copy_from_slice(&pixel.g.to_le_bytes());
+                data[idx + 8..idx + 12].copy_from_slice(&pixel.b.to_le_bytes());
+            }
+            ImageType::RGBA32F => {
+                data[idx..idx + 4].copy_from_slice(&pixel.r.to_le_bytes());
+                data[idx + 4..idx + 8].copy_from_slice(&pixel.g.to_le_bytes());
+                data[idx + 8..idx + 12].copy_from_slice(&pixel.b.to_le_bytes());
+                data[idx + 12..idx + 16].copy_from_slice(&pixel.a.to_le_bytes());
+            }
+            _ => {}
+        }
+    }
+
+    fn fill(mut self, pixel: Pixel) {
+        for y in 0..self.height {
+            for x in 0..self.width {
+                self.set_pixel(x, y, pixel);
+            }
+        }
+    }
+
+    fn clone(self) -> Image {
+        Image {
+            width: self.width,
+            height: self.height,
+            image_type: self.image_type,
+            data: self.data.clone(),
+            stride: self.stride,
+            icc_profile: self.icc_profile.clone(),
+            metadata: self.metadata.clone(),
+        }
+    }
+
+    fn crop(self, x: u32, y: u32, width: u32, height: u32) -> Image {
+        let x = x.min(self.width);
+        let y = y.min(self.height);
+        let width = width.min(self.width - x);
+        let height = height.min(self.height - y);
+
+        let mut result = Image::new(width, height, self.image_type);
+
+        for dy in 0..height {
+            for dx in 0..width {
+                result.set_pixel(dx, dy, self.get_pixel(x + dx, y + dy));
+            }
+        }
+
+        result
+    }
+
+    fn flip_horizontal(mut self) {
+        for y in 0..self.height {
+            for x in 0..(self.width / 2) {
+                let p1 = self.get_pixel(x, y);
+                let p2 = self.get_pixel(self.width - 1 - x, y);
+                self.set_pixel(x, y, p2);
+                self.set_pixel(self.width - 1 - x, y, p1);
+            }
+        }
+    }
+
+    fn flip_vertical(mut self) {
+        for y in 0..(self.height / 2) {
+            for x in 0..self.width {
+                let p1 = self.get_pixel(x, y);
+                let p2 = self.get_pixel(x, self.height - 1 - y);
+                self.set_pixel(x, y, p2);
+                self.set_pixel(x, self.height - 1 - y, p1);
+            }
+        }
+    }
+
+    fn rotate_90_cw(self) -> Image {
+        let mut result = Image::new(self.height, self.width, self.image_type);
+
+        for y in 0..self.height {
+            for x in 0..self.width {
+                result.set_pixel(self.height - 1 - y, x, self.get_pixel(x, y));
+            }
+        }
+
+        result
+    }
+
+    fn rotate_90_ccw(self) -> Image {
+        let mut result = Image::new(self.height, self.width, self.image_type);
+
+        for y in 0..self.height {
+            for x in 0..self.width {
+                result.set_pixel(y, self.width - 1 - x, self.get_pixel(x, y));
+            }
+        }
+
+        result
+    }
+
+    fn rotate_180(mut self) {
+        self.flip_horizontal();
+        self.flip_vertical();
+    }
+}
+
+/// Floating-point pixel representation
+struct Pixel {
+    r: f32,
+    g: f32,
+    b: f32,
+    a: f32,
+
+    fn new(r: f32, g: f32, b: f32, a: f32) -> Self {
+        Self { r, g, b, a }
+    }
+
+    fn black() -> Self {
+        Self { r: 0.0, g: 0.0, b: 0.0, a: 1.0 }
+    }
+
+    fn white() -> Self {
+        Self { r: 1.0, g: 1.0, b: 1.0, a: 1.0 }
+    }
+
+    fn transparent() -> Self {
+        Self { r: 0.0, g: 0.0, b: 0.0, a: 0.0 }
+    }
+
+    fn from_rgb8(r: u8, g: u8, b: u8) -> Self {
+        Self {
+            r: r as f32 / 255.0,
+            g: g as f32 / 255.0,
+            b: b as f32 / 255.0,
+            a: 1.0,
+        }
+    }
+
+    fn from_rgba8(r: u8, g: u8, b: u8, a: u8) -> Self {
+        Self {
+            r: r as f32 / 255.0,
+            g: g as f32 / 255.0,
+            b: b as f32 / 255.0,
+            a: a as f32 / 255.0,
+        }
+    }
+
+    fn from_rgb16(r: u16, g: u16, b: u16) -> Self {
+        Self {
+            r: r as f32 / 65535.0,
+            g: g as f32 / 65535.0,
+            b: b as f32 / 65535.0,
+            a: 1.0,
+        }
+    }
+
+    fn from_rgba16(r: u16, g: u16, b: u16, a: u16) -> Self {
+        Self {
+            r: r as f32 / 65535.0,
+            g: g as f32 / 65535.0,
+            b: b as f32 / 65535.0,
+            a: a as f32 / 65535.0,
+        }
+    }
+
+    fn from_gray8(g: u8) -> Self {
+        let v = g as f32 / 255.0;
+        Self { r: v, g: v, b: v, a: 1.0 }
+    }
+
+    fn from_hsv(h: f32, s: f32, v: f32) -> Self {
+        let c = v * s;
+        let x = c * (1.0 - ((h / 60.0) % 2.0 - 1.0).abs());
+        let m = v - c;
+
+        let (r, g, b) = if h < 60.0 {
+            (c, x, 0.0)
+        } else if h < 120.0 {
+            (x, c, 0.0)
+        } else if h < 180.0 {
+            (0.0, c, x)
+        } else if h < 240.0 {
+            (0.0, x, c)
+        } else if h < 300.0 {
+            (x, 0.0, c)
+        } else {
+            (c, 0.0, x)
+        };
+
+        Self { r: r + m, g: g + m, b: b + m, a: 1.0 }
+    }
+
+    fn from_hsl(h: f32, s: f32, l: f32) -> Self {
+        let c = (1.0 - (2.0 * l - 1.0).abs()) * s;
+        let x = c * (1.0 - ((h / 60.0) % 2.0 - 1.0).abs());
+        let m = l - c / 2.0;
+
+        let (r, g, b) = if h < 60.0 {
+            (c, x, 0.0)
+        } else if h < 120.0 {
+            (x, c, 0.0)
+        } else if h < 180.0 {
+            (0.0, c, x)
+        } else if h < 240.0 {
+            (0.0, x, c)
+        } else if h < 300.0 {
+            (x, 0.0, c)
+        } else {
+            (c, 0.0, x)
+        };
+
+        Self { r: r + m, g: g + m, b: b + m, a: 1.0 }
+    }
+
+    fn to_hsv(self) -> (f32, f32, f32) {
+        let max = self.r.max(self.g).max(self.b);
+        let min = self.r.min(self.g).min(self.b);
+        let delta = max - min;
+
+        let h = if delta < 0.0001 {
+            0.0
+        } else if max == self.r {
+            60.0 * (((self.g - self.b) / delta) % 6.0)
+        } else if max == self.g {
+            60.0 * ((self.b - self.r) / delta + 2.0)
+        } else {
+            60.0 * ((self.r - self.g) / delta + 4.0)
+        };
+
+        let h = if h < 0.0 { h + 360.0 } else { h };
+        let s = if max < 0.0001 { 0.0 } else { delta / max };
+        let v = max;
+
+        (h, s, v)
+    }
+
+    fn to_hsl(self) -> (f32, f32, f32) {
+        let max = self.r.max(self.g).max(self.b);
+        let min = self.r.min(self.g).min(self.b);
+        let delta = max - min;
+        let l = (max + min) / 2.0;
+
+        let h = if delta < 0.0001 {
+            0.0
+        } else if max == self.r {
+            60.0 * (((self.g - self.b) / delta) % 6.0)
+        } else if max == self.g {
+            60.0 * ((self.b - self.r) / delta + 2.0)
+        } else {
+            60.0 * ((self.r - self.g) / delta + 4.0)
+        };
+
+        let h = if h < 0.0 { h + 360.0 } else { h };
+        let s = if delta < 0.0001 { 0.0 } else { delta / (1.0 - (2.0 * l - 1.0).abs()) };
+
+        (h, s, l)
+    }
+
+    fn luminance(self) -> f32 {
+        0.2126 * self.r + 0.7152 * self.g + 0.0722 * self.b
+    }
+
+    fn blend(self, other: Pixel, mode: BlendMode) -> Pixel {
+        match mode {
+            BlendMode::Normal => self.blend_normal(other),
+            BlendMode::Multiply => self.blend_multiply(other),
+            BlendMode::Screen => self.blend_screen(other),
+            BlendMode::Overlay => self.blend_overlay(other),
+            BlendMode::Darken => self.blend_darken(other),
+            BlendMode::Lighten => self.blend_lighten(other),
+            BlendMode::ColorDodge => self.blend_color_dodge(other),
+            BlendMode::ColorBurn => self.blend_color_burn(other),
+            BlendMode::HardLight => self.blend_hard_light(other),
+            BlendMode::SoftLight => self.blend_soft_light(other),
+            BlendMode::Difference => self.blend_difference(other),
+            BlendMode::Exclusion => self.blend_exclusion(other),
+            BlendMode::Hue => self.blend_hue(other),
+            BlendMode::Saturation => self.blend_saturation(other),
+            BlendMode::Color => self.blend_color(other),
+            BlendMode::Luminosity => self.blend_luminosity(other),
+        }
+    }
+
+    fn blend_normal(self, other: Pixel) -> Pixel {
+        let a = other.a + self.a * (1.0 - other.a);
+        if a < 0.0001 {
+            return Pixel::transparent();
+        }
+        Pixel {
+            r: (other.r * other.a + self.r * self.a * (1.0 - other.a)) / a,
+            g: (other.g * other.a + self.g * self.a * (1.0 - other.a)) / a,
+            b: (other.b * other.a + self.b * self.a * (1.0 - other.a)) / a,
+            a,
+        }
+    }
+
+    fn blend_multiply(self, other: Pixel) -> Pixel {
+        Pixel {
+            r: self.r * other.r,
+            g: self.g * other.g,
+            b: self.b * other.b,
+            a: self.a * other.a,
+        }
+    }
+
+    fn blend_screen(self, other: Pixel) -> Pixel {
+        Pixel {
+            r: 1.0 - (1.0 - self.r) * (1.0 - other.r),
+            g: 1.0 - (1.0 - self.g) * (1.0 - other.g),
+            b: 1.0 - (1.0 - self.b) * (1.0 - other.b),
+            a: 1.0 - (1.0 - self.a) * (1.0 - other.a),
+        }
+    }
+
+    fn blend_overlay(self, other: Pixel) -> Pixel {
+        let blend = |base: f32, over: f32| {
+            if base < 0.5 {
+                2.0 * base * over
+            } else {
+                1.0 - 2.0 * (1.0 - base) * (1.0 - over)
+            }
+        };
+
+        Pixel {
+            r: blend(self.r, other.r),
+            g: blend(self.g, other.g),
+            b: blend(self.b, other.b),
+            a: self.a,
+        }
+    }
+
+    fn blend_darken(self, other: Pixel) -> Pixel {
+        Pixel {
+            r: self.r.min(other.r),
+            g: self.g.min(other.g),
+            b: self.b.min(other.b),
+            a: self.a.max(other.a),
+        }
+    }
+
+    fn blend_lighten(self, other: Pixel) -> Pixel {
+        Pixel {
+            r: self.r.max(other.r),
+            g: self.g.max(other.g),
+            b: self.b.max(other.b),
+            a: self.a.max(other.a),
+        }
+    }
+
+    fn blend_color_dodge(self, other: Pixel) -> Pixel {
+        let dodge = |base: f32, over: f32| {
+            if over >= 1.0 { 1.0 } else { (base / (1.0 - over)).min(1.0) }
+        };
+
+        Pixel {
+            r: dodge(self.r, other.r),
+            g: dodge(self.g, other.g),
+            b: dodge(self.b, other.b),
+            a: self.a,
+        }
+    }
+
+    fn blend_color_burn(self, other: Pixel) -> Pixel {
+        let burn = |base: f32, over: f32| {
+            if over <= 0.0 { 0.0 } else { 1.0 - ((1.0 - base) / over).min(1.0) }
+        };
+
+        Pixel {
+            r: burn(self.r, other.r),
+            g: burn(self.g, other.g),
+            b: burn(self.b, other.b),
+            a: self.a,
+        }
+    }
+
+    fn blend_hard_light(self, other: Pixel) -> Pixel {
+        let blend = |base: f32, over: f32| {
+            if over < 0.5 {
+                2.0 * base * over
+            } else {
+                1.0 - 2.0 * (1.0 - base) * (1.0 - over)
+            }
+        };
+
+        Pixel {
+            r: blend(self.r, other.r),
+            g: blend(self.g, other.g),
+            b: blend(self.b, other.b),
+            a: self.a,
+        }
+    }
+
+    fn blend_soft_light(self, other: Pixel) -> Pixel {
+        let blend = |base: f32, over: f32| {
+            if over < 0.5 {
+                base - (1.0 - 2.0 * over) * base * (1.0 - base)
+            } else {
+                let d = if base < 0.25 {
+                    ((16.0 * base - 12.0) * base + 4.0) * base
+                } else {
+                    base.sqrt()
+                };
+                base + (2.0 * over - 1.0) * (d - base)
+            }
+        };
+
+        Pixel {
+            r: blend(self.r, other.r),
+            g: blend(self.g, other.g),
+            b: blend(self.b, other.b),
+            a: self.a,
+        }
+    }
+
+    fn blend_difference(self, other: Pixel) -> Pixel {
+        Pixel {
+            r: (self.r - other.r).abs(),
+            g: (self.g - other.g).abs(),
+            b: (self.b - other.b).abs(),
+            a: self.a,
+        }
+    }
+
+    fn blend_exclusion(self, other: Pixel) -> Pixel {
+        Pixel {
+            r: self.r + other.r - 2.0 * self.r * other.r,
+            g: self.g + other.g - 2.0 * self.g * other.g,
+            b: self.b + other.b - 2.0 * self.b * other.b,
+            a: self.a,
+        }
+    }
+
+    fn blend_hue(self, other: Pixel) -> Pixel {
+        let (h, _, _) = other.to_hsl();
+        let (_, s, l) = self.to_hsl();
+        Pixel::from_hsl(h, s, l)
+    }
+
+    fn blend_saturation(self, other: Pixel) -> Pixel {
+        let (_, s, _) = other.to_hsl();
+        let (h, _, l) = self.to_hsl();
+        Pixel::from_hsl(h, s, l)
+    }
+
+    fn blend_color(self, other: Pixel) -> Pixel {
+        let (h, s, _) = other.to_hsl();
+        let (_, _, l) = self.to_hsl();
+        Pixel::from_hsl(h, s, l)
+    }
+
+    fn blend_luminosity(self, other: Pixel) -> Pixel {
+        let (_, _, l) = other.to_hsl();
+        let (h, s, _) = self.to_hsl();
+        Pixel::from_hsl(h, s, l)
+    }
+
+    fn lerp(self, other: Pixel, t: f32) -> Pixel {
+        Pixel {
+            r: self.r + (other.r - self.r) * t,
+            g: self.g + (other.g - self.g) * t,
+            b: self.b + (other.b - self.b) * t,
+            a: self.a + (other.a - self.a) * t,
+        }
+    }
+
+    fn clamp(self) -> Pixel {
+        Pixel {
+            r: self.r.clamp(0.0, 1.0),
+            g: self.g.clamp(0.0, 1.0),
+            b: self.b.clamp(0.0, 1.0),
+            a: self.a.clamp(0.0, 1.0),
+        }
+    }
+}
+
+/// Blend modes
+enum BlendMode {
+    Normal,
+    Multiply,
+    Screen,
+    Overlay,
+    Darken,
+    Lighten,
+    ColorDodge,
+    ColorBurn,
+    HardLight,
+    SoftLight,
+    Difference,
+    Exclusion,
+    Hue,
+    Saturation,
+    Color,
+    Luminosity,
+}
+
+/// Image metadata
+struct ImageMetadata {
+    dpi_x: f32,
+    dpi_y: f32,
+    creation_date: ?String,
+    modification_date: ?String,
+    author: ?String,
+    copyright: ?String,
+    title: ?String,
+    description: ?String,
+    exif: HashMap<String, String>,
+    xmp: HashMap<String, String>,
+
+    fn new() -> Self {
+        Self {
+            dpi_x: 72.0,
+            dpi_y: 72.0,
+            creation_date: None,
+            modification_date: None,
+            author: None,
+            copyright: None,
+            title: None,
+            description: None,
+            exif: HashMap::new(),
+            xmp: HashMap::new(),
+        }
+    }
+
+    fn clone(self) -> ImageMetadata {
+        Self {
+            dpi_x: self.dpi_x,
+            dpi_y: self.dpi_y,
+            creation_date: self.creation_date.clone(),
+            modification_date: self.modification_date.clone(),
+            author: self.author.clone(),
+            copyright: self.copyright.clone(),
+            title: self.title.clone(),
+            description: self.description.clone(),
+            exif: self.exif.clone(),
+            xmp: self.xmp.clone(),
+        }
+    }
+}
+
+// ============================================================================
+// IMAGE FILTERS
+// ============================================================================
+
+/// Filter trait
+trait ImageFilter {
+    fn apply(self, image: &mut Image);
+}
+
+/// Convolution kernel
+struct ConvolutionKernel {
+    values: Array<f32>,
+    width: usize,
+    height: usize,
+    divisor: f32,
+    offset: f32,
+
+    fn new(values: Array<f32>, width: usize, height: usize) -> Self {
+        let divisor: f32 = values.iter().sum();
+        let divisor = if divisor.abs() < 0.0001 { 1.0 } else { divisor };
+
+        Self {
+            values,
+            width,
+            height,
+            divisor,
+            offset: 0.0,
+        }
+    }
+
+    fn identity() -> Self {
+        Self::new([0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0].into(), 3, 3)
+    }
+
+    fn blur_3x3() -> Self {
+        Self::new([1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0].into(), 3, 3)
+    }
+
+    fn gaussian_3x3() -> Self {
+        Self::new([1.0, 2.0, 1.0, 2.0, 4.0, 2.0, 1.0, 2.0, 1.0].into(), 3, 3)
+    }
+
+    fn gaussian_5x5() -> Self {
+        Self::new([
+            1.0, 4.0, 6.0, 4.0, 1.0,
+            4.0, 16.0, 24.0, 16.0, 4.0,
+            6.0, 24.0, 36.0, 24.0, 6.0,
+            4.0, 16.0, 24.0, 16.0, 4.0,
+            1.0, 4.0, 6.0, 4.0, 1.0,
+        ].into(), 5, 5)
+    }
+
+    fn sharpen() -> Self {
+        Self::new([0.0, -1.0, 0.0, -1.0, 5.0, -1.0, 0.0, -1.0, 0.0].into(), 3, 3)
+    }
+
+    fn unsharp_mask() -> Self {
+        Self::new([
+            1.0, 4.0, 6.0, 4.0, 1.0,
+            4.0, 16.0, 24.0, 16.0, 4.0,
+            6.0, 24.0, -476.0, 24.0, 6.0,
+            4.0, 16.0, 24.0, 16.0, 4.0,
+            1.0, 4.0, 6.0, 4.0, 1.0,
+        ].into(), 5, 5)
+    }
+
+    fn edge_detect() -> Self {
+        let mut k = Self::new([-1.0, -1.0, -1.0, -1.0, 8.0, -1.0, -1.0, -1.0, -1.0].into(), 3, 3);
+        k.divisor = 1.0;
+        k
+    }
+
+    fn emboss() -> Self {
+        let mut k = Self::new([-2.0, -1.0, 0.0, -1.0, 1.0, 1.0, 0.0, 1.0, 2.0].into(), 3, 3);
+        k.divisor = 1.0;
+        k.offset = 0.5;
+        k
+    }
+
+    fn sobel_x() -> Self {
+        let mut k = Self::new([-1.0, 0.0, 1.0, -2.0, 0.0, 2.0, -1.0, 0.0, 1.0].into(), 3, 3);
+        k.divisor = 1.0;
+        k
+    }
+
+    fn sobel_y() -> Self {
+        let mut k = Self::new([-1.0, -2.0, -1.0, 0.0, 0.0, 0.0, 1.0, 2.0, 1.0].into(), 3, 3);
+        k.divisor = 1.0;
+        k
+    }
+
+    fn apply(self, image: &mut Image) {
+        let original = image.clone();
+        let half_w = self.width / 2;
+        let half_h = self.height / 2;
+
+        for y in 0..image.height {
+            for x in 0..image.width {
+                let mut r_sum = 0.0;
+                let mut g_sum = 0.0;
+                let mut b_sum = 0.0;
+
+                for ky in 0..self.height {
+                    for kx in 0..self.width {
+                        let sx = (x as i32 + kx as i32 - half_w as i32)
+                            .clamp(0, image.width as i32 - 1) as u32;
+                        let sy = (y as i32 + ky as i32 - half_h as i32)
+                            .clamp(0, image.height as i32 - 1) as u32;
+
+                        let pixel = original.get_pixel(sx, sy);
+                        let weight = self.values[ky * self.width + kx];
+
+                        r_sum += pixel.r * weight;
+                        g_sum += pixel.g * weight;
+                        b_sum += pixel.b * weight;
+                    }
+                }
+
+                let pixel = original.get_pixel(x, y);
+                image.set_pixel(x, y, Pixel {
+                    r: (r_sum / self.divisor + self.offset).clamp(0.0, 1.0),
+                    g: (g_sum / self.divisor + self.offset).clamp(0.0, 1.0),
+                    b: (b_sum / self.divisor + self.offset).clamp(0.0, 1.0),
+                    a: pixel.a,
+                });
+            }
+        }
+    }
+}
+
+/// Gaussian blur filter
+struct GaussianBlur {
+    radius: f32,
+    kernel: Array<f32>,
+
+    fn new(radius: f32) -> Self {
+        let radius = radius.max(0.1);
+        let size = (radius * 6.0).ceil() as usize | 1;
+        let sigma = radius;
+
+        let mut kernel = Array::with_capacity(size);
+        let center = size / 2;
+        let mut sum = 0.0;
+
+        for i in 0..size {
+            let x = i as f32 - center as f32;
+            let g = (-x * x / (2.0 * sigma * sigma)).exp();
+            kernel.push(g);
+            sum += g;
+        }
+
+        for i in 0..size {
+            kernel[i] /= sum;
+        }
+
+        Self { radius, kernel }
+    }
+}
+
+impl ImageFilter for GaussianBlur {
+    fn apply(self, image: &mut Image) {
+        let temp = image.clone();
+        let half = self.kernel.len() / 2;
+
+        // Horizontal pass
+        for y in 0..image.height {
+            for x in 0..image.width {
+                let mut r_sum = 0.0;
+                let mut g_sum = 0.0;
+                let mut b_sum = 0.0;
+                let mut a_sum = 0.0;
+
+                for k in 0..self.kernel.len() {
+                    let sx = (x as i32 + k as i32 - half as i32)
+                        .clamp(0, image.width as i32 - 1) as u32;
+                    let pixel = temp.get_pixel(sx, y);
+                    let weight = self.kernel[k];
+
+                    r_sum += pixel.r * weight;
+                    g_sum += pixel.g * weight;
+                    b_sum += pixel.b * weight;
+                    a_sum += pixel.a * weight;
+                }
+
+                image.set_pixel(x, y, Pixel { r: r_sum, g: g_sum, b: b_sum, a: a_sum });
+            }
+        }
+
+        let temp = image.clone();
+
+        // Vertical pass
+        for y in 0..image.height {
+            for x in 0..image.width {
+                let mut r_sum = 0.0;
+                let mut g_sum = 0.0;
+                let mut b_sum = 0.0;
+                let mut a_sum = 0.0;
+
+                for k in 0..self.kernel.len() {
+                    let sy = (y as i32 + k as i32 - half as i32)
+                        .clamp(0, image.height as i32 - 1) as u32;
+                    let pixel = temp.get_pixel(x, sy);
+                    let weight = self.kernel[k];
+
+                    r_sum += pixel.r * weight;
+                    g_sum += pixel.g * weight;
+                    b_sum += pixel.b * weight;
+                    a_sum += pixel.a * weight;
+                }
+
+                image.set_pixel(x, y, Pixel { r: r_sum, g: g_sum, b: b_sum, a: a_sum });
+            }
+        }
+    }
+}
+
+/// Box blur filter
+struct BoxBlur {
+    radius: u32,
+
+    fn new(radius: u32) -> Self {
+        Self { radius }
+    }
+}
+
+impl ImageFilter for BoxBlur {
+    fn apply(self, image: &mut Image) {
+        let temp = image.clone();
+        let size = (self.radius * 2 + 1) as f32;
+
+        // Horizontal pass
+        for y in 0..image.height {
+            for x in 0..image.width {
+                let mut r_sum = 0.0;
+                let mut g_sum = 0.0;
+                let mut b_sum = 0.0;
+
+                for dx in 0..=self.radius * 2 {
+                    let sx = (x as i32 + dx as i32 - self.radius as i32)
+                        .clamp(0, image.width as i32 - 1) as u32;
+                    let pixel = temp.get_pixel(sx, y);
+                    r_sum += pixel.r;
+                    g_sum += pixel.g;
+                    b_sum += pixel.b;
+                }
+
+                let pixel = temp.get_pixel(x, y);
+                image.set_pixel(x, y, Pixel {
+                    r: r_sum / size,
+                    g: g_sum / size,
+                    b: b_sum / size,
+                    a: pixel.a,
+                });
+            }
+        }
+
+        let temp = image.clone();
+
+        // Vertical pass
+        for y in 0..image.height {
+            for x in 0..image.width {
+                let mut r_sum = 0.0;
+                let mut g_sum = 0.0;
+                let mut b_sum = 0.0;
+
+                for dy in 0..=self.radius * 2 {
+                    let sy = (y as i32 + dy as i32 - self.radius as i32)
+                        .clamp(0, image.height as i32 - 1) as u32;
+                    let pixel = temp.get_pixel(x, sy);
+                    r_sum += pixel.r;
+                    g_sum += pixel.g;
+                    b_sum += pixel.b;
+                }
+
+                let pixel = temp.get_pixel(x, y);
+                image.set_pixel(x, y, Pixel {
+                    r: r_sum / size,
+                    g: g_sum / size,
+                    b: b_sum / size,
+                    a: pixel.a,
+                });
+            }
+        }
+    }
+}
+
+/// Brightness/Contrast filter
+struct BrightnessContrast {
+    brightness: f32,  // -1.0 to 1.0
+    contrast: f32,    // 0.0 to 2.0
+
+    fn new(brightness: f32, contrast: f32) -> Self {
+        Self {
+            brightness: brightness.clamp(-1.0, 1.0),
+            contrast: contrast.clamp(0.0, 2.0),
+        }
+    }
+}
+
+impl ImageFilter for BrightnessContrast {
+    fn apply(self, image: &mut Image) {
+        for y in 0..image.height {
+            for x in 0..image.width {
+                let pixel = image.get_pixel(x, y);
+                let r = (pixel.r - 0.5) * self.contrast + 0.5 + self.brightness;
+                let g = (pixel.g - 0.5) * self.contrast + 0.5 + self.brightness;
+                let b = (pixel.b - 0.5) * self.contrast + 0.5 + self.brightness;
+
+                image.set_pixel(x, y, Pixel {
+                    r: r.clamp(0.0, 1.0),
+                    g: g.clamp(0.0, 1.0),
+                    b: b.clamp(0.0, 1.0),
+                    a: pixel.a,
+                });
+            }
+        }
+    }
+}
+
+/// Hue/Saturation/Lightness filter
+struct HueSaturationLightness {
+    hue: f32,         // -180 to 180 degrees
+    saturation: f32,  // -1.0 to 1.0
+    lightness: f32,   // -1.0 to 1.0
+
+    fn new(hue: f32, saturation: f32, lightness: f32) -> Self {
+        Self {
+            hue: hue.clamp(-180.0, 180.0),
+            saturation: saturation.clamp(-1.0, 1.0),
+            lightness: lightness.clamp(-1.0, 1.0),
+        }
+    }
+}
+
+impl ImageFilter for HueSaturationLightness {
+    fn apply(self, image: &mut Image) {
+        for y in 0..image.height {
+            for x in 0..image.width {
+                let pixel = image.get_pixel(x, y);
+                let (h, s, l) = pixel.to_hsl();
+
+                let new_h = (h + self.hue) % 360.0;
+                let new_h = if new_h < 0.0 { new_h + 360.0 } else { new_h };
+
+                let new_s = if self.saturation >= 0.0 {
+                    s + (1.0 - s) * self.saturation
+                } else {
+                    s + s * self.saturation
+                };
+
+                let new_l = if self.lightness >= 0.0 {
+                    l + (1.0 - l) * self.lightness
+                } else {
+                    l + l * self.lightness
+                };
+
+                let mut new_pixel = Pixel::from_hsl(new_h, new_s.clamp(0.0, 1.0), new_l.clamp(0.0, 1.0));
+                new_pixel.a = pixel.a;
+                image.set_pixel(x, y, new_pixel);
+            }
+        }
+    }
+}
+
+/// Levels adjustment
+struct Levels {
+    input_black: f32,
+    input_white: f32,
+    input_gamma: f32,
+    output_black: f32,
+    output_white: f32,
+
+    fn new() -> Self {
+        Self {
+            input_black: 0.0,
+            input_white: 1.0,
+            input_gamma: 1.0,
+            output_black: 0.0,
+            output_white: 1.0,
+        }
+    }
+
+    fn with_input(mut self, black: f32, white: f32, gamma: f32) -> Self {
+        self.input_black = black.clamp(0.0, 1.0);
+        self.input_white = white.clamp(0.0, 1.0);
+        self.input_gamma = gamma.clamp(0.1, 10.0);
+        self
+    }
+
+    fn with_output(mut self, black: f32, white: f32) -> Self {
+        self.output_black = black.clamp(0.0, 1.0);
+        self.output_white = white.clamp(0.0, 1.0);
+        self
+    }
+
+    fn transform(self, value: f32) -> f32 {
+        // Input mapping
+        let range = self.input_white - self.input_black;
+        let v = if range > 0.0001 {
+            ((value - self.input_black) / range).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+
+        // Gamma correction
+        let v = v.powf(1.0 / self.input_gamma);
+
+        // Output mapping
+        self.output_black + v * (self.output_white - self.output_black)
+    }
+}
+
+impl ImageFilter for Levels {
+    fn apply(self, image: &mut Image) {
+        for y in 0..image.height {
+            for x in 0..image.width {
+                let pixel = image.get_pixel(x, y);
+                image.set_pixel(x, y, Pixel {
+                    r: self.transform(pixel.r),
+                    g: self.transform(pixel.g),
+                    b: self.transform(pixel.b),
+                    a: pixel.a,
+                });
+            }
+        }
+    }
+}
+
+/// Curves adjustment
+struct Curves {
+    r_curve: Array<f32>,
+    g_curve: Array<f32>,
+    b_curve: Array<f32>,
+    master_curve: Array<f32>,
+
+    fn new() -> Self {
+        let identity = Self::create_identity_curve();
+        Self {
+            r_curve: identity.clone(),
+            g_curve: identity.clone(),
+            b_curve: identity.clone(),
+            master_curve: identity,
+        }
+    }
+
+    fn create_identity_curve() -> Array<f32> {
+        let mut curve = Array::with_capacity(256);
+        for i in 0..256 {
+            curve.push(i as f32 / 255.0);
+        }
+        curve
+    }
+
+    fn set_curve(mut self, channel: char, points: &[(f32, f32)]) {
+        let curve = match channel {
+            'r' | 'R' => &mut self.r_curve,
+            'g' | 'G' => &mut self.g_curve,
+            'b' | 'B' => &mut self.b_curve,
+            'm' | 'M' => &mut self.master_curve,
+            _ => return,
+        };
+
+        for i in 0..256 {
+            let x = i as f32 / 255.0;
+            curve[i] = Self::interpolate_curve(points, x);
+        }
+    }
+
+    fn interpolate_curve(points: &[(f32, f32)], x: f32) -> f32 {
+        if points.len() < 2 {
+            return x;
+        }
+
+        // Find surrounding points
+        let mut i = 0;
+        while i < points.len() - 1 && points[i + 1].0 < x {
+            i += 1;
+        }
+
+        if i >= points.len() - 1 {
+            return points[points.len() - 1].1;
+        }
+
+        let (x0, y0) = points[i];
+        let (x1, y1) = points[i + 1];
+
+        if (x1 - x0).abs() < 0.0001 {
+            return y0;
+        }
+
+        // Catmull-Rom spline interpolation
+        let t = (x - x0) / (x1 - x0);
+
+        let p0 = if i > 0 { points[i - 1].1 } else { y0 - (y1 - y0) };
+        let p1 = y0;
+        let p2 = y1;
+        let p3 = if i < points.len() - 2 { points[i + 2].1 } else { y1 + (y1 - y0) };
+
+        let t2 = t * t;
+        let t3 = t2 * t;
+
+        0.5 * ((2.0 * p1) +
+               (-p0 + p2) * t +
+               (2.0 * p0 - 5.0 * p1 + 4.0 * p2 - p3) * t2 +
+               (-p0 + 3.0 * p1 - 3.0 * p2 + p3) * t3)
+    }
+
+    fn apply_curve(self, value: f32, curve: &Array<f32>) -> f32 {
+        let idx = (value * 255.0).clamp(0.0, 255.0) as usize;
+        curve[idx]
+    }
+}
+
+impl ImageFilter for Curves {
+    fn apply(self, image: &mut Image) {
+        for y in 0..image.height {
+            for x in 0..image.width {
+                let pixel = image.get_pixel(x, y);
+
+                // Apply master curve first
+                let r = self.apply_curve(pixel.r, &self.master_curve);
+                let g = self.apply_curve(pixel.g, &self.master_curve);
+                let b = self.apply_curve(pixel.b, &self.master_curve);
+
+                // Apply channel curves
+                let r = self.apply_curve(r, &self.r_curve);
+                let g = self.apply_curve(g, &self.g_curve);
+                let b = self.apply_curve(b, &self.b_curve);
+
+                image.set_pixel(x, y, Pixel {
+                    r: r.clamp(0.0, 1.0),
+                    g: g.clamp(0.0, 1.0),
+                    b: b.clamp(0.0, 1.0),
+                    a: pixel.a,
+                });
+            }
+        }
+    }
+}
+
+/// Color balance adjustment
+struct ColorBalance {
+    shadows_cyan_red: f32,
+    shadows_magenta_green: f32,
+    shadows_yellow_blue: f32,
+    midtones_cyan_red: f32,
+    midtones_magenta_green: f32,
+    midtones_yellow_blue: f32,
+    highlights_cyan_red: f32,
+    highlights_magenta_green: f32,
+    highlights_yellow_blue: f32,
+    preserve_luminosity: bool,
+
+    fn new() -> Self {
+        Self {
+            shadows_cyan_red: 0.0,
+            shadows_magenta_green: 0.0,
+            shadows_yellow_blue: 0.0,
+            midtones_cyan_red: 0.0,
+            midtones_magenta_green: 0.0,
+            midtones_yellow_blue: 0.0,
+            highlights_cyan_red: 0.0,
+            highlights_magenta_green: 0.0,
+            highlights_yellow_blue: 0.0,
+            preserve_luminosity: true,
+        }
+    }
+}
+
+impl ImageFilter for ColorBalance {
+    fn apply(self, image: &mut Image) {
+        for y in 0..image.height {
+            for x in 0..image.width {
+                let pixel = image.get_pixel(x, y);
+                let luma = pixel.luminance();
+
+                // Calculate tonal weights
+                let shadow_weight = 1.0 - luma.min(0.5) * 2.0;
+                let highlight_weight = (luma - 0.5).max(0.0) * 2.0;
+                let midtone_weight = 1.0 - shadow_weight - highlight_weight;
+
+                let mut r = pixel.r;
+                let mut g = pixel.g;
+                let mut b = pixel.b;
+
+                // Apply shadows adjustments
+                r += self.shadows_cyan_red * shadow_weight;
+                g += self.shadows_magenta_green * shadow_weight;
+                b += self.shadows_yellow_blue * shadow_weight;
+
+                // Apply midtones adjustments
+                r += self.midtones_cyan_red * midtone_weight;
+                g += self.midtones_magenta_green * midtone_weight;
+                b += self.midtones_yellow_blue * midtone_weight;
+
+                // Apply highlights adjustments
+                r += self.highlights_cyan_red * highlight_weight;
+                g += self.highlights_magenta_green * highlight_weight;
+                b += self.highlights_yellow_blue * highlight_weight;
+
+                // Preserve luminosity
+                if self.preserve_luminosity {
+                    let new_pixel = Pixel { r, g, b, a: pixel.a };
+                    let new_luma = new_pixel.luminance();
+                    if new_luma > 0.0001 {
+                        let ratio = luma / new_luma;
+                        r *= ratio;
+                        g *= ratio;
+                        b *= ratio;
+                    }
+                }
+
+                image.set_pixel(x, y, Pixel {
+                    r: r.clamp(0.0, 1.0),
+                    g: g.clamp(0.0, 1.0),
+                    b: b.clamp(0.0, 1.0),
+                    a: pixel.a,
+                });
+            }
+        }
+    }
+}
+
+/// Invert colors filter
+struct Invert {}
+
+impl ImageFilter for Invert {
+    fn apply(self, image: &mut Image) {
+        for y in 0..image.height {
+            for x in 0..image.width {
+                let pixel = image.get_pixel(x, y);
+                image.set_pixel(x, y, Pixel {
+                    r: 1.0 - pixel.r,
+                    g: 1.0 - pixel.g,
+                    b: 1.0 - pixel.b,
+                    a: pixel.a,
+                });
+            }
+        }
+    }
+}
+
+/// Grayscale filter
+struct Grayscale {
+    method: GrayscaleMethod,
+
+    fn new(method: GrayscaleMethod) -> Self {
+        Self { method }
+    }
+}
+
+enum GrayscaleMethod {
+    Luminosity,
+    Average,
+    Lightness,
+    RedChannel,
+    GreenChannel,
+    BlueChannel,
+}
+
+impl ImageFilter for Grayscale {
+    fn apply(self, image: &mut Image) {
+        for y in 0..image.height {
+            for x in 0..image.width {
+                let pixel = image.get_pixel(x, y);
+
+                let gray = match self.method {
+                    GrayscaleMethod::Luminosity => {
+                        0.2126 * pixel.r + 0.7152 * pixel.g + 0.0722 * pixel.b
+                    }
+                    GrayscaleMethod::Average => {
+                        (pixel.r + pixel.g + pixel.b) / 3.0
+                    }
+                    GrayscaleMethod::Lightness => {
+                        (pixel.r.max(pixel.g).max(pixel.b) + pixel.r.min(pixel.g).min(pixel.b)) / 2.0
+                    }
+                    GrayscaleMethod::RedChannel => pixel.r,
+                    GrayscaleMethod::GreenChannel => pixel.g,
+                    GrayscaleMethod::BlueChannel => pixel.b,
+                };
+
+                image.set_pixel(x, y, Pixel { r: gray, g: gray, b: gray, a: pixel.a });
+            }
+        }
+    }
+}
+
+/// Sepia tone filter
+struct Sepia {
+    intensity: f32,
+
+    fn new(intensity: f32) -> Self {
+        Self { intensity: intensity.clamp(0.0, 1.0) }
+    }
+}
+
+impl ImageFilter for Sepia {
+    fn apply(self, image: &mut Image) {
+        for y in 0..image.height {
+            for x in 0..image.width {
+                let pixel = image.get_pixel(x, y);
+
+                let sepia_r = pixel.r * 0.393 + pixel.g * 0.769 + pixel.b * 0.189;
+                let sepia_g = pixel.r * 0.349 + pixel.g * 0.686 + pixel.b * 0.168;
+                let sepia_b = pixel.r * 0.272 + pixel.g * 0.534 + pixel.b * 0.131;
+
+                let r = pixel.r.lerp(sepia_r, self.intensity);
+                let g = pixel.g.lerp(sepia_g, self.intensity);
+                let b = pixel.b.lerp(sepia_b, self.intensity);
+
+                image.set_pixel(x, y, Pixel {
+                    r: r.clamp(0.0, 1.0),
+                    g: g.clamp(0.0, 1.0),
+                    b: b.clamp(0.0, 1.0),
+                    a: pixel.a,
+                });
+            }
+        }
+    }
+}
+
+/// Posterize filter
+struct Posterize {
+    levels: u32,
+
+    fn new(levels: u32) -> Self {
+        Self { levels: levels.max(2).min(256) }
+    }
+}
+
+impl ImageFilter for Posterize {
+    fn apply(self, image: &mut Image) {
+        let step = 1.0 / (self.levels - 1) as f32;
+
+        for y in 0..image.height {
+            for x in 0..image.width {
+                let pixel = image.get_pixel(x, y);
+
+                let r = (pixel.r / step).floor() * step;
+                let g = (pixel.g / step).floor() * step;
+                let b = (pixel.b / step).floor() * step;
+
+                image.set_pixel(x, y, Pixel { r, g, b, a: pixel.a });
+            }
+        }
+    }
+}
+
+/// Threshold filter
+struct Threshold {
+    level: f32,
+
+    fn new(level: f32) -> Self {
+        Self { level: level.clamp(0.0, 1.0) }
+    }
+}
+
+impl ImageFilter for Threshold {
+    fn apply(self, image: &mut Image) {
+        for y in 0..image.height {
+            for x in 0..image.width {
+                let pixel = image.get_pixel(x, y);
+                let luma = pixel.luminance();
+                let value = if luma >= self.level { 1.0 } else { 0.0 };
+
+                image.set_pixel(x, y, Pixel { r: value, g: value, b: value, a: pixel.a });
+            }
+        }
+    }
+}
+
+/// Vignette filter
+struct Vignette {
+    radius: f32,
+    softness: f32,
+    color: Pixel,
+
+    fn new(radius: f32, softness: f32) -> Self {
+        Self {
+            radius: radius.clamp(0.0, 2.0),
+            softness: softness.clamp(0.0, 1.0),
+            color: Pixel::black(),
+        }
+    }
+
+    fn with_color(mut self, color: Pixel) -> Self {
+        self.color = color;
+        self
+    }
+}
+
+impl ImageFilter for Vignette {
+    fn apply(self, image: &mut Image) {
+        let cx = image.width as f32 / 2.0;
+        let cy = image.height as f32 / 2.0;
+        let max_dist = (cx * cx + cy * cy).sqrt();
+
+        for y in 0..image.height {
+            for x in 0..image.width {
+                let dx = x as f32 - cx;
+                let dy = y as f32 - cy;
+                let dist = (dx * dx + dy * dy).sqrt() / max_dist;
+
+                let vignette = if dist < self.radius {
+                    1.0
+                } else {
+                    let t = (dist - self.radius) / self.softness.max(0.0001);
+                    (1.0 - t).clamp(0.0, 1.0)
+                };
+
+                let pixel = image.get_pixel(x, y);
+                image.set_pixel(x, y, pixel.lerp(self.color, 1.0 - vignette));
+            }
+        }
+    }
+}
+
+/// Noise generator
+struct NoiseGenerator {
+    amount: f32,
+    monochrome: bool,
+    seed: u64,
+
+    fn new(amount: f32) -> Self {
+        Self {
+            amount: amount.clamp(0.0, 1.0),
+            monochrome: false,
+            seed: 12345,
+        }
+    }
+
+    fn monochrome(mut self) -> Self {
+        self.monochrome = true;
+        self
+    }
+
+    fn with_seed(mut self, seed: u64) -> Self {
+        self.seed = seed;
+        self
+    }
+
+    fn random(mut self) -> f32 {
+        // Simple LCG PRNG
+        self.seed = self.seed.wrapping_mul(1103515245).wrapping_add(12345);
+        ((self.seed >> 16) & 0x7FFF) as f32 / 32767.0
+    }
+}
+
+impl ImageFilter for NoiseGenerator {
+    fn apply(mut self, image: &mut Image) {
+        for y in 0..image.height {
+            for x in 0..image.width {
+                let pixel = image.get_pixel(x, y);
+
+                let (nr, ng, nb) = if self.monochrome {
+                    let n = (self.random() - 0.5) * 2.0 * self.amount;
+                    (n, n, n)
+                } else {
+                    (
+                        (self.random() - 0.5) * 2.0 * self.amount,
+                        (self.random() - 0.5) * 2.0 * self.amount,
+                        (self.random() - 0.5) * 2.0 * self.amount,
+                    )
+                };
+
+                image.set_pixel(x, y, Pixel {
+                    r: (pixel.r + nr).clamp(0.0, 1.0),
+                    g: (pixel.g + ng).clamp(0.0, 1.0),
+                    b: (pixel.b + nb).clamp(0.0, 1.0),
+                    a: pixel.a,
+                });
+            }
+        }
+    }
+}
+
+// ============================================================================
+// IMAGE SCALING
+// ============================================================================
+
+/// Scaling algorithm
+enum ScaleAlgorithm {
+    NearestNeighbor,
+    Bilinear,
+    Bicubic,
+    Lanczos2,
+    Lanczos3,
+}
+
+/// Image scaler
+struct ImageScaler {
+    algorithm: ScaleAlgorithm,
+
+    fn new(algorithm: ScaleAlgorithm) -> Self {
+        Self { algorithm }
+    }
+
+    fn scale(self, image: &Image, new_width: u32, new_height: u32) -> Image {
+        let mut result = Image::new(new_width, new_height, image.image_type);
+
+        let x_scale = image.width as f32 / new_width as f32;
+        let y_scale = image.height as f32 / new_height as f32;
+
+        for y in 0..new_height {
+            for x in 0..new_width {
+                let src_x = (x as f32 + 0.5) * x_scale - 0.5;
+                let src_y = (y as f32 + 0.5) * y_scale - 0.5;
+
+                let pixel = match self.algorithm {
+                    ScaleAlgorithm::NearestNeighbor => {
+                        self.sample_nearest(image, src_x, src_y)
+                    }
+                    ScaleAlgorithm::Bilinear => {
+                        self.sample_bilinear(image, src_x, src_y)
+                    }
+                    ScaleAlgorithm::Bicubic => {
+                        self.sample_bicubic(image, src_x, src_y)
+                    }
+                    ScaleAlgorithm::Lanczos2 => {
+                        self.sample_lanczos(image, src_x, src_y, 2)
+                    }
+                    ScaleAlgorithm::Lanczos3 => {
+                        self.sample_lanczos(image, src_x, src_y, 3)
+                    }
+                };
+
+                result.set_pixel(x, y, pixel);
+            }
+        }
+
+        result
+    }
+
+    fn sample_nearest(self, image: &Image, x: f32, y: f32) -> Pixel {
+        let sx = (x.round() as i32).clamp(0, image.width as i32 - 1) as u32;
+        let sy = (y.round() as i32).clamp(0, image.height as i32 - 1) as u32;
+        image.get_pixel(sx, sy)
+    }
+
+    fn sample_bilinear(self, image: &Image, x: f32, y: f32) -> Pixel {
+        let x0 = (x.floor() as i32).clamp(0, image.width as i32 - 1) as u32;
+        let y0 = (y.floor() as i32).clamp(0, image.height as i32 - 1) as u32;
+        let x1 = (x0 + 1).min(image.width - 1);
+        let y1 = (y0 + 1).min(image.height - 1);
+
+        let fx = x - x.floor();
+        let fy = y - y.floor();
+
+        let p00 = image.get_pixel(x0, y0);
+        let p10 = image.get_pixel(x1, y0);
+        let p01 = image.get_pixel(x0, y1);
+        let p11 = image.get_pixel(x1, y1);
+
+        let top = p00.lerp(p10, fx);
+        let bottom = p01.lerp(p11, fx);
+        top.lerp(bottom, fy)
+    }
+
+    fn sample_bicubic(self, image: &Image, x: f32, y: f32) -> Pixel {
+        let x0 = x.floor() as i32;
+        let y0 = y.floor() as i32;
+        let fx = x - x.floor();
+        let fy = y - y.floor();
+
+        let mut r = 0.0;
+        let mut g = 0.0;
+        let mut b = 0.0;
+        let mut a = 0.0;
+
+        for j in -1..=2 {
+            for i in -1..=2 {
+                let px = (x0 + i).clamp(0, image.width as i32 - 1) as u32;
+                let py = (y0 + j).clamp(0, image.height as i32 - 1) as u32;
+                let pixel = image.get_pixel(px, py);
+
+                let wx = Self::bicubic_weight(i as f32 - fx);
+                let wy = Self::bicubic_weight(j as f32 - fy);
+                let weight = wx * wy;
+
+                r += pixel.r * weight;
+                g += pixel.g * weight;
+                b += pixel.b * weight;
+                a += pixel.a * weight;
+            }
+        }
+
+        Pixel {
+            r: r.clamp(0.0, 1.0),
+            g: g.clamp(0.0, 1.0),
+            b: b.clamp(0.0, 1.0),
+            a: a.clamp(0.0, 1.0),
+        }
+    }
+
+    fn bicubic_weight(x: f32) -> f32 {
+        let x = x.abs();
+        let a = -0.5;
+
+        if x < 1.0 {
+            (a + 2.0) * x * x * x - (a + 3.0) * x * x + 1.0
+        } else if x < 2.0 {
+            a * x * x * x - 5.0 * a * x * x + 8.0 * a * x - 4.0 * a
+        } else {
+            0.0
+        }
+    }
+
+    fn sample_lanczos(self, image: &Image, x: f32, y: f32, a: i32) -> Pixel {
+        let x0 = x.floor() as i32;
+        let y0 = y.floor() as i32;
+        let fx = x - x.floor();
+        let fy = y - y.floor();
+
+        let mut r = 0.0;
+        let mut g = 0.0;
+        let mut b = 0.0;
+        let mut alpha = 0.0;
+        let mut weight_sum = 0.0;
+
+        for j in (1-a)..=a {
+            for i in (1-a)..=a {
+                let px = (x0 + i).clamp(0, image.width as i32 - 1) as u32;
+                let py = (y0 + j).clamp(0, image.height as i32 - 1) as u32;
+                let pixel = image.get_pixel(px, py);
+
+                let wx = Self::lanczos_weight(i as f32 - fx, a);
+                let wy = Self::lanczos_weight(j as f32 - fy, a);
+                let weight = wx * wy;
+
+                r += pixel.r * weight;
+                g += pixel.g * weight;
+                b += pixel.b * weight;
+                alpha += pixel.a * weight;
+                weight_sum += weight;
+            }
+        }
+
+        if weight_sum > 0.0 {
+            Pixel {
+                r: (r / weight_sum).clamp(0.0, 1.0),
+                g: (g / weight_sum).clamp(0.0, 1.0),
+                b: (b / weight_sum).clamp(0.0, 1.0),
+                a: (alpha / weight_sum).clamp(0.0, 1.0),
+            }
+        } else {
+            Pixel::black()
+        }
+    }
+
+    fn lanczos_weight(x: f32, a: i32) -> f32 {
+        if x.abs() < 0.0001 {
+            1.0
+        } else if x.abs() < a as f32 {
+            let pi_x = std::f32::consts::PI * x;
+            let pi_x_a = pi_x / a as f32;
+            (pi_x.sin() / pi_x) * (pi_x_a.sin() / pi_x_a)
+        } else {
+            0.0
+        }
+    }
+}
+
+// ============================================================================
+// HISTOGRAM
+// ============================================================================
+
+/// Image histogram
+struct Histogram {
+    r: [u32; 256],
+    g: [u32; 256],
+    b: [u32; 256],
+    luminance: [u32; 256],
+    total_pixels: u32,
+
+    fn from_image(image: &Image) -> Self {
+        let mut hist = Self {
+            r: [0; 256],
+            g: [0; 256],
+            b: [0; 256],
+            luminance: [0; 256],
+            total_pixels: image.width * image.height,
+        };
+
+        for y in 0..image.height {
+            for x in 0..image.width {
+                let pixel = image.get_pixel(x, y);
+
+                let ri = (pixel.r * 255.0).clamp(0.0, 255.0) as usize;
+                let gi = (pixel.g * 255.0).clamp(0.0, 255.0) as usize;
+                let bi = (pixel.b * 255.0).clamp(0.0, 255.0) as usize;
+                let li = (pixel.luminance() * 255.0).clamp(0.0, 255.0) as usize;
+
+                hist.r[ri] += 1;
+                hist.g[gi] += 1;
+                hist.b[bi] += 1;
+                hist.luminance[li] += 1;
+            }
+        }
+
+        hist
+    }
+
+    fn percentile(self, channel: char, p: f32) -> u8 {
+        let data = match channel {
+            'r' | 'R' => &self.r,
+            'g' | 'G' => &self.g,
+            'b' | 'B' => &self.b,
+            'l' | 'L' => &self.luminance,
+            _ => &self.luminance,
+        };
+
+        let target = (self.total_pixels as f32 * p) as u32;
+        let mut sum = 0u32;
+
+        for i in 0..256 {
+            sum += data[i];
+            if sum >= target {
+                return i as u8;
+            }
+        }
+
+        255
+    }
+
+    fn mean(self, channel: char) -> f32 {
+        let data = match channel {
+            'r' | 'R' => &self.r,
+            'g' | 'G' => &self.g,
+            'b' | 'B' => &self.b,
+            'l' | 'L' => &self.luminance,
+            _ => &self.luminance,
+        };
+
+        let mut sum = 0u64;
+        for i in 0..256 {
+            sum += i as u64 * data[i] as u64;
+        }
+
+        sum as f32 / self.total_pixels as f32
+    }
+
+    fn std_dev(self, channel: char) -> f32 {
+        let mean = self.mean(channel);
+        let data = match channel {
+            'r' | 'R' => &self.r,
+            'g' | 'G' => &self.g,
+            'b' | 'B' => &self.b,
+            'l' | 'L' => &self.luminance,
+            _ => &self.luminance,
+        };
+
+        let mut variance = 0.0f64;
+        for i in 0..256 {
+            let diff = i as f32 - mean;
+            variance += diff as f64 * diff as f64 * data[i] as f64;
+        }
+
+        (variance / self.total_pixels as f64).sqrt() as f32
+    }
+}
+
+/// Histogram equalization
+struct HistogramEqualization {}
+
+impl ImageFilter for HistogramEqualization {
+    fn apply(self, image: &mut Image) {
+        let hist = Histogram::from_image(image);
+
+        // Build CDF for each channel
+        let mut r_cdf = [0u32; 256];
+        let mut g_cdf = [0u32; 256];
+        let mut b_cdf = [0u32; 256];
+
+        r_cdf[0] = hist.r[0];
+        g_cdf[0] = hist.g[0];
+        b_cdf[0] = hist.b[0];
+
+        for i in 1..256 {
+            r_cdf[i] = r_cdf[i - 1] + hist.r[i];
+            g_cdf[i] = g_cdf[i - 1] + hist.g[i];
+            b_cdf[i] = b_cdf[i - 1] + hist.b[i];
+        }
+
+        // Build lookup tables
+        let mut r_lut = [0u8; 256];
+        let mut g_lut = [0u8; 256];
+        let mut b_lut = [0u8; 256];
+
+        let total = hist.total_pixels as f32;
+        for i in 0..256 {
+            r_lut[i] = (r_cdf[i] as f32 / total * 255.0).round() as u8;
+            g_lut[i] = (g_cdf[i] as f32 / total * 255.0).round() as u8;
+            b_lut[i] = (b_cdf[i] as f32 / total * 255.0).round() as u8;
+        }
+
+        // Apply equalization
+        for y in 0..image.height {
+            for x in 0..image.width {
+                let pixel = image.get_pixel(x, y);
+
+                let ri = (pixel.r * 255.0).clamp(0.0, 255.0) as usize;
+                let gi = (pixel.g * 255.0).clamp(0.0, 255.0) as usize;
+                let bi = (pixel.b * 255.0).clamp(0.0, 255.0) as usize;
+
+                image.set_pixel(x, y, Pixel {
+                    r: r_lut[ri] as f32 / 255.0,
+                    g: g_lut[gi] as f32 / 255.0,
+                    b: b_lut[bi] as f32 / 255.0,
+                    a: pixel.a,
+                });
+            }
+        }
+    }
+}
+
+/// Auto levels
+struct AutoLevels {
+    clip_percentage: f32,
+
+    fn new(clip_percentage: f32) -> Self {
+        Self { clip_percentage: clip_percentage.clamp(0.0, 0.5) }
+    }
+}
+
+impl ImageFilter for AutoLevels {
+    fn apply(self, image: &mut Image) {
+        let hist = Histogram::from_image(image);
+
+        let r_low = hist.percentile('r', self.clip_percentage) as f32 / 255.0;
+        let r_high = hist.percentile('r', 1.0 - self.clip_percentage) as f32 / 255.0;
+        let g_low = hist.percentile('g', self.clip_percentage) as f32 / 255.0;
+        let g_high = hist.percentile('g', 1.0 - self.clip_percentage) as f32 / 255.0;
+        let b_low = hist.percentile('b', self.clip_percentage) as f32 / 255.0;
+        let b_high = hist.percentile('b', 1.0 - self.clip_percentage) as f32 / 255.0;
+
+        for y in 0..image.height {
+            for x in 0..image.width {
+                let pixel = image.get_pixel(x, y);
+
+                let r = if r_high > r_low {
+                    (pixel.r - r_low) / (r_high - r_low)
+                } else {
+                    pixel.r
+                };
+
+                let g = if g_high > g_low {
+                    (pixel.g - g_low) / (g_high - g_low)
+                } else {
+                    pixel.g
+                };
+
+                let b = if b_high > b_low {
+                    (pixel.b - b_low) / (b_high - b_low)
+                } else {
+                    pixel.b
+                };
+
+                image.set_pixel(x, y, Pixel {
+                    r: r.clamp(0.0, 1.0),
+                    g: g.clamp(0.0, 1.0),
+                    b: b.clamp(0.0, 1.0),
+                    a: pixel.a,
+                });
+            }
+        }
+    }
+}
+
+// ============================================================================
+// MORPHOLOGICAL OPERATIONS
+// ============================================================================
+
+/// Structuring element for morphological operations
+struct StructuringElement {
+    kernel: Array<bool>,
+    width: usize,
+    height: usize,
+
+    fn square(size: usize) -> Self {
+        let mut kernel = Array::with_capacity(size * size);
+        for _ in 0..size * size {
+            kernel.push(true);
+        }
+        Self { kernel, width: size, height: size }
+    }
+
+    fn cross(size: usize) -> Self {
+        let mut kernel = Array::with_capacity(size * size);
+        let center = size / 2;
+        for y in 0..size {
+            for x in 0..size {
+                kernel.push(x == center || y == center);
+            }
+        }
+        Self { kernel, width: size, height: size }
+    }
+
+    fn circle(radius: usize) -> Self {
+        let size = radius * 2 + 1;
+        let mut kernel = Array::with_capacity(size * size);
+        let center = radius as f32;
+
+        for y in 0..size {
+            for x in 0..size {
+                let dx = x as f32 - center;
+                let dy = y as f32 - center;
+                kernel.push(dx * dx + dy * dy <= center * center);
+            }
+        }
+
+        Self { kernel, width: size, height: size }
+    }
+}
+
+/// Erosion operation
+struct Erode {
+    element: StructuringElement,
+
+    fn new(element: StructuringElement) -> Self {
+        Self { element }
+    }
+}
+
+impl ImageFilter for Erode {
+    fn apply(self, image: &mut Image) {
+        let original = image.clone();
+        let half_w = self.element.width / 2;
+        let half_h = self.element.height / 2;
+
+        for y in 0..image.height {
+            for x in 0..image.width {
+                let mut min_r = 1.0f32;
+                let mut min_g = 1.0f32;
+                let mut min_b = 1.0f32;
+
+                for ky in 0..self.element.height {
+                    for kx in 0..self.element.width {
+                        if !self.element.kernel[ky * self.element.width + kx] {
+                            continue;
+                        }
+
+                        let sx = (x as i32 + kx as i32 - half_w as i32)
+                            .clamp(0, image.width as i32 - 1) as u32;
+                        let sy = (y as i32 + ky as i32 - half_h as i32)
+                            .clamp(0, image.height as i32 - 1) as u32;
+
+                        let pixel = original.get_pixel(sx, sy);
+                        min_r = min_r.min(pixel.r);
+                        min_g = min_g.min(pixel.g);
+                        min_b = min_b.min(pixel.b);
+                    }
+                }
+
+                let orig_pixel = original.get_pixel(x, y);
+                image.set_pixel(x, y, Pixel { r: min_r, g: min_g, b: min_b, a: orig_pixel.a });
+            }
+        }
+    }
+}
+
+/// Dilation operation
+struct Dilate {
+    element: StructuringElement,
+
+    fn new(element: StructuringElement) -> Self {
+        Self { element }
+    }
+}
+
+impl ImageFilter for Dilate {
+    fn apply(self, image: &mut Image) {
+        let original = image.clone();
+        let half_w = self.element.width / 2;
+        let half_h = self.element.height / 2;
+
+        for y in 0..image.height {
+            for x in 0..image.width {
+                let mut max_r = 0.0f32;
+                let mut max_g = 0.0f32;
+                let mut max_b = 0.0f32;
+
+                for ky in 0..self.element.height {
+                    for kx in 0..self.element.width {
+                        if !self.element.kernel[ky * self.element.width + kx] {
+                            continue;
+                        }
+
+                        let sx = (x as i32 + kx as i32 - half_w as i32)
+                            .clamp(0, image.width as i32 - 1) as u32;
+                        let sy = (y as i32 + ky as i32 - half_h as i32)
+                            .clamp(0, image.height as i32 - 1) as u32;
+
+                        let pixel = original.get_pixel(sx, sy);
+                        max_r = max_r.max(pixel.r);
+                        max_g = max_g.max(pixel.g);
+                        max_b = max_b.max(pixel.b);
+                    }
+                }
+
+                let orig_pixel = original.get_pixel(x, y);
+                image.set_pixel(x, y, Pixel { r: max_r, g: max_g, b: max_b, a: orig_pixel.a });
+            }
+        }
+    }
+}
+
+/// Opening operation (erosion followed by dilation)
+struct Opening {
+    element: StructuringElement,
+
+    fn new(element: StructuringElement) -> Self {
+        Self { element }
+    }
+}
+
+impl ImageFilter for Opening {
+    fn apply(self, image: &mut Image) {
+        let erode = Erode::new(self.element.clone());
+        erode.apply(image);
+        let dilate = Dilate::new(self.element);
+        dilate.apply(image);
+    }
+}
+
+/// Closing operation (dilation followed by erosion)
+struct Closing {
+    element: StructuringElement,
+
+    fn new(element: StructuringElement) -> Self {
+        Self { element }
+    }
+}
+
+impl ImageFilter for Closing {
+    fn apply(self, image: &mut Image) {
+        let dilate = Dilate::new(self.element.clone());
+        dilate.apply(image);
+        let erode = Erode::new(self.element);
+        erode.apply(image);
+    }
+}
+
+// ============================================================================
+// COMPOSITING
+// ============================================================================
+
+/// Layer for image compositing
+struct Layer {
+    image: Image,
+    x: i32,
+    y: i32,
+    opacity: f32,
+    blend_mode: BlendMode,
+    visible: bool,
+    name: String,
+
+    fn new(image: Image) -> Self {
+        Self {
+            image,
+            x: 0,
+            y: 0,
+            opacity: 1.0,
+            blend_mode: BlendMode::Normal,
+            visible: true,
+            name: String::new(),
+        }
+    }
+
+    fn with_position(mut self, x: i32, y: i32) -> Self {
+        self.x = x;
+        self.y = y;
+        self
+    }
+
+    fn with_opacity(mut self, opacity: f32) -> Self {
+        self.opacity = opacity.clamp(0.0, 1.0);
+        self
+    }
+
+    fn with_blend_mode(mut self, mode: BlendMode) -> Self {
+        self.blend_mode = mode;
+        self
+    }
+}
+
+/// Image compositor
+struct Compositor {
+    width: u32,
+    height: u32,
+    background: Pixel,
+    layers: Array<Layer>,
+
+    fn new(width: u32, height: u32) -> Self {
+        Self {
+            width,
+            height,
+            background: Pixel::transparent(),
+            layers: Array::new(),
+        }
+    }
+
+    fn with_background(mut self, color: Pixel) -> Self {
+        self.background = color;
+        self
+    }
+
+    fn add_layer(mut self, layer: Layer) {
+        self.layers.push(layer);
+    }
+
+    fn render(self) -> Image {
+        let mut result = Image::new(self.width, self.height, ImageType::RGBA8);
+        result.fill(self.background);
+
+        for layer in self.layers.iter() {
+            if !layer.visible {
+                continue;
+            }
+
+            self.composite_layer(&mut result, layer);
+        }
+
+        result
+    }
+
+    fn composite_layer(self, target: &mut Image, layer: &Layer) {
+        for ly in 0..layer.image.height {
+            for lx in 0..layer.image.width {
+                let tx = layer.x + lx as i32;
+                let ty = layer.y + ly as i32;
+
+                if tx < 0 || ty < 0 || tx >= self.width as i32 || ty >= self.height as i32 {
+                    continue;
+                }
+
+                let base = target.get_pixel(tx as u32, ty as u32);
+                let mut overlay = layer.image.get_pixel(lx, ly);
+                overlay.a *= layer.opacity;
+
+                let blended = base.blend(overlay, layer.blend_mode);
+                target.set_pixel(tx as u32, ty as u32, blended);
+            }
+        }
+    }
+}
+
+// ============================================================================
+// EXPORTS
+// ============================================================================
+
+export {
+    // Core types
+    ImageType,
+    Image,
+    Pixel,
+    BlendMode,
+    ImageMetadata,
+
+    // Filters
+    ImageFilter,
+    ConvolutionKernel,
+    GaussianBlur,
+    BoxBlur,
+    BrightnessContrast,
+    HueSaturationLightness,
+    Levels,
+    Curves,
+    ColorBalance,
+    Invert,
+    Grayscale,
+    GrayscaleMethod,
+    Sepia,
+    Posterize,
+    Threshold,
+    Vignette,
+    NoiseGenerator,
+
+    // Scaling
+    ScaleAlgorithm,
+    ImageScaler,
+
+    // Histogram
+    Histogram,
+    HistogramEqualization,
+    AutoLevels,
+
+    // Morphology
+    StructuringElement,
+    Erode,
+    Dilate,
+    Opening,
+    Closing,
+
+    // Compositing
+    Layer,
+    Compositor,
+};

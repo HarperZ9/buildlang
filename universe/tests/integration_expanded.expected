@@ -1,0 +1,41 @@
+=== BUILD-UNIVERSE Cross-Module Integration Tests ===
+
+--- 1. Foundation -> Spectrum ---
+  foundation -> spectrum XYZ roundtrip: OK
+  foundation -> spectrum tonemapping: OK
+  foundation -> spectrum matrix chain: OK
+
+--- 2. Spectrum -> Calibrate ---
+  spectrum -> calibrate profile: OK
+  spectrum -> calibrate gamma: OK
+  spectrum -> calibrate delta E: OK
+
+--- 3. Foundation -> Oracle ---
+  foundation -> oracle time series: OK
+  foundation -> oracle statistics: OK
+
+--- 4. Oracle -> Quantum-Finance ---
+  oracle -> quantum-finance forecast signals: OK
+  oracle -> quantum-finance anomaly risk: OK
+
+--- 5. Foundation -> Field-Tensor ---
+  foundation -> field-tensor populate: OK
+  foundation -> field-tensor covariance: OK
+
+--- 6. Photon -> Spectrum ---
+  photon -> spectrum color pipeline: OK
+  photon -> spectrum OKLab: OK
+
+--- 7. Oracle -> Field-Tensor ---
+  oracle -> field-tensor forecast embedding: OK
+
+--- 8. Full Chain: Foundation -> Oracle -> Quantum-Finance ---
+  foundation -> oracle -> quantum-finance full chain: OK
+
+--- 9. Full Chain: Spectrum -> Photon -> Calibrate ---
+  spectrum -> photon -> calibrate full chain: OK
+
+--- 10. Full Chain: Field-Tensor -> Quantum-Finance -> Oracle ---
+  field-tensor -> quantum-finance -> oracle feedback: OK
+
+=== All cross-module integration tests complete ===

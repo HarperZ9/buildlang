@@ -1,0 +1,1776 @@
+// =============================================================================
+// Lumina Motion Blur - Advanced Motion Blur Effects
+// =============================================================================
+// Comprehensive motion blur system with camera and per-object blur,
+// velocity buffer generation, and temporal reconstruction.
+// Target: Game engines, film production, real-time visualization
+// =============================================================================
+
+module lumina::motion_blur;
+
+use core::math::{Vec2, Vec3, Vec4, Mat4, lerp, saturate, smoothstep};
+use core::simd::{f32x4, f32x8};
+use lumina::{RenderTarget, Texture2D, TextureFormat, SamplerState};
+
+// =============================================================================
+// Motion Blur Configuration
+// =============================================================================
+
+/// Motion blur quality levels
+@[repr(u8)]
+enum MotionBlurQuality {
+    Low = 0,        // 4 samples
+    Medium = 1,     // 8 samples
+    High = 2,       // 16 samples
+    Ultra = 3,      // 32 samples
+    Cinematic = 4,  // 64 samples
+}
+
+/// Motion blur algorithm types
+@[repr(u8)]
+enum MotionBlurAlgorithm {
+    // Simple approaches
+    LinearBlur,         // Basic directional blur
+    RadialBlur,         // Zoom/explosion effect
+
+    // Velocity-based
+    PerPixelVelocity,   // Per-pixel motion vectors
+    TileBasedVelocity,  // McGuire & Mara 2012
+
+    // Advanced techniques
+    ScatteredAsGathered, // Guertin et al. 2014
+    ReconstructionFilter, // Jimenez 2014
+    DeepMotionBlur,     // Layer-aware blur
+
+    // Specialized
+    RotationalBlur,     // Camera rotation
+    ObjectBlur,         // Per-object velocity
+}
+
+/// Motion blur configuration
+struct MotionBlurConfig {
+    enabled: bool,
+    algorithm: MotionBlurAlgorithm,
+    quality: MotionBlurQuality,
+
+    // Shutter settings
+    shutter_angle: f32,         // 0-360 degrees (180 = cinematic)
+    shutter_phase: f32,         // Phase offset (-1 to 1)
+    exposure_time: f32,         // Normalized exposure time
+
+    // Velocity scaling
+    velocity_scale: f32,        // Overall velocity multiplier
+    max_velocity: f32,          // Maximum blur length (pixels)
+    min_velocity: f32,          // Minimum velocity threshold
+
+    // Quality settings
+    sample_count: u32,          // Number of blur samples
+    tile_size: u32,             // Tile size for tile-based methods
+    jitter_samples: bool,       // Add temporal jitter
+
+    // Advanced
+    depth_aware: bool,          // Use depth for occlusion
+    background_velocity: Vec2,  // Background motion (parallax)
+    center_weight: f32,         // Weight toward center sample
+}
+
+impl MotionBlurConfig {
+    /// Default cinematic motion blur
+    pub fn cinematic() -> Self {
+        Self {
+            enabled: true,
+            algorithm: MotionBlurAlgorithm::TileBasedVelocity,
+            quality: MotionBlurQuality::High,
+            shutter_angle: 180.0,
+            shutter_phase: 0.0,
+            exposure_time: 1.0 / 24.0,
+            velocity_scale: 1.0,
+            max_velocity: 64.0,
+            min_velocity: 0.5,
+            sample_count: 16,
+            tile_size: 20,
+            jitter_samples: true,
+            depth_aware: true,
+            background_velocity: Vec2::ZERO,
+            center_weight: 1.0,
+        }
+    }
+
+    /// Fast motion blur for games
+    pub fn game() -> Self {
+        Self {
+            enabled: true,
+            algorithm: MotionBlurAlgorithm::TileBasedVelocity,
+            quality: MotionBlurQuality::Medium,
+            shutter_angle: 90.0,
+            shutter_phase: 0.0,
+            exposure_time: 1.0 / 60.0,
+            velocity_scale: 0.8,
+            max_velocity: 32.0,
+            min_velocity: 1.0,
+            sample_count: 8,
+            tile_size: 16,
+            jitter_samples: true,
+            depth_aware: true,
+            background_velocity: Vec2::ZERO,
+            center_weight: 1.5,
+        }
+    }
+
+    /// Subtle motion blur
+    pub fn subtle() -> Self {
+        Self {
+            enabled: true,
+            algorithm: MotionBlurAlgorithm::LinearBlur,
+            quality: MotionBlurQuality::Low,
+            shutter_angle: 45.0,
+            shutter_phase: 0.0,
+            exposure_time: 1.0 / 60.0,
+            velocity_scale: 0.5,
+            max_velocity: 16.0,
+            min_velocity: 2.0,
+            sample_count: 4,
+            tile_size: 16,
+            jitter_samples: false,
+            depth_aware: false,
+            background_velocity: Vec2::ZERO,
+            center_weight: 2.0,
+        }
+    }
+}
+
+// =============================================================================
+// Velocity Buffer
+// =============================================================================
+
+/// Velocity buffer format
+@[repr(u8)]
+enum VelocityFormat {
+    RG16F,      // 16-bit float per channel
+    RG32F,      // 32-bit float per channel
+    RGB10A2,    // Packed 10-bit with direction
+}
+
+/// Velocity buffer generator
+struct VelocityBuffer {
+    width: u32,
+    height: u32,
+    format: VelocityFormat,
+    current_vp: Mat4,       // Current view-projection
+    previous_vp: Mat4,      // Previous view-projection
+    jitter_current: Vec2,   // Current frame jitter
+    jitter_previous: Vec2,  // Previous frame jitter
+}
+
+impl VelocityBuffer {
+    /// Create new velocity buffer
+    pub fn new(width: u32, height: u32, format: VelocityFormat) -> Self {
+        Self {
+            width,
+            height,
+            format,
+            current_vp: Mat4::IDENTITY,
+            previous_vp: Mat4::IDENTITY,
+            jitter_current: Vec2::ZERO,
+            jitter_previous: Vec2::ZERO,
+        }
+    }
+
+    /// Update view-projection matrices
+    pub fn update_matrices(&mut self, current_vp: Mat4, jitter: Vec2) {
+        self.previous_vp = self.current_vp;
+        self.jitter_previous = self.jitter_current;
+        self.current_vp = current_vp;
+        self.jitter_current = jitter;
+    }
+
+    /// Calculate camera velocity at screen position
+    pub fn calculate_camera_velocity(&self, screen_pos: Vec2, depth: f32) -> Vec2 {
+        // Reconstruct world position from depth
+        let ndc = Vec4::new(
+            screen_pos.x * 2.0 - 1.0,
+            1.0 - screen_pos.y * 2.0,
+            depth,
+            1.0
+        );
+
+        // Remove jitter from current position
+        let ndc_unjittered = Vec4::new(
+            ndc.x - self.jitter_current.x,
+            ndc.y - self.jitter_current.y,
+            ndc.z,
+            ndc.w
+        );
+
+        // Inverse project to world space
+        let inv_current = self.current_vp.inverse();
+        let world_pos = inv_current * ndc_unjittered;
+        let world_pos = world_pos / world_pos.w;
+
+        // Project to previous frame
+        let prev_pos = self.previous_vp * world_pos;
+        let prev_ndc = prev_pos / prev_pos.w;
+
+        // Add previous jitter
+        let prev_screen = Vec2::new(
+            (prev_ndc.x + self.jitter_previous.x + 1.0) * 0.5,
+            (1.0 - prev_ndc.y - self.jitter_previous.y) * 0.5
+        );
+
+        // Velocity in screen space
+        Vec2::new(
+            screen_pos.x - prev_screen.x,
+            screen_pos.y - prev_screen.y
+        ) * Vec2::new(self.width as f32, self.height as f32)
+    }
+
+    /// Encode velocity to texture format
+    pub fn encode_velocity(&self, velocity: Vec2) -> Vec4 {
+        match self.format {
+            VelocityFormat::RG16F | VelocityFormat::RG32F => {
+                Vec4::new(velocity.x, velocity.y, 0.0, 1.0)
+            },
+            VelocityFormat::RGB10A2 => {
+                let length = velocity.length();
+                let dir = if length > 0.0001 {
+                    velocity / length
+                } else {
+                    Vec2::ZERO
+                };
+                // Pack direction and magnitude
+                Vec4::new(
+                    dir.x * 0.5 + 0.5,
+                    dir.y * 0.5 + 0.5,
+                    saturate(length / 128.0),
+                    1.0
+                )
+            },
+        }
+    }
+
+    /// Decode velocity from texture
+    pub fn decode_velocity(&self, encoded: Vec4) -> Vec2 {
+        match self.format {
+            VelocityFormat::RG16F | VelocityFormat::RG32F => {
+                Vec2::new(encoded.x, encoded.y)
+            },
+            VelocityFormat::RGB10A2 => {
+                let dir = Vec2::new(
+                    encoded.x * 2.0 - 1.0,
+                    encoded.y * 2.0 - 1.0
+                );
+                let length = encoded.z * 128.0;
+                dir * length
+            },
+        }
+    }
+}
+
+// =============================================================================
+// Per-Object Motion
+// =============================================================================
+
+/// Object motion data for skinned/animated objects
+struct ObjectMotion {
+    object_id: u32,
+    current_transform: Mat4,
+    previous_transform: Mat4,
+    velocity_bias: Vec3,        // Additional velocity
+    blur_scale: f32,            // Per-object blur multiplier
+    exclude_from_blur: bool,    // Skip motion blur
+}
+
+impl ObjectMotion {
+    /// Calculate object velocity at local position
+    pub fn calculate_velocity(&self, local_pos: Vec3, view_proj: Mat4) -> Vec2 {
+        if self.exclude_from_blur {
+            return Vec2::ZERO;
+        }
+
+        // Transform to world space
+        let current_world = self.current_transform * Vec4::from_vec3(local_pos, 1.0);
+        let previous_world = self.previous_transform * Vec4::from_vec3(local_pos, 1.0);
+
+        // Add velocity bias
+        let previous_world = Vec4::new(
+            previous_world.x - self.velocity_bias.x,
+            previous_world.y - self.velocity_bias.y,
+            previous_world.z - self.velocity_bias.z,
+            previous_world.w
+        );
+
+        // Project to screen space
+        let current_clip = view_proj * current_world;
+        let previous_clip = view_proj * previous_world;
+
+        let current_ndc = Vec2::new(
+            current_clip.x / current_clip.w,
+            current_clip.y / current_clip.w
+        );
+        let previous_ndc = Vec2::new(
+            previous_clip.x / previous_clip.w,
+            previous_clip.y / previous_clip.w
+        );
+
+        (current_ndc - previous_ndc) * 0.5 * self.blur_scale
+    }
+}
+
+/// Object motion buffer for all animated objects
+struct ObjectMotionBuffer {
+    objects: Vec<ObjectMotion>,
+    max_objects: u32,
+}
+
+impl ObjectMotionBuffer {
+    pub fn new(max_objects: u32) -> Self {
+        Self {
+            objects: Vec::with_capacity(max_objects as usize),
+            max_objects,
+        }
+    }
+
+    pub fn add_object(&mut self, motion: ObjectMotion) {
+        if self.objects.len() < self.max_objects as usize {
+            self.objects.push(motion);
+        }
+    }
+
+    pub fn clear(&mut self) {
+        self.objects.clear();
+    }
+
+    pub fn update_object(&mut self, object_id: u32, new_transform: Mat4) {
+        if let Some(obj) = self.objects.iter_mut().find(|o| o.object_id == object_id) {
+            obj.previous_transform = obj.current_transform;
+            obj.current_transform = new_transform;
+        }
+    }
+}
+
+// =============================================================================
+// Tile-Based Motion Blur (McGuire & Mara 2012)
+// =============================================================================
+
+/// Velocity tile for tile-based blur
+struct VelocityTile {
+    max_velocity: Vec2,     // Maximum velocity in tile
+    min_velocity: Vec2,     // Minimum velocity in tile
+    dominant_velocity: Vec2, // Most common velocity direction
+}
+
+/// Tile-based motion blur processor
+struct TileBasedBlur {
+    tile_size: u32,
+    tiles_x: u32,
+    tiles_y: u32,
+    tiles: Vec<VelocityTile>,
+}
+
+impl TileBasedBlur {
+    /// Create tile processor
+    pub fn new(width: u32, height: u32, tile_size: u32) -> Self {
+        let tiles_x = (width + tile_size - 1) / tile_size;
+        let tiles_y = (height + tile_size - 1) / tile_size;
+
+        Self {
+            tile_size,
+            tiles_x,
+            tiles_y,
+            tiles: vec![VelocityTile {
+                max_velocity: Vec2::ZERO,
+                min_velocity: Vec2::ZERO,
+                dominant_velocity: Vec2::ZERO,
+            }; (tiles_x * tiles_y) as usize],
+        }
+    }
+
+    /// Generate tiles from velocity buffer
+    pub fn generate_tiles(&mut self, velocity_data: &[Vec2], width: u32, height: u32) {
+        // Clear tiles
+        for tile in &mut self.tiles {
+            tile.max_velocity = Vec2::ZERO;
+            tile.min_velocity = Vec2::new(f32::MAX, f32::MAX);
+            tile.dominant_velocity = Vec2::ZERO;
+        }
+
+        // Process each pixel
+        for y in 0..height {
+            for x in 0..width {
+                let tile_x = x / self.tile_size;
+                let tile_y = y / self.tile_size;
+                let tile_idx = (tile_y * self.tiles_x + tile_x) as usize;
+
+                let velocity = velocity_data[(y * width + x) as usize];
+                let vel_length = velocity.length();
+
+                let tile = &mut self.tiles[tile_idx];
+
+                if vel_length > tile.max_velocity.length() {
+                    tile.max_velocity = velocity;
+                }
+                if vel_length < tile.min_velocity.length() {
+                    tile.min_velocity = velocity;
+                }
+                tile.dominant_velocity = tile.dominant_velocity + velocity;
+            }
+        }
+
+        // Normalize dominant velocities
+        let pixels_per_tile = (self.tile_size * self.tile_size) as f32;
+        for tile in &mut self.tiles {
+            tile.dominant_velocity = tile.dominant_velocity / pixels_per_tile;
+            if tile.min_velocity.length() > 1e6 {
+                tile.min_velocity = Vec2::ZERO;
+            }
+        }
+    }
+
+    /// Expand tiles for neighbor awareness
+    pub fn expand_tiles(&mut self) {
+        let mut expanded = self.tiles.clone();
+
+        for ty in 0..self.tiles_y {
+            for tx in 0..self.tiles_x {
+                let idx = (ty * self.tiles_x + tx) as usize;
+                let mut max_vel = self.tiles[idx].max_velocity;
+                let mut max_len = max_vel.length();
+
+                // Check 3x3 neighborhood
+                for dy in -1i32..=1 {
+                    for dx in -1i32..=1 {
+                        let nx = tx as i32 + dx;
+                        let ny = ty as i32 + dy;
+
+                        if nx >= 0 && nx < self.tiles_x as i32 &&
+                           ny >= 0 && ny < self.tiles_y as i32 {
+                            let nidx = (ny as u32 * self.tiles_x + nx as u32) as usize;
+                            let neighbor_vel = self.tiles[nidx].max_velocity;
+                            let neighbor_len = neighbor_vel.length();
+
+                            if neighbor_len > max_len {
+                                max_vel = neighbor_vel;
+                                max_len = neighbor_len;
+                            }
+                        }
+                    }
+                }
+
+                expanded[idx].max_velocity = max_vel;
+            }
+        }
+
+        self.tiles = expanded;
+    }
+
+    /// Get tile for screen position
+    pub fn get_tile(&self, x: u32, y: u32) -> &VelocityTile {
+        let tile_x = (x / self.tile_size).min(self.tiles_x - 1);
+        let tile_y = (y / self.tile_size).min(self.tiles_y - 1);
+        &self.tiles[(tile_y * self.tiles_x + tile_x) as usize]
+    }
+}
+
+// =============================================================================
+// Reconstruction Filter Motion Blur
+// =============================================================================
+
+/// Reconstruction filter for high-quality motion blur
+struct ReconstructionFilter {
+    soft_z_extent: f32,     // Depth comparison softness
+    sample_count: u32,
+    jitter_offset: f32,
+}
+
+impl ReconstructionFilter {
+    pub fn new(sample_count: u32) -> Self {
+        Self {
+            soft_z_extent: 0.1,
+            sample_count,
+            jitter_offset: 0.0,
+        }
+    }
+
+    /// Soft depth comparison
+    fn soft_depth_compare(&self, za: f32, zb: f32) -> f32 {
+        saturate(1.0 - (za - zb) / self.soft_z_extent)
+    }
+
+    /// Cone weight for sample visibility
+    fn cone_weight(&self, distance: f32, velocity_length: f32) -> f32 {
+        saturate(1.0 - distance / velocity_length)
+    }
+
+    /// Cylinder weight for sample contribution
+    fn cylinder_weight(&self, distance: f32, velocity_length: f32) -> f32 {
+        1.0 - smoothstep(0.95 * velocity_length, 1.05 * velocity_length, distance)
+    }
+
+    /// Sample weight combining depth and velocity
+    pub fn sample_weight(
+        &self,
+        sample_depth: f32,
+        center_depth: f32,
+        sample_velocity: f32,
+        center_velocity: f32,
+        distance: f32
+    ) -> f32 {
+        // Foreground contribution
+        let foreground = self.soft_depth_compare(center_depth, sample_depth);
+
+        // Background contribution
+        let background = self.soft_depth_compare(sample_depth, center_depth);
+
+        // Velocity-based weights
+        let sample_spread = self.cone_weight(distance, sample_velocity);
+        let center_spread = self.cylinder_weight(distance, center_velocity);
+
+        // Combine: sample spreads to us, or we spread to sample
+        (foreground * sample_spread + background * center_spread) * 2.0
+    }
+
+    /// Apply reconstruction filter blur
+    pub fn apply(
+        &self,
+        color: &[Vec4],
+        velocity: &[Vec2],
+        depth: &[f32],
+        width: u32,
+        height: u32,
+        config: &MotionBlurConfig
+    ) -> Vec<Vec4> {
+        let mut result = vec![Vec4::ZERO; color.len()];
+        let inv_samples = 1.0 / self.sample_count as f32;
+
+        for y in 0..height {
+            for x in 0..width {
+                let idx = (y * width + x) as usize;
+                let center_color = color[idx];
+                let center_velocity = velocity[idx];
+                let center_depth = depth[idx];
+                let vel_length = center_velocity.length().max(0.5);
+
+                if vel_length < config.min_velocity {
+                    result[idx] = center_color;
+                    continue;
+                }
+
+                let mut accumulated = Vec4::ZERO;
+                let mut total_weight = 0.0;
+
+                // Sample along velocity direction
+                for i in 0..self.sample_count {
+                    let t = (i as f32 + self.jitter_offset) * inv_samples - 0.5;
+                    let offset = center_velocity * t * config.velocity_scale;
+
+                    let sample_x = ((x as f32 + offset.x) as i32)
+                        .max(0).min(width as i32 - 1) as u32;
+                    let sample_y = ((y as f32 + offset.y) as i32)
+                        .max(0).min(height as i32 - 1) as u32;
+                    let sample_idx = (sample_y * width + sample_x) as usize;
+
+                    let sample_color = color[sample_idx];
+                    let sample_velocity = velocity[sample_idx];
+                    let sample_depth = depth[sample_idx];
+                    let sample_vel_length = sample_velocity.length().max(0.5);
+
+                    let distance = offset.length();
+
+                    let weight = self.sample_weight(
+                        sample_depth,
+                        center_depth,
+                        sample_vel_length,
+                        vel_length,
+                        distance
+                    );
+
+                    accumulated = accumulated + sample_color * weight;
+                    total_weight += weight;
+                }
+
+                // Add center sample with higher weight
+                let center_weight = config.center_weight;
+                accumulated = accumulated + center_color * center_weight;
+                total_weight += center_weight;
+
+                if total_weight > 0.0 {
+                    result[idx] = accumulated / total_weight;
+                } else {
+                    result[idx] = center_color;
+                }
+            }
+        }
+
+        result
+    }
+}
+
+// =============================================================================
+// Scattered as Gathered Motion Blur
+// =============================================================================
+
+/// Advanced motion blur using scatter simulation
+struct ScatteredAsGathered {
+    max_scatter_samples: u32,
+    depth_threshold: f32,
+}
+
+impl ScatteredAsGathered {
+    pub fn new(max_samples: u32) -> Self {
+        Self {
+            max_scatter_samples: max_samples,
+            depth_threshold: 0.01,
+        }
+    }
+
+    /// Calculate background velocity contribution
+    fn background_contribution(
+        &self,
+        sample_pos: Vec2,
+        center_pos: Vec2,
+        velocity: Vec2,
+        depth_diff: f32
+    ) -> f32 {
+        if depth_diff < -self.depth_threshold {
+            // Sample is in front (foreground)
+            return 0.0;
+        }
+
+        let to_center = center_pos - sample_pos;
+        let vel_length = velocity.length();
+
+        if vel_length < 0.001 {
+            return 0.0;
+        }
+
+        let vel_dir = velocity / vel_length;
+        let proj = to_center.dot(vel_dir);
+
+        // Check if center is within blur path
+        if proj < 0.0 || proj > vel_length {
+            return 0.0;
+        }
+
+        // Perpendicular distance
+        let perp = (to_center - vel_dir * proj).length();
+        if perp > 1.0 {
+            return 0.0;
+        }
+
+        1.0 - perp
+    }
+
+    /// Apply scattered-as-gathered blur
+    pub fn apply(
+        &self,
+        color: &[Vec4],
+        velocity: &[Vec2],
+        depth: &[f32],
+        tiles: &TileBasedBlur,
+        width: u32,
+        height: u32,
+        config: &MotionBlurConfig
+    ) -> Vec<Vec4> {
+        let mut result = vec![Vec4::ZERO; color.len()];
+
+        for y in 0..height {
+            for x in 0..width {
+                let idx = (y * width + x) as usize;
+                let center_color = color[idx];
+                let center_velocity = velocity[idx];
+                let center_depth = depth[idx];
+                let center_pos = Vec2::new(x as f32, y as f32);
+
+                // Get tile max velocity for search radius
+                let tile = tiles.get_tile(x, y);
+                let max_vel = tile.max_velocity.length().max(center_velocity.length());
+
+                if max_vel < config.min_velocity {
+                    result[idx] = center_color;
+                    continue;
+                }
+
+                let search_radius = max_vel.min(config.max_velocity) as i32;
+
+                let mut accumulated = center_color * config.center_weight;
+                let mut total_weight = config.center_weight;
+
+                // Gather from nearby pixels that might scatter to us
+                let step = (search_radius / self.max_scatter_samples as i32).max(1);
+
+                for dy in (-search_radius..=search_radius).step_by(step as usize) {
+                    for dx in (-search_radius..=search_radius).step_by(step as usize) {
+                        if dx == 0 && dy == 0 {
+                            continue;
+                        }
+
+                        let sx = (x as i32 + dx).max(0).min(width as i32 - 1) as u32;
+                        let sy = (y as i32 + dy).max(0).min(height as i32 - 1) as u32;
+                        let sample_idx = (sy * width + sx) as usize;
+
+                        let sample_color = color[sample_idx];
+                        let sample_velocity = velocity[sample_idx] * config.velocity_scale;
+                        let sample_depth = depth[sample_idx];
+                        let sample_pos = Vec2::new(sx as f32, sy as f32);
+
+                        let depth_diff = sample_depth - center_depth;
+
+                        let contrib = self.background_contribution(
+                            sample_pos,
+                            center_pos,
+                            sample_velocity,
+                            depth_diff
+                        );
+
+                        if contrib > 0.001 {
+                            accumulated = accumulated + sample_color * contrib;
+                            total_weight += contrib;
+                        }
+                    }
+                }
+
+                if total_weight > 0.0 {
+                    result[idx] = accumulated / total_weight;
+                } else {
+                    result[idx] = center_color;
+                }
+            }
+        }
+
+        result
+    }
+}
+
+// =============================================================================
+// Camera Motion Blur
+// =============================================================================
+
+/// Camera motion blur types
+@[repr(u8)]
+enum CameraMotionType {
+    Translation,    // Camera movement
+    Rotation,       // Camera rotation
+    Zoom,           // Dolly zoom
+    Combined,       // All motion types
+}
+
+/// Camera motion blur processor
+struct CameraMotionBlur {
+    motion_type: CameraMotionType,
+    rotation_center: Vec2,      // Center of rotation
+    zoom_center: Vec2,          // Center of zoom
+}
+
+impl CameraMotionBlur {
+    pub fn new() -> Self {
+        Self {
+            motion_type: CameraMotionType::Combined,
+            rotation_center: Vec2::new(0.5, 0.5),
+            zoom_center: Vec2::new(0.5, 0.5),
+        }
+    }
+
+    /// Calculate radial blur velocity
+    pub fn radial_velocity(&self, uv: Vec2, strength: f32) -> Vec2 {
+        let to_center = self.zoom_center - uv;
+        to_center * strength
+    }
+
+    /// Calculate rotational blur velocity
+    pub fn rotational_velocity(&self, uv: Vec2, angle: f32) -> Vec2 {
+        let to_center = uv - self.rotation_center;
+        let perpendicular = Vec2::new(-to_center.y, to_center.x);
+        perpendicular * angle
+    }
+
+    /// Apply camera motion blur
+    pub fn apply(
+        &self,
+        color: &[Vec4],
+        translation_velocity: Vec2,
+        rotation_angle: f32,
+        zoom_strength: f32,
+        width: u32,
+        height: u32,
+        config: &MotionBlurConfig
+    ) -> Vec<Vec4> {
+        let mut result = vec![Vec4::ZERO; color.len()];
+        let sample_count = config.sample_count;
+        let inv_samples = 1.0 / sample_count as f32;
+
+        for y in 0..height {
+            for x in 0..width {
+                let idx = (y * width + x) as usize;
+                let uv = Vec2::new(
+                    x as f32 / width as f32,
+                    y as f32 / height as f32
+                );
+
+                // Calculate combined velocity
+                let mut velocity = Vec2::ZERO;
+
+                match self.motion_type {
+                    CameraMotionType::Translation => {
+                        velocity = translation_velocity;
+                    },
+                    CameraMotionType::Rotation => {
+                        velocity = self.rotational_velocity(uv, rotation_angle);
+                    },
+                    CameraMotionType::Zoom => {
+                        velocity = self.radial_velocity(uv, zoom_strength);
+                    },
+                    CameraMotionType::Combined => {
+                        velocity = translation_velocity
+                            + self.rotational_velocity(uv, rotation_angle)
+                            + self.radial_velocity(uv, zoom_strength);
+                    },
+                }
+
+                velocity = velocity * config.velocity_scale;
+                let vel_length = velocity.length();
+
+                if vel_length < config.min_velocity / width as f32 {
+                    result[idx] = color[idx];
+                    continue;
+                }
+
+                let mut accumulated = Vec4::ZERO;
+
+                for i in 0..sample_count {
+                    let t = (i as f32 + 0.5) * inv_samples - 0.5;
+                    let sample_uv = uv + velocity * t;
+
+                    let sample_x = ((sample_uv.x * width as f32) as i32)
+                        .max(0).min(width as i32 - 1) as u32;
+                    let sample_y = ((sample_uv.y * height as f32) as i32)
+                        .max(0).min(height as i32 - 1) as u32;
+                    let sample_idx = (sample_y * width + sample_x) as usize;
+
+                    accumulated = accumulated + color[sample_idx];
+                }
+
+                result[idx] = accumulated * inv_samples;
+            }
+        }
+
+        result
+    }
+}
+
+// =============================================================================
+// Motion Blur Renderer
+// =============================================================================
+
+/// Main motion blur renderer
+struct MotionBlurRenderer {
+    config: MotionBlurConfig,
+    velocity_buffer: VelocityBuffer,
+    tiles: Option<TileBasedBlur>,
+    reconstruction_filter: ReconstructionFilter,
+    scattered_gather: ScatteredAsGathered,
+    camera_blur: CameraMotionBlur,
+    object_motion: ObjectMotionBuffer,
+}
+
+impl MotionBlurRenderer {
+    /// Create new motion blur renderer
+    pub fn new(width: u32, height: u32, config: MotionBlurConfig) -> Self {
+        let tiles = if matches!(config.algorithm,
+            MotionBlurAlgorithm::TileBasedVelocity |
+            MotionBlurAlgorithm::ScatteredAsGathered) {
+            Some(TileBasedBlur::new(width, height, config.tile_size))
+        } else {
+            None
+        };
+
+        Self {
+            velocity_buffer: VelocityBuffer::new(width, height, VelocityFormat::RG16F),
+            tiles,
+            reconstruction_filter: ReconstructionFilter::new(config.sample_count),
+            scattered_gather: ScatteredAsGathered::new(64),
+            camera_blur: CameraMotionBlur::new(),
+            object_motion: ObjectMotionBuffer::new(1024),
+            config,
+        }
+    }
+
+    /// Update configuration
+    pub fn set_config(&mut self, config: MotionBlurConfig) {
+        if config.tile_size != self.config.tile_size {
+            if let Some(ref mut tiles) = self.tiles {
+                *tiles = TileBasedBlur::new(
+                    self.velocity_buffer.width,
+                    self.velocity_buffer.height,
+                    config.tile_size
+                );
+            }
+        }
+        self.reconstruction_filter = ReconstructionFilter::new(config.sample_count);
+        self.config = config;
+    }
+
+    /// Calculate shutter exposure factor
+    fn shutter_exposure(&self) -> f32 {
+        (self.config.shutter_angle / 360.0) * self.config.exposure_time
+    }
+
+    /// Render motion blur
+    pub fn render(
+        &mut self,
+        color: &[Vec4],
+        velocity: &[Vec2],
+        depth: &[f32],
+        width: u32,
+        height: u32
+    ) -> Vec<Vec4> {
+        if !self.config.enabled {
+            return color.to_vec();
+        }
+
+        // Scale velocities by shutter
+        let shutter = self.shutter_exposure();
+        let scaled_velocity: Vec<Vec2> = velocity.iter()
+            .map(|v| *v * shutter * self.config.velocity_scale)
+            .collect();
+
+        // Clamp velocities to max
+        let clamped_velocity: Vec<Vec2> = scaled_velocity.iter()
+            .map(|v| {
+                let len = v.length();
+                if len > self.config.max_velocity {
+                    *v * (self.config.max_velocity / len)
+                } else {
+                    *v
+                }
+            })
+            .collect();
+
+        // Generate tiles if needed
+        if let Some(ref mut tiles) = self.tiles {
+            tiles.generate_tiles(&clamped_velocity, width, height);
+            tiles.expand_tiles();
+        }
+
+        match self.config.algorithm {
+            MotionBlurAlgorithm::LinearBlur => {
+                self.linear_blur(color, &clamped_velocity, width, height)
+            },
+            MotionBlurAlgorithm::RadialBlur => {
+                self.camera_blur.apply(
+                    color,
+                    Vec2::ZERO,
+                    0.0,
+                    0.1,
+                    width, height,
+                    &self.config
+                )
+            },
+            MotionBlurAlgorithm::PerPixelVelocity => {
+                self.per_pixel_blur(color, &clamped_velocity, width, height)
+            },
+            MotionBlurAlgorithm::TileBasedVelocity => {
+                self.tile_based_blur(color, &clamped_velocity, depth, width, height)
+            },
+            MotionBlurAlgorithm::ScatteredAsGathered => {
+                if let Some(ref tiles) = self.tiles {
+                    self.scattered_gather.apply(
+                        color, &clamped_velocity, depth, tiles,
+                        width, height, &self.config
+                    )
+                } else {
+                    self.per_pixel_blur(color, &clamped_velocity, width, height)
+                }
+            },
+            MotionBlurAlgorithm::ReconstructionFilter => {
+                self.reconstruction_filter.apply(
+                    color, &clamped_velocity, depth,
+                    width, height, &self.config
+                )
+            },
+            MotionBlurAlgorithm::DeepMotionBlur => {
+                self.deep_motion_blur(color, &clamped_velocity, depth, width, height)
+            },
+            MotionBlurAlgorithm::RotationalBlur => {
+                self.camera_blur.motion_type = CameraMotionType::Rotation;
+                self.camera_blur.apply(
+                    color, Vec2::ZERO, 0.05, 0.0,
+                    width, height, &self.config
+                )
+            },
+            MotionBlurAlgorithm::ObjectBlur => {
+                self.per_pixel_blur(color, &clamped_velocity, width, height)
+            },
+        }
+    }
+
+    /// Simple linear blur
+    fn linear_blur(
+        &self,
+        color: &[Vec4],
+        velocity: &[Vec2],
+        width: u32,
+        height: u32
+    ) -> Vec<Vec4> {
+        let mut result = vec![Vec4::ZERO; color.len()];
+        let sample_count = self.config.sample_count;
+        let inv_samples = 1.0 / sample_count as f32;
+
+        for y in 0..height {
+            for x in 0..width {
+                let idx = (y * width + x) as usize;
+                let vel = velocity[idx];
+
+                if vel.length() < self.config.min_velocity {
+                    result[idx] = color[idx];
+                    continue;
+                }
+
+                let mut accumulated = Vec4::ZERO;
+
+                for i in 0..sample_count {
+                    let t = (i as f32 + 0.5) * inv_samples - 0.5;
+                    let offset = vel * t;
+
+                    let sx = ((x as f32 + offset.x) as i32)
+                        .max(0).min(width as i32 - 1) as u32;
+                    let sy = ((y as f32 + offset.y) as i32)
+                        .max(0).min(height as i32 - 1) as u32;
+
+                    accumulated = accumulated + color[(sy * width + sx) as usize];
+                }
+
+                result[idx] = accumulated * inv_samples;
+            }
+        }
+
+        result
+    }
+
+    /// Per-pixel velocity blur
+    fn per_pixel_blur(
+        &self,
+        color: &[Vec4],
+        velocity: &[Vec2],
+        width: u32,
+        height: u32
+    ) -> Vec<Vec4> {
+        let mut result = vec![Vec4::ZERO; color.len()];
+        let sample_count = self.config.sample_count;
+
+        for y in 0..height {
+            for x in 0..width {
+                let idx = (y * width + x) as usize;
+                let vel = velocity[idx];
+                let vel_length = vel.length();
+
+                if vel_length < self.config.min_velocity {
+                    result[idx] = color[idx];
+                    continue;
+                }
+
+                // Adjust sample count based on velocity
+                let adaptive_samples = ((vel_length / 8.0) as u32)
+                    .max(4)
+                    .min(sample_count);
+                let inv_samples = 1.0 / adaptive_samples as f32;
+
+                let mut accumulated = Vec4::ZERO;
+                let mut total_weight = 0.0;
+
+                for i in 0..adaptive_samples {
+                    let t = (i as f32 + 0.5) * inv_samples - 0.5;
+                    let weight = 1.0 - t.abs() * 0.5; // Reduce weight at extremes
+                    let offset = vel * t;
+
+                    let sx = ((x as f32 + offset.x) as i32)
+                        .max(0).min(width as i32 - 1) as u32;
+                    let sy = ((y as f32 + offset.y) as i32)
+                        .max(0).min(height as i32 - 1) as u32;
+
+                    accumulated = accumulated + color[(sy * width + sx) as usize] * weight;
+                    total_weight += weight;
+                }
+
+                result[idx] = accumulated / total_weight;
+            }
+        }
+
+        result
+    }
+
+    /// Tile-based blur with depth awareness
+    fn tile_based_blur(
+        &self,
+        color: &[Vec4],
+        velocity: &[Vec2],
+        depth: &[f32],
+        width: u32,
+        height: u32
+    ) -> Vec<Vec4> {
+        let tiles = match &self.tiles {
+            Some(t) => t,
+            None => return self.per_pixel_blur(color, velocity, width, height),
+        };
+
+        let mut result = vec![Vec4::ZERO; color.len()];
+        let sample_count = self.config.sample_count;
+        let inv_samples = 1.0 / sample_count as f32;
+
+        for y in 0..height {
+            for x in 0..width {
+                let idx = (y * width + x) as usize;
+                let tile = tiles.get_tile(x, y);
+                let pixel_vel = velocity[idx];
+                let pixel_depth = depth[idx];
+
+                // Use max of tile and pixel velocity
+                let blur_vel = if tile.max_velocity.length() > pixel_vel.length() {
+                    tile.max_velocity
+                } else {
+                    pixel_vel
+                };
+
+                let vel_length = blur_vel.length();
+
+                if vel_length < self.config.min_velocity {
+                    result[idx] = color[idx];
+                    continue;
+                }
+
+                let mut accumulated = Vec4::ZERO;
+                let mut total_weight = 0.0;
+
+                for i in 0..sample_count {
+                    let t = (i as f32 + 0.5) * inv_samples - 0.5;
+                    let offset = blur_vel * t;
+
+                    let sx = ((x as f32 + offset.x) as i32)
+                        .max(0).min(width as i32 - 1) as u32;
+                    let sy = ((y as f32 + offset.y) as i32)
+                        .max(0).min(height as i32 - 1) as u32;
+                    let sample_idx = (sy * width + sx) as usize;
+
+                    let sample_depth = depth[sample_idx];
+
+                    // Depth-based weight
+                    let depth_weight = if self.config.depth_aware {
+                        let depth_diff = sample_depth - pixel_depth;
+                        if depth_diff > 0.05 {
+                            0.1 // Sample is behind, reduce contribution
+                        } else {
+                            1.0
+                        }
+                    } else {
+                        1.0
+                    };
+
+                    let weight = depth_weight * (1.0 - t.abs() * 0.3);
+                    accumulated = accumulated + color[sample_idx] * weight;
+                    total_weight += weight;
+                }
+
+                if total_weight > 0.0 {
+                    result[idx] = accumulated / total_weight;
+                } else {
+                    result[idx] = color[idx];
+                }
+            }
+        }
+
+        result
+    }
+
+    /// Deep motion blur with layer separation
+    fn deep_motion_blur(
+        &self,
+        color: &[Vec4],
+        velocity: &[Vec2],
+        depth: &[f32],
+        width: u32,
+        height: u32
+    ) -> Vec<Vec4> {
+        // Separate into depth layers
+        const NUM_LAYERS: usize = 4;
+        let mut layers: Vec<Vec<(Vec4, Vec2, f32)>> = vec![Vec::new(); NUM_LAYERS];
+
+        // Find depth range
+        let min_depth = depth.iter().cloned().fold(f32::MAX, f32::min);
+        let max_depth = depth.iter().cloned().fold(f32::MIN, f32::max);
+        let depth_range = (max_depth - min_depth).max(0.001);
+
+        // Assign pixels to layers
+        for i in 0..color.len() {
+            let normalized_depth = (depth[i] - min_depth) / depth_range;
+            let layer = ((normalized_depth * NUM_LAYERS as f32) as usize)
+                .min(NUM_LAYERS - 1);
+            layers[layer].push((color[i], velocity[i], depth[i]));
+        }
+
+        // Blur each layer independently
+        let mut result = vec![Vec4::ZERO; color.len()];
+        let sample_count = self.config.sample_count;
+        let inv_samples = 1.0 / sample_count as f32;
+
+        for y in 0..height {
+            for x in 0..width {
+                let idx = (y * width + x) as usize;
+                let pixel_depth = depth[idx];
+                let normalized_depth = (pixel_depth - min_depth) / depth_range;
+                let layer = ((normalized_depth * NUM_LAYERS as f32) as usize)
+                    .min(NUM_LAYERS - 1);
+
+                let vel = velocity[idx];
+                let vel_length = vel.length();
+
+                if vel_length < self.config.min_velocity {
+                    result[idx] = color[idx];
+                    continue;
+                }
+
+                // Only sample from same or nearby layers
+                let mut accumulated = Vec4::ZERO;
+                let mut total_weight = 0.0;
+
+                for i in 0..sample_count {
+                    let t = (i as f32 + 0.5) * inv_samples - 0.5;
+                    let offset = vel * t;
+
+                    let sx = ((x as f32 + offset.x) as i32)
+                        .max(0).min(width as i32 - 1) as u32;
+                    let sy = ((y as f32 + offset.y) as i32)
+                        .max(0).min(height as i32 - 1) as u32;
+                    let sample_idx = (sy * width + sx) as usize;
+
+                    let sample_depth = depth[sample_idx];
+                    let sample_norm_depth = (sample_depth - min_depth) / depth_range;
+                    let sample_layer = ((sample_norm_depth * NUM_LAYERS as f32) as usize)
+                        .min(NUM_LAYERS - 1);
+
+                    // Weight based on layer distance
+                    let layer_diff = (layer as i32 - sample_layer as i32).abs();
+                    let layer_weight = if layer_diff <= 1 { 1.0 } else { 0.2 };
+
+                    let weight = layer_weight * (1.0 - t.abs() * 0.3);
+                    accumulated = accumulated + color[sample_idx] * weight;
+                    total_weight += weight;
+                }
+
+                if total_weight > 0.0 {
+                    result[idx] = accumulated / total_weight;
+                } else {
+                    result[idx] = color[idx];
+                }
+            }
+        }
+
+        result
+    }
+}
+
+// =============================================================================
+// WGSL Shaders
+// =============================================================================
+
+/// Motion blur WGSL shaders
+mod shaders {
+    /// Velocity buffer generation shader
+    pub const VELOCITY_BUFFER: &str = r#"
+struct Uniforms {
+    current_vp: mat4x4<f32>,
+    previous_vp: mat4x4<f32>,
+    current_vp_inv: mat4x4<f32>,
+    jitter_current: vec2<f32>,
+    jitter_previous: vec2<f32>,
+    resolution: vec2<f32>,
+}
+
+@group(0) @binding(0) var<uniform> uniforms: Uniforms;
+@group(0) @binding(1) var depth_tex: texture_2d<f32>;
+@group(0) @binding(2) var velocity_tex: texture_storage_2d<rg16float, write>;
+
+@compute @workgroup_size(8, 8)
+fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+    let dims = textureDimensions(depth_tex);
+    if (id.x >= dims.x || id.y >= dims.y) {
+        return;
+    }
+
+    let uv = vec2<f32>(id.xy) / vec2<f32>(dims);
+    let depth = textureLoad(depth_tex, id.xy, 0).r;
+
+    // NDC position
+    let ndc = vec4<f32>(
+        uv.x * 2.0 - 1.0 - uniforms.jitter_current.x,
+        (1.0 - uv.y) * 2.0 - 1.0 - uniforms.jitter_current.y,
+        depth,
+        1.0
+    );
+
+    // World position
+    let world = uniforms.current_vp_inv * ndc;
+    let world_pos = world / world.w;
+
+    // Previous screen position
+    let prev_clip = uniforms.previous_vp * world_pos;
+    let prev_ndc = prev_clip.xy / prev_clip.w;
+
+    let prev_uv = vec2<f32>(
+        (prev_ndc.x + uniforms.jitter_previous.x + 1.0) * 0.5,
+        1.0 - (prev_ndc.y + uniforms.jitter_previous.y + 1.0) * 0.5
+    );
+
+    let velocity = (uv - prev_uv) * uniforms.resolution;
+    textureStore(velocity_tex, id.xy, vec4<f32>(velocity, 0.0, 1.0));
+}
+"#;
+
+    /// Tile velocity computation shader
+    pub const TILE_MAX_VELOCITY: &str = r#"
+struct TileParams {
+    tile_size: u32,
+    max_velocity: f32,
+    _pad0: u32,
+    _pad1: u32,
+}
+
+@group(0) @binding(0) var<uniform> params: TileParams;
+@group(0) @binding(1) var velocity_tex: texture_2d<f32>;
+@group(0) @binding(2) var tile_tex: texture_storage_2d<rg16float, write>;
+
+@compute @workgroup_size(8, 8)
+fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+    let tile_dims = textureDimensions(tile_tex);
+    if (id.x >= tile_dims.x || id.y >= tile_dims.y) {
+        return;
+    }
+
+    let vel_dims = textureDimensions(velocity_tex);
+    let start_x = id.x * params.tile_size;
+    let start_y = id.y * params.tile_size;
+
+    var max_vel = vec2<f32>(0.0);
+    var max_len = 0.0;
+
+    for (var y = start_y; y < min(start_y + params.tile_size, vel_dims.y); y++) {
+        for (var x = start_x; x < min(start_x + params.tile_size, vel_dims.x); x++) {
+            let vel = textureLoad(velocity_tex, vec2<u32>(x, y), 0).xy;
+            let len = length(vel);
+            if (len > max_len) {
+                max_vel = vel;
+                max_len = len;
+            }
+        }
+    }
+
+    // Clamp to max velocity
+    if (max_len > params.max_velocity) {
+        max_vel = max_vel * (params.max_velocity / max_len);
+    }
+
+    textureStore(tile_tex, id.xy, vec4<f32>(max_vel, 0.0, 1.0));
+}
+"#;
+
+    /// Tile neighbor expansion shader
+    pub const TILE_NEIGHBOR_MAX: &str = r#"
+@group(0) @binding(0) var tile_in: texture_2d<f32>;
+@group(0) @binding(1) var tile_out: texture_storage_2d<rg16float, write>;
+
+@compute @workgroup_size(8, 8)
+fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+    let dims = textureDimensions(tile_in);
+    if (id.x >= dims.x || id.y >= dims.y) {
+        return;
+    }
+
+    var max_vel = vec2<f32>(0.0);
+    var max_len = 0.0;
+
+    for (var dy = -1; dy <= 1; dy++) {
+        for (var dx = -1; dx <= 1; dx++) {
+            let nx = clamp(i32(id.x) + dx, 0, i32(dims.x) - 1);
+            let ny = clamp(i32(id.y) + dy, 0, i32(dims.y) - 1);
+
+            let vel = textureLoad(tile_in, vec2<u32>(u32(nx), u32(ny)), 0).xy;
+            let len = length(vel);
+            if (len > max_len) {
+                max_vel = vel;
+                max_len = len;
+            }
+        }
+    }
+
+    textureStore(tile_out, id.xy, vec4<f32>(max_vel, 0.0, 1.0));
+}
+"#;
+
+    /// Motion blur gather shader
+    pub const MOTION_BLUR_GATHER: &str = r#"
+struct MotionBlurParams {
+    sample_count: u32,
+    max_velocity: f32,
+    min_velocity: f32,
+    center_weight: f32,
+    tile_size: u32,
+    depth_scale: f32,
+    velocity_scale: f32,
+    jitter: f32,
+}
+
+@group(0) @binding(0) var<uniform> params: MotionBlurParams;
+@group(0) @binding(1) var color_tex: texture_2d<f32>;
+@group(0) @binding(2) var velocity_tex: texture_2d<f32>;
+@group(0) @binding(3) var depth_tex: texture_2d<f32>;
+@group(0) @binding(4) var tile_tex: texture_2d<f32>;
+@group(0) @binding(5) var output_tex: texture_storage_2d<rgba16float, write>;
+@group(0) @binding(6) var linear_sampler: sampler;
+
+fn soft_depth_compare(za: f32, zb: f32) -> f32 {
+    return saturate(1.0 - (za - zb) * params.depth_scale);
+}
+
+fn cone(distance: f32, velocity_len: f32) -> f32 {
+    return saturate(1.0 - distance / velocity_len);
+}
+
+fn cylinder(distance: f32, velocity_len: f32) -> f32 {
+    return 1.0 - smoothstep(0.95 * velocity_len, 1.05 * velocity_len, distance);
+}
+
+@compute @workgroup_size(8, 8)
+fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+    let dims = textureDimensions(color_tex);
+    if (id.x >= dims.x || id.y >= dims.y) {
+        return;
+    }
+
+    let uv = (vec2<f32>(id.xy) + 0.5) / vec2<f32>(dims);
+
+    // Get center sample
+    let center_color = textureLoad(color_tex, id.xy, 0);
+    let center_velocity = textureLoad(velocity_tex, id.xy, 0).xy * params.velocity_scale;
+    let center_depth = textureLoad(depth_tex, id.xy, 0).r;
+    let center_vel_len = max(length(center_velocity), 0.5);
+
+    // Get tile max velocity
+    let tile_coord = id.xy / params.tile_size;
+    let tile_velocity = textureLoad(tile_tex, tile_coord, 0).xy;
+    let tile_vel_len = length(tile_velocity);
+
+    // Skip if no significant motion
+    if (max(center_vel_len, tile_vel_len) < params.min_velocity) {
+        textureStore(output_tex, id.xy, center_color);
+        return;
+    }
+
+    // Use max of tile and pixel velocity for blur direction
+    var blur_vel = center_velocity;
+    if (tile_vel_len > center_vel_len) {
+        blur_vel = tile_velocity;
+    }
+    let blur_len = length(blur_vel);
+
+    var accumulated = vec4<f32>(0.0);
+    var total_weight = 0.0;
+    let inv_samples = 1.0 / f32(params.sample_count);
+
+    for (var i = 0u; i < params.sample_count; i++) {
+        let t = (f32(i) + 0.5 + params.jitter) * inv_samples - 0.5;
+        let offset = blur_vel * t / vec2<f32>(dims);
+        let sample_uv = uv + offset;
+
+        if (sample_uv.x < 0.0 || sample_uv.x > 1.0 ||
+            sample_uv.y < 0.0 || sample_uv.y > 1.0) {
+            continue;
+        }
+
+        let sample_pos = vec2<u32>(sample_uv * vec2<f32>(dims));
+        let sample_color = textureLoad(color_tex, sample_pos, 0);
+        let sample_velocity = textureLoad(velocity_tex, sample_pos, 0).xy * params.velocity_scale;
+        let sample_depth = textureLoad(depth_tex, sample_pos, 0).r;
+        let sample_vel_len = max(length(sample_velocity), 0.5);
+
+        let distance = length(offset * vec2<f32>(dims));
+
+        // Foreground/background weights
+        let foreground = soft_depth_compare(center_depth, sample_depth);
+        let background = soft_depth_compare(sample_depth, center_depth);
+
+        let sample_spread = cone(distance, sample_vel_len);
+        let center_spread = cylinder(distance, center_vel_len);
+
+        let weight = 2.0 * (foreground * sample_spread + background * center_spread);
+
+        accumulated += sample_color * weight;
+        total_weight += weight;
+    }
+
+    // Add center sample
+    accumulated += center_color * params.center_weight;
+    total_weight += params.center_weight;
+
+    let result = select(center_color, accumulated / total_weight, total_weight > 0.0);
+    textureStore(output_tex, id.xy, result);
+}
+"#;
+
+    /// Simple directional blur shader
+    pub const DIRECTIONAL_BLUR: &str = r#"
+struct BlurParams {
+    direction: vec2<f32>,
+    sample_count: u32,
+    strength: f32,
+}
+
+@group(0) @binding(0) var<uniform> params: BlurParams;
+@group(0) @binding(1) var input_tex: texture_2d<f32>;
+@group(0) @binding(2) var output_tex: texture_storage_2d<rgba16float, write>;
+@group(0) @binding(3) var linear_sampler: sampler;
+
+@compute @workgroup_size(8, 8)
+fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+    let dims = textureDimensions(input_tex);
+    if (id.x >= dims.x || id.y >= dims.y) {
+        return;
+    }
+
+    let uv = (vec2<f32>(id.xy) + 0.5) / vec2<f32>(dims);
+    let step = params.direction * params.strength / vec2<f32>(dims);
+
+    var accumulated = vec4<f32>(0.0);
+    let inv_samples = 1.0 / f32(params.sample_count);
+
+    for (var i = 0u; i < params.sample_count; i++) {
+        let t = (f32(i) + 0.5) * inv_samples - 0.5;
+        let sample_uv = clamp(uv + step * t, vec2<f32>(0.0), vec2<f32>(1.0));
+        accumulated += textureSampleLevel(input_tex, linear_sampler, sample_uv, 0.0);
+    }
+
+    textureStore(output_tex, id.xy, accumulated * inv_samples);
+}
+"#;
+
+    /// Radial (zoom) blur shader
+    pub const RADIAL_BLUR: &str = r#"
+struct RadialParams {
+    center: vec2<f32>,
+    sample_count: u32,
+    strength: f32,
+}
+
+@group(0) @binding(0) var<uniform> params: RadialParams;
+@group(0) @binding(1) var input_tex: texture_2d<f32>;
+@group(0) @binding(2) var output_tex: texture_storage_2d<rgba16float, write>;
+@group(0) @binding(3) var linear_sampler: sampler;
+
+@compute @workgroup_size(8, 8)
+fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+    let dims = textureDimensions(input_tex);
+    if (id.x >= dims.x || id.y >= dims.y) {
+        return;
+    }
+
+    let uv = (vec2<f32>(id.xy) + 0.5) / vec2<f32>(dims);
+    let to_center = params.center - uv;
+    let dist = length(to_center);
+
+    var accumulated = vec4<f32>(0.0);
+    let inv_samples = 1.0 / f32(params.sample_count);
+
+    for (var i = 0u; i < params.sample_count; i++) {
+        let t = f32(i) * inv_samples * params.strength * dist;
+        let sample_uv = uv + to_center * t;
+        let clamped_uv = clamp(sample_uv, vec2<f32>(0.0), vec2<f32>(1.0));
+        accumulated += textureSampleLevel(input_tex, linear_sampler, clamped_uv, 0.0);
+    }
+
+    textureStore(output_tex, id.xy, accumulated * inv_samples);
+}
+"#;
+}
+
+// =============================================================================
+// Unit Tests
+// =============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_velocity_buffer_creation() {
+        let buffer = VelocityBuffer::new(1920, 1080, VelocityFormat::RG16F);
+        assert_eq!(buffer.width, 1920);
+        assert_eq!(buffer.height, 1080);
+    }
+
+    #[test]
+    fn test_velocity_encoding_rg16f() {
+        let buffer = VelocityBuffer::new(100, 100, VelocityFormat::RG16F);
+        let velocity = Vec2::new(10.0, -5.0);
+        let encoded = buffer.encode_velocity(velocity);
+        let decoded = buffer.decode_velocity(encoded);
+
+        assert!((decoded.x - velocity.x).abs() < 0.01);
+        assert!((decoded.y - velocity.y).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_velocity_encoding_rgb10a2() {
+        let buffer = VelocityBuffer::new(100, 100, VelocityFormat::RGB10A2);
+        let velocity = Vec2::new(10.0, -5.0);
+        let encoded = buffer.encode_velocity(velocity);
+        let decoded = buffer.decode_velocity(encoded);
+
+        // RGB10A2 has less precision
+        let tolerance = 1.0;
+        assert!((decoded.x - velocity.x).abs() < tolerance);
+        assert!((decoded.y - velocity.y).abs() < tolerance);
+    }
+
+    #[test]
+    fn test_tile_generation() {
+        let mut tiles = TileBasedBlur::new(64, 64, 16);
+        let velocity = vec![Vec2::new(5.0, 0.0); 64 * 64];
+        tiles.generate_tiles(&velocity, 64, 64);
+
+        let tile = tiles.get_tile(32, 32);
+        assert!(tile.max_velocity.length() > 0.0);
+    }
+
+    #[test]
+    fn test_config_presets() {
+        let cinematic = MotionBlurConfig::cinematic();
+        assert_eq!(cinematic.shutter_angle, 180.0);
+        assert_eq!(cinematic.sample_count, 16);
+
+        let game = MotionBlurConfig::game();
+        assert_eq!(game.shutter_angle, 90.0);
+        assert_eq!(game.sample_count, 8);
+
+        let subtle = MotionBlurConfig::subtle();
+        assert_eq!(subtle.shutter_angle, 45.0);
+    }
+
+    #[test]
+    fn test_reconstruction_filter_weights() {
+        let filter = ReconstructionFilter::new(16);
+
+        // Same depth, sample in front
+        let weight = filter.sample_weight(0.5, 0.5, 10.0, 10.0, 5.0);
+        assert!(weight > 0.0);
+
+        // Sample behind (larger depth value)
+        let weight_behind = filter.sample_weight(0.6, 0.5, 10.0, 10.0, 5.0);
+        assert!(weight_behind < weight);
+    }
+
+    #[test]
+    fn test_camera_motion_blur_radial() {
+        let blur = CameraMotionBlur::new();
+
+        // Center should have no velocity
+        let center_vel = blur.radial_velocity(Vec2::new(0.5, 0.5), 1.0);
+        assert!(center_vel.length() < 0.001);
+
+        // Corner should have velocity toward center
+        let corner_vel = blur.radial_velocity(Vec2::new(0.0, 0.0), 1.0);
+        assert!(corner_vel.x > 0.0);
+        assert!(corner_vel.y > 0.0);
+    }
+
+    #[test]
+    fn test_camera_motion_blur_rotational() {
+        let blur = CameraMotionBlur::new();
+
+        // Point to right of center should have downward velocity
+        let right_vel = blur.rotational_velocity(Vec2::new(0.7, 0.5), 1.0);
+        assert!(right_vel.y.abs() > 0.0);
+
+        // Point above center should have velocity to the right
+        let top_vel = blur.rotational_velocity(Vec2::new(0.5, 0.3), 1.0);
+        assert!(top_vel.x > 0.0);
+    }
+
+    #[test]
+    fn test_object_motion() {
+        let motion = ObjectMotion {
+            object_id: 1,
+            current_transform: Mat4::translation(Vec3::new(1.0, 0.0, 0.0)),
+            previous_transform: Mat4::IDENTITY,
+            velocity_bias: Vec3::ZERO,
+            blur_scale: 1.0,
+            exclude_from_blur: false,
+        };
+
+        let view_proj = Mat4::IDENTITY;
+        let velocity = motion.calculate_velocity(Vec3::ZERO, view_proj);
+
+        // Object moved right, so velocity should be positive x
+        assert!(velocity.x > 0.0);
+    }
+
+    #[test]
+    fn test_motion_blur_renderer() {
+        let config = MotionBlurConfig::game();
+        let renderer = MotionBlurRenderer::new(256, 256, config);
+
+        let color = vec![Vec4::new(1.0, 0.0, 0.0, 1.0); 256 * 256];
+        let velocity = vec![Vec2::new(10.0, 0.0); 256 * 256];
+        let depth = vec![0.5; 256 * 256];
+
+        let result = renderer.linear_blur(&color, &velocity, 256, 256);
+
+        // Result should be valid
+        assert_eq!(result.len(), color.len());
+        assert!(result[0].x > 0.0); // Still has color
+    }
+
+    #[test]
+    fn test_linear_blur_no_velocity() {
+        let config = MotionBlurConfig::game();
+        let renderer = MotionBlurRenderer::new(64, 64, config);
+
+        let color: Vec<Vec4> = (0..64*64)
+            .map(|i| Vec4::new(i as f32 / 4096.0, 0.0, 0.0, 1.0))
+            .collect();
+        let velocity = vec![Vec2::ZERO; 64 * 64];
+
+        let result = renderer.linear_blur(&color, &velocity, 64, 64);
+
+        // With no velocity, output should equal input
+        for i in 0..result.len() {
+            assert!((result[i].x - color[i].x).abs() < 0.001);
+        }
+    }
+
+    #[test]
+    fn test_scattered_gather() {
+        let sg = ScatteredAsGathered::new(64);
+
+        // Test background contribution calculation
+        let contrib = sg.background_contribution(
+            Vec2::new(0.0, 0.0),
+            Vec2::new(10.0, 0.0),
+            Vec2::new(10.0, 0.0),
+            0.0
+        );
+
+        // Sample at (0,0) with velocity (10,0) should contribute to center at (10,0)
+        assert!(contrib > 0.0);
+    }
+
+    #[test]
+    fn test_shutter_angle_calculation() {
+        let mut config = MotionBlurConfig::cinematic();
+        config.shutter_angle = 180.0;
+        config.exposure_time = 1.0 / 24.0;
+
+        let renderer = MotionBlurRenderer::new(100, 100, config);
+        let exposure = renderer.shutter_exposure();
+
+        // 180 degree shutter = 0.5 of frame time
+        let expected = (180.0 / 360.0) * (1.0 / 24.0);
+        assert!((exposure - expected).abs() < 0.0001);
+    }
+}

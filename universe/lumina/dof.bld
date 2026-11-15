@@ -1,0 +1,1159 @@
+// BUILD Lumina - Depth of Field
+// Physically-based bokeh and cinematic DoF effects
+// Includes circular, hexagonal, and custom aperture shapes
+
+module lumina::dof;
+
+use core::simd::{Vec2, Vec3, Vec4, Mat4x4};
+use core::math::{pow, sqrt, abs, sin, cos, exp, log, PI, clamp, lerp, smoothstep, floor, ceil};
+use core::gpu::{Texture2D, TextureFormat, RenderTarget, ComputeShader};
+
+// ============================================================================
+// DOF CONFIGURATION
+// ============================================================================
+
+/// DoF quality presets
+enum DofQuality {
+    Low,        // Simple gaussian blur
+    Medium,     // Separable bokeh
+    High,       // Scatter-based bokeh
+    Ultra,      // Sprite-based gather
+    Cinematic,  // Full physically-based
+}
+
+/// Aperture blade shapes
+enum ApertureShape {
+    /// Circular aperture (ideal)
+    Circle,
+
+    /// Polygonal aperture (blade count determines shape)
+    Polygon(u32),
+
+    /// Anamorphic (oval) aperture
+    Anamorphic { ratio: f32, rotation: f32 },
+
+    /// Custom aperture from texture
+    Custom,
+}
+
+impl ApertureShape {
+    fn pentagon() -> Self { ApertureShape::Polygon(5) }
+    fn hexagon() -> Self { ApertureShape::Polygon(6) }
+    fn heptagon() -> Self { ApertureShape::Polygon(7) }
+    fn octagon() -> Self { ApertureShape::Polygon(8) }
+}
+
+/// Depth of field configuration
+struct DofConfig {
+    /// Enable DoF
+    enabled: bool,
+
+    /// Quality preset
+    quality: DofQuality,
+
+    /// Focus distance (world units)
+    focus_distance: f32,
+
+    /// Aperture f-stop (lower = more blur)
+    aperture: f32,
+
+    /// Focal length in mm
+    focal_length: f32,
+
+    /// Sensor height in mm (determines FoV relationship)
+    sensor_height: f32,
+
+    /// Maximum blur radius in pixels
+    max_blur_radius: f32,
+
+    /// Minimum blur radius threshold
+    min_blur_radius: f32,
+
+    /// Aperture shape
+    aperture_shape: ApertureShape,
+
+    /// Aperture blade curvature (for polygons)
+    blade_curvature: f32,
+
+    /// Aperture rotation angle
+    aperture_rotation: f32,
+
+    /// Enable foreground blur
+    foreground_blur: bool,
+
+    /// Foreground blur boost (makes near blur more visible)
+    foreground_boost: f32,
+
+    /// Chromatic aberration in bokeh
+    chromatic_aberration: f32,
+
+    /// Spherical aberration (cats-eye effect)
+    spherical_aberration: f32,
+
+    /// Optical vignetting
+    optical_vignetting: f32,
+
+    /// Sample count
+    sample_count: u32,
+}
+
+impl DofConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            quality: DofQuality::High,
+            focus_distance: 5.0,
+            aperture: 2.8,
+            focal_length: 50.0,
+            sensor_height: 24.0,
+            max_blur_radius: 40.0,
+            min_blur_radius: 0.5,
+            aperture_shape: ApertureShape::hexagon(),
+            blade_curvature: 0.0,
+            aperture_rotation: 0.0,
+            foreground_blur: true,
+            foreground_boost: 1.5,
+            chromatic_aberration: 0.0,
+            spherical_aberration: 0.0,
+            optical_vignetting: 0.0,
+            sample_count: 64,
+        }
+    }
+
+    fn cinematic() -> Self {
+        Self {
+            enabled: true,
+            quality: DofQuality::Cinematic,
+            focus_distance: 3.0,
+            aperture: 1.4,
+            focal_length: 85.0,
+            sensor_height: 24.0,
+            max_blur_radius: 60.0,
+            min_blur_radius: 0.5,
+            aperture_shape: ApertureShape::Polygon(9),
+            blade_curvature: 0.3,
+            aperture_rotation: 0.0,
+            foreground_blur: true,
+            foreground_boost: 2.0,
+            chromatic_aberration: 0.02,
+            spherical_aberration: 0.3,
+            optical_vignetting: 0.2,
+            sample_count: 128,
+        }
+    }
+
+    fn portrait() -> Self {
+        Self {
+            enabled: true,
+            quality: DofQuality::High,
+            focus_distance: 2.0,
+            aperture: 1.8,
+            focal_length: 85.0,
+            sensor_height: 36.0,  // Full frame
+            max_blur_radius: 80.0,
+            min_blur_radius: 0.5,
+            aperture_shape: ApertureShape::Circle,
+            blade_curvature: 0.0,
+            aperture_rotation: 0.0,
+            foreground_blur: true,
+            foreground_boost: 1.2,
+            chromatic_aberration: 0.01,
+            spherical_aberration: 0.1,
+            optical_vignetting: 0.1,
+            sample_count: 96,
+        }
+    }
+
+    fn macro_photography() -> Self {
+        Self {
+            enabled: true,
+            quality: DofQuality::Ultra,
+            focus_distance: 0.3,
+            aperture: 5.6,
+            focal_length: 100.0,
+            sensor_height: 24.0,
+            max_blur_radius: 50.0,
+            min_blur_radius: 0.5,
+            aperture_shape: ApertureShape::hexagon(),
+            blade_curvature: 0.5,
+            aperture_rotation: PI / 12.0,
+            foreground_blur: true,
+            foreground_boost: 1.0,
+            chromatic_aberration: 0.0,
+            spherical_aberration: 0.0,
+            optical_vignetting: 0.0,
+            sample_count: 64,
+        }
+    }
+}
+
+// ============================================================================
+// CIRCLE OF CONFUSION
+// ============================================================================
+
+/// Circle of Confusion calculator
+struct CocCalculator {
+    /// Focal length (mm)
+    focal_length: f32,
+
+    /// Aperture (f-number)
+    aperture: f32,
+
+    /// Focus distance (mm)
+    focus_distance: f32,
+
+    /// Sensor height (mm)
+    sensor_height: f32,
+
+    /// Screen height (pixels)
+    screen_height: f32,
+}
+
+impl CocCalculator {
+    fn new(config: &DofConfig, screen_height: f32) -> Self {
+        Self {
+            focal_length: config.focal_length,
+            aperture: config.aperture,
+            focus_distance: config.focus_distance * 1000.0,  // Convert to mm
+            sensor_height: config.sensor_height,
+            screen_height,
+        }
+    }
+
+    /// Calculate CoC diameter for a given depth (in mm)
+    fn calculate(&self, depth_mm: f32) -> f32 {
+        if depth_mm <= 0.0 {
+            return 0.0;
+        }
+
+        let f = self.focal_length;
+        let N = self.aperture;
+        let s = self.focus_distance;
+        let d = depth_mm;
+
+        // Thin lens CoC formula
+        // CoC = |S * f² * (d - s)| / (N * d * (s - f))
+        let numerator = abs(s * f * f * (d - s));
+        let denominator = N * d * (s - f);
+
+        if denominator.abs() < 0.001 {
+            return 0.0;
+        }
+
+        let coc_mm = numerator / denominator;
+
+        // Convert to pixels
+        let coc_pixels = coc_mm / self.sensor_height * self.screen_height;
+
+        coc_pixels
+    }
+
+    /// Calculate CoC from normalized depth (0-1)
+    fn calculate_from_normalized(&self, depth: f32, near: f32, far: f32) -> f32 {
+        let linear_depth = near * far / (far - depth * (far - near));
+        self.calculate(linear_depth * 1000.0)
+    }
+
+    /// Calculate signed CoC (positive = background, negative = foreground)
+    fn calculate_signed(&self, depth_mm: f32) -> f32 {
+        let coc = self.calculate(depth_mm);
+        if depth_mm < self.focus_distance {
+            -coc  // Foreground
+        } else {
+            coc   // Background
+        }
+    }
+
+    /// Hyperfocal distance
+    fn hyperfocal_distance(&self) -> f32 {
+        // H = f²/(N*c) + f
+        // Where c is the acceptable CoC (typically 0.03mm for 35mm)
+        let acceptable_coc = 0.03;  // mm
+        let f = self.focal_length;
+        let N = self.aperture;
+
+        (f * f) / (N * acceptable_coc) + f
+    }
+
+    /// Near focus limit
+    fn near_focus_limit(&self) -> f32 {
+        let H = self.hyperfocal_distance();
+        let s = self.focus_distance;
+
+        (H * s) / (H + s - self.focal_length)
+    }
+
+    /// Far focus limit
+    fn far_focus_limit(&self) -> f32 {
+        let H = self.hyperfocal_distance();
+        let s = self.focus_distance;
+
+        if s >= H {
+            f32::INFINITY
+        } else {
+            (H * s) / (H - s + self.focal_length)
+        }
+    }
+}
+
+// ============================================================================
+// BOKEH SAMPLING
+// ============================================================================
+
+/// Bokeh sample pattern generator
+struct BokehSampler {
+    /// Sample positions (normalized to unit disk)
+    samples: Vec<Vec2>,
+
+    /// Sample weights
+    weights: Vec<f32>,
+
+    /// Aperture shape function
+    shape: ApertureShape,
+}
+
+impl BokehSampler {
+    fn new(sample_count: u32, shape: ApertureShape, blade_curvature: f32, rotation: f32) -> Self {
+        let samples = Self::generate_samples(sample_count, &shape, blade_curvature, rotation);
+        let weights = vec![1.0 / sample_count as f32; sample_count as usize];
+
+        Self {
+            samples,
+            weights,
+            shape,
+        }
+    }
+
+    /// Generate sample positions for given aperture shape
+    fn generate_samples(count: u32, shape: &ApertureShape, curvature: f32, rotation: f32) -> Vec<Vec2> {
+        match shape {
+            ApertureShape::Circle => {
+                Self::generate_disk_samples(count)
+            }
+            ApertureShape::Polygon(blades) => {
+                Self::generate_polygon_samples(count, *blades, curvature, rotation)
+            }
+            ApertureShape::Anamorphic { ratio, rotation: ana_rot } => {
+                Self::generate_anamorphic_samples(count, *ratio, *ana_rot + rotation)
+            }
+            ApertureShape::Custom => {
+                // Would sample from texture
+                Self::generate_disk_samples(count)
+            }
+        }
+    }
+
+    /// Generate samples on unit disk (circular aperture)
+    fn generate_disk_samples(count: u32) -> Vec<Vec2> {
+        let mut samples = Vec::with_capacity(count as usize);
+
+        // Fibonacci spiral for uniform distribution
+        let golden_angle = PI * (3.0 - sqrt(5.0));
+
+        for i in 0..count {
+            let r = sqrt((i as f32 + 0.5) / count as f32);
+            let theta = golden_angle * i as f32;
+
+            samples.push(Vec2::new(r * cos(theta), r * sin(theta)));
+        }
+
+        samples
+    }
+
+    /// Generate samples for polygonal aperture
+    fn generate_polygon_samples(count: u32, blades: u32, curvature: f32, rotation: f32) -> Vec<Vec2> {
+        let mut samples = Vec::with_capacity(count as usize);
+        let blade_angle = 2.0 * PI / blades as f32;
+
+        for i in 0..count {
+            // Start with disk sample
+            let r = sqrt((i as f32 + 0.5) / count as f32);
+            let theta = (PI * (3.0 - sqrt(5.0))) * i as f32 + rotation;
+
+            // Map to polygon
+            let sector = (theta / blade_angle).floor();
+            let local_angle = theta - sector * blade_angle - blade_angle / 2.0;
+
+            // Polygon edge distance
+            let edge_dist = cos(blade_angle / 2.0) / cos(local_angle);
+
+            // Apply curvature (makes edges rounder)
+            let curved_dist = lerp(edge_dist, 1.0, curvature);
+
+            // Scale radius
+            let scaled_r = r * curved_dist.min(1.0);
+
+            samples.push(Vec2::new(scaled_r * cos(theta), scaled_r * sin(theta)));
+        }
+
+        samples
+    }
+
+    /// Generate samples for anamorphic (oval) aperture
+    fn generate_anamorphic_samples(count: u32, ratio: f32, rotation: f32) -> Vec<Vec2> {
+        let mut samples = Vec::with_capacity(count as usize);
+
+        for i in 0..count {
+            let r = sqrt((i as f32 + 0.5) / count as f32);
+            let theta = (PI * (3.0 - sqrt(5.0))) * i as f32 + rotation;
+
+            // Stretch horizontally
+            let x = r * cos(theta) * ratio;
+            let y = r * sin(theta);
+
+            samples.push(Vec2::new(x, y));
+        }
+
+        samples
+    }
+
+    /// Get sample offset for given pixel
+    fn get_sample(&self, index: usize, blur_radius: f32) -> Vec2 {
+        let sample = &self.samples[index % self.samples.len()];
+        Vec2::new(sample.x * blur_radius, sample.y * blur_radius)
+    }
+}
+
+// ============================================================================
+// DOF RENDERING
+// ============================================================================
+
+/// Main DoF renderer
+struct DofRenderer {
+    config: DofConfig,
+    coc_calculator: CocCalculator,
+    bokeh_sampler: BokehSampler,
+
+    // Work buffers
+    coc_buffer: Texture2D,
+    near_field: Texture2D,
+    far_field: Texture2D,
+    combined: Texture2D,
+}
+
+impl DofRenderer {
+    fn new(config: DofConfig, width: u32, height: u32) -> Self {
+        let coc_calculator = CocCalculator::new(&config, height as f32);
+        let bokeh_sampler = BokehSampler::new(
+            config.sample_count,
+            config.aperture_shape.clone(),
+            config.blade_curvature,
+            config.aperture_rotation
+        );
+
+        Self {
+            config: config.clone(),
+            coc_calculator,
+            bokeh_sampler,
+            coc_buffer: Texture2D::new(width, height, TextureFormat::RG16F),  // CoC + signed
+            near_field: Texture2D::new(width / 2, height / 2, TextureFormat::RGBA16F),
+            far_field: Texture2D::new(width / 2, height / 2, TextureFormat::RGBA16F),
+            combined: Texture2D::new(width, height, TextureFormat::RGBA16F),
+        }
+    }
+
+    /// Execute DoF pipeline
+    fn execute(&self, color: &Texture2D, depth: &Texture2D, output: &Texture2D, near: f32, far: f32) {
+        if !self.config.enabled {
+            // Just copy
+            return;
+        }
+
+        // 1. Compute CoC for each pixel
+        self.compute_coc(depth, near, far);
+
+        // 2. Separate near and far fields
+        self.separate_fields(color);
+
+        // 3. Blur far field
+        self.blur_far_field();
+
+        // 4. Blur near field
+        if self.config.foreground_blur {
+            self.blur_near_field();
+        }
+
+        // 5. Composite
+        self.composite(color, output);
+    }
+
+    /// Compute CoC buffer
+    fn compute_coc(&self, depth: &Texture2D, near: f32, far: f32) {
+        // For each pixel, compute CoC using thin lens formula
+        // Store signed CoC (negative for foreground)
+    }
+
+    /// Separate near and far fields
+    fn separate_fields(&self, color: &Texture2D) {
+        // Near field: pixels with negative CoC (in front of focus)
+        // Far field: pixels with positive CoC (behind focus)
+    }
+
+    /// Blur far field (background)
+    fn blur_far_field(&self) {
+        // Standard gather-based bokeh blur
+        // Uses sample pattern from bokeh_sampler
+    }
+
+    /// Blur near field (foreground)
+    fn blur_near_field(&self) {
+        // Foreground needs special handling
+        // Blur should "bleed" outward, not inward
+    }
+
+    /// Composite all layers
+    fn composite(&self, original: &Texture2D, output: &Texture2D) {
+        // Blend near, in-focus, and far regions
+        // Handle transitions smoothly
+    }
+}
+
+// ============================================================================
+// SCATTER-BASED DOF
+// ============================================================================
+
+/// Scatter-based DoF (more accurate, slower)
+struct ScatterDof {
+    config: DofConfig,
+
+    /// Tile size for scatter optimization
+    tile_size: u32,
+
+    /// Max scatter radius per tile
+    tile_coc: Texture2D,
+}
+
+impl ScatterDof {
+    fn new(config: DofConfig, width: u32, height: u32) -> Self {
+        let tile_size = 8;
+        let tile_w = (width + tile_size - 1) / tile_size;
+        let tile_h = (height + tile_size - 1) / tile_size;
+
+        Self {
+            config,
+            tile_size,
+            tile_coc: Texture2D::new(tile_w, tile_h, TextureFormat::R16F),
+        }
+    }
+
+    /// Execute scatter DoF
+    fn execute(&self, color: &Texture2D, depth: &Texture2D, coc: &Texture2D, output: &Texture2D) {
+        // 1. Compute per-tile max CoC
+        self.compute_tile_coc(coc);
+
+        // 2. For each bright pixel, scatter to neighbors based on CoC
+        self.scatter_bokeh(color, coc, output);
+    }
+
+    fn compute_tile_coc(&self, coc: &Texture2D) {
+        // Find max CoC in each tile
+        // Used to optimize scatter radius
+    }
+
+    fn scatter_bokeh(&self, color: &Texture2D, coc: &Texture2D, output: &Texture2D) {
+        // For each pixel with CoC > threshold:
+        // Splat bokeh shape to affected pixels
+    }
+}
+
+// ============================================================================
+// SPRITE-BASED DOF
+// ============================================================================
+
+/// Sprite-based DoF (highest quality)
+struct SpriteDof {
+    config: DofConfig,
+
+    /// Bokeh sprite texture
+    bokeh_sprite: Texture2D,
+
+    /// Vertex buffer for bokeh sprites
+    sprite_buffer: Vec<BokehSprite>,
+}
+
+struct BokehSprite {
+    position: Vec2,
+    size: f32,
+    color: Vec3,
+    rotation: f32,
+}
+
+impl SpriteDof {
+    fn new(config: DofConfig) -> Self {
+        Self {
+            config: config.clone(),
+            bokeh_sprite: Self::generate_sprite(&config),
+            sprite_buffer: Vec::new(),
+        }
+    }
+
+    /// Generate bokeh sprite texture
+    fn generate_sprite(config: &DofConfig) -> Texture2D {
+        let size = 64;
+        let mut texture = Texture2D::new(size, size, TextureFormat::RGBA8);
+
+        let center = size as f32 / 2.0;
+
+        for y in 0..size {
+            for x in 0..size {
+                let dx = x as f32 - center;
+                let dy = y as f32 - center;
+                let dist = sqrt(dx * dx + dy * dy) / center;
+                let angle = atan2(dy, dx);
+
+                let alpha = match &config.aperture_shape {
+                    ApertureShape::Circle => {
+                        if dist <= 1.0 { 1.0 } else { 0.0 }
+                    }
+                    ApertureShape::Polygon(blades) => {
+                        let blade_angle = 2.0 * PI / *blades as f32;
+                        let sector_angle = angle - (angle / blade_angle).floor() * blade_angle - blade_angle / 2.0;
+                        let edge_dist = cos(blade_angle / 2.0) / cos(sector_angle);
+                        if dist <= edge_dist { 1.0 } else { 0.0 }
+                    }
+                    ApertureShape::Anamorphic { ratio, rotation } => {
+                        let rx = (dx * cos(*rotation) + dy * sin(*rotation)) / center / ratio;
+                        let ry = (-dx * sin(*rotation) + dy * cos(*rotation)) / center;
+                        if rx * rx + ry * ry <= 1.0 { 1.0 } else { 0.0 }
+                    }
+                    ApertureShape::Custom => 1.0,
+                };
+
+                // Apply edge softness
+                let soft_alpha = if dist > 0.9 && dist <= 1.0 {
+                    alpha * smoothstep(1.0, 0.9, dist)
+                } else {
+                    alpha
+                };
+
+                // Store in texture
+                // texture.set_pixel(x, y, soft_alpha);
+            }
+        }
+
+        texture
+    }
+
+    /// Collect bokeh sprites from bright pixels
+    fn collect_sprites(&mut self, color: &Texture2D, coc: &Texture2D, threshold: f32) {
+        self.sprite_buffer.clear();
+
+        // Scan for bright pixels with significant CoC
+        // Create sprite for each
+    }
+
+    /// Render sprites
+    fn render_sprites(&self, output: &Texture2D) {
+        // Sort sprites by depth (back to front)
+        // Render each sprite with additive blending
+    }
+}
+
+// ============================================================================
+// CATS-EYE EFFECT
+// ============================================================================
+
+/// Optical vignetting (cats-eye bokeh)
+struct CatsEyeEffect {
+    /// Vignetting strength
+    strength: f32,
+
+    /// Optical center offset
+    center_offset: Vec2,
+}
+
+impl CatsEyeEffect {
+    fn new(strength: f32) -> Self {
+        Self {
+            strength,
+            center_offset: Vec2::zero(),
+        }
+    }
+
+    /// Calculate cats-eye clipping at a screen position
+    fn calculate_clipping(&self, screen_pos: Vec2, screen_size: Vec2) -> f32 {
+        let centered = screen_pos - screen_size * 0.5 - self.center_offset;
+        let normalized = centered / (screen_size * 0.5);
+
+        let dist_from_center = sqrt(normalized.x * normalized.x + normalized.y * normalized.y);
+
+        // Clipping increases toward edges
+        let clip_factor = smoothstep(0.5, 1.0, dist_from_center);
+
+        1.0 - clip_factor * self.strength
+    }
+
+    /// Apply cats-eye to bokeh sample
+    fn apply_to_sample(&self, sample_offset: Vec2, pixel_pos: Vec2, screen_size: Vec2) -> Vec2 {
+        let clip = self.calculate_clipping(pixel_pos, screen_size);
+
+        // Squeeze samples radially toward center
+        let sample_dir = sample_offset.normalize();
+        let sample_len = sample_offset.length();
+
+        sample_dir * sample_len * clip
+    }
+}
+
+// ============================================================================
+// CHROMATIC ABERRATION DOF
+// ============================================================================
+
+/// Longitudinal chromatic aberration in bokeh
+struct ChromaticDof {
+    /// Separation amount
+    separation: f32,
+
+    /// Per-channel CoC multipliers
+    channel_coc: Vec3,
+}
+
+impl ChromaticDof {
+    fn new(separation: f32) -> Self {
+        Self {
+            separation,
+            channel_coc: Vec3::new(1.0 + separation, 1.0, 1.0 - separation),
+        }
+    }
+
+    /// Get per-channel CoC
+    fn get_coc(&self, base_coc: f32) -> Vec3 {
+        Vec3::new(
+            base_coc * self.channel_coc.x,
+            base_coc * self.channel_coc.y,
+            base_coc * self.channel_coc.z
+        )
+    }
+}
+
+// ============================================================================
+// AUTOFOCUS
+// ============================================================================
+
+/// Autofocus system
+struct Autofocus {
+    /// Current focus distance
+    focus_distance: f32,
+
+    /// Target focus distance
+    target_distance: f32,
+
+    /// Focus speed
+    speed: f32,
+
+    /// Focus region center (normalized)
+    focus_point: Vec2,
+
+    /// Focus region size
+    region_size: f32,
+
+    /// Enable continuous autofocus
+    continuous: bool,
+
+    /// Focus mode
+    mode: AutofocusMode,
+}
+
+enum AutofocusMode {
+    /// Focus on center
+    Center,
+
+    /// Focus on specific point
+    Point,
+
+    /// Focus on nearest object
+    Nearest,
+
+    /// Focus on face (if available)
+    Face,
+
+    /// Manual focus
+    Manual,
+}
+
+impl Autofocus {
+    fn new() -> Self {
+        Self {
+            focus_distance: 5.0,
+            target_distance: 5.0,
+            speed: 2.0,
+            focus_point: Vec2::new(0.5, 0.5),
+            region_size: 0.1,
+            continuous: true,
+            mode: AutofocusMode::Center,
+        }
+    }
+
+    /// Update autofocus
+    fn update(&mut self, depth_buffer: &Texture2D, delta_time: f32, near: f32, far: f32) {
+        if !self.continuous && self.mode != AutofocusMode::Manual {
+            return;
+        }
+
+        // Sample depth at focus region
+        let sampled_depth = self.sample_focus_region(depth_buffer, near, far);
+
+        // Update target
+        match self.mode {
+            AutofocusMode::Center | AutofocusMode::Point => {
+                self.target_distance = sampled_depth;
+            }
+            AutofocusMode::Nearest => {
+                // Find nearest depth in region
+                self.target_distance = self.find_nearest_depth(depth_buffer, near, far);
+            }
+            AutofocusMode::Face => {
+                // Would use face detection
+                self.target_distance = sampled_depth;
+            }
+            AutofocusMode::Manual => {
+                // Don't update
+            }
+        }
+
+        // Smoothly interpolate to target
+        let diff = self.target_distance - self.focus_distance;
+        self.focus_distance += diff * (1.0 - exp(-self.speed * delta_time));
+    }
+
+    fn sample_focus_region(&self, depth: &Texture2D, near: f32, far: f32) -> f32 {
+        // Sample multiple points in focus region and average
+        // Returns linear depth
+        5.0  // Placeholder
+    }
+
+    fn find_nearest_depth(&self, depth: &Texture2D, near: f32, far: f32) -> f32 {
+        // Find minimum depth in focus region
+        5.0  // Placeholder
+    }
+}
+
+// ============================================================================
+// WGSL SHADERS
+// ============================================================================
+
+const DOF_COC_SHADER: &str = r#"
+// DoF Circle of Confusion Calculation
+
+struct DofParams {
+    focus_distance: f32,
+    aperture: f32,
+    focal_length: f32,
+    sensor_height: f32,
+    near_plane: f32,
+    far_plane: f32,
+    max_coc: f32,
+    padding: f32,
+}
+
+@group(0) @binding(0) var<uniform> params: DofParams;
+@group(0) @binding(1) var depth_texture: texture_2d<f32>;
+@group(0) @binding(2) var depth_sampler: sampler;
+
+fn linear_depth(d: f32) -> f32 {
+    return params.near_plane * params.far_plane /
+        (params.far_plane - d * (params.far_plane - params.near_plane));
+}
+
+fn calculate_coc(depth: f32) -> f32 {
+    let f = params.focal_length;
+    let N = params.aperture;
+    let s = params.focus_distance * 1000.0;  // Convert to mm
+    let d = depth * 1000.0;
+
+    let numerator = abs(s * f * f * (d - s));
+    let denominator = N * d * (s - f);
+
+    if (abs(denominator) < 0.001) {
+        return 0.0;
+    }
+
+    let coc_mm = numerator / denominator;
+    return clamp(coc_mm / params.sensor_height * 1080.0, -params.max_coc, params.max_coc);
+}
+
+struct VertexOutput {
+    @builtin(position) position: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+}
+
+@fragment
+fn fs_main(input: VertexOutput) -> @location(0) vec2<f32> {
+    let depth_sample = textureSample(depth_texture, depth_sampler, input.uv).r;
+    let linear_d = linear_depth(depth_sample);
+    let coc = calculate_coc(linear_d);
+
+    // Store CoC and sign (for near/far separation)
+    let signed_coc = select(coc, -coc, linear_d < params.focus_distance);
+    return vec2<f32>(abs(coc), signed_coc);
+}
+"#;
+
+const DOF_DOWNSAMPLE_SHADER: &str = r#"
+// DoF Downsample with CoC-aware filtering
+
+@group(0) @binding(0) var color_texture: texture_2d<f32>;
+@group(0) @binding(1) var coc_texture: texture_2d<f32>;
+@group(0) @binding(2) var input_sampler: sampler;
+
+struct VertexOutput {
+    @builtin(position) position: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+}
+
+@fragment
+fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
+    let dims = vec2<f32>(textureDimensions(color_texture));
+    let texel = 1.0 / dims;
+
+    // 4-tap filter with CoC weighting
+    var color_sum = vec3<f32>(0.0);
+    var weight_sum = 0.0;
+
+    let offsets = array<vec2<f32>, 4>(
+        vec2<f32>(-0.5, -0.5),
+        vec2<f32>(0.5, -0.5),
+        vec2<f32>(-0.5, 0.5),
+        vec2<f32>(0.5, 0.5)
+    );
+
+    for (var i = 0; i < 4; i++) {
+        let sample_uv = input.uv + offsets[i] * texel;
+        let color = textureSample(color_texture, input_sampler, sample_uv).rgb;
+        let coc = textureSample(coc_texture, input_sampler, sample_uv).r;
+
+        let weight = 1.0 / (1.0 + coc);
+        color_sum += color * weight;
+        weight_sum += weight;
+    }
+
+    return vec4<f32>(color_sum / weight_sum, 1.0);
+}
+"#;
+
+const DOF_BOKEH_SHADER: &str = r#"
+// DoF Bokeh Blur (Gather-based)
+
+struct BokehParams {
+    sample_count: u32,
+    max_blur: f32,
+    foreground_boost: f32,
+    aspect_ratio: f32,
+}
+
+@group(0) @binding(0) var<uniform> params: BokehParams;
+@group(0) @binding(1) var color_texture: texture_2d<f32>;
+@group(0) @binding(2) var coc_texture: texture_2d<f32>;
+@group(0) @binding(3) var input_sampler: sampler;
+@group(0) @binding(4) var<storage, read> sample_offsets: array<vec2<f32>>;
+
+struct VertexOutput {
+    @builtin(position) position: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+}
+
+@fragment
+fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
+    let dims = vec2<f32>(textureDimensions(color_texture));
+    let texel = 1.0 / dims;
+
+    let center_coc = textureSample(coc_texture, input_sampler, input.uv);
+    let blur_radius = abs(center_coc.r);
+
+    if (blur_radius < 0.5) {
+        return textureSample(color_texture, input_sampler, input.uv);
+    }
+
+    var color_sum = vec3<f32>(0.0);
+    var weight_sum = 0.0;
+
+    for (var i = 0u; i < params.sample_count; i++) {
+        let offset = sample_offsets[i] * blur_radius * texel;
+        let sample_uv = input.uv + offset * vec2<f32>(1.0, params.aspect_ratio);
+
+        let sample_color = textureSample(color_texture, input_sampler, sample_uv).rgb;
+        let sample_coc = textureSample(coc_texture, input_sampler, sample_uv);
+
+        // Weight based on sample's own CoC
+        let sample_blur = abs(sample_coc.r);
+        let intersection = min(blur_radius, sample_blur);
+        let weight = intersection * intersection;
+
+        // Boost foreground
+        let is_foreground = sample_coc.g < 0.0;
+        let fg_weight = select(1.0, params.foreground_boost, is_foreground);
+
+        color_sum += sample_color * weight * fg_weight;
+        weight_sum += weight * fg_weight;
+    }
+
+    return vec4<f32>(color_sum / max(weight_sum, 0.0001), 1.0);
+}
+"#;
+
+const DOF_COMPOSITE_SHADER: &str = r#"
+// DoF Composite - Blend focused and blurred regions
+
+@group(0) @binding(0) var original_texture: texture_2d<f32>;
+@group(0) @binding(1) var near_texture: texture_2d<f32>;
+@group(0) @binding(2) var far_texture: texture_2d<f32>;
+@group(0) @binding(3) var coc_texture: texture_2d<f32>;
+@group(0) @binding(4) var input_sampler: sampler;
+
+struct VertexOutput {
+    @builtin(position) position: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+}
+
+@fragment
+fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
+    let original = textureSample(original_texture, input_sampler, input.uv);
+    let near_blur = textureSample(near_texture, input_sampler, input.uv);
+    let far_blur = textureSample(far_texture, input_sampler, input.uv);
+    let coc = textureSample(coc_texture, input_sampler, input.uv);
+
+    let blur_radius = abs(coc.r);
+    let is_foreground = coc.g < 0.0;
+
+    // Blend factor based on CoC
+    let blend = smoothstep(0.0, 2.0, blur_radius);
+
+    // Choose between near and far blur
+    let blurred = select(far_blur.rgb, near_blur.rgb, is_foreground);
+
+    // Final blend
+    let result = mix(original.rgb, blurred, blend);
+
+    return vec4<f32>(result, original.a);
+}
+"#;
+
+// ============================================================================
+// UTILITY FUNCTIONS
+// ============================================================================
+
+fn atan2(y: f32, x: f32) -> f32 {
+    core::math::atan2(y, x)
+}
+
+// ============================================================================
+// UNIT TESTS
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const EPSILON: f32 = 0.01;
+
+    fn approx_eq(a: f32, b: f32) -> bool {
+        (a - b).abs() < EPSILON
+    }
+
+    #[test]
+    fn test_dof_config_default() {
+        let config = DofConfig::default();
+        assert!(config.enabled);
+        assert!(approx_eq(config.focus_distance, 5.0));
+        assert!(approx_eq(config.aperture, 2.8));
+    }
+
+    #[test]
+    fn test_coc_at_focus() {
+        let config = DofConfig::default();
+        let calc = CocCalculator::new(&config, 1080.0);
+
+        // At focus distance, CoC should be nearly zero
+        let coc = calc.calculate(config.focus_distance * 1000.0);
+        assert!(coc < 1.0);
+    }
+
+    #[test]
+    fn test_coc_increases_with_distance() {
+        let config = DofConfig::default();
+        let calc = CocCalculator::new(&config, 1080.0);
+
+        let coc_near = calc.calculate(config.focus_distance * 1000.0 * 0.5);
+        let coc_focus = calc.calculate(config.focus_distance * 1000.0);
+        let coc_far = calc.calculate(config.focus_distance * 1000.0 * 2.0);
+
+        assert!(coc_near > coc_focus);
+        assert!(coc_far > coc_focus);
+    }
+
+    #[test]
+    fn test_wider_aperture_more_blur() {
+        let mut config1 = DofConfig::default();
+        config1.aperture = 1.4;
+
+        let mut config2 = DofConfig::default();
+        config2.aperture = 5.6;
+
+        let calc1 = CocCalculator::new(&config1, 1080.0);
+        let calc2 = CocCalculator::new(&config2, 1080.0);
+
+        let coc1 = calc1.calculate(10000.0);  // 10m
+        let coc2 = calc2.calculate(10000.0);
+
+        // f/1.4 should produce more blur than f/5.6
+        assert!(coc1 > coc2);
+    }
+
+    #[test]
+    fn test_bokeh_sampler_disk() {
+        let sampler = BokehSampler::new(64, ApertureShape::Circle, 0.0, 0.0);
+
+        assert_eq!(sampler.samples.len(), 64);
+
+        // All samples should be within unit disk
+        for sample in &sampler.samples {
+            let dist = sqrt(sample.x * sample.x + sample.y * sample.y);
+            assert!(dist <= 1.0 + EPSILON);
+        }
+    }
+
+    #[test]
+    fn test_bokeh_sampler_polygon() {
+        let sampler = BokehSampler::new(64, ApertureShape::hexagon(), 0.0, 0.0);
+
+        assert_eq!(sampler.samples.len(), 64);
+    }
+
+    #[test]
+    fn test_autofocus_initial() {
+        let af = Autofocus::new();
+        assert!(approx_eq(af.focus_distance, 5.0));
+        assert!(af.continuous);
+    }
+
+    #[test]
+    fn test_cats_eye_center() {
+        let cats_eye = CatsEyeEffect::new(0.5);
+
+        // At center, no clipping
+        let clip = cats_eye.calculate_clipping(Vec2::new(960.0, 540.0), Vec2::new(1920.0, 1080.0));
+        assert!(approx_eq(clip, 1.0));
+    }
+
+    #[test]
+    fn test_cats_eye_edge() {
+        let cats_eye = CatsEyeEffect::new(0.5);
+
+        // At edge, should have clipping
+        let clip = cats_eye.calculate_clipping(Vec2::new(1900.0, 540.0), Vec2::new(1920.0, 1080.0));
+        assert!(clip < 1.0);
+    }
+
+    #[test]
+    fn test_chromatic_dof() {
+        let chroma = ChromaticDof::new(0.05);
+        let base_coc = 10.0;
+
+        let coc = chroma.get_coc(base_coc);
+
+        // Red should be larger, blue smaller
+        assert!(coc.x > base_coc);
+        assert!(approx_eq(coc.y, base_coc));
+        assert!(coc.z < base_coc);
+    }
+}

@@ -1,0 +1,673 @@
+include!("stdlib/lines.bld");
+
+// =============================================================================
+// qsed — Stream editor (sed clone) written in BuildLang
+// =============================================================================
+// Processes text line by line applying editing commands, just like Unix sed.
+//
+// Usage:
+//   echo "hello" | qsed 's/hello/goodbye/'          substitute first
+//   echo "aabb" | qsed 's/a/X/g'                    substitute all
+//   printf "a\nb\nc\n" | qsed '2d'                  delete line 2
+//   printf "a\nb\nc\n" | qsed '/b/d'                delete matching lines
+//   printf "a\nb\nc\n" | qsed '1,2s/./X/'           ranged substitute
+//   printf "a\nb\nc\n" | qsed -n '2p'               print only line 2
+//   qsed -e 's/a/A/' -e 's/b/B/' file.txt           multiple commands
+//   qsed -i 's/old/new/g' file.txt                  in-place editing
+//   qsed --help                                     usage info
+//
+// Design: All state in a flat struct. Command fields stored in parallel vecs
+// with a string pool, following the standard BuildLang pattern.
+// =============================================================================
+
+// --- Main state struct ---
+struct Sed {
+    // String pool for command strings (patterns, replacements, etc.)
+    sp_buf: String,
+
+    // Command string pool (raw command text from args)
+    cs_buf: String,
+    cs_starts: Vec<i32>,
+    cs_lens: Vec<i32>,
+    cs_n: i32,
+
+    // Parsed command parallel vecs
+    // addr_type: 0=all, 1=single line, 2=line range, 3=pattern match
+    c_addr_type: Vec<i32>,
+    c_addr_line1: Vec<i32>,
+    c_addr_line2: Vec<i32>,
+    c_addr_pat_starts: Vec<i32>,
+    c_addr_pat_lens: Vec<i32>,
+    // cmd_type: 0=substitute, 1=delete, 2=print
+    c_cmd_type: Vec<i32>,
+    c_sub_pat_starts: Vec<i32>,
+    c_sub_pat_lens: Vec<i32>,
+    c_sub_rep_starts: Vec<i32>,
+    c_sub_rep_lens: Vec<i32>,
+    c_sub_global: Vec<i32>,
+    num_cmds: i32,
+
+    // Flags
+    silent: bool,
+    in_place: bool,
+    filename: String,
+    has_file: bool,
+}
+
+fn sed_new() -> Sed {
+    Sed {
+        sp_buf: "",
+        cs_buf: "", cs_starts: vec![], cs_lens: vec![], cs_n: 0,
+        c_addr_type: vec![], c_addr_line1: vec![], c_addr_line2: vec![],
+        c_addr_pat_starts: vec![], c_addr_pat_lens: vec![],
+        c_cmd_type: vec![],
+        c_sub_pat_starts: vec![], c_sub_pat_lens: vec![],
+        c_sub_rep_starts: vec![], c_sub_rep_lens: vec![],
+        c_sub_global: vec![], num_cmds: 0,
+        silent: false, in_place: false, filename: "", has_file: false,
+    }
+}
+
+// --- String pool helper: add string, return (start, len) ---
+fn sp_add(s: &mut Sed, text: String) -> i32 {
+    let st = s.sp_buf.len();
+    s.sp_buf = s.sp_buf + text;
+    st
+}
+
+fn sp_get(s: &Sed, start: i32, len: i32) -> String {
+    if len <= 0 { return ""; }
+    s.sp_buf.substring(start, len)
+}
+
+// --- Help ---
+fn print_help() ~ Console {
+    println!("qsed — stream editor for filtering and transforming text");
+    println!("");
+    println!("Usage:");
+    println!("  qsed [OPTION]... COMMAND [FILE]");
+    println!("  qsed [OPTION]... -e COMMAND [-e COMMAND]... [FILE]");
+    println!("");
+    println!("Commands:");
+    println!("  s/PATTERN/REPLACEMENT/       substitute first occurrence");
+    println!("  s/PATTERN/REPLACEMENT/g      substitute all occurrences");
+    println!("  d                            delete line");
+    println!("  p                            print line");
+    println!("");
+    println!("Addressing:");
+    println!("  3s/a/b/      apply to line 3 only");
+    println!("  1,5d         apply to lines 1 through 5");
+    println!("  /PATTERN/d   apply to lines matching PATTERN");
+    println!("  /PATTERN/s/old/new/  substitute on matching lines");
+    println!("");
+    println!("Options:");
+    println!("  -n           suppress automatic printing; only print via p");
+    println!("  -i           edit file in-place");
+    println!("  -e COMMAND   add a command (can be repeated)");
+    println!("  --help       display this help and exit");
+}
+
+// --- Parse a number at position pos in string s ---
+// Returns the value, or -1 if no digit found.
+fn parse_number(s: String, pos: i32) -> i32 {
+    let slen = s.len();
+    let mut val: i32 = 0;
+    let mut found = false;
+    let mut p = pos;
+    let mut go = true;
+    while go {
+        if p >= slen {
+            go = false;
+        } else {
+            let c = s.char_at(p);
+            if c == "0" || c == "1" || c == "2" || c == "3" || c == "4" ||
+               c == "5" || c == "6" || c == "7" || c == "8" || c == "9" {
+                let digit = if c == "0" { 0 }
+                    else if c == "1" { 1 }
+                    else if c == "2" { 2 }
+                    else if c == "3" { 3 }
+                    else if c == "4" { 4 }
+                    else if c == "5" { 5 }
+                    else if c == "6" { 6 }
+                    else if c == "7" { 7 }
+                    else if c == "8" { 8 }
+                    else { 9 };
+                val = val * 10 + digit;
+                found = true;
+                p = p + 1;
+            } else {
+                go = false;
+            }
+        }
+    }
+    if !found { -1 } else { val }
+}
+
+// Return the count of consecutive digits starting at pos
+fn digit_count(s: String, pos: i32) -> i32 {
+    let slen = s.len();
+    let mut count: i32 = 0;
+    let mut p = pos;
+    let mut go = true;
+    while go {
+        if p >= slen {
+            go = false;
+        } else {
+            let c = s.char_at(p);
+            if c == "0" || c == "1" || c == "2" || c == "3" || c == "4" ||
+               c == "5" || c == "6" || c == "7" || c == "8" || c == "9" {
+                count = count + 1;
+                p = p + 1;
+            } else {
+                go = false;
+            }
+        }
+    }
+    count
+}
+
+// --- Add a raw command string to the command string pool ---
+fn add_cmd_string(s: &mut Sed, cmd_s: String) {
+    let st = s.cs_buf.len();
+    s.cs_buf = s.cs_buf + cmd_s;
+    let en = s.cs_buf.len();
+    vec_push(s.cs_starts, st);
+    vec_push(s.cs_lens, en - st);
+    s.cs_n = s.cs_n + 1;
+}
+
+// --- Parse a substitute command from cmd_str at position pos ---
+// Stores the parsed fields directly into the parallel vecs.
+fn parse_substitute(s: &mut Sed, cmd_str: String, pos: i32) {
+    let slen = cmd_str.len();
+    let mut p = pos + 1;  // skip 's'
+    if p >= slen { return; }
+
+    // Delimiter character
+    let delim = cmd_str.char_at(p);
+    p = p + 1;
+
+    // Extract pattern
+    let mut pat = "";
+    let mut pat_go = true;
+    while pat_go {
+        if p >= slen {
+            pat_go = false;
+        } else {
+            let c = cmd_str.char_at(p);
+            if c == delim {
+                pat_go = false;
+            } else {
+                pat = pat + c;
+                p = p + 1;
+            }
+        }
+    }
+    p = p + 1;  // skip closing delimiter
+
+    // Extract replacement
+    let mut rep = "";
+    let mut rep_go = true;
+    while rep_go {
+        if p >= slen {
+            rep_go = false;
+        } else {
+            let c = cmd_str.char_at(p);
+            if c == delim {
+                rep_go = false;
+            } else {
+                rep = rep + c;
+                p = p + 1;
+            }
+        }
+    }
+    p = p + 1;  // skip closing delimiter
+
+    // Check for 'g' flag
+    let mut global = false;
+    if p < slen {
+        let flag = cmd_str.char_at(p);
+        if flag == "g" {
+            global = true;
+        }
+    }
+
+    vec_push(s.c_cmd_type, 0);  // substitute
+
+    // Store pattern in pool
+    let sp_st = s.sp_buf.len();
+    s.sp_buf = s.sp_buf + pat;
+    let sp_len = s.sp_buf.len() - sp_st;
+    vec_push(s.c_sub_pat_starts, sp_st);
+    vec_push(s.c_sub_pat_lens, sp_len);
+
+    // Store replacement in pool
+    let sr_st = s.sp_buf.len();
+    s.sp_buf = s.sp_buf + rep;
+    let sr_len = s.sp_buf.len() - sr_st;
+    vec_push(s.c_sub_rep_starts, sr_st);
+    vec_push(s.c_sub_rep_lens, sr_len);
+
+    let sg = if global { 1 } else { 0 };
+    vec_push(s.c_sub_global, sg);
+}
+
+// --- Parse a full command string and add to parsed command vecs ---
+fn parse_command(s: &mut Sed, cmd_str: String) {
+    let slen = cmd_str.len();
+    if slen == 0 { return; }
+
+    let mut pos: i32 = 0;
+    let first = cmd_str.char_at(0);
+
+    let mut addr_type: i32 = 0;
+    let mut addr_line1: i32 = 0;
+    let mut addr_line2: i32 = 0;
+    let mut addr_pat = "";
+
+    // Check for pattern address: /pattern/cmd
+    if first == "/" {
+        pos = 1;
+        let mut go = true;
+        while go {
+            if pos >= slen {
+                go = false;
+            } else {
+                let c = cmd_str.char_at(pos);
+                if c == "/" {
+                    go = false;
+                } else {
+                    addr_pat = addr_pat + c;
+                    pos = pos + 1;
+                }
+            }
+        }
+        pos = pos + 1;  // skip closing /
+        addr_type = 3;
+    } else {
+        // Check for numeric address
+        let num1 = parse_number(cmd_str, 0);
+        if num1 >= 0 {
+            let dc1 = digit_count(cmd_str, 0);
+            pos = dc1;
+            addr_type = 1;
+            addr_line1 = num1;
+
+            // Check for range: num1,num2
+            if pos < slen {
+                let comma = cmd_str.char_at(pos);
+                if comma == "," {
+                    pos = pos + 1;
+                    let num2 = parse_number(cmd_str, pos);
+                    if num2 >= 0 {
+                        let dc2 = digit_count(cmd_str, pos);
+                        pos = pos + dc2;
+                        addr_type = 2;
+                        addr_line2 = num2;
+                    }
+                }
+            }
+        }
+    }
+
+    // Store address info
+    vec_push(s.c_addr_type, addr_type);
+    vec_push(s.c_addr_line1, addr_line1);
+    vec_push(s.c_addr_line2, addr_line2);
+
+    // Store addr_pattern in pool
+    let ap_st = s.sp_buf.len();
+    s.sp_buf = s.sp_buf + addr_pat;
+    let ap_len = s.sp_buf.len() - ap_st;
+    vec_push(s.c_addr_pat_starts, ap_st);
+    vec_push(s.c_addr_pat_lens, ap_len);
+
+    // Parse the actual command
+    if pos >= slen {
+        // No command character — treat as no-op substitute with empty pattern
+        vec_push(s.c_cmd_type, 0);
+        vec_push(s.c_sub_pat_starts, 0);
+        vec_push(s.c_sub_pat_lens, 0);
+        vec_push(s.c_sub_rep_starts, 0);
+        vec_push(s.c_sub_rep_lens, 0);
+        vec_push(s.c_sub_global, 0);
+        s.num_cmds = s.num_cmds + 1;
+        return;
+    }
+
+    let cmd_char = cmd_str.char_at(pos);
+
+    if cmd_char == "s" {
+        parse_substitute(s, cmd_str, pos);
+    } else if cmd_char == "d" {
+        vec_push(s.c_cmd_type, 1);
+        vec_push(s.c_sub_pat_starts, 0);
+        vec_push(s.c_sub_pat_lens, 0);
+        vec_push(s.c_sub_rep_starts, 0);
+        vec_push(s.c_sub_rep_lens, 0);
+        vec_push(s.c_sub_global, 0);
+    } else if cmd_char == "p" {
+        vec_push(s.c_cmd_type, 2);
+        vec_push(s.c_sub_pat_starts, 0);
+        vec_push(s.c_sub_pat_lens, 0);
+        vec_push(s.c_sub_rep_starts, 0);
+        vec_push(s.c_sub_rep_lens, 0);
+        vec_push(s.c_sub_global, 0);
+    } else {
+        // Unknown command — default no-op
+        vec_push(s.c_cmd_type, 0);
+        vec_push(s.c_sub_pat_starts, 0);
+        vec_push(s.c_sub_pat_lens, 0);
+        vec_push(s.c_sub_rep_starts, 0);
+        vec_push(s.c_sub_rep_lens, 0);
+        vec_push(s.c_sub_global, 0);
+    }
+
+    s.num_cmds = s.num_cmds + 1;
+}
+
+// --- Substitute: replace first occurrence ---
+fn sub_first(line: String, pattern: String, replacement: String) -> String {
+    let idx = line.index_of(pattern);
+    if idx < 0 {
+        return line;
+    }
+    let plen = pattern.len();
+    let llen = line.len();
+    let before = line.substring(0, idx);
+    let after_start = idx + plen;
+    let after_len = llen - after_start;
+    let after = if after_len > 0 {
+        line.substring(after_start, after_len)
+    } else {
+        ""
+    };
+    before + replacement + after
+}
+
+// --- Substitute: replace all occurrences (left-to-right scan) ---
+// Advances past each replacement to avoid infinite loops.
+fn sub_all(line: String, pattern: String, replacement: String) -> String {
+    let plen = pattern.len();
+    if plen == 0 { return line; }
+
+    let rlen = replacement.len();
+    let mut result = line;
+    let mut search_from: i32 = 0;
+    let mut go = true;
+
+    while go {
+        let rlen_now = result.len();
+        if search_from >= rlen_now {
+            go = false;
+        } else {
+            let rest = result.substring(search_from, rlen_now - search_from);
+            let idx = rest.index_of(pattern);
+            if idx < 0 {
+                go = false;
+            } else {
+                let abs_idx = search_from + idx;
+                let before = result.substring(0, abs_idx);
+                let after_start = abs_idx + plen;
+                let after_len = rlen_now - after_start;
+                let after = if after_len > 0 {
+                    result.substring(after_start, after_len)
+                } else {
+                    ""
+                };
+                result = before + replacement + after;
+                // Advance past the replacement
+                search_from = abs_idx + rlen;
+            }
+        }
+    }
+    result
+}
+
+// --- Check if address matches the current line ---
+fn addr_matches(s: &Sed, ci: i32, line_num: i32, line: String) -> bool {
+    let at = vec_get(s.c_addr_type, ci);
+    if at == 0 { return true; }
+    if at == 1 {
+        let al1 = vec_get(s.c_addr_line1, ci);
+        return line_num == al1;
+    }
+    if at == 2 {
+        let al1 = vec_get(s.c_addr_line1, ci);
+        let al2 = vec_get(s.c_addr_line2, ci);
+        return line_num >= al1 && line_num <= al2;
+    }
+    if at == 3 {
+        let ap_st = vec_get(s.c_addr_pat_starts, ci);
+        let ap_ln = vec_get(s.c_addr_pat_lens, ci);
+        let pat = sp_get(s, ap_st, ap_ln);
+        return line.contains(pat);
+    }
+    false
+}
+
+// --- Apply command ci to line, return modified line ---
+// Sets deleted/printed flags via a result struct.
+struct CmdResult {
+    line: String,
+    deleted: bool,
+    printed: bool,
+}
+
+fn apply_command(s: &Sed, ci: i32, line: String, line_num: i32) -> CmdResult {
+    let matches = addr_matches(s, ci, line_num, line);
+    if !matches {
+        return CmdResult { line: line, deleted: false, printed: false };
+    }
+
+    let ct = vec_get(s.c_cmd_type, ci);
+
+    if ct == 0 {
+        // Substitute
+        let sp_st = vec_get(s.c_sub_pat_starts, ci);
+        let sp_ln = vec_get(s.c_sub_pat_lens, ci);
+        let sr_st = vec_get(s.c_sub_rep_starts, ci);
+        let sr_ln = vec_get(s.c_sub_rep_lens, ci);
+        let sg = vec_get(s.c_sub_global, ci);
+
+        if sp_ln > 0 {
+            let pat = sp_get(s, sp_st, sp_ln);
+            let rep = sp_get(s, sr_st, sr_ln);
+            let new_line = if sg == 1 {
+                sub_all(line, pat, rep)
+            } else {
+                sub_first(line, pat, rep)
+            };
+            return CmdResult { line: new_line, deleted: false, printed: false };
+        }
+        return CmdResult { line: line, deleted: false, printed: false };
+    }
+    if ct == 1 {
+        return CmdResult { line: line, deleted: true, printed: false };
+    }
+    if ct == 2 {
+        return CmdResult { line: line, deleted: false, printed: true };
+    }
+    CmdResult { line: line, deleted: false, printed: false }
+}
+
+// --- Process all input lines ---
+fn process_input(s: &Sed, content: String) -> String {
+    let lr = lr_new(content);
+    let mut line_num: i32 = 0;
+    let mut output = "";
+    let mut i: i32 = 0;
+
+    while i < lr.count {
+        let line = lr_get(&lr, i);
+        line_num = line_num + 1;
+
+        // Strip trailing \r
+        let llen = line.len();
+        let clean_line = if llen > 0 {
+            let last_c = line.char_at(llen - 1);
+            if last_c == "\r" {
+                line.substring(0, llen - 1)
+            } else {
+                line
+            }
+        } else {
+            line
+        };
+
+        // Apply all commands
+        let mut cur_line = clean_line;
+        let mut deleted = false;
+        let mut printed = false;
+        let mut ci: i32 = 0;
+
+        while ci < s.num_cmds {
+            if !deleted {
+                let result = apply_command(s, ci, cur_line, line_num);
+                cur_line = result.line;
+                deleted = result.deleted;
+                if result.printed {
+                    printed = true;
+                }
+            }
+            ci = ci + 1;
+        }
+
+        // Output logic
+        if !deleted {
+            if printed {
+                output = output + cur_line + "\n";
+            }
+            if !s.silent {
+                output = output + cur_line + "\n";
+            }
+        }
+        i = i + 1;
+    }
+
+    output
+}
+
+// --- Parse all command strings into parallel vecs ---
+fn parse_all_commands(s: &mut Sed) {
+    let mut ci: i32 = 0;
+    while ci < s.cs_n {
+        let cs_start = vec_get(s.cs_starts, ci);
+        let cs_len = vec_get(s.cs_lens, ci);
+        let cmd_str = s.cs_buf.substring(cs_start, cs_len);
+        parse_command(s, cmd_str);
+        ci = ci + 1;
+    }
+}
+
+// --- Parse arguments ---
+fn parse_args(s: &mut Sed) ~ Console + Environment + Process {
+    let nargs = args_count();
+    let mut i: i32 = 1;
+    while i < nargs {
+        let arg = args_get(i);
+
+        if arg == "--help" || arg == "-h" {
+            print_help();
+            process_exit(0);
+        } else if arg == "-n" {
+            s.silent = true;
+        } else if arg == "-i" {
+            s.in_place = true;
+        } else if arg == "-e" {
+            i = i + 1;
+            if i < nargs {
+                let cmd_s = args_get(i);
+                add_cmd_string(s, cmd_s);
+            }
+        } else if arg == "-ni" || arg == "-in" {
+            s.silent = true;
+            s.in_place = true;
+        } else if arg == "-ne" || arg == "-en" {
+            s.silent = true;
+            i = i + 1;
+            if i < nargs {
+                let cmd_s = args_get(i);
+                add_cmd_string(s, cmd_s);
+            }
+        } else if arg == "-ie" || arg == "-ei" {
+            s.in_place = true;
+            i = i + 1;
+            if i < nargs {
+                let cmd_s = args_get(i);
+                add_cmd_string(s, cmd_s);
+            }
+        } else if arg.starts_with("-") {
+            println!("qsed: unknown option '{}'", arg);
+            process_exit(2);
+        } else {
+            // Positional: first is command (if none via -e), rest are files
+            if s.cs_n == 0 {
+                add_cmd_string(s, arg);
+            } else {
+                s.filename = arg;
+                s.has_file = true;
+            }
+        }
+
+        i = i + 1;
+    }
+}
+
+// --- Main ---
+fn main() ~ Console + Environment + FileSystem + Process {
+    let nargs = args_count();
+
+    if nargs < 2 {
+        print_help();
+        process_exit(0);
+    }
+
+    let mut s = sed_new();
+
+    // Parse arguments via &mut ref
+    parse_args(&mut s);
+
+    if s.cs_n == 0 {
+        println!("qsed: no command specified");
+        println!("Try 'qsed --help' for usage.");
+        process_exit(2);
+    }
+
+    // Parse command strings into structured parallel vecs
+    parse_all_commands(&mut s);
+
+    // Read input
+    let input = if s.has_file {
+        let exists = file_exists(s.filename);
+        if !exists {
+            println!("qsed: {}: No such file or directory", s.filename);
+            process_exit(2);
+        }
+        read_file(s.filename)
+    } else {
+        let piped = stdin_is_pipe();
+        if !piped {
+            print_help();
+            process_exit(0);
+        }
+        read_all()
+    };
+
+    if input.len() == 0 {
+        process_exit(0);
+    }
+
+    // Process
+    let result = process_input(&s, input);
+
+    // Output
+    if s.in_place && s.has_file {
+        write_file(s.filename, result);
+    } else {
+        let rlen = result.len();
+        if rlen > 0 {
+            print!("{}", result);
+        }
+    }
+}

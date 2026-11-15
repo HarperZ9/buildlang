@@ -1,0 +1,151 @@
+# ===============================================================================
+# BUILDOS COREUTILS
+# ===============================================================================
+# Copyright (c) 2024-2025 Zain Dana Harper. All Rights Reserved.
+# ===============================================================================
+
+[package]
+name = "coreutils"
+version = "1.0.0"
+edition = "2021"
+authors = ["Zain Dana Harper"]
+description = "Core Unix-like utilities for BuildOS"
+
+[dependencies]
+libbuild = { path = "../libbuild" }
+
+[[bin]]
+name = "ls"
+path = "src/bin/ls.rs"
+
+[[bin]]
+name = "cat"
+path = "src/bin/cat.rs"
+
+[[bin]]
+name = "mkdir"
+path = "src/bin/mkdir.rs"
+
+[[bin]]
+name = "rm"
+path = "src/bin/rm.rs"
+
+[[bin]]
+name = "cp"
+path = "src/bin/cp.rs"
+
+[[bin]]
+name = "mv"
+path = "src/bin/mv.rs"
+
+[[bin]]
+name = "touch"
+path = "src/bin/touch.rs"
+
+[[bin]]
+name = "head"
+path = "src/bin/head.rs"
+
+[[bin]]
+name = "tail"
+path = "src/bin/tail.rs"
+
+[[bin]]
+name = "wc"
+path = "src/bin/wc.rs"
+
+[[bin]]
+name = "echo"
+path = "src/bin/echo.rs"
+
+[[bin]]
+name = "true"
+path = "src/bin/true.rs"
+
+[[bin]]
+name = "false"
+path = "src/bin/false.rs"
+
+[[bin]]
+name = "yes"
+path = "src/bin/yes.rs"
+
+[[bin]]
+name = "env"
+path = "src/bin/env.rs"
+
+[[bin]]
+name = "uname"
+path = "src/bin/uname.rs"
+
+[[bin]]
+name = "whoami"
+path = "src/bin/whoami.rs"
+
+[[bin]]
+name = "hostname"
+path = "src/bin/hostname.rs"
+
+[[bin]]
+name = "date"
+path = "src/bin/date.rs"
+
+[[bin]]
+name = "sleep"
+path = "src/bin/sleep.rs"
+
+[[bin]]
+name = "pwd"
+path = "src/bin/pwd.rs"
+
+[[bin]]
+name = "ln"
+path = "src/bin/ln.rs"
+
+[[bin]]
+name = "chmod"
+path = "src/bin/chmod.rs"
+
+[[bin]]
+name = "chown"
+path = "src/bin/chown.rs"
+
+[[bin]]
+name = "stat"
+path = "src/bin/stat.rs"
+
+[[bin]]
+name = "readlink"
+path = "src/bin/readlink.rs"
+
+[[bin]]
+name = "basename"
+path = "src/bin/basename.rs"
+
+[[bin]]
+name = "dirname"
+path = "src/bin/dirname.rs"
+
+[[bin]]
+name = "clear"
+path = "src/bin/clear.rs"
+
+[[bin]]
+name = "tee"
+path = "src/bin/tee.rs"
+
+[[bin]]
+name = "id"
+path = "src/bin/id.rs"
+
+[[bin]]
+name = "kill"
+path = "src/bin/kill.rs"
+
+[[bin]]
+name = "ps"
+path = "src/bin/ps.rs"
+
+[lib]
+name = "coreutils_common"
+path = "src/lib.rs"

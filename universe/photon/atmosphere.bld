@@ -1,0 +1,3582 @@
+// =============================================================================
+// PHOTON ENGINE - ATMOSPHERIC SCATTERING SYSTEM
+// =============================================================================
+// Comprehensive physically-based atmospheric rendering with Rayleigh/Mie
+// scattering, aerial perspective, sky rendering, and celestial bodies.
+// Based on Harper Engine WP-009, WP-126-142 atmospheric rendering papers.
+// =============================================================================
+
+import core::memory::{Arena, Pool, Buffer, GpuBuffer};
+import core::math::{Vec2, Vec3, Vec4, Mat4, Quaternion, Transform};
+import core::simd::{f32x4, f32x8, SimdMath};
+import photon::gpu::{ComputeShader, RenderPipeline, Texture, Sampler};
+import photon::color::{Color, ColorSpace, Spectrum};
+
+// =============================================================================
+// REGION: PHYSICAL CONSTANTS
+// =============================================================================
+
+/// Physical constants for atmospheric scattering
+module AtmosphereConstants {
+    /// Earth radius in meters
+    pub const EARTH_RADIUS: f64 = 6_371_000.0;
+
+    /// Atmosphere thickness in meters
+    pub const ATMOSPHERE_THICKNESS: f64 = 100_000.0;
+
+    /// Rayleigh scale height in meters
+    pub const RAYLEIGH_SCALE_HEIGHT: f64 = 8_500.0;
+
+    /// Mie scale height in meters
+    pub const MIE_SCALE_HEIGHT: f64 = 1_200.0;
+
+    /// Ozone layer center altitude in meters
+    pub const OZONE_CENTER_ALTITUDE: f64 = 25_000.0;
+
+    /// Ozone layer width in meters
+    pub const OZONE_WIDTH: f64 = 15_000.0;
+
+    /// Rayleigh scattering coefficients at sea level (per meter)
+    /// Wavelengths: R=680nm, G=550nm, B=440nm
+    pub const RAYLEIGH_COEFFICIENTS: Vec3 = Vec3::new(
+        5.802e-6,   // Red
+        13.558e-6,  // Green
+        33.1e-6     // Blue
+    );
+
+    /// Mie scattering coefficient at sea level (per meter)
+    pub const MIE_COEFFICIENT: f64 = 21e-6;
+
+    /// Mie absorption coefficient at sea level
+    pub const MIE_ABSORPTION: f64 = 4.4e-6;
+
+    /// Ozone absorption cross-section (per meter)
+    pub const OZONE_ABSORPTION: Vec3 = Vec3::new(
+        0.650e-6,   // Red
+        1.881e-6,   // Green
+        0.085e-6    // Blue
+    );
+
+    /// Mie asymmetry factor (Henyey-Greenstein g parameter)
+    pub const MIE_ASYMMETRY: f64 = 0.8;
+
+    /// Solar irradiance at top of atmosphere (W/m^2/nm)
+    pub const SOLAR_IRRADIANCE: Vec3 = Vec3::new(1.474, 1.850, 1.911);
+
+    /// Speed of light in vacuum (m/s)
+    pub const SPEED_OF_LIGHT: f64 = 299_792_458.0;
+
+    /// Planck constant (J·s)
+    pub const PLANCK_CONSTANT: f64 = 6.62607015e-34;
+
+    /// Boltzmann constant (J/K)
+    pub const BOLTZMANN_CONSTANT: f64 = 1.380649e-23;
+}
+
+// =============================================================================
+// REGION: ATMOSPHERE PARAMETERS
+// =============================================================================
+
+/// Atmosphere type presets
+pub enum AtmospherePreset {
+    /// Earth-like atmosphere
+    Earth,
+    /// Mars-like thin atmosphere
+    Mars,
+    /// Venus-like dense atmosphere
+    Venus,
+    /// Titan-like hazy atmosphere
+    Titan,
+    /// Alien world with custom colors
+    Alien {
+        primary_color: Color,
+        secondary_color: Color,
+        haze_density: f32,
+    },
+    /// Pure artistic sky (non-physical)
+    Stylized {
+        zenith_color: Color,
+        horizon_color: Color,
+        ground_color: Color,
+    },
+    /// Custom physical parameters
+    Custom(AtmosphereParams),
+}
+
+/// Complete atmosphere parameters
+pub struct AtmosphereParams {
+    /// Planet radius in meters
+    pub planet_radius: f64,
+
+    /// Atmosphere thickness in meters
+    pub atmosphere_height: f64,
+
+    /// Rayleigh scattering coefficients
+    pub rayleigh_coefficients: Vec3,
+
+    /// Rayleigh scale height
+    pub rayleigh_scale_height: f32,
+
+    /// Mie scattering coefficient
+    pub mie_coefficient: f32,
+
+    /// Mie absorption coefficient
+    pub mie_absorption: f32,
+
+    /// Mie scale height
+    pub mie_scale_height: f32,
+
+    /// Mie asymmetry factor (g)
+    pub mie_asymmetry: f32,
+
+    /// Ozone absorption coefficients
+    pub ozone_absorption: Vec3,
+
+    /// Ozone layer center altitude
+    pub ozone_center_altitude: f32,
+
+    /// Ozone layer width
+    pub ozone_width: f32,
+
+    /// Ground albedo
+    pub ground_albedo: Vec3,
+
+    /// Enable multiple scattering
+    pub enable_multiple_scattering: bool,
+
+    /// Number of scattering orders
+    pub scattering_orders: u32,
+}
+
+impl AtmosphereParams {
+    /// Create Earth atmosphere parameters
+    pub fn earth() -> Self {
+        Self {
+            planet_radius: AtmosphereConstants::EARTH_RADIUS,
+            atmosphere_height: AtmosphereConstants::ATMOSPHERE_THICKNESS,
+            rayleigh_coefficients: AtmosphereConstants::RAYLEIGH_COEFFICIENTS,
+            rayleigh_scale_height: AtmosphereConstants::RAYLEIGH_SCALE_HEIGHT as f32,
+            mie_coefficient: AtmosphereConstants::MIE_COEFFICIENT as f32,
+            mie_absorption: AtmosphereConstants::MIE_ABSORPTION as f32,
+            mie_scale_height: AtmosphereConstants::MIE_SCALE_HEIGHT as f32,
+            mie_asymmetry: AtmosphereConstants::MIE_ASYMMETRY as f32,
+            ozone_absorption: AtmosphereConstants::OZONE_ABSORPTION,
+            ozone_center_altitude: AtmosphereConstants::OZONE_CENTER_ALTITUDE as f32,
+            ozone_width: AtmosphereConstants::OZONE_WIDTH as f32,
+            ground_albedo: Vec3::new(0.3, 0.3, 0.3),
+            enable_multiple_scattering: true,
+            scattering_orders: 4,
+        }
+    }
+
+    /// Create Mars atmosphere parameters
+    pub fn mars() -> Self {
+        Self {
+            planet_radius: 3_389_500.0,
+            atmosphere_height: 200_000.0,
+            rayleigh_coefficients: Vec3::new(19.918e-6, 13.57e-6, 5.75e-6), // Reddish
+            rayleigh_scale_height: 11_100.0,
+            mie_coefficient: 3e-5,  // More dust
+            mie_absorption: 4.4e-6,
+            mie_scale_height: 11_000.0,
+            mie_asymmetry: 0.76,
+            ozone_absorption: Vec3::zero(),  // No ozone on Mars
+            ozone_center_altitude: 0.0,
+            ozone_width: 0.0,
+            ground_albedo: Vec3::new(0.5, 0.3, 0.2),
+            enable_multiple_scattering: true,
+            scattering_orders: 3,
+        }
+    }
+
+    /// Create Venus atmosphere parameters
+    pub fn venus() -> Self {
+        Self {
+            planet_radius: 6_051_800.0,
+            atmosphere_height: 250_000.0,
+            rayleigh_coefficients: Vec3::new(10e-6, 15e-6, 8e-6), // Yellow-orange
+            rayleigh_scale_height: 15_900.0,
+            mie_coefficient: 1e-4,  // Dense clouds
+            mie_absorption: 1e-5,
+            mie_scale_height: 6_000.0,
+            mie_asymmetry: 0.85,
+            ozone_absorption: Vec3::zero(),
+            ozone_center_altitude: 0.0,
+            ozone_width: 0.0,
+            ground_albedo: Vec3::new(0.4, 0.35, 0.25),
+            enable_multiple_scattering: true,
+            scattering_orders: 5,
+        }
+    }
+
+    /// Create Titan atmosphere parameters
+    pub fn titan() -> Self {
+        Self {
+            planet_radius: 2_574_730.0,
+            atmosphere_height: 600_000.0,
+            rayleigh_coefficients: Vec3::new(2e-5, 1.5e-5, 1e-5), // Orange-brown
+            rayleigh_scale_height: 21_000.0,
+            mie_coefficient: 5e-4,  // Very hazy
+            mie_absorption: 2e-5,
+            mie_scale_height: 50_000.0,
+            mie_asymmetry: 0.78,
+            ozone_absorption: Vec3::zero(),
+            ozone_center_altitude: 0.0,
+            ozone_width: 0.0,
+            ground_albedo: Vec3::new(0.3, 0.25, 0.15),
+            enable_multiple_scattering: true,
+            scattering_orders: 6,
+        }
+    }
+}
+
+// =============================================================================
+// REGION: SCATTERING PHASE FUNCTIONS
+// =============================================================================
+
+/// Phase function types for scattering
+pub enum PhaseFunction {
+    /// Rayleigh phase function for molecular scattering
+    Rayleigh,
+    /// Henyey-Greenstein phase function for aerosols
+    HenyeyGreenstein { g: f32 },
+    /// Cornette-Shanks phase function (improved HG)
+    CornetteShanks { g: f32 },
+    /// Double Henyey-Greenstein for complex aerosols
+    DoubleHenyeyGreenstein {
+        g_forward: f32,
+        g_backward: f32,
+        weight: f32,
+    },
+    /// Mie phase function computed from particle size distribution
+    Mie {
+        particle_radius: f32,
+        refractive_index: f32,
+    },
+    /// Schlick approximation (fast)
+    Schlick { k: f32 },
+    /// Draine phase function for dust
+    Draine { g: f32, alpha: f32 },
+}
+
+impl PhaseFunction {
+    /// Evaluate phase function for given cosine of scattering angle
+    pub fn evaluate(&self, cos_theta: f32) -> f32 {
+        match self {
+            Self::Rayleigh => {
+                // P(θ) = 3/(16π) * (1 + cos²θ)
+                let inv_16pi = 0.0596831;
+                3.0 * inv_16pi * (1.0 + cos_theta * cos_theta)
+            }
+
+            Self::HenyeyGreenstein { g } => {
+                // P(θ) = (1 - g²) / (4π * (1 + g² - 2g*cos(θ))^1.5)
+                let g2 = g * g;
+                let denom = 1.0 + g2 - 2.0 * g * cos_theta;
+                let inv_4pi = 0.07957747;
+                inv_4pi * (1.0 - g2) / (denom * denom.sqrt())
+            }
+
+            Self::CornetteShanks { g } => {
+                // Cornette-Shanks modification
+                let g2 = g * g;
+                let denom = 1.0 + g2 - 2.0 * g * cos_theta;
+                let inv_8pi = 0.03978874;
+                let num = 3.0 * (1.0 - g2) * (1.0 + cos_theta * cos_theta);
+                let denom_full = 2.0 * (2.0 + g2) * denom * denom.sqrt();
+                inv_8pi * num / denom_full
+            }
+
+            Self::DoubleHenyeyGreenstein { g_forward, g_backward, weight } => {
+                let hg_forward = Self::HenyeyGreenstein { g: *g_forward }.evaluate(cos_theta);
+                let hg_backward = Self::HenyeyGreenstein { g: *g_backward }.evaluate(cos_theta);
+                weight * hg_forward + (1.0 - weight) * hg_backward
+            }
+
+            Self::Mie { particle_radius, refractive_index } => {
+                // Simplified Mie phase function approximation
+                Self::compute_mie_phase(cos_theta, *particle_radius, *refractive_index)
+            }
+
+            Self::Schlick { k } => {
+                // Schlick approximation: faster than HG
+                let inv_4pi = 0.07957747;
+                let denom = 1.0 + k * cos_theta;
+                inv_4pi * (1.0 - k * k) / (denom * denom)
+            }
+
+            Self::Draine { g, alpha } => {
+                // Draine phase function for dust grains
+                let hg = Self::HenyeyGreenstein { g: *g }.evaluate(cos_theta);
+                let rayleigh = Self::Rayleigh.evaluate(cos_theta);
+                alpha * hg + (1.0 - alpha) * rayleigh
+            }
+        }
+    }
+
+    /// Compute Mie phase function from particle parameters
+    fn compute_mie_phase(cos_theta: f32, radius: f32, n: f32) -> f32 {
+        // Size parameter
+        let x = 2.0 * std::f32::consts::PI * radius / 0.55e-6; // At 550nm
+
+        // Use HG approximation with computed g
+        let g = Self::compute_mie_asymmetry(x, n);
+        Self::HenyeyGreenstein { g }.evaluate(cos_theta)
+    }
+
+    /// Compute Mie asymmetry factor from size parameter
+    fn compute_mie_asymmetry(x: f32, n: f32) -> f32 {
+        // Empirical formula for g based on size parameter and refractive index
+        let x_clamped = x.clamp(0.1, 50.0);
+        let g = (x_clamped / (x_clamped + 4.0)) * (0.7 + 0.15 * (n - 1.33));
+        g.clamp(-0.999, 0.999)
+    }
+}
+
+// =============================================================================
+// REGION: TRANSMITTANCE LUT
+// =============================================================================
+
+/// Transmittance lookup table generator
+pub struct TransmittanceLUT {
+    /// Texture resolution
+    pub resolution: (u32, u32),
+
+    /// GPU texture
+    pub texture: Texture,
+
+    /// Atmosphere parameters
+    pub params: AtmosphereParams,
+
+    /// Compute shader for generation
+    compute_shader: ComputeShader,
+}
+
+impl TransmittanceLUT {
+    /// Create new transmittance LUT
+    pub fn new(params: &AtmosphereParams, resolution: (u32, u32)) -> Self {
+        let texture = Texture::create_2d(
+            resolution.0,
+            resolution.1,
+            TextureFormat::RGBA32Float,
+            TextureUsage::Storage | TextureUsage::Sampled,
+        );
+
+        let compute_shader = ComputeShader::new(TRANSMITTANCE_LUT_SHADER);
+
+        Self {
+            resolution,
+            texture,
+            params: params.clone(),
+            compute_shader,
+        }
+    }
+
+    /// Generate the transmittance LUT
+    pub fn generate(&mut self) {
+        // Set up compute shader uniforms
+        self.compute_shader.set_uniform("u_planet_radius", self.params.planet_radius as f32);
+        self.compute_shader.set_uniform("u_atmosphere_height", self.params.atmosphere_height as f32);
+        self.compute_shader.set_uniform("u_rayleigh_coefficients", self.params.rayleigh_coefficients);
+        self.compute_shader.set_uniform("u_rayleigh_scale_height", self.params.rayleigh_scale_height);
+        self.compute_shader.set_uniform("u_mie_coefficient", self.params.mie_coefficient);
+        self.compute_shader.set_uniform("u_mie_absorption", self.params.mie_absorption);
+        self.compute_shader.set_uniform("u_mie_scale_height", self.params.mie_scale_height);
+        self.compute_shader.set_uniform("u_ozone_absorption", self.params.ozone_absorption);
+        self.compute_shader.set_uniform("u_ozone_center_altitude", self.params.ozone_center_altitude);
+        self.compute_shader.set_uniform("u_ozone_width", self.params.ozone_width);
+        self.compute_shader.set_uniform("u_resolution", Vec2::new(
+            self.resolution.0 as f32,
+            self.resolution.1 as f32,
+        ));
+
+        self.compute_shader.set_storage_image(0, &self.texture);
+
+        // Dispatch compute shader
+        let group_size = 8;
+        self.compute_shader.dispatch(
+            (self.resolution.0 + group_size - 1) / group_size,
+            (self.resolution.1 + group_size - 1) / group_size,
+            1,
+        );
+    }
+
+    /// Sample transmittance for given altitude and view-zenith cosine
+    pub fn sample(&self, altitude: f32, mu: f32) -> Vec3 {
+        // Map to UV coordinates
+        let r = self.params.planet_radius as f32 + altitude;
+        let r_min = self.params.planet_radius as f32;
+        let r_max = r_min + self.params.atmosphere_height as f32;
+
+        let rho = (r * r - r_min * r_min).sqrt();
+        let h = (r_max * r_max - r_min * r_min).sqrt();
+
+        let u = rho / h;
+
+        // Map mu from [-1, 1] to [0, 1]
+        let d_min = r_max - r;
+        let d_max = rho + h;
+        let d = -r * mu + (r * r * (mu * mu - 1.0) + r_max * r_max).sqrt();
+        let v = (d - d_min) / (d_max - d_min);
+
+        self.texture.sample_bilinear(u, v).xyz()
+    }
+}
+
+const TRANSMITTANCE_LUT_SHADER: &str = r#"
+    #version 460
+
+    layout(local_size_x = 8, local_size_y = 8) in;
+
+    layout(rgba32f, binding = 0) uniform image2D u_transmittance_lut;
+
+    uniform float u_planet_radius;
+    uniform float u_atmosphere_height;
+    uniform vec3 u_rayleigh_coefficients;
+    uniform float u_rayleigh_scale_height;
+    uniform float u_mie_coefficient;
+    uniform float u_mie_absorption;
+    uniform float u_mie_scale_height;
+    uniform vec3 u_ozone_absorption;
+    uniform float u_ozone_center_altitude;
+    uniform float u_ozone_width;
+    uniform vec2 u_resolution;
+
+    const int SAMPLE_COUNT = 256;
+
+    float get_density_rayleigh(float h) {
+        return exp(-h / u_rayleigh_scale_height);
+    }
+
+    float get_density_mie(float h) {
+        return exp(-h / u_mie_scale_height);
+    }
+
+    float get_density_ozone(float h) {
+        return max(0.0, 1.0 - abs(h - u_ozone_center_altitude) / u_ozone_width);
+    }
+
+    float ray_sphere_intersect(vec3 origin, vec3 dir, float radius) {
+        float b = 2.0 * dot(origin, dir);
+        float c = dot(origin, origin) - radius * radius;
+        float d = b * b - 4.0 * c;
+        if (d < 0.0) return -1.0;
+        return (-b + sqrt(d)) * 0.5;
+    }
+
+    vec3 compute_transmittance(float r, float mu) {
+        float r_top = u_planet_radius + u_atmosphere_height;
+
+        // Distance to atmosphere boundary
+        float discriminant = r * r * (mu * mu - 1.0) + r_top * r_top;
+        if (discriminant < 0.0) return vec3(1.0);
+
+        float d = -r * mu + sqrt(discriminant);
+
+        // Integration step
+        float dx = d / float(SAMPLE_COUNT);
+
+        vec3 optical_depth = vec3(0.0);
+
+        for (int i = 0; i < SAMPLE_COUNT; i++) {
+            float t = (float(i) + 0.5) * dx;
+
+            // Position along ray
+            float height = sqrt(r * r + t * t + 2.0 * r * t * mu) - u_planet_radius;
+
+            // Accumulate optical depth
+            float density_rayleigh = get_density_rayleigh(height);
+            float density_mie = get_density_mie(height);
+            float density_ozone = get_density_ozone(height);
+
+            optical_depth += u_rayleigh_coefficients * density_rayleigh * dx;
+            optical_depth += vec3(u_mie_coefficient + u_mie_absorption) * density_mie * dx;
+            optical_depth += u_ozone_absorption * density_ozone * dx;
+        }
+
+        return exp(-optical_depth);
+    }
+
+    void main() {
+        ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+        if (pixel.x >= int(u_resolution.x) || pixel.y >= int(u_resolution.y)) return;
+
+        // UV to atmosphere coordinates
+        vec2 uv = (vec2(pixel) + 0.5) / u_resolution;
+
+        float r_min = u_planet_radius;
+        float r_max = u_planet_radius + u_atmosphere_height;
+        float h = sqrt(r_max * r_max - r_min * r_min);
+
+        float rho = h * uv.x;
+        float r = sqrt(rho * rho + r_min * r_min);
+
+        float d_min = r_max - r;
+        float d_max = rho + h;
+        float d = d_min + (d_max - d_min) * uv.y;
+
+        float mu = (d == 0.0) ? 1.0 : (r_max * r_max - r * r - d * d) / (2.0 * r * d);
+        mu = clamp(mu, -1.0, 1.0);
+
+        vec3 transmittance = compute_transmittance(r, mu);
+
+        imageStore(u_transmittance_lut, pixel, vec4(transmittance, 1.0));
+    }
+"#;
+
+// =============================================================================
+// REGION: SINGLE SCATTERING LUT
+// =============================================================================
+
+/// Single scattering lookup table
+pub struct SingleScatteringLUT {
+    /// Texture resolution (altitude, sun_zenith, view_zenith, azimuth)
+    pub resolution: (u32, u32, u32, u32),
+
+    /// Rayleigh scattering texture
+    pub rayleigh_texture: Texture,
+
+    /// Mie scattering texture
+    pub mie_texture: Texture,
+
+    /// Atmosphere parameters
+    pub params: AtmosphereParams,
+
+    /// Transmittance LUT reference
+    transmittance_lut: *const TransmittanceLUT,
+
+    /// Compute shader
+    compute_shader: ComputeShader,
+}
+
+impl SingleScatteringLUT {
+    /// Create single scattering LUT
+    pub fn new(
+        params: &AtmosphereParams,
+        transmittance_lut: &TransmittanceLUT,
+        resolution: (u32, u32, u32, u32),
+    ) -> Self {
+        // Use 3D textures with 4th dimension packed
+        let rayleigh_texture = Texture::create_3d(
+            resolution.0 * resolution.3,
+            resolution.1,
+            resolution.2,
+            TextureFormat::RGBA16Float,
+            TextureUsage::Storage | TextureUsage::Sampled,
+        );
+
+        let mie_texture = Texture::create_3d(
+            resolution.0 * resolution.3,
+            resolution.1,
+            resolution.2,
+            TextureFormat::RGBA16Float,
+            TextureUsage::Storage | TextureUsage::Sampled,
+        );
+
+        let compute_shader = ComputeShader::new(SINGLE_SCATTERING_SHADER);
+
+        Self {
+            resolution,
+            rayleigh_texture,
+            mie_texture,
+            params: params.clone(),
+            transmittance_lut,
+            compute_shader,
+        }
+    }
+
+    /// Generate single scattering LUTs
+    pub fn generate(&mut self) {
+        self.compute_shader.set_uniform("u_planet_radius", self.params.planet_radius as f32);
+        self.compute_shader.set_uniform("u_atmosphere_height", self.params.atmosphere_height as f32);
+        self.compute_shader.set_uniform("u_rayleigh_coefficients", self.params.rayleigh_coefficients);
+        self.compute_shader.set_uniform("u_rayleigh_scale_height", self.params.rayleigh_scale_height);
+        self.compute_shader.set_uniform("u_mie_coefficient", self.params.mie_coefficient);
+        self.compute_shader.set_uniform("u_mie_scale_height", self.params.mie_scale_height);
+        self.compute_shader.set_uniform("u_resolution", Vec4::new(
+            self.resolution.0 as f32,
+            self.resolution.1 as f32,
+            self.resolution.2 as f32,
+            self.resolution.3 as f32,
+        ));
+
+        unsafe {
+            self.compute_shader.set_texture(0, &(*self.transmittance_lut).texture);
+        }
+        self.compute_shader.set_storage_image(1, &self.rayleigh_texture);
+        self.compute_shader.set_storage_image(2, &self.mie_texture);
+
+        let group_size = 4;
+        self.compute_shader.dispatch(
+            (self.resolution.0 * self.resolution.3 + group_size - 1) / group_size,
+            (self.resolution.1 + group_size - 1) / group_size,
+            (self.resolution.2 + group_size - 1) / group_size,
+        );
+    }
+}
+
+const SINGLE_SCATTERING_SHADER: &str = r#"
+    #version 460
+
+    layout(local_size_x = 4, local_size_y = 4, local_size_z = 4) in;
+
+    layout(binding = 0) uniform sampler2D u_transmittance_lut;
+    layout(rgba16f, binding = 1) uniform image3D u_rayleigh_lut;
+    layout(rgba16f, binding = 2) uniform image3D u_mie_lut;
+
+    uniform float u_planet_radius;
+    uniform float u_atmosphere_height;
+    uniform vec3 u_rayleigh_coefficients;
+    uniform float u_rayleigh_scale_height;
+    uniform float u_mie_coefficient;
+    uniform float u_mie_scale_height;
+    uniform vec4 u_resolution;
+
+    const int SAMPLE_COUNT = 64;
+    const float PI = 3.14159265359;
+
+    // Transmittance sampling helper
+    vec3 sample_transmittance(float r, float mu) {
+        float r_min = u_planet_radius;
+        float r_max = u_planet_radius + u_atmosphere_height;
+        float h = sqrt(r_max * r_max - r_min * r_min);
+        float rho = sqrt(max(0.0, r * r - r_min * r_min));
+
+        float u = rho / h;
+
+        float d_min = r_max - r;
+        float d_max = rho + h;
+        float d = -r * mu + sqrt(max(0.0, r * r * (mu * mu - 1.0) + r_max * r_max));
+        float v = (d - d_min) / (d_max - d_min);
+
+        return texture(u_transmittance_lut, vec2(u, v)).rgb;
+    }
+
+    void compute_single_scattering(
+        float r, float mu, float mu_s, float nu,
+        out vec3 rayleigh, out vec3 mie
+    ) {
+        float r_top = u_planet_radius + u_atmosphere_height;
+
+        // Ray-sphere intersection
+        float discriminant = r * r * (mu * mu - 1.0) + r_top * r_top;
+        if (discriminant < 0.0) {
+            rayleigh = vec3(0.0);
+            mie = vec3(0.0);
+            return;
+        }
+
+        float d = -r * mu + sqrt(discriminant);
+        float dx = d / float(SAMPLE_COUNT);
+
+        rayleigh = vec3(0.0);
+        mie = vec3(0.0);
+
+        for (int i = 0; i < SAMPLE_COUNT; i++) {
+            float t = (float(i) + 0.5) * dx;
+
+            // Current position
+            float r_i = sqrt(r * r + t * t + 2.0 * r * t * mu);
+            float h_i = r_i - u_planet_radius;
+
+            // Densities at current point
+            float density_r = exp(-h_i / u_rayleigh_scale_height);
+            float density_m = exp(-h_i / u_mie_scale_height);
+
+            // Sun direction cosine at current point
+            float mu_s_i = (r * mu_s + t * nu) / r_i;
+
+            // Check if sun is below horizon
+            if (mu_s_i < -sqrt(1.0 - (u_planet_radius * u_planet_radius) / (r_i * r_i))) {
+                continue;
+            }
+
+            // Transmittances
+            vec3 trans_view = sample_transmittance(r, mu);
+            vec3 trans_point = sample_transmittance(r_i, mu);
+            vec3 trans_sun = sample_transmittance(r_i, mu_s_i);
+
+            vec3 trans_full = trans_sun * (trans_view / max(trans_point, vec3(1e-6)));
+
+            rayleigh += u_rayleigh_coefficients * density_r * trans_full * dx;
+            mie += vec3(u_mie_coefficient) * density_m * trans_full * dx;
+        }
+    }
+
+    void main() {
+        ivec3 pixel = ivec3(gl_GlobalInvocationID.xyz);
+
+        int size_x = int(u_resolution.x * u_resolution.w);
+        int size_y = int(u_resolution.y);
+        int size_z = int(u_resolution.z);
+
+        if (pixel.x >= size_x || pixel.y >= size_y || pixel.z >= size_z) return;
+
+        // Unpack 4D coordinates
+        int idx_altitude = pixel.x % int(u_resolution.x);
+        int idx_azimuth = pixel.x / int(u_resolution.x);
+        int idx_sun_zenith = pixel.y;
+        int idx_view_zenith = pixel.z;
+
+        // Map to physical parameters
+        float u_r = (float(idx_altitude) + 0.5) / u_resolution.x;
+        float u_mu_s = (float(idx_sun_zenith) + 0.5) / u_resolution.y;
+        float u_mu = (float(idx_view_zenith) + 0.5) / u_resolution.z;
+        float u_nu = (float(idx_azimuth) + 0.5) / u_resolution.w;
+
+        float r_min = u_planet_radius;
+        float r_max = u_planet_radius + u_atmosphere_height;
+
+        // Altitude
+        float h = sqrt(r_max * r_max - r_min * r_min);
+        float rho = h * u_r;
+        float r = sqrt(rho * rho + r_min * r_min);
+
+        // View zenith cosine
+        float mu = 2.0 * u_mu - 1.0;
+
+        // Sun zenith cosine
+        float mu_s = 2.0 * u_mu_s - 1.0;
+
+        // Azimuth angle (between sun and view)
+        float nu_angle = u_nu * 2.0 * PI;
+        float sin_view = sqrt(1.0 - mu * mu);
+        float sin_sun = sqrt(1.0 - mu_s * mu_s);
+        float nu = mu * mu_s + sin_view * sin_sun * cos(nu_angle);
+
+        vec3 rayleigh, mie;
+        compute_single_scattering(r, mu, mu_s, nu, rayleigh, mie);
+
+        imageStore(u_rayleigh_lut, pixel, vec4(rayleigh, 1.0));
+        imageStore(u_mie_lut, pixel, vec4(mie, 1.0));
+    }
+"#;
+
+// =============================================================================
+// REGION: MULTIPLE SCATTERING LUT
+// =============================================================================
+
+/// Multiple scattering lookup table
+pub struct MultipleScatteringLUT {
+    /// Resolution (altitude, sun_zenith)
+    pub resolution: (u32, u32),
+
+    /// Multiple scattering texture
+    pub texture: Texture,
+
+    /// Atmosphere parameters
+    pub params: AtmosphereParams,
+
+    /// Number of scattering orders computed
+    pub scattering_orders: u32,
+
+    /// Compute shader for delta S
+    delta_s_shader: ComputeShader,
+
+    /// Compute shader for scattering density
+    density_shader: ComputeShader,
+
+    /// Compute shader for indirect irradiance
+    irradiance_shader: ComputeShader,
+
+    /// Accumulation shader
+    accumulate_shader: ComputeShader,
+}
+
+impl MultipleScatteringLUT {
+    /// Create multiple scattering LUT
+    pub fn new(
+        params: &AtmosphereParams,
+        resolution: (u32, u32),
+        scattering_orders: u32,
+    ) -> Self {
+        let texture = Texture::create_2d(
+            resolution.0,
+            resolution.1,
+            TextureFormat::RGBA32Float,
+            TextureUsage::Storage | TextureUsage::Sampled,
+        );
+
+        Self {
+            resolution,
+            texture,
+            params: params.clone(),
+            scattering_orders,
+            delta_s_shader: ComputeShader::new(DELTA_S_SHADER),
+            density_shader: ComputeShader::new(DENSITY_SHADER),
+            irradiance_shader: ComputeShader::new(IRRADIANCE_SHADER),
+            accumulate_shader: ComputeShader::new(ACCUMULATE_SHADER),
+        }
+    }
+
+    /// Generate multiple scattering LUT iteratively
+    pub fn generate(
+        &mut self,
+        transmittance_lut: &TransmittanceLUT,
+        single_scattering_lut: &SingleScatteringLUT,
+    ) {
+        // Initialize with single scattering
+        // ...
+
+        // Iterate for each scattering order
+        for order in 2..=self.scattering_orders {
+            // Compute delta scattering density
+            // Compute indirect irradiance
+            // Accumulate into final LUT
+        }
+    }
+}
+
+const DELTA_S_SHADER: &str = "/* Delta scattering shader */";
+const DENSITY_SHADER: &str = "/* Scattering density shader */";
+const IRRADIANCE_SHADER: &str = "/* Indirect irradiance shader */";
+const ACCUMULATE_SHADER: &str = "/* Accumulation shader */";
+
+// =============================================================================
+// REGION: SKY VIEW LUT
+// =============================================================================
+
+/// Sky view lookup table for real-time rendering
+pub struct SkyViewLUT {
+    /// Resolution (azimuth, altitude)
+    pub resolution: (u32, u32),
+
+    /// Sky luminance texture
+    pub texture: Texture,
+
+    /// Compute shader
+    compute_shader: ComputeShader,
+}
+
+impl SkyViewLUT {
+    /// Create sky view LUT
+    pub fn new(resolution: (u32, u32)) -> Self {
+        let texture = Texture::create_2d(
+            resolution.0,
+            resolution.1,
+            TextureFormat::RGB16Float,
+            TextureUsage::Storage | TextureUsage::Sampled,
+        );
+
+        Self {
+            resolution,
+            texture,
+            compute_shader: ComputeShader::new(SKY_VIEW_SHADER),
+        }
+    }
+
+    /// Update sky view LUT for current sun position
+    pub fn update(
+        &mut self,
+        sun_direction: Vec3,
+        camera_altitude: f32,
+        transmittance_lut: &TransmittanceLUT,
+        single_scattering_lut: &SingleScatteringLUT,
+        multiple_scattering_lut: &MultipleScatteringLUT,
+    ) {
+        self.compute_shader.set_uniform("u_sun_direction", sun_direction);
+        self.compute_shader.set_uniform("u_camera_altitude", camera_altitude);
+        self.compute_shader.set_uniform("u_resolution", Vec2::new(
+            self.resolution.0 as f32,
+            self.resolution.1 as f32,
+        ));
+
+        self.compute_shader.set_texture(0, &transmittance_lut.texture);
+        self.compute_shader.set_texture(1, &single_scattering_lut.rayleigh_texture);
+        self.compute_shader.set_texture(2, &single_scattering_lut.mie_texture);
+        self.compute_shader.set_texture(3, &multiple_scattering_lut.texture);
+        self.compute_shader.set_storage_image(4, &self.texture);
+
+        let group_size = 8;
+        self.compute_shader.dispatch(
+            (self.resolution.0 + group_size - 1) / group_size,
+            (self.resolution.1 + group_size - 1) / group_size,
+            1,
+        );
+    }
+}
+
+const SKY_VIEW_SHADER: &str = r#"
+    #version 460
+
+    layout(local_size_x = 8, local_size_y = 8) in;
+
+    layout(binding = 0) uniform sampler2D u_transmittance_lut;
+    layout(binding = 1) uniform sampler3D u_rayleigh_lut;
+    layout(binding = 2) uniform sampler3D u_mie_lut;
+    layout(binding = 3) uniform sampler2D u_multiple_scattering_lut;
+    layout(rgba16f, binding = 4) uniform image2D u_sky_view_lut;
+
+    uniform vec3 u_sun_direction;
+    uniform float u_camera_altitude;
+    uniform vec2 u_resolution;
+
+    const float PI = 3.14159265359;
+    const float MIE_G = 0.8;
+
+    // Phase functions
+    float rayleigh_phase(float cos_theta) {
+        return 3.0 / (16.0 * PI) * (1.0 + cos_theta * cos_theta);
+    }
+
+    float mie_phase(float cos_theta, float g) {
+        float g2 = g * g;
+        float denom = 1.0 + g2 - 2.0 * g * cos_theta;
+        return (1.0 - g2) / (4.0 * PI * denom * sqrt(denom));
+    }
+
+    void main() {
+        ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+        if (pixel.x >= int(u_resolution.x) || pixel.y >= int(u_resolution.y)) return;
+
+        vec2 uv = (vec2(pixel) + 0.5) / u_resolution;
+
+        // Map UV to view direction
+        float azimuth = uv.x * 2.0 * PI;
+        float altitude = uv.y * PI - PI * 0.5;
+
+        vec3 view_dir;
+        view_dir.x = cos(altitude) * cos(azimuth);
+        view_dir.y = sin(altitude);
+        view_dir.z = cos(altitude) * sin(azimuth);
+
+        // Scattering angle
+        float cos_theta = dot(view_dir, u_sun_direction);
+
+        // Sample scattering LUTs
+        // ... (sample and combine scattering terms)
+
+        float phase_r = rayleigh_phase(cos_theta);
+        float phase_m = mie_phase(cos_theta, MIE_G);
+
+        // Placeholder - actual implementation samples LUTs
+        vec3 luminance = vec3(0.5, 0.7, 1.0) * max(0.0, cos_theta);
+
+        imageStore(u_sky_view_lut, pixel, vec4(luminance, 1.0));
+    }
+"#;
+
+// =============================================================================
+// REGION: AERIAL PERSPECTIVE LUT
+// =============================================================================
+
+/// Aerial perspective (atmospheric fog) lookup table
+pub struct AerialPerspectiveLUT {
+    /// Resolution (x, y, depth)
+    pub resolution: (u32, u32, u32),
+
+    /// Inscattering texture
+    pub inscattering_texture: Texture,
+
+    /// Transmittance texture
+    pub transmittance_texture: Texture,
+
+    /// Slice depth in meters
+    pub slice_depth: f32,
+
+    /// Maximum distance in meters
+    pub max_distance: f32,
+
+    /// Compute shader
+    compute_shader: ComputeShader,
+}
+
+impl AerialPerspectiveLUT {
+    /// Create aerial perspective LUT
+    pub fn new(resolution: (u32, u32, u32), max_distance: f32) -> Self {
+        let inscattering_texture = Texture::create_3d(
+            resolution.0,
+            resolution.1,
+            resolution.2,
+            TextureFormat::RGBA16Float,
+            TextureUsage::Storage | TextureUsage::Sampled,
+        );
+
+        let transmittance_texture = Texture::create_3d(
+            resolution.0,
+            resolution.1,
+            resolution.2,
+            TextureFormat::RGBA16Float,
+            TextureUsage::Storage | TextureUsage::Sampled,
+        );
+
+        let slice_depth = max_distance / resolution.2 as f32;
+
+        Self {
+            resolution,
+            inscattering_texture,
+            transmittance_texture,
+            slice_depth,
+            max_distance,
+            compute_shader: ComputeShader::new(AERIAL_PERSPECTIVE_SHADER),
+        }
+    }
+
+    /// Update aerial perspective for current view
+    pub fn update(
+        &mut self,
+        view_proj: Mat4,
+        camera_position: Vec3,
+        sun_direction: Vec3,
+        transmittance_lut: &TransmittanceLUT,
+        sky_view_lut: &SkyViewLUT,
+    ) {
+        self.compute_shader.set_uniform("u_view_proj", view_proj);
+        self.compute_shader.set_uniform("u_inv_view_proj", view_proj.inverse());
+        self.compute_shader.set_uniform("u_camera_position", camera_position);
+        self.compute_shader.set_uniform("u_sun_direction", sun_direction);
+        self.compute_shader.set_uniform("u_slice_depth", self.slice_depth);
+        self.compute_shader.set_uniform("u_resolution", Vec3::new(
+            self.resolution.0 as f32,
+            self.resolution.1 as f32,
+            self.resolution.2 as f32,
+        ));
+
+        self.compute_shader.set_texture(0, &transmittance_lut.texture);
+        self.compute_shader.set_texture(1, &sky_view_lut.texture);
+        self.compute_shader.set_storage_image(2, &self.inscattering_texture);
+        self.compute_shader.set_storage_image(3, &self.transmittance_texture);
+
+        let group_size = 4;
+        self.compute_shader.dispatch(
+            (self.resolution.0 + group_size - 1) / group_size,
+            (self.resolution.1 + group_size - 1) / group_size,
+            (self.resolution.2 + group_size - 1) / group_size,
+        );
+    }
+
+    /// Apply aerial perspective to scene color
+    pub fn apply(&self, scene_color: Vec3, scene_depth: f32) -> Vec3 {
+        // Sample from 3D LUT based on screen position and depth
+        let depth_slice = (scene_depth / self.max_distance).min(1.0);
+        let inscattering = self.inscattering_texture.sample_trilinear(0.5, 0.5, depth_slice);
+        let transmittance = self.transmittance_texture.sample_trilinear(0.5, 0.5, depth_slice);
+
+        scene_color * transmittance.xyz() + inscattering.xyz()
+    }
+}
+
+const AERIAL_PERSPECTIVE_SHADER: &str = r#"
+    #version 460
+
+    layout(local_size_x = 4, local_size_y = 4, local_size_z = 4) in;
+
+    layout(binding = 0) uniform sampler2D u_transmittance_lut;
+    layout(binding = 1) uniform sampler2D u_sky_view_lut;
+    layout(rgba16f, binding = 2) uniform image3D u_inscattering;
+    layout(rgba16f, binding = 3) uniform image3D u_transmittance;
+
+    uniform mat4 u_view_proj;
+    uniform mat4 u_inv_view_proj;
+    uniform vec3 u_camera_position;
+    uniform vec3 u_sun_direction;
+    uniform float u_slice_depth;
+    uniform vec3 u_resolution;
+
+    void main() {
+        ivec3 voxel = ivec3(gl_GlobalInvocationID.xyz);
+        if (voxel.x >= int(u_resolution.x) ||
+            voxel.y >= int(u_resolution.y) ||
+            voxel.z >= int(u_resolution.z)) return;
+
+        vec3 uvw = (vec3(voxel) + 0.5) / u_resolution;
+
+        // Screen position to world
+        vec2 ndc = uvw.xy * 2.0 - 1.0;
+        float depth = uvw.z * u_slice_depth * u_resolution.z;
+
+        vec4 clip_pos = vec4(ndc, 0.5, 1.0);
+        vec4 world_pos = u_inv_view_proj * clip_pos;
+        world_pos /= world_pos.w;
+
+        vec3 view_dir = normalize(world_pos.xyz - u_camera_position);
+
+        // Ray march through atmosphere to this depth
+        // ... (integration code)
+
+        vec3 inscattering = vec3(0.0);
+        vec3 transmittance = vec3(1.0);
+
+        imageStore(u_inscattering, voxel, vec4(inscattering, 1.0));
+        imageStore(u_transmittance, voxel, vec4(transmittance, 1.0));
+    }
+"#;
+
+// =============================================================================
+// REGION: SKY RENDERER
+// =============================================================================
+
+/// Complete sky rendering system
+pub struct SkyRenderer {
+    /// Atmosphere parameters
+    pub params: AtmosphereParams,
+
+    /// Transmittance LUT
+    pub transmittance_lut: TransmittanceLUT,
+
+    /// Single scattering LUT
+    pub single_scattering_lut: SingleScatteringLUT,
+
+    /// Multiple scattering LUT
+    pub multiple_scattering_lut: MultipleScatteringLUT,
+
+    /// Sky view LUT
+    pub sky_view_lut: SkyViewLUT,
+
+    /// Aerial perspective LUT
+    pub aerial_perspective_lut: AerialPerspectiveLUT,
+
+    /// Sun disk renderer
+    pub sun_renderer: SunRenderer,
+
+    /// Moon renderer
+    pub moon_renderer: MoonRenderer,
+
+    /// Star renderer
+    pub star_renderer: StarRenderer,
+
+    /// Current sun direction
+    pub sun_direction: Vec3,
+
+    /// Current moon direction
+    pub moon_direction: Vec3,
+
+    /// Sun intensity
+    pub sun_intensity: f32,
+
+    /// Moon intensity
+    pub moon_intensity: f32,
+
+    /// Exposure adjustment
+    pub exposure: f32,
+
+    /// LUTs need regeneration
+    luts_dirty: bool,
+}
+
+impl SkyRenderer {
+    /// Create sky renderer with default Earth atmosphere
+    pub fn new() -> Self {
+        Self::with_preset(AtmospherePreset::Earth)
+    }
+
+    /// Create sky renderer with atmosphere preset
+    pub fn with_preset(preset: AtmospherePreset) -> Self {
+        let params = match preset {
+            AtmospherePreset::Earth => AtmosphereParams::earth(),
+            AtmospherePreset::Mars => AtmosphereParams::mars(),
+            AtmospherePreset::Venus => AtmosphereParams::venus(),
+            AtmospherePreset::Titan => AtmosphereParams::titan(),
+            AtmospherePreset::Alien { primary_color, secondary_color, haze_density } => {
+                let mut params = AtmosphereParams::earth();
+                // Customize for alien world
+                params.rayleigh_coefficients = Vec3::new(
+                    primary_color.r * 30e-6,
+                    primary_color.g * 30e-6,
+                    primary_color.b * 30e-6,
+                );
+                params.mie_coefficient = haze_density * 50e-6;
+                params
+            }
+            AtmospherePreset::Stylized { .. } => AtmosphereParams::earth(), // Use procedural sky
+            AtmospherePreset::Custom(params) => params,
+        };
+
+        let transmittance_lut = TransmittanceLUT::new(&params, (256, 64));
+        let single_scattering_lut = SingleScatteringLUT::new(
+            &params,
+            &transmittance_lut,
+            (32, 128, 32, 8),
+        );
+        let multiple_scattering_lut = MultipleScatteringLUT::new(
+            &params,
+            (32, 32),
+            params.scattering_orders,
+        );
+        let sky_view_lut = SkyViewLUT::new((192, 108));
+        let aerial_perspective_lut = AerialPerspectiveLUT::new((32, 32, 32), 128000.0);
+
+        Self {
+            params,
+            transmittance_lut,
+            single_scattering_lut,
+            multiple_scattering_lut,
+            sky_view_lut,
+            aerial_perspective_lut,
+            sun_renderer: SunRenderer::new(),
+            moon_renderer: MoonRenderer::new(),
+            star_renderer: StarRenderer::new(),
+            sun_direction: Vec3::new(0.0, 0.5, 0.866), // 30 degrees elevation
+            moon_direction: Vec3::new(0.0, -0.3, -0.954),
+            sun_intensity: 1.0,
+            moon_intensity: 0.01,
+            exposure: 1.0,
+            luts_dirty: true,
+        }
+    }
+
+    /// Set sun position by time of day and day of year
+    pub fn set_time_of_day(&mut self, hours: f32, day_of_year: u32, latitude: f32) {
+        let time_fraction = hours / 24.0;
+        let day_angle = 2.0 * std::f32::consts::PI * day_of_year as f32 / 365.0;
+
+        // Solar declination
+        let declination = 23.44 * (day_angle - std::f32::consts::PI / 2.0).sin();
+        let declination_rad = declination.to_radians();
+        let latitude_rad = latitude.to_radians();
+
+        // Hour angle
+        let hour_angle = 2.0 * std::f32::consts::PI * (time_fraction - 0.5);
+
+        // Solar position
+        let sin_altitude = latitude_rad.sin() * declination_rad.sin() +
+                          latitude_rad.cos() * declination_rad.cos() * hour_angle.cos();
+        let altitude = sin_altitude.asin();
+
+        let cos_azimuth = (declination_rad.sin() - latitude_rad.sin() * sin_altitude) /
+                         (latitude_rad.cos() * altitude.cos());
+        let azimuth = if hour_angle < 0.0 {
+            cos_azimuth.clamp(-1.0, 1.0).acos()
+        } else {
+            2.0 * std::f32::consts::PI - cos_azimuth.clamp(-1.0, 1.0).acos()
+        };
+
+        // Convert to direction vector
+        self.sun_direction = Vec3::new(
+            altitude.cos() * azimuth.sin(),
+            altitude.sin(),
+            altitude.cos() * azimuth.cos(),
+        ).normalize();
+
+        // Simple moon approximation (opposite + offset)
+        let moon_offset = std::f32::consts::PI * 0.8;
+        self.moon_direction = Vec3::new(
+            altitude.cos() * (azimuth + moon_offset).sin(),
+            (-altitude + 0.2).sin(),
+            altitude.cos() * (azimuth + moon_offset).cos(),
+        ).normalize();
+    }
+
+    /// Set sun direction directly
+    pub fn set_sun_direction(&mut self, direction: Vec3) {
+        self.sun_direction = direction.normalize();
+    }
+
+    /// Generate all atmosphere LUTs
+    pub fn generate_luts(&mut self) {
+        if !self.luts_dirty { return; }
+
+        self.transmittance_lut.generate();
+        self.single_scattering_lut.generate();
+        self.multiple_scattering_lut.generate(
+            &self.transmittance_lut,
+            &self.single_scattering_lut,
+        );
+
+        self.luts_dirty = false;
+    }
+
+    /// Update per-frame LUTs
+    pub fn update(&mut self, camera_altitude: f32, view_proj: Mat4, camera_position: Vec3) {
+        // Sky view LUT depends on sun position
+        self.sky_view_lut.update(
+            self.sun_direction,
+            camera_altitude,
+            &self.transmittance_lut,
+            &self.single_scattering_lut,
+            &self.multiple_scattering_lut,
+        );
+
+        // Aerial perspective depends on view
+        self.aerial_perspective_lut.update(
+            view_proj,
+            camera_position,
+            self.sun_direction,
+            &self.transmittance_lut,
+            &self.sky_view_lut,
+        );
+    }
+
+    /// Get sky luminance for a view direction
+    pub fn sample_sky(&self, view_direction: Vec3) -> Vec3 {
+        // Convert direction to sky view UV
+        let phi = view_direction.z.atan2(view_direction.x);
+        let theta = view_direction.y.asin();
+
+        let u = (phi / (2.0 * std::f32::consts::PI) + 0.5).fract();
+        let v = theta / std::f32::consts::PI + 0.5;
+
+        self.sky_view_lut.texture.sample_bilinear(u, v).xyz() * self.exposure
+    }
+
+    /// Get sun luminance contribution
+    pub fn get_sun_luminance(&self, view_direction: Vec3) -> Vec3 {
+        self.sun_renderer.get_luminance(
+            view_direction,
+            self.sun_direction,
+            self.sun_intensity,
+            &self.transmittance_lut,
+        )
+    }
+
+    /// Get ambient sky irradiance
+    pub fn get_ambient_irradiance(&self, normal: Vec3) -> Vec3 {
+        // Hemisphere integration from sky view LUT
+        let mut irradiance = Vec3::zero();
+        let samples = 32;
+
+        for i in 0..samples {
+            for j in 0..samples {
+                let phi = 2.0 * std::f32::consts::PI * i as f32 / samples as f32;
+                let theta = std::f32::consts::FRAC_PI_2 * j as f32 / samples as f32;
+
+                let sample_dir = Vec3::new(
+                    theta.cos() * phi.cos(),
+                    theta.sin(),
+                    theta.cos() * phi.sin(),
+                );
+
+                let n_dot_l = normal.dot(sample_dir).max(0.0);
+                irradiance += self.sample_sky(sample_dir) * n_dot_l * theta.cos();
+            }
+        }
+
+        irradiance * std::f32::consts::PI / (samples * samples) as f32
+    }
+}
+
+// =============================================================================
+// REGION: SUN RENDERER
+// =============================================================================
+
+/// Sun disk renderer with limb darkening
+pub struct SunRenderer {
+    /// Angular radius of sun disk in radians
+    pub angular_radius: f32,
+
+    /// Sun color temperature in Kelvin
+    pub temperature: f32,
+
+    /// Limb darkening coefficients (linear, quadratic)
+    pub limb_darkening: (f32, f32),
+
+    /// Corona scale
+    pub corona_scale: f32,
+
+    /// Enable bloom contribution
+    pub enable_bloom: bool,
+}
+
+impl SunRenderer {
+    /// Create sun renderer with Earth-like sun
+    pub fn new() -> Self {
+        Self {
+            angular_radius: 0.00935, // ~0.536 degrees
+            temperature: 5778.0,     // Kelvin
+            limb_darkening: (0.6, 0.4),
+            corona_scale: 1.0,
+            enable_bloom: true,
+        }
+    }
+
+    /// Get sun luminance for view direction
+    pub fn get_luminance(
+        &self,
+        view_direction: Vec3,
+        sun_direction: Vec3,
+        intensity: f32,
+        transmittance_lut: &TransmittanceLUT,
+    ) -> Vec3 {
+        let cos_angle = view_direction.dot(sun_direction);
+        let angle = cos_angle.acos();
+
+        if angle > self.angular_radius * 1.5 {
+            return Vec3::zero();
+        }
+
+        // Distance from sun center (0 = center, 1 = edge)
+        let r = (angle / self.angular_radius).min(1.0);
+
+        if r <= 1.0 {
+            // Inside sun disk - apply limb darkening
+            let mu = (1.0 - r * r).sqrt();
+            let darkening = 1.0 - self.limb_darkening.0 * (1.0 - mu)
+                               - self.limb_darkening.1 * (1.0 - mu) * (1.0 - mu);
+
+            let sun_color = self.blackbody_color(self.temperature);
+            return sun_color * darkening * intensity;
+        } else {
+            // Corona falloff
+            let falloff = ((1.0 - r) * 2.0).max(0.0).powf(4.0);
+            let sun_color = self.blackbody_color(self.temperature);
+            return sun_color * falloff * self.corona_scale * intensity * 0.01;
+        }
+    }
+
+    /// Compute blackbody color for given temperature
+    fn blackbody_color(&self, temperature: f32) -> Vec3 {
+        // CIE 1931 color matching approximation
+        let t = temperature;
+
+        // Red
+        let r = if t <= 6600.0 {
+            1.0
+        } else {
+            let x = (t - 6000.0) / 100.0;
+            1.29293618 * x.powf(-0.1332047592)
+        };
+
+        // Green
+        let g = if t <= 6600.0 {
+            let x = t / 100.0;
+            0.39008157 * x.ln() - 0.63184144
+        } else {
+            let x = (t - 6000.0) / 100.0;
+            1.12989086 * x.powf(-0.0755148492)
+        };
+
+        // Blue
+        let b = if t >= 6600.0 {
+            1.0
+        } else if t <= 1900.0 {
+            0.0
+        } else {
+            let x = (t - 1000.0) / 100.0;
+            0.54320678 * x.ln() - 1.19625408
+        };
+
+        Vec3::new(r.clamp(0.0, 1.0), g.clamp(0.0, 1.0), b.clamp(0.0, 1.0))
+    }
+}
+
+// =============================================================================
+// REGION: MOON RENDERER
+// =============================================================================
+
+/// Moon renderer with phases and earthshine
+pub struct MoonRenderer {
+    /// Angular radius in radians
+    pub angular_radius: f32,
+
+    /// Moon albedo
+    pub albedo: f32,
+
+    /// Current phase (0 = new, 0.5 = full, 1 = new)
+    pub phase: f32,
+
+    /// Moon texture
+    pub texture: Option<Texture>,
+
+    /// Enable earthshine
+    pub enable_earthshine: bool,
+
+    /// Earthshine intensity
+    pub earthshine_intensity: f32,
+}
+
+impl MoonRenderer {
+    /// Create moon renderer
+    pub fn new() -> Self {
+        Self {
+            angular_radius: 0.009,  // ~0.52 degrees
+            albedo: 0.12,
+            phase: 0.25,            // First quarter
+            texture: None,
+            enable_earthshine: true,
+            earthshine_intensity: 0.05,
+        }
+    }
+
+    /// Set moon phase by day (synodic month = 29.53 days)
+    pub fn set_phase_by_day(&mut self, day: f32) {
+        self.phase = (day / 29.53).fract();
+    }
+
+    /// Get moon luminance for view direction
+    pub fn get_luminance(
+        &self,
+        view_direction: Vec3,
+        moon_direction: Vec3,
+        sun_direction: Vec3,
+        sun_intensity: f32,
+    ) -> Vec3 {
+        let cos_angle = view_direction.dot(moon_direction);
+        let angle = cos_angle.acos();
+
+        if angle > self.angular_radius * 1.2 {
+            return Vec3::zero();
+        }
+
+        // Distance from moon center
+        let r = angle / self.angular_radius;
+
+        if r <= 1.0 {
+            // Phase illumination
+            let phase_angle = (-sun_direction).dot(moon_direction).acos();
+            let illumination = (1.0 + phase_angle.cos()) * 0.5;
+
+            // Surface position on moon disk
+            let surface_normal = moon_direction; // Simplified
+            let n_dot_sun = surface_normal.dot(sun_direction).max(0.0);
+
+            // Base luminance
+            let mut luminance = Vec3::splat(self.albedo * n_dot_sun * illumination * sun_intensity);
+
+            // Add earthshine for dark side
+            if self.enable_earthshine {
+                let earthshine = (1.0 - illumination) * self.earthshine_intensity;
+                luminance += Vec3::new(0.1, 0.15, 0.2) * earthshine;
+            }
+
+            // Edge softening
+            let edge_factor = if r > 0.9 {
+                1.0 - (r - 0.9) / 0.1
+            } else {
+                1.0
+            };
+
+            return luminance * edge_factor;
+        }
+
+        Vec3::zero()
+    }
+}
+
+// =============================================================================
+// REGION: STAR RENDERER
+// =============================================================================
+
+/// Star field renderer
+pub struct StarRenderer {
+    /// Star catalog (position, magnitude, color)
+    stars: Vec<Star>,
+
+    /// Star texture atlas
+    pub star_atlas: Option<Texture>,
+
+    /// Procedural star seed
+    pub seed: u32,
+
+    /// Star density multiplier
+    pub density: f32,
+
+    /// Twinkle speed
+    pub twinkle_speed: f32,
+
+    /// Twinkle intensity
+    pub twinkle_intensity: f32,
+
+    /// Minimum visible magnitude (higher = dimmer)
+    pub min_magnitude: f32,
+
+    /// GPU buffer for star data
+    star_buffer: Option<GpuBuffer>,
+}
+
+/// Individual star data
+pub struct Star {
+    /// Right ascension (radians)
+    pub ra: f32,
+
+    /// Declination (radians)
+    pub dec: f32,
+
+    /// Apparent magnitude
+    pub magnitude: f32,
+
+    /// Color temperature (Kelvin)
+    pub temperature: f32,
+
+    /// Spectral class
+    pub spectral_class: SpectralClass,
+}
+
+/// Star spectral classification
+pub enum SpectralClass {
+    O, // Blue (30,000-60,000K)
+    B, // Blue-white (10,000-30,000K)
+    A, // White (7,500-10,000K)
+    F, // Yellow-white (6,000-7,500K)
+    G, // Yellow (5,200-6,000K) - Sun-like
+    K, // Orange (3,700-5,200K)
+    M, // Red (2,400-3,700K)
+}
+
+impl StarRenderer {
+    /// Create star renderer
+    pub fn new() -> Self {
+        Self {
+            stars: Vec::new(),
+            star_atlas: None,
+            seed: 12345,
+            density: 1.0,
+            twinkle_speed: 1.0,
+            twinkle_intensity: 0.3,
+            min_magnitude: 6.5,
+            star_buffer: None,
+        }
+    }
+
+    /// Generate procedural star field
+    pub fn generate_procedural(&mut self, count: u32) {
+        self.stars.clear();
+
+        let mut rng = SimpleRng::new(self.seed);
+
+        for _ in 0..count {
+            // Random position on sphere
+            let ra = rng.next_f32() * 2.0 * std::f32::consts::PI;
+            let dec = (rng.next_f32() * 2.0 - 1.0).asin();
+
+            // Magnitude distribution (more dim stars)
+            let magnitude = rng.next_f32().powf(0.5) * self.min_magnitude;
+
+            // Temperature based on magnitude (brighter stars tend to be hotter)
+            let temp_factor = 1.0 - magnitude / self.min_magnitude;
+            let temperature = 3000.0 + temp_factor * 30000.0 * rng.next_f32();
+
+            let spectral_class = match temperature as u32 {
+                30000..=60000 => SpectralClass::O,
+                10000..=29999 => SpectralClass::B,
+                7500..=9999 => SpectralClass::A,
+                6000..=7499 => SpectralClass::F,
+                5200..=5999 => SpectralClass::G,
+                3700..=5199 => SpectralClass::K,
+                _ => SpectralClass::M,
+            };
+
+            self.stars.push(Star {
+                ra,
+                dec,
+                magnitude,
+                temperature,
+                spectral_class,
+            });
+        }
+
+        self.update_gpu_buffer();
+    }
+
+    /// Load star catalog (e.g., Hipparcos or Tycho-2)
+    pub fn load_catalog(&mut self, path: &str) -> Result<(), String> {
+        // Parse star catalog file
+        // Format: RA, DEC, Magnitude, ColorIndex
+        // ...
+        Ok(())
+    }
+
+    /// Update GPU buffer with star data
+    fn update_gpu_buffer(&mut self) {
+        let data: Vec<f32> = self.stars.iter().flat_map(|star| {
+            vec![
+                star.ra,
+                star.dec,
+                star.magnitude,
+                star.temperature,
+            ]
+        }).collect();
+
+        self.star_buffer = Some(GpuBuffer::from_slice(&data));
+    }
+
+    /// Get star contribution for view direction
+    pub fn sample(&self, view_direction: Vec3, time: f32) -> Vec3 {
+        // Convert view direction to RA/DEC
+        let ra = view_direction.z.atan2(view_direction.x);
+        let dec = view_direction.y.asin();
+
+        let mut total_luminance = Vec3::zero();
+
+        for star in &self.stars {
+            // Angular distance
+            let cos_dist = dec.sin() * star.dec.sin() +
+                          dec.cos() * star.dec.cos() * (ra - star.ra).cos();
+
+            if cos_dist > 0.9999 { // Very close to star
+                // Intensity from magnitude
+                let intensity = 10.0_f32.powf(-0.4 * star.magnitude);
+
+                // Twinkle
+                let twinkle = 1.0 + self.twinkle_intensity *
+                    (time * self.twinkle_speed + star.ra * 100.0).sin();
+
+                // Star color from temperature
+                let color = self.temperature_to_color(star.temperature);
+
+                total_luminance += color * intensity * twinkle * self.density;
+            }
+        }
+
+        total_luminance
+    }
+
+    /// Convert temperature to RGB color
+    fn temperature_to_color(&self, temp: f32) -> Vec3 {
+        // Simplified blackbody to RGB
+        let t = temp / 100.0;
+
+        let r = if t <= 66.0 {
+            1.0
+        } else {
+            1.29293618 * (t - 60.0).powf(-0.1332047592)
+        };
+
+        let g = if t <= 66.0 {
+            0.390081579 * t.ln() - 0.631841444
+        } else {
+            1.12989086 * (t - 60.0).powf(-0.0755148492)
+        };
+
+        let b = if t >= 66.0 {
+            1.0
+        } else if t <= 19.0 {
+            0.0
+        } else {
+            0.543206789 * (t - 10.0).ln() - 1.19625408
+        };
+
+        Vec3::new(r.clamp(0.0, 1.0), g.clamp(0.0, 1.0), b.clamp(0.0, 1.0))
+    }
+}
+
+/// Simple RNG for procedural generation
+struct SimpleRng {
+    state: u32,
+}
+
+impl SimpleRng {
+    fn new(seed: u32) -> Self {
+        Self { state: seed }
+    }
+
+    fn next_u32(&mut self) -> u32 {
+        self.state = self.state.wrapping_mul(1664525).wrapping_add(1013904223);
+        self.state
+    }
+
+    fn next_f32(&mut self) -> f32 {
+        self.next_u32() as f32 / u32::MAX as f32
+    }
+}
+
+// =============================================================================
+// REGION: CLOUD LAYER
+// =============================================================================
+
+/// Cloud layer configuration
+pub struct CloudLayer {
+    /// Layer altitude in meters
+    pub altitude: f32,
+
+    /// Layer thickness in meters
+    pub thickness: f32,
+
+    /// Cloud coverage (0-1)
+    pub coverage: f32,
+
+    /// Cloud density
+    pub density: f32,
+
+    /// Cloud type
+    pub cloud_type: CloudType,
+
+    /// Wind speed and direction
+    pub wind: Vec2,
+
+    /// Detail noise scale
+    pub detail_scale: f32,
+}
+
+/// Cloud types
+pub enum CloudType {
+    /// Flat stratus clouds
+    Stratus,
+    /// Puffy cumulus clouds
+    Cumulus,
+    /// High-altitude cirrus clouds
+    Cirrus,
+    /// Towering cumulonimbus
+    Cumulonimbus,
+    /// Layered stratocumulus
+    Stratocumulus,
+}
+
+/// Volumetric cloud renderer
+pub struct VolumetricCloudRenderer {
+    /// Cloud layers
+    pub layers: Vec<CloudLayer>,
+
+    /// 3D noise texture for cloud shape
+    pub shape_noise: Texture,
+
+    /// 3D noise texture for detail
+    pub detail_noise: Texture,
+
+    /// Weather map texture
+    pub weather_map: Option<Texture>,
+
+    /// Cloud render target
+    pub render_target: Texture,
+
+    /// Ray march step count
+    pub ray_steps: u32,
+
+    /// Light march step count
+    pub light_steps: u32,
+
+    /// Temporal reprojection enabled
+    pub temporal_reprojection: bool,
+
+    /// Previous frame clouds
+    history_texture: Texture,
+
+    /// Compute shader
+    compute_shader: ComputeShader,
+}
+
+impl VolumetricCloudRenderer {
+    /// Create volumetric cloud renderer
+    pub fn new(resolution: (u32, u32)) -> Self {
+        let shape_noise = Self::generate_3d_noise(128, NoiseType::WorleyFBM);
+        let detail_noise = Self::generate_3d_noise(32, NoiseType::WorleyDetail);
+
+        let render_target = Texture::create_2d(
+            resolution.0,
+            resolution.1,
+            TextureFormat::RGBA16Float,
+            TextureUsage::Storage | TextureUsage::Sampled,
+        );
+
+        let history_texture = Texture::create_2d(
+            resolution.0,
+            resolution.1,
+            TextureFormat::RGBA16Float,
+            TextureUsage::Storage | TextureUsage::Sampled,
+        );
+
+        Self {
+            layers: vec![
+                CloudLayer {
+                    altitude: 2000.0,
+                    thickness: 500.0,
+                    coverage: 0.5,
+                    density: 0.3,
+                    cloud_type: CloudType::Cumulus,
+                    wind: Vec2::new(10.0, 5.0),
+                    detail_scale: 0.1,
+                },
+            ],
+            shape_noise,
+            detail_noise,
+            weather_map: None,
+            render_target,
+            ray_steps: 64,
+            light_steps: 6,
+            temporal_reprojection: true,
+            history_texture,
+            compute_shader: ComputeShader::new(VOLUMETRIC_CLOUD_SHADER),
+        }
+    }
+
+    /// Generate 3D noise texture
+    fn generate_3d_noise(size: u32, noise_type: NoiseType) -> Texture {
+        let texture = Texture::create_3d(
+            size, size, size,
+            TextureFormat::R16Float,
+            TextureUsage::Storage | TextureUsage::Sampled,
+        );
+
+        // Generate noise on GPU
+        let noise_shader = ComputeShader::new(NOISE_GENERATION_SHADER);
+        noise_shader.set_uniform("u_size", size as f32);
+        noise_shader.set_uniform("u_noise_type", noise_type as i32);
+        noise_shader.set_storage_image(0, &texture);
+        noise_shader.dispatch(size / 4, size / 4, size / 4);
+
+        texture
+    }
+
+    /// Render clouds
+    pub fn render(
+        &mut self,
+        view_proj: Mat4,
+        camera_position: Vec3,
+        sun_direction: Vec3,
+        time: f32,
+        sky_renderer: &SkyRenderer,
+    ) {
+        self.compute_shader.set_uniform("u_view_proj", view_proj);
+        self.compute_shader.set_uniform("u_inv_view_proj", view_proj.inverse());
+        self.compute_shader.set_uniform("u_camera_position", camera_position);
+        self.compute_shader.set_uniform("u_sun_direction", sun_direction);
+        self.compute_shader.set_uniform("u_time", time);
+        self.compute_shader.set_uniform("u_ray_steps", self.ray_steps as i32);
+        self.compute_shader.set_uniform("u_light_steps", self.light_steps as i32);
+
+        // Set layer parameters
+        if let Some(layer) = self.layers.first() {
+            self.compute_shader.set_uniform("u_cloud_altitude", layer.altitude);
+            self.compute_shader.set_uniform("u_cloud_thickness", layer.thickness);
+            self.compute_shader.set_uniform("u_cloud_coverage", layer.coverage);
+            self.compute_shader.set_uniform("u_cloud_density", layer.density);
+            self.compute_shader.set_uniform("u_wind", layer.wind);
+        }
+
+        self.compute_shader.set_texture(0, &self.shape_noise);
+        self.compute_shader.set_texture(1, &self.detail_noise);
+        self.compute_shader.set_texture(2, &sky_renderer.transmittance_lut.texture);
+        self.compute_shader.set_storage_image(3, &self.render_target);
+
+        if self.temporal_reprojection {
+            self.compute_shader.set_texture(4, &self.history_texture);
+        }
+
+        let (width, height) = (self.render_target.width(), self.render_target.height());
+        let group_size = 8;
+        self.compute_shader.dispatch(
+            (width + group_size - 1) / group_size,
+            (height + group_size - 1) / group_size,
+            1,
+        );
+
+        // Copy to history for temporal reprojection
+        if self.temporal_reprojection {
+            self.render_target.copy_to(&mut self.history_texture);
+        }
+    }
+}
+
+enum NoiseType {
+    WorleyFBM = 0,
+    WorleyDetail = 1,
+    Perlin = 2,
+}
+
+const NOISE_GENERATION_SHADER: &str = r#"
+    #version 460
+
+    layout(local_size_x = 4, local_size_y = 4, local_size_z = 4) in;
+
+    layout(r16f, binding = 0) uniform image3D u_noise;
+
+    uniform float u_size;
+    uniform int u_noise_type;
+
+    // Hash function
+    vec3 hash33(vec3 p) {
+        p = fract(p * vec3(443.8975, 397.2973, 491.1871));
+        p += dot(p.zxy, p.yxz + 19.27);
+        return fract(vec3(p.x * p.y, p.z * p.x, p.y * p.z));
+    }
+
+    // Worley noise
+    float worley(vec3 p, float scale) {
+        p *= scale;
+        vec3 id = floor(p);
+        vec3 f = fract(p);
+
+        float min_dist = 1.0;
+
+        for (int x = -1; x <= 1; x++) {
+            for (int y = -1; y <= 1; y++) {
+                for (int z = -1; z <= 1; z++) {
+                    vec3 offset = vec3(x, y, z);
+                    vec3 neighbor = id + offset;
+                    vec3 point = hash33(neighbor);
+                    vec3 diff = offset + point - f;
+                    float dist = length(diff);
+                    min_dist = min(min_dist, dist);
+                }
+            }
+        }
+
+        return min_dist;
+    }
+
+    void main() {
+        ivec3 pos = ivec3(gl_GlobalInvocationID.xyz);
+        if (pos.x >= int(u_size) || pos.y >= int(u_size) || pos.z >= int(u_size)) return;
+
+        vec3 uvw = (vec3(pos) + 0.5) / u_size;
+
+        float value = 0.0;
+
+        if (u_noise_type == 0) {
+            // Worley FBM
+            value += (1.0 - worley(uvw, 4.0)) * 0.625;
+            value += (1.0 - worley(uvw, 8.0)) * 0.25;
+            value += (1.0 - worley(uvw, 16.0)) * 0.125;
+        } else if (u_noise_type == 1) {
+            // Detail worley
+            value = 1.0 - worley(uvw, 8.0);
+        }
+
+        imageStore(u_noise, pos, vec4(value));
+    }
+"#;
+
+const VOLUMETRIC_CLOUD_SHADER: &str = r#"
+    #version 460
+
+    layout(local_size_x = 8, local_size_y = 8) in;
+
+    layout(binding = 0) uniform sampler3D u_shape_noise;
+    layout(binding = 1) uniform sampler3D u_detail_noise;
+    layout(binding = 2) uniform sampler2D u_transmittance_lut;
+    layout(rgba16f, binding = 3) uniform image2D u_output;
+
+    uniform mat4 u_view_proj;
+    uniform mat4 u_inv_view_proj;
+    uniform vec3 u_camera_position;
+    uniform vec3 u_sun_direction;
+    uniform float u_time;
+    uniform int u_ray_steps;
+    uniform int u_light_steps;
+    uniform float u_cloud_altitude;
+    uniform float u_cloud_thickness;
+    uniform float u_cloud_coverage;
+    uniform float u_cloud_density;
+    uniform vec2 u_wind;
+
+    const float PI = 3.14159265359;
+
+    // Henyey-Greenstein phase function
+    float hg_phase(float cos_theta, float g) {
+        float g2 = g * g;
+        float denom = 1.0 + g2 - 2.0 * g * cos_theta;
+        return (1.0 - g2) / (4.0 * PI * denom * sqrt(denom));
+    }
+
+    // Two-lobe phase function
+    float cloud_phase(float cos_theta) {
+        return mix(hg_phase(cos_theta, 0.8), hg_phase(cos_theta, -0.5), 0.2);
+    }
+
+    // Sample cloud density
+    float sample_cloud_density(vec3 pos) {
+        float height = pos.y - u_cloud_altitude;
+        if (height < 0.0 || height > u_cloud_thickness) return 0.0;
+
+        float height_fraction = height / u_cloud_thickness;
+        float height_gradient = 4.0 * height_fraction * (1.0 - height_fraction);
+
+        // Apply wind
+        vec3 wind_offset = vec3(u_wind.x, 0.0, u_wind.y) * u_time * 0.01;
+        vec3 sample_pos = (pos + wind_offset) * 0.001;
+
+        float shape = texture(u_shape_noise, sample_pos).r;
+        float detail = texture(u_detail_noise, sample_pos * 4.0).r;
+
+        float density = shape - (1.0 - u_cloud_coverage);
+        density = max(0.0, density) * height_gradient;
+        density -= detail * 0.2;
+
+        return max(0.0, density * u_cloud_density);
+    }
+
+    // Light marching for in-scattering
+    float light_march(vec3 pos) {
+        float step_size = u_cloud_thickness / float(u_light_steps);
+        float total_density = 0.0;
+
+        for (int i = 0; i < u_light_steps; i++) {
+            pos += u_sun_direction * step_size;
+            total_density += sample_cloud_density(pos) * step_size;
+        }
+
+        return exp(-total_density * 10.0);
+    }
+
+    void main() {
+        ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+        ivec2 size = imageSize(u_output);
+        if (pixel.x >= size.x || pixel.y >= size.y) return;
+
+        vec2 uv = (vec2(pixel) + 0.5) / vec2(size);
+        vec2 ndc = uv * 2.0 - 1.0;
+
+        // Ray direction
+        vec4 clip = vec4(ndc, 1.0, 1.0);
+        vec4 view = u_inv_view_proj * clip;
+        vec3 ray_dir = normalize(view.xyz / view.w - u_camera_position);
+
+        // Ray-layer intersection
+        float t_min = (u_cloud_altitude - u_camera_position.y) / ray_dir.y;
+        float t_max = (u_cloud_altitude + u_cloud_thickness - u_camera_position.y) / ray_dir.y;
+
+        if (t_min > t_max) {
+            float temp = t_min;
+            t_min = t_max;
+            t_max = temp;
+        }
+
+        if (t_max < 0.0) {
+            imageStore(u_output, pixel, vec4(0.0, 0.0, 0.0, 1.0));
+            return;
+        }
+
+        t_min = max(0.0, t_min);
+
+        // Ray march
+        float step_size = (t_max - t_min) / float(u_ray_steps);
+
+        vec3 inscattering = vec3(0.0);
+        float transmittance = 1.0;
+
+        float cos_angle = dot(ray_dir, u_sun_direction);
+        float phase = cloud_phase(cos_angle);
+
+        for (int i = 0; i < u_ray_steps && transmittance > 0.01; i++) {
+            float t = t_min + (float(i) + 0.5) * step_size;
+            vec3 pos = u_camera_position + ray_dir * t;
+
+            float density = sample_cloud_density(pos);
+
+            if (density > 0.0) {
+                float light_trans = light_march(pos);
+
+                vec3 sun_color = vec3(1.0, 0.95, 0.9);
+                vec3 ambient_color = vec3(0.6, 0.7, 0.9);
+
+                vec3 light = sun_color * light_trans * phase + ambient_color * 0.3;
+
+                float sample_trans = exp(-density * step_size * 10.0);
+                inscattering += light * density * transmittance * step_size;
+                transmittance *= sample_trans;
+            }
+        }
+
+        imageStore(u_output, pixel, vec4(inscattering, 1.0 - transmittance));
+    }
+"#;
+
+// =============================================================================
+// REGION: ATMOSPHERE SYSTEM
+// =============================================================================
+
+/// Complete atmosphere system managing all components
+pub struct AtmosphereSystem {
+    /// Sky renderer
+    pub sky: SkyRenderer,
+
+    /// Cloud renderer
+    pub clouds: VolumetricCloudRenderer,
+
+    /// Enable clouds
+    pub clouds_enabled: bool,
+
+    /// Enable stars
+    pub stars_enabled: bool,
+
+    /// Enable celestial bodies (sun/moon)
+    pub celestial_enabled: bool,
+
+    /// Composite render target
+    composite_target: Texture,
+
+    /// Composite shader
+    composite_shader: ComputeShader,
+}
+
+impl AtmosphereSystem {
+    /// Create atmosphere system
+    pub fn new(resolution: (u32, u32)) -> Self {
+        let composite_target = Texture::create_2d(
+            resolution.0,
+            resolution.1,
+            TextureFormat::RGBA16Float,
+            TextureUsage::Storage | TextureUsage::Sampled,
+        );
+
+        Self {
+            sky: SkyRenderer::new(),
+            clouds: VolumetricCloudRenderer::new((resolution.0 / 2, resolution.1 / 2)),
+            clouds_enabled: true,
+            stars_enabled: true,
+            celestial_enabled: true,
+            composite_target,
+            composite_shader: ComputeShader::new(ATMOSPHERE_COMPOSITE_SHADER),
+        }
+    }
+
+    /// Initialize atmosphere system
+    pub fn initialize(&mut self) {
+        self.sky.generate_luts();
+        self.sky.star_renderer.generate_procedural(5000);
+    }
+
+    /// Update atmosphere for current frame
+    pub fn update(
+        &mut self,
+        view_proj: Mat4,
+        camera_position: Vec3,
+        time: f32,
+    ) {
+        let camera_altitude = camera_position.y;
+
+        // Update sky LUTs
+        self.sky.update(camera_altitude, view_proj, camera_position);
+
+        // Render clouds
+        if self.clouds_enabled {
+            self.clouds.render(
+                view_proj,
+                camera_position,
+                self.sky.sun_direction,
+                time,
+                &self.sky,
+            );
+        }
+    }
+
+    /// Render atmosphere to target
+    pub fn render(&mut self, depth_texture: &Texture, scene_texture: &Texture) {
+        self.composite_shader.set_texture(0, &self.sky.sky_view_lut.texture);
+        self.composite_shader.set_texture(1, &self.clouds.render_target);
+        self.composite_shader.set_texture(2, &self.sky.aerial_perspective_lut.inscattering_texture);
+        self.composite_shader.set_texture(3, &self.sky.aerial_perspective_lut.transmittance_texture);
+        self.composite_shader.set_texture(4, depth_texture);
+        self.composite_shader.set_texture(5, scene_texture);
+        self.composite_shader.set_storage_image(6, &self.composite_target);
+
+        self.composite_shader.set_uniform("u_sun_direction", self.sky.sun_direction);
+        self.composite_shader.set_uniform("u_sun_intensity", self.sky.sun_intensity);
+        self.composite_shader.set_uniform("u_exposure", self.sky.exposure);
+        self.composite_shader.set_uniform("u_clouds_enabled", self.clouds_enabled as i32);
+        self.composite_shader.set_uniform("u_stars_enabled", self.stars_enabled as i32);
+
+        let (width, height) = (self.composite_target.width(), self.composite_target.height());
+        let group_size = 8;
+        self.composite_shader.dispatch(
+            (width + group_size - 1) / group_size,
+            (height + group_size - 1) / group_size,
+            1,
+        );
+    }
+
+    /// Get composited atmosphere texture
+    pub fn get_output(&self) -> &Texture {
+        &self.composite_target
+    }
+}
+
+const ATMOSPHERE_COMPOSITE_SHADER: &str = r#"
+    #version 460
+
+    layout(local_size_x = 8, local_size_y = 8) in;
+
+    layout(binding = 0) uniform sampler2D u_sky;
+    layout(binding = 1) uniform sampler2D u_clouds;
+    layout(binding = 2) uniform sampler3D u_inscattering;
+    layout(binding = 3) uniform sampler3D u_transmittance;
+    layout(binding = 4) uniform sampler2D u_depth;
+    layout(binding = 5) uniform sampler2D u_scene;
+    layout(rgba16f, binding = 6) uniform image2D u_output;
+
+    uniform vec3 u_sun_direction;
+    uniform float u_sun_intensity;
+    uniform float u_exposure;
+    uniform int u_clouds_enabled;
+    uniform int u_stars_enabled;
+
+    void main() {
+        ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+        ivec2 size = imageSize(u_output);
+        if (pixel.x >= size.x || pixel.y >= size.y) return;
+
+        vec2 uv = (vec2(pixel) + 0.5) / vec2(size);
+
+        float depth = texture(u_depth, uv).r;
+        vec3 scene_color = texture(u_scene, uv).rgb;
+        vec3 sky_color = texture(u_sky, uv).rgb;
+
+        vec3 result;
+
+        if (depth >= 1.0) {
+            // Sky pixel
+            result = sky_color;
+
+            // Add clouds
+            if (u_clouds_enabled != 0) {
+                vec4 cloud = texture(u_clouds, uv);
+                result = mix(result, cloud.rgb, cloud.a);
+            }
+        } else {
+            // Scene pixel with aerial perspective
+            vec3 inscatter = texture(u_inscattering, vec3(uv, depth)).rgb;
+            vec3 trans = texture(u_transmittance, vec3(uv, depth)).rgb;
+
+            result = scene_color * trans + inscatter;
+        }
+
+        // Apply exposure
+        result *= u_exposure;
+
+        imageStore(u_output, pixel, vec4(result, 1.0));
+    }
+"#;
+
+// =============================================================================
+// REGION: TIME OF DAY SYSTEM
+// =============================================================================
+
+/// Time of day controller for day/night cycle
+pub struct TimeOfDaySystem {
+    /// Current time in hours (0-24)
+    pub current_time: f32,
+
+    /// Time speed multiplier
+    pub time_scale: f32,
+
+    /// Day of year (1-365)
+    pub day_of_year: u32,
+
+    /// Latitude in degrees
+    pub latitude: f32,
+
+    /// Longitude in degrees
+    pub longitude: f32,
+
+    /// Presets for different times of day
+    pub presets: TimeOfDayPresets,
+
+    /// Enable automatic time progression
+    pub auto_progress: bool,
+}
+
+/// Time of day presets
+pub struct TimeOfDayPresets {
+    pub dawn: TimeOfDaySettings,
+    pub morning: TimeOfDaySettings,
+    pub noon: TimeOfDaySettings,
+    pub afternoon: TimeOfDaySettings,
+    pub sunset: TimeOfDaySettings,
+    pub dusk: TimeOfDaySettings,
+    pub night: TimeOfDaySettings,
+}
+
+/// Settings for a specific time of day
+pub struct TimeOfDaySettings {
+    /// Sun intensity
+    pub sun_intensity: f32,
+
+    /// Sun color temperature
+    pub sun_temperature: f32,
+
+    /// Ambient intensity
+    pub ambient_intensity: f32,
+
+    /// Fog density
+    pub fog_density: f32,
+
+    /// Sky exposure
+    pub exposure: f32,
+
+    /// Cloud coverage
+    pub cloud_coverage: f32,
+}
+
+impl TimeOfDaySystem {
+    /// Create time of day system
+    pub fn new() -> Self {
+        Self {
+            current_time: 12.0,
+            time_scale: 1.0,
+            day_of_year: 172,  // Summer solstice
+            latitude: 45.0,
+            longitude: 0.0,
+            presets: TimeOfDayPresets::default(),
+            auto_progress: false,
+        }
+    }
+
+    /// Update time and atmosphere
+    pub fn update(&mut self, delta_time: f32, atmosphere: &mut AtmosphereSystem) {
+        if self.auto_progress {
+            // Progress time (1 game hour = 1 real minute at scale 1.0)
+            self.current_time += delta_time * self.time_scale / 60.0;
+            if self.current_time >= 24.0 {
+                self.current_time -= 24.0;
+                self.day_of_year = (self.day_of_year % 365) + 1;
+            }
+        }
+
+        // Update sun position
+        atmosphere.sky.set_time_of_day(
+            self.current_time,
+            self.day_of_year,
+            self.latitude,
+        );
+
+        // Interpolate settings
+        let settings = self.interpolate_settings();
+        atmosphere.sky.sun_intensity = settings.sun_intensity;
+        atmosphere.sky.exposure = settings.exposure;
+        atmosphere.clouds.layers[0].coverage = settings.cloud_coverage;
+    }
+
+    /// Interpolate settings based on current time
+    fn interpolate_settings(&self) -> TimeOfDaySettings {
+        let (preset_a, preset_b, t) = self.get_blend_presets();
+
+        TimeOfDaySettings {
+            sun_intensity: lerp(preset_a.sun_intensity, preset_b.sun_intensity, t),
+            sun_temperature: lerp(preset_a.sun_temperature, preset_b.sun_temperature, t),
+            ambient_intensity: lerp(preset_a.ambient_intensity, preset_b.ambient_intensity, t),
+            fog_density: lerp(preset_a.fog_density, preset_b.fog_density, t),
+            exposure: lerp(preset_a.exposure, preset_b.exposure, t),
+            cloud_coverage: lerp(preset_a.cloud_coverage, preset_b.cloud_coverage, t),
+        }
+    }
+
+    /// Get presets to blend between
+    fn get_blend_presets(&self) -> (&TimeOfDaySettings, &TimeOfDaySettings, f32) {
+        let hour = self.current_time;
+
+        match hour {
+            h if h < 5.0 => (&self.presets.night, &self.presets.dawn, h / 5.0),
+            h if h < 7.0 => (&self.presets.dawn, &self.presets.morning, (h - 5.0) / 2.0),
+            h if h < 11.0 => (&self.presets.morning, &self.presets.noon, (h - 7.0) / 4.0),
+            h if h < 15.0 => (&self.presets.noon, &self.presets.afternoon, (h - 11.0) / 4.0),
+            h if h < 18.0 => (&self.presets.afternoon, &self.presets.sunset, (h - 15.0) / 3.0),
+            h if h < 20.0 => (&self.presets.sunset, &self.presets.dusk, (h - 18.0) / 2.0),
+            h if h < 22.0 => (&self.presets.dusk, &self.presets.night, (h - 20.0) / 2.0),
+            _ => (&self.presets.night, &self.presets.night, 0.0),
+        }
+    }
+
+    /// Set time directly
+    pub fn set_time(&mut self, hours: f32) {
+        self.current_time = hours.rem_euclid(24.0);
+    }
+
+    /// Set to specific preset
+    pub fn set_preset(&mut self, preset: TimeOfDayPresetName) {
+        self.current_time = match preset {
+            TimeOfDayPresetName::Dawn => 5.5,
+            TimeOfDayPresetName::Morning => 8.0,
+            TimeOfDayPresetName::Noon => 12.0,
+            TimeOfDayPresetName::Afternoon => 15.0,
+            TimeOfDayPresetName::Sunset => 18.5,
+            TimeOfDayPresetName::Dusk => 20.0,
+            TimeOfDayPresetName::Night => 23.0,
+        };
+    }
+}
+
+/// Named presets for time of day
+pub enum TimeOfDayPresetName {
+    Dawn,
+    Morning,
+    Noon,
+    Afternoon,
+    Sunset,
+    Dusk,
+    Night,
+}
+
+impl Default for TimeOfDayPresets {
+    fn default() -> Self {
+        Self {
+            dawn: TimeOfDaySettings {
+                sun_intensity: 0.3,
+                sun_temperature: 2500.0,
+                ambient_intensity: 0.2,
+                fog_density: 0.5,
+                exposure: 0.8,
+                cloud_coverage: 0.3,
+            },
+            morning: TimeOfDaySettings {
+                sun_intensity: 0.7,
+                sun_temperature: 4000.0,
+                ambient_intensity: 0.4,
+                fog_density: 0.2,
+                exposure: 1.0,
+                cloud_coverage: 0.4,
+            },
+            noon: TimeOfDaySettings {
+                sun_intensity: 1.0,
+                sun_temperature: 5778.0,
+                ambient_intensity: 0.5,
+                fog_density: 0.1,
+                exposure: 1.0,
+                cloud_coverage: 0.5,
+            },
+            afternoon: TimeOfDaySettings {
+                sun_intensity: 0.9,
+                sun_temperature: 5500.0,
+                ambient_intensity: 0.45,
+                fog_density: 0.15,
+                exposure: 1.0,
+                cloud_coverage: 0.5,
+            },
+            sunset: TimeOfDaySettings {
+                sun_intensity: 0.5,
+                sun_temperature: 2200.0,
+                ambient_intensity: 0.3,
+                fog_density: 0.3,
+                exposure: 0.9,
+                cloud_coverage: 0.4,
+            },
+            dusk: TimeOfDaySettings {
+                sun_intensity: 0.1,
+                sun_temperature: 2000.0,
+                ambient_intensity: 0.15,
+                fog_density: 0.4,
+                exposure: 0.7,
+                cloud_coverage: 0.3,
+            },
+            night: TimeOfDaySettings {
+                sun_intensity: 0.0,
+                sun_temperature: 0.0,
+                ambient_intensity: 0.05,
+                fog_density: 0.2,
+                exposure: 0.5,
+                cloud_coverage: 0.2,
+            },
+        }
+    }
+}
+
+/// Linear interpolation helper
+fn lerp(a: f32, b: f32, t: f32) -> f32 {
+    a + (b - a) * t
+}
+
+// =============================================================================
+// REGION: WEATHER SYSTEM
+// =============================================================================
+
+/// Weather system for dynamic atmospheric effects
+pub struct WeatherSystem {
+    /// Current weather state
+    pub current_weather: WeatherState,
+
+    /// Target weather state for interpolation
+    pub target_weather: WeatherState,
+
+    /// Weather transition progress (0-1)
+    pub transition_progress: f32,
+
+    /// Transition duration in seconds
+    pub transition_duration: f32,
+
+    /// Random weather changes enabled
+    pub auto_weather: bool,
+
+    /// Weather change probability per minute
+    pub change_probability: f32,
+
+    /// Weather presets
+    pub presets: WeatherPresets,
+}
+
+/// Weather state
+pub struct WeatherState {
+    /// Cloud coverage (0-1)
+    pub cloud_coverage: f32,
+
+    /// Cloud density (0-1)
+    pub cloud_density: f32,
+
+    /// Rain intensity (0-1)
+    pub rain: f32,
+
+    /// Snow intensity (0-1)
+    pub snow: f32,
+
+    /// Fog density (0-1)
+    pub fog: f32,
+
+    /// Wind speed (m/s)
+    pub wind_speed: f32,
+
+    /// Wind direction (radians)
+    pub wind_direction: f32,
+
+    /// Lightning probability (0-1)
+    pub lightning: f32,
+}
+
+/// Weather presets
+pub struct WeatherPresets {
+    pub clear: WeatherState,
+    pub partly_cloudy: WeatherState,
+    pub cloudy: WeatherState,
+    pub overcast: WeatherState,
+    pub foggy: WeatherState,
+    pub rainy: WeatherState,
+    pub stormy: WeatherState,
+    pub snowy: WeatherState,
+}
+
+impl WeatherSystem {
+    /// Create weather system
+    pub fn new() -> Self {
+        let clear = WeatherState::clear();
+
+        Self {
+            current_weather: clear.clone(),
+            target_weather: clear,
+            transition_progress: 1.0,
+            transition_duration: 60.0,
+            auto_weather: false,
+            change_probability: 0.05,
+            presets: WeatherPresets::default(),
+        }
+    }
+
+    /// Update weather system
+    pub fn update(&mut self, delta_time: f32, atmosphere: &mut AtmosphereSystem) {
+        // Update transition
+        if self.transition_progress < 1.0 {
+            self.transition_progress += delta_time / self.transition_duration;
+            self.transition_progress = self.transition_progress.min(1.0);
+
+            // Interpolate weather state
+            self.current_weather = WeatherState::lerp(
+                &self.current_weather,
+                &self.target_weather,
+                delta_time / self.transition_duration,
+            );
+        }
+
+        // Apply to atmosphere
+        atmosphere.clouds.layers[0].coverage = self.current_weather.cloud_coverage;
+        atmosphere.clouds.layers[0].density = self.current_weather.cloud_density;
+        atmosphere.clouds.layers[0].wind = Vec2::new(
+            self.current_weather.wind_speed * self.current_weather.wind_direction.cos(),
+            self.current_weather.wind_speed * self.current_weather.wind_direction.sin(),
+        );
+    }
+
+    /// Transition to weather preset
+    pub fn transition_to(&mut self, preset: WeatherPresetName, duration: f32) {
+        self.target_weather = match preset {
+            WeatherPresetName::Clear => self.presets.clear.clone(),
+            WeatherPresetName::PartlyCloudy => self.presets.partly_cloudy.clone(),
+            WeatherPresetName::Cloudy => self.presets.cloudy.clone(),
+            WeatherPresetName::Overcast => self.presets.overcast.clone(),
+            WeatherPresetName::Foggy => self.presets.foggy.clone(),
+            WeatherPresetName::Rainy => self.presets.rainy.clone(),
+            WeatherPresetName::Stormy => self.presets.stormy.clone(),
+            WeatherPresetName::Snowy => self.presets.snowy.clone(),
+        };
+        self.transition_duration = duration;
+        self.transition_progress = 0.0;
+    }
+
+    /// Set weather immediately
+    pub fn set_immediate(&mut self, preset: WeatherPresetName) {
+        self.transition_to(preset, 0.0);
+        self.transition_progress = 1.0;
+    }
+}
+
+/// Weather preset names
+pub enum WeatherPresetName {
+    Clear,
+    PartlyCloudy,
+    Cloudy,
+    Overcast,
+    Foggy,
+    Rainy,
+    Stormy,
+    Snowy,
+}
+
+impl WeatherState {
+    /// Clear weather
+    pub fn clear() -> Self {
+        Self {
+            cloud_coverage: 0.1,
+            cloud_density: 0.2,
+            rain: 0.0,
+            snow: 0.0,
+            fog: 0.0,
+            wind_speed: 2.0,
+            wind_direction: 0.0,
+            lightning: 0.0,
+        }
+    }
+
+    /// Interpolate between weather states
+    pub fn lerp(a: &Self, b: &Self, t: f32) -> Self {
+        Self {
+            cloud_coverage: a.cloud_coverage + (b.cloud_coverage - a.cloud_coverage) * t,
+            cloud_density: a.cloud_density + (b.cloud_density - a.cloud_density) * t,
+            rain: a.rain + (b.rain - a.rain) * t,
+            snow: a.snow + (b.snow - a.snow) * t,
+            fog: a.fog + (b.fog - a.fog) * t,
+            wind_speed: a.wind_speed + (b.wind_speed - a.wind_speed) * t,
+            wind_direction: a.wind_direction + (b.wind_direction - a.wind_direction) * t,
+            lightning: a.lightning + (b.lightning - a.lightning) * t,
+        }
+    }
+
+    fn clone(&self) -> Self {
+        Self {
+            cloud_coverage: self.cloud_coverage,
+            cloud_density: self.cloud_density,
+            rain: self.rain,
+            snow: self.snow,
+            fog: self.fog,
+            wind_speed: self.wind_speed,
+            wind_direction: self.wind_direction,
+            lightning: self.lightning,
+        }
+    }
+}
+
+impl Default for WeatherPresets {
+    fn default() -> Self {
+        Self {
+            clear: WeatherState::clear(),
+            partly_cloudy: WeatherState {
+                cloud_coverage: 0.3,
+                cloud_density: 0.3,
+                rain: 0.0,
+                snow: 0.0,
+                fog: 0.0,
+                wind_speed: 5.0,
+                wind_direction: 0.5,
+                lightning: 0.0,
+            },
+            cloudy: WeatherState {
+                cloud_coverage: 0.6,
+                cloud_density: 0.4,
+                rain: 0.0,
+                snow: 0.0,
+                fog: 0.05,
+                wind_speed: 8.0,
+                wind_direction: 0.7,
+                lightning: 0.0,
+            },
+            overcast: WeatherState {
+                cloud_coverage: 0.9,
+                cloud_density: 0.5,
+                rain: 0.0,
+                snow: 0.0,
+                fog: 0.1,
+                wind_speed: 10.0,
+                wind_direction: 1.0,
+                lightning: 0.0,
+            },
+            foggy: WeatherState {
+                cloud_coverage: 0.7,
+                cloud_density: 0.3,
+                rain: 0.0,
+                snow: 0.0,
+                fog: 0.8,
+                wind_speed: 2.0,
+                wind_direction: 0.0,
+                lightning: 0.0,
+            },
+            rainy: WeatherState {
+                cloud_coverage: 0.85,
+                cloud_density: 0.6,
+                rain: 0.7,
+                snow: 0.0,
+                fog: 0.2,
+                wind_speed: 12.0,
+                wind_direction: 1.2,
+                lightning: 0.0,
+            },
+            stormy: WeatherState {
+                cloud_coverage: 1.0,
+                cloud_density: 0.8,
+                rain: 1.0,
+                snow: 0.0,
+                fog: 0.3,
+                wind_speed: 25.0,
+                wind_direction: 1.5,
+                lightning: 0.5,
+            },
+            snowy: WeatherState {
+                cloud_coverage: 0.9,
+                cloud_density: 0.5,
+                rain: 0.0,
+                snow: 0.8,
+                fog: 0.4,
+                wind_speed: 8.0,
+                wind_direction: 0.8,
+                lightning: 0.0,
+            },
+        }
+    }
+}
+
+// =============================================================================
+// REGION: GOD RAYS / CREPUSCULAR RAYS
+// =============================================================================
+
+/// God rays (crepuscular rays) renderer
+pub struct GodRaysRenderer {
+    /// Resolution of god rays texture
+    pub resolution: (u32, u32),
+
+    /// Ray density
+    pub density: f32,
+
+    /// Ray weight
+    pub weight: f32,
+
+    /// Ray decay
+    pub decay: f32,
+
+    /// Ray exposure
+    pub exposure: f32,
+
+    /// Sample count along each ray
+    pub samples: u32,
+
+    /// God rays texture
+    pub texture: Texture,
+
+    /// Compute shader
+    compute_shader: ComputeShader,
+}
+
+impl GodRaysRenderer {
+    /// Create god rays renderer
+    pub fn new(resolution: (u32, u32)) -> Self {
+        let texture = Texture::create_2d(
+            resolution.0,
+            resolution.1,
+            TextureFormat::RGBA16Float,
+            TextureUsage::Storage | TextureUsage::Sampled,
+        );
+
+        Self {
+            resolution,
+            density: 1.0,
+            weight: 0.01,
+            decay: 0.97,
+            exposure: 1.0,
+            samples: 100,
+            texture,
+            compute_shader: ComputeShader::new(GOD_RAYS_SHADER),
+        }
+    }
+
+    /// Render god rays
+    pub fn render(
+        &mut self,
+        occlusion_texture: &Texture,
+        sun_screen_pos: Vec2,
+    ) {
+        self.compute_shader.set_texture(0, occlusion_texture);
+        self.compute_shader.set_storage_image(1, &self.texture);
+
+        self.compute_shader.set_uniform("u_sun_pos", sun_screen_pos);
+        self.compute_shader.set_uniform("u_density", self.density);
+        self.compute_shader.set_uniform("u_weight", self.weight);
+        self.compute_shader.set_uniform("u_decay", self.decay);
+        self.compute_shader.set_uniform("u_exposure", self.exposure);
+        self.compute_shader.set_uniform("u_samples", self.samples as i32);
+        self.compute_shader.set_uniform("u_resolution", Vec2::new(
+            self.resolution.0 as f32,
+            self.resolution.1 as f32,
+        ));
+
+        let group_size = 8;
+        self.compute_shader.dispatch(
+            (self.resolution.0 + group_size - 1) / group_size,
+            (self.resolution.1 + group_size - 1) / group_size,
+            1,
+        );
+    }
+}
+
+const GOD_RAYS_SHADER: &str = r#"
+    #version 460
+
+    layout(local_size_x = 8, local_size_y = 8) in;
+
+    layout(binding = 0) uniform sampler2D u_occlusion;
+    layout(rgba16f, binding = 1) uniform image2D u_output;
+
+    uniform vec2 u_sun_pos;
+    uniform float u_density;
+    uniform float u_weight;
+    uniform float u_decay;
+    uniform float u_exposure;
+    uniform int u_samples;
+    uniform vec2 u_resolution;
+
+    void main() {
+        ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+        if (pixel.x >= int(u_resolution.x) || pixel.y >= int(u_resolution.y)) return;
+
+        vec2 uv = (vec2(pixel) + 0.5) / u_resolution;
+
+        // Ray from pixel to sun
+        vec2 delta_uv = (uv - u_sun_pos);
+        delta_uv *= u_density / float(u_samples);
+
+        vec3 color = texture(u_occlusion, uv).rgb;
+        float illumination_decay = 1.0;
+
+        vec2 sample_uv = uv;
+
+        for (int i = 0; i < u_samples; i++) {
+            sample_uv -= delta_uv;
+            vec3 sample_color = texture(u_occlusion, sample_uv).rgb;
+            sample_color *= illumination_decay * u_weight;
+            color += sample_color;
+            illumination_decay *= u_decay;
+        }
+
+        color *= u_exposure;
+
+        imageStore(u_output, pixel, vec4(color, 1.0));
+    }
+"#;
+
+// =============================================================================
+// REGION: AURORA BOREALIS
+// =============================================================================
+
+/// Aurora borealis (northern lights) renderer
+pub struct AuroraRenderer {
+    /// Aurora intensity
+    pub intensity: f32,
+
+    /// Primary color
+    pub primary_color: Color,
+
+    /// Secondary color
+    pub secondary_color: Color,
+
+    /// Aurora height range (min, max) in km
+    pub height_range: (f32, f32),
+
+    /// Wave speed
+    pub wave_speed: f32,
+
+    /// Curtain density
+    pub curtain_density: f32,
+
+    /// Visibility (based on solar activity, latitude)
+    pub visibility: f32,
+
+    /// Render texture
+    pub texture: Texture,
+
+    /// Compute shader
+    compute_shader: ComputeShader,
+}
+
+impl AuroraRenderer {
+    /// Create aurora renderer
+    pub fn new(resolution: (u32, u32)) -> Self {
+        let texture = Texture::create_2d(
+            resolution.0,
+            resolution.1,
+            TextureFormat::RGBA16Float,
+            TextureUsage::Storage | TextureUsage::Sampled,
+        );
+
+        Self {
+            intensity: 1.0,
+            primary_color: Color::from_rgb(0.2, 0.9, 0.3),   // Green
+            secondary_color: Color::from_rgb(0.8, 0.2, 0.6),  // Magenta
+            height_range: (100.0, 300.0),
+            wave_speed: 1.0,
+            curtain_density: 1.0,
+            visibility: 0.0,  // Depends on latitude/solar activity
+            texture,
+            compute_shader: ComputeShader::new(AURORA_SHADER),
+        }
+    }
+
+    /// Update aurora visibility based on location
+    pub fn update_visibility(&mut self, latitude: f32, solar_activity: f32) {
+        // Aurora most visible at high latitudes (60-75 degrees)
+        let lat_factor = if latitude.abs() > 60.0 && latitude.abs() < 75.0 {
+            1.0 - ((latitude.abs() - 67.5) / 7.5).abs()
+        } else if latitude.abs() >= 75.0 {
+            0.5
+        } else {
+            0.0
+        };
+
+        self.visibility = lat_factor * solar_activity;
+    }
+
+    /// Render aurora
+    pub fn render(&mut self, time: f32, camera_direction: Vec3) {
+        if self.visibility < 0.01 { return; }
+
+        self.compute_shader.set_storage_image(0, &self.texture);
+
+        self.compute_shader.set_uniform("u_time", time);
+        self.compute_shader.set_uniform("u_intensity", self.intensity * self.visibility);
+        self.compute_shader.set_uniform("u_primary_color", self.primary_color.to_vec3());
+        self.compute_shader.set_uniform("u_secondary_color", self.secondary_color.to_vec3());
+        self.compute_shader.set_uniform("u_height_range", Vec2::new(
+            self.height_range.0,
+            self.height_range.1,
+        ));
+        self.compute_shader.set_uniform("u_wave_speed", self.wave_speed);
+        self.compute_shader.set_uniform("u_curtain_density", self.curtain_density);
+        self.compute_shader.set_uniform("u_camera_dir", camera_direction);
+
+        let (width, height) = (self.texture.width(), self.texture.height());
+        let group_size = 8;
+        self.compute_shader.dispatch(
+            (width + group_size - 1) / group_size,
+            (height + group_size - 1) / group_size,
+            1,
+        );
+    }
+}
+
+const AURORA_SHADER: &str = r#"
+    #version 460
+
+    layout(local_size_x = 8, local_size_y = 8) in;
+
+    layout(rgba16f, binding = 0) uniform image2D u_output;
+
+    uniform float u_time;
+    uniform float u_intensity;
+    uniform vec3 u_primary_color;
+    uniform vec3 u_secondary_color;
+    uniform vec2 u_height_range;
+    uniform float u_wave_speed;
+    uniform float u_curtain_density;
+    uniform vec3 u_camera_dir;
+
+    // Noise functions
+    float hash(vec2 p) {
+        return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
+    }
+
+    float noise(vec2 p) {
+        vec2 i = floor(p);
+        vec2 f = fract(p);
+        f = f * f * (3.0 - 2.0 * f);
+
+        float a = hash(i);
+        float b = hash(i + vec2(1.0, 0.0));
+        float c = hash(i + vec2(0.0, 1.0));
+        float d = hash(i + vec2(1.0, 1.0));
+
+        return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+    }
+
+    float fbm(vec2 p, int octaves) {
+        float value = 0.0;
+        float amplitude = 0.5;
+
+        for (int i = 0; i < octaves; i++) {
+            value += amplitude * noise(p);
+            p *= 2.0;
+            amplitude *= 0.5;
+        }
+
+        return value;
+    }
+
+    void main() {
+        ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+        ivec2 size = imageSize(u_output);
+        if (pixel.x >= size.x || pixel.y >= size.y) return;
+
+        vec2 uv = (vec2(pixel) + 0.5) / vec2(size);
+
+        // Aurora appears in upper sky
+        float altitude = uv.y;
+        if (altitude < 0.4) {
+            imageStore(u_output, pixel, vec4(0.0));
+            return;
+        }
+
+        // Aurora curtain effect
+        float t = u_time * u_wave_speed;
+        vec2 aurora_uv = vec2(uv.x * 3.0 + t * 0.1, altitude * 2.0);
+
+        float curtain = fbm(aurora_uv * u_curtain_density, 5);
+        curtain = pow(curtain, 2.0);
+
+        // Wave motion
+        float wave = sin(uv.x * 10.0 + t) * 0.5 + 0.5;
+        wave *= sin(uv.x * 7.0 - t * 0.7) * 0.5 + 0.5;
+
+        // Height-based color gradient
+        float color_mix = (altitude - 0.4) / 0.6;
+        vec3 aurora_color = mix(u_primary_color, u_secondary_color, color_mix);
+
+        // Intensity falloff at edges
+        float edge = smoothstep(0.4, 0.5, altitude) * smoothstep(1.0, 0.8, altitude);
+
+        float aurora = curtain * wave * edge * u_intensity;
+
+        imageStore(u_output, pixel, vec4(aurora_color * aurora, aurora));
+    }
+"#;
+
+// =============================================================================
+// REGION: RAINBOW RENDERER
+// =============================================================================
+
+/// Rainbow renderer for post-rain effects
+pub struct RainbowRenderer {
+    /// Rainbow intensity
+    pub intensity: f32,
+
+    /// Rainbow angular radius (degrees from anti-solar point)
+    /// Primary rainbow: ~42 degrees, Secondary: ~51 degrees
+    pub primary_radius: f32,
+    pub secondary_radius: f32,
+
+    /// Rainbow width in degrees
+    pub width: f32,
+
+    /// Enable secondary rainbow
+    pub show_secondary: bool,
+
+    /// Enable supernumerary arcs
+    pub show_supernumerary: bool,
+}
+
+impl RainbowRenderer {
+    /// Create rainbow renderer
+    pub fn new() -> Self {
+        Self {
+            intensity: 1.0,
+            primary_radius: 42.0,
+            secondary_radius: 51.0,
+            width: 2.0,
+            show_secondary: true,
+            show_supernumerary: false,
+        }
+    }
+
+    /// Get rainbow color for given angle from anti-solar point
+    pub fn sample(&self, angle: f32, sun_direction: Vec3, view_direction: Vec3) -> Vec3 {
+        // Anti-solar point is opposite of sun
+        let anti_solar = -sun_direction;
+        let view_angle = view_direction.dot(anti_solar).acos().to_degrees();
+
+        let mut color = Vec3::zero();
+
+        // Primary rainbow (42 degrees)
+        let primary_dist = (view_angle - self.primary_radius).abs();
+        if primary_dist < self.width {
+            let t = 1.0 - primary_dist / self.width;
+            // Spectral colors
+            let hue = (view_angle - self.primary_radius + self.width) / (2.0 * self.width);
+            color += self.hue_to_rgb(hue) * t * self.intensity;
+        }
+
+        // Secondary rainbow (51 degrees, color order reversed)
+        if self.show_secondary {
+            let secondary_dist = (view_angle - self.secondary_radius).abs();
+            if secondary_dist < self.width {
+                let t = 1.0 - secondary_dist / self.width;
+                let hue = 1.0 - (view_angle - self.secondary_radius + self.width) / (2.0 * self.width);
+                color += self.hue_to_rgb(hue) * t * self.intensity * 0.5;
+            }
+        }
+
+        color
+    }
+
+    /// Convert hue (0-1) to RGB spectral color
+    fn hue_to_rgb(&self, hue: f32) -> Vec3 {
+        let h = hue.clamp(0.0, 1.0) * 6.0;
+        let x = 1.0 - (h % 2.0 - 1.0).abs();
+
+        match h as u32 {
+            0 => Vec3::new(1.0, x, 0.0),
+            1 => Vec3::new(x, 1.0, 0.0),
+            2 => Vec3::new(0.0, 1.0, x),
+            3 => Vec3::new(0.0, x, 1.0),
+            4 => Vec3::new(x, 0.0, 1.0),
+            _ => Vec3::new(1.0, 0.0, x),
+        }
+    }
+}
+
+// =============================================================================
+// REGION: TESTS
+// =============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_atmosphere_params_earth() {
+        let params = AtmosphereParams::earth();
+
+        assert!((params.planet_radius - AtmosphereConstants::EARTH_RADIUS).abs() < 1.0);
+        assert!(params.rayleigh_coefficients.x < params.rayleigh_coefficients.y);
+        assert!(params.rayleigh_coefficients.y < params.rayleigh_coefficients.z);
+        assert!(params.mie_asymmetry > 0.0 && params.mie_asymmetry < 1.0);
+    }
+
+    #[test]
+    fn test_atmosphere_params_mars() {
+        let params = AtmosphereParams::mars();
+
+        // Mars is smaller than Earth
+        assert!(params.planet_radius < AtmosphereConstants::EARTH_RADIUS);
+        // Mars has thinner atmosphere but we model extended atmosphere
+        assert!(params.atmosphere_height > 0.0);
+        // Mars has reddish sky - red coefficient should be higher
+        assert!(params.rayleigh_coefficients.x > params.rayleigh_coefficients.z);
+    }
+
+    #[test]
+    fn test_rayleigh_phase_function() {
+        let phase = PhaseFunction::Rayleigh;
+
+        // At 0 degrees (forward) and 180 degrees (backward), phase should be equal
+        let forward = phase.evaluate(1.0);
+        let backward = phase.evaluate(-1.0);
+        assert!((forward - backward).abs() < 1e-6);
+
+        // At 90 degrees, phase should be minimum
+        let side = phase.evaluate(0.0);
+        assert!(side < forward);
+
+        // Phase function should be positive
+        assert!(side > 0.0);
+    }
+
+    #[test]
+    fn test_henyey_greenstein_phase_function() {
+        let g = 0.8;
+        let phase = PhaseFunction::HenyeyGreenstein { g };
+
+        // Forward scattering should dominate for positive g
+        let forward = phase.evaluate(1.0);
+        let backward = phase.evaluate(-1.0);
+        assert!(forward > backward);
+
+        // Phase function should be positive everywhere
+        assert!(forward > 0.0);
+        assert!(backward > 0.0);
+        assert!(phase.evaluate(0.0) > 0.0);
+    }
+
+    #[test]
+    fn test_cornette_shanks_phase_function() {
+        let g = 0.8;
+        let cs = PhaseFunction::CornetteShanks { g };
+        let hg = PhaseFunction::HenyeyGreenstein { g };
+
+        // CS and HG should be similar but not identical
+        let cs_forward = cs.evaluate(1.0);
+        let hg_forward = hg.evaluate(1.0);
+
+        // Both should favor forward scattering
+        assert!(cs_forward > cs.evaluate(0.0));
+        assert!(hg_forward > hg.evaluate(0.0));
+    }
+
+    #[test]
+    fn test_double_henyey_greenstein() {
+        let phase = PhaseFunction::DoubleHenyeyGreenstein {
+            g_forward: 0.8,
+            g_backward: -0.3,
+            weight: 0.7,
+        };
+
+        // Should have both forward and backward peaks
+        let forward = phase.evaluate(0.95);
+        let side = phase.evaluate(0.0);
+        let backward = phase.evaluate(-0.95);
+
+        assert!(forward > side);
+        // With backward lobe, backward should be higher than pure HG
+        assert!(backward > 0.01);
+    }
+
+    #[test]
+    fn test_sun_position_calculation() {
+        let mut sky = SkyRenderer::new();
+
+        // Test noon at equator on equinox
+        sky.set_time_of_day(12.0, 80, 0.0);  // March 21-ish
+
+        // Sun should be nearly overhead
+        assert!(sky.sun_direction.y > 0.9);
+
+        // Test midnight
+        sky.set_time_of_day(0.0, 80, 0.0);
+
+        // Sun should be below horizon
+        assert!(sky.sun_direction.y < 0.0);
+    }
+
+    #[test]
+    fn test_sun_position_seasons() {
+        let mut sky = SkyRenderer::new();
+        let latitude = 45.0;
+
+        // Summer solstice noon
+        sky.set_time_of_day(12.0, 172, latitude);
+        let summer_elevation = sky.sun_direction.y;
+
+        // Winter solstice noon
+        sky.set_time_of_day(12.0, 355, latitude);
+        let winter_elevation = sky.sun_direction.y;
+
+        // Sun should be higher in summer
+        assert!(summer_elevation > winter_elevation);
+    }
+
+    #[test]
+    fn test_blackbody_color() {
+        let sun = SunRenderer::new();
+
+        // Test sun temperature (5778K) - should be warm white
+        let sun_color = sun.blackbody_color(5778.0);
+        assert!(sun_color.x > 0.9);
+        assert!(sun_color.y > 0.9);
+        assert!(sun_color.z > 0.9);
+
+        // Test cool temperature (3000K) - should be reddish
+        let warm_color = sun.blackbody_color(3000.0);
+        assert!(warm_color.x > warm_color.z);
+
+        // Test hot temperature (10000K) - should be bluish
+        let cool_color = sun.blackbody_color(10000.0);
+        assert!(cool_color.z >= cool_color.x);
+    }
+
+    #[test]
+    fn test_moon_phases() {
+        let mut moon = MoonRenderer::new();
+
+        // New moon
+        moon.set_phase_by_day(0.0);
+        assert!(moon.phase < 0.1);
+
+        // Full moon (half synodic month)
+        moon.set_phase_by_day(14.765);
+        assert!((moon.phase - 0.5).abs() < 0.01);
+
+        // Phase should wrap around
+        moon.set_phase_by_day(29.53);
+        assert!(moon.phase < 0.1);
+    }
+
+    #[test]
+    fn test_star_spectral_classes() {
+        let mut star_renderer = StarRenderer::new();
+        star_renderer.generate_procedural(1000);
+
+        // Should have generated stars
+        assert!(!star_renderer.stars.is_empty());
+
+        // Check temperature to spectral class mapping
+        for star in &star_renderer.stars {
+            match star.temperature as u32 {
+                30000..=60000 => assert!(matches!(star.spectral_class, SpectralClass::O)),
+                10000..=29999 => assert!(matches!(star.spectral_class, SpectralClass::B)),
+                7500..=9999 => assert!(matches!(star.spectral_class, SpectralClass::A)),
+                6000..=7499 => assert!(matches!(star.spectral_class, SpectralClass::F)),
+                5200..=5999 => assert!(matches!(star.spectral_class, SpectralClass::G)),
+                3700..=5199 => assert!(matches!(star.spectral_class, SpectralClass::K)),
+                _ => assert!(matches!(star.spectral_class, SpectralClass::M)),
+            }
+        }
+    }
+
+    #[test]
+    fn test_time_of_day_presets() {
+        let tod = TimeOfDaySystem::new();
+
+        // Dawn should have lower sun intensity than noon
+        assert!(tod.presets.dawn.sun_intensity < tod.presets.noon.sun_intensity);
+
+        // Night should have zero sun intensity
+        assert!(tod.presets.night.sun_intensity == 0.0);
+
+        // Sunset should have warm (low) temperature
+        assert!(tod.presets.sunset.sun_temperature < tod.presets.noon.sun_temperature);
+    }
+
+    #[test]
+    fn test_weather_state_interpolation() {
+        let clear = WeatherState::clear();
+        let stormy = WeatherState {
+            cloud_coverage: 1.0,
+            cloud_density: 0.8,
+            rain: 1.0,
+            snow: 0.0,
+            fog: 0.3,
+            wind_speed: 25.0,
+            wind_direction: 1.5,
+            lightning: 0.5,
+        };
+
+        // 50% interpolation
+        let mid = WeatherState::lerp(&clear, &stormy, 0.5);
+
+        assert!((mid.cloud_coverage - 0.55).abs() < 0.1);
+        assert!((mid.rain - 0.5).abs() < 0.1);
+        assert!(mid.wind_speed > clear.wind_speed);
+        assert!(mid.wind_speed < stormy.wind_speed);
+    }
+
+    #[test]
+    fn test_cloud_layer_defaults() {
+        let cloud_renderer = VolumetricCloudRenderer::new((256, 256));
+
+        assert!(!cloud_renderer.layers.is_empty());
+
+        let layer = &cloud_renderer.layers[0];
+        assert!(layer.altitude > 0.0);
+        assert!(layer.thickness > 0.0);
+        assert!(layer.coverage >= 0.0 && layer.coverage <= 1.0);
+    }
+
+    #[test]
+    fn test_aurora_visibility() {
+        let mut aurora = AuroraRenderer::new((256, 256));
+
+        // Low latitude, low activity - no aurora
+        aurora.update_visibility(30.0, 0.5);
+        assert!(aurora.visibility < 0.1);
+
+        // High latitude (auroral zone), high activity - visible aurora
+        aurora.update_visibility(67.0, 0.8);
+        assert!(aurora.visibility > 0.5);
+
+        // Polar region - reduced visibility
+        aurora.update_visibility(85.0, 0.8);
+        assert!(aurora.visibility > 0.0 && aurora.visibility < 0.5);
+    }
+
+    #[test]
+    fn test_rainbow_angles() {
+        let rainbow = RainbowRenderer::new();
+
+        // Primary rainbow at 42 degrees
+        assert!((rainbow.primary_radius - 42.0).abs() < 1.0);
+
+        // Secondary rainbow at 51 degrees
+        assert!((rainbow.secondary_radius - 51.0).abs() < 1.0);
+
+        // Secondary is outside primary
+        assert!(rainbow.secondary_radius > rainbow.primary_radius);
+    }
+
+    #[test]
+    fn test_rainbow_colors() {
+        let rainbow = RainbowRenderer::new();
+
+        // Test spectral colors across the rainbow
+        let red = rainbow.hue_to_rgb(0.0);
+        let green = rainbow.hue_to_rgb(0.33);
+        let blue = rainbow.hue_to_rgb(0.66);
+
+        // Red should have high R
+        assert!(red.x > 0.9);
+        assert!(red.y < 0.5);
+
+        // Green should have high G
+        assert!(green.y > 0.9);
+
+        // Blue should have high B
+        assert!(blue.z > 0.9);
+    }
+
+    #[test]
+    fn test_simple_rng() {
+        let mut rng1 = SimpleRng::new(12345);
+        let mut rng2 = SimpleRng::new(12345);
+
+        // Same seed should produce same sequence
+        for _ in 0..100 {
+            assert_eq!(rng1.next_u32(), rng2.next_u32());
+        }
+
+        // Different seeds should produce different sequences
+        let mut rng3 = SimpleRng::new(54321);
+        let mut rng4 = SimpleRng::new(12345);
+
+        let mut same_count = 0;
+        for _ in 0..100 {
+            if rng3.next_u32() == rng4.next_u32() {
+                same_count += 1;
+            }
+        }
+        assert!(same_count < 10);  // Should be very unlikely to match often
+    }
+
+    #[test]
+    fn test_rng_distribution() {
+        let mut rng = SimpleRng::new(42);
+
+        let samples = 10000;
+        let mut sum = 0.0;
+        let mut min = 1.0f32;
+        let mut max = 0.0f32;
+
+        for _ in 0..samples {
+            let v = rng.next_f32();
+            sum += v;
+            min = min.min(v);
+            max = max.max(v);
+        }
+
+        let mean = sum / samples as f32;
+
+        // Mean should be close to 0.5
+        assert!((mean - 0.5).abs() < 0.02);
+
+        // Should cover most of [0, 1] range
+        assert!(min < 0.01);
+        assert!(max > 0.99);
+    }
+
+    #[test]
+    fn test_atmosphere_preset_creation() {
+        // Test all presets can be created
+        let _earth = SkyRenderer::with_preset(AtmospherePreset::Earth);
+        let _mars = SkyRenderer::with_preset(AtmospherePreset::Mars);
+        let _venus = SkyRenderer::with_preset(AtmospherePreset::Venus);
+        let _titan = SkyRenderer::with_preset(AtmospherePreset::Titan);
+
+        let _alien = SkyRenderer::with_preset(AtmospherePreset::Alien {
+            primary_color: Color::from_rgb(0.0, 0.5, 1.0),
+            secondary_color: Color::from_rgb(1.0, 0.5, 0.0),
+            haze_density: 0.5,
+        });
+
+        let _stylized = SkyRenderer::with_preset(AtmospherePreset::Stylized {
+            zenith_color: Color::from_rgb(0.0, 0.0, 0.5),
+            horizon_color: Color::from_rgb(1.0, 0.5, 0.0),
+            ground_color: Color::from_rgb(0.2, 0.2, 0.2),
+        });
+    }
+
+    #[test]
+    fn test_god_rays_parameters() {
+        let god_rays = GodRaysRenderer::new((256, 256));
+
+        // Default parameters should be reasonable
+        assert!(god_rays.density > 0.0);
+        assert!(god_rays.weight > 0.0 && god_rays.weight < 1.0);
+        assert!(god_rays.decay > 0.0 && god_rays.decay < 1.0);
+        assert!(god_rays.samples > 0);
+    }
+
+    #[test]
+    fn test_lerp_function() {
+        assert_eq!(lerp(0.0, 10.0, 0.0), 0.0);
+        assert_eq!(lerp(0.0, 10.0, 1.0), 10.0);
+        assert_eq!(lerp(0.0, 10.0, 0.5), 5.0);
+
+        // Extrapolation should work too
+        assert_eq!(lerp(0.0, 10.0, 2.0), 20.0);
+        assert_eq!(lerp(0.0, 10.0, -0.5), -5.0);
+    }
+}

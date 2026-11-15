@@ -1,0 +1,1489 @@
+// =============================================================================
+// PRISM: Ray Tracing Shaders
+// =============================================================================
+// Hardware-accelerated ray tracing for reflections, shadows, GI, and path tracing
+// Part of the BUILD-UNIVERSE Rendering Stack
+// =============================================================================
+
+@module prism::raytracing
+@version 1.0.0
+@author BUILD Team
+
+// =============================================================================
+// RAY TRACING CONFIGURATION
+// =============================================================================
+
+/// Ray tracing quality settings
+struct RTConfig {
+    // General
+    enable_rt: bool,
+    max_ray_depth: u32,
+
+    // Reflections
+    enable_reflections: bool,
+    reflection_samples: u32,
+    reflection_roughness_threshold: f32,
+    max_reflection_distance: f32,
+
+    // Shadows
+    enable_shadows: bool,
+    shadow_samples: u32,
+    shadow_softness: f32,
+    shadow_distance: f32,
+
+    // Ambient Occlusion
+    enable_rtao: bool,
+    ao_samples: u32,
+    ao_radius: f32,
+
+    // Global Illumination
+    enable_gi: bool,
+    gi_samples: u32,
+    gi_bounces: u32,
+    gi_intensity: f32,
+
+    // Denoising
+    enable_denoising: bool,
+    temporal_accumulation: f32,
+    spatial_sigma: f32,
+}
+
+impl RTConfig {
+    pub fn ultra() -> Self {
+        Self {
+            enable_rt: true,
+            max_ray_depth: 8,
+
+            enable_reflections: true,
+            reflection_samples: 4,
+            reflection_roughness_threshold: 0.4,
+            max_reflection_distance: 1000.0,
+
+            enable_shadows: true,
+            shadow_samples: 4,
+            shadow_softness: 0.02,
+            shadow_distance: 500.0,
+
+            enable_rtao: true,
+            ao_samples: 8,
+            ao_radius: 2.0,
+
+            enable_gi: true,
+            gi_samples: 4,
+            gi_bounces: 2,
+            gi_intensity: 1.0,
+
+            enable_denoising: true,
+            temporal_accumulation: 0.9,
+            spatial_sigma: 1.0,
+        }
+    }
+
+    pub fn high() -> Self {
+        Self {
+            reflection_samples: 2,
+            shadow_samples: 2,
+            ao_samples: 4,
+            gi_samples: 2,
+            gi_bounces: 1,
+            ..Self::ultra()
+        }
+    }
+
+    pub fn medium() -> Self {
+        Self {
+            enable_gi: false,
+            reflection_samples: 1,
+            shadow_samples: 1,
+            ao_samples: 2,
+            ..Self::ultra()
+        }
+    }
+
+    pub fn low() -> Self {
+        Self {
+            enable_gi: false,
+            enable_rtao: false,
+            reflection_samples: 1,
+            shadow_samples: 1,
+            max_ray_depth: 2,
+            ..Self::ultra()
+        }
+    }
+}
+
+/// Hit info for ray intersection
+#[repr(C)]
+struct HitInfo {
+    position: vec3,
+    distance: f32,
+    normal: vec3,
+    front_face: u32,
+    uv: vec2,
+    material_id: u32,
+    instance_id: u32,
+}
+
+/// Material info for shading
+#[repr(C)]
+struct MaterialInfo {
+    albedo: vec3,
+    roughness: f32,
+    metallic: f32,
+    emissive: vec3,
+    ior: f32,
+    transmission: f32,
+}
+
+// =============================================================================
+// RAY GENERATION SHADERS
+// =============================================================================
+
+const RAY_GEN_COMMON: &str = r#"
+//-----------------------------------------------------------------------------
+// Common Ray Generation Utilities
+//-----------------------------------------------------------------------------
+
+cbuffer RayTracingParams : register(b0) {
+    float4x4 inv_view;
+    float4x4 inv_projection;
+
+    float3 camera_position;
+    uint frame_count;
+
+    float3 sun_direction;
+    float sun_intensity;
+
+    float3 sun_color;
+    uint max_bounces;
+
+    float2 jitter;
+    float2 screen_size;
+}
+
+RaytracingAccelerationStructure scene : register(t0);
+RWTexture2D<float4> output : register(u0);
+
+// Generate primary ray from pixel coordinates
+RayDesc GeneratePrimaryRay(uint2 pixel, float2 jitter) {
+    float2 uv = (float2(pixel) + 0.5 + jitter) / screen_size;
+    uv = uv * 2.0 - 1.0;
+    uv.y = -uv.y;
+
+    float4 near_point = mul(inv_projection, float4(uv, 0.0, 1.0));
+    float4 far_point = mul(inv_projection, float4(uv, 1.0, 1.0));
+
+    near_point /= near_point.w;
+    far_point /= far_point.w;
+
+    float3 direction = normalize(far_point.xyz - near_point.xyz);
+    direction = mul((float3x3)inv_view, direction);
+
+    RayDesc ray;
+    ray.Origin = camera_position;
+    ray.Direction = direction;
+    ray.TMin = 0.001;
+    ray.TMax = 10000.0;
+
+    return ray;
+}
+
+// Blue noise sampling
+float2 BlueNoiseJitter(uint2 pixel, uint frame) {
+    // Use blue noise texture for stable jittering
+    // Placeholder implementation
+    uint seed = pixel.x + pixel.y * 1920 + frame * 1920 * 1080;
+    float x = frac(sin(float(seed) * 12.9898) * 43758.5453);
+    float y = frac(sin(float(seed) * 78.233) * 43758.5453);
+    return float2(x, y) - 0.5;
+}
+
+// Importance sampling for GGX
+float3 SampleGGX(float2 xi, float3 N, float roughness) {
+    float a = roughness * roughness;
+
+    float phi = 2.0 * 3.14159 * xi.x;
+    float cos_theta = sqrt((1.0 - xi.y) / (1.0 + (a * a - 1.0) * xi.y));
+    float sin_theta = sqrt(1.0 - cos_theta * cos_theta);
+
+    // Spherical to cartesian
+    float3 H;
+    H.x = cos(phi) * sin_theta;
+    H.y = sin(phi) * sin_theta;
+    H.z = cos_theta;
+
+    // Tangent space to world space
+    float3 up = abs(N.z) < 0.999 ? float3(0, 0, 1) : float3(1, 0, 0);
+    float3 tangent = normalize(cross(up, N));
+    float3 bitangent = cross(N, tangent);
+
+    return normalize(tangent * H.x + bitangent * H.y + N * H.z);
+}
+
+// Cosine-weighted hemisphere sampling
+float3 SampleCosineHemisphere(float2 xi, float3 N) {
+    float phi = 2.0 * 3.14159 * xi.x;
+    float cos_theta = sqrt(1.0 - xi.y);
+    float sin_theta = sqrt(xi.y);
+
+    float3 H;
+    H.x = cos(phi) * sin_theta;
+    H.y = sin(phi) * sin_theta;
+    H.z = cos_theta;
+
+    float3 up = abs(N.z) < 0.999 ? float3(0, 0, 1) : float3(1, 0, 0);
+    float3 tangent = normalize(cross(up, N));
+    float3 bitangent = cross(N, tangent);
+
+    return normalize(tangent * H.x + bitangent * H.y + N * H.z);
+}
+
+// Random number generation
+uint PCGHash(uint input) {
+    uint state = input * 747796405u + 2891336453u;
+    uint word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
+    return (word >> 22u) ^ word;
+}
+
+float RandomFloat(inout uint seed) {
+    seed = PCGHash(seed);
+    return float(seed) / 4294967295.0;
+}
+
+float2 RandomFloat2(inout uint seed) {
+    return float2(RandomFloat(seed), RandomFloat(seed));
+}
+"#;
+
+// =============================================================================
+// RT REFLECTIONS
+// =============================================================================
+
+const RT_REFLECTIONS_SHADER: &str = r#"
+//-----------------------------------------------------------------------------
+// Ray Traced Reflections
+//-----------------------------------------------------------------------------
+
+#include "RayGenCommon.hlsli"
+
+cbuffer ReflectionParams : register(b1) {
+    int num_samples;
+    float roughness_threshold;
+    float max_distance;
+    float intensity;
+}
+
+Texture2D<float4> gbuffer_normal : register(t1);
+Texture2D<float4> gbuffer_material : register(t2);
+Texture2D<float> gbuffer_depth : register(t3);
+TextureCube<float4> environment_map : register(t4);
+
+SamplerState linear_sampler : register(s0);
+
+struct ReflectionPayload {
+    float3 color;
+    float hit_distance;
+};
+
+[shader("raygeneration")]
+void ReflectionRayGen() {
+    uint2 pixel = DispatchRaysIndex().xy;
+    uint2 dims = DispatchRaysDimensions().xy;
+
+    // Sample G-Buffer
+    float2 uv = (float2(pixel) + 0.5) / float2(dims);
+    float4 normal_sample = gbuffer_normal.SampleLevel(linear_sampler, uv, 0);
+    float4 material_sample = gbuffer_material.SampleLevel(linear_sampler, uv, 0);
+    float depth = gbuffer_depth.SampleLevel(linear_sampler, uv, 0);
+
+    if (depth >= 1.0) {
+        output[pixel] = float4(0, 0, 0, 0);
+        return;
+    }
+
+    float3 N = DecodeNormal(normal_sample.rg);
+    float roughness = material_sample.r;
+    float metallic = material_sample.g;
+
+    // Skip very rough surfaces
+    if (roughness > roughness_threshold) {
+        output[pixel] = float4(0, 0, 0, 0);
+        return;
+    }
+
+    // Reconstruct position
+    float3 world_pos = ReconstructPosition(uv, depth);
+    float3 V = normalize(camera_position - world_pos);
+
+    // Initialize random seed
+    uint seed = pixel.x + pixel.y * dims.x + frame_count * dims.x * dims.y;
+
+    float3 reflection_color = float3(0, 0, 0);
+    float valid_samples = 0.0;
+
+    for (int i = 0; i < num_samples; i++) {
+        float2 xi = RandomFloat2(seed);
+
+        // Sample reflection direction
+        float3 H = SampleGGX(xi, N, roughness);
+        float3 L = reflect(-V, H);
+
+        if (dot(N, L) <= 0.0) continue;
+
+        RayDesc ray;
+        ray.Origin = world_pos + N * 0.001;
+        ray.Direction = L;
+        ray.TMin = 0.001;
+        ray.TMax = max_distance;
+
+        ReflectionPayload payload;
+        payload.color = float3(0, 0, 0);
+        payload.hit_distance = -1.0;
+
+        TraceRay(scene, RAY_FLAG_NONE, 0xFF, 0, 0, 0, ray, payload);
+
+        if (payload.hit_distance > 0.0) {
+            reflection_color += payload.color;
+        } else {
+            // Sample environment map for miss
+            reflection_color += environment_map.SampleLevel(linear_sampler, L, roughness * 6.0).rgb;
+        }
+
+        valid_samples += 1.0;
+    }
+
+    if (valid_samples > 0.0) {
+        reflection_color /= valid_samples;
+    }
+
+    output[pixel] = float4(reflection_color * intensity, 1.0);
+}
+
+[shader("closesthit")]
+void ReflectionClosestHit(inout ReflectionPayload payload, BuiltInTriangleIntersectionAttributes attribs) {
+    // Get hit info
+    float3 barycentrics = float3(1.0 - attribs.barycentrics.x - attribs.barycentrics.y,
+                                  attribs.barycentrics.x, attribs.barycentrics.y);
+
+    // Sample material at hit point
+    float3 albedo = GetAlbedo(PrimitiveIndex(), barycentrics);
+    float3 emissive = GetEmissive(PrimitiveIndex(), barycentrics);
+
+    // Simple shading for reflections
+    float3 N = GetNormal(PrimitiveIndex(), barycentrics);
+    float NdotL = max(dot(N, -sun_direction), 0.0);
+
+    payload.color = albedo * NdotL * sun_color * sun_intensity + emissive;
+    payload.hit_distance = RayTCurrent();
+}
+
+[shader("miss")]
+void ReflectionMiss(inout ReflectionPayload payload) {
+    payload.color = float3(0, 0, 0);
+    payload.hit_distance = -1.0;
+}
+"#;
+
+// =============================================================================
+// RT SHADOWS
+// =============================================================================
+
+const RT_SHADOWS_SHADER: &str = r#"
+//-----------------------------------------------------------------------------
+// Ray Traced Soft Shadows
+//-----------------------------------------------------------------------------
+
+#include "RayGenCommon.hlsli"
+
+cbuffer ShadowParams : register(b1) {
+    float3 light_position;
+    float light_radius;
+
+    float3 light_direction;  // For directional light
+    int light_type;
+
+    int num_samples;
+    float shadow_distance;
+    float normal_bias;
+    float _padding;
+}
+
+Texture2D<float4> gbuffer_normal : register(t1);
+Texture2D<float> gbuffer_depth : register(t2);
+
+struct ShadowPayload {
+    float visibility;
+};
+
+[shader("raygeneration")]
+void ShadowRayGen() {
+    uint2 pixel = DispatchRaysIndex().xy;
+    uint2 dims = DispatchRaysDimensions().xy;
+
+    float2 uv = (float2(pixel) + 0.5) / float2(dims);
+    float4 normal_sample = gbuffer_normal.SampleLevel(linear_sampler, uv, 0);
+    float depth = gbuffer_depth.SampleLevel(linear_sampler, uv, 0);
+
+    if (depth >= 1.0) {
+        output[pixel] = float4(1, 1, 1, 1);
+        return;
+    }
+
+    float3 N = DecodeNormal(normal_sample.rg);
+    float3 world_pos = ReconstructPosition(uv, depth);
+
+    // Bias along normal
+    float3 origin = world_pos + N * normal_bias;
+
+    uint seed = pixel.x + pixel.y * dims.x + frame_count * dims.x * dims.y;
+
+    float total_visibility = 0.0;
+
+    for (int i = 0; i < num_samples; i++) {
+        float2 xi = RandomFloat2(seed);
+
+        float3 L;
+        float max_dist;
+
+        if (light_type == 0) {
+            // Directional light - sample cone around direction
+            L = SampleConeUniform(xi, -light_direction, light_radius);
+            max_dist = shadow_distance;
+        } else {
+            // Point/spot light - sample disk on light surface
+            float3 to_light = light_position - origin;
+            float dist = length(to_light);
+            float3 L_center = to_light / dist;
+
+            // Create tangent frame
+            float3 tangent = normalize(cross(L_center, float3(0, 1, 0)));
+            float3 bitangent = cross(L_center, tangent);
+
+            // Sample point on disk
+            float r = sqrt(xi.x) * light_radius;
+            float theta = xi.y * 6.28318;
+            float3 offset = tangent * cos(theta) * r + bitangent * sin(theta) * r;
+
+            float3 sample_pos = light_position + offset;
+            L = normalize(sample_pos - origin);
+            max_dist = length(sample_pos - origin);
+        }
+
+        // Trace shadow ray
+        RayDesc ray;
+        ray.Origin = origin;
+        ray.Direction = L;
+        ray.TMin = 0.001;
+        ray.TMax = max_dist - 0.01;
+
+        ShadowPayload payload;
+        payload.visibility = 1.0;
+
+        TraceRay(scene, RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH | RAY_FLAG_SKIP_CLOSEST_HIT_SHADER,
+                 0xFF, 1, 0, 1, ray, payload);
+
+        total_visibility += payload.visibility;
+    }
+
+    float visibility = total_visibility / float(num_samples);
+    output[pixel] = float4(visibility, visibility, visibility, 1.0);
+}
+
+float3 SampleConeUniform(float2 xi, float3 direction, float cone_angle) {
+    float cos_angle = cos(cone_angle);
+    float z = xi.x * (1.0 - cos_angle) + cos_angle;
+    float phi = xi.y * 6.28318;
+    float r = sqrt(1.0 - z * z);
+
+    float3 local = float3(r * cos(phi), r * sin(phi), z);
+
+    float3 up = abs(direction.z) < 0.999 ? float3(0, 0, 1) : float3(1, 0, 0);
+    float3 tangent = normalize(cross(up, direction));
+    float3 bitangent = cross(direction, tangent);
+
+    return normalize(tangent * local.x + bitangent * local.y + direction * local.z);
+}
+
+[shader("miss")]
+void ShadowMiss(inout ShadowPayload payload) {
+    payload.visibility = 1.0;
+}
+
+[shader("anyhit")]
+void ShadowAnyHit(inout ShadowPayload payload, BuiltInTriangleIntersectionAttributes attribs) {
+    // Check for alpha cutout
+    float alpha = GetAlpha(PrimitiveIndex(), attribs);
+    if (alpha < 0.5) {
+        IgnoreHit();
+    } else {
+        payload.visibility = 0.0;
+        AcceptHitAndEndSearch();
+    }
+}
+"#;
+
+// =============================================================================
+// RT AMBIENT OCCLUSION
+// =============================================================================
+
+const RT_AO_SHADER: &str = r#"
+//-----------------------------------------------------------------------------
+// Ray Traced Ambient Occlusion
+//-----------------------------------------------------------------------------
+
+#include "RayGenCommon.hlsli"
+
+cbuffer AOParams : register(b1) {
+    float ao_radius;
+    int ao_samples;
+    float ao_power;
+    float ao_intensity;
+}
+
+Texture2D<float4> gbuffer_normal : register(t1);
+Texture2D<float> gbuffer_depth : register(t2);
+
+struct AOPayload {
+    float occlusion;
+};
+
+[shader("raygeneration")]
+void AORayGen() {
+    uint2 pixel = DispatchRaysIndex().xy;
+    uint2 dims = DispatchRaysDimensions().xy;
+
+    float2 uv = (float2(pixel) + 0.5) / float2(dims);
+    float4 normal_sample = gbuffer_normal.SampleLevel(linear_sampler, uv, 0);
+    float depth = gbuffer_depth.SampleLevel(linear_sampler, uv, 0);
+
+    if (depth >= 1.0) {
+        output[pixel] = float4(1, 1, 1, 1);
+        return;
+    }
+
+    float3 N = DecodeNormal(normal_sample.rg);
+    float3 world_pos = ReconstructPosition(uv, depth);
+    float3 origin = world_pos + N * 0.001;
+
+    uint seed = pixel.x + pixel.y * dims.x + frame_count * dims.x * dims.y;
+
+    float total_occlusion = 0.0;
+
+    for (int i = 0; i < ao_samples; i++) {
+        float2 xi = RandomFloat2(seed);
+
+        // Cosine-weighted hemisphere sampling
+        float3 sample_dir = SampleCosineHemisphere(xi, N);
+
+        RayDesc ray;
+        ray.Origin = origin;
+        ray.Direction = sample_dir;
+        ray.TMin = 0.001;
+        ray.TMax = ao_radius;
+
+        AOPayload payload;
+        payload.occlusion = 0.0;
+
+        TraceRay(scene, RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH | RAY_FLAG_SKIP_CLOSEST_HIT_SHADER,
+                 0xFF, 2, 0, 2, ray, payload);
+
+        total_occlusion += payload.occlusion;
+    }
+
+    float ao = 1.0 - (total_occlusion / float(ao_samples));
+    ao = pow(ao, ao_power) * ao_intensity + (1.0 - ao_intensity);
+
+    output[pixel] = float4(ao, ao, ao, 1.0);
+}
+
+[shader("miss")]
+void AOMiss(inout AOPayload payload) {
+    payload.occlusion = 0.0;
+}
+
+[shader("anyhit")]
+void AOAnyHit(inout AOPayload payload, BuiltInTriangleIntersectionAttributes attribs) {
+    float t = RayTCurrent();
+    float falloff = 1.0 - (t / ao_radius);
+    payload.occlusion = falloff;
+    AcceptHitAndEndSearch();
+}
+"#;
+
+// =============================================================================
+// RT GLOBAL ILLUMINATION
+// =============================================================================
+
+const RT_GI_SHADER: &str = r#"
+//-----------------------------------------------------------------------------
+// Ray Traced Global Illumination
+//-----------------------------------------------------------------------------
+
+#include "RayGenCommon.hlsli"
+
+cbuffer GIParams : register(b1) {
+    int gi_samples;
+    int gi_bounces;
+    float gi_intensity;
+    float gi_radius;
+}
+
+Texture2D<float4> gbuffer_albedo : register(t1);
+Texture2D<float4> gbuffer_normal : register(t2);
+Texture2D<float4> gbuffer_material : register(t3);
+Texture2D<float> gbuffer_depth : register(t4);
+TextureCube<float4> environment_map : register(t5);
+
+struct GIPayload {
+    float3 radiance;
+    float3 throughput;
+    int depth;
+    uint seed;
+};
+
+[shader("raygeneration")]
+void GIRayGen() {
+    uint2 pixel = DispatchRaysIndex().xy;
+    uint2 dims = DispatchRaysDimensions().xy;
+
+    float2 uv = (float2(pixel) + 0.5) / float2(dims);
+    float4 albedo_sample = gbuffer_albedo.SampleLevel(linear_sampler, uv, 0);
+    float4 normal_sample = gbuffer_normal.SampleLevel(linear_sampler, uv, 0);
+    float4 material_sample = gbuffer_material.SampleLevel(linear_sampler, uv, 0);
+    float depth = gbuffer_depth.SampleLevel(linear_sampler, uv, 0);
+
+    if (depth >= 1.0) {
+        output[pixel] = float4(0, 0, 0, 0);
+        return;
+    }
+
+    float3 albedo = albedo_sample.rgb;
+    float3 N = DecodeNormal(normal_sample.rg);
+    float roughness = material_sample.r;
+    float metallic = material_sample.g;
+
+    float3 world_pos = ReconstructPosition(uv, depth);
+    float3 V = normalize(camera_position - world_pos);
+
+    uint seed = pixel.x + pixel.y * dims.x + frame_count * dims.x * dims.y;
+
+    float3 total_gi = float3(0, 0, 0);
+
+    for (int s = 0; s < gi_samples; s++) {
+        float2 xi = RandomFloat2(seed);
+
+        // First bounce - cosine-weighted hemisphere
+        float3 L = SampleCosineHemisphere(xi, N);
+
+        RayDesc ray;
+        ray.Origin = world_pos + N * 0.001;
+        ray.Direction = L;
+        ray.TMin = 0.001;
+        ray.TMax = gi_radius;
+
+        GIPayload payload;
+        payload.radiance = float3(0, 0, 0);
+        payload.throughput = albedo * max(dot(N, L), 0.0);
+        payload.depth = 0;
+        payload.seed = seed;
+
+        TraceRay(scene, RAY_FLAG_NONE, 0xFF, 3, 0, 3, ray, payload);
+
+        total_gi += payload.radiance;
+    }
+
+    total_gi /= float(gi_samples);
+    output[pixel] = float4(total_gi * gi_intensity, 1.0);
+}
+
+[shader("closesthit")]
+void GIClosestHit(inout GIPayload payload, BuiltInTriangleIntersectionAttributes attribs) {
+    if (payload.depth >= gi_bounces) {
+        return;
+    }
+
+    float3 barycentrics = float3(1.0 - attribs.barycentrics.x - attribs.barycentrics.y,
+                                  attribs.barycentrics.x, attribs.barycentrics.y);
+
+    float3 albedo = GetAlbedo(PrimitiveIndex(), barycentrics);
+    float3 N = GetNormal(PrimitiveIndex(), barycentrics);
+    float3 emissive = GetEmissive(PrimitiveIndex(), barycentrics);
+
+    // Add emissive contribution
+    payload.radiance += payload.throughput * emissive;
+
+    // Direct lighting
+    float NdotL = max(dot(N, -sun_direction), 0.0);
+    float3 direct = albedo * NdotL * sun_color * sun_intensity;
+
+    // Check shadow
+    RayDesc shadow_ray;
+    shadow_ray.Origin = WorldRayOrigin() + WorldRayDirection() * RayTCurrent() + N * 0.001;
+    shadow_ray.Direction = -sun_direction;
+    shadow_ray.TMin = 0.001;
+    shadow_ray.TMax = 10000.0;
+
+    // ... trace shadow ray ...
+
+    payload.radiance += payload.throughput * direct;
+
+    // Continue path
+    if (payload.depth < gi_bounces - 1) {
+        float2 xi = RandomFloat2(payload.seed);
+        float3 bounce_dir = SampleCosineHemisphere(xi, N);
+
+        RayDesc bounce_ray;
+        bounce_ray.Origin = shadow_ray.Origin;
+        bounce_ray.Direction = bounce_dir;
+        bounce_ray.TMin = 0.001;
+        bounce_ray.TMax = gi_radius;
+
+        payload.throughput *= albedo * max(dot(N, bounce_dir), 0.0);
+        payload.depth++;
+
+        TraceRay(scene, RAY_FLAG_NONE, 0xFF, 3, 0, 3, bounce_ray, payload);
+    }
+}
+
+[shader("miss")]
+void GIMiss(inout GIPayload payload) {
+    // Sample environment for indirect lighting
+    float3 env = environment_map.SampleLevel(linear_sampler, WorldRayDirection(), 4.0).rgb;
+    payload.radiance += payload.throughput * env * 0.1;
+}
+"#;
+
+// =============================================================================
+// PATH TRACER
+// =============================================================================
+
+const PATH_TRACER_SHADER: &str = r#"
+//-----------------------------------------------------------------------------
+// Full Path Tracer
+//-----------------------------------------------------------------------------
+
+#include "RayGenCommon.hlsli"
+
+#define MAX_BOUNCES 8
+#define RUSSIAN_ROULETTE_DEPTH 3
+
+cbuffer PathTracerParams : register(b1) {
+    int samples_per_pixel;
+    int max_bounces;
+    float exposure;
+    int accumulation_frame;
+}
+
+RWTexture2D<float4> accumulation_buffer : register(u1);
+
+struct PathPayload {
+    float3 radiance;
+    float3 throughput;
+    int depth;
+    uint seed;
+    bool done;
+};
+
+// Material BRDF evaluation
+float3 EvaluateBRDF(float3 V, float3 L, float3 N, float3 albedo, float roughness, float metallic) {
+    float3 H = normalize(V + L);
+
+    float NdotV = max(dot(N, V), 0.001);
+    float NdotL = max(dot(N, L), 0.001);
+    float NdotH = max(dot(N, H), 0.001);
+    float VdotH = max(dot(V, H), 0.001);
+
+    float3 F0 = lerp(float3(0.04, 0.04, 0.04), albedo, metallic);
+
+    // GGX distribution
+    float a = roughness * roughness;
+    float a2 = a * a;
+    float denom = NdotH * NdotH * (a2 - 1.0) + 1.0;
+    float D = a2 / (3.14159 * denom * denom);
+
+    // Fresnel
+    float3 F = F0 + (1.0 - F0) * pow(1.0 - VdotH, 5.0);
+
+    // Geometry
+    float k = (roughness + 1.0) * (roughness + 1.0) / 8.0;
+    float G = (NdotV / (NdotV * (1.0 - k) + k)) * (NdotL / (NdotL * (1.0 - k) + k));
+
+    float3 specular = (D * F * G) / (4.0 * NdotV * NdotL + 0.001);
+    float3 diffuse = (1.0 - F) * (1.0 - metallic) * albedo / 3.14159;
+
+    return (diffuse + specular) * NdotL;
+}
+
+// Sample BRDF direction
+float3 SampleBRDF(float2 xi, float3 V, float3 N, float roughness, float metallic, out float pdf) {
+    // Choose between diffuse and specular based on material
+    float spec_prob = 0.5 * (1.0 - roughness) + 0.5 * metallic;
+
+    if (xi.x < spec_prob) {
+        // Sample specular (GGX)
+        xi.x /= spec_prob;
+        float3 H = SampleGGX(xi, N, roughness);
+        float3 L = reflect(-V, H);
+
+        float NdotH = max(dot(N, H), 0.001);
+        float VdotH = max(dot(V, H), 0.001);
+        float a = roughness * roughness;
+        float a2 = a * a;
+        float denom = NdotH * NdotH * (a2 - 1.0) + 1.0;
+        float D = a2 / (3.14159 * denom * denom);
+
+        pdf = spec_prob * D * NdotH / (4.0 * VdotH);
+        return L;
+    } else {
+        // Sample diffuse (cosine-weighted)
+        xi.x = (xi.x - spec_prob) / (1.0 - spec_prob);
+        float3 L = SampleCosineHemisphere(xi, N);
+
+        pdf = (1.0 - spec_prob) * max(dot(N, L), 0.0) / 3.14159;
+        return L;
+    }
+}
+
+[shader("raygeneration")]
+void PathTracerRayGen() {
+    uint2 pixel = DispatchRaysIndex().xy;
+    uint2 dims = DispatchRaysDimensions().xy;
+
+    uint seed = pixel.x + pixel.y * dims.x + frame_count * dims.x * dims.y;
+
+    float3 total_color = float3(0, 0, 0);
+
+    for (int s = 0; s < samples_per_pixel; s++) {
+        // Jittered primary ray
+        float2 jitter = RandomFloat2(seed) - 0.5;
+        RayDesc ray = GeneratePrimaryRay(pixel, jitter);
+
+        PathPayload payload;
+        payload.radiance = float3(0, 0, 0);
+        payload.throughput = float3(1, 1, 1);
+        payload.depth = 0;
+        payload.seed = seed;
+        payload.done = false;
+
+        while (!payload.done && payload.depth < max_bounces) {
+            TraceRay(scene, RAY_FLAG_NONE, 0xFF, 0, 0, 0, ray, payload);
+
+            if (payload.done) break;
+
+            // Russian roulette
+            if (payload.depth >= RUSSIAN_ROULETTE_DEPTH) {
+                float p = max(payload.throughput.x, max(payload.throughput.y, payload.throughput.z));
+                if (RandomFloat(payload.seed) > p) {
+                    break;
+                }
+                payload.throughput /= p;
+            }
+
+            payload.depth++;
+        }
+
+        total_color += payload.radiance;
+    }
+
+    total_color /= float(samples_per_pixel);
+
+    // Temporal accumulation
+    if (accumulation_frame > 0) {
+        float4 prev = accumulation_buffer[pixel];
+        float weight = 1.0 / float(accumulation_frame + 1);
+        total_color = lerp(prev.rgb, total_color, weight);
+    }
+
+    accumulation_buffer[pixel] = float4(total_color, 1.0);
+
+    // Apply exposure
+    float3 exposed = 1.0 - exp(-total_color * exposure);
+    output[pixel] = float4(exposed, 1.0);
+}
+
+[shader("closesthit")]
+void PathTracerClosestHit(inout PathPayload payload, BuiltInTriangleIntersectionAttributes attribs) {
+    float3 barycentrics = float3(1.0 - attribs.barycentrics.x - attribs.barycentrics.y,
+                                  attribs.barycentrics.x, attribs.barycentrics.y);
+
+    // Get surface data
+    float3 albedo = GetAlbedo(PrimitiveIndex(), barycentrics);
+    float3 N = GetNormal(PrimitiveIndex(), barycentrics);
+    float roughness = GetRoughness(PrimitiveIndex(), barycentrics);
+    float metallic = GetMetallic(PrimitiveIndex(), barycentrics);
+    float3 emissive = GetEmissive(PrimitiveIndex(), barycentrics);
+
+    float3 hit_pos = WorldRayOrigin() + WorldRayDirection() * RayTCurrent();
+    float3 V = -WorldRayDirection();
+
+    // Add emissive
+    payload.radiance += payload.throughput * emissive;
+
+    // Sample next direction
+    float2 xi = RandomFloat2(payload.seed);
+    float pdf;
+    float3 L = SampleBRDF(xi, V, N, roughness, metallic, pdf);
+
+    if (pdf < 0.001 || dot(N, L) <= 0.0) {
+        payload.done = true;
+        return;
+    }
+
+    // Evaluate BRDF and update throughput
+    float3 brdf = EvaluateBRDF(V, L, N, albedo, roughness, metallic);
+    payload.throughput *= brdf / pdf;
+
+    // Prepare next ray
+    // (Would set up ray for next iteration)
+}
+
+[shader("miss")]
+void PathTracerMiss(inout PathPayload payload) {
+    // Environment lighting
+    float3 dir = WorldRayDirection();
+    float3 env = environment_map.SampleLevel(linear_sampler, dir, 0).rgb;
+
+    payload.radiance += payload.throughput * env;
+    payload.done = true;
+}
+"#;
+
+// =============================================================================
+// DENOISING SHADER
+// =============================================================================
+
+const DENOISER_SHADER: &str = r#"
+//-----------------------------------------------------------------------------
+// Spatiotemporal Denoising (SVGF-inspired)
+//-----------------------------------------------------------------------------
+
+cbuffer DenoiserParams : register(b0) {
+    float4x4 prev_view_projection;
+    float4x4 inv_view_projection;
+
+    float2 screen_size;
+    float temporal_alpha;
+    float spatial_sigma;
+
+    float color_sigma;
+    float normal_sigma;
+    float depth_sigma;
+    int iteration;
+}
+
+Texture2D<float4> noisy_input : register(t0);
+Texture2D<float4> gbuffer_normal : register(t1);
+Texture2D<float> gbuffer_depth : register(t2);
+Texture2D<float2> gbuffer_velocity : register(t3);
+Texture2D<float4> history : register(t4);
+Texture2D<float> variance_history : register(t5);
+
+RWTexture2D<float4> denoised_output : register(u0);
+RWTexture2D<float> variance_output : register(u1);
+
+SamplerState linear_clamp : register(s0);
+
+// Edge-stopping functions
+float NormalWeight(float3 n1, float3 n2, float sigma) {
+    return pow(max(dot(n1, n2), 0.0), sigma);
+}
+
+float DepthWeight(float d1, float d2, float sigma) {
+    return exp(-abs(d1 - d2) * sigma);
+}
+
+float LuminanceWeight(float3 c1, float3 c2, float sigma) {
+    float l1 = dot(c1, float3(0.2126, 0.7152, 0.0722));
+    float l2 = dot(c2, float3(0.2126, 0.7152, 0.0722));
+    return exp(-abs(l1 - l2) * sigma);
+}
+
+// Temporal reprojection
+float2 GetReprojectedUV(float2 uv, float depth) {
+    float3 world_pos = ReconstructPosition(uv, depth);
+    float4 prev_clip = mul(prev_view_projection, float4(world_pos, 1.0));
+    float2 prev_uv = (prev_clip.xy / prev_clip.w) * 0.5 + 0.5;
+    prev_uv.y = 1.0 - prev_uv.y;
+    return prev_uv;
+}
+
+[numthreads(8, 8, 1)]
+void TemporalAccumulationCS(uint3 id : SV_DispatchThreadID) {
+    float2 uv = (float2(id.xy) + 0.5) / screen_size;
+
+    float4 current = noisy_input[id.xy];
+    float3 current_normal = DecodeNormal(gbuffer_normal[id.xy].rg);
+    float current_depth = gbuffer_depth[id.xy];
+
+    // Get motion vector or reproject
+    float2 velocity = gbuffer_velocity[id.xy];
+    float2 prev_uv = uv - velocity;
+
+    // Alternatively use depth-based reprojection
+    // float2 prev_uv = GetReprojectedUV(uv, current_depth);
+
+    // Check if reprojection is valid
+    bool valid = prev_uv.x >= 0.0 && prev_uv.x <= 1.0 &&
+                 prev_uv.y >= 0.0 && prev_uv.y <= 1.0;
+
+    if (valid) {
+        float4 history_sample = history.SampleLevel(linear_clamp, prev_uv, 0);
+
+        // Color clamping to reduce ghosting
+        float3 mean = current.rgb;
+        float3 sigma = float3(0.1, 0.1, 0.1);  // Would compute from neighborhood
+
+        float3 clamped_history = clamp(history_sample.rgb, mean - sigma, mean + sigma);
+
+        // Blend
+        float3 result = lerp(clamped_history, current.rgb, 1.0 - temporal_alpha);
+        denoised_output[id.xy] = float4(result, 1.0);
+    } else {
+        denoised_output[id.xy] = current;
+    }
+}
+
+[numthreads(8, 8, 1)]
+void SpatialFilterCS(uint3 id : SV_DispatchThreadID) {
+    float2 uv = (float2(id.xy) + 0.5) / screen_size;
+
+    float4 center_color = noisy_input[id.xy];
+    float3 center_normal = DecodeNormal(gbuffer_normal[id.xy].rg);
+    float center_depth = gbuffer_depth[id.xy];
+
+    // A-trous wavelet filter
+    int step_size = 1 << iteration;
+    float3 sum = float3(0, 0, 0);
+    float weight_sum = 0.0;
+
+    float kernel[25] = {
+        1.0/256.0, 4.0/256.0, 6.0/256.0, 4.0/256.0, 1.0/256.0,
+        4.0/256.0, 16.0/256.0, 24.0/256.0, 16.0/256.0, 4.0/256.0,
+        6.0/256.0, 24.0/256.0, 36.0/256.0, 24.0/256.0, 6.0/256.0,
+        4.0/256.0, 16.0/256.0, 24.0/256.0, 16.0/256.0, 4.0/256.0,
+        1.0/256.0, 4.0/256.0, 6.0/256.0, 4.0/256.0, 1.0/256.0
+    };
+
+    for (int y = -2; y <= 2; y++) {
+        for (int x = -2; x <= 2; x++) {
+            int2 offset = int2(x, y) * step_size;
+            int2 sample_pos = id.xy + offset;
+
+            if (sample_pos.x < 0 || sample_pos.x >= screen_size.x ||
+                sample_pos.y < 0 || sample_pos.y >= screen_size.y) {
+                continue;
+            }
+
+            float4 sample_color = noisy_input[sample_pos];
+            float3 sample_normal = DecodeNormal(gbuffer_normal[sample_pos].rg);
+            float sample_depth = gbuffer_depth[sample_pos];
+
+            // Edge-stopping weights
+            float w_normal = NormalWeight(center_normal, sample_normal, normal_sigma);
+            float w_depth = DepthWeight(center_depth, sample_depth, depth_sigma);
+            float w_color = LuminanceWeight(center_color.rgb, sample_color.rgb, color_sigma);
+
+            int kernel_idx = (y + 2) * 5 + (x + 2);
+            float weight = kernel[kernel_idx] * w_normal * w_depth * w_color;
+
+            sum += sample_color.rgb * weight;
+            weight_sum += weight;
+        }
+    }
+
+    float3 result = sum / max(weight_sum, 0.0001);
+    denoised_output[id.xy] = float4(result, 1.0);
+}
+"#;
+
+// =============================================================================
+// RAY TRACING SYSTEM
+// =============================================================================
+
+/// Complete ray tracing system
+struct RayTracingSystem {
+    config: RTConfig,
+
+    // Acceleration structure
+    blas_list: Vec<BLASHandle>,
+    tlas: TLASHandle,
+
+    // Shader tables
+    ray_gen_table: ShaderTableHandle,
+    miss_table: ShaderTableHandle,
+    hit_group_table: ShaderTableHandle,
+
+    // Output textures
+    reflection_target: TextureHandle,
+    shadow_target: TextureHandle,
+    ao_target: TextureHandle,
+    gi_target: TextureHandle,
+
+    // Denoiser
+    denoised_reflection: TextureHandle,
+    denoised_gi: TextureHandle,
+    history_buffer: TextureHandle,
+
+    // State
+    frame_count: u32,
+    accumulation_frame: u32,
+}
+
+impl RayTracingSystem {
+    pub fn new(device: &RTDevice, config: RTConfig, width: u32, height: u32) -> Self {
+        // Create output textures
+        let reflection_target = device.create_rt_texture(width, height, TextureFormat::RGBA16F);
+        let shadow_target = device.create_rt_texture(width, height, TextureFormat::R16F);
+        let ao_target = device.create_rt_texture(width, height, TextureFormat::R16F);
+        let gi_target = device.create_rt_texture(width, height, TextureFormat::RGBA16F);
+
+        let denoised_reflection = device.create_rt_texture(width, height, TextureFormat::RGBA16F);
+        let denoised_gi = device.create_rt_texture(width, height, TextureFormat::RGBA16F);
+        let history_buffer = device.create_rt_texture(width, height, TextureFormat::RGBA16F);
+
+        // Create shader tables
+        let ray_gen_table = device.create_shader_table(1);
+        let miss_table = device.create_shader_table(4);
+        let hit_group_table = device.create_shader_table(4);
+
+        Self {
+            config,
+            blas_list: Vec::new(),
+            tlas: 0,
+            ray_gen_table,
+            miss_table,
+            hit_group_table,
+            reflection_target,
+            shadow_target,
+            ao_target,
+            gi_target,
+            denoised_reflection,
+            denoised_gi,
+            history_buffer,
+            frame_count: 0,
+            accumulation_frame: 0,
+        }
+    }
+
+    pub fn build_blas(&mut self, device: &RTDevice, mesh: &Mesh) -> usize {
+        let blas = device.create_blas(mesh);
+        self.blas_list.push(blas);
+        self.blas_list.len() - 1
+    }
+
+    pub fn build_tlas(&mut self, device: &RTDevice, instances: &[RTInstance]) {
+        self.tlas = device.create_tlas(&self.blas_list, instances);
+    }
+
+    pub fn trace_reflections(&self, context: &RTContext, gbuffer: &GBuffer, camera: &Camera) {
+        if !self.config.enable_reflections {
+            return;
+        }
+
+        context.set_acceleration_structure(0, self.tlas);
+        context.set_output(0, &self.reflection_target);
+
+        context.set_constant_buffer(0, &self.create_common_params(camera));
+        context.set_constant_buffer(1, &ReflectionParams {
+            num_samples: self.config.reflection_samples as i32,
+            roughness_threshold: self.config.reflection_roughness_threshold,
+            max_distance: self.config.max_reflection_distance,
+            intensity: 1.0,
+        });
+
+        context.set_gbuffer(gbuffer);
+
+        context.dispatch_rays(
+            &self.ray_gen_table, 0,
+            &self.miss_table, 0,
+            &self.hit_group_table, 0,
+            1920, 1080, 1
+        );
+    }
+
+    pub fn trace_shadows(&self, context: &RTContext, gbuffer: &GBuffer, light: &Light) {
+        if !self.config.enable_shadows {
+            return;
+        }
+
+        context.set_acceleration_structure(0, self.tlas);
+        context.set_output(0, &self.shadow_target);
+
+        context.set_constant_buffer(1, &ShadowParams {
+            light_position: light.position,
+            light_radius: light.radius,
+            light_direction: light.direction,
+            light_type: light.light_type as i32,
+            num_samples: self.config.shadow_samples as i32,
+            shadow_distance: self.config.shadow_distance,
+            normal_bias: 0.01,
+        });
+
+        context.dispatch_rays(
+            &self.ray_gen_table, 1,
+            &self.miss_table, 1,
+            &self.hit_group_table, 1,
+            1920, 1080, 1
+        );
+    }
+
+    pub fn trace_ao(&self, context: &RTContext, gbuffer: &GBuffer, camera: &Camera) {
+        if !self.config.enable_rtao {
+            return;
+        }
+
+        context.set_acceleration_structure(0, self.tlas);
+        context.set_output(0, &self.ao_target);
+
+        context.set_constant_buffer(1, &AOParams {
+            ao_radius: self.config.ao_radius,
+            ao_samples: self.config.ao_samples as i32,
+            ao_power: 1.5,
+            ao_intensity: 1.0,
+        });
+
+        context.dispatch_rays(
+            &self.ray_gen_table, 2,
+            &self.miss_table, 2,
+            &self.hit_group_table, 2,
+            1920, 1080, 1
+        );
+    }
+
+    pub fn trace_gi(&self, context: &RTContext, gbuffer: &GBuffer, camera: &Camera) {
+        if !self.config.enable_gi {
+            return;
+        }
+
+        context.set_acceleration_structure(0, self.tlas);
+        context.set_output(0, &self.gi_target);
+
+        context.set_constant_buffer(1, &GIParams {
+            gi_samples: self.config.gi_samples as i32,
+            gi_bounces: self.config.gi_bounces as i32,
+            gi_intensity: self.config.gi_intensity,
+            gi_radius: 100.0,
+        });
+
+        context.dispatch_rays(
+            &self.ray_gen_table, 3,
+            &self.miss_table, 3,
+            &self.hit_group_table, 3,
+            1920, 1080, 1
+        );
+    }
+
+    pub fn denoise(&mut self, context: &ComputeContext) {
+        if !self.config.enable_denoising {
+            return;
+        }
+
+        // Temporal accumulation
+        context.bind_compute_shader("denoiser_temporal_cs");
+        context.set_srv(0, &self.reflection_target);
+        context.set_srv(4, &self.history_buffer);
+        context.set_uav(0, &self.denoised_reflection);
+        context.dispatch(1920 / 8, 1080 / 8, 1);
+
+        // Spatial filtering (A-trous wavelet)
+        for i in 0..5 {
+            context.bind_compute_shader("denoiser_spatial_cs");
+            context.set_constant_buffer(0, &DenoiserParams {
+                iteration: i,
+                spatial_sigma: self.config.spatial_sigma,
+                ..Default::default()
+            });
+
+            // Ping-pong between buffers
+            if i % 2 == 0 {
+                context.set_srv(0, &self.denoised_reflection);
+                context.set_uav(0, &self.history_buffer);
+            } else {
+                context.set_srv(0, &self.history_buffer);
+                context.set_uav(0, &self.denoised_reflection);
+            }
+
+            context.dispatch(1920 / 8, 1080 / 8, 1);
+        }
+    }
+
+    fn create_common_params(&self, camera: &Camera) -> RTCommonParams {
+        RTCommonParams {
+            inv_view: camera.inv_view,
+            inv_projection: camera.inv_projection,
+            camera_position: camera.position,
+            frame_count: self.frame_count,
+            sun_direction: [0.5, 0.8, 0.3],
+            sun_intensity: 5.0,
+            sun_color: [1.0, 0.95, 0.9],
+            max_bounces: self.config.max_ray_depth,
+        }
+    }
+
+    pub fn get_reflection_result(&self) -> &TextureHandle {
+        if self.config.enable_denoising {
+            &self.denoised_reflection
+        } else {
+            &self.reflection_target
+        }
+    }
+
+    pub fn get_shadow_result(&self) -> &TextureHandle {
+        &self.shadow_target
+    }
+
+    pub fn get_ao_result(&self) -> &TextureHandle {
+        &self.ao_target
+    }
+
+    pub fn get_gi_result(&self) -> &TextureHandle {
+        if self.config.enable_denoising {
+            &self.denoised_gi
+        } else {
+            &self.gi_target
+        }
+    }
+
+    pub fn update(&mut self) {
+        self.frame_count += 1;
+    }
+
+    pub fn reset_accumulation(&mut self) {
+        self.accumulation_frame = 0;
+    }
+}
+
+// Parameter structures
+#[repr(C)]
+struct RTCommonParams {
+    inv_view: [[f32; 4]; 4],
+    inv_projection: [[f32; 4]; 4],
+    camera_position: [f32; 3],
+    frame_count: u32,
+    sun_direction: [f32; 3],
+    sun_intensity: f32,
+    sun_color: [f32; 3],
+    max_bounces: u32,
+}
+
+#[repr(C)]
+struct ReflectionParams {
+    num_samples: i32,
+    roughness_threshold: f32,
+    max_distance: f32,
+    intensity: f32,
+}
+
+#[repr(C)]
+struct ShadowParams {
+    light_position: [f32; 3],
+    light_radius: f32,
+    light_direction: [f32; 3],
+    light_type: i32,
+    num_samples: i32,
+    shadow_distance: f32,
+    normal_bias: f32,
+}
+
+#[repr(C)]
+struct AOParams {
+    ao_radius: f32,
+    ao_samples: i32,
+    ao_power: f32,
+    ao_intensity: f32,
+}
+
+#[repr(C)]
+struct GIParams {
+    gi_samples: i32,
+    gi_bounces: i32,
+    gi_intensity: f32,
+    gi_radius: f32,
+}
+
+#[repr(C)]
+#[derive(Default)]
+struct DenoiserParams {
+    iteration: i32,
+    spatial_sigma: f32,
+    temporal_alpha: f32,
+    color_sigma: f32,
+}
+
+struct RTInstance {
+    blas_index: usize,
+    transform: [[f32; 4]; 3],
+    instance_id: u32,
+    mask: u32,
+}
+
+// Placeholder types
+type TextureHandle = u64;
+type BLASHandle = u64;
+type TLASHandle = u64;
+type ShaderTableHandle = u64;
+type vec3 = [f32; 3];
+
+enum TextureFormat { RGBA16F, R16F }
+
+struct RTDevice;
+impl RTDevice {
+    fn create_rt_texture(&self, _w: u32, _h: u32, _fmt: TextureFormat) -> TextureHandle { 0 }
+    fn create_shader_table(&self, _count: u32) -> ShaderTableHandle { 0 }
+    fn create_blas(&self, _mesh: &Mesh) -> BLASHandle { 0 }
+    fn create_tlas(&self, _blas: &[BLASHandle], _instances: &[RTInstance]) -> TLASHandle { 0 }
+}
+
+struct RTContext;
+impl RTContext {
+    fn set_acceleration_structure(&self, _slot: u32, _tlas: TLASHandle) {}
+    fn set_output(&self, _slot: u32, _tex: &TextureHandle) {}
+    fn set_constant_buffer<T>(&self, _slot: u32, _data: &T) {}
+    fn set_gbuffer(&self, _gbuffer: &GBuffer) {}
+    fn dispatch_rays(&self, _rg: &ShaderTableHandle, _rg_idx: u32,
+                     _miss: &ShaderTableHandle, _miss_idx: u32,
+                     _hit: &ShaderTableHandle, _hit_idx: u32,
+                     _w: u32, _h: u32, _d: u32) {}
+}
+
+struct ComputeContext;
+impl ComputeContext {
+    fn bind_compute_shader(&self, _name: &str) {}
+    fn set_srv(&self, _slot: u32, _tex: &TextureHandle) {}
+    fn set_uav(&self, _slot: u32, _tex: &TextureHandle) {}
+    fn set_constant_buffer<T>(&self, _slot: u32, _data: &T) {}
+    fn dispatch(&self, _x: u32, _y: u32, _z: u32) {}
+}
+
+struct Camera {
+    inv_view: [[f32; 4]; 4],
+    inv_projection: [[f32; 4]; 4],
+    position: [f32; 3],
+}
+
+struct Light {
+    position: [f32; 3],
+    radius: f32,
+    direction: [f32; 3],
+    light_type: u32,
+}
+
+struct Mesh;
+struct GBuffer;
+
+// =============================================================================
+// MODULE EXPORTS
+// =============================================================================
+
+pub use RTConfig;
+pub use RayTracingSystem;
+
+pub const SHADERS: &[(&str, &str)] = &[
+    ("ray_gen_common", RAY_GEN_COMMON),
+    ("rt_reflections", RT_REFLECTIONS_SHADER),
+    ("rt_shadows", RT_SHADOWS_SHADER),
+    ("rt_ao", RT_AO_SHADER),
+    ("rt_gi", RT_GI_SHADER),
+    ("path_tracer", PATH_TRACER_SHADER),
+    ("denoiser", DENOISER_SHADER),
+];

@@ -1,0 +1,4647 @@
+// =============================================================================
+// BUILD FORMAT - Code Formatter for BuildLang
+// =============================================================================
+// A configurable code formatter that ensures consistent style across codebases.
+// Supports multiple formatting styles, customizable rules, and IDE integration.
+// =============================================================================
+
+use buildlang::prelude::*;
+use std::collections::{HashMap, HashSet};
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::io::{Read, Write, BufReader, BufWriter};
+
+// =============================================================================
+// FORMATTER CONFIGURATION
+// =============================================================================
+
+/// Indentation style
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IndentStyle {
+    Spaces(u8),
+    Tabs,
+}
+
+impl Default for IndentStyle {
+    fn default() -> Self {
+        IndentStyle::Spaces(4)
+    }
+}
+
+/// Line ending style
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LineEnding {
+    Unix,      // \n
+    Windows,   // \r\n
+    Native,    // Platform default
+}
+
+impl Default for LineEnding {
+    fn default() -> Self {
+        LineEnding::Unix
+    }
+}
+
+/// Brace style for blocks
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BraceStyle {
+    SameLine,      // fn foo() {
+    NextLine,      // fn foo()\n{
+    Allman,        // Same as NextLine
+}
+
+impl Default for BraceStyle {
+    fn default() -> Self {
+        BraceStyle::SameLine
+    }
+}
+
+/// Import grouping style
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImportGrouping {
+    Preserve,      // Keep original order
+    Alphabetical,  // Sort alphabetically
+    Grouped,       // Group by type (std, external, internal)
+}
+
+impl Default for ImportGrouping {
+    fn default() -> Self {
+        ImportGrouping::Grouped
+    }
+}
+
+/// Formatter configuration
+#[derive(Debug, Clone)]
+pub struct FormatConfig {
+    /// Maximum line width
+    pub max_line_width: usize,
+
+    /// Indentation style
+    pub indent_style: IndentStyle,
+
+    /// Line ending style
+    pub line_ending: LineEnding,
+
+    /// Brace placement style
+    pub brace_style: BraceStyle,
+
+    /// Import grouping
+    pub import_grouping: ImportGrouping,
+
+    /// Add trailing commas in multi-line constructs
+    pub trailing_commas: bool,
+
+    /// Space after colon in type annotations
+    pub space_after_colon: bool,
+
+    /// Space before colon in type annotations
+    pub space_before_colon: bool,
+
+    /// Spaces around operators
+    pub spaces_around_operators: bool,
+
+    /// Blank lines between top-level items
+    pub blank_lines_between_items: usize,
+
+    /// Maximum blank lines to preserve
+    pub max_blank_lines: usize,
+
+    /// Format string literals (normalize quotes)
+    pub normalize_string_quotes: bool,
+
+    /// Preferred string quote character
+    pub string_quote: char,
+
+    /// Align struct field types
+    pub align_struct_fields: bool,
+
+    /// Align match arms
+    pub align_match_arms: bool,
+
+    /// Remove unnecessary parentheses
+    pub remove_unnecessary_parens: bool,
+
+    /// Reorder impl items (type, const, fn)
+    pub reorder_impl_items: bool,
+
+    /// Format doc comments
+    pub format_doc_comments: bool,
+
+    /// Wrap comments at max_line_width
+    pub wrap_comments: bool,
+
+    /// Files/directories to ignore
+    pub ignore_patterns: Vec<String>,
+}
+
+impl Default for FormatConfig {
+    fn default() -> Self {
+        FormatConfig {
+            max_line_width: 100,
+            indent_style: IndentStyle::Spaces(4),
+            line_ending: LineEnding::Unix,
+            brace_style: BraceStyle::SameLine,
+            import_grouping: ImportGrouping::Grouped,
+            trailing_commas: true,
+            space_after_colon: true,
+            space_before_colon: false,
+            spaces_around_operators: true,
+            blank_lines_between_items: 1,
+            max_blank_lines: 2,
+            normalize_string_quotes: false,
+            string_quote: '"',
+            align_struct_fields: false,
+            align_match_arms: false,
+            remove_unnecessary_parens: true,
+            reorder_impl_items: true,
+            format_doc_comments: true,
+            wrap_comments: true,
+            ignore_patterns: vec![
+                "target".to_string(),
+                ".git".to_string(),
+                "node_modules".to_string(),
+            ],
+        }
+    }
+}
+
+impl FormatConfig {
+    /// Load configuration from buildfmt.toml
+    pub fn load(path: &Path) -> Result<Self, FormatError> {
+        let config_path = path.join("buildfmt.toml");
+
+        if !config_path.exists() {
+            return Ok(Self::default());
+        }
+
+        let content = fs::read_to_string(&config_path)
+            .map_err(|e| FormatError::ConfigError(format!("Failed to read config: {}", e)))?;
+
+        Self::parse_toml(&content)
+    }
+
+    /// Parse TOML configuration
+    fn parse_toml(content: &str) -> Result<Self, FormatError> {
+        let mut config = Self::default();
+
+        for line in content.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+
+            if let Some((key, value)) = line.split_once('=') {
+                let key = key.trim();
+                let value = value.trim().trim_matches('"');
+
+                match key {
+                    "max_line_width" => {
+                        config.max_line_width = value.parse().unwrap_or(100);
+                    }
+                    "indent_style" => {
+                        config.indent_style = match value {
+                            "tabs" => IndentStyle::Tabs,
+                            _ => {
+                                let spaces: u8 = value.parse().unwrap_or(4);
+                                IndentStyle::Spaces(spaces)
+                            }
+                        };
+                    }
+                    "line_ending" => {
+                        config.line_ending = match value {
+                            "windows" | "crlf" => LineEnding::Windows,
+                            "native" => LineEnding::Native,
+                            _ => LineEnding::Unix,
+                        };
+                    }
+                    "brace_style" => {
+                        config.brace_style = match value {
+                            "next_line" | "allman" => BraceStyle::NextLine,
+                            _ => BraceStyle::SameLine,
+                        };
+                    }
+                    "trailing_commas" => {
+                        config.trailing_commas = value == "true";
+                    }
+                    "align_struct_fields" => {
+                        config.align_struct_fields = value == "true";
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        Ok(config)
+    }
+
+    /// Get indent string
+    pub fn indent_str(&self) -> String {
+        match self.indent_style {
+            IndentStyle::Spaces(n) => " ".repeat(n as usize),
+            IndentStyle::Tabs => "\t".to_string(),
+        }
+    }
+
+    /// Get line ending string
+    pub fn line_ending_str(&self) -> &'static str {
+        match self.line_ending {
+            LineEnding::Unix => "\n",
+            LineEnding::Windows => "\r\n",
+            LineEnding::Native => {
+                #[cfg(windows)]
+                { "\r\n" }
+                #[cfg(not(windows))]
+                { "\n" }
+            }
+        }
+    }
+}
+
+// =============================================================================
+// TOKEN REPRESENTATION
+// =============================================================================
+
+/// Token types for formatting
+#[derive(Debug, Clone, PartialEq)]
+pub enum Token {
+    // Keywords
+    Keyword(String),
+
+    // Identifiers
+    Ident(String),
+
+    // Literals
+    IntLiteral(String),
+    FloatLiteral(String),
+    StringLiteral(String),
+    CharLiteral(char),
+    BoolLiteral(bool),
+
+    // Operators
+    Plus, Minus, Star, Slash, Percent,
+    Eq, EqEq, NotEq, Lt, LtEq, Gt, GtEq,
+    And, Or, Not, BitAnd, BitOr, BitXor,
+    Shl, Shr, Arrow, FatArrow, DoubleColon,
+    PlusEq, MinusEq, StarEq, SlashEq,
+
+    // Delimiters
+    LParen, RParen,
+    LBrace, RBrace,
+    LBracket, RBracket,
+    Comma, Semicolon, Colon, Dot, DotDot, DotDotEq,
+    At, Hash, Question,
+
+    // Comments
+    LineComment(String),
+    BlockComment(String),
+    DocComment(String),
+
+    // Whitespace
+    Whitespace(String),
+    Newline,
+
+    // Special
+    Eof,
+}
+
+impl Token {
+    /// Check if token is a keyword
+    pub fn is_keyword(&self) -> bool {
+        matches!(self, Token::Keyword(_))
+    }
+
+    /// Check if token starts a block
+    pub fn starts_block(&self) -> bool {
+        matches!(self, Token::LBrace)
+    }
+
+    /// Check if token ends a block
+    pub fn ends_block(&self) -> bool {
+        matches!(self, Token::RBrace)
+    }
+
+    /// Get string representation
+    pub fn to_string(&self) -> String {
+        match self {
+            Token::Keyword(s) | Token::Ident(s) => s.clone(),
+            Token::IntLiteral(s) | Token::FloatLiteral(s) => s.clone(),
+            Token::StringLiteral(s) => format!("\"{}\"", s),
+            Token::CharLiteral(c) => format!("'{}'", c),
+            Token::BoolLiteral(b) => b.to_string(),
+            Token::Plus => "+".to_string(),
+            Token::Minus => "-".to_string(),
+            Token::Star => "*".to_string(),
+            Token::Slash => "/".to_string(),
+            Token::Percent => "%".to_string(),
+            Token::Eq => "=".to_string(),
+            Token::EqEq => "==".to_string(),
+            Token::NotEq => "!=".to_string(),
+            Token::Lt => "<".to_string(),
+            Token::LtEq => "<=".to_string(),
+            Token::Gt => ">".to_string(),
+            Token::GtEq => ">=".to_string(),
+            Token::And => "&&".to_string(),
+            Token::Or => "||".to_string(),
+            Token::Not => "!".to_string(),
+            Token::BitAnd => "&".to_string(),
+            Token::BitOr => "|".to_string(),
+            Token::BitXor => "^".to_string(),
+            Token::Shl => "<<".to_string(),
+            Token::Shr => ">>".to_string(),
+            Token::Arrow => "->".to_string(),
+            Token::FatArrow => "=>".to_string(),
+            Token::DoubleColon => "::".to_string(),
+            Token::PlusEq => "+=".to_string(),
+            Token::MinusEq => "-=".to_string(),
+            Token::StarEq => "*=".to_string(),
+            Token::SlashEq => "/=".to_string(),
+            Token::LParen => "(".to_string(),
+            Token::RParen => ")".to_string(),
+            Token::LBrace => "{".to_string(),
+            Token::RBrace => "}".to_string(),
+            Token::LBracket => "[".to_string(),
+            Token::RBracket => "]".to_string(),
+            Token::Comma => ",".to_string(),
+            Token::Semicolon => ";".to_string(),
+            Token::Colon => ":".to_string(),
+            Token::Dot => ".".to_string(),
+            Token::DotDot => "..".to_string(),
+            Token::DotDotEq => "..=".to_string(),
+            Token::At => "@".to_string(),
+            Token::Hash => "#".to_string(),
+            Token::Question => "?".to_string(),
+            Token::LineComment(s) => format!("//{}", s),
+            Token::BlockComment(s) => format!("/*{}*/", s),
+            Token::DocComment(s) => format!("///{}", s),
+            Token::Whitespace(s) => s.clone(),
+            Token::Newline => "\n".to_string(),
+            Token::Eof => String::new(),
+        }
+    }
+}
+
+// =============================================================================
+// LEXER FOR FORMATTING
+// =============================================================================
+
+/// Lexer that preserves whitespace and comments
+pub struct FormatLexer {
+    input: Vec<char>,
+    position: usize,
+}
+
+impl FormatLexer {
+    pub fn new(input: &str) -> Self {
+        FormatLexer {
+            input: input.chars().collect(),
+            position: 0,
+        }
+    }
+
+    /// Tokenize entire input
+    pub fn tokenize(&mut self) -> Vec<Token> {
+        let mut tokens = Vec::new();
+
+        while !self.is_at_end() {
+            if let Some(token) = self.next_token() {
+                tokens.push(token);
+            }
+        }
+
+        tokens.push(Token::Eof);
+        tokens
+    }
+
+    fn is_at_end(&self) -> bool {
+        self.position >= self.input.len()
+    }
+
+    fn peek(&self) -> Option<char> {
+        self.input.get(self.position).copied()
+    }
+
+    fn peek_next(&self) -> Option<char> {
+        self.input.get(self.position + 1).copied()
+    }
+
+    fn advance(&mut self) -> Option<char> {
+        let ch = self.peek();
+        self.position += 1;
+        ch
+    }
+
+    fn next_token(&mut self) -> Option<Token> {
+        let ch = self.peek()?;
+
+        // Whitespace (excluding newlines)
+        if ch == ' ' || ch == '\t' {
+            return Some(self.scan_whitespace());
+        }
+
+        // Newlines
+        if ch == '\n' {
+            self.advance();
+            return Some(Token::Newline);
+        }
+
+        if ch == '\r' {
+            self.advance();
+            if self.peek() == Some('\n') {
+                self.advance();
+            }
+            return Some(Token::Newline);
+        }
+
+        // Comments
+        if ch == '/' {
+            if self.peek_next() == Some('/') {
+                return Some(self.scan_line_comment());
+            }
+            if self.peek_next() == Some('*') {
+                return Some(self.scan_block_comment());
+            }
+        }
+
+        // String literals
+        if ch == '"' {
+            return Some(self.scan_string());
+        }
+
+        // Char literals
+        if ch == '\'' {
+            return Some(self.scan_char());
+        }
+
+        // Numbers
+        if ch.is_ascii_digit() {
+            return Some(self.scan_number());
+        }
+
+        // Identifiers and keywords
+        if ch.is_alphabetic() || ch == '_' {
+            return Some(self.scan_identifier());
+        }
+
+        // Operators and delimiters
+        Some(self.scan_operator())
+    }
+
+    fn scan_whitespace(&mut self) -> Token {
+        let mut ws = String::new();
+        while let Some(ch) = self.peek() {
+            if ch == ' ' || ch == '\t' {
+                ws.push(ch);
+                self.advance();
+            } else {
+                break;
+            }
+        }
+        Token::Whitespace(ws)
+    }
+
+    fn scan_line_comment(&mut self) -> Token {
+        self.advance(); // /
+        self.advance(); // /
+
+        let is_doc = self.peek() == Some('/');
+
+        let mut content = String::new();
+        while let Some(ch) = self.peek() {
+            if ch == '\n' || ch == '\r' {
+                break;
+            }
+            content.push(ch);
+            self.advance();
+        }
+
+        if is_doc {
+            Token::DocComment(content)
+        } else {
+            Token::LineComment(content)
+        }
+    }
+
+    fn scan_block_comment(&mut self) -> Token {
+        self.advance(); // /
+        self.advance(); // *
+
+        let mut content = String::new();
+        let mut depth = 1;
+
+        while depth > 0 && !self.is_at_end() {
+            let ch = self.advance().unwrap();
+
+            if ch == '/' && self.peek() == Some('*') {
+                content.push(ch);
+                content.push(self.advance().unwrap());
+                depth += 1;
+            } else if ch == '*' && self.peek() == Some('/') {
+                depth -= 1;
+                if depth > 0 {
+                    content.push(ch);
+                    content.push(self.advance().unwrap());
+                } else {
+                    self.advance(); // consume closing /
+                }
+            } else {
+                content.push(ch);
+            }
+        }
+
+        Token::BlockComment(content)
+    }
+
+    fn scan_string(&mut self) -> Token {
+        self.advance(); // opening "
+        let mut content = String::new();
+
+        while let Some(ch) = self.peek() {
+            if ch == '"' {
+                self.advance();
+                break;
+            }
+            if ch == '\\' {
+                content.push(ch);
+                self.advance();
+                if let Some(escaped) = self.peek() {
+                    content.push(escaped);
+                    self.advance();
+                }
+            } else {
+                content.push(ch);
+                self.advance();
+            }
+        }
+
+        Token::StringLiteral(content)
+    }
+
+    fn scan_char(&mut self) -> Token {
+        self.advance(); // opening '
+        let ch = self.advance().unwrap_or(' ');
+
+        let result = if ch == '\\' {
+            let escaped = self.advance().unwrap_or(' ');
+            match escaped {
+                'n' => '\n',
+                'r' => '\r',
+                't' => '\t',
+                '\\' => '\\',
+                '\'' => '\'',
+                '0' => '\0',
+                _ => escaped,
+            }
+        } else {
+            ch
+        };
+
+        if self.peek() == Some('\'') {
+            self.advance();
+        }
+
+        Token::CharLiteral(result)
+    }
+
+    fn scan_number(&mut self) -> Token {
+        let mut num = String::new();
+        let mut is_float = false;
+
+        // Handle hex, octal, binary
+        if self.peek() == Some('0') {
+            num.push(self.advance().unwrap());
+            match self.peek() {
+                Some('x') | Some('X') => {
+                    num.push(self.advance().unwrap());
+                    while let Some(ch) = self.peek() {
+                        if ch.is_ascii_hexdigit() || ch == '_' {
+                            num.push(ch);
+                            self.advance();
+                        } else {
+                            break;
+                        }
+                    }
+                    return Token::IntLiteral(num);
+                }
+                Some('o') | Some('O') => {
+                    num.push(self.advance().unwrap());
+                    while let Some(ch) = self.peek() {
+                        if ('0'..='7').contains(&ch) || ch == '_' {
+                            num.push(ch);
+                            self.advance();
+                        } else {
+                            break;
+                        }
+                    }
+                    return Token::IntLiteral(num);
+                }
+                Some('b') | Some('B') => {
+                    num.push(self.advance().unwrap());
+                    while let Some(ch) = self.peek() {
+                        if ch == '0' || ch == '1' || ch == '_' {
+                            num.push(ch);
+                            self.advance();
+                        } else {
+                            break;
+                        }
+                    }
+                    return Token::IntLiteral(num);
+                }
+                _ => {}
+            }
+        }
+
+        // Decimal number
+        while let Some(ch) = self.peek() {
+            if ch.is_ascii_digit() || ch == '_' {
+                num.push(ch);
+                self.advance();
+            } else if ch == '.' && !is_float {
+                if let Some(next) = self.peek_next() {
+                    if next.is_ascii_digit() {
+                        is_float = true;
+                        num.push(ch);
+                        self.advance();
+                    } else {
+                        break;
+                    }
+                } else {
+                    break;
+                }
+            } else if (ch == 'e' || ch == 'E') && !num.contains('e') && !num.contains('E') {
+                is_float = true;
+                num.push(ch);
+                self.advance();
+                if self.peek() == Some('+') || self.peek() == Some('-') {
+                    num.push(self.advance().unwrap());
+                }
+            } else {
+                break;
+            }
+        }
+
+        // Type suffix
+        while let Some(ch) = self.peek() {
+            if ch.is_alphabetic() {
+                num.push(ch);
+                self.advance();
+            } else {
+                break;
+            }
+        }
+
+        if is_float {
+            Token::FloatLiteral(num)
+        } else {
+            Token::IntLiteral(num)
+        }
+    }
+
+    fn scan_identifier(&mut self) -> Token {
+        let mut ident = String::new();
+
+        while let Some(ch) = self.peek() {
+            if ch.is_alphanumeric() || ch == '_' {
+                ident.push(ch);
+                self.advance();
+            } else {
+                break;
+            }
+        }
+
+        // Check for keywords
+        let keywords = [
+            "fn", "let", "mut", "const", "static", "struct", "enum", "union",
+            "trait", "impl", "type", "mod", "use", "pub", "crate", "self",
+            "super", "as", "where", "for", "in", "if", "else", "match",
+            "loop", "while", "break", "continue", "return", "async", "await",
+            "move", "ref", "dyn", "unsafe", "extern", "true", "false",
+        ];
+
+        if keywords.contains(&ident.as_str()) {
+            if ident == "true" {
+                Token::BoolLiteral(true)
+            } else if ident == "false" {
+                Token::BoolLiteral(false)
+            } else {
+                Token::Keyword(ident)
+            }
+        } else {
+            Token::Ident(ident)
+        }
+    }
+
+    fn scan_operator(&mut self) -> Token {
+        let ch = self.advance().unwrap();
+
+        match ch {
+            '+' => {
+                if self.peek() == Some('=') {
+                    self.advance();
+                    Token::PlusEq
+                } else {
+                    Token::Plus
+                }
+            }
+            '-' => {
+                if self.peek() == Some('>') {
+                    self.advance();
+                    Token::Arrow
+                } else if self.peek() == Some('=') {
+                    self.advance();
+                    Token::MinusEq
+                } else {
+                    Token::Minus
+                }
+            }
+            '*' => {
+                if self.peek() == Some('=') {
+                    self.advance();
+                    Token::StarEq
+                } else {
+                    Token::Star
+                }
+            }
+            '/' => {
+                if self.peek() == Some('=') {
+                    self.advance();
+                    Token::SlashEq
+                } else {
+                    Token::Slash
+                }
+            }
+            '%' => Token::Percent,
+            '=' => {
+                if self.peek() == Some('=') {
+                    self.advance();
+                    Token::EqEq
+                } else if self.peek() == Some('>') {
+                    self.advance();
+                    Token::FatArrow
+                } else {
+                    Token::Eq
+                }
+            }
+            '!' => {
+                if self.peek() == Some('=') {
+                    self.advance();
+                    Token::NotEq
+                } else {
+                    Token::Not
+                }
+            }
+            '<' => {
+                if self.peek() == Some('=') {
+                    self.advance();
+                    Token::LtEq
+                } else if self.peek() == Some('<') {
+                    self.advance();
+                    Token::Shl
+                } else {
+                    Token::Lt
+                }
+            }
+            '>' => {
+                if self.peek() == Some('=') {
+                    self.advance();
+                    Token::GtEq
+                } else if self.peek() == Some('>') {
+                    self.advance();
+                    Token::Shr
+                } else {
+                    Token::Gt
+                }
+            }
+            '&' => {
+                if self.peek() == Some('&') {
+                    self.advance();
+                    Token::And
+                } else {
+                    Token::BitAnd
+                }
+            }
+            '|' => {
+                if self.peek() == Some('|') {
+                    self.advance();
+                    Token::Or
+                } else {
+                    Token::BitOr
+                }
+            }
+            '^' => Token::BitXor,
+            ':' => {
+                if self.peek() == Some(':') {
+                    self.advance();
+                    Token::DoubleColon
+                } else {
+                    Token::Colon
+                }
+            }
+            '.' => {
+                if self.peek() == Some('.') {
+                    self.advance();
+                    if self.peek() == Some('=') {
+                        self.advance();
+                        Token::DotDotEq
+                    } else {
+                        Token::DotDot
+                    }
+                } else {
+                    Token::Dot
+                }
+            }
+            '(' => Token::LParen,
+            ')' => Token::RParen,
+            '{' => Token::LBrace,
+            '}' => Token::RBrace,
+            '[' => Token::LBracket,
+            ']' => Token::RBracket,
+            ',' => Token::Comma,
+            ';' => Token::Semicolon,
+            '@' => Token::At,
+            '#' => Token::Hash,
+            '?' => Token::Question,
+            _ => Token::Ident(ch.to_string()),
+        }
+    }
+}
+
+// =============================================================================
+// AST REPRESENTATION FOR FORMATTING
+// =============================================================================
+
+/// Simplified AST node for formatting
+#[derive(Debug, Clone)]
+pub enum FormatNode {
+    /// Module with items
+    Module {
+        items: Vec<FormatNode>,
+    },
+
+    /// Use statement
+    Use {
+        path: String,
+        alias: Option<String>,
+    },
+
+    /// Function definition
+    Function {
+        visibility: Option<String>,
+        is_async: bool,
+        name: String,
+        generics: Vec<String>,
+        params: Vec<(String, String)>,
+        return_type: Option<String>,
+        body: Option<Box<FormatNode>>,
+        doc_comment: Option<String>,
+    },
+
+    /// Struct definition
+    Struct {
+        visibility: Option<String>,
+        name: String,
+        generics: Vec<String>,
+        fields: Vec<StructField>,
+        doc_comment: Option<String>,
+    },
+
+    /// Enum definition
+    Enum {
+        visibility: Option<String>,
+        name: String,
+        generics: Vec<String>,
+        variants: Vec<EnumVariant>,
+        doc_comment: Option<String>,
+    },
+
+    /// Impl block
+    Impl {
+        generics: Vec<String>,
+        trait_name: Option<String>,
+        type_name: String,
+        items: Vec<FormatNode>,
+    },
+
+    /// Trait definition
+    Trait {
+        visibility: Option<String>,
+        name: String,
+        generics: Vec<String>,
+        bounds: Vec<String>,
+        items: Vec<FormatNode>,
+        doc_comment: Option<String>,
+    },
+
+    /// Block of statements
+    Block {
+        statements: Vec<FormatNode>,
+    },
+
+    /// Let binding
+    Let {
+        is_mut: bool,
+        pattern: String,
+        type_annotation: Option<String>,
+        value: Option<Box<FormatNode>>,
+    },
+
+    /// Expression
+    Expr {
+        tokens: Vec<Token>,
+    },
+
+    /// Comment
+    Comment {
+        content: String,
+        is_doc: bool,
+    },
+
+    /// Raw tokens (unparsed)
+    Raw {
+        tokens: Vec<Token>,
+    },
+}
+
+/// Struct field
+#[derive(Debug, Clone)]
+pub struct StructField {
+    pub visibility: Option<String>,
+    pub name: String,
+    pub field_type: String,
+    pub doc_comment: Option<String>,
+}
+
+/// Enum variant
+#[derive(Debug, Clone)]
+pub struct EnumVariant {
+    pub name: String,
+    pub fields: Option<Vec<String>>,
+    pub doc_comment: Option<String>,
+}
+
+// =============================================================================
+// FORMATTER ENGINE
+// =============================================================================
+
+/// Format error
+#[derive(Debug)]
+pub enum FormatError {
+    IoError(String),
+    ParseError(String),
+    ConfigError(String),
+}
+
+/// Formatter engine
+pub struct Formatter {
+    config: FormatConfig,
+    indent_level: usize,
+    output: String,
+    current_line_len: usize,
+}
+
+impl Formatter {
+    pub fn new(config: FormatConfig) -> Self {
+        Formatter {
+            config,
+            indent_level: 0,
+            output: String::new(),
+            current_line_len: 0,
+        }
+    }
+
+    /// Format source code
+    pub fn format(&mut self, source: &str) -> Result<String, FormatError> {
+        self.output.clear();
+        self.indent_level = 0;
+        self.current_line_len = 0;
+
+        let mut lexer = FormatLexer::new(source);
+        let tokens = lexer.tokenize();
+
+        // Group tokens into logical units
+        let formatted = self.format_tokens(&tokens)?;
+
+        // Post-process: fix line endings, trim trailing whitespace
+        let result = self.post_process(&formatted);
+
+        Ok(result)
+    }
+
+    /// Format a file
+    pub fn format_file(&mut self, path: &Path) -> Result<(), FormatError> {
+        let source = fs::read_to_string(path)
+            .map_err(|e| FormatError::IoError(format!("Failed to read {}: {}", path.display(), e)))?;
+
+        let formatted = self.format(&source)?;
+
+        if formatted != source {
+            fs::write(path, &formatted)
+                .map_err(|e| FormatError::IoError(format!("Failed to write {}: {}", path.display(), e)))?;
+        }
+
+        Ok(())
+    }
+
+    /// Check if file needs formatting (without modifying)
+    pub fn check_file(&mut self, path: &Path) -> Result<bool, FormatError> {
+        let source = fs::read_to_string(path)
+            .map_err(|e| FormatError::IoError(format!("Failed to read {}: {}", path.display(), e)))?;
+
+        let formatted = self.format(&source)?;
+
+        Ok(formatted == source)
+    }
+
+    /// Format tokens
+    fn format_tokens(&mut self, tokens: &[Token]) -> Result<String, FormatError> {
+        let mut output = String::new();
+        let mut i = 0;
+        let mut prev_token: Option<&Token> = None;
+        let mut pending_newlines = 0;
+        let mut at_line_start = true;
+
+        while i < tokens.len() {
+            let token = &tokens[i];
+
+            match token {
+                Token::Newline => {
+                    pending_newlines += 1;
+                    at_line_start = true;
+                }
+
+                Token::Whitespace(_) => {
+                    // Whitespace handling depends on context
+                    if !at_line_start {
+                        // Check if space is needed between tokens
+                        if self.needs_space_between(prev_token, tokens.get(i + 1)) {
+                            output.push(' ');
+                        }
+                    }
+                }
+
+                Token::Eof => break,
+
+                _ => {
+                    // Emit pending newlines
+                    if pending_newlines > 0 {
+                        let newlines = pending_newlines.min(self.config.max_blank_lines + 1);
+                        for _ in 0..newlines {
+                            output.push_str(self.config.line_ending_str());
+                        }
+                        pending_newlines = 0;
+                    }
+
+                    // Add indentation at line start
+                    if at_line_start && !matches!(token, Token::RBrace) {
+                        output.push_str(&self.get_indent());
+                    } else if at_line_start && matches!(token, Token::RBrace) {
+                        self.dedent();
+                        output.push_str(&self.get_indent());
+                    }
+                    at_line_start = false;
+
+                    // Handle brace style
+                    if matches!(token, Token::LBrace) {
+                        if self.config.brace_style == BraceStyle::NextLine {
+                            output.push_str(self.config.line_ending_str());
+                            output.push_str(&self.get_indent());
+                        } else if let Some(prev) = prev_token {
+                            if !matches!(prev, Token::Whitespace(_)) {
+                                output.push(' ');
+                            }
+                        }
+                    }
+
+                    // Space before token if needed
+                    if !at_line_start && self.needs_space_before(token, prev_token) {
+                        output.push(' ');
+                    }
+
+                    // Emit the token
+                    output.push_str(&token.to_string());
+
+                    // Handle indentation
+                    if matches!(token, Token::LBrace) {
+                        self.indent();
+                    }
+
+                    prev_token = Some(token);
+                }
+            }
+
+            i += 1;
+        }
+
+        // Ensure file ends with newline
+        if !output.ends_with('\n') && !output.ends_with("\r\n") {
+            output.push_str(self.config.line_ending_str());
+        }
+
+        Ok(output)
+    }
+
+    /// Post-process formatted output
+    fn post_process(&self, source: &str) -> String {
+        let mut lines: Vec<String> = source.lines().map(|s| s.to_string()).collect();
+
+        // Trim trailing whitespace from each line
+        for line in &mut lines {
+            let trimmed = line.trim_end();
+            *line = trimmed.to_string();
+        }
+
+        // Remove excessive blank lines
+        let mut result = Vec::new();
+        let mut blank_count = 0;
+
+        for line in lines {
+            if line.is_empty() {
+                blank_count += 1;
+                if blank_count <= self.config.max_blank_lines {
+                    result.push(line);
+                }
+            } else {
+                blank_count = 0;
+                result.push(line);
+            }
+        }
+
+        // Remove trailing blank lines
+        while result.last().map(|s| s.is_empty()).unwrap_or(false) {
+            result.pop();
+        }
+
+        // Join with configured line ending
+        let mut output = result.join(self.config.line_ending_str());
+        output.push_str(self.config.line_ending_str());
+
+        output
+    }
+
+    /// Check if space is needed between two tokens
+    fn needs_space_between(&self, prev: Option<&Token>, next: Option<&Token>) -> bool {
+        match (prev, next) {
+            (None, _) | (_, None) => false,
+            (Some(Token::Comma), _) => true,
+            (Some(Token::Colon), _) if self.config.space_after_colon => true,
+            (_, Some(Token::Colon)) if self.config.space_before_colon => true,
+            (Some(Token::Keyword(_)), Some(Token::Ident(_))) => true,
+            (Some(Token::Keyword(_)), Some(Token::LParen)) => true,
+            (Some(Token::Ident(_)), Some(Token::LBrace)) => true,
+            (Some(Token::RParen), Some(Token::LBrace)) => true,
+            (Some(Token::RParen), Some(Token::Arrow)) => true,
+            (Some(Token::Arrow), _) => true,
+            (Some(Token::FatArrow), _) => true,
+            (_, Some(Token::FatArrow)) => true,
+            // Operators
+            (Some(op), _) if self.is_binary_operator(op) && self.config.spaces_around_operators => true,
+            (_, Some(op)) if self.is_binary_operator(op) && self.config.spaces_around_operators => true,
+            _ => false,
+        }
+    }
+
+    /// Check if space is needed before token
+    fn needs_space_before(&self, token: &Token, prev: Option<&Token>) -> bool {
+        match (prev, token) {
+            (Some(Token::Comma), _) => true,
+            (Some(Token::Semicolon), _) => false,
+            (Some(Token::Keyword(_)), Token::Ident(_)) => true,
+            (Some(Token::Keyword(_)), Token::LParen) => true,
+            (Some(Token::Keyword(_)), Token::LBrace) => true,
+            (Some(Token::Ident(_)), Token::LBrace) => true,
+            (Some(Token::RParen), Token::LBrace) => true,
+            (Some(Token::RParen), Token::Arrow) => true,
+            (_, Token::LBrace) => true,
+            _ => false,
+        }
+    }
+
+    /// Check if token is a binary operator
+    fn is_binary_operator(&self, token: &Token) -> bool {
+        matches!(token,
+            Token::Plus | Token::Minus | Token::Star | Token::Slash | Token::Percent |
+            Token::Eq | Token::EqEq | Token::NotEq | Token::Lt | Token::LtEq |
+            Token::Gt | Token::GtEq | Token::And | Token::Or | Token::BitAnd |
+            Token::BitOr | Token::BitXor | Token::Shl | Token::Shr |
+            Token::PlusEq | Token::MinusEq | Token::StarEq | Token::SlashEq
+        )
+    }
+
+    /// Get current indentation string
+    fn get_indent(&self) -> String {
+        self.config.indent_str().repeat(self.indent_level)
+    }
+
+    /// Increase indentation
+    fn indent(&mut self) {
+        self.indent_level += 1;
+    }
+
+    /// Decrease indentation
+    fn dedent(&mut self) {
+        if self.indent_level > 0 {
+            self.indent_level -= 1;
+        }
+    }
+}
+
+// =============================================================================
+// IMPORT ORGANIZER
+// =============================================================================
+
+/// Import statement representation
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Import {
+    pub path: Vec<String>,
+    pub alias: Option<String>,
+    pub is_glob: bool,
+    pub group: ImportGroup,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ImportGroup {
+    Std,       // Standard library
+    External,  // External crates
+    Crate,     // Current crate
+    Super,     // Parent module
+    Self_,     // Current module
+}
+
+/// Organize imports
+pub struct ImportOrganizer {
+    config: FormatConfig,
+}
+
+impl ImportOrganizer {
+    pub fn new(config: FormatConfig) -> Self {
+        ImportOrganizer { config }
+    }
+
+    /// Parse and organize imports
+    pub fn organize(&self, source: &str) -> String {
+        if self.config.import_grouping == ImportGrouping::Preserve {
+            return source.to_string();
+        }
+
+        // Find import section
+        let lines: Vec<&str> = source.lines().collect();
+        let mut import_start = None;
+        let mut import_end = None;
+        let mut imports = Vec::new();
+        let mut non_import_content_before = Vec::new();
+        let mut non_import_content_after = Vec::new();
+
+        for (i, line) in lines.iter().enumerate() {
+            let trimmed = line.trim();
+
+            if trimmed.starts_with("use ") {
+                if import_start.is_none() {
+                    import_start = Some(i);
+                }
+                import_end = Some(i);
+
+                if let Some(import) = self.parse_import(trimmed) {
+                    imports.push(import);
+                }
+            } else if import_start.is_none() {
+                non_import_content_before.push(*line);
+            } else if import_end.is_some() && !trimmed.is_empty() {
+                // Found non-import after imports
+                non_import_content_after.extend(lines[i..].iter());
+                break;
+            }
+        }
+
+        if imports.is_empty() {
+            return source.to_string();
+        }
+
+        // Sort imports
+        let sorted = self.sort_imports(&imports);
+
+        // Reconstruct source
+        let mut result = String::new();
+
+        for line in non_import_content_before {
+            result.push_str(line);
+            result.push_str(self.config.line_ending_str());
+        }
+
+        let mut current_group = None;
+        for import in sorted {
+            if current_group != Some(import.group) {
+                if current_group.is_some() {
+                    result.push_str(self.config.line_ending_str());
+                }
+                current_group = Some(import.group);
+            }
+
+            result.push_str(&self.format_import(&import));
+            result.push_str(self.config.line_ending_str());
+        }
+
+        if !non_import_content_after.is_empty() {
+            result.push_str(self.config.line_ending_str());
+            for line in non_import_content_after {
+                result.push_str(line);
+                result.push_str(self.config.line_ending_str());
+            }
+        }
+
+        result
+    }
+
+    fn parse_import(&self, line: &str) -> Option<Import> {
+        let line = line.strip_prefix("use ")?.trim_end_matches(';').trim();
+
+        let (path_str, alias) = if let Some((path, alias_part)) = line.split_once(" as ") {
+            (path.trim(), Some(alias_part.trim().to_string()))
+        } else {
+            (line, None)
+        };
+
+        let path: Vec<String> = path_str.split("::").map(|s| s.to_string()).collect();
+        let is_glob = path.last().map(|s| s == "*").unwrap_or(false);
+
+        let group = self.determine_group(&path);
+
+        Some(Import { path, alias, is_glob, group })
+    }
+
+    fn determine_group(&self, path: &[String]) -> ImportGroup {
+        if path.is_empty() {
+            return ImportGroup::External;
+        }
+
+        match path[0].as_str() {
+            "std" | "core" | "alloc" => ImportGroup::Std,
+            "crate" => ImportGroup::Crate,
+            "super" => ImportGroup::Super,
+            "self" => ImportGroup::Self_,
+            _ => ImportGroup::External,
+        }
+    }
+
+    fn sort_imports(&self, imports: &[Import]) -> Vec<Import> {
+        let mut sorted = imports.to_vec();
+
+        match self.config.import_grouping {
+            ImportGrouping::Alphabetical => {
+                sorted.sort_by(|a, b| a.path.cmp(&b.path));
+            }
+            ImportGrouping::Grouped => {
+                sorted.sort_by(|a, b| {
+                    match a.group.cmp(&b.group) {
+                        std::cmp::Ordering::Equal => a.path.cmp(&b.path),
+                        other => other,
+                    }
+                });
+            }
+            ImportGrouping::Preserve => {}
+        }
+
+        sorted
+    }
+
+    fn format_import(&self, import: &Import) -> String {
+        let path = import.path.join("::");
+
+        if let Some(alias) = &import.alias {
+            format!("use {} as {};", path, alias)
+        } else {
+            format!("use {};", path)
+        }
+    }
+}
+
+// =============================================================================
+// DIFF OUTPUT
+// =============================================================================
+
+/// Diff line type
+#[derive(Debug, Clone)]
+pub enum DiffLine {
+    Same(String),
+    Added(String),
+    Removed(String),
+}
+
+/// Generate diff between original and formatted
+pub fn generate_diff(original: &str, formatted: &str, filename: &str) -> String {
+    if original == formatted {
+        return String::new();
+    }
+
+    let original_lines: Vec<&str> = original.lines().collect();
+    let formatted_lines: Vec<&str> = formatted.lines().collect();
+
+    let mut output = String::new();
+    output.push_str(&format!("--- {}\n", filename));
+    output.push_str(&format!("+++ {}\n", filename));
+
+    // Simple line-by-line diff
+    let max_len = original_lines.len().max(formatted_lines.len());
+    let mut i = 0;
+
+    while i < max_len {
+        let orig = original_lines.get(i).copied();
+        let fmt = formatted_lines.get(i).copied();
+
+        match (orig, fmt) {
+            (Some(o), Some(f)) if o == f => {
+                // Same line, skip
+            }
+            (Some(o), Some(f)) => {
+                output.push_str(&format!("@@ -{},{} +{},{} @@\n", i + 1, 1, i + 1, 1));
+                output.push_str(&format!("-{}\n", o));
+                output.push_str(&format!("+{}\n", f));
+            }
+            (Some(o), None) => {
+                output.push_str(&format!("@@ -{},{} +{},{} @@\n", i + 1, 1, i + 1, 0));
+                output.push_str(&format!("-{}\n", o));
+            }
+            (None, Some(f)) => {
+                output.push_str(&format!("@@ -{},{} +{},{} @@\n", i + 1, 0, i + 1, 1));
+                output.push_str(&format!("+{}\n", f));
+            }
+            (None, None) => break,
+        }
+
+        i += 1;
+    }
+
+    output
+}
+
+// =============================================================================
+// CLI INTERFACE
+// =============================================================================
+
+/// Format command options
+#[derive(Debug, Clone)]
+pub struct FormatOptions {
+    /// Check mode (don't modify files)
+    pub check: bool,
+
+    /// Show diff output
+    pub diff: bool,
+
+    /// Format stdin
+    pub stdin: bool,
+
+    /// Emit formatted code to stdout
+    pub emit: bool,
+
+    /// Config file path
+    pub config_path: Option<PathBuf>,
+
+    /// Specific files/directories to format
+    pub paths: Vec<PathBuf>,
+
+    /// Verbose output
+    pub verbose: bool,
+}
+
+impl Default for FormatOptions {
+    fn default() -> Self {
+        FormatOptions {
+            check: false,
+            diff: false,
+            stdin: false,
+            emit: false,
+            config_path: None,
+            paths: Vec::new(),
+            verbose: false,
+        }
+    }
+}
+
+/// Format result
+#[derive(Debug)]
+pub struct FormatResult {
+    pub files_checked: usize,
+    pub files_changed: usize,
+    pub files_failed: Vec<(PathBuf, String)>,
+}
+
+/// Run the formatter
+pub fn run_formatter(options: FormatOptions) -> Result<FormatResult, FormatError> {
+    let config = if let Some(path) = &options.config_path {
+        FormatConfig::load(path)?
+    } else {
+        FormatConfig::load(&std::env::current_dir().unwrap_or_default())?
+    };
+
+    let mut formatter = Formatter::new(config.clone());
+    let mut result = FormatResult {
+        files_checked: 0,
+        files_changed: 0,
+        files_failed: Vec::new(),
+    };
+
+    // Handle stdin
+    if options.stdin {
+        let mut input = String::new();
+        std::io::stdin().read_to_string(&mut input)
+            .map_err(|e| FormatError::IoError(e.to_string()))?;
+
+        let formatted = formatter.format(&input)?;
+
+        if options.emit {
+            print!("{}", formatted);
+        }
+
+        return Ok(result);
+    }
+
+    // Collect files to format
+    let files = collect_files(&options.paths, &config)?;
+
+    for file in files {
+        result.files_checked += 1;
+
+        if options.verbose {
+            eprintln!("Checking {}", file.display());
+        }
+
+        match process_file(&file, &mut formatter, &options) {
+            Ok(changed) => {
+                if changed {
+                    result.files_changed += 1;
+                }
+            }
+            Err(e) => {
+                result.files_failed.push((file, format!("{:?}", e)));
+            }
+        }
+    }
+
+    Ok(result)
+}
+
+/// Process a single file
+fn process_file(path: &Path, formatter: &mut Formatter, options: &FormatOptions) -> Result<bool, FormatError> {
+    let source = fs::read_to_string(path)
+        .map_err(|e| FormatError::IoError(format!("Failed to read {}: {}", path.display(), e)))?;
+
+    let formatted = formatter.format(&source)?;
+
+    if formatted == source {
+        return Ok(false);
+    }
+
+    if options.diff {
+        let diff = generate_diff(&source, &formatted, &path.display().to_string());
+        print!("{}", diff);
+    }
+
+    if options.emit {
+        print!("{}", formatted);
+    }
+
+    if !options.check && !options.diff && !options.emit {
+        fs::write(path, &formatted)
+            .map_err(|e| FormatError::IoError(format!("Failed to write {}: {}", path.display(), e)))?;
+    }
+
+    Ok(true)
+}
+
+/// Collect files to format
+fn collect_files(paths: &[PathBuf], config: &FormatConfig) -> Result<Vec<PathBuf>, FormatError> {
+    let mut files = Vec::new();
+
+    let paths_to_check = if paths.is_empty() {
+        vec![std::env::current_dir().unwrap_or_default()]
+    } else {
+        paths.to_vec()
+    };
+
+    for path in paths_to_check {
+        if path.is_file() {
+            if path.extension().map(|e| e == "build").unwrap_or(false) {
+                files.push(path);
+            }
+        } else if path.is_dir() {
+            collect_files_recursive(&path, &mut files, config)?;
+        }
+    }
+
+    Ok(files)
+}
+
+/// Recursively collect files
+fn collect_files_recursive(dir: &Path, files: &mut Vec<PathBuf>, config: &FormatConfig) -> Result<(), FormatError> {
+    for entry in fs::read_dir(dir).map_err(|e| FormatError::IoError(e.to_string()))? {
+        let entry = entry.map_err(|e| FormatError::IoError(e.to_string()))?;
+        let path = entry.path();
+
+        // Check ignore patterns
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        if config.ignore_patterns.iter().any(|p| name == p || path.to_string_lossy().contains(p)) {
+            continue;
+        }
+
+        if path.is_file() {
+            if path.extension().map(|e| e == "build").unwrap_or(false) {
+                files.push(path);
+            }
+        } else if path.is_dir() {
+            collect_files_recursive(&path, files, config)?;
+        }
+    }
+
+    Ok(())
+}
+
+// =============================================================================
+// MAIN ENTRY POINT
+// =============================================================================
+
+/// Main formatter entry point
+pub fn main() {
+    let args: Vec<String> = std::env::args().collect();
+
+    let mut options = FormatOptions::default();
+    let mut i = 1;
+
+    while i < args.len() {
+        match args[i].as_str() {
+            "--check" | "-c" => options.check = true,
+            "--diff" | "-d" => options.diff = true,
+            "--stdin" => options.stdin = true,
+            "--emit" => options.emit = true,
+            "--verbose" | "-v" => options.verbose = true,
+            "--config" => {
+                i += 1;
+                if i < args.len() {
+                    options.config_path = Some(PathBuf::from(&args[i]));
+                }
+            }
+            "--help" | "-h" => {
+                print_help();
+                return;
+            }
+            "--version" | "-V" => {
+                println!("buildfmt 1.0.0");
+                return;
+            }
+            arg if !arg.starts_with('-') => {
+                options.paths.push(PathBuf::from(arg));
+            }
+            _ => {
+                eprintln!("Unknown option: {}", args[i]);
+                std::process::exit(1);
+            }
+        }
+        i += 1;
+    }
+
+    match run_formatter(options) {
+        Ok(result) => {
+            if result.files_changed > 0 {
+                println!("Formatted {} of {} files", result.files_changed, result.files_checked);
+            } else {
+                println!("All {} files are properly formatted", result.files_checked);
+            }
+
+            for (path, error) in &result.files_failed {
+                eprintln!("Error formatting {}: {}", path.display(), error);
+            }
+
+            if !result.files_failed.is_empty() {
+                std::process::exit(1);
+            }
+        }
+        Err(e) => {
+            eprintln!("Error: {:?}", e);
+            std::process::exit(1);
+        }
+    }
+}
+
+fn print_help() {
+    println!("buildfmt - BuildLang Code Formatter
+
+USAGE:
+    buildfmt [OPTIONS] [FILES...]
+
+OPTIONS:
+    -c, --check     Check if files are formatted (don't modify)
+    -d, --diff      Show diff of changes
+    --stdin         Read from stdin
+    --emit          Output formatted code to stdout
+    --config PATH   Path to config file (buildfmt.toml)
+    -v, --verbose   Verbose output
+    -h, --help      Show this help message
+    -V, --version   Show version
+
+EXAMPLES:
+    buildfmt                     Format all .bld files in current directory
+    buildfmt src/                Format all files in src/
+    buildfmt file.bld         Format a specific file
+    buildfmt --check             Check formatting without modifying
+    buildfmt --diff              Show what would change
+
+CONFIGURATION:
+    Create a buildfmt.toml file in your project root:
+
+    max_line_width = 100
+    indent_style = 4           # Number of spaces, or 'tabs'
+    line_ending = 'unix'       # 'unix', 'windows', or 'native'
+    brace_style = 'same_line'  # 'same_line' or 'next_line'
+    trailing_commas = true
+    align_struct_fields = false
+");
+}
+
+// =============================================================================
+// ADVANCED FORMAT RULES ENGINE
+// =============================================================================
+
+/// Rule severity levels
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuleSeverity {
+    Error,
+    Warning,
+    Info,
+    Off,
+}
+
+/// Format rule trait
+pub trait FormatRule: Send + Sync {
+    /// Rule identifier
+    fn id(&self) -> &str;
+
+    /// Rule description
+    fn description(&self) -> &str;
+
+    /// Rule severity
+    fn severity(&self) -> RuleSeverity;
+
+    /// Check if rule applies to token stream
+    fn check(&self, tokens: &[Token], config: &FormatConfig) -> Vec<RuleViolation>;
+
+    /// Fix violations
+    fn fix(&self, tokens: &mut Vec<Token>, violations: &[RuleViolation], config: &FormatConfig);
+}
+
+/// Rule violation
+#[derive(Debug, Clone)]
+pub struct RuleViolation {
+    pub rule_id: String,
+    pub message: String,
+    pub line: usize,
+    pub column: usize,
+    pub end_line: usize,
+    pub end_column: usize,
+    pub fix: Option<SuggestedFix>,
+}
+
+/// Suggested fix for violation
+#[derive(Debug, Clone)]
+pub struct SuggestedFix {
+    pub description: String,
+    pub replacements: Vec<TextReplacement>,
+}
+
+/// Text replacement
+#[derive(Debug, Clone)]
+pub struct TextReplacement {
+    pub start_offset: usize,
+    pub end_offset: usize,
+    pub new_text: String,
+}
+
+/// Rule engine
+pub struct RuleEngine {
+    rules: Vec<Box<dyn FormatRule>>,
+    config: RuleEngineConfig,
+}
+
+/// Rule engine configuration
+#[derive(Debug, Clone)]
+pub struct RuleEngineConfig {
+    /// Rule severity overrides
+    pub severity_overrides: HashMap<String, RuleSeverity>,
+
+    /// Disabled rules
+    pub disabled_rules: HashSet<String>,
+
+    /// Auto-fix enabled
+    pub auto_fix: bool,
+
+    /// Max violations per file
+    pub max_violations: usize,
+}
+
+impl Default for RuleEngineConfig {
+    fn default() -> Self {
+        RuleEngineConfig {
+            severity_overrides: HashMap::new(),
+            disabled_rules: HashSet::new(),
+            auto_fix: true,
+            max_violations: 1000,
+        }
+    }
+}
+
+impl RuleEngine {
+    pub fn new(config: RuleEngineConfig) -> Self {
+        let mut engine = RuleEngine {
+            rules: Vec::new(),
+            config,
+        };
+        engine.register_default_rules();
+        engine
+    }
+
+    /// Register default rules
+    fn register_default_rules(&mut self) {
+        self.rules.push(Box::new(ConsecutiveBlankLinesRule::new()));
+        self.rules.push(Box::new(TrailingWhitespaceRule::new()));
+        self.rules.push(Box::new(IndentationRule::new()));
+        self.rules.push(Box::new(LineWidthRule::new()));
+        self.rules.push(Box::new(BraceSpacingRule::new()));
+        self.rules.push(Box::new(CommaSpacingRule::new()));
+        self.rules.push(Box::new(OperatorSpacingRule::new()));
+        self.rules.push(Box::new(SemicolonRule::new()));
+        self.rules.push(Box::new(KeywordSpacingRule::new()));
+        self.rules.push(Box::new(ParenthesesSpacingRule::new()));
+    }
+
+    /// Register custom rule
+    pub fn register_rule(&mut self, rule: Box<dyn FormatRule>) {
+        self.rules.push(rule);
+    }
+
+    /// Check all rules
+    pub fn check(&self, tokens: &[Token], format_config: &FormatConfig) -> Vec<RuleViolation> {
+        let mut violations = Vec::new();
+
+        for rule in &self.rules {
+            if self.config.disabled_rules.contains(rule.id()) {
+                continue;
+            }
+
+            let rule_violations = rule.check(tokens, format_config);
+            violations.extend(rule_violations);
+
+            if violations.len() >= self.config.max_violations {
+                break;
+            }
+        }
+
+        violations
+    }
+
+    /// Fix all violations
+    pub fn fix(&self, tokens: &mut Vec<Token>, format_config: &FormatConfig) -> usize {
+        if !self.config.auto_fix {
+            return 0;
+        }
+
+        let mut total_fixed = 0;
+
+        for rule in &self.rules {
+            if self.config.disabled_rules.contains(rule.id()) {
+                continue;
+            }
+
+            let violations = rule.check(tokens, format_config);
+            if !violations.is_empty() {
+                rule.fix(tokens, &violations, format_config);
+                total_fixed += violations.len();
+            }
+        }
+
+        total_fixed
+    }
+}
+
+// =============================================================================
+// BUILT-IN FORMAT RULES
+// =============================================================================
+
+/// Consecutive blank lines rule
+pub struct ConsecutiveBlankLinesRule {
+    max_consecutive: usize,
+}
+
+impl ConsecutiveBlankLinesRule {
+    pub fn new() -> Self {
+        ConsecutiveBlankLinesRule { max_consecutive: 2 }
+    }
+}
+
+impl FormatRule for ConsecutiveBlankLinesRule {
+    fn id(&self) -> &str { "consecutive-blank-lines" }
+
+    fn description(&self) -> &str {
+        "Limits consecutive blank lines"
+    }
+
+    fn severity(&self) -> RuleSeverity { RuleSeverity::Warning }
+
+    fn check(&self, tokens: &[Token], _config: &FormatConfig) -> Vec<RuleViolation> {
+        let mut violations = Vec::new();
+        let mut consecutive = 0;
+        let mut line = 1;
+
+        for token in tokens {
+            if matches!(token, Token::Newline) {
+                consecutive += 1;
+                if consecutive > self.max_consecutive + 1 {
+                    violations.push(RuleViolation {
+                        rule_id: self.id().to_string(),
+                        message: format!("More than {} consecutive blank lines", self.max_consecutive),
+                        line,
+                        column: 1,
+                        end_line: line,
+                        end_column: 1,
+                        fix: Some(SuggestedFix {
+                            description: "Remove extra blank lines".to_string(),
+                            replacements: vec![],
+                        }),
+                    });
+                }
+                line += 1;
+            } else if !matches!(token, Token::Whitespace(_)) {
+                consecutive = 0;
+            }
+        }
+
+        violations
+    }
+
+    fn fix(&self, tokens: &mut Vec<Token>, _violations: &[RuleViolation], _config: &FormatConfig) {
+        let mut i = 0;
+        let mut consecutive = 0;
+
+        while i < tokens.len() {
+            if matches!(tokens[i], Token::Newline) {
+                consecutive += 1;
+                if consecutive > self.max_consecutive + 1 {
+                    tokens.remove(i);
+                    continue;
+                }
+            } else if !matches!(tokens[i], Token::Whitespace(_)) {
+                consecutive = 0;
+            }
+            i += 1;
+        }
+    }
+}
+
+/// Trailing whitespace rule
+pub struct TrailingWhitespaceRule;
+
+impl TrailingWhitespaceRule {
+    pub fn new() -> Self { TrailingWhitespaceRule }
+}
+
+impl FormatRule for TrailingWhitespaceRule {
+    fn id(&self) -> &str { "trailing-whitespace" }
+
+    fn description(&self) -> &str {
+        "Removes trailing whitespace from lines"
+    }
+
+    fn severity(&self) -> RuleSeverity { RuleSeverity::Warning }
+
+    fn check(&self, tokens: &[Token], _config: &FormatConfig) -> Vec<RuleViolation> {
+        let mut violations = Vec::new();
+        let mut line = 1;
+
+        for i in 0..tokens.len() {
+            if matches!(tokens[i], Token::Whitespace(_)) {
+                if i + 1 < tokens.len() && matches!(tokens[i + 1], Token::Newline) {
+                    violations.push(RuleViolation {
+                        rule_id: self.id().to_string(),
+                        message: "Trailing whitespace".to_string(),
+                        line,
+                        column: 1,
+                        end_line: line,
+                        end_column: 1,
+                        fix: Some(SuggestedFix {
+                            description: "Remove trailing whitespace".to_string(),
+                            replacements: vec![],
+                        }),
+                    });
+                }
+            }
+            if matches!(tokens[i], Token::Newline) {
+                line += 1;
+            }
+        }
+
+        violations
+    }
+
+    fn fix(&self, tokens: &mut Vec<Token>, _violations: &[RuleViolation], _config: &FormatConfig) {
+        let mut i = 0;
+        while i < tokens.len() {
+            if matches!(tokens[i], Token::Whitespace(_)) {
+                if i + 1 < tokens.len() && matches!(tokens[i + 1], Token::Newline) {
+                    tokens.remove(i);
+                    continue;
+                }
+            }
+            i += 1;
+        }
+    }
+}
+
+/// Indentation rule
+pub struct IndentationRule;
+
+impl IndentationRule {
+    pub fn new() -> Self { IndentationRule }
+}
+
+impl FormatRule for IndentationRule {
+    fn id(&self) -> &str { "indentation" }
+
+    fn description(&self) -> &str {
+        "Ensures consistent indentation"
+    }
+
+    fn severity(&self) -> RuleSeverity { RuleSeverity::Error }
+
+    fn check(&self, tokens: &[Token], config: &FormatConfig) -> Vec<RuleViolation> {
+        let mut violations = Vec::new();
+        let mut line = 1;
+        let mut at_line_start = true;
+
+        for token in tokens {
+            if matches!(token, Token::Newline) {
+                line += 1;
+                at_line_start = true;
+                continue;
+            }
+
+            if at_line_start {
+                if let Token::Whitespace(ws) = token {
+                    let expected_char = match config.indent_style {
+                        IndentStyle::Spaces(_) => ' ',
+                        IndentStyle::Tabs => '\t',
+                    };
+
+                    let has_mixed = ws.contains(' ') && ws.contains('\t');
+                    let has_wrong_type = match config.indent_style {
+                        IndentStyle::Spaces(_) => ws.contains('\t'),
+                        IndentStyle::Tabs => ws.chars().any(|c| c == ' '),
+                    };
+
+                    if has_mixed || has_wrong_type {
+                        violations.push(RuleViolation {
+                            rule_id: self.id().to_string(),
+                            message: format!("Inconsistent indentation (expected {:?})", config.indent_style),
+                            line,
+                            column: 1,
+                            end_line: line,
+                            end_column: ws.len() + 1,
+                            fix: Some(SuggestedFix {
+                                description: "Fix indentation".to_string(),
+                                replacements: vec![],
+                            }),
+                        });
+                    }
+                }
+                at_line_start = false;
+            }
+        }
+
+        violations
+    }
+
+    fn fix(&self, tokens: &mut Vec<Token>, _violations: &[RuleViolation], config: &FormatConfig) {
+        let mut at_line_start = true;
+
+        for token in tokens.iter_mut() {
+            if matches!(token, Token::Newline) {
+                at_line_start = true;
+                continue;
+            }
+
+            if at_line_start {
+                if let Token::Whitespace(ws) = token {
+                    let indent_level = match config.indent_style {
+                        IndentStyle::Spaces(n) => ws.len() / n as usize,
+                        IndentStyle::Tabs => ws.chars().filter(|c| *c == '\t').count(),
+                    };
+
+                    *token = Token::Whitespace(config.indent_str().repeat(indent_level));
+                }
+                at_line_start = false;
+            }
+        }
+    }
+}
+
+/// Line width rule
+pub struct LineWidthRule;
+
+impl LineWidthRule {
+    pub fn new() -> Self { LineWidthRule }
+}
+
+impl FormatRule for LineWidthRule {
+    fn id(&self) -> &str { "line-width" }
+
+    fn description(&self) -> &str {
+        "Enforces maximum line width"
+    }
+
+    fn severity(&self) -> RuleSeverity { RuleSeverity::Warning }
+
+    fn check(&self, tokens: &[Token], config: &FormatConfig) -> Vec<RuleViolation> {
+        let mut violations = Vec::new();
+        let mut line = 1;
+        let mut column = 0;
+
+        for token in tokens {
+            if matches!(token, Token::Newline) {
+                line += 1;
+                column = 0;
+                continue;
+            }
+
+            let token_str = token.to_string();
+            column += token_str.len();
+
+            if column > config.max_line_width {
+                violations.push(RuleViolation {
+                    rule_id: self.id().to_string(),
+                    message: format!("Line exceeds {} characters", config.max_line_width),
+                    line,
+                    column: config.max_line_width + 1,
+                    end_line: line,
+                    end_column: column,
+                    fix: None,
+                });
+            }
+        }
+
+        violations
+    }
+
+    fn fix(&self, _tokens: &mut Vec<Token>, _violations: &[RuleViolation], _config: &FormatConfig) {
+        // Line width fixes are complex and context-dependent
+    }
+}
+
+/// Brace spacing rule
+pub struct BraceSpacingRule;
+
+impl BraceSpacingRule {
+    pub fn new() -> Self { BraceSpacingRule }
+}
+
+impl FormatRule for BraceSpacingRule {
+    fn id(&self) -> &str { "brace-spacing" }
+
+    fn description(&self) -> &str {
+        "Ensures consistent spacing around braces"
+    }
+
+    fn severity(&self) -> RuleSeverity { RuleSeverity::Warning }
+
+    fn check(&self, tokens: &[Token], _config: &FormatConfig) -> Vec<RuleViolation> {
+        let mut violations = Vec::new();
+        let mut line = 1;
+
+        for i in 0..tokens.len() {
+            if matches!(tokens[i], Token::Newline) {
+                line += 1;
+                continue;
+            }
+
+            // Check for space before opening brace
+            if matches!(tokens[i], Token::LBrace) && i > 0 {
+                if !matches!(tokens[i - 1], Token::Whitespace(_) | Token::Newline) {
+                    violations.push(RuleViolation {
+                        rule_id: self.id().to_string(),
+                        message: "Missing space before opening brace".to_string(),
+                        line,
+                        column: 1,
+                        end_line: line,
+                        end_column: 1,
+                        fix: Some(SuggestedFix {
+                            description: "Add space before brace".to_string(),
+                            replacements: vec![],
+                        }),
+                    });
+                }
+            }
+        }
+
+        violations
+    }
+
+    fn fix(&self, tokens: &mut Vec<Token>, _violations: &[RuleViolation], _config: &FormatConfig) {
+        let mut i = 0;
+        while i < tokens.len() {
+            if matches!(tokens[i], Token::LBrace) && i > 0 {
+                if !matches!(tokens[i - 1], Token::Whitespace(_) | Token::Newline) {
+                    tokens.insert(i, Token::Whitespace(" ".to_string()));
+                    i += 1;
+                }
+            }
+            i += 1;
+        }
+    }
+}
+
+/// Comma spacing rule
+pub struct CommaSpacingRule;
+
+impl CommaSpacingRule {
+    pub fn new() -> Self { CommaSpacingRule }
+}
+
+impl FormatRule for CommaSpacingRule {
+    fn id(&self) -> &str { "comma-spacing" }
+
+    fn description(&self) -> &str {
+        "Ensures space after commas"
+    }
+
+    fn severity(&self) -> RuleSeverity { RuleSeverity::Warning }
+
+    fn check(&self, tokens: &[Token], _config: &FormatConfig) -> Vec<RuleViolation> {
+        let mut violations = Vec::new();
+        let mut line = 1;
+
+        for i in 0..tokens.len() {
+            if matches!(tokens[i], Token::Newline) {
+                line += 1;
+                continue;
+            }
+
+            if matches!(tokens[i], Token::Comma) && i + 1 < tokens.len() {
+                if !matches!(tokens[i + 1], Token::Whitespace(_) | Token::Newline) {
+                    violations.push(RuleViolation {
+                        rule_id: self.id().to_string(),
+                        message: "Missing space after comma".to_string(),
+                        line,
+                        column: 1,
+                        end_line: line,
+                        end_column: 1,
+                        fix: Some(SuggestedFix {
+                            description: "Add space after comma".to_string(),
+                            replacements: vec![],
+                        }),
+                    });
+                }
+            }
+        }
+
+        violations
+    }
+
+    fn fix(&self, tokens: &mut Vec<Token>, _violations: &[RuleViolation], _config: &FormatConfig) {
+        let mut i = 0;
+        while i < tokens.len() {
+            if matches!(tokens[i], Token::Comma) && i + 1 < tokens.len() {
+                if !matches!(tokens[i + 1], Token::Whitespace(_) | Token::Newline) {
+                    tokens.insert(i + 1, Token::Whitespace(" ".to_string()));
+                }
+            }
+            i += 1;
+        }
+    }
+}
+
+/// Operator spacing rule
+pub struct OperatorSpacingRule;
+
+impl OperatorSpacingRule {
+    pub fn new() -> Self { OperatorSpacingRule }
+}
+
+impl FormatRule for OperatorSpacingRule {
+    fn id(&self) -> &str { "operator-spacing" }
+
+    fn description(&self) -> &str {
+        "Ensures spaces around binary operators"
+    }
+
+    fn severity(&self) -> RuleSeverity { RuleSeverity::Warning }
+
+    fn check(&self, tokens: &[Token], _config: &FormatConfig) -> Vec<RuleViolation> {
+        let mut violations = Vec::new();
+        let mut line = 1;
+
+        let binary_ops = [
+            Token::Plus, Token::Minus, Token::Star, Token::Slash,
+            Token::EqEq, Token::NotEq, Token::Lt, Token::LtEq,
+            Token::Gt, Token::GtEq, Token::And, Token::Or,
+        ];
+
+        for i in 0..tokens.len() {
+            if matches!(tokens[i], Token::Newline) {
+                line += 1;
+                continue;
+            }
+
+            if binary_ops.contains(&tokens[i]) {
+                // Check for space before
+                if i > 0 && !matches!(tokens[i - 1], Token::Whitespace(_)) {
+                    violations.push(RuleViolation {
+                        rule_id: self.id().to_string(),
+                        message: "Missing space before operator".to_string(),
+                        line,
+                        column: 1,
+                        end_line: line,
+                        end_column: 1,
+                        fix: Some(SuggestedFix {
+                            description: "Add space before operator".to_string(),
+                            replacements: vec![],
+                        }),
+                    });
+                }
+
+                // Check for space after
+                if i + 1 < tokens.len() && !matches!(tokens[i + 1], Token::Whitespace(_)) {
+                    violations.push(RuleViolation {
+                        rule_id: self.id().to_string(),
+                        message: "Missing space after operator".to_string(),
+                        line,
+                        column: 1,
+                        end_line: line,
+                        end_column: 1,
+                        fix: Some(SuggestedFix {
+                            description: "Add space after operator".to_string(),
+                            replacements: vec![],
+                        }),
+                    });
+                }
+            }
+        }
+
+        violations
+    }
+
+    fn fix(&self, tokens: &mut Vec<Token>, _violations: &[RuleViolation], _config: &FormatConfig) {
+        let binary_ops = [
+            Token::Plus, Token::Minus, Token::Star, Token::Slash,
+            Token::EqEq, Token::NotEq, Token::Lt, Token::LtEq,
+            Token::Gt, Token::GtEq, Token::And, Token::Or,
+        ];
+
+        let mut i = 0;
+        while i < tokens.len() {
+            if binary_ops.contains(&tokens[i]) {
+                // Add space after if needed
+                if i + 1 < tokens.len() && !matches!(tokens[i + 1], Token::Whitespace(_)) {
+                    tokens.insert(i + 1, Token::Whitespace(" ".to_string()));
+                }
+
+                // Add space before if needed
+                if i > 0 && !matches!(tokens[i - 1], Token::Whitespace(_)) {
+                    tokens.insert(i, Token::Whitespace(" ".to_string()));
+                    i += 1;
+                }
+            }
+            i += 1;
+        }
+    }
+}
+
+/// Semicolon rule
+pub struct SemicolonRule;
+
+impl SemicolonRule {
+    pub fn new() -> Self { SemicolonRule }
+}
+
+impl FormatRule for SemicolonRule {
+    fn id(&self) -> &str { "semicolon" }
+
+    fn description(&self) -> &str {
+        "Ensures no space before semicolons"
+    }
+
+    fn severity(&self) -> RuleSeverity { RuleSeverity::Warning }
+
+    fn check(&self, tokens: &[Token], _config: &FormatConfig) -> Vec<RuleViolation> {
+        let mut violations = Vec::new();
+        let mut line = 1;
+
+        for i in 0..tokens.len() {
+            if matches!(tokens[i], Token::Newline) {
+                line += 1;
+                continue;
+            }
+
+            if matches!(tokens[i], Token::Semicolon) && i > 0 {
+                if matches!(tokens[i - 1], Token::Whitespace(_)) {
+                    violations.push(RuleViolation {
+                        rule_id: self.id().to_string(),
+                        message: "Unexpected space before semicolon".to_string(),
+                        line,
+                        column: 1,
+                        end_line: line,
+                        end_column: 1,
+                        fix: Some(SuggestedFix {
+                            description: "Remove space before semicolon".to_string(),
+                            replacements: vec![],
+                        }),
+                    });
+                }
+            }
+        }
+
+        violations
+    }
+
+    fn fix(&self, tokens: &mut Vec<Token>, _violations: &[RuleViolation], _config: &FormatConfig) {
+        let mut i = 0;
+        while i < tokens.len() {
+            if matches!(tokens[i], Token::Semicolon) && i > 0 {
+                if matches!(tokens[i - 1], Token::Whitespace(_)) {
+                    tokens.remove(i - 1);
+                    continue;
+                }
+            }
+            i += 1;
+        }
+    }
+}
+
+/// Keyword spacing rule
+pub struct KeywordSpacingRule;
+
+impl KeywordSpacingRule {
+    pub fn new() -> Self { KeywordSpacingRule }
+}
+
+impl FormatRule for KeywordSpacingRule {
+    fn id(&self) -> &str { "keyword-spacing" }
+
+    fn description(&self) -> &str {
+        "Ensures space after keywords"
+    }
+
+    fn severity(&self) -> RuleSeverity { RuleSeverity::Warning }
+
+    fn check(&self, tokens: &[Token], _config: &FormatConfig) -> Vec<RuleViolation> {
+        let mut violations = Vec::new();
+        let mut line = 1;
+
+        let keywords_requiring_space = ["if", "else", "while", "for", "match", "fn", "let", "const", "mut", "pub"];
+
+        for i in 0..tokens.len() {
+            if matches!(tokens[i], Token::Newline) {
+                line += 1;
+                continue;
+            }
+
+            if let Token::Keyword(kw) = &tokens[i] {
+                if keywords_requiring_space.contains(&kw.as_str()) && i + 1 < tokens.len() {
+                    if !matches!(tokens[i + 1], Token::Whitespace(_) | Token::LParen) {
+                        violations.push(RuleViolation {
+                            rule_id: self.id().to_string(),
+                            message: format!("Missing space after keyword '{}'", kw),
+                            line,
+                            column: 1,
+                            end_line: line,
+                            end_column: 1,
+                            fix: Some(SuggestedFix {
+                                description: "Add space after keyword".to_string(),
+                                replacements: vec![],
+                            }),
+                        });
+                    }
+                }
+            }
+        }
+
+        violations
+    }
+
+    fn fix(&self, tokens: &mut Vec<Token>, _violations: &[RuleViolation], _config: &FormatConfig) {
+        let keywords_requiring_space = ["if", "else", "while", "for", "match", "fn", "let", "const", "mut", "pub"];
+
+        let mut i = 0;
+        while i < tokens.len() {
+            if let Token::Keyword(kw) = &tokens[i] {
+                if keywords_requiring_space.contains(&kw.as_str()) && i + 1 < tokens.len() {
+                    if !matches!(tokens[i + 1], Token::Whitespace(_) | Token::LParen) {
+                        tokens.insert(i + 1, Token::Whitespace(" ".to_string()));
+                    }
+                }
+            }
+            i += 1;
+        }
+    }
+}
+
+/// Parentheses spacing rule
+pub struct ParenthesesSpacingRule;
+
+impl ParenthesesSpacingRule {
+    pub fn new() -> Self { ParenthesesSpacingRule }
+}
+
+impl FormatRule for ParenthesesSpacingRule {
+    fn id(&self) -> &str { "parentheses-spacing" }
+
+    fn description(&self) -> &str {
+        "Ensures no space inside parentheses"
+    }
+
+    fn severity(&self) -> RuleSeverity { RuleSeverity::Warning }
+
+    fn check(&self, tokens: &[Token], _config: &FormatConfig) -> Vec<RuleViolation> {
+        let mut violations = Vec::new();
+        let mut line = 1;
+
+        for i in 0..tokens.len() {
+            if matches!(tokens[i], Token::Newline) {
+                line += 1;
+                continue;
+            }
+
+            // No space after opening paren
+            if matches!(tokens[i], Token::LParen) && i + 1 < tokens.len() {
+                if matches!(tokens[i + 1], Token::Whitespace(_)) && i + 2 < tokens.len() {
+                    if !matches!(tokens[i + 2], Token::Newline | Token::RParen) {
+                        violations.push(RuleViolation {
+                            rule_id: self.id().to_string(),
+                            message: "Unexpected space after opening parenthesis".to_string(),
+                            line,
+                            column: 1,
+                            end_line: line,
+                            end_column: 1,
+                            fix: Some(SuggestedFix {
+                                description: "Remove space after parenthesis".to_string(),
+                                replacements: vec![],
+                            }),
+                        });
+                    }
+                }
+            }
+
+            // No space before closing paren
+            if matches!(tokens[i], Token::RParen) && i > 0 {
+                if matches!(tokens[i - 1], Token::Whitespace(_)) && i > 1 {
+                    if !matches!(tokens[i - 2], Token::Newline | Token::LParen) {
+                        violations.push(RuleViolation {
+                            rule_id: self.id().to_string(),
+                            message: "Unexpected space before closing parenthesis".to_string(),
+                            line,
+                            column: 1,
+                            end_line: line,
+                            end_column: 1,
+                            fix: Some(SuggestedFix {
+                                description: "Remove space before parenthesis".to_string(),
+                                replacements: vec![],
+                            }),
+                        });
+                    }
+                }
+            }
+        }
+
+        violations
+    }
+
+    fn fix(&self, tokens: &mut Vec<Token>, _violations: &[RuleViolation], _config: &FormatConfig) {
+        let mut i = 0;
+        while i < tokens.len() {
+            // Remove space after opening paren
+            if matches!(tokens[i], Token::LParen) && i + 1 < tokens.len() {
+                if matches!(tokens[i + 1], Token::Whitespace(_)) && i + 2 < tokens.len() {
+                    if !matches!(tokens[i + 2], Token::Newline | Token::RParen) {
+                        tokens.remove(i + 1);
+                        continue;
+                    }
+                }
+            }
+
+            // Remove space before closing paren
+            if matches!(tokens[i], Token::RParen) && i > 0 {
+                if matches!(tokens[i - 1], Token::Whitespace(_)) && i > 1 {
+                    if !matches!(tokens[i - 2], Token::Newline | Token::LParen) {
+                        tokens.remove(i - 1);
+                        continue;
+                    }
+                }
+            }
+
+            i += 1;
+        }
+    }
+}
+
+// =============================================================================
+// PRETTY PRINTER
+// =============================================================================
+
+/// Pretty printer with line breaking algorithm (Wadler-style)
+pub struct PrettyPrinter {
+    config: FormatConfig,
+    width: usize,
+}
+
+/// Document representation for pretty printing
+#[derive(Debug, Clone)]
+pub enum Doc {
+    /// Empty document
+    Nil,
+
+    /// Text that cannot be broken
+    Text(String),
+
+    /// Line break (space if flattened)
+    Line,
+
+    /// Hard line break (always breaks)
+    HardLine,
+
+    /// Nested (indented) document
+    Nest(usize, Box<Doc>),
+
+    /// Concatenation
+    Concat(Box<Doc>, Box<Doc>),
+
+    /// Group (try to fit on one line)
+    Group(Box<Doc>),
+
+    /// If-flat choice
+    IfFlat(Box<Doc>, Box<Doc>),
+
+    /// Align to current column
+    Align(Box<Doc>),
+
+    /// Fill paragraph
+    Fill(Vec<Doc>),
+}
+
+impl Doc {
+    /// Create text document
+    pub fn text(s: impl Into<String>) -> Self {
+        Doc::Text(s.into())
+    }
+
+    /// Create line break
+    pub fn line() -> Self {
+        Doc::Line
+    }
+
+    /// Create hard line break
+    pub fn hard_line() -> Self {
+        Doc::HardLine
+    }
+
+    /// Nest document
+    pub fn nest(indent: usize, doc: Doc) -> Self {
+        Doc::Nest(indent, Box::new(doc))
+    }
+
+    /// Concatenate documents
+    pub fn concat(left: Doc, right: Doc) -> Self {
+        Doc::Concat(Box::new(left), Box::new(right))
+    }
+
+    /// Group documents
+    pub fn group(doc: Doc) -> Self {
+        Doc::Group(Box::new(doc))
+    }
+
+    /// If-flat choice
+    pub fn if_flat(flat: Doc, broken: Doc) -> Self {
+        Doc::IfFlat(Box::new(flat), Box::new(broken))
+    }
+
+    /// Align to current column
+    pub fn align(doc: Doc) -> Self {
+        Doc::Align(Box::new(doc))
+    }
+
+    /// Concatenate with separator
+    pub fn intersperse(docs: Vec<Doc>, sep: Doc) -> Doc {
+        if docs.is_empty() {
+            return Doc::Nil;
+        }
+
+        let mut result = docs[0].clone();
+        for doc in docs.into_iter().skip(1) {
+            result = Doc::concat(result, Doc::concat(sep.clone(), doc));
+        }
+        result
+    }
+
+    /// Concatenate all documents
+    pub fn concat_all(docs: Vec<Doc>) -> Doc {
+        docs.into_iter().fold(Doc::Nil, Doc::concat)
+    }
+
+    /// Surround with delimiters
+    pub fn surround(left: &str, doc: Doc, right: &str) -> Doc {
+        Doc::concat(
+            Doc::text(left),
+            Doc::concat(doc, Doc::text(right)),
+        )
+    }
+}
+
+impl PrettyPrinter {
+    pub fn new(config: FormatConfig) -> Self {
+        let width = config.max_line_width;
+        PrettyPrinter { config, width }
+    }
+
+    /// Format document to string
+    pub fn format(&self, doc: &Doc) -> String {
+        let mut output = String::new();
+        self.render(doc, 0, &mut output);
+        output
+    }
+
+    /// Render document
+    fn render(&self, doc: &Doc, indent: usize, output: &mut String) {
+        match doc {
+            Doc::Nil => {}
+
+            Doc::Text(s) => {
+                output.push_str(s);
+            }
+
+            Doc::Line => {
+                output.push_str(self.config.line_ending_str());
+                output.push_str(&self.config.indent_str().repeat(indent));
+            }
+
+            Doc::HardLine => {
+                output.push_str(self.config.line_ending_str());
+                output.push_str(&self.config.indent_str().repeat(indent));
+            }
+
+            Doc::Nest(n, inner) => {
+                self.render(inner, indent + n, output);
+            }
+
+            Doc::Concat(left, right) => {
+                self.render(left, indent, output);
+                self.render(right, indent, output);
+            }
+
+            Doc::Group(inner) => {
+                // Try to fit on one line
+                let flat = self.flatten(inner);
+                let flat_str = self.format(&flat);
+
+                if flat_str.len() <= self.width {
+                    output.push_str(&flat_str);
+                } else {
+                    self.render(inner, indent, output);
+                }
+            }
+
+            Doc::IfFlat(flat, broken) => {
+                // In render context, always use broken form
+                self.render(broken, indent, output);
+            }
+
+            Doc::Align(inner) => {
+                // Align uses current column as base
+                self.render(inner, indent, output);
+            }
+
+            Doc::Fill(docs) => {
+                let mut current_line_len = 0;
+                for (i, d) in docs.iter().enumerate() {
+                    let doc_str = self.format(d);
+
+                    if current_line_len + doc_str.len() > self.width && current_line_len > 0 {
+                        output.push_str(self.config.line_ending_str());
+                        output.push_str(&self.config.indent_str().repeat(indent));
+                        current_line_len = 0;
+                    }
+
+                    output.push_str(&doc_str);
+                    current_line_len += doc_str.len();
+
+                    if i < docs.len() - 1 {
+                        output.push(' ');
+                        current_line_len += 1;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Flatten document (remove line breaks)
+    fn flatten(&self, doc: &Doc) -> Doc {
+        match doc {
+            Doc::Nil => Doc::Nil,
+            Doc::Text(s) => Doc::Text(s.clone()),
+            Doc::Line => Doc::Text(" ".to_string()),
+            Doc::HardLine => Doc::HardLine,
+            Doc::Nest(n, inner) => Doc::Nest(*n, Box::new(self.flatten(inner))),
+            Doc::Concat(left, right) => {
+                Doc::Concat(Box::new(self.flatten(left)), Box::new(self.flatten(right)))
+            }
+            Doc::Group(inner) => self.flatten(inner),
+            Doc::IfFlat(flat, _) => self.flatten(flat),
+            Doc::Align(inner) => Doc::Align(Box::new(self.flatten(inner))),
+            Doc::Fill(docs) => Doc::Fill(docs.iter().map(|d| self.flatten(d)).collect()),
+        }
+    }
+}
+
+// =============================================================================
+// AST-BASED FORMATTER
+// =============================================================================
+
+/// AST-based formatter for semantic formatting
+pub struct AstFormatter {
+    config: FormatConfig,
+    printer: PrettyPrinter,
+}
+
+impl AstFormatter {
+    pub fn new(config: FormatConfig) -> Self {
+        let printer = PrettyPrinter::new(config.clone());
+        AstFormatter { config, printer }
+    }
+
+    /// Format a function
+    pub fn format_function(&self, node: &FormatNode) -> Doc {
+        if let FormatNode::Function {
+            visibility,
+            is_async,
+            name,
+            generics,
+            params,
+            return_type,
+            body,
+            doc_comment,
+        } = node {
+            let mut parts = Vec::new();
+
+            // Doc comment
+            if let Some(doc) = doc_comment {
+                for line in doc.lines() {
+                    parts.push(Doc::text(format!("/// {}", line.trim())));
+                    parts.push(Doc::hard_line());
+                }
+            }
+
+            // Visibility
+            if let Some(vis) = visibility {
+                parts.push(Doc::text(vis.clone()));
+                parts.push(Doc::text(" "));
+            }
+
+            // Async
+            if *is_async {
+                parts.push(Doc::text("async "));
+            }
+
+            // fn keyword
+            parts.push(Doc::text("fn "));
+            parts.push(Doc::text(name.clone()));
+
+            // Generics
+            if !generics.is_empty() {
+                parts.push(Doc::text("<"));
+                parts.push(Doc::text(generics.join(", ")));
+                parts.push(Doc::text(">"));
+            }
+
+            // Parameters
+            parts.push(Doc::text("("));
+            if !params.is_empty() {
+                let param_docs: Vec<Doc> = params.iter()
+                    .map(|(n, t)| Doc::text(format!("{}: {}", n, t)))
+                    .collect();
+
+                parts.push(Doc::group(Doc::nest(
+                    1,
+                    Doc::concat(
+                        Doc::if_flat(Doc::Nil, Doc::line()),
+                        Doc::intersperse(param_docs, Doc::concat(Doc::text(","), Doc::line())),
+                    ),
+                )));
+            }
+            parts.push(Doc::text(")"));
+
+            // Return type
+            if let Some(ret) = return_type {
+                parts.push(Doc::text(" -> "));
+                parts.push(Doc::text(ret.clone()));
+            }
+
+            // Body
+            if let Some(b) = body {
+                parts.push(Doc::text(" "));
+                parts.push(self.format_block(b));
+            }
+
+            Doc::concat_all(parts)
+        } else {
+            Doc::Nil
+        }
+    }
+
+    /// Format a struct
+    pub fn format_struct(&self, node: &FormatNode) -> Doc {
+        if let FormatNode::Struct {
+            visibility,
+            name,
+            generics,
+            fields,
+            doc_comment,
+        } = node {
+            let mut parts = Vec::new();
+
+            // Doc comment
+            if let Some(doc) = doc_comment {
+                for line in doc.lines() {
+                    parts.push(Doc::text(format!("/// {}", line.trim())));
+                    parts.push(Doc::hard_line());
+                }
+            }
+
+            // Visibility
+            if let Some(vis) = visibility {
+                parts.push(Doc::text(vis.clone()));
+                parts.push(Doc::text(" "));
+            }
+
+            parts.push(Doc::text("struct "));
+            parts.push(Doc::text(name.clone()));
+
+            // Generics
+            if !generics.is_empty() {
+                parts.push(Doc::text("<"));
+                parts.push(Doc::text(generics.join(", ")));
+                parts.push(Doc::text(">"));
+            }
+
+            // Fields
+            if !fields.is_empty() {
+                parts.push(Doc::text(" {"));
+                parts.push(Doc::hard_line());
+
+                for field in fields {
+                    parts.push(Doc::nest(1, self.format_struct_field(field)));
+                    parts.push(Doc::hard_line());
+                }
+
+                parts.push(Doc::text("}"));
+            } else {
+                parts.push(Doc::text(";"));
+            }
+
+            Doc::concat_all(parts)
+        } else {
+            Doc::Nil
+        }
+    }
+
+    /// Format struct field
+    fn format_struct_field(&self, field: &StructField) -> Doc {
+        let mut parts = Vec::new();
+
+        if let Some(doc) = &field.doc_comment {
+            parts.push(Doc::text(format!("/// {}", doc)));
+            parts.push(Doc::hard_line());
+        }
+
+        if let Some(vis) = &field.visibility {
+            parts.push(Doc::text(vis.clone()));
+            parts.push(Doc::text(" "));
+        }
+
+        parts.push(Doc::text(format!("{}: {},", field.name, field.field_type)));
+
+        Doc::concat_all(parts)
+    }
+
+    /// Format a block
+    fn format_block(&self, node: &FormatNode) -> Doc {
+        if let FormatNode::Block { statements } = node {
+            let mut parts = Vec::new();
+
+            parts.push(Doc::text("{"));
+            parts.push(Doc::hard_line());
+
+            for stmt in statements {
+                parts.push(Doc::nest(1, self.format_node(stmt)));
+                parts.push(Doc::hard_line());
+            }
+
+            parts.push(Doc::text("}"));
+
+            Doc::concat_all(parts)
+        } else {
+            Doc::Nil
+        }
+    }
+
+    /// Format any node
+    pub fn format_node(&self, node: &FormatNode) -> Doc {
+        match node {
+            FormatNode::Function { .. } => self.format_function(node),
+            FormatNode::Struct { .. } => self.format_struct(node),
+            FormatNode::Block { .. } => self.format_block(node),
+            _ => Doc::Nil,
+        }
+    }
+}
+
+// =============================================================================
+// FORMAT PROFILES
+// =============================================================================
+
+/// Predefined format profiles
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FormatProfile {
+    /// Default BuildLang style
+    Default,
+
+    /// Compact style (minimal whitespace)
+    Compact,
+
+    /// Expanded style (more whitespace)
+    Expanded,
+
+    /// Google style
+    Google,
+
+    /// LLVM style
+    Llvm,
+
+    /// Linux kernel style
+    Linux,
+
+    /// Mozilla style
+    Mozilla,
+
+    /// WebKit style
+    WebKit,
+}
+
+impl FormatProfile {
+    /// Get configuration for profile
+    pub fn config(&self) -> FormatConfig {
+        match self {
+            FormatProfile::Default => FormatConfig::default(),
+
+            FormatProfile::Compact => FormatConfig {
+                max_line_width: 120,
+                indent_style: IndentStyle::Spaces(2),
+                blank_lines_between_items: 0,
+                max_blank_lines: 1,
+                trailing_commas: false,
+                ..FormatConfig::default()
+            },
+
+            FormatProfile::Expanded => FormatConfig {
+                max_line_width: 80,
+                indent_style: IndentStyle::Spaces(4),
+                blank_lines_between_items: 2,
+                max_blank_lines: 2,
+                trailing_commas: true,
+                brace_style: BraceStyle::NextLine,
+                ..FormatConfig::default()
+            },
+
+            FormatProfile::Google => FormatConfig {
+                max_line_width: 80,
+                indent_style: IndentStyle::Spaces(2),
+                brace_style: BraceStyle::SameLine,
+                trailing_commas: true,
+                ..FormatConfig::default()
+            },
+
+            FormatProfile::Llvm => FormatConfig {
+                max_line_width: 80,
+                indent_style: IndentStyle::Spaces(2),
+                brace_style: BraceStyle::SameLine,
+                ..FormatConfig::default()
+            },
+
+            FormatProfile::Linux => FormatConfig {
+                max_line_width: 80,
+                indent_style: IndentStyle::Tabs,
+                brace_style: BraceStyle::SameLine,
+                trailing_commas: false,
+                ..FormatConfig::default()
+            },
+
+            FormatProfile::Mozilla => FormatConfig {
+                max_line_width: 99,
+                indent_style: IndentStyle::Spaces(2),
+                brace_style: BraceStyle::SameLine,
+                ..FormatConfig::default()
+            },
+
+            FormatProfile::WebKit => FormatConfig {
+                max_line_width: 80,
+                indent_style: IndentStyle::Spaces(4),
+                brace_style: BraceStyle::NextLine,
+                ..FormatConfig::default()
+            },
+        }
+    }
+
+    /// Parse profile name
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name.to_lowercase().as_str() {
+            "default" => Some(FormatProfile::Default),
+            "compact" => Some(FormatProfile::Compact),
+            "expanded" => Some(FormatProfile::Expanded),
+            "google" => Some(FormatProfile::Google),
+            "llvm" => Some(FormatProfile::Llvm),
+            "linux" => Some(FormatProfile::Linux),
+            "mozilla" => Some(FormatProfile::Mozilla),
+            "webkit" => Some(FormatProfile::WebKit),
+            _ => None,
+        }
+    }
+}
+
+// =============================================================================
+// MACRO FORMATTER
+// =============================================================================
+
+/// Macro-specific formatting
+pub struct MacroFormatter {
+    config: FormatConfig,
+}
+
+impl MacroFormatter {
+    pub fn new(config: FormatConfig) -> Self {
+        MacroFormatter { config }
+    }
+
+    /// Format macro invocation
+    pub fn format_macro_call(&self, name: &str, args: &str, delimiter: char) -> String {
+        let (open, close) = match delimiter {
+            '(' => ("(", ")"),
+            '[' => ("[", "]"),
+            '{' => ("{", "}"),
+            _ => ("(", ")"),
+        };
+
+        let formatted_args = self.format_macro_args(args);
+
+        if formatted_args.len() > self.config.max_line_width - name.len() - 3 {
+            // Multi-line format
+            let indent = self.config.indent_str();
+            format!(
+                "{}!{}\n{}{}\n{}",
+                name, open,
+                indent, formatted_args.replace(", ", &format!(",\n{}", indent)),
+                close
+            )
+        } else {
+            format!("{}!{}{}{}", name, open, formatted_args, close)
+        }
+    }
+
+    /// Format macro arguments
+    fn format_macro_args(&self, args: &str) -> String {
+        let mut result = String::new();
+        let mut in_string = false;
+        let mut escape_next = false;
+
+        for ch in args.chars() {
+            if escape_next {
+                result.push(ch);
+                escape_next = false;
+                continue;
+            }
+
+            if ch == '\\' {
+                result.push(ch);
+                escape_next = true;
+                continue;
+            }
+
+            if ch == '"' && !escape_next {
+                in_string = !in_string;
+            }
+
+            result.push(ch);
+        }
+
+        result.trim().to_string()
+    }
+
+    /// Format macro definition
+    pub fn format_macro_definition(&self, name: &str, rules: &[MacroRule]) -> String {
+        let mut output = String::new();
+
+        output.push_str(&format!("macro_rules! {} {{\n", name));
+
+        for rule in rules {
+            output.push_str(&self.config.indent_str());
+            output.push_str(&format!("({}) => {{\n", rule.pattern));
+            output.push_str(&self.config.indent_str());
+            output.push_str(&self.config.indent_str());
+            output.push_str(&rule.expansion);
+            output.push_str("\n");
+            output.push_str(&self.config.indent_str());
+            output.push_str("};\n");
+        }
+
+        output.push_str("}\n");
+        output
+    }
+}
+
+/// Macro rule
+#[derive(Debug, Clone)]
+pub struct MacroRule {
+    pub pattern: String,
+    pub expansion: String,
+}
+
+// =============================================================================
+// ATTRIBUTE FORMATTER
+// =============================================================================
+
+/// Attribute-specific formatting
+pub struct AttributeFormatter {
+    config: FormatConfig,
+}
+
+impl AttributeFormatter {
+    pub fn new(config: FormatConfig) -> Self {
+        AttributeFormatter { config }
+    }
+
+    /// Format attributes
+    pub fn format_attributes(&self, attrs: &[Attribute]) -> String {
+        let mut output = String::new();
+
+        // Group attributes by type
+        let mut derive_attrs: Vec<&str> = Vec::new();
+        let mut cfg_attrs: Vec<&Attribute> = Vec::new();
+        let mut doc_attrs: Vec<&str> = Vec::new();
+        let mut other_attrs: Vec<&Attribute> = Vec::new();
+
+        for attr in attrs {
+            match attr.name.as_str() {
+                "derive" => {
+                    for arg in &attr.args {
+                        derive_attrs.push(arg);
+                    }
+                }
+                "cfg" | "cfg_attr" => cfg_attrs.push(attr),
+                "doc" => {
+                    for arg in &attr.args {
+                        doc_attrs.push(arg);
+                    }
+                }
+                _ => other_attrs.push(attr),
+            }
+        }
+
+        // Format doc comments first
+        for doc in doc_attrs {
+            output.push_str(&format!("/// {}\n", doc));
+        }
+
+        // Format derive (combined)
+        if !derive_attrs.is_empty() {
+            derive_attrs.sort();
+            output.push_str("#[derive(");
+            output.push_str(&derive_attrs.join(", "));
+            output.push_str(")]\n");
+        }
+
+        // Format cfg attributes
+        for attr in cfg_attrs {
+            output.push_str(&self.format_attribute(attr));
+            output.push('\n');
+        }
+
+        // Format other attributes
+        for attr in other_attrs {
+            output.push_str(&self.format_attribute(attr));
+            output.push('\n');
+        }
+
+        output
+    }
+
+    /// Format single attribute
+    fn format_attribute(&self, attr: &Attribute) -> String {
+        if attr.args.is_empty() {
+            if attr.is_inner {
+                format!("#![{}]", attr.name)
+            } else {
+                format!("#[{}]", attr.name)
+            }
+        } else {
+            let args = attr.args.join(", ");
+            if attr.is_inner {
+                format!("#![{}({})]", attr.name, args)
+            } else {
+                format!("#[{}({})]", attr.name, args)
+            }
+        }
+    }
+}
+
+/// Attribute representation
+#[derive(Debug, Clone)]
+pub struct Attribute {
+    pub name: String,
+    pub args: Vec<String>,
+    pub is_inner: bool,
+}
+
+// =============================================================================
+// EXPRESSION FORMATTER
+// =============================================================================
+
+/// Expression-specific formatting strategies
+pub struct ExpressionFormatter {
+    config: FormatConfig,
+}
+
+impl ExpressionFormatter {
+    pub fn new(config: FormatConfig) -> Self {
+        ExpressionFormatter { config }
+    }
+
+    /// Format chain expression (method chains)
+    pub fn format_chain(&self, chain: &[ChainElement]) -> String {
+        // Determine if chain should break
+        let total_len: usize = chain.iter().map(|c| c.len()).sum();
+        let should_break = total_len > self.config.max_line_width / 2;
+
+        if should_break {
+            self.format_chain_multiline(chain)
+        } else {
+            self.format_chain_inline(chain)
+        }
+    }
+
+    /// Format chain inline
+    fn format_chain_inline(&self, chain: &[ChainElement]) -> String {
+        chain.iter()
+            .map(|e| e.to_string())
+            .collect::<Vec<_>>()
+            .join("")
+    }
+
+    /// Format chain multiline
+    fn format_chain_multiline(&self, chain: &[ChainElement]) -> String {
+        let indent = self.config.indent_str();
+        let mut output = String::new();
+
+        for (i, element) in chain.iter().enumerate() {
+            if i > 0 {
+                output.push_str(self.config.line_ending_str());
+                output.push_str(&indent);
+            }
+            output.push_str(&element.to_string());
+        }
+
+        output
+    }
+
+    /// Format match expression
+    pub fn format_match(&self, scrutinee: &str, arms: &[MatchArm]) -> String {
+        let mut output = String::new();
+        let indent = self.config.indent_str();
+
+        output.push_str(&format!("match {} {{\n", scrutinee));
+
+        // Calculate max pattern length for alignment
+        let max_pattern_len = if self.config.align_match_arms {
+            arms.iter().map(|a| a.pattern.len()).max().unwrap_or(0)
+        } else {
+            0
+        };
+
+        for arm in arms {
+            output.push_str(&indent);
+            output.push_str(&arm.pattern);
+
+            if let Some(guard) = &arm.guard {
+                output.push_str(&format!(" if {}", guard));
+            }
+
+            output.push_str(" => ");
+
+            // Pad for alignment
+            if self.config.align_match_arms && arm.pattern.len() < max_pattern_len {
+                output.push_str(&" ".repeat(max_pattern_len - arm.pattern.len()));
+            }
+
+            if arm.body.contains('\n') {
+                output.push_str("{\n");
+                for line in arm.body.lines() {
+                    output.push_str(&indent);
+                    output.push_str(&indent);
+                    output.push_str(line);
+                    output.push_str(self.config.line_ending_str());
+                }
+                output.push_str(&indent);
+                output.push('}');
+            } else {
+                output.push_str(&arm.body);
+            }
+
+            if self.config.trailing_commas {
+                output.push(',');
+            }
+            output.push_str(self.config.line_ending_str());
+        }
+
+        output.push('}');
+        output
+    }
+
+    /// Format if-else chain
+    pub fn format_if_else(&self, conditions: &[IfBranch], else_body: Option<&str>) -> String {
+        let mut output = String::new();
+        let indent = self.config.indent_str();
+
+        for (i, branch) in conditions.iter().enumerate() {
+            if i == 0 {
+                output.push_str("if ");
+            } else {
+                output.push_str(" else if ");
+            }
+
+            output.push_str(&branch.condition);
+            output.push_str(" {\n");
+
+            for line in branch.body.lines() {
+                output.push_str(&indent);
+                output.push_str(line);
+                output.push_str(self.config.line_ending_str());
+            }
+
+            output.push('}');
+        }
+
+        if let Some(else_body) = else_body {
+            output.push_str(" else {\n");
+            for line in else_body.lines() {
+                output.push_str(&indent);
+                output.push_str(line);
+                output.push_str(self.config.line_ending_str());
+            }
+            output.push('}');
+        }
+
+        output
+    }
+
+    /// Format closure
+    pub fn format_closure(&self, params: &[String], body: &str, is_async: bool, is_move: bool) -> String {
+        let mut output = String::new();
+
+        if is_async {
+            output.push_str("async ");
+        }
+        if is_move {
+            output.push_str("move ");
+        }
+
+        output.push('|');
+        output.push_str(&params.join(", "));
+        output.push('|');
+
+        if body.contains('\n') || body.len() > self.config.max_line_width / 2 {
+            output.push_str(" {\n");
+            let indent = self.config.indent_str();
+            for line in body.lines() {
+                output.push_str(&indent);
+                output.push_str(line);
+                output.push_str(self.config.line_ending_str());
+            }
+            output.push('}');
+        } else {
+            output.push(' ');
+            output.push_str(body);
+        }
+
+        output
+    }
+}
+
+/// Chain element
+#[derive(Debug, Clone)]
+pub struct ChainElement {
+    pub kind: ChainKind,
+    pub content: String,
+}
+
+#[derive(Debug, Clone)]
+pub enum ChainKind {
+    Receiver,
+    MethodCall,
+    FieldAccess,
+    Await,
+    Try,
+}
+
+impl ChainElement {
+    fn len(&self) -> usize {
+        match self.kind {
+            ChainKind::Receiver => self.content.len(),
+            ChainKind::MethodCall => self.content.len() + 1,
+            ChainKind::FieldAccess => self.content.len() + 1,
+            ChainKind::Await => 6,
+            ChainKind::Try => 1,
+        }
+    }
+
+    fn to_string(&self) -> String {
+        match self.kind {
+            ChainKind::Receiver => self.content.clone(),
+            ChainKind::MethodCall => format!(".{}", self.content),
+            ChainKind::FieldAccess => format!(".{}", self.content),
+            ChainKind::Await => ".await".to_string(),
+            ChainKind::Try => "?".to_string(),
+        }
+    }
+}
+
+/// Match arm
+#[derive(Debug, Clone)]
+pub struct MatchArm {
+    pub pattern: String,
+    pub guard: Option<String>,
+    pub body: String,
+}
+
+/// If branch
+#[derive(Debug, Clone)]
+pub struct IfBranch {
+    pub condition: String,
+    pub body: String,
+}
+
+// =============================================================================
+// COMMENT FORMATTER
+// =============================================================================
+
+/// Comment formatting utilities
+pub struct CommentFormatter {
+    config: FormatConfig,
+}
+
+impl CommentFormatter {
+    pub fn new(config: FormatConfig) -> Self {
+        CommentFormatter { config }
+    }
+
+    /// Format and wrap doc comment
+    pub fn format_doc_comment(&self, content: &str) -> String {
+        if !self.config.wrap_comments {
+            return format!("/// {}", content);
+        }
+
+        let max_width = self.config.max_line_width - 4; // "/// ".len()
+        let words: Vec<&str> = content.split_whitespace().collect();
+
+        let mut lines = Vec::new();
+        let mut current_line = String::new();
+
+        for word in words {
+            if current_line.is_empty() {
+                current_line = word.to_string();
+            } else if current_line.len() + 1 + word.len() <= max_width {
+                current_line.push(' ');
+                current_line.push_str(word);
+            } else {
+                lines.push(current_line);
+                current_line = word.to_string();
+            }
+        }
+
+        if !current_line.is_empty() {
+            lines.push(current_line);
+        }
+
+        lines.iter()
+            .map(|l| format!("/// {}", l))
+            .collect::<Vec<_>>()
+            .join(self.config.line_ending_str())
+    }
+
+    /// Format block comment
+    pub fn format_block_comment(&self, content: &str) -> String {
+        let lines: Vec<&str> = content.lines().collect();
+
+        if lines.len() == 1 && content.len() < self.config.max_line_width - 6 {
+            return format!("/* {} */", content.trim());
+        }
+
+        let mut output = String::from("/*\n");
+        for line in lines {
+            output.push_str(" * ");
+            output.push_str(line.trim());
+            output.push_str(self.config.line_ending_str());
+        }
+        output.push_str(" */");
+        output
+    }
+
+    /// Reflow comment to max width
+    pub fn reflow_comment(&self, comment: &str) -> String {
+        let prefix = if comment.starts_with("///") {
+            "/// "
+        } else if comment.starts_with("//!") {
+            "//! "
+        } else if comment.starts_with("//") {
+            "// "
+        } else {
+            return comment.to_string();
+        };
+
+        let content: String = comment.lines()
+            .map(|l| l.trim_start_matches('/').trim_start_matches('!').trim())
+            .collect::<Vec<_>>()
+            .join(" ");
+
+        let max_width = self.config.max_line_width - prefix.len();
+        let words: Vec<&str> = content.split_whitespace().collect();
+
+        let mut lines = Vec::new();
+        let mut current_line = String::new();
+
+        for word in words {
+            if current_line.is_empty() {
+                current_line = word.to_string();
+            } else if current_line.len() + 1 + word.len() <= max_width {
+                current_line.push(' ');
+                current_line.push_str(word);
+            } else {
+                lines.push(current_line);
+                current_line = word.to_string();
+            }
+        }
+
+        if !current_line.is_empty() {
+            lines.push(current_line);
+        }
+
+        lines.iter()
+            .map(|l| format!("{}{}", prefix, l))
+            .collect::<Vec<_>>()
+            .join(self.config.line_ending_str())
+    }
+}
+
+// =============================================================================
+// PARALLEL FORMATTER
+// =============================================================================
+
+/// Parallel file formatter for large codebases
+pub struct ParallelFormatter {
+    config: FormatConfig,
+    thread_count: usize,
+}
+
+impl ParallelFormatter {
+    pub fn new(config: FormatConfig, thread_count: usize) -> Self {
+        ParallelFormatter {
+            config,
+            thread_count: thread_count.max(1),
+        }
+    }
+
+    /// Format files in parallel
+    pub fn format_files(&self, files: Vec<PathBuf>) -> ParallelFormatResult {
+        let chunk_size = (files.len() + self.thread_count - 1) / self.thread_count;
+        let chunks: Vec<Vec<PathBuf>> = files.chunks(chunk_size)
+            .map(|c| c.to_vec())
+            .collect();
+
+        let results: Vec<FileFormatResult> = Vec::new();
+        let errors: Vec<(PathBuf, String)> = Vec::new();
+
+        // Note: In actual implementation, this would use thread spawning
+        // For this representation, we show the structure
+        for chunk in chunks {
+            for file in chunk {
+                let mut formatter = Formatter::new(self.config.clone());
+                match formatter.format_file(&file) {
+                    Ok(_) => {
+                        // results.push(FileFormatResult { ... })
+                    }
+                    Err(e) => {
+                        // errors.push((file, format!("{:?}", e)))
+                    }
+                }
+            }
+        }
+
+        ParallelFormatResult {
+            files_processed: files.len(),
+            files_changed: 0,
+            files_unchanged: 0,
+            errors,
+            duration_ms: 0,
+        }
+    }
+
+    /// Check files in parallel (no modification)
+    pub fn check_files(&self, files: Vec<PathBuf>) -> ParallelCheckResult {
+        let mut needs_formatting = Vec::new();
+        let mut well_formatted = Vec::new();
+        let errors: Vec<(PathBuf, String)> = Vec::new();
+
+        for file in &files {
+            let mut formatter = Formatter::new(self.config.clone());
+            match formatter.check_file(file) {
+                Ok(true) => well_formatted.push(file.clone()),
+                Ok(false) => needs_formatting.push(file.clone()),
+                Err(_) => {
+                    // errors.push((file.clone(), format!("{:?}", e)))
+                }
+            }
+        }
+
+        ParallelCheckResult {
+            total_files: files.len(),
+            needs_formatting,
+            well_formatted,
+            errors,
+        }
+    }
+}
+
+/// Parallel format result
+#[derive(Debug)]
+pub struct ParallelFormatResult {
+    pub files_processed: usize,
+    pub files_changed: usize,
+    pub files_unchanged: usize,
+    pub errors: Vec<(PathBuf, String)>,
+    pub duration_ms: u64,
+}
+
+/// Parallel check result
+#[derive(Debug)]
+pub struct ParallelCheckResult {
+    pub total_files: usize,
+    pub needs_formatting: Vec<PathBuf>,
+    pub well_formatted: Vec<PathBuf>,
+    pub errors: Vec<(PathBuf, String)>,
+}
+
+/// Individual file format result
+#[derive(Debug)]
+pub struct FileFormatResult {
+    pub path: PathBuf,
+    pub changed: bool,
+    pub original_size: usize,
+    pub formatted_size: usize,
+}
+
+// =============================================================================
+// FORMAT CACHE
+// =============================================================================
+
+/// Format cache for incremental formatting
+pub struct FormatCache {
+    cache_dir: PathBuf,
+    entries: HashMap<PathBuf, CacheEntry>,
+}
+
+/// Cache entry
+#[derive(Debug, Clone)]
+pub struct CacheEntry {
+    pub file_hash: String,
+    pub config_hash: String,
+    pub formatted_hash: String,
+    pub timestamp: u64,
+}
+
+impl FormatCache {
+    pub fn new(cache_dir: PathBuf) -> Self {
+        let mut cache = FormatCache {
+            cache_dir,
+            entries: HashMap::new(),
+        };
+        cache.load();
+        cache
+    }
+
+    /// Load cache from disk
+    fn load(&mut self) {
+        let cache_file = self.cache_dir.join("format_cache.json");
+        if cache_file.exists() {
+            if let Ok(content) = fs::read_to_string(&cache_file) {
+                // Parse JSON entries
+                for line in content.lines() {
+                    if let Some((path, entry)) = self.parse_cache_line(line) {
+                        self.entries.insert(path, entry);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Parse cache line
+    fn parse_cache_line(&self, line: &str) -> Option<(PathBuf, CacheEntry)> {
+        let parts: Vec<&str> = line.split('\t').collect();
+        if parts.len() == 5 {
+            Some((
+                PathBuf::from(parts[0]),
+                CacheEntry {
+                    file_hash: parts[1].to_string(),
+                    config_hash: parts[2].to_string(),
+                    formatted_hash: parts[3].to_string(),
+                    timestamp: parts[4].parse().unwrap_or(0),
+                },
+            ))
+        } else {
+            None
+        }
+    }
+
+    /// Save cache to disk
+    pub fn save(&self) {
+        let cache_file = self.cache_dir.join("format_cache.json");
+        fs::create_dir_all(&self.cache_dir).ok();
+
+        let mut content = String::new();
+        for (path, entry) in &self.entries {
+            content.push_str(&format!(
+                "{}\t{}\t{}\t{}\t{}\n",
+                path.display(),
+                entry.file_hash,
+                entry.config_hash,
+                entry.formatted_hash,
+                entry.timestamp,
+            ));
+        }
+
+        fs::write(cache_file, content).ok();
+    }
+
+    /// Check if file needs formatting
+    pub fn needs_format(&self, path: &Path, content_hash: &str, config_hash: &str) -> bool {
+        if let Some(entry) = self.entries.get(path) {
+            entry.file_hash != content_hash || entry.config_hash != config_hash
+        } else {
+            true
+        }
+    }
+
+    /// Update cache entry
+    pub fn update(&mut self, path: PathBuf, file_hash: String, config_hash: String, formatted_hash: String) {
+        self.entries.insert(path, CacheEntry {
+            file_hash,
+            config_hash,
+            formatted_hash,
+            timestamp: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0),
+        });
+    }
+
+    /// Clear cache
+    pub fn clear(&mut self) {
+        self.entries.clear();
+        let cache_file = self.cache_dir.join("format_cache.json");
+        fs::remove_file(cache_file).ok();
+    }
+
+    /// Get cache statistics
+    pub fn stats(&self) -> CacheStats {
+        CacheStats {
+            entries: self.entries.len(),
+            oldest_entry: self.entries.values()
+                .map(|e| e.timestamp)
+                .min()
+                .unwrap_or(0),
+            newest_entry: self.entries.values()
+                .map(|e| e.timestamp)
+                .max()
+                .unwrap_or(0),
+        }
+    }
+}
+
+/// Cache statistics
+#[derive(Debug)]
+pub struct CacheStats {
+    pub entries: usize,
+    pub oldest_entry: u64,
+    pub newest_entry: u64,
+}
+
+// =============================================================================
+// IDE INTEGRATION
+// =============================================================================
+
+/// IDE integration support
+pub struct IdeFormatter {
+    config: FormatConfig,
+    formatter: Formatter,
+}
+
+impl IdeFormatter {
+    pub fn new(config: FormatConfig) -> Self {
+        let formatter = Formatter::new(config.clone());
+        IdeFormatter { config, formatter }
+    }
+
+    /// Format range (for format-on-type)
+    pub fn format_range(&mut self, source: &str, start_line: usize, end_line: usize) -> Result<String, FormatError> {
+        let lines: Vec<&str> = source.lines().collect();
+
+        if start_line >= lines.len() || end_line >= lines.len() {
+            return Err(FormatError::ParseError("Invalid range".to_string()));
+        }
+
+        let range_content: String = lines[start_line..=end_line].join("\n");
+        let formatted = self.formatter.format(&range_content)?;
+
+        // Reconstruct full source with formatted range
+        let mut result = String::new();
+        for (i, line) in lines.iter().enumerate() {
+            if i < start_line {
+                result.push_str(line);
+                result.push_str(self.config.line_ending_str());
+            } else if i == start_line {
+                result.push_str(&formatted);
+            } else if i > end_line {
+                result.push_str(line);
+                result.push_str(self.config.line_ending_str());
+            }
+        }
+
+        Ok(result)
+    }
+
+    /// Format on type (triggered by specific characters)
+    pub fn format_on_type(&mut self, source: &str, position: usize, trigger_char: char) -> Result<TextEdit, FormatError> {
+        match trigger_char {
+            ';' => self.format_statement(source, position),
+            '}' => self.format_block_end(source, position),
+            '\n' => self.format_line(source, position),
+            _ => Ok(TextEdit::empty()),
+        }
+    }
+
+    /// Format statement ending with semicolon
+    fn format_statement(&mut self, source: &str, position: usize) -> Result<TextEdit, FormatError> {
+        // Find statement start
+        let before = &source[..position];
+        let statement_start = before.rfind(|c| c == ';' || c == '{' || c == '}')
+            .map(|p| p + 1)
+            .unwrap_or(0);
+
+        let statement = &source[statement_start..=position];
+        let formatted = self.formatter.format(statement)?;
+
+        Ok(TextEdit {
+            start: statement_start,
+            end: position + 1,
+            new_text: formatted.trim_end().to_string(),
+        })
+    }
+
+    /// Format block ending with brace
+    fn format_block_end(&mut self, source: &str, position: usize) -> Result<TextEdit, FormatError> {
+        // Find matching opening brace
+        let before = &source[..position];
+        let mut depth = 1;
+        let mut block_start = 0;
+
+        for (i, ch) in before.chars().rev().enumerate() {
+            match ch {
+                '}' => depth += 1,
+                '{' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        block_start = before.len() - i - 1;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        let block = &source[block_start..=position];
+        let formatted = self.formatter.format(block)?;
+
+        Ok(TextEdit {
+            start: block_start,
+            end: position + 1,
+            new_text: formatted,
+        })
+    }
+
+    /// Format current line
+    fn format_line(&mut self, source: &str, position: usize) -> Result<TextEdit, FormatError> {
+        let before = &source[..position];
+        let line_start = before.rfind('\n').map(|p| p + 1).unwrap_or(0);
+        let line = &source[line_start..position];
+
+        let formatted = self.formatter.format(line)?;
+
+        Ok(TextEdit {
+            start: line_start,
+            end: position,
+            new_text: formatted.trim_end().to_string(),
+        })
+    }
+
+    /// Get formatting edits for document
+    pub fn get_document_edits(&mut self, source: &str) -> Result<Vec<TextEdit>, FormatError> {
+        let formatted = self.formatter.format(source)?;
+
+        if formatted == source {
+            return Ok(vec![]);
+        }
+
+        Ok(vec![TextEdit {
+            start: 0,
+            end: source.len(),
+            new_text: formatted,
+        }])
+    }
+}
+
+/// Text edit
+#[derive(Debug, Clone)]
+pub struct TextEdit {
+    pub start: usize,
+    pub end: usize,
+    pub new_text: String,
+}
+
+impl TextEdit {
+    fn empty() -> Self {
+        TextEdit {
+            start: 0,
+            end: 0,
+            new_text: String::new(),
+        }
+    }
+}
+
+// =============================================================================
+// GIT INTEGRATION
+// =============================================================================
+
+/// Git integration for formatting changed files
+pub struct GitFormatter {
+    config: FormatConfig,
+    repo_root: PathBuf,
+}
+
+impl GitFormatter {
+    pub fn new(config: FormatConfig, repo_root: PathBuf) -> Self {
+        GitFormatter { config, repo_root }
+    }
+
+    /// Get changed files (staged and unstaged)
+    pub fn get_changed_files(&self) -> Result<Vec<PathBuf>, FormatError> {
+        // Execute: git diff --name-only && git diff --cached --name-only
+        let output = std::process::Command::new("git")
+            .args(&["diff", "--name-only"])
+            .current_dir(&self.repo_root)
+            .output()
+            .map_err(|e| FormatError::IoError(e.to_string()))?;
+
+        let staged_output = std::process::Command::new("git")
+            .args(&["diff", "--cached", "--name-only"])
+            .current_dir(&self.repo_root)
+            .output()
+            .map_err(|e| FormatError::IoError(e.to_string()))?;
+
+        let mut files = HashSet::new();
+
+        for line in String::from_utf8_lossy(&output.stdout).lines() {
+            if line.ends_with(".bld") {
+                files.insert(self.repo_root.join(line));
+            }
+        }
+
+        for line in String::from_utf8_lossy(&staged_output.stdout).lines() {
+            if line.ends_with(".bld") {
+                files.insert(self.repo_root.join(line));
+            }
+        }
+
+        Ok(files.into_iter().collect())
+    }
+
+    /// Get files changed since ref
+    pub fn get_files_since(&self, git_ref: &str) -> Result<Vec<PathBuf>, FormatError> {
+        let output = std::process::Command::new("git")
+            .args(&["diff", "--name-only", git_ref])
+            .current_dir(&self.repo_root)
+            .output()
+            .map_err(|e| FormatError::IoError(e.to_string()))?;
+
+        let mut files = Vec::new();
+        for line in String::from_utf8_lossy(&output.stdout).lines() {
+            if line.ends_with(".bld") {
+                files.push(self.repo_root.join(line));
+            }
+        }
+
+        Ok(files)
+    }
+
+    /// Format only changed lines in file
+    pub fn format_changed_lines(&self, file: &Path) -> Result<String, FormatError> {
+        // Get changed line ranges from git
+        let output = std::process::Command::new("git")
+            .args(&["diff", "-U0", "--", file.to_str().unwrap_or("")])
+            .current_dir(&self.repo_root)
+            .output()
+            .map_err(|e| FormatError::IoError(e.to_string()))?;
+
+        let diff = String::from_utf8_lossy(&output.stdout);
+        let ranges = self.parse_diff_ranges(&diff);
+
+        if ranges.is_empty() {
+            return fs::read_to_string(file)
+                .map_err(|e| FormatError::IoError(e.to_string()));
+        }
+
+        // Read file and format only changed ranges
+        let source = fs::read_to_string(file)
+            .map_err(|e| FormatError::IoError(e.to_string()))?;
+
+        let mut formatter = Formatter::new(self.config.clone());
+        let lines: Vec<&str> = source.lines().collect();
+        let mut result = String::new();
+
+        let mut current_line = 0;
+        for (start, end) in ranges {
+            // Add unchanged lines
+            while current_line < start.saturating_sub(1) && current_line < lines.len() {
+                result.push_str(lines[current_line]);
+                result.push_str(self.config.line_ending_str());
+                current_line += 1;
+            }
+
+            // Format changed lines
+            let range_end = end.min(lines.len());
+            if current_line < range_end {
+                let range_content: String = lines[current_line..range_end]
+                    .join(self.config.line_ending_str());
+                let formatted = formatter.format(&range_content)?;
+                result.push_str(&formatted);
+                current_line = range_end;
+            }
+        }
+
+        // Add remaining unchanged lines
+        while current_line < lines.len() {
+            result.push_str(lines[current_line]);
+            result.push_str(self.config.line_ending_str());
+            current_line += 1;
+        }
+
+        Ok(result)
+    }
+
+    /// Parse diff output to get changed line ranges
+    fn parse_diff_ranges(&self, diff: &str) -> Vec<(usize, usize)> {
+        let mut ranges = Vec::new();
+
+        for line in diff.lines() {
+            if line.starts_with("@@") {
+                // Parse @@ -old,count +new,count @@
+                if let Some(plus_pos) = line.find('+') {
+                    let rest = &line[plus_pos + 1..];
+                    if let Some(space_pos) = rest.find(' ') {
+                        let range_str = &rest[..space_pos];
+                        let parts: Vec<&str> = range_str.split(',').collect();
+                        if !parts.is_empty() {
+                            if let Ok(start) = parts[0].parse::<usize>() {
+                                let count = parts.get(1)
+                                    .and_then(|s| s.parse::<usize>().ok())
+                                    .unwrap_or(1);
+                                ranges.push((start, start + count));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        ranges
+    }
+}
+
+// =============================================================================
+// PRE-COMMIT HOOK
+// =============================================================================
+
+/// Pre-commit hook support
+pub struct PreCommitHook {
+    config: FormatConfig,
+}
+
+impl PreCommitHook {
+    pub fn new(config: FormatConfig) -> Self {
+        PreCommitHook { config }
+    }
+
+    /// Generate pre-commit hook script
+    pub fn generate_hook(&self) -> String {
+        r#"#!/bin/sh
+# BuildFmt pre-commit hook
+
+# Get list of staged .bld files
+files=$(git diff --cached --name-only --diff-filter=ACM | grep '\.bld$')
+
+if [ -z "$files" ]; then
+    exit 0
+fi
+
+# Check if buildfmt is installed
+if ! command -v buildfmt &> /dev/null; then
+    echo "buildfmt not found. Please install it first."
+    exit 1
+fi
+
+# Check formatting
+unformatted=$(echo "$files" | xargs buildfmt --check 2>&1)
+
+if [ $? -ne 0 ]; then
+    echo "Some files are not properly formatted:"
+    echo "$unformatted"
+    echo ""
+    echo "Run 'buildfmt' to fix formatting, then commit again."
+    exit 1
+fi
+
+exit 0
+"#.to_string()
+    }
+
+    /// Install hook
+    pub fn install(&self, repo_root: &Path) -> Result<(), FormatError> {
+        let hooks_dir = repo_root.join(".git").join("hooks");
+        fs::create_dir_all(&hooks_dir)
+            .map_err(|e| FormatError::IoError(e.to_string()))?;
+
+        let hook_path = hooks_dir.join("pre-commit");
+        let hook_content = self.generate_hook();
+
+        fs::write(&hook_path, hook_content)
+            .map_err(|e| FormatError::IoError(e.to_string()))?;
+
+        // Make executable on Unix
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = fs::metadata(&hook_path)
+                .map_err(|e| FormatError::IoError(e.to_string()))?
+                .permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(&hook_path, perms)
+                .map_err(|e| FormatError::IoError(e.to_string()))?;
+        }
+
+        Ok(())
+    }
+
+    /// Uninstall hook
+    pub fn uninstall(&self, repo_root: &Path) -> Result<(), FormatError> {
+        let hook_path = repo_root.join(".git").join("hooks").join("pre-commit");
+
+        if hook_path.exists() {
+            // Check if it's our hook
+            if let Ok(content) = fs::read_to_string(&hook_path) {
+                if content.contains("BuildFmt") {
+                    fs::remove_file(&hook_path)
+                        .map_err(|e| FormatError::IoError(e.to_string()))?;
+                }
+            }
+        }
+
+        Ok(())
+    }
+}
+
+// =============================================================================
+// CONFIGURATION FILE GENERATOR
+// =============================================================================
+
+/// Generate configuration file
+pub struct ConfigGenerator;
+
+impl ConfigGenerator {
+    /// Generate default buildfmt.toml
+    pub fn generate_default() -> String {
+        r#"# BuildFmt Configuration
+# Documentation: https://buildlang.org/docs/formatter
+
+# Maximum line width
+max_line_width = 100
+
+# Indentation: number of spaces, or "tabs"
+indent_style = 4
+
+# Line endings: "unix" (\n), "windows" (\r\n), or "native"
+line_ending = "unix"
+
+# Brace style: "same_line" or "next_line"
+brace_style = "same_line"
+
+# Import grouping: "preserve", "alphabetical", or "grouped"
+import_grouping = "grouped"
+
+# Add trailing commas in multi-line constructs
+trailing_commas = true
+
+# Spacing around colons in type annotations
+space_after_colon = true
+space_before_colon = false
+
+# Spaces around binary operators
+spaces_around_operators = true
+
+# Blank lines between top-level items
+blank_lines_between_items = 1
+
+# Maximum consecutive blank lines
+max_blank_lines = 2
+
+# String quote style: '"' or "'"
+string_quote = '"'
+
+# Align struct fields
+align_struct_fields = false
+
+# Align match arms
+align_match_arms = false
+
+# Remove unnecessary parentheses
+remove_unnecessary_parens = true
+
+# Reorder impl items (type, const, fn)
+reorder_impl_items = true
+
+# Format doc comments
+format_doc_comments = true
+
+# Wrap comments at max_line_width
+wrap_comments = true
+
+# Ignore patterns (files/directories)
+ignore_patterns = ["target", ".git", "node_modules"]
+"#.to_string()
+    }
+
+    /// Generate profile-based config
+    pub fn generate_for_profile(profile: FormatProfile) -> String {
+        let config = profile.config();
+
+        format!(r#"# BuildFmt Configuration - {:?} Profile
+
+max_line_width = {}
+indent_style = {}
+line_ending = "{}"
+brace_style = "{}"
+trailing_commas = {}
+blank_lines_between_items = {}
+max_blank_lines = {}
+"#,
+            profile,
+            config.max_line_width,
+            match config.indent_style {
+                IndentStyle::Spaces(n) => n.to_string(),
+                IndentStyle::Tabs => "\"tabs\"".to_string(),
+            },
+            match config.line_ending {
+                LineEnding::Unix => "unix",
+                LineEnding::Windows => "windows",
+                LineEnding::Native => "native",
+            },
+            match config.brace_style {
+                BraceStyle::SameLine => "same_line",
+                BraceStyle::NextLine | BraceStyle::Allman => "next_line",
+            },
+            config.trailing_commas,
+            config.blank_lines_between_items,
+            config.max_blank_lines,
+        )
+    }
+}
+
+// =============================================================================
+// EDITORCONFIG SUPPORT
+// =============================================================================
+
+/// EditorConfig integration
+pub struct EditorConfigReader;
+
+impl EditorConfigReader {
+    /// Read .editorconfig and convert to FormatConfig
+    pub fn read(path: &Path) -> Result<FormatConfig, FormatError> {
+        let config_path = Self::find_editorconfig(path)?;
+        let content = fs::read_to_string(&config_path)
+            .map_err(|e| FormatError::ConfigError(e.to_string()))?;
+
+        Self::parse(&content)
+    }
+
+    /// Find .editorconfig file
+    fn find_editorconfig(start_path: &Path) -> Result<PathBuf, FormatError> {
+        let mut current = start_path.to_path_buf();
+
+        loop {
+            let config_path = current.join(".editorconfig");
+            if config_path.exists() {
+                return Ok(config_path);
+            }
+
+            if !current.pop() {
+                return Err(FormatError::ConfigError("No .editorconfig found".to_string()));
+            }
+        }
+    }
+
+    /// Parse .editorconfig content
+    fn parse(content: &str) -> Result<FormatConfig, FormatError> {
+        let mut config = FormatConfig::default();
+        let mut in_build_section = false;
+
+        for line in content.lines() {
+            let line = line.trim();
+
+            // Skip comments and empty lines
+            if line.is_empty() || line.starts_with('#') || line.starts_with(';') {
+                continue;
+            }
+
+            // Check for section
+            if line.starts_with('[') && line.ends_with(']') {
+                let pattern = &line[1..line.len() - 1];
+                in_build_section = pattern == "*.bld" || pattern == "*";
+                continue;
+            }
+
+            if !in_build_section {
+                continue;
+            }
+
+            // Parse key-value
+            if let Some((key, value)) = line.split_once('=') {
+                let key = key.trim();
+                let value = value.trim();
+
+                match key {
+                    "indent_style" => {
+                        config.indent_style = match value {
+                            "tab" => IndentStyle::Tabs,
+                            "space" => IndentStyle::Spaces(4),
+                            _ => IndentStyle::Spaces(4),
+                        };
+                    }
+                    "indent_size" => {
+                        if let Ok(size) = value.parse::<u8>() {
+                            if let IndentStyle::Spaces(_) = config.indent_style {
+                                config.indent_style = IndentStyle::Spaces(size);
+                            }
+                        }
+                    }
+                    "max_line_length" => {
+                        if let Ok(width) = value.parse() {
+                            config.max_line_width = width;
+                        }
+                    }
+                    "end_of_line" => {
+                        config.line_ending = match value {
+                            "lf" => LineEnding::Unix,
+                            "crlf" => LineEnding::Windows,
+                            "native" => LineEnding::Native,
+                            _ => LineEnding::Unix,
+                        };
+                    }
+                    "insert_final_newline" => {
+                        // Already handled by default
+                    }
+                    "trim_trailing_whitespace" => {
+                        // Already handled by default
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        Ok(config)
+    }
+}
+
+// =============================================================================
+// FORMAT STATISTICS
+// =============================================================================
+
+/// Format statistics collector
+pub struct FormatStats {
+    pub files_processed: usize,
+    pub files_changed: usize,
+    pub lines_processed: usize,
+    pub lines_changed: usize,
+    pub violations_found: usize,
+    pub violations_fixed: usize,
+    pub duration_ms: u64,
+}
+
+impl FormatStats {
+    pub fn new() -> Self {
+        FormatStats {
+            files_processed: 0,
+            files_changed: 0,
+            lines_processed: 0,
+            lines_changed: 0,
+            violations_found: 0,
+            violations_fixed: 0,
+            duration_ms: 0,
+        }
+    }
+
+    /// Merge stats
+    pub fn merge(&mut self, other: &FormatStats) {
+        self.files_processed += other.files_processed;
+        self.files_changed += other.files_changed;
+        self.lines_processed += other.lines_processed;
+        self.lines_changed += other.lines_changed;
+        self.violations_found += other.violations_found;
+        self.violations_fixed += other.violations_fixed;
+        self.duration_ms += other.duration_ms;
+    }
+
+    /// Print summary
+    pub fn print_summary(&self) {
+        println!("Format Statistics:");
+        println!("  Files processed: {}", self.files_processed);
+        println!("  Files changed: {}", self.files_changed);
+        println!("  Lines processed: {}", self.lines_processed);
+        println!("  Lines changed: {}", self.lines_changed);
+        println!("  Violations found: {}", self.violations_found);
+        println!("  Violations fixed: {}", self.violations_fixed);
+        println!("  Duration: {}ms", self.duration_ms);
+    }
+}
+
+// =============================================================================
+// TESTS
+// =============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_basic_formatting() {
+        let mut formatter = Formatter::new(FormatConfig::default());
+
+        let input = "fn   foo( ) {let x=1;}";
+        let result = formatter.format(input).unwrap();
+
+        assert!(result.contains("fn foo()"));
+    }
+
+    #[test]
+    fn test_import_organization() {
+        let organizer = ImportOrganizer::new(FormatConfig::default());
+
+        let input = "use crate::foo;\nuse std::io;\nuse external::bar;";
+        let result = organizer.organize(input);
+
+        // std should come first
+        assert!(result.find("std::io").unwrap() < result.find("external::bar").unwrap());
+    }
+
+    #[test]
+    fn test_indentation() {
+        let mut formatter = Formatter::new(FormatConfig::default());
+
+        let input = "fn foo() {\nlet x = 1;\n}";
+        let result = formatter.format(input).unwrap();
+
+        assert!(result.contains("    let x = 1"));
+    }
+
+    #[test]
+    fn test_trailing_newline() {
+        let mut formatter = Formatter::new(FormatConfig::default());
+
+        let input = "let x = 1";
+        let result = formatter.format(input).unwrap();
+
+        assert!(result.ends_with('\n'));
+    }
+}

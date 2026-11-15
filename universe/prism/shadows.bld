@@ -1,0 +1,1119 @@
+// =============================================================================
+// PRISM: Shadow Rendering Shaders
+// =============================================================================
+// Cascaded shadow maps, variance shadows, contact hardening, and shadow volumes
+// Part of the BUILD-UNIVERSE Rendering Stack
+// =============================================================================
+
+@module prism::shadows
+@version 1.0.0
+@author BUILD Team
+
+// =============================================================================
+// SHADOW CONFIGURATION
+// =============================================================================
+
+/// Shadow map configuration
+struct ShadowConfig {
+    // Resolution
+    shadow_map_size: u32,
+    cascade_count: u32,
+
+    // Cascades
+    cascade_splits: [f32; 4],
+    cascade_blend_distance: f32,
+
+    // Filtering
+    filter_mode: ShadowFilterMode,
+    filter_size: f32,
+    pcf_samples: u32,
+
+    // Bias
+    depth_bias: f32,
+    slope_bias: f32,
+    normal_bias: f32,
+
+    // Soft shadows
+    light_size: f32,
+    blocker_search_samples: u32,
+    pcf_filter_samples: u32,
+
+    // VSM/ESM
+    variance_min: f32,
+    light_bleed_reduction: f32,
+    esm_exponent: f32,
+
+    // Contact shadows
+    enable_contact_shadows: bool,
+    contact_shadow_length: f32,
+    contact_shadow_thickness: f32,
+}
+
+enum ShadowFilterMode {
+    None,
+    PCF,
+    PCSS,
+    VSM,
+    ESM,
+    EVSM,
+    MSM,
+}
+
+impl ShadowConfig {
+    pub fn high_quality() -> Self {
+        Self {
+            shadow_map_size: 4096,
+            cascade_count: 4,
+            cascade_splits: [0.05, 0.15, 0.4, 1.0],
+            cascade_blend_distance: 0.1,
+
+            filter_mode: ShadowFilterMode::PCSS,
+            filter_size: 1.0,
+            pcf_samples: 16,
+
+            depth_bias: 0.0001,
+            slope_bias: 0.001,
+            normal_bias: 0.01,
+
+            light_size: 0.02,
+            blocker_search_samples: 16,
+            pcf_filter_samples: 32,
+
+            variance_min: 0.0001,
+            light_bleed_reduction: 0.2,
+            esm_exponent: 80.0,
+
+            enable_contact_shadows: true,
+            contact_shadow_length: 0.5,
+            contact_shadow_thickness: 0.01,
+        }
+    }
+
+    pub fn medium() -> Self {
+        Self {
+            shadow_map_size: 2048,
+            cascade_count: 3,
+            filter_mode: ShadowFilterMode::PCF,
+            pcf_samples: 8,
+            enable_contact_shadows: false,
+            ..Self::high_quality()
+        }
+    }
+
+    pub fn low() -> Self {
+        Self {
+            shadow_map_size: 1024,
+            cascade_count: 2,
+            filter_mode: ShadowFilterMode::PCF,
+            pcf_samples: 4,
+            enable_contact_shadows: false,
+            ..Self::high_quality()
+        }
+    }
+}
+
+/// Cascade data
+#[repr(C)]
+struct CascadeData {
+    view_projection: [[f32; 4]; 4],
+    world_to_shadow: [[f32; 4]; 4],
+    split_depth: f32,
+    texel_size: f32,
+    bias: f32,
+    _padding: f32,
+}
+
+// =============================================================================
+// SHADOW MAP GENERATION SHADERS
+// =============================================================================
+
+const SHADOW_MAP_VERTEX_SHADER: &str = r#"
+//-----------------------------------------------------------------------------
+// Shadow Map Generation Vertex Shader
+//-----------------------------------------------------------------------------
+
+cbuffer ShadowParams : register(b0) {
+    float4x4 light_view_projection;
+    float depth_bias;
+    float slope_bias;
+    float2 _padding;
+}
+
+cbuffer PerObject : register(b1) {
+    float4x4 world;
+}
+
+struct VSInput {
+    float3 position : POSITION;
+    float2 texcoord : TEXCOORD0;
+};
+
+struct PSInput {
+    float4 position : SV_POSITION;
+    float2 texcoord : TEXCOORD0;
+    float depth : TEXCOORD1;
+};
+
+PSInput ShadowMapVS(VSInput input) {
+    PSInput output;
+
+    float4 world_pos = mul(world, float4(input.position, 1.0));
+    output.position = mul(light_view_projection, world_pos);
+
+    // Apply depth bias
+    output.position.z += depth_bias;
+
+    output.texcoord = input.texcoord;
+    output.depth = output.position.z / output.position.w;
+
+    return output;
+}
+"#;
+
+const SHADOW_MAP_PIXEL_SHADER: &str = r#"
+//-----------------------------------------------------------------------------
+// Shadow Map Generation Pixel Shader
+//-----------------------------------------------------------------------------
+
+cbuffer MaterialParams : register(b2) {
+    float alpha_cutoff;
+    uint use_alpha_mask;
+    float2 _padding;
+}
+
+Texture2D<float4> albedo_texture : register(t0);
+SamplerState linear_sampler : register(s0);
+
+struct PSInput {
+    float4 position : SV_POSITION;
+    float2 texcoord : TEXCOORD0;
+    float depth : TEXCOORD1;
+};
+
+float ShadowMapPS(PSInput input) : SV_TARGET {
+    // Alpha testing for foliage/cutout
+    if (use_alpha_mask) {
+        float alpha = albedo_texture.Sample(linear_sampler, input.texcoord).a;
+        if (alpha < alpha_cutoff) {
+            discard;
+        }
+    }
+
+    return input.depth;
+}
+
+// Variance shadow map output
+float2 VarianceShadowMapPS(PSInput input) : SV_TARGET {
+    float depth = input.depth;
+    float dx = ddx(depth);
+    float dy = ddy(depth);
+    float moment2 = depth * depth + 0.25 * (dx * dx + dy * dy);
+
+    return float2(depth, moment2);
+}
+
+// Exponential shadow map output
+float ExponentialShadowMapPS(PSInput input) : SV_TARGET {
+    return exp(80.0 * input.depth);
+}
+
+// EVSM output (Exponential Variance Shadow Maps)
+float4 EVSMShadowMapPS(PSInput input) : SV_TARGET {
+    float depth = input.depth;
+    float pos = exp(40.0 * depth);
+    float neg = -exp(-40.0 * depth);
+
+    return float4(pos, pos * pos, neg, neg * neg);
+}
+"#;
+
+// =============================================================================
+// CASCADED SHADOW MAP SHADERS
+// =============================================================================
+
+const CSM_SHADER: &str = r#"
+//-----------------------------------------------------------------------------
+// Cascaded Shadow Maps
+//-----------------------------------------------------------------------------
+
+#define MAX_CASCADES 4
+
+cbuffer CSMParams : register(b0) {
+    float4x4 cascade_view_projections[MAX_CASCADES];
+    float4 cascade_splits;
+    float4 cascade_scales[MAX_CASCADES];
+    float4 cascade_offsets[MAX_CASCADES];
+
+    float3 light_direction;
+    int cascade_count;
+
+    float shadow_distance;
+    float cascade_blend;
+    float2 shadow_map_size;
+}
+
+Texture2DArray<float> shadow_maps : register(t0);
+SamplerComparisonState shadow_sampler : register(s0);
+SamplerState point_sampler : register(s1);
+
+// Get cascade index based on view depth
+int GetCascadeIndex(float view_depth) {
+    int cascade = 0;
+    for (int i = 0; i < cascade_count - 1; i++) {
+        if (view_depth > cascade_splits[i] * shadow_distance) {
+            cascade = i + 1;
+        }
+    }
+    return cascade;
+}
+
+// Get shadow UV for cascade
+float3 GetShadowUV(float3 world_pos, int cascade) {
+    float4 shadow_pos = mul(cascade_view_projections[cascade], float4(world_pos, 1.0));
+    shadow_pos.xyz /= shadow_pos.w;
+
+    float2 uv = shadow_pos.xy * 0.5 + 0.5;
+    uv.y = 1.0 - uv.y;
+
+    return float3(uv, shadow_pos.z);
+}
+
+// Basic PCF sampling
+float PCFSample(float3 shadow_uv, int cascade, int samples) {
+    float shadow = 0.0;
+    float2 texel_size = 1.0 / shadow_map_size;
+
+    int half_samples = samples / 2;
+    for (int y = -half_samples; y <= half_samples; y++) {
+        for (int x = -half_samples; x <= half_samples; x++) {
+            float2 offset = float2(x, y) * texel_size;
+            shadow += shadow_maps.SampleCmpLevelZero(shadow_sampler,
+                float3(shadow_uv.xy + offset, cascade), shadow_uv.z);
+        }
+    }
+
+    return shadow / float((samples + 1) * (samples + 1));
+}
+
+// Optimized PCF with rotated kernel
+float PCFSampleRotated(float3 shadow_uv, int cascade, float2 rotation) {
+    float shadow = 0.0;
+    float2 texel_size = 1.0 / shadow_map_size;
+
+    // Rotated Poisson disk samples
+    float2 samples[16] = {
+        float2(-0.94201624, -0.39906216),
+        float2(0.94558609, -0.76890725),
+        float2(-0.094184101, -0.92938870),
+        float2(0.34495938, 0.29387760),
+        float2(-0.91588581, 0.45771432),
+        float2(-0.81544232, -0.87912464),
+        float2(-0.38277543, 0.27676845),
+        float2(0.97484398, 0.75648379),
+        float2(0.44323325, -0.97511554),
+        float2(0.53742981, -0.47373420),
+        float2(-0.26496911, -0.41893023),
+        float2(0.79197514, 0.19090188),
+        float2(-0.24188840, 0.99706507),
+        float2(-0.81409955, 0.91437590),
+        float2(0.19984126, 0.78641367),
+        float2(0.14383161, -0.14100790)
+    };
+
+    for (int i = 0; i < 16; i++) {
+        float2 offset = samples[i];
+        // Rotate offset
+        offset = float2(
+            offset.x * rotation.x - offset.y * rotation.y,
+            offset.x * rotation.y + offset.y * rotation.x
+        );
+        offset *= texel_size * 2.0;
+
+        shadow += shadow_maps.SampleCmpLevelZero(shadow_sampler,
+            float3(shadow_uv.xy + offset, cascade), shadow_uv.z);
+    }
+
+    return shadow / 16.0;
+}
+
+// Cascade blending
+float SampleCSM(float3 world_pos, float view_depth) {
+    int cascade = GetCascadeIndex(view_depth);
+    float3 shadow_uv = GetShadowUV(world_pos, cascade);
+
+    // Check UV bounds
+    if (any(shadow_uv.xy < 0.0) || any(shadow_uv.xy > 1.0)) {
+        return 1.0;
+    }
+
+    float shadow = PCFSample(shadow_uv, cascade, 3);
+
+    // Blend between cascades
+    if (cascade < cascade_count - 1) {
+        float blend_region = cascade_splits[cascade] * shadow_distance * cascade_blend;
+        float blend_distance = cascade_splits[cascade] * shadow_distance - view_depth;
+
+        if (blend_distance < blend_region) {
+            float blend_factor = blend_distance / blend_region;
+
+            int next_cascade = cascade + 1;
+            float3 next_shadow_uv = GetShadowUV(world_pos, next_cascade);
+            float next_shadow = PCFSample(next_shadow_uv, next_cascade, 3);
+
+            shadow = lerp(next_shadow, shadow, blend_factor);
+        }
+    }
+
+    return shadow;
+}
+"#;
+
+// =============================================================================
+// PCSS (PERCENTAGE CLOSER SOFT SHADOWS)
+// =============================================================================
+
+const PCSS_SHADER: &str = r#"
+//-----------------------------------------------------------------------------
+// Percentage Closer Soft Shadows (PCSS)
+//-----------------------------------------------------------------------------
+
+cbuffer PCSSParams : register(b1) {
+    float light_size;
+    float blocker_search_radius;
+    int blocker_samples;
+    int pcf_samples;
+    float near_plane;
+    float3 _padding;
+}
+
+Texture2D<float> shadow_map : register(t0);
+SamplerState point_sampler : register(s0);
+SamplerComparisonState shadow_sampler : register(s1);
+
+// Poisson disk samples for blocker search
+static float2 blocker_poisson[16] = {
+    float2(-0.94201624, -0.39906216),
+    float2(0.94558609, -0.76890725),
+    float2(-0.094184101, -0.92938870),
+    float2(0.34495938, 0.29387760),
+    float2(-0.91588581, 0.45771432),
+    float2(-0.81544232, -0.87912464),
+    float2(-0.38277543, 0.27676845),
+    float2(0.97484398, 0.75648379),
+    float2(0.44323325, -0.97511554),
+    float2(0.53742981, -0.47373420),
+    float2(-0.26496911, -0.41893023),
+    float2(0.79197514, 0.19090188),
+    float2(-0.24188840, 0.99706507),
+    float2(-0.81409955, 0.91437590),
+    float2(0.19984126, 0.78641367),
+    float2(0.14383161, -0.14100790)
+};
+
+// Vogel disk for PCF
+float2 VogelDiskSample(int sample_index, int samples_count, float phi) {
+    float golden_angle = 2.4;
+    float r = sqrt(float(sample_index) + 0.5) / sqrt(float(samples_count));
+    float theta = float(sample_index) * golden_angle + phi;
+    return float2(r * cos(theta), r * sin(theta));
+}
+
+// Find average blocker depth
+float FindBlockerDepth(float2 uv, float receiver_depth, float search_radius) {
+    float blocker_sum = 0.0;
+    int blocker_count = 0;
+
+    float2 texel_size = 1.0 / float2(2048, 2048);  // Shadow map size
+
+    for (int i = 0; i < blocker_samples; i++) {
+        float2 offset = blocker_poisson[i] * search_radius * texel_size;
+        float shadow_depth = shadow_map.SampleLevel(point_sampler, uv + offset, 0).r;
+
+        if (shadow_depth < receiver_depth) {
+            blocker_sum += shadow_depth;
+            blocker_count++;
+        }
+    }
+
+    if (blocker_count == 0) {
+        return -1.0;  // No blockers found
+    }
+
+    return blocker_sum / float(blocker_count);
+}
+
+// Calculate penumbra size based on blocker depth
+float CalculatePenumbraSize(float receiver_depth, float blocker_depth) {
+    return (receiver_depth - blocker_depth) * light_size / blocker_depth;
+}
+
+// Main PCSS sampling
+float PCSS(float2 uv, float receiver_depth, float2 random_rotation) {
+    // Step 1: Blocker search
+    float blocker_depth = FindBlockerDepth(uv, receiver_depth, blocker_search_radius);
+
+    if (blocker_depth < 0.0) {
+        return 1.0;  // No blockers - fully lit
+    }
+
+    // Step 2: Penumbra estimation
+    float penumbra_size = CalculatePenumbraSize(receiver_depth, blocker_depth);
+
+    // Step 3: PCF filtering with penumbra-based radius
+    float shadow = 0.0;
+    float2 texel_size = 1.0 / float2(2048, 2048);
+
+    float phi = random_rotation.x * 6.28318;  // Random rotation angle
+
+    for (int i = 0; i < pcf_samples; i++) {
+        float2 offset = VogelDiskSample(i, pcf_samples, phi);
+
+        // Rotate offset
+        float c = cos(phi);
+        float s = sin(phi);
+        offset = float2(
+            offset.x * c - offset.y * s,
+            offset.x * s + offset.y * c
+        );
+
+        offset *= penumbra_size * texel_size;
+
+        shadow += shadow_map.SampleCmpLevelZero(shadow_sampler, uv + offset, receiver_depth);
+    }
+
+    return shadow / float(pcf_samples);
+}
+"#;
+
+// =============================================================================
+// VARIANCE SHADOW MAPS
+// =============================================================================
+
+const VSM_SHADER: &str = r#"
+//-----------------------------------------------------------------------------
+// Variance Shadow Maps (VSM)
+//-----------------------------------------------------------------------------
+
+cbuffer VSMParams : register(b0) {
+    float min_variance;
+    float light_bleed_reduction;
+    float2 _padding;
+}
+
+Texture2D<float2> vsm_shadow_map : register(t0);
+SamplerState linear_sampler : register(s0);
+
+// Chebyshev's inequality for upper bound on visibility
+float ChebyshevUpperBound(float2 moments, float depth) {
+    // Surface is fully lit
+    if (depth <= moments.x) {
+        return 1.0;
+    }
+
+    // Calculate variance
+    float variance = moments.y - (moments.x * moments.x);
+    variance = max(variance, min_variance);
+
+    // Calculate probability
+    float d = depth - moments.x;
+    float p_max = variance / (variance + d * d);
+
+    // Light bleeding reduction
+    p_max = saturate((p_max - light_bleed_reduction) / (1.0 - light_bleed_reduction));
+
+    return p_max;
+}
+
+float VSMShadow(float2 uv, float depth) {
+    float2 moments = vsm_shadow_map.Sample(linear_sampler, uv).rg;
+    return ChebyshevUpperBound(moments, depth);
+}
+
+// VSM with blur pass
+Texture2D<float2> vsm_input : register(t0);
+RWTexture2D<float2> vsm_output : register(u0);
+
+[numthreads(8, 8, 1)]
+void VSMBlurHorizontalCS(uint3 id : SV_DispatchThreadID) {
+    float2 result = float2(0, 0);
+
+    // Gaussian weights for 7x1 kernel
+    float weights[7] = { 0.00598, 0.060626, 0.241843, 0.383103, 0.241843, 0.060626, 0.00598 };
+
+    for (int i = -3; i <= 3; i++) {
+        int2 coord = int2(id.x + i, id.y);
+        result += vsm_input[coord] * weights[i + 3];
+    }
+
+    vsm_output[id.xy] = result;
+}
+
+[numthreads(8, 8, 1)]
+void VSMBlurVerticalCS(uint3 id : SV_DispatchThreadID) {
+    float2 result = float2(0, 0);
+
+    float weights[7] = { 0.00598, 0.060626, 0.241843, 0.383103, 0.241843, 0.060626, 0.00598 };
+
+    for (int i = -3; i <= 3; i++) {
+        int2 coord = int2(id.x, id.y + i);
+        result += vsm_input[coord] * weights[i + 3];
+    }
+
+    vsm_output[id.xy] = result;
+}
+"#;
+
+// =============================================================================
+// EXPONENTIAL SHADOW MAPS
+// =============================================================================
+
+const ESM_SHADER: &str = r#"
+//-----------------------------------------------------------------------------
+// Exponential Shadow Maps (ESM)
+//-----------------------------------------------------------------------------
+
+cbuffer ESMParams : register(b0) {
+    float esm_exponent;
+    float3 _padding;
+}
+
+Texture2D<float> esm_shadow_map : register(t0);
+SamplerState linear_sampler : register(s0);
+
+float ESMShadow(float2 uv, float depth) {
+    float occluder = esm_shadow_map.Sample(linear_sampler, uv).r;
+    float receiver = exp(esm_exponent * depth);
+
+    return saturate(occluder / receiver);
+}
+
+// EVSM - Exponential Variance Shadow Maps (combines VSM and ESM)
+Texture2D<float4> evsm_shadow_map : register(t0);
+
+float EVSMShadow(float2 uv, float depth) {
+    float4 moments = evsm_shadow_map.Sample(linear_sampler, uv);
+
+    // Positive exponent
+    float pos_depth = exp(40.0 * depth);
+    float pos_variance = moments.y - moments.x * moments.x;
+    pos_variance = max(pos_variance, 0.0001);
+    float pos_d = pos_depth - moments.x;
+    float pos_p = pos_variance / (pos_variance + pos_d * pos_d);
+
+    // Negative exponent
+    float neg_depth = -exp(-40.0 * depth);
+    float neg_variance = moments.w - moments.z * moments.z;
+    neg_variance = max(neg_variance, 0.0001);
+    float neg_d = neg_depth - moments.z;
+    float neg_p = neg_variance / (neg_variance + neg_d * neg_d);
+
+    return min(pos_p, neg_p);
+}
+"#;
+
+// =============================================================================
+// MOMENT SHADOW MAPS
+// =============================================================================
+
+const MSM_SHADER: &str = r#"
+//-----------------------------------------------------------------------------
+// Moment Shadow Maps (MSM)
+//-----------------------------------------------------------------------------
+
+// MSM uses 4 moments instead of 2 for better quality
+// Requires more math but handles more complex cases
+
+Texture2D<float4> msm_shadow_map : register(t0);
+SamplerState linear_sampler : register(s0);
+
+// Solve for shadow using 4 moments
+float MSMShadow(float2 uv, float depth) {
+    float4 moments = msm_shadow_map.Sample(linear_sampler, uv);
+
+    // Transform to centered moments
+    float4 b = lerp(moments, float4(0.5, 0.5, 0.5, 0.5), 0.0001);
+
+    // Compute shadow using Hamburger 4-moment algorithm
+    float L32D22 = mad(-b.x, b.y, b.z);
+    float D22 = mad(-b.x, b.x, b.y);
+    float SquaredDepthVariance = mad(-b.y, b.y, b.w);
+
+    float D33D22 = dot(float2(SquaredDepthVariance, -L32D22), float2(D22, L32D22));
+    float InvD22 = 1.0 / D22;
+    float L32 = L32D22 * InvD22;
+
+    float3 z;
+    z.x = depth;
+
+    float3 c = float3(1.0, z.x, z.x * z.x);
+    c.y -= b.x;
+    c.z -= b.y + L32 * c.y;
+    c.y *= InvD22;
+    c.z *= D22 / D33D22;
+    c.y -= L32 * c.z;
+    c.x -= dot(c.yz, b.xy);
+
+    float p = c.y / c.z;
+    float q = c.x / c.z;
+    float r = sqrt(p * p * 0.25 - q);
+    z.y = -p * 0.5 - r;
+    z.z = -p * 0.5 + r;
+
+    float4 Switch = (z.z < z.x) ? float4(z.y, z.x, 1.0, 1.0) :
+                    ((z.y < z.x) ? float4(z.x, z.y, 0.0, 1.0) :
+                    float4(0, 0, 0, 0));
+
+    float Quotient = (Switch.x * z.z - b.x * (Switch.x + z.z) + b.y) /
+                     ((z.z - Switch.y) * (z.x - z.y));
+
+    return saturate(Switch.z + Switch.w * Quotient);
+}
+"#;
+
+// =============================================================================
+// CONTACT SHADOWS
+// =============================================================================
+
+const CONTACT_SHADOW_SHADER: &str = r#"
+//-----------------------------------------------------------------------------
+// Screen-Space Contact Shadows
+//-----------------------------------------------------------------------------
+
+cbuffer ContactShadowParams : register(b0) {
+    float4x4 view_projection;
+    float4x4 inv_view_projection;
+
+    float3 light_direction;
+    float max_distance;
+
+    float3 camera_position;
+    float thickness;
+
+    int max_steps;
+    float step_scale;
+    float2 screen_size;
+}
+
+Texture2D<float> depth_texture : register(t0);
+Texture2D<float4> gbuffer_normal : register(t1);
+SamplerState point_sampler : register(s0);
+
+// Reconstruct world position from depth
+float3 ReconstructPosition(float2 uv, float depth) {
+    float4 clip = float4(uv * 2.0 - 1.0, depth, 1.0);
+    clip.y = -clip.y;
+    float4 world = mul(inv_view_projection, clip);
+    return world.xyz / world.w;
+}
+
+struct VSOutput {
+    float4 position : SV_POSITION;
+    float2 texcoord : TEXCOORD0;
+};
+
+float ContactShadowPS(VSOutput input) : SV_TARGET {
+    float depth = depth_texture.Sample(point_sampler, input.texcoord).r;
+
+    if (depth >= 1.0) return 1.0;
+
+    float3 world_pos = ReconstructPosition(input.texcoord, depth);
+    float3 normal = gbuffer_normal.Sample(point_sampler, input.texcoord).xyz * 2.0 - 1.0;
+
+    // Start slightly above surface
+    float3 ray_start = world_pos + normal * 0.01;
+    float3 ray_dir = -light_direction;
+
+    // Project ray direction to screen space
+    float4 ray_end_clip = mul(view_projection, float4(ray_start + ray_dir * max_distance, 1.0));
+    ray_end_clip /= ray_end_clip.w;
+    float2 ray_end_screen = ray_end_clip.xy * 0.5 + 0.5;
+    ray_end_screen.y = 1.0 - ray_end_screen.y;
+
+    float4 ray_start_clip = mul(view_projection, float4(ray_start, 1.0));
+    ray_start_clip /= ray_start_clip.w;
+    float2 ray_start_screen = ray_start_clip.xy * 0.5 + 0.5;
+    ray_start_screen.y = 1.0 - ray_start_screen.y;
+
+    float2 ray_screen = ray_end_screen - ray_start_screen;
+    float ray_screen_length = length(ray_screen);
+
+    if (ray_screen_length < 0.001) return 1.0;
+
+    // March along ray in screen space
+    float2 step_size = ray_screen / float(max_steps);
+    float2 current_uv = ray_start_screen;
+    float current_depth = ray_start_clip.z;
+    float depth_step = (ray_end_clip.z - ray_start_clip.z) / float(max_steps);
+
+    for (int i = 1; i <= max_steps; i++) {
+        current_uv += step_size;
+        current_depth += depth_step;
+
+        // Check bounds
+        if (any(current_uv < 0.0) || any(current_uv > 1.0)) {
+            break;
+        }
+
+        float scene_depth = depth_texture.Sample(point_sampler, current_uv).r;
+
+        // Check for intersection
+        if (current_depth > scene_depth && current_depth - scene_depth < thickness) {
+            // Binary search refinement
+            float2 refined_uv = current_uv - step_size * 0.5;
+            float refined_depth = current_depth - depth_step * 0.5;
+
+            for (int j = 0; j < 4; j++) {
+                float refined_scene_depth = depth_texture.Sample(point_sampler, refined_uv).r;
+                float2 half_step = step_size * 0.5;
+                float half_depth_step = depth_step * 0.5;
+
+                if (refined_depth > refined_scene_depth) {
+                    refined_uv -= half_step * 0.5;
+                    refined_depth -= half_depth_step * 0.5;
+                } else {
+                    refined_uv += half_step * 0.5;
+                    refined_depth += half_depth_step * 0.5;
+                }
+            }
+
+            // Fade based on distance along ray
+            float fade = 1.0 - float(i) / float(max_steps);
+            return 1.0 - fade;
+        }
+    }
+
+    return 1.0;
+}
+"#;
+
+// =============================================================================
+// SHADOW VOLUMES
+// =============================================================================
+
+const SHADOW_VOLUME_SHADER: &str = r#"
+//-----------------------------------------------------------------------------
+// Shadow Volumes (Stencil-Based)
+//-----------------------------------------------------------------------------
+
+// Shadow volume extrusion vertex shader
+cbuffer ShadowVolumeParams : register(b0) {
+    float4x4 world;
+    float4x4 view_projection;
+    float3 light_position;
+    float extrusion_distance;
+    int light_type;  // 0 = point, 1 = directional
+    float3 light_direction;
+}
+
+struct VSInput {
+    float3 position : POSITION;
+    float3 normal : NORMAL;
+};
+
+struct PSInput {
+    float4 position : SV_POSITION;
+};
+
+// Find silhouette edges and extrude
+PSInput ShadowVolumeVS(VSInput input) {
+    PSInput output;
+
+    float3 world_pos = mul(world, float4(input.position, 1.0)).xyz;
+    float3 world_normal = mul((float3x3)world, input.normal);
+
+    float3 light_dir;
+    if (light_type == 0) {
+        light_dir = normalize(light_position - world_pos);
+    } else {
+        light_dir = -light_direction;
+    }
+
+    // Check if vertex is facing away from light
+    float facing = dot(world_normal, light_dir);
+
+    // Extrude vertices facing away from light
+    if (facing < 0.0) {
+        if (light_type == 0) {
+            // Point light - extrude away from light
+            world_pos = world_pos - light_dir * extrusion_distance;
+        } else {
+            // Directional light - extrude in light direction
+            world_pos = world_pos + light_direction * extrusion_distance;
+        }
+    }
+
+    output.position = mul(view_projection, float4(world_pos, 1.0));
+
+    return output;
+}
+
+// Depth fail (Carmack's Reverse) - increment on back face depth fail
+// This requires two passes with different stencil operations
+
+// Pass 1: Render back faces, increment stencil on depth fail
+// Pass 2: Render front faces, decrement stencil on depth fail
+
+float4 ShadowVolumePS(PSInput input) : SV_TARGET {
+    // No color output - only affects stencil
+    discard;
+    return float4(0, 0, 0, 0);
+}
+"#;
+
+// =============================================================================
+// SHADOW SYSTEM
+// =============================================================================
+
+/// Complete shadow mapping system
+struct ShadowSystem {
+    config: ShadowConfig,
+
+    // Cascade shadow maps
+    cascade_shadow_maps: Vec<TextureHandle>,
+    cascade_data: Vec<CascadeData>,
+
+    // Point light shadows
+    point_shadow_cubemaps: Vec<TextureHandle>,
+
+    // Spot light shadows
+    spot_shadow_maps: Vec<TextureHandle>,
+
+    // Variance/ESM processing
+    vsm_blur_temp: TextureHandle,
+
+    // Contact shadows
+    contact_shadow_target: TextureHandle,
+}
+
+impl ShadowSystem {
+    pub fn new(device: &RenderDevice, config: ShadowConfig) -> Self {
+        // Create cascade shadow maps
+        let cascade_shadow_maps: Vec<TextureHandle> = (0..config.cascade_count)
+            .map(|_| {
+                device.create_depth_texture(
+                    config.shadow_map_size,
+                    config.shadow_map_size,
+                    TextureFormat::D32F
+                )
+            })
+            .collect();
+
+        // VSM blur target
+        let vsm_blur_temp = device.create_render_target(
+            config.shadow_map_size,
+            config.shadow_map_size,
+            TextureFormat::RG32F
+        );
+
+        // Contact shadow target
+        let contact_shadow_target = device.create_render_target(
+            1920, 1080,
+            TextureFormat::R8
+        );
+
+        Self {
+            config,
+            cascade_shadow_maps,
+            cascade_data: Vec::new(),
+            point_shadow_cubemaps: Vec::new(),
+            spot_shadow_maps: Vec::new(),
+            vsm_blur_temp,
+            contact_shadow_target,
+        }
+    }
+
+    pub fn calculate_cascade_splits(&self, camera: &Camera, light_dir: vec3) -> Vec<CascadeData> {
+        let mut cascades = Vec::new();
+
+        let near = camera.near;
+        let far = camera.far.min(self.config.cascade_splits[3] * 1000.0);
+
+        for i in 0..self.config.cascade_count as usize {
+            let split_near = if i == 0 { near } else {
+                near + (far - near) * self.config.cascade_splits[i - 1]
+            };
+            let split_far = near + (far - near) * self.config.cascade_splits[i];
+
+            // Calculate light-space bounding box for this cascade
+            // ... (frustum corners calculation)
+
+            cascades.push(CascadeData {
+                view_projection: [[0.0; 4]; 4],
+                world_to_shadow: [[0.0; 4]; 4],
+                split_depth: split_far,
+                texel_size: 1.0 / self.config.shadow_map_size as f32,
+                bias: self.config.depth_bias,
+                _padding: 0.0,
+            });
+        }
+
+        cascades
+    }
+
+    pub fn render_cascades(&mut self, context: &RenderContext, camera: &Camera,
+                           light_dir: vec3, scene: &Scene) {
+        self.cascade_data = self.calculate_cascade_splits(camera, light_dir);
+
+        for (i, cascade) in self.cascade_data.iter().enumerate() {
+            context.set_depth_target(&self.cascade_shadow_maps[i]);
+            context.clear_depth(1.0);
+
+            context.bind_shader("shadow_map");
+            context.set_constant_buffer(0, &ShadowMapParams {
+                light_view_projection: cascade.view_projection,
+                depth_bias: self.config.depth_bias,
+                slope_bias: self.config.slope_bias,
+            });
+
+            // Render scene
+            for object in scene.objects.iter() {
+                context.set_constant_buffer(1, &object.world_matrix);
+                context.draw_mesh(&object.mesh);
+            }
+        }
+
+        // VSM/ESM blur if needed
+        match self.config.filter_mode {
+            ShadowFilterMode::VSM | ShadowFilterMode::ESM | ShadowFilterMode::EVSM => {
+                self.blur_shadow_maps(context);
+            }
+            _ => {}
+        }
+    }
+
+    fn blur_shadow_maps(&self, context: &RenderContext) {
+        for cascade in &self.cascade_shadow_maps {
+            // Horizontal blur
+            context.bind_compute_shader("vsm_blur_horizontal_cs");
+            context.set_srv(0, cascade);
+            context.set_uav(0, &self.vsm_blur_temp);
+            context.dispatch(self.config.shadow_map_size / 8, self.config.shadow_map_size / 8, 1);
+
+            // Vertical blur
+            context.bind_compute_shader("vsm_blur_vertical_cs");
+            context.set_srv(0, &self.vsm_blur_temp);
+            context.set_uav(0, cascade);
+            context.dispatch(self.config.shadow_map_size / 8, self.config.shadow_map_size / 8, 1);
+        }
+    }
+
+    pub fn render_contact_shadows(&self, context: &RenderContext, gbuffer: &GBuffer,
+                                   light_dir: vec3) {
+        if !self.config.enable_contact_shadows {
+            return;
+        }
+
+        context.set_render_target(&self.contact_shadow_target);
+        context.bind_shader("contact_shadows");
+
+        context.set_srv(0, &gbuffer.depth);
+        context.set_srv(1, &gbuffer.normal);
+
+        context.set_constant_buffer(0, &ContactShadowParams {
+            light_direction: light_dir,
+            max_distance: self.config.contact_shadow_length,
+            thickness: self.config.contact_shadow_thickness,
+            max_steps: 16,
+            step_scale: 1.0,
+        });
+
+        context.draw_fullscreen_triangle();
+    }
+
+    pub fn get_cascade_shadow_maps(&self) -> &[TextureHandle] {
+        &self.cascade_shadow_maps
+    }
+
+    pub fn get_cascade_data(&self) -> &[CascadeData] {
+        &self.cascade_data
+    }
+
+    pub fn get_contact_shadow_map(&self) -> &TextureHandle {
+        &self.contact_shadow_target
+    }
+}
+
+// Parameter structures
+#[repr(C)]
+struct ShadowMapParams {
+    light_view_projection: [[f32; 4]; 4],
+    depth_bias: f32,
+    slope_bias: f32,
+}
+
+#[repr(C)]
+struct ContactShadowParams {
+    light_direction: vec3,
+    max_distance: f32,
+    thickness: f32,
+    max_steps: i32,
+    step_scale: f32,
+}
+
+// Placeholder types
+type TextureHandle = u64;
+type vec3 = [f32; 3];
+
+enum TextureFormat { D32F, RG32F, R8 }
+
+struct RenderDevice;
+impl RenderDevice {
+    fn create_depth_texture(&self, _w: u32, _h: u32, _fmt: TextureFormat) -> TextureHandle { 0 }
+    fn create_render_target(&self, _w: u32, _h: u32, _fmt: TextureFormat) -> TextureHandle { 0 }
+}
+
+struct RenderContext;
+impl RenderContext {
+    fn set_depth_target(&self, _tex: &TextureHandle) {}
+    fn set_render_target(&self, _tex: &TextureHandle) {}
+    fn clear_depth(&self, _d: f32) {}
+    fn bind_shader(&self, _name: &str) {}
+    fn bind_compute_shader(&self, _name: &str) {}
+    fn set_constant_buffer<T>(&self, _slot: u32, _data: &T) {}
+    fn set_srv(&self, _slot: u32, _tex: &TextureHandle) {}
+    fn set_uav(&self, _slot: u32, _tex: &TextureHandle) {}
+    fn draw_mesh(&self, _mesh: &Mesh) {}
+    fn draw_fullscreen_triangle(&self) {}
+    fn dispatch(&self, _x: u32, _y: u32, _z: u32) {}
+}
+
+struct Camera {
+    near: f32,
+    far: f32,
+}
+
+struct Scene {
+    objects: Vec<SceneObject>,
+}
+
+struct SceneObject {
+    world_matrix: [[f32; 4]; 4],
+    mesh: Mesh,
+}
+
+struct Mesh;
+struct GBuffer {
+    depth: TextureHandle,
+    normal: TextureHandle,
+}
+
+// =============================================================================
+// MODULE EXPORTS
+// =============================================================================
+
+pub use ShadowConfig;
+pub use ShadowFilterMode;
+pub use ShadowSystem;
+pub use CascadeData;
+
+pub const SHADERS: &[(&str, &str)] = &[
+    ("shadow_map_vs", SHADOW_MAP_VERTEX_SHADER),
+    ("shadow_map_ps", SHADOW_MAP_PIXEL_SHADER),
+    ("csm", CSM_SHADER),
+    ("pcss", PCSS_SHADER),
+    ("vsm", VSM_SHADER),
+    ("esm", ESM_SHADER),
+    ("msm", MSM_SHADER),
+    ("contact_shadow", CONTACT_SHADOW_SHADER),
+    ("shadow_volume", SHADOW_VOLUME_SHADER),
+];

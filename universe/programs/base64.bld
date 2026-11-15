@@ -1,0 +1,238 @@
+// =============================================================================
+// qbase64 — Base64 encode/decode CLI tool written in BuildLang
+// =============================================================================
+// The fourth showcase program compiled to a native binary.
+// Usage:
+//   qbase64 -e file.txt          encode file to base64
+//   qbase64 -d file.b64          decode base64 file
+//   echo "Hello" | qbase64 -e    encode from stdin
+//   echo "SGVsbG8=" | qbase64 -d decode from stdin
+//   qbase64 --help               usage info
+// =============================================================================
+
+// ---------------------------------------------------------------------------
+// Lookup tables stored in a struct so fields have type String (BuildString),
+// which supports .index_of() and .char_at() methods.
+// ---------------------------------------------------------------------------
+
+struct Tables {
+    ascii: String,
+    b64: String,
+}
+
+fn tables_new() -> Tables {
+    Tables {
+        ascii: " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~",
+        b64: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/",
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ASCII byte value helpers
+// ---------------------------------------------------------------------------
+
+fn char_code(t: &Tables, c: String) -> i64 {
+    let idx = t.ascii.index_of(c);
+    if idx < 0 {
+        if c == "\n" { return 10; }
+        if c == "\r" { return 13; }
+        if c == "\t" { return 9; }
+        return 0;
+    }
+    idx + 32
+}
+
+fn code_to_char(t: &Tables, code: i64) -> String {
+    if code == 10 { return "\n"; }
+    if code == 13 { return "\r"; }
+    if code == 9 { return "\t"; }
+    if code < 32 || code > 126 { return "?"; }
+    let idx = code - 32;
+    t.ascii.char_at(idx)
+}
+
+// ---------------------------------------------------------------------------
+// Base64 alphabet helpers
+// ---------------------------------------------------------------------------
+
+fn b64_char_at(t: &Tables, idx: i64) -> String {
+    t.b64.char_at(idx)
+}
+
+fn b64_index(t: &Tables, c: String) -> i64 {
+    t.b64.index_of(c)
+}
+
+// ---------------------------------------------------------------------------
+// Encode: input bytes -> base64 string
+// ---------------------------------------------------------------------------
+
+fn encode(t: &Tables, input: String) -> String {
+    let len = input.len();
+    let mut result = "";
+    let mut i: i64 = 0;
+
+    while i < len {
+        let b0 = char_code(t, input.char_at(i));
+        let b1 = if i + 1 < len { char_code(t, input.char_at(i + 1)) } else { 0 };
+        let b2 = if i + 2 < len { char_code(t, input.char_at(i + 2)) } else { 0 };
+
+        let idx0 = b0 / 4;
+        let idx1 = (b0 % 4) * 16 + b1 / 16;
+        let idx2 = (b1 % 16) * 4 + b2 / 64;
+        let idx3 = b2 % 64;
+
+        result = result + b64_char_at(t, idx0);
+        result = result + b64_char_at(t, idx1);
+
+        if i + 1 < len {
+            result = result + b64_char_at(t, idx2);
+        } else {
+            result = result + "=";
+        }
+
+        if i + 2 < len {
+            result = result + b64_char_at(t, idx3);
+        } else {
+            result = result + "=";
+        }
+
+        i = i + 3;
+    }
+
+    result
+}
+
+// ---------------------------------------------------------------------------
+// Decode: base64 string -> original bytes
+// ---------------------------------------------------------------------------
+
+fn strip_whitespace(input: String) -> String {
+    let len = input.len();
+    let mut result = "";
+    let mut i: i64 = 0;
+    while i < len {
+        let c = input.char_at(i);
+        if c != " " && c != "\n" && c != "\r" && c != "\t" {
+            result = result + c;
+        }
+        i = i + 1;
+    }
+    result
+}
+
+fn decode(t: &Tables, raw_input: String) -> String ~ Console + Process {
+    let input = strip_whitespace(raw_input);
+    let len = input.len();
+    let mut result = "";
+    let mut i: i64 = 0;
+
+    while i < len {
+        let c0 = input.char_at(i);
+        let c1 = if i + 1 < len { input.char_at(i + 1) } else { "A" };
+        let c2 = if i + 2 < len { input.char_at(i + 2) } else { "A" };
+        let c3 = if i + 3 < len { input.char_at(i + 3) } else { "A" };
+
+        let v0 = b64_index(t, c0);
+        let v1 = b64_index(t, c1);
+
+        let v2 = if c2 == "=" { 0 } else { b64_index(t, c2) };
+        let v3 = if c3 == "=" { 0 } else { b64_index(t, c3) };
+
+        if v0 < 0 || v1 < 0 {
+            println!("Error: invalid base64 character at position {}", i);
+            process_exit(1);
+        }
+        if c2 != "=" && v2 < 0 {
+            println!("Error: invalid base64 character at position {}", i + 2);
+            process_exit(1);
+        }
+        if c3 != "=" && v3 < 0 {
+            println!("Error: invalid base64 character at position {}", i + 3);
+            process_exit(1);
+        }
+
+        let byte0 = v0 * 4 + v1 / 16;
+        let byte1 = (v1 % 16) * 16 + v2 / 4;
+        let byte2 = (v2 % 4) * 64 + v3;
+
+        result = result + code_to_char(t, byte0);
+
+        if c2 != "=" {
+            result = result + code_to_char(t, byte1);
+        }
+
+        if c3 != "=" {
+            result = result + code_to_char(t, byte2);
+        }
+
+        i = i + 4;
+    }
+
+    result
+}
+
+// ---------------------------------------------------------------------------
+// CLI
+// ---------------------------------------------------------------------------
+
+fn print_help() ~ Console {
+    println!("qbase64 — Base64 encode/decode tool");
+    println!("");
+    println!("Usage:");
+    println!("  qbase64 -e [FILE]    Encode FILE (or stdin) to base64");
+    println!("  qbase64 -d [FILE]    Decode base64 FILE (or stdin)");
+    println!("  qbase64 --help       Show this help message");
+    println!("");
+    println!("Examples:");
+    println!("  qbase64 -e file.txt");
+    println!("  qbase64 -d file.b64");
+    println!("  echo -n \"Hello\" | qbase64 -e");
+    println!("  echo -n \"SGVsbG8=\" | qbase64 -d");
+}
+
+fn main() ~ Console + Environment + FileSystem + Process {
+    let nargs = args_count();
+
+    if nargs < 2 {
+        print_help();
+        process_exit(0);
+    }
+
+    let flag = args_get(1);
+
+    if flag == "--help" || flag == "-h" {
+        print_help();
+        process_exit(0);
+    }
+
+    let input = if nargs > 2 {
+        let path = args_get(2);
+        if !file_exists(path) {
+            println!("Error: file not found: {}", path);
+            process_exit(1);
+        }
+        read_file(path)
+    } else {
+        let piped = stdin_is_pipe();
+        if !piped {
+            println!("Error: no input. Provide a file or pipe data via stdin.");
+            println!("Run 'qbase64 --help' for usage.");
+            process_exit(1);
+        }
+        read_all()
+    };
+
+    let t = tables_new();
+
+    if flag == "-e" {
+        let encoded = encode(&t, input);
+        println!("{}", encoded);
+    } else if flag == "-d" {
+        let decoded = decode(&t, input);
+        print!("{}", decoded);
+    } else {
+        println!("Error: unknown flag '{}'. Use -e to encode or -d to decode.", flag);
+        process_exit(1);
+    }
+}

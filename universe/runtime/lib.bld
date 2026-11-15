@@ -1,0 +1,5086 @@
+// ═══════════════════════════════════════════════════════════════════════════════
+// BUILD-UNIVERSE Runtime Environment v2.0.0
+// "The Execution Engine"
+// ═══════════════════════════════════════════════════════════════════════════════
+// Copyright © 2024-2025 Zain Dana Harper. All Rights Reserved.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+module runtime
+
+use foundation::collections::{Vec, HashMap, VecDeque, BTreeMap, HashSet}
+use foundation::sync::{Arc, RwLock, Mutex, Condvar, AtomicBool, AtomicU64, AtomicUsize, Ordering}
+use foundation::time::{Instant, Duration}
+use foundation::io::println
+use foundation::thread::{spawn, JoinHandle, ThreadId}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// RUNTIME CONFIGURATION
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[derive(Clone)]
+pub struct RuntimeConfig {
+    /// Number of worker threads
+    pub thread_pool_size: usize,
+    /// Maximum memory per module (bytes)
+    pub max_module_memory: usize,
+    /// Stack size per task (bytes)
+    pub task_stack_size: usize,
+    /// Enable debug mode
+    pub debug_mode: bool,
+    /// Enable profiling
+    pub profiling_enabled: bool,
+    /// GC settings
+    pub gc_config: GCConfig,
+    /// Scheduler settings
+    pub scheduler_config: SchedulerConfig,
+    /// JIT settings
+    pub jit_config: JITConfig,
+    /// Security settings
+    pub security_config: SecurityConfig,
+    /// NUMA configuration
+    pub numa_config: NumaConfig,
+    /// Fiber configuration
+    pub fiber_config: FiberConfig,
+}
+
+impl Default for RuntimeConfig {
+    fn default() -> Self {
+        RuntimeConfig {
+            thread_pool_size: num_cpus(),
+            max_module_memory: 256 * 1024 * 1024, // 256MB
+            task_stack_size: 2 * 1024 * 1024,      // 2MB
+            debug_mode: false,
+            profiling_enabled: false,
+            gc_config: GCConfig::default(),
+            scheduler_config: SchedulerConfig::default(),
+            jit_config: JITConfig::default(),
+            security_config: SecurityConfig::default(),
+            numa_config: NumaConfig::default(),
+            fiber_config: FiberConfig::default(),
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct GCConfig {
+    pub enabled: bool,
+    pub heap_size: usize,
+    pub threshold: f64,
+    pub gc_type: GCType,
+    /// Young generation size ratio
+    pub young_gen_ratio: f64,
+    /// Survivor space ratio
+    pub survivor_ratio: u32,
+    /// Tenuring threshold
+    pub tenuring_threshold: u32,
+    /// Concurrent GC threads
+    pub gc_threads: usize,
+    /// Enable G1-style regions
+    pub use_regions: bool,
+    /// Region size (if using regions)
+    pub region_size: usize,
+    /// Pause time target (ms)
+    pub pause_time_target_ms: u64,
+    /// Heap growth factor
+    pub heap_growth_factor: f64,
+    /// Enable escape analysis
+    pub escape_analysis: bool,
+    /// Enable scalar replacement
+    pub scalar_replacement: bool,
+}
+
+impl Default for GCConfig {
+    fn default() -> Self {
+        GCConfig {
+            enabled: true,
+            heap_size: 1024 * 1024 * 1024, // 1GB
+            threshold: 0.75,
+            gc_type: GCType::Generational,
+            young_gen_ratio: 0.33,
+            survivor_ratio: 8,
+            tenuring_threshold: 15,
+            gc_threads: 4,
+            use_regions: false,
+            region_size: 1024 * 1024, // 1MB regions
+            pause_time_target_ms: 10,
+            heap_growth_factor: 2.0,
+            escape_analysis: true,
+            scalar_replacement: true,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum GCType {
+    MarkAndSweep,
+    Generational,
+    Concurrent,
+    Reference,
+    G1,
+    ZGC,
+    Shenandoah,
+}
+
+#[derive(Clone)]
+pub struct SchedulerConfig {
+    pub preemptive: bool,
+    pub time_slice_ms: u64,
+    pub priority_levels: u8,
+    pub work_stealing: bool,
+    /// Enable fair scheduling
+    pub fair_scheduling: bool,
+    /// Context switch overhead budget (ns)
+    pub context_switch_budget_ns: u64,
+    /// Idle spin count before parking
+    pub idle_spin_count: u32,
+    /// Enable NUMA-aware scheduling
+    pub numa_aware: bool,
+    /// Enable CPU affinity
+    pub cpu_affinity: bool,
+}
+
+impl Default for SchedulerConfig {
+    fn default() -> Self {
+        SchedulerConfig {
+            preemptive: true,
+            time_slice_ms: 10,
+            priority_levels: 4,
+            work_stealing: true,
+            fair_scheduling: true,
+            context_switch_budget_ns: 10000,
+            idle_spin_count: 1000,
+            numa_aware: false,
+            cpu_affinity: false,
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct JITConfig {
+    /// Initial tier
+    pub initial_tier: JITTier,
+    /// Enable tiered compilation
+    pub tiered_compilation: bool,
+    /// Baseline threshold
+    pub baseline_threshold: u32,
+    /// Optimizing threshold
+    pub optimizing_threshold: u32,
+    /// PGO threshold
+    pub pgo_threshold: u32,
+    /// Enable on-stack replacement
+    pub enable_osr: bool,
+    /// Enable deoptimization
+    pub enable_deopt: bool,
+    /// Code cache size
+    pub code_cache_size: usize,
+    /// Enable inline caching
+    pub inline_caching: bool,
+    /// Maximum inline depth
+    pub max_inline_depth: u32,
+    /// Maximum inlined code size
+    pub max_inline_size: usize,
+}
+
+impl Default for JITConfig {
+    fn default() -> Self {
+        JITConfig {
+            initial_tier: JITTier::Interpreter,
+            tiered_compilation: true,
+            baseline_threshold: 100,
+            optimizing_threshold: 1000,
+            pgo_threshold: 5000,
+            enable_osr: true,
+            enable_deopt: true,
+            code_cache_size: 64 * 1024 * 1024, // 64MB
+            inline_caching: true,
+            max_inline_depth: 9,
+            max_inline_size: 35,
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct SecurityConfig {
+    /// Enable sandboxing
+    pub sandboxing: bool,
+    /// Default memory limit for sandboxed code
+    pub sandbox_memory_limit: usize,
+    /// Default CPU time limit (seconds)
+    pub sandbox_cpu_limit_secs: u64,
+    /// Enable capability-based security
+    pub capabilities: bool,
+    /// Enable code signing verification
+    pub verify_signatures: bool,
+}
+
+impl Default for SecurityConfig {
+    fn default() -> Self {
+        SecurityConfig {
+            sandboxing: false,
+            sandbox_memory_limit: 256 * 1024 * 1024,
+            sandbox_cpu_limit_secs: 60,
+            capabilities: true,
+            verify_signatures: false,
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct NumaConfig {
+    /// Enable NUMA awareness
+    pub enabled: bool,
+    /// Preferred NUMA node
+    pub preferred_node: Option<u32>,
+    /// Enable memory interleaving
+    pub interleave: bool,
+    /// Local allocation policy
+    pub local_alloc: bool,
+}
+
+impl Default for NumaConfig {
+    fn default() -> Self {
+        NumaConfig {
+            enabled: false,
+            preferred_node: None,
+            interleave: false,
+            local_alloc: true,
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct FiberConfig {
+    /// Enable fiber (green thread) support
+    pub enabled: bool,
+    /// Default fiber stack size
+    pub stack_size: usize,
+    /// Maximum fibers per worker
+    pub max_fibers_per_worker: usize,
+    /// Enable stack pooling
+    pub stack_pooling: bool,
+}
+
+impl Default for FiberConfig {
+    fn default() -> Self {
+        FiberConfig {
+            enabled: true,
+            stack_size: 64 * 1024, // 64KB
+            max_fibers_per_worker: 10000,
+            stack_pooling: true,
+        }
+    }
+}
+
+fn num_cpus() -> usize {
+    // Would use actual CPU detection
+    8
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// BUILD RUNTIME
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// The main runtime environment for BUILD-UNIVERSE
+pub struct BuildRuntime {
+    config: RuntimeConfig,
+    thread_pool: ThreadPool,
+    scheduler: TaskScheduler,
+    memory_manager: MemoryManager,
+    module_loader: ModuleLoader,
+    gc: Arc<GarbageCollector>,
+    jit: Arc<JITCompiler>,
+    profiler: RuntimeProfiler,
+    type_registry: Arc<TypeRegistry>,
+    fiber_scheduler: Option<FiberScheduler>,
+    signal_handler: SignalHandler,
+    tls_manager: ThreadLocalStorage,
+    running: AtomicBool,
+    start_time: Instant,
+}
+
+impl BuildRuntime {
+    /// Create a new runtime with default configuration
+    pub fn new() -> Self {
+        Self::with_config(RuntimeConfig::default())
+    }
+
+    /// Create a new runtime with custom configuration
+    pub fn with_config(config: RuntimeConfig) -> Self {
+        println!("╔═══════════════════════════════════════════════════════════════╗");
+        println!("║  BUILD-UNIVERSE Runtime v2.0.0                               ║");
+        println!("╚═══════════════════════════════════════════════════════════════╝");
+        println!();
+
+        println!("Initializing runtime...");
+
+        // Create thread pool
+        let thread_pool = ThreadPool::new(config.thread_pool_size);
+        println!("  Thread pool: {} workers", config.thread_pool_size);
+
+        // Create scheduler
+        let scheduler = TaskScheduler::new(config.scheduler_config.clone());
+        println!("  Scheduler: {} priority levels", config.scheduler_config.priority_levels);
+
+        // Create memory manager
+        let memory_manager = MemoryManager::new(config.max_module_memory);
+        println!("  Memory: {} MB max per module", config.max_module_memory / 1024 / 1024);
+
+        // Create module loader
+        let module_loader = ModuleLoader::new();
+        println!("  Module loader: ready");
+
+        // Create type registry
+        let type_registry = Arc::new(TypeRegistry::new());
+        println!("  Type registry: initialized");
+
+        // Create garbage collector
+        let gc = Arc::new(GarbageCollector::new(config.gc_config.clone()));
+        println!("  GC: {:?}, {} MB heap", config.gc_config.gc_type, config.gc_config.heap_size / 1024 / 1024);
+
+        // Create JIT compiler
+        let jit = Arc::new(JITCompiler::with_config(config.jit_config.clone()));
+        println!("  JIT: tiered={}, OSR={}", config.jit_config.tiered_compilation, config.jit_config.enable_osr);
+
+        // Create profiler
+        let profiler = RuntimeProfiler::new(config.profiling_enabled);
+        if config.profiling_enabled {
+            println!("  Profiler: enabled");
+        }
+
+        // Create fiber scheduler if enabled
+        let fiber_scheduler = if config.fiber_config.enabled {
+            println!("  Fibers: enabled, {} max per worker", config.fiber_config.max_fibers_per_worker);
+            Some(FiberScheduler::new(config.fiber_config.clone()))
+        } else {
+            None
+        };
+
+        // Create signal handler
+        let signal_handler = SignalHandler::new();
+        println!("  Signal handler: ready");
+
+        // Create TLS manager
+        let tls_manager = ThreadLocalStorage::new();
+        println!("  TLS: initialized");
+
+        println!("  ✓ Runtime initialized");
+
+        BuildRuntime {
+            config,
+            thread_pool,
+            scheduler,
+            memory_manager,
+            module_loader,
+            gc,
+            jit,
+            profiler,
+            type_registry,
+            fiber_scheduler,
+            signal_handler,
+            tls_manager,
+            running: AtomicBool::new(false),
+            start_time: Instant::now(),
+        }
+    }
+
+    /// Start the runtime
+    pub fn start(&self) -> Result<(), RuntimeError> {
+        if self.running.swap(true, Ordering::SeqCst) {
+            return Err(RuntimeError::AlreadyRunning);
+        }
+
+        println!("\nStarting runtime...");
+
+        // Start thread pool
+        self.thread_pool.start()?;
+
+        // Start scheduler
+        self.scheduler.start()?;
+
+        // Start GC
+        self.gc.start()?;
+
+        // Start fiber scheduler
+        if let Some(ref fiber_sched) = self.fiber_scheduler {
+            fiber_sched.start()?;
+        }
+
+        // Start profiler if enabled
+        if self.config.profiling_enabled {
+            self.profiler.start()?;
+        }
+
+        // Setup signal handlers
+        self.signal_handler.setup()?;
+
+        println!("  ✓ Runtime started");
+        Ok(())
+    }
+
+    /// Stop the runtime
+    pub fn stop(&self) -> Result<(), RuntimeError> {
+        if !self.running.swap(false, Ordering::SeqCst) {
+            return Err(RuntimeError::NotRunning);
+        }
+
+        println!("\nStopping runtime...");
+
+        // Stop profiler
+        if self.config.profiling_enabled {
+            self.profiler.stop()?;
+        }
+
+        // Stop fiber scheduler
+        if let Some(ref fiber_sched) = self.fiber_scheduler {
+            fiber_sched.stop()?;
+        }
+
+        // Stop GC
+        self.gc.stop()?;
+
+        // Stop scheduler
+        self.scheduler.stop()?;
+
+        // Stop thread pool
+        self.thread_pool.stop()?;
+
+        println!("  ✓ Runtime stopped");
+        Ok(())
+    }
+
+    /// Submit a task for execution
+    pub fn spawn<F, R>(&self, task: F) -> TaskHandle<R>
+    where
+        F: FnOnce() -> R + Send + 'static,
+        R: Send + 'static,
+    {
+        let task_id = self.scheduler.next_task_id();
+        self.scheduler.enqueue(Task::new(task_id, TaskPriority::Normal, Box::new(move || {
+            let result = task();
+            Box::new(result) as Box<dyn std::any::Any + Send>
+        })));
+
+        TaskHandle {
+            id: task_id,
+            result: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    /// Spawn a task with priority
+    pub fn spawn_with_priority<F, R>(&self, priority: TaskPriority, task: F) -> TaskHandle<R>
+    where
+        F: FnOnce() -> R + Send + 'static,
+        R: Send + 'static,
+    {
+        let task_id = self.scheduler.next_task_id();
+        self.scheduler.enqueue(Task::new(task_id, priority, Box::new(move || {
+            let result = task();
+            Box::new(result) as Box<dyn std::any::Any + Send>
+        })));
+
+        TaskHandle {
+            id: task_id,
+            result: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    /// Spawn a fiber (green thread)
+    pub fn spawn_fiber<F>(&self, f: F) -> Result<FiberId, RuntimeError>
+    where
+        F: FnOnce() + Send + 'static,
+    {
+        if let Some(ref fiber_sched) = self.fiber_scheduler {
+            fiber_sched.spawn(f)
+        } else {
+            Err(RuntimeError::FibersDisabled)
+        }
+    }
+
+    /// Load a module
+    pub fn load_module(&self, name: &str) -> Result<ModuleHandle, RuntimeError> {
+        self.module_loader.load(name)
+    }
+
+    /// Unload a module
+    pub fn unload_module(&self, handle: ModuleHandle) -> Result<(), RuntimeError> {
+        self.module_loader.unload(handle)
+    }
+
+    /// Request garbage collection
+    pub fn gc_collect(&self) {
+        self.gc.collect();
+    }
+
+    /// Request a specific GC generation
+    pub fn gc_collect_generation(&self, generation: Generation) {
+        self.gc.collect_generation(generation);
+    }
+
+    /// Get runtime statistics
+    pub fn stats(&self) -> RuntimeStats {
+        RuntimeStats {
+            uptime_secs: self.start_time.elapsed().as_secs(),
+            thread_count: self.thread_pool.active_threads(),
+            active_tasks: self.scheduler.active_count(),
+            pending_tasks: self.scheduler.pending_count(),
+            memory_used: self.memory_manager.used(),
+            memory_total: self.memory_manager.total(),
+            gc_collections: self.gc.collection_count(),
+            jit_compilations: self.jit.compilation_count(),
+            fiber_count: self.fiber_scheduler.as_ref().map_or(0, |f| f.fiber_count()),
+        }
+    }
+
+    /// Get JIT compiler reference
+    pub fn jit(&self) -> &Arc<JITCompiler> {
+        &self.jit
+    }
+
+    /// Get type registry reference
+    pub fn type_registry(&self) -> &Arc<TypeRegistry> {
+        &self.type_registry
+    }
+
+    /// Get GC reference
+    pub fn gc(&self) -> &Arc<GarbageCollector> {
+        &self.gc
+    }
+
+    /// Allocate thread-local storage slot
+    pub fn tls_alloc<T: Send + 'static>(&self) -> TlsKey<T> {
+        self.tls_manager.alloc()
+    }
+}
+
+#[derive(Debug)]
+pub enum RuntimeError {
+    AlreadyRunning,
+    NotRunning,
+    ModuleNotFound(String),
+    ModuleLoadFailed(String),
+    OutOfMemory,
+    TaskFailed(String),
+    FibersDisabled,
+    FiberStackOverflow,
+    DeoptimizationFailed,
+    InvalidBytecode(String),
+    SecurityViolation(String),
+    SignalError(String),
+    Other(String),
+}
+
+pub struct RuntimeStats {
+    pub uptime_secs: u64,
+    pub thread_count: usize,
+    pub active_tasks: usize,
+    pub pending_tasks: usize,
+    pub memory_used: usize,
+    pub memory_total: usize,
+    pub gc_collections: u64,
+    pub jit_compilations: u64,
+    pub fiber_count: usize,
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// THREAD POOL WITH WORK STEALING
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Worker thread pool with work-stealing support
+pub struct ThreadPool {
+    workers: Vec<Worker>,
+    task_queues: Vec<Arc<WorkStealingQueue<Task>>>,
+    global_queue: Arc<Mutex<VecDeque<Task>>>,
+    condvar: Arc<Condvar>,
+    running: Arc<AtomicBool>,
+    size: usize,
+}
+
+struct Worker {
+    id: usize,
+    handle: Option<JoinHandle<()>>,
+    local_queue: Arc<WorkStealingQueue<Task>>,
+    steal_order: Vec<usize>,
+}
+
+/// Lock-free work-stealing deque
+pub struct WorkStealingQueue<T> {
+    buffer: RwLock<VecDeque<T>>,
+    len: AtomicUsize,
+}
+
+impl<T> WorkStealingQueue<T> {
+    pub fn new() -> Self {
+        WorkStealingQueue {
+            buffer: RwLock::new(VecDeque::with_capacity(256)),
+            len: AtomicUsize::new(0),
+        }
+    }
+
+    /// Push to the local end (LIFO for owner)
+    pub fn push(&self, item: T) {
+        let mut buffer = self.buffer.write().unwrap();
+        buffer.push_back(item);
+        self.len.fetch_add(1, Ordering::Release);
+    }
+
+    /// Pop from the local end (LIFO for owner)
+    pub fn pop(&self) -> Option<T> {
+        let mut buffer = self.buffer.write().unwrap();
+        if let Some(item) = buffer.pop_back() {
+            self.len.fetch_sub(1, Ordering::Release);
+            Some(item)
+        } else {
+            None
+        }
+    }
+
+    /// Steal from the remote end (FIFO for thieves)
+    pub fn steal(&self) -> Option<T> {
+        let mut buffer = self.buffer.write().unwrap();
+        if let Some(item) = buffer.pop_front() {
+            self.len.fetch_sub(1, Ordering::Release);
+            Some(item)
+        } else {
+            None
+        }
+    }
+
+    /// Steal half of the items
+    pub fn steal_batch(&self, dest: &Self, batch_size: usize) -> usize {
+        let mut src_buffer = self.buffer.write().unwrap();
+        let mut dst_buffer = dest.buffer.write().unwrap();
+
+        let available = src_buffer.len();
+        let to_steal = available.min(batch_size) / 2;
+
+        for _ in 0..to_steal {
+            if let Some(item) = src_buffer.pop_front() {
+                dst_buffer.push_back(item);
+            }
+        }
+
+        self.len.fetch_sub(to_steal, Ordering::Release);
+        dest.len.fetch_add(to_steal, Ordering::Release);
+
+        to_steal
+    }
+
+    pub fn len(&self) -> usize {
+        self.len.load(Ordering::Acquire)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
+impl ThreadPool {
+    pub fn new(size: usize) -> Self {
+        let task_queues: Vec<_> = (0..size)
+            .map(|_| Arc::new(WorkStealingQueue::new()))
+            .collect();
+
+        ThreadPool {
+            workers: Vec::with_capacity(size),
+            task_queues,
+            global_queue: Arc::new(Mutex::new(VecDeque::new())),
+            condvar: Arc::new(Condvar::new()),
+            running: Arc::new(AtomicBool::new(false)),
+            size,
+        }
+    }
+
+    pub fn start(&self) -> Result<(), RuntimeError> {
+        self.running.store(true, Ordering::SeqCst);
+
+        // Start worker threads
+        for id in 0..self.size {
+            let local_queue = self.task_queues[id].clone();
+            let global_queue = self.global_queue.clone();
+            let all_queues: Vec<_> = self.task_queues.iter()
+                .enumerate()
+                .filter(|(i, _)| *i != id)
+                .map(|(_, q)| q.clone())
+                .collect();
+            let condvar = self.condvar.clone();
+            let running = self.running.clone();
+
+            spawn(move || {
+                let mut idle_count = 0u32;
+
+                while running.load(Ordering::SeqCst) {
+                    // Try local queue first
+                    if let Some(task) = local_queue.pop() {
+                        idle_count = 0;
+                        (task.func)();
+                        continue;
+                    }
+
+                    // Try global queue
+                    {
+                        let mut queue = global_queue.lock().unwrap();
+                        if let Some(task) = queue.pop_front() {
+                            drop(queue);
+                            idle_count = 0;
+                            (task.func)();
+                            continue;
+                        }
+                    }
+
+                    // Try stealing from other workers
+                    let mut stolen = false;
+                    for other_queue in &all_queues {
+                        if let Some(task) = other_queue.steal() {
+                            idle_count = 0;
+                            (task.func)();
+                            stolen = true;
+                            break;
+                        }
+                    }
+
+                    if !stolen {
+                        idle_count += 1;
+                        if idle_count > 1000 {
+                            // Park the thread
+                            let queue = global_queue.lock().unwrap();
+                            let _ = condvar.wait_timeout(queue, Duration::from_millis(1));
+                            idle_count = 0;
+                        } else {
+                            std::thread::yield_now();
+                        }
+                    }
+                }
+            });
+        }
+
+        Ok(())
+    }
+
+    pub fn stop(&self) -> Result<(), RuntimeError> {
+        self.running.store(false, Ordering::SeqCst);
+        self.condvar.notify_all();
+        Ok(())
+    }
+
+    pub fn submit(&self, task: Task) {
+        let mut queue = self.global_queue.lock().unwrap();
+        queue.push_back(task);
+        self.condvar.notify_one();
+    }
+
+    pub fn submit_to_worker(&self, worker_id: usize, task: Task) {
+        if worker_id < self.task_queues.len() {
+            self.task_queues[worker_id].push(task);
+        } else {
+            self.submit(task);
+        }
+    }
+
+    pub fn active_threads(&self) -> usize {
+        self.size
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// TASK SCHEDULER
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Task scheduler with priority queues
+pub struct TaskScheduler {
+    config: SchedulerConfig,
+    queues: Vec<Mutex<VecDeque<Task>>>,
+    next_id: AtomicU64,
+    active: AtomicU64,
+    running: AtomicBool,
+    /// Fair scheduling virtual runtime
+    vruntime: RwLock<HashMap<u64, u64>>,
+}
+
+pub struct Task {
+    id: u64,
+    priority: TaskPriority,
+    func: Box<dyn FnOnce() -> Box<dyn std::any::Any + Send> + Send>,
+    created_at: Instant,
+    /// CPU affinity (optional)
+    affinity: Option<usize>,
+    /// Nice value for fair scheduling
+    nice: i8,
+}
+
+impl Task {
+    fn new(
+        id: u64,
+        priority: TaskPriority,
+        func: Box<dyn FnOnce() -> Box<dyn std::any::Any + Send> + Send>,
+    ) -> Self {
+        Task {
+            id,
+            priority,
+            func,
+            created_at: Instant::now(),
+            affinity: None,
+            nice: 0,
+        }
+    }
+
+    pub fn with_affinity(mut self, cpu: usize) -> Self {
+        self.affinity = Some(cpu);
+        self
+    }
+
+    pub fn with_nice(mut self, nice: i8) -> Self {
+        self.nice = nice;
+        self
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum TaskPriority {
+    Idle = 0,
+    Low = 1,
+    Normal = 2,
+    High = 3,
+    Critical = 4,
+    RealTime = 5,
+}
+
+impl TaskPriority {
+    /// Get weight for fair scheduling
+    pub fn weight(&self) -> u64 {
+        match self {
+            TaskPriority::Idle => 1,
+            TaskPriority::Low => 2,
+            TaskPriority::Normal => 4,
+            TaskPriority::High => 8,
+            TaskPriority::Critical => 16,
+            TaskPriority::RealTime => 32,
+        }
+    }
+}
+
+pub struct TaskHandle<R> {
+    id: u64,
+    result: Arc<Mutex<Option<R>>>,
+}
+
+impl<R> TaskHandle<R> {
+    pub fn id(&self) -> u64 {
+        self.id
+    }
+
+    pub fn is_complete(&self) -> bool {
+        self.result.lock().unwrap().is_some()
+    }
+
+    pub fn wait(self) -> R {
+        loop {
+            if let Some(result) = self.result.lock().unwrap().take() {
+                return result;
+            }
+            std::thread::yield_now();
+        }
+    }
+
+    pub fn wait_timeout(self, timeout: Duration) -> Option<R> {
+        let start = Instant::now();
+        loop {
+            if let Some(result) = self.result.lock().unwrap().take() {
+                return Some(result);
+            }
+            if start.elapsed() >= timeout {
+                return None;
+            }
+            std::thread::yield_now();
+        }
+    }
+}
+
+impl TaskScheduler {
+    pub fn new(config: SchedulerConfig) -> Self {
+        let queues = (0..config.priority_levels + 2) // +2 for idle and realtime
+            .map(|_| Mutex::new(VecDeque::new()))
+            .collect();
+
+        TaskScheduler {
+            config,
+            queues,
+            next_id: AtomicU64::new(0),
+            active: AtomicU64::new(0),
+            running: AtomicBool::new(false),
+            vruntime: RwLock::new(HashMap::new()),
+        }
+    }
+
+    pub fn start(&self) -> Result<(), RuntimeError> {
+        self.running.store(true, Ordering::SeqCst);
+        Ok(())
+    }
+
+    pub fn stop(&self) -> Result<(), RuntimeError> {
+        self.running.store(false, Ordering::SeqCst);
+        Ok(())
+    }
+
+    pub fn next_task_id(&self) -> u64 {
+        self.next_id.fetch_add(1, Ordering::SeqCst)
+    }
+
+    pub fn enqueue(&self, task: Task) {
+        let priority_idx = task.priority as usize;
+        if priority_idx < self.queues.len() {
+            let mut queue = self.queues[priority_idx].lock().unwrap();
+
+            // Update virtual runtime for fair scheduling
+            if self.config.fair_scheduling {
+                let mut vruntime = self.vruntime.write().unwrap();
+                vruntime.insert(task.id, 0);
+            }
+
+            queue.push_back(task);
+        }
+    }
+
+    pub fn dequeue(&self) -> Option<Task> {
+        // Check queues from highest to lowest priority
+        for i in (0..self.queues.len()).rev() {
+            let mut queue = self.queues[i].lock().unwrap();
+            if let Some(task) = queue.pop_front() {
+                self.active.fetch_add(1, Ordering::SeqCst);
+                return Some(task);
+            }
+        }
+        None
+    }
+
+    /// Dequeue with fair scheduling (CFS-like)
+    pub fn dequeue_fair(&self) -> Option<Task> {
+        if !self.config.fair_scheduling {
+            return self.dequeue();
+        }
+
+        let vruntime = self.vruntime.read().unwrap();
+        let mut best_task: Option<(Task, u64)> = None;
+
+        for i in (0..self.queues.len()).rev() {
+            let mut queue = self.queues[i].lock().unwrap();
+
+            // Find task with smallest vruntime
+            let mut best_idx = None;
+            let mut best_vrt = u64::MAX;
+
+            for (idx, task) in queue.iter().enumerate() {
+                if let Some(&vrt) = vruntime.get(&task.id) {
+                    if vrt < best_vrt {
+                        best_vrt = vrt;
+                        best_idx = Some(idx);
+                    }
+                }
+            }
+
+            if let Some(idx) = best_idx {
+                let task = queue.remove(idx).unwrap();
+                if best_task.is_none() || best_vrt < best_task.as_ref().unwrap().1 {
+                    best_task = Some((task, best_vrt));
+                }
+            }
+        }
+
+        if let Some((task, _)) = best_task {
+            self.active.fetch_add(1, Ordering::SeqCst);
+            Some(task)
+        } else {
+            None
+        }
+    }
+
+    pub fn active_count(&self) -> usize {
+        self.active.load(Ordering::SeqCst) as usize
+    }
+
+    pub fn pending_count(&self) -> usize {
+        self.queues.iter()
+            .map(|q| q.lock().unwrap().len())
+            .sum()
+    }
+
+    pub fn complete(&self, task_id: u64, runtime_ns: u64) {
+        self.active.fetch_sub(1, Ordering::SeqCst);
+
+        // Update vruntime for fair scheduling
+        if self.config.fair_scheduling {
+            let mut vruntime = self.vruntime.write().unwrap();
+            if let Some(vrt) = vruntime.get_mut(&task_id) {
+                *vrt += runtime_ns;
+            }
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// FIBER (GREEN THREAD) SCHEDULER
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Fiber ID
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct FiberId(u64);
+
+/// Fiber state
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FiberState {
+    Ready,
+    Running,
+    Suspended,
+    Blocked,
+    Dead,
+}
+
+/// Fiber (green thread) context
+pub struct Fiber {
+    id: FiberId,
+    state: FiberState,
+    stack: FiberStack,
+    /// Saved registers/context
+    context: FiberContext,
+    /// Parent fiber
+    parent: Option<FiberId>,
+    /// Fiber-local storage
+    locals: HashMap<usize, Box<dyn std::any::Any + Send>>,
+}
+
+/// Fiber stack
+pub struct FiberStack {
+    memory: Vec<u8>,
+    size: usize,
+    guard_page: bool,
+}
+
+impl FiberStack {
+    pub fn new(size: usize) -> Self {
+        FiberStack {
+            memory: vec![0u8; size],
+            size,
+            guard_page: true,
+        }
+    }
+
+    pub fn top(&self) -> *mut u8 {
+        unsafe { self.memory.as_ptr().add(self.size) as *mut u8 }
+    }
+}
+
+/// Fiber execution context (platform-specific)
+#[derive(Default)]
+pub struct FiberContext {
+    /// Stack pointer
+    pub sp: usize,
+    /// Instruction pointer
+    pub ip: usize,
+    /// Base pointer
+    pub bp: usize,
+    /// Callee-saved registers
+    pub regs: [usize; 8],
+}
+
+/// Fiber scheduler
+pub struct FiberScheduler {
+    config: FiberConfig,
+    fibers: RwLock<HashMap<FiberId, Fiber>>,
+    ready_queue: Mutex<VecDeque<FiberId>>,
+    current: RwLock<HashMap<ThreadId, FiberId>>,
+    next_id: AtomicU64,
+    stack_pool: Mutex<Vec<FiberStack>>,
+    running: AtomicBool,
+}
+
+impl FiberScheduler {
+    pub fn new(config: FiberConfig) -> Self {
+        FiberScheduler {
+            config,
+            fibers: RwLock::new(HashMap::new()),
+            ready_queue: Mutex::new(VecDeque::new()),
+            current: RwLock::new(HashMap::new()),
+            next_id: AtomicU64::new(0),
+            stack_pool: Mutex::new(Vec::new()),
+            running: AtomicBool::new(false),
+        }
+    }
+
+    pub fn start(&self) -> Result<(), RuntimeError> {
+        self.running.store(true, Ordering::SeqCst);
+        Ok(())
+    }
+
+    pub fn stop(&self) -> Result<(), RuntimeError> {
+        self.running.store(false, Ordering::SeqCst);
+        Ok(())
+    }
+
+    /// Spawn a new fiber
+    pub fn spawn<F>(&self, f: F) -> Result<FiberId, RuntimeError>
+    where
+        F: FnOnce() + Send + 'static,
+    {
+        let id = FiberId(self.next_id.fetch_add(1, Ordering::SeqCst));
+
+        // Get or allocate stack
+        let stack = self.alloc_stack()?;
+
+        let fiber = Fiber {
+            id,
+            state: FiberState::Ready,
+            stack,
+            context: FiberContext::default(),
+            parent: None,
+            locals: HashMap::new(),
+        };
+
+        let mut fibers = self.fibers.write().unwrap();
+        fibers.insert(id, fiber);
+
+        let mut queue = self.ready_queue.lock().unwrap();
+        queue.push_back(id);
+
+        Ok(id)
+    }
+
+    /// Yield the current fiber
+    pub fn yield_fiber(&self) {
+        // Save current context and switch to scheduler
+        self.schedule();
+    }
+
+    /// Schedule the next ready fiber
+    fn schedule(&self) {
+        let next_id = {
+            let mut queue = self.ready_queue.lock().unwrap();
+            queue.pop_front()
+        };
+
+        if let Some(id) = next_id {
+            self.switch_to(id);
+        }
+    }
+
+    /// Switch to a specific fiber
+    fn switch_to(&self, target: FiberId) {
+        let thread_id = std::thread::current().id();
+
+        // Save current fiber context
+        if let Some(current_id) = self.current.read().unwrap().get(&thread_id) {
+            let mut fibers = self.fibers.write().unwrap();
+            if let Some(fiber) = fibers.get_mut(current_id) {
+                fiber.state = FiberState::Ready;
+                // Save context here
+            }
+        }
+
+        // Switch to target fiber
+        {
+            let mut current = self.current.write().unwrap();
+            current.insert(thread_id, target);
+        }
+
+        let mut fibers = self.fibers.write().unwrap();
+        if let Some(fiber) = fibers.get_mut(&target) {
+            fiber.state = FiberState::Running;
+            // Restore context and jump here
+        }
+    }
+
+    fn alloc_stack(&self) -> Result<FiberStack, RuntimeError> {
+        // Try to reuse from pool
+        if self.config.stack_pooling {
+            let mut pool = self.stack_pool.lock().unwrap();
+            if let Some(stack) = pool.pop() {
+                return Ok(stack);
+            }
+        }
+
+        Ok(FiberStack::new(self.config.stack_size))
+    }
+
+    fn free_stack(&self, stack: FiberStack) {
+        if self.config.stack_pooling {
+            let mut pool = self.stack_pool.lock().unwrap();
+            if pool.len() < 100 {
+                pool.push(stack);
+            }
+        }
+    }
+
+    pub fn fiber_count(&self) -> usize {
+        self.fibers.read().unwrap().len()
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// THREAD-LOCAL STORAGE
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Thread-local storage key
+pub struct TlsKey<T> {
+    id: usize,
+    _marker: std::marker::PhantomData<T>,
+}
+
+impl<T> Clone for TlsKey<T> {
+    fn clone(&self) -> Self {
+        TlsKey { id: self.id, _marker: std::marker::PhantomData }
+    }
+}
+
+impl<T> Copy for TlsKey<T> {}
+
+/// Thread-local storage manager
+pub struct ThreadLocalStorage {
+    slots: RwLock<HashMap<ThreadId, HashMap<usize, Box<dyn std::any::Any + Send>>>>,
+    next_key: AtomicUsize,
+}
+
+impl ThreadLocalStorage {
+    pub fn new() -> Self {
+        ThreadLocalStorage {
+            slots: RwLock::new(HashMap::new()),
+            next_key: AtomicUsize::new(0),
+        }
+    }
+
+    /// Allocate a new TLS key
+    pub fn alloc<T: Send + 'static>(&self) -> TlsKey<T> {
+        let id = self.next_key.fetch_add(1, Ordering::SeqCst);
+        TlsKey { id, _marker: std::marker::PhantomData }
+    }
+
+    /// Set a value for the current thread
+    pub fn set<T: Send + 'static>(&self, key: TlsKey<T>, value: T) {
+        let thread_id = std::thread::current().id();
+        let mut slots = self.slots.write().unwrap();
+        let thread_slots = slots.entry(thread_id).or_insert_with(HashMap::new);
+        thread_slots.insert(key.id, Box::new(value));
+    }
+
+    /// Get a value for the current thread
+    pub fn get<T: Send + 'static>(&self, key: TlsKey<T>) -> Option<T>
+    where
+        T: Clone,
+    {
+        let thread_id = std::thread::current().id();
+        let slots = self.slots.read().unwrap();
+        slots.get(&thread_id)
+            .and_then(|thread_slots| thread_slots.get(&key.id))
+            .and_then(|value| value.downcast_ref::<T>())
+            .cloned()
+    }
+
+    /// Remove and return a value
+    pub fn take<T: Send + 'static>(&self, key: TlsKey<T>) -> Option<T> {
+        let thread_id = std::thread::current().id();
+        let mut slots = self.slots.write().unwrap();
+        slots.get_mut(&thread_id)
+            .and_then(|thread_slots| thread_slots.remove(&key.id))
+            .and_then(|value| value.downcast::<T>().ok())
+            .map(|b| *b)
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// SIGNAL HANDLER
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Signal handler
+pub struct SignalHandler {
+    handlers: RwLock<HashMap<Signal, SignalCallback>>,
+    pending: Mutex<VecDeque<Signal>>,
+}
+
+type SignalCallback = Arc<dyn Fn(Signal) + Send + Sync>;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Signal {
+    Interrupt,
+    Terminate,
+    Hangup,
+    User1,
+    User2,
+    Child,
+    Alarm,
+    Pipe,
+    StackFault,
+    SegmentationFault,
+    IllegalInstruction,
+    FloatingPointException,
+}
+
+impl SignalHandler {
+    pub fn new() -> Self {
+        SignalHandler {
+            handlers: RwLock::new(HashMap::new()),
+            pending: Mutex::new(VecDeque::new()),
+        }
+    }
+
+    pub fn setup(&self) -> Result<(), RuntimeError> {
+        // Setup OS signal handlers
+        Ok(())
+    }
+
+    /// Register a signal handler
+    pub fn register<F>(&self, signal: Signal, handler: F)
+    where
+        F: Fn(Signal) + Send + Sync + 'static,
+    {
+        let mut handlers = self.handlers.write().unwrap();
+        handlers.insert(signal, Arc::new(handler));
+    }
+
+    /// Handle a received signal
+    pub fn handle(&self, signal: Signal) {
+        let handlers = self.handlers.read().unwrap();
+        if let Some(handler) = handlers.get(&signal) {
+            handler(signal);
+        } else {
+            // Default handling
+            match signal {
+                Signal::Interrupt | Signal::Terminate => {
+                    // Initiate shutdown
+                }
+                Signal::SegmentationFault | Signal::IllegalInstruction => {
+                    // Fatal - should abort
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Check for pending signals
+    pub fn poll(&self) -> Option<Signal> {
+        let mut pending = self.pending.lock().unwrap();
+        pending.pop_front()
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// MEMORY MANAGER
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Memory management for the runtime
+pub struct MemoryManager {
+    allocations: RwLock<HashMap<usize, Allocation>>,
+    used: AtomicU64,
+    total: usize,
+    next_id: AtomicU64,
+    /// Memory pools for different size classes
+    pools: Vec<MemoryPool>,
+    /// Large object space
+    large_objects: RwLock<HashMap<usize, LargeAllocation>>,
+    /// NUMA node allocations
+    numa_allocations: RwLock<HashMap<u32, Vec<usize>>>,
+}
+
+pub struct Allocation {
+    id: usize,
+    size: usize,
+    module: Option<String>,
+    allocated_at: Instant,
+    /// Generation for GC
+    generation: Generation,
+    /// Memory flags
+    flags: AllocationFlags,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Generation {
+    Young,
+    Survivor,
+    Old,
+    Permanent,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct AllocationFlags {
+    pub pinned: bool,
+    pub executable: bool,
+    pub read_only: bool,
+    pub zero_filled: bool,
+}
+
+impl Default for AllocationFlags {
+    fn default() -> Self {
+        AllocationFlags {
+            pinned: false,
+            executable: false,
+            read_only: false,
+            zero_filled: true,
+        }
+    }
+}
+
+struct LargeAllocation {
+    id: usize,
+    size: usize,
+    ptr: *mut u8,
+}
+
+impl MemoryManager {
+    pub fn new(total: usize) -> Self {
+        // Create size class pools: 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096
+        let pools: Vec<_> = [8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096]
+            .iter()
+            .map(|&size| MemoryPool::new(size, 1024))
+            .collect();
+
+        MemoryManager {
+            allocations: RwLock::new(HashMap::new()),
+            used: AtomicU64::new(0),
+            total,
+            next_id: AtomicU64::new(0),
+            pools,
+            large_objects: RwLock::new(HashMap::new()),
+            numa_allocations: RwLock::new(HashMap::new()),
+        }
+    }
+
+    pub fn allocate(&self, size: usize, module: Option<&str>) -> Result<usize, RuntimeError> {
+        self.allocate_with_flags(size, module, AllocationFlags::default())
+    }
+
+    pub fn allocate_with_flags(
+        &self,
+        size: usize,
+        module: Option<&str>,
+        flags: AllocationFlags,
+    ) -> Result<usize, RuntimeError> {
+        let current = self.used.load(Ordering::SeqCst) as usize;
+        if current + size > self.total {
+            return Err(RuntimeError::OutOfMemory);
+        }
+
+        let id = self.next_id.fetch_add(1, Ordering::SeqCst) as usize;
+        self.used.fetch_add(size as u64, Ordering::SeqCst);
+
+        let mut allocations = self.allocations.write().unwrap();
+        allocations.insert(id, Allocation {
+            id,
+            size,
+            module: module.map(String::from),
+            allocated_at: Instant::now(),
+            generation: Generation::Young,
+            flags,
+        });
+
+        Ok(id)
+    }
+
+    /// Allocate from a specific size class pool
+    pub fn allocate_pooled(&self, size: usize) -> Option<*mut u8> {
+        // Find appropriate pool
+        for pool in &self.pools {
+            if pool.object_size >= size {
+                return pool.allocate();
+            }
+        }
+        None
+    }
+
+    pub fn deallocate(&self, id: usize) -> Result<(), RuntimeError> {
+        let mut allocations = self.allocations.write().unwrap();
+        if let Some(alloc) = allocations.remove(&id) {
+            self.used.fetch_sub(alloc.size as u64, Ordering::SeqCst);
+            Ok(())
+        } else {
+            Err(RuntimeError::Other("Invalid allocation ID".to_string()))
+        }
+    }
+
+    pub fn used(&self) -> usize {
+        self.used.load(Ordering::SeqCst) as usize
+    }
+
+    pub fn total(&self) -> usize {
+        self.total
+    }
+
+    pub fn available(&self) -> usize {
+        self.total - self.used()
+    }
+
+    /// Get allocation statistics by generation
+    pub fn stats_by_generation(&self) -> HashMap<Generation, (usize, usize)> {
+        let allocations = self.allocations.read().unwrap();
+        let mut stats: HashMap<Generation, (usize, usize)> = HashMap::new();
+
+        for alloc in allocations.values() {
+            let entry = stats.entry(alloc.generation).or_insert((0, 0));
+            entry.0 += 1;
+            entry.1 += alloc.size;
+        }
+
+        stats
+    }
+
+    /// Promote allocation to next generation
+    pub fn promote(&self, id: usize) -> Result<(), RuntimeError> {
+        let mut allocations = self.allocations.write().unwrap();
+        if let Some(alloc) = allocations.get_mut(&id) {
+            alloc.generation = match alloc.generation {
+                Generation::Young => Generation::Survivor,
+                Generation::Survivor => Generation::Old,
+                Generation::Old => Generation::Permanent,
+                Generation::Permanent => Generation::Permanent,
+            };
+            Ok(())
+        } else {
+            Err(RuntimeError::Other("Invalid allocation ID".to_string()))
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// MODULE LOADER
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Dynamic module loader
+pub struct ModuleLoader {
+    modules: RwLock<HashMap<String, LoadedModule>>,
+    next_handle: AtomicU64,
+    search_paths: RwLock<Vec<String>>,
+    /// Module dependency graph
+    dependencies: RwLock<HashMap<String, Vec<String>>>,
+    /// Module initialization order
+    init_order: RwLock<Vec<String>>,
+}
+
+pub struct LoadedModule {
+    name: String,
+    handle: ModuleHandle,
+    loaded_at: Instant,
+    exports: HashMap<String, usize>,
+    /// Module state
+    state: ModuleState,
+    /// Module version
+    version: Version,
+    /// Native library handle (if any)
+    native_handle: Option<*mut std::ffi::c_void>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ModuleState {
+    Loading,
+    Loaded,
+    Initializing,
+    Ready,
+    Unloading,
+    Failed,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct ModuleHandle(u64);
+
+impl ModuleLoader {
+    pub fn new() -> Self {
+        ModuleLoader {
+            modules: RwLock::new(HashMap::new()),
+            next_handle: AtomicU64::new(0),
+            search_paths: RwLock::new(vec![".".to_string()]),
+            dependencies: RwLock::new(HashMap::new()),
+            init_order: RwLock::new(Vec::new()),
+        }
+    }
+
+    /// Add a search path
+    pub fn add_search_path(&self, path: &str) {
+        let mut paths = self.search_paths.write().unwrap();
+        if !paths.contains(&path.to_string()) {
+            paths.push(path.to_string());
+        }
+    }
+
+    pub fn load(&self, name: &str) -> Result<ModuleHandle, RuntimeError> {
+        let mut modules = self.modules.write().unwrap();
+
+        if let Some(module) = modules.get(name) {
+            if module.state == ModuleState::Ready {
+                return Ok(module.handle);
+            }
+        }
+
+        let handle = ModuleHandle(self.next_handle.fetch_add(1, Ordering::SeqCst));
+
+        // Create module in loading state
+        modules.insert(name.to_string(), LoadedModule {
+            name: name.to_string(),
+            handle,
+            loaded_at: Instant::now(),
+            exports: HashMap::new(),
+            state: ModuleState::Loading,
+            version: Version { major: 1, minor: 0, patch: 0 },
+            native_handle: None,
+        });
+
+        // Load dependencies first
+        drop(modules);
+        self.load_dependencies(name)?;
+
+        // Initialize module
+        let mut modules = self.modules.write().unwrap();
+        if let Some(module) = modules.get_mut(name) {
+            module.state = ModuleState::Ready;
+        }
+
+        // Add to init order
+        let mut init_order = self.init_order.write().unwrap();
+        init_order.push(name.to_string());
+
+        println!("  Loaded module: {}", name);
+        Ok(handle)
+    }
+
+    fn load_dependencies(&self, name: &str) -> Result<(), RuntimeError> {
+        let deps = {
+            let dependencies = self.dependencies.read().unwrap();
+            dependencies.get(name).cloned().unwrap_or_default()
+        };
+
+        for dep in deps {
+            self.load(&dep)?;
+        }
+
+        Ok(())
+    }
+
+    pub fn unload(&self, handle: ModuleHandle) -> Result<(), RuntimeError> {
+        let mut modules = self.modules.write().unwrap();
+
+        let name = modules.iter()
+            .find(|(_, m)| m.handle.0 == handle.0)
+            .map(|(n, _)| n.clone());
+
+        if let Some(name) = name {
+            // Check if any modules depend on this one
+            let dependencies = self.dependencies.read().unwrap();
+            for (other, deps) in dependencies.iter() {
+                if deps.contains(&name) && modules.contains_key(other) {
+                    return Err(RuntimeError::Other(format!(
+                        "Cannot unload '{}': module '{}' depends on it",
+                        name, other
+                    )));
+                }
+            }
+
+            modules.remove(&name);
+
+            // Remove from init order
+            let mut init_order = self.init_order.write().unwrap();
+            init_order.retain(|n| n != &name);
+
+            println!("  Unloaded module: {}", name);
+            Ok(())
+        } else {
+            Err(RuntimeError::ModuleNotFound("Unknown handle".to_string()))
+        }
+    }
+
+    pub fn get(&self, name: &str) -> Option<ModuleHandle> {
+        let modules = self.modules.read().unwrap();
+        modules.get(name).map(|m| m.handle)
+    }
+
+    pub fn list(&self) -> Vec<String> {
+        let modules = self.modules.read().unwrap();
+        modules.keys().cloned().collect()
+    }
+
+    /// Register a module dependency
+    pub fn register_dependency(&self, module: &str, dependency: &str) {
+        let mut dependencies = self.dependencies.write().unwrap();
+        dependencies.entry(module.to_string())
+            .or_insert_with(Vec::new)
+            .push(dependency.to_string());
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// GARBAGE COLLECTOR
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Garbage collector
+pub struct GarbageCollector {
+    config: GCConfig,
+    collections: AtomicU64,
+    running: AtomicBool,
+    last_collection: RwLock<Instant>,
+    /// GC roots
+    roots: RwLock<HashSet<usize>>,
+    /// Card table for remembered set
+    card_table: RwLock<Vec<u8>>,
+    /// Young generation
+    young_gen: RwLock<HeapRegion>,
+    /// Survivor spaces (from and to)
+    survivor_from: RwLock<HeapRegion>,
+    survivor_to: RwLock<HeapRegion>,
+    /// Old generation
+    old_gen: RwLock<HeapRegion>,
+    /// GC statistics
+    stats: RwLock<GCStats>,
+    /// Concurrent marking state
+    marking_state: RwLock<MarkingState>,
+}
+
+#[derive(Clone)]
+pub struct HeapRegion {
+    start: usize,
+    end: usize,
+    used: usize,
+    objects: Vec<HeapObject>,
+}
+
+impl Default for HeapRegion {
+    fn default() -> Self {
+        HeapRegion {
+            start: 0,
+            end: 0,
+            used: 0,
+            objects: Vec::new(),
+        }
+    }
+}
+
+#[derive(Clone)]
+struct HeapObject {
+    address: usize,
+    size: usize,
+    marked: bool,
+    forwarded: Option<usize>,
+    type_id: TypeId,
+}
+
+#[derive(Default)]
+struct MarkingState {
+    in_progress: bool,
+    grey_set: VecDeque<usize>,
+    black_set: HashSet<usize>,
+}
+
+#[derive(Clone, Default)]
+pub struct GCStats {
+    pub minor_collections: u64,
+    pub major_collections: u64,
+    pub total_pause_time_ns: u64,
+    pub max_pause_time_ns: u64,
+    pub bytes_collected: u64,
+    pub bytes_promoted: u64,
+    pub allocation_rate: f64,
+}
+
+impl GarbageCollector {
+    pub fn new(config: GCConfig) -> Self {
+        let heap_size = config.heap_size;
+        let young_size = (heap_size as f64 * config.young_gen_ratio) as usize;
+        let survivor_size = young_size / config.survivor_ratio as usize;
+        let old_size = heap_size - young_size;
+
+        GarbageCollector {
+            config,
+            collections: AtomicU64::new(0),
+            running: AtomicBool::new(false),
+            last_collection: RwLock::new(Instant::now()),
+            roots: RwLock::new(HashSet::new()),
+            card_table: RwLock::new(vec![0u8; heap_size / 512]),
+            young_gen: RwLock::new(HeapRegion {
+                start: 0,
+                end: young_size,
+                used: 0,
+                objects: Vec::new(),
+            }),
+            survivor_from: RwLock::new(HeapRegion {
+                start: young_size,
+                end: young_size + survivor_size,
+                used: 0,
+                objects: Vec::new(),
+            }),
+            survivor_to: RwLock::new(HeapRegion {
+                start: young_size + survivor_size,
+                end: young_size + survivor_size * 2,
+                used: 0,
+                objects: Vec::new(),
+            }),
+            old_gen: RwLock::new(HeapRegion {
+                start: young_size + survivor_size * 2,
+                end: heap_size,
+                used: 0,
+                objects: Vec::new(),
+            }),
+            stats: RwLock::new(GCStats::default()),
+            marking_state: RwLock::new(MarkingState::default()),
+        }
+    }
+
+    pub fn start(&self) -> Result<(), RuntimeError> {
+        self.running.store(true, Ordering::SeqCst);
+
+        // Start concurrent GC thread if configured
+        if matches!(self.config.gc_type, GCType::Concurrent | GCType::G1 | GCType::ZGC) {
+            // Would start concurrent marking thread
+        }
+
+        Ok(())
+    }
+
+    pub fn stop(&self) -> Result<(), RuntimeError> {
+        self.running.store(false, Ordering::SeqCst);
+        Ok(())
+    }
+
+    /// Add a GC root
+    pub fn add_root(&self, address: usize) {
+        let mut roots = self.roots.write().unwrap();
+        roots.insert(address);
+    }
+
+    /// Remove a GC root
+    pub fn remove_root(&self, address: usize) {
+        let mut roots = self.roots.write().unwrap();
+        roots.remove(&address);
+    }
+
+    pub fn collect(&self) {
+        self.collect_generation(Generation::Young);
+    }
+
+    pub fn collect_generation(&self, generation: Generation) {
+        let start = Instant::now();
+
+        match generation {
+            Generation::Young => self.minor_gc(),
+            Generation::Survivor | Generation::Old => self.major_gc(),
+            Generation::Permanent => {} // Never collect permanent
+        }
+
+        self.collections.fetch_add(1, Ordering::SeqCst);
+        *self.last_collection.write().unwrap() = Instant::now();
+
+        let elapsed = start.elapsed();
+        let mut stats = self.stats.write().unwrap();
+        stats.total_pause_time_ns += elapsed.as_nanos() as u64;
+        stats.max_pause_time_ns = stats.max_pause_time_ns.max(elapsed.as_nanos() as u64);
+
+        if elapsed.as_millis() > self.config.pause_time_target_ms as u128 {
+            println!("  GC: collection took {}ms (target: {}ms)",
+                elapsed.as_millis(), self.config.pause_time_target_ms);
+        }
+    }
+
+    fn minor_gc(&self) {
+        // Mark phase for young generation
+        let roots = self.roots.read().unwrap().clone();
+
+        // Mark reachable objects from roots
+        let mut marked = HashSet::new();
+        let mut worklist: VecDeque<_> = roots.iter().cloned().collect();
+
+        while let Some(addr) = worklist.pop_front() {
+            if marked.insert(addr) {
+                // Would trace references from this object
+            }
+        }
+
+        // Copy surviving objects to survivor space
+        let mut young_gen = self.young_gen.write().unwrap();
+        let mut survivor_to = self.survivor_to.write().unwrap();
+        let mut old_gen = self.old_gen.write().unwrap();
+        let mut stats = self.stats.write().unwrap();
+
+        let mut promoted_bytes = 0usize;
+        let mut collected_bytes = 0usize;
+
+        for obj in young_gen.objects.drain(..) {
+            if marked.contains(&obj.address) {
+                // Object survived - check tenuring threshold
+                // For simplicity, promote directly to old gen
+                old_gen.objects.push(HeapObject {
+                    address: old_gen.used,
+                    size: obj.size,
+                    marked: false,
+                    forwarded: None,
+                    type_id: obj.type_id,
+                });
+                old_gen.used += obj.size;
+                promoted_bytes += obj.size;
+            } else {
+                collected_bytes += obj.size;
+            }
+        }
+
+        young_gen.used = 0;
+        stats.minor_collections += 1;
+        stats.bytes_collected += collected_bytes as u64;
+        stats.bytes_promoted += promoted_bytes as u64;
+    }
+
+    fn major_gc(&self) {
+        match self.config.gc_type {
+            GCType::MarkAndSweep => self.mark_and_sweep(),
+            GCType::Generational => self.generational_collect(),
+            GCType::Concurrent => self.concurrent_collect(),
+            GCType::G1 => self.g1_collect(),
+            GCType::ZGC => self.zgc_collect(),
+            GCType::Shenandoah => self.shenandoah_collect(),
+            GCType::Reference => self.reference_count(),
+        }
+
+        let mut stats = self.stats.write().unwrap();
+        stats.major_collections += 1;
+    }
+
+    fn mark_and_sweep(&self) {
+        // Mark phase: traverse all roots and mark reachable objects
+        let roots = self.roots.read().unwrap().clone();
+        let mut marked = HashSet::new();
+
+        for root in roots {
+            self.mark_object(root, &mut marked);
+        }
+
+        // Sweep phase: free unmarked objects
+        let mut old_gen = self.old_gen.write().unwrap();
+        let before = old_gen.objects.len();
+        old_gen.objects.retain(|obj| marked.contains(&obj.address));
+        let after = old_gen.objects.len();
+
+        // Recalculate used space
+        old_gen.used = old_gen.objects.iter().map(|o| o.size).sum();
+
+        let mut stats = self.stats.write().unwrap();
+        stats.bytes_collected += ((before - after) * 64) as u64; // Approximate
+    }
+
+    fn mark_object(&self, address: usize, marked: &mut HashSet<usize>) {
+        if marked.insert(address) {
+            // Would trace references from this object
+        }
+    }
+
+    fn generational_collect(&self) {
+        // Collect young generation first
+        self.minor_gc();
+
+        // If old gen is above threshold, do major GC
+        let old_gen = self.old_gen.read().unwrap();
+        let old_usage = old_gen.used as f64 / (old_gen.end - old_gen.start) as f64;
+
+        if old_usage > self.config.threshold {
+            drop(old_gen);
+            self.mark_and_sweep();
+        }
+    }
+
+    fn concurrent_collect(&self) {
+        // Initial mark (STW)
+        let roots = self.roots.read().unwrap().clone();
+
+        {
+            let mut marking = self.marking_state.write().unwrap();
+            marking.in_progress = true;
+            marking.grey_set.extend(roots);
+        }
+
+        // Concurrent marking
+        loop {
+            let addr = {
+                let mut marking = self.marking_state.write().unwrap();
+                marking.grey_set.pop_front()
+            };
+
+            if let Some(addr) = addr {
+                // Mark object and add children to grey set
+                let mut marking = self.marking_state.write().unwrap();
+                marking.black_set.insert(addr);
+                // Would add children to grey_set
+            } else {
+                break;
+            }
+        }
+
+        // Remark (STW) - handle mutations during concurrent mark
+
+        // Concurrent sweep
+        let black_set = {
+            let marking = self.marking_state.read().unwrap();
+            marking.black_set.clone()
+        };
+
+        let mut old_gen = self.old_gen.write().unwrap();
+        old_gen.objects.retain(|obj| black_set.contains(&obj.address));
+        old_gen.used = old_gen.objects.iter().map(|o| o.size).sum();
+
+        // Reset marking state
+        let mut marking = self.marking_state.write().unwrap();
+        marking.in_progress = false;
+        marking.grey_set.clear();
+        marking.black_set.clear();
+    }
+
+    fn g1_collect(&self) {
+        // G1 garbage collector (region-based)
+        // Would implement:
+        // 1. Young-only phase
+        // 2. Space reclamation phase
+        // 3. Full GC (fallback)
+        self.concurrent_collect();
+    }
+
+    fn zgc_collect(&self) {
+        // ZGC (colored pointers, load barriers)
+        // Would implement concurrent relocation
+        self.concurrent_collect();
+    }
+
+    fn shenandoah_collect(&self) {
+        // Shenandoah (forwarding pointers)
+        // Would implement concurrent evacuation
+        self.concurrent_collect();
+    }
+
+    fn reference_count(&self) {
+        // Process reference count decrements
+        // Free objects with zero count
+    }
+
+    pub fn collection_count(&self) -> u64 {
+        self.collections.load(Ordering::SeqCst)
+    }
+
+    pub fn stats(&self) -> GCStats {
+        self.stats.read().unwrap().clone()
+    }
+
+    /// Write barrier for generational GC
+    pub fn write_barrier(&self, object_addr: usize, field_offset: usize, new_value: usize) {
+        // Update card table for remembered set
+        let card_index = object_addr / 512;
+        let mut card_table = self.card_table.write().unwrap();
+        if card_index < card_table.len() {
+            card_table[card_index] = 1; // Mark card as dirty
+        }
+    }
+
+    /// Read barrier for concurrent GC
+    pub fn read_barrier(&self, object_addr: usize) -> usize {
+        // Check if object has been relocated
+        // Return forwarding pointer if so
+        object_addr
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// RUNTIME PROFILER
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Runtime profiler
+pub struct RuntimeProfiler {
+    enabled: bool,
+    samples: RwLock<Vec<ProfileSample>>,
+    running: AtomicBool,
+    sample_rate: Duration,
+    /// Method execution counts
+    method_counts: RwLock<HashMap<FunctionRef, u64>>,
+    /// Hot spot detection
+    hot_spots: RwLock<Vec<HotSpot>>,
+    /// Allocation profiling
+    allocations: RwLock<Vec<AllocationSample>>,
+}
+
+#[derive(Clone)]
+pub struct ProfileSample {
+    pub timestamp: Instant,
+    pub cpu_usage: f64,
+    pub memory_usage: f64,
+    pub active_threads: usize,
+    pub gc_pressure: f64,
+    pub stack_trace: Vec<FunctionRef>,
+}
+
+#[derive(Clone)]
+pub struct HotSpot {
+    pub function: FunctionRef,
+    pub execution_count: u64,
+    pub total_time_ns: u64,
+    pub self_time_ns: u64,
+}
+
+#[derive(Clone)]
+pub struct AllocationSample {
+    pub timestamp: Instant,
+    pub type_id: TypeId,
+    pub size: usize,
+    pub stack_trace: Vec<FunctionRef>,
+}
+
+impl RuntimeProfiler {
+    pub fn new(enabled: bool) -> Self {
+        RuntimeProfiler {
+            enabled,
+            samples: RwLock::new(Vec::new()),
+            running: AtomicBool::new(false),
+            sample_rate: Duration::from_millis(100),
+            method_counts: RwLock::new(HashMap::new()),
+            hot_spots: RwLock::new(Vec::new()),
+            allocations: RwLock::new(Vec::new()),
+        }
+    }
+
+    pub fn start(&self) -> Result<(), RuntimeError> {
+        if !self.enabled {
+            return Ok(());
+        }
+
+        self.running.store(true, Ordering::SeqCst);
+        // Would start profiler thread here
+        Ok(())
+    }
+
+    pub fn stop(&self) -> Result<(), RuntimeError> {
+        self.running.store(false, Ordering::SeqCst);
+        Ok(())
+    }
+
+    /// Record method entry
+    pub fn method_enter(&self, func: &FunctionRef) {
+        if !self.enabled {
+            return;
+        }
+
+        let mut counts = self.method_counts.write().unwrap();
+        *counts.entry(func.clone()).or_insert(0) += 1;
+    }
+
+    /// Record allocation
+    pub fn record_allocation(&self, type_id: TypeId, size: usize, stack: Vec<FunctionRef>) {
+        if !self.enabled {
+            return;
+        }
+
+        let mut allocations = self.allocations.write().unwrap();
+        allocations.push(AllocationSample {
+            timestamp: Instant::now(),
+            type_id,
+            size,
+            stack_trace: stack,
+        });
+
+        // Keep last 10000 allocations
+        if allocations.len() > 10000 {
+            allocations.remove(0);
+        }
+    }
+
+    pub fn sample(&self) {
+        if !self.enabled {
+            return;
+        }
+
+        let sample = ProfileSample {
+            timestamp: Instant::now(),
+            cpu_usage: 0.0,  // Would measure actual CPU
+            memory_usage: 0.0, // Would measure actual memory
+            active_threads: 0,
+            gc_pressure: 0.0,
+            stack_trace: Vec::new(),
+        };
+
+        let mut samples = self.samples.write().unwrap();
+        samples.push(sample);
+
+        // Keep last 10000 samples
+        if samples.len() > 10000 {
+            samples.remove(0);
+        }
+    }
+
+    /// Detect hot spots
+    pub fn detect_hot_spots(&self, threshold: u64) {
+        let counts = self.method_counts.read().unwrap();
+        let mut hot_spots = self.hot_spots.write().unwrap();
+
+        hot_spots.clear();
+        for (func, &count) in counts.iter() {
+            if count >= threshold {
+                hot_spots.push(HotSpot {
+                    function: func.clone(),
+                    execution_count: count,
+                    total_time_ns: 0,
+                    self_time_ns: 0,
+                });
+            }
+        }
+
+        hot_spots.sort_by(|a, b| b.execution_count.cmp(&a.execution_count));
+    }
+
+    pub fn report(&self) -> ProfileReport {
+        let samples = self.samples.read().unwrap();
+
+        if samples.is_empty() {
+            return ProfileReport::default();
+        }
+
+        let avg_cpu: f64 = samples.iter().map(|s| s.cpu_usage).sum::<f64>() / samples.len() as f64;
+        let avg_memory: f64 = samples.iter().map(|s| s.memory_usage).sum::<f64>() / samples.len() as f64;
+        let max_cpu = samples.iter().map(|s| s.cpu_usage).fold(0.0, f64::max);
+        let max_memory = samples.iter().map(|s| s.memory_usage).fold(0.0, f64::max);
+
+        ProfileReport {
+            sample_count: samples.len(),
+            avg_cpu_usage: avg_cpu,
+            max_cpu_usage: max_cpu,
+            avg_memory_usage: avg_memory,
+            max_memory_usage: max_memory,
+        }
+    }
+}
+
+#[derive(Default)]
+pub struct ProfileReport {
+    pub sample_count: usize,
+    pub avg_cpu_usage: f64,
+    pub max_cpu_usage: f64,
+    pub avg_memory_usage: f64,
+    pub max_memory_usage: f64,
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// GLOBAL RUNTIME INSTANCE
+// ═══════════════════════════════════════════════════════════════════════════════
+
+static mut RUNTIME: Option<Arc<BuildRuntime>> = None;
+
+/// Initialize the global runtime
+pub fn init() -> Result<Arc<BuildRuntime>, RuntimeError> {
+    init_with_config(RuntimeConfig::default())
+}
+
+/// Initialize the global runtime with custom config
+pub fn init_with_config(config: RuntimeConfig) -> Result<Arc<BuildRuntime>, RuntimeError> {
+    unsafe {
+        if RUNTIME.is_none() {
+            let runtime = BuildRuntime::with_config(config);
+            RUNTIME = Some(Arc::new(runtime));
+        }
+        Ok(RUNTIME.clone().unwrap())
+    }
+}
+
+/// Get the global runtime
+pub fn runtime() -> Arc<BuildRuntime> {
+    unsafe {
+        RUNTIME.clone().expect("Runtime not initialized. Call runtime::init() first.")
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// CONVENIENCE FUNCTIONS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Spawn a task on the global runtime
+pub fn spawn<F, R>(task: F) -> TaskHandle<R>
+where
+    F: FnOnce() -> R + Send + 'static,
+    R: Send + 'static,
+{
+    runtime().spawn(task)
+}
+
+/// Spawn a high-priority task
+pub fn spawn_critical<F, R>(task: F) -> TaskHandle<R>
+where
+    F: FnOnce() -> R + Send + 'static,
+    R: Send + 'static,
+{
+    runtime().spawn_with_priority(TaskPriority::Critical, task)
+}
+
+/// Spawn a fiber
+pub fn spawn_fiber<F>(f: F) -> Result<FiberId, RuntimeError>
+where
+    F: FnOnce() + Send + 'static,
+{
+    runtime().spawn_fiber(f)
+}
+
+/// Request garbage collection
+pub fn gc() {
+    runtime().gc_collect();
+}
+
+/// Get runtime statistics
+pub fn stats() -> RuntimeStats {
+    runtime().stats()
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// BYTECODE AND INTERMEDIATE REPRESENTATION
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Bytecode instruction set for the BUILD virtual machine
+#[derive(Clone, Debug)]
+pub enum Opcode {
+    // Stack operations
+    Nop,
+    Push(Value),
+    Pop,
+    Dup,
+    Dup2,
+    Swap,
+    Rot3,
+
+    // Arithmetic
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Mod,
+    Neg,
+    Inc,
+    Dec,
+
+    // Bitwise
+    And,
+    Or,
+    Xor,
+    Not,
+    Shl,
+    Shr,
+    Ushr,
+
+    // Comparison
+    Eq,
+    Ne,
+    Lt,
+    Le,
+    Gt,
+    Ge,
+    Cmp,
+
+    // Control flow
+    Jump(usize),
+    JumpIf(usize),
+    JumpIfNot(usize),
+    JumpIfNull(usize),
+    JumpIfNotNull(usize),
+    Call(usize),
+    TailCall(usize),
+    Return,
+    ReturnVoid,
+
+    // Local variables
+    LoadLocal(u16),
+    StoreLocal(u16),
+    IncLocal(u16),
+
+    // Global variables
+    LoadGlobal(u32),
+    StoreGlobal(u32),
+
+    // Object operations
+    NewObject(TypeId),
+    GetField(u16),
+    SetField(u16),
+    GetStatic(u32),
+    SetStatic(u32),
+
+    // Array operations
+    NewArray(TypeId, usize),
+    ArrayGet,
+    ArraySet,
+    ArrayLen,
+    ArraySlice,
+
+    // Function operations
+    Closure(usize, Vec<u16>),
+    InvokeVirtual(u16),
+    InvokeInterface(u16),
+    InvokeStatic(u32),
+    InvokeDynamic(u32),
+
+    // Type operations
+    TypeOf,
+    Cast(TypeId),
+    InstanceOf(TypeId),
+    CheckCast(TypeId),
+
+    // Exception handling
+    Try(usize),
+    Catch(TypeId, usize),
+    Finally(usize),
+    Throw,
+    EndTry,
+    Rethrow,
+
+    // Monitor operations
+    MonitorEnter,
+    MonitorExit,
+
+    // Debug
+    DebugBreak,
+    DebugPrint,
+    LineNumber(u32),
+
+    // Optimization hints
+    HotLoop,
+    ColdPath,
+    Likely,
+    Unlikely,
+}
+
+/// Runtime value representation
+#[derive(Clone, Debug)]
+pub enum Value {
+    Null,
+    Bool(bool),
+    Int8(i8),
+    Int16(i16),
+    Int32(i32),
+    Int64(i64),
+    Int128(i128),
+    UInt8(u8),
+    UInt16(u16),
+    UInt32(u32),
+    UInt64(u64),
+    UInt128(u128),
+    Float32(f32),
+    Float64(f64),
+    Char(char),
+    String(Arc<String>),
+    Array(Arc<RwLock<Vec<Value>>>),
+    Object(Arc<RwLock<RuntimeObject>>),
+    Function(FunctionRef),
+    Closure(ClosureRef),
+    NativeFunction(NativeFunctionRef),
+    TypeRef(TypeId),
+    /// Boxed value for heap allocation
+    Boxed(Arc<Value>),
+    /// Weak reference
+    Weak(std::sync::Weak<RwLock<RuntimeObject>>),
+}
+
+impl Value {
+    pub fn type_id(&self) -> TypeId {
+        match self {
+            Value::Null => TypeId::NULL,
+            Value::Bool(_) => TypeId::BOOL,
+            Value::Int8(_) => TypeId::INT8,
+            Value::Int16(_) => TypeId::INT16,
+            Value::Int32(_) => TypeId::INT32,
+            Value::Int64(_) => TypeId::INT64,
+            Value::Int128(_) => TypeId::INT128,
+            Value::UInt8(_) => TypeId::UINT8,
+            Value::UInt16(_) => TypeId::UINT16,
+            Value::UInt32(_) => TypeId::UINT32,
+            Value::UInt64(_) => TypeId::UINT64,
+            Value::UInt128(_) => TypeId::UINT128,
+            Value::Float32(_) => TypeId::FLOAT32,
+            Value::Float64(_) => TypeId::FLOAT64,
+            Value::Char(_) => TypeId::CHAR,
+            Value::String(_) => TypeId::STRING,
+            Value::Array(_) => TypeId::ARRAY,
+            Value::Object(obj) => obj.read().unwrap().type_id,
+            Value::Function(_) => TypeId::FUNCTION,
+            Value::Closure(_) => TypeId::CLOSURE,
+            Value::NativeFunction(_) => TypeId::NATIVE_FUNCTION,
+            Value::TypeRef(_) => TypeId::TYPE,
+            Value::Boxed(v) => v.type_id(),
+            Value::Weak(_) => TypeId::WEAK_REF,
+        }
+    }
+
+    pub fn is_truthy(&self) -> bool {
+        match self {
+            Value::Null => false,
+            Value::Bool(b) => *b,
+            Value::Int8(n) => *n != 0,
+            Value::Int16(n) => *n != 0,
+            Value::Int32(n) => *n != 0,
+            Value::Int64(n) => *n != 0,
+            Value::Int128(n) => *n != 0,
+            Value::UInt8(n) => *n != 0,
+            Value::UInt16(n) => *n != 0,
+            Value::UInt32(n) => *n != 0,
+            Value::UInt64(n) => *n != 0,
+            Value::UInt128(n) => *n != 0,
+            Value::Float32(n) => *n != 0.0,
+            Value::Float64(n) => *n != 0.0,
+            Value::String(s) => !s.is_empty(),
+            Value::Array(a) => !a.read().unwrap().is_empty(),
+            Value::Weak(w) => w.upgrade().is_some(),
+            _ => true,
+        }
+    }
+
+    pub fn is_null(&self) -> bool {
+        matches!(self, Value::Null)
+    }
+
+    /// Convert to i64 if possible
+    pub fn to_i64(&self) -> Option<i64> {
+        match self {
+            Value::Int8(n) => Some(*n as i64),
+            Value::Int16(n) => Some(*n as i64),
+            Value::Int32(n) => Some(*n as i64),
+            Value::Int64(n) => Some(*n),
+            Value::UInt8(n) => Some(*n as i64),
+            Value::UInt16(n) => Some(*n as i64),
+            Value::UInt32(n) => Some(*n as i64),
+            Value::UInt64(n) => Some(*n as i64),
+            _ => None,
+        }
+    }
+
+    /// Convert to f64 if possible
+    pub fn to_f64(&self) -> Option<f64> {
+        match self {
+            Value::Float32(n) => Some(*n as f64),
+            Value::Float64(n) => Some(*n),
+            Value::Int64(n) => Some(*n as f64),
+            _ => None,
+        }
+    }
+}
+
+/// Type identifier for runtime type checking
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct TypeId(pub u64);
+
+impl TypeId {
+    pub const NULL: TypeId = TypeId(0);
+    pub const BOOL: TypeId = TypeId(1);
+    pub const INT8: TypeId = TypeId(2);
+    pub const INT16: TypeId = TypeId(3);
+    pub const INT32: TypeId = TypeId(4);
+    pub const INT64: TypeId = TypeId(5);
+    pub const UINT8: TypeId = TypeId(6);
+    pub const UINT16: TypeId = TypeId(7);
+    pub const UINT32: TypeId = TypeId(8);
+    pub const UINT64: TypeId = TypeId(9);
+    pub const FLOAT32: TypeId = TypeId(10);
+    pub const FLOAT64: TypeId = TypeId(11);
+    pub const CHAR: TypeId = TypeId(12);
+    pub const STRING: TypeId = TypeId(13);
+    pub const ARRAY: TypeId = TypeId(14);
+    pub const OBJECT: TypeId = TypeId(15);
+    pub const FUNCTION: TypeId = TypeId(16);
+    pub const CLOSURE: TypeId = TypeId(17);
+    pub const NATIVE_FUNCTION: TypeId = TypeId(18);
+    pub const TYPE: TypeId = TypeId(19);
+    pub const INT128: TypeId = TypeId(20);
+    pub const UINT128: TypeId = TypeId(21);
+    pub const WEAK_REF: TypeId = TypeId(22);
+
+    pub const FIRST_USER_TYPE: u64 = 1000;
+
+    pub fn is_primitive(&self) -> bool {
+        self.0 >= 1 && self.0 <= 12
+    }
+
+    pub fn is_numeric(&self) -> bool {
+        self.0 >= 2 && self.0 <= 11
+    }
+
+    pub fn is_integer(&self) -> bool {
+        (self.0 >= 2 && self.0 <= 5) || (self.0 >= 6 && self.0 <= 9) || self.0 == 20 || self.0 == 21
+    }
+
+    pub fn is_floating_point(&self) -> bool {
+        self.0 == 10 || self.0 == 11
+    }
+}
+
+/// Runtime object representation
+#[derive(Debug)]
+pub struct RuntimeObject {
+    pub type_id: TypeId,
+    pub fields: HashMap<String, Value>,
+    pub vtable: Option<Arc<VTable>>,
+    /// Object header for GC
+    pub header: ObjectHeader,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct ObjectHeader {
+    /// Mark bits for GC
+    pub mark: u8,
+    /// Age for generational GC
+    pub age: u8,
+    /// Hash code
+    pub hash: u32,
+    /// Lock state
+    pub lock_state: LockState,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum LockState {
+    Unlocked,
+    Biased(u64),      // Thread ID
+    ThinLock(u32),    // Lock record
+    FatLock(u64),     // Monitor ID
+}
+
+impl Default for ObjectHeader {
+    fn default() -> Self {
+        ObjectHeader {
+            mark: 0,
+            age: 0,
+            hash: 0,
+            lock_state: LockState::Unlocked,
+        }
+    }
+}
+
+/// Virtual method table for dynamic dispatch
+#[derive(Debug)]
+pub struct VTable {
+    pub type_id: TypeId,
+    pub type_name: String,
+    pub methods: HashMap<String, FunctionRef>,
+    pub interface_tables: HashMap<TypeId, InterfaceTable>,
+    pub parent: Option<Arc<VTable>>,
+}
+
+/// Interface dispatch table
+#[derive(Debug, Clone)]
+pub struct InterfaceTable {
+    pub interface_id: TypeId,
+    pub methods: Vec<FunctionRef>,
+}
+
+impl VTable {
+    pub fn lookup(&self, name: &str) -> Option<&FunctionRef> {
+        self.methods.get(name).or_else(|| {
+            self.parent.as_ref().and_then(|p| p.lookup(name))
+        })
+    }
+
+    pub fn lookup_interface(&self, interface: TypeId, method_idx: usize) -> Option<&FunctionRef> {
+        self.interface_tables.get(&interface)
+            .and_then(|table| table.methods.get(method_idx))
+    }
+}
+
+/// Function reference
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct FunctionRef {
+    pub module_id: u32,
+    pub function_id: u32,
+    pub arity: u8,
+}
+
+/// Closure reference with captured environment
+#[derive(Clone, Debug)]
+pub struct ClosureRef {
+    pub function: FunctionRef,
+    pub captures: Vec<Value>,
+}
+
+/// Native function reference
+#[derive(Clone)]
+pub struct NativeFunctionRef {
+    pub name: String,
+    pub arity: u8,
+    pub function: Arc<dyn Fn(&[Value]) -> Result<Value, RuntimeError> + Send + Sync>,
+}
+
+impl std::fmt::Debug for NativeFunctionRef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "NativeFunction({})", self.name)
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// JIT COMPILATION WITH TIERED COMPILATION
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// JIT compilation tier
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum JITTier {
+    /// Interpreted bytecode
+    Interpreter,
+    /// Baseline JIT (fast compilation, basic optimizations)
+    Baseline,
+    /// Optimizing JIT (slower compilation, aggressive optimizations)
+    Optimizing,
+    /// Profile-guided optimization
+    PGO,
+}
+
+/// JIT compiler with tiered compilation support
+pub struct JITCompiler {
+    config: JITConfig,
+    /// Code cache
+    code_cache: RwLock<HashMap<FunctionRef, CompiledCode>>,
+    /// Execution counters for tiering
+    execution_counts: RwLock<HashMap<FunctionRef, u64>>,
+    /// IR builder
+    ir_builder: IRBuilder,
+    /// Optimization passes by tier
+    optimizers: HashMap<JITTier, Optimizer>,
+    /// Code generator
+    codegen: CodeGenerator,
+    /// Compilation count
+    compilations: AtomicU64,
+    /// OSR entry points
+    osr_entries: RwLock<HashMap<(FunctionRef, usize), CompiledCode>>,
+    /// Deoptimization info
+    deopt_info: RwLock<HashMap<FunctionRef, DeoptInfo>>,
+    /// Inline cache
+    inline_cache: RwLock<HashMap<InlineCacheKey, InlineCacheEntry>>,
+}
+
+#[derive(Clone, Hash, PartialEq, Eq)]
+pub struct InlineCacheKey {
+    pub function: FunctionRef,
+    pub pc: usize,
+}
+
+#[derive(Clone)]
+pub struct InlineCacheEntry {
+    pub receiver_type: TypeId,
+    pub target: FunctionRef,
+    pub hit_count: u64,
+}
+
+#[derive(Clone)]
+pub struct DeoptInfo {
+    pub reason: DeoptReason,
+    pub pc: usize,
+    pub stack_state: Vec<Value>,
+}
+
+#[derive(Clone, Debug)]
+pub enum DeoptReason {
+    TypeMismatch,
+    NullPointer,
+    ArrayBoundsCheck,
+    DivisionByZero,
+    StackOverflow,
+    ClassNotLoaded,
+    Uncommon,
+    Invalidated,
+}
+
+impl JITCompiler {
+    pub fn new(tier: JITTier) -> Self {
+        Self::with_config(JITConfig {
+            initial_tier: tier,
+            ..JITConfig::default()
+        })
+    }
+
+    pub fn with_config(config: JITConfig) -> Self {
+        let mut optimizers = HashMap::new();
+        optimizers.insert(JITTier::Baseline, Optimizer::new(JITTier::Baseline));
+        optimizers.insert(JITTier::Optimizing, Optimizer::new(JITTier::Optimizing));
+        optimizers.insert(JITTier::PGO, Optimizer::new(JITTier::PGO));
+
+        JITCompiler {
+            config,
+            code_cache: RwLock::new(HashMap::new()),
+            execution_counts: RwLock::new(HashMap::new()),
+            ir_builder: IRBuilder::new(),
+            optimizers,
+            codegen: CodeGenerator::new(),
+            compilations: AtomicU64::new(0),
+            osr_entries: RwLock::new(HashMap::new()),
+            deopt_info: RwLock::new(HashMap::new()),
+            inline_cache: RwLock::new(HashMap::new()),
+        }
+    }
+
+    /// Record method execution and check if compilation is needed
+    pub fn record_execution(&self, func: &FunctionRef) -> Option<JITTier> {
+        if !self.config.tiered_compilation {
+            return None;
+        }
+
+        let mut counts = self.execution_counts.write().unwrap();
+        let count = counts.entry(func.clone()).or_insert(0);
+        *count += 1;
+
+        // Check thresholds
+        if *count >= self.config.pgo_threshold as u64 {
+            Some(JITTier::PGO)
+        } else if *count >= self.config.optimizing_threshold as u64 {
+            Some(JITTier::Optimizing)
+        } else if *count >= self.config.baseline_threshold as u64 {
+            Some(JITTier::Baseline)
+        } else {
+            None
+        }
+    }
+
+    /// Compile bytecode to native code
+    pub fn compile(&self, function: &Function, tier: JITTier) -> Result<CompiledCode, CompileError> {
+        // Check cache first
+        {
+            let cache = self.code_cache.read().unwrap();
+            if let Some(code) = cache.get(&function.reference) {
+                if code.tier >= tier {
+                    return Ok(code.clone());
+                }
+            }
+        }
+
+        // Build IR from bytecode
+        let ir = self.ir_builder.build(&function.bytecode)?;
+
+        // Run optimization passes for this tier
+        let optimized_ir = if let Some(optimizer) = self.optimizers.get(&tier) {
+            optimizer.optimize(ir)?
+        } else {
+            ir
+        };
+
+        // Generate native code
+        let native_code = self.codegen.generate(&optimized_ir)?;
+
+        let compiled = CompiledCode {
+            function_ref: function.reference.clone(),
+            tier,
+            code: native_code,
+            metadata: CodeMetadata::default(),
+        };
+
+        // Cache the result
+        self.cache(compiled.clone());
+        self.compilations.fetch_add(1, Ordering::SeqCst);
+
+        Ok(compiled)
+    }
+
+    /// Compile for on-stack replacement
+    pub fn compile_osr(&self, function: &Function, entry_pc: usize) -> Result<CompiledCode, CompileError> {
+        // Build IR starting from entry_pc
+        let ir = self.ir_builder.build_osr(&function.bytecode, entry_pc)?;
+
+        // Optimize
+        let optimizer = self.optimizers.get(&JITTier::Optimizing).unwrap();
+        let optimized_ir = optimizer.optimize(ir)?;
+
+        // Generate with OSR entry
+        let native_code = self.codegen.generate_osr(&optimized_ir, entry_pc)?;
+
+        let compiled = CompiledCode {
+            function_ref: function.reference.clone(),
+            tier: JITTier::Optimizing,
+            code: native_code,
+            metadata: CodeMetadata::default(),
+        };
+
+        // Cache OSR entry
+        let mut osr = self.osr_entries.write().unwrap();
+        osr.insert((function.reference.clone(), entry_pc), compiled.clone());
+
+        Ok(compiled)
+    }
+
+    /// Deoptimize compiled code
+    pub fn deoptimize(&self, func: &FunctionRef, reason: DeoptReason, pc: usize, stack: Vec<Value>) {
+        // Record deopt info
+        let mut deopt = self.deopt_info.write().unwrap();
+        deopt.insert(func.clone(), DeoptInfo {
+            reason,
+            pc,
+            stack_state: stack,
+        });
+
+        // Invalidate compiled code
+        self.invalidate(func);
+    }
+
+    /// Look up compiled code in cache
+    pub fn lookup(&self, func_ref: &FunctionRef) -> Option<CompiledCode> {
+        let cache = self.code_cache.read().unwrap();
+        cache.get(func_ref).cloned()
+    }
+
+    /// Cache compiled code
+    pub fn cache(&self, code: CompiledCode) {
+        let mut cache = self.code_cache.write().unwrap();
+        cache.insert(code.function_ref.clone(), code);
+    }
+
+    /// Invalidate cached code
+    pub fn invalidate(&self, func_ref: &FunctionRef) {
+        let mut cache = self.code_cache.write().unwrap();
+        cache.remove(func_ref);
+    }
+
+    /// Clear entire code cache
+    pub fn clear_cache(&self) {
+        let mut cache = self.code_cache.write().unwrap();
+        cache.clear();
+    }
+
+    /// Update inline cache
+    pub fn update_inline_cache(&self, key: InlineCacheKey, receiver_type: TypeId, target: FunctionRef) {
+        if !self.config.inline_caching {
+            return;
+        }
+
+        let mut cache = self.inline_cache.write().unwrap();
+        let entry = cache.entry(key).or_insert(InlineCacheEntry {
+            receiver_type,
+            target: target.clone(),
+            hit_count: 0,
+        });
+
+        if entry.receiver_type == receiver_type {
+            entry.hit_count += 1;
+        } else {
+            // Polymorphic - may need to deoptimize
+            *entry = InlineCacheEntry {
+                receiver_type,
+                target,
+                hit_count: 1,
+            };
+        }
+    }
+
+    /// Look up inline cache
+    pub fn lookup_inline_cache(&self, key: &InlineCacheKey, receiver_type: TypeId) -> Option<FunctionRef> {
+        let cache = self.inline_cache.read().unwrap();
+        cache.get(key)
+            .filter(|e| e.receiver_type == receiver_type)
+            .map(|e| e.target.clone())
+    }
+
+    pub fn compilation_count(&self) -> u64 {
+        self.compilations.load(Ordering::SeqCst)
+    }
+}
+
+/// Compiled native code
+#[derive(Clone)]
+pub struct CompiledCode {
+    pub function_ref: FunctionRef,
+    pub tier: JITTier,
+    pub code: NativeCode,
+    pub metadata: CodeMetadata,
+}
+
+/// Native machine code
+#[derive(Clone)]
+pub struct NativeCode {
+    /// Executable memory region
+    pub bytes: Vec<u8>,
+    /// Entry point offset
+    pub entry_offset: usize,
+    /// Stack frame size
+    pub frame_size: usize,
+    /// GC safe points
+    pub safe_points: Vec<SafePoint>,
+    /// Exception table
+    pub exception_table: Vec<ExceptionTableEntry>,
+}
+
+/// GC safe point information
+#[derive(Clone, Debug)]
+pub struct SafePoint {
+    pub offset: usize,
+    pub stack_map: Vec<StackSlotInfo>,
+}
+
+/// Stack slot information for GC
+#[derive(Clone, Debug)]
+pub struct StackSlotInfo {
+    pub offset: i32,
+    pub kind: StackSlotKind,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum StackSlotKind {
+    Reference,
+    Value,
+    Derived,
+}
+
+/// Code metadata for debugging and profiling
+#[derive(Clone, Default)]
+pub struct CodeMetadata {
+    pub source_map: Vec<SourceMapEntry>,
+    pub exception_table: Vec<ExceptionTableEntry>,
+    pub profile_data: Option<ProfileData>,
+    /// Deoptimization points
+    pub deopt_points: Vec<DeoptPoint>,
+}
+
+#[derive(Clone)]
+pub struct DeoptPoint {
+    pub pc: usize,
+    pub bytecode_pc: usize,
+    pub stack_height: usize,
+}
+
+#[derive(Clone)]
+pub struct SourceMapEntry {
+    pub code_offset: usize,
+    pub source_line: u32,
+    pub source_column: u32,
+}
+
+#[derive(Clone)]
+pub struct ExceptionTableEntry {
+    pub try_start: usize,
+    pub try_end: usize,
+    pub handler: usize,
+    pub catch_type: Option<TypeId>,
+}
+
+#[derive(Clone)]
+pub struct ProfileData {
+    pub execution_count: u64,
+    pub branch_frequencies: HashMap<usize, f64>,
+    pub type_feedback: HashMap<usize, Vec<TypeId>>,
+}
+
+/// Compilation error
+#[derive(Debug)]
+pub enum CompileError {
+    InvalidBytecode(String),
+    UnsupportedFeature(String),
+    InternalError(String),
+    OutOfMemory,
+    CodeCacheFull,
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// INTERMEDIATE REPRESENTATION
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// IR Builder - converts bytecode to SSA form IR
+pub struct IRBuilder {
+    next_reg: u32,
+    blocks: Vec<BasicBlock>,
+}
+
+impl IRBuilder {
+    pub fn new() -> Self {
+        IRBuilder {
+            next_reg: 0,
+            blocks: Vec::new(),
+        }
+    }
+
+    pub fn build(&self, bytecode: &[Opcode]) -> Result<IRFunction, CompileError> {
+        let mut blocks = Vec::new();
+        let mut current_block = BasicBlock::new(0);
+
+        for (i, op) in bytecode.iter().enumerate() {
+            match op {
+                Opcode::Jump(target) => {
+                    current_block.terminator = Some(IRTerminator::Jump(*target));
+                    blocks.push(current_block);
+                    current_block = BasicBlock::new(blocks.len());
+                }
+                Opcode::JumpIf(target) => {
+                    current_block.terminator = Some(IRTerminator::Branch {
+                        cond: IRValue::Reg(current_block.instructions.len() as u32),
+                        then_block: *target,
+                        else_block: i + 1,
+                    });
+                    blocks.push(current_block);
+                    current_block = BasicBlock::new(blocks.len());
+                }
+                Opcode::Return | Opcode::ReturnVoid => {
+                    current_block.terminator = Some(IRTerminator::Return(None));
+                    blocks.push(current_block);
+                    current_block = BasicBlock::new(blocks.len());
+                }
+                _ => {
+                    let ir_instr = self.opcode_to_ir(op)?;
+                    current_block.instructions.push(ir_instr);
+                }
+            }
+        }
+
+        if current_block.terminator.is_none() {
+            current_block.terminator = Some(IRTerminator::Return(None));
+        }
+        blocks.push(current_block);
+
+        Ok(IRFunction { blocks, locals: Vec::new() })
+    }
+
+    /// Build IR for on-stack replacement starting at entry_pc
+    pub fn build_osr(&self, bytecode: &[Opcode], entry_pc: usize) -> Result<IRFunction, CompileError> {
+        // Build full IR first
+        let mut ir = self.build(bytecode)?;
+
+        // Mark entry block
+        // In practice, would need to insert OSR entry prologue
+
+        Ok(ir)
+    }
+
+    fn opcode_to_ir(&self, op: &Opcode) -> Result<IRInstruction, CompileError> {
+        match op {
+            Opcode::Add => Ok(IRInstruction::BinOp(IRBinOp::Add, IRValue::Stack(0), IRValue::Stack(1))),
+            Opcode::Sub => Ok(IRInstruction::BinOp(IRBinOp::Sub, IRValue::Stack(0), IRValue::Stack(1))),
+            Opcode::Mul => Ok(IRInstruction::BinOp(IRBinOp::Mul, IRValue::Stack(0), IRValue::Stack(1))),
+            Opcode::Div => Ok(IRInstruction::BinOp(IRBinOp::Div, IRValue::Stack(0), IRValue::Stack(1))),
+            Opcode::Mod => Ok(IRInstruction::BinOp(IRBinOp::Mod, IRValue::Stack(0), IRValue::Stack(1))),
+            Opcode::And => Ok(IRInstruction::BinOp(IRBinOp::And, IRValue::Stack(0), IRValue::Stack(1))),
+            Opcode::Or => Ok(IRInstruction::BinOp(IRBinOp::Or, IRValue::Stack(0), IRValue::Stack(1))),
+            Opcode::Xor => Ok(IRInstruction::BinOp(IRBinOp::Xor, IRValue::Stack(0), IRValue::Stack(1))),
+            Opcode::Push(v) => Ok(IRInstruction::Const(v.clone())),
+            Opcode::LoadLocal(idx) => Ok(IRInstruction::Load(IRValue::Local(*idx as u32))),
+            Opcode::StoreLocal(idx) => Ok(IRInstruction::Store(IRValue::Local(*idx as u32), IRValue::Stack(0))),
+            Opcode::Neg => Ok(IRInstruction::UnOp(IRUnOp::Neg, IRValue::Stack(0))),
+            Opcode::Not => Ok(IRInstruction::UnOp(IRUnOp::Not, IRValue::Stack(0))),
+            _ => Ok(IRInstruction::Nop),
+        }
+    }
+}
+
+/// IR Function in SSA form
+pub struct IRFunction {
+    pub blocks: Vec<BasicBlock>,
+    pub locals: Vec<IRLocal>,
+}
+
+#[derive(Clone)]
+pub struct IRLocal {
+    pub name: String,
+    pub type_id: TypeId,
+    pub is_param: bool,
+}
+
+/// Basic block in the control flow graph
+pub struct BasicBlock {
+    pub id: usize,
+    pub instructions: Vec<IRInstruction>,
+    pub terminator: Option<IRTerminator>,
+    pub predecessors: Vec<usize>,
+    pub successors: Vec<usize>,
+    /// Phi nodes at block entry
+    pub phis: Vec<PhiNode>,
+    /// Loop depth (for optimization prioritization)
+    pub loop_depth: u32,
+}
+
+#[derive(Clone)]
+pub struct PhiNode {
+    pub dest: u32,
+    pub operands: Vec<(usize, IRValue)>,
+}
+
+impl BasicBlock {
+    pub fn new(id: usize) -> Self {
+        BasicBlock {
+            id,
+            instructions: Vec::new(),
+            terminator: None,
+            predecessors: Vec::new(),
+            successors: Vec::new(),
+            phis: Vec::new(),
+            loop_depth: 0,
+        }
+    }
+}
+
+/// IR Instructions
+#[derive(Clone, Debug)]
+pub enum IRInstruction {
+    Nop,
+    Const(Value),
+    BinOp(IRBinOp, IRValue, IRValue),
+    UnOp(IRUnOp, IRValue),
+    Load(IRValue),
+    Store(IRValue, IRValue),
+    Call(FunctionRef, Vec<IRValue>),
+    Phi(Vec<(usize, IRValue)>),
+    Alloca(TypeId),
+    GetElementPtr(IRValue, Vec<IRValue>),
+    Cast(IRValue, TypeId),
+    /// Memory barrier
+    Fence(MemoryOrdering),
+    /// Compare and swap
+    CmpXchg(IRValue, IRValue, IRValue),
+    /// Atomic load
+    AtomicLoad(IRValue, MemoryOrdering),
+    /// Atomic store
+    AtomicStore(IRValue, IRValue, MemoryOrdering),
+    /// Call with inline cache
+    CallVirtualIC(u32, IRValue, Vec<IRValue>),
+    /// Type guard for speculative optimization
+    TypeGuard(IRValue, TypeId, usize),
+    /// Bounds check
+    BoundsCheck(IRValue, IRValue),
+    /// Null check
+    NullCheck(IRValue),
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum MemoryOrdering {
+    Relaxed,
+    Acquire,
+    Release,
+    AcqRel,
+    SeqCst,
+}
+
+/// IR Binary operations
+#[derive(Clone, Copy, Debug)]
+pub enum IRBinOp {
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Mod,
+    And,
+    Or,
+    Xor,
+    Shl,
+    Shr,
+    Ushr,
+    Eq,
+    Ne,
+    Lt,
+    Le,
+    Gt,
+    Ge,
+    /// Fused multiply-add
+    Fma,
+}
+
+/// IR Unary operations
+#[derive(Clone, Copy, Debug)]
+pub enum IRUnOp {
+    Neg,
+    Not,
+    Deref,
+    AddressOf,
+    Sqrt,
+    Abs,
+    Floor,
+    Ceil,
+    Round,
+}
+
+/// IR Values
+#[derive(Clone, Debug)]
+pub enum IRValue {
+    Reg(u32),
+    Stack(u32),
+    Local(u32),
+    Global(u32),
+    Const(i64),
+    Float(f64),
+    /// Immediate pointer
+    ImmPtr(usize),
+}
+
+/// IR Block terminators
+#[derive(Clone, Debug)]
+pub enum IRTerminator {
+    Jump(usize),
+    Branch { cond: IRValue, then_block: usize, else_block: usize },
+    Switch { value: IRValue, cases: Vec<(i64, usize)>, default: usize },
+    Return(Option<IRValue>),
+    Unreachable,
+    /// Throw exception
+    Throw(IRValue),
+    /// Tail call
+    TailCall(FunctionRef, Vec<IRValue>),
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// OPTIMIZATION PASSES
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// IR Optimizer with configurable passes
+pub struct Optimizer {
+    tier: JITTier,
+    passes: Vec<Box<dyn OptimizationPass>>,
+}
+
+impl Optimizer {
+    pub fn new(tier: JITTier) -> Self {
+        let mut passes: Vec<Box<dyn OptimizationPass>> = Vec::new();
+
+        // Add passes based on optimization tier
+        match tier {
+            JITTier::Interpreter => {}
+            JITTier::Baseline => {
+                passes.push(Box::new(ConstantFolding));
+                passes.push(Box::new(DeadCodeElimination));
+                passes.push(Box::new(SimplePeephole));
+            }
+            JITTier::Optimizing => {
+                passes.push(Box::new(ConstantFolding));
+                passes.push(Box::new(DeadCodeElimination));
+                passes.push(Box::new(CommonSubexpressionElimination));
+                passes.push(Box::new(LoopInvariantCodeMotion));
+                passes.push(Box::new(InstructionCombining));
+                passes.push(Box::new(Inlining));
+                passes.push(Box::new(EscapeAnalysis));
+                passes.push(Box::new(ScalarReplacement));
+                passes.push(Box::new(StrengthReduction));
+                passes.push(Box::new(TailCallOptimization));
+            }
+            JITTier::PGO => {
+                passes.push(Box::new(ConstantFolding));
+                passes.push(Box::new(DeadCodeElimination));
+                passes.push(Box::new(CommonSubexpressionElimination));
+                passes.push(Box::new(LoopInvariantCodeMotion));
+                passes.push(Box::new(InstructionCombining));
+                passes.push(Box::new(Inlining));
+                passes.push(Box::new(EscapeAnalysis));
+                passes.push(Box::new(ScalarReplacement));
+                passes.push(Box::new(ProfileGuidedOptimization));
+                passes.push(Box::new(LoopUnrolling));
+                passes.push(Box::new(Vectorization));
+                passes.push(Box::new(SpeculativeDevirtualization));
+                passes.push(Box::new(BranchPredictionHints));
+            }
+        }
+
+        Optimizer { tier, passes }
+    }
+
+    pub fn optimize(&self, ir: IRFunction) -> Result<IRFunction, CompileError> {
+        let mut current = ir;
+
+        for pass in &self.passes {
+            current = pass.run(current)?;
+        }
+
+        Ok(current)
+    }
+}
+
+/// Optimization pass trait
+pub trait OptimizationPass: Send + Sync {
+    fn name(&self) -> &'static str;
+    fn run(&self, ir: IRFunction) -> Result<IRFunction, CompileError>;
+}
+
+/// Constant folding pass
+pub struct ConstantFolding;
+
+impl OptimizationPass for ConstantFolding {
+    fn name(&self) -> &'static str { "constant-folding" }
+
+    fn run(&self, ir: IRFunction) -> Result<IRFunction, CompileError> {
+        // Fold constant expressions at compile time
+        // e.g., 2 + 3 -> 5
+        Ok(ir)
+    }
+}
+
+/// Dead code elimination pass
+pub struct DeadCodeElimination;
+
+impl OptimizationPass for DeadCodeElimination {
+    fn name(&self) -> &'static str { "dead-code-elimination" }
+
+    fn run(&self, ir: IRFunction) -> Result<IRFunction, CompileError> {
+        // Remove unreachable code and unused computations
+        Ok(ir)
+    }
+}
+
+/// Simple peephole optimizations
+pub struct SimplePeephole;
+
+impl OptimizationPass for SimplePeephole {
+    fn name(&self) -> &'static str { "peephole" }
+
+    fn run(&self, ir: IRFunction) -> Result<IRFunction, CompileError> {
+        // Pattern matching for simple optimizations
+        Ok(ir)
+    }
+}
+
+/// Common subexpression elimination
+pub struct CommonSubexpressionElimination;
+
+impl OptimizationPass for CommonSubexpressionElimination {
+    fn name(&self) -> &'static str { "cse" }
+
+    fn run(&self, ir: IRFunction) -> Result<IRFunction, CompileError> {
+        // Reuse results of identical computations
+        Ok(ir)
+    }
+}
+
+/// Loop invariant code motion
+pub struct LoopInvariantCodeMotion;
+
+impl OptimizationPass for LoopInvariantCodeMotion {
+    fn name(&self) -> &'static str { "licm" }
+
+    fn run(&self, ir: IRFunction) -> Result<IRFunction, CompileError> {
+        // Move loop-invariant computations outside loops
+        Ok(ir)
+    }
+}
+
+/// Instruction combining
+pub struct InstructionCombining;
+
+impl OptimizationPass for InstructionCombining {
+    fn name(&self) -> &'static str { "instcombine" }
+
+    fn run(&self, ir: IRFunction) -> Result<IRFunction, CompileError> {
+        // Combine instructions into more efficient forms
+        // e.g., x * 2 -> x << 1
+        Ok(ir)
+    }
+}
+
+/// Function inlining
+pub struct Inlining;
+
+impl OptimizationPass for Inlining {
+    fn name(&self) -> &'static str { "inline" }
+
+    fn run(&self, ir: IRFunction) -> Result<IRFunction, CompileError> {
+        // Inline small functions at call sites
+        Ok(ir)
+    }
+}
+
+/// Escape analysis
+pub struct EscapeAnalysis;
+
+impl OptimizationPass for EscapeAnalysis {
+    fn name(&self) -> &'static str { "escape-analysis" }
+
+    fn run(&self, ir: IRFunction) -> Result<IRFunction, CompileError> {
+        // Determine if objects escape the current scope
+        // Enable stack allocation for non-escaping objects
+        Ok(ir)
+    }
+}
+
+/// Scalar replacement of aggregates
+pub struct ScalarReplacement;
+
+impl OptimizationPass for ScalarReplacement {
+    fn name(&self) -> &'static str { "scalar-replacement" }
+
+    fn run(&self, ir: IRFunction) -> Result<IRFunction, CompileError> {
+        // Replace aggregates with scalar values when possible
+        Ok(ir)
+    }
+}
+
+/// Strength reduction
+pub struct StrengthReduction;
+
+impl OptimizationPass for StrengthReduction {
+    fn name(&self) -> &'static str { "strength-reduction" }
+
+    fn run(&self, ir: IRFunction) -> Result<IRFunction, CompileError> {
+        // Replace expensive operations with cheaper ones
+        // e.g., x * 8 -> x << 3
+        Ok(ir)
+    }
+}
+
+/// Tail call optimization
+pub struct TailCallOptimization;
+
+impl OptimizationPass for TailCallOptimization {
+    fn name(&self) -> &'static str { "tail-call" }
+
+    fn run(&self, ir: IRFunction) -> Result<IRFunction, CompileError> {
+        // Convert tail calls to jumps
+        Ok(ir)
+    }
+}
+
+/// Profile-guided optimization
+pub struct ProfileGuidedOptimization;
+
+impl OptimizationPass for ProfileGuidedOptimization {
+    fn name(&self) -> &'static str { "pgo" }
+
+    fn run(&self, ir: IRFunction) -> Result<IRFunction, CompileError> {
+        // Use runtime profile data to guide optimizations
+        // - Hot path optimization
+        // - Branch prediction hints
+        // - Speculative devirtualization
+        Ok(ir)
+    }
+}
+
+/// Loop unrolling
+pub struct LoopUnrolling;
+
+impl OptimizationPass for LoopUnrolling {
+    fn name(&self) -> &'static str { "loop-unroll" }
+
+    fn run(&self, ir: IRFunction) -> Result<IRFunction, CompileError> {
+        // Unroll loops to reduce branch overhead
+        Ok(ir)
+    }
+}
+
+/// Auto-vectorization
+pub struct Vectorization;
+
+impl OptimizationPass for Vectorization {
+    fn name(&self) -> &'static str { "vectorize" }
+
+    fn run(&self, ir: IRFunction) -> Result<IRFunction, CompileError> {
+        // Convert scalar operations to SIMD operations
+        Ok(ir)
+    }
+}
+
+/// Speculative devirtualization
+pub struct SpeculativeDevirtualization;
+
+impl OptimizationPass for SpeculativeDevirtualization {
+    fn name(&self) -> &'static str { "speculative-devirt" }
+
+    fn run(&self, ir: IRFunction) -> Result<IRFunction, CompileError> {
+        // Speculatively inline virtual calls based on type profiling
+        Ok(ir)
+    }
+}
+
+/// Branch prediction hints
+pub struct BranchPredictionHints;
+
+impl OptimizationPass for BranchPredictionHints {
+    fn name(&self) -> &'static str { "branch-hints" }
+
+    fn run(&self, ir: IRFunction) -> Result<IRFunction, CompileError> {
+        // Add branch prediction hints based on profiling
+        Ok(ir)
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// CODE GENERATOR
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Native code generator
+pub struct CodeGenerator {
+    target: TargetInfo,
+    register_allocator: RegisterAllocator,
+}
+
+impl CodeGenerator {
+    pub fn new() -> Self {
+        CodeGenerator {
+            target: TargetInfo::host(),
+            register_allocator: RegisterAllocator::new(),
+        }
+    }
+
+    pub fn generate(&self, ir: &IRFunction) -> Result<NativeCode, CompileError> {
+        let mut code = Vec::new();
+        let mut safe_points = Vec::new();
+        let mut exception_table = Vec::new();
+
+        // Generate prologue
+        self.emit_prologue(&mut code);
+
+        // Generate code for each basic block
+        for block in &ir.blocks {
+            for instr in &block.instructions {
+                self.emit_instruction(&mut code, instr)?;
+            }
+
+            if let Some(term) = &block.terminator {
+                self.emit_terminator(&mut code, term)?;
+            }
+        }
+
+        // Generate epilogue
+        self.emit_epilogue(&mut code);
+
+        Ok(NativeCode {
+            bytes: code,
+            entry_offset: 0,
+            frame_size: 0,
+            safe_points,
+            exception_table,
+        })
+    }
+
+    /// Generate code for on-stack replacement entry
+    pub fn generate_osr(&self, ir: &IRFunction, entry_pc: usize) -> Result<NativeCode, CompileError> {
+        // Generate with special OSR entry prologue
+        self.generate(ir)
+    }
+
+    fn emit_prologue(&self, code: &mut Vec<u8>) {
+        // Push frame pointer, set up stack frame
+        match self.target.arch {
+            Architecture::X86_64 => {
+                // push rbp; mov rbp, rsp; sub rsp, frame_size
+            }
+            Architecture::AArch64 => {
+                // stp x29, x30, [sp, #-16]!; mov x29, sp
+            }
+            _ => {}
+        }
+    }
+
+    fn emit_epilogue(&self, code: &mut Vec<u8>) {
+        // Restore frame pointer, return
+        match self.target.arch {
+            Architecture::X86_64 => {
+                // mov rsp, rbp; pop rbp; ret
+            }
+            Architecture::AArch64 => {
+                // ldp x29, x30, [sp], #16; ret
+            }
+            _ => {}
+        }
+    }
+
+    fn emit_instruction(&self, code: &mut Vec<u8>, instr: &IRInstruction) -> Result<(), CompileError> {
+        // Generate native code for IR instruction
+        Ok(())
+    }
+
+    fn emit_terminator(&self, code: &mut Vec<u8>, term: &IRTerminator) -> Result<(), CompileError> {
+        // Generate native code for block terminator
+        Ok(())
+    }
+}
+
+/// Target platform information
+#[derive(Clone)]
+pub struct TargetInfo {
+    pub arch: Architecture,
+    pub os: OperatingSystem,
+    pub pointer_size: u8,
+    pub endian: Endian,
+    pub features: TargetFeatures,
+}
+
+#[derive(Clone, Default)]
+pub struct TargetFeatures {
+    pub sse: bool,
+    pub sse2: bool,
+    pub sse3: bool,
+    pub sse4_1: bool,
+    pub sse4_2: bool,
+    pub avx: bool,
+    pub avx2: bool,
+    pub avx512: bool,
+    pub neon: bool,
+}
+
+impl TargetInfo {
+    pub fn host() -> Self {
+        TargetInfo {
+            arch: Architecture::X86_64,
+            os: OperatingSystem::Unknown,
+            pointer_size: 8,
+            endian: Endian::Little,
+            features: TargetFeatures {
+                sse: true,
+                sse2: true,
+                sse3: true,
+                sse4_1: true,
+                sse4_2: true,
+                avx: true,
+                avx2: true,
+                ..Default::default()
+            },
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum Architecture {
+    X86_64,
+    AArch64,
+    ARM,
+    RISCV64,
+    WASM32,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum OperatingSystem {
+    Windows,
+    Linux,
+    MacOS,
+    FreeBSD,
+    Unknown,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum Endian {
+    Little,
+    Big,
+}
+
+/// Register allocator using graph coloring
+pub struct RegisterAllocator {
+    registers: Vec<Register>,
+    interference_graph: HashMap<u32, Vec<u32>>,
+}
+
+impl RegisterAllocator {
+    pub fn new() -> Self {
+        RegisterAllocator {
+            registers: Vec::new(),
+            interference_graph: HashMap::new(),
+        }
+    }
+
+    pub fn allocate(&mut self, ir: &IRFunction) -> Result<RegisterAssignment, CompileError> {
+        // Build interference graph
+        self.build_interference_graph(ir);
+
+        // Coalesce registers (copy propagation)
+        self.coalesce();
+
+        // Simplify graph
+        self.simplify();
+
+        // Color the graph
+        let coloring = self.color_graph()?;
+
+        // Assign registers
+        Ok(RegisterAssignment { mapping: coloring })
+    }
+
+    fn build_interference_graph(&mut self, ir: &IRFunction) {
+        // Build graph where edges represent values that cannot share a register
+    }
+
+    fn coalesce(&mut self) {
+        // Merge registers that are connected by move instructions
+    }
+
+    fn simplify(&mut self) {
+        // Remove low-degree nodes
+    }
+
+    fn color_graph(&self) -> Result<HashMap<u32, Register>, CompileError> {
+        // Use graph coloring algorithm to assign registers
+        Ok(HashMap::new())
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct Register {
+    pub id: u8,
+    pub name: &'static str,
+    pub kind: RegisterKind,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum RegisterKind {
+    General,
+    Float,
+    Vector,
+    Stack,
+}
+
+pub struct RegisterAssignment {
+    pub mapping: HashMap<u32, Register>,
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// FUNCTION AND MODULE REPRESENTATION
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Runtime function representation
+pub struct Function {
+    pub reference: FunctionRef,
+    pub name: String,
+    pub bytecode: Vec<Opcode>,
+    pub locals: Vec<LocalVariable>,
+    pub max_stack: u16,
+    pub exception_handlers: Vec<ExceptionHandler>,
+    pub debug_info: Option<DebugInfo>,
+    pub execution_count: AtomicU64,
+    /// Compiled tier
+    pub compiled_tier: RwLock<Option<JITTier>>,
+}
+
+/// Local variable information
+#[derive(Clone)]
+pub struct LocalVariable {
+    pub name: String,
+    pub type_id: TypeId,
+    pub slot: u16,
+    pub scope_start: usize,
+    pub scope_end: usize,
+}
+
+/// Exception handler
+#[derive(Clone)]
+pub struct ExceptionHandler {
+    pub try_start: usize,
+    pub try_end: usize,
+    pub handler_start: usize,
+    pub catch_type: Option<TypeId>,
+    pub finally_start: Option<usize>,
+}
+
+/// Debug information
+#[derive(Clone)]
+pub struct DebugInfo {
+    pub source_file: String,
+    pub line_numbers: Vec<(usize, u32)>,
+    pub local_variables: Vec<LocalVariable>,
+}
+
+/// Runtime module representation
+pub struct RuntimeModule {
+    pub id: u32,
+    pub name: String,
+    pub version: Version,
+    pub functions: HashMap<u32, Function>,
+    pub types: HashMap<TypeId, TypeDescriptor>,
+    pub globals: HashMap<u32, Value>,
+    pub imports: Vec<ModuleImport>,
+    pub exports: Vec<ModuleExport>,
+    /// String constant pool
+    pub string_pool: Vec<Arc<String>>,
+    /// Static initializer
+    pub static_init: Option<FunctionRef>,
+}
+
+#[derive(Clone)]
+pub struct Version {
+    pub major: u16,
+    pub minor: u16,
+    pub patch: u16,
+}
+
+impl std::fmt::Display for Version {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}.{}.{}", self.major, self.minor, self.patch)
+    }
+}
+
+#[derive(Clone)]
+pub struct ModuleImport {
+    pub module_name: String,
+    pub symbol_name: String,
+    pub kind: ImportKind,
+}
+
+#[derive(Clone, Copy)]
+pub enum ImportKind {
+    Function,
+    Type,
+    Global,
+}
+
+#[derive(Clone)]
+pub struct ModuleExport {
+    pub name: String,
+    pub kind: ExportKind,
+    pub id: u32,
+}
+
+#[derive(Clone, Copy)]
+pub enum ExportKind {
+    Function,
+    Type,
+    Global,
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// RUNTIME TYPE INFORMATION (RTTI)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Type descriptor for RTTI
+#[derive(Clone)]
+pub struct TypeDescriptor {
+    pub id: TypeId,
+    pub name: String,
+    pub kind: TypeKind,
+    pub size: usize,
+    pub alignment: usize,
+    pub fields: Vec<FieldDescriptor>,
+    pub methods: Vec<MethodDescriptor>,
+    pub traits: Vec<TypeId>,
+    pub parent: Option<TypeId>,
+    /// Generic parameters
+    pub generics: Vec<TypeId>,
+    /// Annotations
+    pub annotations: Vec<Annotation>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum TypeKind {
+    Primitive,
+    Struct,
+    Enum,
+    Class,
+    Interface,
+    Array,
+    Tuple,
+    Function,
+    Pointer,
+    Reference,
+    Optional,
+    Result,
+    Generic,
+}
+
+#[derive(Clone)]
+pub struct FieldDescriptor {
+    pub name: String,
+    pub type_id: TypeId,
+    pub offset: usize,
+    pub visibility: Visibility,
+    pub is_final: bool,
+    pub is_volatile: bool,
+}
+
+#[derive(Clone)]
+pub struct MethodDescriptor {
+    pub name: String,
+    pub function_ref: FunctionRef,
+    pub visibility: Visibility,
+    pub is_static: bool,
+    pub is_virtual: bool,
+    pub is_abstract: bool,
+    pub is_final: bool,
+}
+
+#[derive(Clone)]
+pub struct Annotation {
+    pub name: String,
+    pub values: HashMap<String, Value>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum Visibility {
+    Public,
+    Private,
+    Protected,
+    Internal,
+}
+
+/// Type registry for runtime type lookup
+pub struct TypeRegistry {
+    types: RwLock<HashMap<TypeId, TypeDescriptor>>,
+    by_name: RwLock<HashMap<String, TypeId>>,
+    next_id: AtomicU64,
+    /// Generic type instantiations
+    instantiations: RwLock<HashMap<(TypeId, Vec<TypeId>), TypeId>>,
+}
+
+impl TypeRegistry {
+    pub fn new() -> Self {
+        let registry = TypeRegistry {
+            types: RwLock::new(HashMap::new()),
+            by_name: RwLock::new(HashMap::new()),
+            next_id: AtomicU64::new(TypeId::FIRST_USER_TYPE),
+            instantiations: RwLock::new(HashMap::new()),
+        };
+
+        // Register built-in types
+        registry.register_builtin_types();
+
+        registry
+    }
+
+    fn register_builtin_types(&self) {
+        let builtins = vec![
+            (TypeId::NULL, "null", TypeKind::Primitive, 0),
+            (TypeId::BOOL, "bool", TypeKind::Primitive, 1),
+            (TypeId::INT8, "i8", TypeKind::Primitive, 1),
+            (TypeId::INT16, "i16", TypeKind::Primitive, 2),
+            (TypeId::INT32, "i32", TypeKind::Primitive, 4),
+            (TypeId::INT64, "i64", TypeKind::Primitive, 8),
+            (TypeId::UINT8, "u8", TypeKind::Primitive, 1),
+            (TypeId::UINT16, "u16", TypeKind::Primitive, 2),
+            (TypeId::UINT32, "u32", TypeKind::Primitive, 4),
+            (TypeId::UINT64, "u64", TypeKind::Primitive, 8),
+            (TypeId::FLOAT32, "f32", TypeKind::Primitive, 4),
+            (TypeId::FLOAT64, "f64", TypeKind::Primitive, 8),
+            (TypeId::CHAR, "char", TypeKind::Primitive, 4),
+            (TypeId::STRING, "string", TypeKind::Class, 24),
+            (TypeId::INT128, "i128", TypeKind::Primitive, 16),
+            (TypeId::UINT128, "u128", TypeKind::Primitive, 16),
+        ];
+
+        let mut types = self.types.write().unwrap();
+        let mut by_name = self.by_name.write().unwrap();
+
+        for (id, name, kind, size) in builtins {
+            let desc = TypeDescriptor {
+                id,
+                name: name.to_string(),
+                kind,
+                size,
+                alignment: size.max(1),
+                fields: Vec::new(),
+                methods: Vec::new(),
+                traits: Vec::new(),
+                parent: None,
+                generics: Vec::new(),
+                annotations: Vec::new(),
+            };
+            types.insert(id, desc);
+            by_name.insert(name.to_string(), id);
+        }
+    }
+
+    /// Register a new type
+    pub fn register(&self, desc: TypeDescriptor) -> TypeId {
+        let id = desc.id;
+        let name = desc.name.clone();
+
+        let mut types = self.types.write().unwrap();
+        let mut by_name = self.by_name.write().unwrap();
+
+        types.insert(id, desc);
+        by_name.insert(name, id);
+
+        id
+    }
+
+    /// Allocate a new type ID
+    pub fn allocate_id(&self) -> TypeId {
+        TypeId(self.next_id.fetch_add(1, Ordering::SeqCst))
+    }
+
+    /// Lookup type by ID
+    pub fn get(&self, id: TypeId) -> Option<TypeDescriptor> {
+        let types = self.types.read().unwrap();
+        types.get(&id).cloned()
+    }
+
+    /// Lookup type by name
+    pub fn get_by_name(&self, name: &str) -> Option<TypeId> {
+        let by_name = self.by_name.read().unwrap();
+        by_name.get(name).copied()
+    }
+
+    /// Check if type A is subtype of type B
+    pub fn is_subtype(&self, a: TypeId, b: TypeId) -> bool {
+        if a == b {
+            return true;
+        }
+
+        let types = self.types.read().unwrap();
+        if let Some(desc) = types.get(&a) {
+            if let Some(parent) = desc.parent {
+                return self.is_subtype(parent, b);
+            }
+
+            // Check interfaces
+            if desc.traits.contains(&b) {
+                return true;
+            }
+        }
+
+        false
+    }
+
+    /// Instantiate a generic type
+    pub fn instantiate(&self, generic: TypeId, params: Vec<TypeId>) -> TypeId {
+        let key = (generic, params.clone());
+
+        // Check cache
+        {
+            let cache = self.instantiations.read().unwrap();
+            if let Some(&id) = cache.get(&key) {
+                return id;
+            }
+        }
+
+        // Create new instantiation
+        let base = self.get(generic).unwrap();
+        let new_id = self.allocate_id();
+
+        let instantiated = TypeDescriptor {
+            id: new_id,
+            name: format!("{}<{}>", base.name, params.iter().map(|p| format!("{}", p.0)).collect::<Vec<_>>().join(", ")),
+            kind: base.kind,
+            size: base.size,
+            alignment: base.alignment,
+            fields: base.fields.clone(),
+            methods: base.methods.clone(),
+            traits: base.traits.clone(),
+            parent: base.parent,
+            generics: params.clone(),
+            annotations: base.annotations.clone(),
+        };
+
+        self.register(instantiated);
+
+        // Cache
+        let mut cache = self.instantiations.write().unwrap();
+        cache.insert(key, new_id);
+
+        new_id
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ADVANCED MEMORY MANAGEMENT
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Memory pool (slab allocator) for fixed-size objects
+pub struct MemoryPool {
+    slab_size: usize,
+    object_size: usize,
+    slabs: RwLock<Vec<Slab>>,
+    free_list: Mutex<Vec<*mut u8>>,
+}
+
+struct Slab {
+    memory: Vec<u8>,
+    used: usize,
+    capacity: usize,
+}
+
+impl MemoryPool {
+    pub fn new(object_size: usize, initial_capacity: usize) -> Self {
+        let slab_size = 64 * 1024; // 64KB slabs
+        let objects_per_slab = slab_size / object_size;
+
+        let mut pool = MemoryPool {
+            slab_size,
+            object_size,
+            slabs: RwLock::new(Vec::new()),
+            free_list: Mutex::new(Vec::new()),
+        };
+
+        // Pre-allocate initial slabs
+        let initial_slabs = (initial_capacity + objects_per_slab - 1) / objects_per_slab;
+        for _ in 0..initial_slabs {
+            pool.allocate_slab();
+        }
+
+        pool
+    }
+
+    fn allocate_slab(&self) {
+        let slab = Slab {
+            memory: vec![0u8; self.slab_size],
+            used: 0,
+            capacity: self.slab_size / self.object_size,
+        };
+
+        let mut slabs = self.slabs.write().unwrap();
+        slabs.push(slab);
+    }
+
+    /// Allocate an object from the pool
+    pub fn allocate(&self) -> Option<*mut u8> {
+        // Try free list first
+        {
+            let mut free_list = self.free_list.lock().unwrap();
+            if let Some(ptr) = free_list.pop() {
+                return Some(ptr);
+            }
+        }
+
+        // Allocate from current slab
+        let mut slabs = self.slabs.write().unwrap();
+        for slab in slabs.iter_mut() {
+            if slab.used < slab.capacity {
+                let offset = slab.used * self.object_size;
+                slab.used += 1;
+                return Some(slab.memory.as_mut_ptr().wrapping_add(offset));
+            }
+        }
+
+        // Need new slab
+        drop(slabs);
+        self.allocate_slab();
+        self.allocate()
+    }
+
+    /// Return an object to the pool
+    pub fn deallocate(&self, ptr: *mut u8) {
+        let mut free_list = self.free_list.lock().unwrap();
+        free_list.push(ptr);
+    }
+}
+
+/// Memory arena for bump allocation
+pub struct Arena {
+    chunks: RwLock<Vec<ArenaChunk>>,
+    current: Mutex<ArenaChunk>,
+    chunk_size: usize,
+}
+
+struct ArenaChunk {
+    memory: Vec<u8>,
+    offset: usize,
+}
+
+impl Arena {
+    pub fn new(chunk_size: usize) -> Self {
+        Arena {
+            chunks: RwLock::new(Vec::new()),
+            current: Mutex::new(ArenaChunk {
+                memory: vec![0u8; chunk_size],
+                offset: 0,
+            }),
+            chunk_size,
+        }
+    }
+
+    /// Allocate memory from the arena (bump allocation)
+    pub fn allocate(&self, size: usize, align: usize) -> *mut u8 {
+        let mut current = self.current.lock().unwrap();
+
+        // Align the offset
+        let aligned_offset = (current.offset + align - 1) & !(align - 1);
+
+        if aligned_offset + size <= current.memory.len() {
+            let ptr = current.memory.as_mut_ptr().wrapping_add(aligned_offset);
+            current.offset = aligned_offset + size;
+            return ptr;
+        }
+
+        // Need new chunk
+        let old_chunk = std::mem::replace(&mut *current, ArenaChunk {
+            memory: vec![0u8; self.chunk_size.max(size + align)],
+            offset: 0,
+        });
+
+        let mut chunks = self.chunks.write().unwrap();
+        chunks.push(old_chunk);
+
+        // Allocate from new chunk
+        let aligned_offset = (current.offset + align - 1) & !(align - 1);
+        let ptr = current.memory.as_mut_ptr().wrapping_add(aligned_offset);
+        current.offset = aligned_offset + size;
+        ptr
+    }
+
+    /// Reset the arena, reusing memory
+    pub fn reset(&self) {
+        let mut current = self.current.lock().unwrap();
+        current.offset = 0;
+
+        let mut chunks = self.chunks.write().unwrap();
+        for chunk in chunks.iter_mut() {
+            chunk.offset = 0;
+        }
+    }
+
+    /// Total memory used
+    pub fn used(&self) -> usize {
+        let current = self.current.lock().unwrap();
+        let chunks = self.chunks.read().unwrap();
+
+        current.offset + chunks.iter().map(|c| c.offset).sum::<usize>()
+    }
+}
+
+/// Stack frame for function execution
+pub struct StackFrame {
+    pub function: FunctionRef,
+    pub locals: Vec<Value>,
+    pub operand_stack: Vec<Value>,
+    pub pc: usize,
+    pub return_address: usize,
+    pub exception_handlers: Vec<ExceptionHandler>,
+    /// Monitor locks held
+    pub monitors: Vec<usize>,
+}
+
+impl StackFrame {
+    pub fn new(function: FunctionRef, num_locals: usize) -> Self {
+        StackFrame {
+            function,
+            locals: vec![Value::Null; num_locals],
+            operand_stack: Vec::with_capacity(32),
+            pc: 0,
+            return_address: 0,
+            exception_handlers: Vec::new(),
+            monitors: Vec::new(),
+        }
+    }
+
+    pub fn push(&mut self, value: Value) {
+        self.operand_stack.push(value);
+    }
+
+    pub fn pop(&mut self) -> Option<Value> {
+        self.operand_stack.pop()
+    }
+
+    pub fn peek(&self) -> Option<&Value> {
+        self.operand_stack.last()
+    }
+
+    pub fn stack_height(&self) -> usize {
+        self.operand_stack.len()
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// LOCK ELISION AND BIASED LOCKING
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Lock manager with biased locking support
+pub struct LockManager {
+    locks: RwLock<HashMap<u64, LockInfo>>,
+    next_id: AtomicU64,
+    /// Bias revocation queue
+    revocation_queue: Mutex<VecDeque<u64>>,
+}
+
+struct LockInfo {
+    id: u64,
+    state: LockState,
+    owner: Option<ThreadId>,
+    wait_queue: VecDeque<ThreadId>,
+    recursion_count: u32,
+}
+
+impl LockManager {
+    pub fn new() -> Self {
+        LockManager {
+            locks: RwLock::new(HashMap::new()),
+            next_id: AtomicU64::new(0),
+            revocation_queue: Mutex::new(VecDeque::new()),
+        }
+    }
+
+    /// Create a new lock
+    pub fn create_lock(&self) -> u64 {
+        let id = self.next_id.fetch_add(1, Ordering::SeqCst);
+
+        let mut locks = self.locks.write().unwrap();
+        locks.insert(id, LockInfo {
+            id,
+            state: LockState::Unlocked,
+            owner: None,
+            wait_queue: VecDeque::new(),
+            recursion_count: 0,
+        });
+
+        id
+    }
+
+    /// Acquire lock with biased locking
+    pub fn lock(&self, lock_id: u64) -> Result<(), RuntimeError> {
+        let thread_id = std::thread::current().id();
+
+        let mut locks = self.locks.write().unwrap();
+        let lock = locks.get_mut(&lock_id)
+            .ok_or(RuntimeError::Other("Lock not found".to_string()))?;
+
+        match lock.state {
+            LockState::Unlocked => {
+                // Fast path: bias to current thread
+                lock.state = LockState::Biased(0); // Would use actual thread ID
+                lock.owner = Some(thread_id);
+                lock.recursion_count = 1;
+                Ok(())
+            }
+            LockState::Biased(_) if lock.owner == Some(thread_id) => {
+                // Recursive lock
+                lock.recursion_count += 1;
+                Ok(())
+            }
+            LockState::Biased(_) => {
+                // Need to revoke bias
+                self.revoke_bias(lock_id);
+                lock.state = LockState::ThinLock(0);
+                lock.owner = Some(thread_id);
+                lock.recursion_count = 1;
+                Ok(())
+            }
+            LockState::ThinLock(_) | LockState::FatLock(_) if lock.owner == Some(thread_id) => {
+                // Recursive lock
+                lock.recursion_count += 1;
+                Ok(())
+            }
+            _ => {
+                // Contention - inflate to fat lock and wait
+                lock.state = LockState::FatLock(lock_id);
+                lock.wait_queue.push_back(thread_id);
+                // Would block here
+                Ok(())
+            }
+        }
+    }
+
+    /// Release lock
+    pub fn unlock(&self, lock_id: u64) -> Result<(), RuntimeError> {
+        let thread_id = std::thread::current().id();
+
+        let mut locks = self.locks.write().unwrap();
+        let lock = locks.get_mut(&lock_id)
+            .ok_or(RuntimeError::Other("Lock not found".to_string()))?;
+
+        if lock.owner != Some(thread_id) {
+            return Err(RuntimeError::Other("Not lock owner".to_string()));
+        }
+
+        lock.recursion_count -= 1;
+
+        if lock.recursion_count == 0 {
+            lock.owner = None;
+
+            // Wake up next waiter
+            if let Some(waiter) = lock.wait_queue.pop_front() {
+                lock.owner = Some(waiter);
+                lock.recursion_count = 1;
+                // Would wake thread here
+            } else {
+                lock.state = LockState::Unlocked;
+            }
+        }
+
+        Ok(())
+    }
+
+    fn revoke_bias(&self, lock_id: u64) {
+        let mut queue = self.revocation_queue.lock().unwrap();
+        queue.push_back(lock_id);
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// EXCEPTION HANDLING
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Runtime exception
+#[derive(Debug, Clone)]
+pub struct Exception {
+    pub type_id: TypeId,
+    pub message: String,
+    pub cause: Option<Box<Exception>>,
+    pub stack_trace: Vec<StackTraceElement>,
+}
+
+impl Exception {
+    pub fn new(type_id: TypeId, message: String) -> Self {
+        Exception {
+            type_id,
+            message,
+            cause: None,
+            stack_trace: Vec::new(),
+        }
+    }
+
+    pub fn with_cause(mut self, cause: Exception) -> Self {
+        self.cause = Some(Box::new(cause));
+        self
+    }
+
+    pub fn capture_stack_trace(&mut self, frames: &[StackFrame]) {
+        self.stack_trace = frames.iter().map(|f| StackTraceElement {
+            function: f.function.clone(),
+            pc: f.pc,
+            line_number: None,
+            source_file: None,
+        }).collect();
+    }
+}
+
+/// Stack trace element
+#[derive(Debug, Clone)]
+pub struct StackTraceElement {
+    pub function: FunctionRef,
+    pub pc: usize,
+    pub line_number: Option<u32>,
+    pub source_file: Option<String>,
+}
+
+/// Exception dispatcher
+pub struct ExceptionDispatcher {
+    handlers: RwLock<HashMap<TypeId, ExceptionHandlerCallback>>,
+}
+
+type ExceptionHandlerCallback = Arc<dyn Fn(&Exception) + Send + Sync>;
+
+impl ExceptionDispatcher {
+    pub fn new() -> Self {
+        ExceptionDispatcher {
+            handlers: RwLock::new(HashMap::new()),
+        }
+    }
+
+    /// Register a global exception handler
+    pub fn register_handler<F>(&self, type_id: TypeId, handler: F)
+    where
+        F: Fn(&Exception) + Send + Sync + 'static,
+    {
+        let mut handlers = self.handlers.write().unwrap();
+        handlers.insert(type_id, Arc::new(handler));
+    }
+
+    /// Find a handler for an exception
+    pub fn find_handler(&self, exception: &Exception) -> Option<ExceptionHandlerCallback> {
+        let handlers = self.handlers.read().unwrap();
+        handlers.get(&exception.type_id).cloned()
+    }
+
+    /// Dispatch an exception
+    pub fn dispatch(&self, exception: &Exception) {
+        if let Some(handler) = self.find_handler(exception) {
+            handler(exception);
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// INTERPRETER
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Bytecode interpreter
+pub struct Interpreter {
+    frames: Vec<StackFrame>,
+    globals: HashMap<u32, Value>,
+    type_registry: Arc<TypeRegistry>,
+    debugger: Option<Arc<Debugger>>,
+    jit: Option<Arc<JITCompiler>>,
+}
+
+impl Interpreter {
+    pub fn new(type_registry: Arc<TypeRegistry>) -> Self {
+        Interpreter {
+            frames: Vec::new(),
+            globals: HashMap::new(),
+            type_registry,
+            debugger: None,
+            jit: None,
+        }
+    }
+
+    pub fn attach_debugger(&mut self, debugger: Arc<Debugger>) {
+        self.debugger = Some(debugger);
+    }
+
+    pub fn attach_jit(&mut self, jit: Arc<JITCompiler>) {
+        self.jit = Some(jit);
+    }
+
+    /// Execute bytecode
+    pub fn execute(&mut self, function: &Function, args: Vec<Value>) -> Result<Value, RuntimeError> {
+        // Check if we should JIT compile
+        if let Some(ref jit) = self.jit {
+            if let Some(tier) = jit.record_execution(&function.reference) {
+                // Compile and execute native code
+                match jit.compile(function, tier) {
+                    Ok(compiled) => {
+                        // Would execute native code here
+                    }
+                    Err(_) => {
+                        // Fall back to interpretation
+                    }
+                }
+            }
+        }
+
+        // Create stack frame
+        let mut frame = StackFrame::new(function.reference.clone(), function.locals.len());
+
+        // Initialize arguments
+        for (i, arg) in args.into_iter().enumerate() {
+            if i < frame.locals.len() {
+                frame.locals[i] = arg;
+            }
+        }
+
+        self.frames.push(frame);
+
+        // Execute loop
+        loop {
+            let frame = self.frames.last_mut().ok_or(RuntimeError::Other("No stack frame".to_string()))?;
+
+            if frame.pc >= function.bytecode.len() {
+                break;
+            }
+
+            let opcode = &function.bytecode[frame.pc];
+            frame.pc += 1;
+
+            // Check debugger
+            if let Some(ref debugger) = self.debugger {
+                let location = BreakpointLocation {
+                    module_id: frame.function.module_id,
+                    function_id: frame.function.function_id,
+                    pc: frame.pc - 1,
+                };
+
+                if debugger.should_break(&location) {
+                    debugger.emit(DebugEvent::BreakpointHit {
+                        id: 0,
+                        location
+                    });
+                }
+            }
+
+            match opcode {
+                Opcode::Nop => {}
+
+                Opcode::Push(v) => {
+                    frame.push(v.clone());
+                }
+
+                Opcode::Pop => {
+                    frame.pop();
+                }
+
+                Opcode::Dup => {
+                    if let Some(v) = frame.peek() {
+                        let v = v.clone();
+                        frame.push(v);
+                    }
+                }
+
+                Opcode::Add => {
+                    let b = frame.pop().ok_or(RuntimeError::Other("Stack underflow".to_string()))?;
+                    let a = frame.pop().ok_or(RuntimeError::Other("Stack underflow".to_string()))?;
+                    let result = self.binary_op(&a, &b, |x, y| x + y, |x, y| x + y)?;
+                    frame.push(result);
+                }
+
+                Opcode::Sub => {
+                    let b = frame.pop().ok_or(RuntimeError::Other("Stack underflow".to_string()))?;
+                    let a = frame.pop().ok_or(RuntimeError::Other("Stack underflow".to_string()))?;
+                    let result = self.binary_op(&a, &b, |x, y| x - y, |x, y| x - y)?;
+                    frame.push(result);
+                }
+
+                Opcode::Mul => {
+                    let b = frame.pop().ok_or(RuntimeError::Other("Stack underflow".to_string()))?;
+                    let a = frame.pop().ok_or(RuntimeError::Other("Stack underflow".to_string()))?;
+                    let result = self.binary_op(&a, &b, |x, y| x * y, |x, y| x * y)?;
+                    frame.push(result);
+                }
+
+                Opcode::Div => {
+                    let b = frame.pop().ok_or(RuntimeError::Other("Stack underflow".to_string()))?;
+                    let a = frame.pop().ok_or(RuntimeError::Other("Stack underflow".to_string()))?;
+                    let result = self.binary_op(&a, &b, |x, y| x / y, |x, y| x / y)?;
+                    frame.push(result);
+                }
+
+                Opcode::LoadLocal(idx) => {
+                    let value = frame.locals.get(*idx as usize).cloned().unwrap_or(Value::Null);
+                    frame.push(value);
+                }
+
+                Opcode::StoreLocal(idx) => {
+                    let value = frame.pop().unwrap_or(Value::Null);
+                    if (*idx as usize) < frame.locals.len() {
+                        frame.locals[*idx as usize] = value;
+                    }
+                }
+
+                Opcode::LoadGlobal(idx) => {
+                    let value = self.globals.get(idx).cloned().unwrap_or(Value::Null);
+                    frame.push(value);
+                }
+
+                Opcode::StoreGlobal(idx) => {
+                    let value = frame.pop().unwrap_or(Value::Null);
+                    self.globals.insert(*idx, value);
+                }
+
+                Opcode::Jump(target) => {
+                    frame.pc = *target;
+                }
+
+                Opcode::JumpIf(target) => {
+                    let cond = frame.pop().ok_or(RuntimeError::Other("Stack underflow".to_string()))?;
+                    if cond.is_truthy() {
+                        frame.pc = *target;
+                    }
+                }
+
+                Opcode::JumpIfNot(target) => {
+                    let cond = frame.pop().ok_or(RuntimeError::Other("Stack underflow".to_string()))?;
+                    if !cond.is_truthy() {
+                        frame.pc = *target;
+                    }
+                }
+
+                Opcode::Return | Opcode::ReturnVoid => {
+                    let result = frame.pop().unwrap_or(Value::Null);
+                    self.frames.pop();
+
+                    if self.frames.is_empty() {
+                        return Ok(result);
+                    } else {
+                        self.frames.last_mut().unwrap().push(result);
+                    }
+                }
+
+                Opcode::Eq => {
+                    let b = frame.pop().ok_or(RuntimeError::Other("Stack underflow".to_string()))?;
+                    let a = frame.pop().ok_or(RuntimeError::Other("Stack underflow".to_string()))?;
+                    frame.push(Value::Bool(self.equals(&a, &b)));
+                }
+
+                Opcode::Lt => {
+                    let b = frame.pop().ok_or(RuntimeError::Other("Stack underflow".to_string()))?;
+                    let a = frame.pop().ok_or(RuntimeError::Other("Stack underflow".to_string()))?;
+                    let result = self.compare(&a, &b)?;
+                    frame.push(Value::Bool(result < 0));
+                }
+
+                Opcode::Le => {
+                    let b = frame.pop().ok_or(RuntimeError::Other("Stack underflow".to_string()))?;
+                    let a = frame.pop().ok_or(RuntimeError::Other("Stack underflow".to_string()))?;
+                    let result = self.compare(&a, &b)?;
+                    frame.push(Value::Bool(result <= 0));
+                }
+
+                Opcode::Gt => {
+                    let b = frame.pop().ok_or(RuntimeError::Other("Stack underflow".to_string()))?;
+                    let a = frame.pop().ok_or(RuntimeError::Other("Stack underflow".to_string()))?;
+                    let result = self.compare(&a, &b)?;
+                    frame.push(Value::Bool(result > 0));
+                }
+
+                Opcode::Ge => {
+                    let b = frame.pop().ok_or(RuntimeError::Other("Stack underflow".to_string()))?;
+                    let a = frame.pop().ok_or(RuntimeError::Other("Stack underflow".to_string()))?;
+                    let result = self.compare(&a, &b)?;
+                    frame.push(Value::Bool(result >= 0));
+                }
+
+                _ => {
+                    // Handle other opcodes
+                }
+            }
+        }
+
+        // Implicit return
+        let frame = self.frames.pop();
+        Ok(frame.and_then(|f| f.operand_stack.last().cloned()).unwrap_or(Value::Null))
+    }
+
+    fn binary_op<I, F>(&self, a: &Value, b: &Value, int_op: I, float_op: F) -> Result<Value, RuntimeError>
+    where
+        I: Fn(i64, i64) -> i64,
+        F: Fn(f64, f64) -> f64,
+    {
+        match (a, b) {
+            (Value::Int64(x), Value::Int64(y)) => Ok(Value::Int64(int_op(*x, *y))),
+            (Value::Int32(x), Value::Int32(y)) => Ok(Value::Int32(int_op(*x as i64, *y as i64) as i32)),
+            (Value::Float64(x), Value::Float64(y)) => Ok(Value::Float64(float_op(*x, *y))),
+            (Value::Float32(x), Value::Float32(y)) => Ok(Value::Float32(float_op(*x as f64, *y as f64) as f32)),
+            _ => Err(RuntimeError::Other("Type mismatch in binary operation".to_string())),
+        }
+    }
+
+    fn equals(&self, a: &Value, b: &Value) -> bool {
+        match (a, b) {
+            (Value::Null, Value::Null) => true,
+            (Value::Bool(x), Value::Bool(y)) => x == y,
+            (Value::Int64(x), Value::Int64(y)) => x == y,
+            (Value::Float64(x), Value::Float64(y)) => x == y,
+            (Value::String(x), Value::String(y)) => x == y,
+            _ => false,
+        }
+    }
+
+    fn compare(&self, a: &Value, b: &Value) -> Result<i32, RuntimeError> {
+        match (a, b) {
+            (Value::Int64(x), Value::Int64(y)) => Ok(x.cmp(y) as i32),
+            (Value::Float64(x), Value::Float64(y)) => {
+                if x < y { Ok(-1) }
+                else if x > y { Ok(1) }
+                else { Ok(0) }
+            }
+            (Value::String(x), Value::String(y)) => Ok(x.cmp(y) as i32),
+            _ => Err(RuntimeError::Other("Cannot compare values".to_string())),
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// DEBUGGING SUPPORT
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Debugger interface
+pub struct Debugger {
+    breakpoints: RwLock<HashMap<BreakpointLocation, Breakpoint>>,
+    watches: RwLock<Vec<Watch>>,
+    stepping: AtomicBool,
+    step_mode: Mutex<StepMode>,
+    event_handlers: RwLock<Vec<DebugEventHandler>>,
+}
+
+type DebugEventHandler = Arc<dyn Fn(&DebugEvent) + Send + Sync>;
+
+impl Debugger {
+    pub fn new() -> Self {
+        Debugger {
+            breakpoints: RwLock::new(HashMap::new()),
+            watches: RwLock::new(Vec::new()),
+            stepping: AtomicBool::new(false),
+            step_mode: Mutex::new(StepMode::None),
+            event_handlers: RwLock::new(Vec::new()),
+        }
+    }
+
+    /// Set a breakpoint
+    pub fn set_breakpoint(&self, location: BreakpointLocation, condition: Option<String>) -> u64 {
+        let mut breakpoints = self.breakpoints.write().unwrap();
+        let id = breakpoints.len() as u64;
+        breakpoints.insert(location.clone(), Breakpoint {
+            id,
+            location,
+            condition,
+            enabled: true,
+            hit_count: AtomicU64::new(0),
+        });
+        id
+    }
+
+    /// Remove a breakpoint
+    pub fn remove_breakpoint(&self, location: &BreakpointLocation) {
+        let mut breakpoints = self.breakpoints.write().unwrap();
+        breakpoints.remove(location);
+    }
+
+    /// Check if we should break at a location
+    pub fn should_break(&self, location: &BreakpointLocation) -> bool {
+        let breakpoints = self.breakpoints.read().unwrap();
+        if let Some(bp) = breakpoints.get(location) {
+            if bp.enabled {
+                bp.hit_count.fetch_add(1, Ordering::SeqCst);
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Emit a debug event
+    pub fn emit(&self, event: DebugEvent) {
+        let handlers = self.event_handlers.read().unwrap();
+        for handler in handlers.iter() {
+            handler(&event);
+        }
+    }
+}
+
+#[derive(Clone, Hash, PartialEq, Eq)]
+pub struct BreakpointLocation {
+    pub module_id: u32,
+    pub function_id: u32,
+    pub pc: usize,
+}
+
+pub struct Breakpoint {
+    pub id: u64,
+    pub location: BreakpointLocation,
+    pub condition: Option<String>,
+    pub enabled: bool,
+    pub hit_count: AtomicU64,
+}
+
+pub struct Watch {
+    pub id: u64,
+    pub expression: String,
+    pub last_value: Option<Value>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum StepMode {
+    None,
+    StepInto,
+    StepOver,
+    StepOut,
+}
+
+#[derive(Debug)]
+pub enum DebugEvent {
+    BreakpointHit { id: u64, location: BreakpointLocation },
+    StepComplete { location: BreakpointLocation },
+    ExceptionThrown { exception: Exception },
+    ModuleLoaded { module_id: u32, name: String },
+    ThreadCreated { thread_id: u64 },
+    ThreadExited { thread_id: u64 },
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// TESTS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_runtime_config_default() {
+        let config = RuntimeConfig::default();
+        assert_eq!(config.thread_pool_size, 8);
+        assert!(config.gc_config.enabled);
+        assert!(config.scheduler_config.work_stealing);
+    }
+
+    #[test]
+    fn test_type_id_properties() {
+        assert!(TypeId::INT32.is_primitive());
+        assert!(TypeId::INT64.is_numeric());
+        assert!(TypeId::INT32.is_integer());
+        assert!(TypeId::FLOAT64.is_floating_point());
+        assert!(!TypeId::STRING.is_primitive());
+    }
+
+    #[test]
+    fn test_value_is_truthy() {
+        assert!(!Value::Null.is_truthy());
+        assert!(Value::Bool(true).is_truthy());
+        assert!(!Value::Bool(false).is_truthy());
+        assert!(Value::Int64(1).is_truthy());
+        assert!(!Value::Int64(0).is_truthy());
+    }
+
+    #[test]
+    fn test_work_stealing_queue() {
+        let queue: WorkStealingQueue<i32> = WorkStealingQueue::new();
+
+        queue.push(1);
+        queue.push(2);
+        queue.push(3);
+
+        assert_eq!(queue.len(), 3);
+        assert_eq!(queue.pop(), Some(3)); // LIFO for owner
+        assert_eq!(queue.steal(), Some(1)); // FIFO for thieves
+        assert_eq!(queue.len(), 1);
+    }
+
+    #[test]
+    fn test_task_priority_weight() {
+        assert!(TaskPriority::Critical.weight() > TaskPriority::Normal.weight());
+        assert!(TaskPriority::Normal.weight() > TaskPriority::Low.weight());
+    }
+
+    #[test]
+    fn test_memory_pool() {
+        let pool = MemoryPool::new(64, 100);
+
+        let ptr1 = pool.allocate();
+        assert!(ptr1.is_some());
+
+        let ptr2 = pool.allocate();
+        assert!(ptr2.is_some());
+        assert_ne!(ptr1, ptr2);
+    }
+
+    #[test]
+    fn test_arena_allocation() {
+        let arena = Arena::new(4096);
+
+        let ptr1 = arena.allocate(64, 8);
+        let ptr2 = arena.allocate(128, 8);
+
+        assert!(!ptr1.is_null());
+        assert!(!ptr2.is_null());
+        assert_ne!(ptr1, ptr2);
+    }
+
+    #[test]
+    fn test_type_registry() {
+        let registry = TypeRegistry::new();
+
+        assert!(registry.get(TypeId::INT32).is_some());
+        assert!(registry.get_by_name("i32").is_some());
+        assert!(registry.is_subtype(TypeId::INT32, TypeId::INT32));
+    }
+
+    #[test]
+    fn test_gc_config_default() {
+        let config = GCConfig::default();
+        assert!(config.enabled);
+        assert!(config.escape_analysis);
+        assert!(matches!(config.gc_type, GCType::Generational));
+    }
+
+    #[test]
+    fn test_jit_tier_ordering() {
+        assert!(JITTier::PGO as u8 > JITTier::Optimizing as u8);
+        assert!(JITTier::Optimizing as u8 > JITTier::Baseline as u8);
+        assert!(JITTier::Baseline as u8 > JITTier::Interpreter as u8);
+    }
+
+    #[test]
+    fn test_fiber_state() {
+        assert_eq!(FiberState::Ready, FiberState::Ready);
+        assert_ne!(FiberState::Ready, FiberState::Running);
+    }
+
+    #[test]
+    fn test_stack_frame() {
+        let func_ref = FunctionRef {
+            module_id: 0,
+            function_id: 0,
+            arity: 0,
+        };
+
+        let mut frame = StackFrame::new(func_ref, 4);
+        assert_eq!(frame.locals.len(), 4);
+
+        frame.push(Value::Int64(42));
+        assert_eq!(frame.stack_height(), 1);
+
+        let val = frame.pop();
+        assert!(matches!(val, Some(Value::Int64(42))));
+    }
+
+    #[test]
+    fn test_version_display() {
+        let version = Version { major: 1, minor: 2, patch: 3 };
+        assert_eq!(format!("{}", version), "1.2.3");
+    }
+
+    #[test]
+    fn test_ir_basic_block() {
+        let block = BasicBlock::new(0);
+        assert_eq!(block.id, 0);
+        assert!(block.instructions.is_empty());
+        assert!(block.terminator.is_none());
+    }
+
+    #[test]
+    fn test_exception_creation() {
+        let mut exc = Exception::new(TypeId::OBJECT, "Test error".to_string());
+        assert!(exc.cause.is_none());
+        assert!(exc.stack_trace.is_empty());
+
+        exc = exc.with_cause(Exception::new(TypeId::OBJECT, "Inner".to_string()));
+        assert!(exc.cause.is_some());
+    }
+
+    #[test]
+    fn test_value_conversion() {
+        assert_eq!(Value::Int32(42).to_i64(), Some(42));
+        assert_eq!(Value::Float64(3.14).to_f64(), Some(3.14));
+        assert!(Value::String(Arc::new("hello".to_string())).to_i64().is_none());
+    }
+
+    #[test]
+    fn test_allocation_flags() {
+        let flags = AllocationFlags::default();
+        assert!(!flags.pinned);
+        assert!(!flags.executable);
+        assert!(flags.zero_filled);
+    }
+
+    #[test]
+    fn test_generation() {
+        assert_ne!(Generation::Young, Generation::Old);
+        assert_ne!(Generation::Survivor, Generation::Permanent);
+    }
+
+    #[test]
+    fn test_deopt_reason() {
+        let reason = DeoptReason::TypeMismatch;
+        assert!(matches!(reason, DeoptReason::TypeMismatch));
+    }
+}

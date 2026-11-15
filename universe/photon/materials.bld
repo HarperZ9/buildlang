@@ -1,0 +1,2674 @@
+// =============================================================================
+// PHOTON ENGINE - PHYSICALLY BASED MATERIALS SYSTEM
+// =============================================================================
+// Comprehensive PBR material system with Disney BRDF, multi-layer materials,
+// specialized BRDFs for hair, skin, cloth, eyes, and advanced effects.
+// Based on Harper Engine WP-012, WP-080-083, WP-107, WP-115, WP-135-137.
+// =============================================================================
+
+import core::memory::{Arena, Pool, Buffer, GpuBuffer};
+import core::math::{Vec2, Vec3, Vec4, Mat4, Color, Spectrum};
+import core::simd::{f32x4, f32x8, SimdMath};
+import photon::gpu::{Shader, Texture, Sampler, UniformBuffer};
+import photon::texture::{TextureArray, TextureCube};
+
+// =============================================================================
+// REGION: CONSTANTS AND UTILITIES
+// =============================================================================
+
+/// Physical constants for material calculations
+module MaterialConstants {
+    /// Index of refraction for common materials
+    pub const IOR_VACUUM: f32 = 1.0;
+    pub const IOR_AIR: f32 = 1.00029;
+    pub const IOR_WATER: f32 = 1.333;
+    pub const IOR_GLASS: f32 = 1.52;
+    pub const IOR_DIAMOND: f32 = 2.417;
+    pub const IOR_GOLD: f32 = 0.47;  // Complex IOR (real part)
+    pub const IOR_SILVER: f32 = 0.135;
+    pub const IOR_COPPER: f32 = 0.617;
+
+    /// F0 (normal incidence reflectance) for common materials
+    pub const F0_DIELECTRIC: f32 = 0.04;
+    pub const F0_WATER: f32 = 0.02;
+    pub const F0_PLASTIC: f32 = 0.04;
+    pub const F0_GLASS: f32 = 0.04;
+    pub const F0_DIAMOND: f32 = 0.172;
+    pub const F0_IRON: Vec3 = Vec3::new(0.562, 0.565, 0.578);
+    pub const F0_GOLD: Vec3 = Vec3::new(1.022, 0.782, 0.344);
+    pub const F0_SILVER: Vec3 = Vec3::new(0.972, 0.960, 0.915);
+    pub const F0_COPPER: Vec3 = Vec3::new(0.955, 0.638, 0.538);
+    pub const F0_ALUMINUM: Vec3 = Vec3::new(0.913, 0.922, 0.924);
+
+    /// Minimum roughness to prevent singularities
+    pub const MIN_ROUGHNESS: f32 = 0.002;
+
+    /// PI and related constants
+    pub const PI: f32 = 3.14159265359;
+    pub const INV_PI: f32 = 0.31830988618;
+    pub const TWO_PI: f32 = 6.28318530718;
+}
+
+/// Material utility functions
+module MaterialUtils {
+    /// Convert perceptual roughness to linear roughness (alpha)
+    pub fn roughness_to_alpha(roughness: f32) -> f32 {
+        let r = roughness.max(MaterialConstants::MIN_ROUGHNESS);
+        r * r
+    }
+
+    /// Convert linear roughness (alpha) back to perceptual
+    pub fn alpha_to_roughness(alpha: f32) -> f32 {
+        alpha.sqrt()
+    }
+
+    /// Compute F0 from index of refraction
+    pub fn ior_to_f0(ior: f32) -> f32 {
+        let f0 = (ior - 1.0) / (ior + 1.0);
+        f0 * f0
+    }
+
+    /// Compute index of refraction from F0
+    pub fn f0_to_ior(f0: f32) -> f32 {
+        let sqrt_f0 = f0.sqrt();
+        (1.0 + sqrt_f0) / (1.0 - sqrt_f0)
+    }
+
+    /// Compute F0 for metallic materials from base color
+    pub fn compute_f0(base_color: Vec3, metallic: f32) -> Vec3 {
+        let dielectric_f0 = Vec3::splat(MaterialConstants::F0_DIELECTRIC);
+        Vec3::lerp(dielectric_f0, base_color, metallic)
+    }
+
+    /// Compute diffuse color accounting for metallic
+    pub fn compute_diffuse(base_color: Vec3, metallic: f32) -> Vec3 {
+        base_color * (1.0 - metallic)
+    }
+}
+
+// =============================================================================
+// REGION: FRESNEL FUNCTIONS
+// =============================================================================
+
+/// Fresnel reflectance functions
+pub struct Fresnel;
+
+impl Fresnel {
+    /// Schlick approximation of Fresnel reflectance
+    pub fn schlick(cos_theta: f32, f0: Vec3) -> Vec3 {
+        let fc = (1.0 - cos_theta).max(0.0).powf(5.0);
+        f0 + (Vec3::splat(1.0) - f0) * fc
+    }
+
+    /// Schlick approximation with roughness modification
+    pub fn schlick_roughness(cos_theta: f32, f0: Vec3, roughness: f32) -> Vec3 {
+        let fc = (1.0 - cos_theta).max(0.0).powf(5.0);
+        let max_reflectance = Vec3::splat(1.0 - roughness).max(f0);
+        f0 + (max_reflectance - f0) * fc
+    }
+
+    /// Exact Fresnel for dielectrics
+    pub fn dielectric(cos_theta_i: f32, eta: f32) -> f32 {
+        let sin_theta_i_sq = 1.0 - cos_theta_i * cos_theta_i;
+        let sin_theta_t_sq = sin_theta_i_sq / (eta * eta);
+
+        // Total internal reflection
+        if sin_theta_t_sq > 1.0 {
+            return 1.0;
+        }
+
+        let cos_theta_t = (1.0 - sin_theta_t_sq).sqrt();
+
+        let r_parallel = (eta * cos_theta_i - cos_theta_t) /
+                         (eta * cos_theta_i + cos_theta_t);
+        let r_perp = (cos_theta_i - eta * cos_theta_t) /
+                     (cos_theta_i + eta * cos_theta_t);
+
+        (r_parallel * r_parallel + r_perp * r_perp) * 0.5
+    }
+
+    /// Fresnel for conductors (metals) with complex IOR
+    pub fn conductor(cos_theta: f32, eta: Vec3, k: Vec3) -> Vec3 {
+        let cos_theta_sq = cos_theta * cos_theta;
+        let sin_theta_sq = 1.0 - cos_theta_sq;
+        let sin_theta_qu = sin_theta_sq * sin_theta_sq;
+
+        let eta_sq = eta * eta;
+        let k_sq = k * k;
+
+        let inner = eta_sq - k_sq - Vec3::splat(sin_theta_sq);
+        let a_sq_plus_b_sq = (inner * inner + eta_sq * k_sq * 4.0).sqrt();
+        let a = ((a_sq_plus_b_sq + inner) * 0.5).sqrt();
+
+        let rs = (a_sq_plus_b_sq + Vec3::splat(cos_theta_sq) - a * 2.0 * cos_theta) /
+                 (a_sq_plus_b_sq + Vec3::splat(cos_theta_sq) + a * 2.0 * cos_theta);
+
+        let rp = rs * (Vec3::splat(cos_theta_sq) * a_sq_plus_b_sq +
+                       Vec3::splat(sin_theta_qu) - a * 2.0 * cos_theta * sin_theta_sq) /
+                      (Vec3::splat(cos_theta_sq) * a_sq_plus_b_sq +
+                       Vec3::splat(sin_theta_qu) + a * 2.0 * cos_theta * sin_theta_sq);
+
+        (rs + rp) * 0.5
+    }
+
+    /// Thin film interference Fresnel
+    pub fn thin_film(
+        cos_theta: f32,
+        thickness: f32,       // Film thickness in nm
+        film_ior: f32,        // Film index of refraction
+        base_f0: f32,         // Base material F0
+        wavelength: f32,      // Light wavelength in nm
+    ) -> f32 {
+        // Phase shift from path difference
+        let sin_theta_i = (1.0 - cos_theta * cos_theta).sqrt();
+        let sin_theta_t = sin_theta_i / film_ior;
+        let cos_theta_t = (1.0 - sin_theta_t * sin_theta_t).sqrt();
+
+        let path_diff = 2.0 * film_ior * thickness * cos_theta_t;
+        let phase = 2.0 * MaterialConstants::PI * path_diff / wavelength;
+
+        // Fresnel at both interfaces
+        let r1 = Self::dielectric(cos_theta, film_ior);
+        let r2 = base_f0;
+
+        // Interference pattern
+        let amplitude = r1 + r2 - 2.0 * (r1 * r2).sqrt() * phase.cos();
+        amplitude / (1.0 + r1 * r2 - 2.0 * (r1 * r2).sqrt() * phase.cos())
+    }
+}
+
+// =============================================================================
+// REGION: NORMAL DISTRIBUTION FUNCTIONS
+// =============================================================================
+
+/// Normal Distribution Function (NDF) types
+pub enum NDF {
+    /// GGX/Trowbridge-Reitz (most common)
+    GGX,
+    /// Beckmann distribution
+    Beckmann,
+    /// Blinn-Phong
+    BlinnPhong,
+    /// Generalized Trowbridge-Reitz (GTR)
+    GTR { gamma: f32 },
+    /// Anisotropic GGX
+    GGXAnisotropic,
+    /// Multi-scattering GGX
+    GGXMultiScatter,
+    /// Student's t-distribution (broader tails)
+    StudentT { df: f32 },
+}
+
+impl NDF {
+    /// Evaluate the NDF
+    pub fn evaluate(&self, n_dot_h: f32, roughness: f32) -> f32 {
+        let alpha = MaterialUtils::roughness_to_alpha(roughness);
+
+        match self {
+            Self::GGX => Self::ggx(n_dot_h, alpha),
+            Self::Beckmann => Self::beckmann(n_dot_h, alpha),
+            Self::BlinnPhong => Self::blinn_phong(n_dot_h, alpha),
+            Self::GTR { gamma } => Self::gtr(n_dot_h, alpha, *gamma),
+            Self::GGXAnisotropic => Self::ggx(n_dot_h, alpha), // Simplified
+            Self::GGXMultiScatter => Self::ggx(n_dot_h, alpha), // Base is same
+            Self::StudentT { df } => Self::student_t(n_dot_h, alpha, *df),
+        }
+    }
+
+    /// Evaluate anisotropic NDF
+    pub fn evaluate_anisotropic(
+        &self,
+        n_dot_h: f32,
+        h: Vec3,
+        tangent: Vec3,
+        bitangent: Vec3,
+        roughness_x: f32,
+        roughness_y: f32,
+    ) -> f32 {
+        let alpha_x = MaterialUtils::roughness_to_alpha(roughness_x);
+        let alpha_y = MaterialUtils::roughness_to_alpha(roughness_y);
+
+        Self::ggx_anisotropic(n_dot_h, h, tangent, bitangent, alpha_x, alpha_y)
+    }
+
+    /// GGX/Trowbridge-Reitz NDF
+    fn ggx(n_dot_h: f32, alpha: f32) -> f32 {
+        let alpha_sq = alpha * alpha;
+        let d = n_dot_h * n_dot_h * (alpha_sq - 1.0) + 1.0;
+        alpha_sq / (MaterialConstants::PI * d * d)
+    }
+
+    /// Anisotropic GGX NDF
+    fn ggx_anisotropic(
+        n_dot_h: f32,
+        h: Vec3,
+        t: Vec3,
+        b: Vec3,
+        alpha_x: f32,
+        alpha_y: f32,
+    ) -> f32 {
+        let h_dot_t = h.dot(t);
+        let h_dot_b = h.dot(b);
+
+        let term = (h_dot_t * h_dot_t) / (alpha_x * alpha_x) +
+                   (h_dot_b * h_dot_b) / (alpha_y * alpha_y) +
+                   n_dot_h * n_dot_h;
+
+        1.0 / (MaterialConstants::PI * alpha_x * alpha_y * term * term)
+    }
+
+    /// Beckmann NDF
+    fn beckmann(n_dot_h: f32, alpha: f32) -> f32 {
+        let alpha_sq = alpha * alpha;
+        let cos_sq = n_dot_h * n_dot_h;
+        let tan_sq = (1.0 - cos_sq) / cos_sq;
+
+        let exp_term = (-tan_sq / alpha_sq).exp();
+        exp_term / (MaterialConstants::PI * alpha_sq * cos_sq * cos_sq)
+    }
+
+    /// Blinn-Phong NDF
+    fn blinn_phong(n_dot_h: f32, alpha: f32) -> f32 {
+        let shininess = 2.0 / (alpha * alpha) - 2.0;
+        let norm = (shininess + 2.0) / MaterialConstants::TWO_PI;
+        norm * n_dot_h.powf(shininess)
+    }
+
+    /// Generalized Trowbridge-Reitz NDF
+    fn gtr(n_dot_h: f32, alpha: f32, gamma: f32) -> f32 {
+        let alpha_sq = alpha * alpha;
+        let d = 1.0 + (alpha_sq - 1.0) * n_dot_h * n_dot_h;
+
+        // Normalization factor
+        let c = (gamma - 1.0) * (alpha_sq - 1.0) /
+                (MaterialConstants::PI * (1.0 - alpha_sq.powf(1.0 - gamma)));
+
+        c / d.powf(gamma)
+    }
+
+    /// Student's t-distribution NDF (for velvet-like materials)
+    fn student_t(n_dot_h: f32, alpha: f32, df: f32) -> f32 {
+        let cos_sq = n_dot_h * n_dot_h;
+        let tan_sq = (1.0 - cos_sq) / cos_sq;
+
+        let term = 1.0 + tan_sq / (df * alpha * alpha);
+        let norm = 1.0 / (MaterialConstants::PI * alpha * alpha);
+
+        norm / (term.powf((df + 1.0) / 2.0) * cos_sq * cos_sq)
+    }
+}
+
+// =============================================================================
+// REGION: GEOMETRY/VISIBILITY FUNCTIONS
+// =============================================================================
+
+/// Geometry function (masking-shadowing)
+pub enum GeometryFunction {
+    /// Smith GGX
+    SmithGGX,
+    /// Smith GGX correlated
+    SmithGGXCorrelated,
+    /// Smith Beckmann
+    SmithBeckmann,
+    /// Schlick-GGX approximation
+    SchlickGGX,
+    /// Kelemen approximation (fast)
+    Kelemen,
+    /// Height-correlated Smith
+    HeightCorrelated,
+}
+
+impl GeometryFunction {
+    /// Evaluate geometry term G(v, l, h)
+    pub fn evaluate(&self, n_dot_v: f32, n_dot_l: f32, roughness: f32) -> f32 {
+        let alpha = MaterialUtils::roughness_to_alpha(roughness);
+
+        match self {
+            Self::SmithGGX => {
+                Self::smith_ggx_g1(n_dot_v, alpha) * Self::smith_ggx_g1(n_dot_l, alpha)
+            }
+            Self::SmithGGXCorrelated => Self::smith_ggx_correlated(n_dot_v, n_dot_l, alpha),
+            Self::SmithBeckmann => {
+                Self::smith_beckmann_g1(n_dot_v, alpha) * Self::smith_beckmann_g1(n_dot_l, alpha)
+            }
+            Self::SchlickGGX => {
+                Self::schlick_ggx_g1(n_dot_v, roughness) * Self::schlick_ggx_g1(n_dot_l, roughness)
+            }
+            Self::Kelemen => Self::kelemen(n_dot_v, n_dot_l),
+            Self::HeightCorrelated => Self::height_correlated(n_dot_v, n_dot_l, alpha),
+        }
+    }
+
+    /// Evaluate anisotropic geometry term
+    pub fn evaluate_anisotropic(
+        &self,
+        n_dot_v: f32,
+        n_dot_l: f32,
+        t_dot_v: f32,
+        b_dot_v: f32,
+        t_dot_l: f32,
+        b_dot_l: f32,
+        roughness_x: f32,
+        roughness_y: f32,
+    ) -> f32 {
+        let alpha_x = MaterialUtils::roughness_to_alpha(roughness_x);
+        let alpha_y = MaterialUtils::roughness_to_alpha(roughness_y);
+
+        let g_v = Self::smith_ggx_aniso_g1(n_dot_v, t_dot_v, b_dot_v, alpha_x, alpha_y);
+        let g_l = Self::smith_ggx_aniso_g1(n_dot_l, t_dot_l, b_dot_l, alpha_x, alpha_y);
+
+        g_v * g_l
+    }
+
+    /// Smith GGX G1 term
+    fn smith_ggx_g1(n_dot_v: f32, alpha: f32) -> f32 {
+        let alpha_sq = alpha * alpha;
+        let n_dot_v_sq = n_dot_v * n_dot_v;
+
+        2.0 * n_dot_v / (n_dot_v + (alpha_sq + (1.0 - alpha_sq) * n_dot_v_sq).sqrt())
+    }
+
+    /// Smith GGX correlated visibility term
+    fn smith_ggx_correlated(n_dot_v: f32, n_dot_l: f32, alpha: f32) -> f32 {
+        let alpha_sq = alpha * alpha;
+
+        let ggx_v = n_dot_l * (n_dot_v * n_dot_v * (1.0 - alpha_sq) + alpha_sq).sqrt();
+        let ggx_l = n_dot_v * (n_dot_l * n_dot_l * (1.0 - alpha_sq) + alpha_sq).sqrt();
+
+        0.5 / (ggx_v + ggx_l).max(1e-7)
+    }
+
+    /// Smith GGX anisotropic G1
+    fn smith_ggx_aniso_g1(
+        n_dot_v: f32,
+        t_dot_v: f32,
+        b_dot_v: f32,
+        alpha_x: f32,
+        alpha_y: f32,
+    ) -> f32 {
+        let tan_sq = (t_dot_v * t_dot_v * alpha_x * alpha_x +
+                      b_dot_v * b_dot_v * alpha_y * alpha_y) /
+                     (n_dot_v * n_dot_v);
+
+        2.0 / (1.0 + (1.0 + tan_sq).sqrt())
+    }
+
+    /// Smith Beckmann G1 term
+    fn smith_beckmann_g1(n_dot_v: f32, alpha: f32) -> f32 {
+        let c = n_dot_v / (alpha * (1.0 - n_dot_v * n_dot_v).sqrt());
+
+        if c < 1.6 {
+            let c_sq = c * c;
+            (3.535 * c + 2.181 * c_sq) / (1.0 + 2.276 * c + 2.577 * c_sq)
+        } else {
+            1.0
+        }
+    }
+
+    /// Schlick-GGX approximation G1
+    fn schlick_ggx_g1(n_dot_v: f32, roughness: f32) -> f32 {
+        let k = roughness * roughness / 2.0;  // For direct lighting
+        // For IBL: k = roughness * roughness / 2.0
+
+        n_dot_v / (n_dot_v * (1.0 - k) + k)
+    }
+
+    /// Kelemen approximation
+    fn kelemen(n_dot_v: f32, n_dot_l: f32) -> f32 {
+        // Simple but inaccurate
+        n_dot_v * n_dot_l
+    }
+
+    /// Height-correlated Smith
+    fn height_correlated(n_dot_v: f32, n_dot_l: f32, alpha: f32) -> f32 {
+        let alpha_sq = alpha * alpha;
+
+        let lambda_v = (alpha_sq + (1.0 - alpha_sq) * n_dot_v * n_dot_v).sqrt() / n_dot_v - 1.0;
+        let lambda_l = (alpha_sq + (1.0 - alpha_sq) * n_dot_l * n_dot_l).sqrt() / n_dot_l - 1.0;
+
+        1.0 / (1.0 + lambda_v + lambda_l)
+    }
+}
+
+// =============================================================================
+// REGION: DISNEY BRDF
+// =============================================================================
+
+/// Disney Principled BRDF parameters
+pub struct DisneyMaterial {
+    /// Base color (diffuse albedo or specular F0 for metals)
+    pub base_color: Vec3,
+
+    /// Metallic (0 = dielectric, 1 = metallic)
+    pub metallic: f32,
+
+    /// Roughness (0 = smooth, 1 = rough)
+    pub roughness: f32,
+
+    /// Specular intensity (0 = none, 1 = normal)
+    pub specular: f32,
+
+    /// Specular tint (0 = achromatic, 1 = base_color)
+    pub specular_tint: f32,
+
+    /// Anisotropic (-1 to 1)
+    pub anisotropic: f32,
+
+    /// Sheen intensity
+    pub sheen: f32,
+
+    /// Sheen tint (0 = white, 1 = base_color)
+    pub sheen_tint: f32,
+
+    /// Clear coat intensity
+    pub clearcoat: f32,
+
+    /// Clear coat gloss
+    pub clearcoat_gloss: f32,
+
+    /// Subsurface scattering amount
+    pub subsurface: f32,
+
+    /// Transmission (0 = opaque, 1 = transparent)
+    pub transmission: f32,
+
+    /// Transmission roughness
+    pub transmission_roughness: f32,
+
+    /// Index of refraction
+    pub ior: f32,
+
+    /// Thin film thickness in nm (0 = disabled)
+    pub thin_film_thickness: f32,
+
+    /// Thin film IOR
+    pub thin_film_ior: f32,
+
+    /// Iridescence intensity
+    pub iridescence: f32,
+
+    /// Emission color
+    pub emission: Vec3,
+
+    /// Emission intensity
+    pub emission_intensity: f32,
+
+    /// Alpha/opacity
+    pub alpha: f32,
+
+    /// Normal map strength
+    pub normal_strength: f32,
+}
+
+impl DisneyMaterial {
+    /// Create default dielectric material
+    pub fn default() -> Self {
+        Self {
+            base_color: Vec3::splat(0.8),
+            metallic: 0.0,
+            roughness: 0.5,
+            specular: 0.5,
+            specular_tint: 0.0,
+            anisotropic: 0.0,
+            sheen: 0.0,
+            sheen_tint: 0.5,
+            clearcoat: 0.0,
+            clearcoat_gloss: 1.0,
+            subsurface: 0.0,
+            transmission: 0.0,
+            transmission_roughness: 0.0,
+            ior: 1.5,
+            thin_film_thickness: 0.0,
+            thin_film_ior: 1.5,
+            iridescence: 0.0,
+            emission: Vec3::zero(),
+            emission_intensity: 0.0,
+            alpha: 1.0,
+            normal_strength: 1.0,
+        }
+    }
+
+    /// Create metallic material
+    pub fn metal(color: Vec3, roughness: f32) -> Self {
+        let mut mat = Self::default();
+        mat.base_color = color;
+        mat.metallic = 1.0;
+        mat.roughness = roughness;
+        mat
+    }
+
+    /// Create dielectric material
+    pub fn dielectric(color: Vec3, roughness: f32) -> Self {
+        let mut mat = Self::default();
+        mat.base_color = color;
+        mat.metallic = 0.0;
+        mat.roughness = roughness;
+        mat
+    }
+
+    /// Create glass material
+    pub fn glass(tint: Vec3, roughness: f32, ior: f32) -> Self {
+        let mut mat = Self::default();
+        mat.base_color = tint;
+        mat.metallic = 0.0;
+        mat.roughness = roughness;
+        mat.transmission = 1.0;
+        mat.ior = ior;
+        mat
+    }
+
+    /// Create clear coat material
+    pub fn clearcoat(base_color: Vec3, roughness: f32, coat_strength: f32) -> Self {
+        let mut mat = Self::default();
+        mat.base_color = base_color;
+        mat.roughness = roughness;
+        mat.clearcoat = coat_strength;
+        mat.clearcoat_gloss = 1.0;
+        mat
+    }
+}
+
+/// Disney BRDF evaluator
+pub struct DisneyBRDF;
+
+impl DisneyBRDF {
+    /// Evaluate Disney BRDF
+    pub fn evaluate(
+        material: &DisneyMaterial,
+        n: Vec3,       // Surface normal
+        v: Vec3,       // View direction
+        l: Vec3,       // Light direction
+        tangent: Vec3, // Tangent (for anisotropic)
+    ) -> Vec3 {
+        let h = (v + l).normalize();
+        let bitangent = n.cross(tangent);
+
+        let n_dot_v = n.dot(v).max(0.0001);
+        let n_dot_l = n.dot(l).max(0.0);
+        let n_dot_h = n.dot(h).max(0.0);
+        let l_dot_h = l.dot(h).max(0.0);
+        let v_dot_h = v.dot(h).max(0.0);
+
+        if n_dot_l <= 0.0 {
+            return Vec3::zero();
+        }
+
+        // Compute derived values
+        let luminance = 0.3 * material.base_color.x +
+                       0.6 * material.base_color.y +
+                       0.1 * material.base_color.z;
+        let c_tint = if luminance > 0.0 {
+            material.base_color / luminance
+        } else {
+            Vec3::splat(1.0)
+        };
+
+        // Specular F0
+        let specular_base = 0.08 * material.specular;
+        let c_spec0 = Vec3::lerp(
+            Vec3::lerp(Vec3::splat(specular_base), c_tint * specular_base, material.specular_tint),
+            material.base_color,
+            material.metallic,
+        );
+
+        // Diffuse component (with subsurface)
+        let f_diffuse = if material.subsurface > 0.0 {
+            Self::subsurface_diffuse(n_dot_l, n_dot_v, l_dot_h, material.roughness) *
+            material.subsurface +
+            Self::disney_diffuse(n_dot_l, n_dot_v, l_dot_h, material.roughness) *
+            (1.0 - material.subsurface)
+        } else {
+            Self::disney_diffuse(n_dot_l, n_dot_v, l_dot_h, material.roughness)
+        };
+
+        let diffuse = material.base_color * f_diffuse * (1.0 - material.metallic);
+
+        // Specular component (anisotropic or isotropic)
+        let specular = if material.anisotropic.abs() > 0.001 {
+            let aspect = (1.0 - material.anisotropic * 0.9).sqrt();
+            let roughness_x = material.roughness / aspect;
+            let roughness_y = material.roughness * aspect;
+
+            Self::specular_anisotropic(
+                c_spec0,
+                n, v, l, h,
+                tangent, bitangent,
+                roughness_x, roughness_y,
+                n_dot_v, n_dot_l, n_dot_h, l_dot_h,
+            )
+        } else {
+            Self::specular_isotropic(
+                c_spec0,
+                n_dot_v, n_dot_l, n_dot_h, l_dot_h,
+                material.roughness,
+            )
+        };
+
+        // Sheen
+        let sheen = if material.sheen > 0.0 {
+            let c_sheen = Vec3::lerp(Vec3::splat(1.0), c_tint, material.sheen_tint);
+            Self::sheen(c_sheen, l_dot_h) * material.sheen * (1.0 - material.metallic)
+        } else {
+            Vec3::zero()
+        };
+
+        // Clear coat
+        let clearcoat = if material.clearcoat > 0.0 {
+            let clearcoat_roughness = (1.0 - material.clearcoat_gloss) * 0.1 + 0.01;
+            Self::clearcoat(n_dot_v, n_dot_l, n_dot_h, l_dot_h, clearcoat_roughness) *
+            material.clearcoat * 0.25
+        } else {
+            0.0
+        };
+
+        (diffuse + specular + sheen) * (1.0 - material.clearcoat * 0.04) +
+        Vec3::splat(clearcoat)
+    }
+
+    /// Disney diffuse term
+    fn disney_diffuse(n_dot_l: f32, n_dot_v: f32, l_dot_h: f32, roughness: f32) -> f32 {
+        let fd90 = 0.5 + 2.0 * l_dot_h * l_dot_h * roughness;
+        let light_scatter = Self::schlick_weight(n_dot_l);
+        let view_scatter = Self::schlick_weight(n_dot_v);
+
+        let fd = (1.0 + (fd90 - 1.0) * light_scatter) * (1.0 + (fd90 - 1.0) * view_scatter);
+
+        fd * MaterialConstants::INV_PI
+    }
+
+    /// Subsurface diffuse approximation
+    fn subsurface_diffuse(n_dot_l: f32, n_dot_v: f32, l_dot_h: f32, roughness: f32) -> f32 {
+        let fss90 = l_dot_h * l_dot_h * roughness;
+        let fss = (1.0 + (fss90 - 1.0) * Self::schlick_weight(n_dot_l)) *
+                  (1.0 + (fss90 - 1.0) * Self::schlick_weight(n_dot_v));
+
+        1.25 * (fss * (1.0 / (n_dot_l + n_dot_v) - 0.5) + 0.5) * MaterialConstants::INV_PI
+    }
+
+    /// Isotropic specular
+    fn specular_isotropic(
+        f0: Vec3,
+        n_dot_v: f32,
+        n_dot_l: f32,
+        n_dot_h: f32,
+        l_dot_h: f32,
+        roughness: f32,
+    ) -> Vec3 {
+        let d = NDF::GGX.evaluate(n_dot_h, roughness);
+        let g = GeometryFunction::SmithGGXCorrelated.evaluate(n_dot_v, n_dot_l, roughness);
+        let f = Fresnel::schlick(l_dot_h, f0);
+
+        // Note: G is already divided by 4 * n_dot_l * n_dot_v
+        f * d * g
+    }
+
+    /// Anisotropic specular
+    fn specular_anisotropic(
+        f0: Vec3,
+        n: Vec3,
+        v: Vec3,
+        l: Vec3,
+        h: Vec3,
+        t: Vec3,
+        b: Vec3,
+        roughness_x: f32,
+        roughness_y: f32,
+        n_dot_v: f32,
+        n_dot_l: f32,
+        n_dot_h: f32,
+        l_dot_h: f32,
+    ) -> Vec3 {
+        let d = NDF::GGXAnisotropic.evaluate_anisotropic(
+            n_dot_h, h, t, b, roughness_x, roughness_y);
+
+        let t_dot_v = t.dot(v);
+        let b_dot_v = b.dot(v);
+        let t_dot_l = t.dot(l);
+        let b_dot_l = b.dot(l);
+
+        let g = GeometryFunction::SmithGGX.evaluate_anisotropic(
+            n_dot_v, n_dot_l,
+            t_dot_v, b_dot_v,
+            t_dot_l, b_dot_l,
+            roughness_x, roughness_y,
+        );
+
+        let f = Fresnel::schlick(l_dot_h, f0);
+
+        f * d * g / (4.0 * n_dot_v * n_dot_l)
+    }
+
+    /// Sheen term
+    fn sheen(c_sheen: Vec3, l_dot_h: f32) -> Vec3 {
+        c_sheen * Self::schlick_weight(l_dot_h)
+    }
+
+    /// Clear coat term
+    fn clearcoat(n_dot_v: f32, n_dot_l: f32, n_dot_h: f32, l_dot_h: f32, roughness: f32) -> f32 {
+        let d = NDF::GTR { gamma: 1.0 }.evaluate(n_dot_h, roughness);
+        let g = GeometryFunction::SchlickGGX.evaluate(n_dot_v, n_dot_l, 0.25);
+        let f = Fresnel::schlick(l_dot_h, Vec3::splat(0.04)).x;
+
+        d * g * f / (4.0 * n_dot_v * n_dot_l)
+    }
+
+    /// Schlick weight: (1 - cos)^5
+    fn schlick_weight(cos_theta: f32) -> f32 {
+        let m = (1.0 - cos_theta).clamp(0.0, 1.0);
+        m * m * m * m * m
+    }
+}
+
+// =============================================================================
+// REGION: SPECIALIZED BRDFS
+// =============================================================================
+
+/// Hair BRDF (Marschner model)
+pub struct HairBRDF {
+    /// Hair melanin concentration (0-1)
+    pub melanin: f32,
+
+    /// Hair melanin redness (0-1, 0=eumelanin/brown, 1=pheomelanin/red)
+    pub melanin_redness: f32,
+
+    /// Primary specular intensity (R)
+    pub specular_r: f32,
+
+    /// Secondary specular intensity (TRT)
+    pub specular_trt: f32,
+
+    /// Transmission intensity (TT)
+    pub transmission_tt: f32,
+
+    /// Longitudinal roughness
+    pub roughness_longitudinal: f32,
+
+    /// Azimuthal roughness
+    pub roughness_azimuthal: f32,
+
+    /// Cuticle angle (degrees)
+    pub cuticle_angle: f32,
+
+    /// Hair IOR
+    pub ior: f32,
+}
+
+impl HairBRDF {
+    /// Create default brown hair
+    pub fn brown_hair() -> Self {
+        Self {
+            melanin: 0.5,
+            melanin_redness: 0.2,
+            specular_r: 1.0,
+            specular_trt: 0.8,
+            transmission_tt: 0.5,
+            roughness_longitudinal: 0.1,
+            roughness_azimuthal: 0.3,
+            cuticle_angle: 3.0,
+            ior: 1.55,
+        }
+    }
+
+    /// Create blonde hair
+    pub fn blonde_hair() -> Self {
+        Self {
+            melanin: 0.1,
+            melanin_redness: 0.3,
+            specular_r: 1.0,
+            specular_trt: 0.9,
+            transmission_tt: 0.7,
+            roughness_longitudinal: 0.08,
+            roughness_azimuthal: 0.25,
+            cuticle_angle: 2.5,
+            ior: 1.55,
+        }
+    }
+
+    /// Create black hair
+    pub fn black_hair() -> Self {
+        Self {
+            melanin: 0.9,
+            melanin_redness: 0.1,
+            specular_r: 1.0,
+            specular_trt: 0.5,
+            transmission_tt: 0.2,
+            roughness_longitudinal: 0.12,
+            roughness_azimuthal: 0.35,
+            cuticle_angle: 3.5,
+            ior: 1.55,
+        }
+    }
+
+    /// Create red hair
+    pub fn red_hair() -> Self {
+        Self {
+            melanin: 0.4,
+            melanin_redness: 0.9,
+            specular_r: 1.0,
+            specular_trt: 0.85,
+            transmission_tt: 0.6,
+            roughness_longitudinal: 0.1,
+            roughness_azimuthal: 0.3,
+            cuticle_angle: 3.0,
+            ior: 1.55,
+        }
+    }
+
+    /// Compute hair absorption from melanin
+    pub fn compute_absorption(&self) -> Vec3 {
+        // Eumelanin (brown/black) absorption
+        let eumelanin = Vec3::new(0.419, 0.697, 1.37);
+        // Pheomelanin (red/yellow) absorption
+        let pheomelanin = Vec3::new(0.187, 0.4, 1.05);
+
+        let base_absorption = Vec3::lerp(eumelanin, pheomelanin, self.melanin_redness);
+        base_absorption * self.melanin
+    }
+
+    /// Evaluate hair BRDF
+    pub fn evaluate(
+        &self,
+        wi: Vec3,         // Incoming direction
+        wo: Vec3,         // Outgoing direction
+        tangent: Vec3,    // Hair tangent direction
+    ) -> Vec3 {
+        // Project to hair coordinate system
+        let sin_theta_i = wi.dot(tangent);
+        let sin_theta_o = wo.dot(tangent);
+        let cos_theta_i = (1.0 - sin_theta_i * sin_theta_i).sqrt();
+        let cos_theta_o = (1.0 - sin_theta_o * sin_theta_o).sqrt();
+
+        // Longitudinal angles
+        let theta_i = sin_theta_i.asin();
+        let theta_o = sin_theta_o.asin();
+        let theta_h = (theta_i + theta_o) * 0.5;
+        let theta_d = (theta_i - theta_o) * 0.5;
+
+        // Azimuthal angles
+        let normal = Vec3::new(0.0, 1.0, 0.0); // Assume up
+        let bitangent = tangent.cross(normal).normalize();
+        let phi_i = (wi.dot(bitangent)).atan2(wi.dot(normal));
+        let phi_o = (wo.dot(bitangent)).atan2(wo.dot(normal));
+        let phi = phi_o - phi_i;
+
+        // Cuticle angle offset
+        let alpha = self.cuticle_angle.to_radians();
+
+        // R lobe (primary reflection)
+        let r = self.evaluate_r_lobe(theta_h, theta_d, phi, alpha);
+
+        // TT lobe (transmission-transmission)
+        let tt = self.evaluate_tt_lobe(theta_h, theta_d, phi, alpha);
+
+        // TRT lobe (transmission-reflection-transmission)
+        let trt = self.evaluate_trt_lobe(theta_h, theta_d, phi, alpha);
+
+        let absorption = self.compute_absorption();
+
+        // Combine lobes
+        Vec3::splat(r * self.specular_r) +
+        tt * self.transmission_tt * (-absorption * 2.0).exp() +
+        trt * self.specular_trt * (-absorption * 3.0).exp()
+    }
+
+    /// R lobe (surface reflection)
+    fn evaluate_r_lobe(&self, theta_h: f32, theta_d: f32, phi: f32, alpha: f32) -> f32 {
+        let m_r = Self::longitudinal_m(self.roughness_longitudinal, theta_h - alpha);
+        let n_r = Self::azimuthal_n_r(phi, self.roughness_azimuthal, self.ior);
+        m_r * n_r
+    }
+
+    /// TT lobe (transmission-transmission)
+    fn evaluate_tt_lobe(&self, theta_h: f32, theta_d: f32, phi: f32, alpha: f32) -> Vec3 {
+        let m_tt = Self::longitudinal_m(self.roughness_longitudinal * 0.5, theta_h + alpha);
+        let n_tt = Self::azimuthal_n_tt(phi, self.roughness_azimuthal * 0.5, self.ior, theta_d);
+        Vec3::splat(m_tt * n_tt)
+    }
+
+    /// TRT lobe
+    fn evaluate_trt_lobe(&self, theta_h: f32, theta_d: f32, phi: f32, alpha: f32) -> Vec3 {
+        let m_trt = Self::longitudinal_m(self.roughness_longitudinal * 2.0, theta_h - alpha * 2.0);
+        let n_trt = Self::azimuthal_n_trt(phi, self.roughness_azimuthal * 2.0, self.ior);
+        Vec3::splat(m_trt * n_trt)
+    }
+
+    /// Longitudinal scattering function
+    fn longitudinal_m(beta: f32, theta: f32) -> f32 {
+        let v = beta * beta;
+        let x = theta.cos();
+
+        // Gaussian approximation
+        let exp_term = -(theta * theta) / (2.0 * v);
+        exp_term.exp() / (beta * (2.0 * MaterialConstants::PI).sqrt())
+    }
+
+    /// Azimuthal scattering for R
+    fn azimuthal_n_r(phi: f32, beta: f32, eta: f32) -> f32 {
+        let cos_half_phi = (phi * 0.5).cos();
+
+        // Fresnel term
+        let f = Fresnel::dielectric(cos_half_phi, eta);
+
+        // Distribution
+        let d = Self::azimuthal_distribution(phi, beta);
+
+        f * d
+    }
+
+    /// Azimuthal scattering for TT
+    fn azimuthal_n_tt(phi: f32, beta: f32, eta: f32, theta_d: f32) -> f32 {
+        let gamma_t = (theta_d.sin() / eta).asin();
+        let h = (gamma_t * 2.0).sin();
+
+        let t = 1.0 - Fresnel::dielectric((phi * 0.5).cos(), eta);
+
+        t * t * Self::azimuthal_distribution(phi - MaterialConstants::PI, beta)
+    }
+
+    /// Azimuthal scattering for TRT
+    fn azimuthal_n_trt(phi: f32, beta: f32, eta: f32) -> f32 {
+        Self::azimuthal_distribution(phi, beta) * 0.5
+    }
+
+    /// Azimuthal distribution
+    fn azimuthal_distribution(phi: f32, beta: f32) -> f32 {
+        let s = beta * beta;
+        let exp_term = -(phi * phi) / (2.0 * s);
+        exp_term.exp() / (beta * (2.0 * MaterialConstants::PI).sqrt())
+    }
+}
+
+/// Cloth/Fabric BRDF
+pub struct ClothBRDF {
+    /// Fabric type
+    pub fabric_type: FabricType,
+
+    /// Sheen color
+    pub sheen_color: Vec3,
+
+    /// Sheen intensity
+    pub sheen: f32,
+
+    /// Roughness
+    pub roughness: f32,
+
+    /// Subsurface color
+    pub subsurface_color: Vec3,
+
+    /// Subsurface intensity
+    pub subsurface: f32,
+
+    /// Anisotropy direction
+    pub anisotropy_direction: Vec2,
+
+    /// Anisotropy strength
+    pub anisotropy: f32,
+}
+
+/// Fabric types
+pub enum FabricType {
+    /// Cotton-like diffuse fabric
+    Cotton,
+    /// Silk-like shiny fabric
+    Silk,
+    /// Velvet with retroreflection
+    Velvet,
+    /// Satin with anisotropic highlights
+    Satin,
+    /// Denim with subsurface
+    Denim,
+    /// Wool with fuzz
+    Wool,
+    /// Leather (not technically fabric but similar)
+    Leather,
+}
+
+impl ClothBRDF {
+    /// Create cotton material
+    pub fn cotton(color: Vec3) -> Self {
+        Self {
+            fabric_type: FabricType::Cotton,
+            sheen_color: color * 0.9,
+            sheen: 0.05,
+            roughness: 0.8,
+            subsurface_color: color,
+            subsurface: 0.1,
+            anisotropy_direction: Vec2::new(1.0, 0.0),
+            anisotropy: 0.0,
+        }
+    }
+
+    /// Create velvet material
+    pub fn velvet(color: Vec3) -> Self {
+        Self {
+            fabric_type: FabricType::Velvet,
+            sheen_color: color,
+            sheen: 0.8,
+            roughness: 0.95,
+            subsurface_color: color * 0.3,
+            subsurface: 0.3,
+            anisotropy_direction: Vec2::new(1.0, 0.0),
+            anisotropy: 0.0,
+        }
+    }
+
+    /// Create silk material
+    pub fn silk(color: Vec3) -> Self {
+        Self {
+            fabric_type: FabricType::Silk,
+            sheen_color: Vec3::splat(0.9),
+            sheen: 0.6,
+            roughness: 0.4,
+            subsurface_color: color,
+            subsurface: 0.2,
+            anisotropy_direction: Vec2::new(1.0, 0.0),
+            anisotropy: 0.7,
+        }
+    }
+
+    /// Create satin material
+    pub fn satin(color: Vec3) -> Self {
+        Self {
+            fabric_type: FabricType::Satin,
+            sheen_color: Vec3::splat(0.95),
+            sheen: 0.5,
+            roughness: 0.3,
+            subsurface_color: color,
+            subsurface: 0.15,
+            anisotropy_direction: Vec2::new(1.0, 0.0),
+            anisotropy: 0.8,
+        }
+    }
+
+    /// Evaluate cloth BRDF
+    pub fn evaluate(&self, n: Vec3, v: Vec3, l: Vec3, tangent: Vec3) -> Vec3 {
+        let h = (v + l).normalize();
+        let n_dot_l = n.dot(l).max(0.0);
+        let n_dot_v = n.dot(v).max(0.0001);
+        let n_dot_h = n.dot(h).max(0.0);
+        let l_dot_h = l.dot(h).max(0.0);
+
+        if n_dot_l <= 0.0 {
+            return Vec3::zero();
+        }
+
+        match self.fabric_type {
+            FabricType::Velvet => self.evaluate_velvet(n_dot_l, n_dot_v, l_dot_h),
+            FabricType::Silk | FabricType::Satin => {
+                self.evaluate_anisotropic(n, v, l, h, tangent, n_dot_l, n_dot_v)
+            }
+            _ => self.evaluate_diffuse(n_dot_l, n_dot_v, l_dot_h),
+        }
+    }
+
+    /// Diffuse fabric (cotton, denim, wool)
+    fn evaluate_diffuse(&self, n_dot_l: f32, n_dot_v: f32, l_dot_h: f32) -> Vec3 {
+        // Lambertian diffuse
+        let diffuse = self.subsurface_color * MaterialConstants::INV_PI;
+
+        // Sheen (edge lighting)
+        let sheen = self.sheen_color * self.sheen *
+                   (1.0 - l_dot_h).powf(5.0);
+
+        diffuse + sheen
+    }
+
+    /// Velvet with retroreflection
+    fn evaluate_velvet(&self, n_dot_l: f32, n_dot_v: f32, l_dot_h: f32) -> Vec3 {
+        // Retroreflection: peaks when view and light are opposite
+        let retro = (1.0 - n_dot_v).powf(3.0) * (1.0 - n_dot_l).powf(3.0);
+
+        // Horizon scattering
+        let horizon = (1.0 - n_dot_v).powf(5.0) + (1.0 - n_dot_l).powf(5.0);
+
+        let diffuse = self.subsurface_color * MaterialConstants::INV_PI;
+        let sheen = self.sheen_color * self.sheen * (retro + horizon);
+
+        diffuse + sheen
+    }
+
+    /// Anisotropic fabric (silk, satin)
+    fn evaluate_anisotropic(
+        &self,
+        n: Vec3,
+        v: Vec3,
+        l: Vec3,
+        h: Vec3,
+        tangent: Vec3,
+        n_dot_l: f32,
+        n_dot_v: f32,
+    ) -> Vec3 {
+        let bitangent = n.cross(tangent).normalize();
+
+        // Rotate tangent by anisotropy direction
+        let angle = self.anisotropy_direction.y.atan2(self.anisotropy_direction.x);
+        let t = tangent * angle.cos() + bitangent * angle.sin();
+        let b = n.cross(t);
+
+        // Anisotropic GGX
+        let aspect = (1.0 - self.anisotropy * 0.9).sqrt();
+        let roughness_t = self.roughness / aspect;
+        let roughness_b = self.roughness * aspect;
+
+        let n_dot_h = n.dot(h).max(0.0);
+        let d = NDF::GGXAnisotropic.evaluate_anisotropic(
+            n_dot_h, h, t, b, roughness_t, roughness_b);
+
+        let l_dot_h = l.dot(h).max(0.0);
+        let f = Fresnel::schlick(l_dot_h, self.sheen_color * self.sheen);
+
+        let g = GeometryFunction::SmithGGXCorrelated.evaluate(n_dot_v, n_dot_l, self.roughness);
+
+        let specular = f * d * g;
+
+        // Add diffuse
+        let diffuse = self.subsurface_color * MaterialConstants::INV_PI * (1.0 - self.sheen);
+
+        diffuse + specular
+    }
+}
+
+/// Skin BRDF
+pub struct SkinBRDF {
+    /// Epidermal color
+    pub epidermis_color: Vec3,
+
+    /// Dermal color (blood layer)
+    pub dermis_color: Vec3,
+
+    /// Subsurface radius (mm)
+    pub subsurface_radius: Vec3,
+
+    /// Roughness
+    pub roughness: f32,
+
+    /// Oil layer specular
+    pub oil_specular: f32,
+
+    /// Oil layer roughness
+    pub oil_roughness: f32,
+
+    /// Melanin concentration
+    pub melanin: f32,
+
+    /// Hemoglobin concentration
+    pub hemoglobin: f32,
+
+    /// Oiliness
+    pub oiliness: f32,
+}
+
+impl SkinBRDF {
+    /// Create Caucasian skin
+    pub fn caucasian() -> Self {
+        Self {
+            epidermis_color: Vec3::new(0.95, 0.85, 0.75),
+            dermis_color: Vec3::new(0.85, 0.5, 0.4),
+            subsurface_radius: Vec3::new(1.0, 0.4, 0.15),
+            roughness: 0.4,
+            oil_specular: 0.03,
+            oil_roughness: 0.3,
+            melanin: 0.1,
+            hemoglobin: 0.4,
+            oiliness: 0.3,
+        }
+    }
+
+    /// Create Asian skin
+    pub fn asian() -> Self {
+        Self {
+            epidermis_color: Vec3::new(0.92, 0.80, 0.65),
+            dermis_color: Vec3::new(0.85, 0.5, 0.4),
+            subsurface_radius: Vec3::new(0.9, 0.35, 0.13),
+            roughness: 0.35,
+            oil_specular: 0.04,
+            oil_roughness: 0.25,
+            melanin: 0.25,
+            hemoglobin: 0.35,
+            oiliness: 0.4,
+        }
+    }
+
+    /// Create African skin
+    pub fn african() -> Self {
+        Self {
+            epidermis_color: Vec3::new(0.45, 0.35, 0.3),
+            dermis_color: Vec3::new(0.7, 0.4, 0.35),
+            subsurface_radius: Vec3::new(0.6, 0.25, 0.1),
+            roughness: 0.3,
+            oil_specular: 0.05,
+            oil_roughness: 0.2,
+            melanin: 0.8,
+            hemoglobin: 0.3,
+            oiliness: 0.5,
+        }
+    }
+
+    /// Compute subsurface color from bio-physical parameters
+    pub fn compute_subsurface_color(&self) -> Vec3 {
+        // Melanin absorption
+        let melanin_absorption = Vec3::new(0.1, 0.5, 1.0) * self.melanin;
+
+        // Hemoglobin absorption
+        let hemoglobin_absorption = Vec3::new(0.3, 0.7, 0.1) * self.hemoglobin;
+
+        // Combine
+        let total_absorption = melanin_absorption + hemoglobin_absorption;
+        (-total_absorption).exp()
+    }
+
+    /// Evaluate skin BRDF (simplified, full requires SSS)
+    pub fn evaluate(&self, n: Vec3, v: Vec3, l: Vec3) -> Vec3 {
+        let h = (v + l).normalize();
+        let n_dot_l = n.dot(l).max(0.0);
+        let n_dot_v = n.dot(v).max(0.0001);
+        let n_dot_h = n.dot(h).max(0.0);
+        let l_dot_h = l.dot(h).max(0.0);
+
+        if n_dot_l <= 0.0 {
+            return Vec3::zero();
+        }
+
+        // Oil layer specular
+        let d = NDF::GGX.evaluate(n_dot_h, self.oil_roughness);
+        let g = GeometryFunction::SmithGGXCorrelated.evaluate(n_dot_v, n_dot_l, self.oil_roughness);
+        let f = Fresnel::schlick(l_dot_h, Vec3::splat(self.oil_specular));
+        let specular = f * d * g;
+
+        // Skin layer specular (lower, rougher)
+        let d2 = NDF::GGX.evaluate(n_dot_h, self.roughness);
+        let g2 = GeometryFunction::SmithGGXCorrelated.evaluate(n_dot_v, n_dot_l, self.roughness);
+        let f2 = Fresnel::schlick(l_dot_h, Vec3::splat(0.028));
+        let skin_specular = f2 * d2 * g2 * (1.0 - self.oiliness);
+
+        // Diffuse with wrapped lighting for SSS approximation
+        let wrap = 0.3;
+        let wrapped_n_dot_l = (n_dot_l + wrap) / (1.0 + wrap);
+        let diffuse = self.epidermis_color * wrapped_n_dot_l.max(0.0) * MaterialConstants::INV_PI;
+
+        // Subsurface scattering approximation (view-dependent)
+        let sss_strength = (1.0 - n_dot_v).powf(3.0) * 0.3;
+        let sss = self.dermis_color * sss_strength;
+
+        specular + skin_specular + diffuse + sss
+    }
+}
+
+/// Eye BRDF
+pub struct EyeBRDF {
+    /// Iris color
+    pub iris_color: Vec3,
+
+    /// Iris detail texture
+    pub iris_texture: Option<Texture>,
+
+    /// Sclera color (whites of eye)
+    pub sclera_color: Vec3,
+
+    /// Pupil size (0-1)
+    pub pupil_size: f32,
+
+    /// Cornea IOR
+    pub cornea_ior: f32,
+
+    /// Limbal ring intensity
+    pub limbal_ring: f32,
+
+    /// Aqueous humor IOR
+    pub aqueous_ior: f32,
+
+    /// Eye wetness (specular intensity)
+    pub wetness: f32,
+
+    /// Caustic intensity
+    pub caustics: f32,
+}
+
+impl EyeBRDF {
+    /// Create blue eye
+    pub fn blue_eye() -> Self {
+        Self {
+            iris_color: Vec3::new(0.2, 0.4, 0.7),
+            iris_texture: None,
+            sclera_color: Vec3::new(0.98, 0.97, 0.95),
+            pupil_size: 0.3,
+            cornea_ior: 1.376,
+            limbal_ring: 0.8,
+            aqueous_ior: 1.336,
+            wetness: 0.9,
+            caustics: 0.3,
+        }
+    }
+
+    /// Create brown eye
+    pub fn brown_eye() -> Self {
+        Self {
+            iris_color: Vec3::new(0.4, 0.25, 0.15),
+            iris_texture: None,
+            sclera_color: Vec3::new(0.98, 0.96, 0.93),
+            pupil_size: 0.35,
+            cornea_ior: 1.376,
+            limbal_ring: 0.6,
+            aqueous_ior: 1.336,
+            wetness: 0.85,
+            caustics: 0.2,
+        }
+    }
+
+    /// Create green eye
+    pub fn green_eye() -> Self {
+        Self {
+            iris_color: Vec3::new(0.3, 0.5, 0.3),
+            iris_texture: None,
+            sclera_color: Vec3::new(0.98, 0.97, 0.95),
+            pupil_size: 0.3,
+            cornea_ior: 1.376,
+            limbal_ring: 0.7,
+            aqueous_ior: 1.336,
+            wetness: 0.9,
+            caustics: 0.25,
+        }
+    }
+
+    /// Evaluate eye BRDF at given UV
+    pub fn evaluate(
+        &self,
+        uv: Vec2,           // UV on eye mesh
+        n: Vec3,            // Normal
+        v: Vec3,            // View direction
+        l: Vec3,            // Light direction
+        light_color: Vec3,  // Light color
+    ) -> Vec3 {
+        // Compute eye region (iris vs sclera)
+        let center = Vec2::new(0.5, 0.5);
+        let dist_from_center = (uv - center).length() * 2.0;
+
+        let is_iris = dist_from_center < 0.5;
+        let is_pupil = dist_from_center < self.pupil_size * 0.5;
+
+        if is_pupil {
+            // Pupil is black
+            return Vec3::splat(0.001);
+        }
+
+        let h = (v + l).normalize();
+        let n_dot_l = n.dot(l).max(0.0);
+        let n_dot_v = n.dot(v).max(0.0001);
+        let n_dot_h = n.dot(h).max(0.0);
+        let l_dot_h = l.dot(h).max(0.0);
+
+        // Cornea specular (very smooth, wet)
+        let cornea_roughness = 0.01 + (1.0 - self.wetness) * 0.1;
+        let d = NDF::GGX.evaluate(n_dot_h, cornea_roughness);
+        let g = GeometryFunction::SmithGGXCorrelated.evaluate(n_dot_v, n_dot_l, cornea_roughness);
+        let f0 = MaterialUtils::ior_to_f0(self.cornea_ior);
+        let f = Fresnel::schlick(l_dot_h, Vec3::splat(f0));
+        let specular = f * d * g * light_color;
+
+        // Base color
+        let base_color = if is_iris {
+            // Iris with limbal ring darkening
+            let iris_dist = (dist_from_center - self.pupil_size * 0.5) /
+                           (0.5 - self.pupil_size * 0.5);
+            let limbal_factor = 1.0 - self.limbal_ring *
+                               (1.0 - ((1.0 - iris_dist) * 3.0).min(1.0));
+
+            self.iris_color * limbal_factor
+        } else {
+            // Sclera with veins at edges
+            let vein_factor = 1.0 - (dist_from_center - 0.5).max(0.0) * 0.5;
+            let blood_tint = Vec3::new(1.0, 0.8, 0.8);
+            Vec3::lerp(self.sclera_color * blood_tint, self.sclera_color, vein_factor)
+        };
+
+        // Diffuse with SSS approximation
+        let diffuse = base_color * n_dot_l.max(0.1) * MaterialConstants::INV_PI;
+
+        // Caustics from refraction
+        let caustics = if is_iris && n_dot_l > 0.0 {
+            light_color * self.caustics * (n_dot_l * n_dot_v).sqrt()
+        } else {
+            Vec3::zero()
+        };
+
+        specular + diffuse + caustics
+    }
+}
+
+// =============================================================================
+// REGION: MULTI-LAYER MATERIALS
+// =============================================================================
+
+/// Material layer for multi-layer system
+pub struct MaterialLayer {
+    /// Layer type
+    pub layer_type: LayerType,
+
+    /// Layer thickness (for absorption)
+    pub thickness: f32,
+
+    /// Layer opacity/coverage
+    pub opacity: f32,
+
+    /// Layer BRDF parameters
+    pub brdf: LayerBRDF,
+}
+
+/// Layer types
+pub enum LayerType {
+    /// Diffuse substrate
+    Substrate,
+    /// Metallic base
+    Metal,
+    /// Dielectric coating
+    Coating,
+    /// Thin film interference
+    ThinFilm { thickness_nm: f32, ior: f32 },
+    /// Absorption layer
+    Absorption { color: Vec3 },
+}
+
+/// Layer BRDF (simplified parameters)
+pub struct LayerBRDF {
+    pub color: Vec3,
+    pub roughness: f32,
+    pub metallic: f32,
+    pub ior: f32,
+}
+
+/// Multi-layer material
+pub struct MultiLayerMaterial {
+    /// Bottom-to-top layer stack
+    pub layers: Vec<MaterialLayer>,
+
+    /// Normal map
+    pub normal_map: Option<Texture>,
+
+    /// Per-layer normal maps
+    pub layer_normals: Vec<Option<Texture>>,
+}
+
+impl MultiLayerMaterial {
+    /// Create new multi-layer material
+    pub fn new() -> Self {
+        Self {
+            layers: Vec::new(),
+            normal_map: None,
+            layer_normals: Vec::new(),
+        }
+    }
+
+    /// Add layer to stack
+    pub fn add_layer(&mut self, layer: MaterialLayer) {
+        self.layers.push(layer);
+        self.layer_normals.push(None);
+    }
+
+    /// Car paint preset (base + flakes + clear coat)
+    pub fn car_paint(base_color: Vec3, flake_color: Vec3, flake_density: f32) -> Self {
+        let mut mat = Self::new();
+
+        // Base coat
+        mat.add_layer(MaterialLayer {
+            layer_type: LayerType::Substrate,
+            thickness: 0.0,
+            opacity: 1.0,
+            brdf: LayerBRDF {
+                color: base_color,
+                roughness: 0.5,
+                metallic: 0.0,
+                ior: 1.5,
+            },
+        });
+
+        // Metallic flake layer
+        mat.add_layer(MaterialLayer {
+            layer_type: LayerType::Metal,
+            thickness: 0.01,
+            opacity: flake_density,
+            brdf: LayerBRDF {
+                color: flake_color,
+                roughness: 0.2,
+                metallic: 1.0,
+                ior: 1.5,
+            },
+        });
+
+        // Clear coat
+        mat.add_layer(MaterialLayer {
+            layer_type: LayerType::Coating,
+            thickness: 0.1,
+            opacity: 1.0,
+            brdf: LayerBRDF {
+                color: Vec3::splat(1.0),
+                roughness: 0.05,
+                metallic: 0.0,
+                ior: 1.5,
+            },
+        });
+
+        mat
+    }
+
+    /// Evaluate multi-layer material
+    pub fn evaluate(&self, n: Vec3, v: Vec3, l: Vec3) -> Vec3 {
+        if self.layers.is_empty() {
+            return Vec3::zero();
+        }
+
+        let h = (v + l).normalize();
+        let n_dot_l = n.dot(l).max(0.0);
+        let n_dot_v = n.dot(v).max(0.0001);
+        let l_dot_h = l.dot(h).max(0.0);
+
+        if n_dot_l <= 0.0 {
+            return Vec3::zero();
+        }
+
+        // Evaluate from top layer down
+        let mut result = Vec3::zero();
+        let mut transmittance = Vec3::splat(1.0);
+
+        for layer in self.layers.iter().rev() {
+            let layer_result = self.evaluate_layer(layer, n, v, l, h, n_dot_l, n_dot_v, l_dot_h);
+
+            // Add layer contribution attenuated by upper layers
+            result += layer_result * transmittance * layer.opacity;
+
+            // Update transmittance for next layer
+            match &layer.layer_type {
+                LayerType::Coating => {
+                    let f = Fresnel::schlick(l_dot_h, Vec3::splat(0.04));
+                    transmittance *= Vec3::splat(1.0) - f * layer.opacity;
+                }
+                LayerType::ThinFilm { .. } => {
+                    // Thin film has complex transmittance
+                    transmittance *= Vec3::splat(1.0 - layer.opacity * 0.5);
+                }
+                LayerType::Absorption { color } => {
+                    transmittance *= (-*color * layer.thickness).exp();
+                }
+                _ => {
+                    transmittance *= Vec3::splat(1.0 - layer.opacity);
+                }
+            }
+        }
+
+        result
+    }
+
+    /// Evaluate single layer
+    fn evaluate_layer(
+        &self,
+        layer: &MaterialLayer,
+        n: Vec3,
+        v: Vec3,
+        l: Vec3,
+        h: Vec3,
+        n_dot_l: f32,
+        n_dot_v: f32,
+        l_dot_h: f32,
+    ) -> Vec3 {
+        let n_dot_h = n.dot(h).max(0.0);
+
+        match &layer.layer_type {
+            LayerType::Substrate => {
+                // Diffuse + specular
+                let diffuse = layer.brdf.color * MaterialConstants::INV_PI * (1.0 - layer.brdf.metallic);
+
+                let f0 = MaterialUtils::compute_f0(layer.brdf.color, layer.brdf.metallic);
+                let d = NDF::GGX.evaluate(n_dot_h, layer.brdf.roughness);
+                let g = GeometryFunction::SmithGGXCorrelated.evaluate(n_dot_v, n_dot_l, layer.brdf.roughness);
+                let f = Fresnel::schlick(l_dot_h, f0);
+                let specular = f * d * g;
+
+                diffuse + specular
+            }
+
+            LayerType::Metal => {
+                // Pure specular
+                let f0 = layer.brdf.color;
+                let d = NDF::GGX.evaluate(n_dot_h, layer.brdf.roughness);
+                let g = GeometryFunction::SmithGGXCorrelated.evaluate(n_dot_v, n_dot_l, layer.brdf.roughness);
+                let f = Fresnel::schlick(l_dot_h, f0);
+
+                f * d * g
+            }
+
+            LayerType::Coating => {
+                // Clear coat specular
+                let f0 = MaterialUtils::ior_to_f0(layer.brdf.ior);
+                let d = NDF::GGX.evaluate(n_dot_h, layer.brdf.roughness);
+                let g = GeometryFunction::SmithGGXCorrelated.evaluate(n_dot_v, n_dot_l, layer.brdf.roughness);
+                let f = Fresnel::schlick(l_dot_h, Vec3::splat(f0));
+
+                f * d * g
+            }
+
+            LayerType::ThinFilm { thickness_nm, ior } => {
+                // Thin film interference colors
+                let wavelengths = [650.0, 550.0, 450.0]; // RGB
+                let mut color = Vec3::zero();
+
+                for (i, &wavelength) in wavelengths.iter().enumerate() {
+                    let f = Fresnel::thin_film(
+                        l_dot_h,
+                        *thickness_nm,
+                        *ior,
+                        0.04,
+                        wavelength,
+                    );
+                    color.set(i, f);
+                }
+
+                color * NDF::GGX.evaluate(n_dot_h, layer.brdf.roughness)
+            }
+
+            LayerType::Absorption { color } => {
+                // No BRDF, just absorption (handled in main loop)
+                Vec3::zero()
+            }
+        }
+    }
+}
+
+// =============================================================================
+// REGION: IRIDESCENCE
+// =============================================================================
+
+/// Iridescent material (soap bubbles, oil on water, beetle shells)
+pub struct IridescentMaterial {
+    /// Base material
+    pub base: DisneyMaterial,
+
+    /// Thin film thickness in nm
+    pub film_thickness: f32,
+
+    /// Film thickness variation
+    pub thickness_variation: f32,
+
+    /// Film IOR
+    pub film_ior: f32,
+
+    /// Iridescence intensity
+    pub intensity: f32,
+
+    /// Thickness noise texture
+    pub thickness_map: Option<Texture>,
+}
+
+impl IridescentMaterial {
+    /// Create soap bubble
+    pub fn soap_bubble() -> Self {
+        let mut base = DisneyMaterial::default();
+        base.transmission = 0.95;
+        base.roughness = 0.02;
+        base.ior = 1.33;
+
+        Self {
+            base,
+            film_thickness: 300.0,  // nm
+            thickness_variation: 200.0,
+            film_ior: 1.4,
+            intensity: 1.0,
+            thickness_map: None,
+        }
+    }
+
+    /// Create oil slick
+    pub fn oil_slick() -> Self {
+        let mut base = DisneyMaterial::default();
+        base.base_color = Vec3::new(0.02, 0.02, 0.02);
+        base.roughness = 0.1;
+
+        Self {
+            base,
+            film_thickness: 400.0,
+            thickness_variation: 300.0,
+            film_ior: 1.5,
+            intensity: 0.8,
+            thickness_map: None,
+        }
+    }
+
+    /// Create beetle shell
+    pub fn beetle_shell(base_color: Vec3) -> Self {
+        let mut base = DisneyMaterial::default();
+        base.base_color = base_color;
+        base.roughness = 0.3;
+        base.clearcoat = 0.5;
+
+        Self {
+            base,
+            film_thickness: 500.0,
+            thickness_variation: 100.0,
+            film_ior: 1.6,
+            intensity: 0.6,
+            thickness_map: None,
+        }
+    }
+
+    /// Compute iridescent color for given view angle and thickness
+    pub fn compute_iridescent_color(&self, cos_theta: f32, thickness: f32) -> Vec3 {
+        let wavelengths = [650.0, 550.0, 450.0]; // RGB wavelengths in nm
+        let mut color = Vec3::zero();
+
+        for (i, &wavelength) in wavelengths.iter().enumerate() {
+            let f = Fresnel::thin_film(
+                cos_theta,
+                thickness,
+                self.film_ior,
+                0.04,
+                wavelength,
+            );
+            color.set(i, f);
+        }
+
+        color * self.intensity
+    }
+
+    /// Evaluate iridescent material
+    pub fn evaluate(&self, n: Vec3, v: Vec3, l: Vec3, uv: Vec2, tangent: Vec3) -> Vec3 {
+        // Get thickness at this point
+        let thickness = if let Some(ref _map) = self.thickness_map {
+            // Sample thickness from texture
+            self.film_thickness // Placeholder
+        } else {
+            // Use uniform thickness
+            self.film_thickness
+        };
+
+        // Base material
+        let base_brdf = DisneyBRDF::evaluate(&self.base, n, v, l, tangent);
+
+        // Iridescent contribution
+        let h = (v + l).normalize();
+        let l_dot_h = l.dot(h).max(0.0);
+        let iridescence = self.compute_iridescent_color(l_dot_h, thickness);
+
+        // Blend based on viewing angle
+        let view_factor = 1.0 - n.dot(v).abs();
+        let blend = view_factor * self.intensity;
+
+        Vec3::lerp(base_brdf, base_brdf + iridescence, blend)
+    }
+}
+
+// =============================================================================
+// REGION: MATERIAL TEXTURES
+// =============================================================================
+
+/// Complete PBR texture set
+pub struct PBRTextureSet {
+    /// Albedo/base color texture
+    pub albedo: Option<Texture>,
+
+    /// Normal map
+    pub normal: Option<Texture>,
+
+    /// Roughness texture
+    pub roughness: Option<Texture>,
+
+    /// Metallic texture
+    pub metallic: Option<Texture>,
+
+    /// Ambient occlusion texture
+    pub ao: Option<Texture>,
+
+    /// Height/displacement map
+    pub height: Option<Texture>,
+
+    /// Emission texture
+    pub emission: Option<Texture>,
+
+    /// Combined ORM texture (Occlusion, Roughness, Metallic)
+    pub orm: Option<Texture>,
+
+    /// Detail normal map
+    pub detail_normal: Option<Texture>,
+
+    /// Detail albedo
+    pub detail_albedo: Option<Texture>,
+
+    /// Subsurface scattering radius map
+    pub sss_radius: Option<Texture>,
+
+    /// Thickness map (for SSS)
+    pub thickness: Option<Texture>,
+
+    /// Clear coat mask
+    pub clearcoat_mask: Option<Texture>,
+
+    /// Anisotropy direction map
+    pub anisotropy: Option<Texture>,
+}
+
+impl PBRTextureSet {
+    /// Create empty texture set
+    pub fn new() -> Self {
+        Self {
+            albedo: None,
+            normal: None,
+            roughness: None,
+            metallic: None,
+            ao: None,
+            height: None,
+            emission: None,
+            orm: None,
+            detail_normal: None,
+            detail_albedo: None,
+            sss_radius: None,
+            thickness: None,
+            clearcoat_mask: None,
+            anisotropy: None,
+        }
+    }
+
+    /// Sample all textures at UV
+    pub fn sample(&self, uv: Vec2) -> PBRSample {
+        PBRSample {
+            albedo: self.albedo.as_ref().map(|t| t.sample_bilinear(uv.x, uv.y).xyz())
+                .unwrap_or(Vec3::splat(1.0)),
+            normal: self.normal.as_ref().map(|t| {
+                let s = t.sample_bilinear(uv.x, uv.y).xyz();
+                Vec3::new(s.x * 2.0 - 1.0, s.y * 2.0 - 1.0, s.z * 2.0 - 1.0)
+            }).unwrap_or(Vec3::new(0.0, 0.0, 1.0)),
+            roughness: self.roughness.as_ref().map(|t| t.sample_bilinear(uv.x, uv.y).x)
+                .or_else(|| self.orm.as_ref().map(|t| t.sample_bilinear(uv.x, uv.y).y))
+                .unwrap_or(0.5),
+            metallic: self.metallic.as_ref().map(|t| t.sample_bilinear(uv.x, uv.y).x)
+                .or_else(|| self.orm.as_ref().map(|t| t.sample_bilinear(uv.x, uv.y).z))
+                .unwrap_or(0.0),
+            ao: self.ao.as_ref().map(|t| t.sample_bilinear(uv.x, uv.y).x)
+                .or_else(|| self.orm.as_ref().map(|t| t.sample_bilinear(uv.x, uv.y).x))
+                .unwrap_or(1.0),
+            emission: self.emission.as_ref().map(|t| t.sample_bilinear(uv.x, uv.y).xyz())
+                .unwrap_or(Vec3::zero()),
+        }
+    }
+}
+
+/// Sampled PBR values
+pub struct PBRSample {
+    pub albedo: Vec3,
+    pub normal: Vec3,
+    pub roughness: f32,
+    pub metallic: f32,
+    pub ao: f32,
+    pub emission: Vec3,
+}
+
+// =============================================================================
+// REGION: MATERIAL BLENDING
+// =============================================================================
+
+/// Material blending modes
+pub enum BlendMode {
+    /// Linear interpolation
+    Linear,
+    /// Height-based blending
+    HeightBased { contrast: f32 },
+    /// Overlay blending
+    Overlay,
+    /// Multiplicative
+    Multiply,
+    /// Additive
+    Add,
+}
+
+/// Blend two materials
+pub fn blend_materials(
+    a: &DisneyMaterial,
+    b: &DisneyMaterial,
+    factor: f32,
+    mode: BlendMode,
+) -> DisneyMaterial {
+    let t = factor.clamp(0.0, 1.0);
+
+    match mode {
+        BlendMode::Linear => {
+            DisneyMaterial {
+                base_color: Vec3::lerp(a.base_color, b.base_color, t),
+                metallic: a.metallic + (b.metallic - a.metallic) * t,
+                roughness: a.roughness + (b.roughness - a.roughness) * t,
+                specular: a.specular + (b.specular - a.specular) * t,
+                specular_tint: a.specular_tint + (b.specular_tint - a.specular_tint) * t,
+                anisotropic: a.anisotropic + (b.anisotropic - a.anisotropic) * t,
+                sheen: a.sheen + (b.sheen - a.sheen) * t,
+                sheen_tint: a.sheen_tint + (b.sheen_tint - a.sheen_tint) * t,
+                clearcoat: a.clearcoat + (b.clearcoat - a.clearcoat) * t,
+                clearcoat_gloss: a.clearcoat_gloss + (b.clearcoat_gloss - a.clearcoat_gloss) * t,
+                subsurface: a.subsurface + (b.subsurface - a.subsurface) * t,
+                transmission: a.transmission + (b.transmission - a.transmission) * t,
+                transmission_roughness: a.transmission_roughness + (b.transmission_roughness - a.transmission_roughness) * t,
+                ior: a.ior + (b.ior - a.ior) * t,
+                thin_film_thickness: a.thin_film_thickness + (b.thin_film_thickness - a.thin_film_thickness) * t,
+                thin_film_ior: a.thin_film_ior + (b.thin_film_ior - a.thin_film_ior) * t,
+                iridescence: a.iridescence + (b.iridescence - a.iridescence) * t,
+                emission: Vec3::lerp(a.emission, b.emission, t),
+                emission_intensity: a.emission_intensity + (b.emission_intensity - a.emission_intensity) * t,
+                alpha: a.alpha + (b.alpha - a.alpha) * t,
+                normal_strength: a.normal_strength + (b.normal_strength - a.normal_strength) * t,
+            }
+        }
+
+        BlendMode::HeightBased { contrast } => {
+            // Height-based blending with sharpening
+            let sharpened_t = ((t - 0.5) * contrast + 0.5).clamp(0.0, 1.0);
+            blend_materials(a, b, sharpened_t, BlendMode::Linear)
+        }
+
+        BlendMode::Overlay => {
+            // Photoshop-style overlay blend
+            fn overlay(base: f32, blend: f32) -> f32 {
+                if base < 0.5 {
+                    2.0 * base * blend
+                } else {
+                    1.0 - 2.0 * (1.0 - base) * (1.0 - blend)
+                }
+            }
+
+            let mut result = a.clone();
+            result.base_color = Vec3::new(
+                overlay(a.base_color.x, b.base_color.x),
+                overlay(a.base_color.y, b.base_color.y),
+                overlay(a.base_color.z, b.base_color.z),
+            );
+            result.roughness = overlay(a.roughness, b.roughness);
+            result
+        }
+
+        BlendMode::Multiply => {
+            let mut result = blend_materials(a, b, t, BlendMode::Linear);
+            result.base_color = a.base_color * b.base_color;
+            result
+        }
+
+        BlendMode::Add => {
+            let mut result = blend_materials(a, b, t, BlendMode::Linear);
+            result.base_color = (a.base_color + b.base_color * t).min(Vec3::splat(1.0));
+            result.emission = a.emission + b.emission * t;
+            result
+        }
+    }
+}
+
+impl DisneyMaterial {
+    fn clone(&self) -> Self {
+        Self {
+            base_color: self.base_color,
+            metallic: self.metallic,
+            roughness: self.roughness,
+            specular: self.specular,
+            specular_tint: self.specular_tint,
+            anisotropic: self.anisotropic,
+            sheen: self.sheen,
+            sheen_tint: self.sheen_tint,
+            clearcoat: self.clearcoat,
+            clearcoat_gloss: self.clearcoat_gloss,
+            subsurface: self.subsurface,
+            transmission: self.transmission,
+            transmission_roughness: self.transmission_roughness,
+            ior: self.ior,
+            thin_film_thickness: self.thin_film_thickness,
+            thin_film_ior: self.thin_film_ior,
+            iridescence: self.iridescence,
+            emission: self.emission,
+            emission_intensity: self.emission_intensity,
+            alpha: self.alpha,
+            normal_strength: self.normal_strength,
+        }
+    }
+}
+
+// =============================================================================
+// REGION: MATERIAL LIBRARY
+// =============================================================================
+
+/// Common material presets
+pub struct MaterialLibrary;
+
+impl MaterialLibrary {
+    /// Gold
+    pub fn gold() -> DisneyMaterial {
+        let mut mat = DisneyMaterial::default();
+        mat.base_color = Vec3::new(1.0, 0.766, 0.336);
+        mat.metallic = 1.0;
+        mat.roughness = 0.3;
+        mat
+    }
+
+    /// Silver
+    pub fn silver() -> DisneyMaterial {
+        let mut mat = DisneyMaterial::default();
+        mat.base_color = Vec3::new(0.972, 0.960, 0.915);
+        mat.metallic = 1.0;
+        mat.roughness = 0.2;
+        mat
+    }
+
+    /// Copper
+    pub fn copper() -> DisneyMaterial {
+        let mut mat = DisneyMaterial::default();
+        mat.base_color = Vec3::new(0.955, 0.638, 0.538);
+        mat.metallic = 1.0;
+        mat.roughness = 0.35;
+        mat
+    }
+
+    /// Iron
+    pub fn iron() -> DisneyMaterial {
+        let mut mat = DisneyMaterial::default();
+        mat.base_color = Vec3::new(0.562, 0.565, 0.578);
+        mat.metallic = 1.0;
+        mat.roughness = 0.5;
+        mat
+    }
+
+    /// Aluminum
+    pub fn aluminum() -> DisneyMaterial {
+        let mut mat = DisneyMaterial::default();
+        mat.base_color = Vec3::new(0.913, 0.922, 0.924);
+        mat.metallic = 1.0;
+        mat.roughness = 0.4;
+        mat
+    }
+
+    /// Plastic
+    pub fn plastic(color: Vec3) -> DisneyMaterial {
+        let mut mat = DisneyMaterial::default();
+        mat.base_color = color;
+        mat.metallic = 0.0;
+        mat.roughness = 0.4;
+        mat.specular = 0.5;
+        mat
+    }
+
+    /// Rubber
+    pub fn rubber(color: Vec3) -> DisneyMaterial {
+        let mut mat = DisneyMaterial::default();
+        mat.base_color = color;
+        mat.metallic = 0.0;
+        mat.roughness = 0.8;
+        mat.specular = 0.2;
+        mat
+    }
+
+    /// Glass
+    pub fn glass() -> DisneyMaterial {
+        DisneyMaterial::glass(Vec3::splat(1.0), 0.02, 1.52)
+    }
+
+    /// Tinted glass
+    pub fn tinted_glass(tint: Vec3) -> DisneyMaterial {
+        DisneyMaterial::glass(tint, 0.02, 1.52)
+    }
+
+    /// Diamond
+    pub fn diamond() -> DisneyMaterial {
+        let mut mat = DisneyMaterial::default();
+        mat.base_color = Vec3::splat(1.0);
+        mat.metallic = 0.0;
+        mat.roughness = 0.0;
+        mat.transmission = 1.0;
+        mat.ior = 2.417;
+        mat
+    }
+
+    /// Water
+    pub fn water() -> DisneyMaterial {
+        let mut mat = DisneyMaterial::default();
+        mat.base_color = Vec3::new(0.8, 0.9, 1.0);
+        mat.metallic = 0.0;
+        mat.roughness = 0.0;
+        mat.transmission = 0.95;
+        mat.ior = 1.333;
+        mat
+    }
+
+    /// Marble
+    pub fn marble() -> DisneyMaterial {
+        let mut mat = DisneyMaterial::default();
+        mat.base_color = Vec3::new(0.95, 0.95, 0.95);
+        mat.metallic = 0.0;
+        mat.roughness = 0.3;
+        mat.subsurface = 0.2;
+        mat
+    }
+
+    /// Wood
+    pub fn wood(color: Vec3) -> DisneyMaterial {
+        let mut mat = DisneyMaterial::default();
+        mat.base_color = color;
+        mat.metallic = 0.0;
+        mat.roughness = 0.6;
+        mat.clearcoat = 0.3;
+        mat.clearcoat_gloss = 0.5;
+        mat
+    }
+
+    /// Ceramic
+    pub fn ceramic(color: Vec3) -> DisneyMaterial {
+        let mut mat = DisneyMaterial::default();
+        mat.base_color = color;
+        mat.metallic = 0.0;
+        mat.roughness = 0.2;
+        mat.clearcoat = 0.8;
+        mat.clearcoat_gloss = 1.0;
+        mat
+    }
+
+    /// Concrete
+    pub fn concrete() -> DisneyMaterial {
+        let mut mat = DisneyMaterial::default();
+        mat.base_color = Vec3::new(0.5, 0.5, 0.5);
+        mat.metallic = 0.0;
+        mat.roughness = 0.9;
+        mat
+    }
+
+    /// Brick
+    pub fn brick() -> DisneyMaterial {
+        let mut mat = DisneyMaterial::default();
+        mat.base_color = Vec3::new(0.6, 0.25, 0.15);
+        mat.metallic = 0.0;
+        mat.roughness = 0.85;
+        mat
+    }
+
+    /// Asphalt
+    pub fn asphalt() -> DisneyMaterial {
+        let mut mat = DisneyMaterial::default();
+        mat.base_color = Vec3::new(0.15, 0.15, 0.15);
+        mat.metallic = 0.0;
+        mat.roughness = 0.95;
+        mat
+    }
+
+    /// Snow
+    pub fn snow() -> DisneyMaterial {
+        let mut mat = DisneyMaterial::default();
+        mat.base_color = Vec3::new(0.98, 0.98, 1.0);
+        mat.metallic = 0.0;
+        mat.roughness = 0.8;
+        mat.subsurface = 0.5;
+        mat
+    }
+
+    /// Sand
+    pub fn sand() -> DisneyMaterial {
+        let mut mat = DisneyMaterial::default();
+        mat.base_color = Vec3::new(0.76, 0.70, 0.50);
+        mat.metallic = 0.0;
+        mat.roughness = 0.9;
+        mat
+    }
+
+    /// Grass
+    pub fn grass() -> DisneyMaterial {
+        let mut mat = DisneyMaterial::default();
+        mat.base_color = Vec3::new(0.2, 0.4, 0.1);
+        mat.metallic = 0.0;
+        mat.roughness = 0.7;
+        mat.subsurface = 0.1;
+        mat
+    }
+
+    /// Wax
+    pub fn wax(color: Vec3) -> DisneyMaterial {
+        let mut mat = DisneyMaterial::default();
+        mat.base_color = color;
+        mat.metallic = 0.0;
+        mat.roughness = 0.3;
+        mat.subsurface = 0.8;
+        mat
+    }
+}
+
+// =============================================================================
+// REGION: GPU MATERIAL BUFFER
+// =============================================================================
+
+/// GPU-compatible material data
+#[repr(C)]
+pub struct GpuMaterialData {
+    pub base_color: [f32; 4],
+    pub emission: [f32; 4],
+    pub metallic_roughness_ao_alpha: [f32; 4],
+    pub specular_sheen_clearcoat_flags: [f32; 4],
+    pub subsurface_ior_transmission_aniso: [f32; 4],
+    pub texture_indices: [i32; 8],
+}
+
+impl GpuMaterialData {
+    /// Create from Disney material
+    pub fn from_disney(mat: &DisneyMaterial, texture_indices: [i32; 8]) -> Self {
+        Self {
+            base_color: [mat.base_color.x, mat.base_color.y, mat.base_color.z, 1.0],
+            emission: [mat.emission.x * mat.emission_intensity,
+                      mat.emission.y * mat.emission_intensity,
+                      mat.emission.z * mat.emission_intensity, 0.0],
+            metallic_roughness_ao_alpha: [mat.metallic, mat.roughness, 1.0, mat.alpha],
+            specular_sheen_clearcoat_flags: [mat.specular, mat.sheen, mat.clearcoat, 0.0],
+            subsurface_ior_transmission_aniso: [mat.subsurface, mat.ior, mat.transmission, mat.anisotropic],
+            texture_indices,
+        }
+    }
+}
+
+/// GPU material buffer
+pub struct MaterialBuffer {
+    /// GPU buffer
+    buffer: GpuBuffer,
+
+    /// Material data
+    materials: Vec<GpuMaterialData>,
+
+    /// Dirty flag
+    dirty: bool,
+
+    /// Max materials
+    capacity: usize,
+}
+
+impl MaterialBuffer {
+    /// Create new material buffer
+    pub fn new(capacity: usize) -> Self {
+        let buffer = GpuBuffer::new(
+            capacity * std::mem::size_of::<GpuMaterialData>(),
+            BufferUsage::Storage | BufferUsage::Uniform,
+        );
+
+        Self {
+            buffer,
+            materials: Vec::with_capacity(capacity),
+            dirty: false,
+            capacity,
+        }
+    }
+
+    /// Add material, returns index
+    pub fn add(&mut self, material: GpuMaterialData) -> usize {
+        let index = self.materials.len();
+        self.materials.push(material);
+        self.dirty = true;
+        index
+    }
+
+    /// Update material at index
+    pub fn update(&mut self, index: usize, material: GpuMaterialData) {
+        if index < self.materials.len() {
+            self.materials[index] = material;
+            self.dirty = true;
+        }
+    }
+
+    /// Upload to GPU
+    pub fn upload(&mut self) {
+        if self.dirty && !self.materials.is_empty() {
+            self.buffer.write(&self.materials);
+            self.dirty = false;
+        }
+    }
+
+    /// Get GPU buffer
+    pub fn gpu_buffer(&self) -> &GpuBuffer {
+        &self.buffer
+    }
+}
+
+// Buffer usage flags
+bitflags::bitflags! {
+    pub struct BufferUsage: u32 {
+        const Storage = 1;
+        const Uniform = 2;
+    }
+}
+
+// =============================================================================
+// REGION: SHADER GENERATION
+// =============================================================================
+
+/// Generate HLSL/GLSL code for material evaluation
+pub fn generate_material_shader() -> String {
+    r#"
+// Material evaluation shader code
+struct MaterialInput {
+    float3 base_color;
+    float metallic;
+    float roughness;
+    float3 normal;
+    float3 view;
+    float3 light;
+    float3 tangent;
+    float ao;
+    float3 emission;
+};
+
+float3 evaluate_material(MaterialInput input) {
+    float3 n = input.normal;
+    float3 v = input.view;
+    float3 l = input.light;
+    float3 h = normalize(v + l);
+
+    float n_dot_l = max(dot(n, l), 0.0001);
+    float n_dot_v = max(dot(n, v), 0.0001);
+    float n_dot_h = max(dot(n, h), 0.0001);
+    float l_dot_h = max(dot(l, h), 0.0001);
+
+    // Compute F0
+    float3 f0 = lerp(float3(0.04, 0.04, 0.04), input.base_color, input.metallic);
+
+    // Diffuse
+    float3 diffuse = input.base_color * (1.0 - input.metallic) * (1.0 / 3.14159);
+
+    // Specular D (GGX)
+    float alpha = input.roughness * input.roughness;
+    float alpha_sq = alpha * alpha;
+    float d_denom = n_dot_h * n_dot_h * (alpha_sq - 1.0) + 1.0;
+    float D = alpha_sq / (3.14159 * d_denom * d_denom);
+
+    // Specular G (Smith GGX correlated)
+    float ggx_v = n_dot_l * sqrt(n_dot_v * n_dot_v * (1.0 - alpha_sq) + alpha_sq);
+    float ggx_l = n_dot_v * sqrt(n_dot_l * n_dot_l * (1.0 - alpha_sq) + alpha_sq);
+    float G = 0.5 / max(ggx_v + ggx_l, 0.0001);
+
+    // Specular F (Schlick)
+    float3 F = f0 + (1.0 - f0) * pow(1.0 - l_dot_h, 5.0);
+
+    float3 specular = F * D * G;
+
+    return (diffuse + specular) * n_dot_l * input.ao + input.emission;
+}
+"#.to_string()
+}
+
+// =============================================================================
+// REGION: TESTS
+// =============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_roughness_conversion() {
+        assert!((MaterialUtils::roughness_to_alpha(0.5) - 0.25).abs() < 1e-6);
+        assert!((MaterialUtils::alpha_to_roughness(0.25) - 0.5).abs() < 1e-6);
+
+        // Round-trip
+        let r = 0.7;
+        let alpha = MaterialUtils::roughness_to_alpha(r);
+        let r2 = MaterialUtils::alpha_to_roughness(alpha);
+        assert!((r - r2).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_ior_f0_conversion() {
+        // Glass IOR ~1.5 should give F0 ~0.04
+        let f0 = MaterialUtils::ior_to_f0(1.5);
+        assert!((f0 - 0.04).abs() < 0.01);
+
+        // Round-trip
+        let ior = 1.45;
+        let f0 = MaterialUtils::ior_to_f0(ior);
+        let ior2 = MaterialUtils::f0_to_ior(f0);
+        assert!((ior - ior2).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_fresnel_schlick() {
+        let f0 = Vec3::splat(0.04);
+
+        // At normal incidence, F should equal F0
+        let f_normal = Fresnel::schlick(1.0, f0);
+        assert!((f_normal.x - f0.x).abs() < 1e-6);
+
+        // At grazing angle, F should approach 1
+        let f_grazing = Fresnel::schlick(0.0, f0);
+        assert!(f_grazing.x > 0.99);
+    }
+
+    #[test]
+    fn test_fresnel_dielectric() {
+        // At normal incidence with IOR 1.5
+        let f = Fresnel::dielectric(1.0, 1.5);
+        let expected = MaterialUtils::ior_to_f0(1.5);
+        assert!((f - expected).abs() < 0.01);
+
+        // Total internal reflection
+        let f_tir = Fresnel::dielectric(0.1, 0.5); // Going from dense to light
+        assert!((f_tir - 1.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_ndf_ggx() {
+        let ndf = NDF::GGX;
+
+        // At n_dot_h = 1 (perfect alignment), NDF should be maximum
+        let d_aligned = ndf.evaluate(1.0, 0.5);
+        let d_45deg = ndf.evaluate(0.707, 0.5);
+
+        assert!(d_aligned > d_45deg);
+        assert!(d_aligned > 0.0);
+    }
+
+    #[test]
+    fn test_ndf_roughness_effect() {
+        let ndf = NDF::GGX;
+
+        // Smoother surfaces have sharper peaks
+        let d_smooth = ndf.evaluate(1.0, 0.1);
+        let d_rough = ndf.evaluate(1.0, 0.9);
+
+        assert!(d_smooth > d_rough);
+    }
+
+    #[test]
+    fn test_geometry_function() {
+        let g = GeometryFunction::SmithGGX;
+
+        // At normal incidence (n_dot_v = n_dot_l = 1), G should be near 1
+        let g_normal = g.evaluate(1.0, 1.0, 0.5);
+        assert!(g_normal > 0.9);
+
+        // At grazing angles, G should decrease
+        let g_grazing = g.evaluate(0.1, 0.1, 0.5);
+        assert!(g_grazing < g_normal);
+    }
+
+    #[test]
+    fn test_disney_material_default() {
+        let mat = DisneyMaterial::default();
+
+        assert!((mat.metallic - 0.0).abs() < 1e-6);
+        assert!((mat.roughness - 0.5).abs() < 1e-6);
+        assert!((mat.alpha - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_disney_material_presets() {
+        let metal = DisneyMaterial::metal(Vec3::splat(0.8), 0.3);
+        assert!((metal.metallic - 1.0).abs() < 1e-6);
+
+        let dielectric = DisneyMaterial::dielectric(Vec3::splat(0.5), 0.4);
+        assert!((dielectric.metallic - 0.0).abs() < 1e-6);
+
+        let glass = DisneyMaterial::glass(Vec3::splat(1.0), 0.1, 1.5);
+        assert!((glass.transmission - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_disney_brdf_energy_conservation() {
+        let mat = DisneyMaterial::default();
+        let n = Vec3::new(0.0, 1.0, 0.0);
+        let v = Vec3::new(0.0, 1.0, 0.0);
+        let l = Vec3::new(0.0, 1.0, 0.0);
+        let t = Vec3::new(1.0, 0.0, 0.0);
+
+        let brdf = DisneyBRDF::evaluate(&mat, n, v, l, t);
+
+        // BRDF should be positive
+        assert!(brdf.x >= 0.0);
+        assert!(brdf.y >= 0.0);
+        assert!(brdf.z >= 0.0);
+    }
+
+    #[test]
+    fn test_hair_brdf_colors() {
+        let brown = HairBRDF::brown_hair();
+        let blonde = HairBRDF::blonde_hair();
+        let black = HairBRDF::black_hair();
+
+        // Brown has more melanin than blonde
+        assert!(brown.melanin > blonde.melanin);
+        // Black has most melanin
+        assert!(black.melanin > brown.melanin);
+    }
+
+    #[test]
+    fn test_hair_absorption() {
+        let brown = HairBRDF::brown_hair();
+        let absorption = brown.compute_absorption();
+
+        // Absorption should be positive
+        assert!(absorption.x > 0.0);
+        assert!(absorption.y > 0.0);
+        assert!(absorption.z > 0.0);
+    }
+
+    #[test]
+    fn test_cloth_presets() {
+        let cotton = ClothBRDF::cotton(Vec3::splat(0.8));
+        let velvet = ClothBRDF::velvet(Vec3::new(0.2, 0.0, 0.1));
+        let silk = ClothBRDF::silk(Vec3::splat(0.9));
+
+        // Velvet has more sheen
+        assert!(velvet.sheen > cotton.sheen);
+        // Silk has anisotropy
+        assert!(silk.anisotropy > 0.0);
+    }
+
+    #[test]
+    fn test_skin_presets() {
+        let caucasian = SkinBRDF::caucasian();
+        let asian = SkinBRDF::asian();
+        let african = SkinBRDF::african();
+
+        // Melanin increases from caucasian to african
+        assert!(caucasian.melanin < asian.melanin);
+        assert!(asian.melanin < african.melanin);
+    }
+
+    #[test]
+    fn test_eye_colors() {
+        let blue = EyeBRDF::blue_eye();
+        let brown = EyeBRDF::brown_eye();
+
+        // Blue eye has higher blue component
+        assert!(blue.iris_color.z > blue.iris_color.x);
+        // Brown eye has higher red component
+        assert!(brown.iris_color.x > brown.iris_color.z);
+    }
+
+    #[test]
+    fn test_multi_layer_material() {
+        let car_paint = MultiLayerMaterial::car_paint(
+            Vec3::new(0.8, 0.0, 0.0),
+            Vec3::new(1.0, 1.0, 1.0),
+            0.3,
+        );
+
+        // Should have 3 layers (base, flakes, clearcoat)
+        assert_eq!(car_paint.layers.len(), 3);
+    }
+
+    #[test]
+    fn test_iridescent_material() {
+        let bubble = IridescentMaterial::soap_bubble();
+        let oil = IridescentMaterial::oil_slick();
+
+        // Both should have thin film effects
+        assert!(bubble.film_thickness > 0.0);
+        assert!(oil.film_thickness > 0.0);
+    }
+
+    #[test]
+    fn test_iridescent_color_variation() {
+        let bubble = IridescentMaterial::soap_bubble();
+
+        // Color should change with viewing angle
+        let color_normal = bubble.compute_iridescent_color(1.0, bubble.film_thickness);
+        let color_grazing = bubble.compute_iridescent_color(0.3, bubble.film_thickness);
+
+        // Colors should be different
+        assert!((color_normal.x - color_grazing.x).abs() > 0.01 ||
+                (color_normal.y - color_grazing.y).abs() > 0.01 ||
+                (color_normal.z - color_grazing.z).abs() > 0.01);
+    }
+
+    #[test]
+    fn test_material_library() {
+        let gold = MaterialLibrary::gold();
+        assert!((gold.metallic - 1.0).abs() < 1e-6);
+
+        let plastic = MaterialLibrary::plastic(Vec3::splat(0.5));
+        assert!((plastic.metallic - 0.0).abs() < 1e-6);
+
+        let glass = MaterialLibrary::glass();
+        assert!(glass.transmission > 0.9);
+    }
+
+    #[test]
+    fn test_material_blending() {
+        let a = MaterialLibrary::gold();
+        let b = MaterialLibrary::silver();
+
+        let blended = blend_materials(&a, &b, 0.5, BlendMode::Linear);
+
+        // Blended color should be between gold and silver
+        assert!(blended.base_color.x < a.base_color.x);
+        assert!(blended.base_color.x > b.base_color.x);
+    }
+
+    #[test]
+    fn test_pbr_texture_set() {
+        let textures = PBRTextureSet::new();
+
+        // All textures should be None by default
+        assert!(textures.albedo.is_none());
+        assert!(textures.normal.is_none());
+        assert!(textures.roughness.is_none());
+    }
+
+    #[test]
+    fn test_gpu_material_data() {
+        let mat = MaterialLibrary::gold();
+        let gpu_data = GpuMaterialData::from_disney(&mat, [-1; 8]);
+
+        assert!((gpu_data.metallic_roughness_ao_alpha[0] - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_material_buffer() {
+        let mut buffer = MaterialBuffer::new(100);
+
+        let mat = MaterialLibrary::copper();
+        let gpu_data = GpuMaterialData::from_disney(&mat, [-1; 8]);
+
+        let index = buffer.add(gpu_data);
+        assert_eq!(index, 0);
+
+        let index2 = buffer.add(GpuMaterialData::from_disney(&MaterialLibrary::iron(), [-1; 8]));
+        assert_eq!(index2, 1);
+    }
+
+    #[test]
+    fn test_shader_generation() {
+        let shader = generate_material_shader();
+
+        // Shader should contain key functions
+        assert!(shader.contains("evaluate_material"));
+        assert!(shader.contains("MaterialInput"));
+    }
+}

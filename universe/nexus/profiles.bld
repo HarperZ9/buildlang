@@ -1,0 +1,1254 @@
+// ============================================================================
+// BUILD-UNIVERSE: NEXUS MOD PROFILES
+// Mod profile management for different configurations and presets
+// ============================================================================
+
+import nexus::lib::{ModMetadata, Version};
+import nexus::config::ModConfig;
+import nexus::loader::LoadState;
+
+// ============================================================================
+// REGION: Profile Types
+// ============================================================================
+
+/// Profile management errors
+@derive(Debug, Clone)]
+enum ProfileError {
+    /// Profile not found
+    NotFound { name: String },
+    /// Profile already exists
+    AlreadyExists { name: String },
+    /// Invalid profile name
+    InvalidName { reason: String },
+    /// Profile is read-only
+    ReadOnly { name: String },
+    /// Profile is locked
+    Locked { name: String },
+    /// Import/export error
+    IoError { operation: String, reason: String },
+    /// Validation error
+    ValidationError { reason: String },
+    /// Profile in use
+    InUse { name: String },
+    /// Generic error
+    Other { message: String },
+}
+
+impl ProfileError {
+    fn to_string(&self) -> String {
+        match self {
+            ProfileError::NotFound { name } =>
+                format!("Profile '{}' not found", name),
+            ProfileError::AlreadyExists { name } =>
+                format!("Profile '{}' already exists", name),
+            ProfileError::InvalidName { reason } =>
+                format!("Invalid profile name: {}", reason),
+            ProfileError::ReadOnly { name } =>
+                format!("Profile '{}' is read-only", name),
+            ProfileError::Locked { name } =>
+                format!("Profile '{}' is locked", name),
+            ProfileError::IoError { operation, reason } =>
+                format!("IO error during {}: {}", operation, reason),
+            ProfileError::ValidationError { reason } =>
+                format!("Validation error: {}", reason),
+            ProfileError::InUse { name } =>
+                format!("Profile '{}' is currently in use", name),
+            ProfileError::Other { message } =>
+                message.clone(),
+        }
+    }
+}
+
+/// Profile visibility/type
+@derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProfileType {
+    /// User-created profile
+    User,
+    /// System/default profile
+    System,
+    /// Temporary profile (not saved)
+    Temporary,
+    /// Shared profile (read from repository)
+    Shared,
+    /// Imported profile
+    Imported,
+}
+
+impl ProfileType {
+    fn is_editable(&self) -> bool {
+        match self {
+            ProfileType::User | ProfileType::Temporary => true,
+            _ => false,
+        }
+    }
+
+    fn is_persistent(&self) -> bool {
+        match self {
+            ProfileType::Temporary => false,
+            _ => true,
+        }
+    }
+}
+
+// ============================================================================
+// REGION: Mod Entry
+// ============================================================================
+
+/// Entry for a mod in a profile
+@derive(Debug, Clone)]
+struct ProfileModEntry {
+    /// Mod ID
+    mod_id: String,
+    /// Enabled state
+    enabled: bool,
+    /// Version constraint (if any)
+    version: Option<String>,
+    /// Load order priority
+    priority: i32,
+    /// Per-mod config overrides
+    config_overrides: HashMap<String, ConfigValue>,
+    /// Notes/comments
+    notes: Option<String>,
+    /// Tags for organization
+    tags: Vec<String>,
+}
+
+impl ProfileModEntry {
+    fn new(mod_id: &str) -> Self {
+        ProfileModEntry {
+            mod_id: mod_id.to_string(),
+            enabled: true,
+            version: None,
+            priority: 0,
+            config_overrides: HashMap::new(),
+            notes: None,
+            tags: Vec::new(),
+        }
+    }
+
+    fn disabled(mod_id: &str) -> Self {
+        ProfileModEntry {
+            mod_id: mod_id.to_string(),
+            enabled: false,
+            version: None,
+            priority: 0,
+            config_overrides: HashMap::new(),
+            notes: None,
+            tags: Vec::new(),
+        }
+    }
+
+    fn with_version(mut self, version: &str) -> Self {
+        self.version = Some(version.to_string());
+        self
+    }
+
+    fn with_priority(mut self, priority: i32) -> Self {
+        self.priority = priority;
+        self
+    }
+
+    fn with_config(mut self, key: &str, value: ConfigValue) -> Self {
+        self.config_overrides.insert(key.to_string(), value);
+        self
+    }
+
+    fn with_tag(mut self, tag: &str) -> Self {
+        self.tags.push(tag.to_string());
+        self
+    }
+}
+
+// ============================================================================
+// REGION: Profile
+// ============================================================================
+
+/// Mod profile containing a set of mods and their configurations
+@derive(Debug, Clone)]
+struct Profile {
+    /// Unique profile ID
+    id: String,
+    /// Display name
+    name: String,
+    /// Description
+    description: String,
+    /// Profile type
+    profile_type: ProfileType,
+    /// Author (for shared profiles)
+    author: Option<String>,
+    /// Creation timestamp
+    created_at: u64,
+    /// Last modified timestamp
+    modified_at: u64,
+    /// Profile version
+    version: u32,
+    /// Icon/thumbnail path
+    icon: Option<String>,
+    /// Mods in this profile
+    mods: Vec<ProfileModEntry>,
+    /// Global settings
+    settings: HashMap<String, ConfigValue>,
+    /// Tags for organization
+    tags: Vec<String>,
+    /// Parent profile (for inheritance)
+    parent: Option<String>,
+    /// Game version compatibility
+    game_version: Option<String>,
+    /// Read-only flag
+    read_only: bool,
+    /// Locked by another process
+    locked: bool,
+    /// Custom metadata
+    metadata: HashMap<String, String>,
+}
+
+impl Profile {
+    fn new(id: &str, name: &str) -> Self {
+        let now = current_time_ms();
+        Profile {
+            id: id.to_string(),
+            name: name.to_string(),
+            description: String::new(),
+            profile_type: ProfileType::User,
+            author: None,
+            created_at: now,
+            modified_at: now,
+            version: 1,
+            icon: None,
+            mods: Vec::new(),
+            settings: HashMap::new(),
+            tags: Vec::new(),
+            parent: None,
+            game_version: None,
+            read_only: false,
+            locked: false,
+            metadata: HashMap::new(),
+        }
+    }
+
+    fn default_profile() -> Self {
+        let mut profile = Profile::new("default", "Default");
+        profile.description = "Default mod profile".to_string();
+        profile.profile_type = ProfileType::System;
+        profile.read_only = true;
+        profile
+    }
+
+    fn with_description(mut self, description: &str) -> Self {
+        self.description = description.to_string();
+        self
+    }
+
+    fn with_author(mut self, author: &str) -> Self {
+        self.author = Some(author.to_string());
+        self
+    }
+
+    fn with_game_version(mut self, version: &str) -> Self {
+        self.game_version = Some(version.to_string());
+        self
+    }
+
+    fn with_parent(mut self, parent: &str) -> Self {
+        self.parent = Some(parent.to_string());
+        self
+    }
+
+    fn add_mod(&mut self, entry: ProfileModEntry) {
+        // Remove existing entry if present
+        self.mods.retain(|m| m.mod_id != entry.mod_id);
+        self.mods.push(entry);
+        self.touch();
+    }
+
+    fn remove_mod(&mut self, mod_id: &str) -> Option<ProfileModEntry> {
+        let pos = self.mods.iter().position(|m| m.mod_id == mod_id)?;
+        let entry = self.mods.remove(pos);
+        self.touch();
+        Some(entry)
+    }
+
+    fn get_mod(&self, mod_id: &str) -> Option<&ProfileModEntry> {
+        self.mods.iter().find(|m| m.mod_id == mod_id)
+    }
+
+    fn get_mod_mut(&mut self, mod_id: &str) -> Option<&mut ProfileModEntry> {
+        self.mods.iter_mut().find(|m| m.mod_id == mod_id)
+    }
+
+    fn is_mod_enabled(&self, mod_id: &str) -> bool {
+        self.mods.iter()
+            .find(|m| m.mod_id == mod_id)
+            .map(|m| m.enabled)
+            .unwrap_or(false)
+    }
+
+    fn enable_mod(&mut self, mod_id: &str) {
+        if let Some(entry) = self.get_mod_mut(mod_id) {
+            entry.enabled = true;
+            self.touch();
+        }
+    }
+
+    fn disable_mod(&mut self, mod_id: &str) {
+        if let Some(entry) = self.get_mod_mut(mod_id) {
+            entry.enabled = false;
+            self.touch();
+        }
+    }
+
+    fn toggle_mod(&mut self, mod_id: &str) -> bool {
+        if let Some(entry) = self.get_mod_mut(mod_id) {
+            entry.enabled = !entry.enabled;
+            self.touch();
+            entry.enabled
+        } else {
+            false
+        }
+    }
+
+    fn enabled_mods(&self) -> Vec<&ProfileModEntry> {
+        self.mods.iter().filter(|m| m.enabled).collect()
+    }
+
+    fn disabled_mods(&self) -> Vec<&ProfileModEntry> {
+        self.mods.iter().filter(|m| !m.enabled).collect()
+    }
+
+    fn mods_by_tag(&self, tag: &str) -> Vec<&ProfileModEntry> {
+        self.mods.iter()
+            .filter(|m| m.tags.contains(&tag.to_string()))
+            .collect()
+    }
+
+    fn sorted_mods(&self) -> Vec<&ProfileModEntry> {
+        let mut mods: Vec<_> = self.mods.iter().collect();
+        mods.sort_by(|a, b| b.priority.cmp(&a.priority));
+        mods
+    }
+
+    fn set_setting(&mut self, key: &str, value: ConfigValue) {
+        self.settings.insert(key.to_string(), value);
+        self.touch();
+    }
+
+    fn get_setting(&self, key: &str) -> Option<&ConfigValue> {
+        self.settings.get(key)
+    }
+
+    fn remove_setting(&mut self, key: &str) -> Option<ConfigValue> {
+        let value = self.settings.remove(key);
+        if value.is_some() {
+            self.touch();
+        }
+        value
+    }
+
+    fn touch(&mut self) {
+        self.modified_at = current_time_ms();
+        self.version += 1;
+    }
+
+    fn is_editable(&self) -> bool {
+        !self.read_only && !self.locked && self.profile_type.is_editable()
+    }
+
+    fn mod_count(&self) -> usize {
+        self.mods.len()
+    }
+
+    fn enabled_count(&self) -> usize {
+        self.mods.iter().filter(|m| m.enabled).count()
+    }
+
+    fn validate(&self) -> Result<(), ProfileError> {
+        // Validate profile name
+        if self.name.is_empty() {
+            return Err(ProfileError::InvalidName {
+                reason: "Name cannot be empty".to_string(),
+            });
+        }
+
+        if self.name.len() > 64 {
+            return Err(ProfileError::InvalidName {
+                reason: "Name too long (max 64 characters)".to_string(),
+            });
+        }
+
+        // Check for invalid characters
+        let invalid_chars = ['/', '\\', '<', '>', ':', '"', '|', '?', '*'];
+        if self.name.chars().any(|c| invalid_chars.contains(&c)) {
+            return Err(ProfileError::InvalidName {
+                reason: "Name contains invalid characters".to_string(),
+            });
+        }
+
+        Ok(())
+    }
+
+    fn clone_as(&self, new_id: &str, new_name: &str) -> Self {
+        let now = current_time_ms();
+        Profile {
+            id: new_id.to_string(),
+            name: new_name.to_string(),
+            description: self.description.clone(),
+            profile_type: ProfileType::User,
+            author: None,
+            created_at: now,
+            modified_at: now,
+            version: 1,
+            icon: self.icon.clone(),
+            mods: self.mods.clone(),
+            settings: self.settings.clone(),
+            tags: self.tags.clone(),
+            parent: Some(self.id.clone()),
+            game_version: self.game_version.clone(),
+            read_only: false,
+            locked: false,
+            metadata: HashMap::new(),
+        }
+    }
+
+    fn merge_from(&mut self, other: &Profile, overwrite: bool) {
+        for other_mod in &other.mods {
+            if let Some(existing) = self.get_mod_mut(&other_mod.mod_id) {
+                if overwrite {
+                    *existing = other_mod.clone();
+                }
+            } else {
+                self.mods.push(other_mod.clone());
+            }
+        }
+
+        for (key, value) in &other.settings {
+            if overwrite || !self.settings.contains_key(key) {
+                self.settings.insert(key.clone(), value.clone());
+            }
+        }
+
+        self.touch();
+    }
+
+    fn diff(&self, other: &Profile) -> ProfileDiff {
+        let mut diff = ProfileDiff::new();
+
+        // Find added/removed/changed mods
+        for my_mod in &self.mods {
+            if let Some(other_mod) = other.get_mod(&my_mod.mod_id) {
+                if my_mod.enabled != other_mod.enabled ||
+                   my_mod.priority != other_mod.priority ||
+                   my_mod.config_overrides != other_mod.config_overrides {
+                    diff.changed_mods.push(my_mod.mod_id.clone());
+                }
+            } else {
+                diff.added_mods.push(my_mod.mod_id.clone());
+            }
+        }
+
+        for other_mod in &other.mods {
+            if self.get_mod(&other_mod.mod_id).is_none() {
+                diff.removed_mods.push(other_mod.mod_id.clone());
+            }
+        }
+
+        // Find changed settings
+        for (key, value) in &self.settings {
+            if other.settings.get(key) != Some(value) {
+                diff.changed_settings.push(key.clone());
+            }
+        }
+
+        for key in other.settings.keys() {
+            if !self.settings.contains_key(key) {
+                diff.removed_settings.push(key.clone());
+            }
+        }
+
+        diff
+    }
+}
+
+/// Difference between two profiles
+@derive(Debug, Clone)]
+struct ProfileDiff {
+    added_mods: Vec<String>,
+    removed_mods: Vec<String>,
+    changed_mods: Vec<String>,
+    changed_settings: Vec<String>,
+    removed_settings: Vec<String>,
+}
+
+impl ProfileDiff {
+    fn new() -> Self {
+        ProfileDiff {
+            added_mods: Vec::new(),
+            removed_mods: Vec::new(),
+            changed_mods: Vec::new(),
+            changed_settings: Vec::new(),
+            removed_settings: Vec::new(),
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.added_mods.is_empty() &&
+        self.removed_mods.is_empty() &&
+        self.changed_mods.is_empty() &&
+        self.changed_settings.is_empty() &&
+        self.removed_settings.is_empty()
+    }
+
+    fn summary(&self) -> String {
+        let mut parts = Vec::new();
+
+        if !self.added_mods.is_empty() {
+            parts.push(format!("+{} mods", self.added_mods.len()));
+        }
+        if !self.removed_mods.is_empty() {
+            parts.push(format!("-{} mods", self.removed_mods.len()));
+        }
+        if !self.changed_mods.is_empty() {
+            parts.push(format!("~{} mods", self.changed_mods.len()));
+        }
+        if !self.changed_settings.is_empty() || !self.removed_settings.is_empty() {
+            let count = self.changed_settings.len() + self.removed_settings.len();
+            parts.push(format!("{} settings", count));
+        }
+
+        if parts.is_empty() {
+            "No changes".to_string()
+        } else {
+            parts.join(", ")
+        }
+    }
+}
+
+// ============================================================================
+// REGION: Profile Manager
+// ============================================================================
+
+/// Manager for profile operations
+@derive(Debug)]
+struct ProfileManager {
+    /// All profiles
+    profiles: HashMap<String, Profile>,
+    /// Currently active profile
+    active_profile: Option<String>,
+    /// Profile storage path
+    storage_path: String,
+    /// Autosave enabled
+    autosave: bool,
+    /// Profile change listeners
+    listeners: Vec<Box<dyn Fn(ProfileEvent)>>,
+}
+
+/// Profile events for listeners
+@derive(Debug, Clone)]
+enum ProfileEvent {
+    Created { profile_id: String },
+    Deleted { profile_id: String },
+    Modified { profile_id: String },
+    Activated { profile_id: String },
+    Deactivated { profile_id: String },
+    Imported { profile_id: String },
+    Exported { profile_id: String },
+}
+
+impl ProfileManager {
+    fn new(storage_path: &str) -> Self {
+        let mut manager = ProfileManager {
+            profiles: HashMap::new(),
+            active_profile: None,
+            storage_path: storage_path.to_string(),
+            autosave: true,
+            listeners: Vec::new(),
+        };
+
+        // Create default profile
+        manager.profiles.insert("default".to_string(), Profile::default_profile());
+
+        manager
+    }
+
+    fn load_profiles(&mut self) -> Result<(), ProfileError> {
+        // Load profiles from storage
+        let files = list_files(&self.storage_path, "*.profile.json")?;
+
+        for file in files {
+            if let Ok(profile) = self.load_profile_from_file(&file) {
+                self.profiles.insert(profile.id.clone(), profile);
+            }
+        }
+
+        Ok(())
+    }
+
+    fn load_profile_from_file(&self, path: &str) -> Result<Profile, ProfileError> {
+        let content = read_file(path).map_err(|e| ProfileError::IoError {
+            operation: "read".to_string(),
+            reason: e,
+        })?;
+
+        deserialize_profile(&content)
+    }
+
+    fn save_profiles(&self) -> Result<(), ProfileError> {
+        ensure_directory(&self.storage_path)?;
+
+        for (id, profile) in &self.profiles {
+            if profile.profile_type.is_persistent() && !profile.read_only {
+                self.save_profile_to_file(profile)?;
+            }
+        }
+
+        Ok(())
+    }
+
+    fn save_profile_to_file(&self, profile: &Profile) -> Result<(), ProfileError> {
+        let path = format!("{}/{}.profile.json", self.storage_path, profile.id);
+        let content = serialize_profile(profile)?;
+
+        write_file(&path, &content).map_err(|e| ProfileError::IoError {
+            operation: "write".to_string(),
+            reason: e,
+        })
+    }
+
+    fn add_listener<F: Fn(ProfileEvent) + 'static>(&mut self, listener: F) {
+        self.listeners.push(Box::new(listener));
+    }
+
+    fn emit_event(&self, event: ProfileEvent) {
+        for listener in &self.listeners {
+            listener(event.clone());
+        }
+    }
+
+    fn create(&mut self, id: &str, name: &str) -> Result<&Profile, ProfileError> {
+        if self.profiles.contains_key(id) {
+            return Err(ProfileError::AlreadyExists { name: id.to_string() });
+        }
+
+        let profile = Profile::new(id, name);
+        profile.validate()?;
+
+        self.profiles.insert(id.to_string(), profile);
+        self.emit_event(ProfileEvent::Created { profile_id: id.to_string() });
+
+        if self.autosave {
+            self.save_profile_to_file(self.profiles.get(id).unwrap())?;
+        }
+
+        Ok(self.profiles.get(id).unwrap())
+    }
+
+    fn create_from(&mut self, source_id: &str, new_id: &str, new_name: &str) -> Result<&Profile, ProfileError> {
+        let source = self.profiles.get(source_id)
+            .ok_or(ProfileError::NotFound { name: source_id.to_string() })?
+            .clone();
+
+        if self.profiles.contains_key(new_id) {
+            return Err(ProfileError::AlreadyExists { name: new_id.to_string() });
+        }
+
+        let new_profile = source.clone_as(new_id, new_name);
+        new_profile.validate()?;
+
+        self.profiles.insert(new_id.to_string(), new_profile);
+        self.emit_event(ProfileEvent::Created { profile_id: new_id.to_string() });
+
+        if self.autosave {
+            self.save_profile_to_file(self.profiles.get(new_id).unwrap())?;
+        }
+
+        Ok(self.profiles.get(new_id).unwrap())
+    }
+
+    fn delete(&mut self, id: &str) -> Result<Profile, ProfileError> {
+        if id == "default" {
+            return Err(ProfileError::ReadOnly { name: id.to_string() });
+        }
+
+        if self.active_profile.as_deref() == Some(id) {
+            return Err(ProfileError::InUse { name: id.to_string() });
+        }
+
+        let profile = self.profiles.remove(id)
+            .ok_or(ProfileError::NotFound { name: id.to_string() })?;
+
+        // Delete file
+        let path = format!("{}/{}.profile.json", self.storage_path, id);
+        let _ = delete_file(&path);
+
+        self.emit_event(ProfileEvent::Deleted { profile_id: id.to_string() });
+
+        Ok(profile)
+    }
+
+    fn rename(&mut self, id: &str, new_name: &str) -> Result<(), ProfileError> {
+        let profile = self.profiles.get_mut(id)
+            .ok_or(ProfileError::NotFound { name: id.to_string() })?;
+
+        if !profile.is_editable() {
+            return Err(ProfileError::ReadOnly { name: id.to_string() });
+        }
+
+        profile.name = new_name.to_string();
+        profile.touch();
+
+        if self.autosave {
+            self.save_profile_to_file(profile)?;
+        }
+
+        self.emit_event(ProfileEvent::Modified { profile_id: id.to_string() });
+
+        Ok(())
+    }
+
+    fn get(&self, id: &str) -> Option<&Profile> {
+        self.profiles.get(id)
+    }
+
+    fn get_mut(&mut self, id: &str) -> Option<&mut Profile> {
+        self.profiles.get_mut(id)
+    }
+
+    fn list(&self) -> Vec<&Profile> {
+        self.profiles.values().collect()
+    }
+
+    fn list_by_type(&self, profile_type: ProfileType) -> Vec<&Profile> {
+        self.profiles.values()
+            .filter(|p| p.profile_type == profile_type)
+            .collect()
+    }
+
+    fn activate(&mut self, id: &str) -> Result<(), ProfileError> {
+        if !self.profiles.contains_key(id) {
+            return Err(ProfileError::NotFound { name: id.to_string() });
+        }
+
+        if let Some(ref old_id) = self.active_profile {
+            self.emit_event(ProfileEvent::Deactivated { profile_id: old_id.clone() });
+        }
+
+        self.active_profile = Some(id.to_string());
+        self.emit_event(ProfileEvent::Activated { profile_id: id.to_string() });
+
+        Ok(())
+    }
+
+    fn active(&self) -> Option<&Profile> {
+        self.active_profile.as_ref().and_then(|id| self.profiles.get(id))
+    }
+
+    fn active_mut(&mut self) -> Option<&mut Profile> {
+        if let Some(ref id) = self.active_profile {
+            self.profiles.get_mut(id)
+        } else {
+            None
+        }
+    }
+
+    fn active_id(&self) -> Option<&str> {
+        self.active_profile.as_deref()
+    }
+
+    fn export(&self, id: &str, path: &str) -> Result<(), ProfileError> {
+        let profile = self.profiles.get(id)
+            .ok_or(ProfileError::NotFound { name: id.to_string() })?;
+
+        let content = serialize_profile(profile)?;
+        write_file(path, &content).map_err(|e| ProfileError::IoError {
+            operation: "export".to_string(),
+            reason: e,
+        })?;
+
+        self.emit_event(ProfileEvent::Exported { profile_id: id.to_string() });
+
+        Ok(())
+    }
+
+    fn import(&mut self, path: &str) -> Result<String, ProfileError> {
+        let content = read_file(path).map_err(|e| ProfileError::IoError {
+            operation: "import".to_string(),
+            reason: e,
+        })?;
+
+        let mut profile = deserialize_profile(&content)?;
+
+        // Generate new ID if conflict
+        let original_id = profile.id.clone();
+        let mut id = original_id.clone();
+        let mut counter = 1;
+        while self.profiles.contains_key(&id) {
+            id = format!("{}_{}", original_id, counter);
+            counter += 1;
+        }
+        profile.id = id.clone();
+        profile.profile_type = ProfileType::Imported;
+        profile.created_at = current_time_ms();
+        profile.modified_at = profile.created_at;
+
+        self.profiles.insert(id.clone(), profile);
+        self.emit_event(ProfileEvent::Imported { profile_id: id.clone() });
+
+        if self.autosave {
+            self.save_profile_to_file(self.profiles.get(&id).unwrap())?;
+        }
+
+        Ok(id)
+    }
+
+    fn compare(&self, id_a: &str, id_b: &str) -> Result<ProfileDiff, ProfileError> {
+        let profile_a = self.profiles.get(id_a)
+            .ok_or(ProfileError::NotFound { name: id_a.to_string() })?;
+
+        let profile_b = self.profiles.get(id_b)
+            .ok_or(ProfileError::NotFound { name: id_b.to_string() })?;
+
+        Ok(profile_a.diff(profile_b))
+    }
+
+    fn search(&self, query: &str) -> Vec<&Profile> {
+        let query_lower = query.to_lowercase();
+        self.profiles.values()
+            .filter(|p| {
+                p.name.to_lowercase().contains(&query_lower) ||
+                p.description.to_lowercase().contains(&query_lower) ||
+                p.tags.iter().any(|t| t.to_lowercase().contains(&query_lower))
+            })
+            .collect()
+    }
+}
+
+// ============================================================================
+// REGION: Profile Presets
+// ============================================================================
+
+/// Preset profile templates
+@derive(Debug)]
+struct ProfilePreset {
+    id: String,
+    name: String,
+    description: String,
+    icon: Option<String>,
+    categories: Vec<String>,
+    template: ProfileTemplate,
+}
+
+@derive(Debug, Clone)]
+struct ProfileTemplate {
+    /// Mod categories to enable
+    enabled_categories: Vec<String>,
+    /// Mod categories to disable
+    disabled_categories: Vec<String>,
+    /// Specific mods to include
+    included_mods: Vec<String>,
+    /// Specific mods to exclude
+    excluded_mods: Vec<String>,
+    /// Settings to apply
+    settings: HashMap<String, ConfigValue>,
+}
+
+impl ProfileTemplate {
+    fn new() -> Self {
+        ProfileTemplate {
+            enabled_categories: Vec::new(),
+            disabled_categories: Vec::new(),
+            included_mods: Vec::new(),
+            excluded_mods: Vec::new(),
+            settings: HashMap::new(),
+        }
+    }
+
+    fn enable_category(mut self, category: &str) -> Self {
+        self.enabled_categories.push(category.to_string());
+        self
+    }
+
+    fn disable_category(mut self, category: &str) -> Self {
+        self.disabled_categories.push(category.to_string());
+        self
+    }
+
+    fn include_mod(mut self, mod_id: &str) -> Self {
+        self.included_mods.push(mod_id.to_string());
+        self
+    }
+
+    fn exclude_mod(mut self, mod_id: &str) -> Self {
+        self.excluded_mods.push(mod_id.to_string());
+        self
+    }
+
+    fn with_setting(mut self, key: &str, value: ConfigValue) -> Self {
+        self.settings.insert(key.to_string(), value);
+        self
+    }
+}
+
+/// Preset manager
+@derive(Debug)]
+struct PresetManager {
+    presets: Vec<ProfilePreset>,
+}
+
+impl PresetManager {
+    fn new() -> Self {
+        let mut manager = PresetManager { presets: Vec::new() };
+        manager.register_builtin_presets();
+        manager
+    }
+
+    fn register_builtin_presets(&mut self) {
+        // Performance preset
+        self.presets.push(ProfilePreset {
+            id: "performance".to_string(),
+            name: "Performance".to_string(),
+            description: "Optimized for maximum performance".to_string(),
+            icon: Some("speed".to_string()),
+            categories: vec!["optimization".to_string()],
+            template: ProfileTemplate::new()
+                .enable_category("optimization")
+                .enable_category("performance")
+                .disable_category("graphics")
+                .disable_category("visual")
+                .with_setting("quality", ConfigValue::String("low".to_string())),
+        });
+
+        // Quality preset
+        self.presets.push(ProfilePreset {
+            id: "quality".to_string(),
+            name: "Quality".to_string(),
+            description: "Maximum visual quality".to_string(),
+            icon: Some("quality".to_string()),
+            categories: vec!["graphics".to_string()],
+            template: ProfileTemplate::new()
+                .enable_category("graphics")
+                .enable_category("visual")
+                .enable_category("effects")
+                .with_setting("quality", ConfigValue::String("ultra".to_string())),
+        });
+
+        // Minimal preset
+        self.presets.push(ProfilePreset {
+            id: "minimal".to_string(),
+            name: "Minimal".to_string(),
+            description: "Only essential mods".to_string(),
+            icon: Some("minimal".to_string()),
+            categories: vec!["essential".to_string()],
+            template: ProfileTemplate::new()
+                .disable_category("optional")
+                .disable_category("extras"),
+        });
+    }
+
+    fn register(&mut self, preset: ProfilePreset) {
+        self.presets.push(preset);
+    }
+
+    fn get(&self, id: &str) -> Option<&ProfilePreset> {
+        self.presets.iter().find(|p| p.id == id)
+    }
+
+    fn list(&self) -> &[ProfilePreset] {
+        &self.presets
+    }
+
+    fn list_by_category(&self, category: &str) -> Vec<&ProfilePreset> {
+        self.presets.iter()
+            .filter(|p| p.categories.contains(&category.to_string()))
+            .collect()
+    }
+
+    fn apply(&self, preset_id: &str, profile: &mut Profile) -> Result<(), ProfileError> {
+        let preset = self.get(preset_id)
+            .ok_or(ProfileError::NotFound { name: preset_id.to_string() })?;
+
+        // Apply template settings
+        for (key, value) in &preset.template.settings {
+            profile.set_setting(key, value.clone());
+        }
+
+        // Apply mod configurations would require access to mod metadata
+        // This would be done by the caller
+
+        Ok(())
+    }
+}
+
+// ============================================================================
+// REGION: Profile History
+// ============================================================================
+
+/// Profile change history entry
+@derive(Debug, Clone)]
+struct ProfileHistoryEntry {
+    timestamp: u64,
+    profile_id: String,
+    change_type: ProfileChangeType,
+    description: String,
+    undo_data: Option<String>,
+}
+
+@derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProfileChangeType {
+    ModAdded,
+    ModRemoved,
+    ModEnabled,
+    ModDisabled,
+    ModConfigChanged,
+    SettingChanged,
+    ProfileCreated,
+    ProfileDeleted,
+    ProfileRenamed,
+    ProfileImported,
+}
+
+/// Profile history tracker
+@derive(Debug)]
+struct ProfileHistory {
+    entries: Vec<ProfileHistoryEntry>,
+    max_entries: usize,
+    undo_stack: Vec<ProfileHistoryEntry>,
+    redo_stack: Vec<ProfileHistoryEntry>,
+}
+
+impl ProfileHistory {
+    fn new(max_entries: usize) -> Self {
+        ProfileHistory {
+            entries: Vec::new(),
+            max_entries,
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
+        }
+    }
+
+    fn record(&mut self, entry: ProfileHistoryEntry) {
+        self.entries.push(entry.clone());
+
+        // Maintain max size
+        while self.entries.len() > self.max_entries {
+            self.entries.remove(0);
+        }
+
+        // Add to undo stack if undoable
+        if entry.undo_data.is_some() {
+            self.undo_stack.push(entry);
+            self.redo_stack.clear();
+        }
+    }
+
+    fn get_history(&self, profile_id: &str) -> Vec<&ProfileHistoryEntry> {
+        self.entries.iter()
+            .filter(|e| e.profile_id == profile_id)
+            .collect()
+    }
+
+    fn get_recent(&self, count: usize) -> Vec<&ProfileHistoryEntry> {
+        self.entries.iter().rev().take(count).collect()
+    }
+
+    fn can_undo(&self) -> bool {
+        !self.undo_stack.is_empty()
+    }
+
+    fn can_redo(&self) -> bool {
+        !self.redo_stack.is_empty()
+    }
+
+    fn undo(&mut self) -> Option<ProfileHistoryEntry> {
+        let entry = self.undo_stack.pop()?;
+        self.redo_stack.push(entry.clone());
+        Some(entry)
+    }
+
+    fn redo(&mut self) -> Option<ProfileHistoryEntry> {
+        let entry = self.redo_stack.pop()?;
+        self.undo_stack.push(entry.clone());
+        Some(entry)
+    }
+
+    fn clear(&mut self) {
+        self.entries.clear();
+        self.undo_stack.clear();
+        self.redo_stack.clear();
+    }
+}
+
+// ============================================================================
+// REGION: Helper Functions
+// ============================================================================
+
+fn current_time_ms() -> u64 { 0 }
+
+fn read_file(path: &str) -> Result<String, String> {
+    Err("Not implemented".to_string())
+}
+
+fn write_file(path: &str, content: &str) -> Result<(), String> {
+    Err("Not implemented".to_string())
+}
+
+fn delete_file(path: &str) -> Result<(), String> {
+    Err("Not implemented".to_string())
+}
+
+fn list_files(path: &str, pattern: &str) -> Result<Vec<String>, ProfileError> {
+    Ok(Vec::new())
+}
+
+fn ensure_directory(path: &str) -> Result<(), ProfileError> {
+    Ok(())
+}
+
+fn serialize_profile(profile: &Profile) -> Result<String, ProfileError> {
+    Ok(String::new())
+}
+
+fn deserialize_profile(content: &str) -> Result<Profile, ProfileError> {
+    Err(ProfileError::Other { message: "Not implemented".to_string() })
+}
+
+// Config value placeholder
+@derive(Debug, Clone, PartialEq)]
+enum ConfigValue {
+    Bool(bool),
+    Int(i64),
+    Float(f64),
+    String(String),
+    Array(Vec<ConfigValue>),
+    Object(HashMap<String, ConfigValue>),
+}
+
+// ============================================================================
+// REGION: Unit Tests
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_profile_creation() {
+        let profile = Profile::new("test", "Test Profile");
+
+        assert_eq!(profile.id, "test");
+        assert_eq!(profile.name, "Test Profile");
+        assert!(profile.mods.is_empty());
+        assert!(profile.is_editable());
+    }
+
+    #[test]
+    fn test_profile_mod_management() {
+        let mut profile = Profile::new("test", "Test");
+
+        let entry = ProfileModEntry::new("mod_a")
+            .with_priority(10);
+        profile.add_mod(entry);
+
+        assert_eq!(profile.mod_count(), 1);
+        assert!(profile.is_mod_enabled("mod_a"));
+
+        profile.disable_mod("mod_a");
+        assert!(!profile.is_mod_enabled("mod_a"));
+
+        profile.toggle_mod("mod_a");
+        assert!(profile.is_mod_enabled("mod_a"));
+    }
+
+    #[test]
+    fn test_profile_validation() {
+        let mut profile = Profile::new("", "");
+        assert!(profile.validate().is_err());
+
+        profile.name = "Valid Name".to_string();
+        assert!(profile.validate().is_ok());
+
+        profile.name = "Invalid/Name".to_string();
+        assert!(profile.validate().is_err());
+    }
+
+    #[test]
+    fn test_profile_diff() {
+        let mut profile_a = Profile::new("a", "Profile A");
+        profile_a.add_mod(ProfileModEntry::new("mod1"));
+        profile_a.add_mod(ProfileModEntry::new("mod2"));
+
+        let mut profile_b = Profile::new("b", "Profile B");
+        profile_b.add_mod(ProfileModEntry::new("mod2"));
+        profile_b.add_mod(ProfileModEntry::new("mod3"));
+
+        let diff = profile_a.diff(&profile_b);
+
+        assert!(diff.added_mods.contains(&"mod1".to_string()));
+        assert!(diff.removed_mods.contains(&"mod3".to_string()));
+    }
+
+    #[test]
+    fn test_profile_clone() {
+        let mut original = Profile::new("original", "Original");
+        original.add_mod(ProfileModEntry::new("mod1"));
+        original.description = "Original description".to_string();
+
+        let cloned = original.clone_as("clone", "Cloned");
+
+        assert_eq!(cloned.id, "clone");
+        assert_eq!(cloned.name, "Cloned");
+        assert_eq!(cloned.parent, Some("original".to_string()));
+        assert_eq!(cloned.mod_count(), 1);
+    }
+
+    #[test]
+    fn test_profile_manager() {
+        let mut manager = ProfileManager::new("/profiles");
+
+        // Default profile exists
+        assert!(manager.get("default").is_some());
+
+        // Create new profile
+        manager.create("test", "Test").ok();
+        assert!(manager.get("test").is_some());
+
+        // Activate
+        manager.activate("test").ok();
+        assert_eq!(manager.active_id(), Some("test"));
+
+        // Delete
+        manager.delete("test").ok();
+        assert!(manager.get("test").is_none());
+    }
+
+    #[test]
+    fn test_profile_template() {
+        let template = ProfileTemplate::new()
+            .enable_category("graphics")
+            .disable_category("audio")
+            .include_mod("essential_mod")
+            .with_setting("quality", ConfigValue::String("high".to_string()));
+
+        assert!(template.enabled_categories.contains(&"graphics".to_string()));
+        assert!(template.disabled_categories.contains(&"audio".to_string()));
+        assert!(template.included_mods.contains(&"essential_mod".to_string()));
+    }
+
+    #[test]
+    fn test_profile_history() {
+        let mut history = ProfileHistory::new(100);
+
+        history.record(ProfileHistoryEntry {
+            timestamp: 1000,
+            profile_id: "test".to_string(),
+            change_type: ProfileChangeType::ModAdded,
+            description: "Added mod_a".to_string(),
+            undo_data: Some("{}".to_string()),
+        });
+
+        assert_eq!(history.entries.len(), 1);
+        assert!(history.can_undo());
+        assert!(!history.can_redo());
+
+        history.undo();
+        assert!(history.can_redo());
+    }
+}

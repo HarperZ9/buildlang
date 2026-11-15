@@ -1,0 +1,912 @@
+// BUILD-UNIVERSE Prism: Subsurface Scattering Shaders
+// Comprehensive SSS implementations including screen-space, separable, and pre-integrated techniques
+
+import prism::lib::*;
+import spectrum::color::*;
+
+// ============================================================================
+// SSS CONFIGURATION
+// ============================================================================
+
+@shader_config
+struct SSSConfig {
+    technique: SSSTechnique,
+    quality: SSSQuality,
+    diffusion_profile: DiffusionProfile,
+    width: f32,
+    strength: f32,
+    follow_surface: bool,
+    max_distance: f32,
+    kernel_samples: u32,
+    jitter_samples: bool,
+    temporal_filter: bool,
+    translucency_enabled: bool,
+    shadow_aware: bool,
+}
+
+enum SSSTechnique {
+    PreIntegrated,          // Pre-integrated lookup texture
+    ScreenSpace,            // Screen-space diffusion
+    SeparableSSS,           // Separable gaussian approximation (Jimenez 2015)
+    RayMarched,             // Ray-marched SSS
+    DeferredTexturing,      // Deferred texturing approach
+    Random Walk,            // Path-traced random walk (offline)
+}
+
+enum SSSQuality {
+    Low,        // 5 samples
+    Medium,     // 11 samples
+    High,       // 17 samples
+    Ultra,      // 25 samples
+    Extreme,    // 35 samples
+}
+
+enum DiffusionProfile {
+    Skin,
+    Marble,
+    Wax,
+    Milk,
+    Jade,
+    Ketchup,
+    Custom,
+}
+
+impl DiffusionProfile {
+    fn get_scatter_color(&self) -> Vec3 {
+        match self {
+            Self::Skin => Vec3::new(0.87, 0.41, 0.23),
+            Self::Marble => Vec3::new(0.85, 0.85, 0.85),
+            Self::Wax => Vec3::new(0.97, 0.94, 0.62),
+            Self::Milk => Vec3::new(0.95, 0.95, 0.90),
+            Self::Jade => Vec3::new(0.40, 0.90, 0.45),
+            Self::Ketchup => Vec3::new(0.95, 0.08, 0.03),
+            Self::Custom => Vec3::ONE,
+        }
+    }
+
+    fn get_scatter_distance(&self) -> Vec3 {
+        match self {
+            Self::Skin => Vec3::new(1.0, 0.5, 0.25),
+            Self::Marble => Vec3::new(1.0, 0.95, 0.90),
+            Self::Wax => Vec3::new(0.8, 0.75, 0.4),
+            Self::Milk => Vec3::new(0.7, 0.6, 0.5),
+            Self::Jade => Vec3::new(0.3, 1.0, 0.35),
+            Self::Ketchup => Vec3::new(0.3, 0.1, 0.08),
+            Self::Custom => Vec3::ONE,
+        }
+    }
+}
+
+impl SSSConfig {
+    const SKIN_HIGH: Self = SSSConfig {
+        technique: SSSTechnique::SeparableSSS,
+        quality: SSSQuality::High,
+        diffusion_profile: DiffusionProfile::Skin,
+        width: 0.012,
+        strength: 0.48,
+        follow_surface: true,
+        max_distance: 0.05,
+        kernel_samples: 17,
+        jitter_samples: true,
+        temporal_filter: true,
+        translucency_enabled: true,
+        shadow_aware: true,
+    };
+
+    const SKIN_MEDIUM: Self = SSSConfig {
+        technique: SSSTechnique::SeparableSSS,
+        quality: SSSQuality::Medium,
+        diffusion_profile: DiffusionProfile::Skin,
+        width: 0.012,
+        strength: 0.48,
+        follow_surface: true,
+        max_distance: 0.05,
+        kernel_samples: 11,
+        jitter_samples: false,
+        temporal_filter: false,
+        translucency_enabled: true,
+        shadow_aware: true,
+    };
+
+    const MARBLE: Self = SSSConfig {
+        technique: SSSTechnique::SeparableSSS,
+        quality: SSSQuality::High,
+        diffusion_profile: DiffusionProfile::Marble,
+        width: 0.02,
+        strength: 0.6,
+        follow_surface: true,
+        max_distance: 0.1,
+        kernel_samples: 17,
+        jitter_samples: true,
+        temporal_filter: true,
+        translucency_enabled: true,
+        shadow_aware: true,
+    };
+}
+
+// ============================================================================
+// DIFFUSION KERNEL GENERATION
+// ============================================================================
+
+struct DiffusionKernel {
+    weights: Vec<Vec4>,  // xyz = RGB weight, w = offset
+    falloff: Vec3,
+}
+
+impl DiffusionKernel {
+    fn generate_gaussian_kernel(profile: &DiffusionProfile, samples: u32, width: f32) -> Self {
+        let scatter_color = profile.get_scatter_color();
+        let scatter_distance = profile.get_scatter_distance();
+
+        let mut weights = Vec::with_capacity(samples as usize);
+
+        // Generate kernel using sum of gaussians approximation
+        let range = 3.0;  // Standard deviations to cover
+
+        for i in 0..samples {
+            let t = (i as f32) / ((samples - 1) as f32) * 2.0 - 1.0;
+            let offset = t * range * width;
+
+            let r_weight = gaussian(t * range, scatter_distance.x);
+            let g_weight = gaussian(t * range, scatter_distance.y);
+            let b_weight = gaussian(t * range, scatter_distance.z);
+
+            weights.push(Vec4::new(
+                r_weight * scatter_color.x,
+                g_weight * scatter_color.y,
+                b_weight * scatter_color.z,
+                offset
+            ));
+        }
+
+        // Normalize weights
+        let mut total_rgb = Vec3::ZERO;
+        for w in &weights {
+            total_rgb += Vec3::new(w.x, w.y, w.z);
+        }
+
+        for w in &mut weights {
+            w.x /= total_rgb.x;
+            w.y /= total_rgb.y;
+            w.z /= total_rgb.z;
+        }
+
+        Self {
+            weights,
+            falloff: scatter_distance,
+        }
+    }
+}
+
+fn gaussian(x: f32, variance: f32) -> f32 {
+    (-(x * x) / (2.0 * variance * variance)).exp() / (std::f32::consts::TAU.sqrt() * variance)
+}
+
+// ============================================================================
+// PRE-INTEGRATED SSS SHADER
+// ============================================================================
+
+@shader(fragment)
+const PRE_INTEGRATED_SSS_SHADER: &str = r#"
+    // Pre-integrated subsurface scattering
+    // Uses lookup texture for curvature-based SSS
+
+    cbuffer SSSParams : register(b0) {
+        float3 scatter_color;
+        float sss_width;
+        float3 scatter_distance;
+        float sss_strength;
+        float3 light_direction;
+        float curvature_scale;
+        float3 light_color;
+        float ambient_strength;
+    };
+
+    Texture2D<float4> albedo_texture : register(t0);
+    Texture2D<float4> normal_texture : register(t1);
+    Texture2D<float> curvature_texture : register(t2);
+    Texture2D<float4> pre_integrated_lut : register(t3);  // NdotL vs curvature
+
+    SamplerState linear_sampler : register(s0);
+
+    struct VSOutput {
+        float4 position : SV_POSITION;
+        float3 world_position : TEXCOORD0;
+        float3 world_normal : TEXCOORD1;
+        float2 uv : TEXCOORD2;
+        float3 view_dir : TEXCOORD3;
+    };
+
+    float4 ps_main(VSOutput input) : SV_TARGET {
+        float4 albedo = albedo_texture.Sample(linear_sampler, input.uv);
+        float3 normal = normalize(normal_texture.Sample(linear_sampler, input.uv).xyz * 2.0 - 1.0);
+        float curvature = curvature_texture.Sample(linear_sampler, input.uv);
+
+        float3 N = normalize(input.world_normal);
+        float3 L = normalize(-light_direction);
+        float3 V = normalize(input.view_dir);
+
+        float NdotL = dot(N, L);
+
+        // Pre-integrated lookup
+        // X axis: NdotL remapped from [-1, 1] to [0, 1]
+        // Y axis: curvature (affects blur width)
+        float2 lut_uv = float2(NdotL * 0.5 + 0.5, curvature * curvature_scale);
+        float3 sss = pre_integrated_lut.Sample(linear_sampler, lut_uv).rgb;
+
+        // Apply scatter color and strength
+        sss *= scatter_color * sss_strength;
+
+        // Combine with regular diffuse
+        float3 diffuse = albedo.rgb * max(NdotL, 0.0) * light_color;
+        float3 ambient = albedo.rgb * ambient_strength;
+
+        // SSS replaces the shadow terminator
+        float3 final_color = lerp(diffuse, albedo.rgb * sss * light_color, sss_strength);
+        final_color += ambient;
+
+        return float4(final_color, albedo.a);
+    }
+"#;
+
+// ============================================================================
+// GENERATE PRE-INTEGRATED LUT
+// ============================================================================
+
+@shader(compute)
+const GENERATE_SSS_LUT_SHADER: &str = r#"
+    // Generate pre-integrated SSS lookup texture
+
+    cbuffer LUTParams : register(b0) {
+        float3 scatter_distance;
+        float width;
+        float3 scatter_color;
+        uint lut_size;
+    };
+
+    RWTexture2D<float4> lut_output : register(u0);
+
+    static const float PI = 3.14159265359;
+
+    float gaussian(float v, float r) {
+        return exp(-(r * r) / (2.0 * v)) / (2.0 * PI * v);
+    }
+
+    float3 scatter(float r) {
+        // Sum of gaussians approximation
+        return scatter_color * (
+            gaussian(0.0064 * scatter_distance, r) * 0.233 +
+            gaussian(0.0484 * scatter_distance, r) * 0.100 +
+            gaussian(0.1870 * scatter_distance, r) * 0.118 +
+            gaussian(0.5670 * scatter_distance, r) * 0.113 +
+            gaussian(1.9900 * scatter_distance, r) * 0.358 +
+            gaussian(7.4100 * scatter_distance, r) * 0.078
+        );
+    }
+
+    float3 integrate_diffuse_scattering(float cos_theta, float curvature) {
+        float theta = acos(cos_theta);
+
+        float3 result = float3(0.0, 0.0, 0.0);
+
+        int steps = 64;
+        for (int i = 0; i < steps; i++) {
+            float x = -PI + (float(i) + 0.5) / float(steps) * 2.0 * PI;
+
+            float diffuse = saturate(cos(theta + x));
+            float r = abs(2.0 * curvature * sin(x * 0.5));
+
+            result += scatter(r) * diffuse;
+        }
+
+        return result * (2.0 * PI / float(steps));
+    }
+
+    [numthreads(8, 8, 1)]
+    void cs_main(uint3 dispatch_id : SV_DispatchThreadID) {
+        float2 uv = (float2(dispatch_id.xy) + 0.5) / float(lut_size);
+
+        float ndotl = uv.x * 2.0 - 1.0;
+        float curvature = uv.y;
+
+        float3 sss = integrate_diffuse_scattering(ndotl, curvature);
+
+        // Normalize
+        sss = sss / max(max(sss.r, sss.g), sss.b);
+
+        lut_output[dispatch_id.xy] = float4(sss, 1.0);
+    }
+"#;
+
+// ============================================================================
+// SEPARABLE SSS SHADER (Jimenez 2015)
+// ============================================================================
+
+@shader(compute)
+const SEPARABLE_SSS_HORIZONTAL_SHADER: &str = r#"
+    // Separable Screen-Space Subsurface Scattering - Horizontal Pass
+    // Based on "Separable Subsurface Scattering" (Jimenez et al. 2015)
+
+    cbuffer SSSParams : register(b0) {
+        float4x4 projection;
+        float2 screen_size;
+        float2 inv_screen_size;
+        float sss_width;
+        float sss_strength;
+        float max_distance;
+        float near_plane;
+        float far_plane;
+        uint kernel_size;
+        float follow_surface;
+        float jitter;
+        uint frame_index;
+        float padding0;
+        float padding1;
+        float padding2;
+    };
+
+    // Kernel weights (pre-computed)
+    cbuffer KernelBuffer : register(b1) {
+        float4 kernel[25];  // xyz = RGB weight, w = offset
+    };
+
+    Texture2D<float4> color_texture : register(t0);
+    Texture2D<float> depth_texture : register(t1);
+    Texture2D<float4> sss_mask_texture : register(t2);  // R = SSS mask, G = profile ID
+
+    RWTexture2D<float4> output_texture : register(u0);
+
+    SamplerState point_sampler : register(s0);
+    SamplerState linear_sampler : register(s1);
+
+    float linearize_depth(float depth) {
+        return near_plane * far_plane / (far_plane - depth * (far_plane - near_plane));
+    }
+
+    [numthreads(8, 8, 1)]
+    void cs_main(uint3 dispatch_id : SV_DispatchThreadID) {
+        float2 uv = (float2(dispatch_id.xy) + 0.5) * inv_screen_size;
+
+        float4 sss_mask = sss_mask_texture.SampleLevel(point_sampler, uv, 0);
+
+        // Skip non-SSS pixels
+        if (sss_mask.r < 0.01) {
+            output_texture[dispatch_id.xy] = color_texture.SampleLevel(point_sampler, uv, 0);
+            return;
+        }
+
+        float center_depth = linearize_depth(depth_texture.SampleLevel(point_sampler, uv, 0));
+
+        // Scale kernel width based on depth (perspective correction)
+        float scale = 1.0 / center_depth;
+        float2 final_step = float2(sss_width * scale, 0.0) * inv_screen_size * screen_size.y;
+
+        // Accumulate samples
+        float4 color_sum = float4(0.0, 0.0, 0.0, 0.0);
+        float3 weight_sum = float3(0.0, 0.0, 0.0);
+
+        for (uint i = 0; i < kernel_size; i++) {
+            float4 k = kernel[i];
+            float2 offset = k.w * final_step;
+            float2 sample_uv = uv + offset;
+
+            // Clamp to screen bounds
+            sample_uv = clamp(sample_uv, 0.0, 1.0);
+
+            float4 sample_color = color_texture.SampleLevel(linear_sampler, sample_uv, 0);
+            float sample_depth = linearize_depth(depth_texture.SampleLevel(point_sampler, sample_uv, 0));
+
+            // Depth-based weight attenuation (follow surface)
+            float depth_diff = abs(center_depth - sample_depth);
+            float depth_weight = 1.0;
+
+            if (follow_surface > 0.5) {
+                depth_weight = saturate(1.0 - depth_diff / (max_distance * center_depth));
+            }
+
+            float3 weight = k.rgb * depth_weight * sss_mask.r * sss_strength;
+
+            color_sum.rgb += sample_color.rgb * weight;
+            weight_sum += weight;
+        }
+
+        // Normalize
+        float3 result = color_sum.rgb / max(weight_sum, float3(0.001, 0.001, 0.001));
+
+        // Blend with original based on SSS mask
+        float4 original = color_texture.SampleLevel(point_sampler, uv, 0);
+        result = lerp(original.rgb, result, sss_mask.r);
+
+        output_texture[dispatch_id.xy] = float4(result, original.a);
+    }
+"#;
+
+@shader(compute)
+const SEPARABLE_SSS_VERTICAL_SHADER: &str = r#"
+    // Separable SSS - Vertical Pass
+
+    cbuffer SSSParams : register(b0) {
+        float4x4 projection;
+        float2 screen_size;
+        float2 inv_screen_size;
+        float sss_width;
+        float sss_strength;
+        float max_distance;
+        float near_plane;
+        float far_plane;
+        uint kernel_size;
+        float follow_surface;
+        float jitter;
+        uint frame_index;
+        float padding0;
+        float padding1;
+        float padding2;
+    };
+
+    cbuffer KernelBuffer : register(b1) {
+        float4 kernel[25];
+    };
+
+    Texture2D<float4> color_texture : register(t0);
+    Texture2D<float> depth_texture : register(t1);
+    Texture2D<float4> sss_mask_texture : register(t2);
+
+    RWTexture2D<float4> output_texture : register(u0);
+
+    SamplerState point_sampler : register(s0);
+    SamplerState linear_sampler : register(s1);
+
+    float linearize_depth(float depth) {
+        return near_plane * far_plane / (far_plane - depth * (far_plane - near_plane));
+    }
+
+    [numthreads(8, 8, 1)]
+    void cs_main(uint3 dispatch_id : SV_DispatchThreadID) {
+        float2 uv = (float2(dispatch_id.xy) + 0.5) * inv_screen_size;
+
+        float4 sss_mask = sss_mask_texture.SampleLevel(point_sampler, uv, 0);
+
+        if (sss_mask.r < 0.01) {
+            output_texture[dispatch_id.xy] = color_texture.SampleLevel(point_sampler, uv, 0);
+            return;
+        }
+
+        float center_depth = linearize_depth(depth_texture.SampleLevel(point_sampler, uv, 0));
+
+        float scale = 1.0 / center_depth;
+        float2 final_step = float2(0.0, sss_width * scale) * inv_screen_size * screen_size.y;
+
+        float4 color_sum = float4(0.0, 0.0, 0.0, 0.0);
+        float3 weight_sum = float3(0.0, 0.0, 0.0);
+
+        for (uint i = 0; i < kernel_size; i++) {
+            float4 k = kernel[i];
+            float2 offset = k.w * final_step;
+            float2 sample_uv = clamp(uv + offset, 0.0, 1.0);
+
+            float4 sample_color = color_texture.SampleLevel(linear_sampler, sample_uv, 0);
+            float sample_depth = linearize_depth(depth_texture.SampleLevel(point_sampler, sample_uv, 0));
+
+            float depth_diff = abs(center_depth - sample_depth);
+            float depth_weight = 1.0;
+
+            if (follow_surface > 0.5) {
+                depth_weight = saturate(1.0 - depth_diff / (max_distance * center_depth));
+            }
+
+            float3 weight = k.rgb * depth_weight * sss_mask.r * sss_strength;
+
+            color_sum.rgb += sample_color.rgb * weight;
+            weight_sum += weight;
+        }
+
+        float3 result = color_sum.rgb / max(weight_sum, float3(0.001, 0.001, 0.001));
+
+        float4 original = color_texture.SampleLevel(point_sampler, uv, 0);
+        result = lerp(original.rgb, result, sss_mask.r);
+
+        output_texture[dispatch_id.xy] = float4(result, original.a);
+    }
+"#;
+
+// ============================================================================
+// TRANSLUCENCY SHADER
+// ============================================================================
+
+@shader(fragment)
+const TRANSLUCENCY_SHADER: &str = r#"
+    // Translucency for thin objects (ears, leaves, etc.)
+
+    cbuffer TranslucencyParams : register(b0) {
+        float3 light_direction;
+        float translucency_power;
+        float3 light_color;
+        float translucency_distortion;
+        float3 subsurface_color;
+        float translucency_scale;
+        float ambient_strength;
+        float shadow_strength;
+        float thickness_scale;
+        float padding;
+    };
+
+    Texture2D<float4> albedo_texture : register(t0);
+    Texture2D<float4> normal_texture : register(t1);
+    Texture2D<float> thickness_texture : register(t2);
+    Texture2D<float> shadow_map : register(t3);
+
+    SamplerState linear_sampler : register(s0);
+    SamplerComparisonState shadow_sampler : register(s1);
+
+    struct VSOutput {
+        float4 position : SV_POSITION;
+        float3 world_position : TEXCOORD0;
+        float3 world_normal : TEXCOORD1;
+        float2 uv : TEXCOORD2;
+        float3 view_dir : TEXCOORD3;
+        float4 shadow_coord : TEXCOORD4;
+    };
+
+    float4 ps_main(VSOutput input) : SV_TARGET {
+        float4 albedo = albedo_texture.Sample(linear_sampler, input.uv);
+        float3 normal = normalize(normal_texture.Sample(linear_sampler, input.uv).xyz * 2.0 - 1.0);
+        float thickness = thickness_texture.Sample(linear_sampler, input.uv) * thickness_scale;
+
+        float3 N = normalize(input.world_normal);
+        float3 L = normalize(-light_direction);
+        float3 V = normalize(input.view_dir);
+
+        // Front-side lighting
+        float NdotL = max(dot(N, L), 0.0);
+
+        // Back-side translucency
+        float3 back_light_dir = L + N * translucency_distortion;
+        float VdotL = pow(saturate(dot(V, -back_light_dir)), translucency_power) * translucency_scale;
+
+        // Attenuate by thickness
+        float thickness_attenuation = exp(-thickness * 10.0);
+        float3 translucency = subsurface_color * VdotL * thickness_attenuation;
+
+        // Shadow
+        float shadow = shadow_map.SampleCmpLevelZero(shadow_sampler, input.shadow_coord.xy, input.shadow_coord.z);
+        shadow = lerp(1.0, shadow, shadow_strength);
+
+        // Combine
+        float3 diffuse = albedo.rgb * NdotL * light_color * shadow;
+        float3 ambient = albedo.rgb * ambient_strength;
+        float3 sss = albedo.rgb * translucency * light_color * (1.0 - shadow * 0.5);
+
+        float3 final_color = diffuse + ambient + sss;
+
+        return float4(final_color, albedo.a);
+    }
+"#;
+
+// ============================================================================
+// THICKNESS MAP GENERATION SHADER
+// ============================================================================
+
+@shader(compute)
+const THICKNESS_MAP_SHADER: &str = r#"
+    // Generate thickness map from depth buffers (front and back faces)
+
+    cbuffer ThicknessParams : register(b0) {
+        float4x4 light_projection;
+        float2 map_size;
+        float2 inv_map_size;
+        float near_plane;
+        float far_plane;
+        float bias;
+        float scale;
+    };
+
+    Texture2D<float> front_depth : register(t0);
+    Texture2D<float> back_depth : register(t1);
+
+    RWTexture2D<float> thickness_output : register(u0);
+
+    SamplerState point_sampler : register(s0);
+
+    float linearize_depth(float depth) {
+        return near_plane * far_plane / (far_plane - depth * (far_plane - near_plane));
+    }
+
+    [numthreads(8, 8, 1)]
+    void cs_main(uint3 dispatch_id : SV_DispatchThreadID) {
+        float2 uv = (float2(dispatch_id.xy) + 0.5) * inv_map_size;
+
+        float front = linearize_depth(front_depth.SampleLevel(point_sampler, uv, 0));
+        float back = linearize_depth(back_depth.SampleLevel(point_sampler, uv, 0));
+
+        float thickness = max(0.0, back - front - bias) * scale;
+
+        thickness_output[dispatch_id.xy] = thickness;
+    }
+"#;
+
+// ============================================================================
+// SKIN SHADER WITH SSS
+// ============================================================================
+
+@shader(fragment)
+const SKIN_SHADER: &str = r#"
+    // Complete skin shader with SSS, pore detail, and specular
+
+    cbuffer SkinParams : register(b0) {
+        float3 light_direction;
+        float sss_width;
+        float3 light_color;
+        float sss_strength;
+        float3 scatter_color;
+        float roughness;
+        float3 scatter_distance;
+        float specular_intensity;
+        float3 ambient_color;
+        float ambient_occlusion;
+        float curvature_scale;
+        float translucency;
+        float detail_normal_strength;
+        float pore_strength;
+    };
+
+    Texture2D<float4> albedo_texture : register(t0);
+    Texture2D<float4> normal_texture : register(t1);
+    Texture2D<float4> detail_normal_texture : register(t2);
+    Texture2D<float> roughness_texture : register(t3);
+    Texture2D<float> ao_texture : register(t4);
+    Texture2D<float> thickness_texture : register(t5);
+    Texture2D<float> curvature_texture : register(t6);
+    Texture2D<float4> sss_lut : register(t7);
+
+    SamplerState linear_sampler : register(s0);
+    SamplerState detail_sampler : register(s1);
+
+    struct VSOutput {
+        float4 position : SV_POSITION;
+        float3 world_position : TEXCOORD0;
+        float3 world_normal : TEXCOORD1;
+        float4 tangent : TEXCOORD2;
+        float2 uv : TEXCOORD3;
+        float3 view_dir : TEXCOORD4;
+    };
+
+    float3 fresnelSchlick(float cosTheta, float3 F0) {
+        return F0 + (1.0 - F0) * pow(1.0 - cosTheta, 5.0);
+    }
+
+    float DistributionGGX(float3 N, float3 H, float roughness) {
+        float a = roughness * roughness;
+        float a2 = a * a;
+        float NdotH = max(dot(N, H), 0.0);
+        float NdotH2 = NdotH * NdotH;
+
+        float num = a2;
+        float denom = (NdotH2 * (a2 - 1.0) + 1.0);
+        denom = 3.14159 * denom * denom;
+
+        return num / denom;
+    }
+
+    float GeometrySchlickGGX(float NdotV, float roughness) {
+        float r = (roughness + 1.0);
+        float k = (r * r) / 8.0;
+
+        return NdotV / (NdotV * (1.0 - k) + k);
+    }
+
+    float GeometrySmith(float3 N, float3 V, float3 L, float roughness) {
+        float NdotV = max(dot(N, V), 0.0);
+        float NdotL = max(dot(N, L), 0.0);
+        return GeometrySchlickGGX(NdotV, roughness) * GeometrySchlickGGX(NdotL, roughness);
+    }
+
+    float4 ps_main(VSOutput input) : SV_TARGET {
+        // Sample textures
+        float4 albedo = albedo_texture.Sample(linear_sampler, input.uv);
+        float3 normal_sample = normal_texture.Sample(linear_sampler, input.uv).xyz * 2.0 - 1.0;
+        float3 detail_normal = detail_normal_texture.Sample(detail_sampler, input.uv * 8.0).xyz * 2.0 - 1.0;
+        float rough = roughness_texture.Sample(linear_sampler, input.uv);
+        float ao = ao_texture.Sample(linear_sampler, input.uv);
+        float thickness = thickness_texture.Sample(linear_sampler, input.uv);
+        float curvature = curvature_texture.Sample(linear_sampler, input.uv);
+
+        // Blend normals
+        normal_sample.xy += detail_normal.xy * detail_normal_strength;
+        normal_sample = normalize(normal_sample);
+
+        // Calculate TBN
+        float3 N = normalize(input.world_normal);
+        float3 T = normalize(input.tangent.xyz);
+        float3 B = cross(N, T) * input.tangent.w;
+        float3x3 TBN = float3x3(T, B, N);
+
+        N = normalize(mul(normal_sample, TBN));
+        float3 L = normalize(-light_direction);
+        float3 V = normalize(input.view_dir);
+        float3 H = normalize(V + L);
+
+        float NdotL = dot(N, L);
+        float NdotV = max(dot(N, V), 0.0);
+
+        // Pre-integrated SSS lookup
+        float2 sss_uv = float2(NdotL * 0.5 + 0.5, curvature * curvature_scale);
+        float3 sss = sss_lut.Sample(linear_sampler, sss_uv).rgb;
+        sss *= scatter_color * sss_strength;
+
+        // SSS diffuse
+        float3 diffuse = albedo.rgb * sss * light_color;
+
+        // Translucency
+        float3 back_dir = L + N * 0.5;
+        float VdotL = pow(saturate(dot(V, -back_dir)), 3.0);
+        float3 translucent = scatter_color * VdotL * translucency * exp(-thickness * 5.0);
+        diffuse += albedo.rgb * translucent * light_color;
+
+        // Specular (dual-lobe for skin)
+        float roughness1 = rough * roughness;
+        float roughness2 = lerp(rough, 0.3, 0.5);
+
+        float3 F0 = float3(0.028, 0.028, 0.028);
+        float3 F = fresnelSchlick(max(dot(H, V), 0.0), F0);
+
+        float D1 = DistributionGGX(N, H, roughness1);
+        float D2 = DistributionGGX(N, H, roughness2);
+        float G = GeometrySmith(N, V, L, roughness1);
+
+        float3 specular1 = (D1 * F * G) / max(4.0 * NdotV * max(NdotL, 0.0), 0.001);
+        float3 specular2 = (D2 * F * G) / max(4.0 * NdotV * max(NdotL, 0.0), 0.001);
+
+        float3 specular = (specular1 * 0.7 + specular2 * 0.3) * specular_intensity * light_color * max(NdotL, 0.0);
+
+        // Ambient
+        float3 ambient = albedo.rgb * ambient_color * ao * ambient_occlusion;
+
+        float3 final_color = diffuse + specular + ambient;
+
+        return float4(final_color, albedo.a);
+    }
+"#;
+
+// ============================================================================
+// SSS SYSTEM
+// ============================================================================
+
+@system
+struct SSSSystem {
+    config: SSSConfig,
+    sss_lut: Handle<Texture>,
+    thickness_map: Handle<Texture>,
+    blur_temp_texture: Handle<Texture>,
+    kernel_buffer: Handle<Buffer>,
+    lut_gen_pipeline: Handle<ComputePipeline>,
+    thickness_pipeline: Handle<ComputePipeline>,
+    horizontal_blur_pipeline: Handle<ComputePipeline>,
+    vertical_blur_pipeline: Handle<ComputePipeline>,
+    skin_pipeline: Handle<RenderPipeline>,
+    translucency_pipeline: Handle<RenderPipeline>,
+}
+
+impl SSSSystem {
+    fn new(config: SSSConfig) -> Self {
+        Self {
+            config,
+            sss_lut: Handle::null(),
+            thickness_map: Handle::null(),
+            blur_temp_texture: Handle::null(),
+            kernel_buffer: Handle::null(),
+            lut_gen_pipeline: Handle::null(),
+            thickness_pipeline: Handle::null(),
+            horizontal_blur_pipeline: Handle::null(),
+            vertical_blur_pipeline: Handle::null(),
+            skin_pipeline: Handle::null(),
+            translucency_pipeline: Handle::null(),
+        }
+    }
+
+    fn initialize(&mut self, device: &RenderDevice, width: u32, height: u32) {
+        // Create SSS LUT
+        self.sss_lut = device.create_texture(&TextureDescriptor {
+            size: Extent3d { width: 256, height: 256, depth: 1 },
+            format: TextureFormat::Rgba16Float,
+            usage: TextureUsage::STORAGE | TextureUsage::SAMPLED,
+            ..default()
+        });
+
+        // Create thickness map
+        self.thickness_map = device.create_texture(&TextureDescriptor {
+            size: Extent3d { width: 512, height: 512, depth: 1 },
+            format: TextureFormat::R16Float,
+            usage: TextureUsage::STORAGE | TextureUsage::SAMPLED,
+            ..default()
+        });
+
+        // Create blur temp texture
+        self.blur_temp_texture = device.create_texture(&TextureDescriptor {
+            size: Extent3d { width, height, depth: 1 },
+            format: TextureFormat::Rgba16Float,
+            usage: TextureUsage::STORAGE | TextureUsage::SAMPLED,
+            ..default()
+        });
+
+        // Generate kernel
+        let kernel = DiffusionKernel::generate_gaussian_kernel(
+            &self.config.diffusion_profile,
+            self.config.kernel_samples,
+            self.config.width
+        );
+
+        self.kernel_buffer = device.create_buffer_with_data(
+            BufferUsage::UNIFORM,
+            bytemuck::cast_slice(&kernel.weights)
+        );
+
+        // Create pipelines
+        self.lut_gen_pipeline = device.create_compute_pipeline(GENERATE_SSS_LUT_SHADER);
+        self.thickness_pipeline = device.create_compute_pipeline(THICKNESS_MAP_SHADER);
+        self.horizontal_blur_pipeline = device.create_compute_pipeline(SEPARABLE_SSS_HORIZONTAL_SHADER);
+        self.vertical_blur_pipeline = device.create_compute_pipeline(SEPARABLE_SSS_VERTICAL_SHADER);
+
+        self.skin_pipeline = device.create_render_pipeline(&RenderPipelineDescriptor {
+            vertex: STANDARD_VS,
+            fragment: SKIN_SHADER,
+            ..default()
+        });
+
+        self.translucency_pipeline = device.create_render_pipeline(&RenderPipelineDescriptor {
+            vertex: STANDARD_VS,
+            fragment: TRANSLUCENCY_SHADER,
+            ..default()
+        });
+
+        // Generate LUT
+        self.generate_lut(device);
+    }
+
+    fn generate_lut(&self, device: &RenderDevice) {
+        let mut cmd = device.create_command_encoder();
+
+        let mut pass = cmd.begin_compute_pass();
+        pass.set_pipeline(&self.lut_gen_pipeline);
+        // Set bind groups...
+        pass.dispatch(32, 32, 1);
+
+        device.queue().submit(cmd.finish());
+    }
+
+    fn render_sss(&self,
+                   cmd: &mut CommandEncoder,
+                   color: &Texture,
+                   depth: &Texture,
+                   sss_mask: &Texture,
+                   output: &Texture) {
+        // Horizontal blur pass
+        {
+            let mut pass = cmd.begin_compute_pass();
+            pass.set_pipeline(&self.horizontal_blur_pipeline);
+            // Set bind groups...
+            let width = color.width();
+            let height = color.height();
+            pass.dispatch((width + 7) / 8, (height + 7) / 8, 1);
+        }
+
+        // Vertical blur pass
+        {
+            let mut pass = cmd.begin_compute_pass();
+            pass.set_pipeline(&self.vertical_blur_pipeline);
+            // Set bind groups...
+            let width = color.width();
+            let height = color.height();
+            pass.dispatch((width + 7) / 8, (height + 7) / 8, 1);
+        }
+    }
+
+    fn update_thickness_map(&self,
+                            cmd: &mut CommandEncoder,
+                            front_depth: &Texture,
+                            back_depth: &Texture) {
+        let mut pass = cmd.begin_compute_pass();
+        pass.set_pipeline(&self.thickness_pipeline);
+        // Set bind groups...
+        pass.dispatch(64, 64, 1);
+    }
+}

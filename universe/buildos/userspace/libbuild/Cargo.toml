@@ -1,0 +1,11 @@
+[package]
+name = "libbuild"
+version = "0.1.0"
+edition = "2021"
+authors = ["Zain Dana Harper"]
+description = "BuildOS user-space standard library"
+
+[dependencies]
+
+[features]
+default = []

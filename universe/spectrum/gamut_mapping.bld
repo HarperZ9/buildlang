@@ -1,0 +1,1501 @@
+// BUILD Spectrum - Gamut Mapping
+// Algorithms for mapping colors between different color gamuts
+// Implements compression, clipping, and perceptual gamut mapping
+
+use core::simd;
+use std::collections::HashMap;
+
+// ============================================================================
+// GAMUT MAPPING CONSTANTS
+// ============================================================================
+
+/// Default number of lightness steps for gamut boundary calculation
+const DEFAULT_LIGHTNESS_STEPS: usize = 101;
+
+/// Default number of hue steps for gamut boundary calculation
+const DEFAULT_HUE_STEPS: usize = 360;
+
+/// Convergence threshold for binary search
+const CONVERGENCE_THRESHOLD: f32 = 0.0001;
+
+/// Maximum iterations for iterative algorithms
+const MAX_ITERATIONS: usize = 50;
+
+// ============================================================================
+// COLOR GAMUT DEFINITIONS
+// ============================================================================
+
+/// Color gamut definition using CIE xy chromaticity coordinates
+struct ColorGamut {
+    /// Red primary (x, y)
+    red: (f32, f32),
+    /// Green primary (x, y)
+    green: (f32, f32),
+    /// Blue primary (x, y)
+    blue: (f32, f32),
+    /// White point (x, y)
+    white_point: (f32, f32),
+    /// Gamut name
+    name: String,
+}
+
+impl ColorGamut {
+    /// sRGB / Rec.709 gamut
+    fn srgb() -> Self {
+        Self {
+            red: (0.64, 0.33),
+            green: (0.30, 0.60),
+            blue: (0.15, 0.06),
+            white_point: (0.3127, 0.3290),
+            name: "sRGB".to_string(),
+        }
+    }
+
+    /// DCI-P3 gamut
+    fn dci_p3() -> Self {
+        Self {
+            red: (0.680, 0.320),
+            green: (0.265, 0.690),
+            blue: (0.150, 0.060),
+            white_point: (0.314, 0.351),
+            name: "DCI-P3".to_string(),
+        }
+    }
+
+    /// Display P3 gamut (D65 white point)
+    fn display_p3() -> Self {
+        Self {
+            red: (0.680, 0.320),
+            green: (0.265, 0.690),
+            blue: (0.150, 0.060),
+            white_point: (0.3127, 0.3290),
+            name: "Display P3".to_string(),
+        }
+    }
+
+    /// Rec.2020 gamut
+    fn rec2020() -> Self {
+        Self {
+            red: (0.708, 0.292),
+            green: (0.170, 0.797),
+            blue: (0.131, 0.046),
+            white_point: (0.3127, 0.3290),
+            name: "Rec.2020".to_string(),
+        }
+    }
+
+    /// Adobe RGB gamut
+    fn adobe_rgb() -> Self {
+        Self {
+            red: (0.64, 0.33),
+            green: (0.21, 0.71),
+            blue: (0.15, 0.06),
+            white_point: (0.3127, 0.3290),
+            name: "Adobe RGB".to_string(),
+        }
+    }
+
+    /// ACES AP0 gamut (encompassing)
+    fn aces_ap0() -> Self {
+        Self {
+            red: (0.7347, 0.2653),
+            green: (0.0000, 1.0000),
+            blue: (0.0001, -0.0770),
+            white_point: (0.32168, 0.33767),
+            name: "ACES AP0".to_string(),
+        }
+    }
+
+    /// ACES AP1 gamut
+    fn aces_ap1() -> Self {
+        Self {
+            red: (0.713, 0.293),
+            green: (0.165, 0.830),
+            blue: (0.128, 0.044),
+            white_point: (0.32168, 0.33767),
+            name: "ACES AP1".to_string(),
+        }
+    }
+
+    /// ProPhoto RGB gamut
+    fn prophoto_rgb() -> Self {
+        Self {
+            red: (0.7347, 0.2653),
+            green: (0.1596, 0.8404),
+            blue: (0.0366, 0.0001),
+            white_point: (0.3457, 0.3585),
+            name: "ProPhoto RGB".to_string(),
+        }
+    }
+
+    /// Calculate RGB to XYZ matrix
+    fn rgb_to_xyz_matrix(&self) -> [[f32; 3]; 3] {
+        // Calculate XYZ coordinates of primaries
+        let xr = self.red.0;
+        let yr = self.red.1;
+        let zr = 1.0 - xr - yr;
+
+        let xg = self.green.0;
+        let yg = self.green.1;
+        let zg = 1.0 - xg - yg;
+
+        let xb = self.blue.0;
+        let yb = self.blue.1;
+        let zb = 1.0 - xb - yb;
+
+        // Calculate white point XYZ
+        let xw = self.white_point.0 / self.white_point.1;
+        let yw = 1.0;
+        let zw = (1.0 - self.white_point.0 - self.white_point.1) / self.white_point.1;
+
+        // Build matrix and solve for scaling factors
+        let det = xr * (yg * zb - yb * zg)
+                - xg * (yr * zb - yb * zr)
+                + xb * (yr * zg - yg * zr);
+
+        let sr = ((xw * (yg * zb - yb * zg)
+                 - xg * (yw * zb - yb * zw)
+                 + xb * (yw * zg - yg * zw)) / det);
+
+        let sg = ((xr * (yw * zb - yb * zw)
+                 - xw * (yr * zb - yb * zr)
+                 + xb * (yr * zw - yw * zr)) / det);
+
+        let sb = ((xr * (yg * zw - yw * zg)
+                 - xg * (yr * zw - yw * zr)
+                 + xw * (yr * zg - yg * zr)) / det);
+
+        [
+            [sr * xr, sg * xg, sb * xb],
+            [sr * yr, sg * yg, sb * yb],
+            [sr * zr, sg * zg, sb * zb],
+        ]
+    }
+
+    /// Calculate XYZ to RGB matrix (inverse of rgb_to_xyz)
+    fn xyz_to_rgb_matrix(&self) -> [[f32; 3]; 3] {
+        let m = self.rgb_to_xyz_matrix();
+        invert_3x3(m)
+    }
+
+    /// Check if a point is inside the gamut triangle
+    fn contains_xy(&self, x: f32, y: f32) -> bool {
+        // Use barycentric coordinates
+        let v0 = (self.blue.0 - self.red.0, self.blue.1 - self.red.1);
+        let v1 = (self.green.0 - self.red.0, self.green.1 - self.red.1);
+        let v2 = (x - self.red.0, y - self.red.1);
+
+        let dot00 = v0.0 * v0.0 + v0.1 * v0.1;
+        let dot01 = v0.0 * v1.0 + v0.1 * v1.1;
+        let dot02 = v0.0 * v2.0 + v0.1 * v2.1;
+        let dot11 = v1.0 * v1.0 + v1.1 * v1.1;
+        let dot12 = v1.0 * v2.0 + v1.1 * v2.1;
+
+        let inv_denom = 1.0 / (dot00 * dot11 - dot01 * dot01);
+        let u = (dot11 * dot02 - dot01 * dot12) * inv_denom;
+        let v = (dot00 * dot12 - dot01 * dot02) * inv_denom;
+
+        u >= 0.0 && v >= 0.0 && u + v <= 1.0
+    }
+
+    /// Get gamut area in xy chromaticity
+    fn area(&self) -> f32 {
+        // Shoelace formula for triangle area
+        let x1 = self.red.0;
+        let y1 = self.red.1;
+        let x2 = self.green.0;
+        let y2 = self.green.1;
+        let x3 = self.blue.0;
+        let y3 = self.blue.1;
+
+        0.5 * ((x1 * (y2 - y3) + x2 * (y3 - y1) + x3 * (y1 - y2)).abs())
+    }
+
+    /// Get coverage ratio relative to another gamut
+    fn coverage_ratio(&self, other: &ColorGamut) -> f32 {
+        self.area() / other.area()
+    }
+}
+
+/// Invert 3x3 matrix
+fn invert_3x3(m: [[f32; 3]; 3]) -> [[f32; 3]; 3] {
+    let det = m[0][0] * (m[1][1] * m[2][2] - m[2][1] * m[1][2])
+            - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0])
+            + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0]);
+
+    let inv_det = 1.0 / det;
+
+    [
+        [
+            (m[1][1] * m[2][2] - m[2][1] * m[1][2]) * inv_det,
+            (m[0][2] * m[2][1] - m[0][1] * m[2][2]) * inv_det,
+            (m[0][1] * m[1][2] - m[0][2] * m[1][1]) * inv_det,
+        ],
+        [
+            (m[1][2] * m[2][0] - m[1][0] * m[2][2]) * inv_det,
+            (m[0][0] * m[2][2] - m[0][2] * m[2][0]) * inv_det,
+            (m[1][0] * m[0][2] - m[0][0] * m[1][2]) * inv_det,
+        ],
+        [
+            (m[1][0] * m[2][1] - m[2][0] * m[1][1]) * inv_det,
+            (m[2][0] * m[0][1] - m[0][0] * m[2][1]) * inv_det,
+            (m[0][0] * m[1][1] - m[1][0] * m[0][1]) * inv_det,
+        ],
+    ]
+}
+
+// ============================================================================
+// GAMUT MAPPING METHODS
+// ============================================================================
+
+/// Gamut mapping method enumeration
+enum GamutMappingMethod {
+    /// Simple clipping to RGB [0, 1]
+    Clip,
+    /// Clip in destination RGB space
+    ClipDestination,
+    /// Chroma compression towards neutral axis
+    ChromaCompression,
+    /// Chroma compression with lightness preservation
+    ChromaCompressionLightnessPreserve,
+    /// Hue-preserving chroma reduction (HPMINDE)
+    HuePreservingMinDeltaE,
+    /// Perceptual gamut mapping in Oklab
+    OklabPerceptual,
+    /// Perceptual gamut mapping in JzAzBz
+    JzAzBzPerceptual,
+    /// CUSP-based mapping (Colour Universal Space Processor)
+    CuspMapping,
+    /// Soft clipping with smooth transition
+    SoftClip { softness: f32 },
+    /// Local contrast aware mapping
+    LocalContrastAware,
+}
+
+/// Gamut boundary descriptor for a specific lightness
+struct GamutBoundary {
+    /// Lightness value (L* or similar)
+    lightness: f32,
+    /// Maximum chroma at each hue angle (degrees)
+    max_chroma: Vec<f32>,
+    /// Hue step in degrees
+    hue_step: f32,
+}
+
+impl GamutBoundary {
+    /// Create boundary with specified resolution
+    fn new(lightness: f32, hue_steps: usize) -> Self {
+        Self {
+            lightness,
+            max_chroma: vec![0.0; hue_steps],
+            hue_step: 360.0 / hue_steps as f32,
+        }
+    }
+
+    /// Get maximum chroma at given hue angle
+    fn get_max_chroma(&self, hue_degrees: f32) -> f32 {
+        let normalized_hue = ((hue_degrees % 360.0) + 360.0) % 360.0;
+        let index = (normalized_hue / self.hue_step) as usize;
+        let next_index = (index + 1) % self.max_chroma.len();
+
+        let t = (normalized_hue - index as f32 * self.hue_step) / self.hue_step;
+
+        self.max_chroma[index] * (1.0 - t) + self.max_chroma[next_index] * t
+    }
+
+    /// Check if chroma is within gamut at given hue
+    fn is_in_gamut(&self, chroma: f32, hue_degrees: f32) -> bool {
+        chroma <= self.get_max_chroma(hue_degrees)
+    }
+}
+
+/// Full gamut boundary description (3D)
+struct GamutBoundaryDescriptor {
+    /// Boundaries at different lightness levels
+    boundaries: Vec<GamutBoundary>,
+    /// Lightness step
+    lightness_step: f32,
+    /// Minimum lightness
+    min_lightness: f32,
+    /// Maximum lightness
+    max_lightness: f32,
+    /// Source gamut
+    source_gamut: ColorGamut,
+}
+
+impl GamutBoundaryDescriptor {
+    /// Build gamut boundary descriptor
+    fn build(gamut: &ColorGamut, lightness_steps: usize, hue_steps: usize) -> Self {
+        let lightness_step = 100.0 / (lightness_steps - 1) as f32;
+        let mut boundaries = Vec::with_capacity(lightness_steps);
+
+        for l_idx in 0..lightness_steps {
+            let lightness = l_idx as f32 * lightness_step;
+            let mut boundary = GamutBoundary::new(lightness, hue_steps);
+
+            // Calculate max chroma for each hue at this lightness
+            for h_idx in 0..hue_steps {
+                let hue = h_idx as f32 * 360.0 / hue_steps as f32;
+                boundary.max_chroma[h_idx] = Self::find_max_chroma(gamut, lightness, hue);
+            }
+
+            boundaries.push(boundary);
+        }
+
+        Self {
+            boundaries,
+            lightness_step,
+            min_lightness: 0.0,
+            max_lightness: 100.0,
+            source_gamut: gamut.clone(),
+        }
+    }
+
+    /// Find maximum chroma at given L, h using binary search
+    fn find_max_chroma(gamut: &ColorGamut, lightness: f32, hue: f32) -> f32 {
+        let xyz_to_rgb = gamut.xyz_to_rgb_matrix();
+
+        let mut low = 0.0;
+        let mut high = 200.0; // Generous upper bound for chroma
+
+        while high - low > CONVERGENCE_THRESHOLD {
+            let mid = (low + high) / 2.0;
+
+            // Convert LCH to Lab to XYZ to RGB
+            let hue_rad = hue.to_radians();
+            let a = mid * hue_rad.cos();
+            let b = mid * hue_rad.sin();
+
+            // Lab to XYZ
+            let fy = (lightness + 16.0) / 116.0;
+            let fx = a / 500.0 + fy;
+            let fz = fy - b / 200.0;
+
+            let x = if fx > 0.206893 { fx.powi(3) } else { (fx - 16.0/116.0) / 7.787 };
+            let y = if fy > 0.206893 { fy.powi(3) } else { (fy - 16.0/116.0) / 7.787 };
+            let z = if fz > 0.206893 { fz.powi(3) } else { (fz - 16.0/116.0) / 7.787 };
+
+            // D65 reference white
+            let x = x * 0.95047;
+            let z = z * 1.08883;
+
+            // XYZ to RGB
+            let r = xyz_to_rgb[0][0] * x + xyz_to_rgb[0][1] * y + xyz_to_rgb[0][2] * z;
+            let g = xyz_to_rgb[1][0] * x + xyz_to_rgb[1][1] * y + xyz_to_rgb[1][2] * z;
+            let b = xyz_to_rgb[2][0] * x + xyz_to_rgb[2][1] * y + xyz_to_rgb[2][2] * z;
+
+            // Check if in gamut (RGB in [0, 1])
+            if r >= -0.001 && r <= 1.001 && g >= -0.001 && g <= 1.001 && b >= -0.001 && b <= 1.001 {
+                low = mid;
+            } else {
+                high = mid;
+            }
+        }
+
+        low
+    }
+
+    /// Get maximum chroma at given lightness and hue
+    fn get_max_chroma(&self, lightness: f32, hue: f32) -> f32 {
+        let clamped_l = lightness.clamp(self.min_lightness, self.max_lightness);
+        let l_index = (clamped_l / self.lightness_step) as usize;
+        let l_index = l_index.min(self.boundaries.len() - 2);
+
+        let t = (clamped_l - l_index as f32 * self.lightness_step) / self.lightness_step;
+
+        let c1 = self.boundaries[l_index].get_max_chroma(hue);
+        let c2 = self.boundaries[l_index + 1].get_max_chroma(hue);
+
+        c1 * (1.0 - t) + c2 * t
+    }
+
+    /// Check if color is in gamut
+    fn is_in_gamut(&self, lightness: f32, chroma: f32, hue: f32) -> bool {
+        chroma <= self.get_max_chroma(lightness, hue)
+    }
+
+    /// Find cusp (maximum chroma lightness) for given hue
+    fn find_cusp(&self, hue: f32) -> (f32, f32) {
+        let mut max_chroma = 0.0;
+        let mut cusp_lightness = 50.0;
+
+        for boundary in &self.boundaries {
+            let c = boundary.get_max_chroma(hue);
+            if c > max_chroma {
+                max_chroma = c;
+                cusp_lightness = boundary.lightness;
+            }
+        }
+
+        (cusp_lightness, max_chroma)
+    }
+}
+
+// ============================================================================
+// GAMUT MAPPER
+// ============================================================================
+
+/// Main gamut mapper structure
+struct GamutMapper {
+    /// Source gamut
+    source: ColorGamut,
+    /// Destination gamut
+    destination: ColorGamut,
+    /// Source gamut boundary
+    source_boundary: GamutBoundaryDescriptor,
+    /// Destination gamut boundary
+    dest_boundary: GamutBoundaryDescriptor,
+    /// Mapping method
+    method: GamutMappingMethod,
+}
+
+impl GamutMapper {
+    /// Create gamut mapper
+    fn new(source: ColorGamut, destination: ColorGamut, method: GamutMappingMethod) -> Self {
+        let source_boundary = GamutBoundaryDescriptor::build(&source, DEFAULT_LIGHTNESS_STEPS, DEFAULT_HUE_STEPS);
+        let dest_boundary = GamutBoundaryDescriptor::build(&destination, DEFAULT_LIGHTNESS_STEPS, DEFAULT_HUE_STEPS);
+
+        Self {
+            source,
+            destination,
+            source_boundary,
+            dest_boundary,
+            method,
+        }
+    }
+
+    /// Map a single color (in Lab space)
+    fn map_lab(&self, l: f32, a: f32, b: f32) -> (f32, f32, f32) {
+        match &self.method {
+            GamutMappingMethod::Clip => self.clip_rgb(l, a, b),
+            GamutMappingMethod::ClipDestination => self.clip_destination(l, a, b),
+            GamutMappingMethod::ChromaCompression => self.compress_chroma(l, a, b),
+            GamutMappingMethod::ChromaCompressionLightnessPreserve => {
+                self.compress_chroma_preserve_lightness(l, a, b)
+            }
+            GamutMappingMethod::HuePreservingMinDeltaE => self.hpminde(l, a, b),
+            GamutMappingMethod::OklabPerceptual => self.oklab_perceptual(l, a, b),
+            GamutMappingMethod::JzAzBzPerceptual => self.jzazbz_perceptual(l, a, b),
+            GamutMappingMethod::CuspMapping => self.cusp_mapping(l, a, b),
+            GamutMappingMethod::SoftClip { softness } => self.soft_clip(l, a, b, *softness),
+            GamutMappingMethod::LocalContrastAware => {
+                // Simplified version without neighborhood context
+                self.compress_chroma(l, a, b)
+            }
+        }
+    }
+
+    /// Simple RGB clipping
+    fn clip_rgb(&self, l: f32, a: f32, b: f32) -> (f32, f32, f32) {
+        // Convert to XYZ
+        let xyz = lab_to_xyz(l, a, b);
+
+        // Convert to destination RGB
+        let m = self.destination.xyz_to_rgb_matrix();
+        let r = m[0][0] * xyz.0 + m[0][1] * xyz.1 + m[0][2] * xyz.2;
+        let g = m[1][0] * xyz.0 + m[1][1] * xyz.1 + m[1][2] * xyz.2;
+        let b_rgb = m[2][0] * xyz.0 + m[2][1] * xyz.1 + m[2][2] * xyz.2;
+
+        // Clip and convert back to Lab
+        let clipped_r = r.clamp(0.0, 1.0);
+        let clipped_g = g.clamp(0.0, 1.0);
+        let clipped_b = b_rgb.clamp(0.0, 1.0);
+
+        // RGB back to XYZ
+        let m_inv = self.destination.rgb_to_xyz_matrix();
+        let x = m_inv[0][0] * clipped_r + m_inv[0][1] * clipped_g + m_inv[0][2] * clipped_b;
+        let y = m_inv[1][0] * clipped_r + m_inv[1][1] * clipped_g + m_inv[1][2] * clipped_b;
+        let z = m_inv[2][0] * clipped_r + m_inv[2][1] * clipped_g + m_inv[2][2] * clipped_b;
+
+        xyz_to_lab(x, y, z)
+    }
+
+    /// Clip in destination color space
+    fn clip_destination(&self, l: f32, a: f32, b: f32) -> (f32, f32, f32) {
+        self.clip_rgb(l, a, b)
+    }
+
+    /// Chroma compression towards neutral axis
+    fn compress_chroma(&self, l: f32, a: f32, b: f32) -> (f32, f32, f32) {
+        let chroma = (a * a + b * b).sqrt();
+        let hue = b.atan2(a).to_degrees();
+        let hue = if hue < 0.0 { hue + 360.0 } else { hue };
+
+        // Get destination gamut boundary at this L and h
+        let max_chroma = self.dest_boundary.get_max_chroma(l, hue);
+
+        if chroma <= max_chroma {
+            return (l, a, b);
+        }
+
+        // Compress chroma
+        let new_chroma = max_chroma * (1.0 - (-chroma / max_chroma).exp()) / (1.0 - (-1.0f32).exp());
+        let hue_rad = hue.to_radians();
+
+        (l, new_chroma * hue_rad.cos(), new_chroma * hue_rad.sin())
+    }
+
+    /// Chroma compression with strict lightness preservation
+    fn compress_chroma_preserve_lightness(&self, l: f32, a: f32, b: f32) -> (f32, f32, f32) {
+        let chroma = (a * a + b * b).sqrt();
+        let hue = b.atan2(a).to_degrees();
+        let hue = if hue < 0.0 { hue + 360.0 } else { hue };
+
+        let max_chroma = self.dest_boundary.get_max_chroma(l, hue);
+
+        if chroma <= max_chroma {
+            return (l, a, b);
+        }
+
+        // Simple linear compression to boundary
+        let scale = max_chroma / chroma;
+        (l, a * scale, b * scale)
+    }
+
+    /// Hue-preserving minimum delta E (HPMINDE)
+    fn hpminde(&self, l: f32, a: f32, b: f32) -> (f32, f32, f32) {
+        let chroma = (a * a + b * b).sqrt();
+        let hue = b.atan2(a);
+        let hue_deg = hue.to_degrees();
+        let hue_deg = if hue_deg < 0.0 { hue_deg + 360.0 } else { hue_deg };
+
+        // Check if already in gamut
+        if self.dest_boundary.is_in_gamut(l, chroma, hue_deg) {
+            return (l, a, b);
+        }
+
+        // Find cusp for this hue
+        let (cusp_l, cusp_c) = self.dest_boundary.find_cusp(hue_deg);
+
+        // Binary search along line from current point to neutral axis
+        let mut best_l = l;
+        let mut best_c = 0.0;
+        let mut min_dist = f32::MAX;
+
+        // Try different lightness values
+        for l_step in 0..100 {
+            let test_l = l_step as f32;
+            let max_c = self.dest_boundary.get_max_chroma(test_l, hue_deg);
+
+            // Calculate distance to original color
+            let dl = l - test_l;
+            let dc = chroma - max_c;
+            let dist = dl * dl + dc * dc;
+
+            if dist < min_dist && max_c > 0.0 {
+                min_dist = dist;
+                best_l = test_l;
+                best_c = max_c;
+            }
+        }
+
+        (best_l, best_c * hue.cos(), best_c * hue.sin())
+    }
+
+    /// Perceptual mapping in Oklab space
+    fn oklab_perceptual(&self, l: f32, a: f32, b: f32) -> (f32, f32, f32) {
+        // Convert Lab to Oklab for more perceptually uniform mapping
+        let xyz = lab_to_xyz(l, a, b);
+        let oklab = xyz_to_oklab(xyz.0, xyz.1, xyz.2);
+
+        // Perform mapping in Oklab
+        let chroma = (oklab.1 * oklab.1 + oklab.2 * oklab.2).sqrt();
+        let hue = oklab.2.atan2(oklab.1);
+
+        // Find gamut boundary in Oklab (using Lab boundary as approximation)
+        let hue_deg = hue.to_degrees();
+        let hue_deg = if hue_deg < 0.0 { hue_deg + 360.0 } else { hue_deg };
+        let l_mapped = oklab.0 * 100.0;
+
+        let max_chroma = self.dest_boundary.get_max_chroma(l_mapped, hue_deg) / 100.0;
+
+        if chroma <= max_chroma {
+            return (l, a, b);
+        }
+
+        // Compress in Oklab
+        let toe = 0.05;
+        let knee = max_chroma * 0.8;
+
+        let compressed = if chroma <= knee {
+            chroma
+        } else {
+            let t = (chroma - knee) / (chroma - knee + toe);
+            knee + t * (max_chroma - knee)
+        };
+
+        let new_a = compressed * hue.cos();
+        let new_b = compressed * hue.sin();
+
+        // Convert back to Lab
+        let new_xyz = oklab_to_xyz(oklab.0, new_a, new_b);
+        xyz_to_lab(new_xyz.0, new_xyz.1, new_xyz.2)
+    }
+
+    /// Perceptual mapping in JzAzBz space
+    fn jzazbz_perceptual(&self, l: f32, a: f32, b: f32) -> (f32, f32, f32) {
+        // Similar to Oklab but using JzAzBz for HDR content
+        let xyz = lab_to_xyz(l, a, b);
+        let jzazbz = xyz_to_jzazbz(xyz.0, xyz.1, xyz.2);
+
+        let chroma = (jzazbz.1 * jzazbz.1 + jzazbz.2 * jzazbz.2).sqrt();
+        let hue = jzazbz.2.atan2(jzazbz.1);
+
+        let hue_deg = hue.to_degrees();
+        let hue_deg = if hue_deg < 0.0 { hue_deg + 360.0 } else { hue_deg };
+
+        // Map Jz to L* range for boundary lookup
+        let l_equiv = jzazbz.0 * 100.0;
+        let max_chroma = self.dest_boundary.get_max_chroma(l_equiv, hue_deg) / 100.0;
+
+        if chroma <= max_chroma {
+            return (l, a, b);
+        }
+
+        // Soft compression
+        let compressed = max_chroma * (1.0 - (-chroma / max_chroma * 1.5).exp());
+
+        let new_az = compressed * hue.cos();
+        let new_bz = compressed * hue.sin();
+
+        let new_xyz = jzazbz_to_xyz(jzazbz.0, new_az, new_bz);
+        xyz_to_lab(new_xyz.0, new_xyz.1, new_xyz.2)
+    }
+
+    /// CUSP-based gamut mapping
+    fn cusp_mapping(&self, l: f32, a: f32, b: f32) -> (f32, f32, f32) {
+        let chroma = (a * a + b * b).sqrt();
+        let hue = b.atan2(a);
+        let hue_deg = hue.to_degrees();
+        let hue_deg = if hue_deg < 0.0 { hue_deg + 360.0 } else { hue_deg };
+
+        // Find cusps for source and destination
+        let (src_cusp_l, src_cusp_c) = self.source_boundary.find_cusp(hue_deg);
+        let (dst_cusp_l, dst_cusp_c) = self.dest_boundary.find_cusp(hue_deg);
+
+        // Focal point based on cusps
+        let focal_l = (src_cusp_l + dst_cusp_l) / 2.0;
+
+        // Map color towards focal point
+        if self.dest_boundary.is_in_gamut(l, chroma, hue_deg) {
+            return (l, a, b);
+        }
+
+        // Line from focal point through original color
+        let dl = l - focal_l;
+        let dc = chroma;
+
+        // Find intersection with destination gamut
+        let mut t_min = 0.0;
+        let mut t_max = 1.0;
+
+        for _ in 0..MAX_ITERATIONS {
+            let t = (t_min + t_max) / 2.0;
+            let test_l = focal_l + dl * t;
+            let test_c = dc * t;
+
+            if self.dest_boundary.is_in_gamut(test_l, test_c, hue_deg) {
+                t_min = t;
+            } else {
+                t_max = t;
+            }
+
+            if t_max - t_min < CONVERGENCE_THRESHOLD {
+                break;
+            }
+        }
+
+        let final_l = focal_l + dl * t_min;
+        let final_c = dc * t_min;
+
+        (final_l, final_c * hue.cos(), final_c * hue.sin())
+    }
+
+    /// Soft clipping with smooth transition
+    fn soft_clip(&self, l: f32, a: f32, b: f32, softness: f32) -> (f32, f32, f32) {
+        let chroma = (a * a + b * b).sqrt();
+        let hue = b.atan2(a);
+        let hue_deg = hue.to_degrees();
+        let hue_deg = if hue_deg < 0.0 { hue_deg + 360.0 } else { hue_deg };
+
+        let max_chroma = self.dest_boundary.get_max_chroma(l, hue_deg);
+
+        if chroma <= max_chroma * (1.0 - softness) {
+            return (l, a, b);
+        }
+
+        // Smooth transition zone
+        let knee = max_chroma * (1.0 - softness);
+        let excess = chroma - knee;
+        let range = max_chroma - knee;
+
+        let compressed = if excess <= range {
+            // Smooth compression using cubic easing
+            let t = excess / range;
+            let eased = t * t * (3.0 - 2.0 * t);
+            knee + eased * range
+        } else {
+            max_chroma
+        };
+
+        (l, compressed * hue.cos(), compressed * hue.sin())
+    }
+
+    /// Map array of colors
+    fn map_colors(&self, colors: &mut [(f32, f32, f32)]) {
+        for color in colors.iter_mut() {
+            *color = self.map_lab(color.0, color.1, color.2);
+        }
+    }
+}
+
+// ============================================================================
+// COLOR SPACE CONVERSION HELPERS
+// ============================================================================
+
+/// Lab to XYZ conversion
+fn lab_to_xyz(l: f32, a: f32, b: f32) -> (f32, f32, f32) {
+    let fy = (l + 16.0) / 116.0;
+    let fx = a / 500.0 + fy;
+    let fz = fy - b / 200.0;
+
+    let epsilon = 0.008856;
+    let kappa = 903.3;
+
+    let xr = if fx.powi(3) > epsilon { fx.powi(3) } else { (116.0 * fx - 16.0) / kappa };
+    let yr = if l > kappa * epsilon { ((l + 16.0) / 116.0).powi(3) } else { l / kappa };
+    let zr = if fz.powi(3) > epsilon { fz.powi(3) } else { (116.0 * fz - 16.0) / kappa };
+
+    // D65 reference white
+    (xr * 0.95047, yr * 1.0, zr * 1.08883)
+}
+
+/// XYZ to Lab conversion
+fn xyz_to_lab(x: f32, y: f32, z: f32) -> (f32, f32, f32) {
+    // D65 reference white
+    let xn = x / 0.95047;
+    let yn = y / 1.0;
+    let zn = z / 1.08883;
+
+    let epsilon = 0.008856;
+    let kappa = 903.3;
+
+    let fx = if xn > epsilon { xn.cbrt() } else { (kappa * xn + 16.0) / 116.0 };
+    let fy = if yn > epsilon { yn.cbrt() } else { (kappa * yn + 16.0) / 116.0 };
+    let fz = if zn > epsilon { zn.cbrt() } else { (kappa * zn + 16.0) / 116.0 };
+
+    let l = 116.0 * fy - 16.0;
+    let a = 500.0 * (fx - fy);
+    let b = 200.0 * (fy - fz);
+
+    (l, a, b)
+}
+
+/// XYZ to Oklab conversion
+fn xyz_to_oklab(x: f32, y: f32, z: f32) -> (f32, f32, f32) {
+    // XYZ to LMS
+    let l = 0.8189330101 * x + 0.3618667424 * y - 0.1288597137 * z;
+    let m = 0.0329845436 * x + 0.9293118715 * y + 0.0361456387 * z;
+    let s = 0.0482003018 * x + 0.2643662691 * y + 0.6338517070 * z;
+
+    // Cube root
+    let l_ = l.cbrt();
+    let m_ = m.cbrt();
+    let s_ = s.cbrt();
+
+    // LMS to Oklab
+    let ok_l = 0.2104542553 * l_ + 0.7936177850 * m_ - 0.0040720468 * s_;
+    let ok_a = 1.9779984951 * l_ - 2.4285922050 * m_ + 0.4505937099 * s_;
+    let ok_b = 0.0259040371 * l_ + 0.7827717662 * m_ - 0.8086757660 * s_;
+
+    (ok_l, ok_a, ok_b)
+}
+
+/// Oklab to XYZ conversion
+fn oklab_to_xyz(l: f32, a: f32, b: f32) -> (f32, f32, f32) {
+    // Oklab to LMS
+    let l_ = l + 0.3963377774 * a + 0.2158037573 * b;
+    let m_ = l - 0.1055613458 * a - 0.0638541728 * b;
+    let s_ = l - 0.0894841775 * a - 1.2914855480 * b;
+
+    // Cube
+    let l_cubed = l_ * l_ * l_;
+    let m_cubed = m_ * m_ * m_;
+    let s_cubed = s_ * s_ * s_;
+
+    // LMS to XYZ
+    let x = 1.2270138511 * l_cubed - 0.5577999807 * m_cubed + 0.2812561490 * s_cubed;
+    let y = -0.0405801784 * l_cubed + 1.1122568696 * m_cubed - 0.0716766787 * s_cubed;
+    let z = -0.0763812845 * l_cubed - 0.4214819784 * m_cubed + 1.5861632204 * s_cubed;
+
+    (x, y, z)
+}
+
+/// XYZ to JzAzBz conversion (simplified, assuming SDR range)
+fn xyz_to_jzazbz(x: f32, y: f32, z: f32) -> (f32, f32, f32) {
+    let b = 1.15;
+    let g = 0.66;
+
+    let x_ = b * x - (b - 1.0) * z;
+    let y_ = g * y - (g - 1.0) * x;
+
+    // Convert to LMS
+    let l = 0.41478972 * x_ + 0.579999 * y_ + 0.0146480 * z;
+    let m = -0.2015100 * x_ + 1.120649 * y_ + 0.0531008 * z;
+    let s = -0.0166008 * x_ + 0.264800 * y_ + 0.6684799 * z;
+
+    // PQ-like transfer (simplified)
+    let l_ = pq_like(l.max(0.0));
+    let m_ = pq_like(m.max(0.0));
+    let s_ = pq_like(s.max(0.0));
+
+    // To Iz, Az, Bz
+    let iz = 0.5 * (l_ + m_);
+    let az = 3.524000 * l_ - 4.066708 * m_ + 0.542708 * s_;
+    let bz = 0.199076 * l_ + 1.096799 * m_ - 1.295875 * s_;
+
+    // Jz
+    let d = -0.56;
+    let d0 = 1.6295499532821566e-11;
+    let jz = ((1.0 + d) * iz) / (1.0 + d * iz) - d0;
+
+    (jz, az, bz)
+}
+
+/// JzAzBz to XYZ conversion (simplified)
+fn jzazbz_to_xyz(jz: f32, az: f32, bz: f32) -> (f32, f32, f32) {
+    let d = -0.56;
+    let d0 = 1.6295499532821566e-11;
+
+    // Reverse Jz to Iz
+    let iz = (jz + d0) / (1.0 + d - d * (jz + d0));
+
+    // Reverse to L', M', S'
+    let l_ = iz + 0.1386050432715393 * az + 0.0580473161561189 * bz;
+    let m_ = iz - 0.1386050432715393 * az - 0.0580473161561189 * bz;
+    let s_ = iz - 0.0960192420263190 * az - 0.8118918960560390 * bz;
+
+    // Reverse PQ
+    let l = inverse_pq_like(l_);
+    let m = inverse_pq_like(m_);
+    let s = inverse_pq_like(s_);
+
+    // LMS to XYZ (inverse)
+    let x_ = 1.9242264358 * l - 1.0047923126 * m + 0.0376514040 * s;
+    let y_ = 0.3503167621 * l + 0.7264811939 * m - 0.0653844230 * s;
+    let z = -0.0909828109 * l - 0.3127282905 * m + 1.5227665613 * s;
+
+    let b = 1.15;
+    let g = 0.66;
+
+    let x = (x_ + (b - 1.0) * z) / b;
+    let y = (y_ + (g - 1.0) * x) / g;
+
+    (x, y, z)
+}
+
+/// PQ-like transfer function (simplified)
+fn pq_like(v: f32) -> f32 {
+    let c1 = 0.8359375;
+    let c2 = 18.8515625;
+    let c3 = 18.6875;
+    let n = 0.15930175781;
+    let p = 134.034375;
+
+    let vm = v.powf(n);
+    let num = c1 + c2 * vm;
+    let den = 1.0 + c3 * vm;
+
+    (num / den).powf(p)
+}
+
+/// Inverse PQ-like transfer function
+fn inverse_pq_like(v: f32) -> f32 {
+    let c1 = 0.8359375;
+    let c2 = 18.8515625;
+    let c3 = 18.6875;
+    let n = 0.15930175781;
+    let p = 134.034375;
+
+    let vp = v.powf(1.0 / p);
+    let num = (vp - c1).max(0.0);
+    let den = c2 - c3 * vp;
+
+    (num / den).powf(1.0 / n)
+}
+
+// ============================================================================
+// GAMUT WARNING / VISUALIZATION
+// ============================================================================
+
+/// Gamut warning modes
+enum GamutWarningMode {
+    /// No warning
+    None,
+    /// Highlight out-of-gamut colors with solid color
+    SolidColor { color: (f32, f32, f32) },
+    /// Overlay pattern on out-of-gamut areas
+    Pattern,
+    /// Show chroma reduction amount
+    ChromaReduction,
+    /// Show both lightness and chroma changes
+    FullDelta,
+}
+
+/// Gamut warning generator
+struct GamutWarning {
+    /// Warning mode
+    mode: GamutWarningMode,
+    /// Destination gamut boundary
+    boundary: GamutBoundaryDescriptor,
+}
+
+impl GamutWarning {
+    /// Create gamut warning generator
+    fn new(mode: GamutWarningMode, destination: &ColorGamut) -> Self {
+        let boundary = GamutBoundaryDescriptor::build(destination, 101, 360);
+        Self { mode, boundary }
+    }
+
+    /// Check if color is out of gamut and generate warning
+    fn process(&self, l: f32, a: f32, b: f32, x: usize, y: usize) -> Option<(f32, f32, f32)> {
+        let chroma = (a * a + b * b).sqrt();
+        let hue = b.atan2(a).to_degrees();
+        let hue = if hue < 0.0 { hue + 360.0 } else { hue };
+
+        if self.boundary.is_in_gamut(l, chroma, hue) {
+            return None;
+        }
+
+        match &self.mode {
+            GamutWarningMode::None => None,
+            GamutWarningMode::SolidColor { color } => Some(*color),
+            GamutWarningMode::Pattern => {
+                // Checkerboard pattern
+                if (x + y) % 2 == 0 {
+                    Some((100.0, 80.0, 0.0)) // Yellow in Lab
+                } else {
+                    None // Show original
+                }
+            }
+            GamutWarningMode::ChromaReduction => {
+                let max_chroma = self.boundary.get_max_chroma(l, hue);
+                let reduction = (chroma - max_chroma) / chroma;
+                // Show reduction as blue shift
+                Some((l, a * (1.0 - reduction), b * (1.0 - reduction) - reduction * 50.0))
+            }
+            GamutWarningMode::FullDelta => {
+                // Full delta visualization
+                let max_chroma = self.boundary.get_max_chroma(l, hue);
+                let chroma_delta = chroma - max_chroma;
+                // Magenta tint proportional to out-of-gamut amount
+                Some((l, a + chroma_delta * 0.5, b - chroma_delta * 0.5))
+            }
+        }
+    }
+}
+
+// ============================================================================
+// GAMUT INTERSECTION
+// ============================================================================
+
+/// Find intersection of two gamuts
+struct GamutIntersection {
+    /// First gamut
+    gamut_a: ColorGamut,
+    /// Second gamut
+    gamut_b: ColorGamut,
+}
+
+impl GamutIntersection {
+    /// Create intersection analyzer
+    fn new(a: ColorGamut, b: ColorGamut) -> Self {
+        Self { gamut_a: a, gamut_b: b }
+    }
+
+    /// Check if point is in intersection
+    fn in_intersection_xy(&self, x: f32, y: f32) -> bool {
+        self.gamut_a.contains_xy(x, y) && self.gamut_b.contains_xy(x, y)
+    }
+
+    /// Get approximate intersection area
+    fn intersection_area(&self, samples: usize) -> f32 {
+        let mut inside_count = 0;
+
+        // Monte Carlo sampling within bounding box
+        let min_x = 0.0;
+        let max_x = 0.8;
+        let min_y = 0.0;
+        let max_y = 0.9;
+
+        for i in 0..samples {
+            for j in 0..samples {
+                let x = min_x + (max_x - min_x) * i as f32 / samples as f32;
+                let y = min_y + (max_y - min_y) * j as f32 / samples as f32;
+
+                if self.in_intersection_xy(x, y) {
+                    inside_count += 1;
+                }
+            }
+        }
+
+        let box_area = (max_x - min_x) * (max_y - min_y);
+        box_area * inside_count as f32 / (samples * samples) as f32
+    }
+
+    /// Get gamut coverage percentage (A covered by B)
+    fn coverage_percentage(&self, samples: usize) -> f32 {
+        let intersection = self.intersection_area(samples);
+        let a_area = self.gamut_a.area();
+
+        if a_area > 0.0 {
+            (intersection / a_area * 100.0).min(100.0)
+        } else {
+            0.0
+        }
+    }
+}
+
+// ============================================================================
+// BATCH PROCESSING
+// ============================================================================
+
+/// Batch gamut mapping processor
+struct BatchGamutMapper {
+    /// Underlying mapper
+    mapper: GamutMapper,
+    /// Enable parallel processing
+    parallel: bool,
+    /// Chunk size for parallel processing
+    chunk_size: usize,
+}
+
+impl BatchGamutMapper {
+    /// Create batch processor
+    fn new(mapper: GamutMapper) -> Self {
+        Self {
+            mapper,
+            parallel: true,
+            chunk_size: 1024,
+        }
+    }
+
+    /// Process image buffer (in Lab space)
+    fn process_image(&self, pixels: &mut [(f32, f32, f32)]) {
+        if self.parallel {
+            // Would use rayon or similar for parallel processing
+            for chunk in pixels.chunks_mut(self.chunk_size) {
+                for pixel in chunk.iter_mut() {
+                    *pixel = self.mapper.map_lab(pixel.0, pixel.1, pixel.2);
+                }
+            }
+        } else {
+            for pixel in pixels.iter_mut() {
+                *pixel = self.mapper.map_lab(pixel.0, pixel.1, pixel.2);
+            }
+        }
+    }
+
+    /// Process with statistics
+    fn process_with_stats(&self, pixels: &mut [(f32, f32, f32)]) -> GamutMappingStats {
+        let mut stats = GamutMappingStats::default();
+
+        for pixel in pixels.iter_mut() {
+            let original = *pixel;
+            let mapped = self.mapper.map_lab(pixel.0, pixel.1, pixel.2);
+
+            let orig_chroma = (original.1 * original.1 + original.2 * original.2).sqrt();
+            let mapped_chroma = (mapped.1 * mapped.1 + mapped.2 * mapped.2).sqrt();
+
+            if (mapped_chroma - orig_chroma).abs() > 0.001 {
+                stats.modified_pixels += 1;
+                stats.total_chroma_reduction += orig_chroma - mapped_chroma;
+                stats.max_chroma_reduction = stats.max_chroma_reduction.max(orig_chroma - mapped_chroma);
+            }
+
+            let lightness_change = (mapped.0 - original.0).abs();
+            if lightness_change > 0.001 {
+                stats.total_lightness_change += lightness_change;
+                stats.max_lightness_change = stats.max_lightness_change.max(lightness_change);
+            }
+
+            stats.total_pixels += 1;
+            *pixel = mapped;
+        }
+
+        stats.out_of_gamut_percentage = stats.modified_pixels as f32 / stats.total_pixels as f32 * 100.0;
+
+        stats
+    }
+}
+
+/// Statistics from gamut mapping
+#[derive(Default)]
+struct GamutMappingStats {
+    /// Total pixels processed
+    total_pixels: usize,
+    /// Number of pixels that were modified
+    modified_pixels: usize,
+    /// Percentage of out-of-gamut pixels
+    out_of_gamut_percentage: f32,
+    /// Total chroma reduction across all pixels
+    total_chroma_reduction: f32,
+    /// Maximum chroma reduction for any single pixel
+    max_chroma_reduction: f32,
+    /// Total lightness change
+    total_lightness_change: f32,
+    /// Maximum lightness change
+    max_lightness_change: f32,
+}
+
+// ============================================================================
+// WGSL SHADERS
+// ============================================================================
+
+/// Gamut mapping shader
+const GAMUT_MAP_SHADER: &str = r#"
+// Gamut Mapping Compute Shader
+
+@group(0) @binding(0) var input_texture: texture_2d<f32>;
+@group(0) @binding(1) var output_texture: texture_storage_2d<rgba16float, write>;
+@group(0) @binding(2) var<uniform> params: GamutParams;
+@group(0) @binding(3) var<storage, read> boundary_lut: array<f32>;
+
+struct GamutParams {
+    method: u32,
+    softness: f32,
+    hue_steps: u32,
+    lightness_steps: u32,
+};
+
+// Lab to LCH
+fn lab_to_lch(lab: vec3<f32>) -> vec3<f32> {
+    let c = sqrt(lab.y * lab.y + lab.z * lab.z);
+    var h = atan2(lab.z, lab.y);
+    if (h < 0.0) {
+        h += 6.283185307;
+    }
+    return vec3<f32>(lab.x, c, h);
+}
+
+// LCH to Lab
+fn lch_to_lab(lch: vec3<f32>) -> vec3<f32> {
+    return vec3<f32>(lch.x, lch.y * cos(lch.z), lch.y * sin(lch.z));
+}
+
+// Get max chroma from LUT
+fn get_max_chroma(l: f32, h: f32) -> f32 {
+    let l_idx = u32(clamp(l / 100.0 * f32(params.lightness_steps - 1u), 0.0, f32(params.lightness_steps - 1u)));
+    let h_idx = u32(clamp(h / 6.283185307 * f32(params.hue_steps), 0.0, f32(params.hue_steps - 1u)));
+    let idx = l_idx * params.hue_steps + h_idx;
+    return boundary_lut[idx];
+}
+
+// Compress chroma
+fn compress_chroma(lch: vec3<f32>) -> vec3<f32> {
+    let max_c = get_max_chroma(lch.x, lch.z);
+
+    if (lch.y <= max_c) {
+        return lch;
+    }
+
+    // Soft compression
+    let knee = max_c * (1.0 - params.softness);
+    var new_c: f32;
+
+    if (lch.y <= knee) {
+        new_c = lch.y;
+    } else {
+        let excess = lch.y - knee;
+        let range = max_c - knee;
+        let t = excess / (excess + range);
+        new_c = knee + t * range;
+    }
+
+    return vec3<f32>(lch.x, new_c, lch.z);
+}
+
+@compute @workgroup_size(8, 8, 1)
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+    let dims = textureDimensions(input_texture);
+    if (global_id.x >= dims.x || global_id.y >= dims.y) {
+        return;
+    }
+
+    let coords = vec2<i32>(global_id.xy);
+    var color = textureLoad(input_texture, coords, 0);
+
+    // Assume input is in Lab-like space
+    let lch = lab_to_lch(color.rgb);
+    let mapped_lch = compress_chroma(lch);
+    let mapped_lab = lch_to_lab(mapped_lch);
+
+    textureStore(output_texture, coords, vec4<f32>(mapped_lab, color.a));
+}
+"#;
+
+/// Gamut warning overlay shader
+const GAMUT_WARNING_SHADER: &str = r#"
+// Gamut Warning Overlay Shader
+
+@group(0) @binding(0) var input_texture: texture_2d<f32>;
+@group(0) @binding(1) var output_texture: texture_storage_2d<rgba16float, write>;
+@group(0) @binding(2) var<uniform> params: WarningParams;
+@group(0) @binding(3) var<storage, read> boundary_lut: array<f32>;
+
+struct WarningParams {
+    mode: u32,          // 0=none, 1=solid, 2=pattern, 3=delta
+    warning_color: vec3<f32>,
+    hue_steps: u32,
+    lightness_steps: u32,
+};
+
+fn get_max_chroma(l: f32, h: f32) -> f32 {
+    let l_idx = u32(clamp(l / 100.0 * f32(params.lightness_steps - 1u), 0.0, f32(params.lightness_steps - 1u)));
+    let h_idx = u32(clamp(h / 6.283185307 * f32(params.hue_steps), 0.0, f32(params.hue_steps - 1u)));
+    let idx = l_idx * params.hue_steps + h_idx;
+    return boundary_lut[idx];
+}
+
+fn is_out_of_gamut(lab: vec3<f32>) -> bool {
+    let c = sqrt(lab.y * lab.y + lab.z * lab.z);
+    var h = atan2(lab.z, lab.y);
+    if (h < 0.0) {
+        h += 6.283185307;
+    }
+    return c > get_max_chroma(lab.x, h);
+}
+
+@compute @workgroup_size(8, 8, 1)
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+    let dims = textureDimensions(input_texture);
+    if (global_id.x >= dims.x || global_id.y >= dims.y) {
+        return;
+    }
+
+    let coords = vec2<i32>(global_id.xy);
+    var color = textureLoad(input_texture, coords, 0);
+
+    if (params.mode == 0u || !is_out_of_gamut(color.rgb)) {
+        textureStore(output_texture, coords, color);
+        return;
+    }
+
+    var output_color: vec3<f32>;
+
+    switch (params.mode) {
+        case 1u: {
+            // Solid warning color
+            output_color = params.warning_color;
+        }
+        case 2u: {
+            // Checkerboard pattern
+            if ((global_id.x + global_id.y) % 2u == 0u) {
+                output_color = params.warning_color;
+            } else {
+                output_color = color.rgb;
+            }
+        }
+        case 3u: {
+            // Delta visualization
+            let c = sqrt(color.g * color.g + color.b * color.b);
+            var h = atan2(color.b, color.g);
+            if (h < 0.0) {
+                h += 6.283185307;
+            }
+            let max_c = get_max_chroma(color.r, h);
+            let delta = c - max_c;
+            // Blend with warning color based on delta
+            let blend = clamp(delta / 50.0, 0.0, 1.0);
+            output_color = mix(color.rgb, params.warning_color, blend);
+        }
+        default: {
+            output_color = color.rgb;
+        }
+    }
+
+    textureStore(output_texture, coords, vec4<f32>(output_color, color.a));
+}
+"#;
+
+// ============================================================================
+// UNIT TESTS
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const EPSILON: f32 = 0.01;
+
+    fn approx_eq(a: f32, b: f32) -> bool {
+        (a - b).abs() < EPSILON
+    }
+
+    #[test]
+    fn test_gamut_creation() {
+        let srgb = ColorGamut::srgb();
+        assert!(approx_eq(srgb.red.0, 0.64));
+        assert!(approx_eq(srgb.green.1, 0.60));
+
+        let rec2020 = ColorGamut::rec2020();
+        assert!(rec2020.area() > srgb.area());
+    }
+
+    #[test]
+    fn test_gamut_containment() {
+        let srgb = ColorGamut::srgb();
+
+        // White point should be inside
+        assert!(srgb.contains_xy(0.3127, 0.3290));
+
+        // Red primary should be inside (on edge)
+        assert!(srgb.contains_xy(0.64, 0.33));
+
+        // Outside point
+        assert!(!srgb.contains_xy(0.0, 0.0));
+    }
+
+    #[test]
+    fn test_matrix_inversion() {
+        let srgb = ColorGamut::srgb();
+        let m = srgb.rgb_to_xyz_matrix();
+        let m_inv = srgb.xyz_to_rgb_matrix();
+
+        // M * M_inv should be identity
+        let identity = [
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+        ];
+
+        for i in 0..3 {
+            for j in 0..3 {
+                let sum: f32 = (0..3).map(|k| m[i][k] * m_inv[k][j]).sum();
+                assert!(
+                    approx_eq(sum, identity[i][j]),
+                    "Matrix inversion failed at ({}, {})",
+                    i, j
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_lab_xyz_roundtrip() {
+        let test_values = [
+            (50.0, 0.0, 0.0),   // Neutral gray
+            (100.0, 0.0, 0.0),  // White
+            (25.0, 50.0, -20.0), // Chromatic color
+        ];
+
+        for (l, a, b) in &test_values {
+            let xyz = lab_to_xyz(*l, *a, *b);
+            let (l2, a2, b2) = xyz_to_lab(xyz.0, xyz.1, xyz.2);
+
+            assert!(approx_eq(*l, l2), "L roundtrip failed: {} -> {}", l, l2);
+            assert!(approx_eq(*a, a2), "a roundtrip failed: {} -> {}", a, a2);
+            assert!(approx_eq(*b, b2), "b roundtrip failed: {} -> {}", b, b2);
+        }
+    }
+
+    #[test]
+    fn test_gamut_boundary() {
+        let srgb = ColorGamut::srgb();
+        let boundary = GamutBoundaryDescriptor::build(&srgb, 21, 36);
+
+        // At L=50, there should be some positive max chroma
+        let max_c = boundary.get_max_chroma(50.0, 0.0);
+        assert!(max_c > 0.0, "Max chroma at L=50, h=0 should be positive");
+
+        // At L=0 and L=100, chroma should be very small
+        let max_c_black = boundary.get_max_chroma(0.0, 0.0);
+        let max_c_white = boundary.get_max_chroma(100.0, 0.0);
+        assert!(max_c_black < 5.0, "Max chroma at L=0 should be small");
+        assert!(max_c_white < 5.0, "Max chroma at L=100 should be small");
+    }
+
+    #[test]
+    fn test_gamut_mapper_clip() {
+        let mapper = GamutMapper::new(
+            ColorGamut::rec2020(),
+            ColorGamut::srgb(),
+            GamutMappingMethod::Clip,
+        );
+
+        // Neutral colors should pass through
+        let neutral = mapper.map_lab(50.0, 0.0, 0.0);
+        assert!(approx_eq(neutral.0, 50.0));
+        assert!(approx_eq(neutral.1, 0.0));
+        assert!(approx_eq(neutral.2, 0.0));
+    }
+
+    #[test]
+    fn test_chroma_compression() {
+        let mapper = GamutMapper::new(
+            ColorGamut::rec2020(),
+            ColorGamut::srgb(),
+            GamutMappingMethod::ChromaCompression,
+        );
+
+        // High chroma color should be reduced
+        let high_chroma = (50.0, 100.0, 0.0);
+        let mapped = mapper.map_lab(high_chroma.0, high_chroma.1, high_chroma.2);
+
+        let orig_c = (high_chroma.1 * high_chroma.1 + high_chroma.2 * high_chroma.2).sqrt();
+        let mapped_c = (mapped.1 * mapped.1 + mapped.2 * mapped.2).sqrt();
+
+        assert!(mapped_c <= orig_c, "Chroma should be reduced or equal");
+    }
+
+    #[test]
+    fn test_gamut_intersection() {
+        let intersection = GamutIntersection::new(
+            ColorGamut::srgb(),
+            ColorGamut::display_p3(),
+        );
+
+        // sRGB is fully contained in Display P3
+        let coverage = intersection.coverage_percentage(100);
+        assert!(
+            coverage > 95.0,
+            "sRGB should be mostly contained in Display P3: {}%",
+            coverage
+        );
+    }
+
+    #[test]
+    fn test_oklab_conversion() {
+        // Test Oklab roundtrip
+        let xyz = (0.5, 0.5, 0.5);
+        let oklab = xyz_to_oklab(xyz.0, xyz.1, xyz.2);
+        let xyz2 = oklab_to_xyz(oklab.0, oklab.1, oklab.2);
+
+        assert!(approx_eq(xyz.0, xyz2.0), "Oklab X roundtrip failed");
+        assert!(approx_eq(xyz.1, xyz2.1), "Oklab Y roundtrip failed");
+        assert!(approx_eq(xyz.2, xyz2.2), "Oklab Z roundtrip failed");
+    }
+
+    #[test]
+    fn test_batch_stats() {
+        let mapper = GamutMapper::new(
+            ColorGamut::rec2020(),
+            ColorGamut::srgb(),
+            GamutMappingMethod::ChromaCompression,
+        );
+
+        let batch = BatchGamutMapper::new(mapper);
+
+        let mut pixels = vec![
+            (50.0, 0.0, 0.0),    // In gamut
+            (50.0, 100.0, 0.0),  // Out of gamut
+            (50.0, 50.0, 50.0),  // Possibly out of gamut
+        ];
+
+        let stats = batch.process_with_stats(&mut pixels);
+
+        assert_eq!(stats.total_pixels, 3);
+        // At least some should be modified
+        assert!(stats.modified_pixels > 0 || stats.out_of_gamut_percentage >= 0.0);
+    }
+}

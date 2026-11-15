@@ -1,0 +1,1752 @@
+// BUILD Spectrum - LUT (Look-Up Table) Support
+// Comprehensive 1D and 3D LUT implementation for color grading
+// Supports .cube, .3dl, .csp, and other industry formats
+
+use core::simd;
+use std::collections::HashMap;
+use std::io::{Read, Write, BufRead};
+use std::fs::File;
+
+// ============================================================================
+// LUT CONSTANTS
+// ============================================================================
+
+/// Maximum supported 3D LUT size
+const MAX_3D_LUT_SIZE: usize = 65;
+
+/// Maximum supported 1D LUT size
+const MAX_1D_LUT_SIZE: usize = 65536;
+
+/// Default 3D LUT size
+const DEFAULT_3D_LUT_SIZE: usize = 33;
+
+/// Default 1D LUT size
+const DEFAULT_1D_LUT_SIZE: usize = 1024;
+
+/// LUT file signature for BUILD binary format
+const BUILD_LUT_SIGNATURE: [u8; 4] = [b'Q', b'L', b'U', b'T'];
+
+// ============================================================================
+// LUT TYPES
+// ============================================================================
+
+/// LUT interpolation method
+enum LutInterpolation {
+    /// Nearest neighbor (fastest, lowest quality)
+    Nearest,
+    /// Trilinear interpolation (standard)
+    Trilinear,
+    /// Tetrahedral interpolation (highest quality)
+    Tetrahedral,
+    /// Prism interpolation (balanced)
+    Prism,
+}
+
+/// LUT bit depth
+enum LutBitDepth {
+    /// 16-bit half float
+    Half16,
+    /// 32-bit float
+    Float32,
+    /// 64-bit double
+    Float64,
+}
+
+/// LUT domain (input range)
+struct LutDomain {
+    /// Minimum value per channel
+    min: (f32, f32, f32),
+    /// Maximum value per channel
+    max: (f32, f32, f32),
+}
+
+impl LutDomain {
+    /// Standard 0-1 domain
+    fn unit() -> Self {
+        Self {
+            min: (0.0, 0.0, 0.0),
+            max: (1.0, 1.0, 1.0),
+        }
+    }
+
+    /// Extended HDR domain
+    fn extended() -> Self {
+        Self {
+            min: (-0.125, -0.125, -0.125),
+            max: (1.625, 1.625, 1.625),
+        }
+    }
+
+    /// Normalize input to 0-1 range
+    fn normalize(&self, r: f32, g: f32, b: f32) -> (f32, f32, f32) {
+        (
+            (r - self.min.0) / (self.max.0 - self.min.0),
+            (g - self.min.1) / (self.max.1 - self.min.1),
+            (b - self.min.2) / (self.max.2 - self.min.2),
+        )
+    }
+
+    /// Denormalize from 0-1 range
+    fn denormalize(&self, r: f32, g: f32, b: f32) -> (f32, f32, f32) {
+        (
+            r * (self.max.0 - self.min.0) + self.min.0,
+            g * (self.max.1 - self.min.1) + self.min.1,
+            b * (self.max.2 - self.min.2) + self.min.2,
+        )
+    }
+}
+
+// ============================================================================
+// 1D LUT
+// ============================================================================
+
+/// 1D Look-Up Table (per-channel curves)
+struct Lut1D {
+    /// Red channel LUT
+    red: Vec<f32>,
+    /// Green channel LUT
+    green: Vec<f32>,
+    /// Blue channel LUT
+    blue: Vec<f32>,
+    /// Size of each channel LUT
+    size: usize,
+    /// Input domain
+    domain: LutDomain,
+    /// Title/name
+    title: String,
+}
+
+impl Lut1D {
+    /// Create identity 1D LUT
+    fn identity(size: usize) -> Self {
+        let values: Vec<f32> = (0..size)
+            .map(|i| i as f32 / (size - 1) as f32)
+            .collect();
+
+        Self {
+            red: values.clone(),
+            green: values.clone(),
+            blue: values,
+            size,
+            domain: LutDomain::unit(),
+            title: "Identity".to_string(),
+        }
+    }
+
+    /// Create 1D LUT with custom curves
+    fn with_curves(red: Vec<f32>, green: Vec<f32>, blue: Vec<f32>) -> Result<Self, String> {
+        if red.len() != green.len() || green.len() != blue.len() {
+            return Err("Channel sizes must match".to_string());
+        }
+
+        if red.len() < 2 {
+            return Err("LUT must have at least 2 entries".to_string());
+        }
+
+        if red.len() > MAX_1D_LUT_SIZE {
+            return Err(format!("LUT size {} exceeds maximum {}", red.len(), MAX_1D_LUT_SIZE));
+        }
+
+        Ok(Self {
+            size: red.len(),
+            red,
+            green,
+            blue,
+            domain: LutDomain::unit(),
+            title: String::new(),
+        })
+    }
+
+    /// Create gamma correction LUT
+    fn gamma(size: usize, gamma: f32) -> Self {
+        let values: Vec<f32> = (0..size)
+            .map(|i| {
+                let t = i as f32 / (size - 1) as f32;
+                t.powf(1.0 / gamma)
+            })
+            .collect();
+
+        Self {
+            red: values.clone(),
+            green: values.clone(),
+            blue: values,
+            size,
+            domain: LutDomain::unit(),
+            title: format!("Gamma {:.2}", gamma),
+        }
+    }
+
+    /// Create sRGB linearization LUT
+    fn srgb_linearize(size: usize) -> Self {
+        let values: Vec<f32> = (0..size)
+            .map(|i| {
+                let v = i as f32 / (size - 1) as f32;
+                if v <= 0.04045 {
+                    v / 12.92
+                } else {
+                    ((v + 0.055) / 1.055).powf(2.4)
+                }
+            })
+            .collect();
+
+        Self {
+            red: values.clone(),
+            green: values.clone(),
+            blue: values,
+            size,
+            domain: LutDomain::unit(),
+            title: "sRGB to Linear".to_string(),
+        }
+    }
+
+    /// Create sRGB encoding LUT
+    fn srgb_encode(size: usize) -> Self {
+        let values: Vec<f32> = (0..size)
+            .map(|i| {
+                let v = i as f32 / (size - 1) as f32;
+                if v <= 0.0031308 {
+                    v * 12.92
+                } else {
+                    1.055 * v.powf(1.0 / 2.4) - 0.055
+                }
+            })
+            .collect();
+
+        Self {
+            red: values.clone(),
+            green: values.clone(),
+            blue: values,
+            size,
+            domain: LutDomain::unit(),
+            title: "Linear to sRGB".to_string(),
+        }
+    }
+
+    /// Create contrast curve LUT
+    fn contrast(size: usize, contrast: f32) -> Self {
+        let values: Vec<f32> = (0..size)
+            .map(|i| {
+                let t = i as f32 / (size - 1) as f32;
+                // S-curve using sigmoid
+                let centered = (t - 0.5) * contrast;
+                let sigmoid = 1.0 / (1.0 + (-centered * 4.0).exp());
+                sigmoid.clamp(0.0, 1.0)
+            })
+            .collect();
+
+        Self {
+            red: values.clone(),
+            green: values.clone(),
+            blue: values,
+            size,
+            domain: LutDomain::unit(),
+            title: format!("Contrast {:.2}", contrast),
+        }
+    }
+
+    /// Apply 1D LUT to single value
+    fn apply_channel(&self, channel: &[f32], value: f32) -> f32 {
+        let size = self.size as f32;
+        let index_f = value.clamp(0.0, 1.0) * (size - 1.0);
+        let index_low = index_f.floor() as usize;
+        let index_high = (index_low + 1).min(self.size - 1);
+        let t = index_f.fract();
+
+        channel[index_low] * (1.0 - t) + channel[index_high] * t
+    }
+
+    /// Apply 1D LUT to RGB color
+    fn apply(&self, r: f32, g: f32, b: f32) -> (f32, f32, f32) {
+        // Normalize to LUT domain
+        let (rn, gn, bn) = self.domain.normalize(r, g, b);
+
+        // Apply per-channel
+        let ro = self.apply_channel(&self.red, rn);
+        let go = self.apply_channel(&self.green, gn);
+        let bo = self.apply_channel(&self.blue, bn);
+
+        (ro, go, bo)
+    }
+
+    /// Invert the LUT (requires monotonic increasing)
+    fn invert(&self) -> Result<Self, String> {
+        fn invert_channel(channel: &[f32], size: usize) -> Result<Vec<f32>, String> {
+            // Check monotonicity
+            for i in 1..channel.len() {
+                if channel[i] < channel[i - 1] {
+                    return Err("Channel is not monotonically increasing".to_string());
+                }
+            }
+
+            let mut inverted = vec![0.0f32; size];
+            let in_size = channel.len() as f32;
+
+            for i in 0..size {
+                let target = i as f32 / (size - 1) as f32;
+
+                // Binary search for inverse
+                let mut low = 0usize;
+                let mut high = channel.len() - 1;
+
+                while high - low > 1 {
+                    let mid = (low + high) / 2;
+                    if channel[mid] <= target {
+                        low = mid;
+                    } else {
+                        high = mid;
+                    }
+                }
+
+                // Interpolate
+                let t = if channel[high] != channel[low] {
+                    (target - channel[low]) / (channel[high] - channel[low])
+                } else {
+                    0.0
+                };
+
+                inverted[i] = (low as f32 + t) / (in_size - 1.0);
+            }
+
+            Ok(inverted)
+        }
+
+        let inv_red = invert_channel(&self.red, self.size)?;
+        let inv_green = invert_channel(&self.green, self.size)?;
+        let inv_blue = invert_channel(&self.blue, self.size)?;
+
+        Ok(Self {
+            red: inv_red,
+            green: inv_green,
+            blue: inv_blue,
+            size: self.size,
+            domain: self.domain.clone(),
+            title: format!("{} (Inverted)", self.title),
+        })
+    }
+
+    /// Compose two 1D LUTs
+    fn compose(&self, other: &Lut1D, output_size: usize) -> Self {
+        fn compose_channel(a: &[f32], b: &[f32], size: usize) -> Vec<f32> {
+            (0..size)
+                .map(|i| {
+                    let t = i as f32 / (size - 1) as f32;
+
+                    // Apply first LUT
+                    let index_f = t * (a.len() - 1) as f32;
+                    let idx_low = index_f.floor() as usize;
+                    let idx_high = (idx_low + 1).min(a.len() - 1);
+                    let frac = index_f.fract();
+                    let intermediate = a[idx_low] * (1.0 - frac) + a[idx_high] * frac;
+
+                    // Apply second LUT
+                    let index_f2 = intermediate.clamp(0.0, 1.0) * (b.len() - 1) as f32;
+                    let idx_low2 = index_f2.floor() as usize;
+                    let idx_high2 = (idx_low2 + 1).min(b.len() - 1);
+                    let frac2 = index_f2.fract();
+
+                    b[idx_low2] * (1.0 - frac2) + b[idx_high2] * frac2
+                })
+                .collect()
+        }
+
+        Self {
+            red: compose_channel(&self.red, &other.red, output_size),
+            green: compose_channel(&self.green, &other.green, output_size),
+            blue: compose_channel(&self.blue, &other.blue, output_size),
+            size: output_size,
+            domain: self.domain.clone(),
+            title: format!("{} + {}", self.title, other.title),
+        }
+    }
+}
+
+// ============================================================================
+// 3D LUT
+// ============================================================================
+
+/// 3D Look-Up Table
+struct Lut3D {
+    /// LUT data (R, G, B values for each lattice point)
+    data: Vec<(f32, f32, f32)>,
+    /// Size per dimension (cubic LUT)
+    size: usize,
+    /// Input domain
+    domain: LutDomain,
+    /// Title/name
+    title: String,
+    /// Interpolation method
+    interpolation: LutInterpolation,
+}
+
+impl Lut3D {
+    /// Create identity 3D LUT
+    fn identity(size: usize) -> Self {
+        let total = size * size * size;
+        let mut data = Vec::with_capacity(total);
+
+        for b in 0..size {
+            for g in 0..size {
+                for r in 0..size {
+                    let rf = r as f32 / (size - 1) as f32;
+                    let gf = g as f32 / (size - 1) as f32;
+                    let bf = b as f32 / (size - 1) as f32;
+                    data.push((rf, gf, bf));
+                }
+            }
+        }
+
+        Self {
+            data,
+            size,
+            domain: LutDomain::unit(),
+            title: "Identity".to_string(),
+            interpolation: LutInterpolation::Tetrahedral,
+        }
+    }
+
+    /// Create 3D LUT from data
+    fn from_data(data: Vec<(f32, f32, f32)>, size: usize) -> Result<Self, String> {
+        let expected = size * size * size;
+        if data.len() != expected {
+            return Err(format!(
+                "Data size {} doesn't match expected {} for {}x{}x{} LUT",
+                data.len(), expected, size, size, size
+            ));
+        }
+
+        if size > MAX_3D_LUT_SIZE {
+            return Err(format!("LUT size {} exceeds maximum {}", size, MAX_3D_LUT_SIZE));
+        }
+
+        Ok(Self {
+            data,
+            size,
+            domain: LutDomain::unit(),
+            title: String::new(),
+            interpolation: LutInterpolation::Tetrahedral,
+        })
+    }
+
+    /// Get index into flat data array
+    fn get_index(&self, r: usize, g: usize, b: usize) -> usize {
+        b * self.size * self.size + g * self.size + r
+    }
+
+    /// Get value at lattice point
+    fn get(&self, r: usize, g: usize, b: usize) -> (f32, f32, f32) {
+        self.data[self.get_index(r, g, b)]
+    }
+
+    /// Set value at lattice point
+    fn set(&mut self, r: usize, g: usize, b: usize, value: (f32, f32, f32)) {
+        let idx = self.get_index(r, g, b);
+        self.data[idx] = value;
+    }
+
+    /// Apply 3D LUT with trilinear interpolation
+    fn apply_trilinear(&self, r: f32, g: f32, b: f32) -> (f32, f32, f32) {
+        // Normalize to LUT domain
+        let (rn, gn, bn) = self.domain.normalize(r, g, b);
+
+        // Clamp to valid range
+        let size = self.size as f32;
+        let ri = (rn * (size - 1.0)).clamp(0.0, size - 1.001);
+        let gi = (gn * (size - 1.0)).clamp(0.0, size - 1.001);
+        let bi = (bn * (size - 1.0)).clamp(0.0, size - 1.001);
+
+        // Get integer indices and fractions
+        let r0 = ri.floor() as usize;
+        let g0 = gi.floor() as usize;
+        let b0 = bi.floor() as usize;
+        let r1 = (r0 + 1).min(self.size - 1);
+        let g1 = (g0 + 1).min(self.size - 1);
+        let b1 = (b0 + 1).min(self.size - 1);
+
+        let rf = ri.fract();
+        let gf = gi.fract();
+        let bf = bi.fract();
+
+        // Get 8 corner values
+        let c000 = self.get(r0, g0, b0);
+        let c100 = self.get(r1, g0, b0);
+        let c010 = self.get(r0, g1, b0);
+        let c110 = self.get(r1, g1, b0);
+        let c001 = self.get(r0, g0, b1);
+        let c101 = self.get(r1, g0, b1);
+        let c011 = self.get(r0, g1, b1);
+        let c111 = self.get(r1, g1, b1);
+
+        // Trilinear interpolation
+        let lerp = |a: f32, b: f32, t: f32| a + (b - a) * t;
+        let lerp3 = |a: (f32, f32, f32), b: (f32, f32, f32), t: f32| {
+            (lerp(a.0, b.0, t), lerp(a.1, b.1, t), lerp(a.2, b.2, t))
+        };
+
+        let c00 = lerp3(c000, c100, rf);
+        let c10 = lerp3(c010, c110, rf);
+        let c01 = lerp3(c001, c101, rf);
+        let c11 = lerp3(c011, c111, rf);
+
+        let c0 = lerp3(c00, c10, gf);
+        let c1 = lerp3(c01, c11, gf);
+
+        lerp3(c0, c1, bf)
+    }
+
+    /// Apply 3D LUT with tetrahedral interpolation
+    fn apply_tetrahedral(&self, r: f32, g: f32, b: f32) -> (f32, f32, f32) {
+        // Normalize to LUT domain
+        let (rn, gn, bn) = self.domain.normalize(r, g, b);
+
+        // Scale to LUT indices
+        let size = self.size as f32;
+        let ri = (rn * (size - 1.0)).clamp(0.0, size - 1.001);
+        let gi = (gn * (size - 1.0)).clamp(0.0, size - 1.001);
+        let bi = (bn * (size - 1.0)).clamp(0.0, size - 1.001);
+
+        // Get integer indices
+        let r0 = ri.floor() as usize;
+        let g0 = gi.floor() as usize;
+        let b0 = bi.floor() as usize;
+        let r1 = (r0 + 1).min(self.size - 1);
+        let g1 = (g0 + 1).min(self.size - 1);
+        let b1 = (b0 + 1).min(self.size - 1);
+
+        // Get fractional parts
+        let rf = ri.fract();
+        let gf = gi.fract();
+        let bf = bi.fract();
+
+        // Get corner values
+        let c000 = self.get(r0, g0, b0);
+        let c100 = self.get(r1, g0, b0);
+        let c010 = self.get(r0, g1, b0);
+        let c110 = self.get(r1, g1, b0);
+        let c001 = self.get(r0, g0, b1);
+        let c101 = self.get(r1, g0, b1);
+        let c011 = self.get(r0, g1, b1);
+        let c111 = self.get(r1, g1, b1);
+
+        // Determine which tetrahedron we're in and interpolate
+        let (w0, w1, w2, w3, v0, v1, v2, v3) = if rf > gf {
+            if gf > bf {
+                // rf > gf > bf
+                (1.0 - rf, rf - gf, gf - bf, bf, c000, c100, c110, c111)
+            } else if rf > bf {
+                // rf > bf > gf
+                (1.0 - rf, rf - bf, bf - gf, gf, c000, c100, c101, c111)
+            } else {
+                // bf > rf > gf
+                (1.0 - bf, bf - rf, rf - gf, gf, c000, c001, c101, c111)
+            }
+        } else {
+            if bf > gf {
+                // bf > gf > rf
+                (1.0 - bf, bf - gf, gf - rf, rf, c000, c001, c011, c111)
+            } else if bf > rf {
+                // gf > bf > rf
+                (1.0 - gf, gf - bf, bf - rf, rf, c000, c010, c011, c111)
+            } else {
+                // gf > rf > bf
+                (1.0 - gf, gf - rf, rf - bf, bf, c000, c010, c110, c111)
+            }
+        };
+
+        // Weighted sum
+        (
+            w0 * v0.0 + w1 * v1.0 + w2 * v2.0 + w3 * v3.0,
+            w0 * v0.1 + w1 * v1.1 + w2 * v2.1 + w3 * v3.1,
+            w0 * v0.2 + w1 * v1.2 + w2 * v2.2 + w3 * v3.2,
+        )
+    }
+
+    /// Apply 3D LUT using configured interpolation method
+    fn apply(&self, r: f32, g: f32, b: f32) -> (f32, f32, f32) {
+        match self.interpolation {
+            LutInterpolation::Nearest => self.apply_nearest(r, g, b),
+            LutInterpolation::Trilinear => self.apply_trilinear(r, g, b),
+            LutInterpolation::Tetrahedral => self.apply_tetrahedral(r, g, b),
+            LutInterpolation::Prism => self.apply_prism(r, g, b),
+        }
+    }
+
+    /// Apply with nearest neighbor interpolation
+    fn apply_nearest(&self, r: f32, g: f32, b: f32) -> (f32, f32, f32) {
+        let (rn, gn, bn) = self.domain.normalize(r, g, b);
+
+        let size = self.size as f32;
+        let ri = (rn * (size - 1.0)).round().clamp(0.0, size - 1.0) as usize;
+        let gi = (gn * (size - 1.0)).round().clamp(0.0, size - 1.0) as usize;
+        let bi = (bn * (size - 1.0)).round().clamp(0.0, size - 1.0) as usize;
+
+        self.get(ri, gi, bi)
+    }
+
+    /// Apply with prism interpolation
+    fn apply_prism(&self, r: f32, g: f32, b: f32) -> (f32, f32, f32) {
+        // Prism interpolation divides cube into 6 tetrahedra based on hue
+        let (rn, gn, bn) = self.domain.normalize(r, g, b);
+
+        let size = self.size as f32;
+        let ri = (rn * (size - 1.0)).clamp(0.0, size - 1.001);
+        let gi = (gn * (size - 1.0)).clamp(0.0, size - 1.001);
+        let bi = (bn * (size - 1.0)).clamp(0.0, size - 1.001);
+
+        let r0 = ri.floor() as usize;
+        let g0 = gi.floor() as usize;
+        let b0 = bi.floor() as usize;
+
+        let rf = ri.fract();
+        let gf = gi.fract();
+        let bf = bi.fract();
+
+        // Use tetrahedral as fallback
+        self.apply_tetrahedral(r, g, b)
+    }
+
+    /// Generate 3D LUT from function
+    fn from_function<F>(size: usize, f: F) -> Self
+    where
+        F: Fn(f32, f32, f32) -> (f32, f32, f32),
+    {
+        let total = size * size * size;
+        let mut data = Vec::with_capacity(total);
+
+        for b in 0..size {
+            for g in 0..size {
+                for r in 0..size {
+                    let rf = r as f32 / (size - 1) as f32;
+                    let gf = g as f32 / (size - 1) as f32;
+                    let bf = b as f32 / (size - 1) as f32;
+                    data.push(f(rf, gf, bf));
+                }
+            }
+        }
+
+        Self {
+            data,
+            size,
+            domain: LutDomain::unit(),
+            title: "Generated".to_string(),
+            interpolation: LutInterpolation::Tetrahedral,
+        }
+    }
+
+    /// Compose two 3D LUTs
+    fn compose(&self, other: &Lut3D, output_size: usize) -> Self {
+        let total = output_size * output_size * output_size;
+        let mut data = Vec::with_capacity(total);
+
+        for b in 0..output_size {
+            for g in 0..output_size {
+                for r in 0..output_size {
+                    let rf = r as f32 / (output_size - 1) as f32;
+                    let gf = g as f32 / (output_size - 1) as f32;
+                    let bf = b as f32 / (output_size - 1) as f32;
+
+                    // Apply first LUT
+                    let intermediate = self.apply(rf, gf, bf);
+
+                    // Apply second LUT
+                    let output = other.apply(intermediate.0, intermediate.1, intermediate.2);
+
+                    data.push(output);
+                }
+            }
+        }
+
+        Self {
+            data,
+            size: output_size,
+            domain: self.domain.clone(),
+            title: format!("{} + {}", self.title, other.title),
+            interpolation: self.interpolation.clone(),
+        }
+    }
+
+    /// Invert 3D LUT (computationally expensive)
+    fn invert(&self, output_size: usize, iterations: usize) -> Self {
+        let total = output_size * output_size * output_size;
+        let mut data = Vec::with_capacity(total);
+
+        for b in 0..output_size {
+            for g in 0..output_size {
+                for r in 0..output_size {
+                    let target_r = r as f32 / (output_size - 1) as f32;
+                    let target_g = g as f32 / (output_size - 1) as f32;
+                    let target_b = b as f32 / (output_size - 1) as f32;
+
+                    // Newton-Raphson iteration to find inverse
+                    let mut guess_r = target_r;
+                    let mut guess_g = target_g;
+                    let mut guess_b = target_b;
+
+                    for _ in 0..iterations {
+                        let result = self.apply(guess_r, guess_g, guess_b);
+                        let error_r = target_r - result.0;
+                        let error_g = target_g - result.1;
+                        let error_b = target_b - result.2;
+
+                        // Simple gradient descent
+                        guess_r += error_r * 0.5;
+                        guess_g += error_g * 0.5;
+                        guess_b += error_b * 0.5;
+
+                        guess_r = guess_r.clamp(0.0, 1.0);
+                        guess_g = guess_g.clamp(0.0, 1.0);
+                        guess_b = guess_b.clamp(0.0, 1.0);
+                    }
+
+                    data.push((guess_r, guess_g, guess_b));
+                }
+            }
+        }
+
+        Self {
+            data,
+            size: output_size,
+            domain: self.domain.clone(),
+            title: format!("{} (Inverted)", self.title),
+            interpolation: self.interpolation.clone(),
+        }
+    }
+
+    /// Resize LUT to different size
+    fn resize(&self, new_size: usize) -> Self {
+        Self::from_function(new_size, |r, g, b| self.apply(r, g, b))
+    }
+}
+
+// ============================================================================
+// LUT FILE FORMATS
+// ============================================================================
+
+/// .cube file parser (Resolve/Adobe format)
+struct CubeParser;
+
+impl CubeParser {
+    /// Parse .cube file content
+    fn parse(content: &str) -> Result<Lut3D, String> {
+        let mut size: Option<usize> = None;
+        let mut title = String::new();
+        let mut domain_min = (0.0f32, 0.0f32, 0.0f32);
+        let mut domain_max = (1.0f32, 1.0f32, 1.0f32);
+        let mut data: Vec<(f32, f32, f32)> = Vec::new();
+
+        for line in content.lines() {
+            let line = line.trim();
+
+            // Skip comments and empty lines
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+
+            // Parse header
+            if line.starts_with("TITLE") {
+                title = line.split_once(' ')
+                    .map(|(_, t)| t.trim_matches('"').to_string())
+                    .unwrap_or_default();
+            } else if line.starts_with("LUT_3D_SIZE") {
+                size = line.split_whitespace()
+                    .nth(1)
+                    .and_then(|s| s.parse().ok());
+            } else if line.starts_with("DOMAIN_MIN") {
+                let parts: Vec<f32> = line.split_whitespace()
+                    .skip(1)
+                    .filter_map(|s| s.parse().ok())
+                    .collect();
+                if parts.len() >= 3 {
+                    domain_min = (parts[0], parts[1], parts[2]);
+                }
+            } else if line.starts_with("DOMAIN_MAX") {
+                let parts: Vec<f32> = line.split_whitespace()
+                    .skip(1)
+                    .filter_map(|s| s.parse().ok())
+                    .collect();
+                if parts.len() >= 3 {
+                    domain_max = (parts[0], parts[1], parts[2]);
+                }
+            } else {
+                // Parse data line
+                let parts: Vec<f32> = line.split_whitespace()
+                    .filter_map(|s| s.parse().ok())
+                    .collect();
+
+                if parts.len() >= 3 {
+                    data.push((parts[0], parts[1], parts[2]));
+                }
+            }
+        }
+
+        let size = size.ok_or("LUT_3D_SIZE not found in file")?;
+        let expected = size * size * size;
+
+        if data.len() != expected {
+            return Err(format!(
+                "Expected {} entries but found {}",
+                expected, data.len()
+            ));
+        }
+
+        let mut lut = Lut3D::from_data(data, size)?;
+        lut.title = title;
+        lut.domain = LutDomain {
+            min: domain_min,
+            max: domain_max,
+        };
+
+        Ok(lut)
+    }
+
+    /// Generate .cube file content
+    fn generate(lut: &Lut3D) -> String {
+        let mut output = String::new();
+
+        output.push_str(&format!("# BUILD Generated 3D LUT\n"));
+        output.push_str(&format!("TITLE \"{}\"\n", lut.title));
+        output.push_str(&format!("LUT_3D_SIZE {}\n", lut.size));
+        output.push_str(&format!(
+            "DOMAIN_MIN {} {} {}\n",
+            lut.domain.min.0, lut.domain.min.1, lut.domain.min.2
+        ));
+        output.push_str(&format!(
+            "DOMAIN_MAX {} {} {}\n",
+            lut.domain.max.0, lut.domain.max.1, lut.domain.max.2
+        ));
+        output.push_str("\n");
+
+        for entry in &lut.data {
+            output.push_str(&format!("{:.6} {:.6} {:.6}\n", entry.0, entry.1, entry.2));
+        }
+
+        output
+    }
+}
+
+/// .3dl file parser (Autodesk/Flame format)
+struct ThreeDlParser;
+
+impl ThreeDlParser {
+    /// Parse .3dl file content
+    fn parse(content: &str) -> Result<Lut3D, String> {
+        let mut lines: Vec<&str> = content.lines()
+            .map(|l| l.trim())
+            .filter(|l| !l.is_empty() && !l.starts_with('#'))
+            .collect();
+
+        if lines.is_empty() {
+            return Err("Empty 3DL file".to_string());
+        }
+
+        // First line contains input LUT specification
+        let header: Vec<usize> = lines[0]
+            .split_whitespace()
+            .filter_map(|s| s.parse().ok())
+            .collect();
+
+        if header.len() < 2 {
+            return Err("Invalid 3DL header".to_string());
+        }
+
+        // Determine size from data count
+        let data_lines = &lines[1..];
+        let count = data_lines.len();
+
+        // Find cube root
+        let size = (count as f32).cbrt().round() as usize;
+        if size * size * size != count {
+            return Err(format!("Data count {} is not a perfect cube", count));
+        }
+
+        // Parse data (3DL uses integer values 0-4095 typically)
+        let max_val = header.get(1).copied().unwrap_or(4095) as f32;
+        let mut data = Vec::with_capacity(count);
+
+        for line in data_lines {
+            let parts: Vec<f32> = line
+                .split_whitespace()
+                .filter_map(|s| s.parse::<f32>().ok())
+                .map(|v| v / max_val)
+                .collect();
+
+            if parts.len() >= 3 {
+                data.push((parts[0], parts[1], parts[2]));
+            }
+        }
+
+        Lut3D::from_data(data, size)
+    }
+
+    /// Generate .3dl file content
+    fn generate(lut: &Lut3D, bit_depth: usize) -> String {
+        let max_val = ((1 << bit_depth) - 1) as f32;
+        let mut output = String::new();
+
+        // Header
+        let input_entries = lut.size;
+        output.push_str(&format!("{} {}\n", input_entries, max_val as usize));
+
+        // Data
+        for entry in &lut.data {
+            let r = (entry.0 * max_val).round() as usize;
+            let g = (entry.1 * max_val).round() as usize;
+            let b = (entry.2 * max_val).round() as usize;
+            output.push_str(&format!("{} {} {}\n", r, g, b));
+        }
+
+        output
+    }
+}
+
+/// .csp file parser (Cinespace format)
+struct CspParser;
+
+impl CspParser {
+    /// Parse .csp file content
+    fn parse(content: &str) -> Result<(Lut1D, Lut3D), String> {
+        let mut lines: Vec<&str> = content.lines()
+            .map(|l| l.trim())
+            .filter(|l| !l.is_empty())
+            .collect();
+
+        // Check header
+        if lines.is_empty() || lines[0] != "CSPLUTV100" {
+            return Err("Invalid CSP file header".to_string());
+        }
+
+        // Parse sections
+        let mut in_pre_lut = false;
+        let mut in_3d_lut = false;
+        let mut pre_lut_data: Vec<Vec<f32>> = vec![Vec::new(); 3];
+        let mut lut_3d_data: Vec<(f32, f32, f32)> = Vec::new();
+        let mut lut_3d_size: Option<usize> = None;
+        let mut channel_idx = 0;
+
+        for line in &lines[1..] {
+            if line.starts_with("BEGIN_PRE") {
+                in_pre_lut = true;
+                in_3d_lut = false;
+                channel_idx = 0;
+                continue;
+            } else if line.starts_with("END_PRE") {
+                in_pre_lut = false;
+                continue;
+            } else if line.starts_with("BEGIN_LUT") {
+                in_pre_lut = false;
+                in_3d_lut = true;
+                // Parse size
+                let parts: Vec<&str> = line.split_whitespace().collect();
+                if parts.len() >= 4 {
+                    lut_3d_size = parts[1].parse().ok();
+                }
+                continue;
+            } else if line.starts_with("END_LUT") {
+                in_3d_lut = false;
+                continue;
+            }
+
+            if in_pre_lut {
+                let values: Vec<f32> = line
+                    .split_whitespace()
+                    .filter_map(|s| s.parse().ok())
+                    .collect();
+
+                if values.len() == 1 {
+                    // Channel size indicator
+                    channel_idx = 0;
+                } else if values.len() >= 2 && channel_idx < 3 {
+                    pre_lut_data[channel_idx].push(values[1]);
+                    // Advance channel after complete
+                }
+            } else if in_3d_lut {
+                let values: Vec<f32> = line
+                    .split_whitespace()
+                    .filter_map(|s| s.parse().ok())
+                    .collect();
+
+                if values.len() >= 3 {
+                    lut_3d_data.push((values[0], values[1], values[2]));
+                }
+            }
+        }
+
+        // Create 1D LUT (or identity if not present)
+        let lut_1d = if pre_lut_data[0].is_empty() {
+            Lut1D::identity(1024)
+        } else {
+            Lut1D::with_curves(
+                pre_lut_data[0].clone(),
+                pre_lut_data[1].clone(),
+                pre_lut_data[2].clone(),
+            )?
+        };
+
+        // Create 3D LUT
+        let size = lut_3d_size.ok_or("LUT size not specified")?;
+        let lut_3d = Lut3D::from_data(lut_3d_data, size)?;
+
+        Ok((lut_1d, lut_3d))
+    }
+}
+
+// ============================================================================
+// LUT PROCESSING PIPELINE
+// ============================================================================
+
+/// LUT processing pipeline
+struct LutPipeline {
+    /// Pre-processing 1D LUT (input linearization)
+    pre_lut: Option<Lut1D>,
+    /// Main 3D LUT (color transform)
+    main_lut: Option<Lut3D>,
+    /// Post-processing 1D LUT (output encoding)
+    post_lut: Option<Lut1D>,
+    /// Blend amount (0.0 = bypass, 1.0 = full effect)
+    blend: f32,
+}
+
+impl LutPipeline {
+    /// Create empty pipeline
+    fn new() -> Self {
+        Self {
+            pre_lut: None,
+            main_lut: None,
+            post_lut: None,
+            blend: 1.0,
+        }
+    }
+
+    /// Set pre-LUT
+    fn with_pre_lut(mut self, lut: Lut1D) -> Self {
+        self.pre_lut = Some(lut);
+        self
+    }
+
+    /// Set main 3D LUT
+    fn with_main_lut(mut self, lut: Lut3D) -> Self {
+        self.main_lut = Some(lut);
+        self
+    }
+
+    /// Set post-LUT
+    fn with_post_lut(mut self, lut: Lut1D) -> Self {
+        self.post_lut = Some(lut);
+        self
+    }
+
+    /// Set blend amount
+    fn with_blend(mut self, blend: f32) -> Self {
+        self.blend = blend.clamp(0.0, 1.0);
+        self
+    }
+
+    /// Apply pipeline to single color
+    fn apply(&self, r: f32, g: f32, b: f32) -> (f32, f32, f32) {
+        let original = (r, g, b);
+
+        // Apply pre-LUT
+        let (mut r, mut g, mut b) = if let Some(lut) = &self.pre_lut {
+            lut.apply(r, g, b)
+        } else {
+            (r, g, b)
+        };
+
+        // Apply main 3D LUT
+        (r, g, b) = if let Some(lut) = &self.main_lut {
+            lut.apply(r, g, b)
+        } else {
+            (r, g, b)
+        };
+
+        // Apply post-LUT
+        (r, g, b) = if let Some(lut) = &self.post_lut {
+            lut.apply(r, g, b)
+        } else {
+            (r, g, b)
+        };
+
+        // Blend with original
+        if self.blend < 1.0 {
+            let inv_blend = 1.0 - self.blend;
+            (
+                r * self.blend + original.0 * inv_blend,
+                g * self.blend + original.1 * inv_blend,
+                b * self.blend + original.2 * inv_blend,
+            )
+        } else {
+            (r, g, b)
+        }
+    }
+
+    /// Apply pipeline to array of colors
+    fn apply_batch(&self, colors: &mut [(f32, f32, f32)]) {
+        for color in colors.iter_mut() {
+            *color = self.apply(color.0, color.1, color.2);
+        }
+    }
+
+    /// Bake pipeline into single 3D LUT
+    fn bake(&self, size: usize) -> Lut3D {
+        Lut3D::from_function(size, |r, g, b| self.apply(r, g, b))
+    }
+}
+
+// ============================================================================
+// LUT GENERATION UTILITIES
+// ============================================================================
+
+/// LUT generation utilities
+struct LutGenerator;
+
+impl LutGenerator {
+    /// Generate color matrix as 3D LUT
+    fn from_matrix(matrix: [[f32; 3]; 3], size: usize) -> Lut3D {
+        Lut3D::from_function(size, |r, g, b| {
+            let ro = matrix[0][0] * r + matrix[0][1] * g + matrix[0][2] * b;
+            let go = matrix[1][0] * r + matrix[1][1] * g + matrix[1][2] * b;
+            let bo = matrix[2][0] * r + matrix[2][1] * g + matrix[2][2] * b;
+            (ro.clamp(0.0, 1.0), go.clamp(0.0, 1.0), bo.clamp(0.0, 1.0))
+        })
+    }
+
+    /// Generate saturation adjustment LUT
+    fn saturation(amount: f32, size: usize) -> Lut3D {
+        Lut3D::from_function(size, |r, g, b| {
+            let luma = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+            let ro = luma + (r - luma) * amount;
+            let go = luma + (g - luma) * amount;
+            let bo = luma + (b - luma) * amount;
+            (ro.clamp(0.0, 1.0), go.clamp(0.0, 1.0), bo.clamp(0.0, 1.0))
+        })
+    }
+
+    /// Generate hue rotation LUT
+    fn hue_rotation(degrees: f32, size: usize) -> Lut3D {
+        let radians = degrees.to_radians();
+        let cos_a = radians.cos();
+        let sin_a = radians.sin();
+
+        // Hue rotation matrix
+        let sqrt3 = 3.0f32.sqrt();
+        let matrix = [
+            [
+                cos_a + (1.0 - cos_a) / 3.0,
+                (1.0 - cos_a) / 3.0 - sqrt3 * sin_a / 3.0,
+                (1.0 - cos_a) / 3.0 + sqrt3 * sin_a / 3.0,
+            ],
+            [
+                (1.0 - cos_a) / 3.0 + sqrt3 * sin_a / 3.0,
+                cos_a + (1.0 - cos_a) / 3.0,
+                (1.0 - cos_a) / 3.0 - sqrt3 * sin_a / 3.0,
+            ],
+            [
+                (1.0 - cos_a) / 3.0 - sqrt3 * sin_a / 3.0,
+                (1.0 - cos_a) / 3.0 + sqrt3 * sin_a / 3.0,
+                cos_a + (1.0 - cos_a) / 3.0,
+            ],
+        ];
+
+        Self::from_matrix(matrix, size)
+    }
+
+    /// Generate lift-gamma-gain LUT
+    fn lift_gamma_gain(
+        lift: (f32, f32, f32),
+        gamma: (f32, f32, f32),
+        gain: (f32, f32, f32),
+        size: usize,
+    ) -> Lut3D {
+        Lut3D::from_function(size, |r, g, b| {
+            // Apply gain
+            let r = r * gain.0;
+            let g = g * gain.1;
+            let b = b * gain.2;
+
+            // Apply lift (shadows)
+            let r = r + lift.0 * (1.0 - r);
+            let g = g + lift.1 * (1.0 - g);
+            let b = b + lift.2 * (1.0 - b);
+
+            // Apply gamma
+            let r = r.max(0.0).powf(gamma.0);
+            let g = g.max(0.0).powf(gamma.1);
+            let b = b.max(0.0).powf(gamma.2);
+
+            (r.clamp(0.0, 1.0), g.clamp(0.0, 1.0), b.clamp(0.0, 1.0))
+        })
+    }
+
+    /// Generate ASC CDL (Color Decision List) LUT
+    fn cdl(
+        slope: (f32, f32, f32),
+        offset: (f32, f32, f32),
+        power: (f32, f32, f32),
+        saturation: f32,
+        size: usize,
+    ) -> Lut3D {
+        Lut3D::from_function(size, |r, g, b| {
+            // Slope and offset
+            let r = r * slope.0 + offset.0;
+            let g = g * slope.1 + offset.1;
+            let b = b * slope.2 + offset.2;
+
+            // Power (gamma)
+            let r = r.max(0.0).powf(power.0);
+            let g = g.max(0.0).powf(power.1);
+            let b = b.max(0.0).powf(power.2);
+
+            // Saturation
+            let luma = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+            let r = luma + (r - luma) * saturation;
+            let g = luma + (g - luma) * saturation;
+            let b = luma + (b - luma) * saturation;
+
+            (r.clamp(0.0, 1.0), g.clamp(0.0, 1.0), b.clamp(0.0, 1.0))
+        })
+    }
+
+    /// Generate film emulation LUT
+    fn film_emulation(
+        color_balance: (f32, f32, f32),
+        contrast: f32,
+        saturation: f32,
+        highlight_rolloff: f32,
+        size: usize,
+    ) -> Lut3D {
+        Lut3D::from_function(size, |r, g, b| {
+            // Apply color balance
+            let r = r * color_balance.0;
+            let g = g * color_balance.1;
+            let b = b * color_balance.2;
+
+            // Apply contrast with S-curve
+            let apply_contrast = |v: f32| -> f32 {
+                let centered = v - 0.5;
+                let curved = centered * contrast;
+                let sigmoid = 0.5 + 0.5 * (curved * 4.0).tanh();
+                sigmoid
+            };
+
+            let r = apply_contrast(r);
+            let g = apply_contrast(g);
+            let b = apply_contrast(b);
+
+            // Highlight rolloff
+            let apply_rolloff = |v: f32| -> f32 {
+                if v > highlight_rolloff {
+                    let excess = v - highlight_rolloff;
+                    let compressed = excess / (1.0 + excess);
+                    highlight_rolloff + compressed * (1.0 - highlight_rolloff)
+                } else {
+                    v
+                }
+            };
+
+            let r = apply_rolloff(r);
+            let g = apply_rolloff(g);
+            let b = apply_rolloff(b);
+
+            // Apply saturation
+            let luma = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+            let r = luma + (r - luma) * saturation;
+            let g = luma + (g - luma) * saturation;
+            let b = luma + (b - luma) * saturation;
+
+            (r.clamp(0.0, 1.0), g.clamp(0.0, 1.0), b.clamp(0.0, 1.0))
+        })
+    }
+}
+
+// ============================================================================
+// LUT QUALITY ANALYSIS
+// ============================================================================
+
+/// LUT quality analyzer
+struct LutAnalyzer;
+
+impl LutAnalyzer {
+    /// Calculate LUT interpolation error
+    fn interpolation_error(lut: &Lut3D, samples: usize) -> LutQualityReport {
+        let mut max_error = 0.0f32;
+        let mut total_error = 0.0f64;
+        let mut sample_count = 0;
+
+        // Sample at sub-lattice positions
+        let step = 1.0 / samples as f32;
+
+        for bi in 0..samples {
+            for gi in 0..samples {
+                for ri in 0..samples {
+                    let r = ri as f32 * step;
+                    let g = gi as f32 * step;
+                    let b = bi as f32 * step;
+
+                    // Get tetrahedral and trilinear results
+                    let tet = lut.apply_tetrahedral(r, g, b);
+                    let tri = lut.apply_trilinear(r, g, b);
+
+                    // Calculate difference
+                    let error = ((tet.0 - tri.0).powi(2)
+                        + (tet.1 - tri.1).powi(2)
+                        + (tet.2 - tri.2).powi(2))
+                        .sqrt();
+
+                    max_error = max_error.max(error);
+                    total_error += error as f64;
+                    sample_count += 1;
+                }
+            }
+        }
+
+        LutQualityReport {
+            max_interpolation_error: max_error,
+            avg_interpolation_error: (total_error / sample_count as f64) as f32,
+            samples_tested: sample_count,
+        }
+    }
+
+    /// Check LUT monotonicity (for 1D LUTs)
+    fn check_monotonicity(lut: &Lut1D) -> MonotonicityReport {
+        let check_channel = |channel: &[f32]| -> (bool, usize) {
+            let mut violations = 0;
+            for i in 1..channel.len() {
+                if channel[i] < channel[i - 1] {
+                    violations += 1;
+                }
+            }
+            (violations == 0, violations)
+        };
+
+        let (r_mono, r_violations) = check_channel(&lut.red);
+        let (g_mono, g_violations) = check_channel(&lut.green);
+        let (b_mono, b_violations) = check_channel(&lut.blue);
+
+        MonotonicityReport {
+            red_monotonic: r_mono,
+            green_monotonic: g_mono,
+            blue_monotonic: b_mono,
+            red_violations: r_violations,
+            green_violations: g_violations,
+            blue_violations: b_violations,
+        }
+    }
+
+    /// Analyze gamut coverage of LUT
+    fn gamut_coverage(lut: &Lut3D, samples: usize) -> GamutCoverageReport {
+        let mut min_r = 1.0f32;
+        let mut max_r = 0.0f32;
+        let mut min_g = 1.0f32;
+        let mut max_g = 0.0f32;
+        let mut min_b = 1.0f32;
+        let mut max_b = 0.0f32;
+        let mut clipped_count = 0;
+        let mut sample_count = 0;
+
+        let step = 1.0 / samples as f32;
+
+        for bi in 0..samples {
+            for gi in 0..samples {
+                for ri in 0..samples {
+                    let r = ri as f32 * step;
+                    let g = gi as f32 * step;
+                    let b = bi as f32 * step;
+
+                    let result = lut.apply(r, g, b);
+
+                    min_r = min_r.min(result.0);
+                    max_r = max_r.max(result.0);
+                    min_g = min_g.min(result.1);
+                    max_g = max_g.max(result.1);
+                    min_b = min_b.min(result.2);
+                    max_b = max_b.max(result.2);
+
+                    if result.0 < 0.0 || result.0 > 1.0
+                        || result.1 < 0.0 || result.1 > 1.0
+                        || result.2 < 0.0 || result.2 > 1.0
+                    {
+                        clipped_count += 1;
+                    }
+
+                    sample_count += 1;
+                }
+            }
+        }
+
+        GamutCoverageReport {
+            output_range: ((min_r, max_r), (min_g, max_g), (min_b, max_b)),
+            clipped_percentage: clipped_count as f32 / sample_count as f32 * 100.0,
+            samples_tested: sample_count,
+        }
+    }
+}
+
+/// LUT quality report
+struct LutQualityReport {
+    max_interpolation_error: f32,
+    avg_interpolation_error: f32,
+    samples_tested: usize,
+}
+
+/// Monotonicity report for 1D LUT
+struct MonotonicityReport {
+    red_monotonic: bool,
+    green_monotonic: bool,
+    blue_monotonic: bool,
+    red_violations: usize,
+    green_violations: usize,
+    blue_violations: usize,
+}
+
+/// Gamut coverage report
+struct GamutCoverageReport {
+    output_range: ((f32, f32), (f32, f32), (f32, f32)),
+    clipped_percentage: f32,
+    samples_tested: usize,
+}
+
+// ============================================================================
+// WGSL SHADERS
+// ============================================================================
+
+/// 1D LUT shader
+const LUT_1D_SHADER: &str = r#"
+// 1D LUT Application Shader
+
+@group(0) @binding(0) var input_texture: texture_2d<f32>;
+@group(0) @binding(1) var output_texture: texture_storage_2d<rgba16float, write>;
+@group(0) @binding(2) var lut_texture: texture_1d<f32>;
+@group(0) @binding(3) var lut_sampler: sampler;
+@group(0) @binding(4) var<uniform> params: Lut1DParams;
+
+struct Lut1DParams {
+    blend: f32,
+    lut_size: f32,
+    domain_min: vec3<f32>,
+    domain_range: vec3<f32>,
+};
+
+@compute @workgroup_size(8, 8, 1)
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+    let dims = textureDimensions(input_texture);
+    if (global_id.x >= dims.x || global_id.y >= dims.y) {
+        return;
+    }
+
+    let coords = vec2<i32>(global_id.xy);
+    let color = textureLoad(input_texture, coords, 0);
+
+    // Normalize to LUT domain
+    let normalized = (color.rgb - params.domain_min) / params.domain_range;
+
+    // Sample 1D LUT (using RGB channels of 1D texture)
+    let lut_coord_r = clamp(normalized.r, 0.0, 1.0);
+    let lut_coord_g = clamp(normalized.g, 0.0, 1.0);
+    let lut_coord_b = clamp(normalized.b, 0.0, 1.0);
+
+    // For separate channel LUT, we'd need 3 textures or a 2D texture
+    let mapped = vec3<f32>(
+        textureSampleLevel(lut_texture, lut_sampler, lut_coord_r, 0.0).r,
+        textureSampleLevel(lut_texture, lut_sampler, lut_coord_g, 0.0).g,
+        textureSampleLevel(lut_texture, lut_sampler, lut_coord_b, 0.0).b
+    );
+
+    // Blend
+    let result = mix(color.rgb, mapped, params.blend);
+
+    textureStore(output_texture, coords, vec4<f32>(result, color.a));
+}
+"#;
+
+/// 3D LUT shader with tetrahedral interpolation
+const LUT_3D_SHADER: &str = r#"
+// 3D LUT Application Shader with Tetrahedral Interpolation
+
+@group(0) @binding(0) var input_texture: texture_2d<f32>;
+@group(0) @binding(1) var output_texture: texture_storage_2d<rgba16float, write>;
+@group(0) @binding(2) var lut_texture: texture_3d<f32>;
+@group(0) @binding(3) var lut_sampler: sampler;
+@group(0) @binding(4) var<uniform> params: Lut3DParams;
+
+struct Lut3DParams {
+    blend: f32,
+    lut_size: f32,
+    use_tetrahedral: u32,
+    _pad: f32,
+    domain_min: vec3<f32>,
+    _pad2: f32,
+    domain_range: vec3<f32>,
+    _pad3: f32,
+};
+
+fn sample_lut_trilinear(coords: vec3<f32>) -> vec3<f32> {
+    return textureSampleLevel(lut_texture, lut_sampler, coords, 0.0).rgb;
+}
+
+fn sample_lut_tetrahedral(coords: vec3<f32>) -> vec3<f32> {
+    let size = params.lut_size;
+    let scaled = coords * (size - 1.0);
+
+    let base = floor(scaled);
+    let frac = scaled - base;
+
+    let base_i = vec3<i32>(base);
+
+    // Get 8 corners
+    let c000 = textureLoad(lut_texture, base_i + vec3<i32>(0, 0, 0), 0).rgb;
+    let c100 = textureLoad(lut_texture, base_i + vec3<i32>(1, 0, 0), 0).rgb;
+    let c010 = textureLoad(lut_texture, base_i + vec3<i32>(0, 1, 0), 0).rgb;
+    let c110 = textureLoad(lut_texture, base_i + vec3<i32>(1, 1, 0), 0).rgb;
+    let c001 = textureLoad(lut_texture, base_i + vec3<i32>(0, 0, 1), 0).rgb;
+    let c101 = textureLoad(lut_texture, base_i + vec3<i32>(1, 0, 1), 0).rgb;
+    let c011 = textureLoad(lut_texture, base_i + vec3<i32>(0, 1, 1), 0).rgb;
+    let c111 = textureLoad(lut_texture, base_i + vec3<i32>(1, 1, 1), 0).rgb;
+
+    // Tetrahedral interpolation
+    var result: vec3<f32>;
+
+    if (frac.r > frac.g) {
+        if (frac.g > frac.b) {
+            // r > g > b
+            result = c000 * (1.0 - frac.r)
+                   + c100 * (frac.r - frac.g)
+                   + c110 * (frac.g - frac.b)
+                   + c111 * frac.b;
+        } else if (frac.r > frac.b) {
+            // r > b > g
+            result = c000 * (1.0 - frac.r)
+                   + c100 * (frac.r - frac.b)
+                   + c101 * (frac.b - frac.g)
+                   + c111 * frac.g;
+        } else {
+            // b > r > g
+            result = c000 * (1.0 - frac.b)
+                   + c001 * (frac.b - frac.r)
+                   + c101 * (frac.r - frac.g)
+                   + c111 * frac.g;
+        }
+    } else {
+        if (frac.b > frac.g) {
+            // b > g > r
+            result = c000 * (1.0 - frac.b)
+                   + c001 * (frac.b - frac.g)
+                   + c011 * (frac.g - frac.r)
+                   + c111 * frac.r;
+        } else if (frac.b > frac.r) {
+            // g > b > r
+            result = c000 * (1.0 - frac.g)
+                   + c010 * (frac.g - frac.b)
+                   + c011 * (frac.b - frac.r)
+                   + c111 * frac.r;
+        } else {
+            // g > r > b
+            result = c000 * (1.0 - frac.g)
+                   + c010 * (frac.g - frac.r)
+                   + c110 * (frac.r - frac.b)
+                   + c111 * frac.b;
+        }
+    }
+
+    return result;
+}
+
+@compute @workgroup_size(8, 8, 1)
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+    let dims = textureDimensions(input_texture);
+    if (global_id.x >= dims.x || global_id.y >= dims.y) {
+        return;
+    }
+
+    let coords = vec2<i32>(global_id.xy);
+    let color = textureLoad(input_texture, coords, 0);
+
+    // Normalize to LUT domain
+    let normalized = (color.rgb - params.domain_min) / params.domain_range;
+    let clamped = clamp(normalized, vec3<f32>(0.0), vec3<f32>(1.0));
+
+    // Apply LUT
+    var mapped: vec3<f32>;
+    if (params.use_tetrahedral != 0u) {
+        mapped = sample_lut_tetrahedral(clamped);
+    } else {
+        mapped = sample_lut_trilinear(clamped);
+    }
+
+    // Blend
+    let result = mix(color.rgb, mapped, params.blend);
+
+    textureStore(output_texture, coords, vec4<f32>(result, color.a));
+}
+"#;
+
+// ============================================================================
+// UNIT TESTS
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const EPSILON: f32 = 0.001;
+
+    fn approx_eq(a: f32, b: f32) -> bool {
+        (a - b).abs() < EPSILON
+    }
+
+    #[test]
+    fn test_1d_lut_identity() {
+        let lut = Lut1D::identity(256);
+
+        // Identity should pass through unchanged
+        assert!(approx_eq(lut.apply(0.0, 0.0, 0.0).0, 0.0));
+        assert!(approx_eq(lut.apply(0.5, 0.5, 0.5).0, 0.5));
+        assert!(approx_eq(lut.apply(1.0, 1.0, 1.0).0, 1.0));
+    }
+
+    #[test]
+    fn test_1d_lut_gamma() {
+        let lut = Lut1D::gamma(1024, 2.2);
+
+        // Gamma curve should lift midtones
+        let mid = lut.apply(0.5, 0.5, 0.5);
+        assert!(mid.0 > 0.5, "Gamma 2.2 should lift midtones: {}", mid.0);
+
+        // Black and white should remain
+        assert!(approx_eq(lut.apply(0.0, 0.0, 0.0).0, 0.0));
+        assert!(approx_eq(lut.apply(1.0, 1.0, 1.0).0, 1.0));
+    }
+
+    #[test]
+    fn test_1d_lut_inversion() {
+        let lut = Lut1D::gamma(1024, 2.2);
+        let inverted = lut.invert().unwrap();
+        let composed = lut.compose(&inverted, 1024);
+
+        // Composed should be approximately identity
+        for i in 0..10 {
+            let t = i as f32 / 9.0;
+            let result = composed.apply(t, t, t);
+            assert!(
+                (result.0 - t).abs() < 0.01,
+                "Composition not identity at {}: got {}",
+                t, result.0
+            );
+        }
+    }
+
+    #[test]
+    fn test_3d_lut_identity() {
+        let lut = Lut3D::identity(17);
+
+        // Identity should pass through unchanged
+        let tests = [
+            (0.0, 0.0, 0.0),
+            (0.5, 0.5, 0.5),
+            (1.0, 1.0, 1.0),
+            (0.25, 0.5, 0.75),
+        ];
+
+        for (r, g, b) in &tests {
+            let result = lut.apply(*r, *g, *b);
+            assert!(
+                approx_eq(result.0, *r) && approx_eq(result.1, *g) && approx_eq(result.2, *b),
+                "Identity failed for ({}, {}, {}): got ({}, {}, {})",
+                r, g, b, result.0, result.1, result.2
+            );
+        }
+    }
+
+    #[test]
+    fn test_3d_lut_interpolation() {
+        let lut = Lut3D::identity(9);
+
+        // Test that interpolation is smooth
+        for i in 0..100 {
+            let t = i as f32 / 99.0;
+            let result = lut.apply(t, t, t);
+            assert!(
+                approx_eq(result.0, t),
+                "Interpolation error at {}: got {}",
+                t, result.0
+            );
+        }
+    }
+
+    #[test]
+    fn test_cube_parser() {
+        let cube_content = r#"
+TITLE "Test LUT"
+LUT_3D_SIZE 2
+
+0.0 0.0 0.0
+1.0 0.0 0.0
+0.0 1.0 0.0
+1.0 1.0 0.0
+0.0 0.0 1.0
+1.0 0.0 1.0
+0.0 1.0 1.0
+1.0 1.0 1.0
+"#;
+
+        let lut = CubeParser::parse(cube_content).unwrap();
+        assert_eq!(lut.size, 2);
+        assert_eq!(lut.title, "Test LUT");
+        assert_eq!(lut.data.len(), 8);
+    }
+
+    #[test]
+    fn test_lut_pipeline() {
+        let pipeline = LutPipeline::new()
+            .with_pre_lut(Lut1D::srgb_linearize(1024))
+            .with_main_lut(Lut3D::identity(17))
+            .with_post_lut(Lut1D::srgb_encode(1024))
+            .with_blend(1.0);
+
+        // sRGB -> linear -> identity -> sRGB should be approximately identity
+        let tests = [(0.0, 0.0, 0.0), (0.5, 0.5, 0.5), (1.0, 1.0, 1.0)];
+
+        for (r, g, b) in &tests {
+            let result = pipeline.apply(*r, *g, *b);
+            assert!(
+                (result.0 - r).abs() < 0.02,
+                "Pipeline failed for {}: got {}",
+                r, result.0
+            );
+        }
+    }
+
+    #[test]
+    fn test_lut_generator_saturation() {
+        let lut = LutGenerator::saturation(0.5, 17);
+
+        // Neutral colors should be unchanged
+        let gray = lut.apply(0.5, 0.5, 0.5);
+        assert!(approx_eq(gray.0, gray.1) && approx_eq(gray.1, gray.2));
+
+        // Saturated colors should be desaturated
+        let red = lut.apply(1.0, 0.0, 0.0);
+        let luma = 0.2126 * 1.0 + 0.7152 * 0.0 + 0.0722 * 0.0;
+        assert!(red.1 > 0.0, "Green should increase from desaturation");
+    }
+
+    #[test]
+    fn test_domain() {
+        let domain = LutDomain::extended();
+
+        let normalized = domain.normalize(0.0, 0.0, 0.0);
+        assert!(normalized.0 > 0.0, "Extended domain should shift origin");
+
+        let denormalized = domain.denormalize(normalized.0, normalized.1, normalized.2);
+        assert!(approx_eq(denormalized.0, 0.0));
+    }
+
+    #[test]
+    fn test_lut_quality() {
+        let lut = Lut3D::identity(17);
+        let report = LutAnalyzer::interpolation_error(&lut, 10);
+
+        assert!(
+            report.max_interpolation_error < 0.01,
+            "Identity LUT should have minimal interpolation error"
+        );
+    }
+}

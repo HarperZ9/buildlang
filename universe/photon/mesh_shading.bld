@@ -1,0 +1,2358 @@
+// =============================================================================
+// PHOTON MESH SHADING PIPELINE - Harper Engine Advanced Rendering
+// =============================================================================
+// Implements complete mesh shading pipeline with task/mesh shaders
+// Based on Harper Engine Whitepapers:
+// - WP-059: Mesh Shading Fundamentals
+// - WP-060: Task Shader Culling and LOD Selection
+// - WP-061: Meshlet Generation and Optimization
+// - WP-062: Primitive Culling in Mesh Shaders
+// - WP-063: Mesh Shader Performance Optimization
+// - WP-064: Hybrid Mesh/Traditional Pipeline
+// - WP-065: Mesh Shading for Terrain and Foliage
+// =============================================================================
+
+use core::mem;
+use core::simd;
+use crate::photon::{RenderContext, Pipeline, Buffer, Shader};
+use crate::photon::gpu_driven::{MeshletMesh, Meshlet, IndirectDrawBuffer};
+
+// =============================================================================
+// MESH SHADING CONSTANTS (WP-059)
+// =============================================================================
+
+/// Maximum vertices per meshlet (hardware optimal)
+const MAX_MESHLET_VERTICES: u32 = 64;
+
+/// Maximum primitives per meshlet (hardware optimal)
+const MAX_MESHLET_PRIMITIVES: u32 = 124;
+
+/// Maximum meshlets per task shader workgroup
+const MAX_MESHLETS_PER_TASK_GROUP: u32 = 32;
+
+/// Task shader workgroup size
+const TASK_SHADER_WORKGROUP_SIZE: u32 = 32;
+
+/// Mesh shader workgroup size
+const MESH_SHADER_WORKGROUP_SIZE: u32 = 128;
+
+/// Maximum payload size in bytes
+const MAX_PAYLOAD_SIZE: usize = 16384;
+
+// =============================================================================
+// MESHLET DATA STRUCTURES (WP-061)
+// =============================================================================
+
+/// Optimized meshlet vertex data
+@align(16)
+struct MeshletVertexData {
+    position: Vec3<f32>,
+    normal: u32,           // Octahedral encoded
+    tangent: u32,          // Octahedral encoded + sign
+    uv: u32,               // R16G16 packed
+}
+
+/// Meshlet primitive data (3 vertex indices packed)
+@align(4)
+struct MeshletPrimitive {
+    indices: u32,          // 3x 8-bit indices packed
+}
+
+/// Extended meshlet with culling data
+@align(64)
+struct MeshletCullData {
+    /// Bounding sphere center (object space)
+    center: Vec3<f32>,
+    /// Bounding sphere radius
+    radius: f32,
+
+    /// Cone apex for backface culling
+    cone_apex: Vec3<f32>,
+    /// Cone cutoff (cos of half-angle)
+    cone_cutoff: f32,
+
+    /// Cone axis (normalized)
+    cone_axis: Vec3<f32>,
+    /// Parent LOD group index
+    lod_group: u32,
+
+    /// Normal cone for cluster culling (WP-062)
+    normal_cone: Vec4<f32>,
+
+    /// LOD error metric
+    lod_error: f32,
+    /// LOD distance threshold
+    lod_distance: f32,
+    /// Meshlet flags
+    flags: u32,
+    /// Reserved for alignment
+    _padding: u32,
+}
+
+/// Meshlet LOD group for seamless transitions
+@align(32)
+struct MeshletLODGroup {
+    /// Starting meshlet index
+    meshlet_start: u32,
+    /// Number of meshlets in this LOD
+    meshlet_count: u32,
+    /// LOD level (0 = highest detail)
+    lod_level: u32,
+    /// Screen-size threshold for LOD selection
+    screen_size_threshold: f32,
+
+    /// Parent LOD group index (-1 if root)
+    parent_group: i32,
+    /// Error metric for this LOD level
+    error_metric: f32,
+    /// Reserved
+    _padding: [u32; 2],
+}
+
+/// Mesh shading draw command
+@align(16)
+struct MeshDrawCommand {
+    /// Task shader dispatch count X
+    task_count_x: u32,
+    /// Task shader dispatch count Y
+    task_count_y: u32,
+    /// Task shader dispatch count Z
+    task_count_z: u32,
+    /// First meshlet index
+    first_meshlet: u32,
+
+    /// Meshlet count
+    meshlet_count: u32,
+    /// Instance index
+    instance_index: u32,
+    /// Material index
+    material_index: u32,
+    /// Flags
+    flags: u32,
+}
+
+// =============================================================================
+// TASK SHADER PAYLOAD (WP-060)
+// =============================================================================
+
+/// Payload passed from task shader to mesh shader
+@align(16)
+struct TaskPayload {
+    /// Base meshlet index for this dispatch
+    base_meshlet_index: u32,
+    /// Number of visible meshlets
+    visible_meshlet_count: u32,
+    /// Instance index
+    instance_index: u32,
+    /// Material index
+    material_index: u32,
+
+    /// Visible meshlet indices (up to 32 per task group)
+    visible_meshlets: [u32; MAX_MESHLETS_PER_TASK_GROUP],
+
+    /// LOD blend factors for seamless transitions
+    lod_blend_factors: [f32; MAX_MESHLETS_PER_TASK_GROUP],
+
+    /// Culling results bitmask
+    culling_mask: u32,
+    /// LOD selection results
+    lod_selection: u32,
+    /// Reserved
+    _padding: [u32; 2],
+}
+
+/// Extended payload with additional data
+@align(16)
+struct TaskPayloadExtended {
+    /// Base payload
+    base: TaskPayload,
+
+    /// Per-meshlet visibility data
+    visibility_data: [u32; MAX_MESHLETS_PER_TASK_GROUP],
+
+    /// Per-meshlet screen coverage
+    screen_coverage: [f32; MAX_MESHLETS_PER_TASK_GROUP],
+
+    /// Transform matrix (for vertex transformation)
+    world_matrix: Mat4x4<f32>,
+
+    /// Normal matrix (inverse transpose)
+    normal_matrix: Mat3x3<f32>,
+}
+
+// =============================================================================
+// MESHLET GENERATOR (WP-061)
+// =============================================================================
+
+/// Meshlet generation configuration
+struct MeshletConfig {
+    max_vertices: u32,
+    max_primitives: u32,
+    cone_weight: f32,
+    locality_weight: f32,
+}
+
+impl MeshletConfig {
+    fn default() -> Self {
+        Self {
+            max_vertices: MAX_MESHLET_VERTICES,
+            max_primitives: MAX_MESHLET_PRIMITIVES,
+            cone_weight: 0.5,
+            locality_weight: 0.5,
+        }
+    }
+
+    fn high_quality() -> Self {
+        Self {
+            max_vertices: 64,
+            max_primitives: 126,
+            cone_weight: 0.7,
+            locality_weight: 0.3,
+        }
+    }
+}
+
+/// Meshlet generator using greedy clustering
+struct MeshletGenerator {
+    config: MeshletConfig,
+    vertex_cache: Vec<u32>,
+    triangle_adjacency: Vec<Vec<u32>>,
+}
+
+impl MeshletGenerator {
+    fn new(config: MeshletConfig) -> Self {
+        Self {
+            config,
+            vertex_cache: Vec::new(),
+            triangle_adjacency: Vec::new(),
+        }
+    }
+
+    /// Generate meshlets from indexed triangle mesh
+    fn generate(
+        &mut self,
+        vertices: &[MeshletVertexData],
+        indices: &[u32],
+    ) -> MeshletMeshData {
+        // Build triangle adjacency
+        self.build_adjacency(vertices.len(), indices);
+
+        let triangle_count = indices.len() / 3;
+        let mut used_triangles = vec![false; triangle_count];
+        let mut meshlets = Vec::new();
+        let mut meshlet_vertices = Vec::new();
+        let mut meshlet_primitives = Vec::new();
+        let mut cull_data = Vec::new();
+
+        // Greedy meshlet construction
+        while let Some(seed) = self.find_seed_triangle(&used_triangles) {
+            let meshlet = self.build_meshlet(
+                seed,
+                vertices,
+                indices,
+                &mut used_triangles,
+                &mut meshlet_vertices,
+                &mut meshlet_primitives,
+            );
+
+            // Compute culling data for this meshlet
+            let cull = self.compute_cull_data(
+                &meshlet,
+                vertices,
+                &meshlet_vertices,
+            );
+
+            meshlets.push(meshlet);
+            cull_data.push(cull);
+        }
+
+        // Optimize meshlet order for cache efficiency
+        self.optimize_meshlet_order(&mut meshlets, &cull_data);
+
+        MeshletMeshData {
+            meshlets,
+            vertices: meshlet_vertices,
+            primitives: meshlet_primitives,
+            cull_data,
+            lod_groups: Vec::new(),
+        }
+    }
+
+    /// Build triangle adjacency structure
+    fn build_adjacency(&mut self, vertex_count: usize, indices: &[u32]) {
+        self.triangle_adjacency.clear();
+        self.triangle_adjacency.resize(indices.len() / 3, Vec::new());
+
+        // Build edge -> triangle map
+        let mut edge_map: HashMap<(u32, u32), Vec<u32>> = HashMap::new();
+
+        for tri_idx in 0..(indices.len() / 3) {
+            let i0 = indices[tri_idx * 3];
+            let i1 = indices[tri_idx * 3 + 1];
+            let i2 = indices[tri_idx * 3 + 2];
+
+            // Add edges (sorted to ensure consistent lookup)
+            let edges = [
+                (i0.min(i1), i0.max(i1)),
+                (i1.min(i2), i1.max(i2)),
+                (i2.min(i0), i2.max(i0)),
+            ];
+
+            for edge in edges {
+                edge_map.entry(edge)
+                    .or_insert_with(Vec::new)
+                    .push(tri_idx as u32);
+            }
+        }
+
+        // Build adjacency from edge map
+        for (_, triangles) in edge_map {
+            for i in 0..triangles.len() {
+                for j in (i + 1)..triangles.len() {
+                    let t1 = triangles[i] as usize;
+                    let t2 = triangles[j] as usize;
+                    self.triangle_adjacency[t1].push(t2 as u32);
+                    self.triangle_adjacency[t2].push(t1 as u32);
+                }
+            }
+        }
+    }
+
+    /// Find seed triangle for new meshlet
+    fn find_seed_triangle(&self, used: &[bool]) -> Option<usize> {
+        used.iter().position(|&u| !u)
+    }
+
+    /// Build a single meshlet starting from seed triangle
+    fn build_meshlet(
+        &mut self,
+        seed: usize,
+        vertices: &[MeshletVertexData],
+        indices: &[u32],
+        used: &mut [bool],
+        out_vertices: &mut Vec<MeshletVertexData>,
+        out_primitives: &mut Vec<MeshletPrimitive>,
+    ) -> Meshlet {
+        let vertex_start = out_vertices.len() as u32;
+        let primitive_start = out_primitives.len() as u32;
+
+        // Local vertex map for this meshlet
+        let mut local_vertices: HashMap<u32, u8> = HashMap::new();
+        let mut meshlet_triangles: Vec<usize> = Vec::new();
+        let mut candidate_queue: Vec<usize> = vec![seed];
+
+        while !candidate_queue.is_empty()
+            && meshlet_triangles.len() < self.config.max_primitives as usize
+        {
+            // Find best candidate triangle
+            let best_idx = self.find_best_candidate(
+                &candidate_queue,
+                &local_vertices,
+                indices,
+                used,
+            );
+
+            if best_idx.is_none() {
+                break;
+            }
+
+            let tri_idx = candidate_queue.swap_remove(best_idx.unwrap());
+
+            if used[tri_idx] {
+                continue;
+            }
+
+            // Check if adding this triangle would exceed vertex limit
+            let tri_verts = [
+                indices[tri_idx * 3],
+                indices[tri_idx * 3 + 1],
+                indices[tri_idx * 3 + 2],
+            ];
+
+            let new_verts: Vec<u32> = tri_verts.iter()
+                .filter(|v| !local_vertices.contains_key(v))
+                .copied()
+                .collect();
+
+            if local_vertices.len() + new_verts.len() > self.config.max_vertices as usize {
+                continue;
+            }
+
+            // Add triangle to meshlet
+            used[tri_idx] = true;
+            meshlet_triangles.push(tri_idx);
+
+            // Add new vertices
+            for v in new_verts {
+                let local_idx = local_vertices.len() as u8;
+                local_vertices.insert(v, local_idx);
+                out_vertices.push(vertices[v as usize].clone());
+            }
+
+            // Pack primitive
+            let primitive = MeshletPrimitive {
+                indices: (local_vertices[&tri_verts[0]] as u32)
+                    | ((local_vertices[&tri_verts[1]] as u32) << 8)
+                    | ((local_vertices[&tri_verts[2]] as u32) << 16),
+            };
+            out_primitives.push(primitive);
+
+            // Add adjacent triangles to candidates
+            for &adj in &self.triangle_adjacency[tri_idx] {
+                if !used[adj as usize] {
+                    candidate_queue.push(adj as usize);
+                }
+            }
+        }
+
+        Meshlet {
+            vertex_offset: vertex_start,
+            vertex_count: local_vertices.len() as u32,
+            primitive_offset: primitive_start,
+            primitive_count: meshlet_triangles.len() as u32,
+        }
+    }
+
+    /// Find best candidate triangle for cache efficiency
+    fn find_best_candidate(
+        &self,
+        candidates: &[usize],
+        local_vertices: &HashMap<u32, u8>,
+        indices: &[u32],
+        used: &[bool],
+    ) -> Option<usize> {
+        let mut best_idx = None;
+        let mut best_score = f32::MIN;
+
+        for (idx, &tri_idx) in candidates.iter().enumerate() {
+            if used[tri_idx] {
+                continue;
+            }
+
+            let tri_verts = [
+                indices[tri_idx * 3],
+                indices[tri_idx * 3 + 1],
+                indices[tri_idx * 3 + 2],
+            ];
+
+            // Score based on vertex reuse
+            let reuse_count = tri_verts.iter()
+                .filter(|v| local_vertices.contains_key(v))
+                .count();
+
+            let score = reuse_count as f32 * self.config.locality_weight;
+
+            if score > best_score {
+                best_score = score;
+                best_idx = Some(idx);
+            }
+        }
+
+        best_idx
+    }
+
+    /// Compute culling data for meshlet
+    fn compute_cull_data(
+        &self,
+        meshlet: &Meshlet,
+        vertices: &[MeshletVertexData],
+        meshlet_vertices: &[MeshletVertexData],
+    ) -> MeshletCullData {
+        let start = meshlet.vertex_offset as usize;
+        let end = start + meshlet.vertex_count as usize;
+
+        // Compute bounding sphere
+        let mut center = Vec3::zero();
+        for v in &meshlet_vertices[start..end] {
+            center = center + v.position;
+        }
+        center = center / meshlet.vertex_count as f32;
+
+        let mut radius = 0.0f32;
+        for v in &meshlet_vertices[start..end] {
+            let dist = (v.position - center).length();
+            radius = radius.max(dist);
+        }
+
+        // Compute normal cone
+        let (cone_axis, cone_cutoff, cone_apex) = self.compute_normal_cone(
+            meshlet,
+            meshlet_vertices,
+            center,
+        );
+
+        MeshletCullData {
+            center,
+            radius,
+            cone_apex,
+            cone_cutoff,
+            cone_axis,
+            lod_group: 0,
+            normal_cone: Vec4::new(cone_axis.x, cone_axis.y, cone_axis.z, cone_cutoff),
+            lod_error: 0.0,
+            lod_distance: 0.0,
+            flags: 0,
+            _padding: 0,
+        }
+    }
+
+    /// Compute normal cone for backface culling
+    fn compute_normal_cone(
+        &self,
+        meshlet: &Meshlet,
+        vertices: &[MeshletVertexData],
+        center: Vec3<f32>,
+    ) -> (Vec3<f32>, f32, Vec3<f32>) {
+        let start = meshlet.vertex_offset as usize;
+
+        // Decode and average normals
+        let mut avg_normal = Vec3::zero();
+        for i in 0..meshlet.vertex_count {
+            let v = &vertices[start + i as usize];
+            let normal = decode_octahedral_normal(v.normal);
+            avg_normal = avg_normal + normal;
+        }
+        avg_normal = avg_normal.normalize();
+
+        // Compute cone cutoff (minimum dot product with average)
+        let mut min_dot = 1.0f32;
+        for i in 0..meshlet.vertex_count {
+            let v = &vertices[start + i as usize];
+            let normal = decode_octahedral_normal(v.normal);
+            let dot = avg_normal.dot(normal);
+            min_dot = min_dot.min(dot);
+        }
+
+        // Compute cone apex
+        let apex = center - avg_normal * (radius / min_dot.max(0.001));
+
+        (avg_normal, min_dot, apex)
+    }
+
+    /// Optimize meshlet order for cache efficiency
+    fn optimize_meshlet_order(&self, meshlets: &mut [Meshlet], cull_data: &[MeshletCullData]) {
+        // Sort by spatial locality (Morton code)
+        let mut indexed: Vec<(usize, u64)> = meshlets.iter()
+            .enumerate()
+            .map(|(i, _)| {
+                let c = &cull_data[i].center;
+                let morton = compute_morton_code(c);
+                (i, morton)
+            })
+            .collect();
+
+        indexed.sort_by_key(|(_, morton)| *morton);
+
+        // Reorder meshlets (would need to update indices in practice)
+        // This is a simplified version
+    }
+}
+
+/// Compute Morton code for spatial sorting
+fn compute_morton_code(p: &Vec3<f32>) -> u64 {
+    fn expand_bits(mut v: u32) -> u64 {
+        let mut v = v as u64;
+        v = (v | (v << 32)) & 0x1f00000000ffff;
+        v = (v | (v << 16)) & 0x1f0000ff0000ff;
+        v = (v | (v << 8)) & 0x100f00f00f00f00f;
+        v = (v | (v << 4)) & 0x10c30c30c30c30c3;
+        v = (v | (v << 2)) & 0x1249249249249249;
+        v
+    }
+
+    let scale = 1023.0;
+    let x = ((p.x + 1.0) * 0.5 * scale) as u32;
+    let y = ((p.y + 1.0) * 0.5 * scale) as u32;
+    let z = ((p.z + 1.0) * 0.5 * scale) as u32;
+
+    expand_bits(x) | (expand_bits(y) << 1) | (expand_bits(z) << 2)
+}
+
+/// Decode octahedral-encoded normal
+fn decode_octahedral_normal(encoded: u32) -> Vec3<f32> {
+    let x = ((encoded & 0xFFFF) as f32 / 65535.0) * 2.0 - 1.0;
+    let y = (((encoded >> 16) & 0xFFFF) as f32 / 65535.0) * 2.0 - 1.0;
+
+    let z = 1.0 - x.abs() - y.abs();
+    let t = (-z).max(0.0);
+    let nx = x + if x >= 0.0 { -t } else { t };
+    let ny = y + if y >= 0.0 { -t } else { t };
+
+    Vec3::new(nx, ny, z).normalize()
+}
+
+/// Complete meshlet mesh data
+struct MeshletMeshData {
+    meshlets: Vec<Meshlet>,
+    vertices: Vec<MeshletVertexData>,
+    primitives: Vec<MeshletPrimitive>,
+    cull_data: Vec<MeshletCullData>,
+    lod_groups: Vec<MeshletLODGroup>,
+}
+
+// =============================================================================
+// LOD GENERATION (WP-060)
+// =============================================================================
+
+/// LOD generation configuration
+struct LODConfig {
+    /// Maximum number of LOD levels
+    max_lod_levels: u32,
+    /// Target reduction ratio per level
+    reduction_ratio: f32,
+    /// Screen-size threshold multiplier
+    screen_threshold_multiplier: f32,
+    /// Minimum meshlet count per LOD
+    min_meshlets_per_lod: u32,
+}
+
+impl LODConfig {
+    fn default() -> Self {
+        Self {
+            max_lod_levels: 8,
+            reduction_ratio: 0.5,
+            screen_threshold_multiplier: 2.0,
+            min_meshlets_per_lod: 4,
+        }
+    }
+}
+
+/// LOD generator for meshlet meshes
+struct MeshletLODGenerator {
+    config: LODConfig,
+}
+
+impl MeshletLODGenerator {
+    fn new(config: LODConfig) -> Self {
+        Self { config }
+    }
+
+    /// Generate LOD hierarchy from base mesh
+    fn generate_lods(&self, base_mesh: &mut MeshletMeshData) {
+        let mut current_meshlets = base_mesh.meshlets.clone();
+        let mut current_level = 0u32;
+        let mut lod_groups = Vec::new();
+
+        // LOD 0 is the base mesh
+        lod_groups.push(MeshletLODGroup {
+            meshlet_start: 0,
+            meshlet_count: current_meshlets.len() as u32,
+            lod_level: 0,
+            screen_size_threshold: f32::MAX,
+            parent_group: -1,
+            error_metric: 0.0,
+            _padding: [0; 2],
+        });
+
+        while current_level < self.config.max_lod_levels
+            && current_meshlets.len() > self.config.min_meshlets_per_lod as usize
+        {
+            current_level += 1;
+
+            // Generate simplified LOD
+            let simplified = self.simplify_meshlets(
+                &current_meshlets,
+                &base_mesh.cull_data,
+                self.config.reduction_ratio,
+            );
+
+            if simplified.len() >= current_meshlets.len() {
+                break; // No further simplification possible
+            }
+
+            let meshlet_start = base_mesh.meshlets.len() as u32;
+
+            // Calculate screen threshold
+            let screen_threshold = self.calculate_screen_threshold(
+                current_level,
+                &simplified,
+            );
+
+            // Calculate error metric
+            let error_metric = self.calculate_error_metric(
+                &current_meshlets,
+                &simplified,
+            );
+
+            lod_groups.push(MeshletLODGroup {
+                meshlet_start,
+                meshlet_count: simplified.len() as u32,
+                lod_level: current_level,
+                screen_size_threshold: screen_threshold,
+                parent_group: (lod_groups.len() - 1) as i32,
+                error_metric,
+                _padding: [0; 2],
+            });
+
+            // Add simplified meshlets to mesh
+            base_mesh.meshlets.extend(simplified.clone());
+
+            current_meshlets = simplified;
+        }
+
+        base_mesh.lod_groups = lod_groups;
+    }
+
+    /// Simplify meshlets by clustering
+    fn simplify_meshlets(
+        &self,
+        meshlets: &[Meshlet],
+        cull_data: &[MeshletCullData],
+        ratio: f32,
+    ) -> Vec<Meshlet> {
+        let target_count = ((meshlets.len() as f32) * ratio) as usize;
+        let target_count = target_count.max(self.config.min_meshlets_per_lod as usize);
+
+        // Cluster meshlets spatially
+        let clusters = self.cluster_meshlets(meshlets, cull_data, target_count);
+
+        // Merge meshlets within each cluster
+        clusters.into_iter()
+            .map(|cluster| self.merge_cluster(&cluster, meshlets))
+            .collect()
+    }
+
+    /// Cluster meshlets spatially using k-means
+    fn cluster_meshlets(
+        &self,
+        meshlets: &[Meshlet],
+        cull_data: &[MeshletCullData],
+        target_count: usize,
+    ) -> Vec<Vec<usize>> {
+        // Initialize cluster centers using k-means++
+        let mut centers: Vec<Vec3<f32>> = Vec::with_capacity(target_count);
+        let mut assignments: Vec<usize> = vec![0; meshlets.len()];
+
+        // First center is random
+        centers.push(cull_data[0].center);
+
+        // k-means++ initialization
+        for _ in 1..target_count {
+            let mut max_dist = 0.0f32;
+            let mut best_idx = 0;
+
+            for (i, c) in cull_data.iter().enumerate() {
+                let min_dist = centers.iter()
+                    .map(|center| (c.center - *center).length_squared())
+                    .fold(f32::MAX, f32::min);
+
+                if min_dist > max_dist {
+                    max_dist = min_dist;
+                    best_idx = i;
+                }
+            }
+
+            centers.push(cull_data[best_idx].center);
+        }
+
+        // k-means iterations
+        for _ in 0..10 {
+            // Assign meshlets to nearest center
+            for (i, c) in cull_data.iter().enumerate() {
+                let (nearest, _) = centers.iter()
+                    .enumerate()
+                    .map(|(j, center)| (j, (c.center - *center).length_squared()))
+                    .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
+                    .unwrap();
+                assignments[i] = nearest;
+            }
+
+            // Update centers
+            for (j, center) in centers.iter_mut().enumerate() {
+                let mut sum = Vec3::zero();
+                let mut count = 0;
+
+                for (i, &assignment) in assignments.iter().enumerate() {
+                    if assignment == j {
+                        sum = sum + cull_data[i].center;
+                        count += 1;
+                    }
+                }
+
+                if count > 0 {
+                    *center = sum / count as f32;
+                }
+            }
+        }
+
+        // Build cluster lists
+        let mut clusters: Vec<Vec<usize>> = vec![Vec::new(); target_count];
+        for (i, &assignment) in assignments.iter().enumerate() {
+            clusters[assignment].push(i);
+        }
+
+        // Remove empty clusters
+        clusters.into_iter().filter(|c| !c.is_empty()).collect()
+    }
+
+    /// Merge meshlets in a cluster into a single meshlet
+    fn merge_cluster(&self, cluster: &[usize], meshlets: &[Meshlet]) -> Meshlet {
+        // For simplification, we create a representative meshlet
+        // In a full implementation, this would actually merge geometry
+        let first = &meshlets[cluster[0]];
+
+        let total_vertices: u32 = cluster.iter()
+            .map(|&i| meshlets[i].vertex_count)
+            .sum();
+
+        let total_primitives: u32 = cluster.iter()
+            .map(|&i| meshlets[i].primitive_count)
+            .sum();
+
+        Meshlet {
+            vertex_offset: first.vertex_offset,
+            vertex_count: total_vertices.min(MAX_MESHLET_VERTICES),
+            primitive_offset: first.primitive_offset,
+            primitive_count: total_primitives.min(MAX_MESHLET_PRIMITIVES),
+        }
+    }
+
+    /// Calculate screen threshold for LOD selection
+    fn calculate_screen_threshold(&self, level: u32, meshlets: &[Meshlet]) -> f32 {
+        let base_threshold = 0.05; // 5% of screen
+        base_threshold * self.config.screen_threshold_multiplier.powi(level as i32)
+    }
+
+    /// Calculate error metric between LOD levels
+    fn calculate_error_metric(&self, original: &[Meshlet], simplified: &[Meshlet]) -> f32 {
+        // Simplified error based on meshlet count reduction
+        let reduction = 1.0 - (simplified.len() as f32 / original.len() as f32);
+        reduction * 0.1 // Error scales with reduction
+    }
+}
+
+// =============================================================================
+// TASK SHADER IMPLEMENTATION (WP-060)
+// =============================================================================
+
+/// Task shader for meshlet culling and LOD selection
+struct TaskShaderModule {
+    /// Frustum planes for culling
+    frustum_planes: [Vec4<f32>; 6],
+    /// Camera position for LOD selection
+    camera_position: Vec3<f32>,
+    /// Screen dimensions
+    screen_size: Vec2<f32>,
+    /// Field of view tangent
+    fov_tan: f32,
+    /// LOD bias
+    lod_bias: f32,
+}
+
+impl TaskShaderModule {
+    fn new() -> Self {
+        Self {
+            frustum_planes: [Vec4::zero(); 6],
+            camera_position: Vec3::zero(),
+            screen_size: Vec2::new(1920.0, 1080.0),
+            fov_tan: 1.0,
+            lod_bias: 0.0,
+        }
+    }
+
+    /// Execute task shader for a group of meshlets
+    fn execute(
+        &self,
+        meshlets: &[Meshlet],
+        cull_data: &[MeshletCullData],
+        lod_groups: &[MeshletLODGroup],
+        world_matrix: &Mat4x4<f32>,
+        start_meshlet: u32,
+        count: u32,
+    ) -> TaskPayload {
+        let mut payload = TaskPayload {
+            base_meshlet_index: start_meshlet,
+            visible_meshlet_count: 0,
+            instance_index: 0,
+            material_index: 0,
+            visible_meshlets: [0; MAX_MESHLETS_PER_TASK_GROUP as usize],
+            lod_blend_factors: [0.0; MAX_MESHLETS_PER_TASK_GROUP as usize],
+            culling_mask: 0,
+            lod_selection: 0,
+            _padding: [0; 2],
+        };
+
+        for i in 0..count.min(MAX_MESHLETS_PER_TASK_GROUP) {
+            let meshlet_idx = start_meshlet + i;
+            if meshlet_idx >= meshlets.len() as u32 {
+                break;
+            }
+
+            let cull = &cull_data[meshlet_idx as usize];
+
+            // Transform bounding sphere to world space
+            let world_center = world_matrix.transform_point(cull.center);
+            let world_radius = cull.radius * world_matrix.max_scale();
+
+            // Frustum culling
+            if !self.frustum_cull(world_center, world_radius) {
+                continue;
+            }
+
+            // Backface cone culling
+            let world_cone_axis = world_matrix.transform_vector(cull.cone_axis).normalize();
+            if !self.cone_cull(world_center, world_cone_axis, cull.cone_cutoff) {
+                continue;
+            }
+
+            // LOD selection
+            let screen_size = self.calculate_screen_size(world_center, world_radius);
+            let selected_lod = self.select_lod(screen_size, lod_groups, cull.lod_group);
+
+            // Add to visible list
+            let visible_idx = payload.visible_meshlet_count as usize;
+            payload.visible_meshlets[visible_idx] = meshlet_idx;
+            payload.lod_blend_factors[visible_idx] = selected_lod.1;
+            payload.visible_meshlet_count += 1;
+            payload.culling_mask |= 1 << i;
+        }
+
+        payload
+    }
+
+    /// Frustum culling test
+    fn frustum_cull(&self, center: Vec3<f32>, radius: f32) -> bool {
+        for plane in &self.frustum_planes {
+            let dist = plane.x * center.x + plane.y * center.y + plane.z * center.z + plane.w;
+            if dist < -radius {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Normal cone culling for backface rejection
+    fn cone_cull(&self, center: Vec3<f32>, cone_axis: Vec3<f32>, cutoff: f32) -> bool {
+        let view_dir = (center - self.camera_position).normalize();
+        let dot = view_dir.dot(cone_axis);
+
+        // If all normals face away from camera, cull the meshlet
+        dot < cutoff
+    }
+
+    /// Calculate screen-space size of bounding sphere
+    fn calculate_screen_size(&self, center: Vec3<f32>, radius: f32) -> f32 {
+        let dist = (center - self.camera_position).length();
+        if dist <= 0.0 {
+            return f32::MAX;
+        }
+
+        let projected_size = radius / (dist * self.fov_tan);
+        projected_size * self.screen_size.y
+    }
+
+    /// Select appropriate LOD level
+    fn select_lod(
+        &self,
+        screen_size: f32,
+        lod_groups: &[MeshletLODGroup],
+        current_group: u32,
+    ) -> (u32, f32) {
+        let adjusted_size = screen_size * (1.0 + self.lod_bias);
+
+        for (i, group) in lod_groups.iter().enumerate() {
+            if adjusted_size > group.screen_size_threshold {
+                // Calculate blend factor for smooth transitions
+                let blend = if i > 0 {
+                    let prev_threshold = lod_groups[i - 1].screen_size_threshold;
+                    let range = prev_threshold - group.screen_size_threshold;
+                    if range > 0.0 {
+                        (adjusted_size - group.screen_size_threshold) / range
+                    } else {
+                        1.0
+                    }
+                } else {
+                    1.0
+                };
+
+                return (group.lod_level, blend);
+            }
+        }
+
+        // Return lowest LOD
+        let last = lod_groups.last().unwrap();
+        (last.lod_level, 1.0)
+    }
+}
+
+// =============================================================================
+// MESH SHADER IMPLEMENTATION (WP-059, WP-062)
+// =============================================================================
+
+/// Mesh shader output vertex
+@align(16)
+struct MeshShaderVertex {
+    position: Vec4<f32>,      // Clip space position
+    world_pos: Vec3<f32>,     // World position
+    _pad0: f32,
+    normal: Vec3<f32>,        // World normal
+    _pad1: f32,
+    tangent: Vec4<f32>,       // World tangent + sign
+    uv: Vec2<f32>,            // Texture coordinates
+    _pad2: [f32; 2],
+}
+
+/// Mesh shader output primitive
+@align(4)
+struct MeshShaderPrimitive {
+    primitive_id: u32,
+    layer: u32,
+    viewport: u32,
+    cull_primitive: u32,      // Per-primitive culling flag
+}
+
+/// Mesh shader module
+struct MeshShaderModule {
+    /// View-projection matrix
+    view_proj: Mat4x4<f32>,
+    /// View matrix
+    view: Mat4x4<f32>,
+    /// Camera position
+    camera_pos: Vec3<f32>,
+    /// Enable per-primitive culling
+    per_primitive_culling: bool,
+    /// Enable small primitive culling
+    small_primitive_culling: bool,
+    /// Small primitive threshold in pixels
+    small_primitive_threshold: f32,
+}
+
+impl MeshShaderModule {
+    fn new() -> Self {
+        Self {
+            view_proj: Mat4x4::identity(),
+            view: Mat4x4::identity(),
+            camera_pos: Vec3::zero(),
+            per_primitive_culling: true,
+            small_primitive_culling: true,
+            small_primitive_threshold: 1.0,
+        }
+    }
+
+    /// Execute mesh shader for a single meshlet
+    fn execute(
+        &self,
+        meshlet: &Meshlet,
+        vertices: &[MeshletVertexData],
+        primitives: &[MeshletPrimitive],
+        world_matrix: &Mat4x4<f32>,
+        normal_matrix: &Mat3x3<f32>,
+    ) -> (Vec<MeshShaderVertex>, Vec<[u32; 3]>) {
+        let mut out_vertices = Vec::with_capacity(meshlet.vertex_count as usize);
+        let mut out_indices = Vec::new();
+
+        // Transform vertices
+        for i in 0..meshlet.vertex_count {
+            let v = &vertices[(meshlet.vertex_offset + i) as usize];
+
+            let world_pos = world_matrix.transform_point(v.position);
+            let clip_pos = self.view_proj * Vec4::new(world_pos.x, world_pos.y, world_pos.z, 1.0);
+
+            let normal = decode_octahedral_normal(v.normal);
+            let world_normal = (normal_matrix * normal).normalize();
+
+            let (tangent, sign) = decode_tangent(v.tangent);
+            let world_tangent = (normal_matrix * tangent).normalize();
+
+            let uv = decode_uv(v.uv);
+
+            out_vertices.push(MeshShaderVertex {
+                position: clip_pos,
+                world_pos,
+                _pad0: 0.0,
+                normal: world_normal,
+                _pad1: 0.0,
+                tangent: Vec4::new(world_tangent.x, world_tangent.y, world_tangent.z, sign),
+                uv,
+                _pad2: [0.0; 2],
+            });
+        }
+
+        // Process primitives with culling
+        for i in 0..meshlet.primitive_count {
+            let prim = &primitives[(meshlet.primitive_offset + i) as usize];
+
+            let i0 = (prim.indices & 0xFF) as u32;
+            let i1 = ((prim.indices >> 8) & 0xFF) as u32;
+            let i2 = ((prim.indices >> 16) & 0xFF) as u32;
+
+            // Per-primitive culling
+            if self.per_primitive_culling {
+                let v0 = &out_vertices[i0 as usize];
+                let v1 = &out_vertices[i1 as usize];
+                let v2 = &out_vertices[i2 as usize];
+
+                // Backface culling
+                if self.is_backface(v0, v1, v2) {
+                    continue;
+                }
+
+                // Small primitive culling
+                if self.small_primitive_culling && self.is_small_primitive(v0, v1, v2) {
+                    continue;
+                }
+
+                // Frustum culling (clip space)
+                if self.is_outside_frustum(v0, v1, v2) {
+                    continue;
+                }
+            }
+
+            out_indices.push([i0, i1, i2]);
+        }
+
+        (out_vertices, out_indices)
+    }
+
+    /// Check if triangle is backfacing
+    fn is_backface(&self, v0: &MeshShaderVertex, v1: &MeshShaderVertex, v2: &MeshShaderVertex) -> bool {
+        // NDC space winding order check
+        let p0 = v0.position.xyz() / v0.position.w;
+        let p1 = v1.position.xyz() / v1.position.w;
+        let p2 = v2.position.xyz() / v2.position.w;
+
+        let e0 = p1 - p0;
+        let e1 = p2 - p0;
+
+        let cross = e0.x * e1.y - e0.y * e1.x;
+        cross <= 0.0 // Assuming counter-clockwise front face
+    }
+
+    /// Check if triangle is too small to render
+    fn is_small_primitive(
+        &self,
+        v0: &MeshShaderVertex,
+        v1: &MeshShaderVertex,
+        v2: &MeshShaderVertex,
+    ) -> bool {
+        // Convert to pixel coordinates (assuming 1920x1080)
+        let screen_w = 1920.0;
+        let screen_h = 1080.0;
+
+        let p0 = Vec2::new(
+            (v0.position.x / v0.position.w * 0.5 + 0.5) * screen_w,
+            (v0.position.y / v0.position.w * 0.5 + 0.5) * screen_h,
+        );
+        let p1 = Vec2::new(
+            (v1.position.x / v1.position.w * 0.5 + 0.5) * screen_w,
+            (v1.position.y / v1.position.w * 0.5 + 0.5) * screen_h,
+        );
+        let p2 = Vec2::new(
+            (v2.position.x / v2.position.w * 0.5 + 0.5) * screen_w,
+            (v2.position.y / v2.position.w * 0.5 + 0.5) * screen_h,
+        );
+
+        // Calculate screen-space area
+        let area = ((p1 - p0).cross_2d(p2 - p0)).abs() * 0.5;
+
+        area < self.small_primitive_threshold
+    }
+
+    /// Check if triangle is completely outside frustum
+    fn is_outside_frustum(
+        &self,
+        v0: &MeshShaderVertex,
+        v1: &MeshShaderVertex,
+        v2: &MeshShaderVertex,
+    ) -> bool {
+        // Check each clip plane
+        let vertices = [v0, v1, v2];
+
+        // Left plane: x > -w
+        if vertices.iter().all(|v| v.position.x < -v.position.w) {
+            return true;
+        }
+        // Right plane: x < w
+        if vertices.iter().all(|v| v.position.x > v.position.w) {
+            return true;
+        }
+        // Bottom plane: y > -w
+        if vertices.iter().all(|v| v.position.y < -v.position.w) {
+            return true;
+        }
+        // Top plane: y < w
+        if vertices.iter().all(|v| v.position.y > v.position.w) {
+            return true;
+        }
+        // Near plane: z > 0 (or > -w for OpenGL)
+        if vertices.iter().all(|v| v.position.z < 0.0) {
+            return true;
+        }
+        // Far plane: z < w
+        if vertices.iter().all(|v| v.position.z > v.position.w) {
+            return true;
+        }
+
+        false
+    }
+}
+
+/// Decode tangent from packed format
+fn decode_tangent(packed: u32) -> (Vec3<f32>, f32) {
+    let oct = packed & 0x7FFFFFFF;
+    let sign = if (packed & 0x80000000) != 0 { -1.0 } else { 1.0 };
+
+    let tangent = decode_octahedral_normal(oct);
+    (tangent, sign)
+}
+
+/// Decode UV from packed R16G16 format
+fn decode_uv(packed: u32) -> Vec2<f32> {
+    let u = (packed & 0xFFFF) as f32 / 65535.0;
+    let v = ((packed >> 16) & 0xFFFF) as f32 / 65535.0;
+    Vec2::new(u, v)
+}
+
+// =============================================================================
+// MESH SHADING PIPELINE (WP-059, WP-063)
+// =============================================================================
+
+/// Mesh shading pipeline configuration
+struct MeshPipelineConfig {
+    /// Enable task shader stage
+    use_task_shader: bool,
+    /// Enable per-primitive culling
+    per_primitive_culling: bool,
+    /// Enable small primitive culling
+    small_primitive_culling: bool,
+    /// Small primitive threshold
+    small_primitive_threshold: f32,
+    /// Maximum task shader workgroups
+    max_task_workgroups: u32,
+    /// Enable LOD blending
+    lod_blending: bool,
+}
+
+impl MeshPipelineConfig {
+    fn default() -> Self {
+        Self {
+            use_task_shader: true,
+            per_primitive_culling: true,
+            small_primitive_culling: true,
+            small_primitive_threshold: 1.0,
+            max_task_workgroups: 65535,
+            lod_blending: true,
+        }
+    }
+
+    fn simple() -> Self {
+        Self {
+            use_task_shader: false,
+            per_primitive_culling: false,
+            small_primitive_culling: false,
+            small_primitive_threshold: 0.0,
+            max_task_workgroups: 65535,
+            lod_blending: false,
+        }
+    }
+}
+
+/// Complete mesh shading pipeline
+struct MeshShadingPipeline {
+    config: MeshPipelineConfig,
+    task_shader: TaskShaderModule,
+    mesh_shader: MeshShaderModule,
+
+    /// Meshlet buffer
+    meshlet_buffer: Buffer<Meshlet>,
+    /// Vertex buffer
+    vertex_buffer: Buffer<MeshletVertexData>,
+    /// Primitive buffer
+    primitive_buffer: Buffer<MeshletPrimitive>,
+    /// Culling data buffer
+    cull_data_buffer: Buffer<MeshletCullData>,
+    /// LOD groups buffer
+    lod_groups_buffer: Buffer<MeshletLODGroup>,
+
+    /// Draw command buffer
+    draw_commands: Buffer<MeshDrawCommand>,
+    /// Payload buffer
+    payload_buffer: Buffer<TaskPayload>,
+
+    /// Statistics
+    stats: MeshPipelineStats,
+}
+
+/// Pipeline statistics
+struct MeshPipelineStats {
+    total_meshlets: u32,
+    visible_meshlets: u32,
+    culled_meshlets: u32,
+    total_primitives: u32,
+    visible_primitives: u32,
+    culled_primitives: u32,
+    task_invocations: u32,
+    mesh_invocations: u32,
+}
+
+impl MeshShadingPipeline {
+    fn new(ctx: &RenderContext, config: MeshPipelineConfig) -> Self {
+        Self {
+            config,
+            task_shader: TaskShaderModule::new(),
+            mesh_shader: MeshShaderModule::new(),
+            meshlet_buffer: Buffer::new(ctx, BufferUsage::STORAGE),
+            vertex_buffer: Buffer::new(ctx, BufferUsage::STORAGE),
+            primitive_buffer: Buffer::new(ctx, BufferUsage::STORAGE),
+            cull_data_buffer: Buffer::new(ctx, BufferUsage::STORAGE),
+            lod_groups_buffer: Buffer::new(ctx, BufferUsage::STORAGE),
+            draw_commands: Buffer::new(ctx, BufferUsage::INDIRECT | BufferUsage::STORAGE),
+            payload_buffer: Buffer::new(ctx, BufferUsage::STORAGE),
+            stats: MeshPipelineStats::default(),
+        }
+    }
+
+    /// Upload mesh data to GPU
+    fn upload_mesh(&mut self, ctx: &RenderContext, mesh: &MeshletMeshData) {
+        self.meshlet_buffer.upload(ctx, &mesh.meshlets);
+        self.vertex_buffer.upload(ctx, &mesh.vertices);
+        self.primitive_buffer.upload(ctx, &mesh.primitives);
+        self.cull_data_buffer.upload(ctx, &mesh.cull_data);
+        self.lod_groups_buffer.upload(ctx, &mesh.lod_groups);
+    }
+
+    /// Update view parameters
+    fn update_view(&mut self, camera: &Camera) {
+        self.task_shader.frustum_planes = camera.frustum_planes();
+        self.task_shader.camera_position = camera.position;
+        self.task_shader.screen_size = camera.viewport_size;
+        self.task_shader.fov_tan = (camera.fov * 0.5).tan();
+
+        self.mesh_shader.view_proj = camera.view_projection();
+        self.mesh_shader.view = camera.view_matrix();
+        self.mesh_shader.camera_pos = camera.position;
+    }
+
+    /// Render scene using mesh shading pipeline
+    fn render(
+        &mut self,
+        ctx: &RenderContext,
+        scene: &MeshShadingScene,
+        render_target: &RenderTarget,
+    ) {
+        self.stats = MeshPipelineStats::default();
+
+        // Begin render pass
+        ctx.begin_render_pass(render_target);
+
+        // Process each mesh instance
+        for instance in &scene.instances {
+            let mesh = &scene.meshes[instance.mesh_index];
+
+            self.stats.total_meshlets += mesh.meshlets.len() as u32;
+
+            if self.config.use_task_shader {
+                // Use task shader for culling
+                self.render_with_task_shader(ctx, mesh, instance);
+            } else {
+                // Direct mesh shader dispatch
+                self.render_direct(ctx, mesh, instance);
+            }
+        }
+
+        ctx.end_render_pass();
+    }
+
+    /// Render using task shader for culling
+    fn render_with_task_shader(
+        &mut self,
+        ctx: &RenderContext,
+        mesh: &MeshletMeshData,
+        instance: &MeshInstance,
+    ) {
+        let meshlet_count = mesh.meshlets.len() as u32;
+        let task_groups = (meshlet_count + MAX_MESHLETS_PER_TASK_GROUP - 1)
+            / MAX_MESHLETS_PER_TASK_GROUP;
+
+        // Execute task shader on CPU (simulated)
+        // In actual GPU implementation, this would be a dispatch
+        for group in 0..task_groups {
+            let start = group * MAX_MESHLETS_PER_TASK_GROUP;
+            let count = (meshlet_count - start).min(MAX_MESHLETS_PER_TASK_GROUP);
+
+            let payload = self.task_shader.execute(
+                &mesh.meshlets,
+                &mesh.cull_data,
+                &mesh.lod_groups,
+                &instance.world_matrix,
+                start,
+                count,
+            );
+
+            self.stats.task_invocations += 1;
+            self.stats.visible_meshlets += payload.visible_meshlet_count;
+            self.stats.culled_meshlets += count - payload.visible_meshlet_count;
+
+            // Dispatch mesh shaders for visible meshlets
+            for i in 0..payload.visible_meshlet_count {
+                let meshlet_idx = payload.visible_meshlets[i as usize];
+                let meshlet = &mesh.meshlets[meshlet_idx as usize];
+
+                let (vertices, indices) = self.mesh_shader.execute(
+                    meshlet,
+                    &mesh.vertices,
+                    &mesh.primitives,
+                    &instance.world_matrix,
+                    &instance.normal_matrix,
+                );
+
+                self.stats.mesh_invocations += 1;
+                self.stats.total_primitives += meshlet.primitive_count;
+                self.stats.visible_primitives += indices.len() as u32;
+                self.stats.culled_primitives += meshlet.primitive_count - indices.len() as u32;
+
+                // Rasterize (actual GPU would do this automatically)
+                // ctx.rasterize(vertices, indices);
+            }
+        }
+    }
+
+    /// Direct mesh shader rendering without task shader
+    fn render_direct(
+        &mut self,
+        ctx: &RenderContext,
+        mesh: &MeshletMeshData,
+        instance: &MeshInstance,
+    ) {
+        for (i, meshlet) in mesh.meshlets.iter().enumerate() {
+            let (vertices, indices) = self.mesh_shader.execute(
+                meshlet,
+                &mesh.vertices,
+                &mesh.primitives,
+                &instance.world_matrix,
+                &instance.normal_matrix,
+            );
+
+            self.stats.mesh_invocations += 1;
+            self.stats.visible_meshlets += 1;
+            self.stats.total_primitives += meshlet.primitive_count;
+            self.stats.visible_primitives += indices.len() as u32;
+
+            // Rasterize
+            // ctx.rasterize(vertices, indices);
+        }
+    }
+
+    /// Get pipeline statistics
+    fn get_stats(&self) -> &MeshPipelineStats {
+        &self.stats
+    }
+}
+
+impl MeshPipelineStats {
+    fn default() -> Self {
+        Self {
+            total_meshlets: 0,
+            visible_meshlets: 0,
+            culled_meshlets: 0,
+            total_primitives: 0,
+            visible_primitives: 0,
+            culled_primitives: 0,
+            task_invocations: 0,
+            mesh_invocations: 0,
+        }
+    }
+
+    fn meshlet_cull_efficiency(&self) -> f32 {
+        if self.total_meshlets == 0 {
+            return 0.0;
+        }
+        self.culled_meshlets as f32 / self.total_meshlets as f32
+    }
+
+    fn primitive_cull_efficiency(&self) -> f32 {
+        if self.total_primitives == 0 {
+            return 0.0;
+        }
+        self.culled_primitives as f32 / self.total_primitives as f32
+    }
+}
+
+// =============================================================================
+// MESH SHADING SCENE (WP-064)
+// =============================================================================
+
+/// Mesh instance data
+struct MeshInstance {
+    mesh_index: usize,
+    world_matrix: Mat4x4<f32>,
+    normal_matrix: Mat3x3<f32>,
+    material_index: u32,
+    flags: u32,
+}
+
+/// Complete scene for mesh shading
+struct MeshShadingScene {
+    meshes: Vec<MeshletMeshData>,
+    instances: Vec<MeshInstance>,
+    materials: Vec<MaterialData>,
+}
+
+impl MeshShadingScene {
+    fn new() -> Self {
+        Self {
+            meshes: Vec::new(),
+            instances: Vec::new(),
+            materials: Vec::new(),
+        }
+    }
+
+    /// Add mesh to scene
+    fn add_mesh(&mut self, mesh: MeshletMeshData) -> usize {
+        let idx = self.meshes.len();
+        self.meshes.push(mesh);
+        idx
+    }
+
+    /// Add instance to scene
+    fn add_instance(
+        &mut self,
+        mesh_index: usize,
+        world_matrix: Mat4x4<f32>,
+        material_index: u32,
+    ) {
+        let normal_matrix = world_matrix.inverse().transpose().to_mat3();
+
+        self.instances.push(MeshInstance {
+            mesh_index,
+            world_matrix,
+            normal_matrix,
+            material_index,
+            flags: 0,
+        });
+    }
+
+    /// Sort instances for optimal rendering
+    fn sort_instances(&mut self) {
+        // Sort by mesh index for batching
+        self.instances.sort_by_key(|i| i.mesh_index);
+    }
+}
+
+/// Material data for mesh shading
+@align(64)
+struct MaterialData {
+    base_color: Vec4<f32>,
+    metallic: f32,
+    roughness: f32,
+    emissive_strength: f32,
+    alpha_cutoff: f32,
+
+    base_color_texture: u32,
+    normal_texture: u32,
+    metallic_roughness_texture: u32,
+    emissive_texture: u32,
+
+    flags: u32,
+    _padding: [u32; 3],
+}
+
+// =============================================================================
+// HYBRID PIPELINE (WP-064)
+// =============================================================================
+
+/// Hybrid pipeline supporting both traditional and mesh shading
+struct HybridPipeline {
+    mesh_pipeline: MeshShadingPipeline,
+    use_mesh_shading: bool,
+    mesh_shading_threshold: u32,
+}
+
+impl HybridPipeline {
+    fn new(ctx: &RenderContext) -> Self {
+        Self {
+            mesh_pipeline: MeshShadingPipeline::new(ctx, MeshPipelineConfig::default()),
+            use_mesh_shading: true,
+            mesh_shading_threshold: 1000, // Use mesh shading for meshes with >1000 triangles
+        }
+    }
+
+    /// Check if mesh shading is supported
+    fn is_mesh_shading_supported(ctx: &RenderContext) -> bool {
+        ctx.supports_mesh_shading()
+    }
+
+    /// Render scene with automatic pipeline selection
+    fn render(
+        &mut self,
+        ctx: &RenderContext,
+        scene: &MeshShadingScene,
+        render_target: &RenderTarget,
+    ) {
+        if self.use_mesh_shading && Self::is_mesh_shading_supported(ctx) {
+            self.mesh_pipeline.render(ctx, scene, render_target);
+        } else {
+            self.render_traditional(ctx, scene, render_target);
+        }
+    }
+
+    /// Traditional rendering fallback
+    fn render_traditional(
+        &self,
+        ctx: &RenderContext,
+        scene: &MeshShadingScene,
+        render_target: &RenderTarget,
+    ) {
+        ctx.begin_render_pass(render_target);
+
+        for instance in &scene.instances {
+            let mesh = &scene.meshes[instance.mesh_index];
+
+            // Convert meshlets back to traditional draw calls
+            // This would use index/vertex buffers in actual implementation
+            ctx.draw_indexed(
+                mesh.vertices.len() as u32,
+                mesh.primitives.len() as u32 * 3,
+                0,
+                0,
+                1,
+            );
+        }
+
+        ctx.end_render_pass();
+    }
+}
+
+// =============================================================================
+// TERRAIN MESH SHADING (WP-065)
+// =============================================================================
+
+/// Terrain tile for mesh shading
+struct TerrainTile {
+    /// Tile position in world space
+    position: Vec2<f32>,
+    /// Tile size
+    size: f32,
+    /// Height map
+    heightmap: Vec<f32>,
+    /// Heightmap resolution
+    resolution: u32,
+    /// Generated meshlets
+    meshlets: Option<MeshletMeshData>,
+}
+
+/// Terrain mesh shading system
+struct TerrainMeshShading {
+    tiles: Vec<TerrainTile>,
+    generator: MeshletGenerator,
+    tile_size: f32,
+    max_tessellation: u32,
+}
+
+impl TerrainMeshShading {
+    fn new(tile_size: f32) -> Self {
+        Self {
+            tiles: Vec::new(),
+            generator: MeshletGenerator::new(MeshletConfig::default()),
+            tile_size,
+            max_tessellation: 64,
+        }
+    }
+
+    /// Generate meshlets for terrain tile
+    fn generate_tile_meshlets(&mut self, tile: &mut TerrainTile) {
+        let res = tile.resolution as usize;
+        let mut vertices = Vec::with_capacity(res * res);
+        let mut indices = Vec::new();
+
+        // Generate vertices from heightmap
+        for y in 0..res {
+            for x in 0..res {
+                let u = x as f32 / (res - 1) as f32;
+                let v = y as f32 / (res - 1) as f32;
+
+                let height = tile.heightmap[y * res + x];
+
+                let position = Vec3::new(
+                    tile.position.x + u * tile.size,
+                    height,
+                    tile.position.y + v * tile.size,
+                );
+
+                // Calculate normal from heightmap
+                let normal = self.calculate_terrain_normal(tile, x, y);
+
+                vertices.push(MeshletVertexData {
+                    position,
+                    normal: encode_octahedral_normal(normal),
+                    tangent: encode_octahedral_normal(Vec3::new(1.0, 0.0, 0.0)),
+                    uv: pack_uv(u, v),
+                });
+            }
+        }
+
+        // Generate indices
+        for y in 0..(res - 1) {
+            for x in 0..(res - 1) {
+                let i00 = (y * res + x) as u32;
+                let i10 = i00 + 1;
+                let i01 = ((y + 1) * res + x) as u32;
+                let i11 = i01 + 1;
+
+                // Triangle 1
+                indices.push(i00);
+                indices.push(i01);
+                indices.push(i10);
+
+                // Triangle 2
+                indices.push(i10);
+                indices.push(i01);
+                indices.push(i11);
+            }
+        }
+
+        // Generate meshlets
+        tile.meshlets = Some(self.generator.generate(&vertices, &indices));
+    }
+
+    /// Calculate terrain normal at position
+    fn calculate_terrain_normal(&self, tile: &TerrainTile, x: usize, y: usize) -> Vec3<f32> {
+        let res = tile.resolution as usize;
+        let step = tile.size / (res - 1) as f32;
+
+        let h_center = tile.heightmap[y * res + x];
+
+        let h_left = if x > 0 { tile.heightmap[y * res + x - 1] } else { h_center };
+        let h_right = if x < res - 1 { tile.heightmap[y * res + x + 1] } else { h_center };
+        let h_down = if y > 0 { tile.heightmap[(y - 1) * res + x] } else { h_center };
+        let h_up = if y < res - 1 { tile.heightmap[(y + 1) * res + x] } else { h_center };
+
+        let dx = (h_right - h_left) / (2.0 * step);
+        let dy = (h_up - h_down) / (2.0 * step);
+
+        Vec3::new(-dx, 1.0, -dy).normalize()
+    }
+}
+
+/// Encode normal to octahedral format
+fn encode_octahedral_normal(n: Vec3<f32>) -> u32 {
+    let n = n.normalize();
+    let l1_norm = n.x.abs() + n.y.abs() + n.z.abs();
+
+    let mut oct = Vec2::new(n.x / l1_norm, n.y / l1_norm);
+
+    if n.z < 0.0 {
+        let ox = (1.0 - oct.y.abs()) * if oct.x >= 0.0 { 1.0 } else { -1.0 };
+        let oy = (1.0 - oct.x.abs()) * if oct.y >= 0.0 { 1.0 } else { -1.0 };
+        oct = Vec2::new(ox, oy);
+    }
+
+    let x = ((oct.x * 0.5 + 0.5) * 65535.0) as u32;
+    let y = ((oct.y * 0.5 + 0.5) * 65535.0) as u32;
+
+    x | (y << 16)
+}
+
+/// Pack UV coordinates
+fn pack_uv(u: f32, v: f32) -> u32 {
+    let u16 = (u.clamp(0.0, 1.0) * 65535.0) as u32;
+    let v16 = (v.clamp(0.0, 1.0) * 65535.0) as u32;
+    u16 | (v16 << 16)
+}
+
+// =============================================================================
+// FOLIAGE MESH SHADING (WP-065)
+// =============================================================================
+
+/// Foliage instance for mesh shading
+@align(32)
+struct FoliageInstance {
+    position: Vec3<f32>,
+    scale: f32,
+    rotation: Vec4<f32>, // Quaternion
+    color_variation: f32,
+    wind_phase: f32,
+    lod_bias: f32,
+    flags: u32,
+}
+
+/// Foliage mesh shading system
+struct FoliageMeshShading {
+    /// Base foliage meshlets
+    base_meshlets: Vec<MeshletMeshData>,
+    /// Instance buffer
+    instances: Vec<FoliageInstance>,
+    /// Culling acceleration structure
+    spatial_hash: SpatialHash,
+}
+
+/// Spatial hash for foliage culling
+struct SpatialHash {
+    cell_size: f32,
+    cells: HashMap<(i32, i32, i32), Vec<u32>>,
+}
+
+impl SpatialHash {
+    fn new(cell_size: f32) -> Self {
+        Self {
+            cell_size,
+            cells: HashMap::new(),
+        }
+    }
+
+    fn insert(&mut self, idx: u32, position: Vec3<f32>) {
+        let cell = self.get_cell(position);
+        self.cells.entry(cell)
+            .or_insert_with(Vec::new)
+            .push(idx);
+    }
+
+    fn get_cell(&self, position: Vec3<f32>) -> (i32, i32, i32) {
+        (
+            (position.x / self.cell_size).floor() as i32,
+            (position.y / self.cell_size).floor() as i32,
+            (position.z / self.cell_size).floor() as i32,
+        )
+    }
+
+    fn query_frustum(&self, frustum: &[Vec4<f32>; 6]) -> Vec<u32> {
+        let mut result = Vec::new();
+
+        for (cell, indices) in &self.cells {
+            let cell_center = Vec3::new(
+                (cell.0 as f32 + 0.5) * self.cell_size,
+                (cell.1 as f32 + 0.5) * self.cell_size,
+                (cell.2 as f32 + 0.5) * self.cell_size,
+            );
+            let cell_radius = self.cell_size * 0.866; // sqrt(3)/2
+
+            // Frustum test cell
+            let mut visible = true;
+            for plane in frustum {
+                let dist = plane.x * cell_center.x
+                    + plane.y * cell_center.y
+                    + plane.z * cell_center.z
+                    + plane.w;
+                if dist < -cell_radius {
+                    visible = false;
+                    break;
+                }
+            }
+
+            if visible {
+                result.extend(indices);
+            }
+        }
+
+        result
+    }
+}
+
+impl FoliageMeshShading {
+    fn new() -> Self {
+        Self {
+            base_meshlets: Vec::new(),
+            instances: Vec::new(),
+            spatial_hash: SpatialHash::new(50.0),
+        }
+    }
+
+    /// Add foliage mesh type
+    fn add_mesh_type(&mut self, meshlets: MeshletMeshData) -> usize {
+        let idx = self.base_meshlets.len();
+        self.base_meshlets.push(meshlets);
+        idx
+    }
+
+    /// Add foliage instance
+    fn add_instance(&mut self, instance: FoliageInstance) {
+        let idx = self.instances.len() as u32;
+        self.spatial_hash.insert(idx, instance.position);
+        self.instances.push(instance);
+    }
+
+    /// Cull instances against frustum
+    fn cull_instances(&self, frustum: &[Vec4<f32>; 6]) -> Vec<u32> {
+        self.spatial_hash.query_frustum(frustum)
+    }
+}
+
+// =============================================================================
+// AMPLIFICATION SHADING (WP-063)
+// =============================================================================
+
+/// Amplification data for geometry expansion
+struct AmplificationData {
+    /// Number of output vertices per input
+    vertex_amplification: u32,
+    /// Number of output primitives per input
+    primitive_amplification: u32,
+    /// Maximum amplification factor
+    max_amplification: u32,
+}
+
+/// Amplification shader for procedural geometry
+struct AmplificationShader {
+    config: AmplificationData,
+}
+
+impl AmplificationShader {
+    fn new() -> Self {
+        Self {
+            config: AmplificationData {
+                vertex_amplification: 1,
+                primitive_amplification: 1,
+                max_amplification: 256,
+            },
+        }
+    }
+
+    /// Calculate amplification factor based on LOD and screen coverage
+    fn calculate_amplification(
+        &self,
+        screen_size: f32,
+        base_detail: u32,
+    ) -> u32 {
+        let factor = (screen_size / 100.0).clamp(0.0, 1.0);
+        let amplification = (base_detail as f32 * factor) as u32;
+        amplification.clamp(1, self.config.max_amplification)
+    }
+
+    /// Amplify grass blade into multiple strands
+    fn amplify_grass(
+        &self,
+        base_position: Vec3<f32>,
+        base_normal: Vec3<f32>,
+        amplification: u32,
+    ) -> Vec<(Vec3<f32>, Vec3<f32>)> {
+        let mut output = Vec::with_capacity(amplification as usize);
+
+        let tangent = if base_normal.y.abs() < 0.999 {
+            base_normal.cross(Vec3::new(0.0, 1.0, 0.0)).normalize()
+        } else {
+            Vec3::new(1.0, 0.0, 0.0)
+        };
+        let bitangent = base_normal.cross(tangent);
+
+        for i in 0..amplification {
+            // Distribute blades in a small area
+            let angle = (i as f32 / amplification as f32) * 2.0 * std::f32::consts::PI;
+            let radius = 0.05 * ((i + 1) as f32 / amplification as f32);
+
+            let offset = tangent * (angle.cos() * radius) + bitangent * (angle.sin() * radius);
+            let position = base_position + offset;
+
+            // Slight normal variation
+            let normal_variation = tangent * (angle.cos() * 0.1) + bitangent * (angle.sin() * 0.1);
+            let normal = (base_normal + normal_variation).normalize();
+
+            output.push((position, normal));
+        }
+
+        output
+    }
+}
+
+// =============================================================================
+// MESH SHADER DEBUGGING (WP-063)
+// =============================================================================
+
+/// Debug visualization mode
+enum MeshDebugMode {
+    None,
+    Meshlets,         // Color by meshlet
+    LOD,              // Color by LOD level
+    Overdraw,         // Visualize overdraw
+    PrimitiveCulling, // Show culled primitives
+    ConeNormal,       // Visualize normal cones
+}
+
+/// Mesh shader debugger
+struct MeshShaderDebugger {
+    mode: MeshDebugMode,
+    meshlet_colors: Vec<Vec3<f32>>,
+    lod_colors: [Vec3<f32>; 8],
+}
+
+impl MeshShaderDebugger {
+    fn new() -> Self {
+        Self {
+            mode: MeshDebugMode::None,
+            meshlet_colors: Vec::new(),
+            lod_colors: [
+                Vec3::new(0.0, 1.0, 0.0),  // LOD 0 - Green
+                Vec3::new(0.5, 1.0, 0.0),  // LOD 1
+                Vec3::new(1.0, 1.0, 0.0),  // LOD 2 - Yellow
+                Vec3::new(1.0, 0.7, 0.0),  // LOD 3
+                Vec3::new(1.0, 0.5, 0.0),  // LOD 4 - Orange
+                Vec3::new(1.0, 0.2, 0.0),  // LOD 5
+                Vec3::new(1.0, 0.0, 0.0),  // LOD 6 - Red
+                Vec3::new(0.5, 0.0, 0.0),  // LOD 7
+            ],
+        }
+    }
+
+    /// Generate random colors for meshlets
+    fn generate_meshlet_colors(&mut self, count: usize) {
+        self.meshlet_colors.clear();
+
+        for i in 0..count {
+            // Use golden ratio for good color distribution
+            let hue = (i as f32 * 0.618033988749895) % 1.0;
+            let color = hsv_to_rgb(hue, 0.7, 0.9);
+            self.meshlet_colors.push(color);
+        }
+    }
+
+    /// Get debug color for meshlet
+    fn get_meshlet_color(&self, meshlet_idx: usize) -> Vec3<f32> {
+        match self.mode {
+            MeshDebugMode::Meshlets => {
+                self.meshlet_colors.get(meshlet_idx)
+                    .copied()
+                    .unwrap_or(Vec3::new(1.0, 0.0, 1.0))
+            }
+            _ => Vec3::new(1.0, 1.0, 1.0),
+        }
+    }
+
+    /// Get debug color for LOD level
+    fn get_lod_color(&self, lod_level: u32) -> Vec3<f32> {
+        self.lod_colors[(lod_level as usize).min(7)]
+    }
+}
+
+/// Convert HSV to RGB
+fn hsv_to_rgb(h: f32, s: f32, v: f32) -> Vec3<f32> {
+    let c = v * s;
+    let x = c * (1.0 - ((h * 6.0) % 2.0 - 1.0).abs());
+    let m = v - c;
+
+    let (r, g, b) = match (h * 6.0) as i32 {
+        0 => (c, x, 0.0),
+        1 => (x, c, 0.0),
+        2 => (0.0, c, x),
+        3 => (0.0, x, c),
+        4 => (x, 0.0, c),
+        _ => (c, 0.0, x),
+    };
+
+    Vec3::new(r + m, g + m, b + m)
+}
+
+// =============================================================================
+// MESH SHADING PROFILER
+// =============================================================================
+
+/// Performance metrics for mesh shading
+struct MeshShadingMetrics {
+    /// Frame time in milliseconds
+    frame_time_ms: f32,
+    /// Task shader time
+    task_shader_time_ms: f32,
+    /// Mesh shader time
+    mesh_shader_time_ms: f32,
+    /// Rasterization time
+    rasterization_time_ms: f32,
+
+    /// Meshlets processed per frame
+    meshlets_per_frame: u32,
+    /// Primitives per frame
+    primitives_per_frame: u32,
+    /// Vertices per frame
+    vertices_per_frame: u32,
+
+    /// Culling efficiency
+    meshlet_cull_rate: f32,
+    primitive_cull_rate: f32,
+
+    /// Memory bandwidth (MB/s)
+    memory_bandwidth: f32,
+}
+
+/// Mesh shading profiler
+struct MeshShadingProfiler {
+    metrics: MeshShadingMetrics,
+    history: Vec<MeshShadingMetrics>,
+    max_history: usize,
+}
+
+impl MeshShadingProfiler {
+    fn new() -> Self {
+        Self {
+            metrics: MeshShadingMetrics::default(),
+            history: Vec::new(),
+            max_history: 120, // ~2 seconds at 60fps
+        }
+    }
+
+    /// Record frame metrics
+    fn record_frame(&mut self, stats: &MeshPipelineStats, frame_time: f32) {
+        self.metrics.frame_time_ms = frame_time;
+        self.metrics.meshlets_per_frame = stats.total_meshlets;
+        self.metrics.primitives_per_frame = stats.total_primitives;
+        self.metrics.meshlet_cull_rate = stats.meshlet_cull_efficiency();
+        self.metrics.primitive_cull_rate = stats.primitive_cull_efficiency();
+
+        self.history.push(self.metrics.clone());
+        if self.history.len() > self.max_history {
+            self.history.remove(0);
+        }
+    }
+
+    /// Get average metrics
+    fn get_average_metrics(&self) -> MeshShadingMetrics {
+        if self.history.is_empty() {
+            return MeshShadingMetrics::default();
+        }
+
+        let count = self.history.len() as f32;
+
+        MeshShadingMetrics {
+            frame_time_ms: self.history.iter().map(|m| m.frame_time_ms).sum::<f32>() / count,
+            task_shader_time_ms: self.history.iter().map(|m| m.task_shader_time_ms).sum::<f32>() / count,
+            mesh_shader_time_ms: self.history.iter().map(|m| m.mesh_shader_time_ms).sum::<f32>() / count,
+            rasterization_time_ms: self.history.iter().map(|m| m.rasterization_time_ms).sum::<f32>() / count,
+            meshlets_per_frame: (self.history.iter().map(|m| m.meshlets_per_frame as f32).sum::<f32>() / count) as u32,
+            primitives_per_frame: (self.history.iter().map(|m| m.primitives_per_frame as f32).sum::<f32>() / count) as u32,
+            vertices_per_frame: (self.history.iter().map(|m| m.vertices_per_frame as f32).sum::<f32>() / count) as u32,
+            meshlet_cull_rate: self.history.iter().map(|m| m.meshlet_cull_rate).sum::<f32>() / count,
+            primitive_cull_rate: self.history.iter().map(|m| m.primitive_cull_rate).sum::<f32>() / count,
+            memory_bandwidth: self.history.iter().map(|m| m.memory_bandwidth).sum::<f32>() / count,
+        }
+    }
+}
+
+impl MeshShadingMetrics {
+    fn default() -> Self {
+        Self {
+            frame_time_ms: 0.0,
+            task_shader_time_ms: 0.0,
+            mesh_shader_time_ms: 0.0,
+            rasterization_time_ms: 0.0,
+            meshlets_per_frame: 0,
+            primitives_per_frame: 0,
+            vertices_per_frame: 0,
+            meshlet_cull_rate: 0.0,
+            primitive_cull_rate: 0.0,
+            memory_bandwidth: 0.0,
+        }
+    }
+
+    fn clone(&self) -> Self {
+        Self {
+            frame_time_ms: self.frame_time_ms,
+            task_shader_time_ms: self.task_shader_time_ms,
+            mesh_shader_time_ms: self.mesh_shader_time_ms,
+            rasterization_time_ms: self.rasterization_time_ms,
+            meshlets_per_frame: self.meshlets_per_frame,
+            primitives_per_frame: self.primitives_per_frame,
+            vertices_per_frame: self.vertices_per_frame,
+            meshlet_cull_rate: self.meshlet_cull_rate,
+            primitive_cull_rate: self.primitive_cull_rate,
+            memory_bandwidth: self.memory_bandwidth,
+        }
+    }
+}
+
+// =============================================================================
+// TESTS
+// =============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_meshlet_generator() {
+        let generator = MeshletGenerator::new(MeshletConfig::default());
+
+        // Create simple triangle mesh
+        let vertices = vec![
+            MeshletVertexData {
+                position: Vec3::new(0.0, 0.0, 0.0),
+                normal: encode_octahedral_normal(Vec3::new(0.0, 1.0, 0.0)),
+                tangent: 0,
+                uv: 0,
+            },
+            MeshletVertexData {
+                position: Vec3::new(1.0, 0.0, 0.0),
+                normal: encode_octahedral_normal(Vec3::new(0.0, 1.0, 0.0)),
+                tangent: 0,
+                uv: 0,
+            },
+            MeshletVertexData {
+                position: Vec3::new(0.0, 0.0, 1.0),
+                normal: encode_octahedral_normal(Vec3::new(0.0, 1.0, 0.0)),
+                tangent: 0,
+                uv: 0,
+            },
+        ];
+        let indices = vec![0, 1, 2];
+
+        let mesh = generator.generate(&vertices, &indices);
+
+        assert_eq!(mesh.meshlets.len(), 1);
+        assert_eq!(mesh.meshlets[0].vertex_count, 3);
+        assert_eq!(mesh.meshlets[0].primitive_count, 1);
+    }
+
+    #[test]
+    fn test_octahedral_encoding() {
+        let normals = [
+            Vec3::new(0.0, 1.0, 0.0),
+            Vec3::new(1.0, 0.0, 0.0),
+            Vec3::new(0.0, 0.0, 1.0),
+            Vec3::new(0.0, -1.0, 0.0),
+            Vec3::new(0.577, 0.577, 0.577),
+        ];
+
+        for n in &normals {
+            let encoded = encode_octahedral_normal(*n);
+            let decoded = decode_octahedral_normal(encoded);
+
+            let error = (*n - decoded).length();
+            assert!(error < 0.01, "Encoding error too large: {}", error);
+        }
+    }
+
+    #[test]
+    fn test_morton_code() {
+        let p1 = Vec3::new(0.0, 0.0, 0.0);
+        let p2 = Vec3::new(0.1, 0.1, 0.1);
+        let p3 = Vec3::new(0.9, 0.9, 0.9);
+
+        let m1 = compute_morton_code(&p1);
+        let m2 = compute_morton_code(&p2);
+        let m3 = compute_morton_code(&p3);
+
+        // Morton codes should be ordered
+        assert!(m1 < m2);
+        assert!(m2 < m3);
+    }
+
+    #[test]
+    fn test_frustum_culling() {
+        let task_shader = TaskShaderModule::new();
+
+        // Sphere at origin should be visible
+        let visible = task_shader.frustum_cull(Vec3::zero(), 1.0);
+        assert!(visible);
+    }
+
+    #[test]
+    fn test_lod_selection() {
+        let task_shader = TaskShaderModule::new();
+
+        let lod_groups = vec![
+            MeshletLODGroup {
+                meshlet_start: 0,
+                meshlet_count: 100,
+                lod_level: 0,
+                screen_size_threshold: 100.0,
+                parent_group: -1,
+                error_metric: 0.0,
+                _padding: [0; 2],
+            },
+            MeshletLODGroup {
+                meshlet_start: 100,
+                meshlet_count: 50,
+                lod_level: 1,
+                screen_size_threshold: 50.0,
+                parent_group: 0,
+                error_metric: 0.01,
+                _padding: [0; 2],
+            },
+        ];
+
+        // Large screen size should select LOD 0
+        let (lod, _) = task_shader.select_lod(150.0, &lod_groups, 0);
+        assert_eq!(lod, 0);
+
+        // Small screen size should select LOD 1
+        let (lod, _) = task_shader.select_lod(30.0, &lod_groups, 0);
+        assert_eq!(lod, 1);
+    }
+
+    #[test]
+    fn test_mesh_pipeline_stats() {
+        let stats = MeshPipelineStats {
+            total_meshlets: 100,
+            visible_meshlets: 60,
+            culled_meshlets: 40,
+            total_primitives: 10000,
+            visible_primitives: 7000,
+            culled_primitives: 3000,
+            task_invocations: 4,
+            mesh_invocations: 60,
+        };
+
+        assert_eq!(stats.meshlet_cull_efficiency(), 0.4);
+        assert_eq!(stats.primitive_cull_efficiency(), 0.3);
+    }
+
+    #[test]
+    fn test_spatial_hash() {
+        let mut hash = SpatialHash::new(10.0);
+
+        hash.insert(0, Vec3::new(5.0, 5.0, 5.0));
+        hash.insert(1, Vec3::new(15.0, 5.0, 5.0));
+        hash.insert(2, Vec3::new(25.0, 5.0, 5.0));
+
+        assert_eq!(hash.get_cell(Vec3::new(5.0, 5.0, 5.0)), (0, 0, 0));
+        assert_eq!(hash.get_cell(Vec3::new(15.0, 5.0, 5.0)), (1, 0, 0));
+    }
+
+    #[test]
+    fn test_hsv_to_rgb() {
+        let red = hsv_to_rgb(0.0, 1.0, 1.0);
+        assert!((red.x - 1.0).abs() < 0.01);
+        assert!(red.y < 0.01);
+        assert!(red.z < 0.01);
+
+        let green = hsv_to_rgb(0.333, 1.0, 1.0);
+        assert!(green.x < 0.01);
+        assert!((green.y - 1.0).abs() < 0.01);
+        assert!(green.z < 0.01);
+    }
+
+    #[test]
+    fn test_uv_packing() {
+        let packed = pack_uv(0.5, 0.75);
+        let uv = decode_uv(packed);
+
+        assert!((uv.x - 0.5).abs() < 0.001);
+        assert!((uv.y - 0.75).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_amplification_shader() {
+        let amp = AmplificationShader::new();
+
+        // Large screen coverage = more amplification
+        let factor1 = amp.calculate_amplification(100.0, 16);
+        let factor2 = amp.calculate_amplification(50.0, 16);
+
+        assert!(factor1 > factor2);
+    }
+
+    #[test]
+    fn test_debugger_colors() {
+        let mut debugger = MeshShaderDebugger::new();
+        debugger.generate_meshlet_colors(10);
+
+        assert_eq!(debugger.meshlet_colors.len(), 10);
+
+        // All colors should be different
+        for i in 0..10 {
+            for j in (i + 1)..10 {
+                let c1 = debugger.meshlet_colors[i];
+                let c2 = debugger.meshlet_colors[j];
+                assert!((c1 - c2).length() > 0.01);
+            }
+        }
+    }
+
+    #[test]
+    fn test_lod_colors() {
+        let debugger = MeshShaderDebugger::new();
+
+        // LOD 0 should be green
+        let lod0 = debugger.get_lod_color(0);
+        assert_eq!(lod0, Vec3::new(0.0, 1.0, 0.0));
+
+        // LOD 6 should be red
+        let lod6 = debugger.get_lod_color(6);
+        assert_eq!(lod6, Vec3::new(1.0, 0.0, 0.0));
+    }
+}

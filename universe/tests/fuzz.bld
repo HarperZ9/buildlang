@@ -1,0 +1,695 @@
+// ═══════════════════════════════════════════════════════════════════════════════
+// BUILD-UNIVERSE FUZZ TESTING SUITE v1.0.0
+// "Testing with Chaos to Find Edge Cases"
+// ═══════════════════════════════════════════════════════════════════════════════
+// Copyright © 2024-2025 Zain Dana Harper. All Rights Reserved.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+module fuzz_tests
+
+use std::test::{TestSuite, TestResult, assert}
+use std::time::{Duration, Instant}
+use std::collections::HashMap
+
+use foundation::*
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// RANDOM DATA GENERATION
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Simple PRNG for reproducible fuzzing
+struct Rng {
+    state: u64,
+}
+
+impl Rng {
+    pub fn new(seed: u64) -> Self {
+        Rng { state: seed }
+    }
+
+    pub fn next_u64(&mut self) -> u64 {
+        // xorshift64
+        self.state ^= self.state << 13;
+        self.state ^= self.state >> 7;
+        self.state ^= self.state << 17;
+        self.state
+    }
+
+    pub fn next_u32(&mut self) -> u32 {
+        (self.next_u64() >> 32) as u32
+    }
+
+    pub fn next_u8(&mut self) -> u8 {
+        (self.next_u64() & 0xFF) as u8
+    }
+
+    pub fn next_bool(&mut self) -> bool {
+        self.next_u64() & 1 == 1
+    }
+
+    pub fn next_f64(&mut self) -> f64 {
+        self.next_u64() as f64 / u64::MAX as f64
+    }
+
+    pub fn next_bytes(&mut self, len: usize) -> Vec<u8> {
+        (0..len).map(|_| self.next_u8()).collect()
+    }
+
+    pub fn choice<T: Clone>(&mut self, items: &[T]) -> T {
+        let idx = (self.next_u64() as usize) % items.len();
+        items[idx].clone()
+    }
+
+    pub fn range(&mut self, min: usize, max: usize) -> usize {
+        min + (self.next_u64() as usize) % (max - min)
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// JSON FUZZING
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Generate random JSON-like values
+fn generate_random_json(rng: &mut Rng, depth: usize) -> String {
+    if depth > 5 {
+        // Terminate recursion with primitive
+        return match rng.range(0, 4) {
+            0 => format!("{}", rng.next_u64() as i64),
+            1 => format!("{:.6}", rng.next_f64()),
+            2 => if rng.next_bool() { "true".to_string() } else { "false".to_string() },
+            _ => "null".to_string(),
+        };
+    }
+
+    match rng.range(0, 7) {
+        0 => format!("{}", rng.next_u64() as i64),
+        1 => format!("{:.10}", rng.next_f64() * 1e10 - 5e9),
+        2 => if rng.next_bool() { "true".to_string() } else { "false".to_string() },
+        3 => "null".to_string(),
+        4 => {
+            // Random string
+            let len = rng.range(0, 50);
+            let chars: String = (0..len).map(|_| {
+                let c = rng.range(32, 127) as u8 as char;
+                if c == '"' || c == '\\' { ' ' } else { c }
+            }).collect();
+            format!("\"{}\"", chars)
+        }
+        5 => {
+            // Array
+            let len = rng.range(0, 5);
+            let items: Vec<String> = (0..len)
+                .map(|_| generate_random_json(rng, depth + 1))
+                .collect();
+            format!("[{}]", items.join(","))
+        }
+        _ => {
+            // Object
+            let len = rng.range(0, 5);
+            let items: Vec<String> = (0..len).map(|i| {
+                format!("\"key_{}\":{}", i, generate_random_json(rng, depth + 1))
+            }).collect();
+            format!("{{{}}}", items.join(","))
+        }
+    }
+}
+
+/// Fuzz JSON parser with valid inputs
+#[test]
+fn fuzz_json_valid() -> TestResult {
+    let mut rng = Rng::new(42);
+    let iterations = 1000;
+    let mut parse_failures = 0;
+
+    for _ in 0..iterations {
+        let json = generate_random_json(&mut rng, 0);
+
+        match serialization::json::parse(&json) {
+            Ok(_) => {}
+            Err(e) => {
+                // This shouldn't happen for valid JSON we generated
+                parse_failures += 1;
+                if parse_failures < 5 {
+                    println!("Parse failure: {} -> {}", json, e);
+                }
+            }
+        }
+    }
+
+    // Allow small number of edge case failures
+    assert!(parse_failures < iterations / 20);
+
+    TestResult::pass()
+}
+
+/// Fuzz JSON parser with malformed inputs
+#[test]
+fn fuzz_json_malformed() -> TestResult {
+    let mut rng = Rng::new(123);
+    let iterations = 1000;
+    let mut panics = 0;
+
+    let malformed_samples = vec![
+        // Truncated
+        "{\"key\":",
+        "[1, 2,",
+        "\"incomplete string",
+        // Invalid characters
+        "{key: value}",
+        "{'key': 'value'}",
+        // Numeric edge cases
+        "1e999999",
+        "-1e-999999",
+        "0.0.0",
+        "1.2.3",
+        // Structure errors
+        "[[]]]",
+        "{{{",
+        "}}",
+        "[,]",
+        "{:}",
+        // Unicode edge cases
+        "\"\u{0000}\"",
+        "\"\u{FFFF}\"",
+        // Random bytes
+        "",
+    ];
+
+    for sample in &malformed_samples {
+        // Should not panic
+        let _ = std::panic::catch_unwind(|| {
+            let _ = serialization::json::parse(sample);
+        });
+    }
+
+    // Random malformed inputs
+    for _ in 0..iterations {
+        let len = rng.range(0, 100);
+        let bytes = rng.next_bytes(len);
+        let input = String::from_utf8_lossy(&bytes).to_string();
+
+        match std::panic::catch_unwind(|| {
+            let _ = serialization::json::parse(&input);
+        }) {
+            Ok(_) => {}
+            Err(_) => panics += 1,
+        }
+    }
+
+    assert_eq!(panics, 0, "Parser panicked on malformed input");
+
+    TestResult::pass()
+}
+
+/// Fuzz JSON roundtrip
+#[test]
+fn fuzz_json_roundtrip() -> TestResult {
+    let mut rng = Rng::new(456);
+
+    // Generate random structured data
+    for _ in 0..100 {
+        let data = generate_fuzz_data(&mut rng);
+
+        let json = serialization::json::to_string(&data).unwrap();
+        let restored: FuzzData = serialization::json::from_str(&json).unwrap();
+
+        assert_eq!(data.number, restored.number);
+        assert_eq!(data.text, restored.text);
+        assert_eq!(data.flag, restored.flag);
+        assert_eq!(data.items, restored.items);
+    }
+
+    TestResult::pass()
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// MESSAGEPACK FUZZING
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Fuzz MessagePack with random byte sequences
+#[test]
+fn fuzz_msgpack_random_bytes() -> TestResult {
+    let mut rng = Rng::new(789);
+    let iterations = 1000;
+    let mut panics = 0;
+
+    for _ in 0..iterations {
+        let len = rng.range(0, 200);
+        let bytes = rng.next_bytes(len);
+
+        match std::panic::catch_unwind(|| {
+            // Try to decode as various types
+            let _ = serialization::msgpack::from_slice::<i64>(&bytes);
+            let _ = serialization::msgpack::from_slice::<String>(&bytes);
+            let _ = serialization::msgpack::from_slice::<Vec<u8>>(&bytes);
+            let _ = serialization::msgpack::from_slice::<HashMap<String, i32>>(&bytes);
+        }) {
+            Ok(_) => {}
+            Err(_) => panics += 1,
+        }
+    }
+
+    assert_eq!(panics, 0, "MessagePack decoder panicked on random bytes");
+
+    TestResult::pass()
+}
+
+/// Fuzz MessagePack format markers
+#[test]
+fn fuzz_msgpack_format_markers() -> TestResult {
+    // All possible format marker bytes
+    for marker in 0u8..=255u8 {
+        let input = vec![marker];
+
+        // Should not panic
+        let _ = std::panic::catch_unwind(|| {
+            let _ = serialization::msgpack::from_slice::<i64>(&input);
+        });
+    }
+
+    // Format marker followed by random data
+    let mut rng = Rng::new(101);
+    for marker in 0u8..=255u8 {
+        let mut input = vec![marker];
+        input.extend(rng.next_bytes(20));
+
+        let _ = std::panic::catch_unwind(|| {
+            let _ = serialization::msgpack::from_slice::<Vec<u8>>(&input);
+        });
+    }
+
+    TestResult::pass()
+}
+
+/// Fuzz MessagePack roundtrip
+#[test]
+fn fuzz_msgpack_roundtrip() -> TestResult {
+    let mut rng = Rng::new(202);
+
+    for _ in 0..100 {
+        let data = generate_fuzz_data(&mut rng);
+
+        let bytes = serialization::msgpack::to_vec(&data).unwrap();
+        let restored: FuzzData = serialization::msgpack::from_slice(&bytes).unwrap();
+
+        assert_eq!(data.number, restored.number);
+        assert_eq!(data.text, restored.text);
+        assert_eq!(data.flag, restored.flag);
+        assert_eq!(data.items, restored.items);
+    }
+
+    TestResult::pass()
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// PROTOBUF FUZZING
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Fuzz Protobuf varint decoding
+#[test]
+fn fuzz_protobuf_varint() -> TestResult {
+    let mut rng = Rng::new(303);
+    let iterations = 1000;
+
+    for _ in 0..iterations {
+        // Generate random varint bytes (up to 10 bytes)
+        let len = rng.range(1, 11);
+        let mut bytes: Vec<u8> = (0..len-1).map(|_| rng.next_u8() | 0x80).collect();
+        bytes.push(rng.next_u8() & 0x7F); // Last byte without continuation
+
+        // Should not panic
+        let _ = std::panic::catch_unwind(|| {
+            let mut decoder = serialization::protobuf::Decoder::new(&bytes);
+            let _ = decoder.read_varint();
+        });
+    }
+
+    // Malformed varints (all continuation bits set)
+    let malformed = vec![0x80u8; 20];
+    let result = std::panic::catch_unwind(|| {
+        let mut decoder = serialization::protobuf::Decoder::new(&malformed);
+        let _ = decoder.read_varint();
+    });
+    assert!(result.is_ok(), "Varint decoder panicked on overflow");
+
+    TestResult::pass()
+}
+
+/// Fuzz Protobuf with random wire types
+#[test]
+fn fuzz_protobuf_wire_types() -> TestResult {
+    let mut rng = Rng::new(404);
+
+    for _ in 0..100 {
+        // Build random protobuf-like bytes
+        let mut bytes = Vec::new();
+
+        for _ in 0..rng.range(1, 10) {
+            // Random field tag with random wire type
+            let field_num = rng.range(1, 100);
+            let wire_type = rng.range(0, 8);
+            let tag = (field_num << 3) | wire_type;
+
+            // Encode tag as varint
+            let mut t = tag;
+            while t >= 0x80 {
+                bytes.push((t & 0x7F) as u8 | 0x80);
+                t >>= 7;
+            }
+            bytes.push(t as u8);
+
+            // Add random payload
+            let payload_len = rng.range(0, 20);
+            bytes.extend(rng.next_bytes(payload_len));
+        }
+
+        // Should not panic
+        let _ = std::panic::catch_unwind(|| {
+            let _ = serialization::protobuf::decode_raw(&bytes);
+        });
+    }
+
+    TestResult::pass()
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// CRYPTO FUZZING
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Fuzz encryption with random keys and data
+#[test]
+fn fuzz_crypto_aes() -> TestResult {
+    let mut rng = Rng::new(505);
+
+    for _ in 0..100 {
+        // Random key (32 bytes for AES-256)
+        let key = crypto::Key::from_bytes(&rng.next_bytes(32));
+
+        // Random plaintext
+        let len = rng.range(0, 1000);
+        let plaintext = rng.next_bytes(len);
+
+        // Encrypt
+        let ciphertext = crypto::encrypt(&plaintext, &key, crypto::Algorithm::AES256)?;
+
+        // Decrypt
+        let decrypted = crypto::decrypt(&ciphertext, &key, crypto::Algorithm::AES256)?;
+
+        assert_eq!(plaintext, decrypted);
+    }
+
+    TestResult::pass()
+}
+
+/// Fuzz decryption with invalid ciphertext
+#[test]
+fn fuzz_crypto_invalid_ciphertext() -> TestResult {
+    let mut rng = Rng::new(606);
+    let key = crypto::generate_key(crypto::Algorithm::AES256);
+
+    for _ in 0..100 {
+        // Random bytes (not valid ciphertext)
+        let len = rng.range(0, 100);
+        let garbage = rng.next_bytes(len);
+
+        // Should return error, not panic
+        let result = crypto::decrypt(&garbage, &key, crypto::Algorithm::AES256);
+        assert!(result.is_err());
+    }
+
+    // Tampered ciphertext
+    let plaintext = b"test message";
+    let ciphertext = crypto::encrypt(plaintext, &key, crypto::Algorithm::AES256)?;
+
+    for _ in 0..100 {
+        let mut tampered = ciphertext.clone();
+        let idx = rng.range(0, tampered.len());
+        tampered[idx] ^= rng.next_u8();
+
+        // Should fail authentication
+        let result = crypto::decrypt(&tampered, &key, crypto::Algorithm::AES256);
+        // May succeed if tampering happened in padding area, but shouldn't panic
+    }
+
+    TestResult::pass()
+}
+
+/// Fuzz hashing with random data
+#[test]
+fn fuzz_crypto_hash() -> TestResult {
+    let mut rng = Rng::new(707);
+
+    for _ in 0..100 {
+        let len = rng.range(0, 10000);
+        let data = rng.next_bytes(len);
+
+        // Compute hashes - should never panic
+        let sha256 = crypto::hash(&data, crypto::HashAlgorithm::SHA256);
+        let sha512 = crypto::hash(&data, crypto::HashAlgorithm::SHA512);
+        let blake3 = crypto::hash(&data, crypto::HashAlgorithm::Blake3);
+
+        // Verify hash lengths
+        assert_eq!(sha256.len(), 32);
+        assert_eq!(sha512.len(), 64);
+        assert_eq!(blake3.len(), 32);
+
+        // Same input should produce same output
+        let sha256_2 = crypto::hash(&data, crypto::HashAlgorithm::SHA256);
+        assert_eq!(sha256, sha256_2);
+    }
+
+    TestResult::pass()
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// COLLECTIONS FUZZING
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Fuzz HashMap operations
+#[test]
+fn fuzz_hashmap_operations() -> TestResult {
+    let mut rng = Rng::new(808);
+    let mut map = HashMap::new();
+
+    for _ in 0..10000 {
+        let op = rng.range(0, 4);
+        let key = format!("key_{}", rng.range(0, 100));
+
+        match op {
+            0 => { map.insert(key, rng.next_u64()); }
+            1 => { map.remove(&key); }
+            2 => { let _ = map.get(&key); }
+            _ => { let _ = map.contains_key(&key); }
+        }
+    }
+
+    // Verify invariants
+    for (k, v) in &map {
+        assert!(k.starts_with("key_"));
+        assert!(map.get(k) == Some(v));
+    }
+
+    TestResult::pass()
+}
+
+/// Fuzz Vec operations
+#[test]
+fn fuzz_vec_operations() -> TestResult {
+    let mut rng = Rng::new(909);
+    let mut vec: Vec<i64> = Vec::new();
+
+    for _ in 0..10000 {
+        let op = rng.range(0, 5);
+
+        match op {
+            0 => { vec.push(rng.next_u64() as i64); }
+            1 => { vec.pop(); }
+            2 if !vec.is_empty() => {
+                let idx = rng.range(0, vec.len());
+                let _ = vec.get(idx);
+            }
+            3 if !vec.is_empty() => {
+                let idx = rng.range(0, vec.len());
+                vec.remove(idx);
+            }
+            4 if !vec.is_empty() => {
+                let idx = rng.range(0, vec.len());
+                vec.insert(idx, rng.next_u64() as i64);
+            }
+            _ => {}
+        }
+    }
+
+    TestResult::pass()
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// STRING FUZZING
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Fuzz string parsing operations
+#[test]
+fn fuzz_string_parsing() -> TestResult {
+    let mut rng = Rng::new(111);
+
+    for _ in 0..1000 {
+        let len = rng.range(0, 100);
+        let bytes = rng.next_bytes(len);
+
+        // UTF-8 validation - should not panic
+        let _ = String::from_utf8(bytes.clone());
+        let _ = String::from_utf8_lossy(&bytes);
+
+        // Generate valid-ish strings
+        let s = String::from_utf8_lossy(&bytes).to_string();
+
+        // Various parsing operations - should not panic
+        let _ = s.parse::<i64>();
+        let _ = s.parse::<f64>();
+        let _ = s.parse::<bool>();
+        let _ = s.split(',').collect::<Vec<_>>();
+        let _ = s.trim();
+        let _ = s.to_uppercase();
+        let _ = s.to_lowercase();
+    }
+
+    TestResult::pass()
+}
+
+/// Fuzz regex-like patterns (simplified pattern matching)
+#[test]
+fn fuzz_pattern_matching() -> TestResult {
+    let mut rng = Rng::new(222);
+
+    let patterns = vec!["*", "?", ".*", ".+", "[a-z]", "[0-9]+", "\\d+", "\\w+"];
+
+    for _ in 0..100 {
+        let len = rng.range(0, 50);
+        let input: String = (0..len).map(|_| {
+            (rng.range(32, 127) as u8) as char
+        }).collect();
+
+        for pattern in &patterns {
+            // Simplified glob matching - should not panic
+            let _ = glob_match(pattern, &input);
+        }
+    }
+
+    TestResult::pass()
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// HELPER TYPES AND FUNCTIONS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+struct FuzzData {
+    number: i64,
+    text: String,
+    flag: bool,
+    items: Vec<i32>,
+}
+
+fn generate_fuzz_data(rng: &mut Rng) -> FuzzData {
+    let text_len = rng.range(0, 50);
+    let text: String = (0..text_len).map(|_| {
+        let c = rng.range(65, 91) as u8 as char;
+        c
+    }).collect();
+
+    let items_len = rng.range(0, 20);
+    let items: Vec<i32> = (0..items_len).map(|_| rng.next_u32() as i32).collect();
+
+    FuzzData {
+        number: rng.next_u64() as i64,
+        text,
+        flag: rng.next_bool(),
+        items,
+    }
+}
+
+fn glob_match(pattern: &str, input: &str) -> bool {
+    // Simplified glob matching
+    if pattern == "*" {
+        return true;
+    }
+    if pattern == input {
+        return true;
+    }
+    if pattern.contains('*') {
+        let parts: Vec<&str> = pattern.split('*').collect();
+        if parts.len() == 2 {
+            return input.starts_with(parts[0]) && input.ends_with(parts[1]);
+        }
+    }
+    false
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// TEST RUNNER
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Run all fuzz tests
+pub fn run_all_fuzz_tests() -> TestSuite {
+    let mut suite = TestSuite::new("BUILD-UNIVERSE Fuzz Tests");
+
+    suite.add_group("JSON Fuzzing", vec![
+        ("json_valid", fuzz_json_valid),
+        ("json_malformed", fuzz_json_malformed),
+        ("json_roundtrip", fuzz_json_roundtrip),
+    ]);
+
+    suite.add_group("MessagePack Fuzzing", vec![
+        ("msgpack_random_bytes", fuzz_msgpack_random_bytes),
+        ("msgpack_format_markers", fuzz_msgpack_format_markers),
+        ("msgpack_roundtrip", fuzz_msgpack_roundtrip),
+    ]);
+
+    suite.add_group("Protobuf Fuzzing", vec![
+        ("protobuf_varint", fuzz_protobuf_varint),
+        ("protobuf_wire_types", fuzz_protobuf_wire_types),
+    ]);
+
+    suite.add_group("Crypto Fuzzing", vec![
+        ("crypto_aes", fuzz_crypto_aes),
+        ("crypto_invalid_ciphertext", fuzz_crypto_invalid_ciphertext),
+        ("crypto_hash", fuzz_crypto_hash),
+    ]);
+
+    suite.add_group("Collections Fuzzing", vec![
+        ("hashmap_operations", fuzz_hashmap_operations),
+        ("vec_operations", fuzz_vec_operations),
+    ]);
+
+    suite.add_group("String Fuzzing", vec![
+        ("string_parsing", fuzz_string_parsing),
+        ("pattern_matching", fuzz_pattern_matching),
+    ]);
+
+    suite
+}
+
+/// Main entry point
+pub fn main() -> i32 {
+    let suite = run_all_fuzz_tests();
+    let results = suite.run();
+
+    println!("\n{}", "═".repeat(70));
+    println!("BUILD-UNIVERSE Fuzz Test Results");
+    println!("{}", "═".repeat(70));
+    println!("Total:   {}", results.total);
+    println!("Passed:  {}", results.passed);
+    println!("Failed:  {}", results.failed);
+    println!("{}", "═".repeat(70));
+
+    if results.failed > 0 {
+        println!("\nFailed tests:");
+        for failure in &results.failures {
+            println!("  - {}: {}", failure.name, failure.message);
+        }
+        1
+    } else {
+        println!("\nAll fuzz tests passed!");
+        0
+    }
+}

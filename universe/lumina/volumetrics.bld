@@ -1,0 +1,1385 @@
+// =============================================================================
+// Lumina Volumetrics - Atmospheric and Volumetric Effects
+// =============================================================================
+// Comprehensive volumetric rendering including fog, god rays, clouds,
+// atmospheric scattering, and participating media.
+// Target: Game engines, film VFX, environmental simulation
+// =============================================================================
+
+module lumina::volumetrics;
+
+use core::math::{Vec2, Vec3, Vec4, Mat4, lerp, saturate, smoothstep};
+use core::simd::{f32x4, f32x8};
+use lumina::{RenderTarget, Texture2D, TextureFormat, SamplerState};
+
+// =============================================================================
+// Constants
+// =============================================================================
+
+/// Earth's atmosphere parameters
+const EARTH_RADIUS: f32 = 6371000.0;         // meters
+const ATMOSPHERE_HEIGHT: f32 = 100000.0;      // meters
+const RAYLEIGH_SCALE_HEIGHT: f32 = 8500.0;    // meters
+const MIE_SCALE_HEIGHT: f32 = 1200.0;         // meters
+
+/// Rayleigh scattering coefficients at sea level
+const RAYLEIGH_BETA: Vec3 = Vec3::new(5.8e-6, 13.5e-6, 33.1e-6);
+
+/// Mie scattering coefficient at sea level
+const MIE_BETA: f32 = 21e-6;
+
+// =============================================================================
+// Configuration
+// =============================================================================
+
+/// Fog type
+@[repr(u8)]
+enum FogType {
+    None,
+    Linear,             // Linear distance fog
+    Exponential,        // Exponential fog
+    Exponential2,       // Exponential squared fog
+    Height,             // Height-based fog
+    Volumetric,         // Ray-marched volumetric fog
+}
+
+/// God ray algorithm
+@[repr(u8)]
+enum GodRayAlgorithm {
+    None,
+    Radial,             // Screen-space radial blur
+    RayMarch,           // Volumetric ray marching
+    Epipolar,           // Epipolar sampling
+}
+
+/// Volumetric configuration
+struct VolumeConfig {
+    // Fog settings
+    fog_enabled: bool,
+    fog_type: FogType,
+    fog_color: Vec3,
+    fog_density: f32,
+    fog_start: f32,
+    fog_end: f32,
+    fog_height: f32,
+    fog_height_falloff: f32,
+
+    // Volumetric fog
+    volumetric_enabled: bool,
+    volumetric_samples: u32,
+    volumetric_max_distance: f32,
+    volumetric_noise_scale: f32,
+    volumetric_noise_intensity: f32,
+    volumetric_temporal: bool,
+
+    // God rays
+    god_rays_enabled: bool,
+    god_rays_algorithm: GodRayAlgorithm,
+    god_rays_intensity: f32,
+    god_rays_samples: u32,
+    god_rays_density: f32,
+    god_rays_decay: f32,
+
+    // Atmospheric scattering
+    atmosphere_enabled: bool,
+    atmosphere_sun_intensity: f32,
+    atmosphere_mie_g: f32,         // Mie phase asymmetry
+    atmosphere_samples: u32,
+
+    // Clouds
+    clouds_enabled: bool,
+    cloud_coverage: f32,
+    cloud_density: f32,
+    cloud_height_min: f32,
+    cloud_height_max: f32,
+}
+
+impl VolumeConfig {
+    /// Default configuration
+    pub fn default() -> Self {
+        Self {
+            fog_enabled: true,
+            fog_type: FogType::Exponential2,
+            fog_color: Vec3::new(0.7, 0.75, 0.8),
+            fog_density: 0.01,
+            fog_start: 10.0,
+            fog_end: 500.0,
+            fog_height: 50.0,
+            fog_height_falloff: 0.1,
+            volumetric_enabled: false,
+            volumetric_samples: 32,
+            volumetric_max_distance: 200.0,
+            volumetric_noise_scale: 0.1,
+            volumetric_noise_intensity: 0.5,
+            volumetric_temporal: true,
+            god_rays_enabled: true,
+            god_rays_algorithm: GodRayAlgorithm::Radial,
+            god_rays_intensity: 1.0,
+            god_rays_samples: 32,
+            god_rays_density: 1.0,
+            god_rays_decay: 0.95,
+            atmosphere_enabled: true,
+            atmosphere_sun_intensity: 20.0,
+            atmosphere_mie_g: 0.76,
+            atmosphere_samples: 8,
+            clouds_enabled: false,
+            cloud_coverage: 0.5,
+            cloud_density: 0.3,
+            cloud_height_min: 1000.0,
+            cloud_height_max: 3000.0,
+        }
+    }
+
+    /// Clear day preset
+    pub fn clear_day() -> Self {
+        let mut config = Self::default();
+        config.fog_density = 0.002;
+        config.god_rays_intensity = 0.5;
+        config.atmosphere_sun_intensity = 22.0;
+        config
+    }
+
+    /// Foggy preset
+    pub fn foggy() -> Self {
+        let mut config = Self::default();
+        config.fog_type = FogType::Volumetric;
+        config.fog_density = 0.05;
+        config.volumetric_enabled = true;
+        config.volumetric_noise_intensity = 0.8;
+        config.god_rays_intensity = 2.0;
+        config
+    }
+
+    /// Sunset preset
+    pub fn sunset() -> Self {
+        let mut config = Self::default();
+        config.fog_color = Vec3::new(1.0, 0.6, 0.3);
+        config.atmosphere_sun_intensity = 15.0;
+        config.atmosphere_mie_g = 0.85;
+        config
+    }
+}
+
+// =============================================================================
+// Basic Fog
+// =============================================================================
+
+/// Basic fog processor
+struct BasicFog {
+    fog_type: FogType,
+    color: Vec3,
+    density: f32,
+    start: f32,
+    end: f32,
+    height: f32,
+    height_falloff: f32,
+}
+
+impl BasicFog {
+    pub fn new(config: &VolumeConfig) -> Self {
+        Self {
+            fog_type: config.fog_type,
+            color: config.fog_color,
+            density: config.fog_density,
+            start: config.fog_start,
+            end: config.fog_end,
+            height: config.fog_height,
+            height_falloff: config.fog_height_falloff,
+        }
+    }
+
+    /// Calculate fog factor for a distance
+    pub fn fog_factor(&self, distance: f32, world_height: Option<f32>) -> f32 {
+        let distance_fog = match self.fog_type {
+            FogType::None => 0.0,
+            FogType::Linear => {
+                saturate((distance - self.start) / (self.end - self.start))
+            },
+            FogType::Exponential => {
+                1.0 - (-distance * self.density).exp()
+            },
+            FogType::Exponential2 => {
+                let d = distance * self.density;
+                1.0 - (-d * d).exp()
+            },
+            FogType::Height | FogType::Volumetric => {
+                1.0 - (-distance * self.density).exp()
+            },
+        };
+
+        // Height-based falloff
+        let height_factor = if let Some(h) = world_height {
+            if matches!(self.fog_type, FogType::Height) {
+                let height_diff = h - self.height;
+                if height_diff > 0.0 {
+                    (-height_diff * self.height_falloff).exp()
+                } else {
+                    1.0
+                }
+            } else {
+                1.0
+            }
+        } else {
+            1.0
+        };
+
+        (distance_fog * height_factor).clamp(0.0, 1.0)
+    }
+
+    /// Apply fog to color
+    pub fn apply(&self, color: Vec3, distance: f32, world_height: Option<f32>) -> Vec3 {
+        let fog = self.fog_factor(distance, world_height);
+        lerp(color, self.color, fog)
+    }
+}
+
+// =============================================================================
+// Volumetric Fog
+// =============================================================================
+
+/// Volumetric fog with ray marching
+struct VolumetricFog {
+    samples: u32,
+    max_distance: f32,
+    density: f32,
+    color: Vec3,
+    noise_scale: f32,
+    noise_intensity: f32,
+    temporal_jitter: f32,
+}
+
+impl VolumetricFog {
+    pub fn new(config: &VolumeConfig) -> Self {
+        Self {
+            samples: config.volumetric_samples,
+            max_distance: config.volumetric_max_distance,
+            density: config.fog_density,
+            color: config.fog_color,
+            noise_scale: config.volumetric_noise_scale,
+            noise_intensity: config.volumetric_noise_intensity,
+            temporal_jitter: 0.0,
+        }
+    }
+
+    /// Set temporal jitter for TAA integration
+    pub fn set_jitter(&mut self, jitter: f32) {
+        self.temporal_jitter = jitter;
+    }
+
+    /// Sample fog density at world position
+    fn sample_density(&self, world_pos: Vec3) -> f32 {
+        // Base density
+        let base = self.density;
+
+        // Add noise variation
+        let noise = self.noise_3d(world_pos * self.noise_scale);
+        let varied = base * (1.0 + noise * self.noise_intensity);
+
+        varied.max(0.0)
+    }
+
+    /// Simple 3D noise function
+    fn noise_3d(&self, p: Vec3) -> f32 {
+        // Hash function
+        let hash = |v: Vec3| -> f32 {
+            let p = Vec3::new(
+                v.dot(Vec3::new(127.1, 311.7, 74.7)),
+                v.dot(Vec3::new(269.5, 183.3, 246.1)),
+                v.dot(Vec3::new(113.5, 271.9, 124.6))
+            );
+            let s = p.x.sin() * 43758.5453 + p.y.cos() * 28001.8384 + p.z.sin() * 18503.2345;
+            (s % 1.0).abs() * 2.0 - 1.0
+        };
+
+        let i = Vec3::new(p.x.floor(), p.y.floor(), p.z.floor());
+        let f = Vec3::new(p.x - i.x, p.y - i.y, p.z - i.z);
+
+        // Smooth interpolation
+        let u = Vec3::new(
+            f.x * f.x * (3.0 - 2.0 * f.x),
+            f.y * f.y * (3.0 - 2.0 * f.y),
+            f.z * f.z * (3.0 - 2.0 * f.z)
+        );
+
+        // Interpolate
+        let a = lerp(hash(i), hash(i + Vec3::new(1.0, 0.0, 0.0)), u.x);
+        let b = lerp(hash(i + Vec3::new(0.0, 1.0, 0.0)), hash(i + Vec3::new(1.0, 1.0, 0.0)), u.x);
+        let c = lerp(hash(i + Vec3::new(0.0, 0.0, 1.0)), hash(i + Vec3::new(1.0, 0.0, 1.0)), u.x);
+        let d = lerp(hash(i + Vec3::new(0.0, 1.0, 1.0)), hash(i + Vec3::ONE), u.x);
+
+        lerp(lerp(a, b, u.y), lerp(c, d, u.y), u.z)
+    }
+
+    /// Ray march through volume
+    pub fn ray_march(
+        &self,
+        ray_origin: Vec3,
+        ray_dir: Vec3,
+        max_dist: f32,
+        light_dir: Vec3,
+        light_color: Vec3
+    ) -> Vec4 {
+        let step_size = self.max_distance.min(max_dist) / self.samples as f32;
+
+        let mut accumulated_color = Vec3::ZERO;
+        let mut transmittance = 1.0;
+
+        // Jittered start for temporal stability
+        let jitter = self.temporal_jitter * step_size;
+
+        for i in 0..self.samples {
+            let t = (i as f32 + 0.5) * step_size + jitter;
+            if t > max_dist {
+                break;
+            }
+
+            let sample_pos = ray_origin + ray_dir * t;
+            let density = self.sample_density(sample_pos);
+
+            if density > 0.001 {
+                // In-scattering (simplified)
+                let phase = self.henyey_greenstein(ray_dir.dot(light_dir), 0.3);
+                let in_scatter = light_color * phase * density;
+
+                // Beer-Lambert absorption
+                let absorption = (-density * step_size).exp();
+
+                accumulated_color = accumulated_color + in_scatter * transmittance * step_size;
+                transmittance *= absorption;
+
+                if transmittance < 0.01 {
+                    break;
+                }
+            }
+        }
+
+        // Add ambient fog color
+        accumulated_color = accumulated_color + self.color * (1.0 - transmittance) * 0.5;
+
+        Vec4::from_vec3(accumulated_color, 1.0 - transmittance)
+    }
+
+    /// Henyey-Greenstein phase function
+    fn henyey_greenstein(&self, cos_theta: f32, g: f32) -> f32 {
+        let g2 = g * g;
+        let denom = 1.0 + g2 - 2.0 * g * cos_theta;
+        (1.0 - g2) / (4.0 * std::f32::consts::PI * denom.powf(1.5))
+    }
+}
+
+// =============================================================================
+// God Rays (Light Shafts)
+// =============================================================================
+
+/// God rays / light shafts processor
+struct GodRays {
+    algorithm: GodRayAlgorithm,
+    intensity: f32,
+    samples: u32,
+    density: f32,
+    decay: f32,
+}
+
+impl GodRays {
+    pub fn new(config: &VolumeConfig) -> Self {
+        Self {
+            algorithm: config.god_rays_algorithm,
+            intensity: config.god_rays_intensity,
+            samples: config.god_rays_samples,
+            density: config.god_rays_density,
+            decay: config.god_rays_decay,
+        }
+    }
+
+    /// Apply radial god rays (screen-space)
+    pub fn apply_radial(
+        &self,
+        color: &[Vec4],
+        depth: &[f32],
+        light_screen_pos: Vec2,
+        width: u32,
+        height: u32
+    ) -> Vec<Vec4> {
+        if matches!(self.algorithm, GodRayAlgorithm::None) {
+            return color.to_vec();
+        }
+
+        let mut result = color.to_vec();
+
+        // First pass: extract bright pixels
+        let mut occlusion = vec![0.0f32; color.len()];
+        for i in 0..color.len() {
+            let pixel = color[i];
+            let lum = pixel.x * 0.2126 + pixel.y * 0.7152 + pixel.z * 0.0722;
+
+            // Sky pixels (far depth) contribute to god rays
+            if depth[i] > 0.999 && lum > 0.5 {
+                occlusion[i] = lum;
+            }
+        }
+
+        // Second pass: radial blur from light position
+        let step = 1.0 / self.samples as f32;
+        let delta = Vec2::new(
+            light_screen_pos.x - 0.5,
+            light_screen_pos.y - 0.5
+        ) * -1.0;
+
+        for y in 0..height {
+            for x in 0..width {
+                let idx = (y * width + x) as usize;
+                let uv = Vec2::new(
+                    (x as f32 + 0.5) / width as f32,
+                    (y as f32 + 0.5) / height as f32
+                );
+
+                let to_light = light_screen_pos - uv;
+                let ray_dir = to_light.normalize() * step * 0.1;
+
+                let mut accum = 0.0;
+                let mut decay_factor = 1.0;
+                let mut sample_uv = uv;
+
+                for _ in 0..self.samples {
+                    sample_uv = sample_uv + ray_dir;
+
+                    if sample_uv.x < 0.0 || sample_uv.x > 1.0 ||
+                       sample_uv.y < 0.0 || sample_uv.y > 1.0 {
+                        break;
+                    }
+
+                    let sx = (sample_uv.x * width as f32) as u32;
+                    let sy = (sample_uv.y * height as f32) as u32;
+                    let sample_idx = (sy * width + sx) as usize;
+
+                    accum += occlusion[sample_idx] * decay_factor * self.density;
+                    decay_factor *= self.decay;
+                }
+
+                // Add god rays contribution
+                let ray_contrib = accum * self.intensity / self.samples as f32;
+                let ray_color = Vec3::new(1.0, 0.95, 0.9) * ray_contrib; // Warm tint
+
+                result[idx] = Vec4::new(
+                    result[idx].x + ray_color.x,
+                    result[idx].y + ray_color.y,
+                    result[idx].z + ray_color.z,
+                    result[idx].w
+                );
+            }
+        }
+
+        result
+    }
+
+    /// Volumetric god rays with ray marching
+    pub fn ray_march_shafts(
+        &self,
+        ray_origin: Vec3,
+        ray_dir: Vec3,
+        max_dist: f32,
+        shadow_map: impl Fn(Vec3) -> f32,
+        light_dir: Vec3,
+        light_color: Vec3
+    ) -> Vec3 {
+        let step_size = max_dist / self.samples as f32;
+        let mut accumulated = Vec3::ZERO;
+        let mut transmittance = 1.0;
+
+        for i in 0..self.samples {
+            let t = (i as f32 + 0.5) * step_size;
+            let sample_pos = ray_origin + ray_dir * t;
+
+            // Check if point is in shadow
+            let shadow = shadow_map(sample_pos);
+
+            if shadow > 0.5 {
+                // Point is lit
+                let phase = self.henyey_greenstein(ray_dir.dot(light_dir), 0.7);
+                accumulated = accumulated + light_color * phase * self.intensity * transmittance * step_size * 0.01;
+            }
+
+            transmittance *= self.decay;
+            if transmittance < 0.01 {
+                break;
+            }
+        }
+
+        accumulated
+    }
+
+    /// Henyey-Greenstein phase function
+    fn henyey_greenstein(&self, cos_theta: f32, g: f32) -> f32 {
+        let g2 = g * g;
+        (1.0 - g2) / (4.0 * std::f32::consts::PI * (1.0 + g2 - 2.0 * g * cos_theta).powf(1.5))
+    }
+}
+
+// =============================================================================
+// Atmospheric Scattering
+// =============================================================================
+
+/// Physical atmospheric scattering
+struct AtmosphericScattering {
+    sun_intensity: f32,
+    mie_g: f32,
+    samples: u32,
+    rayleigh_beta: Vec3,
+    mie_beta: f32,
+}
+
+impl AtmosphericScattering {
+    pub fn new(config: &VolumeConfig) -> Self {
+        Self {
+            sun_intensity: config.atmosphere_sun_intensity,
+            mie_g: config.atmosphere_mie_g,
+            samples: config.atmosphere_samples,
+            rayleigh_beta: RAYLEIGH_BETA,
+            mie_beta: MIE_BETA,
+        }
+    }
+
+    /// Rayleigh phase function
+    fn rayleigh_phase(&self, cos_theta: f32) -> f32 {
+        (3.0 / 16.0 * std::f32::consts::PI) * (1.0 + cos_theta * cos_theta)
+    }
+
+    /// Mie phase function (Cornette-Shanks)
+    fn mie_phase(&self, cos_theta: f32) -> f32 {
+        let g = self.mie_g;
+        let g2 = g * g;
+        let num = 3.0 * (1.0 - g2) * (1.0 + cos_theta * cos_theta);
+        let denom = 8.0 * std::f32::consts::PI * (2.0 + g2) * (1.0 + g2 - 2.0 * g * cos_theta).powf(1.5);
+        num / denom
+    }
+
+    /// Calculate density at altitude
+    fn density(&self, height: f32) -> (f32, f32) {
+        let rayleigh = (-height / RAYLEIGH_SCALE_HEIGHT).exp();
+        let mie = (-height / MIE_SCALE_HEIGHT).exp();
+        (rayleigh, mie)
+    }
+
+    /// Calculate sky color for a ray direction
+    pub fn sky_color(&self, view_dir: Vec3, sun_dir: Vec3) -> Vec3 {
+        // Simplified single-scattering model
+        let cos_theta = view_dir.dot(sun_dir);
+
+        // View ray from ground level
+        let ray_origin = Vec3::new(0.0, EARTH_RADIUS + 100.0, 0.0);
+
+        // Find intersection with atmosphere
+        let atmosphere_radius = EARTH_RADIUS + ATMOSPHERE_HEIGHT;
+        let t_atmosphere = self.ray_sphere_intersect(ray_origin, view_dir, atmosphere_radius);
+
+        if t_atmosphere < 0.0 {
+            return Vec3::ZERO;
+        }
+
+        let step_size = t_atmosphere / self.samples as f32;
+        let mut total_rayleigh = Vec3::ZERO;
+        let mut total_mie = Vec3::ZERO;
+        let mut optical_depth_rayleigh = 0.0;
+        let mut optical_depth_mie = 0.0;
+
+        for i in 0..self.samples {
+            let t = (i as f32 + 0.5) * step_size;
+            let sample_pos = ray_origin + view_dir * t;
+            let height = sample_pos.length() - EARTH_RADIUS;
+
+            let (density_r, density_m) = self.density(height);
+            optical_depth_rayleigh += density_r * step_size;
+            optical_depth_mie += density_m * step_size;
+
+            // Light optical depth (to sun)
+            let t_sun = self.ray_sphere_intersect(sample_pos, sun_dir, atmosphere_radius);
+            if t_sun > 0.0 {
+                let sun_step = t_sun / 4.0; // Fewer samples for sun
+                let mut sun_optical_r = 0.0;
+                let mut sun_optical_m = 0.0;
+
+                for j in 0..4 {
+                    let sun_t = (j as f32 + 0.5) * sun_step;
+                    let sun_pos = sample_pos + sun_dir * sun_t;
+                    let sun_height = sun_pos.length() - EARTH_RADIUS;
+                    let (dr, dm) = self.density(sun_height);
+                    sun_optical_r += dr * sun_step;
+                    sun_optical_m += dm * sun_step;
+                }
+
+                // Attenuation
+                let tau_rayleigh = self.rayleigh_beta * (optical_depth_rayleigh + sun_optical_r);
+                let tau_mie = Vec3::splat(self.mie_beta * (optical_depth_mie + sun_optical_m));
+                let attenuation = Vec3::new(
+                    (-tau_rayleigh.x - tau_mie.x).exp(),
+                    (-tau_rayleigh.y - tau_mie.y).exp(),
+                    (-tau_rayleigh.z - tau_mie.z).exp()
+                );
+
+                total_rayleigh = total_rayleigh + attenuation * density_r * step_size;
+                total_mie = total_mie + attenuation * density_m * step_size;
+            }
+        }
+
+        let phase_r = self.rayleigh_phase(cos_theta);
+        let phase_m = self.mie_phase(cos_theta);
+
+        let rayleigh_contrib = total_rayleigh * self.rayleigh_beta * phase_r;
+        let mie_contrib = total_mie * self.mie_beta * phase_m;
+
+        (rayleigh_contrib + mie_contrib) * self.sun_intensity
+    }
+
+    /// Ray-sphere intersection
+    fn ray_sphere_intersect(&self, origin: Vec3, dir: Vec3, radius: f32) -> f32 {
+        let b = 2.0 * origin.dot(dir);
+        let c = origin.dot(origin) - radius * radius;
+        let disc = b * b - 4.0 * c;
+
+        if disc < 0.0 {
+            -1.0
+        } else {
+            (-b + disc.sqrt()) * 0.5
+        }
+    }
+
+    /// Apply atmospheric perspective to scene
+    pub fn apply_perspective(
+        &self,
+        color: Vec3,
+        distance: f32,
+        view_dir: Vec3,
+        sun_dir: Vec3
+    ) -> Vec3 {
+        // Simplified aerial perspective
+        let fade = 1.0 - (-(distance * 0.0001)).exp();
+        let sky = self.sky_color(view_dir, sun_dir);
+
+        lerp(color, sky, fade * 0.5)
+    }
+}
+
+// =============================================================================
+// Volumetric Clouds
+// =============================================================================
+
+/// Cloud layer type
+@[repr(u8)]
+enum CloudType {
+    Cumulus,
+    Stratus,
+    Cirrus,
+    Cumulonimbus,
+}
+
+/// Volumetric cloud renderer
+struct VolumetricClouds {
+    coverage: f32,
+    density: f32,
+    height_min: f32,
+    height_max: f32,
+    cloud_type: CloudType,
+    samples: u32,
+    light_samples: u32,
+}
+
+impl VolumetricClouds {
+    pub fn new(config: &VolumeConfig) -> Self {
+        Self {
+            coverage: config.cloud_coverage,
+            density: config.cloud_density,
+            height_min: config.cloud_height_min,
+            height_max: config.cloud_height_max,
+            cloud_type: CloudType::Cumulus,
+            samples: 64,
+            light_samples: 6,
+        }
+    }
+
+    /// Sample cloud density at world position
+    fn sample_density(&self, world_pos: Vec3, detail_level: u32) -> f32 {
+        let height = world_pos.y;
+
+        // Height gradient
+        if height < self.height_min || height > self.height_max {
+            return 0.0;
+        }
+
+        let height_fraction = (height - self.height_min) / (self.height_max - self.height_min);
+        let height_gradient = self.cloud_height_gradient(height_fraction);
+
+        // Base shape noise (low frequency)
+        let base_scale = 0.0003;
+        let base_pos = world_pos * base_scale;
+        let base_noise = self.fbm(base_pos, 4);
+
+        // Detail noise (high frequency)
+        let detail_noise = if detail_level > 0 {
+            let detail_scale = 0.002;
+            let detail_pos = world_pos * detail_scale;
+            self.fbm(detail_pos, 3) * 0.3
+        } else {
+            0.0
+        };
+
+        // Combine
+        let shape = (base_noise + 0.5) - (1.0 - self.coverage);
+        let detailed = shape - detail_noise * (1.0 - shape);
+
+        (detailed * height_gradient * self.density).max(0.0)
+    }
+
+    /// Height gradient based on cloud type
+    fn cloud_height_gradient(&self, h: f32) -> f32 {
+        match self.cloud_type {
+            CloudType::Cumulus => {
+                // Fluffy cumulus - denser at bottom
+                let gradient = smoothstep(0.0, 0.2, h) * smoothstep(1.0, 0.7, h);
+                gradient
+            },
+            CloudType::Stratus => {
+                // Flat stratus - uniform density
+                smoothstep(0.0, 0.1, h) * smoothstep(1.0, 0.9, h)
+            },
+            CloudType::Cirrus => {
+                // Wispy cirrus - thin at top
+                smoothstep(0.3, 0.5, h) * smoothstep(1.0, 0.8, h) * 0.5
+            },
+            CloudType::Cumulonimbus => {
+                // Tall thunderhead
+                smoothstep(0.0, 0.1, h) * smoothstep(1.0, 0.95, h)
+            },
+        }
+    }
+
+    /// Fractal Brownian Motion
+    fn fbm(&self, p: Vec3, octaves: u32) -> f32 {
+        let mut value = 0.0;
+        let mut amplitude = 0.5;
+        let mut frequency = 1.0;
+
+        for _ in 0..octaves {
+            value += amplitude * self.noise_3d(p * frequency);
+            amplitude *= 0.5;
+            frequency *= 2.0;
+        }
+
+        value
+    }
+
+    /// 3D value noise
+    fn noise_3d(&self, p: Vec3) -> f32 {
+        let i = Vec3::new(p.x.floor(), p.y.floor(), p.z.floor());
+        let f = Vec3::new(p.x - i.x, p.y - i.y, p.z - i.z);
+
+        let u = Vec3::new(
+            f.x * f.x * (3.0 - 2.0 * f.x),
+            f.y * f.y * (3.0 - 2.0 * f.y),
+            f.z * f.z * (3.0 - 2.0 * f.z)
+        );
+
+        let hash = |ix: f32, iy: f32, iz: f32| -> f32 {
+            let n = (ix as i32 + iy as i32 * 57 + iz as i32 * 113) as f32;
+            (n.sin() * 43758.5453).fract()
+        };
+
+        let a = lerp(hash(i.x, i.y, i.z), hash(i.x + 1.0, i.y, i.z), u.x);
+        let b = lerp(hash(i.x, i.y + 1.0, i.z), hash(i.x + 1.0, i.y + 1.0, i.z), u.x);
+        let c = lerp(hash(i.x, i.y, i.z + 1.0), hash(i.x + 1.0, i.y, i.z + 1.0), u.x);
+        let d = lerp(hash(i.x, i.y + 1.0, i.z + 1.0), hash(i.x + 1.0, i.y + 1.0, i.z + 1.0), u.x);
+
+        lerp(lerp(a, b, u.y), lerp(c, d, u.y), u.z) * 2.0 - 1.0
+    }
+
+    /// Ray march through clouds
+    pub fn ray_march(
+        &self,
+        ray_origin: Vec3,
+        ray_dir: Vec3,
+        sun_dir: Vec3,
+        sun_color: Vec3
+    ) -> Vec4 {
+        // Find entry/exit points in cloud layer
+        let t_min = if ray_origin.y < self.height_min {
+            (self.height_min - ray_origin.y) / ray_dir.y.max(0.0001)
+        } else if ray_origin.y > self.height_max {
+            return Vec4::ZERO; // Above clouds, looking up
+        } else {
+            0.0
+        };
+
+        let t_max = if ray_dir.y > 0.0 {
+            (self.height_max - ray_origin.y) / ray_dir.y
+        } else {
+            (self.height_min - ray_origin.y) / ray_dir.y.min(-0.0001)
+        };
+
+        if t_min >= t_max || t_max < 0.0 {
+            return Vec4::ZERO;
+        }
+
+        let step_size = (t_max - t_min) / self.samples as f32;
+        let mut accumulated_color = Vec3::ZERO;
+        let mut transmittance = 1.0;
+
+        for i in 0..self.samples {
+            let t = t_min + (i as f32 + 0.5) * step_size;
+            let sample_pos = ray_origin + ray_dir * t;
+            let density = self.sample_density(sample_pos, 1);
+
+            if density > 0.001 {
+                // Light marching for shadows
+                let light_energy = self.light_march(sample_pos, sun_dir);
+
+                // Ambient + direct lighting
+                let ambient = Vec3::new(0.5, 0.55, 0.65) * 0.3;
+                let direct = sun_color * light_energy;
+                let light = ambient + direct;
+
+                // Beer-Lambert
+                let absorption = (-density * step_size * 10.0).exp();
+
+                accumulated_color = accumulated_color + light * (1.0 - absorption) * transmittance;
+                transmittance *= absorption;
+
+                if transmittance < 0.01 {
+                    break;
+                }
+            }
+        }
+
+        Vec4::from_vec3(accumulated_color, 1.0 - transmittance)
+    }
+
+    /// March toward sun to calculate shadowing
+    fn light_march(&self, origin: Vec3, sun_dir: Vec3) -> f32 {
+        let step_size = (self.height_max - self.height_min) / self.light_samples as f32;
+        let mut optical_depth = 0.0;
+
+        for i in 0..self.light_samples {
+            let t = (i as f32 + 0.5) * step_size;
+            let sample_pos = origin + sun_dir * t;
+
+            if sample_pos.y > self.height_max {
+                break;
+            }
+
+            let density = self.sample_density(sample_pos, 0);
+            optical_depth += density * step_size;
+        }
+
+        (-optical_depth * 5.0).exp()
+    }
+}
+
+// =============================================================================
+// Volumetrics Renderer
+// =============================================================================
+
+/// Main volumetrics renderer
+struct VolumetricsRenderer {
+    config: VolumeConfig,
+    basic_fog: BasicFog,
+    volumetric_fog: Option<VolumetricFog>,
+    god_rays: GodRays,
+    atmosphere: AtmosphericScattering,
+    clouds: Option<VolumetricClouds>,
+}
+
+impl VolumetricsRenderer {
+    /// Create new volumetrics renderer
+    pub fn new(config: VolumeConfig) -> Self {
+        let volumetric_fog = if config.volumetric_enabled {
+            Some(VolumetricFog::new(&config))
+        } else {
+            None
+        };
+
+        let clouds = if config.clouds_enabled {
+            Some(VolumetricClouds::new(&config))
+        } else {
+            None
+        };
+
+        Self {
+            basic_fog: BasicFog::new(&config),
+            volumetric_fog,
+            god_rays: GodRays::new(&config),
+            atmosphere: AtmosphericScattering::new(&config),
+            clouds,
+            config,
+        }
+    }
+
+    /// Render all volumetric effects
+    pub fn render(
+        &self,
+        color: &[Vec4],
+        depth: &[f32],
+        camera_pos: Vec3,
+        view_proj_inv: &Mat4,
+        sun_dir: Vec3,
+        sun_color: Vec3,
+        light_screen_pos: Vec2,
+        width: u32,
+        height: u32
+    ) -> Vec<Vec4> {
+        let mut result = color.to_vec();
+
+        // Apply fog
+        if self.config.fog_enabled {
+            for y in 0..height {
+                for x in 0..width {
+                    let idx = (y * width + x) as usize;
+                    let d = depth[idx];
+
+                    // Reconstruct world position
+                    let uv = Vec2::new(
+                        (x as f32 + 0.5) / width as f32,
+                        (y as f32 + 0.5) / height as f32
+                    );
+                    let world_pos = self.unproject(uv, d, view_proj_inv);
+                    let distance = (world_pos - camera_pos).length();
+
+                    let fogged = self.basic_fog.apply(
+                        result[idx].xyz(),
+                        distance,
+                        Some(world_pos.y)
+                    );
+                    result[idx] = Vec4::from_vec3(fogged, result[idx].w);
+                }
+            }
+        }
+
+        // Apply atmospheric scattering
+        if self.config.atmosphere_enabled {
+            for y in 0..height {
+                for x in 0..width {
+                    let idx = (y * width + x) as usize;
+                    let d = depth[idx];
+
+                    let uv = Vec2::new(
+                        (x as f32 + 0.5) / width as f32,
+                        (y as f32 + 0.5) / height as f32
+                    );
+                    let world_pos = self.unproject(uv, d, view_proj_inv);
+                    let view_dir = (world_pos - camera_pos).normalize();
+                    let distance = (world_pos - camera_pos).length();
+
+                    // For sky pixels, use full atmospheric scattering
+                    if d > 0.9999 {
+                        let sky = self.atmosphere.sky_color(view_dir, sun_dir);
+                        result[idx] = Vec4::from_vec3(sky, 1.0);
+                    } else {
+                        // Aerial perspective for scene objects
+                        let scattered = self.atmosphere.apply_perspective(
+                            result[idx].xyz(),
+                            distance,
+                            view_dir,
+                            sun_dir
+                        );
+                        result[idx] = Vec4::from_vec3(scattered, result[idx].w);
+                    }
+                }
+            }
+        }
+
+        // Apply god rays
+        if self.config.god_rays_enabled {
+            result = self.god_rays.apply_radial(&result, depth, light_screen_pos, width, height);
+        }
+
+        result
+    }
+
+    /// Unproject screen position to world
+    fn unproject(&self, uv: Vec2, depth: f32, view_proj_inv: &Mat4) -> Vec3 {
+        let ndc = Vec4::new(
+            uv.x * 2.0 - 1.0,
+            1.0 - uv.y * 2.0,
+            depth,
+            1.0
+        );
+
+        let world = *view_proj_inv * ndc;
+        Vec3::new(world.x / world.w, world.y / world.w, world.z / world.w)
+    }
+}
+
+// =============================================================================
+// WGSL Shaders
+// =============================================================================
+
+mod shaders {
+    /// Fog compute shader
+    pub const FOG: &str = r#"
+struct FogParams {
+    color: vec3<f32>,
+    density: f32,
+    start: f32,
+    end: f32,
+    height: f32,
+    height_falloff: f32,
+    fog_type: u32,
+    _pad: vec3<f32>,
+}
+
+struct CameraParams {
+    position: vec3<f32>,
+    _pad: f32,
+    view_proj_inv: mat4x4<f32>,
+}
+
+@group(0) @binding(0) var<uniform> fog: FogParams;
+@group(0) @binding(1) var<uniform> camera: CameraParams;
+@group(0) @binding(2) var color_tex: texture_2d<f32>;
+@group(0) @binding(3) var depth_tex: texture_2d<f32>;
+@group(0) @binding(4) var output_tex: texture_storage_2d<rgba16float, write>;
+
+fn unproject(uv: vec2<f32>, depth: f32) -> vec3<f32> {
+    let ndc = vec4<f32>(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, depth, 1.0);
+    let world = camera.view_proj_inv * ndc;
+    return world.xyz / world.w;
+}
+
+fn fog_factor(distance: f32, height: f32) -> f32 {
+    var dist_fog = 0.0;
+
+    switch fog.fog_type {
+        case 1u: { // Linear
+            dist_fog = saturate((distance - fog.start) / (fog.end - fog.start));
+        }
+        case 2u: { // Exponential
+            dist_fog = 1.0 - exp(-distance * fog.density);
+        }
+        case 3u: { // Exponential2
+            let d = distance * fog.density;
+            dist_fog = 1.0 - exp(-d * d);
+        }
+        case 4u: { // Height
+            dist_fog = 1.0 - exp(-distance * fog.density);
+        }
+        default: {}
+    }
+
+    // Height falloff
+    var height_factor = 1.0;
+    if (fog.fog_type == 4u) {
+        let height_diff = height - fog.height;
+        if (height_diff > 0.0) {
+            height_factor = exp(-height_diff * fog.height_falloff);
+        }
+    }
+
+    return saturate(dist_fog * height_factor);
+}
+
+@compute @workgroup_size(8, 8)
+fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+    let dims = textureDimensions(color_tex);
+    if (id.x >= dims.x || id.y >= dims.y) {
+        return;
+    }
+
+    let uv = (vec2<f32>(id.xy) + 0.5) / vec2<f32>(dims);
+    let color = textureLoad(color_tex, id.xy, 0);
+    let depth = textureLoad(depth_tex, id.xy, 0).r;
+
+    let world_pos = unproject(uv, depth);
+    let distance = length(world_pos - camera.position);
+
+    let fog_amount = fog_factor(distance, world_pos.y);
+    let fogged = mix(color.rgb, fog.color, fog_amount);
+
+    textureStore(output_tex, id.xy, vec4<f32>(fogged, color.a));
+}
+"#;
+
+    /// God rays shader
+    pub const GOD_RAYS: &str = r#"
+struct GodRayParams {
+    light_screen_pos: vec2<f32>,
+    intensity: f32,
+    density: f32,
+    decay: f32,
+    samples: u32,
+    _pad: vec2<f32>,
+}
+
+@group(0) @binding(0) var<uniform> params: GodRayParams;
+@group(0) @binding(1) var color_tex: texture_2d<f32>;
+@group(0) @binding(2) var depth_tex: texture_2d<f32>;
+@group(0) @binding(3) var output_tex: texture_storage_2d<rgba16float, write>;
+@group(0) @binding(4) var linear_sampler: sampler;
+
+@compute @workgroup_size(8, 8)
+fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+    let dims = textureDimensions(color_tex);
+    if (id.x >= dims.x || id.y >= dims.y) {
+        return;
+    }
+
+    let uv = (vec2<f32>(id.xy) + 0.5) / vec2<f32>(dims);
+    let color = textureLoad(color_tex, id.xy, 0);
+
+    let to_light = params.light_screen_pos - uv;
+    let ray_dir = normalize(to_light) / f32(params.samples) * 0.1;
+
+    var accum = 0.0;
+    var decay_factor = 1.0;
+    var sample_uv = uv;
+
+    for (var i = 0u; i < params.samples; i++) {
+        sample_uv = sample_uv + ray_dir;
+
+        if (sample_uv.x < 0.0 || sample_uv.x > 1.0 || sample_uv.y < 0.0 || sample_uv.y > 1.0) {
+            break;
+        }
+
+        let sample_color = textureSampleLevel(color_tex, linear_sampler, sample_uv, 0.0);
+        let sample_depth = textureSampleLevel(depth_tex, linear_sampler, sample_uv, 0.0).r;
+
+        // Only sky pixels contribute
+        if (sample_depth > 0.999) {
+            let lum = dot(sample_color.rgb, vec3<f32>(0.2126, 0.7152, 0.0722));
+            if (lum > 0.5) {
+                accum += lum * decay_factor * params.density;
+            }
+        }
+
+        decay_factor *= params.decay;
+    }
+
+    let ray_contrib = accum * params.intensity / f32(params.samples);
+    let ray_color = vec3<f32>(1.0, 0.95, 0.9) * ray_contrib;
+
+    textureStore(output_tex, id.xy, vec4<f32>(color.rgb + ray_color, color.a));
+}
+"#;
+
+    /// Atmospheric scattering shader
+    pub const ATMOSPHERE: &str = r#"
+struct AtmosphereParams {
+    sun_dir: vec3<f32>,
+    sun_intensity: f32,
+    rayleigh_beta: vec3<f32>,
+    mie_beta: f32,
+    mie_g: f32,
+    samples: u32,
+    _pad: vec2<f32>,
+}
+
+const EARTH_RADIUS: f32 = 6371000.0;
+const ATMOSPHERE_HEIGHT: f32 = 100000.0;
+const RAYLEIGH_SCALE_HEIGHT: f32 = 8500.0;
+const MIE_SCALE_HEIGHT: f32 = 1200.0;
+const PI: f32 = 3.14159265;
+
+@group(0) @binding(0) var<uniform> params: AtmosphereParams;
+@group(0) @binding(1) var output_tex: texture_storage_2d<rgba16float, write>;
+
+fn rayleigh_phase(cos_theta: f32) -> f32 {
+    return (3.0 / (16.0 * PI)) * (1.0 + cos_theta * cos_theta);
+}
+
+fn mie_phase(cos_theta: f32) -> f32 {
+    let g = params.mie_g;
+    let g2 = g * g;
+    let num = 3.0 * (1.0 - g2) * (1.0 + cos_theta * cos_theta);
+    let denom = 8.0 * PI * (2.0 + g2) * pow(1.0 + g2 - 2.0 * g * cos_theta, 1.5);
+    return num / denom;
+}
+
+fn density(height: f32) -> vec2<f32> {
+    return vec2<f32>(
+        exp(-height / RAYLEIGH_SCALE_HEIGHT),
+        exp(-height / MIE_SCALE_HEIGHT)
+    );
+}
+
+@compute @workgroup_size(8, 8)
+fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+    let dims = vec2<u32>(textureDimensions(output_tex));
+    if (id.x >= dims.x || id.y >= dims.y) {
+        return;
+    }
+
+    // Convert to view direction on hemisphere
+    let uv = (vec2<f32>(id.xy) + 0.5) / vec2<f32>(dims);
+    let theta = uv.x * 2.0 * PI;
+    let phi = uv.y * PI * 0.5;
+
+    let view_dir = vec3<f32>(
+        cos(theta) * cos(phi),
+        sin(phi),
+        sin(theta) * cos(phi)
+    );
+
+    let cos_theta = dot(view_dir, params.sun_dir);
+
+    // Simplified sky color calculation
+    let rayleigh = params.rayleigh_beta * rayleigh_phase(cos_theta);
+    let mie = vec3<f32>(params.mie_beta) * mie_phase(cos_theta);
+
+    let sky_color = (rayleigh + mie) * params.sun_intensity;
+
+    textureStore(output_tex, id.xy, vec4<f32>(sky_color, 1.0));
+}
+"#;
+}
+
+// =============================================================================
+// Unit Tests
+// =============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_config_presets() {
+        let default = VolumeConfig::default();
+        assert!(default.fog_enabled);
+        assert!(default.god_rays_enabled);
+
+        let foggy = VolumeConfig::foggy();
+        assert!(foggy.volumetric_enabled);
+        assert!(foggy.fog_density > default.fog_density);
+
+        let sunset = VolumeConfig::sunset();
+        assert!(sunset.fog_color.x > sunset.fog_color.z); // Warm color
+    }
+
+    #[test]
+    fn test_basic_fog_linear() {
+        let mut config = VolumeConfig::default();
+        config.fog_type = FogType::Linear;
+        config.fog_start = 10.0;
+        config.fog_end = 100.0;
+
+        let fog = BasicFog::new(&config);
+
+        // Before start
+        assert!(fog.fog_factor(5.0, None) < 0.1);
+
+        // At midpoint
+        let mid = fog.fog_factor(55.0, None);
+        assert!(mid > 0.4 && mid < 0.6);
+
+        // After end
+        assert!(fog.fog_factor(150.0, None) > 0.9);
+    }
+
+    #[test]
+    fn test_basic_fog_exponential() {
+        let mut config = VolumeConfig::default();
+        config.fog_type = FogType::Exponential;
+        config.fog_density = 0.01;
+
+        let fog = BasicFog::new(&config);
+
+        // Should increase with distance
+        let near = fog.fog_factor(10.0, None);
+        let far = fog.fog_factor(100.0, None);
+        assert!(far > near);
+    }
+
+    #[test]
+    fn test_height_fog() {
+        let mut config = VolumeConfig::default();
+        config.fog_type = FogType::Height;
+        config.fog_height = 50.0;
+        config.fog_height_falloff = 0.05;
+
+        let fog = BasicFog::new(&config);
+
+        // Below fog height
+        let below = fog.fog_factor(50.0, Some(30.0));
+
+        // Above fog height
+        let above = fog.fog_factor(50.0, Some(100.0));
+
+        // Fog should be denser below the fog height
+        assert!(below > above);
+    }
+
+    #[test]
+    fn test_god_rays_creation() {
+        let config = VolumeConfig::default();
+        let god_rays = GodRays::new(&config);
+
+        assert_eq!(god_rays.samples, config.god_rays_samples);
+        assert_eq!(god_rays.intensity, config.god_rays_intensity);
+    }
+
+    #[test]
+    fn test_atmosphere_phases() {
+        let config = VolumeConfig::default();
+        let atm = AtmosphericScattering::new(&config);
+
+        // Rayleigh phase should be symmetric
+        let forward = atm.rayleigh_phase(1.0);
+        let backward = atm.rayleigh_phase(-1.0);
+        assert!((forward - backward).abs() < 0.01);
+
+        // Mie phase should be forward-peaked
+        let mie_forward = atm.mie_phase(1.0);
+        let mie_backward = atm.mie_phase(-1.0);
+        assert!(mie_forward > mie_backward);
+    }
+
+    #[test]
+    fn test_atmosphere_density() {
+        let config = VolumeConfig::default();
+        let atm = AtmosphericScattering::new(&config);
+
+        // Density should decrease with altitude
+        let (r_low, m_low) = atm.density(0.0);
+        let (r_high, m_high) = atm.density(10000.0);
+
+        assert!(r_low > r_high);
+        assert!(m_low > m_high);
+    }
+
+    #[test]
+    fn test_volumetric_fog_noise() {
+        let config = VolumeConfig::default();
+        let fog = VolumetricFog::new(&config);
+
+        // Noise should produce values in reasonable range
+        let n1 = fog.noise_3d(Vec3::ZERO);
+        let n2 = fog.noise_3d(Vec3::ONE);
+
+        assert!(n1 >= -1.0 && n1 <= 1.0);
+        assert!(n2 >= -1.0 && n2 <= 1.0);
+        assert!(n1 != n2); // Different positions should give different values
+    }
+
+    #[test]
+    fn test_cloud_height_gradient() {
+        let config = VolumeConfig::default();
+        let clouds = VolumetricClouds::new(&config);
+
+        // Gradient should be 0 at edges, positive in middle
+        let bottom = clouds.cloud_height_gradient(0.0);
+        let middle = clouds.cloud_height_gradient(0.5);
+        let top = clouds.cloud_height_gradient(1.0);
+
+        assert!(bottom < middle);
+        assert!(top < middle);
+    }
+
+    #[test]
+    fn test_henyey_greenstein() {
+        let config = VolumeConfig::default();
+        let fog = VolumetricFog::new(&config);
+
+        // Forward scattering should be stronger for positive g
+        let forward = fog.henyey_greenstein(1.0, 0.8);
+        let backward = fog.henyey_greenstein(-1.0, 0.8);
+        let side = fog.henyey_greenstein(0.0, 0.8);
+
+        assert!(forward > side);
+        assert!(forward > backward);
+    }
+}

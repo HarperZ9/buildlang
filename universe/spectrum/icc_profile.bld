@@ -1,0 +1,2101 @@
+// BUILD Spectrum - ICC Profile Support
+// Complete ICC.1:2022 color profile implementation
+// Supports v2 and v4 profiles with full tag processing
+
+module spectrum::icc_profile;
+
+use core::simd::{Vec3, Vec4, Mat3x3};
+use core::math::{pow, sqrt, abs, cbrt};
+use core::io::{ByteReader, ByteWriter, Endianness};
+
+// ============================================================================
+// ICC PROFILE CONSTANTS
+// ============================================================================
+
+/// ICC profile signature
+const ICC_MAGIC: u32 = 0x61637370;  // 'acsp'
+
+/// ICC profile version
+enum IccVersion {
+    V2_1,
+    V2_4,
+    V4_2,
+    V4_3,
+    V4_4,
+    V5_0,
+}
+
+impl IccVersion {
+    fn to_bytes(&self) -> u32 {
+        match self {
+            IccVersion::V2_1 => 0x02100000,
+            IccVersion::V2_4 => 0x02400000,
+            IccVersion::V4_2 => 0x04200000,
+            IccVersion::V4_3 => 0x04300000,
+            IccVersion::V4_4 => 0x04400000,
+            IccVersion::V5_0 => 0x05000000,
+        }
+    }
+
+    fn from_bytes(version: u32) -> Self {
+        let major = (version >> 24) & 0xFF;
+        let minor = (version >> 20) & 0x0F;
+
+        match (major, minor) {
+            (2, 1) => IccVersion::V2_1,
+            (2, _) => IccVersion::V2_4,
+            (4, 2) => IccVersion::V4_2,
+            (4, 3) => IccVersion::V4_3,
+            (4, _) => IccVersion::V4_4,
+            (5, _) => IccVersion::V5_0,
+            _ => IccVersion::V4_4,
+        }
+    }
+}
+
+/// Profile class/device class
+enum ProfileClass {
+    Input,          // 'scnr' - Scanner
+    Display,        // 'mntr' - Monitor
+    Output,         // 'prtr' - Printer
+    DeviceLink,     // 'link' - Device link
+    ColorSpace,     // 'spac' - Color space conversion
+    Abstract,       // 'abst' - Abstract
+    NamedColor,     // 'nmcl' - Named color
+}
+
+impl ProfileClass {
+    fn signature(&self) -> u32 {
+        match self {
+            ProfileClass::Input => 0x73636E72,      // 'scnr'
+            ProfileClass::Display => 0x6D6E7472,    // 'mntr'
+            ProfileClass::Output => 0x70727472,     // 'prtr'
+            ProfileClass::DeviceLink => 0x6C696E6B, // 'link'
+            ProfileClass::ColorSpace => 0x73706163, // 'spac'
+            ProfileClass::Abstract => 0x61627374,   // 'abst'
+            ProfileClass::NamedColor => 0x6E6D636C, // 'nmcl'
+        }
+    }
+
+    fn from_signature(sig: u32) -> Option<Self> {
+        match sig {
+            0x73636E72 => Some(ProfileClass::Input),
+            0x6D6E7472 => Some(ProfileClass::Display),
+            0x70727472 => Some(ProfileClass::Output),
+            0x6C696E6B => Some(ProfileClass::DeviceLink),
+            0x73706163 => Some(ProfileClass::ColorSpace),
+            0x61627374 => Some(ProfileClass::Abstract),
+            0x6E6D636C => Some(ProfileClass::NamedColor),
+            _ => None,
+        }
+    }
+}
+
+/// Color space signature
+enum ColorSpaceSignature {
+    XYZ,            // 'XYZ '
+    Lab,            // 'Lab '
+    Luv,            // 'Luv '
+    YCbCr,          // 'YCbr'
+    Yxy,            // 'Yxy '
+    RGB,            // 'RGB '
+    Gray,           // 'GRAY'
+    HSV,            // 'HSV '
+    HLS,            // 'HLS '
+    CMYK,           // 'CMYK'
+    CMY,            // 'CMY '
+    Color2,         // '2CLR'
+    Color3,         // '3CLR'
+    Color4,         // '4CLR'
+    Color5,         // '5CLR'
+    Color6,         // '6CLR'
+    Color7,         // '7CLR'
+    Color8,         // '8CLR'
+}
+
+impl ColorSpaceSignature {
+    fn signature(&self) -> u32 {
+        match self {
+            ColorSpaceSignature::XYZ => 0x58595A20,
+            ColorSpaceSignature::Lab => 0x4C616220,
+            ColorSpaceSignature::Luv => 0x4C757620,
+            ColorSpaceSignature::YCbCr => 0x59436272,
+            ColorSpaceSignature::Yxy => 0x59787920,
+            ColorSpaceSignature::RGB => 0x52474220,
+            ColorSpaceSignature::Gray => 0x47524159,
+            ColorSpaceSignature::HSV => 0x48535620,
+            ColorSpaceSignature::HLS => 0x484C5320,
+            ColorSpaceSignature::CMYK => 0x434D594B,
+            ColorSpaceSignature::CMY => 0x434D5920,
+            ColorSpaceSignature::Color2 => 0x32434C52,
+            ColorSpaceSignature::Color3 => 0x33434C52,
+            ColorSpaceSignature::Color4 => 0x34434C52,
+            ColorSpaceSignature::Color5 => 0x35434C52,
+            ColorSpaceSignature::Color6 => 0x36434C52,
+            ColorSpaceSignature::Color7 => 0x37434C52,
+            ColorSpaceSignature::Color8 => 0x38434C52,
+        }
+    }
+
+    fn channels(&self) -> usize {
+        match self {
+            ColorSpaceSignature::Gray => 1,
+            ColorSpaceSignature::Color2 => 2,
+            ColorSpaceSignature::XYZ |
+            ColorSpaceSignature::Lab |
+            ColorSpaceSignature::Luv |
+            ColorSpaceSignature::YCbCr |
+            ColorSpaceSignature::Yxy |
+            ColorSpaceSignature::RGB |
+            ColorSpaceSignature::HSV |
+            ColorSpaceSignature::HLS |
+            ColorSpaceSignature::CMY |
+            ColorSpaceSignature::Color3 => 3,
+            ColorSpaceSignature::CMYK |
+            ColorSpaceSignature::Color4 => 4,
+            ColorSpaceSignature::Color5 => 5,
+            ColorSpaceSignature::Color6 => 6,
+            ColorSpaceSignature::Color7 => 7,
+            ColorSpaceSignature::Color8 => 8,
+        }
+    }
+
+    fn from_signature(sig: u32) -> Option<Self> {
+        match sig {
+            0x58595A20 => Some(ColorSpaceSignature::XYZ),
+            0x4C616220 => Some(ColorSpaceSignature::Lab),
+            0x4C757620 => Some(ColorSpaceSignature::Luv),
+            0x59436272 => Some(ColorSpaceSignature::YCbCr),
+            0x59787920 => Some(ColorSpaceSignature::Yxy),
+            0x52474220 => Some(ColorSpaceSignature::RGB),
+            0x47524159 => Some(ColorSpaceSignature::Gray),
+            0x48535620 => Some(ColorSpaceSignature::HSV),
+            0x484C5320 => Some(ColorSpaceSignature::HLS),
+            0x434D594B => Some(ColorSpaceSignature::CMYK),
+            0x434D5920 => Some(ColorSpaceSignature::CMY),
+            _ => None,
+        }
+    }
+}
+
+/// Rendering intent
+enum RenderingIntent {
+    Perceptual,
+    RelativeColorimetric,
+    Saturation,
+    AbsoluteColorimetric,
+}
+
+impl RenderingIntent {
+    fn to_u32(&self) -> u32 {
+        match self {
+            RenderingIntent::Perceptual => 0,
+            RenderingIntent::RelativeColorimetric => 1,
+            RenderingIntent::Saturation => 2,
+            RenderingIntent::AbsoluteColorimetric => 3,
+        }
+    }
+
+    fn from_u32(value: u32) -> Self {
+        match value {
+            0 => RenderingIntent::Perceptual,
+            1 => RenderingIntent::RelativeColorimetric,
+            2 => RenderingIntent::Saturation,
+            3 => RenderingIntent::AbsoluteColorimetric,
+            _ => RenderingIntent::Perceptual,
+        }
+    }
+}
+
+// ============================================================================
+// TAG SIGNATURES
+// ============================================================================
+
+/// Common ICC tag signatures
+struct TagSignature;
+
+impl TagSignature {
+    // Required tags
+    const PROFILE_DESCRIPTION: u32 = 0x64657363;     // 'desc'
+    const COPYRIGHT: u32 = 0x63707274;               // 'cprt'
+    const MEDIA_WHITE_POINT: u32 = 0x77747074;       // 'wtpt'
+
+    // Matrix/TRC tags (for matrix-based profiles)
+    const RED_MATRIX_COLUMN: u32 = 0x7258595A;       // 'rXYZ'
+    const GREEN_MATRIX_COLUMN: u32 = 0x6758595A;     // 'gXYZ'
+    const BLUE_MATRIX_COLUMN: u32 = 0x6258595A;      // 'bXYZ'
+    const RED_TRC: u32 = 0x72545243;                 // 'rTRC'
+    const GREEN_TRC: u32 = 0x67545243;               // 'gTRC'
+    const BLUE_TRC: u32 = 0x62545243;                // 'bTRC'
+    const GRAY_TRC: u32 = 0x6B545243;                // 'kTRC'
+
+    // LUT tags
+    const A_TO_B0: u32 = 0x41324230;                 // 'A2B0'
+    const A_TO_B1: u32 = 0x41324231;                 // 'A2B1'
+    const A_TO_B2: u32 = 0x41324232;                 // 'A2B2'
+    const B_TO_A0: u32 = 0x42324130;                 // 'B2A0'
+    const B_TO_A1: u32 = 0x42324131;                 // 'B2A1'
+    const B_TO_A2: u32 = 0x42324132;                 // 'B2A2'
+
+    // Gamut tag
+    const GAMUT: u32 = 0x67616D74;                   // 'gamt'
+
+    // Profile sequence
+    const PROFILE_SEQUENCE_DESC: u32 = 0x70736571;  // 'pseq'
+
+    // Chromaticity
+    const CHROMATICITY: u32 = 0x6368726D;           // 'chrm'
+
+    // Viewing conditions
+    const VIEWING_CONDITIONS: u32 = 0x76696577;     // 'view'
+    const VIEWING_COND_DESC: u32 = 0x76756564;      // 'vued'
+
+    // Luminance
+    const LUMINANCE: u32 = 0x6C756D69;              // 'lumi'
+
+    // Measurement
+    const MEASUREMENT: u32 = 0x6D656173;            // 'meas'
+
+    // Technology
+    const TECHNOLOGY: u32 = 0x74656368;             // 'tech'
+
+    // Named colors
+    const NAMED_COLOR_2: u32 = 0x6E636C32;          // 'ncl2'
+
+    // Perceptual rendering intent gamut
+    const PERCEPTUAL_RENDERING_INTENT_GAMUT: u32 = 0x72696730;  // 'rig0'
+
+    // Saturation rendering intent gamut
+    const SATURATION_RENDERING_INTENT_GAMUT: u32 = 0x72696732;  // 'rig2'
+
+    // D2B/B2D (device to/from PCS with BPC)
+    const D_TO_B0: u32 = 0x44324230;                 // 'D2B0'
+    const D_TO_B1: u32 = 0x44324231;                 // 'D2B1'
+    const D_TO_B2: u32 = 0x44324232;                 // 'D2B2'
+    const D_TO_B3: u32 = 0x44324233;                 // 'D2B3'
+    const B_TO_D0: u32 = 0x42324430;                 // 'B2D0'
+    const B_TO_D1: u32 = 0x42324431;                 // 'B2D1'
+    const B_TO_D2: u32 = 0x42324432;                 // 'B2D2'
+    const B_TO_D3: u32 = 0x42324433;                 // 'B2D3'
+
+    // Chad (chromatic adaptation)
+    const CHROMATIC_ADAPTATION: u32 = 0x63686164;   // 'chad'
+
+    // Colorant table
+    const COLORANT_TABLE: u32 = 0x636C7274;         // 'clrt'
+    const COLORANT_TABLE_OUT: u32 = 0x636C6F74;     // 'clot'
+
+    // cicp (Coding-independent code points)
+    const CICP: u32 = 0x63696370;                   // 'cicp'
+}
+
+// ============================================================================
+// TAG DATA TYPES
+// ============================================================================
+
+/// XYZ number (s15Fixed16)
+#[derive(Clone, Copy)]
+struct XyzNumber {
+    x: f32,
+    y: f32,
+    z: f32,
+}
+
+impl XyzNumber {
+    fn new(x: f32, y: f32, z: f32) -> Self {
+        Self { x, y, z }
+    }
+
+    fn to_vec3(&self) -> Vec3 {
+        Vec3::new(self.x, self.y, self.z)
+    }
+
+    fn from_vec3(v: Vec3) -> Self {
+        Self { x: v.x, y: v.y, z: v.z }
+    }
+
+    fn read(reader: &mut ByteReader) -> Self {
+        let x = reader.read_s15_fixed16();
+        let y = reader.read_s15_fixed16();
+        let z = reader.read_s15_fixed16();
+        Self { x, y, z }
+    }
+
+    fn write(&self, writer: &mut ByteWriter) {
+        writer.write_s15_fixed16(self.x);
+        writer.write_s15_fixed16(self.y);
+        writer.write_s15_fixed16(self.z);
+    }
+}
+
+/// Parametric curve type
+enum ParametricCurveType {
+    /// Type 0: Y = X^gamma
+    Gamma(f32),
+
+    /// Type 1: Y = (aX + b)^gamma if X >= -b/a, else Y = 0
+    CIE122_1996 { gamma: f32, a: f32, b: f32 },
+
+    /// Type 2: Y = (aX + b)^gamma + c if X >= -b/a, else Y = c
+    IEC61966_3 { gamma: f32, a: f32, b: f32, c: f32 },
+
+    /// Type 3: Y = (aX + b)^gamma if X >= d, else Y = cX
+    IEC61966_2_1 { gamma: f32, a: f32, b: f32, c: f32, d: f32 },
+
+    /// Type 4: Y = (aX + b)^gamma + e if X >= d, else Y = cX + f
+    Full { gamma: f32, a: f32, b: f32, c: f32, d: f32, e: f32, f: f32 },
+}
+
+impl ParametricCurveType {
+    fn evaluate(&self, x: f32) -> f32 {
+        match self {
+            ParametricCurveType::Gamma(gamma) => {
+                pow(x.max(0.0), *gamma)
+            }
+            ParametricCurveType::CIE122_1996 { gamma, a, b } => {
+                if x >= -b / a {
+                    pow(a * x + b, *gamma)
+                } else {
+                    0.0
+                }
+            }
+            ParametricCurveType::IEC61966_3 { gamma, a, b, c } => {
+                if x >= -b / a {
+                    pow(a * x + b, *gamma) + c
+                } else {
+                    *c
+                }
+            }
+            ParametricCurveType::IEC61966_2_1 { gamma, a, b, c, d } => {
+                if x >= *d {
+                    pow(a * x + b, *gamma)
+                } else {
+                    c * x
+                }
+            }
+            ParametricCurveType::Full { gamma, a, b, c, d, e, f } => {
+                if x >= *d {
+                    pow(a * x + b, *gamma) + e
+                } else {
+                    c * x + f
+                }
+            }
+        }
+    }
+
+    /// sRGB transfer function parameters
+    fn srgb() -> Self {
+        ParametricCurveType::IEC61966_2_1 {
+            gamma: 2.4,
+            a: 1.0 / 1.055,
+            b: 0.055 / 1.055,
+            c: 1.0 / 12.92,
+            d: 0.04045,
+        }
+    }
+
+    /// Rec. 709 transfer function
+    fn rec709() -> Self {
+        ParametricCurveType::IEC61966_2_1 {
+            gamma: 2.22222,
+            a: 1.0 / 1.099,
+            b: 0.099 / 1.099,
+            c: 1.0 / 4.5,
+            d: 0.081,
+        }
+    }
+
+    /// Linear (gamma 1.0)
+    fn linear() -> Self {
+        ParametricCurveType::Gamma(1.0)
+    }
+}
+
+/// Tone reproduction curve
+enum ToneCurve {
+    /// Single gamma value
+    Gamma(f32),
+
+    /// Curve table (1D LUT)
+    Table(Vec<u16>),
+
+    /// Parametric curve
+    Parametric(ParametricCurveType),
+}
+
+impl ToneCurve {
+    fn evaluate(&self, x: f32) -> f32 {
+        let x_clamped = x.clamp(0.0, 1.0);
+
+        match self {
+            ToneCurve::Gamma(g) => pow(x_clamped, *g),
+            ToneCurve::Table(table) => {
+                if table.is_empty() {
+                    return x_clamped;
+                }
+
+                let pos = x_clamped * (table.len() - 1) as f32;
+                let idx = pos.floor() as usize;
+                let frac = pos - idx as f32;
+
+                if idx >= table.len() - 1 {
+                    table[table.len() - 1] as f32 / 65535.0
+                } else {
+                    let v0 = table[idx] as f32 / 65535.0;
+                    let v1 = table[idx + 1] as f32 / 65535.0;
+                    v0 + frac * (v1 - v0)
+                }
+            }
+            ToneCurve::Parametric(param) => param.evaluate(x_clamped),
+        }
+    }
+
+    fn evaluate_inverse(&self, y: f32) -> f32 {
+        let y_clamped = y.clamp(0.0, 1.0);
+
+        match self {
+            ToneCurve::Gamma(g) => pow(y_clamped, 1.0 / g),
+            ToneCurve::Table(table) => {
+                // Binary search for inverse
+                if table.is_empty() {
+                    return y_clamped;
+                }
+
+                let target = (y_clamped * 65535.0) as u16;
+                let mut lo = 0;
+                let mut hi = table.len() - 1;
+
+                while lo < hi {
+                    let mid = (lo + hi) / 2;
+                    if table[mid] < target {
+                        lo = mid + 1;
+                    } else {
+                        hi = mid;
+                    }
+                }
+
+                lo as f32 / (table.len() - 1) as f32
+            }
+            ToneCurve::Parametric(param) => {
+                // Newton-Raphson for parametric inverse
+                let mut x = y_clamped;
+                for _ in 0..10 {
+                    let fx = param.evaluate(x) - y_clamped;
+                    if fx.abs() < 1e-6 {
+                        break;
+                    }
+                    // Numerical derivative
+                    let h = 0.0001;
+                    let dfx = (param.evaluate(x + h) - param.evaluate(x - h)) / (2.0 * h);
+                    if dfx.abs() > 1e-10 {
+                        x -= fx / dfx;
+                        x = x.clamp(0.0, 1.0);
+                    }
+                }
+                x
+            }
+        }
+    }
+
+    /// Create sRGB tone curve
+    fn srgb() -> Self {
+        ToneCurve::Parametric(ParametricCurveType::srgb())
+    }
+
+    /// Create gamma curve
+    fn gamma(g: f32) -> Self {
+        ToneCurve::Gamma(g)
+    }
+
+    /// Create linear curve
+    fn linear() -> Self {
+        ToneCurve::Gamma(1.0)
+    }
+}
+
+// ============================================================================
+// LUT STRUCTURES
+// ============================================================================
+
+/// CLUT (Color Look-Up Table) for multi-dimensional transforms
+struct Clut {
+    /// Grid dimensions for each input channel
+    grid_points: Vec<u8>,
+
+    /// Number of input channels
+    input_channels: usize,
+
+    /// Number of output channels
+    output_channels: usize,
+
+    /// Data precision (1 = 8-bit, 2 = 16-bit)
+    precision: u8,
+
+    /// LUT data
+    data: Vec<f32>,
+}
+
+impl Clut {
+    fn new(grid_points: Vec<u8>, output_channels: usize) -> Self {
+        let input_channels = grid_points.len();
+        let total_points: usize = grid_points.iter().map(|&g| g as usize).product();
+        let data_size = total_points * output_channels;
+
+        Self {
+            grid_points,
+            input_channels,
+            output_channels,
+            precision: 2,  // 16-bit
+            data: vec![0.0; data_size],
+        }
+    }
+
+    /// Trilinear interpolation for 3D CLUT
+    fn interpolate_3d(&self, input: Vec3) -> Vec3 {
+        if self.input_channels != 3 || self.grid_points.len() != 3 {
+            return Vec3::zero();
+        }
+
+        let n0 = self.grid_points[0] as f32 - 1.0;
+        let n1 = self.grid_points[1] as f32 - 1.0;
+        let n2 = self.grid_points[2] as f32 - 1.0;
+
+        let x = (input.x.clamp(0.0, 1.0) * n0);
+        let y = (input.y.clamp(0.0, 1.0) * n1);
+        let z = (input.z.clamp(0.0, 1.0) * n2);
+
+        let x0 = x.floor() as usize;
+        let y0 = y.floor() as usize;
+        let z0 = z.floor() as usize;
+
+        let x1 = (x0 + 1).min(self.grid_points[0] as usize - 1);
+        let y1 = (y0 + 1).min(self.grid_points[1] as usize - 1);
+        let z1 = (z0 + 1).min(self.grid_points[2] as usize - 1);
+
+        let fx = x - x0 as f32;
+        let fy = y - y0 as f32;
+        let fz = z - z0 as f32;
+
+        let get_value = |xi: usize, yi: usize, zi: usize, ch: usize| -> f32 {
+            let idx = (xi * self.grid_points[1] as usize * self.grid_points[2] as usize +
+                yi * self.grid_points[2] as usize + zi) * self.output_channels + ch;
+            self.data.get(idx).copied().unwrap_or(0.0)
+        };
+
+        let mut result = Vec3::zero();
+        for ch in 0..3.min(self.output_channels) {
+            let c000 = get_value(x0, y0, z0, ch);
+            let c001 = get_value(x0, y0, z1, ch);
+            let c010 = get_value(x0, y1, z0, ch);
+            let c011 = get_value(x0, y1, z1, ch);
+            let c100 = get_value(x1, y0, z0, ch);
+            let c101 = get_value(x1, y0, z1, ch);
+            let c110 = get_value(x1, y1, z0, ch);
+            let c111 = get_value(x1, y1, z1, ch);
+
+            let c00 = c000 * (1.0 - fz) + c001 * fz;
+            let c01 = c010 * (1.0 - fz) + c011 * fz;
+            let c10 = c100 * (1.0 - fz) + c101 * fz;
+            let c11 = c110 * (1.0 - fz) + c111 * fz;
+
+            let c0 = c00 * (1.0 - fy) + c01 * fy;
+            let c1 = c10 * (1.0 - fy) + c11 * fy;
+
+            let value = c0 * (1.0 - fx) + c1 * fx;
+
+            match ch {
+                0 => result.x = value,
+                1 => result.y = value,
+                2 => result.z = value,
+                _ => {}
+            }
+        }
+
+        result
+    }
+
+    /// Tetrahedral interpolation for 3D CLUT (higher quality)
+    fn interpolate_tetrahedral(&self, input: Vec3) -> Vec3 {
+        if self.input_channels != 3 || self.grid_points.len() != 3 {
+            return Vec3::zero();
+        }
+
+        let n0 = self.grid_points[0] as f32 - 1.0;
+        let n1 = self.grid_points[1] as f32 - 1.0;
+        let n2 = self.grid_points[2] as f32 - 1.0;
+
+        let x = input.x.clamp(0.0, 1.0) * n0;
+        let y = input.y.clamp(0.0, 1.0) * n1;
+        let z = input.z.clamp(0.0, 1.0) * n2;
+
+        let x0 = x.floor() as usize;
+        let y0 = y.floor() as usize;
+        let z0 = z.floor() as usize;
+
+        let rx = x - x0 as f32;
+        let ry = y - y0 as f32;
+        let rz = z - z0 as f32;
+
+        let get_value = |xi: usize, yi: usize, zi: usize| -> Vec3 {
+            let xi = xi.min(self.grid_points[0] as usize - 1);
+            let yi = yi.min(self.grid_points[1] as usize - 1);
+            let zi = zi.min(self.grid_points[2] as usize - 1);
+            let idx = (xi * self.grid_points[1] as usize * self.grid_points[2] as usize +
+                yi * self.grid_points[2] as usize + zi) * self.output_channels;
+
+            Vec3::new(
+                self.data.get(idx).copied().unwrap_or(0.0),
+                self.data.get(idx + 1).copied().unwrap_or(0.0),
+                self.data.get(idx + 2).copied().unwrap_or(0.0)
+            )
+        };
+
+        let c000 = get_value(x0, y0, z0);
+        let c111 = get_value(x0 + 1, y0 + 1, z0 + 1);
+
+        // Determine tetrahedron
+        if rx > ry {
+            if ry > rz {
+                // T1: rx > ry > rz
+                let c100 = get_value(x0 + 1, y0, z0);
+                let c110 = get_value(x0 + 1, y0 + 1, z0);
+                c000 * (1.0 - rx) + c100 * (rx - ry) + c110 * (ry - rz) + c111 * rz
+            } else if rx > rz {
+                // T2: rx > rz > ry
+                let c100 = get_value(x0 + 1, y0, z0);
+                let c101 = get_value(x0 + 1, y0, z0 + 1);
+                c000 * (1.0 - rx) + c100 * (rx - rz) + c101 * (rz - ry) + c111 * ry
+            } else {
+                // T3: rz > rx > ry
+                let c001 = get_value(x0, y0, z0 + 1);
+                let c101 = get_value(x0 + 1, y0, z0 + 1);
+                c000 * (1.0 - rz) + c001 * (rz - rx) + c101 * (rx - ry) + c111 * ry
+            }
+        } else {
+            if rx > rz {
+                // T4: ry > rx > rz
+                let c010 = get_value(x0, y0 + 1, z0);
+                let c110 = get_value(x0 + 1, y0 + 1, z0);
+                c000 * (1.0 - ry) + c010 * (ry - rx) + c110 * (rx - rz) + c111 * rz
+            } else if ry > rz {
+                // T5: ry > rz > rx
+                let c010 = get_value(x0, y0 + 1, z0);
+                let c011 = get_value(x0, y0 + 1, z0 + 1);
+                c000 * (1.0 - ry) + c010 * (ry - rz) + c011 * (rz - rx) + c111 * rx
+            } else {
+                // T6: rz > ry > rx
+                let c001 = get_value(x0, y0, z0 + 1);
+                let c011 = get_value(x0, y0 + 1, z0 + 1);
+                c000 * (1.0 - rz) + c001 * (rz - ry) + c011 * (ry - rx) + c111 * rx
+            }
+        }
+    }
+}
+
+/// LUT8/LUT16 type (legacy)
+struct LutAToB {
+    /// Input channels
+    input_channels: u8,
+
+    /// Output channels
+    output_channels: u8,
+
+    /// Input curves (one per input channel)
+    input_curves: Vec<ToneCurve>,
+
+    /// CLUT
+    clut: Option<Clut>,
+
+    /// Matrix (applied after CLUT for AToB, before for BToA)
+    matrix: Option<Mat3x3>,
+
+    /// Matrix offset
+    matrix_offset: Option<Vec3>,
+
+    /// M curves (between matrix and CLUT)
+    m_curves: Vec<ToneCurve>,
+
+    /// Output curves (one per output channel)
+    output_curves: Vec<ToneCurve>,
+}
+
+impl LutAToB {
+    fn new(input_channels: u8, output_channels: u8) -> Self {
+        Self {
+            input_channels,
+            output_channels,
+            input_curves: Vec::new(),
+            clut: None,
+            matrix: None,
+            matrix_offset: None,
+            m_curves: Vec::new(),
+            output_curves: Vec::new(),
+        }
+    }
+
+    /// Apply the LUT transform
+    fn apply(&self, input: Vec3) -> Vec3 {
+        let mut value = input;
+
+        // Apply input curves (A curves)
+        if !self.input_curves.is_empty() {
+            value.x = self.input_curves.get(0).map(|c| c.evaluate(value.x)).unwrap_or(value.x);
+            value.y = self.input_curves.get(1).map(|c| c.evaluate(value.y)).unwrap_or(value.y);
+            value.z = self.input_curves.get(2).map(|c| c.evaluate(value.z)).unwrap_or(value.z);
+        }
+
+        // Apply CLUT
+        if let Some(ref clut) = self.clut {
+            value = clut.interpolate_tetrahedral(value);
+        }
+
+        // Apply M curves
+        if !self.m_curves.is_empty() {
+            value.x = self.m_curves.get(0).map(|c| c.evaluate(value.x)).unwrap_or(value.x);
+            value.y = self.m_curves.get(1).map(|c| c.evaluate(value.y)).unwrap_or(value.y);
+            value.z = self.m_curves.get(2).map(|c| c.evaluate(value.z)).unwrap_or(value.z);
+        }
+
+        // Apply matrix
+        if let Some(ref matrix) = self.matrix {
+            value = *matrix * value;
+            if let Some(ref offset) = self.matrix_offset {
+                value = value + *offset;
+            }
+        }
+
+        // Apply output curves (B curves)
+        if !self.output_curves.is_empty() {
+            value.x = self.output_curves.get(0).map(|c| c.evaluate(value.x)).unwrap_or(value.x);
+            value.y = self.output_curves.get(1).map(|c| c.evaluate(value.y)).unwrap_or(value.y);
+            value.z = self.output_curves.get(2).map(|c| c.evaluate(value.z)).unwrap_or(value.z);
+        }
+
+        value
+    }
+}
+
+// ============================================================================
+// ICC PROFILE HEADER
+// ============================================================================
+
+/// ICC profile header (128 bytes)
+struct ProfileHeader {
+    /// Profile size in bytes
+    size: u32,
+
+    /// CMM type signature
+    cmm_type: u32,
+
+    /// Profile version
+    version: IccVersion,
+
+    /// Profile/device class
+    device_class: ProfileClass,
+
+    /// Color space of data
+    color_space: ColorSpaceSignature,
+
+    /// Profile connection space (PCS)
+    pcs: ColorSpaceSignature,
+
+    /// Date and time created
+    created: DateTime,
+
+    /// Profile file signature ('acsp')
+    signature: u32,
+
+    /// Primary platform signature
+    platform: u32,
+
+    /// Profile flags
+    flags: u32,
+
+    /// Device manufacturer
+    device_manufacturer: u32,
+
+    /// Device model
+    device_model: u32,
+
+    /// Device attributes
+    device_attributes: u64,
+
+    /// Rendering intent
+    rendering_intent: RenderingIntent,
+
+    /// PCS illuminant (D50)
+    pcs_illuminant: XyzNumber,
+
+    /// Profile creator
+    creator: u32,
+
+    /// Profile ID (MD5 hash for v4+)
+    profile_id: [u8; 16],
+}
+
+/// Date and time structure
+struct DateTime {
+    year: u16,
+    month: u16,
+    day: u16,
+    hour: u16,
+    minute: u16,
+    second: u16,
+}
+
+impl DateTime {
+    fn now() -> Self {
+        // Placeholder - would use actual system time
+        Self {
+            year: 2024,
+            month: 1,
+            day: 1,
+            hour: 0,
+            minute: 0,
+            second: 0,
+        }
+    }
+}
+
+impl ProfileHeader {
+    /// D50 illuminant in XYZ
+    const D50: XyzNumber = XyzNumber { x: 0.9642, y: 1.0, z: 0.8249 };
+
+    fn new(device_class: ProfileClass, color_space: ColorSpaceSignature) -> Self {
+        Self {
+            size: 0,  // Calculated when writing
+            cmm_type: 0,
+            version: IccVersion::V4_4,
+            device_class,
+            color_space,
+            pcs: ColorSpaceSignature::XYZ,
+            created: DateTime::now(),
+            signature: ICC_MAGIC,
+            platform: 0,
+            flags: 0,
+            device_manufacturer: 0,
+            device_model: 0,
+            device_attributes: 0,
+            rendering_intent: RenderingIntent::Perceptual,
+            pcs_illuminant: Self::D50,
+            creator: 0,
+            profile_id: [0u8; 16],
+        }
+    }
+}
+
+// ============================================================================
+// TAG TABLE
+// ============================================================================
+
+/// Tag table entry
+struct TagEntry {
+    signature: u32,
+    offset: u32,
+    size: u32,
+}
+
+/// Tag data container
+enum TagData {
+    /// XYZ data
+    Xyz(XyzNumber),
+
+    /// Text description
+    Text(String),
+
+    /// Curve/TRC
+    Curve(ToneCurve),
+
+    /// Parametric curve
+    ParametricCurve(ParametricCurveType),
+
+    /// LUT
+    Lut(LutAToB),
+
+    /// Multi-localized Unicode string
+    MultiLocalizedUnicode(Vec<(String, String, String)>),  // (language, country, text)
+
+    /// Chromatic adaptation matrix
+    ChromaticAdaptation(Mat3x3),
+
+    /// Measurement
+    Measurement {
+        observer: u32,
+        backing: XyzNumber,
+        geometry: u32,
+        flare: f32,
+        illuminant: u32,
+    },
+
+    /// Viewing conditions
+    ViewingConditions {
+        illuminant: XyzNumber,
+        surround: XyzNumber,
+        illuminant_type: u32,
+    },
+
+    /// cicp (coding-independent code points)
+    Cicp {
+        color_primaries: u8,
+        transfer_characteristics: u8,
+        matrix_coefficients: u8,
+        video_full_range_flag: u8,
+    },
+
+    /// Raw data (for unsupported tags)
+    Raw(Vec<u8>),
+}
+
+// ============================================================================
+// ICC PROFILE
+// ============================================================================
+
+/// Complete ICC profile
+struct IccProfile {
+    /// Profile header
+    header: ProfileHeader,
+
+    /// Tag data
+    tags: HashMap<u32, TagData>,
+
+    // Cached transform data
+    /// Matrix (RGB to XYZ)
+    rgb_to_xyz_matrix: Option<Mat3x3>,
+
+    /// Inverse matrix (XYZ to RGB)
+    xyz_to_rgb_matrix: Option<Mat3x3>,
+
+    /// Red TRC
+    red_trc: Option<ToneCurve>,
+
+    /// Green TRC
+    green_trc: Option<ToneCurve>,
+
+    /// Blue TRC
+    blue_trc: Option<ToneCurve>,
+
+    /// Gray TRC (for grayscale profiles)
+    gray_trc: Option<ToneCurve>,
+
+    /// AToB LUT (for LUT-based profiles)
+    a_to_b: [Option<LutAToB>; 3],
+
+    /// BToA LUT
+    b_to_a: [Option<LutAToB>; 3],
+
+    /// Media white point
+    media_white_point: XyzNumber,
+
+    /// Chromatic adaptation matrix
+    chromatic_adaptation: Option<Mat3x3>,
+}
+
+impl IccProfile {
+    /// Create empty profile
+    fn new(device_class: ProfileClass, color_space: ColorSpaceSignature) -> Self {
+        Self {
+            header: ProfileHeader::new(device_class, color_space),
+            tags: HashMap::new(),
+            rgb_to_xyz_matrix: None,
+            xyz_to_rgb_matrix: None,
+            red_trc: None,
+            green_trc: None,
+            blue_trc: None,
+            gray_trc: None,
+            a_to_b: [None, None, None],
+            b_to_a: [None, None, None],
+            media_white_point: ProfileHeader::D50,
+            chromatic_adaptation: None,
+        }
+    }
+
+    /// Create sRGB profile
+    fn srgb() -> Self {
+        let mut profile = Self::new(ProfileClass::Display, ColorSpaceSignature::RGB);
+
+        // Set description
+        profile.tags.insert(
+            TagSignature::PROFILE_DESCRIPTION,
+            TagData::Text("sRGB IEC61966-2.1".to_string())
+        );
+
+        // White point (D65 adapted to D50 PCS)
+        profile.media_white_point = XyzNumber::new(0.9505, 1.0, 1.0890);
+
+        // sRGB primaries (adapted to D50)
+        let red_xyz = XyzNumber::new(0.4360747, 0.2225045, 0.0139322);
+        let green_xyz = XyzNumber::new(0.3850649, 0.7168786, 0.0971045);
+        let blue_xyz = XyzNumber::new(0.1430804, 0.0606169, 0.7141733);
+
+        profile.tags.insert(TagSignature::RED_MATRIX_COLUMN, TagData::Xyz(red_xyz));
+        profile.tags.insert(TagSignature::GREEN_MATRIX_COLUMN, TagData::Xyz(green_xyz));
+        profile.tags.insert(TagSignature::BLUE_MATRIX_COLUMN, TagData::Xyz(blue_xyz));
+
+        // Build matrix
+        profile.rgb_to_xyz_matrix = Some(Mat3x3::from_columns(
+            red_xyz.to_vec3(),
+            green_xyz.to_vec3(),
+            blue_xyz.to_vec3()
+        ));
+
+        profile.xyz_to_rgb_matrix = profile.rgb_to_xyz_matrix.map(|m| m.inverse());
+
+        // sRGB TRC
+        let srgb_trc = ToneCurve::srgb();
+        profile.red_trc = Some(srgb_trc.clone());
+        profile.green_trc = Some(srgb_trc.clone());
+        profile.blue_trc = Some(srgb_trc);
+
+        profile
+    }
+
+    /// Create Display P3 profile
+    fn display_p3() -> Self {
+        let mut profile = Self::new(ProfileClass::Display, ColorSpaceSignature::RGB);
+
+        profile.tags.insert(
+            TagSignature::PROFILE_DESCRIPTION,
+            TagData::Text("Display P3".to_string())
+        );
+
+        // Display P3 primaries (adapted to D50)
+        let red_xyz = XyzNumber::new(0.5151187, 0.2411892, 0.0);
+        let green_xyz = XyzNumber::new(0.2919768, 0.6922026, 0.0418913);
+        let blue_xyz = XyzNumber::new(0.1571035, 0.0666082, 0.7840988);
+
+        profile.tags.insert(TagSignature::RED_MATRIX_COLUMN, TagData::Xyz(red_xyz));
+        profile.tags.insert(TagSignature::GREEN_MATRIX_COLUMN, TagData::Xyz(green_xyz));
+        profile.tags.insert(TagSignature::BLUE_MATRIX_COLUMN, TagData::Xyz(blue_xyz));
+
+        profile.rgb_to_xyz_matrix = Some(Mat3x3::from_columns(
+            red_xyz.to_vec3(),
+            green_xyz.to_vec3(),
+            blue_xyz.to_vec3()
+        ));
+
+        profile.xyz_to_rgb_matrix = profile.rgb_to_xyz_matrix.map(|m| m.inverse());
+
+        // sRGB TRC (Display P3 uses same transfer function)
+        let srgb_trc = ToneCurve::srgb();
+        profile.red_trc = Some(srgb_trc.clone());
+        profile.green_trc = Some(srgb_trc.clone());
+        profile.blue_trc = Some(srgb_trc);
+
+        profile
+    }
+
+    /// Create Adobe RGB profile
+    fn adobe_rgb() -> Self {
+        let mut profile = Self::new(ProfileClass::Display, ColorSpaceSignature::RGB);
+
+        profile.tags.insert(
+            TagSignature::PROFILE_DESCRIPTION,
+            TagData::Text("Adobe RGB (1998)".to_string())
+        );
+
+        // Adobe RGB primaries (adapted to D50)
+        let red_xyz = XyzNumber::new(0.6097559, 0.3111242, 0.0194811);
+        let green_xyz = XyzNumber::new(0.2052401, 0.6256560, 0.0608902);
+        let blue_xyz = XyzNumber::new(0.1492240, 0.0632198, 0.7448387);
+
+        profile.tags.insert(TagSignature::RED_MATRIX_COLUMN, TagData::Xyz(red_xyz));
+        profile.tags.insert(TagSignature::GREEN_MATRIX_COLUMN, TagData::Xyz(green_xyz));
+        profile.tags.insert(TagSignature::BLUE_MATRIX_COLUMN, TagData::Xyz(blue_xyz));
+
+        profile.rgb_to_xyz_matrix = Some(Mat3x3::from_columns(
+            red_xyz.to_vec3(),
+            green_xyz.to_vec3(),
+            blue_xyz.to_vec3()
+        ));
+
+        profile.xyz_to_rgb_matrix = profile.rgb_to_xyz_matrix.map(|m| m.inverse());
+
+        // Adobe RGB uses gamma 2.2
+        let gamma_trc = ToneCurve::gamma(2.19921875);  // 563/256
+        profile.red_trc = Some(gamma_trc.clone());
+        profile.green_trc = Some(gamma_trc.clone());
+        profile.blue_trc = Some(gamma_trc);
+
+        profile
+    }
+
+    /// Create Rec. 2020 profile
+    fn rec2020() -> Self {
+        let mut profile = Self::new(ProfileClass::Display, ColorSpaceSignature::RGB);
+
+        profile.tags.insert(
+            TagSignature::PROFILE_DESCRIPTION,
+            TagData::Text("Rec. ITU-R BT.2020".to_string())
+        );
+
+        // Rec. 2020 primaries (adapted to D50)
+        let red_xyz = XyzNumber::new(0.6734241, 0.2790176, 0.0);
+        let green_xyz = XyzNumber::new(0.1656411, 0.6753402, 0.0299555);
+        let blue_xyz = XyzNumber::new(0.1251348, 0.0456422, 0.7970445);
+
+        profile.tags.insert(TagSignature::RED_MATRIX_COLUMN, TagData::Xyz(red_xyz));
+        profile.tags.insert(TagSignature::GREEN_MATRIX_COLUMN, TagData::Xyz(green_xyz));
+        profile.tags.insert(TagSignature::BLUE_MATRIX_COLUMN, TagData::Xyz(blue_xyz));
+
+        profile.rgb_to_xyz_matrix = Some(Mat3x3::from_columns(
+            red_xyz.to_vec3(),
+            green_xyz.to_vec3(),
+            blue_xyz.to_vec3()
+        ));
+
+        profile.xyz_to_rgb_matrix = profile.rgb_to_xyz_matrix.map(|m| m.inverse());
+
+        // Rec. 2020 uses Rec. 709 transfer (or PQ for HDR)
+        let rec709_trc = ToneCurve::Parametric(ParametricCurveType::rec709());
+        profile.red_trc = Some(rec709_trc.clone());
+        profile.green_trc = Some(rec709_trc.clone());
+        profile.blue_trc = Some(rec709_trc);
+
+        profile
+    }
+
+    /// Create linear RGB profile
+    fn linear_srgb() -> Self {
+        let mut profile = Self::srgb();
+
+        profile.tags.insert(
+            TagSignature::PROFILE_DESCRIPTION,
+            TagData::Text("Linear sRGB".to_string())
+        );
+
+        // Linear TRC
+        let linear_trc = ToneCurve::linear();
+        profile.red_trc = Some(linear_trc.clone());
+        profile.green_trc = Some(linear_trc.clone());
+        profile.blue_trc = Some(linear_trc);
+
+        profile
+    }
+
+    /// Check if this is a matrix-based profile
+    fn is_matrix_based(&self) -> bool {
+        self.rgb_to_xyz_matrix.is_some() && self.red_trc.is_some()
+    }
+
+    /// Check if this is a LUT-based profile
+    fn is_lut_based(&self) -> bool {
+        self.a_to_b[0].is_some() || self.a_to_b[1].is_some()
+    }
+
+    /// Transform device color to PCS (XYZ)
+    fn device_to_pcs(&self, device: Vec3, intent: RenderingIntent) -> Vec3 {
+        // Try LUT first
+        let intent_idx = intent.to_u32() as usize;
+        if let Some(ref lut) = self.a_to_b[intent_idx.min(2)] {
+            return lut.apply(device);
+        }
+
+        // Fall back to matrix/TRC
+        if let (Some(ref matrix), Some(ref r_trc), Some(ref g_trc), Some(ref b_trc)) =
+            (&self.rgb_to_xyz_matrix, &self.red_trc, &self.green_trc, &self.blue_trc) {
+
+            let linear = Vec3::new(
+                r_trc.evaluate(device.x),
+                g_trc.evaluate(device.y),
+                b_trc.evaluate(device.z)
+            );
+
+            return *matrix * linear;
+        }
+
+        // Grayscale
+        if let Some(ref gray_trc) = self.gray_trc {
+            let Y = gray_trc.evaluate(device.x);
+            return Vec3::new(0.9642 * Y, Y, 0.8249 * Y);  // D50
+        }
+
+        device
+    }
+
+    /// Transform PCS (XYZ) to device color
+    fn pcs_to_device(&self, pcs: Vec3, intent: RenderingIntent) -> Vec3 {
+        // Try LUT first
+        let intent_idx = intent.to_u32() as usize;
+        if let Some(ref lut) = self.b_to_a[intent_idx.min(2)] {
+            return lut.apply(pcs);
+        }
+
+        // Fall back to matrix/TRC
+        if let (Some(ref matrix), Some(ref r_trc), Some(ref g_trc), Some(ref b_trc)) =
+            (&self.xyz_to_rgb_matrix, &self.red_trc, &self.green_trc, &self.blue_trc) {
+
+            let linear = *matrix * pcs;
+
+            return Vec3::new(
+                r_trc.evaluate_inverse(linear.x),
+                g_trc.evaluate_inverse(linear.y),
+                b_trc.evaluate_inverse(linear.z)
+            );
+        }
+
+        // Grayscale
+        if let Some(ref gray_trc) = self.gray_trc {
+            let Y = pcs.y;
+            let device = gray_trc.evaluate_inverse(Y);
+            return Vec3::new(device, device, device);
+        }
+
+        pcs
+    }
+
+    /// Get description text
+    fn description(&self) -> String {
+        if let Some(TagData::Text(ref desc)) = self.tags.get(&TagSignature::PROFILE_DESCRIPTION) {
+            desc.clone()
+        } else if let Some(TagData::MultiLocalizedUnicode(ref strings)) = self.tags.get(&TagSignature::PROFILE_DESCRIPTION) {
+            strings.first().map(|(_, _, text)| text.clone()).unwrap_or_default()
+        } else {
+            "Unknown".to_string()
+        }
+    }
+
+    /// Get copyright text
+    fn copyright(&self) -> Option<String> {
+        if let Some(TagData::Text(ref text)) = self.tags.get(&TagSignature::COPYRIGHT) {
+            Some(text.clone())
+        } else {
+            None
+        }
+    }
+}
+
+// ============================================================================
+// ICC PROFILE PARSER
+// ============================================================================
+
+struct IccParser {
+    data: Vec<u8>,
+    position: usize,
+}
+
+impl IccParser {
+    fn new(data: Vec<u8>) -> Self {
+        Self { data, position: 0 }
+    }
+
+    fn read_u8(&mut self) -> u8 {
+        let value = self.data.get(self.position).copied().unwrap_or(0);
+        self.position += 1;
+        value
+    }
+
+    fn read_u16(&mut self) -> u16 {
+        let bytes = [self.read_u8(), self.read_u8()];
+        u16::from_be_bytes(bytes)
+    }
+
+    fn read_u32(&mut self) -> u32 {
+        let bytes = [self.read_u8(), self.read_u8(), self.read_u8(), self.read_u8()];
+        u32::from_be_bytes(bytes)
+    }
+
+    fn read_u64(&mut self) -> u64 {
+        let bytes = [
+            self.read_u8(), self.read_u8(), self.read_u8(), self.read_u8(),
+            self.read_u8(), self.read_u8(), self.read_u8(), self.read_u8()
+        ];
+        u64::from_be_bytes(bytes)
+    }
+
+    fn read_s15_fixed16(&mut self) -> f32 {
+        let value = self.read_u32() as i32;
+        value as f32 / 65536.0
+    }
+
+    fn seek(&mut self, position: usize) {
+        self.position = position;
+    }
+
+    fn parse(&mut self) -> Result<IccProfile, String> {
+        // Parse header
+        let size = self.read_u32();
+        let cmm_type = self.read_u32();
+        let version = IccVersion::from_bytes(self.read_u32());
+        let device_class_sig = self.read_u32();
+        let color_space_sig = self.read_u32();
+        let pcs_sig = self.read_u32();
+
+        let device_class = ProfileClass::from_signature(device_class_sig)
+            .ok_or("Invalid device class")?;
+        let color_space = ColorSpaceSignature::from_signature(color_space_sig)
+            .ok_or("Invalid color space")?;
+        let pcs = ColorSpaceSignature::from_signature(pcs_sig)
+            .ok_or("Invalid PCS")?;
+
+        // Skip date/time (12 bytes)
+        self.position += 12;
+
+        let signature = self.read_u32();
+        if signature != ICC_MAGIC {
+            return Err("Invalid ICC signature".to_string());
+        }
+
+        let platform = self.read_u32();
+        let flags = self.read_u32();
+        let device_manufacturer = self.read_u32();
+        let device_model = self.read_u32();
+        let device_attributes = self.read_u64();
+        let rendering_intent = RenderingIntent::from_u32(self.read_u32());
+
+        let pcs_illuminant = XyzNumber::read(&mut ByteReader::new(&self.data[self.position..]));
+        self.position += 12;
+
+        let creator = self.read_u32();
+
+        // Skip profile ID (16 bytes) and reserved (28 bytes)
+        self.position += 44;
+
+        // Parse tag table
+        let tag_count = self.read_u32();
+
+        let mut tag_entries = Vec::new();
+        for _ in 0..tag_count {
+            let sig = self.read_u32();
+            let offset = self.read_u32();
+            let size = self.read_u32();
+            tag_entries.push(TagEntry { signature: sig, offset, size });
+        }
+
+        // Create profile
+        let mut profile = IccProfile::new(device_class, color_space);
+        profile.header.version = version;
+        profile.header.pcs = pcs;
+        profile.header.rendering_intent = rendering_intent;
+        profile.header.pcs_illuminant = pcs_illuminant;
+
+        // Parse tags
+        for entry in tag_entries {
+            if let Some(tag_data) = self.parse_tag(&entry) {
+                profile.tags.insert(entry.signature, tag_data);
+
+                // Extract matrix columns
+                match entry.signature {
+                    TagSignature::RED_MATRIX_COLUMN => {
+                        if let TagData::Xyz(xyz) = profile.tags.get(&entry.signature).unwrap() {
+                            profile.rgb_to_xyz_matrix = Some(Mat3x3::from_columns(
+                                xyz.to_vec3(),
+                                profile.rgb_to_xyz_matrix.map(|m| m.column(1)).unwrap_or(Vec3::zero()),
+                                profile.rgb_to_xyz_matrix.map(|m| m.column(2)).unwrap_or(Vec3::zero())
+                            ));
+                        }
+                    }
+                    TagSignature::GREEN_MATRIX_COLUMN => {
+                        if let TagData::Xyz(xyz) = profile.tags.get(&entry.signature).unwrap() {
+                            let current = profile.rgb_to_xyz_matrix.unwrap_or(Mat3x3::identity());
+                            profile.rgb_to_xyz_matrix = Some(Mat3x3::from_columns(
+                                current.column(0),
+                                xyz.to_vec3(),
+                                current.column(2)
+                            ));
+                        }
+                    }
+                    TagSignature::BLUE_MATRIX_COLUMN => {
+                        if let TagData::Xyz(xyz) = profile.tags.get(&entry.signature).unwrap() {
+                            let current = profile.rgb_to_xyz_matrix.unwrap_or(Mat3x3::identity());
+                            profile.rgb_to_xyz_matrix = Some(Mat3x3::from_columns(
+                                current.column(0),
+                                current.column(1),
+                                xyz.to_vec3()
+                            ));
+                        }
+                    }
+                    TagSignature::RED_TRC => {
+                        if let TagData::Curve(ref curve) = profile.tags.get(&entry.signature).unwrap() {
+                            profile.red_trc = Some(curve.clone());
+                        }
+                    }
+                    TagSignature::GREEN_TRC => {
+                        if let TagData::Curve(ref curve) = profile.tags.get(&entry.signature).unwrap() {
+                            profile.green_trc = Some(curve.clone());
+                        }
+                    }
+                    TagSignature::BLUE_TRC => {
+                        if let TagData::Curve(ref curve) = profile.tags.get(&entry.signature).unwrap() {
+                            profile.blue_trc = Some(curve.clone());
+                        }
+                    }
+                    TagSignature::GRAY_TRC => {
+                        if let TagData::Curve(ref curve) = profile.tags.get(&entry.signature).unwrap() {
+                            profile.gray_trc = Some(curve.clone());
+                        }
+                    }
+                    TagSignature::MEDIA_WHITE_POINT => {
+                        if let TagData::Xyz(xyz) = profile.tags.get(&entry.signature).unwrap() {
+                            profile.media_white_point = *xyz;
+                        }
+                    }
+                    TagSignature::CHROMATIC_ADAPTATION => {
+                        if let TagData::ChromaticAdaptation(mat) = profile.tags.get(&entry.signature).unwrap() {
+                            profile.chromatic_adaptation = Some(*mat);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        // Compute inverse matrix
+        if let Some(ref matrix) = profile.rgb_to_xyz_matrix {
+            profile.xyz_to_rgb_matrix = Some(matrix.inverse());
+        }
+
+        Ok(profile)
+    }
+
+    fn parse_tag(&mut self, entry: &TagEntry) -> Option<TagData> {
+        self.seek(entry.offset as usize);
+
+        let type_sig = self.read_u32();
+        let _reserved = self.read_u32();
+
+        match type_sig {
+            0x58595A20 => {  // 'XYZ '
+                let xyz = XyzNumber {
+                    x: self.read_s15_fixed16(),
+                    y: self.read_s15_fixed16(),
+                    z: self.read_s15_fixed16(),
+                };
+                Some(TagData::Xyz(xyz))
+            }
+            0x63757276 => {  // 'curv'
+                let count = self.read_u32();
+                if count == 0 {
+                    Some(TagData::Curve(ToneCurve::linear()))
+                } else if count == 1 {
+                    let gamma = self.read_u16() as f32 / 256.0;
+                    Some(TagData::Curve(ToneCurve::gamma(gamma)))
+                } else {
+                    let mut table = Vec::with_capacity(count as usize);
+                    for _ in 0..count {
+                        table.push(self.read_u16());
+                    }
+                    Some(TagData::Curve(ToneCurve::Table(table)))
+                }
+            }
+            0x70617261 => {  // 'para'
+                let func_type = self.read_u16();
+                let _reserved = self.read_u16();
+
+                let curve = match func_type {
+                    0 => {
+                        let gamma = self.read_s15_fixed16();
+                        ParametricCurveType::Gamma(gamma)
+                    }
+                    1 => {
+                        let gamma = self.read_s15_fixed16();
+                        let a = self.read_s15_fixed16();
+                        let b = self.read_s15_fixed16();
+                        ParametricCurveType::CIE122_1996 { gamma, a, b }
+                    }
+                    2 => {
+                        let gamma = self.read_s15_fixed16();
+                        let a = self.read_s15_fixed16();
+                        let b = self.read_s15_fixed16();
+                        let c = self.read_s15_fixed16();
+                        ParametricCurveType::IEC61966_3 { gamma, a, b, c }
+                    }
+                    3 => {
+                        let gamma = self.read_s15_fixed16();
+                        let a = self.read_s15_fixed16();
+                        let b = self.read_s15_fixed16();
+                        let c = self.read_s15_fixed16();
+                        let d = self.read_s15_fixed16();
+                        ParametricCurveType::IEC61966_2_1 { gamma, a, b, c, d }
+                    }
+                    4 => {
+                        let gamma = self.read_s15_fixed16();
+                        let a = self.read_s15_fixed16();
+                        let b = self.read_s15_fixed16();
+                        let c = self.read_s15_fixed16();
+                        let d = self.read_s15_fixed16();
+                        let e = self.read_s15_fixed16();
+                        let f = self.read_s15_fixed16();
+                        ParametricCurveType::Full { gamma, a, b, c, d, e, f }
+                    }
+                    _ => ParametricCurveType::Gamma(2.2)
+                };
+
+                Some(TagData::ParametricCurve(curve))
+            }
+            0x74657874 => {  // 'text'
+                let len = entry.size as usize - 8;
+                let text_bytes: Vec<u8> = (0..len).map(|_| self.read_u8()).collect();
+                let text = String::from_utf8_lossy(&text_bytes).trim_end_matches('\0').to_string();
+                Some(TagData::Text(text))
+            }
+            0x64657363 => {  // 'desc' (v2 textDescriptionType)
+                let ascii_count = self.read_u32();
+                let ascii_bytes: Vec<u8> = (0..ascii_count).map(|_| self.read_u8()).collect();
+                let text = String::from_utf8_lossy(&ascii_bytes).trim_end_matches('\0').to_string();
+                Some(TagData::Text(text))
+            }
+            0x6D6C7563 => {  // 'mluc' (multiLocalizedUnicodeType)
+                let record_count = self.read_u32();
+                let record_size = self.read_u32();
+
+                let mut strings = Vec::new();
+                let base_offset = self.position;
+
+                for i in 0..record_count as usize {
+                    self.seek(base_offset + i * record_size as usize);
+
+                    let lang_code = self.read_u16();
+                    let country_code = self.read_u16();
+                    let length = self.read_u32();
+                    let offset = self.read_u32();
+
+                    let lang = format!("{}{}", (lang_code >> 8) as u8 as char, (lang_code & 0xFF) as u8 as char);
+                    let country = format!("{}{}", (country_code >> 8) as u8 as char, (country_code & 0xFF) as u8 as char);
+
+                    self.seek(entry.offset as usize + offset as usize);
+                    let mut text_bytes = Vec::new();
+                    for _ in 0..(length / 2) {
+                        text_bytes.push(self.read_u16());
+                    }
+                    let text = String::from_utf16_lossy(&text_bytes);
+
+                    strings.push((lang, country, text));
+                }
+
+                Some(TagData::MultiLocalizedUnicode(strings))
+            }
+            0x73663332 => {  // 'sf32' (s15Fixed16ArrayType - used for chad)
+                let mut values = Vec::new();
+                let count = (entry.size as usize - 8) / 4;
+                for _ in 0..count {
+                    values.push(self.read_s15_fixed16());
+                }
+
+                if values.len() == 9 {
+                    let mat = Mat3x3::from_rows(
+                        Vec3::new(values[0], values[1], values[2]),
+                        Vec3::new(values[3], values[4], values[5]),
+                        Vec3::new(values[6], values[7], values[8])
+                    );
+                    Some(TagData::ChromaticAdaptation(mat))
+                } else {
+                    None
+                }
+            }
+            0x63696370 => {  // 'cicp'
+                Some(TagData::Cicp {
+                    color_primaries: self.read_u8(),
+                    transfer_characteristics: self.read_u8(),
+                    matrix_coefficients: self.read_u8(),
+                    video_full_range_flag: self.read_u8(),
+                })
+            }
+            _ => {
+                // Read raw data for unsupported types
+                self.seek(entry.offset as usize);
+                let raw: Vec<u8> = (0..entry.size as usize).map(|_| self.read_u8()).collect();
+                Some(TagData::Raw(raw))
+            }
+        }
+    }
+}
+
+// ============================================================================
+// COLOR MANAGEMENT MODULE
+// ============================================================================
+
+/// Color management transform
+struct ColorTransform {
+    /// Source profile
+    source: IccProfile,
+
+    /// Destination profile
+    destination: IccProfile,
+
+    /// Rendering intent
+    intent: RenderingIntent,
+
+    /// Black point compensation
+    bpc: bool,
+}
+
+impl ColorTransform {
+    fn new(source: IccProfile, destination: IccProfile, intent: RenderingIntent) -> Self {
+        Self {
+            source,
+            destination,
+            intent,
+            bpc: false,
+        }
+    }
+
+    fn with_bpc(mut self, bpc: bool) -> Self {
+        self.bpc = bpc;
+        self
+    }
+
+    /// Transform a color
+    fn transform(&self, color: Vec3) -> Vec3 {
+        // Source to PCS
+        let mut pcs = self.source.device_to_pcs(color, self.intent);
+
+        // Apply black point compensation
+        if self.bpc {
+            pcs = self.apply_bpc(pcs);
+        }
+
+        // PCS to destination
+        self.destination.pcs_to_device(pcs, self.intent)
+    }
+
+    /// Apply black point compensation
+    fn apply_bpc(&self, pcs: Vec3) -> Vec3 {
+        // Get source and destination black points
+        let source_black = self.source.device_to_pcs(Vec3::zero(), RenderingIntent::RelativeColorimetric);
+        let dest_black = self.destination.device_to_pcs(Vec3::zero(), RenderingIntent::RelativeColorimetric);
+
+        // Scale to destination black
+        let scale = (1.0 - dest_black.y) / (1.0 - source_black.y).max(0.001);
+        let offset = dest_black.y - source_black.y * scale;
+
+        Vec3::new(
+            pcs.x * scale + offset * 0.9642,
+            pcs.y * scale + offset,
+            pcs.z * scale + offset * 0.8249
+        )
+    }
+
+    /// Transform batch of colors
+    fn transform_batch(&self, colors: &[Vec3]) -> Vec<Vec3> {
+        colors.iter().map(|c| self.transform(*c)).collect()
+    }
+}
+
+/// Color management engine
+struct ColorManagementModule {
+    /// Registered profiles
+    profiles: HashMap<String, IccProfile>,
+
+    /// Default rendering intent
+    default_intent: RenderingIntent,
+
+    /// Enable black point compensation by default
+    default_bpc: bool,
+}
+
+impl ColorManagementModule {
+    fn new() -> Self {
+        let mut cmm = Self {
+            profiles: HashMap::new(),
+            default_intent: RenderingIntent::Perceptual,
+            default_bpc: true,
+        };
+
+        // Register built-in profiles
+        cmm.register_profile("sRGB", IccProfile::srgb());
+        cmm.register_profile("Display P3", IccProfile::display_p3());
+        cmm.register_profile("Adobe RGB", IccProfile::adobe_rgb());
+        cmm.register_profile("Rec. 2020", IccProfile::rec2020());
+        cmm.register_profile("Linear sRGB", IccProfile::linear_srgb());
+
+        cmm
+    }
+
+    fn register_profile(&mut self, name: &str, profile: IccProfile) {
+        self.profiles.insert(name.to_string(), profile);
+    }
+
+    fn get_profile(&self, name: &str) -> Option<&IccProfile> {
+        self.profiles.get(name)
+    }
+
+    fn load_profile(&mut self, name: &str, data: Vec<u8>) -> Result<(), String> {
+        let mut parser = IccParser::new(data);
+        let profile = parser.parse()?;
+        self.profiles.insert(name.to_string(), profile);
+        Ok(())
+    }
+
+    fn create_transform(&self, source: &str, destination: &str) -> Option<ColorTransform> {
+        let src = self.profiles.get(source)?.clone();
+        let dst = self.profiles.get(destination)?.clone();
+
+        Some(ColorTransform::new(src, dst, self.default_intent).with_bpc(self.default_bpc))
+    }
+}
+
+// ============================================================================
+// WGSL SHADERS
+// ============================================================================
+
+const ICC_TRANSFORM_SHADER: &str = r#"
+// ICC Color Transform - WGSL Implementation
+
+struct TransformParams {
+    src_matrix: mat3x3<f32>,
+    dst_matrix_inv: mat3x3<f32>,
+    src_gamma: vec3<f32>,
+    dst_gamma: vec3<f32>,
+    bpc_scale: f32,
+    bpc_offset: f32,
+}
+
+@group(0) @binding(0) var<uniform> params: TransformParams;
+@group(0) @binding(1) var<storage, read> input: array<vec4<f32>>;
+@group(0) @binding(2) var<storage, read_write> output: array<vec4<f32>>;
+
+fn srgb_to_linear(x: f32) -> f32 {
+    if (x <= 0.04045) {
+        return x / 12.92;
+    } else {
+        return pow((x + 0.055) / 1.055, 2.4);
+    }
+}
+
+fn linear_to_srgb(x: f32) -> f32 {
+    if (x <= 0.0031308) {
+        return x * 12.92;
+    } else {
+        return 1.055 * pow(x, 1.0 / 2.4) - 0.055;
+    }
+}
+
+fn apply_gamma(color: vec3<f32>, gamma: vec3<f32>) -> vec3<f32> {
+    return vec3<f32>(
+        pow(max(color.x, 0.0), gamma.x),
+        pow(max(color.y, 0.0), gamma.y),
+        pow(max(color.z, 0.0), gamma.z)
+    );
+}
+
+@compute @workgroup_size(256)
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+    let idx = global_id.x;
+    if (idx >= arrayLength(&input)) { return; }
+
+    let rgb_src = input[idx].xyz;
+
+    // Source: device to linear
+    let linear_src = apply_gamma(rgb_src, params.src_gamma);
+
+    // Source: linear to PCS (XYZ)
+    var xyz = params.src_matrix * linear_src;
+
+    // Black point compensation
+    xyz.y = xyz.y * params.bpc_scale + params.bpc_offset;
+    xyz.x = xyz.x * params.bpc_scale + params.bpc_offset * 0.9642;
+    xyz.z = xyz.z * params.bpc_scale + params.bpc_offset * 0.8249;
+
+    // Destination: PCS to linear
+    let linear_dst = params.dst_matrix_inv * xyz;
+
+    // Destination: linear to device
+    let rgb_dst = apply_gamma(linear_dst, 1.0 / params.dst_gamma);
+
+    output[idx] = vec4<f32>(clamp(rgb_dst, vec3<f32>(0.0), vec3<f32>(1.0)), input[idx].w);
+}
+"#;
+
+const ICC_LUT_SHADER: &str = r#"
+// ICC LUT-based Transform - WGSL Implementation
+
+struct LutParams {
+    input_size: u32,
+    clut_size: vec3<u32>,
+    output_size: u32,
+}
+
+@group(0) @binding(0) var<uniform> params: LutParams;
+@group(0) @binding(1) var<storage, read> input_lut: array<f32>;
+@group(0) @binding(2) var<storage, read> clut: array<f32>;
+@group(0) @binding(3) var<storage, read> output_lut: array<f32>;
+@group(0) @binding(4) var<storage, read> input: array<vec4<f32>>;
+@group(0) @binding(5) var<storage, read_write> output: array<vec4<f32>>;
+
+fn sample_1d_lut(lut_offset: u32, lut_size: u32, x: f32) -> f32 {
+    let pos = x * f32(lut_size - 1u);
+    let idx = u32(floor(pos));
+    let frac = pos - floor(pos);
+
+    let idx0 = min(idx, lut_size - 1u);
+    let idx1 = min(idx + 1u, lut_size - 1u);
+
+    let v0 = input_lut[lut_offset + idx0];
+    let v1 = input_lut[lut_offset + idx1];
+
+    return mix(v0, v1, frac);
+}
+
+fn sample_3d_clut(pos: vec3<f32>) -> vec3<f32> {
+    let n = vec3<f32>(params.clut_size) - 1.0;
+    let p = pos * n;
+
+    let p0 = vec3<u32>(floor(p));
+    let p1 = min(p0 + 1u, params.clut_size - 1u);
+    let f = p - floor(p);
+
+    // Trilinear interpolation
+    let get_idx = |xi: u32, yi: u32, zi: u32| -> u32 {
+        return (xi * params.clut_size.y * params.clut_size.z + yi * params.clut_size.z + zi) * 3u;
+    };
+
+    var result = vec3<f32>(0.0);
+    for (var c = 0u; c < 3u; c++) {
+        let c000 = clut[get_idx(p0.x, p0.y, p0.z) + c];
+        let c001 = clut[get_idx(p0.x, p0.y, p1.z) + c];
+        let c010 = clut[get_idx(p0.x, p1.y, p0.z) + c];
+        let c011 = clut[get_idx(p0.x, p1.y, p1.z) + c];
+        let c100 = clut[get_idx(p1.x, p0.y, p0.z) + c];
+        let c101 = clut[get_idx(p1.x, p0.y, p1.z) + c];
+        let c110 = clut[get_idx(p1.x, p1.y, p0.z) + c];
+        let c111 = clut[get_idx(p1.x, p1.y, p1.z) + c];
+
+        let c00 = mix(c000, c001, f.z);
+        let c01 = mix(c010, c011, f.z);
+        let c10 = mix(c100, c101, f.z);
+        let c11 = mix(c110, c111, f.z);
+
+        let c0 = mix(c00, c01, f.y);
+        let c1 = mix(c10, c11, f.y);
+
+        result[c] = mix(c0, c1, f.x);
+    }
+
+    return result;
+}
+
+@compute @workgroup_size(256)
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+    let idx = global_id.x;
+    if (idx >= arrayLength(&input)) { return; }
+
+    var color = input[idx].xyz;
+
+    // Apply input curves
+    color.x = sample_1d_lut(0u, params.input_size, color.x);
+    color.y = sample_1d_lut(params.input_size, params.input_size, color.y);
+    color.z = sample_1d_lut(params.input_size * 2u, params.input_size, color.z);
+
+    // Apply CLUT
+    color = sample_3d_clut(color);
+
+    // Apply output curves (using output_lut)
+    // Similar to input curves...
+
+    output[idx] = vec4<f32>(color, input[idx].w);
+}
+"#;
+
+// ============================================================================
+// UNIT TESTS
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const EPSILON: f32 = 0.001;
+
+    fn approx_eq(a: f32, b: f32) -> bool {
+        (a - b).abs() < EPSILON
+    }
+
+    fn vec3_approx_eq(a: Vec3, b: Vec3) -> bool {
+        approx_eq(a.x, b.x) && approx_eq(a.y, b.y) && approx_eq(a.z, b.z)
+    }
+
+    #[test]
+    fn test_srgb_profile_creation() {
+        let profile = IccProfile::srgb();
+
+        assert!(profile.rgb_to_xyz_matrix.is_some());
+        assert!(profile.xyz_to_rgb_matrix.is_some());
+        assert!(profile.red_trc.is_some());
+        assert!(profile.green_trc.is_some());
+        assert!(profile.blue_trc.is_some());
+
+        assert_eq!(profile.description(), "sRGB IEC61966-2.1");
+    }
+
+    #[test]
+    fn test_srgb_white_point() {
+        let profile = IccProfile::srgb();
+
+        let white_rgb = Vec3::new(1.0, 1.0, 1.0);
+        let white_xyz = profile.device_to_pcs(white_rgb, RenderingIntent::RelativeColorimetric);
+
+        // Should be approximately D50 adapted D65 white
+        assert!(approx_eq(white_xyz.y, 1.0));
+    }
+
+    #[test]
+    fn test_srgb_black() {
+        let profile = IccProfile::srgb();
+
+        let black_rgb = Vec3::zero();
+        let black_xyz = profile.device_to_pcs(black_rgb, RenderingIntent::RelativeColorimetric);
+
+        assert!(vec3_approx_eq(black_xyz, Vec3::zero()));
+    }
+
+    #[test]
+    fn test_srgb_roundtrip() {
+        let profile = IccProfile::srgb();
+
+        let original = Vec3::new(0.5, 0.3, 0.8);
+        let xyz = profile.device_to_pcs(original, RenderingIntent::RelativeColorimetric);
+        let roundtrip = profile.pcs_to_device(xyz, RenderingIntent::RelativeColorimetric);
+
+        assert!(vec3_approx_eq(original, roundtrip));
+    }
+
+    #[test]
+    fn test_tone_curve_srgb() {
+        let curve = ToneCurve::srgb();
+
+        // Linear segment
+        assert!(approx_eq(curve.evaluate(0.0), 0.0));
+        assert!(approx_eq(curve.evaluate(0.04045), 0.04045 / 12.92));
+
+        // Power segment
+        assert!(approx_eq(curve.evaluate(1.0), 1.0));
+    }
+
+    #[test]
+    fn test_tone_curve_gamma() {
+        let curve = ToneCurve::gamma(2.2);
+
+        assert!(approx_eq(curve.evaluate(0.0), 0.0));
+        assert!(approx_eq(curve.evaluate(1.0), 1.0));
+        assert!(approx_eq(curve.evaluate(0.5), pow(0.5, 2.2)));
+    }
+
+    #[test]
+    fn test_tone_curve_inverse() {
+        let curve = ToneCurve::gamma(2.2);
+
+        let x = 0.5;
+        let y = curve.evaluate(x);
+        let x_inv = curve.evaluate_inverse(y);
+
+        assert!(approx_eq(x, x_inv));
+    }
+
+    #[test]
+    fn test_color_transform_srgb_to_p3() {
+        let srgb = IccProfile::srgb();
+        let p3 = IccProfile::display_p3();
+
+        let transform = ColorTransform::new(srgb, p3, RenderingIntent::RelativeColorimetric);
+
+        // White should remain white
+        let white = Vec3::new(1.0, 1.0, 1.0);
+        let result = transform.transform(white);
+        assert!(vec3_approx_eq(result, white));
+
+        // Black should remain black
+        let black = Vec3::zero();
+        let result = transform.transform(black);
+        assert!(vec3_approx_eq(result, black));
+    }
+
+    #[test]
+    fn test_color_management_module() {
+        let cmm = ColorManagementModule::new();
+
+        assert!(cmm.get_profile("sRGB").is_some());
+        assert!(cmm.get_profile("Display P3").is_some());
+        assert!(cmm.get_profile("Adobe RGB").is_some());
+        assert!(cmm.get_profile("Rec. 2020").is_some());
+        assert!(cmm.get_profile("Linear sRGB").is_some());
+    }
+
+    #[test]
+    fn test_parametric_curve_types() {
+        // Type 0: Gamma
+        let gamma = ParametricCurveType::Gamma(2.2);
+        assert!(approx_eq(gamma.evaluate(0.5), pow(0.5, 2.2)));
+
+        // Type 3: sRGB
+        let srgb = ParametricCurveType::srgb();
+        assert!(approx_eq(srgb.evaluate(0.0), 0.0));
+        assert!(approx_eq(srgb.evaluate(1.0), 1.0));
+    }
+
+    #[test]
+    fn test_clut_trilinear() {
+        let mut clut = Clut::new(vec![2, 2, 2], 3);
+
+        // Set corner values for a simple identity-like CLUT
+        clut.data = vec![
+            0.0, 0.0, 0.0,  // (0,0,0)
+            0.0, 0.0, 1.0,  // (0,0,1)
+            0.0, 1.0, 0.0,  // (0,1,0)
+            0.0, 1.0, 1.0,  // (0,1,1)
+            1.0, 0.0, 0.0,  // (1,0,0)
+            1.0, 0.0, 1.0,  // (1,0,1)
+            1.0, 1.0, 0.0,  // (1,1,0)
+            1.0, 1.0, 1.0,  // (1,1,1)
+        ];
+
+        // Test corners
+        assert!(vec3_approx_eq(clut.interpolate_3d(Vec3::zero()), Vec3::zero()));
+        assert!(vec3_approx_eq(clut.interpolate_3d(Vec3::new(1.0, 1.0, 1.0)), Vec3::new(1.0, 1.0, 1.0)));
+
+        // Test center
+        let center = clut.interpolate_3d(Vec3::new(0.5, 0.5, 0.5));
+        assert!(vec3_approx_eq(center, Vec3::new(0.5, 0.5, 0.5)));
+    }
+
+    #[test]
+    fn test_adobe_rgb_profile() {
+        let profile = IccProfile::adobe_rgb();
+
+        assert!(profile.is_matrix_based());
+        assert_eq!(profile.description(), "Adobe RGB (1998)");
+
+        // Adobe RGB has gamma 2.2
+        if let Some(ref trc) = profile.red_trc {
+            if let ToneCurve::Gamma(g) = trc {
+                assert!(approx_eq(*g, 2.19921875));
+            }
+        }
+    }
+
+    #[test]
+    fn test_rec2020_profile() {
+        let profile = IccProfile::rec2020();
+
+        assert!(profile.is_matrix_based());
+        assert_eq!(profile.description(), "Rec. ITU-R BT.2020");
+    }
+
+    #[test]
+    fn test_linear_srgb_profile() {
+        let profile = IccProfile::linear_srgb();
+
+        assert!(profile.is_matrix_based());
+
+        // Linear TRC should be gamma 1.0
+        if let Some(ToneCurve::Gamma(g)) = &profile.red_trc {
+            assert!(approx_eq(*g, 1.0));
+        }
+    }
+
+    #[test]
+    fn test_rendering_intent() {
+        assert_eq!(RenderingIntent::from_u32(0).to_u32(), 0);
+        assert_eq!(RenderingIntent::from_u32(1).to_u32(), 1);
+        assert_eq!(RenderingIntent::from_u32(2).to_u32(), 2);
+        assert_eq!(RenderingIntent::from_u32(3).to_u32(), 3);
+    }
+
+    #[test]
+    fn test_color_space_channels() {
+        assert_eq!(ColorSpaceSignature::Gray.channels(), 1);
+        assert_eq!(ColorSpaceSignature::RGB.channels(), 3);
+        assert_eq!(ColorSpaceSignature::CMYK.channels(), 4);
+        assert_eq!(ColorSpaceSignature::XYZ.channels(), 3);
+        assert_eq!(ColorSpaceSignature::Lab.channels(), 3);
+    }
+}

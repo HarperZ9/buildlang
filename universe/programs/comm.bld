@@ -1,0 +1,319 @@
+// =============================================================================
+// qcomm — Compare two sorted files line by line, written in BuildLang
+// =============================================================================
+// Classic three-column output: lines only in file1, only in file2, in both.
+//
+// Usage:
+//   qcomm file1.txt file2.txt       3 columns: only-1, only-2, both
+//   qcomm -1 file1 file2            suppress column 1 (only in file1)
+//   qcomm -2 file1 file2            suppress column 2 (only in file2)
+//   qcomm -3 file1 file2            suppress column 3 (common lines)
+//   qcomm -12 file1 file2           only common lines (intersection)
+//   qcomm -23 file1 file2           only lines unique to file1
+//   qcomm --help                    usage
+//
+// Algorithm: Classic sorted-merge — advance through both files comparing
+// current lines lexicographically. Smaller line is unique to its file;
+// equal lines are common.
+//
+// Design: Lines stored in string pools with parallel start/len vecs.
+// =============================================================================
+
+// --- State struct ---
+struct Comm {
+    // String pool for file1 lines
+    pool1: String,
+    starts1: Vec<i32>,
+    lens1: Vec<i32>,
+    n1: i32,
+
+    // String pool for file2 lines
+    pool2: String,
+    starts2: Vec<i32>,
+    lens2: Vec<i32>,
+    n2: i32,
+}
+
+fn comm_new() -> Comm {
+    Comm {
+        pool1: "", starts1: vec![], lens1: vec![], n1: 0,
+        pool2: "", starts2: vec![], lens2: vec![], n2: 0,
+    }
+}
+
+// --- String pool ops for file1 ---
+fn sp1_add(s: &mut Comm, text: String) -> i32 {
+    let id = s.n1;
+    let st = s.pool1.len();
+    s.pool1 = s.pool1 + text;
+    let en = s.pool1.len();
+    vec_push(s.starts1, st);
+    vec_push(s.lens1, en - st);
+    s.n1 = s.n1 + 1;
+    id
+}
+
+fn sp1_get(s: &Comm, id: i32) -> String {
+    let st = vec_get(s.starts1, id);
+    let ln = vec_get(s.lens1, id);
+    if ln == 0 { return ""; }
+    s.pool1.substring(st, ln)
+}
+
+// --- String pool ops for file2 ---
+fn sp2_add(s: &mut Comm, text: String) -> i32 {
+    let id = s.n2;
+    let st = s.pool2.len();
+    s.pool2 = s.pool2 + text;
+    let en = s.pool2.len();
+    vec_push(s.starts2, st);
+    vec_push(s.lens2, en - st);
+    s.n2 = s.n2 + 1;
+    id
+}
+
+fn sp2_get(s: &Comm, id: i32) -> String {
+    let st = vec_get(s.starts2, id);
+    let ln = vec_get(s.lens2, id);
+    if ln == 0 { return ""; }
+    s.pool2.substring(st, ln)
+}
+
+// --- Parse file content into lines ---
+fn parse_lines(s: &mut Comm, content: String, which: i32) {
+    let clen = content.len();
+    let mut pos: i32 = 0;
+    let mut line_start: i32 = 0;
+    let mut go = true;
+
+    while go {
+        if pos >= clen {
+            let ln = pos - line_start;
+            if ln > 0 {
+                let text = content.substring(line_start, ln);
+                // Strip trailing \r
+                let tlen = text.len();
+                let clean = if tlen > 0 {
+                    let last = text.char_at(tlen - 1);
+                    if last == "\r" {
+                        if tlen == 1 { "" } else { text.substring(0, tlen - 1) }
+                    } else {
+                        text
+                    }
+                } else {
+                    text
+                };
+                if which == 1 {
+                    sp1_add(s, clean);
+                } else {
+                    sp2_add(s, clean);
+                }
+            }
+            go = false;
+        } else {
+            let c = content.char_at(pos);
+            if c == "\n" {
+                let mut ln = pos - line_start;
+                if ln > 0 {
+                    let last_pos = line_start + ln - 1;
+                    let lc = content.char_at(last_pos);
+                    if lc == "\r" { ln = ln - 1; }
+                }
+                let text = if ln > 0 {
+                    content.substring(line_start, ln)
+                } else {
+                    ""
+                };
+                if which == 1 {
+                    sp1_add(s, text);
+                } else {
+                    sp2_add(s, text);
+                }
+                line_start = pos + 1;
+                pos = pos + 1;
+            } else {
+                pos = pos + 1;
+            }
+        }
+    }
+}
+
+// --- Sorted merge and output ---
+// suppress1: suppress "only in file1" column
+// suppress2: suppress "only in file2" column
+// suppress3: suppress "in both" column
+fn merge_output(s: &Comm, suppress1: bool, suppress2: bool, suppress3: bool) ~ Console {
+    let tab = "\t";
+    let mut i1: i32 = 0;
+    let mut i2: i32 = 0;
+
+    let mut go = true;
+    while go {
+        if i1 >= s.n1 && i2 >= s.n2 {
+            go = false;
+        } else if i1 >= s.n1 {
+            // Remaining lines from file2 only
+            if !suppress2 {
+                let line = sp2_get(s, i2);
+                if suppress1 {
+                    println!("{}", line);
+                } else {
+                    let out = tab + line;
+                    println!("{}", out);
+                }
+            }
+            i2 = i2 + 1;
+        } else if i2 >= s.n2 {
+            // Remaining lines from file1 only
+            if !suppress1 {
+                println!("{}", sp1_get(s, i1));
+            }
+            i1 = i1 + 1;
+        } else {
+            let line1 = sp1_get(s, i1);
+            let line2 = sp2_get(s, i2);
+            let cmp = line1.compare(line2);
+
+            if cmp < 0 {
+                // line1 < line2: only in file1
+                if !suppress1 {
+                    println!("{}", line1);
+                }
+                i1 = i1 + 1;
+            } else if cmp > 0 {
+                // line1 > line2: only in file2
+                if !suppress2 {
+                    if suppress1 {
+                        println!("{}", line2);
+                    } else {
+                        let out = tab + line2;
+                        println!("{}", out);
+                    }
+                }
+                i2 = i2 + 1;
+            } else {
+                // Equal: in both
+                if !suppress3 {
+                    let mut prefix = "";
+                    if !suppress1 {
+                        prefix = prefix + tab;
+                    }
+                    if !suppress2 {
+                        prefix = prefix + tab;
+                    }
+                    let out = prefix + line1;
+                    println!("{}", out);
+                }
+                i1 = i1 + 1;
+                i2 = i2 + 1;
+            }
+        }
+    }
+}
+
+// --- Help ---
+fn print_help() ~ Console {
+    println!("qcomm — compare two sorted files line by line");
+    println!("");
+    println!("Usage:");
+    println!("  qcomm [OPTION]... FILE1 FILE2");
+    println!("");
+    println!("Options:");
+    println!("  -1         suppress column 1 (lines unique to FILE1)");
+    println!("  -2         suppress column 2 (lines unique to FILE2)");
+    println!("  -3         suppress column 3 (lines common to both)");
+    println!("  --help     display this help and exit");
+    println!("");
+    println!("With no options, output three columns:");
+    println!("  Column 1: lines only in FILE1");
+    println!("  Column 2: lines only in FILE2 (indented 1 tab)");
+    println!("  Column 3: lines in both files (indented 2 tabs)");
+    println!("");
+    println!("Both files must be sorted. Use 'qsort' first if needed.");
+    println!("");
+    println!("Examples:");
+    println!("  qcomm file1.txt file2.txt        all three columns");
+    println!("  qcomm -12 file1.txt file2.txt    common lines only");
+    println!("  qcomm -3 file1.txt file2.txt     unique lines only");
+}
+
+// --- Main ---
+fn main() ~ Console + Environment + FileSystem + Process {
+    let nargs = args_count();
+
+    if nargs < 2 {
+        print_help();
+        process_exit(0);
+    }
+
+    let mut suppress1 = false;
+    let mut suppress2 = false;
+    let mut suppress3 = false;
+    let mut file1 = "";
+    let mut file2 = "";
+    let mut file_count: i32 = 0;
+
+    let mut i: i32 = 1;
+    while i < nargs {
+        let arg = args_get(i);
+
+        if arg == "--help" || arg == "-h" {
+            print_help();
+            process_exit(0);
+        } else if arg.starts_with("-") && !arg.starts_with("--") {
+            // Parse flag characters: -1, -2, -3, -12, -23, -13, -123
+            if arg.contains("1") {
+                suppress1 = true;
+            }
+            if arg.contains("2") {
+                suppress2 = true;
+            }
+            if arg.contains("3") {
+                suppress3 = true;
+            }
+        } else if arg.starts_with("--") {
+            println!("qcomm: unknown option '{}'", arg);
+            process_exit(2);
+        } else {
+            if file_count == 0 {
+                file1 = arg;
+                file_count = 1;
+            } else if file_count == 1 {
+                file2 = arg;
+                file_count = 2;
+            } else {
+                println!("qcomm: too many file arguments");
+                process_exit(2);
+            }
+        }
+
+        i = i + 1;
+    }
+
+    if file_count < 2 {
+        println!("qcomm: missing file operand");
+        println!("Try 'qcomm --help' for usage.");
+        process_exit(2);
+    }
+
+    // Check files exist
+    if !file_exists(file1) {
+        println!("qcomm: {}: No such file or directory", file1);
+        process_exit(2);
+    }
+    if !file_exists(file2) {
+        println!("qcomm: {}: No such file or directory", file2);
+        process_exit(2);
+    }
+
+    // Read and parse files
+    let content1 = read_file(file1);
+    let content2 = read_file(file2);
+
+    let mut s = comm_new();
+    parse_lines(&mut s, content1, 1);
+    parse_lines(&mut s, content2, 2);
+
+    // Merge and output
+    merge_output(&s, suppress1, suppress2, suppress3);
+}

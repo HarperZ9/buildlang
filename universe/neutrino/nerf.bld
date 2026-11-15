@@ -1,0 +1,3004 @@
+// BUILD-UNIVERSE: Neutrino Neural Rendering Module
+// Neural Radiance Fields (NeRF) and Novel View Synthesis
+// Implements NeRF, Instant-NGP, 3D Gaussian Splatting, and real-time rendering
+
+import core::memory::{Buffer, Arena, MemoryPool};
+import core::math::{Vec2, Vec3, Vec4, Mat3, Mat4, Quaternion};
+import core::simd::{float4, float8, int4};
+import lib::{
+    Tensor, TensorShape, DataType, Device,
+    Layer, Sequential, Activation, ActivationType,
+    Linear, Conv2D, LayerNorm, BatchNorm,
+    Optimizer, SGD, Adam, LearningRateScheduler
+};
+import inference::{InferenceEngine, ExecutionContext};
+
+// ============================================================================
+// POSITIONAL ENCODING
+// ============================================================================
+
+/// Sinusoidal positional encoding for NeRF
+struct PositionalEncoding {
+    num_frequencies: u32,
+    include_input: bool,
+    log_sampling: bool,
+    periodic_fns: Array<fn(f32) -> f32>,
+
+    fn create(num_frequencies: u32, include_input: bool = true) -> Self {
+        let periodic_fns = [Math.sin, Math.cos];
+
+        Self {
+            num_frequencies,
+            include_input,
+            log_sampling: true,
+            periodic_fns
+        }
+    }
+
+    fn output_dim(self, input_dim: u32) -> u32 {
+        let encoded_dim = input_dim * self.num_frequencies * 2;
+        if self.include_input {
+            input_dim + encoded_dim
+        } else {
+            encoded_dim
+        }
+    }
+
+    fn encode(self, x: &Tensor) -> Tensor {
+        // x: [..., input_dim]
+        let batch_shape = x.shape[0..-1];
+        let input_dim = x.shape[-1];
+
+        var outputs: Array<Tensor> = [];
+
+        if self.include_input {
+            outputs.push(x.clone());
+        }
+
+        // Generate frequency bands
+        let freq_bands = if self.log_sampling {
+            // Log-linear sampling
+            Tensor.linspace(0.0, self.num_frequencies - 1, self.num_frequencies)
+                .pow(2.0)
+        } else {
+            // Linear sampling
+            Tensor.linspace(1.0, Math.pow(2.0, self.num_frequencies - 1), self.num_frequencies)
+        };
+
+        for freq in freq_bands.iter() {
+            for periodic_fn in self.periodic_fns {
+                let scaled = x * (freq * Math.PI);
+                outputs.push(scaled.map(periodic_fn));
+            }
+        }
+
+        Tensor.concat(outputs, dim: -1)
+    }
+}
+
+/// Integrated positional encoding for mip-NeRF
+struct IntegratedPositionalEncoding {
+    num_frequencies: u32,
+    diag_cov: bool,
+
+    fn create(num_frequencies: u32) -> Self {
+        Self {
+            num_frequencies,
+            diag_cov: true
+        }
+    }
+
+    fn encode(self, mean: &Tensor, cov: &Tensor) -> Tensor {
+        // Encode Gaussian along ray with mean and covariance
+        let freq_bands = Tensor.linspace(0.0, self.num_frequencies - 1, self.num_frequencies)
+            .pow(2.0) * Math.PI;
+
+        var sin_feats: Array<Tensor> = [];
+        var cos_feats: Array<Tensor> = [];
+
+        for freq in freq_bands.iter() {
+            let scaled_mean = mean * freq;
+            let scaled_var = cov * (freq * freq);
+
+            // Expected value of sin/cos under Gaussian
+            let exp_decay = (-0.5 * scaled_var).exp();
+            sin_feats.push(exp_decay * scaled_mean.sin());
+            cos_feats.push(exp_decay * scaled_mean.cos());
+        }
+
+        let sin_concat = Tensor.concat(sin_feats, dim: -1);
+        let cos_concat = Tensor.concat(cos_feats, dim: -1);
+
+        Tensor.concat([mean, sin_concat, cos_concat], dim: -1)
+    }
+}
+
+// ============================================================================
+// HASH ENCODING (INSTANT-NGP STYLE)
+// ============================================================================
+
+/// Multi-resolution hash encoding for Instant-NGP
+struct HashEncoding {
+    num_levels: u32,
+    features_per_level: u32,
+    log2_hashmap_size: u32,
+    base_resolution: u32,
+    finest_resolution: u32,
+    hash_tables: Array<Tensor>,  // Per-level hash tables
+
+    fn create(
+        num_levels: u32 = 16,
+        features_per_level: u32 = 2,
+        log2_hashmap_size: u32 = 19,
+        base_resolution: u32 = 16,
+        finest_resolution: u32 = 2048
+    ) -> Self {
+        let hashmap_size = 1 << log2_hashmap_size;
+
+        // Initialize hash tables for each level
+        var hash_tables: Array<Tensor> = [];
+        for level in 0..num_levels {
+            let table = Tensor.uniform(
+                [hashmap_size, features_per_level],
+                low: -1e-4,
+                high: 1e-4
+            );
+            hash_tables.push(table);
+        }
+
+        Self {
+            num_levels,
+            features_per_level,
+            log2_hashmap_size,
+            base_resolution,
+            finest_resolution,
+            hash_tables
+        }
+    }
+
+    fn output_dim(self) -> u32 {
+        self.num_levels * self.features_per_level
+    }
+
+    fn resolution_at_level(self, level: u32) -> u32 {
+        let b = Math.exp(
+            Math.log(self.finest_resolution as f32 / self.base_resolution as f32)
+            / (self.num_levels - 1) as f32
+        );
+        (self.base_resolution as f32 * Math.pow(b, level as f32)) as u32
+    }
+
+    fn spatial_hash(self, coords: &[i32; 3], level: u32) -> u32 {
+        // Spatial hash function with prime numbers
+        const PRIMES: [u32; 3] = [1, 2654435761, 805459861];
+
+        var hash: u32 = 0;
+        for i in 0..3 {
+            hash ^= (coords[i] as u32).wrapping_mul(PRIMES[i]);
+        }
+
+        hash % (1 << self.log2_hashmap_size)
+    }
+
+    fn encode(self, positions: &Tensor) -> Tensor {
+        // positions: [batch, 3] normalized to [0, 1]
+        let batch_size = positions.shape[0];
+
+        var level_features: Array<Tensor> = [];
+
+        for level in 0..self.num_levels {
+            let resolution = self.resolution_at_level(level);
+
+            // Scale positions to grid
+            let scaled = positions * (resolution as f32);
+            let floor_coords = scaled.floor().to_int();
+            let ceil_coords = floor_coords + 1;
+            let weights = scaled - floor_coords.to_float();
+
+            // Trilinear interpolation over 8 corners
+            var corner_features = Tensor.zeros([batch_size, self.features_per_level]);
+
+            for corner in 0..8 {
+                let cx = if corner & 1 != 0 { ceil_coords[.., 0] } else { floor_coords[.., 0] };
+                let cy = if corner & 2 != 0 { ceil_coords[.., 1] } else { floor_coords[.., 1] };
+                let cz = if corner & 4 != 0 { ceil_coords[.., 2] } else { floor_coords[.., 2] };
+
+                let wx = if corner & 1 != 0 { weights[.., 0] } else { 1.0 - weights[.., 0] };
+                let wy = if corner & 2 != 0 { weights[.., 1] } else { 1.0 - weights[.., 1] };
+                let wz = if corner & 4 != 0 { weights[.., 2] } else { 1.0 - weights[.., 2] };
+
+                let corner_weight = wx * wy * wz;
+
+                // Hash and lookup
+                for b in 0..batch_size {
+                    let coords = [cx[b], cy[b], cz[b]];
+                    let hash_idx = self.spatial_hash(&coords, level);
+                    let feature = self.hash_tables[level][hash_idx];
+                    corner_features[b] += feature * corner_weight[b];
+                }
+            }
+
+            level_features.push(corner_features);
+        }
+
+        Tensor.concat(level_features, dim: -1)
+    }
+
+    fn encode_batch_optimized(self, positions: &Tensor, device: Device) -> Tensor {
+        // GPU-optimized batch encoding using parallel hash lookups
+        let batch_size = positions.shape[0];
+        let output = Tensor.zeros([batch_size, self.output_dim()], device: device);
+
+        // Fused trilinear interpolation kernel
+        device.launch_kernel("hash_encode_trilinear", grid: [batch_size, self.num_levels], block: [256]) {
+            // CUDA kernel for parallel hash encoding
+            extern __shared__ float shared_weights[8];
+
+            let batch_idx = blockIdx.x;
+            let level = blockIdx.y;
+            let tid = threadIdx.x;
+
+            // Compute grid coordinates for this level
+            let resolution = self.resolution_at_level(level);
+            let pos = positions[batch_idx];
+            let scaled = pos * resolution;
+
+            // Floor and ceil
+            let floor_x = __float2int_rd(scaled.x);
+            let floor_y = __float2int_rd(scaled.y);
+            let floor_z = __float2int_rd(scaled.z);
+
+            let frac_x = scaled.x - floor_x;
+            let frac_y = scaled.y - floor_y;
+            let frac_z = scaled.z - floor_z;
+
+            // Each thread handles one feature dimension
+            if tid < self.features_per_level {
+                var result: f32 = 0.0;
+
+                for corner in 0..8 {
+                    let cx = floor_x + (corner & 1);
+                    let cy = floor_y + ((corner >> 1) & 1);
+                    let cz = floor_z + ((corner >> 2) & 1);
+
+                    let wx = if corner & 1 != 0 { frac_x } else { 1.0 - frac_x };
+                    let wy = if corner & 2 != 0 { frac_y } else { 1.0 - frac_y };
+                    let wz = if corner & 4 != 0 { frac_z } else { 1.0 - frac_z };
+
+                    let hash = self.spatial_hash(&[cx, cy, cz], level);
+                    let feature = self.hash_tables[level][hash, tid];
+
+                    result += wx * wy * wz * feature;
+                }
+
+                let output_idx = level * self.features_per_level + tid;
+                output[batch_idx, output_idx] = result;
+            }
+        };
+
+        output
+    }
+}
+
+/// Spherical harmonics encoding for view directions
+struct SphericalHarmonicsEncoding {
+    degree: u32,
+
+    fn create(degree: u32 = 4) -> Self {
+        Self { degree }
+    }
+
+    fn output_dim(self) -> u32 {
+        (self.degree + 1) * (self.degree + 1)
+    }
+
+    fn encode(self, directions: &Tensor) -> Tensor {
+        // directions: [..., 3] unit vectors
+        let x = directions[.., 0];
+        let y = directions[.., 1];
+        let z = directions[.., 2];
+
+        var components: Array<Tensor> = [];
+
+        // Degree 0
+        components.push(Tensor.full_like(&x, 0.28209479177387814));  // Y_0^0
+
+        if self.degree >= 1 {
+            // Degree 1
+            components.push(y * 0.4886025119029199);   // Y_1^-1
+            components.push(z * 0.4886025119029199);   // Y_1^0
+            components.push(x * 0.4886025119029199);   // Y_1^1
+        }
+
+        if self.degree >= 2 {
+            // Degree 2
+            components.push(x * y * 1.0925484305920792);                    // Y_2^-2
+            components.push(y * z * 1.0925484305920792);                    // Y_2^-1
+            components.push((2.0 * z * z - x * x - y * y) * 0.31539156525252005);  // Y_2^0
+            components.push(x * z * 1.0925484305920792);                    // Y_2^1
+            components.push((x * x - y * y) * 0.5462742152960396);          // Y_2^2
+        }
+
+        if self.degree >= 3 {
+            // Degree 3
+            let xx = x * x;
+            let yy = y * y;
+            let zz = z * z;
+
+            components.push(y * (3.0 * xx - yy) * 0.5900435899266435);
+            components.push(x * y * z * 2.890611442640554);
+            components.push(y * (4.0 * zz - xx - yy) * 0.4570457994644658);
+            components.push(z * (2.0 * zz - 3.0 * xx - 3.0 * yy) * 0.3731763325901154);
+            components.push(x * (4.0 * zz - xx - yy) * 0.4570457994644658);
+            components.push(z * (xx - yy) * 1.445305721320277);
+            components.push(x * (xx - 3.0 * yy) * 0.5900435899266435);
+        }
+
+        if self.degree >= 4 {
+            // Degree 4
+            let xx = x * x;
+            let yy = y * y;
+            let zz = z * z;
+            let xy = x * y;
+            let xz = x * z;
+            let yz = y * z;
+
+            components.push(xy * (xx - yy) * 2.5033429417967046);
+            components.push(yz * (3.0 * xx - yy) * 1.7701307697799304);
+            components.push(xy * (7.0 * zz - 1.0) * 0.9461746957575601);
+            components.push(yz * (7.0 * zz - 3.0) * 0.6690465435572892);
+            components.push((zz * (35.0 * zz - 30.0) + 3.0) * 0.10578554691520431);
+            components.push(xz * (7.0 * zz - 3.0) * 0.6690465435572892);
+            components.push((xx - yy) * (7.0 * zz - 1.0) * 0.47308734787878004);
+            components.push(xz * (xx - 3.0 * yy) * 1.7701307697799304);
+            components.push((xx * (xx - 3.0 * yy) - yy * (3.0 * xx - yy)) * 0.6258357354491761);
+        }
+
+        Tensor.stack(components, dim: -1)
+    }
+}
+
+// ============================================================================
+// NERF MLP NETWORKS
+// ============================================================================
+
+/// Standard NeRF MLP network
+struct NeRFMLP {
+    // Position encoding
+    pos_encoder: PositionalEncoding,
+    dir_encoder: PositionalEncoding,
+
+    // Network layers
+    pts_linears: Array<Linear>,
+    views_linears: Array<Linear>,
+    feature_linear: Linear,
+    alpha_linear: Linear,
+    rgb_linear: Linear,
+
+    // Skip connection
+    skip_layer: u32,
+
+    fn create(
+        pos_frequencies: u32 = 10,
+        dir_frequencies: u32 = 4,
+        hidden_dim: u32 = 256,
+        num_layers: u32 = 8,
+        skip_layer: u32 = 4
+    ) -> Self {
+        let pos_encoder = PositionalEncoding.create(pos_frequencies);
+        let dir_encoder = PositionalEncoding.create(dir_frequencies);
+
+        let pos_dim = pos_encoder.output_dim(3);
+        let dir_dim = dir_encoder.output_dim(3);
+
+        // Position MLP
+        var pts_linears: Array<Linear> = [];
+        pts_linears.push(Linear.create(pos_dim, hidden_dim));
+
+        for i in 1..num_layers {
+            let in_dim = if i == skip_layer { hidden_dim + pos_dim } else { hidden_dim };
+            pts_linears.push(Linear.create(in_dim, hidden_dim));
+        }
+
+        // Feature and density outputs
+        let feature_linear = Linear.create(hidden_dim, hidden_dim);
+        let alpha_linear = Linear.create(hidden_dim, 1);
+
+        // View-dependent color MLP
+        var views_linears: Array<Linear> = [];
+        views_linears.push(Linear.create(hidden_dim + dir_dim, hidden_dim / 2));
+
+        let rgb_linear = Linear.create(hidden_dim / 2, 3);
+
+        Self {
+            pos_encoder,
+            dir_encoder,
+            pts_linears,
+            views_linears,
+            feature_linear,
+            alpha_linear,
+            rgb_linear,
+            skip_layer
+        }
+    }
+
+    fn forward(self, positions: &Tensor, directions: &Tensor) -> (Tensor, Tensor) {
+        // Encode inputs
+        let pos_encoded = self.pos_encoder.encode(positions);
+        let dir_encoded = self.dir_encoder.encode(directions);
+
+        // Position MLP with skip connection
+        var h = pos_encoded.clone();
+
+        for (i, linear) in self.pts_linears.iter().enumerate() {
+            if i == self.skip_layer {
+                h = Tensor.concat([h, pos_encoded.clone()], dim: -1);
+            }
+            h = linear.forward(&h).relu();
+        }
+
+        // Density (sigma) output
+        let sigma = self.alpha_linear.forward(&h).relu();
+
+        // Feature for view-dependent color
+        let feature = self.feature_linear.forward(&h);
+
+        // View-dependent RGB
+        let view_input = Tensor.concat([feature, dir_encoded], dim: -1);
+        var rgb = view_input;
+
+        for linear in self.views_linears {
+            rgb = linear.forward(&rgb).relu();
+        }
+        rgb = self.rgb_linear.forward(&rgb).sigmoid();
+
+        (rgb, sigma)
+    }
+
+    fn forward_density_only(self, positions: &Tensor) -> Tensor {
+        // Fast path for density-only queries (hierarchical sampling)
+        let pos_encoded = self.pos_encoder.encode(positions);
+
+        var h = pos_encoded.clone();
+
+        for (i, linear) in self.pts_linears.iter().enumerate() {
+            if i == self.skip_layer {
+                h = Tensor.concat([h, pos_encoded.clone()], dim: -1);
+            }
+            h = linear.forward(&h).relu();
+        }
+
+        self.alpha_linear.forward(&h).relu()
+    }
+}
+
+/// Instant-NGP style network with hash encoding
+struct InstantNGPNetwork {
+    hash_encoder: HashEncoding,
+    sh_encoder: SphericalHarmonicsEncoding,
+
+    // Small MLP (hash encoding does heavy lifting)
+    density_net: Sequential,
+    color_net: Sequential,
+
+    fn create(
+        num_levels: u32 = 16,
+        features_per_level: u32 = 2,
+        log2_hashmap_size: u32 = 19,
+        base_resolution: u32 = 16,
+        finest_resolution: u32 = 2048,
+        hidden_dim: u32 = 64,
+        sh_degree: u32 = 4
+    ) -> Self {
+        let hash_encoder = HashEncoding.create(
+            num_levels,
+            features_per_level,
+            log2_hashmap_size,
+            base_resolution,
+            finest_resolution
+        );
+
+        let sh_encoder = SphericalHarmonicsEncoding.create(sh_degree);
+
+        let hash_dim = hash_encoder.output_dim();
+        let sh_dim = sh_encoder.output_dim();
+
+        // Density network (position only)
+        let density_net = Sequential.create()
+            .add(Linear.create(hash_dim, hidden_dim))
+            .add(Activation.create(ActivationType.ReLU))
+            .add(Linear.create(hidden_dim, 16));  // 1 density + 15 features
+
+        // Color network (features + direction)
+        let color_net = Sequential.create()
+            .add(Linear.create(15 + sh_dim, hidden_dim))
+            .add(Activation.create(ActivationType.ReLU))
+            .add(Linear.create(hidden_dim, hidden_dim))
+            .add(Activation.create(ActivationType.ReLU))
+            .add(Linear.create(hidden_dim, 3))
+            .add(Activation.create(ActivationType.Sigmoid));
+
+        Self {
+            hash_encoder,
+            sh_encoder,
+            density_net,
+            color_net
+        }
+    }
+
+    fn forward(self, positions: &Tensor, directions: &Tensor) -> (Tensor, Tensor) {
+        // Hash encode positions
+        let hash_features = self.hash_encoder.encode(positions);
+
+        // Density and geometric features
+        let density_out = self.density_net.forward(&hash_features);
+        let sigma = density_out[.., 0:1].exp();  // Exponential activation for density
+        let geo_features = density_out[.., 1:16];
+
+        // Spherical harmonics encode directions
+        let sh_features = self.sh_encoder.encode(directions);
+
+        // Color from features and direction
+        let color_input = Tensor.concat([geo_features, sh_features], dim: -1);
+        let rgb = self.color_net.forward(&color_input);
+
+        (rgb, sigma)
+    }
+}
+
+/// Mip-NeRF network with anti-aliasing
+struct MipNeRFNetwork {
+    pos_encoder: IntegratedPositionalEncoding,
+    dir_encoder: PositionalEncoding,
+
+    mlp: NeRFMLP,
+
+    fn create(
+        num_frequencies: u32 = 16,
+        dir_frequencies: u32 = 4,
+        hidden_dim: u32 = 256
+    ) -> Self {
+        let pos_encoder = IntegratedPositionalEncoding.create(num_frequencies);
+        let dir_encoder = PositionalEncoding.create(dir_frequencies);
+
+        // Standard NeRF MLP but with integrated positional encoding input
+        let mlp = NeRFMLP.create(
+            pos_frequencies: 0,  // Using integrated encoding
+            dir_frequencies,
+            hidden_dim,
+            num_layers: 8,
+            skip_layer: 4
+        );
+
+        Self {
+            pos_encoder,
+            dir_encoder,
+            mlp
+        }
+    }
+
+    fn forward(self, means: &Tensor, covs: &Tensor, directions: &Tensor) -> (Tensor, Tensor) {
+        // Integrated positional encoding for cone-traced rays
+        let pos_encoded = self.pos_encoder.encode(means, covs);
+        let dir_encoded = self.dir_encoder.encode(directions);
+
+        // Through MLP (modified to accept pre-encoded input)
+        self.forward_from_encoded(&pos_encoded, &dir_encoded)
+    }
+
+    fn forward_from_encoded(self, pos_encoded: &Tensor, dir_encoded: &Tensor) -> (Tensor, Tensor) {
+        var h = pos_encoded.clone();
+
+        for (i, linear) in self.mlp.pts_linears.iter().enumerate() {
+            if i == self.mlp.skip_layer {
+                h = Tensor.concat([h, pos_encoded.clone()], dim: -1);
+            }
+            h = linear.forward(&h).relu();
+        }
+
+        let sigma = self.mlp.alpha_linear.forward(&h).relu();
+        let feature = self.mlp.feature_linear.forward(&h);
+
+        let view_input = Tensor.concat([feature, dir_encoded.clone()], dim: -1);
+        var rgb = view_input;
+
+        for linear in self.mlp.views_linears {
+            rgb = linear.forward(&rgb).relu();
+        }
+        rgb = self.mlp.rgb_linear.forward(&rgb).sigmoid();
+
+        (rgb, sigma)
+    }
+}
+
+// ============================================================================
+// VOLUME RENDERING
+// ============================================================================
+
+/// Ray representation for volume rendering
+struct Ray {
+    origin: Vec3,
+    direction: Vec3,
+    near: f32,
+    far: f32,
+}
+
+/// Ray batch for vectorized operations
+struct RayBatch {
+    origins: Tensor,      // [batch, 3]
+    directions: Tensor,   // [batch, 3]
+    near: Tensor,         // [batch, 1]
+    far: Tensor,          // [batch, 1]
+
+    fn sample_points(self, num_samples: u32, stratified: bool = true) -> (Tensor, Tensor) {
+        // Sample points along rays
+        let batch_size = self.origins.shape[0];
+
+        // Uniform spacing
+        let t_vals = Tensor.linspace(0.0, 1.0, num_samples)
+            .unsqueeze(0)
+            .expand([batch_size, num_samples]);
+
+        if stratified {
+            // Add random offset within each bin
+            let mids = 0.5 * (t_vals[.., 1:] + t_vals[.., :-1]);
+            let upper = Tensor.concat([mids, t_vals[.., -1:]], dim: -1);
+            let lower = Tensor.concat([t_vals[.., :1], mids], dim: -1);
+            let t_rand = Tensor.rand([batch_size, num_samples]);
+            let t_vals = lower + (upper - lower) * t_rand;
+        }
+
+        // Convert to distances
+        let z_vals = self.near + (self.far - self.near) * t_vals;
+
+        // Compute 3D points
+        // points[i,j] = origin[i] + z_vals[i,j] * direction[i]
+        let origins_expanded = self.origins.unsqueeze(1);  // [batch, 1, 3]
+        let dirs_expanded = self.directions.unsqueeze(1);   // [batch, 1, 3]
+        let z_expanded = z_vals.unsqueeze(-1);              // [batch, samples, 1]
+
+        let points = origins_expanded + z_expanded * dirs_expanded;  // [batch, samples, 3]
+
+        (points, z_vals)
+    }
+
+    fn sample_points_hierarchical(
+        self,
+        z_vals: &Tensor,
+        weights: &Tensor,
+        num_samples: u32
+    ) -> (Tensor, Tensor) {
+        // Importance sampling based on weights
+        let batch_size = self.origins.shape[0];
+
+        // Get PDF from weights
+        let weights_pad = Tensor.concat([
+            Tensor.zeros([batch_size, 1]),
+            weights,
+            Tensor.zeros([batch_size, 1])
+        ], dim: -1);
+
+        let weights_max = weights_pad.max(-1, keepdim: true);
+        let weights_blur = 0.5 * (
+            weights_pad.max(weights_pad.roll(1, dim: -1)) +
+            weights_pad.max(weights_pad.roll(-1, dim: -1))
+        );
+        weights_blur = weights_blur + 0.01;  // Prevent division by zero
+
+        let pdf = weights_blur / weights_blur.sum(-1, keepdim: true);
+        let cdf = pdf.cumsum(-1);
+
+        // Inverse CDF sampling
+        let u = Tensor.rand([batch_size, num_samples]).sort(-1).values;
+
+        // Binary search for CDF indices
+        let indices = Tensor.searchsorted(cdf, u, right: true);
+        let below = (indices - 1).clamp(0, cdf.shape[-1] - 2);
+        let above = below + 1;
+
+        // Linear interpolation
+        let cdf_below = cdf.gather(-1, below);
+        let cdf_above = cdf.gather(-1, above);
+
+        let z_below = z_vals.gather(-1, below);
+        let z_above = z_vals.gather(-1, above);
+
+        let t = (u - cdf_below) / (cdf_above - cdf_below + 1e-6);
+        let z_samples = z_below + t * (z_above - z_below);
+
+        // Combine with original samples and sort
+        let z_combined = Tensor.concat([z_vals, z_samples], dim: -1)
+            .sort(-1).values;
+
+        // Compute new points
+        let origins_expanded = self.origins.unsqueeze(1);
+        let dirs_expanded = self.directions.unsqueeze(1);
+        let z_expanded = z_combined.unsqueeze(-1);
+
+        let points = origins_expanded + z_expanded * dirs_expanded;
+
+        (points, z_combined)
+    }
+}
+
+/// Volume renderer for NeRF
+struct VolumeRenderer {
+    white_background: bool,
+    raw_noise_std: f32,
+
+    fn create(white_background: bool = false) -> Self {
+        Self {
+            white_background,
+            raw_noise_std: 0.0
+        }
+    }
+
+    fn render(
+        self,
+        rgb: &Tensor,     // [batch, samples, 3]
+        sigma: &Tensor,   // [batch, samples, 1]
+        z_vals: &Tensor,  // [batch, samples]
+        dirs: &Tensor     // [batch, 3]
+    ) -> (Tensor, Tensor, Tensor, Tensor) {
+        // Compute distances between samples
+        let dists = z_vals[.., 1:] - z_vals[.., :-1];
+        let dists = Tensor.concat([
+            dists,
+            Tensor.full([dists.shape[0], 1], 1e10)
+        ], dim: -1);
+
+        // Scale by ray direction magnitude
+        let dir_norm = dirs.norm(dim: -1, keepdim: true);
+        let dists = dists * dir_norm;
+
+        // Add noise during training
+        var sigma = sigma.squeeze(-1);
+        if self.raw_noise_std > 0.0 {
+            let noise = Tensor.randn_like(&sigma) * self.raw_noise_std;
+            sigma = sigma + noise;
+        }
+
+        // Compute alpha (opacity) from density
+        let alpha = 1.0 - (-sigma * dists).exp();
+
+        // Compute transmittance
+        let transmittance = self.exclusive_cumprod(1.0 - alpha + 1e-10);
+
+        // Compute weights
+        let weights = alpha * transmittance;
+
+        // Weighted sum of colors
+        let rgb_map = (weights.unsqueeze(-1) * rgb).sum(dim: 1);
+
+        // Depth map
+        let depth_map = (weights * z_vals).sum(dim: 1);
+
+        // Disparity map
+        let disp_map = 1.0 / (depth_map + 1e-10).max(1e-10);
+
+        // Accumulated opacity
+        let acc_map = weights.sum(dim: 1);
+
+        // Add white background if needed
+        let rgb_map = if self.white_background {
+            rgb_map + (1.0 - acc_map.unsqueeze(-1))
+        } else {
+            rgb_map
+        };
+
+        (rgb_map, depth_map, disp_map, weights)
+    }
+
+    fn exclusive_cumprod(self, x: Tensor) -> Tensor {
+        // Exclusive cumulative product (shifted by 1)
+        let cumprod = x.cumprod(dim: -1);
+        let shifted = Tensor.concat([
+            Tensor.ones([x.shape[0], 1]),
+            cumprod[.., :-1]
+        ], dim: -1);
+        shifted
+    }
+}
+
+/// Occupancy grid for ray marching acceleration
+struct OccupancyGrid {
+    resolution: u32,
+    aabb_min: Vec3,
+    aabb_max: Vec3,
+    grid: Tensor,  // [res, res, res] occupancy values
+    density_threshold: f32,
+
+    fn create(resolution: u32, aabb_min: Vec3, aabb_max: Vec3) -> Self {
+        let grid = Tensor.ones([resolution, resolution, resolution]);
+
+        Self {
+            resolution,
+            aabb_min,
+            aabb_max,
+            grid,
+            density_threshold: 0.01
+        }
+    }
+
+    fn voxel_size(self) -> f32 {
+        (self.aabb_max.x - self.aabb_min.x) / self.resolution as f32
+    }
+
+    fn update(self, network: &impl NeRFNetwork, num_samples: u32 = 16) {
+        // Update occupancy grid based on network density
+        let res = self.resolution;
+
+        // Sample random points in each voxel
+        var positions: Array<Vec3> = [];
+
+        for z in 0..res {
+            for y in 0..res {
+                for x in 0..res {
+                    // Voxel center
+                    let fx = (x as f32 + 0.5) / res as f32;
+                    let fy = (y as f32 + 0.5) / res as f32;
+                    let fz = (z as f32 + 0.5) / res as f32;
+
+                    let pos = Vec3(
+                        self.aabb_min.x + fx * (self.aabb_max.x - self.aabb_min.x),
+                        self.aabb_min.y + fy * (self.aabb_max.y - self.aabb_min.y),
+                        self.aabb_min.z + fz * (self.aabb_max.z - self.aabb_min.z)
+                    );
+                    positions.push(pos);
+                }
+            }
+        }
+
+        // Query densities in batches
+        let pos_tensor = Tensor.from_vec3_array(&positions);
+        let densities = network.forward_density_only(&pos_tensor);
+
+        // Update grid
+        for (i, density) in densities.iter().enumerate() {
+            let z = i / (res * res);
+            let y = (i / res) % res;
+            let x = i % res;
+
+            // EMA update
+            self.grid[x, y, z] = 0.95 * self.grid[x, y, z] + 0.05 * density;
+        }
+    }
+
+    fn is_occupied(self, pos: Vec3) -> bool {
+        // Check if position is in an occupied voxel
+        let fx = (pos.x - self.aabb_min.x) / (self.aabb_max.x - self.aabb_min.x);
+        let fy = (pos.y - self.aabb_min.y) / (self.aabb_max.y - self.aabb_min.y);
+        let fz = (pos.z - self.aabb_min.z) / (self.aabb_max.z - self.aabb_min.z);
+
+        if fx < 0.0 || fx >= 1.0 || fy < 0.0 || fy >= 1.0 || fz < 0.0 || fz >= 1.0 {
+            return false;
+        }
+
+        let x = (fx * self.resolution as f32) as u32;
+        let y = (fy * self.resolution as f32) as u32;
+        let z = (fz * self.resolution as f32) as u32;
+
+        self.grid[x, y, z] > self.density_threshold
+    }
+
+    fn step_to_next_voxel(self, pos: Vec3, dir: Vec3) -> f32 {
+        // Compute step to exit current voxel
+        let voxel = self.voxel_size();
+
+        let fx = (pos.x - self.aabb_min.x) / voxel;
+        let fy = (pos.y - self.aabb_min.y) / voxel;
+        let fz = (pos.z - self.aabb_min.z) / voxel;
+
+        // Distance to next voxel boundary in each dimension
+        let tx = if dir.x > 0.0 {
+            ((fx.floor() + 1.0) * voxel + self.aabb_min.x - pos.x) / dir.x
+        } else if dir.x < 0.0 {
+            (fx.floor() * voxel + self.aabb_min.x - pos.x) / dir.x
+        } else {
+            f32::MAX
+        };
+
+        let ty = if dir.y > 0.0 {
+            ((fy.floor() + 1.0) * voxel + self.aabb_min.y - pos.y) / dir.y
+        } else if dir.y < 0.0 {
+            (fy.floor() * voxel + self.aabb_min.y - pos.y) / dir.y
+        } else {
+            f32::MAX
+        };
+
+        let tz = if dir.z > 0.0 {
+            ((fz.floor() + 1.0) * voxel + self.aabb_min.z - pos.z) / dir.z
+        } else if dir.z < 0.0 {
+            (fz.floor() * voxel + self.aabb_min.z - pos.z) / dir.z
+        } else {
+            f32::MAX
+        };
+
+        tx.min(ty).min(tz).max(voxel * 0.1)
+    }
+
+    fn ray_march_intervals(self, ray: &Ray) -> Array<(f32, f32)> {
+        // Find intervals where ray passes through occupied voxels
+        var intervals: Array<(f32, f32)> = [];
+
+        // DDA ray marching through voxel grid
+        let inv_dir = Vec3(
+            1.0 / ray.direction.x,
+            1.0 / ray.direction.y,
+            1.0 / ray.direction.z
+        );
+
+        // Entry point
+        let t_min = Vec3(
+            (self.aabb_min.x - ray.origin.x) * inv_dir.x,
+            (self.aabb_min.y - ray.origin.y) * inv_dir.y,
+            (self.aabb_min.z - ray.origin.z) * inv_dir.z
+        );
+
+        let t_max = Vec3(
+            (self.aabb_max.x - ray.origin.x) * inv_dir.x,
+            (self.aabb_max.y - ray.origin.y) * inv_dir.y,
+            (self.aabb_max.z - ray.origin.z) * inv_dir.z
+        );
+
+        let t_near = t_min.min(&t_max);
+        let t_far = t_min.max(&t_max);
+
+        let t_enter = t_near.max_component().max(ray.near);
+        let t_exit = t_far.min_component().min(ray.far);
+
+        if t_enter >= t_exit {
+            return intervals;
+        }
+
+        // Step through voxels using DDA
+        let step_size = (self.aabb_max - self.aabb_min).min_component() / self.resolution as f32;
+        var t = t_enter;
+        var in_occupied = false;
+        var interval_start = t_enter;
+
+        while t < t_exit {
+            let pos = ray.origin + ray.direction * t;
+            let occupied = self.is_occupied(pos);
+
+            if occupied && !in_occupied {
+                interval_start = t;
+                in_occupied = true;
+            } else if !occupied && in_occupied {
+                intervals.push((interval_start, t));
+                in_occupied = false;
+            }
+
+            t += step_size;
+        }
+
+        if in_occupied {
+            intervals.push((interval_start, t_exit));
+        }
+
+        intervals
+    }
+}
+
+// ============================================================================
+// 3D GAUSSIAN SPLATTING
+// ============================================================================
+
+/// Single 3D Gaussian primitive
+struct Gaussian3D {
+    position: Vec3,           // Mean position
+    covariance: Mat3,         // 3x3 covariance matrix
+    opacity: f32,             // Alpha value
+    sh_coeffs: Array<Vec3>,   // Spherical harmonics for view-dependent color
+}
+
+/// Collection of 3D Gaussians for a scene
+struct GaussianCloud {
+    positions: Tensor,        // [N, 3]
+    scales: Tensor,           // [N, 3] log-scale
+    rotations: Tensor,        // [N, 4] quaternions
+    opacities: Tensor,        // [N, 1] sigmoid input
+    sh_coeffs: Tensor,        // [N, (sh_degree+1)^2, 3]
+    sh_degree: u32,
+
+    fn create(num_points: u32, sh_degree: u32 = 3) -> Self {
+        let num_sh = (sh_degree + 1) * (sh_degree + 1);
+
+        Self {
+            positions: Tensor.zeros([num_points, 3]),
+            scales: Tensor.zeros([num_points, 3]),
+            rotations: Tensor.zeros([num_points, 4]),
+            opacities: Tensor.zeros([num_points, 1]),
+            sh_coeffs: Tensor.zeros([num_points, num_sh, 3]),
+            sh_degree
+        }
+    }
+
+    fn from_point_cloud(points: &Tensor, colors: &Tensor, sh_degree: u32 = 3) -> Self {
+        let num_points = points.shape[0];
+        let num_sh = (sh_degree + 1) * (sh_degree + 1);
+
+        // Initialize positions from point cloud
+        let positions = points.clone();
+
+        // Initialize scales based on nearest neighbor distances
+        let dists = Self.compute_nn_distances(points);
+        let scales = (dists.log() * 0.5).unsqueeze(-1).expand([num_points, 3]);
+
+        // Identity rotations
+        let rotations = Tensor.zeros([num_points, 4]);
+        rotations[.., 0] = 1.0;  // w component
+
+        // Initialize opacities (will be passed through sigmoid)
+        let opacities = Tensor.full([num_points, 1], 0.1).logit();
+
+        // Initialize SH coefficients from colors (DC component only)
+        let sh_coeffs = Tensor.zeros([num_points, num_sh, 3]);
+        sh_coeffs[.., 0, ..] = colors / 0.28209479177387814;  // DC normalization
+
+        Self {
+            positions,
+            scales,
+            rotations,
+            opacities,
+            sh_coeffs,
+            sh_degree
+        }
+    }
+
+    fn compute_nn_distances(points: &Tensor) -> Tensor {
+        // Compute distance to nearest neighbor for each point
+        let num_points = points.shape[0];
+        var dists = Tensor.zeros([num_points]);
+
+        // Use spatial hash for efficiency
+        for i in 0..num_points {
+            var min_dist = f32::MAX;
+            for j in 0..num_points {
+                if i != j {
+                    let d = (points[i] - points[j]).norm();
+                    min_dist = min_dist.min(d);
+                }
+            }
+            dists[i] = min_dist.max(0.0001);
+        }
+
+        dists
+    }
+
+    fn get_covariance_3d(self, idx: u32) -> Mat3 {
+        // Compute 3D covariance from scale and rotation
+        let s = self.scales[idx].exp();
+        let q = self.rotations[idx];
+
+        // Quaternion to rotation matrix
+        let r = Quaternion.from_tensor(&q).to_mat3();
+
+        // Covariance = R * S * S^T * R^T
+        let scale_mat = Mat3.diag(s.x, s.y, s.z);
+        r * scale_mat * scale_mat * r.transpose()
+    }
+
+    fn get_color(self, idx: u32, direction: Vec3) -> Vec3 {
+        // Evaluate SH for view direction
+        let sh_encoder = SphericalHarmonicsEncoding.create(self.sh_degree);
+        let dir_tensor = Tensor.from_vec3(&direction);
+        let sh_vals = sh_encoder.encode(&dir_tensor);
+
+        var color = Vec3.zero();
+        let num_sh = (self.sh_degree + 1) * (self.sh_degree + 1);
+
+        for i in 0..num_sh {
+            let coeff = Vec3(
+                self.sh_coeffs[idx, i, 0].item(),
+                self.sh_coeffs[idx, i, 1].item(),
+                self.sh_coeffs[idx, i, 2].item()
+            );
+            color += coeff * sh_vals[i].item();
+        }
+
+        // Clamp to valid range
+        color.clamp(0.0, 1.0)
+    }
+
+    fn num_points(self) -> u32 {
+        self.positions.shape[0]
+    }
+}
+
+/// Gaussian splatting rasterizer
+struct GaussianRasterizer {
+    image_width: u32,
+    image_height: u32,
+    fov_x: f32,
+    fov_y: f32,
+    tile_size: u32,
+
+    fn create(width: u32, height: u32, fov_x: f32, fov_y: f32) -> Self {
+        Self {
+            image_width: width,
+            image_height: height,
+            fov_x,
+            fov_y,
+            tile_size: 16
+        }
+    }
+
+    fn project_gaussian(
+        self,
+        mean_3d: Vec3,
+        cov_3d: Mat3,
+        view_matrix: &Mat4,
+        proj_matrix: &Mat4
+    ) -> Option<(Vec2, Mat2, f32)> {
+        // Project 3D Gaussian to 2D
+
+        // Transform to view space
+        let mean_view = view_matrix.transform_point(&mean_3d);
+
+        // Check if behind camera
+        if mean_view.z <= 0.1 {
+            return None;
+        }
+
+        // Jacobian of projection
+        let focal_x = self.image_width as f32 / (2.0 * (self.fov_x / 2.0).tan());
+        let focal_y = self.image_height as f32 / (2.0 * (self.fov_y / 2.0).tan());
+
+        let z_inv = 1.0 / mean_view.z;
+        let z_inv2 = z_inv * z_inv;
+
+        let J = Mat3(
+            focal_x * z_inv, 0.0, -focal_x * mean_view.x * z_inv2,
+            0.0, focal_y * z_inv, -focal_y * mean_view.y * z_inv2,
+            0.0, 0.0, 0.0
+        );
+
+        // Transform covariance
+        let W = Mat3.from_mat4_upper_left(&view_matrix);
+        let cov_view = W * cov_3d * W.transpose();
+        let cov_2d_full = J * cov_view * J.transpose();
+
+        // Extract 2x2 covariance
+        let cov_2d = Mat2(
+            cov_2d_full.m00, cov_2d_full.m01,
+            cov_2d_full.m10, cov_2d_full.m11
+        );
+
+        // Add low-pass filter (blur for anti-aliasing)
+        let cov_2d = Mat2(
+            cov_2d.m00 + 0.3, cov_2d.m01,
+            cov_2d.m10, cov_2d.m11 + 0.3
+        );
+
+        // Project mean to screen
+        let ndc = proj_matrix.transform_point(&mean_view);
+        let screen_x = ((ndc.x + 1.0) * 0.5) * self.image_width as f32;
+        let screen_y = ((1.0 - ndc.y) * 0.5) * self.image_height as f32;
+
+        Some((Vec2(screen_x, screen_y), cov_2d, mean_view.z))
+    }
+
+    fn compute_conic(self, cov_2d: &Mat2) -> (Vec3, f32) {
+        // Compute conic coefficients for 2D Gaussian evaluation
+        let det = cov_2d.determinant();
+
+        if det <= 0.0 {
+            return (Vec3.zero(), 0.0);
+        }
+
+        let det_inv = 1.0 / det;
+        let conic = Vec3(
+            cov_2d.m11 * det_inv,
+            -cov_2d.m01 * det_inv,
+            cov_2d.m00 * det_inv
+        );
+
+        // Compute radius (3 sigma)
+        let mid = 0.5 * (cov_2d.m00 + cov_2d.m11);
+        let half_diff = 0.5 * (cov_2d.m00 - cov_2d.m11);
+        let lambda1 = mid + (half_diff * half_diff + cov_2d.m01 * cov_2d.m01).sqrt();
+        let radius = 3.0 * lambda1.sqrt();
+
+        (conic, radius)
+    }
+
+    fn rasterize(
+        self,
+        gaussians: &GaussianCloud,
+        view_matrix: &Mat4,
+        proj_matrix: &Mat4,
+        camera_pos: Vec3
+    ) -> Tensor {
+        let num_points = gaussians.num_points();
+
+        // Output image
+        var image = Tensor.zeros([self.image_height, self.image_width, 4]);
+
+        // Per-pixel accumulation buffers
+        var accum_color = Tensor.zeros([self.image_height, self.image_width, 3]);
+        var accum_alpha = Tensor.zeros([self.image_height, self.image_width, 1]);
+
+        // Project and sort Gaussians by depth
+        var projected: Array<(u32, Vec2, Mat2, f32, f32)> = [];  // (idx, mean, cov, depth, opacity)
+
+        for i in 0..num_points {
+            let mean_3d = Vec3(
+                gaussians.positions[i, 0].item(),
+                gaussians.positions[i, 1].item(),
+                gaussians.positions[i, 2].item()
+            );
+
+            let cov_3d = gaussians.get_covariance_3d(i);
+
+            if let Some((mean_2d, cov_2d, depth)) = self.project_gaussian(
+                mean_3d, cov_3d, view_matrix, proj_matrix
+            ) {
+                let opacity = gaussians.opacities[i].sigmoid().item();
+                projected.push((i, mean_2d, cov_2d, depth, opacity));
+            }
+        }
+
+        // Sort by depth (front to back for alpha blending)
+        projected.sort_by(|a, b| a.3.partial_cmp(&b.3).unwrap());
+
+        // Tile-based rasterization
+        let num_tiles_x = (self.image_width + self.tile_size - 1) / self.tile_size;
+        let num_tiles_y = (self.image_height + self.tile_size - 1) / self.tile_size;
+
+        for (idx, mean_2d, cov_2d, depth, opacity) in projected {
+            let (conic, radius) = self.compute_conic(&cov_2d);
+
+            if radius <= 0.0 {
+                continue;
+            }
+
+            // Find affected tiles
+            let min_tile_x = ((mean_2d.x - radius).max(0.0) / self.tile_size as f32) as u32;
+            let max_tile_x = ((mean_2d.x + radius).min(self.image_width as f32 - 1.0) / self.tile_size as f32) as u32;
+            let min_tile_y = ((mean_2d.y - radius).max(0.0) / self.tile_size as f32) as u32;
+            let max_tile_y = ((mean_2d.y + radius).min(self.image_height as f32 - 1.0) / self.tile_size as f32) as u32;
+
+            // Get color for this Gaussian
+            let view_dir = (Vec3(
+                gaussians.positions[idx, 0].item(),
+                gaussians.positions[idx, 1].item(),
+                gaussians.positions[idx, 2].item()
+            ) - camera_pos).normalize();
+
+            let color = gaussians.get_color(idx, view_dir);
+
+            // Rasterize to affected pixels
+            for tile_y in min_tile_y..=max_tile_y {
+                for tile_x in min_tile_x..=max_tile_x {
+                    let px_start_x = tile_x * self.tile_size;
+                    let px_start_y = tile_y * self.tile_size;
+                    let px_end_x = (px_start_x + self.tile_size).min(self.image_width);
+                    let px_end_y = (px_start_y + self.tile_size).min(self.image_height);
+
+                    for py in px_start_y..px_end_y {
+                        for px in px_start_x..px_end_x {
+                            let dx = px as f32 + 0.5 - mean_2d.x;
+                            let dy = py as f32 + 0.5 - mean_2d.y;
+
+                            // Evaluate 2D Gaussian
+                            let power = -0.5 * (
+                                conic.x * dx * dx +
+                                2.0 * conic.y * dx * dy +
+                                conic.z * dy * dy
+                            );
+
+                            if power > -4.0 {  // Within 2 sigma
+                                let alpha = opacity * power.exp();
+                                let alpha = alpha.min(0.99);
+
+                                // Check early termination
+                                let T = 1.0 - accum_alpha[py, px, 0].item();
+                                if T < 0.0001 {
+                                    continue;
+                                }
+
+                                // Alpha blending
+                                let weight = alpha * T;
+                                accum_color[py, px, 0] += weight * color.x;
+                                accum_color[py, px, 1] += weight * color.y;
+                                accum_color[py, px, 2] += weight * color.z;
+                                accum_alpha[py, px, 0] += weight;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Normalize colors by accumulated alpha
+        for y in 0..self.image_height {
+            for x in 0..self.image_width {
+                let alpha = accum_alpha[y, x, 0].item();
+                if alpha > 0.0 {
+                    image[y, x, 0] = accum_color[y, x, 0];
+                    image[y, x, 1] = accum_color[y, x, 1];
+                    image[y, x, 2] = accum_color[y, x, 2];
+                    image[y, x, 3] = alpha;
+                }
+            }
+        }
+
+        image
+    }
+
+    fn rasterize_cuda(
+        self,
+        gaussians: &GaussianCloud,
+        view_matrix: &Mat4,
+        proj_matrix: &Mat4,
+        camera_pos: Vec3,
+        device: Device
+    ) -> Tensor {
+        // GPU-accelerated Gaussian splatting
+        let num_points = gaussians.num_points();
+        let image = Tensor.zeros([self.image_height, self.image_width, 4], device: device);
+
+        // Preprocessing: project Gaussians
+        let means_2d = Tensor.zeros([num_points, 2], device: device);
+        let conics = Tensor.zeros([num_points, 3], device: device);
+        let depths = Tensor.zeros([num_points], device: device);
+        let radii = Tensor.zeros([num_points], device: device);
+
+        device.launch_kernel("project_gaussians", grid: [(num_points + 255) / 256], block: [256]) {
+            let idx = blockIdx.x * blockDim.x + threadIdx.x;
+            if idx >= num_points { return; }
+
+            // Project this Gaussian
+            let mean_3d = gaussians.positions[idx];
+            let scale = gaussians.scales[idx].exp();
+            let rotation = gaussians.rotations[idx];
+
+            // Compute covariance and project
+            // ... (GPU implementation)
+        };
+
+        // Sort by depth using radix sort
+        let sorted_indices = depths.argsort();
+
+        // Tile-based rasterization
+        let num_tiles_x = (self.image_width + self.tile_size - 1) / self.tile_size;
+        let num_tiles_y = (self.image_height + self.tile_size - 1) / self.tile_size;
+
+        // Compute tile ranges for each Gaussian
+        let tiles_touched = Tensor.zeros([num_points, 2], device: device);  // (start, count)
+
+        // Prefix sum to get tile offsets
+        let tile_gaussian_list = self.build_tile_lists(
+            &means_2d, &radii, num_tiles_x, num_tiles_y, device
+        );
+
+        // Rasterize tiles in parallel
+        device.launch_kernel("rasterize_tiles",
+            grid: [num_tiles_x, num_tiles_y],
+            block: [self.tile_size, self.tile_size]
+        ) {
+            let tile_x = blockIdx.x;
+            let tile_y = blockIdx.y;
+            let local_x = threadIdx.x;
+            let local_y = threadIdx.y;
+
+            let px = tile_x * self.tile_size + local_x;
+            let py = tile_y * self.tile_size + local_y;
+
+            if px >= self.image_width || py >= self.image_height {
+                return;
+            }
+
+            // Shared memory for tile's Gaussians
+            extern __shared__ float tile_gaussians[SHARED_MEM_SIZE];
+
+            var accum_color = float3(0.0, 0.0, 0.0);
+            var accum_alpha: f32 = 0.0;
+            var T: f32 = 1.0;
+
+            // Process Gaussians in this tile
+            let tile_idx = tile_y * num_tiles_x + tile_x;
+            let gaussian_start = tile_gaussian_list.starts[tile_idx];
+            let gaussian_count = tile_gaussian_list.counts[tile_idx];
+
+            for batch_start in (0..gaussian_count).step_by(BATCH_SIZE) {
+                // Load batch into shared memory
+                __syncthreads();
+
+                let batch_end = min(batch_start + BATCH_SIZE, gaussian_count);
+
+                for i in (batch_start + threadIdx.x * blockDim.y + threadIdx.y)..batch_end
+                    step_by blockDim.x * blockDim.y {
+                    let gaussian_idx = tile_gaussian_list.indices[gaussian_start + i];
+                    // Load gaussian data into shared memory
+                }
+
+                __syncthreads();
+
+                // Process batch
+                for i in 0..(batch_end - batch_start) {
+                    let mean = float2(tile_gaussians[i * 6], tile_gaussians[i * 6 + 1]);
+                    let conic = float3(
+                        tile_gaussians[i * 6 + 2],
+                        tile_gaussians[i * 6 + 3],
+                        tile_gaussians[i * 6 + 4]
+                    );
+                    let opacity = tile_gaussians[i * 6 + 5];
+
+                    let dx = px as f32 + 0.5 - mean.x;
+                    let dy = py as f32 + 0.5 - mean.y;
+
+                    let power = -0.5 * (
+                        conic.x * dx * dx +
+                        2.0 * conic.y * dx * dy +
+                        conic.z * dy * dy
+                    );
+
+                    if power > -4.0 {
+                        let alpha = min(0.99, opacity * exp(power));
+
+                        if T < 0.0001 { break; }
+
+                        let weight = alpha * T;
+                        // Load color and accumulate
+                        let color = load_sh_color(tile_gaussians, i);
+                        accum_color += weight * color;
+                        T *= (1.0 - alpha);
+                    }
+                }
+            }
+
+            // Write output
+            image[py, px, 0] = accum_color.x;
+            image[py, px, 1] = accum_color.y;
+            image[py, px, 2] = accum_color.z;
+            image[py, px, 3] = 1.0 - T;
+        };
+
+        image
+    }
+
+    fn build_tile_lists(
+        self,
+        means_2d: &Tensor,
+        radii: &Tensor,
+        num_tiles_x: u32,
+        num_tiles_y: u32,
+        device: Device
+    ) -> TileGaussianList {
+        // Build per-tile Gaussian lists for efficient rasterization
+        let num_tiles = num_tiles_x * num_tiles_y;
+        let num_points = means_2d.shape[0];
+
+        // Count Gaussians per tile
+        let tile_counts = Tensor.zeros([num_tiles], device: device);
+
+        device.launch_kernel("count_tile_gaussians", grid: [(num_points + 255) / 256], block: [256]) {
+            let idx = blockIdx.x * blockDim.x + threadIdx.x;
+            if idx >= num_points { return; }
+
+            let mean = means_2d[idx];
+            let radius = radii[idx];
+
+            let min_tile_x = max(0, (mean.x - radius) / self.tile_size) as u32;
+            let max_tile_x = min(num_tiles_x - 1, (mean.x + radius) / self.tile_size) as u32;
+            let min_tile_y = max(0, (mean.y - radius) / self.tile_size) as u32;
+            let max_tile_y = min(num_tiles_y - 1, (mean.y + radius) / self.tile_size) as u32;
+
+            for ty in min_tile_y..=max_tile_y {
+                for tx in min_tile_x..=max_tile_x {
+                    let tile_idx = ty * num_tiles_x + tx;
+                    atomicAdd(&tile_counts[tile_idx], 1);
+                }
+            }
+        };
+
+        // Prefix sum for offsets
+        let tile_offsets = tile_counts.cumsum(0);
+        let total_pairs = tile_offsets[-1].item() as u32;
+
+        // Allocate and fill tile lists
+        let tile_indices = Tensor.zeros([total_pairs], dtype: DataType.U32, device: device);
+        let tile_keys = Tensor.zeros([total_pairs], dtype: DataType.U64, device: device);
+
+        device.launch_kernel("fill_tile_lists", grid: [(num_points + 255) / 256], block: [256]) {
+            let idx = blockIdx.x * blockDim.x + threadIdx.x;
+            if idx >= num_points { return; }
+
+            // Fill tile lists with (tile_id << 32 | depth) keys for sorting
+            // ...
+        };
+
+        // Sort by key (tile ID then depth)
+        let sorted_order = tile_keys.argsort();
+        let sorted_indices = tile_indices.gather(0, sorted_order);
+
+        TileGaussianList {
+            starts: tile_offsets - tile_counts,
+            counts: tile_counts,
+            indices: sorted_indices
+        }
+    }
+}
+
+/// Tile-Gaussian mapping for rasterization
+struct TileGaussianList {
+    starts: Tensor,   // [num_tiles] start index for each tile
+    counts: Tensor,   // [num_tiles] count for each tile
+    indices: Tensor,  // [total_pairs] sorted Gaussian indices
+}
+
+// ============================================================================
+// GAUSSIAN SPLATTING TRAINING
+// ============================================================================
+
+/// Adaptive density control for Gaussian splatting
+struct AdaptiveDensityControl {
+    grad_threshold: f32,
+    min_opacity: f32,
+    max_screen_size: f32,
+    densify_interval: u32,
+    opacity_reset_interval: u32,
+
+    fn create() -> Self {
+        Self {
+            grad_threshold: 0.0002,
+            min_opacity: 0.005,
+            max_screen_size: 20.0,
+            densify_interval: 100,
+            opacity_reset_interval: 3000
+        }
+    }
+
+    fn densify_and_prune(
+        self,
+        gaussians: &mut GaussianCloud,
+        grads: &Tensor,
+        iteration: u32
+    ) {
+        if iteration % self.densify_interval != 0 {
+            return;
+        }
+
+        // Compute gradient magnitude
+        let grad_norms = grads.norm(dim: -1);
+
+        // Find points to clone (small Gaussians with high gradients)
+        let scales_mean = gaussians.scales.exp().mean(dim: -1);
+        let clone_mask = (grad_norms > self.grad_threshold) &
+                         (scales_mean < self.max_screen_size / 10.0);
+
+        // Find points to split (large Gaussians with high gradients)
+        let split_mask = (grad_norms > self.grad_threshold) &
+                         (scales_mean >= self.max_screen_size / 10.0);
+
+        // Clone small Gaussians
+        if clone_mask.any() {
+            let clone_indices = clone_mask.nonzero().squeeze(-1);
+            let num_clones = clone_indices.shape[0];
+
+            // Duplicate Gaussians
+            let new_positions = gaussians.positions.index_select(0, clone_indices);
+            let new_scales = gaussians.scales.index_select(0, clone_indices);
+            let new_rotations = gaussians.rotations.index_select(0, clone_indices);
+            let new_opacities = gaussians.opacities.index_select(0, clone_indices);
+            let new_sh_coeffs = gaussians.sh_coeffs.index_select(0, clone_indices);
+
+            // Offset positions slightly
+            let offset = Tensor.randn([num_clones, 3]) * new_scales.exp() * 0.5;
+            let new_positions = new_positions + offset;
+
+            // Append to cloud
+            gaussians.positions = Tensor.concat([gaussians.positions, new_positions], dim: 0);
+            gaussians.scales = Tensor.concat([gaussians.scales, new_scales], dim: 0);
+            gaussians.rotations = Tensor.concat([gaussians.rotations, new_rotations], dim: 0);
+            gaussians.opacities = Tensor.concat([gaussians.opacities, new_opacities], dim: 0);
+            gaussians.sh_coeffs = Tensor.concat([gaussians.sh_coeffs, new_sh_coeffs], dim: 0);
+        }
+
+        // Split large Gaussians
+        if split_mask.any() {
+            let split_indices = split_mask.nonzero().squeeze(-1);
+            let num_splits = split_indices.shape[0];
+
+            // Create two children from each parent
+            let parent_positions = gaussians.positions.index_select(0, split_indices);
+            let parent_scales = gaussians.scales.index_select(0, split_indices);
+            let parent_rotations = gaussians.rotations.index_select(0, split_indices);
+            let parent_sh_coeffs = gaussians.sh_coeffs.index_select(0, split_indices);
+
+            // Child scales are smaller
+            let child_scales = parent_scales - Math.log(1.6);
+
+            // Sample offsets from parent Gaussian
+            let stds = parent_scales.exp();
+            let offset1 = Tensor.randn([num_splits, 3]) * stds;
+            let offset2 = -offset1;
+
+            // Two children per parent
+            let child1_pos = parent_positions + offset1;
+            let child2_pos = parent_positions + offset2;
+
+            let new_positions = Tensor.concat([child1_pos, child2_pos], dim: 0);
+            let new_scales = Tensor.concat([child_scales.clone(), child_scales], dim: 0);
+            let new_rotations = Tensor.concat([parent_rotations.clone(), parent_rotations], dim: 0);
+            let new_opacities = Tensor.full([num_splits * 2, 1], 0.0);  // Reset opacity
+            let new_sh_coeffs = Tensor.concat([parent_sh_coeffs.clone(), parent_sh_coeffs], dim: 0);
+
+            // Replace parent with children
+            let keep_mask = !split_mask;
+            gaussians.positions = Tensor.concat([
+                gaussians.positions.masked_select_rows(keep_mask),
+                new_positions
+            ], dim: 0);
+            gaussians.scales = Tensor.concat([
+                gaussians.scales.masked_select_rows(keep_mask),
+                new_scales
+            ], dim: 0);
+            gaussians.rotations = Tensor.concat([
+                gaussians.rotations.masked_select_rows(keep_mask),
+                new_rotations
+            ], dim: 0);
+            gaussians.opacities = Tensor.concat([
+                gaussians.opacities.masked_select_rows(keep_mask),
+                new_opacities
+            ], dim: 0);
+            gaussians.sh_coeffs = Tensor.concat([
+                gaussians.sh_coeffs.masked_select_rows(keep_mask),
+                new_sh_coeffs
+            ], dim: 0);
+        }
+
+        // Prune low opacity Gaussians
+        let opacities = gaussians.opacities.sigmoid();
+        let prune_mask = opacities.squeeze(-1) < self.min_opacity;
+
+        if prune_mask.any() {
+            let keep_mask = !prune_mask;
+            gaussians.positions = gaussians.positions.masked_select_rows(keep_mask);
+            gaussians.scales = gaussians.scales.masked_select_rows(keep_mask);
+            gaussians.rotations = gaussians.rotations.masked_select_rows(keep_mask);
+            gaussians.opacities = gaussians.opacities.masked_select_rows(keep_mask);
+            gaussians.sh_coeffs = gaussians.sh_coeffs.masked_select_rows(keep_mask);
+        }
+
+        // Reset opacity periodically
+        if iteration % self.opacity_reset_interval == 0 {
+            gaussians.opacities = Tensor.full_like(&gaussians.opacities, -2.0);
+        }
+    }
+}
+
+/// Gaussian splatting trainer
+struct GaussianSplattingTrainer {
+    gaussians: GaussianCloud,
+    rasterizer: GaussianRasterizer,
+    optimizer: Adam,
+    density_control: AdaptiveDensityControl,
+
+    // Learning rates
+    lr_position: f32,
+    lr_scale: f32,
+    lr_rotation: f32,
+    lr_opacity: f32,
+    lr_sh: f32,
+
+    fn create(
+        initial_points: &Tensor,
+        initial_colors: &Tensor,
+        image_width: u32,
+        image_height: u32,
+        fov_x: f32,
+        fov_y: f32
+    ) -> Self {
+        let gaussians = GaussianCloud.from_point_cloud(initial_points, initial_colors, sh_degree: 3);
+        let rasterizer = GaussianRasterizer.create(image_width, image_height, fov_x, fov_y);
+
+        // Per-parameter learning rates
+        let lr_position = 0.00016;
+        let lr_scale = 0.005;
+        let lr_rotation = 0.001;
+        let lr_opacity = 0.05;
+        let lr_sh = 0.0025;
+
+        let optimizer = Adam.create(
+            params: [
+                gaussians.positions,
+                gaussians.scales,
+                gaussians.rotations,
+                gaussians.opacities,
+                gaussians.sh_coeffs
+            ],
+            lr: [lr_position, lr_scale, lr_rotation, lr_opacity, lr_sh],
+            betas: (0.9, 0.999)
+        );
+
+        let density_control = AdaptiveDensityControl.create();
+
+        Self {
+            gaussians,
+            rasterizer,
+            optimizer,
+            density_control,
+            lr_position,
+            lr_scale,
+            lr_rotation,
+            lr_opacity,
+            lr_sh
+        }
+    }
+
+    fn train_step(
+        self,
+        target_image: &Tensor,
+        view_matrix: &Mat4,
+        proj_matrix: &Mat4,
+        camera_pos: Vec3,
+        iteration: u32
+    ) -> f32 {
+        // Render
+        let rendered = self.rasterizer.rasterize(
+            &self.gaussians,
+            view_matrix,
+            proj_matrix,
+            camera_pos
+        );
+
+        // L1 loss
+        let rgb_rendered = rendered[.., .., 0:3];
+        let rgb_target = target_image[.., .., 0:3];
+        let l1_loss = (rgb_rendered - rgb_target).abs().mean();
+
+        // SSIM loss
+        let ssim_loss = 1.0 - self.compute_ssim(&rgb_rendered, &rgb_target);
+
+        // Combined loss
+        let lambda_ssim = 0.2;
+        let loss = (1.0 - lambda_ssim) * l1_loss + lambda_ssim * ssim_loss;
+
+        // Backward pass
+        loss.backward();
+
+        // Store gradients for density control
+        let position_grads = self.gaussians.positions.grad().clone();
+
+        // Optimizer step
+        self.optimizer.step();
+        self.optimizer.zero_grad();
+
+        // Adaptive density control
+        self.density_control.densify_and_prune(&mut self.gaussians, &position_grads, iteration);
+
+        // Update learning rates
+        self.update_learning_rate(iteration);
+
+        loss.item()
+    }
+
+    fn compute_ssim(self, pred: &Tensor, target: &Tensor) -> Tensor {
+        // Simplified SSIM computation
+        let C1: f32 = 0.01 * 0.01;
+        let C2: f32 = 0.03 * 0.03;
+
+        let mu_x = pred.mean(dim: [-3, -2], keepdim: true);
+        let mu_y = target.mean(dim: [-3, -2], keepdim: true);
+
+        let sigma_x = ((pred - mu_x).pow(2.0)).mean(dim: [-3, -2], keepdim: true);
+        let sigma_y = ((target - mu_y).pow(2.0)).mean(dim: [-3, -2], keepdim: true);
+        let sigma_xy = ((pred - mu_x) * (target - mu_y)).mean(dim: [-3, -2], keepdim: true);
+
+        let numerator = (2.0 * mu_x * mu_y + C1) * (2.0 * sigma_xy + C2);
+        let denominator = (mu_x.pow(2.0) + mu_y.pow(2.0) + C1) * (sigma_x + sigma_y + C2);
+
+        (numerator / denominator).mean()
+    }
+
+    fn update_learning_rate(self, iteration: u32) {
+        // Exponential decay for position learning rate
+        let position_decay = 0.01;
+        let final_lr = self.lr_position * 0.01;
+
+        let t = iteration as f32 / 30000.0;
+        let lr = (self.lr_position - final_lr) * Math.exp(-position_decay * t) + final_lr;
+
+        self.optimizer.set_lr(0, lr);
+    }
+
+    fn render(self, view_matrix: &Mat4, proj_matrix: &Mat4, camera_pos: Vec3) -> Tensor {
+        self.rasterizer.rasterize(&self.gaussians, view_matrix, proj_matrix, camera_pos)
+    }
+}
+
+// ============================================================================
+// NERF TRAINING
+// ============================================================================
+
+/// NeRF training configuration
+struct NeRFTrainConfig {
+    num_coarse_samples: u32,
+    num_fine_samples: u32,
+    chunk_size: u32,
+    learning_rate: f32,
+    lr_decay: f32,
+    num_iterations: u32,
+    use_viewdirs: bool,
+    white_background: bool,
+
+    fn default() -> Self {
+        Self {
+            num_coarse_samples: 64,
+            num_fine_samples: 128,
+            chunk_size: 32768,
+            learning_rate: 5e-4,
+            lr_decay: 250,
+            num_iterations: 200000,
+            use_viewdirs: true,
+            white_background: false
+        }
+    }
+}
+
+/// NeRF trainer
+struct NeRFTrainer {
+    coarse_network: NeRFMLP,
+    fine_network: NeRFMLP,
+    renderer: VolumeRenderer,
+    optimizer: Adam,
+    scheduler: LearningRateScheduler,
+    config: NeRFTrainConfig,
+
+    fn create(config: NeRFTrainConfig) -> Self {
+        let coarse_network = NeRFMLP.create(
+            pos_frequencies: 10,
+            dir_frequencies: 4,
+            hidden_dim: 256,
+            num_layers: 8,
+            skip_layer: 4
+        );
+
+        let fine_network = NeRFMLP.create(
+            pos_frequencies: 10,
+            dir_frequencies: 4,
+            hidden_dim: 256,
+            num_layers: 8,
+            skip_layer: 4
+        );
+
+        let renderer = VolumeRenderer.create(white_background: config.white_background);
+
+        let params = coarse_network.parameters() + fine_network.parameters();
+        let optimizer = Adam.create(params, lr: config.learning_rate);
+
+        let scheduler = LearningRateScheduler.exponential(
+            optimizer: &optimizer,
+            gamma: 0.1,
+            step_size: config.lr_decay as u32 * 1000
+        );
+
+        Self {
+            coarse_network,
+            fine_network,
+            renderer,
+            optimizer,
+            scheduler,
+            config
+        }
+    }
+
+    fn train_step(self, rays: &RayBatch, target_rgb: &Tensor) -> f32 {
+        // Coarse sampling
+        let (coarse_points, coarse_z) = rays.sample_points(
+            self.config.num_coarse_samples,
+            stratified: true
+        );
+
+        // Expand directions for all points
+        let batch_size = rays.origins.shape[0];
+        let num_coarse = self.config.num_coarse_samples;
+        let dirs = rays.directions.unsqueeze(1).expand([batch_size, num_coarse, 3]);
+
+        // Flatten for network
+        let flat_points = coarse_points.reshape([-1, 3]);
+        let flat_dirs = dirs.reshape([-1, 3]);
+
+        // Coarse network forward
+        let (coarse_rgb, coarse_sigma) = self.coarse_network.forward(&flat_points, &flat_dirs);
+
+        // Reshape outputs
+        let coarse_rgb = coarse_rgb.reshape([batch_size, num_coarse, 3]);
+        let coarse_sigma = coarse_sigma.reshape([batch_size, num_coarse, 1]);
+
+        // Coarse rendering
+        let (coarse_rgb_map, _, _, coarse_weights) = self.renderer.render(
+            &coarse_rgb, &coarse_sigma, &coarse_z, &rays.directions
+        );
+
+        // Hierarchical sampling for fine network
+        let num_fine = self.config.num_fine_samples;
+        let (fine_points, fine_z) = rays.sample_points_hierarchical(
+            &coarse_z,
+            &coarse_weights,
+            num_fine
+        );
+
+        let total_samples = num_coarse + num_fine;
+        let fine_dirs = rays.directions.unsqueeze(1).expand([batch_size, total_samples, 3]);
+
+        let flat_fine_points = fine_points.reshape([-1, 3]);
+        let flat_fine_dirs = fine_dirs.reshape([-1, 3]);
+
+        // Fine network forward
+        let (fine_rgb, fine_sigma) = self.fine_network.forward(&flat_fine_points, &flat_fine_dirs);
+
+        let fine_rgb = fine_rgb.reshape([batch_size, total_samples, 3]);
+        let fine_sigma = fine_sigma.reshape([batch_size, total_samples, 1]);
+
+        // Fine rendering
+        let (fine_rgb_map, _, _, _) = self.renderer.render(
+            &fine_rgb, &fine_sigma, &fine_z, &rays.directions
+        );
+
+        // Compute losses
+        let coarse_loss = (coarse_rgb_map - target_rgb).pow(2.0).mean();
+        let fine_loss = (fine_rgb_map - target_rgb).pow(2.0).mean();
+        let total_loss = coarse_loss + fine_loss;
+
+        // Backward pass
+        total_loss.backward();
+        self.optimizer.step();
+        self.optimizer.zero_grad();
+        self.scheduler.step();
+
+        total_loss.item()
+    }
+
+    fn render_image(
+        self,
+        camera: &Camera,
+        width: u32,
+        height: u32,
+        near: f32,
+        far: f32
+    ) -> (Tensor, Tensor) {
+        // Generate rays for all pixels
+        let rays = camera.generate_rays(width, height, near, far);
+
+        var rgb_chunks: Array<Tensor> = [];
+        var depth_chunks: Array<Tensor> = [];
+
+        let num_rays = width * height;
+        let chunk_size = self.config.chunk_size;
+
+        for start in (0..num_rays).step_by(chunk_size) {
+            let end = (start + chunk_size).min(num_rays);
+            let ray_batch = rays.slice(start, end);
+
+            // Coarse pass
+            let (coarse_points, coarse_z) = ray_batch.sample_points(
+                self.config.num_coarse_samples,
+                stratified: false
+            );
+
+            let batch_size = end - start;
+            let num_samples = self.config.num_coarse_samples;
+            let dirs = ray_batch.directions.unsqueeze(1).expand([batch_size, num_samples, 3]);
+
+            let flat_points = coarse_points.reshape([-1, 3]);
+            let flat_dirs = dirs.reshape([-1, 3]);
+
+            let (coarse_rgb, coarse_sigma) = self.coarse_network.forward(&flat_points, &flat_dirs);
+
+            let coarse_rgb = coarse_rgb.reshape([batch_size, num_samples, 3]);
+            let coarse_sigma = coarse_sigma.reshape([batch_size, num_samples, 1]);
+
+            let (_, _, _, coarse_weights) = self.renderer.render(
+                &coarse_rgb, &coarse_sigma, &coarse_z, &ray_batch.directions
+            );
+
+            // Fine pass
+            let (fine_points, fine_z) = ray_batch.sample_points_hierarchical(
+                &coarse_z,
+                &coarse_weights,
+                self.config.num_fine_samples
+            );
+
+            let total_samples = self.config.num_coarse_samples + self.config.num_fine_samples;
+            let fine_dirs = ray_batch.directions.unsqueeze(1).expand([batch_size, total_samples, 3]);
+
+            let flat_fine_points = fine_points.reshape([-1, 3]);
+            let flat_fine_dirs = fine_dirs.reshape([-1, 3]);
+
+            let (fine_rgb, fine_sigma) = self.fine_network.forward(&flat_fine_points, &flat_fine_dirs);
+
+            let fine_rgb = fine_rgb.reshape([batch_size, total_samples, 3]);
+            let fine_sigma = fine_sigma.reshape([batch_size, total_samples, 1]);
+
+            let (rgb_map, depth_map, _, _) = self.renderer.render(
+                &fine_rgb, &fine_sigma, &fine_z, &ray_batch.directions
+            );
+
+            rgb_chunks.push(rgb_map);
+            depth_chunks.push(depth_map);
+        }
+
+        let rgb_image = Tensor.concat(rgb_chunks, dim: 0).reshape([height, width, 3]);
+        let depth_image = Tensor.concat(depth_chunks, dim: 0).reshape([height, width]);
+
+        (rgb_image, depth_image)
+    }
+}
+
+/// Instant-NGP trainer
+struct InstantNGPTrainer {
+    network: InstantNGPNetwork,
+    occupancy_grid: OccupancyGrid,
+    renderer: VolumeRenderer,
+    optimizer: Adam,
+
+    fn create(aabb_min: Vec3, aabb_max: Vec3) -> Self {
+        let network = InstantNGPNetwork.create(
+            num_levels: 16,
+            features_per_level: 2,
+            log2_hashmap_size: 19,
+            base_resolution: 16,
+            finest_resolution: 2048,
+            hidden_dim: 64,
+            sh_degree: 4
+        );
+
+        let occupancy_grid = OccupancyGrid.create(128, aabb_min, aabb_max);
+        let renderer = VolumeRenderer.create(white_background: true);
+
+        let params = network.hash_encoder.hash_tables.iter()
+            .chain(network.density_net.parameters())
+            .chain(network.color_net.parameters())
+            .collect();
+
+        let optimizer = Adam.create(params, lr: 1e-2, eps: 1e-15);
+
+        Self {
+            network,
+            occupancy_grid,
+            renderer,
+            optimizer
+        }
+    }
+
+    fn train_step(self, rays: &RayBatch, target_rgb: &Tensor, iteration: u32) -> f32 {
+        // Update occupancy grid periodically
+        if iteration % 16 == 0 {
+            self.occupancy_grid.update(&self.network, num_samples: 16);
+        }
+
+        // Sample points with occupancy-aware marching
+        let (points, z_vals) = self.sample_with_occupancy(rays);
+
+        let batch_size = rays.origins.shape[0];
+        let num_samples = points.shape[1];
+
+        let dirs = rays.directions.unsqueeze(1).expand([batch_size, num_samples, 3]);
+
+        // Normalize positions to [0, 1]
+        let normalized_points = (points - self.occupancy_grid.aabb_min.to_tensor()) /
+            (self.occupancy_grid.aabb_max - self.occupancy_grid.aabb_min).to_tensor();
+
+        let flat_points = normalized_points.reshape([-1, 3]);
+        let flat_dirs = dirs.reshape([-1, 3]);
+
+        // Network forward
+        let (rgb, sigma) = self.network.forward(&flat_points, &flat_dirs);
+
+        let rgb = rgb.reshape([batch_size, num_samples, 3]);
+        let sigma = sigma.reshape([batch_size, num_samples, 1]);
+
+        // Render
+        let (rgb_map, _, _, _) = self.renderer.render(
+            &rgb, &sigma, &z_vals, &rays.directions
+        );
+
+        // Loss
+        let loss = (rgb_map - target_rgb).pow(2.0).mean();
+
+        // Backward
+        loss.backward();
+        self.optimizer.step();
+        self.optimizer.zero_grad();
+
+        loss.item()
+    }
+
+    fn sample_with_occupancy(self, rays: &RayBatch) -> (Tensor, Tensor) {
+        // Adaptive sampling based on occupancy grid
+        let batch_size = rays.origins.shape[0];
+        let max_samples = 512;
+
+        var all_points: Array<Tensor> = [];
+        var all_z_vals: Array<Tensor> = [];
+
+        for i in 0..batch_size {
+            let ray = Ray {
+                origin: Vec3.from_tensor(&rays.origins[i]),
+                direction: Vec3.from_tensor(&rays.directions[i]),
+                near: rays.near[i].item(),
+                far: rays.far[i].item()
+            };
+
+            let intervals = self.occupancy_grid.ray_march_intervals(&ray);
+
+            var z_samples: Array<f32> = [];
+
+            for (t_start, t_end) in intervals {
+                // Sample within occupied interval
+                let num_interval_samples = ((t_end - t_start) / 0.01) as u32;
+                let num_interval_samples = num_interval_samples.clamp(4, 64);
+
+                for j in 0..num_interval_samples {
+                    let t = t_start + (t_end - t_start) * (j as f32 / num_interval_samples as f32);
+                    z_samples.push(t);
+                }
+            }
+
+            // Pad or truncate to max_samples
+            while z_samples.len() < max_samples {
+                z_samples.push(ray.far);
+            }
+            z_samples.truncate(max_samples);
+
+            let z_tensor = Tensor.from_array(&z_samples);
+            all_z_vals.push(z_tensor);
+
+            // Compute points
+            let points = rays.origins[i].unsqueeze(0) +
+                z_tensor.unsqueeze(-1) * rays.directions[i].unsqueeze(0);
+            all_points.push(points);
+        }
+
+        let points = Tensor.stack(all_points, dim: 0);
+        let z_vals = Tensor.stack(all_z_vals, dim: 0);
+
+        (points, z_vals)
+    }
+}
+
+// ============================================================================
+// CAMERA AND SCENE
+// ============================================================================
+
+/// Camera model
+struct Camera {
+    position: Vec3,
+    rotation: Quaternion,
+    fov_y: f32,
+    aspect_ratio: f32,
+    near: f32,
+    far: f32,
+
+    fn create(position: Vec3, look_at: Vec3, up: Vec3, fov_y: f32, aspect: f32) -> Self {
+        let forward = (look_at - position).normalize();
+        let right = forward.cross(&up).normalize();
+        let true_up = right.cross(&forward);
+
+        let rotation = Quaternion.from_basis(&right, &true_up, &forward.negate());
+
+        Self {
+            position,
+            rotation,
+            fov_y,
+            aspect_ratio: aspect,
+            near: 0.1,
+            far: 100.0
+        }
+    }
+
+    fn view_matrix(self) -> Mat4 {
+        let rotation_mat = self.rotation.to_mat4();
+        let translation = Mat4.translate(-self.position);
+        rotation_mat * translation
+    }
+
+    fn projection_matrix(self) -> Mat4 {
+        Mat4.perspective(self.fov_y, self.aspect_ratio, self.near, self.far)
+    }
+
+    fn transform(self, matrix: &Mat4) -> Camera {
+        let new_pos = matrix.transform_point(&self.position);
+        let new_rotation = Quaternion.from_mat4(matrix) * self.rotation;
+
+        Camera {
+            position: new_pos,
+            rotation: new_rotation,
+            fov_y: self.fov_y,
+            aspect_ratio: self.aspect_ratio,
+            near: self.near,
+            far: self.far
+        }
+    }
+
+    fn generate_rays(self, width: u32, height: u32, near: f32, far: f32) -> RayBatch {
+        let tan_half_fov = (self.fov_y / 2.0).tan();
+
+        var origins: Array<Vec3> = [];
+        var directions: Array<Vec3> = [];
+
+        let inv_rotation = self.rotation.conjugate().to_mat3();
+
+        for y in 0..height {
+            for x in 0..width {
+                // NDC coordinates
+                let ndc_x = (2.0 * (x as f32 + 0.5) / width as f32 - 1.0) * self.aspect_ratio * tan_half_fov;
+                let ndc_y = (1.0 - 2.0 * (y as f32 + 0.5) / height as f32) * tan_half_fov;
+
+                // Direction in camera space
+                let dir_cam = Vec3(ndc_x, ndc_y, -1.0).normalize();
+
+                // Transform to world space
+                let dir_world = inv_rotation.transform(&dir_cam);
+
+                origins.push(self.position);
+                directions.push(dir_world);
+            }
+        }
+
+        RayBatch {
+            origins: Tensor.from_vec3_array(&origins),
+            directions: Tensor.from_vec3_array(&directions),
+            near: Tensor.full([width * height, 1], near),
+            far: Tensor.full([width * height, 1], far)
+        }
+    }
+}
+
+/// Training dataset for NeRF
+struct NeRFDataset {
+    images: Array<Tensor>,        // RGB images
+    cameras: Array<Camera>,       // Camera parameters
+    bounds: (f32, f32),          // Near/far bounds
+
+    fn load_blender(path: &str) -> Self {
+        // Load Blender synthetic dataset format
+        let transforms_path = path + "/transforms.json";
+        let transforms = Json.parse_file(transforms_path);
+
+        let camera_angle_x = transforms["camera_angle_x"].as_f32();
+
+        var images: Array<Tensor> = [];
+        var cameras: Array<Camera> = [];
+
+        for frame in transforms["frames"].as_array() {
+            // Load image
+            let image_path = path + "/" + frame["file_path"].as_str() + ".png";
+            let image = Image.load(image_path).to_tensor();
+            images.push(image);
+
+            // Parse camera matrix
+            let transform_matrix = frame["transform_matrix"].as_array();
+            let c2w = Mat4.from_array(&transform_matrix);
+
+            let position = c2w.translation();
+            let rotation = Quaternion.from_mat4(&c2w);
+
+            let aspect = image.shape[1] as f32 / image.shape[0] as f32;
+
+            let camera = Camera {
+                position,
+                rotation,
+                fov_y: 2.0 * (1.0 / (2.0 * (camera_angle_x / 2.0).tan() / aspect)).atan(),
+                aspect_ratio: aspect,
+                near: 2.0,
+                far: 6.0
+            };
+            cameras.push(camera);
+        }
+
+        Self {
+            images,
+            cameras,
+            bounds: (2.0, 6.0)
+        }
+    }
+
+    fn load_llff(path: &str, factor: u32 = 8) -> Self {
+        // Load LLFF real-world dataset format
+        let poses_path = path + "/poses_bounds.npy";
+        let poses_bounds = Numpy.load(poses_path);
+
+        let poses = poses_bounds[.., 0:15].reshape([-1, 3, 5]);
+        let bounds = poses_bounds[.., 15:17];
+
+        // Load images
+        let image_dir = path + "/images";
+        if factor > 1 {
+            let image_dir = path + "/images_" + factor.to_string();
+        }
+
+        let image_files = Directory.list(image_dir)
+            .filter(|f| f.ends_with(".jpg") || f.ends_with(".png"))
+            .sorted();
+
+        var images: Array<Tensor> = [];
+        var cameras: Array<Camera> = [];
+
+        for (i, image_file) in image_files.iter().enumerate() {
+            let image = Image.load(image_dir + "/" + image_file).to_tensor();
+            images.push(image);
+
+            // Parse LLFF pose format
+            let pose = poses[i];
+            let c2w = self.parse_llff_pose(&pose);
+
+            let H = image.shape[0];
+            let W = image.shape[1];
+            let focal = pose[2, 4];
+
+            let fov_y = 2.0 * (H as f32 / (2.0 * focal)).atan();
+
+            let camera = Camera {
+                position: c2w.translation(),
+                rotation: Quaternion.from_mat4(&c2w),
+                fov_y,
+                aspect_ratio: W as f32 / H as f32,
+                near: bounds[i, 0].item() * 0.9,
+                far: bounds[i, 1].item() * 1.1
+            };
+            cameras.push(camera);
+        }
+
+        let near = bounds[.., 0].min().item();
+        let far = bounds[.., 1].max().item();
+
+        Self {
+            images,
+            cameras,
+            bounds: (near, far)
+        }
+    }
+
+    fn parse_llff_pose(self, pose: &Tensor) -> Mat4 {
+        // Convert LLFF pose to 4x4 transformation matrix
+        let c2w = Mat4.identity();
+
+        // LLFF format: [down, right, backwards, position, focal/height/width]
+        c2w.set_column(0, -pose[.., 1].to_vec4(0.0));  // right -> -Y
+        c2w.set_column(1, pose[.., 0].to_vec4(0.0));   // down -> X (up)
+        c2w.set_column(2, -pose[.., 2].to_vec4(0.0));  // backwards -> -Z (forward)
+        c2w.set_column(3, pose[.., 3].to_vec4(1.0));   // position
+
+        c2w
+    }
+
+    fn sample_rays(self, batch_size: u32) -> (RayBatch, Tensor) {
+        // Sample random rays from random images
+        var origins: Array<Vec3> = [];
+        var directions: Array<Vec3> = [];
+        var target_colors: Array<Vec3> = [];
+        var near_vals: Array<f32> = [];
+        var far_vals: Array<f32> = [];
+
+        for _ in 0..batch_size {
+            // Random image
+            let img_idx = Random.uniform_int(0, self.images.len() - 1);
+            let image = &self.images[img_idx];
+            let camera = &self.cameras[img_idx];
+
+            let H = image.shape[0];
+            let W = image.shape[1];
+
+            // Random pixel
+            let y = Random.uniform_int(0, H - 1);
+            let x = Random.uniform_int(0, W - 1);
+
+            // Generate ray
+            let tan_half_fov = (camera.fov_y / 2.0).tan();
+            let ndc_x = (2.0 * (x as f32 + 0.5) / W as f32 - 1.0) * camera.aspect_ratio * tan_half_fov;
+            let ndc_y = (1.0 - 2.0 * (y as f32 + 0.5) / H as f32) * tan_half_fov;
+
+            let dir_cam = Vec3(ndc_x, ndc_y, -1.0).normalize();
+            let inv_rotation = camera.rotation.conjugate().to_mat3();
+            let dir_world = inv_rotation.transform(&dir_cam);
+
+            origins.push(camera.position);
+            directions.push(dir_world);
+            near_vals.push(self.bounds.0);
+            far_vals.push(self.bounds.1);
+
+            // Get target color
+            let color = Vec3(
+                image[y, x, 0].item(),
+                image[y, x, 1].item(),
+                image[y, x, 2].item()
+            );
+            target_colors.push(color);
+        }
+
+        let rays = RayBatch {
+            origins: Tensor.from_vec3_array(&origins),
+            directions: Tensor.from_vec3_array(&directions),
+            near: Tensor.from_array(&near_vals).unsqueeze(-1),
+            far: Tensor.from_array(&far_vals).unsqueeze(-1)
+        };
+
+        let targets = Tensor.from_vec3_array(&target_colors);
+
+        (rays, targets)
+    }
+}
+
+// ============================================================================
+// REAL-TIME RENDERING INTEGRATION
+// ============================================================================
+
+/// NeRF renderer for real-time applications
+struct RealTimeNeRFRenderer {
+    network: InstantNGPNetwork,
+    occupancy_grid: OccupancyGrid,
+    renderer: VolumeRenderer,
+    render_width: u32,
+    render_height: u32,
+    jitter_sequence: Array<Vec2>,
+    temporal_buffer: Tensor,
+    frame_index: u32,
+
+    fn create(
+        network: InstantNGPNetwork,
+        occupancy_grid: OccupancyGrid,
+        width: u32,
+        height: u32
+    ) -> Self {
+        let renderer = VolumeRenderer.create(white_background: false);
+
+        // Halton sequence for temporal jittering
+        let jitter_sequence = Self.generate_halton_sequence(16);
+
+        let temporal_buffer = Tensor.zeros([height, width, 4]);
+
+        Self {
+            network,
+            occupancy_grid,
+            renderer,
+            render_width: width,
+            render_height: height,
+            jitter_sequence,
+            temporal_buffer,
+            frame_index: 0
+        }
+    }
+
+    fn generate_halton_sequence(n: u32) -> Array<Vec2> {
+        var sequence: Array<Vec2> = [];
+
+        for i in 1..=n {
+            let x = Self.halton(i, 2);
+            let y = Self.halton(i, 3);
+            sequence.push(Vec2(x - 0.5, y - 0.5));
+        }
+
+        sequence
+    }
+
+    fn halton(index: u32, base: u32) -> f32 {
+        var result: f32 = 0.0;
+        var f: f32 = 1.0;
+        var i = index;
+
+        while i > 0 {
+            f /= base as f32;
+            result += f * (i % base) as f32;
+            i /= base;
+        }
+
+        result
+    }
+
+    fn render_frame(self, camera: &Camera, device: Device) -> Tensor {
+        // Apply jitter for temporal anti-aliasing
+        let jitter_idx = self.frame_index % self.jitter_sequence.len() as u32;
+        let jitter = self.jitter_sequence[jitter_idx];
+
+        // Generate jittered rays
+        let rays = self.generate_jittered_rays(camera, jitter);
+
+        // Render at reduced resolution for performance
+        let scale = 0.5;
+        let render_w = (self.render_width as f32 * scale) as u32;
+        let render_h = (self.render_height as f32 * scale) as u32;
+
+        // Adaptive ray marching with occupancy grid
+        let (rgb, depth) = self.render_adaptive(&rays, device);
+
+        // Upscale
+        let rgb_full = rgb.upsample_bilinear([self.render_height, self.render_width]);
+
+        // Temporal accumulation
+        let alpha = 0.1;
+        self.temporal_buffer = alpha * rgb_full + (1.0 - alpha) * self.temporal_buffer;
+
+        self.frame_index += 1;
+
+        self.temporal_buffer.clone()
+    }
+
+    fn generate_jittered_rays(self, camera: &Camera, jitter: Vec2) -> RayBatch {
+        let tan_half_fov = (camera.fov_y / 2.0).tan();
+        let inv_rotation = camera.rotation.conjugate().to_mat3();
+
+        var origins: Array<Vec3> = [];
+        var directions: Array<Vec3> = [];
+
+        for y in 0..self.render_height {
+            for x in 0..self.render_width {
+                let px = x as f32 + 0.5 + jitter.x;
+                let py = y as f32 + 0.5 + jitter.y;
+
+                let ndc_x = (2.0 * px / self.render_width as f32 - 1.0) * camera.aspect_ratio * tan_half_fov;
+                let ndc_y = (1.0 - 2.0 * py / self.render_height as f32) * tan_half_fov;
+
+                let dir_cam = Vec3(ndc_x, ndc_y, -1.0).normalize();
+                let dir_world = inv_rotation.transform(&dir_cam);
+
+                origins.push(camera.position);
+                directions.push(dir_world);
+            }
+        }
+
+        RayBatch {
+            origins: Tensor.from_vec3_array(&origins),
+            directions: Tensor.from_vec3_array(&directions),
+            near: Tensor.full([self.render_width * self.render_height, 1], camera.near),
+            far: Tensor.full([self.render_width * self.render_height, 1], camera.far)
+        }
+    }
+
+    fn render_adaptive(self, rays: &RayBatch, device: Device) -> (Tensor, Tensor) {
+        let batch_size = rays.origins.shape[0];
+        let max_steps = 128;
+
+        // Use occupancy grid to skip empty space
+        var rgb_map = Tensor.zeros([batch_size, 3], device: device);
+        var depth_map = Tensor.zeros([batch_size], device: device);
+
+        device.launch_kernel("adaptive_march", grid: [(batch_size + 255) / 256], block: [256]) {
+            let idx = blockIdx.x * blockDim.x + threadIdx.x;
+            if idx >= batch_size { return; }
+
+            let origin = rays.origins[idx];
+            let direction = rays.directions[idx];
+            let near = rays.near[idx, 0];
+            let far = rays.far[idx, 0];
+
+            var t = near;
+            var accumulated_color = float3(0.0, 0.0, 0.0);
+            var accumulated_alpha: f32 = 0.0;
+            var first_hit_t: f32 = far;
+
+            while t < far && accumulated_alpha < 0.99 {
+                let pos = origin + direction * t;
+
+                // Check occupancy
+                if !self.occupancy_grid.is_occupied(pos) {
+                    // Skip to next occupied voxel
+                    t += self.occupancy_grid.step_to_next_voxel(pos, direction);
+                    continue;
+                }
+
+                // Normalize position
+                let norm_pos = (pos - self.occupancy_grid.aabb_min) /
+                    (self.occupancy_grid.aabb_max - self.occupancy_grid.aabb_min);
+
+                // Query network
+                let (color, density) = self.network.forward_single(norm_pos, direction);
+
+                // Volume rendering step
+                let step_size = self.occupancy_grid.voxel_size();
+                let alpha = 1.0 - exp(-density * step_size);
+
+                let weight = alpha * (1.0 - accumulated_alpha);
+                accumulated_color += weight * color;
+                accumulated_alpha += weight;
+
+                if accumulated_alpha > 0.01 && first_hit_t == far {
+                    first_hit_t = t;
+                }
+
+                t += step_size;
+            }
+
+            rgb_map[idx] = accumulated_color;
+            depth_map[idx] = first_hit_t;
+        };
+
+        (rgb_map.reshape([self.render_height, self.render_width, 3]),
+         depth_map.reshape([self.render_height, self.render_width]))
+    }
+}
+
+/// Gaussian splatting renderer for real-time applications
+struct RealTimeGaussianRenderer {
+    gaussians: GaussianCloud,
+    rasterizer: GaussianRasterizer,
+    temporal_buffer: Tensor,
+    frame_index: u32,
+    enable_taa: bool,
+
+    fn create(
+        gaussians: GaussianCloud,
+        width: u32,
+        height: u32,
+        fov_x: f32,
+        fov_y: f32
+    ) -> Self {
+        let rasterizer = GaussianRasterizer.create(width, height, fov_x, fov_y);
+        let temporal_buffer = Tensor.zeros([height, width, 4]);
+
+        Self {
+            gaussians,
+            rasterizer,
+            temporal_buffer,
+            frame_index: 0,
+            enable_taa: true
+        }
+    }
+
+    fn render_frame(
+        self,
+        view_matrix: &Mat4,
+        proj_matrix: &Mat4,
+        camera_pos: Vec3,
+        device: Device
+    ) -> Tensor {
+        // GPU rasterization
+        let image = self.rasterizer.rasterize_cuda(
+            &self.gaussians,
+            view_matrix,
+            proj_matrix,
+            camera_pos,
+            device
+        );
+
+        // Temporal anti-aliasing
+        if self.enable_taa {
+            let alpha = 0.1;
+            self.temporal_buffer = alpha * image + (1.0 - alpha) * self.temporal_buffer;
+            self.frame_index += 1;
+            self.temporal_buffer.clone()
+        } else {
+            image
+        }
+    }
+
+    fn update_gaussians(self, new_gaussians: GaussianCloud) {
+        self.gaussians = new_gaussians;
+    }
+
+    fn set_resolution(self, width: u32, height: u32) {
+        self.rasterizer.image_width = width;
+        self.rasterizer.image_height = height;
+        self.temporal_buffer = Tensor.zeros([height, width, 4]);
+    }
+}
+
+// ============================================================================
+// NEURAL SCENE REPRESENTATION
+// ============================================================================
+
+/// Hybrid scene representation combining multiple techniques
+struct NeuralScene {
+    // Static background (NeRF or Gaussian)
+    background: NeuralBackground,
+
+    // Dynamic objects
+    objects: Array<NeuralObject>,
+
+    // Lighting
+    environment_map: Option<Tensor>,
+
+    fn create(background_type: BackgroundType) -> Self {
+        let background = match background_type {
+            BackgroundType.NeRF => NeuralBackground.NeRF(InstantNGPNetwork.create()),
+            BackgroundType.Gaussian => NeuralBackground.Gaussian(GaussianCloud.create(0, 3)),
+            BackgroundType.Environment => NeuralBackground.Environment(Tensor.zeros([6, 512, 512, 3]))
+        };
+
+        Self {
+            background,
+            objects: [],
+            environment_map: None
+        }
+    }
+
+    fn add_object(self, object: NeuralObject) {
+        self.objects.push(object);
+    }
+
+    fn render(
+        self,
+        camera: &Camera,
+        width: u32,
+        height: u32,
+        device: Device
+    ) -> Tensor {
+        // Render background
+        var image = self.render_background(camera, width, height, device);
+
+        // Composite objects
+        for object in self.objects {
+            let object_image = object.render(camera, width, height, device);
+            image = self.composite(&image, &object_image);
+        }
+
+        image
+    }
+
+    fn render_background(
+        self,
+        camera: &Camera,
+        width: u32,
+        height: u32,
+        device: Device
+    ) -> Tensor {
+        match self.background {
+            NeuralBackground.NeRF(network) => {
+                let renderer = RealTimeNeRFRenderer.create(
+                    network.clone(),
+                    OccupancyGrid.create(128, Vec3(-1.0, -1.0, -1.0), Vec3(1.0, 1.0, 1.0)),
+                    width,
+                    height
+                );
+                renderer.render_frame(camera, device)
+            },
+            NeuralBackground.Gaussian(cloud) => {
+                let renderer = RealTimeGaussianRenderer.create(
+                    cloud.clone(),
+                    width, height,
+                    camera.fov_y * camera.aspect_ratio,
+                    camera.fov_y
+                );
+                renderer.render_frame(
+                    &camera.view_matrix(),
+                    &camera.projection_matrix(),
+                    camera.position,
+                    device
+                )
+            },
+            NeuralBackground.Environment(cubemap) => {
+                self.render_environment(&cubemap, camera, width, height)
+            }
+        }
+    }
+
+    fn render_environment(
+        self,
+        cubemap: &Tensor,
+        camera: &Camera,
+        width: u32,
+        height: u32
+    ) -> Tensor {
+        let rays = camera.generate_rays(width, height, 0.1, 100.0);
+
+        var image = Tensor.zeros([height, width, 4]);
+
+        for y in 0..height {
+            for x in 0..width {
+                let idx = y * width + x;
+                let dir = Vec3.from_tensor(&rays.directions[idx]);
+
+                // Sample cubemap
+                let color = self.sample_cubemap(cubemap, &dir);
+
+                image[y, x, 0] = color.x;
+                image[y, x, 1] = color.y;
+                image[y, x, 2] = color.z;
+                image[y, x, 3] = 1.0;
+            }
+        }
+
+        image
+    }
+
+    fn sample_cubemap(self, cubemap: &Tensor, direction: &Vec3) -> Vec3 {
+        // Determine face and UV coordinates
+        let abs_dir = Vec3(direction.x.abs(), direction.y.abs(), direction.z.abs());
+        let max_axis = abs_dir.max_component();
+
+        let (face, u, v) = if direction.x.abs() == max_axis {
+            if direction.x > 0.0 {
+                (0, -direction.z / direction.x, direction.y / direction.x)  // +X
+            } else {
+                (1, direction.z / -direction.x, direction.y / -direction.x)  // -X
+            }
+        } else if direction.y.abs() == max_axis {
+            if direction.y > 0.0 {
+                (2, direction.x / direction.y, -direction.z / direction.y)  // +Y
+            } else {
+                (3, direction.x / -direction.y, direction.z / -direction.y)  // -Y
+            }
+        } else {
+            if direction.z > 0.0 {
+                (4, direction.x / direction.z, direction.y / direction.z)  // +Z
+            } else {
+                (5, -direction.x / -direction.z, direction.y / -direction.z)  // -Z
+            }
+        };
+
+        // Map to [0, 1]
+        let u = (u + 1.0) * 0.5;
+        let v = (v + 1.0) * 0.5;
+
+        // Sample texture (bilinear)
+        let h = cubemap.shape[1];
+        let w = cubemap.shape[2];
+
+        let px = (u * w as f32).clamp(0.0, w as f32 - 1.0);
+        let py = (v * h as f32).clamp(0.0, h as f32 - 1.0);
+
+        let x0 = px as u32;
+        let y0 = py as u32;
+        let x1 = (x0 + 1).min(w - 1);
+        let y1 = (y0 + 1).min(h - 1);
+
+        let fx = px - x0 as f32;
+        let fy = py - y0 as f32;
+
+        let c00 = Vec3(cubemap[face, y0, x0, 0].item(), cubemap[face, y0, x0, 1].item(), cubemap[face, y0, x0, 2].item());
+        let c10 = Vec3(cubemap[face, y0, x1, 0].item(), cubemap[face, y0, x1, 1].item(), cubemap[face, y0, x1, 2].item());
+        let c01 = Vec3(cubemap[face, y1, x0, 0].item(), cubemap[face, y1, x0, 1].item(), cubemap[face, y1, x0, 2].item());
+        let c11 = Vec3(cubemap[face, y1, x1, 0].item(), cubemap[face, y1, x1, 1].item(), cubemap[face, y1, x1, 2].item());
+
+        let c0 = c00 * (1.0 - fx) + c10 * fx;
+        let c1 = c01 * (1.0 - fx) + c11 * fx;
+
+        c0 * (1.0 - fy) + c1 * fy
+    }
+
+    fn composite(self, background: &Tensor, foreground: &Tensor) -> Tensor {
+        // Alpha compositing
+        let alpha = foreground[.., .., 3:4];
+        let fg_rgb = foreground[.., .., 0:3];
+        let bg_rgb = background[.., .., 0:3];
+
+        let composited_rgb = fg_rgb * alpha + bg_rgb * (1.0 - alpha);
+        let composited_alpha = alpha + background[.., .., 3:4] * (1.0 - alpha);
+
+        Tensor.concat([composited_rgb, composited_alpha], dim: -1)
+    }
+}
+
+/// Background representation type
+enum BackgroundType {
+    NeRF,
+    Gaussian,
+    Environment
+}
+
+/// Neural background representation
+enum NeuralBackground {
+    NeRF(InstantNGPNetwork),
+    Gaussian(GaussianCloud),
+    Environment(Tensor)
+}
+
+/// Neural object in scene
+struct NeuralObject {
+    representation: ObjectRepresentation,
+    transform: Mat4,
+    bounding_box: (Vec3, Vec3),
+
+    fn render(self, camera: &Camera, width: u32, height: u32, device: Device) -> Tensor {
+        // Transform camera to object space
+        let inv_transform = self.transform.inverse();
+        let local_camera = camera.transform(&inv_transform);
+
+        match self.representation {
+            ObjectRepresentation.NeRF(network) => {
+                // Render NeRF object
+                let occupancy = OccupancyGrid.create(
+                    64,
+                    self.bounding_box.0,
+                    self.bounding_box.1
+                );
+                let renderer = RealTimeNeRFRenderer.create(
+                    network.clone(),
+                    occupancy,
+                    width, height
+                );
+                renderer.render_frame(&local_camera, device)
+            },
+            ObjectRepresentation.Gaussian(cloud) => {
+                let renderer = RealTimeGaussianRenderer.create(
+                    cloud.clone(),
+                    width, height,
+                    camera.fov_y * camera.aspect_ratio,
+                    camera.fov_y
+                );
+                renderer.render_frame(
+                    &local_camera.view_matrix(),
+                    &local_camera.projection_matrix(),
+                    local_camera.position,
+                    device
+                )
+            },
+            ObjectRepresentation.Mesh(mesh, texture) => {
+                // Traditional mesh rendering for comparison
+                self.render_mesh(&mesh, &texture, &local_camera, width, height, device)
+            }
+        }
+    }
+
+    fn render_mesh(
+        self,
+        mesh: &Mesh,
+        texture: &Tensor,
+        camera: &Camera,
+        width: u32,
+        height: u32,
+        device: Device
+    ) -> Tensor {
+        // Simple mesh rasterization for hybrid rendering
+        Tensor.zeros([height, width, 4], device: device)
+    }
+}
+
+/// Object representation types
+enum ObjectRepresentation {
+    NeRF(InstantNGPNetwork),
+    Gaussian(GaussianCloud),
+    Mesh(Mesh, Tensor)
+}
+
+/// Mesh data for hybrid rendering
+struct Mesh {
+    vertices: Tensor,    // [N, 3]
+    normals: Tensor,     // [N, 3]
+    uvs: Tensor,         // [N, 2]
+    indices: Tensor,     // [M, 3]
+}
+
+// ============================================================================
+// EXPORT
+// ============================================================================
+
+// Positional encoding
+pub use PositionalEncoding;
+pub use IntegratedPositionalEncoding;
+pub use HashEncoding;
+pub use SphericalHarmonicsEncoding;
+
+// Networks
+pub use NeRFMLP;
+pub use InstantNGPNetwork;
+pub use MipNeRFNetwork;
+
+// Volume rendering
+pub use Ray;
+pub use RayBatch;
+pub use VolumeRenderer;
+pub use OccupancyGrid;
+
+// 3D Gaussian splatting
+pub use Gaussian3D;
+pub use GaussianCloud;
+pub use GaussianRasterizer;
+pub use TileGaussianList;
+pub use AdaptiveDensityControl;
+pub use GaussianSplattingTrainer;
+
+// NeRF training
+pub use NeRFTrainConfig;
+pub use NeRFTrainer;
+pub use InstantNGPTrainer;
+
+// Camera and scene
+pub use Camera;
+pub use NeRFDataset;
+
+// Real-time rendering
+pub use RealTimeNeRFRenderer;
+pub use RealTimeGaussianRenderer;
+
+// Scene representation
+pub use NeuralScene;
+pub use BackgroundType;
+pub use NeuralBackground;
+pub use NeuralObject;
+pub use ObjectRepresentation;
+pub use Mesh;

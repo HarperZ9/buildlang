@@ -1,0 +1,2716 @@
+// ============================================================================
+// WAVELENGTH VIDEO PROCESSING MODULE
+// Advanced video processing, frame manipulation, and transcoding
+// ============================================================================
+
+import std::memory::{Buffer, Arena, Pool};
+import std::math::{Vector2, Vector3, Vector4, Matrix3x3, Matrix4x4};
+import std::collections::{Array, HashMap, Queue, RingBuffer};
+import std::simd::{simd_f32x8, simd_i32x8};
+
+// ============================================================================
+// PIXEL FORMATS AND COLOR SPACES
+// ============================================================================
+
+/// Pixel format enumeration
+enum PixelFormat {
+    RGB24,          // 8-bit RGB
+    RGBA32,         // 8-bit RGBA
+    BGR24,          // 8-bit BGR
+    BGRA32,         // 8-bit BGRA
+    RGB48,          // 16-bit RGB
+    RGBA64,         // 16-bit RGBA
+    RGB96F,         // 32-bit float RGB
+    RGBA128F,       // 32-bit float RGBA
+    YUV420P,        // Planar YUV 4:2:0
+    YUV422P,        // Planar YUV 4:2:2
+    YUV444P,        // Planar YUV 4:4:4
+    NV12,           // Semi-planar YUV 4:2:0
+    NV21,           // Semi-planar YUV 4:2:0 (UV swapped)
+    YUYV,           // Packed YUV 4:2:2
+    UYVY,           // Packed YUV 4:2:2
+    Gray8,          // 8-bit grayscale
+    Gray16,         // 16-bit grayscale
+    Gray32F,        // 32-bit float grayscale
+}
+
+/// Color space enumeration
+enum ColorSpace {
+    SRGB,           // Standard RGB
+    LinearRGB,      // Linear RGB
+    AdobeRGB,       // Adobe RGB (1998)
+    ProPhotoRGB,    // ProPhoto RGB
+    DCIP3,          // DCI-P3
+    Rec709,         // ITU-R BT.709
+    Rec2020,        // ITU-R BT.2020
+    ACES,           // Academy Color Encoding System
+    ACEScg,         // ACES computer graphics
+    XYZ,            // CIE XYZ
+    Lab,            // CIE Lab
+    HSV,            // Hue-Saturation-Value
+    HSL,            // Hue-Saturation-Lightness
+}
+
+/// Color transfer function
+enum TransferFunction {
+    Linear,
+    SRGB,
+    Gamma22,
+    Gamma24,
+    Gamma26,
+    Gamma28,
+    PQ,             // Perceptual Quantizer (HDR)
+    HLG,            // Hybrid Log-Gamma (HDR)
+    Log,
+    LogC,           // ARRI LogC
+    SLog2,          // Sony S-Log2
+    SLog3,          // Sony S-Log3
+    VLog,           // Panasonic V-Log
+    CLog,           // Canon Log
+}
+
+/// Color matrix coefficients
+struct ColorMatrix {
+    coefficients: [[f64; 3]; 3],
+
+    fn identity() -> Self {
+        Self {
+            coefficients: [
+                [1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [0.0, 0.0, 1.0],
+            ],
+        }
+    }
+
+    fn rgb_to_yuv_bt709() -> Self {
+        Self {
+            coefficients: [
+                [0.2126, 0.7152, 0.0722],
+                [-0.1146, -0.3854, 0.5],
+                [0.5, -0.4542, -0.0458],
+            ],
+        }
+    }
+
+    fn yuv_to_rgb_bt709() -> Self {
+        Self {
+            coefficients: [
+                [1.0, 0.0, 1.5748],
+                [1.0, -0.1873, -0.4681],
+                [1.0, 1.8556, 0.0],
+            ],
+        }
+    }
+
+    fn rgb_to_yuv_bt2020() -> Self {
+        Self {
+            coefficients: [
+                [0.2627, 0.6780, 0.0593],
+                [-0.1396, -0.3604, 0.5],
+                [0.5, -0.4598, -0.0402],
+            ],
+        }
+    }
+
+    fn transform(self, r: f64, g: f64, b: f64) -> (f64, f64, f64) {
+        let c = self.coefficients;
+        let x = c[0][0] * r + c[0][1] * g + c[0][2] * b;
+        let y = c[1][0] * r + c[1][1] * g + c[1][2] * b;
+        let z = c[2][0] * r + c[2][1] * g + c[2][2] * b;
+        (x, y, z)
+    }
+
+    fn multiply(self, other: ColorMatrix) -> ColorMatrix {
+        let mut result = [[0.0f64; 3]; 3];
+        for i in 0..3 {
+            for j in 0..3 {
+                for k in 0..3 {
+                    result[i][j] += self.coefficients[i][k] * other.coefficients[k][j];
+                }
+            }
+        }
+        ColorMatrix { coefficients: result }
+    }
+}
+
+// ============================================================================
+// VIDEO FRAME
+// ============================================================================
+
+/// Video frame representation
+struct VideoFrame {
+    width: u32,
+    height: u32,
+    format: PixelFormat,
+    color_space: ColorSpace,
+    transfer: TransferFunction,
+    data: Array<Buffer<u8>>,  // Plane data
+    strides: Array<u32>,      // Bytes per row for each plane
+    timestamp: i64,           // PTS in timebase units
+    duration: i64,            // Duration in timebase units
+    keyframe: bool,
+    interlaced: bool,
+    top_field_first: bool,
+
+    fn new(width: u32, height: u32, format: PixelFormat) -> Self {
+        let (planes, sizes) = Self::calculate_plane_sizes(width, height, format);
+        let mut data = Array::with_capacity(planes);
+        let mut strides = Array::with_capacity(planes);
+
+        for i in 0..planes {
+            let (size, stride) = sizes[i];
+            data.push(Buffer::zeroed(size));
+            strides.push(stride);
+        }
+
+        Self {
+            width,
+            height,
+            format,
+            color_space: ColorSpace::SRGB,
+            transfer: TransferFunction::SRGB,
+            data,
+            strides,
+            timestamp: 0,
+            duration: 0,
+            keyframe: false,
+            interlaced: false,
+            top_field_first: true,
+        }
+    }
+
+    fn calculate_plane_sizes(width: u32, height: u32, format: PixelFormat) -> (usize, Array<(usize, u32)>) {
+        match format {
+            PixelFormat::RGB24 | PixelFormat::BGR24 => {
+                let stride = (width * 3 + 15) & !15;  // 16-byte aligned
+                (1, [(stride as usize * height as usize, stride)].into())
+            }
+            PixelFormat::RGBA32 | PixelFormat::BGRA32 => {
+                let stride = width * 4;
+                (1, [(stride as usize * height as usize, stride)].into())
+            }
+            PixelFormat::YUV420P => {
+                let y_stride = (width + 15) & !15;
+                let uv_stride = (width / 2 + 15) & !15;
+                let y_size = y_stride as usize * height as usize;
+                let uv_size = uv_stride as usize * (height / 2) as usize;
+                (3, [(y_size, y_stride), (uv_size, uv_stride), (uv_size, uv_stride)].into())
+            }
+            PixelFormat::YUV422P => {
+                let y_stride = (width + 15) & !15;
+                let uv_stride = (width / 2 + 15) & !15;
+                let y_size = y_stride as usize * height as usize;
+                let uv_size = uv_stride as usize * height as usize;
+                (3, [(y_size, y_stride), (uv_size, uv_stride), (uv_size, uv_stride)].into())
+            }
+            PixelFormat::YUV444P => {
+                let stride = (width + 15) & !15;
+                let size = stride as usize * height as usize;
+                (3, [(size, stride), (size, stride), (size, stride)].into())
+            }
+            PixelFormat::NV12 | PixelFormat::NV21 => {
+                let y_stride = (width + 15) & !15;
+                let uv_stride = (width + 15) & !15;
+                let y_size = y_stride as usize * height as usize;
+                let uv_size = uv_stride as usize * (height / 2) as usize;
+                (2, [(y_size, y_stride), (uv_size, uv_stride)].into())
+            }
+            PixelFormat::Gray8 => {
+                let stride = (width + 15) & !15;
+                (1, [(stride as usize * height as usize, stride)].into())
+            }
+            PixelFormat::Gray16 => {
+                let stride = (width * 2 + 15) & !15;
+                (1, [(stride as usize * height as usize, stride)].into())
+            }
+            _ => {
+                let stride = width * 4;
+                (1, [(stride as usize * height as usize, stride)].into())
+            }
+        }
+    }
+
+    fn plane(self, index: usize) -> ?&Buffer<u8> {
+        self.data.get(index)
+    }
+
+    fn plane_mut(mut self, index: usize) -> ?&mut Buffer<u8> {
+        self.data.get_mut(index)
+    }
+
+    fn stride(self, plane: usize) -> u32 {
+        self.strides.get(plane).unwrap_or(0)
+    }
+
+    fn clone(self) -> VideoFrame {
+        let mut new_data = Array::with_capacity(self.data.len());
+        for buffer in self.data.iter() {
+            new_data.push(buffer.clone());
+        }
+
+        VideoFrame {
+            width: self.width,
+            height: self.height,
+            format: self.format,
+            color_space: self.color_space,
+            transfer: self.transfer,
+            data: new_data,
+            strides: self.strides.clone(),
+            timestamp: self.timestamp,
+            duration: self.duration,
+            keyframe: self.keyframe,
+            interlaced: self.interlaced,
+            top_field_first: self.top_field_first,
+        }
+    }
+
+    fn fill_solid(mut self, r: u8, g: u8, b: u8) {
+        match self.format {
+            PixelFormat::RGB24 => {
+                let plane = self.data[0].as_mut_slice();
+                for y in 0..self.height as usize {
+                    let row_start = y * self.strides[0] as usize;
+                    for x in 0..self.width as usize {
+                        let idx = row_start + x * 3;
+                        plane[idx] = r;
+                        plane[idx + 1] = g;
+                        plane[idx + 2] = b;
+                    }
+                }
+            }
+            PixelFormat::RGBA32 => {
+                let plane = self.data[0].as_mut_slice();
+                for y in 0..self.height as usize {
+                    let row_start = y * self.strides[0] as usize;
+                    for x in 0..self.width as usize {
+                        let idx = row_start + x * 4;
+                        plane[idx] = r;
+                        plane[idx + 1] = g;
+                        plane[idx + 2] = b;
+                        plane[idx + 3] = 255;
+                    }
+                }
+            }
+            PixelFormat::YUV420P => {
+                let (y, u, v) = Self::rgb_to_yuv(r, g, b);
+                self.data[0].fill(y);
+                self.data[1].fill(u);
+                self.data[2].fill(v);
+            }
+            _ => {}
+        }
+    }
+
+    fn rgb_to_yuv(r: u8, g: u8, b: u8) -> (u8, u8, u8) {
+        let rf = r as f32 / 255.0;
+        let gf = g as f32 / 255.0;
+        let bf = b as f32 / 255.0;
+
+        let y = 0.2126 * rf + 0.7152 * gf + 0.0722 * bf;
+        let u = -0.1146 * rf - 0.3854 * gf + 0.5 * bf + 0.5;
+        let v = 0.5 * rf - 0.4542 * gf - 0.0458 * bf + 0.5;
+
+        (
+            (y * 255.0).clamp(0.0, 255.0) as u8,
+            (u * 255.0).clamp(0.0, 255.0) as u8,
+            (v * 255.0).clamp(0.0, 255.0) as u8,
+        )
+    }
+}
+
+// ============================================================================
+// FRAME POOL
+// ============================================================================
+
+/// Pool of reusable video frames
+struct FramePool {
+    frames: Queue<VideoFrame>,
+    width: u32,
+    height: u32,
+    format: PixelFormat,
+    max_frames: usize,
+    allocated: usize,
+
+    fn new(width: u32, height: u32, format: PixelFormat, max_frames: usize) -> Self {
+        Self {
+            frames: Queue::new(),
+            width,
+            height,
+            format,
+            max_frames,
+            allocated: 0,
+        }
+    }
+
+    fn acquire(mut self) -> VideoFrame {
+        if let Some(frame) = self.frames.pop_front() {
+            frame
+        } else if self.allocated < self.max_frames {
+            self.allocated += 1;
+            VideoFrame::new(self.width, self.height, self.format)
+        } else {
+            // Block until frame available or allocate anyway
+            VideoFrame::new(self.width, self.height, self.format)
+        }
+    }
+
+    fn release(mut self, frame: VideoFrame) {
+        if frame.width == self.width &&
+           frame.height == self.height &&
+           frame.format == self.format {
+            if self.frames.len() < self.max_frames {
+                self.frames.push_back(frame);
+            }
+        }
+    }
+
+    fn clear(mut self) {
+        self.frames.clear();
+    }
+
+    fn available(self) -> usize {
+        self.frames.len()
+    }
+}
+
+// ============================================================================
+// PIXEL FORMAT CONVERSION
+// ============================================================================
+
+/// Pixel format converter
+struct PixelFormatConverter {
+    source_format: PixelFormat,
+    target_format: PixelFormat,
+    color_matrix: ColorMatrix,
+    dither: bool,
+
+    fn new(source: PixelFormat, target: PixelFormat) -> Self {
+        Self {
+            source_format: source,
+            target_format: target,
+            color_matrix: ColorMatrix::identity(),
+            dither: false,
+        }
+    }
+
+    fn with_dither(mut self, enable: bool) -> Self {
+        self.dither = enable;
+        self
+    }
+
+    fn convert(self, source: &VideoFrame) -> VideoFrame {
+        let mut target = VideoFrame::new(source.width, source.height, self.target_format);
+        target.timestamp = source.timestamp;
+        target.duration = source.duration;
+        target.keyframe = source.keyframe;
+
+        match (self.source_format, self.target_format) {
+            (PixelFormat::YUV420P, PixelFormat::RGB24) => {
+                self.yuv420p_to_rgb24(source, &mut target);
+            }
+            (PixelFormat::RGB24, PixelFormat::YUV420P) => {
+                self.rgb24_to_yuv420p(source, &mut target);
+            }
+            (PixelFormat::RGBA32, PixelFormat::RGB24) => {
+                self.rgba32_to_rgb24(source, &mut target);
+            }
+            (PixelFormat::RGB24, PixelFormat::RGBA32) => {
+                self.rgb24_to_rgba32(source, &mut target);
+            }
+            (PixelFormat::NV12, PixelFormat::RGB24) => {
+                self.nv12_to_rgb24(source, &mut target);
+            }
+            (PixelFormat::YUV420P, PixelFormat::NV12) => {
+                self.yuv420p_to_nv12(source, &mut target);
+            }
+            (PixelFormat::Gray8, PixelFormat::RGB24) => {
+                self.gray8_to_rgb24(source, &mut target);
+            }
+            (PixelFormat::RGB24, PixelFormat::Gray8) => {
+                self.rgb24_to_gray8(source, &mut target);
+            }
+            _ => {
+                // Generic fallback through RGB
+                self.convert_generic(source, &mut target);
+            }
+        }
+
+        target
+    }
+
+    fn yuv420p_to_rgb24(self, source: &VideoFrame, target: &mut VideoFrame) {
+        let y_plane = source.data[0].as_slice();
+        let u_plane = source.data[1].as_slice();
+        let v_plane = source.data[2].as_slice();
+        let rgb_plane = target.data[0].as_mut_slice();
+
+        let y_stride = source.strides[0] as usize;
+        let uv_stride = source.strides[1] as usize;
+        let rgb_stride = target.strides[0] as usize;
+
+        for row in 0..source.height as usize {
+            let y_row = row * y_stride;
+            let uv_row = (row / 2) * uv_stride;
+            let rgb_row = row * rgb_stride;
+
+            for col in 0..source.width as usize {
+                let y = y_plane[y_row + col] as f32 - 16.0;
+                let u = u_plane[uv_row + col / 2] as f32 - 128.0;
+                let v = v_plane[uv_row + col / 2] as f32 - 128.0;
+
+                // BT.709 conversion
+                let r = 1.164 * y + 1.793 * v;
+                let g = 1.164 * y - 0.213 * u - 0.533 * v;
+                let b = 1.164 * y + 2.112 * u;
+
+                let rgb_idx = rgb_row + col * 3;
+                rgb_plane[rgb_idx] = r.clamp(0.0, 255.0) as u8;
+                rgb_plane[rgb_idx + 1] = g.clamp(0.0, 255.0) as u8;
+                rgb_plane[rgb_idx + 2] = b.clamp(0.0, 255.0) as u8;
+            }
+        }
+    }
+
+    fn rgb24_to_yuv420p(self, source: &VideoFrame, target: &mut VideoFrame) {
+        let rgb_plane = source.data[0].as_slice();
+        let y_plane = target.data[0].as_mut_slice();
+        let u_plane = target.data[1].as_mut_slice();
+        let v_plane = target.data[2].as_mut_slice();
+
+        let rgb_stride = source.strides[0] as usize;
+        let y_stride = target.strides[0] as usize;
+        let uv_stride = target.strides[1] as usize;
+
+        for row in 0..source.height as usize {
+            let rgb_row = row * rgb_stride;
+            let y_row = row * y_stride;
+
+            for col in 0..source.width as usize {
+                let rgb_idx = rgb_row + col * 3;
+                let r = rgb_plane[rgb_idx] as f32;
+                let g = rgb_plane[rgb_idx + 1] as f32;
+                let b = rgb_plane[rgb_idx + 2] as f32;
+
+                // BT.709 conversion
+                let y = 16.0 + 0.183 * r + 0.614 * g + 0.062 * b;
+                y_plane[y_row + col] = y.clamp(16.0, 235.0) as u8;
+            }
+        }
+
+        // Subsample UV
+        for row in 0..(source.height as usize / 2) {
+            let rgb_row = row * 2 * rgb_stride;
+            let uv_row = row * uv_stride;
+
+            for col in 0..(source.width as usize / 2) {
+                // Average 2x2 block
+                let mut r_sum = 0.0f32;
+                let mut g_sum = 0.0f32;
+                let mut b_sum = 0.0f32;
+
+                for dy in 0..2 {
+                    for dx in 0..2 {
+                        let idx = rgb_row + dy * rgb_stride + (col * 2 + dx) * 3;
+                        r_sum += rgb_plane[idx] as f32;
+                        g_sum += rgb_plane[idx + 1] as f32;
+                        b_sum += rgb_plane[idx + 2] as f32;
+                    }
+                }
+
+                let r = r_sum / 4.0;
+                let g = g_sum / 4.0;
+                let b = b_sum / 4.0;
+
+                let u = 128.0 - 0.101 * r - 0.339 * g + 0.439 * b;
+                let v = 128.0 + 0.439 * r - 0.399 * g - 0.040 * b;
+
+                u_plane[uv_row + col] = u.clamp(16.0, 240.0) as u8;
+                v_plane[uv_row + col] = v.clamp(16.0, 240.0) as u8;
+            }
+        }
+    }
+
+    fn rgba32_to_rgb24(self, source: &VideoFrame, target: &mut VideoFrame) {
+        let rgba = source.data[0].as_slice();
+        let rgb = target.data[0].as_mut_slice();
+
+        let src_stride = source.strides[0] as usize;
+        let dst_stride = target.strides[0] as usize;
+
+        for row in 0..source.height as usize {
+            let src_row = row * src_stride;
+            let dst_row = row * dst_stride;
+
+            for col in 0..source.width as usize {
+                let src_idx = src_row + col * 4;
+                let dst_idx = dst_row + col * 3;
+
+                rgb[dst_idx] = rgba[src_idx];
+                rgb[dst_idx + 1] = rgba[src_idx + 1];
+                rgb[dst_idx + 2] = rgba[src_idx + 2];
+            }
+        }
+    }
+
+    fn rgb24_to_rgba32(self, source: &VideoFrame, target: &mut VideoFrame) {
+        let rgb = source.data[0].as_slice();
+        let rgba = target.data[0].as_mut_slice();
+
+        let src_stride = source.strides[0] as usize;
+        let dst_stride = target.strides[0] as usize;
+
+        for row in 0..source.height as usize {
+            let src_row = row * src_stride;
+            let dst_row = row * dst_stride;
+
+            for col in 0..source.width as usize {
+                let src_idx = src_row + col * 3;
+                let dst_idx = dst_row + col * 4;
+
+                rgba[dst_idx] = rgb[src_idx];
+                rgba[dst_idx + 1] = rgb[src_idx + 1];
+                rgba[dst_idx + 2] = rgb[src_idx + 2];
+                rgba[dst_idx + 3] = 255;
+            }
+        }
+    }
+
+    fn nv12_to_rgb24(self, source: &VideoFrame, target: &mut VideoFrame) {
+        let y_plane = source.data[0].as_slice();
+        let uv_plane = source.data[1].as_slice();
+        let rgb_plane = target.data[0].as_mut_slice();
+
+        let y_stride = source.strides[0] as usize;
+        let uv_stride = source.strides[1] as usize;
+        let rgb_stride = target.strides[0] as usize;
+
+        for row in 0..source.height as usize {
+            let y_row = row * y_stride;
+            let uv_row = (row / 2) * uv_stride;
+            let rgb_row = row * rgb_stride;
+
+            for col in 0..source.width as usize {
+                let y = y_plane[y_row + col] as f32 - 16.0;
+                let uv_idx = (col / 2) * 2;
+                let u = uv_plane[uv_row + uv_idx] as f32 - 128.0;
+                let v = uv_plane[uv_row + uv_idx + 1] as f32 - 128.0;
+
+                let r = 1.164 * y + 1.793 * v;
+                let g = 1.164 * y - 0.213 * u - 0.533 * v;
+                let b = 1.164 * y + 2.112 * u;
+
+                let rgb_idx = rgb_row + col * 3;
+                rgb_plane[rgb_idx] = r.clamp(0.0, 255.0) as u8;
+                rgb_plane[rgb_idx + 1] = g.clamp(0.0, 255.0) as u8;
+                rgb_plane[rgb_idx + 2] = b.clamp(0.0, 255.0) as u8;
+            }
+        }
+    }
+
+    fn yuv420p_to_nv12(self, source: &VideoFrame, target: &mut VideoFrame) {
+        // Copy Y plane
+        let src_y = source.data[0].as_slice();
+        let dst_y = target.data[0].as_mut_slice();
+        dst_y.copy_from_slice(src_y);
+
+        // Interleave U and V
+        let src_u = source.data[1].as_slice();
+        let src_v = source.data[2].as_slice();
+        let dst_uv = target.data[1].as_mut_slice();
+
+        let uv_height = source.height as usize / 2;
+        let uv_width = source.width as usize / 2;
+        let src_uv_stride = source.strides[1] as usize;
+        let dst_uv_stride = target.strides[1] as usize;
+
+        for row in 0..uv_height {
+            for col in 0..uv_width {
+                let src_idx = row * src_uv_stride + col;
+                let dst_idx = row * dst_uv_stride + col * 2;
+                dst_uv[dst_idx] = src_u[src_idx];
+                dst_uv[dst_idx + 1] = src_v[src_idx];
+            }
+        }
+    }
+
+    fn gray8_to_rgb24(self, source: &VideoFrame, target: &mut VideoFrame) {
+        let gray = source.data[0].as_slice();
+        let rgb = target.data[0].as_mut_slice();
+
+        let src_stride = source.strides[0] as usize;
+        let dst_stride = target.strides[0] as usize;
+
+        for row in 0..source.height as usize {
+            for col in 0..source.width as usize {
+                let g = gray[row * src_stride + col];
+                let dst_idx = row * dst_stride + col * 3;
+                rgb[dst_idx] = g;
+                rgb[dst_idx + 1] = g;
+                rgb[dst_idx + 2] = g;
+            }
+        }
+    }
+
+    fn rgb24_to_gray8(self, source: &VideoFrame, target: &mut VideoFrame) {
+        let rgb = source.data[0].as_slice();
+        let gray = target.data[0].as_mut_slice();
+
+        let src_stride = source.strides[0] as usize;
+        let dst_stride = target.strides[0] as usize;
+
+        for row in 0..source.height as usize {
+            for col in 0..source.width as usize {
+                let src_idx = row * src_stride + col * 3;
+                let r = rgb[src_idx] as f32;
+                let g = rgb[src_idx + 1] as f32;
+                let b = rgb[src_idx + 2] as f32;
+
+                // Luminance
+                let luma = 0.299 * r + 0.587 * g + 0.114 * b;
+                gray[row * dst_stride + col] = luma.clamp(0.0, 255.0) as u8;
+            }
+        }
+    }
+
+    fn convert_generic(self, source: &VideoFrame, target: &mut VideoFrame) {
+        // Convert to RGB24 first, then to target format
+        let rgb24 = if source.format != PixelFormat::RGB24 {
+            let conv = PixelFormatConverter::new(source.format, PixelFormat::RGB24);
+            conv.convert(source)
+        } else {
+            source.clone()
+        };
+
+        if self.target_format != PixelFormat::RGB24 {
+            let conv = PixelFormatConverter::new(PixelFormat::RGB24, self.target_format);
+            let result = conv.convert(&rgb24);
+            target.data = result.data;
+        }
+    }
+}
+
+// ============================================================================
+// SCALING AND RESAMPLING
+// ============================================================================
+
+/// Scaling algorithm
+enum ScaleAlgorithm {
+    NearestNeighbor,
+    Bilinear,
+    Bicubic,
+    Lanczos2,
+    Lanczos3,
+    Lanczos4,
+    Spline16,
+    Spline36,
+    Spline64,
+    Gaussian,
+    Area,
+}
+
+/// Video scaler
+struct VideoScaler {
+    algorithm: ScaleAlgorithm,
+    source_width: u32,
+    source_height: u32,
+    target_width: u32,
+    target_height: u32,
+    horizontal_filter: Array<f32>,
+    vertical_filter: Array<f32>,
+
+    fn new(
+        src_w: u32, src_h: u32,
+        dst_w: u32, dst_h: u32,
+        algorithm: ScaleAlgorithm
+    ) -> Self {
+        let mut scaler = Self {
+            algorithm,
+            source_width: src_w,
+            source_height: src_h,
+            target_width: dst_w,
+            target_height: dst_h,
+            horizontal_filter: Array::new(),
+            vertical_filter: Array::new(),
+        };
+        scaler.precompute_filters();
+        scaler
+    }
+
+    fn precompute_filters(mut self) {
+        let h_scale = self.source_width as f32 / self.target_width as f32;
+        let v_scale = self.source_height as f32 / self.target_height as f32;
+
+        self.horizontal_filter = self.compute_filter(h_scale);
+        self.vertical_filter = self.compute_filter(v_scale);
+    }
+
+    fn compute_filter(self, scale: f32) -> Array<f32> {
+        let filter_size = match self.algorithm {
+            ScaleAlgorithm::NearestNeighbor => 1,
+            ScaleAlgorithm::Bilinear => 2,
+            ScaleAlgorithm::Bicubic => 4,
+            ScaleAlgorithm::Lanczos2 => 4,
+            ScaleAlgorithm::Lanczos3 => 6,
+            ScaleAlgorithm::Lanczos4 => 8,
+            ScaleAlgorithm::Spline16 => 4,
+            ScaleAlgorithm::Spline36 => 6,
+            ScaleAlgorithm::Spline64 => 8,
+            ScaleAlgorithm::Gaussian => 4,
+            ScaleAlgorithm::Area => 1,
+        };
+
+        let mut filter = Array::with_capacity(filter_size);
+        for i in 0..filter_size {
+            let t = (i as f32 - filter_size as f32 / 2.0 + 0.5) / scale.max(1.0);
+            let weight = self.kernel(t);
+            filter.push(weight);
+        }
+
+        // Normalize
+        let sum: f32 = filter.iter().sum();
+        if sum > 0.0 {
+            for w in filter.iter_mut() {
+                *w /= sum;
+            }
+        }
+
+        filter
+    }
+
+    fn kernel(self, x: f32) -> f32 {
+        let x = x.abs();
+        match self.algorithm {
+            ScaleAlgorithm::NearestNeighbor => {
+                if x < 0.5 { 1.0 } else { 0.0 }
+            }
+            ScaleAlgorithm::Bilinear => {
+                if x < 1.0 { 1.0 - x } else { 0.0 }
+            }
+            ScaleAlgorithm::Bicubic => {
+                Self::bicubic_kernel(x, -0.5)
+            }
+            ScaleAlgorithm::Lanczos2 => {
+                Self::lanczos_kernel(x, 2)
+            }
+            ScaleAlgorithm::Lanczos3 => {
+                Self::lanczos_kernel(x, 3)
+            }
+            ScaleAlgorithm::Lanczos4 => {
+                Self::lanczos_kernel(x, 4)
+            }
+            ScaleAlgorithm::Gaussian => {
+                let sigma = 0.5;
+                (-x * x / (2.0 * sigma * sigma)).exp()
+            }
+            _ => 1.0,
+        }
+    }
+
+    fn bicubic_kernel(x: f32, a: f32) -> f32 {
+        if x < 1.0 {
+            (a + 2.0) * x * x * x - (a + 3.0) * x * x + 1.0
+        } else if x < 2.0 {
+            a * x * x * x - 5.0 * a * x * x + 8.0 * a * x - 4.0 * a
+        } else {
+            0.0
+        }
+    }
+
+    fn lanczos_kernel(x: f32, a: i32) -> f32 {
+        if x.abs() < 0.0001 {
+            1.0
+        } else if x.abs() < a as f32 {
+            let pi_x = std::f32::consts::PI * x;
+            let pi_x_a = pi_x / a as f32;
+            (pi_x.sin() / pi_x) * (pi_x_a.sin() / pi_x_a)
+        } else {
+            0.0
+        }
+    }
+
+    fn scale(self, source: &VideoFrame) -> VideoFrame {
+        let mut target = VideoFrame::new(self.target_width, self.target_height, source.format);
+        target.timestamp = source.timestamp;
+        target.duration = source.duration;
+        target.keyframe = source.keyframe;
+        target.color_space = source.color_space;
+        target.transfer = source.transfer;
+
+        match source.format {
+            PixelFormat::RGB24 | PixelFormat::BGR24 => {
+                self.scale_rgb24(source, &mut target);
+            }
+            PixelFormat::RGBA32 | PixelFormat::BGRA32 => {
+                self.scale_rgba32(source, &mut target);
+            }
+            PixelFormat::YUV420P => {
+                self.scale_yuv420p(source, &mut target);
+            }
+            PixelFormat::Gray8 => {
+                self.scale_gray8(source, &mut target);
+            }
+            _ => {
+                // Convert to RGB24, scale, convert back
+                let converter = PixelFormatConverter::new(source.format, PixelFormat::RGB24);
+                let rgb = converter.convert(source);
+                let scaled = self.scale(&rgb);
+                let back_converter = PixelFormatConverter::new(PixelFormat::RGB24, source.format);
+                return back_converter.convert(&scaled);
+            }
+        }
+
+        target
+    }
+
+    fn scale_rgb24(self, source: &VideoFrame, target: &mut VideoFrame) {
+        let src = source.data[0].as_slice();
+        let dst = target.data[0].as_mut_slice();
+
+        let src_stride = source.strides[0] as usize;
+        let dst_stride = target.strides[0] as usize;
+
+        let x_scale = source.width as f32 / target.width as f32;
+        let y_scale = source.height as f32 / target.height as f32;
+
+        for dst_y in 0..target.height as usize {
+            let src_y = (dst_y as f32 + 0.5) * y_scale - 0.5;
+            let src_y0 = (src_y.floor() as i32).max(0) as usize;
+            let src_y1 = (src_y0 + 1).min(source.height as usize - 1);
+            let y_frac = src_y - src_y.floor();
+
+            for dst_x in 0..target.width as usize {
+                let src_x = (dst_x as f32 + 0.5) * x_scale - 0.5;
+                let src_x0 = (src_x.floor() as i32).max(0) as usize;
+                let src_x1 = (src_x0 + 1).min(source.width as usize - 1);
+                let x_frac = src_x - src_x.floor();
+
+                for c in 0..3 {
+                    let p00 = src[src_y0 * src_stride + src_x0 * 3 + c] as f32;
+                    let p01 = src[src_y0 * src_stride + src_x1 * 3 + c] as f32;
+                    let p10 = src[src_y1 * src_stride + src_x0 * 3 + c] as f32;
+                    let p11 = src[src_y1 * src_stride + src_x1 * 3 + c] as f32;
+
+                    let interp = p00 * (1.0 - x_frac) * (1.0 - y_frac) +
+                                 p01 * x_frac * (1.0 - y_frac) +
+                                 p10 * (1.0 - x_frac) * y_frac +
+                                 p11 * x_frac * y_frac;
+
+                    dst[dst_y * dst_stride + dst_x * 3 + c] = interp.clamp(0.0, 255.0) as u8;
+                }
+            }
+        }
+    }
+
+    fn scale_rgba32(self, source: &VideoFrame, target: &mut VideoFrame) {
+        let src = source.data[0].as_slice();
+        let dst = target.data[0].as_mut_slice();
+
+        let src_stride = source.strides[0] as usize;
+        let dst_stride = target.strides[0] as usize;
+
+        let x_scale = source.width as f32 / target.width as f32;
+        let y_scale = source.height as f32 / target.height as f32;
+
+        for dst_y in 0..target.height as usize {
+            let src_y = (dst_y as f32 + 0.5) * y_scale - 0.5;
+            let src_y0 = (src_y.floor() as i32).max(0) as usize;
+            let src_y1 = (src_y0 + 1).min(source.height as usize - 1);
+            let y_frac = src_y - src_y.floor();
+
+            for dst_x in 0..target.width as usize {
+                let src_x = (dst_x as f32 + 0.5) * x_scale - 0.5;
+                let src_x0 = (src_x.floor() as i32).max(0) as usize;
+                let src_x1 = (src_x0 + 1).min(source.width as usize - 1);
+                let x_frac = src_x - src_x.floor();
+
+                for c in 0..4 {
+                    let p00 = src[src_y0 * src_stride + src_x0 * 4 + c] as f32;
+                    let p01 = src[src_y0 * src_stride + src_x1 * 4 + c] as f32;
+                    let p10 = src[src_y1 * src_stride + src_x0 * 4 + c] as f32;
+                    let p11 = src[src_y1 * src_stride + src_x1 * 4 + c] as f32;
+
+                    let interp = p00 * (1.0 - x_frac) * (1.0 - y_frac) +
+                                 p01 * x_frac * (1.0 - y_frac) +
+                                 p10 * (1.0 - x_frac) * y_frac +
+                                 p11 * x_frac * y_frac;
+
+                    dst[dst_y * dst_stride + dst_x * 4 + c] = interp.clamp(0.0, 255.0) as u8;
+                }
+            }
+        }
+    }
+
+    fn scale_yuv420p(self, source: &VideoFrame, target: &mut VideoFrame) {
+        // Scale Y plane at full resolution
+        self.scale_plane(
+            source.data[0].as_slice(),
+            target.data[0].as_mut_slice(),
+            source.width as usize,
+            source.height as usize,
+            target.width as usize,
+            target.height as usize,
+            source.strides[0] as usize,
+            target.strides[0] as usize,
+        );
+
+        // Scale U and V planes at half resolution
+        let src_uv_w = source.width as usize / 2;
+        let src_uv_h = source.height as usize / 2;
+        let dst_uv_w = target.width as usize / 2;
+        let dst_uv_h = target.height as usize / 2;
+
+        self.scale_plane(
+            source.data[1].as_slice(),
+            target.data[1].as_mut_slice(),
+            src_uv_w, src_uv_h,
+            dst_uv_w, dst_uv_h,
+            source.strides[1] as usize,
+            target.strides[1] as usize,
+        );
+
+        self.scale_plane(
+            source.data[2].as_slice(),
+            target.data[2].as_mut_slice(),
+            src_uv_w, src_uv_h,
+            dst_uv_w, dst_uv_h,
+            source.strides[2] as usize,
+            target.strides[2] as usize,
+        );
+    }
+
+    fn scale_gray8(self, source: &VideoFrame, target: &mut VideoFrame) {
+        self.scale_plane(
+            source.data[0].as_slice(),
+            target.data[0].as_mut_slice(),
+            source.width as usize,
+            source.height as usize,
+            target.width as usize,
+            target.height as usize,
+            source.strides[0] as usize,
+            target.strides[0] as usize,
+        );
+    }
+
+    fn scale_plane(
+        self,
+        src: &[u8],
+        dst: &mut [u8],
+        src_w: usize,
+        src_h: usize,
+        dst_w: usize,
+        dst_h: usize,
+        src_stride: usize,
+        dst_stride: usize,
+    ) {
+        let x_scale = src_w as f32 / dst_w as f32;
+        let y_scale = src_h as f32 / dst_h as f32;
+
+        for dst_y in 0..dst_h {
+            let src_y = (dst_y as f32 + 0.5) * y_scale - 0.5;
+            let src_y0 = (src_y.floor() as i32).max(0) as usize;
+            let src_y1 = (src_y0 + 1).min(src_h - 1);
+            let y_frac = src_y - src_y.floor();
+
+            for dst_x in 0..dst_w {
+                let src_x = (dst_x as f32 + 0.5) * x_scale - 0.5;
+                let src_x0 = (src_x.floor() as i32).max(0) as usize;
+                let src_x1 = (src_x0 + 1).min(src_w - 1);
+                let x_frac = src_x - src_x.floor();
+
+                let p00 = src[src_y0 * src_stride + src_x0] as f32;
+                let p01 = src[src_y0 * src_stride + src_x1] as f32;
+                let p10 = src[src_y1 * src_stride + src_x0] as f32;
+                let p11 = src[src_y1 * src_stride + src_x1] as f32;
+
+                let interp = p00 * (1.0 - x_frac) * (1.0 - y_frac) +
+                             p01 * x_frac * (1.0 - y_frac) +
+                             p10 * (1.0 - x_frac) * y_frac +
+                             p11 * x_frac * y_frac;
+
+                dst[dst_y * dst_stride + dst_x] = interp.clamp(0.0, 255.0) as u8;
+            }
+        }
+    }
+}
+
+// ============================================================================
+// VIDEO FILTERS
+// ============================================================================
+
+/// Base filter trait
+trait VideoFilter {
+    fn process(mut self, frame: &mut VideoFrame);
+    fn reset(mut self);
+}
+
+/// Brightness/Contrast filter
+struct BrightnessContrastFilter {
+    brightness: f32,  // -1.0 to 1.0
+    contrast: f32,    // 0.0 to 2.0
+
+    fn new(brightness: f32, contrast: f32) -> Self {
+        Self {
+            brightness: brightness.clamp(-1.0, 1.0),
+            contrast: contrast.clamp(0.0, 2.0),
+        }
+    }
+}
+
+impl VideoFilter for BrightnessContrastFilter {
+    fn process(mut self, frame: &mut VideoFrame) {
+        match frame.format {
+            PixelFormat::RGB24 => {
+                let data = frame.data[0].as_mut_slice();
+                let stride = frame.strides[0] as usize;
+
+                for y in 0..frame.height as usize {
+                    for x in 0..frame.width as usize {
+                        let idx = y * stride + x * 3;
+                        for c in 0..3 {
+                            let v = data[idx + c] as f32 / 255.0;
+                            let v = (v - 0.5) * self.contrast + 0.5 + self.brightness;
+                            data[idx + c] = (v * 255.0).clamp(0.0, 255.0) as u8;
+                        }
+                    }
+                }
+            }
+            PixelFormat::YUV420P => {
+                // Adjust Y plane only
+                let y_data = frame.data[0].as_mut_slice();
+                let y_stride = frame.strides[0] as usize;
+
+                for row in 0..frame.height as usize {
+                    for col in 0..frame.width as usize {
+                        let idx = row * y_stride + col;
+                        let v = (y_data[idx] as f32 - 16.0) / 219.0;
+                        let v = (v - 0.5) * self.contrast + 0.5 + self.brightness;
+                        y_data[idx] = (v * 219.0 + 16.0).clamp(16.0, 235.0) as u8;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn reset(mut self) {
+        self.brightness = 0.0;
+        self.contrast = 1.0;
+    }
+}
+
+/// Saturation filter
+struct SaturationFilter {
+    saturation: f32,  // 0.0 to 2.0
+
+    fn new(saturation: f32) -> Self {
+        Self {
+            saturation: saturation.clamp(0.0, 2.0),
+        }
+    }
+}
+
+impl VideoFilter for SaturationFilter {
+    fn process(mut self, frame: &mut VideoFrame) {
+        match frame.format {
+            PixelFormat::RGB24 => {
+                let data = frame.data[0].as_mut_slice();
+                let stride = frame.strides[0] as usize;
+
+                for y in 0..frame.height as usize {
+                    for x in 0..frame.width as usize {
+                        let idx = y * stride + x * 3;
+                        let r = data[idx] as f32;
+                        let g = data[idx + 1] as f32;
+                        let b = data[idx + 2] as f32;
+
+                        let gray = 0.299 * r + 0.587 * g + 0.114 * b;
+
+                        data[idx] = (gray + (r - gray) * self.saturation).clamp(0.0, 255.0) as u8;
+                        data[idx + 1] = (gray + (g - gray) * self.saturation).clamp(0.0, 255.0) as u8;
+                        data[idx + 2] = (gray + (b - gray) * self.saturation).clamp(0.0, 255.0) as u8;
+                    }
+                }
+            }
+            PixelFormat::YUV420P => {
+                // Scale U and V planes
+                let u_data = frame.data[1].as_mut_slice();
+                let v_data = frame.data[2].as_mut_slice();
+
+                for i in 0..u_data.len() {
+                    let u = (u_data[i] as f32 - 128.0) * self.saturation;
+                    let v = (v_data[i] as f32 - 128.0) * self.saturation;
+                    u_data[i] = (u + 128.0).clamp(16.0, 240.0) as u8;
+                    v_data[i] = (v + 128.0).clamp(16.0, 240.0) as u8;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn reset(mut self) {
+        self.saturation = 1.0;
+    }
+}
+
+/// Hue rotation filter
+struct HueRotationFilter {
+    degrees: f32,
+
+    fn new(degrees: f32) -> Self {
+        Self {
+            degrees: degrees % 360.0,
+        }
+    }
+}
+
+impl VideoFilter for HueRotationFilter {
+    fn process(mut self, frame: &mut VideoFrame) {
+        if frame.format != PixelFormat::RGB24 {
+            return;
+        }
+
+        let data = frame.data[0].as_mut_slice();
+        let stride = frame.strides[0] as usize;
+        let angle = self.degrees * std::f32::consts::PI / 180.0;
+        let cos_a = angle.cos();
+        let sin_a = angle.sin();
+
+        for y in 0..frame.height as usize {
+            for x in 0..frame.width as usize {
+                let idx = y * stride + x * 3;
+                let r = data[idx] as f32 / 255.0;
+                let g = data[idx + 1] as f32 / 255.0;
+                let b = data[idx + 2] as f32 / 255.0;
+
+                // RGB to HSV
+                let max = r.max(g).max(b);
+                let min = r.min(g).min(b);
+                let delta = max - min;
+
+                let mut h = if delta < 0.0001 {
+                    0.0
+                } else if max == r {
+                    60.0 * (((g - b) / delta) % 6.0)
+                } else if max == g {
+                    60.0 * ((b - r) / delta + 2.0)
+                } else {
+                    60.0 * ((r - g) / delta + 4.0)
+                };
+
+                if h < 0.0 { h += 360.0; }
+
+                let s = if max < 0.0001 { 0.0 } else { delta / max };
+                let v = max;
+
+                // Rotate hue
+                h = (h + self.degrees) % 360.0;
+                if h < 0.0 { h += 360.0; }
+
+                // HSV to RGB
+                let c = v * s;
+                let x_val = c * (1.0 - ((h / 60.0) % 2.0 - 1.0).abs());
+                let m = v - c;
+
+                let (r1, g1, b1) = if h < 60.0 {
+                    (c, x_val, 0.0)
+                } else if h < 120.0 {
+                    (x_val, c, 0.0)
+                } else if h < 180.0 {
+                    (0.0, c, x_val)
+                } else if h < 240.0 {
+                    (0.0, x_val, c)
+                } else if h < 300.0 {
+                    (x_val, 0.0, c)
+                } else {
+                    (c, 0.0, x_val)
+                };
+
+                data[idx] = ((r1 + m) * 255.0).clamp(0.0, 255.0) as u8;
+                data[idx + 1] = ((g1 + m) * 255.0).clamp(0.0, 255.0) as u8;
+                data[idx + 2] = ((b1 + m) * 255.0).clamp(0.0, 255.0) as u8;
+            }
+        }
+    }
+
+    fn reset(mut self) {
+        self.degrees = 0.0;
+    }
+}
+
+/// Gaussian blur filter
+struct GaussianBlurFilter {
+    radius: f32,
+    kernel: Array<f32>,
+    kernel_size: usize,
+
+    fn new(radius: f32) -> Self {
+        let radius = radius.max(0.1);
+        let kernel_size = (radius * 6.0).ceil() as usize | 1;  // Odd size
+        let kernel = Self::compute_kernel(radius, kernel_size);
+
+        Self {
+            radius,
+            kernel,
+            kernel_size,
+        }
+    }
+
+    fn compute_kernel(radius: f32, size: usize) -> Array<f32> {
+        let sigma = radius;
+        let center = size / 2;
+        let mut kernel = Array::with_capacity(size);
+        let mut sum = 0.0;
+
+        for i in 0..size {
+            let x = i as f32 - center as f32;
+            let g = (-x * x / (2.0 * sigma * sigma)).exp();
+            kernel.push(g);
+            sum += g;
+        }
+
+        // Normalize
+        for i in 0..size {
+            kernel[i] /= sum;
+        }
+
+        kernel
+    }
+}
+
+impl VideoFilter for GaussianBlurFilter {
+    fn process(mut self, frame: &mut VideoFrame) {
+        if frame.format != PixelFormat::RGB24 {
+            return;
+        }
+
+        let width = frame.width as usize;
+        let height = frame.height as usize;
+        let stride = frame.strides[0] as usize;
+        let half_k = self.kernel_size / 2;
+
+        // Temporary buffer for horizontal pass
+        let mut temp = vec![0u8; width * height * 3];
+        let data = frame.data[0].as_mut_slice();
+
+        // Horizontal pass
+        for y in 0..height {
+            for x in 0..width {
+                let mut r_sum = 0.0;
+                let mut g_sum = 0.0;
+                let mut b_sum = 0.0;
+
+                for k in 0..self.kernel_size {
+                    let kx = k as i32 - half_k as i32;
+                    let src_x = (x as i32 + kx).clamp(0, width as i32 - 1) as usize;
+                    let src_idx = y * stride + src_x * 3;
+                    let weight = self.kernel[k];
+
+                    r_sum += data[src_idx] as f32 * weight;
+                    g_sum += data[src_idx + 1] as f32 * weight;
+                    b_sum += data[src_idx + 2] as f32 * weight;
+                }
+
+                let dst_idx = (y * width + x) * 3;
+                temp[dst_idx] = r_sum.clamp(0.0, 255.0) as u8;
+                temp[dst_idx + 1] = g_sum.clamp(0.0, 255.0) as u8;
+                temp[dst_idx + 2] = b_sum.clamp(0.0, 255.0) as u8;
+            }
+        }
+
+        // Vertical pass
+        for y in 0..height {
+            for x in 0..width {
+                let mut r_sum = 0.0;
+                let mut g_sum = 0.0;
+                let mut b_sum = 0.0;
+
+                for k in 0..self.kernel_size {
+                    let ky = k as i32 - half_k as i32;
+                    let src_y = (y as i32 + ky).clamp(0, height as i32 - 1) as usize;
+                    let src_idx = (src_y * width + x) * 3;
+                    let weight = self.kernel[k];
+
+                    r_sum += temp[src_idx] as f32 * weight;
+                    g_sum += temp[src_idx + 1] as f32 * weight;
+                    b_sum += temp[src_idx + 2] as f32 * weight;
+                }
+
+                let dst_idx = y * stride + x * 3;
+                data[dst_idx] = r_sum.clamp(0.0, 255.0) as u8;
+                data[dst_idx + 1] = g_sum.clamp(0.0, 255.0) as u8;
+                data[dst_idx + 2] = b_sum.clamp(0.0, 255.0) as u8;
+            }
+        }
+    }
+
+    fn reset(mut self) {
+        self.radius = 1.0;
+        self.kernel = Self::compute_kernel(1.0, 7);
+        self.kernel_size = 7;
+    }
+}
+
+/// Sharpening filter
+struct SharpenFilter {
+    amount: f32,
+    threshold: u8,
+
+    fn new(amount: f32, threshold: u8) -> Self {
+        Self {
+            amount: amount.clamp(0.0, 10.0),
+            threshold,
+        }
+    }
+}
+
+impl VideoFilter for SharpenFilter {
+    fn process(mut self, frame: &mut VideoFrame) {
+        if frame.format != PixelFormat::RGB24 {
+            return;
+        }
+
+        let width = frame.width as usize;
+        let height = frame.height as usize;
+        let stride = frame.strides[0] as usize;
+
+        // Unsharp mask kernel
+        let kernel = [
+            [0.0, -1.0, 0.0],
+            [-1.0, 5.0, -1.0],
+            [0.0, -1.0, 0.0],
+        ];
+
+        let original = frame.data[0].as_slice().to_vec();
+        let data = frame.data[0].as_mut_slice();
+
+        for y in 1..(height - 1) {
+            for x in 1..(width - 1) {
+                for c in 0..3 {
+                    let mut sum = 0.0;
+
+                    for ky in 0..3 {
+                        for kx in 0..3 {
+                            let src_y = y + ky - 1;
+                            let src_x = x + kx - 1;
+                            let idx = src_y * stride + src_x * 3 + c;
+                            sum += original[idx] as f32 * kernel[ky][kx];
+                        }
+                    }
+
+                    let orig_val = original[y * stride + x * 3 + c] as f32;
+                    let diff = (sum - orig_val).abs() as u8;
+
+                    let result = if diff > self.threshold {
+                        orig_val + (sum - orig_val) * self.amount
+                    } else {
+                        orig_val
+                    };
+
+                    data[y * stride + x * 3 + c] = result.clamp(0.0, 255.0) as u8;
+                }
+            }
+        }
+    }
+
+    fn reset(mut self) {
+        self.amount = 1.0;
+        self.threshold = 0;
+    }
+}
+
+/// Edge detection filter
+struct EdgeDetectionFilter {
+    method: EdgeMethod,
+
+    fn new(method: EdgeMethod) -> Self {
+        Self { method }
+    }
+}
+
+enum EdgeMethod {
+    Sobel,
+    Prewitt,
+    Roberts,
+    Canny,
+    Laplacian,
+}
+
+impl VideoFilter for EdgeDetectionFilter {
+    fn process(mut self, frame: &mut VideoFrame) {
+        if frame.format != PixelFormat::RGB24 {
+            return;
+        }
+
+        let width = frame.width as usize;
+        let height = frame.height as usize;
+        let stride = frame.strides[0] as usize;
+
+        // Convert to grayscale first
+        let original = frame.data[0].as_slice().to_vec();
+        let mut gray = vec![0.0f32; width * height];
+
+        for y in 0..height {
+            for x in 0..width {
+                let idx = y * stride + x * 3;
+                gray[y * width + x] = 0.299 * original[idx] as f32 +
+                                       0.587 * original[idx + 1] as f32 +
+                                       0.114 * original[idx + 2] as f32;
+            }
+        }
+
+        let (kernel_x, kernel_y) = match self.method {
+            EdgeMethod::Sobel => (
+                [[-1.0, 0.0, 1.0], [-2.0, 0.0, 2.0], [-1.0, 0.0, 1.0]],
+                [[-1.0, -2.0, -1.0], [0.0, 0.0, 0.0], [1.0, 2.0, 1.0]],
+            ),
+            EdgeMethod::Prewitt => (
+                [[-1.0, 0.0, 1.0], [-1.0, 0.0, 1.0], [-1.0, 0.0, 1.0]],
+                [[-1.0, -1.0, -1.0], [0.0, 0.0, 0.0], [1.0, 1.0, 1.0]],
+            ),
+            _ => (
+                [[-1.0, 0.0, 1.0], [-2.0, 0.0, 2.0], [-1.0, 0.0, 1.0]],
+                [[-1.0, -2.0, -1.0], [0.0, 0.0, 0.0], [1.0, 2.0, 1.0]],
+            ),
+        };
+
+        let data = frame.data[0].as_mut_slice();
+
+        for y in 1..(height - 1) {
+            for x in 1..(width - 1) {
+                let mut gx = 0.0;
+                let mut gy = 0.0;
+
+                for ky in 0..3 {
+                    for kx in 0..3 {
+                        let val = gray[(y + ky - 1) * width + (x + kx - 1)];
+                        gx += val * kernel_x[ky][kx];
+                        gy += val * kernel_y[ky][kx];
+                    }
+                }
+
+                let magnitude = (gx * gx + gy * gy).sqrt();
+                let edge = magnitude.clamp(0.0, 255.0) as u8;
+
+                let idx = y * stride + x * 3;
+                data[idx] = edge;
+                data[idx + 1] = edge;
+                data[idx + 2] = edge;
+            }
+        }
+    }
+
+    fn reset(mut self) {
+        self.method = EdgeMethod::Sobel;
+    }
+}
+
+/// Color correction with curves
+struct CurvesFilter {
+    r_curve: Array<u8>,
+    g_curve: Array<u8>,
+    b_curve: Array<u8>,
+
+    fn new() -> Self {
+        let mut identity = Array::with_capacity(256);
+        for i in 0..256 {
+            identity.push(i as u8);
+        }
+
+        Self {
+            r_curve: identity.clone(),
+            g_curve: identity.clone(),
+            b_curve: identity,
+        }
+    }
+
+    fn set_curve(mut self, channel: char, points: &[(f32, f32)]) {
+        let curve = match channel {
+            'r' | 'R' => &mut self.r_curve,
+            'g' | 'G' => &mut self.g_curve,
+            'b' | 'B' => &mut self.b_curve,
+            _ => return,
+        };
+
+        // Interpolate curve from control points
+        for i in 0..256 {
+            let x = i as f32 / 255.0;
+            let y = Self::interpolate_spline(points, x);
+            curve[i] = (y * 255.0).clamp(0.0, 255.0) as u8;
+        }
+    }
+
+    fn interpolate_spline(points: &[(f32, f32)], x: f32) -> f32 {
+        if points.len() < 2 {
+            return x;
+        }
+
+        // Find surrounding control points
+        let mut i = 0;
+        while i < points.len() - 1 && points[i + 1].0 < x {
+            i += 1;
+        }
+
+        if i >= points.len() - 1 {
+            return points[points.len() - 1].1;
+        }
+
+        let (x0, y0) = points[i];
+        let (x1, y1) = points[i + 1];
+
+        if (x1 - x0).abs() < 0.0001 {
+            return y0;
+        }
+
+        let t = (x - x0) / (x1 - x0);
+        y0 + t * (y1 - y0)
+    }
+}
+
+impl VideoFilter for CurvesFilter {
+    fn process(mut self, frame: &mut VideoFrame) {
+        if frame.format != PixelFormat::RGB24 {
+            return;
+        }
+
+        let data = frame.data[0].as_mut_slice();
+        let stride = frame.strides[0] as usize;
+
+        for y in 0..frame.height as usize {
+            for x in 0..frame.width as usize {
+                let idx = y * stride + x * 3;
+                data[idx] = self.r_curve[data[idx] as usize];
+                data[idx + 1] = self.g_curve[data[idx + 1] as usize];
+                data[idx + 2] = self.b_curve[data[idx + 2] as usize];
+            }
+        }
+    }
+
+    fn reset(mut self) {
+        for i in 0..256 {
+            self.r_curve[i] = i as u8;
+            self.g_curve[i] = i as u8;
+            self.b_curve[i] = i as u8;
+        }
+    }
+}
+
+// ============================================================================
+// MOTION ESTIMATION
+// ============================================================================
+
+/// Motion vector
+struct MotionVector {
+    x: i16,
+    y: i16,
+    sad: u32,  // Sum of Absolute Differences
+}
+
+/// Block matching motion estimator
+struct MotionEstimator {
+    block_size: usize,
+    search_range: usize,
+    method: MotionEstimationMethod,
+
+    fn new(block_size: usize, search_range: usize) -> Self {
+        Self {
+            block_size,
+            search_range,
+            method: MotionEstimationMethod::Diamond,
+        }
+    }
+
+    fn with_method(mut self, method: MotionEstimationMethod) -> Self {
+        self.method = method;
+        self
+    }
+
+    fn estimate(self, current: &VideoFrame, reference: &VideoFrame) -> Array<Array<MotionVector>> {
+        let blocks_x = (current.width as usize + self.block_size - 1) / self.block_size;
+        let blocks_y = (current.height as usize + self.block_size - 1) / self.block_size;
+
+        let mut motion_field = Array::with_capacity(blocks_y);
+
+        for by in 0..blocks_y {
+            let mut row = Array::with_capacity(blocks_x);
+            for bx in 0..blocks_x {
+                let mv = match self.method {
+                    MotionEstimationMethod::FullSearch => {
+                        self.full_search(current, reference, bx, by)
+                    }
+                    MotionEstimationMethod::ThreeStep => {
+                        self.three_step_search(current, reference, bx, by)
+                    }
+                    MotionEstimationMethod::Diamond => {
+                        self.diamond_search(current, reference, bx, by)
+                    }
+                    MotionEstimationMethod::Hexagon => {
+                        self.hexagon_search(current, reference, bx, by)
+                    }
+                };
+                row.push(mv);
+            }
+            motion_field.push(row);
+        }
+
+        motion_field
+    }
+
+    fn full_search(self, current: &VideoFrame, reference: &VideoFrame, bx: usize, by: usize) -> MotionVector {
+        let x0 = bx * self.block_size;
+        let y0 = by * self.block_size;
+
+        let mut best_mv = MotionVector { x: 0, y: 0, sad: u32::MAX };
+        let range = self.search_range as i32;
+
+        for dy in -range..=range {
+            for dx in -range..=range {
+                let sad = self.compute_sad(current, reference, x0, y0, dx, dy);
+                if sad < best_mv.sad {
+                    best_mv = MotionVector {
+                        x: dx as i16,
+                        y: dy as i16,
+                        sad,
+                    };
+                }
+            }
+        }
+
+        best_mv
+    }
+
+    fn three_step_search(self, current: &VideoFrame, reference: &VideoFrame, bx: usize, by: usize) -> MotionVector {
+        let x0 = bx * self.block_size;
+        let y0 = by * self.block_size;
+
+        let mut best_x = 0i32;
+        let mut best_y = 0i32;
+        let mut best_sad = self.compute_sad(current, reference, x0, y0, 0, 0);
+
+        let mut step = (self.search_range as i32 + 1) / 2;
+
+        while step >= 1 {
+            let search_points = [
+                (0, -step), (0, step), (-step, 0), (step, 0),
+                (-step, -step), (step, -step), (-step, step), (step, step),
+            ];
+
+            for (dx, dy) in search_points.iter() {
+                let x = best_x + dx;
+                let y = best_y + dy;
+
+                let sad = self.compute_sad(current, reference, x0, y0, x, y);
+                if sad < best_sad {
+                    best_sad = sad;
+                    best_x = x;
+                    best_y = y;
+                }
+            }
+
+            step /= 2;
+        }
+
+        MotionVector {
+            x: best_x as i16,
+            y: best_y as i16,
+            sad: best_sad,
+        }
+    }
+
+    fn diamond_search(self, current: &VideoFrame, reference: &VideoFrame, bx: usize, by: usize) -> MotionVector {
+        let x0 = bx * self.block_size;
+        let y0 = by * self.block_size;
+
+        let large_diamond = [(0, -2), (-1, -1), (1, -1), (-2, 0), (2, 0), (-1, 1), (1, 1), (0, 2)];
+        let small_diamond = [(0, -1), (-1, 0), (1, 0), (0, 1)];
+
+        let mut best_x = 0i32;
+        let mut best_y = 0i32;
+        let mut best_sad = self.compute_sad(current, reference, x0, y0, 0, 0);
+
+        // Large diamond search
+        loop {
+            let mut found_better = false;
+
+            for (dx, dy) in large_diamond.iter() {
+                let x = best_x + dx;
+                let y = best_y + dy;
+
+                if x.abs() > self.search_range as i32 || y.abs() > self.search_range as i32 {
+                    continue;
+                }
+
+                let sad = self.compute_sad(current, reference, x0, y0, x, y);
+                if sad < best_sad {
+                    best_sad = sad;
+                    best_x = x;
+                    best_y = y;
+                    found_better = true;
+                }
+            }
+
+            if !found_better {
+                break;
+            }
+        }
+
+        // Small diamond refinement
+        loop {
+            let mut found_better = false;
+
+            for (dx, dy) in small_diamond.iter() {
+                let x = best_x + dx;
+                let y = best_y + dy;
+
+                let sad = self.compute_sad(current, reference, x0, y0, x, y);
+                if sad < best_sad {
+                    best_sad = sad;
+                    best_x = x;
+                    best_y = y;
+                    found_better = true;
+                }
+            }
+
+            if !found_better {
+                break;
+            }
+        }
+
+        MotionVector {
+            x: best_x as i16,
+            y: best_y as i16,
+            sad: best_sad,
+        }
+    }
+
+    fn hexagon_search(self, current: &VideoFrame, reference: &VideoFrame, bx: usize, by: usize) -> MotionVector {
+        let x0 = bx * self.block_size;
+        let y0 = by * self.block_size;
+
+        let hexagon = [(0, -2), (-2, -1), (2, -1), (-2, 1), (2, 1), (0, 2)];
+        let small_square = [(0, -1), (-1, 0), (1, 0), (0, 1)];
+
+        let mut best_x = 0i32;
+        let mut best_y = 0i32;
+        let mut best_sad = self.compute_sad(current, reference, x0, y0, 0, 0);
+
+        // Hexagon search
+        loop {
+            let mut found_better = false;
+
+            for (dx, dy) in hexagon.iter() {
+                let x = best_x + dx;
+                let y = best_y + dy;
+
+                if x.abs() > self.search_range as i32 || y.abs() > self.search_range as i32 {
+                    continue;
+                }
+
+                let sad = self.compute_sad(current, reference, x0, y0, x, y);
+                if sad < best_sad {
+                    best_sad = sad;
+                    best_x = x;
+                    best_y = y;
+                    found_better = true;
+                }
+            }
+
+            if !found_better {
+                break;
+            }
+        }
+
+        // Square refinement
+        for (dx, dy) in small_square.iter() {
+            let x = best_x + dx;
+            let y = best_y + dy;
+
+            let sad = self.compute_sad(current, reference, x0, y0, x, y);
+            if sad < best_sad {
+                best_sad = sad;
+                best_x = x;
+                best_y = y;
+            }
+        }
+
+        MotionVector {
+            x: best_x as i16,
+            y: best_y as i16,
+            sad: best_sad,
+        }
+    }
+
+    fn compute_sad(
+        self,
+        current: &VideoFrame,
+        reference: &VideoFrame,
+        x0: usize,
+        y0: usize,
+        dx: i32,
+        dy: i32
+    ) -> u32 {
+        let width = current.width as usize;
+        let height = current.height as usize;
+
+        let ref_x = x0 as i32 + dx;
+        let ref_y = y0 as i32 + dy;
+
+        // Bounds check
+        if ref_x < 0 || ref_y < 0 ||
+           ref_x + self.block_size as i32 > width as i32 ||
+           ref_y + self.block_size as i32 > height as i32 {
+            return u32::MAX;
+        }
+
+        let cur_data = current.data[0].as_slice();
+        let ref_data = reference.data[0].as_slice();
+        let stride = current.strides[0] as usize;
+
+        let bytes_per_pixel = match current.format {
+            PixelFormat::RGB24 | PixelFormat::BGR24 => 3,
+            PixelFormat::RGBA32 | PixelFormat::BGRA32 => 4,
+            PixelFormat::Gray8 => 1,
+            PixelFormat::YUV420P => 1,  // Y plane only
+            _ => 1,
+        };
+
+        let mut sad = 0u32;
+
+        for by in 0..self.block_size {
+            for bx in 0..self.block_size {
+                let cur_idx = (y0 + by) * stride + (x0 + bx) * bytes_per_pixel;
+                let ref_idx = (ref_y as usize + by) * stride + (ref_x as usize + bx) * bytes_per_pixel;
+
+                for c in 0..bytes_per_pixel.min(3) {
+                    let diff = (cur_data[cur_idx + c] as i32 - ref_data[ref_idx + c] as i32).abs();
+                    sad += diff as u32;
+                }
+            }
+        }
+
+        sad
+    }
+}
+
+enum MotionEstimationMethod {
+    FullSearch,
+    ThreeStep,
+    Diamond,
+    Hexagon,
+}
+
+// ============================================================================
+// FRAME INTERPOLATION
+// ============================================================================
+
+/// Motion-compensated frame interpolation
+struct FrameInterpolator {
+    motion_estimator: MotionEstimator,
+    blend_mode: BlendMode,
+
+    fn new() -> Self {
+        Self {
+            motion_estimator: MotionEstimator::new(16, 32),
+            blend_mode: BlendMode::MotionCompensated,
+        }
+    }
+
+    fn with_block_size(mut self, size: usize) -> Self {
+        self.motion_estimator.block_size = size;
+        self
+    }
+
+    fn interpolate(self, frame1: &VideoFrame, frame2: &VideoFrame, t: f32) -> VideoFrame {
+        match self.blend_mode {
+            BlendMode::Linear => self.linear_blend(frame1, frame2, t),
+            BlendMode::MotionCompensated => self.motion_compensated_blend(frame1, frame2, t),
+            BlendMode::OpticalFlow => self.optical_flow_blend(frame1, frame2, t),
+        }
+    }
+
+    fn linear_blend(self, frame1: &VideoFrame, frame2: &VideoFrame, t: f32) -> VideoFrame {
+        let mut result = frame1.clone();
+        let t = t.clamp(0.0, 1.0);
+        let t1 = 1.0 - t;
+
+        let data1 = frame1.data[0].as_slice();
+        let data2 = frame2.data[0].as_slice();
+        let result_data = result.data[0].as_mut_slice();
+
+        for i in 0..data1.len() {
+            result_data[i] = (data1[i] as f32 * t1 + data2[i] as f32 * t) as u8;
+        }
+
+        result
+    }
+
+    fn motion_compensated_blend(self, frame1: &VideoFrame, frame2: &VideoFrame, t: f32) -> VideoFrame {
+        let motion = self.motion_estimator.estimate(frame2, frame1);
+        let mut result = frame1.clone();
+
+        let block_size = self.motion_estimator.block_size;
+        let width = frame1.width as usize;
+        let height = frame1.height as usize;
+        let stride = frame1.strides[0] as usize;
+
+        let data1 = frame1.data[0].as_slice();
+        let data2 = frame2.data[0].as_slice();
+        let result_data = result.data[0].as_mut_slice();
+
+        let bytes_per_pixel = match frame1.format {
+            PixelFormat::RGB24 | PixelFormat::BGR24 => 3,
+            PixelFormat::RGBA32 | PixelFormat::BGRA32 => 4,
+            _ => 1,
+        };
+
+        for (by, row) in motion.iter().enumerate() {
+            for (bx, mv) in row.iter().enumerate() {
+                let x0 = bx * block_size;
+                let y0 = by * block_size;
+
+                let mv_x = (mv.x as f32 * t) as i32;
+                let mv_y = (mv.y as f32 * t) as i32;
+
+                for dy in 0..block_size {
+                    for dx in 0..block_size {
+                        let x = x0 + dx;
+                        let y = y0 + dy;
+
+                        if x >= width || y >= height {
+                            continue;
+                        }
+
+                        let src_x = (x as i32 + mv_x).clamp(0, width as i32 - 1) as usize;
+                        let src_y = (y as i32 + mv_y).clamp(0, height as i32 - 1) as usize;
+
+                        let dst_idx = y * stride + x * bytes_per_pixel;
+                        let src1_idx = src_y * stride + src_x * bytes_per_pixel;
+                        let src2_idx = y * stride + x * bytes_per_pixel;
+
+                        for c in 0..bytes_per_pixel {
+                            let v1 = data1[src1_idx + c] as f32;
+                            let v2 = data2[src2_idx + c] as f32;
+                            result_data[dst_idx + c] = (v1 * (1.0 - t) + v2 * t) as u8;
+                        }
+                    }
+                }
+            }
+        }
+
+        result
+    }
+
+    fn optical_flow_blend(self, frame1: &VideoFrame, frame2: &VideoFrame, t: f32) -> VideoFrame {
+        // Simplified optical flow using block matching at multiple scales
+        self.motion_compensated_blend(frame1, frame2, t)
+    }
+}
+
+enum BlendMode {
+    Linear,
+    MotionCompensated,
+    OpticalFlow,
+}
+
+// ============================================================================
+// DEINTERLACING
+// ============================================================================
+
+/// Deinterlacing methods
+enum DeinterlaceMethod {
+    Bob,        // Double frame rate, show each field
+    Weave,      // Combine fields (may cause combing)
+    Blend,      // Average fields
+    Yadif,      // Yet Another DeInterlacing Filter
+    BWDIF,      // Bob-Weave DeInterlacing Filter
+}
+
+/// Deinterlacer
+struct Deinterlacer {
+    method: DeinterlaceMethod,
+    top_field_first: bool,
+    prev_frame: ?VideoFrame,
+
+    fn new(method: DeinterlaceMethod) -> Self {
+        Self {
+            method,
+            top_field_first: true,
+            prev_frame: None,
+        }
+    }
+
+    fn process(mut self, frame: &VideoFrame) -> Array<VideoFrame> {
+        self.top_field_first = frame.top_field_first;
+
+        match self.method {
+            DeinterlaceMethod::Bob => self.bob(frame),
+            DeinterlaceMethod::Weave => self.weave(frame),
+            DeinterlaceMethod::Blend => self.blend(frame),
+            DeinterlaceMethod::Yadif => self.yadif(frame),
+            DeinterlaceMethod::BWDIF => self.bwdif(frame),
+        }
+    }
+
+    fn bob(self, frame: &VideoFrame) -> Array<VideoFrame> {
+        let mut results = Array::with_capacity(2);
+
+        // First field
+        let mut field1 = frame.clone();
+        self.interpolate_field(&mut field1, self.top_field_first);
+        field1.timestamp = frame.timestamp;
+        field1.duration = frame.duration / 2;
+        field1.interlaced = false;
+        results.push(field1);
+
+        // Second field
+        let mut field2 = frame.clone();
+        self.interpolate_field(&mut field2, !self.top_field_first);
+        field2.timestamp = frame.timestamp + frame.duration / 2;
+        field2.duration = frame.duration / 2;
+        field2.interlaced = false;
+        results.push(field2);
+
+        results
+    }
+
+    fn interpolate_field(self, frame: &mut VideoFrame, keep_top: bool) {
+        let height = frame.height as usize;
+        let stride = frame.strides[0] as usize;
+        let data = frame.data[0].as_mut_slice();
+
+        let start = if keep_top { 1 } else { 0 };
+
+        for y in (start..height).step_by(2) {
+            if y == 0 || y >= height - 1 {
+                continue;
+            }
+
+            let prev_row = (y - 1) * stride;
+            let curr_row = y * stride;
+            let next_row = (y + 1) * stride;
+
+            for x in 0..stride {
+                data[curr_row + x] = ((data[prev_row + x] as u16 + data[next_row + x] as u16) / 2) as u8;
+            }
+        }
+    }
+
+    fn weave(self, frame: &VideoFrame) -> Array<VideoFrame> {
+        let mut result = frame.clone();
+        result.interlaced = false;
+        [result].into()
+    }
+
+    fn blend(self, frame: &VideoFrame) -> Array<VideoFrame> {
+        let mut result = frame.clone();
+        let height = frame.height as usize;
+        let stride = frame.strides[0] as usize;
+        let data = result.data[0].as_mut_slice();
+
+        for y in 1..(height - 1) {
+            let prev_row = (y - 1) * stride;
+            let curr_row = y * stride;
+            let next_row = (y + 1) * stride;
+
+            for x in 0..stride {
+                data[curr_row + x] = ((data[prev_row + x] as u32 +
+                                       data[curr_row + x] as u32 * 2 +
+                                       data[next_row + x] as u32) / 4) as u8;
+            }
+        }
+
+        result.interlaced = false;
+        [result].into()
+    }
+
+    fn yadif(mut self, frame: &VideoFrame) -> Array<VideoFrame> {
+        // Simplified YADIF implementation
+        let mut results = Array::with_capacity(2);
+
+        // Process each field
+        for field_num in 0..2 {
+            let mut output = frame.clone();
+            let parity = (field_num == 0) == self.top_field_first;
+
+            self.yadif_filter(&mut output, frame, parity);
+
+            output.timestamp = frame.timestamp + field_num * frame.duration / 2;
+            output.duration = frame.duration / 2;
+            output.interlaced = false;
+            results.push(output);
+        }
+
+        self.prev_frame = Some(frame.clone());
+        results
+    }
+
+    fn yadif_filter(self, output: &mut VideoFrame, current: &VideoFrame, tff: bool) {
+        let height = current.height as usize;
+        let stride = current.strides[0] as usize;
+
+        let cur_data = current.data[0].as_slice();
+        let out_data = output.data[0].as_mut_slice();
+
+        let start_line = if tff { 1 } else { 0 };
+
+        for y in (start_line..height).step_by(2) {
+            if y < 2 || y >= height - 2 {
+                // Copy line for edges
+                let row = y * stride;
+                out_data[row..(row + stride)].copy_from_slice(&cur_data[row..(row + stride)]);
+                continue;
+            }
+
+            for x in 0..stride {
+                // Spatial check
+                let c = cur_data[(y - 1) * stride + x] as i32;
+                let e = cur_data[(y + 1) * stride + x] as i32;
+                let d = (c + e) / 2;
+
+                // Temporal check
+                let prev_c = cur_data[(y - 2) * stride + x] as i32;
+                let next_e = cur_data[(y + 2) * stride + x] as i32;
+
+                let spatial_diff = (c - e).abs();
+                let temporal_diff = ((prev_c - c).abs() + (next_e - e).abs()) / 2;
+
+                let result = if spatial_diff > temporal_diff {
+                    d
+                } else {
+                    // Edge-directed interpolation
+                    let a = cur_data[(y - 1) * stride + x.saturating_sub(1)] as i32;
+                    let b = cur_data[(y - 1) * stride + (x + 1).min(stride - 1)] as i32;
+                    let f = cur_data[(y + 1) * stride + x.saturating_sub(1)] as i32;
+                    let g = cur_data[(y + 1) * stride + (x + 1).min(stride - 1)] as i32;
+
+                    let pred1 = (a + g) / 2;
+                    let pred2 = (b + f) / 2;
+
+                    if (pred1 - d).abs() < (pred2 - d).abs() {
+                        pred1
+                    } else {
+                        pred2
+                    }
+                };
+
+                out_data[y * stride + x] = result.clamp(0, 255) as u8;
+            }
+        }
+    }
+
+    fn bwdif(self, frame: &VideoFrame) -> Array<VideoFrame> {
+        // BWDIF is similar to YADIF but with improved edge handling
+        self.yadif(frame)
+    }
+}
+
+// ============================================================================
+// VIDEO TIMELINE
+// ============================================================================
+
+/// Video clip on timeline
+struct VideoClip {
+    source_path: String,
+    source_start: i64,    // Start time in source
+    source_end: i64,      // End time in source
+    timeline_start: i64,  // Position on timeline
+    speed: f32,           // Playback speed multiplier
+    volume: f32,          // Audio volume (0.0 - 1.0)
+    opacity: f32,         // Visual opacity (0.0 - 1.0)
+    effects: Array<Box<dyn VideoFilter>>,
+    transitions: Array<Transition>,
+
+    fn new(path: &str) -> Self {
+        Self {
+            source_path: path.to_string(),
+            source_start: 0,
+            source_end: 0,
+            timeline_start: 0,
+            speed: 1.0,
+            volume: 1.0,
+            opacity: 1.0,
+            effects: Array::new(),
+            transitions: Array::new(),
+        }
+    }
+
+    fn duration(self) -> i64 {
+        ((self.source_end - self.source_start) as f32 / self.speed) as i64
+    }
+
+    fn timeline_end(self) -> i64 {
+        self.timeline_start + self.duration()
+    }
+
+    fn set_in_point(mut self, time: i64) -> Self {
+        self.source_start = time;
+        self
+    }
+
+    fn set_out_point(mut self, time: i64) -> Self {
+        self.source_end = time;
+        self
+    }
+
+    fn set_timeline_position(mut self, time: i64) -> Self {
+        self.timeline_start = time;
+        self
+    }
+
+    fn add_effect(mut self, effect: Box<dyn VideoFilter>) -> Self {
+        self.effects.push(effect);
+        self
+    }
+
+    fn add_transition(mut self, transition: Transition) -> Self {
+        self.transitions.push(transition);
+        self
+    }
+}
+
+/// Transition between clips
+struct Transition {
+    kind: TransitionType,
+    duration: i64,
+    position: TransitionPosition,
+
+    fn new(kind: TransitionType, duration: i64) -> Self {
+        Self {
+            kind,
+            duration,
+            position: TransitionPosition::End,
+        }
+    }
+}
+
+enum TransitionType {
+    Cut,
+    Dissolve,
+    Fade,
+    Wipe { angle: f32 },
+    Slide { direction: Direction },
+    Zoom,
+    Push { direction: Direction },
+    Iris { shape: IrisShape },
+}
+
+enum TransitionPosition {
+    Start,
+    End,
+}
+
+enum Direction {
+    Left,
+    Right,
+    Up,
+    Down,
+}
+
+enum IrisShape {
+    Circle,
+    Rectangle,
+    Diamond,
+    Heart,
+}
+
+/// Video track containing clips
+struct VideoTrack {
+    name: String,
+    clips: Array<VideoClip>,
+    enabled: bool,
+    locked: bool,
+    blend_mode: TrackBlendMode,
+
+    fn new(name: &str) -> Self {
+        Self {
+            name: name.to_string(),
+            clips: Array::new(),
+            enabled: true,
+            locked: false,
+            blend_mode: TrackBlendMode::Normal,
+        }
+    }
+
+    fn add_clip(mut self, clip: VideoClip) {
+        self.clips.push(clip);
+        self.sort_clips();
+    }
+
+    fn sort_clips(mut self) {
+        self.clips.sort_by(|a, b| a.timeline_start.cmp(&b.timeline_start));
+    }
+
+    fn get_clip_at(self, time: i64) -> ?&VideoClip {
+        for clip in self.clips.iter() {
+            if time >= clip.timeline_start && time < clip.timeline_end() {
+                return Some(clip);
+            }
+        }
+        None
+    }
+
+    fn duration(self) -> i64 {
+        self.clips.iter().map(|c| c.timeline_end()).max().unwrap_or(0)
+    }
+}
+
+enum TrackBlendMode {
+    Normal,
+    Add,
+    Multiply,
+    Screen,
+    Overlay,
+    Difference,
+}
+
+/// Timeline composition
+struct Timeline {
+    video_tracks: Array<VideoTrack>,
+    audio_tracks: Array<AudioTrack>,
+    duration: i64,
+    frame_rate: f32,
+    width: u32,
+    height: u32,
+
+    fn new(width: u32, height: u32, frame_rate: f32) -> Self {
+        Self {
+            video_tracks: Array::new(),
+            audio_tracks: Array::new(),
+            duration: 0,
+            frame_rate,
+            width,
+            height,
+        }
+    }
+
+    fn add_video_track(mut self, track: VideoTrack) {
+        self.video_tracks.push(track);
+        self.update_duration();
+    }
+
+    fn add_audio_track(mut self, track: AudioTrack) {
+        self.audio_tracks.push(track);
+        self.update_duration();
+    }
+
+    fn update_duration(mut self) {
+        let video_duration = self.video_tracks.iter().map(|t| t.duration()).max().unwrap_or(0);
+        let audio_duration = self.audio_tracks.iter().map(|t| t.duration()).max().unwrap_or(0);
+        self.duration = video_duration.max(audio_duration);
+    }
+
+    fn render_frame(self, time: i64) -> VideoFrame {
+        let mut result = VideoFrame::new(self.width, self.height, PixelFormat::RGBA32);
+        result.fill_solid(0, 0, 0);
+
+        // Composite tracks from bottom to top
+        for track in self.video_tracks.iter() {
+            if !track.enabled {
+                continue;
+            }
+
+            if let Some(clip) = track.get_clip_at(time) {
+                let clip_frame = self.render_clip(clip, time);
+                self.composite_frame(&mut result, &clip_frame, track.blend_mode, clip.opacity);
+            }
+        }
+
+        result
+    }
+
+    fn render_clip(self, clip: &VideoClip, time: i64) -> VideoFrame {
+        // Calculate source time
+        let clip_time = time - clip.timeline_start;
+        let source_time = clip.source_start + (clip_time as f32 * clip.speed) as i64;
+
+        // Load frame from source (placeholder - would need actual decoder)
+        let mut frame = VideoFrame::new(self.width, self.height, PixelFormat::RGBA32);
+
+        // Apply effects
+        for effect in clip.effects.iter() {
+            effect.process(&mut frame);
+        }
+
+        frame
+    }
+
+    fn composite_frame(
+        self,
+        base: &mut VideoFrame,
+        overlay: &VideoFrame,
+        blend_mode: TrackBlendMode,
+        opacity: f32
+    ) {
+        let base_data = base.data[0].as_mut_slice();
+        let overlay_data = overlay.data[0].as_slice();
+        let stride = base.strides[0] as usize;
+
+        for y in 0..base.height as usize {
+            for x in 0..base.width as usize {
+                let idx = y * stride + x * 4;
+
+                let br = base_data[idx] as f32 / 255.0;
+                let bg = base_data[idx + 1] as f32 / 255.0;
+                let bb = base_data[idx + 2] as f32 / 255.0;
+                let ba = base_data[idx + 3] as f32 / 255.0;
+
+                let or = overlay_data[idx] as f32 / 255.0;
+                let og = overlay_data[idx + 1] as f32 / 255.0;
+                let ob = overlay_data[idx + 2] as f32 / 255.0;
+                let oa = overlay_data[idx + 3] as f32 / 255.0 * opacity;
+
+                let (r, g, b) = match blend_mode {
+                    TrackBlendMode::Normal => (or, og, ob),
+                    TrackBlendMode::Add => (br + or, bg + og, bb + ob),
+                    TrackBlendMode::Multiply => (br * or, bg * og, bb * ob),
+                    TrackBlendMode::Screen => (1.0 - (1.0 - br) * (1.0 - or),
+                                               1.0 - (1.0 - bg) * (1.0 - og),
+                                               1.0 - (1.0 - bb) * (1.0 - ob)),
+                    TrackBlendMode::Overlay => {
+                        let blend_channel = |base: f32, over: f32| {
+                            if base < 0.5 {
+                                2.0 * base * over
+                            } else {
+                                1.0 - 2.0 * (1.0 - base) * (1.0 - over)
+                            }
+                        };
+                        (blend_channel(br, or), blend_channel(bg, og), blend_channel(bb, ob))
+                    }
+                    TrackBlendMode::Difference => ((br - or).abs(), (bg - og).abs(), (bb - ob).abs()),
+                };
+
+                // Alpha compositing
+                let out_a = oa + ba * (1.0 - oa);
+                let out_r = if out_a > 0.0 { (r * oa + br * ba * (1.0 - oa)) / out_a } else { 0.0 };
+                let out_g = if out_a > 0.0 { (g * oa + bg * ba * (1.0 - oa)) / out_a } else { 0.0 };
+                let out_b = if out_a > 0.0 { (b * oa + bb * ba * (1.0 - oa)) / out_a } else { 0.0 };
+
+                base_data[idx] = (out_r * 255.0).clamp(0.0, 255.0) as u8;
+                base_data[idx + 1] = (out_g * 255.0).clamp(0.0, 255.0) as u8;
+                base_data[idx + 2] = (out_b * 255.0).clamp(0.0, 255.0) as u8;
+                base_data[idx + 3] = (out_a * 255.0).clamp(0.0, 255.0) as u8;
+            }
+        }
+    }
+}
+
+/// Audio track placeholder
+struct AudioTrack {
+    name: String,
+    clips: Array<AudioClip>,
+    enabled: bool,
+    volume: f32,
+    pan: f32,
+
+    fn new(name: &str) -> Self {
+        Self {
+            name: name.to_string(),
+            clips: Array::new(),
+            enabled: true,
+            volume: 1.0,
+            pan: 0.0,
+        }
+    }
+
+    fn duration(self) -> i64 {
+        self.clips.iter().map(|c| c.timeline_end()).max().unwrap_or(0)
+    }
+}
+
+struct AudioClip {
+    timeline_start: i64,
+    duration: i64,
+
+    fn timeline_end(self) -> i64 {
+        self.timeline_start + self.duration
+    }
+}
+
+// ============================================================================
+// VIDEO ENCODER/DECODER INTERFACE
+// ============================================================================
+
+/// Codec type enumeration
+enum VideoCodec {
+    H264,
+    H265,
+    VP8,
+    VP9,
+    AV1,
+    ProRes,
+    DNxHD,
+    MJPEG,
+    Raw,
+}
+
+/// Encoder configuration
+struct EncoderConfig {
+    codec: VideoCodec,
+    width: u32,
+    height: u32,
+    frame_rate: f32,
+    bitrate: u64,
+    max_bitrate: u64,
+    gop_size: u32,
+    b_frames: u32,
+    profile: String,
+    level: String,
+    pixel_format: PixelFormat,
+    color_space: ColorSpace,
+    threads: u32,
+
+    fn h264_default(width: u32, height: u32) -> Self {
+        Self {
+            codec: VideoCodec::H264,
+            width,
+            height,
+            frame_rate: 30.0,
+            bitrate: 5_000_000,
+            max_bitrate: 10_000_000,
+            gop_size: 30,
+            b_frames: 2,
+            profile: "high".to_string(),
+            level: "4.1".to_string(),
+            pixel_format: PixelFormat::YUV420P,
+            color_space: ColorSpace::Rec709,
+            threads: 4,
+        }
+    }
+
+    fn h265_default(width: u32, height: u32) -> Self {
+        Self {
+            codec: VideoCodec::H265,
+            width,
+            height,
+            frame_rate: 30.0,
+            bitrate: 3_000_000,
+            max_bitrate: 6_000_000,
+            gop_size: 48,
+            b_frames: 3,
+            profile: "main".to_string(),
+            level: "4.1".to_string(),
+            pixel_format: PixelFormat::YUV420P,
+            color_space: ColorSpace::Rec709,
+            threads: 4,
+        }
+    }
+
+    fn prores_422(width: u32, height: u32) -> Self {
+        Self {
+            codec: VideoCodec::ProRes,
+            width,
+            height,
+            frame_rate: 30.0,
+            bitrate: 150_000_000,
+            max_bitrate: 200_000_000,
+            gop_size: 1,
+            b_frames: 0,
+            profile: "422".to_string(),
+            level: "".to_string(),
+            pixel_format: PixelFormat::YUV422P,
+            color_space: ColorSpace::Rec709,
+            threads: 4,
+        }
+    }
+}
+
+/// Encoded packet
+struct VideoPacket {
+    data: Buffer<u8>,
+    pts: i64,
+    dts: i64,
+    duration: i64,
+    keyframe: bool,
+
+    fn new(size: usize) -> Self {
+        Self {
+            data: Buffer::zeroed(size),
+            pts: 0,
+            dts: 0,
+            duration: 0,
+            keyframe: false,
+        }
+    }
+}
+
+/// Video encoder interface
+trait VideoEncoder {
+    fn configure(mut self, config: &EncoderConfig) -> Result<(), String>;
+    fn encode(mut self, frame: &VideoFrame) -> Result<Array<VideoPacket>, String>;
+    fn flush(mut self) -> Result<Array<VideoPacket>, String>;
+    fn reset(mut self);
+}
+
+/// Video decoder interface
+trait VideoDecoder {
+    fn decode(mut self, packet: &VideoPacket) -> Result<Array<VideoFrame>, String>;
+    fn flush(mut self) -> Result<Array<VideoFrame>, String>;
+    fn reset(mut self);
+}
+
+// ============================================================================
+// EXPORTS
+// ============================================================================
+
+export {
+    // Pixel formats and color
+    PixelFormat,
+    ColorSpace,
+    TransferFunction,
+    ColorMatrix,
+
+    // Video frame
+    VideoFrame,
+    FramePool,
+
+    // Format conversion
+    PixelFormatConverter,
+
+    // Scaling
+    ScaleAlgorithm,
+    VideoScaler,
+
+    // Filters
+    VideoFilter,
+    BrightnessContrastFilter,
+    SaturationFilter,
+    HueRotationFilter,
+    GaussianBlurFilter,
+    SharpenFilter,
+    EdgeDetectionFilter,
+    EdgeMethod,
+    CurvesFilter,
+
+    // Motion
+    MotionVector,
+    MotionEstimator,
+    MotionEstimationMethod,
+
+    // Frame interpolation
+    FrameInterpolator,
+    BlendMode,
+
+    // Deinterlacing
+    DeinterlaceMethod,
+    Deinterlacer,
+
+    // Timeline
+    VideoClip,
+    Transition,
+    TransitionType,
+    TransitionPosition,
+    Direction,
+    IrisShape,
+    VideoTrack,
+    TrackBlendMode,
+    Timeline,
+    AudioTrack,
+    AudioClip,
+
+    // Codec interface
+    VideoCodec,
+    EncoderConfig,
+    VideoPacket,
+    VideoEncoder,
+    VideoDecoder,
+};

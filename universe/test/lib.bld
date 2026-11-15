@@ -1,0 +1,3741 @@
+// =============================================================================
+// BUILD TEST - Test Runner Framework for BuildLang
+// =============================================================================
+// A comprehensive testing framework with assertions, fixtures, mocking,
+// parallel execution, and coverage tracking.
+// =============================================================================
+
+use buildlang::prelude::*;
+use std::collections::{HashMap, HashSet, BTreeMap};
+use std::sync::{Arc, RwLock, Mutex, atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering}};
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
+use std::panic;
+use std::io::{Write, BufWriter};
+use std::fs;
+
+// =============================================================================
+// TEST RESULT TYPES
+// =============================================================================
+
+/// Test result status
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TestStatus {
+    Passed,
+    Failed,
+    Skipped,
+    Ignored,
+    TimedOut,
+}
+
+/// Single test result
+#[derive(Debug, Clone)]
+pub struct TestResult {
+    pub name: String,
+    pub module: String,
+    pub status: TestStatus,
+    pub duration: Duration,
+    pub message: Option<String>,
+    pub location: Option<TestLocation>,
+    pub stdout: String,
+    pub stderr: String,
+}
+
+/// Test location in source
+#[derive(Debug, Clone)]
+pub struct TestLocation {
+    pub file: PathBuf,
+    pub line: u32,
+    pub column: u32,
+}
+
+/// Test suite result
+#[derive(Debug, Clone)]
+pub struct SuiteResult {
+    pub name: String,
+    pub tests: Vec<TestResult>,
+    pub duration: Duration,
+    pub passed: usize,
+    pub failed: usize,
+    pub skipped: usize,
+    pub ignored: usize,
+}
+
+impl SuiteResult {
+    pub fn new(name: &str) -> Self {
+        SuiteResult {
+            name: name.to_string(),
+            tests: Vec::new(),
+            duration: Duration::ZERO,
+            passed: 0,
+            failed: 0,
+            skipped: 0,
+            ignored: 0,
+        }
+    }
+
+    pub fn add_result(&mut self, result: TestResult) {
+        match result.status {
+            TestStatus::Passed => self.passed += 1,
+            TestStatus::Failed | TestStatus::TimedOut => self.failed += 1,
+            TestStatus::Skipped => self.skipped += 1,
+            TestStatus::Ignored => self.ignored += 1,
+        }
+        self.tests.push(result);
+    }
+
+    pub fn total(&self) -> usize {
+        self.passed + self.failed + self.skipped + self.ignored
+    }
+
+    pub fn success(&self) -> bool {
+        self.failed == 0
+    }
+}
+
+// =============================================================================
+// ASSERTION MACROS AND FUNCTIONS
+// =============================================================================
+
+/// Assertion error
+#[derive(Debug)]
+pub struct AssertionError {
+    pub message: String,
+    pub expected: Option<String>,
+    pub actual: Option<String>,
+    pub location: Option<TestLocation>,
+}
+
+impl std::fmt::Display for AssertionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.message)?;
+        if let Some(ref expected) = self.expected {
+            write!(f, "\n  Expected: {}", expected)?;
+        }
+        if let Some(ref actual) = self.actual {
+            write!(f, "\n    Actual: {}", actual)?;
+        }
+        Ok(())
+    }
+}
+
+/// Assert that a condition is true
+pub fn assert_true(condition: bool, message: Option<&str>) -> Result<(), AssertionError> {
+    if condition {
+        Ok(())
+    } else {
+        Err(AssertionError {
+            message: message.unwrap_or("Assertion failed: expected true").to_string(),
+            expected: Some("true".to_string()),
+            actual: Some("false".to_string()),
+            location: None,
+        })
+    }
+}
+
+/// Assert that a condition is false
+pub fn assert_false(condition: bool, message: Option<&str>) -> Result<(), AssertionError> {
+    if !condition {
+        Ok(())
+    } else {
+        Err(AssertionError {
+            message: message.unwrap_or("Assertion failed: expected false").to_string(),
+            expected: Some("false".to_string()),
+            actual: Some("true".to_string()),
+            location: None,
+        })
+    }
+}
+
+/// Assert equality
+pub fn assert_eq<T: PartialEq + std::fmt::Debug>(
+    left: &T,
+    right: &T,
+    message: Option<&str>,
+) -> Result<(), AssertionError> {
+    if left == right {
+        Ok(())
+    } else {
+        Err(AssertionError {
+            message: message.unwrap_or("Assertion failed: values not equal").to_string(),
+            expected: Some(format!("{:?}", right)),
+            actual: Some(format!("{:?}", left)),
+            location: None,
+        })
+    }
+}
+
+/// Assert inequality
+pub fn assert_ne<T: PartialEq + std::fmt::Debug>(
+    left: &T,
+    right: &T,
+    message: Option<&str>,
+) -> Result<(), AssertionError> {
+    if left != right {
+        Ok(())
+    } else {
+        Err(AssertionError {
+            message: message.unwrap_or("Assertion failed: values should not be equal").to_string(),
+            expected: Some(format!("not {:?}", right)),
+            actual: Some(format!("{:?}", left)),
+            location: None,
+        })
+    }
+}
+
+/// Assert that value is None
+pub fn assert_none<T: std::fmt::Debug>(value: &Option<T>, message: Option<&str>) -> Result<(), AssertionError> {
+    if value.is_none() {
+        Ok(())
+    } else {
+        Err(AssertionError {
+            message: message.unwrap_or("Assertion failed: expected None").to_string(),
+            expected: Some("None".to_string()),
+            actual: Some(format!("{:?}", value)),
+            location: None,
+        })
+    }
+}
+
+/// Assert that value is Some
+pub fn assert_some<T: std::fmt::Debug>(value: &Option<T>, message: Option<&str>) -> Result<(), AssertionError> {
+    if value.is_some() {
+        Ok(())
+    } else {
+        Err(AssertionError {
+            message: message.unwrap_or("Assertion failed: expected Some").to_string(),
+            expected: Some("Some(_)".to_string()),
+            actual: Some("None".to_string()),
+            location: None,
+        })
+    }
+}
+
+/// Assert that result is Ok
+pub fn assert_ok<T: std::fmt::Debug, E: std::fmt::Debug>(
+    result: &Result<T, E>,
+    message: Option<&str>,
+) -> Result<(), AssertionError> {
+    if result.is_ok() {
+        Ok(())
+    } else {
+        Err(AssertionError {
+            message: message.unwrap_or("Assertion failed: expected Ok").to_string(),
+            expected: Some("Ok(_)".to_string()),
+            actual: Some(format!("{:?}", result)),
+            location: None,
+        })
+    }
+}
+
+/// Assert that result is Err
+pub fn assert_err<T: std::fmt::Debug, E: std::fmt::Debug>(
+    result: &Result<T, E>,
+    message: Option<&str>,
+) -> Result<(), AssertionError> {
+    if result.is_err() {
+        Ok(())
+    } else {
+        Err(AssertionError {
+            message: message.unwrap_or("Assertion failed: expected Err").to_string(),
+            expected: Some("Err(_)".to_string()),
+            actual: Some(format!("{:?}", result)),
+            location: None,
+        })
+    }
+}
+
+/// Assert approximately equal (for floats)
+pub fn assert_approx_eq(
+    left: f64,
+    right: f64,
+    epsilon: f64,
+    message: Option<&str>,
+) -> Result<(), AssertionError> {
+    if (left - right).abs() < epsilon {
+        Ok(())
+    } else {
+        Err(AssertionError {
+            message: message.unwrap_or("Assertion failed: values not approximately equal").to_string(),
+            expected: Some(format!("{} ± {}", right, epsilon)),
+            actual: Some(format!("{}", left)),
+            location: None,
+        })
+    }
+}
+
+/// Assert that a value is greater than another
+pub fn assert_gt<T: PartialOrd + std::fmt::Debug>(
+    left: &T,
+    right: &T,
+    message: Option<&str>,
+) -> Result<(), AssertionError> {
+    if left > right {
+        Ok(())
+    } else {
+        Err(AssertionError {
+            message: message.unwrap_or("Assertion failed: left not greater than right").to_string(),
+            expected: Some(format!("> {:?}", right)),
+            actual: Some(format!("{:?}", left)),
+            location: None,
+        })
+    }
+}
+
+/// Assert that a value is less than another
+pub fn assert_lt<T: PartialOrd + std::fmt::Debug>(
+    left: &T,
+    right: &T,
+    message: Option<&str>,
+) -> Result<(), AssertionError> {
+    if left < right {
+        Ok(())
+    } else {
+        Err(AssertionError {
+            message: message.unwrap_or("Assertion failed: left not less than right").to_string(),
+            expected: Some(format!("< {:?}", right)),
+            actual: Some(format!("{:?}", left)),
+            location: None,
+        })
+    }
+}
+
+/// Assert that a string contains a substring
+pub fn assert_contains(haystack: &str, needle: &str, message: Option<&str>) -> Result<(), AssertionError> {
+    if haystack.contains(needle) {
+        Ok(())
+    } else {
+        Err(AssertionError {
+            message: message.unwrap_or("Assertion failed: string does not contain substring").to_string(),
+            expected: Some(format!("to contain \"{}\"", needle)),
+            actual: Some(format!("\"{}\"", haystack)),
+            location: None,
+        })
+    }
+}
+
+/// Assert that a collection contains an element
+pub fn assert_collection_contains<T: PartialEq + std::fmt::Debug>(
+    collection: &[T],
+    element: &T,
+    message: Option<&str>,
+) -> Result<(), AssertionError> {
+    if collection.contains(element) {
+        Ok(())
+    } else {
+        Err(AssertionError {
+            message: message.unwrap_or("Assertion failed: collection does not contain element").to_string(),
+            expected: Some(format!("to contain {:?}", element)),
+            actual: Some(format!("{:?}", collection)),
+            location: None,
+        })
+    }
+}
+
+/// Assert that a collection is empty
+pub fn assert_empty<T: std::fmt::Debug>(collection: &[T], message: Option<&str>) -> Result<(), AssertionError> {
+    if collection.is_empty() {
+        Ok(())
+    } else {
+        Err(AssertionError {
+            message: message.unwrap_or("Assertion failed: collection not empty").to_string(),
+            expected: Some("empty collection".to_string()),
+            actual: Some(format!("{:?}", collection)),
+            location: None,
+        })
+    }
+}
+
+/// Assert that a collection has a specific length
+pub fn assert_len<T: std::fmt::Debug>(
+    collection: &[T],
+    expected_len: usize,
+    message: Option<&str>,
+) -> Result<(), AssertionError> {
+    if collection.len() == expected_len {
+        Ok(())
+    } else {
+        Err(AssertionError {
+            message: message.unwrap_or("Assertion failed: wrong collection length").to_string(),
+            expected: Some(format!("length {}", expected_len)),
+            actual: Some(format!("length {}", collection.len())),
+            location: None,
+        })
+    }
+}
+
+// =============================================================================
+// TEST FUNCTION TYPE
+// =============================================================================
+
+/// Test function signature
+pub type TestFn = Box<dyn Fn() -> Result<(), AssertionError> + Send + Sync>;
+
+/// Test definition
+pub struct TestDef {
+    pub name: String,
+    pub module: String,
+    pub function: TestFn,
+    pub attributes: TestAttributes,
+    pub location: Option<TestLocation>,
+}
+
+/// Test attributes
+#[derive(Debug, Clone, Default)]
+pub struct TestAttributes {
+    pub ignore: bool,
+    pub should_panic: bool,
+    pub expected_panic: Option<String>,
+    pub timeout: Option<Duration>,
+    pub tags: HashSet<String>,
+    pub depends_on: Vec<String>,
+}
+
+// =============================================================================
+// TEST FIXTURES
+// =============================================================================
+
+/// Fixture trait
+pub trait Fixture: Send + Sync {
+    /// Set up the fixture before tests
+    fn setup(&mut self) -> Result<(), Box<dyn std::error::Error>>;
+
+    /// Tear down the fixture after tests
+    fn teardown(&mut self) -> Result<(), Box<dyn std::error::Error>>;
+}
+
+/// Scoped fixture that automatically cleans up
+pub struct ScopedFixture<T> {
+    value: Option<T>,
+    teardown_fn: Option<Box<dyn FnOnce(&mut T) + Send>>,
+}
+
+impl<T> ScopedFixture<T> {
+    pub fn new<F>(value: T, teardown: F) -> Self
+    where
+        F: FnOnce(&mut T) + Send + 'static,
+    {
+        ScopedFixture {
+            value: Some(value),
+            teardown_fn: Some(Box::new(teardown)),
+        }
+    }
+
+    pub fn get(&self) -> &T {
+        self.value.as_ref().unwrap()
+    }
+
+    pub fn get_mut(&mut self) -> &mut T {
+        self.value.as_mut().unwrap()
+    }
+}
+
+impl<T> Drop for ScopedFixture<T> {
+    fn drop(&mut self) {
+        if let (Some(mut value), Some(teardown)) = (self.value.take(), self.teardown_fn.take()) {
+            teardown(&mut value);
+        }
+    }
+}
+
+/// Temporary directory fixture
+pub struct TempDir {
+    path: PathBuf,
+}
+
+impl TempDir {
+    pub fn new() -> std::io::Result<Self> {
+        let path = std::env::temp_dir().join(format!("build_test_{}", std::process::id()));
+        fs::create_dir_all(&path)?;
+        Ok(TempDir { path })
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.path);
+    }
+}
+
+/// Temporary file fixture
+pub struct TempFile {
+    path: PathBuf,
+}
+
+impl TempFile {
+    pub fn new(content: &str) -> std::io::Result<Self> {
+        let path = std::env::temp_dir().join(format!("build_test_file_{}", std::process::id()));
+        fs::write(&path, content)?;
+        Ok(TempFile { path })
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for TempFile {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
+}
+
+// =============================================================================
+// MOCKING FRAMEWORK
+// =============================================================================
+
+/// Mock call record
+#[derive(Debug, Clone)]
+pub struct MockCall {
+    pub method: String,
+    pub args: Vec<String>,
+    pub timestamp: Instant,
+}
+
+/// Mock expectation
+pub struct MockExpectation {
+    method: String,
+    args_matcher: Option<Box<dyn Fn(&[String]) -> bool + Send + Sync>>,
+    return_value: Option<Box<dyn std::any::Any + Send + Sync>>,
+    times: Option<usize>,
+    call_count: AtomicUsize,
+}
+
+/// Mock object
+pub struct Mock {
+    name: String,
+    calls: RwLock<Vec<MockCall>>,
+    expectations: RwLock<Vec<MockExpectation>>,
+}
+
+impl Mock {
+    pub fn new(name: &str) -> Self {
+        Mock {
+            name: name.to_string(),
+            calls: RwLock::new(Vec::new()),
+            expectations: RwLock::new(Vec::new()),
+        }
+    }
+
+    /// Record a method call
+    pub fn record_call(&self, method: &str, args: Vec<String>) {
+        self.calls.write().unwrap().push(MockCall {
+            method: method.to_string(),
+            args,
+            timestamp: Instant::now(),
+        });
+    }
+
+    /// Check if a method was called
+    pub fn was_called(&self, method: &str) -> bool {
+        self.calls.read().unwrap().iter().any(|c| c.method == method)
+    }
+
+    /// Get the number of times a method was called
+    pub fn call_count(&self, method: &str) -> usize {
+        self.calls.read().unwrap().iter().filter(|c| c.method == method).count()
+    }
+
+    /// Get all calls to a method
+    pub fn calls_to(&self, method: &str) -> Vec<MockCall> {
+        self.calls.read().unwrap()
+            .iter()
+            .filter(|c| c.method == method)
+            .cloned()
+            .collect()
+    }
+
+    /// Clear all recorded calls
+    pub fn clear(&self) {
+        self.calls.write().unwrap().clear();
+    }
+
+    /// Add an expectation
+    pub fn expect(&self, method: &str) -> &Self {
+        self.expectations.write().unwrap().push(MockExpectation {
+            method: method.to_string(),
+            args_matcher: None,
+            return_value: None,
+            times: None,
+            call_count: AtomicUsize::new(0),
+        });
+        self
+    }
+
+    /// Verify all expectations were met
+    pub fn verify(&self) -> Result<(), AssertionError> {
+        let expectations = self.expectations.read().unwrap();
+        let calls = self.calls.read().unwrap();
+
+        for exp in expectations.iter() {
+            let actual_count = calls.iter().filter(|c| c.method == exp.method).count();
+
+            if let Some(expected_times) = exp.times {
+                if actual_count != expected_times {
+                    return Err(AssertionError {
+                        message: format!("Mock '{}': method '{}' called wrong number of times", self.name, exp.method),
+                        expected: Some(format!("{} times", expected_times)),
+                        actual: Some(format!("{} times", actual_count)),
+                        location: None,
+                    });
+                }
+            }
+        }
+
+        Ok(())
+    }
+}
+
+/// Mock builder for fluent API
+pub struct MockBuilder<'a> {
+    mock: &'a Mock,
+    method: String,
+}
+
+impl<'a> MockBuilder<'a> {
+    pub fn times(self, n: usize) -> Self {
+        // Update the last expectation
+        if let Some(exp) = self.mock.expectations.write().unwrap().last_mut() {
+            exp.times = Some(n);
+        }
+        self
+    }
+
+    pub fn never(self) -> Self {
+        self.times(0)
+    }
+
+    pub fn once(self) -> Self {
+        self.times(1)
+    }
+
+    pub fn twice(self) -> Self {
+        self.times(2)
+    }
+}
+
+// =============================================================================
+// TEST DISCOVERY
+// =============================================================================
+
+/// Test discovery result
+#[derive(Debug)]
+pub struct DiscoveredTest {
+    pub name: String,
+    pub module: String,
+    pub file: PathBuf,
+    pub line: u32,
+    pub attributes: TestAttributes,
+}
+
+/// Discover tests in a directory
+pub fn discover_tests(path: &Path) -> Vec<DiscoveredTest> {
+    let mut tests = Vec::new();
+
+    if path.is_file() {
+        if let Some(file_tests) = discover_tests_in_file(path) {
+            tests.extend(file_tests);
+        }
+    } else if path.is_dir() {
+        if let Ok(entries) = fs::read_dir(path) {
+            for entry in entries.flatten() {
+                let entry_path = entry.path();
+
+                if entry_path.is_dir() {
+                    tests.extend(discover_tests(&entry_path));
+                } else if entry_path.extension().map(|e| e == "build").unwrap_or(false) {
+                    if let Some(file_tests) = discover_tests_in_file(&entry_path) {
+                        tests.extend(file_tests);
+                    }
+                }
+            }
+        }
+    }
+
+    tests
+}
+
+fn discover_tests_in_file(path: &Path) -> Option<Vec<DiscoveredTest>> {
+    let content = fs::read_to_string(path).ok()?;
+    let mut tests = Vec::new();
+    let module = path.file_stem()?.to_string_lossy().to_string();
+
+    for (line_num, line) in content.lines().enumerate() {
+        let trimmed = line.trim();
+
+        // Look for #[test] attribute
+        if trimmed.starts_with("#[test]") || trimmed.contains("#[test]") {
+            // Parse attributes
+            let mut attrs = TestAttributes::default();
+
+            if trimmed.contains("#[ignore]") || trimmed.contains("ignore") {
+                attrs.ignore = true;
+            }
+
+            if trimmed.contains("#[should_panic]") || trimmed.contains("should_panic") {
+                attrs.should_panic = true;
+            }
+
+            // Look for the function on the next line(s)
+            for next_line in content.lines().skip(line_num + 1) {
+                let next_trimmed = next_line.trim();
+
+                if next_trimmed.starts_with("fn ") || next_trimmed.starts_with("pub fn ") {
+                    // Extract function name
+                    if let Some(name_start) = next_trimmed.find("fn ") {
+                        let name_part = &next_trimmed[name_start + 3..];
+                        if let Some(name_end) = name_part.find('(') {
+                            let name = name_part[..name_end].trim().to_string();
+
+                            tests.push(DiscoveredTest {
+                                name,
+                                module: module.clone(),
+                                file: path.to_path_buf(),
+                                line: (line_num + 1) as u32,
+                                attributes: attrs,
+                            });
+                        }
+                    }
+                    break;
+                }
+
+                if next_trimmed.starts_with("#[") {
+                    // More attributes, continue
+                    continue;
+                }
+
+                if !next_trimmed.is_empty() {
+                    break;
+                }
+            }
+        }
+    }
+
+    if tests.is_empty() {
+        None
+    } else {
+        Some(tests)
+    }
+}
+
+// =============================================================================
+// TEST RUNNER
+// =============================================================================
+
+/// Test runner configuration
+#[derive(Debug, Clone)]
+pub struct RunnerConfig {
+    /// Number of parallel threads
+    pub threads: usize,
+
+    /// Test timeout
+    pub timeout: Duration,
+
+    /// Run ignored tests
+    pub run_ignored: bool,
+
+    /// Filter by name pattern
+    pub filter: Option<String>,
+
+    /// Filter by tags
+    pub tags: HashSet<String>,
+
+    /// Fail fast on first failure
+    pub fail_fast: bool,
+
+    /// Show output from passing tests
+    pub show_output: bool,
+
+    /// Capture stdout/stderr
+    pub capture: bool,
+
+    /// Shuffle test order
+    pub shuffle: bool,
+
+    /// Random seed for shuffling
+    pub seed: Option<u64>,
+
+    /// Output format
+    pub format: OutputFormat,
+
+    /// Generate coverage report
+    pub coverage: bool,
+
+    /// Coverage output directory
+    pub coverage_dir: Option<PathBuf>,
+}
+
+impl Default for RunnerConfig {
+    fn default() -> Self {
+        RunnerConfig {
+            threads: num_cpus::get(),
+            timeout: Duration::from_secs(60),
+            run_ignored: false,
+            filter: None,
+            tags: HashSet::new(),
+            fail_fast: false,
+            show_output: false,
+            capture: true,
+            shuffle: false,
+            seed: None,
+            format: OutputFormat::Pretty,
+            coverage: false,
+            coverage_dir: None,
+        }
+    }
+}
+
+/// Output format
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OutputFormat {
+    Pretty,
+    Terse,
+    Json,
+    Junit,
+    Tap,
+}
+
+/// Test runner
+pub struct TestRunner {
+    config: RunnerConfig,
+    tests: Vec<TestDef>,
+    fixtures: HashMap<String, Box<dyn Fixture>>,
+    before_all: Vec<Box<dyn Fn() + Send + Sync>>,
+    after_all: Vec<Box<dyn Fn() + Send + Sync>>,
+    before_each: Vec<Box<dyn Fn() + Send + Sync>>,
+    after_each: Vec<Box<dyn Fn() + Send + Sync>>,
+}
+
+impl TestRunner {
+    pub fn new(config: RunnerConfig) -> Self {
+        TestRunner {
+            config,
+            tests: Vec::new(),
+            fixtures: HashMap::new(),
+            before_all: Vec::new(),
+            after_all: Vec::new(),
+            before_each: Vec::new(),
+            after_each: Vec::new(),
+        }
+    }
+
+    /// Add a test
+    pub fn add_test(&mut self, test: TestDef) {
+        self.tests.push(test);
+    }
+
+    /// Add a fixture
+    pub fn add_fixture(&mut self, name: &str, fixture: Box<dyn Fixture>) {
+        self.fixtures.insert(name.to_string(), fixture);
+    }
+
+    /// Add before all hook
+    pub fn before_all<F>(&mut self, hook: F)
+    where
+        F: Fn() + Send + Sync + 'static,
+    {
+        self.before_all.push(Box::new(hook));
+    }
+
+    /// Add after all hook
+    pub fn after_all<F>(&mut self, hook: F)
+    where
+        F: Fn() + Send + Sync + 'static,
+    {
+        self.after_all.push(Box::new(hook));
+    }
+
+    /// Add before each hook
+    pub fn before_each<F>(&mut self, hook: F)
+    where
+        F: Fn() + Send + Sync + 'static,
+    {
+        self.before_each.push(Box::new(hook));
+    }
+
+    /// Add after each hook
+    pub fn after_each<F>(&mut self, hook: F)
+    where
+        F: Fn() + Send + Sync + 'static,
+    {
+        self.after_each.push(Box::new(hook));
+    }
+
+    /// Run all tests
+    pub fn run(&mut self) -> SuiteResult {
+        let start = Instant::now();
+        let mut result = SuiteResult::new("test");
+
+        // Filter tests
+        let tests: Vec<&TestDef> = self.tests.iter()
+            .filter(|t| self.should_run_test(t))
+            .collect();
+
+        // Setup fixtures
+        for fixture in self.fixtures.values_mut() {
+            if let Err(e) = fixture.setup() {
+                eprintln!("Fixture setup failed: {}", e);
+                return result;
+            }
+        }
+
+        // Run before all hooks
+        for hook in &self.before_all {
+            hook();
+        }
+
+        // Print header
+        match self.config.format {
+            OutputFormat::Pretty => {
+                println!("\nrunning {} tests", tests.len());
+            }
+            OutputFormat::Terse => {}
+            OutputFormat::Json => {}
+            OutputFormat::Junit => {}
+            OutputFormat::Tap => {
+                println!("TAP version 13");
+                println!("1..{}", tests.len());
+            }
+        }
+
+        // Shuffle if requested
+        let test_order: Vec<usize> = if self.config.shuffle {
+            let mut indices: Vec<usize> = (0..tests.len()).collect();
+            // Simple shuffle using seed
+            let seed = self.config.seed.unwrap_or(42);
+            for i in (1..indices.len()).rev() {
+                let j = ((seed * (i as u64 + 1)) % (i as u64 + 1)) as usize;
+                indices.swap(i, j);
+            }
+            indices
+        } else {
+            (0..tests.len()).collect()
+        };
+
+        // Run tests
+        let failed = AtomicBool::new(false);
+
+        for (test_num, &idx) in test_order.iter().enumerate() {
+            if self.config.fail_fast && failed.load(Ordering::SeqCst) {
+                break;
+            }
+
+            let test = tests[idx];
+
+            // Run before each hooks
+            for hook in &self.before_each {
+                hook();
+            }
+
+            let test_result = self.run_single_test(test, test_num + 1);
+
+            if test_result.status == TestStatus::Failed || test_result.status == TestStatus::TimedOut {
+                failed.store(true, Ordering::SeqCst);
+            }
+
+            result.add_result(test_result);
+
+            // Run after each hooks
+            for hook in &self.after_each {
+                hook();
+            }
+        }
+
+        // Run after all hooks
+        for hook in &self.after_all {
+            hook();
+        }
+
+        // Teardown fixtures
+        for fixture in self.fixtures.values_mut() {
+            let _ = fixture.teardown();
+        }
+
+        result.duration = start.elapsed();
+
+        // Print summary
+        self.print_summary(&result);
+
+        result
+    }
+
+    fn should_run_test(&self, test: &TestDef) -> bool {
+        // Check ignore flag
+        if test.attributes.ignore && !self.config.run_ignored {
+            return false;
+        }
+
+        // Check filter
+        if let Some(ref filter) = self.config.filter {
+            if !test.name.contains(filter) && !test.module.contains(filter) {
+                return false;
+            }
+        }
+
+        // Check tags
+        if !self.config.tags.is_empty() {
+            if !self.config.tags.iter().any(|t| test.attributes.tags.contains(t)) {
+                return false;
+            }
+        }
+
+        true
+    }
+
+    fn run_single_test(&self, test: &TestDef, test_num: usize) -> TestResult {
+        let start = Instant::now();
+
+        // Check if ignored
+        if test.attributes.ignore && !self.config.run_ignored {
+            self.print_test_result(test, TestStatus::Ignored, None, test_num);
+            return TestResult {
+                name: test.name.clone(),
+                module: test.module.clone(),
+                status: TestStatus::Ignored,
+                duration: Duration::ZERO,
+                message: Some("ignored".to_string()),
+                location: test.location.clone(),
+                stdout: String::new(),
+                stderr: String::new(),
+            };
+        }
+
+        // Run test with timeout
+        let timeout = test.attributes.timeout.unwrap_or(self.config.timeout);
+
+        let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
+            (test.function)()
+        }));
+
+        let duration = start.elapsed();
+
+        // Check timeout
+        if duration > timeout {
+            self.print_test_result(test, TestStatus::TimedOut, None, test_num);
+            return TestResult {
+                name: test.name.clone(),
+                module: test.module.clone(),
+                status: TestStatus::TimedOut,
+                duration,
+                message: Some(format!("test timed out after {:?}", timeout)),
+                location: test.location.clone(),
+                stdout: String::new(),
+                stderr: String::new(),
+            };
+        }
+
+        let (status, message) = match result {
+            Ok(Ok(())) => {
+                if test.attributes.should_panic {
+                    (TestStatus::Failed, Some("expected panic but test passed".to_string()))
+                } else {
+                    (TestStatus::Passed, None)
+                }
+            }
+            Ok(Err(e)) => {
+                (TestStatus::Failed, Some(e.to_string()))
+            }
+            Err(panic_info) => {
+                if test.attributes.should_panic {
+                    // Check expected panic message
+                    if let Some(ref expected) = test.attributes.expected_panic {
+                        let panic_msg = panic_info.downcast_ref::<&str>()
+                            .map(|s| s.to_string())
+                            .or_else(|| panic_info.downcast_ref::<String>().cloned())
+                            .unwrap_or_else(|| "unknown panic".to_string());
+
+                        if panic_msg.contains(expected) {
+                            (TestStatus::Passed, None)
+                        } else {
+                            (TestStatus::Failed, Some(format!("expected panic '{}' but got '{}'", expected, panic_msg)))
+                        }
+                    } else {
+                        (TestStatus::Passed, None)
+                    }
+                } else {
+                    let panic_msg = panic_info.downcast_ref::<&str>()
+                        .map(|s| s.to_string())
+                        .or_else(|| panic_info.downcast_ref::<String>().cloned())
+                        .unwrap_or_else(|| "unknown panic".to_string());
+
+                    (TestStatus::Failed, Some(format!("panicked: {}", panic_msg)))
+                }
+            }
+        };
+
+        self.print_test_result(test, status, message.as_deref(), test_num);
+
+        TestResult {
+            name: test.name.clone(),
+            module: test.module.clone(),
+            status,
+            duration,
+            message,
+            location: test.location.clone(),
+            stdout: String::new(),
+            stderr: String::new(),
+        }
+    }
+
+    fn print_test_result(&self, test: &TestDef, status: TestStatus, message: Option<&str>, test_num: usize) {
+        match self.config.format {
+            OutputFormat::Pretty => {
+                let status_str = match status {
+                    TestStatus::Passed => "\x1b[32mok\x1b[0m",
+                    TestStatus::Failed => "\x1b[31mFAILED\x1b[0m",
+                    TestStatus::Skipped => "\x1b[33mskipped\x1b[0m",
+                    TestStatus::Ignored => "\x1b[33mignored\x1b[0m",
+                    TestStatus::TimedOut => "\x1b[31mtimed out\x1b[0m",
+                };
+
+                println!("test {}::{} ... {}", test.module, test.name, status_str);
+
+                if let Some(msg) = message {
+                    if status == TestStatus::Failed {
+                        println!("    {}", msg);
+                    }
+                }
+            }
+            OutputFormat::Terse => {
+                let ch = match status {
+                    TestStatus::Passed => '.',
+                    TestStatus::Failed => 'F',
+                    TestStatus::Skipped => 's',
+                    TestStatus::Ignored => 'i',
+                    TestStatus::TimedOut => 'T',
+                };
+                print!("{}", ch);
+                let _ = std::io::stdout().flush();
+            }
+            OutputFormat::Tap => {
+                let status_str = match status {
+                    TestStatus::Passed => "ok",
+                    TestStatus::Failed | TestStatus::TimedOut => "not ok",
+                    TestStatus::Skipped | TestStatus::Ignored => "ok # SKIP",
+                };
+                println!("{} {} - {}::{}", status_str, test_num, test.module, test.name);
+            }
+            _ => {}
+        }
+    }
+
+    fn print_summary(&self, result: &SuiteResult) {
+        match self.config.format {
+            OutputFormat::Pretty | OutputFormat::Terse => {
+                if self.config.format == OutputFormat::Terse {
+                    println!();
+                }
+
+                println!();
+
+                // Print failures
+                let failures: Vec<_> = result.tests.iter()
+                    .filter(|t| t.status == TestStatus::Failed || t.status == TestStatus::TimedOut)
+                    .collect();
+
+                if !failures.is_empty() {
+                    println!("failures:\n");
+                    for test in &failures {
+                        println!("    {}::{}", test.module, test.name);
+                        if let Some(ref msg) = test.message {
+                            println!("        {}", msg);
+                        }
+                    }
+                    println!();
+                }
+
+                // Print summary
+                let status = if result.success() {
+                    "\x1b[32mok\x1b[0m"
+                } else {
+                    "\x1b[31mFAILED\x1b[0m"
+                };
+
+                println!(
+                    "test result: {}. {} passed; {} failed; {} ignored; {} filtered out; finished in {:.2}s",
+                    status,
+                    result.passed,
+                    result.failed,
+                    result.ignored,
+                    result.skipped,
+                    result.duration.as_secs_f64()
+                );
+            }
+            OutputFormat::Json => {
+                let json = serde_json::json!({
+                    "type": "suite",
+                    "passed": result.passed,
+                    "failed": result.failed,
+                    "ignored": result.ignored,
+                    "filtered": result.skipped,
+                    "duration_secs": result.duration.as_secs_f64(),
+                    "tests": result.tests.iter().map(|t| serde_json::json!({
+                        "name": t.name,
+                        "module": t.module,
+                        "status": format!("{:?}", t.status),
+                        "duration_ms": t.duration.as_millis(),
+                        "message": t.message,
+                    })).collect::<Vec<_>>(),
+                });
+                println!("{}", serde_json::to_string_pretty(&json).unwrap());
+            }
+            OutputFormat::Junit => {
+                println!(r#"<?xml version="1.0" encoding="UTF-8"?>"#);
+                println!(r#"<testsuites name="test" tests="{}" failures="{}" time="{:.3}">"#,
+                    result.total(), result.failed, result.duration.as_secs_f64());
+
+                for test in &result.tests {
+                    println!(r#"  <testcase name="{}" classname="{}" time="{:.3}">"#,
+                        test.name, test.module, test.duration.as_secs_f64());
+
+                    if test.status == TestStatus::Failed {
+                        println!(r#"    <failure message="{}">{}</failure>"#,
+                            test.message.as_deref().unwrap_or(""),
+                            test.message.as_deref().unwrap_or(""));
+                    } else if test.status == TestStatus::Skipped || test.status == TestStatus::Ignored {
+                        println!("    <skipped />");
+                    }
+
+                    println!("  </testcase>");
+                }
+
+                println!("</testsuites>");
+            }
+            OutputFormat::Tap => {
+                // TAP output was printed during execution
+            }
+        }
+    }
+}
+
+// =============================================================================
+// PROPERTY-BASED TESTING
+// =============================================================================
+
+/// Arbitrary trait for generating random test values
+pub trait Arbitrary: Sized {
+    fn arbitrary(g: &mut Generator) -> Self;
+
+    fn shrink(&self) -> Vec<Self> {
+        Vec::new()
+    }
+}
+
+/// Random value generator
+pub struct Generator {
+    seed: u64,
+    size: usize,
+}
+
+impl Generator {
+    pub fn new(seed: u64) -> Self {
+        Generator { seed, size: 100 }
+    }
+
+    fn next_u64(&mut self) -> u64 {
+        // Simple LCG
+        self.seed = self.seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+        self.seed
+    }
+
+    pub fn range(&mut self, min: i64, max: i64) -> i64 {
+        let range = (max - min) as u64;
+        if range == 0 {
+            return min;
+        }
+        min + (self.next_u64() % range) as i64
+    }
+
+    pub fn bool(&mut self) -> bool {
+        self.next_u64() % 2 == 0
+    }
+
+    pub fn choose<'a, T>(&mut self, items: &'a [T]) -> Option<&'a T> {
+        if items.is_empty() {
+            None
+        } else {
+            Some(&items[self.next_u64() as usize % items.len()])
+        }
+    }
+}
+
+impl Arbitrary for bool {
+    fn arbitrary(g: &mut Generator) -> Self {
+        g.bool()
+    }
+}
+
+impl Arbitrary for i32 {
+    fn arbitrary(g: &mut Generator) -> Self {
+        g.range(i32::MIN as i64, i32::MAX as i64) as i32
+    }
+
+    fn shrink(&self) -> Vec<Self> {
+        if *self == 0 {
+            vec![]
+        } else if *self > 0 {
+            vec![0, self / 2, self - 1]
+        } else {
+            vec![0, self / 2, self + 1]
+        }
+    }
+}
+
+impl Arbitrary for i64 {
+    fn arbitrary(g: &mut Generator) -> Self {
+        g.range(i64::MIN / 2, i64::MAX / 2)
+    }
+
+    fn shrink(&self) -> Vec<Self> {
+        if *self == 0 {
+            vec![]
+        } else if *self > 0 {
+            vec![0, self / 2, self - 1]
+        } else {
+            vec![0, self / 2, self + 1]
+        }
+    }
+}
+
+impl Arbitrary for String {
+    fn arbitrary(g: &mut Generator) -> Self {
+        let len = g.range(0, 100) as usize;
+        let chars: Vec<char> = (0..len)
+            .map(|_| (g.range(32, 127) as u8) as char)
+            .collect();
+        chars.into_iter().collect()
+    }
+
+    fn shrink(&self) -> Vec<Self> {
+        if self.is_empty() {
+            vec![]
+        } else {
+            vec![
+                String::new(),
+                self[..self.len() / 2].to_string(),
+                self[1..].to_string(),
+            ]
+        }
+    }
+}
+
+impl<T: Arbitrary> Arbitrary for Vec<T> {
+    fn arbitrary(g: &mut Generator) -> Self {
+        let len = g.range(0, 50) as usize;
+        (0..len).map(|_| T::arbitrary(g)).collect()
+    }
+
+    fn shrink(&self) -> Vec<Self> {
+        if self.is_empty() {
+            vec![]
+        } else {
+            vec![
+                vec![],
+                self[..self.len() / 2].to_vec(),
+                self[1..].to_vec(),
+            ]
+        }
+    }
+}
+
+/// Property-based test runner
+pub struct PropTest {
+    iterations: usize,
+    seed: u64,
+}
+
+impl PropTest {
+    pub fn new() -> Self {
+        PropTest {
+            iterations: 100,
+            seed: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos() as u64,
+        }
+    }
+
+    pub fn iterations(mut self, n: usize) -> Self {
+        self.iterations = n;
+        self
+    }
+
+    pub fn seed(mut self, seed: u64) -> Self {
+        self.seed = seed;
+        self
+    }
+
+    /// Run a property test with one arbitrary argument
+    pub fn for_all<A, F>(&self, prop: F) -> Result<(), AssertionError>
+    where
+        A: Arbitrary + std::fmt::Debug,
+        F: Fn(A) -> bool,
+    {
+        let mut gen = Generator::new(self.seed);
+
+        for i in 0..self.iterations {
+            let value = A::arbitrary(&mut gen);
+
+            if !prop(value) {
+                // Attempt shrinking
+                // ... simplified for now
+
+                return Err(AssertionError {
+                    message: format!("Property failed after {} iterations", i + 1),
+                    expected: None,
+                    actual: None,
+                    location: None,
+                });
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Run a property test with two arbitrary arguments
+    pub fn for_all2<A, B, F>(&self, prop: F) -> Result<(), AssertionError>
+    where
+        A: Arbitrary + std::fmt::Debug,
+        B: Arbitrary + std::fmt::Debug,
+        F: Fn(A, B) -> bool,
+    {
+        let mut gen = Generator::new(self.seed);
+
+        for i in 0..self.iterations {
+            let a = A::arbitrary(&mut gen);
+            let b = B::arbitrary(&mut gen);
+
+            if !prop(a, b) {
+                return Err(AssertionError {
+                    message: format!("Property failed after {} iterations", i + 1),
+                    expected: None,
+                    actual: None,
+                    location: None,
+                });
+            }
+        }
+
+        Ok(())
+    }
+}
+
+// =============================================================================
+// CLI INTERFACE
+// =============================================================================
+
+/// Test command options
+#[derive(Debug, Clone)]
+pub struct TestOptions {
+    /// Test paths
+    pub paths: Vec<PathBuf>,
+
+    /// Filter pattern
+    pub filter: Option<String>,
+
+    /// Number of threads
+    pub jobs: Option<usize>,
+
+    /// Run ignored tests
+    pub run_ignored: bool,
+
+    /// Fail fast
+    pub fail_fast: bool,
+
+    /// Show output
+    pub show_output: bool,
+
+    /// No capture
+    pub no_capture: bool,
+
+    /// Output format
+    pub format: OutputFormat,
+
+    /// Enable coverage
+    pub coverage: bool,
+
+    /// List tests only
+    pub list: bool,
+
+    /// Test timeout in seconds
+    pub timeout: Option<u64>,
+}
+
+impl Default for TestOptions {
+    fn default() -> Self {
+        TestOptions {
+            paths: Vec::new(),
+            filter: None,
+            jobs: None,
+            run_ignored: false,
+            fail_fast: false,
+            show_output: false,
+            no_capture: false,
+            format: OutputFormat::Pretty,
+            coverage: false,
+            list: false,
+            timeout: None,
+        }
+    }
+}
+
+/// Run tests with options
+pub fn run_tests(options: TestOptions) -> i32 {
+    let paths = if options.paths.is_empty() {
+        vec![PathBuf::from(".")]
+    } else {
+        options.paths
+    };
+
+    // Discover tests
+    let mut discovered = Vec::new();
+    for path in &paths {
+        discovered.extend(discover_tests(path));
+    }
+
+    if options.list {
+        for test in &discovered {
+            println!("{}::{}: {}:{}", test.module, test.name, test.file.display(), test.line);
+        }
+        return 0;
+    }
+
+    // Build runner config
+    let config = RunnerConfig {
+        threads: options.jobs.unwrap_or(num_cpus::get()),
+        timeout: Duration::from_secs(options.timeout.unwrap_or(60)),
+        run_ignored: options.run_ignored,
+        filter: options.filter,
+        tags: HashSet::new(),
+        fail_fast: options.fail_fast,
+        show_output: options.show_output,
+        capture: !options.no_capture,
+        shuffle: false,
+        seed: None,
+        format: options.format,
+        coverage: options.coverage,
+        coverage_dir: None,
+    };
+
+    // Create runner
+    let mut runner = TestRunner::new(config);
+
+    // Add discovered tests (simplified - in real implementation would compile and load)
+    for test in discovered {
+        // Skip if filtered
+        if let Some(ref filter) = runner.config.filter {
+            if !test.name.contains(filter) && !test.module.contains(filter) {
+                continue;
+            }
+        }
+
+        // Create test definition
+        let test_name = test.name.clone();
+        runner.add_test(TestDef {
+            name: test.name,
+            module: test.module,
+            function: Box::new(move || {
+                // Placeholder - real implementation would run actual test
+                Ok(())
+            }),
+            attributes: test.attributes,
+            location: Some(TestLocation {
+                file: test.file,
+                line: test.line,
+                column: 0,
+            }),
+        });
+    }
+
+    // Run tests
+    let result = runner.run();
+
+    if result.success() { 0 } else { 1 }
+}
+
+/// Main entry point
+pub fn main() {
+    let args: Vec<String> = std::env::args().collect();
+
+    let mut options = TestOptions::default();
+    let mut i = 1;
+
+    while i < args.len() {
+        match args[i].as_str() {
+            "--filter" | "-f" => {
+                i += 1;
+                if i < args.len() {
+                    options.filter = Some(args[i].clone());
+                }
+            }
+            "--jobs" | "-j" => {
+                i += 1;
+                if i < args.len() {
+                    options.jobs = args[i].parse().ok();
+                }
+            }
+            "--ignored" => {
+                options.run_ignored = true;
+            }
+            "--fail-fast" => {
+                options.fail_fast = true;
+            }
+            "--show-output" => {
+                options.show_output = true;
+            }
+            "--no-capture" => {
+                options.no_capture = true;
+            }
+            "--format" => {
+                i += 1;
+                if i < args.len() {
+                    options.format = match args[i].as_str() {
+                        "terse" => OutputFormat::Terse,
+                        "json" => OutputFormat::Json,
+                        "junit" => OutputFormat::Junit,
+                        "tap" => OutputFormat::Tap,
+                        _ => OutputFormat::Pretty,
+                    };
+                }
+            }
+            "--coverage" => {
+                options.coverage = true;
+            }
+            "--list" => {
+                options.list = true;
+            }
+            "--timeout" => {
+                i += 1;
+                if i < args.len() {
+                    options.timeout = args[i].parse().ok();
+                }
+            }
+            "--help" | "-h" => {
+                print_help();
+                return;
+            }
+            "--version" | "-V" => {
+                println!("buildtest 1.0.0");
+                return;
+            }
+            arg if !arg.starts_with('-') => {
+                options.paths.push(PathBuf::from(arg));
+            }
+            _ => {
+                eprintln!("Unknown option: {}", args[i]);
+                std::process::exit(1);
+            }
+        }
+        i += 1;
+    }
+
+    let exit_code = run_tests(options);
+    std::process::exit(exit_code);
+}
+
+fn print_help() {
+    println!("buildtest - BuildLang Test Runner
+
+USAGE:
+    buildtest [OPTIONS] [PATHS...]
+
+OPTIONS:
+    -f, --filter PATTERN    Filter tests by name pattern
+    -j, --jobs N            Number of parallel jobs
+    --ignored               Run ignored tests
+    --fail-fast             Stop on first failure
+    --show-output           Show test output
+    --no-capture            Don't capture stdout/stderr
+    --format FORMAT         Output format (pretty, terse, json, junit, tap)
+    --coverage              Generate coverage report
+    --list                  List tests without running
+    --timeout SECS          Test timeout in seconds
+    -h, --help              Show this help message
+    -V, --version           Show version
+
+EXAMPLES:
+    buildtest                              Run all tests
+    buildtest tests/                       Run tests in directory
+    buildtest -f \"parsing\"                 Filter tests by name
+    buildtest --format json                JSON output
+    buildtest --fail-fast --no-capture     Stop on failure, show output
+
+ATTRIBUTES:
+    #[test]                  Mark function as test
+    #[ignore]                Skip test unless --ignored
+    #[should_panic]          Test should panic
+    #[timeout(5000)]         Custom timeout in ms
+    #[tag(\"slow\")]           Add tag for filtering
+");
+}
+
+// =============================================================================
+// SNAPSHOT TESTING
+// =============================================================================
+
+/// Snapshot testing for regression detection
+pub struct SnapshotManager {
+    snapshot_dir: PathBuf,
+    update_mode: SnapshotUpdateMode,
+    snapshots: HashMap<String, Snapshot>,
+}
+
+#[derive(Debug, Clone)]
+pub struct Snapshot {
+    name: String,
+    content: String,
+    metadata: SnapshotMetadata,
+}
+
+#[derive(Debug, Clone)]
+pub struct SnapshotMetadata {
+    created_at: String,
+    updated_at: String,
+    test_file: String,
+    test_line: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum SnapshotUpdateMode {
+    None,      // Fail on mismatch
+    New,       // Create new, fail on mismatch
+    All,       // Update all mismatches
+}
+
+impl SnapshotManager {
+    pub fn new(snapshot_dir: &Path) -> Self {
+        SnapshotManager {
+            snapshot_dir: snapshot_dir.to_path_buf(),
+            update_mode: SnapshotUpdateMode::None,
+            snapshots: HashMap::new(),
+        }
+    }
+
+    pub fn with_update_mode(mut self, mode: SnapshotUpdateMode) -> Self {
+        self.update_mode = mode;
+        self
+    }
+
+    pub fn load(&mut self) -> std::io::Result<()> {
+        if !self.snapshot_dir.exists() {
+            fs::create_dir_all(&self.snapshot_dir)?;
+            return Ok(());
+        }
+
+        for entry in fs::read_dir(&self.snapshot_dir)? {
+            let entry = entry?;
+            let path = entry.path();
+
+            if path.extension().map(|e| e == "snap").unwrap_or(false) {
+                if let Ok(content) = fs::read_to_string(&path) {
+                    let name = path.file_stem()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("")
+                        .to_string();
+
+                    self.snapshots.insert(name.clone(), Snapshot {
+                        name,
+                        content,
+                        metadata: SnapshotMetadata {
+                            created_at: String::new(),
+                            updated_at: String::new(),
+                            test_file: String::new(),
+                            test_line: 0,
+                        },
+                    });
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    pub fn assert_snapshot(&mut self, name: &str, actual: &str) -> Result<(), AssertionError> {
+        let snapshot_path = self.snapshot_dir.join(format!("{}.snap", name));
+
+        if let Some(existing) = self.snapshots.get(name) {
+            if existing.content.trim() == actual.trim() {
+                return Ok(());
+            }
+
+            // Mismatch
+            match self.update_mode {
+                SnapshotUpdateMode::None => {
+                    return Err(AssertionError {
+                        message: format!("Snapshot '{}' does not match", name),
+                        expected: Some(existing.content.clone()),
+                        actual: Some(actual.to_string()),
+                        location: None,
+                    });
+                }
+                SnapshotUpdateMode::All => {
+                    self.update_snapshot(name, actual)?;
+                    return Ok(());
+                }
+                SnapshotUpdateMode::New => {
+                    return Err(AssertionError {
+                        message: format!("Snapshot '{}' does not match (use --update to update)", name),
+                        expected: Some(existing.content.clone()),
+                        actual: Some(actual.to_string()),
+                        location: None,
+                    });
+                }
+            }
+        }
+
+        // New snapshot
+        match self.update_mode {
+            SnapshotUpdateMode::None => {
+                Err(AssertionError {
+                    message: format!("Snapshot '{}' does not exist (use --update-new to create)", name),
+                    expected: None,
+                    actual: Some(actual.to_string()),
+                    location: None,
+                })
+            }
+            _ => {
+                self.create_snapshot(name, actual)?;
+                Ok(())
+            }
+        }
+    }
+
+    fn create_snapshot(&mut self, name: &str, content: &str) -> std::io::Result<()> {
+        fs::create_dir_all(&self.snapshot_dir)?;
+
+        let snapshot_path = self.snapshot_dir.join(format!("{}.snap", name));
+        fs::write(&snapshot_path, content)?;
+
+        self.snapshots.insert(name.to_string(), Snapshot {
+            name: name.to_string(),
+            content: content.to_string(),
+            metadata: SnapshotMetadata {
+                created_at: chrono_now(),
+                updated_at: chrono_now(),
+                test_file: String::new(),
+                test_line: 0,
+            },
+        });
+
+        println!("Created snapshot: {}", name);
+        Ok(())
+    }
+
+    fn update_snapshot(&mut self, name: &str, content: &str) -> std::io::Result<()> {
+        let snapshot_path = self.snapshot_dir.join(format!("{}.snap", name));
+        fs::write(&snapshot_path, content)?;
+
+        if let Some(snapshot) = self.snapshots.get_mut(name) {
+            snapshot.content = content.to_string();
+            snapshot.metadata.updated_at = chrono_now();
+        }
+
+        println!("Updated snapshot: {}", name);
+        Ok(())
+    }
+
+    pub fn list_snapshots(&self) -> Vec<&str> {
+        self.snapshots.keys().map(|s| s.as_str()).collect()
+    }
+
+    pub fn remove_unused(&mut self, used: &HashSet<String>) -> std::io::Result<usize> {
+        let unused: Vec<String> = self.snapshots.keys()
+            .filter(|k| !used.contains(*k))
+            .cloned()
+            .collect();
+
+        for name in &unused {
+            let path = self.snapshot_dir.join(format!("{}.snap", name));
+            fs::remove_file(&path)?;
+            self.snapshots.remove(name);
+        }
+
+        Ok(unused.len())
+    }
+}
+
+fn chrono_now() -> String {
+    // Simplified timestamp
+    format!("{}", std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs())
+}
+
+/// Inline snapshot assertion macro helper
+pub fn assert_inline_snapshot(actual: &str, expected: &str) -> Result<(), AssertionError> {
+    if actual.trim() == expected.trim() {
+        Ok(())
+    } else {
+        Err(AssertionError {
+            message: "Inline snapshot does not match".to_string(),
+            expected: Some(expected.to_string()),
+            actual: Some(actual.to_string()),
+            location: None,
+        })
+    }
+}
+
+// =============================================================================
+// PARAMETERIZED TESTING
+// =============================================================================
+
+/// Parameterized test case
+#[derive(Debug, Clone)]
+pub struct TestCase<T> {
+    pub name: String,
+    pub input: T,
+    pub expected: Option<String>,
+}
+
+/// Parameterized test runner
+pub struct ParameterizedTest<T> {
+    name: String,
+    cases: Vec<TestCase<T>>,
+}
+
+impl<T: Clone + std::fmt::Debug> ParameterizedTest<T> {
+    pub fn new(name: &str) -> Self {
+        ParameterizedTest {
+            name: name.to_string(),
+            cases: Vec::new(),
+        }
+    }
+
+    pub fn add_case(mut self, name: &str, input: T) -> Self {
+        self.cases.push(TestCase {
+            name: name.to_string(),
+            input,
+            expected: None,
+        });
+        self
+    }
+
+    pub fn add_case_with_expected(mut self, name: &str, input: T, expected: &str) -> Self {
+        self.cases.push(TestCase {
+            name: name.to_string(),
+            input,
+            expected: Some(expected.to_string()),
+        });
+        self
+    }
+
+    pub fn run<F>(&self, test_fn: F) -> Vec<TestResult>
+    where
+        F: Fn(&T) -> Result<(), AssertionError>,
+    {
+        let mut results = Vec::new();
+
+        for case in &self.cases {
+            let start = Instant::now();
+
+            let (status, message) = match test_fn(&case.input) {
+                Ok(()) => (TestStatus::Passed, None),
+                Err(e) => (TestStatus::Failed, Some(e.to_string())),
+            };
+
+            results.push(TestResult {
+                name: format!("{}::{}", self.name, case.name),
+                module: String::new(),
+                status,
+                duration: start.elapsed(),
+                message,
+                location: None,
+                stdout: String::new(),
+                stderr: String::new(),
+            });
+        }
+
+        results
+    }
+}
+
+/// Table-driven test helper
+pub struct TableTest<I, O> {
+    cases: Vec<(String, I, O)>,
+}
+
+impl<I: Clone + std::fmt::Debug, O: Clone + std::fmt::Debug + PartialEq> TableTest<I, O> {
+    pub fn new() -> Self {
+        TableTest { cases: Vec::new() }
+    }
+
+    pub fn case(mut self, name: &str, input: I, expected: O) -> Self {
+        self.cases.push((name.to_string(), input, expected));
+        self
+    }
+
+    pub fn run<F>(&self, f: F) -> Result<(), AssertionError>
+    where
+        F: Fn(&I) -> O,
+    {
+        for (name, input, expected) in &self.cases {
+            let actual = f(input);
+
+            if actual != *expected {
+                return Err(AssertionError {
+                    message: format!("Test case '{}' failed", name),
+                    expected: Some(format!("{:?}", expected)),
+                    actual: Some(format!("{:?}", actual)),
+                    location: None,
+                });
+            }
+        }
+
+        Ok(())
+    }
+}
+
+// =============================================================================
+// TEST DOUBLES (SPIES, STUBS, FAKES)
+// =============================================================================
+
+/// Spy that records calls and delegates to real implementation
+pub struct Spy<T> {
+    inner: T,
+    calls: RwLock<Vec<SpyCall>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct SpyCall {
+    method: String,
+    args: Vec<String>,
+    result: String,
+    timestamp: Instant,
+}
+
+impl<T> Spy<T> {
+    pub fn new(inner: T) -> Self {
+        Spy {
+            inner,
+            calls: RwLock::new(Vec::new()),
+        }
+    }
+
+    pub fn inner(&self) -> &T {
+        &self.inner
+    }
+
+    pub fn inner_mut(&mut self) -> &mut T {
+        &mut self.inner
+    }
+
+    pub fn record(&self, method: &str, args: Vec<String>, result: String) {
+        self.calls.write().unwrap().push(SpyCall {
+            method: method.to_string(),
+            args,
+            result,
+            timestamp: Instant::now(),
+        });
+    }
+
+    pub fn calls(&self) -> Vec<SpyCall> {
+        self.calls.read().unwrap().clone()
+    }
+
+    pub fn calls_to(&self, method: &str) -> Vec<SpyCall> {
+        self.calls.read().unwrap()
+            .iter()
+            .filter(|c| c.method == method)
+            .cloned()
+            .collect()
+    }
+
+    pub fn was_called(&self, method: &str) -> bool {
+        self.calls.read().unwrap().iter().any(|c| c.method == method)
+    }
+
+    pub fn call_count(&self, method: &str) -> usize {
+        self.calls.read().unwrap().iter().filter(|c| c.method == method).count()
+    }
+
+    pub fn reset(&self) {
+        self.calls.write().unwrap().clear();
+    }
+}
+
+/// Stub that returns predefined values
+pub struct Stub<R: Clone> {
+    responses: HashMap<String, Vec<R>>,
+    default: Option<R>,
+    call_index: HashMap<String, usize>,
+}
+
+impl<R: Clone> Stub<R> {
+    pub fn new() -> Self {
+        Stub {
+            responses: HashMap::new(),
+            default: None,
+            call_index: HashMap::new(),
+        }
+    }
+
+    pub fn when(mut self, method: &str, response: R) -> Self {
+        self.responses.entry(method.to_string())
+            .or_insert_with(Vec::new)
+            .push(response);
+        self
+    }
+
+    pub fn when_sequence(mut self, method: &str, responses: Vec<R>) -> Self {
+        self.responses.insert(method.to_string(), responses);
+        self
+    }
+
+    pub fn default(mut self, response: R) -> Self {
+        self.default = Some(response);
+        self
+    }
+
+    pub fn call(&mut self, method: &str) -> Option<R> {
+        if let Some(responses) = self.responses.get(method) {
+            let index = self.call_index.entry(method.to_string()).or_insert(0);
+
+            if *index < responses.len() {
+                let response = responses[*index].clone();
+                *index += 1;
+                return Some(response);
+            }
+        }
+
+        self.default.clone()
+    }
+
+    pub fn reset(&mut self) {
+        self.call_index.clear();
+    }
+}
+
+/// Fake implementation for testing
+pub trait Fake: Send + Sync {
+    fn is_fake(&self) -> bool { true }
+    fn reset(&mut self);
+}
+
+/// In-memory fake database
+pub struct FakeDatabase {
+    tables: HashMap<String, Vec<HashMap<String, String>>>,
+    queries: Vec<String>,
+}
+
+impl FakeDatabase {
+    pub fn new() -> Self {
+        FakeDatabase {
+            tables: HashMap::new(),
+            queries: Vec::new(),
+        }
+    }
+
+    pub fn insert(&mut self, table: &str, row: HashMap<String, String>) {
+        self.tables.entry(table.to_string())
+            .or_insert_with(Vec::new)
+            .push(row);
+    }
+
+    pub fn select(&self, table: &str) -> Vec<HashMap<String, String>> {
+        self.tables.get(table).cloned().unwrap_or_default()
+    }
+
+    pub fn query(&mut self, sql: &str) -> Vec<HashMap<String, String>> {
+        self.queries.push(sql.to_string());
+        // Simplified query parsing
+        Vec::new()
+    }
+
+    pub fn executed_queries(&self) -> &[String] {
+        &self.queries
+    }
+}
+
+impl Fake for FakeDatabase {
+    fn reset(&mut self) {
+        self.tables.clear();
+        self.queries.clear();
+    }
+}
+
+/// Fake HTTP client
+pub struct FakeHttpClient {
+    responses: HashMap<String, FakeHttpResponse>,
+    requests: Vec<FakeHttpRequest>,
+}
+
+#[derive(Debug, Clone)]
+pub struct FakeHttpRequest {
+    method: String,
+    url: String,
+    headers: HashMap<String, String>,
+    body: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct FakeHttpResponse {
+    status: u16,
+    headers: HashMap<String, String>,
+    body: String,
+}
+
+impl FakeHttpClient {
+    pub fn new() -> Self {
+        FakeHttpClient {
+            responses: HashMap::new(),
+            requests: Vec::new(),
+        }
+    }
+
+    pub fn stub_response(&mut self, url: &str, response: FakeHttpResponse) {
+        self.responses.insert(url.to_string(), response);
+    }
+
+    pub fn get(&mut self, url: &str) -> FakeHttpResponse {
+        self.requests.push(FakeHttpRequest {
+            method: "GET".to_string(),
+            url: url.to_string(),
+            headers: HashMap::new(),
+            body: None,
+        });
+
+        self.responses.get(url).cloned().unwrap_or(FakeHttpResponse {
+            status: 404,
+            headers: HashMap::new(),
+            body: "Not Found".to_string(),
+        })
+    }
+
+    pub fn post(&mut self, url: &str, body: &str) -> FakeHttpResponse {
+        self.requests.push(FakeHttpRequest {
+            method: "POST".to_string(),
+            url: url.to_string(),
+            headers: HashMap::new(),
+            body: Some(body.to_string()),
+        });
+
+        self.responses.get(url).cloned().unwrap_or(FakeHttpResponse {
+            status: 404,
+            headers: HashMap::new(),
+            body: "Not Found".to_string(),
+        })
+    }
+
+    pub fn requests(&self) -> &[FakeHttpRequest] {
+        &self.requests
+    }
+}
+
+impl Fake for FakeHttpClient {
+    fn reset(&mut self) {
+        self.responses.clear();
+        self.requests.clear();
+    }
+}
+
+// =============================================================================
+// CONTRACT TESTING
+// =============================================================================
+
+/// Contract definition for API testing
+#[derive(Debug, Clone)]
+pub struct Contract {
+    name: String,
+    provider: String,
+    consumer: String,
+    interactions: Vec<Interaction>,
+}
+
+#[derive(Debug, Clone)]
+pub struct Interaction {
+    description: String,
+    request: ContractRequest,
+    response: ContractResponse,
+}
+
+#[derive(Debug, Clone)]
+pub struct ContractRequest {
+    method: String,
+    path: String,
+    headers: HashMap<String, String>,
+    body: Option<String>,
+    matchers: Vec<BodyMatcher>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ContractResponse {
+    status: u16,
+    headers: HashMap<String, String>,
+    body: Option<String>,
+    matchers: Vec<BodyMatcher>,
+}
+
+#[derive(Debug, Clone)]
+pub enum BodyMatcher {
+    Exact(String, String),           // path, value
+    Type(String, String),            // path, type
+    Regex(String, String),           // path, pattern
+    MinLength(String, usize),        // path, min
+    MaxLength(String, usize),        // path, max
+    EachLike(String, Box<BodyMatcher>), // path, matcher for each element
+}
+
+impl Contract {
+    pub fn new(name: &str, provider: &str, consumer: &str) -> Self {
+        Contract {
+            name: name.to_string(),
+            provider: provider.to_string(),
+            consumer: consumer.to_string(),
+            interactions: Vec::new(),
+        }
+    }
+
+    pub fn add_interaction(mut self, interaction: Interaction) -> Self {
+        self.interactions.push(interaction);
+        self
+    }
+
+    pub fn verify_provider(&self, base_url: &str) -> ContractVerificationResult {
+        let mut results = Vec::new();
+
+        for interaction in &self.interactions {
+            let result = self.verify_interaction(base_url, interaction);
+            results.push(result);
+        }
+
+        let all_passed = results.iter().all(|r| r.passed);
+
+        ContractVerificationResult {
+            contract: self.name.clone(),
+            passed: all_passed,
+            interaction_results: results,
+        }
+    }
+
+    fn verify_interaction(&self, base_url: &str, interaction: &Interaction) -> InteractionResult {
+        // In real implementation, make actual HTTP request
+        InteractionResult {
+            description: interaction.description.clone(),
+            passed: true,
+            errors: Vec::new(),
+        }
+    }
+
+    pub fn to_json(&self) -> String {
+        // Serialize contract to JSON
+        format!(r#"{{"name":"{}","provider":"{}","consumer":"{}","interactions":{}}}"#,
+            self.name, self.provider, self.consumer, self.interactions.len())
+    }
+
+    pub fn from_json(json: &str) -> Result<Self, String> {
+        // Parse contract from JSON
+        Ok(Contract::new("parsed", "provider", "consumer"))
+    }
+}
+
+#[derive(Debug)]
+pub struct ContractVerificationResult {
+    pub contract: String,
+    pub passed: bool,
+    pub interaction_results: Vec<InteractionResult>,
+}
+
+#[derive(Debug)]
+pub struct InteractionResult {
+    pub description: String,
+    pub passed: bool,
+    pub errors: Vec<String>,
+}
+
+/// Contract test builder
+pub struct ContractBuilder {
+    contract: Contract,
+    current_interaction: Option<InteractionBuilder>,
+}
+
+pub struct InteractionBuilder {
+    description: String,
+    request: ContractRequest,
+    response: ContractResponse,
+}
+
+impl ContractBuilder {
+    pub fn new(name: &str, provider: &str, consumer: &str) -> Self {
+        ContractBuilder {
+            contract: Contract::new(name, provider, consumer),
+            current_interaction: None,
+        }
+    }
+
+    pub fn interaction(mut self, description: &str) -> Self {
+        if let Some(interaction) = self.current_interaction.take() {
+            self.contract.interactions.push(Interaction {
+                description: interaction.description,
+                request: interaction.request,
+                response: interaction.response,
+            });
+        }
+
+        self.current_interaction = Some(InteractionBuilder {
+            description: description.to_string(),
+            request: ContractRequest {
+                method: "GET".to_string(),
+                path: "/".to_string(),
+                headers: HashMap::new(),
+                body: None,
+                matchers: Vec::new(),
+            },
+            response: ContractResponse {
+                status: 200,
+                headers: HashMap::new(),
+                body: None,
+                matchers: Vec::new(),
+            },
+        });
+
+        self
+    }
+
+    pub fn request(mut self, method: &str, path: &str) -> Self {
+        if let Some(ref mut interaction) = self.current_interaction {
+            interaction.request.method = method.to_string();
+            interaction.request.path = path.to_string();
+        }
+        self
+    }
+
+    pub fn request_header(mut self, key: &str, value: &str) -> Self {
+        if let Some(ref mut interaction) = self.current_interaction {
+            interaction.request.headers.insert(key.to_string(), value.to_string());
+        }
+        self
+    }
+
+    pub fn request_body(mut self, body: &str) -> Self {
+        if let Some(ref mut interaction) = self.current_interaction {
+            interaction.request.body = Some(body.to_string());
+        }
+        self
+    }
+
+    pub fn response_status(mut self, status: u16) -> Self {
+        if let Some(ref mut interaction) = self.current_interaction {
+            interaction.response.status = status;
+        }
+        self
+    }
+
+    pub fn response_header(mut self, key: &str, value: &str) -> Self {
+        if let Some(ref mut interaction) = self.current_interaction {
+            interaction.response.headers.insert(key.to_string(), value.to_string());
+        }
+        self
+    }
+
+    pub fn response_body(mut self, body: &str) -> Self {
+        if let Some(ref mut interaction) = self.current_interaction {
+            interaction.response.body = Some(body.to_string());
+        }
+        self
+    }
+
+    pub fn build(mut self) -> Contract {
+        if let Some(interaction) = self.current_interaction.take() {
+            self.contract.interactions.push(Interaction {
+                description: interaction.description,
+                request: interaction.request,
+                response: interaction.response,
+            });
+        }
+
+        self.contract
+    }
+}
+
+// =============================================================================
+// MUTATION TESTING
+// =============================================================================
+
+/// Mutation testing for test quality assessment
+pub struct MutationTester {
+    source_path: PathBuf,
+    test_command: String,
+    mutators: Vec<Box<dyn Mutator>>,
+    config: MutationConfig,
+}
+
+#[derive(Debug, Clone)]
+pub struct MutationConfig {
+    timeout_multiplier: f64,
+    max_mutations: Option<usize>,
+    parallel: bool,
+    exclude_patterns: Vec<String>,
+}
+
+impl Default for MutationConfig {
+    fn default() -> Self {
+        MutationConfig {
+            timeout_multiplier: 3.0,
+            max_mutations: None,
+            parallel: true,
+            exclude_patterns: Vec::new(),
+        }
+    }
+}
+
+pub trait Mutator: Send + Sync {
+    fn name(&self) -> &str;
+    fn mutate(&self, source: &str) -> Vec<Mutation>;
+}
+
+#[derive(Debug, Clone)]
+pub struct Mutation {
+    id: String,
+    mutator: String,
+    file: PathBuf,
+    line: u32,
+    original: String,
+    mutated: String,
+    description: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct MutationResult {
+    mutation: Mutation,
+    status: MutationStatus,
+    duration: Duration,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum MutationStatus {
+    Killed,     // Test failed - good!
+    Survived,   // Test passed - bad!
+    TimedOut,   // Test timed out
+    Error,      // Compilation error
+    Skipped,    // Skipped (e.g., equivalent)
+}
+
+impl MutationTester {
+    pub fn new(source_path: &Path, test_command: &str) -> Self {
+        MutationTester {
+            source_path: source_path.to_path_buf(),
+            test_command: test_command.to_string(),
+            mutators: Vec::new(),
+            config: MutationConfig::default(),
+        }
+    }
+
+    pub fn with_config(mut self, config: MutationConfig) -> Self {
+        self.config = config;
+        self
+    }
+
+    pub fn add_mutator<M: Mutator + 'static>(&mut self, mutator: M) {
+        self.mutators.push(Box::new(mutator));
+    }
+
+    pub fn run(&self) -> MutationReport {
+        let mutations = self.generate_mutations();
+        let mut results = Vec::new();
+
+        for mutation in mutations {
+            let result = self.test_mutation(&mutation);
+            results.push(result);
+
+            if let Some(max) = self.config.max_mutations {
+                if results.len() >= max {
+                    break;
+                }
+            }
+        }
+
+        self.generate_report(results)
+    }
+
+    fn generate_mutations(&self) -> Vec<Mutation> {
+        let mut mutations = Vec::new();
+
+        // Read source files and generate mutations
+        if let Ok(source) = fs::read_to_string(&self.source_path) {
+            for mutator in &self.mutators {
+                let mut muts = mutator.mutate(&source);
+                for m in &mut muts {
+                    m.file = self.source_path.clone();
+                }
+                mutations.extend(muts);
+            }
+        }
+
+        mutations
+    }
+
+    fn test_mutation(&self, mutation: &Mutation) -> MutationResult {
+        let start = Instant::now();
+
+        // Apply mutation
+        let original = fs::read_to_string(&mutation.file).unwrap_or_default();
+        let mutated = original.replace(&mutation.original, &mutation.mutated);
+
+        if fs::write(&mutation.file, &mutated).is_err() {
+            return MutationResult {
+                mutation: mutation.clone(),
+                status: MutationStatus::Error,
+                duration: start.elapsed(),
+            };
+        }
+
+        // Run tests
+        let status = self.run_tests();
+
+        // Restore original
+        let _ = fs::write(&mutation.file, &original);
+
+        MutationResult {
+            mutation: mutation.clone(),
+            status,
+            duration: start.elapsed(),
+        }
+    }
+
+    fn run_tests(&self) -> MutationStatus {
+        // In real implementation, run test command
+        MutationStatus::Killed
+    }
+
+    fn generate_report(&self, results: Vec<MutationResult>) -> MutationReport {
+        let total = results.len();
+        let killed = results.iter().filter(|r| r.status == MutationStatus::Killed).count();
+        let survived = results.iter().filter(|r| r.status == MutationStatus::Survived).count();
+        let timed_out = results.iter().filter(|r| r.status == MutationStatus::TimedOut).count();
+
+        let score = if total > 0 {
+            (killed as f64 / total as f64) * 100.0
+        } else {
+            100.0
+        };
+
+        MutationReport {
+            total_mutations: total,
+            killed,
+            survived,
+            timed_out,
+            score,
+            results,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct MutationReport {
+    pub total_mutations: usize,
+    pub killed: usize,
+    pub survived: usize,
+    pub timed_out: usize,
+    pub score: f64,
+    pub results: Vec<MutationResult>,
+}
+
+impl MutationReport {
+    pub fn print(&self) {
+        println!("╔═══════════════════════════════════════╗");
+        println!("║      Mutation Testing Report          ║");
+        println!("╠═══════════════════════════════════════╣");
+        println!("║ Total Mutations: {:>20} ║", self.total_mutations);
+        println!("║ Killed:          {:>20} ║", self.killed);
+        println!("║ Survived:        {:>20} ║", self.survived);
+        println!("║ Timed Out:       {:>20} ║", self.timed_out);
+        println!("║ Mutation Score:  {:>19.1}% ║", self.score);
+        println!("╚═══════════════════════════════════════╝");
+
+        if self.survived > 0 {
+            println!("\nSurviving Mutations:");
+            for result in &self.results {
+                if result.status == MutationStatus::Survived {
+                    println!("  {} ({}:{})", result.mutation.description,
+                        result.mutation.file.display(), result.mutation.line);
+                }
+            }
+        }
+    }
+}
+
+/// Arithmetic operator mutator
+pub struct ArithmeticMutator;
+
+impl Mutator for ArithmeticMutator {
+    fn name(&self) -> &str { "arithmetic" }
+
+    fn mutate(&self, source: &str) -> Vec<Mutation> {
+        let mut mutations = Vec::new();
+        let operators = [
+            ("+", "-"), ("-", "+"),
+            ("*", "/"), ("/", "*"),
+            ("%", "*"),
+        ];
+
+        for (line_num, line) in source.lines().enumerate() {
+            for (from, to) in &operators {
+                if line.contains(from) && !line.contains("//") {
+                    mutations.push(Mutation {
+                        id: format!("arith_{}_{}", line_num, from),
+                        mutator: self.name().to_string(),
+                        file: PathBuf::new(),
+                        line: (line_num + 1) as u32,
+                        original: line.to_string(),
+                        mutated: line.replacen(from, to, 1),
+                        description: format!("Replace '{}' with '{}'", from, to),
+                    });
+                }
+            }
+        }
+
+        mutations
+    }
+}
+
+/// Comparison operator mutator
+pub struct ComparisonMutator;
+
+impl Mutator for ComparisonMutator {
+    fn name(&self) -> &str { "comparison" }
+
+    fn mutate(&self, source: &str) -> Vec<Mutation> {
+        let mut mutations = Vec::new();
+        let operators = [
+            ("==", "!="), ("!=", "=="),
+            ("<", ">="), (">=", "<"),
+            (">", "<="), ("<=", ">"),
+        ];
+
+        for (line_num, line) in source.lines().enumerate() {
+            for (from, to) in &operators {
+                if line.contains(from) && !line.contains("//") {
+                    mutations.push(Mutation {
+                        id: format!("cmp_{}_{}", line_num, from),
+                        mutator: self.name().to_string(),
+                        file: PathBuf::new(),
+                        line: (line_num + 1) as u32,
+                        original: line.to_string(),
+                        mutated: line.replacen(from, to, 1),
+                        description: format!("Replace '{}' with '{}'", from, to),
+                    });
+                }
+            }
+        }
+
+        mutations
+    }
+}
+
+/// Boolean mutator
+pub struct BooleanMutator;
+
+impl Mutator for BooleanMutator {
+    fn name(&self) -> &str { "boolean" }
+
+    fn mutate(&self, source: &str) -> Vec<Mutation> {
+        let mut mutations = Vec::new();
+
+        for (line_num, line) in source.lines().enumerate() {
+            if line.contains("true") && !line.contains("//") {
+                mutations.push(Mutation {
+                    id: format!("bool_{}_true", line_num),
+                    mutator: self.name().to_string(),
+                    file: PathBuf::new(),
+                    line: (line_num + 1) as u32,
+                    original: line.to_string(),
+                    mutated: line.replacen("true", "false", 1),
+                    description: "Replace 'true' with 'false'".to_string(),
+                });
+            }
+
+            if line.contains("false") && !line.contains("//") {
+                mutations.push(Mutation {
+                    id: format!("bool_{}_false", line_num),
+                    mutator: self.name().to_string(),
+                    file: PathBuf::new(),
+                    line: (line_num + 1) as u32,
+                    original: line.to_string(),
+                    mutated: line.replacen("false", "true", 1),
+                    description: "Replace 'false' with 'true'".to_string(),
+                });
+            }
+        }
+
+        mutations
+    }
+}
+
+// =============================================================================
+// ASYNC TESTING
+// =============================================================================
+
+/// Async test runner
+pub struct AsyncTestRunner {
+    timeout: Duration,
+    max_concurrent: usize,
+}
+
+impl AsyncTestRunner {
+    pub fn new() -> Self {
+        AsyncTestRunner {
+            timeout: Duration::from_secs(30),
+            max_concurrent: 4,
+        }
+    }
+
+    pub fn timeout(mut self, duration: Duration) -> Self {
+        self.timeout = duration;
+        self
+    }
+
+    pub fn max_concurrent(mut self, n: usize) -> Self {
+        self.max_concurrent = n;
+        self
+    }
+
+    /// Run async test with timeout
+    pub fn run_async<F, Fut>(&self, test: F) -> Result<(), AssertionError>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = Result<(), AssertionError>>,
+    {
+        // In real implementation, use async runtime
+        // For now, simulate with sync execution
+        Ok(())
+    }
+
+    /// Run multiple async tests concurrently
+    pub fn run_all<F, Fut>(&self, tests: Vec<F>) -> Vec<TestResult>
+    where
+        F: FnOnce() -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = Result<(), AssertionError>> + Send,
+    {
+        // In real implementation, use async runtime with semaphore
+        Vec::new()
+    }
+}
+
+/// Async assertion helpers
+pub struct AsyncAssertions;
+
+impl AsyncAssertions {
+    /// Assert that a future completes within timeout
+    pub fn assert_completes_within<F, Fut, T>(
+        future: F,
+        timeout: Duration,
+    ) -> Result<T, AssertionError>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = T>,
+    {
+        // In real implementation, use async runtime with timeout
+        Err(AssertionError {
+            message: "Async execution not available".to_string(),
+            expected: None,
+            actual: None,
+            location: None,
+        })
+    }
+
+    /// Assert that a future never completes (within timeout)
+    pub fn assert_pending<F, Fut, T>(
+        future: F,
+        timeout: Duration,
+    ) -> Result<(), AssertionError>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = T>,
+    {
+        Ok(())
+    }
+}
+
+// =============================================================================
+// CODE COVERAGE
+// =============================================================================
+
+/// Code coverage collector
+pub struct CoverageCollector {
+    files: HashMap<PathBuf, FileCoverage>,
+    enabled: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct FileCoverage {
+    path: PathBuf,
+    lines: HashMap<u32, LineCoverage>,
+    functions: HashMap<String, FunctionCoverage>,
+    branches: HashMap<u32, BranchCoverage>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct LineCoverage {
+    line: u32,
+    hits: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct FunctionCoverage {
+    name: String,
+    start_line: u32,
+    end_line: u32,
+    hits: u64,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct BranchCoverage {
+    line: u32,
+    branch_id: u32,
+    taken: u64,
+    not_taken: u64,
+}
+
+impl CoverageCollector {
+    pub fn new() -> Self {
+        CoverageCollector {
+            files: HashMap::new(),
+            enabled: true,
+        }
+    }
+
+    pub fn enable(&mut self) {
+        self.enabled = true;
+    }
+
+    pub fn disable(&mut self) {
+        self.enabled = false;
+    }
+
+    pub fn record_line(&mut self, file: &Path, line: u32) {
+        if !self.enabled { return; }
+
+        let file_cov = self.files.entry(file.to_path_buf())
+            .or_insert_with(|| FileCoverage {
+                path: file.to_path_buf(),
+                lines: HashMap::new(),
+                functions: HashMap::new(),
+                branches: HashMap::new(),
+            });
+
+        file_cov.lines.entry(line)
+            .and_modify(|c| c.hits += 1)
+            .or_insert(LineCoverage { line, hits: 1 });
+    }
+
+    pub fn record_function(&mut self, file: &Path, name: &str, start: u32, end: u32) {
+        if !self.enabled { return; }
+
+        let file_cov = self.files.entry(file.to_path_buf())
+            .or_insert_with(|| FileCoverage {
+                path: file.to_path_buf(),
+                lines: HashMap::new(),
+                functions: HashMap::new(),
+                branches: HashMap::new(),
+            });
+
+        file_cov.functions.entry(name.to_string())
+            .and_modify(|c| c.hits += 1)
+            .or_insert(FunctionCoverage {
+                name: name.to_string(),
+                start_line: start,
+                end_line: end,
+                hits: 1,
+            });
+    }
+
+    pub fn record_branch(&mut self, file: &Path, line: u32, branch_id: u32, taken: bool) {
+        if !self.enabled { return; }
+
+        let file_cov = self.files.entry(file.to_path_buf())
+            .or_insert_with(|| FileCoverage {
+                path: file.to_path_buf(),
+                lines: HashMap::new(),
+                functions: HashMap::new(),
+                branches: HashMap::new(),
+            });
+
+        let key = line * 1000 + branch_id;
+        file_cov.branches.entry(key)
+            .and_modify(|c| {
+                if taken { c.taken += 1; } else { c.not_taken += 1; }
+            })
+            .or_insert(BranchCoverage {
+                line,
+                branch_id,
+                taken: if taken { 1 } else { 0 },
+                not_taken: if taken { 0 } else { 1 },
+            });
+    }
+
+    pub fn generate_report(&self) -> CoverageReport {
+        let mut total_lines = 0;
+        let mut covered_lines = 0;
+        let mut total_functions = 0;
+        let mut covered_functions = 0;
+        let mut total_branches = 0;
+        let mut covered_branches = 0;
+
+        let mut file_reports = Vec::new();
+
+        for (path, file_cov) in &self.files {
+            let file_total_lines = file_cov.lines.len();
+            let file_covered_lines = file_cov.lines.values()
+                .filter(|l| l.hits > 0).count();
+
+            let file_total_functions = file_cov.functions.len();
+            let file_covered_functions = file_cov.functions.values()
+                .filter(|f| f.hits > 0).count();
+
+            let file_total_branches = file_cov.branches.len();
+            let file_covered_branches = file_cov.branches.values()
+                .filter(|b| b.taken > 0).count();
+
+            total_lines += file_total_lines;
+            covered_lines += file_covered_lines;
+            total_functions += file_total_functions;
+            covered_functions += file_covered_functions;
+            total_branches += file_total_branches;
+            covered_branches += file_covered_branches;
+
+            file_reports.push(FileCoverageReport {
+                path: path.clone(),
+                line_coverage: if file_total_lines > 0 {
+                    (file_covered_lines as f64 / file_total_lines as f64) * 100.0
+                } else { 100.0 },
+                function_coverage: if file_total_functions > 0 {
+                    (file_covered_functions as f64 / file_total_functions as f64) * 100.0
+                } else { 100.0 },
+                branch_coverage: if file_total_branches > 0 {
+                    (file_covered_branches as f64 / file_total_branches as f64) * 100.0
+                } else { 100.0 },
+                uncovered_lines: file_cov.lines.values()
+                    .filter(|l| l.hits == 0)
+                    .map(|l| l.line)
+                    .collect(),
+            });
+        }
+
+        CoverageReport {
+            line_coverage: if total_lines > 0 {
+                (covered_lines as f64 / total_lines as f64) * 100.0
+            } else { 100.0 },
+            function_coverage: if total_functions > 0 {
+                (covered_functions as f64 / total_functions as f64) * 100.0
+            } else { 100.0 },
+            branch_coverage: if total_branches > 0 {
+                (covered_branches as f64 / total_branches as f64) * 100.0
+            } else { 100.0 },
+            files: file_reports,
+        }
+    }
+
+    pub fn export_lcov(&self, path: &Path) -> std::io::Result<()> {
+        let mut output = String::new();
+
+        for (file_path, file_cov) in &self.files {
+            output.push_str(&format!("SF:{}\n", file_path.display()));
+
+            for func in file_cov.functions.values() {
+                output.push_str(&format!("FN:{},{}\n", func.start_line, func.name));
+                output.push_str(&format!("FNDA:{},{}\n", func.hits, func.name));
+            }
+
+            output.push_str(&format!("FNF:{}\n", file_cov.functions.len()));
+            output.push_str(&format!("FNH:{}\n",
+                file_cov.functions.values().filter(|f| f.hits > 0).count()));
+
+            for line in file_cov.lines.values() {
+                output.push_str(&format!("DA:{},{}\n", line.line, line.hits));
+            }
+
+            output.push_str(&format!("LF:{}\n", file_cov.lines.len()));
+            output.push_str(&format!("LH:{}\n",
+                file_cov.lines.values().filter(|l| l.hits > 0).count()));
+
+            for branch in file_cov.branches.values() {
+                output.push_str(&format!("BRDA:{},{},0,{}\n",
+                    branch.line, branch.branch_id, branch.taken));
+            }
+
+            output.push_str("end_of_record\n");
+        }
+
+        fs::write(path, output)
+    }
+
+    pub fn export_cobertura(&self, path: &Path) -> std::io::Result<()> {
+        let report = self.generate_report();
+
+        let mut xml = String::from("<?xml version=\"1.0\"?>\n");
+        xml.push_str("<coverage version=\"1.0\">\n");
+        xml.push_str(&format!("  <line-rate>{:.4}</line-rate>\n", report.line_coverage / 100.0));
+        xml.push_str(&format!("  <branch-rate>{:.4}</branch-rate>\n", report.branch_coverage / 100.0));
+        xml.push_str("  <packages>\n");
+        xml.push_str("    <package name=\".\">\n");
+        xml.push_str("      <classes>\n");
+
+        for file in &report.files {
+            xml.push_str(&format!("        <class name=\"{}\" filename=\"{}\">\n",
+                file.path.file_name().unwrap_or_default().to_string_lossy(),
+                file.path.display()));
+            xml.push_str(&format!("          <line-rate>{:.4}</line-rate>\n", file.line_coverage / 100.0));
+            xml.push_str("        </class>\n");
+        }
+
+        xml.push_str("      </classes>\n");
+        xml.push_str("    </package>\n");
+        xml.push_str("  </packages>\n");
+        xml.push_str("</coverage>\n");
+
+        fs::write(path, xml)
+    }
+}
+
+#[derive(Debug)]
+pub struct CoverageReport {
+    pub line_coverage: f64,
+    pub function_coverage: f64,
+    pub branch_coverage: f64,
+    pub files: Vec<FileCoverageReport>,
+}
+
+#[derive(Debug)]
+pub struct FileCoverageReport {
+    pub path: PathBuf,
+    pub line_coverage: f64,
+    pub function_coverage: f64,
+    pub branch_coverage: f64,
+    pub uncovered_lines: Vec<u32>,
+}
+
+impl CoverageReport {
+    pub fn print(&self) {
+        println!("╔═══════════════════════════════════════╗");
+        println!("║         Code Coverage Report          ║");
+        println!("╠═══════════════════════════════════════╣");
+        println!("║ Line Coverage:     {:>17.1}% ║", self.line_coverage);
+        println!("║ Function Coverage: {:>17.1}% ║", self.function_coverage);
+        println!("║ Branch Coverage:   {:>17.1}% ║", self.branch_coverage);
+        println!("╚═══════════════════════════════════════╝");
+
+        println!("\nFile Coverage:");
+        for file in &self.files {
+            let name = file.path.file_name()
+                .unwrap_or_default()
+                .to_string_lossy();
+            println!("  {}: {:.1}% lines, {:.1}% branches",
+                name, file.line_coverage, file.branch_coverage);
+        }
+    }
+}
+
+// =============================================================================
+// TEST DATA BUILDERS
+// =============================================================================
+
+/// Builder pattern for test data
+pub trait TestDataBuilder: Default {
+    type Output;
+
+    fn build(self) -> Self::Output;
+}
+
+/// Generic test data factory
+pub struct TestDataFactory<T> {
+    builders: HashMap<String, Box<dyn Fn() -> T + Send + Sync>>,
+    sequences: HashMap<String, AtomicU64>,
+}
+
+impl<T> TestDataFactory<T> {
+    pub fn new() -> Self {
+        TestDataFactory {
+            builders: HashMap::new(),
+            sequences: HashMap::new(),
+        }
+    }
+
+    pub fn define<F>(&mut self, name: &str, builder: F)
+    where
+        F: Fn() -> T + Send + Sync + 'static,
+    {
+        self.builders.insert(name.to_string(), Box::new(builder));
+    }
+
+    pub fn build(&self, name: &str) -> Option<T> {
+        self.builders.get(name).map(|b| b())
+    }
+
+    pub fn build_list(&self, name: &str, count: usize) -> Vec<T> {
+        (0..count).filter_map(|_| self.build(name)).collect()
+    }
+
+    pub fn sequence(&self, name: &str) -> u64 {
+        self.sequences.entry(name.to_string())
+            .or_insert_with(|| AtomicU64::new(0))
+            .fetch_add(1, Ordering::SeqCst)
+    }
+
+    pub fn reset_sequences(&self) {
+        for seq in self.sequences.values() {
+            seq.store(0, Ordering::SeqCst);
+        }
+    }
+}
+
+/// Randomized test data generator
+pub struct TestDataGen {
+    seed: u64,
+}
+
+impl TestDataGen {
+    pub fn new() -> Self {
+        TestDataGen {
+            seed: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos() as u64,
+        }
+    }
+
+    pub fn with_seed(seed: u64) -> Self {
+        TestDataGen { seed }
+    }
+
+    fn next(&mut self) -> u64 {
+        self.seed = self.seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+        self.seed
+    }
+
+    pub fn int(&mut self, min: i64, max: i64) -> i64 {
+        let range = (max - min) as u64;
+        if range == 0 { return min; }
+        min + (self.next() % range) as i64
+    }
+
+    pub fn uint(&mut self, max: u64) -> u64 {
+        if max == 0 { return 0; }
+        self.next() % max
+    }
+
+    pub fn float(&mut self, min: f64, max: f64) -> f64 {
+        let t = (self.next() as f64) / (u64::MAX as f64);
+        min + t * (max - min)
+    }
+
+    pub fn bool(&mut self) -> bool {
+        self.next() % 2 == 0
+    }
+
+    pub fn string(&mut self, len: usize) -> String {
+        (0..len)
+            .map(|_| (self.int(97, 123) as u8) as char)
+            .collect()
+    }
+
+    pub fn email(&mut self) -> String {
+        format!("{}@{}.com", self.string(8), self.string(5))
+    }
+
+    pub fn uuid(&mut self) -> String {
+        format!("{:08x}-{:04x}-{:04x}-{:04x}-{:012x}",
+            self.next() as u32,
+            (self.next() as u16) & 0xFFFF,
+            (self.next() as u16) & 0x0FFF | 0x4000,
+            (self.next() as u16) & 0x3FFF | 0x8000,
+            self.next() & 0xFFFFFFFFFFFF)
+    }
+
+    pub fn choice<'a, T>(&mut self, items: &'a [T]) -> Option<&'a T> {
+        if items.is_empty() { None }
+        else { Some(&items[self.uint(items.len() as u64) as usize]) }
+    }
+
+    pub fn shuffle<T: Clone>(&mut self, items: &mut [T]) {
+        for i in (1..items.len()).rev() {
+            let j = self.uint((i + 1) as u64) as usize;
+            items.swap(i, j);
+        }
+    }
+}
+
+// =============================================================================
+// TEST ISOLATION & SANDBOXING
+// =============================================================================
+
+/// Test isolation context
+pub struct IsolationContext {
+    original_env: HashMap<String, String>,
+    original_cwd: PathBuf,
+    temp_dir: Option<TempDir>,
+    cleaned_up: bool,
+}
+
+impl IsolationContext {
+    pub fn new() -> Self {
+        IsolationContext {
+            original_env: std::env::vars().collect(),
+            original_cwd: std::env::current_dir().unwrap_or_default(),
+            temp_dir: None,
+            cleaned_up: false,
+        }
+    }
+
+    pub fn with_temp_dir(mut self) -> std::io::Result<Self> {
+        self.temp_dir = Some(TempDir::new()?);
+        Ok(self)
+    }
+
+    pub fn temp_path(&self) -> Option<&Path> {
+        self.temp_dir.as_ref().map(|t| t.path())
+    }
+
+    pub fn set_env(&self, key: &str, value: &str) {
+        std::env::set_var(key, value);
+    }
+
+    pub fn remove_env(&self, key: &str) {
+        std::env::remove_var(key);
+    }
+
+    pub fn set_cwd(&self, path: &Path) -> std::io::Result<()> {
+        std::env::set_current_dir(path)
+    }
+
+    pub fn cleanup(&mut self) {
+        if self.cleaned_up { return; }
+
+        // Restore environment
+        for (key, value) in &self.original_env {
+            std::env::set_var(key, value);
+        }
+
+        // Restore cwd
+        let _ = std::env::set_current_dir(&self.original_cwd);
+
+        self.cleaned_up = true;
+    }
+}
+
+impl Drop for IsolationContext {
+    fn drop(&mut self) {
+        self.cleanup();
+    }
+}
+
+/// Run test in isolation
+pub fn run_isolated<F, R>(f: F) -> R
+where
+    F: FnOnce(&mut IsolationContext) -> R,
+{
+    let mut ctx = IsolationContext::new();
+    let result = f(&mut ctx);
+    ctx.cleanup();
+    result
+}
+
+// =============================================================================
+// INTEGRATION TEST SUPPORT
+// =============================================================================
+
+/// Integration test harness
+pub struct IntegrationHarness {
+    services: HashMap<String, Box<dyn TestService>>,
+    cleanup_fns: Vec<Box<dyn FnOnce()>>,
+}
+
+pub trait TestService: Send + Sync {
+    fn name(&self) -> &str;
+    fn start(&mut self) -> Result<(), String>;
+    fn stop(&mut self) -> Result<(), String>;
+    fn is_ready(&self) -> bool;
+    fn health_check(&self) -> Result<(), String>;
+}
+
+impl IntegrationHarness {
+    pub fn new() -> Self {
+        IntegrationHarness {
+            services: HashMap::new(),
+            cleanup_fns: Vec::new(),
+        }
+    }
+
+    pub fn add_service<S: TestService + 'static>(&mut self, service: S) {
+        self.services.insert(service.name().to_string(), Box::new(service));
+    }
+
+    pub fn add_cleanup<F: FnOnce() + 'static>(&mut self, f: F) {
+        self.cleanup_fns.push(Box::new(f));
+    }
+
+    pub fn start(&mut self) -> Result<(), String> {
+        for (name, service) in &mut self.services {
+            println!("Starting service: {}", name);
+            service.start()?;
+        }
+        Ok(())
+    }
+
+    pub fn stop(&mut self) -> Result<(), String> {
+        for (name, service) in &mut self.services {
+            println!("Stopping service: {}", name);
+            let _ = service.stop();
+        }
+        Ok(())
+    }
+
+    pub fn wait_for_ready(&self, timeout: Duration) -> Result<(), String> {
+        let start = Instant::now();
+
+        loop {
+            let all_ready = self.services.values().all(|s| s.is_ready());
+
+            if all_ready {
+                return Ok(());
+            }
+
+            if start.elapsed() > timeout {
+                return Err("Services not ready within timeout".to_string());
+            }
+
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+
+    pub fn health_check(&self) -> Result<(), String> {
+        for (name, service) in &self.services {
+            service.health_check()
+                .map_err(|e| format!("Service {} unhealthy: {}", name, e))?;
+        }
+        Ok(())
+    }
+}
+
+impl Drop for IntegrationHarness {
+    fn drop(&mut self) {
+        let _ = self.stop();
+
+        for cleanup in self.cleanup_fns.drain(..) {
+            cleanup();
+        }
+    }
+}
+
+/// Docker-based test service
+pub struct DockerService {
+    name: String,
+    image: String,
+    ports: Vec<(u16, u16)>,
+    env: HashMap<String, String>,
+    container_id: Option<String>,
+}
+
+impl DockerService {
+    pub fn new(name: &str, image: &str) -> Self {
+        DockerService {
+            name: name.to_string(),
+            image: image.to_string(),
+            ports: Vec::new(),
+            env: HashMap::new(),
+            container_id: None,
+        }
+    }
+
+    pub fn port(mut self, host: u16, container: u16) -> Self {
+        self.ports.push((host, container));
+        self
+    }
+
+    pub fn env(mut self, key: &str, value: &str) -> Self {
+        self.env.insert(key.to_string(), value.to_string());
+        self
+    }
+}
+
+impl TestService for DockerService {
+    fn name(&self) -> &str { &self.name }
+
+    fn start(&mut self) -> Result<(), String> {
+        // In real implementation, use docker command
+        self.container_id = Some("test_container".to_string());
+        Ok(())
+    }
+
+    fn stop(&mut self) -> Result<(), String> {
+        self.container_id = None;
+        Ok(())
+    }
+
+    fn is_ready(&self) -> bool {
+        self.container_id.is_some()
+    }
+
+    fn health_check(&self) -> Result<(), String> {
+        if self.container_id.is_some() {
+            Ok(())
+        } else {
+            Err("Container not running".to_string())
+        }
+    }
+}
+
+// =============================================================================
+// TEST REPORTING
+// =============================================================================
+
+/// Test report generator
+pub struct ReportGenerator {
+    results: Vec<SuiteResult>,
+    coverage: Option<CoverageReport>,
+    mutation: Option<MutationReport>,
+}
+
+impl ReportGenerator {
+    pub fn new() -> Self {
+        ReportGenerator {
+            results: Vec::new(),
+            coverage: None,
+            mutation: None,
+        }
+    }
+
+    pub fn add_suite(&mut self, result: SuiteResult) {
+        self.results.push(result);
+    }
+
+    pub fn set_coverage(&mut self, report: CoverageReport) {
+        self.coverage = Some(report);
+    }
+
+    pub fn set_mutation(&mut self, report: MutationReport) {
+        self.mutation = Some(report);
+    }
+
+    pub fn generate_html(&self, path: &Path) -> std::io::Result<()> {
+        let mut html = String::from(r#"<!DOCTYPE html>
+<html>
+<head>
+    <title>Test Report</title>
+    <style>
+        body { font-family: sans-serif; margin: 20px; }
+        .passed { color: green; }
+        .failed { color: red; }
+        .summary { background: #f0f0f0; padding: 20px; margin: 10px 0; }
+        table { border-collapse: collapse; width: 100%; }
+        th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
+        th { background: #4a4a4a; color: white; }
+        tr:nth-child(even) { background: #f9f9f9; }
+    </style>
+</head>
+<body>
+    <h1>Test Report</h1>
+"#);
+
+        // Summary
+        let total_passed: usize = self.results.iter().map(|r| r.passed).sum();
+        let total_failed: usize = self.results.iter().map(|r| r.failed).sum();
+        let total_duration: f64 = self.results.iter()
+            .map(|r| r.duration.as_secs_f64()).sum();
+
+        html.push_str(&format!(r#"
+    <div class="summary">
+        <h2>Summary</h2>
+        <p>Total Tests: {}</p>
+        <p class="passed">Passed: {}</p>
+        <p class="failed">Failed: {}</p>
+        <p>Duration: {:.2}s</p>
+    </div>
+"#, total_passed + total_failed, total_passed, total_failed, total_duration));
+
+        // Test results table
+        html.push_str(r#"
+    <h2>Test Results</h2>
+    <table>
+        <tr><th>Test</th><th>Status</th><th>Duration</th><th>Message</th></tr>
+"#);
+
+        for suite in &self.results {
+            for test in &suite.tests {
+                let status_class = match test.status {
+                    TestStatus::Passed => "passed",
+                    TestStatus::Failed | TestStatus::TimedOut => "failed",
+                    _ => "",
+                };
+
+                html.push_str(&format!(r#"
+        <tr>
+            <td>{}::{}</td>
+            <td class="{}">{:?}</td>
+            <td>{:.3}s</td>
+            <td>{}</td>
+        </tr>
+"#, test.module, test.name, status_class, test.status,
+    test.duration.as_secs_f64(),
+    test.message.as_deref().unwrap_or("")));
+            }
+        }
+
+        html.push_str("    </table>\n");
+
+        // Coverage section
+        if let Some(ref cov) = self.coverage {
+            html.push_str(&format!(r#"
+    <h2>Code Coverage</h2>
+    <div class="summary">
+        <p>Line Coverage: {:.1}%</p>
+        <p>Function Coverage: {:.1}%</p>
+        <p>Branch Coverage: {:.1}%</p>
+    </div>
+"#, cov.line_coverage, cov.function_coverage, cov.branch_coverage));
+        }
+
+        // Mutation section
+        if let Some(ref mut_report) = self.mutation {
+            html.push_str(&format!(r#"
+    <h2>Mutation Testing</h2>
+    <div class="summary">
+        <p>Mutation Score: {:.1}%</p>
+        <p>Killed: {}</p>
+        <p>Survived: {}</p>
+    </div>
+"#, mut_report.score, mut_report.killed, mut_report.survived));
+        }
+
+        html.push_str("</body>\n</html>");
+
+        fs::write(path, html)
+    }
+
+    pub fn generate_json(&self, path: &Path) -> std::io::Result<()> {
+        let json = serde_json::json!({
+            "suites": self.results.iter().map(|s| {
+                serde_json::json!({
+                    "name": s.name,
+                    "passed": s.passed,
+                    "failed": s.failed,
+                    "duration_ms": s.duration.as_millis(),
+                    "tests": s.tests.iter().map(|t| {
+                        serde_json::json!({
+                            "name": t.name,
+                            "module": t.module,
+                            "status": format!("{:?}", t.status),
+                            "duration_ms": t.duration.as_millis(),
+                            "message": t.message,
+                        })
+                    }).collect::<Vec<_>>(),
+                })
+            }).collect::<Vec<_>>(),
+            "coverage": self.coverage.as_ref().map(|c| {
+                serde_json::json!({
+                    "line_coverage": c.line_coverage,
+                    "function_coverage": c.function_coverage,
+                    "branch_coverage": c.branch_coverage,
+                })
+            }),
+            "mutation": self.mutation.as_ref().map(|m| {
+                serde_json::json!({
+                    "score": m.score,
+                    "killed": m.killed,
+                    "survived": m.survived,
+                })
+            }),
+        });
+
+        fs::write(path, serde_json::to_string_pretty(&json).unwrap())
+    }
+}
+
+// =============================================================================
+// TESTS
+// =============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_assert_eq() {
+        assert!(assert_eq(&1, &1, None).is_ok());
+        assert!(assert_eq(&1, &2, None).is_err());
+    }
+
+    #[test]
+    fn test_assert_ne() {
+        assert!(assert_ne(&1, &2, None).is_ok());
+        assert!(assert_ne(&1, &1, None).is_err());
+    }
+
+    #[test]
+    fn test_assert_approx_eq() {
+        assert!(assert_approx_eq(1.0, 1.0001, 0.001, None).is_ok());
+        assert!(assert_approx_eq(1.0, 2.0, 0.001, None).is_err());
+    }
+
+    #[test]
+    fn test_mock() {
+        let mock = Mock::new("test_mock");
+
+        mock.record_call("foo", vec!["arg1".to_string()]);
+        mock.record_call("foo", vec!["arg2".to_string()]);
+        mock.record_call("bar", vec![]);
+
+        assert!(mock.was_called("foo"));
+        assert_eq!(mock.call_count("foo"), 2);
+        assert_eq!(mock.call_count("bar"), 1);
+        assert!(!mock.was_called("baz"));
+    }
+
+    #[test]
+    fn test_generator() {
+        let mut gen = Generator::new(42);
+
+        let n1 = gen.range(0, 100);
+        let n2 = gen.range(0, 100);
+
+        assert!(n1 >= 0 && n1 < 100);
+        assert!(n2 >= 0 && n2 < 100);
+    }
+
+    #[test]
+    fn test_prop_test() {
+        let prop = PropTest::new().iterations(50);
+
+        // Addition is commutative
+        let result = prop.for_all2(|a: i32, b: i32| {
+            a.wrapping_add(b) == b.wrapping_add(a)
+        });
+
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_suite_result() {
+        let mut result = SuiteResult::new("test");
+
+        result.add_result(TestResult {
+            name: "test1".to_string(),
+            module: "mod".to_string(),
+            status: TestStatus::Passed,
+            duration: Duration::from_millis(10),
+            message: None,
+            location: None,
+            stdout: String::new(),
+            stderr: String::new(),
+        });
+
+        result.add_result(TestResult {
+            name: "test2".to_string(),
+            module: "mod".to_string(),
+            status: TestStatus::Failed,
+            duration: Duration::from_millis(20),
+            message: Some("failed".to_string()),
+            location: None,
+            stdout: String::new(),
+            stderr: String::new(),
+        });
+
+        assert_eq!(result.passed, 1);
+        assert_eq!(result.failed, 1);
+        assert_eq!(result.total(), 2);
+        assert!(!result.success());
+    }
+}

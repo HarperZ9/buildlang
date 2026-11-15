@@ -1,0 +1,1848 @@
+// BUILD-UNIVERSE: Refract - ENB Effect System
+// Core effect implementations for ENB integration
+// Version: 1.0.0
+
+module refract::effects;
+
+use super::lib::*;
+use super::hooks::*;
+
+// ============================================================================
+// EFFECT BASE TYPES
+// ============================================================================
+
+/// Base effect configuration
+pub struct EffectConfig {
+    pub enabled: bool,
+    pub quality: QualityLevel,
+    pub intensity: f32,
+    pub blend_mode: BlendMode,
+}
+
+/// Blend modes for effect compositing
+pub enum BlendMode {
+    Replace,
+    Additive,
+    Multiply,
+    Screen,
+    Overlay,
+    SoftLight,
+    HardLight,
+    ColorDodge,
+    ColorBurn,
+    LinearLight,
+    VividLight,
+}
+
+/// Effect pass definition
+pub struct EffectPass {
+    pub name: String,
+    pub vs: *mut ID3D11VertexShader,
+    pub ps: *mut ID3D11PixelShader,
+    pub cs: Option<*mut ID3D11ComputeShader>,
+    pub render_target: Option<u32>,
+    pub inputs: Vec<u32>,
+    pub blend_state: *mut ID3D11BlendState,
+}
+
+/// Effect resource bindings
+pub struct EffectResources {
+    pub textures: Vec<ENBTexture>,
+    pub constant_buffers: Vec<*mut ID3D11Buffer>,
+    pub samplers: Vec<*mut ID3D11SamplerState>,
+}
+
+// ============================================================================
+// AMBIENT OCCLUSION EFFECT
+// ============================================================================
+
+/// SSAO configuration for ENB
+pub struct ENBAmbientOcclusion {
+    config: EffectConfig,
+
+    // SSAO parameters
+    radius: f32,
+    intensity: f32,
+    bias: f32,
+    power: f32,
+    sample_count: u32,
+
+    // HBAO parameters
+    hbao_radius: f32,
+    hbao_max_radius_pixels: f32,
+    hbao_angle_bias: f32,
+    hbao_num_directions: u32,
+    hbao_num_steps: u32,
+
+    // Bilateral blur
+    blur_enabled: bool,
+    blur_sharpness: f32,
+    blur_radius: u32,
+
+    // Temporal
+    temporal_enabled: bool,
+    temporal_weight: f32,
+
+    // Resources
+    ao_texture: Option<ENBTexture>,
+    ao_history: Option<ENBTexture>,
+    noise_texture: Option<ENBTexture>,
+
+    // Shaders
+    ssao_shader: Option<*mut ID3D11PixelShader>,
+    hbao_shader: Option<*mut ID3D11PixelShader>,
+    blur_h_shader: Option<*mut ID3D11PixelShader>,
+    blur_v_shader: Option<*mut ID3D11PixelShader>,
+    temporal_shader: Option<*mut ID3D11PixelShader>,
+    apply_shader: Option<*mut ID3D11PixelShader>,
+}
+
+impl ENBAmbientOcclusion {
+    pub fn new() -> Self {
+        Self {
+            config: EffectConfig {
+                enabled: true,
+                quality: QualityLevel::High,
+                intensity: 1.0,
+                blend_mode: BlendMode::Multiply,
+            },
+            radius: 1.0,
+            intensity: 1.5,
+            bias: 0.025,
+            power: 1.5,
+            sample_count: 16,
+            hbao_radius: 2.0,
+            hbao_max_radius_pixels: 50.0,
+            hbao_angle_bias: 30.0,
+            hbao_num_directions: 8,
+            hbao_num_steps: 4,
+            blur_enabled: true,
+            blur_sharpness: 16.0,
+            blur_radius: 4,
+            temporal_enabled: true,
+            temporal_weight: 0.9,
+            ao_texture: None,
+            ao_history: None,
+            noise_texture: None,
+            ssao_shader: None,
+            hbao_shader: None,
+            blur_h_shader: None,
+            blur_v_shader: None,
+            temporal_shader: None,
+            apply_shader: None,
+        }
+    }
+
+    /// Initialize SSAO resources
+    pub fn initialize(&mut self, device: *mut ID3D11Device, width: u32, height: u32) -> Result<(), ENBError> {
+        // Create AO render target
+        self.ao_texture = Some(ENBTexture::create(
+            device,
+            width,
+            height,
+            DXGI_FORMAT_R8_UNORM,
+            TextureFlags::RenderTarget
+        )?);
+
+        // Create history buffer for temporal
+        if self.temporal_enabled {
+            self.ao_history = Some(ENBTexture::create(
+                device,
+                width,
+                height,
+                DXGI_FORMAT_R8_UNORM,
+                TextureFlags::RenderTarget
+            )?);
+        }
+
+        // Create noise texture
+        self.create_noise_texture(device)?;
+
+        // Compile shaders
+        self.compile_shaders(device)?;
+
+        Ok(())
+    }
+
+    /// Create rotated noise texture for SSAO
+    fn create_noise_texture(&mut self, device: *mut ID3D11Device) -> Result<(), ENBError> {
+        let size = 4u32;
+        let mut noise_data = vec![0u8; (size * size * 4) as usize];
+
+        // Generate random rotation vectors
+        for i in 0..(size * size) as usize {
+            let angle = rand::random::<f32>() * std::f32::consts::TAU;
+            noise_data[i * 4] = ((angle.cos() * 0.5 + 0.5) * 255.0) as u8;
+            noise_data[i * 4 + 1] = ((angle.sin() * 0.5 + 0.5) * 255.0) as u8;
+            noise_data[i * 4 + 2] = (rand::random::<f32>() * 255.0) as u8;
+            noise_data[i * 4 + 3] = 255;
+        }
+
+        // Create texture with initial data
+        self.noise_texture = Some(ENBTexture::create(
+            device,
+            size,
+            size,
+            DXGI_FORMAT_R8G8B8A8_UNORM,
+            TextureFlags::None
+        )?);
+
+        Ok(())
+    }
+
+    /// Compile SSAO shaders
+    fn compile_shaders(&mut self, _device: *mut ID3D11Device) -> Result<(), ENBError> {
+        // Shader compilation would happen here
+        // Using pre-compiled shader blobs in production
+        Ok(())
+    }
+
+    /// Render SSAO
+    pub fn render(&self, context: &RenderContext) {
+        if !self.config.enabled {
+            return;
+        }
+
+        // SSAO pass
+        self.render_ssao(context);
+
+        // Blur passes
+        if self.blur_enabled {
+            self.render_blur(context);
+        }
+
+        // Temporal pass
+        if self.temporal_enabled {
+            self.render_temporal(context);
+        }
+
+        // Apply pass
+        self.render_apply(context);
+    }
+
+    fn render_ssao(&self, _context: &RenderContext) {
+        shader {
+            // Set render target to AO texture
+            // Bind depth and normal textures
+            // Draw full-screen quad
+
+            @pixel_shader
+            fn ssao_ps(input: VertexOutput) -> f32 {
+                let uv = input.texcoord;
+                let depth = sample_depth(uv);
+                let normal = decode_normal(sample_gbuffer_normal(uv));
+                let position = reconstruct_view_position(uv, depth, inverse_projection);
+
+                // Sample kernel
+                let noise = sample_noise(uv * screen_size.xy / 4.0);
+                let rotation = create_rotation_matrix(noise.xy);
+
+                var ao = 0.0;
+                for i in 0..sample_count {
+                    let sample_offset = rotation * SSAO_KERNEL[i];
+                    let sample_pos = position + sample_offset * radius;
+
+                    // Project sample position
+                    let offset_uv = project_position(sample_pos);
+                    let sample_depth = sample_depth(offset_uv);
+                    let sample_position = reconstruct_view_position(offset_uv, sample_depth, inverse_projection);
+
+                    // Range check and occlusion
+                    let range_check = smoothstep(0.0, 1.0, radius / abs(position.z - sample_position.z));
+                    let occlusion = step(sample_position.z, sample_pos.z - bias) * range_check;
+
+                    ao += occlusion;
+                }
+
+                ao = 1.0 - (ao / f32(sample_count));
+                return pow(ao, power);
+            }
+        }
+    }
+
+    fn render_blur(&self, _context: &RenderContext) {
+        shader {
+            @pixel_shader
+            fn bilateral_blur_h(input: VertexOutput) -> f32 {
+                let uv = input.texcoord;
+                let center_depth = sample_depth(uv);
+                let center_ao = sample_ao(uv);
+
+                var total_ao = 0.0;
+                var total_weight = 0.0;
+
+                for i in -blur_radius..=blur_radius {
+                    let offset_uv = uv + vec2<f32>(f32(i) * texel_size.x, 0.0);
+                    let sample_depth = sample_depth(offset_uv);
+                    let sample_ao = sample_ao(offset_uv);
+
+                    // Bilateral weight
+                    let depth_diff = abs(center_depth - sample_depth);
+                    let depth_weight = exp(-depth_diff * blur_sharpness);
+
+                    let spatial_weight = GAUSSIAN_WEIGHTS[abs(i)];
+                    let weight = spatial_weight * depth_weight;
+
+                    total_ao += sample_ao * weight;
+                    total_weight += weight;
+                }
+
+                return total_ao / total_weight;
+            }
+
+            @pixel_shader
+            fn bilateral_blur_v(input: VertexOutput) -> f32 {
+                let uv = input.texcoord;
+                let center_depth = sample_depth(uv);
+                let center_ao = sample_ao(uv);
+
+                var total_ao = 0.0;
+                var total_weight = 0.0;
+
+                for i in -blur_radius..=blur_radius {
+                    let offset_uv = uv + vec2<f32>(0.0, f32(i) * texel_size.y);
+                    let sample_depth = sample_depth(offset_uv);
+                    let sample_ao = sample_ao(offset_uv);
+
+                    let depth_diff = abs(center_depth - sample_depth);
+                    let depth_weight = exp(-depth_diff * blur_sharpness);
+                    let spatial_weight = GAUSSIAN_WEIGHTS[abs(i)];
+                    let weight = spatial_weight * depth_weight;
+
+                    total_ao += sample_ao * weight;
+                    total_weight += weight;
+                }
+
+                return total_ao / total_weight;
+            }
+        }
+    }
+
+    fn render_temporal(&self, _context: &RenderContext) {
+        shader {
+            @pixel_shader
+            fn temporal_ao(input: VertexOutput) -> f32 {
+                let uv = input.texcoord;
+
+                // Reproject to previous frame
+                let velocity = sample_velocity(uv);
+                let prev_uv = uv - velocity;
+
+                // Sample current and history
+                let current = sample_ao(uv);
+                let history = sample_ao_history(prev_uv);
+
+                // Neighborhood clamping
+                var min_ao = 1.0;
+                var max_ao = 0.0;
+
+                for dy in -1..=1 {
+                    for dx in -1..=1 {
+                        let offset = vec2<f32>(f32(dx), f32(dy)) * texel_size;
+                        let neighbor = sample_ao(uv + offset);
+                        min_ao = min(min_ao, neighbor);
+                        max_ao = max(max_ao, neighbor);
+                    }
+                }
+
+                let clamped_history = clamp(history, min_ao, max_ao);
+
+                // Blend
+                return mix(current, clamped_history, temporal_weight);
+            }
+        }
+    }
+
+    fn render_apply(&self, _context: &RenderContext) {
+        shader {
+            @pixel_shader
+            fn apply_ao(input: VertexOutput) -> Vec4 {
+                let uv = input.texcoord;
+                let color = sample_color(uv);
+                let ao = sample_ao(uv);
+
+                // Apply AO with intensity
+                let ao_factor = mix(1.0, ao, intensity);
+                return vec4<f32>(color.rgb * ao_factor, color.a);
+            }
+        }
+    }
+}
+
+// ============================================================================
+// SCREEN-SPACE REFLECTIONS
+// ============================================================================
+
+/// SSR configuration for ENB
+pub struct ENBScreenSpaceReflections {
+    config: EffectConfig,
+
+    // SSR parameters
+    max_distance: f32,
+    max_steps: u32,
+    stride: f32,
+    thickness: f32,
+    fade_start: f32,
+    fade_end: f32,
+
+    // Hi-Z parameters
+    hiz_enabled: bool,
+    hiz_max_level: u32,
+
+    // Quality
+    half_resolution: bool,
+    jitter_enabled: bool,
+
+    // Temporal
+    temporal_enabled: bool,
+    temporal_weight: f32,
+
+    // Resources
+    ssr_texture: Option<ENBTexture>,
+    ssr_mask: Option<ENBTexture>,
+    ssr_history: Option<ENBTexture>,
+    hiz_texture: Option<ENBTexture>,
+
+    // Shaders
+    hiz_shader: Option<*mut ID3D11ComputeShader>,
+    ssr_shader: Option<*mut ID3D11PixelShader>,
+    resolve_shader: Option<*mut ID3D11PixelShader>,
+    temporal_shader: Option<*mut ID3D11PixelShader>,
+    apply_shader: Option<*mut ID3D11PixelShader>,
+}
+
+impl ENBScreenSpaceReflections {
+    pub fn new() -> Self {
+        Self {
+            config: EffectConfig {
+                enabled: true,
+                quality: QualityLevel::High,
+                intensity: 1.0,
+                blend_mode: BlendMode::Additive,
+            },
+            max_distance: 100.0,
+            max_steps: 64,
+            stride: 0.5,
+            thickness: 0.5,
+            fade_start: 0.8,
+            fade_end: 1.0,
+            hiz_enabled: true,
+            hiz_max_level: 6,
+            half_resolution: false,
+            jitter_enabled: true,
+            temporal_enabled: true,
+            temporal_weight: 0.9,
+            ssr_texture: None,
+            ssr_mask: None,
+            ssr_history: None,
+            hiz_texture: None,
+            hiz_shader: None,
+            ssr_shader: None,
+            resolve_shader: None,
+            temporal_shader: None,
+            apply_shader: None,
+        }
+    }
+
+    /// Initialize SSR resources
+    pub fn initialize(&mut self, device: *mut ID3D11Device, width: u32, height: u32) -> Result<(), ENBError> {
+        let ssr_width = if self.half_resolution { width / 2 } else { width };
+        let ssr_height = if self.half_resolution { height / 2 } else { height };
+
+        // SSR render target
+        self.ssr_texture = Some(ENBTexture::create(
+            device,
+            ssr_width,
+            ssr_height,
+            DXGI_FORMAT_R16G16B16A16_FLOAT,
+            TextureFlags::RenderTarget
+        )?);
+
+        // SSR mask
+        self.ssr_mask = Some(ENBTexture::create(
+            device,
+            ssr_width,
+            ssr_height,
+            DXGI_FORMAT_R8_UNORM,
+            TextureFlags::RenderTarget
+        )?);
+
+        // History buffer
+        if self.temporal_enabled {
+            self.ssr_history = Some(ENBTexture::create(
+                device,
+                ssr_width,
+                ssr_height,
+                DXGI_FORMAT_R16G16B16A16_FLOAT,
+                TextureFlags::RenderTarget
+            )?);
+        }
+
+        // Hi-Z texture
+        if self.hiz_enabled {
+            self.hiz_texture = Some(ENBTexture::create(
+                device,
+                width,
+                height,
+                DXGI_FORMAT_R32_FLOAT,
+                TextureFlags::RenderTarget | TextureFlags::UAV | TextureFlags::Mipmaps
+            )?);
+        }
+
+        Ok(())
+    }
+
+    /// Render SSR
+    pub fn render(&self, context: &RenderContext) {
+        if !self.config.enabled {
+            return;
+        }
+
+        // Generate Hi-Z
+        if self.hiz_enabled {
+            self.render_hiz(context);
+        }
+
+        // SSR tracing
+        self.render_ssr_trace(context);
+
+        // Temporal pass
+        if self.temporal_enabled {
+            self.render_temporal(context);
+        }
+
+        // Resolve and apply
+        self.render_resolve(context);
+        self.render_apply(context);
+    }
+
+    fn render_hiz(&self, _context: &RenderContext) {
+        shader {
+            @compute_shader
+            fn generate_hiz(
+                @group(0) depth_in: Texture2D<f32>,
+                @group(1) depth_out: RWTexture2D<f32>,
+                @builtin(global_invocation_id) id: Vec3<u32>
+            ) {
+                let base = id.xy * 2;
+
+                // Sample 4 depth values
+                let d0 = depth_in.Load(vec3<u32>(base + vec2<u32>(0, 0), 0));
+                let d1 = depth_in.Load(vec3<u32>(base + vec2<u32>(1, 0), 0));
+                let d2 = depth_in.Load(vec3<u32>(base + vec2<u32>(0, 1), 0));
+                let d3 = depth_in.Load(vec3<u32>(base + vec2<u32>(1, 1), 0));
+
+                // Take maximum (farthest) for hi-z
+                let max_depth = max(max(d0, d1), max(d2, d3));
+
+                depth_out[id.xy] = max_depth;
+            }
+        }
+    }
+
+    fn render_ssr_trace(&self, _context: &RenderContext) {
+        shader {
+            @pixel_shader
+            fn ssr_trace(input: VertexOutput) -> SSROutput {
+                let uv = input.texcoord;
+
+                // Read GBuffer
+                let depth = sample_depth(uv);
+                let normal = decode_normal(sample_gbuffer_normal(uv));
+                let roughness = sample_gbuffer_roughness(uv);
+                let metallic = sample_gbuffer_metallic(uv);
+
+                // Skip non-reflective surfaces
+                if roughness > 0.8 || (metallic < 0.1 && roughness > 0.5) {
+                    return SSROutput { color: vec4<f32>(0.0), mask: 0.0 };
+                }
+
+                // Reconstruct position
+                let position = reconstruct_view_position(uv, depth, inverse_projection);
+
+                // Calculate reflection direction
+                let view_dir = normalize(-position);
+                let reflect_dir = reflect(-view_dir, normal);
+
+                // Add jitter for temporal stability
+                var jitter = vec2<f32>(0.0);
+                if jitter_enabled {
+                    jitter = get_temporal_offset(input.position.xy, frame_index) * 0.5;
+                }
+
+                // Ray march
+                var hit_uv = vec2<f32>(0.0);
+                var hit_depth = 0.0;
+                let hit = trace_ray_hiz(
+                    position,
+                    reflect_dir,
+                    max_distance,
+                    max_steps,
+                    stride,
+                    thickness,
+                    jitter,
+                    &hit_uv,
+                    &hit_depth
+                );
+
+                if hit {
+                    // Sample color at hit point
+                    let hit_color = sample_color(hit_uv);
+
+                    // Calculate fade
+                    let screen_fade = calculate_screen_fade(hit_uv);
+                    let distance_fade = 1.0 - saturate(hit_depth / max_distance);
+                    let roughness_fade = 1.0 - pow(roughness, 4.0);
+                    let fresnel = fresnel_schlick(dot(view_dir, normal), 0.04);
+
+                    let fade = screen_fade * distance_fade * roughness_fade * fresnel;
+
+                    return SSROutput {
+                        color: vec4<f32>(hit_color.rgb, fade),
+                        mask: fade
+                    };
+                }
+
+                return SSROutput { color: vec4<f32>(0.0), mask: 0.0 };
+            }
+
+            fn trace_ray_hiz(
+                origin: Vec3,
+                direction: Vec3,
+                max_distance: f32,
+                max_steps: u32,
+                stride: f32,
+                thickness: f32,
+                jitter: Vec2,
+                hit_uv: &mut Vec2,
+                hit_depth: &mut f32
+            ) -> bool {
+                let ray_start = origin;
+                let ray_end = origin + direction * max_distance;
+
+                // Project to screen space
+                let start_screen = project_position(ray_start) + jitter * texel_size;
+                let end_screen = project_position(ray_end);
+
+                var current = start_screen;
+                let step_dir = normalize(end_screen - start_screen) * stride * texel_size;
+
+                var level = 0u32;
+
+                for i in 0..max_steps {
+                    current += step_dir * f32(1 << level);
+
+                    // Check bounds
+                    if any(current < vec2<f32>(0.0)) || any(current > vec2<f32>(1.0)) {
+                        return false;
+                    }
+
+                    // Sample depth at current mip level
+                    let sample_depth = sample_hiz(current, level);
+                    let ray_depth = interpolate_ray_depth(origin, direction, current);
+
+                    // Intersection test
+                    if ray_depth > sample_depth && ray_depth < sample_depth + thickness {
+                        if level == 0 {
+                            *hit_uv = current;
+                            *hit_depth = ray_depth;
+                            return true;
+                        }
+                        level -= 1;
+                        current -= step_dir * f32(1 << level);
+                    } else if ray_depth < sample_depth {
+                        level = min(level + 1, hiz_max_level);
+                    }
+                }
+
+                return false;
+            }
+
+            fn calculate_screen_fade(uv: Vec2) -> f32 {
+                let edge_fade = min(
+                    min(uv.x, 1.0 - uv.x),
+                    min(uv.y, 1.0 - uv.y)
+                );
+                return smoothstep(0.0, 0.1, edge_fade);
+            }
+        }
+    }
+
+    fn render_temporal(&self, _context: &RenderContext) {
+        shader {
+            @pixel_shader
+            fn temporal_ssr(input: VertexOutput) -> Vec4 {
+                let uv = input.texcoord;
+
+                // Reproject
+                let velocity = sample_velocity(uv);
+                let prev_uv = uv - velocity;
+
+                // Sample current and history
+                let current = sample_ssr(uv);
+                let history = sample_ssr_history(prev_uv);
+
+                // Neighborhood clamping (AABB)
+                var min_color = vec4<f32>(1e10);
+                var max_color = vec4<f32>(-1e10);
+
+                for dy in -1..=1 {
+                    for dx in -1..=1 {
+                        let offset = vec2<f32>(f32(dx), f32(dy)) * texel_size;
+                        let neighbor = sample_ssr(uv + offset);
+                        min_color = min(min_color, neighbor);
+                        max_color = max(max_color, neighbor);
+                    }
+                }
+
+                let clamped_history = clamp(history, min_color, max_color);
+
+                // Blend with variance-based weight
+                let variance = length(max_color.rgb - min_color.rgb);
+                let weight = mix(temporal_weight, 0.5, saturate(variance * 4.0));
+
+                return mix(current, clamped_history, weight);
+            }
+        }
+    }
+
+    fn render_resolve(&self, _context: &RenderContext) {
+        shader {
+            @pixel_shader
+            fn resolve_ssr(input: VertexOutput) -> Vec4 {
+                let uv = input.texcoord;
+                let ssr = sample_ssr(uv);
+                let mask = sample_ssr_mask(uv);
+
+                // Apply roughness-based blur
+                let roughness = sample_gbuffer_roughness(uv);
+                let blur_amount = roughness * 4.0;
+
+                var blurred = vec4<f32>(0.0);
+                var weight = 0.0;
+
+                for dy in -2..=2 {
+                    for dx in -2..=2 {
+                        let offset = vec2<f32>(f32(dx), f32(dy)) * texel_size * blur_amount;
+                        let sample = sample_ssr(uv + offset);
+                        let w = gaussian_weight(length(vec2<f32>(f32(dx), f32(dy))), blur_amount);
+                        blurred += sample * w;
+                        weight += w;
+                    }
+                }
+
+                return blurred / weight;
+            }
+        }
+    }
+
+    fn render_apply(&self, _context: &RenderContext) {
+        shader {
+            @pixel_shader
+            fn apply_ssr(input: VertexOutput) -> Vec4 {
+                let uv = input.texcoord;
+                let color = sample_color(uv);
+                let ssr = sample_ssr_resolved(uv);
+
+                // Blend reflection
+                let final_color = color.rgb + ssr.rgb * ssr.a * intensity;
+                return vec4<f32>(final_color, color.a);
+            }
+        }
+    }
+}
+
+// ============================================================================
+// BLOOM EFFECT
+// ============================================================================
+
+/// Bloom configuration for ENB
+pub struct ENBBloom {
+    config: EffectConfig,
+
+    // Bloom parameters
+    threshold: f32,
+    soft_threshold: f32,
+    scatter: f32,
+    anamorphic_ratio: f32,
+    lens_dirt_intensity: f32,
+
+    // Quality
+    num_iterations: u32,
+    downsample_factor: u32,
+
+    // Resources
+    bloom_textures: Vec<ENBTexture>,
+    lens_dirt_texture: Option<ENBTexture>,
+
+    // Shaders
+    prefilter_shader: Option<*mut ID3D11PixelShader>,
+    downsample_shader: Option<*mut ID3D11PixelShader>,
+    upsample_shader: Option<*mut ID3D11PixelShader>,
+    composite_shader: Option<*mut ID3D11PixelShader>,
+}
+
+impl ENBBloom {
+    pub fn new() -> Self {
+        Self {
+            config: EffectConfig {
+                enabled: true,
+                quality: QualityLevel::High,
+                intensity: 0.5,
+                blend_mode: BlendMode::Additive,
+            },
+            threshold: 1.0,
+            soft_threshold: 0.5,
+            scatter: 0.7,
+            anamorphic_ratio: 0.0,
+            lens_dirt_intensity: 0.0,
+            num_iterations: 6,
+            downsample_factor: 2,
+            bloom_textures: Vec::new(),
+            lens_dirt_texture: None,
+            prefilter_shader: None,
+            downsample_shader: None,
+            upsample_shader: None,
+            composite_shader: None,
+        }
+    }
+
+    /// Initialize bloom resources
+    pub fn initialize(&mut self, device: *mut ID3D11Device, width: u32, height: u32) -> Result<(), ENBError> {
+        // Create bloom mip chain
+        self.bloom_textures.clear();
+
+        let mut w = width / self.downsample_factor;
+        let mut h = height / self.downsample_factor;
+
+        for _ in 0..self.num_iterations {
+            let texture = ENBTexture::create(
+                device,
+                w,
+                h,
+                DXGI_FORMAT_R11G11B10_FLOAT,
+                TextureFlags::RenderTarget
+            )?;
+
+            self.bloom_textures.push(texture);
+
+            w = max(1, w / 2);
+            h = max(1, h / 2);
+        }
+
+        Ok(())
+    }
+
+    /// Render bloom
+    pub fn render(&self, context: &RenderContext) {
+        if !self.config.enabled {
+            return;
+        }
+
+        // Prefilter pass
+        self.render_prefilter(context);
+
+        // Downsample chain
+        self.render_downsample_chain(context);
+
+        // Upsample chain
+        self.render_upsample_chain(context);
+
+        // Composite
+        self.render_composite(context);
+    }
+
+    fn render_prefilter(&self, _context: &RenderContext) {
+        shader {
+            @pixel_shader
+            fn bloom_prefilter(input: VertexOutput) -> Vec3 {
+                let uv = input.texcoord;
+                let color = sample_color(uv).rgb;
+
+                // Luminance-based threshold
+                let luma = luminance(color);
+                let soft = luma - threshold + soft_threshold;
+                let contribution = clamp(soft * soft / (4.0 * soft_threshold + 0.00001), 0.0, 1.0);
+                let multiplier = max(luma - threshold, contribution) / max(luma, 0.00001);
+
+                return color * multiplier;
+            }
+        }
+    }
+
+    fn render_downsample_chain(&self, _context: &RenderContext) {
+        shader {
+            @pixel_shader
+            fn bloom_downsample(input: VertexOutput) -> Vec3 {
+                let uv = input.texcoord;
+                let texel = source_texel_size;
+
+                // 13-tap downsampler (CoD:AW style)
+                var color = vec3<f32>(0.0);
+
+                // Center cross (4 samples)
+                color += sample_source(uv + vec2<f32>(-texel.x, 0.0)).rgb * 0.125;
+                color += sample_source(uv + vec2<f32>(texel.x, 0.0)).rgb * 0.125;
+                color += sample_source(uv + vec2<f32>(0.0, -texel.y)).rgb * 0.125;
+                color += sample_source(uv + vec2<f32>(0.0, texel.y)).rgb * 0.125;
+
+                // Corners (8 samples)
+                color += sample_source(uv + vec2<f32>(-texel.x, -texel.y)).rgb * 0.0625;
+                color += sample_source(uv + vec2<f32>(texel.x, -texel.y)).rgb * 0.0625;
+                color += sample_source(uv + vec2<f32>(-texel.x, texel.y)).rgb * 0.0625;
+                color += sample_source(uv + vec2<f32>(texel.x, texel.y)).rgb * 0.0625;
+
+                color += sample_source(uv + vec2<f32>(-texel.x * 2.0, 0.0)).rgb * 0.0625;
+                color += sample_source(uv + vec2<f32>(texel.x * 2.0, 0.0)).rgb * 0.0625;
+                color += sample_source(uv + vec2<f32>(0.0, -texel.y * 2.0)).rgb * 0.0625;
+                color += sample_source(uv + vec2<f32>(0.0, texel.y * 2.0)).rgb * 0.0625;
+
+                // Center sample
+                color += sample_source(uv).rgb * 0.125;
+
+                return color;
+            }
+        }
+    }
+
+    fn render_upsample_chain(&self, _context: &RenderContext) {
+        shader {
+            @pixel_shader
+            fn bloom_upsample(input: VertexOutput) -> Vec3 {
+                let uv = input.texcoord;
+                let texel = source_texel_size;
+
+                // 9-tap tent filter
+                var color = vec3<f32>(0.0);
+
+                color += sample_source(uv + vec2<f32>(-texel.x, -texel.y)).rgb * 0.0625;
+                color += sample_source(uv + vec2<f32>(0.0, -texel.y)).rgb * 0.125;
+                color += sample_source(uv + vec2<f32>(texel.x, -texel.y)).rgb * 0.0625;
+
+                color += sample_source(uv + vec2<f32>(-texel.x, 0.0)).rgb * 0.125;
+                color += sample_source(uv).rgb * 0.25;
+                color += sample_source(uv + vec2<f32>(texel.x, 0.0)).rgb * 0.125;
+
+                color += sample_source(uv + vec2<f32>(-texel.x, texel.y)).rgb * 0.0625;
+                color += sample_source(uv + vec2<f32>(0.0, texel.y)).rgb * 0.125;
+                color += sample_source(uv + vec2<f32>(texel.x, texel.y)).rgb * 0.0625;
+
+                // Add previous mip level
+                let previous = sample_previous_mip(uv).rgb;
+
+                return mix(previous, color, scatter);
+            }
+        }
+    }
+
+    fn render_composite(&self, _context: &RenderContext) {
+        shader {
+            @pixel_shader
+            fn bloom_composite(input: VertexOutput) -> Vec4 {
+                let uv = input.texcoord;
+                let scene = sample_color(uv);
+                let bloom = sample_bloom(uv);
+
+                // Apply lens dirt
+                var dirt = vec3<f32>(0.0);
+                if lens_dirt_intensity > 0.0 {
+                    let dirt_sample = sample_lens_dirt(uv);
+                    dirt = bloom.rgb * dirt_sample.rgb * lens_dirt_intensity;
+                }
+
+                let final_color = scene.rgb + bloom.rgb * intensity + dirt;
+                return vec4<f32>(final_color, scene.a);
+            }
+        }
+    }
+}
+
+// ============================================================================
+// DEPTH OF FIELD EFFECT
+// ============================================================================
+
+/// DOF configuration for ENB
+pub struct ENBDepthOfField {
+    config: EffectConfig,
+
+    // Focus parameters
+    focus_distance: f32,
+    focus_range: f32,
+    auto_focus: bool,
+    auto_focus_speed: f32,
+    auto_focus_center: Vec2,
+    auto_focus_radius: f32,
+
+    // Bokeh parameters
+    bokeh_shape: BokehShape,
+    bokeh_size: f32,
+    bokeh_bias: f32,
+    bokeh_fringe: f32,
+    bokeh_highlights: f32,
+    bokeh_highlight_threshold: f32,
+
+    // Near/far blur
+    near_blur_start: f32,
+    near_blur_end: f32,
+    far_blur_start: f32,
+    far_blur_end: f32,
+
+    // Quality
+    quality_samples: u32,
+
+    // Resources
+    coc_texture: Option<ENBTexture>,
+    dof_near: Option<ENBTexture>,
+    dof_far: Option<ENBTexture>,
+    dof_combined: Option<ENBTexture>,
+
+    // State
+    current_focus_distance: f32,
+
+    // Shaders
+    coc_shader: Option<*mut ID3D11PixelShader>,
+    bokeh_shader: Option<*mut ID3D11PixelShader>,
+    composite_shader: Option<*mut ID3D11PixelShader>,
+    autofocus_shader: Option<*mut ID3D11ComputeShader>,
+}
+
+/// Bokeh shape types
+pub enum BokehShape {
+    Circle,
+    Hexagon,
+    Octagon,
+    Heart,
+    Star,
+    Custom(String),
+}
+
+impl ENBDepthOfField {
+    pub fn new() -> Self {
+        Self {
+            config: EffectConfig {
+                enabled: true,
+                quality: QualityLevel::High,
+                intensity: 1.0,
+                blend_mode: BlendMode::Replace,
+            },
+            focus_distance: 5.0,
+            focus_range: 2.0,
+            auto_focus: true,
+            auto_focus_speed: 2.0,
+            auto_focus_center: Vec2::new(0.5, 0.5),
+            auto_focus_radius: 0.1,
+            bokeh_shape: BokehShape::Hexagon,
+            bokeh_size: 4.0,
+            bokeh_bias: 0.5,
+            bokeh_fringe: 0.5,
+            bokeh_highlights: 1.0,
+            bokeh_highlight_threshold: 0.5,
+            near_blur_start: 0.0,
+            near_blur_end: 1.0,
+            far_blur_start: 10.0,
+            far_blur_end: 100.0,
+            quality_samples: 48,
+            coc_texture: None,
+            dof_near: None,
+            dof_far: None,
+            dof_combined: None,
+            current_focus_distance: 5.0,
+            coc_shader: None,
+            bokeh_shader: None,
+            composite_shader: None,
+            autofocus_shader: None,
+        }
+    }
+
+    /// Initialize DOF resources
+    pub fn initialize(&mut self, device: *mut ID3D11Device, width: u32, height: u32) -> Result<(), ENBError> {
+        // COC texture
+        self.coc_texture = Some(ENBTexture::create(
+            device,
+            width,
+            height,
+            DXGI_FORMAT_R16G16_FLOAT, // near and far COC
+            TextureFlags::RenderTarget
+        )?);
+
+        // Half-res DOF textures
+        self.dof_near = Some(ENBTexture::create(
+            device,
+            width / 2,
+            height / 2,
+            DXGI_FORMAT_R16G16B16A16_FLOAT,
+            TextureFlags::RenderTarget
+        )?);
+
+        self.dof_far = Some(ENBTexture::create(
+            device,
+            width / 2,
+            height / 2,
+            DXGI_FORMAT_R16G16B16A16_FLOAT,
+            TextureFlags::RenderTarget
+        )?);
+
+        // Combined result
+        self.dof_combined = Some(ENBTexture::create(
+            device,
+            width,
+            height,
+            DXGI_FORMAT_R16G16B16A16_FLOAT,
+            TextureFlags::RenderTarget
+        )?);
+
+        Ok(())
+    }
+
+    /// Render DOF
+    pub fn render(&mut self, context: &RenderContext) {
+        if !self.config.enabled {
+            return;
+        }
+
+        // Auto focus update
+        if self.auto_focus {
+            self.update_auto_focus(context);
+        }
+
+        // COC calculation
+        self.render_coc(context);
+
+        // Near field blur
+        self.render_near_field(context);
+
+        // Far field blur
+        self.render_far_field(context);
+
+        // Composite
+        self.render_composite(context);
+    }
+
+    fn update_auto_focus(&mut self, _context: &RenderContext) {
+        shader {
+            @compute_shader
+            fn autofocus(
+                @group(0) depth_texture: Texture2D<f32>,
+                @group(1) focus_buffer: RWStructuredBuffer<f32>,
+                @builtin(global_invocation_id) id: Vec3<u32>
+            ) {
+                // Sample depth at focus region
+                let center = auto_focus_center;
+                let radius = auto_focus_radius;
+
+                var depth_sum = 0.0;
+                var weight_sum = 0.0;
+
+                for i in 0..16 {
+                    let offset = POISSON_DISK_16[i] * radius;
+                    let uv = center + offset;
+                    let depth = linearize_depth(depth_texture.SampleLevel(uv, 0), near_plane, far_plane);
+                    let weight = 1.0 - length(offset) / radius;
+                    depth_sum += depth * weight;
+                    weight_sum += weight;
+                }
+
+                let target_focus = depth_sum / weight_sum;
+
+                // Smooth focus transition
+                let current = focus_buffer[0];
+                let new_focus = mix(current, target_focus, saturate(delta_time * auto_focus_speed));
+                focus_buffer[0] = new_focus;
+            }
+        }
+    }
+
+    fn render_coc(&self, _context: &RenderContext) {
+        shader {
+            @pixel_shader
+            fn calculate_coc(input: VertexOutput) -> Vec2 {
+                let uv = input.texcoord;
+                let depth = sample_depth(uv);
+                let linear_depth = linearize_depth(depth, near_plane, far_plane);
+
+                // Calculate signed COC
+                let focus = current_focus_distance;
+                let coc = (linear_depth - focus) / focus_range;
+
+                // Separate near and far COC
+                let near_coc = saturate(-coc) * bokeh_size;
+                let far_coc = saturate(coc) * bokeh_size;
+
+                return vec2<f32>(near_coc, far_coc);
+            }
+        }
+    }
+
+    fn render_near_field(&self, _context: &RenderContext) {
+        shader {
+            @pixel_shader
+            fn near_field_blur(input: VertexOutput) -> Vec4 {
+                let uv = input.texcoord;
+                let center_coc = sample_coc(uv).x;
+
+                if center_coc < 0.1 {
+                    return vec4<f32>(0.0);
+                }
+
+                var color = vec3<f32>(0.0);
+                var weight = 0.0;
+
+                // Sample bokeh pattern
+                for i in 0..quality_samples {
+                    let offset = get_bokeh_offset(i, quality_samples, bokeh_shape);
+                    let sample_uv = uv + offset * center_coc * texel_size;
+                    let sample_coc = sample_coc(sample_uv).x;
+
+                    // Only include samples that would affect this pixel
+                    if sample_coc > length(offset * center_coc) {
+                        let sample_color = sample_color(sample_uv).rgb;
+                        let sample_weight = saturate(sample_coc);
+
+                        // Highlight boosting
+                        let luma = luminance(sample_color);
+                        let highlight_weight = pow(saturate((luma - bokeh_highlight_threshold) * bokeh_highlights), 2.0);
+                        let w = sample_weight * (1.0 + highlight_weight);
+
+                        color += sample_color * w;
+                        weight += w;
+                    }
+                }
+
+                if weight > 0.0 {
+                    color /= weight;
+                }
+
+                return vec4<f32>(color, saturate(weight));
+            }
+
+            fn get_bokeh_offset(index: u32, count: u32, shape: BokehShape) -> Vec2 {
+                match shape {
+                    BokehShape::Circle => {
+                        let angle = f32(index) / f32(count) * TAU;
+                        let radius = sqrt(f32(index) / f32(count)); // Uniform distribution
+                        return vec2<f32>(cos(angle), sin(angle)) * radius;
+                    },
+                    BokehShape::Hexagon => {
+                        let sector = (index * 6) / count;
+                        let t = fract(f32(index * 6) / f32(count));
+                        let angle0 = f32(sector) * TAU / 6.0;
+                        let angle1 = f32(sector + 1) * TAU / 6.0;
+                        let p0 = vec2<f32>(cos(angle0), sin(angle0));
+                        let p1 = vec2<f32>(cos(angle1), sin(angle1));
+                        return mix(p0, p1, t) * sqrt(f32(index) / f32(count));
+                    },
+                    _ => {
+                        return POISSON_DISK_48[index];
+                    }
+                }
+            }
+        }
+    }
+
+    fn render_far_field(&self, _context: &RenderContext) {
+        shader {
+            @pixel_shader
+            fn far_field_blur(input: VertexOutput) -> Vec4 {
+                let uv = input.texcoord;
+                let center_coc = sample_coc(uv).y;
+
+                if center_coc < 0.1 {
+                    return sample_color(uv);
+                }
+
+                var color = vec3<f32>(0.0);
+                var weight = 0.0;
+
+                for i in 0..quality_samples {
+                    let offset = get_bokeh_offset(i, quality_samples, bokeh_shape);
+                    let sample_uv = uv + offset * center_coc * texel_size;
+                    let sample_color = sample_color(sample_uv).rgb;
+                    let sample_coc = sample_coc(sample_uv).y;
+
+                    let w = saturate(sample_coc / center_coc);
+
+                    // Chromatic aberration (fringing)
+                    if bokeh_fringe > 0.0 {
+                        let fringe_offset = offset * bokeh_fringe * texel_size;
+                        let r = sample_color(sample_uv + fringe_offset).r;
+                        let b = sample_color(sample_uv - fringe_offset).b;
+                        color += vec3<f32>(r, sample_color.g, b) * w;
+                    } else {
+                        color += sample_color * w;
+                    }
+
+                    weight += w;
+                }
+
+                color /= weight;
+                return vec4<f32>(color, 1.0);
+            }
+        }
+    }
+
+    fn render_composite(&self, _context: &RenderContext) {
+        shader {
+            @pixel_shader
+            fn dof_composite(input: VertexOutput) -> Vec4 {
+                let uv = input.texcoord;
+                let scene = sample_color(uv);
+                let coc = sample_coc(uv);
+                let near = sample_near_field(uv);
+                let far = sample_far_field(uv);
+
+                // Blend based on COC
+                var result = scene.rgb;
+
+                // Far field first
+                result = mix(result, far.rgb, saturate(coc.y));
+
+                // Near field on top
+                result = mix(result, near.rgb, near.a);
+
+                return vec4<f32>(result, scene.a);
+            }
+        }
+    }
+}
+
+// ============================================================================
+// TONEMAPPING EFFECT
+// ============================================================================
+
+/// Tonemapping configuration for ENB
+pub struct ENBTonemap {
+    config: EffectConfig,
+
+    // Tonemapper selection
+    tonemapper: TonemapOperator,
+
+    // Exposure
+    exposure: f32,
+    auto_exposure: bool,
+    adaptation_speed: f32,
+    min_exposure: f32,
+    max_exposure: f32,
+    key_value: f32,
+
+    // Tonemapper-specific parameters
+    aces_a: f32,
+    aces_b: f32,
+    aces_c: f32,
+    aces_d: f32,
+    aces_e: f32,
+
+    filmic_shoulder_strength: f32,
+    filmic_linear_strength: f32,
+    filmic_linear_angle: f32,
+    filmic_toe_strength: f32,
+    filmic_toe_numerator: f32,
+    filmic_toe_denominator: f32,
+    filmic_white_point: f32,
+
+    // Color grading
+    contrast: f32,
+    saturation: f32,
+    vibrance: f32,
+    shadows: Vec3,
+    midtones: Vec3,
+    highlights: Vec3,
+    color_filter: Vec3,
+    color_filter_intensity: f32,
+
+    // Resources
+    luminance_texture: Option<ENBTexture>,
+    luminance_history: Option<ENBTexture>,
+    lut_texture: Option<ENBTexture>,
+
+    // Shaders
+    luminance_shader: Option<*mut ID3D11ComputeShader>,
+    adaptation_shader: Option<*mut ID3D11ComputeShader>,
+    tonemap_shader: Option<*mut ID3D11PixelShader>,
+}
+
+/// Tonemapping operators
+pub enum TonemapOperator {
+    Linear,
+    Reinhard,
+    ReinhardExtended,
+    ACES,
+    ACESFitted,
+    Filmic,
+    Uncharted2,
+    AgX,
+    Khronos,
+    Custom,
+}
+
+impl ENBTonemap {
+    pub fn new() -> Self {
+        Self {
+            config: EffectConfig {
+                enabled: true,
+                quality: QualityLevel::High,
+                intensity: 1.0,
+                blend_mode: BlendMode::Replace,
+            },
+            tonemapper: TonemapOperator::ACESFitted,
+            exposure: 1.0,
+            auto_exposure: true,
+            adaptation_speed: 1.0,
+            min_exposure: 0.1,
+            max_exposure: 10.0,
+            key_value: 0.18,
+            aces_a: 2.51,
+            aces_b: 0.03,
+            aces_c: 2.43,
+            aces_d: 0.59,
+            aces_e: 0.14,
+            filmic_shoulder_strength: 0.22,
+            filmic_linear_strength: 0.30,
+            filmic_linear_angle: 0.10,
+            filmic_toe_strength: 0.20,
+            filmic_toe_numerator: 0.01,
+            filmic_toe_denominator: 0.30,
+            filmic_white_point: 11.2,
+            contrast: 1.0,
+            saturation: 1.0,
+            vibrance: 0.0,
+            shadows: Vec3::new(1.0, 1.0, 1.0),
+            midtones: Vec3::new(1.0, 1.0, 1.0),
+            highlights: Vec3::new(1.0, 1.0, 1.0),
+            color_filter: Vec3::new(1.0, 1.0, 1.0),
+            color_filter_intensity: 0.0,
+            luminance_texture: None,
+            luminance_history: None,
+            lut_texture: None,
+            luminance_shader: None,
+            adaptation_shader: None,
+            tonemap_shader: None,
+        }
+    }
+
+    /// Initialize tonemapping resources
+    pub fn initialize(&mut self, device: *mut ID3D11Device) -> Result<(), ENBError> {
+        // Luminance reduction texture (1x1 final)
+        self.luminance_texture = Some(ENBTexture::create(
+            device,
+            256,
+            256,
+            DXGI_FORMAT_R16_FLOAT,
+            TextureFlags::RenderTarget | TextureFlags::UAV | TextureFlags::Mipmaps
+        )?);
+
+        // History for adaptation
+        self.luminance_history = Some(ENBTexture::create(
+            device,
+            1,
+            1,
+            DXGI_FORMAT_R16_FLOAT,
+            TextureFlags::RenderTarget | TextureFlags::UAV
+        )?);
+
+        Ok(())
+    }
+
+    /// Render tonemapping
+    pub fn render(&self, context: &RenderContext) {
+        if !self.config.enabled {
+            return;
+        }
+
+        // Auto exposure
+        if self.auto_exposure {
+            self.compute_luminance(context);
+            self.adapt_exposure(context);
+        }
+
+        // Apply tonemapping
+        self.apply_tonemap(context);
+    }
+
+    fn compute_luminance(&self, _context: &RenderContext) {
+        shader {
+            @compute_shader(8, 8, 1)
+            fn luminance_reduction(
+                @group(0) color_texture: Texture2D<Vec4>,
+                @group(1) luminance_out: RWTexture2D<f32>,
+                @builtin(global_invocation_id) id: Vec3<u32>
+            ) {
+                let uv = (vec2<f32>(id.xy) + 0.5) / vec2<f32>(256.0, 256.0);
+                let color = color_texture.SampleLevel(linear_sampler, uv, 0).rgb;
+
+                // Calculate log luminance
+                let luma = luminance(color);
+                let log_luma = log(max(luma, 0.00001));
+
+                luminance_out[id.xy] = log_luma;
+            }
+        }
+    }
+
+    fn adapt_exposure(&self, _context: &RenderContext) {
+        shader {
+            @compute_shader(1, 1, 1)
+            fn exposure_adaptation(
+                @group(0) luminance_texture: Texture2D<f32>,
+                @group(1) history: RWTexture2D<f32>,
+                @group(2) exposure_out: RWStructuredBuffer<f32>
+            ) {
+                // Average log luminance
+                let avg_log_luma = luminance_texture.SampleLevel(linear_sampler, vec2<f32>(0.5), 8.0);
+                let avg_luma = exp(avg_log_luma);
+
+                // Previous exposure
+                let prev_luma = history[vec2<u32>(0, 0)];
+
+                // Adapt over time
+                let speed = adaptation_speed * delta_time;
+                let adapted_luma = prev_luma + (avg_luma - prev_luma) * saturate(speed);
+                history[vec2<u32>(0, 0)] = adapted_luma;
+
+                // Calculate exposure
+                let target_exposure = key_value / adapted_luma;
+                exposure_out[0] = clamp(target_exposure, min_exposure, max_exposure);
+            }
+        }
+    }
+
+    fn apply_tonemap(&self, _context: &RenderContext) {
+        shader {
+            @pixel_shader
+            fn tonemap(input: VertexOutput) -> Vec4 {
+                let uv = input.texcoord;
+                var color = sample_color(uv).rgb;
+
+                // Apply exposure
+                color *= exposure;
+
+                // Tonemapping
+                match tonemapper {
+                    TonemapOperator::Linear => {
+                        // No tonemapping
+                    },
+                    TonemapOperator::Reinhard => {
+                        color = color / (1.0 + color);
+                    },
+                    TonemapOperator::ReinhardExtended => {
+                        let white = 4.0;
+                        color = (color * (1.0 + color / (white * white))) / (1.0 + color);
+                    },
+                    TonemapOperator::ACES => {
+                        color = aces_tonemap(color);
+                    },
+                    TonemapOperator::ACESFitted => {
+                        color = aces_fitted(color);
+                    },
+                    TonemapOperator::Filmic => {
+                        color = filmic_tonemap(color);
+                    },
+                    TonemapOperator::Uncharted2 => {
+                        color = uncharted2_tonemap(color);
+                    },
+                    TonemapOperator::AgX => {
+                        color = agx_tonemap(color);
+                    },
+                    _ => {}
+                }
+
+                // Color grading
+                color = apply_color_grading(color);
+
+                // Convert to sRGB
+                color = linear_to_srgb(color);
+
+                return vec4<f32>(color, 1.0);
+            }
+
+            fn aces_tonemap(color: Vec3) -> Vec3 {
+                // ACES RRT + ODT
+                let m1 = mat3x3<f32>(
+                    0.59719, 0.35458, 0.04823,
+                    0.07600, 0.90834, 0.01566,
+                    0.02840, 0.13383, 0.83777
+                );
+                let m2 = mat3x3<f32>(
+                    1.60475, -0.53108, -0.07367,
+                    -0.10208, 1.10813, -0.00605,
+                    -0.00327, -0.07276, 1.07602
+                );
+
+                var v = m1 * color;
+                let a = v * (v + 0.0245786) - 0.000090537;
+                let b = v * (0.983729 * v + 0.4329510) + 0.238081;
+                return m2 * (a / b);
+            }
+
+            fn aces_fitted(color: Vec3) -> Vec3 {
+                // Stephen Hill's ACES approximation
+                let a = aces_a;
+                let b = aces_b;
+                let c = aces_c;
+                let d = aces_d;
+                let e = aces_e;
+
+                return saturate((color * (a * color + b)) / (color * (c * color + d) + e));
+            }
+
+            fn filmic_tonemap(color: Vec3) -> Vec3 {
+                let A = filmic_shoulder_strength;
+                let B = filmic_linear_strength;
+                let C = filmic_linear_angle;
+                let D = filmic_toe_strength;
+                let E = filmic_toe_numerator;
+                let F = filmic_toe_denominator;
+                let W = filmic_white_point;
+
+                fn curve(x: Vec3) -> Vec3 {
+                    return ((x * (A * x + C * B) + D * E) / (x * (A * x + B) + D * F)) - E / F;
+                }
+
+                let curr = curve(color);
+                let white = curve(vec3<f32>(W));
+                return curr / white;
+            }
+
+            fn uncharted2_tonemap(color: Vec3) -> Vec3 {
+                let A = 0.15; // Shoulder Strength
+                let B = 0.50; // Linear Strength
+                let C = 0.10; // Linear Angle
+                let D = 0.20; // Toe Strength
+                let E = 0.02; // Toe Numerator
+                let F = 0.30; // Toe Denominator
+                let W = 11.2; // Linear White Point
+
+                fn tonemap_partial(x: Vec3) -> Vec3 {
+                    return ((x * (A * x + C * B) + D * E) / (x * (A * x + B) + D * F)) - E / F;
+                }
+
+                let curr = tonemap_partial(color * 2.0);
+                let white = tonemap_partial(vec3<f32>(W));
+                return curr / white;
+            }
+
+            fn agx_tonemap(color: Vec3) -> Vec3 {
+                // AgX base
+                let agx_mat = mat3x3<f32>(
+                    0.842479062253094, 0.0423282422610123, 0.0423756549057051,
+                    0.0784335999999992, 0.878468636469772, 0.0784336,
+                    0.0792237451477643, 0.0791661274605434, 0.879142973793104
+                );
+
+                var val = agx_mat * color;
+                val = clamp(log2(val), -10.0, 6.5);
+                val = (val + 10.0) / 16.5;
+
+                // Apply sigmoid
+                let x2 = val * val;
+                let x4 = x2 * x2;
+                val = 15.5 * x4 * x2 - 40.14 * x4 * val + 31.96 * x4 - 6.868 * x2 * val + 0.4298 * x2 + 0.1191 * val - 0.00232;
+
+                // AgX inverse
+                let agx_inv = mat3x3<f32>(
+                    1.19687900512017, -0.0528968517574562, -0.0529716355144438,
+                    -0.0980208811401368, 1.15190312990417, -0.0980434501171241,
+                    -0.0990297440797205, -0.0989611768448433, 1.15107367264116
+                );
+
+                return agx_inv * val;
+            }
+
+            fn apply_color_grading(color: Vec3) -> Vec3 {
+                var result = color;
+
+                // Contrast
+                result = (result - 0.5) * contrast + 0.5;
+
+                // Saturation/Vibrance
+                let luma = luminance(result);
+                let saturation_amount = mix(1.0, saturation, 1.0 + vibrance * (1.0 - abs(luma - 0.5) * 2.0));
+                result = mix(vec3<f32>(luma), result, saturation_amount);
+
+                // Lift/Gamma/Gain (shadows/midtones/highlights)
+                let shadow_weight = 1.0 - saturate(luma * 2.0);
+                let highlight_weight = saturate((luma - 0.5) * 2.0);
+                let midtone_weight = 1.0 - shadow_weight - highlight_weight;
+
+                result *= shadows * shadow_weight + midtones * midtone_weight + highlights * highlight_weight;
+
+                // Color filter
+                result = mix(result, result * color_filter, color_filter_intensity);
+
+                return result;
+            }
+        }
+    }
+}
+
+// ============================================================================
+// EFFECT SYSTEM MANAGER
+// ============================================================================
+
+/// Effect system manager
+pub struct ENBEffectSystem {
+    ambient_occlusion: ENBAmbientOcclusion,
+    screen_space_reflections: ENBScreenSpaceReflections,
+    bloom: ENBBloom,
+    depth_of_field: ENBDepthOfField,
+    tonemap: ENBTonemap,
+
+    // Effect order
+    effect_order: Vec<EffectType>,
+
+    // Resources
+    device: *mut ID3D11Device,
+    context: *mut ID3D11DeviceContext,
+
+    // State
+    initialized: bool,
+    render_width: u32,
+    render_height: u32,
+}
+
+/// Effect types
+pub enum EffectType {
+    AmbientOcclusion,
+    ScreenSpaceReflections,
+    Bloom,
+    DepthOfField,
+    Tonemap,
+}
+
+impl ENBEffectSystem {
+    pub fn new() -> Self {
+        Self {
+            ambient_occlusion: ENBAmbientOcclusion::new(),
+            screen_space_reflections: ENBScreenSpaceReflections::new(),
+            bloom: ENBBloom::new(),
+            depth_of_field: ENBDepthOfField::new(),
+            tonemap: ENBTonemap::new(),
+            effect_order: vec![
+                EffectType::AmbientOcclusion,
+                EffectType::ScreenSpaceReflections,
+                EffectType::DepthOfField,
+                EffectType::Bloom,
+                EffectType::Tonemap,
+            ],
+            device: std::ptr::null_mut(),
+            context: std::ptr::null_mut(),
+            initialized: false,
+            render_width: 0,
+            render_height: 0,
+        }
+    }
+
+    /// Initialize all effects
+    pub fn initialize(&mut self, device: *mut ID3D11Device, width: u32, height: u32) -> Result<(), ENBError> {
+        self.device = device;
+        self.render_width = width;
+        self.render_height = height;
+
+        self.ambient_occlusion.initialize(device, width, height)?;
+        self.screen_space_reflections.initialize(device, width, height)?;
+        self.bloom.initialize(device, width, height)?;
+        self.depth_of_field.initialize(device, width, height)?;
+        self.tonemap.initialize(device)?;
+
+        self.initialized = true;
+        Ok(())
+    }
+
+    /// Render all effects in order
+    pub fn render(&mut self, context: &RenderContext) {
+        if !self.initialized {
+            return;
+        }
+
+        for effect_type in &self.effect_order {
+            match effect_type {
+                EffectType::AmbientOcclusion => self.ambient_occlusion.render(context),
+                EffectType::ScreenSpaceReflections => self.screen_space_reflections.render(context),
+                EffectType::Bloom => self.bloom.render(context),
+                EffectType::DepthOfField => self.depth_of_field.render(context),
+                EffectType::Tonemap => self.tonemap.render(context),
+            }
+        }
+    }
+
+    /// Handle resize
+    pub fn on_resize(&mut self, width: u32, height: u32) -> Result<(), ENBError> {
+        if width == self.render_width && height == self.render_height {
+            return Ok(());
+        }
+
+        self.render_width = width;
+        self.render_height = height;
+
+        // Reinitialize effects with new resolution
+        self.ambient_occlusion.initialize(self.device, width, height)?;
+        self.screen_space_reflections.initialize(self.device, width, height)?;
+        self.bloom.initialize(self.device, width, height)?;
+        self.depth_of_field.initialize(self.device, width, height)?;
+
+        Ok(())
+    }
+}
+
+// ============================================================================
+// CONSTANTS
+// ============================================================================
+
+const TAU: f32 = 6.283185307179586;
+
+const SSAO_KERNEL: [Vec3; 64] = [
+    // Pre-computed hemisphere kernel samples
+    Vec3::new(0.5381, 0.1856, 0.4319),
+    Vec3::new(0.1379, 0.2486, 0.4430),
+    Vec3::new(0.3371, 0.5679, 0.0057),
+    // ... (remaining 61 samples)
+];
+
+const POISSON_DISK_16: [Vec2; 16] = [
+    Vec2::new(-0.94201624, -0.39906216),
+    Vec2::new(0.94558609, -0.76890725),
+    Vec2::new(-0.094184101, -0.92938870),
+    Vec2::new(0.34495938, 0.29387760),
+    // ... (remaining 12 samples)
+];
+
+const POISSON_DISK_48: [Vec2; 48] = [
+    Vec2::new(-0.5, -0.5),
+    // ... (remaining 47 samples)
+];
+
+const GAUSSIAN_WEIGHTS: [f32; 5] = [0.227027, 0.194946, 0.121621, 0.054054, 0.016216];
+
+const DXGI_FORMAT_R8_UNORM: u32 = 61;
+const DXGI_FORMAT_R8G8B8A8_UNORM: u32 = 28;
+const DXGI_FORMAT_R16_FLOAT: u32 = 54;
+const DXGI_FORMAT_R16G16_FLOAT: u32 = 34;
+const DXGI_FORMAT_R16G16B16A16_FLOAT: u32 = 10;
+const DXGI_FORMAT_R11G11B10_FLOAT: u32 = 26;
+const DXGI_FORMAT_R32_FLOAT: u32 = 41;
+
+// ============================================================================
+// MODULE EXPORTS
+// ============================================================================
+
+pub use self::{
+    // Config types
+    EffectConfig,
+    BlendMode,
+    EffectPass,
+    EffectResources,
+
+    // Effects
+    ENBAmbientOcclusion,
+    ENBScreenSpaceReflections,
+    ENBBloom,
+    ENBDepthOfField,
+    ENBTonemap,
+
+    // Enums
+    BokehShape,
+    TonemapOperator,
+    EffectType,
+
+    // System
+    ENBEffectSystem,
+};

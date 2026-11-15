@@ -1,0 +1,1817 @@
+// =============================================================================
+// PRISM: Atmospheric Rendering Shaders
+// =============================================================================
+// Advanced atmospheric scattering, volumetric clouds, fog, and sky rendering
+// Part of the BUILD-UNIVERSE Rendering Stack
+// =============================================================================
+
+@module prism::atmosphere
+@version 1.0.0
+@author BUILD Team
+
+// =============================================================================
+// ATMOSPHERIC DATA STRUCTURES
+// =============================================================================
+
+/// Atmosphere profile parameters
+struct AtmosphereProfile {
+    // Rayleigh scattering
+    rayleigh_density_exp_scale: f32,          // Exponential density falloff
+    rayleigh_scattering: vec3,                 // Scattering coefficients RGB
+
+    // Mie scattering (aerosols)
+    mie_density_exp_scale: f32,
+    mie_scattering: vec3,
+    mie_absorption: vec3,
+    mie_phase_g: f32,                          // Asymmetry parameter
+
+    // Ozone absorption
+    ozone_absorption: vec3,
+    ozone_layer_altitude: f32,
+    ozone_layer_width: f32,
+
+    // Planet parameters
+    planet_radius: f32,                        // km
+    atmosphere_height: f32,                    // km above surface
+
+    // Sun parameters
+    sun_angular_radius: f32,                   // radians
+    sun_intensity: f32,
+}
+
+impl AtmosphereProfile {
+    /// Earth-like atmosphere preset
+    pub fn earth() -> Self {
+        Self {
+            rayleigh_density_exp_scale: -1.0 / 8.0,
+            rayleigh_scattering: vec3(5.802e-6, 13.558e-6, 33.1e-6),
+
+            mie_density_exp_scale: -1.0 / 1.2,
+            mie_scattering: vec3(3.996e-6, 3.996e-6, 3.996e-6),
+            mie_absorption: vec3(4.4e-6, 4.4e-6, 4.4e-6),
+            mie_phase_g: 0.8,
+
+            ozone_absorption: vec3(0.65e-6, 1.881e-6, 0.085e-6),
+            ozone_layer_altitude: 25.0,
+            ozone_layer_width: 15.0,
+
+            planet_radius: 6360.0,
+            atmosphere_height: 100.0,
+
+            sun_angular_radius: 0.00935 / 2.0,
+            sun_intensity: 20.0,
+        }
+    }
+
+    /// Mars-like atmosphere
+    pub fn mars() -> Self {
+        Self {
+            rayleigh_density_exp_scale: -1.0 / 11.0,
+            rayleigh_scattering: vec3(19.918e-6, 13.57e-6, 5.75e-6),
+
+            mie_density_exp_scale: -1.0 / 4.0,
+            mie_scattering: vec3(21e-6, 21e-6, 21e-6),
+            mie_absorption: vec3(4.4e-6, 4.4e-6, 4.4e-6),
+            mie_phase_g: 0.65,
+
+            ozone_absorption: vec3(0.0, 0.0, 0.0),
+            ozone_layer_altitude: 30.0,
+            ozone_layer_width: 10.0,
+
+            planet_radius: 3389.5,
+            atmosphere_height: 80.0,
+
+            sun_angular_radius: 0.00935 / 2.0 * 0.66,
+            sun_intensity: 9.0,
+        }
+    }
+
+    /// Alien purple sky
+    pub fn alien_purple() -> Self {
+        Self {
+            rayleigh_density_exp_scale: -1.0 / 6.0,
+            rayleigh_scattering: vec3(33.1e-6, 5.802e-6, 13.558e-6),
+
+            mie_density_exp_scale: -1.0 / 2.0,
+            mie_scattering: vec3(8e-6, 4e-6, 12e-6),
+            mie_absorption: vec3(2e-6, 2e-6, 2e-6),
+            mie_phase_g: 0.7,
+
+            ozone_absorption: vec3(0.5e-6, 1.0e-6, 0.2e-6),
+            ozone_layer_altitude: 20.0,
+            ozone_layer_width: 20.0,
+
+            planet_radius: 8000.0,
+            atmosphere_height: 150.0,
+
+            sun_angular_radius: 0.015,
+            sun_intensity: 15.0,
+        }
+    }
+}
+
+/// Volumetric cloud parameters
+struct CloudProfile {
+    // Coverage
+    coverage: f32,                             // 0-1 cloud coverage
+    cloud_type: f32,                           // 0=stratus, 1=cumulus
+
+    // Layer parameters
+    layer_bottom: f32,                         // km
+    layer_top: f32,                            // km
+
+    // Density
+    density_base: f32,
+    density_multiplier: f32,
+
+    // Shape
+    detail_scale: f32,
+    erosion_strength: f32,
+
+    // Lighting
+    ambient_light: vec3,
+    sun_light: vec3,
+    powder_strength: f32,
+    silver_lining_intensity: f32,
+    silver_lining_spread: f32,
+
+    // Animation
+    wind_direction: vec3,
+    wind_speed: f32,
+
+    // Quality
+    max_steps: i32,
+    light_steps: i32,
+}
+
+impl CloudProfile {
+    pub fn default() -> Self {
+        Self {
+            coverage: 0.5,
+            cloud_type: 0.5,
+
+            layer_bottom: 1.5,
+            layer_top: 4.0,
+
+            density_base: 0.02,
+            density_multiplier: 1.0,
+
+            detail_scale: 0.3,
+            erosion_strength: 0.3,
+
+            ambient_light: vec3(0.4, 0.5, 0.6),
+            sun_light: vec3(1.0, 0.95, 0.9),
+            powder_strength: 0.5,
+            silver_lining_intensity: 0.8,
+            silver_lining_spread: 0.3,
+
+            wind_direction: vec3(1.0, 0.0, 0.3).normalize(),
+            wind_speed: 0.01,
+
+            max_steps: 64,
+            light_steps: 6,
+        }
+    }
+
+    pub fn stormy() -> Self {
+        Self {
+            coverage: 0.85,
+            cloud_type: 0.8,
+
+            layer_bottom: 0.8,
+            layer_top: 5.0,
+
+            density_base: 0.05,
+            density_multiplier: 2.0,
+
+            detail_scale: 0.4,
+            erosion_strength: 0.2,
+
+            ambient_light: vec3(0.15, 0.18, 0.22),
+            sun_light: vec3(0.3, 0.3, 0.35),
+            powder_strength: 0.3,
+            silver_lining_intensity: 1.2,
+            silver_lining_spread: 0.15,
+
+            wind_direction: vec3(1.0, 0.0, 0.0),
+            wind_speed: 0.05,
+
+            max_steps: 96,
+            light_steps: 8,
+        }
+    }
+
+    pub fn clear() -> Self {
+        Self {
+            coverage: 0.15,
+            cloud_type: 0.3,
+
+            layer_bottom: 2.0,
+            layer_top: 3.5,
+
+            density_base: 0.01,
+            density_multiplier: 0.5,
+
+            detail_scale: 0.25,
+            erosion_strength: 0.5,
+
+            ambient_light: vec3(0.6, 0.7, 0.85),
+            sun_light: vec3(1.0, 0.98, 0.95),
+            powder_strength: 0.6,
+            silver_lining_intensity: 0.5,
+            silver_lining_spread: 0.4,
+
+            wind_direction: vec3(0.7, 0.0, 0.7).normalize(),
+            wind_speed: 0.005,
+
+            max_steps: 48,
+            light_steps: 4,
+        }
+    }
+}
+
+/// Fog parameters
+struct FogProfile {
+    fog_type: FogType,
+
+    // Color
+    inscatter_color: vec3,
+    extinction_color: vec3,
+
+    // Density
+    density: f32,
+    height_falloff: f32,
+    base_height: f32,
+    max_opacity: f32,
+
+    // Distance fog
+    start_distance: f32,
+    end_distance: f32,
+
+    // Volumetric
+    volumetric_enabled: bool,
+    volumetric_intensity: f32,
+    volumetric_anisotropy: f32,
+
+    // Animation
+    noise_scale: f32,
+    noise_speed: f32,
+}
+
+enum FogType {
+    Linear,
+    Exponential,
+    ExponentialSquared,
+    HeightFog,
+    Volumetric,
+}
+
+impl FogProfile {
+    pub fn default() -> Self {
+        Self {
+            fog_type: FogType::HeightFog,
+
+            inscatter_color: vec3(0.7, 0.8, 0.9),
+            extinction_color: vec3(0.6, 0.7, 0.8),
+
+            density: 0.01,
+            height_falloff: 0.1,
+            base_height: 0.0,
+            max_opacity: 0.95,
+
+            start_distance: 10.0,
+            end_distance: 1000.0,
+
+            volumetric_enabled: true,
+            volumetric_intensity: 1.0,
+            volumetric_anisotropy: 0.6,
+
+            noise_scale: 0.01,
+            noise_speed: 0.1,
+        }
+    }
+}
+
+// =============================================================================
+// ATMOSPHERE SHADER - BRUNETON MODEL
+// =============================================================================
+
+const ATMOSPHERE_SHADER: &str = r#"
+//-----------------------------------------------------------------------------
+// Precomputed Atmospheric Scattering (Bruneton 2017)
+//-----------------------------------------------------------------------------
+
+#define PI 3.14159265359
+#define TRANSMITTANCE_TEXTURE_WIDTH 256
+#define TRANSMITTANCE_TEXTURE_HEIGHT 64
+#define SCATTERING_TEXTURE_R_SIZE 32
+#define SCATTERING_TEXTURE_MU_SIZE 128
+#define SCATTERING_TEXTURE_MU_S_SIZE 32
+#define SCATTERING_TEXTURE_NU_SIZE 8
+#define IRRADIANCE_TEXTURE_WIDTH 64
+#define IRRADIANCE_TEXTURE_HEIGHT 16
+
+// Atmosphere uniforms
+cbuffer AtmosphereParams : register(b0) {
+    float3 rayleigh_scattering;
+    float rayleigh_density_exp_scale;
+
+    float3 mie_scattering;
+    float mie_density_exp_scale;
+
+    float3 mie_absorption;
+    float mie_phase_g;
+
+    float3 ozone_absorption;
+    float ozone_layer_altitude;
+    float ozone_layer_width;
+
+    float planet_radius;
+    float atmosphere_height;
+    float sun_angular_radius;
+    float sun_intensity;
+
+    float3 sun_direction;
+    float exposure;
+
+    float3 camera_position;
+    float time;
+}
+
+// Textures
+Texture2D<float4> transmittance_lut : register(t0);
+Texture3D<float4> scattering_lut : register(t1);
+Texture2D<float4> irradiance_lut : register(t2);
+SamplerState linear_sampler : register(s0);
+
+// Utility functions
+float ClampCosine(float mu) {
+    return clamp(mu, -1.0, 1.0);
+}
+
+float ClampDistance(float d) {
+    return max(d, 0.0);
+}
+
+float ClampRadius(float r) {
+    return clamp(r, planet_radius, planet_radius + atmosphere_height);
+}
+
+float SafeSqrt(float a) {
+    return sqrt(max(a, 0.0));
+}
+
+// Distance to top of atmosphere
+float DistanceToTopAtmosphereBoundary(float r, float mu) {
+    float discriminant = r * r * (mu * mu - 1.0) +
+                         (planet_radius + atmosphere_height) * (planet_radius + atmosphere_height);
+    return ClampDistance(-r * mu + SafeSqrt(discriminant));
+}
+
+// Distance to ground
+float DistanceToBottomAtmosphereBoundary(float r, float mu) {
+    float discriminant = r * r * (mu * mu - 1.0) + planet_radius * planet_radius;
+    return ClampDistance(-r * mu - SafeSqrt(discriminant));
+}
+
+// Check if ray intersects ground
+bool RayIntersectsGround(float r, float mu) {
+    return mu < 0.0 && r * r * (mu * mu - 1.0) + planet_radius * planet_radius >= 0.0;
+}
+
+// Rayleigh phase function
+float RayleighPhaseFunction(float mu) {
+    return 3.0 / (16.0 * PI) * (1.0 + mu * mu);
+}
+
+// Mie phase function (Henyey-Greenstein)
+float MiePhaseFunction(float g, float mu) {
+    float g2 = g * g;
+    return 3.0 / (8.0 * PI) * (1.0 - g2) * (1.0 + mu * mu) /
+           ((2.0 + g2) * pow(1.0 + g2 - 2.0 * g * mu, 1.5));
+}
+
+// Density at altitude for exponential atmosphere
+float GetLayerDensity(float exp_scale, float altitude) {
+    return exp(exp_scale * altitude);
+}
+
+// Ozone density profile (tent function)
+float GetOzoneDensity(float altitude) {
+    float center = ozone_layer_altitude;
+    float width = ozone_layer_width;
+    return max(0.0, 1.0 - abs(altitude - center) / width);
+}
+
+// Transmittance LUT coordinates
+float2 GetTransmittanceTextureUvFromRMu(float r, float mu) {
+    float H = sqrt((planet_radius + atmosphere_height) * (planet_radius + atmosphere_height) -
+                   planet_radius * planet_radius);
+    float rho = SafeSqrt(r * r - planet_radius * planet_radius);
+
+    float d = DistanceToTopAtmosphereBoundary(r, mu);
+    float d_min = (planet_radius + atmosphere_height) - r;
+    float d_max = rho + H;
+    float x_mu = (d - d_min) / (d_max - d_min);
+    float x_r = rho / H;
+
+    return float2(x_mu, x_r);
+}
+
+// Sample transmittance LUT
+float3 GetTransmittanceToTopAtmosphereBoundary(float r, float mu) {
+    float2 uv = GetTransmittanceTextureUvFromRMu(r, mu);
+    return transmittance_lut.SampleLevel(linear_sampler, uv, 0).rgb;
+}
+
+// Get transmittance between two points
+float3 GetTransmittance(float r, float mu, float d, bool ray_r_mu_intersects_ground) {
+    float r_d = ClampRadius(sqrt(d * d + 2.0 * r * mu * d + r * r));
+    float mu_d = ClampCosine((r * mu + d) / r_d);
+
+    if (ray_r_mu_intersects_ground) {
+        return min(
+            GetTransmittanceToTopAtmosphereBoundary(r_d, -mu_d) /
+            GetTransmittanceToTopAtmosphereBoundary(r, -mu),
+            1.0
+        );
+    } else {
+        return min(
+            GetTransmittanceToTopAtmosphereBoundary(r, mu) /
+            GetTransmittanceToTopAtmosphereBoundary(r_d, mu_d),
+            1.0
+        );
+    }
+}
+
+// Scattering LUT coordinates
+float4 GetScatteringTextureUvwzFromRMuMuSNu(float r, float mu, float mu_s, float nu,
+                                             bool ray_r_mu_intersects_ground) {
+    float H = sqrt((planet_radius + atmosphere_height) * (planet_radius + atmosphere_height) -
+                   planet_radius * planet_radius);
+    float rho = SafeSqrt(r * r - planet_radius * planet_radius);
+    float u_r = rho / H;
+
+    float r_mu = r * mu;
+    float discriminant = r_mu * r_mu - r * r + planet_radius * planet_radius;
+    float u_mu;
+    if (ray_r_mu_intersects_ground) {
+        float d = -r_mu - SafeSqrt(discriminant);
+        float d_min = r - planet_radius;
+        float d_max = rho;
+        u_mu = 0.5 - 0.5 * (d_max == d_min ? 0.0 : (d - d_min) / (d_max - d_min));
+    } else {
+        float d = -r_mu + SafeSqrt(discriminant + H * H);
+        float d_min = (planet_radius + atmosphere_height) - r;
+        float d_max = rho + H;
+        u_mu = 0.5 + 0.5 * (d - d_min) / (d_max - d_min);
+    }
+
+    float d = DistanceToTopAtmosphereBoundary(planet_radius, mu_s);
+    float d_min = planet_radius + atmosphere_height - planet_radius;
+    float d_max = H;
+    float a = (d - d_min) / (d_max - d_min);
+    float u_mu_s = max(1.0 - a / (1.0 + a), 0.0) / (1.0 + (1.0 - a) / (1.0 + a));
+
+    float u_nu = (nu + 1.0) / 2.0;
+
+    return float4(u_nu, u_mu_s, u_mu, u_r);
+}
+
+// Sample scattering LUT
+float3 GetScattering(float r, float mu, float mu_s, float nu,
+                     bool ray_r_mu_intersects_ground) {
+    float4 uvwz = GetScatteringTextureUvwzFromRMuMuSNu(r, mu, mu_s, nu, ray_r_mu_intersects_ground);
+
+    float tex_coord_x = uvwz.x * float(SCATTERING_TEXTURE_NU_SIZE - 1);
+    float tex_x = floor(tex_coord_x);
+    float lerp_factor = tex_coord_x - tex_x;
+
+    float3 uvw0 = float3((tex_x + uvwz.y) / float(SCATTERING_TEXTURE_NU_SIZE),
+                         uvwz.z, uvwz.w);
+    float3 uvw1 = float3((tex_x + 1.0 + uvwz.y) / float(SCATTERING_TEXTURE_NU_SIZE),
+                         uvwz.z, uvwz.w);
+
+    return lerp(scattering_lut.SampleLevel(linear_sampler, uvw0, 0).rgb,
+                scattering_lut.SampleLevel(linear_sampler, uvw1, 0).rgb,
+                lerp_factor);
+}
+
+// Get sky radiance
+float3 GetSkyRadiance(float3 camera, float3 view_ray, float shadow_length,
+                      float3 sun_direction, out float3 transmittance) {
+    float r = length(camera);
+    float rmu = dot(camera, view_ray);
+    float distance_to_top = DistanceToTopAtmosphereBoundary(r, rmu / r);
+
+    float mu = rmu / r;
+    float mu_s = dot(camera, sun_direction) / r;
+    float nu = dot(view_ray, sun_direction);
+
+    bool ray_r_mu_intersects_ground = RayIntersectsGround(r, mu);
+
+    transmittance = ray_r_mu_intersects_ground ?
+                    float3(0.0, 0.0, 0.0) :
+                    GetTransmittanceToTopAtmosphereBoundary(r, mu);
+
+    float3 scattering = GetScattering(r, mu, mu_s, nu, ray_r_mu_intersects_ground);
+
+    // Apply phase functions
+    float3 rayleigh = scattering * RayleighPhaseFunction(nu);
+    float3 mie = scattering * MiePhaseFunction(mie_phase_g, nu);
+
+    return (rayleigh + mie) * sun_intensity;
+}
+
+// Get sun luminance
+float3 GetSunLuminance(float3 camera, float3 view_ray, float3 sun_direction) {
+    float r = length(camera);
+    float mu_s = dot(camera, sun_direction) / r;
+
+    // Sun disc
+    float cos_theta = dot(view_ray, sun_direction);
+    if (cos_theta > cos(sun_angular_radius)) {
+        float3 transmittance = GetTransmittanceToTopAtmosphereBoundary(r, mu_s);
+        return transmittance * sun_intensity * 1000.0; // Sun is very bright
+    }
+
+    return float3(0.0, 0.0, 0.0);
+}
+
+// Main sky pixel shader
+struct SkyVSOutput {
+    float4 position : SV_POSITION;
+    float3 view_ray : TEXCOORD0;
+};
+
+float4 SkyPS(SkyVSOutput input) : SV_TARGET {
+    float3 view_ray = normalize(input.view_ray);
+    float3 camera = camera_position + float3(0, planet_radius, 0);
+
+    float3 transmittance;
+    float3 radiance = GetSkyRadiance(camera, view_ray, 0.0, sun_direction, transmittance);
+
+    // Add sun disc
+    radiance += GetSunLuminance(camera, view_ray, sun_direction);
+
+    // Tone mapping
+    radiance = 1.0 - exp(-radiance * exposure);
+
+    return float4(radiance, 1.0);
+}
+"#;
+
+// =============================================================================
+// VOLUMETRIC CLOUD SHADER
+// =============================================================================
+
+const VOLUMETRIC_CLOUD_SHADER: &str = r#"
+//-----------------------------------------------------------------------------
+// Volumetric Clouds - GPU Pro 7 / Horizon Zero Dawn Style
+//-----------------------------------------------------------------------------
+
+#define PI 3.14159265359
+#define CLOUD_STEPS 64
+#define LIGHT_STEPS 6
+
+cbuffer CloudParams : register(b0) {
+    float coverage;
+    float cloud_type;
+    float layer_bottom;
+    float layer_top;
+
+    float density_base;
+    float density_multiplier;
+    float detail_scale;
+    float erosion_strength;
+
+    float3 ambient_light;
+    float powder_strength;
+
+    float3 sun_light;
+    float silver_lining_intensity;
+    float silver_lining_spread;
+
+    float3 wind_direction;
+    float wind_speed;
+
+    float3 sun_direction;
+    float time;
+
+    float3 camera_position;
+    float planet_radius;
+
+    float atmosphere_height;
+    int max_steps;
+    int light_steps;
+    float _padding;
+}
+
+Texture3D<float> base_noise : register(t0);       // Worley-Perlin base shape
+Texture3D<float> detail_noise : register(t1);     // Worley detail
+Texture2D<float> weather_map : register(t2);       // Coverage/type/precipitation
+Texture2D<float> curl_noise : register(t3);        // Curl noise for wispy details
+SamplerState trilinear_sampler : register(s0);
+
+// Height gradient for cloud type shaping
+float GetHeightGradient(float height, float cloud_type) {
+    // Stratus: flat bottom, flat top
+    float4 stratus = float4(0.0, 0.1, 0.2, 0.3);
+    // Cumulus: round bottom, fluffy top
+    float4 cumulus = float4(0.0, 0.25, 0.45, 0.65);
+    // Cumulonimbus: tall anvil shape
+    float4 cumulonimbus = float4(0.0, 0.15, 0.7, 0.95);
+
+    float4 gradient = lerp(lerp(stratus, cumulus, saturate(cloud_type * 2.0)),
+                           cumulonimbus, saturate(cloud_type * 2.0 - 1.0));
+
+    return smoothstep(gradient.x, gradient.y, height) -
+           smoothstep(gradient.z, gradient.w, height);
+}
+
+// Sample base cloud shape
+float SampleCloudDensity(float3 position, float height_fraction, float lod) {
+    // Weather map lookup
+    float2 weather_uv = position.xz * 0.00002 + 0.5;
+    float3 weather = weather_map.SampleLevel(trilinear_sampler, weather_uv, 0).rgb;
+    float local_coverage = weather.r;
+    float local_type = weather.g;
+    float precipitation = weather.b;
+
+    // Early out if no coverage
+    if (local_coverage < 0.01) return 0.0;
+
+    // Animate position with wind
+    float3 animated_pos = position + wind_direction * wind_speed * time * 1000.0;
+
+    // Base shape noise
+    float3 base_uv = animated_pos * 0.00003;
+    float base_shape = base_noise.SampleLevel(trilinear_sampler, base_uv, lod).r;
+
+    // Height gradient
+    float height_gradient = GetHeightGradient(height_fraction,
+                                               lerp(cloud_type, local_type, 0.5));
+
+    // Coverage remapping
+    float coverage_remap = saturate(coverage * local_coverage);
+    float base_cloud = saturate(Remap(base_shape * height_gradient,
+                                       1.0 - coverage_remap, 1.0, 0.0, 1.0));
+
+    // Detail erosion (skip for distant samples)
+    if (lod < 1.0 && base_cloud > 0.01) {
+        float3 detail_uv = animated_pos * 0.0003 * detail_scale;
+        float detail = detail_noise.SampleLevel(trilinear_sampler, detail_uv, lod).r;
+
+        // Curl noise offset for wispy effect
+        float2 curl_uv = animated_pos.xz * 0.0001;
+        float2 curl = curl_noise.SampleLevel(trilinear_sampler, curl_uv, 0).rg * 2.0 - 1.0;
+        detail_uv.xz += curl * 0.1;
+
+        // Erode edges more at top of clouds
+        float erosion = erosion_strength * (1.0 - height_fraction * 0.5);
+        base_cloud = saturate(Remap(base_cloud, erosion * detail, 1.0, 0.0, 1.0));
+    }
+
+    return base_cloud * density_base * density_multiplier;
+}
+
+// Remap utility
+float Remap(float value, float old_min, float old_max, float new_min, float new_max) {
+    return new_min + (value - old_min) / (old_max - old_min) * (new_max - new_min);
+}
+
+// Henyey-Greenstein phase function
+float HenyeyGreenstein(float cos_theta, float g) {
+    float g2 = g * g;
+    return (1.0 - g2) / (4.0 * PI * pow(1.0 + g2 - 2.0 * g * cos_theta, 1.5));
+}
+
+// Dual-lobe phase for silver lining
+float CloudPhase(float cos_theta) {
+    float forward = HenyeyGreenstein(cos_theta, 0.8);
+    float backward = HenyeyGreenstein(cos_theta, -0.3);
+    return lerp(backward, forward, 0.7);
+}
+
+// Beer-Powder approximation for cloud lighting
+float BeerPowder(float density) {
+    float beer = exp(-density);
+    float powder = 1.0 - exp(-density * 2.0);
+    return beer * lerp(1.0, powder, powder_strength);
+}
+
+// Ray-sphere intersection for cloud layer
+bool RayCloudLayerIntersection(float3 origin, float3 direction,
+                                out float t_enter, out float t_exit) {
+    float inner_radius = planet_radius + layer_bottom * 1000.0;
+    float outer_radius = planet_radius + layer_top * 1000.0;
+
+    float3 center = float3(0, -planet_radius, 0);
+    float3 oc = origin - center;
+
+    float a = dot(direction, direction);
+    float b = 2.0 * dot(oc, direction);
+
+    // Inner sphere
+    float c_inner = dot(oc, oc) - inner_radius * inner_radius;
+    float disc_inner = b * b - 4.0 * a * c_inner;
+
+    // Outer sphere
+    float c_outer = dot(oc, oc) - outer_radius * outer_radius;
+    float disc_outer = b * b - 4.0 * a * c_outer;
+
+    if (disc_outer < 0.0) return false;
+
+    float t_outer_near = (-b - sqrt(disc_outer)) / (2.0 * a);
+    float t_outer_far = (-b + sqrt(disc_outer)) / (2.0 * a);
+
+    if (disc_inner < 0.0) {
+        // Inside inner sphere - ray goes through entire layer
+        t_enter = max(0.0, t_outer_near);
+        t_exit = t_outer_far;
+    } else {
+        float t_inner_near = (-b - sqrt(disc_inner)) / (2.0 * a);
+        float t_inner_far = (-b + sqrt(disc_inner)) / (2.0 * a);
+
+        // Determine which parts of ray are in cloud layer
+        if (length(origin - center) < inner_radius) {
+            // Below clouds
+            t_enter = t_inner_far;
+            t_exit = t_outer_far;
+        } else if (length(origin - center) > outer_radius) {
+            // Above clouds
+            t_enter = t_outer_near;
+            t_exit = min(t_inner_near, t_outer_far);
+        } else {
+            // Inside cloud layer
+            t_enter = 0.0;
+            if (direction.y > 0.0) {
+                t_exit = t_outer_far;
+            } else {
+                t_exit = t_inner_near;
+            }
+        }
+    }
+
+    return t_exit > t_enter;
+}
+
+// Get height fraction within cloud layer
+float GetHeightFraction(float3 position) {
+    float height = length(position - float3(0, -planet_radius, 0)) - planet_radius;
+    return saturate((height - layer_bottom * 1000.0) /
+                    ((layer_top - layer_bottom) * 1000.0));
+}
+
+// Light march for self-shadowing
+float LightMarch(float3 position) {
+    float3 light_dir = sun_direction;
+    float step_size = (layer_top - layer_bottom) * 1000.0 / float(light_steps);
+
+    float total_density = 0.0;
+    float3 current_pos = position;
+
+    for (int i = 0; i < light_steps; i++) {
+        current_pos += light_dir * step_size;
+        float height_fraction = GetHeightFraction(current_pos);
+
+        if (height_fraction < 0.0 || height_fraction > 1.0) break;
+
+        float lod = float(i) / float(light_steps);
+        total_density += SampleCloudDensity(current_pos, height_fraction, lod) * step_size;
+    }
+
+    return BeerPowder(total_density);
+}
+
+// Main cloud raymarch
+float4 RaymarchClouds(float3 ray_origin, float3 ray_direction) {
+    float t_enter, t_exit;
+    if (!RayCloudLayerIntersection(ray_origin, ray_direction, t_enter, t_exit)) {
+        return float4(0, 0, 0, 0);
+    }
+
+    float march_distance = min(t_exit - t_enter, 50000.0);
+    float step_size = march_distance / float(max_steps);
+
+    float3 current_pos = ray_origin + ray_direction * t_enter;
+    float total_transmittance = 1.0;
+    float3 total_light = float3(0, 0, 0);
+
+    float cos_theta = dot(ray_direction, sun_direction);
+    float phase = CloudPhase(cos_theta);
+
+    // Blue noise offset for temporal stability
+    float offset = frac(sin(dot(ray_origin.xz, float2(12.9898, 78.233))) * 43758.5453);
+    current_pos += ray_direction * step_size * offset;
+
+    for (int i = 0; i < max_steps && total_transmittance > 0.01; i++) {
+        float height_fraction = GetHeightFraction(current_pos);
+
+        if (height_fraction >= 0.0 && height_fraction <= 1.0) {
+            float lod = float(i) / float(max_steps);
+            float density = SampleCloudDensity(current_pos, height_fraction, lod);
+
+            if (density > 0.001) {
+                // Light contribution
+                float light_transmittance = LightMarch(current_pos);
+
+                // Direct sun lighting
+                float3 direct_light = sun_light * light_transmittance * phase;
+
+                // Ambient/sky lighting
+                float3 ambient = ambient_light * (0.5 + 0.5 * height_fraction);
+
+                // Silver lining effect
+                float silver = pow(saturate(1.0 - light_transmittance), silver_lining_spread);
+                direct_light += sun_light * silver * silver_lining_intensity;
+
+                float3 luminance = (direct_light + ambient) * density;
+
+                // Integrate
+                float transmittance = exp(-density * step_size);
+                total_light += luminance * total_transmittance * (1.0 - transmittance);
+                total_transmittance *= transmittance;
+            }
+        }
+
+        current_pos += ray_direction * step_size;
+    }
+
+    return float4(total_light, 1.0 - total_transmittance);
+}
+
+// Vertex shader output
+struct CloudVSOutput {
+    float4 position : SV_POSITION;
+    float3 view_ray : TEXCOORD0;
+};
+
+// Pixel shader
+float4 CloudPS(CloudVSOutput input) : SV_TARGET {
+    float3 view_dir = normalize(input.view_ray);
+    return RaymarchClouds(camera_position, view_dir);
+}
+"#;
+
+// =============================================================================
+// HEIGHT FOG SHADER
+// =============================================================================
+
+const HEIGHT_FOG_SHADER: &str = r#"
+//-----------------------------------------------------------------------------
+// Exponential Height Fog with Volumetric Scattering
+//-----------------------------------------------------------------------------
+
+cbuffer FogParams : register(b0) {
+    float3 inscatter_color;
+    float density;
+
+    float3 extinction_color;
+    float height_falloff;
+
+    float base_height;
+    float max_opacity;
+    float start_distance;
+    float end_distance;
+
+    float3 sun_direction;
+    float anisotropy;
+
+    float3 sun_color;
+    float inscatter_intensity;
+
+    float3 camera_position;
+    float time;
+
+    float noise_scale;
+    float noise_speed;
+    float2 _padding;
+}
+
+Texture3D<float> noise_texture : register(t0);
+SamplerState linear_wrap : register(s0);
+
+// Henyey-Greenstein phase
+float HenyeyGreenstein(float cos_theta, float g) {
+    float g2 = g * g;
+    return (1.0 - g2) / (4.0 * 3.14159 * pow(1.0 + g2 - 2.0 * g * cos_theta, 1.5));
+}
+
+// Calculate fog density at a point
+float GetFogDensity(float3 world_pos) {
+    float height_above_base = world_pos.y - base_height;
+    float base_density = density * exp(-height_falloff * max(height_above_base, 0.0));
+
+    // Animated noise for variation
+    float3 noise_pos = world_pos * noise_scale + float3(time * noise_speed, 0, time * noise_speed * 0.5);
+    float noise = noise_texture.SampleLevel(linear_wrap, noise_pos, 0).r;
+    noise = noise * 0.5 + 0.5; // Bias toward density
+
+    return base_density * noise;
+}
+
+// Integrate fog along ray
+float4 IntegrateFog(float3 ray_start, float3 ray_end, float3 view_dir) {
+    float distance = length(ray_end - ray_start);
+
+    // Distance culling
+    if (distance < start_distance) return float4(0, 0, 0, 0);
+
+    // Adjust for start distance
+    float effective_distance = distance - start_distance;
+    ray_start += view_dir * start_distance;
+
+    // Raymarch steps
+    int steps = 16;
+    float step_size = effective_distance / float(steps);
+
+    float total_density = 0.0;
+    float3 current_pos = ray_start;
+
+    for (int i = 0; i < steps; i++) {
+        total_density += GetFogDensity(current_pos) * step_size;
+        current_pos += view_dir * step_size;
+    }
+
+    // Transmittance
+    float transmittance = exp(-total_density);
+    float fog_amount = saturate((1.0 - transmittance) * max_opacity);
+
+    // Inscattering with sun contribution
+    float cos_theta = dot(view_dir, sun_direction);
+    float phase = HenyeyGreenstein(cos_theta, anisotropy);
+
+    float3 fog_color = inscatter_color;
+    fog_color += sun_color * phase * inscatter_intensity * (1.0 - transmittance);
+
+    return float4(fog_color, fog_amount);
+}
+
+// Apply fog to scene color
+float4 ApplyFog(float4 scene_color, float3 world_pos, float3 camera_pos) {
+    float3 view_dir = normalize(world_pos - camera_pos);
+    float4 fog = IntegrateFog(camera_pos, world_pos, view_dir);
+
+    return float4(lerp(scene_color.rgb, fog.rgb, fog.a), scene_color.a);
+}
+"#;
+
+// =============================================================================
+// GODRAYS / VOLUMETRIC LIGHT SHADER
+// =============================================================================
+
+const GODRAY_SHADER: &str = r#"
+//-----------------------------------------------------------------------------
+// Volumetric Light Shafts (Godrays)
+//-----------------------------------------------------------------------------
+
+#define PI 3.14159265359
+#define NUM_SAMPLES 32
+
+cbuffer GodrayParams : register(b0) {
+    float4x4 view_projection;
+    float4x4 inv_view_projection;
+
+    float3 light_position_screen;  // Sun position in screen space
+    float exposure;
+
+    float3 light_color;
+    float density;
+
+    float weight;
+    float decay;
+    float2 _padding;
+}
+
+Texture2D<float4> scene_texture : register(t0);
+Texture2D<float> depth_texture : register(t1);
+Texture2D<float4> occlusion_texture : register(t2);  // Occluders rendered as black
+SamplerState point_sampler : register(s0);
+
+struct VSOutput {
+    float4 position : SV_POSITION;
+    float2 texcoord : TEXCOORD0;
+};
+
+// Radial blur from light source
+float4 GodrayPS(VSOutput input) : SV_TARGET {
+    float2 uv = input.texcoord;
+    float2 delta_uv = (uv - light_position_screen.xy) / float(NUM_SAMPLES) * density;
+
+    float illumination_decay = 1.0;
+    float4 result = float4(0, 0, 0, 0);
+    float2 current_uv = uv;
+
+    for (int i = 0; i < NUM_SAMPLES; i++) {
+        current_uv -= delta_uv;
+
+        // Sample occlusion (black = occluded, white = visible)
+        float4 sample_color = occlusion_texture.Sample(point_sampler, current_uv);
+
+        // Only accumulate if not occluded
+        sample_color *= illumination_decay * weight;
+        result += sample_color;
+
+        illumination_decay *= decay;
+    }
+
+    result *= float4(light_color, 1.0) * exposure;
+
+    // Add to scene
+    float4 scene = scene_texture.Sample(point_sampler, uv);
+    return scene + result;
+}
+
+// Alternative: Epipolar sampling for performance
+// Samples along epipolar lines from light source
+
+cbuffer EpipolarParams : register(b1) {
+    int num_slices;           // Number of epipolar slices
+    int samples_per_slice;    // Samples along each slice
+    float max_distance;       // Maximum ray distance
+    float _ep_padding;
+}
+
+// Create epipolar texture coordinates
+float4 CreateEpipolarSlicePS(VSOutput input) : SV_TARGET {
+    int slice_index = int(input.texcoord.x * num_slices);
+    float sample_pos = input.texcoord.y;
+
+    // Calculate angle for this slice
+    float angle = float(slice_index) / float(num_slices) * 2.0 * PI;
+
+    // Start from light position, march outward
+    float2 direction = float2(cos(angle), sin(angle));
+    float2 sample_uv = light_position_screen.xy + direction * sample_pos * max_distance;
+
+    // Return UV and depth at this sample point
+    if (sample_uv.x < 0.0 || sample_uv.x > 1.0 ||
+        sample_uv.y < 0.0 || sample_uv.y > 1.0) {
+        return float4(0, 0, 0, 0);
+    }
+
+    float depth = depth_texture.Sample(point_sampler, sample_uv).r;
+    float4 occluder = occlusion_texture.Sample(point_sampler, sample_uv);
+
+    return float4(sample_uv, depth, occluder.r);
+}
+"#;
+
+// =============================================================================
+// AERIAL PERSPECTIVE SHADER
+// =============================================================================
+
+const AERIAL_PERSPECTIVE_SHADER: &str = r#"
+//-----------------------------------------------------------------------------
+// Aerial Perspective (Distance-Based Atmospheric Scattering)
+//-----------------------------------------------------------------------------
+
+cbuffer AerialParams : register(b0) {
+    float3 scatter_color;
+    float scatter_intensity;
+
+    float3 absorb_color;
+    float absorb_intensity;
+
+    float start_distance;
+    float density;
+    float height_falloff;
+    float sun_intensity;
+
+    float3 sun_direction;
+    float anisotropy;
+
+    float3 camera_position;
+    float max_distance;
+}
+
+Texture2D<float4> scene_texture : register(t0);
+Texture2D<float> depth_texture : register(t1);
+Texture3D<float4> aerial_lut : register(t2);  // Precomputed scattering
+SamplerState linear_sampler : register(s0);
+
+// Convert depth to world position
+float3 GetWorldPosition(float2 uv, float depth, float4x4 inv_vp) {
+    float4 clip = float4(uv * 2.0 - 1.0, depth, 1.0);
+    clip.y = -clip.y;
+    float4 world = mul(inv_vp, clip);
+    return world.xyz / world.w;
+}
+
+// Simple exponential aerial perspective
+float4 SimpleAerialPerspective(float4 scene_color, float distance, float height) {
+    // Height-based density reduction
+    float height_factor = exp(-height_falloff * max(height - camera_position.y, 0.0));
+
+    // Distance fog
+    float fog = 1.0 - exp(-distance * density * height_factor);
+    fog = saturate(fog);
+
+    // Blend toward scatter color
+    float3 result = lerp(scene_color.rgb, scatter_color, fog * scatter_intensity);
+
+    // Absorption (color shift toward absorb color)
+    result = lerp(result, result * absorb_color, fog * absorb_intensity * 0.3);
+
+    return float4(result, scene_color.a);
+}
+
+// Full aerial perspective with LUT
+float4 AerialPerspectivePS(float2 uv, float4x4 inv_vp) {
+    float4 scene = scene_texture.Sample(linear_sampler, uv);
+    float depth = depth_texture.Sample(linear_sampler, uv).r;
+
+    if (depth >= 1.0) return scene;  // Sky - no aerial perspective
+
+    float3 world_pos = GetWorldPosition(uv, depth, inv_vp);
+    float distance = length(world_pos - camera_position);
+    float height = world_pos.y;
+
+    // Clamp distance for LUT sampling
+    float lut_distance = saturate(distance / max_distance);
+    float lut_height = saturate((height - camera_position.y + 1000.0) / 2000.0);
+
+    // Sample precomputed LUT
+    float3 lut_uv = float3(uv, lut_distance);
+    float4 aerial = aerial_lut.Sample(linear_sampler, lut_uv);
+
+    // Apply aerial perspective
+    float3 result = scene.rgb * aerial.a + aerial.rgb;
+
+    return float4(result, scene.a);
+}
+"#;
+
+// =============================================================================
+// SKY RENDERING UTILITIES
+// =============================================================================
+
+const SKY_UTILITIES_SHADER: &str = r#"
+//-----------------------------------------------------------------------------
+// Sky Rendering Utilities
+//-----------------------------------------------------------------------------
+
+// Preetham sky model
+float3 PreethamSky(float3 view_dir, float3 sun_dir, float turbidity) {
+    // Perez function coefficients based on turbidity
+    float3 A, B, C, D, E;
+
+    // Luminance (Y)
+    float Y_A = 0.1787 * turbidity - 1.4630;
+    float Y_B = -0.3554 * turbidity + 0.4275;
+    float Y_C = -0.0227 * turbidity + 5.3251;
+    float Y_D = 0.1206 * turbidity - 2.5771;
+    float Y_E = -0.0670 * turbidity + 0.3703;
+
+    // x chromaticity
+    float x_A = -0.0193 * turbidity - 0.2592;
+    float x_B = -0.0665 * turbidity + 0.0008;
+    float x_C = -0.0004 * turbidity + 0.2125;
+    float x_D = -0.0641 * turbidity - 0.8989;
+    float x_E = -0.0033 * turbidity + 0.0452;
+
+    // y chromaticity
+    float y_A = -0.0167 * turbidity - 0.2608;
+    float y_B = -0.0950 * turbidity + 0.0092;
+    float y_C = -0.0079 * turbidity + 0.2102;
+    float y_D = -0.0441 * turbidity - 1.6537;
+    float y_E = -0.0109 * turbidity + 0.0529;
+
+    float sun_theta = acos(sun_dir.y);
+    float gamma = acos(dot(view_dir, sun_dir));
+    float view_theta = acos(view_dir.y);
+
+    // Perez function for sky luminance
+    float Y_zenith = (4.0453 * turbidity - 4.9710) *
+                     tan((4.0/9.0 - turbidity/120.0) * (3.14159 - 2.0 * sun_theta)) -
+                     0.2155 * turbidity + 2.4192;
+
+    float Y = Y_zenith * Perez(view_theta, gamma, Y_A, Y_B, Y_C, Y_D, Y_E) /
+              Perez(0.0, sun_theta, Y_A, Y_B, Y_C, Y_D, Y_E);
+
+    // Calculate chromaticity
+    float x = Perez(view_theta, gamma, x_A, x_B, x_C, x_D, x_E) /
+              Perez(0.0, sun_theta, x_A, x_B, x_C, x_D, x_E);
+    float y = Perez(view_theta, gamma, y_A, y_B, y_C, y_D, y_E) /
+              Perez(0.0, sun_theta, y_A, y_B, y_C, y_D, y_E);
+
+    // Convert Yxy to RGB
+    float3 XYZ = float3(x * Y / y, Y, (1.0 - x - y) * Y / y);
+
+    float3x3 XYZ_to_RGB = float3x3(
+        3.2404542, -1.5371385, -0.4985314,
+        -0.9692660, 1.8760108, 0.0415560,
+        0.0556434, -0.2040259, 1.0572252
+    );
+
+    return mul(XYZ_to_RGB, XYZ);
+}
+
+float Perez(float theta, float gamma, float A, float B, float C, float D, float E) {
+    return (1.0 + A * exp(B / cos(theta))) *
+           (1.0 + C * exp(D * gamma) + E * cos(gamma) * cos(gamma));
+}
+
+// Hosek-Wilkie sky model (more accurate)
+float3 HosekWilkieSky(float3 view_dir, float3 sun_dir, float turbidity, float3 ground_albedo) {
+    // This would use precomputed dataset tables
+    // Simplified implementation here
+
+    float sun_theta = acos(clamp(sun_dir.y, -1.0, 1.0));
+    float gamma = acos(clamp(dot(view_dir, sun_dir), -1.0, 1.0));
+    float view_theta = acos(clamp(view_dir.y, 0.001, 1.0));
+
+    // Coefficients would come from Hosek-Wilkie dataset
+    // Using approximation for demonstration
+    float3 sky_color;
+
+    // Zenith color based on turbidity
+    float3 zenith = lerp(float3(0.1, 0.3, 0.6), float3(0.4, 0.5, 0.6), turbidity / 10.0);
+
+    // Horizon color
+    float3 horizon = lerp(float3(0.6, 0.7, 0.8), float3(0.8, 0.75, 0.7), turbidity / 10.0);
+
+    // Sun glow
+    float sun_glow = pow(max(dot(view_dir, sun_dir), 0.0), 32.0) * (1.0 + turbidity * 0.2);
+
+    // Blend based on view angle
+    float horizon_factor = pow(1.0 - view_dir.y, 3.0);
+    sky_color = lerp(zenith, horizon, horizon_factor);
+
+    // Add sun contribution
+    float3 sun_color = float3(1.0, 0.9, 0.7) * sun_glow;
+    sky_color += sun_color;
+
+    // Ground reflection
+    if (view_dir.y < 0.0) {
+        sky_color = lerp(sky_color, ground_albedo * horizon * 0.5, -view_dir.y);
+    }
+
+    return sky_color;
+}
+
+// Stars for night sky
+float3 RenderStars(float3 view_dir, float star_density, float time) {
+    // Create stable random star positions using 3D noise
+    float3 star_pos = view_dir * 1000.0;
+
+    // Multiple octaves of noise for star distribution
+    float stars = 0.0;
+
+    float3 p = floor(star_pos);
+    float3 f = frac(star_pos);
+
+    // Hash function for random stars
+    float n = p.x + p.y * 57.0 + p.z * 113.0;
+    float random = frac(sin(n) * 43758.5453);
+
+    // Star threshold
+    float threshold = 1.0 - star_density * 0.01;
+    if (random > threshold) {
+        // Star brightness with twinkling
+        float brightness = (random - threshold) / (1.0 - threshold);
+        brightness = pow(brightness, 2.0);
+
+        // Twinkle
+        float twinkle = sin(time * 2.0 + n) * 0.3 + 0.7;
+        brightness *= twinkle;
+
+        // Star color (slightly varied)
+        float3 star_color = lerp(float3(1.0, 1.0, 1.0),
+                                  float3(1.0, 0.8, 0.6),
+                                  frac(n * 0.1));
+
+        return star_color * brightness;
+    }
+
+    return float3(0, 0, 0);
+}
+
+// Moon rendering
+float3 RenderMoon(float3 view_dir, float3 moon_dir, float moon_phase, float moon_size) {
+    float cos_angle = dot(view_dir, moon_dir);
+    float angle = acos(cos_angle);
+
+    if (angle > moon_size * 2.0) return float3(0, 0, 0);
+
+    // Moon disc
+    float disc = 1.0 - smoothstep(moon_size * 0.95, moon_size, angle);
+
+    // Phase shading (simplified)
+    float3 moon_right = normalize(cross(moon_dir, float3(0, 1, 0)));
+    float phase_dot = dot(view_dir - moon_dir * cos_angle, moon_right);
+    float phase_factor = smoothstep(-moon_phase, moon_phase, phase_dot);
+
+    // Moon color
+    float3 moon_color = float3(0.9, 0.9, 0.85) * disc * phase_factor;
+
+    // Add slight limb darkening
+    float limb = 1.0 - (angle / moon_size);
+    moon_color *= 0.7 + 0.3 * limb;
+
+    return moon_color;
+}
+"#;
+
+// =============================================================================
+// ATMOSPHERE COMPUTE SHADERS FOR LUT GENERATION
+// =============================================================================
+
+const ATMOSPHERE_COMPUTE_SHADERS: &str = r#"
+//-----------------------------------------------------------------------------
+// Atmosphere LUT Precomputation Compute Shaders
+//-----------------------------------------------------------------------------
+
+// Transmittance LUT computation
+[numthreads(16, 16, 1)]
+void ComputeTransmittanceLUT(uint3 id : SV_DispatchThreadID) {
+    float2 uv = (float2(id.xy) + 0.5) / float2(TRANSMITTANCE_TEXTURE_WIDTH, TRANSMITTANCE_TEXTURE_HEIGHT);
+
+    float H = sqrt((planet_radius + atmosphere_height) * (planet_radius + atmosphere_height) -
+                   planet_radius * planet_radius);
+    float rho = H * uv.y;
+    float r = sqrt(rho * rho + planet_radius * planet_radius);
+
+    float d_min = planet_radius + atmosphere_height - r;
+    float d_max = rho + H;
+    float d = d_min + (d_max - d_min) * uv.x;
+    float mu = (d == 0.0) ? 1.0 : (H * H - rho * rho - d * d) / (2.0 * r * d);
+    mu = ClampCosine(mu);
+
+    // Integrate optical depth
+    float3 transmittance = ComputeTransmittanceToTopAtmosphere(r, mu);
+
+    transmittance_lut_rw[id.xy] = float4(transmittance, 1.0);
+}
+
+float3 ComputeTransmittanceToTopAtmosphere(float r, float mu) {
+    int sample_count = 500;
+    float dx = DistanceToTopAtmosphereBoundary(r, mu) / float(sample_count);
+
+    float3 result = float3(0, 0, 0);
+    for (int i = 0; i <= sample_count; i++) {
+        float d = float(i) * dx;
+        float r_d = sqrt(d * d + 2.0 * r * mu * d + r * r);
+        float altitude = r_d - planet_radius;
+
+        // Rayleigh + Mie extinction
+        float3 extinction =
+            rayleigh_scattering * exp(rayleigh_density_exp_scale * altitude) +
+            (mie_scattering + mie_absorption) * exp(mie_density_exp_scale * altitude) +
+            ozone_absorption * GetOzoneDensity(altitude);
+
+        float weight = (i == 0 || i == sample_count) ? 0.5 : 1.0;
+        result += extinction * weight * dx;
+    }
+
+    return exp(-result);
+}
+
+// Single scattering LUT computation
+[numthreads(8, 8, 8)]
+void ComputeScatteringLUT(uint3 id : SV_DispatchThreadID) {
+    // Convert thread ID to atmosphere parameters
+    float4 uvwz = (float4(id, 0) + 0.5) / float4(SCATTERING_TEXTURE_NU_SIZE * SCATTERING_TEXTURE_MU_S_SIZE,
+                                                   SCATTERING_TEXTURE_MU_SIZE,
+                                                   SCATTERING_TEXTURE_R_SIZE, 1.0);
+
+    float r, mu, mu_s, nu;
+    bool ray_r_mu_intersects_ground;
+    GetRMuMuSNuFromScatteringTextureUvwz(uvwz, r, mu, mu_s, nu, ray_r_mu_intersects_ground);
+
+    float3 rayleigh, mie;
+    ComputeSingleScattering(r, mu, mu_s, nu, ray_r_mu_intersects_ground, rayleigh, mie);
+
+    scattering_lut_rw[id] = float4(rayleigh * RayleighPhaseFunction(nu) +
+                                    mie * MiePhaseFunction(mie_phase_g, nu), 1.0);
+}
+
+void ComputeSingleScattering(float r, float mu, float mu_s, float nu,
+                             bool ray_r_mu_intersects_ground,
+                             out float3 rayleigh, out float3 mie) {
+    float distance = ray_r_mu_intersects_ground ?
+                     DistanceToBottomAtmosphereBoundary(r, mu) :
+                     DistanceToTopAtmosphereBoundary(r, mu);
+
+    int sample_count = 50;
+    float dx = distance / float(sample_count);
+
+    rayleigh = float3(0, 0, 0);
+    mie = float3(0, 0, 0);
+
+    for (int i = 0; i <= sample_count; i++) {
+        float d = float(i) * dx;
+        float r_d = ClampRadius(sqrt(d * d + 2.0 * r * mu * d + r * r));
+        float mu_s_d = ClampCosine((r * mu_s + d * nu) / r_d);
+        float altitude = r_d - planet_radius;
+
+        float3 transmittance = GetTransmittance(r, mu, d, ray_r_mu_intersects_ground) *
+                               GetTransmittanceToTopAtmosphereBoundary(r_d, mu_s_d);
+
+        float rayleigh_density = exp(rayleigh_density_exp_scale * altitude);
+        float mie_density = exp(mie_density_exp_scale * altitude);
+
+        float weight = (i == 0 || i == sample_count) ? 0.5 : 1.0;
+        rayleigh += transmittance * rayleigh_scattering * rayleigh_density * weight * dx;
+        mie += transmittance * mie_scattering * mie_density * weight * dx;
+    }
+}
+
+// Irradiance LUT for ground lighting
+[numthreads(16, 16, 1)]
+void ComputeIrradianceLUT(uint3 id : SV_DispatchThreadID) {
+    float2 uv = (float2(id.xy) + 0.5) / float2(IRRADIANCE_TEXTURE_WIDTH, IRRADIANCE_TEXTURE_HEIGHT);
+
+    float r = planet_radius;
+    float mu_s = uv.x * 2.0 - 1.0;
+
+    float3 irradiance = ComputeDirectIrradiance(r, mu_s);
+
+    irradiance_lut_rw[id.xy] = float4(irradiance, 1.0);
+}
+
+float3 ComputeDirectIrradiance(float r, float mu_s) {
+    float3 transmittance = GetTransmittanceToTopAtmosphereBoundary(r, mu_s);
+    return transmittance * sun_intensity * max(mu_s, 0.0);
+}
+"#;
+
+// =============================================================================
+// ATMOSPHERIC RENDERING PIPELINE
+// =============================================================================
+
+/// Complete atmosphere rendering system
+struct AtmosphereRenderer {
+    profile: AtmosphereProfile,
+    cloud_profile: CloudProfile,
+    fog_profile: FogProfile,
+
+    // LUT textures (handles)
+    transmittance_lut: TextureHandle,
+    scattering_lut: TextureHandle,
+    irradiance_lut: TextureHandle,
+
+    // Cloud textures
+    cloud_base_noise: TextureHandle,
+    cloud_detail_noise: TextureHandle,
+    weather_map: TextureHandle,
+    curl_noise: TextureHandle,
+
+    // Render targets
+    sky_target: TextureHandle,
+    cloud_target: TextureHandle,
+    fog_target: TextureHandle,
+
+    // State
+    luts_dirty: bool,
+    time: f32,
+}
+
+impl AtmosphereRenderer {
+    pub fn new(device: &RenderDevice, profile: AtmosphereProfile) -> Self {
+        // Create LUT textures
+        let transmittance_lut = device.create_texture_2d(
+            256, 64,
+            TextureFormat::RGBA16F,
+            TextureUsage::ShaderResource | TextureUsage::UnorderedAccess
+        );
+
+        let scattering_lut = device.create_texture_3d(
+            32 * 8, 128, 32,
+            TextureFormat::RGBA16F,
+            TextureUsage::ShaderResource | TextureUsage::UnorderedAccess
+        );
+
+        let irradiance_lut = device.create_texture_2d(
+            64, 16,
+            TextureFormat::RGBA16F,
+            TextureUsage::ShaderResource | TextureUsage::UnorderedAccess
+        );
+
+        // Create noise textures
+        let cloud_base_noise = Self::generate_cloud_base_noise(device);
+        let cloud_detail_noise = Self::generate_cloud_detail_noise(device);
+        let weather_map = device.create_texture_2d(1024, 1024, TextureFormat::RGBA8, TextureUsage::ShaderResource);
+        let curl_noise = Self::generate_curl_noise(device);
+
+        // Create render targets
+        let sky_target = device.create_render_target(1920, 1080, TextureFormat::RGBA16F);
+        let cloud_target = device.create_render_target(1920, 1080, TextureFormat::RGBA16F);
+        let fog_target = device.create_render_target(1920, 1080, TextureFormat::RGBA16F);
+
+        Self {
+            profile,
+            cloud_profile: CloudProfile::default(),
+            fog_profile: FogProfile::default(),
+
+            transmittance_lut,
+            scattering_lut,
+            irradiance_lut,
+
+            cloud_base_noise,
+            cloud_detail_noise,
+            weather_map,
+            curl_noise,
+
+            sky_target,
+            cloud_target,
+            fog_target,
+
+            luts_dirty: true,
+            time: 0.0,
+        }
+    }
+
+    fn generate_cloud_base_noise(device: &RenderDevice) -> TextureHandle {
+        // Generate 3D Worley-Perlin noise for cloud shapes
+        // 128^3 texture with 4 octaves
+        device.create_texture_3d(128, 128, 128, TextureFormat::R8, TextureUsage::ShaderResource)
+    }
+
+    fn generate_cloud_detail_noise(device: &RenderDevice) -> TextureHandle {
+        // Generate 3D Worley noise for cloud detail erosion
+        // 32^3 texture
+        device.create_texture_3d(32, 32, 32, TextureFormat::R8, TextureUsage::ShaderResource)
+    }
+
+    fn generate_curl_noise(device: &RenderDevice) -> TextureHandle {
+        // Generate 2D curl noise for wispy cloud effects
+        device.create_texture_2d(128, 128, TextureFormat::RG8, TextureUsage::ShaderResource)
+    }
+
+    pub fn precompute_luts(&mut self, context: &RenderContext) {
+        if !self.luts_dirty {
+            return;
+        }
+
+        // Dispatch compute shaders to generate LUTs
+        context.bind_compute_shader("atmosphere_transmittance_cs");
+        context.set_constant_buffer(0, &self.create_atmosphere_params());
+        context.set_uav(0, &self.transmittance_lut);
+        context.dispatch(16, 4, 1);
+
+        context.bind_compute_shader("atmosphere_scattering_cs");
+        context.set_srv(0, &self.transmittance_lut);
+        context.set_uav(0, &self.scattering_lut);
+        context.dispatch(32, 16, 4);
+
+        context.bind_compute_shader("atmosphere_irradiance_cs");
+        context.set_srv(0, &self.transmittance_lut);
+        context.set_uav(0, &self.irradiance_lut);
+        context.dispatch(4, 1, 1);
+
+        self.luts_dirty = false;
+    }
+
+    fn create_atmosphere_params(&self) -> AtmosphereParamsBuffer {
+        AtmosphereParamsBuffer {
+            rayleigh_scattering: self.profile.rayleigh_scattering,
+            rayleigh_density_exp_scale: self.profile.rayleigh_density_exp_scale,
+            mie_scattering: self.profile.mie_scattering,
+            mie_density_exp_scale: self.profile.mie_density_exp_scale,
+            mie_absorption: self.profile.mie_absorption,
+            mie_phase_g: self.profile.mie_phase_g,
+            ozone_absorption: self.profile.ozone_absorption,
+            ozone_layer_altitude: self.profile.ozone_layer_altitude,
+            ozone_layer_width: self.profile.ozone_layer_width,
+            planet_radius: self.profile.planet_radius,
+            atmosphere_height: self.profile.atmosphere_height,
+            sun_angular_radius: self.profile.sun_angular_radius,
+            sun_intensity: self.profile.sun_intensity,
+        }
+    }
+
+    pub fn render_sky(&self, context: &RenderContext, camera: &Camera, sun_direction: vec3) {
+        context.set_render_target(&self.sky_target);
+        context.bind_shader("atmosphere_sky");
+
+        context.set_srv(0, &self.transmittance_lut);
+        context.set_srv(1, &self.scattering_lut);
+        context.set_srv(2, &self.irradiance_lut);
+
+        context.set_constant_buffer(0, &AtmosphereRenderParams {
+            sun_direction,
+            exposure: 10.0,
+            camera_position: camera.position,
+            time: self.time,
+        });
+
+        context.draw_fullscreen_triangle();
+    }
+
+    pub fn render_clouds(&self, context: &RenderContext, camera: &Camera, sun_direction: vec3) {
+        context.set_render_target(&self.cloud_target);
+        context.bind_shader("volumetric_clouds");
+
+        context.set_srv(0, &self.cloud_base_noise);
+        context.set_srv(1, &self.cloud_detail_noise);
+        context.set_srv(2, &self.weather_map);
+        context.set_srv(3, &self.curl_noise);
+
+        context.set_constant_buffer(0, &self.create_cloud_params(sun_direction));
+
+        context.draw_fullscreen_triangle();
+    }
+
+    fn create_cloud_params(&self, sun_direction: vec3) -> CloudParamsBuffer {
+        CloudParamsBuffer {
+            coverage: self.cloud_profile.coverage,
+            cloud_type: self.cloud_profile.cloud_type,
+            layer_bottom: self.cloud_profile.layer_bottom,
+            layer_top: self.cloud_profile.layer_top,
+            density_base: self.cloud_profile.density_base,
+            density_multiplier: self.cloud_profile.density_multiplier,
+            detail_scale: self.cloud_profile.detail_scale,
+            erosion_strength: self.cloud_profile.erosion_strength,
+            ambient_light: self.cloud_profile.ambient_light,
+            powder_strength: self.cloud_profile.powder_strength,
+            sun_light: self.cloud_profile.sun_light,
+            silver_lining_intensity: self.cloud_profile.silver_lining_intensity,
+            silver_lining_spread: self.cloud_profile.silver_lining_spread,
+            wind_direction: self.cloud_profile.wind_direction,
+            wind_speed: self.cloud_profile.wind_speed,
+            sun_direction,
+            time: self.time,
+            max_steps: self.cloud_profile.max_steps,
+            light_steps: self.cloud_profile.light_steps,
+        }
+    }
+
+    pub fn render_fog(&self, context: &RenderContext, scene_color: &TextureHandle,
+                      depth: &TextureHandle, camera: &Camera) {
+        context.set_render_target(&self.fog_target);
+        context.bind_shader("height_fog");
+
+        context.set_srv(0, scene_color);
+        context.set_srv(1, depth);
+
+        context.set_constant_buffer(0, &self.create_fog_params(camera));
+
+        context.draw_fullscreen_triangle();
+    }
+
+    fn create_fog_params(&self, camera: &Camera) -> FogParamsBuffer {
+        FogParamsBuffer {
+            inscatter_color: self.fog_profile.inscatter_color,
+            density: self.fog_profile.density,
+            extinction_color: self.fog_profile.extinction_color,
+            height_falloff: self.fog_profile.height_falloff,
+            base_height: self.fog_profile.base_height,
+            max_opacity: self.fog_profile.max_opacity,
+            start_distance: self.fog_profile.start_distance,
+            end_distance: self.fog_profile.end_distance,
+            camera_position: camera.position,
+            time: self.time,
+            noise_scale: self.fog_profile.noise_scale,
+            noise_speed: self.fog_profile.noise_speed,
+        }
+    }
+
+    pub fn composite(&self, context: &RenderContext, output: &TextureHandle,
+                     scene: &TextureHandle, depth: &TextureHandle) {
+        context.set_render_target(output);
+        context.bind_shader("atmosphere_composite");
+
+        context.set_srv(0, scene);
+        context.set_srv(1, depth);
+        context.set_srv(2, &self.sky_target);
+        context.set_srv(3, &self.cloud_target);
+        context.set_srv(4, &self.fog_target);
+
+        context.draw_fullscreen_triangle();
+    }
+
+    pub fn update(&mut self, delta_time: f32) {
+        self.time += delta_time;
+    }
+
+    pub fn set_profile(&mut self, profile: AtmosphereProfile) {
+        self.profile = profile;
+        self.luts_dirty = true;
+    }
+
+    pub fn set_cloud_profile(&mut self, profile: CloudProfile) {
+        self.cloud_profile = profile;
+    }
+
+    pub fn set_fog_profile(&mut self, profile: FogProfile) {
+        self.fog_profile = profile;
+    }
+}
+
+// Buffer structures for shader parameters
+#[repr(C)]
+struct AtmosphereParamsBuffer {
+    rayleigh_scattering: vec3,
+    rayleigh_density_exp_scale: f32,
+    mie_scattering: vec3,
+    mie_density_exp_scale: f32,
+    mie_absorption: vec3,
+    mie_phase_g: f32,
+    ozone_absorption: vec3,
+    ozone_layer_altitude: f32,
+    ozone_layer_width: f32,
+    planet_radius: f32,
+    atmosphere_height: f32,
+    sun_angular_radius: f32,
+    sun_intensity: f32,
+}
+
+#[repr(C)]
+struct AtmosphereRenderParams {
+    sun_direction: vec3,
+    exposure: f32,
+    camera_position: vec3,
+    time: f32,
+}
+
+#[repr(C)]
+struct CloudParamsBuffer {
+    coverage: f32,
+    cloud_type: f32,
+    layer_bottom: f32,
+    layer_top: f32,
+    density_base: f32,
+    density_multiplier: f32,
+    detail_scale: f32,
+    erosion_strength: f32,
+    ambient_light: vec3,
+    powder_strength: f32,
+    sun_light: vec3,
+    silver_lining_intensity: f32,
+    silver_lining_spread: f32,
+    wind_direction: vec3,
+    wind_speed: f32,
+    sun_direction: vec3,
+    time: f32,
+    max_steps: i32,
+    light_steps: i32,
+}
+
+#[repr(C)]
+struct FogParamsBuffer {
+    inscatter_color: vec3,
+    density: f32,
+    extinction_color: vec3,
+    height_falloff: f32,
+    base_height: f32,
+    max_opacity: f32,
+    start_distance: f32,
+    end_distance: f32,
+    camera_position: vec3,
+    time: f32,
+    noise_scale: f32,
+    noise_speed: f32,
+}
+
+// Placeholder types
+type TextureHandle = u64;
+type vec3 = [f32; 3];
+
+struct RenderDevice;
+impl RenderDevice {
+    fn create_texture_2d(&self, _w: u32, _h: u32, _fmt: TextureFormat, _usage: TextureUsage) -> TextureHandle { 0 }
+    fn create_texture_3d(&self, _w: u32, _h: u32, _d: u32, _fmt: TextureFormat, _usage: TextureUsage) -> TextureHandle { 0 }
+    fn create_render_target(&self, _w: u32, _h: u32, _fmt: TextureFormat) -> TextureHandle { 0 }
+}
+
+enum TextureFormat { RGBA8, RGBA16F, R8, RG8 }
+enum TextureUsage { ShaderResource, UnorderedAccess }
+
+struct RenderContext;
+impl RenderContext {
+    fn bind_compute_shader(&self, _name: &str) {}
+    fn bind_shader(&self, _name: &str) {}
+    fn set_constant_buffer<T>(&self, _slot: u32, _data: &T) {}
+    fn set_srv(&self, _slot: u32, _tex: &TextureHandle) {}
+    fn set_uav(&self, _slot: u32, _tex: &TextureHandle) {}
+    fn set_render_target(&self, _tex: &TextureHandle) {}
+    fn dispatch(&self, _x: u32, _y: u32, _z: u32) {}
+    fn draw_fullscreen_triangle(&self) {}
+}
+
+struct Camera {
+    position: vec3,
+}
+
+// =============================================================================
+// MODULE EXPORTS
+// =============================================================================
+
+pub use AtmosphereProfile;
+pub use CloudProfile;
+pub use FogProfile;
+pub use FogType;
+pub use AtmosphereRenderer;
+
+// Shader exports
+pub const SHADERS: &[(&str, &str)] = &[
+    ("atmosphere", ATMOSPHERE_SHADER),
+    ("volumetric_clouds", VOLUMETRIC_CLOUD_SHADER),
+    ("height_fog", HEIGHT_FOG_SHADER),
+    ("godrays", GODRAY_SHADER),
+    ("aerial_perspective", AERIAL_PERSPECTIVE_SHADER),
+    ("sky_utilities", SKY_UTILITIES_SHADER),
+    ("atmosphere_compute", ATMOSPHERE_COMPUTE_SHADERS),
+];

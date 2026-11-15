@@ -1,0 +1,1157 @@
+// ═══════════════════════════════════════════════════════════════════════════════
+// BUILD-UNIVERSE Comprehensive Benchmark Suite v2.0.0
+// "Universe Benchmarks" - Performance Testing Across All Modules
+// ═══════════════════════════════════════════════════════════════════════════════
+// Copyright (c) 2024-2025 Zain Dana Harper. All Rights Reserved.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+module universe_benchmarks
+
+use bench::{Bencher, BenchConfig, OutputFormat, ThroughputUnit, benchmark_suite, Iteration}
+use foundation::collections::{Vec, HashMap, BTreeMap, HashSet, LinkedList, RingBuffer}
+use foundation::math::{sqrt, sin, cos, exp, log, pow, Matrix, Complex}
+use foundation::io::{println, File}
+use foundation::crypto::{Sha256, Aes256, ChaCha20, Blake3}
+use foundation::compression::{Gzip, Zstd, Lz4, Brotli}
+use foundation::text::{StringBuilder, Regex}
+use foundation::serialization::{Json, Msgpack, Bincode}
+use foundation::time::{Instant, Duration}
+
+use field_tensor::{MarketTensor4D, PortfolioOptimizer, TechnicalIndicators, MarketGeometry}
+use oracle::{TimeSeriesForecaster, AnomalyDetector, PropheticEnsemble}
+use axiom::{NeuralNetwork, Tensor, EvolutionEngine, DualNumber}
+use spectrum::{Color, ColorSpace, ToneMapper, HdrProcessor}
+use photon::{RenderPipeline, Shader, FrameBuffer}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// BENCHMARK SUITE RUNNER
+// ═══════════════════════════════════════════════════════════════════════════════
+
+pub fn run_all_benchmarks() {
+    let config = BenchConfig {
+        min_iterations: 100,
+        max_duration: Duration::from_secs(10),
+        warmup_iterations: 20,
+        confidence_level: 0.95,
+        output_format: OutputFormat::Pretty,
+        output_file: Some("benchmark_results.json".to_string()),
+        compare_baseline: true,
+        baseline_path: Some("benchmarks/baseline.txt".to_string()),
+    };
+
+    let mut bencher = Bencher::with_config(config);
+
+    // Run all benchmark groups
+    bench_collections(&mut bencher);
+    bench_math(&mut bencher);
+    bench_crypto(&mut bencher);
+    bench_compression(&mut bencher);
+    bench_serialization(&mut bencher);
+    bench_field_tensor(&mut bencher);
+    bench_oracle(&mut bencher);
+    bench_axiom(&mut bencher);
+    bench_spectrum(&mut bencher);
+    bench_concurrency(&mut bencher);
+
+    bencher.summary();
+    bencher.save_baseline("benchmarks/baseline.txt").ok();
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// COLLECTIONS BENCHMARKS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+fn bench_collections(b: &mut Bencher) {
+    b.group("Collections");
+
+    // Vec operations
+    b.bench("vec_push_10k", |iter| {
+        iter.iter(|| {
+            let mut v: Vec<i64> = Vec::with_capacity(10_000);
+            for i in 0..10_000 {
+                v.push(i);
+            }
+            Iteration::black_box(v)
+        });
+    });
+
+    b.bench("vec_pop_10k", |iter| {
+        let mut v: Vec<i64> = (0..10_000).collect();
+        iter.iter(|| {
+            while v.len() > 0 {
+                Iteration::black_box(v.pop());
+            }
+        });
+    });
+
+    b.bench("vec_random_access_10k", |iter| {
+        let v: Vec<i64> = (0..10_000).collect();
+        iter.iter(|| {
+            let mut sum = 0i64;
+            for i in (0..10_000).step_by(7) {
+                sum += v[i % v.len()];
+            }
+            Iteration::black_box(sum)
+        });
+    });
+
+    b.bench("vec_sort_10k", |iter| {
+        let original: Vec<i64> = (0..10_000).rev().collect();
+        iter.iter(|| {
+            let mut v = original.clone();
+            v.sort();
+            Iteration::black_box(v)
+        });
+    });
+
+    b.bench("vec_binary_search_10k", |iter| {
+        let v: Vec<i64> = (0..10_000).collect();
+        iter.iter(|| {
+            let mut found = 0;
+            for i in (0..10_000).step_by(13) {
+                if v.binary_search(&i).is_ok() {
+                    found += 1;
+                }
+            }
+            Iteration::black_box(found)
+        });
+    });
+
+    // HashMap operations
+    b.bench("hashmap_insert_10k", |iter| {
+        iter.iter(|| {
+            let mut m: HashMap<i64, i64> = HashMap::with_capacity(10_000);
+            for i in 0..10_000 {
+                m.insert(i, i * 2);
+            }
+            Iteration::black_box(m)
+        });
+    });
+
+    b.bench("hashmap_get_10k", |iter| {
+        let m: HashMap<i64, i64> = (0..10_000).map(|i| (i, i * 2)).collect();
+        iter.iter(|| {
+            let mut sum = 0i64;
+            for i in 0..10_000 {
+                sum += m.get(&i).unwrap_or(&0);
+            }
+            Iteration::black_box(sum)
+        });
+    });
+
+    b.bench("hashmap_remove_10k", |iter| {
+        let original: HashMap<i64, i64> = (0..10_000).map(|i| (i, i * 2)).collect();
+        iter.iter(|| {
+            let mut m = original.clone();
+            for i in 0..10_000 {
+                m.remove(&i);
+            }
+            Iteration::black_box(m.len())
+        });
+    });
+
+    // BTreeMap operations
+    b.bench("btreemap_insert_10k", |iter| {
+        iter.iter(|| {
+            let mut m: BTreeMap<i64, i64> = BTreeMap::new();
+            for i in 0..10_000 {
+                m.insert(i, i * 2);
+            }
+            Iteration::black_box(m)
+        });
+    });
+
+    b.bench("btreemap_range_query", |iter| {
+        let m: BTreeMap<i64, i64> = (0..10_000).map(|i| (i, i * 2)).collect();
+        iter.iter(|| {
+            let count = m.range(1000..2000).count();
+            Iteration::black_box(count)
+        });
+    });
+
+    // HashSet operations
+    b.bench("hashset_insert_10k", |iter| {
+        iter.iter(|| {
+            let mut s: HashSet<i64> = HashSet::with_capacity(10_000);
+            for i in 0..10_000 {
+                s.insert(i);
+            }
+            Iteration::black_box(s)
+        });
+    });
+
+    b.bench("hashset_intersection", |iter| {
+        let s1: HashSet<i64> = (0..5_000).collect();
+        let s2: HashSet<i64> = (2_500..7_500).collect();
+        iter.iter(|| {
+            let intersection: HashSet<_> = s1.intersection(&s2).cloned().collect();
+            Iteration::black_box(intersection.len())
+        });
+    });
+
+    // RingBuffer operations
+    b.bench("ringbuffer_push_pop_10k", |iter| {
+        iter.iter(|| {
+            let mut rb: RingBuffer<i64> = RingBuffer::with_capacity(1_000);
+            for i in 0..10_000 {
+                rb.push(i);
+                if i > 500 {
+                    rb.pop();
+                }
+            }
+            Iteration::black_box(rb.len())
+        });
+    });
+
+    // LinkedList operations
+    b.bench("linkedlist_push_front_10k", |iter| {
+        iter.iter(|| {
+            let mut ll: LinkedList<i64> = LinkedList::new();
+            for i in 0..10_000 {
+                ll.push_front(i);
+            }
+            Iteration::black_box(ll.len())
+        });
+    });
+
+    b.group_end();
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// MATH BENCHMARKS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+fn bench_math(b: &mut Bencher) {
+    b.group("Mathematics");
+
+    // Basic operations
+    b.bench("sqrt_100k", |iter| {
+        iter.iter(|| {
+            let mut sum = 0.0f64;
+            for i in 1..=100_000 {
+                sum += sqrt(i as f64);
+            }
+            Iteration::black_box(sum)
+        });
+    });
+
+    b.bench("trig_sin_cos_100k", |iter| {
+        iter.iter(|| {
+            let mut sum = 0.0f64;
+            for i in 1..=100_000 {
+                let x = i as f64 * 0.0001;
+                sum += sin(x) + cos(x);
+            }
+            Iteration::black_box(sum)
+        });
+    });
+
+    b.bench("exp_log_100k", |iter| {
+        iter.iter(|| {
+            let mut sum = 0.0f64;
+            for i in 1..=100_000 {
+                let x = i as f64 * 0.0001;
+                sum += exp(x) + log(x);
+            }
+            Iteration::black_box(sum)
+        });
+    });
+
+    b.bench("pow_100k", |iter| {
+        iter.iter(|| {
+            let mut sum = 0.0f64;
+            for i in 1..=100_000 {
+                sum += pow(i as f64 * 0.001, 2.5);
+            }
+            Iteration::black_box(sum)
+        });
+    });
+
+    // Matrix operations
+    b.bench("matrix_mul_100x100", |iter| {
+        let a = Matrix::random(100, 100);
+        let b = Matrix::random(100, 100);
+        iter.iter(|| {
+            let c = a.mul(&b);
+            Iteration::black_box(c)
+        });
+    });
+
+    b.bench("matrix_mul_500x500", |iter| {
+        let a = Matrix::random(500, 500);
+        let b = Matrix::random(500, 500);
+        iter.iter(|| {
+            let c = a.mul(&b);
+            Iteration::black_box(c)
+        });
+    });
+
+    b.bench("matrix_inverse_100x100", |iter| {
+        let a = Matrix::random_invertible(100, 100);
+        iter.iter(|| {
+            let inv = a.inverse();
+            Iteration::black_box(inv)
+        });
+    });
+
+    b.bench("matrix_determinant_100x100", |iter| {
+        let a = Matrix::random(100, 100);
+        iter.iter(|| {
+            let det = a.determinant();
+            Iteration::black_box(det)
+        });
+    });
+
+    b.bench("matrix_eigenvalues_50x50", |iter| {
+        let a = Matrix::random_symmetric(50, 50);
+        iter.iter(|| {
+            let eigenvalues = a.eigenvalues();
+            Iteration::black_box(eigenvalues)
+        });
+    });
+
+    b.bench("matrix_cholesky_100x100", |iter| {
+        let a = Matrix::random_positive_definite(100, 100);
+        iter.iter(|| {
+            let l = a.cholesky();
+            Iteration::black_box(l)
+        });
+    });
+
+    b.bench("matrix_lu_decomposition_100x100", |iter| {
+        let a = Matrix::random(100, 100);
+        iter.iter(|| {
+            let (l, u, p) = a.lu_decomposition();
+            Iteration::black_box((l, u, p))
+        });
+    });
+
+    // Complex number operations
+    b.bench("complex_mul_100k", |iter| {
+        let a = Complex::new(3.0, 4.0);
+        let b = Complex::new(1.0, 2.0);
+        iter.iter(|| {
+            let mut result = Complex::one();
+            for _ in 0..100_000 {
+                result = result * a * b;
+            }
+            Iteration::black_box(result)
+        });
+    });
+
+    b.bench("complex_fft_1024", |iter| {
+        let data: Vec<Complex<f64>> = (0..1024).map(|i| Complex::new(sin(i as f64 * 0.01), 0.0)).collect();
+        iter.iter(|| {
+            let fft = Complex::fft(&data);
+            Iteration::black_box(fft)
+        });
+    });
+
+    b.group_end();
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// CRYPTOGRAPHY BENCHMARKS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+fn bench_crypto(b: &mut Bencher) {
+    b.group("Cryptography");
+
+    // Hash functions
+    let data_1kb: Vec<u8> = (0..1024).map(|i| (i % 256) as u8).collect();
+    let data_1mb: Vec<u8> = (0..1_048_576).map(|i| (i % 256) as u8).collect();
+
+    b.bench_throughput("sha256_1kb", 1024, ThroughputUnit::Bytes, |iter| {
+        iter.iter(|| {
+            let hash = Sha256::hash(&data_1kb);
+            Iteration::black_box(hash)
+        });
+    });
+
+    b.bench_throughput("sha256_1mb", 1_048_576, ThroughputUnit::Bytes, |iter| {
+        iter.iter(|| {
+            let hash = Sha256::hash(&data_1mb);
+            Iteration::black_box(hash)
+        });
+    });
+
+    b.bench_throughput("blake3_1kb", 1024, ThroughputUnit::Bytes, |iter| {
+        iter.iter(|| {
+            let hash = Blake3::hash(&data_1kb);
+            Iteration::black_box(hash)
+        });
+    });
+
+    b.bench_throughput("blake3_1mb", 1_048_576, ThroughputUnit::Bytes, |iter| {
+        iter.iter(|| {
+            let hash = Blake3::hash(&data_1mb);
+            Iteration::black_box(hash)
+        });
+    });
+
+    // Symmetric encryption
+    let key = [0u8; 32];
+    let nonce = [0u8; 12];
+
+    b.bench_throughput("aes256_encrypt_1kb", 1024, ThroughputUnit::Bytes, |iter| {
+        let cipher = Aes256::new(&key);
+        iter.iter(|| {
+            let encrypted = cipher.encrypt(&nonce, &data_1kb);
+            Iteration::black_box(encrypted)
+        });
+    });
+
+    b.bench_throughput("aes256_encrypt_1mb", 1_048_576, ThroughputUnit::Bytes, |iter| {
+        let cipher = Aes256::new(&key);
+        iter.iter(|| {
+            let encrypted = cipher.encrypt(&nonce, &data_1mb);
+            Iteration::black_box(encrypted)
+        });
+    });
+
+    b.bench_throughput("chacha20_encrypt_1kb", 1024, ThroughputUnit::Bytes, |iter| {
+        let cipher = ChaCha20::new(&key);
+        iter.iter(|| {
+            let encrypted = cipher.encrypt(&nonce, &data_1kb);
+            Iteration::black_box(encrypted)
+        });
+    });
+
+    b.bench_throughput("chacha20_encrypt_1mb", 1_048_576, ThroughputUnit::Bytes, |iter| {
+        let cipher = ChaCha20::new(&key);
+        iter.iter(|| {
+            let encrypted = cipher.encrypt(&nonce, &data_1mb);
+            Iteration::black_box(encrypted)
+        });
+    });
+
+    b.group_end();
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// COMPRESSION BENCHMARKS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+fn bench_compression(b: &mut Bencher) {
+    b.group("Compression");
+
+    // Generate compressible data (text-like)
+    let text_1mb: Vec<u8> = generate_compressible_text(1_048_576);
+
+    b.bench_throughput("gzip_compress_1mb", 1_048_576, ThroughputUnit::Bytes, |iter| {
+        iter.iter(|| {
+            let compressed = Gzip::compress(&text_1mb, 6);
+            Iteration::black_box(compressed)
+        });
+    });
+
+    b.bench_throughput("gzip_decompress_1mb", 1_048_576, ThroughputUnit::Bytes, |iter| {
+        let compressed = Gzip::compress(&text_1mb, 6);
+        iter.iter(|| {
+            let decompressed = Gzip::decompress(&compressed);
+            Iteration::black_box(decompressed)
+        });
+    });
+
+    b.bench_throughput("zstd_compress_1mb", 1_048_576, ThroughputUnit::Bytes, |iter| {
+        iter.iter(|| {
+            let compressed = Zstd::compress(&text_1mb, 3);
+            Iteration::black_box(compressed)
+        });
+    });
+
+    b.bench_throughput("zstd_decompress_1mb", 1_048_576, ThroughputUnit::Bytes, |iter| {
+        let compressed = Zstd::compress(&text_1mb, 3);
+        iter.iter(|| {
+            let decompressed = Zstd::decompress(&compressed);
+            Iteration::black_box(decompressed)
+        });
+    });
+
+    b.bench_throughput("lz4_compress_1mb", 1_048_576, ThroughputUnit::Bytes, |iter| {
+        iter.iter(|| {
+            let compressed = Lz4::compress(&text_1mb);
+            Iteration::black_box(compressed)
+        });
+    });
+
+    b.bench_throughput("lz4_decompress_1mb", 1_048_576, ThroughputUnit::Bytes, |iter| {
+        let compressed = Lz4::compress(&text_1mb);
+        iter.iter(|| {
+            let decompressed = Lz4::decompress(&compressed);
+            Iteration::black_box(decompressed)
+        });
+    });
+
+    b.bench_throughput("brotli_compress_1mb", 1_048_576, ThroughputUnit::Bytes, |iter| {
+        iter.iter(|| {
+            let compressed = Brotli::compress(&text_1mb, 4);
+            Iteration::black_box(compressed)
+        });
+    });
+
+    b.group_end();
+}
+
+fn generate_compressible_text(size: usize) -> Vec<u8> {
+    let words = ["the", "quick", "brown", "fox", "jumps", "over", "lazy", "dog"];
+    let mut result = Vec::with_capacity(size);
+    let mut i = 0;
+    while result.len() < size {
+        let word = words[i % words.len()];
+        result.extend_from_slice(word.as_bytes());
+        result.push(b' ');
+        i += 1;
+    }
+    result.truncate(size);
+    result
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// SERIALIZATION BENCHMARKS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+fn bench_serialization(b: &mut Bencher) {
+    b.group("Serialization");
+
+    // Create test data structure
+    #[derive(Clone, Serialize, Deserialize)]
+    struct TestData {
+        id: i64,
+        name: String,
+        values: Vec<f64>,
+        metadata: HashMap<String, String>,
+    }
+
+    let test_data = TestData {
+        id: 12345,
+        name: "benchmark_test_object".to_string(),
+        values: (0..1000).map(|i| i as f64 * 0.001).collect(),
+        metadata: (0..100).map(|i| (format!("key_{}", i), format!("value_{}", i))).collect(),
+    };
+
+    // JSON benchmarks
+    b.bench("json_serialize", |iter| {
+        iter.iter(|| {
+            let json = Json::serialize(&test_data);
+            Iteration::black_box(json)
+        });
+    });
+
+    b.bench("json_deserialize", |iter| {
+        let json = Json::serialize(&test_data);
+        iter.iter(|| {
+            let data: TestData = Json::deserialize(&json);
+            Iteration::black_box(data)
+        });
+    });
+
+    // MessagePack benchmarks
+    b.bench("msgpack_serialize", |iter| {
+        iter.iter(|| {
+            let msgpack = Msgpack::serialize(&test_data);
+            Iteration::black_box(msgpack)
+        });
+    });
+
+    b.bench("msgpack_deserialize", |iter| {
+        let msgpack = Msgpack::serialize(&test_data);
+        iter.iter(|| {
+            let data: TestData = Msgpack::deserialize(&msgpack);
+            Iteration::black_box(data)
+        });
+    });
+
+    // Bincode benchmarks
+    b.bench("bincode_serialize", |iter| {
+        iter.iter(|| {
+            let bincode = Bincode::serialize(&test_data);
+            Iteration::black_box(bincode)
+        });
+    });
+
+    b.bench("bincode_deserialize", |iter| {
+        let bincode = Bincode::serialize(&test_data);
+        iter.iter(|| {
+            let data: TestData = Bincode::deserialize(&bincode);
+            Iteration::black_box(data)
+        });
+    });
+
+    b.group_end();
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// FIELD-TENSOR BENCHMARKS (Trading/Finance)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+fn bench_field_tensor(b: &mut Bencher) {
+    b.group("Field-Tensor (Finance)");
+
+    // Create market data
+    let prices: Vec<f64> = (0..10_000).map(|i| 100.0 + sin(i as f64 * 0.01) * 10.0).collect();
+    let volumes: Vec<f64> = (0..10_000).map(|i| 1_000_000.0 + cos(i as f64 * 0.01) * 100_000.0).collect();
+
+    // Technical indicators
+    b.bench("sma_200_10k", |iter| {
+        iter.iter(|| {
+            let sma = TechnicalIndicators::sma(&prices, 200);
+            Iteration::black_box(sma)
+        });
+    });
+
+    b.bench("ema_50_10k", |iter| {
+        iter.iter(|| {
+            let ema = TechnicalIndicators::ema(&prices, 50);
+            Iteration::black_box(ema)
+        });
+    });
+
+    b.bench("rsi_14_10k", |iter| {
+        iter.iter(|| {
+            let rsi = TechnicalIndicators::rsi(&prices, 14);
+            Iteration::black_box(rsi)
+        });
+    });
+
+    b.bench("macd_10k", |iter| {
+        iter.iter(|| {
+            let (macd, signal, hist) = TechnicalIndicators::macd(&prices, 12, 26, 9);
+            Iteration::black_box((macd, signal, hist))
+        });
+    });
+
+    b.bench("bollinger_bands_10k", |iter| {
+        iter.iter(|| {
+            let (upper, middle, lower) = TechnicalIndicators::bollinger_bands(&prices, 20, 2.0);
+            Iteration::black_box((upper, middle, lower))
+        });
+    });
+
+    b.bench("atr_14_10k", |iter| {
+        let highs: Vec<f64> = prices.iter().map(|p| p * 1.02).collect();
+        let lows: Vec<f64> = prices.iter().map(|p| p * 0.98).collect();
+        iter.iter(|| {
+            let atr = TechnicalIndicators::atr(&highs, &lows, &prices, 14);
+            Iteration::black_box(atr)
+        });
+    });
+
+    b.bench("vwap_10k", |iter| {
+        iter.iter(|| {
+            let vwap = TechnicalIndicators::vwap(&prices, &volumes);
+            Iteration::black_box(vwap)
+        });
+    });
+
+    // Market tensor operations
+    b.bench("tensor_create_4d", |iter| {
+        iter.iter(|| {
+            let tensor = MarketTensor4D::new(100, 50, 10, 4);
+            Iteration::black_box(tensor)
+        });
+    });
+
+    b.bench("tensor_slice_time", |iter| {
+        let tensor = MarketTensor4D::new(100, 50, 10, 4);
+        tensor.fill_random();
+        iter.iter(|| {
+            let slice = tensor.slice_time(50);
+            Iteration::black_box(slice)
+        });
+    });
+
+    // Portfolio optimization
+    b.bench("portfolio_mean_variance_50", |iter| {
+        let returns = Matrix::random(252, 50);  // 1 year of data, 50 assets
+        let optimizer = PortfolioOptimizer::new(&returns);
+        iter.iter(|| {
+            let weights = optimizer.mean_variance_optimize(0.1);
+            Iteration::black_box(weights)
+        });
+    });
+
+    b.bench("portfolio_risk_parity_50", |iter| {
+        let returns = Matrix::random(252, 50);
+        let optimizer = PortfolioOptimizer::new(&returns);
+        iter.iter(|| {
+            let weights = optimizer.risk_parity();
+            Iteration::black_box(weights)
+        });
+    });
+
+    b.bench("portfolio_max_sharpe_50", |iter| {
+        let returns = Matrix::random(252, 50);
+        let optimizer = PortfolioOptimizer::new(&returns);
+        iter.iter(|| {
+            let weights = optimizer.max_sharpe(0.02);
+            Iteration::black_box(weights)
+        });
+    });
+
+    // Differential geometry
+    b.bench("christoffel_symbols_10x10", |iter| {
+        let tensor = MarketTensor4D::new(100, 10, 10, 4);
+        tensor.fill_random();
+        let geometry = MarketGeometry::new(&tensor);
+        iter.iter(|| {
+            let christoffel = geometry.christoffel_symbols();
+            Iteration::black_box(christoffel)
+        });
+    });
+
+    b.bench("riemann_curvature_10x10", |iter| {
+        let tensor = MarketTensor4D::new(100, 10, 10, 4);
+        tensor.fill_random();
+        let geometry = MarketGeometry::new(&tensor);
+        iter.iter(|| {
+            let riemann = geometry.riemann_tensor();
+            Iteration::black_box(riemann)
+        });
+    });
+
+    b.bench("geodesic_path_10", |iter| {
+        let tensor = MarketTensor4D::new(100, 10, 10, 4);
+        tensor.fill_random();
+        let geometry = MarketGeometry::new(&tensor);
+        let start = vec![0.1; 10];
+        let end = vec![0.1; 10];
+        iter.iter(|| {
+            let path = geometry.geodesic(&start, &end, 100);
+            Iteration::black_box(path)
+        });
+    });
+
+    b.group_end();
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ORACLE BENCHMARKS (Prediction/Forecasting)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+fn bench_oracle(b: &mut Bencher) {
+    b.group("Oracle (Prediction)");
+
+    // Generate time series data
+    let series: Vec<f64> = (0..1000).map(|i| {
+        100.0 + sin(i as f64 * 0.05) * 20.0 + sin(i as f64 * 0.01) * 10.0 + (i as f64 * 0.01)
+    }).collect();
+
+    // ARIMA
+    b.bench("arima_fit_1000", |iter| {
+        iter.iter(|| {
+            let model = TimeSeriesForecaster::arima(&series, 2, 1, 2);
+            Iteration::black_box(model)
+        });
+    });
+
+    b.bench("arima_forecast_100", |iter| {
+        let model = TimeSeriesForecaster::arima(&series, 2, 1, 2);
+        iter.iter(|| {
+            let forecast = model.forecast(100);
+            Iteration::black_box(forecast)
+        });
+    });
+
+    // Holt-Winters
+    b.bench("holt_winters_fit_1000", |iter| {
+        iter.iter(|| {
+            let model = TimeSeriesForecaster::holt_winters(&series, 12, true);
+            Iteration::black_box(model)
+        });
+    });
+
+    // Gaussian Process
+    b.bench("gaussian_process_fit_500", |iter| {
+        let short_series: Vec<f64> = series[..500].to_vec();
+        iter.iter(|| {
+            let model = TimeSeriesForecaster::gaussian_process(&short_series);
+            Iteration::black_box(model)
+        });
+    });
+
+    // Anomaly detection
+    b.bench("anomaly_detect_1000", |iter| {
+        let detector = AnomalyDetector::new(3.0);
+        iter.iter(|| {
+            let anomalies = detector.detect(&series);
+            Iteration::black_box(anomalies)
+        });
+    });
+
+    b.bench("anomaly_isolation_forest_1000", |iter| {
+        let detector = AnomalyDetector::isolation_forest(100, 256);
+        iter.iter(|| {
+            let scores = detector.score(&series);
+            Iteration::black_box(scores)
+        });
+    });
+
+    // Prophetic Ensemble
+    b.bench("prophetic_ensemble_fit", |iter| {
+        iter.iter(|| {
+            let ensemble = PropheticEnsemble::new(&series);
+            Iteration::black_box(ensemble)
+        });
+    });
+
+    b.bench("prophetic_ensemble_forecast", |iter| {
+        let ensemble = PropheticEnsemble::new(&series);
+        iter.iter(|| {
+            let forecast = ensemble.forecast(50);
+            Iteration::black_box(forecast)
+        });
+    });
+
+    b.group_end();
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// AXIOM BENCHMARKS (AI/Neural Networks)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+fn bench_axiom(b: &mut Bencher) {
+    b.group("Axiom (AI/ML)");
+
+    // Tensor operations
+    b.bench("tensor_create_1000x1000", |iter| {
+        iter.iter(|| {
+            let t = Tensor::zeros(&[1000, 1000]);
+            Iteration::black_box(t)
+        });
+    });
+
+    b.bench("tensor_matmul_256x256", |iter| {
+        let a = Tensor::random(&[256, 256]);
+        let b = Tensor::random(&[256, 256]);
+        iter.iter(|| {
+            let c = a.matmul(&b);
+            Iteration::black_box(c)
+        });
+    });
+
+    b.bench("tensor_relu_1m", |iter| {
+        let t = Tensor::random(&[1000, 1000]);
+        iter.iter(|| {
+            let activated = t.relu();
+            Iteration::black_box(activated)
+        });
+    });
+
+    b.bench("tensor_softmax_1000", |iter| {
+        let t = Tensor::random(&[1, 1000]);
+        iter.iter(|| {
+            let probs = t.softmax(1);
+            Iteration::black_box(probs)
+        });
+    });
+
+    b.bench("tensor_conv2d_32x32", |iter| {
+        let input = Tensor::random(&[1, 3, 32, 32]);
+        let kernel = Tensor::random(&[16, 3, 3, 3]);
+        iter.iter(|| {
+            let output = input.conv2d(&kernel, 1, 1);
+            Iteration::black_box(output)
+        });
+    });
+
+    // Neural network forward pass
+    b.bench("mlp_forward_784_256_10", |iter| {
+        let nn = NeuralNetwork::mlp(&[784, 256, 128, 10]);
+        let input = Tensor::random(&[32, 784]);  // Batch of 32
+        iter.iter(|| {
+            let output = nn.forward(&input);
+            Iteration::black_box(output)
+        });
+    });
+
+    b.bench("mlp_backward_784_256_10", |iter| {
+        let mut nn = NeuralNetwork::mlp(&[784, 256, 128, 10]);
+        let input = Tensor::random(&[32, 784]);
+        let target = Tensor::random(&[32, 10]);
+        iter.iter(|| {
+            let loss = nn.backward(&input, &target);
+            Iteration::black_box(loss)
+        });
+    });
+
+    // Dual numbers for automatic differentiation
+    b.bench("dual_number_chain_1000", |iter| {
+        iter.iter(|| {
+            let mut x = DualNumber::variable(2.0);
+            for _ in 0..1000 {
+                x = x.sin().exp().sqrt();
+            }
+            Iteration::black_box(x.derivative())
+        });
+    });
+
+    // Evolution engine
+    b.bench("evolution_step_100_pop", |iter| {
+        let engine = EvolutionEngine::new(100, 50);  // 100 individuals, 50 genes
+        iter.iter(|| {
+            let evolved = engine.evolve_step();
+            Iteration::black_box(evolved)
+        });
+    });
+
+    b.group_end();
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// SPECTRUM BENCHMARKS (Color Science)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+fn bench_spectrum(b: &mut Bencher) {
+    b.group("Spectrum (Color)");
+
+    // Color conversions
+    b.bench("rgb_to_lab_10k", |iter| {
+        let colors: Vec<Color> = (0..10_000).map(|i| {
+            Color::rgb(
+                ((i * 17) % 256) as u8,
+                ((i * 31) % 256) as u8,
+                ((i * 47) % 256) as u8,
+            )
+        }).collect();
+
+        iter.iter(|| {
+            let labs: Vec<_> = colors.iter().map(|c| c.to_lab()).collect();
+            Iteration::black_box(labs)
+        });
+    });
+
+    b.bench("rgb_to_xyz_10k", |iter| {
+        let colors: Vec<Color> = (0..10_000).map(|i| {
+            Color::rgb(
+                ((i * 17) % 256) as u8,
+                ((i * 31) % 256) as u8,
+                ((i * 47) % 256) as u8,
+            )
+        }).collect();
+
+        iter.iter(|| {
+            let xyzs: Vec<_> = colors.iter().map(|c| c.to_xyz()).collect();
+            Iteration::black_box(xyzs)
+        });
+    });
+
+    b.bench("color_blend_10k", |iter| {
+        let c1 = Color::rgb(255, 0, 0);
+        let c2 = Color::rgb(0, 0, 255);
+        iter.iter(|| {
+            let mut colors = Vec::with_capacity(10_000);
+            for i in 0..10_000 {
+                colors.push(c1.blend(&c2, (i as f32) / 10_000.0));
+            }
+            Iteration::black_box(colors)
+        });
+    });
+
+    b.bench("perceptual_difference_10k", |iter| {
+        let colors: Vec<Color> = (0..100).map(|i| {
+            Color::rgb(
+                ((i * 17) % 256) as u8,
+                ((i * 31) % 256) as u8,
+                ((i * 47) % 256) as u8,
+            )
+        }).collect();
+
+        iter.iter(|| {
+            let mut sum = 0.0f32;
+            for i in 0..colors.len() {
+                for j in 0..colors.len() {
+                    sum += colors[i].delta_e(&colors[j]);
+                }
+            }
+            Iteration::black_box(sum)
+        });
+    });
+
+    // HDR processing
+    b.bench("tonemap_reinhard_1920x1080", |iter| {
+        let hdr_image: Vec<(f32, f32, f32)> = (0..1920*1080).map(|i| {
+            let v = (i as f32) / (1920.0 * 1080.0) * 10.0;
+            (v, v * 0.8, v * 0.6)
+        }).collect();
+
+        let mapper = ToneMapper::reinhard(2.2);
+        iter.iter(|| {
+            let ldr = mapper.map(&hdr_image);
+            Iteration::black_box(ldr)
+        });
+    });
+
+    b.bench("tonemap_aces_1920x1080", |iter| {
+        let hdr_image: Vec<(f32, f32, f32)> = (0..1920*1080).map(|i| {
+            let v = (i as f32) / (1920.0 * 1080.0) * 10.0;
+            (v, v * 0.8, v * 0.6)
+        }).collect();
+
+        let mapper = ToneMapper::aces();
+        iter.iter(|| {
+            let ldr = mapper.map(&hdr_image);
+            Iteration::black_box(ldr)
+        });
+    });
+
+    // Colorspace conversions
+    b.bench("gamut_mapping_p3_to_srgb", |iter| {
+        let colors: Vec<Color> = (0..10_000).map(|i| {
+            Color::display_p3(
+                (i as f32) / 10_000.0,
+                ((i * 3) as f32) / 10_000.0 % 1.0,
+                ((i * 7) as f32) / 10_000.0 % 1.0,
+            )
+        }).collect();
+
+        iter.iter(|| {
+            let mapped: Vec<_> = colors.iter().map(|c| c.to_srgb_gamut_mapped()).collect();
+            Iteration::black_box(mapped)
+        });
+    });
+
+    b.group_end();
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// CONCURRENCY BENCHMARKS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+fn bench_concurrency(b: &mut Bencher) {
+    b.group("Concurrency");
+
+    use foundation::sync::{Mutex, RwLock, Channel, Semaphore};
+    use foundation::thread::{spawn, ThreadPool};
+
+    // Mutex benchmarks
+    b.bench("mutex_lock_unlock_10k", |iter| {
+        let mutex = Mutex::new(0i64);
+        iter.iter(|| {
+            for _ in 0..10_000 {
+                let mut guard = mutex.lock();
+                *guard += 1;
+            }
+            Iteration::black_box(*mutex.lock())
+        });
+    });
+
+    b.bench("rwlock_read_10k", |iter| {
+        let rwlock = RwLock::new(42i64);
+        iter.iter(|| {
+            let mut sum = 0i64;
+            for _ in 0..10_000 {
+                sum += *rwlock.read();
+            }
+            Iteration::black_box(sum)
+        });
+    });
+
+    b.bench("rwlock_write_1k", |iter| {
+        let rwlock = RwLock::new(0i64);
+        iter.iter(|| {
+            for _ in 0..1_000 {
+                *rwlock.write() += 1;
+            }
+            Iteration::black_box(*rwlock.read())
+        });
+    });
+
+    // Channel benchmarks
+    b.bench("channel_send_recv_10k", |iter| {
+        let (tx, rx) = Channel::bounded(1024);
+        iter.iter(|| {
+            spawn(move || {
+                for i in 0..10_000 {
+                    tx.send(i).ok();
+                }
+            });
+
+            let mut sum = 0i64;
+            for _ in 0..10_000 {
+                sum += rx.recv().unwrap_or(0);
+            }
+            Iteration::black_box(sum)
+        });
+    });
+
+    b.bench("channel_mpsc_4_threads", |iter| {
+        let (tx, rx) = Channel::bounded(1024);
+        iter.iter(|| {
+            for t in 0..4 {
+                let tx = tx.clone();
+                spawn(move || {
+                    for i in 0..2_500 {
+                        tx.send(t * 2500 + i).ok();
+                    }
+                });
+            }
+
+            let mut sum = 0i64;
+            for _ in 0..10_000 {
+                sum += rx.recv().unwrap_or(0);
+            }
+            Iteration::black_box(sum)
+        });
+    });
+
+    // Thread pool benchmarks
+    b.bench("threadpool_submit_10k_tasks", |iter| {
+        let pool = ThreadPool::new(4);
+        iter.iter(|| {
+            let handles: Vec<_> = (0..10_000).map(|i| {
+                pool.submit(move || i * 2)
+            }).collect();
+
+            let sum: i64 = handles.into_iter().map(|h| h.join()).sum();
+            Iteration::black_box(sum)
+        });
+    });
+
+    b.bench("parallel_map_10k", |iter| {
+        let data: Vec<i64> = (0..10_000).collect();
+        iter.iter(|| {
+            let result: Vec<i64> = data.par_iter().map(|x| x * x).collect();
+            Iteration::black_box(result)
+        });
+    });
+
+    b.bench("parallel_reduce_10k", |iter| {
+        let data: Vec<i64> = (0..10_000).collect();
+        iter.iter(|| {
+            let sum: i64 = data.par_iter().reduce(|| 0, |a, b| a + b);
+            Iteration::black_box(sum)
+        });
+    });
+
+    // Semaphore benchmarks
+    b.bench("semaphore_acquire_release_10k", |iter| {
+        let sem = Semaphore::new(10);
+        iter.iter(|| {
+            for _ in 0..10_000 {
+                let permit = sem.acquire();
+                Iteration::black_box(&permit);
+                // permit dropped, releasing
+            }
+        });
+    });
+
+    b.group_end();
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// MAIN ENTRY POINT
+// ═══════════════════════════════════════════════════════════════════════════════
+
+pub fn main() {
+    println!("╔═══════════════════════════════════════════════════════════════════════════╗");
+    println!("║  BUILD-UNIVERSE Comprehensive Benchmark Suite v2.0.0                    ║");
+    println!("║  Copyright (c) 2024-2025 Zain Dana Harper. All Rights Reserved.           ║");
+    println!("╚═══════════════════════════════════════════════════════════════════════════╝");
+    println!();
+
+    run_all_benchmarks();
+
+    println!();
+    println!("Benchmarks complete. Results saved to benchmark_results.json");
+}

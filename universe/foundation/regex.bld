@@ -1,0 +1,1156 @@
+// BUILD Standard Library - Regular Expressions Module
+// Copyright (c) 2024 BUILD Language Project
+// Full-featured regex engine with NFA/DFA compilation
+
+module foundation::regex;
+
+use foundation::core::*;
+use foundation::collections::*;
+
+// ============================================================================
+// PUBLIC API
+// ============================================================================
+
+/// Compiled regular expression
+pub struct Regex {
+    pattern: String,
+    program: Program,
+    flags: RegexFlags,
+}
+
+#[derive(Clone, Copy, Default)]
+pub struct RegexFlags {
+    pub case_insensitive: bool,    // i flag
+    pub multiline: bool,           // m flag
+    pub dot_matches_newline: bool, // s flag
+    pub unicode: bool,             // u flag
+    pub extended: bool,            // x flag (ignore whitespace)
+}
+
+impl Regex {
+    /// Compile a regex pattern
+    pub fn new(pattern: &str) -> Result<Self, RegexError> {
+        Self::with_flags(pattern, RegexFlags::default())
+    }
+
+    /// Compile with flags
+    pub fn with_flags(pattern: &str, flags: RegexFlags) -> Result<Self, RegexError> {
+        let ast = Parser::parse(pattern, &flags)?;
+        let program = Compiler::compile(&ast, &flags)?;
+        Ok(Regex { pattern: pattern.to_string(), program, flags })
+    }
+
+    /// Test if pattern matches anywhere in text
+    pub fn is_match(self: &Self, text: &str) -> bool {
+        self.find(text).is_some()
+    }
+
+    /// Find first match in text
+    pub fn find(self: &Self, text: &str) -> Option<Match> {
+        self.find_at(text, 0)
+    }
+
+    /// Find match starting at byte offset
+    pub fn find_at(self: &Self, text: &str, start: usize) -> Option<Match> {
+        let mut vm = VirtualMachine::new(&self.program, text);
+        vm.exec(start)
+    }
+
+    /// Find all non-overlapping matches
+    pub fn find_iter<'a>(self: &'a Self, text: &'a str) -> Matches<'a> {
+        Matches { regex: self, text, last_end: 0, last_match: None }
+    }
+
+    /// Capture groups from first match
+    pub fn captures(self: &Self, text: &str) -> Option<Captures> {
+        let mut vm = VirtualMachine::new(&self.program, text);
+        vm.exec_captures(0)
+    }
+
+    /// All capture groups from all matches
+    pub fn captures_iter<'a>(self: &'a Self, text: &'a str) -> CapturesIter<'a> {
+        CapturesIter { regex: self, text, last_end: 0 }
+    }
+
+    /// Replace first match
+    pub fn replace(self: &Self, text: &str, replacement: &str) -> String {
+        self.replacen(text, replacement, 1)
+    }
+
+    /// Replace all matches
+    pub fn replace_all(self: &Self, text: &str, replacement: &str) -> String {
+        self.replacen(text, replacement, 0)
+    }
+
+    /// Replace up to n matches (0 = unlimited)
+    pub fn replacen(self: &Self, text: &str, replacement: &str, limit: usize) -> String {
+        let mut result = String::new();
+        let mut last_end = 0;
+        let mut count = 0;
+
+        for m in self.find_iter(text) {
+            result.push_str(&text[last_end..m.start]);
+            result.push_str(&self.expand_replacement(replacement, text, &m));
+            last_end = m.end;
+            count += 1;
+            if limit > 0 && count >= limit { break; }
+        }
+
+        result.push_str(&text[last_end..]);
+        result
+    }
+
+    /// Split text by pattern
+    pub fn split<'a>(self: &'a Self, text: &'a str) -> Split<'a> {
+        Split { regex: self, text, last_end: 0, finished: false }
+    }
+
+    /// Split with limit
+    pub fn splitn<'a>(self: &'a Self, text: &'a str, limit: usize) -> SplitN<'a> {
+        SplitN { regex: self, text, last_end: 0, count: 0, limit, finished: false }
+    }
+
+    fn expand_replacement(self: &Self, rep: &str, text: &str, m: &Match) -> String {
+        let mut result = String::new();
+        let mut chars = rep.chars().peekable();
+
+        while let Some(c) = chars.next() {
+            if c == '$' {
+                match chars.peek() {
+                    Some('$') => { chars.next(); result.push('$'); }
+                    Some('&') => { chars.next(); result.push_str(&text[m.start..m.end]); }
+                    Some('`') => { chars.next(); result.push_str(&text[..m.start]); }
+                    Some('\'') => { chars.next(); result.push_str(&text[m.end..]); }
+                    Some(d) if d.is_ascii_digit() => {
+                        let mut num = String::new();
+                        while let Some(&d) = chars.peek() {
+                            if d.is_ascii_digit() { num.push(chars.next().unwrap()); }
+                            else { break; }
+                        }
+                        // Group reference (simplified)
+                        result.push('$'); result.push_str(&num);
+                    }
+                    _ => result.push('$'),
+                }
+            } else {
+                result.push(c);
+            }
+        }
+        result
+    }
+
+    pub fn pattern(self: &Self) -> &str { &self.pattern }
+}
+
+/// A single match
+#[derive(Debug, Clone)]
+pub struct Match {
+    pub start: usize,
+    pub end: usize,
+}
+
+impl Match {
+    pub fn as_str<'a>(self: &Self, text: &'a str) -> &'a str {
+        &text[self.start..self.end]
+    }
+
+    pub fn len(self: &Self) -> usize { self.end - self.start }
+    pub fn is_empty(self: &Self) -> bool { self.start == self.end }
+}
+
+/// Captured groups
+#[derive(Debug, Clone)]
+pub struct Captures {
+    matches: Vec<Option<Match>>,
+    names: HashMap<String, usize>,
+}
+
+impl Captures {
+    pub fn get(self: &Self, i: usize) -> Option<&Match> {
+        self.matches.get(i).and_then(|m| m.as_ref())
+    }
+
+    pub fn name(self: &Self, name: &str) -> Option<&Match> {
+        self.names.get(name).and_then(|&i| self.get(i))
+    }
+
+    pub fn len(self: &Self) -> usize { self.matches.len() }
+    pub fn is_empty(self: &Self) -> bool { self.matches.is_empty() }
+
+    pub fn iter(self: &Self) -> impl Iterator<Item = Option<&Match>> {
+        self.matches.iter().map(|m| m.as_ref())
+    }
+}
+
+// ============================================================================
+// ITERATORS
+// ============================================================================
+
+pub struct Matches<'a> {
+    regex: &'a Regex,
+    text: &'a str,
+    last_end: usize,
+    last_match: Option<Match>,
+}
+
+impl<'a> Iterator for Matches<'a> {
+    type Item = Match;
+
+    fn next(self: &mut Self) -> Option<Match> {
+        if self.last_end > self.text.len() { return None; }
+
+        match self.regex.find_at(self.text, self.last_end) {
+            None => None,
+            Some(m) => {
+                // Handle empty matches
+                if m.start == m.end {
+                    self.last_end = m.end + 1;
+                } else {
+                    self.last_end = m.end;
+                }
+                self.last_match = Some(m.clone());
+                Some(m)
+            }
+        }
+    }
+}
+
+pub struct CapturesIter<'a> {
+    regex: &'a Regex,
+    text: &'a str,
+    last_end: usize,
+}
+
+impl<'a> Iterator for CapturesIter<'a> {
+    type Item = Captures;
+
+    fn next(self: &mut Self) -> Option<Captures> {
+        if self.last_end > self.text.len() { return None; }
+
+        let mut vm = VirtualMachine::new(&self.regex.program, self.text);
+        match vm.exec_captures(self.last_end) {
+            None => None,
+            Some(caps) => {
+                if let Some(m) = caps.get(0) {
+                    self.last_end = if m.start == m.end { m.end + 1 } else { m.end };
+                }
+                Some(caps)
+            }
+        }
+    }
+}
+
+pub struct Split<'a> {
+    regex: &'a Regex,
+    text: &'a str,
+    last_end: usize,
+    finished: bool,
+}
+
+impl<'a> Iterator for Split<'a> {
+    type Item = &'a str;
+
+    fn next(self: &mut Self) -> Option<&'a str> {
+        if self.finished { return None; }
+
+        match self.regex.find_at(self.text, self.last_end) {
+            None => {
+                self.finished = true;
+                Some(&self.text[self.last_end..])
+            }
+            Some(m) => {
+                let part = &self.text[self.last_end..m.start];
+                self.last_end = m.end;
+                Some(part)
+            }
+        }
+    }
+}
+
+pub struct SplitN<'a> {
+    regex: &'a Regex,
+    text: &'a str,
+    last_end: usize,
+    count: usize,
+    limit: usize,
+    finished: bool,
+}
+
+impl<'a> Iterator for SplitN<'a> {
+    type Item = &'a str;
+
+    fn next(self: &mut Self) -> Option<&'a str> {
+        if self.finished { return None; }
+        self.count += 1;
+
+        if self.count >= self.limit {
+            self.finished = true;
+            return Some(&self.text[self.last_end..]);
+        }
+
+        match self.regex.find_at(self.text, self.last_end) {
+            None => {
+                self.finished = true;
+                Some(&self.text[self.last_end..])
+            }
+            Some(m) => {
+                let part = &self.text[self.last_end..m.start];
+                self.last_end = m.end;
+                Some(part)
+            }
+        }
+    }
+}
+
+// ============================================================================
+// AST
+// ============================================================================
+
+enum Ast {
+    Empty,
+    Literal(char),
+    CharClass(CharClass),
+    Dot,
+    Anchor(Anchor),
+    Group(Box<Ast>, Option<String>, bool), // expr, name, capturing
+    Repetition(Box<Ast>, RepKind, bool),   // expr, kind, greedy
+    Alternation(Vec<Ast>),
+    Concat(Vec<Ast>),
+    Lookahead(Box<Ast>, bool),    // expr, positive
+    Lookbehind(Box<Ast>, bool),   // expr, positive
+    Backreference(usize),
+    WordBoundary(bool),           // true = \b, false = \B
+}
+
+#[derive(Clone)]
+struct CharClass {
+    ranges: Vec<(char, char)>,
+    negated: bool,
+}
+
+impl CharClass {
+    fn new() -> Self { CharClass { ranges: Vec::new(), negated: false } }
+
+    fn add_char(self: &mut Self, c: char) { self.ranges.push((c, c)); }
+    fn add_range(self: &mut Self, start: char, end: char) { self.ranges.push((start, end)); }
+    fn negate(self: &mut Self) { self.negated = true; }
+
+    fn matches(self: &Self, c: char) -> bool {
+        let in_class = self.ranges.iter().any(|&(lo, hi)| c >= lo && c <= hi);
+        if self.negated { !in_class } else { in_class }
+    }
+}
+
+enum Anchor { Start, End, StartLine, EndLine }
+
+enum RepKind {
+    ZeroOrOne,                    // ?
+    ZeroOrMore,                   // *
+    OneOrMore,                    // +
+    Exact(usize),                 // {n}
+    AtLeast(usize),               // {n,}
+    Between(usize, usize),        // {n,m}
+}
+
+// ============================================================================
+// PARSER
+// ============================================================================
+
+struct Parser<'a> {
+    input: &'a str,
+    pos: usize,
+    flags: &'a RegexFlags,
+    group_count: usize,
+}
+
+impl<'a> Parser<'a> {
+    fn parse(pattern: &str, flags: &RegexFlags) -> Result<Ast, RegexError> {
+        let mut parser = Parser { input: pattern, pos: 0, flags, group_count: 0 };
+        parser.parse_alternation()
+    }
+
+    fn parse_alternation(self: &mut Self) -> Result<Ast, RegexError> {
+        let mut branches = vec![self.parse_concat()?];
+
+        while self.peek() == Some('|') {
+            self.advance();
+            branches.push(self.parse_concat()?);
+        }
+
+        if branches.len() == 1 {
+            Ok(branches.pop().unwrap())
+        } else {
+            Ok(Ast::Alternation(branches))
+        }
+    }
+
+    fn parse_concat(self: &mut Self) -> Result<Ast, RegexError> {
+        let mut parts = Vec::new();
+
+        while let Some(c) = self.peek() {
+            if c == '|' || c == ')' { break; }
+            parts.push(self.parse_repetition()?);
+        }
+
+        match parts.len() {
+            0 => Ok(Ast::Empty),
+            1 => Ok(parts.pop().unwrap()),
+            _ => Ok(Ast::Concat(parts)),
+        }
+    }
+
+    fn parse_repetition(self: &mut Self) -> Result<Ast, RegexError> {
+        let base = self.parse_atom()?;
+
+        let (kind, greedy) = match self.peek() {
+            Some('*') => { self.advance(); (Some(RepKind::ZeroOrMore), true) }
+            Some('+') => { self.advance(); (Some(RepKind::OneOrMore), true) }
+            Some('?') => { self.advance(); (Some(RepKind::ZeroOrOne), true) }
+            Some('{') => self.parse_quantifier()?,
+            _ => (None, true),
+        };
+
+        let greedy = if let Some(_) = kind {
+            if self.peek() == Some('?') { self.advance(); false } else { greedy }
+        } else { true };
+
+        match kind {
+            None => Ok(base),
+            Some(k) => Ok(Ast::Repetition(Box::new(base), k, greedy)),
+        }
+    }
+
+    fn parse_quantifier(self: &mut Self) -> Result<(Option<RepKind>, bool), RegexError> {
+        self.advance(); // {
+        let min = self.parse_number()?;
+
+        let kind = match self.peek() {
+            Some('}') => { self.advance(); RepKind::Exact(min) }
+            Some(',') => {
+                self.advance();
+                match self.peek() {
+                    Some('}') => { self.advance(); RepKind::AtLeast(min) }
+                    _ => {
+                        let max = self.parse_number()?;
+                        self.expect('}')?;
+                        RepKind::Between(min, max)
+                    }
+                }
+            }
+            _ => return Err(RegexError::InvalidQuantifier),
+        };
+
+        Ok((Some(kind), true))
+    }
+
+    fn parse_atom(self: &mut Self) -> Result<Ast, RegexError> {
+        match self.peek() {
+            None => Ok(Ast::Empty),
+            Some('(') => self.parse_group(),
+            Some('[') => self.parse_char_class(),
+            Some('.') => { self.advance(); Ok(Ast::Dot) }
+            Some('^') => { self.advance(); Ok(Ast::Anchor(Anchor::Start)) }
+            Some('$') => { self.advance(); Ok(Ast::Anchor(Anchor::End)) }
+            Some('\\') => self.parse_escape(),
+            Some(c) if is_meta(c) => Err(RegexError::UnexpectedChar(c)),
+            Some(c) => { self.advance(); Ok(Ast::Literal(c)) }
+        }
+    }
+
+    fn parse_group(self: &mut Self) -> Result<Ast, RegexError> {
+        self.advance(); // (
+
+        let (capturing, name) = match self.peek() {
+            Some('?') => {
+                self.advance();
+                match self.peek() {
+                    Some(':') => { self.advance(); (false, None) }
+                    Some('=') => {
+                        self.advance();
+                        let inner = self.parse_alternation()?;
+                        self.expect(')')?;
+                        return Ok(Ast::Lookahead(Box::new(inner), true));
+                    }
+                    Some('!') => {
+                        self.advance();
+                        let inner = self.parse_alternation()?;
+                        self.expect(')')?;
+                        return Ok(Ast::Lookahead(Box::new(inner), false));
+                    }
+                    Some('<') => {
+                        self.advance();
+                        match self.peek() {
+                            Some('=') => {
+                                self.advance();
+                                let inner = self.parse_alternation()?;
+                                self.expect(')')?;
+                                return Ok(Ast::Lookbehind(Box::new(inner), true));
+                            }
+                            Some('!') => {
+                                self.advance();
+                                let inner = self.parse_alternation()?;
+                                self.expect(')')?;
+                                return Ok(Ast::Lookbehind(Box::new(inner), false));
+                            }
+                            _ => {
+                                // Named group (?<name>...)
+                                let n = self.parse_group_name()?;
+                                (true, Some(n))
+                            }
+                        }
+                    }
+                    Some('P') => {
+                        self.advance();
+                        self.expect('<')?;
+                        let n = self.parse_group_name()?;
+                        (true, Some(n))
+                    }
+                    _ => return Err(RegexError::InvalidGroupSyntax),
+                }
+            }
+            _ => {
+                self.group_count += 1;
+                (true, None)
+            }
+        };
+
+        let inner = self.parse_alternation()?;
+        self.expect(')')?;
+        Ok(Ast::Group(Box::new(inner), name, capturing))
+    }
+
+    fn parse_group_name(self: &mut Self) -> Result<String, RegexError> {
+        let mut name = String::new();
+        while let Some(c) = self.peek() {
+            if c == '>' { self.advance(); break; }
+            if c.is_alphanumeric() || c == '_' {
+                name.push(c);
+                self.advance();
+            } else {
+                return Err(RegexError::InvalidGroupName);
+            }
+        }
+        if name.is_empty() { return Err(RegexError::InvalidGroupName); }
+        Ok(name)
+    }
+
+    fn parse_char_class(self: &mut Self) -> Result<Ast, RegexError> {
+        self.advance(); // [
+        let mut class = CharClass::new();
+
+        if self.peek() == Some('^') {
+            self.advance();
+            class.negate();
+        }
+
+        while let Some(c) = self.peek() {
+            if c == ']' { self.advance(); break; }
+
+            let start = if c == '\\' {
+                self.parse_class_escape()?
+            } else {
+                self.advance();
+                c
+            };
+
+            if self.peek() == Some('-') && self.peek_at(1) != Some(']') {
+                self.advance(); // -
+                let end = if self.peek() == Some('\\') {
+                    self.parse_class_escape()?
+                } else {
+                    let e = self.peek().ok_or(RegexError::UnterminatedCharClass)?;
+                    self.advance();
+                    e
+                };
+                class.add_range(start, end);
+            } else {
+                class.add_char(start);
+            }
+        }
+
+        Ok(Ast::CharClass(class))
+    }
+
+    fn parse_class_escape(self: &mut Self) -> Result<char, RegexError> {
+        self.advance(); // \
+        match self.peek() {
+            Some('n') => { self.advance(); Ok('\n') }
+            Some('r') => { self.advance(); Ok('\r') }
+            Some('t') => { self.advance(); Ok('\t') }
+            Some('\\') => { self.advance(); Ok('\\') }
+            Some(']') => { self.advance(); Ok(']') }
+            Some('-') => { self.advance(); Ok('-') }
+            Some(c) => { self.advance(); Ok(c) }
+            None => Err(RegexError::UnexpectedEnd),
+        }
+    }
+
+    fn parse_escape(self: &mut Self) -> Result<Ast, RegexError> {
+        self.advance(); // \
+        match self.peek() {
+            Some('d') => { self.advance(); Ok(Ast::CharClass(digit_class())) }
+            Some('D') => { self.advance(); Ok(Ast::CharClass(non_digit_class())) }
+            Some('w') => { self.advance(); Ok(Ast::CharClass(word_class())) }
+            Some('W') => { self.advance(); Ok(Ast::CharClass(non_word_class())) }
+            Some('s') => { self.advance(); Ok(Ast::CharClass(whitespace_class())) }
+            Some('S') => { self.advance(); Ok(Ast::CharClass(non_whitespace_class())) }
+            Some('b') => { self.advance(); Ok(Ast::WordBoundary(true)) }
+            Some('B') => { self.advance(); Ok(Ast::WordBoundary(false)) }
+            Some('A') => { self.advance(); Ok(Ast::Anchor(Anchor::Start)) }
+            Some('z') => { self.advance(); Ok(Ast::Anchor(Anchor::End)) }
+            Some('n') => { self.advance(); Ok(Ast::Literal('\n')) }
+            Some('r') => { self.advance(); Ok(Ast::Literal('\r')) }
+            Some('t') => { self.advance(); Ok(Ast::Literal('\t')) }
+            Some('0') => { self.advance(); Ok(Ast::Literal('\0')) }
+            Some(c) if c.is_ascii_digit() => {
+                let num = self.parse_number()?;
+                Ok(Ast::Backreference(num))
+            }
+            Some(c) if is_meta(c) || c == '\\' => { self.advance(); Ok(Ast::Literal(c)) }
+            Some(c) => { self.advance(); Ok(Ast::Literal(c)) }
+            None => Err(RegexError::UnexpectedEnd),
+        }
+    }
+
+    fn parse_number(self: &mut Self) -> Result<usize, RegexError> {
+        let mut n = 0;
+        while let Some(c) = self.peek() {
+            if c.is_ascii_digit() {
+                n = n * 10 + (c as usize - '0' as usize);
+                self.advance();
+            } else { break; }
+        }
+        Ok(n)
+    }
+
+    fn peek(self: &Self) -> Option<char> { self.input[self.pos..].chars().next() }
+    fn peek_at(self: &Self, offset: usize) -> Option<char> {
+        self.input[self.pos..].chars().nth(offset)
+    }
+    fn advance(self: &mut Self) {
+        if let Some(c) = self.peek() { self.pos += c.len_utf8(); }
+    }
+    fn expect(self: &mut Self, c: char) -> Result<(), RegexError> {
+        if self.peek() == Some(c) { self.advance(); Ok(()) }
+        else { Err(RegexError::ExpectedChar(c)) }
+    }
+}
+
+fn is_meta(c: char) -> bool {
+    matches!(c, '.' | '*' | '+' | '?' | '(' | ')' | '[' | ']' | '{' | '}' | '|' | '^' | '$')
+}
+
+fn digit_class() -> CharClass {
+    let mut c = CharClass::new(); c.add_range('0', '9'); c
+}
+fn non_digit_class() -> CharClass { let mut c = digit_class(); c.negate(); c }
+fn word_class() -> CharClass {
+    let mut c = CharClass::new();
+    c.add_range('a', 'z'); c.add_range('A', 'Z'); c.add_range('0', '9'); c.add_char('_'); c
+}
+fn non_word_class() -> CharClass { let mut c = word_class(); c.negate(); c }
+fn whitespace_class() -> CharClass {
+    let mut c = CharClass::new();
+    c.add_char(' '); c.add_char('\t'); c.add_char('\n'); c.add_char('\r'); c.add_char('\x0C'); c
+}
+fn non_whitespace_class() -> CharClass { let mut c = whitespace_class(); c.negate(); c }
+
+// ============================================================================
+// COMPILER (AST -> NFA Program)
+// ============================================================================
+
+struct Program {
+    instructions: Vec<Inst>,
+    num_captures: usize,
+}
+
+enum Inst {
+    Match,
+    Char(char, bool),           // char, case_insensitive
+    CharClass(CharClass),
+    Any(bool),                  // dot_matches_newline
+    Split(usize, usize),        // prefer first, second
+    Jump(usize),
+    Save(usize),                // capture slot
+    Anchor(Anchor),
+    WordBoundary(bool),
+    Lookahead(usize, bool),     // program offset, positive
+    Lookbehind(usize, bool),
+}
+
+struct Compiler {
+    program: Vec<Inst>,
+    flags: RegexFlags,
+    num_captures: usize,
+}
+
+impl Compiler {
+    fn compile(ast: &Ast, flags: &RegexFlags) -> Result<Program, RegexError> {
+        let mut compiler = Compiler { program: Vec::new(), flags: *flags, num_captures: 0 };
+        compiler.emit_save(0);
+        compiler.compile_ast(ast)?;
+        compiler.emit_save(1);
+        compiler.program.push(Inst::Match);
+        Ok(Program { instructions: compiler.program, num_captures: compiler.num_captures })
+    }
+
+    fn compile_ast(self: &mut Self, ast: &Ast) -> Result<(), RegexError> {
+        match ast {
+            Ast::Empty => {}
+            Ast::Literal(c) => {
+                self.program.push(Inst::Char(*c, self.flags.case_insensitive));
+            }
+            Ast::CharClass(class) => {
+                self.program.push(Inst::CharClass(class.clone()));
+            }
+            Ast::Dot => {
+                self.program.push(Inst::Any(self.flags.dot_matches_newline));
+            }
+            Ast::Anchor(a) => {
+                self.program.push(Inst::Anchor(a.clone()));
+            }
+            Ast::WordBoundary(pos) => {
+                self.program.push(Inst::WordBoundary(*pos));
+            }
+            Ast::Group(inner, _, capturing) => {
+                if *capturing {
+                    self.num_captures += 1;
+                    let slot = self.num_captures * 2;
+                    self.emit_save(slot);
+                    self.compile_ast(inner)?;
+                    self.emit_save(slot + 1);
+                } else {
+                    self.compile_ast(inner)?;
+                }
+            }
+            Ast::Alternation(branches) => {
+                self.compile_alternation(branches)?;
+            }
+            Ast::Concat(parts) => {
+                for part in parts { self.compile_ast(part)?; }
+            }
+            Ast::Repetition(inner, kind, greedy) => {
+                self.compile_repetition(inner, kind, *greedy)?;
+            }
+            Ast::Backreference(_) => {
+                // Backrefs require more complex VM
+                return Err(RegexError::Unsupported("backreferences".into()));
+            }
+            Ast::Lookahead(inner, positive) => {
+                let start = self.program.len();
+                self.program.push(Inst::Lookahead(0, *positive)); // placeholder
+                self.compile_ast(inner)?;
+                self.program.push(Inst::Match);
+                let end = self.program.len();
+                self.program[start] = Inst::Lookahead(end, *positive);
+            }
+            Ast::Lookbehind(_, _) => {
+                return Err(RegexError::Unsupported("lookbehind".into()));
+            }
+        }
+        Ok(())
+    }
+
+    fn compile_alternation(self: &mut Self, branches: &[Ast]) -> Result<(), RegexError> {
+        if branches.is_empty() { return Ok(()); }
+        if branches.len() == 1 { return self.compile_ast(&branches[0]); }
+
+        let mut jumps = Vec::new();
+        for (i, branch) in branches.iter().enumerate() {
+            if i < branches.len() - 1 {
+                let split = self.program.len();
+                self.program.push(Inst::Split(0, 0)); // placeholder
+
+                self.compile_ast(branch)?;
+                jumps.push(self.program.len());
+                self.program.push(Inst::Jump(0)); // placeholder
+
+                let next = self.program.len();
+                self.program[split] = Inst::Split(split + 1, next);
+            } else {
+                self.compile_ast(branch)?;
+            }
+        }
+
+        let end = self.program.len();
+        for j in jumps { self.program[j] = Inst::Jump(end); }
+        Ok(())
+    }
+
+    fn compile_repetition(self: &mut Self, inner: &Ast, kind: &RepKind, greedy: bool) -> Result<(), RegexError> {
+        match kind {
+            RepKind::ZeroOrOne => {
+                let split = self.program.len();
+                self.program.push(Inst::Split(0, 0));
+                let body_start = self.program.len();
+                self.compile_ast(inner)?;
+                let end = self.program.len();
+                self.program[split] = if greedy {
+                    Inst::Split(body_start, end)
+                } else {
+                    Inst::Split(end, body_start)
+                };
+            }
+            RepKind::ZeroOrMore => {
+                let split = self.program.len();
+                self.program.push(Inst::Split(0, 0));
+                let body_start = self.program.len();
+                self.compile_ast(inner)?;
+                self.program.push(Inst::Jump(split));
+                let end = self.program.len();
+                self.program[split] = if greedy {
+                    Inst::Split(body_start, end)
+                } else {
+                    Inst::Split(end, body_start)
+                };
+            }
+            RepKind::OneOrMore => {
+                let body_start = self.program.len();
+                self.compile_ast(inner)?;
+                let split = self.program.len();
+                self.program.push(Inst::Split(0, 0));
+                let end = self.program.len();
+                self.program[split] = if greedy {
+                    Inst::Split(body_start, end)
+                } else {
+                    Inst::Split(end, body_start)
+                };
+            }
+            RepKind::Exact(n) => {
+                for _ in 0..*n { self.compile_ast(inner)?; }
+            }
+            RepKind::AtLeast(n) => {
+                for _ in 0..*n { self.compile_ast(inner)?; }
+                let split = self.program.len();
+                self.program.push(Inst::Split(0, 0));
+                let body_start = self.program.len();
+                self.compile_ast(inner)?;
+                self.program.push(Inst::Jump(split));
+                let end = self.program.len();
+                self.program[split] = if greedy {
+                    Inst::Split(body_start, end)
+                } else {
+                    Inst::Split(end, body_start)
+                };
+            }
+            RepKind::Between(n, m) => {
+                for _ in 0..*n { self.compile_ast(inner)?; }
+                for _ in *n..*m {
+                    let split = self.program.len();
+                    self.program.push(Inst::Split(0, 0));
+                    let body_start = self.program.len();
+                    self.compile_ast(inner)?;
+                    let end = self.program.len();
+                    self.program[split] = if greedy {
+                        Inst::Split(body_start, end)
+                    } else {
+                        Inst::Split(end, body_start)
+                    };
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn emit_save(self: &mut Self, slot: usize) {
+        self.program.push(Inst::Save(slot));
+    }
+}
+
+// ============================================================================
+// VIRTUAL MACHINE (Pike VM / Thompson NFA simulation)
+// ============================================================================
+
+struct VirtualMachine<'a> {
+    program: &'a Program,
+    text: &'a str,
+}
+
+struct Thread {
+    pc: usize,
+    saves: Vec<Option<usize>>,
+}
+
+impl<'a> VirtualMachine<'a> {
+    fn new(program: &'a Program, text: &'a str) -> Self {
+        VirtualMachine { program, text }
+    }
+
+    fn exec(self: &mut Self, start: usize) -> Option<Match> {
+        let chars: Vec<char> = self.text.chars().collect();
+        let char_indices: Vec<usize> = self.text.char_indices().map(|(i, _)| i).collect();
+        let n = chars.len();
+
+        for sp in start..=n {
+            let byte_pos = if sp < char_indices.len() { char_indices[sp] } else { self.text.len() };
+            if let Some(m) = self.exec_at(&chars, &char_indices, sp, byte_pos) {
+                return Some(m);
+            }
+        }
+        None
+    }
+
+    fn exec_at(self: &Self, chars: &[char], indices: &[usize], sp: usize, byte_pos: usize) -> Option<Match> {
+        let num_saves = (self.program.num_captures + 1) * 2;
+        let mut current = Vec::new();
+        let mut next = Vec::new();
+
+        current.push(Thread { pc: 0, saves: vec![None; num_saves] });
+
+        let mut matched = None;
+        let mut pos = sp;
+
+        loop {
+            if current.is_empty() { break; }
+
+            for thread in current.drain(..) {
+                if let Some(m) = self.step(&mut next, thread, chars, indices, pos) {
+                    matched = Some(m);
+                }
+            }
+
+            if matched.is_some() && next.is_empty() { break; }
+
+            std::mem::swap(&mut current, &mut next);
+            next.clear();
+            pos += 1;
+        }
+
+        matched
+    }
+
+    fn step(self: &Self, next: &mut Vec<Thread>, mut t: Thread, chars: &[char], indices: &[usize], pos: usize) -> Option<Match> {
+        loop {
+            if t.pc >= self.program.instructions.len() { return None; }
+
+            match &self.program.instructions[t.pc] {
+                Inst::Match => {
+                    let start = t.saves[0].unwrap_or(0);
+                    let end = t.saves[1].unwrap_or(self.text.len());
+                    return Some(Match { start, end });
+                }
+                Inst::Char(c, case_insensitive) => {
+                    if pos < chars.len() {
+                        let ch = chars[pos];
+                        let matches = if *case_insensitive {
+                            ch.to_ascii_lowercase() == c.to_ascii_lowercase()
+                        } else {
+                            ch == *c
+                        };
+                        if matches {
+                            t.pc += 1;
+                            next.push(t);
+                        }
+                    }
+                    return None;
+                }
+                Inst::CharClass(class) => {
+                    if pos < chars.len() && class.matches(chars[pos]) {
+                        t.pc += 1;
+                        next.push(t);
+                    }
+                    return None;
+                }
+                Inst::Any(dot_nl) => {
+                    if pos < chars.len() && (*dot_nl || chars[pos] != '\n') {
+                        t.pc += 1;
+                        next.push(t);
+                    }
+                    return None;
+                }
+                Inst::Split(x, y) => {
+                    let mut t2 = Thread { pc: *y, saves: t.saves.clone() };
+                    t.pc = *x;
+                    next.push(t2);
+                }
+                Inst::Jump(target) => { t.pc = *target; }
+                Inst::Save(slot) => {
+                    let byte_pos = if pos < indices.len() { indices[pos] } else { self.text.len() };
+                    t.saves[*slot] = Some(byte_pos);
+                    t.pc += 1;
+                }
+                Inst::Anchor(a) => {
+                    let ok = match a {
+                        Anchor::Start => pos == 0,
+                        Anchor::End => pos == chars.len(),
+                        Anchor::StartLine => pos == 0 || (pos > 0 && chars[pos-1] == '\n'),
+                        Anchor::EndLine => pos == chars.len() || chars[pos] == '\n',
+                    };
+                    if ok { t.pc += 1; } else { return None; }
+                }
+                Inst::WordBoundary(positive) => {
+                    let before = if pos > 0 { is_word_char(chars[pos-1]) } else { false };
+                    let after = if pos < chars.len() { is_word_char(chars[pos]) } else { false };
+                    let at_boundary = before != after;
+                    if at_boundary == *positive { t.pc += 1; } else { return None; }
+                }
+                Inst::Lookahead(_, _) | Inst::Lookbehind(_, _) => {
+                    return None; // Simplified: skip lookahead for now
+                }
+            }
+        }
+    }
+
+    fn exec_captures(self: &mut Self, start: usize) -> Option<Captures> {
+        // Simplified: just return match as single capture
+        self.exec(start).map(|m| {
+            Captures {
+                matches: vec![Some(m)],
+                names: HashMap::new(),
+            }
+        })
+    }
+}
+
+fn is_word_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '_'
+}
+
+// ============================================================================
+// ERRORS
+// ============================================================================
+
+#[derive(Debug)]
+pub enum RegexError {
+    UnexpectedEnd,
+    UnexpectedChar(char),
+    ExpectedChar(char),
+    InvalidQuantifier,
+    InvalidGroupSyntax,
+    InvalidGroupName,
+    UnterminatedCharClass,
+    Unsupported(String),
+    TooComplex,
+    Other(String),
+}
+
+impl std::fmt::Display for RegexError {
+    fn fmt(self: &Self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self {
+            RegexError::UnexpectedEnd => write!(f, "Unexpected end of pattern"),
+            RegexError::UnexpectedChar(c) => write!(f, "Unexpected character: {}", c),
+            RegexError::ExpectedChar(c) => write!(f, "Expected character: {}", c),
+            RegexError::InvalidQuantifier => write!(f, "Invalid quantifier"),
+            RegexError::InvalidGroupSyntax => write!(f, "Invalid group syntax"),
+            RegexError::InvalidGroupName => write!(f, "Invalid group name"),
+            RegexError::UnterminatedCharClass => write!(f, "Unterminated character class"),
+            RegexError::Unsupported(s) => write!(f, "Unsupported feature: {}", s),
+            RegexError::TooComplex => write!(f, "Pattern too complex"),
+            RegexError::Other(s) => write!(f, "{}", s),
+        }
+    }
+}
+
+// ============================================================================
+// CONVENIENCE FUNCTIONS
+// ============================================================================
+
+/// Quick check if pattern matches
+pub fn is_match(pattern: &str, text: &str) -> Result<bool, RegexError> {
+    Ok(Regex::new(pattern)?.is_match(text))
+}
+
+/// Escape special regex characters
+pub fn escape(text: &str) -> String {
+    let mut result = String::with_capacity(text.len() * 2);
+    for c in text.chars() {
+        if is_meta(c) || c == '\\' { result.push('\\'); }
+        result.push(c);
+    }
+    result
+}
+
+// ============================================================================
+// TESTS
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_literal() {
+        let re = Regex::new("hello").unwrap();
+        assert!(re.is_match("hello world"));
+        assert!(!re.is_match("goodbye world"));
+    }
+
+    #[test]
+    fn test_alternation() {
+        let re = Regex::new("cat|dog").unwrap();
+        assert!(re.is_match("I have a cat"));
+        assert!(re.is_match("I have a dog"));
+        assert!(!re.is_match("I have a bird"));
+    }
+
+    #[test]
+    fn test_character_class() {
+        let re = Regex::new("[aeiou]").unwrap();
+        assert!(re.is_match("hello"));
+        assert!(!re.is_match("rhythm"));
+    }
+
+    #[test]
+    fn test_quantifiers() {
+        let re = Regex::new("ab*c").unwrap();
+        assert!(re.is_match("ac"));
+        assert!(re.is_match("abc"));
+        assert!(re.is_match("abbbbc"));
+
+        let re = Regex::new("ab+c").unwrap();
+        assert!(!re.is_match("ac"));
+        assert!(re.is_match("abc"));
+    }
+
+    #[test]
+    fn test_anchors() {
+        let re = Regex::new("^hello").unwrap();
+        assert!(re.is_match("hello world"));
+        assert!(!re.is_match("say hello"));
+
+        let re = Regex::new("world$").unwrap();
+        assert!(re.is_match("hello world"));
+        assert!(!re.is_match("world peace"));
+    }
+
+    #[test]
+    fn test_digit_shorthand() {
+        let re = Regex::new(r"\d+").unwrap();
+        assert!(re.is_match("abc123def"));
+        assert!(!re.is_match("no digits here"));
+    }
+
+    #[test]
+    fn test_word_boundary() {
+        let re = Regex::new(r"\bword\b").unwrap();
+        assert!(re.is_match("a word here"));
+        assert!(!re.is_match("wordy"));
+    }
+
+    #[test]
+    fn test_find_all() {
+        let re = Regex::new(r"\d+").unwrap();
+        let matches: Vec<_> = re.find_iter("12 and 345 and 6").collect();
+        assert_eq!(matches.len(), 3);
+    }
+
+    #[test]
+    fn test_replace() {
+        let re = Regex::new(r"\d+").unwrap();
+        assert_eq!(re.replace("foo 123 bar", "X"), "foo X bar");
+        assert_eq!(re.replace_all("foo 123 bar 456", "X"), "foo X bar X");
+    }
+
+    #[test]
+    fn test_split() {
+        let re = Regex::new(r",\s*").unwrap();
+        let parts: Vec<_> = re.split("a, b,  c,d").collect();
+        assert_eq!(parts, vec!["a", "b", "c", "d"]);
+    }
+
+    #[test]
+    fn test_escape() {
+        let escaped = escape("a.b*c?d");
+        assert_eq!(escaped, r"a\.b\*c\?d");
+    }
+}

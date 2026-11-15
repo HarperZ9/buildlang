@@ -1,0 +1,1783 @@
+// ============================================================================
+// BUILD-UNIVERSE: NEXUS MOD UI SYSTEM
+// User interface for mod configuration and management
+// ============================================================================
+
+import nexus::lib::{ModMetadata, Version};
+import nexus::config::{ModConfig, ConfigValue, ConfigSchema};
+import nexus::loader::{ModLoader, ModInstance, LoadState};
+
+// ============================================================================
+// REGION: UI Theme
+// ============================================================================
+
+/// UI color scheme
+@derive(Debug, Clone)]
+struct UITheme {
+    /// Primary accent color
+    primary: Color4,
+    /// Secondary accent color
+    secondary: Color4,
+    /// Background color
+    background: Color4,
+    /// Surface color (cards, panels)
+    surface: Color4,
+    /// Text color
+    text: Color4,
+    /// Muted text color
+    text_muted: Color4,
+    /// Success color
+    success: Color4,
+    /// Warning color
+    warning: Color4,
+    /// Error color
+    error: Color4,
+    /// Border color
+    border: Color4,
+    /// Font family
+    font_family: String,
+    /// Font size base
+    font_size: f32,
+    /// Border radius
+    border_radius: f32,
+    /// Spacing unit
+    spacing: f32,
+}
+
+impl UITheme {
+    fn dark() -> Self {
+        UITheme {
+            primary: Color4::from_hex("#7C3AED"),
+            secondary: Color4::from_hex("#06B6D4"),
+            background: Color4::from_hex("#0F0F0F"),
+            surface: Color4::from_hex("#1A1A1A"),
+            text: Color4::from_hex("#FFFFFF"),
+            text_muted: Color4::from_hex("#A0A0A0"),
+            success: Color4::from_hex("#22C55E"),
+            warning: Color4::from_hex("#F59E0B"),
+            error: Color4::from_hex("#EF4444"),
+            border: Color4::from_hex("#333333"),
+            font_family: "Inter".to_string(),
+            font_size: 14.0,
+            border_radius: 8.0,
+            spacing: 8.0,
+        }
+    }
+
+    fn light() -> Self {
+        UITheme {
+            primary: Color4::from_hex("#7C3AED"),
+            secondary: Color4::from_hex("#0891B2"),
+            background: Color4::from_hex("#FFFFFF"),
+            surface: Color4::from_hex("#F5F5F5"),
+            text: Color4::from_hex("#1A1A1A"),
+            text_muted: Color4::from_hex("#666666"),
+            success: Color4::from_hex("#16A34A"),
+            warning: Color4::from_hex("#D97706"),
+            error: Color4::from_hex("#DC2626"),
+            border: Color4::from_hex("#E0E0E0"),
+            font_family: "Inter".to_string(),
+            font_size: 14.0,
+            border_radius: 8.0,
+            spacing: 8.0,
+        }
+    }
+
+    fn custom(primary: Color4, background: Color4) -> Self {
+        let mut theme = UITheme::dark();
+        theme.primary = primary;
+        theme.background = background;
+        theme
+    }
+}
+
+/// RGBA color
+@derive(Debug, Clone, Copy)]
+struct Color4 {
+    r: f32,
+    g: f32,
+    b: f32,
+    a: f32,
+}
+
+impl Color4 {
+    fn new(r: f32, g: f32, b: f32, a: f32) -> Self {
+        Color4 { r, g, b, a }
+    }
+
+    fn from_hex(hex: &str) -> Self {
+        let hex = hex.trim_start_matches('#');
+        let r = u8::from_str_radix(&hex[0..2], 16).unwrap_or(0) as f32 / 255.0;
+        let g = u8::from_str_radix(&hex[2..4], 16).unwrap_or(0) as f32 / 255.0;
+        let b = u8::from_str_radix(&hex[4..6], 16).unwrap_or(0) as f32 / 255.0;
+        let a = if hex.len() >= 8 {
+            u8::from_str_radix(&hex[6..8], 16).unwrap_or(255) as f32 / 255.0
+        } else {
+            1.0
+        };
+        Color4 { r, g, b, a }
+    }
+
+    fn to_hex(&self) -> String {
+        format!(
+            "#{:02X}{:02X}{:02X}{:02X}",
+            (self.r * 255.0) as u8,
+            (self.g * 255.0) as u8,
+            (self.b * 255.0) as u8,
+            (self.a * 255.0) as u8
+        )
+    }
+
+    fn with_alpha(self, a: f32) -> Self {
+        Color4 { a, ..self }
+    }
+
+    fn lerp(self, other: Color4, t: f32) -> Self {
+        Color4 {
+            r: self.r + (other.r - self.r) * t,
+            g: self.g + (other.g - self.g) * t,
+            b: self.b + (other.b - self.b) * t,
+            a: self.a + (other.a - self.a) * t,
+        }
+    }
+}
+
+// ============================================================================
+// REGION: Layout Types
+// ============================================================================
+
+/// Position and size rectangle
+@derive(Debug, Clone, Copy)]
+struct Rect {
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+}
+
+impl Rect {
+    fn new(x: f32, y: f32, width: f32, height: f32) -> Self {
+        Rect { x, y, width, height }
+    }
+
+    fn zero() -> Self {
+        Rect { x: 0.0, y: 0.0, width: 0.0, height: 0.0 }
+    }
+
+    fn contains(&self, px: f32, py: f32) -> bool {
+        px >= self.x && px <= self.x + self.width &&
+        py >= self.y && py <= self.y + self.height
+    }
+
+    fn center(&self) -> (f32, f32) {
+        (self.x + self.width / 2.0, self.y + self.height / 2.0)
+    }
+
+    fn inset(&self, amount: f32) -> Self {
+        Rect {
+            x: self.x + amount,
+            y: self.y + amount,
+            width: (self.width - amount * 2.0).max(0.0),
+            height: (self.height - amount * 2.0).max(0.0),
+        }
+    }
+
+    fn offset(&self, dx: f32, dy: f32) -> Self {
+        Rect {
+            x: self.x + dx,
+            y: self.y + dy,
+            ..*self
+        }
+    }
+}
+
+/// Padding/margin values
+@derive(Debug, Clone, Copy)]
+struct EdgeInsets {
+    top: f32,
+    right: f32,
+    bottom: f32,
+    left: f32,
+}
+
+impl EdgeInsets {
+    fn all(value: f32) -> Self {
+        EdgeInsets { top: value, right: value, bottom: value, left: value }
+    }
+
+    fn symmetric(horizontal: f32, vertical: f32) -> Self {
+        EdgeInsets {
+            top: vertical,
+            right: horizontal,
+            bottom: vertical,
+            left: horizontal,
+        }
+    }
+
+    fn zero() -> Self {
+        EdgeInsets { top: 0.0, right: 0.0, bottom: 0.0, left: 0.0 }
+    }
+}
+
+/// Layout direction
+@derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Direction {
+    Horizontal,
+    Vertical,
+}
+
+/// Alignment options
+@derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Alignment {
+    Start,
+    Center,
+    End,
+    Stretch,
+    SpaceBetween,
+    SpaceAround,
+    SpaceEvenly,
+}
+
+// ============================================================================
+// REGION: Widget Trait
+// ============================================================================
+
+/// Base widget trait
+trait Widget {
+    /// Get widget ID
+    fn id(&self) -> &str;
+
+    /// Measure preferred size
+    fn measure(&self, ctx: &UIContext, available: Rect) -> (f32, f32);
+
+    /// Layout the widget
+    fn layout(&mut self, ctx: &UIContext, bounds: Rect);
+
+    /// Render the widget
+    fn render(&self, ctx: &mut RenderContext);
+
+    /// Handle input event
+    fn handle_event(&mut self, event: &UIEvent) -> bool;
+
+    /// Check if widget is visible
+    fn is_visible(&self) -> bool { true }
+
+    /// Check if widget is enabled
+    fn is_enabled(&self) -> bool { true }
+}
+
+// ============================================================================
+// REGION: UI Context
+// ============================================================================
+
+/// UI rendering and layout context
+@derive(Debug)]
+struct UIContext {
+    /// Current theme
+    theme: UITheme,
+    /// Screen size
+    screen_size: (f32, f32),
+    /// DPI scale factor
+    scale_factor: f32,
+    /// Font metrics cache
+    font_cache: HashMap<String, FontMetrics>,
+    /// Mouse position
+    mouse_pos: (f32, f32),
+    /// Active/focused widget
+    focused_widget: Option<String>,
+    /// Hovered widget
+    hovered_widget: Option<String>,
+    /// Pressed widget
+    pressed_widget: Option<String>,
+    /// Clipboard content
+    clipboard: String,
+    /// Animation time
+    time: f64,
+    /// Delta time
+    delta_time: f64,
+}
+
+impl UIContext {
+    fn new(theme: UITheme) -> Self {
+        UIContext {
+            theme,
+            screen_size: (1920.0, 1080.0),
+            scale_factor: 1.0,
+            font_cache: HashMap::new(),
+            mouse_pos: (0.0, 0.0),
+            focused_widget: None,
+            hovered_widget: None,
+            pressed_widget: None,
+            clipboard: String::new(),
+            time: 0.0,
+            delta_time: 0.0,
+        }
+    }
+
+    fn set_theme(&mut self, theme: UITheme) {
+        self.theme = theme;
+    }
+
+    fn scaled(&self, value: f32) -> f32 {
+        value * self.scale_factor
+    }
+
+    fn text_size(&self, text: &str, font_size: f32) -> (f32, f32) {
+        // Simplified text measurement
+        let char_width = font_size * 0.6;
+        let width = text.len() as f32 * char_width;
+        let height = font_size * 1.2;
+        (width, height)
+    }
+}
+
+@derive(Debug)]
+struct FontMetrics {
+    ascent: f32,
+    descent: f32,
+    line_height: f32,
+    char_widths: HashMap<char, f32>,
+}
+
+// ============================================================================
+// REGION: Render Context
+// ============================================================================
+
+/// Rendering commands context
+@derive(Debug)]
+struct RenderContext {
+    /// Render commands queue
+    commands: Vec<RenderCommand>,
+    /// Current clip rect stack
+    clip_stack: Vec<Rect>,
+    /// Current transform stack
+    transform_stack: Vec<Transform2D>,
+    /// Current opacity
+    opacity: f32,
+}
+
+impl RenderContext {
+    fn new() -> Self {
+        RenderContext {
+            commands: Vec::new(),
+            clip_stack: Vec::new(),
+            transform_stack: Vec::new(),
+            opacity: 1.0,
+        }
+    }
+
+    fn fill_rect(&mut self, rect: Rect, color: Color4) {
+        self.commands.push(RenderCommand::FillRect {
+            rect,
+            color: color.with_alpha(color.a * self.opacity),
+            radius: 0.0,
+        });
+    }
+
+    fn fill_rounded_rect(&mut self, rect: Rect, color: Color4, radius: f32) {
+        self.commands.push(RenderCommand::FillRect {
+            rect,
+            color: color.with_alpha(color.a * self.opacity),
+            radius,
+        });
+    }
+
+    fn stroke_rect(&mut self, rect: Rect, color: Color4, width: f32) {
+        self.commands.push(RenderCommand::StrokeRect {
+            rect,
+            color: color.with_alpha(color.a * self.opacity),
+            width,
+            radius: 0.0,
+        });
+    }
+
+    fn stroke_rounded_rect(&mut self, rect: Rect, color: Color4, width: f32, radius: f32) {
+        self.commands.push(RenderCommand::StrokeRect {
+            rect,
+            color: color.with_alpha(color.a * self.opacity),
+            width,
+            radius,
+        });
+    }
+
+    fn draw_text(&mut self, text: &str, x: f32, y: f32, color: Color4, size: f32) {
+        self.commands.push(RenderCommand::Text {
+            text: text.to_string(),
+            x,
+            y,
+            color: color.with_alpha(color.a * self.opacity),
+            size,
+            font: None,
+        });
+    }
+
+    fn draw_image(&mut self, image: &str, rect: Rect, tint: Option<Color4>) {
+        self.commands.push(RenderCommand::Image {
+            path: image.to_string(),
+            rect,
+            tint: tint.map(|c| c.with_alpha(c.a * self.opacity)),
+        });
+    }
+
+    fn draw_icon(&mut self, icon: Icon, x: f32, y: f32, size: f32, color: Color4) {
+        self.commands.push(RenderCommand::Icon {
+            icon,
+            x,
+            y,
+            size,
+            color: color.with_alpha(color.a * self.opacity),
+        });
+    }
+
+    fn push_clip(&mut self, rect: Rect) {
+        self.clip_stack.push(rect);
+        self.commands.push(RenderCommand::PushClip { rect });
+    }
+
+    fn pop_clip(&mut self) {
+        self.clip_stack.pop();
+        self.commands.push(RenderCommand::PopClip);
+    }
+
+    fn push_opacity(&mut self, opacity: f32) {
+        self.opacity *= opacity;
+    }
+
+    fn pop_opacity(&mut self, previous: f32) {
+        self.opacity = previous;
+    }
+}
+
+/// Render command types
+@derive(Debug)]
+enum RenderCommand {
+    FillRect { rect: Rect, color: Color4, radius: f32 },
+    StrokeRect { rect: Rect, color: Color4, width: f32, radius: f32 },
+    Text { text: String, x: f32, y: f32, color: Color4, size: f32, font: Option<String> },
+    Image { path: String, rect: Rect, tint: Option<Color4> },
+    Icon { icon: Icon, x: f32, y: f32, size: f32, color: Color4 },
+    PushClip { rect: Rect },
+    PopClip,
+    PushTransform { transform: Transform2D },
+    PopTransform,
+}
+
+@derive(Debug, Clone, Copy)]
+struct Transform2D {
+    m: [[f32; 3]; 3],
+}
+
+impl Transform2D {
+    fn identity() -> Self {
+        Transform2D {
+            m: [
+                [1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [0.0, 0.0, 1.0],
+            ]
+        }
+    }
+
+    fn translate(x: f32, y: f32) -> Self {
+        Transform2D {
+            m: [
+                [1.0, 0.0, x],
+                [0.0, 1.0, y],
+                [0.0, 0.0, 1.0],
+            ]
+        }
+    }
+
+    fn scale(sx: f32, sy: f32) -> Self {
+        Transform2D {
+            m: [
+                [sx, 0.0, 0.0],
+                [0.0, sy, 0.0],
+                [0.0, 0.0, 1.0],
+            ]
+        }
+    }
+}
+
+// ============================================================================
+// REGION: Icons
+// ============================================================================
+
+/// Built-in icon set
+@derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Icon {
+    Check,
+    Cross,
+    Warning,
+    Info,
+    Error,
+    Search,
+    Settings,
+    Refresh,
+    Download,
+    Upload,
+    Folder,
+    File,
+    Trash,
+    Edit,
+    Plus,
+    Minus,
+    ChevronUp,
+    ChevronDown,
+    ChevronLeft,
+    ChevronRight,
+    Menu,
+    Close,
+    Maximize,
+    Minimize,
+    External,
+    Link,
+    Star,
+    StarFilled,
+    Heart,
+    HeartFilled,
+    Lock,
+    Unlock,
+    Eye,
+    EyeOff,
+    Copy,
+    Paste,
+    Undo,
+    Redo,
+    Play,
+    Pause,
+    Stop,
+}
+
+// ============================================================================
+// REGION: UI Events
+// ============================================================================
+
+/// Input event types
+@derive(Debug, Clone)]
+enum UIEvent {
+    /// Mouse button pressed
+    MouseDown { x: f32, y: f32, button: MouseButton },
+    /// Mouse button released
+    MouseUp { x: f32, y: f32, button: MouseButton },
+    /// Mouse moved
+    MouseMove { x: f32, y: f32 },
+    /// Mouse wheel scrolled
+    Scroll { x: f32, y: f32, delta_x: f32, delta_y: f32 },
+    /// Key pressed
+    KeyDown { key: Key, modifiers: Modifiers },
+    /// Key released
+    KeyUp { key: Key, modifiers: Modifiers },
+    /// Text input
+    TextInput { text: String },
+    /// Focus gained
+    Focus,
+    /// Focus lost
+    Blur,
+    /// Window resized
+    Resize { width: f32, height: f32 },
+}
+
+@derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MouseButton {
+    Left,
+    Right,
+    Middle,
+}
+
+@derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Key {
+    A, B, C, D, E, F, G, H, I, J, K, L, M,
+    N, O, P, Q, R, S, T, U, V, W, X, Y, Z,
+    Num0, Num1, Num2, Num3, Num4, Num5, Num6, Num7, Num8, Num9,
+    F1, F2, F3, F4, F5, F6, F7, F8, F9, F10, F11, F12,
+    Escape, Enter, Tab, Space, Backspace, Delete,
+    Left, Right, Up, Down,
+    Home, End, PageUp, PageDown,
+    Insert,
+}
+
+@derive(Debug, Clone, Copy, Default)]
+struct Modifiers {
+    shift: bool,
+    ctrl: bool,
+    alt: bool,
+    meta: bool,
+}
+
+// ============================================================================
+// REGION: Basic Widgets
+// ============================================================================
+
+/// Text label widget
+@derive(Debug)]
+struct Label {
+    id: String,
+    text: String,
+    size: f32,
+    color: Option<Color4>,
+    bold: bool,
+    italic: bool,
+    bounds: Rect,
+}
+
+impl Label {
+    fn new(id: &str, text: &str) -> Self {
+        Label {
+            id: id.to_string(),
+            text: text.to_string(),
+            size: 14.0,
+            color: None,
+            bold: false,
+            italic: false,
+            bounds: Rect::zero(),
+        }
+    }
+
+    fn with_size(mut self, size: f32) -> Self {
+        self.size = size;
+        self
+    }
+
+    fn with_color(mut self, color: Color4) -> Self {
+        self.color = Some(color);
+        self
+    }
+
+    fn bold(mut self) -> Self {
+        self.bold = true;
+        self
+    }
+}
+
+impl Widget for Label {
+    fn id(&self) -> &str { &self.id }
+
+    fn measure(&self, ctx: &UIContext, _available: Rect) -> (f32, f32) {
+        ctx.text_size(&self.text, self.size)
+    }
+
+    fn layout(&mut self, _ctx: &UIContext, bounds: Rect) {
+        self.bounds = bounds;
+    }
+
+    fn render(&self, ctx: &mut RenderContext) {
+        let color = self.color.unwrap_or(Color4::new(1.0, 1.0, 1.0, 1.0));
+        ctx.draw_text(&self.text, self.bounds.x, self.bounds.y, color, self.size);
+    }
+
+    fn handle_event(&mut self, _event: &UIEvent) -> bool { false }
+}
+
+/// Button widget
+@derive(Debug)]
+struct Button {
+    id: String,
+    label: String,
+    icon: Option<Icon>,
+    style: ButtonStyle,
+    enabled: bool,
+    bounds: Rect,
+    hovered: bool,
+    pressed: bool,
+    on_click: Option<Box<dyn Fn()>>,
+}
+
+@derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ButtonStyle {
+    Primary,
+    Secondary,
+    Outline,
+    Ghost,
+    Danger,
+}
+
+impl Button {
+    fn new(id: &str, label: &str) -> Self {
+        Button {
+            id: id.to_string(),
+            label: label.to_string(),
+            icon: None,
+            style: ButtonStyle::Primary,
+            enabled: true,
+            bounds: Rect::zero(),
+            hovered: false,
+            pressed: false,
+            on_click: None,
+        }
+    }
+
+    fn with_icon(mut self, icon: Icon) -> Self {
+        self.icon = Some(icon);
+        self
+    }
+
+    fn with_style(mut self, style: ButtonStyle) -> Self {
+        self.style = style;
+        self
+    }
+
+    fn on_click<F: Fn() + 'static>(mut self, callback: F) -> Self {
+        self.on_click = Some(Box::new(callback));
+        self
+    }
+}
+
+impl Widget for Button {
+    fn id(&self) -> &str { &self.id }
+
+    fn measure(&self, ctx: &UIContext, _available: Rect) -> (f32, f32) {
+        let (text_w, text_h) = ctx.text_size(&self.label, ctx.theme.font_size);
+        let icon_space = if self.icon.is_some() { 24.0 } else { 0.0 };
+        (text_w + icon_space + 32.0, text_h + 16.0)
+    }
+
+    fn layout(&mut self, _ctx: &UIContext, bounds: Rect) {
+        self.bounds = bounds;
+    }
+
+    fn render(&self, ctx: &mut RenderContext) {
+        let (bg_color, text_color) = match self.style {
+            ButtonStyle::Primary => (
+                Color4::from_hex("#7C3AED"),
+                Color4::from_hex("#FFFFFF")
+            ),
+            ButtonStyle::Secondary => (
+                Color4::from_hex("#333333"),
+                Color4::from_hex("#FFFFFF")
+            ),
+            ButtonStyle::Outline => (
+                Color4::from_hex("#00000000"),
+                Color4::from_hex("#7C3AED")
+            ),
+            ButtonStyle::Ghost => (
+                Color4::from_hex("#00000000"),
+                Color4::from_hex("#FFFFFF")
+            ),
+            ButtonStyle::Danger => (
+                Color4::from_hex("#EF4444"),
+                Color4::from_hex("#FFFFFF")
+            ),
+        };
+
+        let bg = if self.pressed {
+            bg_color.with_alpha(0.8)
+        } else if self.hovered {
+            bg_color.lerp(Color4::new(1.0, 1.0, 1.0, 1.0), 0.1)
+        } else {
+            bg_color
+        };
+
+        ctx.fill_rounded_rect(self.bounds, bg, 8.0);
+
+        if self.style == ButtonStyle::Outline {
+            ctx.stroke_rounded_rect(self.bounds, text_color, 1.0, 8.0);
+        }
+
+        let (cx, cy) = self.bounds.center();
+        ctx.draw_text(&self.label, cx - self.label.len() as f32 * 4.0, cy - 7.0, text_color, 14.0);
+    }
+
+    fn handle_event(&mut self, event: &UIEvent) -> bool {
+        match event {
+            UIEvent::MouseMove { x, y } => {
+                self.hovered = self.bounds.contains(*x, *y);
+                self.hovered
+            }
+            UIEvent::MouseDown { x, y, button: MouseButton::Left } => {
+                if self.bounds.contains(*x, *y) && self.enabled {
+                    self.pressed = true;
+                    true
+                } else {
+                    false
+                }
+            }
+            UIEvent::MouseUp { x, y, button: MouseButton::Left } => {
+                if self.pressed {
+                    self.pressed = false;
+                    if self.bounds.contains(*x, *y) && self.enabled {
+                        if let Some(ref callback) = self.on_click {
+                            callback();
+                        }
+                        true
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                }
+            }
+            _ => false,
+        }
+    }
+
+    fn is_enabled(&self) -> bool { self.enabled }
+}
+
+/// Checkbox widget
+@derive(Debug)]
+struct Checkbox {
+    id: String,
+    label: String,
+    checked: bool,
+    enabled: bool,
+    bounds: Rect,
+    hovered: bool,
+    on_change: Option<Box<dyn Fn(bool)>>,
+}
+
+impl Checkbox {
+    fn new(id: &str, label: &str, checked: bool) -> Self {
+        Checkbox {
+            id: id.to_string(),
+            label: label.to_string(),
+            checked,
+            enabled: true,
+            bounds: Rect::zero(),
+            hovered: false,
+            on_change: None,
+        }
+    }
+
+    fn on_change<F: Fn(bool) + 'static>(mut self, callback: F) -> Self {
+        self.on_change = Some(Box::new(callback));
+        self
+    }
+}
+
+impl Widget for Checkbox {
+    fn id(&self) -> &str { &self.id }
+
+    fn measure(&self, ctx: &UIContext, _available: Rect) -> (f32, f32) {
+        let (text_w, text_h) = ctx.text_size(&self.label, ctx.theme.font_size);
+        (text_w + 32.0, text_h.max(24.0))
+    }
+
+    fn layout(&mut self, _ctx: &UIContext, bounds: Rect) {
+        self.bounds = bounds;
+    }
+
+    fn render(&self, ctx: &mut RenderContext) {
+        let box_rect = Rect::new(self.bounds.x, self.bounds.y + 2.0, 20.0, 20.0);
+
+        if self.checked {
+            ctx.fill_rounded_rect(box_rect, Color4::from_hex("#7C3AED"), 4.0);
+            ctx.draw_icon(Icon::Check, box_rect.x + 4.0, box_rect.y + 4.0, 12.0, Color4::from_hex("#FFFFFF"));
+        } else {
+            ctx.stroke_rounded_rect(box_rect, Color4::from_hex("#666666"), 2.0, 4.0);
+        }
+
+        ctx.draw_text(
+            &self.label,
+            self.bounds.x + 28.0,
+            self.bounds.y + 4.0,
+            Color4::from_hex("#FFFFFF"),
+            14.0
+        );
+    }
+
+    fn handle_event(&mut self, event: &UIEvent) -> bool {
+        match event {
+            UIEvent::MouseDown { x, y, button: MouseButton::Left } => {
+                if self.bounds.contains(*x, *y) && self.enabled {
+                    self.checked = !self.checked;
+                    if let Some(ref callback) = self.on_change {
+                        callback(self.checked);
+                    }
+                    true
+                } else {
+                    false
+                }
+            }
+            _ => false,
+        }
+    }
+}
+
+/// Slider widget
+@derive(Debug)]
+struct Slider {
+    id: String,
+    value: f32,
+    min: f32,
+    max: f32,
+    step: f32,
+    enabled: bool,
+    bounds: Rect,
+    dragging: bool,
+    on_change: Option<Box<dyn Fn(f32)>>,
+}
+
+impl Slider {
+    fn new(id: &str, value: f32, min: f32, max: f32) -> Self {
+        Slider {
+            id: id.to_string(),
+            value,
+            min,
+            max,
+            step: 0.0,
+            enabled: true,
+            bounds: Rect::zero(),
+            dragging: false,
+            on_change: None,
+        }
+    }
+
+    fn with_step(mut self, step: f32) -> Self {
+        self.step = step;
+        self
+    }
+
+    fn on_change<F: Fn(f32) + 'static>(mut self, callback: F) -> Self {
+        self.on_change = Some(Box::new(callback));
+        self
+    }
+
+    fn normalized(&self) -> f32 {
+        (self.value - self.min) / (self.max - self.min)
+    }
+
+    fn set_from_position(&mut self, x: f32) {
+        let normalized = ((x - self.bounds.x) / self.bounds.width).clamp(0.0, 1.0);
+        let mut value = self.min + normalized * (self.max - self.min);
+
+        if self.step > 0.0 {
+            value = (value / self.step).round() * self.step;
+        }
+
+        self.value = value.clamp(self.min, self.max);
+
+        if let Some(ref callback) = self.on_change {
+            callback(self.value);
+        }
+    }
+}
+
+impl Widget for Slider {
+    fn id(&self) -> &str { &self.id }
+
+    fn measure(&self, _ctx: &UIContext, _available: Rect) -> (f32, f32) {
+        (200.0, 24.0)
+    }
+
+    fn layout(&mut self, _ctx: &UIContext, bounds: Rect) {
+        self.bounds = bounds;
+    }
+
+    fn render(&self, ctx: &mut RenderContext) {
+        let track_y = self.bounds.y + self.bounds.height / 2.0 - 3.0;
+        let track_rect = Rect::new(self.bounds.x, track_y, self.bounds.width, 6.0);
+
+        // Background track
+        ctx.fill_rounded_rect(track_rect, Color4::from_hex("#333333"), 3.0);
+
+        // Filled portion
+        let fill_width = self.bounds.width * self.normalized();
+        let fill_rect = Rect::new(self.bounds.x, track_y, fill_width, 6.0);
+        ctx.fill_rounded_rect(fill_rect, Color4::from_hex("#7C3AED"), 3.0);
+
+        // Thumb
+        let thumb_x = self.bounds.x + fill_width - 8.0;
+        let thumb_rect = Rect::new(thumb_x, self.bounds.y + 4.0, 16.0, 16.0);
+        ctx.fill_rounded_rect(thumb_rect, Color4::from_hex("#FFFFFF"), 8.0);
+    }
+
+    fn handle_event(&mut self, event: &UIEvent) -> bool {
+        match event {
+            UIEvent::MouseDown { x, y, button: MouseButton::Left } => {
+                if self.bounds.contains(*x, *y) && self.enabled {
+                    self.dragging = true;
+                    self.set_from_position(*x);
+                    true
+                } else {
+                    false
+                }
+            }
+            UIEvent::MouseMove { x, .. } => {
+                if self.dragging {
+                    self.set_from_position(*x);
+                    true
+                } else {
+                    false
+                }
+            }
+            UIEvent::MouseUp { button: MouseButton::Left, .. } => {
+                if self.dragging {
+                    self.dragging = false;
+                    true
+                } else {
+                    false
+                }
+            }
+            _ => false,
+        }
+    }
+}
+
+/// Text input widget
+@derive(Debug)]
+struct TextInput {
+    id: String,
+    value: String,
+    placeholder: String,
+    password: bool,
+    enabled: bool,
+    bounds: Rect,
+    focused: bool,
+    cursor_pos: usize,
+    selection_start: Option<usize>,
+    on_change: Option<Box<dyn Fn(&str)>>,
+    on_submit: Option<Box<dyn Fn(&str)>>,
+}
+
+impl TextInput {
+    fn new(id: &str, value: &str) -> Self {
+        TextInput {
+            id: id.to_string(),
+            value: value.to_string(),
+            placeholder: String::new(),
+            password: false,
+            enabled: true,
+            bounds: Rect::zero(),
+            focused: false,
+            cursor_pos: value.len(),
+            selection_start: None,
+            on_change: None,
+            on_submit: None,
+        }
+    }
+
+    fn with_placeholder(mut self, placeholder: &str) -> Self {
+        self.placeholder = placeholder.to_string();
+        self
+    }
+
+    fn password(mut self) -> Self {
+        self.password = true;
+        self
+    }
+
+    fn on_change<F: Fn(&str) + 'static>(mut self, callback: F) -> Self {
+        self.on_change = Some(Box::new(callback));
+        self
+    }
+
+    fn on_submit<F: Fn(&str) + 'static>(mut self, callback: F) -> Self {
+        self.on_submit = Some(Box::new(callback));
+        self
+    }
+
+    fn display_value(&self) -> String {
+        if self.password {
+            "*".repeat(self.value.len())
+        } else {
+            self.value.clone()
+        }
+    }
+}
+
+impl Widget for TextInput {
+    fn id(&self) -> &str { &self.id }
+
+    fn measure(&self, _ctx: &UIContext, _available: Rect) -> (f32, f32) {
+        (200.0, 36.0)
+    }
+
+    fn layout(&mut self, _ctx: &UIContext, bounds: Rect) {
+        self.bounds = bounds;
+    }
+
+    fn render(&self, ctx: &mut RenderContext) {
+        let bg_color = if self.focused {
+            Color4::from_hex("#2A2A2A")
+        } else {
+            Color4::from_hex("#1A1A1A")
+        };
+
+        ctx.fill_rounded_rect(self.bounds, bg_color, 8.0);
+
+        let border_color = if self.focused {
+            Color4::from_hex("#7C3AED")
+        } else {
+            Color4::from_hex("#333333")
+        };
+        ctx.stroke_rounded_rect(self.bounds, border_color, 1.0, 8.0);
+
+        let text = if self.value.is_empty() && !self.focused {
+            &self.placeholder
+        } else {
+            &self.display_value()
+        };
+
+        let text_color = if self.value.is_empty() && !self.focused {
+            Color4::from_hex("#666666")
+        } else {
+            Color4::from_hex("#FFFFFF")
+        };
+
+        ctx.draw_text(text, self.bounds.x + 12.0, self.bounds.y + 10.0, text_color, 14.0);
+
+        // Draw cursor
+        if self.focused {
+            let cursor_x = self.bounds.x + 12.0 + self.cursor_pos as f32 * 8.4;
+            let cursor_rect = Rect::new(cursor_x, self.bounds.y + 8.0, 2.0, 20.0);
+            ctx.fill_rect(cursor_rect, Color4::from_hex("#7C3AED"));
+        }
+    }
+
+    fn handle_event(&mut self, event: &UIEvent) -> bool {
+        match event {
+            UIEvent::MouseDown { x, y, button: MouseButton::Left } => {
+                let was_focused = self.focused;
+                self.focused = self.bounds.contains(*x, *y);
+
+                if self.focused && !was_focused {
+                    self.cursor_pos = self.value.len();
+                }
+                true
+            }
+            UIEvent::TextInput { text } if self.focused => {
+                self.value.insert_str(self.cursor_pos, text);
+                self.cursor_pos += text.len();
+
+                if let Some(ref callback) = self.on_change {
+                    callback(&self.value);
+                }
+                true
+            }
+            UIEvent::KeyDown { key, modifiers } if self.focused => {
+                match key {
+                    Key::Backspace => {
+                        if self.cursor_pos > 0 {
+                            self.value.remove(self.cursor_pos - 1);
+                            self.cursor_pos -= 1;
+                            if let Some(ref callback) = self.on_change {
+                                callback(&self.value);
+                            }
+                        }
+                        true
+                    }
+                    Key::Delete => {
+                        if self.cursor_pos < self.value.len() {
+                            self.value.remove(self.cursor_pos);
+                            if let Some(ref callback) = self.on_change {
+                                callback(&self.value);
+                            }
+                        }
+                        true
+                    }
+                    Key::Left => {
+                        if self.cursor_pos > 0 {
+                            self.cursor_pos -= 1;
+                        }
+                        true
+                    }
+                    Key::Right => {
+                        if self.cursor_pos < self.value.len() {
+                            self.cursor_pos += 1;
+                        }
+                        true
+                    }
+                    Key::Home => {
+                        self.cursor_pos = 0;
+                        true
+                    }
+                    Key::End => {
+                        self.cursor_pos = self.value.len();
+                        true
+                    }
+                    Key::Enter => {
+                        if let Some(ref callback) = self.on_submit {
+                            callback(&self.value);
+                        }
+                        true
+                    }
+                    _ => false,
+                }
+            }
+            _ => false,
+        }
+    }
+}
+
+// ============================================================================
+// REGION: Mod List Widget
+// ============================================================================
+
+/// Widget for displaying mod list
+@derive(Debug)]
+struct ModListWidget {
+    id: String,
+    mods: Vec<ModListEntry>,
+    selected_index: Option<usize>,
+    scroll_offset: f32,
+    bounds: Rect,
+    item_height: f32,
+    on_select: Option<Box<dyn Fn(usize)>>,
+    on_toggle: Option<Box<dyn Fn(usize, bool)>>,
+}
+
+@derive(Debug, Clone)]
+struct ModListEntry {
+    mod_id: String,
+    name: String,
+    version: String,
+    author: String,
+    description: String,
+    enabled: bool,
+    state: LoadState,
+    thumbnail: Option<String>,
+    tags: Vec<String>,
+}
+
+impl ModListWidget {
+    fn new(id: &str) -> Self {
+        ModListWidget {
+            id: id.to_string(),
+            mods: Vec::new(),
+            selected_index: None,
+            scroll_offset: 0.0,
+            bounds: Rect::zero(),
+            item_height: 72.0,
+            on_select: None,
+            on_toggle: None,
+        }
+    }
+
+    fn set_mods(&mut self, mods: Vec<ModListEntry>) {
+        self.mods = mods;
+        self.selected_index = None;
+    }
+
+    fn on_select<F: Fn(usize) + 'static>(mut self, callback: F) -> Self {
+        self.on_select = Some(Box::new(callback));
+        self
+    }
+
+    fn on_toggle<F: Fn(usize, bool) + 'static>(mut self, callback: F) -> Self {
+        self.on_toggle = Some(Box::new(callback));
+        self
+    }
+
+    fn total_height(&self) -> f32 {
+        self.mods.len() as f32 * self.item_height
+    }
+
+    fn visible_range(&self) -> (usize, usize) {
+        let start = (self.scroll_offset / self.item_height).floor() as usize;
+        let visible_count = (self.bounds.height / self.item_height).ceil() as usize + 1;
+        let end = (start + visible_count).min(self.mods.len());
+        (start, end)
+    }
+}
+
+impl Widget for ModListWidget {
+    fn id(&self) -> &str { &self.id }
+
+    fn measure(&self, _ctx: &UIContext, available: Rect) -> (f32, f32) {
+        (available.width, available.height)
+    }
+
+    fn layout(&mut self, _ctx: &UIContext, bounds: Rect) {
+        self.bounds = bounds;
+    }
+
+    fn render(&self, ctx: &mut RenderContext) {
+        ctx.push_clip(self.bounds);
+
+        let (start, end) = self.visible_range();
+
+        for i in start..end {
+            let entry = &self.mods[i];
+            let y = self.bounds.y + i as f32 * self.item_height - self.scroll_offset;
+            let item_rect = Rect::new(self.bounds.x, y, self.bounds.width, self.item_height);
+
+            // Background
+            let bg_color = if Some(i) == self.selected_index {
+                Color4::from_hex("#2A2A2A")
+            } else if i % 2 == 0 {
+                Color4::from_hex("#1A1A1A")
+            } else {
+                Color4::from_hex("#1F1F1F")
+            };
+            ctx.fill_rect(item_rect, bg_color);
+
+            // Status indicator
+            let status_color = match entry.state {
+                LoadState::Active => Color4::from_hex("#22C55E"),
+                LoadState::Failed => Color4::from_hex("#EF4444"),
+                LoadState::Suspended => Color4::from_hex("#F59E0B"),
+                _ => Color4::from_hex("#666666"),
+            };
+            let status_rect = Rect::new(self.bounds.x, y, 4.0, self.item_height);
+            ctx.fill_rect(status_rect, status_color);
+
+            // Mod info
+            let text_x = self.bounds.x + 16.0;
+            ctx.draw_text(&entry.name, text_x, y + 8.0, Color4::from_hex("#FFFFFF"), 16.0);
+            ctx.draw_text(
+                &format!("v{} by {}", entry.version, entry.author),
+                text_x,
+                y + 28.0,
+                Color4::from_hex("#888888"),
+                12.0
+            );
+            ctx.draw_text(&entry.description, text_x, y + 46.0, Color4::from_hex("#666666"), 11.0);
+
+            // Enable toggle
+            let toggle_x = self.bounds.x + self.bounds.width - 60.0;
+            let toggle_rect = Rect::new(toggle_x, y + 24.0, 44.0, 24.0);
+            let toggle_color = if entry.enabled {
+                Color4::from_hex("#7C3AED")
+            } else {
+                Color4::from_hex("#333333")
+            };
+            ctx.fill_rounded_rect(toggle_rect, toggle_color, 12.0);
+
+            let knob_x = if entry.enabled { toggle_x + 22.0 } else { toggle_x + 2.0 };
+            let knob_rect = Rect::new(knob_x, y + 26.0, 20.0, 20.0);
+            ctx.fill_rounded_rect(knob_rect, Color4::from_hex("#FFFFFF"), 10.0);
+        }
+
+        // Scrollbar
+        if self.total_height() > self.bounds.height {
+            let scrollbar_height = (self.bounds.height / self.total_height()) * self.bounds.height;
+            let scrollbar_y = self.bounds.y + (self.scroll_offset / self.total_height()) * self.bounds.height;
+            let scrollbar_rect = Rect::new(
+                self.bounds.x + self.bounds.width - 8.0,
+                scrollbar_y,
+                6.0,
+                scrollbar_height
+            );
+            ctx.fill_rounded_rect(scrollbar_rect, Color4::from_hex("#444444"), 3.0);
+        }
+
+        ctx.pop_clip();
+    }
+
+    fn handle_event(&mut self, event: &UIEvent) -> bool {
+        match event {
+            UIEvent::MouseDown { x, y, button: MouseButton::Left } => {
+                if self.bounds.contains(*x, *y) {
+                    let relative_y = *y - self.bounds.y + self.scroll_offset;
+                    let index = (relative_y / self.item_height) as usize;
+
+                    if index < self.mods.len() {
+                        // Check if clicking toggle area
+                        let toggle_x = self.bounds.x + self.bounds.width - 60.0;
+                        if *x >= toggle_x {
+                            let enabled = !self.mods[index].enabled;
+                            self.mods[index].enabled = enabled;
+                            if let Some(ref callback) = self.on_toggle {
+                                callback(index, enabled);
+                            }
+                        } else {
+                            self.selected_index = Some(index);
+                            if let Some(ref callback) = self.on_select {
+                                callback(index);
+                            }
+                        }
+                        return true;
+                    }
+                }
+                false
+            }
+            UIEvent::Scroll { x, y, delta_y, .. } => {
+                if self.bounds.contains(*x, *y) {
+                    let max_scroll = (self.total_height() - self.bounds.height).max(0.0);
+                    self.scroll_offset = (self.scroll_offset - delta_y * 40.0).clamp(0.0, max_scroll);
+                    true
+                } else {
+                    false
+                }
+            }
+            _ => false,
+        }
+    }
+}
+
+// ============================================================================
+// REGION: Mod Details Panel
+// ============================================================================
+
+/// Panel showing detailed mod information
+@derive(Debug)]
+struct ModDetailsPanel {
+    id: String,
+    entry: Option<ModListEntry>,
+    config: Option<ModConfig>,
+    bounds: Rect,
+    scroll_offset: f32,
+    widgets: Vec<Box<dyn Widget>>,
+}
+
+impl ModDetailsPanel {
+    fn new(id: &str) -> Self {
+        ModDetailsPanel {
+            id: id.to_string(),
+            entry: None,
+            config: None,
+            bounds: Rect::zero(),
+            scroll_offset: 0.0,
+            widgets: Vec::new(),
+        }
+    }
+
+    fn set_mod(&mut self, entry: ModListEntry, config: Option<ModConfig>) {
+        self.entry = Some(entry);
+        self.config = config;
+        self.rebuild_widgets();
+    }
+
+    fn clear(&mut self) {
+        self.entry = None;
+        self.config = None;
+        self.widgets.clear();
+    }
+
+    fn rebuild_widgets(&mut self) {
+        self.widgets.clear();
+
+        if let Some(ref config) = self.config {
+            // Build config widgets from schema
+            // This would create checkboxes, sliders, etc. based on config schema
+        }
+    }
+}
+
+impl Widget for ModDetailsPanel {
+    fn id(&self) -> &str { &self.id }
+
+    fn measure(&self, _ctx: &UIContext, available: Rect) -> (f32, f32) {
+        (available.width, available.height)
+    }
+
+    fn layout(&mut self, ctx: &UIContext, bounds: Rect) {
+        self.bounds = bounds;
+
+        // Layout child widgets
+        let mut y = bounds.y + 200.0; // After header
+        for widget in &mut self.widgets {
+            let (w, h) = widget.measure(ctx, bounds);
+            widget.layout(ctx, Rect::new(bounds.x + 16.0, y, w, h));
+            y += h + 8.0;
+        }
+    }
+
+    fn render(&self, ctx: &mut RenderContext) {
+        ctx.fill_rounded_rect(self.bounds, Color4::from_hex("#1A1A1A"), 8.0);
+
+        if let Some(ref entry) = self.entry {
+            // Header
+            ctx.draw_text(&entry.name, self.bounds.x + 16.0, self.bounds.y + 16.0, Color4::from_hex("#FFFFFF"), 24.0);
+            ctx.draw_text(
+                &format!("Version {} by {}", entry.version, entry.author),
+                self.bounds.x + 16.0,
+                self.bounds.y + 48.0,
+                Color4::from_hex("#888888"),
+                14.0
+            );
+
+            // Tags
+            let mut tag_x = self.bounds.x + 16.0;
+            for tag in &entry.tags {
+                let tag_rect = Rect::new(tag_x, self.bounds.y + 72.0, tag.len() as f32 * 8.0 + 16.0, 24.0);
+                ctx.fill_rounded_rect(tag_rect, Color4::from_hex("#333333"), 12.0);
+                ctx.draw_text(tag, tag_x + 8.0, self.bounds.y + 76.0, Color4::from_hex("#AAAAAA"), 12.0);
+                tag_x += tag_rect.width + 8.0;
+            }
+
+            // Description
+            ctx.draw_text("Description", self.bounds.x + 16.0, self.bounds.y + 112.0, Color4::from_hex("#888888"), 12.0);
+            ctx.draw_text(&entry.description, self.bounds.x + 16.0, self.bounds.y + 132.0, Color4::from_hex("#FFFFFF"), 14.0);
+
+            // Configuration section
+            if self.config.is_some() {
+                ctx.draw_text("Configuration", self.bounds.x + 16.0, self.bounds.y + 180.0, Color4::from_hex("#888888"), 12.0);
+
+                // Render config widgets
+                for widget in &self.widgets {
+                    widget.render(ctx);
+                }
+            }
+        } else {
+            // Empty state
+            let (cx, cy) = self.bounds.center();
+            ctx.draw_text("Select a mod to view details", cx - 120.0, cy, Color4::from_hex("#666666"), 16.0);
+        }
+    }
+
+    fn handle_event(&mut self, event: &UIEvent) -> bool {
+        for widget in &mut self.widgets {
+            if widget.handle_event(event) {
+                return true;
+            }
+        }
+        false
+    }
+}
+
+// ============================================================================
+// REGION: Mod Manager UI
+// ============================================================================
+
+/// Complete mod manager interface
+@derive(Debug)]
+struct ModManagerUI {
+    /// UI context
+    ctx: UIContext,
+    /// Render context
+    render_ctx: RenderContext,
+    /// Mod list widget
+    mod_list: ModListWidget,
+    /// Details panel
+    details_panel: ModDetailsPanel,
+    /// Search input
+    search_input: TextInput,
+    /// Filter buttons
+    filter_buttons: Vec<Button>,
+    /// Action buttons
+    action_buttons: Vec<Button>,
+    /// Current filter
+    current_filter: ModFilter,
+    /// Bounds
+    bounds: Rect,
+    /// Sidebar width
+    sidebar_width: f32,
+}
+
+@derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ModFilter {
+    All,
+    Enabled,
+    Disabled,
+    Updates,
+    Errors,
+}
+
+impl ModManagerUI {
+    fn new(theme: UITheme) -> Self {
+        ModManagerUI {
+            ctx: UIContext::new(theme),
+            render_ctx: RenderContext::new(),
+            mod_list: ModListWidget::new("mod_list"),
+            details_panel: ModDetailsPanel::new("details_panel"),
+            search_input: TextInput::new("search", "").with_placeholder("Search mods..."),
+            filter_buttons: vec![
+                Button::new("filter_all", "All").with_style(ButtonStyle::Ghost),
+                Button::new("filter_enabled", "Enabled").with_style(ButtonStyle::Ghost),
+                Button::new("filter_disabled", "Disabled").with_style(ButtonStyle::Ghost),
+                Button::new("filter_updates", "Updates").with_style(ButtonStyle::Ghost),
+                Button::new("filter_errors", "Errors").with_style(ButtonStyle::Ghost),
+            ],
+            action_buttons: vec![
+                Button::new("refresh", "Refresh").with_icon(Icon::Refresh),
+                Button::new("add_mod", "Add Mod").with_icon(Icon::Plus),
+                Button::new("settings", "Settings").with_icon(Icon::Settings).with_style(ButtonStyle::Ghost),
+            ],
+            current_filter: ModFilter::All,
+            bounds: Rect::zero(),
+            sidebar_width: 400.0,
+        }
+    }
+
+    fn set_mods(&mut self, mods: Vec<ModListEntry>) {
+        self.mod_list.set_mods(mods);
+    }
+
+    fn layout(&mut self, bounds: Rect) {
+        self.bounds = bounds;
+
+        // Header area
+        let header_height = 64.0;
+
+        // Search and actions layout
+        let search_rect = Rect::new(bounds.x + 16.0, bounds.y + 16.0, 300.0, 36.0);
+        self.search_input.layout(&self.ctx, search_rect);
+
+        let mut action_x = bounds.x + bounds.width - 16.0;
+        for button in self.action_buttons.iter_mut().rev() {
+            let (w, h) = button.measure(&self.ctx, bounds);
+            action_x -= w + 8.0;
+            button.layout(&self.ctx, Rect::new(action_x, bounds.y + 14.0, w, h));
+        }
+
+        // Filter buttons
+        let mut filter_x = bounds.x + 340.0;
+        for button in &mut self.filter_buttons {
+            let (w, h) = button.measure(&self.ctx, bounds);
+            button.layout(&self.ctx, Rect::new(filter_x, bounds.y + 16.0, w, h));
+            filter_x += w + 4.0;
+        }
+
+        // Main content area
+        let content_y = bounds.y + header_height;
+        let content_height = bounds.height - header_height;
+
+        // Mod list (left side)
+        let list_rect = Rect::new(
+            bounds.x,
+            content_y,
+            bounds.width - self.sidebar_width,
+            content_height
+        );
+        self.mod_list.layout(&self.ctx, list_rect);
+
+        // Details panel (right side)
+        let details_rect = Rect::new(
+            bounds.x + bounds.width - self.sidebar_width,
+            content_y,
+            self.sidebar_width,
+            content_height
+        );
+        self.details_panel.layout(&self.ctx, details_rect);
+    }
+
+    fn render(&mut self) {
+        self.render_ctx = RenderContext::new();
+
+        // Background
+        self.render_ctx.fill_rect(self.bounds, self.ctx.theme.background);
+
+        // Header
+        let header_rect = Rect::new(self.bounds.x, self.bounds.y, self.bounds.width, 64.0);
+        self.render_ctx.fill_rect(header_rect, self.ctx.theme.surface);
+
+        // Render all widgets
+        self.search_input.render(&mut self.render_ctx);
+
+        for button in &self.filter_buttons {
+            button.render(&mut self.render_ctx);
+        }
+
+        for button in &self.action_buttons {
+            button.render(&mut self.render_ctx);
+        }
+
+        self.mod_list.render(&mut self.render_ctx);
+        self.details_panel.render(&mut self.render_ctx);
+    }
+
+    fn handle_event(&mut self, event: &UIEvent) {
+        // Distribute event to all widgets
+        if self.search_input.handle_event(event) { return; }
+
+        for button in &mut self.filter_buttons {
+            if button.handle_event(event) { return; }
+        }
+
+        for button in &mut self.action_buttons {
+            if button.handle_event(event) { return; }
+        }
+
+        if self.mod_list.handle_event(event) { return; }
+        self.details_panel.handle_event(event);
+    }
+
+    fn get_render_commands(&self) -> &[RenderCommand] {
+        &self.render_ctx.commands
+    }
+}
+
+// ============================================================================
+// REGION: Unit Tests
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_color4() {
+        let color = Color4::from_hex("#FF5500");
+        assert!((color.r - 1.0).abs() < 0.01);
+        assert!((color.g - 0.333).abs() < 0.01);
+        assert!((color.b - 0.0).abs() < 0.01);
+
+        let hex = color.to_hex();
+        assert!(hex.starts_with("#FF"));
+    }
+
+    #[test]
+    fn test_rect() {
+        let rect = Rect::new(10.0, 20.0, 100.0, 50.0);
+
+        assert!(rect.contains(50.0, 40.0));
+        assert!(!rect.contains(5.0, 40.0));
+        assert!(!rect.contains(50.0, 5.0));
+
+        let (cx, cy) = rect.center();
+        assert!((cx - 60.0).abs() < 0.001);
+        assert!((cy - 45.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_theme_presets() {
+        let dark = UITheme::dark();
+        assert!(dark.background.r < 0.2);
+
+        let light = UITheme::light();
+        assert!(light.background.r > 0.8);
+    }
+
+    #[test]
+    fn test_label_widget() {
+        let label = Label::new("test", "Hello World").with_size(16.0);
+        assert_eq!(label.id(), "test");
+        assert_eq!(label.text, "Hello World");
+    }
+
+    #[test]
+    fn test_button_widget() {
+        let button = Button::new("btn", "Click Me")
+            .with_style(ButtonStyle::Primary)
+            .with_icon(Icon::Plus);
+
+        assert_eq!(button.id(), "btn");
+        assert_eq!(button.style, ButtonStyle::Primary);
+        assert!(button.icon.is_some());
+    }
+
+    #[test]
+    fn test_slider_widget() {
+        let mut slider = Slider::new("slider", 50.0, 0.0, 100.0);
+
+        assert!((slider.normalized() - 0.5).abs() < 0.001);
+
+        slider.value = 75.0;
+        assert!((slider.normalized() - 0.75).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_mod_list_widget() {
+        let mut list = ModListWidget::new("mods");
+
+        let entries = vec![
+            ModListEntry {
+                mod_id: "mod1".to_string(),
+                name: "Test Mod 1".to_string(),
+                version: "1.0.0".to_string(),
+                author: "Author".to_string(),
+                description: "Description".to_string(),
+                enabled: true,
+                state: LoadState::Active,
+                thumbnail: None,
+                tags: vec!["tag1".to_string()],
+            },
+        ];
+
+        list.set_mods(entries);
+        assert_eq!(list.mods.len(), 1);
+    }
+
+    #[test]
+    fn test_edge_insets() {
+        let insets = EdgeInsets::all(8.0);
+        assert_eq!(insets.top, 8.0);
+        assert_eq!(insets.right, 8.0);
+
+        let symmetric = EdgeInsets::symmetric(16.0, 8.0);
+        assert_eq!(symmetric.left, 16.0);
+        assert_eq!(symmetric.top, 8.0);
+    }
+}

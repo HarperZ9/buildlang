@@ -1,0 +1,2109 @@
+// =============================================================================
+// PHOTON OVERLAY & IMGUI RENDERING - Harper Engine Debug/UI System
+// =============================================================================
+// Implements immediate-mode GUI and debug overlay rendering system
+// Based on Harper Engine Whitepapers:
+// - WP-081: Immediate Mode GUI Architecture
+// - WP-082: Debug Visualization System
+// - WP-083: Text Rendering Pipeline
+// - WP-084: GPU-Accelerated 2D Rendering
+// - WP-085: Overlay Compositing
+// =============================================================================
+
+use core::mem;
+use crate::photon::{RenderContext, Pipeline, Buffer, Texture};
+
+// =============================================================================
+// IMGUI CONSTANTS
+// =============================================================================
+
+/// Maximum vertices per frame
+const MAX_IMGUI_VERTICES: usize = 65536;
+
+/// Maximum indices per frame
+const MAX_IMGUI_INDICES: usize = 65536 * 3;
+
+/// Maximum draw commands per frame
+const MAX_DRAW_COMMANDS: usize = 1024;
+
+/// Default font size
+const DEFAULT_FONT_SIZE: f32 = 14.0;
+
+/// Default line height multiplier
+const LINE_HEIGHT_MULT: f32 = 1.2;
+
+/// Widget padding
+const WIDGET_PADDING: f32 = 4.0;
+
+/// Frame padding
+const FRAME_PADDING: f32 = 8.0;
+
+// =============================================================================
+// IMGUI VERTEX FORMAT (WP-081)
+// =============================================================================
+
+/// ImGui vertex format
+@align(16)
+struct ImGuiVertex {
+    /// Position (x, y)
+    position: Vec2<f32>,
+    /// UV coordinates
+    uv: Vec2<f32>,
+    /// Color (RGBA, packed)
+    color: u32,
+}
+
+impl ImGuiVertex {
+    fn new(pos: Vec2<f32>, uv: Vec2<f32>, color: Color) -> Self {
+        Self {
+            position: pos,
+            uv,
+            color: color.to_u32(),
+        }
+    }
+}
+
+/// RGBA color
+#[derive(Clone, Copy)]
+struct Color {
+    r: f32,
+    g: f32,
+    b: f32,
+    a: f32,
+}
+
+impl Color {
+    fn new(r: f32, g: f32, b: f32, a: f32) -> Self {
+        Self { r, g, b, a }
+    }
+
+    fn white() -> Self {
+        Self::new(1.0, 1.0, 1.0, 1.0)
+    }
+
+    fn black() -> Self {
+        Self::new(0.0, 0.0, 0.0, 1.0)
+    }
+
+    fn red() -> Self {
+        Self::new(1.0, 0.0, 0.0, 1.0)
+    }
+
+    fn green() -> Self {
+        Self::new(0.0, 1.0, 0.0, 1.0)
+    }
+
+    fn blue() -> Self {
+        Self::new(0.0, 0.0, 1.0, 1.0)
+    }
+
+    fn transparent() -> Self {
+        Self::new(0.0, 0.0, 0.0, 0.0)
+    }
+
+    fn from_hsv(h: f32, s: f32, v: f32) -> Self {
+        let c = v * s;
+        let x = c * (1.0 - ((h * 6.0) % 2.0 - 1.0).abs());
+        let m = v - c;
+
+        let (r, g, b) = match (h * 6.0) as i32 {
+            0 => (c, x, 0.0),
+            1 => (x, c, 0.0),
+            2 => (0.0, c, x),
+            3 => (0.0, x, c),
+            4 => (x, 0.0, c),
+            _ => (c, 0.0, x),
+        };
+
+        Self::new(r + m, g + m, b + m, 1.0)
+    }
+
+    fn to_u32(&self) -> u32 {
+        let r = (self.r.clamp(0.0, 1.0) * 255.0) as u32;
+        let g = (self.g.clamp(0.0, 1.0) * 255.0) as u32;
+        let b = (self.b.clamp(0.0, 1.0) * 255.0) as u32;
+        let a = (self.a.clamp(0.0, 1.0) * 255.0) as u32;
+        r | (g << 8) | (b << 16) | (a << 24)
+    }
+
+    fn lerp(a: Color, b: Color, t: f32) -> Color {
+        Color::new(
+            a.r + (b.r - a.r) * t,
+            a.g + (b.g - a.g) * t,
+            a.b + (b.b - a.b) * t,
+            a.a + (b.a - a.a) * t,
+        )
+    }
+
+    fn with_alpha(&self, a: f32) -> Color {
+        Color::new(self.r, self.g, self.b, a)
+    }
+}
+
+// =============================================================================
+// DRAW COMMANDS (WP-081)
+// =============================================================================
+
+/// Draw command for batching
+struct DrawCommand {
+    /// Start index in index buffer
+    index_offset: u32,
+    /// Number of indices
+    index_count: u32,
+    /// Texture to bind
+    texture_id: u32,
+    /// Clip rectangle
+    clip_rect: Rect,
+    /// User callback (for custom rendering)
+    callback: Option<fn(&RenderContext)>,
+}
+
+/// 2D rectangle
+#[derive(Clone, Copy)]
+struct Rect {
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+}
+
+impl Rect {
+    fn new(x: f32, y: f32, w: f32, h: f32) -> Self {
+        Self { x, y, w, h }
+    }
+
+    fn from_min_max(min: Vec2<f32>, max: Vec2<f32>) -> Self {
+        Self {
+            x: min.x,
+            y: min.y,
+            w: max.x - min.x,
+            h: max.y - min.y,
+        }
+    }
+
+    fn min(&self) -> Vec2<f32> {
+        Vec2::new(self.x, self.y)
+    }
+
+    fn max(&self) -> Vec2<f32> {
+        Vec2::new(self.x + self.w, self.y + self.h)
+    }
+
+    fn contains(&self, p: Vec2<f32>) -> bool {
+        p.x >= self.x && p.x <= self.x + self.w
+            && p.y >= self.y && p.y <= self.y + self.h
+    }
+
+    fn intersects(&self, other: &Rect) -> bool {
+        self.x < other.x + other.w
+            && self.x + self.w > other.x
+            && self.y < other.y + other.h
+            && self.y + self.h > other.y
+    }
+
+    fn intersection(&self, other: &Rect) -> Option<Rect> {
+        let x = self.x.max(other.x);
+        let y = self.y.max(other.y);
+        let r = (self.x + self.w).min(other.x + other.w);
+        let b = (self.y + self.h).min(other.y + other.h);
+
+        if r > x && b > y {
+            Some(Rect::new(x, y, r - x, b - y))
+        } else {
+            None
+        }
+    }
+
+    fn expand(&self, amount: f32) -> Rect {
+        Rect::new(
+            self.x - amount,
+            self.y - amount,
+            self.w + amount * 2.0,
+            self.h + amount * 2.0,
+        )
+    }
+}
+
+// =============================================================================
+// DRAW LIST (WP-081)
+// =============================================================================
+
+/// Draw list for accumulating primitives
+struct DrawList {
+    /// Vertex buffer
+    vertices: Vec<ImGuiVertex>,
+    /// Index buffer
+    indices: Vec<u32>,
+    /// Draw commands
+    commands: Vec<DrawCommand>,
+    /// Current texture ID
+    current_texture: u32,
+    /// Clip rectangle stack
+    clip_stack: Vec<Rect>,
+    /// Current path for complex shapes
+    path: Vec<Vec2<f32>>,
+}
+
+impl DrawList {
+    fn new() -> Self {
+        Self {
+            vertices: Vec::with_capacity(MAX_IMGUI_VERTICES),
+            indices: Vec::with_capacity(MAX_IMGUI_INDICES),
+            commands: Vec::new(),
+            current_texture: 0,
+            clip_stack: Vec::new(),
+            path: Vec::new(),
+        }
+    }
+
+    fn clear(&mut self) {
+        self.vertices.clear();
+        self.indices.clear();
+        self.commands.clear();
+        self.clip_stack.clear();
+        self.path.clear();
+        self.current_texture = 0;
+    }
+
+    /// Push clip rectangle
+    fn push_clip_rect(&mut self, rect: Rect) {
+        let clipped = if let Some(current) = self.clip_stack.last() {
+            current.intersection(&rect).unwrap_or(rect)
+        } else {
+            rect
+        };
+        self.clip_stack.push(clipped);
+        self.update_command();
+    }
+
+    /// Pop clip rectangle
+    fn pop_clip_rect(&mut self) {
+        self.clip_stack.pop();
+        self.update_command();
+    }
+
+    /// Get current clip rect
+    fn get_clip_rect(&self) -> Rect {
+        self.clip_stack.last()
+            .copied()
+            .unwrap_or(Rect::new(0.0, 0.0, 10000.0, 10000.0))
+    }
+
+    /// Set texture
+    fn set_texture(&mut self, texture_id: u32) {
+        if self.current_texture != texture_id {
+            self.current_texture = texture_id;
+            self.update_command();
+        }
+    }
+
+    /// Start new command if needed
+    fn update_command(&mut self) {
+        if self.commands.is_empty()
+            || self.commands.last().unwrap().index_count > 0
+        {
+            self.commands.push(DrawCommand {
+                index_offset: self.indices.len() as u32,
+                index_count: 0,
+                texture_id: self.current_texture,
+                clip_rect: self.get_clip_rect(),
+                callback: None,
+            });
+        } else {
+            let last = self.commands.last_mut().unwrap();
+            last.texture_id = self.current_texture;
+            last.clip_rect = self.get_clip_rect();
+        }
+    }
+
+    /// Reserve space for primitives
+    fn reserve(&mut self, vertex_count: usize, index_count: usize) {
+        let vtx_capacity = self.vertices.len() + vertex_count;
+        let idx_capacity = self.indices.len() + index_count;
+
+        if vtx_capacity > self.vertices.capacity() {
+            self.vertices.reserve(vertex_count);
+        }
+        if idx_capacity > self.indices.capacity() {
+            self.indices.reserve(index_count);
+        }
+    }
+
+    /// Add primitives
+    fn add_primitives(
+        &mut self,
+        vertices: &[ImGuiVertex],
+        indices: &[u32],
+    ) {
+        let vtx_offset = self.vertices.len() as u32;
+
+        self.vertices.extend_from_slice(vertices);
+        self.indices.extend(indices.iter().map(|i| i + vtx_offset));
+
+        if let Some(cmd) = self.commands.last_mut() {
+            cmd.index_count += indices.len() as u32;
+        }
+    }
+
+    // =========================================================================
+    // PRIMITIVE DRAWING
+    // =========================================================================
+
+    /// Draw filled rectangle
+    fn add_rect_filled(&mut self, rect: Rect, color: Color) {
+        self.update_command();
+
+        let vertices = [
+            ImGuiVertex::new(Vec2::new(rect.x, rect.y), Vec2::zero(), color),
+            ImGuiVertex::new(Vec2::new(rect.x + rect.w, rect.y), Vec2::new(1.0, 0.0), color),
+            ImGuiVertex::new(Vec2::new(rect.x + rect.w, rect.y + rect.h), Vec2::new(1.0, 1.0), color),
+            ImGuiVertex::new(Vec2::new(rect.x, rect.y + rect.h), Vec2::new(0.0, 1.0), color),
+        ];
+
+        let indices = [0, 1, 2, 0, 2, 3];
+        self.add_primitives(&vertices, &indices);
+    }
+
+    /// Draw rectangle outline
+    fn add_rect(&mut self, rect: Rect, color: Color, thickness: f32) {
+        let half = thickness * 0.5;
+
+        // Top
+        self.add_rect_filled(
+            Rect::new(rect.x - half, rect.y - half, rect.w + thickness, thickness),
+            color,
+        );
+        // Bottom
+        self.add_rect_filled(
+            Rect::new(rect.x - half, rect.y + rect.h - half, rect.w + thickness, thickness),
+            color,
+        );
+        // Left
+        self.add_rect_filled(
+            Rect::new(rect.x - half, rect.y + half, thickness, rect.h - thickness),
+            color,
+        );
+        // Right
+        self.add_rect_filled(
+            Rect::new(rect.x + rect.w - half, rect.y + half, thickness, rect.h - thickness),
+            color,
+        );
+    }
+
+    /// Draw filled rounded rectangle
+    fn add_rect_rounded_filled(
+        &mut self,
+        rect: Rect,
+        color: Color,
+        rounding: f32,
+        corners: CornerFlags,
+    ) {
+        if rounding <= 0.0 || corners.is_empty() {
+            self.add_rect_filled(rect, color);
+            return;
+        }
+
+        let rounding = rounding.min(rect.w * 0.5).min(rect.h * 0.5);
+
+        self.path_clear();
+
+        // Build rounded rect path
+        let segments = 8; // Per corner
+
+        // Top-left
+        if corners.contains(CornerFlags::TOP_LEFT) {
+            self.path_arc(
+                Vec2::new(rect.x + rounding, rect.y + rounding),
+                rounding,
+                std::f32::consts::PI,
+                std::f32::consts::FRAC_PI_2 * 3.0,
+                segments,
+            );
+        } else {
+            self.path.push(Vec2::new(rect.x, rect.y));
+        }
+
+        // Top-right
+        if corners.contains(CornerFlags::TOP_RIGHT) {
+            self.path_arc(
+                Vec2::new(rect.x + rect.w - rounding, rect.y + rounding),
+                rounding,
+                std::f32::consts::FRAC_PI_2 * 3.0,
+                std::f32::consts::PI * 2.0,
+                segments,
+            );
+        } else {
+            self.path.push(Vec2::new(rect.x + rect.w, rect.y));
+        }
+
+        // Bottom-right
+        if corners.contains(CornerFlags::BOTTOM_RIGHT) {
+            self.path_arc(
+                Vec2::new(rect.x + rect.w - rounding, rect.y + rect.h - rounding),
+                rounding,
+                0.0,
+                std::f32::consts::FRAC_PI_2,
+                segments,
+            );
+        } else {
+            self.path.push(Vec2::new(rect.x + rect.w, rect.y + rect.h));
+        }
+
+        // Bottom-left
+        if corners.contains(CornerFlags::BOTTOM_LEFT) {
+            self.path_arc(
+                Vec2::new(rect.x + rounding, rect.y + rect.h - rounding),
+                rounding,
+                std::f32::consts::FRAC_PI_2,
+                std::f32::consts::PI,
+                segments,
+            );
+        } else {
+            self.path.push(Vec2::new(rect.x, rect.y + rect.h));
+        }
+
+        self.path_fill_convex(color);
+    }
+
+    /// Draw line
+    fn add_line(&mut self, p1: Vec2<f32>, p2: Vec2<f32>, color: Color, thickness: f32) {
+        let dir = (p2 - p1).normalize();
+        let normal = Vec2::new(-dir.y, dir.x) * (thickness * 0.5);
+
+        let vertices = [
+            ImGuiVertex::new(p1 - normal, Vec2::zero(), color),
+            ImGuiVertex::new(p2 - normal, Vec2::zero(), color),
+            ImGuiVertex::new(p2 + normal, Vec2::zero(), color),
+            ImGuiVertex::new(p1 + normal, Vec2::zero(), color),
+        ];
+
+        let indices = [0, 1, 2, 0, 2, 3];
+        self.update_command();
+        self.add_primitives(&vertices, &indices);
+    }
+
+    /// Draw triangle filled
+    fn add_triangle_filled(
+        &mut self,
+        p1: Vec2<f32>,
+        p2: Vec2<f32>,
+        p3: Vec2<f32>,
+        color: Color,
+    ) {
+        let vertices = [
+            ImGuiVertex::new(p1, Vec2::zero(), color),
+            ImGuiVertex::new(p2, Vec2::zero(), color),
+            ImGuiVertex::new(p3, Vec2::zero(), color),
+        ];
+
+        let indices = [0, 1, 2];
+        self.update_command();
+        self.add_primitives(&vertices, &indices);
+    }
+
+    /// Draw circle filled
+    fn add_circle_filled(&mut self, center: Vec2<f32>, radius: f32, color: Color, segments: u32) {
+        self.path_clear();
+
+        for i in 0..segments {
+            let angle = (i as f32 / segments as f32) * std::f32::consts::PI * 2.0;
+            self.path.push(Vec2::new(
+                center.x + angle.cos() * radius,
+                center.y + angle.sin() * radius,
+            ));
+        }
+
+        self.path_fill_convex(color);
+    }
+
+    /// Draw circle outline
+    fn add_circle(&mut self, center: Vec2<f32>, radius: f32, color: Color, segments: u32, thickness: f32) {
+        self.path_clear();
+
+        for i in 0..=segments {
+            let angle = (i as f32 / segments as f32) * std::f32::consts::PI * 2.0;
+            self.path.push(Vec2::new(
+                center.x + angle.cos() * radius,
+                center.y + angle.sin() * radius,
+            ));
+        }
+
+        self.path_stroke(color, true, thickness);
+    }
+
+    /// Draw textured quad
+    fn add_image(
+        &mut self,
+        texture_id: u32,
+        rect: Rect,
+        uv_min: Vec2<f32>,
+        uv_max: Vec2<f32>,
+        tint: Color,
+    ) {
+        self.set_texture(texture_id);
+
+        let vertices = [
+            ImGuiVertex::new(rect.min(), uv_min, tint),
+            ImGuiVertex::new(Vec2::new(rect.x + rect.w, rect.y), Vec2::new(uv_max.x, uv_min.y), tint),
+            ImGuiVertex::new(rect.max(), uv_max, tint),
+            ImGuiVertex::new(Vec2::new(rect.x, rect.y + rect.h), Vec2::new(uv_min.x, uv_max.y), tint),
+        ];
+
+        let indices = [0, 1, 2, 0, 2, 3];
+        self.add_primitives(&vertices, &indices);
+    }
+
+    // =========================================================================
+    // PATH OPERATIONS
+    // =========================================================================
+
+    fn path_clear(&mut self) {
+        self.path.clear();
+    }
+
+    fn path_arc(
+        &mut self,
+        center: Vec2<f32>,
+        radius: f32,
+        start_angle: f32,
+        end_angle: f32,
+        segments: u32,
+    ) {
+        for i in 0..=segments {
+            let t = i as f32 / segments as f32;
+            let angle = start_angle + (end_angle - start_angle) * t;
+            self.path.push(Vec2::new(
+                center.x + angle.cos() * radius,
+                center.y + angle.sin() * radius,
+            ));
+        }
+    }
+
+    fn path_fill_convex(&mut self, color: Color) {
+        if self.path.len() < 3 {
+            return;
+        }
+
+        self.update_command();
+
+        let vtx_offset = self.vertices.len() as u32;
+
+        // Add vertices
+        for &p in &self.path {
+            self.vertices.push(ImGuiVertex::new(p, Vec2::zero(), color));
+        }
+
+        // Add indices (fan triangulation)
+        for i in 2..self.path.len() {
+            self.indices.push(vtx_offset);
+            self.indices.push(vtx_offset + i as u32 - 1);
+            self.indices.push(vtx_offset + i as u32);
+        }
+
+        if let Some(cmd) = self.commands.last_mut() {
+            cmd.index_count += ((self.path.len() - 2) * 3) as u32;
+        }
+
+        self.path.clear();
+    }
+
+    fn path_stroke(&mut self, color: Color, closed: bool, thickness: f32) {
+        if self.path.len() < 2 {
+            return;
+        }
+
+        let half = thickness * 0.5;
+
+        for i in 0..self.path.len() {
+            let p1 = self.path[i];
+            let p2 = if closed {
+                self.path[(i + 1) % self.path.len()]
+            } else {
+                if i + 1 >= self.path.len() {
+                    break;
+                }
+                self.path[i + 1]
+            };
+
+            self.add_line(p1, p2, color, thickness);
+        }
+
+        self.path.clear();
+    }
+}
+
+/// Corner flags for rounded rectangles
+#[repr(u8)]
+#[derive(Clone, Copy)]
+struct CornerFlags(u8);
+
+impl CornerFlags {
+    const NONE: CornerFlags = CornerFlags(0);
+    const TOP_LEFT: CornerFlags = CornerFlags(1 << 0);
+    const TOP_RIGHT: CornerFlags = CornerFlags(1 << 1);
+    const BOTTOM_LEFT: CornerFlags = CornerFlags(1 << 2);
+    const BOTTOM_RIGHT: CornerFlags = CornerFlags(1 << 3);
+    const ALL: CornerFlags = CornerFlags(0x0F);
+
+    fn is_empty(&self) -> bool {
+        self.0 == 0
+    }
+
+    fn contains(&self, other: CornerFlags) -> bool {
+        (self.0 & other.0) != 0
+    }
+}
+
+// =============================================================================
+// FONT SYSTEM (WP-083)
+// =============================================================================
+
+/// Glyph information
+struct Glyph {
+    /// Character code
+    codepoint: u32,
+    /// UV coordinates in atlas
+    uv_min: Vec2<f32>,
+    uv_max: Vec2<f32>,
+    /// Glyph dimensions
+    size: Vec2<f32>,
+    /// Offset from cursor
+    offset: Vec2<f32>,
+    /// Horizontal advance
+    advance_x: f32,
+}
+
+/// Font atlas
+struct FontAtlas {
+    /// Atlas texture
+    texture: Texture,
+    /// Texture dimensions
+    width: u32,
+    height: u32,
+    /// Glyphs
+    glyphs: HashMap<u32, Glyph>,
+    /// Font size
+    font_size: f32,
+    /// Line height
+    line_height: f32,
+    /// Ascent
+    ascent: f32,
+    /// Descent
+    descent: f32,
+}
+
+impl FontAtlas {
+    fn new(ctx: &RenderContext) -> Self {
+        // Create default font atlas with ASCII characters
+        let width = 512;
+        let height = 512;
+
+        let mut atlas = Self {
+            texture: Texture::new_2d(ctx, width, height, TextureFormat::R8Unorm),
+            width,
+            height,
+            glyphs: HashMap::new(),
+            font_size: DEFAULT_FONT_SIZE,
+            line_height: DEFAULT_FONT_SIZE * LINE_HEIGHT_MULT,
+            ascent: DEFAULT_FONT_SIZE * 0.8,
+            descent: DEFAULT_FONT_SIZE * 0.2,
+        };
+
+        atlas.build_default_font();
+        atlas
+    }
+
+    fn build_default_font(&mut self) {
+        // Create basic ASCII glyphs
+        // In practice, this would use stb_truetype or similar
+
+        let glyph_width = 8.0;
+        let glyph_height = 14.0;
+        let cols = (self.width as f32 / glyph_width) as u32;
+
+        for c in 32u32..127 {
+            let idx = c - 32;
+            let x = (idx % cols) as f32 * glyph_width;
+            let y = (idx / cols) as f32 * glyph_height;
+
+            self.glyphs.insert(c, Glyph {
+                codepoint: c,
+                uv_min: Vec2::new(x / self.width as f32, y / self.height as f32),
+                uv_max: Vec2::new((x + glyph_width) / self.width as f32, (y + glyph_height) / self.height as f32),
+                size: Vec2::new(glyph_width, glyph_height),
+                offset: Vec2::new(0.0, -self.ascent),
+                advance_x: glyph_width,
+            });
+        }
+    }
+
+    fn get_glyph(&self, codepoint: u32) -> Option<&Glyph> {
+        self.glyphs.get(&codepoint)
+    }
+
+    fn calc_text_size(&self, text: &str) -> Vec2<f32> {
+        let mut width = 0.0f32;
+        let mut height = self.line_height;
+        let mut line_width = 0.0f32;
+
+        for c in text.chars() {
+            if c == '\n' {
+                width = width.max(line_width);
+                line_width = 0.0;
+                height += self.line_height;
+                continue;
+            }
+
+            if let Some(glyph) = self.get_glyph(c as u32) {
+                line_width += glyph.advance_x;
+            }
+        }
+
+        width = width.max(line_width);
+        Vec2::new(width, height)
+    }
+}
+
+/// Font renderer
+struct FontRenderer {
+    atlas: FontAtlas,
+    draw_list: DrawList,
+}
+
+impl FontRenderer {
+    fn new(ctx: &RenderContext) -> Self {
+        Self {
+            atlas: FontAtlas::new(ctx),
+            draw_list: DrawList::new(),
+        }
+    }
+
+    /// Render text
+    fn render_text(
+        &mut self,
+        text: &str,
+        position: Vec2<f32>,
+        color: Color,
+    ) {
+        let mut cursor = position;
+        cursor.y += self.atlas.ascent;
+
+        for c in text.chars() {
+            if c == '\n' {
+                cursor.x = position.x;
+                cursor.y += self.atlas.line_height;
+                continue;
+            }
+
+            if let Some(glyph) = self.atlas.get_glyph(c as u32) {
+                let rect = Rect::new(
+                    cursor.x + glyph.offset.x,
+                    cursor.y + glyph.offset.y,
+                    glyph.size.x,
+                    glyph.size.y,
+                );
+
+                self.draw_list.add_image(
+                    0, // Font atlas texture
+                    rect,
+                    glyph.uv_min,
+                    glyph.uv_max,
+                    color,
+                );
+
+                cursor.x += glyph.advance_x;
+            }
+        }
+    }
+}
+
+// =============================================================================
+// IMGUI CONTEXT (WP-081)
+// =============================================================================
+
+/// Widget ID
+type WidgetId = u64;
+
+/// ImGui context
+struct ImGuiContext {
+    /// Draw list
+    draw_list: DrawList,
+    /// Font renderer
+    font: FontRenderer,
+    /// Style
+    style: ImGuiStyle,
+
+    /// Current cursor position
+    cursor: Vec2<f32>,
+    /// Current line height
+    line_height: f32,
+    /// Indent level
+    indent: f32,
+
+    /// Screen size
+    screen_size: Vec2<f32>,
+
+    /// Hot widget (hovered)
+    hot: Option<WidgetId>,
+    /// Active widget (being interacted with)
+    active: Option<WidgetId>,
+
+    /// Mouse position
+    mouse_pos: Vec2<f32>,
+    /// Mouse button state
+    mouse_down: [bool; 3],
+    /// Mouse button clicked this frame
+    mouse_clicked: [bool; 3],
+    /// Mouse button released this frame
+    mouse_released: [bool; 3],
+    /// Scroll delta
+    scroll_delta: Vec2<f32>,
+
+    /// Keyboard input
+    key_pressed: [bool; 256],
+    /// Text input buffer
+    text_input: String,
+
+    /// Window stack
+    window_stack: Vec<WindowState>,
+
+    /// ID stack
+    id_stack: Vec<WidgetId>,
+
+    /// Frame counter
+    frame_count: u64,
+}
+
+/// Window state
+struct WindowState {
+    id: WidgetId,
+    rect: Rect,
+    title: String,
+    flags: WindowFlags,
+    scroll: Vec2<f32>,
+    content_size: Vec2<f32>,
+}
+
+/// Window flags
+#[repr(u32)]
+#[derive(Clone, Copy)]
+struct WindowFlags(u32);
+
+impl WindowFlags {
+    const NONE: WindowFlags = WindowFlags(0);
+    const NO_TITLE_BAR: WindowFlags = WindowFlags(1 << 0);
+    const NO_RESIZE: WindowFlags = WindowFlags(1 << 1);
+    const NO_MOVE: WindowFlags = WindowFlags(1 << 2);
+    const NO_SCROLLBAR: WindowFlags = WindowFlags(1 << 3);
+    const NO_BACKGROUND: WindowFlags = WindowFlags(1 << 4);
+    const ALWAYS_AUTO_RESIZE: WindowFlags = WindowFlags(1 << 5);
+
+    fn contains(&self, other: WindowFlags) -> bool {
+        (self.0 & other.0) != 0
+    }
+}
+
+/// ImGui style
+struct ImGuiStyle {
+    /// Window background color
+    window_bg: Color,
+    /// Window border color
+    window_border: Color,
+    /// Window title bar color
+    title_bar: Color,
+    /// Window title bar active color
+    title_bar_active: Color,
+    /// Button color
+    button: Color,
+    /// Button hovered color
+    button_hovered: Color,
+    /// Button active color
+    button_active: Color,
+    /// Slider grab color
+    slider_grab: Color,
+    /// Slider background color
+    slider_bg: Color,
+    /// Text color
+    text: Color,
+    /// Text disabled color
+    text_disabled: Color,
+    /// Frame background color
+    frame_bg: Color,
+    /// Frame background hovered color
+    frame_bg_hovered: Color,
+    /// Frame background active color
+    frame_bg_active: Color,
+    /// Checkbox mark color
+    check_mark: Color,
+    /// Scrollbar background
+    scrollbar_bg: Color,
+    /// Scrollbar grab
+    scrollbar_grab: Color,
+
+    /// Window padding
+    window_padding: Vec2<f32>,
+    /// Frame padding
+    frame_padding: Vec2<f32>,
+    /// Item spacing
+    item_spacing: Vec2<f32>,
+    /// Window rounding
+    window_rounding: f32,
+    /// Frame rounding
+    frame_rounding: f32,
+    /// Scrollbar size
+    scrollbar_size: f32,
+}
+
+impl ImGuiStyle {
+    fn default() -> Self {
+        Self {
+            window_bg: Color::new(0.06, 0.06, 0.06, 0.94),
+            window_border: Color::new(0.43, 0.43, 0.50, 0.50),
+            title_bar: Color::new(0.04, 0.04, 0.04, 1.0),
+            title_bar_active: Color::new(0.16, 0.29, 0.48, 1.0),
+            button: Color::new(0.26, 0.59, 0.98, 0.40),
+            button_hovered: Color::new(0.26, 0.59, 0.98, 1.0),
+            button_active: Color::new(0.06, 0.53, 0.98, 1.0),
+            slider_grab: Color::new(0.26, 0.59, 0.98, 1.0),
+            slider_bg: Color::new(0.26, 0.59, 0.98, 0.25),
+            text: Color::new(1.0, 1.0, 1.0, 1.0),
+            text_disabled: Color::new(0.5, 0.5, 0.5, 1.0),
+            frame_bg: Color::new(0.16, 0.29, 0.48, 0.54),
+            frame_bg_hovered: Color::new(0.26, 0.59, 0.98, 0.40),
+            frame_bg_active: Color::new(0.26, 0.59, 0.98, 0.67),
+            check_mark: Color::new(0.26, 0.59, 0.98, 1.0),
+            scrollbar_bg: Color::new(0.02, 0.02, 0.02, 0.53),
+            scrollbar_grab: Color::new(0.31, 0.31, 0.31, 1.0),
+
+            window_padding: Vec2::new(8.0, 8.0),
+            frame_padding: Vec2::new(4.0, 3.0),
+            item_spacing: Vec2::new(8.0, 4.0),
+            window_rounding: 4.0,
+            frame_rounding: 2.0,
+            scrollbar_size: 14.0,
+        }
+    }
+
+    fn dark() -> Self {
+        Self::default()
+    }
+
+    fn light() -> Self {
+        Self {
+            window_bg: Color::new(0.94, 0.94, 0.94, 1.0),
+            window_border: Color::new(0.0, 0.0, 0.0, 0.30),
+            title_bar: Color::new(0.82, 0.82, 0.82, 1.0),
+            title_bar_active: Color::new(0.64, 0.64, 0.64, 1.0),
+            button: Color::new(0.26, 0.59, 0.98, 0.40),
+            button_hovered: Color::new(0.26, 0.59, 0.98, 1.0),
+            button_active: Color::new(0.06, 0.53, 0.98, 1.0),
+            slider_grab: Color::new(0.26, 0.59, 0.98, 0.78),
+            slider_bg: Color::new(0.26, 0.59, 0.98, 0.35),
+            text: Color::new(0.0, 0.0, 0.0, 1.0),
+            text_disabled: Color::new(0.6, 0.6, 0.6, 1.0),
+            frame_bg: Color::new(1.0, 1.0, 1.0, 1.0),
+            frame_bg_hovered: Color::new(0.26, 0.59, 0.98, 0.40),
+            frame_bg_active: Color::new(0.26, 0.59, 0.98, 0.67),
+            check_mark: Color::new(0.26, 0.59, 0.98, 1.0),
+            scrollbar_bg: Color::new(0.98, 0.98, 0.98, 0.53),
+            scrollbar_grab: Color::new(0.69, 0.69, 0.69, 0.80),
+
+            window_padding: Vec2::new(8.0, 8.0),
+            frame_padding: Vec2::new(4.0, 3.0),
+            item_spacing: Vec2::new(8.0, 4.0),
+            window_rounding: 4.0,
+            frame_rounding: 2.0,
+            scrollbar_size: 14.0,
+        }
+    }
+}
+
+impl ImGuiContext {
+    fn new(ctx: &RenderContext, screen_size: Vec2<f32>) -> Self {
+        Self {
+            draw_list: DrawList::new(),
+            font: FontRenderer::new(ctx),
+            style: ImGuiStyle::default(),
+            cursor: Vec2::zero(),
+            line_height: DEFAULT_FONT_SIZE * LINE_HEIGHT_MULT,
+            indent: 0.0,
+            screen_size,
+            hot: None,
+            active: None,
+            mouse_pos: Vec2::zero(),
+            mouse_down: [false; 3],
+            mouse_clicked: [false; 3],
+            mouse_released: [false; 3],
+            scroll_delta: Vec2::zero(),
+            key_pressed: [false; 256],
+            text_input: String::new(),
+            window_stack: Vec::new(),
+            id_stack: Vec::new(),
+            frame_count: 0,
+        }
+    }
+
+    // =========================================================================
+    // FRAME MANAGEMENT
+    // =========================================================================
+
+    fn new_frame(&mut self) {
+        self.draw_list.clear();
+        self.cursor = Vec2::zero();
+        self.frame_count += 1;
+
+        // Reset click/release state
+        self.mouse_clicked = [false; 3];
+        self.mouse_released = [false; 3];
+        self.text_input.clear();
+    }
+
+    fn end_frame(&mut self) {
+        // Finalize draw list
+    }
+
+    // =========================================================================
+    // INPUT HANDLING
+    // =========================================================================
+
+    fn set_mouse_pos(&mut self, pos: Vec2<f32>) {
+        self.mouse_pos = pos;
+    }
+
+    fn set_mouse_button(&mut self, button: usize, down: bool) {
+        if button < 3 {
+            if down && !self.mouse_down[button] {
+                self.mouse_clicked[button] = true;
+            }
+            if !down && self.mouse_down[button] {
+                self.mouse_released[button] = true;
+            }
+            self.mouse_down[button] = down;
+        }
+    }
+
+    fn set_scroll(&mut self, delta: Vec2<f32>) {
+        self.scroll_delta = delta;
+    }
+
+    fn add_text_input(&mut self, text: &str) {
+        self.text_input.push_str(text);
+    }
+
+    // =========================================================================
+    // ID SYSTEM
+    // =========================================================================
+
+    fn get_id(&self, label: &str) -> WidgetId {
+        let mut hasher = FnvHasher::default();
+        hasher.write(label.as_bytes());
+        for &id in &self.id_stack {
+            hasher.write_u64(id);
+        }
+        hasher.finish()
+    }
+
+    fn push_id(&mut self, id: WidgetId) {
+        self.id_stack.push(id);
+    }
+
+    fn pop_id(&mut self) {
+        self.id_stack.pop();
+    }
+
+    // =========================================================================
+    // WIDGETS
+    // =========================================================================
+
+    /// Begin a window
+    fn begin_window(&mut self, title: &str, rect: Rect, flags: WindowFlags) -> bool {
+        let id = self.get_id(title);
+
+        let window = WindowState {
+            id,
+            rect,
+            title: title.to_string(),
+            flags,
+            scroll: Vec2::zero(),
+            content_size: Vec2::zero(),
+        };
+
+        // Draw window background
+        if !flags.contains(WindowFlags::NO_BACKGROUND) {
+            self.draw_list.add_rect_rounded_filled(
+                rect,
+                self.style.window_bg,
+                self.style.window_rounding,
+                CornerFlags::ALL,
+            );
+
+            // Border
+            self.draw_list.add_rect(
+                rect,
+                self.style.window_border,
+                1.0,
+            );
+        }
+
+        // Title bar
+        if !flags.contains(WindowFlags::NO_TITLE_BAR) {
+            let title_rect = Rect::new(
+                rect.x,
+                rect.y,
+                rect.w,
+                self.line_height + self.style.frame_padding.y * 2.0,
+            );
+
+            let title_color = if self.active == Some(id) {
+                self.style.title_bar_active
+            } else {
+                self.style.title_bar
+            };
+
+            self.draw_list.add_rect_rounded_filled(
+                title_rect,
+                title_color,
+                self.style.window_rounding,
+                CornerFlags(CornerFlags::TOP_LEFT.0 | CornerFlags::TOP_RIGHT.0),
+            );
+
+            // Title text
+            self.font.render_text(
+                title,
+                Vec2::new(
+                    rect.x + self.style.window_padding.x,
+                    rect.y + self.style.frame_padding.y,
+                ),
+                self.style.text,
+            );
+
+            self.cursor = Vec2::new(
+                rect.x + self.style.window_padding.x,
+                rect.y + title_rect.h + self.style.window_padding.y,
+            );
+        } else {
+            self.cursor = Vec2::new(
+                rect.x + self.style.window_padding.x,
+                rect.y + self.style.window_padding.y,
+            );
+        }
+
+        // Set clip rect
+        self.draw_list.push_clip_rect(rect);
+
+        self.window_stack.push(window);
+        self.push_id(id);
+
+        true
+    }
+
+    /// End a window
+    fn end_window(&mut self) {
+        self.draw_list.pop_clip_rect();
+        self.window_stack.pop();
+        self.pop_id();
+    }
+
+    /// Text label
+    fn text(&mut self, text: &str) {
+        self.font.render_text(text, self.cursor, self.style.text);
+
+        let size = self.font.atlas.calc_text_size(text);
+        self.cursor.y += size.y + self.style.item_spacing.y;
+    }
+
+    /// Colored text
+    fn text_colored(&mut self, text: &str, color: Color) {
+        self.font.render_text(text, self.cursor, color);
+
+        let size = self.font.atlas.calc_text_size(text);
+        self.cursor.y += size.y + self.style.item_spacing.y;
+    }
+
+    /// Button widget
+    fn button(&mut self, label: &str) -> bool {
+        let id = self.get_id(label);
+
+        let text_size = self.font.atlas.calc_text_size(label);
+        let button_size = Vec2::new(
+            text_size.x + self.style.frame_padding.x * 2.0,
+            text_size.y + self.style.frame_padding.y * 2.0,
+        );
+
+        let rect = Rect::new(
+            self.cursor.x,
+            self.cursor.y,
+            button_size.x,
+            button_size.y,
+        );
+
+        // Interaction
+        let hovered = rect.contains(self.mouse_pos);
+        let clicked = hovered && self.mouse_clicked[0];
+        let held = hovered && self.mouse_down[0];
+
+        if hovered {
+            self.hot = Some(id);
+        }
+        if clicked {
+            self.active = Some(id);
+        }
+
+        // Draw
+        let bg_color = if held {
+            self.style.button_active
+        } else if hovered {
+            self.style.button_hovered
+        } else {
+            self.style.button
+        };
+
+        self.draw_list.add_rect_rounded_filled(
+            rect,
+            bg_color,
+            self.style.frame_rounding,
+            CornerFlags::ALL,
+        );
+
+        self.font.render_text(
+            label,
+            Vec2::new(
+                rect.x + self.style.frame_padding.x,
+                rect.y + self.style.frame_padding.y,
+            ),
+            self.style.text,
+        );
+
+        self.cursor.y += button_size.y + self.style.item_spacing.y;
+
+        clicked
+    }
+
+    /// Checkbox widget
+    fn checkbox(&mut self, label: &str, value: &mut bool) -> bool {
+        let id = self.get_id(label);
+
+        let box_size = self.line_height;
+        let text_size = self.font.atlas.calc_text_size(label);
+
+        let total_width = box_size + self.style.item_spacing.x + text_size.x;
+        let rect = Rect::new(
+            self.cursor.x,
+            self.cursor.y,
+            box_size,
+            box_size,
+        );
+
+        // Interaction
+        let check_rect = Rect::new(
+            self.cursor.x,
+            self.cursor.y,
+            total_width,
+            box_size,
+        );
+        let hovered = check_rect.contains(self.mouse_pos);
+        let clicked = hovered && self.mouse_clicked[0];
+
+        if clicked {
+            *value = !*value;
+        }
+
+        // Draw checkbox background
+        let bg_color = if hovered {
+            self.style.frame_bg_hovered
+        } else {
+            self.style.frame_bg
+        };
+
+        self.draw_list.add_rect_rounded_filled(
+            rect,
+            bg_color,
+            self.style.frame_rounding,
+            CornerFlags::ALL,
+        );
+
+        // Draw checkmark
+        if *value {
+            let pad = 3.0;
+            let check_rect = Rect::new(
+                rect.x + pad,
+                rect.y + pad,
+                rect.w - pad * 2.0,
+                rect.h - pad * 2.0,
+            );
+            self.draw_list.add_rect_filled(check_rect, self.style.check_mark);
+        }
+
+        // Draw label
+        self.font.render_text(
+            label,
+            Vec2::new(
+                rect.x + box_size + self.style.item_spacing.x,
+                rect.y + (box_size - text_size.y) * 0.5,
+            ),
+            self.style.text,
+        );
+
+        self.cursor.y += box_size + self.style.item_spacing.y;
+
+        clicked
+    }
+
+    /// Slider widget
+    fn slider(&mut self, label: &str, value: &mut f32, min: f32, max: f32) -> bool {
+        let id = self.get_id(label);
+
+        let text_size = self.font.atlas.calc_text_size(label);
+        let slider_width = 200.0;
+        let slider_height = self.line_height;
+
+        let rect = Rect::new(
+            self.cursor.x,
+            self.cursor.y,
+            slider_width,
+            slider_height,
+        );
+
+        // Interaction
+        let hovered = rect.contains(self.mouse_pos);
+        let active = self.active == Some(id);
+
+        if hovered && self.mouse_clicked[0] {
+            self.active = Some(id);
+        }
+        if self.mouse_released[0] && active {
+            self.active = None;
+        }
+
+        let mut changed = false;
+        if active || (hovered && self.mouse_down[0]) {
+            let t = ((self.mouse_pos.x - rect.x) / rect.w).clamp(0.0, 1.0);
+            let new_value = min + (max - min) * t;
+            if (*value - new_value).abs() > 0.0001 {
+                *value = new_value;
+                changed = true;
+            }
+        }
+
+        // Draw background
+        let bg_color = if hovered || active {
+            self.style.frame_bg_hovered
+        } else {
+            self.style.frame_bg
+        };
+
+        self.draw_list.add_rect_rounded_filled(
+            rect,
+            bg_color,
+            self.style.frame_rounding,
+            CornerFlags::ALL,
+        );
+
+        // Draw filled portion
+        let t = (*value - min) / (max - min);
+        let fill_rect = Rect::new(
+            rect.x,
+            rect.y,
+            rect.w * t,
+            rect.h,
+        );
+        self.draw_list.add_rect_rounded_filled(
+            fill_rect,
+            self.style.slider_bg,
+            self.style.frame_rounding,
+            CornerFlags(CornerFlags::TOP_LEFT.0 | CornerFlags::BOTTOM_LEFT.0),
+        );
+
+        // Draw grab
+        let grab_size = 12.0;
+        let grab_x = rect.x + rect.w * t - grab_size * 0.5;
+        let grab_rect = Rect::new(
+            grab_x.max(rect.x).min(rect.x + rect.w - grab_size),
+            rect.y + (rect.h - grab_size) * 0.5,
+            grab_size,
+            grab_size,
+        );
+        self.draw_list.add_circle_filled(
+            Vec2::new(grab_rect.x + grab_size * 0.5, grab_rect.y + grab_size * 0.5),
+            grab_size * 0.5,
+            self.style.slider_grab,
+            16,
+        );
+
+        // Draw label and value
+        let value_text = format!("{}: {:.2}", label, *value);
+        self.font.render_text(
+            &value_text,
+            Vec2::new(
+                rect.x + rect.w + self.style.item_spacing.x,
+                rect.y + (rect.h - text_size.y) * 0.5,
+            ),
+            self.style.text,
+        );
+
+        self.cursor.y += slider_height + self.style.item_spacing.y;
+
+        changed
+    }
+
+    /// Separator line
+    fn separator(&mut self) {
+        let y = self.cursor.y + self.style.item_spacing.y * 0.5;
+
+        self.draw_list.add_line(
+            Vec2::new(self.cursor.x, y),
+            Vec2::new(self.cursor.x + 200.0, y),
+            self.style.window_border,
+            1.0,
+        );
+
+        self.cursor.y += self.style.item_spacing.y;
+    }
+
+    /// Same line (don't advance cursor Y)
+    fn same_line(&mut self) {
+        self.cursor.y -= self.line_height + self.style.item_spacing.y;
+        self.cursor.x += 100.0; // Simple fixed offset
+    }
+
+    /// Color picker widget
+    fn color_picker(&mut self, label: &str, color: &mut Color) -> bool {
+        let id = self.get_id(label);
+        let mut changed = false;
+
+        // Draw label
+        self.text(label);
+
+        // Hue bar
+        let bar_width = 200.0;
+        let bar_height = 20.0;
+        let bar_rect = Rect::new(self.cursor.x, self.cursor.y, bar_width, bar_height);
+
+        // Draw hue gradient
+        let segments = 32;
+        let segment_width = bar_width / segments as f32;
+        for i in 0..segments {
+            let h1 = i as f32 / segments as f32;
+            let h2 = (i + 1) as f32 / segments as f32;
+            let c1 = Color::from_hsv(h1, 1.0, 1.0);
+            let c2 = Color::from_hsv(h2, 1.0, 1.0);
+
+            let seg_rect = Rect::new(
+                bar_rect.x + i as f32 * segment_width,
+                bar_rect.y,
+                segment_width,
+                bar_height,
+            );
+
+            // Draw gradient segment
+            self.draw_list.add_rect_filled(seg_rect, c1);
+        }
+
+        self.cursor.y += bar_height + self.style.item_spacing.y;
+
+        // Color preview
+        let preview_rect = Rect::new(self.cursor.x, self.cursor.y, 50.0, 50.0);
+        self.draw_list.add_rect_filled(preview_rect, *color);
+        self.draw_list.add_rect(preview_rect, self.style.window_border, 1.0);
+
+        self.cursor.y += 50.0 + self.style.item_spacing.y;
+
+        // RGB sliders
+        let mut r = color.r;
+        let mut g = color.g;
+        let mut b = color.b;
+        let mut a = color.a;
+
+        if self.slider("R", &mut r, 0.0, 1.0) { changed = true; color.r = r; }
+        if self.slider("G", &mut g, 0.0, 1.0) { changed = true; color.g = g; }
+        if self.slider("B", &mut b, 0.0, 1.0) { changed = true; color.b = b; }
+        if self.slider("A", &mut a, 0.0, 1.0) { changed = true; color.a = a; }
+
+        changed
+    }
+
+    /// Progress bar
+    fn progress_bar(&mut self, fraction: f32, label: Option<&str>) {
+        let bar_width = 200.0;
+        let bar_height = self.line_height;
+
+        let rect = Rect::new(self.cursor.x, self.cursor.y, bar_width, bar_height);
+
+        // Background
+        self.draw_list.add_rect_rounded_filled(
+            rect,
+            self.style.frame_bg,
+            self.style.frame_rounding,
+            CornerFlags::ALL,
+        );
+
+        // Filled portion
+        let fill_rect = Rect::new(
+            rect.x,
+            rect.y,
+            rect.w * fraction.clamp(0.0, 1.0),
+            rect.h,
+        );
+        self.draw_list.add_rect_rounded_filled(
+            fill_rect,
+            self.style.button,
+            self.style.frame_rounding,
+            CornerFlags::ALL,
+        );
+
+        // Label
+        let text = label.unwrap_or(&format!("{:.0}%", fraction * 100.0));
+        let text_size = self.font.atlas.calc_text_size(text);
+        self.font.render_text(
+            text,
+            Vec2::new(
+                rect.x + (rect.w - text_size.x) * 0.5,
+                rect.y + (rect.h - text_size.y) * 0.5,
+            ),
+            self.style.text,
+        );
+
+        self.cursor.y += bar_height + self.style.item_spacing.y;
+    }
+}
+
+// =============================================================================
+// DEBUG OVERLAY (WP-082)
+// =============================================================================
+
+/// Debug overlay configuration
+struct DebugOverlayConfig {
+    show_fps: bool,
+    show_frame_time: bool,
+    show_memory: bool,
+    show_draw_calls: bool,
+    show_triangles: bool,
+    show_gpu_time: bool,
+    show_camera: bool,
+    position: DebugPosition,
+}
+
+/// Debug overlay position
+#[derive(Clone, Copy)]
+enum DebugPosition {
+    TopLeft,
+    TopRight,
+    BottomLeft,
+    BottomRight,
+}
+
+impl DebugOverlayConfig {
+    fn default() -> Self {
+        Self {
+            show_fps: true,
+            show_frame_time: true,
+            show_memory: false,
+            show_draw_calls: true,
+            show_triangles: true,
+            show_gpu_time: false,
+            show_camera: false,
+            position: DebugPosition::TopLeft,
+        }
+    }
+}
+
+/// Debug statistics
+struct DebugStats {
+    fps: f32,
+    frame_time_ms: f32,
+    frame_time_history: [f32; 120],
+    history_index: usize,
+    draw_calls: u32,
+    triangles: u32,
+    vertices: u32,
+    gpu_time_ms: f32,
+    memory_used_mb: f32,
+    memory_budget_mb: f32,
+    camera_pos: Vec3<f32>,
+    camera_rot: Vec3<f32>,
+}
+
+impl DebugStats {
+    fn new() -> Self {
+        Self {
+            fps: 0.0,
+            frame_time_ms: 0.0,
+            frame_time_history: [0.0; 120],
+            history_index: 0,
+            draw_calls: 0,
+            triangles: 0,
+            vertices: 0,
+            gpu_time_ms: 0.0,
+            memory_used_mb: 0.0,
+            memory_budget_mb: 0.0,
+            camera_pos: Vec3::zero(),
+            camera_rot: Vec3::zero(),
+        }
+    }
+
+    fn update(&mut self, frame_time: f32) {
+        self.frame_time_ms = frame_time * 1000.0;
+        self.fps = 1.0 / frame_time;
+
+        self.frame_time_history[self.history_index] = self.frame_time_ms;
+        self.history_index = (self.history_index + 1) % 120;
+    }
+
+    fn average_frame_time(&self) -> f32 {
+        self.frame_time_history.iter().sum::<f32>() / 120.0
+    }
+}
+
+/// Debug overlay renderer
+struct DebugOverlay {
+    config: DebugOverlayConfig,
+    stats: DebugStats,
+    imgui: ImGuiContext,
+}
+
+impl DebugOverlay {
+    fn new(ctx: &RenderContext, screen_size: Vec2<f32>) -> Self {
+        Self {
+            config: DebugOverlayConfig::default(),
+            stats: DebugStats::new(),
+            imgui: ImGuiContext::new(ctx, screen_size),
+        }
+    }
+
+    fn render(&mut self, ctx: &RenderContext) {
+        self.imgui.new_frame();
+
+        // Calculate position
+        let padding = 10.0;
+        let width = 200.0;
+        let height = 150.0;
+
+        let pos = match self.config.position {
+            DebugPosition::TopLeft => Vec2::new(padding, padding),
+            DebugPosition::TopRight => Vec2::new(
+                self.imgui.screen_size.x - width - padding,
+                padding,
+            ),
+            DebugPosition::BottomLeft => Vec2::new(
+                padding,
+                self.imgui.screen_size.y - height - padding,
+            ),
+            DebugPosition::BottomRight => Vec2::new(
+                self.imgui.screen_size.x - width - padding,
+                self.imgui.screen_size.y - height - padding,
+            ),
+        };
+
+        let rect = Rect::new(pos.x, pos.y, width, height);
+
+        self.imgui.begin_window("Debug", rect, WindowFlags::NO_TITLE_BAR);
+
+        if self.config.show_fps {
+            let fps_text = format!("FPS: {:.1}", self.stats.fps);
+            self.imgui.text(&fps_text);
+        }
+
+        if self.config.show_frame_time {
+            let time_text = format!("Frame: {:.2} ms", self.stats.frame_time_ms);
+            self.imgui.text(&time_text);
+
+            // Draw frame time graph
+            self.draw_frame_time_graph();
+        }
+
+        if self.config.show_draw_calls {
+            let draw_text = format!("Draw Calls: {}", self.stats.draw_calls);
+            self.imgui.text(&draw_text);
+        }
+
+        if self.config.show_triangles {
+            let tri_text = format!("Triangles: {}K", self.stats.triangles / 1000);
+            self.imgui.text(&tri_text);
+        }
+
+        if self.config.show_memory {
+            let mem_text = format!(
+                "Memory: {:.0}/{:.0} MB",
+                self.stats.memory_used_mb,
+                self.stats.memory_budget_mb,
+            );
+            self.imgui.text(&mem_text);
+        }
+
+        if self.config.show_gpu_time {
+            let gpu_text = format!("GPU: {:.2} ms", self.stats.gpu_time_ms);
+            self.imgui.text(&gpu_text);
+        }
+
+        if self.config.show_camera {
+            let cam_text = format!(
+                "Pos: {:.1}, {:.1}, {:.1}",
+                self.stats.camera_pos.x,
+                self.stats.camera_pos.y,
+                self.stats.camera_pos.z,
+            );
+            self.imgui.text(&cam_text);
+        }
+
+        self.imgui.end_window();
+        self.imgui.end_frame();
+    }
+
+    fn draw_frame_time_graph(&mut self) {
+        let graph_width = 180.0;
+        let graph_height = 40.0;
+        let graph_rect = Rect::new(
+            self.imgui.cursor.x,
+            self.imgui.cursor.y,
+            graph_width,
+            graph_height,
+        );
+
+        // Background
+        self.imgui.draw_list.add_rect_filled(
+            graph_rect,
+            Color::new(0.0, 0.0, 0.0, 0.5),
+        );
+
+        // Find max value for scaling
+        let max_time = self.stats.frame_time_history.iter()
+            .fold(16.67f32, |a, &b| a.max(b));
+
+        // Draw graph lines
+        let bar_width = graph_width / 120.0;
+
+        for i in 0..120 {
+            let idx = (self.stats.history_index + i) % 120;
+            let value = self.stats.frame_time_history[idx];
+            let height = (value / max_time) * graph_height;
+
+            let color = if value > 33.33 {
+                Color::red()
+            } else if value > 16.67 {
+                Color::new(1.0, 0.5, 0.0, 1.0) // Orange
+            } else {
+                Color::green()
+            };
+
+            let bar_rect = Rect::new(
+                graph_rect.x + i as f32 * bar_width,
+                graph_rect.y + graph_height - height,
+                bar_width,
+                height,
+            );
+
+            self.imgui.draw_list.add_rect_filled(bar_rect, color);
+        }
+
+        // 16.67ms line (60 FPS target)
+        let target_y = graph_rect.y + graph_height - (16.67 / max_time) * graph_height;
+        self.imgui.draw_list.add_line(
+            Vec2::new(graph_rect.x, target_y),
+            Vec2::new(graph_rect.x + graph_width, target_y),
+            Color::new(1.0, 1.0, 0.0, 0.5),
+            1.0,
+        );
+
+        self.imgui.cursor.y += graph_height + self.imgui.style.item_spacing.y;
+    }
+}
+
+// =============================================================================
+// OVERLAY COMPOSITOR (WP-085)
+// =============================================================================
+
+/// Overlay layer
+struct OverlayLayer {
+    name: String,
+    draw_list: DrawList,
+    z_order: i32,
+    visible: bool,
+    opacity: f32,
+}
+
+/// Overlay compositor
+struct OverlayCompositor {
+    layers: Vec<OverlayLayer>,
+    /// Vertex buffer for GPU
+    vertex_buffer: Buffer<ImGuiVertex>,
+    /// Index buffer for GPU
+    index_buffer: Buffer<u32>,
+    /// Pipeline for rendering
+    pipeline: Pipeline,
+    /// Font atlas texture
+    font_texture: Texture,
+}
+
+impl OverlayCompositor {
+    fn new(ctx: &RenderContext) -> Self {
+        Self {
+            layers: Vec::new(),
+            vertex_buffer: Buffer::new_capacity(ctx, MAX_IMGUI_VERTICES, BufferUsage::VERTEX),
+            index_buffer: Buffer::new_capacity(ctx, MAX_IMGUI_INDICES, BufferUsage::INDEX),
+            pipeline: Pipeline::new_overlay(ctx),
+            font_texture: Texture::new_2d(ctx, 512, 512, TextureFormat::R8Unorm),
+        }
+    }
+
+    fn add_layer(&mut self, name: &str, z_order: i32) -> usize {
+        let idx = self.layers.len();
+        self.layers.push(OverlayLayer {
+            name: name.to_string(),
+            draw_list: DrawList::new(),
+            z_order,
+            visible: true,
+            opacity: 1.0,
+        });
+        self.sort_layers();
+        idx
+    }
+
+    fn get_layer(&mut self, index: usize) -> Option<&mut DrawList> {
+        self.layers.get_mut(index).map(|l| &mut l.draw_list)
+    }
+
+    fn sort_layers(&mut self) {
+        self.layers.sort_by_key(|l| l.z_order);
+    }
+
+    fn render(&mut self, ctx: &RenderContext, cmd: &mut CommandBuffer) {
+        // Collect all visible draw lists
+        let mut all_vertices = Vec::new();
+        let mut all_indices = Vec::new();
+        let mut all_commands = Vec::new();
+
+        for layer in &self.layers {
+            if !layer.visible {
+                continue;
+            }
+
+            let vtx_offset = all_vertices.len() as u32;
+
+            all_vertices.extend_from_slice(&layer.draw_list.vertices);
+            all_indices.extend(layer.draw_list.indices.iter().map(|i| i + vtx_offset));
+
+            for cmd in &layer.draw_list.commands {
+                all_commands.push(DrawCommand {
+                    index_offset: cmd.index_offset + vtx_offset,
+                    index_count: cmd.index_count,
+                    texture_id: cmd.texture_id,
+                    clip_rect: cmd.clip_rect,
+                    callback: cmd.callback,
+                });
+            }
+        }
+
+        // Upload to GPU
+        self.vertex_buffer.upload(ctx, &all_vertices);
+        self.index_buffer.upload(ctx, &all_indices);
+
+        // Render
+        cmd.bind_pipeline(&self.pipeline);
+        cmd.bind_vertex_buffer(&self.vertex_buffer);
+        cmd.bind_index_buffer(&self.index_buffer);
+        cmd.bind_texture(0, &self.font_texture);
+
+        for draw_cmd in &all_commands {
+            if let Some(callback) = draw_cmd.callback {
+                callback(ctx);
+            } else {
+                cmd.set_scissor(
+                    draw_cmd.clip_rect.x as i32,
+                    draw_cmd.clip_rect.y as i32,
+                    draw_cmd.clip_rect.w as u32,
+                    draw_cmd.clip_rect.h as u32,
+                );
+
+                cmd.draw_indexed(
+                    draw_cmd.index_count,
+                    1,
+                    draw_cmd.index_offset,
+                    0,
+                    0,
+                );
+            }
+        }
+    }
+}
+
+// =============================================================================
+// FNV HASHER (for widget IDs)
+// =============================================================================
+
+struct FnvHasher {
+    state: u64,
+}
+
+impl FnvHasher {
+    fn default() -> Self {
+        Self {
+            state: 0xcbf29ce484222325,
+        }
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        for &byte in bytes {
+            self.state ^= byte as u64;
+            self.state = self.state.wrapping_mul(0x100000001b3);
+        }
+    }
+
+    fn write_u64(&mut self, value: u64) {
+        self.write(&value.to_le_bytes());
+    }
+
+    fn finish(&self) -> u64 {
+        self.state
+    }
+}
+
+// =============================================================================
+// TESTS
+// =============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_color_conversions() {
+        let white = Color::white();
+        assert_eq!(white.to_u32(), 0xFFFFFFFF);
+
+        let red = Color::red();
+        assert_eq!(red.to_u32(), 0xFF0000FF);
+
+        let transparent = Color::transparent();
+        assert_eq!(transparent.to_u32(), 0x00000000);
+    }
+
+    #[test]
+    fn test_color_lerp() {
+        let a = Color::black();
+        let b = Color::white();
+        let mid = Color::lerp(a, b, 0.5);
+
+        assert!((mid.r - 0.5).abs() < 0.01);
+        assert!((mid.g - 0.5).abs() < 0.01);
+        assert!((mid.b - 0.5).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_rect_contains() {
+        let rect = Rect::new(10.0, 10.0, 100.0, 100.0);
+
+        assert!(rect.contains(Vec2::new(50.0, 50.0)));
+        assert!(rect.contains(Vec2::new(10.0, 10.0)));
+        assert!(!rect.contains(Vec2::new(0.0, 0.0)));
+        assert!(!rect.contains(Vec2::new(200.0, 200.0)));
+    }
+
+    #[test]
+    fn test_rect_intersection() {
+        let a = Rect::new(0.0, 0.0, 100.0, 100.0);
+        let b = Rect::new(50.0, 50.0, 100.0, 100.0);
+
+        let inter = a.intersection(&b);
+        assert!(inter.is_some());
+
+        let inter = inter.unwrap();
+        assert_eq!(inter.x, 50.0);
+        assert_eq!(inter.y, 50.0);
+        assert_eq!(inter.w, 50.0);
+        assert_eq!(inter.h, 50.0);
+    }
+
+    #[test]
+    fn test_rect_no_intersection() {
+        let a = Rect::new(0.0, 0.0, 50.0, 50.0);
+        let b = Rect::new(100.0, 100.0, 50.0, 50.0);
+
+        assert!(a.intersection(&b).is_none());
+    }
+
+    #[test]
+    fn test_draw_list_clear() {
+        let mut dl = DrawList::new();
+        dl.add_rect_filled(Rect::new(0.0, 0.0, 100.0, 100.0), Color::white());
+
+        assert!(!dl.vertices.is_empty());
+        assert!(!dl.indices.is_empty());
+
+        dl.clear();
+        assert!(dl.vertices.is_empty());
+        assert!(dl.indices.is_empty());
+    }
+
+    #[test]
+    fn test_corner_flags() {
+        assert!(CornerFlags::ALL.contains(CornerFlags::TOP_LEFT));
+        assert!(CornerFlags::ALL.contains(CornerFlags::TOP_RIGHT));
+        assert!(CornerFlags::ALL.contains(CornerFlags::BOTTOM_LEFT));
+        assert!(CornerFlags::ALL.contains(CornerFlags::BOTTOM_RIGHT));
+        assert!(CornerFlags::NONE.is_empty());
+    }
+
+    #[test]
+    fn test_fnv_hasher() {
+        let mut h1 = FnvHasher::default();
+        h1.write(b"test");
+        let hash1 = h1.finish();
+
+        let mut h2 = FnvHasher::default();
+        h2.write(b"test");
+        let hash2 = h2.finish();
+
+        assert_eq!(hash1, hash2);
+
+        let mut h3 = FnvHasher::default();
+        h3.write(b"different");
+        let hash3 = h3.finish();
+
+        assert_ne!(hash1, hash3);
+    }
+
+    #[test]
+    fn test_debug_stats() {
+        let mut stats = DebugStats::new();
+        stats.update(0.016);
+
+        assert!((stats.fps - 62.5).abs() < 1.0);
+        assert!((stats.frame_time_ms - 16.0).abs() < 0.1);
+    }
+
+    #[test]
+    fn test_color_from_hsv() {
+        // Red
+        let red = Color::from_hsv(0.0, 1.0, 1.0);
+        assert!((red.r - 1.0).abs() < 0.01);
+        assert!(red.g < 0.01);
+        assert!(red.b < 0.01);
+
+        // Green
+        let green = Color::from_hsv(0.333, 1.0, 1.0);
+        assert!(green.r < 0.01);
+        assert!((green.g - 1.0).abs() < 0.01);
+        assert!(green.b < 0.01);
+    }
+
+    #[test]
+    fn test_imgui_style_presets() {
+        let dark = ImGuiStyle::dark();
+        let light = ImGuiStyle::light();
+
+        // Dark theme should have dark background
+        assert!(dark.window_bg.r < 0.5);
+
+        // Light theme should have light background
+        assert!(light.window_bg.r > 0.5);
+    }
+
+    #[test]
+    fn test_window_flags() {
+        let flags = WindowFlags(WindowFlags::NO_TITLE_BAR.0 | WindowFlags::NO_RESIZE.0);
+
+        assert!(flags.contains(WindowFlags::NO_TITLE_BAR));
+        assert!(flags.contains(WindowFlags::NO_RESIZE));
+        assert!(!flags.contains(WindowFlags::NO_MOVE));
+    }
+}

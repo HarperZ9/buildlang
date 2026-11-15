@@ -1,0 +1,310 @@
+// =============================================================================
+// qseq — Print a sequence of numbers (GNU seq clone) in BuildLang
+// =============================================================================
+// Usage:
+//   qseq 5               print 1 2 3 4 5 (one per line)
+//   qseq 3 7             print 3 4 5 6 7
+//   qseq 0 0.5 3         print 0 0.5 1 1.5 2 2.5 3
+//   qseq -w 1 10         zero-pad to width of LAST
+//   qseq -s, 1 5         custom separator (default newline)
+//   qseq --help          usage
+//
+// Argument forms:
+//   1 arg:  seq 1 to N
+//   2 args: seq FIRST to LAST
+//   3 args: seq FIRST INCREMENT LAST
+// =============================================================================
+
+fn print_help() ~ Console {
+    println!("qseq -- print a sequence of numbers");
+    println!("");
+    println!("Usage:");
+    println!("  qseq [OPTION]... LAST");
+    println!("  qseq [OPTION]... FIRST LAST");
+    println!("  qseq [OPTION]... FIRST INCREMENT LAST");
+    println!("");
+    println!("Options:");
+    println!("  -w         equal width: zero-pad to width of LAST");
+    println!("  -s SEP     use SEP as separator (default: newline)");
+    println!("  --help     display this help and exit");
+    println!("");
+    println!("Print numbers from FIRST to LAST, in steps of INCREMENT.");
+    println!("Default FIRST=1, INCREMENT=1.");
+}
+
+// Get the number of decimal places in a numeric string.
+fn decimal_places(s: String) -> i64 {
+    let slen = s.len();
+    let mut i: i64 = 0;
+    while i < slen {
+        let c = s.char_at(i);
+        if c == "." {
+            return slen - i - 1;
+        }
+        i = i + 1;
+    }
+    0
+}
+
+// Find position of '.' in a string, returns -1 if not found.
+fn find_dot(s: String) -> i64 {
+    let slen = s.len();
+    let mut i: i64 = 0;
+    while i < slen {
+        let c = s.char_at(i);
+        if c == "." {
+            return i;
+        }
+        i = i + 1;
+    }
+    let not_found: i64 = 0 - 1;
+    return not_found;
+}
+
+// Strip trailing ".0" or ".000..." from a to_string_f64 result.
+// Note: dot==0 never happens with to_string_f64, so we combine the guard.
+fn strip_dot_zero(s: String) -> String {
+    let dot = find_dot(s);
+    if dot <= 0 {
+        return s;
+    }
+    s.substring(0, dot)
+}
+
+// Split a string at position `pos`: returns the left part (0..pos).
+fn str_left(s: String, pos: i64) -> String {
+    s.substring(0, pos)
+}
+
+// Split a string at position `pos`: returns the right part (pos..end).
+fn str_right(s: String, pos: i64, len: i64) -> String {
+    s.substring(pos, len)
+}
+
+// Build a zero-padded string with `n` leading zeros, then append `tail`.
+fn build_padded(zeros: i64, tail: String) -> String {
+    let mut result = "";
+    let mut p: i64 = 0;
+    while p < zeros {
+        result = result + "0";
+        p = p + 1;
+    }
+    result = result + tail;
+    result
+}
+
+// Format a float value with a specific number of decimal places.
+fn format_value(val: f64, dec: i64) -> String {
+    if dec == 0 {
+        // Integer output
+        let ival = floor(val + 0.5);
+        let s = to_string_f64(ival);
+        return strip_dot_zero(s);
+    }
+
+    // Float output with fixed decimal places
+    let neg = val < 0.0;
+    let abs_val = if neg { 0.0 - val } else { val };
+
+    // Scale up by 10^dec to get all digits as integer
+    let mut scale: f64 = 1.0;
+    let mut d: i64 = 0;
+    while d < dec {
+        scale = scale * 10.0;
+        d = d + 1;
+    }
+    let scaled = floor(abs_val * scale + 0.5);
+    let scaled_str = to_string_f64(scaled);
+    let int_str = strip_dot_zero(scaled_str);
+
+    // Pad with leading zeros so we have enough digits
+    let is_len = int_str.len();
+    let mut needed: i64 = 0;
+    if is_len <= dec {
+        needed = dec + 1 - is_len;
+    }
+    let padded = build_padded(needed, int_str);
+
+    let plen = padded.len();
+    let int_part = str_left(padded, plen - dec);
+    let frac_part = str_right(padded, plen - dec, dec);
+
+    let mut result = "";
+    if neg {
+        result = "-";
+    }
+    result = result + int_part + "." + frac_part;
+    result
+}
+
+// Zero-pad a string to a given width with leading zeros.
+fn zero_pad(s: String, width: i64) -> String {
+    let slen = s.len();
+    if slen >= width {
+        return s;
+    }
+    let pad = width - slen;
+    build_padded(pad, s)
+}
+
+// String pool to hold positional arg strings with proper String type.
+struct ArgPool {
+    buf: String,
+    starts: Vec<i64>,
+    lens: Vec<i64>,
+    n: i64,
+}
+
+fn argpool_new() -> ArgPool {
+    ArgPool { buf: "", starts: vec![], lens: vec![], n: 0 }
+}
+
+fn argpool_add(ap: &mut ArgPool, s: String) {
+    let st = ap.buf.len();
+    ap.buf = ap.buf + s;
+    let en = ap.buf.len();
+    vec_push(ap.starts, st);
+    vec_push(ap.lens, en - st);
+    ap.n = ap.n + 1;
+}
+
+fn argpool_get(ap: &ArgPool, idx: i64) -> String {
+    let st = vec_get(ap.starts, idx);
+    let ln = vec_get(ap.lens, idx);
+    ap.buf.substring(st, ln)
+}
+
+fn main() ~ Console + Environment + Process {
+    let nargs = args_count();
+
+    if nargs < 2 {
+        print_help();
+        process_exit(0);
+    }
+
+    // Parse flags
+    let mut flag_w = false;
+    let mut sep = "\n";
+
+    // Collect positional args into a pool
+    let mut ap = argpool_new();
+
+    let mut i: i64 = 1;
+    while i < nargs {
+        let arg = args_get(i);
+
+        if arg == "--help" || arg == "-h" {
+            print_help();
+            process_exit(0);
+        } else if arg == "-w" {
+            flag_w = true;
+        } else if arg == "-s" {
+            i = i + 1;
+            if i < nargs {
+                sep = args_get(i);
+            }
+        } else if arg.starts_with("-s") {
+            // -s, or -sSEP form
+            let alen = arg.len();
+            sep = arg.substring(2, alen - 2);
+        } else if arg.starts_with("-") {
+            if arg.contains("w") {
+                flag_w = true;
+            }
+        } else {
+            argpool_add(&mut ap, arg);
+        }
+
+        i = i + 1;
+    }
+
+    if ap.n == 0 {
+        println!("qseq: missing operand");
+        process_exit(1);
+    }
+
+    // Determine FIRST, INCREMENT, LAST based on positional count
+    let mut first: f64 = 1.0;
+    let mut incr: f64 = 1.0;
+    let mut last: f64 = 1.0;
+
+    // Also compute decimal places
+    let mut dec: i64 = 0;
+
+    if ap.n == 1 {
+        // qseq LAST
+        let a0 = argpool_get(&ap, 0);
+        last = a0.parse_float();
+        dec = decimal_places(a0);
+    } else if ap.n == 2 {
+        // qseq FIRST LAST
+        let a0 = argpool_get(&ap, 0);
+        let a1 = argpool_get(&ap, 1);
+        first = a0.parse_float();
+        last = a1.parse_float();
+        dec = decimal_places(a0);
+        let d1 = decimal_places(a1);
+        if d1 > dec { dec = d1; }
+    } else {
+        // qseq FIRST INCREMENT LAST
+        let a0 = argpool_get(&ap, 0);
+        let a1 = argpool_get(&ap, 1);
+        let a2 = argpool_get(&ap, 2);
+        first = a0.parse_float();
+        incr = a1.parse_float();
+        last = a2.parse_float();
+        dec = decimal_places(a0);
+        let d1 = decimal_places(a1);
+        if d1 > dec { dec = d1; }
+        let d2 = decimal_places(a2);
+        if d2 > dec { dec = d2; }
+    }
+
+    // Sanity check
+    if incr == 0.0 {
+        println!("qseq: zero increment");
+        process_exit(1);
+    }
+
+    // Determine zero-pad width from LAST
+    let mut pad_width: i64 = 0;
+    if flag_w {
+        let last_fmt = format_value(last, dec);
+        pad_width = last_fmt.len();
+    }
+
+    // Generate the sequence
+    let mut val = first;
+    let mut is_first = true;
+    let going_up = incr > 0.0;
+
+    let mut go = true;
+    while go {
+        let done = if going_up {
+            val > last + 0.0000001
+        } else {
+            val < last - 0.0000001
+        };
+
+        if done {
+            go = false;
+        } else {
+            let mut formatted = format_value(val, dec);
+            if flag_w {
+                formatted = zero_pad(formatted, pad_width);
+            }
+
+            if is_first {
+                print!("{}", formatted);
+                is_first = false;
+            } else {
+                print!("{}{}", sep, formatted);
+            }
+
+            val = val + incr;
+        }
+    }
+
+    // Final newline
+    println!("");
+}

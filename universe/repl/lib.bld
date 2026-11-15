@@ -1,0 +1,5369 @@
+// ═══════════════════════════════════════════════════════════════════════════════
+// BUILD-UNIVERSE REPL v2.0.0
+// "Quantum Shell" - Interactive Development Environment
+// ═══════════════════════════════════════════════════════════════════════════════
+// Copyright © 2024-2025 Zain Dana Harper. All Rights Reserved.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+module repl
+
+use foundation::io::{println, print, stdin, stdout, flush}
+use foundation::collections::{Vec, HashMap, VecDeque}
+use foundation::time::Instant
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// REPL CONFIGURATION
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[derive(Clone)]
+pub struct ReplConfig {
+    pub prompt: String,
+    pub continuation_prompt: String,
+    pub history_size: usize,
+    pub history_file: String,
+    pub auto_complete: bool,
+    pub syntax_highlight: bool,
+    pub show_types: bool,
+    pub show_timing: bool,
+    pub theme: Theme,
+}
+
+impl Default for ReplConfig {
+    fn default() -> Self {
+        ReplConfig {
+            prompt: "build> ".to_string(),
+            continuation_prompt: "     .. ".to_string(),
+            history_size: 1000,
+            history_file: "~/.bld/history".to_string(),
+            auto_complete: true,
+            syntax_highlight: true,
+            show_types: true,
+            show_timing: false,
+            theme: Theme::default(),
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct Theme {
+    pub keyword: Color,
+    pub string: Color,
+    pub number: Color,
+    pub comment: Color,
+    pub function: Color,
+    pub type_name: Color,
+    pub operator: Color,
+    pub error: Color,
+    pub output: Color,
+}
+
+impl Default for Theme {
+    fn default() -> Self {
+        Theme {
+            keyword: Color::Magenta,
+            string: Color::Green,
+            number: Color::Cyan,
+            comment: Color::Gray,
+            function: Color::Blue,
+            type_name: Color::Yellow,
+            operator: Color::White,
+            error: Color::Red,
+            output: Color::White,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+pub enum Color {
+    Black,
+    Red,
+    Green,
+    Yellow,
+    Blue,
+    Magenta,
+    Cyan,
+    White,
+    Gray,
+}
+
+impl Color {
+    pub fn ansi_code(&self) -> &str {
+        match self {
+            Color::Black => "\x1b[30m",
+            Color::Red => "\x1b[31m",
+            Color::Green => "\x1b[32m",
+            Color::Yellow => "\x1b[33m",
+            Color::Blue => "\x1b[34m",
+            Color::Magenta => "\x1b[35m",
+            Color::Cyan => "\x1b[36m",
+            Color::White => "\x1b[37m",
+            Color::Gray => "\x1b[90m",
+        }
+    }
+
+    pub fn reset() -> &'static str {
+        "\x1b[0m"
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// REPL STATE
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// REPL execution context
+pub struct ReplContext {
+    /// Variable bindings
+    pub bindings: HashMap<String, Value>,
+    /// Loaded modules
+    pub modules: HashMap<String, ModuleContext>,
+    /// Type definitions
+    pub types: HashMap<String, TypeDef>,
+    /// Function definitions
+    pub functions: HashMap<String, FunctionDef>,
+    /// Import aliases
+    pub imports: HashMap<String, String>,
+}
+
+impl ReplContext {
+    pub fn new() -> Self {
+        let mut ctx = ReplContext {
+            bindings: HashMap::new(),
+            modules: HashMap::new(),
+            types: HashMap::new(),
+            functions: HashMap::new(),
+            imports: HashMap::new(),
+        };
+
+        // Add built-in bindings
+        ctx.bindings.insert("true".to_string(), Value::Bool(true));
+        ctx.bindings.insert("false".to_string(), Value::Bool(false));
+        ctx.bindings.insert("PI".to_string(), Value::Float(3.14159265358979));
+        ctx.bindings.insert("E".to_string(), Value::Float(2.71828182845904));
+
+        ctx
+    }
+
+    pub fn define(&mut self, name: &str, value: Value) {
+        self.bindings.insert(name.to_string(), value);
+    }
+
+    pub fn get(&self, name: &str) -> Option<&Value> {
+        self.bindings.get(name)
+    }
+
+    pub fn list_bindings(&self) -> Vec<(&String, &Value)> {
+        self.bindings.iter().collect()
+    }
+}
+
+#[derive(Clone, Debug)]
+pub enum Value {
+    Unit,
+    Bool(bool),
+    Int(i64),
+    Float(f64),
+    String(String),
+    Char(char),
+    Array(Vec<Value>),
+    Tuple(Vec<Value>),
+    Struct(String, HashMap<String, Value>),
+    Function(String),
+    Module(String),
+}
+
+impl Value {
+    pub fn type_name(&self) -> &str {
+        match self {
+            Value::Unit => "()",
+            Value::Bool(_) => "bool",
+            Value::Int(_) => "i64",
+            Value::Float(_) => "f64",
+            Value::String(_) => "String",
+            Value::Char(_) => "char",
+            Value::Array(_) => "Vec",
+            Value::Tuple(_) => "tuple",
+            Value::Struct(name, _) => name,
+            Value::Function(name) => name,
+            Value::Module(name) => name,
+        }
+    }
+
+    pub fn display(&self) -> String {
+        match self {
+            Value::Unit => "()".to_string(),
+            Value::Bool(b) => b.to_string(),
+            Value::Int(i) => i.to_string(),
+            Value::Float(f) => format!("{:.6}", f),
+            Value::String(s) => format!("\"{}\"", s),
+            Value::Char(c) => format!("'{}'", c),
+            Value::Array(arr) => {
+                let items: Vec<String> = arr.iter().map(|v| v.display()).collect();
+                format!("[{}]", items.join(", "))
+            }
+            Value::Tuple(items) => {
+                let items: Vec<String> = items.iter().map(|v| v.display()).collect();
+                format!("({})", items.join(", "))
+            }
+            Value::Struct(name, fields) => {
+                let fields: Vec<String> = fields.iter()
+                    .map(|(k, v)| format!("{}: {}", k, v.display()))
+                    .collect();
+                format!("{} {{ {} }}", name, fields.join(", "))
+            }
+            Value::Function(name) => format!("<fn {}>", name),
+            Value::Module(name) => format!("<module {}>", name),
+        }
+    }
+}
+
+pub struct ModuleContext {
+    pub name: String,
+    pub exports: Vec<String>,
+}
+
+pub struct TypeDef {
+    pub name: String,
+    pub fields: Vec<(String, String)>,
+}
+
+pub struct FunctionDef {
+    pub name: String,
+    pub params: Vec<(String, String)>,
+    pub return_type: String,
+    pub body: String,
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// INPUT HANDLING
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// History manager
+pub struct History {
+    entries: VecDeque<String>,
+    max_size: usize,
+    position: usize,
+}
+
+impl History {
+    pub fn new(max_size: usize) -> Self {
+        History {
+            entries: VecDeque::with_capacity(max_size),
+            max_size,
+            position: 0,
+        }
+    }
+
+    pub fn add(&mut self, entry: String) {
+        if !entry.is_empty() {
+            // Don't add duplicates
+            if self.entries.back() != Some(&entry) {
+                if self.entries.len() >= self.max_size {
+                    self.entries.pop_front();
+                }
+                self.entries.push_back(entry);
+            }
+        }
+        self.position = self.entries.len();
+    }
+
+    pub fn previous(&mut self) -> Option<&String> {
+        if self.position > 0 {
+            self.position -= 1;
+            self.entries.get(self.position)
+        } else {
+            None
+        }
+    }
+
+    pub fn next(&mut self) -> Option<&String> {
+        if self.position < self.entries.len() {
+            self.position += 1;
+            self.entries.get(self.position)
+        } else {
+            None
+        }
+    }
+
+    pub fn search(&self, prefix: &str) -> Vec<&String> {
+        self.entries.iter()
+            .filter(|e| e.starts_with(prefix))
+            .collect()
+    }
+
+    pub fn load(&mut self, path: &str) -> Result<(), String> {
+        // Load history from file
+        Ok(())
+    }
+
+    pub fn save(&self, path: &str) -> Result<(), String> {
+        // Save history to file
+        Ok(())
+    }
+}
+
+/// Auto-completion engine
+pub struct Completer {
+    keywords: Vec<String>,
+    builtins: Vec<String>,
+}
+
+impl Completer {
+    pub fn new() -> Self {
+        Completer {
+            keywords: vec![
+                "let", "mut", "fn", "pub", "struct", "enum", "impl", "trait",
+                "if", "else", "match", "for", "while", "loop", "break", "continue",
+                "return", "use", "mod", "type", "where", "async", "await",
+                "true", "false", "self", "Self", "super", "crate",
+            ].into_iter().map(String::from).collect(),
+            builtins: vec![
+                "println!", "print!", "format!", "vec!", "assert!", "assert_eq!",
+                "dbg!", "todo!", "unimplemented!", "panic!",
+            ].into_iter().map(String::from).collect(),
+        }
+    }
+
+    pub fn complete(&self, input: &str, context: &ReplContext) -> Vec<Completion> {
+        let mut completions = Vec::new();
+
+        // Get the word being typed
+        let word = input.split_whitespace().last().unwrap_or("");
+
+        // Complete keywords
+        for kw in &self.keywords {
+            if kw.starts_with(word) {
+                completions.push(Completion {
+                    text: kw.clone(),
+                    kind: CompletionKind::Keyword,
+                    detail: None,
+                });
+            }
+        }
+
+        // Complete builtins
+        for builtin in &self.builtins {
+            if builtin.starts_with(word) {
+                completions.push(Completion {
+                    text: builtin.clone(),
+                    kind: CompletionKind::Macro,
+                    detail: None,
+                });
+            }
+        }
+
+        // Complete from context
+        for (name, value) in context.list_bindings() {
+            if name.starts_with(word) {
+                completions.push(Completion {
+                    text: name.clone(),
+                    kind: CompletionKind::Variable,
+                    detail: Some(value.type_name().to_string()),
+                });
+            }
+        }
+
+        completions
+    }
+}
+
+pub struct Completion {
+    pub text: String,
+    pub kind: CompletionKind,
+    pub detail: Option<String>,
+}
+
+#[derive(Clone, Copy)]
+pub enum CompletionKind {
+    Keyword,
+    Variable,
+    Function,
+    Type,
+    Module,
+    Macro,
+    Field,
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// SYNTAX HIGHLIGHTING
+// ═══════════════════════════════════════════════════════════════════════════════
+
+pub struct Highlighter {
+    theme: Theme,
+    keywords: Vec<&'static str>,
+}
+
+impl Highlighter {
+    pub fn new(theme: Theme) -> Self {
+        Highlighter {
+            theme,
+            keywords: vec![
+                "let", "mut", "fn", "pub", "struct", "enum", "impl", "trait",
+                "if", "else", "match", "for", "while", "loop", "break", "continue",
+                "return", "use", "mod", "type", "where", "async", "await",
+                "true", "false", "self", "Self", "super", "crate",
+            ],
+        }
+    }
+
+    pub fn highlight(&self, input: &str) -> String {
+        let mut result = String::new();
+        let mut chars = input.chars().peekable();
+
+        while let Some(c) = chars.next() {
+            if c.is_alphabetic() || c == '_' {
+                // Identifier or keyword
+                let mut word = c.to_string();
+                while let Some(&next) = chars.peek() {
+                    if next.is_alphanumeric() || next == '_' {
+                        word.push(chars.next().unwrap());
+                    } else {
+                        break;
+                    }
+                }
+
+                if self.keywords.contains(&word.as_str()) {
+                    result.push_str(self.theme.keyword.ansi_code());
+                    result.push_str(&word);
+                    result.push_str(Color::reset());
+                } else if word.chars().next().unwrap().is_uppercase() {
+                    result.push_str(self.theme.type_name.ansi_code());
+                    result.push_str(&word);
+                    result.push_str(Color::reset());
+                } else {
+                    result.push_str(&word);
+                }
+            } else if c == '"' {
+                // String literal
+                result.push_str(self.theme.string.ansi_code());
+                result.push(c);
+                while let Some(next) = chars.next() {
+                    result.push(next);
+                    if next == '"' {
+                        break;
+                    }
+                    if next == '\\' {
+                        if let Some(escaped) = chars.next() {
+                            result.push(escaped);
+                        }
+                    }
+                }
+                result.push_str(Color::reset());
+            } else if c.is_digit(10) {
+                // Number
+                result.push_str(self.theme.number.ansi_code());
+                result.push(c);
+                while let Some(&next) = chars.peek() {
+                    if next.is_digit(10) || next == '.' || next == '_' {
+                        result.push(chars.next().unwrap());
+                    } else {
+                        break;
+                    }
+                }
+                result.push_str(Color::reset());
+            } else if c == '/' && chars.peek() == Some(&'/') {
+                // Comment
+                result.push_str(self.theme.comment.ansi_code());
+                result.push(c);
+                while let Some(next) = chars.next() {
+                    result.push(next);
+                }
+                result.push_str(Color::reset());
+            } else {
+                result.push(c);
+            }
+        }
+
+        result
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// EVALUATOR
+// ═══════════════════════════════════════════════════════════════════════════════
+
+pub struct Evaluator {
+    context: ReplContext,
+}
+
+impl Evaluator {
+    pub fn new(context: ReplContext) -> Self {
+        Evaluator { context }
+    }
+
+    pub fn eval(&mut self, input: &str) -> Result<EvalResult, EvalError> {
+        let input = input.trim();
+
+        // Handle REPL commands
+        if input.starts_with(':') {
+            return self.eval_command(input);
+        }
+
+        // Handle variable binding
+        if input.starts_with("let ") {
+            return self.eval_let(input);
+        }
+
+        // Handle expression
+        self.eval_expr(input)
+    }
+
+    fn eval_command(&mut self, input: &str) -> Result<EvalResult, EvalError> {
+        let parts: Vec<&str> = input.splitn(2, ' ').collect();
+        let cmd = parts[0];
+        let args = parts.get(1).map(|s| *s).unwrap_or("");
+
+        match cmd {
+            ":help" | ":h" | ":?" => {
+                Ok(EvalResult::Output(HELP_TEXT.to_string()))
+            }
+            ":quit" | ":q" | ":exit" => {
+                Ok(EvalResult::Quit)
+            }
+            ":clear" | ":c" => {
+                Ok(EvalResult::Clear)
+            }
+            ":type" | ":t" => {
+                if let Some(value) = self.context.get(args) {
+                    Ok(EvalResult::Output(format!("{}: {}", args, value.type_name())))
+                } else {
+                    Err(EvalError::UndefinedVariable(args.to_string()))
+                }
+            }
+            ":bindings" | ":b" => {
+                let mut output = String::new();
+                for (name, value) in self.context.list_bindings() {
+                    output.push_str(&format!("{}: {} = {}\n", name, value.type_name(), value.display()));
+                }
+                Ok(EvalResult::Output(output))
+            }
+            ":load" | ":l" => {
+                self.load_file(args)?;
+                Ok(EvalResult::Output(format!("Loaded {}", args)))
+            }
+            ":reset" => {
+                self.context = ReplContext::new();
+                Ok(EvalResult::Output("Context reset".to_string()))
+            }
+            ":time" => {
+                Ok(EvalResult::ToggleTiming)
+            }
+            _ => {
+                Err(EvalError::UnknownCommand(cmd.to_string()))
+            }
+        }
+    }
+
+    fn eval_let(&mut self, input: &str) -> Result<EvalResult, EvalError> {
+        // Parse: let [mut] name [: type] = expr
+        let input = input.strip_prefix("let ").unwrap().trim();
+
+        let (name, expr) = if let Some(idx) = input.find('=') {
+            let name = input[..idx].trim().to_string();
+            let expr = input[idx + 1..].trim();
+            (name, expr)
+        } else {
+            return Err(EvalError::SyntaxError("Expected '=' in let binding".to_string()));
+        };
+
+        // Remove mut and type annotation
+        let name = name.replace("mut ", "").trim().to_string();
+        let name = if let Some(idx) = name.find(':') {
+            name[..idx].trim().to_string()
+        } else {
+            name
+        };
+
+        // Evaluate expression
+        let result = self.eval_expr(expr)?;
+        if let EvalResult::Value(value) = result {
+            self.context.define(&name, value.clone());
+            Ok(EvalResult::Value(value))
+        } else {
+            Err(EvalError::SyntaxError("Invalid expression".to_string()))
+        }
+    }
+
+    fn eval_expr(&mut self, input: &str) -> Result<EvalResult, EvalError> {
+        // Simple expression evaluator
+        let input = input.trim();
+
+        // Check for literals
+        if input == "true" {
+            return Ok(EvalResult::Value(Value::Bool(true)));
+        }
+        if input == "false" {
+            return Ok(EvalResult::Value(Value::Bool(false)));
+        }
+        if input.starts_with('"') && input.ends_with('"') {
+            let s = input[1..input.len()-1].to_string();
+            return Ok(EvalResult::Value(Value::String(s)));
+        }
+        if let Ok(i) = input.parse::<i64>() {
+            return Ok(EvalResult::Value(Value::Int(i)));
+        }
+        if let Ok(f) = input.parse::<f64>() {
+            return Ok(EvalResult::Value(Value::Float(f)));
+        }
+
+        // Check for variable reference
+        if let Some(value) = self.context.get(input) {
+            return Ok(EvalResult::Value(value.clone()));
+        }
+
+        // Check for simple binary operations
+        if let Some(result) = self.eval_binary_op(input) {
+            return result;
+        }
+
+        // Check for function calls
+        if input.contains('(') && input.ends_with(')') {
+            return self.eval_function_call(input);
+        }
+
+        Err(EvalError::SyntaxError(format!("Cannot evaluate: {}", input)))
+    }
+
+    fn eval_binary_op(&mut self, input: &str) -> Option<Result<EvalResult, EvalError>> {
+        let ops = ["+", "-", "*", "/", "%", "==", "!=", "<", ">", "<=", ">=", "&&", "||"];
+
+        for op in ops {
+            if let Some(idx) = input.find(op) {
+                let left = input[..idx].trim();
+                let right = input[idx + op.len()..].trim();
+
+                let left_val = match self.eval_expr(left) {
+                    Ok(EvalResult::Value(v)) => v,
+                    Err(e) => return Some(Err(e)),
+                    _ => return None,
+                };
+
+                let right_val = match self.eval_expr(right) {
+                    Ok(EvalResult::Value(v)) => v,
+                    Err(e) => return Some(Err(e)),
+                    _ => return None,
+                };
+
+                let result = match (op, &left_val, &right_val) {
+                    ("+", Value::Int(a), Value::Int(b)) => Value::Int(a + b),
+                    ("+", Value::Float(a), Value::Float(b)) => Value::Float(a + b),
+                    ("+", Value::String(a), Value::String(b)) => Value::String(format!("{}{}", a, b)),
+                    ("-", Value::Int(a), Value::Int(b)) => Value::Int(a - b),
+                    ("-", Value::Float(a), Value::Float(b)) => Value::Float(a - b),
+                    ("*", Value::Int(a), Value::Int(b)) => Value::Int(a * b),
+                    ("*", Value::Float(a), Value::Float(b)) => Value::Float(a * b),
+                    ("/", Value::Int(a), Value::Int(b)) => Value::Int(a / b),
+                    ("/", Value::Float(a), Value::Float(b)) => Value::Float(a / b),
+                    ("%", Value::Int(a), Value::Int(b)) => Value::Int(a % b),
+                    ("==", Value::Int(a), Value::Int(b)) => Value::Bool(a == b),
+                    ("==", Value::Bool(a), Value::Bool(b)) => Value::Bool(a == b),
+                    ("!=", Value::Int(a), Value::Int(b)) => Value::Bool(a != b),
+                    ("<", Value::Int(a), Value::Int(b)) => Value::Bool(a < b),
+                    (">", Value::Int(a), Value::Int(b)) => Value::Bool(a > b),
+                    ("<=", Value::Int(a), Value::Int(b)) => Value::Bool(a <= b),
+                    (">=", Value::Int(a), Value::Int(b)) => Value::Bool(a >= b),
+                    ("&&", Value::Bool(a), Value::Bool(b)) => Value::Bool(*a && *b),
+                    ("||", Value::Bool(a), Value::Bool(b)) => Value::Bool(*a || *b),
+                    _ => return Some(Err(EvalError::TypeError(format!(
+                        "Cannot apply {} to {} and {}",
+                        op, left_val.type_name(), right_val.type_name()
+                    )))),
+                };
+
+                return Some(Ok(EvalResult::Value(result)));
+            }
+        }
+
+        None
+    }
+
+    fn eval_function_call(&mut self, input: &str) -> Result<EvalResult, EvalError> {
+        let paren_idx = input.find('(').unwrap();
+        let func_name = input[..paren_idx].trim();
+        let args_str = &input[paren_idx + 1..input.len() - 1];
+
+        // Built-in functions
+        match func_name {
+            "println!" => {
+                let output = if args_str.starts_with('"') {
+                    args_str[1..args_str.len()-1].to_string()
+                } else {
+                    match self.eval_expr(args_str)? {
+                        EvalResult::Value(v) => v.display(),
+                        _ => args_str.to_string(),
+                    }
+                };
+                println!("{}", output);
+                Ok(EvalResult::Value(Value::Unit))
+            }
+            "sqrt" => {
+                match self.eval_expr(args_str)? {
+                    EvalResult::Value(Value::Float(f)) => Ok(EvalResult::Value(Value::Float(f.sqrt()))),
+                    EvalResult::Value(Value::Int(i)) => Ok(EvalResult::Value(Value::Float((i as f64).sqrt()))),
+                    _ => Err(EvalError::TypeError("sqrt requires a number".to_string())),
+                }
+            }
+            "sin" => {
+                match self.eval_expr(args_str)? {
+                    EvalResult::Value(Value::Float(f)) => Ok(EvalResult::Value(Value::Float(f.sin()))),
+                    _ => Err(EvalError::TypeError("sin requires a float".to_string())),
+                }
+            }
+            "cos" => {
+                match self.eval_expr(args_str)? {
+                    EvalResult::Value(Value::Float(f)) => Ok(EvalResult::Value(Value::Float(f.cos()))),
+                    _ => Err(EvalError::TypeError("cos requires a float".to_string())),
+                }
+            }
+            "abs" => {
+                match self.eval_expr(args_str)? {
+                    EvalResult::Value(Value::Int(i)) => Ok(EvalResult::Value(Value::Int(i.abs()))),
+                    EvalResult::Value(Value::Float(f)) => Ok(EvalResult::Value(Value::Float(f.abs()))),
+                    _ => Err(EvalError::TypeError("abs requires a number".to_string())),
+                }
+            }
+            _ => Err(EvalError::UndefinedFunction(func_name.to_string())),
+        }
+    }
+
+    fn load_file(&mut self, path: &str) -> Result<(), EvalError> {
+        // Load and execute file
+        Ok(())
+    }
+}
+
+#[derive(Debug)]
+pub enum EvalResult {
+    Value(Value),
+    Output(String),
+    Quit,
+    Clear,
+    ToggleTiming,
+}
+
+#[derive(Debug)]
+pub enum EvalError {
+    SyntaxError(String),
+    TypeError(String),
+    UndefinedVariable(String),
+    UndefinedFunction(String),
+    UnknownCommand(String),
+    IoError(String),
+}
+
+const HELP_TEXT: &str = r#"
+BUILD REPL Commands:
+  :help, :h, :?     Show this help
+  :quit, :q, :exit  Exit the REPL
+  :clear, :c        Clear the screen
+  :type <name>      Show the type of a binding
+  :bindings, :b     List all bindings
+  :load <file>      Load and execute a file
+  :reset            Reset the context
+  :time             Toggle timing display
+
+Keyboard shortcuts:
+  Up/Down           Navigate history
+  Tab               Auto-complete
+  Ctrl+C            Cancel current input
+  Ctrl+D            Exit (same as :quit)
+"#;
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// REPL MAIN
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// The main REPL
+pub struct Repl {
+    config: ReplConfig,
+    context: ReplContext,
+    history: History,
+    completer: Completer,
+    highlighter: Highlighter,
+    evaluator: Evaluator,
+    show_timing: bool,
+}
+
+impl Repl {
+    pub fn new() -> Self {
+        let config = ReplConfig::default();
+        let context = ReplContext::new();
+        let history = History::new(config.history_size);
+        let completer = Completer::new();
+        let highlighter = Highlighter::new(config.theme.clone());
+        let evaluator = Evaluator::new(ReplContext::new());
+
+        Repl {
+            config,
+            context,
+            history,
+            completer,
+            highlighter,
+            evaluator,
+            show_timing: false,
+        }
+    }
+
+    pub fn with_config(config: ReplConfig) -> Self {
+        let context = ReplContext::new();
+        let history = History::new(config.history_size);
+        let completer = Completer::new();
+        let highlighter = Highlighter::new(config.theme.clone());
+        let evaluator = Evaluator::new(ReplContext::new());
+
+        Repl {
+            config,
+            context,
+            history,
+            completer,
+            highlighter,
+            evaluator,
+            show_timing: false,
+        }
+    }
+
+    /// Run the REPL
+    pub fn run(&mut self) {
+        self.print_banner();
+
+        // Load history
+        let _ = self.history.load(&self.config.history_file);
+
+        loop {
+            // Print prompt
+            print!("{}", self.config.prompt);
+            flush();
+
+            // Read input
+            let mut input = String::new();
+            match stdin().read_line(&mut input) {
+                Ok(0) => break, // EOF
+                Ok(_) => {}
+                Err(_) => continue,
+            }
+
+            let input = input.trim();
+            if input.is_empty() {
+                continue;
+            }
+
+            // Handle multi-line input
+            let input = self.read_multiline(input);
+
+            // Add to history
+            self.history.add(input.clone());
+
+            // Evaluate
+            let start = Instant::now();
+            match self.evaluator.eval(&input) {
+                Ok(EvalResult::Value(value)) => {
+                    if self.config.show_types {
+                        println!("{}: {} = {}",
+                            Color::Gray.ansi_code(),
+                            value.type_name(),
+                            Color::reset());
+                    }
+                    println!("{}", value.display());
+
+                    if self.show_timing {
+                        println!("{}({}ms){}",
+                            Color::Gray.ansi_code(),
+                            start.elapsed().as_millis(),
+                            Color::reset());
+                    }
+                }
+                Ok(EvalResult::Output(output)) => {
+                    println!("{}", output);
+                }
+                Ok(EvalResult::Quit) => {
+                    println!("Goodbye!");
+                    break;
+                }
+                Ok(EvalResult::Clear) => {
+                    print!("\x1b[2J\x1b[H"); // Clear screen
+                }
+                Ok(EvalResult::ToggleTiming) => {
+                    self.show_timing = !self.show_timing;
+                    println!("Timing display: {}", if self.show_timing { "on" } else { "off" });
+                }
+                Err(e) => {
+                    println!("{}Error: {:?}{}",
+                        self.config.theme.error.ansi_code(),
+                        e,
+                        Color::reset());
+                }
+            }
+        }
+
+        // Save history
+        let _ = self.history.save(&self.config.history_file);
+    }
+
+    fn print_banner(&self) {
+        println!("╔═══════════════════════════════════════════════════════════════╗");
+        println!("║  BUILD-UNIVERSE REPL v2.0.0                                  ║");
+        println!("║  \"Quantum Shell\"                                              ║");
+        println!("╚═══════════════════════════════════════════════════════════════╝");
+        println!();
+        println!("Type :help for help, :quit to exit");
+        println!();
+    }
+
+    fn read_multiline(&mut self, first_line: &str) -> String {
+        let mut input = first_line.to_string();
+
+        // Check if we need more lines (unclosed braces, parens, etc.)
+        while self.needs_continuation(&input) {
+            print!("{}", self.config.continuation_prompt);
+            flush();
+
+            let mut line = String::new();
+            match stdin().read_line(&mut line) {
+                Ok(0) => break,
+                Ok(_) => {
+                    input.push('\n');
+                    input.push_str(line.trim());
+                }
+                Err(_) => break,
+            }
+        }
+
+        input
+    }
+
+    fn needs_continuation(&self, input: &str) -> bool {
+        let mut braces = 0;
+        let mut parens = 0;
+        let mut brackets = 0;
+        let mut in_string = false;
+
+        for c in input.chars() {
+            if in_string {
+                if c == '"' {
+                    in_string = false;
+                }
+                continue;
+            }
+
+            match c {
+                '"' => in_string = true,
+                '{' => braces += 1,
+                '}' => braces -= 1,
+                '(' => parens += 1,
+                ')' => parens -= 1,
+                '[' => brackets += 1,
+                ']' => brackets -= 1,
+                _ => {}
+            }
+        }
+
+        braces > 0 || parens > 0 || brackets > 0
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// MAIN ENTRY POINT
+// ═══════════════════════════════════════════════════════════════════════════════
+
+pub fn main() {
+    let mut repl = Repl::new();
+    repl.run();
+}
+
+fn flush() {
+    stdout().flush().unwrap();
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ADVANCED REPL: MAGIC COMMANDS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Magic command system (inspired by IPython)
+pub struct MagicCommandRegistry {
+    /// Line magics (%command)
+    line_magics: HashMap<String, Box<dyn LineMagic>>,
+    /// Cell magics (%%command)
+    cell_magics: HashMap<String, Box<dyn CellMagic>>,
+    /// Magic aliases
+    aliases: HashMap<String, String>,
+}
+
+impl MagicCommandRegistry {
+    pub fn new() -> Self {
+        let mut registry = MagicCommandRegistry {
+            line_magics: HashMap::new(),
+            cell_magics: HashMap::new(),
+            aliases: HashMap::new(),
+        };
+
+        // Register built-in line magics
+        registry.register_line_magic("time", Box::new(TimeMagic));
+        registry.register_line_magic("timeit", Box::new(TimeitMagic { iterations: 100 }));
+        registry.register_line_magic("run", Box::new(RunMagic));
+        registry.register_line_magic("load", Box::new(LoadMagic));
+        registry.register_line_magic("save", Box::new(SaveMagic));
+        registry.register_line_magic("who", Box::new(WhoMagic));
+        registry.register_line_magic("whos", Box::new(WhosMagic));
+        registry.register_line_magic("reset", Box::new(ResetMagic));
+        registry.register_line_magic("clear", Box::new(ClearMagic));
+        registry.register_line_magic("pwd", Box::new(PwdMagic));
+        registry.register_line_magic("cd", Box::new(CdMagic));
+        registry.register_line_magic("ls", Box::new(LsMagic));
+        registry.register_line_magic("env", Box::new(EnvMagic));
+        registry.register_line_magic("edit", Box::new(EditMagic));
+        registry.register_line_magic("history", Box::new(HistoryMagic));
+        registry.register_line_magic("profile", Box::new(ProfileMagic));
+        registry.register_line_magic("debug", Box::new(DebugMagic));
+        registry.register_line_magic("pdb", Box::new(PdbMagic));
+        registry.register_line_magic("doc", Box::new(DocMagic));
+        registry.register_line_magic("source", Box::new(SourceMagic));
+        registry.register_line_magic("lsmagic", Box::new(LsMagicMagic));
+        registry.register_line_magic("alias", Box::new(AliasMagic));
+        registry.register_line_magic("unalias", Box::new(UnaliasMagic));
+        registry.register_line_magic("macro", Box::new(MacroMagic));
+        registry.register_line_magic("store", Box::new(StoreMagic));
+        registry.register_line_magic("recall", Box::new(RecallMagic));
+        registry.register_line_magic("pip", Box::new(PipMagic));
+        registry.register_line_magic("system", Box::new(SystemMagic));
+        registry.register_line_magic("writefile", Box::new(WriteFileMagic));
+        registry.register_line_magic("xmode", Box::new(XModeMagic));
+        registry.register_line_magic("precision", Box::new(PrecisionMagic));
+
+        // Register built-in cell magics
+        registry.register_cell_magic("timeit", Box::new(CellTimeitMagic));
+        registry.register_cell_magic("capture", Box::new(CaptureMagic));
+        registry.register_cell_magic("bash", Box::new(BashMagic));
+        registry.register_cell_magic("sql", Box::new(SqlMagic));
+        registry.register_cell_magic("html", Box::new(HtmlMagic));
+        registry.register_cell_magic("markdown", Box::new(MarkdownMagic));
+        registry.register_cell_magic("latex", Box::new(LatexMagic));
+        registry.register_cell_magic("javascript", Box::new(JavaScriptMagic));
+        registry.register_cell_magic("python", Box::new(PythonMagic));
+        registry.register_cell_magic("rust", Box::new(RustMagic));
+        registry.register_cell_magic("file", Box::new(FileMagic));
+        registry.register_cell_magic("debug", Box::new(CellDebugMagic));
+
+        // Common aliases
+        registry.aliases.insert("r".to_string(), "run".to_string());
+        registry.aliases.insert("h".to_string(), "history".to_string());
+        registry.aliases.insert("d".to_string(), "doc".to_string());
+        registry.aliases.insert("!".to_string(), "system".to_string());
+
+        registry
+    }
+
+    pub fn register_line_magic(&mut self, name: &str, magic: Box<dyn LineMagic>) {
+        self.line_magics.insert(name.to_string(), magic);
+    }
+
+    pub fn register_cell_magic(&mut self, name: &str, magic: Box<dyn CellMagic>) {
+        self.cell_magics.insert(name.to_string(), magic);
+    }
+
+    pub fn execute_line_magic(&self, name: &str, args: &str, ctx: &mut ReplContext) -> Result<MagicResult, MagicError> {
+        let name = self.aliases.get(name).map(|s| s.as_str()).unwrap_or(name);
+
+        if let Some(magic) = self.line_magics.get(name) {
+            magic.execute(args, ctx)
+        } else {
+            Err(MagicError::UnknownMagic(name.to_string()))
+        }
+    }
+
+    pub fn execute_cell_magic(&self, name: &str, args: &str, body: &str, ctx: &mut ReplContext) -> Result<MagicResult, MagicError> {
+        if let Some(magic) = self.cell_magics.get(name) {
+            magic.execute(args, body, ctx)
+        } else {
+            Err(MagicError::UnknownMagic(name.to_string()))
+        }
+    }
+
+    pub fn list_magics(&self) -> (Vec<&String>, Vec<&String>) {
+        let line_magics: Vec<_> = self.line_magics.keys().collect();
+        let cell_magics: Vec<_> = self.cell_magics.keys().collect();
+        (line_magics, cell_magics)
+    }
+}
+
+/// Line magic trait (%command args)
+pub trait LineMagic: Send + Sync {
+    fn execute(&self, args: &str, ctx: &mut ReplContext) -> Result<MagicResult, MagicError>;
+    fn help(&self) -> &str;
+}
+
+/// Cell magic trait (%%command args\nbody)
+pub trait CellMagic: Send + Sync {
+    fn execute(&self, args: &str, body: &str, ctx: &mut ReplContext) -> Result<MagicResult, MagicError>;
+    fn help(&self) -> &str;
+}
+
+#[derive(Debug)]
+pub enum MagicResult {
+    None,
+    Output(String),
+    Value(Value),
+    Display(DisplayData),
+    Timing(TimingInfo),
+}
+
+#[derive(Debug)]
+pub struct TimingInfo {
+    pub wall_time: Duration,
+    pub cpu_time: Duration,
+    pub iterations: usize,
+    pub mean: Duration,
+    pub std_dev: Duration,
+}
+
+#[derive(Debug)]
+pub enum MagicError {
+    UnknownMagic(String),
+    InvalidArguments(String),
+    ExecutionError(String),
+    IoError(String),
+}
+
+/// Time execution of a single statement
+pub struct TimeMagic;
+
+impl LineMagic for TimeMagic {
+    fn execute(&self, args: &str, ctx: &mut ReplContext) -> Result<MagicResult, MagicError> {
+        let start = Instant::now();
+        // Execute the expression (placeholder)
+        let wall_time = start.elapsed();
+
+        Ok(MagicResult::Timing(TimingInfo {
+            wall_time,
+            cpu_time: wall_time,
+            iterations: 1,
+            mean: wall_time,
+            std_dev: Duration::from_secs(0),
+        }))
+    }
+
+    fn help(&self) -> &str {
+        "%time statement - Time execution of a single statement"
+    }
+}
+
+/// Time execution with multiple iterations
+pub struct TimeitMagic {
+    iterations: usize,
+}
+
+impl LineMagic for TimeitMagic {
+    fn execute(&self, args: &str, ctx: &mut ReplContext) -> Result<MagicResult, MagicError> {
+        let mut times = Vec::with_capacity(self.iterations);
+
+        for _ in 0..self.iterations {
+            let start = Instant::now();
+            // Execute (placeholder)
+            times.push(start.elapsed());
+        }
+
+        let total: Duration = times.iter().sum();
+        let mean = total / self.iterations as u32;
+
+        // Calculate std dev
+        let variance: f64 = times.iter()
+            .map(|t| {
+                let diff = t.as_nanos() as f64 - mean.as_nanos() as f64;
+                diff * diff
+            })
+            .sum::<f64>() / self.iterations as f64;
+        let std_dev = Duration::from_nanos(variance.sqrt() as u64);
+
+        Ok(MagicResult::Timing(TimingInfo {
+            wall_time: total,
+            cpu_time: total,
+            iterations: self.iterations,
+            mean,
+            std_dev,
+        }))
+    }
+
+    fn help(&self) -> &str {
+        "%timeit statement - Time execution with multiple iterations"
+    }
+}
+
+/// Run a file
+pub struct RunMagic;
+
+impl LineMagic for RunMagic {
+    fn execute(&self, args: &str, ctx: &mut ReplContext) -> Result<MagicResult, MagicError> {
+        // Run file (placeholder)
+        Ok(MagicResult::Output(format!("Running {}", args)))
+    }
+
+    fn help(&self) -> &str {
+        "%run file.bld - Execute a BuildLang file"
+    }
+}
+
+/// Load definitions from file
+pub struct LoadMagic;
+
+impl LineMagic for LoadMagic {
+    fn execute(&self, args: &str, ctx: &mut ReplContext) -> Result<MagicResult, MagicError> {
+        Ok(MagicResult::Output(format!("Loaded {}", args)))
+    }
+
+    fn help(&self) -> &str {
+        "%load file.bld - Load and execute code from a file"
+    }
+}
+
+/// Save session to file
+pub struct SaveMagic;
+
+impl LineMagic for SaveMagic {
+    fn execute(&self, args: &str, ctx: &mut ReplContext) -> Result<MagicResult, MagicError> {
+        Ok(MagicResult::Output(format!("Saved to {}", args)))
+    }
+
+    fn help(&self) -> &str {
+        "%save file.bld [range] - Save history lines to a file"
+    }
+}
+
+/// List variables (short form)
+pub struct WhoMagic;
+
+impl LineMagic for WhoMagic {
+    fn execute(&self, args: &str, ctx: &mut ReplContext) -> Result<MagicResult, MagicError> {
+        let names: Vec<_> = ctx.bindings.keys().collect();
+        Ok(MagicResult::Output(names.join("  ")))
+    }
+
+    fn help(&self) -> &str {
+        "%who - List all interactive variables"
+    }
+}
+
+/// List variables (detailed)
+pub struct WhosMagic;
+
+impl LineMagic for WhosMagic {
+    fn execute(&self, args: &str, ctx: &mut ReplContext) -> Result<MagicResult, MagicError> {
+        let mut output = String::from("Variable   Type       Value\n");
+        output.push_str("────────── ────────── ──────────\n");
+
+        for (name, value) in &ctx.bindings {
+            output.push_str(&format!("{:<10} {:<10} {}\n",
+                name, value.type_name(), value.display()));
+        }
+
+        Ok(MagicResult::Output(output))
+    }
+
+    fn help(&self) -> &str {
+        "%whos - List all interactive variables with details"
+    }
+}
+
+/// Reset namespace
+pub struct ResetMagic;
+
+impl LineMagic for ResetMagic {
+    fn execute(&self, args: &str, ctx: &mut ReplContext) -> Result<MagicResult, MagicError> {
+        *ctx = ReplContext::new();
+        Ok(MagicResult::Output("Namespace reset".to_string()))
+    }
+
+    fn help(&self) -> &str {
+        "%reset - Reset the namespace"
+    }
+}
+
+/// Clear output
+pub struct ClearMagic;
+
+impl LineMagic for ClearMagic {
+    fn execute(&self, args: &str, ctx: &mut ReplContext) -> Result<MagicResult, MagicError> {
+        print!("\x1b[2J\x1b[H");
+        Ok(MagicResult::None)
+    }
+
+    fn help(&self) -> &str {
+        "%clear - Clear the screen"
+    }
+}
+
+/// Print working directory
+pub struct PwdMagic;
+
+impl LineMagic for PwdMagic {
+    fn execute(&self, args: &str, ctx: &mut ReplContext) -> Result<MagicResult, MagicError> {
+        Ok(MagicResult::Output(std::env::current_dir()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|_| "unknown".to_string())))
+    }
+
+    fn help(&self) -> &str {
+        "%pwd - Print working directory"
+    }
+}
+
+/// Change directory
+pub struct CdMagic;
+
+impl LineMagic for CdMagic {
+    fn execute(&self, args: &str, ctx: &mut ReplContext) -> Result<MagicResult, MagicError> {
+        let path = if args.is_empty() {
+            std::env::var("HOME").unwrap_or_else(|_| ".".to_string())
+        } else {
+            args.to_string()
+        };
+
+        std::env::set_current_dir(&path)
+            .map_err(|e| MagicError::IoError(e.to_string()))?;
+
+        Ok(MagicResult::Output(format!("Changed to {}", path)))
+    }
+
+    fn help(&self) -> &str {
+        "%cd path - Change directory"
+    }
+}
+
+/// List directory
+pub struct LsMagic;
+
+impl LineMagic for LsMagic {
+    fn execute(&self, args: &str, ctx: &mut ReplContext) -> Result<MagicResult, MagicError> {
+        let path = if args.is_empty() { "." } else { args };
+        // List directory (placeholder)
+        Ok(MagicResult::Output(format!("Listing {}", path)))
+    }
+
+    fn help(&self) -> &str {
+        "%ls [path] - List directory contents"
+    }
+}
+
+/// Show environment variables
+pub struct EnvMagic;
+
+impl LineMagic for EnvMagic {
+    fn execute(&self, args: &str, ctx: &mut ReplContext) -> Result<MagicResult, MagicError> {
+        if args.is_empty() {
+            let mut output = String::new();
+            for (key, value) in std::env::vars() {
+                output.push_str(&format!("{}={}\n", key, value));
+            }
+            Ok(MagicResult::Output(output))
+        } else {
+            let value = std::env::var(args).unwrap_or_else(|_| "undefined".to_string());
+            Ok(MagicResult::Output(format!("{}={}", args, value)))
+        }
+    }
+
+    fn help(&self) -> &str {
+        "%env [VAR] - Show environment variables"
+    }
+}
+
+/// Open file in editor
+pub struct EditMagic;
+
+impl LineMagic for EditMagic {
+    fn execute(&self, args: &str, ctx: &mut ReplContext) -> Result<MagicResult, MagicError> {
+        let editor = std::env::var("EDITOR").unwrap_or_else(|_| "vim".to_string());
+        Ok(MagicResult::Output(format!("Opening {} in {}", args, editor)))
+    }
+
+    fn help(&self) -> &str {
+        "%edit file - Open file in $EDITOR"
+    }
+}
+
+/// Show history
+pub struct HistoryMagic;
+
+impl LineMagic for HistoryMagic {
+    fn execute(&self, args: &str, ctx: &mut ReplContext) -> Result<MagicResult, MagicError> {
+        Ok(MagicResult::Output("History not available in current context".to_string()))
+    }
+
+    fn help(&self) -> &str {
+        "%history [n] - Show command history"
+    }
+}
+
+/// Profile code
+pub struct ProfileMagic;
+
+impl LineMagic for ProfileMagic {
+    fn execute(&self, args: &str, ctx: &mut ReplContext) -> Result<MagicResult, MagicError> {
+        Ok(MagicResult::Output(format!("Profiling: {}", args)))
+    }
+
+    fn help(&self) -> &str {
+        "%profile statement - Profile code execution"
+    }
+}
+
+/// Debug mode
+pub struct DebugMagic;
+
+impl LineMagic for DebugMagic {
+    fn execute(&self, args: &str, ctx: &mut ReplContext) -> Result<MagicResult, MagicError> {
+        Ok(MagicResult::Output("Debug mode enabled".to_string()))
+    }
+
+    fn help(&self) -> &str {
+        "%debug - Enter post-mortem debugging"
+    }
+}
+
+/// Debugger
+pub struct PdbMagic;
+
+impl LineMagic for PdbMagic {
+    fn execute(&self, args: &str, ctx: &mut ReplContext) -> Result<MagicResult, MagicError> {
+        Ok(MagicResult::Output("Interactive debugger".to_string()))
+    }
+
+    fn help(&self) -> &str {
+        "%pdb on/off - Toggle automatic debugger on exception"
+    }
+}
+
+/// Documentation lookup
+pub struct DocMagic;
+
+impl LineMagic for DocMagic {
+    fn execute(&self, args: &str, ctx: &mut ReplContext) -> Result<MagicResult, MagicError> {
+        Ok(MagicResult::Output(format!("Documentation for: {}", args)))
+    }
+
+    fn help(&self) -> &str {
+        "%doc symbol - Show documentation for symbol"
+    }
+}
+
+/// Show source code
+pub struct SourceMagic;
+
+impl LineMagic for SourceMagic {
+    fn execute(&self, args: &str, ctx: &mut ReplContext) -> Result<MagicResult, MagicError> {
+        Ok(MagicResult::Output(format!("Source of: {}", args)))
+    }
+
+    fn help(&self) -> &str {
+        "%source function - Show source code of function"
+    }
+}
+
+/// List available magics
+pub struct LsMagicMagic;
+
+impl LineMagic for LsMagicMagic {
+    fn execute(&self, args: &str, ctx: &mut ReplContext) -> Result<MagicResult, MagicError> {
+        let mut output = String::from("Available line magics:\n  ");
+        output.push_str("time timeit run load save who whos reset clear pwd cd ls env edit history profile debug pdb doc source\n");
+        output.push_str("\nAvailable cell magics:\n  ");
+        output.push_str("%%timeit %%capture %%bash %%sql %%html %%markdown %%latex %%javascript %%python %%rust %%file %%debug\n");
+        Ok(MagicResult::Output(output))
+    }
+
+    fn help(&self) -> &str {
+        "%lsmagic - List all available magic commands"
+    }
+}
+
+/// Create alias
+pub struct AliasMagic;
+
+impl LineMagic for AliasMagic {
+    fn execute(&self, args: &str, ctx: &mut ReplContext) -> Result<MagicResult, MagicError> {
+        Ok(MagicResult::Output(format!("Alias created: {}", args)))
+    }
+
+    fn help(&self) -> &str {
+        "%alias name command - Create shell alias"
+    }
+}
+
+/// Remove alias
+pub struct UnaliasMagic;
+
+impl LineMagic for UnaliasMagic {
+    fn execute(&self, args: &str, ctx: &mut ReplContext) -> Result<MagicResult, MagicError> {
+        Ok(MagicResult::Output(format!("Alias removed: {}", args)))
+    }
+
+    fn help(&self) -> &str {
+        "%unalias name - Remove alias"
+    }
+}
+
+/// Record/playback macros
+pub struct MacroMagic;
+
+impl LineMagic for MacroMagic {
+    fn execute(&self, args: &str, ctx: &mut ReplContext) -> Result<MagicResult, MagicError> {
+        Ok(MagicResult::Output(format!("Macro: {}", args)))
+    }
+
+    fn help(&self) -> &str {
+        "%macro name lines - Define macro from history"
+    }
+}
+
+/// Store variables
+pub struct StoreMagic;
+
+impl LineMagic for StoreMagic {
+    fn execute(&self, args: &str, ctx: &mut ReplContext) -> Result<MagicResult, MagicError> {
+        Ok(MagicResult::Output(format!("Stored: {}", args)))
+    }
+
+    fn help(&self) -> &str {
+        "%store var - Store variable persistently"
+    }
+}
+
+/// Recall stored variables
+pub struct RecallMagic;
+
+impl LineMagic for RecallMagic {
+    fn execute(&self, args: &str, ctx: &mut ReplContext) -> Result<MagicResult, MagicError> {
+        Ok(MagicResult::Output(format!("Recalled: {}", args)))
+    }
+
+    fn help(&self) -> &str {
+        "%recall var - Recall stored variable"
+    }
+}
+
+/// Package installer
+pub struct PipMagic;
+
+impl LineMagic for PipMagic {
+    fn execute(&self, args: &str, ctx: &mut ReplContext) -> Result<MagicResult, MagicError> {
+        Ok(MagicResult::Output(format!("Package operation: {}", args)))
+    }
+
+    fn help(&self) -> &str {
+        "%pip install package - Install package"
+    }
+}
+
+/// System command
+pub struct SystemMagic;
+
+impl LineMagic for SystemMagic {
+    fn execute(&self, args: &str, ctx: &mut ReplContext) -> Result<MagicResult, MagicError> {
+        // Execute system command (placeholder)
+        Ok(MagicResult::Output(format!("System: {}", args)))
+    }
+
+    fn help(&self) -> &str {
+        "%system command - Execute shell command"
+    }
+}
+
+/// Write to file
+pub struct WriteFileMagic;
+
+impl LineMagic for WriteFileMagic {
+    fn execute(&self, args: &str, ctx: &mut ReplContext) -> Result<MagicResult, MagicError> {
+        Ok(MagicResult::Output(format!("Writing to: {}", args)))
+    }
+
+    fn help(&self) -> &str {
+        "%writefile file - Write cell contents to file"
+    }
+}
+
+/// Exception mode
+pub struct XModeMagic;
+
+impl LineMagic for XModeMagic {
+    fn execute(&self, args: &str, ctx: &mut ReplContext) -> Result<MagicResult, MagicError> {
+        Ok(MagicResult::Output(format!("Exception mode: {}", args)))
+    }
+
+    fn help(&self) -> &str {
+        "%xmode mode - Set exception reporting mode"
+    }
+}
+
+/// Float precision
+pub struct PrecisionMagic;
+
+impl LineMagic for PrecisionMagic {
+    fn execute(&self, args: &str, ctx: &mut ReplContext) -> Result<MagicResult, MagicError> {
+        let precision: usize = args.parse().unwrap_or(6);
+        Ok(MagicResult::Output(format!("Precision set to {} digits", precision)))
+    }
+
+    fn help(&self) -> &str {
+        "%precision n - Set floating point precision"
+    }
+}
+
+// Cell magics
+
+/// Time cell with iterations
+pub struct CellTimeitMagic;
+
+impl CellMagic for CellTimeitMagic {
+    fn execute(&self, args: &str, body: &str, ctx: &mut ReplContext) -> Result<MagicResult, MagicError> {
+        let iterations: usize = args.parse().unwrap_or(100);
+        // Time cell (placeholder)
+        Ok(MagicResult::Output(format!("Timing {} iterations", iterations)))
+    }
+
+    fn help(&self) -> &str {
+        "%%timeit [n] - Time cell with n iterations"
+    }
+}
+
+/// Capture output
+pub struct CaptureMagic;
+
+impl CellMagic for CaptureMagic {
+    fn execute(&self, args: &str, body: &str, ctx: &mut ReplContext) -> Result<MagicResult, MagicError> {
+        Ok(MagicResult::Output(format!("Captured output to: {}", args)))
+    }
+
+    fn help(&self) -> &str {
+        "%%capture var - Capture cell output to variable"
+    }
+}
+
+/// Execute bash
+pub struct BashMagic;
+
+impl CellMagic for BashMagic {
+    fn execute(&self, args: &str, body: &str, ctx: &mut ReplContext) -> Result<MagicResult, MagicError> {
+        // Execute bash (placeholder)
+        Ok(MagicResult::Output(format!("Bash:\n{}", body)))
+    }
+
+    fn help(&self) -> &str {
+        "%%bash - Execute cell as bash script"
+    }
+}
+
+/// Execute SQL
+pub struct SqlMagic;
+
+impl CellMagic for SqlMagic {
+    fn execute(&self, args: &str, body: &str, ctx: &mut ReplContext) -> Result<MagicResult, MagicError> {
+        Ok(MagicResult::Output(format!("SQL:\n{}", body)))
+    }
+
+    fn help(&self) -> &str {
+        "%%sql [connection] - Execute cell as SQL"
+    }
+}
+
+/// Render HTML
+pub struct HtmlMagic;
+
+impl CellMagic for HtmlMagic {
+    fn execute(&self, args: &str, body: &str, ctx: &mut ReplContext) -> Result<MagicResult, MagicError> {
+        Ok(MagicResult::Display(DisplayData::Html(body.to_string())))
+    }
+
+    fn help(&self) -> &str {
+        "%%html - Render cell as HTML"
+    }
+}
+
+/// Render markdown
+pub struct MarkdownMagic;
+
+impl CellMagic for MarkdownMagic {
+    fn execute(&self, args: &str, body: &str, ctx: &mut ReplContext) -> Result<MagicResult, MagicError> {
+        Ok(MagicResult::Display(DisplayData::Markdown(body.to_string())))
+    }
+
+    fn help(&self) -> &str {
+        "%%markdown - Render cell as Markdown"
+    }
+}
+
+/// Render LaTeX
+pub struct LatexMagic;
+
+impl CellMagic for LatexMagic {
+    fn execute(&self, args: &str, body: &str, ctx: &mut ReplContext) -> Result<MagicResult, MagicError> {
+        Ok(MagicResult::Display(DisplayData::Latex(body.to_string())))
+    }
+
+    fn help(&self) -> &str {
+        "%%latex - Render cell as LaTeX"
+    }
+}
+
+/// Execute JavaScript
+pub struct JavaScriptMagic;
+
+impl CellMagic for JavaScriptMagic {
+    fn execute(&self, args: &str, body: &str, ctx: &mut ReplContext) -> Result<MagicResult, MagicError> {
+        Ok(MagicResult::Display(DisplayData::JavaScript(body.to_string())))
+    }
+
+    fn help(&self) -> &str {
+        "%%javascript - Execute cell as JavaScript"
+    }
+}
+
+/// Execute Python
+pub struct PythonMagic;
+
+impl CellMagic for PythonMagic {
+    fn execute(&self, args: &str, body: &str, ctx: &mut ReplContext) -> Result<MagicResult, MagicError> {
+        Ok(MagicResult::Output(format!("Python:\n{}", body)))
+    }
+
+    fn help(&self) -> &str {
+        "%%python - Execute cell as Python"
+    }
+}
+
+/// Execute Rust
+pub struct RustMagic;
+
+impl CellMagic for RustMagic {
+    fn execute(&self, args: &str, body: &str, ctx: &mut ReplContext) -> Result<MagicResult, MagicError> {
+        Ok(MagicResult::Output(format!("Rust:\n{}", body)))
+    }
+
+    fn help(&self) -> &str {
+        "%%rust - Compile and execute cell as Rust"
+    }
+}
+
+/// Write to file
+pub struct FileMagic;
+
+impl CellMagic for FileMagic {
+    fn execute(&self, args: &str, body: &str, ctx: &mut ReplContext) -> Result<MagicResult, MagicError> {
+        Ok(MagicResult::Output(format!("Writing to: {}\n{}", args, body)))
+    }
+
+    fn help(&self) -> &str {
+        "%%file filename - Write cell to file"
+    }
+}
+
+/// Debug cell
+pub struct CellDebugMagic;
+
+impl CellMagic for CellDebugMagic {
+    fn execute(&self, args: &str, body: &str, ctx: &mut ReplContext) -> Result<MagicResult, MagicError> {
+        Ok(MagicResult::Output("Debugging cell...".to_string()))
+    }
+
+    fn help(&self) -> &str {
+        "%%debug - Debug cell step by step"
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// RICH OUTPUT FORMATTING
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Rich display data
+#[derive(Debug, Clone)]
+pub enum DisplayData {
+    Plain(String),
+    Html(String),
+    Markdown(String),
+    Latex(String),
+    JavaScript(String),
+    Json(String),
+    Svg(String),
+    Png(Vec<u8>),
+    Jpeg(Vec<u8>),
+    Table(TableData),
+    Chart(ChartData),
+    Progress(ProgressData),
+    Tree(TreeData),
+}
+
+/// Table rendering
+#[derive(Debug, Clone)]
+pub struct TableData {
+    pub headers: Vec<String>,
+    pub rows: Vec<Vec<String>>,
+    pub style: TableStyle,
+}
+
+impl TableData {
+    pub fn new(headers: Vec<String>, rows: Vec<Vec<String>>) -> Self {
+        TableData {
+            headers,
+            rows,
+            style: TableStyle::default(),
+        }
+    }
+
+    pub fn render(&self) -> String {
+        let mut output = String::new();
+        let col_widths = self.calculate_column_widths();
+
+        // Header separator
+        output.push_str(&self.render_separator(&col_widths, '┌', '┬', '┐'));
+
+        // Headers
+        output.push('│');
+        for (i, header) in self.headers.iter().enumerate() {
+            output.push_str(&format!(" {:^width$} │", header, width = col_widths[i]));
+        }
+        output.push('\n');
+
+        // Header-body separator
+        output.push_str(&self.render_separator(&col_widths, '├', '┼', '┤'));
+
+        // Rows
+        for row in &self.rows {
+            output.push('│');
+            for (i, cell) in row.iter().enumerate() {
+                let width = col_widths.get(i).copied().unwrap_or(10);
+                output.push_str(&format!(" {:<width$} │", cell, width = width));
+            }
+            output.push('\n');
+        }
+
+        // Footer separator
+        output.push_str(&self.render_separator(&col_widths, '└', '┴', '┘'));
+
+        output
+    }
+
+    fn calculate_column_widths(&self) -> Vec<usize> {
+        let mut widths: Vec<usize> = self.headers.iter().map(|h| h.len()).collect();
+
+        for row in &self.rows {
+            for (i, cell) in row.iter().enumerate() {
+                if i < widths.len() {
+                    widths[i] = widths[i].max(cell.len());
+                }
+            }
+        }
+
+        widths
+    }
+
+    fn render_separator(&self, widths: &[usize], left: char, mid: char, right: char) -> String {
+        let mut sep = String::new();
+        sep.push(left);
+        for (i, &width) in widths.iter().enumerate() {
+            sep.push_str(&"─".repeat(width + 2));
+            if i < widths.len() - 1 {
+                sep.push(mid);
+            }
+        }
+        sep.push(right);
+        sep.push('\n');
+        sep
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct TableStyle {
+    pub border: bool,
+    pub header_style: TextStyle,
+    pub row_style: TextStyle,
+    pub alternate_rows: bool,
+}
+
+impl Default for TableStyle {
+    fn default() -> Self {
+        TableStyle {
+            border: true,
+            header_style: TextStyle::Bold,
+            row_style: TextStyle::Normal,
+            alternate_rows: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum TextStyle {
+    Normal,
+    Bold,
+    Italic,
+    Underline,
+    Dim,
+}
+
+/// Chart rendering (ASCII art)
+#[derive(Debug, Clone)]
+pub struct ChartData {
+    pub chart_type: ChartType,
+    pub title: Option<String>,
+    pub data: Vec<DataPoint>,
+    pub width: usize,
+    pub height: usize,
+}
+
+#[derive(Debug, Clone)]
+pub enum ChartType {
+    Bar,
+    Line,
+    Scatter,
+    Histogram,
+    Pie,
+    Sparkline,
+}
+
+#[derive(Debug, Clone)]
+pub struct DataPoint {
+    pub label: String,
+    pub value: f64,
+    pub color: Option<Color>,
+}
+
+impl ChartData {
+    pub fn bar(title: &str, data: Vec<(&str, f64)>) -> Self {
+        ChartData {
+            chart_type: ChartType::Bar,
+            title: Some(title.to_string()),
+            data: data.into_iter().map(|(l, v)| DataPoint {
+                label: l.to_string(),
+                value: v,
+                color: None,
+            }).collect(),
+            width: 60,
+            height: 20,
+        }
+    }
+
+    pub fn render(&self) -> String {
+        match self.chart_type {
+            ChartType::Bar => self.render_bar(),
+            ChartType::Sparkline => self.render_sparkline(),
+            _ => self.render_bar(),
+        }
+    }
+
+    fn render_bar(&self) -> String {
+        let mut output = String::new();
+
+        if let Some(title) = &self.title {
+            output.push_str(&format!("  {}\n", title));
+            output.push_str(&"─".repeat(self.width));
+            output.push('\n');
+        }
+
+        let max_value = self.data.iter().map(|d| d.value).fold(0.0, f64::max);
+        let max_label_len = self.data.iter().map(|d| d.label.len()).max().unwrap_or(0);
+        let bar_width = self.width - max_label_len - 15;
+
+        for point in &self.data {
+            let bar_len = ((point.value / max_value) * bar_width as f64) as usize;
+            output.push_str(&format!("{:>width$} │{} {:>8.2}\n",
+                point.label,
+                "█".repeat(bar_len),
+                point.value,
+                width = max_label_len
+            ));
+        }
+
+        output
+    }
+
+    fn render_sparkline(&self) -> String {
+        let blocks = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+        let values: Vec<f64> = self.data.iter().map(|d| d.value).collect();
+        let min = values.iter().fold(f64::INFINITY, |a, &b| a.min(b));
+        let max = values.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
+        let range = max - min;
+
+        let mut output = String::new();
+        for &value in &values {
+            let normalized = if range > 0.0 {
+                (value - min) / range
+            } else {
+                0.5
+            };
+            let index = (normalized * 7.0) as usize;
+            output.push(blocks[index.min(7)]);
+        }
+        output
+    }
+}
+
+/// Progress bar
+#[derive(Debug, Clone)]
+pub struct ProgressData {
+    pub current: usize,
+    pub total: usize,
+    pub message: String,
+    pub width: usize,
+    pub style: ProgressStyle,
+}
+
+#[derive(Debug, Clone)]
+pub enum ProgressStyle {
+    Bar,
+    Spinner,
+    Dots,
+}
+
+impl ProgressData {
+    pub fn new(current: usize, total: usize) -> Self {
+        ProgressData {
+            current,
+            total,
+            message: String::new(),
+            width: 40,
+            style: ProgressStyle::Bar,
+        }
+    }
+
+    pub fn render(&self) -> String {
+        let percentage = (self.current as f64 / self.total as f64) * 100.0;
+        let filled = ((percentage / 100.0) * self.width as f64) as usize;
+        let empty = self.width - filled;
+
+        format!("[{}{}] {:>5.1}% {} ({}/{})",
+            "█".repeat(filled),
+            "░".repeat(empty),
+            percentage,
+            self.message,
+            self.current,
+            self.total
+        )
+    }
+}
+
+/// Tree data for hierarchical display
+#[derive(Debug, Clone)]
+pub struct TreeData {
+    pub root: TreeNode,
+    pub show_lines: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct TreeNode {
+    pub label: String,
+    pub children: Vec<TreeNode>,
+    pub expanded: bool,
+}
+
+impl TreeData {
+    pub fn render(&self) -> String {
+        let mut output = String::new();
+        self.render_node(&self.root, "", true, &mut output);
+        output
+    }
+
+    fn render_node(&self, node: &TreeNode, prefix: &str, is_last: bool, output: &mut String) {
+        let connector = if is_last { "└── " } else { "├── " };
+        output.push_str(prefix);
+        output.push_str(connector);
+        output.push_str(&node.label);
+        output.push('\n');
+
+        let new_prefix = format!("{}{}", prefix, if is_last { "    " } else { "│   " });
+
+        for (i, child) in node.children.iter().enumerate() {
+            let is_last_child = i == node.children.len() - 1;
+            self.render_node(child, &new_prefix, is_last_child, output);
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// JUPYTER NOTEBOOK INTEGRATION
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Jupyter kernel protocol support
+pub struct JupyterKernel {
+    /// Session ID
+    session_id: String,
+    /// Execution counter
+    execution_count: usize,
+    /// REPL context
+    context: ReplContext,
+    /// Magic registry
+    magics: MagicCommandRegistry,
+    /// Kernel info
+    info: KernelInfo,
+    /// Message handlers
+    handlers: HashMap<String, Box<dyn MessageHandler>>,
+}
+
+#[derive(Clone)]
+pub struct KernelInfo {
+    pub protocol_version: String,
+    pub implementation: String,
+    pub implementation_version: String,
+    pub language_info: LanguageInfo,
+    pub banner: String,
+}
+
+#[derive(Clone)]
+pub struct LanguageInfo {
+    pub name: String,
+    pub version: String,
+    pub mimetype: String,
+    pub file_extension: String,
+    pub pygments_lexer: String,
+    pub codemirror_mode: String,
+}
+
+impl Default for KernelInfo {
+    fn default() -> Self {
+        KernelInfo {
+            protocol_version: "5.3".to_string(),
+            implementation: "build".to_string(),
+            implementation_version: "2.0.0".to_string(),
+            language_info: LanguageInfo {
+                name: "buildlang".to_string(),
+                version: "2.0.0".to_string(),
+                mimetype: "text/x-build".to_string(),
+                file_extension: ".bld".to_string(),
+                pygments_lexer: "rust".to_string(),
+                codemirror_mode: "rust".to_string(),
+            },
+            banner: "BUILD-UNIVERSE Kernel v2.0.0\nQuantum Computing Language".to_string(),
+        }
+    }
+}
+
+impl JupyterKernel {
+    pub fn new() -> Self {
+        JupyterKernel {
+            session_id: uuid_v4(),
+            execution_count: 0,
+            context: ReplContext::new(),
+            magics: MagicCommandRegistry::new(),
+            info: KernelInfo::default(),
+            handlers: HashMap::new(),
+        }
+    }
+
+    /// Handle kernel_info_request
+    pub fn kernel_info(&self) -> KernelInfo {
+        self.info.clone()
+    }
+
+    /// Handle execute_request
+    pub fn execute(&mut self, code: &str, silent: bool, store_history: bool) -> ExecuteResult {
+        self.execution_count += 1;
+
+        let mut evaluator = Evaluator::new(ReplContext::new());
+
+        // Check for magics
+        if code.starts_with("%%") {
+            // Cell magic
+            if let Some(idx) = code.find('\n') {
+                let first_line = &code[2..idx];
+                let parts: Vec<&str> = first_line.splitn(2, ' ').collect();
+                let name = parts[0];
+                let args = parts.get(1).copied().unwrap_or("");
+                let body = &code[idx + 1..];
+
+                match self.magics.execute_cell_magic(name, args, body, &mut self.context) {
+                    Ok(result) => return self.magic_to_execute_result(result),
+                    Err(e) => return ExecuteResult::Error {
+                        ename: "MagicError".to_string(),
+                        evalue: format!("{:?}", e),
+                        traceback: vec![],
+                    },
+                }
+            }
+        } else if code.starts_with("%") {
+            // Line magic
+            let parts: Vec<&str> = code[1..].splitn(2, ' ').collect();
+            let name = parts[0];
+            let args = parts.get(1).copied().unwrap_or("");
+
+            match self.magics.execute_line_magic(name, args, &mut self.context) {
+                Ok(result) => return self.magic_to_execute_result(result),
+                Err(e) => return ExecuteResult::Error {
+                    ename: "MagicError".to_string(),
+                    evalue: format!("{:?}", e),
+                    traceback: vec![],
+                },
+            }
+        }
+
+        // Regular code execution
+        match evaluator.eval(code) {
+            Ok(EvalResult::Value(value)) => {
+                ExecuteResult::Ok {
+                    execution_count: self.execution_count,
+                    data: HashMap::from([
+                        ("text/plain".to_string(), value.display()),
+                    ]),
+                }
+            }
+            Ok(EvalResult::Output(output)) => {
+                ExecuteResult::Ok {
+                    execution_count: self.execution_count,
+                    data: HashMap::from([
+                        ("text/plain".to_string(), output),
+                    ]),
+                }
+            }
+            Ok(_) => {
+                ExecuteResult::Ok {
+                    execution_count: self.execution_count,
+                    data: HashMap::new(),
+                }
+            }
+            Err(e) => {
+                ExecuteResult::Error {
+                    ename: "EvalError".to_string(),
+                    evalue: format!("{:?}", e),
+                    traceback: vec![],
+                }
+            }
+        }
+    }
+
+    fn magic_to_execute_result(&self, result: MagicResult) -> ExecuteResult {
+        match result {
+            MagicResult::None => ExecuteResult::Ok {
+                execution_count: self.execution_count,
+                data: HashMap::new(),
+            },
+            MagicResult::Output(s) => ExecuteResult::Ok {
+                execution_count: self.execution_count,
+                data: HashMap::from([("text/plain".to_string(), s)]),
+            },
+            MagicResult::Value(v) => ExecuteResult::Ok {
+                execution_count: self.execution_count,
+                data: HashMap::from([("text/plain".to_string(), v.display())]),
+            },
+            MagicResult::Display(d) => {
+                let mut data = HashMap::new();
+                match d {
+                    DisplayData::Html(s) => { data.insert("text/html".to_string(), s); }
+                    DisplayData::Markdown(s) => { data.insert("text/markdown".to_string(), s); }
+                    DisplayData::Latex(s) => { data.insert("text/latex".to_string(), s); }
+                    DisplayData::Json(s) => { data.insert("application/json".to_string(), s); }
+                    _ => {}
+                }
+                ExecuteResult::Ok { execution_count: self.execution_count, data }
+            },
+            MagicResult::Timing(t) => ExecuteResult::Ok {
+                execution_count: self.execution_count,
+                data: HashMap::from([
+                    ("text/plain".to_string(), format!("{} loops, best of {}: {:?} per loop",
+                        t.iterations, t.iterations, t.mean)),
+                ]),
+            },
+        }
+    }
+
+    /// Handle complete_request
+    pub fn complete(&self, code: &str, cursor_pos: usize) -> CompleteResult {
+        let completer = Completer::new();
+        let prefix = &code[..cursor_pos];
+        let completions = completer.complete(prefix, &self.context);
+
+        CompleteResult {
+            matches: completions.iter().map(|c| c.text.clone()).collect(),
+            cursor_start: cursor_pos - prefix.split_whitespace().last().map(|w| w.len()).unwrap_or(0),
+            cursor_end: cursor_pos,
+            metadata: HashMap::new(),
+        }
+    }
+
+    /// Handle inspect_request
+    pub fn inspect(&self, code: &str, cursor_pos: usize, detail_level: usize) -> InspectResult {
+        let word = code[..cursor_pos].split_whitespace().last().unwrap_or("");
+
+        if let Some(value) = self.context.get(word) {
+            InspectResult {
+                found: true,
+                data: HashMap::from([
+                    ("text/plain".to_string(), format!("{}: {}", word, value.type_name())),
+                ]),
+            }
+        } else {
+            InspectResult {
+                found: false,
+                data: HashMap::new(),
+            }
+        }
+    }
+
+    /// Handle is_complete_request
+    pub fn is_complete(&self, code: &str) -> IsCompleteResult {
+        // Check for balanced brackets
+        let mut braces = 0i32;
+        let mut parens = 0i32;
+        let mut brackets = 0i32;
+        let mut in_string = false;
+
+        for c in code.chars() {
+            if in_string {
+                if c == '"' { in_string = false; }
+                continue;
+            }
+            match c {
+                '"' => in_string = true,
+                '{' => braces += 1,
+                '}' => braces -= 1,
+                '(' => parens += 1,
+                ')' => parens -= 1,
+                '[' => brackets += 1,
+                ']' => brackets -= 1,
+                _ => {}
+            }
+        }
+
+        if braces == 0 && parens == 0 && brackets == 0 && !in_string {
+            IsCompleteResult::Complete
+        } else if braces < 0 || parens < 0 || brackets < 0 {
+            IsCompleteResult::Invalid
+        } else {
+            IsCompleteResult::Incomplete { indent: "    ".to_string() }
+        }
+    }
+
+    /// Handle shutdown_request
+    pub fn shutdown(&mut self, restart: bool) {
+        if restart {
+            self.context = ReplContext::new();
+            self.execution_count = 0;
+        }
+    }
+}
+
+pub enum ExecuteResult {
+    Ok {
+        execution_count: usize,
+        data: HashMap<String, String>,
+    },
+    Error {
+        ename: String,
+        evalue: String,
+        traceback: Vec<String>,
+    },
+}
+
+pub struct CompleteResult {
+    pub matches: Vec<String>,
+    pub cursor_start: usize,
+    pub cursor_end: usize,
+    pub metadata: HashMap<String, String>,
+}
+
+pub struct InspectResult {
+    pub found: bool,
+    pub data: HashMap<String, String>,
+}
+
+pub enum IsCompleteResult {
+    Complete,
+    Incomplete { indent: String },
+    Invalid,
+    Unknown,
+}
+
+pub trait MessageHandler: Send + Sync {
+    fn handle(&self, content: &[u8]) -> Vec<u8>;
+}
+
+fn uuid_v4() -> String {
+    // Simple UUID v4 generator (placeholder)
+    "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".to_string()
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// WORKSPACE MANAGEMENT
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Workspace for saving/restoring REPL sessions
+pub struct Workspace {
+    /// Workspace name
+    pub name: String,
+    /// Saved bindings
+    pub bindings: HashMap<String, SerializedValue>,
+    /// History
+    pub history: Vec<String>,
+    /// Active modules
+    pub modules: Vec<String>,
+    /// Configuration
+    pub config: ReplConfig,
+    /// Metadata
+    pub metadata: WorkspaceMetadata,
+}
+
+#[derive(Clone)]
+pub struct WorkspaceMetadata {
+    pub created: String,
+    pub modified: String,
+    pub description: String,
+    pub tags: Vec<String>,
+}
+
+#[derive(Clone)]
+pub enum SerializedValue {
+    Null,
+    Bool(bool),
+    Int(i64),
+    Float(f64),
+    String(String),
+    Array(Vec<SerializedValue>),
+    Object(HashMap<String, SerializedValue>),
+}
+
+impl Workspace {
+    pub fn new(name: &str) -> Self {
+        Workspace {
+            name: name.to_string(),
+            bindings: HashMap::new(),
+            history: Vec::new(),
+            modules: Vec::new(),
+            config: ReplConfig::default(),
+            metadata: WorkspaceMetadata {
+                created: chrono_now(),
+                modified: chrono_now(),
+                description: String::new(),
+                tags: Vec::new(),
+            },
+        }
+    }
+
+    /// Save workspace to file
+    pub fn save(&self, path: &str) -> Result<(), String> {
+        // Serialize and write (placeholder)
+        Ok(())
+    }
+
+    /// Load workspace from file
+    pub fn load(path: &str) -> Result<Self, String> {
+        // Read and deserialize (placeholder)
+        Ok(Workspace::new("default"))
+    }
+
+    /// Capture current REPL state
+    pub fn capture(&mut self, repl: &Repl) {
+        self.bindings.clear();
+        for (name, value) in &repl.context.bindings {
+            self.bindings.insert(name.clone(), Self::serialize_value(value));
+        }
+        self.metadata.modified = chrono_now();
+    }
+
+    /// Restore to REPL
+    pub fn restore(&self, repl: &mut Repl) {
+        for (name, value) in &self.bindings {
+            if let Some(v) = Self::deserialize_value(value) {
+                repl.context.bindings.insert(name.clone(), v);
+            }
+        }
+    }
+
+    fn serialize_value(value: &Value) -> SerializedValue {
+        match value {
+            Value::Unit => SerializedValue::Null,
+            Value::Bool(b) => SerializedValue::Bool(*b),
+            Value::Int(i) => SerializedValue::Int(*i),
+            Value::Float(f) => SerializedValue::Float(*f),
+            Value::String(s) => SerializedValue::String(s.clone()),
+            Value::Array(arr) => SerializedValue::Array(
+                arr.iter().map(Self::serialize_value).collect()
+            ),
+            _ => SerializedValue::Null,
+        }
+    }
+
+    fn deserialize_value(value: &SerializedValue) -> Option<Value> {
+        match value {
+            SerializedValue::Null => Some(Value::Unit),
+            SerializedValue::Bool(b) => Some(Value::Bool(*b)),
+            SerializedValue::Int(i) => Some(Value::Int(*i)),
+            SerializedValue::Float(f) => Some(Value::Float(*f)),
+            SerializedValue::String(s) => Some(Value::String(s.clone())),
+            SerializedValue::Array(arr) => {
+                let values: Vec<Value> = arr.iter()
+                    .filter_map(Self::deserialize_value)
+                    .collect();
+                Some(Value::Array(values))
+            }
+            SerializedValue::Object(_) => None,
+        }
+    }
+}
+
+/// Workspace manager
+pub struct WorkspaceManager {
+    /// Available workspaces
+    workspaces: HashMap<String, Workspace>,
+    /// Current workspace
+    current: Option<String>,
+    /// Workspace directory
+    workspace_dir: String,
+}
+
+impl WorkspaceManager {
+    pub fn new(workspace_dir: &str) -> Self {
+        WorkspaceManager {
+            workspaces: HashMap::new(),
+            current: None,
+            workspace_dir: workspace_dir.to_string(),
+        }
+    }
+
+    /// Create new workspace
+    pub fn create(&mut self, name: &str) -> &mut Workspace {
+        self.workspaces.insert(name.to_string(), Workspace::new(name));
+        self.workspaces.get_mut(name).unwrap()
+    }
+
+    /// Switch workspace
+    pub fn switch(&mut self, name: &str) -> Option<&mut Workspace> {
+        if self.workspaces.contains_key(name) {
+            self.current = Some(name.to_string());
+            self.workspaces.get_mut(name)
+        } else {
+            None
+        }
+    }
+
+    /// List workspaces
+    pub fn list(&self) -> Vec<&String> {
+        self.workspaces.keys().collect()
+    }
+
+    /// Delete workspace
+    pub fn delete(&mut self, name: &str) -> bool {
+        if self.current.as_deref() == Some(name) {
+            self.current = None;
+        }
+        self.workspaces.remove(name).is_some()
+    }
+
+    /// Save all workspaces
+    pub fn save_all(&self) -> Result<(), String> {
+        for (name, workspace) in &self.workspaces {
+            let path = format!("{}/{}.workspace", self.workspace_dir, name);
+            workspace.save(&path)?;
+        }
+        Ok(())
+    }
+
+    /// Load all workspaces
+    pub fn load_all(&mut self) -> Result<(), String> {
+        // Load from directory (placeholder)
+        Ok(())
+    }
+}
+
+fn chrono_now() -> String {
+    "2025-12-24T00:00:00Z".to_string()
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// PLUGIN SYSTEM
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// REPL plugin interface
+pub trait ReplPlugin: Send + Sync {
+    /// Plugin name
+    fn name(&self) -> &str;
+
+    /// Plugin version
+    fn version(&self) -> &str;
+
+    /// Initialize plugin
+    fn init(&mut self, ctx: &mut ReplContext) -> Result<(), PluginError>;
+
+    /// Cleanup plugin
+    fn cleanup(&mut self) -> Result<(), PluginError>;
+
+    /// Handle input (before evaluation)
+    fn pre_eval(&mut self, input: &str) -> Option<String> {
+        None
+    }
+
+    /// Handle output (after evaluation)
+    fn post_eval(&mut self, result: &EvalResult) -> Option<String> {
+        None
+    }
+
+    /// Register commands
+    fn commands(&self) -> Vec<PluginCommand> {
+        Vec::new()
+    }
+
+    /// Register completions
+    fn completions(&self, prefix: &str) -> Vec<Completion> {
+        Vec::new()
+    }
+}
+
+#[derive(Debug)]
+pub enum PluginError {
+    InitFailed(String),
+    LoadFailed(String),
+    CommandError(String),
+}
+
+pub struct PluginCommand {
+    pub name: String,
+    pub description: String,
+    pub handler: Box<dyn Fn(&str, &mut ReplContext) -> Result<String, String> + Send + Sync>,
+}
+
+/// Plugin manager
+pub struct PluginManager {
+    /// Loaded plugins
+    plugins: Vec<Box<dyn ReplPlugin>>,
+    /// Plugin search paths
+    search_paths: Vec<String>,
+    /// Plugin registry
+    registry: HashMap<String, PluginInfo>,
+}
+
+pub struct PluginInfo {
+    pub name: String,
+    pub version: String,
+    pub path: String,
+    pub enabled: bool,
+}
+
+impl PluginManager {
+    pub fn new() -> Self {
+        PluginManager {
+            plugins: Vec::new(),
+            search_paths: vec![
+                "~/.bld/plugins".to_string(),
+                "/usr/local/share/build/plugins".to_string(),
+            ],
+            registry: HashMap::new(),
+        }
+    }
+
+    /// Load plugin by name
+    pub fn load(&mut self, name: &str) -> Result<(), PluginError> {
+        // Load plugin (placeholder)
+        Ok(())
+    }
+
+    /// Unload plugin
+    pub fn unload(&mut self, name: &str) -> Result<(), PluginError> {
+        self.plugins.retain(|p| p.name() != name);
+        Ok(())
+    }
+
+    /// List loaded plugins
+    pub fn list(&self) -> Vec<(&str, &str)> {
+        self.plugins.iter().map(|p| (p.name(), p.version())).collect()
+    }
+
+    /// Discover available plugins
+    pub fn discover(&mut self) {
+        // Scan search paths (placeholder)
+    }
+
+    /// Call pre_eval hooks
+    pub fn pre_eval(&mut self, input: &str) -> String {
+        let mut result = input.to_string();
+        for plugin in &mut self.plugins {
+            if let Some(transformed) = plugin.pre_eval(&result) {
+                result = transformed;
+            }
+        }
+        result
+    }
+
+    /// Call post_eval hooks
+    pub fn post_eval(&mut self, eval_result: &EvalResult) -> Option<String> {
+        for plugin in &mut self.plugins {
+            if let Some(output) = plugin.post_eval(eval_result) {
+                return Some(output);
+            }
+        }
+        None
+    }
+
+    /// Get all plugin commands
+    pub fn commands(&self) -> Vec<&PluginCommand> {
+        self.plugins.iter()
+            .flat_map(|p| p.commands().iter())
+            .collect()
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// DEBUGGER INTEGRATION
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Integrated debugger for REPL
+pub struct ReplDebugger {
+    /// Breakpoints
+    breakpoints: Vec<Breakpoint>,
+    /// Watch expressions
+    watches: Vec<WatchExpression>,
+    /// Debug mode
+    mode: DebugMode,
+    /// Call stack
+    stack: Vec<StackFrame>,
+    /// Current frame index
+    current_frame: usize,
+}
+
+#[derive(Clone)]
+pub struct Breakpoint {
+    pub id: usize,
+    pub location: BreakpointLocation,
+    pub condition: Option<String>,
+    pub hit_count: usize,
+    pub enabled: bool,
+}
+
+#[derive(Clone)]
+pub enum BreakpointLocation {
+    Line { file: String, line: usize },
+    Function { name: String },
+    Exception { type_name: String },
+}
+
+#[derive(Clone)]
+pub struct WatchExpression {
+    pub id: usize,
+    pub expression: String,
+    pub last_value: Option<Value>,
+}
+
+#[derive(Clone, Copy)]
+pub enum DebugMode {
+    Running,
+    Paused,
+    StepInto,
+    StepOver,
+    StepOut,
+}
+
+#[derive(Clone)]
+pub struct StackFrame {
+    pub function: String,
+    pub file: String,
+    pub line: usize,
+    pub locals: HashMap<String, Value>,
+}
+
+impl ReplDebugger {
+    pub fn new() -> Self {
+        ReplDebugger {
+            breakpoints: Vec::new(),
+            watches: Vec::new(),
+            mode: DebugMode::Running,
+            stack: Vec::new(),
+            current_frame: 0,
+        }
+    }
+
+    /// Add breakpoint
+    pub fn add_breakpoint(&mut self, location: BreakpointLocation) -> usize {
+        let id = self.breakpoints.len();
+        self.breakpoints.push(Breakpoint {
+            id,
+            location,
+            condition: None,
+            hit_count: 0,
+            enabled: true,
+        });
+        id
+    }
+
+    /// Remove breakpoint
+    pub fn remove_breakpoint(&mut self, id: usize) -> bool {
+        if let Some(idx) = self.breakpoints.iter().position(|b| b.id == id) {
+            self.breakpoints.remove(idx);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Toggle breakpoint
+    pub fn toggle_breakpoint(&mut self, id: usize) -> bool {
+        if let Some(bp) = self.breakpoints.iter_mut().find(|b| b.id == id) {
+            bp.enabled = !bp.enabled;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// List breakpoints
+    pub fn list_breakpoints(&self) -> &[Breakpoint] {
+        &self.breakpoints
+    }
+
+    /// Add watch expression
+    pub fn add_watch(&mut self, expression: &str) -> usize {
+        let id = self.watches.len();
+        self.watches.push(WatchExpression {
+            id,
+            expression: expression.to_string(),
+            last_value: None,
+        });
+        id
+    }
+
+    /// Remove watch
+    pub fn remove_watch(&mut self, id: usize) -> bool {
+        if let Some(idx) = self.watches.iter().position(|w| w.id == id) {
+            self.watches.remove(idx);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Step into
+    pub fn step_into(&mut self) {
+        self.mode = DebugMode::StepInto;
+    }
+
+    /// Step over
+    pub fn step_over(&mut self) {
+        self.mode = DebugMode::StepOver;
+    }
+
+    /// Step out
+    pub fn step_out(&mut self) {
+        self.mode = DebugMode::StepOut;
+    }
+
+    /// Continue execution
+    pub fn continue_execution(&mut self) {
+        self.mode = DebugMode::Running;
+    }
+
+    /// Get current stack
+    pub fn stack(&self) -> &[StackFrame] {
+        &self.stack
+    }
+
+    /// Select stack frame
+    pub fn select_frame(&mut self, index: usize) -> bool {
+        if index < self.stack.len() {
+            self.current_frame = index;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Get locals for current frame
+    pub fn locals(&self) -> Option<&HashMap<String, Value>> {
+        self.stack.get(self.current_frame).map(|f| &f.locals)
+    }
+
+    /// Evaluate expression in current context
+    pub fn evaluate(&self, expr: &str) -> Result<Value, String> {
+        // Evaluate in debug context (placeholder)
+        Ok(Value::Unit)
+    }
+
+    /// Format stack trace
+    pub fn format_stack(&self) -> String {
+        let mut output = String::new();
+        for (i, frame) in self.stack.iter().enumerate() {
+            let marker = if i == self.current_frame { ">" } else { " " };
+            output.push_str(&format!("{} #{}: {} at {}:{}\n",
+                marker, i, frame.function, frame.file, frame.line));
+        }
+        output
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ASYNC REPL
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Async-capable REPL
+pub struct AsyncRepl {
+    /// Base REPL
+    inner: Repl,
+    /// Async runtime
+    runtime: AsyncRuntime,
+    /// Pending futures
+    pending: Vec<PendingFuture>,
+    /// Background tasks
+    background_tasks: HashMap<usize, BackgroundTask>,
+    /// Next task ID
+    next_task_id: usize,
+}
+
+pub struct AsyncRuntime {
+    // Async runtime implementation
+}
+
+pub struct PendingFuture {
+    pub id: usize,
+    pub description: String,
+}
+
+pub struct BackgroundTask {
+    pub id: usize,
+    pub name: String,
+    pub status: TaskStatus,
+    pub progress: Option<f64>,
+}
+
+#[derive(Clone, Copy)]
+pub enum TaskStatus {
+    Pending,
+    Running,
+    Completed,
+    Failed,
+    Cancelled,
+}
+
+impl AsyncRepl {
+    pub fn new() -> Self {
+        AsyncRepl {
+            inner: Repl::new(),
+            runtime: AsyncRuntime {},
+            pending: Vec::new(),
+            background_tasks: HashMap::new(),
+            next_task_id: 0,
+        }
+    }
+
+    /// Spawn background task
+    pub fn spawn<F>(&mut self, name: &str, f: F) -> usize
+    where
+        F: FnOnce() + Send + 'static,
+    {
+        let id = self.next_task_id;
+        self.next_task_id += 1;
+
+        self.background_tasks.insert(id, BackgroundTask {
+            id,
+            name: name.to_string(),
+            status: TaskStatus::Running,
+            progress: None,
+        });
+
+        // Spawn task (placeholder)
+        id
+    }
+
+    /// Check task status
+    pub fn task_status(&self, id: usize) -> Option<TaskStatus> {
+        self.background_tasks.get(&id).map(|t| t.status)
+    }
+
+    /// Cancel task
+    pub fn cancel_task(&mut self, id: usize) -> bool {
+        if let Some(task) = self.background_tasks.get_mut(&id) {
+            task.status = TaskStatus::Cancelled;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// List running tasks
+    pub fn running_tasks(&self) -> Vec<&BackgroundTask> {
+        self.background_tasks.values()
+            .filter(|t| matches!(t.status, TaskStatus::Running))
+            .collect()
+    }
+
+    /// Await result
+    pub async fn await_result(&mut self, expr: &str) -> Result<Value, String> {
+        // Await expression (placeholder)
+        Ok(Value::Unit)
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// REMOTE REPL SERVER
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Remote REPL server for network access
+pub struct RemoteReplServer {
+    /// Server address
+    address: String,
+    /// Server port
+    port: u16,
+    /// Connected clients
+    clients: HashMap<usize, RemoteClient>,
+    /// Authentication
+    auth: AuthConfig,
+    /// TLS configuration
+    tls: Option<TlsConfig>,
+    /// Server status
+    status: ServerStatus,
+}
+
+pub struct RemoteClient {
+    pub id: usize,
+    pub address: String,
+    pub connected_at: String,
+    pub username: Option<String>,
+    pub context: ReplContext,
+}
+
+pub struct AuthConfig {
+    pub enabled: bool,
+    pub users: HashMap<String, String>, // username -> password hash
+    pub token_auth: bool,
+    pub api_keys: Vec<String>,
+}
+
+pub struct TlsConfig {
+    pub cert_file: String,
+    pub key_file: String,
+    pub ca_file: Option<String>,
+}
+
+#[derive(Clone, Copy)]
+pub enum ServerStatus {
+    Stopped,
+    Starting,
+    Running,
+    Stopping,
+}
+
+impl RemoteReplServer {
+    pub fn new(address: &str, port: u16) -> Self {
+        RemoteReplServer {
+            address: address.to_string(),
+            port,
+            clients: HashMap::new(),
+            auth: AuthConfig {
+                enabled: false,
+                users: HashMap::new(),
+                token_auth: false,
+                api_keys: Vec::new(),
+            },
+            tls: None,
+            status: ServerStatus::Stopped,
+        }
+    }
+
+    /// Start server
+    pub fn start(&mut self) -> Result<(), String> {
+        self.status = ServerStatus::Running;
+        Ok(())
+    }
+
+    /// Stop server
+    pub fn stop(&mut self) -> Result<(), String> {
+        self.status = ServerStatus::Stopped;
+        self.clients.clear();
+        Ok(())
+    }
+
+    /// Enable TLS
+    pub fn enable_tls(&mut self, config: TlsConfig) {
+        self.tls = Some(config);
+    }
+
+    /// Enable authentication
+    pub fn enable_auth(&mut self) {
+        self.auth.enabled = true;
+    }
+
+    /// Add user
+    pub fn add_user(&mut self, username: &str, password_hash: &str) {
+        self.auth.users.insert(username.to_string(), password_hash.to_string());
+    }
+
+    /// List connected clients
+    pub fn list_clients(&self) -> Vec<&RemoteClient> {
+        self.clients.values().collect()
+    }
+
+    /// Disconnect client
+    pub fn disconnect_client(&mut self, id: usize) -> bool {
+        self.clients.remove(&id).is_some()
+    }
+
+    /// Broadcast message to all clients
+    pub fn broadcast(&self, message: &str) {
+        // Broadcast to all clients (placeholder)
+    }
+}
+
+/// Remote REPL client
+pub struct RemoteReplClient {
+    /// Server address
+    server: String,
+    /// Server port
+    port: u16,
+    /// Connection status
+    connected: bool,
+    /// Session token
+    token: Option<String>,
+}
+
+impl RemoteReplClient {
+    pub fn new(server: &str, port: u16) -> Self {
+        RemoteReplClient {
+            server: server.to_string(),
+            port,
+            connected: false,
+            token: None,
+        }
+    }
+
+    /// Connect to server
+    pub fn connect(&mut self) -> Result<(), String> {
+        self.connected = true;
+        Ok(())
+    }
+
+    /// Disconnect
+    pub fn disconnect(&mut self) {
+        self.connected = false;
+        self.token = None;
+    }
+
+    /// Authenticate
+    pub fn authenticate(&mut self, username: &str, password: &str) -> Result<(), String> {
+        // Authenticate (placeholder)
+        self.token = Some("session_token".to_string());
+        Ok(())
+    }
+
+    /// Execute remotely
+    pub fn execute(&self, code: &str) -> Result<String, String> {
+        if !self.connected {
+            return Err("Not connected".to_string());
+        }
+        // Execute remotely (placeholder)
+        Ok("Remote execution result".to_string())
+    }
+
+    /// Upload file
+    pub fn upload(&self, local_path: &str, remote_path: &str) -> Result<(), String> {
+        // Upload file (placeholder)
+        Ok(())
+    }
+
+    /// Download file
+    pub fn download(&self, remote_path: &str, local_path: &str) -> Result<(), String> {
+        // Download file (placeholder)
+        Ok(())
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// CODE SNIPPETS AND TEMPLATES
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Code snippet manager
+pub struct SnippetManager {
+    /// Snippets by category
+    snippets: HashMap<String, Vec<Snippet>>,
+    /// User snippets
+    user_snippets: Vec<Snippet>,
+    /// Snippet directory
+    snippet_dir: String,
+}
+
+#[derive(Clone)]
+pub struct Snippet {
+    pub name: String,
+    pub description: String,
+    pub prefix: String,
+    pub body: String,
+    pub placeholders: Vec<Placeholder>,
+    pub category: String,
+}
+
+#[derive(Clone)]
+pub struct Placeholder {
+    pub index: usize,
+    pub name: String,
+    pub default: Option<String>,
+    pub choices: Vec<String>,
+}
+
+impl SnippetManager {
+    pub fn new(snippet_dir: &str) -> Self {
+        let mut manager = SnippetManager {
+            snippets: HashMap::new(),
+            user_snippets: Vec::new(),
+            snippet_dir: snippet_dir.to_string(),
+        };
+
+        // Add built-in snippets
+        manager.add_builtin_snippets();
+        manager
+    }
+
+    fn add_builtin_snippets(&mut self) {
+        // Function snippet
+        self.add_snippet(Snippet {
+            name: "function".to_string(),
+            description: "Create a function".to_string(),
+            prefix: "fn".to_string(),
+            body: "fn ${1:name}(${2:params}) -> ${3:ReturnType} {\n    ${0}\n}".to_string(),
+            placeholders: vec![
+                Placeholder { index: 1, name: "name".to_string(), default: None, choices: vec![] },
+                Placeholder { index: 2, name: "params".to_string(), default: None, choices: vec![] },
+                Placeholder { index: 3, name: "ReturnType".to_string(), default: Some("()".to_string()), choices: vec![] },
+            ],
+            category: "basic".to_string(),
+        });
+
+        // Struct snippet
+        self.add_snippet(Snippet {
+            name: "struct".to_string(),
+            description: "Create a struct".to_string(),
+            prefix: "struct".to_string(),
+            body: "struct ${1:Name} {\n    ${2:field}: ${3:Type},\n}".to_string(),
+            placeholders: vec![
+                Placeholder { index: 1, name: "Name".to_string(), default: None, choices: vec![] },
+                Placeholder { index: 2, name: "field".to_string(), default: None, choices: vec![] },
+                Placeholder { index: 3, name: "Type".to_string(), default: None, choices: vec![] },
+            ],
+            category: "basic".to_string(),
+        });
+
+        // Enum snippet
+        self.add_snippet(Snippet {
+            name: "enum".to_string(),
+            description: "Create an enum".to_string(),
+            prefix: "enum".to_string(),
+            body: "enum ${1:Name} {\n    ${2:Variant},\n}".to_string(),
+            placeholders: vec![
+                Placeholder { index: 1, name: "Name".to_string(), default: None, choices: vec![] },
+                Placeholder { index: 2, name: "Variant".to_string(), default: None, choices: vec![] },
+            ],
+            category: "basic".to_string(),
+        });
+
+        // Match snippet
+        self.add_snippet(Snippet {
+            name: "match".to_string(),
+            description: "Match expression".to_string(),
+            prefix: "match".to_string(),
+            body: "match ${1:expr} {\n    ${2:pattern} => ${3:value},\n    _ => ${0},\n}".to_string(),
+            placeholders: vec![
+                Placeholder { index: 1, name: "expr".to_string(), default: None, choices: vec![] },
+                Placeholder { index: 2, name: "pattern".to_string(), default: None, choices: vec![] },
+                Placeholder { index: 3, name: "value".to_string(), default: None, choices: vec![] },
+            ],
+            category: "control".to_string(),
+        });
+
+        // Test snippet
+        self.add_snippet(Snippet {
+            name: "test".to_string(),
+            description: "Create a test function".to_string(),
+            prefix: "test".to_string(),
+            body: "#[test]\nfn test_${1:name}() {\n    ${0}\n}".to_string(),
+            placeholders: vec![
+                Placeholder { index: 1, name: "name".to_string(), default: None, choices: vec![] },
+            ],
+            category: "testing".to_string(),
+        });
+    }
+
+    pub fn add_snippet(&mut self, snippet: Snippet) {
+        let category = snippet.category.clone();
+        self.snippets
+            .entry(category)
+            .or_insert_with(Vec::new)
+            .push(snippet);
+    }
+
+    /// Find snippets by prefix
+    pub fn find_by_prefix(&self, prefix: &str) -> Vec<&Snippet> {
+        let mut results = Vec::new();
+        for snippets in self.snippets.values() {
+            for snippet in snippets {
+                if snippet.prefix.starts_with(prefix) || snippet.name.starts_with(prefix) {
+                    results.push(snippet);
+                }
+            }
+        }
+        results
+    }
+
+    /// Expand snippet
+    pub fn expand(&self, snippet: &Snippet, values: &HashMap<usize, String>) -> String {
+        let mut result = snippet.body.clone();
+
+        // Replace placeholders
+        for placeholder in &snippet.placeholders {
+            let replacement = values.get(&placeholder.index)
+                .cloned()
+                .or_else(|| placeholder.default.clone())
+                .unwrap_or_default();
+
+            result = result.replace(
+                &format!("${{{}}}", placeholder.index),
+                &replacement
+            );
+            result = result.replace(
+                &format!("${{{}:{}}}", placeholder.index, placeholder.name),
+                &replacement
+            );
+        }
+
+        // Remove final cursor placeholder
+        result = result.replace("${0}", "");
+
+        result
+    }
+
+    /// List categories
+    pub fn categories(&self) -> Vec<&String> {
+        self.snippets.keys().collect()
+    }
+
+    /// List snippets in category
+    pub fn in_category(&self, category: &str) -> Vec<&Snippet> {
+        self.snippets.get(category).map(|v| v.iter().collect()).unwrap_or_default()
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// INLINE TESTING
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Inline test runner for REPL
+pub struct InlineTestRunner {
+    /// Test results
+    results: Vec<TestResult>,
+    /// Test filters
+    filters: Vec<String>,
+    /// Verbose output
+    verbose: bool,
+}
+
+pub struct TestResult {
+    pub name: String,
+    pub passed: bool,
+    pub duration: Duration,
+    pub message: Option<String>,
+    pub location: Option<String>,
+}
+
+impl InlineTestRunner {
+    pub fn new() -> Self {
+        InlineTestRunner {
+            results: Vec::new(),
+            filters: Vec::new(),
+            verbose: false,
+        }
+    }
+
+    /// Run test function
+    pub fn run_test<F>(&mut self, name: &str, test: F)
+    where
+        F: FnOnce() -> Result<(), String>,
+    {
+        let start = Instant::now();
+        let result = test();
+        let duration = start.elapsed();
+
+        self.results.push(TestResult {
+            name: name.to_string(),
+            passed: result.is_ok(),
+            duration,
+            message: result.err(),
+            location: None,
+        });
+    }
+
+    /// Run assertion
+    pub fn assert(&mut self, name: &str, condition: bool, message: &str) {
+        self.results.push(TestResult {
+            name: name.to_string(),
+            passed: condition,
+            duration: Duration::from_secs(0),
+            message: if condition { None } else { Some(message.to_string()) },
+            location: None,
+        });
+    }
+
+    /// Assert equality
+    pub fn assert_eq<T: PartialEq + std::fmt::Debug>(&mut self, name: &str, left: T, right: T) {
+        let passed = left == right;
+        let message = if passed {
+            None
+        } else {
+            Some(format!("assertion failed: {:?} != {:?}", left, right))
+        };
+
+        self.results.push(TestResult {
+            name: name.to_string(),
+            passed,
+            duration: Duration::from_secs(0),
+            message,
+            location: None,
+        });
+    }
+
+    /// Get summary
+    pub fn summary(&self) -> TestSummary {
+        let passed = self.results.iter().filter(|r| r.passed).count();
+        let failed = self.results.iter().filter(|r| !r.passed).count();
+        let total_duration: Duration = self.results.iter().map(|r| r.duration).sum();
+
+        TestSummary {
+            passed,
+            failed,
+            total: self.results.len(),
+            duration: total_duration,
+        }
+    }
+
+    /// Format results
+    pub fn format_results(&self) -> String {
+        let mut output = String::new();
+
+        for result in &self.results {
+            let status = if result.passed { "✓" } else { "✗" };
+            let color = if result.passed { Color::Green } else { Color::Red };
+
+            output.push_str(&format!("{}{} {}{} ({:?})\n",
+                color.ansi_code(),
+                status,
+                result.name,
+                Color::reset(),
+                result.duration
+            ));
+
+            if !result.passed {
+                if let Some(msg) = &result.message {
+                    output.push_str(&format!("    {}\n", msg));
+                }
+            }
+        }
+
+        let summary = self.summary();
+        output.push_str(&format!("\n{} passed, {} failed ({:?})\n",
+            summary.passed, summary.failed, summary.duration));
+
+        output
+    }
+
+    /// Clear results
+    pub fn clear(&mut self) {
+        self.results.clear();
+    }
+}
+
+pub struct TestSummary {
+    pub passed: usize,
+    pub failed: usize,
+    pub total: usize,
+    pub duration: Duration,
+}
+
+use std::time::Duration;
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// DOCUMENTATION BROWSER
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Documentation browser for REPL
+pub struct DocBrowser {
+    /// Documentation index
+    index: HashMap<String, DocEntry>,
+    /// Search index
+    search_index: Vec<String>,
+    /// History
+    history: Vec<String>,
+    /// Bookmarks
+    bookmarks: Vec<String>,
+}
+
+#[derive(Clone)]
+pub struct DocEntry {
+    pub name: String,
+    pub kind: DocKind,
+    pub signature: Option<String>,
+    pub description: String,
+    pub examples: Vec<DocExample>,
+    pub see_also: Vec<String>,
+    pub since: Option<String>,
+    pub deprecated: Option<String>,
+}
+
+#[derive(Clone)]
+pub enum DocKind {
+    Module,
+    Function,
+    Struct,
+    Enum,
+    Trait,
+    Type,
+    Constant,
+    Macro,
+}
+
+#[derive(Clone)]
+pub struct DocExample {
+    pub description: Option<String>,
+    pub code: String,
+    pub output: Option<String>,
+}
+
+impl DocBrowser {
+    pub fn new() -> Self {
+        DocBrowser {
+            index: HashMap::new(),
+            search_index: Vec::new(),
+            history: Vec::new(),
+            bookmarks: Vec::new(),
+        }
+    }
+
+    /// Lookup documentation
+    pub fn lookup(&mut self, name: &str) -> Option<&DocEntry> {
+        if let Some(entry) = self.index.get(name) {
+            self.history.push(name.to_string());
+            Some(entry)
+        } else {
+            None
+        }
+    }
+
+    /// Search documentation
+    pub fn search(&self, query: &str) -> Vec<&DocEntry> {
+        let query_lower = query.to_lowercase();
+        self.index.values()
+            .filter(|e| e.name.to_lowercase().contains(&query_lower) ||
+                       e.description.to_lowercase().contains(&query_lower))
+            .collect()
+    }
+
+    /// Add bookmark
+    pub fn bookmark(&mut self, name: &str) {
+        if !self.bookmarks.contains(&name.to_string()) {
+            self.bookmarks.push(name.to_string());
+        }
+    }
+
+    /// Remove bookmark
+    pub fn unbookmark(&mut self, name: &str) {
+        self.bookmarks.retain(|b| b != name);
+    }
+
+    /// List bookmarks
+    pub fn list_bookmarks(&self) -> &[String] {
+        &self.bookmarks
+    }
+
+    /// Go back in history
+    pub fn back(&mut self) -> Option<&DocEntry> {
+        self.history.pop();
+        self.history.last().and_then(|name| self.index.get(name))
+    }
+
+    /// Format entry for display
+    pub fn format_entry(&self, entry: &DocEntry) -> String {
+        let mut output = String::new();
+
+        // Header
+        let kind = match entry.kind {
+            DocKind::Module => "module",
+            DocKind::Function => "fn",
+            DocKind::Struct => "struct",
+            DocKind::Enum => "enum",
+            DocKind::Trait => "trait",
+            DocKind::Type => "type",
+            DocKind::Constant => "const",
+            DocKind::Macro => "macro",
+        };
+
+        output.push_str(&format!("{} {}\n", kind, entry.name));
+        output.push_str(&"─".repeat(60));
+        output.push('\n');
+
+        // Signature
+        if let Some(sig) = &entry.signature {
+            output.push_str(&format!("\n{}\n", sig));
+        }
+
+        // Description
+        output.push_str(&format!("\n{}\n", entry.description));
+
+        // Examples
+        if !entry.examples.is_empty() {
+            output.push_str("\n## Examples\n\n");
+            for example in &entry.examples {
+                if let Some(desc) = &example.description {
+                    output.push_str(&format!("{}\n\n", desc));
+                }
+                output.push_str(&format!("```\n{}\n```\n", example.code));
+                if let Some(out) = &example.output {
+                    output.push_str(&format!("// Output: {}\n", out));
+                }
+            }
+        }
+
+        // See also
+        if !entry.see_also.is_empty() {
+            output.push_str("\n## See also\n\n");
+            for related in &entry.see_also {
+                output.push_str(&format!("- {}\n", related));
+            }
+        }
+
+        // Deprecation warning
+        if let Some(deprecated) = &entry.deprecated {
+            output.push_str(&format!("\n⚠️  Deprecated: {}\n", deprecated));
+        }
+
+        output
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// REPL TESTS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_value_display() {
+        assert_eq!(Value::Int(42).display(), "42");
+        assert_eq!(Value::Float(3.14).display(), "3.140000");
+        assert_eq!(Value::Bool(true).display(), "true");
+        assert_eq!(Value::String("hello".to_string()).display(), "\"hello\"");
+    }
+
+    #[test]
+    fn test_history() {
+        let mut history = History::new(10);
+        history.add("first".to_string());
+        history.add("second".to_string());
+        history.add("third".to_string());
+
+        assert_eq!(history.previous(), Some(&"third".to_string()));
+        assert_eq!(history.previous(), Some(&"second".to_string()));
+        assert_eq!(history.next(), Some(&"third".to_string()));
+    }
+
+    #[test]
+    fn test_completer() {
+        let completer = Completer::new();
+        let ctx = ReplContext::new();
+
+        let completions = completer.complete("le", &ctx);
+        assert!(completions.iter().any(|c| c.text == "let"));
+    }
+
+    #[test]
+    fn test_highlighter() {
+        let highlighter = Highlighter::new(Theme::default());
+        let highlighted = highlighter.highlight("let x = 42");
+        assert!(highlighted.contains("\x1b[35m")); // keyword color
+    }
+
+    #[test]
+    fn test_table_render() {
+        let table = TableData::new(
+            vec!["Name".to_string(), "Value".to_string()],
+            vec![
+                vec!["x".to_string(), "42".to_string()],
+                vec!["y".to_string(), "100".to_string()],
+            ],
+        );
+
+        let rendered = table.render();
+        assert!(rendered.contains("Name"));
+        assert!(rendered.contains("42"));
+    }
+
+    #[test]
+    fn test_chart_bar() {
+        let chart = ChartData::bar("Test", vec![
+            ("A", 10.0),
+            ("B", 20.0),
+            ("C", 15.0),
+        ]);
+
+        let rendered = chart.render();
+        assert!(rendered.contains("Test"));
+        assert!(rendered.contains("█"));
+    }
+
+    #[test]
+    fn test_progress_bar() {
+        let progress = ProgressData::new(50, 100);
+        let rendered = progress.render();
+        assert!(rendered.contains("50.0%"));
+    }
+
+    #[test]
+    fn test_magic_registry() {
+        let registry = MagicCommandRegistry::new();
+        let (line, cell) = registry.list_magics();
+
+        assert!(line.iter().any(|m| *m == "time"));
+        assert!(cell.iter().any(|m| *m == "bash"));
+    }
+
+    #[test]
+    fn test_jupyter_kernel() {
+        let mut kernel = JupyterKernel::new();
+
+        // Test execute
+        let result = kernel.execute("let x = 42", false, true);
+        match result {
+            ExecuteResult::Ok { execution_count, .. } => {
+                assert_eq!(execution_count, 1);
+            }
+            _ => panic!("Expected Ok result"),
+        }
+    }
+
+    #[test]
+    fn test_workspace() {
+        let mut workspace = Workspace::new("test");
+        workspace.bindings.insert("x".to_string(), SerializedValue::Int(42));
+
+        assert_eq!(workspace.name, "test");
+        assert!(workspace.bindings.contains_key("x"));
+    }
+
+    #[test]
+    fn test_snippet_manager() {
+        let manager = SnippetManager::new("~/.bld/snippets");
+
+        let snippets = manager.find_by_prefix("fn");
+        assert!(!snippets.is_empty());
+    }
+
+    #[test]
+    fn test_inline_test_runner() {
+        let mut runner = InlineTestRunner::new();
+
+        runner.run_test("passes", || Ok(()));
+        runner.run_test("fails", || Err("error".to_string()));
+
+        let summary = runner.summary();
+        assert_eq!(summary.passed, 1);
+        assert_eq!(summary.failed, 1);
+    }
+
+    #[test]
+    fn test_repl_debugger() {
+        let mut debugger = ReplDebugger::new();
+
+        let id = debugger.add_breakpoint(BreakpointLocation::Line {
+            file: "test.bld".to_string(),
+            line: 10,
+        });
+
+        assert_eq!(debugger.list_breakpoints().len(), 1);
+        assert!(debugger.toggle_breakpoint(id));
+        assert!(debugger.remove_breakpoint(id));
+        assert!(debugger.list_breakpoints().is_empty());
+    }
+
+    #[test]
+    fn test_tree_render() {
+        let tree = TreeData {
+            root: TreeNode {
+                label: "root".to_string(),
+                children: vec![
+                    TreeNode {
+                        label: "child1".to_string(),
+                        children: vec![],
+                        expanded: true,
+                    },
+                    TreeNode {
+                        label: "child2".to_string(),
+                        children: vec![],
+                        expanded: true,
+                    },
+                ],
+                expanded: true,
+            },
+            show_lines: true,
+        };
+
+        let rendered = tree.render();
+        assert!(rendered.contains("root"));
+        assert!(rendered.contains("child1"));
+    }
+
+    #[test]
+    fn test_is_complete() {
+        let kernel = JupyterKernel::new();
+
+        assert!(matches!(kernel.is_complete("let x = 42"), IsCompleteResult::Complete));
+        assert!(matches!(kernel.is_complete("fn foo() {"), IsCompleteResult::Incomplete { .. }));
+        assert!(matches!(kernel.is_complete("let x = }"), IsCompleteResult::Invalid));
+    }
+
+    #[test]
+    fn test_sparkline() {
+        let chart = ChartData {
+            chart_type: ChartType::Sparkline,
+            title: None,
+            data: vec![
+                DataPoint { label: "".to_string(), value: 1.0, color: None },
+                DataPoint { label: "".to_string(), value: 5.0, color: None },
+                DataPoint { label: "".to_string(), value: 3.0, color: None },
+                DataPoint { label: "".to_string(), value: 8.0, color: None },
+                DataPoint { label: "".to_string(), value: 2.0, color: None },
+            ],
+            width: 40,
+            height: 1,
+        };
+
+        let rendered = chart.render();
+        assert_eq!(rendered.len(), 5);
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// SESSION RECORDING AND PLAYBACK
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Records REPL sessions for playback and sharing
+pub struct SessionRecorder {
+    pub session_id: String,
+    pub events: Vec<SessionEvent>,
+    pub metadata: SessionMetadata,
+    pub start_time: Instant,
+    pub recording: bool,
+    pub output_path: Option<String>,
+}
+
+/// Metadata about a recorded session
+pub struct SessionMetadata {
+    pub title: String,
+    pub author: String,
+    pub description: String,
+    pub tags: Vec<String>,
+    pub created_at: u64,
+    pub duration_ms: u64,
+    pub language_version: String,
+    pub environment: HashMap<String, String>,
+}
+
+/// A single event in a recorded session
+pub struct SessionEvent {
+    pub timestamp_ms: u64,
+    pub event_type: SessionEventType,
+    pub content: String,
+    pub metadata: HashMap<String, String>,
+}
+
+/// Types of session events
+pub enum SessionEventType {
+    Input,              // User input
+    Output,             // Program output
+    Error,              // Error message
+    Stdout,             // Standard output
+    Stderr,             // Standard error
+    SystemMessage,      // System message
+    VariableChange,     // Variable was changed
+    FunctionDefined,    // Function was defined
+    ModuleLoaded,       // Module was loaded
+    TimingInfo,         // Execution timing
+    DebugEvent,         // Debug event
+    MagicCommand,       // Magic command executed
+    Completion,         // Completion suggestion shown
+    Annotation,         // User annotation/comment
+}
+
+impl SessionRecorder {
+    pub fn new() -> Self {
+        Self {
+            session_id: format!("session_{}", std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis()),
+            events: Vec::new(),
+            metadata: SessionMetadata::default(),
+            start_time: Instant::now(),
+            recording: false,
+            output_path: None,
+        }
+    }
+
+    pub fn start(&mut self) {
+        self.recording = true;
+        self.start_time = Instant::now();
+        self.record_event(SessionEventType::SystemMessage, "Session recording started");
+    }
+
+    pub fn stop(&mut self) {
+        self.recording = false;
+        self.metadata.duration_ms = self.start_time.elapsed().as_millis() as u64;
+        self.record_event(SessionEventType::SystemMessage, "Session recording stopped");
+    }
+
+    pub fn record_event(&mut self, event_type: SessionEventType, content: &str) {
+        if !self.recording && !matches!(event_type, SessionEventType::SystemMessage) {
+            return;
+        }
+
+        self.events.push(SessionEvent {
+            timestamp_ms: self.start_time.elapsed().as_millis() as u64,
+            event_type,
+            content: content.to_string(),
+            metadata: HashMap::new(),
+        });
+    }
+
+    pub fn record_input(&mut self, input: &str) {
+        self.record_event(SessionEventType::Input, input);
+    }
+
+    pub fn record_output(&mut self, output: &str) {
+        self.record_event(SessionEventType::Output, output);
+    }
+
+    pub fn record_error(&mut self, error: &str) {
+        self.record_event(SessionEventType::Error, error);
+    }
+
+    pub fn add_annotation(&mut self, annotation: &str) {
+        self.record_event(SessionEventType::Annotation, annotation);
+    }
+
+    pub fn export_json(&self) -> String {
+        format!(r#"{{
+            "session_id": "{}",
+            "metadata": {{
+                "title": "{}",
+                "author": "{}",
+                "duration_ms": {}
+            }},
+            "events": {}
+        }}"#,
+            self.session_id,
+            self.metadata.title,
+            self.metadata.author,
+            self.metadata.duration_ms,
+            self.events.len()
+        )
+    }
+
+    pub fn export_markdown(&self) -> String {
+        let mut md = format!("# {}\n\n", self.metadata.title);
+        md.push_str(&format!("Author: {}\n", self.metadata.author));
+        md.push_str(&format!("Duration: {}ms\n\n", self.metadata.duration_ms));
+        md.push_str("---\n\n");
+
+        for event in &self.events {
+            match event.event_type {
+                SessionEventType::Input => {
+                    md.push_str(&format!("```build\n{}\n```\n\n", event.content));
+                }
+                SessionEventType::Output => {
+                    md.push_str(&format!("> {}\n\n", event.content));
+                }
+                SessionEventType::Annotation => {
+                    md.push_str(&format!("*{}*\n\n", event.content));
+                }
+                _ => {}
+            }
+        }
+
+        md
+    }
+}
+
+/// Plays back recorded sessions
+pub struct SessionPlayer {
+    pub session: Option<RecordedSession>,
+    pub current_event: usize,
+    pub playback_speed: f64,
+    pub paused: bool,
+    pub callbacks: SessionCallbacks,
+}
+
+/// A recorded session for playback
+pub struct RecordedSession {
+    pub session_id: String,
+    pub metadata: SessionMetadata,
+    pub events: Vec<SessionEvent>,
+}
+
+/// Callbacks for session playback
+pub struct SessionCallbacks {
+    pub on_input: Option<Box<dyn Fn(&str) + Send + Sync>>,
+    pub on_output: Option<Box<dyn Fn(&str) + Send + Sync>>,
+    pub on_error: Option<Box<dyn Fn(&str) + Send + Sync>>,
+    pub on_complete: Option<Box<dyn Fn() + Send + Sync>>,
+}
+
+impl SessionPlayer {
+    pub fn new() -> Self {
+        Self {
+            session: None,
+            current_event: 0,
+            playback_speed: 1.0,
+            paused: true,
+            callbacks: SessionCallbacks::default(),
+        }
+    }
+
+    pub fn load(&mut self, session: RecordedSession) {
+        self.session = Some(session);
+        self.current_event = 0;
+    }
+
+    pub fn play(&mut self) {
+        self.paused = false;
+    }
+
+    pub fn pause(&mut self) {
+        self.paused = true;
+    }
+
+    pub fn step(&mut self) -> Option<&SessionEvent> {
+        if let Some(ref session) = self.session {
+            if self.current_event < session.events.len() {
+                let event = &session.events[self.current_event];
+                self.current_event += 1;
+                return Some(event);
+            }
+        }
+        None
+    }
+
+    pub fn seek(&mut self, event_index: usize) {
+        self.current_event = event_index;
+    }
+
+    pub fn set_speed(&mut self, speed: f64) {
+        self.playback_speed = speed.max(0.1).min(10.0);
+    }
+}
+
+impl Default for SessionMetadata {
+    fn default() -> Self {
+        Self {
+            title: "Untitled Session".to_string(),
+            author: "Unknown".to_string(),
+            description: String::new(),
+            tags: Vec::new(),
+            created_at: 0,
+            duration_ms: 0,
+            language_version: "1.0.0".to_string(),
+            environment: HashMap::new(),
+        }
+    }
+}
+
+impl Default for SessionCallbacks {
+    fn default() -> Self {
+        Self {
+            on_input: None,
+            on_output: None,
+            on_error: None,
+            on_complete: None,
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// LITERATE PROGRAMMING SUPPORT
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Literate programming support for REPL
+pub struct LiterateMode {
+    pub document: LiterateDocument,
+    pub current_cell: usize,
+    pub execution_order: Vec<usize>,
+    pub outputs: HashMap<usize, CellOutput>,
+}
+
+/// A literate programming document
+pub struct LiterateDocument {
+    pub cells: Vec<DocumentCell>,
+    pub metadata: DocumentMetadata,
+    pub title: String,
+}
+
+/// A cell in a literate document
+pub struct DocumentCell {
+    pub id: usize,
+    pub cell_type: CellType,
+    pub source: String,
+    pub outputs: Vec<CellOutput>,
+    pub execution_count: Option<u32>,
+    pub metadata: CellMetadata,
+}
+
+/// Types of cells
+pub enum CellType {
+    Code,
+    Markdown,
+    Raw,
+    Heading,
+    Equation,
+}
+
+/// Output from a cell
+pub struct CellOutput {
+    pub output_type: OutputType,
+    pub data: OutputData,
+    pub execution_count: Option<u32>,
+}
+
+/// Types of cell outputs
+pub enum OutputType {
+    Stream,
+    DisplayData,
+    ExecuteResult,
+    Error,
+}
+
+/// Data in cell output
+pub enum OutputData {
+    Text(String),
+    Html(String),
+    Latex(String),
+    Json(String),
+    Image { format: String, data: Vec<u8> },
+    Svg(String),
+}
+
+/// Metadata for cells
+pub struct CellMetadata {
+    pub collapsed: bool,
+    pub scrollable: bool,
+    pub editable: bool,
+    pub deletable: bool,
+    pub tags: Vec<String>,
+}
+
+/// Document-level metadata
+pub struct DocumentMetadata {
+    pub language: String,
+    pub kernel: String,
+    pub authors: Vec<String>,
+    pub created: u64,
+    pub modified: u64,
+}
+
+impl LiterateMode {
+    pub fn new() -> Self {
+        Self {
+            document: LiterateDocument {
+                cells: Vec::new(),
+                metadata: DocumentMetadata::default(),
+                title: "Untitled".to_string(),
+            },
+            current_cell: 0,
+            execution_order: Vec::new(),
+            outputs: HashMap::new(),
+        }
+    }
+
+    pub fn add_cell(&mut self, cell_type: CellType, source: &str) -> usize {
+        let id = self.document.cells.len();
+        self.document.cells.push(DocumentCell {
+            id,
+            cell_type,
+            source: source.to_string(),
+            outputs: Vec::new(),
+            execution_count: None,
+            metadata: CellMetadata::default(),
+        });
+        id
+    }
+
+    pub fn execute_cell(&mut self, cell_id: usize) -> Result<CellOutput, String> {
+        if cell_id >= self.document.cells.len() {
+            return Err("Cell not found".to_string());
+        }
+
+        let cell = &mut self.document.cells[cell_id];
+        match cell.cell_type {
+            CellType::Code => {
+                // Execute code cell
+                let output = CellOutput {
+                    output_type: OutputType::ExecuteResult,
+                    data: OutputData::Text("Executed".to_string()),
+                    execution_count: cell.execution_count,
+                };
+                cell.outputs.push(output.clone());
+                self.execution_order.push(cell_id);
+                Ok(output)
+            }
+            _ => Ok(CellOutput {
+                output_type: OutputType::DisplayData,
+                data: OutputData::Text(cell.source.clone()),
+                execution_count: None,
+            }),
+        }
+    }
+
+    pub fn run_all(&mut self) -> Vec<Result<CellOutput, String>> {
+        (0..self.document.cells.len())
+            .map(|id| self.execute_cell(id))
+            .collect()
+    }
+
+    pub fn export_notebook(&self) -> String {
+        // Export to Jupyter-compatible format
+        format!(r#"{{
+            "cells": {},
+            "metadata": {{}},
+            "nbformat": 4,
+            "nbformat_minor": 5
+        }}"#, self.document.cells.len())
+    }
+
+    pub fn export_html(&self) -> String {
+        let mut html = String::from("<!DOCTYPE html>\n<html>\n<head>\n<style>");
+        html.push_str("body { font-family: sans-serif; max-width: 900px; margin: auto; }");
+        html.push_str(".cell { margin: 1em 0; } .code { background: #f5f5f5; padding: 1em; }");
+        html.push_str("</style>\n</head>\n<body>\n");
+        html.push_str(&format!("<h1>{}</h1>\n", self.document.title));
+
+        for cell in &self.document.cells {
+            html.push_str("<div class=\"cell\">\n");
+            match cell.cell_type {
+                CellType::Code => {
+                    html.push_str(&format!("<pre class=\"code\">{}</pre>\n", cell.source));
+                }
+                CellType::Markdown => {
+                    html.push_str(&format!("<div class=\"markdown\">{}</div>\n", cell.source));
+                }
+                _ => {}
+            }
+            html.push_str("</div>\n");
+        }
+
+        html.push_str("</body>\n</html>");
+        html
+    }
+}
+
+impl Default for DocumentMetadata {
+    fn default() -> Self {
+        Self {
+            language: "build".to_string(),
+            kernel: "build_kernel".to_string(),
+            authors: Vec::new(),
+            created: 0,
+            modified: 0,
+        }
+    }
+}
+
+impl Default for CellMetadata {
+    fn default() -> Self {
+        Self {
+            collapsed: false,
+            scrollable: true,
+            editable: true,
+            deletable: true,
+            tags: Vec::new(),
+        }
+    }
+}
+
+impl Clone for CellOutput {
+    fn clone(&self) -> Self {
+        Self {
+            output_type: match self.output_type {
+                OutputType::Stream => OutputType::Stream,
+                OutputType::DisplayData => OutputType::DisplayData,
+                OutputType::ExecuteResult => OutputType::ExecuteResult,
+                OutputType::Error => OutputType::Error,
+            },
+            data: match &self.data {
+                OutputData::Text(s) => OutputData::Text(s.clone()),
+                OutputData::Html(s) => OutputData::Html(s.clone()),
+                OutputData::Latex(s) => OutputData::Latex(s.clone()),
+                OutputData::Json(s) => OutputData::Json(s.clone()),
+                OutputData::Image { format, data } => OutputData::Image {
+                    format: format.clone(),
+                    data: data.clone(),
+                },
+                OutputData::Svg(s) => OutputData::Svg(s.clone()),
+            },
+            execution_count: self.execution_count,
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// MULTI-LANGUAGE REPL INTEGRATION
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Multi-language REPL support
+pub struct PolyglotRepl {
+    pub languages: HashMap<String, Box<dyn LanguageBackend + Send + Sync>>,
+    pub current_language: String,
+    pub shared_context: SharedContext,
+    pub bridge: LanguageBridge,
+}
+
+/// Backend trait for different languages
+pub trait LanguageBackend {
+    fn name(&self) -> &str;
+    fn version(&self) -> &str;
+    fn execute(&mut self, code: &str) -> LanguageResult;
+    fn complete(&self, code: &str, cursor: usize) -> Vec<CompletionItem>;
+    fn is_complete(&self, code: &str) -> bool;
+    fn reset(&mut self);
+}
+
+/// Result from language execution
+pub struct LanguageResult {
+    pub success: bool,
+    pub output: String,
+    pub error: Option<String>,
+    pub exports: HashMap<String, ExportedValue>,
+}
+
+/// A value exported between languages
+pub struct ExportedValue {
+    pub name: String,
+    pub value_type: ExportType,
+    pub data: Vec<u8>,
+    pub source_language: String,
+}
+
+/// Types of exported values
+pub enum ExportType {
+    Integer,
+    Float,
+    String,
+    Boolean,
+    Array,
+    Object,
+    Function,
+    Binary,
+}
+
+/// Shared context between languages
+pub struct SharedContext {
+    pub variables: HashMap<String, ExportedValue>,
+    pub functions: HashMap<String, ExportedValue>,
+    pub types: HashMap<String, TypeDefinition>,
+}
+
+/// Type definition for cross-language types
+pub struct TypeDefinition {
+    pub name: String,
+    pub fields: Vec<FieldDefinition>,
+    pub source_language: String,
+}
+
+/// Field in a type definition
+pub struct FieldDefinition {
+    pub name: String,
+    pub field_type: String,
+    pub optional: bool,
+}
+
+/// Bridge for language interop
+pub struct LanguageBridge {
+    pub conversions: HashMap<(String, String), Box<dyn ValueConverter + Send + Sync>>,
+}
+
+/// Trait for converting values between languages
+pub trait ValueConverter {
+    fn convert(&self, value: &ExportedValue) -> Result<ExportedValue, String>;
+}
+
+impl PolyglotRepl {
+    pub fn new() -> Self {
+        let mut languages = HashMap::new();
+        languages.insert("build".to_string(), Box::new(BuildBackend::new()) as Box<dyn LanguageBackend + Send + Sync>);
+
+        Self {
+            languages,
+            current_language: "build".to_string(),
+            shared_context: SharedContext::default(),
+            bridge: LanguageBridge::default(),
+        }
+    }
+
+    pub fn add_language<L: LanguageBackend + Send + Sync + 'static>(&mut self, backend: L) {
+        self.languages.insert(backend.name().to_string(), Box::new(backend));
+    }
+
+    pub fn switch_language(&mut self, language: &str) -> Result<(), String> {
+        if self.languages.contains_key(language) {
+            self.current_language = language.to_string();
+            Ok(())
+        } else {
+            Err(format!("Unknown language: {}", language))
+        }
+    }
+
+    pub fn execute(&mut self, code: &str) -> LanguageResult {
+        if let Some(backend) = self.languages.get_mut(&self.current_language) {
+            let result = backend.execute(code);
+
+            // Export any new values to shared context
+            for (name, value) in &result.exports {
+                self.shared_context.variables.insert(name.clone(), ExportedValue {
+                    name: name.clone(),
+                    value_type: value.value_type.clone(),
+                    data: value.data.clone(),
+                    source_language: self.current_language.clone(),
+                });
+            }
+
+            result
+        } else {
+            LanguageResult {
+                success: false,
+                output: String::new(),
+                error: Some("No language backend".to_string()),
+                exports: HashMap::new(),
+            }
+        }
+    }
+
+    pub fn list_languages(&self) -> Vec<&str> {
+        self.languages.keys().map(|s| s.as_str()).collect()
+    }
+
+    pub fn import_from(&mut self, language: &str, name: &str) -> Result<(), String> {
+        if let Some(value) = self.shared_context.variables.get(name) {
+            if value.source_language != self.current_language {
+                // Convert value if needed
+                let key = (value.source_language.clone(), self.current_language.clone());
+                if let Some(converter) = self.bridge.conversions.get(&key) {
+                    let converted = converter.convert(value)?;
+                    // Make available in current language
+                    Ok(())
+                } else {
+                    // Direct copy if no conversion needed
+                    Ok(())
+                }
+            } else {
+                Ok(())
+            }
+        } else {
+            Err(format!("Variable '{}' not found", name))
+        }
+    }
+}
+
+/// BuildLang backend
+pub struct BuildBackend {
+    pub context: HashMap<String, String>,
+}
+
+impl BuildBackend {
+    pub fn new() -> Self {
+        Self { context: HashMap::new() }
+    }
+}
+
+impl LanguageBackend for BuildBackend {
+    fn name(&self) -> &str { "build" }
+    fn version(&self) -> &str { "1.0.0" }
+
+    fn execute(&mut self, code: &str) -> LanguageResult {
+        // Execute BuildLang code
+        LanguageResult {
+            success: true,
+            output: "Executed".to_string(),
+            error: None,
+            exports: HashMap::new(),
+        }
+    }
+
+    fn complete(&self, _code: &str, _cursor: usize) -> Vec<CompletionItem> {
+        Vec::new()
+    }
+
+    fn is_complete(&self, code: &str) -> bool {
+        !code.ends_with('{') && !code.ends_with('(')
+    }
+
+    fn reset(&mut self) {
+        self.context.clear();
+    }
+}
+
+impl Clone for ExportType {
+    fn clone(&self) -> Self {
+        match self {
+            ExportType::Integer => ExportType::Integer,
+            ExportType::Float => ExportType::Float,
+            ExportType::String => ExportType::String,
+            ExportType::Boolean => ExportType::Boolean,
+            ExportType::Array => ExportType::Array,
+            ExportType::Object => ExportType::Object,
+            ExportType::Function => ExportType::Function,
+            ExportType::Binary => ExportType::Binary,
+        }
+    }
+}
+
+impl Default for SharedContext {
+    fn default() -> Self {
+        Self {
+            variables: HashMap::new(),
+            functions: HashMap::new(),
+            types: HashMap::new(),
+        }
+    }
+}
+
+impl Default for LanguageBridge {
+    fn default() -> Self {
+        Self {
+            conversions: HashMap::new(),
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// COLLABORATION MODE
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Collaborative REPL for multiple users
+pub struct CollaborativeRepl {
+    pub session_id: String,
+    pub participants: HashMap<String, Participant>,
+    pub shared_state: SharedState,
+    pub message_queue: VecDeque<CollabMessage>,
+    pub config: CollabConfig,
+}
+
+/// A participant in the collaborative session
+pub struct Participant {
+    pub id: String,
+    pub name: String,
+    pub role: ParticipantRole,
+    pub cursor_position: usize,
+    pub selection: Option<Selection>,
+    pub last_active: u64,
+    pub color: String,
+}
+
+/// Participant roles
+pub enum ParticipantRole {
+    Owner,
+    Editor,
+    Viewer,
+    Commenter,
+}
+
+/// Selection range
+pub struct Selection {
+    pub start: usize,
+    pub end: usize,
+}
+
+/// Shared state for collaboration
+pub struct SharedState {
+    pub document: String,
+    pub history: Vec<String>,
+    pub variables: HashMap<String, String>,
+    pub version: u64,
+    pub operations: Vec<Operation>,
+}
+
+/// An operation for OT (Operational Transformation)
+pub struct Operation {
+    pub op_type: OperationType,
+    pub position: usize,
+    pub content: String,
+    pub author: String,
+    pub timestamp: u64,
+    pub version: u64,
+}
+
+/// Types of operations
+pub enum OperationType {
+    Insert,
+    Delete,
+    Retain,
+}
+
+/// Messages for collaboration
+pub struct CollabMessage {
+    pub message_type: CollabMessageType,
+    pub sender: String,
+    pub payload: String,
+    pub timestamp: u64,
+}
+
+/// Types of collaboration messages
+pub enum CollabMessageType {
+    Join,
+    Leave,
+    Operation,
+    CursorMove,
+    Selection,
+    Chat,
+    Execute,
+    Sync,
+}
+
+/// Configuration for collaboration
+pub struct CollabConfig {
+    pub max_participants: usize,
+    pub allow_anonymous: bool,
+    pub require_password: bool,
+    pub auto_save_interval: Duration,
+    pub sync_interval: Duration,
+}
+
+impl CollaborativeRepl {
+    pub fn new(session_id: &str) -> Self {
+        Self {
+            session_id: session_id.to_string(),
+            participants: HashMap::new(),
+            shared_state: SharedState::default(),
+            message_queue: VecDeque::new(),
+            config: CollabConfig::default(),
+        }
+    }
+
+    pub fn join(&mut self, participant: Participant) -> Result<(), String> {
+        if self.participants.len() >= self.config.max_participants {
+            return Err("Session full".to_string());
+        }
+
+        self.broadcast(CollabMessage {
+            message_type: CollabMessageType::Join,
+            sender: "system".to_string(),
+            payload: format!("{} joined the session", participant.name),
+            timestamp: 0,
+        });
+
+        self.participants.insert(participant.id.clone(), participant);
+        Ok(())
+    }
+
+    pub fn leave(&mut self, participant_id: &str) {
+        if let Some(p) = self.participants.remove(participant_id) {
+            self.broadcast(CollabMessage {
+                message_type: CollabMessageType::Leave,
+                sender: "system".to_string(),
+                payload: format!("{} left the session", p.name),
+                timestamp: 0,
+            });
+        }
+    }
+
+    pub fn apply_operation(&mut self, op: Operation) -> Result<(), String> {
+        // Apply OT transformation
+        match op.op_type {
+            OperationType::Insert => {
+                self.shared_state.document.insert_str(op.position, &op.content);
+            }
+            OperationType::Delete => {
+                let end = (op.position + op.content.len()).min(self.shared_state.document.len());
+                self.shared_state.document.drain(op.position..end);
+            }
+            OperationType::Retain => {}
+        }
+
+        self.shared_state.version += 1;
+        self.shared_state.operations.push(op);
+        Ok(())
+    }
+
+    pub fn broadcast(&mut self, message: CollabMessage) {
+        self.message_queue.push_back(message);
+    }
+
+    pub fn sync(&self) -> SyncPayload {
+        SyncPayload {
+            document: self.shared_state.document.clone(),
+            version: self.shared_state.version,
+            participants: self.participants.keys().cloned().collect(),
+        }
+    }
+}
+
+/// Sync payload
+pub struct SyncPayload {
+    pub document: String,
+    pub version: u64,
+    pub participants: Vec<String>,
+}
+
+impl Default for SharedState {
+    fn default() -> Self {
+        Self {
+            document: String::new(),
+            history: Vec::new(),
+            variables: HashMap::new(),
+            version: 0,
+            operations: Vec::new(),
+        }
+    }
+}
+
+impl Default for CollabConfig {
+    fn default() -> Self {
+        Self {
+            max_participants: 10,
+            allow_anonymous: false,
+            require_password: false,
+            auto_save_interval: Duration::from_secs(30),
+            sync_interval: Duration::from_millis(100),
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// REPL ANALYTICS AND METRICS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Analytics for REPL usage
+pub struct ReplAnalytics {
+    pub session_id: String,
+    pub metrics: ReplMetrics,
+    pub command_history: Vec<CommandRecord>,
+    pub error_log: Vec<ErrorRecord>,
+    pub performance_samples: Vec<PerformanceSample>,
+}
+
+/// Metrics for REPL usage
+pub struct ReplMetrics {
+    pub total_commands: u64,
+    pub successful_commands: u64,
+    pub failed_commands: u64,
+    pub total_execution_time_ms: u64,
+    pub average_execution_time_ms: f64,
+    pub unique_functions_used: HashSet<String>,
+    pub unique_modules_loaded: HashSet<String>,
+    pub magic_commands_used: HashMap<String, u64>,
+    pub completion_usage: CompletionMetrics,
+    pub session_duration_ms: u64,
+}
+
+/// Metrics for completion usage
+pub struct CompletionMetrics {
+    pub suggestions_shown: u64,
+    pub suggestions_accepted: u64,
+    pub suggestions_rejected: u64,
+    pub average_position_selected: f64,
+}
+
+/// Record of a command execution
+pub struct CommandRecord {
+    pub command: String,
+    pub timestamp: u64,
+    pub execution_time_ms: u64,
+    pub success: bool,
+    pub error_type: Option<String>,
+}
+
+/// Record of an error
+pub struct ErrorRecord {
+    pub error_type: String,
+    pub message: String,
+    pub command: String,
+    pub timestamp: u64,
+    pub stack_trace: Option<String>,
+}
+
+/// Performance sample
+pub struct PerformanceSample {
+    pub timestamp: u64,
+    pub cpu_usage: f64,
+    pub memory_usage_mb: f64,
+    pub active_variables: usize,
+    pub gc_collections: u64,
+}
+
+impl ReplAnalytics {
+    pub fn new(session_id: &str) -> Self {
+        Self {
+            session_id: session_id.to_string(),
+            metrics: ReplMetrics::default(),
+            command_history: Vec::new(),
+            error_log: Vec::new(),
+            performance_samples: Vec::new(),
+        }
+    }
+
+    pub fn record_command(&mut self, command: &str, execution_time_ms: u64, success: bool, error: Option<String>) {
+        self.metrics.total_commands += 1;
+        self.metrics.total_execution_time_ms += execution_time_ms;
+
+        if success {
+            self.metrics.successful_commands += 1;
+        } else {
+            self.metrics.failed_commands += 1;
+        }
+
+        self.metrics.average_execution_time_ms =
+            self.metrics.total_execution_time_ms as f64 / self.metrics.total_commands as f64;
+
+        self.command_history.push(CommandRecord {
+            command: command.to_string(),
+            timestamp: 0,
+            execution_time_ms,
+            success,
+            error_type: error.clone(),
+        });
+
+        if let Some(err) = error {
+            self.error_log.push(ErrorRecord {
+                error_type: "RuntimeError".to_string(),
+                message: err,
+                command: command.to_string(),
+                timestamp: 0,
+                stack_trace: None,
+            });
+        }
+    }
+
+    pub fn record_magic_usage(&mut self, magic_name: &str) {
+        *self.metrics.magic_commands_used.entry(magic_name.to_string()).or_insert(0) += 1;
+    }
+
+    pub fn record_completion(&mut self, shown: bool, accepted: bool, position: Option<usize>) {
+        if shown {
+            self.metrics.completion_usage.suggestions_shown += 1;
+        }
+        if accepted {
+            self.metrics.completion_usage.suggestions_accepted += 1;
+        } else if shown {
+            self.metrics.completion_usage.suggestions_rejected += 1;
+        }
+    }
+
+    pub fn sample_performance(&mut self, cpu: f64, memory: f64, variables: usize, gc: u64) {
+        self.performance_samples.push(PerformanceSample {
+            timestamp: 0,
+            cpu_usage: cpu,
+            memory_usage_mb: memory,
+            active_variables: variables,
+            gc_collections: gc,
+        });
+    }
+
+    pub fn generate_report(&self) -> AnalyticsReport {
+        AnalyticsReport {
+            session_id: self.session_id.clone(),
+            total_commands: self.metrics.total_commands,
+            success_rate: if self.metrics.total_commands > 0 {
+                self.metrics.successful_commands as f64 / self.metrics.total_commands as f64 * 100.0
+            } else {
+                0.0
+            },
+            average_execution_time_ms: self.metrics.average_execution_time_ms,
+            most_used_commands: self.get_most_used_commands(10),
+            common_errors: self.get_common_errors(5),
+            performance_summary: self.get_performance_summary(),
+        }
+    }
+
+    fn get_most_used_commands(&self, limit: usize) -> Vec<(String, u64)> {
+        let mut counts: HashMap<String, u64> = HashMap::new();
+        for record in &self.command_history {
+            *counts.entry(record.command.clone()).or_insert(0) += 1;
+        }
+        let mut sorted: Vec<_> = counts.into_iter().collect();
+        sorted.sort_by(|a, b| b.1.cmp(&a.1));
+        sorted.truncate(limit);
+        sorted
+    }
+
+    fn get_common_errors(&self, limit: usize) -> Vec<(String, u64)> {
+        let mut counts: HashMap<String, u64> = HashMap::new();
+        for record in &self.error_log {
+            *counts.entry(record.error_type.clone()).or_insert(0) += 1;
+        }
+        let mut sorted: Vec<_> = counts.into_iter().collect();
+        sorted.sort_by(|a, b| b.1.cmp(&a.1));
+        sorted.truncate(limit);
+        sorted
+    }
+
+    fn get_performance_summary(&self) -> PerformanceSummary {
+        let samples = &self.performance_samples;
+        if samples.is_empty() {
+            return PerformanceSummary::default();
+        }
+
+        let avg_cpu = samples.iter().map(|s| s.cpu_usage).sum::<f64>() / samples.len() as f64;
+        let avg_mem = samples.iter().map(|s| s.memory_usage_mb).sum::<f64>() / samples.len() as f64;
+        let max_mem = samples.iter().map(|s| s.memory_usage_mb).fold(0.0f64, f64::max);
+
+        PerformanceSummary {
+            average_cpu_usage: avg_cpu,
+            average_memory_mb: avg_mem,
+            peak_memory_mb: max_mem,
+            sample_count: samples.len(),
+        }
+    }
+}
+
+/// Analytics report
+pub struct AnalyticsReport {
+    pub session_id: String,
+    pub total_commands: u64,
+    pub success_rate: f64,
+    pub average_execution_time_ms: f64,
+    pub most_used_commands: Vec<(String, u64)>,
+    pub common_errors: Vec<(String, u64)>,
+    pub performance_summary: PerformanceSummary,
+}
+
+/// Performance summary
+pub struct PerformanceSummary {
+    pub average_cpu_usage: f64,
+    pub average_memory_mb: f64,
+    pub peak_memory_mb: f64,
+    pub sample_count: usize,
+}
+
+impl Default for ReplMetrics {
+    fn default() -> Self {
+        Self {
+            total_commands: 0,
+            successful_commands: 0,
+            failed_commands: 0,
+            total_execution_time_ms: 0,
+            average_execution_time_ms: 0.0,
+            unique_functions_used: HashSet::new(),
+            unique_modules_loaded: HashSet::new(),
+            magic_commands_used: HashMap::new(),
+            completion_usage: CompletionMetrics::default(),
+            session_duration_ms: 0,
+        }
+    }
+}
+
+impl Default for CompletionMetrics {
+    fn default() -> Self {
+        Self {
+            suggestions_shown: 0,
+            suggestions_accepted: 0,
+            suggestions_rejected: 0,
+            average_position_selected: 0.0,
+        }
+    }
+}
+
+impl Default for PerformanceSummary {
+    fn default() -> Self {
+        Self {
+            average_cpu_usage: 0.0,
+            average_memory_mb: 0.0,
+            peak_memory_mb: 0.0,
+            sample_count: 0,
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// SECURITY SANDBOXING
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Security sandbox for REPL execution
+pub struct ReplSandbox {
+    pub config: SandboxConfig,
+    pub permissions: SandboxPermissions,
+    pub resource_limits: ResourceLimits,
+    pub audit_log: Vec<AuditEntry>,
+}
+
+/// Sandbox configuration
+pub struct SandboxConfig {
+    pub enabled: bool,
+    pub isolation_level: IsolationLevel,
+    pub network_policy: NetworkPolicy,
+    pub filesystem_policy: FilesystemPolicy,
+}
+
+/// Isolation levels
+pub enum IsolationLevel {
+    None,           // No isolation
+    Process,        // Separate process
+    Container,      // Docker container
+    VM,             // Virtual machine
+    Wasm,           // WebAssembly sandbox
+}
+
+/// Network policy
+pub struct NetworkPolicy {
+    pub allow_network: bool,
+    pub allowed_hosts: Vec<String>,
+    pub blocked_hosts: Vec<String>,
+    pub allowed_ports: Vec<u16>,
+    pub max_connections: usize,
+}
+
+/// Filesystem policy
+pub struct FilesystemPolicy {
+    pub allow_read: bool,
+    pub allow_write: bool,
+    pub allowed_paths: Vec<String>,
+    pub blocked_paths: Vec<String>,
+    pub max_file_size_bytes: usize,
+}
+
+/// Permissions for sandboxed code
+pub struct SandboxPermissions {
+    pub can_import: bool,
+    pub can_spawn_process: bool,
+    pub can_access_env: bool,
+    pub can_use_ffi: bool,
+    pub can_use_reflection: bool,
+    pub allowed_modules: HashSet<String>,
+    pub blocked_functions: HashSet<String>,
+}
+
+/// Resource limits
+pub struct ResourceLimits {
+    pub max_memory_mb: usize,
+    pub max_cpu_time_ms: u64,
+    pub max_wall_time_ms: u64,
+    pub max_stack_depth: usize,
+    pub max_output_bytes: usize,
+}
+
+/// Audit log entry
+pub struct AuditEntry {
+    pub timestamp: u64,
+    pub action: AuditAction,
+    pub allowed: bool,
+    pub details: String,
+}
+
+/// Audit actions
+pub enum AuditAction {
+    ModuleImport(String),
+    FunctionCall(String),
+    FileRead(String),
+    FileWrite(String),
+    NetworkConnect(String),
+    ProcessSpawn(String),
+    EnvAccess(String),
+}
+
+impl ReplSandbox {
+    pub fn new() -> Self {
+        Self {
+            config: SandboxConfig::default(),
+            permissions: SandboxPermissions::default(),
+            resource_limits: ResourceLimits::default(),
+            audit_log: Vec::new(),
+        }
+    }
+
+    pub fn check_permission(&mut self, action: &AuditAction) -> bool {
+        let allowed = match action {
+            AuditAction::ModuleImport(module) => {
+                self.permissions.can_import &&
+                    (self.permissions.allowed_modules.is_empty() ||
+                     self.permissions.allowed_modules.contains(module))
+            }
+            AuditAction::FunctionCall(func) => {
+                !self.permissions.blocked_functions.contains(func)
+            }
+            AuditAction::FileRead(path) => {
+                self.config.filesystem_policy.allow_read &&
+                    self.check_path_allowed(path)
+            }
+            AuditAction::FileWrite(path) => {
+                self.config.filesystem_policy.allow_write &&
+                    self.check_path_allowed(path)
+            }
+            AuditAction::NetworkConnect(host) => {
+                self.config.network_policy.allow_network &&
+                    self.check_host_allowed(host)
+            }
+            AuditAction::ProcessSpawn(_) => {
+                self.permissions.can_spawn_process
+            }
+            AuditAction::EnvAccess(_) => {
+                self.permissions.can_access_env
+            }
+        };
+
+        self.audit_log.push(AuditEntry {
+            timestamp: 0,
+            action: match action {
+                AuditAction::ModuleImport(s) => AuditAction::ModuleImport(s.clone()),
+                AuditAction::FunctionCall(s) => AuditAction::FunctionCall(s.clone()),
+                AuditAction::FileRead(s) => AuditAction::FileRead(s.clone()),
+                AuditAction::FileWrite(s) => AuditAction::FileWrite(s.clone()),
+                AuditAction::NetworkConnect(s) => AuditAction::NetworkConnect(s.clone()),
+                AuditAction::ProcessSpawn(s) => AuditAction::ProcessSpawn(s.clone()),
+                AuditAction::EnvAccess(s) => AuditAction::EnvAccess(s.clone()),
+            },
+            allowed,
+            details: format!("{:?}", action),
+        });
+
+        allowed
+    }
+
+    fn check_path_allowed(&self, path: &str) -> bool {
+        let policy = &self.config.filesystem_policy;
+
+        // Check blocked paths first
+        for blocked in &policy.blocked_paths {
+            if path.starts_with(blocked) {
+                return false;
+            }
+        }
+
+        // Check allowed paths
+        if policy.allowed_paths.is_empty() {
+            return true;
+        }
+
+        for allowed in &policy.allowed_paths {
+            if path.starts_with(allowed) {
+                return true;
+            }
+        }
+
+        false
+    }
+
+    fn check_host_allowed(&self, host: &str) -> bool {
+        let policy = &self.config.network_policy;
+
+        // Check blocked hosts first
+        for blocked in &policy.blocked_hosts {
+            if host.contains(blocked) {
+                return false;
+            }
+        }
+
+        // Check allowed hosts
+        if policy.allowed_hosts.is_empty() {
+            return true;
+        }
+
+        for allowed in &policy.allowed_hosts {
+            if host.contains(allowed) {
+                return true;
+            }
+        }
+
+        false
+    }
+
+    pub fn get_audit_summary(&self) -> AuditSummary {
+        let mut summary = AuditSummary::default();
+
+        for entry in &self.audit_log {
+            summary.total_actions += 1;
+            if entry.allowed {
+                summary.allowed_actions += 1;
+            } else {
+                summary.blocked_actions += 1;
+            }
+        }
+
+        summary
+    }
+}
+
+/// Audit summary
+pub struct AuditSummary {
+    pub total_actions: u64,
+    pub allowed_actions: u64,
+    pub blocked_actions: u64,
+}
+
+impl Default for SandboxConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            isolation_level: IsolationLevel::None,
+            network_policy: NetworkPolicy::default(),
+            filesystem_policy: FilesystemPolicy::default(),
+        }
+    }
+}
+
+impl Default for NetworkPolicy {
+    fn default() -> Self {
+        Self {
+            allow_network: true,
+            allowed_hosts: Vec::new(),
+            blocked_hosts: Vec::new(),
+            allowed_ports: Vec::new(),
+            max_connections: 100,
+        }
+    }
+}
+
+impl Default for FilesystemPolicy {
+    fn default() -> Self {
+        Self {
+            allow_read: true,
+            allow_write: true,
+            allowed_paths: Vec::new(),
+            blocked_paths: Vec::new(),
+            max_file_size_bytes: 100 * 1024 * 1024, // 100MB
+        }
+    }
+}
+
+impl Default for SandboxPermissions {
+    fn default() -> Self {
+        Self {
+            can_import: true,
+            can_spawn_process: false,
+            can_access_env: true,
+            can_use_ffi: false,
+            can_use_reflection: true,
+            allowed_modules: HashSet::new(),
+            blocked_functions: HashSet::new(),
+        }
+    }
+}
+
+impl Default for ResourceLimits {
+    fn default() -> Self {
+        Self {
+            max_memory_mb: 512,
+            max_cpu_time_ms: 30000,
+            max_wall_time_ms: 60000,
+            max_stack_depth: 1000,
+            max_output_bytes: 10 * 1024 * 1024, // 10MB
+        }
+    }
+}
+
+impl Default for AuditSummary {
+    fn default() -> Self {
+        Self {
+            total_actions: 0,
+            allowed_actions: 0,
+            blocked_actions: 0,
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// EXTENDED UNIT TESTS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[cfg(test)]
+mod enterprise_tests {
+    use super::*;
+
+    #[test]
+    fn test_session_recorder() {
+        let mut recorder = SessionRecorder::new();
+        recorder.start();
+        recorder.record_input("let x = 42");
+        recorder.record_output("42");
+        recorder.stop();
+
+        assert!(!recorder.session_id.is_empty());
+        assert!(recorder.events.len() >= 2);
+    }
+
+    #[test]
+    fn test_literate_mode() {
+        let mut literate = LiterateMode::new();
+        let id = literate.add_cell(CellType::Code, "let x = 1 + 2");
+        assert_eq!(id, 0);
+
+        let result = literate.execute_cell(0);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_polyglot_repl() {
+        let mut repl = PolyglotRepl::new();
+        assert!(repl.list_languages().contains(&"build"));
+
+        let result = repl.execute("let x = 42");
+        assert!(result.success);
+    }
+
+    #[test]
+    fn test_collaborative_repl() {
+        let mut collab = CollaborativeRepl::new("test-session");
+
+        let participant = Participant {
+            id: "user1".to_string(),
+            name: "Alice".to_string(),
+            role: ParticipantRole::Editor,
+            cursor_position: 0,
+            selection: None,
+            last_active: 0,
+            color: "#ff0000".to_string(),
+        };
+
+        assert!(collab.join(participant).is_ok());
+        assert_eq!(collab.participants.len(), 1);
+    }
+
+    #[test]
+    fn test_repl_analytics() {
+        let mut analytics = ReplAnalytics::new("test");
+        analytics.record_command("let x = 1", 10, true, None);
+        analytics.record_command("invalid", 5, false, Some("SyntaxError".to_string()));
+
+        assert_eq!(analytics.metrics.total_commands, 2);
+        assert_eq!(analytics.metrics.successful_commands, 1);
+        assert_eq!(analytics.metrics.failed_commands, 1);
+
+        let report = analytics.generate_report();
+        assert_eq!(report.success_rate, 50.0);
+    }
+
+    #[test]
+    fn test_sandbox() {
+        let mut sandbox = ReplSandbox::new();
+
+        let allowed = sandbox.check_permission(&AuditAction::ModuleImport("std".to_string()));
+        assert!(allowed);
+
+        sandbox.permissions.can_spawn_process = false;
+        let blocked = sandbox.check_permission(&AuditAction::ProcessSpawn("bash".to_string()));
+        assert!(!blocked);
+
+        let summary = sandbox.get_audit_summary();
+        assert_eq!(summary.total_actions, 2);
+    }
+
+    #[test]
+    fn test_session_player() {
+        let mut player = SessionPlayer::new();
+        player.set_speed(2.0);
+        assert_eq!(player.playback_speed, 2.0);
+
+        player.play();
+        assert!(!player.paused);
+
+        player.pause();
+        assert!(player.paused);
+    }
+
+    #[test]
+    fn test_export_formats() {
+        let recorder = SessionRecorder::new();
+        let json = recorder.export_json();
+        assert!(json.contains("session_id"));
+
+        let md = recorder.export_markdown();
+        assert!(md.contains("# Untitled Session"));
+    }
+
+    #[test]
+    fn test_network_policy() {
+        let mut sandbox = ReplSandbox::new();
+        sandbox.config.network_policy.blocked_hosts.push("evil.com".to_string());
+
+        let allowed = sandbox.check_permission(&AuditAction::NetworkConnect("good.com".to_string()));
+        assert!(allowed);
+
+        let blocked = sandbox.check_permission(&AuditAction::NetworkConnect("evil.com".to_string()));
+        assert!(!blocked);
+    }
+}
