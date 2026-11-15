@@ -6123,6 +6123,22 @@ impl<'ctx> MirLowerer<'ctx> {
             // pass it directly to avoid double-indirection.
             let receiver_already_ptr = matches!(&receiver_ty, MirType::Ptr(_));
 
+            // The method takes `self` by value and the receiver is a
+            // reference (`p.clone()` with `p: &S` and a derived clone): the
+            // call gets the value the pointer leads to. Passing the pointer
+            // compiled to `S_clone(p)`, which the C compiler refused.
+            let self_by_value = self
+                .module
+                .find_function(&mangled_name)
+                .and_then(|f| f.sig.params.first())
+                .map(|p| !p.is_pointer())
+                .unwrap_or(false)
+                || self.derived_clone_fns.contains(&mangled_name);
+            let by_value_pointee = match &receiver_ty {
+                MirType::Ptr(inner) if self_by_value && !self_is_ref => Some((**inner).clone()),
+                _ => None,
+            };
+
             // A receiver that is a field, an element or a mutable global is
             // borrowed where it lives; a borrow of the copy in `receiver_val`
             // lost every write the method made (`o.c.inc()`, `TB.inc()`).
@@ -6147,6 +6163,17 @@ impl<'ctx> MirLowerer<'ctx> {
                 let ref_local = builder.create_local(MirType::Ptr(Box::new(receiver_ty.clone())));
                 builder.make_ref(ref_local, false, MirPlace::local(receiver_local));
                 values::local(ref_local)
+            } else if let Some(pointee_ty) = by_value_pointee {
+                let builder = self.current_fn.as_mut().unwrap();
+                let derefed = builder.create_local(pointee_ty.clone());
+                builder.assign(
+                    derefed,
+                    MirRValue::Deref {
+                        ptr: receiver_val,
+                        pointee_ty,
+                    },
+                );
+                values::local(derefed)
             } else {
                 receiver_val
             };
