@@ -31,6 +31,7 @@ mod stdlib_embed;
 mod symbol_graph;
 mod tool_receipt;
 mod tv_cli;
+mod use_merge;
 mod verify_cli;
 
 use clap::{Parser as ClapParser, Subcommand};
@@ -6331,6 +6332,7 @@ fn run_check_reporting(file: &Path, early: &mut Option<Diagnostic>) -> Result<Ch
         source_digest,
         ledger: input_digest_ledger,
         origins: None,
+        entry: Some(file.to_path_buf()),
     };
     run_check_unit(unit, early)
 }
@@ -6347,6 +6349,9 @@ struct CheckUnit<'a> {
     ledger: InputDigestLedger,
     /// For a package: the file and line each line of `source` came from.
     origins: Option<&'a buildlang::pkg::local::linemap::LineMap>,
+    /// The file being checked. A package has none: its joined text holds
+    /// every file already, so a `use` of a sibling file loads nothing.
+    entry: Option<PathBuf>,
 }
 
 /// Lex, parse and check one unit. Positions in the outcome are positions in
@@ -6359,6 +6364,7 @@ fn run_check_unit(unit: CheckUnit, early: &mut Option<Diagnostic>) -> Result<Che
         source_digest,
         ledger: mut input_digest_ledger,
         origins,
+        entry,
     } = unit;
     let chk_base = base.as_path();
     let unresolved = |early: &mut Option<Diagnostic>| {
@@ -6421,8 +6427,13 @@ fn run_check_unit(unit: CheckUnit, early: &mut Option<Diagnostic>) -> Result<Che
     let item_count = ast.items.len();
     let measured_constants = buildlang::types::measured::collect(&ast, source_file.source()).0;
 
-    resolve_modules_recording_inputs(&mut ast, chk_base, &mut input_digest_ledger)
-        .map_err(|_| unresolved(early))?;
+    resolve_modules_recording_inputs(
+        &mut ast,
+        chk_base,
+        entry.as_deref(),
+        &mut input_digest_ledger,
+    )
+    .map_err(|_| unresolved(early))?;
 
     let mut ctx = TypeContext::new();
     let mut checker = TypeChecker::new(&mut ctx);
@@ -7366,7 +7377,7 @@ fn cmd_build(
 
     // Resolve `mod foo;` declarations - load and merge external module files
     let source_dir = main_path.parent().unwrap_or(Path::new("."));
-    resolve_modules(&mut ast, source_dir)?;
+    resolve_modules(&mut ast, source_dir, Some(main_path.as_path()))?;
 
     // Type check
     let mut ctx = TypeContext::new();
@@ -8004,7 +8015,7 @@ fn compile_program_to_exe(
 
     // Resolve `mod foo;` declarations - load and merge external module files
     let source_dir = file.parent().unwrap_or(Path::new("."));
-    resolve_modules(&mut ast, source_dir)?;
+    resolve_modules(&mut ast, source_dir, Some(file))?;
 
     // Type check
     let mut ctx = TypeContext::new();
@@ -8260,7 +8271,7 @@ fn compile_program_to_rust_exe(file: &Path, rustc_path: &str) -> Result<Compiled
     report_parse_errors(file, &source_file, parser.errors())?;
 
     let source_dir = file.parent().unwrap_or(Path::new("."));
-    resolve_modules(&mut ast, source_dir)?;
+    resolve_modules(&mut ast, source_dir, Some(file))?;
 
     let mut ctx = TypeContext::new();
     let mut checker = TypeChecker::new(&mut ctx);
@@ -9206,7 +9217,7 @@ fn cmd_test(
             }
 
             let source_dir = build_file.parent().unwrap_or(Path::new("."));
-            let _ = resolve_modules(&mut ast, source_dir);
+            let _ = resolve_modules(&mut ast, source_dir, Some(build_file.as_path()));
 
             let mut ctx = TypeContext::new();
             let mut checker = TypeChecker::new(&mut ctx);
@@ -9334,7 +9345,7 @@ fn cmd_lint(file: &PathBuf) -> Result<(), i32> {
         let input = pkg_check::load(file).map_err(|_| 1)?;
         let shown = file.display().to_string();
         let base = file.join("src");
-        return lint_unit(&shown, &base, input.source, Some(&input.line_map));
+        return lint_unit(&shown, &base, None, input.source, Some(&input.line_map));
     }
     let source = std::fs::read_to_string(file).map_err(|e| {
         eprintln!("Error reading file '{}': {}", file.display(), e);
@@ -9344,7 +9355,13 @@ fn cmd_lint(file: &PathBuf) -> Result<(), i32> {
     let source = resolve_imports(&source, file)?;
     let base = file.parent().unwrap_or(Path::new("."));
     let source = preprocess_includes(&source, base)?;
-    lint_unit(&file.display().to_string(), base, source, None)
+    lint_unit(
+        &file.display().to_string(),
+        base,
+        Some(file.as_path()),
+        source,
+        None,
+    )
 }
 
 /// Lint one unit: a file, or the joined text of a package. With `origins`
@@ -9354,6 +9371,7 @@ fn cmd_lint(file: &PathBuf) -> Result<(), i32> {
 fn lint_unit(
     shown: &str,
     base: &Path,
+    entry: Option<&Path>,
     source: String,
     origins: Option<&buildlang::pkg::local::linemap::LineMap>,
 ) -> Result<(), i32> {
@@ -9386,7 +9404,7 @@ fn lint_unit(
         1
     })?;
 
-    resolve_modules(&mut ast, base)?;
+    resolve_modules(&mut ast, base, entry)?;
 
     // Type check
     let mut ctx = TypeContext::new();
@@ -9843,22 +9861,54 @@ fn find_stdlib_path() -> Option<PathBuf> {
     stdlib_embed::materialize()
 }
 
-fn resolve_modules(ast: &mut Module, source_dir: &Path) -> Result<(), i32> {
+/// Merge the module files of `ast` into it. `entry` is the file `ast` was
+/// parsed from. With an entry, a `use` of a module file loads that file too;
+/// without one (the joined text of a package, which already holds every file
+/// of the package) only `mod NAME;` loads a file.
+fn resolve_modules(ast: &mut Module, source_dir: &Path, entry: Option<&Path>) -> Result<(), i32> {
     let mut ledger = None;
     let mut visiting = HashSet::new();
-    let mut loaded = LoadedModules::default();
-    resolve_modules_with_prefix(ast, source_dir, "", &mut ledger, &mut visiting, &mut loaded)
+    let mut loaded = start_resolution(entry, &mut visiting);
+    resolve_modules_with_prefix(
+        ast,
+        source_dir,
+        "",
+        &mut ledger,
+        &mut visiting,
+        &mut loaded,
+        true,
+    )
 }
 
 fn resolve_modules_recording_inputs(
     ast: &mut Module,
     source_dir: &Path,
+    entry: Option<&Path>,
     ledger: &mut InputDigestLedger,
 ) -> Result<(), i32> {
     let mut ledger = Some(ledger);
     let mut visiting = HashSet::new();
+    let mut loaded = start_resolution(entry, &mut visiting);
+    resolve_modules_with_prefix(
+        ast,
+        source_dir,
+        "",
+        &mut ledger,
+        &mut visiting,
+        &mut loaded,
+        true,
+    )
+}
+
+/// The entry file is on the resolution stack from the start, so an import
+/// that leads back to it is never merged into itself.
+fn start_resolution(entry: Option<&Path>, visiting: &mut HashSet<PathBuf>) -> LoadedModules {
     let mut loaded = LoadedModules::default();
-    resolve_modules_with_prefix(ast, source_dir, "", &mut ledger, &mut visiting, &mut loaded)
+    if let Some(entry) = entry {
+        visiting.insert(std::fs::canonicalize(entry).unwrap_or_else(|_| entry.to_path_buf()));
+        loaded.merge_uses = true;
+    }
+    loaded
 }
 
 /// Every module file merged so far, by canonical path, and every function
@@ -9876,6 +9926,30 @@ struct LoadedModules {
     /// Function names that are already final (`geom_area`). A parent module
     /// that merges them again must not prefix them a second time.
     final_names: HashSet<String>,
+    /// Whether a `use` of a module file loads the file.
+    merge_uses: bool,
+}
+
+/// What asked for a module file.
+enum ModuleAsk {
+    /// `mod NAME;`: every function of the module is callable by its bare name.
+    Mod,
+    /// `use` paths: the names they import are callable.
+    Use {
+        glob: bool,
+        /// `(item, local name)`.
+        names: Vec<(String, String)>,
+    },
+}
+
+/// One module file to merge.
+struct ModuleLoad {
+    name: String,
+    file: PathBuf,
+    sub_source_dir: PathBuf,
+    full_prefix: String,
+    child_prefix: String,
+    ask: ModuleAsk,
 }
 
 /// Resolve modules with a prefix for nested module support.
@@ -9897,6 +9971,7 @@ fn resolve_modules_with_prefix(
     ledger: &mut Option<&mut InputDigestLedger>,
     visiting: &mut HashSet<PathBuf>,
     loaded: &mut LoadedModules,
+    is_entry: bool,
 ) -> Result<(), i32> {
     // Collect module names from `mod foo;` declarations (content == None).
     //
@@ -9918,14 +9993,7 @@ fn resolve_modules_with_prefix(
         })
         .collect();
 
-    if mod_names.is_empty() {
-        return Ok(());
-    }
-
-    let mut new_items: Vec<ast::Item> = Vec::new();
-    // Bare function name to its final name, for every module this file declares.
-    let mut imported_fns: HashMap<String, String> = HashMap::new();
-
+    let mut loads: Vec<ModuleLoad> = Vec::new();
     for mod_name in &mod_names {
         // Look for foo.bld or foo/mod.bld
         let mod_file = source_dir.join(format!("{}.bld", mod_name));
@@ -9941,7 +10009,7 @@ fn resolve_modules_with_prefix(
         } else {
             format!("{}_{}", prefix, mod_name)
         };
-        let (actual_file, sub_source_dir, full_prefix, child_prefix) = if mod_file.exists() {
+        let (file, sub_source_dir, full_prefix, child_prefix) = if mod_file.exists() {
             (
                 mod_file,
                 source_dir.to_path_buf(),
@@ -9969,178 +10037,324 @@ fn resolve_modules_with_prefix(
         } else {
             continue;
         };
+        loads.push(ModuleLoad {
+            name: mod_name.clone(),
+            file,
+            sub_source_dir,
+            full_prefix,
+            child_prefix,
+            ask: ModuleAsk::Mod,
+        });
+    }
 
-        // Fail-closed cycle guard: if this module file is already on the
-        // resolution stack, a `mod` import cycle (a->b->a, or a file importing
-        // itself) would recurse forever. Emit a diagnostic instead of hanging.
+    // A `use` of a module file loads the file, as `mod` does.
+    let mut satisfied_uses: Vec<usize> = Vec::new();
+    if loaded.merge_uses {
+        let stdlib = find_stdlib_path();
+        let found = use_merge::collect(ast, source_dir, stdlib.as_deref());
+        satisfied_uses = found.satisfied_items;
+        for request in found.requests {
+            loads.push(ModuleLoad {
+                name: request.name,
+                file: request.file,
+                sub_source_dir: request.sub_source_dir,
+                full_prefix: request.full_prefix,
+                child_prefix: request.child_prefix,
+                ask: ModuleAsk::Use {
+                    glob: request.glob,
+                    names: request.names,
+                },
+            });
+        }
+    }
+
+    if loads.is_empty() {
+        return Ok(());
+    }
+
+    // Functions this file defines itself. A name imported by `use` never
+    // replaces one of them.
+    let own_fn_names: HashSet<String> = ast
+        .items
+        .iter()
+        .filter_map(|item| match &item.kind {
+            ItemKind::Function(f) => Some(f.name.name.to_string()),
+            _ => None,
+        })
+        .collect();
+
+    let mut new_items: Vec<ast::Item> = Vec::new();
+    // Bare function name to its final name, for every module this file declares.
+    let mut imported_fns: HashMap<String, String> = HashMap::new();
+    let mut every_use_merged = true;
+
+    for load in &loads {
         // Canonicalize so the same file reached by two spellings compares equal.
-        let module_key =
-            std::fs::canonicalize(&actual_file).unwrap_or_else(|_| actual_file.clone());
-        if !visiting.insert(module_key.clone()) {
+        let module_key = std::fs::canonicalize(&load.file).unwrap_or_else(|_| load.file.clone());
+        if visiting.contains(&module_key) {
+            if matches!(load.ask, ModuleAsk::Use { .. }) {
+                // Two files that import each other, or a file that imports
+                // from itself: the file is being merged further up the stack
+                // and is not merged a second time.
+                every_use_merged = false;
+                continue;
+            }
+            // Fail-closed cycle guard: a `mod` import cycle (a->b->a, or a
+            // file importing itself) would recurse forever.
             eprintln!(
                 "error: module import cycle detected at '{}' (module '{}' is already being resolved)",
-                actual_file.display(),
-                mod_name
+                load.file.display(),
+                load.name
             );
             return Err(1);
         }
 
         // Merged already, by this file or another: only the names are new here.
-        if let Some((merged_prefix, fns)) = loaded.files.get(&module_key) {
-            for bare in fns {
-                imported_fns.insert(bare.clone(), format!("{}_{}", merged_prefix, bare));
+        let (merged_prefix, fns) = match loaded.files.get(&module_key) {
+            Some(merged) => merged.clone(),
+            None => {
+                let fns =
+                    merge_module_file(load, &module_key, ledger, visiting, loaded, &mut new_items)?;
+                (load.full_prefix.clone(), fns)
             }
-            visiting.remove(&module_key);
-            continue;
-        }
-
-        // Read and parse the module file
-        let mod_bytes = std::fs::read(&actual_file).map_err(|e| {
-            eprintln!(
-                "Error reading module file '{}': {}",
-                actual_file.display(),
-                e
-            );
-            1
-        })?;
-        if let Some(ledger) = ledger.as_deref_mut() {
-            ledger.record("module", &actual_file, &mod_bytes);
-        }
-        let mod_source = String::from_utf8(mod_bytes).map_err(|e| {
-            eprintln!(
-                "Error reading module file '{}': {}",
-                actual_file.display(),
-                e
-            );
-            1
-        })?;
-
-        let mod_source_file = SourceFile::new(actual_file.to_string_lossy(), mod_source);
-        let mut mod_lexer = Lexer::new(&mod_source_file);
-        let mod_tokens = mod_lexer.tokenize().map_err(|e| {
-            eprintln!("Lexer error in module '{}': {}", mod_name, e);
-            1
-        })?;
-
-        let mut mod_parser = Parser::new(&mod_source_file, mod_tokens);
-        let mut mod_ast = mod_parser.parse().map_err(|e| {
-            eprintln!("Parse error in module '{}': {}", mod_name, e);
-            for err in mod_parser.errors() {
-                eprintln!("  {}", err);
+        };
+        match &load.ask {
+            ModuleAsk::Mod => {
+                for bare in &fns {
+                    imported_fns.insert(bare.clone(), format!("{}_{}", merged_prefix, bare));
+                }
             }
-            1
-        })?;
-        report_parse_errors(&actual_file, &mod_source_file, mod_parser.errors())?;
-
-        // Recursively resolve sub-modules within this module
-        resolve_modules_with_prefix(
-            &mut mod_ast,
-            &sub_source_dir,
-            &child_prefix,
-            ledger,
-            visiting,
-            loaded,
-        )?;
-        // Done with this module's subtree; drop it from the stack so a sibling
-        // branch may legitimately include the same module again (a diamond is
-        // not a cycle).
-        visiting.remove(&module_key);
-
-        // Collect names defined in this module (for intra-module rewriting).
-        // Functions merged in from the module's own sub-modules carry their
-        // final names already and are left as they are.
-        let mod_defined: std::collections::HashSet<String> = mod_ast
-            .items
-            .iter()
-            .filter_map(|item| match &item.kind {
-                ItemKind::Function(f) if !loaded.final_names.contains(f.name.name.as_ref()) => {
-                    Some(f.name.name.to_string())
-                }
-                _ => None,
-            })
-            .collect();
-        let mut own_fns: Vec<String> = mod_defined.iter().cloned().collect();
-        own_fns.sort();
-        for bare in &own_fns {
-            let final_name = format!("{}_{}", full_prefix, bare);
-            imported_fns.insert(bare.clone(), final_name.clone());
-            loaded.final_names.insert(final_name);
-        }
-        loaded
-            .files
-            .insert(module_key.clone(), (full_prefix.clone(), own_fns));
-
-        // Merge module items with name prefixing.
-        // Functions are prefixed: `add` → `math_helpers_add`
-        // This matches how lower_path joins path segments with `_`:
-        // `math_helpers::add(...)` emits a call to `math_helpers_add`.
-        for item in mod_ast.items {
-            match item.kind {
-                ItemKind::Function(f) if !mod_defined.contains(f.name.name.as_ref()) => {
-                    // A sub-module's function: named and rewritten already.
-                    new_items.push(ast::Item::new(
-                        ItemKind::Function(f),
-                        Visibility::default(),
-                        Vec::new(),
-                        Span::dummy(),
-                    ));
-                }
-                ItemKind::Function(f) => {
-                    let mut prefixed_fn = *f;
-                    let original_name = prefixed_fn.name.name.to_string();
-                    prefixed_fn.name = ast::Ident {
-                        name: Arc::from(format!("{}_{}", full_prefix, original_name)),
-                        span: prefixed_fn.name.span,
-                    };
-                    // Rewrite intra-module calls in the function body:
-                    // if this function calls `helper()` and `helper` is defined
-                    // in the same module, rewrite to `math_helpers_helper()`.
-                    // Seed the shadow scope with this function's parameter names
-                    // first so a parameter shadowing a sibling module function is
-                    // not rewritten.
-                    let mut param_names = HashSet::new();
-                    for p in &prefixed_fn.sig.params {
-                        collect_pattern_names(&p.pattern, &mut param_names);
+            ModuleAsk::Use { glob, names } => {
+                if *glob {
+                    for bare in &fns {
+                        if !own_fn_names.contains(bare) {
+                            imported_fns
+                                .insert(bare.clone(), format!("{}_{}", merged_prefix, bare));
+                        }
                     }
-                    if let Some(ref mut body) = prefixed_fn.body {
-                        rewrite_intra_module_calls(body, &mod_defined, &full_prefix, param_names);
+                }
+                for (item, local_name) in names {
+                    if fns.contains(item) && !own_fn_names.contains(local_name) {
+                        imported_fns
+                            .insert(local_name.clone(), format!("{}_{}", merged_prefix, item));
                     }
-                    new_items.push(ast::Item::new(
-                        ItemKind::Function(Box::new(prefixed_fn)),
-                        Visibility::default(),
-                        Vec::new(),
-                        Span::dummy(),
-                    ));
-                }
-                ItemKind::Struct(_) | ItemKind::Enum(_) | ItemKind::Impl(_) => {
-                    new_items.push(item);
-                }
-                _ => {
-                    new_items.push(item);
                 }
             }
+        }
+    }
+
+    // A module file's `use` lines that named merged files have done their
+    // work. Left in, the checker would look their paths up again from the
+    // folder of the file that imports the module.
+    if !is_entry && every_use_merged {
+        for index in satisfied_uses.iter().rev() {
+            ast.items.remove(*index);
         }
     }
 
     // Append module items to the main AST
     ast.items.extend(new_items);
 
-    // Rewrite calls in the main program's existing functions to use prefixed names
+    // Rewrite calls in the main program's existing functions and methods to
+    // use prefixed names
     if !imported_fns.is_empty() {
         for item in &mut ast.items {
-            if let ItemKind::Function(f) = &mut item.kind {
-                let mut param_names = HashSet::new();
-                for p in &f.sig.params {
-                    collect_pattern_names(&p.pattern, &mut param_names);
+            match &mut item.kind {
+                ItemKind::Function(f) => {
+                    let mut param_names = HashSet::new();
+                    for p in &f.sig.params {
+                        collect_pattern_names(&p.pattern, &mut param_names);
+                    }
+                    if let Some(ref mut body) = f.body {
+                        rewrite_imported_calls(body, &imported_fns, param_names);
+                    }
                 }
-                if let Some(ref mut body) = f.body {
-                    rewrite_imported_calls(body, &imported_fns, param_names);
+                ItemKind::Impl(imp) => {
+                    for_each_method_body(
+                        imp,
+                        &mut |body: &mut ast::Block, param_names: HashSet<Arc<str>>| {
+                            rewrite_imported_calls(body, &imported_fns, param_names);
+                        },
+                    );
                 }
+                _ => {}
             }
         }
     }
 
     Ok(())
+}
+
+/// Call `visit` with the body and the parameter names of every method of an
+/// impl block.
+fn for_each_method_body(
+    imp: &mut ast::ImplDef,
+    visit: &mut dyn FnMut(&mut ast::Block, HashSet<Arc<str>>),
+) {
+    for impl_item in &mut imp.items {
+        if let ast::ImplItemKind::Function(f) = &mut impl_item.kind {
+            let mut param_names = HashSet::new();
+            for p in &f.sig.params {
+                collect_pattern_names(&p.pattern, &mut param_names);
+            }
+            if let Some(ref mut body) = f.body {
+                visit(&mut **body, param_names);
+            }
+        }
+    }
+}
+
+/// Read, parse and merge one module file into `new_items`. Returns the bare
+/// names of the functions the module defines.
+fn merge_module_file(
+    load: &ModuleLoad,
+    module_key: &Path,
+    ledger: &mut Option<&mut InputDigestLedger>,
+    visiting: &mut HashSet<PathBuf>,
+    loaded: &mut LoadedModules,
+    new_items: &mut Vec<ast::Item>,
+) -> Result<Vec<String>, i32> {
+    let actual_file = &load.file;
+    let mod_name = &load.name;
+    let full_prefix = &load.full_prefix;
+    visiting.insert(module_key.to_path_buf());
+
+    // Read and parse the module file
+    let mod_bytes = std::fs::read(actual_file).map_err(|e| {
+        eprintln!(
+            "Error reading module file '{}': {}",
+            actual_file.display(),
+            e
+        );
+        1
+    })?;
+    if let Some(ledger) = ledger.as_deref_mut() {
+        ledger.record("module", actual_file, &mod_bytes);
+    }
+    let mod_source = String::from_utf8(mod_bytes).map_err(|e| {
+        eprintln!(
+            "Error reading module file '{}': {}",
+            actual_file.display(),
+            e
+        );
+        1
+    })?;
+
+    let mod_source_file = SourceFile::new(actual_file.to_string_lossy(), mod_source);
+    let mut mod_lexer = Lexer::new(&mod_source_file);
+    let mod_tokens = mod_lexer.tokenize().map_err(|e| {
+        eprintln!("Lexer error in module '{}': {}", mod_name, e);
+        1
+    })?;
+
+    let mut mod_parser = Parser::new(&mod_source_file, mod_tokens);
+    let mut mod_ast = mod_parser.parse().map_err(|e| {
+        eprintln!("Parse error in module '{}': {}", mod_name, e);
+        for err in mod_parser.errors() {
+            eprintln!("  {}", err);
+        }
+        1
+    })?;
+    report_parse_errors(actual_file, &mod_source_file, mod_parser.errors())?;
+
+    // Recursively resolve sub-modules within this module
+    resolve_modules_with_prefix(
+        &mut mod_ast,
+        &load.sub_source_dir,
+        &load.child_prefix,
+        ledger,
+        visiting,
+        loaded,
+        false,
+    )?;
+    // Done with this module's subtree; drop it from the stack so a sibling
+    // branch may legitimately include the same module again (a diamond is
+    // not a cycle).
+    visiting.remove(module_key);
+
+    // Collect names defined in this module (for intra-module rewriting).
+    // Functions merged in from the module's own sub-modules carry their
+    // final names already and are left as they are.
+    let mod_defined: std::collections::HashSet<String> = mod_ast
+        .items
+        .iter()
+        .filter_map(|item| match &item.kind {
+            ItemKind::Function(f) if !loaded.final_names.contains(f.name.name.as_ref()) => {
+                Some(f.name.name.to_string())
+            }
+            _ => None,
+        })
+        .collect();
+    let mut own_fns: Vec<String> = mod_defined.iter().cloned().collect();
+    own_fns.sort();
+    for bare in &own_fns {
+        loaded
+            .final_names
+            .insert(format!("{}_{}", full_prefix, bare));
+    }
+    loaded.files.insert(
+        module_key.to_path_buf(),
+        (full_prefix.clone(), own_fns.clone()),
+    );
+
+    // Merge module items with name prefixing.
+    // Functions are prefixed: `add` → `math_helpers_add`
+    // This matches how lower_path joins path segments with `_`:
+    // `math_helpers::add(...)` emits a call to `math_helpers_add`.
+    for mut item in mod_ast.items {
+        // A method that calls a function of its own module by bare name
+        // reaches the prefixed function, as a function of the module does.
+        if let ItemKind::Impl(imp) = &mut item.kind {
+            for_each_method_body(
+                imp,
+                &mut |body: &mut ast::Block, param_names: HashSet<Arc<str>>| {
+                    rewrite_intra_module_calls(body, &mod_defined, full_prefix, param_names);
+                },
+            );
+        }
+        match item.kind {
+            ItemKind::Function(f) if !mod_defined.contains(f.name.name.as_ref()) => {
+                // A sub-module's function: named and rewritten already.
+                new_items.push(ast::Item::new(
+                    ItemKind::Function(f),
+                    Visibility::default(),
+                    Vec::new(),
+                    Span::dummy(),
+                ));
+            }
+            ItemKind::Function(f) => {
+                let mut prefixed_fn = *f;
+                let original_name = prefixed_fn.name.name.to_string();
+                prefixed_fn.name = ast::Ident {
+                    name: Arc::from(format!("{}_{}", full_prefix, original_name)),
+                    span: prefixed_fn.name.span,
+                };
+                // Rewrite intra-module calls in the function body:
+                // if this function calls `helper()` and `helper` is defined
+                // in the same module, rewrite to `math_helpers_helper()`.
+                // Seed the shadow scope with this function's parameter names
+                // first so a parameter shadowing a sibling module function is
+                // not rewritten.
+                let mut param_names = HashSet::new();
+                for p in &prefixed_fn.sig.params {
+                    collect_pattern_names(&p.pattern, &mut param_names);
+                }
+                if let Some(ref mut body) = prefixed_fn.body {
+                    rewrite_intra_module_calls(body, &mod_defined, full_prefix, param_names);
+                }
+                new_items.push(ast::Item::new(
+                    ItemKind::Function(Box::new(prefixed_fn)),
+                    Visibility::default(),
+                    Vec::new(),
+                    Span::dummy(),
+                ));
+            }
+            _ => {
+                new_items.push(item);
+            }
+        }
+    }
+    Ok(own_fns)
 }
 
 /// Names bound by a pattern (function params, `let`, closure params, loop and
@@ -10598,7 +10812,7 @@ fn cmd_compile(
 
     // Resolve `mod foo;` declarations - load and merge external module files
     let source_dir = input.parent().unwrap_or(Path::new("."));
-    resolve_modules(&mut ast, source_dir)?;
+    resolve_modules(&mut ast, source_dir, Some(input.as_path()))?;
 
     // Type check
     let mut ctx = TypeContext::new();

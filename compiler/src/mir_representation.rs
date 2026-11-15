@@ -1873,14 +1873,18 @@ pub(crate) fn lower_program_to_mir(program_path: &Path) -> Result<LoweredMirProg
             program_path.display()
         ));
     }
-    resolve_modules_recording_inputs(&mut ast, base_dir, &mut input_digest_ledger).map_err(
-        |_| {
-            format!(
-                "mir representation failed to resolve modules for {}",
-                program_path.display()
-            )
-        },
-    )?;
+    resolve_modules_recording_inputs(
+        &mut ast,
+        base_dir,
+        Some(program_path),
+        &mut input_digest_ledger,
+    )
+    .map_err(|_| {
+        format!(
+            "mir representation failed to resolve modules for {}",
+            program_path.display()
+        )
+    })?;
 
     let mut ctx = TypeContext::new();
     let mut checker = TypeChecker::new(&mut ctx);
