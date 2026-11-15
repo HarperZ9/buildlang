@@ -6008,7 +6008,22 @@ impl<'ctx> TypeInfer<'ctx> {
             }
             "is_empty" => return Ty::bool(),
             "contains" | "starts_with" | "ends_with" => return Ty::bool(),
-            "clone" | "copy" => return receiver_ty.clone(),
+            "clone" | "copy" => {
+                // `.clone()` through a reference to a struct that derives
+                // Clone gives the struct. Typing it as the reference made
+                // `let mut q = p.clone(); q = q.step(&q);` fail with
+                // "expected `S`, found `&S`".
+                if method_name == "clone" {
+                    if let TyKind::Ref(_, _, inner) = &receiver_ty.kind {
+                        if let TyKind::Adt(def_id, _) = &inner.kind {
+                            if self.ctx.derives_clone(*def_id) {
+                                return inner.as_ref().clone();
+                            }
+                        }
+                    }
+                }
+                return receiver_ty.clone();
+            }
             "to_string" | "to_owned" | "to_json" => return Ty::str(),
             "as_str" | "as_ref" => return Ty::str(),
             "parse_int" => return Ty::int(IntTy::I64),

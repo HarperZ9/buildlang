@@ -1,0 +1,52 @@
+// `.clone()` through a reference to a struct that derives Clone gives the
+// struct. Two halves: the checker types `p.clone()` as `S` (it was `&S`, so
+// `q = q.step(&q)` was refused), and the C call passes the value the
+// reference leads to (it passed the pointer, which the C compiler refused).
+
+#[derive(Clone)]
+struct S {
+    a: i32,
+}
+
+impl S {
+    fn step(&self, other: &S) -> S {
+        S { a: self.a + other.a }
+    }
+}
+
+// The clone is declared before the struct it clones is lowered.
+fn early(p: &Late) -> Late {
+    p.clone()
+}
+
+#[derive(Clone)]
+struct Late {
+    n: i64,
+}
+
+fn advance(p: &S, n: i32) -> S {
+    let mut q = p.clone();
+    let mut i = 0;
+    while i < n {
+        q = q.step(&q);
+        i = i + 1;
+    }
+    q
+}
+
+fn annotated(p: &S) -> i32 {
+    let q: S = p.clone();
+    q.a + 1
+}
+
+fn main() ~ Console {
+    let s = S { a: 1 };
+    let t = advance(&s, 3);
+    println!("{} {}", s.a, t.a);
+    println!("{}", annotated(&t));
+    let l = Late { n: 7 };
+    let m = early(&l);
+    println!("{} {}", l.n, m.n);
+    let u = s.clone();
+    println!("{}", u.a);
+}
