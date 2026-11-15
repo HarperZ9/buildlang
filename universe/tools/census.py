@@ -3,28 +3,37 @@
 
     python3 universe/tools/census.py <path to buildc> [--out DIR] [--max-steps N] [file ...]
 
-`buildc check` lists every type error of a file, but only the FIRST refusal of the C
-backend (BL0901). A file that shows one error can hide a chain of them, so "files whose
-only error is X" cannot be read from one run. This script makes the chain visible.
+One run of `buildc check` does not show everything a file holds. An unresolved import
+(BL0611) hides the type errors of the code that uses the name. Type errors hide the C
+backend gate, which runs only on a file with none. The gate (BL0901) reports only its
+first refusal. So "files whose only error is X" cannot be read from one run, and a
+fix chosen from first errors alone can turn no file green.
 
-For each failing file it checks a scratch copy written beside the file. While the first
-diagnostic is a BL0901 with a line, it replaces the body of the function around that line
-with `{ loop { } }` and checks again. The stub is a measuring device, not a repair: it
-answers "what else does the compiler refuse in this file", nothing more.
+This script walks past each layer on a scratch copy written beside the file:
 
-Per file it reports the stage, the number of functions stubbed, the refusals seen on the
-way (as classes: names and numbers blanked), and where the walk ended:
+  * an unresolved `use` name is taken out of its `use` statement;
+  * a diagnostic inside a function body replaces that body with `{ loop { } }`;
 
-    PASS      nothing else is refused once those functions are out of the way
-    TYPES     type errors (the checker lists all of them; each is in the diagnostics table)
-    NOLINE    a backend refusal with no line, usually functions the program calls that
-              no C function stands behind (the names are in the detail column)
-    ITEM      a backend refusal on a line outside any function body (a `const`, a field)
-    PARSE, LEX, TIMEOUT, LIMIT (more than --max-steps functions stubbed)
+and checks again, until the copy passes or nothing more can be taken out. The edits are
+a measuring device, not a repair. They answer one question: what does the compiler
+refuse in this file, in total?
 
-Two tables go to stdout between marker lines, tab-separated, and to DIR when --out is
-given: `census.tsv` (one row per file) and `diagnostics.tsv` (one row per diagnostic).
-The script never changes a tracked file and removes every scratch copy it writes.
+Per file it reports the stage, the number of walk steps, the unresolved import names
+taken out, the functions stubbed, the diagnostics seen by code, and where the walk ended:
+
+    PASS      the copy passes once those names and functions are out of the way: the
+              diagnostics listed for the file are everything that stands between it
+              and green
+    ITEM      a diagnostic on a line outside any function body (a `const`, a field
+              type, an `impl` header) stops the walk
+    NOLINE    a refusal with no line, usually functions the program calls that have
+              no C function behind them (the names are in the detail column)
+    PARSE, LEX, TIMEOUT, LIMIT (more than --max-steps steps)
+
+Two tab-separated tables go to stdout between marker lines, and to DIR when --out is
+given: `census.tsv` (one row per file) and `diagnostics.tsv` (one row per diagnostic,
+with the walk step it appeared in). The script never changes a tracked file and removes
+every scratch copy it writes.
 """
 import argparse
 import os
@@ -40,7 +49,9 @@ DIAG_LEX = re.compile(r"^Lexer error \[(BL\d+)\]:? (.*)$")
 FN_HEAD = re.compile(
     r"^\s*(pub(\([a-z]+\))?\s+)?((const|async|unsafe|extern\s+\"C\")\s+)*fn\s+\w+"
 )
+UNRESOLVED = re.compile(r"^unresolved import `([^`]+)`")
 SCRATCH = "__census.bld"
+STUB = "{ loop { } }"
 
 
 def run_check(buildc, rel):
@@ -59,11 +70,7 @@ def run_check(buildc, rel):
     out = proc.stdout + proc.stderr
     diags = []
     for line in out.splitlines():
-        m = DIAG.match(line)
-        if m:
-            diags.append((int(m.group(1)), m.group(3), m.group(4).strip()))
-            continue
-        m = DIAG_PARSE.match(line)
+        m = DIAG.match(line) or DIAG_PARSE.match(line)
         if m:
             diags.append((int(m.group(1)), m.group(3), m.group(4).strip()))
             continue
@@ -81,16 +88,8 @@ def stage_of(out):
     return "lex"
 
 
-def klass(message):
-    """A diagnostic with its names and numbers blanked, so equal causes compare equal."""
-    message = re.sub(r"`[^`]*`", "`_`", message)
-    message = re.sub(r"\(also: [^)]*\)", "(also: _)", message)
-    message = re.sub(r"\d+", "N", message)
-    return message[:120]
-
-
 def blank_strings_and_comments(line, in_block):
-    """`line` with string contents and comments removed, keeping column positions."""
+    """`line` with string contents and comments blanked, keeping column positions."""
     out = []
     i, n = 0, len(line)
     while i < n:
@@ -117,7 +116,7 @@ def blank_strings_and_comments(line, in_block):
             while j < n and line[j] != '"':
                 j += 2 if line[j] == "\\" else 1
             j = min(j + 1, n)
-            out.append('"' + " " * (j - i - 2) + '"' if j - i >= 2 else " " * (j - i))
+            out.append(" " * (j - i))
             i = j
             continue
         if ch == "'":
@@ -132,19 +131,22 @@ def blank_strings_and_comments(line, in_block):
     return "".join(out), in_block
 
 
-def stub_function(lines, line_no):
-    """Replace the body of the function around 1-based `line_no`. False when there is none."""
-    clean = []
+def cleaned(lines):
+    out = []
     in_block = False
     for line in lines:
         text, in_block = blank_strings_and_comments(line, in_block)
-        clean.append(text)
-    head = line_no - 1
+        out.append(text)
+    return out
+
+
+def function_body(clean, line_no):
+    """(open_row, open_col, close_row, close_col) of the body around 1-based `line_no`."""
+    head = min(line_no - 1, len(clean) - 1)
     while head >= 0 and not FN_HEAD.match(clean[head]):
         head -= 1
     if head < 0:
-        return False
-    # The body opens at the first `{` outside parentheses and brackets.
+        return None
     depth = 0
     opened = None
     row = head
@@ -155,19 +157,18 @@ def stub_function(lines, line_no):
             elif ch in ")]":
                 depth -= 1
             elif ch == ";" and depth == 0:
-                return False  # a declaration without a body
+                return None  # a declaration without a body
             elif ch == "{" and depth == 0:
                 opened = (row, col)
                 break
         if opened is None:
             row += 1
     if opened is None:
-        return False
+        return None
     open_row, open_col = opened
     depth = 0
-    closed = None
     row, col = open_row, open_col
-    while row < len(clean) and closed is None:
+    while row < len(clean):
         text = clean[row]
         while col < len(text):
             if text[col] == "{":
@@ -175,26 +176,68 @@ def stub_function(lines, line_no):
             elif text[col] == "}":
                 depth -= 1
                 if depth == 0:
-                    closed = (row, col)
-                    break
+                    if head <= line_no - 1 <= row:
+                        return (open_row, open_col, row, col)
+                    return None
             col += 1
-        if closed is None:
-            row += 1
-            col = 0
-    if closed is None:
+        row += 1
+        col = 0
+    return None
+
+
+def stub_bodies(lines, bodies):
+    """Replace each body, last first so earlier positions stay valid."""
+    for open_row, open_col, close_row, close_col in sorted(set(bodies), reverse=True):
+        tail = lines[close_row][close_col + 1 :]
+        lines[open_row] = lines[open_row][:open_col] + STUB + tail
+        for row in range(open_row + 1, close_row + 1):
+            lines[row] = ""
+
+
+def drop_imports(lines, clean, line_no, paths):
+    """Take the unresolved `paths` out of the `use` statement that starts on `line_no`."""
+    first = line_no - 1
+    if first >= len(clean):
         return False
-    close_row, close_col = closed
-    if not open_row <= line_no - 1 <= close_row and not head <= line_no - 1 <= close_row:
+    if re.match(r"^\s*(pub\s+)?mod\s+\w+\s*;", clean[first]):
+        lines[first] = ""
+        return True
+    if not re.match(r"^\s*(pub(\([a-z]+\))?\s+)?use\b", clean[first]):
         return False
-    tail = lines[close_row][close_col + 1 :]
-    lines[open_row] = lines[open_row][:open_col] + "{ loop { } }" + tail
-    for row in range(open_row + 1, close_row + 1):
+    last = first
+    while last < len(clean) and ";" not in clean[last]:
+        last += 1
+    if last >= len(clean):
+        return False
+    statement = " ".join(clean[first : last + 1])
+    m = re.match(r"^(\s*(?:pub(?:\([a-z]+\))?\s+)?use\s+)([^{};]*)\{([^{}]*)\}\s*;(.*)$", statement)
+    replacement = ""
+    if m:
+        prefix, base, body, rest = m.groups()
+        leaves = {p.split("::")[-1] for p in paths}
+        kept = []
+        for item in body.split(","):
+            name = item.strip()
+            if not name:
+                continue
+            leaf = name.split(" as ")[0].strip().split("::")[-1]
+            whole = (base.strip() + name.split(" as ")[0].strip())
+            if leaf in leaves or whole in paths:
+                continue
+            kept.append(name)
+        # A path that names the module itself takes every item with it.
+        if base.strip().rstrip(":") in paths:
+            kept = []
+        if kept:
+            replacement = f"{prefix}{base}{{{', '.join(kept)}}};{rest}"
+    lines[first] = replacement
+    for row in range(first + 1, last + 1):
         lines[row] = ""
     return True
 
 
 def walk(buildc, rel, max_steps):
-    """Returns (stage, steps, terminal, detail, diagnostics rows)."""
+    """Returns (stage, steps, terminal, detail, imports out, functions stubbed, rows)."""
     source = os.path.join(HERE, rel)
     scratch_rel = rel[: -len(".bld")] + SCRATCH
     scratch = os.path.join(HERE, scratch_rel)
@@ -202,34 +245,66 @@ def walk(buildc, rel, max_steps):
         lines = fh.read().split("\n")
     rows = []
     stage = "types"
-    steps = 0
+    steps = imports = stubbed = 0
+
+    def done(terminal, detail=""):
+        return stage, steps, terminal, detail, imports, stubbed, rows
+
     try:
         while True:
             with open(scratch, "w", encoding="utf-8", newline="") as fh:
                 fh.write("\n".join(lines))
             code, diags, out = run_check(buildc, scratch_rel)
             if code == 0:
-                return stage, steps, "PASS", "", rows
+                return done("PASS")
             if code == 124:
-                return stage, steps, "TIMEOUT", "", rows
+                return done("TIMEOUT")
+            now = stage_of(out)
             if steps == 0:
-                stage = stage_of(out)
+                stage = now
             if not diags:
                 last = (out.strip().splitlines() or ["no output"])[-1]
-                return stage, steps, "NODIAG", last[:200], rows
-            line_no, bl, message = diags[0]
-            if bl != "BL0901":
-                kind = {"types": "TYPES", "parse": "PARSE", "lex": "LEX"}[stage_of(out)]
-                for d_line, d_code, d_message in diags:
-                    rows.append((rel, steps, d_line, d_code, d_message))
-                return stage, steps, kind, str(len(diags)), rows
-            rows.append((rel, steps, line_no, bl, message))
-            if line_no == 0:
-                return stage, steps, "NOLINE", message, rows
+                return done("NODIAG", last[:200])
+            for line_no, bl, message in diags:
+                rows.append((rel, steps, line_no, bl, message))
+            if now != "types":
+                return done("PARSE" if now == "parse" else "LEX", str(len(diags)))
             if steps >= max_steps:
-                return stage, steps, "LIMIT", "", rows
-            if not stub_function(lines, line_no):
-                return stage, steps, "ITEM", f"line {line_no}: {message}", rows
+                return done("LIMIT")
+
+            clean = cleaned(lines)
+            by_use = {}
+            bodies = []
+            outside = []
+            no_line = []
+            for line_no, bl, message in diags:
+                m = UNRESOLVED.match(message) if bl == "BL0611" else None
+                if line_no == 0:
+                    no_line.append(message)
+                elif m:
+                    by_use.setdefault(line_no, set()).add(m.group(1))
+                else:
+                    body = function_body(clean, line_no)
+                    if body is None:
+                        outside.append(f"line {line_no}: [{bl}] {message}")
+                    else:
+                        bodies.append(body)
+            changed = False
+            # Bodies first: dropping an import rewrites lines, which would move columns.
+            if bodies:
+                stub_bodies(lines, bodies)
+                stubbed += len(set(bodies))
+                changed = True
+            for line_no, paths in by_use.items():
+                if drop_imports(lines, clean, line_no, paths):
+                    imports += len(paths)
+                    changed = True
+                else:
+                    outside.append(f"line {line_no}: [BL0611] {sorted(paths)[0]}")
+            if not changed:
+                if outside:
+                    return done("ITEM", outside[0][:300])
+                return done("NOLINE", no_line[0][:600])
             steps += 1
     finally:
         if os.path.exists(scratch):
@@ -251,28 +326,27 @@ def main():
     ap.add_argument("buildc")
     ap.add_argument("files", nargs="*")
     ap.add_argument("--out")
-    ap.add_argument("--max-steps", type=int, default=60)
+    ap.add_argument("--max-steps", type=int, default=40)
     args = ap.parse_args()
     buildc = os.path.abspath(args.buildc)
     files = args.files or listed_files()
 
-    census = ["file\tstage\tstubbed\tterminal\tdetail\trefusal classes on the way"]
+    census = [
+        "file\tstage\tsteps\tterminal\tdetail\timports taken out\tfunctions stubbed\tdiagnostics by code"
+    ]
     table = ["file\tstep\tline\tcode\tmessage"]
     for rel in files:
-        stage, steps, terminal, detail, rows = walk(buildc, rel, args.max_steps)
+        stage, steps, terminal, detail, imports, stubbed, rows = walk(buildc, rel, args.max_steps)
         counts = {}
         for row in rows:
-            if row[3] == "BL0901" and row[2] != 0:
-                counts[klass(row[4])] = counts.get(klass(row[4]), 0) + 1
-        classes = " | ".join(
-            f"{n}x {k}" for k, n in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
-        )
+            counts[row[3]] = counts.get(row[3], 0) + 1
+        codes = " ".join(f"{k}:{n}" for k, n in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])))
         detail = detail.replace("\t", " ")
-        census.append(f"{rel}\t{stage}\t{steps}\t{terminal}\t{detail}\t{classes}")
+        census.append(f"{rel}\t{stage}\t{steps}\t{terminal}\t{detail}\t{imports}\t{stubbed}\t{codes}")
         for row in rows:
             message = row[4].replace("\t", " ")
             table.append(f"{row[0]}\t{row[1]}\t{row[2]}\t{row[3]}\t{message}")
-        print(f"{rel}: {stage}, {steps} stubbed, {terminal}", file=sys.stderr, flush=True)
+        print(f"{rel}: {stage}, {steps} steps, {terminal}", file=sys.stderr, flush=True)
 
     print("=== CENSUS BEGIN ===")
     print("\n".join(census))

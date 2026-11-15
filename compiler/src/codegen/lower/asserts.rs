@@ -68,14 +68,26 @@ pub(super) fn inner(tokens: &[ast::TokenTree]) -> &[ast::TokenTree] {
 }
 
 /// Split at top-level commas. A trailing comma adds no empty part.
+///
+/// The parser keeps a macro's arguments as a flat run of tokens: an inner
+/// `(`, `[` or `{` is a token, not a group. A comma between an opening and
+/// its closing delimiter belongs to that argument, so the depth is counted
+/// here. Before, `assert!(f(1, 2))` was cut at the comma inside the call and
+/// refused as "the arguments of `assert!` are not expressions: `f(1`".
 pub(super) fn split_commas(trees: &[ast::TokenTree]) -> Vec<&[ast::TokenTree]> {
     let mut parts = Vec::new();
     let mut start = 0usize;
+    let mut depth = 0usize;
     for (i, tree) in trees.iter().enumerate() {
         if let ast::TokenTree::Token(t) = tree {
-            if matches!(t.kind, TokenKind::Comma) {
-                parts.push(&trees[start..i]);
-                start = i + 1;
+            match &t.kind {
+                TokenKind::OpenDelim(_) => depth += 1,
+                TokenKind::CloseDelim(_) => depth = depth.saturating_sub(1),
+                TokenKind::Comma if depth == 0 => {
+                    parts.push(&trees[start..i]);
+                    start = i + 1;
+                }
+                _ => {}
             }
         }
     }
