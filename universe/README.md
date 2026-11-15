@@ -9,7 +9,7 @@ BuildLang modules and example programs for graphics, colour, finance and systems
 
 This tree moved here from the `HarperZ9/build-universe` repository on 2026-11-15 (its `main` at commit `1633fc3`). The compiler is in this repository under [`compiler/`](../compiler), and the Build suite is under [`suite/`](../suite). The compiler figures further down this page were recorded against an earlier compiler version.
 
-**What the current compiler accepts.** CI runs `buildc check` on every `.bld` file in this folder with the compiler of the same commit. With `buildc` 1.15.0 on CI, 73 of 267 files pass. The 194 that fail are listed one by one in [CHECK-FAILS.txt](CHECK-FAILS.txt) with the stage where each stops, and the job fails when that list stops being true. Run it yourself from the repository root:
+**What the current compiler accepts.** CI runs `buildc check` on every `.bld` file in this folder with the compiler of the same commit. With `buildc` 1.15.0 on CI, 75 of 267 files pass. The 192 that fail are listed one by one in [CHECK-FAILS.txt](CHECK-FAILS.txt) with the stage where each stops, and the job fails when that list stops being true. Run it yourself from the repository root:
 
 ```bash
 bash universe/check.sh compiler/target/release/buildc
