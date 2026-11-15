@@ -42,6 +42,7 @@ with the walk step it appeared in). The script never changes a tracked file and 
 every scratch copy it writes.
 """
 import argparse
+import concurrent.futures
 import os
 import re
 import subprocess
@@ -373,8 +374,9 @@ def main():
     ap.add_argument("files", nargs="*")
     ap.add_argument("--out")
     ap.add_argument("--max-steps", type=int, default=120)
-    ap.add_argument("--file-seconds", type=float, default=45.0, help="time budget for one file")
-    ap.add_argument("--total-seconds", type=float, default=600.0, help="time budget for the run")
+    ap.add_argument("--file-seconds", type=float, default=40.0, help="time budget for one file")
+    ap.add_argument("--jobs", type=int, default=os.cpu_count() or 2, help="walks at a time")
+    ap.add_argument("--total-seconds", type=float, default=690.0, help="time budget for the run")
     args = ap.parse_args()
     buildc = os.path.abspath(args.buildc)
     files = args.files or listed_files()
@@ -384,23 +386,30 @@ def main():
     ]
     table = ["file\tstep\tline\tcode\tmessage"]
     started = time.monotonic()
-    for rel in files:
+
+    def one(rel):
         if time.monotonic() - started > args.total_seconds:
+            return rel, None
+        return rel, walk(buildc, rel, args.max_steps, time.monotonic() + args.file_seconds)
+
+    # The walks are independent (each has its own scratch copy) and spend their time in
+    # `buildc`, so threads are enough. Results are written in the order of the list.
+    with concurrent.futures.ThreadPoolExecutor(max_workers=args.jobs) as pool:
+        results = list(pool.map(one, files))
+    for rel, result in results:
+        if result is None:
             census.append(f"{rel}	?	0	BUDGET	the run's time budget ended before this file	0	0	")
             continue
-        stage, steps, terminal, detail, imports, stubbed, rows = walk(
-            buildc, rel, args.max_steps, time.monotonic() + args.file_seconds
-        )
+        stage, steps, terminal, detail, imports, stubbed, rows = result
         counts = {}
         for row in rows:
             counts[row[3]] = counts.get(row[3], 0) + 1
         codes = " ".join(f"{k}:{n}" for k, n in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])))
-        detail = detail.replace("\t", " ")
-        census.append(f"{rel}\t{stage}\t{steps}\t{terminal}\t{detail}\t{imports}\t{stubbed}\t{codes}")
+        detail = detail.replace("	", " ")
+        census.append(f"{rel}	{stage}	{steps}	{terminal}	{detail}	{imports}	{stubbed}	{codes}")
         for row in rows:
-            message = row[4].replace("\t", " ")
-            table.append(f"{row[0]}\t{row[1]}\t{row[2]}\t{row[3]}\t{message}")
-        print(f"{rel}: {stage}, {steps} steps, {terminal}", file=sys.stderr, flush=True)
+            message = row[4].replace("	", " ")
+            table.append(f"{row[0]}	{row[1]}	{row[2]}	{row[3]}	{message}")
 
     print("=== CENSUS BEGIN ===")
     print("\n".join(census))
