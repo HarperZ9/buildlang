@@ -63,6 +63,12 @@ pub struct TypeContext {
     /// multiple types in different modules share the same name.
     inherent_methods: HashMap<(DefId, Arc<str>), TraitMethod>,
 
+    /// Operator implementations of user types: `(type, method)` to the type
+    /// of the right operand (`None` for unary minus) and the result type.
+    /// `impl Mul<f32> for Vec3 { fn mul(self, s: f32) -> Vec3 }` is stored
+    /// under `(Vec3, "mul")` as `(Some(f32), Vec3)`.
+    operator_methods: HashMap<(DefId, Arc<str>), (Option<Ty>, Ty)>,
+
     /// Type parameter trait bounds: param_name → [trait_name, ...].
     /// Populated when entering a generic function so that lookup_method can
     /// resolve trait methods on type parameters through their bounds.
@@ -362,6 +368,7 @@ impl TypeContext {
             linear_defs: HashSet::new(),
             current_self_ty: None,
             inherent_methods: HashMap::new(),
+            operator_methods: HashMap::new(),
             param_trait_bounds: HashMap::new(),
             module_bindings: HashMap::new(),
             derive_clone_types: std::collections::HashSet::new(),
@@ -901,6 +908,30 @@ impl TypeContext {
     // =========================================================================
     // MODULE BINDINGS
     // =========================================================================
+
+    /// Record an operator implementation of a user type. The first one of
+    /// a type and method stays: the C backend has one function per pair.
+    pub fn register_operator_method(
+        &mut self,
+        type_def_id: DefId,
+        method: Arc<str>,
+        rhs: Option<Ty>,
+        ret: Ty,
+    ) {
+        self.operator_methods
+            .entry((type_def_id, method))
+            .or_insert((rhs, ret));
+    }
+
+    /// The right operand type and the result type of an operator a user type
+    /// implements.
+    pub fn lookup_operator_method(
+        &self,
+        type_def_id: DefId,
+        method: &str,
+    ) -> Option<&(Option<Ty>, Ty)> {
+        self.operator_methods.get(&(type_def_id, Arc::from(method)))
+    }
 
     /// Record that the struct `name` is declared with `#[derive(Clone)]`.
     pub fn mark_derive_clone(&mut self, name: Arc<str>) {
