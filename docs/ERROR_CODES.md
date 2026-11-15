@@ -195,7 +195,6 @@ A test in `compiler/src/diagnostics/tests.rs` fails if this table and the compil
 | BL0605 | measured constant without a valid source |
 | BL0610 | module import cycle |
 | BL0611 | unresolved import |
-| BL0612 | name defined in two files of one package |
 | BL0620 | formatting macro needs a string literal first |
 
 ## Packages, registry and lockfile

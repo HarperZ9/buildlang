@@ -229,7 +229,6 @@ pub fn type_code(error: &TypeError) -> &'static str {
         E::MeasuredConstantInvalid { .. } => "BL0605",
         E::ModuleImportCycle { .. } => "BL0610",
         E::UnresolvedImport { .. } => "BL0611",
-        E::DuplicateAcrossFiles { .. } => "BL0612",
         E::FormatArgNotStringLiteral { .. } => "BL0620",
         E::SpecRefuted { .. } => "BL0801",
         E::SpecInconsistent { .. } => "BL0802",
@@ -407,7 +406,6 @@ pub const CODES: &[CodeInfo] = &[
     c("BL0605", "measured constant without a valid source"),
     c("BL0610", "module import cycle"),
     c("BL0611", "unresolved import"),
-    c("BL0612", "name defined in two files of one package"),
     c("BL0620", "formatting macro needs a string literal first"),
     c(
         "BL0701",
