@@ -1,9 +1,11 @@
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/HarperZ9/buildlang-tmLanguage/main/docs/art/hero-dark.svg">
-  <img src="https://raw.githubusercontent.com/HarperZ9/buildlang-tmLanguage/main/docs/art/hero-light.svg" alt="buildlang-tmLanguage: TextMate grammar that highlights BuildLang .bld files in editors. A fine lattice of lines bulges outward around a bright core, as if seen through a lens, inside a ring." width="100%">
+  <source media="(prefers-color-scheme: dark)" srcset="docs/art/hero-dark.svg">
+  <img src="docs/art/hero-light.svg" alt="buildlang-tmLanguage: TextMate grammar that highlights BuildLang .bld files in editors. A fine lattice of lines bulges outward around a bright core, as if seen through a lens, inside a ring." width="100%">
 </picture>
 
 # buildlang-tmLanguage
+
+> This folder moved here from the `HarperZ9/buildlang-tmLanguage` repository on 2026-11-15 (its `main` at commit `d9c3de1`). The badges below still point at that repository, which stays in place. The same grammar file ships in [`../vscode-syntax`](../vscode-syntax); CI checks that the two copies are byte-identical.
 
 TextMate grammar that highlights BuildLang .bld files in editors.
 
@@ -73,7 +75,7 @@ Place the grammar file in the appropriate packages directory. Sublime Text accep
 
 ### github-linguist
 
-This repository is included as a submodule by `github-linguist/linguist` under `vendor/grammars/buildlang-tmLanguage`. Consumers do not need to install anything.
+github-linguist does not include this grammar. The request to add it (github-linguist/linguist#7913, under the earlier name QuantaLang) was closed without a merge on 2026-04-12, because linguist accepts a language only once it is in wide use. GitHub therefore does not highlight `.bld` files.
 
 ## License
 
@@ -81,4 +83,4 @@ MIT. See [LICENSE](LICENSE).
 
 ---
 
-Built by **[Zain Dana Harper](https://harperz9.github.io)** in Seattle: evidence-first tools that leave a re-checkable artifact behind. The full workbench is at [Project Telos](https://harperz9.github.io).
+Built by **[Zain Dana Harper](https://harperz9.github.io)**: evidence-first tools that leave a re-checkable artifact behind. The full workbench is at [Project Telos](https://harperz9.github.io).

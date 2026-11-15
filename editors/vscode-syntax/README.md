@@ -1,9 +1,11 @@
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/HarperZ9/buildlang-vscode/main/docs/art/hero-dark.svg">
-  <img src="https://raw.githubusercontent.com/HarperZ9/buildlang-vscode/main/docs/art/hero-light.svg" alt="buildlang-vscode: Syntax highlighting for BuildLang .bld files in VS Code. A fine lattice of lines bulges outward around a bright core, as if seen through a lens, inside a ring." width="100%">
+  <source media="(prefers-color-scheme: dark)" srcset="docs/art/hero-dark.svg">
+  <img src="docs/art/hero-light.svg" alt="buildlang-vscode: Syntax highlighting for BuildLang .bld files in VS Code. A fine lattice of lines bulges outward around a bright core, as if seen through a lens, inside a ring." width="100%">
 </picture>
 
 # buildlang-vscode
+
+> This folder moved here from the `HarperZ9/buildlang-vscode` repository on 2026-11-15 (its `main` at commit `c7cc292`). The badges below still point at that repository, which stays in place because the Marketplace listing links to it. This is the syntax-only extension. [`../vscode`](../vscode) is a second extension with snippets and the language-server client.
 
 Syntax highlighting for BuildLang .bld files in VS Code.
 
@@ -72,8 +74,8 @@ or execute browser automation.
 ## Links
 
 - [Language repo](https://github.com/HarperZ9/buildlang)
-- [Grammar repo](https://github.com/HarperZ9/buildlang-tmLanguage)
-- [Build Universe ecosystem](https://github.com/HarperZ9/build-universe)
+- [Grammar](../tmLanguage)
+- [Build Universe](../../universe)
 
 ## License
 
@@ -81,4 +83,4 @@ MIT. Copyright (c) 2026 Zain Dana Harper.
 
 ---
 
-Built by **[Zain Dana Harper](https://harperz9.github.io)** in Seattle: evidence-first tools that leave a re-checkable artifact behind. The full workbench is at [Project Telos](https://harperz9.github.io).
+Built by **[Zain Dana Harper](https://harperz9.github.io)**: evidence-first tools that leave a re-checkable artifact behind. The full workbench is at [Project Telos](https://harperz9.github.io).

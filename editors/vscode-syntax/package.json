@@ -11,10 +11,11 @@
   "homepage": "https://github.com/HarperZ9/buildlang",
   "repository": {
     "type": "git",
-    "url": "https://github.com/HarperZ9/buildlang-vscode.git"
+    "url": "https://github.com/HarperZ9/buildlang.git",
+    "directory": "editors/vscode-syntax"
   },
   "bugs": {
-    "url": "https://github.com/HarperZ9/buildlang-vscode/issues"
+    "url": "https://github.com/HarperZ9/buildlang/issues"
   },
   "engines": {
     "vscode": "^1.70.0"

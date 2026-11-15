@@ -53,10 +53,10 @@ exact location is editor-specific; consult that editor's grammar/bundle docs.
 
 ### github-linguist
 
-This repository is intended to be vendored by
-[`github-linguist/linguist`](https://github.com/github-linguist/linguist) under
-`vendor/grammars/buildlang-tmLanguage`. Consumers of GitHub do not install
-anything; the `samples/` files drive language detection.
+The grammar is laid out so that
+[`github-linguist/linguist`](https://github.com/github-linguist/linguist) could vendor it,
+with the `samples/` files driving language detection. Linguist does not include it today:
+the request (github-linguist/linguist#7913) was closed without a merge on 2026-04-12.
 
 ## Validating and packaging the grammar
 

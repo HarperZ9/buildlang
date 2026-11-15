@@ -1,0 +1,86 @@
+name: editors
+
+# editors/tmLanguage and editors/vscode-syntax moved here from the buildlang-tmLanguage and
+# buildlang-vscode repositories. This carries their checks: the manifests and grammars are
+# well-formed JSON, the extension packs, the art receipts match the stored bytes, and the one
+# grammar the two folders share stays byte-identical.
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "editors/**"
+      - ".github/workflows/editors.yml"
+  push:
+    branches: [main]
+    paths:
+      - "editors/**"
+      - ".github/workflows/editors.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: editors-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  grammars:
+    name: Grammars, manifests and art receipts
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "24"
+
+      - name: JSON files parse
+        run: |
+          for f in \
+            editors/tmLanguage/grammars/buildlang.tmLanguage.json \
+            editors/tmLanguage/language-configuration.json \
+            editors/vscode-syntax/package.json \
+            editors/vscode-syntax/language-configuration.json \
+            editors/vscode-syntax/syntaxes/buildlang.tmLanguage.json \
+            editors/vscode/package.json \
+            editors/vscode/syntaxes/buildlang.tmLanguage.json \
+            editors/vscode/snippets/buildlang.json; do
+            python -m json.tool "$f" > /dev/null || { echo "not valid JSON: $f"; exit 1; }
+            echo "ok: $f"
+          done
+
+      - name: The shared grammar is the same file in both folders
+        run: cmp editors/tmLanguage/grammars/buildlang.tmLanguage.json editors/vscode-syntax/syntaxes/buildlang.tmLanguage.json
+
+      - name: Every file the extension manifest names exists
+        working-directory: editors/vscode-syntax
+        run: |
+          python - <<'PY'
+          import json, os, sys
+          m = json.load(open("package.json", encoding="utf-8"))
+          c = m["contributes"]
+          paths = [g["path"] for g in c["grammars"]]
+          for lang in c["languages"]:
+              paths.append(lang["configuration"])
+              paths.extend(lang.get("icon", {}).values())
+          missing = [p for p in paths if not os.path.isfile(p)]
+          print("named:", ", ".join(sorted(set(paths))))
+          if missing:
+              sys.exit("missing: " + ", ".join(missing))
+          PY
+
+      - name: The syntax extension packs
+        working-directory: editors/vscode-syntax
+        run: npm pack --dry-run
+
+      - name: Art receipt digests
+        run: |
+          (cd editors/tmLanguage && python3 scripts/check_art_receipts.py)
+          (cd editors/vscode-syntax && python3 scripts/check_art_receipts.py)
