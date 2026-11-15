@@ -533,6 +533,16 @@ pub enum TypeError {
     #[error("unresolved import `{path}`: {reason}")]
     UnresolvedImport { path: String, reason: String },
 
+    /// One name defined in two files of one package. The files of a package
+    /// are checked as one unit and share one namespace. `first` and `second`
+    /// are the `file:line` of the two definitions.
+    #[error("`{name}` is defined in two files of this package: {first} and {second}")]
+    DuplicateAcrossFiles {
+        name: String,
+        first: String,
+        second: String,
+    },
+
     // =========================================================================
     // MACRO ERRORS
     // =========================================================================

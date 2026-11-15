@@ -322,3 +322,128 @@ fn every_registry_package_checks_as_a_directory() {
         failures.join("\n")
     );
 }
+
+// ---------------------------------------------------------------------------
+// Duplicate definitions across the files of one package (BL0612)
+// ---------------------------------------------------------------------------
+
+/// How many times `needle` occurs in `hay`.
+fn count(hay: &str, needle: &str) -> usize {
+    hay.matches(needle).count()
+}
+
+#[test]
+fn a_struct_defined_in_two_files_is_one_error_naming_both_places() {
+    let dir = package(
+        "dup-struct",
+        &[
+            ("a.bld", "struct Sheet {\n    w: i32,\n}\n"),
+            (
+                "b.bld",
+                "// the second file\n\nstruct Sheet {\n    h: i32,\n}\n",
+            ),
+            (
+                "main.bld",
+                "fn main() ~ Console {\n    println!(\"{}\", 1);\n}\n",
+            ),
+        ],
+    );
+    let out = buildc(&["check"], &dir);
+    let log = text(&out);
+    assert!(!out.status.success(), "the check passed\n{log}");
+    let base = shown(&dir);
+    let wanted = format!(
+        "{base}/src/b.bld:3:8: [BL0612] `Sheet` is defined in two files of this package: {base}/src/a.bld:1 and {base}/src/b.bld:3"
+    );
+    assert!(log.contains(&wanted), "no `{wanted}` in\n{log}");
+    assert_eq!(count(&log, "[BL0612]"), 1, "{log}");
+    assert_eq!(count(&log, "[BL0380]"), 0, "{log}");
+}
+
+/// A function with the same parameter types in two files used to pass the
+/// check when nothing called it, and to fail with BL0901 at the call when
+/// something did. A trait or a type alias defined twice passed silently.
+#[test]
+fn functions_traits_and_aliases_defined_in_two_files_are_all_reported_in_one_run() {
+    let first = "fn area(w: i32, h: i32) -> i32 {\n    w * h\n}\n\ntrait Shape {\n    fn sides(&self) -> i32;\n}\n\ntype Count = i32;\n";
+    let second = "type Count = i64;\n\ntrait Shape {\n    fn corners(&self) -> i32;\n}\n\nfn area(w: i32,  h: i32) -> i32 {\n    w + h\n}\n";
+    let dir = package(
+        "dup-kinds",
+        &[("a.bld", first), ("b.bld", second), ("main.bld", MAIN)],
+    );
+    let out = buildc(&["check"], &dir);
+    let log = text(&out);
+    assert!(!out.status.success(), "the check passed\n{log}");
+    let base = shown(&dir);
+    for (name, first_line, second_line) in [("area", 1, 7), ("Shape", 5, 3), ("Count", 9, 1)] {
+        let wanted = format!(
+            "[BL0612] `{name}` is defined in two files of this package: {base}/src/a.bld:{first_line} and {base}/src/b.bld:{second_line}"
+        );
+        assert!(log.contains(&wanted), "no `{wanted}` in\n{log}");
+    }
+    assert_eq!(count(&log, "[BL0612]"), 3, "{log}");
+    assert!(!log.contains("BL0901"), "{log}");
+}
+
+/// Two functions of one name with different parameter types are overloads,
+/// in one file or in two.
+#[test]
+fn overloads_in_two_files_are_not_duplicates() {
+    let dir = package(
+        "overloads",
+        &[
+            ("a.bld", "fn twice(x: i32) -> i32 {\n    x + x\n}\n"),
+            ("b.bld", "fn twice(x: f64) -> f64 {\n    x + x\n}\n"),
+            (
+                "main.bld",
+                "fn main() ~ Console {\n    println!(\"{}\", twice(4));\n}\n",
+            ),
+        ],
+    );
+    let log = text(&buildc(&["check"], &dir));
+    assert!(!log.contains("BL0612"), "{log}");
+}
+
+/// Inside one file the existing BL0380 stays, and the line it names is a line
+/// of that file. The joined text would put the first definition on line 9.
+#[test]
+fn a_duplicate_inside_one_file_names_that_files_line() {
+    let twice = "// two definitions in one file\nstruct Twice {\n    a: i32,\n}\n\nstruct Twice {\n    b: i32,\n}\n";
+    let dir = package(
+        "dup-same-file",
+        &[("aaa.bld", AAA), ("b.bld", twice), ("main.bld", MAIN)],
+    );
+    let out = buildc(&["check"], &dir);
+    let log = text(&out);
+    assert!(!out.status.success(), "the check passed\n{log}");
+    let wanted = format!(
+        "{}/src/b.bld:6:8: [BL0380] duplicate definition: `Twice` is already defined on line 2",
+        shown(&dir)
+    );
+    assert!(log.contains(&wanted), "no `{wanted}` in\n{log}");
+    assert_eq!(count(&log, "[BL0612]"), 0, "{log}");
+}
+
+#[test]
+fn lint_reports_a_cross_file_duplicate_too() {
+    let dir = package(
+        "dup-lint",
+        &[
+            ("a.bld", "struct Sheet {\n    w: i32,\n}\n"),
+            ("b.bld", "struct Sheet {\n    h: i32,\n}\n"),
+            (
+                "main.bld",
+                "fn main() ~ Console {\n    println!(\"{}\", 1);\n}\n",
+            ),
+        ],
+    );
+    let out = buildc(&["lint"], &dir);
+    let log = text(&out);
+    assert_eq!(out.status.code(), Some(1), "{log}");
+    let base = shown(&dir);
+    let wanted = format!(
+        "`Sheet` is defined in two files of this package: {base}/src/a.bld:1 and {base}/src/b.bld:1"
+    );
+    assert!(log.contains(&wanted), "no `{wanted}` in\n{log}");
+    assert!(log.contains(&format!("({base}/src/b.bld:1:8)")), "{log}");
+}
