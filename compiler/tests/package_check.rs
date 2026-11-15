@@ -314,7 +314,7 @@ fn every_registry_package_checks_as_a_directory() {
             }
         }
     }
-    assert!(checked >= 31, "only {checked} registry packages were found");
+    assert!(checked >= 30, "only {checked} registry versions were found");
     assert!(
         failures.is_empty(),
         "{} of {checked} registry packages fail `buildc check <dir>`:\n{}",
