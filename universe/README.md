@@ -15,6 +15,8 @@ This tree moved here from the `HarperZ9/build-universe` repository on 2026-11-15
 bash universe/check.sh compiler/target/release/buildc
 ```
 
+The `organism` job runs every component in [tools/components.toml](tools/components.toml) on Windows and skips none. The 16 library modules registered for a C build all fail it today; each is marked `xfail` and the job fails when one starts to pass. Issue #290 tracks both lists.
+
 Licence: this folder keeps the licence it was published under, FSL-1.1-MIT ([LICENSE](LICENSE)). The rest of the repository is AGPL-3.0-only.
 
 An alpha compiler ecosystem, mixed-language by design. The pieces are not "all written in BuildLang":

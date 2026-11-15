@@ -6,7 +6,16 @@ organism health check: one command, no claims, just observed results.
     python tools/verify_organism.py --quick    # skip heavy components
     python tools/verify_organism.py --json      # machine-readable summary
 
+    python tools/verify_organism.py --no-skip   # a skipped component counts as a failure
+
 Exit code is the number of failures (0 = healthy), so it doubles as a CI gate.
+
+A component that is known to fail carries `xfail = "<issue and reason>"` in
+components.toml. It still runs. While it fails it is reported as XFAIL and does
+not count as a failure. When it starts to pass it is reported as XPASS and
+counts as a failure, so the mark has to be removed in the same change. A
+component with `covered_by` is not run here because another CI job runs it; it
+is reported as ELSEWHERE with that job named.
 """
 import argparse
 import glob
@@ -45,21 +54,28 @@ COMPILER_TARGETS = [
 ]
 
 
-def has_buildc():
+def buildc_dirs():
+    """Folders that may hold buildc. BUILDC_DIR names one directly, for a compiler built elsewhere."""
+    dirs = []
+    if os.environ.get("BUILDC_DIR"):
+        dirs.append(os.environ["BUILDC_DIR"])
     for target in COMPILER_TARGETS:
-        for sub in ("debug", "release"):
-            for exe in ("buildc.exe", "buildc"):
-                if os.path.isfile(os.path.join(target, sub, exe)):
-                    return True
+        dirs.append(os.path.join(target, "release"))
+        dirs.append(os.path.join(target, "debug"))
+    return dirs
+
+
+def has_buildc():
+    for d in buildc_dirs():
+        for exe in ("buildc.exe", "buildc"):
+            if os.path.isfile(os.path.join(d, exe)):
+                return True
     return False
 
 
 def build_env():
     env = dict(os.environ)
-    extra = [os.path.expanduser("~/.cargo/bin")]
-    for target in COMPILER_TARGETS:
-        extra.append(os.path.join(target, "debug"))
-        extra.append(os.path.join(target, "release"))
+    extra = [os.path.expanduser("~/.cargo/bin")] + buildc_dirs()
     paths = [p for p in extra if os.path.isdir(p)]
     if paths:
         env["PATH"] = os.pathsep.join(paths) + os.pathsep + env.get("PATH", "")
@@ -67,6 +83,8 @@ def build_env():
 
 
 def run_component(c, env, avail, quick):
+    if c.get("covered_by"):
+        return ("ELSEWHERE", 0.0, [])
     path = os.path.join(REPO, c["path"].replace("/", os.sep))
     if not os.path.isdir(path):
         return ("SKIP:absent", 0.0, [])
@@ -79,9 +97,13 @@ def run_component(c, env, avail, quick):
     proc = subprocess.run(c["verify"], shell=True, cwd=path, env=env,
                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     dur = time.monotonic() - start
+    tail = proc.stdout.decode("utf-8", "replace").splitlines()[-10:]
+    if c.get("xfail"):
+        if proc.returncode == 0:
+            return ("XPASS", dur, ["passes now: remove `xfail` from components.toml (" + c["xfail"] + ")"])
+        return ("XFAIL", dur, tail[-3:])
     if proc.returncode == 0:
         return ("PASS", dur, [])
-    tail = proc.stdout.decode("utf-8", "replace").splitlines()[-10:]
     return ("FAIL", dur, tail)
 
 
@@ -89,6 +111,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--quick", action="store_true", help="skip heavy components")
     ap.add_argument("--json", action="store_true", help="machine-readable output")
+    ap.add_argument("--no-skip", action="store_true",
+                    help="count a skipped component as a failure (CI uses this)")
     args = ap.parse_args()
 
     comps = load_manifest()
@@ -100,7 +124,7 @@ def main():
     for c in comps:
         cdir = os.path.join(REPO, c["path"].replace("/", os.sep))
         fresh = "-"
-        if os.path.isdir(cdir):
+        if os.path.isdir(cdir) and not c.get("covered_by"):
             fcode, _w = freshness.adjudicate(c["name"], by_name)
             fresh = {0: "fresh", 1: "STALE", 2: "new"}[fcode]
         status, dur, tail = run_component(c, env, avail, args.quick)
@@ -110,15 +134,22 @@ def main():
             "name": c["name"], "language": c.get("language", "?"),
             "tier": c.get("tier", "?"), "expect": c.get("expect", "tested"),
             "status": status, "seconds": round(dur, 1), "tail": tail, "fresh": fresh,
+            "xfail": c.get("xfail", ""), "covered_by": c.get("covered_by", ""),
         })
 
-    failures = sum(1 for r in results if r["status"] == "FAIL")
     passed = sum(1 for r in results if r["status"] == "PASS")
     skipped = sum(1 for r in results if r["status"].startswith("SKIP"))
+    xfailed = sum(1 for r in results if r["status"] == "XFAIL")
+    xpassed = sum(1 for r in results if r["status"] == "XPASS")
+    elsewhere = sum(1 for r in results if r["status"] == "ELSEWHERE")
+    failures = sum(1 for r in results if r["status"] == "FAIL") + xpassed
+    if args.no_skip:
+        failures += skipped
 
     if args.json:
-        print(json.dumps({"passed": passed, "failed": failures,
-                          "skipped": skipped, "components": results}, indent=2))
+        print(json.dumps({"passed": passed, "failed": failures, "skipped": skipped,
+                          "xfailed": xfailed, "xpassed": xpassed, "elsewhere": elsewhere,
+                          "components": results}, indent=2))
         sys.exit(failures)
 
     print("")
@@ -143,7 +174,9 @@ def main():
                 print("    " + ln)
     print("")
     print("ORGANISM: " + str(passed) + " passed, " + str(failures)
-          + " failed, " + str(skipped) + " skipped")
+          + " failed, " + str(xfailed) + " expected failures, " + str(xpassed)
+          + " unexpected passes, " + str(skipped) + " skipped, " + str(elsewhere)
+          + " run by another job")
     print("")
     sys.exit(failures)
 

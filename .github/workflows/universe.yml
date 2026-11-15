@@ -8,11 +8,16 @@ name: universe
 #              universe/CHECK-FAILS.txt. The job fails when a file fails that is not listed,
 #              or when a listed file passes, so the list stays true. A change to compiler/
 #              runs it too.
-#   structure  the old repository's validation: module folders present, art receipts match.
-#   organism   universe/tools/verify_organism.py on Windows with MSVC: the frametrace Rust
-#              tests, its C ABI demo and its D3D11 hook build. The components that need a
-#              built buildc are reported as skipped in the job summary; `check` covers the
-#              .bld files instead.
+#   structure  the old repository's validation, made to fail: module folders present, art
+#              receipts match, every .bld file is UTF-8, no credential-shaped assignment in
+#              the sources, and the number of .bld files with trailing whitespace does not grow.
+#   organism   universe/tools/verify_organism.py on Windows with MSVC and a buildc built from
+#              this checkout. It runs every registered component and skips none: the
+#              frametrace Rust tests, its C ABI demo and its D3D11 hook build, and the C build
+#              of the 16 library modules. Those 16 fail today and are marked `xfail` in
+#              tools/components.toml (issue #290): each still runs, and the job fails when one
+#              starts to pass or when an unmarked component fails. `--no-skip` makes a skipped
+#              component a failure. The compiler's own tests run in the CI workflow.
 
 on:
   pull_request:
@@ -97,10 +102,52 @@ jobs:
       - name: Art receipt digests
         run: python3 scripts/check_art_receipts.py
 
+      - name: Every .bld file is UTF-8
+        run: |
+          python3 - <<'PY'
+          import pathlib, sys
+          bad = []
+          files = sorted(pathlib.Path(".").rglob("*.bld"))
+          for p in files:
+              try:
+                  p.read_bytes().decode("utf-8")
+              except UnicodeDecodeError as exc:
+                  bad.append(f"{p}: {exc}")
+          print(f"{len(files)} files, {len(bad)} not UTF-8")
+          if bad or len(files) < 200:
+              sys.exit("; ".join(bad) or "fewer than 200 .bld files found")
+          PY
+
+      - name: No credential-shaped assignment in the sources
+        run: |
+          if grep -rnE "(api[_-]?key|secret|password|token)[[:space:]]*=[[:space:]]*['\"][^'\"]{8,}['\"]" \
+               --include="*.bld" --include="*.toml" --include="*.md" . ; then
+            echo "a quoted value is assigned to a key, secret, password or token name above"
+            exit 1
+          fi
+          echo "none found"
+
+      # The old repository printed this count and never failed on it. The limit is the count on
+      # 2026-11-15. A higher count fails; a lower one fails too, with the number to write here.
+      - name: Trailing whitespace does not spread
+        env:
+          LIMIT: "16"
+        run: |
+          count=$(find . -name "*.bld" -type f -exec grep -lE '[[:space:]]+$' {} + | wc -l)
+          echo ".bld files with trailing whitespace: $count (limit $LIMIT)"
+          if [ "$count" -gt "$LIMIT" ]; then
+            find . -name "*.bld" -type f -exec grep -lE '[[:space:]]+$' {} + | sort
+            exit 1
+          fi
+          if [ "$count" -lt "$LIMIT" ]; then
+            echo "the count fell: lower LIMIT in .github/workflows/universe.yml to $count"
+            exit 1
+          fi
+
   organism:
     name: Verify organism components (Windows, MSVC)
     runs-on: windows-latest
-    timeout-minutes: 30
+    timeout-minutes: 60
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
     steps:
@@ -111,12 +158,21 @@ jobs:
           python-version: "3.12"
 
       - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: compiler
+
+      - name: Build buildc
+        working-directory: compiler
+        run: cargo build --release --locked
 
       - name: Verify organism
         shell: bash
+        env:
+          BUILDLANG_STDLIB: ${{ github.workspace }}/stdlib
         run: |
           set -o pipefail
-          python universe/tools/verify_organism.py --json | tee "$RUNNER_TEMP/organism.json"
+          python universe/tools/verify_organism.py --no-skip --json | tee "$RUNNER_TEMP/organism.json"
 
       - name: Summary
         if: always()
@@ -130,9 +186,12 @@ jobs:
               print(f"### organism\nno result file: {exc!r}")
               raise SystemExit(0)
           print("### organism components")
-          print(f"{data['passed']} passed, {data['failed']} failed, {data['skipped']} skipped\n")
-          print("| component | result |")
-          print("|---|---|")
+          print(f"{data['passed']} passed, {data['failed']} failed, {data['xfailed']} expected failures, "
+                f"{data['xpassed']} unexpected passes, {data['skipped']} skipped, "
+                f"{data['elsewhere']} run by another job\n")
+          print("| component | result | note |")
+          print("|---|---|---|")
           for c in data["components"]:
-              print(f"| {c['name']} | {c['status']} |")
+              note = c.get("xfail") or c.get("covered_by") or ""
+              print(f"| {c['name']} | {c['status']} | {note} |")
           PY
