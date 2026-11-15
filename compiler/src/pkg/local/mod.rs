@@ -17,7 +17,6 @@
 
 pub mod content;
 pub mod index;
-pub mod linemap;
 pub mod lock;
 pub mod ops;
 pub mod project;

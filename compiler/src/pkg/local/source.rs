@@ -17,8 +17,7 @@
 //! no absolute paths, so two clones build the same bytes.
 
 use super::content::package_checksum;
-use super::index::{find_registry, Registry};
-use super::linemap::{shown_path, LineMap};
+use super::index::Registry;
 use super::lock::{Lock, LOCK_FILE};
 use super::project::{library_files, read_project, ProjectInfo};
 use super::resolve::build_order;
@@ -37,8 +36,6 @@ pub struct BuildInput {
     pub lock_text: String,
     /// The joined BuildLang source.
     pub source: String,
-    /// The file and line each line of `source` was copied from.
-    pub line_map: LineMap,
     /// Locked packages in the order they were joined.
     pub order: Vec<String>,
 }
@@ -116,45 +113,7 @@ pub fn build_input(dir: &Path, registry: &Registry) -> PkgResult<BuildInput> {
     let project = read_project(dir)?;
     let (lock, lock_text) = read_lock(dir, &project)?;
     verify_locked(registry, &lock)?;
-    join(dir, project, lock, lock_text, Some(registry), true)
-}
 
-/// The joined text of the package at `dir` for `buildc check <dir>` and
-/// `buildc lint <dir>`. Differences from [`build_input`]: `src/main.bld` is
-/// optional (a library package is checked too), and a package with no
-/// dependencies needs neither a `Build.lock` nor a registry. A package with
-/// dependencies is held to the same lock and checksum rules as a build;
-/// `explicit_registry` overrides the registry search.
-pub fn check_input(dir: &Path, explicit_registry: Option<&Path>) -> PkgResult<BuildInput> {
-    let project = read_project(dir)?;
-    let has_lock = dir.join(LOCK_FILE).is_file();
-    let (lock, lock_text) = if project.dependencies.is_empty() && !has_lock {
-        let lock = Lock::new(
-            &project.name,
-            &project.version,
-            &project.dependencies,
-            &Picks::new(),
-        );
-        (lock, String::new())
-    } else {
-        read_lock(dir, &project)?
-    };
-    if lock.packages.is_empty() {
-        return join(dir, project, lock, lock_text, None, false);
-    }
-    let registry = Registry::load(&find_registry(dir, explicit_registry)?)?;
-    verify_locked(&registry, &lock)?;
-    join(dir, project, lock, lock_text, Some(&registry), false)
-}
-
-fn join(
-    dir: &Path,
-    project: ProjectInfo,
-    lock: Lock,
-    lock_text: String,
-    registry: Option<&Registry>,
-    need_main: bool,
-) -> PkgResult<BuildInput> {
     let picks: Picks = lock
         .packages
         .iter()
@@ -176,101 +135,67 @@ fn join(
     let mut names: BTreeSet<String> = picks.keys().cloned().collect();
     names.insert(project.name.clone());
 
-    let mut out = Joined::default();
+    let mut source = String::new();
     for name in &order {
         let locked = &lock.packages[name];
         let entry = registry
-            .and_then(|r| r.version_entry(name, &locked.version))
+            .version_entry(name, &locked.version)
             .expect("verified above");
-        let pkg_dir = registry.expect("verified above").version_dir(entry);
         let header = format!("package {} {} ({})", name, locked.version, locked.checksum);
-        append_library(&mut out, &pkg_dir, &header, &names, false)?;
+        append_library(&mut source, &registry.version_dir(entry), &header, &names)?;
     }
     let header = format!("package {} {} (the project)", project.name, project.version);
-    let library = append_library(&mut out, dir, &header, &names, true)?;
+    append_library(&mut source, dir, &header, &names)?;
     let main = dir.join("src").join("main.bld");
-    if main.is_file() {
-        append_file(&mut out, &main, dir, "src/main.bld", &names, true)?;
-    } else if need_main {
+    if !main.is_file() {
         return Err(PkgError::new(
             codes::PKG_MANIFEST,
             format!("{} has no src/main.bld to build", dir.display()),
         ));
-    } else if library == 0 {
-        return Err(PkgError::new(
-            codes::PKG_MANIFEST,
-            format!("{} has no .bld file in src/ to check", dir.display()),
-        ));
     }
+    append_file(&mut source, &main, "src/main.bld", &names)?;
     Ok(BuildInput {
         project,
         lock,
         lock_text,
-        source: out.source,
-        line_map: out.map,
+        source,
         order,
     })
 }
 
-/// The joined text and the origin of each of its lines, kept in step.
-#[derive(Default)]
-struct Joined {
-    source: String,
-    map: LineMap,
-}
-
-impl Joined {
-    /// Write a line of the join's own.
-    fn written(&mut self, line: &str) {
-        self.source.push_str(line);
-        self.source.push('\n');
-        self.map.synthetic();
-    }
-}
-
-/// Join the library files of the package at `dir`; return how many there were.
 fn append_library(
-    out: &mut Joined,
+    out: &mut String,
     dir: &Path,
     header: &str,
     names: &BTreeSet<String>,
-    own: bool,
-) -> PkgResult<usize> {
-    out.written(&format!("// ==== {} ====", header));
-    let files = library_files(dir)?;
-    for file in &files {
+) -> PkgResult<()> {
+    out.push_str(&format!("// ==== {} ====\n", header));
+    for file in library_files(dir)? {
         let rel = format!(
             "src/{}",
             file.file_name().unwrap_or_default().to_string_lossy()
         );
-        append_file(out, file, dir, &rel, names, own)?;
+        append_file(out, &file, &rel, names)?;
     }
-    Ok(files.len())
+    Ok(())
 }
 
 fn append_file(
-    out: &mut Joined,
+    out: &mut String,
     file: &Path,
-    dir: &Path,
     rel: &str,
     names: &BTreeSet<String>,
-    own: bool,
 ) -> PkgResult<()> {
     let text = std::fs::read_to_string(file).map_err(|e| PkgError::io(file, e))?;
-    out.written(&format!("// ---- {} ----", rel));
-    out.map.begin_file(shown_path(dir, rel), own);
-    let mut byte_start = 0;
-    for (index, raw) in text.split_inclusive('\n').enumerate() {
-        let line = raw.strip_suffix('\n').unwrap_or(raw);
-        let line = line.strip_suffix('\r').unwrap_or(line);
-        if !imports_known_package(line, names) {
-            out.source.push_str(line);
-            out.source.push('\n');
-            out.map.copied(index + 1, byte_start);
+    out.push_str(&format!("// ---- {} ----\n", rel));
+    for line in text.lines() {
+        if imports_known_package(line, names) {
+            continue;
         }
-        byte_start += raw.len();
+        out.push_str(line);
+        out.push('\n');
     }
-    out.written("");
+    out.push('\n');
     Ok(())
 }
 
