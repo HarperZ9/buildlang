@@ -53,7 +53,7 @@ when a row here already has it.
 | GPU path | `compiler/src/gpu/`, `examples/gpu/` | Merged; experimental | Compute SPIR-V with a CPU C reference, an optional Vulkan host behind `--features gpu`, and saxpy, reduce, matmul and stencil examples. |
 | buildos | Build Universe `buildos/` | Built for QEMU; real-hardware boot unknown | A Rust `no_std` x86-64 kernel with ACPI, PCI, NUMA-aware memory, SMP scheduling, AHCI and NVMe. Its `lib.bld` describes the design in BuildLang. |
 | superframe kernels and joules | superframe PR #2 (`packages/kernels`, `packages/joules`) | Open PR | A kernel contract with bit-identical CPU and CUDA modes, planted bad kernels, receipts and a "BuildLang port note" per kernel. The joules meter reads RAPL and NVML. |
-| Editor support | `buildlang-vscode`, `buildlang-tmLanguage` repos | Released | Syntax and editor support. |
+| Editor support | `editors/` in this repo (the `buildlang-vscode` and `buildlang-tmLanguage` repos until 2026-11-15) | Released | Syntax and editor support. |
 
 ## 2. What exists today
 

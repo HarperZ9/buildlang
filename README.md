@@ -24,7 +24,7 @@ experimental `#[linear]` attribute for no-cloning values. The `buildc` CLI
 covers build, run, test, repl, fmt, pkg, watch, and doctor, plus a bundled LSP
 server with completion, hover, diagnostics, and go-to-definition.
 
-[Landing page](https://harperz9.github.io/buildlang/) | [Build Universe](universe/) | [VS Code extension](https://github.com/HarperZ9/buildlang-vscode) | [grammar](https://github.com/HarperZ9/buildlang-tmLanguage)
+[Landing page](https://harperz9.github.io/buildlang/) | [Build Universe](universe/) | [Editor support](editors/)
 
 ## See it work, step by step
 
@@ -286,8 +286,10 @@ and `#[linear]` types are experimental. Release test results are in
   was the build-universe repository until November 2026. CI runs `buildc check` on each of its
   267 `.bld` files; [universe/CHECK-FAILS.txt](universe/CHECK-FAILS.txt) lists the 195 the
   compiler does not accept yet
-- Peers: [buildlang-vscode](https://github.com/HarperZ9/buildlang-vscode),
-  [buildlang-tmLanguage](https://github.com/HarperZ9/buildlang-tmLanguage)
+- Editor support: [editors/](editors/) holds two VS Code extensions and the TextMate grammar.
+  `editors/vscode-syntax` and `editors/tmLanguage` were the buildlang-vscode and
+  buildlang-tmLanguage repositories until November 2026; [editors/README.md](editors/README.md)
+  says what each folder is and what is published where
 
 <p align="center"><img src=".github/assets/banner.svg" alt="buildlang: A real systems language: typed capability effects, sum and linear types, C FFI, native binaries." width="100%"></p>
 
