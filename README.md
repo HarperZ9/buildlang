@@ -284,7 +284,7 @@ and `#[linear]` types are experimental. Release test results are in
 - Build Universe: [universe/](universe/) holds the BuildLang modules and example programs for
   graphics, colour, finance and systems work, a hobby OS kernel and the frametrace tracer. It
   was the build-universe repository until November 2026. CI runs `buildc check` on each of its
-  267 `.bld` files; [universe/CHECK-FAILS.txt](universe/CHECK-FAILS.txt) lists the ones the
+  267 `.bld` files; [universe/CHECK-FAILS.txt](universe/CHECK-FAILS.txt) lists the 195 the
   compiler does not accept yet
 - Peers: [buildlang-vscode](https://github.com/HarperZ9/buildlang-vscode),
   [buildlang-tmLanguage](https://github.com/HarperZ9/buildlang-tmLanguage)
