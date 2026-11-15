@@ -1,0 +1,8 @@
+// Three imports that resolve nowhere: one run reports all three.
+use nowhere::thing::Widget;
+use std::memory::Arena;
+use shapes::{Square, Hexagon};
+
+fn main() ~ Console {
+    println!("{}", 1);
+}

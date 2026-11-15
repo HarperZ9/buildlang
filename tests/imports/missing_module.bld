@@ -1,0 +1,6 @@
+// `nowhere::thing` is no file beside this program or above it.
+use nowhere::thing::Widget;
+
+fn main() ~ Console {
+    println!("{}", 1);
+}

@@ -525,6 +525,14 @@ pub enum TypeError {
     #[error("module import cycle: `{path}` is already being loaded (module `{module}` imports back into it)")]
     ModuleImportCycle { path: String, module: String },
 
+    /// A `use` path, or a `mod NAME;` declaration, that names a module or an
+    /// item the compiler cannot find. It used to be accepted silently: the
+    /// imported name stayed unknown and later lines failed with errors about
+    /// something else. `reason` says what is missing and where the compiler
+    /// looked.
+    #[error("unresolved import `{path}`: {reason}")]
+    UnresolvedImport { path: String, reason: String },
+
     // =========================================================================
     // MACRO ERRORS
     // =========================================================================

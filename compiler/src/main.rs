@@ -5613,6 +5613,7 @@ fn type_error_kind(error: &TypeError) -> &'static str {
         TypeError::UnitRootNotExact { .. } => "UnitRootNotExact",
         TypeError::MeasuredConstantInvalid { .. } => "MeasuredConstantInvalid",
         TypeError::ModuleImportCycle { .. } => "ModuleImportCycle",
+        TypeError::UnresolvedImport { .. } => "UnresolvedImport",
         TypeError::UndefinedLoopLabel { .. } => "UndefinedLoopLabel",
         _ => "TypeError",
     }

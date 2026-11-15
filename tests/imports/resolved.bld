@@ -1,0 +1,24 @@
+// Every import here resolves: a built-in module, a module file beside the
+// program, and the variants of an enum declared below the `use`.
+use std::collections::HashMap;
+use shapes::Square;
+use Light::{Red, Green};
+
+enum Light {
+    Red,
+    Green,
+}
+
+fn code(l: Light) -> i64 {
+    match l {
+        Light::Red => 1,
+        Light::Green => 2,
+    }
+}
+
+fn main() ~ Console {
+    let mut m: HashMap<i64, i64> = HashMap::new();
+    m.insert(1, code(Light::Red));
+    m.insert(2, code(Light::Green));
+    println!("{} {}", m.len(), code(Light::Green));
+}
