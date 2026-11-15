@@ -124,6 +124,13 @@ pub struct MirLowerer<'ctx> {
     /// Top-level user functions lowered under `user_fn_c_name` because their
     /// names collide with a C library or runtime name.
     pub(crate) shadow_fns: std::collections::HashSet<Arc<str>>,
+    /// The index pattern and the counter of a `for (i, x) in X.enumerate()`
+    /// whose inner loop over `X` has not bound its element yet. Set by
+    /// `lower_for_enumerate`, taken by `bind_for_element`.
+    pub(crate) pending_enumerate: Option<(ast::Pattern, LocalId)>,
+    /// True once `bind_for_element` has bound the index of the innermost
+    /// `enumerate` loop being lowered.
+    pub(crate) enumerate_bound: bool,
     /// Constants and statics declared `char`. A char is an integer in MIR, so
     /// printing one as a character needs to know where it came from.
     pub(crate) char_globals: std::collections::HashSet<Arc<str>>,
@@ -381,6 +388,8 @@ impl<'ctx> MirLowerer<'ctx> {
             ref_locals: std::collections::HashSet::new(),
             char_vec_locals: std::collections::HashSet::new(),
             shadow_fns: std::collections::HashSet::new(),
+            pending_enumerate: None,
+            enumerate_bound: false,
             char_globals: std::collections::HashSet::new(),
             str_ref_globals: std::collections::HashSet::new(),
             str_ref_locals: std::collections::HashSet::new(),
@@ -455,6 +464,8 @@ impl<'ctx> MirLowerer<'ctx> {
             ref_locals: std::collections::HashSet::new(),
             char_vec_locals: std::collections::HashSet::new(),
             shadow_fns: std::collections::HashSet::new(),
+            pending_enumerate: None,
+            enumerate_bound: false,
             char_globals: std::collections::HashSet::new(),
             str_ref_globals: std::collections::HashSet::new(),
             str_ref_locals: std::collections::HashSet::new(),

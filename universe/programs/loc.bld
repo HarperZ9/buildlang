@@ -250,7 +250,7 @@ fn main() ~ Console + Environment + FileSystem + Process {
                 }
             }
         }
-        map_insert(files_map, lang, 1.0);
+        map_insert(files_map, lang, 1);
         map_insert(lines_map, lang, fl);
         map_insert(code_map, lang, fc);
         map_insert(comments_map, lang, fcm);
@@ -371,7 +371,7 @@ fn main() ~ Console + Environment + FileSystem + Process {
 
                             // Accumulate into maps
                             let old_f = map_get(files_map, lang);
-                            map_insert(files_map, lang, old_f + 1.0);
+                            map_insert(files_map, lang, old_f + 1);
                             let old_l = map_get(lines_map, lang);
                             map_insert(lines_map, lang, old_l + fl);
                             let old_c = map_get(code_map, lang);
@@ -425,7 +425,7 @@ fn main() ~ Console + Environment + FileSystem + Process {
     while j < nlang {
         let lang = vec_get_str(all_langs, j);
         let f = map_get(files_map, lang);
-        if f > 0.0 {
+        if f > 0 {
             active_count = active_count + 1;
             total_files = total_files + f;
             total_lines = total_lines + map_get(lines_map, lang);
@@ -458,7 +458,7 @@ fn main() ~ Console + Environment + FileSystem + Process {
     while j2 < nlang {
         let lang = vec_get_str(all_langs, j2);
         let f = map_get(files_map, lang);
-        if f > 0.0 {
+        if f > 0 {
             let lines = map_get(lines_map, lang);
             let code = map_get(code_map, lang);
             let comments = map_get(comments_map, lang);

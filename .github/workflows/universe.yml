@@ -67,6 +67,16 @@ jobs:
           set -o pipefail
           bash universe/check.sh compiler/target/release/buildc | tee "$RUNNER_TEMP/universe-check.txt"
 
+      # Not a gate: the census walks past each refusal of the C backend to show what else a
+      # failing file holds (universe/tools/census.py). Its two tables are in this step's log.
+      - name: Census of the failing files (distance to green)
+        if: always()
+        continue-on-error: true
+        timeout-minutes: 14
+        env:
+          BUILDLANG_STDLIB: ${{ github.workspace }}/stdlib
+        run: python3 universe/tools/census.py compiler/target/release/buildc
+
       - name: Summary
         if: always()
         run: |
