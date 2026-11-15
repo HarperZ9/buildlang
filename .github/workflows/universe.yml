@@ -72,6 +72,7 @@ jobs:
       - name: Census of the failing files (distance to green)
         if: always()
         continue-on-error: true
+        timeout-minutes: 14
         env:
           BUILDLANG_STDLIB: ${{ github.workspace }}/stdlib
         run: python3 universe/tools/census.py compiler/target/release/buildc

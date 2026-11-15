@@ -28,7 +28,8 @@ taken out, the functions stubbed, the diagnostics seen by code, and where the wa
               type, an `impl` header) stops the walk
     NOLINE    a refusal with no line, usually functions the program calls that have
               no C function behind them (the names are in the detail column)
-    PARSE, LEX, TIMEOUT, LIMIT (more than --max-steps steps)
+    PARSE, LEX, TIMEOUT, LIMIT (more than --max-steps steps, or the file's time budget),
+    BUDGET (the run's time budget ended before the file)
 
 PASS is necessary for "these diagnostics are all of it", not sufficient: a stubbed function
 shows every type error it has, but only the first refusal of the C backend gate inside it.
@@ -45,6 +46,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DIAG = re.compile(r"^\s*(\d+):(\d+): \[(BL\d+)\] (.*)$")
@@ -241,7 +243,7 @@ def drop_imports(lines, clean, line_no, paths):
     return True
 
 
-def walk(buildc, rel, max_steps):
+def walk(buildc, rel, max_steps, deadline):
     """Returns (stage, steps, terminal, detail, imports out, functions stubbed, rows)."""
     source = os.path.join(HERE, rel)
     scratch_rel = rel[: -len(".bld")] + SCRATCH
@@ -282,6 +284,8 @@ def walk(buildc, rel, max_steps):
                 return done("PARSE" if stage == "parse" else "LEX", str(len(diags)))
             if steps >= max_steps:
                 return done("LIMIT")
+            if time.monotonic() > deadline:
+                return done("LIMIT", "time budget for one file")
 
             clean = cleaned(lines)
             by_use = {}
@@ -329,6 +333,8 @@ def walk(buildc, rel, max_steps):
                 else:
                     # One stub broke the parse. Apply them one at a time and keep the sound ones.
                     for body in sorted(bodies, reverse=True)[:120]:
+                        if time.monotonic() > deadline:
+                            break
                         single = list(current)
                         stub_bodies(single, [body])
                         trial = check(single)
@@ -367,6 +373,8 @@ def main():
     ap.add_argument("files", nargs="*")
     ap.add_argument("--out")
     ap.add_argument("--max-steps", type=int, default=120)
+    ap.add_argument("--file-seconds", type=float, default=45.0, help="time budget for one file")
+    ap.add_argument("--total-seconds", type=float, default=600.0, help="time budget for the run")
     args = ap.parse_args()
     buildc = os.path.abspath(args.buildc)
     files = args.files or listed_files()
@@ -375,8 +383,14 @@ def main():
         "file\tstage\tsteps\tterminal\tdetail\timports taken out\tfunctions stubbed\tdiagnostics by code"
     ]
     table = ["file\tstep\tline\tcode\tmessage"]
+    started = time.monotonic()
     for rel in files:
-        stage, steps, terminal, detail, imports, stubbed, rows = walk(buildc, rel, args.max_steps)
+        if time.monotonic() - started > args.total_seconds:
+            census.append(f"{rel}	?	0	BUDGET	the run's time budget ended before this file	0	0	")
+            continue
+        stage, steps, terminal, detail, imports, stubbed, rows = walk(
+            buildc, rel, args.max_steps, time.monotonic() + args.file_seconds
+        )
         counts = {}
         for row in rows:
             counts[row[3]] = counts.get(row[3], 0) + 1
