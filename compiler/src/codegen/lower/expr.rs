@@ -597,14 +597,12 @@ impl<'ctx> MirLowerer<'ctx> {
         }
 
         // `let v = vec_new();` with no annotation: the element type is settled
-        // by the first push (see `settle_pending_vec`). `Vec::new()` and
-        // `Vec::with_capacity(n)` are the same vector under their other names.
+        // by the first push (see `settle_pending_vec`).
         let untyped_vec_new = explicit_ty.is_none()
             && matches!(&local.pattern.kind, ast::PatternKind::Ident { .. })
             && local.init.as_ref().is_some_and(|init| {
                 matches!(&init.expr.kind, ExprKind::Call { func, args }
-                    if (args.is_empty() && self.extract_call_name(func) == Some("vec_new"))
-                        || Self::is_vec_constructor_call(func, args))
+                    if args.is_empty() && self.extract_call_name(func) == Some("vec_new"))
             });
         self.untyped_vec_new_binding = untyped_vec_new;
         self.untyped_vec_new_dest = None;
@@ -3265,37 +3263,6 @@ impl<'ctx> MirLowerer<'ctx> {
                 .iter()
                 .map(|s| s.ident.name.as_ref())
                 .collect();
-            // `Vec::with_capacity(n)`: the capacity is a hint, and the vector
-            // runtime grows on its own. Lower `n` for its effects, then build
-            // the vector as `Vec::new()` does. Before, the call was refused:
-            // no C function stood behind `Vec_with_capacity`.
-            if segs.as_slice() == ["Vec", "with_capacity"] && args.len() == 1 {
-                let binding = std::mem::replace(&mut self.untyped_vec_new_binding, false);
-                let expected = self.expected_type.take();
-                let capacity = self.lower_expr(&args[0]);
-                self.expected_type = expected;
-                self.untyped_vec_new_binding = binding;
-                capacity?;
-                let mut as_new = func.clone();
-                if let ExprKind::Path(new_path) = &mut as_new.kind {
-                    if let Some(last) = new_path.segments.last_mut() {
-                        last.ident.name = Arc::from("new");
-                    }
-                }
-                return self.lower_call(&as_new, &[]);
-            }
-            // `let v = Vec::new();` with no annotation: a vector whose element
-            // type the first push settles, as for `vec_new()`. Before, the
-            // local had no vector type and the first `v.push(x)` was refused.
-            if segs.as_slice() == ["Vec", "new"]
-                && args.is_empty()
-                && self.untyped_vec_new_binding
-                && self.expected_type.is_none()
-            {
-                if let Some(done) = self.try_typed_vec_new() {
-                    return done;
-                }
-            }
             // f64::from_bits(u) / f32::from_bits(u): a bit cast (DETMATH's pow2).
             let from_bits = match segs.as_slice() {
                 ["f64", "from_bits"] => Some(("build_f64_from_bits", MirType::f64())),
@@ -3922,21 +3889,6 @@ impl<'ctx> MirLowerer<'ctx> {
     /// strings wrote 16-byte values into 4-byte slots. With an annotation, lower
     /// it like `Vec::new()`, which the C backend constructs from the element
     /// type of the destination. Without one (or for `Vec<i32>`), keep the default.
-    /// True for the calls `Vec::new()` and `Vec::with_capacity(n)`.
-    fn is_vec_constructor_call(func: &ast::Expr, args: &[ast::Expr]) -> bool {
-        let ExprKind::Path(path) = &func.kind else {
-            return false;
-        };
-        if path.segments.len() != 2 || path.segments[0].ident.name.as_ref() != "Vec" {
-            return false;
-        }
-        match path.segments[1].ident.name.as_ref() {
-            "new" => args.is_empty(),
-            "with_capacity" => args.len() == 1,
-            _ => false,
-        }
-    }
-
     fn try_typed_vec_new(&mut self) -> Option<CodegenResult<MirValue>> {
         let resolved = self.resolve_fn_name("vec_new");
         if self.module.find_function(resolved.as_ref()).is_some() {
@@ -9028,37 +8980,6 @@ impl<'ctx> MirLowerer<'ctx> {
         body: &ast::Block,
         label: Option<&ast::Ident>,
     ) -> CodegenResult<MirValue> {
-        // An `enumerate` index waiting for this loop's element must not be
-        // bound by a loop inside the iterable expression: hold it back until
-        // the iterable is lowered.
-        let pending_index = self.pending_enumerate.take();
-
-        if let ExprKind::MethodCall {
-            receiver,
-            method,
-            args,
-            ..
-        } = &iter.kind
-        {
-            // `for (i, x) in X.enumerate()`: a counter beside the loop over `X`.
-            if method.name.as_ref() == "enumerate" && args.is_empty() && pending_index.is_none() {
-                if let ast::PatternKind::Tuple(parts) = &pattern.kind {
-                    if parts.len() == 2 {
-                        return self
-                            .lower_for_enumerate(&parts[0], &parts[1], receiver, body, label);
-                    }
-                }
-            }
-            // `for i in (a..b).rev()`: the same values, last to first.
-            if method.name.as_ref() == "rev" && args.is_empty() && pending_index.is_none() {
-                if let Some((Some(start), Some(end), inclusive)) =
-                    Self::extract_range_parts(receiver)
-                {
-                    return self.lower_for_range_rev(pattern, start, end, inclusive, body, label);
-                }
-            }
-        }
-
         // Detect `.step_by(n)` on a range: `(start..end).step_by(n)` or `(start..=end).step_by(n)`
         if let ExprKind::MethodCall {
             receiver,
@@ -9159,8 +9080,6 @@ impl<'ctx> MirLowerer<'ctx> {
             _ => iter,
         };
         let iter_val = self.lower_expr(iter)?;
-        // The iterable is lowered: the loop chosen below binds the index.
-        self.pending_enumerate = pending_index;
         // `for x in &v`: iterate the vector, array or string behind the
         // reference. This used to fall through to an empty loop.
         let iter_val = match self.type_of_value(&iter_val) {
@@ -9281,7 +9200,7 @@ impl<'ctx> MirLowerer<'ctx> {
         // Bind pattern variable and save var_map so loop-body `let`
         // bindings do not leak into the enclosing scope.
         let saved_vars = self.var_map.clone();
-        self.bind_for_element(pattern, elem_local, &elem_ty)?;
+        self.bind_for_pattern(pattern, elem_local, &elem_ty)?;
 
         self.lower_block(body)?;
         self.var_map = saved_vars;
@@ -9364,7 +9283,7 @@ impl<'ctx> MirLowerer<'ctx> {
             },
         );
         let saved_vars = self.var_map.clone();
-        self.bind_for_element(pattern, elem, &elem_ty)?;
+        self.bind_for_pattern(pattern, elem, &elem_ty)?;
         self.lower_block(body)?;
         self.var_map = saved_vars;
 
@@ -9468,7 +9387,7 @@ impl<'ctx> MirLowerer<'ctx> {
         }
 
         let saved_vars = self.var_map.clone();
-        self.bind_for_element(pattern, elem_local, &elem_ty)?;
+        self.bind_for_pattern(pattern, elem_local, &elem_ty)?;
         self.lower_block(body)?;
         self.var_map = saved_vars;
 
@@ -9574,7 +9493,7 @@ impl<'ctx> MirLowerer<'ctx> {
         }
 
         let saved_vars = self.var_map.clone();
-        self.bind_for_element(pattern, elem_local, &byte_ty)?;
+        self.bind_for_pattern(pattern, elem_local, &byte_ty)?;
         self.lower_block(body)?;
         self.var_map = saved_vars;
 
@@ -9886,7 +9805,7 @@ impl<'ctx> MirLowerer<'ctx> {
         // Bind pattern variable and save var_map so loop-body `let`
         // bindings do not leak into the enclosing scope.
         let saved_vars = self.var_map.clone();
-        self.bind_for_element(pattern, payload, &payload_ty)?;
+        self.bind_for_pattern(pattern, payload, &payload_ty)?;
 
         self.lower_block(body)?;
         self.var_map = saved_vars;
@@ -9906,181 +9825,6 @@ impl<'ctx> MirLowerer<'ctx> {
     /// Bind a for-loop pattern to a local value.  Handles Ident, Tuple,
     /// Ref, and Wildcard patterns so that `for (a, b) in ...` and
     /// `for &x in ...` declare all needed locals.
-    /// Lower `for (i, x) in X.enumerate() { body }` as the loop over `X` with
-    /// a counter beside it. The counter starts at 0; the loop over `X` binds
-    /// `i` to it and adds 1 at the top of every pass (`bind_for_element`), so
-    /// a `continue` in the body keeps the count right. An iterable whose loop
-    /// does not bind an element that way is refused: the index would be
-    /// missing or wrong.
-    fn lower_for_enumerate(
-        &mut self,
-        index_pattern: &ast::Pattern,
-        elem_pattern: &ast::Pattern,
-        source: &ast::Expr,
-        body: &ast::Block,
-        label: Option<&ast::Ident>,
-    ) -> CodegenResult<MirValue> {
-        let builder = self
-            .current_fn
-            .as_mut()
-            .ok_or_else(|| CodegenError::Internal("No current function".to_string()))?;
-        let counter = builder.create_local(MirType::usize());
-        builder.assign(
-            counter,
-            MirRValue::Use(MirValue::Const(MirConst::Int(0, MirType::usize()))),
-        );
-        let outer_bound = self.enumerate_bound;
-        self.enumerate_bound = false;
-        self.pending_enumerate = Some((index_pattern.clone(), counter));
-        let result = self.lower_for(elem_pattern, source, body, label);
-        let bound = self.enumerate_bound;
-        self.pending_enumerate = None;
-        self.enumerate_bound = outer_bound;
-        let value = result?;
-        if !bound {
-            return Err(self.reject_at(
-                source,
-                "`for` cannot count the items of this `enumerate()` in the C backend".to_string(),
-                "enumerate a vector, array, slice or string, or count with a variable of your own"
-                    .to_string(),
-            ));
-        }
-        Ok(value)
-    }
-
-    /// Lower `for i in (start..end).rev() { body }` (or `start..=end`) as a
-    /// loop that counts down:
-    /// ```text
-    /// let mut i = end;            // end + 1 for an inclusive range
-    /// loop_cond:
-    ///   if i <= start { goto exit }
-    ///   i = i - 1
-    ///   body
-    ///   goto loop_cond
-    /// ```
-    /// The counter never goes below `start`, so an unsigned range that starts
-    /// at 0 does not wrap.
-    fn lower_for_range_rev(
-        &mut self,
-        pattern: &ast::Pattern,
-        start: &ast::Expr,
-        end: &ast::Expr,
-        inclusive: bool,
-        body: &ast::Block,
-        label: Option<&ast::Ident>,
-    ) -> CodegenResult<MirValue> {
-        let name = match &pattern.kind {
-            ast::PatternKind::Ident { name, .. } => Some(name.name.clone()),
-            ast::PatternKind::Wildcard => None,
-            _ => {
-                return Err(self.reject_at(
-                    end,
-                    "`for` over a reversed range needs a plain name for its value".to_string(),
-                    "write `for i in (a..b).rev()`".to_string(),
-                ));
-            }
-        };
-        let start_val = self.lower_expr(start)?;
-        let end_val = self.lower_expr(end)?;
-        // A literal bound takes the type of the other bound.
-        let iter_ty = if matches!(start_val, MirValue::Const(_)) {
-            self.type_of_value(&end_val)
-        } else {
-            self.type_of_value(&start_val)
-        };
-
-        let builder = self
-            .current_fn
-            .as_mut()
-            .ok_or_else(|| CodegenError::Internal("No current function".to_string()))?;
-        let first = builder.create_local(iter_ty.clone());
-        builder.assign(first, MirRValue::Use(start_val));
-        let counter = builder.create_local(iter_ty.clone());
-        builder.assign(counter, MirRValue::Use(end_val));
-        if inclusive {
-            builder.binary_op(
-                counter,
-                BinOp::Add,
-                values::local(counter),
-                MirValue::Const(MirConst::Int(1, iter_ty.clone())),
-            );
-        }
-
-        let cond_block = builder.create_block();
-        let body_block = builder.create_block();
-        let exit_block = builder.create_block();
-
-        self.loop_drop_depths.push(self.drop_scopes.len());
-        self.loop_stack
-            .push((cond_block, exit_block, label_name(label)));
-
-        let builder = self.current_fn.as_mut().unwrap();
-        builder.goto(cond_block);
-        builder.switch_to_block(cond_block);
-        let done = builder.create_local(MirType::Bool);
-        builder.binary_op(
-            done,
-            BinOp::Le,
-            values::local(counter),
-            values::local(first),
-        );
-        builder.branch(values::local(done), exit_block, body_block);
-
-        builder.switch_to_block(body_block);
-        builder.binary_op(
-            counter,
-            BinOp::Sub,
-            values::local(counter),
-            MirValue::Const(MirConst::Int(1, iter_ty)),
-        );
-
-        let saved_vars = self.var_map.clone();
-        if let Some(name) = name {
-            self.var_map.insert(name, counter);
-        }
-        self.lower_block(body)?;
-        self.var_map = saved_vars;
-
-        let builder = self.current_fn.as_mut().unwrap();
-        builder.goto(cond_block);
-
-        self.loop_stack.pop();
-        self.loop_drop_depths.pop();
-
-        let builder = self.current_fn.as_mut().unwrap();
-        builder.switch_to_block(exit_block);
-
-        Ok(values::unit())
-    }
-
-    /// Bind the element of one pass of a `for` loop. When the loop is the
-    /// inner loop of an `enumerate`, the index is bound first and the counter
-    /// moves on.
-    fn bind_for_element(
-        &mut self,
-        pattern: &ast::Pattern,
-        value_local: LocalId,
-        value_ty: &MirType,
-    ) -> CodegenResult<()> {
-        if let Some((index_pattern, counter)) = self.pending_enumerate.take() {
-            let builder = self
-                .current_fn
-                .as_mut()
-                .ok_or_else(|| CodegenError::Internal("No current function".to_string()))?;
-            let index = builder.create_local(MirType::usize());
-            builder.assign(index, MirRValue::Use(values::local(counter)));
-            builder.binary_op(
-                counter,
-                BinOp::Add,
-                values::local(counter),
-                MirValue::Const(MirConst::Int(1, MirType::usize())),
-            );
-            self.enumerate_bound = true;
-            self.bind_for_pattern(&index_pattern, index, &MirType::usize())?;
-        }
-        self.bind_for_pattern(pattern, value_local, value_ty)
-    }
-
     fn bind_for_pattern(
         &mut self,
         pattern: &ast::Pattern,
