@@ -454,6 +454,9 @@ impl<'ctx> TypeChecker<'ctx> {
         }
         match &item.kind {
             ItemKind::Struct(s) => {
+                if Self::has_derive(&item.attrs, "Clone") {
+                    self.ctx.mark_derive_clone(s.name.name.clone());
+                }
                 self.collect_struct(s, item.span, Self::has_linear_attr(&item.attrs))
             }
             ItemKind::Enum(e) => {
@@ -611,6 +614,34 @@ impl<'ctx> TypeChecker<'ctx> {
         }
 
         self.ctx.pop_scope();
+    }
+
+    /// Whether an item's attribute list has `#[derive(...)]` naming `target`.
+    /// The names inside the parentheses are raw tokens, read from the text of
+    /// the file each token belongs to.
+    fn has_derive(attrs: &[ast::Attribute], target: &str) -> bool {
+        attrs.iter().any(|attr| {
+            let is_derive = attr
+                .path
+                .segments
+                .first()
+                .is_some_and(|seg| seg.ident.name.as_ref() == "derive");
+            let ast::AttrArgs::Delimited(tokens) = &attr.args else {
+                return false;
+            };
+            is_derive
+                && tokens.iter().any(|tok| {
+                    let ast::TokenTree::Token(t) = tok else {
+                        return false;
+                    };
+                    if !matches!(t.kind, crate::lexer::TokenKind::Ident) {
+                        return false;
+                    }
+                    let (start, end) = (t.span.start.to_usize(), t.span.end.to_usize());
+                    crate::lexer::source_text_for_id(t.span.source_id)
+                        .is_some_and(|src| src.get(start..end) == Some(target))
+                })
+        })
     }
 
     /// Whether an item's attribute list contains the `#[linear]` marker.

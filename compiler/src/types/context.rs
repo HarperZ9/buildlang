@@ -72,6 +72,10 @@ pub struct TypeContext {
     /// Populated by check_mod so that `use` statements can import names.
     module_bindings: HashMap<Arc<str>, HashMap<Arc<str>, TypeScheme>>,
 
+    /// Names of the structs declared with `#[derive(Clone)]`. `.clone()`
+    /// through a reference to one of them gives the struct, not the reference.
+    derive_clone_types: std::collections::HashSet<Arc<str>>,
+
     /// Foreign function names declared by extern blocks.
     foreign_functions: HashSet<Arc<str>>,
 
@@ -360,6 +364,7 @@ impl TypeContext {
             inherent_methods: HashMap::new(),
             param_trait_bounds: HashMap::new(),
             module_bindings: HashMap::new(),
+            derive_clone_types: std::collections::HashSet::new(),
             foreign_functions: HashSet::new(),
             generic_function_types: HashMap::new(),
             foreign_statics: HashSet::new(),
@@ -896,6 +901,17 @@ impl TypeContext {
     // =========================================================================
     // MODULE BINDINGS
     // =========================================================================
+
+    /// Record that the struct `name` is declared with `#[derive(Clone)]`.
+    pub fn mark_derive_clone(&mut self, name: Arc<str>) {
+        self.derive_clone_types.insert(name);
+    }
+
+    /// Whether the type `def_id` is a struct declared with `#[derive(Clone)]`.
+    pub fn derives_clone(&self, def_id: DefId) -> bool {
+        self.lookup_type(def_id)
+            .is_some_and(|t| self.derive_clone_types.contains(&t.name))
+    }
 
     /// Register a module's exported bindings for use-statement resolution.
     pub fn register_module_bindings(

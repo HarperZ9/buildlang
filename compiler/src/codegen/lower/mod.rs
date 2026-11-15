@@ -157,6 +157,11 @@ pub struct MirLowerer<'ctx> {
     closure_count: u32,
     /// Impl method registry: maps (TypeName, MethodName) -> mangled function name.
     impl_methods: HashMap<(Arc<str>, Arc<str>), Arc<str>>,
+    /// Names of the `Type_clone` functions made for `#[derive(Clone)]`. Each
+    /// takes `self` by value. A call may be lowered before the function
+    /// exists (the struct is declared further down), so the call site reads
+    /// this set to know the receiver is wanted by value.
+    derived_clone_fns: HashSet<Arc<str>>,
     /// Generic function ASTs stored for monomorphization: name -> FnDef clone.
     generic_functions: HashMap<Arc<str>, ast::FnDef>,
     /// Generic enum ASTs stored for monomorphization: name -> EnumDef clone.
@@ -390,6 +395,7 @@ impl<'ctx> MirLowerer<'ctx> {
             source: None,
             closure_count: 0,
             impl_methods: HashMap::new(),
+            derived_clone_fns: HashSet::new(),
             generic_functions: HashMap::new(),
             generic_enums: HashMap::new(),
             generic_structs: HashMap::new(),
@@ -463,6 +469,7 @@ impl<'ctx> MirLowerer<'ctx> {
             source: Some(source),
             closure_count: 0,
             impl_methods: HashMap::new(),
+            derived_clone_fns: HashSet::new(),
             generic_functions: HashMap::new(),
             generic_enums: HashMap::new(),
             generic_structs: HashMap::new(),
@@ -1499,6 +1506,7 @@ impl<'ctx> MirLowerer<'ctx> {
                         let method_name: Arc<str> = Arc::from(format!("{}_clone", type_name));
                         self.impl_methods
                             .insert((type_name.clone(), Arc::from("clone")), method_name.clone());
+                        self.derived_clone_fns.insert(method_name.clone());
                         // The actual function will be generated in lower_item pass
                         // by checking for this registered method.
                     }
