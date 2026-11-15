@@ -9846,7 +9846,8 @@ fn find_stdlib_path() -> Option<PathBuf> {
 fn resolve_modules(ast: &mut Module, source_dir: &Path) -> Result<(), i32> {
     let mut ledger = None;
     let mut visiting = HashSet::new();
-    resolve_modules_with_prefix(ast, source_dir, "", &mut ledger, &mut visiting)
+    let mut loaded = LoadedModules::default();
+    resolve_modules_with_prefix(ast, source_dir, "", &mut ledger, &mut visiting, &mut loaded)
 }
 
 fn resolve_modules_recording_inputs(
@@ -9856,11 +9857,34 @@ fn resolve_modules_recording_inputs(
 ) -> Result<(), i32> {
     let mut ledger = Some(ledger);
     let mut visiting = HashSet::new();
-    resolve_modules_with_prefix(ast, source_dir, "", &mut ledger, &mut visiting)
+    let mut loaded = LoadedModules::default();
+    resolve_modules_with_prefix(ast, source_dir, "", &mut ledger, &mut visiting, &mut loaded)
+}
+
+/// Every module file merged so far, by canonical path, and every function
+/// name the merge produced.
+///
+/// A file is merged once. `mod geom;` in two files used to merge `geom.bld`
+/// twice: its structs were then defined twice, and its functions got one
+/// name per loader (`geom_area` and `use2_geom_area`). A second `mod` of a
+/// merged file now only teaches the declaring file the names.
+#[derive(Default)]
+struct LoadedModules {
+    /// Canonical path to the module's prefix and the bare names of its
+    /// functions.
+    files: HashMap<PathBuf, (String, Vec<String>)>,
+    /// Function names that are already final (`geom_area`). A parent module
+    /// that merges them again must not prefix them a second time.
+    final_names: HashSet<String>,
 }
 
 /// Resolve modules with a prefix for nested module support.
-/// The prefix is prepended to all mangled names (e.g., "utils_" for sub-modules of utils).
+///
+/// `prefix` is the chain of directory modules above `source_dir`. A module's
+/// functions are named after the module's own path, whatever file declares
+/// it: `geom.bld` beside the entry file gives `geom_area` (what the path call
+/// `geom::area` lowers to), `sub/mod.bld` gives `sub_`, `sub/x.bld` declared
+/// by it gives `sub_x_`, and a standard library module gives its own name.
 ///
 /// `visiting` holds the canonical paths of the module files on the current
 /// resolution stack. It turns an import cycle -- including a `mod NAME;` in a
@@ -9872,6 +9896,7 @@ fn resolve_modules_with_prefix(
     prefix: &str,
     ledger: &mut Option<&mut InputDigestLedger>,
     visiting: &mut HashSet<PathBuf>,
+    loaded: &mut LoadedModules,
 ) -> Result<(), i32> {
     // Collect module names from `mod foo;` declarations (content == None).
     //
@@ -9898,6 +9923,8 @@ fn resolve_modules_with_prefix(
     }
 
     let mut new_items: Vec<ast::Item> = Vec::new();
+    // Bare function name to its final name, for every module this file declares.
+    let mut imported_fns: HashMap<String, String> = HashMap::new();
 
     for mod_name in &mod_names {
         // Look for foo.bld or foo/mod.bld
@@ -9907,15 +9934,34 @@ fn resolve_modules_with_prefix(
         // Search order: source directory → stdlib directory → skip
         let stdlib_file = find_stdlib_path().map(|p| p.join(format!("{}.bld", mod_name)));
 
-        let (actual_file, sub_source_dir) = if mod_file.exists() {
-            (mod_file, source_dir.to_path_buf())
+        // `child_prefix` is the prefix handed to the module's own `mod`
+        // declarations: the directory chain it sits in.
+        let own_prefix = if prefix.is_empty() {
+            mod_name.clone()
+        } else {
+            format!("{}_{}", prefix, mod_name)
+        };
+        let (actual_file, sub_source_dir, full_prefix, child_prefix) = if mod_file.exists() {
+            (
+                mod_file,
+                source_dir.to_path_buf(),
+                own_prefix,
+                prefix.to_string(),
+            )
         } else if mod_dir_file.exists() {
-            (mod_dir_file, source_dir.join(mod_name))
+            (
+                mod_dir_file,
+                source_dir.join(mod_name),
+                own_prefix.clone(),
+                own_prefix,
+            )
         } else if let Some(ref sf) = stdlib_file {
             if sf.exists() {
                 (
                     sf.clone(),
                     sf.parent().unwrap_or(Path::new(".")).to_path_buf(),
+                    mod_name.clone(),
+                    String::new(),
                 )
             } else {
                 continue;
@@ -9937,6 +9983,15 @@ fn resolve_modules_with_prefix(
                 mod_name
             );
             return Err(1);
+        }
+
+        // Merged already, by this file or another: only the names are new here.
+        if let Some((merged_prefix, fns)) = loaded.files.get(&module_key) {
+            for bare in fns {
+                imported_fns.insert(bare.clone(), format!("{}_{}", merged_prefix, bare));
+            }
+            visiting.remove(&module_key);
+            continue;
         }
 
         // Read and parse the module file
@@ -9977,35 +10032,43 @@ fn resolve_modules_with_prefix(
         })?;
         report_parse_errors(&actual_file, &mod_source_file, mod_parser.errors())?;
 
-        // The full prefix for this module's items
-        let full_prefix = if prefix.is_empty() {
-            mod_name.clone()
-        } else {
-            format!("{}_{}", prefix, mod_name)
-        };
-
         // Recursively resolve sub-modules within this module
         resolve_modules_with_prefix(
             &mut mod_ast,
             &sub_source_dir,
-            &full_prefix,
+            &child_prefix,
             ledger,
             visiting,
+            loaded,
         )?;
         // Done with this module's subtree; drop it from the stack so a sibling
         // branch may legitimately include the same module again (a diamond is
         // not a cycle).
         visiting.remove(&module_key);
 
-        // Collect names defined in this module (for intra-module rewriting)
+        // Collect names defined in this module (for intra-module rewriting).
+        // Functions merged in from the module's own sub-modules carry their
+        // final names already and are left as they are.
         let mod_defined: std::collections::HashSet<String> = mod_ast
             .items
             .iter()
             .filter_map(|item| match &item.kind {
-                ItemKind::Function(f) => Some(f.name.name.to_string()),
+                ItemKind::Function(f) if !loaded.final_names.contains(f.name.name.as_ref()) => {
+                    Some(f.name.name.to_string())
+                }
                 _ => None,
             })
             .collect();
+        let mut own_fns: Vec<String> = mod_defined.iter().cloned().collect();
+        own_fns.sort();
+        for bare in &own_fns {
+            let final_name = format!("{}_{}", full_prefix, bare);
+            imported_fns.insert(bare.clone(), final_name.clone());
+            loaded.final_names.insert(final_name);
+        }
+        loaded
+            .files
+            .insert(module_key.clone(), (full_prefix.clone(), own_fns));
 
         // Merge module items with name prefixing.
         // Functions are prefixed: `add` → `math_helpers_add`
@@ -10013,6 +10076,15 @@ fn resolve_modules_with_prefix(
         // `math_helpers::add(...)` emits a call to `math_helpers_add`.
         for item in mod_ast.items {
             match item.kind {
+                ItemKind::Function(f) if !mod_defined.contains(f.name.name.as_ref()) => {
+                    // A sub-module's function: named and rewritten already.
+                    new_items.push(ast::Item::new(
+                        ItemKind::Function(f),
+                        Visibility::default(),
+                        Vec::new(),
+                        Span::dummy(),
+                    ));
+                }
                 ItemKind::Function(f) => {
                     let mut prefixed_fn = *f;
                     let original_name = prefixed_fn.name.name.to_string();
@@ -10045,27 +10117,6 @@ fn resolve_modules_with_prefix(
                 }
                 _ => {
                     new_items.push(item);
-                }
-            }
-        }
-    }
-
-    // Build a map of all imported function names: bare_name → prefixed_name
-    let mut imported_fns: HashMap<String, String> = HashMap::new();
-    for item in &new_items {
-        if let ItemKind::Function(f) = &item.kind {
-            let prefixed = f.name.name.to_string();
-            // Extract the bare name by stripping the module prefix
-            // e.g., "core_i32_min" → "i32_min", "math_lerp_f64" → "lerp_f64"
-            for mod_name in &mod_names {
-                let module_prefix = if prefix.is_empty() {
-                    mod_name.clone()
-                } else {
-                    format!("{}_{}", prefix, mod_name)
-                };
-                let prefix_with_sep = format!("{}_", module_prefix);
-                if let Some(bare) = prefixed.strip_prefix(&prefix_with_sep) {
-                    imported_fns.insert(bare.to_string(), prefixed.clone());
                 }
             }
         }
