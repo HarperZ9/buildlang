@@ -1,0 +1,1016 @@
+diff --git a/.codex/config.toml b/.codex/config.toml
+new file mode 100644
+index 0000000..595c385
+--- /dev/null
++++ b/.codex/config.toml
+@@ -0,0 +1,5 @@
++[shell_environment_policy]
++inherit = "core"
++
++[shell_environment_policy.set]
++CLAUDE_CODE_MAX_OUTPUT_TOKENS = "64000"
+diff --git a/.gitignore b/.gitignore
+index 30db79a..d7bf646 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -52,3 +52,6 @@ programs/*.c
+ 
+ # coherence-membrane build-state witnesses (per-machine)
+ tools/coherence/witness/
++# Python bytecode caches (global)
++__pycache__/
++*.pyc
+diff --git a/STATUS.md b/STATUS.md
+index 741faad..de19479 100644
+--- a/STATUS.md
++++ b/STATUS.md
+@@ -107,13 +107,306 @@ New real modules join the organism by registering in components.toml.
+ ## Compiler organ deep-codegen finding (2026-06-05)
+ 
+ The Compiler organ (tools/coherence/compiler_oracle.py) adjudicates the deeper
+-claim "the emitted C compiles", beyond the shallow "quantac exits 0":
+-- Self-contained programs color_test, wc, base64: CONFIRMED (transpile + cl /c clean).
+-- programs/calc: CONTRADICTED at transpile (mutability mismatch, calc.quanta:120).
+-- Library modules spectrum, delta: transpile but the emitted C FAILS cl -- a real
+-  name-prefixing codegen bug (typedef `hdr_ColorPrimaries` but a bare
+-  `ColorPrimaries` field reference; same class for `BTreeMap` in delta).
+-So "transpiles cleanly" (the 16 green .quanta modules in the organism check) does
+-NOT imply "emits compilable C". The membrane surfaced this; the codegen prefixing
+-fix is open quantalang work. The organism gate intentionally keeps "transpiles"
+-as the module bar (a real if shallow check); the deep check is a separate witness.
+\ No newline at end of file
++claim "the emitted C compiles", beyond the shallow "quantac exits 0". Ground
++truth below, re-scanned after two codegen fixes landed.
++
++Fixed (quantalang branch fix/codegen-module-prefix, commit 392ee5d):
++- Module forward-reference prefixing. A struct or enum field whose type was
++  declared later in the same inline module kept its bare name, so the emitted C
++  named an undefined identifier (a bare ColorPrimaries field where only
++  hdr_ColorPrimaries is defined). collect_inline_mod now forward-declares every
++  module type (bare to module-prefixed) before lowering any item body. Verified:
++  the spectrum field is now hdr_ColorPrimaries primaries.
++- Primitive tuple field typedefs. A tuple field carried as MirType::Tuple (e.g.
++  an xy chromaticity, Tuple_f32_f32) was referenced but never typedef-ed. Now
++  emitted, gated to all-primitive element tuples. Tuples of named structs still
++  need topological ordering (the typedef must follow the member struct full
++  definition) and are left as a known gap.
++- Regression: 337 codegen tests pass, 0 failed (incl. C-backend snapshots).
++
++Membrane-wide scan (compiler_oracle.py adjudicate-all, 16 .quanta modules): no
++module compiles standalone yet. The dominant blocker is single-module isolation:
++the oracle compiles each module in isolation (its lib.quanta alone), so
++cross-module and stdlib types are absent. Witnessed identifiers: Box (oracle,
++entropy), BTreeMap (delta), Vec2 (nova), Mat4 (lumina), XYZ (calibrate), Version
++(nexus), SnapshotId (entangle), ID3D11RenderTargetView (refract). This is the
++documented cross-module-resolution caveat, not a codegen defect. Other real
++blockers surfaced: spectrum declares pub mod harmony twice (enum redefinition, a
++source defect a stricter frontend would reject); field-tensor redefines
++Tuple_usize_usize; foundation applies == to QuantaString; prism, neutrino, and
++wavelength fail at transpile with mutability mismatches. Self-contained programs
++color_test, wc, base64 remain CONFIRMED.
++
++Conclusion (truth-over-approval): "transpiles cleanly" (the 16 green modules in
++the organism check) does NOT imply "compiles standalone". The organism gate keeps
++transpile as the module bar (a real if shallow check); the compiler organ is the
++separate, deeper witness. Reaching CONFIRMED requires cross-module linking
++(architectural), per-module source dedup, and the mutability fixes -- tracked
++here, not yet done.
++
++
++## Compiler organ -- second codegen pass (2026-06-05, session continuation)
++
++A second adjudication-driven pass landed five verified compiler fixes on the
++quantalang branch fix/codegen-module-prefix. Each was diagnosed against the
++compiler organ (tools/coherence/compiler_oracle.py), implemented, then verified
++by rebuild plus the full compiler test suite (612 pass / 0 failed) and the
++337-test codegen slice. Method discipline held throughout: every fix was
++confirmed by re-adjudication (observe, never simulate), and the generated C was
++read, not reasoned about.
++
++Fixes (inner-repo commits on fix/codegen-module-prefix):
++- e844bda -- Tuple typedefs were emitted twice (for a tuple that is both a
++  struct-field type and a registered type definition); once de-duplicated, a
++  tuple used by value was emitted after its user. The pre-emit step now skips
++  already-declared tuples, and the topological emitter records a dependency on a
++  tuple's own typedef. field-tensor's C2011 redefinition and the follow-on C2079
++  ordering both clear.
++- aab75e7 -- Impl methods returning a tuple of named structs never registered the
++  tuple's type definition (only free functions did), so the C referenced an
++  undeclared Tuple_RGB_RGB. Registration is now mirrored into both impl-method
++  lowering paths. (Roadmap item 4: tuple-of-named-struct ordering. lumina and
++  refract now emit and correctly order these tuples.)
++- 9d387fe -- Indexing a Vec<T> typed every element as i32 (the element-type match
++  lacked a Vec arm), selecting the wrong runtime getter and defeating string
++  equality. foundation's QuantaString '==' (C2088) clears and now lowers to a
++  string compare.
++- 09ec158 -- Box/Rc/Arc and BTreeMap were not lowered as intrinsics and emitted
++  undeclared C identifiers. Box/Rc/Arc now lower to a pointer and BTreeMap shares
++  the map machinery. (Roadmap item 2, stdlib half. delta's Box/BTreeMap clear;
++  oracle and entropy advance past Box. Honest caveat: BTreeMap aliases the
++  unordered string-keyed map and Box<dyn Trait> becomes a thin pointer, so
++  ordered/typed-key maps and trait-object dispatch remain separate gaps.)
++- 9f69b60 -- The type checker treated reference mutability as invariant at
++  argument positions, rejecting a &mut T argument where a &T parameter is
++  expected. A call-boundary coercion now accepts that sound reborrow while unify
++  stays invariant everywhere else. (Roadmap item 3. prism, neutrino, wavelength
++  now transpile.)
++
++Refreshed ground truth (adjudicate-all): all 16 modules remain CONTRADICTED, but
++the blockers moved deeper -- each module carries several stacked defects, and one
++layer was peeled per module. New first-blockers surfaced (field-tensor: a
++function-pointer field syntax; prism/neutrino: a char-before-bool enum emission;
++foundation: a map-iteration tuple assignment; oracle: dyn_Kernel; delta:
++DirectionalBarrierType). "Errors moved deeper" is the witnessed evidence the
++fixes landed; reaching CONFIRMED requires clearing the remaining layers and the
++items below.
++
++Remaining roadmap, by tractability:
++- DUPLICATE SIBLING DEFINITIONS (roadmap item 1, plus the nexus failure). Five
++  modules declare a top-level module name twice (spectrum: harmony, quantization;
++  delta: market_making; oracle: changepoint, ensemble; quantum-finance:
++  risk/oms/multi_asset/ml_signals; forge: tests), and nexus declares ModConflict
++  and ConflictType twice. The frontend accepts duplicates and emits both bodies,
++  producing the C redefinitions. The principled fix is a frontend rejection (as
++  Rust does), but it is entangled: it turns the organism transpile gate red for
++  the three registered files (spectrum, delta, oracle) and requires source
++  de-duplication to restore green -- and the duplicates genuinely differ
++  (spectrum's two harmony modules carry different variant sets), so they cannot be
++  auto-merged. This needs an authoring decision; it is not a single clean compiler
++  change. Held for direction.
++- CROSS-MODULE AND FFI RESOLUTION (roadmap item 2, cross-module half). nova,
++  calibrate, lumina, entangle, refract reference types defined in sibling modules
++  (titan_color = spectrum, Vec2/Mat4 = foundation) or external C (refract:
++  ID3D11RenderTargetView). Single-file compilation cannot resolve these; the clean
++  path is a project/registry build (a Quanta.toml dependency graph and a
++  module-name index) plus an opaque/extern type mechanism for FFI. Architectural;
++  deferred. entangle's SnapshotId is undefined anywhere -- a source defect inside
++  that envelope.
++
++## Compiler organ -- third codegen pass (2026-06-05, seam continuation)
++
++Three further codegen fixes on quantalang fix/codegen-module-prefix, each verified
++by rebuild + the full suite (612 pass / 0 failed) and re-adjudication:
++- 9a90491 -- enum unit-variant placeholder "char _<Variant>;" is escaped against
++  reserved C identifiers (a variant named Bool produced _Bool, the C99 keyword;
++  C2632). prism and neutrino clear the enum emission.
++- a331f3f -- the C backend synthesizes typedefs for every tuple type referenced
++  anywhere (parameters, locals, fields), not just literals and return types.
++  Witnessed via cl-harvest: undefined Tuple_* identifiers 14 -> 0.
++- 7b54733 -- const identifiers used as fixed-array lengths now resolve
++  (try_const_eval gains an Ident/Path arm backed by a const_values pre-pass);
++  [usize; MAX_DIMS] no longer emits an illegal zero-sized array.
++
++Witnessed de-duplication inventory committed at docs/DEDUP-INVENTORY.md: 67
++duplicate-sibling-definition families (classified IDENTICAL / SUPERSET / DIFFERENT)
++plus the C-compiler-enumerated referenced-but-undefined set (7 SOURCE-PHANTOM, 25
++CROSS-MODULE incl. 6 ambiguous, 3 FFI, and codegen-side gaps). This draws the seam:
++source-authoring work (duplicate families, phantoms, cross-module ownership) on one
++side; remaining compiler work (cross-module linking, FFI extern types, generic and
++method emission) on the other.
++
++## Generic/method emission -- investigation (2026-06-05, witnessed; NOT shipped)
++
++Investigated the broad `Self*`-receiver leak (unresolved Self in emitted C across
++12 modules: prism 237, refract 230, entangle 78, calibrate 36, neutrino 27,
++oracle 26, field-tensor/nexus 20, ...). Findings, all witnessed:
++
++- The Inventory-2 CODEGEN-fn bucket (ColorTransform_new, ScriptEngine_new, etc.)
++  is CASCADE NOISE: those methods ARE emitted correctly; cl flagged them only
++  because earlier undefined types poisoned their signature lines.
++- The real defect: a PARSER bug. A generic method with an `Fn(...) -> T` bound
++  (e.g. `fn map<F: Fn(f64) -> f64>(&self, f: F)`) is mis-parsed -- parse_path
++  reads `Fn` and stops at `(`, leaving `(...) -> T` to derail the generic-param
++  list and silently TRUNCATE the impl block. Every method after it parses as a
++  top-level free function -> bare name + unresolved `Self*` receiver. Minimal
++  repro: `impl S { fn make()->S{...} fn apply<F: Fn(f64)->f64>(&self,f:F)->S{...}
++  fn doubled(&self)->S{...} }` emits `doubled(Self* self)` (top-level), not
++  `S_doubled`.
++- Fixing the parser (consume the Fn-sugar) is correct but UN-MASKS a cascade of
++  unsupported generic-system features that the truncation was hiding:
++  closure-type-param callability (`type F is not callable`), generic-method
++  return inference (`function returns () but expected DefId`), method-on-
++  type-param (`type T has no method shrink`). A parser+callability fix recovered
++  3 modules (entropy/field-tensor/wavelength, leak reduced) and kept 612 tests
++  green, but regressed 5 modules (oracle/prism/calibrate/neutrino/refract) from
++  false-green transpile to honest transpile-failure.
++
++Conclusion (truth-over-approval): completing generic/method emission is a major
++generic-system feature spanning parser + AST (retain Fn-bound signature) +
++typecheck (callability, return inference, associated-method resolution) +
++method-with-closure monomorphization -- not a clean fix. The partial fix was
++REVERTED to avoid a net regression (the organism transpile gate going red for 5
++modules without delivering working generic methods). The false-green is itself a
++truth gap: those modules "transpile" but emit broken C and use unsupported
++features. Tracked here for a scoped feature effort.
++
++## Generic/method emission -- core implemented (2026-06-06, quantalang 1641c97)
++
++Supersedes the prior "investigation (NOT shipped)" note: the compiler-side core
++is now implemented and committed (612 tests pass throughout):
++- Parser: parse_type_bounds consumes Fn-trait sugar `Fn(A,B) -> C` (covers generic
++  bounds and, via the shared bound parser, dyn/impl Trait). Fixes the silent impl
++  truncation that leaked post-generic methods as free functions (bare name +
++  unresolved Self* receiver).
++- Typecheck: a call on a generic type parameter (or &/&mut of a param/var) is
++  callable (fresh var, deferred to monomorphization); bodies of generic functions
++  and of methods in a generic impl are no longer strict-checked abstractly.
++
++Verified on clean code (repro: an impl with a closure-bounded generic method
++followed by another method now emits Type_method(T* self) for both). Recovered to
++correct transpile/emission: calibrate, neutrino, entropy, field-tensor (partial),
++wavelength.
++
++Current ground truth (adjudicate/transpile, 16 modules): 13 transpile, 3 fail. The
++remaining tail is partly NOT compiler-fixable:
++- oracle FAIL -- DefId<?T> collision in ConformalPredictor, caused by oracle's
++  duplicate `mod`s (changepoint x2, ensemble x3). Source de-dup, not a compiler bug.
++- entangle (78 residual Self*) -- MALFORMED SOURCE: a `pub fn route_task` is spliced
++  into the middle of another method's `match` expression (a botched "// Stubbed"
++  edit). Parser error-recovery leaks subsequent methods. Source defect.
++- prism / refract FAIL -- `new()` returns `()` vs the struct type; a typecheck issue
++  lowering struct fields of type Option<Box<dyn Fn(...) + Send + Sync>> (the field in
++  isolation lowers fine, so it is a module-specific interaction). Compiler-side,
++  needs deeper work.
++- field-tensor (13 residual Self*) -- a module-specific impl truncation not yet
++  pinned; its map<F: Fn(f64)->f64> is byte-identical to a working repro, so the
++  trigger is elsewhere in that impl.
++
++Conclusion: the generic/method-emission core works for clean code and is committed.
++Full per-module completion is blocked by (a) source defects in oracle/entangle
++(de-dup / malformed-stub cleanup -- source side) and (b) a long tail of
++module-specific compiler edge-cases (prism/refract field lowering, field-tensor
++truncation) that each need dedicated investigation. The committed milestone
++intentionally trades 3 modules from false-green transpile (passing while emitting
++broken C) to honest transpile-failure.
++
++## Cross-module compilation -- oracle mechanism (2026-06-06, quanta-universe 05d8d7d)
++
++The compiler organ can now compile a module WITH its transitive dependencies:
++`python tools/coherence/compiler_oracle.py adjudicate-deps[-all]`. It builds a
++module-name index (module <Name> decls across */lib.quanta, dir-name fallback),
++resolves transitive `use <Mod>::...` deps, concatenates them ahead of the target,
++and adjudicates the combined unit.
++
++Ground truth (adjudicate-deps-all): cross-module linking RESOLVES the cross-module
++type-reference class. Modules that pulled deps advanced from undefined-identifier
++errors to deeper ones in the combined unit: calibrate XYZ -> "no field white";
++nova Vec2 -> "no field title"; lumina Mat4 -> "no method scale"; wavelength ->
++non-exhaustive match. No module compiles-with-deps yet -- residual blockers are
++deeper type mismatches and the dependency modules' OWN source defects (e.g.
++spectrum's duplicate mods). Modules with no resolvable cross-module import show
++[+0 deps]; their blockers are source phantoms / duplicate definitions, not
++cross-module. Mechanism validated: a clean dep+user concatenation emits C that cl
++compiles (type-ordered). Kept oracle-side (observation); a compiler-side port
++(quantac resolving cross-module directly) is deferred until the deeper issues and
++dep source defects are cleared, since modules cannot compile-with-deps until then.
++
++## Codegen: Vec-of-aggregate indexing + the lowering type-inference root (2026-06-06, 26aac3e)
++
++Fixed (quantalang 26aac3e): indexing a Vec whose element is a struct/tuple selected
++the scalar i32 getter; aggregate elements now use the runtime generic
++quanta_vec_get(handle.inner, i) with cast+deref. Broad (any Vec<struct>/Vec<tuple>
++index). 337 codegen tests pass. foundation advanced past its Vec<tuple> access.
++
++Root-cause finding (foundation, a CLEAN module -- no dup-defs): its remaining
++blockers are a deep chain of LOWERING type-inference defaults-to-i32. Next was
++`let edges = <match/if with a map.get(node) branch>` -- the binding type defaulted
++to i32 instead of the value type (Vec). Traced: the let-binding type is
++type_of_value(init) (correct for direct calls), but for a CONDITIONAL/match init
++the merged result local defaults to i32, so the binding mis-types. This is a
++systemic weakness: the codegen lowering's own type inference (separate from the
++typechecker) falls back to i32 in several places (binding types, conditional-result
++merges, some collection-accessor returns). It is the recurring root behind the
++clean modules' residual codegen failures. A typechecker-side .get fix was tried and
++reverted -- ineffective, because the binding type comes from the lowering, not the
++typechecker.
++
++Assessment: per-module compilation bottoms out in either source defects (dup-defs /
++malformed stubs -- source side) or this systemic lowering-inference weakness. The
++highest-leverage remaining compiler work is hardening the lowering's type
++propagation (reduce the i32 defaults), which is a sizable, higher-risk change to a
++shared base -- not a clean per-site fix.
++
++## Lowering type-inference hardening -- begun (2026-06-06, quantalang dfaf158, 97e8179)
++
++Started driving out the codegen lowering's i32 defaults. New tool: infer_expr_type
++-- a best-effort static AST-expression type inferrer (literals, idents, free
++calls, collection method-calls map.get->V / vec.pop/first/last->T, struct
++literals, self.field via pointer-peel, if/match/block tails). Applied at two
++result-merge sites that previously guessed:
++- lower_match result type: was the enclosing function's return type (enum) or the
++  SCRUTINEE type otherwise; now inferred from the arm bodies. Verified:
++  `let p = match n { _ => Pt {..} }` types p as Pt (was scrutinee i64), p.x
++  compiles; `let p = match n { _ => self.pt }` resolves via the field type.
++- Some(x)/TupleStruct match-arm binding: infers from the scrutinee expression
++  when no tracked Option inner type exists, instead of the scrutinee local type.
++612 tests pass; each fix verified cl-clean on a focused repro.
++
++Note: this is real hardening but does NOT move the modules' single-module
++first-blockers, which are dominated by other classes (cross-module types,
++duplicate definitions, dyn_Fn, the Option/V mismatch). foundation specifically
++bottoms out in an anomaly where `match self.edges.get(node) { Some(edges) => }`
++types `edges` i32 even though the codegen emits the correct value-typed getter
++(quanta_hmap_get_val_QuantaVecHandle) -- the get-result local is typed i32 while
++the emitted getter knows it is a Vec, a contradiction that resists per-site fixing
++and needs deeper tracing of the get-result local typing. Tracked, not yet cracked.
++
++## Source-side de-duplication pass (2026-06-06)
++
++Targeted the duplicate-sibling-definition blockers in spectrum, oracle, nexus.
++- spectrum: the second `pub mod harmony` (4 colliding inner defs) renamed to
++  harmony_palette -- conservative (no deletion); the harmony_HarmonyType C2365
++  redefinition is gone. spectrum advances to a separate pre-existing codegen bug
++  (C2059 '[' at module.c:3066). (quantization's two blocks are disjoint -> no
++  collision -> left as harmless concatenation.)
++- oracle: ConformalPredictor was defined twice -- a generic `<F: Fn..>` in
++  mod conformal (def+impl only, never constructed) plus a non-generic top-level
++  one with base_model. The generic's bare-name registration won resolution, so the
++  non-generic construction resolved to DefId<?T> (no base_model). Renamed the
++  unused generic to ConformalPredictorGeneric; oracle advances past 7512 to a
++  separate source issue (undefined `relu`). (CompositeKernel enum/struct name
++  clash remains latent, not the current blocker.)
++- nexus: NOT de-duped. It carries two FULL parallel implementations of 10 types
++  (ModConflict/ConflictType/ConflictSeverity/ModPackage/ProfileManager/
++  GameDetector/VirtualFileSystem/AssetRedirector/ModDependency/ModFile), each with
++  impls in BOTH clusters (e.g. impl ModPackage @199 and @4759), with different
++  field types (cluster1 ConflictType vs cluster2 ModConflictType -- the latter
++  undefined). Choosing which implementation is canonical is an authoring decision,
++  not a safe mechanical de-dup; deferred.
++
++Net: the de-dup cleared spectrum's and oracle's own duplicate-definition blockers
++(both advance to separate, non-dup issues). It did NOT make any module compile or
++immediately unblock the spectrum-dependents -- those fail earlier at transpile on
++their own API mismatches (calibrate .white, nova .title, lumina .scale), unrelated
++to the spectrum dup. nexus needs an operator decision on its two implementations.
+diff --git a/docs/DEDUP-INVENTORY.md b/docs/DEDUP-INVENTORY.md
+new file mode 100644
+index 0000000..02bcb7c
+--- /dev/null
++++ b/docs/DEDUP-INVENTORY.md
+@@ -0,0 +1,470 @@
++# QUANTA de-duplication inventory (witnessed from raw bytes)
++
++## INVENTORY 1: duplicate sibling definitions
++
++Classification: IDENTICAL (drop one) | SUPERSET (merge to the larger) |
++DIFFERENT (disjoint members -> rename/namespace or hand-merge) | mod (the
++duplicate is a module; COLLIDE lines are the inner defs that mangle to the
++same C name).
++
++### Summary
++
++| module | definition | copies | classification |
++|---|---|---|---|
++| axiom | enum Term | 2 | DIFFERENT->rename/namespace or manual merge |
++| axiom | struct Clause | 2 | DIFFERENT->rename/namespace or manual merge |
++| config | enum ConfigError | 2 | SUPERSET->merge-to-superset |
++| debug | enum StopReason | 2 | DIFFERENT->rename/namespace or manual merge |
++| debug | struct MemoryPermissions | 2 | IDENTICAL |
++| debug | struct MemoryRegion | 2 | SUPERSET->merge-to-superset |
++| debug | struct MemorySnapshot | 2 | DIFFERENT->rename/namespace or manual merge |
++| delta | mod market_making | 2 | mod (colliding inner: 0) |
++| forge | mod tests | 2 | mod (colliding inner: 0) |
++| forge | struct AllocationEvent | 2 | DIFFERENT->rename/namespace or manual merge |
++| forge | struct Hotspot | 2 | DIFFERENT->rename/namespace or manual merge |
++| forge | struct MemoryProfiler | 2 | DIFFERENT->rename/namespace or manual merge |
++| lsp | enum SemanticTokenType | 2 | SUPERSET->merge-to-superset |
++| lsp | struct Scope | 2 | DIFFERENT->rename/namespace or manual merge |
++| lsp | struct SemanticToken | 2 | DIFFERENT->rename/namespace or manual merge |
++| lsp | struct SemanticTokenModifiers | 2 | DIFFERENT->rename/namespace or manual merge |
++| neutrino | struct QuantizationConfig | 2 | DIFFERENT->rename/namespace or manual merge |
++| neutrino | struct QuantizedTensor | 2 | SUPERSET->merge-to-superset |
++| nexus | enum ConflictSeverity | 2 | DIFFERENT->rename/namespace or manual merge |
++| nexus | enum ConflictType | 2 | DIFFERENT->rename/namespace or manual merge |
++| nexus | struct AssetRedirector | 2 | DIFFERENT->rename/namespace or manual merge |
++| nexus | struct GameDetector | 2 | DIFFERENT->rename/namespace or manual merge |
++| nexus | struct ModConflict | 2 | DIFFERENT->rename/namespace or manual merge |
++| nexus | struct ModDependency | 2 | DIFFERENT->rename/namespace or manual merge |
++| nexus | struct ModFile | 2 | DIFFERENT->rename/namespace or manual merge |
++| nexus | struct ModPackage | 2 | DIFFERENT->rename/namespace or manual merge |
++| nexus | struct ProfileManager | 2 | DIFFERENT->rename/namespace or manual merge |
++| nexus | struct VirtualFileSystem | 2 | DIFFERENT->rename/namespace or manual merge |
++| oracle | mod changepoint | 2 | mod (colliding inner: 0) |
++| oracle | mod ensemble | 3 | mod (colliding inner: 0) |
++| pkg | enum AnalyticsEventType | 2 | SUPERSET->merge-to-superset |
++| pkg | enum DependencyType | 2 | DIFFERENT->rename/namespace or manual merge |
++| pkg | struct AnalyticsEvent | 2 | DIFFERENT->rename/namespace or manual merge |
++| pkg | struct PackageAnalytics | 2 | DIFFERENT->rename/namespace or manual merge |
++| pkg | struct PackageSigner | 2 | SUPERSET->merge-to-superset |
++| pkg | struct RegistryConfig | 3 | DIFFERENT->rename/namespace or manual merge |
++| pkg | struct Signature | 2 | DIFFERENT->rename/namespace or manual merge |
++| pkg | struct SignatureVerifier | 2 | DIFFERENT->rename/namespace or manual merge |
++| pkg | struct VerificationResult | 3 | DIFFERENT->rename/namespace or manual merge |
++| pkg | struct WorkspaceConfig | 2 | DIFFERENT->rename/namespace or manual merge |
++| quantaos | enum AuditEventType | 2 | DIFFERENT->rename/namespace or manual merge |
++| quantaos | enum AuditResult | 2 | DIFFERENT->rename/namespace or manual merge |
++| quantaos | enum ContainerState | 2 | SUPERSET->merge-to-superset |
++| quantaos | enum CpuGovernor | 2 | IDENTICAL |
++| quantaos | enum SeccompAction | 2 | SUPERSET->merge-to-superset |
++| quantaos | enum SeccompOp | 2 | DIFFERENT->rename/namespace or manual merge |
++| quantaos | struct Container | 2 | DIFFERENT->rename/namespace or manual merge |
++| quantaos | struct ContainerConfig | 2 | DIFFERENT->rename/namespace or manual merge |
++| quantaos | struct ContainerRuntime | 2 | DIFFERENT->rename/namespace or manual merge |
++| quantaos | struct MountPoint | 2 | DIFFERENT->rename/namespace or manual merge |
++| quantaos | struct PowerManager | 2 | DIFFERENT->rename/namespace or manual merge |
++| quantaos | struct SeccompArg | 2 | IDENTICAL |
++| quantaos | struct SeccompRule | 2 | DIFFERENT->rename/namespace or manual merge |
++| quantaos | struct SecurityLabel | 2 | DIFFERENT->rename/namespace or manual merge |
++| quantaos | struct SecurityLevel | 2 | IDENTICAL |
++| quantum-finance | mod ml_signals | 2 | mod (colliding inner: 2) |
++| quantum-finance | mod multi_asset | 2 | mod (colliding inner: 5) |
++| quantum-finance | mod oms | 2 | mod (colliding inner: 1) |
++| quantum-finance | mod risk | 2 | mod (colliding inner: 0) |
++| spectrum | mod harmony | 2 | mod (colliding inner: 4) |
++| spectrum | mod quantization | 2 | mod (colliding inner: 0) |
++| tests | enum MutationStatus | 2 | DIFFERENT->rename/namespace or manual merge |
++| tests | struct CoverageData | 2 | DIFFERENT->rename/namespace or manual merge |
++| tests | struct Mutation | 2 | DIFFERENT->rename/namespace or manual merge |
++| tests | struct MutationTester | 2 | DIFFERENT->rename/namespace or manual merge |
++| universe | struct Hypothesis | 2 | DIFFERENT->rename/namespace or manual merge |
++| wavelength | struct SRTParser | 2 | IDENTICAL |
++
++### Detail
++
++## axiom :: struct Clause  x2  (L1351, 2641)  [DIFFERENT->rename/namespace or manual merge]
++- L1351: literals
++- L2641: body, head
++
++## axiom :: enum Term  x2  (L1311, 2634)  [DIFFERENT->rename/namespace or manual merge]
++- L1311: Const, Func, Var
++- L2634: Compound, Constant, Variable
++
++## config :: enum ConfigError  x2  (L679, 3472)  [SUPERSET->merge-to-superset]
++- L679: IoError, NotFound, ParseError, ValidationError
++- L3472: AuthenticationError, EncryptionError, IoError, NetworkError, NotFound, NotSupported, ParseError, RateLimitError, TimeoutError, ValidationError
++
++## debug :: struct MemorySnapshot  x2  (L1979, 5121)  [DIFFERENT->rename/namespace or manual merge]
++- L1979: MemoryPermissions, Vec, pages, permissions
++- L5121: allocations, heap_usage, stack_usage, timestamp
++
++## debug :: struct MemoryPermissions  x2  (L1985, 4740)  [IDENTICAL]
++- L1985: execute, read, write
++- L4740: execute, read, write
++
++## debug :: struct MemoryRegion  x2  (L2386, 4733)  [SUPERSET->merge-to-superset]
++- L2386: end, name, permissions, region_type, start
++- L4733: end, name, permissions, start
++
++## debug :: enum StopReason  x2  (L260, 4100)  [DIFFERENT->rename/namespace or manual merge]
++- L260: Breakpoint, DataBreakpoint, Entry, Exception, FunctionBreakpoint, Goto, InstructionBreakpoint, Pause, Step
++- L4100: Breakpoint, Exception, Exit, Pause, Signal, Step, Watchpoint
++
++## delta :: mod market_making  x2  (L2494, 4650)
++- copy L2494 items: struct OptionsMarketMaker, struct PositionInventory, struct TwoSidedQuote, struct RiskLimits, struct PricingParams, struct EdgeTargets, struct QuoteManager, struct QuoteEvent, enum QuoteEventType
++- copy L4650 items: struct Quote, struct OptionPosition, struct InventoryState, struct MarketMakerConfig, struct MarketMaker, struct SpreadQuoter
++
++## forge :: mod tests  x2  (L542, 9405)
++- copy L542 items: (empty)
++- copy L9405 items: fn test_logger, fn test_cli_parse, fn test_code_generator_struct, fn test_code_generator_enum, fn test_env_manager, fn test_pascal_case
++
++## forge :: struct AllocationEvent  x2  (L4684, 5741)  [DIFFERENT->rename/namespace or manual merge]
++- L4684: , address, false, is_alloc, size, thread_id, timestamp_ns
++- L5741: address, event_type, size, timestamp
++
++## forge :: struct Hotspot  x2  (L4730, 5673)  [DIFFERENT->rename/namespace or manual merge]
++- L4730: file, function, line, percentage, sample_count
++- L5673: file, line, percentage, time_ns
++
++## forge :: struct MemoryProfiler  x2  (L4927, 5723)  [DIFFERENT->rename/namespace or manual merge]
++- L4927: data, tracking
++- L5723: AllocationRecord, allocation_history, allocations, current_memory, is_running, peak_memory
++
++## lsp :: struct SemanticTokenModifiers  x2  (L1644, 5885)  [DIFFERENT->rename/namespace or manual merge]
++- L1644: bits
++- L5885: const
++
++## lsp :: struct SemanticToken  x2  (L1678, 5909)  [DIFFERENT->rename/namespace or manual merge]
++- L1678: delta_line, delta_start, length, modifiers, token_type
++- L5909: length, line, modifiers, start_char, token_type
++
++## lsp :: struct Scope  x2  (L1919, 6946)  [DIFFERENT->rename/namespace or manual merge]
++- L1919: LocalSymbol, id, kind, parent, range, symbols
++- L6946: expensive, name, variables_reference
++
++## lsp :: enum SemanticTokenType  x2  (L1613, 5845)  [SUPERSET->merge-to-superset]
++- L1613: Attribute, Class, Comment, Decorator, Enum, EnumMember, Event, Function, Interface, Keyword, Label, Lifetime, Macro, Method, Modifier, Namespace, Number, Operator, Parameter, Property, Regexp, SelfKeyword, String, Struct, Type, TypeParameter, Variable
++- L5845: Class, Comment, Decorator, Enum, EnumMember, Event, Function, Interface, Keyword, Label, Macro, Method, Modifier, Namespace, Number, Operator, Parameter, Property, Regexp, String, Struct, Type, TypeParameter, Variable
++
++## neutrino :: struct QuantizationConfig  x2  (L3794, 4084)  [DIFFERENT->rename/namespace or manual merge]
++- L3794: activation_bits, calibration_method, per_channel, symmetric, weight_bits
++- L4084: calibration_samples, per_channel, qtype, symmetric
++
++## neutrino :: struct QuantizedTensor  x2  (L3806, 4086)  [SUPERSET->merge-to-superset]
++- L3806: data, scale, shape, zero_point
++- L4086: data, qtype, scale, shape, zero_point
++
++## nexus :: struct ModDependency  x2  (L126, 4751)  [DIFFERENT->rename/namespace or manual merge]
++- L126: max_version, min_version, mod_id, optional
++- L4751: condition, mod_id, optional, version
++
++## nexus :: struct ModFile  x2  (L181, 4753)  [DIFFERENT->rename/namespace or manual merge]
++- L181: , file_type, hash, path, size, target_path
++- L4753: checksum, condition, install_type, path, size, source
++
++## nexus :: struct ModPackage  x2  (L191, 4682)  [DIFFERENT->rename/namespace or manual merge]
++- L191: enabled, files, install_path, installed, metadata
++- L4682: author, checksum, conflicts, created, dependencies, description, files, fomod_config, id, install_scripts, license, name, provides, size_bytes, updated, version, website
++
++## nexus :: struct ModConflict  x2  (L325, 4388)  [DIFFERENT->rename/namespace or manual merge]
++- L325: conflict_type, description, mod_a, mod_b, resolution, severity
++- L4388: auto_resolvable, conflict_type, description, mod_a, mod_b, resource, severity
++
++## nexus :: struct ProfileManager  x2  (L486, 4472)  [DIFFERENT->rename/namespace or manual merge]
++- L486: ModProfile, active_profile, profiles
++- L4472: SimpleProfile, active_profile, default_profile, profiles
++
++## nexus :: struct GameDetector  x2  (L569, 5155)  [DIFFERENT->rename/namespace or manual merge]
++- L569: signatures
++- L5155: DetectedGame, detected, known_games, search_paths
++
++## nexus :: struct VirtualFileSystem  x2  (L887, 4598)  [DIFFERENT->rename/namespace or manual merge]
++- L887: Vec, backup_dir, hooks_installed, overlays
++- L4598: String, case_sensitive, mount_points, overlays, read_only, root
++
++## nexus :: struct AssetRedirector  x2  (L1512, 4546)  [DIFFERENT->rename/namespace or manual merge]
++- L1512: String, Vec, redirects, stats, variables
++- L4546: String, Vec, cache, enabled, redirects
++
++## nexus :: enum ConflictType  x2  (L335, 4385)  [DIFFERENT->rename/namespace or manual merge]
++- L335: , ExplicitIncompatibility
++- L4385: AssetConflict, FileOverwrite, PluginConflict, RecordConflict, ResourceConflict
++
++## nexus :: enum ConflictSeverity  x2  (L344, 4386)  [DIFFERENT->rename/namespace or manual merge]
++- L344: , Info
++- L4386: Critical, High, Low, Medium
++
++## oracle :: mod changepoint  x2  (L2822, 7087)
++- copy L2822 items: struct DetectedChangepoint, enum ChangeType, struct PELT, enum CostFunction, struct BOCPD
++- copy L7087 items: enum ChangePointMethod, struct ChangePointDetector
++
++## oracle :: mod ensemble  x3  (L5757, 9634, 9966)
++- copy L5757 items: enum CombineStrategy, struct ForecastEnsemble, struct TimeSeriesBagging, struct ModelSelector, struct GradientBoostingForecaster, struct DecisionStump
++- copy L9634 items: trait Forecaster, struct EnsembleForecaster, enum EnsembleCombinationMethod, struct EnsembleModelSelector, enum SelectionCriterion
++- copy L9966 items: struct DecisionTree, struct TreeNode, struct RandomForest, struct GradientBoosting, struct XGBoostLite, struct AdaBoost, struct StackingEnsemble, struct VotingEnsemble, enum VotingType, struct BaggingRegressor
++
++## pkg :: struct RegistryConfig  x3  (L191, 3365, 5305)  [DIFFERENT->rename/namespace or manual merge]
++- L191: api_url, auth_token, cache_dir, download_url, index_url
++- L3365: allowed_licenses, blocked_packages, max_package_size, mirror_from, require_signing, storage_path
++- L5305: auth_token, registry_type, url
++
++## pkg :: struct WorkspaceConfig  x2  (L1457, 3773)  [DIFFERENT->rename/namespace or manual merge]
++- L1457: Dependency, default_members, dependencies, exclude, members, resolver
++- L3773: , String, hoist_dependencies, link_protocol, packages
++
++## pkg :: struct SignatureVerifier  x2  (L2847, 5029)  [DIFFERENT->rename/namespace or manual merge]
++- L2847: PublicKey, config, trusted_keys
++- L5029: VerifyingKey, require_signature, revoked_keys, trusted_keys
++
++## pkg :: struct Signature  x2  (L2886, 3642)  [DIFFERENT->rename/namespace or manual merge]
++- L2886: algorithm, data, key_id, timestamp
++- L3642: algorithm, key_id, timestamp, value
++
++## pkg :: struct VerificationResult  x3  (L2894, 3731, 5132)  [DIFFERENT->rename/namespace or manual merge]
++- L2894: issues, package, signer, trust_level, verified, version
++- L3731: error, key_id, owner, valid
++- L5132: key_id, reason, valid, verified_at
++
++## pkg :: struct PackageSigner  x2  (L3565, 4842)  [SUPERSET->merge-to-superset]
++- L3565: algorithm, private_key, public_key
++- L4842: algorithm, key_id, private_key, public_key
++
++## pkg :: struct PackageAnalytics  x2  (L4414, 5144)  [DIFFERENT->rename/namespace or manual merge]
++- L4414: aggregates, events
++- L5144: enabled, endpoint, events, session_id
++
++## pkg :: struct AnalyticsEvent  x2  (L4420, 5152)  [DIFFERENT->rename/namespace or manual merge]
++- L4420: String, event_type, metadata, package, timestamp, version
++- L5152: String, event_type, metadata, package_name, package_version, timestamp
++
++## pkg :: enum DependencyType  x2  (L2574, 4222)  [DIFFERENT->rename/namespace or manual merge]
++- L2574: Build, Dev, Direct, Transitive
++- L4222: Dev, Direct, Optional, Peer, Transitive
++
++## pkg :: enum AnalyticsEventType  x2  (L4429, 5161)  [SUPERSET->merge-to-superset]
++- L4429: Build, Download, Install, Publish, Remove, Update
++- L5161: Build, CacheHit, CacheMiss, Download, Error, Install, Publish, Remove, ResolutionComplete, ResolutionStart, Test, Update
++
++## quantaos :: struct MountPoint  x2  (L1775, 4302)  [DIFFERENT->rename/namespace or manual merge]
++- L1775: device, flags, fs_type, path, root_inode
++- L4302: fs_type, options, read_only, source, target
++
++## quantaos :: struct SecurityLabel  x2  (L3051, 5133)  [DIFFERENT->rename/namespace or manual merge]
++- L3051: level, role, type_, user
++- L5133: categories, label_type, level, role, user
++
++## quantaos :: struct SecurityLevel  x2  (L3059, 5143)  [IDENTICAL]
++- L3059: categories, sensitivity
++- L5143: categories, sensitivity
++
++## quantaos :: struct SeccompRule  x2  (L3080, 4428)  [DIFFERENT->rename/namespace or manual merge]
++- L3080: action, args, syscall
++- L4428: action, args, names
++
++## quantaos :: struct SeccompArg  x2  (L3097, 4434)  [IDENTICAL]
++- L3097: index, op, value
++- L4434: index, op, value
++
++## quantaos :: struct Container  x2  (L3280, 4218)  [DIFFERENT->rename/namespace or manual merge]
++- L3280: cgroup, config, id, init_pid, name, namespaces, root_fs, state, u64
++- L4218: String, cgroups, command, created_at, env, exit_code, id, image, mounts, name, namespaces, pid, resource_limits, security_context, started_at, state
++
++## quantaos :: struct ContainerConfig  x2  (L3300, 4384)  [DIFFERENT->rename/namespace or manual merge]
++- L3300: String, capabilities, cmd, cpu_quota, cpu_shares, env, hostname, memory_limit, network_mode, pids_limit, readonly_rootfs, seccomp, user, working_dir
++- L4384: , cgroup_driver, default_runtime, default_ulimits, enable_apparmor, enable_seccomp, root_dir, state_dir
++
++## quantaos :: struct ContainerRuntime  x2  (L3398, 4197)  [DIFFERENT->rename/namespace or manual merge]
++- L3398: Cgroup, Container, Namespace, cgroups, containers, namespaces, next_ns_id
++- L4197: Container, ContainerImage, ContainerNetwork, ContainerVolume, config, containers, images, networks, next_id, volumes
++
++## quantaos :: struct PowerManager  x2  (L3576, 4753)  [DIFFERENT->rename/namespace or manual merge]
++- L3576: CpuPState, ac_power, battery_level, cpu_states, governor, power_state, thermal_zones
++- L4753: DevicePowerState, PowerPolicy, active_policy, cpu_states, device_states, events, policies, stats, suspend_handlers
++
++## quantaos :: enum SeccompAction  x2  (L3087, 4420)  [SUPERSET->merge-to-superset]
++- L3087: Allow, Errno, Kill, Log, Trace, Trap
++- L4420: Allow, Errno, Kill, Log, Trap
++
++## quantaos :: enum SeccompOp  x2  (L3104, 4441)  [DIFFERENT->rename/namespace or manual merge]
++- L3104: Eq, Ge, Gt, Le, Lt, MaskedEq, Ne
++- L4441: Equal, GreaterThan, LessThan, MaskedEqual, NotEqual
++
++## quantaos :: enum AuditEventType  x2  (L3190, 5231)  [DIFFERENT->rename/namespace or manual merge]
++- L3190: CapabilityUse, FileAccess, NetworkAccess, ProcessCreate, ProcessExit, SecurityViolation, Syscall
++- L5231: AccessCheck, EnforcementChange, LabelChange, PolicyChange, PolicyLoad, SecurityViolation
++
++## quantaos :: enum AuditResult  x2  (L3201, 5241)  [DIFFERENT->rename/namespace or manual merge]
++- L3201: Denied, Failed, Success
++- L5241: Denied, Error, Granted
++
++## quantaos :: enum ContainerState  x2  (L3292, 4238)  [SUPERSET->merge-to-superset]
++- L3292: Created, Paused, Running, Stopped
++- L4238: Created, Error, Exited, Paused, Running, Starting, Stopped, Stopping
++
++## quantaos :: enum CpuGovernor  x2  (L3545, 4823)  [IDENTICAL]
++- L3545: Conservative, Ondemand, Performance, Powersave, Schedutil, Userspace
++- L4823: Conservative, Ondemand, Performance, Powersave, Schedutil, Userspace
++
++## quantum-finance :: mod risk  x2  (L1103, 9282)
++- copy L1103 items: enum RiskLevel, enum PositionSizing, fn calculate_position_size, fn var_parametric, fn expected_shortfall, fn max_drawdown, fn sharpe_ratio, fn sortino_ratio
++- copy L9282 items: struct RiskManager, struct Position, struct RiskCheckResult, struct PositionSizer, enum SizingMethod, struct CorrelationRisk
++
++## quantum-finance :: mod oms  x2  (L1364, 9448)
++- copy L1364 items: struct OrderIdGenerator, struct ValidationResult, struct OrderValidator, enum OrderEvent, trait OrderEventHandler, enum RoutingDestination, struct SmartOrderRouter, struct RoutingRule, struct FillTracker, struct Fill, enum LiquidityType, struct FillSummary, struct OrderManager
++- copy L9448 items: struct OrderManagementSystem, struct Order, enum OrderSide, enum OrderType, enum OrderStatus, struct Fill, struct BracketOrder, struct OCOOrder, struct OrderRouter, struct Venue, enum RoutingMode
++  * COLLIDE struct Fill [DIFFERENT->rename/namespace or manual merge]
++    c1: commission, fill_id, liquidity, order_id, price, quantity, timestamp, venue
++    c2: fee, order_id, price, quantity, timestamp
++
++## quantum-finance :: mod multi_asset  x2  (L6569, 8733)
++- copy L6569 items: enum AssetClass, struct Asset, struct MultiAssetPosition, struct MultiAssetPortfolio, struct RebalanceTrade, struct FactorModel, struct CurrencyHedger
++- copy L8733 items: enum AssetClass, struct Asset, struct AssetAllocation, struct MultiAssetPortfolio, struct Holding, struct RebalanceTrade, struct PortfolioRiskMetrics, struct CurrencyHedger
++  * COLLIDE enum AssetClass [DIFFERENT->rename/namespace or manual merge]
++    c1: Alternative, Commodity, Crypto, Currency, Derivatives, Equity, FixedIncome, RealEstate
++    c2: Commodity, Crypto, Currency, Derivative, Equity, FixedIncome, RealEstate
++  * COLLIDE struct Asset [SUPERSET->merge-to-superset]
++    c1: asset_class, currency, exchange, lot_size, margin_requirement, name, symbol, tick_size
++    c2: asset_class, currency, lot_size, margin_requirement, name, symbol, tick_size
++  * COLLIDE struct CurrencyHedger [DIFFERENT->rename/namespace or manual merge]
++    c1: base_currency, f64, forward_rates, hedge_ratios
++    c2: base_currency, f64, forward_points, hedge_ratios
++  * COLLIDE struct MultiAssetPortfolio [DIFFERENT->rename/namespace or manual merge]
++    c1: MultiAssetPosition, base_currency, cash_balances, f64, fx_rates, name, positions, target_allocations
++    c2: Holding, allocations, base_currency, cash, f64, fx_rates, holdings, name
++  * COLLIDE struct RebalanceTrade [IDENTICAL]
++    c1: asset_class, current_value, target_value, trade_value
++    c2: asset_class, current_value, target_value, trade_value
++
++## quantum-finance :: mod ml_signals  x2  (L6828, 8963)
++- copy L6828 items: enum Feature, struct FeatureVector, struct FeatureExtractor, struct FeatureConfig, enum FeatureType, struct SignalGenerator, enum Signal, struct EnsembleSignal, struct WalkForwardOptimizer, struct WalkForwardResult
++- copy L8963 items: struct MLSignal, struct FeatureSet, struct Feature, enum FeatureCategory, struct FeatureExtractor, enum FeatureType, struct SignalCombiner, struct ModelWeight, enum CombinationMethod, struct SignalValidator, struct ValidationResult
++  * COLLIDE enum FeatureType [DIFFERENT->rename/namespace or manual merge]
++    c1: ATR, BollingerBand, EMA, MACD, Momentum, PricePosition, RSI, Returns, SMA, VolumeRatio
++    c2: ATR, BollingerWidth, LogReturns, MACD, Momentum, PriceToMA, RSI, Returns, Skewness, Volatility, VolumeRatio
++  * COLLIDE struct FeatureExtractor [DIFFERENT->rename/namespace or manual merge]
++    c1: feature_config, lookback
++    c2: features, lookback
++
++## spectrum :: mod harmony  x2  (L2856, 6474)
++- copy L2856 items: enum HarmonyType, struct HarmonyConfig, fn rgb_to_hsl, fn hsl_to_rgb, fn generate, fn harmony_score, fn suggest_scheme, fn accent_color
++- copy L6474 items: enum HarmonyType, fn generate, fn calculate_harmony_score, fn rgb_to_hsl, fn hsl_to_rgb, struct PaletteGenerator, fn tint, fn shade, struct ColorPalette, fn relative_luminance
++  * COLLIDE enum HarmonyType [SUPERSET->merge-to-superset]
++    c1: Analogous, AnalogousTriad, Complementary, DoubleSplit, Monochromatic, SplitComplementary, Square, Tetradic, Triadic
++    c2: Analogous, Complementary, Monochromatic, SplitComplementary, Square, Tetradic, Triadic
++  * COLLIDE fn generate
++  * COLLIDE fn hsl_to_rgb
++  * COLLIDE fn rgb_to_hsl
++
++## spectrum :: mod quantization  x2  (L3668, 5267)
++- copy L3668 items: enum Algorithm, struct WeightedColor, struct Palette, struct ColorBox, fn median_cut, fn kmeans, fn kmeans_plusplus_init, fn dominant_colors
++- copy L5267 items: struct ColorQuantizer, enum QuantizationMethod, struct Ditherer, enum DitheringMethod
++
++## tests :: struct CoverageData  x2  (L1925, 4517)  [DIFFERENT->rename/namespace or manual merge]
++- L1925: FileCoverage, covered_branches, covered_lines, files, total_branches, total_lines
++- L4517: , HashSet, test_coverage
++
++## tests :: struct MutationTester  x2  (L2435, 3404)  [DIFFERENT->rename/namespace or manual merge]
++- L2435: killed, mutations, survived, timeout
++- L3404: config, excluded_patterns, mutators, source_files, test_runner
++
++## tests :: struct Mutation  x2  (L2443, 3431)  [DIFFERENT->rename/namespace or manual merge]
++- L2443: file, id, kind, line, mutated, original, status
++- L3431: column, description, file, id, line, mutated, mutator_name, original
++
++## tests :: enum MutationStatus  x2  (L2468, 3452)  [DIFFERENT->rename/namespace or manual merge]
++- L2468: CompileError, Killed, Pending, Survived, Timeout
++- L3452: , Killed
++
++## universe :: struct Hypothesis  x2  (L2830, 3729)  [DIFFERENT->rename/namespace or manual merge]
++- L2830: is_assumption, name, prop
++- L3729: assumptions, claim, created, domain, id, predictions, status, updated
++
++## wavelength :: struct SRTParser  x2  (L5832, 7081)  [IDENTICAL]
++- L5832: fn
++- L7081: fn
++
++## INVENTORY 2: referenced-but-undefined (C-compiler-witnessed, classified)
++
++cl /c enumerates every undefined Capitalized identifier per module; each is
++resolved against the repo symbol index and bucketed. Only SOURCE-PHANTOM and
++CROSS-MODULE are de-duplication / resolution concerns; CODEGEN-* and
++STD-INTRINSIC are compiler-side gaps (not source edits). FFI needs extern decls.
++
++### SOURCE-PHANTOM (7)
++- CVDResult  [ref: chromatic]  -> undefined type, defined nowhere
++- ChromaticityCoords  [ref: calibrate]  -> undefined type, defined nowhere
++- DirectionalBarrierType  [ref: delta]  -> undefined type, defined nowhere
++- DynamicsProcessor  [ref: wavelength]  -> undefined type, defined nowhere
++- HSL  [ref: chromatic]  -> undefined type, defined nowhere
++- MonitorProfile  [ref: calibrate]  -> undefined type, defined nowhere
++- SnapshotId  [ref: entangle]  -> undefined type, defined nowhere
++
++### CROSS-MODULE (25)
++- AmbientLightSensor  [ref: calibrate]  -> defined in calibrate
++- AssetRedirectStats  [ref: nexus]  -> defined in nexus
++- AtmosphericFog  [ref: lumina]  -> defined in lumina
++- ColorGradeStyle  [ref: wavelength]  -> defined in wavelength
++- ColorGrading  [ref: lumina]  -> defined in lumina, prism  AMBIGUOUS
++- ColorPatch  [ref: calibrate]  -> defined in calibrate
++- ColorSettings  [ref: nova]  -> defined in nova
++- ConflictSeverity  [ref: nexus]  -> defined in nexus
++- ConflictType  [ref: nexus]  -> defined in nexus
++- ENBShaderConstants  [ref: refract]  -> defined in refract
++- EffectsSettings  [ref: nova]  -> defined in nova
++- Illuminant  [ref: calibrate]  -> defined in chromatic, spectrum  AMBIGUOUS
++- InterpolationCurve  [ref: nova]  -> defined in nova
++- Mat4  [ref: lumina, refract]  -> defined in foundation
++- RGB  [ref: calibrate, lumina, nova, wavelength]  -> defined in spectrum
++- RenderTargets  [ref: refract]  -> defined in refract
++- RingBuffer  [ref: oracle]  -> defined in oracle, refract  AMBIGUOUS
++- StructuralCausalModel  [ref: oracle]  -> defined in oracle
++- ToneCurve  [ref: calibrate, chromatic]  -> defined in chromatic, spectrum  AMBIGUOUS
++- TransactionState  [ref: entangle]  -> defined in entangle
++- TypeId  [ref: entangle]  -> defined in runtime
++- UniversalHook  [ref: nexus]  -> defined in photon
++- Vec2  [ref: nova, prism]  -> defined in foundation, lumina  AMBIGUOUS
++- Vec3  [ref: lumina, refract]  -> defined in field-tensor, foundation, neutrino, spectrum  AMBIGUOUS
++- XYZ  [ref: calibrate]  -> defined in chromatic, spectrum  AMBIGUOUS
++
++### FFI (3)
++- ID3D11Device  [ref: refract]  -> external C/COM
++- ID3D11RenderTargetView  [ref: refract]  -> external C/COM
++- ID3D11Texture2D  [ref: refract]  -> external C/COM
++
++### STD-INTRINSIC (2)
++- Error  [ref: refract]  -> needs intrinsic lowering
++- RwLock  [ref: delta]  -> needs intrinsic lowering
++
++### CODEGEN-tuple (14)
++- Tuple_DateTime_f64_f64  [ref: calibrate]  -> tuple typedef not emitted
++- Tuple_FeaturePoint_bool  [ref: wavelength]  -> tuple typedef not emitted
++- Tuple_Illuminant_Illuminant  [ref: chromatic]  -> tuple typedef not emitted
++- Tuple_QuantaString_QuantaString  [ref: entropy]  -> tuple typedef not emitted
++- Tuple_QuantaString_f64_u32  [ref: delta]  -> tuple typedef not emitted
++- Tuple_QuantaString_unknown  [ref: nexus]  -> tuple typedef not emitted
++- Tuple_RGB_f32  [ref: nova, spectrum]  -> tuple typedef not emitted
++- Tuple_Tensor_usize_usize  [ref: neutrino]  -> tuple typedef not emitted
++- Tuple_Version_Version  [ref: nexus]  -> tuple typedef not emitted
++- Tuple_f64_usize  [ref: oracle]  -> tuple typedef not emitted
++- Tuple_quantum_QuantumState_f64  [ref: field-tensor]  -> tuple typedef not emitted
++- Tuple_u32_f32  [ref: wavelength]  -> tuple typedef not emitted
++- Tuple_unknown_f64_f64  [ref: field-tensor]  -> tuple typedef not emitted
++- Tuple_usize_usize  [ref: oracle]  -> tuple typedef not emitted
++
++### CODEGEN-fn (8)
++- ColorTransform_new  [ref: chromatic]  -> mangled Type_method not emitted
++- FrameInterpolator_sample_bilinear  [ref: wavelength]  -> mangled Type_method not emitted
++- ScriptEngine_new  [ref: nexus]  -> mangled Type_method not emitted
++- ShaderHotReloader_new  [ref: prism]  -> mangled Type_method not emitted
++- StabVideoStabilizer_bilinear_sample  [ref: wavelength]  -> mangled Type_method not emitted
++- StabVideoStabilizer_handle_border  [ref: wavelength]  -> mangled Type_method not emitted
++- VCSPresetVersionControl_new  [ref: nova]  -> mangled Type_method not emitted
++- VideoFrame_get_pixel  [ref: wavelength]  -> mangled Type_method not emitted
++
++### CODEGEN-vtable (2)
++- EnginePlugin_vtable  [ref: nexus]  -> vtable instance not emitted
++- Projection_vtable  [ref: entangle]  -> vtable instance not emitted
++
++### CODEGEN-enumvariant (2)
++- LookbackType_FixedStrike  [ref: delta]  -> mangled Enum_Variant not emitted
++- LookbackType_FloatingStrike  [ref: delta]  -> mangled Enum_Variant not emitted
++
+diff --git a/oracle/lib.quanta b/oracle/lib.quanta
+index 7232c77..e51a280 100644
+--- a/oracle/lib.quanta
++++ b/oracle/lib.quanta
+@@ -3257,13 +3257,13 @@ pub mod conformal {
+     use super::*;
+ 
+     /// Conformal predictor for prediction intervals
+-    pub struct ConformalPredictor<F: Fn(&[f64], &[f64], f64) -> f64> {
++    pub struct ConformalPredictorGeneric<F: Fn(&[f64], &[f64], f64) -> f64> {
+         nonconformity_fn: F,
+         calibration_scores: Vec<f64>,
+         coverage: f64,
+     }
+ 
+-    impl<F: Fn(&[f64], &[f64], f64) -> f64> ConformalPredictor<F> {
++    impl<F: Fn(&[f64], &[f64], f64) -> f64> ConformalPredictorGeneric<F> {
+         pub fn new(nonconformity_fn: F, coverage: f64) -> Self {
+             Self {
+                 nonconformity_fn,
+diff --git a/spectrum/lib.quanta b/spectrum/lib.quanta
+index 969d1e6..8193c4d 100644
+--- a/spectrum/lib.quanta
++++ b/spectrum/lib.quanta
+@@ -6471,7 +6471,7 @@ pub mod hdr_metadata {
+ // COLOR HARMONY
+ 
+ /// Color harmony algorithms
+-pub mod harmony {
++pub mod harmony_palette {
+     use super::*;
+ 
+     /// Harmony type
+diff --git a/tools/coherence/README.md b/tools/coherence/README.md
+index 0ba1591..2dd76b4 100644
+--- a/tools/coherence/README.md
++++ b/tools/coherence/README.md
+@@ -42,4 +42,15 @@ spectrum/delta transpile but their emitted C FAILS cl -- a name-prefixing codege
+ bug (typedef hdr_ColorPrimaries vs a bare ColorPrimaries field; BTreeMap in
+ delta). The organism gate keeps "transpiles" as the module bar; this organ is the
+ deeper, separate witness. quantac runs only locally, so this organ is local-only
+-(absent quantac in CI -> UNRESOLVABLE).
+\ No newline at end of file
++(absent quantac in CI -> UNRESOLVABLE).
++
++## Cross-module adjudication (adjudicate-deps)
++
++  python tools/coherence/compiler_oracle.py adjudicate-deps <module>
++  python tools/coherence/compiler_oracle.py adjudicate-deps-all
++
++Compiles a module WITH its transitive `use <Mod>::...` dependencies: builds a
++module-name index, concatenates dep sources ahead of the target, then transpiles
++and compiles the combined unit. The deeper, cross-module witness beyond the
++single-module adjudicate. Resolution works; modules still carry deeper type
++issues and dependency source defects (see STATUS.md).
+diff --git a/tools/coherence/compiler_oracle.py b/tools/coherence/compiler_oracle.py
+index 96ad881..03e202a 100644
+--- a/tools/coherence/compiler_oracle.py
++++ b/tools/coherence/compiler_oracle.py
+@@ -101,6 +101,114 @@ def components():
+         return {c["name"]: c for c in tomllib.load(f).get("component", [])}
+ 
+ 
++# --- Cross-module adjudication: compile a module WITH its transitive deps ---
++# Resolves `use <Mod>::...` to the sibling module that declares `module <Mod>`,
++# concatenates the dependency sources, and adjudicates the combined unit. This
++# answers the cross-module question the single-module check cannot.
++
++STD_MODS = ('std', 'core', 'self', 'super', 'crate', 'alloc')
++
++
++def build_module_index():
++    index = {}
++    for d in sorted(os.listdir(REPO)):
++        lib = os.path.join(REPO, d, 'lib.quanta')
++        if not os.path.isfile(lib):
++            continue
++        index.setdefault(d, lib)
++        try:
++            txt = open(lib, encoding='utf-8', errors='replace').read()
++        except Exception:
++            continue
++        for line in txt.splitlines():
++            st = line.strip()
++            if st.startswith('module '):
++                nm = ''
++                for ch in st[7:]:
++                    if ch.isalnum() or ch == '_':
++                        nm += ch
++                    else:
++                        break
++                if nm:
++                    index.setdefault(nm, lib)
++                break
++    return index
++
++
++def module_deps(txt):
++    out = []
++    for line in txt.splitlines():
++        st = line.strip()
++        if not st.startswith('use '):
++            continue
++        rest = st[4:].strip()
++        seg = ''
++        for ch in rest:
++            if ch.isalnum() or ch == '_':
++                seg += ch
++            else:
++                break
++        if seg and seg not in STD_MODS and rest[len(seg):len(seg) + 2] == '::':
++            out.append(seg)
++    return out
++
++
++def resolve_transitive_deps(target_path, index):
++    seen = set()
++    seen.add(os.path.normcase(os.path.abspath(target_path)))
++    order = []
++    visited = set()
++    def read(pth):
++        return open(pth, encoding='utf-8', errors='replace').read()
++    work = list(module_deps(read(target_path)))
++    while work:
++        mod = work.pop(0)
++        if mod in visited:
++            continue
++        visited.add(mod)
++        path = index.get(mod)
++        if not path:
++            continue
++        ap = os.path.normcase(os.path.abspath(path))
++        if ap in seen:
++            continue
++        seen.add(ap)
++        order.append(path)
++        for d in module_deps(read(path)):
++            if d not in visited:
++                work.append(d)
++    return order
++
++
++def adjudicate_with_deps(name, comps):
++    quantac = find_quantac()
++    if not quantac:
++        return 2, 'UNRESOLVABLE no quantac built', []
++    src = module_path(name, comps)
++    if not src or not os.path.isfile(src):
++        return 2, 'UNRESOLVABLE module source not found: ' + str(name), []
++    index = build_module_index()
++    deps = resolve_transitive_deps(src, index)
++    depnames = [os.path.basename(os.path.dirname(d)) for d in deps]
++    parts = [open(dp, 'rb').read() for dp in deps]
++    parts.append(open(src, 'rb').read())
++    sep = (chr(10) + chr(10)).encode('utf-8')
++    combined = sep.join(parts)
++    tmp = tempfile.mkdtemp(prefix='cocx_')
++    in_q = os.path.join(tmp, 'unit.quanta')
++    open(in_q, 'wb').write(combined)
++    out_c = os.path.join(tmp, 'unit.c')
++    rc, out = transpile(quantac, in_q, out_c)
++    if rc != 0:
++        return 1, 'CONTRADICTED transpile fails: ' + first_error(out), depnames
++    vcvars = find_vcvars()
++    if not vcvars:
++        return 0, 'CONFIRMED transpiles with deps (no C compiler)', depnames
++    crc, cout = compile_c(vcvars, out_c)
++    if crc != 0:
++        return 1, 'CONTRADICTED emitted C fails: ' + first_error(cout), depnames
++    return 0, 'CONFIRMED compiles with deps', depnames
++
+ def main():
+     if len(sys.argv) < 2:
+         sys.exit("usage: compiler_oracle.py adjudicate <module|component> | adjudicate-all")
+@@ -120,6 +228,21 @@ def main():
+             if code == 1:
+                 worst = 1
+         sys.exit(worst)
++    if cmd == 'adjudicate-deps':
++        code, w, deps = adjudicate_with_deps(sys.argv[2], comps)
++        tag = '  [deps: ' + (', '.join(deps) if deps else 'none') + ']'
++        print(w + tag)
++        sys.exit(code)
++    if cmd == 'adjudicate-deps-all':
++        worst = 0
++        for nm, c in comps.items():
++            if c.get('language') != 'quanta':
++                continue
++            code, w, deps = adjudicate_with_deps(nm, comps)
++            print(nm.ljust(16), w, '[+' + str(len(deps)) + ' deps]')
++            if code == 1:
++                worst = 1
++        sys.exit(worst)
+     sys.exit("unknown command: " + cmd)
+ 
+ 

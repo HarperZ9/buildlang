@@ -37,20 +37,29 @@ def has_msvc():
     return any(glob.glob(p) for p in pats)
 
 
+# Where a built compiler can be. This tree lives in HarperZ9/buildlang as universe/, so the
+# compiler is one level up; the nested buildlang/ folder is the layout of the old repository.
+COMPILER_TARGETS = [
+    os.path.join(os.path.dirname(REPO), "compiler", "target"),
+    os.path.join(REPO, "buildlang", "compiler", "target"),
+]
+
+
 def has_buildc():
-    for sub in ("debug", "release"):
-        if os.path.isfile(os.path.join(REPO, "buildlang", "compiler", "target", sub, "buildc.exe")):
-            return True
+    for target in COMPILER_TARGETS:
+        for sub in ("debug", "release"):
+            for exe in ("buildc.exe", "buildc"):
+                if os.path.isfile(os.path.join(target, sub, exe)):
+                    return True
     return False
 
 
 def build_env():
     env = dict(os.environ)
-    extra = [
-        os.path.expanduser("~/.cargo/bin"),
-        os.path.join(REPO, "buildlang", "compiler", "target", "debug"),
-        os.path.join(REPO, "buildlang", "compiler", "target", "release"),
-    ]
+    extra = [os.path.expanduser("~/.cargo/bin")]
+    for target in COMPILER_TARGETS:
+        extra.append(os.path.join(target, "debug"))
+        extra.append(os.path.join(target, "release"))
     paths = [p for p in extra if os.path.isdir(p)]
     if paths:
         env["PATH"] = os.pathsep.join(paths) + os.pathsep + env.get("PATH", "")

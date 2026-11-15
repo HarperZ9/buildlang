@@ -10,6 +10,13 @@ tracked in `STATUS.md`, `README.md`, and
 
 ## Unreleased
 
+### Build Universe in `universe/`
+
+- The `HarperZ9/build-universe` repository moved into this one as `universe/`: the BuildLang modules (`foundation`, `spectrum`, `photon`, `oracle` and the rest), the example programs in `universe/programs`, the BuildOS hobby kernel, the Calibrate Python tree and the frametrace tracer. It is the tree of build-universe `main` at commit `1633fc3`, imported as one commit. The old history stays in the old repository because some of its commits carry personal author addresses. The folder keeps its licence, FSL-1.1-MIT (`universe/LICENSE`, and `NOTICE`).
+- The unmerged branch `recon/corpus-effects-2026-09-05` came with it (parser and effect-row repairs across 98 files). Five other unmerged branches are kept as patch files with an index in `universe/project-docs/unmerged-branches/`.
+- New `universe` workflow. One job builds `buildc` from the checkout and runs `buildc check` on each of the 267 `.bld` files under `universe/`; `universe/CHECK-FAILS.txt` lists the files the compiler refuses, with the stage where each stops, and the job fails when a file fails that is not listed or a listed file passes. With `buildc` 1.14.0, 69 files pass and 198 fail (1 at the lexer, 21 at the parser, 176 at the type and effect check). Two more jobs carry the old repository's checks: module folders and art receipts, and the frametrace tests and MSVC builds on Windows.
+- Changed on the way in: six files had a local user folder path replaced, and the two frametrace MSVC link lines add `synchronization.lib`, which the current Rust standard library needs on Windows.
+
 ## 1.15.0 - 2026-11-14 - experimental x86-64 executables and WebAssembly modules written by buildc, `Drop`, handlers that resume, a C-to-BuildLang port tool, and the Build suite in `suite/`
 
 `buildc` can now write a runnable x86-64 executable and a binary WebAssembly module by itself, with no C compiler, assembler or linker. Both targets are experimental and cover a subset of the language; a program outside the subset is refused by name and no file is written. The C backend remains the only primary backend. In the language, a type's `drop` now runs, a handler clause can resume at the `perform` site, a range of a vector is a view, `Option` has its combinators, a failed `unwrap` or `assert!` stops the program, and a long list of programs that passed the check and then failed in the C compiler or ran wrong now build and run right. `port` translates a C subset to BuildLang in one step, and the five Build suite packages now live in this repository under `suite/`.

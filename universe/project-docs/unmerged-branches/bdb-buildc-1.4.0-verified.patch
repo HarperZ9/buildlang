@@ -1,0 +1,71 @@
+diff --git a/STATUS.md b/STATUS.md
+index f100b22..9b3bab9 100644
+--- a/STATUS.md
++++ b/STATUS.md
+@@ -16,6 +16,20 @@ source audit: real, correct, extractable logic vs scaffolding/showcase.
+ - ~6 GB of local disk is Cargo target/ build cache (already git-ignored; the
+   compiler dir buildlang/ is itself git-ignored, a separate repo).
+ 
++## BDB (qdb, programs/db.bld): verified 2026-10-29
++
++- Builds with buildc 1.4.0 (the effect annotations on this branch line satisfy the
++  1.4.0 effect checker; main's db.bld does not, with 33 undeclared-effect errors).
++- `programs/tests/test_qdb.sh` on that build: pass=214 fail=0 xfail=1 xpass=0.
++- KNOWN OPEN: a long REPL session crashes. Piping 5,000 single-row INSERTs into
++  the REPL ended in a segmentation fault after about 2,500 statements (2,549 and
++  2,507 rows stored in two runs; 2,464 on main in a third). Rows stored before the
++  crash are intact, and 4,000 rows load fine through single-command multi-row
++  INSERTs, so the trigger is per-statement growth in the REPL, not table size.
++  Cause not found. Opt-in repro: `programs/tests/repro_qdb_repl_bulk.sh`.
++- Name: the author wants this engine called BDB (Build DB). It is still qdb in
++  code, docs, tests and binaries; the rename waits for a planned checklist.
++
+ ## Tier 1 — Load-bearing, real, extractable (the engine)
+ 
+ | Component | Score | What is real |
+diff --git a/programs/tests/repro_qdb_repl_bulk.sh b/programs/tests/repro_qdb_repl_bulk.sh
+new file mode 100644
+index 0000000..db9bd32
+--- /dev/null
++++ b/programs/tests/repro_qdb_repl_bulk.sh
+@@ -0,0 +1,40 @@
++#!/usr/bin/env bash
++# KNOWN OPEN: qdb (BDB) crashes partway through a long REPL session.
++#
++# Opt-in reproduction, not part of test_qdb.sh: it takes about three minutes.
++# Build qdb.exe first, then: bash programs/tests/repro_qdb_repl_bulk.sh [N]
++#
++# Observed 2026-10-29 with buildc 1.4.0 + gcc on Windows, piping 5,000 single-row
++# INSERT statements into the REPL:
++#   - this branch (577abe4): segmentation fault after 2,549 rows were stored,
++#     and after 2,507 of 3,000 in a second run with this script;
++#   - main's db.bld (effect-annotated scratch build): the REPL stopped after
++#     2,464 rows with no message (the crash was not visible through the pipe).
++# Rows stored before the crash were intact, and 4,000 rows loaded through 40
++# single-command multi-row INSERTs without error, so table size alone does not
++# trigger it. Something grows per REPL statement. Cause not yet found.
++#
++# Exit 0 when all N rows land (fixed), 1 when the REPL dies early (still open).
++set -o pipefail
++cd "$(dirname "$0")"
++QDB="$(cd .. && pwd)/qdb.exe"
++N="${1:-3000}"
++DB=/tmp/qdb_repl_bulk.db
++if [ ! -f "$QDB" ]; then echo "SKIP: $QDB not found"; exit 0; fi
++rm -f "$DB" "$DB".wal
++{
++  echo "CREATE TABLE art (path TEXT, kind TEXT, size INTEGER);"
++  i=0
++  while [ "$i" -lt "$N" ]; do
++    echo "INSERT INTO art VALUES ('p$i.md','k$((i % 7))',$i);"
++    i=$((i + 1))
++  done
++  echo ".quit"
++} | "$QDB" "$DB" >/dev/null 2>&1
++rc=$?
++got="$("$QDB" "$DB" "SELECT COUNT(*) FROM art" | tr -d '\r' | tail -n +3 | tr -d ' ')"
++rm -f "$DB" "$DB".wal
++echo "repl bulk load: rc=$rc rows=$got want=$N"
++if [ "$got" = "$N" ] && [ "$rc" -eq 0 ]; then echo "FIXED"; exit 0; fi
++echo "OPEN: REPL died after $got of $N statements"
++exit 1
