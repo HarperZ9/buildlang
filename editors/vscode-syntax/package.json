@@ -1,0 +1,65 @@
+{
+  "name": "buildlang",
+  "displayName": "BuildLang",
+  "description": "Syntax highlighting and editor configuration for BuildLang effects-language files.",
+  "version": "0.1.0",
+  "publisher": "HarperZ9",
+  "author": {
+    "name": "Zain Dana Harper"
+  },
+  "license": "MIT",
+  "homepage": "https://github.com/HarperZ9/buildlang",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/HarperZ9/buildlang.git",
+    "directory": "editors/vscode-syntax"
+  },
+  "bugs": {
+    "url": "https://github.com/HarperZ9/buildlang/issues"
+  },
+  "engines": {
+    "vscode": "^1.70.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "keywords": [
+    "buildlang",
+    "build",
+    "compiler",
+    "effects",
+    "systems programming",
+    "shader"
+  ],
+  "galleryBanner": {
+    "color": "#0b0f1a",
+    "theme": "dark"
+  },
+  "contributes": {
+    "languages": [
+      {
+        "id": "buildlang",
+        "aliases": [
+          "BuildLang",
+          "buildlang",
+          "build"
+        ],
+        "extensions": [
+          ".bld"
+        ],
+        "configuration": "./language-configuration.json",
+        "icon": {
+          "light": "./images/icon.png",
+          "dark": "./images/icon.png"
+        }
+      }
+    ],
+    "grammars": [
+      {
+        "language": "buildlang",
+        "scopeName": "source.build",
+        "path": "./syntaxes/buildlang.tmLanguage.json"
+      }
+    ]
+  }
+}

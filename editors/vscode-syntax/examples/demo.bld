@@ -1,0 +1,52 @@
+// Best-effort demo - not runtime-verified by author.
+//
+// A sample BuildLang source file that exercises the highlighting surface of
+// this extension: keywords, the effect system, types, literals, strings with
+// interpolation, comments, attributes, macros, and operators.
+//
+// This extension provides editor support only. To run this file, use the
+// `buildc` toolchain from https://github.com/HarperZ9/buildlang.
+
+// #region effects
+
+/// An effect that greets a named recipient.
+effect Greeting {
+    fn greet(name: str) -> (),
+}
+
+fn welcome() ~ Greeting {
+    perform Greeting.greet("teammate");
+}
+
+// #endregion
+
+fn add_month(balance: i32, interest: i32) -> i32 {
+    balance + interest
+}
+
+#[inline]
+fn double(x: i32) -> i32 {
+    x * 2 // inline comment
+}
+
+fn main() ~ Console {
+    let mut balance: i32 = 100;
+    let mut month: i32 = 0;
+
+    while month < 3 {
+        balance = add_month(balance, 5);
+        month = month + 1;
+    }
+
+    let doubled = double(balance);
+
+    handle {
+        welcome()
+    } with {
+        Greeting.greet(name) => {
+            println!("Hello, {}!", name)
+        },
+    }
+
+    println!("balance: {}, doubled: {}", balance, doubled);
+}

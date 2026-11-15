@@ -21,6 +21,11 @@ under, the Functional Source License 1.1 with MIT future licence
 (FSL-1.1-MIT); see universe/LICENSE. The five packages under suite/ likewise
 keep their own LICENSE files.
 
+The files under editors/tmLanguage/ and editors/vscode-syntax/ moved here from
+HarperZ9/buildlang-tmLanguage (commit d9c3de1) and HarperZ9/buildlang-vscode
+(commit c7cc292) on 2026-11-15. They keep the MIT licence they were published
+under; see the LICENSE file in each folder.
+
 This product includes original software whose API design was informed by, but
 which does not copy the source of, the following project:
 

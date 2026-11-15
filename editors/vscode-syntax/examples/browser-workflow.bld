@@ -1,0 +1,24 @@
+// Browser evidence workflow vocabulary fixture.
+//
+// This sample exists for editor highlighting only. It sketches the Telos
+// local-first browser evidence path and the later Index/Forum council route.
+
+effect BrowserEvidence {
+    fn capture(url: str, mode: str) -> str;
+    fn verify(packet_ref: str) -> Result<str, str>;
+}
+
+effect ModelCouncil {
+    fn route(packet_ref: str, reason: str) -> Result<str, str>;
+}
+
+fn capture_source(url: str) ~ BrowserEvidence {
+    let mode: str = "research-capture";
+    let packet_ref = perform BrowserEvidence.capture(url, mode);
+    perform BrowserEvidence.verify(packet_ref);
+}
+
+fn escalate_uncertain(packet_ref: str) ~ ModelCouncil {
+    let reason: str = "uncertain-local-verdict";
+    perform ModelCouncil.route(packet_ref, reason);
+}
