@@ -310,7 +310,7 @@ fn print_help() ~ Console {
     println!("Examples:");
     println!("  echo \"a b c\" | qxargs echo");
     println!("  printf \"a\\nb\\nc\\n\" | qxargs -n 1 echo");
-    println!("  printf \"a\\nb\\nc\\n\" | qxargs -I'{}' echo '{}'");
+    println!("  printf \"a\\nb\\nc\\n\" | qxargs -I'{{}}' echo '{{}}'");
 }
 
 fn is_digit(c: String) -> bool {

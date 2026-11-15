@@ -25,7 +25,7 @@ fn print_help() ~ Console {
     println!("Examples:");
     println!("  qhttp GET http://example.com");
     println!("  qhttp -b GET http://example.com");
-    println!("  qhttp POST http://httpbin.org/post --data '{\"key\":\"val\"}'");
+    println!("  qhttp POST http://httpbin.org/post --data '{{\"key\":\"val\"}}'");
 }
 
 // Parse host from URL: extract everything between :// and the next / or :
