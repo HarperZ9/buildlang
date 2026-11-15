@@ -1,0 +1,146 @@
+// =============================================================================
+// qexpand — Convert tabs to spaces, written in BuildLang
+// =============================================================================
+// Usage:
+//   qexpand file.txt           replace tabs with 8 spaces (default)
+//   qexpand -t 4 file.txt      replace tabs with 4 spaces
+//   cat file | qexpand          from stdin
+//   qexpand --help              usage
+//
+// Simple: for each line, replace \t with N spaces.
+// =============================================================================
+
+include!("stdlib/lines.bld");
+
+// --- Build a string of N spaces ---
+fn make_spaces(n: i32) -> String {
+    let mut out = "";
+    let mut i: i32 = 0;
+    while i < n {
+        out = out + " ";
+        i = i + 1;
+    }
+    out
+}
+
+// --- Strip trailing \r ---
+fn strip_cr(line: String) -> String {
+    let len = line.len();
+    if len == 0 { return ""; }
+    let last = line.char_at(len - 1);
+    if last == "\r" {
+        if len == 1 { return ""; }
+        line.substring(0, len - 1)
+    } else {
+        line
+    }
+}
+
+// --- Expand tabs in a single line ---
+fn expand_line(line: String, tab_width: i32) -> String {
+    let len = line.len();
+    if len == 0 { return ""; }
+    let spaces = make_spaces(tab_width);
+    let mut out = "";
+    let mut i: i32 = 0;
+    while i < len {
+        let c = line.char_at(i);
+        if c == "\t" {
+            out = out + spaces;
+        } else {
+            out = out + c;
+        }
+        i = i + 1;
+    }
+    out
+}
+
+// --- Process content line by line ---
+fn process(content: String, tab_width: i32) ~ Console {
+    let lr = lr_new(content);
+    let mut i = 0;
+    while i < lr.count {
+        let raw = lr_get(&lr, i);
+        let line = strip_cr(raw);
+        let expanded = expand_line(line, tab_width);
+        println!("{}", expanded);
+        i = i + 1;
+    }
+}
+
+// --- Help ---
+fn print_help() ~ Console {
+    println!("qexpand — convert tabs to spaces");
+    println!("");
+    println!("Usage:");
+    println!("  qexpand [OPTIONS] [FILE]");
+    println!("");
+    println!("Options:");
+    println!("  -t N       set tab width to N (default: 8)");
+    println!("  --help     display this help and exit");
+    println!("");
+    println!("If no FILE is given, reads from stdin.");
+    println!("");
+    println!("Examples:");
+    println!("  qexpand file.txt           tabs -> 8 spaces");
+    println!("  qexpand -t 4 file.txt      tabs -> 4 spaces");
+    println!("  cat file | qexpand -t 2    from stdin, 2 spaces");
+}
+
+// --- Main ---
+fn main() ~ Console + Environment + FileSystem + Process {
+    let nargs = args_count();
+    let mut tab_width: i32 = 8;
+    let mut filename = "";
+    let mut has_file = false;
+
+    let mut i: i32 = 1;
+    while i < nargs {
+        let arg = args_get(i);
+
+        if arg == "--help" || arg == "-h" {
+            print_help();
+            process_exit(0);
+        } else if arg == "-t" {
+            i = i + 1;
+            if i < nargs {
+                let val = args_get(i);
+                tab_width = val.parse_int();
+                if tab_width < 1 {
+                    println!("qexpand: invalid tab width");
+                    process_exit(2);
+                }
+            }
+        } else if arg.starts_with("-") {
+            println!("qexpand: unknown option '{}'", arg);
+            process_exit(2);
+        } else {
+            filename = arg;
+            has_file = true;
+        }
+
+        i = i + 1;
+    }
+
+    // Read input
+    let input = if has_file {
+        if !file_exists(filename) {
+            println!("qexpand: {}: No such file or directory", filename);
+            process_exit(2);
+        }
+        read_file(filename)
+    } else {
+        let piped = stdin_is_pipe();
+        if !piped {
+            print_help();
+            process_exit(0);
+        }
+        read_all()
+    };
+
+    if input.len() == 0 {
+        process_exit(0);
+    }
+
+    process(input, tab_width);
+}

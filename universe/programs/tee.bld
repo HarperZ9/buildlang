@@ -1,0 +1,87 @@
+// =============================================================================
+// qtee - Tee (split output) written in BuildLang
+// =============================================================================
+// Reads stdin, writes to stdout AND to one or more files.
+//
+// Usage:
+//   echo "hello" | qtee output.txt          write to stdout AND file
+//   echo "hello" | qtee -a output.txt       append to file
+//   echo "hello" | qtee f1.txt f2.txt       multiple output files
+//   qtee --help                             usage
+// =============================================================================
+
+fn print_help() ~ Console {
+    println!("qtee - copy stdin to stdout and files");
+    println!("");
+    println!("Usage:");
+    println!("  qtee [OPTION]... [FILE]...");
+    println!("");
+    println!("Options:");
+    println!("  -a       append to files instead of overwriting");
+    println!("  --help   display this help and exit");
+    println!("");
+    println!("Copy standard input to each FILE, and also to standard output.");
+    println!("If no FILE is given, just copy stdin to stdout.");
+}
+
+fn main() ~ Console + Environment + FileSystem + Process {
+    let nargs = args_count();
+
+    // Parse flags and collect file count
+    let mut append_mode = false;
+    let mut file_count: i64 = 0;
+
+    let mut i: i64 = 1;
+    while i < nargs {
+        let arg = args_get(i);
+
+        if arg == "--help" || arg == "-h" {
+            print_help();
+            process_exit(0);
+        } else if arg == "-a" {
+            append_mode = true;
+        } else if arg.starts_with("-") {
+            // Check for combined flags
+            if arg.contains("a") {
+                append_mode = true;
+            }
+        } else {
+            file_count = file_count + 1;
+        }
+
+        i = i + 1;
+    }
+
+    // Read all of stdin
+    let piped = stdin_is_pipe();
+    if !piped {
+        print_help();
+        process_exit(0);
+    }
+
+    let content = read_all();
+
+    // Write to stdout
+    print!("{}", content);
+
+    // Write (or append) to each file argument
+    let mut j: i64 = 1;
+    while j < nargs {
+        let arg = args_get(j);
+
+        if arg.starts_with("-") {
+            // Skip flags
+            j = j + 1;
+        } else {
+            // It's a filename
+            if append_mode {
+                // Simulate append: read existing + write back combined
+                let existing = if file_exists(arg) { read_file(arg) } else { "" };
+                write_file(arg, existing + content);
+            } else {
+                write_file(arg, content);
+            }
+            j = j + 1;
+        }
+    }
+}

@@ -1,0 +1,1568 @@
+// ============================================================================
+// PHOTON ENGINE - VIRTUAL TEXTURING SYSTEM
+// Sparse Virtual Textures and Streaming Architecture
+// Based on Harper Engine WP-089: Virtual Texturing Pipeline
+// ============================================================================
+
+module photon::virtual_texturing;
+
+use core::memory::{GpuBuffer, GpuTexture, MemoryPool, PageAllocator};
+use core::math::{Vec2, Vec3, Vec4, UVec2, UVec4};
+use core::io::{AsyncFileReader, CompressedStream};
+use photon::gpu::{CommandBuffer, ComputeShader, RenderPipeline, BindGroup};
+use photon::texture::{TextureFormat, SamplerState, TextureView};
+
+// ============================================================================
+// VIRTUAL TEXTURE CORE TYPES
+// Based on Harper Engine RT-0891: Virtual Texture Fundamentals
+// ============================================================================
+
+/// Page size for virtual textures (128x128 is common)
+const PAGE_SIZE: u32 = 128;
+/// Border size for filtering across page boundaries
+const PAGE_BORDER: u32 = 4;
+/// Total page size including borders
+const PAGE_SIZE_WITH_BORDER: u32 = PAGE_SIZE + PAGE_BORDER * 2;
+
+/// Virtual texture page identifier
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+struct PageId {
+    /// Virtual texture ID
+    texture_id: u16,
+    /// Mip level
+    mip_level: u8,
+    /// Page X coordinate within mip level
+    page_x: u16,
+    /// Page Y coordinate within mip level
+    page_y: u16,
+}
+
+impl PageId {
+    fn new(texture_id: u16, mip_level: u8, page_x: u16, page_y: u16) -> Self {
+        Self { texture_id, mip_level, page_x, page_y }
+    }
+
+    /// Pack into 64-bit integer for hashing
+    fn pack(self) -> u64 {
+        ((self.texture_id as u64) << 48) |
+        ((self.mip_level as u64) << 40) |
+        ((self.page_x as u64) << 16) |
+        (self.page_y as u64)
+    }
+
+    fn unpack(packed: u64) -> Self {
+        Self {
+            texture_id: ((packed >> 48) & 0xFFFF) as u16,
+            mip_level: ((packed >> 40) & 0xFF) as u8,
+            page_x: ((packed >> 16) & 0xFFFF) as u16,
+            page_y: (packed & 0xFFFF) as u16,
+        }
+    }
+}
+
+/// Physical page location in the tile cache
+struct PhysicalPage {
+    /// X coordinate in tile cache atlas
+    cache_x: u16,
+    /// Y coordinate in tile cache atlas
+    cache_y: u16,
+    /// Last frame this page was accessed
+    last_used_frame: u32,
+    /// Page is currently being loaded
+    loading: bool,
+    /// Page data is valid and ready to use
+    valid: bool,
+}
+
+/// Page request from GPU feedback
+struct PageRequest {
+    page_id: PageId,
+    priority: f32,
+    frame_requested: u32,
+}
+
+/// Virtual texture descriptor
+struct VirtualTextureDescriptor {
+    /// Unique identifier
+    id: u16,
+    /// Virtual texture width in pixels
+    width: u32,
+    /// Virtual texture height in pixels
+    height: u32,
+    /// Number of mip levels
+    mip_levels: u32,
+    /// Texture format
+    format: TextureFormat,
+    /// Source file path for streaming
+    source_path: String,
+    /// Compression format for stored pages
+    compression: PageCompression,
+}
+
+/// Page data compression format
+enum PageCompression {
+    None,
+    BC1,
+    BC3,
+    BC4,
+    BC5,
+    BC6H,
+    BC7,
+    ASTC4x4,
+    ASTC6x6,
+    ASTC8x8,
+    Custom { codec: String },
+}
+
+impl PageCompression {
+    fn bytes_per_page(&self) -> u32 {
+        let pixels = PAGE_SIZE_WITH_BORDER * PAGE_SIZE_WITH_BORDER;
+        match self {
+            Self::None => pixels * 4,
+            Self::BC1 | Self::BC4 => pixels / 2,
+            Self::BC3 | Self::BC5 | Self::BC6H | Self::BC7 => pixels,
+            Self::ASTC4x4 => pixels,
+            Self::ASTC6x6 => (pixels * 128) / (6 * 6 * 8),
+            Self::ASTC8x8 => (pixels * 128) / (8 * 8 * 8),
+            Self::Custom { .. } => pixels, // Assume 1:1
+        }
+    }
+}
+
+// ============================================================================
+// INDIRECTION TEXTURE
+// Based on Harper Engine RT-0892: Page Table Architecture
+// ============================================================================
+
+/// Indirection texture for virtual to physical address translation
+struct IndirectionTexture {
+    /// GPU texture for indirection lookup
+    texture: GpuTexture,
+    /// Width in pages
+    width_pages: u32,
+    /// Height in pages
+    height_pages: u32,
+    /// Number of mip levels
+    mip_levels: u32,
+    /// CPU-side mirror for updates
+    cpu_data: Vec<u32>,
+    /// Dirty pages that need GPU upload
+    dirty_pages: Vec<(u32, u32, u32)>, // (x, y, mip)
+}
+
+impl IndirectionTexture {
+    /// Indirection entry format:
+    /// Bits 0-9:   Physical page X
+    /// Bits 10-19: Physical page Y
+    /// Bits 20-23: Mip bias
+    /// Bits 24-31: Flags (valid, etc.)
+    const VALID_FLAG: u32 = 1 << 24;
+    const FALLBACK_FLAG: u32 = 1 << 25;
+
+    fn new(device: &GpuDevice, width: u32, height: u32, mip_levels: u32) -> Self {
+        let width_pages = (width + PAGE_SIZE - 1) / PAGE_SIZE;
+        let height_pages = (height + PAGE_SIZE - 1) / PAGE_SIZE;
+
+        let texture = device.create_texture(&TextureDescriptor {
+            width: width_pages,
+            height: height_pages,
+            mip_levels,
+            format: TextureFormat::R32_UINT,
+            usage: TextureUsage::SHADER_READ | TextureUsage::COPY_DST,
+            ..Default::default()
+        });
+
+        let total_texels = Self::calculate_total_texels(width_pages, height_pages, mip_levels);
+        let cpu_data = vec![0u32; total_texels];
+
+        Self {
+            texture,
+            width_pages,
+            height_pages,
+            mip_levels,
+            cpu_data,
+            dirty_pages: Vec::new(),
+        }
+    }
+
+    fn calculate_total_texels(width: u32, height: u32, mips: u32) -> usize {
+        let mut total = 0usize;
+        let mut w = width;
+        let mut h = height;
+
+        for _ in 0..mips {
+            total += (w * h) as usize;
+            w = (w + 1) / 2;
+            h = (h + 1) / 2;
+        }
+
+        total
+    }
+
+    /// Update indirection entry for a page
+    fn update_entry(&mut self, page_x: u32, page_y: u32, mip: u32, physical_x: u32, physical_y: u32) {
+        let entry = (physical_x & 0x3FF) |
+                   ((physical_y & 0x3FF) << 10) |
+                   Self::VALID_FLAG;
+
+        let offset = self.get_offset(page_x, page_y, mip);
+        self.cpu_data[offset] = entry;
+        self.dirty_pages.push((page_x, page_y, mip));
+    }
+
+    /// Mark entry as fallback (using coarser mip)
+    fn update_fallback(&mut self, page_x: u32, page_y: u32, mip: u32,
+                       physical_x: u32, physical_y: u32, mip_bias: u32) {
+        let entry = (physical_x & 0x3FF) |
+                   ((physical_y & 0x3FF) << 10) |
+                   ((mip_bias & 0xF) << 20) |
+                   Self::VALID_FLAG |
+                   Self::FALLBACK_FLAG;
+
+        let offset = self.get_offset(page_x, page_y, mip);
+        self.cpu_data[offset] = entry;
+        self.dirty_pages.push((page_x, page_y, mip));
+    }
+
+    fn get_offset(&self, page_x: u32, page_y: u32, mip: u32) -> usize {
+        let mut offset = 0usize;
+        let mut w = self.width_pages;
+        let mut h = self.height_pages;
+
+        for m in 0..mip {
+            offset += (w * h) as usize;
+            w = (w + 1) / 2;
+            h = (h + 1) / 2;
+        }
+
+        offset + (page_y * w + page_x) as usize
+    }
+
+    /// Upload dirty pages to GPU
+    fn upload_dirty(&mut self, cmd: &mut CommandBuffer) {
+        if self.dirty_pages.is_empty() {
+            return;
+        }
+
+        // Batch updates by mip level for efficiency
+        for (page_x, page_y, mip) in self.dirty_pages.drain(..) {
+            let offset = self.get_offset(page_x, page_y, mip);
+            let data = self.cpu_data[offset];
+
+            cmd.update_texture_region(
+                &self.texture,
+                mip,
+                page_x, page_y, 1, 1,
+                &[data]
+            );
+        }
+    }
+}
+
+// ============================================================================
+// TILE CACHE (PHYSICAL TEXTURE ATLAS)
+// Based on Harper Engine RT-0893: Physical Page Cache
+// ============================================================================
+
+/// Physical tile cache that holds resident pages
+struct TileCache {
+    /// GPU texture atlas holding physical pages
+    atlas: GpuTexture,
+    /// Atlas width in pages
+    atlas_width_pages: u32,
+    /// Atlas height in pages
+    atlas_height_pages: u32,
+    /// Total number of pages in cache
+    capacity: u32,
+    /// Physical page metadata
+    pages: Vec<Option<CachedPage>>,
+    /// Free page list (indices into pages)
+    free_list: Vec<u32>,
+    /// Page lookup: PageId -> cache index
+    page_map: HashMap<u64, u32>,
+    /// LRU tracking
+    lru_head: Option<u32>,
+    lru_tail: Option<u32>,
+}
+
+struct CachedPage {
+    page_id: PageId,
+    physical_x: u16,
+    physical_y: u16,
+    last_used_frame: u32,
+    lru_prev: Option<u32>,
+    lru_next: Option<u32>,
+}
+
+impl TileCache {
+    fn new(device: &GpuDevice, atlas_size: u32, format: TextureFormat) -> Self {
+        let atlas_width_pages = atlas_size / PAGE_SIZE_WITH_BORDER;
+        let atlas_height_pages = atlas_size / PAGE_SIZE_WITH_BORDER;
+        let capacity = atlas_width_pages * atlas_height_pages;
+
+        let atlas = device.create_texture(&TextureDescriptor {
+            width: atlas_size,
+            height: atlas_size,
+            format,
+            usage: TextureUsage::SHADER_READ | TextureUsage::COPY_DST,
+            ..Default::default()
+        });
+
+        let pages = vec![None; capacity as usize];
+        let free_list: Vec<u32> = (0..capacity).collect();
+
+        Self {
+            atlas,
+            atlas_width_pages,
+            atlas_height_pages,
+            capacity,
+            pages,
+            free_list,
+            page_map: HashMap::new(),
+            lru_head: None,
+            lru_tail: None,
+        }
+    }
+
+    /// Allocate a page slot for the given page ID
+    fn allocate(&mut self, page_id: PageId, current_frame: u32) -> Option<(u32, u32)> {
+        // Check if page is already cached
+        if let Some(&cache_idx) = self.page_map.get(&page_id.pack()) {
+            // Update LRU
+            self.touch(cache_idx, current_frame);
+            let page = self.pages[cache_idx as usize].as_ref()?;
+            return Some((page.physical_x as u32, page.physical_y as u32));
+        }
+
+        // Try to get a free page
+        let cache_idx = if let Some(idx) = self.free_list.pop() {
+            idx
+        } else {
+            // Evict LRU page
+            self.evict_lru()?
+        };
+
+        // Calculate physical coordinates
+        let physical_x = (cache_idx % self.atlas_width_pages) as u16;
+        let physical_y = (cache_idx / self.atlas_width_pages) as u16;
+
+        // Insert into page map
+        self.page_map.insert(page_id.pack(), cache_idx);
+
+        // Create cached page entry
+        self.pages[cache_idx as usize] = Some(CachedPage {
+            page_id,
+            physical_x,
+            physical_y,
+            last_used_frame: current_frame,
+            lru_prev: None,
+            lru_next: None,
+        });
+
+        // Add to LRU
+        self.add_to_lru_head(cache_idx);
+
+        Some((physical_x as u32, physical_y as u32))
+    }
+
+    fn touch(&mut self, cache_idx: u32, current_frame: u32) {
+        if let Some(ref mut page) = self.pages[cache_idx as usize] {
+            page.last_used_frame = current_frame;
+        }
+        self.move_to_lru_head(cache_idx);
+    }
+
+    fn evict_lru(&mut self) -> Option<u32> {
+        let tail = self.lru_tail?;
+
+        // Remove from page map
+        if let Some(ref page) = self.pages[tail as usize] {
+            self.page_map.remove(&page.page_id.pack());
+        }
+
+        // Remove from LRU
+        self.remove_from_lru(tail);
+
+        // Clear page entry
+        self.pages[tail as usize] = None;
+
+        Some(tail)
+    }
+
+    fn add_to_lru_head(&mut self, idx: u32) {
+        if let Some(ref mut page) = self.pages[idx as usize] {
+            page.lru_prev = None;
+            page.lru_next = self.lru_head;
+        }
+
+        if let Some(old_head) = self.lru_head {
+            if let Some(ref mut old_page) = self.pages[old_head as usize] {
+                old_page.lru_prev = Some(idx);
+            }
+        }
+
+        self.lru_head = Some(idx);
+
+        if self.lru_tail.is_none() {
+            self.lru_tail = Some(idx);
+        }
+    }
+
+    fn remove_from_lru(&mut self, idx: u32) {
+        let (prev, next) = if let Some(ref page) = self.pages[idx as usize] {
+            (page.lru_prev, page.lru_next)
+        } else {
+            return;
+        };
+
+        if let Some(prev_idx) = prev {
+            if let Some(ref mut prev_page) = self.pages[prev_idx as usize] {
+                prev_page.lru_next = next;
+            }
+        } else {
+            self.lru_head = next;
+        }
+
+        if let Some(next_idx) = next {
+            if let Some(ref mut next_page) = self.pages[next_idx as usize] {
+                next_page.lru_prev = prev;
+            }
+        } else {
+            self.lru_tail = prev;
+        }
+    }
+
+    fn move_to_lru_head(&mut self, idx: u32) {
+        self.remove_from_lru(idx);
+        self.add_to_lru_head(idx);
+    }
+
+    /// Upload page data to the cache
+    fn upload_page(&self, cmd: &mut CommandBuffer, cache_idx: u32, data: &[u8]) {
+        let physical_x = (cache_idx % self.atlas_width_pages) * PAGE_SIZE_WITH_BORDER;
+        let physical_y = (cache_idx / self.atlas_width_pages) * PAGE_SIZE_WITH_BORDER;
+
+        cmd.update_texture_region(
+            &self.atlas,
+            0,
+            physical_x, physical_y,
+            PAGE_SIZE_WITH_BORDER, PAGE_SIZE_WITH_BORDER,
+            data
+        );
+    }
+}
+
+use std::collections::HashMap;
+
+// ============================================================================
+// GPU FEEDBACK SYSTEM
+// Based on Harper Engine RT-0894: Page Request Feedback
+// ============================================================================
+
+/// GPU feedback buffer for page requests
+struct FeedbackBuffer {
+    /// Downscaled feedback texture
+    feedback_texture: GpuTexture,
+    /// Readback buffer for CPU processing
+    readback_buffer: GpuBuffer,
+    /// Feedback resolution divisor
+    scale_factor: u32,
+    /// Analysis compute shader
+    analyze_pipeline: ComputeShader,
+    /// Page request buffer
+    request_buffer: GpuBuffer,
+    /// Request count atomic
+    request_count: GpuBuffer,
+}
+
+impl FeedbackBuffer {
+    fn new(device: &GpuDevice, width: u32, height: u32, scale_factor: u32) -> Self {
+        let feedback_width = (width + scale_factor - 1) / scale_factor;
+        let feedback_height = (height + scale_factor - 1) / scale_factor;
+
+        let feedback_texture = device.create_texture(&TextureDescriptor {
+            width: feedback_width,
+            height: feedback_height,
+            format: TextureFormat::R32G32_UINT, // page_id + mip
+            usage: TextureUsage::RENDER_TARGET | TextureUsage::SHADER_READ,
+            ..Default::default()
+        });
+
+        let readback_buffer = device.create_buffer(&BufferDescriptor {
+            size: (feedback_width * feedback_height * 8) as u64,
+            usage: BufferUsage::COPY_DST | BufferUsage::MAP_READ,
+            ..Default::default()
+        });
+
+        let request_buffer = device.create_buffer(&BufferDescriptor {
+            size: 1024 * 1024 * std::mem::size_of::<PageRequest>() as u64,
+            usage: BufferUsage::STORAGE,
+            ..Default::default()
+        });
+
+        let request_count = device.create_buffer(&BufferDescriptor {
+            size: 4,
+            usage: BufferUsage::STORAGE | BufferUsage::COPY_SRC,
+            ..Default::default()
+        });
+
+        let analyze_pipeline = Self::create_analyze_pipeline(device);
+
+        Self {
+            feedback_texture,
+            readback_buffer,
+            scale_factor,
+            analyze_pipeline,
+            request_buffer,
+            request_count,
+        }
+    }
+
+    fn create_analyze_pipeline(device: &GpuDevice) -> ComputeShader {
+        let shader = r#"
+            struct PageRequest {
+                texture_id: u32,
+                mip_level: u32,
+                page_x: u32,
+                page_y: u32,
+            };
+
+            @group(0) @binding(0) var feedback_texture: texture_2d<u32>;
+            @group(0) @binding(1) var<storage, read_write> request_count: atomic<u32>;
+            @group(0) @binding(2) var<storage, read_write> requests: array<PageRequest>;
+            @group(0) @binding(3) var<storage, read> indirection_texture: texture_2d<u32>;
+
+            const MAX_REQUESTS: u32 = 1024u * 1024u;
+
+            var<workgroup> local_requests: array<PageRequest, 64>;
+            var<workgroup> local_count: atomic<u32>;
+
+            @compute @workgroup_size(8, 8, 1)
+            fn main(
+                @builtin(global_invocation_id) gid: vec3<u32>,
+                @builtin(local_invocation_index) lid: u32
+            ) {
+                let dims = textureDimensions(feedback_texture);
+
+                if (lid == 0u) {
+                    atomicStore(&local_count, 0u);
+                }
+                workgroupBarrier();
+
+                if (gid.x < dims.x && gid.y < dims.y) {
+                    let feedback = textureLoad(feedback_texture, gid.xy, 0);
+                    let page_id = feedback.x;
+                    let mip = feedback.y;
+
+                    if (page_id != 0xFFFFFFFFu) {
+                        // Decode page ID
+                        let texture_id = page_id >> 24u;
+                        let page_x = (page_id >> 12u) & 0xFFFu;
+                        let page_y = page_id & 0xFFFu;
+
+                        // Check if page is already loaded
+                        let indirection = textureLoad(indirection_texture, vec2<u32>(page_x, page_y), i32(mip));
+                        let is_valid = (indirection.r & 0x01000000u) != 0u;
+
+                        if (!is_valid) {
+                            // Add to local request list
+                            let local_idx = atomicAdd(&local_count, 1u);
+                            if (local_idx < 64u) {
+                                local_requests[local_idx] = PageRequest(
+                                    texture_id,
+                                    mip,
+                                    page_x,
+                                    page_y
+                                );
+                            }
+                        }
+                    }
+                }
+
+                workgroupBarrier();
+
+                // Merge local requests to global
+                let count = atomicLoad(&local_count);
+                if (lid < count) {
+                    let global_idx = atomicAdd(&request_count, 1u);
+                    if (global_idx < MAX_REQUESTS) {
+                        requests[global_idx] = local_requests[lid];
+                    }
+                }
+            }
+        "#;
+
+        device.create_compute_shader(shader)
+    }
+
+    /// Render feedback pass
+    fn render_feedback(&self, cmd: &mut CommandBuffer) {
+        cmd.begin_render_pass(&RenderPassDescriptor {
+            color_attachments: &[ColorAttachment {
+                texture: &self.feedback_texture,
+                clear: Some(ClearValue::Uint2(0xFFFFFFFF, 0)),
+                store: true,
+            }],
+            ..Default::default()
+        });
+
+        // Render scene with feedback shader
+        // ... geometry rendering with page ID output ...
+
+        cmd.end_render_pass();
+    }
+
+    /// Analyze feedback and generate page requests
+    fn analyze(&self, cmd: &mut CommandBuffer) {
+        // Reset request count
+        cmd.fill_buffer(&self.request_count, 0, 4, 0);
+        cmd.barrier(BarrierType::BufferWriteToRead);
+
+        cmd.set_compute_shader(&self.analyze_pipeline);
+        // ... set bind group ...
+
+        let dims = self.feedback_texture.dimensions();
+        cmd.dispatch(
+            (dims.0 + 7) / 8,
+            (dims.1 + 7) / 8,
+            1
+        );
+
+        // Copy for readback
+        cmd.copy_texture_to_buffer(
+            &self.feedback_texture,
+            &self.readback_buffer,
+            0
+        );
+    }
+
+    /// Read back page requests to CPU
+    fn read_requests(&self) -> Vec<PageRequest> {
+        // Map readback buffer and parse requests
+        // This would be async in practice
+        Vec::new()
+    }
+}
+
+// ============================================================================
+// PAGE STREAMING
+// Based on Harper Engine RT-0895: Asynchronous Page Loading
+// ============================================================================
+
+/// Asynchronous page streaming system
+struct PageStreamer {
+    /// Pending page load requests
+    pending_loads: Vec<PendingLoad>,
+    /// Completed loads ready for upload
+    completed_loads: Vec<CompletedLoad>,
+    /// Worker thread pool
+    worker_pool: ThreadPool,
+    /// Page file reader
+    file_reader: AsyncFileReader,
+    /// Maximum concurrent loads
+    max_concurrent: usize,
+    /// Currently loading count
+    loading_count: usize,
+    /// Decompression buffer pool
+    decompress_pool: BufferPool,
+}
+
+struct PendingLoad {
+    page_id: PageId,
+    priority: f32,
+    file_offset: u64,
+    compressed_size: u32,
+}
+
+struct CompletedLoad {
+    page_id: PageId,
+    data: Vec<u8>,
+}
+
+struct BufferPool {
+    buffers: Vec<Vec<u8>>,
+    free_indices: Vec<usize>,
+}
+
+impl BufferPool {
+    fn new(count: usize, size: usize) -> Self {
+        let buffers = (0..count).map(|_| vec![0u8; size]).collect();
+        let free_indices = (0..count).collect();
+        Self { buffers, free_indices }
+    }
+
+    fn acquire(&mut self) -> Option<(usize, &mut Vec<u8>)> {
+        let idx = self.free_indices.pop()?;
+        Some((idx, &mut self.buffers[idx]))
+    }
+
+    fn release(&mut self, idx: usize) {
+        self.free_indices.push(idx);
+    }
+}
+
+struct ThreadPool {
+    // Simplified thread pool
+    thread_count: usize,
+}
+
+impl PageStreamer {
+    fn new(max_concurrent: usize) -> Self {
+        Self {
+            pending_loads: Vec::new(),
+            completed_loads: Vec::new(),
+            worker_pool: ThreadPool { thread_count: 4 },
+            file_reader: AsyncFileReader::new(),
+            max_concurrent,
+            loading_count: 0,
+            decompress_pool: BufferPool::new(max_concurrent * 2,
+                (PAGE_SIZE_WITH_BORDER * PAGE_SIZE_WITH_BORDER * 4) as usize),
+        }
+    }
+
+    /// Queue page for loading
+    fn request_page(&mut self, page_id: PageId, priority: f32, file_offset: u64, compressed_size: u32) {
+        // Check if already pending
+        if self.pending_loads.iter().any(|p| p.page_id == page_id) {
+            return;
+        }
+
+        self.pending_loads.push(PendingLoad {
+            page_id,
+            priority,
+            file_offset,
+            compressed_size,
+        });
+    }
+
+    /// Process pending loads
+    fn update(&mut self) {
+        // Sort by priority
+        self.pending_loads.sort_by(|a, b| b.priority.partial_cmp(&a.priority).unwrap());
+
+        // Start new loads up to limit
+        while self.loading_count < self.max_concurrent && !self.pending_loads.is_empty() {
+            let load = self.pending_loads.remove(0);
+            self.start_load(load);
+        }
+
+        // Check for completed loads
+        self.poll_completions();
+    }
+
+    fn start_load(&mut self, load: PendingLoad) {
+        self.loading_count += 1;
+
+        // In practice, this would spawn an async task
+        // For now, simulate immediate completion
+    }
+
+    fn poll_completions(&mut self) {
+        // Check async file reads for completion
+    }
+
+    /// Get completed loads for upload
+    fn get_completed(&mut self) -> Vec<CompletedLoad> {
+        std::mem::take(&mut self.completed_loads)
+    }
+}
+
+// ============================================================================
+// VIRTUAL TEXTURE MANAGER
+// Based on Harper Engine RT-0896: Unified Virtual Texturing
+// ============================================================================
+
+/// Main virtual texture manager
+struct VirtualTextureManager {
+    /// Registered virtual textures
+    textures: Vec<VirtualTextureDescriptor>,
+    /// Per-texture indirection tables
+    indirection_textures: Vec<IndirectionTexture>,
+    /// Physical page caches (one per format)
+    tile_caches: HashMap<TextureFormat, TileCache>,
+    /// GPU feedback system
+    feedback: FeedbackBuffer,
+    /// Page streaming system
+    streamer: PageStreamer,
+    /// Current frame number
+    frame: u32,
+    /// Page file index
+    page_index: PageIndex,
+    /// Statistics
+    stats: VirtualTextureStats,
+}
+
+/// Index mapping page IDs to file locations
+struct PageIndex {
+    /// Per-texture page tables
+    tables: Vec<PageTable>,
+}
+
+struct PageTable {
+    /// Entries indexed by (mip * pages_in_mip + page_y * width + page_x)
+    entries: Vec<PageTableEntry>,
+    /// Page counts per mip level
+    mip_offsets: Vec<u32>,
+}
+
+struct PageTableEntry {
+    file_offset: u64,
+    compressed_size: u32,
+    flags: u32,
+}
+
+struct VirtualTextureStats {
+    pages_resident: u32,
+    pages_requested: u32,
+    pages_loaded: u32,
+    pages_evicted: u32,
+    cache_hit_rate: f32,
+    streaming_bandwidth: f32,
+}
+
+impl VirtualTextureManager {
+    fn new(device: &GpuDevice, screen_width: u32, screen_height: u32) -> Self {
+        let feedback = FeedbackBuffer::new(device, screen_width, screen_height, 8);
+        let streamer = PageStreamer::new(16);
+
+        Self {
+            textures: Vec::new(),
+            indirection_textures: Vec::new(),
+            tile_caches: HashMap::new(),
+            feedback,
+            streamer,
+            frame: 0,
+            page_index: PageIndex { tables: Vec::new() },
+            stats: VirtualTextureStats::default(),
+        }
+    }
+
+    /// Register a virtual texture
+    fn register_texture(&mut self, device: &GpuDevice, desc: VirtualTextureDescriptor) -> u16 {
+        let id = self.textures.len() as u16;
+
+        // Create indirection texture
+        let indirection = IndirectionTexture::new(
+            device,
+            desc.width,
+            desc.height,
+            desc.mip_levels
+        );
+        self.indirection_textures.push(indirection);
+
+        // Ensure we have a tile cache for this format
+        if !self.tile_caches.contains_key(&desc.format) {
+            let cache = TileCache::new(device, 8192, desc.format);
+            self.tile_caches.insert(desc.format, cache);
+        }
+
+        self.textures.push(desc);
+        id
+    }
+
+    /// Update virtual texture system (call once per frame)
+    fn update(&mut self, cmd: &mut CommandBuffer) {
+        self.frame += 1;
+
+        // 1. Analyze feedback from previous frame
+        let requests = self.feedback.read_requests();
+        self.stats.pages_requested = requests.len() as u32;
+
+        // 2. Queue page loads
+        for request in requests {
+            if let Some(entry) = self.get_page_entry(&request.page_id) {
+                self.streamer.request_page(
+                    request.page_id,
+                    request.priority,
+                    entry.file_offset,
+                    entry.compressed_size
+                );
+            }
+        }
+
+        // 3. Process streaming
+        self.streamer.update();
+
+        // 4. Upload completed pages
+        let completed = self.streamer.get_completed();
+        self.stats.pages_loaded = completed.len() as u32;
+
+        for load in completed {
+            self.upload_page(cmd, load);
+        }
+
+        // 5. Upload dirty indirection entries
+        for indirection in &mut self.indirection_textures {
+            indirection.upload_dirty(cmd);
+        }
+
+        // 6. Update statistics
+        self.update_stats();
+    }
+
+    fn get_page_entry(&self, page_id: &PageId) -> Option<&PageTableEntry> {
+        let table = self.page_index.tables.get(page_id.texture_id as usize)?;
+        let mip_offset = *table.mip_offsets.get(page_id.mip_level as usize)?;
+        let entry_idx = mip_offset + page_id.page_y as u32 * self.get_mip_width(page_id) + page_id.page_x as u32;
+        table.entries.get(entry_idx as usize)
+    }
+
+    fn get_mip_width(&self, page_id: &PageId) -> u32 {
+        let desc = &self.textures[page_id.texture_id as usize];
+        let base_width = (desc.width + PAGE_SIZE - 1) / PAGE_SIZE;
+        base_width >> page_id.mip_level
+    }
+
+    fn upload_page(&mut self, cmd: &mut CommandBuffer, load: CompletedLoad) {
+        let desc = &self.textures[load.page_id.texture_id as usize];
+        let cache = self.tile_caches.get_mut(&desc.format).unwrap();
+
+        // Allocate cache slot
+        if let Some((phys_x, phys_y)) = cache.allocate(load.page_id, self.frame) {
+            // Find cache index from coordinates
+            let cache_idx = phys_y * cache.atlas_width_pages + phys_x;
+
+            // Upload page data
+            cache.upload_page(cmd, cache_idx, &load.data);
+
+            // Update indirection texture
+            let indirection = &mut self.indirection_textures[load.page_id.texture_id as usize];
+            indirection.update_entry(
+                load.page_id.page_x as u32,
+                load.page_id.page_y as u32,
+                load.page_id.mip_level as u32,
+                phys_x,
+                phys_y
+            );
+
+            self.stats.pages_resident += 1;
+        }
+    }
+
+    fn update_stats(&mut self) {
+        let total_capacity: u32 = self.tile_caches.values()
+            .map(|c| c.capacity)
+            .sum();
+
+        let total_resident: u32 = self.tile_caches.values()
+            .map(|c| c.pages.iter().filter(|p| p.is_some()).count() as u32)
+            .sum();
+
+        self.stats.pages_resident = total_resident;
+
+        if self.stats.pages_requested > 0 {
+            self.stats.cache_hit_rate =
+                1.0 - (self.stats.pages_loaded as f32 / self.stats.pages_requested as f32);
+        }
+    }
+
+    /// Get bind group for virtual texture sampling
+    fn get_bind_group(&self, texture_id: u16) -> BindGroup {
+        let desc = &self.textures[texture_id as usize];
+        let cache = self.tile_caches.get(&desc.format).unwrap();
+        let indirection = &self.indirection_textures[texture_id as usize];
+
+        // Create bind group with cache atlas and indirection texture
+        BindGroup::default()
+    }
+}
+
+// ============================================================================
+// VIRTUAL TEXTURE SAMPLING SHADER
+// Based on Harper Engine RT-0897: Trilinear Virtual Texture Sampling
+// ============================================================================
+
+/// Generate WGSL shader code for virtual texture sampling
+fn generate_vt_sampling_shader() -> String {
+    r#"
+        struct VirtualTextureParams {
+            page_size: f32,
+            page_border: f32,
+            atlas_size: f32,
+            mip_bias: f32,
+        };
+
+        @group(1) @binding(0) var<uniform> vt_params: VirtualTextureParams;
+        @group(1) @binding(1) var vt_indirection: texture_2d<u32>;
+        @group(1) @binding(2) var vt_cache: texture_2d<f32>;
+        @group(1) @binding(3) var vt_sampler: sampler;
+
+        fn sample_virtual_texture(uv: vec2<f32>, dx: vec2<f32>, dy: vec2<f32>) -> vec4<f32> {
+            // Calculate mip level from derivatives
+            let delta_max = max(length(dx), length(dy));
+            let mip = log2(delta_max * vt_params.page_size) + vt_params.mip_bias;
+            let mip_floor = floor(mip);
+            let mip_frac = mip - mip_floor;
+
+            // Sample two mip levels for trilinear
+            let sample0 = sample_vt_mip(uv, i32(mip_floor));
+            let sample1 = sample_vt_mip(uv, i32(mip_floor) + 1);
+
+            return mix(sample0, sample1, mip_frac);
+        }
+
+        fn sample_vt_mip(uv: vec2<f32>, mip: i32) -> vec4<f32> {
+            // Calculate page coordinates
+            let mip_scale = 1.0 / f32(1 << u32(mip));
+            let page_uv = uv * mip_scale;
+            let page_coord = floor(page_uv * f32(textureDimensions(vt_indirection).x));
+
+            // Read indirection entry
+            let entry = textureLoad(vt_indirection, vec2<u32>(page_coord), mip).r;
+
+            // Decode physical page location
+            let phys_x = f32(entry & 0x3FFu);
+            let phys_y = f32((entry >> 10u) & 0x3FFu);
+            let mip_bias = f32((entry >> 20u) & 0xFu);
+            let is_valid = (entry & 0x01000000u) != 0u;
+
+            if (!is_valid) {
+                // Fallback to lower mip
+                return sample_vt_mip(uv, mip + 1);
+            }
+
+            // Calculate UV within page
+            let page_frac = fract(page_uv * f32(textureDimensions(vt_indirection).x));
+
+            // Add border offset
+            let border_offset = vt_params.page_border / vt_params.page_size;
+            let inner_uv = page_frac * (1.0 - 2.0 * border_offset) + border_offset;
+
+            // Calculate atlas UV
+            let atlas_page_size = (vt_params.page_size + 2.0 * vt_params.page_border) / vt_params.atlas_size;
+            let atlas_uv = vec2<f32>(phys_x, phys_y) * atlas_page_size + inner_uv * atlas_page_size;
+
+            return textureSampleLevel(vt_cache, vt_sampler, atlas_uv, 0.0);
+        }
+
+        // Optimized sampling with anisotropic filtering
+        fn sample_virtual_texture_aniso(
+            uv: vec2<f32>,
+            dx: vec2<f32>,
+            dy: vec2<f32>,
+            max_aniso: f32
+        ) -> vec4<f32> {
+            // Calculate anisotropy ratio
+            let len_dx = length(dx);
+            let len_dy = length(dy);
+            let max_len = max(len_dx, len_dy);
+            let min_len = min(len_dx, len_dy);
+
+            let aniso_ratio = clamp(max_len / min_len, 1.0, max_aniso);
+            let samples = i32(ceil(aniso_ratio));
+
+            // Sample along major axis
+            var color = vec4<f32>(0.0);
+            let step_size = 1.0 / f32(samples);
+
+            let major_axis = select(dx, dy, len_dy > len_dx);
+            let sample_offset = major_axis * step_size;
+
+            for (var i = 0; i < samples; i++) {
+                let sample_uv = uv + sample_offset * (f32(i) - f32(samples - 1) * 0.5);
+                color += sample_virtual_texture(sample_uv, dx / aniso_ratio, dy / aniso_ratio);
+            }
+
+            return color / f32(samples);
+        }
+    "#.to_string()
+}
+
+// ============================================================================
+// PROCEDURAL VIRTUAL TEXTURES
+// Based on Harper Engine RT-0898: Runtime Page Generation
+// ============================================================================
+
+/// Procedural virtual texture generator
+struct ProceduralVirtualTexture {
+    /// Base virtual texture
+    texture_id: u16,
+    /// Page generation compute shader
+    generate_pipeline: ComputeShader,
+    /// Staging buffer for generated pages
+    staging_buffer: GpuBuffer,
+    /// Generation parameters
+    params: ProceduralParams,
+}
+
+struct ProceduralParams {
+    seed: u32,
+    octaves: u32,
+    persistence: f32,
+    lacunarity: f32,
+    scale: f32,
+}
+
+impl ProceduralVirtualTexture {
+    fn new(device: &GpuDevice, manager: &mut VirtualTextureManager, width: u32, height: u32) -> Self {
+        let texture_id = manager.register_texture(device, VirtualTextureDescriptor {
+            id: 0,
+            width,
+            height,
+            mip_levels: (width.max(height) as f32).log2() as u32 + 1,
+            format: TextureFormat::RGBA8_UNORM,
+            source_path: String::new(),
+            compression: PageCompression::None,
+        });
+
+        let generate_pipeline = Self::create_generate_pipeline(device);
+
+        let staging_buffer = device.create_buffer(&BufferDescriptor {
+            size: (PAGE_SIZE_WITH_BORDER * PAGE_SIZE_WITH_BORDER * 4) as u64,
+            usage: BufferUsage::STORAGE | BufferUsage::COPY_SRC,
+            ..Default::default()
+        });
+
+        Self {
+            texture_id,
+            generate_pipeline,
+            staging_buffer,
+            params: ProceduralParams {
+                seed: 12345,
+                octaves: 6,
+                persistence: 0.5,
+                lacunarity: 2.0,
+                scale: 1.0,
+            },
+        }
+    }
+
+    fn create_generate_pipeline(device: &GpuDevice) -> ComputeShader {
+        let shader = r#"
+            struct GenerateParams {
+                page_x: u32,
+                page_y: u32,
+                mip_level: u32,
+                seed: u32,
+                octaves: u32,
+                persistence: f32,
+                lacunarity: f32,
+                scale: f32,
+            };
+
+            @group(0) @binding(0) var<uniform> params: GenerateParams;
+            @group(0) @binding(1) var<storage, read_write> output: array<u32>;
+
+            const PAGE_SIZE: u32 = 128u;
+            const PAGE_BORDER: u32 = 4u;
+            const TOTAL_SIZE: u32 = PAGE_SIZE + PAGE_BORDER * 2u;
+
+            // Simplex noise implementation
+            fn hash(p: vec3<f32>) -> f32 {
+                var p3 = fract(p * 0.1031);
+                p3 += dot(p3, p3.yzx + 33.33);
+                return fract((p3.x + p3.y) * p3.z);
+            }
+
+            fn noise(p: vec3<f32>) -> f32 {
+                let i = floor(p);
+                let f = fract(p);
+                let u = f * f * (3.0 - 2.0 * f);
+
+                return mix(
+                    mix(mix(hash(i + vec3<f32>(0.0, 0.0, 0.0)),
+                            hash(i + vec3<f32>(1.0, 0.0, 0.0)), u.x),
+                        mix(hash(i + vec3<f32>(0.0, 1.0, 0.0)),
+                            hash(i + vec3<f32>(1.0, 1.0, 0.0)), u.x), u.y),
+                    mix(mix(hash(i + vec3<f32>(0.0, 0.0, 1.0)),
+                            hash(i + vec3<f32>(1.0, 0.0, 1.0)), u.x),
+                        mix(hash(i + vec3<f32>(0.0, 1.0, 1.0)),
+                            hash(i + vec3<f32>(1.0, 1.0, 1.0)), u.x), u.y), u.z
+                );
+            }
+
+            fn fbm(p: vec3<f32>) -> f32 {
+                var value = 0.0;
+                var amplitude = 1.0;
+                var frequency = 1.0;
+                var pos = p;
+
+                for (var i = 0u; i < params.octaves; i++) {
+                    value += amplitude * noise(pos * frequency);
+                    amplitude *= params.persistence;
+                    frequency *= params.lacunarity;
+                }
+
+                return value;
+            }
+
+            @compute @workgroup_size(8, 8, 1)
+            fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+                if (gid.x >= TOTAL_SIZE || gid.y >= TOTAL_SIZE) {
+                    return;
+                }
+
+                // Calculate world UV including border
+                let mip_scale = 1.0 / f32(1u << params.mip_level);
+                let pixel_offset = vec2<f32>(gid.xy) - f32(PAGE_BORDER);
+                let page_offset = vec2<f32>(f32(params.page_x), f32(params.page_y)) * f32(PAGE_SIZE);
+                let world_pos = (page_offset + pixel_offset) * mip_scale * params.scale;
+
+                // Generate procedural content
+                let n = fbm(vec3<f32>(world_pos, f32(params.seed) * 0.01));
+
+                // Convert to color
+                let color = vec4<f32>(n, n * 0.8, n * 0.6, 1.0);
+
+                // Pack to RGBA8
+                let packed = u32(color.r * 255.0) |
+                            (u32(color.g * 255.0) << 8u) |
+                            (u32(color.b * 255.0) << 16u) |
+                            (u32(color.a * 255.0) << 24u);
+
+                let idx = gid.y * TOTAL_SIZE + gid.x;
+                output[idx] = packed;
+            }
+        "#;
+
+        device.create_compute_shader(shader)
+    }
+
+    /// Generate page data on GPU
+    fn generate_page(&self, cmd: &mut CommandBuffer, page_id: PageId) {
+        cmd.set_compute_shader(&self.generate_pipeline);
+
+        // Set uniforms
+        // ... set bind group with params ...
+
+        cmd.dispatch(
+            (PAGE_SIZE_WITH_BORDER + 7) / 8,
+            (PAGE_SIZE_WITH_BORDER + 7) / 8,
+            1
+        );
+    }
+}
+
+// ============================================================================
+// CLIPMAP VIRTUAL TEXTURES
+// Based on Harper Engine RT-0899: Terrain Clipmap Texturing
+// ============================================================================
+
+/// Clipmap-based virtual texture for terrain
+struct ClipmapVirtualTexture {
+    /// Number of clipmap levels
+    levels: u32,
+    /// Size of each clipmap level (in pages)
+    level_size: u32,
+    /// Physical page cache per level
+    level_caches: Vec<GpuTexture>,
+    /// Clipmap center in world space
+    center: Vec2,
+    /// Page size in world units
+    page_world_size: f32,
+    /// Update ring buffer for streaming
+    update_ring: Vec<ClipmapUpdate>,
+}
+
+struct ClipmapUpdate {
+    level: u32,
+    page_x: i32,
+    page_y: i32,
+    state: UpdateState,
+}
+
+enum UpdateState {
+    Pending,
+    Loading,
+    Ready,
+}
+
+impl ClipmapVirtualTexture {
+    fn new(device: &GpuDevice, levels: u32, level_size: u32, format: TextureFormat) -> Self {
+        let level_caches = (0..levels)
+            .map(|_| device.create_texture(&TextureDescriptor {
+                width: level_size * PAGE_SIZE_WITH_BORDER,
+                height: level_size * PAGE_SIZE_WITH_BORDER,
+                format,
+                usage: TextureUsage::SHADER_READ | TextureUsage::COPY_DST,
+                ..Default::default()
+            }))
+            .collect();
+
+        Self {
+            levels,
+            level_size,
+            level_caches,
+            center: Vec2::ZERO,
+            page_world_size: 64.0,
+            update_ring: Vec::new(),
+        }
+    }
+
+    /// Update clipmap center (e.g., camera position)
+    fn update_center(&mut self, new_center: Vec2) {
+        let delta = new_center - self.center;
+
+        // Determine which pages need updating per level
+        for level in 0..self.levels {
+            let level_scale = 1 << level;
+            let page_world_size = self.page_world_size * level_scale as f32;
+
+            let delta_pages_x = (delta.x / page_world_size) as i32;
+            let delta_pages_y = (delta.y / page_world_size) as i32;
+
+            if delta_pages_x.abs() > 0 || delta_pages_y.abs() > 0 {
+                self.queue_level_updates(level, delta_pages_x, delta_pages_y);
+            }
+        }
+
+        self.center = new_center;
+    }
+
+    fn queue_level_updates(&mut self, level: u32, delta_x: i32, delta_y: i32) {
+        // Queue updates for pages that have scrolled into view
+        let half_size = (self.level_size / 2) as i32;
+
+        if delta_x > 0 {
+            // New pages on right edge
+            for y in -half_size..=half_size {
+                for x in (half_size - delta_x + 1)..=half_size {
+                    self.update_ring.push(ClipmapUpdate {
+                        level,
+                        page_x: x,
+                        page_y: y,
+                        state: UpdateState::Pending,
+                    });
+                }
+            }
+        } else if delta_x < 0 {
+            // New pages on left edge
+            for y in -half_size..=half_size {
+                for x in -half_size..(-half_size - delta_x) {
+                    self.update_ring.push(ClipmapUpdate {
+                        level,
+                        page_x: x,
+                        page_y: y,
+                        state: UpdateState::Pending,
+                    });
+                }
+            }
+        }
+
+        // Similar for Y axis...
+    }
+
+    /// Generate clipmap sampling shader
+    fn generate_sampling_shader() -> String {
+        r#"
+            struct ClipmapParams {
+                center: vec2<f32>,
+                levels: u32,
+                level_size: u32,
+                page_world_size: f32,
+            };
+
+            @group(2) @binding(0) var<uniform> clipmap_params: ClipmapParams;
+            @group(2) @binding(1) var clipmap_levels: texture_2d_array<f32>;
+            @group(2) @binding(2) var clipmap_sampler: sampler;
+
+            fn sample_clipmap(world_pos: vec2<f32>) -> vec4<f32> {
+                let relative_pos = world_pos - clipmap_params.center;
+
+                // Find appropriate level based on distance from center
+                let dist = max(abs(relative_pos.x), abs(relative_pos.y));
+                let level_float = log2(dist / clipmap_params.page_world_size);
+                let level = u32(clamp(level_float, 0.0, f32(clipmap_params.levels - 1u)));
+
+                // Calculate UV within level
+                let level_scale = f32(1u << level);
+                let level_uv = relative_pos / (clipmap_params.page_world_size * level_scale * f32(clipmap_params.level_size));
+                let uv = level_uv * 0.5 + 0.5;
+
+                // Sample with bilinear blending between levels
+                let sample0 = textureSampleLevel(clipmap_levels, clipmap_sampler, uv, f32(level), i32(level));
+
+                if (level < clipmap_params.levels - 1u) {
+                    let next_uv = level_uv * 0.5 / 2.0 + 0.5;
+                    let sample1 = textureSampleLevel(clipmap_levels, clipmap_sampler, next_uv, f32(level + 1u), i32(level + 1u));
+
+                    // Blend based on fractional level
+                    let blend = fract(level_float);
+                    return mix(sample0, sample1, blend);
+                }
+
+                return sample0;
+            }
+        "#.to_string()
+    }
+}
+
+// ============================================================================
+// UNIT TESTS
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_page_id_packing() {
+        let page = PageId::new(100, 5, 200, 300);
+        let packed = page.pack();
+        let unpacked = PageId::unpack(packed);
+
+        assert_eq!(unpacked.texture_id, 100);
+        assert_eq!(unpacked.mip_level, 5);
+        assert_eq!(unpacked.page_x, 200);
+        assert_eq!(unpacked.page_y, 300);
+    }
+
+    #[test]
+    fn test_page_compression_sizes() {
+        let none = PageCompression::None;
+        let bc1 = PageCompression::BC1;
+        let bc7 = PageCompression::BC7;
+
+        let pixels = PAGE_SIZE_WITH_BORDER * PAGE_SIZE_WITH_BORDER;
+
+        // None: 4 bytes per pixel
+        assert_eq!(none.bytes_per_page(), pixels * 4);
+
+        // BC1: 4:1 compression (0.5 bytes per pixel)
+        assert_eq!(bc1.bytes_per_page(), pixels / 2);
+
+        // BC7: 3:1 compression (1 byte per pixel)
+        assert_eq!(bc7.bytes_per_page(), pixels);
+    }
+
+    #[test]
+    fn test_indirection_texture_offsets() {
+        let width_pages = 64u32;
+        let height_pages = 64u32;
+        let mip_levels = 7u32;
+
+        let total = IndirectionTexture::calculate_total_texels(width_pages, height_pages, mip_levels);
+
+        // Mip 0: 64*64 = 4096
+        // Mip 1: 32*32 = 1024
+        // Mip 2: 16*16 = 256
+        // Mip 3: 8*8 = 64
+        // Mip 4: 4*4 = 16
+        // Mip 5: 2*2 = 4
+        // Mip 6: 1*1 = 1
+        // Total: 5461
+        assert_eq!(total, 5461);
+    }
+
+    #[test]
+    fn test_tile_cache_allocation() {
+        // Simulate tile cache behavior
+        let atlas_size = 4096u32;
+        let atlas_width_pages = atlas_size / PAGE_SIZE_WITH_BORDER;
+        let capacity = atlas_width_pages * atlas_width_pages;
+
+        // 4096 / 136 = 30 pages per dimension
+        assert_eq!(atlas_width_pages, 30);
+        // 30 * 30 = 900 pages total
+        assert_eq!(capacity, 900);
+    }
+
+    #[test]
+    fn test_mip_level_calculation() {
+        // Test mip level from screen-space derivatives
+        let page_size = 128.0f32;
+
+        // 1:1 mapping
+        let dx = Vec2::new(1.0 / page_size, 0.0);
+        let mip = (dx.length() * page_size).log2();
+        assert!((mip - 0.0).abs() < 0.01);
+
+        // 2:1 minification
+        let dx2 = Vec2::new(2.0 / page_size, 0.0);
+        let mip2 = (dx2.length() * page_size).log2();
+        assert!((mip2 - 1.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_buffer_pool() {
+        let mut pool = BufferPool::new(4, 1024);
+
+        // Acquire all buffers
+        let b1 = pool.acquire();
+        let b2 = pool.acquire();
+        let b3 = pool.acquire();
+        let b4 = pool.acquire();
+
+        assert!(b1.is_some());
+        assert!(b2.is_some());
+        assert!(b3.is_some());
+        assert!(b4.is_some());
+
+        // Pool should be empty
+        assert!(pool.acquire().is_none());
+
+        // Release one
+        pool.release(b1.unwrap().0);
+
+        // Should be available again
+        assert!(pool.acquire().is_some());
+    }
+
+    #[test]
+    fn test_virtual_texture_params() {
+        let params = ProceduralParams {
+            seed: 42,
+            octaves: 6,
+            persistence: 0.5,
+            lacunarity: 2.0,
+            scale: 1.0,
+        };
+
+        assert_eq!(params.octaves, 6);
+        assert_eq!(params.persistence, 0.5);
+    }
+
+    #[test]
+    fn test_clipmap_level_scale() {
+        let levels = 8u32;
+        let page_world_size = 64.0f32;
+
+        for level in 0..levels {
+            let level_scale = 1 << level;
+            let coverage = page_world_size * level_scale as f32;
+
+            // Level 0: 64m
+            // Level 1: 128m
+            // Level 7: 8192m
+            if level == 0 { assert_eq!(coverage, 64.0); }
+            if level == 7 { assert_eq!(coverage, 8192.0); }
+        }
+    }
+
+    #[test]
+    fn test_page_border_coverage() {
+        // Verify border provides enough texels for bilinear filtering
+        let border = PAGE_BORDER;
+        assert!(border >= 1); // Minimum for bilinear
+
+        // For trilinear with anisotropic, need more
+        assert!(border >= 4); // Good for up to 4x aniso
+    }
+
+    #[test]
+    fn test_feedback_buffer_scaling() {
+        let screen_width = 1920u32;
+        let screen_height = 1080u32;
+        let scale_factor = 8u32;
+
+        let feedback_width = (screen_width + scale_factor - 1) / scale_factor;
+        let feedback_height = (screen_height + scale_factor - 1) / scale_factor;
+
+        assert_eq!(feedback_width, 240);
+        assert_eq!(feedback_height, 135);
+
+        // Memory usage: 240 * 135 * 8 bytes = 259,200 bytes ≈ 253 KB
+        let memory = feedback_width * feedback_height * 8;
+        assert!(memory < 300_000);
+    }
+
+    #[test]
+    fn test_vt_sampling_shader_generation() {
+        let shader = generate_vt_sampling_shader();
+
+        assert!(shader.contains("sample_virtual_texture"));
+        assert!(shader.contains("VirtualTextureParams"));
+        assert!(shader.contains("vt_indirection"));
+        assert!(shader.contains("vt_cache"));
+    }
+}

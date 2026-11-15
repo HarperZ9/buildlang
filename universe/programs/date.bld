@@ -1,0 +1,156 @@
+// =============================================================================
+// qdate — Display the current date and time (date clone) written in BuildLang
+// =============================================================================
+// Usage:
+//   qdate                -> 2026-03-26
+//   qdate -t             -> 2026-03-26 15:30:45
+//   qdate -u             -> 1743019845 (unix timestamp)
+//   qdate --help         -> usage
+//
+// Implementation: time_unix() returns epoch seconds, then we compute
+// year/month/day/hour/minute/second via arithmetic.
+// =============================================================================
+
+fn print_help() ~ Console {
+    println!("qdate -- display the current date and time");
+    println!("");
+    println!("Usage:");
+    println!("  qdate          print current date (YYYY-MM-DD)");
+    println!("  qdate -t       print date and time (YYYY-MM-DD HH:MM:SS)");
+    println!("  qdate -u       print unix timestamp (seconds since epoch)");
+    println!("  qdate --help   display this help and exit");
+}
+
+// Check if a year is a leap year
+fn is_leap(year: i64) -> bool {
+    if year % 400 == 0 { return true; }
+    if year % 100 == 0 { return false; }
+    if year % 4 == 0 { return true; }
+    false
+}
+
+// Days in a given month (1-indexed)
+fn days_in_month(month: i64, year: i64) -> i64 {
+    if month == 1 { return 31; }
+    if month == 2 {
+        if is_leap(year) { return 29; }
+        return 28;
+    }
+    if month == 3 { return 31; }
+    if month == 4 { return 30; }
+    if month == 5 { return 31; }
+    if month == 6 { return 30; }
+    if month == 7 { return 31; }
+    if month == 8 { return 31; }
+    if month == 9 { return 30; }
+    if month == 10 { return 31; }
+    if month == 11 { return 30; }
+    31  // December
+}
+
+// Days in a given year
+fn days_in_year(year: i64) -> i64 {
+    if is_leap(year) { 366 } else { 365 }
+}
+
+// Zero-pad a number to 2 digits
+fn pad2(n: i64) -> String {
+    if n < 10 {
+        return "0" + to_string_i32(n);
+    }
+    to_string_i32(n)
+}
+
+// Zero-pad a number to 4 digits
+fn pad4(n: i64) -> String {
+    if n < 10 {
+        return "000" + to_string_i32(n);
+    }
+    if n < 100 {
+        return "00" + to_string_i32(n);
+    }
+    if n < 1000 {
+        return "0" + to_string_i32(n);
+    }
+    to_string_i32(n)
+}
+
+// Convert unix timestamp to (year, month, day, hour, minute, second)
+// Returns formatted date string, and optionally time.
+fn format_date(ts: i64, show_time: bool) -> String {
+    // Split into days and time-of-day
+    let total_secs = ts;
+    let day_secs: i64 = 86400;  // 60*60*24
+    let mut remaining_days = total_secs / day_secs;
+    let time_of_day = total_secs % day_secs;
+
+    // Compute hour:minute:second from time_of_day
+    let hour = time_of_day / 3600;
+    let min = (time_of_day % 3600) / 60;
+    let sec = time_of_day % 60;
+
+    // Compute year from days since epoch (1970-01-01)
+    let mut year: i64 = 1970;
+    let mut go = true;
+    while go {
+        let dy = days_in_year(year);
+        if remaining_days < dy {
+            go = false;
+        } else {
+            remaining_days = remaining_days - dy;
+            year = year + 1;
+        }
+    }
+
+    // Compute month from remaining days
+    let mut month: i64 = 1;
+    let mut go2 = true;
+    while go2 {
+        let dm = days_in_month(month, year);
+        if remaining_days < dm {
+            go2 = false;
+        } else {
+            remaining_days = remaining_days - dm;
+            month = month + 1;
+        }
+    }
+
+    let day = remaining_days + 1;  // days are 1-indexed
+
+    let date_str = pad4(year) + "-" + pad2(month) + "-" + pad2(day);
+
+    if show_time {
+        return date_str + " " + pad2(hour) + ":" + pad2(min) + ":" + pad2(sec);
+    }
+    date_str
+}
+
+fn main() ~ Console + Environment + Process + Clock {
+    let nargs = args_count();
+    let ts = time_unix();
+
+    if nargs < 2 {
+        // Default: just date
+        println!("{}", format_date(ts, false));
+        process_exit(0);
+    }
+
+    let flag = args_get(1);
+    if flag == "--help" || flag == "-h" {
+        print_help();
+        process_exit(0);
+    }
+
+    if flag == "-u" {
+        println!("{}", ts);
+        process_exit(0);
+    }
+
+    if flag == "-t" {
+        println!("{}", format_date(ts, true));
+        process_exit(0);
+    }
+
+    println!("qdate: unknown option: {}", flag);
+    process_exit(1);
+}

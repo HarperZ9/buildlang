@@ -1,0 +1,1222 @@
+// BUILD Standard Library - Cryptography Module
+// Copyright (c) 2024 BUILD Language Project
+// Core cryptographic primitives with secure implementations
+
+module foundation::crypto;
+
+use foundation::core::*;
+use foundation::io_extended::{Read, Write};
+
+// ============================================================================
+// HASHING ALGORITHMS
+// ============================================================================
+
+/// Hash algorithm trait
+pub trait Hash {
+    const OUTPUT_SIZE: usize;
+    const BLOCK_SIZE: usize;
+
+    fn new() -> Self;
+    fn update(self: &mut Self, data: &[u8]);
+    fn finalize(self: Self) -> Vec<u8>;
+    fn reset(self: &mut Self);
+
+    fn digest(data: &[u8]) -> Vec<u8> {
+        let mut hasher = Self::new();
+        hasher.update(data);
+        hasher.finalize()
+    }
+}
+
+/// SHA-256 hash function (FIPS 180-4)
+pub struct Sha256 {
+    state: [u32; 8],
+    buffer: [u8; 64],
+    buffer_len: usize,
+    total_len: u64,
+}
+
+impl Hash for Sha256 {
+    const OUTPUT_SIZE: usize = 32;
+    const BLOCK_SIZE: usize = 64;
+
+    fn new() -> Self {
+        Sha256 {
+            state: [
+                0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
+                0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
+            ],
+            buffer: [0u8; 64],
+            buffer_len: 0,
+            total_len: 0,
+        }
+    }
+
+    fn update(self: &mut Self, data: &[u8]) {
+        let mut offset = 0;
+        self.total_len += data.len() as u64;
+
+        if self.buffer_len > 0 {
+            let copy_len = min(64 - self.buffer_len, data.len());
+            self.buffer[self.buffer_len..self.buffer_len + copy_len]
+                .copy_from_slice(&data[..copy_len]);
+            self.buffer_len += copy_len;
+            offset = copy_len;
+
+            if self.buffer_len == 64 {
+                self.compress(&self.buffer.clone());
+                self.buffer_len = 0;
+            }
+        }
+
+        while offset + 64 <= data.len() {
+            self.compress(&data[offset..offset + 64]);
+            offset += 64;
+        }
+
+        if offset < data.len() {
+            let remaining = data.len() - offset;
+            self.buffer[..remaining].copy_from_slice(&data[offset..]);
+            self.buffer_len = remaining;
+        }
+    }
+
+    fn finalize(mut self: Self) -> Vec<u8> {
+        let bit_len = self.total_len * 8;
+        self.buffer[self.buffer_len] = 0x80;
+        self.buffer_len += 1;
+
+        if self.buffer_len > 56 {
+            for i in self.buffer_len..64 { self.buffer[i] = 0; }
+            self.compress(&self.buffer.clone());
+            self.buffer_len = 0;
+        }
+
+        for i in self.buffer_len..56 { self.buffer[i] = 0; }
+        self.buffer[56..64].copy_from_slice(&bit_len.to_be_bytes());
+        self.compress(&self.buffer.clone());
+
+        let mut result = Vec::with_capacity(32);
+        for word in self.state.iter() {
+            result.extend_from_slice(&word.to_be_bytes());
+        }
+        result
+    }
+
+    fn reset(self: &mut Self) { *self = Self::new(); }
+}
+
+impl Sha256 {
+    const K: [u32; 64] = [
+        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5,
+        0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+        0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3,
+        0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+        0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc,
+        0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+        0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
+        0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+        0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13,
+        0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+        0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3,
+        0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+        0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5,
+        0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+        0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
+        0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+    ];
+
+    fn compress(self: &mut Self, block: &[u8]) {
+        let mut w = [0u32; 64];
+        for i in 0..16 {
+            w[i] = u32::from_be_bytes([
+                block[i*4], block[i*4+1], block[i*4+2], block[i*4+3]
+            ]);
+        }
+        for i in 16..64 {
+            let s0 = w[i-15].rotate_right(7) ^ w[i-15].rotate_right(18) ^ (w[i-15] >> 3);
+            let s1 = w[i-2].rotate_right(17) ^ w[i-2].rotate_right(19) ^ (w[i-2] >> 10);
+            w[i] = w[i-16].wrapping_add(s0).wrapping_add(w[i-7]).wrapping_add(s1);
+        }
+
+        let (mut a, mut b, mut c, mut d, mut e, mut f, mut g, mut h) = (
+            self.state[0], self.state[1], self.state[2], self.state[3],
+            self.state[4], self.state[5], self.state[6], self.state[7],
+        );
+
+        for i in 0..64 {
+            let s1 = e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25);
+            let ch = (e & f) ^ ((!e) & g);
+            let temp1 = h.wrapping_add(s1).wrapping_add(ch)
+                .wrapping_add(Self::K[i]).wrapping_add(w[i]);
+            let s0 = a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22);
+            let maj = (a & b) ^ (a & c) ^ (b & c);
+            let temp2 = s0.wrapping_add(maj);
+
+            h = g; g = f; f = e;
+            e = d.wrapping_add(temp1);
+            d = c; c = b; b = a;
+            a = temp1.wrapping_add(temp2);
+        }
+
+        self.state[0] = self.state[0].wrapping_add(a);
+        self.state[1] = self.state[1].wrapping_add(b);
+        self.state[2] = self.state[2].wrapping_add(c);
+        self.state[3] = self.state[3].wrapping_add(d);
+        self.state[4] = self.state[4].wrapping_add(e);
+        self.state[5] = self.state[5].wrapping_add(f);
+        self.state[6] = self.state[6].wrapping_add(g);
+        self.state[7] = self.state[7].wrapping_add(h);
+    }
+}
+
+/// SHA-512 hash function (FIPS 180-4)
+pub struct Sha512 {
+    state: [u64; 8],
+    buffer: [u8; 128],
+    buffer_len: usize,
+    total_len: u128,
+}
+
+impl Hash for Sha512 {
+    const OUTPUT_SIZE: usize = 64;
+    const BLOCK_SIZE: usize = 128;
+
+    fn new() -> Self {
+        Sha512 {
+            state: [
+                0x6a09e667f3bcc908, 0xbb67ae8584caa73b,
+                0x3c6ef372fe94f82b, 0xa54ff53a5f1d36f1,
+                0x510e527fade682d1, 0x9b05688c2b3e6c1f,
+                0x1f83d9abfb41bd6b, 0x5be0cd19137e2179,
+            ],
+            buffer: [0u8; 128],
+            buffer_len: 0,
+            total_len: 0,
+        }
+    }
+
+    fn update(self: &mut Self, data: &[u8]) {
+        self.total_len += data.len() as u128;
+        // Similar logic to SHA-256 but with 128-byte blocks
+        intrinsics::sha512_update(self, data);
+    }
+
+    fn finalize(self: Self) -> Vec<u8> {
+        intrinsics::sha512_finalize(self)
+    }
+
+    fn reset(self: &mut Self) { *self = Self::new(); }
+}
+
+/// SHA-3 (Keccak) hash function (FIPS 202)
+pub struct Sha3_256 {
+    state: [u64; 25],
+    buffer: [u8; 136],  // rate = 1088 bits
+    buffer_len: usize,
+}
+
+impl Hash for Sha3_256 {
+    const OUTPUT_SIZE: usize = 32;
+    const BLOCK_SIZE: usize = 136;
+
+    fn new() -> Self {
+        Sha3_256 { state: [0u64; 25], buffer: [0u8; 136], buffer_len: 0 }
+    }
+
+    fn update(self: &mut Self, data: &[u8]) {
+        intrinsics::keccak_absorb(self, data);
+    }
+
+    fn finalize(self: Self) -> Vec<u8> {
+        intrinsics::keccak_squeeze(self, 32)
+    }
+
+    fn reset(self: &mut Self) { *self = Self::new(); }
+}
+
+/// BLAKE2b hash function (RFC 7693)
+pub struct Blake2b {
+    h: [u64; 8],
+    t: [u64; 2],
+    buf: [u8; 128],
+    buf_len: usize,
+    outlen: usize,
+}
+
+impl Blake2b {
+    const IV: [u64; 8] = [
+        0x6a09e667f3bcc908, 0xbb67ae8584caa73b,
+        0x3c6ef372fe94f82b, 0xa54ff53a5f1d36f1,
+        0x510e527fade682d1, 0x9b05688c2b3e6c1f,
+        0x1f83d9abfb41bd6b, 0x5be0cd19137e2179,
+    ];
+
+    pub fn with_size(outlen: usize) -> Self {
+        assert!(outlen > 0 && outlen <= 64, "Invalid output length");
+        let mut h = Self::IV;
+        h[0] ^= 0x01010000 ^ (outlen as u64);
+        Blake2b { h, t: [0, 0], buf: [0u8; 128], buf_len: 0, outlen }
+    }
+
+    pub fn keyed(key: &[u8], outlen: usize) -> Self {
+        assert!(key.len() <= 64, "Key too long");
+        let mut hasher = Self::with_size(outlen);
+        hasher.h[0] ^= (key.len() as u64) << 8;
+        if !key.is_empty() {
+            hasher.buf[..key.len()].copy_from_slice(key);
+            hasher.buf_len = 128;
+        }
+        hasher
+    }
+}
+
+impl Hash for Blake2b {
+    const OUTPUT_SIZE: usize = 64;
+    const BLOCK_SIZE: usize = 128;
+
+    fn new() -> Self { Self::with_size(64) }
+
+    fn update(self: &mut Self, data: &[u8]) {
+        intrinsics::blake2b_update(self, data);
+    }
+
+    fn finalize(self: Self) -> Vec<u8> {
+        intrinsics::blake2b_finalize(self)
+    }
+
+    fn reset(self: &mut Self) { *self = Self::with_size(self.outlen); }
+}
+
+/// BLAKE3 high-performance hash function
+pub struct Blake3 {
+    cv: [u32; 8],
+    chunk_state: Blake3ChunkState,
+    cv_stack: Vec<[u32; 8]>,
+}
+
+struct Blake3ChunkState {
+    cv: [u32; 8],
+    chunk_counter: u64,
+    buf: [u8; 64],
+    buf_len: usize,
+    blocks_compressed: u8,
+    flags: u8,
+}
+
+impl Hash for Blake3 {
+    const OUTPUT_SIZE: usize = 32;
+    const BLOCK_SIZE: usize = 64;
+
+    fn new() -> Self { intrinsics::blake3_new() }
+    fn update(self: &mut Self, data: &[u8]) { intrinsics::blake3_update(self, data); }
+    fn finalize(self: Self) -> Vec<u8> { intrinsics::blake3_finalize(self) }
+    fn reset(self: &mut Self) { *self = Self::new(); }
+}
+
+impl Blake3 {
+    pub fn keyed(key: &[u8; 32]) -> Self { intrinsics::blake3_keyed(key) }
+    pub fn derive_key(context: &str, key_material: &[u8]) -> [u8; 32] {
+        intrinsics::blake3_derive_key(context, key_material)
+    }
+}
+
+// ============================================================================
+// HMAC - Hash-based Message Authentication Code
+// ============================================================================
+
+pub struct Hmac<H: Hash> {
+    inner: H,
+    outer_key_pad: Vec<u8>,
+}
+
+impl<H: Hash> Hmac<H> {
+    pub fn new(key: &[u8]) -> Self {
+        let block_size = H::BLOCK_SIZE;
+        let mut key_block = vec![0u8; block_size];
+
+        if key.len() > block_size {
+            let hash = H::digest(key);
+            key_block[..hash.len()].copy_from_slice(&hash);
+        } else {
+            key_block[..key.len()].copy_from_slice(key);
+        }
+
+        let mut inner_key_pad = vec![0x36u8; block_size];
+        let mut outer_key_pad = vec![0x5cu8; block_size];
+        for i in 0..block_size {
+            inner_key_pad[i] ^= key_block[i];
+            outer_key_pad[i] ^= key_block[i];
+        }
+
+        let mut inner = H::new();
+        inner.update(&inner_key_pad);
+
+        Hmac { inner, outer_key_pad }
+    }
+
+    pub fn update(self: &mut Self, data: &[u8]) {
+        self.inner.update(data);
+    }
+
+    pub fn finalize(self: Self) -> Vec<u8> {
+        let inner_hash = self.inner.finalize();
+        let mut outer = H::new();
+        outer.update(&self.outer_key_pad);
+        outer.update(&inner_hash);
+        outer.finalize()
+    }
+
+    pub fn verify(self: Self, expected: &[u8]) -> bool {
+        constant_time_eq(&self.finalize(), expected)
+    }
+
+    pub fn mac(key: &[u8], data: &[u8]) -> Vec<u8> {
+        let mut hmac = Self::new(key);
+        hmac.update(data);
+        hmac.finalize()
+    }
+}
+
+// ============================================================================
+// SYMMETRIC ENCRYPTION
+// ============================================================================
+
+/// AES block cipher
+pub struct Aes {
+    round_keys: Vec<u32>,
+    rounds: usize,
+}
+
+pub enum AesKeySize { Aes128, Aes192, Aes256 }
+
+impl Aes {
+    pub fn new(key: &[u8]) -> Result<Self, CryptoError> {
+        let (rounds, key_words) = match key.len() {
+            16 => (10, 4),
+            24 => (12, 6),
+            32 => (14, 8),
+            _ => return Err(CryptoError::InvalidKeyLength),
+        };
+
+        let round_keys = intrinsics::aes_key_expansion(key, rounds, key_words);
+        Ok(Aes { round_keys, rounds })
+    }
+
+    pub fn encrypt_block(self: &Self, block: &mut [u8; 16]) {
+        intrinsics::aes_encrypt_block(&self.round_keys, self.rounds, block);
+    }
+
+    pub fn decrypt_block(self: &Self, block: &mut [u8; 16]) {
+        intrinsics::aes_decrypt_block(&self.round_keys, self.rounds, block);
+    }
+}
+
+/// AES-GCM authenticated encryption (NIST SP 800-38D)
+pub struct AesGcm {
+    aes: Aes,
+    h: [u8; 16],
+}
+
+impl AesGcm {
+    pub fn new(key: &[u8]) -> Result<Self, CryptoError> {
+        let aes = Aes::new(key)?;
+        let mut h = [0u8; 16];
+        aes.encrypt_block(&mut h);
+        Ok(AesGcm { aes, h })
+    }
+
+    pub fn encrypt(
+        self: &Self,
+        nonce: &[u8; 12],
+        plaintext: &[u8],
+        aad: &[u8],
+    ) -> Result<(Vec<u8>, [u8; 16]), CryptoError> {
+        let mut ctr = [0u8; 16];
+        ctr[..12].copy_from_slice(nonce);
+        ctr[15] = 1;
+
+        let mut tag_block = ctr.clone();
+        self.aes.encrypt_block(&mut tag_block);
+
+        ctr[15] = 2;
+        let mut ciphertext = Vec::with_capacity(plaintext.len());
+
+        for chunk in plaintext.chunks(16) {
+            let mut keystream = ctr.clone();
+            self.aes.encrypt_block(&mut keystream);
+
+            for (i, &byte) in chunk.iter().enumerate() {
+                ciphertext.push(byte ^ keystream[i]);
+            }
+
+            increment_counter(&mut ctr);
+        }
+
+        let tag = self.compute_tag(aad, &ciphertext, &tag_block);
+        Ok((ciphertext, tag))
+    }
+
+    pub fn decrypt(
+        self: &Self,
+        nonce: &[u8; 12],
+        ciphertext: &[u8],
+        aad: &[u8],
+        tag: &[u8; 16],
+    ) -> Result<Vec<u8>, CryptoError> {
+        let mut ctr = [0u8; 16];
+        ctr[..12].copy_from_slice(nonce);
+        ctr[15] = 1;
+
+        let mut tag_block = ctr.clone();
+        self.aes.encrypt_block(&mut tag_block);
+
+        let expected_tag = self.compute_tag(aad, ciphertext, &tag_block);
+        if !constant_time_eq(&expected_tag, tag) {
+            return Err(CryptoError::AuthenticationFailed);
+        }
+
+        ctr[15] = 2;
+        let mut plaintext = Vec::with_capacity(ciphertext.len());
+
+        for chunk in ciphertext.chunks(16) {
+            let mut keystream = ctr.clone();
+            self.aes.encrypt_block(&mut keystream);
+
+            for (i, &byte) in chunk.iter().enumerate() {
+                plaintext.push(byte ^ keystream[i]);
+            }
+
+            increment_counter(&mut ctr);
+        }
+
+        Ok(plaintext)
+    }
+
+    fn compute_tag(self: &Self, aad: &[u8], ct: &[u8], tag_block: &[u8; 16]) -> [u8; 16] {
+        intrinsics::ghash(&self.h, aad, ct, tag_block)
+    }
+}
+
+/// ChaCha20 stream cipher (RFC 8439)
+pub struct ChaCha20 {
+    state: [u32; 16],
+}
+
+impl ChaCha20 {
+    pub fn new(key: &[u8; 32], nonce: &[u8; 12]) -> Self {
+        let mut state = [0u32; 16];
+        state[0] = 0x61707865;  // "expa"
+        state[1] = 0x3320646e;  // "nd 3"
+        state[2] = 0x79622d32;  // "2-by"
+        state[3] = 0x6b206574;  // "te k"
+
+        for i in 0..8 {
+            state[4 + i] = u32::from_le_bytes([
+                key[i*4], key[i*4+1], key[i*4+2], key[i*4+3]
+            ]);
+        }
+
+        state[12] = 0;  // counter
+        for i in 0..3 {
+            state[13 + i] = u32::from_le_bytes([
+                nonce[i*4], nonce[i*4+1], nonce[i*4+2], nonce[i*4+3]
+            ]);
+        }
+
+        ChaCha20 { state }
+    }
+
+    pub fn apply_keystream(self: &mut Self, data: &mut [u8]) {
+        let mut offset = 0;
+        while offset < data.len() {
+            let keystream = self.block();
+            self.state[12] += 1;
+
+            let remaining = data.len() - offset;
+            let to_xor = min(64, remaining);
+
+            for i in 0..to_xor {
+                data[offset + i] ^= keystream[i];
+            }
+            offset += to_xor;
+        }
+    }
+
+    fn block(self: &Self) -> [u8; 64] {
+        let mut working = self.state.clone();
+
+        for _ in 0..10 {
+            // Column rounds
+            quarter_round(&mut working, 0, 4, 8, 12);
+            quarter_round(&mut working, 1, 5, 9, 13);
+            quarter_round(&mut working, 2, 6, 10, 14);
+            quarter_round(&mut working, 3, 7, 11, 15);
+            // Diagonal rounds
+            quarter_round(&mut working, 0, 5, 10, 15);
+            quarter_round(&mut working, 1, 6, 11, 12);
+            quarter_round(&mut working, 2, 7, 8, 13);
+            quarter_round(&mut working, 3, 4, 9, 14);
+        }
+
+        for i in 0..16 {
+            working[i] = working[i].wrapping_add(self.state[i]);
+        }
+
+        let mut result = [0u8; 64];
+        for (i, word) in working.iter().enumerate() {
+            result[i*4..i*4+4].copy_from_slice(&word.to_le_bytes());
+        }
+        result
+    }
+}
+
+fn quarter_round(state: &mut [u32; 16], a: usize, b: usize, c: usize, d: usize) {
+    state[a] = state[a].wrapping_add(state[b]); state[d] ^= state[a]; state[d] = state[d].rotate_left(16);
+    state[c] = state[c].wrapping_add(state[d]); state[b] ^= state[c]; state[b] = state[b].rotate_left(12);
+    state[a] = state[a].wrapping_add(state[b]); state[d] ^= state[a]; state[d] = state[d].rotate_left(8);
+    state[c] = state[c].wrapping_add(state[d]); state[b] ^= state[c]; state[b] = state[b].rotate_left(7);
+}
+
+/// ChaCha20-Poly1305 AEAD (RFC 8439)
+pub struct ChaCha20Poly1305;
+
+impl ChaCha20Poly1305 {
+    pub fn encrypt(
+        key: &[u8; 32],
+        nonce: &[u8; 12],
+        plaintext: &[u8],
+        aad: &[u8],
+    ) -> (Vec<u8>, [u8; 16]) {
+        // Generate Poly1305 key
+        let mut poly_key = [0u8; 32];
+        let mut chacha = ChaCha20::new(key, nonce);
+        chacha.apply_keystream(&mut poly_key);
+
+        // Encrypt
+        chacha.state[12] = 1;
+        let mut ciphertext = plaintext.to_vec();
+        chacha.apply_keystream(&mut ciphertext);
+
+        // Compute tag
+        let tag = Poly1305::mac(&poly_key, aad, &ciphertext);
+        (ciphertext, tag)
+    }
+
+    pub fn decrypt(
+        key: &[u8; 32],
+        nonce: &[u8; 12],
+        ciphertext: &[u8],
+        aad: &[u8],
+        tag: &[u8; 16],
+    ) -> Result<Vec<u8>, CryptoError> {
+        let mut poly_key = [0u8; 32];
+        let mut chacha = ChaCha20::new(key, nonce);
+        chacha.apply_keystream(&mut poly_key);
+
+        let expected_tag = Poly1305::mac(&poly_key, aad, ciphertext);
+        if !constant_time_eq(&expected_tag, tag) {
+            return Err(CryptoError::AuthenticationFailed);
+        }
+
+        chacha.state[12] = 1;
+        let mut plaintext = ciphertext.to_vec();
+        chacha.apply_keystream(&mut plaintext);
+        Ok(plaintext)
+    }
+}
+
+/// Poly1305 MAC (RFC 8439)
+pub struct Poly1305 {
+    r: [u32; 5],
+    h: [u32; 5],
+    pad: [u32; 4],
+}
+
+impl Poly1305 {
+    pub fn new(key: &[u8; 32]) -> Self {
+        let r = [
+            u32::from_le_bytes([key[0], key[1], key[2], key[3]]) & 0x0fffffff,
+            u32::from_le_bytes([key[4], key[5], key[6], key[7]]) & 0x0ffffffc,
+            u32::from_le_bytes([key[8], key[9], key[10], key[11]]) & 0x0ffffffc,
+            u32::from_le_bytes([key[12], key[13], key[14], key[15]]) & 0x0ffffffc,
+            0,
+        ];
+        let pad = [
+            u32::from_le_bytes([key[16], key[17], key[18], key[19]]),
+            u32::from_le_bytes([key[20], key[21], key[22], key[23]]),
+            u32::from_le_bytes([key[24], key[25], key[26], key[27]]),
+            u32::from_le_bytes([key[28], key[29], key[30], key[31]]),
+        ];
+        Poly1305 { r, h: [0; 5], pad }
+    }
+
+    pub fn update(self: &mut Self, data: &[u8]) {
+        intrinsics::poly1305_update(self, data);
+    }
+
+    pub fn finalize(self: Self) -> [u8; 16] {
+        intrinsics::poly1305_finalize(self)
+    }
+
+    pub fn mac(key: &[u8; 32], aad: &[u8], data: &[u8]) -> [u8; 16] {
+        let mut poly = Self::new(key);
+        poly.update(aad);
+        poly.update(&pad_to_16(aad.len()));
+        poly.update(data);
+        poly.update(&pad_to_16(data.len()));
+
+        let mut lengths = [0u8; 16];
+        lengths[..8].copy_from_slice(&(aad.len() as u64).to_le_bytes());
+        lengths[8..].copy_from_slice(&(data.len() as u64).to_le_bytes());
+        poly.update(&lengths);
+
+        poly.finalize()
+    }
+}
+
+fn pad_to_16(len: usize) -> Vec<u8> {
+    let rem = len % 16;
+    if rem == 0 { vec![] } else { vec![0u8; 16 - rem] }
+}
+
+// ============================================================================
+// ASYMMETRIC CRYPTOGRAPHY
+// ============================================================================
+
+/// RSA public key
+pub struct RsaPublicKey {
+    n: BigUint,
+    e: BigUint,
+    bit_size: usize,
+}
+
+/// RSA private key
+pub struct RsaPrivateKey {
+    public: RsaPublicKey,
+    d: BigUint,
+    p: BigUint,
+    q: BigUint,
+    dp: BigUint,
+    dq: BigUint,
+    qinv: BigUint,
+}
+
+impl RsaPrivateKey {
+    pub fn generate(bits: usize) -> Result<Self, CryptoError> {
+        if bits < 2048 { return Err(CryptoError::KeyTooSmall); }
+        intrinsics::rsa_generate_keypair(bits)
+    }
+
+    pub fn public_key(self: &Self) -> &RsaPublicKey { &self.public }
+
+    pub fn decrypt_oaep<H: Hash>(self: &Self, ciphertext: &[u8]) -> Result<Vec<u8>, CryptoError> {
+        intrinsics::rsa_oaep_decrypt::<H>(self, ciphertext)
+    }
+
+    pub fn sign_pss<H: Hash>(self: &Self, message: &[u8]) -> Result<Vec<u8>, CryptoError> {
+        let hash = H::digest(message);
+        intrinsics::rsa_pss_sign::<H>(self, &hash)
+    }
+}
+
+impl RsaPublicKey {
+    pub fn encrypt_oaep<H: Hash>(self: &Self, plaintext: &[u8]) -> Result<Vec<u8>, CryptoError> {
+        intrinsics::rsa_oaep_encrypt::<H>(self, plaintext)
+    }
+
+    pub fn verify_pss<H: Hash>(self: &Self, message: &[u8], signature: &[u8]) -> bool {
+        let hash = H::digest(message);
+        intrinsics::rsa_pss_verify::<H>(self, &hash, signature)
+    }
+}
+
+/// Ed25519 signing key
+pub struct Ed25519SigningKey {
+    seed: [u8; 32],
+    public: Ed25519VerifyingKey,
+}
+
+/// Ed25519 verifying key
+pub struct Ed25519VerifyingKey {
+    bytes: [u8; 32],
+}
+
+impl Ed25519SigningKey {
+    pub fn generate() -> Self {
+        let mut seed = [0u8; 32];
+        csprng_fill(&mut seed);
+        Self::from_seed(&seed)
+    }
+
+    pub fn from_seed(seed: &[u8; 32]) -> Self {
+        let public = intrinsics::ed25519_derive_public(seed);
+        Ed25519SigningKey { seed: *seed, public }
+    }
+
+    pub fn verifying_key(self: &Self) -> &Ed25519VerifyingKey { &self.public }
+
+    pub fn sign(self: &Self, message: &[u8]) -> [u8; 64] {
+        intrinsics::ed25519_sign(&self.seed, &self.public.bytes, message)
+    }
+
+    pub fn to_bytes(self: &Self) -> [u8; 32] { self.seed }
+}
+
+impl Ed25519VerifyingKey {
+    pub fn from_bytes(bytes: &[u8; 32]) -> Result<Self, CryptoError> {
+        if !intrinsics::ed25519_validate_public(bytes) {
+            return Err(CryptoError::InvalidPublicKey);
+        }
+        Ok(Ed25519VerifyingKey { bytes: *bytes })
+    }
+
+    pub fn verify(self: &Self, message: &[u8], signature: &[u8; 64]) -> bool {
+        intrinsics::ed25519_verify(&self.bytes, message, signature)
+    }
+
+    pub fn to_bytes(self: &Self) -> [u8; 32] { self.bytes }
+}
+
+/// X25519 key exchange
+pub struct X25519SecretKey([u8; 32]);
+pub struct X25519PublicKey([u8; 32]);
+
+impl X25519SecretKey {
+    pub fn generate() -> Self {
+        let mut bytes = [0u8; 32];
+        csprng_fill(&mut bytes);
+        bytes[0] &= 248;
+        bytes[31] &= 127;
+        bytes[31] |= 64;
+        X25519SecretKey(bytes)
+    }
+
+    pub fn public_key(self: &Self) -> X25519PublicKey {
+        X25519PublicKey(intrinsics::x25519_scalar_mult_base(&self.0))
+    }
+
+    pub fn diffie_hellman(self: &Self, their_public: &X25519PublicKey) -> [u8; 32] {
+        intrinsics::x25519_scalar_mult(&self.0, &their_public.0)
+    }
+
+    pub fn to_bytes(self: &Self) -> [u8; 32] { self.0 }
+}
+
+impl X25519PublicKey {
+    pub fn from_bytes(bytes: &[u8; 32]) -> Self { X25519PublicKey(*bytes) }
+    pub fn to_bytes(self: &Self) -> [u8; 32] { self.0 }
+}
+
+// ============================================================================
+// KEY DERIVATION FUNCTIONS
+// ============================================================================
+
+/// HKDF (RFC 5869)
+pub struct Hkdf<H: Hash> {
+    prk: Vec<u8>,
+    _marker: PhantomData<H>,
+}
+
+impl<H: Hash> Hkdf<H> {
+    pub fn new(salt: Option<&[u8]>, ikm: &[u8]) -> Self {
+        let salt = salt.unwrap_or(&vec![0u8; H::OUTPUT_SIZE]);
+        let prk = Hmac::<H>::mac(salt, ikm);
+        Hkdf { prk, _marker: PhantomData }
+    }
+
+    pub fn expand(self: &Self, info: &[u8], length: usize) -> Result<Vec<u8>, CryptoError> {
+        if length > 255 * H::OUTPUT_SIZE {
+            return Err(CryptoError::InvalidLength);
+        }
+
+        let mut okm = Vec::with_capacity(length);
+        let mut prev = Vec::new();
+        let mut counter = 1u8;
+
+        while okm.len() < length {
+            let mut hmac = Hmac::<H>::new(&self.prk);
+            hmac.update(&prev);
+            hmac.update(info);
+            hmac.update(&[counter]);
+            prev = hmac.finalize();
+            okm.extend_from_slice(&prev[..min(H::OUTPUT_SIZE, length - okm.len())]);
+            counter += 1;
+        }
+
+        Ok(okm)
+    }
+}
+
+/// PBKDF2 (RFC 8018)
+pub fn pbkdf2<H: Hash>(password: &[u8], salt: &[u8], iterations: u32, dk_len: usize) -> Vec<u8> {
+    let mut dk = Vec::with_capacity(dk_len);
+    let mut block = 1u32;
+
+    while dk.len() < dk_len {
+        let mut u = Hmac::<H>::mac(password, &[salt, &block.to_be_bytes()].concat());
+        let mut f = u.clone();
+
+        for _ in 1..iterations {
+            u = Hmac::<H>::mac(password, &u);
+            for i in 0..f.len() { f[i] ^= u[i]; }
+        }
+
+        dk.extend_from_slice(&f[..min(H::OUTPUT_SIZE, dk_len - dk.len())]);
+        block += 1;
+    }
+
+    dk
+}
+
+/// Argon2 password hashing (RFC 9106)
+pub struct Argon2 {
+    variant: Argon2Variant,
+    version: u32,
+    m_cost: u32,     // memory in KiB
+    t_cost: u32,     // iterations
+    p_cost: u32,     // parallelism
+}
+
+pub enum Argon2Variant { Argon2d, Argon2i, Argon2id }
+
+impl Argon2 {
+    pub fn new(variant: Argon2Variant, m_cost: u32, t_cost: u32, p_cost: u32) -> Self {
+        Argon2 { variant, version: 0x13, m_cost, t_cost, p_cost }
+    }
+
+    pub fn default_argon2id() -> Self {
+        Self::new(Argon2Variant::Argon2id, 65536, 3, 4)
+    }
+
+    pub fn hash(self: &Self, password: &[u8], salt: &[u8], output_len: usize) -> Vec<u8> {
+        intrinsics::argon2_hash(self, password, salt, output_len)
+    }
+
+    pub fn hash_encoded(self: &Self, password: &[u8], salt: &[u8]) -> String {
+        let hash = self.hash(password, salt, 32);
+        let variant = match self.variant {
+            Argon2Variant::Argon2d => "argon2d",
+            Argon2Variant::Argon2i => "argon2i",
+            Argon2Variant::Argon2id => "argon2id",
+        };
+        format!(
+            "${}$v={}$m={},t={},p={}${}${}",
+            variant, self.version, self.m_cost, self.t_cost, self.p_cost,
+            base64_encode_no_pad(salt),
+            base64_encode_no_pad(&hash)
+        )
+    }
+
+    pub fn verify_encoded(encoded: &str, password: &[u8]) -> bool {
+        intrinsics::argon2_verify(encoded, password)
+    }
+}
+
+/// scrypt password hashing (RFC 7914)
+pub fn scrypt(password: &[u8], salt: &[u8], n: u32, r: u32, p: u32, dk_len: usize) -> Vec<u8> {
+    intrinsics::scrypt_derive(password, salt, n, r, p, dk_len)
+}
+
+// ============================================================================
+// RANDOM NUMBER GENERATION
+// ============================================================================
+
+/// Cryptographically secure random number generator
+pub struct CsRng {
+    state: [u8; 64],
+    counter: u64,
+}
+
+impl CsRng {
+    pub fn new() -> Self {
+        let mut state = [0u8; 64];
+        intrinsics::get_random_bytes(&mut state);
+        CsRng { state, counter: 0 }
+    }
+
+    pub fn fill(self: &mut Self, dest: &mut [u8]) {
+        let mut offset = 0;
+        while offset < dest.len() {
+            let block = self.generate_block();
+            let to_copy = min(64, dest.len() - offset);
+            dest[offset..offset + to_copy].copy_from_slice(&block[..to_copy]);
+            offset += to_copy;
+        }
+    }
+
+    fn generate_block(self: &mut Self) -> [u8; 64] {
+        self.counter += 1;
+        let mut input = [0u8; 72];
+        input[..64].copy_from_slice(&self.state);
+        input[64..72].copy_from_slice(&self.counter.to_le_bytes());
+
+        let output = Sha512::digest(&input);
+        self.state.copy_from_slice(&Sha512::digest(&[&self.state[..], &output].concat()));
+
+        let mut result = [0u8; 64];
+        result.copy_from_slice(&output);
+        result
+    }
+
+    pub fn gen<T: Random>(self: &mut Self) -> T { T::random(self) }
+    pub fn gen_range<T: Random + Ord>(self: &mut Self, low: T, high: T) -> T {
+        T::random_range(self, low, high)
+    }
+}
+
+pub trait Random: Sized {
+    fn random(rng: &mut CsRng) -> Self;
+    fn random_range(rng: &mut CsRng, low: Self, high: Self) -> Self where Self: Ord;
+}
+
+impl Random for u64 {
+    fn random(rng: &mut CsRng) -> Self {
+        let mut bytes = [0u8; 8];
+        rng.fill(&mut bytes);
+        u64::from_le_bytes(bytes)
+    }
+
+    fn random_range(rng: &mut CsRng, low: Self, high: Self) -> Self {
+        let range = high - low;
+        low + (Self::random(rng) % range)
+    }
+}
+
+/// Global CSPRNG functions
+pub fn csprng_fill(dest: &mut [u8]) {
+    intrinsics::get_random_bytes(dest);
+}
+
+pub fn random_bytes(len: usize) -> Vec<u8> {
+    let mut buf = vec![0u8; len];
+    csprng_fill(&mut buf);
+    buf
+}
+
+pub fn random_u64() -> u64 {
+    let mut bytes = [0u8; 8];
+    csprng_fill(&mut bytes);
+    u64::from_le_bytes(bytes)
+}
+
+// ============================================================================
+// UTILITIES
+// ============================================================================
+
+/// Constant-time comparison
+pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() { return false; }
+    let mut result = 0u8;
+    for i in 0..a.len() {
+        result |= a[i] ^ b[i];
+    }
+    result == 0
+}
+
+/// Secure memory zeroing
+pub fn secure_zero(data: &mut [u8]) {
+    intrinsics::secure_memset(data, 0);
+    intrinsics::memory_barrier();
+}
+
+fn increment_counter(ctr: &mut [u8; 16]) {
+    for i in (0..16).rev() {
+        ctr[i] = ctr[i].wrapping_add(1);
+        if ctr[i] != 0 { break; }
+    }
+}
+
+fn base64_encode_no_pad(data: &[u8]) -> String {
+    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut result = String::new();
+    for chunk in data.chunks(3) {
+        let n = match chunk.len() {
+            3 => ((chunk[0] as u32) << 16) | ((chunk[1] as u32) << 8) | (chunk[2] as u32),
+            2 => ((chunk[0] as u32) << 16) | ((chunk[1] as u32) << 8),
+            1 => (chunk[0] as u32) << 16,
+            _ => unreachable!(),
+        };
+        result.push(ALPHABET[(n >> 18) as usize & 0x3F] as char);
+        result.push(ALPHABET[(n >> 12) as usize & 0x3F] as char);
+        if chunk.len() > 1 { result.push(ALPHABET[(n >> 6) as usize & 0x3F] as char); }
+        if chunk.len() > 2 { result.push(ALPHABET[n as usize & 0x3F] as char); }
+    }
+    result
+}
+
+// ============================================================================
+// ERRORS
+// ============================================================================
+
+pub enum CryptoError {
+    InvalidKeyLength,
+    InvalidLength,
+    KeyTooSmall,
+    InvalidPublicKey,
+    InvalidSignature,
+    AuthenticationFailed,
+    DecryptionFailed,
+    EncryptionFailed,
+    RandomFailure,
+    Other(String),
+}
+
+impl std::fmt::Display for CryptoError {
+    fn fmt(self: &Self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self {
+            CryptoError::InvalidKeyLength => write!(f, "Invalid key length"),
+            CryptoError::InvalidLength => write!(f, "Invalid length"),
+            CryptoError::KeyTooSmall => write!(f, "Key size too small"),
+            CryptoError::InvalidPublicKey => write!(f, "Invalid public key"),
+            CryptoError::InvalidSignature => write!(f, "Invalid signature"),
+            CryptoError::AuthenticationFailed => write!(f, "Authentication failed"),
+            CryptoError::DecryptionFailed => write!(f, "Decryption failed"),
+            CryptoError::EncryptionFailed => write!(f, "Encryption failed"),
+            CryptoError::RandomFailure => write!(f, "Random generation failed"),
+            CryptoError::Other(msg) => write!(f, "{}", msg),
+        }
+    }
+}
+
+// ============================================================================
+// BIG INTEGER SUPPORT (for RSA)
+// ============================================================================
+
+pub struct BigUint {
+    digits: Vec<u64>,
+}
+
+impl BigUint {
+    pub fn from_bytes_be(bytes: &[u8]) -> Self {
+        intrinsics::biguint_from_bytes(bytes)
+    }
+
+    pub fn to_bytes_be(self: &Self) -> Vec<u8> {
+        intrinsics::biguint_to_bytes(self)
+    }
+
+    pub fn mod_pow(self: &Self, exp: &Self, modulus: &Self) -> Self {
+        intrinsics::biguint_mod_pow(self, exp, modulus)
+    }
+}
+
+// ============================================================================
+// TESTS
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_sha256_empty() {
+        let hash = Sha256::digest(b"");
+        let expected = hex::decode(
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        ).unwrap();
+        assert_eq!(hash, expected);
+    }
+
+    #[test]
+    fn test_sha256_abc() {
+        let hash = Sha256::digest(b"abc");
+        let expected = hex::decode(
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        ).unwrap();
+        assert_eq!(hash, expected);
+    }
+
+    #[test]
+    fn test_hmac_sha256() {
+        let mac = Hmac::<Sha256>::mac(b"key", b"message");
+        assert_eq!(mac.len(), 32);
+    }
+
+    #[test]
+    fn test_aes_gcm_roundtrip() {
+        let key = random_bytes(32);
+        let nonce = [0u8; 12];
+        let plaintext = b"Hello, World!";
+        let aad = b"additional data";
+
+        let gcm = AesGcm::new(&key).unwrap();
+        let (ciphertext, tag) = gcm.encrypt(&nonce, plaintext, aad).unwrap();
+        let decrypted = gcm.decrypt(&nonce, &ciphertext, aad, &tag).unwrap();
+
+        assert_eq!(decrypted, plaintext);
+    }
+
+    #[test]
+    fn test_chacha20_poly1305_roundtrip() {
+        let key = [0u8; 32];
+        let nonce = [0u8; 12];
+        let plaintext = b"Secret message";
+        let aad = b"";
+
+        let (ciphertext, tag) = ChaCha20Poly1305::encrypt(&key, &nonce, plaintext, aad);
+        let decrypted = ChaCha20Poly1305::decrypt(&key, &nonce, &ciphertext, aad, &tag).unwrap();
+
+        assert_eq!(decrypted, plaintext);
+    }
+
+    #[test]
+    fn test_ed25519_sign_verify() {
+        let signing_key = Ed25519SigningKey::generate();
+        let message = b"Test message";
+
+        let signature = signing_key.sign(message);
+        assert!(signing_key.verifying_key().verify(message, &signature));
+
+        let wrong_message = b"Wrong message";
+        assert!(!signing_key.verifying_key().verify(wrong_message, &signature));
+    }
+
+    #[test]
+    fn test_x25519_key_exchange() {
+        let alice_secret = X25519SecretKey::generate();
+        let alice_public = alice_secret.public_key();
+
+        let bob_secret = X25519SecretKey::generate();
+        let bob_public = bob_secret.public_key();
+
+        let alice_shared = alice_secret.diffie_hellman(&bob_public);
+        let bob_shared = bob_secret.diffie_hellman(&alice_public);
+
+        assert_eq!(alice_shared, bob_shared);
+    }
+
+    #[test]
+    fn test_hkdf() {
+        let hkdf = Hkdf::<Sha256>::new(None, b"input key material");
+        let okm = hkdf.expand(b"info", 32).unwrap();
+        assert_eq!(okm.len(), 32);
+    }
+
+    #[test]
+    fn test_pbkdf2() {
+        let dk = pbkdf2::<Sha256>(b"password", b"salt", 100000, 32);
+        assert_eq!(dk.len(), 32);
+    }
+
+    #[test]
+    fn test_argon2id() {
+        let argon2 = Argon2::default_argon2id();
+        let hash = argon2.hash(b"password", b"somesalt", 32);
+        assert_eq!(hash.len(), 32);
+    }
+
+    #[test]
+    fn test_csprng() {
+        let bytes1 = random_bytes(32);
+        let bytes2 = random_bytes(32);
+        assert_ne!(bytes1, bytes2);
+    }
+
+    #[test]
+    fn test_constant_time_eq() {
+        assert!(constant_time_eq(b"hello", b"hello"));
+        assert!(!constant_time_eq(b"hello", b"world"));
+        assert!(!constant_time_eq(b"hello", b"hell"));
+    }
+}

@@ -1,0 +1,1705 @@
+// ============================================================================
+// BUILD UNIVERSE - Foundation Iterator Tools Module
+// Copyright 2024-2025 Zain Dana Harper. All Rights Reserved.
+// Proprietary and confidential. Unauthorized copying, distribution,
+// or modification is strictly prohibited.
+// ============================================================================
+
+//! Advanced iterator adapters and combinators.
+//!
+//! This module extends the standard iterator interface with powerful
+//! combinators for functional-style data processing.
+
+use foundation::collections::{Vec, HashMap, HashSet};
+
+// ============================================================================
+// Core Iterator Extension Trait
+// ============================================================================
+
+/// Extension trait for iterators with additional combinators.
+pub trait IteratorExt: Iterator + Sized {
+    // ========================================================================
+    // Grouping & Chunking
+    // ========================================================================
+
+    /// Group consecutive elements by a key function.
+    fn group_by<K, F>(self, key_fn: F) -> GroupBy<Self, K, F>
+    where
+        K: PartialEq,
+        F: FnMut(&Self::Item) -> K,
+    {
+        GroupBy::new(self, key_fn)
+    }
+
+    /// Chunk iterator into fixed-size groups.
+    fn chunks(self, size: usize) -> Chunks<Self> {
+        Chunks::new(self, size)
+    }
+
+    /// Chunk iterator based on a predicate.
+    fn chunk_by<F>(self, predicate: F) -> ChunkBy<Self, F>
+    where
+        F: FnMut(&Self::Item, &Self::Item) -> bool,
+    {
+        ChunkBy::new(self, predicate)
+    }
+
+    /// Create sliding windows over the iterator.
+    fn windows(self, size: usize) -> Windows<Self>
+    where
+        Self::Item: Clone,
+    {
+        Windows::new(self, size)
+    }
+
+    // ========================================================================
+    // Filtering & Selection
+    // ========================================================================
+
+    /// Filter and map in one step (like filter_map but cleaner).
+    fn filter_ok<T, E>(self) -> FilterOk<Self, T, E>
+    where
+        Self: Iterator<Item = Result<T, E>>,
+    {
+        FilterOk::new(self)
+    }
+
+    /// Take while predicate is true, but include the first failing element.
+    fn take_while_inclusive<F>(self, predicate: F) -> TakeWhileInclusive<Self, F>
+    where
+        F: FnMut(&Self::Item) -> bool,
+    {
+        TakeWhileInclusive::new(self, predicate)
+    }
+
+    /// Skip while predicate is true, but include the first failing element.
+    fn skip_while_inclusive<F>(self, predicate: F) -> SkipWhileInclusive<Self, F>
+    where
+        F: FnMut(&Self::Item) -> bool,
+    {
+        SkipWhileInclusive::new(self, predicate)
+    }
+
+    /// Deduplicate consecutive elements.
+    fn dedup(self) -> Dedup<Self>
+    where
+        Self::Item: PartialEq + Clone,
+    {
+        Dedup::new(self)
+    }
+
+    /// Deduplicate by a key function.
+    fn dedup_by_key<K, F>(self, key_fn: F) -> DedupByKey<Self, K, F>
+    where
+        K: PartialEq,
+        F: FnMut(&Self::Item) -> K,
+    {
+        DedupByKey::new(self, key_fn)
+    }
+
+    /// Keep only unique elements (requires collecting).
+    fn unique(self) -> Unique<Self>
+    where
+        Self::Item: Eq + std::hash::Hash + Clone,
+    {
+        Unique::new(self)
+    }
+
+    /// Keep only unique elements by key.
+    fn unique_by<K, F>(self, key_fn: F) -> UniqueBy<Self, K, F>
+    where
+        K: Eq + std::hash::Hash,
+        F: FnMut(&Self::Item) -> K,
+    {
+        UniqueBy::new(self, key_fn)
+    }
+
+    // ========================================================================
+    // Combining Iterators
+    // ========================================================================
+
+    /// Interleave two iterators.
+    fn interleave<I>(self, other: I) -> Interleave<Self, I::IntoIter>
+    where
+        I: IntoIterator<Item = Self::Item>,
+    {
+        Interleave::new(self, other.into_iter())
+    }
+
+    /// Interleave shortest - stops when either iterator is exhausted.
+    fn interleave_shortest<I>(self, other: I) -> InterleaveShort<Self, I::IntoIter>
+    where
+        I: IntoIterator<Item = Self::Item>,
+    {
+        InterleaveShort::new(self, other.into_iter())
+    }
+
+    /// Merge two sorted iterators.
+    fn merge<I>(self, other: I) -> Merge<Self, I::IntoIter>
+    where
+        I: IntoIterator<Item = Self::Item>,
+        Self::Item: Ord,
+    {
+        Merge::new(self, other.into_iter())
+    }
+
+    /// Merge by a comparison function.
+    fn merge_by<I, F>(self, other: I, cmp: F) -> MergeBy<Self, I::IntoIter, F>
+    where
+        I: IntoIterator<Item = Self::Item>,
+        F: FnMut(&Self::Item, &Self::Item) -> std::cmp::Ordering,
+    {
+        MergeBy::new(self, other.into_iter(), cmp)
+    }
+
+    /// Cartesian product of two iterators.
+    fn cartesian_product<I>(self, other: I) -> CartesianProduct<Self, I>
+    where
+        I: IntoIterator,
+        I::IntoIter: Clone,
+        Self::Item: Clone,
+    {
+        CartesianProduct::new(self, other.into_iter())
+    }
+
+    // ========================================================================
+    // Mapping & Transforming
+    // ========================================================================
+
+    /// Map with index.
+    fn enumerate_map<B, F>(self, f: F) -> EnumerateMap<Self, F>
+    where
+        F: FnMut(usize, Self::Item) -> B,
+    {
+        EnumerateMap::new(self, f)
+    }
+
+    /// Flat map with index.
+    fn enumerate_flat_map<I, F>(self, f: F) -> EnumerateFlatMap<Self, I, F>
+    where
+        I: IntoIterator,
+        F: FnMut(usize, Self::Item) -> I,
+    {
+        EnumerateFlatMap::new(self, f)
+    }
+
+    /// Insert a separator between elements.
+    fn intersperse(self, separator: Self::Item) -> Intersperse<Self>
+    where
+        Self::Item: Clone,
+    {
+        Intersperse::new(self, separator)
+    }
+
+    /// Insert separators generated by a function.
+    fn intersperse_with<F>(self, separator_fn: F) -> IntersperseWith<Self, F>
+    where
+        F: FnMut() -> Self::Item,
+    {
+        IntersperseWith::new(self, separator_fn)
+    }
+
+    /// Batched map - apply function to batches.
+    fn batched_map<B, F>(self, batch_size: usize, f: F) -> BatchedMap<Self, B, F>
+    where
+        F: FnMut(Vec<Self::Item>) -> Vec<B>,
+    {
+        BatchedMap::new(self, batch_size, f)
+    }
+
+    // ========================================================================
+    // Accumulation & Reduction
+    // ========================================================================
+
+    /// Scan with state that can be modified.
+    fn scan_mut<S, B, F>(self, state: S, f: F) -> ScanMut<Self, S, F>
+    where
+        F: FnMut(&mut S, Self::Item) -> Option<B>,
+    {
+        ScanMut::new(self, state, f)
+    }
+
+    /// Running fold - emit intermediate values.
+    fn running_fold<B, F>(self, init: B, f: F) -> RunningFold<Self, B, F>
+    where
+        B: Clone,
+        F: FnMut(&B, Self::Item) -> B,
+    {
+        RunningFold::new(self, init, f)
+    }
+
+    /// Running reduce - like running_fold without initial value.
+    fn running_reduce<F>(self, f: F) -> RunningReduce<Self, F>
+    where
+        Self::Item: Clone,
+        F: FnMut(&Self::Item, Self::Item) -> Self::Item,
+    {
+        RunningReduce::new(self, f)
+    }
+
+    // ========================================================================
+    // Peeking & Lookahead
+    // ========================================================================
+
+    /// Peek at multiple elements ahead.
+    fn multipeek(self) -> Multipeek<Self> {
+        Multipeek::new(self)
+    }
+
+    /// Put back elements.
+    fn put_back(self, value: Self::Item) -> PutBack<Self> {
+        PutBack::with_value(self, value)
+    }
+
+    // ========================================================================
+    // Positioning
+    // ========================================================================
+
+    /// Find position of element.
+    fn position_all<F>(self, predicate: F) -> PositionAll<Self, F>
+    where
+        F: FnMut(&Self::Item) -> bool,
+    {
+        PositionAll::new(self, predicate)
+    }
+
+    /// Get the nth elements (every nth).
+    fn step_by_from(self, step: usize, start: usize) -> StepByFrom<Self> {
+        StepByFrom::new(self, step, start)
+    }
+
+    // ========================================================================
+    // Collection Methods
+    // ========================================================================
+
+    /// Collect into a vector.
+    fn collect_vec(self) -> Vec<Self::Item> {
+        self.collect()
+    }
+
+    /// Collect into a HashMap.
+    fn collect_map<K, V>(self) -> HashMap<K, V>
+    where
+        Self: Iterator<Item = (K, V)>,
+        K: Eq + std::hash::Hash,
+    {
+        self.collect()
+    }
+
+    /// Collect into groups by key.
+    fn into_group_map<K, V, F>(self, key_fn: F) -> HashMap<K, Vec<V>>
+    where
+        K: Eq + std::hash::Hash,
+        F: FnMut(&Self::Item) -> K,
+        Self: Iterator<Item = V>,
+    {
+        let mut map: HashMap<K, Vec<V>> = HashMap::new();
+        let mut f = key_fn;
+        for item in self {
+            let key = f(&item);
+            map.entry(key).or_insert_with(Vec::new).push(item);
+        }
+        map
+    }
+
+    /// Partition into two vectors.
+    fn partition_vec<F>(self, predicate: F) -> (Vec<Self::Item>, Vec<Self::Item>)
+    where
+        F: FnMut(&Self::Item) -> bool,
+    {
+        let mut f = predicate;
+        let mut left = Vec::new();
+        let mut right = Vec::new();
+        for item in self {
+            if f(&item) {
+                left.push(item);
+            } else {
+                right.push(item);
+            }
+        }
+        (left, right)
+    }
+
+    /// Try to collect, short-circuiting on error.
+    fn try_collect<T, E>(self) -> Result<Vec<T>, E>
+    where
+        Self: Iterator<Item = Result<T, E>>,
+    {
+        let mut result = Vec::new();
+        for item in self {
+            result.push(item?);
+        }
+        Ok(result)
+    }
+
+    // ========================================================================
+    // Min/Max Extensions
+    // ========================================================================
+
+    /// Find element with minimum key.
+    fn min_by_key_ref<K, F>(self, key_fn: F) -> Option<Self::Item>
+    where
+        K: Ord,
+        F: FnMut(&Self::Item) -> K,
+    {
+        let mut f = key_fn;
+        self.min_by(|a, b| f(a).cmp(&f(b)))
+    }
+
+    /// Find element with maximum key.
+    fn max_by_key_ref<K, F>(self, key_fn: F) -> Option<Self::Item>
+    where
+        K: Ord,
+        F: FnMut(&Self::Item) -> K,
+    {
+        let mut f = key_fn;
+        self.max_by(|a, b| f(a).cmp(&f(b)))
+    }
+
+    /// Find both min and max in one pass.
+    fn minmax(self) -> MinMax<Self::Item>
+    where
+        Self::Item: Ord + Clone,
+    {
+        let mut iter = self;
+        match iter.next() {
+            None => MinMax::Empty,
+            Some(first) => {
+                let mut min = first.clone();
+                let mut max = first;
+                for item in iter {
+                    if item < min {
+                        min = item.clone();
+                    }
+                    if item > max {
+                        max = item;
+                    }
+                }
+                if min == max {
+                    MinMax::Single(min)
+                } else {
+                    MinMax::MinMax(min, max)
+                }
+            }
+        }
+    }
+
+    // ========================================================================
+    // Boolean Queries
+    // ========================================================================
+
+    /// Check if all elements are equal.
+    fn all_equal(self) -> bool
+    where
+        Self::Item: PartialEq,
+    {
+        let mut iter = self;
+        match iter.next() {
+            None => true,
+            Some(first) => iter.all(|x| x == first),
+        }
+    }
+
+    /// Check if all elements are unique.
+    fn all_unique(self) -> bool
+    where
+        Self::Item: Eq + std::hash::Hash,
+    {
+        let mut seen = HashSet::new();
+        for item in self {
+            if !seen.insert(item) {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Check if iterator contains element.
+    fn contains_element(self, element: &Self::Item) -> bool
+    where
+        Self::Item: PartialEq,
+    {
+        self.any(|x| &x == element)
+    }
+
+    // ========================================================================
+    // Sorted Checks
+    // ========================================================================
+
+    /// Check if iterator is sorted.
+    fn is_sorted(self) -> bool
+    where
+        Self::Item: Ord,
+    {
+        let mut iter = self;
+        match iter.next() {
+            None => true,
+            Some(mut prev) => {
+                for curr in iter {
+                    if curr < prev {
+                        return false;
+                    }
+                    prev = curr;
+                }
+                true
+            }
+        }
+    }
+
+    /// Check if iterator is sorted by key.
+    fn is_sorted_by_key<K, F>(self, key_fn: F) -> bool
+    where
+        K: Ord,
+        F: FnMut(&Self::Item) -> K,
+    {
+        let mut f = key_fn;
+        let mut iter = self;
+        match iter.next() {
+            None => true,
+            Some(first) => {
+                let mut prev_key = f(&first);
+                for curr in iter {
+                    let curr_key = f(&curr);
+                    if curr_key < prev_key {
+                        return false;
+                    }
+                    prev_key = curr_key;
+                }
+                true
+            }
+        }
+    }
+}
+
+// Implement for all iterators
+impl<I: Iterator> IteratorExt for I {}
+
+// ============================================================================
+// MinMax Result
+// ============================================================================
+
+/// Result of minmax operation.
+pub enum MinMax<T> {
+    Empty,
+    Single(T),
+    MinMax(T, T),
+}
+
+impl<T> MinMax<T> {
+    pub fn min(self: &Self) -> Option<&T> {
+        match self {
+            MinMax::Empty => None,
+            MinMax::Single(x) => Some(x),
+            MinMax::MinMax(min, _) => Some(min),
+        }
+    }
+
+    pub fn max(self: &Self) -> Option<&T> {
+        match self {
+            MinMax::Empty => None,
+            MinMax::Single(x) => Some(x),
+            MinMax::MinMax(_, max) => Some(max),
+        }
+    }
+
+    pub fn into_option(self) -> Option<(T, T)> {
+        match self {
+            MinMax::Empty => None,
+            MinMax::Single(x) => None,  // Can't return two of same
+            MinMax::MinMax(min, max) => Some((min, max)),
+        }
+    }
+}
+
+// ============================================================================
+// Iterator Adapters
+// ============================================================================
+
+/// Group consecutive elements by key.
+pub struct GroupBy<I, K, F> {
+    iter: I,
+    key_fn: F,
+    current_key: Option<K>,
+    buffer: Vec<I::Item>,
+}
+
+impl<I: Iterator, K: PartialEq, F: FnMut(&I::Item) -> K> GroupBy<I, K, F> {
+    fn new(iter: I, key_fn: F) -> Self {
+        Self {
+            iter,
+            key_fn,
+            current_key: None,
+            buffer: Vec::new(),
+        }
+    }
+}
+
+impl<I: Iterator, K: PartialEq, F: FnMut(&I::Item) -> K> Iterator for GroupBy<I, K, F> {
+    type Item = (K, Vec<I::Item>);
+
+    fn next(self: &mut Self) -> Option<Self::Item> {
+        loop {
+            match self.iter.next() {
+                None => {
+                    if self.buffer.is_empty() {
+                        return None;
+                    } else {
+                        let key = self.current_key.take()?;
+                        let group = std::mem::take(&mut self.buffer);
+                        return Some((key, group));
+                    }
+                }
+                Some(item) => {
+                    let key = (self.key_fn)(&item);
+                    match &self.current_key {
+                        None => {
+                            self.current_key = Some(key);
+                            self.buffer.push(item);
+                        }
+                        Some(current) if *current == key => {
+                            self.buffer.push(item);
+                        }
+                        Some(_) => {
+                            let old_key = std::mem::replace(&mut self.current_key, Some(key));
+                            let group = std::mem::take(&mut self.buffer);
+                            self.buffer.push(item);
+                            return Some((old_key?, group));
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Chunk iterator into fixed-size groups.
+pub struct Chunks<I: Iterator> {
+    iter: I,
+    size: usize,
+}
+
+impl<I: Iterator> Chunks<I> {
+    fn new(iter: I, size: usize) -> Self {
+        assert!(size > 0, "Chunk size must be positive");
+        Self { iter, size }
+    }
+}
+
+impl<I: Iterator> Iterator for Chunks<I> {
+    type Item = Vec<I::Item>;
+
+    fn next(self: &mut Self) -> Option<Self::Item> {
+        let mut chunk = Vec::with_capacity(self.size);
+        for _ in 0..self.size {
+            match self.iter.next() {
+                Some(item) => chunk.push(item),
+                None => break,
+            }
+        }
+        if chunk.is_empty() {
+            None
+        } else {
+            Some(chunk)
+        }
+    }
+}
+
+/// Chunk by predicate.
+pub struct ChunkBy<I: Iterator, F> {
+    iter: I,
+    predicate: F,
+    buffer: Vec<I::Item>,
+}
+
+impl<I: Iterator, F: FnMut(&I::Item, &I::Item) -> bool> ChunkBy<I, F> {
+    fn new(iter: I, predicate: F) -> Self {
+        Self {
+            iter,
+            predicate,
+            buffer: Vec::new(),
+        }
+    }
+}
+
+impl<I: Iterator, F: FnMut(&I::Item, &I::Item) -> bool> Iterator for ChunkBy<I, F> {
+    type Item = Vec<I::Item>;
+
+    fn next(self: &mut Self) -> Option<Self::Item> {
+        loop {
+            match self.iter.next() {
+                None => {
+                    if self.buffer.is_empty() {
+                        return None;
+                    } else {
+                        return Some(std::mem::take(&mut self.buffer));
+                    }
+                }
+                Some(item) => {
+                    if self.buffer.is_empty() {
+                        self.buffer.push(item);
+                    } else if (self.predicate)(self.buffer.last().unwrap(), &item) {
+                        self.buffer.push(item);
+                    } else {
+                        let chunk = std::mem::take(&mut self.buffer);
+                        self.buffer.push(item);
+                        return Some(chunk);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Sliding windows.
+pub struct Windows<I: Iterator> {
+    iter: I,
+    size: usize,
+    buffer: Vec<I::Item>,
+}
+
+impl<I: Iterator> Windows<I>
+where
+    I::Item: Clone,
+{
+    fn new(iter: I, size: usize) -> Self {
+        assert!(size > 0, "Window size must be positive");
+        Self {
+            iter,
+            size,
+            buffer: Vec::with_capacity(size),
+        }
+    }
+}
+
+impl<I: Iterator> Iterator for Windows<I>
+where
+    I::Item: Clone,
+{
+    type Item = Vec<I::Item>;
+
+    fn next(self: &mut Self) -> Option<Self::Item> {
+        // Fill initial window
+        while self.buffer.len() < self.size {
+            match self.iter.next() {
+                Some(item) => self.buffer.push(item),
+                None => return None,
+            }
+        }
+
+        let window = self.buffer.clone();
+
+        // Slide window
+        match self.iter.next() {
+            Some(item) => {
+                self.buffer.remove(0);
+                self.buffer.push(item);
+            }
+            None => {
+                self.buffer.clear();
+            }
+        }
+
+        Some(window)
+    }
+}
+
+/// Filter only Ok values.
+pub struct FilterOk<I, T, E> {
+    iter: I,
+    _marker: std::marker::PhantomData<(T, E)>,
+}
+
+impl<I, T, E> FilterOk<I, T, E> {
+    fn new(iter: I) -> Self {
+        Self { iter, _marker: std::marker::PhantomData }
+    }
+}
+
+impl<I: Iterator<Item = Result<T, E>>, T, E> Iterator for FilterOk<I, T, E> {
+    type Item = T;
+
+    fn next(self: &mut Self) -> Option<Self::Item> {
+        loop {
+            match self.iter.next() {
+                None => return None,
+                Some(Ok(item)) => return Some(item),
+                Some(Err(_)) => continue,
+            }
+        }
+    }
+}
+
+/// Take while inclusive.
+pub struct TakeWhileInclusive<I, F> {
+    iter: I,
+    predicate: F,
+    done: bool,
+}
+
+impl<I: Iterator, F: FnMut(&I::Item) -> bool> TakeWhileInclusive<I, F> {
+    fn new(iter: I, predicate: F) -> Self {
+        Self { iter, predicate, done: false }
+    }
+}
+
+impl<I: Iterator, F: FnMut(&I::Item) -> bool> Iterator for TakeWhileInclusive<I, F> {
+    type Item = I::Item;
+
+    fn next(self: &mut Self) -> Option<Self::Item> {
+        if self.done {
+            return None;
+        }
+        match self.iter.next() {
+            None => None,
+            Some(item) => {
+                if !(self.predicate)(&item) {
+                    self.done = true;
+                }
+                Some(item)
+            }
+        }
+    }
+}
+
+/// Skip while inclusive.
+pub struct SkipWhileInclusive<I, F> {
+    iter: I,
+    predicate: F,
+    skipping: bool,
+}
+
+impl<I: Iterator, F: FnMut(&I::Item) -> bool> SkipWhileInclusive<I, F> {
+    fn new(iter: I, predicate: F) -> Self {
+        Self { iter, predicate, skipping: true }
+    }
+}
+
+impl<I: Iterator, F: FnMut(&I::Item) -> bool> Iterator for SkipWhileInclusive<I, F> {
+    type Item = I::Item;
+
+    fn next(self: &mut Self) -> Option<Self::Item> {
+        loop {
+            match self.iter.next() {
+                None => return None,
+                Some(item) => {
+                    if self.skipping {
+                        if !(self.predicate)(&item) {
+                            self.skipping = false;
+                        }
+                        // Skip this item even if predicate is false (inclusive)
+                    } else {
+                        return Some(item);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Deduplicate consecutive elements.
+pub struct Dedup<I: Iterator> {
+    iter: I,
+    last: Option<I::Item>,
+}
+
+impl<I: Iterator> Dedup<I>
+where
+    I::Item: PartialEq + Clone,
+{
+    fn new(iter: I) -> Self {
+        Self { iter, last: None }
+    }
+}
+
+impl<I: Iterator> Iterator for Dedup<I>
+where
+    I::Item: PartialEq + Clone,
+{
+    type Item = I::Item;
+
+    fn next(self: &mut Self) -> Option<Self::Item> {
+        loop {
+            match self.iter.next() {
+                None => return None,
+                Some(item) => {
+                    if self.last.as_ref() != Some(&item) {
+                        self.last = Some(item.clone());
+                        return Some(item);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Deduplicate by key.
+pub struct DedupByKey<I: Iterator, K, F> {
+    iter: I,
+    key_fn: F,
+    last_key: Option<K>,
+}
+
+impl<I: Iterator, K: PartialEq, F: FnMut(&I::Item) -> K> DedupByKey<I, K, F> {
+    fn new(iter: I, key_fn: F) -> Self {
+        Self { iter, key_fn, last_key: None }
+    }
+}
+
+impl<I: Iterator, K: PartialEq, F: FnMut(&I::Item) -> K> Iterator for DedupByKey<I, K, F> {
+    type Item = I::Item;
+
+    fn next(self: &mut Self) -> Option<Self::Item> {
+        loop {
+            match self.iter.next() {
+                None => return None,
+                Some(item) => {
+                    let key = (self.key_fn)(&item);
+                    if self.last_key.as_ref() != Some(&key) {
+                        self.last_key = Some(key);
+                        return Some(item);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Unique elements.
+pub struct Unique<I: Iterator> {
+    iter: I,
+    seen: HashSet<I::Item>,
+}
+
+impl<I: Iterator> Unique<I>
+where
+    I::Item: Eq + std::hash::Hash + Clone,
+{
+    fn new(iter: I) -> Self {
+        Self { iter, seen: HashSet::new() }
+    }
+}
+
+impl<I: Iterator> Iterator for Unique<I>
+where
+    I::Item: Eq + std::hash::Hash + Clone,
+{
+    type Item = I::Item;
+
+    fn next(self: &mut Self) -> Option<Self::Item> {
+        loop {
+            match self.iter.next() {
+                None => return None,
+                Some(item) => {
+                    if self.seen.insert(item.clone()) {
+                        return Some(item);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Unique by key.
+pub struct UniqueBy<I: Iterator, K, F> {
+    iter: I,
+    key_fn: F,
+    seen: HashSet<K>,
+}
+
+impl<I: Iterator, K: Eq + std::hash::Hash, F: FnMut(&I::Item) -> K> UniqueBy<I, K, F> {
+    fn new(iter: I, key_fn: F) -> Self {
+        Self { iter, key_fn, seen: HashSet::new() }
+    }
+}
+
+impl<I: Iterator, K: Eq + std::hash::Hash, F: FnMut(&I::Item) -> K> Iterator for UniqueBy<I, K, F> {
+    type Item = I::Item;
+
+    fn next(self: &mut Self) -> Option<Self::Item> {
+        loop {
+            match self.iter.next() {
+                None => return None,
+                Some(item) => {
+                    let key = (self.key_fn)(&item);
+                    if self.seen.insert(key) {
+                        return Some(item);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Interleave two iterators.
+pub struct Interleave<I, J> {
+    a: I,
+    b: J,
+    flag: bool,
+}
+
+impl<I: Iterator, J: Iterator<Item = I::Item>> Interleave<I, J> {
+    fn new(a: I, b: J) -> Self {
+        Self { a, b, flag: false }
+    }
+}
+
+impl<I: Iterator, J: Iterator<Item = I::Item>> Iterator for Interleave<I, J> {
+    type Item = I::Item;
+
+    fn next(self: &mut Self) -> Option<Self::Item> {
+        self.flag = !self.flag;
+        if self.flag {
+            match self.a.next() {
+                Some(x) => Some(x),
+                None => self.b.next(),
+            }
+        } else {
+            match self.b.next() {
+                Some(x) => Some(x),
+                None => self.a.next(),
+            }
+        }
+    }
+}
+
+/// Interleave shortest.
+pub struct InterleaveShort<I, J> {
+    a: I,
+    b: J,
+    flag: bool,
+}
+
+impl<I: Iterator, J: Iterator<Item = I::Item>> InterleaveShort<I, J> {
+    fn new(a: I, b: J) -> Self {
+        Self { a, b, flag: false }
+    }
+}
+
+impl<I: Iterator, J: Iterator<Item = I::Item>> Iterator for InterleaveShort<I, J> {
+    type Item = I::Item;
+
+    fn next(self: &mut Self) -> Option<Self::Item> {
+        self.flag = !self.flag;
+        if self.flag {
+            self.a.next()
+        } else {
+            self.b.next()
+        }
+    }
+}
+
+/// Merge sorted iterators.
+pub struct Merge<I, J> {
+    a: std::iter::Peekable<I>,
+    b: std::iter::Peekable<J>,
+}
+
+impl<I: Iterator, J: Iterator<Item = I::Item>> Merge<I, J>
+where
+    I::Item: Ord,
+{
+    fn new(a: I, b: J) -> Self {
+        Self {
+            a: a.peekable(),
+            b: b.peekable(),
+        }
+    }
+}
+
+impl<I: Iterator, J: Iterator<Item = I::Item>> Iterator for Merge<I, J>
+where
+    I::Item: Ord,
+{
+    type Item = I::Item;
+
+    fn next(self: &mut Self) -> Option<Self::Item> {
+        match (self.a.peek(), self.b.peek()) {
+            (None, None) => None,
+            (Some(_), None) => self.a.next(),
+            (None, Some(_)) => self.b.next(),
+            (Some(a), Some(b)) => {
+                if a <= b {
+                    self.a.next()
+                } else {
+                    self.b.next()
+                }
+            }
+        }
+    }
+}
+
+/// Merge by comparison function.
+pub struct MergeBy<I, J, F> {
+    a: std::iter::Peekable<I>,
+    b: std::iter::Peekable<J>,
+    cmp: F,
+}
+
+impl<I: Iterator, J: Iterator<Item = I::Item>, F: FnMut(&I::Item, &I::Item) -> std::cmp::Ordering>
+    MergeBy<I, J, F>
+{
+    fn new(a: I, b: J, cmp: F) -> Self {
+        Self {
+            a: a.peekable(),
+            b: b.peekable(),
+            cmp,
+        }
+    }
+}
+
+impl<I: Iterator, J: Iterator<Item = I::Item>, F: FnMut(&I::Item, &I::Item) -> std::cmp::Ordering>
+    Iterator for MergeBy<I, J, F>
+{
+    type Item = I::Item;
+
+    fn next(self: &mut Self) -> Option<Self::Item> {
+        match (self.a.peek(), self.b.peek()) {
+            (None, None) => None,
+            (Some(_), None) => self.a.next(),
+            (None, Some(_)) => self.b.next(),
+            (Some(a), Some(b)) => {
+                if (self.cmp)(a, b) != std::cmp::Ordering::Greater {
+                    self.a.next()
+                } else {
+                    self.b.next()
+                }
+            }
+        }
+    }
+}
+
+/// Cartesian product.
+pub struct CartesianProduct<I, J>
+where
+    J: Iterator,
+    J::IntoIter: Clone,
+{
+    a: I,
+    b_orig: J,
+    b: J,
+    a_item: Option<I::Item>,
+}
+
+impl<I: Iterator, J: Iterator> CartesianProduct<I, J>
+where
+    J: Clone,
+    I::Item: Clone,
+{
+    fn new(mut a: I, b: J) -> Self {
+        let a_item = a.next();
+        Self {
+            a,
+            b_orig: b.clone(),
+            b,
+            a_item,
+        }
+    }
+}
+
+impl<I: Iterator, J: Iterator> Iterator for CartesianProduct<I, J>
+where
+    J: Clone,
+    I::Item: Clone,
+{
+    type Item = (I::Item, J::Item);
+
+    fn next(self: &mut Self) -> Option<Self::Item> {
+        loop {
+            match &self.a_item {
+                None => return None,
+                Some(a) => {
+                    match self.b.next() {
+                        Some(b) => return Some((a.clone(), b)),
+                        None => {
+                            // Reset b, advance a
+                            self.a_item = self.a.next();
+                            self.b = self.b_orig.clone();
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Enumerate and map.
+pub struct EnumerateMap<I, F> {
+    iter: I,
+    f: F,
+    index: usize,
+}
+
+impl<I: Iterator, F> EnumerateMap<I, F> {
+    fn new(iter: I, f: F) -> Self {
+        Self { iter, f, index: 0 }
+    }
+}
+
+impl<I: Iterator, B, F: FnMut(usize, I::Item) -> B> Iterator for EnumerateMap<I, F> {
+    type Item = B;
+
+    fn next(self: &mut Self) -> Option<Self::Item> {
+        let item = self.iter.next()?;
+        let index = self.index;
+        self.index += 1;
+        Some((self.f)(index, item))
+    }
+}
+
+/// Enumerate and flat map.
+pub struct EnumerateFlatMap<I, U: IntoIterator, F> {
+    iter: I,
+    f: F,
+    index: usize,
+    current: Option<U::IntoIter>,
+}
+
+impl<I: Iterator, U: IntoIterator, F> EnumerateFlatMap<I, U, F> {
+    fn new(iter: I, f: F) -> Self {
+        Self { iter, f, index: 0, current: None }
+    }
+}
+
+impl<I: Iterator, U: IntoIterator, F: FnMut(usize, I::Item) -> U> Iterator for EnumerateFlatMap<I, U, F> {
+    type Item = U::Item;
+
+    fn next(self: &mut Self) -> Option<Self::Item> {
+        loop {
+            if let Some(ref mut inner) = self.current {
+                if let Some(item) = inner.next() {
+                    return Some(item);
+                }
+            }
+            let item = self.iter.next()?;
+            let index = self.index;
+            self.index += 1;
+            self.current = Some((self.f)(index, item).into_iter());
+        }
+    }
+}
+
+/// Intersperse separator.
+pub struct Intersperse<I: Iterator> {
+    iter: I,
+    separator: I::Item,
+    needs_sep: bool,
+    next_item: Option<I::Item>,
+}
+
+impl<I: Iterator> Intersperse<I>
+where
+    I::Item: Clone,
+{
+    fn new(mut iter: I, separator: I::Item) -> Self {
+        let next_item = iter.next();
+        Self { iter, separator, needs_sep: false, next_item }
+    }
+}
+
+impl<I: Iterator> Iterator for Intersperse<I>
+where
+    I::Item: Clone,
+{
+    type Item = I::Item;
+
+    fn next(self: &mut Self) -> Option<Self::Item> {
+        if self.needs_sep {
+            self.needs_sep = false;
+            Some(self.separator.clone())
+        } else {
+            let item = self.next_item.take()?;
+            self.next_item = self.iter.next();
+            if self.next_item.is_some() {
+                self.needs_sep = true;
+            }
+            Some(item)
+        }
+    }
+}
+
+/// Intersperse with function.
+pub struct IntersperseWith<I: Iterator, F> {
+    iter: I,
+    separator_fn: F,
+    needs_sep: bool,
+    next_item: Option<I::Item>,
+}
+
+impl<I: Iterator, F: FnMut() -> I::Item> IntersperseWith<I, F> {
+    fn new(mut iter: I, separator_fn: F) -> Self {
+        let next_item = iter.next();
+        Self { iter, separator_fn, needs_sep: false, next_item }
+    }
+}
+
+impl<I: Iterator, F: FnMut() -> I::Item> Iterator for IntersperseWith<I, F> {
+    type Item = I::Item;
+
+    fn next(self: &mut Self) -> Option<Self::Item> {
+        if self.needs_sep {
+            self.needs_sep = false;
+            Some((self.separator_fn)())
+        } else {
+            let item = self.next_item.take()?;
+            self.next_item = self.iter.next();
+            if self.next_item.is_some() {
+                self.needs_sep = true;
+            }
+            Some(item)
+        }
+    }
+}
+
+/// Batched map.
+pub struct BatchedMap<I: Iterator, B, F> {
+    iter: I,
+    batch_size: usize,
+    f: F,
+    buffer: Vec<B>,
+}
+
+impl<I: Iterator, B, F: FnMut(Vec<I::Item>) -> Vec<B>> BatchedMap<I, B, F> {
+    fn new(iter: I, batch_size: usize, f: F) -> Self {
+        Self { iter, batch_size, f, buffer: Vec::new() }
+    }
+}
+
+impl<I: Iterator, B, F: FnMut(Vec<I::Item>) -> Vec<B>> Iterator for BatchedMap<I, B, F> {
+    type Item = B;
+
+    fn next(self: &mut Self) -> Option<Self::Item> {
+        if let Some(item) = self.buffer.pop() {
+            return Some(item);
+        }
+
+        let mut batch = Vec::with_capacity(self.batch_size);
+        for _ in 0..self.batch_size {
+            match self.iter.next() {
+                Some(item) => batch.push(item),
+                None => break,
+            }
+        }
+
+        if batch.is_empty() {
+            return None;
+        }
+
+        self.buffer = (self.f)(batch);
+        self.buffer.reverse();
+        self.buffer.pop()
+    }
+}
+
+/// Scan with mutable state.
+pub struct ScanMut<I, S, F> {
+    iter: I,
+    state: S,
+    f: F,
+}
+
+impl<I: Iterator, S, F> ScanMut<I, S, F> {
+    fn new(iter: I, state: S, f: F) -> Self {
+        Self { iter, state, f }
+    }
+}
+
+impl<I: Iterator, S, B, F: FnMut(&mut S, I::Item) -> Option<B>> Iterator for ScanMut<I, S, F> {
+    type Item = B;
+
+    fn next(self: &mut Self) -> Option<Self::Item> {
+        let item = self.iter.next()?;
+        (self.f)(&mut self.state, item)
+    }
+}
+
+/// Running fold.
+pub struct RunningFold<I, B, F> {
+    iter: I,
+    acc: B,
+    f: F,
+}
+
+impl<I: Iterator, B: Clone, F: FnMut(&B, I::Item) -> B> RunningFold<I, B, F> {
+    fn new(iter: I, init: B, f: F) -> Self {
+        Self { iter, acc: init, f }
+    }
+}
+
+impl<I: Iterator, B: Clone, F: FnMut(&B, I::Item) -> B> Iterator for RunningFold<I, B, F> {
+    type Item = B;
+
+    fn next(self: &mut Self) -> Option<Self::Item> {
+        let item = self.iter.next()?;
+        self.acc = (self.f)(&self.acc, item);
+        Some(self.acc.clone())
+    }
+}
+
+/// Running reduce.
+pub struct RunningReduce<I: Iterator, F> {
+    iter: I,
+    acc: Option<I::Item>,
+    f: F,
+}
+
+impl<I: Iterator, F: FnMut(&I::Item, I::Item) -> I::Item> RunningReduce<I, F>
+where
+    I::Item: Clone,
+{
+    fn new(mut iter: I, f: F) -> Self {
+        let acc = iter.next();
+        Self { iter, acc, f }
+    }
+}
+
+impl<I: Iterator, F: FnMut(&I::Item, I::Item) -> I::Item> Iterator for RunningReduce<I, F>
+where
+    I::Item: Clone,
+{
+    type Item = I::Item;
+
+    fn next(self: &mut Self) -> Option<Self::Item> {
+        match self.iter.next() {
+            None => self.acc.take(),
+            Some(item) => {
+                let acc = self.acc.as_ref()?;
+                self.acc = Some((self.f)(acc, item));
+                self.acc.clone()
+            }
+        }
+    }
+}
+
+/// Multipeek iterator.
+pub struct Multipeek<I: Iterator> {
+    iter: I,
+    buffer: Vec<I::Item>,
+}
+
+impl<I: Iterator> Multipeek<I> {
+    fn new(iter: I) -> Self {
+        Self { iter, buffer: Vec::new() }
+    }
+
+    /// Peek at the nth item (0-indexed).
+    pub fn peek_nth(self: &mut Self, n: usize) -> Option<&I::Item> {
+        while self.buffer.len() <= n {
+            match self.iter.next() {
+                Some(item) => self.buffer.push(item),
+                None => return None,
+            }
+        }
+        self.buffer.get(n)
+    }
+}
+
+impl<I: Iterator> Iterator for Multipeek<I> {
+    type Item = I::Item;
+
+    fn next(self: &mut Self) -> Option<Self::Item> {
+        if !self.buffer.is_empty() {
+            Some(self.buffer.remove(0))
+        } else {
+            self.iter.next()
+        }
+    }
+}
+
+/// Put back iterator.
+pub struct PutBack<I: Iterator> {
+    iter: I,
+    put_back: Option<I::Item>,
+}
+
+impl<I: Iterator> PutBack<I> {
+    fn with_value(iter: I, value: I::Item) -> Self {
+        Self { iter, put_back: Some(value) }
+    }
+
+    pub fn put_back(self: &mut Self, value: I::Item) {
+        self.put_back = Some(value);
+    }
+}
+
+impl<I: Iterator> Iterator for PutBack<I> {
+    type Item = I::Item;
+
+    fn next(self: &mut Self) -> Option<Self::Item> {
+        self.put_back.take().or_else(|| self.iter.next())
+    }
+}
+
+/// Find all positions.
+pub struct PositionAll<I, F> {
+    iter: I,
+    predicate: F,
+    index: usize,
+}
+
+impl<I: Iterator, F: FnMut(&I::Item) -> bool> PositionAll<I, F> {
+    fn new(iter: I, predicate: F) -> Self {
+        Self { iter, predicate, index: 0 }
+    }
+}
+
+impl<I: Iterator, F: FnMut(&I::Item) -> bool> Iterator for PositionAll<I, F> {
+    type Item = usize;
+
+    fn next(self: &mut Self) -> Option<Self::Item> {
+        loop {
+            let item = self.iter.next()?;
+            let index = self.index;
+            self.index += 1;
+            if (self.predicate)(&item) {
+                return Some(index);
+            }
+        }
+    }
+}
+
+/// Step by from offset.
+pub struct StepByFrom<I> {
+    iter: I,
+    step: usize,
+    skip_first: usize,
+    first: bool,
+}
+
+impl<I: Iterator> StepByFrom<I> {
+    fn new(iter: I, step: usize, start: usize) -> Self {
+        Self { iter, step, skip_first: start, first: true }
+    }
+}
+
+impl<I: Iterator> Iterator for StepByFrom<I> {
+    type Item = I::Item;
+
+    fn next(self: &mut Self) -> Option<Self::Item> {
+        if self.first {
+            self.first = false;
+            for _ in 0..self.skip_first {
+                self.iter.next();
+            }
+            self.iter.next()
+        } else {
+            for _ in 1..self.step {
+                self.iter.next();
+            }
+            self.iter.next()
+        }
+    }
+}
+
+// ============================================================================
+// Generator Functions
+// ============================================================================
+
+/// Generate values from a function.
+pub fn from_fn<T, F: FnMut() -> Option<T>>(f: F) -> FromFn<F> {
+    FromFn { f }
+}
+
+pub struct FromFn<F> {
+    f: F,
+}
+
+impl<T, F: FnMut() -> Option<T>> Iterator for FromFn<F> {
+    type Item = T;
+
+    fn next(self: &mut Self) -> Option<Self::Item> {
+        (self.f)()
+    }
+}
+
+/// Repeat a value forever.
+pub fn repeat<T: Clone>(value: T) -> Repeat<T> {
+    Repeat { value }
+}
+
+pub struct Repeat<T> {
+    value: T,
+}
+
+impl<T: Clone> Iterator for Repeat<T> {
+    type Item = T;
+
+    fn next(self: &mut Self) -> Option<Self::Item> {
+        Some(self.value.clone())
+    }
+}
+
+/// Repeat with a function.
+pub fn repeat_with<T, F: FnMut() -> T>(f: F) -> RepeatWith<F> {
+    RepeatWith { f }
+}
+
+pub struct RepeatWith<F> {
+    f: F,
+}
+
+impl<T, F: FnMut() -> T> Iterator for RepeatWith<F> {
+    type Item = T;
+
+    fn next(self: &mut Self) -> Option<Self::Item> {
+        Some((self.f)())
+    }
+}
+
+/// Iterate with a successor function.
+pub fn successors<T, F: FnMut(&T) -> Option<T>>(first: Option<T>, succ: F) -> Successors<T, F> {
+    Successors { current: first, succ }
+}
+
+pub struct Successors<T, F> {
+    current: Option<T>,
+    succ: F,
+}
+
+impl<T, F: FnMut(&T) -> Option<T>> Iterator for Successors<T, F> {
+    type Item = T;
+
+    fn next(self: &mut Self) -> Option<Self::Item> {
+        let item = self.current.take()?;
+        self.current = (self.succ)(&item);
+        Some(item)
+    }
+}
+
+/// Unfold from state.
+pub fn unfold<T, S, F: FnMut(&mut S) -> Option<T>>(init: S, f: F) -> Unfold<S, F> {
+    Unfold { state: init, f }
+}
+
+pub struct Unfold<S, F> {
+    state: S,
+    f: F,
+}
+
+impl<T, S, F: FnMut(&mut S) -> Option<T>> Iterator for Unfold<S, F> {
+    type Item = T;
+
+    fn next(self: &mut Self) -> Option<Self::Item> {
+        (self.f)(&mut self.state)
+    }
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_chunks() {
+        let data = vec![1, 2, 3, 4, 5];
+        let chunks: Vec<_> = data.into_iter().chunks(2).collect();
+        assert_eq!(chunks, vec![vec![1, 2], vec![3, 4], vec![5]]);
+    }
+
+    #[test]
+    fn test_windows() {
+        let data = vec![1, 2, 3, 4, 5];
+        let windows: Vec<_> = data.into_iter().windows(3).collect();
+        assert_eq!(windows, vec![vec![1, 2, 3], vec![2, 3, 4], vec![3, 4, 5]]);
+    }
+
+    #[test]
+    fn test_dedup() {
+        let data = vec![1, 1, 2, 2, 2, 3, 1, 1];
+        let result: Vec<_> = data.into_iter().dedup().collect();
+        assert_eq!(result, vec![1, 2, 3, 1]);
+    }
+
+    #[test]
+    fn test_unique() {
+        let data = vec![1, 2, 1, 3, 2, 4];
+        let result: Vec<_> = data.into_iter().unique().collect();
+        assert_eq!(result, vec![1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn test_interleave() {
+        let a = vec![1, 3, 5];
+        let b = vec![2, 4, 6, 8];
+        let result: Vec<_> = a.into_iter().interleave(b).collect();
+        assert_eq!(result, vec![1, 2, 3, 4, 5, 6, 8]);
+    }
+
+    #[test]
+    fn test_merge() {
+        let a = vec![1, 3, 5, 7];
+        let b = vec![2, 4, 6, 8];
+        let result: Vec<_> = a.into_iter().merge(b).collect();
+        assert_eq!(result, vec![1, 2, 3, 4, 5, 6, 7, 8]);
+    }
+
+    #[test]
+    fn test_intersperse() {
+        let data = vec![1, 2, 3];
+        let result: Vec<_> = data.into_iter().intersperse(0).collect();
+        assert_eq!(result, vec![1, 0, 2, 0, 3]);
+    }
+
+    #[test]
+    fn test_cartesian_product() {
+        let a = vec![1, 2];
+        let b = vec!['a', 'b'];
+        let result: Vec<_> = a.into_iter().cartesian_product(b).collect();
+        assert_eq!(result, vec![(1, 'a'), (1, 'b'), (2, 'a'), (2, 'b')]);
+    }
+
+    #[test]
+    fn test_running_fold() {
+        let data = vec![1, 2, 3, 4];
+        let sums: Vec<_> = data.into_iter().running_fold(0, |acc, x| acc + x).collect();
+        assert_eq!(sums, vec![1, 3, 6, 10]);
+    }
+
+    #[test]
+    fn test_minmax() {
+        let data = vec![3, 1, 4, 1, 5, 9, 2, 6];
+        match data.into_iter().minmax() {
+            MinMax::MinMax(min, max) => {
+                assert_eq!(min, 1);
+                assert_eq!(max, 9);
+            }
+            _ => panic!("Expected MinMax"),
+        }
+    }
+
+    #[test]
+    fn test_all_equal() {
+        assert!(vec![1, 1, 1].into_iter().all_equal());
+        assert!(!vec![1, 2, 1].into_iter().all_equal());
+        assert!(Vec::<i32>::new().into_iter().all_equal());
+    }
+
+    #[test]
+    fn test_is_sorted() {
+        assert!(vec![1, 2, 3, 4].into_iter().is_sorted());
+        assert!(!vec![1, 3, 2, 4].into_iter().is_sorted());
+    }
+
+    #[test]
+    fn test_group_by() {
+        let data = vec!["aa", "ab", "bc", "bd", "ca"];
+        let groups: Vec<_> = data.into_iter()
+            .group_by(|s| s.chars().next().unwrap())
+            .collect();
+        assert_eq!(groups.len(), 3);
+        assert_eq!(groups[0], ('a', vec!["aa", "ab"]));
+        assert_eq!(groups[1], ('b', vec!["bc", "bd"]));
+        assert_eq!(groups[2], ('c', vec!["ca"]));
+    }
+
+    #[test]
+    fn test_successors() {
+        let fib: Vec<_> = successors(Some((0, 1)), |(a, b)| Some((*b, a + b)))
+            .map(|(a, _)| a)
+            .take(10)
+            .collect();
+        assert_eq!(fib, vec![0, 1, 1, 2, 3, 5, 8, 13, 21, 34]);
+    }
+}

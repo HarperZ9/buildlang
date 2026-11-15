@@ -1,0 +1,885 @@
+// =============================================================================
+// qsql — SQL parser written in BuildLang
+// =============================================================================
+// Step 2 toward a SQLite-class database. Parses SQL statements into a
+// structured representation and echoes them back in normalized form.
+//
+// Usage:
+//   echo "SELECT name FROM users;" | qsql
+//   qsql "SELECT * FROM users WHERE age > 25;"
+//
+// Supported statements:
+//   CREATE TABLE, INSERT INTO, SELECT, UPDATE, DELETE FROM, DROP TABLE
+//
+// Design: ALL state lives in one flat struct (SQL) to avoid the &mut
+// sub-struct copy codegen limitation. Strings are pooled in a single buffer.
+// =============================================================================
+
+// --- Helpers ---
+fn is_ws(c: String) -> bool { c == " " || c == "\n" || c == "\r" || c == "\t" }
+fn is_digit(c: String) -> bool { c == "0" || c == "1" || c == "2" || c == "3" || c == "4" || c == "5" || c == "6" || c == "7" || c == "8" || c == "9" }
+fn is_lower(c: String) -> bool { c == "a" || c == "b" || c == "c" || c == "d" || c == "e" || c == "f" || c == "g" || c == "h" || c == "i" || c == "j" || c == "k" || c == "l" || c == "m" || c == "n" || c == "o" || c == "p" || c == "q" || c == "r" || c == "s" || c == "t" || c == "u" || c == "v" || c == "w" || c == "x" || c == "y" || c == "z" }
+fn is_upper(c: String) -> bool { c == "A" || c == "B" || c == "C" || c == "D" || c == "E" || c == "F" || c == "G" || c == "H" || c == "I" || c == "J" || c == "K" || c == "L" || c == "M" || c == "N" || c == "O" || c == "P" || c == "Q" || c == "R" || c == "S" || c == "T" || c == "U" || c == "V" || c == "W" || c == "X" || c == "Y" || c == "Z" }
+fn is_alpha(c: String) -> bool { is_lower(c) || is_upper(c) }
+fn is_alnum(c: String) -> bool { is_alpha(c) || is_digit(c) || c == "_" }
+
+// --- Token types ---
+// 0 = Keyword, 1 = Ident, 2 = String literal, 3 = Number literal
+// 4 = Operator, 5 = Punctuation, 6 = Star, 7 = EOF
+
+// --- Flat state struct ---
+struct SQL {
+    // Lexer input
+    input: String,
+    ilen: i32,
+    pos: i32,
+
+    // Current token
+    tk_type: i32,
+    tk_val: String,
+
+    // String pool
+    pool: String,
+    ps: Vec<i32>,
+    pl: Vec<i32>,
+    pn: i32,
+
+    // Statement type: 0=SELECT, 1=INSERT, 2=CREATE, 3=UPDATE, 4=DELETE, 5=DROP
+    stmt_type: i32,
+
+    // Table name (pool index)
+    table_id: i32,
+
+    // Column names (pool indices)
+    col_ids: Vec<i32>,
+    col_count: i32,
+
+    // Column types for CREATE (pool indices)
+    type_ids: Vec<i32>,
+
+    // PRIMARY KEY flags for CREATE (0 or 1 per column)
+    pk_flags: Vec<i32>,
+
+    // Values for INSERT (pool indices)
+    val_ids: Vec<i32>,
+    val_count: i32,
+
+    // WHERE clause
+    where_left: i32,
+    where_op: i32,
+    where_right: i32,
+    has_where: i32,
+
+    // ORDER BY
+    order_col: i32,
+    order_desc: i32,
+    has_order: i32,
+
+    // LIMIT
+    limit_val: i32,
+    has_limit: i32,
+
+    // SET clause for UPDATE
+    set_col: i32,
+    set_val: i32,
+
+    // SELECT * flag
+    select_star: i32,
+
+    // INSERT column list flag
+    has_insert_cols: i32,
+}
+
+fn sql_new(input: String) -> SQL {
+    let ilen = input.len();
+    SQL {
+        input: input, ilen: ilen, pos: 0,
+        tk_type: 7, tk_val: "",
+        pool: "", ps: vec![], pl: vec![], pn: 0,
+        stmt_type: 0, table_id: -1,
+        col_ids: vec![], col_count: 0,
+        type_ids: vec![],
+        pk_flags: vec![],
+        val_ids: vec![], val_count: 0,
+        where_left: -1, where_op: -1, where_right: -1, has_where: 0,
+        order_col: -1, order_desc: 0, has_order: 0,
+        limit_val: 0, has_limit: 0,
+        set_col: -1, set_val: -1,
+        select_star: 0,
+        has_insert_cols: 0,
+    }
+}
+
+// --- String pool ops ---
+fn sp_add(s: &mut SQL, text: String) -> i32 {
+    let id = s.pn;
+    let st = s.pool.len();
+    s.pool = s.pool + text;
+    let en = s.pool.len();
+    vec_push(s.ps, st);
+    vec_push(s.pl, en - st);
+    s.pn = s.pn + 1;
+    id
+}
+
+fn sp_get(s: &SQL, id: i32) -> String {
+    if id < 0 { return ""; }
+    let st = vec_get(s.ps, id);
+    let ln = vec_get(s.pl, id);
+    s.pool.substring(st, ln)
+}
+
+// =============================================================================
+// LEXER
+// =============================================================================
+
+fn skip_ws(s: &mut SQL) {
+    let mut go = true;
+    while go {
+        if s.pos >= s.ilen { go = false; }
+        else {
+            let c = s.input.char_at(s.pos);
+            if is_ws(c) { s.pos = s.pos + 1; }
+            else { go = false; }
+        }
+    }
+}
+
+// Check if a word is a SQL keyword (case-insensitive)
+fn is_keyword(word: String) -> i32 {
+    let u = word.to_uppercase();
+    if u == "SELECT" { return 1; }
+    if u == "FROM" { return 1; }
+    if u == "WHERE" { return 1; }
+    if u == "INSERT" { return 1; }
+    if u == "INTO" { return 1; }
+    if u == "VALUES" { return 1; }
+    if u == "CREATE" { return 1; }
+    if u == "TABLE" { return 1; }
+    if u == "UPDATE" { return 1; }
+    if u == "SET" { return 1; }
+    if u == "DELETE" { return 1; }
+    if u == "DROP" { return 1; }
+    if u == "ORDER" { return 1; }
+    if u == "BY" { return 1; }
+    if u == "ASC" { return 1; }
+    if u == "DESC" { return 1; }
+    if u == "LIMIT" { return 1; }
+    if u == "AND" { return 1; }
+    if u == "OR" { return 1; }
+    if u == "NOT" { return 1; }
+    if u == "NULL" { return 1; }
+    if u == "INTEGER" { return 1; }
+    if u == "REAL" { return 1; }
+    if u == "TEXT" { return 1; }
+    if u == "BLOB" { return 1; }
+    if u == "PRIMARY" { return 1; }
+    if u == "KEY" { return 1; }
+    0
+}
+
+fn next_token(s: &mut SQL) {
+    skip_ws(s);
+    if s.pos >= s.ilen {
+        s.tk_type = 7;
+        s.tk_val = "";
+        return;
+    }
+    let c = s.input.char_at(s.pos);
+
+    // String literal: 'single quotes'
+    if c == "'" {
+        s.pos = s.pos + 1;
+        let mut val = "";
+        let mut go = true;
+        while go {
+            if s.pos >= s.ilen { go = false; }
+            else {
+                let qc = s.input.char_at(s.pos);
+                if qc == "'" {
+                    // Check for escaped quote ''
+                    if s.pos + 1 < s.ilen {
+                        let nx = s.input.char_at(s.pos + 1);
+                        if nx == "'" {
+                            val = val + "'";
+                            s.pos = s.pos + 2;
+                        } else {
+                            s.pos = s.pos + 1;
+                            go = false;
+                        }
+                    } else {
+                        s.pos = s.pos + 1;
+                        go = false;
+                    }
+                } else {
+                    val = val + qc;
+                    s.pos = s.pos + 1;
+                }
+            }
+        }
+        s.tk_type = 2;
+        s.tk_val = val;
+        return;
+    }
+
+    // Number literal
+    if is_digit(c) || (c == "-" && s.pos + 1 < s.ilen) {
+        let mut is_neg = false;
+        if c == "-" {
+            // Check next char is digit
+            let nx = s.input.char_at(s.pos + 1);
+            if is_digit(nx) {
+                is_neg = true;
+            }
+        }
+        if is_digit(c) || is_neg {
+            let mut val = "";
+            if is_neg {
+                val = "-";
+                s.pos = s.pos + 1;
+            }
+            let mut ngo = true;
+            while ngo {
+                if s.pos >= s.ilen { ngo = false; }
+                else {
+                    let nc = s.input.char_at(s.pos);
+                    if is_digit(nc) { val = val + nc; s.pos = s.pos + 1; }
+                    else if nc == "." { val = val + nc; s.pos = s.pos + 1; }
+                    else { ngo = false; }
+                }
+            }
+            s.tk_type = 3;
+            s.tk_val = val;
+            return;
+        }
+    }
+
+    // Identifier or keyword
+    if is_alpha(c) || c == "_" {
+        let mut val = "";
+        let mut go = true;
+        while go {
+            if s.pos >= s.ilen { go = false; }
+            else {
+                let ic = s.input.char_at(s.pos);
+                if is_alnum(ic) { val = val + ic; s.pos = s.pos + 1; }
+                else { go = false; }
+            }
+        }
+        let kw = is_keyword(val);
+        if kw == 1 {
+            s.tk_type = 0;
+            s.tk_val = val.to_uppercase();
+        } else {
+            s.tk_type = 1;
+            s.tk_val = val;
+        }
+        return;
+    }
+
+    // Operators: <=, >=, <>, !=, =, <, >, +, -, /, *
+    if c == "<" {
+        s.pos = s.pos + 1;
+        if s.pos < s.ilen {
+            let nx = s.input.char_at(s.pos);
+            if nx == "=" { s.pos = s.pos + 1; s.tk_type = 4; s.tk_val = "<="; return; }
+            if nx == ">" { s.pos = s.pos + 1; s.tk_type = 4; s.tk_val = "<>"; return; }
+        }
+        s.tk_type = 4; s.tk_val = "<"; return;
+    }
+    if c == ">" {
+        s.pos = s.pos + 1;
+        if s.pos < s.ilen {
+            let nx = s.input.char_at(s.pos);
+            if nx == "=" { s.pos = s.pos + 1; s.tk_type = 4; s.tk_val = ">="; return; }
+        }
+        s.tk_type = 4; s.tk_val = ">"; return;
+    }
+    if c == "!" {
+        s.pos = s.pos + 1;
+        if s.pos < s.ilen {
+            let nx = s.input.char_at(s.pos);
+            if nx == "=" { s.pos = s.pos + 1; s.tk_type = 4; s.tk_val = "!="; return; }
+        }
+        s.tk_type = 4; s.tk_val = "!"; return;
+    }
+    if c == "=" { s.pos = s.pos + 1; s.tk_type = 4; s.tk_val = "="; return; }
+    if c == "+" { s.pos = s.pos + 1; s.tk_type = 4; s.tk_val = "+"; return; }
+    if c == "-" { s.pos = s.pos + 1; s.tk_type = 4; s.tk_val = "-"; return; }
+    if c == "/" { s.pos = s.pos + 1; s.tk_type = 4; s.tk_val = "/"; return; }
+
+    // Star (SELECT *)
+    if c == "*" { s.pos = s.pos + 1; s.tk_type = 6; s.tk_val = "*"; return; }
+
+    // Punctuation: ( ) , ;
+    if c == "(" { s.pos = s.pos + 1; s.tk_type = 5; s.tk_val = "("; return; }
+    if c == ")" { s.pos = s.pos + 1; s.tk_type = 5; s.tk_val = ")"; return; }
+    if c == "," { s.pos = s.pos + 1; s.tk_type = 5; s.tk_val = ","; return; }
+    if c == ";" { s.pos = s.pos + 1; s.tk_type = 5; s.tk_val = ";"; return; }
+
+    // Unknown character: skip
+    s.pos = s.pos + 1;
+    s.tk_type = 1;
+    s.tk_val = c;
+}
+
+// --- Token helpers ---
+fn tk_is(s: &SQL, t: i32) -> i32 {
+    if s.tk_type == t { return 1; }
+    0
+}
+
+fn tk_is_kw(s: &SQL, kw: String) -> i32 {
+    if s.tk_type == 0 {
+        if s.tk_val == kw { return 1; }
+    }
+    0
+}
+
+fn tk_is_punct(s: &SQL, p: String) -> i32 {
+    if s.tk_type == 5 {
+        if s.tk_val == p { return 1; }
+    }
+    0
+}
+
+fn expect_kw(s: &mut SQL, kw: String) ~ Console + Process {
+    if tk_is_kw(s, kw) == 0 {
+        println!("Error: expected keyword '{}', got '{}'", kw, s.tk_val);
+        process_exit(1);
+    }
+    next_token(s);
+}
+
+fn expect_punct(s: &mut SQL, p: String) ~ Console + Process {
+    if tk_is_punct(s, p) == 0 {
+        println!("Error: expected '{}', got '{}'", p, s.tk_val);
+        process_exit(1);
+    }
+    next_token(s);
+}
+
+// Encode operator string to i32: 0=eq, 1=lt, 2=gt, 3=le, 4=ge, 5=ne
+fn op_encode(op: String) -> i32 {
+    if op == "=" { return 0; }
+    if op == "<" { return 1; }
+    if op == ">" { return 2; }
+    if op == "<=" { return 3; }
+    if op == ">=" { return 4; }
+    if op == "<>" { return 5; }
+    if op == "!=" { return 5; }
+    0 - 1
+}
+
+fn op_decode(op: i32) -> String {
+    if op == 0 { return "="; }
+    if op == 1 { return "<"; }
+    if op == 2 { return ">"; }
+    if op == 3 { return "<="; }
+    if op == 4 { return ">="; }
+    if op == 5 { return "<>"; }
+    "?"
+}
+
+// =============================================================================
+// PARSER — recursive descent
+// =============================================================================
+
+fn parse_sql(s: &mut SQL) ~ Console + Process {
+    next_token(s);
+
+    if tk_is_kw(s, "SELECT") == 1 { parse_select(s); return; }
+    if tk_is_kw(s, "INSERT") == 1 { parse_insert(s); return; }
+    if tk_is_kw(s, "CREATE") == 1 { parse_create(s); return; }
+    if tk_is_kw(s, "UPDATE") == 1 { parse_update(s); return; }
+    if tk_is_kw(s, "DELETE") == 1 { parse_delete(s); return; }
+    if tk_is_kw(s, "DROP") == 1 { parse_drop(s); return; }
+
+    println!("Error: unrecognized statement starting with '{}'", s.tk_val);
+    process_exit(1);
+}
+
+// --- SELECT col1, col2 FROM table [WHERE ...] [ORDER BY ...] [LIMIT n] ---
+fn parse_select(s: &mut SQL) ~ Console + Process {
+    s.stmt_type = 0;
+    next_token(s);
+
+    // Columns: * or col1, col2, ...
+    if tk_is(s, 6) == 1 {
+        // SELECT *
+        s.select_star = 1;
+        next_token(s);
+    } else {
+        // Column list
+        let mut go = true;
+        while go {
+            let name = s.tk_val;
+            let id = sp_add(s, name);
+            vec_push(s.col_ids, id);
+            s.col_count = s.col_count + 1;
+            next_token(s);
+            if tk_is_punct(s, ",") == 1 {
+                next_token(s);
+            } else {
+                go = false;
+            }
+        }
+    }
+
+    // FROM table
+    expect_kw(s, "FROM");
+    let tname = s.tk_val;
+    s.table_id = sp_add(s, tname);
+    next_token(s);
+
+    // Optional WHERE
+    if tk_is_kw(s, "WHERE") == 1 {
+        parse_where(s);
+    }
+
+    // Optional ORDER BY
+    if tk_is_kw(s, "ORDER") == 1 {
+        parse_order_by(s);
+    }
+
+    // Optional LIMIT
+    if tk_is_kw(s, "LIMIT") == 1 {
+        parse_limit(s);
+    }
+}
+
+// --- INSERT INTO table [(cols)] VALUES (val1, val2, ...) ---
+fn parse_insert(s: &mut SQL) ~ Console + Process {
+    s.stmt_type = 1;
+    next_token(s);
+    expect_kw(s, "INTO");
+
+    // Table name
+    let tname = s.tk_val;
+    s.table_id = sp_add(s, tname);
+    next_token(s);
+
+    // Optional column list: (col1, col2, ...)
+    if tk_is_punct(s, "(") == 1 {
+        s.has_insert_cols = 1;
+        next_token(s);
+        let mut go = true;
+        while go {
+            let cname = s.tk_val;
+            let cid = sp_add(s, cname);
+            vec_push(s.col_ids, cid);
+            s.col_count = s.col_count + 1;
+            next_token(s);
+            if tk_is_punct(s, ",") == 1 {
+                next_token(s);
+            } else {
+                go = false;
+            }
+        }
+        expect_punct(s, ")");
+    }
+
+    // VALUES (val1, val2, ...)
+    expect_kw(s, "VALUES");
+    expect_punct(s, "(");
+    let mut vgo = true;
+    while vgo {
+        // Value can be number, string, or NULL
+        let vtext = s.tk_val;
+        let vid = sp_add(s, vtext);
+        vec_push(s.val_ids, vid);
+        s.val_count = s.val_count + 1;
+        next_token(s);
+        if tk_is_punct(s, ",") == 1 {
+            next_token(s);
+        } else {
+            vgo = false;
+        }
+    }
+    expect_punct(s, ")");
+}
+
+// --- CREATE TABLE name (col1 type1 [PRIMARY KEY], ...) ---
+fn parse_create(s: &mut SQL) ~ Console + Process {
+    s.stmt_type = 2;
+    next_token(s);
+    expect_kw(s, "TABLE");
+
+    // Table name
+    let tname = s.tk_val;
+    s.table_id = sp_add(s, tname);
+    next_token(s);
+
+    // Column definitions: (col1 type1, col2 type2, ...)
+    expect_punct(s, "(");
+    let mut go = true;
+    while go {
+        // Column name
+        let cname = s.tk_val;
+        let cid = sp_add(s, cname);
+        vec_push(s.col_ids, cid);
+        s.col_count = s.col_count + 1;
+        next_token(s);
+
+        // Column type
+        let ctype = s.tk_val;
+        let tid = sp_add(s, ctype);
+        vec_push(s.type_ids, tid);
+        next_token(s);
+
+        // Optional PRIMARY KEY
+        if tk_is_kw(s, "PRIMARY") == 1 {
+            next_token(s);
+            expect_kw(s, "KEY");
+            vec_push(s.pk_flags, 1);
+        } else {
+            vec_push(s.pk_flags, 0);
+        }
+
+        if tk_is_punct(s, ",") == 1 {
+            next_token(s);
+        } else {
+            go = false;
+        }
+    }
+    expect_punct(s, ")");
+}
+
+// --- UPDATE table SET col = val WHERE ... ---
+fn parse_update(s: &mut SQL) ~ Console + Process {
+    s.stmt_type = 3;
+    next_token(s);
+
+    // Table name
+    let tname = s.tk_val;
+    s.table_id = sp_add(s, tname);
+    next_token(s);
+
+    // SET col = val
+    expect_kw(s, "SET");
+    let cname = s.tk_val;
+    s.set_col = sp_add(s, cname);
+    next_token(s);
+
+    // Expect =
+    if s.tk_type == 4 {
+        if s.tk_val == "=" {
+            next_token(s);
+        }
+    }
+
+    let vtext = s.tk_val;
+    s.set_val = sp_add(s, vtext);
+    next_token(s);
+
+    // Optional WHERE
+    if tk_is_kw(s, "WHERE") == 1 {
+        parse_where(s);
+    }
+}
+
+// --- DELETE FROM table [WHERE ...] ---
+fn parse_delete(s: &mut SQL) ~ Console + Process {
+    s.stmt_type = 4;
+    next_token(s);
+    expect_kw(s, "FROM");
+
+    // Table name
+    let tname = s.tk_val;
+    s.table_id = sp_add(s, tname);
+    next_token(s);
+
+    // Optional WHERE
+    if tk_is_kw(s, "WHERE") == 1 {
+        parse_where(s);
+    }
+}
+
+// --- DROP TABLE name ---
+fn parse_drop(s: &mut SQL) ~ Console + Process {
+    s.stmt_type = 5;
+    next_token(s);
+    expect_kw(s, "TABLE");
+
+    let tname = s.tk_val;
+    s.table_id = sp_add(s, tname);
+    next_token(s);
+}
+
+// --- WHERE left op right ---
+fn parse_where(s: &mut SQL) {
+    next_token(s);
+    s.has_where = 1;
+
+    // Left side (column name)
+    let lname = s.tk_val;
+    s.where_left = sp_add(s, lname);
+    next_token(s);
+
+    // Operator
+    let op = s.tk_val;
+    s.where_op = op_encode(op);
+    next_token(s);
+
+    // Right side (value: number, string, or ident)
+    let rval = s.tk_val;
+    s.where_right = sp_add(s, rval);
+    next_token(s);
+}
+
+// --- ORDER BY col [ASC|DESC] ---
+fn parse_order_by(s: &mut SQL) ~ Console + Process {
+    next_token(s);
+    expect_kw(s, "BY");
+    s.has_order = 1;
+
+    let cname = s.tk_val;
+    s.order_col = sp_add(s, cname);
+    next_token(s);
+
+    // Optional ASC/DESC
+    if tk_is_kw(s, "DESC") == 1 {
+        s.order_desc = 1;
+        next_token(s);
+    } else if tk_is_kw(s, "ASC") == 1 {
+        s.order_desc = 0;
+        next_token(s);
+    }
+}
+
+// --- LIMIT n ---
+fn parse_limit(s: &mut SQL) {
+    next_token(s);
+    s.has_limit = 1;
+
+    // Parse the number manually
+    let val = s.tk_val;
+    let vlen = val.len();
+    let mut num = 0;
+    let mut i = 0;
+    while i < vlen {
+        let ch = val.char_at(i);
+        if ch == "0" { num = num * 10; }
+        else if ch == "1" { num = num * 10 + 1; }
+        else if ch == "2" { num = num * 10 + 2; }
+        else if ch == "3" { num = num * 10 + 3; }
+        else if ch == "4" { num = num * 10 + 4; }
+        else if ch == "5" { num = num * 10 + 5; }
+        else if ch == "6" { num = num * 10 + 6; }
+        else if ch == "7" { num = num * 10 + 7; }
+        else if ch == "8" { num = num * 10 + 8; }
+        else if ch == "9" { num = num * 10 + 9; }
+        i = i + 1;
+    }
+    s.limit_val = num;
+    next_token(s);
+}
+
+// =============================================================================
+// OUTPUT — print parsed statement
+// =============================================================================
+
+fn print_parsed(s: &SQL) ~ Console {
+    let st = s.stmt_type;
+
+    if st == 0 { print_select(s); return; }
+    if st == 1 { print_insert(s); return; }
+    if st == 2 { print_create(s); return; }
+    if st == 3 { print_update(s); return; }
+    if st == 4 { print_delete(s); return; }
+    if st == 5 { print_drop(s); return; }
+}
+
+fn print_select(s: &SQL) ~ Console {
+    println!("Parsed SELECT statement");
+
+    // Columns
+    if s.select_star == 1 {
+        println!("  columns: *");
+    } else {
+        let mut out = "";
+        let mut i = 0;
+        while i < s.col_count {
+            if i > 0 { out = out + ", "; }
+            let cid = vec_get(s.col_ids, i);
+            let cname = sp_get(s, cid);
+            out = out + cname;
+            i = i + 1;
+        }
+        println!("  columns: {}", out);
+    }
+
+    // Table
+    let tname = sp_get(s, s.table_id);
+    println!("  table: {}", tname);
+
+    // WHERE
+    if s.has_where == 1 {
+        let lname = sp_get(s, s.where_left);
+        let op = op_decode(s.where_op);
+        let rval = sp_get(s, s.where_right);
+        println!("  where: {} {} {}", lname, op, rval);
+    }
+
+    // ORDER BY
+    if s.has_order == 1 {
+        let cname = sp_get(s, s.order_col);
+        let dir = if s.order_desc == 1 { "DESC" } else { "ASC" };
+        println!("  order_by: {} {}", cname, dir);
+    }
+
+    // LIMIT
+    if s.has_limit == 1 {
+        println!("  limit: {}", s.limit_val);
+    }
+}
+
+fn print_insert(s: &SQL) ~ Console {
+    println!("Parsed INSERT statement");
+
+    // Table
+    let tname = sp_get(s, s.table_id);
+    println!("  table: {}", tname);
+
+    // Column list (if provided)
+    if s.has_insert_cols == 1 {
+        let mut out = "";
+        let mut i = 0;
+        while i < s.col_count {
+            if i > 0 { out = out + ", "; }
+            let cid = vec_get(s.col_ids, i);
+            let cname = sp_get(s, cid);
+            out = out + cname;
+            i = i + 1;
+        }
+        println!("  columns: {}", out);
+    }
+
+    // Values
+    let mut out = "";
+    let mut i = 0;
+    while i < s.val_count {
+        if i > 0 { out = out + ", "; }
+        let vid = vec_get(s.val_ids, i);
+        let vtext = sp_get(s, vid);
+        out = out + vtext;
+        i = i + 1;
+    }
+    println!("  values: {}", out);
+}
+
+fn print_create(s: &SQL) ~ Console {
+    println!("Parsed CREATE TABLE statement");
+
+    // Table
+    let tname = sp_get(s, s.table_id);
+    println!("  table: {}", tname);
+
+    // Columns with types
+    let mut out = "";
+    let mut i = 0;
+    while i < s.col_count {
+        if i > 0 { out = out + ", "; }
+        let cid = vec_get(s.col_ids, i);
+        let cname = sp_get(s, cid);
+        let tid = vec_get(s.type_ids, i);
+        let tname = sp_get(s, tid);
+        out = out + cname + " " + tname;
+        let pk = vec_get(s.pk_flags, i);
+        if pk == 1 {
+            out = out + " PRIMARY KEY";
+        }
+        i = i + 1;
+    }
+    println!("  columns: {}", out);
+}
+
+fn print_update(s: &SQL) ~ Console {
+    println!("Parsed UPDATE statement");
+
+    // Table
+    let tname = sp_get(s, s.table_id);
+    println!("  table: {}", tname);
+
+    // SET
+    let cname = sp_get(s, s.set_col);
+    let vtext = sp_get(s, s.set_val);
+    println!("  set: {} = {}", cname, vtext);
+
+    // WHERE
+    if s.has_where == 1 {
+        let lname = sp_get(s, s.where_left);
+        let op = op_decode(s.where_op);
+        let rval = sp_get(s, s.where_right);
+        println!("  where: {} {} {}", lname, op, rval);
+    }
+}
+
+fn print_delete(s: &SQL) ~ Console {
+    println!("Parsed DELETE statement");
+
+    // Table
+    let tname = sp_get(s, s.table_id);
+    println!("  table: {}", tname);
+
+    // WHERE
+    if s.has_where == 1 {
+        let lname = sp_get(s, s.where_left);
+        let op = op_decode(s.where_op);
+        let rval = sp_get(s, s.where_right);
+        println!("  where: {} {} {}", lname, op, rval);
+    }
+}
+
+fn print_drop(s: &SQL) ~ Console {
+    println!("Parsed DROP TABLE statement");
+
+    let tname = sp_get(s, s.table_id);
+    println!("  table: {}", tname);
+}
+
+// =============================================================================
+// MAIN
+// =============================================================================
+
+fn main() ~ Console + Environment + Process {
+    let nargs = args_count();
+
+    if nargs > 1 {
+        let first = args_get(1);
+        if first == "--help" || first == "-h" {
+            println!("Usage: qsql <sql-statement>");
+            println!("       echo \"SELECT * FROM users;\" | qsql");
+            println!("       qsql \"SELECT name, age FROM users WHERE id = 1\"");
+            println!("");
+            println!("Parses SQL into a structured representation and prints it.");
+            println!("");
+            println!("Supported statements:");
+            println!("  CREATE TABLE, INSERT INTO, SELECT, UPDATE, DELETE FROM, DROP TABLE");
+            process_exit(0);
+        }
+    }
+
+    let input = if nargs > 1 {
+        args_get(1)
+    } else {
+        if stdin_is_pipe() {
+            read_all().trim()
+        } else {
+            println!("Usage: qsql <sql-statement>");
+            println!("       echo \"SELECT * FROM users;\" | qsql");
+            println!("Try 'qsql --help' for more information.");
+            process_exit(0);
+            ""
+        }
+    };
+
+    if input.len() == 0 {
+        println!("Error: empty input");
+        process_exit(1);
+    }
+
+    let mut sql = sql_new(input);
+    parse_sql(&mut sql);
+    print_parsed(&sql);
+}

@@ -1,0 +1,1087 @@
+// ============================================================================
+// BUILD-UNIVERSE: PRISM PBR SHADERS
+// Physically-Based Rendering shader collection
+// ============================================================================
+
+// ============================================================================
+// REGION: PBR Material Model
+// ============================================================================
+
+/// Standard PBR material structure
+@derive(Debug, Clone)]
+struct PBRMaterial {
+    /// Base color/albedo
+    base_color: vec4,
+    /// Metallic factor (0-1)
+    metallic: f32,
+    /// Roughness factor (0-1)
+    roughness: f32,
+    /// Normal map intensity
+    normal_intensity: f32,
+    /// Ambient occlusion
+    occlusion: f32,
+    /// Emissive color
+    emissive: vec3,
+    /// Emissive intensity
+    emissive_intensity: f32,
+    /// Clear coat factor
+    clear_coat: f32,
+    /// Clear coat roughness
+    clear_coat_roughness: f32,
+    /// Anisotropy factor
+    anisotropy: f32,
+    /// Anisotropy rotation
+    anisotropy_rotation: f32,
+    /// Subsurface scattering
+    subsurface: f32,
+    /// Subsurface color
+    subsurface_color: vec3,
+    /// Sheen factor
+    sheen: f32,
+    /// Sheen tint
+    sheen_tint: f32,
+    /// Specular factor
+    specular: f32,
+    /// Specular tint
+    specular_tint: f32,
+    /// IOR (Index of Refraction)
+    ior: f32,
+    /// Transmission factor
+    transmission: f32,
+    /// Alpha mode
+    alpha_mode: AlphaMode,
+    /// Alpha cutoff
+    alpha_cutoff: f32,
+}
+
+@derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AlphaMode {
+    Opaque,
+    Mask,
+    Blend,
+}
+
+impl PBRMaterial {
+    fn default() -> Self {
+        PBRMaterial {
+            base_color: vec4(1.0, 1.0, 1.0, 1.0),
+            metallic: 0.0,
+            roughness: 0.5,
+            normal_intensity: 1.0,
+            occlusion: 1.0,
+            emissive: vec3(0.0, 0.0, 0.0),
+            emissive_intensity: 0.0,
+            clear_coat: 0.0,
+            clear_coat_roughness: 0.03,
+            anisotropy: 0.0,
+            anisotropy_rotation: 0.0,
+            subsurface: 0.0,
+            subsurface_color: vec3(1.0, 0.2, 0.1),
+            sheen: 0.0,
+            sheen_tint: 0.5,
+            specular: 0.5,
+            specular_tint: 0.0,
+            ior: 1.5,
+            transmission: 0.0,
+            alpha_mode: AlphaMode::Opaque,
+            alpha_cutoff: 0.5,
+        }
+    }
+
+    fn metallic_roughness(metallic: f32, roughness: f32) -> Self {
+        PBRMaterial {
+            metallic,
+            roughness,
+            ..Self::default()
+        }
+    }
+
+    fn glass(ior: f32, roughness: f32) -> Self {
+        PBRMaterial {
+            metallic: 0.0,
+            roughness,
+            ior,
+            transmission: 1.0,
+            ..Self::default()
+        }
+    }
+
+    fn fabric(base_color: vec3, sheen: f32) -> Self {
+        PBRMaterial {
+            base_color: vec4(base_color.x, base_color.y, base_color.z, 1.0),
+            metallic: 0.0,
+            roughness: 0.8,
+            sheen,
+            sheen_tint: 0.5,
+            ..Self::default()
+        }
+    }
+}
+
+// ============================================================================
+// REGION: Standard PBR Vertex Shader
+// ============================================================================
+
+pub const PBR_VERTEX_SHADER: &str = r#"
+//═══════════════════════════════════════════════════════════════════════════════
+// PBR Vertex Shader
+// BUILD-PRISM Physically-Based Rendering
+//═══════════════════════════════════════════════════════════════════════════════
+
+struct VSInput {
+    float3 position : POSITION;
+    float3 normal : NORMAL;
+    float2 texcoord : TEXCOORD0;
+    float4 tangent : TANGENT;
+    float4 color : COLOR0;
+};
+
+struct VSOutput {
+    float4 position : SV_Position;
+    float3 worldPos : TEXCOORD0;
+    float3 normal : TEXCOORD1;
+    float2 texcoord : TEXCOORD2;
+    float3 tangent : TEXCOORD3;
+    float3 bitangent : TEXCOORD4;
+    float4 color : TEXCOORD5;
+    float3 viewDir : TEXCOORD6;
+};
+
+cbuffer FrameConstants : register(b0) {
+    float4x4 ViewProjection;
+    float4x4 View;
+    float4x4 Projection;
+    float3 CameraPosition;
+    float Time;
+};
+
+cbuffer ObjectConstants : register(b1) {
+    float4x4 World;
+    float4x4 WorldInvTranspose;
+};
+
+VSOutput main(VSInput input) {
+    VSOutput output;
+
+    // Transform position
+    float4 worldPos = mul(World, float4(input.position, 1.0));
+    output.worldPos = worldPos.xyz;
+    output.position = mul(ViewProjection, worldPos);
+
+    // Transform normal, tangent, bitangent
+    float3 worldNormal = normalize(mul((float3x3)WorldInvTranspose, input.normal));
+    float3 worldTangent = normalize(mul((float3x3)World, input.tangent.xyz));
+    float3 worldBitangent = cross(worldNormal, worldTangent) * input.tangent.w;
+
+    output.normal = worldNormal;
+    output.tangent = worldTangent;
+    output.bitangent = worldBitangent;
+
+    // Pass through texcoord and color
+    output.texcoord = input.texcoord;
+    output.color = input.color;
+
+    // View direction
+    output.viewDir = normalize(CameraPosition - worldPos.xyz);
+
+    return output;
+}
+"#;
+
+// ============================================================================
+// REGION: Standard PBR Fragment Shader
+// ============================================================================
+
+pub const PBR_FRAGMENT_SHADER: &str = r#"
+//═══════════════════════════════════════════════════════════════════════════════
+// PBR Fragment Shader
+// BUILD-PRISM Physically-Based Rendering
+//═══════════════════════════════════════════════════════════════════════════════
+
+// Constants
+static const float PI = 3.14159265359;
+static const float INV_PI = 0.31830988618;
+static const float EPSILON = 1e-6;
+
+// Textures
+Texture2D AlbedoMap : register(t0);
+Texture2D NormalMap : register(t1);
+Texture2D MetallicRoughnessMap : register(t2);
+Texture2D OcclusionMap : register(t3);
+Texture2D EmissiveMap : register(t4);
+TextureCube EnvironmentMap : register(t5);
+TextureCube IrradianceMap : register(t6);
+Texture2D BRDFLut : register(t7);
+
+SamplerState LinearSampler : register(s0);
+SamplerState PointSampler : register(s1);
+
+// Material parameters
+cbuffer MaterialConstants : register(b2) {
+    float4 BaseColorFactor;
+    float MetallicFactor;
+    float RoughnessFactor;
+    float NormalScale;
+    float OcclusionStrength;
+    float3 EmissiveFactor;
+    float EmissiveIntensity;
+    float AlphaCutoff;
+    int AlphaMode;
+    float ClearCoat;
+    float ClearCoatRoughness;
+    float Anisotropy;
+    float AnisotropyRotation;
+    float Subsurface;
+    float3 SubsurfaceColor;
+    float Sheen;
+    float SheenTint;
+    float Specular;
+    float SpecularTint;
+    float IOR;
+    float Transmission;
+};
+
+// Lighting
+cbuffer LightingConstants : register(b3) {
+    float3 SunDirection;
+    float3 SunColor;
+    float SunIntensity;
+    float3 AmbientColor;
+    float AmbientIntensity;
+    float EnvironmentIntensity;
+    int MaxEnvironmentLOD;
+};
+
+struct PSInput {
+    float4 position : SV_Position;
+    float3 worldPos : TEXCOORD0;
+    float3 normal : TEXCOORD1;
+    float2 texcoord : TEXCOORD2;
+    float3 tangent : TEXCOORD3;
+    float3 bitangent : TEXCOORD4;
+    float4 color : TEXCOORD5;
+    float3 viewDir : TEXCOORD6;
+};
+
+//───────────────────────────────────────────────────────────────────────────────
+// BRDF Functions
+//───────────────────────────────────────────────────────────────────────────────
+
+// Fresnel - Schlick approximation
+float3 F_Schlick(float3 F0, float VdotH) {
+    return F0 + (1.0 - F0) * pow(saturate(1.0 - VdotH), 5.0);
+}
+
+// Fresnel with roughness for IBL
+float3 F_SchlickRoughness(float3 F0, float VdotH, float roughness) {
+    return F0 + (max(1.0 - roughness, F0) - F0) * pow(saturate(1.0 - VdotH), 5.0);
+}
+
+// Normal Distribution Function - GGX/Trowbridge-Reitz
+float D_GGX(float NdotH, float roughness) {
+    float a = roughness * roughness;
+    float a2 = a * a;
+    float NdotH2 = NdotH * NdotH;
+
+    float denom = NdotH2 * (a2 - 1.0) + 1.0;
+    return a2 / (PI * denom * denom);
+}
+
+// Geometry Function - Smith GGX
+float G_SchlickGGX(float NdotV, float roughness) {
+    float r = roughness + 1.0;
+    float k = (r * r) / 8.0;
+
+    return NdotV / (NdotV * (1.0 - k) + k);
+}
+
+float G_Smith(float NdotV, float NdotL, float roughness) {
+    float ggx1 = G_SchlickGGX(NdotV, roughness);
+    float ggx2 = G_SchlickGGX(NdotL, roughness);
+
+    return ggx1 * ggx2;
+}
+
+// Anisotropic GGX
+float D_GGX_Anisotropic(float NdotH, float TdotH, float BdotH, float ax, float ay) {
+    float d = TdotH * TdotH / (ax * ax) + BdotH * BdotH / (ay * ay) + NdotH * NdotH;
+    return 1.0 / (PI * ax * ay * d * d);
+}
+
+// Visibility function for anisotropic
+float V_SmithGGXCorrelated_Anisotropic(float at, float ab, float TdotV, float BdotV,
+                                        float TdotL, float BdotL, float NdotV, float NdotL) {
+    float lambdaV = NdotL * length(float3(at * TdotV, ab * BdotV, NdotV));
+    float lambdaL = NdotV * length(float3(at * TdotL, ab * BdotL, NdotL));
+    return 0.5 / (lambdaV + lambdaL);
+}
+
+//───────────────────────────────────────────────────────────────────────────────
+// Clear Coat BRDF
+//───────────────────────────────────────────────────────────────────────────────
+
+float D_GGX_ClearCoat(float NdotH, float clearCoatRoughness) {
+    float a = clearCoatRoughness * clearCoatRoughness;
+    float a2 = a * a;
+    float d = NdotH * NdotH * (a2 - 1.0) + 1.0;
+    return a2 / (PI * d * d);
+}
+
+float V_Kelemen(float LdotH) {
+    return 0.25 / (LdotH * LdotH);
+}
+
+float3 EvaluateClearCoat(float3 N, float3 V, float3 L, float3 H,
+                          float clearCoat, float clearCoatRoughness) {
+    if (clearCoat <= 0.0) return float3(0, 0, 0);
+
+    float NdotL = saturate(dot(N, L));
+    float NdotH = saturate(dot(N, H));
+    float LdotH = saturate(dot(L, H));
+
+    float D = D_GGX_ClearCoat(NdotH, clearCoatRoughness);
+    float V_term = V_Kelemen(LdotH);
+    float F = 0.04 + (1.0 - 0.04) * pow(1.0 - LdotH, 5.0);
+
+    return float3(D * V_term * F * NdotL * clearCoat);
+}
+
+//───────────────────────────────────────────────────────────────────────────────
+// Sheen BRDF
+//───────────────────────────────────────────────────────────────────────────────
+
+float3 EvaluateSheen(float3 baseColor, float NdotL, float NdotV, float NdotH,
+                      float sheen, float sheenTint) {
+    if (sheen <= 0.0) return float3(0, 0, 0);
+
+    float luminance = dot(baseColor, float3(0.2126, 0.7152, 0.0722));
+    float3 tintColor = luminance > 0.0 ? baseColor / luminance : float3(1, 1, 1);
+    float3 sheenColor = lerp(float3(1, 1, 1), tintColor, sheenTint);
+
+    // Charlie distribution
+    float sinNH = sqrt(1.0 - NdotH * NdotH);
+    float h = 1.0 / (1.0 + 4.0 * sinNH * sinNH);
+
+    return sheenColor * sheen * h;
+}
+
+//───────────────────────────────────────────────────────────────────────────────
+// Subsurface Scattering Approximation
+//───────────────────────────────────────────────────────────────────────────────
+
+float3 EvaluateSubsurface(float3 baseColor, float3 subsurfaceColor, float subsurface,
+                           float3 N, float3 L, float3 V) {
+    if (subsurface <= 0.0) return float3(0, 0, 0);
+
+    // Wrap lighting for subsurface
+    float NdotL = dot(N, L);
+    float wrap = 0.5;
+    float wrappedNdotL = saturate((NdotL + wrap) / (1.0 + wrap));
+
+    // Transmission through the surface
+    float3 H = normalize(L + N * 0.5);
+    float VdotH = saturate(dot(V, -H));
+    float scatterPower = 3.0;
+    float scatter = pow(saturate(dot(V, -L)), scatterPower);
+
+    float3 sss = (wrappedNdotL + scatter) * subsurfaceColor;
+
+    return lerp(float3(0, 0, 0), sss, subsurface);
+}
+
+//───────────────────────────────────────────────────────────────────────────────
+// Main BRDF Evaluation
+//───────────────────────────────────────────────────────────────────────────────
+
+float3 EvaluatePBR(float3 albedo, float metallic, float roughness, float3 N,
+                    float3 V, float3 L, float3 lightColor, float3 F0) {
+    float3 H = normalize(V + L);
+
+    float NdotL = max(dot(N, L), 0.0);
+    float NdotV = max(dot(N, V), 0.0);
+    float NdotH = max(dot(N, H), 0.0);
+    float VdotH = max(dot(V, H), 0.0);
+
+    if (NdotL <= 0.0) return float3(0, 0, 0);
+
+    // Fresnel
+    float3 F = F_Schlick(F0, VdotH);
+
+    // NDF
+    float D = D_GGX(NdotH, roughness);
+
+    // Geometry
+    float G = G_Smith(NdotV, NdotL, roughness);
+
+    // Specular BRDF
+    float3 numerator = D * G * F;
+    float denominator = 4.0 * NdotV * NdotL + EPSILON;
+    float3 specular = numerator / denominator;
+
+    // Diffuse BRDF (Lambertian)
+    float3 kS = F;
+    float3 kD = (1.0 - kS) * (1.0 - metallic);
+    float3 diffuse = kD * albedo * INV_PI;
+
+    return (diffuse + specular) * lightColor * NdotL;
+}
+
+//───────────────────────────────────────────────────────────────────────────────
+// Image-Based Lighting
+//───────────────────────────────────────────────────────────────────────────────
+
+float3 EvaluateIBL(float3 albedo, float metallic, float roughness, float3 N,
+                   float3 V, float3 F0, float ao) {
+    float NdotV = max(dot(N, V), 0.0);
+
+    // Fresnel
+    float3 F = F_SchlickRoughness(F0, NdotV, roughness);
+
+    // Diffuse IBL
+    float3 kS = F;
+    float3 kD = (1.0 - kS) * (1.0 - metallic);
+
+    float3 irradiance = IrradianceMap.Sample(LinearSampler, N).rgb;
+    float3 diffuseIBL = kD * albedo * irradiance;
+
+    // Specular IBL
+    float3 R = reflect(-V, N);
+    float mipLevel = roughness * MaxEnvironmentLOD;
+    float3 prefilteredColor = EnvironmentMap.SampleLevel(LinearSampler, R, mipLevel).rgb;
+
+    float2 brdfSample = BRDFLut.Sample(LinearSampler, float2(NdotV, roughness)).rg;
+    float3 specularIBL = prefilteredColor * (F * brdfSample.x + brdfSample.y);
+
+    return (diffuseIBL + specularIBL) * ao * EnvironmentIntensity;
+}
+
+//───────────────────────────────────────────────────────────────────────────────
+// Main Pixel Shader
+//───────────────────────────────────────────────────────────────────────────────
+
+float4 main(PSInput input) : SV_Target {
+    // Sample textures
+    float4 albedoSample = AlbedoMap.Sample(LinearSampler, input.texcoord);
+    float3 albedo = albedoSample.rgb * BaseColorFactor.rgb * input.color.rgb;
+    float alpha = albedoSample.a * BaseColorFactor.a * input.color.a;
+
+    // Alpha handling
+    if (AlphaMode == 1) { // Mask
+        clip(alpha - AlphaCutoff);
+    }
+
+    float2 metallicRoughness = MetallicRoughnessMap.Sample(LinearSampler, input.texcoord).bg;
+    float metallic = metallicRoughness.r * MetallicFactor;
+    float roughness = max(metallicRoughness.g * RoughnessFactor, 0.04);
+
+    float ao = OcclusionMap.Sample(LinearSampler, input.texcoord).r;
+    ao = lerp(1.0, ao, OcclusionStrength);
+
+    float3 emissive = EmissiveMap.Sample(LinearSampler, input.texcoord).rgb;
+    emissive *= EmissiveFactor * EmissiveIntensity;
+
+    // Normal mapping
+    float3 normalSample = NormalMap.Sample(LinearSampler, input.texcoord).xyz * 2.0 - 1.0;
+    normalSample.xy *= NormalScale;
+    float3x3 TBN = float3x3(normalize(input.tangent), normalize(input.bitangent), normalize(input.normal));
+    float3 N = normalize(mul(normalSample, TBN));
+
+    float3 V = normalize(input.viewDir);
+    float3 L = normalize(-SunDirection);
+
+    // F0 (reflectance at normal incidence)
+    float3 F0 = lerp(float3(0.04, 0.04, 0.04), albedo, metallic);
+
+    // Adjust F0 based on specular and specular tint
+    float3 dielectricF0 = 0.08 * Specular * lerp(float3(1, 1, 1), albedo, SpecularTint);
+    F0 = lerp(dielectricF0, albedo, metallic);
+
+    // Direct lighting
+    float3 directLighting = EvaluatePBR(albedo, metallic, roughness, N, V, L,
+                                         SunColor * SunIntensity, F0);
+
+    // Anisotropic BRDF (if enabled)
+    if (Anisotropy != 0.0) {
+        float3 T = normalize(input.tangent);
+        float3 B = normalize(input.bitangent);
+
+        // Rotate anisotropy direction
+        float cosRot = cos(AnisotropyRotation * PI * 2.0);
+        float sinRot = sin(AnisotropyRotation * PI * 2.0);
+        T = cosRot * T + sinRot * B;
+        B = -sinRot * T + cosRot * B;
+
+        float aspect = sqrt(1.0 - Anisotropy * 0.9);
+        float ax = max(0.001, roughness / aspect);
+        float ay = max(0.001, roughness * aspect);
+
+        // Would use anisotropic BRDF here
+    }
+
+    // Clear coat
+    float3 H = normalize(V + L);
+    float3 clearCoatContrib = EvaluateClearCoat(N, V, L, H, ClearCoat, ClearCoatRoughness);
+
+    // Sheen
+    float NdotL = saturate(dot(N, L));
+    float NdotV = saturate(dot(N, V));
+    float NdotH = saturate(dot(N, H));
+    float3 sheenContrib = EvaluateSheen(albedo, NdotL, NdotV, NdotH, Sheen, SheenTint);
+
+    // Subsurface
+    float3 subsurfaceContrib = EvaluateSubsurface(albedo, SubsurfaceColor, Subsurface, N, L, V);
+
+    // Image-based lighting
+    float3 iblLighting = EvaluateIBL(albedo, metallic, roughness, N, V, F0, ao);
+
+    // Combine all lighting
+    float3 finalColor = directLighting + iblLighting + clearCoatContrib +
+                        sheenContrib * SunColor * SunIntensity + subsurfaceContrib;
+
+    // Add emissive
+    finalColor += emissive;
+
+    // Ambient
+    finalColor += albedo * AmbientColor * AmbientIntensity * (1.0 - metallic) * ao;
+
+    return float4(finalColor, alpha);
+}
+"#;
+
+// ============================================================================
+// REGION: PBR Utilities
+// ============================================================================
+
+pub const PBR_COMMON_HLSL: &str = r#"
+//═══════════════════════════════════════════════════════════════════════════════
+// PBR Common Utilities
+// BUILD-PRISM
+//═══════════════════════════════════════════════════════════════════════════════
+
+#ifndef PBR_COMMON_INCLUDED
+#define PBR_COMMON_INCLUDED
+
+// Constants
+static const float PI = 3.14159265359;
+static const float TWO_PI = 6.28318530718;
+static const float HALF_PI = 1.57079632679;
+static const float INV_PI = 0.31830988618;
+static const float INV_TWO_PI = 0.15915494309;
+static const float EPSILON = 1e-6;
+static const float HALF_MIN = 6.103515625e-5;
+
+//───────────────────────────────────────────────────────────────────────────────
+// Math Utilities
+//───────────────────────────────────────────────────────────────────────────────
+
+float sq(float x) { return x * x; }
+float2 sq(float2 x) { return x * x; }
+float3 sq(float3 x) { return x * x; }
+float4 sq(float4 x) { return x * x; }
+
+float pow5(float x) {
+    float x2 = x * x;
+    return x2 * x2 * x;
+}
+
+float3 SafeNormalize(float3 v) {
+    float len = length(v);
+    return len > EPSILON ? v / len : float3(0, 0, 1);
+}
+
+float3 PerpendicularVector(float3 v) {
+    float3 a = abs(v);
+    if (a.x <= a.y && a.x <= a.z) {
+        return float3(0, -v.z, v.y);
+    } else if (a.y <= a.z) {
+        return float3(-v.z, 0, v.x);
+    }
+    return float3(-v.y, v.x, 0);
+}
+
+//───────────────────────────────────────────────────────────────────────────────
+// Color Space
+//───────────────────────────────────────────────────────────────────────────────
+
+float Luminance(float3 color) {
+    return dot(color, float3(0.2126, 0.7152, 0.0722));
+}
+
+float3 LinearToSRGB(float3 color) {
+    float3 lo = color * 12.92;
+    float3 hi = 1.055 * pow(color, 1.0 / 2.4) - 0.055;
+    return lerp(lo, hi, step(0.0031308, color));
+}
+
+float3 SRGBToLinear(float3 color) {
+    float3 lo = color / 12.92;
+    float3 hi = pow((color + 0.055) / 1.055, 2.4);
+    return lerp(lo, hi, step(0.04045, color));
+}
+
+//───────────────────────────────────────────────────────────────────────────────
+// Texture Sampling
+//───────────────────────────────────────────────────────────────────────────────
+
+float3 UnpackNormal(float4 packednormal) {
+    float3 normal;
+    normal.xy = packednormal.ag * 2.0 - 1.0;
+    normal.z = sqrt(1.0 - saturate(dot(normal.xy, normal.xy)));
+    return normal;
+}
+
+float3 BlendNormals(float3 n1, float3 n2) {
+    return normalize(float3(n1.xy + n2.xy, n1.z * n2.z));
+}
+
+float3 ReorientNormal(float3 n1, float3 n2) {
+    n1 += float3(0, 0, 1);
+    n2 *= float3(-1, -1, 1);
+    return n1 * dot(n1, n2) / n1.z - n2;
+}
+
+//───────────────────────────────────────────────────────────────────────────────
+// Parallax Mapping
+//───────────────────────────────────────────────────────────────────────────────
+
+float2 ParallaxMapping(float2 texcoord, float3 viewDir, Texture2D heightMap,
+                        SamplerState samp, float heightScale) {
+    float height = heightMap.Sample(samp, texcoord).r;
+    float2 offset = viewDir.xy / viewDir.z * (height * heightScale);
+    return texcoord - offset;
+}
+
+float2 ParallaxOcclusionMapping(float2 texcoord, float3 viewDir, Texture2D heightMap,
+                                 SamplerState samp, float heightScale, int numLayers) {
+    float layerDepth = 1.0 / numLayers;
+    float currentLayerDepth = 0.0;
+    float2 P = viewDir.xy * heightScale;
+    float2 deltaTexCoords = P / numLayers;
+
+    float2 currentTexCoords = texcoord;
+    float currentDepthMapValue = heightMap.Sample(samp, currentTexCoords).r;
+
+    [loop]
+    for (int i = 0; i < numLayers; i++) {
+        if (currentLayerDepth >= currentDepthMapValue) break;
+        currentTexCoords -= deltaTexCoords;
+        currentDepthMapValue = heightMap.Sample(samp, currentTexCoords).r;
+        currentLayerDepth += layerDepth;
+    }
+
+    // Refinement
+    float2 prevTexCoords = currentTexCoords + deltaTexCoords;
+    float afterDepth = currentDepthMapValue - currentLayerDepth;
+    float beforeDepth = heightMap.Sample(samp, prevTexCoords).r - currentLayerDepth + layerDepth;
+    float weight = afterDepth / (afterDepth - beforeDepth);
+
+    return lerp(currentTexCoords, prevTexCoords, weight);
+}
+
+//───────────────────────────────────────────────────────────────────────────────
+// Environment Sampling
+//───────────────────────────────────────────────────────────────────────────────
+
+float3 BoxProjectedCubemapDirection(float3 R, float3 worldPos, float3 boxMin, float3 boxMax, float3 probePos) {
+    float3 firstPlane = (boxMax - worldPos) / R;
+    float3 secondPlane = (boxMin - worldPos) / R;
+    float3 planes = max(firstPlane, secondPlane);
+    float dist = min(planes.x, min(planes.y, planes.z));
+    return R * dist + (worldPos - probePos);
+}
+
+// Importance sampling for IBL
+float3 ImportanceSampleGGX(float2 Xi, float3 N, float roughness) {
+    float a = roughness * roughness;
+
+    float phi = TWO_PI * Xi.x;
+    float cosTheta = sqrt((1.0 - Xi.y) / (1.0 + (a * a - 1.0) * Xi.y));
+    float sinTheta = sqrt(1.0 - cosTheta * cosTheta);
+
+    float3 H;
+    H.x = cos(phi) * sinTheta;
+    H.y = sin(phi) * sinTheta;
+    H.z = cosTheta;
+
+    float3 up = abs(N.z) < 0.999 ? float3(0, 0, 1) : float3(1, 0, 0);
+    float3 tangent = normalize(cross(up, N));
+    float3 bitangent = cross(N, tangent);
+
+    return normalize(tangent * H.x + bitangent * H.y + N * H.z);
+}
+
+// Hammersley sequence
+float RadicalInverse_VdC(uint bits) {
+    bits = (bits << 16u) | (bits >> 16u);
+    bits = ((bits & 0x55555555u) << 1u) | ((bits & 0xAAAAAAAAu) >> 1u);
+    bits = ((bits & 0x33333333u) << 2u) | ((bits & 0xCCCCCCCCu) >> 2u);
+    bits = ((bits & 0x0F0F0F0Fu) << 4u) | ((bits & 0xF0F0F0F0u) >> 4u);
+    bits = ((bits & 0x00FF00FFu) << 8u) | ((bits & 0xFF00FF00u) >> 8u);
+    return float(bits) * 2.3283064365386963e-10;
+}
+
+float2 Hammersley(uint i, uint N) {
+    return float2(float(i) / float(N), RadicalInverse_VdC(i));
+}
+
+#endif // PBR_COMMON_INCLUDED
+"#;
+
+// ============================================================================
+// REGION: Skin Shader (Subsurface Scattering)
+// ============================================================================
+
+pub const SKIN_SHADER: &str = r#"
+//═══════════════════════════════════════════════════════════════════════════════
+// Skin/Subsurface Scattering Shader
+// BUILD-PRISM
+//═══════════════════════════════════════════════════════════════════════════════
+
+#include "PBRCommon.hlsli"
+
+// Diffusion profiles for various materials
+static const float3 SKIN_DIFFUSION = float3(0.48, 0.25, 0.14);
+static const float3 MARBLE_DIFFUSION = float3(0.44, 0.22, 0.13);
+static const float3 JADE_DIFFUSION = float3(0.36, 0.44, 0.30);
+static const float3 WAX_DIFFUSION = float3(0.72, 0.55, 0.45);
+static const float3 MILK_DIFFUSION = float3(0.78, 0.70, 0.55);
+
+// Pre-integrated skin diffusion LUT
+Texture2D SkinDiffusionLUT : register(t10);
+Texture2D SkinShadowLUT : register(t11);
+Texture2D CurvatureTex : register(t12);
+Texture2D ThicknessMap : register(t13);
+
+cbuffer SkinParams : register(b4) {
+    float SSSStrength;
+    float3 SSSColor;
+    float SSSRadius;
+    float3 TransmittanceColor;
+    float TranslucencyScale;
+    float3 SheenColor;
+    float SheenRoughness;
+    float CurvatureScale;
+    float ThicknessScale;
+    float SpecularIntensity;
+    float SpecularRoughness;
+    int DiffusionProfile;
+};
+
+//───────────────────────────────────────────────────────────────────────────────
+// Pre-Integrated Skin Shading
+//───────────────────────────────────────────────────────────────────────────────
+
+float3 PreIntegratedSkinDiffuse(float NdotL, float curvature, float3 diffuseColor) {
+    // Sample pre-integrated BRDF
+    float2 uv = float2(NdotL * 0.5 + 0.5, curvature);
+    float3 lookup = SkinDiffusionLUT.Sample(LinearSampler, uv).rgb;
+
+    return diffuseColor * lookup;
+}
+
+float3 PreIntegratedSkinShadow(float NdotL, float shadowValue, float curvature) {
+    float2 uv = float2(NdotL * 0.5 + 0.5, shadowValue);
+    return SkinShadowLUT.Sample(LinearSampler, uv).rgb;
+}
+
+//───────────────────────────────────────────────────────────────────────────────
+// Transmittance (Back Lighting)
+//───────────────────────────────────────────────────────────────────────────────
+
+float3 TransmittanceBRDF(float3 L, float3 V, float3 N, float thickness,
+                          float3 transmittanceColor, float translucencyScale) {
+    float3 H = normalize(L + N * 0.6);
+    float VdotH = saturate(dot(V, -H));
+    float transmittance = pow(VdotH, 6.0);
+
+    float attenuation = exp(-thickness * translucencyScale);
+
+    return transmittanceColor * transmittance * attenuation;
+}
+
+//───────────────────────────────────────────────────────────────────────────────
+// Dual Lobe Specular (for skin)
+//───────────────────────────────────────────────────────────────────────────────
+
+float3 DualLobeSpecular(float3 N, float3 V, float3 L, float roughness1,
+                         float roughness2, float lobeRatio) {
+    float3 H = normalize(V + L);
+    float NdotH = saturate(dot(N, H));
+    float NdotL = saturate(dot(N, L));
+    float NdotV = saturate(dot(N, V));
+    float VdotH = saturate(dot(V, H));
+
+    float D1 = D_GGX(NdotH, roughness1);
+    float D2 = D_GGX(NdotH, roughness2);
+    float D = lerp(D1, D2, lobeRatio);
+
+    float G = G_Smith(NdotV, NdotL, lerp(roughness1, roughness2, lobeRatio));
+    float3 F = F_Schlick(float3(0.028, 0.028, 0.028), VdotH);
+
+    return D * G * F / (4.0 * NdotV * NdotL + EPSILON);
+}
+
+//───────────────────────────────────────────────────────────────────────────────
+// Main Skin Shader
+//───────────────────────────────────────────────────────────────────────────────
+
+float4 SkinPS(PSInput input) : SV_Target {
+    // Sample textures
+    float4 albedoSample = AlbedoMap.Sample(LinearSampler, input.texcoord);
+    float3 albedo = albedoSample.rgb;
+
+    float thickness = ThicknessMap.Sample(LinearSampler, input.texcoord).r * ThicknessScale;
+    float curvature = CurvatureTex.Sample(LinearSampler, input.texcoord).r * CurvatureScale;
+
+    // Normal mapping
+    float3 normalSample = NormalMap.Sample(LinearSampler, input.texcoord).xyz * 2.0 - 1.0;
+    float3x3 TBN = float3x3(normalize(input.tangent), normalize(input.bitangent), normalize(input.normal));
+    float3 N = normalize(mul(normalSample, TBN));
+
+    float3 V = normalize(input.viewDir);
+    float3 L = normalize(-SunDirection);
+
+    float NdotL = dot(N, L);
+
+    // Pre-integrated skin diffuse
+    float3 diffuse = PreIntegratedSkinDiffuse(NdotL, curvature, albedo * SSSColor);
+    diffuse *= SSSStrength;
+
+    // Dual lobe specular
+    float3 specular = DualLobeSpecular(N, V, L, 0.35, 0.8, 0.4);
+    specular *= SpecularIntensity;
+
+    // Transmittance
+    float3 transmittance = TransmittanceBRDF(L, V, N, thickness,
+                                              TransmittanceColor, TranslucencyScale);
+
+    // Combine
+    float3 finalColor = (diffuse + transmittance) * SunColor * SunIntensity;
+    finalColor += specular * SunColor * SunIntensity * saturate(NdotL);
+
+    // Sheen (for peach fuzz)
+    float3 H = normalize(V + L);
+    float NdotH = saturate(dot(N, H));
+    float3 sheen = SheenColor * pow(1.0 - NdotH, 5.0);
+    finalColor += sheen * saturate(NdotL);
+
+    // Ambient
+    float3 ambient = albedo * AmbientColor * AmbientIntensity;
+    finalColor += ambient;
+
+    return float4(finalColor, 1.0);
+}
+
+technique SkinShading {
+    pass {
+        VertexShader = PBRVertexShader;
+        PixelShader = SkinPS;
+    }
+}
+"#;
+
+// ============================================================================
+// REGION: Hair Shader
+// ============================================================================
+
+pub const HAIR_SHADER: &str = r#"
+//═══════════════════════════════════════════════════════════════════════════════
+// Hair/Fur Shader (Marschner Model)
+// BUILD-PRISM
+//═══════════════════════════════════════════════════════════════════════════════
+
+#include "PBRCommon.hlsli"
+
+Texture2D HairFlowMap : register(t10);
+Texture2D HairAlphaMap : register(t11);
+Texture2D HairShiftMap : register(t12);
+
+cbuffer HairParams : register(b4) {
+    float3 HairColor;
+    float HairRoughness;
+    float SpecularShift1;
+    float SpecularShift2;
+    float SpecularWidth1;
+    float SpecularWidth2;
+    float3 SpecularTint1;
+    float3 SpecularTint2;
+    float ScatteringStrength;
+    float3 ScatteringColor;
+    float AlphaCutoff;
+    float AnisotropicStrength;
+};
+
+//───────────────────────────────────────────────────────────────────────────────
+// Marschner Hair BRDF
+//───────────────────────────────────────────────────────────────────────────────
+
+// R (Primary specular reflection)
+float3 MarschnerR(float3 T, float3 L, float3 V, float shift, float width, float3 tint) {
+    float3 H = normalize(L + V);
+
+    float TdotH = dot(T, H);
+    float sinTH = sqrt(1.0 - TdotH * TdotH);
+
+    float angle = asin(sinTH) - shift;
+    float gaussian = exp(-angle * angle / (2.0 * width * width));
+
+    return tint * gaussian;
+}
+
+// TT (Transmission through hair)
+float3 MarschnerTT(float3 T, float3 L, float3 V, float3 absorption) {
+    float cosTL = dot(T, L);
+    float cosTV = dot(T, V);
+
+    float sinTL = sqrt(1.0 - cosTL * cosTL);
+    float sinTV = sqrt(1.0 - cosTV * cosTV);
+
+    float transmittance = exp(-absorption.x * 2.0);
+
+    return float3(transmittance, transmittance, transmittance);
+}
+
+// TRT (Internal reflection)
+float3 MarschnerTRT(float3 T, float3 L, float3 V, float shift, float width, float3 tint) {
+    return MarschnerR(T, L, V, shift * 1.5, width * 2.0, tint * 0.5);
+}
+
+//───────────────────────────────────────────────────────────────────────────────
+// Kajiya-Kay Diffuse
+//───────────────────────────────────────────────────────────────────────────────
+
+float KajiyaKayDiffuse(float3 T, float3 L) {
+    float TdotL = dot(T, L);
+    return sqrt(1.0 - TdotL * TdotL);
+}
+
+float3 KajiyaKaySpecular(float3 T, float3 L, float3 V, float shift, float exponent) {
+    float3 H = normalize(L + V);
+
+    float TdotH = dot(T, H);
+    float sinTH = sqrt(1.0 - TdotH * TdotH);
+
+    // Shift tangent
+    float3 shiftedT = T + shift * normalize(cross(T, V));
+    shiftedT = normalize(shiftedT);
+
+    float dirAtten = smoothstep(-1.0, 0.0, dot(T, H));
+    float specular = dirAtten * pow(sinTH, exponent);
+
+    return float3(specular, specular, specular);
+}
+
+//───────────────────────────────────────────────────────────────────────────────
+// Main Hair Shader
+//───────────────────────────────────────────────────────────────────────────────
+
+float4 HairPS(PSInput input) : SV_Target {
+    // Sample textures
+    float4 albedo = tex2D(AlbedoSampler, input.texcoord) * float4(HairColor, 1.0);
+    float alpha = HairAlphaMap.Sample(LinearSampler, input.texcoord).r;
+
+    // Alpha test
+    clip(alpha - AlphaCutoff);
+
+    // Flow direction (tangent)
+    float3 flowDir = HairFlowMap.Sample(LinearSampler, input.texcoord).xyz * 2.0 - 1.0;
+    float3x3 TBN = float3x3(normalize(input.tangent), normalize(input.bitangent), normalize(input.normal));
+    float3 T = normalize(mul(flowDir, TBN));
+
+    // Tangent shift
+    float shift = HairShiftMap.Sample(LinearSampler, input.texcoord).r;
+
+    float3 V = normalize(input.viewDir);
+    float3 L = normalize(-SunDirection);
+    float3 N = normalize(input.normal);
+
+    // Diffuse (Kajiya-Kay)
+    float diffuse = KajiyaKayDiffuse(T, L);
+
+    // Primary specular (R)
+    float3 specR = KajiyaKaySpecular(T, L, V, SpecularShift1 + shift, 1.0 / SpecularWidth1);
+    specR *= SpecularTint1;
+
+    // Secondary specular (TRT)
+    float3 specTRT = KajiyaKaySpecular(T, L, V, SpecularShift2 + shift, 1.0 / SpecularWidth2);
+    specTRT *= SpecularTint2 * albedo.rgb;
+
+    // Transmission (TT)
+    float3 transmission = MarschnerTT(T, L, V, -log(albedo.rgb + 0.001));
+    transmission *= ScatteringColor * ScatteringStrength;
+
+    // Rim lighting
+    float rim = pow(1.0 - saturate(dot(N, V)), 4.0);
+    float3 rimLight = rim * albedo.rgb * 0.3;
+
+    // Combine
+    float3 finalColor = albedo.rgb * diffuse * SunColor * SunIntensity;
+    finalColor += (specR + specTRT) * SunColor * SunIntensity;
+    finalColor += transmission;
+    finalColor += rimLight;
+
+    // Ambient
+    finalColor += albedo.rgb * AmbientColor * AmbientIntensity;
+
+    return float4(finalColor, alpha);
+}
+
+technique HairShading {
+    pass {
+        VertexShader = PBRVertexShader;
+        PixelShader = HairPS;
+        // Enable alpha blending
+        BlendEnable = true;
+        SrcBlend = SrcAlpha;
+        DstBlend = InvSrcAlpha;
+        // Two-sided rendering
+        CullMode = None;
+    }
+}
+"#;
+
+// ============================================================================
+// REGION: Unit Tests
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_pbr_material_default() {
+        let mat = PBRMaterial::default();
+        assert_eq!(mat.metallic, 0.0);
+        assert_eq!(mat.roughness, 0.5);
+        assert_eq!(mat.ior, 1.5);
+    }
+
+    #[test]
+    fn test_pbr_material_presets() {
+        let metallic = PBRMaterial::metallic_roughness(1.0, 0.3);
+        assert_eq!(metallic.metallic, 1.0);
+
+        let glass = PBRMaterial::glass(1.5, 0.0);
+        assert_eq!(glass.transmission, 1.0);
+        assert_eq!(glass.ior, 1.5);
+
+        let fabric = PBRMaterial::fabric(vec3(0.5, 0.5, 0.5), 0.8);
+        assert_eq!(fabric.sheen, 0.8);
+    }
+
+    #[test]
+    fn test_alpha_mode() {
+        assert_ne!(AlphaMode::Opaque, AlphaMode::Blend);
+        assert_eq!(AlphaMode::Mask, AlphaMode::Mask);
+    }
+}
+
+// Vector type placeholders
+fn vec3(x: f32, y: f32, z: f32) -> vec3 { vec3 { x, y, z } }
+fn vec4(x: f32, y: f32, z: f32, w: f32) -> vec4 { vec4 { x, y, z, w } }
+
+#[derive(Debug, Clone, Copy)]
+struct vec3 { x: f32, y: f32, z: f32 }
+
+#[derive(Debug, Clone, Copy)]
+struct vec4 { x: f32, y: f32, z: f32, w: f32 }

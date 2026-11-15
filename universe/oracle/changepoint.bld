@@ -1,0 +1,2390 @@
+// ============================================================================
+// BUILD-UNIVERSE: Oracle Change Point Detection Module
+// ============================================================================
+// Copyright © 2024-2025 Zain Dana Harper. All Rights Reserved.
+// Copyright (c) 2024-2025 Zain Dana Harper. All Rights Reserved.
+// ============================================================================
+// Advanced algorithms for detecting structural breaks in time series
+// ============================================================================
+
+use foundation::collections::{Vec, HashMap, HashSet, BinaryHeap};
+use foundation::math::{Matrix, Vector, sqrt, log, exp, abs, min, max, pow, floor, ceil};
+use foundation::sync::{Arc, RwLock, Mutex};
+use foundation::io::{Result, Error};
+
+// ============================================================================
+// CHANGE POINT TYPES AND CONFIGURATION
+// ============================================================================
+
+/// Type of change to detect
+@derive(Clone, Copy, Debug, PartialEq)
+pub enum ChangeType {
+    Mean,           // Change in mean level
+    Variance,       // Change in variance
+    Trend,          // Change in trend direction
+    Seasonal,       // Change in seasonal pattern
+    Distribution,   // Full distribution change
+    Structural,     // Structural break (multiple aspects)
+}
+
+/// Cost function for segmentation
+@derive(Clone, Copy, Debug, PartialEq)
+pub enum CostFunction {
+    L1,             // Mean absolute deviation (robust)
+    L2,             // Mean squared error (standard)
+    Normal,         // Negative log-likelihood (normal distribution)
+    Poisson,        // Poisson distribution
+    Exponential,    // Exponential distribution
+    MBIC,           // Modified BIC
+    RBF,            // Radial basis function kernel
+    Linear,         // Linear kernel
+    CostAR,         // Autoregressive cost
+    CostARCH,       // ARCH/GARCH cost
+}
+
+/// Penalty function for model complexity
+@derive(Clone, Copy, Debug, PartialEq)
+pub enum PenaltyFunction {
+    BIC,            // Bayesian Information Criterion
+    AIC,            // Akaike Information Criterion
+    MBIC,           // Modified BIC
+    Hannan,         // Hannan-Quinn criterion
+    Linear,         // Linear penalty λ * k
+    Elbow,          // Elbow method (heuristic)
+}
+
+/// Configuration for change point detection
+@derive(Clone, Debug)
+pub struct ChangePointConfig {
+    pub change_type: ChangeType,
+    pub cost_function: CostFunction,
+    pub penalty_function: PenaltyFunction,
+    pub min_segment_length: Int,
+    pub max_changepoints: Option<Int>,
+    pub penalty_value: Float,
+    pub jump_size: Int,          // For approximate algorithms
+    pub confidence_level: Float, // For statistical tests
+}
+
+impl ChangePointConfig {
+    pub fn new() -> Self {
+        Self {
+            change_type: ChangeType::Mean,
+            cost_function: CostFunction::L2,
+            penalty_function: PenaltyFunction::BIC,
+            min_segment_length: 2,
+            max_changepoints: None,
+            penalty_value: 0.0,  // Auto-compute if 0
+            jump_size: 5,
+            confidence_level: 0.95,
+        }
+    }
+
+    pub fn with_change_type(mut self, change_type: ChangeType) -> Self {
+        self.change_type = change_type;
+        self
+    }
+
+    pub fn with_cost_function(mut self, cost: CostFunction) -> Self {
+        self.cost_function = cost;
+        self
+    }
+
+    pub fn with_min_segment(mut self, min_len: Int) -> Self {
+        self.min_segment_length = min_len;
+        self
+    }
+
+    pub fn with_penalty(mut self, penalty: Float) -> Self {
+        self.penalty_value = penalty;
+        self
+    }
+
+    pub fn with_max_changepoints(mut self, max_cp: Int) -> Self {
+        self.max_changepoints = Some(max_cp);
+        self
+    }
+}
+
+/// Result of change point detection
+@derive(Clone, Debug)
+pub struct ChangePointResult {
+    pub changepoints: Vec<Int>,           // Indices of detected change points
+    pub segments: Vec<Segment>,           // Segment information
+    pub cost: Float,                      // Total cost of segmentation
+    pub confidence: Vec<Float>,           // Confidence for each change point
+    pub diagnostics: ChangePointDiagnostics,
+}
+
+/// Segment information
+@derive(Clone, Debug)
+pub struct Segment {
+    pub start: Int,
+    pub end: Int,
+    pub mean: Float,
+    pub variance: Float,
+    pub trend: Float,
+    pub cost: Float,
+}
+
+/// Diagnostic information
+@derive(Clone, Debug)
+pub struct ChangePointDiagnostics {
+    pub algorithm: String,
+    pub iterations: Int,
+    pub computation_time_ms: Float,
+    pub residuals: Vec<Float>,
+    pub cusum_stats: Vec<Float>,
+}
+
+// ============================================================================
+// PELT (PRUNED EXACT LINEAR TIME) ALGORITHM
+// ============================================================================
+
+/// PELT algorithm for optimal multiple change point detection
+/// O(n) average complexity with exact optimization
+pub struct PELT {
+    config: ChangePointConfig,
+    costs: Vec<Vec<Float>>,     // Cached segment costs
+    optimal: Vec<Float>,         // Optimal cost up to each point
+    last_change: Vec<Int>,       // Last change point for backtracking
+}
+
+impl PELT {
+    pub fn new(config: ChangePointConfig) -> Self {
+        Self {
+            config,
+            costs: Vec::new(),
+            optimal: Vec::new(),
+            last_change: Vec::new(),
+        }
+    }
+
+    /// Detect change points in time series
+    pub fn detect(&mut self, data: &[Float]) -> ChangePointResult {
+        let n = data.len();
+        if n < 2 * self.config.min_segment_length {
+            return self.empty_result(data);
+        }
+
+        // Compute penalty if not specified
+        let penalty = if self.config.penalty_value > 0.0 {
+            self.config.penalty_value
+        } else {
+            self.compute_penalty(n)
+        };
+
+        // Initialize arrays
+        let min_seg = self.config.min_segment_length as usize;
+        self.optimal = vec![-penalty; n + 1];
+        self.optimal[0] = -penalty;
+        self.last_change = vec![0; n + 1];
+
+        // Compute cumulative sums for efficient cost calculation
+        let (cum_sum, cum_sum_sq) = self.compute_cumulative_sums(data);
+
+        // Active candidate set (pruning)
+        let mut candidates: Vec<Int> = vec![0];
+
+        // Main PELT loop
+        for t in min_seg..=n {
+            // Find optimal segmentation ending at t
+            let mut best_cost = Float::INFINITY;
+            let mut best_cp = 0;
+
+            let mut new_candidates = Vec::new();
+
+            for &s in &candidates {
+                let s_usize = s as usize;
+                if t - s_usize >= min_seg {
+                    let seg_cost = self.segment_cost_fast(
+                        &cum_sum, &cum_sum_sq, s_usize, t
+                    );
+                    let total_cost = self.optimal[s_usize] + seg_cost + penalty;
+
+                    if total_cost < best_cost {
+                        best_cost = total_cost;
+                        best_cp = s;
+                    }
+
+                    // Pruning: keep only candidates that could be optimal later
+                    if self.optimal[s_usize] + seg_cost <= self.optimal[t] {
+                        new_candidates.push(s);
+                    }
+                }
+            }
+
+            self.optimal[t] = best_cost;
+            self.last_change[t] = best_cp;
+
+            // Add t-min_seg as new candidate
+            if t >= min_seg {
+                new_candidates.push((t - min_seg) as Int);
+            }
+            candidates = new_candidates;
+        }
+
+        // Backtrack to find change points
+        let changepoints = self.backtrack(n);
+
+        // Build result
+        self.build_result(data, changepoints)
+    }
+
+    /// Compute cumulative sums for O(1) segment cost
+    fn compute_cumulative_sums(&self, data: &[Float]) -> (Vec<Float>, Vec<Float>) {
+        let n = data.len();
+        let mut cum_sum = vec![0.0; n + 1];
+        let mut cum_sum_sq = vec![0.0; n + 1];
+
+        for i in 0..n {
+            cum_sum[i + 1] = cum_sum[i] + data[i];
+            cum_sum_sq[i + 1] = cum_sum_sq[i] + data[i] * data[i];
+        }
+
+        (cum_sum, cum_sum_sq)
+    }
+
+    /// Fast segment cost using cumulative sums
+    fn segment_cost_fast(
+        &self,
+        cum_sum: &[Float],
+        cum_sum_sq: &[Float],
+        start: usize,
+        end: usize
+    ) -> Float {
+        let n = (end - start) as Float;
+        if n < 1.0 {
+            return 0.0;
+        }
+
+        let sum = cum_sum[end] - cum_sum[start];
+        let sum_sq = cum_sum_sq[end] - cum_sum_sq[start];
+        let mean = sum / n;
+
+        match self.config.cost_function {
+            CostFunction::L2 => {
+                // Sum of squared deviations from mean
+                sum_sq - sum * sum / n
+            }
+            CostFunction::L1 => {
+                // Approximation: use variance as proxy
+                (sum_sq - sum * sum / n).sqrt() * n
+            }
+            CostFunction::Normal => {
+                // Negative log-likelihood for normal distribution
+                let variance = (sum_sq - sum * sum / n) / n;
+                if variance > 0.0 {
+                    n * log(variance) / 2.0 + n / 2.0
+                } else {
+                    0.0
+                }
+            }
+            _ => {
+                // Default to L2
+                sum_sq - sum * sum / n
+            }
+        }
+    }
+
+    /// Compute penalty based on data size
+    fn compute_penalty(&self, n: usize) -> Float {
+        let n_f = n as Float;
+        match self.config.penalty_function {
+            PenaltyFunction::BIC => log(n_f),
+            PenaltyFunction::AIC => 2.0,
+            PenaltyFunction::MBIC => 3.0 * log(n_f),
+            PenaltyFunction::Hannan => 2.0 * log(log(n_f)),
+            PenaltyFunction::Linear => 1.0,
+            _ => log(n_f),
+        }
+    }
+
+    /// Backtrack to find all change points
+    fn backtrack(&self, n: usize) -> Vec<Int> {
+        let mut changepoints = Vec::new();
+        let mut current = n;
+
+        while current > 0 {
+            let cp = self.last_change[current] as usize;
+            if cp > 0 {
+                changepoints.push(cp as Int);
+            }
+            current = cp;
+        }
+
+        changepoints.reverse();
+        changepoints
+    }
+
+    /// Build comprehensive result
+    fn build_result(&self, data: &[Float], changepoints: Vec<Int>) -> ChangePointResult {
+        let mut segments = Vec::new();
+        let mut all_points = vec![0];
+        all_points.extend(changepoints.iter().cloned());
+        all_points.push(data.len() as Int);
+
+        for i in 0..all_points.len() - 1 {
+            let start = all_points[i] as usize;
+            let end = all_points[i + 1] as usize;
+
+            let segment_data: Vec<Float> = data[start..end].to_vec();
+            let (mean, variance) = compute_mean_variance(&segment_data);
+            let trend = compute_trend(&segment_data);
+            let cost = self.segment_cost(&segment_data);
+
+            segments.push(Segment {
+                start: start as Int,
+                end: end as Int,
+                mean,
+                variance,
+                trend,
+                cost,
+            });
+        }
+
+        // Compute confidence scores
+        let confidence = self.compute_confidence(data, &changepoints);
+
+        ChangePointResult {
+            changepoints,
+            segments,
+            cost: self.optimal[data.len()],
+            confidence,
+            diagnostics: ChangePointDiagnostics {
+                algorithm: "PELT".to_string(),
+                iterations: data.len() as Int,
+                computation_time_ms: 0.0,
+                residuals: Vec::new(),
+                cusum_stats: Vec::new(),
+            },
+        }
+    }
+
+    /// Compute segment cost directly
+    fn segment_cost(&self, data: &[Float]) -> Float {
+        let n = data.len() as Float;
+        if n < 1.0 {
+            return 0.0;
+        }
+
+        let (mean, variance) = compute_mean_variance(data);
+
+        match self.config.cost_function {
+            CostFunction::L2 => variance * n,
+            CostFunction::L1 => {
+                data.iter().map(|&x| abs(x - mean)).sum::<Float>()
+            }
+            CostFunction::Normal => {
+                if variance > 0.0 {
+                    n * log(variance) / 2.0 + n / 2.0
+                } else {
+                    0.0
+                }
+            }
+            _ => variance * n,
+        }
+    }
+
+    /// Compute confidence scores for each change point
+    fn compute_confidence(&self, data: &[Float], changepoints: &[Int]) -> Vec<Float> {
+        let mut confidence = Vec::new();
+
+        for &cp in changepoints {
+            let cp_idx = cp as usize;
+            let window = self.config.min_segment_length as usize;
+
+            // Compare variance before and after
+            let start = if cp_idx > window { cp_idx - window } else { 0 };
+            let end = min(cp_idx + window, data.len());
+
+            let before: Vec<Float> = data[start..cp_idx].to_vec();
+            let after: Vec<Float> = data[cp_idx..end].to_vec();
+
+            if before.is_empty() || after.is_empty() {
+                confidence.push(0.5);
+                continue;
+            }
+
+            let (mean_before, var_before) = compute_mean_variance(&before);
+            let (mean_after, var_after) = compute_mean_variance(&after);
+
+            // Effect size (Cohen's d)
+            let pooled_std = sqrt((var_before + var_after) / 2.0);
+            let effect_size = if pooled_std > 0.0 {
+                abs(mean_after - mean_before) / pooled_std
+            } else {
+                0.0
+            };
+
+            // Convert to confidence (sigmoid)
+            let conf = 1.0 / (1.0 + exp(-effect_size));
+            confidence.push(conf);
+        }
+
+        confidence
+    }
+
+    /// Return empty result for trivial cases
+    fn empty_result(&self, data: &[Float]) -> ChangePointResult {
+        let (mean, variance) = compute_mean_variance(data);
+        ChangePointResult {
+            changepoints: Vec::new(),
+            segments: vec![Segment {
+                start: 0,
+                end: data.len() as Int,
+                mean,
+                variance,
+                trend: 0.0,
+                cost: 0.0,
+            }],
+            cost: 0.0,
+            confidence: Vec::new(),
+            diagnostics: ChangePointDiagnostics {
+                algorithm: "PELT".to_string(),
+                iterations: 0,
+                computation_time_ms: 0.0,
+                residuals: Vec::new(),
+                cusum_stats: Vec::new(),
+            },
+        }
+    }
+}
+
+// ============================================================================
+// BINARY SEGMENTATION
+// ============================================================================
+
+/// Binary Segmentation algorithm - classic divide-and-conquer approach
+/// O(n log n) complexity, may not find global optimum
+pub struct BinarySegmentation {
+    config: ChangePointConfig,
+}
+
+impl BinarySegmentation {
+    pub fn new(config: ChangePointConfig) -> Self {
+        Self { config }
+    }
+
+    /// Detect change points using binary segmentation
+    pub fn detect(&self, data: &[Float]) -> ChangePointResult {
+        let mut changepoints = Vec::new();
+        let min_seg = self.config.min_segment_length as usize;
+
+        // Recursive segmentation
+        self.segment_recursive(data, 0, data.len(), min_seg, &mut changepoints);
+
+        // Sort change points
+        changepoints.sort();
+
+        // Build result
+        self.build_result(data, changepoints)
+    }
+
+    /// Recursively segment the data
+    fn segment_recursive(
+        &self,
+        data: &[Float],
+        start: usize,
+        end: usize,
+        min_seg: usize,
+        changepoints: &mut Vec<Int>
+    ) {
+        if end - start < 2 * min_seg {
+            return;
+        }
+
+        // Check max changepoints limit
+        if let Some(max_cp) = self.config.max_changepoints {
+            if changepoints.len() >= max_cp as usize {
+                return;
+            }
+        }
+
+        // Find best split point
+        let segment = &data[start..end];
+        let (best_split, test_stat) = self.find_best_split(segment, min_seg);
+
+        // Check if split is significant
+        let threshold = self.compute_threshold(segment.len());
+
+        if test_stat > threshold {
+            let global_split = start + best_split;
+            changepoints.push(global_split as Int);
+
+            // Recursively segment left and right
+            self.segment_recursive(data, start, global_split, min_seg, changepoints);
+            self.segment_recursive(data, global_split, end, min_seg, changepoints);
+        }
+    }
+
+    /// Find best split point in segment
+    fn find_best_split(&self, segment: &[Float], min_seg: usize) -> (usize, Float) {
+        let n = segment.len();
+        let mut best_split = min_seg;
+        let mut best_stat = Float::NEG_INFINITY;
+
+        let total_cost = self.segment_cost(segment);
+
+        for t in min_seg..(n - min_seg + 1) {
+            let left_cost = self.segment_cost(&segment[..t]);
+            let right_cost = self.segment_cost(&segment[t..]);
+
+            // Gain from splitting
+            let gain = total_cost - left_cost - right_cost;
+
+            if gain > best_stat {
+                best_stat = gain;
+                best_split = t;
+            }
+        }
+
+        (best_split, best_stat)
+    }
+
+    /// Compute segment cost
+    fn segment_cost(&self, data: &[Float]) -> Float {
+        let n = data.len() as Float;
+        if n < 1.0 {
+            return 0.0;
+        }
+
+        let (mean, variance) = compute_mean_variance(data);
+
+        match self.config.cost_function {
+            CostFunction::L2 => variance * n,
+            CostFunction::L1 => {
+                data.iter().map(|&x| abs(x - mean)).sum::<Float>()
+            }
+            CostFunction::Normal => {
+                if variance > 0.0 {
+                    n * log(variance) / 2.0
+                } else {
+                    0.0
+                }
+            }
+            _ => variance * n,
+        }
+    }
+
+    /// Compute significance threshold
+    fn compute_threshold(&self, n: usize) -> Float {
+        let n_f = n as Float;
+        match self.config.penalty_function {
+            PenaltyFunction::BIC => log(n_f),
+            PenaltyFunction::AIC => 2.0,
+            _ => log(n_f),
+        }
+    }
+
+    /// Build result from change points
+    fn build_result(&self, data: &[Float], changepoints: Vec<Int>) -> ChangePointResult {
+        let mut segments = Vec::new();
+        let mut all_points = vec![0];
+        all_points.extend(changepoints.iter().cloned());
+        all_points.push(data.len() as Int);
+
+        for i in 0..all_points.len() - 1 {
+            let start = all_points[i] as usize;
+            let end = all_points[i + 1] as usize;
+            let segment_data: Vec<Float> = data[start..end].to_vec();
+            let (mean, variance) = compute_mean_variance(&segment_data);
+            let trend = compute_trend(&segment_data);
+
+            segments.push(Segment {
+                start: start as Int,
+                end: end as Int,
+                mean,
+                variance,
+                trend,
+                cost: self.segment_cost(&segment_data),
+            });
+        }
+
+        ChangePointResult {
+            changepoints,
+            segments,
+            cost: 0.0,
+            confidence: Vec::new(),
+            diagnostics: ChangePointDiagnostics {
+                algorithm: "BinarySegmentation".to_string(),
+                iterations: 0,
+                computation_time_ms: 0.0,
+                residuals: Vec::new(),
+                cusum_stats: Vec::new(),
+            },
+        }
+    }
+}
+
+// ============================================================================
+// BOTTOM-UP SEGMENTATION
+// ============================================================================
+
+/// Bottom-Up segmentation - merge similar adjacent segments
+pub struct BottomUpSegmentation {
+    config: ChangePointConfig,
+}
+
+impl BottomUpSegmentation {
+    pub fn new(config: ChangePointConfig) -> Self {
+        Self { config }
+    }
+
+    /// Detect change points using bottom-up merging
+    pub fn detect(&self, data: &[Float], target_segments: Int) -> ChangePointResult {
+        let n = data.len();
+        let min_seg = self.config.min_segment_length as usize;
+
+        // Start with finest segmentation
+        let initial_segments = n / min_seg;
+        let mut boundaries: Vec<usize> = (0..=initial_segments)
+            .map(|i| min(i * min_seg, n))
+            .collect();
+
+        // Merge until target number of segments reached
+        while boundaries.len() > (target_segments as usize + 1) {
+            // Find best merge
+            let merge_idx = self.find_best_merge(data, &boundaries);
+
+            // Remove the boundary
+            boundaries.remove(merge_idx);
+        }
+
+        // Convert to change points
+        let changepoints: Vec<Int> = boundaries[1..boundaries.len()-1]
+            .iter()
+            .map(|&x| x as Int)
+            .collect();
+
+        self.build_result(data, changepoints)
+    }
+
+    /// Find best pair of segments to merge
+    fn find_best_merge(&self, data: &[Float], boundaries: &[usize]) -> usize {
+        let mut best_idx = 1;
+        let mut min_cost_increase = Float::INFINITY;
+
+        for i in 1..boundaries.len() - 1 {
+            let left_start = boundaries[i - 1];
+            let left_end = boundaries[i];
+            let right_end = boundaries[i + 1];
+
+            let left_cost = self.segment_cost(&data[left_start..left_end]);
+            let right_cost = self.segment_cost(&data[left_end..right_end]);
+            let merged_cost = self.segment_cost(&data[left_start..right_end]);
+
+            let cost_increase = merged_cost - left_cost - right_cost;
+
+            if cost_increase < min_cost_increase {
+                min_cost_increase = cost_increase;
+                best_idx = i;
+            }
+        }
+
+        best_idx
+    }
+
+    /// Compute segment cost
+    fn segment_cost(&self, data: &[Float]) -> Float {
+        let n = data.len() as Float;
+        if n < 1.0 {
+            return 0.0;
+        }
+        let (_, variance) = compute_mean_variance(data);
+        variance * n
+    }
+
+    /// Build result
+    fn build_result(&self, data: &[Float], changepoints: Vec<Int>) -> ChangePointResult {
+        let mut segments = Vec::new();
+        let mut all_points = vec![0];
+        all_points.extend(changepoints.iter().cloned());
+        all_points.push(data.len() as Int);
+
+        for i in 0..all_points.len() - 1 {
+            let start = all_points[i] as usize;
+            let end = all_points[i + 1] as usize;
+            let segment_data: Vec<Float> = data[start..end].to_vec();
+            let (mean, variance) = compute_mean_variance(&segment_data);
+
+            segments.push(Segment {
+                start: start as Int,
+                end: end as Int,
+                mean,
+                variance,
+                trend: 0.0,
+                cost: self.segment_cost(&segment_data),
+            });
+        }
+
+        ChangePointResult {
+            changepoints,
+            segments,
+            cost: 0.0,
+            confidence: Vec::new(),
+            diagnostics: ChangePointDiagnostics {
+                algorithm: "BottomUp".to_string(),
+                iterations: 0,
+                computation_time_ms: 0.0,
+                residuals: Vec::new(),
+                cusum_stats: Vec::new(),
+            },
+        }
+    }
+}
+
+// ============================================================================
+// BOCPD (BAYESIAN ONLINE CHANGE POINT DETECTION)
+// ============================================================================
+
+/// Bayesian Online Change Point Detection
+/// Detects change points in real-time streaming data
+pub struct BOCPD {
+    hazard_rate: Float,         // Prior probability of change point
+    prior_mean: Float,          // Prior mean
+    prior_precision: Float,     // Prior precision
+    prior_alpha: Float,         // Prior alpha (variance)
+    prior_beta: Float,          // Prior beta (variance)
+    run_length_probs: Vec<Float>, // Run length probabilities
+    mu_posterior: Vec<Float>,   // Posterior mean
+    kappa_posterior: Vec<Float>, // Posterior precision
+    alpha_posterior: Vec<Float>, // Posterior alpha
+    beta_posterior: Vec<Float>,  // Posterior beta
+    changepoints: Vec<Int>,
+    max_run_length: usize,
+}
+
+impl BOCPD {
+    pub fn new(hazard_rate: Float) -> Self {
+        Self {
+            hazard_rate,
+            prior_mean: 0.0,
+            prior_precision: 1.0,
+            prior_alpha: 1.0,
+            prior_beta: 1.0,
+            run_length_probs: vec![1.0],
+            mu_posterior: vec![0.0],
+            kappa_posterior: vec![1.0],
+            alpha_posterior: vec![1.0],
+            beta_posterior: vec![1.0],
+            changepoints: Vec::new(),
+            max_run_length: 500,
+        }
+    }
+
+    pub fn with_prior(mut self, mean: Float, precision: Float, alpha: Float, beta: Float) -> Self {
+        self.prior_mean = mean;
+        self.prior_precision = precision;
+        self.prior_alpha = alpha;
+        self.prior_beta = beta;
+        self.mu_posterior = vec![mean];
+        self.kappa_posterior = vec![precision];
+        self.alpha_posterior = vec![alpha];
+        self.beta_posterior = vec![beta];
+        self
+    }
+
+    /// Update with new observation (online)
+    pub fn update(&mut self, observation: Float) -> Option<Int> {
+        let t = self.run_length_probs.len();
+        let mut new_run_probs = vec![0.0; min(t + 1, self.max_run_length)];
+
+        // Compute predictive probabilities for each run length
+        let mut predictive_probs = Vec::with_capacity(t);
+        for r in 0..t {
+            let pred_prob = self.student_t_pdf(
+                observation,
+                self.mu_posterior[r],
+                self.beta_posterior[r] * (self.kappa_posterior[r] + 1.0) /
+                    (self.alpha_posterior[r] * self.kappa_posterior[r]),
+                2.0 * self.alpha_posterior[r]
+            );
+            predictive_probs.push(pred_prob);
+        }
+
+        // Growth probability (run length increases)
+        for r in 0..t {
+            let growth_prob = self.run_length_probs[r] * predictive_probs[r] * (1.0 - self.hazard_rate);
+            if r + 1 < new_run_probs.len() {
+                new_run_probs[r + 1] += growth_prob;
+            }
+        }
+
+        // Changepoint probability (run length resets to 0)
+        let cp_prob: Float = (0..t)
+            .map(|r| self.run_length_probs[r] * predictive_probs[r] * self.hazard_rate)
+            .sum();
+        new_run_probs[0] = cp_prob;
+
+        // Normalize
+        let total: Float = new_run_probs.iter().sum();
+        if total > 0.0 {
+            for p in &mut new_run_probs {
+                *p /= total;
+            }
+        }
+
+        // Update posterior parameters
+        self.update_posteriors(observation);
+
+        // Detect changepoint if probability at run_length=0 exceeds threshold
+        let changepoint_detected = new_run_probs[0] > 0.5;
+
+        self.run_length_probs = new_run_probs;
+
+        if changepoint_detected {
+            self.changepoints.push(t as Int);
+            Some(t as Int)
+        } else {
+            None
+        }
+    }
+
+    /// Update posterior parameters with new observation
+    fn update_posteriors(&mut self, x: Float) {
+        let t = self.mu_posterior.len();
+
+        // New posteriors for run length 0 (after changepoint)
+        let mut new_mu = vec![self.prior_mean];
+        let mut new_kappa = vec![self.prior_precision];
+        let mut new_alpha = vec![self.prior_alpha];
+        let mut new_beta = vec![self.prior_beta];
+
+        // Update posteriors for each run length
+        for r in 0..t {
+            let kappa_r = self.kappa_posterior[r];
+            let mu_r = self.mu_posterior[r];
+            let alpha_r = self.alpha_posterior[r];
+            let beta_r = self.beta_posterior[r];
+
+            let new_kappa_r = kappa_r + 1.0;
+            let new_mu_r = (kappa_r * mu_r + x) / new_kappa_r;
+            let new_alpha_r = alpha_r + 0.5;
+            let new_beta_r = beta_r + 0.5 * kappa_r * (x - mu_r).powi(2) / new_kappa_r;
+
+            if r + 1 < self.max_run_length {
+                new_mu.push(new_mu_r);
+                new_kappa.push(new_kappa_r);
+                new_alpha.push(new_alpha_r);
+                new_beta.push(new_beta_r);
+            }
+        }
+
+        self.mu_posterior = new_mu;
+        self.kappa_posterior = new_kappa;
+        self.alpha_posterior = new_alpha;
+        self.beta_posterior = new_beta;
+    }
+
+    /// Student-t PDF for predictive distribution
+    fn student_t_pdf(&self, x: Float, mu: Float, sigma_sq: Float, nu: Float) -> Float {
+        if sigma_sq <= 0.0 || nu <= 0.0 {
+            return 1e-10;
+        }
+
+        let z = (x - mu) / sqrt(sigma_sq);
+        let coef = gamma(nu / 2.0 + 0.5) / (gamma(nu / 2.0) * sqrt(nu * 3.14159265359 * sigma_sq));
+        let density = coef * pow(1.0 + z * z / nu, -(nu + 1.0) / 2.0);
+
+        max(density, 1e-10)
+    }
+
+    /// Get all detected change points
+    pub fn get_changepoints(&self) -> Vec<Int> {
+        self.changepoints.clone()
+    }
+
+    /// Get current run length distribution
+    pub fn get_run_length_probs(&self) -> Vec<Float> {
+        self.run_length_probs.clone()
+    }
+
+    /// Reset the detector
+    pub fn reset(&mut self) {
+        self.run_length_probs = vec![1.0];
+        self.mu_posterior = vec![self.prior_mean];
+        self.kappa_posterior = vec![self.prior_precision];
+        self.alpha_posterior = vec![self.prior_alpha];
+        self.beta_posterior = vec![self.prior_beta];
+        self.changepoints.clear();
+    }
+
+    /// Process entire series offline
+    pub fn detect_offline(&mut self, data: &[Float]) -> ChangePointResult {
+        self.reset();
+
+        for &x in data {
+            self.update(x);
+        }
+
+        self.build_result(data)
+    }
+
+    /// Build result
+    fn build_result(&self, data: &[Float]) -> ChangePointResult {
+        let mut segments = Vec::new();
+        let mut all_points = vec![0];
+        all_points.extend(self.changepoints.iter().cloned());
+        all_points.push(data.len() as Int);
+
+        for i in 0..all_points.len() - 1 {
+            let start = all_points[i] as usize;
+            let end = all_points[i + 1] as usize;
+            if start < end && end <= data.len() {
+                let segment_data: Vec<Float> = data[start..end].to_vec();
+                let (mean, variance) = compute_mean_variance(&segment_data);
+
+                segments.push(Segment {
+                    start: start as Int,
+                    end: end as Int,
+                    mean,
+                    variance,
+                    trend: 0.0,
+                    cost: 0.0,
+                });
+            }
+        }
+
+        ChangePointResult {
+            changepoints: self.changepoints.clone(),
+            segments,
+            cost: 0.0,
+            confidence: Vec::new(),
+            diagnostics: ChangePointDiagnostics {
+                algorithm: "BOCPD".to_string(),
+                iterations: data.len() as Int,
+                computation_time_ms: 0.0,
+                residuals: Vec::new(),
+                cusum_stats: Vec::new(),
+            },
+        }
+    }
+}
+
+// ============================================================================
+// CUSUM (CUMULATIVE SUM) DETECTOR
+// ============================================================================
+
+/// CUSUM change point detector for mean shifts
+pub struct CUSUM {
+    threshold: Float,           // Detection threshold
+    drift: Float,               // Allowance parameter (slack)
+    target: Option<Float>,      // Target mean (if known)
+    direction: CUSUMDirection,  // Detection direction
+}
+
+@derive(Clone, Copy, Debug, PartialEq)
+pub enum CUSUMDirection {
+    Increase,   // Detect increases only
+    Decrease,   // Detect decreases only
+    Both,       // Detect both directions
+}
+
+impl CUSUM {
+    pub fn new(threshold: Float, drift: Float) -> Self {
+        Self {
+            threshold,
+            drift,
+            target: None,
+            direction: CUSUMDirection::Both,
+        }
+    }
+
+    pub fn with_target(mut self, target: Float) -> Self {
+        self.target = Some(target);
+        self
+    }
+
+    pub fn with_direction(mut self, direction: CUSUMDirection) -> Self {
+        self.direction = direction;
+        self
+    }
+
+    /// Detect change points
+    pub fn detect(&self, data: &[Float]) -> ChangePointResult {
+        let n = data.len();
+        if n < 2 {
+            return self.empty_result(data);
+        }
+
+        // Estimate target if not provided
+        let target = self.target.unwrap_or_else(|| {
+            let sum: Float = data.iter().sum();
+            sum / n as Float
+        });
+
+        // Compute CUSUM statistics
+        let mut s_pos = vec![0.0; n];  // Positive CUSUM
+        let mut s_neg = vec![0.0; n];  // Negative CUSUM
+        let mut changepoints = Vec::new();
+
+        for i in 1..n {
+            let deviation = data[i] - target;
+
+            // Positive CUSUM (detect increase)
+            s_pos[i] = max(0.0, s_pos[i-1] + deviation - self.drift);
+
+            // Negative CUSUM (detect decrease)
+            s_neg[i] = max(0.0, s_neg[i-1] - deviation - self.drift);
+
+            // Check for change points
+            let detected = match self.direction {
+                CUSUMDirection::Increase => s_pos[i] > self.threshold,
+                CUSUMDirection::Decrease => s_neg[i] > self.threshold,
+                CUSUMDirection::Both => s_pos[i] > self.threshold || s_neg[i] > self.threshold,
+            };
+
+            if detected {
+                changepoints.push(i as Int);
+                // Reset after detection
+                s_pos[i] = 0.0;
+                s_neg[i] = 0.0;
+            }
+        }
+
+        // Build CUSUM stats for diagnostics
+        let cusum_stats: Vec<Float> = (0..n)
+            .map(|i| max(s_pos[i], s_neg[i]))
+            .collect();
+
+        let mut result = self.build_result(data, changepoints);
+        result.diagnostics.cusum_stats = cusum_stats;
+        result
+    }
+
+    /// Empty result
+    fn empty_result(&self, data: &[Float]) -> ChangePointResult {
+        let (mean, variance) = compute_mean_variance(data);
+        ChangePointResult {
+            changepoints: Vec::new(),
+            segments: vec![Segment {
+                start: 0,
+                end: data.len() as Int,
+                mean,
+                variance,
+                trend: 0.0,
+                cost: 0.0,
+            }],
+            cost: 0.0,
+            confidence: Vec::new(),
+            diagnostics: ChangePointDiagnostics {
+                algorithm: "CUSUM".to_string(),
+                iterations: 0,
+                computation_time_ms: 0.0,
+                residuals: Vec::new(),
+                cusum_stats: Vec::new(),
+            },
+        }
+    }
+
+    /// Build result
+    fn build_result(&self, data: &[Float], changepoints: Vec<Int>) -> ChangePointResult {
+        let mut segments = Vec::new();
+        let mut all_points = vec![0];
+        all_points.extend(changepoints.iter().cloned());
+        all_points.push(data.len() as Int);
+
+        for i in 0..all_points.len() - 1 {
+            let start = all_points[i] as usize;
+            let end = all_points[i + 1] as usize;
+            let segment_data: Vec<Float> = data[start..end].to_vec();
+            let (mean, variance) = compute_mean_variance(&segment_data);
+
+            segments.push(Segment {
+                start: start as Int,
+                end: end as Int,
+                mean,
+                variance,
+                trend: 0.0,
+                cost: 0.0,
+            });
+        }
+
+        ChangePointResult {
+            changepoints,
+            segments,
+            cost: 0.0,
+            confidence: Vec::new(),
+            diagnostics: ChangePointDiagnostics {
+                algorithm: "CUSUM".to_string(),
+                iterations: data.len() as Int,
+                computation_time_ms: 0.0,
+                residuals: Vec::new(),
+                cusum_stats: Vec::new(),
+            },
+        }
+    }
+}
+
+// ============================================================================
+// EWMA (EXPONENTIALLY WEIGHTED MOVING AVERAGE) DETECTOR
+// ============================================================================
+
+/// EWMA change point detector
+pub struct EWMA {
+    lambda: Float,      // Smoothing parameter (0 < λ ≤ 1)
+    k: Float,           // Control limit factor
+    target: Option<Float>,
+    sigma: Option<Float>,
+}
+
+impl EWMA {
+    pub fn new(lambda: Float, k: Float) -> Self {
+        Self {
+            lambda: lambda.clamp(0.01, 1.0),
+            k,
+            target: None,
+            sigma: None,
+        }
+    }
+
+    pub fn with_parameters(mut self, target: Float, sigma: Float) -> Self {
+        self.target = Some(target);
+        self.sigma = Some(sigma);
+        self
+    }
+
+    /// Detect change points
+    pub fn detect(&self, data: &[Float]) -> ChangePointResult {
+        let n = data.len();
+        if n < 2 {
+            return self.empty_result(data);
+        }
+
+        // Estimate target and sigma if not provided
+        let (mean, variance) = compute_mean_variance(data);
+        let target = self.target.unwrap_or(mean);
+        let sigma = self.sigma.unwrap_or(sqrt(variance));
+
+        // Compute EWMA
+        let mut ewma = vec![target; n];
+        let mut changepoints = Vec::new();
+
+        ewma[0] = target;
+
+        for i in 1..n {
+            ewma[i] = self.lambda * data[i] + (1.0 - self.lambda) * ewma[i-1];
+
+            // Control limits (time-varying for startup)
+            let multiplier = sqrt(
+                self.lambda / (2.0 - self.lambda) *
+                (1.0 - pow(1.0 - self.lambda, 2.0 * (i + 1) as Float))
+            );
+            let ucl = target + self.k * sigma * multiplier;
+            let lcl = target - self.k * sigma * multiplier;
+
+            // Check for out-of-control
+            if ewma[i] > ucl || ewma[i] < lcl {
+                changepoints.push(i as Int);
+            }
+        }
+
+        self.build_result(data, changepoints)
+    }
+
+    fn empty_result(&self, data: &[Float]) -> ChangePointResult {
+        let (mean, variance) = compute_mean_variance(data);
+        ChangePointResult {
+            changepoints: Vec::new(),
+            segments: vec![Segment {
+                start: 0,
+                end: data.len() as Int,
+                mean,
+                variance,
+                trend: 0.0,
+                cost: 0.0,
+            }],
+            cost: 0.0,
+            confidence: Vec::new(),
+            diagnostics: ChangePointDiagnostics {
+                algorithm: "EWMA".to_string(),
+                iterations: 0,
+                computation_time_ms: 0.0,
+                residuals: Vec::new(),
+                cusum_stats: Vec::new(),
+            },
+        }
+    }
+
+    fn build_result(&self, data: &[Float], changepoints: Vec<Int>) -> ChangePointResult {
+        let mut segments = Vec::new();
+        let mut all_points = vec![0];
+        all_points.extend(changepoints.iter().cloned());
+        all_points.push(data.len() as Int);
+
+        for i in 0..all_points.len() - 1 {
+            let start = all_points[i] as usize;
+            let end = all_points[i + 1] as usize;
+            let segment_data: Vec<Float> = data[start..end].to_vec();
+            let (mean, variance) = compute_mean_variance(&segment_data);
+
+            segments.push(Segment {
+                start: start as Int,
+                end: end as Int,
+                mean,
+                variance,
+                trend: 0.0,
+                cost: 0.0,
+            });
+        }
+
+        ChangePointResult {
+            changepoints,
+            segments,
+            cost: 0.0,
+            confidence: Vec::new(),
+            diagnostics: ChangePointDiagnostics {
+                algorithm: "EWMA".to_string(),
+                iterations: data.len() as Int,
+                computation_time_ms: 0.0,
+                residuals: Vec::new(),
+                cusum_stats: Vec::new(),
+            },
+        }
+    }
+}
+
+// ============================================================================
+// KERNEL CHANGE POINT DETECTION
+// ============================================================================
+
+/// Kernel-based change point detection using MMD (Maximum Mean Discrepancy)
+pub struct KernelChangePointDetector {
+    kernel: KernelType,
+    bandwidth: Float,
+    window_size: Int,
+    threshold: Float,
+}
+
+@derive(Clone, Copy, Debug)]
+pub enum KernelType {
+    RBF,
+    Linear,
+    Polynomial { degree: Int },
+    Laplacian,
+}
+
+impl KernelChangePointDetector {
+    pub fn new(kernel: KernelType, bandwidth: Float) -> Self {
+        Self {
+            kernel,
+            bandwidth,
+            window_size: 50,
+            threshold: 0.1,
+        }
+    }
+
+    pub fn with_window(mut self, size: Int) -> Self {
+        self.window_size = size;
+        self
+    }
+
+    pub fn with_threshold(mut self, threshold: Float) -> Self {
+        self.threshold = threshold;
+        self
+    }
+
+    /// Compute kernel value
+    fn kernel(&self, x: Float, y: Float) -> Float {
+        match self.kernel {
+            KernelType::RBF => {
+                let diff = x - y;
+                exp(-diff * diff / (2.0 * self.bandwidth * self.bandwidth))
+            }
+            KernelType::Linear => x * y,
+            KernelType::Polynomial { degree } => {
+                pow(1.0 + x * y, degree as Float)
+            }
+            KernelType::Laplacian => {
+                exp(-abs(x - y) / self.bandwidth)
+            }
+        }
+    }
+
+    /// Compute MMD between two samples
+    fn compute_mmd(&self, sample1: &[Float], sample2: &[Float]) -> Float {
+        let n1 = sample1.len();
+        let n2 = sample2.len();
+
+        if n1 == 0 || n2 == 0 {
+            return 0.0;
+        }
+
+        // Compute E[k(X, X')]
+        let mut sum_xx = 0.0;
+        for i in 0..n1 {
+            for j in 0..n1 {
+                if i != j {
+                    sum_xx += self.kernel(sample1[i], sample1[j]);
+                }
+            }
+        }
+        let e_xx = if n1 > 1 { sum_xx / (n1 * (n1 - 1)) as Float } else { 0.0 };
+
+        // Compute E[k(Y, Y')]
+        let mut sum_yy = 0.0;
+        for i in 0..n2 {
+            for j in 0..n2 {
+                if i != j {
+                    sum_yy += self.kernel(sample2[i], sample2[j]);
+                }
+            }
+        }
+        let e_yy = if n2 > 1 { sum_yy / (n2 * (n2 - 1)) as Float } else { 0.0 };
+
+        // Compute E[k(X, Y)]
+        let mut sum_xy = 0.0;
+        for i in 0..n1 {
+            for j in 0..n2 {
+                sum_xy += self.kernel(sample1[i], sample2[j]);
+            }
+        }
+        let e_xy = sum_xy / (n1 * n2) as Float;
+
+        // MMD^2
+        e_xx + e_yy - 2.0 * e_xy
+    }
+
+    /// Detect change points
+    pub fn detect(&self, data: &[Float]) -> ChangePointResult {
+        let n = data.len();
+        let window = self.window_size as usize;
+
+        if n < 2 * window {
+            return self.empty_result(data);
+        }
+
+        let mut mmd_scores = vec![0.0; n];
+        let mut changepoints = Vec::new();
+
+        // Sliding window MMD computation
+        for t in window..(n - window) {
+            let left: Vec<Float> = data[(t-window)..t].to_vec();
+            let right: Vec<Float> = data[t..(t+window)].to_vec();
+
+            mmd_scores[t] = self.compute_mmd(&left, &right);
+        }
+
+        // Find peaks above threshold
+        for t in (window + 1)..(n - window - 1) {
+            if mmd_scores[t] > self.threshold &&
+               mmd_scores[t] > mmd_scores[t-1] &&
+               mmd_scores[t] > mmd_scores[t+1] {
+                changepoints.push(t as Int);
+            }
+        }
+
+        self.build_result(data, changepoints)
+    }
+
+    fn empty_result(&self, data: &[Float]) -> ChangePointResult {
+        let (mean, variance) = compute_mean_variance(data);
+        ChangePointResult {
+            changepoints: Vec::new(),
+            segments: vec![Segment {
+                start: 0,
+                end: data.len() as Int,
+                mean,
+                variance,
+                trend: 0.0,
+                cost: 0.0,
+            }],
+            cost: 0.0,
+            confidence: Vec::new(),
+            diagnostics: ChangePointDiagnostics {
+                algorithm: "KernelCPD".to_string(),
+                iterations: 0,
+                computation_time_ms: 0.0,
+                residuals: Vec::new(),
+                cusum_stats: Vec::new(),
+            },
+        }
+    }
+
+    fn build_result(&self, data: &[Float], changepoints: Vec<Int>) -> ChangePointResult {
+        let mut segments = Vec::new();
+        let mut all_points = vec![0];
+        all_points.extend(changepoints.iter().cloned());
+        all_points.push(data.len() as Int);
+
+        for i in 0..all_points.len() - 1 {
+            let start = all_points[i] as usize;
+            let end = all_points[i + 1] as usize;
+            let segment_data: Vec<Float> = data[start..end].to_vec();
+            let (mean, variance) = compute_mean_variance(&segment_data);
+
+            segments.push(Segment {
+                start: start as Int,
+                end: end as Int,
+                mean,
+                variance,
+                trend: 0.0,
+                cost: 0.0,
+            });
+        }
+
+        ChangePointResult {
+            changepoints,
+            segments,
+            cost: 0.0,
+            confidence: Vec::new(),
+            diagnostics: ChangePointDiagnostics {
+                algorithm: "KernelCPD".to_string(),
+                iterations: data.len() as Int,
+                computation_time_ms: 0.0,
+                residuals: Vec::new(),
+                cusum_stats: Vec::new(),
+            },
+        }
+    }
+}
+
+// ============================================================================
+// REGIME DETECTION (HIDDEN MARKOV MODEL BASED)
+// ============================================================================
+
+/// Regime detection using Hidden Markov Models
+pub struct RegimeDetector {
+    num_regimes: Int,
+    transition_matrix: Matrix<Float>,
+    emission_means: Vec<Float>,
+    emission_vars: Vec<Float>,
+    initial_probs: Vec<Float>,
+    max_iterations: Int,
+    convergence_threshold: Float,
+}
+
+impl RegimeDetector {
+    pub fn new(num_regimes: Int) -> Self {
+        let k = num_regimes as usize;
+
+        // Initialize uniform transition probabilities
+        let mut transition = Matrix::zeros(k, k);
+        for i in 0..k {
+            for j in 0..k {
+                transition[(i, j)] = 1.0 / k as Float;
+            }
+        }
+
+        Self {
+            num_regimes,
+            transition_matrix: transition,
+            emission_means: vec![0.0; k],
+            emission_vars: vec![1.0; k],
+            initial_probs: vec![1.0 / k as Float; k],
+            max_iterations: 100,
+            convergence_threshold: 1e-6,
+        }
+    }
+
+    /// Fit the HMM using Baum-Welch (EM) algorithm
+    pub fn fit(&mut self, data: &[Float]) {
+        let n = data.len();
+        let k = self.num_regimes as usize;
+
+        // Initialize emission parameters from data
+        self.initialize_emissions(data);
+
+        for _iter in 0..self.max_iterations {
+            // E-step: Forward-backward algorithm
+            let (alpha, scaling) = self.forward(data);
+            let beta = self.backward(data, &scaling);
+
+            // Compute gamma and xi
+            let gamma = self.compute_gamma(&alpha, &beta);
+            let xi = self.compute_xi(data, &alpha, &beta, &scaling);
+
+            // M-step: Update parameters
+            let old_means = self.emission_means.clone();
+
+            // Update initial probabilities
+            for i in 0..k {
+                self.initial_probs[i] = gamma[(i, 0)];
+            }
+
+            // Update transition matrix
+            for i in 0..k {
+                let mut denom = 0.0;
+                for t in 0..(n - 1) {
+                    denom += gamma[(i, t)];
+                }
+
+                for j in 0..k {
+                    let mut numer = 0.0;
+                    for t in 0..(n - 1) {
+                        numer += xi[(i * k + j, t)];
+                    }
+
+                    self.transition_matrix[(i, j)] = if denom > 0.0 {
+                        numer / denom
+                    } else {
+                        1.0 / k as Float
+                    };
+                }
+            }
+
+            // Update emission parameters
+            for i in 0..k {
+                let mut numer = 0.0;
+                let mut denom = 0.0;
+
+                for t in 0..n {
+                    numer += gamma[(i, t)] * data[t];
+                    denom += gamma[(i, t)];
+                }
+
+                self.emission_means[i] = if denom > 0.0 { numer / denom } else { 0.0 };
+
+                // Update variance
+                let mut var_numer = 0.0;
+                for t in 0..n {
+                    let diff = data[t] - self.emission_means[i];
+                    var_numer += gamma[(i, t)] * diff * diff;
+                }
+
+                self.emission_vars[i] = if denom > 0.0 {
+                    max(var_numer / denom, 1e-6)
+                } else {
+                    1.0
+                };
+            }
+
+            // Check convergence
+            let mut converged = true;
+            for i in 0..k {
+                if abs(self.emission_means[i] - old_means[i]) > self.convergence_threshold {
+                    converged = false;
+                    break;
+                }
+            }
+
+            if converged {
+                break;
+            }
+        }
+    }
+
+    /// Initialize emission parameters from data
+    fn initialize_emissions(&mut self, data: &[Float]) {
+        let k = self.num_regimes as usize;
+        let (mean, var) = compute_mean_variance(data);
+        let std = sqrt(var);
+
+        // Space means evenly
+        for i in 0..k {
+            let offset = (i as Float - (k - 1) as Float / 2.0) * std;
+            self.emission_means[i] = mean + offset;
+            self.emission_vars[i] = var / k as Float;
+        }
+    }
+
+    /// Forward algorithm with scaling
+    fn forward(&self, data: &[Float]) -> (Matrix<Float>, Vec<Float>) {
+        let n = data.len();
+        let k = self.num_regimes as usize;
+
+        let mut alpha = Matrix::zeros(k, n);
+        let mut scaling = vec![0.0; n];
+
+        // Initialize
+        for i in 0..k {
+            alpha[(i, 0)] = self.initial_probs[i] * self.emission_prob(data[0], i);
+        }
+
+        // Scale
+        let sum: Float = (0..k).map(|i| alpha[(i, 0)]).sum();
+        scaling[0] = if sum > 0.0 { 1.0 / sum } else { 1.0 };
+        for i in 0..k {
+            alpha[(i, 0)] *= scaling[0];
+        }
+
+        // Forward pass
+        for t in 1..n {
+            for j in 0..k {
+                let mut sum_prob = 0.0;
+                for i in 0..k {
+                    sum_prob += alpha[(i, t-1)] * self.transition_matrix[(i, j)];
+                }
+                alpha[(j, t)] = sum_prob * self.emission_prob(data[t], j);
+            }
+
+            // Scale
+            let sum: Float = (0..k).map(|i| alpha[(i, t)]).sum();
+            scaling[t] = if sum > 0.0 { 1.0 / sum } else { 1.0 };
+            for i in 0..k {
+                alpha[(i, t)] *= scaling[t];
+            }
+        }
+
+        (alpha, scaling)
+    }
+
+    /// Backward algorithm with scaling
+    fn backward(&self, data: &[Float], scaling: &[Float]) -> Matrix<Float> {
+        let n = data.len();
+        let k = self.num_regimes as usize;
+
+        let mut beta = Matrix::zeros(k, n);
+
+        // Initialize
+        for i in 0..k {
+            beta[(i, n-1)] = scaling[n-1];
+        }
+
+        // Backward pass
+        for t in (0..n-1).rev() {
+            for i in 0..k {
+                let mut sum_prob = 0.0;
+                for j in 0..k {
+                    sum_prob += self.transition_matrix[(i, j)] *
+                               self.emission_prob(data[t+1], j) *
+                               beta[(j, t+1)];
+                }
+                beta[(i, t)] = sum_prob * scaling[t];
+            }
+        }
+
+        beta
+    }
+
+    /// Emission probability (Gaussian)
+    fn emission_prob(&self, x: Float, state: usize) -> Float {
+        let mean = self.emission_means[state];
+        let var = self.emission_vars[state];
+
+        if var <= 0.0 {
+            return 1e-10;
+        }
+
+        let z = (x - mean) / sqrt(var);
+        let prob = exp(-0.5 * z * z) / sqrt(2.0 * 3.14159265359 * var);
+
+        max(prob, 1e-10)
+    }
+
+    /// Compute gamma (state probabilities)
+    fn compute_gamma(&self, alpha: &Matrix<Float>, beta: &Matrix<Float>) -> Matrix<Float> {
+        let k = self.num_regimes as usize;
+        let n = alpha.cols();
+
+        let mut gamma = Matrix::zeros(k, n);
+
+        for t in 0..n {
+            let mut sum = 0.0;
+            for i in 0..k {
+                sum += alpha[(i, t)] * beta[(i, t)];
+            }
+
+            for i in 0..k {
+                gamma[(i, t)] = if sum > 0.0 {
+                    alpha[(i, t)] * beta[(i, t)] / sum
+                } else {
+                    1.0 / k as Float
+                };
+            }
+        }
+
+        gamma
+    }
+
+    /// Compute xi (transition probabilities)
+    fn compute_xi(
+        &self,
+        data: &[Float],
+        alpha: &Matrix<Float>,
+        beta: &Matrix<Float>,
+        scaling: &[Float]
+    ) -> Matrix<Float> {
+        let k = self.num_regimes as usize;
+        let n = data.len();
+
+        let mut xi = Matrix::zeros(k * k, n - 1);
+
+        for t in 0..(n - 1) {
+            let mut sum = 0.0;
+            for i in 0..k {
+                for j in 0..k {
+                    sum += alpha[(i, t)] *
+                           self.transition_matrix[(i, j)] *
+                           self.emission_prob(data[t+1], j) *
+                           beta[(j, t+1)];
+                }
+            }
+
+            for i in 0..k {
+                for j in 0..k {
+                    let idx = i * k + j;
+                    xi[(idx, t)] = if sum > 0.0 {
+                        alpha[(i, t)] *
+                        self.transition_matrix[(i, j)] *
+                        self.emission_prob(data[t+1], j) *
+                        beta[(j, t+1)] / sum
+                    } else {
+                        1.0 / (k * k) as Float
+                    };
+                }
+            }
+        }
+
+        xi
+    }
+
+    /// Viterbi decoding to find most likely regime sequence
+    pub fn decode(&self, data: &[Float]) -> Vec<Int> {
+        let n = data.len();
+        let k = self.num_regimes as usize;
+
+        let mut delta = Matrix::zeros(k, n);
+        let mut psi = Matrix::zeros(k, n);
+
+        // Initialize
+        for i in 0..k {
+            delta[(i, 0)] = log(self.initial_probs[i]) + log(self.emission_prob(data[0], i));
+            psi[(i, 0)] = 0.0;
+        }
+
+        // Forward pass
+        for t in 1..n {
+            for j in 0..k {
+                let mut max_val = Float::NEG_INFINITY;
+                let mut max_idx = 0;
+
+                for i in 0..k {
+                    let val = delta[(i, t-1)] + log(self.transition_matrix[(i, j)]);
+                    if val > max_val {
+                        max_val = val;
+                        max_idx = i;
+                    }
+                }
+
+                delta[(j, t)] = max_val + log(self.emission_prob(data[t], j));
+                psi[(j, t)] = max_idx as Float;
+            }
+        }
+
+        // Backtrack
+        let mut states = vec![0; n];
+
+        // Find best final state
+        let mut max_val = Float::NEG_INFINITY;
+        for i in 0..k {
+            if delta[(i, n-1)] > max_val {
+                max_val = delta[(i, n-1)];
+                states[n-1] = i as Int;
+            }
+        }
+
+        // Backtrack
+        for t in (0..n-1).rev() {
+            states[t] = psi[(states[t+1] as usize, t+1)] as Int;
+        }
+
+        states
+    }
+
+    /// Detect regime change points from state sequence
+    pub fn detect(&self, data: &[Float]) -> ChangePointResult {
+        let states = self.decode(data);
+        let mut changepoints = Vec::new();
+
+        for i in 1..states.len() {
+            if states[i] != states[i-1] {
+                changepoints.push(i as Int);
+            }
+        }
+
+        self.build_result(data, changepoints, states)
+    }
+
+    fn build_result(
+        &self,
+        data: &[Float],
+        changepoints: Vec<Int>,
+        states: Vec<Int>
+    ) -> ChangePointResult {
+        let mut segments = Vec::new();
+        let mut all_points = vec![0];
+        all_points.extend(changepoints.iter().cloned());
+        all_points.push(data.len() as Int);
+
+        for i in 0..all_points.len() - 1 {
+            let start = all_points[i] as usize;
+            let end = all_points[i + 1] as usize;
+            let segment_data: Vec<Float> = data[start..end].to_vec();
+            let (mean, variance) = compute_mean_variance(&segment_data);
+
+            segments.push(Segment {
+                start: start as Int,
+                end: end as Int,
+                mean,
+                variance,
+                trend: 0.0,
+                cost: 0.0,
+            });
+        }
+
+        ChangePointResult {
+            changepoints,
+            segments,
+            cost: 0.0,
+            confidence: Vec::new(),
+            diagnostics: ChangePointDiagnostics {
+                algorithm: "RegimeHMM".to_string(),
+                iterations: self.max_iterations,
+                computation_time_ms: 0.0,
+                residuals: Vec::new(),
+                cusum_stats: Vec::new(),
+            },
+        }
+    }
+}
+
+// ============================================================================
+// WINDOW-BASED CHANGE DETECTION
+// ============================================================================
+
+/// Window-based change detection using statistical tests
+pub struct WindowChangeDetector {
+    window_size: Int,
+    test_type: StatisticalTest,
+    significance_level: Float,
+}
+
+@derive(Clone, Copy, Debug)]
+pub enum StatisticalTest {
+    TTest,          // Student's t-test
+    WelchTest,      // Welch's t-test (unequal variances)
+    MannWhitney,    // Non-parametric rank test
+    KolmogorovSmirnov,  // Distribution test
+    LeveneTest,     // Variance equality test
+}
+
+impl WindowChangeDetector {
+    pub fn new(window_size: Int, test_type: StatisticalTest) -> Self {
+        Self {
+            window_size,
+            test_type,
+            significance_level: 0.05,
+        }
+    }
+
+    pub fn with_significance(mut self, alpha: Float) -> Self {
+        self.significance_level = alpha;
+        self
+    }
+
+    /// Detect change points
+    pub fn detect(&self, data: &[Float]) -> ChangePointResult {
+        let n = data.len();
+        let window = self.window_size as usize;
+
+        if n < 2 * window {
+            return self.empty_result(data);
+        }
+
+        let mut test_stats = vec![0.0; n];
+        let mut changepoints = Vec::new();
+
+        for t in window..(n - window) {
+            let left: Vec<Float> = data[(t - window)..t].to_vec();
+            let right: Vec<Float> = data[t..(t + window)].to_vec();
+
+            let (stat, pvalue) = self.compute_test(&left, &right);
+            test_stats[t] = stat;
+
+            if pvalue < self.significance_level {
+                // Check if local maximum
+                if t > window && t < n - window - 1 {
+                    if abs(stat) > abs(test_stats[t-1]) && abs(stat) > abs(test_stats.get(t+1).unwrap_or(&0.0)) {
+                        changepoints.push(t as Int);
+                    }
+                }
+            }
+        }
+
+        self.build_result(data, changepoints)
+    }
+
+    /// Compute statistical test
+    fn compute_test(&self, sample1: &[Float], sample2: &[Float]) -> (Float, Float) {
+        match self.test_type {
+            StatisticalTest::TTest => self.t_test(sample1, sample2),
+            StatisticalTest::WelchTest => self.welch_test(sample1, sample2),
+            StatisticalTest::MannWhitney => self.mann_whitney(sample1, sample2),
+            StatisticalTest::KolmogorovSmirnov => self.ks_test(sample1, sample2),
+            StatisticalTest::LeveneTest => self.levene_test(sample1, sample2),
+        }
+    }
+
+    /// Student's t-test (equal variances)
+    fn t_test(&self, s1: &[Float], s2: &[Float]) -> (Float, Float) {
+        let n1 = s1.len() as Float;
+        let n2 = s2.len() as Float;
+
+        let (m1, v1) = compute_mean_variance(s1);
+        let (m2, v2) = compute_mean_variance(s2);
+
+        // Pooled variance
+        let sp = sqrt(((n1 - 1.0) * v1 + (n2 - 1.0) * v2) / (n1 + n2 - 2.0));
+
+        if sp < 1e-10 {
+            return (0.0, 1.0);
+        }
+
+        let t_stat = (m1 - m2) / (sp * sqrt(1.0 / n1 + 1.0 / n2));
+        let df = n1 + n2 - 2.0;
+
+        // Approximate p-value using normal for large df
+        let pvalue = 2.0 * (1.0 - normal_cdf(abs(t_stat)));
+
+        (t_stat, pvalue)
+    }
+
+    /// Welch's t-test (unequal variances)
+    fn welch_test(&self, s1: &[Float], s2: &[Float]) -> (Float, Float) {
+        let n1 = s1.len() as Float;
+        let n2 = s2.len() as Float;
+
+        let (m1, v1) = compute_mean_variance(s1);
+        let (m2, v2) = compute_mean_variance(s2);
+
+        let se1 = v1 / n1;
+        let se2 = v2 / n2;
+        let se = sqrt(se1 + se2);
+
+        if se < 1e-10 {
+            return (0.0, 1.0);
+        }
+
+        let t_stat = (m1 - m2) / se;
+
+        // Welch-Satterthwaite degrees of freedom
+        let df = (se1 + se2).powi(2) /
+                 (se1.powi(2) / (n1 - 1.0) + se2.powi(2) / (n2 - 1.0));
+
+        let pvalue = 2.0 * (1.0 - normal_cdf(abs(t_stat)));
+
+        (t_stat, pvalue)
+    }
+
+    /// Mann-Whitney U test
+    fn mann_whitney(&self, s1: &[Float], s2: &[Float]) -> (Float, Float) {
+        let n1 = s1.len();
+        let n2 = s2.len();
+
+        // Combine and rank
+        let mut combined: Vec<(Float, usize)> = Vec::with_capacity(n1 + n2);
+        for &x in s1 {
+            combined.push((x, 0));
+        }
+        for &x in s2 {
+            combined.push((x, 1));
+        }
+        combined.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+
+        // Compute rank sum for sample 1
+        let mut r1 = 0.0;
+        for (rank, &(_, group)) in combined.iter().enumerate() {
+            if group == 0 {
+                r1 += (rank + 1) as Float;
+            }
+        }
+
+        // U statistic
+        let u1 = r1 - (n1 * (n1 + 1)) as Float / 2.0;
+
+        // Normal approximation
+        let mu = (n1 * n2) as Float / 2.0;
+        let sigma = sqrt((n1 * n2 * (n1 + n2 + 1)) as Float / 12.0);
+
+        if sigma < 1e-10 {
+            return (0.0, 1.0);
+        }
+
+        let z = (u1 - mu) / sigma;
+        let pvalue = 2.0 * (1.0 - normal_cdf(abs(z)));
+
+        (z, pvalue)
+    }
+
+    /// Kolmogorov-Smirnov test
+    fn ks_test(&self, s1: &[Float], s2: &[Float]) -> (Float, Float) {
+        let n1 = s1.len();
+        let n2 = s2.len();
+
+        // Sort both samples
+        let mut sorted1 = s1.to_vec();
+        let mut sorted2 = s2.to_vec();
+        sorted1.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        sorted2.sort_by(|a, b| a.partial_cmp(b).unwrap());
+
+        // Compute D statistic
+        let mut max_diff: Float = 0.0;
+        let mut i = 0;
+        let mut j = 0;
+
+        while i < n1 && j < n2 {
+            let f1 = (i + 1) as Float / n1 as Float;
+            let f2 = (j + 1) as Float / n2 as Float;
+
+            let diff = abs(f1 - f2);
+            if diff > max_diff {
+                max_diff = diff;
+            }
+
+            if sorted1[i] <= sorted2[j] {
+                i += 1;
+            } else {
+                j += 1;
+            }
+        }
+
+        // Approximate p-value
+        let n = (n1 * n2) as Float / (n1 + n2) as Float;
+        let lambda = (sqrt(n) + 0.12 + 0.11 / sqrt(n)) * max_diff;
+        let pvalue = 2.0 * exp(-2.0 * lambda * lambda);
+
+        (max_diff, pvalue.clamp(0.0, 1.0))
+    }
+
+    /// Levene's test for variance equality
+    fn levene_test(&self, s1: &[Float], s2: &[Float]) -> (Float, Float) {
+        let (m1, _) = compute_mean_variance(s1);
+        let (m2, _) = compute_mean_variance(s2);
+
+        // Compute absolute deviations from median (or mean)
+        let z1: Vec<Float> = s1.iter().map(|&x| abs(x - m1)).collect();
+        let z2: Vec<Float> = s2.iter().map(|&x| abs(x - m2)).collect();
+
+        // Run standard t-test on deviations
+        self.t_test(&z1, &z2)
+    }
+
+    fn empty_result(&self, data: &[Float]) -> ChangePointResult {
+        let (mean, variance) = compute_mean_variance(data);
+        ChangePointResult {
+            changepoints: Vec::new(),
+            segments: vec![Segment {
+                start: 0,
+                end: data.len() as Int,
+                mean,
+                variance,
+                trend: 0.0,
+                cost: 0.0,
+            }],
+            cost: 0.0,
+            confidence: Vec::new(),
+            diagnostics: ChangePointDiagnostics {
+                algorithm: format!("{:?}", self.test_type),
+                iterations: 0,
+                computation_time_ms: 0.0,
+                residuals: Vec::new(),
+                cusum_stats: Vec::new(),
+            },
+        }
+    }
+
+    fn build_result(&self, data: &[Float], changepoints: Vec<Int>) -> ChangePointResult {
+        let mut segments = Vec::new();
+        let mut all_points = vec![0];
+        all_points.extend(changepoints.iter().cloned());
+        all_points.push(data.len() as Int);
+
+        for i in 0..all_points.len() - 1 {
+            let start = all_points[i] as usize;
+            let end = all_points[i + 1] as usize;
+            let segment_data: Vec<Float> = data[start..end].to_vec();
+            let (mean, variance) = compute_mean_variance(&segment_data);
+
+            segments.push(Segment {
+                start: start as Int,
+                end: end as Int,
+                mean,
+                variance,
+                trend: 0.0,
+                cost: 0.0,
+            });
+        }
+
+        ChangePointResult {
+            changepoints,
+            segments,
+            cost: 0.0,
+            confidence: Vec::new(),
+            diagnostics: ChangePointDiagnostics {
+                algorithm: format!("{:?}", self.test_type),
+                iterations: data.len() as Int,
+                computation_time_ms: 0.0,
+                residuals: Vec::new(),
+                cusum_stats: Vec::new(),
+            },
+        }
+    }
+}
+
+// ============================================================================
+// UNIFIED CHANGE POINT DETECTOR
+// ============================================================================
+
+/// Unified interface for multiple change point detection algorithms
+pub struct ChangePointDetector {
+    algorithm: CPDAlgorithm,
+    config: ChangePointConfig,
+}
+
+@derive(Clone, Debug)]
+pub enum CPDAlgorithm {
+    PELT,
+    BinarySegmentation,
+    BottomUp { target_segments: Int },
+    BOCPD { hazard_rate: Float },
+    CUSUM { threshold: Float, drift: Float },
+    EWMA { lambda: Float, k: Float },
+    Kernel { kernel: KernelType, bandwidth: Float },
+    Regime { num_regimes: Int },
+    Window { size: Int, test: StatisticalTest },
+}
+
+impl ChangePointDetector {
+    pub fn new(algorithm: CPDAlgorithm, config: ChangePointConfig) -> Self {
+        Self { algorithm, config }
+    }
+
+    pub fn pelt() -> Self {
+        Self::new(CPDAlgorithm::PELT, ChangePointConfig::new())
+    }
+
+    pub fn binary_segmentation() -> Self {
+        Self::new(CPDAlgorithm::BinarySegmentation, ChangePointConfig::new())
+    }
+
+    pub fn bocpd(hazard_rate: Float) -> Self {
+        Self::new(
+            CPDAlgorithm::BOCPD { hazard_rate },
+            ChangePointConfig::new()
+        )
+    }
+
+    /// Detect change points
+    pub fn detect(&self, data: &[Float]) -> ChangePointResult {
+        match &self.algorithm {
+            CPDAlgorithm::PELT => {
+                let mut detector = PELT::new(self.config.clone());
+                detector.detect(data)
+            }
+            CPDAlgorithm::BinarySegmentation => {
+                let detector = BinarySegmentation::new(self.config.clone());
+                detector.detect(data)
+            }
+            CPDAlgorithm::BottomUp { target_segments } => {
+                let detector = BottomUpSegmentation::new(self.config.clone());
+                detector.detect(data, *target_segments)
+            }
+            CPDAlgorithm::BOCPD { hazard_rate } => {
+                let mut detector = BOCPD::new(*hazard_rate);
+                detector.detect_offline(data)
+            }
+            CPDAlgorithm::CUSUM { threshold, drift } => {
+                let detector = CUSUM::new(*threshold, *drift);
+                detector.detect(data)
+            }
+            CPDAlgorithm::EWMA { lambda, k } => {
+                let detector = EWMA::new(*lambda, *k);
+                detector.detect(data)
+            }
+            CPDAlgorithm::Kernel { kernel, bandwidth } => {
+                let detector = KernelChangePointDetector::new(*kernel, *bandwidth);
+                detector.detect(data)
+            }
+            CPDAlgorithm::Regime { num_regimes } => {
+                let mut detector = RegimeDetector::new(*num_regimes);
+                detector.fit(data);
+                detector.detect(data)
+            }
+            CPDAlgorithm::Window { size, test } => {
+                let detector = WindowChangeDetector::new(*size, *test);
+                detector.detect(data)
+            }
+        }
+    }
+}
+
+// ============================================================================
+// HELPER FUNCTIONS
+// ============================================================================
+
+/// Compute mean and variance of a sample
+fn compute_mean_variance(data: &[Float]) -> (Float, Float) {
+    let n = data.len();
+    if n == 0 {
+        return (0.0, 0.0);
+    }
+
+    let sum: Float = data.iter().sum();
+    let mean = sum / n as Float;
+
+    let var_sum: Float = data.iter().map(|&x| (x - mean).powi(2)).sum();
+    let variance = if n > 1 { var_sum / (n - 1) as Float } else { 0.0 };
+
+    (mean, variance)
+}
+
+/// Compute trend (slope) of a segment
+fn compute_trend(data: &[Float]) -> Float {
+    let n = data.len();
+    if n < 2 {
+        return 0.0;
+    }
+
+    let n_f = n as Float;
+    let sum_x: Float = (0..n).map(|i| i as Float).sum();
+    let sum_y: Float = data.iter().sum();
+    let sum_xy: Float = data.iter().enumerate().map(|(i, &y)| i as Float * y).sum();
+    let sum_xx: Float = (0..n).map(|i| (i as Float).powi(2)).sum();
+
+    let denom = n_f * sum_xx - sum_x * sum_x;
+    if abs(denom) < 1e-10 {
+        return 0.0;
+    }
+
+    (n_f * sum_xy - sum_x * sum_y) / denom
+}
+
+/// Standard normal CDF approximation
+fn normal_cdf(x: Float) -> Float {
+    let a1 = 0.254829592;
+    let a2 = -0.284496736;
+    let a3 = 1.421413741;
+    let a4 = -1.453152027;
+    let a5 = 1.061405429;
+    let p = 0.3275911;
+
+    let sign = if x < 0.0 { -1.0 } else { 1.0 };
+    let x = abs(x) / sqrt(2.0);
+
+    let t = 1.0 / (1.0 + p * x);
+    let y = 1.0 - (((((a5 * t + a4) * t) + a3) * t + a2) * t + a1) * t * exp(-x * x);
+
+    0.5 * (1.0 + sign * y)
+}
+
+/// Gamma function approximation (Stirling)
+fn gamma(x: Float) -> Float {
+    if x < 0.5 {
+        3.14159265359 / (sin(3.14159265359 * x) * gamma(1.0 - x))
+    } else {
+        let x = x - 1.0;
+        let mut sum = 0.99999999999980993;
+        let coefficients = [
+            676.5203681218851,
+            -1259.1392167224028,
+            771.32342877765313,
+            -176.61502916214059,
+            12.507343278686905,
+            -0.13857109526572012,
+            9.9843695780195716e-6,
+            1.5056327351493116e-7
+        ];
+
+        for (i, &c) in coefficients.iter().enumerate() {
+            sum += c / (x + i as Float + 1.0);
+        }
+
+        let t = x + coefficients.len() as Float - 0.5;
+        sqrt(2.0 * 3.14159265359) * pow(t, x + 0.5) * exp(-t) * sum
+    }
+}
+
+fn sin(x: Float) -> Float {
+    // Taylor series approximation
+    let x = x % (2.0 * 3.14159265359);
+    let mut result = 0.0;
+    let mut term = x;
+    let mut n = 1;
+
+    while abs(term) > 1e-15 && n < 20 {
+        result += term;
+        term *= -x * x / ((2 * n) * (2 * n + 1)) as Float;
+        n += 1;
+    }
+
+    result
+}
+
+// ============================================================================
+// TESTS
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_pelt_detection() {
+        // Generate data with change point at index 50
+        let mut data = Vec::with_capacity(100);
+        for i in 0..50 {
+            data.push(0.0 + (i as Float * 0.01).sin());
+        }
+        for i in 50..100 {
+            data.push(5.0 + (i as Float * 0.01).sin());
+        }
+
+        let mut pelt = PELT::new(ChangePointConfig::new());
+        let result = pelt.detect(&data);
+
+        assert!(!result.changepoints.is_empty());
+        // Should detect change point near 50
+        let detected = result.changepoints[0];
+        assert!((detected - 50).abs() < 5);
+    }
+
+    #[test]
+    fn test_bocpd_online() {
+        let mut bocpd = BOCPD::new(0.01);
+
+        // Stream data with change
+        for _ in 0..50 {
+            bocpd.update(0.0);
+        }
+        for _ in 0..50 {
+            bocpd.update(5.0);
+        }
+
+        let cps = bocpd.get_changepoints();
+        assert!(!cps.is_empty());
+    }
+
+    #[test]
+    fn test_cusum() {
+        let mut data = vec![0.0; 50];
+        data.extend(vec![3.0; 50]);
+
+        let detector = CUSUM::new(5.0, 0.5);
+        let result = detector.detect(&data);
+
+        assert!(!result.changepoints.is_empty());
+    }
+
+    #[test]
+    fn test_regime_detector() {
+        let mut data = Vec::with_capacity(100);
+        for i in 0..33 {
+            data.push(-2.0 + (i as Float * 0.1).sin() * 0.1);
+        }
+        for i in 33..66 {
+            data.push(0.0 + (i as Float * 0.1).sin() * 0.1);
+        }
+        for i in 66..100 {
+            data.push(2.0 + (i as Float * 0.1).sin() * 0.1);
+        }
+
+        let mut detector = RegimeDetector::new(3);
+        detector.fit(&data);
+        let result = detector.detect(&data);
+
+        // Should detect approximately 2 regime changes
+        assert!(result.changepoints.len() >= 1);
+    }
+}

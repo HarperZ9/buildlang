@@ -1,0 +1,301 @@
+// =============================================================================
+// qsort — Sort lines (GNU sort clone) written in BuildLang
+// =============================================================================
+// Sixth showcase program compiled to a native binary.
+//
+// Usage:
+//   qsort file.txt           sort lines alphabetically
+//   cat file.txt | qsort     sort from stdin
+//   qsort -r file.txt        reverse sort
+//   qsort -n file.txt        numeric sort
+//   qsort -u file.txt        unique lines only
+//   qsort -rn file.txt       combined: reverse numeric
+//   qsort --help             usage info
+//
+// Design: All state in a flat struct. Lines stored in a string pool with
+// parallel start/len vecs. Sort via selection sort building a new result vec,
+// since BuildLang vecs have no set/swap — only push/get/pop/len.
+// =============================================================================
+
+// --- Flat state struct ---
+struct Sort {
+    input: String,
+    ilen: i32,
+    // String pool
+    sp_buf: String,
+    sp_n: i32,
+    sp_starts: Vec<i32>,
+    sp_lens: Vec<i32>,
+    // Line IDs (indices into string pool)
+    line_ids: Vec<i32>,
+    line_n: i32,
+    // Sorted result (indices into line_ids)
+    sorted: Vec<i32>,
+    // Used flags for selection sort (0 = available, 1 = picked)
+    used: Vec<i32>,
+}
+
+fn sort_new(input: String) -> Sort {
+    let ilen = input.len();
+    Sort {
+        input: input, ilen: ilen,
+        sp_buf: "", sp_n: 0, sp_starts: vec![], sp_lens: vec![],
+        line_ids: vec![], line_n: 0,
+        sorted: vec![],
+        used: vec![],
+    }
+}
+
+// --- String pool ops ---
+fn sp_add(s: &mut Sort, text: String) -> i32 {
+    let id = s.sp_n;
+    let st = s.sp_buf.len();
+    s.sp_buf = s.sp_buf + text;
+    let en = s.sp_buf.len();
+    vec_push(s.sp_starts, st);
+    vec_push(s.sp_lens, en - st);
+    s.sp_n = s.sp_n + 1;
+    id
+}
+
+fn sp_get(s: &Sort, id: i32) -> String {
+    let st = vec_get(s.sp_starts, id);
+    let ln = vec_get(s.sp_lens, id);
+    s.sp_buf.substring(st, ln)
+}
+
+// --- Parse input into lines ---
+fn parse_lines(s: &mut Sort) {
+    let mut pos = 0;
+    let mut line_start = 0;
+    let mut go = true;
+    while go {
+        if pos >= s.ilen {
+            // Last line (no trailing newline)
+            let ln = pos - line_start;
+            if ln > 0 {
+                let text = s.input.substring(line_start, ln);
+                let id = sp_add(s, text);
+                vec_push(s.line_ids, id);
+                s.line_n = s.line_n + 1;
+            }
+            go = false;
+        } else {
+            let c = s.input.char_at(pos);
+            if c == "\n" {
+                let mut ln = pos - line_start;
+                // Strip trailing \r
+                if ln > 0 {
+                    let last_pos = line_start + ln - 1;
+                    let lc = s.input.char_at(last_pos);
+                    if lc == "\r" { ln = ln - 1; }
+                }
+                let text = if ln > 0 {
+                    s.input.substring(line_start, ln)
+                } else {
+                    ""
+                };
+                let id = sp_add(s, text);
+                vec_push(s.line_ids, id);
+                s.line_n = s.line_n + 1;
+                line_start = pos + 1;
+                pos = pos + 1;
+            } else {
+                pos = pos + 1;
+            }
+        }
+    }
+}
+
+// --- Compare two lines ---
+// Returns -1, 0, or 1
+fn compare_lines(s: &Sort, a: i32, b: i32, numeric: bool) -> i64 {
+    let sa = sp_get(s, a);
+    let sb = sp_get(s, b);
+    if numeric {
+        // atof() already skips leading whitespace, so no .trim() needed
+        let na = sa.parse_float();
+        let nb = sb.parse_float();
+        if na < nb { return -1; }
+        if na > nb { return 1; }
+        return 0;
+    }
+    sa.compare(sb)
+}
+
+// --- Selection sort ---
+// Builds s.sorted by repeatedly finding the next element in order.
+// For reverse, we pick the maximum instead of minimum.
+fn selection_sort(s: &mut Sort, numeric: bool, reverse: bool) {
+    let n = s.line_n;
+
+    // Initialize used flags to 0
+    let mut i = 0;
+    while i < n {
+        vec_push(s.used, 0);
+        i = i + 1;
+    }
+
+    // Pick n elements
+    let mut picked = 0;
+    while picked < n {
+        // Find the best unused element
+        let mut best = -1;
+        let mut best_id = 0;
+        let mut j = 0;
+        while j < n {
+            if vec_get(s.used, j) == 0 {
+                if best < 0 {
+                    best = j;
+                    best_id = vec_get(s.line_ids, j);
+                } else {
+                    let curr_id = vec_get(s.line_ids, j);
+                    let cmp = compare_lines(s, curr_id, best_id, numeric);
+                    // For normal sort: pick smaller (cmp < 0)
+                    // For reverse sort: pick larger (cmp > 0)
+                    if reverse {
+                        if cmp > 0 {
+                            best = j;
+                            best_id = curr_id;
+                        }
+                    } else {
+                        if cmp < 0 {
+                            best = j;
+                            best_id = curr_id;
+                        }
+                    }
+                }
+            }
+            j = j + 1;
+        }
+
+        // Mark as used — rebuild used vec with this slot set to 1
+        // Since we can't vec_set, we rebuild
+        let mut new_used: Vec<i32> = vec![];
+        let mut k = 0;
+        while k < n {
+            if k == best {
+                vec_push(new_used, 1);
+            } else {
+                vec_push(new_used, vec_get(s.used, k));
+            }
+            k = k + 1;
+        }
+        s.used = new_used;
+
+        vec_push(s.sorted, best_id);
+        picked = picked + 1;
+    }
+}
+
+// --- Output sorted lines ---
+fn output_lines(s: &Sort, unique: bool) ~ Console {
+    let n = vec_len(s.sorted);
+    let mut i: i64 = 0;
+    let mut prev = "";
+    let mut first = true;
+    while i < n {
+        let id = vec_get(s.sorted, i);
+        let line = sp_get(s, id);
+        if unique {
+            if first || line.compare(prev) != 0 {
+                println!("{}", line);
+                prev = line;
+                first = false;
+            }
+        } else {
+            println!("{}", line);
+        }
+        i = i + 1;
+    }
+}
+
+// --- Help ---
+fn print_help() ~ Console {
+    println!("qsort — Sort lines of text");
+    println!("");
+    println!("Usage:");
+    println!("  qsort [OPTION]... [FILE]");
+    println!("");
+    println!("Options:");
+    println!("  -n    numeric sort (compare as numbers)");
+    println!("  -r    reverse the result of comparisons");
+    println!("  -u    output only unique lines");
+    println!("  --help  display this help and exit");
+    println!("");
+    println!("With no FILE, read standard input.");
+    println!("Options can be combined: -rn, -nu, -rnu, etc.");
+}
+
+// --- Main ---
+fn main() ~ Console + Environment + FileSystem + Process {
+    let nargs = args_count();
+
+    // Parse flags
+    let mut numeric = false;
+    let mut reverse = false;
+    let mut unique = false;
+    let mut filename = "";
+    let mut has_file = false;
+
+    let mut i: i64 = 1;
+    while i < nargs {
+        let arg = args_get(i);
+
+        if arg.starts_with("--") {
+            if arg.contains("help") {
+                print_help();
+                process_exit(0);
+            }
+        } else if arg.starts_with("-") {
+            // Short flags: could be -n, -r, -u, or combined like -rn, -rnu
+            if arg.contains("n") {
+                numeric = true;
+            }
+            if arg.contains("r") {
+                reverse = true;
+            }
+            if arg.contains("u") {
+                unique = true;
+            }
+        } else {
+            filename = arg;
+            has_file = true;
+        }
+
+        i = i + 1;
+    }
+
+    // Read input
+    let input = if has_file {
+        let exists = file_exists(filename);
+        if !exists {
+            println!("qsort: {}: No such file or directory", filename);
+            process_exit(2);
+        }
+        read_file(filename)
+    } else {
+        let piped = stdin_is_pipe();
+        if !piped {
+            print_help();
+            process_exit(0);
+        }
+        read_all()
+    };
+
+    // Handle empty input
+    if input.len() == 0 {
+        process_exit(0);
+    }
+
+    // Parse, sort, output
+    let mut s = sort_new(input);
+    parse_lines(&mut s);
+
+    if s.line_n == 0 {
+        process_exit(0);
+    }
+
+    selection_sort(&mut s, numeric, reverse);
+    output_lines(&s, unique);
+}

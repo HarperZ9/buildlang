@@ -1,0 +1,1395 @@
+// BUILD Spectrum - Color Blindness Simulation & Accessibility
+// Comprehensive color vision deficiency simulation and daltonization
+// Based on Brettel, Viénot, and Machado models
+
+module spectrum::color_blindness;
+
+use core::simd::{Vec3, Vec4, Mat3x3};
+use core::math::{pow, sqrt, abs, sin, cos, atan2, PI};
+
+// ============================================================================
+// COLOR VISION DEFICIENCY TYPES
+// ============================================================================
+
+/// Types of color vision deficiency
+enum ColorVisionDeficiency {
+    /// Normal color vision
+    Normal,
+
+    /// Protanopia - L-cone (red) absence
+    Protanopia,
+
+    /// Deuteranopia - M-cone (green) absence
+    Deuteranopia,
+
+    /// Tritanopia - S-cone (blue) absence
+    Tritanopia,
+
+    /// Protanomaly - L-cone deficiency (partial)
+    Protanomaly(f32),  // severity 0-1
+
+    /// Deuteranomaly - M-cone deficiency (partial)
+    Deuteranomaly(f32),  // severity 0-1
+
+    /// Tritanomaly - S-cone deficiency (partial)
+    Tritanomaly(f32),  // severity 0-1
+
+    /// Achromatopsia - complete color blindness (rod monochromacy)
+    Achromatopsia,
+
+    /// Blue cone monochromacy
+    BlueConeMonochromacy,
+}
+
+impl ColorVisionDeficiency {
+    /// Get the severity (1.0 for complete, 0.0 for none)
+    fn severity(&self) -> f32 {
+        match self {
+            ColorVisionDeficiency::Normal => 0.0,
+            ColorVisionDeficiency::Protanopia => 1.0,
+            ColorVisionDeficiency::Deuteranopia => 1.0,
+            ColorVisionDeficiency::Tritanopia => 1.0,
+            ColorVisionDeficiency::Protanomaly(s) => *s,
+            ColorVisionDeficiency::Deuteranomaly(s) => *s,
+            ColorVisionDeficiency::Tritanomaly(s) => *s,
+            ColorVisionDeficiency::Achromatopsia => 1.0,
+            ColorVisionDeficiency::BlueConeMonochromacy => 1.0,
+        }
+    }
+
+    /// Is this a protan-type deficiency?
+    fn is_protan(&self) -> bool {
+        matches!(self, ColorVisionDeficiency::Protanopia | ColorVisionDeficiency::Protanomaly(_))
+    }
+
+    /// Is this a deutan-type deficiency?
+    fn is_deutan(&self) -> bool {
+        matches!(self, ColorVisionDeficiency::Deuteranopia | ColorVisionDeficiency::Deuteranomaly(_))
+    }
+
+    /// Is this a tritan-type deficiency?
+    fn is_tritan(&self) -> bool {
+        matches!(self, ColorVisionDeficiency::Tritanopia | ColorVisionDeficiency::Tritanomaly(_))
+    }
+
+    /// Get base type for anomalous conditions
+    fn base_type(&self) -> ColorVisionDeficiency {
+        match self {
+            ColorVisionDeficiency::Protanomaly(_) => ColorVisionDeficiency::Protanopia,
+            ColorVisionDeficiency::Deuteranomaly(_) => ColorVisionDeficiency::Deuteranopia,
+            ColorVisionDeficiency::Tritanomaly(_) => ColorVisionDeficiency::Tritanopia,
+            other => other.clone(),
+        }
+    }
+}
+
+// ============================================================================
+// LMS CONE RESPONSE
+// ============================================================================
+
+/// LMS cone response values
+struct LmsColor {
+    /// Long wavelength cone (red-sensitive)
+    l: f32,
+    /// Medium wavelength cone (green-sensitive)
+    m: f32,
+    /// Short wavelength cone (blue-sensitive)
+    s: f32,
+}
+
+impl LmsColor {
+    fn new(l: f32, m: f32, s: f32) -> Self {
+        Self { l, m, s }
+    }
+
+    fn to_vec3(&self) -> Vec3 {
+        Vec3::new(self.l, self.m, self.s)
+    }
+
+    fn from_vec3(v: Vec3) -> Self {
+        Self { l: v.x, m: v.y, s: v.z }
+    }
+}
+
+/// LMS color space transformations
+struct LmsTransform;
+
+impl LmsTransform {
+    /// sRGB to LMS matrix (Hunt-Pointer-Estevez)
+    const RGB_TO_LMS: Mat3x3 = Mat3x3::from_rows(
+        Vec3::new(0.31399022, 0.63951294, 0.04649755),
+        Vec3::new(0.15537241, 0.75789446, 0.08670142),
+        Vec3::new(0.01775239, 0.10944209, 0.87256922)
+    );
+
+    /// LMS to sRGB matrix
+    const LMS_TO_RGB: Mat3x3 = Mat3x3::from_rows(
+        Vec3::new(5.47221206, -4.64196010, 0.16963708),
+        Vec3::new(-1.12524190, 2.29317094, -0.16789520),
+        Vec3::new(0.02980165, -0.19318073, 1.16364789)
+    );
+
+    /// Alternative sRGB to LMS (CIECAM02 adaptation)
+    const RGB_TO_LMS_CIECAM02: Mat3x3 = Mat3x3::from_rows(
+        Vec3::new(0.4122214708, 0.5363325363, 0.0514459929),
+        Vec3::new(0.2119034982, 0.6806995451, 0.1073969566),
+        Vec3::new(0.0883024619, 0.2817188376, 0.6299787005)
+    );
+
+    /// Convert linear sRGB to LMS
+    fn rgb_to_lms(rgb: Vec3) -> LmsColor {
+        let lms = Self::RGB_TO_LMS * rgb;
+        LmsColor::from_vec3(lms)
+    }
+
+    /// Convert LMS to linear sRGB
+    fn lms_to_rgb(lms: LmsColor) -> Vec3 {
+        Self::LMS_TO_RGB * lms.to_vec3()
+    }
+
+    /// sRGB EOTF (gamma decode)
+    fn srgb_to_linear(srgb: Vec3) -> Vec3 {
+        let linearize = |x: f32| -> f32 {
+            if x <= 0.04045 {
+                x / 12.92
+            } else {
+                pow((x + 0.055) / 1.055, 2.4)
+            }
+        };
+
+        Vec3::new(
+            linearize(srgb.x),
+            linearize(srgb.y),
+            linearize(srgb.z)
+        )
+    }
+
+    /// sRGB OETF (gamma encode)
+    fn linear_to_srgb(linear: Vec3) -> Vec3 {
+        let encode = |x: f32| -> f32 {
+            if x <= 0.0031308 {
+                x * 12.92
+            } else {
+                1.055 * pow(x, 1.0 / 2.4) - 0.055
+            }
+        };
+
+        Vec3::new(
+            encode(linear.x.clamp(0.0, 1.0)),
+            encode(linear.y.clamp(0.0, 1.0)),
+            encode(linear.z.clamp(0.0, 1.0))
+        )
+    }
+}
+
+// ============================================================================
+// BRETTEL MODEL (1997)
+// ============================================================================
+
+/// Brettel dichromatic simulation model
+/// Based on confusion lines in LMS space
+struct BrettelSimulation {
+    /// Precomputed projection matrices for each half-plane
+    protan_h1: Mat3x3,
+    protan_h2: Mat3x3,
+    deutan_h1: Mat3x3,
+    deutan_h2: Mat3x3,
+    tritan_h1: Mat3x3,
+    tritan_h2: Mat3x3,
+
+    /// Separation planes (normal vectors)
+    protan_sep: Vec3,
+    deutan_sep: Vec3,
+    tritan_sep: Vec3,
+}
+
+impl BrettelSimulation {
+    fn new() -> Self {
+        // Anchor wavelengths in LMS (normalized)
+        // 475nm (blue anchor), 575nm (yellow anchor), 485nm (cyan), 660nm (red)
+
+        // Protanopia anchors (575nm and 475nm visible)
+        let anchor_575_lms = Vec3::new(0.0829, 0.0843, 0.0003);  // Yellow
+        let anchor_475_lms = Vec3::new(0.0154, 0.0285, 0.1693);  // Blue
+
+        // Equal energy white in LMS
+        let white_lms = Vec3::new(0.333, 0.333, 0.333);
+
+        // Compute Brettel projection matrices
+        let (protan_h1, protan_h2, protan_sep) =
+            Self::compute_dichromat_matrices(anchor_575_lms, anchor_475_lms, white_lms, 0);
+
+        // Deuteranopia anchors
+        let (deutan_h1, deutan_h2, deutan_sep) =
+            Self::compute_dichromat_matrices(anchor_575_lms, anchor_475_lms, white_lms, 1);
+
+        // Tritanopia anchors (660nm and 485nm visible)
+        let anchor_660_lms = Vec3::new(0.1284, 0.0387, 0.0000);  // Red
+        let anchor_485_lms = Vec3::new(0.0221, 0.0435, 0.1297);  // Cyan
+        let (tritan_h1, tritan_h2, tritan_sep) =
+            Self::compute_dichromat_matrices(anchor_660_lms, anchor_485_lms, white_lms, 2);
+
+        Self {
+            protan_h1,
+            protan_h2,
+            deutan_h1,
+            deutan_h2,
+            tritan_h1,
+            tritan_h2,
+            protan_sep,
+            deutan_sep,
+            tritan_sep,
+        }
+    }
+
+    /// Compute projection matrices for a dichromat
+    /// missing_cone: 0=L(protan), 1=M(deutan), 2=S(tritan)
+    fn compute_dichromat_matrices(
+        anchor1: Vec3,
+        anchor2: Vec3,
+        white: Vec3,
+        missing_cone: usize
+    ) -> (Mat3x3, Mat3x3, Vec3) {
+        // Compute plane normals for each half-plane
+        let n1 = anchor1.cross(white).normalize();
+        let n2 = anchor2.cross(white).normalize();
+
+        // Separation plane normal (between the two half-planes)
+        let sep = anchor1.cross(anchor2).normalize();
+
+        // Project onto each half-plane
+        let h1 = Self::compute_projection_matrix(n1, missing_cone);
+        let h2 = Self::compute_projection_matrix(n2, missing_cone);
+
+        (h1, h2, sep)
+    }
+
+    /// Compute projection matrix for a half-plane
+    fn compute_projection_matrix(normal: Vec3, missing_cone: usize) -> Mat3x3 {
+        // The projection replaces the missing cone value
+        // such that the resulting LMS lies on the confusion plane
+
+        match missing_cone {
+            0 => {
+                // Protanopia: L = f(M, S)
+                // L = -(n.y * M + n.z * S) / n.x
+                let factor = if abs(normal.x) > 0.0001 { -1.0 / normal.x } else { 0.0 };
+                Mat3x3::from_rows(
+                    Vec3::new(0.0, normal.y * factor, normal.z * factor),
+                    Vec3::new(0.0, 1.0, 0.0),
+                    Vec3::new(0.0, 0.0, 1.0)
+                )
+            }
+            1 => {
+                // Deuteranopia: M = f(L, S)
+                let factor = if abs(normal.y) > 0.0001 { -1.0 / normal.y } else { 0.0 };
+                Mat3x3::from_rows(
+                    Vec3::new(1.0, 0.0, 0.0),
+                    Vec3::new(normal.x * factor, 0.0, normal.z * factor),
+                    Vec3::new(0.0, 0.0, 1.0)
+                )
+            }
+            2 => {
+                // Tritanopia: S = f(L, M)
+                let factor = if abs(normal.z) > 0.0001 { -1.0 / normal.z } else { 0.0 };
+                Mat3x3::from_rows(
+                    Vec3::new(1.0, 0.0, 0.0),
+                    Vec3::new(0.0, 1.0, 0.0),
+                    Vec3::new(normal.x * factor, normal.y * factor, 0.0)
+                )
+            }
+            _ => Mat3x3::identity()
+        }
+    }
+
+    /// Simulate color vision deficiency
+    fn simulate(&self, lms: LmsColor, cvd: &ColorVisionDeficiency) -> LmsColor {
+        match cvd {
+            ColorVisionDeficiency::Normal => lms,
+
+            ColorVisionDeficiency::Protanopia => {
+                self.apply_brettel(lms.to_vec3(), &self.protan_h1, &self.protan_h2, &self.protan_sep)
+            }
+
+            ColorVisionDeficiency::Deuteranopia => {
+                self.apply_brettel(lms.to_vec3(), &self.deutan_h1, &self.deutan_h2, &self.deutan_sep)
+            }
+
+            ColorVisionDeficiency::Tritanopia => {
+                self.apply_brettel(lms.to_vec3(), &self.tritan_h1, &self.tritan_h2, &self.tritan_sep)
+            }
+
+            ColorVisionDeficiency::Protanomaly(severity) => {
+                let sim = self.apply_brettel(lms.to_vec3(), &self.protan_h1, &self.protan_h2, &self.protan_sep);
+                self.blend_lms(lms, sim, *severity)
+            }
+
+            ColorVisionDeficiency::Deuteranomaly(severity) => {
+                let sim = self.apply_brettel(lms.to_vec3(), &self.deutan_h1, &self.deutan_h2, &self.deutan_sep);
+                self.blend_lms(lms, sim, *severity)
+            }
+
+            ColorVisionDeficiency::Tritanomaly(severity) => {
+                let sim = self.apply_brettel(lms.to_vec3(), &self.tritan_h1, &self.tritan_h2, &self.tritan_sep);
+                self.blend_lms(lms, sim, *severity)
+            }
+
+            ColorVisionDeficiency::Achromatopsia => {
+                // Rod monochromacy - luminance only
+                let y = 0.212656 * lms.l + 0.715158 * lms.m + 0.072186 * lms.s;
+                LmsColor::new(y, y, y)
+            }
+
+            ColorVisionDeficiency::BlueConeMonochromacy => {
+                // Only S-cones functional
+                LmsColor::new(lms.s * 0.5, lms.s * 0.5, lms.s)
+            }
+        }
+    }
+
+    /// Apply Brettel transformation with half-plane selection
+    fn apply_brettel(&self, lms: Vec3, h1: &Mat3x3, h2: &Mat3x3, sep: &Vec3) -> LmsColor {
+        // Determine which half-plane the color is in
+        let dot = lms.dot(*sep);
+
+        let result = if dot >= 0.0 {
+            *h1 * lms
+        } else {
+            *h2 * lms
+        };
+
+        LmsColor::from_vec3(result)
+    }
+
+    /// Blend between normal and simulated LMS
+    fn blend_lms(&self, normal: LmsColor, simulated: LmsColor, severity: f32) -> LmsColor {
+        let s = severity.clamp(0.0, 1.0);
+        LmsColor::new(
+            normal.l * (1.0 - s) + simulated.l * s,
+            normal.m * (1.0 - s) + simulated.m * s,
+            normal.s * (1.0 - s) + simulated.s * s
+        )
+    }
+}
+
+// ============================================================================
+// VIÉNOT MODEL (1999)
+// ============================================================================
+
+/// Viénot simulation model
+/// Simpler matrix-based approach
+struct VienotSimulation;
+
+impl VienotSimulation {
+    /// Protanopia simulation matrix (sRGB space)
+    const PROTAN_MATRIX: Mat3x3 = Mat3x3::from_rows(
+        Vec3::new(0.567, 0.433, 0.0),
+        Vec3::new(0.558, 0.442, 0.0),
+        Vec3::new(0.0, 0.242, 0.758)
+    );
+
+    /// Deuteranopia simulation matrix
+    const DEUTAN_MATRIX: Mat3x3 = Mat3x3::from_rows(
+        Vec3::new(0.625, 0.375, 0.0),
+        Vec3::new(0.7, 0.3, 0.0),
+        Vec3::new(0.0, 0.3, 0.7)
+    );
+
+    /// Tritanopia simulation matrix
+    const TRITAN_MATRIX: Mat3x3 = Mat3x3::from_rows(
+        Vec3::new(0.95, 0.05, 0.0),
+        Vec3::new(0.0, 0.433, 0.567),
+        Vec3::new(0.0, 0.475, 0.525)
+    );
+
+    /// Simulate using Viénot matrices
+    fn simulate(rgb: Vec3, cvd: &ColorVisionDeficiency) -> Vec3 {
+        let linear = LmsTransform::srgb_to_linear(rgb);
+
+        let simulated = match cvd {
+            ColorVisionDeficiency::Normal => linear,
+            ColorVisionDeficiency::Protanopia => Self::PROTAN_MATRIX * linear,
+            ColorVisionDeficiency::Deuteranopia => Self::DEUTAN_MATRIX * linear,
+            ColorVisionDeficiency::Tritanopia => Self::TRITAN_MATRIX * linear,
+            ColorVisionDeficiency::Protanomaly(s) => {
+                let sim = Self::PROTAN_MATRIX * linear;
+                linear * (1.0 - s) + sim * *s
+            }
+            ColorVisionDeficiency::Deuteranomaly(s) => {
+                let sim = Self::DEUTAN_MATRIX * linear;
+                linear * (1.0 - s) + sim * *s
+            }
+            ColorVisionDeficiency::Tritanomaly(s) => {
+                let sim = Self::TRITAN_MATRIX * linear;
+                linear * (1.0 - s) + sim * *s
+            }
+            ColorVisionDeficiency::Achromatopsia => {
+                let y = 0.212656 * linear.x + 0.715158 * linear.y + 0.072186 * linear.z;
+                Vec3::new(y, y, y)
+            }
+            ColorVisionDeficiency::BlueConeMonochromacy => {
+                Vec3::new(linear.z * 0.5, linear.z * 0.5, linear.z)
+            }
+        };
+
+        LmsTransform::linear_to_srgb(simulated)
+    }
+}
+
+// ============================================================================
+// MACHADO MODEL (2009)
+// ============================================================================
+
+/// Machado et al. simulation model
+/// Physiologically-based with shift parameter
+struct MachadoSimulation {
+    /// Precomputed matrices for different severities
+    matrices: HashMap<(CvdType, u8), Mat3x3>,
+}
+
+#[derive(Hash, Eq, PartialEq, Clone, Copy)]
+enum CvdType {
+    Protan,
+    Deutan,
+    Tritan,
+}
+
+impl MachadoSimulation {
+    fn new() -> Self {
+        let mut matrices = HashMap::new();
+
+        // Precompute matrices for 0%, 10%, ..., 100% severity
+        for i in 0..=10 {
+            let severity = i as f32 / 10.0;
+
+            matrices.insert((CvdType::Protan, i), Self::compute_matrix(CvdType::Protan, severity));
+            matrices.insert((CvdType::Deutan, i), Self::compute_matrix(CvdType::Deutan, severity));
+            matrices.insert((CvdType::Tritan, i), Self::compute_matrix(CvdType::Tritan, severity));
+        }
+
+        Self { matrices }
+    }
+
+    /// Compute simulation matrix for given CVD type and severity
+    fn compute_matrix(cvd_type: CvdType, severity: f32) -> Mat3x3 {
+        // Machado uses spectral shift model
+        // These are precomputed matrices from the paper
+
+        match cvd_type {
+            CvdType::Protan => {
+                // Interpolate between identity and full protanopia
+                Self::interpolate_matrices(
+                    Mat3x3::identity(),
+                    Mat3x3::from_rows(
+                        Vec3::new(0.152286, 1.052583, -0.204868),
+                        Vec3::new(0.114503, 0.786281, 0.099216),
+                        Vec3::new(-0.003882, -0.048116, 1.051998)
+                    ),
+                    severity
+                )
+            }
+            CvdType::Deutan => {
+                Self::interpolate_matrices(
+                    Mat3x3::identity(),
+                    Mat3x3::from_rows(
+                        Vec3::new(0.367322, 0.860646, -0.227968),
+                        Vec3::new(0.280085, 0.672501, 0.047414),
+                        Vec3::new(-0.011820, 0.042940, 0.968881)
+                    ),
+                    severity
+                )
+            }
+            CvdType::Tritan => {
+                Self::interpolate_matrices(
+                    Mat3x3::identity(),
+                    Mat3x3::from_rows(
+                        Vec3::new(1.255528, -0.076749, -0.178779),
+                        Vec3::new(-0.078411, 0.930809, 0.147602),
+                        Vec3::new(0.004733, 0.691367, 0.303900)
+                    ),
+                    severity
+                )
+            }
+        }
+    }
+
+    /// Interpolate between two matrices
+    fn interpolate_matrices(m1: Mat3x3, m2: Mat3x3, t: f32) -> Mat3x3 {
+        let t = t.clamp(0.0, 1.0);
+        Mat3x3::from_rows(
+            m1.row(0) * (1.0 - t) + m2.row(0) * t,
+            m1.row(1) * (1.0 - t) + m2.row(1) * t,
+            m1.row(2) * (1.0 - t) + m2.row(2) * t
+        )
+    }
+
+    /// Get matrix for CVD simulation
+    fn get_matrix(&self, cvd: &ColorVisionDeficiency) -> Mat3x3 {
+        let (cvd_type, severity) = match cvd {
+            ColorVisionDeficiency::Normal => return Mat3x3::identity(),
+            ColorVisionDeficiency::Protanopia => (CvdType::Protan, 1.0),
+            ColorVisionDeficiency::Deuteranopia => (CvdType::Deutan, 1.0),
+            ColorVisionDeficiency::Tritanopia => (CvdType::Tritan, 1.0),
+            ColorVisionDeficiency::Protanomaly(s) => (CvdType::Protan, *s),
+            ColorVisionDeficiency::Deuteranomaly(s) => (CvdType::Deutan, *s),
+            ColorVisionDeficiency::Tritanomaly(s) => (CvdType::Tritan, *s),
+            ColorVisionDeficiency::Achromatopsia |
+            ColorVisionDeficiency::BlueConeMonochromacy => return Mat3x3::identity(),
+        };
+
+        // Find closest precomputed matrix
+        let idx = ((severity * 10.0).round() as u8).min(10);
+        self.matrices.get(&(cvd_type, idx)).copied().unwrap_or(Mat3x3::identity())
+    }
+
+    /// Simulate color vision deficiency
+    fn simulate(&self, rgb: Vec3, cvd: &ColorVisionDeficiency) -> Vec3 {
+        match cvd {
+            ColorVisionDeficiency::Achromatopsia => {
+                let linear = LmsTransform::srgb_to_linear(rgb);
+                let y = 0.212656 * linear.x + 0.715158 * linear.y + 0.072186 * linear.z;
+                LmsTransform::linear_to_srgb(Vec3::new(y, y, y))
+            }
+            ColorVisionDeficiency::BlueConeMonochromacy => {
+                let linear = LmsTransform::srgb_to_linear(rgb);
+                LmsTransform::linear_to_srgb(Vec3::new(linear.z * 0.5, linear.z * 0.5, linear.z))
+            }
+            _ => {
+                let linear = LmsTransform::srgb_to_linear(rgb);
+                let matrix = self.get_matrix(cvd);
+                let simulated = matrix * linear;
+                LmsTransform::linear_to_srgb(simulated)
+            }
+        }
+    }
+}
+
+// ============================================================================
+// CVD SIMULATOR
+// ============================================================================
+
+/// Simulation algorithm choice
+enum SimulationAlgorithm {
+    Brettel,
+    Vienot,
+    Machado,
+}
+
+/// Main CVD simulator
+struct CvdSimulator {
+    brettel: BrettelSimulation,
+    machado: MachadoSimulation,
+    algorithm: SimulationAlgorithm,
+}
+
+impl CvdSimulator {
+    fn new() -> Self {
+        Self {
+            brettel: BrettelSimulation::new(),
+            machado: MachadoSimulation::new(),
+            algorithm: SimulationAlgorithm::Machado,
+        }
+    }
+
+    fn with_algorithm(mut self, algorithm: SimulationAlgorithm) -> Self {
+        self.algorithm = algorithm;
+        self
+    }
+
+    /// Simulate how a color appears to someone with CVD
+    fn simulate(&self, rgb: Vec3, cvd: &ColorVisionDeficiency) -> Vec3 {
+        match self.algorithm {
+            SimulationAlgorithm::Brettel => {
+                let linear = LmsTransform::srgb_to_linear(rgb);
+                let lms = LmsTransform::rgb_to_lms(linear);
+                let simulated_lms = self.brettel.simulate(lms, cvd);
+                let simulated_linear = LmsTransform::lms_to_rgb(simulated_lms);
+                LmsTransform::linear_to_srgb(simulated_linear)
+            }
+            SimulationAlgorithm::Vienot => {
+                VienotSimulation::simulate(rgb, cvd)
+            }
+            SimulationAlgorithm::Machado => {
+                self.machado.simulate(rgb, cvd)
+            }
+        }
+    }
+
+    /// Batch simulation
+    fn simulate_batch(&self, colors: &[Vec3], cvd: &ColorVisionDeficiency) -> Vec<Vec3> {
+        colors.iter().map(|c| self.simulate(*c, cvd)).collect()
+    }
+}
+
+// ============================================================================
+// DALTONIZATION
+// ============================================================================
+
+/// Daltonization algorithms to enhance colors for CVD viewers
+struct Daltonizer {
+    simulator: CvdSimulator,
+}
+
+impl Daltonizer {
+    fn new() -> Self {
+        Self {
+            simulator: CvdSimulator::new(),
+        }
+    }
+
+    /// Daltonize using difference-based enhancement
+    fn daltonize_difference(&self, rgb: Vec3, cvd: &ColorVisionDeficiency) -> Vec3 {
+        // Simulate CVD perception
+        let simulated = self.simulator.simulate(rgb, cvd);
+
+        // Calculate error (what information is lost)
+        let error = rgb - simulated;
+
+        // Redistribute error to remaining channels
+        let correction = match cvd {
+            ColorVisionDeficiency::Protanopia |
+            ColorVisionDeficiency::Protanomaly(_) => {
+                // Shift red-green error to blue channel
+                Vec3::new(0.0, 0.0, error.x * 0.7 + error.y * 0.7)
+            }
+            ColorVisionDeficiency::Deuteranopia |
+            ColorVisionDeficiency::Deuteranomaly(_) => {
+                // Shift error to blue channel
+                Vec3::new(0.0, 0.0, error.x * 0.7 + error.y * 0.7)
+            }
+            ColorVisionDeficiency::Tritanopia |
+            ColorVisionDeficiency::Tritanomaly(_) => {
+                // Shift blue error to red/green
+                Vec3::new(error.z * 0.7, error.z * 0.7, 0.0)
+            }
+            _ => Vec3::zero()
+        };
+
+        let result = rgb + correction;
+        Vec3::new(
+            result.x.clamp(0.0, 1.0),
+            result.y.clamp(0.0, 1.0),
+            result.z.clamp(0.0, 1.0)
+        )
+    }
+
+    /// Daltonize using LMS-based enhancement (Fidaner method)
+    fn daltonize_lms(&self, rgb: Vec3, cvd: &ColorVisionDeficiency) -> Vec3 {
+        let linear = LmsTransform::srgb_to_linear(rgb);
+        let lms = LmsTransform::rgb_to_lms(linear);
+
+        // Error correction matrices
+        let correction = match cvd {
+            ColorVisionDeficiency::Protanopia |
+            ColorVisionDeficiency::Protanomaly(_) => {
+                Mat3x3::from_rows(
+                    Vec3::new(0.0, 0.0, 0.0),
+                    Vec3::new(0.7, 1.0, 0.0),
+                    Vec3::new(0.7, 0.0, 1.0)
+                )
+            }
+            ColorVisionDeficiency::Deuteranopia |
+            ColorVisionDeficiency::Deuteranomaly(_) => {
+                Mat3x3::from_rows(
+                    Vec3::new(1.0, 0.7, 0.0),
+                    Vec3::new(0.0, 0.0, 0.0),
+                    Vec3::new(0.0, 0.7, 1.0)
+                )
+            }
+            ColorVisionDeficiency::Tritanopia |
+            ColorVisionDeficiency::Tritanomaly(_) => {
+                Mat3x3::from_rows(
+                    Vec3::new(1.0, 0.0, 0.7),
+                    Vec3::new(0.0, 1.0, 0.7),
+                    Vec3::new(0.0, 0.0, 0.0)
+                )
+            }
+            _ => Mat3x3::identity()
+        };
+
+        // Get simulated LMS
+        let simulated_lms = self.simulator.brettel.simulate(lms, cvd);
+
+        // Calculate error in LMS
+        let lms_vec = lms.to_vec3();
+        let sim_vec = simulated_lms.to_vec3();
+        let error = lms_vec - sim_vec;
+
+        // Apply correction
+        let corrected_lms = lms_vec + correction * error;
+        let corrected_rgb = LmsTransform::lms_to_rgb(LmsColor::from_vec3(corrected_lms));
+
+        LmsTransform::linear_to_srgb(corrected_rgb)
+    }
+
+    /// Daltonize with severity-based interpolation
+    fn daltonize(&self, rgb: Vec3, cvd: &ColorVisionDeficiency, strength: f32) -> Vec3 {
+        let daltonized = self.daltonize_lms(rgb, cvd);
+        rgb * (1.0 - strength) + daltonized * strength
+    }
+}
+
+// ============================================================================
+// COLOR ACCESSIBILITY TOOLS
+// ============================================================================
+
+/// Accessibility contrast checker
+struct ContrastChecker;
+
+impl ContrastChecker {
+    /// Calculate relative luminance (WCAG definition)
+    fn relative_luminance(rgb: Vec3) -> f32 {
+        let linear = LmsTransform::srgb_to_linear(rgb);
+        0.2126 * linear.x + 0.7152 * linear.y + 0.0722 * linear.z
+    }
+
+    /// Calculate WCAG contrast ratio
+    fn contrast_ratio(color1: Vec3, color2: Vec3) -> f32 {
+        let l1 = Self::relative_luminance(color1);
+        let l2 = Self::relative_luminance(color2);
+
+        let lighter = l1.max(l2);
+        let darker = l1.min(l2);
+
+        (lighter + 0.05) / (darker + 0.05)
+    }
+
+    /// Check WCAG AA compliance for normal text (4.5:1)
+    fn meets_aa_normal(color1: Vec3, color2: Vec3) -> bool {
+        Self::contrast_ratio(color1, color2) >= 4.5
+    }
+
+    /// Check WCAG AA compliance for large text (3:1)
+    fn meets_aa_large(color1: Vec3, color2: Vec3) -> bool {
+        Self::contrast_ratio(color1, color2) >= 3.0
+    }
+
+    /// Check WCAG AAA compliance for normal text (7:1)
+    fn meets_aaa_normal(color1: Vec3, color2: Vec3) -> bool {
+        Self::contrast_ratio(color1, color2) >= 7.0
+    }
+
+    /// Check WCAG AAA compliance for large text (4.5:1)
+    fn meets_aaa_large(color1: Vec3, color2: Vec3) -> bool {
+        Self::contrast_ratio(color1, color2) >= 4.5
+    }
+
+    /// Calculate APCA (Advanced Perceptual Contrast Algorithm)
+    fn apca_contrast(text: Vec3, background: Vec3) -> f32 {
+        let text_y = Self::apca_luminance(text);
+        let bg_y = Self::apca_luminance(background);
+
+        // Polarity-aware contrast
+        if bg_y > text_y {
+            // Light background, dark text
+            (pow(bg_y, 0.56) - pow(text_y, 0.57)) * 1.14
+        } else {
+            // Dark background, light text
+            (pow(bg_y, 0.65) - pow(text_y, 0.62)) * 1.14
+        }
+    }
+
+    fn apca_luminance(rgb: Vec3) -> f32 {
+        let linear = LmsTransform::srgb_to_linear(rgb);
+
+        // APCA uses different coefficients
+        let y = 0.2126729 * linear.x + 0.7151522 * linear.y + 0.0721750 * linear.z;
+
+        // Soft clamp
+        if y < 0.022 {
+            y + pow(0.022 - y, 1.414)
+        } else {
+            y
+        }
+    }
+}
+
+/// Color palette accessibility analyzer
+struct PaletteAnalyzer {
+    simulator: CvdSimulator,
+}
+
+impl PaletteAnalyzer {
+    fn new() -> Self {
+        Self {
+            simulator: CvdSimulator::new(),
+        }
+    }
+
+    /// Calculate color difference (simple Euclidean in sRGB)
+    fn color_distance(c1: Vec3, c2: Vec3) -> f32 {
+        let diff = c1 - c2;
+        sqrt(diff.x * diff.x + diff.y * diff.y + diff.z * diff.z)
+    }
+
+    /// Calculate perceptual color difference (using relative luminance)
+    fn perceptual_distance(c1: Vec3, c2: Vec3) -> f32 {
+        let l1 = ContrastChecker::relative_luminance(c1);
+        let l2 = ContrastChecker::relative_luminance(c2);
+        abs(l1 - l2)
+    }
+
+    /// Check if colors are distinguishable under CVD
+    fn are_distinguishable(&self, c1: Vec3, c2: Vec3, cvd: &ColorVisionDeficiency, threshold: f32) -> bool {
+        let sim1 = self.simulator.simulate(c1, cvd);
+        let sim2 = self.simulator.simulate(c2, cvd);
+
+        Self::color_distance(sim1, sim2) > threshold
+    }
+
+    /// Find confusable color pairs in a palette
+    fn find_confusable_pairs(&self, palette: &[Vec3], cvd: &ColorVisionDeficiency, threshold: f32) -> Vec<(usize, usize)> {
+        let mut confusable = Vec::new();
+
+        for i in 0..palette.len() {
+            for j in (i + 1)..palette.len() {
+                if !self.are_distinguishable(palette[i], palette[j], cvd, threshold) {
+                    confusable.push((i, j));
+                }
+            }
+        }
+
+        confusable
+    }
+
+    /// Suggest improved palette for accessibility
+    fn suggest_accessible_palette(&self, palette: &[Vec3], cvd: &ColorVisionDeficiency) -> Vec<Vec3> {
+        let daltonizer = Daltonizer::new();
+
+        // First, find problematic colors
+        let confusable = self.find_confusable_pairs(palette, cvd, 0.1);
+
+        if confusable.is_empty() {
+            return palette.to_vec();
+        }
+
+        // Apply daltonization to problematic colors
+        let mut improved = palette.to_vec();
+        for (i, j) in confusable {
+            // Shift one of the colors
+            improved[j] = daltonizer.daltonize(improved[j], cvd, 0.5);
+        }
+
+        improved
+    }
+
+    /// Generate accessibility report for palette
+    fn analyze_palette(&self, palette: &[Vec3]) -> PaletteReport {
+        let cvd_types = [
+            ColorVisionDeficiency::Protanopia,
+            ColorVisionDeficiency::Deuteranopia,
+            ColorVisionDeficiency::Tritanopia,
+        ];
+
+        let mut issues = Vec::new();
+
+        for cvd in &cvd_types {
+            let confusable = self.find_confusable_pairs(palette, cvd, 0.1);
+            if !confusable.is_empty() {
+                issues.push(AccessibilityIssue {
+                    cvd_type: cvd.clone(),
+                    confusable_pairs: confusable,
+                });
+            }
+        }
+
+        // Check contrast ratios
+        let mut contrast_issues = Vec::new();
+        for i in 0..palette.len() {
+            for j in (i + 1)..palette.len() {
+                let ratio = ContrastChecker::contrast_ratio(palette[i], palette[j]);
+                if ratio < 3.0 {
+                    contrast_issues.push((i, j, ratio));
+                }
+            }
+        }
+
+        PaletteReport {
+            total_colors: palette.len(),
+            cvd_issues: issues,
+            low_contrast_pairs: contrast_issues,
+        }
+    }
+}
+
+struct AccessibilityIssue {
+    cvd_type: ColorVisionDeficiency,
+    confusable_pairs: Vec<(usize, usize)>,
+}
+
+struct PaletteReport {
+    total_colors: usize,
+    cvd_issues: Vec<AccessibilityIssue>,
+    low_contrast_pairs: Vec<(usize, usize, f32)>,
+}
+
+// ============================================================================
+// ISHIHARA-STYLE PATTERN GENERATOR
+// ============================================================================
+
+/// Generate Ishihara-style color confusion patterns
+struct ConfusionPatternGenerator {
+    simulator: CvdSimulator,
+}
+
+impl ConfusionPatternGenerator {
+    fn new() -> Self {
+        Self {
+            simulator: CvdSimulator::new(),
+        }
+    }
+
+    /// Generate a pair of colors that look the same to someone with given CVD
+    fn generate_confusion_pair(&self, cvd: &ColorVisionDeficiency) -> (Vec3, Vec3) {
+        // Start with a base color
+        let base = Vec3::new(0.5, 0.5, 0.5);
+
+        // Find a color that looks the same under CVD but different to normal vision
+        let sim_base = self.simulator.simulate(base, cvd);
+
+        // Perturb in the confusion direction
+        let delta = match cvd {
+            ColorVisionDeficiency::Protanopia |
+            ColorVisionDeficiency::Protanomaly(_) => Vec3::new(0.3, -0.15, 0.0),
+            ColorVisionDeficiency::Deuteranopia |
+            ColorVisionDeficiency::Deuteranomaly(_) => Vec3::new(-0.15, 0.3, 0.0),
+            ColorVisionDeficiency::Tritanopia |
+            ColorVisionDeficiency::Tritanomaly(_) => Vec3::new(0.0, 0.0, 0.3),
+            _ => Vec3::zero(),
+        };
+
+        let confused = (base + delta).clamp(Vec3::zero(), Vec3::new(1.0, 1.0, 1.0));
+
+        (base, confused)
+    }
+
+    /// Generate colors that are clearly visible to CVD viewers but not normal vision
+    fn generate_hidden_pattern_colors(&self, cvd: &ColorVisionDeficiency) -> (Vec3, Vec3) {
+        // These should look the same to normal vision but different to CVD
+        // This is the reverse of usual Ishihara
+
+        match cvd {
+            ColorVisionDeficiency::Protanopia |
+            ColorVisionDeficiency::Protanomaly(_) => {
+                // Colors that differ in the red/green direction
+                (Vec3::new(0.5, 0.5, 0.3), Vec3::new(0.4, 0.6, 0.3))
+            }
+            ColorVisionDeficiency::Deuteranopia |
+            ColorVisionDeficiency::Deuteranomaly(_) => {
+                (Vec3::new(0.5, 0.5, 0.3), Vec3::new(0.6, 0.4, 0.3))
+            }
+            ColorVisionDeficiency::Tritanopia |
+            ColorVisionDeficiency::Tritanomaly(_) => {
+                (Vec3::new(0.5, 0.4, 0.5), Vec3::new(0.5, 0.5, 0.4))
+            }
+            _ => (Vec3::new(0.5, 0.5, 0.5), Vec3::new(0.5, 0.5, 0.5))
+        }
+    }
+}
+
+// ============================================================================
+// WGSL SHADERS
+// ============================================================================
+
+const CVD_SIMULATION_SHADER: &str = r#"
+// Color Vision Deficiency Simulation - WGSL Implementation
+
+struct CvdParams {
+    simulation_matrix: mat3x3<f32>,
+    cvd_type: u32,  // 0=normal, 1=protan, 2=deutan, 3=tritan, 4=achroma
+    severity: f32,
+}
+
+@group(0) @binding(0) var<uniform> params: CvdParams;
+@group(0) @binding(1) var input_texture: texture_2d<f32>;
+@group(0) @binding(2) var output_texture: texture_storage_2d<rgba8unorm, write>;
+
+fn srgb_to_linear(srgb: vec3<f32>) -> vec3<f32> {
+    let cutoff = vec3<f32>(0.04045);
+    let linear_part = srgb / 12.92;
+    let gamma_part = pow((srgb + 0.055) / 1.055, vec3<f32>(2.4));
+    return select(gamma_part, linear_part, srgb <= cutoff);
+}
+
+fn linear_to_srgb(linear: vec3<f32>) -> vec3<f32> {
+    let cutoff = vec3<f32>(0.0031308);
+    let linear_part = linear * 12.92;
+    let gamma_part = 1.055 * pow(linear, vec3<f32>(1.0/2.4)) - 0.055;
+    return select(gamma_part, linear_part, linear <= cutoff);
+}
+
+fn simulate_achromatopsia(linear: vec3<f32>) -> vec3<f32> {
+    let luminance = 0.212656 * linear.x + 0.715158 * linear.y + 0.072186 * linear.z;
+    return vec3<f32>(luminance);
+}
+
+@compute @workgroup_size(16, 16)
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+    let dims = textureDimensions(input_texture);
+    if (global_id.x >= dims.x || global_id.y >= dims.y) { return; }
+
+    let srgb = textureLoad(input_texture, vec2<i32>(global_id.xy), 0);
+    let linear = srgb_to_linear(srgb.rgb);
+
+    var simulated: vec3<f32>;
+
+    if (params.cvd_type == 4u) {
+        simulated = simulate_achromatopsia(linear);
+    } else if (params.cvd_type == 0u) {
+        simulated = linear;
+    } else {
+        let full_sim = params.simulation_matrix * linear;
+        simulated = mix(linear, full_sim, params.severity);
+    }
+
+    let output = linear_to_srgb(clamp(simulated, vec3<f32>(0.0), vec3<f32>(1.0)));
+    textureStore(output_texture, vec2<i32>(global_id.xy), vec4<f32>(output, srgb.a));
+}
+"#;
+
+const DALTONIZATION_SHADER: &str = r#"
+// Daltonization (Color Enhancement for CVD) - WGSL Implementation
+
+struct DaltonParams {
+    simulation_matrix: mat3x3<f32>,
+    cvd_type: u32,
+    strength: f32,
+}
+
+@group(0) @binding(0) var<uniform> params: DaltonParams;
+@group(0) @binding(1) var input_texture: texture_2d<f32>;
+@group(0) @binding(2) var output_texture: texture_storage_2d<rgba8unorm, write>;
+
+const RGB_TO_LMS = mat3x3<f32>(
+    vec3<f32>(0.31399022, 0.63951294, 0.04649755),
+    vec3<f32>(0.15537241, 0.75789446, 0.08670142),
+    vec3<f32>(0.01775239, 0.10944209, 0.87256922)
+);
+
+const LMS_TO_RGB = mat3x3<f32>(
+    vec3<f32>(5.47221206, -4.64196010, 0.16963708),
+    vec3<f32>(-1.12524190, 2.29317094, -0.16789520),
+    vec3<f32>(0.02980165, -0.19318073, 1.16364789)
+);
+
+fn srgb_to_linear(srgb: vec3<f32>) -> vec3<f32> {
+    let cutoff = vec3<f32>(0.04045);
+    let linear_part = srgb / 12.92;
+    let gamma_part = pow((srgb + 0.055) / 1.055, vec3<f32>(2.4));
+    return select(gamma_part, linear_part, srgb <= cutoff);
+}
+
+fn linear_to_srgb(linear: vec3<f32>) -> vec3<f32> {
+    let cutoff = vec3<f32>(0.0031308);
+    let linear_part = linear * 12.92;
+    let gamma_part = 1.055 * pow(linear, vec3<f32>(1.0/2.4)) - 0.055;
+    return select(gamma_part, linear_part, linear <= cutoff);
+}
+
+fn get_error_correction_matrix(cvd_type: u32) -> mat3x3<f32> {
+    if (cvd_type == 1u) {  // Protan
+        return mat3x3<f32>(
+            vec3<f32>(0.0, 0.0, 0.0),
+            vec3<f32>(0.7, 1.0, 0.0),
+            vec3<f32>(0.7, 0.0, 1.0)
+        );
+    } else if (cvd_type == 2u) {  // Deutan
+        return mat3x3<f32>(
+            vec3<f32>(1.0, 0.7, 0.0),
+            vec3<f32>(0.0, 0.0, 0.0),
+            vec3<f32>(0.0, 0.7, 1.0)
+        );
+    } else if (cvd_type == 3u) {  // Tritan
+        return mat3x3<f32>(
+            vec3<f32>(1.0, 0.0, 0.7),
+            vec3<f32>(0.0, 1.0, 0.7),
+            vec3<f32>(0.0, 0.0, 0.0)
+        );
+    }
+    return mat3x3<f32>(1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0);
+}
+
+@compute @workgroup_size(16, 16)
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+    let dims = textureDimensions(input_texture);
+    if (global_id.x >= dims.x || global_id.y >= dims.y) { return; }
+
+    let srgb = textureLoad(input_texture, vec2<i32>(global_id.xy), 0);
+    let linear = srgb_to_linear(srgb.rgb);
+
+    // Convert to LMS
+    let lms = RGB_TO_LMS * linear;
+
+    // Simulate CVD
+    let simulated_lms = params.simulation_matrix * lms;
+
+    // Calculate error
+    let error = lms - simulated_lms;
+
+    // Apply correction
+    let correction_matrix = get_error_correction_matrix(params.cvd_type);
+    let correction = correction_matrix * error;
+    let corrected_lms = lms + correction * params.strength;
+
+    // Convert back to RGB
+    let corrected_rgb = LMS_TO_RGB * corrected_lms;
+    let output = linear_to_srgb(clamp(corrected_rgb, vec3<f32>(0.0), vec3<f32>(1.0)));
+
+    textureStore(output_texture, vec2<i32>(global_id.xy), vec4<f32>(output, srgb.a));
+}
+"#;
+
+const CONTRAST_CHECK_SHADER: &str = r#"
+// WCAG Contrast Checker - WGSL Implementation
+
+struct ContrastParams {
+    foreground: vec3<f32>,
+    background: vec3<f32>,
+    min_ratio: f32,
+}
+
+@group(0) @binding(0) var<uniform> params: ContrastParams;
+@group(0) @binding(1) var<storage, read_write> result: f32;
+
+fn srgb_to_linear_component(c: f32) -> f32 {
+    if (c <= 0.04045) {
+        return c / 12.92;
+    }
+    return pow((c + 0.055) / 1.055, 2.4);
+}
+
+fn relative_luminance(color: vec3<f32>) -> f32 {
+    let linear = vec3<f32>(
+        srgb_to_linear_component(color.x),
+        srgb_to_linear_component(color.y),
+        srgb_to_linear_component(color.z)
+    );
+    return 0.2126 * linear.x + 0.7152 * linear.y + 0.0722 * linear.z;
+}
+
+fn contrast_ratio(l1: f32, l2: f32) -> f32 {
+    let lighter = max(l1, l2);
+    let darker = min(l1, l2);
+    return (lighter + 0.05) / (darker + 0.05);
+}
+
+@compute @workgroup_size(1)
+fn main() {
+    let l_fg = relative_luminance(params.foreground);
+    let l_bg = relative_luminance(params.background);
+    result = contrast_ratio(l_fg, l_bg);
+}
+"#;
+
+// ============================================================================
+// UNIT TESTS
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const EPSILON: f32 = 0.01;
+
+    fn approx_eq(a: f32, b: f32) -> bool {
+        (a - b).abs() < EPSILON
+    }
+
+    fn vec3_approx_eq(a: Vec3, b: Vec3) -> bool {
+        approx_eq(a.x, b.x) && approx_eq(a.y, b.y) && approx_eq(a.z, b.z)
+    }
+
+    #[test]
+    fn test_lms_transform_roundtrip() {
+        let rgb = Vec3::new(0.5, 0.3, 0.8);
+        let lms = LmsTransform::rgb_to_lms(rgb);
+        let roundtrip = LmsTransform::lms_to_rgb(lms);
+
+        assert!(vec3_approx_eq(rgb, roundtrip));
+    }
+
+    #[test]
+    fn test_srgb_gamma_roundtrip() {
+        let srgb = Vec3::new(0.5, 0.3, 0.8);
+        let linear = LmsTransform::srgb_to_linear(srgb);
+        let roundtrip = LmsTransform::linear_to_srgb(linear);
+
+        assert!(vec3_approx_eq(srgb, roundtrip));
+    }
+
+    #[test]
+    fn test_normal_vision_no_change() {
+        let simulator = CvdSimulator::new();
+        let rgb = Vec3::new(0.5, 0.3, 0.8);
+
+        let result = simulator.simulate(rgb, &ColorVisionDeficiency::Normal);
+        assert!(vec3_approx_eq(rgb, result));
+    }
+
+    #[test]
+    fn test_achromatopsia_grayscale() {
+        let simulator = CvdSimulator::new();
+        let rgb = Vec3::new(1.0, 0.0, 0.0);  // Pure red
+
+        let result = simulator.simulate(rgb, &ColorVisionDeficiency::Achromatopsia);
+
+        // Should be grayscale (all components equal)
+        assert!(approx_eq(result.x, result.y));
+        assert!(approx_eq(result.y, result.z));
+    }
+
+    #[test]
+    fn test_protanopia_red_confusion() {
+        let simulator = CvdSimulator::new();
+
+        let red = Vec3::new(1.0, 0.0, 0.0);
+        let green = Vec3::new(0.0, 1.0, 0.0);
+
+        let sim_red = simulator.simulate(red, &ColorVisionDeficiency::Protanopia);
+        let sim_green = simulator.simulate(green, &ColorVisionDeficiency::Protanopia);
+
+        // For protanopia, red and green should appear more similar
+        let original_diff = (red - green).length();
+        let simulated_diff = (sim_red - sim_green).length();
+
+        assert!(simulated_diff < original_diff);
+    }
+
+    #[test]
+    fn test_anomaly_interpolation() {
+        let simulator = CvdSimulator::new();
+        let rgb = Vec3::new(1.0, 0.0, 0.0);
+
+        let mild = simulator.simulate(rgb, &ColorVisionDeficiency::Protanomaly(0.3));
+        let moderate = simulator.simulate(rgb, &ColorVisionDeficiency::Protanomaly(0.6));
+        let full = simulator.simulate(rgb, &ColorVisionDeficiency::Protanopia);
+
+        // More severe should be closer to full protanopia
+        let diff_mild = (mild - rgb).length();
+        let diff_moderate = (moderate - rgb).length();
+        let diff_full = (full - rgb).length();
+
+        assert!(diff_mild < diff_moderate);
+        assert!(diff_moderate < diff_full);
+    }
+
+    #[test]
+    fn test_contrast_ratio_white_black() {
+        let white = Vec3::new(1.0, 1.0, 1.0);
+        let black = Vec3::new(0.0, 0.0, 0.0);
+
+        let ratio = ContrastChecker::contrast_ratio(white, black);
+
+        // Maximum contrast ratio is 21:1
+        assert!(approx_eq(ratio, 21.0));
+    }
+
+    #[test]
+    fn test_contrast_ratio_same_color() {
+        let color = Vec3::new(0.5, 0.5, 0.5);
+
+        let ratio = ContrastChecker::contrast_ratio(color, color);
+
+        // Same color should have 1:1 ratio
+        assert!(approx_eq(ratio, 1.0));
+    }
+
+    #[test]
+    fn test_wcag_aa_compliance() {
+        let white = Vec3::new(1.0, 1.0, 1.0);
+        let dark_gray = Vec3::new(0.3, 0.3, 0.3);
+
+        assert!(ContrastChecker::meets_aa_normal(white, dark_gray));
+        assert!(ContrastChecker::meets_aa_large(white, dark_gray));
+    }
+
+    #[test]
+    fn test_daltonization_preserves_black_white() {
+        let daltonizer = Daltonizer::new();
+
+        let black = Vec3::zero();
+        let white = Vec3::new(1.0, 1.0, 1.0);
+
+        let black_dalt = daltonizer.daltonize(black, &ColorVisionDeficiency::Protanopia, 1.0);
+        let white_dalt = daltonizer.daltonize(white, &ColorVisionDeficiency::Protanopia, 1.0);
+
+        // Black and white should remain relatively unchanged
+        assert!(black_dalt.length() < 0.1);
+        assert!((white_dalt - white).length() < 0.2);
+    }
+
+    #[test]
+    fn test_palette_analyzer_identical() {
+        let analyzer = PaletteAnalyzer::new();
+        let palette = vec![Vec3::new(0.5, 0.0, 0.0), Vec3::new(0.5, 0.0, 0.0)];
+
+        let confusable = analyzer.find_confusable_pairs(
+            &palette,
+            &ColorVisionDeficiency::Normal,
+            0.01
+        );
+
+        // Identical colors should be confusable
+        assert_eq!(confusable.len(), 1);
+    }
+
+    #[test]
+    fn test_vienot_simulation() {
+        let red = Vec3::new(1.0, 0.0, 0.0);
+
+        let protan = VienotSimulation::simulate(red, &ColorVisionDeficiency::Protanopia);
+        let deutan = VienotSimulation::simulate(red, &ColorVisionDeficiency::Deuteranopia);
+
+        // Both should differ from original red
+        assert!((protan - red).length() > 0.1);
+        assert!((deutan - red).length() > 0.1);
+    }
+
+    #[test]
+    fn test_machado_matrices() {
+        let machado = MachadoSimulation::new();
+
+        // Identity for normal vision
+        let normal_matrix = machado.get_matrix(&ColorVisionDeficiency::Normal);
+        assert!(approx_eq(normal_matrix.row(0).x, 1.0));
+        assert!(approx_eq(normal_matrix.row(1).y, 1.0));
+        assert!(approx_eq(normal_matrix.row(2).z, 1.0));
+    }
+
+    #[test]
+    fn test_cvd_severity() {
+        assert_eq!(ColorVisionDeficiency::Normal.severity(), 0.0);
+        assert_eq!(ColorVisionDeficiency::Protanopia.severity(), 1.0);
+        assert_eq!(ColorVisionDeficiency::Protanomaly(0.5).severity(), 0.5);
+    }
+
+    #[test]
+    fn test_cvd_type_classification() {
+        assert!(ColorVisionDeficiency::Protanopia.is_protan());
+        assert!(ColorVisionDeficiency::Protanomaly(0.5).is_protan());
+        assert!(ColorVisionDeficiency::Deuteranopia.is_deutan());
+        assert!(ColorVisionDeficiency::Tritanopia.is_tritan());
+        assert!(!ColorVisionDeficiency::Protanopia.is_deutan());
+    }
+
+    #[test]
+    fn test_confusion_pattern_generator() {
+        let generator = ConfusionPatternGenerator::new();
+
+        let (c1, c2) = generator.generate_confusion_pair(&ColorVisionDeficiency::Protanopia);
+
+        // Should be different colors
+        assert!((c1 - c2).length() > 0.1);
+    }
+
+    #[test]
+    fn test_apca_contrast() {
+        let white = Vec3::new(1.0, 1.0, 1.0);
+        let black = Vec3::new(0.0, 0.0, 0.0);
+
+        let contrast = ContrastChecker::apca_contrast(black, white);
+
+        // APCA contrast for black on white should be high
+        assert!(contrast.abs() > 1.0);
+    }
+}

@@ -1,0 +1,452 @@
+// =============================================================================
+// qlint - BuildLang Source Linter written in BuildLang
+// =============================================================================
+// Second self-hosting tool. Reads .bld source files and reports quality
+// issues: long files, long functions, missing return types, TODO/FIXME/HACK
+// markers, trailing whitespace, consecutive blank lines, deep nesting, and
+// lines exceeding 120 characters.
+//
+// Usage:
+//   qlint file.bld          lint single file
+//   qlint -r src/              lint directory recursively
+//   qlint --help               usage
+// =============================================================================
+
+fn print_help() ~ Console {
+    println!("qlint - BuildLang source linter");
+    println!("");
+    println!("Usage:");
+    println!("  qlint FILE...              lint one or more .bld files");
+    println!("  qlint -r DIR               lint all .bld files recursively");
+    println!("  qlint --help               display this help and exit");
+    println!("");
+    println!("Checks:");
+    println!("  - File exceeds 300 lines");
+    println!("  - Function exceeds 50 lines");
+    println!("  - Function missing return type (except main)");
+    println!("  - TODO/FIXME/HACK markers");
+    println!("  - Trailing whitespace");
+    println!("  - 3+ consecutive blank lines");
+    println!("  - Indentation deeper than 5 levels (20 spaces)");
+    println!("  - Line exceeds 120 characters");
+}
+
+// Check if a filename ends with ".bld"
+fn is_build_file(name: String) -> bool {
+    name.ends_with(".bld")
+}
+
+// Should skip this directory during recursive walk?
+fn should_skip_dir(name: String) -> bool {
+    if name == ".git" { return true; }
+    if name == "node_modules" { return true; }
+    if name == "target" { return true; }
+    if name == "__pycache__" { return true; }
+    if name == "build" { return true; }
+    if name == "dist" { return true; }
+    if name == ".cache" { return true; }
+    false
+}
+
+// Count leading spaces on a line. Returns the number of space characters
+// at the start. Tabs count as 4 spaces each.
+fn count_leading_spaces(line: String) -> i64 {
+    let llen = line.len();
+    let mut count: i64 = 0;
+    let mut i: i64 = 0;
+    let mut go = true;
+    while go {
+        if i >= llen {
+            go = false;
+        } else {
+            let c = line.char_at(i);
+            if c == " " {
+                count = count + 1;
+                i = i + 1;
+            } else if c == "\t" {
+                count = count + 4;
+                i = i + 1;
+            } else {
+                go = false;
+            }
+        }
+    }
+    count
+}
+
+// Check if a line has trailing whitespace (space or tab at end).
+fn has_trailing_ws(line: String) -> bool {
+    let llen = line.len();
+    if llen == 0 { return false; }
+    let last = line.char_at(llen - 1);
+    if last == " " { return true; }
+    if last == "\t" { return true; }
+    false
+}
+
+// Check if trimmed line starts with "fn " and extract function name.
+// Returns the function name or "" if not a function definition.
+fn extract_fn_name(trimmed: String) -> String {
+    let tlen = trimmed.len();
+    if tlen < 4 { return ""; }
+
+    // Check for "fn " prefix
+    let prefix = trimmed.substring(0, 3);
+    if prefix != "fn " { return ""; }
+
+    // Extract name up to "("
+    let rest = trimmed.substring(3, tlen - 3);
+    let paren_idx = rest.index_of("(");
+    if paren_idx < 0 { return ""; }
+
+    // Also handle generic: fn name<T>(
+    let angle_idx = rest.index_of("<");
+    if angle_idx >= 0 {
+        if angle_idx < paren_idx {
+            return rest.substring(0, angle_idx);
+        }
+    }
+
+    rest.substring(0, paren_idx)
+}
+
+// Check if a function signature has a return type annotation (->).
+// Looks for "->" between the closing ")" and opening "{" on the fn line.
+fn fn_has_return_type(trimmed: String) -> bool {
+    // Find the closing paren of params
+    let close_paren = trimmed.index_of(")");
+    if close_paren < 0 { return false; }
+
+    // Check for "->" after the closing paren
+    let rest_start = close_paren + 1;
+    let tlen = trimmed.len();
+    if rest_start >= tlen { return false; }
+
+    let rest = trimmed.substring(rest_start, tlen - rest_start);
+    let arrow = rest.index_of("->");
+    arrow >= 0
+}
+
+// Check if a trimmed line contains TODO, FIXME, or HACK markers.
+// Returns the marker text found, or "" if none.
+fn find_marker(line: String) -> String {
+    if line.contains("TODO") { return "TODO"; }
+    if line.contains("FIXME") { return "FIXME"; }
+    if line.contains("HACK") { return "HACK"; }
+    ""
+}
+
+// Lint a single file. Returns the number of warnings found.
+fn lint_file(filepath: String) -> i64 ~ Console + FileSystem {
+    let content = read_file(filepath);
+    let clen = content.len();
+    let mut warnings: i64 = 0;
+
+    // State for line-by-line scan
+    let mut line_num: i64 = 0;
+    let mut pos: i64 = 0;
+    let mut consecutive_blanks: i64 = 0;
+
+    // State for function length tracking
+    let mut in_fn = false;
+    let mut fn_name = "";
+    let mut fn_start_line: i64 = 0;
+    let mut brace_depth: i64 = 0;
+
+    // Walk through content line by line
+    let mut go = true;
+    while go {
+        if pos >= clen {
+            go = false;
+        } else {
+            // Extract current line
+            let rest = content.substring(pos, clen - pos);
+            let nl_idx = rest.index_of("\n");
+            let line = if nl_idx < 0 { rest } else {
+                rest.substring(0, nl_idx)
+            };
+            if nl_idx < 0 { pos = clen; } else {
+                pos = pos + nl_idx + 1;
+            }
+
+            line_num = line_num + 1;
+
+            // Strip trailing \r for Windows line endings
+            let llen = line.len();
+            let clean = if llen > 0 {
+                let last_c = line.char_at(llen - 1);
+                if last_c == "\r" {
+                    line.substring(0, llen - 1)
+                } else {
+                    line
+                }
+            } else {
+                line
+            };
+
+            let clean_len = clean.len();
+            let trimmed = clean.trim();
+            let tlen = trimmed.len();
+
+            // Check 1: Trailing whitespace
+            if clean_len > 0 {
+                if has_trailing_ws(clean) {
+                    println!("{}:{}: warning: trailing whitespace",
+                             filepath, line_num);
+                    warnings = warnings + 1;
+                }
+            }
+
+            // Check 2: Line too long (>120 chars)
+            if clean_len > 120 {
+                println!("{}:{}: warning: line exceeds 120 characters ({})",
+                         filepath, line_num, clean_len);
+                warnings = warnings + 1;
+            }
+
+            // Check 3: Consecutive blank lines (3+)
+            if tlen == 0 {
+                consecutive_blanks = consecutive_blanks + 1;
+                if consecutive_blanks == 3 {
+                    println!("{}:{}: warning: 3+ consecutive blank lines",
+                             filepath, line_num);
+                    warnings = warnings + 1;
+                }
+            } else {
+                consecutive_blanks = 0;
+            }
+
+            // Check 4: Deep nesting (>20 spaces = 5 levels)
+            if tlen > 0 {
+                let leading = count_leading_spaces(clean);
+                if leading > 20 {
+                    println!("{}:{}: warning: deep nesting ({} spaces, max 20)",
+                             filepath, line_num, leading);
+                    warnings = warnings + 1;
+                }
+            }
+
+            // Check 5: TODO/FIXME/HACK markers
+            if tlen > 0 {
+                let marker = find_marker(trimmed);
+                let mlen = marker.len();
+                if mlen > 0 {
+                    println!("{}:{}: warning: {}: {}",
+                             filepath, line_num, marker, trimmed);
+                    warnings = warnings + 1;
+                }
+            }
+
+            // Check 6: Function tracking (length + return type)
+            if tlen > 0 {
+                let fn_name_found = extract_fn_name(trimmed);
+                let fn_name_len = fn_name_found.len();
+
+                if fn_name_len > 0 {
+                    // Starting a new function definition
+                    // First, close any previous function
+                    if in_fn {
+                        let fn_lines = line_num - fn_start_line;
+                        if fn_lines > 50 {
+                            println!("{}:{}: warning: function '{}' is {} lines (max 50)",
+                                     filepath, fn_start_line, fn_name,
+                                     fn_lines);
+                            warnings = warnings + 1;
+                        }
+                    }
+
+                    in_fn = true;
+                    fn_name = fn_name_found;
+                    fn_start_line = line_num;
+                    brace_depth = 0;
+
+                    // Check for missing return type (except main)
+                    if fn_name != "main" {
+                        if !fn_has_return_type(trimmed) {
+                            // Also check if return type is on next
+                            // line -- but for simplicity, only check
+                            // current line (covers all practical cases)
+                            println!("{}:{}: warning: function '{}' has no return type",
+                                     filepath, line_num, fn_name);
+                            warnings = warnings + 1;
+                        }
+                    }
+                }
+
+                // Track brace depth for function end detection
+                if in_fn {
+                    // Count braces in this line
+                    let mut bi: i64 = 0;
+                    while bi < clean_len {
+                        let bc = clean.char_at(bi);
+                        if bc == "{" {
+                            brace_depth = brace_depth + 1;
+                        }
+                        if bc == "}" {
+                            brace_depth = brace_depth - 1;
+                            if brace_depth == 0 {
+                                // Function ended
+                                let fn_lines = line_num - fn_start_line + 1;
+                                if fn_lines > 50 {
+                                    println!("{}:{}: warning: function '{}' is {} lines (max 50)",
+                                             filepath, fn_start_line,
+                                             fn_name, fn_lines);
+                                    warnings = warnings + 1;
+                                }
+                                in_fn = false;
+                            }
+                        }
+                        bi = bi + 1;
+                    }
+                }
+            }
+        }
+    }
+
+    // Check 7: File too long (>300 lines)
+    if line_num > 300 {
+        println!("{}: warning: file is {} lines (max 300)",
+                 filepath, line_num);
+        warnings = warnings + 1;
+    }
+
+    warnings
+}
+
+// Recursively collect .bld files from a directory
+fn lint_directory(dirpath: String, total_warnings: Vec<i32>,
+                  total_files: Vec<i32>) ~ Console + FileSystem {
+    let dir_stack = vec_new_str();
+    vec_push_str(dir_stack, dirpath);
+
+    let mut stack_done = false;
+    while !stack_done {
+        let slen = vec_len(dir_stack);
+        if slen == 0 {
+            stack_done = true;
+        } else {
+            let cur = vec_get_str(dir_stack, slen - 1);
+            vec_pop(dir_stack);
+
+            let entries = list_dir(cur);
+            let n = vec_len(entries);
+            let mut ei: i64 = 0;
+
+            while ei < n {
+                let name = vec_get_str(entries, ei);
+
+                // Skip hidden entries
+                if name.starts_with(".") {
+                    ei = ei + 1;
+                } else {
+                    let full = cur + "/" + name;
+                    let isdir = is_dir(full);
+
+                    if isdir {
+                        let skip = should_skip_dir(name);
+                        if !skip {
+                            vec_push_str(dir_stack, full);
+                        }
+                    } else {
+                        // Lint .bld files
+                        if is_build_file(name) {
+                            let w = lint_file(full);
+                            let old_w = vec_get(total_warnings, 0);
+                            vec_pop(total_warnings);
+                            vec_push(total_warnings, old_w + w);
+                            let old_f = vec_get(total_files, 0);
+                            vec_pop(total_files);
+                            vec_push(total_files, old_f + 1);
+                        }
+                    }
+                    ei = ei + 1;
+                }
+            }
+        }
+    }
+}
+
+fn main() ~ Console + Environment + FileSystem + Process {
+    let nargs = args_count();
+
+    if nargs < 2 {
+        print_help();
+        process_exit(0);
+    }
+
+    let mut recursive = false;
+    let mut file_count: i64 = 0;
+    let mut total_warnings: i64 = 0;
+
+    // First pass: detect flags
+    let mut i: i64 = 1;
+    while i < nargs {
+        let arg = args_get(i);
+        if arg == "--help" || arg == "-h" {
+            print_help();
+            process_exit(0);
+        }
+        if arg == "-r" {
+            recursive = true;
+        }
+        i = i + 1;
+    }
+
+    // Second pass: process files/dirs
+    let mut j: i64 = 1;
+    while j < nargs {
+        let arg = args_get(j);
+
+        if arg.starts_with("-") {
+            // Skip flags
+            j = j + 1;
+        } else {
+            if recursive {
+                let isdir = is_dir(arg);
+                if isdir {
+                    // Use vecs as mutable counters
+                    let tw = vec_new();
+                    vec_push(tw, 0);
+                    let tf = vec_new();
+                    vec_push(tf, 0);
+
+                    lint_directory(arg, tw, tf);
+
+                    total_warnings = total_warnings + vec_get(tw, 0);
+                    file_count = file_count + vec_get(tf, 0);
+                } else {
+                    // Single file even in recursive mode
+                    let exists = file_exists(arg);
+                    if exists {
+                        let w = lint_file(arg);
+                        total_warnings = total_warnings + w;
+                        file_count = file_count + 1;
+                    } else {
+                        println!("qlint: {}: No such file or directory", arg);
+                    }
+                }
+            } else {
+                // Direct file mode
+                let exists = file_exists(arg);
+                if exists {
+                    let w = lint_file(arg);
+                    total_warnings = total_warnings + w;
+                    file_count = file_count + 1;
+                } else {
+                    println!("qlint: {}: No such file or directory", arg);
+                }
+            }
+
+            j = j + 1;
+        }
+    }
+
+    // Print summary
+    println!("");
+    println!("Summary: {} warnings in {} files",
+             total_warnings, file_count);
+
+    if total_warnings > 0 {
+        process_exit(1);
+    }
+}

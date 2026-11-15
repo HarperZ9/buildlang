@@ -1,0 +1,35 @@
+# ===============================================================================
+# BUILDOS KERNEL
+# ===============================================================================
+# Copyright (c) 2024-2025 Zain Dana Harper. All Rights Reserved.
+# ===============================================================================
+
+[package]
+name = "buildos-kernel"
+version = "2.0.0"
+edition = "2021"
+authors = ["Zain Dana Harper"]
+license = "Proprietary"
+description = "BuildOS Kernel"
+
+[dependencies]
+spin = "0.9"
+bitflags = "2.4"
+static_assertions = "1.1"
+libm = "0.2"
+
+[features]
+default = []
+test = []
+multiboot = []
+uefi = []
+module_sig_force = []
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+lto = true
+opt-level = 2
+

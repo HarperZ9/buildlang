@@ -1,0 +1,2105 @@
+// =============================================================================
+// BUILD Photon - Render Graph System
+// =============================================================================
+// Frame graph / render graph for automatic resource management,
+// pass scheduling, barrier insertion, and GPU synchronization.
+
+module photon::render_graph {
+    use core::mem;
+    use core::collections::{HashMap, HashSet, Vec, Queue};
+    use math::{Vec2, Vec3, Vec4};
+    use gpu::{
+        Buffer, Texture, Sampler, Pipeline, ComputePipeline, BindGroup,
+        CommandEncoder, RenderPass, ComputePass, Device, Queue as GpuQueue,
+        TextureFormat, TextureUsage, BufferUsage, LoadOp, StoreOp
+    };
+
+    // =========================================================================
+    // Resource Handle Types
+    // =========================================================================
+
+    /// Handle to a transient texture resource
+    #[derive(Clone, Copy, PartialEq, Eq, Hash)]
+    pub struct TextureHandle {
+        index: u32,
+        version: u32,
+    }
+
+    /// Handle to a transient buffer resource
+    #[derive(Clone, Copy, PartialEq, Eq, Hash)]
+    pub struct BufferHandle {
+        index: u32,
+        version: u32,
+    }
+
+    /// Handle to an imported (external) texture
+    #[derive(Clone, Copy, PartialEq, Eq, Hash)]
+    pub struct ImportedTextureHandle {
+        index: u32,
+    }
+
+    /// Handle to an imported (external) buffer
+    #[derive(Clone, Copy, PartialEq, Eq, Hash)]
+    pub struct ImportedBufferHandle {
+        index: u32,
+    }
+
+    /// Handle to a render pass
+    #[derive(Clone, Copy, PartialEq, Eq, Hash)]
+    pub struct PassHandle {
+        index: u32,
+    }
+
+    // =========================================================================
+    // Resource Descriptors
+    // =========================================================================
+
+    /// Texture resource description
+    pub struct TextureDesc {
+        pub width: u32,
+        pub height: u32,
+        pub depth: u32,
+        pub mip_levels: u32,
+        pub array_layers: u32,
+        pub format: TextureFormat,
+        pub samples: u32,
+        pub usage_hint: TextureUsageHint,
+        pub name: String,
+    }
+
+    impl TextureDesc {
+        pub fn render_target_2d(name: &str, width: u32, height: u32, format: TextureFormat) -> Self {
+            Self {
+                width,
+                height,
+                depth: 1,
+                mip_levels: 1,
+                array_layers: 1,
+                format,
+                samples: 1,
+                usage_hint: TextureUsageHint::RenderTarget,
+                name: name.to_string(),
+            }
+        }
+
+        pub fn depth_target_2d(name: &str, width: u32, height: u32) -> Self {
+            Self::render_target_2d(name, width, height, TextureFormat::Depth32Float)
+        }
+
+        pub fn storage_2d(name: &str, width: u32, height: u32, format: TextureFormat) -> Self {
+            Self {
+                width,
+                height,
+                depth: 1,
+                mip_levels: 1,
+                array_layers: 1,
+                format,
+                samples: 1,
+                usage_hint: TextureUsageHint::Storage,
+                name: name.to_string(),
+            }
+        }
+
+        pub fn with_mips(mut self, mip_levels: u32) -> Self {
+            self.mip_levels = mip_levels;
+            self
+        }
+
+        pub fn with_samples(mut self, samples: u32) -> Self {
+            self.samples = samples;
+            self
+        }
+
+        pub fn with_array_layers(mut self, layers: u32) -> Self {
+            self.array_layers = layers;
+            self
+        }
+    }
+
+    /// Buffer resource description
+    pub struct BufferDesc {
+        pub size: usize,
+        pub usage_hint: BufferUsageHint,
+        pub name: String,
+    }
+
+    impl BufferDesc {
+        pub fn storage(name: &str, size: usize) -> Self {
+            Self {
+                size,
+                usage_hint: BufferUsageHint::Storage,
+                name: name.to_string(),
+            }
+        }
+
+        pub fn uniform(name: &str, size: usize) -> Self {
+            Self {
+                size,
+                usage_hint: BufferUsageHint::Uniform,
+                name: name.to_string(),
+            }
+        }
+
+        pub fn vertex(name: &str, size: usize) -> Self {
+            Self {
+                size,
+                usage_hint: BufferUsageHint::Vertex,
+                name: name.to_string(),
+            }
+        }
+
+        pub fn index(name: &str, size: usize) -> Self {
+            Self {
+                size,
+                usage_hint: BufferUsageHint::Index,
+                name: name.to_string(),
+            }
+        }
+
+        pub fn indirect(name: &str, size: usize) -> Self {
+            Self {
+                size,
+                usage_hint: BufferUsageHint::Indirect,
+                name: name.to_string(),
+            }
+        }
+    }
+
+    /// Texture usage hints
+    pub enum TextureUsageHint {
+        RenderTarget,
+        DepthTarget,
+        Storage,
+        Sampled,
+        CopySource,
+        CopyDest,
+    }
+
+    /// Buffer usage hints
+    pub enum BufferUsageHint {
+        Storage,
+        Uniform,
+        Vertex,
+        Index,
+        Indirect,
+        CopySource,
+        CopyDest,
+    }
+
+    // =========================================================================
+    // Resource Access Types
+    // =========================================================================
+
+    /// How a pass accesses a texture
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    pub enum TextureAccess {
+        /// Read as sampled texture
+        Read,
+        /// Read as storage image
+        ReadStorage,
+        /// Write as render target color attachment
+        WriteColor { clear: Option<ClearColor> },
+        /// Write as render target depth attachment
+        WriteDepth { clear: Option<ClearDepth> },
+        /// Write as storage image
+        WriteStorage,
+        /// Read and write as storage image
+        ReadWriteStorage,
+        /// Resolve MSAA source
+        ResolveSource,
+        /// Resolve MSAA destination
+        ResolveDest,
+        /// Copy source
+        CopySource,
+        /// Copy destination
+        CopyDest,
+    }
+
+    /// How a pass accesses a buffer
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    pub enum BufferAccess {
+        /// Read in vertex shader
+        VertexRead,
+        /// Read in shader as storage buffer
+        ShaderRead,
+        /// Write in shader as storage buffer
+        ShaderWrite,
+        /// Read and write in shader
+        ShaderReadWrite,
+        /// Read for indirect draw/dispatch
+        IndirectRead,
+        /// Copy source
+        CopySource,
+        /// Copy destination
+        CopyDest,
+    }
+
+    /// Clear color value
+    #[derive(Clone, Copy)]
+    pub struct ClearColor {
+        pub r: f32,
+        pub g: f32,
+        pub b: f32,
+        pub a: f32,
+    }
+
+    impl ClearColor {
+        pub fn black() -> Self {
+            Self { r: 0.0, g: 0.0, b: 0.0, a: 1.0 }
+        }
+
+        pub fn transparent() -> Self {
+            Self { r: 0.0, g: 0.0, b: 0.0, a: 0.0 }
+        }
+
+        pub fn white() -> Self {
+            Self { r: 1.0, g: 1.0, b: 1.0, a: 1.0 }
+        }
+    }
+
+    /// Clear depth value
+    #[derive(Clone, Copy)]
+    pub struct ClearDepth {
+        pub depth: f32,
+        pub stencil: Option<u8>,
+    }
+
+    impl ClearDepth {
+        pub fn far() -> Self {
+            Self { depth: 1.0, stencil: None }
+        }
+
+        pub fn near() -> Self {
+            Self { depth: 0.0, stencil: None }
+        }
+    }
+
+    // =========================================================================
+    // Resource State Tracking
+    // =========================================================================
+
+    /// Resource state for barrier generation
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    pub enum ResourceState {
+        Undefined,
+        ColorAttachment,
+        DepthAttachment,
+        ShaderReadOnly,
+        ShaderReadWrite,
+        TransferSource,
+        TransferDest,
+        Present,
+    }
+
+    /// Pending resource barrier
+    pub struct ResourceBarrier {
+        resource_type: ResourceType,
+        resource_index: u32,
+        before_state: ResourceState,
+        after_state: ResourceState,
+    }
+
+    enum ResourceType {
+        Texture,
+        Buffer,
+    }
+
+    // =========================================================================
+    // Pass Types
+    // =========================================================================
+
+    /// Type of render pass
+    pub enum PassType {
+        Graphics,
+        Compute,
+        Copy,
+        RayTracing,
+        Present,
+    }
+
+    /// Pass queue assignment
+    pub enum PassQueue {
+        Graphics,
+        Compute,
+        Transfer,
+    }
+
+    /// Resource dependency for a pass
+    struct ResourceDependency {
+        resource_type: ResourceType,
+        handle_index: u32,
+        access: ResourceAccessType,
+        mip_level: Option<u32>,
+        array_layer: Option<u32>,
+    }
+
+    enum ResourceAccessType {
+        Texture(TextureAccess),
+        Buffer(BufferAccess),
+    }
+
+    /// Render pass data
+    pub struct RenderPassData {
+        pub name: String,
+        pub pass_type: PassType,
+        pub queue: PassQueue,
+        pub color_attachments: Vec<ColorAttachment>,
+        pub depth_attachment: Option<DepthAttachment>,
+        pub reads: Vec<ResourceDependency>,
+        pub writes: Vec<ResourceDependency>,
+        pub execute_fn: Option<Box<dyn FnOnce(&mut PassContext)>>,
+        pub enabled: bool,
+        pub cull_immune: bool,  // Cannot be culled even if no outputs used
+    }
+
+    /// Color attachment for a render pass
+    pub struct ColorAttachment {
+        pub texture: TextureHandle,
+        pub mip_level: u32,
+        pub array_layer: u32,
+        pub load_op: LoadOp,
+        pub store_op: StoreOp,
+        pub clear_value: Option<ClearColor>,
+        pub resolve_target: Option<TextureHandle>,
+    }
+
+    /// Depth attachment for a render pass
+    pub struct DepthAttachment {
+        pub texture: TextureHandle,
+        pub load_op: LoadOp,
+        pub store_op: StoreOp,
+        pub clear_value: Option<ClearDepth>,
+        pub read_only: bool,
+    }
+
+    // =========================================================================
+    // Pass Builder
+    // =========================================================================
+
+    /// Builder for constructing render passes
+    pub struct PassBuilder<'a> {
+        graph: &'a mut RenderGraph,
+        pass_handle: PassHandle,
+        pass_data: RenderPassData,
+    }
+
+    impl<'a> PassBuilder<'a> {
+        /// Read a texture as a sampled input
+        pub fn read_texture(&mut self, handle: TextureHandle) -> &mut Self {
+            self.pass_data.reads.push(ResourceDependency {
+                resource_type: ResourceType::Texture,
+                handle_index: handle.index,
+                access: ResourceAccessType::Texture(TextureAccess::Read),
+                mip_level: None,
+                array_layer: None,
+            });
+            self
+        }
+
+        /// Read a texture at a specific mip level
+        pub fn read_texture_mip(&mut self, handle: TextureHandle, mip: u32) -> &mut Self {
+            self.pass_data.reads.push(ResourceDependency {
+                resource_type: ResourceType::Texture,
+                handle_index: handle.index,
+                access: ResourceAccessType::Texture(TextureAccess::Read),
+                mip_level: Some(mip),
+                array_layer: None,
+            });
+            self
+        }
+
+        /// Read a texture as storage image
+        pub fn read_storage_texture(&mut self, handle: TextureHandle) -> &mut Self {
+            self.pass_data.reads.push(ResourceDependency {
+                resource_type: ResourceType::Texture,
+                handle_index: handle.index,
+                access: ResourceAccessType::Texture(TextureAccess::ReadStorage),
+                mip_level: None,
+                array_layer: None,
+            });
+            self
+        }
+
+        /// Write to a texture as color attachment
+        pub fn write_color(&mut self, handle: TextureHandle, clear: Option<ClearColor>) -> &mut Self {
+            self.pass_data.color_attachments.push(ColorAttachment {
+                texture: handle,
+                mip_level: 0,
+                array_layer: 0,
+                load_op: if clear.is_some() { LoadOp::Clear } else { LoadOp::Load },
+                store_op: StoreOp::Store,
+                clear_value: clear,
+                resolve_target: None,
+            });
+
+            self.pass_data.writes.push(ResourceDependency {
+                resource_type: ResourceType::Texture,
+                handle_index: handle.index,
+                access: ResourceAccessType::Texture(TextureAccess::WriteColor { clear }),
+                mip_level: None,
+                array_layer: None,
+            });
+            self
+        }
+
+        /// Write to depth attachment
+        pub fn write_depth(&mut self, handle: TextureHandle, clear: Option<ClearDepth>) -> &mut Self {
+            self.pass_data.depth_attachment = Some(DepthAttachment {
+                texture: handle,
+                load_op: if clear.is_some() { LoadOp::Clear } else { LoadOp::Load },
+                store_op: StoreOp::Store,
+                clear_value: clear,
+                read_only: false,
+            });
+
+            self.pass_data.writes.push(ResourceDependency {
+                resource_type: ResourceType::Texture,
+                handle_index: handle.index,
+                access: ResourceAccessType::Texture(TextureAccess::WriteDepth { clear }),
+                mip_level: None,
+                array_layer: None,
+            });
+            self
+        }
+
+        /// Read depth (depth test without write)
+        pub fn read_depth(&mut self, handle: TextureHandle) -> &mut Self {
+            self.pass_data.depth_attachment = Some(DepthAttachment {
+                texture: handle,
+                load_op: LoadOp::Load,
+                store_op: StoreOp::Store,
+                clear_value: None,
+                read_only: true,
+            });
+
+            self.pass_data.reads.push(ResourceDependency {
+                resource_type: ResourceType::Texture,
+                handle_index: handle.index,
+                access: ResourceAccessType::Texture(TextureAccess::Read),
+                mip_level: None,
+                array_layer: None,
+            });
+            self
+        }
+
+        /// Write to storage texture
+        pub fn write_storage_texture(&mut self, handle: TextureHandle) -> &mut Self {
+            self.pass_data.writes.push(ResourceDependency {
+                resource_type: ResourceType::Texture,
+                handle_index: handle.index,
+                access: ResourceAccessType::Texture(TextureAccess::WriteStorage),
+                mip_level: None,
+                array_layer: None,
+            });
+            self
+        }
+
+        /// Read/write storage texture
+        pub fn read_write_storage_texture(&mut self, handle: TextureHandle) -> &mut Self {
+            self.pass_data.reads.push(ResourceDependency {
+                resource_type: ResourceType::Texture,
+                handle_index: handle.index,
+                access: ResourceAccessType::Texture(TextureAccess::ReadWriteStorage),
+                mip_level: None,
+                array_layer: None,
+            });
+            self.pass_data.writes.push(ResourceDependency {
+                resource_type: ResourceType::Texture,
+                handle_index: handle.index,
+                access: ResourceAccessType::Texture(TextureAccess::ReadWriteStorage),
+                mip_level: None,
+                array_layer: None,
+            });
+            self
+        }
+
+        /// Read a buffer
+        pub fn read_buffer(&mut self, handle: BufferHandle) -> &mut Self {
+            self.pass_data.reads.push(ResourceDependency {
+                resource_type: ResourceType::Buffer,
+                handle_index: handle.index,
+                access: ResourceAccessType::Buffer(BufferAccess::ShaderRead),
+                mip_level: None,
+                array_layer: None,
+            });
+            self
+        }
+
+        /// Write to a buffer
+        pub fn write_buffer(&mut self, handle: BufferHandle) -> &mut Self {
+            self.pass_data.writes.push(ResourceDependency {
+                resource_type: ResourceType::Buffer,
+                handle_index: handle.index,
+                access: ResourceAccessType::Buffer(BufferAccess::ShaderWrite),
+                mip_level: None,
+                array_layer: None,
+            });
+            self
+        }
+
+        /// Read/write a buffer
+        pub fn read_write_buffer(&mut self, handle: BufferHandle) -> &mut Self {
+            self.pass_data.reads.push(ResourceDependency {
+                resource_type: ResourceType::Buffer,
+                handle_index: handle.index,
+                access: ResourceAccessType::Buffer(BufferAccess::ShaderReadWrite),
+                mip_level: None,
+                array_layer: None,
+            });
+            self.pass_data.writes.push(ResourceDependency {
+                resource_type: ResourceType::Buffer,
+                handle_index: handle.index,
+                access: ResourceAccessType::Buffer(BufferAccess::ShaderReadWrite),
+                mip_level: None,
+                array_layer: None,
+            });
+            self
+        }
+
+        /// Read buffer for indirect commands
+        pub fn read_indirect(&mut self, handle: BufferHandle) -> &mut Self {
+            self.pass_data.reads.push(ResourceDependency {
+                resource_type: ResourceType::Buffer,
+                handle_index: handle.index,
+                access: ResourceAccessType::Buffer(BufferAccess::IndirectRead),
+                mip_level: None,
+                array_layer: None,
+            });
+            self
+        }
+
+        /// MSAA resolve
+        pub fn resolve_msaa(&mut self, source: TextureHandle, dest: TextureHandle) -> &mut Self {
+            // Add resolve target to last color attachment
+            if let Some(last) = self.pass_data.color_attachments.last_mut() {
+                last.resolve_target = Some(dest);
+            }
+
+            self.pass_data.reads.push(ResourceDependency {
+                resource_type: ResourceType::Texture,
+                handle_index: source.index,
+                access: ResourceAccessType::Texture(TextureAccess::ResolveSource),
+                mip_level: None,
+                array_layer: None,
+            });
+            self.pass_data.writes.push(ResourceDependency {
+                resource_type: ResourceType::Texture,
+                handle_index: dest.index,
+                access: ResourceAccessType::Texture(TextureAccess::ResolveDest),
+                mip_level: None,
+                array_layer: None,
+            });
+            self
+        }
+
+        /// Set execution callback
+        pub fn set_execute<F: FnOnce(&mut PassContext) + 'static>(&mut self, f: F) -> &mut Self {
+            self.pass_data.execute_fn = Some(Box::new(f));
+            self
+        }
+
+        /// Mark pass as immune to culling
+        pub fn cull_immune(&mut self) -> &mut Self {
+            self.pass_data.cull_immune = true;
+            self
+        }
+
+        /// Enable or disable the pass
+        pub fn set_enabled(&mut self, enabled: bool) -> &mut Self {
+            self.pass_data.enabled = enabled;
+            self
+        }
+
+        /// Finalize the pass
+        pub fn build(self) -> PassHandle {
+            let handle = self.pass_handle;
+            self.graph.passes.push(self.pass_data);
+            handle
+        }
+    }
+
+    // =========================================================================
+    // Pass Execution Context
+    // =========================================================================
+
+    /// Context passed to pass execution callbacks
+    pub struct PassContext<'a> {
+        encoder: &'a mut CommandEncoder,
+        device: &'a Device,
+        queue: &'a GpuQueue,
+        textures: &'a HashMap<u32, Texture>,
+        buffers: &'a HashMap<u32, Buffer>,
+        render_pass: Option<RenderPass<'a>>,
+        compute_pass: Option<ComputePass<'a>>,
+    }
+
+    impl<'a> PassContext<'a> {
+        /// Get texture by handle
+        pub fn get_texture(&self, handle: TextureHandle) -> Option<&Texture> {
+            self.textures.get(&handle.index)
+        }
+
+        /// Get buffer by handle
+        pub fn get_buffer(&self, handle: BufferHandle) -> Option<&Buffer> {
+            self.buffers.get(&handle.index)
+        }
+
+        /// Get the command encoder
+        pub fn encoder(&mut self) -> &mut CommandEncoder {
+            self.encoder
+        }
+
+        /// Get the device
+        pub fn device(&self) -> &Device {
+            self.device
+        }
+
+        /// Get the queue
+        pub fn queue(&self) -> &GpuQueue {
+            self.queue
+        }
+    }
+
+    // =========================================================================
+    // Transient Resource Pool
+    // =========================================================================
+
+    /// Key for texture aliasing
+    #[derive(Clone, PartialEq, Eq, Hash)]
+    struct TextureKey {
+        width: u32,
+        height: u32,
+        depth: u32,
+        format: TextureFormat,
+        samples: u32,
+        mip_levels: u32,
+        array_layers: u32,
+    }
+
+    impl TextureKey {
+        fn from_desc(desc: &TextureDesc) -> Self {
+            Self {
+                width: desc.width,
+                height: desc.height,
+                depth: desc.depth,
+                format: desc.format,
+                samples: desc.samples,
+                mip_levels: desc.mip_levels,
+                array_layers: desc.array_layers,
+            }
+        }
+    }
+
+    /// Key for buffer aliasing
+    #[derive(Clone, PartialEq, Eq, Hash)]
+    struct BufferKey {
+        size: usize,
+        alignment: usize,
+    }
+
+    /// Pool of reusable transient resources
+    pub struct TransientResourcePool {
+        free_textures: HashMap<TextureKey, Vec<Texture>>,
+        free_buffers: HashMap<BufferKey, Vec<Buffer>>,
+        frame_textures: Vec<(TextureKey, Texture)>,
+        frame_buffers: Vec<(BufferKey, Buffer)>,
+    }
+
+    impl TransientResourcePool {
+        pub fn new() -> Self {
+            Self {
+                free_textures: HashMap::new(),
+                free_buffers: HashMap::new(),
+                frame_textures: Vec::new(),
+                frame_buffers: Vec::new(),
+            }
+        }
+
+        /// Acquire a texture from the pool or create new
+        pub fn acquire_texture(&mut self, device: &Device, desc: &TextureDesc) -> Texture {
+            let key = TextureKey::from_desc(desc);
+
+            if let Some(textures) = self.free_textures.get_mut(&key) {
+                if let Some(texture) = textures.pop() {
+                    self.frame_textures.push((key, texture.clone()));
+                    return texture;
+                }
+            }
+
+            // Create new texture
+            let texture = device.create_texture(&gpu::TextureDesc {
+                width: desc.width,
+                height: desc.height,
+                depth: desc.depth,
+                mip_levels: desc.mip_levels,
+                array_layers: desc.array_layers,
+                format: desc.format,
+                samples: desc.samples,
+                usage: Self::texture_usage_from_hint(&desc.usage_hint),
+                ..Default::default()
+            });
+
+            self.frame_textures.push((key, texture.clone()));
+            texture
+        }
+
+        /// Acquire a buffer from the pool or create new
+        pub fn acquire_buffer(&mut self, device: &Device, desc: &BufferDesc) -> Buffer {
+            let key = BufferKey {
+                size: desc.size,
+                alignment: 256, // Standard alignment
+            };
+
+            if let Some(buffers) = self.free_buffers.get_mut(&key) {
+                if let Some(buffer) = buffers.pop() {
+                    self.frame_buffers.push((key, buffer.clone()));
+                    return buffer;
+                }
+            }
+
+            // Create new buffer
+            let buffer = device.create_buffer(&gpu::BufferDesc {
+                size: desc.size,
+                usage: Self::buffer_usage_from_hint(&desc.usage_hint),
+                ..Default::default()
+            });
+
+            self.frame_buffers.push((key, buffer.clone()));
+            buffer
+        }
+
+        /// Release all frame resources back to pool
+        pub fn end_frame(&mut self) {
+            for (key, texture) in self.frame_textures.drain(..) {
+                self.free_textures.entry(key).or_insert_with(Vec::new).push(texture);
+            }
+
+            for (key, buffer) in self.frame_buffers.drain(..) {
+                self.free_buffers.entry(key).or_insert_with(Vec::new).push(buffer);
+            }
+        }
+
+        /// Trim unused resources (call periodically)
+        pub fn trim(&mut self, max_free: usize) {
+            for textures in self.free_textures.values_mut() {
+                if textures.len() > max_free {
+                    textures.truncate(max_free);
+                }
+            }
+
+            for buffers in self.free_buffers.values_mut() {
+                if buffers.len() > max_free {
+                    buffers.truncate(max_free);
+                }
+            }
+        }
+
+        fn texture_usage_from_hint(hint: &TextureUsageHint) -> TextureUsage {
+            match hint {
+                TextureUsageHint::RenderTarget => {
+                    TextureUsage::RENDER_TARGET | TextureUsage::SAMPLED
+                }
+                TextureUsageHint::DepthTarget => {
+                    TextureUsage::RENDER_TARGET | TextureUsage::SAMPLED
+                }
+                TextureUsageHint::Storage => {
+                    TextureUsage::STORAGE | TextureUsage::SAMPLED
+                }
+                TextureUsageHint::Sampled => {
+                    TextureUsage::SAMPLED
+                }
+                TextureUsageHint::CopySource => {
+                    TextureUsage::COPY_SRC
+                }
+                TextureUsageHint::CopyDest => {
+                    TextureUsage::COPY_DST
+                }
+            }
+        }
+
+        fn buffer_usage_from_hint(hint: &BufferUsageHint) -> BufferUsage {
+            match hint {
+                BufferUsageHint::Storage => {
+                    BufferUsage::STORAGE
+                }
+                BufferUsageHint::Uniform => {
+                    BufferUsage::UNIFORM
+                }
+                BufferUsageHint::Vertex => {
+                    BufferUsage::VERTEX
+                }
+                BufferUsageHint::Index => {
+                    BufferUsage::INDEX
+                }
+                BufferUsageHint::Indirect => {
+                    BufferUsage::INDIRECT
+                }
+                BufferUsageHint::CopySource => {
+                    BufferUsage::COPY_SRC
+                }
+                BufferUsageHint::CopyDest => {
+                    BufferUsage::COPY_DST
+                }
+            }
+        }
+    }
+
+    // =========================================================================
+    // Render Graph
+    // =========================================================================
+
+    /// Transient texture resource
+    struct TransientTexture {
+        desc: TextureDesc,
+        first_use: Option<u32>,  // Pass index
+        last_use: Option<u32>,   // Pass index
+        producer: Option<u32>,   // Pass that creates the resource
+        consumers: Vec<u32>,     // Passes that read the resource
+    }
+
+    /// Transient buffer resource
+    struct TransientBuffer {
+        desc: BufferDesc,
+        first_use: Option<u32>,
+        last_use: Option<u32>,
+        producer: Option<u32>,
+        consumers: Vec<u32>,
+    }
+
+    /// Imported external texture
+    struct ImportedTexture {
+        texture: Texture,
+        name: String,
+        current_state: ResourceState,
+    }
+
+    /// Imported external buffer
+    struct ImportedBuffer {
+        buffer: Buffer,
+        name: String,
+        current_state: ResourceState,
+    }
+
+    /// Main render graph structure
+    pub struct RenderGraph {
+        // Resources
+        transient_textures: Vec<TransientTexture>,
+        transient_buffers: Vec<TransientBuffer>,
+        imported_textures: Vec<ImportedTexture>,
+        imported_buffers: Vec<ImportedBuffer>,
+
+        // Passes
+        passes: Vec<RenderPassData>,
+
+        // Execution data (populated during compile)
+        sorted_passes: Vec<u32>,
+        culled_passes: HashSet<u32>,
+        barriers: Vec<(u32, Vec<ResourceBarrier>)>,  // (pass_index, barriers)
+
+        // Allocated GPU resources
+        allocated_textures: HashMap<u32, Texture>,
+        allocated_buffers: HashMap<u32, Buffer>,
+
+        // Resource pool
+        resource_pool: TransientResourcePool,
+
+        // Configuration
+        debug_names: bool,
+    }
+
+    impl RenderGraph {
+        pub fn new() -> Self {
+            Self {
+                transient_textures: Vec::new(),
+                transient_buffers: Vec::new(),
+                imported_textures: Vec::new(),
+                imported_buffers: Vec::new(),
+                passes: Vec::new(),
+                sorted_passes: Vec::new(),
+                culled_passes: HashSet::new(),
+                barriers: Vec::new(),
+                allocated_textures: HashMap::new(),
+                allocated_buffers: HashMap::new(),
+                resource_pool: TransientResourcePool::new(),
+                debug_names: true,
+            }
+        }
+
+        /// Create a transient texture resource
+        pub fn create_texture(&mut self, desc: TextureDesc) -> TextureHandle {
+            let index = self.transient_textures.len() as u32;
+            self.transient_textures.push(TransientTexture {
+                desc,
+                first_use: None,
+                last_use: None,
+                producer: None,
+                consumers: Vec::new(),
+            });
+            TextureHandle { index, version: 0 }
+        }
+
+        /// Create a transient buffer resource
+        pub fn create_buffer(&mut self, desc: BufferDesc) -> BufferHandle {
+            let index = self.transient_buffers.len() as u32;
+            self.transient_buffers.push(TransientBuffer {
+                desc,
+                first_use: None,
+                last_use: None,
+                producer: None,
+                consumers: Vec::new(),
+            });
+            BufferHandle { index, version: 0 }
+        }
+
+        /// Import an external texture
+        pub fn import_texture(&mut self, name: &str, texture: Texture) -> ImportedTextureHandle {
+            let index = self.imported_textures.len() as u32;
+            self.imported_textures.push(ImportedTexture {
+                texture,
+                name: name.to_string(),
+                current_state: ResourceState::Undefined,
+            });
+            ImportedTextureHandle { index }
+        }
+
+        /// Import an external buffer
+        pub fn import_buffer(&mut self, name: &str, buffer: Buffer) -> ImportedBufferHandle {
+            let index = self.imported_buffers.len() as u32;
+            self.imported_buffers.push(ImportedBuffer {
+                buffer,
+                name: name.to_string(),
+                current_state: ResourceState::Undefined,
+            });
+            ImportedBufferHandle { index }
+        }
+
+        /// Add a graphics pass
+        pub fn add_graphics_pass(&mut self, name: &str) -> PassBuilder {
+            let pass_handle = PassHandle { index: self.passes.len() as u32 };
+            PassBuilder {
+                graph: self,
+                pass_handle,
+                pass_data: RenderPassData {
+                    name: name.to_string(),
+                    pass_type: PassType::Graphics,
+                    queue: PassQueue::Graphics,
+                    color_attachments: Vec::new(),
+                    depth_attachment: None,
+                    reads: Vec::new(),
+                    writes: Vec::new(),
+                    execute_fn: None,
+                    enabled: true,
+                    cull_immune: false,
+                },
+            }
+        }
+
+        /// Add a compute pass
+        pub fn add_compute_pass(&mut self, name: &str) -> PassBuilder {
+            let pass_handle = PassHandle { index: self.passes.len() as u32 };
+            PassBuilder {
+                graph: self,
+                pass_handle,
+                pass_data: RenderPassData {
+                    name: name.to_string(),
+                    pass_type: PassType::Compute,
+                    queue: PassQueue::Compute,
+                    color_attachments: Vec::new(),
+                    depth_attachment: None,
+                    reads: Vec::new(),
+                    writes: Vec::new(),
+                    execute_fn: None,
+                    enabled: true,
+                    cull_immune: false,
+                },
+            }
+        }
+
+        /// Add a copy pass
+        pub fn add_copy_pass(&mut self, name: &str) -> PassBuilder {
+            let pass_handle = PassHandle { index: self.passes.len() as u32 };
+            PassBuilder {
+                graph: self,
+                pass_handle,
+                pass_data: RenderPassData {
+                    name: name.to_string(),
+                    pass_type: PassType::Copy,
+                    queue: PassQueue::Transfer,
+                    color_attachments: Vec::new(),
+                    depth_attachment: None,
+                    reads: Vec::new(),
+                    writes: Vec::new(),
+                    execute_fn: None,
+                    enabled: true,
+                    cull_immune: false,
+                },
+            }
+        }
+
+        /// Compile the render graph
+        pub fn compile(&mut self) {
+            // 1. Update resource lifetimes
+            self.update_resource_lifetimes();
+
+            // 2. Cull unused passes
+            self.cull_passes();
+
+            // 3. Topological sort
+            self.topological_sort();
+
+            // 4. Generate barriers
+            self.generate_barriers();
+        }
+
+        /// Update first/last use for each resource
+        fn update_resource_lifetimes(&mut self) {
+            for (pass_idx, pass) in self.passes.iter().enumerate() {
+                if !pass.enabled {
+                    continue;
+                }
+
+                let pass_idx = pass_idx as u32;
+
+                // Process reads
+                for dep in &pass.reads {
+                    if let ResourceType::Texture = dep.resource_type {
+                        let tex = &mut self.transient_textures[dep.handle_index as usize];
+                        if tex.first_use.is_none() {
+                            tex.first_use = Some(pass_idx);
+                        }
+                        tex.last_use = Some(pass_idx);
+                        tex.consumers.push(pass_idx);
+                    }
+                }
+
+                // Process writes
+                for dep in &pass.writes {
+                    if let ResourceType::Texture = dep.resource_type {
+                        let tex = &mut self.transient_textures[dep.handle_index as usize];
+                        if tex.first_use.is_none() {
+                            tex.first_use = Some(pass_idx);
+                        }
+                        tex.last_use = Some(pass_idx);
+                        if tex.producer.is_none() {
+                            tex.producer = Some(pass_idx);
+                        }
+                    }
+                }
+            }
+        }
+
+        /// Cull passes that don't contribute to final output
+        fn cull_passes(&mut self) {
+            self.culled_passes.clear();
+
+            // Start with passes that are cull-immune or produce imported resources
+            let mut live_passes: HashSet<u32> = HashSet::new();
+
+            for (idx, pass) in self.passes.iter().enumerate() {
+                if !pass.enabled {
+                    self.culled_passes.insert(idx as u32);
+                    continue;
+                }
+
+                if pass.cull_immune {
+                    live_passes.insert(idx as u32);
+                }
+            }
+
+            // Backward propagate liveness
+            loop {
+                let prev_count = live_passes.len();
+
+                for (idx, pass) in self.passes.iter().enumerate() {
+                    if !pass.enabled || self.culled_passes.contains(&(idx as u32)) {
+                        continue;
+                    }
+
+                    // If any consumer of this pass's outputs is live, this pass is live
+                    for dep in &pass.writes {
+                        if let ResourceType::Texture = dep.resource_type {
+                            let tex = &self.transient_textures[dep.handle_index as usize];
+                            for consumer in &tex.consumers {
+                                if live_passes.contains(consumer) {
+                                    live_passes.insert(idx as u32);
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if live_passes.len() == prev_count {
+                    break;
+                }
+            }
+
+            // Mark non-live passes as culled
+            for idx in 0..self.passes.len() {
+                if !live_passes.contains(&(idx as u32)) && self.passes[idx].enabled {
+                    self.culled_passes.insert(idx as u32);
+                }
+            }
+        }
+
+        /// Topological sort of passes based on dependencies
+        fn topological_sort(&mut self) {
+            self.sorted_passes.clear();
+
+            // Build dependency graph
+            let num_passes = self.passes.len();
+            let mut in_degree = vec![0u32; num_passes];
+            let mut adjacency: Vec<Vec<u32>> = vec![Vec::new(); num_passes];
+
+            // For each texture, producer->consumer edges
+            for tex in &self.transient_textures {
+                if let Some(producer) = tex.producer {
+                    if self.culled_passes.contains(&producer) {
+                        continue;
+                    }
+
+                    for &consumer in &tex.consumers {
+                        if self.culled_passes.contains(&consumer) || consumer == producer {
+                            continue;
+                        }
+
+                        adjacency[producer as usize].push(consumer);
+                        in_degree[consumer as usize] += 1;
+                    }
+                }
+            }
+
+            // Kahn's algorithm
+            let mut queue: Queue<u32> = Queue::new();
+
+            for i in 0..num_passes {
+                if !self.culled_passes.contains(&(i as u32)) && in_degree[i] == 0 {
+                    queue.push(i as u32);
+                }
+            }
+
+            while let Some(pass_idx) = queue.pop() {
+                self.sorted_passes.push(pass_idx);
+
+                for &next in &adjacency[pass_idx as usize] {
+                    in_degree[next as usize] -= 1;
+                    if in_degree[next as usize] == 0 {
+                        queue.push(next);
+                    }
+                }
+            }
+
+            // Check for cycles
+            let active_passes = num_passes - self.culled_passes.len();
+            if self.sorted_passes.len() != active_passes {
+                panic!("Render graph contains a cycle!");
+            }
+        }
+
+        /// Generate resource barriers between passes
+        fn generate_barriers(&mut self) {
+            self.barriers.clear();
+
+            // Track current state of each resource
+            let mut texture_states: Vec<ResourceState> = vec![ResourceState::Undefined;
+                                                              self.transient_textures.len()];
+            let mut buffer_states: Vec<ResourceState> = vec![ResourceState::Undefined;
+                                                             self.transient_buffers.len()];
+
+            for &pass_idx in &self.sorted_passes {
+                let pass = &self.passes[pass_idx as usize];
+                let mut pass_barriers = Vec::new();
+
+                // Check reads
+                for dep in &pass.reads {
+                    let (current_state, required_state) = match &dep.resource_type {
+                        ResourceType::Texture => {
+                            let current = texture_states[dep.handle_index as usize];
+                            let required = match &dep.access {
+                                ResourceAccessType::Texture(TextureAccess::Read) |
+                                ResourceAccessType::Texture(TextureAccess::ReadStorage) => {
+                                    ResourceState::ShaderReadOnly
+                                }
+                                ResourceAccessType::Texture(TextureAccess::ReadWriteStorage) => {
+                                    ResourceState::ShaderReadWrite
+                                }
+                                _ => current,
+                            };
+                            (current, required)
+                        }
+                        ResourceType::Buffer => {
+                            let current = buffer_states[dep.handle_index as usize];
+                            let required = match &dep.access {
+                                ResourceAccessType::Buffer(BufferAccess::ShaderRead) |
+                                ResourceAccessType::Buffer(BufferAccess::VertexRead) |
+                                ResourceAccessType::Buffer(BufferAccess::IndirectRead) => {
+                                    ResourceState::ShaderReadOnly
+                                }
+                                ResourceAccessType::Buffer(BufferAccess::ShaderReadWrite) => {
+                                    ResourceState::ShaderReadWrite
+                                }
+                                _ => current,
+                            };
+                            (current, required)
+                        }
+                    };
+
+                    if current_state != required_state {
+                        pass_barriers.push(ResourceBarrier {
+                            resource_type: dep.resource_type.clone(),
+                            resource_index: dep.handle_index,
+                            before_state: current_state,
+                            after_state: required_state,
+                        });
+
+                        // Update tracked state
+                        match dep.resource_type {
+                            ResourceType::Texture => {
+                                texture_states[dep.handle_index as usize] = required_state;
+                            }
+                            ResourceType::Buffer => {
+                                buffer_states[dep.handle_index as usize] = required_state;
+                            }
+                        }
+                    }
+                }
+
+                // Check writes
+                for dep in &pass.writes {
+                    let (current_state, required_state) = match &dep.resource_type {
+                        ResourceType::Texture => {
+                            let current = texture_states[dep.handle_index as usize];
+                            let required = match &dep.access {
+                                ResourceAccessType::Texture(TextureAccess::WriteColor { .. }) => {
+                                    ResourceState::ColorAttachment
+                                }
+                                ResourceAccessType::Texture(TextureAccess::WriteDepth { .. }) => {
+                                    ResourceState::DepthAttachment
+                                }
+                                ResourceAccessType::Texture(TextureAccess::WriteStorage) |
+                                ResourceAccessType::Texture(TextureAccess::ReadWriteStorage) => {
+                                    ResourceState::ShaderReadWrite
+                                }
+                                ResourceAccessType::Texture(TextureAccess::CopyDest) => {
+                                    ResourceState::TransferDest
+                                }
+                                _ => current,
+                            };
+                            (current, required)
+                        }
+                        ResourceType::Buffer => {
+                            let current = buffer_states[dep.handle_index as usize];
+                            let required = match &dep.access {
+                                ResourceAccessType::Buffer(BufferAccess::ShaderWrite) |
+                                ResourceAccessType::Buffer(BufferAccess::ShaderReadWrite) => {
+                                    ResourceState::ShaderReadWrite
+                                }
+                                ResourceAccessType::Buffer(BufferAccess::CopyDest) => {
+                                    ResourceState::TransferDest
+                                }
+                                _ => current,
+                            };
+                            (current, required)
+                        }
+                    };
+
+                    if current_state != required_state {
+                        pass_barriers.push(ResourceBarrier {
+                            resource_type: dep.resource_type.clone(),
+                            resource_index: dep.handle_index,
+                            before_state: current_state,
+                            after_state: required_state,
+                        });
+
+                        // Update tracked state
+                        match dep.resource_type {
+                            ResourceType::Texture => {
+                                texture_states[dep.handle_index as usize] = required_state;
+                            }
+                            ResourceType::Buffer => {
+                                buffer_states[dep.handle_index as usize] = required_state;
+                            }
+                        }
+                    }
+                }
+
+                if !pass_barriers.is_empty() {
+                    self.barriers.push((pass_idx, pass_barriers));
+                }
+            }
+        }
+
+        /// Allocate GPU resources
+        pub fn allocate_resources(&mut self, device: &Device) {
+            self.allocated_textures.clear();
+            self.allocated_buffers.clear();
+
+            // Allocate textures
+            for (idx, tex) in self.transient_textures.iter().enumerate() {
+                // Skip unused textures
+                if tex.first_use.is_none() {
+                    continue;
+                }
+
+                let gpu_texture = self.resource_pool.acquire_texture(device, &tex.desc);
+                self.allocated_textures.insert(idx as u32, gpu_texture);
+            }
+
+            // Allocate buffers
+            for (idx, buf) in self.transient_buffers.iter().enumerate() {
+                if buf.first_use.is_none() {
+                    continue;
+                }
+
+                let gpu_buffer = self.resource_pool.acquire_buffer(device, &buf.desc);
+                self.allocated_buffers.insert(idx as u32, gpu_buffer);
+            }
+        }
+
+        /// Execute the render graph
+        pub fn execute(&mut self, device: &Device, queue: &GpuQueue) {
+            let mut encoder = device.create_command_encoder(&gpu::CommandEncoderDesc::default());
+
+            // Find barriers for each pass
+            let barrier_map: HashMap<u32, &Vec<ResourceBarrier>> = self.barriers.iter()
+                .map(|(idx, barriers)| (*idx, barriers))
+                .collect();
+
+            for &pass_idx in &self.sorted_passes {
+                // Insert barriers if needed
+                if let Some(barriers) = barrier_map.get(&pass_idx) {
+                    for barrier in *barriers {
+                        self.insert_barrier(&mut encoder, barrier);
+                    }
+                }
+
+                // Execute pass
+                let pass = &mut self.passes[pass_idx as usize];
+                if let Some(execute_fn) = pass.execute_fn.take() {
+                    let mut ctx = PassContext {
+                        encoder: &mut encoder,
+                        device,
+                        queue,
+                        textures: &self.allocated_textures,
+                        buffers: &self.allocated_buffers,
+                        render_pass: None,
+                        compute_pass: None,
+                    };
+                    execute_fn(&mut ctx);
+                }
+            }
+
+            // Submit command buffer
+            let command_buffer = encoder.finish();
+            queue.submit(&[command_buffer]);
+
+            // Return resources to pool
+            self.resource_pool.end_frame();
+        }
+
+        fn insert_barrier(&self, encoder: &mut CommandEncoder, barrier: &ResourceBarrier) {
+            // Convert ResourceState to pipeline stages and access flags
+            let (src_stage, src_access, dst_stage, dst_access) =
+                Self::barrier_states_to_stages(barrier.before_state, barrier.after_state);
+
+            match barrier.resource_type {
+                ResourceType::Texture => {
+                    if let Some(texture) = self.allocated_textures.get(&barrier.resource_index) {
+                        encoder.texture_barrier(texture, src_stage, src_access, dst_stage, dst_access);
+                    }
+                }
+                ResourceType::Buffer => {
+                    if let Some(buffer) = self.allocated_buffers.get(&barrier.resource_index) {
+                        encoder.buffer_barrier(buffer, src_stage, src_access, dst_stage, dst_access);
+                    }
+                }
+            }
+        }
+
+        fn barrier_states_to_stages(before: ResourceState, after: ResourceState)
+            -> (gpu::PipelineStage, gpu::AccessFlags, gpu::PipelineStage, gpu::AccessFlags)
+        {
+            let (src_stage, src_access) = match before {
+                ResourceState::Undefined => {
+                    (gpu::PipelineStage::TOP, gpu::AccessFlags::NONE)
+                }
+                ResourceState::ColorAttachment => {
+                    (gpu::PipelineStage::COLOR_OUTPUT, gpu::AccessFlags::COLOR_WRITE)
+                }
+                ResourceState::DepthAttachment => {
+                    (gpu::PipelineStage::DEPTH_STENCIL, gpu::AccessFlags::DEPTH_WRITE)
+                }
+                ResourceState::ShaderReadOnly => {
+                    (gpu::PipelineStage::FRAGMENT | gpu::PipelineStage::COMPUTE,
+                     gpu::AccessFlags::SHADER_READ)
+                }
+                ResourceState::ShaderReadWrite => {
+                    (gpu::PipelineStage::COMPUTE, gpu::AccessFlags::SHADER_READ | gpu::AccessFlags::SHADER_WRITE)
+                }
+                ResourceState::TransferSource => {
+                    (gpu::PipelineStage::TRANSFER, gpu::AccessFlags::TRANSFER_READ)
+                }
+                ResourceState::TransferDest => {
+                    (gpu::PipelineStage::TRANSFER, gpu::AccessFlags::TRANSFER_WRITE)
+                }
+                ResourceState::Present => {
+                    (gpu::PipelineStage::BOTTOM, gpu::AccessFlags::NONE)
+                }
+            };
+
+            let (dst_stage, dst_access) = match after {
+                ResourceState::Undefined => {
+                    (gpu::PipelineStage::TOP, gpu::AccessFlags::NONE)
+                }
+                ResourceState::ColorAttachment => {
+                    (gpu::PipelineStage::COLOR_OUTPUT, gpu::AccessFlags::COLOR_WRITE)
+                }
+                ResourceState::DepthAttachment => {
+                    (gpu::PipelineStage::DEPTH_STENCIL, gpu::AccessFlags::DEPTH_WRITE)
+                }
+                ResourceState::ShaderReadOnly => {
+                    (gpu::PipelineStage::FRAGMENT | gpu::PipelineStage::COMPUTE,
+                     gpu::AccessFlags::SHADER_READ)
+                }
+                ResourceState::ShaderReadWrite => {
+                    (gpu::PipelineStage::COMPUTE, gpu::AccessFlags::SHADER_READ | gpu::AccessFlags::SHADER_WRITE)
+                }
+                ResourceState::TransferSource => {
+                    (gpu::PipelineStage::TRANSFER, gpu::AccessFlags::TRANSFER_READ)
+                }
+                ResourceState::TransferDest => {
+                    (gpu::PipelineStage::TRANSFER, gpu::AccessFlags::TRANSFER_WRITE)
+                }
+                ResourceState::Present => {
+                    (gpu::PipelineStage::BOTTOM, gpu::AccessFlags::NONE)
+                }
+            };
+
+            (src_stage, src_access, dst_stage, dst_access)
+        }
+
+        /// Reset the graph for a new frame
+        pub fn reset(&mut self) {
+            self.transient_textures.clear();
+            self.transient_buffers.clear();
+            self.passes.clear();
+            self.sorted_passes.clear();
+            self.culled_passes.clear();
+            self.barriers.clear();
+            self.allocated_textures.clear();
+            self.allocated_buffers.clear();
+        }
+
+        /// Get statistics about the graph
+        pub fn get_stats(&self) -> RenderGraphStats {
+            RenderGraphStats {
+                total_passes: self.passes.len() as u32,
+                culled_passes: self.culled_passes.len() as u32,
+                active_passes: self.sorted_passes.len() as u32,
+                transient_textures: self.transient_textures.len() as u32,
+                transient_buffers: self.transient_buffers.len() as u32,
+                barrier_count: self.barriers.iter().map(|(_, b)| b.len()).sum::<usize>() as u32,
+            }
+        }
+    }
+
+    /// Render graph statistics
+    pub struct RenderGraphStats {
+        pub total_passes: u32,
+        pub culled_passes: u32,
+        pub active_passes: u32,
+        pub transient_textures: u32,
+        pub transient_buffers: u32,
+        pub barrier_count: u32,
+    }
+
+    // =========================================================================
+    // Async Compute Overlap
+    // =========================================================================
+
+    /// Tracks async compute overlap opportunities
+    pub struct AsyncComputeScheduler {
+        graphics_passes: Vec<u32>,
+        compute_passes: Vec<u32>,
+        overlap_regions: Vec<OverlapRegion>,
+    }
+
+    struct OverlapRegion {
+        graphics_start: u32,
+        graphics_end: u32,
+        compute_passes: Vec<u32>,
+        sync_point: u32,
+    }
+
+    impl AsyncComputeScheduler {
+        pub fn new() -> Self {
+            Self {
+                graphics_passes: Vec::new(),
+                compute_passes: Vec::new(),
+                overlap_regions: Vec::new(),
+            }
+        }
+
+        /// Analyze the graph for async compute opportunities
+        pub fn analyze(&mut self, graph: &RenderGraph) {
+            self.graphics_passes.clear();
+            self.compute_passes.clear();
+            self.overlap_regions.clear();
+
+            // Separate passes by queue
+            for &pass_idx in &graph.sorted_passes {
+                let pass = &graph.passes[pass_idx as usize];
+                match pass.queue {
+                    PassQueue::Graphics => self.graphics_passes.push(pass_idx),
+                    PassQueue::Compute => self.compute_passes.push(pass_idx),
+                    _ => {}
+                }
+            }
+
+            // Find overlappable compute work
+            self.find_overlap_regions(graph);
+        }
+
+        fn find_overlap_regions(&mut self, graph: &RenderGraph) {
+            // Simple heuristic: compute passes that don't depend on recent graphics output
+            // can overlap with preceding graphics passes
+
+            let mut current_region: Option<OverlapRegion> = None;
+
+            for &compute_pass in &self.compute_passes {
+                let pass = &graph.passes[compute_pass as usize];
+
+                // Check dependencies
+                let depends_on_graphics = pass.reads.iter().any(|dep| {
+                    if let ResourceType::Texture = dep.resource_type {
+                        let tex = &graph.transient_textures[dep.handle_index as usize];
+                        if let Some(producer) = tex.producer {
+                            return graph.passes[producer as usize].queue == PassQueue::Graphics;
+                        }
+                    }
+                    false
+                });
+
+                if !depends_on_graphics {
+                    // Can potentially overlap
+                    if current_region.is_none() {
+                        // Find preceding graphics passes
+                        let graphics_start = self.graphics_passes.iter()
+                            .position(|&g| g > compute_pass)
+                            .map(|p| if p > 0 { self.graphics_passes[p - 1] } else { 0 })
+                            .unwrap_or(0);
+
+                        current_region = Some(OverlapRegion {
+                            graphics_start,
+                            graphics_end: graphics_start,
+                            compute_passes: vec![compute_pass],
+                            sync_point: 0,
+                        });
+                    } else {
+                        current_region.as_mut().unwrap().compute_passes.push(compute_pass);
+                    }
+                } else {
+                    // Must sync before this pass
+                    if let Some(mut region) = current_region.take() {
+                        region.sync_point = compute_pass;
+                        self.overlap_regions.push(region);
+                    }
+                }
+            }
+
+            if let Some(region) = current_region.take() {
+                self.overlap_regions.push(region);
+            }
+        }
+
+        /// Get number of overlap regions found
+        pub fn overlap_count(&self) -> usize {
+            self.overlap_regions.len()
+        }
+    }
+
+    // =========================================================================
+    // Multi-Queue Execution
+    // =========================================================================
+
+    /// Timeline semaphore for cross-queue synchronization
+    pub struct TimelineSemaphore {
+        value: u64,
+        gpu_semaphore: gpu::Semaphore,
+    }
+
+    impl TimelineSemaphore {
+        pub fn new(device: &Device) -> Self {
+            Self {
+                value: 0,
+                gpu_semaphore: device.create_semaphore(&gpu::SemaphoreDesc {
+                    timeline: true,
+                    initial_value: 0,
+                }),
+            }
+        }
+
+        pub fn signal(&mut self) -> u64 {
+            self.value += 1;
+            self.value
+        }
+
+        pub fn current_value(&self) -> u64 {
+            self.value
+        }
+    }
+
+    /// Multi-queue executor for parallel submission
+    pub struct MultiQueueExecutor {
+        graphics_queue: GpuQueue,
+        compute_queue: GpuQueue,
+        transfer_queue: GpuQueue,
+        graphics_timeline: TimelineSemaphore,
+        compute_timeline: TimelineSemaphore,
+        transfer_timeline: TimelineSemaphore,
+    }
+
+    impl MultiQueueExecutor {
+        pub fn new(device: &Device) -> Self {
+            Self {
+                graphics_queue: device.get_queue(gpu::QueueType::Graphics),
+                compute_queue: device.get_queue(gpu::QueueType::Compute),
+                transfer_queue: device.get_queue(gpu::QueueType::Transfer),
+                graphics_timeline: TimelineSemaphore::new(device),
+                compute_timeline: TimelineSemaphore::new(device),
+                transfer_timeline: TimelineSemaphore::new(device),
+            }
+        }
+
+        /// Execute render graph with multi-queue scheduling
+        pub fn execute(&mut self, graph: &mut RenderGraph, device: &Device) {
+            let scheduler = AsyncComputeScheduler::new();
+            // scheduler.analyze(graph);
+
+            // For now, single-queue fallback
+            graph.execute(device, &self.graphics_queue);
+        }
+    }
+
+    // =========================================================================
+    // Render Graph Builder (Fluent API)
+    // =========================================================================
+
+    /// High-level builder for common render setups
+    pub struct RenderGraphBuilder {
+        graph: RenderGraph,
+        width: u32,
+        height: u32,
+    }
+
+    impl RenderGraphBuilder {
+        pub fn new(width: u32, height: u32) -> Self {
+            Self {
+                graph: RenderGraph::new(),
+                width,
+                height,
+            }
+        }
+
+        /// Add a depth prepass
+        pub fn add_depth_prepass(&mut self) -> (TextureHandle, PassHandle) {
+            let depth = self.graph.create_texture(
+                TextureDesc::depth_target_2d("DepthBuffer", self.width, self.height)
+            );
+
+            let pass = self.graph.add_graphics_pass("DepthPrepass")
+                .write_depth(depth, Some(ClearDepth::far()))
+                .cull_immune()
+                .build();
+
+            (depth, pass)
+        }
+
+        /// Add a G-Buffer pass
+        pub fn add_gbuffer_pass(&mut self, depth: TextureHandle)
+            -> (TextureHandle, TextureHandle, TextureHandle, PassHandle)
+        {
+            let albedo = self.graph.create_texture(
+                TextureDesc::render_target_2d("GBufferAlbedo", self.width, self.height,
+                                             TextureFormat::Rgba8Unorm)
+            );
+
+            let normal = self.graph.create_texture(
+                TextureDesc::render_target_2d("GBufferNormal", self.width, self.height,
+                                             TextureFormat::Rgba16Float)
+            );
+
+            let material = self.graph.create_texture(
+                TextureDesc::render_target_2d("GBufferMaterial", self.width, self.height,
+                                             TextureFormat::Rgba8Unorm)
+            );
+
+            let pass = self.graph.add_graphics_pass("GBuffer")
+                .write_color(albedo, Some(ClearColor::black()))
+                .write_color(normal, Some(ClearColor::black()))
+                .write_color(material, Some(ClearColor::black()))
+                .write_depth(depth, None)
+                .cull_immune()
+                .build();
+
+            (albedo, normal, material, pass)
+        }
+
+        /// Add a deferred lighting pass
+        pub fn add_lighting_pass(&mut self, albedo: TextureHandle, normal: TextureHandle,
+                                 material: TextureHandle, depth: TextureHandle)
+            -> (TextureHandle, PassHandle)
+        {
+            let hdr_output = self.graph.create_texture(
+                TextureDesc::storage_2d("HDROutput", self.width, self.height,
+                                       TextureFormat::Rgba16Float)
+            );
+
+            let pass = self.graph.add_compute_pass("DeferredLighting")
+                .read_texture(albedo)
+                .read_texture(normal)
+                .read_texture(material)
+                .read_texture(depth)
+                .write_storage_texture(hdr_output)
+                .cull_immune()
+                .build();
+
+            (hdr_output, pass)
+        }
+
+        /// Add post-processing chain
+        pub fn add_post_processing(&mut self, input: TextureHandle)
+            -> (TextureHandle, Vec<PassHandle>)
+        {
+            let mut passes = Vec::new();
+            let mut current = input;
+
+            // Bloom extract
+            let bloom_threshold = self.graph.create_texture(
+                TextureDesc::storage_2d("BloomThreshold", self.width / 2, self.height / 2,
+                                       TextureFormat::Rgba16Float)
+            );
+
+            let bloom_extract = self.graph.add_compute_pass("BloomExtract")
+                .read_texture(current)
+                .write_storage_texture(bloom_threshold)
+                .build();
+            passes.push(bloom_extract);
+
+            // Bloom blur (horizontal + vertical)
+            let bloom_blur_h = self.graph.create_texture(
+                TextureDesc::storage_2d("BloomBlurH", self.width / 2, self.height / 2,
+                                       TextureFormat::Rgba16Float)
+            );
+
+            let blur_h = self.graph.add_compute_pass("BloomBlurH")
+                .read_texture(bloom_threshold)
+                .write_storage_texture(bloom_blur_h)
+                .build();
+            passes.push(blur_h);
+
+            let bloom_blur_v = self.graph.create_texture(
+                TextureDesc::storage_2d("BloomBlurV", self.width / 2, self.height / 2,
+                                       TextureFormat::Rgba16Float)
+            );
+
+            let blur_v = self.graph.add_compute_pass("BloomBlurV")
+                .read_texture(bloom_blur_h)
+                .write_storage_texture(bloom_blur_v)
+                .build();
+            passes.push(blur_v);
+
+            // Tone mapping + bloom composite
+            let ldr_output = self.graph.create_texture(
+                TextureDesc::storage_2d("LDROutput", self.width, self.height,
+                                       TextureFormat::Rgba8UnormSrgb)
+            );
+
+            let tonemap = self.graph.add_compute_pass("ToneMap")
+                .read_texture(current)
+                .read_texture(bloom_blur_v)
+                .write_storage_texture(ldr_output)
+                .cull_immune()
+                .build();
+            passes.push(tonemap);
+
+            (ldr_output, passes)
+        }
+
+        /// Build and return the graph
+        pub fn build(self) -> RenderGraph {
+            self.graph
+        }
+    }
+
+    // =========================================================================
+    // Visualization / Debug
+    // =========================================================================
+
+    /// Generate a DOT graph for visualization
+    pub fn generate_dot_graph(graph: &RenderGraph) -> String {
+        let mut dot = String::from("digraph RenderGraph {\n");
+        dot.push_str("    rankdir=LR;\n");
+        dot.push_str("    node [shape=box];\n\n");
+
+        // Add pass nodes
+        for (idx, pass) in graph.passes.iter().enumerate() {
+            let culled = graph.culled_passes.contains(&(idx as u32));
+            let color = if culled { "gray" } else {
+                match pass.pass_type {
+                    PassType::Graphics => "lightblue",
+                    PassType::Compute => "lightgreen",
+                    PassType::Copy => "lightyellow",
+                    _ => "white",
+                }
+            };
+
+            dot.push_str(&format!("    pass_{} [label=\"{}\" style=filled fillcolor={}];\n",
+                                 idx, pass.name, color));
+        }
+
+        dot.push_str("\n");
+
+        // Add resource nodes and edges
+        for (tex_idx, tex) in graph.transient_textures.iter().enumerate() {
+            dot.push_str(&format!("    tex_{} [label=\"{}\" shape=ellipse style=filled fillcolor=lightpink];\n",
+                                 tex_idx, tex.desc.name));
+
+            if let Some(producer) = tex.producer {
+                dot.push_str(&format!("    pass_{} -> tex_{};\n", producer, tex_idx));
+            }
+
+            for &consumer in &tex.consumers {
+                dot.push_str(&format!("    tex_{} -> pass_{};\n", tex_idx, consumer));
+            }
+        }
+
+        dot.push_str("}\n");
+        dot
+    }
+
+    // =========================================================================
+    // Unit Tests
+    // =========================================================================
+
+    #[test]
+    fn test_texture_handle() {
+        let h1 = TextureHandle { index: 0, version: 0 };
+        let h2 = TextureHandle { index: 0, version: 0 };
+        let h3 = TextureHandle { index: 1, version: 0 };
+
+        assert_eq!(h1, h2);
+        assert_ne!(h1, h3);
+    }
+
+    #[test]
+    fn test_texture_desc_builder() {
+        let desc = TextureDesc::render_target_2d("Test", 1920, 1080, TextureFormat::Rgba8Unorm)
+            .with_mips(4)
+            .with_samples(4);
+
+        assert_eq!(desc.width, 1920);
+        assert_eq!(desc.height, 1080);
+        assert_eq!(desc.mip_levels, 4);
+        assert_eq!(desc.samples, 4);
+    }
+
+    #[test]
+    fn test_buffer_desc_builder() {
+        let desc = BufferDesc::storage("TestBuffer", 1024 * 1024);
+
+        assert_eq!(desc.size, 1024 * 1024);
+        assert_eq!(desc.name, "TestBuffer");
+    }
+
+    #[test]
+    fn test_clear_values() {
+        let black = ClearColor::black();
+        assert_eq!(black.r, 0.0);
+        assert_eq!(black.a, 1.0);
+
+        let far_depth = ClearDepth::far();
+        assert_eq!(far_depth.depth, 1.0);
+    }
+
+    #[test]
+    fn test_render_graph_create_resources() {
+        let mut graph = RenderGraph::new();
+
+        let tex = graph.create_texture(
+            TextureDesc::render_target_2d("Test", 1920, 1080, TextureFormat::Rgba8Unorm)
+        );
+        assert_eq!(tex.index, 0);
+
+        let buf = graph.create_buffer(BufferDesc::storage("TestBuf", 1024));
+        assert_eq!(buf.index, 0);
+
+        let tex2 = graph.create_texture(
+            TextureDesc::depth_target_2d("Depth", 1920, 1080)
+        );
+        assert_eq!(tex2.index, 1);
+    }
+
+    #[test]
+    fn test_render_graph_builder() {
+        let mut builder = RenderGraphBuilder::new(1920, 1080);
+
+        let (depth, _depth_pass) = builder.add_depth_prepass();
+        let (albedo, normal, material, _gbuffer_pass) = builder.add_gbuffer_pass(depth);
+        let (hdr, _lighting_pass) = builder.add_lighting_pass(albedo, normal, material, depth);
+        let (_ldr, _post_passes) = builder.add_post_processing(hdr);
+
+        let graph = builder.build();
+
+        assert!(graph.transient_textures.len() >= 6);
+        assert!(graph.passes.len() >= 4);
+    }
+
+    #[test]
+    fn test_topological_sort_simple() {
+        let mut graph = RenderGraph::new();
+
+        let tex = graph.create_texture(
+            TextureDesc::render_target_2d("Test", 100, 100, TextureFormat::Rgba8Unorm)
+        );
+
+        // Producer pass
+        graph.add_graphics_pass("Producer")
+            .write_color(tex, Some(ClearColor::black()))
+            .cull_immune()
+            .build();
+
+        // Consumer pass
+        graph.add_graphics_pass("Consumer")
+            .read_texture(tex)
+            .cull_immune()
+            .build();
+
+        graph.compile();
+
+        // Producer should come before consumer
+        let producer_pos = graph.sorted_passes.iter().position(|&p| p == 0);
+        let consumer_pos = graph.sorted_passes.iter().position(|&p| p == 1);
+
+        assert!(producer_pos.is_some());
+        assert!(consumer_pos.is_some());
+        assert!(producer_pos.unwrap() < consumer_pos.unwrap());
+    }
+
+    #[test]
+    fn test_pass_culling() {
+        let mut graph = RenderGraph::new();
+
+        let used_tex = graph.create_texture(
+            TextureDesc::render_target_2d("Used", 100, 100, TextureFormat::Rgba8Unorm)
+        );
+
+        let unused_tex = graph.create_texture(
+            TextureDesc::render_target_2d("Unused", 100, 100, TextureFormat::Rgba8Unorm)
+        );
+
+        // This pass writes to an unused texture
+        graph.add_graphics_pass("UnusedProducer")
+            .write_color(unused_tex, Some(ClearColor::black()))
+            .build();
+
+        // This pass writes to a used texture
+        graph.add_graphics_pass("UsedProducer")
+            .write_color(used_tex, Some(ClearColor::black()))
+            .cull_immune()  // Mark as output
+            .build();
+
+        graph.compile();
+
+        // UnusedProducer should be culled
+        assert!(graph.culled_passes.contains(&0));
+        assert!(!graph.culled_passes.contains(&1));
+    }
+
+    #[test]
+    fn test_resource_pool() {
+        let mut pool = TransientResourcePool::new();
+
+        // Simulate frame 1
+        // Would need actual device here, but this tests the data structures
+
+        // End frame returns resources to pool
+        pool.end_frame();
+
+        // Trim to 2 resources per key
+        pool.trim(2);
+    }
+
+    #[test]
+    fn test_graph_stats() {
+        let mut graph = RenderGraph::new();
+
+        let tex = graph.create_texture(
+            TextureDesc::render_target_2d("Test", 100, 100, TextureFormat::Rgba8Unorm)
+        );
+
+        graph.add_graphics_pass("Pass1")
+            .write_color(tex, Some(ClearColor::black()))
+            .cull_immune()
+            .build();
+
+        graph.add_graphics_pass("Pass2")
+            .read_texture(tex)
+            .cull_immune()
+            .build();
+
+        graph.compile();
+
+        let stats = graph.get_stats();
+
+        assert_eq!(stats.total_passes, 2);
+        assert_eq!(stats.culled_passes, 0);
+        assert_eq!(stats.active_passes, 2);
+        assert_eq!(stats.transient_textures, 1);
+    }
+
+    #[test]
+    fn test_dot_graph_generation() {
+        let mut graph = RenderGraph::new();
+
+        let tex = graph.create_texture(
+            TextureDesc::render_target_2d("TestRT", 100, 100, TextureFormat::Rgba8Unorm)
+        );
+
+        graph.add_graphics_pass("RenderPass")
+            .write_color(tex, Some(ClearColor::black()))
+            .cull_immune()
+            .build();
+
+        let dot = generate_dot_graph(&graph);
+
+        assert!(dot.contains("digraph RenderGraph"));
+        assert!(dot.contains("RenderPass"));
+        assert!(dot.contains("TestRT"));
+    }
+
+    #[test]
+    fn test_barrier_state_conversion() {
+        // Test undefined -> color attachment
+        let (src_stage, _, dst_stage, dst_access) =
+            RenderGraph::barrier_states_to_stages(ResourceState::Undefined, ResourceState::ColorAttachment);
+
+        assert_eq!(src_stage, gpu::PipelineStage::TOP);
+        assert_eq!(dst_stage, gpu::PipelineStage::COLOR_OUTPUT);
+
+        // Test color attachment -> shader read
+        let (src_stage, src_access, dst_stage, dst_access) =
+            RenderGraph::barrier_states_to_stages(ResourceState::ColorAttachment, ResourceState::ShaderReadOnly);
+
+        assert_eq!(src_stage, gpu::PipelineStage::COLOR_OUTPUT);
+        assert_eq!(src_access, gpu::AccessFlags::COLOR_WRITE);
+    }
+
+    #[test]
+    fn test_async_compute_scheduler() {
+        let scheduler = AsyncComputeScheduler::new();
+
+        // Just test that it can be created
+        assert_eq!(scheduler.overlap_count(), 0);
+    }
+}

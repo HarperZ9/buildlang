@@ -1,0 +1,533 @@
+// =============================================================================
+// qxargs — Command builder from stdin (xargs clone) written in BuildLang
+// =============================================================================
+// Since BuildLang has no process spawning, this prints the commands that
+// would be executed — still useful as a formatter / command builder.
+//
+// Usage:
+//   echo "a b c" | qxargs echo             -> echo a b c
+//   printf "file1\nfile2\n" | qxargs rm     -> rm file1 file2
+//   printf "a\nb\nc\n" | qxargs -n 1 echo  -> echo a\necho b\necho c
+//   printf "a\nb\nc\n" | qxargs -I{} echo {} -> echo a\necho b\necho c
+//   echo "a,b,c" | qxargs -d, echo         -> echo a b c
+//   qxargs --help                           -> usage
+//
+// Design: Read all stdin, tokenize on whitespace (or custom delimiter),
+// then build command strings. -n limits args per command, -I does
+// placeholder replacement. All state in a flat struct.
+// =============================================================================
+
+// --- State struct ---
+struct Xargs {
+    // Parsed tokens (string pool)
+    sp_buf: String,
+    sp_starts: Vec<i32>,
+    sp_lens: Vec<i32>,
+    sp_n: i32,
+}
+
+fn xargs_new() -> Xargs {
+    Xargs {
+        sp_buf: "", sp_starts: vec![], sp_lens: vec![], sp_n: 0,
+    }
+}
+
+// --- String pool ops ---
+fn sp_add(s: &mut Xargs, text: String) -> i32 {
+    let id = s.sp_n;
+    let st = s.sp_buf.len();
+    s.sp_buf = s.sp_buf + text;
+    let en = s.sp_buf.len();
+    vec_push(s.sp_starts, st);
+    vec_push(s.sp_lens, en - st);
+    s.sp_n = s.sp_n + 1;
+    id
+}
+
+fn sp_get(s: &Xargs, id: i32) -> String {
+    let st = vec_get(s.sp_starts, id);
+    let ln = vec_get(s.sp_lens, id);
+    if ln == 0 { return ""; }
+    s.sp_buf.substring(st, ln)
+}
+
+// --- Helpers ---
+
+fn is_ws(c: String) -> bool {
+    c == " " || c == "\t" || c == "\n" || c == "\r"
+}
+
+fn strip_cr(line: String) -> String {
+    let len = line.len();
+    if len == 0 { return ""; }
+    let last = line.char_at(len - 1);
+    if last == "\r" {
+        if len == 1 { return ""; }
+        line.substring(0, len - 1)
+    } else {
+        line
+    }
+}
+
+// Strip trailing \r and \n from a field
+fn clean_field(raw: String) -> String {
+    let len = raw.len();
+    if len == 0 { return ""; }
+    let mut end = len;
+    let mut go = true;
+    while go {
+        if end == 0 {
+            go = false;
+        } else {
+            let c = raw.char_at(end - 1);
+            if c == "\r" || c == "\n" {
+                end = end - 1;
+            } else {
+                go = false;
+            }
+        }
+    }
+    if end == 0 { return ""; }
+    raw.substring(0, end)
+}
+
+// --- Tokenize input on whitespace ---
+fn tokenize_ws(s: &mut Xargs, input: String) {
+    let clen = input.len();
+    let mut pos: i32 = 0;
+    let mut go = true;
+
+    while go {
+        if pos >= clen {
+            go = false;
+        } else {
+            // Skip whitespace
+            let mut skip = true;
+            while skip {
+                if pos >= clen {
+                    skip = false;
+                } else {
+                    let c = input.char_at(pos);
+                    if is_ws(c) {
+                        pos = pos + 1;
+                    } else {
+                        skip = false;
+                    }
+                }
+            }
+
+            if pos < clen {
+                // Collect non-whitespace token
+                let tok_start = pos;
+                let mut tok_go = true;
+                while tok_go {
+                    if pos >= clen {
+                        tok_go = false;
+                    } else {
+                        let c = input.char_at(pos);
+                        if is_ws(c) {
+                            tok_go = false;
+                        } else {
+                            pos = pos + 1;
+                        }
+                    }
+                }
+                let tok_len = pos - tok_start;
+                if tok_len > 0 {
+                    let tok = input.substring(tok_start, tok_len);
+                    sp_add(s, tok);
+                }
+            }
+        }
+    }
+}
+
+// --- Tokenize input on a custom delimiter ---
+fn tokenize_delim(s: &mut Xargs, input: String, delim: String) {
+    let clen = input.len();
+    let dlen = delim.len();
+    if dlen == 0 {
+        // No delimiter: each character is a token
+        let mut i: i32 = 0;
+        while i < clen {
+            let c = input.char_at(i);
+            if c != "\n" && c != "\r" {
+                sp_add(s, c);
+            }
+            i = i + 1;
+        }
+        return;
+    }
+
+    let mut pos: i32 = 0;
+    let mut field_start: i32 = 0;
+    let mut go = true;
+
+    while go {
+        if pos >= clen {
+            // Last field
+            let flen = pos - field_start;
+            if flen > 0 {
+                let field = input.substring(field_start, flen);
+                let clean = clean_field(field);
+                if clean.len() > 0 {
+                    sp_add(s, clean);
+                }
+            }
+            go = false;
+        } else {
+            let mut is_delim = false;
+            if pos + dlen <= clen {
+                let chunk = input.substring(pos, dlen);
+                if chunk == delim {
+                    is_delim = true;
+                }
+            }
+
+            if is_delim {
+                let flen = pos - field_start;
+                if flen > 0 {
+                    let field = input.substring(field_start, flen);
+                    let clean = clean_field(field);
+                    if clean.len() > 0 {
+                        sp_add(s, clean);
+                    }
+                }
+                pos = pos + dlen;
+                field_start = pos;
+            } else {
+                pos = pos + 1;
+            }
+        }
+    }
+}
+
+// --- Tokenize by newlines (for -I mode, each line is one arg) ---
+fn tokenize_lines(s: &mut Xargs, input: String) {
+    let clen = input.len();
+    let mut pos: i32 = 0;
+    let mut line_start: i32 = 0;
+    let mut go = true;
+
+    while go {
+        if pos >= clen {
+            let ln = pos - line_start;
+            if ln > 0 {
+                let text = input.substring(line_start, ln);
+                let clean = strip_cr(text);
+                if clean.len() > 0 {
+                    sp_add(s, clean);
+                }
+            }
+            go = false;
+        } else {
+            let c = input.char_at(pos);
+            if c == "\n" {
+                let ln = pos - line_start;
+                if ln > 0 {
+                    let text = input.substring(line_start, ln);
+                    let clean = strip_cr(text);
+                    if clean.len() > 0 {
+                        sp_add(s, clean);
+                    }
+                }
+                line_start = pos + 1;
+                pos = pos + 1;
+            } else {
+                pos = pos + 1;
+            }
+        }
+    }
+}
+
+// --- Replace all occurrences of placeholder in template ---
+fn replace_all(template: String, placeholder: String, replacement: String) -> String {
+    let tlen = template.len();
+    let plen = placeholder.len();
+    if plen == 0 { return template; }
+
+    let mut result = "";
+    let mut pos: i32 = 0;
+    let mut go = true;
+
+    while go {
+        if pos >= tlen {
+            go = false;
+        } else {
+            let mut found = false;
+            if pos + plen <= tlen {
+                let chunk = template.substring(pos, plen);
+                if chunk == placeholder {
+                    found = true;
+                }
+            }
+            if found {
+                result = result + replacement;
+                pos = pos + plen;
+            } else {
+                let c = template.char_at(pos);
+                result = result + c;
+                pos = pos + 1;
+            }
+        }
+    }
+    result
+}
+
+// --- Build command string for a set of args ---
+// cmd_prefix is the initial command (e.g., "echo")
+fn build_cmd_prefix(argc: i32, argv_start: i32, argv_end: i32) -> String ~ Environment {
+    // Collect the initial command parts from argv
+    let mut prefix = "";
+    let mut i = argv_start;
+    while i < argc {
+        let a = args_get(i);
+        if i > argv_start {
+            prefix = prefix + " ";
+        }
+        prefix = prefix + a;
+        i = i + 1;
+    }
+    prefix
+}
+
+// --- Help ---
+fn print_help() ~ Console {
+    println!("qxargs — build and print commands from standard input");
+    println!("");
+    println!("Usage:");
+    println!("  command | qxargs [OPTIONS] COMMAND [INITIAL-ARGS]");
+    println!("");
+    println!("Options:");
+    println!("  -n NUM     use at most NUM arguments per command line");
+    println!("  -I REPL    replace occurrences of REPL in COMMAND with input");
+    println!("  -d DELIM   use DELIM as input delimiter (instead of whitespace)");
+    println!("  --help     display this help and exit");
+    println!("");
+    println!("Since BuildLang cannot spawn processes, qxargs prints the");
+    println!("commands that would be executed.");
+    println!("");
+    println!("Examples:");
+    println!("  echo \"a b c\" | qxargs echo");
+    println!("  printf \"a\\nb\\nc\\n\" | qxargs -n 1 echo");
+    println!("  printf \"a\\nb\\nc\\n\" | qxargs -I'{}' echo '{}'");
+}
+
+fn is_digit(c: String) -> bool {
+    c == "0" || c == "1" || c == "2" || c == "3" || c == "4" ||
+    c == "5" || c == "6" || c == "7" || c == "8" || c == "9"
+}
+
+fn parse_int(s: String) -> i32 {
+    let slen = s.len();
+    let mut val: i32 = 0;
+    let mut found = false;
+    let mut p: i32 = 0;
+    let mut go = true;
+    while go {
+        if p >= slen {
+            go = false;
+        } else {
+            let c = s.char_at(p);
+            if is_digit(c) {
+                let digit = if c == "0" { 0 }
+                    else if c == "1" { 1 }
+                    else if c == "2" { 2 }
+                    else if c == "3" { 3 }
+                    else if c == "4" { 4 }
+                    else if c == "5" { 5 }
+                    else if c == "6" { 6 }
+                    else if c == "7" { 7 }
+                    else if c == "8" { 8 }
+                    else { 9 };
+                val = val * 10 + digit;
+                found = true;
+                p = p + 1;
+            } else {
+                go = false;
+            }
+        }
+    }
+    if !found { -1 } else { val }
+}
+
+// --- Extract option value: handles -dX, -d'X' forms ---
+fn extract_opt_val(arg: String, prefix_len: i32) -> String {
+    let alen = arg.len();
+    if alen <= prefix_len {
+        return "";
+    }
+    let rest = arg.substring(prefix_len, alen - prefix_len);
+    let rlen = rest.len();
+    if rlen >= 2 {
+        let first = rest.char_at(0);
+        let last = rest.char_at(rlen - 1);
+        if first == "'" && last == "'" {
+            if rlen == 2 { return ""; }
+            return rest.substring(1, rlen - 2);
+        }
+    }
+    rest
+}
+
+// --- Main ---
+fn main() ~ Console + Environment + Process {
+    let nargs = args_count();
+
+    // Defaults
+    let mut max_args: i32 = -1;
+    let mut has_max_args = false;
+    let mut replace_str = "";
+    let mut has_replace = false;
+    let mut custom_delim = "";
+    let mut has_delim = false;
+    let mut cmd_start: i32 = -1;
+
+    // Parse arguments
+    let mut i: i32 = 1;
+    while i < nargs {
+        let arg = args_get(i);
+
+        if arg == "--help" || arg == "-h" {
+            print_help();
+            process_exit(0);
+        } else if arg == "-n" {
+            i = i + 1;
+            if i < nargs {
+                let val = args_get(i);
+                max_args = parse_int(val);
+                if max_args > 0 {
+                    has_max_args = true;
+                }
+            }
+        } else if arg == "-I" {
+            i = i + 1;
+            if i < nargs {
+                replace_str = args_get(i);
+                has_replace = true;
+            }
+        } else if arg.starts_with("-I") {
+            let val = extract_opt_val(arg, 2);
+            if val.len() > 0 {
+                replace_str = val;
+                has_replace = true;
+            }
+        } else if arg == "-d" {
+            i = i + 1;
+            if i < nargs {
+                let val = args_get(i);
+                let vlen = val.len();
+                if vlen >= 2 {
+                    let first = val.char_at(0);
+                    let last = val.char_at(vlen - 1);
+                    if first == "'" && last == "'" {
+                        custom_delim = if vlen == 2 { "" }
+                            else { val.substring(1, vlen - 2) };
+                    } else {
+                        custom_delim = val;
+                    }
+                } else {
+                    custom_delim = val;
+                }
+                has_delim = true;
+            }
+        } else if arg.starts_with("-d") {
+            let val = extract_opt_val(arg, 2);
+            if val.len() > 0 {
+                custom_delim = val;
+                has_delim = true;
+            }
+        } else {
+            // First non-option is start of command
+            cmd_start = i;
+            // Break out of arg parsing - rest is command
+            i = nargs;
+        }
+
+        i = i + 1;
+    }
+
+    // Default command: echo
+    if cmd_start < 0 {
+        cmd_start = nargs;
+    }
+
+    // Build the command prefix from remaining args
+    let mut cmd_prefix = "";
+    let mut ci = cmd_start;
+    while ci < nargs {
+        let a = args_get(ci);
+        if ci > cmd_start {
+            cmd_prefix = cmd_prefix + " ";
+        }
+        cmd_prefix = cmd_prefix + a;
+        ci = ci + 1;
+    }
+
+    // Default command is "echo" if none specified
+    if cmd_prefix.len() == 0 {
+        cmd_prefix = "echo";
+    }
+
+    // Read stdin
+    let piped = stdin_is_pipe();
+    if !piped {
+        print_help();
+        process_exit(0);
+    }
+    let input = read_all();
+    if input.len() == 0 {
+        process_exit(0);
+    }
+
+    // Tokenize input
+    let mut s = xargs_new();
+    if has_replace {
+        // -I mode: each line is one token
+        tokenize_lines(&mut s, input);
+    } else if has_delim {
+        tokenize_delim(&mut s, input, custom_delim);
+    } else {
+        tokenize_ws(&mut s, input);
+    }
+
+    if s.sp_n == 0 {
+        process_exit(0);
+    }
+
+    // Build and print commands
+    if has_replace {
+        // -I mode: one command per token, replacing placeholder
+        let mut ti: i32 = 0;
+        while ti < s.sp_n {
+            let tok = sp_get(&s, ti);
+            let cmd = replace_all(cmd_prefix, replace_str, tok);
+            println!("{}", cmd);
+            ti = ti + 1;
+        }
+    } else if has_max_args {
+        // -n mode: batches of max_args tokens per command
+        let mut ti: i32 = 0;
+        while ti < s.sp_n {
+            let mut cmd = cmd_prefix;
+            let mut count: i32 = 0;
+            while count < max_args && ti < s.sp_n {
+                let tok = sp_get(&s, ti);
+                cmd = cmd + " " + tok;
+                count = count + 1;
+                ti = ti + 1;
+            }
+            println!("{}", cmd);
+        }
+    } else {
+        // Default: all tokens in one command
+        let mut cmd = cmd_prefix;
+        let mut ti: i32 = 0;
+        while ti < s.sp_n {
+            let tok = sp_get(&s, ti);
+            cmd = cmd + " " + tok;
+            ti = ti + 1;
+        }
+        println!("{}", cmd);
+    }
+}

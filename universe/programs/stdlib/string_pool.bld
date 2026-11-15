@@ -1,0 +1,42 @@
+// Generic string pool for storing arrays of strings using Vec<i32>.
+//
+// Usage:
+//   include!("stdlib/string_pool.bld");
+//   let mut pool = sp_new();
+//   let id = sp_add(&mut pool, "hello");
+//   let val = sp_get(&pool, id);  // "hello"
+
+struct StringPool {
+    buf: String,
+    starts: Vec<i32>,
+    lens: Vec<i32>,
+    count: i32,
+}
+
+fn sp_new() -> StringPool {
+    return StringPool {
+        buf: "",
+        starts: vec![],
+        lens: vec![],
+        count: 0,
+    };
+}
+
+fn sp_add(pool: &mut StringPool, text: String) -> i32 {
+    let start = pool.buf.len();
+    pool.buf = pool.buf + text;
+    vec_push(pool.starts, start);
+    vec_push(pool.lens, text.len());
+    let id = pool.count;
+    pool.count = pool.count + 1;
+    return id;
+}
+
+fn sp_get(pool: &StringPool, id: i32) -> String {
+    if id < 0 || id >= pool.count {
+        return "";
+    }
+    let s = vec_get(pool.starts, id);
+    let l = vec_get(pool.lens, id);
+    return pool.buf.substring(s, l);
+}

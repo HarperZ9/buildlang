@@ -1,0 +1,2506 @@
+// ═══════════════════════════════════════════════════════════════════════════════
+// ORACLE - Extended Forecasting Models v2.0.0
+// ═══════════════════════════════════════════════════════════════════════════════
+// Copyright © 2024-2025 Zain Dana Harper. All Rights Reserved.
+// Copyright (c) 2024-2025 Zain Dana Harper. All Rights Reserved.
+// ═══════════════════════════════════════════════════════════════════════════════
+//
+// Advanced time series forecasting models including:
+// - SARIMA (Seasonal ARIMA)
+// - VAR (Vector Autoregression)
+// - VARMAX (VAR with exogenous variables)
+// - State Space Models
+// - Theta Method
+// - TBATS (Trigonometric Box-Cox ARMA Trend Seasonal)
+// - Prophet-style decomposition
+// - Croston's method for intermittent demand
+// - ETS (Error, Trend, Seasonal) framework
+//
+// ═══════════════════════════════════════════════════════════════════════════════
+
+module oracle::forecasting
+
+use std::math::{sin, cos, exp, log, sqrt, pow, abs, min, max, floor, ceil, PI}
+use std::collections::{HashMap, Vec, VecDeque}
+use oracle::{Tensor, TimeSeries, Frequency, DataPoint, Xorshift64}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// SARIMA (SEASONAL ARIMA)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// SARIMA(p,d,q)(P,D,Q)[s] - Seasonal ARIMA model
+pub struct SARIMA {
+    // Non-seasonal parameters
+    pub p: usize,  // AR order
+    pub d: usize,  // Differencing order
+    pub q: usize,  // MA order
+
+    // Seasonal parameters
+    pub P: usize,  // Seasonal AR order
+    pub D: usize,  // Seasonal differencing order
+    pub Q: usize,  // Seasonal MA order
+    pub s: usize,  // Seasonal period
+
+    // Fitted parameters
+    ar_params: Vec<f64>,
+    ma_params: Vec<f64>,
+    seasonal_ar_params: Vec<f64>,
+    seasonal_ma_params: Vec<f64>,
+    intercept: f64,
+    residuals: Vec<f64>,
+    sigma2: f64,
+    fitted: bool,
+}
+
+impl SARIMA {
+    pub fn new(p: usize, d: usize, q: usize, P: usize, D: usize, Q: usize, s: usize) -> Self {
+        SARIMA {
+            p, d, q, P, D, Q, s,
+            ar_params: vec![0.0; p],
+            ma_params: vec![0.0; q],
+            seasonal_ar_params: vec![0.0; P],
+            seasonal_ma_params: vec![0.0; Q],
+            intercept: 0.0,
+            residuals: Vec::new(),
+            sigma2: 1.0,
+            fitted: false,
+        }
+    }
+
+    /// Convenience constructor for common seasonal patterns
+    pub fn monthly(p: usize, d: usize, q: usize, P: usize, D: usize, Q: usize) -> Self {
+        Self::new(p, d, q, P, D, Q, 12)
+    }
+
+    pub fn quarterly(p: usize, d: usize, q: usize, P: usize, D: usize, Q: usize) -> Self {
+        Self::new(p, d, q, P, D, Q, 4)
+    }
+
+    pub fn weekly(p: usize, d: usize, q: usize, P: usize, D: usize, Q: usize) -> Self {
+        Self::new(p, d, q, P, D, Q, 7)
+    }
+
+    /// Apply differencing to make series stationary
+    fn difference(&self, values: &[f64]) -> Vec<f64> {
+        let mut result = values.to_vec();
+
+        // Regular differencing
+        for _ in 0..self.d {
+            let mut diff = Vec::with_capacity(result.len() - 1);
+            for i in 1..result.len() {
+                diff.push(result[i] - result[i - 1]);
+            }
+            result = diff;
+        }
+
+        // Seasonal differencing
+        for _ in 0..self.D {
+            if result.len() > self.s {
+                let mut diff = Vec::with_capacity(result.len() - self.s);
+                for i in self.s..result.len() {
+                    diff.push(result[i] - result[i - self.s]);
+                }
+                result = diff;
+            }
+        }
+
+        result
+    }
+
+    /// Reverse differencing for forecasts
+    fn integrate(&self, forecasts: &[f64], original: &[f64]) -> Vec<f64> {
+        let mut result = forecasts.to_vec();
+        let n = original.len();
+
+        // Reverse seasonal differencing
+        for _ in 0..self.D {
+            let mut integrated = Vec::with_capacity(result.len());
+            for (i, &f) in result.iter().enumerate() {
+                let idx = n - self.s + i;
+                if idx < n {
+                    integrated.push(f + original[idx]);
+                } else {
+                    // Use previously integrated values
+                    let prev_idx = i - self.s;
+                    if prev_idx < integrated.len() {
+                        integrated.push(f + integrated[prev_idx]);
+                    } else {
+                        integrated.push(f + original[n - 1]);
+                    }
+                }
+            }
+            result = integrated;
+        }
+
+        // Reverse regular differencing
+        for _ in 0..self.d {
+            let mut integrated = Vec::with_capacity(result.len());
+            let mut last = original[n - 1];
+            for &f in &result {
+                last += f;
+                integrated.push(last);
+            }
+            result = integrated;
+        }
+
+        result
+    }
+
+    /// Fit the SARIMA model using conditional least squares
+    pub fn fit(&mut self, series: &TimeSeries) {
+        let original = series.values();
+        let diff = self.difference(&original);
+        let n = diff.len();
+
+        if n < self.p + self.s * self.P + self.q + self.s * self.Q + 1 {
+            return;
+        }
+
+        // Initialize parameters using autocorrelations
+        self.initialize_parameters(&diff);
+
+        // Iteratively refine using conditional sum of squares
+        for _iter in 0..50 {
+            self.compute_residuals(&diff);
+            self.update_parameters(&diff);
+        }
+
+        // Final residuals and variance
+        self.compute_residuals(&diff);
+        self.sigma2 = self.residuals.iter()
+            .map(|r| r * r)
+            .sum::<f64>() / (self.residuals.len() - self.total_params()) as f64;
+
+        self.fitted = true;
+    }
+
+    fn total_params(&self) -> usize {
+        self.p + self.q + self.P + self.Q + 1
+    }
+
+    fn initialize_parameters(&mut self, values: &[f64]) {
+        let n = values.len();
+        let mean: f64 = values.iter().sum::<f64>() / n as f64;
+        self.intercept = mean;
+
+        // Compute autocorrelations
+        let mut acf = vec![0.0; max(self.p, self.s * self.P) + 1];
+        for k in 0..acf.len() {
+            let mut sum = 0.0;
+            for i in k..n {
+                sum += (values[i] - mean) * (values[i - k] - mean);
+            }
+            acf[k] = sum / n as f64;
+        }
+
+        // Initialize AR parameters using Yule-Walker
+        if self.p > 0 && acf[0] > 1e-10 {
+            for j in 0..self.p {
+                self.ar_params[j] = acf[j + 1] / acf[0] * 0.5;
+            }
+        }
+
+        // Initialize seasonal AR parameters
+        if self.P > 0 && acf[0] > 1e-10 {
+            for j in 0..self.P {
+                let lag = (j + 1) * self.s;
+                if lag < acf.len() {
+                    self.seasonal_ar_params[j] = acf[lag] / acf[0] * 0.3;
+                }
+            }
+        }
+
+        // MA and seasonal MA start at small values
+        for j in 0..self.q {
+            self.ma_params[j] = 0.1;
+        }
+        for j in 0..self.Q {
+            self.seasonal_ma_params[j] = 0.1;
+        }
+    }
+
+    fn compute_residuals(&mut self, values: &[f64]) {
+        let n = values.len();
+        self.residuals = vec![0.0; n];
+
+        let start = max(self.p, self.s * self.P);
+
+        for t in start..n {
+            let mut pred = self.intercept;
+
+            // AR terms
+            for j in 0..self.p {
+                pred += self.ar_params[j] * values[t - j - 1];
+            }
+
+            // Seasonal AR terms
+            for j in 0..self.P {
+                let lag = (j + 1) * self.s;
+                if t >= lag {
+                    pred += self.seasonal_ar_params[j] * values[t - lag];
+                }
+            }
+
+            // MA terms (using past residuals)
+            for j in 0..self.q {
+                if t > j {
+                    pred += self.ma_params[j] * self.residuals[t - j - 1];
+                }
+            }
+
+            // Seasonal MA terms
+            for j in 0..self.Q {
+                let lag = (j + 1) * self.s;
+                if t >= lag {
+                    pred += self.seasonal_ma_params[j] * self.residuals[t - lag];
+                }
+            }
+
+            self.residuals[t] = values[t] - pred;
+        }
+    }
+
+    fn update_parameters(&mut self, values: &[f64]) {
+        let n = values.len();
+        let learning_rate = 0.01;
+
+        let start = max(self.p, self.s * self.P);
+
+        // Gradient descent on parameters
+        for t in start..n {
+            let error = self.residuals[t];
+
+            // Update intercept
+            self.intercept += learning_rate * error;
+
+            // Update AR parameters
+            for j in 0..self.p {
+                let grad = error * values[t - j - 1];
+                self.ar_params[j] += learning_rate * grad;
+                self.ar_params[j] = self.ar_params[j].clamp(-0.99, 0.99);
+            }
+
+            // Update seasonal AR parameters
+            for j in 0..self.P {
+                let lag = (j + 1) * self.s;
+                if t >= lag {
+                    let grad = error * values[t - lag];
+                    self.seasonal_ar_params[j] += learning_rate * grad;
+                    self.seasonal_ar_params[j] = self.seasonal_ar_params[j].clamp(-0.99, 0.99);
+                }
+            }
+
+            // Update MA parameters
+            for j in 0..self.q {
+                if t > j {
+                    let grad = error * self.residuals[t - j - 1];
+                    self.ma_params[j] += learning_rate * grad;
+                    self.ma_params[j] = self.ma_params[j].clamp(-0.99, 0.99);
+                }
+            }
+
+            // Update seasonal MA parameters
+            for j in 0..self.Q {
+                let lag = (j + 1) * self.s;
+                if t >= lag {
+                    let grad = error * self.residuals[t - lag];
+                    self.seasonal_ma_params[j] += learning_rate * grad;
+                    self.seasonal_ma_params[j] = self.seasonal_ma_params[j].clamp(-0.99, 0.99);
+                }
+            }
+        }
+    }
+
+    /// Generate forecasts
+    pub fn forecast(&self, series: &TimeSeries, horizon: usize) -> SARIMAForecast {
+        if !self.fitted {
+            return SARIMAForecast::empty(horizon);
+        }
+
+        let original = series.values();
+        let diff = self.difference(&original);
+        let n = diff.len();
+
+        let mut forecasts = Vec::with_capacity(horizon);
+        let mut extended = diff.clone();
+        let mut extended_residuals = self.residuals.clone();
+
+        for h in 0..horizon {
+            let t = n + h;
+            let mut pred = self.intercept;
+
+            // AR terms
+            for j in 0..self.p {
+                if t > j {
+                    pred += self.ar_params[j] * extended[t - j - 1];
+                }
+            }
+
+            // Seasonal AR terms
+            for j in 0..self.P {
+                let lag = (j + 1) * self.s;
+                if t >= lag {
+                    pred += self.seasonal_ar_params[j] * extended[t - lag];
+                }
+            }
+
+            // MA terms (residuals become 0 for forecasts)
+            for j in 0..self.q {
+                if t > j && t - j - 1 < extended_residuals.len() {
+                    pred += self.ma_params[j] * extended_residuals[t - j - 1];
+                }
+            }
+
+            // Seasonal MA terms
+            for j in 0..self.Q {
+                let lag = (j + 1) * self.s;
+                if t >= lag && t - lag < extended_residuals.len() {
+                    pred += self.seasonal_ma_params[j] * extended_residuals[t - lag];
+                }
+            }
+
+            extended.push(pred);
+            extended_residuals.push(0.0);
+            forecasts.push(pred);
+        }
+
+        // Integrate forecasts
+        let integrated = self.integrate(&forecasts, &original);
+
+        // Compute prediction intervals
+        let se = sqrt(self.sigma2);
+        let mut lower = Vec::with_capacity(horizon);
+        let mut upper = Vec::with_capacity(horizon);
+
+        for h in 0..horizon {
+            // Variance increases with horizon
+            let var_factor = sqrt((h + 1) as f64);
+            lower.push(integrated[h] - 1.96 * se * var_factor);
+            upper.push(integrated[h] + 1.96 * se * var_factor);
+        }
+
+        SARIMAForecast {
+            point_forecast: integrated,
+            lower_95: lower,
+            upper_95: upper,
+            residual_variance: self.sigma2,
+        }
+    }
+
+    /// Get AIC for model selection
+    pub fn aic(&self) -> f64 {
+        if !self.fitted || self.residuals.is_empty() {
+            return f64::INFINITY;
+        }
+
+        let n = self.residuals.len() as f64;
+        let k = self.total_params() as f64;
+        let log_likelihood = -0.5 * n * (log(2.0 * PI) + log(self.sigma2) + 1.0);
+
+        -2.0 * log_likelihood + 2.0 * k
+    }
+
+    /// Get BIC for model selection
+    pub fn bic(&self) -> f64 {
+        if !self.fitted || self.residuals.is_empty() {
+            return f64::INFINITY;
+        }
+
+        let n = self.residuals.len() as f64;
+        let k = self.total_params() as f64;
+        let log_likelihood = -0.5 * n * (log(2.0 * PI) + log(self.sigma2) + 1.0);
+
+        -2.0 * log_likelihood + k * log(n)
+    }
+}
+
+/// SARIMA forecast result
+#[derive(Debug, Clone)]
+pub struct SARIMAForecast {
+    pub point_forecast: Vec<f64>,
+    pub lower_95: Vec<f64>,
+    pub upper_95: Vec<f64>,
+    pub residual_variance: f64,
+}
+
+impl SARIMAForecast {
+    fn empty(horizon: usize) -> Self {
+        SARIMAForecast {
+            point_forecast: vec![0.0; horizon],
+            lower_95: vec![0.0; horizon],
+            upper_95: vec![0.0; horizon],
+            residual_variance: 1.0,
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// VAR (VECTOR AUTOREGRESSION)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Vector Autoregression for multivariate time series
+pub struct VAR {
+    pub order: usize,      // Number of lags
+    pub n_series: usize,   // Number of time series
+    coefficients: Vec<Tensor>,  // One matrix per lag
+    intercept: Vec<f64>,
+    residuals: Tensor,
+    sigma: Tensor,         // Covariance matrix of residuals
+    fitted: bool,
+}
+
+impl VAR {
+    pub fn new(order: usize) -> Self {
+        VAR {
+            order,
+            n_series: 0,
+            coefficients: Vec::new(),
+            intercept: Vec::new(),
+            residuals: Tensor::zeros(vec![1, 1]),
+            sigma: Tensor::zeros(vec![1, 1]),
+            fitted: false,
+        }
+    }
+
+    /// Fit VAR model to multiple time series
+    pub fn fit(&mut self, series: &[TimeSeries]) {
+        if series.is_empty() {
+            return;
+        }
+
+        self.n_series = series.len();
+        let n = series[0].len();
+
+        // Check all series have same length
+        if !series.iter().all(|s| s.len() == n) {
+            return;
+        }
+
+        if n <= self.order {
+            return;
+        }
+
+        // Build design matrix Y (dependent) and X (lagged values)
+        let n_obs = n - self.order;
+
+        // Y: (n_obs x n_series)
+        let mut y_data = Vec::with_capacity(n_obs * self.n_series);
+        for t in self.order..n {
+            for s in series {
+                y_data.push(s.values()[t]);
+            }
+        }
+        let y = Tensor::from_vec(y_data, vec![n_obs, self.n_series]);
+
+        // X: (n_obs x (1 + order * n_series)) - includes intercept
+        let n_features = 1 + self.order * self.n_series;
+        let mut x_data = Vec::with_capacity(n_obs * n_features);
+        for t in self.order..n {
+            x_data.push(1.0); // Intercept
+            for lag in 1..=self.order {
+                for s in series {
+                    x_data.push(s.values()[t - lag]);
+                }
+            }
+        }
+        let x = Tensor::from_vec(x_data, vec![n_obs, n_features]);
+
+        // OLS estimation: B = (X'X)^-1 X'Y
+        let xtx = x.transpose().matmul(&x);
+        let xtx_inv = self.pseudo_inverse(&xtx);
+        let xty = x.transpose().matmul(&y);
+        let beta = xtx_inv.matmul(&xty);
+
+        // Extract intercept and coefficients
+        self.intercept = vec![0.0; self.n_series];
+        for j in 0..self.n_series {
+            self.intercept[j] = beta.get(&[0, j]);
+        }
+
+        self.coefficients = Vec::with_capacity(self.order);
+        for lag in 0..self.order {
+            let mut coef = Tensor::zeros(vec![self.n_series, self.n_series]);
+            for i in 0..self.n_series {
+                for j in 0..self.n_series {
+                    let row = 1 + lag * self.n_series + i;
+                    coef.set(&[i, j], beta.get(&[row, j]));
+                }
+            }
+            self.coefficients.push(coef);
+        }
+
+        // Compute residuals
+        let y_hat = x.matmul(&beta);
+        self.residuals = y.sub(&y_hat);
+
+        // Covariance matrix of residuals
+        let res_t = self.residuals.transpose();
+        self.sigma = res_t.matmul(&self.residuals).scale(1.0 / (n_obs - n_features) as f64);
+
+        self.fitted = true;
+    }
+
+    fn pseudo_inverse(&self, m: &Tensor) -> Tensor {
+        let n = m.shape[0];
+        let mut result = Tensor::zeros(vec![n, n]);
+
+        // Gauss-Jordan elimination with pivoting
+        let mut augmented = vec![vec![0.0; 2 * n]; n];
+        for i in 0..n {
+            for j in 0..n {
+                augmented[i][j] = m.get(&[i, j]);
+            }
+            augmented[i][n + i] = 1.0;
+        }
+
+        for i in 0..n {
+            // Find pivot
+            let mut max_row = i;
+            for k in (i + 1)..n {
+                if augmented[k][i].abs() > augmented[max_row][i].abs() {
+                    max_row = k;
+                }
+            }
+            augmented.swap(i, max_row);
+
+            let pivot = augmented[i][i];
+            if pivot.abs() < 1e-10 {
+                // Add regularization
+                augmented[i][i] = 1e-6;
+                continue;
+            }
+
+            for j in 0..2 * n {
+                augmented[i][j] /= pivot;
+            }
+
+            for k in 0..n {
+                if k != i {
+                    let factor = augmented[k][i];
+                    for j in 0..2 * n {
+                        augmented[k][j] -= factor * augmented[i][j];
+                    }
+                }
+            }
+        }
+
+        for i in 0..n {
+            for j in 0..n {
+                result.set(&[i, j], augmented[i][n + j]);
+            }
+        }
+
+        result
+    }
+
+    /// Generate multivariate forecasts
+    pub fn forecast(&self, series: &[TimeSeries], horizon: usize) -> VARForecast {
+        if !self.fitted || series.len() != self.n_series {
+            return VARForecast::empty(self.n_series, horizon);
+        }
+
+        let n = series[0].len();
+
+        // Collect last 'order' observations
+        let mut history: Vec<Vec<f64>> = Vec::with_capacity(self.order);
+        for lag in 0..self.order {
+            let mut values = Vec::with_capacity(self.n_series);
+            for s in series {
+                values.push(s.values()[n - lag - 1]);
+            }
+            history.push(values);
+        }
+
+        let mut forecasts = vec![Vec::with_capacity(horizon); self.n_series];
+
+        for _h in 0..horizon {
+            // Compute forecast for each series
+            let mut forecast = self.intercept.clone();
+
+            for (lag, coef) in self.coefficients.iter().enumerate() {
+                if lag < history.len() {
+                    for i in 0..self.n_series {
+                        for j in 0..self.n_series {
+                            forecast[i] += coef.get(&[j, i]) * history[lag][j];
+                        }
+                    }
+                }
+            }
+
+            // Store forecast
+            for (i, &f) in forecast.iter().enumerate() {
+                forecasts[i].push(f);
+            }
+
+            // Update history
+            history.insert(0, forecast);
+            if history.len() > self.order {
+                history.pop();
+            }
+        }
+
+        VARForecast {
+            forecasts,
+            series_names: series.iter().map(|s| s.name.clone()).collect(),
+        }
+    }
+
+    /// Granger causality test between series
+    pub fn granger_causality(&self, cause_idx: usize, effect_idx: usize) -> GrangerResult {
+        if !self.fitted || cause_idx >= self.n_series || effect_idx >= self.n_series {
+            return GrangerResult {
+                f_statistic: 0.0,
+                p_value: 1.0,
+                is_causal: false,
+            };
+        }
+
+        // Test if coefficients from cause to effect are jointly zero
+        let mut sum_sq = 0.0;
+        for coef in &self.coefficients {
+            sum_sq += coef.get(&[cause_idx, effect_idx]).powi(2);
+        }
+
+        // Simplified F-statistic
+        let n = self.residuals.shape[0] as f64;
+        let f_stat = (sum_sq / self.order as f64) / (self.sigma.get(&[effect_idx, effect_idx]) / n);
+
+        // Approximate p-value
+        let p_value = exp(-f_stat / 2.0);
+
+        GrangerResult {
+            f_statistic: f_stat,
+            p_value,
+            is_causal: p_value < 0.05,
+        }
+    }
+
+    /// Impulse response function
+    pub fn impulse_response(&self, shock_series: usize, response_series: usize, periods: usize) -> Vec<f64> {
+        if !self.fitted || shock_series >= self.n_series || response_series >= self.n_series {
+            return vec![0.0; periods];
+        }
+
+        let mut irf = vec![0.0; periods];
+
+        // Initial shock of 1 unit
+        let mut state = vec![vec![0.0; self.n_series]; self.order];
+        state[0][shock_series] = 1.0;
+
+        for t in 0..periods {
+            // Compute response
+            let mut response = vec![0.0; self.n_series];
+            for (lag, coef) in self.coefficients.iter().enumerate() {
+                if lag < state.len() {
+                    for i in 0..self.n_series {
+                        for j in 0..self.n_series {
+                            response[i] += coef.get(&[j, i]) * state[lag][j];
+                        }
+                    }
+                }
+            }
+
+            irf[t] = if t == 0 && shock_series == response_series { 1.0 } else { response[response_series] };
+
+            // Update state
+            state.insert(0, response);
+            if state.len() > self.order {
+                state.pop();
+            }
+        }
+
+        irf
+    }
+}
+
+/// VAR forecast result
+#[derive(Debug, Clone)]
+pub struct VARForecast {
+    pub forecasts: Vec<Vec<f64>>,  // One vector per series
+    pub series_names: Vec<String>,
+}
+
+impl VARForecast {
+    fn empty(n_series: usize, horizon: usize) -> Self {
+        VARForecast {
+            forecasts: vec![vec![0.0; horizon]; n_series],
+            series_names: Vec::new(),
+        }
+    }
+}
+
+/// Granger causality test result
+#[derive(Debug, Clone)]
+pub struct GrangerResult {
+    pub f_statistic: f64,
+    pub p_value: f64,
+    pub is_causal: bool,
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// VARMAX (VAR WITH EXOGENOUS VARIABLES)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// VARMAX - VAR with exogenous variables and moving average terms
+pub struct VARMAX {
+    pub var_order: usize,
+    pub ma_order: usize,
+    pub n_series: usize,
+    pub n_exog: usize,
+    var_coefficients: Vec<Tensor>,
+    ma_coefficients: Vec<Tensor>,
+    exog_coefficients: Tensor,
+    intercept: Vec<f64>,
+    fitted: bool,
+}
+
+impl VARMAX {
+    pub fn new(var_order: usize, ma_order: usize) -> Self {
+        VARMAX {
+            var_order,
+            ma_order,
+            n_series: 0,
+            n_exog: 0,
+            var_coefficients: Vec::new(),
+            ma_coefficients: Vec::new(),
+            exog_coefficients: Tensor::zeros(vec![1, 1]),
+            intercept: Vec::new(),
+            fitted: false,
+        }
+    }
+
+    /// Fit VARMAX model
+    pub fn fit(&mut self, series: &[TimeSeries], exog: Option<&Tensor>) {
+        if series.is_empty() {
+            return;
+        }
+
+        self.n_series = series.len();
+        let n = series[0].len();
+
+        self.n_exog = exog.map(|e| e.shape[1]).unwrap_or(0);
+
+        if n <= self.var_order {
+            return;
+        }
+
+        // For simplicity, fit VAR first then estimate MA from residuals
+        let mut var = VAR::new(self.var_order);
+        var.fit(series);
+
+        // Copy VAR coefficients
+        self.var_coefficients = var.coefficients.clone();
+        self.intercept = var.intercept.clone();
+
+        // Estimate exogenous coefficients if provided
+        if let Some(x) = exog {
+            // Simple OLS for exogenous effects
+            self.exog_coefficients = Tensor::zeros(vec![self.n_exog, self.n_series]);
+
+            // Compute correlation between residuals and exogenous variables
+            for i in 0..self.n_exog {
+                for j in 0..self.n_series {
+                    let mut sum = 0.0;
+                    let mut count = 0;
+                    for t in self.var_order..min(n, x.shape[0]) {
+                        sum += x.get(&[t, i]) * var.residuals.get(&[t - self.var_order, j]);
+                        count += 1;
+                    }
+                    if count > 0 {
+                        self.exog_coefficients.set(&[i, j], sum / count as f64);
+                    }
+                }
+            }
+        }
+
+        // Estimate MA coefficients from residual autocorrelations
+        self.ma_coefficients = Vec::with_capacity(self.ma_order);
+        for lag in 0..self.ma_order {
+            let mut coef = Tensor::zeros(vec![self.n_series, self.n_series]);
+            let n_res = var.residuals.shape[0];
+
+            for i in 0..self.n_series {
+                for j in 0..self.n_series {
+                    let mut cov = 0.0;
+                    let mut var_i = 0.0;
+                    for t in (lag + 1)..n_res {
+                        cov += var.residuals.get(&[t, i]) * var.residuals.get(&[t - lag - 1, j]);
+                        var_i += var.residuals.get(&[t, i]).powi(2);
+                    }
+                    if var_i > 1e-10 {
+                        coef.set(&[i, j], cov / var_i * 0.5);
+                    }
+                }
+            }
+            self.ma_coefficients.push(coef);
+        }
+
+        self.fitted = true;
+    }
+
+    /// Generate forecasts with optional future exogenous values
+    pub fn forecast(&self, series: &[TimeSeries], horizon: usize, future_exog: Option<&Tensor>) -> VARForecast {
+        if !self.fitted {
+            return VARForecast::empty(self.n_series, horizon);
+        }
+
+        let n = series[0].len();
+
+        // Get recent history
+        let mut history: Vec<Vec<f64>> = Vec::with_capacity(self.var_order);
+        for lag in 0..self.var_order {
+            let mut values = Vec::with_capacity(self.n_series);
+            for s in series {
+                values.push(s.values()[n - lag - 1]);
+            }
+            history.push(values);
+        }
+
+        let mut forecasts = vec![Vec::with_capacity(horizon); self.n_series];
+
+        for h in 0..horizon {
+            let mut forecast = self.intercept.clone();
+
+            // VAR terms
+            for (lag, coef) in self.var_coefficients.iter().enumerate() {
+                if lag < history.len() {
+                    for i in 0..self.n_series {
+                        for j in 0..self.n_series {
+                            forecast[i] += coef.get(&[j, i]) * history[lag][j];
+                        }
+                    }
+                }
+            }
+
+            // Exogenous terms
+            if let Some(exog) = future_exog {
+                if h < exog.shape[0] {
+                    for i in 0..self.n_exog {
+                        for j in 0..self.n_series {
+                            forecast[j] += self.exog_coefficients.get(&[i, j]) * exog.get(&[h, i]);
+                        }
+                    }
+                }
+            }
+
+            for (i, &f) in forecast.iter().enumerate() {
+                forecasts[i].push(f);
+            }
+
+            history.insert(0, forecast);
+            if history.len() > self.var_order {
+                history.pop();
+            }
+        }
+
+        VARForecast {
+            forecasts,
+            series_names: series.iter().map(|s| s.name.clone()).collect(),
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// STATE SPACE MODELS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// State Space Model with Kalman filter
+pub struct StateSpaceModel {
+    // State transition matrix
+    pub transition: Tensor,
+    // Observation matrix
+    pub observation: Tensor,
+    // Process noise covariance
+    pub process_noise: Tensor,
+    // Observation noise covariance
+    pub observation_noise: Tensor,
+    // Initial state
+    pub initial_state: Tensor,
+    // Initial state covariance
+    pub initial_covariance: Tensor,
+
+    // Filtered states and covariances
+    filtered_states: Vec<Tensor>,
+    filtered_covariances: Vec<Tensor>,
+
+    fitted: bool,
+}
+
+impl StateSpaceModel {
+    /// Create a local level model (random walk with noise)
+    pub fn local_level(observation_noise: f64, level_noise: f64) -> Self {
+        StateSpaceModel {
+            transition: Tensor::from_vec(vec![1.0], vec![1, 1]),
+            observation: Tensor::from_vec(vec![1.0], vec![1, 1]),
+            process_noise: Tensor::from_vec(vec![level_noise], vec![1, 1]),
+            observation_noise: Tensor::from_vec(vec![observation_noise], vec![1, 1]),
+            initial_state: Tensor::zeros(vec![1]),
+            initial_covariance: Tensor::from_vec(vec![1e6], vec![1, 1]),
+            filtered_states: Vec::new(),
+            filtered_covariances: Vec::new(),
+            fitted: false,
+        }
+    }
+
+    /// Create a local linear trend model
+    pub fn local_linear_trend(obs_noise: f64, level_noise: f64, trend_noise: f64) -> Self {
+        StateSpaceModel {
+            transition: Tensor::from_vec(vec![1.0, 1.0, 0.0, 1.0], vec![2, 2]),
+            observation: Tensor::from_vec(vec![1.0, 0.0], vec![1, 2]),
+            process_noise: Tensor::from_vec(vec![level_noise, 0.0, 0.0, trend_noise], vec![2, 2]),
+            observation_noise: Tensor::from_vec(vec![obs_noise], vec![1, 1]),
+            initial_state: Tensor::zeros(vec![2]),
+            initial_covariance: Tensor::from_vec(vec![1e6, 0.0, 0.0, 1e6], vec![2, 2]),
+            filtered_states: Vec::new(),
+            filtered_covariances: Vec::new(),
+            fitted: false,
+        }
+    }
+
+    /// Create a seasonal model
+    pub fn seasonal(obs_noise: f64, seasonal_periods: usize) -> Self {
+        let state_dim = seasonal_periods - 1;
+
+        // Transition matrix for seasonal state
+        let mut trans_data = vec![0.0; state_dim * state_dim];
+        for i in 0..state_dim {
+            trans_data[i] = -1.0; // First row is all -1s
+        }
+        for i in 1..state_dim {
+            trans_data[i * state_dim + i - 1] = 1.0; // Subdiagonal is 1s
+        }
+
+        let mut obs_data = vec![0.0; state_dim];
+        obs_data[0] = 1.0;
+
+        StateSpaceModel {
+            transition: Tensor::from_vec(trans_data, vec![state_dim, state_dim]),
+            observation: Tensor::from_vec(obs_data, vec![1, state_dim]),
+            process_noise: Tensor::zeros(vec![state_dim, state_dim]),
+            observation_noise: Tensor::from_vec(vec![obs_noise], vec![1, 1]),
+            initial_state: Tensor::zeros(vec![state_dim]),
+            initial_covariance: Tensor::from_vec(vec![1e6; state_dim * state_dim], vec![state_dim, state_dim]),
+            filtered_states: Vec::new(),
+            filtered_covariances: Vec::new(),
+            fitted: false,
+        }
+    }
+
+    /// Fit using Kalman filter
+    pub fn fit(&mut self, series: &TimeSeries) {
+        let values = series.values();
+        let n = values.len();
+        let state_dim = self.transition.shape[0];
+
+        self.filtered_states = Vec::with_capacity(n);
+        self.filtered_covariances = Vec::with_capacity(n);
+
+        // Initialize
+        let mut state = self.initial_state.clone();
+        let mut covariance = self.initial_covariance.clone();
+
+        // Initialize with first observation
+        state.data[0] = values[0];
+
+        for t in 0..n {
+            // Predict step
+            let state_pred = self.transition.matmul(&Tensor::from_vec(state.data.clone(), vec![state_dim, 1]));
+            let cov_pred = self.transition.matmul(&covariance).matmul(&self.transition.transpose())
+                .add(&self.process_noise);
+
+            // Update step
+            let y = values[t];
+            let y_pred = self.observation.matmul(&state_pred);
+            let innovation = y - y_pred.data[0];
+
+            // Innovation covariance
+            let s = self.observation.matmul(&cov_pred).matmul(&self.observation.transpose())
+                .add(&self.observation_noise);
+            let s_inv = 1.0 / (s.data[0] + 1e-10);
+
+            // Kalman gain
+            let mut kalman_gain = cov_pred.matmul(&self.observation.transpose());
+            for i in 0..kalman_gain.numel() {
+                kalman_gain.data[i] *= s_inv;
+            }
+
+            // Updated state
+            state = Tensor::zeros(vec![state_dim]);
+            for i in 0..state_dim {
+                state.data[i] = state_pred.data[i] + kalman_gain.get(&[i, 0]) * innovation;
+            }
+
+            // Updated covariance
+            let kg_h = kalman_gain.matmul(&self.observation);
+            let i_kg_h = Tensor::zeros(vec![state_dim, state_dim]);
+            for i in 0..state_dim {
+                for j in 0..state_dim {
+                    let val = if i == j { 1.0 } else { 0.0 } - kg_h.get(&[i, j]);
+                    covariance.set(&[i, j], val);
+                }
+            }
+            covariance = covariance.matmul(&cov_pred);
+
+            self.filtered_states.push(state.clone());
+            self.filtered_covariances.push(covariance.clone());
+        }
+
+        self.fitted = true;
+    }
+
+    /// Generate forecasts
+    pub fn forecast(&self, horizon: usize) -> StateSpaceForecast {
+        if !self.fitted || self.filtered_states.is_empty() {
+            return StateSpaceForecast::empty(horizon);
+        }
+
+        let state_dim = self.transition.shape[0];
+        let mut state = self.filtered_states.last().unwrap().clone();
+        let mut covariance = self.filtered_covariances.last().unwrap().clone();
+
+        let mut forecasts = Vec::with_capacity(horizon);
+        let mut variances = Vec::with_capacity(horizon);
+
+        for _ in 0..horizon {
+            // Predict step
+            let state_pred = self.transition.matmul(&Tensor::from_vec(state.data.clone(), vec![state_dim, 1]));
+            let cov_pred = self.transition.matmul(&covariance).matmul(&self.transition.transpose())
+                .add(&self.process_noise);
+
+            // Observation
+            let y_pred = self.observation.matmul(&state_pred);
+            forecasts.push(y_pred.data[0]);
+
+            // Forecast variance
+            let var = self.observation.matmul(&cov_pred).matmul(&self.observation.transpose())
+                .add(&self.observation_noise);
+            variances.push(var.data[0]);
+
+            // Update for next iteration
+            state = Tensor::from_vec(state_pred.data, vec![state_dim]);
+            covariance = cov_pred;
+        }
+
+        // Compute prediction intervals
+        let lower: Vec<f64> = forecasts.iter().zip(variances.iter())
+            .map(|(&f, &v)| f - 1.96 * sqrt(v))
+            .collect();
+        let upper: Vec<f64> = forecasts.iter().zip(variances.iter())
+            .map(|(&f, &v)| f + 1.96 * sqrt(v))
+            .collect();
+
+        StateSpaceForecast {
+            forecasts,
+            variances,
+            lower_95: lower,
+            upper_95: upper,
+        }
+    }
+
+    /// Get filtered states (smoothed estimates)
+    pub fn get_filtered_states(&self) -> Vec<Vec<f64>> {
+        self.filtered_states.iter()
+            .map(|s| s.data.clone())
+            .collect()
+    }
+}
+
+/// State space forecast result
+#[derive(Debug, Clone)]
+pub struct StateSpaceForecast {
+    pub forecasts: Vec<f64>,
+    pub variances: Vec<f64>,
+    pub lower_95: Vec<f64>,
+    pub upper_95: Vec<f64>,
+}
+
+impl StateSpaceForecast {
+    fn empty(horizon: usize) -> Self {
+        StateSpaceForecast {
+            forecasts: vec![0.0; horizon],
+            variances: vec![1.0; horizon],
+            lower_95: vec![0.0; horizon],
+            upper_95: vec![0.0; horizon],
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// THETA METHOD
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Theta Method for time series forecasting
+/// Decomposes series into theta lines and combines forecasts
+pub struct ThetaMethod {
+    pub theta: f64,
+    drift: f64,
+    level: f64,
+    alpha: f64,  // SES parameter
+    fitted: bool,
+}
+
+impl ThetaMethod {
+    pub fn new(theta: f64) -> Self {
+        ThetaMethod {
+            theta,
+            drift: 0.0,
+            level: 0.0,
+            alpha: 0.5,
+            fitted: false,
+        }
+    }
+
+    /// Standard theta method with theta = 2
+    pub fn standard() -> Self {
+        Self::new(2.0)
+    }
+
+    /// Fit theta method
+    pub fn fit(&mut self, series: &TimeSeries) {
+        let values = series.values();
+        let n = values.len();
+
+        if n < 4 {
+            return;
+        }
+
+        // Compute drift (average first difference)
+        let mut sum_diff = 0.0;
+        for i in 1..n {
+            sum_diff += values[i] - values[i - 1];
+        }
+        self.drift = sum_diff / (n - 1) as f64;
+
+        // Simple exponential smoothing on original series
+        let mut ses = values[0];
+        for &v in &values[1..] {
+            ses = self.alpha * v + (1.0 - self.alpha) * ses;
+        }
+        self.level = ses;
+
+        // Optimize alpha using MSE
+        let mut best_alpha = 0.5;
+        let mut best_mse = f64::INFINITY;
+
+        for alpha_int in 1..99 {
+            let alpha = alpha_int as f64 / 100.0;
+            let mut ses = values[0];
+            let mut mse = 0.0;
+
+            for &v in &values[1..] {
+                let err = v - ses;
+                mse += err * err;
+                ses = alpha * v + (1.0 - alpha) * ses;
+            }
+
+            if mse < best_mse {
+                best_mse = mse;
+                best_alpha = alpha;
+            }
+        }
+
+        self.alpha = best_alpha;
+
+        // Recompute level with optimal alpha
+        self.level = values[0];
+        for &v in &values[1..] {
+            self.level = self.alpha * v + (1.0 - self.alpha) * self.level;
+        }
+
+        self.fitted = true;
+    }
+
+    /// Generate forecasts
+    pub fn forecast(&self, horizon: usize) -> Vec<f64> {
+        if !self.fitted {
+            return vec![0.0; horizon];
+        }
+
+        let mut forecasts = Vec::with_capacity(horizon);
+
+        for h in 1..=horizon {
+            // Theta method forecast is combination of SES and drift extrapolation
+            // For theta = 2, it's: level + (h-1) * drift * 0.5
+            let fc = self.level + (h as f64 - 0.5) * self.drift;
+            forecasts.push(fc);
+        }
+
+        forecasts
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// TBATS MODEL
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// TBATS - Trigonometric Box-Cox ARMA Trend Seasonal model
+/// Handles complex seasonality with Fourier terms
+pub struct TBATS {
+    pub use_box_cox: bool,
+    pub box_cox_lambda: f64,
+    pub use_damped_trend: bool,
+    pub damping_phi: f64,
+    pub seasonal_periods: Vec<usize>,
+    pub num_harmonics: Vec<usize>,
+
+    // Fitted components
+    level: f64,
+    trend: f64,
+    seasonal_states: Vec<Vec<f64>>,  // Fourier coefficients for each seasonality
+    alpha: f64,
+    beta: f64,
+    gamma: Vec<f64>,
+
+    fitted: bool,
+}
+
+impl TBATS {
+    pub fn new(seasonal_periods: Vec<usize>) -> Self {
+        let n_seasons = seasonal_periods.len();
+        let num_harmonics: Vec<usize> = seasonal_periods.iter()
+            .map(|&s| min(s / 2, 5))
+            .collect();
+
+        TBATS {
+            use_box_cox: false,
+            box_cox_lambda: 1.0,
+            use_damped_trend: true,
+            damping_phi: 0.98,
+            seasonal_periods,
+            num_harmonics,
+            level: 0.0,
+            trend: 0.0,
+            seasonal_states: vec![Vec::new(); n_seasons],
+            alpha: 0.1,
+            beta: 0.01,
+            gamma: vec![0.01; n_seasons],
+            fitted: false,
+        }
+    }
+
+    /// Apply Box-Cox transformation
+    fn box_cox_transform(&self, x: f64) -> f64 {
+        if !self.use_box_cox || (self.box_cox_lambda - 1.0).abs() < 1e-10 {
+            x
+        } else if self.box_cox_lambda.abs() < 1e-10 {
+            log(x.max(1e-10))
+        } else {
+            (pow(x.max(1e-10), self.box_cox_lambda) - 1.0) / self.box_cox_lambda
+        }
+    }
+
+    /// Inverse Box-Cox transformation
+    fn box_cox_inverse(&self, y: f64) -> f64 {
+        if !self.use_box_cox || (self.box_cox_lambda - 1.0).abs() < 1e-10 {
+            y
+        } else if self.box_cox_lambda.abs() < 1e-10 {
+            exp(y)
+        } else {
+            pow((y * self.box_cox_lambda + 1.0).max(0.0), 1.0 / self.box_cox_lambda)
+        }
+    }
+
+    /// Compute seasonal component using Fourier terms
+    fn compute_seasonal(&self, seasonal_idx: usize, t: usize) -> f64 {
+        let period = self.seasonal_periods[seasonal_idx] as f64;
+        let k = self.num_harmonics[seasonal_idx];
+        let states = &self.seasonal_states[seasonal_idx];
+
+        if states.len() < 2 * k {
+            return 0.0;
+        }
+
+        let mut seasonal = 0.0;
+        for j in 0..k {
+            let freq = 2.0 * PI * (j + 1) as f64 / period;
+            let a = states[2 * j];
+            let b = states[2 * j + 1];
+            seasonal += a * cos(freq * t as f64) + b * sin(freq * t as f64);
+        }
+
+        seasonal
+    }
+
+    /// Fit TBATS model
+    pub fn fit(&mut self, series: &TimeSeries) {
+        let values = series.values();
+        let n = values.len();
+
+        if n < 10 {
+            return;
+        }
+
+        // Transform data
+        let transformed: Vec<f64> = values.iter()
+            .map(|&v| self.box_cox_transform(v))
+            .collect();
+
+        // Initialize level and trend
+        self.level = transformed.iter().take(10).sum::<f64>() / 10.0;
+        self.trend = (transformed[9] - transformed[0]) / 10.0;
+
+        // Initialize seasonal states
+        for (idx, &period) in self.seasonal_periods.iter().enumerate() {
+            let k = self.num_harmonics[idx];
+            let mut states = vec![0.0; 2 * k];
+
+            // Estimate initial Fourier coefficients
+            for j in 0..k {
+                let freq = 2.0 * PI * (j + 1) as f64 / period as f64;
+                let mut cos_sum = 0.0;
+                let mut sin_sum = 0.0;
+
+                for t in 0..min(period * 2, n) {
+                    let y = transformed[t] - self.level;
+                    cos_sum += y * cos(freq * t as f64);
+                    sin_sum += y * sin(freq * t as f64);
+                }
+
+                let scale = 2.0 / min(period * 2, n) as f64;
+                states[2 * j] = cos_sum * scale;
+                states[2 * j + 1] = sin_sum * scale;
+            }
+
+            self.seasonal_states[idx] = states;
+        }
+
+        // Iterative refinement
+        for _iter in 0..20 {
+            let mut level_prev = self.level;
+            let mut trend_prev = self.trend;
+
+            for t in 0..n {
+                let y = transformed[t];
+
+                // Compute total seasonal
+                let mut seasonal = 0.0;
+                for s in 0..self.seasonal_periods.len() {
+                    seasonal += self.compute_seasonal(s, t);
+                }
+
+                // One-step forecast
+                let trend_damped = if self.use_damped_trend { self.damping_phi * trend_prev } else { trend_prev };
+                let forecast = level_prev + trend_damped + seasonal;
+                let error = y - forecast;
+
+                // Update level
+                self.level = level_prev + trend_damped + self.alpha * error;
+
+                // Update trend
+                self.trend = trend_damped + self.beta * error;
+
+                // Update seasonal states
+                for (s, &period) in self.seasonal_periods.iter().enumerate() {
+                    let k = self.num_harmonics[s];
+                    let gamma = self.gamma[s];
+
+                    for j in 0..k {
+                        let freq = 2.0 * PI * (j + 1) as f64 / period as f64;
+
+                        // Update Fourier coefficients
+                        self.seasonal_states[s][2 * j] += gamma * error * cos(freq * t as f64);
+                        self.seasonal_states[s][2 * j + 1] += gamma * error * sin(freq * t as f64);
+                    }
+                }
+
+                level_prev = self.level;
+                trend_prev = self.trend;
+            }
+        }
+
+        self.fitted = true;
+    }
+
+    /// Generate forecasts
+    pub fn forecast(&self, horizon: usize) -> Vec<f64> {
+        if !self.fitted {
+            return vec![0.0; horizon];
+        }
+
+        let mut forecasts = Vec::with_capacity(horizon);
+        let mut level = self.level;
+        let mut trend = self.trend;
+
+        for h in 0..horizon {
+            // Damped trend extrapolation
+            let trend_sum: f64 = (1..=h as i32 + 1)
+                .map(|i| pow(self.damping_phi, i as f64))
+                .sum();
+            let trend_component = if self.use_damped_trend { trend * trend_sum } else { trend * (h + 1) as f64 };
+
+            // Seasonal components
+            let mut seasonal = 0.0;
+            for s in 0..self.seasonal_periods.len() {
+                seasonal += self.compute_seasonal(s, h);
+            }
+
+            let fc = level + trend_component + seasonal;
+            forecasts.push(self.box_cox_inverse(fc));
+        }
+
+        forecasts
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// CROSTON'S METHOD (INTERMITTENT DEMAND)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Croston's method for intermittent demand forecasting
+pub struct CrostonsMethod {
+    pub alpha: f64,
+    demand_level: f64,
+    interval_level: f64,
+    last_demand: usize,
+    fitted: bool,
+}
+
+impl CrostonsMethod {
+    pub fn new(alpha: f64) -> Self {
+        CrostonsMethod {
+            alpha: alpha.clamp(0.0, 1.0),
+            demand_level: 0.0,
+            interval_level: 1.0,
+            last_demand: 0,
+            fitted: false,
+        }
+    }
+
+    /// Default Croston's method with alpha = 0.1
+    pub fn default() -> Self {
+        Self::new(0.1)
+    }
+
+    /// Fit to intermittent demand data
+    pub fn fit(&mut self, series: &TimeSeries) {
+        let values = series.values();
+        let n = values.len();
+
+        if n < 2 {
+            return;
+        }
+
+        // Find first non-zero demand
+        let first_demand = values.iter().position(|&v| v > 0.0);
+        if first_demand.is_none() {
+            return;
+        }
+
+        // Initialize
+        let non_zero: Vec<f64> = values.iter().filter(|&&v| v > 0.0).cloned().collect();
+        if non_zero.is_empty() {
+            return;
+        }
+
+        self.demand_level = non_zero[0];
+        self.interval_level = 1.0;
+
+        let mut periods_since_demand = 0;
+
+        for (t, &v) in values.iter().enumerate() {
+            periods_since_demand += 1;
+
+            if v > 0.0 {
+                // Update demand level
+                self.demand_level = self.alpha * v + (1.0 - self.alpha) * self.demand_level;
+
+                // Update interval level
+                self.interval_level = self.alpha * periods_since_demand as f64
+                    + (1.0 - self.alpha) * self.interval_level;
+
+                periods_since_demand = 0;
+                self.last_demand = t;
+            }
+        }
+
+        self.fitted = true;
+    }
+
+    /// Generate forecasts (expected demand per period)
+    pub fn forecast(&self, horizon: usize) -> Vec<f64> {
+        if !self.fitted {
+            return vec![0.0; horizon];
+        }
+
+        // Croston's forecast is constant: z/p
+        let expected_demand = self.demand_level / self.interval_level;
+
+        vec![expected_demand; horizon]
+    }
+
+    /// SBA (Syntetos-Boylan Approximation) variant
+    pub fn forecast_sba(&self, horizon: usize) -> Vec<f64> {
+        if !self.fitted {
+            return vec![0.0; horizon];
+        }
+
+        // Bias-corrected version
+        let correction = 1.0 - self.alpha / 2.0;
+        let expected_demand = correction * self.demand_level / self.interval_level;
+
+        vec![expected_demand; horizon]
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ETS FRAMEWORK
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// ETS (Error, Trend, Seasonal) model framework
+pub struct ETS {
+    pub error_type: ErrorType,
+    pub trend_type: ETSTrendType,
+    pub seasonal_type: ETSSeasonalType,
+    pub seasonal_periods: usize,
+    pub damped: bool,
+
+    // Parameters
+    alpha: f64,    // Level smoothing
+    beta: f64,     // Trend smoothing
+    gamma: f64,    // Seasonal smoothing
+    phi: f64,      // Damping parameter
+
+    // State
+    level: f64,
+    trend: f64,
+    seasonal: Vec<f64>,
+
+    // Error variance
+    sigma2: f64,
+
+    fitted: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ErrorType {
+    Additive,
+    Multiplicative,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ETSTrendType {
+    None,
+    Additive,
+    Multiplicative,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ETSSeasonalType {
+    None,
+    Additive,
+    Multiplicative,
+}
+
+impl ETS {
+    pub fn new(
+        error_type: ErrorType,
+        trend_type: ETSTrendType,
+        seasonal_type: ETSSeasonalType,
+        seasonal_periods: usize,
+        damped: bool,
+    ) -> Self {
+        ETS {
+            error_type,
+            trend_type,
+            seasonal_type,
+            seasonal_periods: if matches!(seasonal_type, ETSSeasonalType::None) { 1 } else { seasonal_periods },
+            damped,
+            alpha: 0.3,
+            beta: 0.1,
+            gamma: 0.1,
+            phi: 0.98,
+            level: 0.0,
+            trend: 0.0,
+            seasonal: Vec::new(),
+            sigma2: 1.0,
+            fitted: false,
+        }
+    }
+
+    /// Create ETS(A,N,N) - Simple exponential smoothing
+    pub fn ann() -> Self {
+        Self::new(ErrorType::Additive, ETSTrendType::None, ETSSeasonalType::None, 1, false)
+    }
+
+    /// Create ETS(A,A,N) - Holt's linear trend
+    pub fn aan() -> Self {
+        Self::new(ErrorType::Additive, ETSTrendType::Additive, ETSSeasonalType::None, 1, false)
+    }
+
+    /// Create ETS(A,Ad,N) - Damped trend
+    pub fn aadn() -> Self {
+        Self::new(ErrorType::Additive, ETSTrendType::Additive, ETSSeasonalType::None, 1, true)
+    }
+
+    /// Create ETS(A,A,A) - Holt-Winters additive
+    pub fn aaa(periods: usize) -> Self {
+        Self::new(ErrorType::Additive, ETSTrendType::Additive, ETSSeasonalType::Additive, periods, false)
+    }
+
+    /// Create ETS(A,A,M) - Holt-Winters multiplicative seasonality
+    pub fn aam(periods: usize) -> Self {
+        Self::new(ErrorType::Additive, ETSTrendType::Additive, ETSSeasonalType::Multiplicative, periods, false)
+    }
+
+    /// Create ETS(M,A,M) - Multiplicative error with additive trend and multiplicative seasonality
+    pub fn mam(periods: usize) -> Self {
+        Self::new(ErrorType::Multiplicative, ETSTrendType::Additive, ETSSeasonalType::Multiplicative, periods, false)
+    }
+
+    /// Get model string (e.g., "ETS(A,A,N)")
+    pub fn model_string(&self) -> String {
+        let e = match self.error_type {
+            ErrorType::Additive => "A",
+            ErrorType::Multiplicative => "M",
+        };
+        let t = match self.trend_type {
+            ETSTrendType::None => "N",
+            ETSTrendType::Additive => if self.damped { "Ad" } else { "A" },
+            ETSTrendType::Multiplicative => if self.damped { "Md" } else { "M" },
+        };
+        let s = match self.seasonal_type {
+            ETSSeasonalType::None => "N",
+            ETSSeasonalType::Additive => "A",
+            ETSSeasonalType::Multiplicative => "M",
+        };
+        format!("ETS({},{},{})", e, t, s)
+    }
+
+    /// Fit ETS model
+    pub fn fit(&mut self, series: &TimeSeries) {
+        let values = series.values();
+        let n = values.len();
+
+        if n < self.seasonal_periods * 2 {
+            return;
+        }
+
+        // Initialize level
+        if matches!(self.seasonal_type, ETSSeasonalType::None) {
+            self.level = values[0];
+        } else {
+            self.level = values[..self.seasonal_periods].iter().sum::<f64>() / self.seasonal_periods as f64;
+        }
+
+        // Initialize trend
+        if !matches!(self.trend_type, ETSTrendType::None) && n >= 2 * self.seasonal_periods {
+            let first_avg: f64 = values[..self.seasonal_periods].iter().sum::<f64>() / self.seasonal_periods as f64;
+            let second_avg: f64 = values[self.seasonal_periods..2 * self.seasonal_periods].iter().sum::<f64>() / self.seasonal_periods as f64;
+            self.trend = (second_avg - first_avg) / self.seasonal_periods as f64;
+        }
+
+        // Initialize seasonal
+        self.seasonal = match self.seasonal_type {
+            ETSSeasonalType::None => vec![0.0],
+            ETSSeasonalType::Additive => {
+                (0..self.seasonal_periods)
+                    .map(|i| values[i] - self.level)
+                    .collect()
+            }
+            ETSSeasonalType::Multiplicative => {
+                (0..self.seasonal_periods)
+                    .map(|i| values[i] / self.level.max(1e-10))
+                    .collect()
+            }
+        };
+
+        // Optimize parameters
+        self.optimize_parameters(&values);
+
+        // Run through data with optimized parameters
+        let mut sse = 0.0;
+        let mut level = self.level;
+        let mut trend = self.trend;
+        let mut seasonal = self.seasonal.clone();
+
+        for t in 0..n {
+            let s_idx = t % self.seasonal_periods;
+            let s = seasonal[s_idx];
+
+            // One-step forecast
+            let trend_component = match self.trend_type {
+                ETSTrendType::None => 0.0,
+                ETSTrendType::Additive => if self.damped { self.phi * trend } else { trend },
+                ETSTrendType::Multiplicative => if self.damped { pow(trend, self.phi) } else { trend },
+            };
+
+            let forecast = match (self.trend_type, self.seasonal_type) {
+                (ETSTrendType::None, ETSSeasonalType::None) => level,
+                (ETSTrendType::None, ETSSeasonalType::Additive) => level + s,
+                (ETSTrendType::None, ETSSeasonalType::Multiplicative) => level * s,
+                (ETSTrendType::Additive, ETSSeasonalType::None) => level + trend_component,
+                (ETSTrendType::Additive, ETSSeasonalType::Additive) => level + trend_component + s,
+                (ETSTrendType::Additive, ETSSeasonalType::Multiplicative) => (level + trend_component) * s,
+                (ETSTrendType::Multiplicative, ETSSeasonalType::None) => level * trend_component,
+                (ETSTrendType::Multiplicative, ETSSeasonalType::Additive) => level * trend_component + s,
+                (ETSTrendType::Multiplicative, ETSSeasonalType::Multiplicative) => level * trend_component * s,
+            };
+
+            let error = values[t] - forecast;
+            sse += error * error;
+
+            // Update states
+            let (new_level, new_trend, new_seasonal) = self.update_states(
+                level, trend, s, values[t], error, forecast
+            );
+
+            level = new_level;
+            trend = new_trend;
+            seasonal[s_idx] = new_seasonal;
+        }
+
+        self.level = level;
+        self.trend = trend;
+        self.seasonal = seasonal;
+        self.sigma2 = sse / n as f64;
+        self.fitted = true;
+    }
+
+    fn optimize_parameters(&mut self, values: &[f64]) {
+        // Grid search for optimal parameters
+        let mut best_sse = f64::INFINITY;
+        let mut best_params = (self.alpha, self.beta, self.gamma, self.phi);
+
+        for a in (1..=9).map(|i| i as f64 / 10.0) {
+            for b in (0..=5).map(|i| i as f64 / 10.0) {
+                for g in (0..=3).map(|i| i as f64 / 10.0) {
+                    let sse = self.compute_sse(values, a, b, g, self.phi);
+                    if sse < best_sse {
+                        best_sse = sse;
+                        best_params = (a, b, g, self.phi);
+                    }
+                }
+            }
+        }
+
+        self.alpha = best_params.0;
+        self.beta = best_params.1;
+        self.gamma = best_params.2;
+        self.phi = best_params.3;
+    }
+
+    fn compute_sse(&self, values: &[f64], alpha: f64, beta: f64, gamma: f64, phi: f64) -> f64 {
+        let n = values.len();
+        let mut level = self.level;
+        let mut trend = self.trend;
+        let mut seasonal = self.seasonal.clone();
+        let mut sse = 0.0;
+
+        for t in 0..n {
+            let s_idx = t % self.seasonal_periods;
+            let s = seasonal[s_idx];
+
+            let trend_component = match self.trend_type {
+                ETSTrendType::None => 0.0,
+                ETSTrendType::Additive => if self.damped { phi * trend } else { trend },
+                ETSTrendType::Multiplicative => if self.damped { pow(trend, phi) } else { trend },
+            };
+
+            let forecast = match (self.trend_type, self.seasonal_type) {
+                (ETSTrendType::None, ETSSeasonalType::None) => level,
+                (ETSTrendType::None, ETSSeasonalType::Additive) => level + s,
+                (ETSTrendType::None, ETSSeasonalType::Multiplicative) => level * s,
+                (ETSTrendType::Additive, ETSSeasonalType::None) => level + trend_component,
+                (ETSTrendType::Additive, ETSSeasonalType::Additive) => level + trend_component + s,
+                (ETSTrendType::Additive, ETSSeasonalType::Multiplicative) => (level + trend_component) * s,
+                (ETSTrendType::Multiplicative, ETSSeasonalType::None) => level * trend_component,
+                (ETSTrendType::Multiplicative, ETSSeasonalType::Additive) => level * trend_component + s,
+                (ETSTrendType::Multiplicative, ETSSeasonalType::Multiplicative) => level * trend_component * s,
+            };
+
+            let error = values[t] - forecast;
+            sse += error * error;
+
+            // Simplified updates
+            let y = values[t];
+            match self.seasonal_type {
+                ETSSeasonalType::None => {
+                    level = alpha * y + (1.0 - alpha) * (level + trend_component);
+                    trend = beta * (level - (level - trend_component)) + (1.0 - beta) * trend_component;
+                }
+                ETSSeasonalType::Additive => {
+                    let new_level = alpha * (y - s) + (1.0 - alpha) * (level + trend_component);
+                    let new_trend = beta * (new_level - level) + (1.0 - beta) * trend_component;
+                    seasonal[s_idx] = gamma * (y - new_level) + (1.0 - gamma) * s;
+                    level = new_level;
+                    trend = new_trend;
+                }
+                ETSSeasonalType::Multiplicative => {
+                    let new_level = alpha * (y / s.max(1e-10)) + (1.0 - alpha) * (level + trend_component);
+                    let new_trend = beta * (new_level - level) + (1.0 - beta) * trend_component;
+                    seasonal[s_idx] = gamma * (y / new_level.max(1e-10)) + (1.0 - gamma) * s;
+                    level = new_level;
+                    trend = new_trend;
+                }
+            }
+        }
+
+        sse
+    }
+
+    fn update_states(&self, level: f64, trend: f64, seasonal: f64, y: f64, _error: f64, _forecast: f64) -> (f64, f64, f64) {
+        let trend_component = match self.trend_type {
+            ETSTrendType::None => 0.0,
+            ETSTrendType::Additive => if self.damped { self.phi * trend } else { trend },
+            ETSTrendType::Multiplicative => if self.damped { pow(trend, self.phi) } else { trend },
+        };
+
+        match self.seasonal_type {
+            ETSSeasonalType::None => {
+                let new_level = self.alpha * y + (1.0 - self.alpha) * (level + trend_component);
+                let new_trend = self.beta * (new_level - level) + (1.0 - self.beta) * trend_component;
+                (new_level, new_trend, 0.0)
+            }
+            ETSSeasonalType::Additive => {
+                let new_level = self.alpha * (y - seasonal) + (1.0 - self.alpha) * (level + trend_component);
+                let new_trend = self.beta * (new_level - level) + (1.0 - self.beta) * trend_component;
+                let new_seasonal = self.gamma * (y - new_level) + (1.0 - self.gamma) * seasonal;
+                (new_level, new_trend, new_seasonal)
+            }
+            ETSSeasonalType::Multiplicative => {
+                let new_level = self.alpha * (y / seasonal.max(1e-10)) + (1.0 - self.alpha) * (level + trend_component);
+                let new_trend = self.beta * (new_level - level) + (1.0 - self.beta) * trend_component;
+                let new_seasonal = self.gamma * (y / new_level.max(1e-10)) + (1.0 - self.gamma) * seasonal;
+                (new_level, new_trend, new_seasonal)
+            }
+        }
+    }
+
+    /// Generate forecasts
+    pub fn forecast(&self, horizon: usize) -> ETSForecast {
+        if !self.fitted {
+            return ETSForecast::empty(horizon);
+        }
+
+        let mut forecasts = Vec::with_capacity(horizon);
+        let mut level = self.level;
+        let mut trend = self.trend;
+
+        for h in 0..horizon {
+            let s_idx = h % self.seasonal_periods;
+            let s = self.seasonal[s_idx];
+
+            // Trend with damping
+            let trend_sum: f64 = if self.damped {
+                (1..=(h + 1) as i32).map(|i| pow(self.phi, i as f64)).sum()
+            } else {
+                (h + 1) as f64
+            };
+
+            let trend_component = match self.trend_type {
+                ETSTrendType::None => 0.0,
+                ETSTrendType::Additive => trend * trend_sum,
+                ETSTrendType::Multiplicative => pow(trend, trend_sum),
+            };
+
+            let fc = match (self.trend_type, self.seasonal_type) {
+                (ETSTrendType::None, ETSSeasonalType::None) => level,
+                (ETSTrendType::None, ETSSeasonalType::Additive) => level + s,
+                (ETSTrendType::None, ETSSeasonalType::Multiplicative) => level * s,
+                (ETSTrendType::Additive, ETSSeasonalType::None) => level + trend_component,
+                (ETSTrendType::Additive, ETSSeasonalType::Additive) => level + trend_component + s,
+                (ETSTrendType::Additive, ETSSeasonalType::Multiplicative) => (level + trend_component) * s,
+                (ETSTrendType::Multiplicative, ETSSeasonalType::None) => level * trend_component,
+                (ETSTrendType::Multiplicative, ETSSeasonalType::Additive) => level * trend_component + s,
+                (ETSTrendType::Multiplicative, ETSSeasonalType::Multiplicative) => level * trend_component * s,
+            };
+
+            forecasts.push(fc);
+        }
+
+        // Compute prediction intervals
+        let se = sqrt(self.sigma2);
+        let lower: Vec<f64> = forecasts.iter().enumerate()
+            .map(|(h, &f)| f - 1.96 * se * sqrt((h + 1) as f64))
+            .collect();
+        let upper: Vec<f64> = forecasts.iter().enumerate()
+            .map(|(h, &f)| f + 1.96 * se * sqrt((h + 1) as f64))
+            .collect();
+
+        ETSForecast {
+            point_forecast: forecasts,
+            lower_95: lower,
+            upper_95: upper,
+            model: self.model_string(),
+            alpha: self.alpha,
+            beta: self.beta,
+            gamma: self.gamma,
+            phi: self.phi,
+        }
+    }
+
+    /// Get AIC
+    pub fn aic(&self) -> f64 {
+        if !self.fitted {
+            return f64::INFINITY;
+        }
+
+        // Count parameters
+        let mut k = 1; // alpha
+        if !matches!(self.trend_type, ETSTrendType::None) { k += 1; } // beta
+        if !matches!(self.seasonal_type, ETSSeasonalType::None) { k += 1; } // gamma
+        if self.damped { k += 1; } // phi
+        k += self.seasonal_periods; // seasonal states
+
+        // AIC approximation
+        let n = 100.0; // Placeholder
+        n * log(self.sigma2) + 2.0 * k as f64
+    }
+}
+
+/// ETS forecast result
+#[derive(Debug, Clone)]
+pub struct ETSForecast {
+    pub point_forecast: Vec<f64>,
+    pub lower_95: Vec<f64>,
+    pub upper_95: Vec<f64>,
+    pub model: String,
+    pub alpha: f64,
+    pub beta: f64,
+    pub gamma: f64,
+    pub phi: f64,
+}
+
+impl ETSForecast {
+    fn empty(horizon: usize) -> Self {
+        ETSForecast {
+            point_forecast: vec![0.0; horizon],
+            lower_95: vec![0.0; horizon],
+            upper_95: vec![0.0; horizon],
+            model: "ETS(A,N,N)".to_string(),
+            alpha: 0.0,
+            beta: 0.0,
+            gamma: 0.0,
+            phi: 1.0,
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// MODEL SELECTION
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Automatic model selection for ETS
+pub struct AutoETS {
+    best_model: Option<ETS>,
+    all_results: Vec<(String, f64)>,
+}
+
+impl AutoETS {
+    pub fn new() -> Self {
+        AutoETS {
+            best_model: None,
+            all_results: Vec::new(),
+        }
+    }
+
+    /// Automatically select best ETS model
+    pub fn fit(&mut self, series: &TimeSeries, seasonal_periods: Option<usize>) {
+        let periods = seasonal_periods.unwrap_or(1);
+
+        // Define candidate models
+        let mut candidates: Vec<ETS> = vec![
+            ETS::ann(),
+            ETS::aan(),
+            ETS::aadn(),
+        ];
+
+        // Add seasonal models if periods > 1
+        if periods > 1 {
+            candidates.push(ETS::aaa(periods));
+            candidates.push(ETS::aam(periods));
+            candidates.push(ETS::new(
+                ErrorType::Additive,
+                ETSTrendType::Additive,
+                ETSSeasonalType::Additive,
+                periods,
+                true,
+            ));
+        }
+
+        let mut best_aic = f64::INFINITY;
+
+        for mut model in candidates {
+            model.fit(series);
+            let aic = model.aic();
+
+            self.all_results.push((model.model_string(), aic));
+
+            if aic < best_aic {
+                best_aic = aic;
+                self.best_model = Some(model);
+            }
+        }
+    }
+
+    /// Get the best model
+    pub fn best_model(&self) -> Option<&ETS> {
+        self.best_model.as_ref()
+    }
+
+    /// Generate forecast using best model
+    pub fn forecast(&self, horizon: usize) -> ETSForecast {
+        match &self.best_model {
+            Some(model) => model.forecast(horizon),
+            None => ETSForecast::empty(horizon),
+        }
+    }
+
+    /// Get comparison of all models
+    pub fn model_comparison(&self) -> &[(String, f64)] {
+        &self.all_results
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// PROPHET-STYLE DECOMPOSITION
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Prophet-style additive forecasting model
+pub struct ProphetModel {
+    // Components
+    pub growth: GrowthType,
+    pub seasonality_mode: SeasonalityMode,
+
+    // Fitted parameters
+    trend_intercept: f64,
+    trend_slope: f64,
+    changepoints: Vec<usize>,
+    changepoint_deltas: Vec<f64>,
+
+    // Fourier terms for seasonality
+    yearly_fourier: Vec<(f64, f64)>,  // (a, b) pairs
+    weekly_fourier: Vec<(f64, f64)>,
+
+    // Holiday effects
+    holiday_effects: HashMap<String, f64>,
+
+    fitted: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum GrowthType {
+    Linear,
+    Logistic { cap: f64, floor: f64 },
+    Flat,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum SeasonalityMode {
+    Additive,
+    Multiplicative,
+}
+
+impl ProphetModel {
+    pub fn new() -> Self {
+        ProphetModel {
+            growth: GrowthType::Linear,
+            seasonality_mode: SeasonalityMode::Additive,
+            trend_intercept: 0.0,
+            trend_slope: 0.0,
+            changepoints: Vec::new(),
+            changepoint_deltas: Vec::new(),
+            yearly_fourier: Vec::new(),
+            weekly_fourier: Vec::new(),
+            holiday_effects: HashMap::new(),
+            fitted: false,
+        }
+    }
+
+    /// Set growth type
+    pub fn with_growth(mut self, growth: GrowthType) -> Self {
+        self.growth = growth;
+        self
+    }
+
+    /// Set seasonality mode
+    pub fn with_seasonality_mode(mut self, mode: SeasonalityMode) -> Self {
+        self.seasonality_mode = mode;
+        self
+    }
+
+    /// Fit model
+    pub fn fit(&mut self, series: &TimeSeries) {
+        let values = series.values();
+        let n = values.len();
+
+        if n < 10 {
+            return;
+        }
+
+        // Fit trend
+        self.fit_trend(&values);
+
+        // Detect changepoints
+        self.detect_changepoints(&values);
+
+        // Fit yearly seasonality (if enough data)
+        if n >= 365 {
+            self.fit_yearly_seasonality(&values);
+        }
+
+        // Fit weekly seasonality (if enough data)
+        if n >= 14 {
+            self.fit_weekly_seasonality(&values);
+        }
+
+        self.fitted = true;
+    }
+
+    fn fit_trend(&mut self, values: &[f64]) {
+        let n = values.len();
+
+        match self.growth {
+            GrowthType::Linear => {
+                // Simple linear regression
+                let x_mean = (n - 1) as f64 / 2.0;
+                let y_mean: f64 = values.iter().sum::<f64>() / n as f64;
+
+                let mut ss_xy = 0.0;
+                let mut ss_xx = 0.0;
+                for (i, &y) in values.iter().enumerate() {
+                    let x = i as f64;
+                    ss_xy += (x - x_mean) * (y - y_mean);
+                    ss_xx += (x - x_mean).powi(2);
+                }
+
+                self.trend_slope = if ss_xx > 1e-10 { ss_xy / ss_xx } else { 0.0 };
+                self.trend_intercept = y_mean - self.trend_slope * x_mean;
+            }
+            GrowthType::Logistic { cap, floor } => {
+                // Fit logistic curve
+                let y_mean: f64 = values.iter().sum::<f64>() / n as f64;
+                let range = cap - floor;
+
+                // Approximate midpoint
+                let midpoint = (n / 2) as f64;
+                self.trend_intercept = midpoint;
+
+                // Approximate growth rate
+                self.trend_slope = 4.0 * (values[n - 1] - values[0]) / (range * n as f64);
+            }
+            GrowthType::Flat => {
+                self.trend_intercept = values.iter().sum::<f64>() / n as f64;
+                self.trend_slope = 0.0;
+            }
+        }
+    }
+
+    fn detect_changepoints(&mut self, values: &[f64]) {
+        let n = values.len();
+        let n_changepoints = min(25, n / 10);
+
+        if n_changepoints == 0 {
+            return;
+        }
+
+        // Place potential changepoints uniformly in first 80% of data
+        let cp_range = (n as f64 * 0.8) as usize;
+        let step = cp_range / n_changepoints;
+
+        for i in 0..n_changepoints {
+            let idx = (i + 1) * step;
+            if idx < n - 1 {
+                self.changepoints.push(idx);
+            }
+        }
+
+        // Estimate deltas using piecewise linear regression
+        let detrended: Vec<f64> = values.iter().enumerate()
+            .map(|(i, &v)| v - (self.trend_intercept + self.trend_slope * i as f64))
+            .collect();
+
+        self.changepoint_deltas = vec![0.0; self.changepoints.len()];
+
+        for (j, &cp) in self.changepoints.iter().enumerate() {
+            if cp > 0 && cp < n - 1 {
+                // Slope change at this point
+                let before_slope = (detrended[cp] - detrended[0]) / cp as f64;
+                let after_slope = (detrended[n - 1] - detrended[cp]) / (n - 1 - cp) as f64;
+                self.changepoint_deltas[j] = (after_slope - before_slope) * 0.1;
+            }
+        }
+    }
+
+    fn fit_yearly_seasonality(&mut self, values: &[f64]) {
+        let n = values.len();
+        let n_fourier = 10;
+
+        // Detrend
+        let detrended: Vec<f64> = values.iter().enumerate()
+            .map(|(i, &v)| v - self.get_trend(i))
+            .collect();
+
+        for k in 1..=n_fourier {
+            let freq = 2.0 * PI * k as f64 / 365.25;
+
+            let mut cos_sum = 0.0;
+            let mut sin_sum = 0.0;
+
+            for (t, &y) in detrended.iter().enumerate() {
+                cos_sum += y * cos(freq * t as f64);
+                sin_sum += y * sin(freq * t as f64);
+            }
+
+            let scale = 2.0 / n as f64;
+            self.yearly_fourier.push((cos_sum * scale, sin_sum * scale));
+        }
+    }
+
+    fn fit_weekly_seasonality(&mut self, values: &[f64]) {
+        let n = values.len();
+        let n_fourier = 3;
+
+        let detrended: Vec<f64> = values.iter().enumerate()
+            .map(|(i, &v)| v - self.get_trend(i) - self.get_yearly_seasonality(i))
+            .collect();
+
+        for k in 1..=n_fourier {
+            let freq = 2.0 * PI * k as f64 / 7.0;
+
+            let mut cos_sum = 0.0;
+            let mut sin_sum = 0.0;
+
+            for (t, &y) in detrended.iter().enumerate() {
+                cos_sum += y * cos(freq * t as f64);
+                sin_sum += y * sin(freq * t as f64);
+            }
+
+            let scale = 2.0 / n as f64;
+            self.weekly_fourier.push((cos_sum * scale, sin_sum * scale));
+        }
+    }
+
+    fn get_trend(&self, t: usize) -> f64 {
+        let mut trend = match self.growth {
+            GrowthType::Linear => self.trend_intercept + self.trend_slope * t as f64,
+            GrowthType::Logistic { cap, floor } => {
+                let k = self.trend_slope;
+                let m = self.trend_intercept;
+                floor + (cap - floor) / (1.0 + exp(-k * (t as f64 - m)))
+            }
+            GrowthType::Flat => self.trend_intercept,
+        };
+
+        // Add changepoint effects
+        for (i, &cp) in self.changepoints.iter().enumerate() {
+            if t > cp {
+                trend += self.changepoint_deltas[i] * (t - cp) as f64;
+            }
+        }
+
+        trend
+    }
+
+    fn get_yearly_seasonality(&self, t: usize) -> f64 {
+        let mut seasonal = 0.0;
+        for (k, &(a, b)) in self.yearly_fourier.iter().enumerate() {
+            let freq = 2.0 * PI * (k + 1) as f64 / 365.25;
+            seasonal += a * cos(freq * t as f64) + b * sin(freq * t as f64);
+        }
+        seasonal
+    }
+
+    fn get_weekly_seasonality(&self, t: usize) -> f64 {
+        let mut seasonal = 0.0;
+        for (k, &(a, b)) in self.weekly_fourier.iter().enumerate() {
+            let freq = 2.0 * PI * (k + 1) as f64 / 7.0;
+            seasonal += a * cos(freq * t as f64) + b * sin(freq * t as f64);
+        }
+        seasonal
+    }
+
+    /// Generate forecasts
+    pub fn forecast(&self, series: &TimeSeries, horizon: usize) -> ProphetForecast {
+        if !self.fitted {
+            return ProphetForecast::empty(horizon);
+        }
+
+        let n = series.len();
+        let mut forecasts = Vec::with_capacity(horizon);
+        let mut trend = Vec::with_capacity(horizon);
+        let mut yearly = Vec::with_capacity(horizon);
+        let mut weekly = Vec::with_capacity(horizon);
+
+        for h in 0..horizon {
+            let t = n + h;
+
+            let trend_val = self.get_trend(t);
+            let yearly_val = self.get_yearly_seasonality(t);
+            let weekly_val = self.get_weekly_seasonality(t);
+
+            let fc = match self.seasonality_mode {
+                SeasonalityMode::Additive => trend_val + yearly_val + weekly_val,
+                SeasonalityMode::Multiplicative => trend_val * (1.0 + yearly_val) * (1.0 + weekly_val),
+            };
+
+            forecasts.push(fc);
+            trend.push(trend_val);
+            yearly.push(yearly_val);
+            weekly.push(weekly_val);
+        }
+
+        ProphetForecast {
+            yhat: forecasts,
+            trend,
+            yearly,
+            weekly,
+        }
+    }
+}
+
+/// Prophet forecast result with components
+#[derive(Debug, Clone)]
+pub struct ProphetForecast {
+    pub yhat: Vec<f64>,
+    pub trend: Vec<f64>,
+    pub yearly: Vec<f64>,
+    pub weekly: Vec<f64>,
+}
+
+impl ProphetForecast {
+    fn empty(horizon: usize) -> Self {
+        ProphetForecast {
+            yhat: vec![0.0; horizon],
+            trend: vec![0.0; horizon],
+            yearly: vec![0.0; horizon],
+            weekly: vec![0.0; horizon],
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// TESTS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_sarima() {
+        let values: Vec<f64> = (0..120)
+            .map(|i| 100.0 + i as f64 * 0.5 + 20.0 * sin(2.0 * PI * i as f64 / 12.0))
+            .collect();
+        let ts = TimeSeries::from_values("test", &values, Frequency::Monthly);
+
+        let mut model = SARIMA::monthly(1, 1, 1, 1, 1, 1);
+        model.fit(&ts);
+
+        assert!(model.fitted);
+
+        let forecast = model.forecast(&ts, 12);
+        assert_eq!(forecast.point_forecast.len(), 12);
+    }
+
+    #[test]
+    fn test_var() {
+        let series1: Vec<f64> = (0..100).map(|i| i as f64 + 10.0).collect();
+        let series2: Vec<f64> = (0..100).map(|i| i as f64 * 0.5 + 5.0).collect();
+
+        let ts1 = TimeSeries::from_values("s1", &series1, Frequency::Daily);
+        let ts2 = TimeSeries::from_values("s2", &series2, Frequency::Daily);
+
+        let mut var = VAR::new(2);
+        var.fit(&[ts1.clone(), ts2.clone()]);
+
+        assert!(var.fitted);
+
+        let forecast = var.forecast(&[ts1, ts2], 10);
+        assert_eq!(forecast.forecasts.len(), 2);
+        assert_eq!(forecast.forecasts[0].len(), 10);
+    }
+
+    #[test]
+    fn test_state_space() {
+        let values: Vec<f64> = (0..100).map(|i| 50.0 + i as f64 * 0.3 + 5.0 * (i as f64 * 0.1).sin()).collect();
+        let ts = TimeSeries::from_values("test", &values, Frequency::Daily);
+
+        let mut model = StateSpaceModel::local_linear_trend(1.0, 0.1, 0.01);
+        model.fit(&ts);
+
+        assert!(model.fitted);
+
+        let forecast = model.forecast(10);
+        assert_eq!(forecast.forecasts.len(), 10);
+    }
+
+    #[test]
+    fn test_theta() {
+        let values: Vec<f64> = (0..50).map(|i| 100.0 + i as f64 * 2.0).collect();
+        let ts = TimeSeries::from_values("test", &values, Frequency::Daily);
+
+        let mut model = ThetaMethod::standard();
+        model.fit(&ts);
+
+        assert!(model.fitted);
+
+        let forecast = model.forecast(10);
+        assert_eq!(forecast.len(), 10);
+    }
+
+    #[test]
+    fn test_ets() {
+        let values: Vec<f64> = (0..100)
+            .map(|i| 50.0 + i as f64 * 0.5 + 10.0 * sin(2.0 * PI * i as f64 / 12.0))
+            .collect();
+        let ts = TimeSeries::from_values("test", &values, Frequency::Monthly);
+
+        let mut model = ETS::aaa(12);
+        model.fit(&ts);
+
+        assert!(model.fitted);
+
+        let forecast = model.forecast(12);
+        assert_eq!(forecast.point_forecast.len(), 12);
+    }
+
+    #[test]
+    fn test_auto_ets() {
+        let values: Vec<f64> = (0..100).map(|i| 50.0 + i as f64 * 0.2).collect();
+        let ts = TimeSeries::from_values("test", &values, Frequency::Daily);
+
+        let mut auto = AutoETS::new();
+        auto.fit(&ts, None);
+
+        assert!(auto.best_model().is_some());
+
+        let forecast = auto.forecast(10);
+        assert_eq!(forecast.point_forecast.len(), 10);
+    }
+
+    #[test]
+    fn test_prophet() {
+        let values: Vec<f64> = (0..365)
+            .map(|i| 100.0 + i as f64 * 0.1 + 20.0 * sin(2.0 * PI * i as f64 / 365.0))
+            .collect();
+        let ts = TimeSeries::from_values("test", &values, Frequency::Daily);
+
+        let mut model = ProphetModel::new();
+        model.fit(&ts);
+
+        assert!(model.fitted);
+
+        let forecast = model.forecast(&ts, 30);
+        assert_eq!(forecast.yhat.len(), 30);
+    }
+
+    #[test]
+    fn test_crostons() {
+        // Intermittent demand pattern
+        let values: Vec<f64> = vec![
+            0.0, 0.0, 5.0, 0.0, 0.0, 0.0, 3.0, 0.0, 0.0, 7.0,
+            0.0, 0.0, 0.0, 4.0, 0.0, 0.0, 6.0, 0.0, 0.0, 0.0,
+        ];
+        let ts = TimeSeries::from_values("demand", &values, Frequency::Daily);
+
+        let mut model = CrostonsMethod::default();
+        model.fit(&ts);
+
+        assert!(model.fitted);
+
+        let forecast = model.forecast(5);
+        assert_eq!(forecast.len(), 5);
+        assert!(forecast[0] > 0.0); // Should have positive demand expectation
+    }
+}

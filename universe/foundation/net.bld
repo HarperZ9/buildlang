@@ -1,0 +1,1066 @@
+// BUILD Standard Library - Networking Module
+// Copyright (c) 2024 BUILD Language Project
+// High-level networking: HTTP, WebSocket, DNS, URLs
+
+module foundation::net;
+
+use foundation::core::*;
+use foundation::io_extended::*;
+use foundation::crypto::{TlsConnector, TlsStream};
+use foundation::time::Duration;
+
+// ============================================================================
+// URL PARSING
+// ============================================================================
+
+/// Parsed URL components
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Url {
+    scheme: String,
+    username: Option<String>,
+    password: Option<String>,
+    host: Option<String>,
+    port: Option<u16>,
+    path: String,
+    query: Option<String>,
+    fragment: Option<String>,
+}
+
+impl Url {
+    pub fn parse(input: &str) -> Result<Self, UrlError> {
+        let mut parser = UrlParser::new(input);
+        parser.parse()
+    }
+
+    pub fn scheme(self: &Self) -> &str { &self.scheme }
+    pub fn host(self: &Self) -> Option<&str> { self.host.as_deref() }
+    pub fn port(self: &Self) -> Option<u16> { self.port }
+    pub fn port_or_default(self: &Self) -> u16 {
+        self.port.unwrap_or_else(|| match self.scheme.as_str() {
+            "http" => 80,
+            "https" => 443,
+            "ws" => 80,
+            "wss" => 443,
+            "ftp" => 21,
+            _ => 0,
+        })
+    }
+    pub fn path(self: &Self) -> &str { &self.path }
+    pub fn query(self: &Self) -> Option<&str> { self.query.as_deref() }
+    pub fn fragment(self: &Self) -> Option<&str> { self.fragment.as_deref() }
+    pub fn username(self: &Self) -> Option<&str> { self.username.as_deref() }
+    pub fn password(self: &Self) -> Option<&str> { self.password.as_deref() }
+
+    pub fn host_with_port(self: &Self) -> Option<String> {
+        self.host.as_ref().map(|h| {
+            match self.port {
+                Some(p) => format!("{}:{}", h, p),
+                None => h.clone(),
+            }
+        })
+    }
+
+    pub fn to_string(self: &Self) -> String {
+        let mut s = format!("{}://", self.scheme);
+        if let Some(ref u) = self.username {
+            s.push_str(u);
+            if let Some(ref p) = self.password {
+                s.push(':'); s.push_str(p);
+            }
+            s.push('@');
+        }
+        if let Some(ref h) = self.host { s.push_str(h); }
+        if let Some(p) = self.port { s.push_str(&format!(":{}", p)); }
+        s.push_str(&self.path);
+        if let Some(ref q) = self.query { s.push('?'); s.push_str(q); }
+        if let Some(ref f) = self.fragment { s.push('#'); s.push_str(f); }
+        s
+    }
+
+    pub fn join(self: &Self, reference: &str) -> Result<Url, UrlError> {
+        if reference.contains("://") { return Url::parse(reference); }
+        let mut new = self.clone();
+        if reference.starts_with('/') {
+            new.path = reference.to_string();
+            new.query = None;
+            new.fragment = None;
+        } else {
+            let base_path = self.path.rfind('/').map(|i| &self.path[..=i]).unwrap_or("/");
+            new.path = format!("{}{}", base_path, reference);
+        }
+        Ok(new)
+    }
+}
+
+struct UrlParser<'a> {
+    input: &'a str,
+    pos: usize,
+}
+
+impl<'a> UrlParser<'a> {
+    fn new(input: &'a str) -> Self { UrlParser { input, pos: 0 } }
+
+    fn parse(self: &mut Self) -> Result<Url, UrlError> {
+        let scheme = self.parse_scheme()?;
+        self.expect("://")?;
+        let (username, password) = self.parse_userinfo();
+        let host = self.parse_host();
+        let port = self.parse_port()?;
+        let path = self.parse_path();
+        let query = self.parse_query();
+        let fragment = self.parse_fragment();
+
+        Ok(Url { scheme, username, password, host, port, path, query, fragment })
+    }
+
+    fn parse_scheme(self: &mut Self) -> Result<String, UrlError> {
+        let start = self.pos;
+        while self.pos < self.input.len() {
+            let c = self.input.as_bytes()[self.pos] as char;
+            if c == ':' { break; }
+            if !c.is_ascii_alphanumeric() && c != '+' && c != '-' && c != '.' {
+                return Err(UrlError::InvalidScheme);
+            }
+            self.pos += 1;
+        }
+        if self.pos == start { return Err(UrlError::InvalidScheme); }
+        Ok(self.input[start..self.pos].to_lowercase())
+    }
+
+    fn expect(self: &mut Self, s: &str) -> Result<(), UrlError> {
+        if self.input[self.pos..].starts_with(s) {
+            self.pos += s.len();
+            Ok(())
+        } else {
+            Err(UrlError::InvalidFormat)
+        }
+    }
+
+    fn parse_userinfo(self: &mut Self) -> (Option<String>, Option<String>) {
+        let start = self.pos;
+        let mut at_pos = None;
+        let mut colon_pos = None;
+
+        for (i, c) in self.input[self.pos..].char_indices() {
+            if c == '@' { at_pos = Some(self.pos + i); break; }
+            if c == ':' && colon_pos.is_none() { colon_pos = Some(self.pos + i); }
+            if c == '/' || c == '?' || c == '#' { break; }
+        }
+
+        match at_pos {
+            Some(at) => {
+                let userinfo = &self.input[start..at];
+                self.pos = at + 1;
+                match colon_pos {
+                    Some(c) if c < at => {
+                        (Some(self.input[start..c].to_string()),
+                         Some(self.input[c+1..at].to_string()))
+                    }
+                    _ => (Some(userinfo.to_string()), None)
+                }
+            }
+            None => (None, None)
+        }
+    }
+
+    fn parse_host(self: &mut Self) -> Option<String> {
+        let start = self.pos;
+        if self.pos < self.input.len() && self.input.as_bytes()[self.pos] == b'[' {
+            // IPv6
+            while self.pos < self.input.len() && self.input.as_bytes()[self.pos] != b']' {
+                self.pos += 1;
+            }
+            if self.pos < self.input.len() { self.pos += 1; }
+        } else {
+            while self.pos < self.input.len() {
+                let c = self.input.as_bytes()[self.pos] as char;
+                if c == ':' || c == '/' || c == '?' || c == '#' { break; }
+                self.pos += 1;
+            }
+        }
+        if self.pos > start { Some(self.input[start..self.pos].to_string()) } else { None }
+    }
+
+    fn parse_port(self: &mut Self) -> Result<Option<u16>, UrlError> {
+        if self.pos >= self.input.len() || self.input.as_bytes()[self.pos] != b':' {
+            return Ok(None);
+        }
+        self.pos += 1;
+        let start = self.pos;
+        while self.pos < self.input.len() {
+            let c = self.input.as_bytes()[self.pos] as char;
+            if !c.is_ascii_digit() { break; }
+            self.pos += 1;
+        }
+        if self.pos > start {
+            self.input[start..self.pos].parse().map(Some).map_err(|_| UrlError::InvalidPort)
+        } else { Ok(None) }
+    }
+
+    fn parse_path(self: &mut Self) -> String {
+        let start = self.pos;
+        while self.pos < self.input.len() {
+            let c = self.input.as_bytes()[self.pos] as char;
+            if c == '?' || c == '#' { break; }
+            self.pos += 1;
+        }
+        if self.pos > start { self.input[start..self.pos].to_string() } else { "/".to_string() }
+    }
+
+    fn parse_query(self: &mut Self) -> Option<String> {
+        if self.pos >= self.input.len() || self.input.as_bytes()[self.pos] != b'?' {
+            return None;
+        }
+        self.pos += 1;
+        let start = self.pos;
+        while self.pos < self.input.len() && self.input.as_bytes()[self.pos] != b'#' {
+            self.pos += 1;
+        }
+        Some(self.input[start..self.pos].to_string())
+    }
+
+    fn parse_fragment(self: &mut Self) -> Option<String> {
+        if self.pos >= self.input.len() || self.input.as_bytes()[self.pos] != b'#' {
+            return None;
+        }
+        self.pos += 1;
+        Some(self.input[self.pos..].to_string())
+    }
+}
+
+#[derive(Debug)]
+pub enum UrlError {
+    InvalidScheme,
+    InvalidFormat,
+    InvalidPort,
+    InvalidHost,
+}
+
+/// URL encode a string
+pub fn url_encode(s: &str) -> String {
+    let mut result = String::new();
+    for c in s.chars() {
+        if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' || c == '~' {
+            result.push(c);
+        } else {
+            for byte in c.to_string().as_bytes() {
+                result.push_str(&format!("%{:02X}", byte));
+            }
+        }
+    }
+    result
+}
+
+/// URL decode a string
+pub fn url_decode(s: &str) -> Result<String, UrlError> {
+    let mut result = Vec::new();
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            let hex = &s[i+1..i+3];
+            if let Ok(byte) = u8::from_str_radix(hex, 16) {
+                result.push(byte);
+                i += 3;
+            } else { result.push(bytes[i]); i += 1; }
+        } else if bytes[i] == b'+' {
+            result.push(b' '); i += 1;
+        } else {
+            result.push(bytes[i]); i += 1;
+        }
+    }
+    String::from_utf8(result).map_err(|_| UrlError::InvalidFormat)
+}
+
+// ============================================================================
+// HTTP CLIENT
+// ============================================================================
+
+/// HTTP request methods
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Method {
+    GET, POST, PUT, DELETE, PATCH, HEAD, OPTIONS, TRACE, CONNECT,
+}
+
+impl Method {
+    pub fn as_str(self: &Self) -> &'static str {
+        match self {
+            Method::GET => "GET", Method::POST => "POST", Method::PUT => "PUT",
+            Method::DELETE => "DELETE", Method::PATCH => "PATCH", Method::HEAD => "HEAD",
+            Method::OPTIONS => "OPTIONS", Method::TRACE => "TRACE", Method::CONNECT => "CONNECT",
+        }
+    }
+}
+
+/// HTTP version
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Version { Http10, Http11, Http2 }
+
+/// HTTP headers collection
+#[derive(Debug, Clone, Default)]
+pub struct Headers {
+    entries: Vec<(String, String)>,
+}
+
+impl Headers {
+    pub fn new() -> Self { Headers { entries: Vec::new() } }
+
+    pub fn insert(self: &mut Self, name: &str, value: &str) {
+        let name_lower = name.to_lowercase();
+        for (n, v) in &mut self.entries {
+            if n.to_lowercase() == name_lower { *v = value.to_string(); return; }
+        }
+        self.entries.push((name.to_string(), value.to_string()));
+    }
+
+    pub fn append(self: &mut Self, name: &str, value: &str) {
+        self.entries.push((name.to_string(), value.to_string()));
+    }
+
+    pub fn get(self: &Self, name: &str) -> Option<&str> {
+        let name_lower = name.to_lowercase();
+        self.entries.iter().find(|(n, _)| n.to_lowercase() == name_lower).map(|(_, v)| v.as_str())
+    }
+
+    pub fn get_all(self: &Self, name: &str) -> Vec<&str> {
+        let name_lower = name.to_lowercase();
+        self.entries.iter().filter(|(n, _)| n.to_lowercase() == name_lower)
+            .map(|(_, v)| v.as_str()).collect()
+    }
+
+    pub fn remove(self: &mut Self, name: &str) {
+        let name_lower = name.to_lowercase();
+        self.entries.retain(|(n, _)| n.to_lowercase() != name_lower);
+    }
+
+    pub fn iter(self: &Self) -> impl Iterator<Item = (&str, &str)> {
+        self.entries.iter().map(|(n, v)| (n.as_str(), v.as_str()))
+    }
+
+    pub fn len(self: &Self) -> usize { self.entries.len() }
+    pub fn is_empty(self: &Self) -> bool { self.entries.is_empty() }
+}
+
+/// HTTP request builder
+pub struct Request {
+    method: Method,
+    url: Url,
+    headers: Headers,
+    body: Option<Vec<u8>>,
+    timeout: Option<Duration>,
+}
+
+impl Request {
+    pub fn new(method: Method, url: &str) -> Result<Self, HttpError> {
+        let url = Url::parse(url).map_err(|_| HttpError::InvalidUrl)?;
+        Ok(Request { method, url, headers: Headers::new(), body: None, timeout: None })
+    }
+
+    pub fn get(url: &str) -> Result<Self, HttpError> { Self::new(Method::GET, url) }
+    pub fn post(url: &str) -> Result<Self, HttpError> { Self::new(Method::POST, url) }
+    pub fn put(url: &str) -> Result<Self, HttpError> { Self::new(Method::PUT, url) }
+    pub fn delete(url: &str) -> Result<Self, HttpError> { Self::new(Method::DELETE, url) }
+
+    pub fn header(mut self: Self, name: &str, value: &str) -> Self {
+        self.headers.insert(name, value); self
+    }
+
+    pub fn headers(mut self: Self, headers: Headers) -> Self {
+        for (n, v) in headers.iter() { self.headers.insert(n, v); }
+        self
+    }
+
+    pub fn body(mut self: Self, body: Vec<u8>) -> Self { self.body = Some(body); self }
+    pub fn body_str(self: Self, body: &str) -> Self { self.body(body.as_bytes().to_vec()) }
+
+    pub fn json<T: Serialize>(mut self: Self, value: &T) -> Result<Self, HttpError> {
+        let json = serialization::json::to_string(value).map_err(|_| HttpError::SerializationError)?;
+        self.headers.insert("Content-Type", "application/json");
+        Ok(self.body_str(&json))
+    }
+
+    pub fn form(mut self: Self, params: &[(&str, &str)]) -> Self {
+        let body = params.iter().map(|(k, v)| format!("{}={}", url_encode(k), url_encode(v)))
+            .collect::<Vec<_>>().join("&");
+        self.headers.insert("Content-Type", "application/x-www-form-urlencoded");
+        self.body_str(&body)
+    }
+
+    pub fn timeout(mut self: Self, duration: Duration) -> Self {
+        self.timeout = Some(duration); self
+    }
+
+    pub fn send(self: Self) -> Result<Response, HttpError> {
+        HttpClient::new().send(self)
+    }
+}
+
+/// HTTP response
+pub struct Response {
+    pub status: u16,
+    pub status_text: String,
+    pub version: Version,
+    pub headers: Headers,
+    body: Vec<u8>,
+}
+
+impl Response {
+    pub fn status(self: &Self) -> u16 { self.status }
+    pub fn is_success(self: &Self) -> bool { self.status >= 200 && self.status < 300 }
+    pub fn is_redirect(self: &Self) -> bool { self.status >= 300 && self.status < 400 }
+    pub fn is_client_error(self: &Self) -> bool { self.status >= 400 && self.status < 500 }
+    pub fn is_server_error(self: &Self) -> bool { self.status >= 500 }
+
+    pub fn headers(self: &Self) -> &Headers { &self.headers }
+    pub fn body(self: &Self) -> &[u8] { &self.body }
+
+    pub fn text(self: &Self) -> Result<String, HttpError> {
+        String::from_utf8(self.body.clone()).map_err(|_| HttpError::InvalidUtf8)
+    }
+
+    pub fn json<T: Deserialize>(self: &Self) -> Result<T, HttpError> {
+        let text = self.text()?;
+        serialization::json::from_str(&text).map_err(|_| HttpError::DeserializationError)
+    }
+
+    pub fn content_length(self: &Self) -> Option<usize> {
+        self.headers.get("Content-Length").and_then(|v| v.parse().ok())
+    }
+
+    pub fn content_type(self: &Self) -> Option<&str> {
+        self.headers.get("Content-Type")
+    }
+}
+
+/// HTTP client with connection pooling
+pub struct HttpClient {
+    timeout: Duration,
+    follow_redirects: bool,
+    max_redirects: usize,
+    user_agent: String,
+}
+
+impl HttpClient {
+    pub fn new() -> Self {
+        HttpClient {
+            timeout: Duration::from_secs(30),
+            follow_redirects: true,
+            max_redirects: 10,
+            user_agent: "Build-HTTP/1.0".to_string(),
+        }
+    }
+
+    pub fn timeout(mut self: Self, timeout: Duration) -> Self {
+        self.timeout = timeout; self
+    }
+
+    pub fn follow_redirects(mut self: Self, follow: bool) -> Self {
+        self.follow_redirects = follow; self
+    }
+
+    pub fn user_agent(mut self: Self, ua: &str) -> Self {
+        self.user_agent = ua.to_string(); self
+    }
+
+    pub fn send(self: &Self, mut request: Request) -> Result<Response, HttpError> {
+        let mut redirects = 0;
+
+        loop {
+            // Set default headers
+            if request.headers.get("Host").is_none() {
+                if let Some(host) = request.url.host_with_port() {
+                    request.headers.insert("Host", &host);
+                }
+            }
+            if request.headers.get("User-Agent").is_none() {
+                request.headers.insert("User-Agent", &self.user_agent);
+            }
+            if let Some(ref body) = request.body {
+                request.headers.insert("Content-Length", &body.len().to_string());
+            }
+
+            let response = self.send_request(&request)?;
+
+            if self.follow_redirects && response.is_redirect() {
+                redirects += 1;
+                if redirects > self.max_redirects {
+                    return Err(HttpError::TooManyRedirects);
+                }
+                if let Some(location) = response.headers.get("Location") {
+                    let new_url = request.url.join(location).map_err(|_| HttpError::InvalidUrl)?;
+                    request.url = new_url;
+                    request.method = Method::GET;
+                    request.body = None;
+                    continue;
+                }
+            }
+
+            return Ok(response);
+        }
+    }
+
+    fn send_request(self: &Self, request: &Request) -> Result<Response, HttpError> {
+        let host = request.url.host().ok_or(HttpError::InvalidUrl)?;
+        let port = request.url.port_or_default();
+        let use_tls = request.url.scheme() == "https";
+
+        // Connect
+        let stream = TcpStream::connect(&format!("{}:{}", host, port))
+            .map_err(|e| HttpError::ConnectionError(e.to_string()))?;
+
+        if use_tls {
+            let tls = TlsConnector::new().map_err(|e| HttpError::TlsError(e.to_string()))?;
+            let tls_stream = tls.connect(host, stream).map_err(|e| HttpError::TlsError(e.to_string()))?;
+            self.send_over_stream(request, tls_stream)
+        } else {
+            self.send_over_stream(request, stream)
+        }
+    }
+
+    fn send_over_stream<S: Read + Write>(self: &Self, request: &Request, mut stream: S) -> Result<Response, HttpError> {
+        // Build request line
+        let path = if request.url.query().is_some() {
+            format!("{}?{}", request.url.path(), request.url.query().unwrap())
+        } else {
+            request.url.path().to_string()
+        };
+
+        let mut req_bytes = format!("{} {} HTTP/1.1\r\n", request.method.as_str(), path);
+        for (name, value) in request.headers.iter() {
+            req_bytes.push_str(&format!("{}: {}\r\n", name, value));
+        }
+        req_bytes.push_str("\r\n");
+
+        stream.write_all(req_bytes.as_bytes()).map_err(|e| HttpError::IoError(e.to_string()))?;
+        if let Some(ref body) = request.body {
+            stream.write_all(body).map_err(|e| HttpError::IoError(e.to_string()))?;
+        }
+        stream.flush().map_err(|e| HttpError::IoError(e.to_string()))?;
+
+        // Parse response
+        self.parse_response(&mut stream)
+    }
+
+    fn parse_response<R: Read>(self: &Self, reader: &mut R) -> Result<Response, HttpError> {
+        let mut buf = BufReader::new(reader);
+        let mut line = String::new();
+
+        // Status line
+        buf.read_line(&mut line).map_err(|e| HttpError::IoError(e.to_string()))?;
+        let parts: Vec<&str> = line.trim().splitn(3, ' ').collect();
+        if parts.len() < 2 { return Err(HttpError::InvalidResponse); }
+
+        let version = match parts[0] {
+            "HTTP/1.0" => Version::Http10,
+            "HTTP/1.1" => Version::Http11,
+            "HTTP/2" => Version::Http2,
+            _ => return Err(HttpError::InvalidResponse),
+        };
+        let status: u16 = parts[1].parse().map_err(|_| HttpError::InvalidResponse)?;
+        let status_text = parts.get(2).unwrap_or(&"").to_string();
+
+        // Headers
+        let mut headers = Headers::new();
+        loop {
+            line.clear();
+            buf.read_line(&mut line).map_err(|e| HttpError::IoError(e.to_string()))?;
+            let trimmed = line.trim();
+            if trimmed.is_empty() { break; }
+
+            if let Some(colon) = trimmed.find(':') {
+                let name = trimmed[..colon].trim();
+                let value = trimmed[colon+1..].trim();
+                headers.append(name, value);
+            }
+        }
+
+        // Body
+        let body = self.read_body(&mut buf, &headers)?;
+
+        Ok(Response { status, status_text, version, headers, body })
+    }
+
+    fn read_body<R: Read>(self: &Self, reader: &mut R, headers: &Headers) -> Result<Vec<u8>, HttpError> {
+        if let Some(len) = headers.get("Content-Length") {
+            let len: usize = len.parse().map_err(|_| HttpError::InvalidResponse)?;
+            let mut body = vec![0u8; len];
+            reader.read_exact(&mut body).map_err(|e| HttpError::IoError(e.to_string()))?;
+            Ok(body)
+        } else if headers.get("Transfer-Encoding").map(|v| v.contains("chunked")).unwrap_or(false) {
+            self.read_chunked(reader)
+        } else {
+            let mut body = Vec::new();
+            reader.read_to_end(&mut body).map_err(|e| HttpError::IoError(e.to_string()))?;
+            Ok(body)
+        }
+    }
+
+    fn read_chunked<R: Read>(self: &Self, reader: &mut R) -> Result<Vec<u8>, HttpError> {
+        let mut buf = BufReader::new(reader);
+        let mut body = Vec::new();
+        let mut line = String::new();
+
+        loop {
+            line.clear();
+            buf.read_line(&mut line).map_err(|e| HttpError::IoError(e.to_string()))?;
+            let size = usize::from_str_radix(line.trim(), 16).map_err(|_| HttpError::InvalidResponse)?;
+            if size == 0 { break; }
+
+            let mut chunk = vec![0u8; size];
+            buf.read_exact(&mut chunk).map_err(|e| HttpError::IoError(e.to_string()))?;
+            body.extend_from_slice(&chunk);
+
+            // Read trailing CRLF
+            line.clear();
+            buf.read_line(&mut line).map_err(|e| HttpError::IoError(e.to_string()))?;
+        }
+
+        Ok(body)
+    }
+
+    // Convenience methods
+    pub fn get(self: &Self, url: &str) -> Result<Response, HttpError> {
+        self.send(Request::get(url)?)
+    }
+
+    pub fn post(self: &Self, url: &str, body: &[u8]) -> Result<Response, HttpError> {
+        self.send(Request::post(url)?.body(body.to_vec()))
+    }
+
+    pub fn post_json<T: Serialize>(self: &Self, url: &str, value: &T) -> Result<Response, HttpError> {
+        self.send(Request::post(url)?.json(value)?)
+    }
+}
+
+// ============================================================================
+// WEBSOCKET
+// ============================================================================
+
+/// WebSocket connection
+pub struct WebSocket {
+    stream: Box<dyn ReadWrite>,
+    url: Url,
+    is_client: bool,
+    closed: bool,
+}
+
+pub trait ReadWrite: Read + Write {}
+impl<T: Read + Write> ReadWrite for T {}
+
+/// WebSocket message
+#[derive(Debug, Clone)]
+pub enum WsMessage {
+    Text(String),
+    Binary(Vec<u8>),
+    Ping(Vec<u8>),
+    Pong(Vec<u8>),
+    Close(Option<u16>, String),
+}
+
+impl WebSocket {
+    /// Connect to a WebSocket server
+    pub fn connect(url: &str) -> Result<Self, WsError> {
+        let url = Url::parse(url).map_err(|_| WsError::InvalidUrl)?;
+        let host = url.host().ok_or(WsError::InvalidUrl)?;
+        let port = url.port_or_default();
+        let use_tls = url.scheme() == "wss";
+
+        let stream = TcpStream::connect(&format!("{}:{}", host, port))
+            .map_err(|e| WsError::ConnectionError(e.to_string()))?;
+
+        let stream: Box<dyn ReadWrite> = if use_tls {
+            let tls = TlsConnector::new().map_err(|e| WsError::TlsError(e.to_string()))?;
+            Box::new(tls.connect(host, stream).map_err(|e| WsError::TlsError(e.to_string()))?)
+        } else {
+            Box::new(stream)
+        };
+
+        let mut ws = WebSocket { stream, url: url.clone(), is_client: true, closed: false };
+        ws.handshake()?;
+        Ok(ws)
+    }
+
+    fn handshake(self: &mut Self) -> Result<(), WsError> {
+        use foundation::crypto::{random_bytes, base64_encode};
+
+        let key = base64_encode(&random_bytes(16));
+        let host = self.url.host().unwrap();
+        let path = self.url.path();
+
+        let request = format!(
+            "GET {} HTTP/1.1\r\n\
+             Host: {}\r\n\
+             Upgrade: websocket\r\n\
+             Connection: Upgrade\r\n\
+             Sec-WebSocket-Key: {}\r\n\
+             Sec-WebSocket-Version: 13\r\n\r\n",
+            path, host, key
+        );
+
+        self.stream.write_all(request.as_bytes()).map_err(|e| WsError::IoError(e.to_string()))?;
+
+        // Read response
+        let mut buf = [0u8; 1024];
+        let n = self.stream.read(&mut buf).map_err(|e| WsError::IoError(e.to_string()))?;
+        let response = String::from_utf8_lossy(&buf[..n]);
+
+        if !response.contains("101") || !response.to_lowercase().contains("upgrade") {
+            return Err(WsError::HandshakeFailed);
+        }
+
+        Ok(())
+    }
+
+    /// Send a message
+    pub fn send(self: &mut Self, message: WsMessage) -> Result<(), WsError> {
+        if self.closed { return Err(WsError::ConnectionClosed); }
+
+        let (opcode, payload) = match message {
+            WsMessage::Text(s) => (0x01, s.into_bytes()),
+            WsMessage::Binary(b) => (0x02, b),
+            WsMessage::Ping(b) => (0x09, b),
+            WsMessage::Pong(b) => (0x0A, b),
+            WsMessage::Close(code, reason) => {
+                let mut payload = Vec::new();
+                if let Some(c) = code {
+                    payload.extend_from_slice(&c.to_be_bytes());
+                    payload.extend_from_slice(reason.as_bytes());
+                }
+                self.closed = true;
+                (0x08, payload)
+            }
+        };
+
+        self.send_frame(opcode, &payload)
+    }
+
+    fn send_frame(self: &mut Self, opcode: u8, payload: &[u8]) -> Result<(), WsError> {
+        let mut frame = Vec::new();
+
+        // FIN + opcode
+        frame.push(0x80 | opcode);
+
+        // Mask bit (client must mask) + length
+        let mask_bit = if self.is_client { 0x80 } else { 0x00 };
+        if payload.len() < 126 {
+            frame.push(mask_bit | payload.len() as u8);
+        } else if payload.len() < 65536 {
+            frame.push(mask_bit | 126);
+            frame.extend_from_slice(&(payload.len() as u16).to_be_bytes());
+        } else {
+            frame.push(mask_bit | 127);
+            frame.extend_from_slice(&(payload.len() as u64).to_be_bytes());
+        }
+
+        // Masking key and masked payload (for client)
+        if self.is_client {
+            let mask = foundation::crypto::random_bytes(4);
+            frame.extend_from_slice(&mask);
+            for (i, byte) in payload.iter().enumerate() {
+                frame.push(byte ^ mask[i % 4]);
+            }
+        } else {
+            frame.extend_from_slice(payload);
+        }
+
+        self.stream.write_all(&frame).map_err(|e| WsError::IoError(e.to_string()))?;
+        self.stream.flush().map_err(|e| WsError::IoError(e.to_string()))
+    }
+
+    /// Receive a message
+    pub fn recv(self: &mut Self) -> Result<WsMessage, WsError> {
+        if self.closed { return Err(WsError::ConnectionClosed); }
+        self.read_frame()
+    }
+
+    fn read_frame(self: &mut Self) -> Result<WsMessage, WsError> {
+        let mut header = [0u8; 2];
+        self.stream.read_exact(&mut header).map_err(|e| WsError::IoError(e.to_string()))?;
+
+        let _fin = (header[0] & 0x80) != 0;
+        let opcode = header[0] & 0x0F;
+        let masked = (header[1] & 0x80) != 0;
+        let mut len = (header[1] & 0x7F) as usize;
+
+        if len == 126 {
+            let mut buf = [0u8; 2];
+            self.stream.read_exact(&mut buf).map_err(|e| WsError::IoError(e.to_string()))?;
+            len = u16::from_be_bytes(buf) as usize;
+        } else if len == 127 {
+            let mut buf = [0u8; 8];
+            self.stream.read_exact(&mut buf).map_err(|e| WsError::IoError(e.to_string()))?;
+            len = u64::from_be_bytes(buf) as usize;
+        }
+
+        let mask = if masked {
+            let mut m = [0u8; 4];
+            self.stream.read_exact(&mut m).map_err(|e| WsError::IoError(e.to_string()))?;
+            Some(m)
+        } else { None };
+
+        let mut payload = vec![0u8; len];
+        self.stream.read_exact(&mut payload).map_err(|e| WsError::IoError(e.to_string()))?;
+
+        if let Some(m) = mask {
+            for (i, byte) in payload.iter_mut().enumerate() {
+                *byte ^= m[i % 4];
+            }
+        }
+
+        match opcode {
+            0x01 => Ok(WsMessage::Text(String::from_utf8_lossy(&payload).to_string())),
+            0x02 => Ok(WsMessage::Binary(payload)),
+            0x08 => {
+                self.closed = true;
+                let (code, reason) = if payload.len() >= 2 {
+                    let code = u16::from_be_bytes([payload[0], payload[1]]);
+                    let reason = String::from_utf8_lossy(&payload[2..]).to_string();
+                    (Some(code), reason)
+                } else { (None, String::new()) };
+                Ok(WsMessage::Close(code, reason))
+            }
+            0x09 => Ok(WsMessage::Ping(payload)),
+            0x0A => Ok(WsMessage::Pong(payload)),
+            _ => Err(WsError::InvalidFrame),
+        }
+    }
+
+    /// Close the connection
+    pub fn close(self: &mut Self, code: Option<u16>, reason: &str) -> Result<(), WsError> {
+        self.send(WsMessage::Close(code, reason.to_string()))
+    }
+
+    pub fn is_closed(self: &Self) -> bool { self.closed }
+}
+
+// ============================================================================
+// DNS
+// ============================================================================
+
+/// DNS resolver
+pub struct DnsResolver {
+    servers: Vec<SocketAddr>,
+    timeout: Duration,
+}
+
+/// DNS record types
+#[derive(Debug, Clone, Copy)]
+pub enum RecordType { A, AAAA, CNAME, MX, TXT, NS, SOA, PTR, SRV }
+
+/// DNS record
+#[derive(Debug, Clone)]
+pub enum DnsRecord {
+    A(Ipv4Addr),
+    AAAA(Ipv6Addr),
+    CNAME(String),
+    MX { priority: u16, exchange: String },
+    TXT(String),
+    NS(String),
+    SRV { priority: u16, weight: u16, port: u16, target: String },
+}
+
+impl DnsResolver {
+    pub fn new() -> Self {
+        DnsResolver {
+            servers: vec![
+                "8.8.8.8:53".parse().unwrap(),
+                "8.8.4.4:53".parse().unwrap(),
+            ],
+            timeout: Duration::from_secs(5),
+        }
+    }
+
+    pub fn with_servers(servers: Vec<SocketAddr>) -> Self {
+        DnsResolver { servers, timeout: Duration::from_secs(5) }
+    }
+
+    /// Resolve hostname to IP addresses
+    pub fn resolve(self: &Self, hostname: &str) -> Result<Vec<IpAddr>, DnsError> {
+        let records = self.query(hostname, RecordType::A)?;
+        let mut addrs = Vec::new();
+        for record in records {
+            if let DnsRecord::A(addr) = record { addrs.push(IpAddr::V4(addr)); }
+        }
+        if addrs.is_empty() {
+            let records = self.query(hostname, RecordType::AAAA)?;
+            for record in records {
+                if let DnsRecord::AAAA(addr) = record { addrs.push(IpAddr::V6(addr)); }
+            }
+        }
+        if addrs.is_empty() { Err(DnsError::NoRecords) } else { Ok(addrs) }
+    }
+
+    /// Query DNS records
+    pub fn query(self: &Self, name: &str, record_type: RecordType) -> Result<Vec<DnsRecord>, DnsError> {
+        intrinsics::dns_query(&self.servers, name, record_type, self.timeout)
+    }
+
+    /// Reverse DNS lookup
+    pub fn reverse(self: &Self, addr: IpAddr) -> Result<String, DnsError> {
+        let ptr_name = match addr {
+            IpAddr::V4(v4) => {
+                let octets = v4.octets();
+                format!("{}.{}.{}.{}.in-addr.arpa", octets[3], octets[2], octets[1], octets[0])
+            }
+            IpAddr::V6(v6) => {
+                let mut s = String::new();
+                for byte in v6.octets().iter().rev() {
+                    s.push_str(&format!("{:x}.{:x}.", byte & 0xf, byte >> 4));
+                }
+                s.push_str("ip6.arpa");
+                s
+            }
+        };
+
+        let records = self.query(&ptr_name, RecordType::PTR)?;
+        for record in records {
+            if let DnsRecord::CNAME(name) = record { return Ok(name); }
+        }
+        Err(DnsError::NoRecords)
+    }
+}
+
+// ============================================================================
+// IP ADDRESSES
+// ============================================================================
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Ipv4Addr([u8; 4]);
+
+impl Ipv4Addr {
+    pub const LOCALHOST: Ipv4Addr = Ipv4Addr([127, 0, 0, 1]);
+    pub const UNSPECIFIED: Ipv4Addr = Ipv4Addr([0, 0, 0, 0]);
+    pub const BROADCAST: Ipv4Addr = Ipv4Addr([255, 255, 255, 255]);
+
+    pub fn new(a: u8, b: u8, c: u8, d: u8) -> Self { Ipv4Addr([a, b, c, d]) }
+    pub fn octets(self: &Self) -> [u8; 4] { self.0 }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        let parts: Vec<&str> = s.split('.').collect();
+        if parts.len() != 4 { return None; }
+        let mut octets = [0u8; 4];
+        for (i, p) in parts.iter().enumerate() {
+            octets[i] = p.parse().ok()?;
+        }
+        Some(Ipv4Addr(octets))
+    }
+
+    pub fn is_loopback(self: &Self) -> bool { self.0[0] == 127 }
+    pub fn is_private(self: &Self) -> bool {
+        self.0[0] == 10 || (self.0[0] == 172 && self.0[1] >= 16 && self.0[1] <= 31)
+            || (self.0[0] == 192 && self.0[1] == 168)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Ipv6Addr([u8; 16]);
+
+impl Ipv6Addr {
+    pub const LOCALHOST: Ipv6Addr = Ipv6Addr([0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1]);
+    pub const UNSPECIFIED: Ipv6Addr = Ipv6Addr([0; 16]);
+
+    pub fn new(a: u16, b: u16, c: u16, d: u16, e: u16, f: u16, g: u16, h: u16) -> Self {
+        let mut octets = [0u8; 16];
+        for (i, &seg) in [a, b, c, d, e, f, g, h].iter().enumerate() {
+            octets[i*2] = (seg >> 8) as u8;
+            octets[i*2 + 1] = seg as u8;
+        }
+        Ipv6Addr(octets)
+    }
+
+    pub fn octets(self: &Self) -> [u8; 16] { self.0 }
+    pub fn is_loopback(self: &Self) -> bool { self.0 == Self::LOCALHOST.0 }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum IpAddr { V4(Ipv4Addr), V6(Ipv6Addr) }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct SocketAddr { ip: IpAddr, port: u16 }
+
+impl SocketAddr {
+    pub fn new(ip: IpAddr, port: u16) -> Self { SocketAddr { ip, port } }
+    pub fn ip(self: &Self) -> IpAddr { self.ip }
+    pub fn port(self: &Self) -> u16 { self.port }
+}
+
+// ============================================================================
+// ERRORS
+// ============================================================================
+
+#[derive(Debug)]
+pub enum HttpError {
+    InvalidUrl,
+    ConnectionError(String),
+    TlsError(String),
+    IoError(String),
+    InvalidResponse,
+    InvalidUtf8,
+    SerializationError,
+    DeserializationError,
+    TooManyRedirects,
+    Timeout,
+}
+
+#[derive(Debug)]
+pub enum WsError {
+    InvalidUrl,
+    ConnectionError(String),
+    TlsError(String),
+    IoError(String),
+    HandshakeFailed,
+    InvalidFrame,
+    ConnectionClosed,
+}
+
+#[derive(Debug)]
+pub enum DnsError {
+    Timeout,
+    ServerError,
+    NoRecords,
+    InvalidName,
+    IoError(String),
+}
+
+// ============================================================================
+// TESTS
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_url_parse() {
+        let url = Url::parse("https://user:pass@example.com:8080/path?query=1#frag").unwrap();
+        assert_eq!(url.scheme(), "https");
+        assert_eq!(url.username(), Some("user"));
+        assert_eq!(url.password(), Some("pass"));
+        assert_eq!(url.host(), Some("example.com"));
+        assert_eq!(url.port(), Some(8080));
+        assert_eq!(url.path(), "/path");
+        assert_eq!(url.query(), Some("query=1"));
+        assert_eq!(url.fragment(), Some("frag"));
+    }
+
+    #[test]
+    fn test_url_encode() {
+        assert_eq!(url_encode("hello world"), "hello%20world");
+        assert_eq!(url_encode("a+b=c"), "a%2Bb%3Dc");
+    }
+
+    #[test]
+    fn test_headers() {
+        let mut headers = Headers::new();
+        headers.insert("Content-Type", "application/json");
+        headers.insert("content-type", "text/plain");
+        assert_eq!(headers.get("Content-Type"), Some("text/plain"));
+    }
+
+    #[test]
+    fn test_ipv4_parse() {
+        let addr = Ipv4Addr::parse("192.168.1.1").unwrap();
+        assert_eq!(addr.octets(), [192, 168, 1, 1]);
+        assert!(addr.is_private());
+    }
+}

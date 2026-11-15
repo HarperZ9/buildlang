@@ -1,0 +1,1805 @@
+// ============================================================================
+// PHOTON ENGINE - LENS EFFECTS SYSTEM
+// Physically-Based Camera and Lens Simulation
+// Based on Harper Engine WP-201: Cinematic Lens Effects
+// ============================================================================
+
+module photon::lens_effects;
+
+use core::memory::{GpuBuffer, GpuTexture, MemoryPool};
+use core::math::{Vec2, Vec3, Vec4, Mat4};
+use photon::gpu::{CommandBuffer, ComputeShader, RenderPipeline, BindGroup};
+
+// ============================================================================
+// BLOOM SYSTEM
+// Based on Harper Engine RT-2011: Physically-Based Bloom
+// ============================================================================
+
+/// Bloom quality preset
+enum BloomQuality {
+    Low,      // 3 passes
+    Medium,   // 5 passes
+    High,     // 7 passes
+    Ultra,    // 9 passes
+}
+
+/// Bloom configuration
+struct BloomConfig {
+    /// Enable bloom
+    enabled: bool,
+    /// Intensity multiplier
+    intensity: f32,
+    /// Threshold for bloom contribution
+    threshold: f32,
+    /// Soft threshold knee
+    soft_knee: f32,
+    /// Quality preset
+    quality: BloomQuality,
+    /// Per-mip weights
+    mip_weights: [f32; 9],
+    /// Lens dirt texture
+    lens_dirt: Option<GpuTexture>,
+    /// Lens dirt intensity
+    lens_dirt_intensity: f32,
+    /// Anamorphic ratio (1.0 = normal, >1.0 = horizontal stretch)
+    anamorphic_ratio: f32,
+    /// Use FFT convolution for realistic bloom
+    use_fft: bool,
+}
+
+impl Default for BloomConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            intensity: 0.5,
+            threshold: 1.0,
+            soft_knee: 0.5,
+            quality: BloomQuality::High,
+            mip_weights: [1.0, 0.9, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3, 0.2],
+            lens_dirt: None,
+            lens_dirt_intensity: 0.0,
+            anamorphic_ratio: 1.0,
+            use_fft: false,
+        }
+    }
+}
+
+/// Bloom renderer using dual-filtering technique
+struct BloomRenderer {
+    config: BloomConfig,
+    /// Downsampling mip chain
+    mip_chain: Vec<GpuTexture>,
+    /// Upsample mip chain
+    upsample_chain: Vec<GpuTexture>,
+    /// Threshold/prefilter shader
+    prefilter_shader: ComputeShader,
+    /// Downsample shader
+    downsample_shader: ComputeShader,
+    /// Upsample shader
+    upsample_shader: ComputeShader,
+    /// Composite shader
+    composite_shader: ComputeShader,
+    /// FFT kernel (if using convolution)
+    fft_kernel: Option<GpuTexture>,
+}
+
+impl BloomRenderer {
+    fn new(device: &GpuDevice, width: u32, height: u32, config: BloomConfig) -> Self {
+        let mip_count = match config.quality {
+            BloomQuality::Low => 3,
+            BloomQuality::Medium => 5,
+            BloomQuality::High => 7,
+            BloomQuality::Ultra => 9,
+        };
+
+        // Create mip chain
+        let mut mip_chain = Vec::new();
+        let mut upsample_chain = Vec::new();
+        let mut w = width / 2;
+        let mut h = height / 2;
+
+        for _ in 0..mip_count {
+            mip_chain.push(device.create_texture(&TextureDescriptor {
+                width: w,
+                height: h,
+                format: TextureFormat::RGBA16_FLOAT,
+                usage: TextureUsage::SHADER_READ | TextureUsage::SHADER_WRITE,
+                ..Default::default()
+            }));
+
+            upsample_chain.push(device.create_texture(&TextureDescriptor {
+                width: w,
+                height: h,
+                format: TextureFormat::RGBA16_FLOAT,
+                usage: TextureUsage::SHADER_READ | TextureUsage::SHADER_WRITE,
+                ..Default::default()
+            }));
+
+            w = (w + 1) / 2;
+            h = (h + 1) / 2;
+        }
+
+        let prefilter_shader = Self::create_prefilter_shader(device);
+        let downsample_shader = Self::create_downsample_shader(device);
+        let upsample_shader = Self::create_upsample_shader(device);
+        let composite_shader = Self::create_composite_shader(device);
+
+        Self {
+            config,
+            mip_chain,
+            upsample_chain,
+            prefilter_shader,
+            downsample_shader,
+            upsample_shader,
+            composite_shader,
+            fft_kernel: None,
+        }
+    }
+
+    fn create_prefilter_shader(device: &GpuDevice) -> ComputeShader {
+        let shader = r#"
+            struct BloomParams {
+                threshold: f32,
+                soft_knee: f32,
+                intensity: f32,
+                _pad: f32,
+            };
+
+            @group(0) @binding(0) var<uniform> params: BloomParams;
+            @group(0) @binding(1) var input_texture: texture_2d<f32>;
+            @group(0) @binding(2) var output_texture: texture_storage_2d<rgba16float, write>;
+
+            fn soft_threshold(color: vec3<f32>, threshold: f32, knee: f32) -> vec3<f32> {
+                let luminance = dot(color, vec3<f32>(0.2126, 0.7152, 0.0722));
+                let soft = luminance - threshold + knee;
+                soft = clamp(soft, 0.0, 2.0 * knee);
+                soft = soft * soft / (4.0 * knee + 0.00001);
+                let contribution = max(soft, luminance - threshold) / max(luminance, 0.00001);
+                return color * contribution;
+            }
+
+            @compute @workgroup_size(8, 8, 1)
+            fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+                let dims = textureDimensions(output_texture);
+                if (gid.x >= dims.x || gid.y >= dims.y) {
+                    return;
+                }
+
+                // Sample with 2x2 downsampling and filtering
+                let src_dims = textureDimensions(input_texture);
+                let src_uv = (vec2<f32>(gid.xy) + 0.5) * 2.0 / vec2<f32>(src_dims);
+
+                // 13-tap downsampling filter (Kawase)
+                let a = textureLoad(input_texture, vec2<i32>(gid.xy * 2u) + vec2<i32>(-1, -1), 0).rgb;
+                let b = textureLoad(input_texture, vec2<i32>(gid.xy * 2u) + vec2<i32>(0, -1), 0).rgb;
+                let c = textureLoad(input_texture, vec2<i32>(gid.xy * 2u) + vec2<i32>(1, -1), 0).rgb;
+                let d = textureLoad(input_texture, vec2<i32>(gid.xy * 2u) + vec2<i32>(-1, 0), 0).rgb;
+                let e = textureLoad(input_texture, vec2<i32>(gid.xy * 2u) + vec2<i32>(0, 0), 0).rgb;
+                let f = textureLoad(input_texture, vec2<i32>(gid.xy * 2u) + vec2<i32>(1, 0), 0).rgb;
+                let g = textureLoad(input_texture, vec2<i32>(gid.xy * 2u) + vec2<i32>(-1, 1), 0).rgb;
+                let h = textureLoad(input_texture, vec2<i32>(gid.xy * 2u) + vec2<i32>(0, 1), 0).rgb;
+                let i = textureLoad(input_texture, vec2<i32>(gid.xy * 2u) + vec2<i32>(1, 1), 0).rgb;
+
+                var color = e * 0.25;
+                color += (b + d + f + h) * 0.125;
+                color += (a + c + g + i) * 0.0625;
+
+                // Apply threshold
+                color = soft_threshold(color, params.threshold, params.soft_knee);
+
+                textureStore(output_texture, gid.xy, vec4<f32>(color * params.intensity, 1.0));
+            }
+        "#;
+
+        device.create_compute_shader(shader)
+    }
+
+    fn create_downsample_shader(device: &GpuDevice) -> ComputeShader {
+        let shader = r#"
+            @group(0) @binding(0) var input_texture: texture_2d<f32>;
+            @group(0) @binding(1) var output_texture: texture_storage_2d<rgba16float, write>;
+
+            @compute @workgroup_size(8, 8, 1)
+            fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+                let dims = textureDimensions(output_texture);
+                if (gid.x >= dims.x || gid.y >= dims.y) {
+                    return;
+                }
+
+                // Dual filtering downsample
+                let src = vec2<i32>(gid.xy * 2u);
+
+                let a = textureLoad(input_texture, src + vec2<i32>(-1, -1), 0).rgb;
+                let b = textureLoad(input_texture, src + vec2<i32>(0, -1), 0).rgb;
+                let c = textureLoad(input_texture, src + vec2<i32>(1, -1), 0).rgb;
+                let d = textureLoad(input_texture, src + vec2<i32>(-1, 0), 0).rgb;
+                let e = textureLoad(input_texture, src + vec2<i32>(0, 0), 0).rgb;
+                let f = textureLoad(input_texture, src + vec2<i32>(1, 0), 0).rgb;
+                let g = textureLoad(input_texture, src + vec2<i32>(-1, 1), 0).rgb;
+                let h = textureLoad(input_texture, src + vec2<i32>(0, 1), 0).rgb;
+                let i = textureLoad(input_texture, src + vec2<i32>(1, 1), 0).rgb;
+
+                var color = e * 0.25;
+                color += (b + d + f + h) * 0.125;
+                color += (a + c + g + i) * 0.0625;
+
+                textureStore(output_texture, gid.xy, vec4<f32>(color, 1.0));
+            }
+        "#;
+
+        device.create_compute_shader(shader)
+    }
+
+    fn create_upsample_shader(device: &GpuDevice) -> ComputeShader {
+        let shader = r#"
+            struct UpsampleParams {
+                mip_weight: f32,
+                filter_radius: f32,
+                _pad: vec2<f32>,
+            };
+
+            @group(0) @binding(0) var<uniform> params: UpsampleParams;
+            @group(0) @binding(1) var lower_mip: texture_2d<f32>;
+            @group(0) @binding(2) var higher_mip: texture_2d<f32>;
+            @group(0) @binding(3) var output_texture: texture_storage_2d<rgba16float, write>;
+            @group(0) @binding(4) var linear_sampler: sampler;
+
+            @compute @workgroup_size(8, 8, 1)
+            fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+                let dims = textureDimensions(output_texture);
+                if (gid.x >= dims.x || gid.y >= dims.y) {
+                    return;
+                }
+
+                let uv = (vec2<f32>(gid.xy) + 0.5) / vec2<f32>(dims);
+
+                // Tent filter upsample
+                let lower_dims = vec2<f32>(textureDimensions(lower_mip));
+                let texel_size = 1.0 / lower_dims;
+                let radius = params.filter_radius;
+
+                var color = vec3<f32>(0.0);
+                color += textureSampleLevel(lower_mip, linear_sampler, uv + vec2<f32>(-radius, -radius) * texel_size, 0.0).rgb;
+                color += textureSampleLevel(lower_mip, linear_sampler, uv + vec2<f32>(0.0, -radius) * texel_size, 0.0).rgb * 2.0;
+                color += textureSampleLevel(lower_mip, linear_sampler, uv + vec2<f32>(radius, -radius) * texel_size, 0.0).rgb;
+                color += textureSampleLevel(lower_mip, linear_sampler, uv + vec2<f32>(-radius, 0.0) * texel_size, 0.0).rgb * 2.0;
+                color += textureSampleLevel(lower_mip, linear_sampler, uv, 0.0).rgb * 4.0;
+                color += textureSampleLevel(lower_mip, linear_sampler, uv + vec2<f32>(radius, 0.0) * texel_size, 0.0).rgb * 2.0;
+                color += textureSampleLevel(lower_mip, linear_sampler, uv + vec2<f32>(-radius, radius) * texel_size, 0.0).rgb;
+                color += textureSampleLevel(lower_mip, linear_sampler, uv + vec2<f32>(0.0, radius) * texel_size, 0.0).rgb * 2.0;
+                color += textureSampleLevel(lower_mip, linear_sampler, uv + vec2<f32>(radius, radius) * texel_size, 0.0).rgb;
+                color /= 16.0;
+
+                // Add higher resolution mip
+                let higher_color = textureLoad(higher_mip, vec2<i32>(gid.xy), 0).rgb;
+                color = color * params.mip_weight + higher_color;
+
+                textureStore(output_texture, gid.xy, vec4<f32>(color, 1.0));
+            }
+        "#;
+
+        device.create_compute_shader(shader)
+    }
+
+    fn create_composite_shader(device: &GpuDevice) -> ComputeShader {
+        let shader = r#"
+            struct CompositeParams {
+                bloom_intensity: f32,
+                dirt_intensity: f32,
+                _pad: vec2<f32>,
+            };
+
+            @group(0) @binding(0) var<uniform> params: CompositeParams;
+            @group(0) @binding(1) var scene_texture: texture_2d<f32>;
+            @group(0) @binding(2) var bloom_texture: texture_2d<f32>;
+            @group(0) @binding(3) var dirt_texture: texture_2d<f32>;
+            @group(0) @binding(4) var output_texture: texture_storage_2d<rgba16float, write>;
+            @group(0) @binding(5) var linear_sampler: sampler;
+
+            @compute @workgroup_size(8, 8, 1)
+            fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+                let dims = textureDimensions(output_texture);
+                if (gid.x >= dims.x || gid.y >= dims.y) {
+                    return;
+                }
+
+                let uv = (vec2<f32>(gid.xy) + 0.5) / vec2<f32>(dims);
+
+                let scene = textureLoad(scene_texture, vec2<i32>(gid.xy), 0).rgb;
+                let bloom = textureSampleLevel(bloom_texture, linear_sampler, uv, 0.0).rgb;
+                let dirt = textureSampleLevel(dirt_texture, linear_sampler, uv, 0.0).rgb;
+
+                // Add bloom
+                var color = scene + bloom * params.bloom_intensity;
+
+                // Add lens dirt bloom
+                color += bloom * dirt * params.dirt_intensity;
+
+                textureStore(output_texture, gid.xy, vec4<f32>(color, 1.0));
+            }
+        "#;
+
+        device.create_compute_shader(shader)
+    }
+
+    /// Render bloom effect
+    fn render(&self, cmd: &mut CommandBuffer, input: &GpuTexture, output: &GpuTexture) {
+        if !self.config.enabled {
+            // Copy input to output directly
+            cmd.copy_texture_to_texture(input, output, 0);
+            return;
+        }
+
+        // 1. Prefilter and first downsample
+        cmd.set_compute_shader(&self.prefilter_shader);
+        // ... bind prefilter resources ...
+        let dims = self.mip_chain[0].dimensions();
+        cmd.dispatch((dims.0 + 7) / 8, (dims.1 + 7) / 8, 1);
+        cmd.barrier(BarrierType::TextureWriteToRead);
+
+        // 2. Downsample chain
+        for i in 1..self.mip_chain.len() {
+            cmd.set_compute_shader(&self.downsample_shader);
+            // ... bind mip_chain[i-1] as input, mip_chain[i] as output ...
+            let dims = self.mip_chain[i].dimensions();
+            cmd.dispatch((dims.0 + 7) / 8, (dims.1 + 7) / 8, 1);
+            cmd.barrier(BarrierType::TextureWriteToRead);
+        }
+
+        // 3. Upsample chain
+        for i in (0..self.mip_chain.len() - 1).rev() {
+            cmd.set_compute_shader(&self.upsample_shader);
+            // ... bind appropriately with mip weights ...
+            let dims = self.upsample_chain[i].dimensions();
+            cmd.dispatch((dims.0 + 7) / 8, (dims.1 + 7) / 8, 1);
+            cmd.barrier(BarrierType::TextureWriteToRead);
+        }
+
+        // 4. Composite with scene
+        cmd.set_compute_shader(&self.composite_shader);
+        // ... bind input, bloom, dirt, output ...
+        let dims = output.dimensions();
+        cmd.dispatch((dims.0 + 7) / 8, (dims.1 + 7) / 8, 1);
+    }
+}
+
+// ============================================================================
+// DEPTH OF FIELD
+// Based on Harper Engine RT-2012: Cinematic Depth of Field
+// ============================================================================
+
+/// Depth of field method
+enum DofMethod {
+    /// Gather-based (classic)
+    Gather,
+    /// Scatter-based (more accurate)
+    Scatter,
+    /// Bokeh sprites (highest quality)
+    BokehSprite,
+    /// Physically-based with aberrations
+    PhysicallyBased,
+}
+
+/// Bokeh shape
+enum BokehShape {
+    Circle,
+    Hexagon,
+    Octagon,
+    Custom { blade_count: u32, rotation: f32 },
+}
+
+/// Depth of field configuration
+struct DofConfig {
+    /// Enable DOF
+    enabled: bool,
+    /// Focus distance in world units
+    focus_distance: f32,
+    /// Aperture (f-stop)
+    aperture: f32,
+    /// Focal length in mm
+    focal_length: f32,
+    /// Sensor size in mm (for full-frame 35mm = 36)
+    sensor_size: f32,
+    /// Near blur limit
+    near_blur_limit: f32,
+    /// Far blur limit
+    far_blur_limit: f32,
+    /// DOF method
+    method: DofMethod,
+    /// Bokeh shape
+    bokeh_shape: BokehShape,
+    /// Bokeh brightness boost for highlights
+    bokeh_brightness_boost: f32,
+    /// Bokeh threshold for sprite rendering
+    bokeh_threshold: f32,
+    /// Enable foreground/background separation
+    separate_layers: bool,
+}
+
+impl Default for DofConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            focus_distance: 5.0,
+            aperture: 2.8,
+            focal_length: 50.0,
+            sensor_size: 36.0,
+            near_blur_limit: 1.0,
+            far_blur_limit: 1.0,
+            method: DofMethod::Gather,
+            bokeh_shape: BokehShape::Circle,
+            bokeh_brightness_boost: 0.0,
+            bokeh_threshold: 0.5,
+            separate_layers: true,
+        }
+    }
+}
+
+/// Circle of confusion calculation
+struct CircleOfConfusion;
+
+impl CircleOfConfusion {
+    /// Calculate CoC radius in pixels
+    fn calculate(
+        depth: f32,
+        focus_distance: f32,
+        aperture: f32,
+        focal_length: f32,
+        sensor_size: f32,
+        screen_height: f32
+    ) -> f32 {
+        // Convert focal length to meters
+        let f = focal_length * 0.001;
+        let s = focus_distance;
+        let d = depth;
+
+        // Circle of confusion diameter on sensor
+        let coc = (f * f * (s - d).abs()) / (aperture * d * (s - f));
+
+        // Convert to pixels
+        let sensor_pixels = screen_height * sensor_size / 24.0; // Relative to 35mm
+        coc * sensor_pixels
+    }
+}
+
+/// Depth of field renderer
+struct DofRenderer {
+    config: DofConfig,
+    /// CoC texture
+    coc_texture: GpuTexture,
+    /// Near field blur texture
+    near_field: GpuTexture,
+    /// Far field blur texture
+    far_field: GpuTexture,
+    /// Bokeh points buffer (for sprite method)
+    bokeh_points: GpuBuffer,
+    /// Bokeh count (atomic)
+    bokeh_count: GpuBuffer,
+    /// CoC calculation shader
+    coc_shader: ComputeShader,
+    /// Blur shaders
+    blur_shader: ComputeShader,
+    /// Composite shader
+    composite_shader: ComputeShader,
+    /// Bokeh detection shader
+    bokeh_detect_shader: ComputeShader,
+    /// Bokeh render shader
+    bokeh_render_shader: RenderPipeline,
+}
+
+impl DofRenderer {
+    fn new(device: &GpuDevice, width: u32, height: u32, config: DofConfig) -> Self {
+        let coc_texture = device.create_texture(&TextureDescriptor {
+            width,
+            height,
+            format: TextureFormat::R16_FLOAT, // Signed CoC
+            usage: TextureUsage::SHADER_READ | TextureUsage::SHADER_WRITE,
+            ..Default::default()
+        });
+
+        let near_field = device.create_texture(&TextureDescriptor {
+            width: width / 2,
+            height: height / 2,
+            format: TextureFormat::RGBA16_FLOAT,
+            usage: TextureUsage::SHADER_READ | TextureUsage::SHADER_WRITE,
+            ..Default::default()
+        });
+
+        let far_field = device.create_texture(&TextureDescriptor {
+            width: width / 2,
+            height: height / 2,
+            format: TextureFormat::RGBA16_FLOAT,
+            usage: TextureUsage::SHADER_READ | TextureUsage::SHADER_WRITE,
+            ..Default::default()
+        });
+
+        let max_bokeh = 1024 * 1024;
+        let bokeh_points = device.create_buffer(&BufferDescriptor {
+            size: max_bokeh * std::mem::size_of::<BokehPoint>() as u64,
+            usage: BufferUsage::STORAGE,
+            ..Default::default()
+        });
+
+        let bokeh_count = device.create_buffer(&BufferDescriptor {
+            size: 4,
+            usage: BufferUsage::STORAGE | BufferUsage::INDIRECT,
+            ..Default::default()
+        });
+
+        let coc_shader = Self::create_coc_shader(device);
+        let blur_shader = Self::create_blur_shader(device, &config);
+        let composite_shader = Self::create_composite_shader(device);
+        let bokeh_detect_shader = Self::create_bokeh_detect_shader(device);
+        let bokeh_render_shader = Self::create_bokeh_render_shader(device, &config);
+
+        Self {
+            config,
+            coc_texture,
+            near_field,
+            far_field,
+            bokeh_points,
+            bokeh_count,
+            coc_shader,
+            blur_shader,
+            composite_shader,
+            bokeh_detect_shader,
+            bokeh_render_shader,
+        }
+    }
+
+    fn create_coc_shader(device: &GpuDevice) -> ComputeShader {
+        let shader = r#"
+            struct DofParams {
+                focus_distance: f32,
+                aperture: f32,
+                focal_length: f32,
+                sensor_size: f32,
+                near_blur_limit: f32,
+                far_blur_limit: f32,
+                screen_height: f32,
+                _pad: f32,
+            };
+
+            @group(0) @binding(0) var<uniform> params: DofParams;
+            @group(0) @binding(1) var depth_texture: texture_2d<f32>;
+            @group(0) @binding(2) var coc_texture: texture_storage_2d<r16float, write>;
+
+            fn linear_depth(d: f32, near: f32, far: f32) -> f32 {
+                // Reverse-Z to linear depth
+                return near * far / (far - d * (far - near));
+            }
+
+            fn calculate_coc(depth: f32) -> f32 {
+                let f = params.focal_length * 0.001;
+                let s = params.focus_distance;
+                let d = depth;
+
+                if (d <= 0.001) {
+                    return 0.0;
+                }
+
+                // CoC diameter on sensor
+                let coc = (f * f * (s - d)) / (params.aperture * d * (s - f));
+
+                // Convert to pixels (relative to 35mm full-frame)
+                let sensor_pixels = params.screen_height * params.sensor_size / 24.0;
+                var coc_pixels = coc * sensor_pixels;
+
+                // Clamp to limits
+                if (coc_pixels > 0.0) {
+                    coc_pixels = min(coc_pixels, params.far_blur_limit);
+                } else {
+                    coc_pixels = max(coc_pixels, -params.near_blur_limit);
+                }
+
+                return coc_pixels;
+            }
+
+            @compute @workgroup_size(8, 8, 1)
+            fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+                let dims = textureDimensions(coc_texture);
+                if (gid.x >= dims.x || gid.y >= dims.y) {
+                    return;
+                }
+
+                let raw_depth = textureLoad(depth_texture, vec2<i32>(gid.xy), 0).r;
+                let depth = linear_depth(raw_depth, 0.1, 1000.0);
+                let coc = calculate_coc(depth);
+
+                textureStore(coc_texture, gid.xy, vec4<f32>(coc, 0.0, 0.0, 0.0));
+            }
+        "#;
+
+        device.create_compute_shader(shader)
+    }
+
+    fn create_blur_shader(device: &GpuDevice, config: &DofConfig) -> ComputeShader {
+        let bokeh_code = match config.bokeh_shape {
+            BokehShape::Circle => "return length(p) <= 1.0;",
+            BokehShape::Hexagon => r#"
+                let angle = 3.14159 / 3.0;
+                for (var i = 0; i < 6; i++) {
+                    let n = vec2<f32>(cos(f32(i) * angle), sin(f32(i) * angle));
+                    if (dot(p, n) > 0.866) { return false; }
+                }
+                return true;
+            "#,
+            BokehShape::Octagon => r#"
+                let angle = 3.14159 / 4.0;
+                for (var i = 0; i < 8; i++) {
+                    let n = vec2<f32>(cos(f32(i) * angle), sin(f32(i) * angle));
+                    if (dot(p, n) > 0.924) { return false; }
+                }
+                return true;
+            "#,
+            BokehShape::Custom { blade_count, rotation } => {
+                // Would generate custom shape code
+                "return length(p) <= 1.0;"
+            }
+        };
+
+        let shader = format!(r#"
+            struct BlurParams {{
+                max_coc: f32,
+                sample_count: u32,
+                _pad: vec2<f32>,
+            }};
+
+            @group(0) @binding(0) var<uniform> params: BlurParams;
+            @group(0) @binding(1) var color_texture: texture_2d<f32>;
+            @group(0) @binding(2) var coc_texture: texture_2d<f32>;
+            @group(0) @binding(3) var output_texture: texture_storage_2d<rgba16float, write>;
+            @group(0) @binding(4) var linear_sampler: sampler;
+
+            fn inside_bokeh(p: vec2<f32>) -> bool {{
+                {bokeh_code}
+            }}
+
+            @compute @workgroup_size(8, 8, 1)
+            fn main(@builtin(global_invocation_id) gid: vec3<u32>) {{
+                let dims = textureDimensions(output_texture);
+                if (gid.x >= dims.x || gid.y >= dims.y) {{
+                    return;
+                }}
+
+                let uv = (vec2<f32>(gid.xy) + 0.5) / vec2<f32>(dims);
+                let center_coc = abs(textureLoad(coc_texture, vec2<i32>(gid.xy * 2u), 0).r);
+
+                if (center_coc < 0.5) {{
+                    // No blur needed
+                    let color = textureSampleLevel(color_texture, linear_sampler, uv, 0.0);
+                    textureStore(output_texture, gid.xy, color);
+                    return;
+                }}
+
+                // Gather blur
+                var color_sum = vec4<f32>(0.0);
+                var weight_sum = 0.0;
+
+                let sample_radius = min(center_coc, params.max_coc);
+                let sample_count = i32(params.sample_count);
+
+                for (var i = -sample_count; i <= sample_count; i++) {{
+                    for (var j = -sample_count; j <= sample_count; j++) {{
+                        let offset = vec2<f32>(f32(i), f32(j)) / f32(sample_count);
+
+                        if (!inside_bokeh(offset)) {{
+                            continue;
+                        }}
+
+                        let sample_uv = uv + offset * sample_radius / vec2<f32>(dims);
+                        let sample_color = textureSampleLevel(color_texture, linear_sampler, sample_uv, 0.0);
+                        let sample_coc = abs(textureSampleLevel(coc_texture, linear_sampler, sample_uv, 0.0).r);
+
+                        // Weight by CoC (larger CoC contributes more)
+                        let weight = saturate(sample_coc / sample_radius);
+
+                        color_sum += sample_color * weight;
+                        weight_sum += weight;
+                    }}
+                }}
+
+                if (weight_sum > 0.0) {{
+                    color_sum /= weight_sum;
+                }}
+
+                textureStore(output_texture, gid.xy, color_sum);
+            }}
+        "#);
+
+        device.create_compute_shader(&shader)
+    }
+
+    fn create_composite_shader(device: &GpuDevice) -> ComputeShader {
+        let shader = r#"
+            @group(0) @binding(0) var sharp_texture: texture_2d<f32>;
+            @group(0) @binding(1) var near_texture: texture_2d<f32>;
+            @group(0) @binding(2) var far_texture: texture_2d<f32>;
+            @group(0) @binding(3) var coc_texture: texture_2d<f32>;
+            @group(0) @binding(4) var output_texture: texture_storage_2d<rgba16float, write>;
+            @group(0) @binding(5) var linear_sampler: sampler;
+
+            @compute @workgroup_size(8, 8, 1)
+            fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+                let dims = textureDimensions(output_texture);
+                if (gid.x >= dims.x || gid.y >= dims.y) {
+                    return;
+                }
+
+                let uv = (vec2<f32>(gid.xy) + 0.5) / vec2<f32>(dims);
+
+                let sharp = textureLoad(sharp_texture, vec2<i32>(gid.xy), 0);
+                let near = textureSampleLevel(near_texture, linear_sampler, uv, 0.0);
+                let far = textureSampleLevel(far_texture, linear_sampler, uv, 0.0);
+                let coc = textureLoad(coc_texture, vec2<i32>(gid.xy), 0).r;
+
+                var result: vec4<f32>;
+
+                if (coc < 0.0) {
+                    // Near field (foreground blur)
+                    let blend = saturate(-coc);
+                    result = mix(sharp, near, blend);
+                } else {
+                    // Far field (background blur)
+                    let blend = saturate(coc);
+                    result = mix(sharp, far, blend);
+                }
+
+                textureStore(output_texture, gid.xy, result);
+            }
+        "#;
+
+        device.create_compute_shader(shader)
+    }
+
+    fn create_bokeh_detect_shader(device: &GpuDevice) -> ComputeShader {
+        let shader = r#"
+            struct BokehPoint {
+                position: vec2<f32>,
+                color: vec3<f32>,
+                size: f32,
+            };
+
+            struct DetectParams {
+                brightness_threshold: f32,
+                coc_threshold: f32,
+                _pad: vec2<f32>,
+            };
+
+            @group(0) @binding(0) var<uniform> params: DetectParams;
+            @group(0) @binding(1) var color_texture: texture_2d<f32>;
+            @group(0) @binding(2) var coc_texture: texture_2d<f32>;
+            @group(0) @binding(3) var<storage, read_write> bokeh_count: atomic<u32>;
+            @group(0) @binding(4) var<storage, read_write> bokeh_points: array<BokehPoint>;
+
+            const MAX_BOKEH: u32 = 1024u * 1024u;
+
+            @compute @workgroup_size(8, 8, 1)
+            fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+                let dims = textureDimensions(color_texture);
+                if (gid.x >= dims.x || gid.y >= dims.y) {
+                    return;
+                }
+
+                let color = textureLoad(color_texture, vec2<i32>(gid.xy), 0).rgb;
+                let coc = abs(textureLoad(coc_texture, vec2<i32>(gid.xy), 0).r);
+
+                let luminance = dot(color, vec3<f32>(0.2126, 0.7152, 0.0722));
+
+                // Detect bright spots with significant blur
+                if (luminance > params.brightness_threshold && coc > params.coc_threshold) {
+                    let idx = atomicAdd(&bokeh_count, 1u);
+                    if (idx < MAX_BOKEH) {
+                        bokeh_points[idx] = BokehPoint(
+                            vec2<f32>(gid.xy),
+                            color,
+                            coc
+                        );
+                    }
+                }
+            }
+        "#;
+
+        device.create_compute_shader(shader)
+    }
+
+    fn create_bokeh_render_shader(device: &GpuDevice, config: &DofConfig) -> RenderPipeline {
+        // Bokeh sprite rendering pipeline
+        RenderPipeline::default()
+    }
+
+    /// Render depth of field
+    fn render(&self, cmd: &mut CommandBuffer, color: &GpuTexture, depth: &GpuTexture, output: &GpuTexture) {
+        if !self.config.enabled {
+            cmd.copy_texture_to_texture(color, output, 0);
+            return;
+        }
+
+        // 1. Calculate CoC
+        cmd.set_compute_shader(&self.coc_shader);
+        let dims = self.coc_texture.dimensions();
+        cmd.dispatch((dims.0 + 7) / 8, (dims.1 + 7) / 8, 1);
+        cmd.barrier(BarrierType::TextureWriteToRead);
+
+        // 2. Separate near/far blur
+        cmd.set_compute_shader(&self.blur_shader);
+        // ... near field blur ...
+        // ... far field blur ...
+
+        // 3. Optional: Detect and render bokeh sprites
+        if matches!(self.config.method, DofMethod::BokehSprite) {
+            cmd.fill_buffer(&self.bokeh_count, 0, 4, 0);
+            cmd.barrier(BarrierType::BufferWriteToRead);
+
+            cmd.set_compute_shader(&self.bokeh_detect_shader);
+            cmd.dispatch((dims.0 + 7) / 8, (dims.1 + 7) / 8, 1);
+            cmd.barrier(BarrierType::ComputeToCompute);
+
+            // Render bokeh sprites
+            // ... point sprite rendering ...
+        }
+
+        // 4. Composite
+        cmd.set_compute_shader(&self.composite_shader);
+        let dims = output.dimensions();
+        cmd.dispatch((dims.0 + 7) / 8, (dims.1 + 7) / 8, 1);
+    }
+}
+
+#[repr(C)]
+struct BokehPoint {
+    position: Vec2,
+    color: Vec3,
+    size: f32,
+}
+
+// ============================================================================
+// CHROMATIC ABERRATION
+// Based on Harper Engine RT-2013: Lens Chromatic Aberration
+// ============================================================================
+
+/// Chromatic aberration type
+enum ChromaticAberrationType {
+    /// Simple RGB separation
+    Simple,
+    /// Spectral (physically accurate)
+    Spectral { wavelength_count: u32 },
+    /// Lateral only (edge distortion)
+    Lateral,
+    /// Axial only (focus shift)
+    Axial,
+    /// Combined lateral and axial
+    Combined,
+}
+
+/// Chromatic aberration configuration
+struct ChromaticAberrationConfig {
+    enabled: bool,
+    aberration_type: ChromaticAberrationType,
+    /// Intensity (separation amount)
+    intensity: f32,
+    /// Falloff from center (higher = more edge aberration)
+    falloff: f32,
+    /// Optical center offset
+    center_offset: Vec2,
+    /// Custom channel offsets [R, G, B]
+    channel_offsets: [f32; 3],
+}
+
+impl Default for ChromaticAberrationConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            aberration_type: ChromaticAberrationType::Lateral,
+            intensity: 0.5,
+            falloff: 2.0,
+            center_offset: Vec2::ZERO,
+            channel_offsets: [-1.0, 0.0, 1.0],
+        }
+    }
+}
+
+/// Chromatic aberration renderer
+struct ChromaticAberrationRenderer {
+    config: ChromaticAberrationConfig,
+    shader: ComputeShader,
+}
+
+impl ChromaticAberrationRenderer {
+    fn new(device: &GpuDevice, config: ChromaticAberrationConfig) -> Self {
+        let shader = Self::create_shader(device, &config);
+        Self { config, shader }
+    }
+
+    fn create_shader(device: &GpuDevice, config: &ChromaticAberrationConfig) -> ComputeShader {
+        let sampling_code = match config.aberration_type {
+            ChromaticAberrationType::Simple => r#"
+                let r = textureSampleLevel(input, linear_sampler, uv + offset * params.channel_offsets.r, 0.0).r;
+                let g = textureSampleLevel(input, linear_sampler, uv + offset * params.channel_offsets.g, 0.0).g;
+                let b = textureSampleLevel(input, linear_sampler, uv + offset * params.channel_offsets.b, 0.0).b;
+                result = vec4<f32>(r, g, b, 1.0);
+            "#,
+            ChromaticAberrationType::Spectral { wavelength_count } => {
+                // Sample multiple wavelengths and reconstruct RGB
+                r#"
+                    var spectrum = array<vec3<f32>, 7>(
+                        vec3<f32>(1.0, 0.0, 0.0),  // 700nm Red
+                        vec3<f32>(1.0, 0.5, 0.0),  // 620nm Orange
+                        vec3<f32>(1.0, 1.0, 0.0),  // 580nm Yellow
+                        vec3<f32>(0.0, 1.0, 0.0),  // 530nm Green
+                        vec3<f32>(0.0, 1.0, 1.0),  // 490nm Cyan
+                        vec3<f32>(0.0, 0.0, 1.0),  // 450nm Blue
+                        vec3<f32>(0.5, 0.0, 1.0),  // 400nm Violet
+                    );
+
+                    var color = vec3<f32>(0.0);
+                    for (var i = 0u; i < 7u; i++) {
+                        let wavelength_offset = (f32(i) - 3.0) / 3.0;
+                        let sample_uv = uv + offset * wavelength_offset * params.intensity;
+                        let sample = textureSampleLevel(input, linear_sampler, sample_uv, 0.0).rgb;
+                        color += sample * spectrum[i];
+                    }
+                    result = vec4<f32>(color / 7.0, 1.0);
+                "#
+            }
+            ChromaticAberrationType::Lateral => r#"
+                // Radial distortion
+                let dist = length(uv - 0.5 - params.center_offset);
+                let radial = normalize(uv - 0.5 - params.center_offset) * dist;
+
+                let r_uv = uv + radial * params.channel_offsets.r * params.intensity * 0.01;
+                let g_uv = uv + radial * params.channel_offsets.g * params.intensity * 0.01;
+                let b_uv = uv + radial * params.channel_offsets.b * params.intensity * 0.01;
+
+                let r = textureSampleLevel(input, linear_sampler, r_uv, 0.0).r;
+                let g = textureSampleLevel(input, linear_sampler, g_uv, 0.0).g;
+                let b = textureSampleLevel(input, linear_sampler, b_uv, 0.0).b;
+                result = vec4<f32>(r, g, b, 1.0);
+            "#,
+            _ => "result = textureSampleLevel(input, linear_sampler, uv, 0.0);",
+        };
+
+        let shader = format!(r#"
+            struct ChromaParams {{
+                intensity: f32,
+                falloff: f32,
+                center_offset: vec2<f32>,
+                channel_offsets: vec3<f32>,
+                _pad: f32,
+            }};
+
+            @group(0) @binding(0) var<uniform> params: ChromaParams;
+            @group(0) @binding(1) var input: texture_2d<f32>;
+            @group(0) @binding(2) var output: texture_storage_2d<rgba16float, write>;
+            @group(0) @binding(3) var linear_sampler: sampler;
+
+            @compute @workgroup_size(8, 8, 1)
+            fn main(@builtin(global_invocation_id) gid: vec3<u32>) {{
+                let dims = textureDimensions(output);
+                if (gid.x >= dims.x || gid.y >= dims.y) {{
+                    return;
+                }}
+
+                let uv = (vec2<f32>(gid.xy) + 0.5) / vec2<f32>(dims);
+
+                // Calculate offset based on distance from center
+                let center = vec2<f32>(0.5) + params.center_offset;
+                let to_center = uv - center;
+                let dist = length(to_center);
+                let offset = to_center * pow(dist, params.falloff) * params.intensity * 0.01;
+
+                var result: vec4<f32>;
+
+                {sampling_code}
+
+                textureStore(output, gid.xy, result);
+            }}
+        "#);
+
+        device.create_compute_shader(&shader)
+    }
+
+    fn render(&self, cmd: &mut CommandBuffer, input: &GpuTexture, output: &GpuTexture) {
+        if !self.config.enabled {
+            cmd.copy_texture_to_texture(input, output, 0);
+            return;
+        }
+
+        cmd.set_compute_shader(&self.shader);
+        let dims = output.dimensions();
+        cmd.dispatch((dims.0 + 7) / 8, (dims.1 + 7) / 8, 1);
+    }
+}
+
+// ============================================================================
+// LENS DISTORTION
+// Based on Harper Engine RT-2014: Optical Lens Distortion
+// ============================================================================
+
+/// Lens distortion model
+enum DistortionModel {
+    /// Brown-Conrady (radial + tangential)
+    BrownConrady {
+        k1: f32, k2: f32, k3: f32,  // Radial
+        p1: f32, p2: f32,           // Tangential
+    },
+    /// Fisheye (equidistant projection)
+    Fisheye { strength: f32 },
+    /// Barrel distortion
+    Barrel { strength: f32 },
+    /// Pincushion distortion
+    Pincushion { strength: f32 },
+    /// Custom polynomial
+    Polynomial { coefficients: [f32; 6] },
+}
+
+/// Lens distortion configuration
+struct LensDistortionConfig {
+    enabled: bool,
+    model: DistortionModel,
+    /// Optical center (normalized, 0.5 = center)
+    optical_center: Vec2,
+    /// Scale to fit after distortion
+    scale: f32,
+}
+
+impl Default for LensDistortionConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            model: DistortionModel::Barrel { strength: 0.1 },
+            optical_center: Vec2::new(0.5, 0.5),
+            scale: 1.0,
+        }
+    }
+}
+
+/// Lens distortion renderer
+struct LensDistortionRenderer {
+    config: LensDistortionConfig,
+    shader: ComputeShader,
+    /// Precomputed distortion LUT
+    distortion_lut: Option<GpuTexture>,
+}
+
+impl LensDistortionRenderer {
+    fn new(device: &GpuDevice, width: u32, height: u32, config: LensDistortionConfig) -> Self {
+        let shader = Self::create_shader(device, &config);
+
+        // Optionally precompute distortion LUT
+        let distortion_lut = if matches!(config.model, DistortionModel::BrownConrady { .. }) {
+            Some(device.create_texture(&TextureDescriptor {
+                width: width / 4,
+                height: height / 4,
+                format: TextureFormat::RG32_FLOAT,
+                usage: TextureUsage::SHADER_READ | TextureUsage::SHADER_WRITE,
+                ..Default::default()
+            }))
+        } else {
+            None
+        };
+
+        Self { config, shader, distortion_lut }
+    }
+
+    fn create_shader(device: &GpuDevice, config: &LensDistortionConfig) -> ComputeShader {
+        let distortion_code = match &config.model {
+            DistortionModel::Barrel { strength } => format!(r#"
+                let r = length(p);
+                let r2 = r * r;
+                let distortion = 1.0 + {strength} * r2;
+                distorted_p = p * distortion;
+            "#),
+            DistortionModel::Pincushion { strength } => format!(r#"
+                let r = length(p);
+                let r2 = r * r;
+                let distortion = 1.0 - {strength} * r2;
+                distorted_p = p * distortion;
+            "#),
+            DistortionModel::Fisheye { strength } => format!(r#"
+                let r = length(p);
+                let theta = atan(r);
+                let distorted_r = theta * {strength} / r;
+                distorted_p = p * distorted_r;
+            "#),
+            DistortionModel::BrownConrady { k1, k2, k3, p1, p2 } => format!(r#"
+                let r2 = dot(p, p);
+                let r4 = r2 * r2;
+                let r6 = r4 * r2;
+
+                // Radial distortion
+                let radial = 1.0 + {k1} * r2 + {k2} * r4 + {k3} * r6;
+
+                // Tangential distortion
+                let tangential = vec2<f32>(
+                    2.0 * {p1} * p.x * p.y + {p2} * (r2 + 2.0 * p.x * p.x),
+                    {p1} * (r2 + 2.0 * p.y * p.y) + 2.0 * {p2} * p.x * p.y
+                );
+
+                distorted_p = p * radial + tangential;
+            "#),
+            _ => "distorted_p = p;".to_string(),
+        };
+
+        let shader = format!(r#"
+            struct DistortParams {{
+                optical_center: vec2<f32>,
+                scale: f32,
+                _pad: f32,
+            }};
+
+            @group(0) @binding(0) var<uniform> params: DistortParams;
+            @group(0) @binding(1) var input: texture_2d<f32>;
+            @group(0) @binding(2) var output: texture_storage_2d<rgba16float, write>;
+            @group(0) @binding(3) var linear_sampler: sampler;
+
+            @compute @workgroup_size(8, 8, 1)
+            fn main(@builtin(global_invocation_id) gid: vec3<u32>) {{
+                let dims = textureDimensions(output);
+                if (gid.x >= dims.x || gid.y >= dims.y) {{
+                    return;
+                }}
+
+                let uv = (vec2<f32>(gid.xy) + 0.5) / vec2<f32>(dims);
+
+                // Convert to centered coordinates
+                let p = (uv - params.optical_center) * 2.0;
+
+                var distorted_p: vec2<f32>;
+                {distortion_code}
+
+                // Convert back to UV
+                let distorted_uv = distorted_p * 0.5 * params.scale + params.optical_center;
+
+                // Sample with clamping
+                if (distorted_uv.x < 0.0 || distorted_uv.x > 1.0 ||
+                    distorted_uv.y < 0.0 || distorted_uv.y > 1.0) {{
+                    textureStore(output, gid.xy, vec4<f32>(0.0, 0.0, 0.0, 1.0));
+                    return;
+                }}
+
+                let color = textureSampleLevel(input, linear_sampler, distorted_uv, 0.0);
+                textureStore(output, gid.xy, color);
+            }}
+        "#);
+
+        device.create_compute_shader(&shader)
+    }
+
+    fn render(&self, cmd: &mut CommandBuffer, input: &GpuTexture, output: &GpuTexture) {
+        if !self.config.enabled {
+            cmd.copy_texture_to_texture(input, output, 0);
+            return;
+        }
+
+        cmd.set_compute_shader(&self.shader);
+        let dims = output.dimensions();
+        cmd.dispatch((dims.0 + 7) / 8, (dims.1 + 7) / 8, 1);
+    }
+}
+
+// ============================================================================
+// LENS FLARE
+// Based on Harper Engine RT-2015: Cinematic Lens Flares
+// ============================================================================
+
+/// Lens flare element type
+enum FlareElementType {
+    /// Simple glow
+    Glow { size: f32, intensity: f32 },
+    /// Ring/halo
+    Ring { inner_radius: f32, outer_radius: f32 },
+    /// Streaks
+    Streak { count: u32, length: f32, rotation: f32 },
+    /// Ghost (reflected flare)
+    Ghost { position: f32, size: f32, chromatic: bool },
+    /// Anamorphic streak
+    AnamorphicStreak { aspect: f32 },
+    /// Starburst
+    Starburst { points: u32, rotation: f32 },
+}
+
+/// Lens flare element
+struct FlareElement {
+    element_type: FlareElementType,
+    color: Vec3,
+    opacity: f32,
+    /// Position along flare axis (0 = light, 1 = center, 2 = opposite)
+    axis_position: f32,
+    /// Texture for custom shapes
+    texture: Option<GpuTexture>,
+}
+
+/// Lens flare configuration
+struct LensFlareConfig {
+    enabled: bool,
+    /// Light threshold for flare
+    threshold: f32,
+    /// Overall intensity
+    intensity: f32,
+    /// Flare elements
+    elements: Vec<FlareElement>,
+    /// Chromatic dispersion
+    chromatic_dispersion: f32,
+    /// Occlusion query (fade when light blocked)
+    use_occlusion: bool,
+    /// Fade based on view angle
+    angular_fade: bool,
+}
+
+impl Default for LensFlareConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            threshold: 1.0,
+            intensity: 1.0,
+            elements: vec![
+                FlareElement {
+                    element_type: FlareElementType::Glow { size: 0.5, intensity: 0.5 },
+                    color: Vec3::ONE,
+                    opacity: 1.0,
+                    axis_position: 0.0,
+                    texture: None,
+                },
+                FlareElement {
+                    element_type: FlareElementType::Ghost { position: 0.5, size: 0.3, chromatic: true },
+                    color: Vec3::new(0.8, 0.9, 1.0),
+                    opacity: 0.5,
+                    axis_position: 0.5,
+                    texture: None,
+                },
+                FlareElement {
+                    element_type: FlareElementType::Ring { inner_radius: 0.8, outer_radius: 1.0 },
+                    color: Vec3::new(0.6, 0.8, 1.0),
+                    opacity: 0.3,
+                    axis_position: 1.0,
+                    texture: None,
+                },
+            ],
+            chromatic_dispersion: 0.01,
+            use_occlusion: true,
+            angular_fade: true,
+        }
+    }
+}
+
+/// Lens flare renderer
+struct LensFlareRenderer {
+    config: LensFlareConfig,
+    /// Flare sprite buffer
+    sprite_buffer: GpuBuffer,
+    /// Occlusion query results
+    occlusion_buffer: GpuBuffer,
+    /// Detection shader
+    detect_shader: ComputeShader,
+    /// Composite shader
+    composite_shader: ComputeShader,
+    /// Sprite render pipeline
+    sprite_pipeline: RenderPipeline,
+}
+
+impl LensFlareRenderer {
+    fn new(device: &GpuDevice, config: LensFlareConfig) -> Self {
+        let sprite_buffer = device.create_buffer(&BufferDescriptor {
+            size: 1024 * std::mem::size_of::<FlareSprite>() as u64,
+            usage: BufferUsage::STORAGE,
+            ..Default::default()
+        });
+
+        let occlusion_buffer = device.create_buffer(&BufferDescriptor {
+            size: 256 * 4, // 256 lights
+            usage: BufferUsage::STORAGE,
+            ..Default::default()
+        });
+
+        let detect_shader = Self::create_detect_shader(device);
+        let composite_shader = Self::create_composite_shader(device);
+        let sprite_pipeline = Self::create_sprite_pipeline(device);
+
+        Self {
+            config,
+            sprite_buffer,
+            occlusion_buffer,
+            detect_shader,
+            composite_shader,
+            sprite_pipeline,
+        }
+    }
+
+    fn create_detect_shader(device: &GpuDevice) -> ComputeShader {
+        let shader = r#"
+            struct LightInfo {
+                screen_pos: vec2<f32>,
+                color: vec3<f32>,
+                intensity: f32,
+            };
+
+            struct FlareSprite {
+                position: vec2<f32>,
+                size: vec2<f32>,
+                color: vec4<f32>,
+                element_type: u32,
+                _pad: vec3<u32>,
+            };
+
+            @group(0) @binding(0) var bloom_texture: texture_2d<f32>;
+            @group(0) @binding(1) var<storage, read_write> light_count: atomic<u32>;
+            @group(0) @binding(2) var<storage, read_write> lights: array<LightInfo>;
+
+            const MAX_LIGHTS: u32 = 256u;
+            const THRESHOLD: f32 = 1.5;
+
+            // Find local maxima that could be flare sources
+            @compute @workgroup_size(8, 8, 1)
+            fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+                let dims = textureDimensions(bloom_texture);
+                if (gid.x >= dims.x || gid.y >= dims.y) {
+                    return;
+                }
+
+                let center = textureLoad(bloom_texture, vec2<i32>(gid.xy), 0).rgb;
+                let luminance = dot(center, vec3<f32>(0.2126, 0.7152, 0.0722));
+
+                if (luminance < THRESHOLD) {
+                    return;
+                }
+
+                // Check if local maximum
+                var is_max = true;
+                for (var dy = -2; dy <= 2; dy++) {
+                    for (var dx = -2; dx <= 2; dx++) {
+                        if (dx == 0 && dy == 0) { continue; }
+                        let neighbor = textureLoad(bloom_texture, vec2<i32>(gid.xy) + vec2<i32>(dx, dy), 0).rgb;
+                        let neighbor_lum = dot(neighbor, vec3<f32>(0.2126, 0.7152, 0.0722));
+                        if (neighbor_lum > luminance) {
+                            is_max = false;
+                            break;
+                        }
+                    }
+                    if (!is_max) { break; }
+                }
+
+                if (is_max) {
+                    let idx = atomicAdd(&light_count, 1u);
+                    if (idx < MAX_LIGHTS) {
+                        lights[idx] = LightInfo(
+                            vec2<f32>(gid.xy) / vec2<f32>(dims),
+                            center,
+                            luminance
+                        );
+                    }
+                }
+            }
+        "#;
+
+        device.create_compute_shader(shader)
+    }
+
+    fn create_composite_shader(device: &GpuDevice) -> ComputeShader {
+        let shader = r#"
+            @group(0) @binding(0) var scene_texture: texture_2d<f32>;
+            @group(0) @binding(1) var flare_texture: texture_2d<f32>;
+            @group(0) @binding(2) var output_texture: texture_storage_2d<rgba16float, write>;
+
+            @compute @workgroup_size(8, 8, 1)
+            fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+                let dims = textureDimensions(output_texture);
+                if (gid.x >= dims.x || gid.y >= dims.y) {
+                    return;
+                }
+
+                let scene = textureLoad(scene_texture, vec2<i32>(gid.xy), 0);
+                let flare = textureLoad(flare_texture, vec2<i32>(gid.xy), 0);
+
+                // Additive blending
+                let result = scene.rgb + flare.rgb;
+
+                textureStore(output_texture, gid.xy, vec4<f32>(result, scene.a));
+            }
+        "#;
+
+        device.create_compute_shader(shader)
+    }
+
+    fn create_sprite_pipeline(device: &GpuDevice) -> RenderPipeline {
+        RenderPipeline::default()
+    }
+
+    fn render(&self, cmd: &mut CommandBuffer, bloom: &GpuTexture, output: &GpuTexture) {
+        if !self.config.enabled {
+            return;
+        }
+
+        // 1. Detect flare sources
+        cmd.set_compute_shader(&self.detect_shader);
+        let dims = bloom.dimensions();
+        cmd.dispatch((dims.0 + 7) / 8, (dims.1 + 7) / 8, 1);
+        cmd.barrier(BarrierType::ComputeToCompute);
+
+        // 2. Generate flare sprites
+        // ... based on detected lights and element config ...
+
+        // 3. Render flare sprites
+        // ... additive blending ...
+
+        // 4. Composite with scene
+        cmd.set_compute_shader(&self.composite_shader);
+        let dims = output.dimensions();
+        cmd.dispatch((dims.0 + 7) / 8, (dims.1 + 7) / 8, 1);
+    }
+}
+
+#[repr(C)]
+struct FlareSprite {
+    position: Vec2,
+    size: Vec2,
+    color: Vec4,
+    element_type: u32,
+    _pad: [u32; 3],
+}
+
+// ============================================================================
+// VIGNETTE
+// Based on Harper Engine RT-2016: Cinematic Vignette
+// ============================================================================
+
+/// Vignette configuration
+struct VignetteConfig {
+    enabled: bool,
+    /// Vignette intensity (0-1)
+    intensity: f32,
+    /// Vignette smoothness
+    smoothness: f32,
+    /// Vignette roundness (1 = circle, 0 = rectangle)
+    roundness: f32,
+    /// Center offset
+    center: Vec2,
+    /// Vignette color (usually black)
+    color: Vec3,
+    /// Use mask texture
+    mask: Option<GpuTexture>,
+}
+
+impl Default for VignetteConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            intensity: 0.3,
+            smoothness: 0.5,
+            roundness: 1.0,
+            center: Vec2::ZERO,
+            color: Vec3::ZERO,
+            mask: None,
+        }
+    }
+}
+
+/// Vignette renderer
+struct VignetteRenderer {
+    config: VignetteConfig,
+    shader: ComputeShader,
+}
+
+impl VignetteRenderer {
+    fn new(device: &GpuDevice, config: VignetteConfig) -> Self {
+        let shader = Self::create_shader(device);
+        Self { config, shader }
+    }
+
+    fn create_shader(device: &GpuDevice) -> ComputeShader {
+        let shader = r#"
+            struct VignetteParams {
+                intensity: f32,
+                smoothness: f32,
+                roundness: f32,
+                _pad: f32,
+                center: vec2<f32>,
+                color: vec3<f32>,
+                _pad2: f32,
+            };
+
+            @group(0) @binding(0) var<uniform> params: VignetteParams;
+            @group(0) @binding(1) var input: texture_2d<f32>;
+            @group(0) @binding(2) var output: texture_storage_2d<rgba16float, write>;
+
+            @compute @workgroup_size(8, 8, 1)
+            fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+                let dims = textureDimensions(output);
+                if (gid.x >= dims.x || gid.y >= dims.y) {
+                    return;
+                }
+
+                let color = textureLoad(input, vec2<i32>(gid.xy), 0);
+
+                let uv = (vec2<f32>(gid.xy) + 0.5) / vec2<f32>(dims);
+                let centered = uv - 0.5 - params.center;
+
+                // Aspect ratio correction
+                let aspect = f32(dims.x) / f32(dims.y);
+                let corrected = vec2<f32>(centered.x * aspect, centered.y);
+
+                // Calculate distance based on roundness
+                let dist_circle = length(corrected);
+                let dist_rect = max(abs(corrected.x), abs(corrected.y));
+                let dist = mix(dist_rect, dist_circle, params.roundness);
+
+                // Apply vignette
+                let vignette = smoothstep(0.5, 0.5 - params.smoothness, dist * (1.0 + params.intensity));
+                let final_color = mix(params.color, color.rgb, vignette);
+
+                textureStore(output, gid.xy, vec4<f32>(final_color, color.a));
+            }
+        "#;
+
+        device.create_compute_shader(shader)
+    }
+
+    fn render(&self, cmd: &mut CommandBuffer, input: &GpuTexture, output: &GpuTexture) {
+        if !self.config.enabled {
+            cmd.copy_texture_to_texture(input, output, 0);
+            return;
+        }
+
+        cmd.set_compute_shader(&self.shader);
+        let dims = output.dimensions();
+        cmd.dispatch((dims.0 + 7) / 8, (dims.1 + 7) / 8, 1);
+    }
+}
+
+// ============================================================================
+// GRAIN/NOISE
+// Based on Harper Engine RT-2017: Film Grain Simulation
+// ============================================================================
+
+/// Film grain type
+enum GrainType {
+    /// Simple noise
+    Simple,
+    /// Perlin-based organic grain
+    Organic,
+    /// Photographic film grain
+    Photographic,
+    /// Digital sensor noise
+    DigitalNoise,
+}
+
+/// Film grain configuration
+struct FilmGrainConfig {
+    enabled: bool,
+    grain_type: GrainType,
+    /// Grain intensity
+    intensity: f32,
+    /// Grain size (1.0 = pixel size)
+    size: f32,
+    /// Colored grain vs monochrome
+    colored: bool,
+    /// Luminance response (more grain in shadows)
+    luminance_response: f32,
+    /// Animation speed
+    speed: f32,
+}
+
+impl Default for FilmGrainConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            grain_type: GrainType::Photographic,
+            intensity: 0.05,
+            size: 1.5,
+            colored: false,
+            luminance_response: 0.5,
+            speed: 1.0,
+        }
+    }
+}
+
+/// Film grain renderer
+struct FilmGrainRenderer {
+    config: FilmGrainConfig,
+    shader: ComputeShader,
+    frame: u32,
+}
+
+impl FilmGrainRenderer {
+    fn new(device: &GpuDevice, config: FilmGrainConfig) -> Self {
+        let shader = Self::create_shader(device, &config);
+        Self { config, shader, frame: 0 }
+    }
+
+    fn create_shader(device: &GpuDevice, config: &FilmGrainConfig) -> ComputeShader {
+        let noise_function = match config.grain_type {
+            GrainType::Simple => r#"
+                fn grain(uv: vec2<f32>, seed: f32) -> f32 {
+                    return fract(sin(dot(uv, vec2<f32>(12.9898, 78.233)) + seed) * 43758.5453);
+                }
+            "#,
+            GrainType::Organic => r#"
+                fn hash(p: vec2<f32>) -> f32 {
+                    var p3 = fract(vec3<f32>(p.xyx) * 0.1031);
+                    p3 += dot(p3, p3.yzx + 33.33);
+                    return fract((p3.x + p3.y) * p3.z);
+                }
+
+                fn noise(p: vec2<f32>) -> f32 {
+                    let i = floor(p);
+                    let f = fract(p);
+                    let u = f * f * (3.0 - 2.0 * f);
+
+                    return mix(
+                        mix(hash(i + vec2<f32>(0.0, 0.0)), hash(i + vec2<f32>(1.0, 0.0)), u.x),
+                        mix(hash(i + vec2<f32>(0.0, 1.0)), hash(i + vec2<f32>(1.0, 1.0)), u.x),
+                        u.y
+                    );
+                }
+
+                fn grain(uv: vec2<f32>, seed: f32) -> f32 {
+                    return noise(uv * 100.0 + seed * 100.0) * 2.0 - 1.0;
+                }
+            "#,
+            _ => r#"
+                fn grain(uv: vec2<f32>, seed: f32) -> f32 {
+                    let n = fract(sin(dot(uv, vec2<f32>(12.9898, 78.233)) + seed) * 43758.5453);
+                    return n * 2.0 - 1.0;
+                }
+            "#,
+        };
+
+        let shader = format!(r#"
+            struct GrainParams {{
+                intensity: f32,
+                size: f32,
+                luminance_response: f32,
+                time: f32,
+            }};
+
+            @group(0) @binding(0) var<uniform> params: GrainParams;
+            @group(0) @binding(1) var input: texture_2d<f32>;
+            @group(0) @binding(2) var output: texture_storage_2d<rgba16float, write>;
+
+            {noise_function}
+
+            @compute @workgroup_size(8, 8, 1)
+            fn main(@builtin(global_invocation_id) gid: vec3<u32>) {{
+                let dims = textureDimensions(output);
+                if (gid.x >= dims.x || gid.y >= dims.y) {{
+                    return;
+                }}
+
+                let color = textureLoad(input, vec2<i32>(gid.xy), 0);
+                let uv = vec2<f32>(gid.xy) / params.size;
+
+                // Calculate grain
+                let g = grain(uv, params.time);
+
+                // Luminance-based response (more grain in darker areas)
+                let lum = dot(color.rgb, vec3<f32>(0.2126, 0.7152, 0.0722));
+                let response = mix(1.0, 1.0 - lum, params.luminance_response);
+
+                // Apply grain
+                let grain_amount = g * params.intensity * response;
+                let final_color = color.rgb + grain_amount;
+
+                textureStore(output, gid.xy, vec4<f32>(final_color, color.a));
+            }}
+        "#);
+
+        device.create_compute_shader(&shader)
+    }
+
+    fn render(&mut self, cmd: &mut CommandBuffer, input: &GpuTexture, output: &GpuTexture) {
+        if !self.config.enabled {
+            cmd.copy_texture_to_texture(input, output, 0);
+            return;
+        }
+
+        self.frame += 1;
+
+        cmd.set_compute_shader(&self.shader);
+        let dims = output.dimensions();
+        cmd.dispatch((dims.0 + 7) / 8, (dims.1 + 7) / 8, 1);
+    }
+}
+
+// ============================================================================
+// UNIT TESTS
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_bloom_config_default() {
+        let config = BloomConfig::default();
+        assert!(config.enabled);
+        assert_eq!(config.intensity, 0.5);
+        assert_eq!(config.threshold, 1.0);
+    }
+
+    #[test]
+    fn test_bloom_mip_count() {
+        assert_eq!(
+            match BloomQuality::Low { BloomQuality::Low => 3, _ => 0 },
+            3
+        );
+        assert_eq!(
+            match BloomQuality::High { BloomQuality::High => 7, _ => 0 },
+            7
+        );
+    }
+
+    #[test]
+    fn test_circle_of_confusion() {
+        // At focus distance, CoC should be 0
+        let coc = CircleOfConfusion::calculate(5.0, 5.0, 2.8, 50.0, 36.0, 1080.0);
+        assert!(coc.abs() < 0.001);
+
+        // Behind focus should have positive CoC
+        let coc_far = CircleOfConfusion::calculate(10.0, 5.0, 2.8, 50.0, 36.0, 1080.0);
+        assert!(coc_far > 0.0);
+    }
+
+    #[test]
+    fn test_dof_config_default() {
+        let config = DofConfig::default();
+        assert_eq!(config.focus_distance, 5.0);
+        assert_eq!(config.aperture, 2.8);
+        assert_eq!(config.focal_length, 50.0);
+    }
+
+    #[test]
+    fn test_chromatic_aberration_default() {
+        let config = ChromaticAberrationConfig::default();
+        assert!(config.enabled);
+        assert_eq!(config.channel_offsets, [-1.0, 0.0, 1.0]);
+    }
+
+    #[test]
+    fn test_lens_distortion_barrel() {
+        let config = LensDistortionConfig {
+            enabled: true,
+            model: DistortionModel::Barrel { strength: 0.1 },
+            optical_center: Vec2::new(0.5, 0.5),
+            scale: 1.0,
+        };
+
+        assert!(config.enabled);
+        if let DistortionModel::Barrel { strength } = config.model {
+            assert_eq!(strength, 0.1);
+        }
+    }
+
+    #[test]
+    fn test_lens_flare_elements() {
+        let config = LensFlareConfig::default();
+        assert!(!config.elements.is_empty());
+        assert!(config.enabled);
+    }
+
+    #[test]
+    fn test_vignette_defaults() {
+        let config = VignetteConfig::default();
+        assert!(config.enabled);
+        assert_eq!(config.roundness, 1.0);
+        assert_eq!(config.color, Vec3::ZERO);
+    }
+
+    #[test]
+    fn test_film_grain_defaults() {
+        let config = FilmGrainConfig::default();
+        assert!(config.enabled);
+        assert_eq!(config.intensity, 0.05);
+        assert!(!config.colored);
+    }
+
+    #[test]
+    fn test_bokeh_shape_matching() {
+        let shape = BokehShape::Hexagon;
+        assert!(matches!(shape, BokehShape::Hexagon));
+
+        let shape = BokehShape::Custom { blade_count: 5, rotation: 0.0 };
+        if let BokehShape::Custom { blade_count, .. } = shape {
+            assert_eq!(blade_count, 5);
+        }
+    }
+}

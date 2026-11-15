@@ -1,0 +1,291 @@
+// =============================================================================
+// qtr - Character translate/delete/squeeze (tr clone) in BuildLang
+// =============================================================================
+// Reads stdin and transforms characters based on character sets.
+//
+// Usage:
+//   echo "Hello World" | qtr 'a-z' 'A-Z'     translate lowercase to upper
+//   echo "Hello World" | qtr -d 'aeiou'       delete vowels
+//   echo "hello   world" | qtr -s ' '         squeeze repeated spaces
+//   echo "Hello123" | qtr -d '0-9'            delete digits
+//   qtr --help                                usage
+//
+// Character set expansion:
+//   'a-z' -> all lowercase letters
+//   'A-Z' -> all uppercase letters
+//   '0-9' -> all digits
+//   'aeiou' -> literal characters
+//   Mixed: 'a-zA-Z' -> all letters
+// =============================================================================
+
+fn print_help() ~ Console {
+    println!("qtr - translate, delete, or squeeze characters");
+    println!("");
+    println!("Usage:");
+    println!("  qtr SET1 SET2       translate chars in SET1 to SET2");
+    println!("  qtr -d SET          delete chars in SET");
+    println!("  qtr -s SET          squeeze repeated chars in SET");
+    println!("  qtr --help          display this help and exit");
+    println!("");
+    println!("Character sets:");
+    println!("  a-z    all lowercase letters");
+    println!("  A-Z    all uppercase letters");
+    println!("  0-9    all digits");
+    println!("  aeiou  literal characters");
+    println!("");
+    println!("Input is always read from stdin (piped).");
+}
+
+// Expand a character set specification into a string of all characters.
+// Handles ranges like a-z, A-Z, 0-9 and literal characters.
+fn expand_set(spec: String) -> String {
+    let slen = spec.len();
+    let mut result = "";
+    let mut i: i64 = 0;
+
+    let mut go = true;
+    while go {
+        if i >= slen {
+            go = false;
+        } else {
+            // Check for a range pattern: X-Y where i+2 < slen
+            let have_range = if i + 2 < slen {
+                let dash = spec.char_at(i + 1);
+                dash == "-"
+            } else {
+                false
+            };
+
+            if have_range {
+                let start_c = spec.char_at(i);
+                let end_c = spec.char_at(i + 2);
+
+                // Expand a-z
+                if start_c == "a" && end_c == "z" {
+                    result = result + "abcdefghijklmnopqrstuvwxyz";
+                } else if start_c == "A" && end_c == "Z" {
+                    result = result + "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+                } else if start_c == "0" && end_c == "9" {
+                    result = result + "0123456789";
+                } else if start_c == "a" && end_c == "f" {
+                    result = result + "abcdef";
+                } else if start_c == "A" && end_c == "F" {
+                    result = result + "ABCDEF";
+                } else if start_c == "a" && end_c == "m" {
+                    result = result + "abcdefghijklm";
+                } else if start_c == "n" && end_c == "z" {
+                    result = result + "nopqrstuvwxyz";
+                } else if start_c == "0" && end_c == "5" {
+                    result = result + "012345";
+                } else {
+                    // Unknown range: just add the three chars
+                    result = result + start_c + "-" + end_c;
+                }
+                i = i + 3;
+            } else {
+                // Literal character
+                let c = spec.char_at(i);
+                result = result + c;
+                i = i + 1;
+            }
+        }
+    }
+
+    result
+}
+
+// Check if a character exists in a set string.
+// Returns the index if found, -1 if not.
+fn find_in_set(ch: String, set: String) -> i64 {
+    let set_len = set.len();
+    let mut idx: i64 = 0;
+    let mut found: i64 = -1;
+    let mut go = true;
+    while go {
+        if idx >= set_len {
+            go = false;
+        } else {
+            let sc = set.char_at(idx);
+            if sc == ch {
+                found = idx;
+                go = false;
+            } else {
+                idx = idx + 1;
+            }
+        }
+    }
+    found
+}
+
+// Mode: translate. Replace chars from set1 with corresponding char in set2.
+fn do_translate(input: String, set1: String, set2: String) -> String {
+    let ilen = input.len();
+    let s2len = set2.len();
+    let mut result = "";
+    let mut i: i64 = 0;
+
+    while i < ilen {
+        let c = input.char_at(i);
+        let idx = find_in_set(c, set1);
+        if idx >= 0 {
+            // Map to corresponding character in set2
+            if idx < s2len {
+                let mapped = set2.char_at(idx);
+                result = result + mapped;
+            } else {
+                // If set2 is shorter, use last char of set2
+                if s2len > 0 {
+                    let last = set2.char_at(s2len - 1);
+                    result = result + last;
+                } else {
+                    result = result + c;
+                }
+            }
+        } else {
+            result = result + c;
+        }
+        i = i + 1;
+    }
+
+    result
+}
+
+// Mode: delete. Remove all chars found in the set.
+fn do_delete(input: String, set: String) -> String {
+    let ilen = input.len();
+    let mut result = "";
+    let mut i: i64 = 0;
+
+    while i < ilen {
+        let c = input.char_at(i);
+        let idx = find_in_set(c, set);
+        if idx < 0 {
+            result = result + c;
+        }
+        i = i + 1;
+    }
+
+    result
+}
+
+// Mode: squeeze. Replace consecutive runs of chars in set with single.
+fn do_squeeze(input: String, set: String) -> String {
+    let ilen = input.len();
+    let mut result = "";
+    let mut prev = "";
+    let mut i: i64 = 0;
+
+    while i < ilen {
+        let c = input.char_at(i);
+        let in_set = find_in_set(c, set) >= 0;
+
+        if in_set {
+            // Only add if not a repeat of previous char
+            if c != prev {
+                result = result + c;
+            }
+        } else {
+            result = result + c;
+        }
+        prev = c;
+        i = i + 1;
+    }
+
+    result
+}
+
+fn main() ~ Console + Environment + Process {
+    let nargs = args_count();
+
+    if nargs < 2 {
+        print_help();
+        process_exit(0);
+    }
+
+    // Parse arguments
+    let mut mode: i64 = 0;    // 0=translate, 1=delete, 2=squeeze
+    let mut set1_raw = "";
+    let mut set2_raw = "";
+    let mut set1_set = false;
+    let mut set2_set = false;
+
+    let mut i: i64 = 1;
+    while i < nargs {
+        let arg = args_get(i);
+
+        if arg == "--help" || arg == "-h" {
+            print_help();
+            process_exit(0);
+        } else if arg == "-d" {
+            mode = 1;
+        } else if arg == "-s" {
+            mode = 2;
+        } else if arg.starts_with("-") {
+            // Check for combined flags
+            if arg.contains("d") {
+                mode = 1;
+            }
+            if arg.contains("s") {
+                mode = 2;
+            }
+        } else {
+            if !set1_set {
+                set1_raw = arg;
+                set1_set = true;
+            } else if !set2_set {
+                set2_raw = arg;
+                set2_set = true;
+            }
+        }
+
+        i = i + 1;
+    }
+
+    // Validate arguments
+    if !set1_set {
+        println!("qtr: missing operand");
+        println!("Try 'qtr --help' for more information.");
+        process_exit(1);
+    }
+
+    if mode == 0 {
+        if !set2_set {
+            println!("qtr: missing operand after '{}'", set1_raw);
+            println!("Two sets are required for translate mode.");
+            println!("Try 'qtr --help' for more information.");
+            process_exit(1);
+        }
+    }
+
+    // Read from stdin
+    let piped = stdin_is_pipe();
+    if !piped {
+        println!("qtr: no input (pipe data to qtr)");
+        println!("Try 'qtr --help' for more information.");
+        process_exit(1);
+    }
+
+    let input = read_all();
+    if input.len() == 0 {
+        process_exit(0);
+    }
+
+    // Expand character sets
+    let set1 = expand_set(set1_raw);
+
+    // Process based on mode
+    if mode == 1 {
+        // Delete mode
+        let result = do_delete(input, set1);
+        print!("{}", result);
+    } else if mode == 2 {
+        // Squeeze mode
+        let result = do_squeeze(input, set1);
+        print!("{}", result);
+    } else {
+        // Translate mode
+        let set2 = expand_set(set2_raw);
+        let result = do_translate(input, set1, set2);
+        print!("{}", result);
+    }
+}

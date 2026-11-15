@@ -1,0 +1,1245 @@
+// BUILD-UNIVERSE: Refract - D3D11 Hook System
+// Low-level DirectX hooking for ENB integration
+// Version: 1.0.0
+
+module refract::hooks;
+
+use super::lib::*;
+
+// ============================================================================
+// D3D11 VTABLE DEFINITIONS
+// ============================================================================
+
+/// D3D11 Device VTable indices
+pub const DEVICE_VTABLE: DeviceVTable = DeviceVTable {
+    query_interface: 0,
+    add_ref: 1,
+    release: 2,
+    create_buffer: 3,
+    create_texture1d: 4,
+    create_texture2d: 5,
+    create_texture3d: 6,
+    create_shader_resource_view: 7,
+    create_unordered_access_view: 8,
+    create_render_target_view: 9,
+    create_depth_stencil_view: 10,
+    create_input_layout: 11,
+    create_vertex_shader: 12,
+    create_geometry_shader: 13,
+    create_geometry_shader_with_stream_output: 14,
+    create_pixel_shader: 15,
+    create_hull_shader: 16,
+    create_domain_shader: 17,
+    create_compute_shader: 18,
+    create_class_linkage: 19,
+    create_blend_state: 20,
+    create_depth_stencil_state: 21,
+    create_rasterizer_state: 22,
+    create_sampler_state: 23,
+    create_query: 24,
+    create_predicate: 25,
+    create_counter: 26,
+    create_deferred_context: 27,
+    open_shared_resource: 28,
+    check_format_support: 29,
+    check_multisample_quality_levels: 30,
+    check_counter_info: 31,
+    check_counter: 32,
+    check_feature_support: 33,
+    get_private_data: 34,
+    set_private_data: 35,
+    set_private_data_interface: 36,
+    get_feature_level: 37,
+    get_creation_flags: 38,
+    get_device_removed_reason: 39,
+    get_immediate_context: 40,
+    set_exception_mode: 41,
+    get_exception_mode: 42,
+};
+
+pub struct DeviceVTable {
+    pub query_interface: u32,
+    pub add_ref: u32,
+    pub release: u32,
+    pub create_buffer: u32,
+    pub create_texture1d: u32,
+    pub create_texture2d: u32,
+    pub create_texture3d: u32,
+    pub create_shader_resource_view: u32,
+    pub create_unordered_access_view: u32,
+    pub create_render_target_view: u32,
+    pub create_depth_stencil_view: u32,
+    pub create_input_layout: u32,
+    pub create_vertex_shader: u32,
+    pub create_geometry_shader: u32,
+    pub create_geometry_shader_with_stream_output: u32,
+    pub create_pixel_shader: u32,
+    pub create_hull_shader: u32,
+    pub create_domain_shader: u32,
+    pub create_compute_shader: u32,
+    pub create_class_linkage: u32,
+    pub create_blend_state: u32,
+    pub create_depth_stencil_state: u32,
+    pub create_rasterizer_state: u32,
+    pub create_sampler_state: u32,
+    pub create_query: u32,
+    pub create_predicate: u32,
+    pub create_counter: u32,
+    pub create_deferred_context: u32,
+    pub open_shared_resource: u32,
+    pub check_format_support: u32,
+    pub check_multisample_quality_levels: u32,
+    pub check_counter_info: u32,
+    pub check_counter: u32,
+    pub check_feature_support: u32,
+    pub get_private_data: u32,
+    pub set_private_data: u32,
+    pub set_private_data_interface: u32,
+    pub get_feature_level: u32,
+    pub get_creation_flags: u32,
+    pub get_device_removed_reason: u32,
+    pub get_immediate_context: u32,
+    pub set_exception_mode: u32,
+    pub get_exception_mode: u32,
+}
+
+/// D3D11 Device Context VTable indices
+pub const CONTEXT_VTABLE: ContextVTable = ContextVTable {
+    query_interface: 0,
+    add_ref: 1,
+    release: 2,
+    get_device: 3,
+    get_private_data: 4,
+    set_private_data: 5,
+    set_private_data_interface: 6,
+    vs_set_constant_buffers: 7,
+    ps_set_shader_resources: 8,
+    ps_set_shader: 9,
+    ps_set_samplers: 10,
+    vs_set_shader: 11,
+    draw_indexed: 12,
+    draw: 13,
+    map: 14,
+    unmap: 15,
+    ps_set_constant_buffers: 16,
+    ia_set_input_layout: 17,
+    ia_set_vertex_buffers: 18,
+    ia_set_index_buffer: 19,
+    draw_indexed_instanced: 20,
+    draw_instanced: 21,
+    gs_set_constant_buffers: 22,
+    gs_set_shader: 23,
+    ia_set_primitive_topology: 24,
+    vs_set_shader_resources: 25,
+    vs_set_samplers: 26,
+    begin: 27,
+    end: 28,
+    get_data: 29,
+    set_predication: 30,
+    gs_set_shader_resources: 31,
+    gs_set_samplers: 32,
+    om_set_render_targets: 33,
+    om_set_render_targets_and_uav: 34,
+    om_set_blend_state: 35,
+    om_set_depth_stencil_state: 36,
+    so_set_targets: 37,
+    draw_auto: 38,
+    draw_indexed_instanced_indirect: 39,
+    draw_instanced_indirect: 40,
+    dispatch: 41,
+    dispatch_indirect: 42,
+    rs_set_state: 43,
+    rs_set_viewports: 44,
+    rs_set_scissor_rects: 45,
+    copy_subresource_region: 46,
+    copy_resource: 47,
+    update_subresource: 48,
+    copy_structure_count: 49,
+    clear_render_target_view: 50,
+    clear_unordered_access_view_uint: 51,
+    clear_unordered_access_view_float: 52,
+    clear_depth_stencil_view: 53,
+    generate_mips: 54,
+    set_resource_min_lod: 55,
+    get_resource_min_lod: 56,
+    resolve_subresource: 57,
+    execute_command_list: 58,
+    hs_set_shader_resources: 59,
+    hs_set_shader: 60,
+    hs_set_samplers: 61,
+    hs_set_constant_buffers: 62,
+    ds_set_shader_resources: 63,
+    ds_set_shader: 64,
+    ds_set_samplers: 65,
+    ds_set_constant_buffers: 66,
+    cs_set_shader_resources: 67,
+    cs_set_unordered_access_views: 68,
+    cs_set_shader: 69,
+    cs_set_samplers: 70,
+    cs_set_constant_buffers: 71,
+    vs_get_constant_buffers: 72,
+    ps_get_shader_resources: 73,
+    ps_get_shader: 74,
+    ps_get_samplers: 75,
+    vs_get_shader: 76,
+    ps_get_constant_buffers: 77,
+    ia_get_input_layout: 78,
+    ia_get_vertex_buffers: 79,
+    ia_get_index_buffer: 80,
+    gs_get_constant_buffers: 81,
+    gs_get_shader: 82,
+    ia_get_primitive_topology: 83,
+    vs_get_shader_resources: 84,
+    vs_get_samplers: 85,
+    get_predication: 86,
+    gs_get_shader_resources: 87,
+    gs_get_samplers: 88,
+    om_get_render_targets: 89,
+    om_get_render_targets_and_uav: 90,
+    om_get_blend_state: 91,
+    om_get_depth_stencil_state: 92,
+    so_get_targets: 93,
+    rs_get_state: 94,
+    rs_get_viewports: 95,
+    rs_get_scissor_rects: 96,
+    hs_get_shader_resources: 97,
+    hs_get_shader: 98,
+    hs_get_samplers: 99,
+    hs_get_constant_buffers: 100,
+    ds_get_shader_resources: 101,
+    ds_get_shader: 102,
+    ds_get_samplers: 103,
+    ds_get_constant_buffers: 104,
+    cs_get_shader_resources: 105,
+    cs_get_unordered_access_views: 106,
+    cs_get_shader: 107,
+    cs_get_samplers: 108,
+    cs_get_constant_buffers: 109,
+    clear_state: 110,
+    flush: 111,
+    get_type: 112,
+    get_context_flags: 113,
+    finish_command_list: 114,
+};
+
+pub struct ContextVTable {
+    pub query_interface: u32,
+    pub add_ref: u32,
+    pub release: u32,
+    pub get_device: u32,
+    pub get_private_data: u32,
+    pub set_private_data: u32,
+    pub set_private_data_interface: u32,
+    pub vs_set_constant_buffers: u32,
+    pub ps_set_shader_resources: u32,
+    pub ps_set_shader: u32,
+    pub ps_set_samplers: u32,
+    pub vs_set_shader: u32,
+    pub draw_indexed: u32,
+    pub draw: u32,
+    pub map: u32,
+    pub unmap: u32,
+    pub ps_set_constant_buffers: u32,
+    pub ia_set_input_layout: u32,
+    pub ia_set_vertex_buffers: u32,
+    pub ia_set_index_buffer: u32,
+    pub draw_indexed_instanced: u32,
+    pub draw_instanced: u32,
+    pub gs_set_constant_buffers: u32,
+    pub gs_set_shader: u32,
+    pub ia_set_primitive_topology: u32,
+    pub vs_set_shader_resources: u32,
+    pub vs_set_samplers: u32,
+    pub begin: u32,
+    pub end: u32,
+    pub get_data: u32,
+    pub set_predication: u32,
+    pub gs_set_shader_resources: u32,
+    pub gs_set_samplers: u32,
+    pub om_set_render_targets: u32,
+    pub om_set_render_targets_and_uav: u32,
+    pub om_set_blend_state: u32,
+    pub om_set_depth_stencil_state: u32,
+    pub so_set_targets: u32,
+    pub draw_auto: u32,
+    pub draw_indexed_instanced_indirect: u32,
+    pub draw_instanced_indirect: u32,
+    pub dispatch: u32,
+    pub dispatch_indirect: u32,
+    pub rs_set_state: u32,
+    pub rs_set_viewports: u32,
+    pub rs_set_scissor_rects: u32,
+    pub copy_subresource_region: u32,
+    pub copy_resource: u32,
+    pub update_subresource: u32,
+    pub copy_structure_count: u32,
+    pub clear_render_target_view: u32,
+    pub clear_unordered_access_view_uint: u32,
+    pub clear_unordered_access_view_float: u32,
+    pub clear_depth_stencil_view: u32,
+    pub generate_mips: u32,
+    pub set_resource_min_lod: u32,
+    pub get_resource_min_lod: u32,
+    pub resolve_subresource: u32,
+    pub execute_command_list: u32,
+    pub hs_set_shader_resources: u32,
+    pub hs_set_shader: u32,
+    pub hs_set_samplers: u32,
+    pub hs_set_constant_buffers: u32,
+    pub ds_set_shader_resources: u32,
+    pub ds_set_shader: u32,
+    pub ds_set_samplers: u32,
+    pub ds_set_constant_buffers: u32,
+    pub cs_set_shader_resources: u32,
+    pub cs_set_unordered_access_views: u32,
+    pub cs_set_shader: u32,
+    pub cs_set_samplers: u32,
+    pub cs_set_constant_buffers: u32,
+    pub vs_get_constant_buffers: u32,
+    pub ps_get_shader_resources: u32,
+    pub ps_get_shader: u32,
+    pub ps_get_samplers: u32,
+    pub vs_get_shader: u32,
+    pub ps_get_constant_buffers: u32,
+    pub ia_get_input_layout: u32,
+    pub ia_get_vertex_buffers: u32,
+    pub ia_get_index_buffer: u32,
+    pub gs_get_constant_buffers: u32,
+    pub gs_get_shader: u32,
+    pub ia_get_primitive_topology: u32,
+    pub vs_get_shader_resources: u32,
+    pub vs_get_samplers: u32,
+    pub get_predication: u32,
+    pub gs_get_shader_resources: u32,
+    pub gs_get_samplers: u32,
+    pub om_get_render_targets: u32,
+    pub om_get_render_targets_and_uav: u32,
+    pub om_get_blend_state: u32,
+    pub om_get_depth_stencil_state: u32,
+    pub so_get_targets: u32,
+    pub rs_get_state: u32,
+    pub rs_get_viewports: u32,
+    pub rs_get_scissor_rects: u32,
+    pub hs_get_shader_resources: u32,
+    pub hs_get_shader: u32,
+    pub hs_get_samplers: u32,
+    pub hs_get_constant_buffers: u32,
+    pub ds_get_shader_resources: u32,
+    pub ds_get_shader: u32,
+    pub ds_get_samplers: u32,
+    pub ds_get_constant_buffers: u32,
+    pub cs_get_shader_resources: u32,
+    pub cs_get_unordered_access_views: u32,
+    pub cs_get_shader: u32,
+    pub cs_get_samplers: u32,
+    pub cs_get_constant_buffers: u32,
+    pub clear_state: u32,
+    pub flush: u32,
+    pub get_type: u32,
+    pub get_context_flags: u32,
+    pub finish_command_list: u32,
+}
+
+/// DXGI SwapChain VTable indices
+pub const SWAPCHAIN_VTABLE: SwapChainVTable = SwapChainVTable {
+    query_interface: 0,
+    add_ref: 1,
+    release: 2,
+    set_private_data: 3,
+    set_private_data_interface: 4,
+    get_private_data: 5,
+    get_parent: 6,
+    get_device: 7,
+    present: 8,
+    get_buffer: 9,
+    set_fullscreen_state: 10,
+    get_fullscreen_state: 11,
+    get_desc: 12,
+    resize_buffers: 13,
+    resize_target: 14,
+    get_containing_output: 15,
+    get_frame_statistics: 16,
+    get_last_present_count: 17,
+};
+
+pub struct SwapChainVTable {
+    pub query_interface: u32,
+    pub add_ref: u32,
+    pub release: u32,
+    pub set_private_data: u32,
+    pub set_private_data_interface: u32,
+    pub get_private_data: u32,
+    pub get_parent: u32,
+    pub get_device: u32,
+    pub present: u32,
+    pub get_buffer: u32,
+    pub set_fullscreen_state: u32,
+    pub get_fullscreen_state: u32,
+    pub get_desc: u32,
+    pub resize_buffers: u32,
+    pub resize_target: u32,
+    pub get_containing_output: u32,
+    pub get_frame_statistics: u32,
+    pub get_last_present_count: u32,
+}
+
+// ============================================================================
+// HOOK FUNCTION TYPES
+// ============================================================================
+
+/// Function pointer types for D3D11 hooks
+pub type FnPresent = extern "stdcall" fn(
+    swap_chain: *mut IDXGISwapChain,
+    sync_interval: u32,
+    flags: u32
+) -> HRESULT;
+
+pub type FnResizeBuffers = extern "stdcall" fn(
+    swap_chain: *mut IDXGISwapChain,
+    buffer_count: u32,
+    width: u32,
+    height: u32,
+    new_format: DXGI_FORMAT,
+    swap_chain_flags: u32
+) -> HRESULT;
+
+pub type FnDraw = extern "stdcall" fn(
+    context: *mut ID3D11DeviceContext,
+    vertex_count: u32,
+    start_vertex_location: u32
+);
+
+pub type FnDrawIndexed = extern "stdcall" fn(
+    context: *mut ID3D11DeviceContext,
+    index_count: u32,
+    start_index_location: u32,
+    base_vertex_location: i32
+);
+
+pub type FnDrawInstanced = extern "stdcall" fn(
+    context: *mut ID3D11DeviceContext,
+    vertex_count_per_instance: u32,
+    instance_count: u32,
+    start_vertex_location: u32,
+    start_instance_location: u32
+);
+
+pub type FnDrawIndexedInstanced = extern "stdcall" fn(
+    context: *mut ID3D11DeviceContext,
+    index_count_per_instance: u32,
+    instance_count: u32,
+    start_index_location: u32,
+    base_vertex_location: i32,
+    start_instance_location: u32
+);
+
+pub type FnDispatch = extern "stdcall" fn(
+    context: *mut ID3D11DeviceContext,
+    thread_group_count_x: u32,
+    thread_group_count_y: u32,
+    thread_group_count_z: u32
+);
+
+pub type FnClearRenderTargetView = extern "stdcall" fn(
+    context: *mut ID3D11DeviceContext,
+    render_target_view: *mut ID3D11RenderTargetView,
+    color_rgba: *const f32
+);
+
+pub type FnOMSetRenderTargets = extern "stdcall" fn(
+    context: *mut ID3D11DeviceContext,
+    num_views: u32,
+    render_target_views: *const *mut ID3D11RenderTargetView,
+    depth_stencil_view: *mut ID3D11DepthStencilView
+);
+
+pub type FnPSSetShaderResources = extern "stdcall" fn(
+    context: *mut ID3D11DeviceContext,
+    start_slot: u32,
+    num_views: u32,
+    shader_resource_views: *const *mut ID3D11ShaderResourceView
+);
+
+// ============================================================================
+// HOOK MANAGEMENT
+// ============================================================================
+
+/// Hook installation result
+pub struct HookResult {
+    pub success: bool,
+    pub original: *mut c_void,
+    pub error: Option<String>,
+}
+
+/// Hook entry tracking
+pub struct HookEntry {
+    pub hook_point: HookPoint,
+    pub target_address: *mut c_void,
+    pub detour_address: *mut c_void,
+    pub original_address: *mut c_void,
+    pub trampoline: Vec<u8>,
+    pub installed: bool,
+    pub enabled: bool,
+}
+
+/// Hook manager for D3D11 integration
+pub struct HookManager {
+    hooks: HashMap<HookPoint, HookEntry>,
+    device: *mut ID3D11Device,
+    context: *mut ID3D11DeviceContext,
+    swap_chain: *mut IDXGISwapChain,
+
+    // Original function pointers
+    original_present: Option<FnPresent>,
+    original_resize_buffers: Option<FnResizeBuffers>,
+    original_draw: Option<FnDraw>,
+    original_draw_indexed: Option<FnDrawIndexed>,
+    original_draw_instanced: Option<FnDrawInstanced>,
+    original_draw_indexed_instanced: Option<FnDrawIndexedInstanced>,
+    original_dispatch: Option<FnDispatch>,
+    original_clear_rtv: Option<FnClearRenderTargetView>,
+    original_om_set_render_targets: Option<FnOMSetRenderTargets>,
+    original_ps_set_shader_resources: Option<FnPSSetShaderResources>,
+
+    // Callback system
+    pre_callbacks: HashMap<HookPoint, Vec<Box<dyn Fn(&RenderContext)>>>,
+    post_callbacks: HashMap<HookPoint, Vec<Box<dyn Fn(&RenderContext)>>>,
+}
+
+impl HookManager {
+    pub fn new() -> Self {
+        Self {
+            hooks: HashMap::new(),
+            device: std::ptr::null_mut(),
+            context: std::ptr::null_mut(),
+            swap_chain: std::ptr::null_mut(),
+            original_present: None,
+            original_resize_buffers: None,
+            original_draw: None,
+            original_draw_indexed: None,
+            original_draw_instanced: None,
+            original_draw_indexed_instanced: None,
+            original_dispatch: None,
+            original_clear_rtv: None,
+            original_om_set_render_targets: None,
+            original_ps_set_shader_resources: None,
+            pre_callbacks: HashMap::new(),
+            post_callbacks: HashMap::new(),
+        }
+    }
+
+    /// Initialize hook manager with D3D11 interfaces
+    pub fn initialize(
+        &mut self,
+        device: *mut ID3D11Device,
+        context: *mut ID3D11DeviceContext,
+        swap_chain: *mut IDXGISwapChain
+    ) -> Result<(), ENBError> {
+        self.device = device;
+        self.context = context;
+        self.swap_chain = swap_chain;
+
+        // Validate interfaces
+        if self.device.is_null() {
+            return Err(ENBError::DeviceNotFound);
+        }
+        if self.context.is_null() {
+            return Err(ENBError::ContextNotFound);
+        }
+        if self.swap_chain.is_null() {
+            return Err(ENBError::SwapChainNotFound);
+        }
+
+        Ok(())
+    }
+
+    /// Install a hook at the specified point
+    pub fn install_hook(&mut self, hook_point: HookPoint) -> Result<(), ENBError> {
+        let (vtable, index, detour) = self.get_hook_info(hook_point)?;
+
+        // Get the target address from vtable
+        let target = unsafe {
+            let vtable_ptr = *(vtable as *const *const *mut c_void);
+            *vtable_ptr.add(index as usize)
+        };
+
+        // Create trampoline
+        let trampoline = self.create_trampoline(target)?;
+
+        // Install the detour
+        self.install_detour(target, detour, &trampoline)?;
+
+        // Store hook entry
+        let entry = HookEntry {
+            hook_point,
+            target_address: target,
+            detour_address: detour,
+            original_address: trampoline.as_ptr() as *mut c_void,
+            trampoline,
+            installed: true,
+            enabled: true,
+        };
+
+        self.hooks.insert(hook_point, entry);
+        Ok(())
+    }
+
+    /// Remove a hook at the specified point
+    pub fn remove_hook(&mut self, hook_point: HookPoint) -> Result<(), ENBError> {
+        if let Some(entry) = self.hooks.get_mut(&hook_point) {
+            if entry.installed {
+                // Restore original bytes
+                self.restore_original(entry)?;
+                entry.installed = false;
+                entry.enabled = false;
+            }
+        }
+        Ok(())
+    }
+
+    /// Enable or disable a hook without removing it
+    pub fn set_hook_enabled(&mut self, hook_point: HookPoint, enabled: bool) {
+        if let Some(entry) = self.hooks.get_mut(&hook_point) {
+            entry.enabled = enabled;
+        }
+    }
+
+    /// Register a pre-execution callback for a hook point
+    pub fn register_pre_callback<F>(&mut self, hook_point: HookPoint, callback: F)
+    where
+        F: Fn(&RenderContext) + 'static
+    {
+        self.pre_callbacks
+            .entry(hook_point)
+            .or_insert_with(Vec::new)
+            .push(Box::new(callback));
+    }
+
+    /// Register a post-execution callback for a hook point
+    pub fn register_post_callback<F>(&mut self, hook_point: HookPoint, callback: F)
+    where
+        F: Fn(&RenderContext) + 'static
+    {
+        self.post_callbacks
+            .entry(hook_point)
+            .or_insert_with(Vec::new)
+            .push(Box::new(callback));
+    }
+
+    /// Get hook information for a hook point
+    fn get_hook_info(&self, hook_point: HookPoint) -> Result<(*mut c_void, u32, *mut c_void), ENBError> {
+        match hook_point {
+            HookPoint::SwapChainPresent => Ok((
+                self.swap_chain as *mut c_void,
+                SWAPCHAIN_VTABLE.present,
+                Self::present_hook as *mut c_void
+            )),
+            HookPoint::SwapChainResizeBuffers => Ok((
+                self.swap_chain as *mut c_void,
+                SWAPCHAIN_VTABLE.resize_buffers,
+                Self::resize_buffers_hook as *mut c_void
+            )),
+            HookPoint::ContextDraw => Ok((
+                self.context as *mut c_void,
+                CONTEXT_VTABLE.draw,
+                Self::draw_hook as *mut c_void
+            )),
+            HookPoint::ContextDrawIndexed => Ok((
+                self.context as *mut c_void,
+                CONTEXT_VTABLE.draw_indexed,
+                Self::draw_indexed_hook as *mut c_void
+            )),
+            HookPoint::ContextDispatch => Ok((
+                self.context as *mut c_void,
+                CONTEXT_VTABLE.dispatch,
+                Self::dispatch_hook as *mut c_void
+            )),
+            HookPoint::ContextClearRTV => Ok((
+                self.context as *mut c_void,
+                CONTEXT_VTABLE.clear_render_target_view,
+                Self::clear_rtv_hook as *mut c_void
+            )),
+            HookPoint::ContextOMSetRenderTargets => Ok((
+                self.context as *mut c_void,
+                CONTEXT_VTABLE.om_set_render_targets,
+                Self::om_set_render_targets_hook as *mut c_void
+            )),
+            _ => Err(ENBError::HookFailed(hook_point)),
+        }
+    }
+
+    /// Create a trampoline for the original function
+    fn create_trampoline(&self, target: *mut c_void) -> Result<Vec<u8>, ENBError> {
+        // Allocate executable memory for trampoline
+        let trampoline_size = 32; // Enough for most prologues + jump
+        let trampoline = unsafe {
+            VirtualAlloc(
+                std::ptr::null_mut(),
+                trampoline_size,
+                MEM_COMMIT | MEM_RESERVE,
+                PAGE_EXECUTE_READWRITE
+            ) as *mut u8
+        };
+
+        if trampoline.is_null() {
+            return Err(ENBError::BufferCreationFailed);
+        }
+
+        // Copy original bytes (minimum 5 for x86, 14 for x64)
+        let copy_size = self.calculate_prologue_size(target);
+        unsafe {
+            std::ptr::copy_nonoverlapping(target as *const u8, trampoline, copy_size);
+
+            // Add jump back to original function + copy_size
+            let jump_target = (target as usize + copy_size) as u64;
+
+            #[cfg(target_arch = "x86_64")]
+            {
+                // mov rax, target
+                *trampoline.add(copy_size) = 0x48;
+                *trampoline.add(copy_size + 1) = 0xB8;
+                std::ptr::copy_nonoverlapping(
+                    &jump_target as *const u64 as *const u8,
+                    trampoline.add(copy_size + 2),
+                    8
+                );
+                // jmp rax
+                *trampoline.add(copy_size + 10) = 0xFF;
+                *trampoline.add(copy_size + 11) = 0xE0;
+            }
+
+            #[cfg(target_arch = "x86")]
+            {
+                // jmp relative
+                *trampoline.add(copy_size) = 0xE9;
+                let relative = (jump_target as i64 - (trampoline.add(copy_size + 5) as i64)) as i32;
+                std::ptr::copy_nonoverlapping(
+                    &relative as *const i32 as *const u8,
+                    trampoline.add(copy_size + 1),
+                    4
+                );
+            }
+        }
+
+        Ok(unsafe {
+            Vec::from_raw_parts(trampoline, trampoline_size, trampoline_size)
+        })
+    }
+
+    /// Calculate the size of the function prologue to copy
+    fn calculate_prologue_size(&self, _target: *mut c_void) -> usize {
+        // Simplified - in real implementation, use a disassembler
+        #[cfg(target_arch = "x86_64")]
+        { 14 } // Minimum for x64 absolute jump
+
+        #[cfg(target_arch = "x86")]
+        { 5 } // Minimum for x86 relative jump
+    }
+
+    /// Install a detour at the target address
+    fn install_detour(&self, target: *mut c_void, detour: *mut c_void, _trampoline: &[u8]) -> Result<(), ENBError> {
+        unsafe {
+            // Unprotect memory
+            let mut old_protect: u32 = 0;
+            VirtualProtect(target, 14, PAGE_EXECUTE_READWRITE, &mut old_protect);
+
+            #[cfg(target_arch = "x86_64")]
+            {
+                // mov rax, detour
+                *(target as *mut u8) = 0x48;
+                *(target as *mut u8).add(1) = 0xB8;
+                std::ptr::copy_nonoverlapping(
+                    &(detour as u64) as *const u64 as *const u8,
+                    (target as *mut u8).add(2),
+                    8
+                );
+                // jmp rax
+                *(target as *mut u8).add(10) = 0xFF;
+                *(target as *mut u8).add(11) = 0xE0;
+            }
+
+            #[cfg(target_arch = "x86")]
+            {
+                // jmp relative
+                *(target as *mut u8) = 0xE9;
+                let relative = (detour as i64 - ((target as usize + 5) as i64)) as i32;
+                std::ptr::copy_nonoverlapping(
+                    &relative as *const i32 as *const u8,
+                    (target as *mut u8).add(1),
+                    4
+                );
+            }
+
+            // Restore protection
+            VirtualProtect(target, 14, old_protect, &mut old_protect);
+        }
+
+        Ok(())
+    }
+
+    /// Restore original bytes at the target address
+    fn restore_original(&self, entry: &HookEntry) -> Result<(), ENBError> {
+        unsafe {
+            let mut old_protect: u32 = 0;
+            let copy_size = self.calculate_prologue_size(entry.target_address);
+
+            VirtualProtect(entry.target_address, copy_size, PAGE_EXECUTE_READWRITE, &mut old_protect);
+
+            std::ptr::copy_nonoverlapping(
+                entry.trampoline.as_ptr(),
+                entry.target_address as *mut u8,
+                copy_size
+            );
+
+            VirtualProtect(entry.target_address, copy_size, old_protect, &mut old_protect);
+        }
+
+        Ok(())
+    }
+
+    // ========================================================================
+    // HOOK DETOUR FUNCTIONS
+    // ========================================================================
+
+    extern "stdcall" fn present_hook(
+        swap_chain: *mut IDXGISwapChain,
+        sync_interval: u32,
+        flags: u32
+    ) -> HRESULT {
+        // Get hook manager instance (using thread-local or global)
+        let manager = get_hook_manager();
+
+        // Execute pre-callbacks
+        if let Some(callbacks) = manager.pre_callbacks.get(&HookPoint::SwapChainPresent) {
+            let ctx = manager.create_render_context();
+            for callback in callbacks {
+                callback(&ctx);
+            }
+        }
+
+        // Call original
+        let result = if let Some(original) = manager.original_present {
+            original(swap_chain, sync_interval, flags)
+        } else {
+            S_OK
+        };
+
+        // Execute post-callbacks
+        if let Some(callbacks) = manager.post_callbacks.get(&HookPoint::SwapChainPresent) {
+            let ctx = manager.create_render_context();
+            for callback in callbacks {
+                callback(&ctx);
+            }
+        }
+
+        result
+    }
+
+    extern "stdcall" fn resize_buffers_hook(
+        swap_chain: *mut IDXGISwapChain,
+        buffer_count: u32,
+        width: u32,
+        height: u32,
+        new_format: DXGI_FORMAT,
+        swap_chain_flags: u32
+    ) -> HRESULT {
+        let manager = get_hook_manager();
+
+        // Release render targets before resize
+        manager.release_render_targets();
+
+        // Call original
+        let result = if let Some(original) = manager.original_resize_buffers {
+            original(swap_chain, buffer_count, width, height, new_format, swap_chain_flags)
+        } else {
+            S_OK
+        };
+
+        // Recreate render targets
+        if result == S_OK {
+            manager.create_render_targets(width, height);
+        }
+
+        result
+    }
+
+    extern "stdcall" fn draw_hook(
+        context: *mut ID3D11DeviceContext,
+        vertex_count: u32,
+        start_vertex_location: u32
+    ) {
+        let manager = get_hook_manager();
+
+        // Execute pre-callbacks
+        if let Some(callbacks) = manager.pre_callbacks.get(&HookPoint::ContextDraw) {
+            let ctx = manager.create_render_context();
+            for callback in callbacks {
+                callback(&ctx);
+            }
+        }
+
+        // Call original
+        if let Some(original) = manager.original_draw {
+            original(context, vertex_count, start_vertex_location);
+        }
+
+        // Execute post-callbacks
+        if let Some(callbacks) = manager.post_callbacks.get(&HookPoint::ContextDraw) {
+            let ctx = manager.create_render_context();
+            for callback in callbacks {
+                callback(&ctx);
+            }
+        }
+    }
+
+    extern "stdcall" fn draw_indexed_hook(
+        context: *mut ID3D11DeviceContext,
+        index_count: u32,
+        start_index_location: u32,
+        base_vertex_location: i32
+    ) {
+        let manager = get_hook_manager();
+
+        if let Some(original) = manager.original_draw_indexed {
+            original(context, index_count, start_index_location, base_vertex_location);
+        }
+    }
+
+    extern "stdcall" fn dispatch_hook(
+        context: *mut ID3D11DeviceContext,
+        thread_group_count_x: u32,
+        thread_group_count_y: u32,
+        thread_group_count_z: u32
+    ) {
+        let manager = get_hook_manager();
+
+        if let Some(original) = manager.original_dispatch {
+            original(context, thread_group_count_x, thread_group_count_y, thread_group_count_z);
+        }
+    }
+
+    extern "stdcall" fn clear_rtv_hook(
+        context: *mut ID3D11DeviceContext,
+        render_target_view: *mut ID3D11RenderTargetView,
+        color_rgba: *const f32
+    ) {
+        let manager = get_hook_manager();
+
+        if let Some(original) = manager.original_clear_rtv {
+            original(context, render_target_view, color_rgba);
+        }
+    }
+
+    extern "stdcall" fn om_set_render_targets_hook(
+        context: *mut ID3D11DeviceContext,
+        num_views: u32,
+        render_target_views: *const *mut ID3D11RenderTargetView,
+        depth_stencil_view: *mut ID3D11DepthStencilView
+    ) {
+        let manager = get_hook_manager();
+
+        // Track render target changes
+        manager.track_render_target_change(num_views, render_target_views, depth_stencil_view);
+
+        if let Some(original) = manager.original_om_set_render_targets {
+            original(context, num_views, render_target_views, depth_stencil_view);
+        }
+    }
+
+    // ========================================================================
+    // HELPER FUNCTIONS
+    // ========================================================================
+
+    fn create_render_context(&self) -> RenderContext {
+        RenderContext {
+            device: self.device,
+            context: self.context,
+            constants: ENBShaderConstants::default(),
+            render_targets: RenderTargets::default(),
+            current_stage: RenderStage::GBuffer,
+            point_sampler: std::ptr::null_mut(),
+            linear_sampler: std::ptr::null_mut(),
+            aniso_sampler: std::ptr::null_mut(),
+            shadow_sampler: std::ptr::null_mut(),
+        }
+    }
+
+    fn release_render_targets(&mut self) {
+        // Release all ENB render targets before resize
+        // Implementation depends on render target management
+    }
+
+    fn create_render_targets(&mut self, _width: u32, _height: u32) {
+        // Recreate render targets after resize
+        // Implementation depends on render target management
+    }
+
+    fn track_render_target_change(
+        &self,
+        _num_views: u32,
+        _render_target_views: *const *mut ID3D11RenderTargetView,
+        _depth_stencil_view: *mut ID3D11DepthStencilView
+    ) {
+        // Track render target changes for effect insertion
+    }
+}
+
+/// Get the global hook manager instance
+fn get_hook_manager() -> &'static mut HookManager {
+    static mut HOOK_MANAGER: Option<HookManager> = None;
+    static INIT: std::sync::Once = std::sync::Once::new();
+
+    unsafe {
+        INIT.call_once(|| {
+            HOOK_MANAGER = Some(HookManager::new());
+        });
+        HOOK_MANAGER.as_mut().unwrap()
+    }
+}
+
+// ============================================================================
+// SHADER INJECTION SYSTEM
+// ============================================================================
+
+/// Shader injection point
+pub struct ShaderInjection {
+    pub target_shader_hash: u64,
+    pub injection_type: ShaderInjectionType,
+    pub replacement_shader: Vec<u8>,
+    pub enabled: bool,
+}
+
+/// Types of shader injection
+pub enum ShaderInjectionType {
+    Replace,            // Replace entire shader
+    Prepend,            // Add code before main
+    Append,             // Add code after main
+    Patch(u32, Vec<u8>), // Patch at specific offset
+}
+
+/// Shader injection manager
+pub struct ShaderInjector {
+    injections: HashMap<u64, ShaderInjection>,
+    shader_cache: HashMap<u64, Vec<u8>>,
+}
+
+impl ShaderInjector {
+    pub fn new() -> Self {
+        Self {
+            injections: HashMap::new(),
+            shader_cache: HashMap::new(),
+        }
+    }
+
+    /// Register a shader injection
+    pub fn register_injection(&mut self, injection: ShaderInjection) {
+        self.injections.insert(injection.target_shader_hash, injection);
+    }
+
+    /// Process a shader before it's set
+    pub fn process_shader(&mut self, shader_bytecode: &[u8]) -> Option<Vec<u8>> {
+        let hash = self.hash_shader(shader_bytecode);
+
+        if let Some(injection) = self.injections.get(&hash) {
+            if injection.enabled {
+                return Some(self.apply_injection(shader_bytecode, injection));
+            }
+        }
+
+        None
+    }
+
+    /// Calculate shader hash
+    fn hash_shader(&self, bytecode: &[u8]) -> u64 {
+        // FNV-1a hash
+        let mut hash: u64 = 0xcbf29ce484222325;
+        for byte in bytecode {
+            hash ^= *byte as u64;
+            hash = hash.wrapping_mul(0x100000001b3);
+        }
+        hash
+    }
+
+    /// Apply shader injection
+    fn apply_injection(&self, original: &[u8], injection: &ShaderInjection) -> Vec<u8> {
+        match &injection.injection_type {
+            ShaderInjectionType::Replace => injection.replacement_shader.clone(),
+            ShaderInjectionType::Prepend => {
+                let mut result = injection.replacement_shader.clone();
+                result.extend_from_slice(original);
+                result
+            },
+            ShaderInjectionType::Append => {
+                let mut result = original.to_vec();
+                result.extend_from_slice(&injection.replacement_shader);
+                result
+            },
+            ShaderInjectionType::Patch(offset, patch) => {
+                let mut result = original.to_vec();
+                let offset = *offset as usize;
+                for (i, byte) in patch.iter().enumerate() {
+                    if offset + i < result.len() {
+                        result[offset + i] = *byte;
+                    }
+                }
+                result
+            },
+        }
+    }
+}
+
+// ============================================================================
+// DRAW CALL TRACKING
+// ============================================================================
+
+/// Draw call information for analysis
+pub struct DrawCallInfo {
+    pub call_type: DrawCallType,
+    pub vertex_count: u32,
+    pub index_count: u32,
+    pub instance_count: u32,
+    pub topology: D3D11_PRIMITIVE_TOPOLOGY,
+    pub current_render_targets: Vec<*mut ID3D11RenderTargetView>,
+    pub current_depth_stencil: *mut ID3D11DepthStencilView,
+    pub current_vs: *mut ID3D11VertexShader,
+    pub current_ps: *mut ID3D11PixelShader,
+    pub vs_hash: u64,
+    pub ps_hash: u64,
+}
+
+/// Draw call type
+pub enum DrawCallType {
+    Draw,
+    DrawIndexed,
+    DrawInstanced,
+    DrawIndexedInstanced,
+    DrawAuto,
+    Dispatch,
+}
+
+/// Draw call tracker for effect insertion
+pub struct DrawCallTracker {
+    draw_calls: Vec<DrawCallInfo>,
+    frame_draw_count: u32,
+    identified_stages: HashMap<u64, RenderStage>,
+}
+
+impl DrawCallTracker {
+    pub fn new() -> Self {
+        Self {
+            draw_calls: Vec::with_capacity(10000),
+            frame_draw_count: 0,
+            identified_stages: HashMap::new(),
+        }
+    }
+
+    /// Record a draw call
+    pub fn record_draw(&mut self, info: DrawCallInfo) {
+        self.draw_calls.push(info);
+        self.frame_draw_count += 1;
+    }
+
+    /// Identify the current render stage based on shader hashes
+    pub fn identify_stage(&self, vs_hash: u64, ps_hash: u64) -> RenderStage {
+        // Check known shader combinations
+        if let Some(stage) = self.identified_stages.get(&(vs_hash ^ ps_hash)) {
+            return *stage;
+        }
+
+        // Heuristic detection based on render targets
+        RenderStage::GBuffer
+    }
+
+    /// Reset for new frame
+    pub fn new_frame(&mut self) {
+        self.draw_calls.clear();
+        self.frame_draw_count = 0;
+    }
+
+    /// Get draw count for current frame
+    pub fn get_draw_count(&self) -> u32 {
+        self.frame_draw_count
+    }
+}
+
+// ============================================================================
+// WINDOWS API DECLARATIONS
+// ============================================================================
+
+#[cfg(windows)]
+extern "system" {
+    fn VirtualAlloc(
+        lpAddress: *mut c_void,
+        dwSize: usize,
+        flAllocationType: u32,
+        flProtect: u32
+    ) -> *mut c_void;
+
+    fn VirtualProtect(
+        lpAddress: *mut c_void,
+        dwSize: usize,
+        flNewProtect: u32,
+        lpflOldProtect: *mut u32
+    ) -> i32;
+}
+
+const MEM_COMMIT: u32 = 0x1000;
+const MEM_RESERVE: u32 = 0x2000;
+const PAGE_EXECUTE_READWRITE: u32 = 0x40;
+const S_OK: HRESULT = 0;
+
+type HRESULT = i32;
+type DXGI_FORMAT = u32;
+type D3D11_PRIMITIVE_TOPOLOGY = u32;
+
+// D3D11 interface placeholders
+pub struct ID3D11Device;
+pub struct ID3D11DeviceContext;
+pub struct IDXGISwapChain;
+pub struct ID3D11RenderTargetView;
+pub struct ID3D11DepthStencilView;
+pub struct ID3D11ShaderResourceView;
+pub struct ID3D11VertexShader;
+pub struct ID3D11PixelShader;
+
+// ============================================================================
+// MODULE EXPORTS
+// ============================================================================
+
+pub use self::{
+    // VTables
+    DEVICE_VTABLE,
+    CONTEXT_VTABLE,
+    SWAPCHAIN_VTABLE,
+    DeviceVTable,
+    ContextVTable,
+    SwapChainVTable,
+
+    // Function types
+    FnPresent,
+    FnResizeBuffers,
+    FnDraw,
+    FnDrawIndexed,
+    FnDrawInstanced,
+    FnDrawIndexedInstanced,
+    FnDispatch,
+    FnClearRenderTargetView,
+    FnOMSetRenderTargets,
+    FnPSSetShaderResources,
+
+    // Hook management
+    HookResult,
+    HookEntry,
+    HookManager,
+    get_hook_manager,
+
+    // Shader injection
+    ShaderInjection,
+    ShaderInjectionType,
+    ShaderInjector,
+
+    // Draw tracking
+    DrawCallInfo,
+    DrawCallType,
+    DrawCallTracker,
+};

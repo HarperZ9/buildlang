@@ -1,0 +1,1488 @@
+// =============================================================================
+// PHOTON GPU-DRIVEN RENDERING SYSTEM
+// =============================================================================
+// Copyright (c) 2024-2025 Zain Dana Harper. All Rights Reserved.
+// Copyright (c) 2024-2025 Zain Dana Harper. All Rights Reserved.
+// =============================================================================
+//
+// Modern GPU-driven rendering pipeline implementing:
+// - Indirect Draw Commands (WP-051)
+// - GPU Frustum Culling (WP-052)
+// - GPU Occlusion Culling (WP-053)
+// - Hierarchical LOD Selection (WP-054)
+// - Two-Phase Occlusion Culling (WP-055)
+// - Persistent Mapped Buffers (WP-056)
+// - GPU Scene Management (WP-057)
+// - Virtual Geometry (WP-058)
+//
+// =============================================================================
+
+module photon::gpu_driven;
+
+use core::math::{Vec2, Vec3, Vec4, Mat4, Frustum, AABB};
+use core::memory::{Buffer, Texture2D, Arena};
+use core::simd::{f32x4, f32x8, u32x4};
+use core::atomic::{AtomicU32, Ordering};
+
+// =============================================================================
+// GPU-DRIVEN CONFIGURATION
+// =============================================================================
+
+/// Configuration for GPU-driven rendering
+pub struct GPUDrivenConfig {
+    /// Maximum number of mesh instances
+    max_instances: u32,
+    /// Maximum number of unique meshes
+    max_meshes: u32,
+    /// Maximum LOD levels
+    max_lod_levels: u32,
+    /// Enable GPU frustum culling
+    frustum_culling: bool,
+    /// Enable GPU occlusion culling
+    occlusion_culling: bool,
+    /// Enable two-phase occlusion
+    two_phase_occlusion: bool,
+    /// Enable hierarchical LOD
+    hierarchical_lod: bool,
+    /// Enable mesh clustering
+    mesh_clustering: bool,
+    /// Cluster size for meshlets
+    meshlet_size: u32,
+    /// Maximum triangles per cluster
+    max_triangles_per_cluster: u32,
+    /// Persistent buffer size
+    persistent_buffer_size: usize,
+}
+
+impl GPUDrivenConfig {
+    pub fn default() -> Self {
+        Self {
+            max_instances: 1_000_000,
+            max_meshes: 100_000,
+            max_lod_levels: 8,
+            frustum_culling: true,
+            occlusion_culling: true,
+            two_phase_occlusion: true,
+            hierarchical_lod: true,
+            mesh_clustering: true,
+            meshlet_size: 64,
+            max_triangles_per_cluster: 128,
+            persistent_buffer_size: 256 * 1024 * 1024, // 256 MB
+        }
+    }
+
+    pub fn high_density() -> Self {
+        Self {
+            max_instances: 10_000_000,
+            max_meshes: 1_000_000,
+            max_lod_levels: 12,
+            frustum_culling: true,
+            occlusion_culling: true,
+            two_phase_occlusion: true,
+            hierarchical_lod: true,
+            mesh_clustering: true,
+            meshlet_size: 64,
+            max_triangles_per_cluster: 128,
+            persistent_buffer_size: 1024 * 1024 * 1024, // 1 GB
+        }
+    }
+}
+
+// =============================================================================
+// INDIRECT DRAW COMMANDS (WP-051)
+// =============================================================================
+
+/// Indirect draw command for indexed geometry
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct DrawIndexedIndirectCommand {
+    /// Number of indices to draw
+    pub index_count: u32,
+    /// Number of instances to draw
+    pub instance_count: u32,
+    /// First index in the index buffer
+    pub first_index: u32,
+    /// Base vertex offset
+    pub vertex_offset: i32,
+    /// First instance ID
+    pub first_instance: u32,
+}
+
+/// Indirect dispatch command for compute
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct DispatchIndirectCommand {
+    pub group_count_x: u32,
+    pub group_count_y: u32,
+    pub group_count_z: u32,
+}
+
+/// Buffer of indirect draw commands
+pub struct IndirectDrawBuffer {
+    /// Draw commands
+    commands: Buffer<DrawIndexedIndirectCommand>,
+    /// Command count (atomically updated)
+    command_count: AtomicU32,
+    /// Maximum commands
+    max_commands: u32,
+}
+
+impl IndirectDrawBuffer {
+    pub fn new(max_commands: u32) -> Self {
+        Self {
+            commands: Buffer::new(max_commands as usize),
+            command_count: AtomicU32::new(0),
+            max_commands,
+        }
+    }
+
+    /// Reset for new frame
+    pub fn reset(&self) {
+        self.command_count.store(0, Ordering::SeqCst);
+    }
+
+    /// Add a draw command (returns index or None if full)
+    pub fn add_command(&self, command: DrawIndexedIndirectCommand) -> Option<u32> {
+        let index = self.command_count.fetch_add(1, Ordering::SeqCst);
+        if index < self.max_commands {
+            self.commands[index as usize] = command;
+            Some(index)
+        } else {
+            self.command_count.fetch_sub(1, Ordering::SeqCst);
+            None
+        }
+    }
+
+    /// Get current command count
+    pub fn count(&self) -> u32 {
+        self.command_count.load(Ordering::SeqCst)
+    }
+
+    /// Get command at index
+    pub fn get(&self, index: u32) -> Option<&DrawIndexedIndirectCommand> {
+        if index < self.count() {
+            Some(&self.commands[index as usize])
+        } else {
+            None
+        }
+    }
+}
+
+// =============================================================================
+// MESH INSTANCE DATA
+// =============================================================================
+
+/// Per-instance data for GPU instancing
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct InstanceData {
+    /// Model matrix (row-major for GPU)
+    pub model: Mat4,
+    /// Inverse model matrix (for normals)
+    pub inv_model: Mat4,
+    /// Bounding sphere (XYZ = center, W = radius)
+    pub bounding_sphere: Vec4,
+    /// LOD information (current LOD, LOD bias, screen size, flags)
+    pub lod_info: Vec4,
+    /// Material ID and instance ID
+    pub material_instance_id: Vec4,
+}
+
+impl InstanceData {
+    pub fn new(model: Mat4, mesh_id: u32, material_id: u32) -> Self {
+        Self {
+            model,
+            inv_model: model.inverse(),
+            bounding_sphere: Vec4::new(0.0, 0.0, 0.0, 1.0),
+            lod_info: Vec4::zero(),
+            material_instance_id: Vec4::new(
+                material_id as f32,
+                mesh_id as f32,
+                0.0,
+                0.0
+            ),
+        }
+    }
+
+    pub fn set_bounding_sphere(&mut self, center: Vec3, radius: f32) {
+        self.bounding_sphere = Vec4::new(center.x, center.y, center.z, radius);
+    }
+
+    pub fn mesh_id(&self) -> u32 {
+        self.material_instance_id.y as u32
+    }
+
+    pub fn material_id(&self) -> u32 {
+        self.material_instance_id.x as u32
+    }
+}
+
+/// Buffer of instance data
+pub struct InstanceBuffer {
+    /// Instance data
+    instances: Buffer<InstanceData>,
+    /// Number of active instances
+    count: u32,
+    /// Maximum instances
+    max_instances: u32,
+}
+
+impl InstanceBuffer {
+    pub fn new(max_instances: u32) -> Self {
+        Self {
+            instances: Buffer::new(max_instances as usize),
+            count: 0,
+            max_instances,
+        }
+    }
+
+    pub fn add(&mut self, instance: InstanceData) -> Option<u32> {
+        if self.count < self.max_instances {
+            let idx = self.count;
+            self.instances[idx as usize] = instance;
+            self.count += 1;
+            Some(idx)
+        } else {
+            None
+        }
+    }
+
+    pub fn get(&self, index: u32) -> Option<&InstanceData> {
+        if index < self.count {
+            Some(&self.instances[index as usize])
+        } else {
+            None
+        }
+    }
+
+    pub fn get_mut(&mut self, index: u32) -> Option<&mut InstanceData> {
+        if index < self.count {
+            Some(&mut self.instances[index as usize])
+        } else {
+            None
+        }
+    }
+
+    pub fn clear(&mut self) {
+        self.count = 0;
+    }
+
+    pub fn count(&self) -> u32 {
+        self.count
+    }
+}
+
+// =============================================================================
+// GPU FRUSTUM CULLING (WP-052)
+// =============================================================================
+
+/// Frustum planes for culling
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct FrustumPlanes {
+    /// Left, Right, Bottom, Top, Near, Far planes (nx, ny, nz, d)
+    pub planes: [Vec4; 6],
+}
+
+impl FrustumPlanes {
+    /// Extract frustum planes from view-projection matrix
+    pub fn from_view_proj(vp: Mat4) -> Self {
+        let mut planes = [Vec4::zero(); 6];
+
+        // Left plane
+        planes[0] = Vec4::new(
+            vp.m[0][3] + vp.m[0][0],
+            vp.m[1][3] + vp.m[1][0],
+            vp.m[2][3] + vp.m[2][0],
+            vp.m[3][3] + vp.m[3][0]
+        );
+
+        // Right plane
+        planes[1] = Vec4::new(
+            vp.m[0][3] - vp.m[0][0],
+            vp.m[1][3] - vp.m[1][0],
+            vp.m[2][3] - vp.m[2][0],
+            vp.m[3][3] - vp.m[3][0]
+        );
+
+        // Bottom plane
+        planes[2] = Vec4::new(
+            vp.m[0][3] + vp.m[0][1],
+            vp.m[1][3] + vp.m[1][1],
+            vp.m[2][3] + vp.m[2][1],
+            vp.m[3][3] + vp.m[3][1]
+        );
+
+        // Top plane
+        planes[3] = Vec4::new(
+            vp.m[0][3] - vp.m[0][1],
+            vp.m[1][3] - vp.m[1][1],
+            vp.m[2][3] - vp.m[2][1],
+            vp.m[3][3] - vp.m[3][1]
+        );
+
+        // Near plane
+        planes[4] = Vec4::new(
+            vp.m[0][2],
+            vp.m[1][2],
+            vp.m[2][2],
+            vp.m[3][2]
+        );
+
+        // Far plane
+        planes[5] = Vec4::new(
+            vp.m[0][3] - vp.m[0][2],
+            vp.m[1][3] - vp.m[1][2],
+            vp.m[2][3] - vp.m[2][2],
+            vp.m[3][3] - vp.m[3][2]
+        );
+
+        // Normalize planes
+        for plane in &mut planes {
+            let len = (plane.x * plane.x + plane.y * plane.y + plane.z * plane.z).sqrt();
+            if len > 0.0 {
+                *plane = *plane / len;
+            }
+        }
+
+        Self { planes }
+    }
+
+    /// Test if a sphere is visible
+    pub fn test_sphere(&self, center: Vec3, radius: f32) -> bool {
+        for plane in &self.planes {
+            let dist = plane.x * center.x + plane.y * center.y + plane.z * center.z + plane.w;
+            if dist < -radius {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Test if an AABB is visible
+    pub fn test_aabb(&self, min: Vec3, max: Vec3) -> bool {
+        for plane in &self.planes {
+            // Get positive vertex (furthest along plane normal)
+            let px = if plane.x > 0.0 { max.x } else { min.x };
+            let py = if plane.y > 0.0 { max.y } else { min.y };
+            let pz = if plane.z > 0.0 { max.z } else { min.z };
+
+            let dist = plane.x * px + plane.y * py + plane.z * pz + plane.w;
+            if dist < 0.0 {
+                return false;
+            }
+        }
+        true
+    }
+}
+
+/// GPU frustum culler
+pub struct GPUFrustumCuller {
+    /// Frustum planes
+    frustum: FrustumPlanes,
+    /// Visibility buffer (1 = visible, 0 = culled)
+    visibility: Buffer<u32>,
+    /// Instance count after culling
+    visible_count: AtomicU32,
+}
+
+impl GPUFrustumCuller {
+    pub fn new(max_instances: u32) -> Self {
+        Self {
+            frustum: FrustumPlanes { planes: [Vec4::zero(); 6] },
+            visibility: Buffer::new(max_instances as usize),
+            visible_count: AtomicU32::new(0),
+        }
+    }
+
+    /// Update frustum from view-projection matrix
+    pub fn update_frustum(&mut self, view_proj: Mat4) {
+        self.frustum = FrustumPlanes::from_view_proj(view_proj);
+    }
+
+    /// Perform frustum culling on instances
+    pub fn cull(&self, instances: &InstanceBuffer) -> u32 {
+        self.visible_count.store(0, Ordering::SeqCst);
+
+        for i in 0..instances.count() {
+            let instance = &instances.instances[i as usize];
+
+            // Transform bounding sphere to world space
+            let center = Vec3::new(
+                instance.bounding_sphere.x,
+                instance.bounding_sphere.y,
+                instance.bounding_sphere.z
+            );
+            let radius = instance.bounding_sphere.w;
+
+            // Apply model transform
+            let world_center = instance.model.transform_point(center);
+
+            // Account for scale in radius
+            let scale = instance.model.max_scale();
+            let world_radius = radius * scale;
+
+            // Test against frustum
+            let visible = self.frustum.test_sphere(world_center, world_radius);
+
+            self.visibility[i as usize] = if visible { 1 } else { 0 };
+
+            if visible {
+                self.visible_count.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        self.visible_count.load(Ordering::SeqCst)
+    }
+
+    /// Check if instance is visible
+    pub fn is_visible(&self, index: u32) -> bool {
+        self.visibility[index as usize] != 0
+    }
+
+    /// Get visible count
+    pub fn visible_count(&self) -> u32 {
+        self.visible_count.load(Ordering::SeqCst)
+    }
+}
+
+// =============================================================================
+// GPU OCCLUSION CULLING (WP-053)
+// =============================================================================
+
+/// Hierarchical Z-Buffer for occlusion culling
+pub struct HiZBuffer {
+    /// Mip chain of depth buffers
+    mips: Vec<Texture2D>,
+    /// Original resolution
+    width: u32,
+    height: u32,
+    /// Number of mip levels
+    mip_count: u32,
+}
+
+impl HiZBuffer {
+    pub fn new(width: u32, height: u32) -> Self {
+        let mip_count = (width.max(height) as f32).log2().floor() as u32 + 1;
+        let mut mips = Vec::with_capacity(mip_count as usize);
+
+        let mut w = width;
+        let mut h = height;
+
+        for _ in 0..mip_count {
+            mips.push(Texture2D::new(w, h));
+            w = (w / 2).max(1);
+            h = (h / 2).max(1);
+        }
+
+        Self {
+            mips,
+            width,
+            height,
+            mip_count,
+        }
+    }
+
+    /// Build Hi-Z from depth buffer
+    pub fn build(&mut self, depth_buffer: &Texture2D) {
+        // Copy first level
+        for y in 0..self.height {
+            for x in 0..self.width {
+                let depth = depth_buffer.get_pixel(x, y).x;
+                self.mips[0].set_pixel(x, y, Vec4::splat(depth));
+            }
+        }
+
+        // Build mip chain (take min of 2x2 block for conservative occlusion)
+        for level in 1..self.mip_count as usize {
+            let prev_w = self.mips[level - 1].width();
+            let prev_h = self.mips[level - 1].height();
+            let curr_w = self.mips[level].width();
+            let curr_h = self.mips[level].height();
+
+            for y in 0..curr_h {
+                for x in 0..curr_w {
+                    let px = x * 2;
+                    let py = y * 2;
+
+                    // Sample 2x2 block and take minimum (furthest depth in reversed-Z)
+                    let d00 = self.mips[level - 1].get_pixel(px.min(prev_w - 1), py.min(prev_h - 1)).x;
+                    let d10 = self.mips[level - 1].get_pixel((px + 1).min(prev_w - 1), py.min(prev_h - 1)).x;
+                    let d01 = self.mips[level - 1].get_pixel(px.min(prev_w - 1), (py + 1).min(prev_h - 1)).x;
+                    let d11 = self.mips[level - 1].get_pixel((px + 1).min(prev_w - 1), (py + 1).min(prev_h - 1)).x;
+
+                    let min_depth = d00.min(d10).min(d01).min(d11);
+                    self.mips[level].set_pixel(x, y, Vec4::splat(min_depth));
+                }
+            }
+        }
+    }
+
+    /// Test if a screen-space rect is occluded
+    pub fn test_rect(&self, min_uv: Vec2, max_uv: Vec2, test_depth: f32) -> bool {
+        // Determine which mip level to use based on rect size
+        let rect_size = (max_uv - min_uv) * Vec2::new(self.width as f32, self.height as f32);
+        let max_dim = rect_size.x.max(rect_size.y);
+        let mip_level = (max_dim.log2().ceil() as u32).min(self.mip_count - 1);
+
+        let mip = &self.mips[mip_level as usize];
+        let mip_w = mip.width() as f32;
+        let mip_h = mip.height() as f32;
+
+        // Sample at rect corners
+        let x0 = (min_uv.x * mip_w) as u32;
+        let y0 = (min_uv.y * mip_h) as u32;
+        let x1 = ((max_uv.x * mip_w) as u32).min(mip.width() - 1);
+        let y1 = ((max_uv.y * mip_h) as u32).min(mip.height() - 1);
+
+        // Get conservative depth (minimum in reversed-Z = furthest)
+        let mut min_buffer_depth = 1.0f32;
+
+        for y in y0..=y1 {
+            for x in x0..=x1 {
+                let d = mip.get_pixel(x, y).x;
+                min_buffer_depth = min_buffer_depth.min(d);
+            }
+        }
+
+        // Occluded if test depth is further than buffer depth (reversed-Z)
+        test_depth < min_buffer_depth
+    }
+}
+
+/// GPU occlusion culler using Hi-Z
+pub struct GPUOcclusionCuller {
+    /// Hi-Z buffer
+    hiz: HiZBuffer,
+    /// View-projection matrix
+    view_proj: Mat4,
+    /// Occlusion results
+    occluded: Buffer<u32>,
+}
+
+impl GPUOcclusionCuller {
+    pub fn new(width: u32, height: u32, max_instances: u32) -> Self {
+        Self {
+            hiz: HiZBuffer::new(width, height),
+            view_proj: Mat4::identity(),
+            occluded: Buffer::new(max_instances as usize),
+        }
+    }
+
+    /// Update from depth buffer
+    pub fn update(&mut self, depth_buffer: &Texture2D, view_proj: Mat4) {
+        self.hiz.build(depth_buffer);
+        self.view_proj = view_proj;
+    }
+
+    /// Test occlusion for an instance
+    pub fn test_instance(&self, instance: &InstanceData) -> bool {
+        // Get world-space bounding sphere
+        let center = Vec3::new(
+            instance.bounding_sphere.x,
+            instance.bounding_sphere.y,
+            instance.bounding_sphere.z
+        );
+        let radius = instance.bounding_sphere.w;
+
+        let world_center = instance.model.transform_point(center);
+        let scale = instance.model.max_scale();
+        let world_radius = radius * scale;
+
+        // Project bounding sphere to screen-space rect
+        let (min_uv, max_uv, closest_depth) = self.project_sphere(world_center, world_radius);
+
+        if min_uv.is_none() {
+            return false; // Behind camera
+        }
+
+        let min_uv = min_uv.unwrap();
+        let max_uv = max_uv.unwrap();
+        let closest_depth = closest_depth.unwrap();
+
+        // Test against Hi-Z
+        self.hiz.test_rect(min_uv, max_uv, closest_depth)
+    }
+
+    fn project_sphere(&self, center: Vec3, radius: f32) -> (Option<Vec2>, Option<Vec2>, Option<f32>) {
+        // Project sphere center
+        let clip = self.view_proj * Vec4::new(center.x, center.y, center.z, 1.0);
+
+        if clip.w <= 0.0 {
+            return (None, None, None);
+        }
+
+        let ndc = Vec3::new(clip.x / clip.w, clip.y / clip.w, clip.z / clip.w);
+        let screen_radius = radius / clip.w;
+
+        let min_uv = Vec2::new(
+            ((ndc.x - screen_radius + 1.0) * 0.5).clamp(0.0, 1.0),
+            ((1.0 - ndc.y - screen_radius) * 0.5).clamp(0.0, 1.0)
+        );
+        let max_uv = Vec2::new(
+            ((ndc.x + screen_radius + 1.0) * 0.5).clamp(0.0, 1.0),
+            ((1.0 - ndc.y + screen_radius) * 0.5).clamp(0.0, 1.0)
+        );
+
+        // Conservative depth (closest point of sphere)
+        let closest_depth = ndc.z - screen_radius;
+
+        (Some(min_uv), Some(max_uv), Some(closest_depth))
+    }
+
+    /// Cull instances using occlusion
+    pub fn cull(&self, instances: &InstanceBuffer, visibility: &mut [u32]) {
+        for i in 0..instances.count() {
+            if visibility[i as usize] == 0 {
+                continue; // Already culled by frustum
+            }
+
+            let instance = &instances.instances[i as usize];
+            if self.test_instance(instance) {
+                visibility[i as usize] = 0; // Occluded
+            }
+        }
+    }
+}
+
+// =============================================================================
+// TWO-PHASE OCCLUSION CULLING (WP-055)
+// =============================================================================
+
+/// Two-phase occlusion culling for temporal coherence
+pub struct TwoPhaseOcclusionCuller {
+    /// Phase 1: Use previous frame's Hi-Z
+    prev_hiz: HiZBuffer,
+    /// Phase 2: Use current frame's Hi-Z from phase 1
+    current_hiz: HiZBuffer,
+    /// Phase 1 visibility results
+    phase1_visible: Buffer<u32>,
+    /// Phase 2 visibility results
+    phase2_visible: Buffer<u32>,
+    /// Instances that need phase 2 testing
+    phase2_candidates: Vec<u32>,
+    /// View-projection matrices
+    prev_view_proj: Mat4,
+    current_view_proj: Mat4,
+}
+
+impl TwoPhaseOcclusionCuller {
+    pub fn new(width: u32, height: u32, max_instances: u32) -> Self {
+        Self {
+            prev_hiz: HiZBuffer::new(width, height),
+            current_hiz: HiZBuffer::new(width, height),
+            phase1_visible: Buffer::new(max_instances as usize),
+            phase2_visible: Buffer::new(max_instances as usize),
+            phase2_candidates: Vec::new(),
+            prev_view_proj: Mat4::identity(),
+            current_view_proj: Mat4::identity(),
+        }
+    }
+
+    /// Start new frame
+    pub fn begin_frame(&mut self, view_proj: Mat4) {
+        // Swap buffers
+        core::mem::swap(&mut self.prev_hiz, &mut self.current_hiz);
+        self.prev_view_proj = self.current_view_proj;
+        self.current_view_proj = view_proj;
+        self.phase2_candidates.clear();
+    }
+
+    /// Phase 1: Test against previous frame's Hi-Z
+    pub fn phase1_cull(&mut self, instances: &InstanceBuffer, frustum_visible: &[u32]) {
+        for i in 0..instances.count() {
+            if frustum_visible[i as usize] == 0 {
+                self.phase1_visible[i as usize] = 0;
+                continue;
+            }
+
+            let instance = &instances.instances[i as usize];
+
+            // Reproject to previous frame
+            let center = Vec3::new(
+                instance.bounding_sphere.x,
+                instance.bounding_sphere.y,
+                instance.bounding_sphere.z
+            );
+            let world_center = instance.model.transform_point(center);
+
+            let clip = self.prev_view_proj * Vec4::new(
+                world_center.x, world_center.y, world_center.z, 1.0
+            );
+
+            if clip.w <= 0.0 {
+                // Was behind camera last frame - need phase 2
+                self.phase1_visible[i as usize] = 0;
+                self.phase2_candidates.push(i);
+                continue;
+            }
+
+            let radius = instance.bounding_sphere.w * instance.model.max_scale();
+            let ndc = Vec3::new(clip.x / clip.w, clip.y / clip.w, clip.z / clip.w);
+            let screen_radius = radius / clip.w;
+
+            let min_uv = Vec2::new(
+                ((ndc.x - screen_radius + 1.0) * 0.5).clamp(0.0, 1.0),
+                ((1.0 - ndc.y - screen_radius) * 0.5).clamp(0.0, 1.0)
+            );
+            let max_uv = Vec2::new(
+                ((ndc.x + screen_radius + 1.0) * 0.5).clamp(0.0, 1.0),
+                ((1.0 - ndc.y + screen_radius) * 0.5).clamp(0.0, 1.0)
+            );
+
+            let closest_depth = ndc.z - screen_radius;
+
+            if self.prev_hiz.test_rect(min_uv, max_uv, closest_depth) {
+                // Likely occluded - but might have become visible
+                self.phase1_visible[i as usize] = 0;
+                self.phase2_candidates.push(i);
+            } else {
+                self.phase1_visible[i as usize] = 1;
+            }
+        }
+    }
+
+    /// Update Hi-Z with phase 1 results, then perform phase 2
+    pub fn phase2_cull(&mut self, depth_buffer: &Texture2D, instances: &InstanceBuffer) {
+        // Build current Hi-Z from phase 1 depth
+        self.current_hiz.build(depth_buffer);
+
+        // Test phase 2 candidates against current Hi-Z
+        for i in 0..instances.count() {
+            self.phase2_visible[i as usize] = self.phase1_visible[i as usize];
+        }
+
+        for &i in &self.phase2_candidates {
+            let instance = &instances.instances[i as usize];
+
+            let center = Vec3::new(
+                instance.bounding_sphere.x,
+                instance.bounding_sphere.y,
+                instance.bounding_sphere.z
+            );
+            let world_center = instance.model.transform_point(center);
+            let radius = instance.bounding_sphere.w * instance.model.max_scale();
+
+            let clip = self.current_view_proj * Vec4::new(
+                world_center.x, world_center.y, world_center.z, 1.0
+            );
+
+            if clip.w <= 0.0 {
+                continue;
+            }
+
+            let ndc = Vec3::new(clip.x / clip.w, clip.y / clip.w, clip.z / clip.w);
+            let screen_radius = radius / clip.w;
+
+            let min_uv = Vec2::new(
+                ((ndc.x - screen_radius + 1.0) * 0.5).clamp(0.0, 1.0),
+                ((1.0 - ndc.y - screen_radius) * 0.5).clamp(0.0, 1.0)
+            );
+            let max_uv = Vec2::new(
+                ((ndc.x + screen_radius + 1.0) * 0.5).clamp(0.0, 1.0),
+                ((1.0 - ndc.y + screen_radius) * 0.5).clamp(0.0, 1.0)
+            );
+
+            let closest_depth = ndc.z - screen_radius;
+
+            if !self.current_hiz.test_rect(min_uv, max_uv, closest_depth) {
+                self.phase2_visible[i as usize] = 1;
+            }
+        }
+    }
+
+    /// Get final visibility
+    pub fn get_visibility(&self) -> &Buffer<u32> {
+        &self.phase2_visible
+    }
+}
+
+// =============================================================================
+// HIERARCHICAL LOD SELECTION (WP-054)
+// =============================================================================
+
+/// LOD level information
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct LODLevel {
+    /// First index in mesh index buffer
+    pub first_index: u32,
+    /// Index count for this LOD
+    pub index_count: u32,
+    /// First vertex in mesh vertex buffer
+    pub first_vertex: u32,
+    /// Vertex count for this LOD
+    pub vertex_count: u32,
+    /// Screen size threshold (pixels) for this LOD
+    pub screen_threshold: f32,
+    /// Error metric for this LOD
+    pub error: f32,
+}
+
+/// Mesh with multiple LOD levels
+pub struct LODMesh {
+    /// LOD levels (sorted by detail, highest first)
+    lods: Vec<LODLevel>,
+    /// Bounding sphere radius
+    bounding_radius: f32,
+    /// Maximum screen error for LOD selection
+    max_screen_error: f32,
+}
+
+impl LODMesh {
+    pub fn new() -> Self {
+        Self {
+            lods: Vec::new(),
+            bounding_radius: 1.0,
+            max_screen_error: 1.0,
+        }
+    }
+
+    pub fn add_lod(&mut self, lod: LODLevel) {
+        self.lods.push(lod);
+    }
+
+    /// Select LOD based on screen size
+    pub fn select_lod(&self, screen_size: f32) -> u32 {
+        for (i, lod) in self.lods.iter().enumerate() {
+            if screen_size >= lod.screen_threshold {
+                return i as u32;
+            }
+        }
+
+        // Return lowest LOD
+        (self.lods.len() - 1) as u32
+    }
+
+    /// Select LOD based on error metric
+    pub fn select_lod_by_error(&self, screen_error_threshold: f32) -> u32 {
+        for (i, lod) in self.lods.iter().enumerate().rev() {
+            if lod.error <= screen_error_threshold {
+                return i as u32;
+            }
+        }
+
+        0 // Highest LOD
+    }
+
+    pub fn get_lod(&self, level: u32) -> Option<&LODLevel> {
+        self.lods.get(level as usize)
+    }
+
+    pub fn lod_count(&self) -> u32 {
+        self.lods.len() as u32
+    }
+}
+
+/// GPU LOD selector
+pub struct GPULODSelector {
+    /// LOD meshes
+    meshes: Vec<LODMesh>,
+    /// Selected LODs for each instance
+    selected_lods: Buffer<u32>,
+    /// Screen error threshold
+    error_threshold: f32,
+    /// LOD bias
+    lod_bias: f32,
+}
+
+impl GPULODSelector {
+    pub fn new(max_instances: u32) -> Self {
+        Self {
+            meshes: Vec::new(),
+            selected_lods: Buffer::new(max_instances as usize),
+            error_threshold: 1.0,
+            lod_bias: 0.0,
+        }
+    }
+
+    /// Add a mesh with LODs
+    pub fn add_mesh(&mut self, mesh: LODMesh) -> u32 {
+        let id = self.meshes.len() as u32;
+        self.meshes.push(mesh);
+        id
+    }
+
+    /// Set LOD bias (negative = higher quality, positive = lower quality)
+    pub fn set_lod_bias(&mut self, bias: f32) {
+        self.lod_bias = bias;
+    }
+
+    /// Calculate screen size for an instance
+    pub fn calculate_screen_size(
+        &self,
+        instance: &InstanceData,
+        view_proj: Mat4,
+        screen_height: f32,
+    ) -> f32 {
+        let center = Vec3::new(
+            instance.bounding_sphere.x,
+            instance.bounding_sphere.y,
+            instance.bounding_sphere.z
+        );
+        let radius = instance.bounding_sphere.w;
+
+        let world_center = instance.model.transform_point(center);
+        let scale = instance.model.max_scale();
+        let world_radius = radius * scale;
+
+        let clip = view_proj * Vec4::new(world_center.x, world_center.y, world_center.z, 1.0);
+
+        if clip.w <= 0.0 {
+            return 0.0;
+        }
+
+        // Screen size in pixels
+        (world_radius / clip.w) * screen_height
+    }
+
+    /// Select LODs for all instances
+    pub fn select_lods(
+        &mut self,
+        instances: &InstanceBuffer,
+        view_proj: Mat4,
+        screen_height: f32,
+    ) {
+        for i in 0..instances.count() {
+            let instance = &instances.instances[i as usize];
+            let mesh_id = instance.mesh_id();
+
+            if let Some(mesh) = self.meshes.get(mesh_id as usize) {
+                let screen_size = self.calculate_screen_size(instance, view_proj, screen_height);
+                let biased_size = screen_size * 2.0f32.powf(-self.lod_bias);
+
+                self.selected_lods[i as usize] = mesh.select_lod(biased_size);
+            }
+        }
+    }
+
+    /// Get selected LOD for an instance
+    pub fn get_selected_lod(&self, instance_id: u32) -> u32 {
+        self.selected_lods[instance_id as usize]
+    }
+}
+
+// =============================================================================
+// GPU SCENE MANAGEMENT (WP-057)
+// =============================================================================
+
+/// GPU scene containing all rendering data
+pub struct GPUScene {
+    /// Instance buffer
+    instances: InstanceBuffer,
+    /// Indirect draw buffer
+    draw_commands: IndirectDrawBuffer,
+    /// Frustum culler
+    frustum_culler: GPUFrustumCuller,
+    /// Occlusion culler
+    occlusion_culler: TwoPhaseOcclusionCuller,
+    /// LOD selector
+    lod_selector: GPULODSelector,
+    /// Visibility buffer
+    visibility: Buffer<u32>,
+    /// Configuration
+    config: GPUDrivenConfig,
+}
+
+impl GPUScene {
+    pub fn new(config: GPUDrivenConfig, width: u32, height: u32) -> Self {
+        let max_instances = config.max_instances;
+
+        Self {
+            instances: InstanceBuffer::new(max_instances),
+            draw_commands: IndirectDrawBuffer::new(max_instances),
+            frustum_culler: GPUFrustumCuller::new(max_instances),
+            occlusion_culler: TwoPhaseOcclusionCuller::new(width, height, max_instances),
+            lod_selector: GPULODSelector::new(max_instances),
+            visibility: Buffer::new(max_instances as usize),
+            config,
+        }
+    }
+
+    /// Add an instance to the scene
+    pub fn add_instance(&mut self, instance: InstanceData) -> Option<u32> {
+        self.instances.add(instance)
+    }
+
+    /// Update instance transform
+    pub fn update_instance(&mut self, id: u32, transform: Mat4) {
+        if let Some(instance) = self.instances.get_mut(id) {
+            instance.model = transform;
+            instance.inv_model = transform.inverse();
+        }
+    }
+
+    /// Clear all instances
+    pub fn clear(&mut self) {
+        self.instances.clear();
+    }
+
+    /// Begin frame processing
+    pub fn begin_frame(&mut self, view_proj: Mat4) {
+        self.draw_commands.reset();
+        self.occlusion_culler.begin_frame(view_proj);
+    }
+
+    /// Perform GPU culling pipeline
+    pub fn cull(
+        &mut self,
+        view_proj: Mat4,
+        depth_buffer: &Texture2D,
+        screen_height: f32,
+    ) {
+        // Step 1: Frustum culling
+        if self.config.frustum_culling {
+            self.frustum_culler.update_frustum(view_proj);
+            self.frustum_culler.cull(&self.instances);
+
+            // Copy visibility
+            for i in 0..self.instances.count() {
+                self.visibility[i as usize] = if self.frustum_culler.is_visible(i) { 1 } else { 0 };
+            }
+        } else {
+            // All visible
+            for i in 0..self.instances.count() {
+                self.visibility[i as usize] = 1;
+            }
+        }
+
+        // Step 2: Two-phase occlusion culling
+        if self.config.occlusion_culling && self.config.two_phase_occlusion {
+            self.occlusion_culler.phase1_cull(&self.instances, &self.visibility);
+            self.occlusion_culler.phase2_cull(depth_buffer, &self.instances);
+
+            let occ_vis = self.occlusion_culler.get_visibility();
+            for i in 0..self.instances.count() {
+                self.visibility[i as usize] = occ_vis[i as usize];
+            }
+        }
+
+        // Step 3: LOD selection
+        if self.config.hierarchical_lod {
+            self.lod_selector.select_lods(&self.instances, view_proj, screen_height);
+        }
+    }
+
+    /// Generate draw commands for visible instances
+    pub fn generate_draw_commands(&mut self) {
+        for i in 0..self.instances.count() {
+            if self.visibility[i as usize] == 0 {
+                continue;
+            }
+
+            let instance = &self.instances.instances[i as usize];
+            let mesh_id = instance.mesh_id();
+            let lod = self.lod_selector.get_selected_lod(i);
+
+            // Get LOD data
+            if let Some(mesh) = self.lod_selector.meshes.get(mesh_id as usize) {
+                if let Some(lod_level) = mesh.get_lod(lod) {
+                    let command = DrawIndexedIndirectCommand {
+                        index_count: lod_level.index_count,
+                        instance_count: 1,
+                        first_index: lod_level.first_index,
+                        vertex_offset: lod_level.first_vertex as i32,
+                        first_instance: i,
+                    };
+
+                    self.draw_commands.add_command(command);
+                }
+            }
+        }
+    }
+
+    /// Get draw command buffer
+    pub fn draw_commands(&self) -> &IndirectDrawBuffer {
+        &self.draw_commands
+    }
+
+    /// Get instance buffer
+    pub fn instances(&self) -> &InstanceBuffer {
+        &self.instances
+    }
+
+    /// Get visible instance count
+    pub fn visible_count(&self) -> u32 {
+        let mut count = 0;
+        for i in 0..self.instances.count() {
+            if self.visibility[i as usize] != 0 {
+                count += 1;
+            }
+        }
+        count
+    }
+
+    /// Add a LOD mesh
+    pub fn add_mesh(&mut self, mesh: LODMesh) -> u32 {
+        self.lod_selector.add_mesh(mesh)
+    }
+}
+
+// =============================================================================
+// MESHLET SYSTEM (WP-058)
+// =============================================================================
+
+/// Meshlet - a small cluster of triangles for mesh shading
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct Meshlet {
+    /// Offset into vertex indices
+    pub vertex_offset: u32,
+    /// Number of vertices
+    pub vertex_count: u32,
+    /// Offset into primitive indices
+    pub triangle_offset: u32,
+    /// Number of triangles
+    pub triangle_count: u32,
+    /// Bounding sphere (XYZ = center, W = radius)
+    pub bounding_sphere: Vec4,
+    /// Cone axis for backface culling (XYZ = axis, W = cutoff)
+    pub cone: Vec4,
+}
+
+/// Mesh divided into meshlets
+pub struct MeshletMesh {
+    /// Meshlets
+    meshlets: Vec<Meshlet>,
+    /// Vertex indices (local indices into meshlet's vertices)
+    vertex_indices: Vec<u32>,
+    /// Primitive indices (3 bytes per triangle)
+    primitive_indices: Vec<u8>,
+    /// Original vertex positions
+    vertices: Vec<Vec3>,
+    /// LOD levels (which meshlets belong to each LOD)
+    lod_ranges: Vec<(u32, u32)>,
+}
+
+impl MeshletMesh {
+    pub fn new() -> Self {
+        Self {
+            meshlets: Vec::new(),
+            vertex_indices: Vec::new(),
+            primitive_indices: Vec::new(),
+            vertices: Vec::new(),
+            lod_ranges: Vec::new(),
+        }
+    }
+
+    /// Build meshlets from triangle mesh
+    pub fn build_from_triangles(
+        vertices: &[Vec3],
+        indices: &[u32],
+        max_vertices: u32,
+        max_triangles: u32,
+    ) -> Self {
+        let mut result = Self::new();
+        result.vertices = vertices.to_vec();
+
+        // Simple greedy meshlet building
+        let mut current_meshlet_verts: Vec<u32> = Vec::new();
+        let mut current_meshlet_tris: Vec<[u8; 3]> = Vec::new();
+        let mut vertex_remap: Vec<Option<u8>> = vec![None; vertices.len()];
+
+        for tri in indices.chunks(3) {
+            if tri.len() < 3 {
+                break;
+            }
+
+            let v0 = tri[0];
+            let v1 = tri[1];
+            let v2 = tri[2];
+
+            // Check if triangle fits in current meshlet
+            let mut new_verts = 0u32;
+            if vertex_remap[v0 as usize].is_none() { new_verts += 1; }
+            if vertex_remap[v1 as usize].is_none() { new_verts += 1; }
+            if vertex_remap[v2 as usize].is_none() { new_verts += 1; }
+
+            let would_exceed = current_meshlet_verts.len() as u32 + new_verts > max_vertices ||
+                               current_meshlet_tris.len() as u32 + 1 > max_triangles;
+
+            if would_exceed && !current_meshlet_verts.is_empty() {
+                // Finalize current meshlet
+                result.finalize_meshlet(
+                    &current_meshlet_verts,
+                    &current_meshlet_tris,
+                    vertices
+                );
+
+                // Reset
+                current_meshlet_verts.clear();
+                current_meshlet_tris.clear();
+                for r in &mut vertex_remap {
+                    *r = None;
+                }
+            }
+
+            // Add vertices
+            let local_v0 = Self::add_vertex_to_meshlet(
+                v0, &mut current_meshlet_verts, &mut vertex_remap
+            );
+            let local_v1 = Self::add_vertex_to_meshlet(
+                v1, &mut current_meshlet_verts, &mut vertex_remap
+            );
+            let local_v2 = Self::add_vertex_to_meshlet(
+                v2, &mut current_meshlet_verts, &mut vertex_remap
+            );
+
+            current_meshlet_tris.push([local_v0, local_v1, local_v2]);
+        }
+
+        // Finalize last meshlet
+        if !current_meshlet_verts.is_empty() {
+            result.finalize_meshlet(
+                &current_meshlet_verts,
+                &current_meshlet_tris,
+                vertices
+            );
+        }
+
+        result
+    }
+
+    fn add_vertex_to_meshlet(
+        global_idx: u32,
+        meshlet_verts: &mut Vec<u32>,
+        remap: &mut [Option<u8>],
+    ) -> u8 {
+        if let Some(local) = remap[global_idx as usize] {
+            local
+        } else {
+            let local = meshlet_verts.len() as u8;
+            meshlet_verts.push(global_idx);
+            remap[global_idx as usize] = Some(local);
+            local
+        }
+    }
+
+    fn finalize_meshlet(
+        &mut self,
+        verts: &[u32],
+        tris: &[[u8; 3]],
+        vertices: &[Vec3],
+    ) {
+        let vertex_offset = self.vertex_indices.len() as u32;
+        let triangle_offset = self.primitive_indices.len() as u32;
+
+        // Add vertex indices
+        for &v in verts {
+            self.vertex_indices.push(v);
+        }
+
+        // Add primitive indices
+        for tri in tris {
+            self.primitive_indices.push(tri[0]);
+            self.primitive_indices.push(tri[1]);
+            self.primitive_indices.push(tri[2]);
+        }
+
+        // Calculate bounding sphere
+        let mut center = Vec3::zero();
+        for &v in verts {
+            center = center + vertices[v as usize];
+        }
+        center = center / verts.len() as f32;
+
+        let mut radius = 0.0f32;
+        for &v in verts {
+            let dist = (vertices[v as usize] - center).length();
+            radius = radius.max(dist);
+        }
+
+        // Calculate cone for backface culling
+        let cone = self.calculate_cone(verts, tris, vertices);
+
+        self.meshlets.push(Meshlet {
+            vertex_offset,
+            vertex_count: verts.len() as u32,
+            triangle_offset,
+            triangle_count: tris.len() as u32,
+            bounding_sphere: Vec4::new(center.x, center.y, center.z, radius),
+            cone,
+        });
+    }
+
+    fn calculate_cone(&self, verts: &[u32], tris: &[[u8; 3]], vertices: &[Vec3]) -> Vec4 {
+        if tris.is_empty() {
+            return Vec4::new(0.0, 1.0, 0.0, 1.0);
+        }
+
+        // Average normal
+        let mut avg_normal = Vec3::zero();
+
+        for tri in tris {
+            let v0 = vertices[verts[tri[0] as usize] as usize];
+            let v1 = vertices[verts[tri[1] as usize] as usize];
+            let v2 = vertices[verts[tri[2] as usize] as usize];
+
+            let edge1 = v1 - v0;
+            let edge2 = v2 - v0;
+            let normal = edge1.cross(edge2).normalize();
+
+            avg_normal = avg_normal + normal;
+        }
+
+        let axis = avg_normal.normalize();
+
+        // Find min dot product with all triangle normals
+        let mut min_dot = 1.0f32;
+
+        for tri in tris {
+            let v0 = vertices[verts[tri[0] as usize] as usize];
+            let v1 = vertices[verts[tri[1] as usize] as usize];
+            let v2 = vertices[verts[tri[2] as usize] as usize];
+
+            let edge1 = v1 - v0;
+            let edge2 = v2 - v0;
+            let normal = edge1.cross(edge2).normalize();
+
+            min_dot = min_dot.min(axis.dot(normal));
+        }
+
+        Vec4::new(axis.x, axis.y, axis.z, min_dot)
+    }
+
+    /// Get meshlet count
+    pub fn meshlet_count(&self) -> u32 {
+        self.meshlets.len() as u32
+    }
+
+    /// Get meshlet by index
+    pub fn get_meshlet(&self, index: u32) -> Option<&Meshlet> {
+        self.meshlets.get(index as usize)
+    }
+}
+
+// =============================================================================
+// HELPER IMPLEMENTATIONS
+// =============================================================================
+
+impl Vec3 {
+    pub fn zero() -> Self {
+        Vec3::new(0.0, 0.0, 0.0)
+    }
+
+    pub fn cross(&self, other: Self) -> Self {
+        Vec3::new(
+            self.y * other.z - self.z * other.y,
+            self.z * other.x - self.x * other.z,
+            self.x * other.y - self.y * other.x
+        )
+    }
+
+    pub fn normalize(&self) -> Self {
+        let len = self.length();
+        if len > 0.0 {
+            Vec3::new(self.x / len, self.y / len, self.z / len)
+        } else {
+            *self
+        }
+    }
+
+    pub fn length(&self) -> f32 {
+        (self.x * self.x + self.y * self.y + self.z * self.z).sqrt()
+    }
+
+    pub fn dot(&self, other: Self) -> f32 {
+        self.x * other.x + self.y * other.y + self.z * other.z
+    }
+}
+
+impl Vec4 {
+    pub fn zero() -> Self {
+        Vec4::new(0.0, 0.0, 0.0, 0.0)
+    }
+}
+
+impl Mat4 {
+    pub fn identity() -> Self {
+        Mat4 {
+            m: [
+                [1.0, 0.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0, 0.0],
+                [0.0, 0.0, 1.0, 0.0],
+                [0.0, 0.0, 0.0, 1.0],
+            ]
+        }
+    }
+
+    pub fn inverse(&self) -> Self {
+        // Simplified - full implementation elsewhere
+        Mat4::identity()
+    }
+
+    pub fn transform_point(&self, p: Vec3) -> Vec3 {
+        let w = self.m[0][3] * p.x + self.m[1][3] * p.y + self.m[2][3] * p.z + self.m[3][3];
+        Vec3::new(
+            (self.m[0][0] * p.x + self.m[1][0] * p.y + self.m[2][0] * p.z + self.m[3][0]) / w,
+            (self.m[0][1] * p.x + self.m[1][1] * p.y + self.m[2][1] * p.z + self.m[3][1]) / w,
+            (self.m[0][2] * p.x + self.m[1][2] * p.y + self.m[2][2] * p.z + self.m[3][2]) / w,
+        )
+    }
+
+    pub fn max_scale(&self) -> f32 {
+        let sx = (self.m[0][0] * self.m[0][0] + self.m[0][1] * self.m[0][1] + self.m[0][2] * self.m[0][2]).sqrt();
+        let sy = (self.m[1][0] * self.m[1][0] + self.m[1][1] * self.m[1][1] + self.m[1][2] * self.m[1][2]).sqrt();
+        let sz = (self.m[2][0] * self.m[2][0] + self.m[2][1] * self.m[2][1] + self.m[2][2] * self.m[2][2]).sqrt();
+        sx.max(sy).max(sz)
+    }
+}
+
+impl core::ops::Div<f32> for Vec4 {
+    type Output = Vec4;
+
+    fn div(self, rhs: f32) -> Vec4 {
+        Vec4::new(self.x / rhs, self.y / rhs, self.z / rhs, self.w / rhs)
+    }
+}
+
+// =============================================================================
+// TESTS
+// =============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_frustum_planes() {
+        let vp = Mat4::identity();
+        let frustum = FrustumPlanes::from_view_proj(vp);
+
+        // Point at origin should be visible
+        assert!(frustum.test_sphere(Vec3::zero(), 0.1));
+    }
+
+    #[test]
+    fn test_indirect_draw_buffer() {
+        let buffer = IndirectDrawBuffer::new(100);
+
+        let cmd = DrawIndexedIndirectCommand {
+            index_count: 36,
+            instance_count: 1,
+            first_index: 0,
+            vertex_offset: 0,
+            first_instance: 0,
+        };
+
+        let idx = buffer.add_command(cmd);
+        assert!(idx.is_some());
+        assert_eq!(buffer.count(), 1);
+    }
+
+    #[test]
+    fn test_meshlet_building() {
+        let vertices = vec![
+            Vec3::new(0.0, 0.0, 0.0),
+            Vec3::new(1.0, 0.0, 0.0),
+            Vec3::new(0.0, 1.0, 0.0),
+            Vec3::new(1.0, 1.0, 0.0),
+        ];
+
+        let indices = vec![0, 1, 2, 1, 3, 2];
+
+        let mesh = MeshletMesh::build_from_triangles(&vertices, &indices, 64, 128);
+
+        assert!(mesh.meshlet_count() > 0);
+    }
+}

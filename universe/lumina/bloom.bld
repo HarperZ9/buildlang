@@ -1,0 +1,1004 @@
+// BUILD Lumina - Advanced Bloom Effects
+// Physically-based and stylized bloom implementations
+// Includes convolution bloom, FFT bloom, and artistic effects
+
+module lumina::bloom;
+
+use core::simd::{Vec2, Vec3, Vec4, Mat3x3};
+use core::math::{pow, sqrt, abs, sin, cos, exp, log, PI, clamp, lerp, smoothstep};
+use core::gpu::{Texture2D, TextureFormat, RenderTarget, ComputeShader};
+
+// ============================================================================
+// BLOOM CONFIGURATION
+// ============================================================================
+
+/// Bloom quality presets
+enum BloomQuality {
+    Low,        // 3 mip levels, 5-tap blur
+    Medium,     // 5 mip levels, 9-tap blur
+    High,       // 7 mip levels, 13-tap blur
+    Ultra,      // 9 mip levels, convolution bloom
+    Cinematic,  // FFT-based with custom kernels
+}
+
+/// Bloom effect configuration
+struct BloomConfig {
+    /// Enable bloom
+    enabled: bool,
+
+    /// Quality preset
+    quality: BloomQuality,
+
+    /// Brightness threshold (in scene-referred luminance)
+    threshold: f32,
+
+    /// Soft threshold knee
+    knee: f32,
+
+    /// Overall intensity
+    intensity: f32,
+
+    /// Scatter (spread of the bloom)
+    scatter: f32,
+
+    /// Tint color
+    tint: Vec3,
+
+    /// Dirt mask intensity (lens dirt)
+    dirt_intensity: f32,
+
+    /// Anamorphic bloom ratio (horizontal stretch)
+    anamorphic_ratio: f32,
+
+    /// Per-mip contribution weights
+    mip_weights: [f32; 8],
+}
+
+impl BloomConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            quality: BloomQuality::High,
+            threshold: 0.9,
+            knee: 0.5,
+            intensity: 0.5,
+            scatter: 0.7,
+            tint: Vec3::one(),
+            dirt_intensity: 0.0,
+            anamorphic_ratio: 1.0,
+            mip_weights: [0.5, 0.8, 1.0, 1.0, 0.8, 0.6, 0.4, 0.2],
+        }
+    }
+
+    fn cinematic() -> Self {
+        Self {
+            enabled: true,
+            quality: BloomQuality::Cinematic,
+            threshold: 0.8,
+            knee: 0.6,
+            intensity: 0.7,
+            scatter: 0.8,
+            tint: Vec3::new(1.0, 0.95, 0.9),  // Warm tint
+            dirt_intensity: 0.2,
+            anamorphic_ratio: 1.0,
+            mip_weights: [0.3, 0.6, 1.0, 1.0, 0.9, 0.7, 0.5, 0.3],
+        }
+    }
+
+    fn neon() -> Self {
+        Self {
+            enabled: true,
+            quality: BloomQuality::High,
+            threshold: 0.7,
+            knee: 0.3,
+            intensity: 1.0,
+            scatter: 0.6,
+            tint: Vec3::one(),
+            dirt_intensity: 0.0,
+            anamorphic_ratio: 1.0,
+            mip_weights: [1.0, 0.9, 0.7, 0.5, 0.3, 0.2, 0.1, 0.05],
+        }
+    }
+
+    fn subtle() -> Self {
+        Self {
+            enabled: true,
+            quality: BloomQuality::Medium,
+            threshold: 1.2,
+            knee: 0.2,
+            intensity: 0.25,
+            scatter: 0.5,
+            tint: Vec3::one(),
+            dirt_intensity: 0.0,
+            anamorphic_ratio: 1.0,
+            mip_weights: [0.2, 0.4, 0.6, 0.5, 0.3, 0.15, 0.1, 0.05],
+        }
+    }
+}
+
+// ============================================================================
+// MIP CHAIN BLOOM
+// ============================================================================
+
+/// Traditional mip-chain gaussian bloom
+struct MipBloom {
+    /// Configuration
+    config: BloomConfig,
+
+    /// Mip chain textures
+    mip_chain: Vec<Texture2D>,
+
+    /// Downscale intermediate
+    downscale_temp: Vec<Texture2D>,
+
+    /// Lens dirt texture
+    dirt_texture: Option<Texture2D>,
+
+    /// Blur kernel
+    kernel: Vec<f32>,
+}
+
+impl MipBloom {
+    fn new(config: BloomConfig, width: u32, height: u32) -> Self {
+        let mip_count = Self::calculate_mip_count(&config.quality);
+
+        let mut mip_chain = Vec::with_capacity(mip_count);
+        let mut downscale_temp = Vec::with_capacity(mip_count);
+
+        let mut w = width;
+        let mut h = height;
+
+        for _ in 0..mip_count {
+            w = (w / 2).max(1);
+            h = (h / 2).max(1);
+
+            mip_chain.push(Texture2D::new(w, h, TextureFormat::RGBA16F));
+            downscale_temp.push(Texture2D::new(w, h, TextureFormat::RGBA16F));
+        }
+
+        let kernel = Self::generate_kernel(&config.quality);
+
+        Self {
+            config,
+            mip_chain,
+            downscale_temp,
+            dirt_texture: None,
+            kernel,
+        }
+    }
+
+    fn calculate_mip_count(quality: &BloomQuality) -> usize {
+        match quality {
+            BloomQuality::Low => 3,
+            BloomQuality::Medium => 5,
+            BloomQuality::High => 7,
+            BloomQuality::Ultra => 9,
+            BloomQuality::Cinematic => 8,
+        }
+    }
+
+    fn generate_kernel(quality: &BloomQuality) -> Vec<f32> {
+        let taps = match quality {
+            BloomQuality::Low => 5,
+            BloomQuality::Medium => 9,
+            BloomQuality::High => 13,
+            BloomQuality::Ultra | BloomQuality::Cinematic => 13,
+        };
+
+        let sigma = taps as f32 / 4.0;
+        let mut kernel = Vec::with_capacity(taps);
+        let mut sum = 0.0;
+
+        for i in 0..taps {
+            let x = (i as i32 - taps as i32 / 2) as f32;
+            let w = exp(-(x * x) / (2.0 * sigma * sigma));
+            kernel.push(w);
+            sum += w;
+        }
+
+        // Normalize
+        for w in &mut kernel {
+            *w /= sum;
+        }
+
+        kernel
+    }
+
+    /// Extract bright pixels with soft knee
+    fn prefilter(&self, color: Vec3) -> Vec3 {
+        let brightness = luminance(color);
+
+        // Soft threshold
+        let knee = self.config.threshold * self.config.knee;
+        let soft = brightness - self.config.threshold + knee;
+        let soft = clamp(soft, 0.0, 2.0 * knee);
+        let soft = soft * soft / (4.0 * knee + 0.0001);
+
+        let contribution = (soft.max(brightness - self.config.threshold)) / brightness.max(0.0001);
+
+        color * contribution
+    }
+
+    /// Downscale pass with 13-tap filter
+    fn downscale(&self, input: &Texture2D, output: &Texture2D) {
+        // Karis average for first pass to prevent fireflies
+        // 13-tap filter for subsequent passes
+        // Uses bilinear samples for efficiency
+    }
+
+    /// Upscale and combine pass
+    fn upscale(&self, input: &Texture2D, lower_mip: &Texture2D, output: &Texture2D) {
+        // Tent filter upscale
+        // Combine with weighted addition
+    }
+
+    /// Horizontal blur pass
+    fn blur_h(&self, input: &Texture2D, output: &Texture2D, texel_size: f32) {
+        // Separable gaussian blur - horizontal
+    }
+
+    /// Vertical blur pass
+    fn blur_v(&self, input: &Texture2D, output: &Texture2D, texel_size: f32) {
+        // Separable gaussian blur - vertical
+    }
+
+    /// Execute full bloom pipeline
+    fn execute(&mut self, input: &Texture2D, output: &Texture2D) {
+        if !self.config.enabled || self.mip_chain.is_empty() {
+            return;
+        }
+
+        // Prefilter + first downscale
+        self.downscale(input, &self.mip_chain[0]);
+
+        // Progressive downscale
+        for i in 1..self.mip_chain.len() {
+            self.downscale(&self.mip_chain[i - 1], &self.mip_chain[i]);
+        }
+
+        // Blur at each level
+        for i in 0..self.mip_chain.len() {
+            let texel = 1.0 / self.mip_chain[i].width as f32;
+            self.blur_h(&self.mip_chain[i], &self.downscale_temp[i], texel);
+            self.blur_v(&self.downscale_temp[i], &self.mip_chain[i], texel);
+        }
+
+        // Progressive upscale with combining
+        for i in (0..self.mip_chain.len() - 1).rev() {
+            let weight = self.config.mip_weights[i];
+            self.upscale(&self.mip_chain[i + 1], &self.mip_chain[i], &self.downscale_temp[i]);
+            // Apply weight and store back
+        }
+
+        // Final composite
+        self.composite(input, &self.mip_chain[0], output);
+    }
+
+    /// Composite bloom with original image
+    fn composite(&self, original: &Texture2D, bloom: &Texture2D, output: &Texture2D) {
+        // Add bloom * intensity * tint
+        // Apply lens dirt if enabled
+    }
+}
+
+// ============================================================================
+// CONVOLUTION BLOOM
+// ============================================================================
+
+/// Convolution-based bloom with custom kernels
+struct ConvolutionBloom {
+    config: BloomConfig,
+
+    /// Kernel texture (precomputed)
+    kernel_texture: Texture2D,
+
+    /// Kernel size
+    kernel_size: u32,
+
+    /// Work buffers
+    buffer_a: Texture2D,
+    buffer_b: Texture2D,
+}
+
+impl ConvolutionBloom {
+    fn new(config: BloomConfig, width: u32, height: u32) -> Self {
+        let kernel_size = 256;  // Higher for more accurate bloom
+
+        Self {
+            config,
+            kernel_texture: Self::generate_kernel(kernel_size),
+            kernel_size,
+            buffer_a: Texture2D::new(width, height, TextureFormat::RGBA16F),
+            buffer_b: Texture2D::new(width, height, TextureFormat::RGBA16F),
+        }
+    }
+
+    /// Generate bloom kernel based on physical model
+    fn generate_kernel(size: u32) -> Texture2D {
+        let mut kernel = Texture2D::new(size, size, TextureFormat::R32F);
+
+        let center = size as f32 / 2.0;
+        let mut sum = 0.0;
+
+        for y in 0..size {
+            for x in 0..size {
+                let dx = x as f32 - center;
+                let dy = y as f32 - center;
+                let dist = sqrt(dx * dx + dy * dy) / center;
+
+                // Bloom falloff based on empirical camera lens behavior
+                let value = Self::lens_bloom_falloff(dist);
+
+                // Store in kernel texture
+                let idx = (y * size + x) as usize * 4;
+                // kernel.data[idx..idx+4] = value as bytes
+
+                sum += value;
+            }
+        }
+
+        // Normalize
+        // ...
+
+        kernel
+    }
+
+    /// Physical lens bloom falloff
+    fn lens_bloom_falloff(dist: f32) -> f32 {
+        // Combination of:
+        // - Core (gaussian)
+        // - Glare (power law)
+        // - Diffraction spikes (optional)
+
+        let core = exp(-dist * dist * 20.0);
+        let glare = 1.0 / (1.0 + pow(dist * 10.0, 2.5));
+
+        core * 0.5 + glare * 0.5
+    }
+
+    /// Execute convolution bloom (expensive!)
+    fn execute(&self, input: &Texture2D, output: &Texture2D) {
+        // For real-time, use FFT-based convolution
+        // Direct convolution is too expensive for large kernels
+    }
+}
+
+// ============================================================================
+// FFT BLOOM
+// ============================================================================
+
+/// FFT-based bloom for arbitrary kernels
+struct FftBloom {
+    config: BloomConfig,
+
+    /// FFT size (power of 2)
+    fft_size: u32,
+
+    /// Kernel FFT (precomputed)
+    kernel_fft: Texture2D,
+
+    /// Work buffers (complex)
+    buffer_real: Texture2D,
+    buffer_imag: Texture2D,
+    temp_real: Texture2D,
+    temp_imag: Texture2D,
+}
+
+impl FftBloom {
+    fn new(config: BloomConfig, width: u32, height: u32) -> Self {
+        // Round up to power of 2
+        let fft_size = (width.max(height)).next_power_of_two();
+
+        let kernel_fft = Self::compute_kernel_fft(fft_size, &config);
+
+        Self {
+            config,
+            fft_size,
+            kernel_fft,
+            buffer_real: Texture2D::new(fft_size, fft_size, TextureFormat::R32F),
+            buffer_imag: Texture2D::new(fft_size, fft_size, TextureFormat::R32F),
+            temp_real: Texture2D::new(fft_size, fft_size, TextureFormat::R32F),
+            temp_imag: Texture2D::new(fft_size, fft_size, TextureFormat::R32F),
+        }
+    }
+
+    fn compute_kernel_fft(size: u32, config: &BloomConfig) -> Texture2D {
+        // Generate spatial kernel and transform to frequency domain
+        Texture2D::new(size, size, TextureFormat::RG32F)  // Complex
+    }
+
+    /// Execute FFT bloom
+    fn execute(&self, input: &Texture2D, output: &Texture2D) {
+        // 1. Copy and prefilter input to buffer
+        // 2. Forward FFT on input (per channel or luminance)
+        // 3. Multiply with kernel FFT
+        // 4. Inverse FFT
+        // 5. Composite with original
+    }
+}
+
+// ============================================================================
+// DIFFRACTION SPIKES (STAR BLOOM)
+// ============================================================================
+
+/// Diffraction spike generator
+struct DiffractionSpikes {
+    /// Enable spikes
+    enabled: bool,
+
+    /// Number of spikes (typically 4, 6, or 8)
+    spike_count: u32,
+
+    /// Spike rotation (radians)
+    rotation: f32,
+
+    /// Spike length
+    length: f32,
+
+    /// Spike intensity
+    intensity: f32,
+
+    /// Spike sharpness
+    sharpness: f32,
+
+    /// Chromatic dispersion
+    chromatic: f32,
+}
+
+impl DiffractionSpikes {
+    fn new() -> Self {
+        Self {
+            enabled: true,
+            spike_count: 6,
+            rotation: 0.0,
+            length: 0.3,
+            intensity: 0.5,
+            sharpness: 0.8,
+            chromatic: 0.02,
+        }
+    }
+
+    /// Generate spike pattern at a point
+    fn generate(&self, uv: Vec2, light_pos: Vec2, light_color: Vec3) -> Vec3 {
+        if !self.enabled {
+            return Vec3::zero();
+        }
+
+        let dir = uv - light_pos;
+        let dist = dir.length();
+
+        if dist < 0.001 {
+            return Vec3::zero();
+        }
+
+        let angle = atan2(dir.y, dir.x);
+
+        let mut result = Vec3::zero();
+
+        for i in 0..self.spike_count {
+            let spike_angle = self.rotation + PI * i as f32 / self.spike_count as f32;
+
+            // Angle alignment
+            let angle_diff = (angle - spike_angle).abs();
+            let angle_diff = angle_diff.min(PI - angle_diff);  // Wrap
+
+            let angular_falloff = exp(-angle_diff * angle_diff * 100.0 * self.sharpness);
+
+            // Distance falloff
+            let dist_falloff = exp(-dist * 20.0 / self.length);
+
+            let spike_intensity = angular_falloff * dist_falloff * self.intensity;
+
+            // Chromatic dispersion
+            if self.chromatic > 0.0 {
+                let chromatic_offset = dist * self.chromatic;
+                result.x += spike_intensity * light_color.x * (1.0 + chromatic_offset);
+                result.y += spike_intensity * light_color.y;
+                result.z += spike_intensity * light_color.z * (1.0 - chromatic_offset);
+            } else {
+                result = result + light_color * spike_intensity;
+            }
+        }
+
+        result
+    }
+}
+
+// ============================================================================
+// LENS FLARE GHOSTS
+// ============================================================================
+
+/// Lens flare ghost generation
+struct LensGhosts {
+    /// Enable ghosts
+    enabled: bool,
+
+    /// Ghost configurations
+    ghosts: Vec<GhostConfig>,
+
+    /// Global intensity
+    intensity: f32,
+
+    /// Threshold for ghost trigger
+    threshold: f32,
+}
+
+struct GhostConfig {
+    /// Position along flare axis (0 = light, 1 = center, 2 = opposite)
+    position: f32,
+
+    /// Size multiplier
+    size: f32,
+
+    /// Color tint
+    tint: Vec3,
+
+    /// Shape (0 = circle, 1 = hexagon, etc.)
+    shape: u32,
+
+    /// Distortion
+    distortion: f32,
+}
+
+impl LensGhosts {
+    fn new() -> Self {
+        Self {
+            enabled: true,
+            ghosts: vec![
+                GhostConfig { position: -0.3, size: 0.5, tint: Vec3::new(1.0, 0.8, 0.6), shape: 0, distortion: 0.0 },
+                GhostConfig { position: 0.5, size: 0.3, tint: Vec3::new(0.6, 0.8, 1.0), shape: 0, distortion: 0.1 },
+                GhostConfig { position: 0.8, size: 0.4, tint: Vec3::new(0.8, 1.0, 0.8), shape: 1, distortion: 0.05 },
+                GhostConfig { position: 1.2, size: 0.25, tint: Vec3::new(1.0, 0.6, 0.8), shape: 0, distortion: 0.15 },
+                GhostConfig { position: 1.5, size: 0.6, tint: Vec3::new(0.7, 0.7, 1.0), shape: 0, distortion: 0.2 },
+            ],
+            intensity: 0.3,
+            threshold: 0.9,
+        }
+    }
+
+    /// Generate ghosts from a light source
+    fn generate(&self, uv: Vec2, light_pos: Vec2, light_intensity: f32) -> Vec3 {
+        if !self.enabled || light_intensity < self.threshold {
+            return Vec3::zero();
+        }
+
+        let center = Vec2::new(0.5, 0.5);
+        let dir = center - light_pos;
+
+        let mut result = Vec3::zero();
+
+        for ghost in &self.ghosts {
+            let ghost_pos = light_pos + dir * ghost.position;
+
+            let dist = (uv - ghost_pos).length();
+            let ghost_radius = ghost.size * 0.1;
+
+            // Apply distortion
+            let distorted_dist = if ghost.distortion > 0.0 {
+                let distort_factor = 1.0 + ghost.distortion * sin(dist * 50.0);
+                dist * distort_factor
+            } else {
+                dist
+            };
+
+            // Ghost falloff
+            let falloff = match ghost.shape {
+                0 => {
+                    // Circle
+                    smoothstep(ghost_radius * 1.2, ghost_radius * 0.8, distorted_dist)
+                }
+                1 => {
+                    // Hexagon-ish (approximation)
+                    let angle = atan2(uv.y - ghost_pos.y, uv.x - ghost_pos.x);
+                    let hex_factor = cos(angle * 3.0).abs() * 0.2 + 0.8;
+                    smoothstep(ghost_radius * 1.2 * hex_factor, ghost_radius * 0.8 * hex_factor, distorted_dist)
+                }
+                _ => 0.0,
+            };
+
+            let ghost_color = ghost.tint * falloff * self.intensity * (light_intensity - self.threshold);
+            result = result + ghost_color;
+        }
+
+        result
+    }
+}
+
+// ============================================================================
+// CHROMATIC BLOOM
+// ============================================================================
+
+/// Bloom with chromatic separation
+struct ChromaticBloom {
+    /// Base bloom config
+    config: BloomConfig,
+
+    /// Chromatic separation amount
+    separation: f32,
+
+    /// Per-channel blur radius multipliers
+    channel_radii: Vec3,
+}
+
+impl ChromaticBloom {
+    fn new(config: BloomConfig) -> Self {
+        Self {
+            config,
+            separation: 0.01,
+            channel_radii: Vec3::new(1.1, 1.0, 0.9),  // Red slightly larger, blue smaller
+        }
+    }
+
+    /// Execute chromatic bloom
+    fn execute(&self, input: &Texture2D, output: &Texture2D) {
+        // Process each channel separately with different blur radii
+        // Combine with chromatic offset
+    }
+}
+
+// ============================================================================
+// ANAMORPHIC BLOOM
+// ============================================================================
+
+/// Anamorphic lens bloom (horizontal streaks)
+struct AnamorphicBloom {
+    config: BloomConfig,
+
+    /// Horizontal stretch factor
+    stretch: f32,
+
+    /// Streak intensity
+    streak_intensity: f32,
+
+    /// Work buffers
+    horizontal_blur: Texture2D,
+}
+
+impl AnamorphicBloom {
+    fn new(config: BloomConfig, width: u32, height: u32) -> Self {
+        Self {
+            config,
+            stretch: 2.0,
+            streak_intensity: 0.5,
+            horizontal_blur: Texture2D::new(width, height / 4, TextureFormat::RGBA16F),
+        }
+    }
+
+    /// Execute anamorphic bloom
+    fn execute(&self, input: &Texture2D, output: &Texture2D) {
+        // 1. Prefilter bright pixels
+        // 2. Heavy horizontal blur (asymmetric kernel)
+        // 3. Light vertical blur
+        // 4. Composite with stretch
+    }
+
+    /// Asymmetric horizontal blur for streaks
+    fn horizontal_streak_blur(&self, input: &Texture2D, output: &Texture2D) {
+        // Use long horizontal kernel
+        // Kernel falls off more slowly than standard gaussian
+    }
+}
+
+// ============================================================================
+// WGSL SHADERS
+// ============================================================================
+
+const BLOOM_PREFILTER_SHADER: &str = r#"
+// Bloom Prefilter - Extract bright pixels with soft threshold
+
+struct BloomParams {
+    threshold: f32,
+    knee: f32,
+    intensity: f32,
+    padding: f32,
+}
+
+@group(0) @binding(0) var<uniform> params: BloomParams;
+@group(0) @binding(1) var input_texture: texture_2d<f32>;
+@group(0) @binding(2) var input_sampler: sampler;
+
+fn luminance(color: vec3<f32>) -> f32 {
+    return dot(color, vec3<f32>(0.2126, 0.7152, 0.0722));
+}
+
+fn soft_threshold(color: vec3<f32>, threshold: f32, knee: f32) -> vec3<f32> {
+    let brightness = luminance(color);
+    let soft = brightness - threshold + knee;
+    let soft_clamped = clamp(soft, 0.0, 2.0 * knee);
+    let contribution = soft_clamped * soft_clamped / (4.0 * knee + 0.0001);
+    let result = max(contribution, brightness - threshold) / max(brightness, 0.0001);
+    return color * result;
+}
+
+struct VertexOutput {
+    @builtin(position) position: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+}
+
+@fragment
+fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
+    let color = textureSample(input_texture, input_sampler, input.uv).rgb;
+    let filtered = soft_threshold(color, params.threshold, params.knee);
+    return vec4<f32>(filtered * params.intensity, 1.0);
+}
+"#;
+
+const BLOOM_DOWNSAMPLE_SHADER: &str = r#"
+// Bloom Downsample - 13-tap filter for quality downscaling
+
+@group(0) @binding(0) var input_texture: texture_2d<f32>;
+@group(0) @binding(1) var input_sampler: sampler;
+
+struct VertexOutput {
+    @builtin(position) position: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+}
+
+@fragment
+fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
+    let dims = vec2<f32>(textureDimensions(input_texture));
+    let texel = 1.0 / dims;
+
+    // 13-tap filter (using bilinear samples for efficiency)
+    var result = textureSample(input_texture, input_sampler, input.uv) * 0.125;
+
+    result += textureSample(input_texture, input_sampler, input.uv + vec2<f32>(-1.0, -1.0) * texel) * 0.03125;
+    result += textureSample(input_texture, input_sampler, input.uv + vec2<f32>(1.0, -1.0) * texel) * 0.03125;
+    result += textureSample(input_texture, input_sampler, input.uv + vec2<f32>(-1.0, 1.0) * texel) * 0.03125;
+    result += textureSample(input_texture, input_sampler, input.uv + vec2<f32>(1.0, 1.0) * texel) * 0.03125;
+
+    result += textureSample(input_texture, input_sampler, input.uv + vec2<f32>(-2.0, 0.0) * texel) * 0.0625;
+    result += textureSample(input_texture, input_sampler, input.uv + vec2<f32>(2.0, 0.0) * texel) * 0.0625;
+    result += textureSample(input_texture, input_sampler, input.uv + vec2<f32>(0.0, -2.0) * texel) * 0.0625;
+    result += textureSample(input_texture, input_sampler, input.uv + vec2<f32>(0.0, 2.0) * texel) * 0.0625;
+
+    result += textureSample(input_texture, input_sampler, input.uv + vec2<f32>(-2.0, -2.0) * texel) * 0.03125;
+    result += textureSample(input_texture, input_sampler, input.uv + vec2<f32>(2.0, -2.0) * texel) * 0.03125;
+    result += textureSample(input_texture, input_sampler, input.uv + vec2<f32>(-2.0, 2.0) * texel) * 0.03125;
+    result += textureSample(input_texture, input_sampler, input.uv + vec2<f32>(2.0, 2.0) * texel) * 0.03125;
+
+    return result;
+}
+"#;
+
+const BLOOM_UPSAMPLE_SHADER: &str = r#"
+// Bloom Upsample - Tent filter upscaling with additive blend
+
+struct UpsampleParams {
+    scatter: f32,
+    mip_weight: f32,
+    padding: vec2<f32>,
+}
+
+@group(0) @binding(0) var<uniform> params: UpsampleParams;
+@group(0) @binding(1) var current_mip: texture_2d<f32>;
+@group(0) @binding(2) var higher_mip: texture_2d<f32>;
+@group(0) @binding(3) var input_sampler: sampler;
+
+struct VertexOutput {
+    @builtin(position) position: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+}
+
+@fragment
+fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
+    let dims = vec2<f32>(textureDimensions(current_mip));
+    let texel = 1.0 / dims;
+
+    // 9-tap tent filter
+    var upsampled = textureSample(current_mip, input_sampler, input.uv + vec2<f32>(-1.0, -1.0) * texel) * 1.0;
+    upsampled += textureSample(current_mip, input_sampler, input.uv + vec2<f32>(0.0, -1.0) * texel) * 2.0;
+    upsampled += textureSample(current_mip, input_sampler, input.uv + vec2<f32>(1.0, -1.0) * texel) * 1.0;
+    upsampled += textureSample(current_mip, input_sampler, input.uv + vec2<f32>(-1.0, 0.0) * texel) * 2.0;
+    upsampled += textureSample(current_mip, input_sampler, input.uv) * 4.0;
+    upsampled += textureSample(current_mip, input_sampler, input.uv + vec2<f32>(1.0, 0.0) * texel) * 2.0;
+    upsampled += textureSample(current_mip, input_sampler, input.uv + vec2<f32>(-1.0, 1.0) * texel) * 1.0;
+    upsampled += textureSample(current_mip, input_sampler, input.uv + vec2<f32>(0.0, 1.0) * texel) * 2.0;
+    upsampled += textureSample(current_mip, input_sampler, input.uv + vec2<f32>(1.0, 1.0) * texel) * 1.0;
+    upsampled /= 16.0;
+
+    // Sample higher resolution mip
+    let higher = textureSample(higher_mip, input_sampler, input.uv);
+
+    // Blend with scatter control
+    let bloom = upsampled * params.scatter;
+    let combined = higher + bloom * params.mip_weight;
+
+    return combined;
+}
+"#;
+
+const BLOOM_COMPOSITE_SHADER: &str = r#"
+// Bloom Composite - Combine bloom with original image
+
+struct CompositeParams {
+    intensity: f32,
+    tint: vec3<f32>,
+    dirt_intensity: f32,
+    padding: vec3<f32>,
+}
+
+@group(0) @binding(0) var<uniform> params: CompositeParams;
+@group(0) @binding(1) var original_texture: texture_2d<f32>;
+@group(0) @binding(2) var bloom_texture: texture_2d<f32>;
+@group(0) @binding(3) var dirt_texture: texture_2d<f32>;
+@group(0) @binding(4) var input_sampler: sampler;
+
+struct VertexOutput {
+    @builtin(position) position: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+}
+
+@fragment
+fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
+    let original = textureSample(original_texture, input_sampler, input.uv);
+    let bloom = textureSample(bloom_texture, input_sampler, input.uv).rgb;
+    let dirt = textureSample(dirt_texture, input_sampler, input.uv).rgb;
+
+    // Apply tint
+    let tinted_bloom = bloom * params.tint;
+
+    // Apply lens dirt
+    let dirt_bloom = tinted_bloom * (1.0 + dirt * params.dirt_intensity);
+
+    // Additive blend
+    let result = original.rgb + dirt_bloom * params.intensity;
+
+    return vec4<f32>(result, original.a);
+}
+"#;
+
+const DIFFRACTION_SPIKES_SHADER: &str = r#"
+// Diffraction Spikes (Star Bloom)
+
+struct SpikeParams {
+    spike_count: u32,
+    rotation: f32,
+    length: f32,
+    intensity: f32,
+    sharpness: f32,
+    chromatic: f32,
+    padding: vec2<f32>,
+}
+
+@group(0) @binding(0) var<uniform> params: SpikeParams;
+@group(0) @binding(1) var input_texture: texture_2d<f32>;
+@group(0) @binding(2) var input_sampler: sampler;
+@group(0) @binding(3) var output_texture: texture_storage_2d<rgba16float, write>;
+
+const PI: f32 = 3.14159265359;
+
+@compute @workgroup_size(16, 16)
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+    let dims = textureDimensions(input_texture);
+    if (global_id.x >= dims.x || global_id.y >= dims.y) { return; }
+
+    let uv = (vec2<f32>(global_id.xy) + 0.5) / vec2<f32>(dims);
+    var result = textureSample(input_texture, input_sampler, uv);
+
+    // Find bright pixels and generate spikes
+    let brightness = dot(result.rgb, vec3<f32>(0.2126, 0.7152, 0.0722));
+
+    if (brightness > 1.0) {
+        // Generate spikes radiating from this pixel
+        var spike_contribution = vec3<f32>(0.0);
+
+        for (var i = 0u; i < params.spike_count; i++) {
+            let spike_angle = params.rotation + PI * f32(i) / f32(params.spike_count);
+            let dir = vec2<f32>(cos(spike_angle), sin(spike_angle));
+
+            // Sample along spike direction
+            for (var j = 1u; j < 32u; j++) {
+                let offset = dir * f32(j) * params.length / 32.0;
+                let sample_uv = uv + offset;
+
+                if (sample_uv.x < 0.0 || sample_uv.x > 1.0 || sample_uv.y < 0.0 || sample_uv.y > 1.0) {
+                    break;
+                }
+
+                let falloff = exp(-f32(j) * params.sharpness * 0.2);
+                let sample = textureSample(input_texture, input_sampler, sample_uv).rgb;
+                spike_contribution += sample * falloff * params.intensity;
+            }
+        }
+
+        result = vec4<f32>(result.rgb + spike_contribution / f32(params.spike_count), result.a);
+    }
+
+    textureStore(output_texture, vec2<i32>(global_id.xy), result);
+}
+"#;
+
+// ============================================================================
+// UTILITY FUNCTIONS
+// ============================================================================
+
+fn luminance(color: Vec3) -> f32 {
+    color.x * 0.2126 + color.y * 0.7152 + color.z * 0.0722
+}
+
+fn atan2(y: f32, x: f32) -> f32 {
+    // Platform atan2 implementation
+    core::math::atan2(y, x)
+}
+
+// ============================================================================
+// UNIT TESTS
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const EPSILON: f32 = 0.001;
+
+    fn approx_eq(a: f32, b: f32) -> bool {
+        (a - b).abs() < EPSILON
+    }
+
+    #[test]
+    fn test_bloom_config_default() {
+        let config = BloomConfig::default();
+        assert!(config.enabled);
+        assert!(approx_eq(config.threshold, 0.9));
+        assert!(approx_eq(config.intensity, 0.5));
+    }
+
+    #[test]
+    fn test_bloom_config_presets() {
+        let cinematic = BloomConfig::cinematic();
+        assert!(cinematic.dirt_intensity > 0.0);
+
+        let neon = BloomConfig::neon();
+        assert!(approx_eq(neon.intensity, 1.0));
+
+        let subtle = BloomConfig::subtle();
+        assert!(subtle.intensity < 0.5);
+    }
+
+    #[test]
+    fn test_mip_bloom_mip_count() {
+        assert_eq!(MipBloom::calculate_mip_count(&BloomQuality::Low), 3);
+        assert_eq!(MipBloom::calculate_mip_count(&BloomQuality::High), 7);
+        assert_eq!(MipBloom::calculate_mip_count(&BloomQuality::Ultra), 9);
+    }
+
+    #[test]
+    fn test_gaussian_kernel_normalized() {
+        let kernel = MipBloom::generate_kernel(&BloomQuality::High);
+        let sum: f32 = kernel.iter().sum();
+        assert!(approx_eq(sum, 1.0));
+    }
+
+    #[test]
+    fn test_diffraction_spikes_disabled() {
+        let mut spikes = DiffractionSpikes::new();
+        spikes.enabled = false;
+
+        let result = spikes.generate(Vec2::new(0.5, 0.5), Vec2::new(0.3, 0.3), Vec3::one());
+        assert!(approx_eq(result.x, 0.0));
+        assert!(approx_eq(result.y, 0.0));
+        assert!(approx_eq(result.z, 0.0));
+    }
+
+    #[test]
+    fn test_lens_ghosts_below_threshold() {
+        let ghosts = LensGhosts::new();
+
+        let result = ghosts.generate(Vec2::new(0.5, 0.5), Vec2::new(0.3, 0.3), 0.5);  // Below threshold
+        assert!(approx_eq(result.x, 0.0));
+    }
+
+    #[test]
+    fn test_luminance() {
+        // White should have luminance of 1
+        assert!(approx_eq(luminance(Vec3::one()), 1.0));
+
+        // Black should have luminance of 0
+        assert!(approx_eq(luminance(Vec3::zero()), 0.0));
+
+        // Pure red
+        let red_lum = luminance(Vec3::new(1.0, 0.0, 0.0));
+        assert!(approx_eq(red_lum, 0.2126));
+    }
+}

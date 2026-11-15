@@ -1,0 +1,225 @@
+# Verifiable components of the Build organism.
+#
+# tools/verify_organism.py runs each component verify command in its path and
+# reports ground truth -- what actually builds and passes here, not what the
+# prose docs claim. New real (non-sketch) modules register here as they land,
+# which is how the organism grows cohesively instead of by assertion.
+#
+# Fields: name, path (relative to repo root), language, tier (0 foundational,
+# 1 load-bearing, 2/3 lower), verify (shell cmd; exit 0 = ok), expect
+# ("tested" = runtime-verified, "build" = compile/transpile only), requires
+# (toolchain gate: "msvc" | "buildc"), heavy (skipped under --quick), note.
+#
+# NOTE: .bld modules that do NOT transpile standalone are intentionally not
+# registered: photon, quantum-finance, axiom, forge (known; see STATUS.md).
+
+[[component]]
+name = "frametrace-core"
+path = "photon/frametrace"
+language = "rust"
+tier = 1
+verify = "cargo test --locked"
+expect = "tested"
+note = "binding table + hazard model + C ABI + trace ingestion (18 tests)"
+
+[[component]]
+name = "frametrace-c-abi"
+path = "photon/frametrace"
+language = "c"
+tier = 1
+requires = "msvc"
+verify = 'c_demo\build.bat'
+expect = "build"
+note = "C program links the staticlib and drives the tracer"
+
+[[component]]
+name = "frametrace-hook"
+path = "photon/frametrace"
+language = "cpp"
+tier = 1
+requires = "msvc"
+verify = 'hook\build.bat'
+expect = "build"
+note = "D3D11 vtable hook DLL; runtime verified by injection into a live app"
+
+[[component]]
+name = "frametrace-adapter"
+path = "photon/frametrace/adapters"
+language = "python"
+tier = 1
+verify = "python -m py_compile renderdoc_to_frametrace.py"
+expect = "build"
+note = "RenderDoc capture -> JSON trace; runtime needs a live capture"
+
+[[component]]
+name = "buildlang"
+path = "buildlang/compiler"
+language = "rust"
+tier = 0
+verify = "cargo test --locked"
+expect = "tested"
+heavy = true
+note = "foundational compiler (separate repo; absent in CI). ~612 tests, ~20s."
+
+# --- BuildLang domain modules (verify = transpile to C via buildc) ---
+
+[[component]]
+name = "spectrum"
+path = "spectrum"
+language = "build"
+tier = 1
+requires = "buildc"
+verify = "buildc lib.bld --target c -o nul"
+expect = "build"
+note = "transpiles standalone to C"
+
+[[component]]
+name = "chromatic"
+path = "chromatic"
+language = "build"
+tier = 1
+requires = "buildc"
+verify = "buildc lib.bld --target c -o nul"
+expect = "build"
+note = "transpiles standalone to C"
+
+[[component]]
+name = "delta"
+path = "delta"
+language = "build"
+tier = 1
+requires = "buildc"
+verify = "buildc lib.bld --target c -o nul"
+expect = "build"
+note = "transpiles standalone to C"
+
+[[component]]
+name = "foundation"
+path = "foundation"
+language = "build"
+tier = 1
+requires = "buildc"
+verify = "buildc lib.bld --target c -o nul"
+expect = "build"
+note = "transpiles standalone to C"
+
+[[component]]
+name = "oracle"
+path = "oracle"
+language = "build"
+tier = 2
+requires = "buildc"
+verify = "buildc lib.bld --target c -o nul"
+expect = "build"
+note = "transpiles standalone to C"
+
+[[component]]
+name = "entropy"
+path = "entropy"
+language = "build"
+tier = 2
+requires = "buildc"
+verify = "buildc lib.bld --target c -o nul"
+expect = "build"
+note = "transpiles standalone to C"
+
+[[component]]
+name = "field-tensor"
+path = "field-tensor"
+language = "build"
+tier = 2
+requires = "buildc"
+verify = "buildc lib.bld --target c -o nul"
+expect = "build"
+note = "transpiles standalone to C"
+
+[[component]]
+name = "prism"
+path = "prism"
+language = "build"
+tier = 2
+requires = "buildc"
+verify = "buildc lib.bld --target c -o nul"
+expect = "build"
+note = "transpiles standalone to C"
+
+[[component]]
+name = "calibrate"
+path = "calibrate"
+language = "build"
+tier = 2
+requires = "buildc"
+verify = "buildc lib.bld --target c -o nul"
+expect = "build"
+note = "transpiles standalone to C"
+
+[[component]]
+name = "nova"
+path = "nova"
+language = "build"
+tier = 2
+requires = "buildc"
+verify = "buildc lib.bld --target c -o nul"
+expect = "build"
+note = "transpiles standalone to C"
+
+[[component]]
+name = "entangle"
+path = "entangle"
+language = "build"
+tier = 2
+requires = "buildc"
+verify = "buildc lib.bld --target c -o nul"
+expect = "build"
+note = "transpiles standalone to C"
+
+[[component]]
+name = "lumina"
+path = "lumina"
+language = "build"
+tier = 3
+requires = "buildc"
+verify = "buildc lib.bld --target c -o nul"
+expect = "build"
+note = "transpiles standalone to C"
+
+[[component]]
+name = "neutrino"
+path = "neutrino"
+language = "build"
+tier = 3
+requires = "buildc"
+verify = "buildc lib.bld --target c -o nul"
+expect = "build"
+note = "transpiles standalone to C"
+
+[[component]]
+name = "nexus"
+path = "nexus"
+language = "build"
+tier = 3
+requires = "buildc"
+verify = "buildc lib.bld --target c -o nul"
+expect = "build"
+note = "transpiles standalone to C"
+
+[[component]]
+name = "refract"
+path = "refract"
+language = "build"
+tier = 3
+requires = "buildc"
+verify = "buildc lib.bld --target c -o nul"
+expect = "build"
+note = "transpiles standalone to C"
+
+[[component]]
+name = "wavelength"
+path = "wavelength"
+language = "build"
+tier = 3
+requires = "buildc"
+verify = "buildc lib.bld --target c -o nul"
+expect = "build"
+note = "transpiles standalone to C"
+

@@ -1,0 +1,1396 @@
+// BUILD Spectrum - Spectral Rendering
+// Full spectral color representation and rendering for physically accurate color
+// Implements wavelength-based color handling, spectral uplifting, and spectral integration
+
+use core::simd;
+use std::collections::HashMap;
+
+// ============================================================================
+// SPECTRAL CONSTANTS
+// ============================================================================
+
+/// Minimum visible wavelength (nm)
+const WAVELENGTH_MIN: f32 = 380.0;
+
+/// Maximum visible wavelength (nm)
+const WAVELENGTH_MAX: f32 = 780.0;
+
+/// Standard spectral sampling resolution
+const SPECTRAL_SAMPLES: usize = 81;
+
+/// High resolution spectral sampling
+const SPECTRAL_SAMPLES_HIGH: usize = 401;
+
+/// Wavelength step for standard sampling
+const WAVELENGTH_STEP: f32 = 5.0;
+
+/// Speed of light (m/s)
+const SPEED_OF_LIGHT: f64 = 299792458.0;
+
+/// Planck constant (J·s)
+const PLANCK_CONSTANT: f64 = 6.62607015e-34;
+
+/// Boltzmann constant (J/K)
+const BOLTZMANN_CONSTANT: f64 = 1.380649e-23;
+
+// ============================================================================
+// SPECTRAL POWER DISTRIBUTION
+// ============================================================================
+
+/// Spectral Power Distribution (SPD)
+struct SpectralPowerDistribution {
+    /// Wavelength values in nm
+    wavelengths: Vec<f32>,
+    /// Power values at each wavelength
+    powers: Vec<f32>,
+    /// Minimum wavelength
+    min_wavelength: f32,
+    /// Maximum wavelength
+    max_wavelength: f32,
+    /// Name/description
+    name: String,
+}
+
+impl SpectralPowerDistribution {
+    /// Create empty SPD
+    fn new(wavelengths: Vec<f32>, powers: Vec<f32>) -> Result<Self, String> {
+        if wavelengths.len() != powers.len() {
+            return Err("Wavelength and power arrays must have same length".to_string());
+        }
+
+        if wavelengths.is_empty() {
+            return Err("SPD cannot be empty".to_string());
+        }
+
+        let min_wavelength = wavelengths.first().copied().unwrap_or(WAVELENGTH_MIN);
+        let max_wavelength = wavelengths.last().copied().unwrap_or(WAVELENGTH_MAX);
+
+        Ok(Self {
+            wavelengths,
+            powers,
+            min_wavelength,
+            max_wavelength,
+            name: String::new(),
+        })
+    }
+
+    /// Create uniform SPD (equal energy white)
+    fn uniform(samples: usize) -> Self {
+        let step = (WAVELENGTH_MAX - WAVELENGTH_MIN) / (samples - 1) as f32;
+        let wavelengths: Vec<f32> = (0..samples)
+            .map(|i| WAVELENGTH_MIN + i as f32 * step)
+            .collect();
+        let powers = vec![1.0; samples];
+
+        Self {
+            wavelengths,
+            powers,
+            min_wavelength: WAVELENGTH_MIN,
+            max_wavelength: WAVELENGTH_MAX,
+            name: "Equal Energy White".to_string(),
+        }
+    }
+
+    /// Create blackbody radiator SPD at given temperature
+    fn blackbody(temperature: f32, samples: usize) -> Self {
+        let step = (WAVELENGTH_MAX - WAVELENGTH_MIN) / (samples - 1) as f32;
+        let wavelengths: Vec<f32> = (0..samples)
+            .map(|i| WAVELENGTH_MIN + i as f32 * step)
+            .collect();
+
+        let powers: Vec<f32> = wavelengths.iter()
+            .map(|&wl| planck_radiation(wl, temperature))
+            .collect();
+
+        // Normalize
+        let max_power = powers.iter().cloned().fold(0.0f32, f32::max);
+        let normalized: Vec<f32> = if max_power > 0.0 {
+            powers.iter().map(|p| p / max_power).collect()
+        } else {
+            powers
+        };
+
+        Self {
+            wavelengths,
+            powers: normalized,
+            min_wavelength: WAVELENGTH_MIN,
+            max_wavelength: WAVELENGTH_MAX,
+            name: format!("Blackbody {}K", temperature),
+        }
+    }
+
+    /// Create D-series daylight illuminant
+    fn daylight(cct: f32, samples: usize) -> Self {
+        let step = (WAVELENGTH_MAX - WAVELENGTH_MIN) / (samples - 1) as f32;
+        let wavelengths: Vec<f32> = (0..samples)
+            .map(|i| WAVELENGTH_MIN + i as f32 * step)
+            .collect();
+
+        // Calculate chromaticity coordinates
+        let (x_d, y_d) = daylight_chromaticity(cct);
+
+        // Calculate M1, M2 coefficients
+        let m = 0.0241 + 0.2562 * x_d - 0.7341 * y_d;
+        let m1 = (-1.3515 - 1.7703 * x_d + 5.9114 * y_d) / m;
+        let m2 = (0.0300 - 31.4424 * x_d + 30.0717 * y_d) / m;
+
+        // Calculate SPD from basis functions
+        let powers: Vec<f32> = wavelengths.iter()
+            .map(|&wl| {
+                let (s0, s1, s2) = daylight_basis(wl);
+                (s0 + m1 * s1 + m2 * s2).max(0.0)
+            })
+            .collect();
+
+        // Normalize
+        let max_power = powers.iter().cloned().fold(0.0f32, f32::max);
+        let normalized: Vec<f32> = if max_power > 0.0 {
+            powers.iter().map(|p| p / max_power).collect()
+        } else {
+            powers
+        };
+
+        Self {
+            wavelengths,
+            powers: normalized,
+            min_wavelength: WAVELENGTH_MIN,
+            max_wavelength: WAVELENGTH_MAX,
+            name: format!("D{}", (cct / 100.0).round() as u32),
+        }
+    }
+
+    /// Create standard illuminant D65
+    fn d65(samples: usize) -> Self {
+        Self::daylight(6504.0, samples)
+    }
+
+    /// Create standard illuminant D50
+    fn d50(samples: usize) -> Self {
+        Self::daylight(5003.0, samples)
+    }
+
+    /// Create standard illuminant A (incandescent)
+    fn illuminant_a(samples: usize) -> Self {
+        Self::blackbody(2856.0, samples)
+    }
+
+    /// Sample SPD at specific wavelength (with linear interpolation)
+    fn sample(&self, wavelength: f32) -> f32 {
+        if wavelength < self.min_wavelength || wavelength > self.max_wavelength {
+            return 0.0;
+        }
+
+        // Find bracketing indices
+        let mut idx_low = 0;
+        for (i, &wl) in self.wavelengths.iter().enumerate() {
+            if wl <= wavelength {
+                idx_low = i;
+            } else {
+                break;
+            }
+        }
+
+        let idx_high = (idx_low + 1).min(self.wavelengths.len() - 1);
+
+        if idx_low == idx_high {
+            return self.powers[idx_low];
+        }
+
+        // Linear interpolation
+        let t = (wavelength - self.wavelengths[idx_low])
+            / (self.wavelengths[idx_high] - self.wavelengths[idx_low]);
+
+        self.powers[idx_low] * (1.0 - t) + self.powers[idx_high] * t
+    }
+
+    /// Resample SPD to different wavelength spacing
+    fn resample(&self, new_wavelengths: &[f32]) -> Self {
+        let new_powers: Vec<f32> = new_wavelengths.iter()
+            .map(|&wl| self.sample(wl))
+            .collect();
+
+        Self {
+            wavelengths: new_wavelengths.to_vec(),
+            powers: new_powers,
+            min_wavelength: new_wavelengths.first().copied().unwrap_or(WAVELENGTH_MIN),
+            max_wavelength: new_wavelengths.last().copied().unwrap_or(WAVELENGTH_MAX),
+            name: self.name.clone(),
+        }
+    }
+
+    /// Multiply two SPDs together (element-wise)
+    fn multiply(&self, other: &SpectralPowerDistribution) -> Self {
+        // Resample other to match our wavelengths
+        let new_powers: Vec<f32> = self.wavelengths.iter()
+            .zip(self.powers.iter())
+            .map(|(&wl, &p)| p * other.sample(wl))
+            .collect();
+
+        Self {
+            wavelengths: self.wavelengths.clone(),
+            powers: new_powers,
+            min_wavelength: self.min_wavelength,
+            max_wavelength: self.max_wavelength,
+            name: format!("{} * {}", self.name, other.name),
+        }
+    }
+
+    /// Add two SPDs together
+    fn add(&self, other: &SpectralPowerDistribution) -> Self {
+        let new_powers: Vec<f32> = self.wavelengths.iter()
+            .zip(self.powers.iter())
+            .map(|(&wl, &p)| p + other.sample(wl))
+            .collect();
+
+        Self {
+            wavelengths: self.wavelengths.clone(),
+            powers: new_powers,
+            min_wavelength: self.min_wavelength,
+            max_wavelength: self.max_wavelength,
+            name: format!("{} + {}", self.name, other.name),
+        }
+    }
+
+    /// Scale SPD by constant
+    fn scale(&self, factor: f32) -> Self {
+        let new_powers: Vec<f32> = self.powers.iter()
+            .map(|&p| p * factor)
+            .collect();
+
+        Self {
+            wavelengths: self.wavelengths.clone(),
+            powers: new_powers,
+            min_wavelength: self.min_wavelength,
+            max_wavelength: self.max_wavelength,
+            name: self.name.clone(),
+        }
+    }
+
+    /// Normalize SPD so maximum is 1.0
+    fn normalize(&self) -> Self {
+        let max_power = self.powers.iter().cloned().fold(0.0f32, f32::max);
+        if max_power > 0.0 {
+            self.scale(1.0 / max_power)
+        } else {
+            self.clone()
+        }
+    }
+
+    /// Calculate luminous flux (integrated luminance)
+    fn luminous_flux(&self) -> f32 {
+        let y_bar = CieColorMatchingFunctions::cie_1931();
+        self.integrate_with_cmf(&y_bar, 1)
+    }
+
+    /// Integrate SPD with color matching function
+    fn integrate_with_cmf(&self, cmf: &CieColorMatchingFunctions, component: usize) -> f32 {
+        let mut sum = 0.0f32;
+
+        for i in 0..self.wavelengths.len().saturating_sub(1) {
+            let wl_low = self.wavelengths[i];
+            let wl_high = self.wavelengths[i + 1];
+            let wl_mid = (wl_low + wl_high) / 2.0;
+
+            let p_low = self.powers[i];
+            let p_high = self.powers[i + 1];
+            let p_mid = (p_low + p_high) / 2.0;
+
+            let cmf_val = match component {
+                0 => cmf.sample_x(wl_mid),
+                1 => cmf.sample_y(wl_mid),
+                _ => cmf.sample_z(wl_mid),
+            };
+
+            sum += p_mid * cmf_val * (wl_high - wl_low);
+        }
+
+        sum
+    }
+
+    /// Convert to XYZ tristimulus values
+    fn to_xyz(&self) -> (f32, f32, f32) {
+        let cmf = CieColorMatchingFunctions::cie_1931();
+
+        let x = self.integrate_with_cmf(&cmf, 0);
+        let y = self.integrate_with_cmf(&cmf, 1);
+        let z = self.integrate_with_cmf(&cmf, 2);
+
+        (x, y, z)
+    }
+
+    /// Convert to xy chromaticity
+    fn to_chromaticity(&self) -> (f32, f32) {
+        let (x, y, z) = self.to_xyz();
+        let sum = x + y + z;
+
+        if sum > 0.0 {
+            (x / sum, y / sum)
+        } else {
+            (0.3127, 0.3290) // D65 white point as fallback
+        }
+    }
+}
+
+/// Clone implementation for SPD
+impl Clone for SpectralPowerDistribution {
+    fn clone(&self) -> Self {
+        Self {
+            wavelengths: self.wavelengths.clone(),
+            powers: self.powers.clone(),
+            min_wavelength: self.min_wavelength,
+            max_wavelength: self.max_wavelength,
+            name: self.name.clone(),
+        }
+    }
+}
+
+// ============================================================================
+// SPECTRAL REFLECTANCE
+// ============================================================================
+
+/// Spectral reflectance (0-1 range at each wavelength)
+struct SpectralReflectance {
+    /// Underlying SPD (values clamped to 0-1)
+    spd: SpectralPowerDistribution,
+}
+
+impl SpectralReflectance {
+    /// Create from raw data
+    fn new(wavelengths: Vec<f32>, reflectances: Vec<f32>) -> Result<Self, String> {
+        // Clamp to valid range
+        let clamped: Vec<f32> = reflectances.iter()
+            .map(|&r| r.clamp(0.0, 1.0))
+            .collect();
+
+        let spd = SpectralPowerDistribution::new(wavelengths, clamped)?;
+        Ok(Self { spd })
+    }
+
+    /// Create neutral gray reflectance
+    fn neutral(reflectance: f32, samples: usize) -> Self {
+        let step = (WAVELENGTH_MAX - WAVELENGTH_MIN) / (samples - 1) as f32;
+        let wavelengths: Vec<f32> = (0..samples)
+            .map(|i| WAVELENGTH_MIN + i as f32 * step)
+            .collect();
+        let reflectances = vec![reflectance.clamp(0.0, 1.0); samples];
+
+        Self {
+            spd: SpectralPowerDistribution::new(wavelengths, reflectances).unwrap(),
+        }
+    }
+
+    /// Create from Macbeth ColorChecker patch (approximate)
+    fn macbeth_patch(patch_index: usize, samples: usize) -> Self {
+        let step = (WAVELENGTH_MAX - WAVELENGTH_MIN) / (samples - 1) as f32;
+        let wavelengths: Vec<f32> = (0..samples)
+            .map(|i| WAVELENGTH_MIN + i as f32 * step)
+            .collect();
+
+        // Simplified Macbeth patch approximations
+        let reflectances: Vec<f32> = wavelengths.iter()
+            .map(|&wl| macbeth_reflectance(patch_index, wl))
+            .collect();
+
+        Self {
+            spd: SpectralPowerDistribution::new(wavelengths, reflectances).unwrap(),
+        }
+    }
+
+    /// Sample reflectance at wavelength
+    fn sample(&self, wavelength: f32) -> f32 {
+        self.spd.sample(wavelength).clamp(0.0, 1.0)
+    }
+
+    /// Reflect light through this material
+    fn reflect(&self, illuminant: &SpectralPowerDistribution) -> SpectralPowerDistribution {
+        self.spd.multiply(illuminant)
+    }
+
+    /// Convert to XYZ under given illuminant
+    fn to_xyz(&self, illuminant: &SpectralPowerDistribution) -> (f32, f32, f32) {
+        let reflected = self.reflect(illuminant);
+        reflected.to_xyz()
+    }
+}
+
+// ============================================================================
+// CIE COLOR MATCHING FUNCTIONS
+// ============================================================================
+
+/// CIE Standard Observer Color Matching Functions
+struct CieColorMatchingFunctions {
+    /// Wavelength samples
+    wavelengths: Vec<f32>,
+    /// x̄ (x-bar) values
+    x_bar: Vec<f32>,
+    /// ȳ (y-bar) values
+    y_bar: Vec<f32>,
+    /// z̄ (z-bar) values
+    z_bar: Vec<f32>,
+}
+
+impl CieColorMatchingFunctions {
+    /// CIE 1931 2° Standard Observer
+    fn cie_1931() -> Self {
+        // Simplified version with key wavelengths
+        let wavelengths = vec![
+            380.0, 390.0, 400.0, 410.0, 420.0, 430.0, 440.0, 450.0, 460.0, 470.0,
+            480.0, 490.0, 500.0, 510.0, 520.0, 530.0, 540.0, 550.0, 560.0, 570.0,
+            580.0, 590.0, 600.0, 610.0, 620.0, 630.0, 640.0, 650.0, 660.0, 670.0,
+            680.0, 690.0, 700.0, 710.0, 720.0, 730.0, 740.0, 750.0, 760.0, 770.0, 780.0,
+        ];
+
+        let x_bar = vec![
+            0.0014, 0.0042, 0.0143, 0.0435, 0.1344, 0.2839, 0.3483, 0.3362, 0.2908, 0.1954,
+            0.0956, 0.0320, 0.0049, 0.0093, 0.0633, 0.1655, 0.2904, 0.4334, 0.5945, 0.7621,
+            0.9163, 1.0263, 1.0622, 1.0026, 0.8544, 0.6424, 0.4479, 0.2835, 0.1649, 0.0874,
+            0.0468, 0.0227, 0.0114, 0.0058, 0.0029, 0.0014, 0.0007, 0.0003, 0.0002, 0.0001, 0.0000,
+        ];
+
+        let y_bar = vec![
+            0.0000, 0.0001, 0.0004, 0.0012, 0.0040, 0.0116, 0.0230, 0.0380, 0.0600, 0.0910,
+            0.1390, 0.2080, 0.3230, 0.5030, 0.7100, 0.8620, 0.9540, 0.9950, 0.9950, 0.9520,
+            0.8700, 0.7570, 0.6310, 0.5030, 0.3810, 0.2650, 0.1750, 0.1070, 0.0610, 0.0320,
+            0.0170, 0.0082, 0.0041, 0.0021, 0.0010, 0.0005, 0.0003, 0.0001, 0.0001, 0.0000, 0.0000,
+        ];
+
+        let z_bar = vec![
+            0.0065, 0.0201, 0.0679, 0.2074, 0.6456, 1.3856, 1.7471, 1.7721, 1.6692, 1.2876,
+            0.8130, 0.4652, 0.2720, 0.1582, 0.0782, 0.0422, 0.0203, 0.0087, 0.0039, 0.0021,
+            0.0017, 0.0011, 0.0008, 0.0003, 0.0002, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000,
+            0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000,
+        ];
+
+        Self {
+            wavelengths,
+            x_bar,
+            y_bar,
+            z_bar,
+        }
+    }
+
+    /// CIE 1964 10° Standard Observer
+    fn cie_1964() -> Self {
+        // 10° observer has slightly different values
+        // Using simplified version
+        let wavelengths = vec![
+            380.0, 390.0, 400.0, 410.0, 420.0, 430.0, 440.0, 450.0, 460.0, 470.0,
+            480.0, 490.0, 500.0, 510.0, 520.0, 530.0, 540.0, 550.0, 560.0, 570.0,
+            580.0, 590.0, 600.0, 610.0, 620.0, 630.0, 640.0, 650.0, 660.0, 670.0,
+            680.0, 690.0, 700.0, 710.0, 720.0, 730.0, 740.0, 750.0, 760.0, 770.0, 780.0,
+        ];
+
+        let x_bar = vec![
+            0.0002, 0.0024, 0.0191, 0.0847, 0.2045, 0.3147, 0.3837, 0.3707, 0.3023, 0.1956,
+            0.0805, 0.0162, 0.0038, 0.0375, 0.1177, 0.2365, 0.3768, 0.5298, 0.7052, 0.8787,
+            1.0142, 1.1185, 1.1240, 1.0305, 0.8563, 0.6475, 0.4316, 0.2683, 0.1526, 0.0813,
+            0.0409, 0.0199, 0.0096, 0.0046, 0.0022, 0.0010, 0.0005, 0.0003, 0.0001, 0.0001, 0.0000,
+        ];
+
+        let y_bar = vec![
+            0.0000, 0.0003, 0.0020, 0.0088, 0.0214, 0.0387, 0.0621, 0.0895, 0.1282, 0.1852,
+            0.2536, 0.3391, 0.4608, 0.6067, 0.7618, 0.8752, 0.9620, 0.9918, 0.9973, 0.9556,
+            0.8689, 0.7774, 0.6583, 0.5280, 0.3981, 0.2835, 0.1798, 0.1076, 0.0603, 0.0318,
+            0.0159, 0.0077, 0.0037, 0.0018, 0.0008, 0.0004, 0.0002, 0.0001, 0.0001, 0.0000, 0.0000,
+        ];
+
+        let z_bar = vec![
+            0.0007, 0.0105, 0.0860, 0.3894, 0.9725, 1.5535, 1.9673, 1.9948, 1.7454, 1.3176,
+            0.7721, 0.4153, 0.2185, 0.1120, 0.0607, 0.0305, 0.0137, 0.0040, 0.0000, 0.0000,
+            0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000,
+            0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000,
+        ];
+
+        Self {
+            wavelengths,
+            x_bar,
+            y_bar,
+            z_bar,
+        }
+    }
+
+    /// Sample x̄ at wavelength
+    fn sample_x(&self, wavelength: f32) -> f32 {
+        self.interpolate(&self.x_bar, wavelength)
+    }
+
+    /// Sample ȳ at wavelength
+    fn sample_y(&self, wavelength: f32) -> f32 {
+        self.interpolate(&self.y_bar, wavelength)
+    }
+
+    /// Sample z̄ at wavelength
+    fn sample_z(&self, wavelength: f32) -> f32 {
+        self.interpolate(&self.z_bar, wavelength)
+    }
+
+    /// Linear interpolation helper
+    fn interpolate(&self, values: &[f32], wavelength: f32) -> f32 {
+        if wavelength < self.wavelengths[0] || wavelength > *self.wavelengths.last().unwrap() {
+            return 0.0;
+        }
+
+        let mut idx_low = 0;
+        for (i, &wl) in self.wavelengths.iter().enumerate() {
+            if wl <= wavelength {
+                idx_low = i;
+            } else {
+                break;
+            }
+        }
+
+        let idx_high = (idx_low + 1).min(self.wavelengths.len() - 1);
+
+        if idx_low == idx_high {
+            return values[idx_low];
+        }
+
+        let t = (wavelength - self.wavelengths[idx_low])
+            / (self.wavelengths[idx_high] - self.wavelengths[idx_low]);
+
+        values[idx_low] * (1.0 - t) + values[idx_high] * t
+    }
+}
+
+// ============================================================================
+// SPECTRAL UPLIFTING
+// ============================================================================
+
+/// Method for converting RGB to spectral representation
+enum SpectralUpliftMethod {
+    /// Smits' method (1999)
+    Smits,
+    /// Meng-Simon SIGGRAPH 2015
+    MengSimon,
+    /// Jakob-Hanika SIGGRAPH 2019
+    JakobHanika,
+    /// Simple linear interpolation
+    LinearInterpolation,
+    /// Fluorescent pigment model
+    Fluorescent,
+}
+
+/// Spectral uplifter - converts RGB to spectral
+struct SpectralUplifter {
+    /// Uplifting method
+    method: SpectralUpliftMethod,
+    /// Number of spectral samples
+    samples: usize,
+    /// Reference illuminant for uplifting
+    illuminant: SpectralPowerDistribution,
+    /// Precomputed basis spectra
+    basis_spectra: Option<Vec<SpectralPowerDistribution>>,
+}
+
+impl SpectralUplifter {
+    /// Create with specified method
+    fn new(method: SpectralUpliftMethod, samples: usize) -> Self {
+        let illuminant = SpectralPowerDistribution::d65(samples);
+        let basis_spectra = Self::compute_basis_spectra(&method, samples);
+
+        Self {
+            method,
+            samples,
+            illuminant,
+            basis_spectra,
+        }
+    }
+
+    /// Compute basis spectra for uplifting
+    fn compute_basis_spectra(method: &SpectralUpliftMethod, samples: usize) -> Option<Vec<SpectralPowerDistribution>> {
+        match method {
+            SpectralUpliftMethod::Smits => Some(Self::smits_basis(samples)),
+            SpectralUpliftMethod::LinearInterpolation => Some(Self::linear_basis(samples)),
+            _ => None,
+        }
+    }
+
+    /// Smits' basis spectra
+    fn smits_basis(samples: usize) -> Vec<SpectralPowerDistribution> {
+        let step = (WAVELENGTH_MAX - WAVELENGTH_MIN) / (samples - 1) as f32;
+        let wavelengths: Vec<f32> = (0..samples)
+            .map(|i| WAVELENGTH_MIN + i as f32 * step)
+            .collect();
+
+        // White, cyan, magenta, yellow, red, green, blue basis functions
+        let create_basis = |low: f32, high: f32, peak: f32| -> SpectralPowerDistribution {
+            let powers: Vec<f32> = wavelengths.iter()
+                .map(|&wl| {
+                    if wl >= low && wl <= high {
+                        peak
+                    } else {
+                        0.0
+                    }
+                })
+                .collect();
+            SpectralPowerDistribution::new(wavelengths.clone(), powers).unwrap()
+        };
+
+        vec![
+            create_basis(WAVELENGTH_MIN, WAVELENGTH_MAX, 1.0), // White
+            create_basis(400.0, 550.0, 1.0),                    // Cyan-ish
+            create_basis(500.0, 700.0, 1.0),                    // Magenta-ish
+            create_basis(500.0, 640.0, 1.0),                    // Yellow-ish
+            create_basis(580.0, 780.0, 1.0),                    // Red
+            create_basis(480.0, 580.0, 1.0),                    // Green
+            create_basis(380.0, 500.0, 1.0),                    // Blue
+        ]
+    }
+
+    /// Simple linear interpolation basis
+    fn linear_basis(samples: usize) -> Vec<SpectralPowerDistribution> {
+        let step = (WAVELENGTH_MAX - WAVELENGTH_MIN) / (samples - 1) as f32;
+        let wavelengths: Vec<f32> = (0..samples)
+            .map(|i| WAVELENGTH_MIN + i as f32 * step)
+            .collect();
+
+        // R, G, B basis with smooth transitions
+        let create_color_basis = |peak_wl: f32, width: f32| -> SpectralPowerDistribution {
+            let powers: Vec<f32> = wavelengths.iter()
+                .map(|&wl| {
+                    let dist = (wl - peak_wl).abs();
+                    if dist < width {
+                        (1.0 - dist / width).powi(2)
+                    } else {
+                        0.0
+                    }
+                })
+                .collect();
+            SpectralPowerDistribution::new(wavelengths.clone(), powers).unwrap()
+        };
+
+        vec![
+            create_color_basis(700.0, 150.0), // Red
+            create_color_basis(550.0, 100.0), // Green
+            create_color_basis(450.0, 100.0), // Blue
+        ]
+    }
+
+    /// Uplift RGB to spectral
+    fn uplift(&self, r: f32, g: f32, b: f32) -> SpectralPowerDistribution {
+        match &self.method {
+            SpectralUpliftMethod::Smits => self.uplift_smits(r, g, b),
+            SpectralUpliftMethod::LinearInterpolation => self.uplift_linear(r, g, b),
+            SpectralUpliftMethod::MengSimon => self.uplift_meng_simon(r, g, b),
+            SpectralUpliftMethod::JakobHanika => self.uplift_jakob_hanika(r, g, b),
+            SpectralUpliftMethod::Fluorescent => self.uplift_fluorescent(r, g, b),
+        }
+    }
+
+    /// Smits' uplifting algorithm
+    fn uplift_smits(&self, r: f32, g: f32, b: f32) -> SpectralPowerDistribution {
+        let basis = match &self.basis_spectra {
+            Some(b) => b,
+            None => return SpectralPowerDistribution::uniform(self.samples),
+        };
+
+        let step = (WAVELENGTH_MAX - WAVELENGTH_MIN) / (self.samples - 1) as f32;
+        let wavelengths: Vec<f32> = (0..self.samples)
+            .map(|i| WAVELENGTH_MIN + i as f32 * step)
+            .collect();
+
+        // Decompose RGB into white + primary/secondary components
+        let white = r.min(g).min(b);
+        let r2 = r - white;
+        let g2 = g - white;
+        let b2 = b - white;
+
+        // Build spectrum from basis
+        let mut powers = vec![white; self.samples];
+
+        // Add color contributions
+        if r2 > 0.0 {
+            for i in 0..self.samples {
+                powers[i] += r2 * basis[4].sample(wavelengths[i]);
+            }
+        }
+        if g2 > 0.0 {
+            for i in 0..self.samples {
+                powers[i] += g2 * basis[5].sample(wavelengths[i]);
+            }
+        }
+        if b2 > 0.0 {
+            for i in 0..self.samples {
+                powers[i] += b2 * basis[6].sample(wavelengths[i]);
+            }
+        }
+
+        SpectralPowerDistribution::new(wavelengths, powers).unwrap()
+    }
+
+    /// Linear interpolation uplifting
+    fn uplift_linear(&self, r: f32, g: f32, b: f32) -> SpectralPowerDistribution {
+        let basis = match &self.basis_spectra {
+            Some(b) => b,
+            None => return SpectralPowerDistribution::uniform(self.samples),
+        };
+
+        let step = (WAVELENGTH_MAX - WAVELENGTH_MIN) / (self.samples - 1) as f32;
+        let wavelengths: Vec<f32> = (0..self.samples)
+            .map(|i| WAVELENGTH_MIN + i as f32 * step)
+            .collect();
+
+        let powers: Vec<f32> = wavelengths.iter()
+            .enumerate()
+            .map(|(i, &wl)| {
+                r * basis[0].sample(wl) + g * basis[1].sample(wl) + b * basis[2].sample(wl)
+            })
+            .collect();
+
+        SpectralPowerDistribution::new(wavelengths, powers).unwrap()
+    }
+
+    /// Meng-Simon uplifting (simplified)
+    fn uplift_meng_simon(&self, r: f32, g: f32, b: f32) -> SpectralPowerDistribution {
+        // Simplified Meng-Simon using sigmoid basis functions
+        let step = (WAVELENGTH_MAX - WAVELENGTH_MIN) / (self.samples - 1) as f32;
+        let wavelengths: Vec<f32> = (0..self.samples)
+            .map(|i| WAVELENGTH_MIN + i as f32 * step)
+            .collect();
+
+        let powers: Vec<f32> = wavelengths.iter()
+            .map(|&wl| {
+                // Smooth color matching approximation
+                let r_response = sigmoid_response(wl, 700.0, 60.0);
+                let g_response = gaussian_response(wl, 550.0, 40.0);
+                let b_response = sigmoid_response(450.0, wl, 50.0);
+
+                (r * r_response + g * g_response + b * b_response).clamp(0.0, 1.0)
+            })
+            .collect();
+
+        SpectralPowerDistribution::new(wavelengths, powers).unwrap()
+    }
+
+    /// Jakob-Hanika uplifting (simplified)
+    fn uplift_jakob_hanika(&self, r: f32, g: f32, b: f32) -> SpectralPowerDistribution {
+        // Simplified Jakob-Hanika using polynomial coefficients
+        let step = (WAVELENGTH_MAX - WAVELENGTH_MIN) / (self.samples - 1) as f32;
+        let wavelengths: Vec<f32> = (0..self.samples)
+            .map(|i| WAVELENGTH_MIN + i as f32 * step)
+            .collect();
+
+        let powers: Vec<f32> = wavelengths.iter()
+            .map(|&wl| {
+                let normalized_wl = (wl - WAVELENGTH_MIN) / (WAVELENGTH_MAX - WAVELENGTH_MIN);
+
+                // Polynomial basis for smooth spectra
+                let c0 = 1.0 - normalized_wl;
+                let c1 = 4.0 * normalized_wl * (1.0 - normalized_wl);
+                let c2 = normalized_wl;
+
+                let value = b * c0 + g * c1 + r * c2;
+                value.clamp(0.0, 1.0)
+            })
+            .collect();
+
+        SpectralPowerDistribution::new(wavelengths, powers).unwrap()
+    }
+
+    /// Fluorescent pigment model
+    fn uplift_fluorescent(&self, r: f32, g: f32, b: f32) -> SpectralPowerDistribution {
+        // Add fluorescent peak for very saturated colors
+        let saturation = 1.0 - r.min(g).min(b) / r.max(g).max(b).max(0.001);
+
+        let mut base = self.uplift_smits(r, g, b);
+
+        if saturation > 0.8 {
+            let fluorescent_factor = (saturation - 0.8) * 5.0;
+
+            // Add narrow fluorescent emission
+            let step = (WAVELENGTH_MAX - WAVELENGTH_MIN) / (self.samples - 1) as f32;
+            for i in 0..base.powers.len() {
+                let wl = WAVELENGTH_MIN + i as f32 * step;
+
+                // Green fluorescence peak
+                if g > r && g > b {
+                    base.powers[i] += fluorescent_factor * gaussian_response(wl, 520.0, 15.0);
+                }
+                // Red fluorescence
+                if r > g && r > b {
+                    base.powers[i] += fluorescent_factor * gaussian_response(wl, 620.0, 15.0);
+                }
+            }
+        }
+
+        base
+    }
+}
+
+// ============================================================================
+// SPECTRAL COLOR
+// ============================================================================
+
+/// Full spectral color representation
+struct SpectralColor {
+    /// Spectral power distribution
+    spd: SpectralPowerDistribution,
+    /// Cached XYZ values
+    xyz_cache: Option<(f32, f32, f32)>,
+}
+
+impl SpectralColor {
+    /// Create from SPD
+    fn from_spd(spd: SpectralPowerDistribution) -> Self {
+        Self {
+            spd,
+            xyz_cache: None,
+        }
+    }
+
+    /// Create from RGB with uplifting
+    fn from_rgb(r: f32, g: f32, b: f32, method: SpectralUpliftMethod) -> Self {
+        let uplifter = SpectralUplifter::new(method, SPECTRAL_SAMPLES);
+        let spd = uplifter.uplift(r, g, b);
+
+        Self {
+            spd,
+            xyz_cache: None,
+        }
+    }
+
+    /// Convert to XYZ
+    fn to_xyz(&mut self) -> (f32, f32, f32) {
+        if let Some(xyz) = self.xyz_cache {
+            return xyz;
+        }
+
+        let xyz = self.spd.to_xyz();
+        self.xyz_cache = Some(xyz);
+        xyz
+    }
+
+    /// Convert to sRGB
+    fn to_srgb(&mut self) -> (f32, f32, f32) {
+        let (x, y, z) = self.to_xyz();
+
+        // XYZ to linear sRGB
+        let r = 3.2404542 * x - 1.5371385 * y - 0.4985314 * z;
+        let g = -0.9692660 * x + 1.8760108 * y + 0.0415560 * z;
+        let b = 0.0556434 * x - 0.2040259 * y + 1.0572252 * z;
+
+        // sRGB gamma
+        fn gamma(v: f32) -> f32 {
+            if v <= 0.0031308 {
+                12.92 * v
+            } else {
+                1.055 * v.powf(1.0 / 2.4) - 0.055
+            }
+        }
+
+        (
+            gamma(r.clamp(0.0, 1.0)),
+            gamma(g.clamp(0.0, 1.0)),
+            gamma(b.clamp(0.0, 1.0)),
+        )
+    }
+
+    /// Multiply two spectral colors
+    fn multiply(&self, other: &SpectralColor) -> SpectralColor {
+        Self::from_spd(self.spd.multiply(&other.spd))
+    }
+
+    /// Add two spectral colors
+    fn add(&self, other: &SpectralColor) -> SpectralColor {
+        Self::from_spd(self.spd.add(&other.spd))
+    }
+
+    /// Scale spectral color
+    fn scale(&self, factor: f32) -> SpectralColor {
+        Self::from_spd(self.spd.scale(factor))
+    }
+}
+
+// ============================================================================
+// HERO WAVELENGTH SAMPLING
+// ============================================================================
+
+/// Hero wavelength spectral sampling method
+struct HeroWavelengthSampler {
+    /// Number of wavelength samples per path
+    samples_per_path: usize,
+    /// Wavelength spacing
+    spacing: f32,
+}
+
+impl HeroWavelengthSampler {
+    /// Create sampler
+    fn new(samples: usize) -> Self {
+        let visible_range = WAVELENGTH_MAX - WAVELENGTH_MIN;
+        let spacing = visible_range / samples as f32;
+
+        Self {
+            samples_per_path: samples,
+            spacing,
+        }
+    }
+
+    /// Sample wavelengths for a path
+    fn sample_wavelengths(&self, random_offset: f32) -> Vec<f32> {
+        let hero = WAVELENGTH_MIN + random_offset * self.spacing;
+
+        (0..self.samples_per_path)
+            .map(|i| {
+                let wl = hero + i as f32 * self.spacing;
+                if wl > WAVELENGTH_MAX {
+                    wl - (WAVELENGTH_MAX - WAVELENGTH_MIN)
+                } else {
+                    wl
+                }
+            })
+            .collect()
+    }
+
+    /// Evaluate SPD at sampled wavelengths
+    fn evaluate(&self, spd: &SpectralPowerDistribution, wavelengths: &[f32]) -> Vec<f32> {
+        wavelengths.iter().map(|&wl| spd.sample(wl)).collect()
+    }
+
+    /// Convert spectral samples to XYZ
+    fn samples_to_xyz(&self, wavelengths: &[f32], samples: &[f32]) -> (f32, f32, f32) {
+        let cmf = CieColorMatchingFunctions::cie_1931();
+        let mut x = 0.0f32;
+        let mut y = 0.0f32;
+        let mut z = 0.0f32;
+
+        for (&wl, &s) in wavelengths.iter().zip(samples.iter()) {
+            x += s * cmf.sample_x(wl);
+            y += s * cmf.sample_y(wl);
+            z += s * cmf.sample_z(wl);
+        }
+
+        let scale = self.spacing / samples.len() as f32;
+        (x * scale, y * scale, z * scale)
+    }
+}
+
+// ============================================================================
+// SPECTRAL PATH TRACER INTEGRATION
+// ============================================================================
+
+/// Spectral BSDF wrapper
+struct SpectralBsdf {
+    /// Spectral reflectance
+    reflectance: SpectralReflectance,
+    /// IOR as function of wavelength (for dielectrics)
+    ior_spd: Option<SpectralPowerDistribution>,
+    /// Absorption coefficient (for volumetrics)
+    absorption: Option<SpectralPowerDistribution>,
+}
+
+impl SpectralBsdf {
+    /// Evaluate BSDF at wavelength
+    fn evaluate(&self, wavelength: f32) -> f32 {
+        self.reflectance.sample(wavelength)
+    }
+
+    /// Get IOR at wavelength (Cauchy dispersion)
+    fn get_ior(&self, wavelength: f32, base_ior: f32) -> f32 {
+        // Cauchy's equation: n = A + B/λ²
+        // Using simplified model
+        let cauchy_b = 0.00420; // Typical for glass
+        let wavelength_um = wavelength / 1000.0;
+
+        base_ior + cauchy_b / (wavelength_um * wavelength_um)
+    }
+
+    /// Get dispersion-adjusted Fresnel
+    fn fresnel_dielectric(&self, cos_theta: f32, wavelength: f32, base_ior: f32) -> f32 {
+        let eta = self.get_ior(wavelength, base_ior);
+
+        let sin_theta_t2 = eta * eta * (1.0 - cos_theta * cos_theta);
+
+        if sin_theta_t2 > 1.0 {
+            return 1.0; // Total internal reflection
+        }
+
+        let cos_theta_t = (1.0 - sin_theta_t2).sqrt();
+
+        let r_s = ((eta * cos_theta) - cos_theta_t) / ((eta * cos_theta) + cos_theta_t);
+        let r_p = (cos_theta - (eta * cos_theta_t)) / (cos_theta + (eta * cos_theta_t));
+
+        0.5 * (r_s * r_s + r_p * r_p)
+    }
+}
+
+/// Spectral light source
+struct SpectralLight {
+    /// Emission spectrum
+    emission: SpectralPowerDistribution,
+    /// Intensity multiplier
+    intensity: f32,
+}
+
+impl SpectralLight {
+    /// Create blackbody emitter
+    fn blackbody(temperature: f32, intensity: f32) -> Self {
+        Self {
+            emission: SpectralPowerDistribution::blackbody(temperature, SPECTRAL_SAMPLES),
+            intensity,
+        }
+    }
+
+    /// Create daylight
+    fn daylight(cct: f32, intensity: f32) -> Self {
+        Self {
+            emission: SpectralPowerDistribution::daylight(cct, SPECTRAL_SAMPLES),
+            intensity,
+        }
+    }
+
+    /// Sample emission at wavelength
+    fn sample(&self, wavelength: f32) -> f32 {
+        self.emission.sample(wavelength) * self.intensity
+    }
+}
+
+// ============================================================================
+// HELPER FUNCTIONS
+// ============================================================================
+
+/// Planck's radiation law
+fn planck_radiation(wavelength_nm: f32, temperature: f32) -> f32 {
+    let wavelength = wavelength_nm * 1e-9; // Convert to meters
+    let temp = temperature as f64;
+
+    let c1 = 2.0 * std::f64::consts::PI * PLANCK_CONSTANT * SPEED_OF_LIGHT * SPEED_OF_LIGHT;
+    let c2 = (PLANCK_CONSTANT * SPEED_OF_LIGHT) / BOLTZMANN_CONSTANT;
+
+    let wl5 = (wavelength as f64).powi(5);
+    let exp_term = (c2 / (wavelength as f64 * temp)).exp() - 1.0;
+
+    ((c1 / wl5) / exp_term) as f32
+}
+
+/// Daylight chromaticity from CCT
+fn daylight_chromaticity(cct: f32) -> (f32, f32) {
+    let t = cct;
+
+    let x = if t < 7000.0 {
+        -4.6070e9 / (t * t * t) + 2.9678e6 / (t * t) + 0.09911e3 / t + 0.244063
+    } else {
+        -2.0064e9 / (t * t * t) + 1.9018e6 / (t * t) + 0.24748e3 / t + 0.237040
+    };
+
+    let y = -3.000 * x * x + 2.870 * x - 0.275;
+
+    (x, y)
+}
+
+/// Daylight basis functions (S0, S1, S2)
+fn daylight_basis(wavelength: f32) -> (f32, f32, f32) {
+    // Simplified daylight basis (would normally use tabulated data)
+    let t = (wavelength - WAVELENGTH_MIN) / (WAVELENGTH_MAX - WAVELENGTH_MIN);
+
+    // Approximate S0, S1, S2 functions
+    let s0 = gaussian_response(wavelength, 550.0, 100.0);
+    let s1 = gaussian_response(wavelength, 480.0, 80.0) - gaussian_response(wavelength, 600.0, 80.0);
+    let s2 = gaussian_response(wavelength, 440.0, 60.0) - gaussian_response(wavelength, 550.0, 60.0);
+
+    (s0, s1 * 0.5, s2 * 0.5)
+}
+
+/// Gaussian response function
+fn gaussian_response(wavelength: f32, center: f32, width: f32) -> f32 {
+    let x = (wavelength - center) / width;
+    (-0.5 * x * x).exp()
+}
+
+/// Sigmoid response function
+fn sigmoid_response(wavelength: f32, center: f32, width: f32) -> f32 {
+    let x = (wavelength - center) / width;
+    1.0 / (1.0 + (-x * 4.0).exp())
+}
+
+/// Simplified Macbeth ColorChecker reflectance
+fn macbeth_reflectance(patch: usize, wavelength: f32) -> f32 {
+    // Approximate reflectance for key Macbeth patches
+    match patch {
+        0 => 0.35 + 0.15 * gaussian_response(wavelength, 620.0, 80.0), // Dark skin
+        1 => 0.50 + 0.20 * gaussian_response(wavelength, 600.0, 100.0), // Light skin
+        2 => 0.25 + 0.30 * gaussian_response(wavelength, 480.0, 60.0), // Blue sky
+        3 => 0.28 + 0.30 * gaussian_response(wavelength, 540.0, 50.0), // Foliage
+        4 => 0.35 + 0.25 * gaussian_response(wavelength, 500.0, 80.0), // Blue flower
+        5 => 0.40 + 0.35 * gaussian_response(wavelength, 520.0, 100.0), // Bluish green
+        18 => 0.90, // White
+        19 => 0.60, // Neutral 8
+        20 => 0.36, // Neutral 6.5
+        21 => 0.20, // Neutral 5
+        22 => 0.09, // Neutral 3.5
+        23 => 0.03, // Black
+        _ => 0.5, // Default neutral
+    }
+}
+
+// ============================================================================
+// WGSL SHADERS
+// ============================================================================
+
+/// Spectral rendering shader
+const SPECTRAL_SHADER: &str = r#"
+// Spectral Rendering Shader Module
+
+// Spectral constants
+const WAVELENGTH_MIN: f32 = 380.0;
+const WAVELENGTH_MAX: f32 = 780.0;
+const HERO_SAMPLES: u32 = 4u;
+
+struct SpectralSample {
+    wavelengths: vec4<f32>,
+    values: vec4<f32>,
+};
+
+// Sample SPD texture at wavelength
+fn sample_spd(spd_texture: texture_2d<f32>, wavelength: f32) -> f32 {
+    let normalized = (wavelength - WAVELENGTH_MIN) / (WAVELENGTH_MAX - WAVELENGTH_MIN);
+    let uv = vec2<f32>(clamp(normalized, 0.0, 1.0), 0.5);
+    return textureSampleLevel(spd_texture, linear_sampler, uv, 0.0).r;
+}
+
+// Hero wavelength sampling
+fn hero_wavelengths(random: f32) -> vec4<f32> {
+    let spacing = (WAVELENGTH_MAX - WAVELENGTH_MIN) / f32(HERO_SAMPLES);
+    let hero = WAVELENGTH_MIN + random * spacing;
+
+    return vec4<f32>(
+        hero,
+        hero + spacing,
+        hero + 2.0 * spacing,
+        hero + 3.0 * spacing
+    );
+}
+
+// Wrap wavelengths to visible range
+fn wrap_wavelength(wl: f32) -> f32 {
+    let range = WAVELENGTH_MAX - WAVELENGTH_MIN;
+    if (wl > WAVELENGTH_MAX) {
+        return wl - range;
+    }
+    return wl;
+}
+
+// CIE 1931 color matching functions (approximation)
+fn cie_x_bar(wavelength: f32) -> f32 {
+    let t1 = (wavelength - 442.0) * select(0.0624, 0.0374, wavelength < 442.0);
+    let t2 = (wavelength - 599.8) * select(0.0264, 0.0323, wavelength < 599.8);
+    let t3 = (wavelength - 501.1) * select(0.0490, 0.0382, wavelength < 501.1);
+
+    return 0.362 * exp(-0.5 * t1 * t1) + 1.056 * exp(-0.5 * t2 * t2) - 0.065 * exp(-0.5 * t3 * t3);
+}
+
+fn cie_y_bar(wavelength: f32) -> f32 {
+    let t1 = (wavelength - 568.8) * select(0.0213, 0.0247, wavelength < 568.8);
+    let t2 = (wavelength - 530.9) * select(0.0613, 0.0322, wavelength < 530.9);
+
+    return 0.821 * exp(-0.5 * t1 * t1) + 0.286 * exp(-0.5 * t2 * t2);
+}
+
+fn cie_z_bar(wavelength: f32) -> f32 {
+    let t1 = (wavelength - 437.0) * select(0.0845, 0.0278, wavelength < 437.0);
+    let t2 = (wavelength - 459.0) * select(0.0385, 0.0725, wavelength < 459.0);
+
+    return 1.217 * exp(-0.5 * t1 * t1) + 0.681 * exp(-0.5 * t2 * t2);
+}
+
+// Convert spectral samples to XYZ
+fn spectral_to_xyz(samples: SpectralSample) -> vec3<f32> {
+    var xyz = vec3<f32>(0.0);
+
+    for (var i = 0u; i < HERO_SAMPLES; i = i + 1u) {
+        let wl = wrap_wavelength(samples.wavelengths[i]);
+        let power = samples.values[i];
+
+        xyz.x += power * cie_x_bar(wl);
+        xyz.y += power * cie_y_bar(wl);
+        xyz.z += power * cie_z_bar(wl);
+    }
+
+    return xyz / f32(HERO_SAMPLES);
+}
+
+// Cauchy dispersion for IOR
+fn cauchy_ior(base_ior: f32, wavelength: f32) -> f32 {
+    let wavelength_um = wavelength / 1000.0;
+    let B = 0.00420; // Typical glass
+    return base_ior + B / (wavelength_um * wavelength_um);
+}
+
+// Fresnel with dispersion
+fn fresnel_dispersion(cos_theta: f32, wavelength: f32, base_ior: f32) -> f32 {
+    let eta = cauchy_ior(base_ior, wavelength);
+    let sin_theta_t2 = eta * eta * (1.0 - cos_theta * cos_theta);
+
+    if (sin_theta_t2 > 1.0) {
+        return 1.0; // TIR
+    }
+
+    let cos_theta_t = sqrt(1.0 - sin_theta_t2);
+    let r_s = ((eta * cos_theta) - cos_theta_t) / ((eta * cos_theta) + cos_theta_t);
+    let r_p = (cos_theta - (eta * cos_theta_t)) / (cos_theta + (eta * cos_theta_t));
+
+    return 0.5 * (r_s * r_s + r_p * r_p);
+}
+"#;
+
+// ============================================================================
+// UNIT TESTS
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const EPSILON: f32 = 0.01;
+
+    fn approx_eq(a: f32, b: f32) -> bool {
+        (a - b).abs() < EPSILON
+    }
+
+    #[test]
+    fn test_uniform_spd() {
+        let spd = SpectralPowerDistribution::uniform(81);
+
+        // Should sample 1.0 everywhere in visible range
+        assert!(approx_eq(spd.sample(500.0), 1.0));
+        assert!(approx_eq(spd.sample(600.0), 1.0));
+        assert!(approx_eq(spd.sample(700.0), 1.0));
+
+        // Outside range should be 0
+        assert!(approx_eq(spd.sample(300.0), 0.0));
+    }
+
+    #[test]
+    fn test_blackbody() {
+        let spd = SpectralPowerDistribution::blackbody(5500.0, 81);
+
+        // Should peak around yellow-green
+        let blue = spd.sample(450.0);
+        let green = spd.sample(550.0);
+        let red = spd.sample(650.0);
+
+        // For 5500K, peak should be in green region
+        assert!(green > blue);
+        assert!(green > red);
+    }
+
+    #[test]
+    fn test_spd_to_xyz() {
+        let d65 = SpectralPowerDistribution::d65(81);
+        let xyz = d65.to_xyz();
+
+        // D65 should have roughly equal x and y (close to white)
+        assert!(xyz.0 > 0.0);
+        assert!(xyz.1 > 0.0);
+        assert!(xyz.2 > 0.0);
+    }
+
+    #[test]
+    fn test_neutral_reflectance() {
+        let gray = SpectralReflectance::neutral(0.5, 81);
+
+        assert!(approx_eq(gray.sample(500.0), 0.5));
+        assert!(approx_eq(gray.sample(600.0), 0.5));
+    }
+
+    #[test]
+    fn test_uplifter_roundtrip() {
+        let uplifter = SpectralUplifter::new(SpectralUpliftMethod::Smits, 81);
+
+        // Uplift neutral gray
+        let spd = uplifter.uplift(0.5, 0.5, 0.5);
+        let xyz = spd.to_xyz();
+
+        // Should have approximately equal XYZ components
+        let ratio_xy = xyz.0 / xyz.1;
+        let ratio_zy = xyz.2 / xyz.1;
+
+        assert!(
+            (ratio_xy - 1.0).abs() < 0.2,
+            "X/Y ratio for gray should be near 1.0: {}",
+            ratio_xy
+        );
+    }
+
+    #[test]
+    fn test_hero_wavelength_sampling() {
+        let sampler = HeroWavelengthSampler::new(4);
+        let wavelengths = sampler.sample_wavelengths(0.0);
+
+        assert_eq!(wavelengths.len(), 4);
+        assert!(wavelengths[0] >= WAVELENGTH_MIN);
+        assert!(wavelengths[3] <= WAVELENGTH_MAX);
+    }
+
+    #[test]
+    fn test_cmf_integration() {
+        let cmf = CieColorMatchingFunctions::cie_1931();
+
+        // Y at 555nm (peak sensitivity) should be highest
+        let y_555 = cmf.sample_y(555.0);
+        let y_400 = cmf.sample_y(400.0);
+        let y_700 = cmf.sample_y(700.0);
+
+        assert!(y_555 > y_400);
+        assert!(y_555 > y_700);
+    }
+
+    #[test]
+    fn test_planck_radiation() {
+        // Wien's displacement law: peak wavelength = 2898/T micrometers
+        // For 5778K (sun), peak should be around 502nm
+
+        let t = 5778.0;
+        let mut max_power = 0.0f32;
+        let mut peak_wl = 0.0f32;
+
+        for wl in (380..=780).step_by(5) {
+            let power = planck_radiation(wl as f32, t);
+            if power > max_power {
+                max_power = power;
+                peak_wl = wl as f32;
+            }
+        }
+
+        // Peak should be in visible range
+        assert!(peak_wl >= 400.0 && peak_wl <= 600.0);
+    }
+
+    #[test]
+    fn test_spectral_color_operations() {
+        let white = SpectralColor::from_rgb(1.0, 1.0, 1.0, SpectralUpliftMethod::Smits);
+        let scaled = white.scale(0.5);
+
+        // Scaling should reduce power
+        for i in 0..scaled.spd.powers.len() {
+            assert!(scaled.spd.powers[i] <= white.spd.powers[i]);
+        }
+    }
+
+    #[test]
+    fn test_dispersion() {
+        let bsdf = SpectralBsdf {
+            reflectance: SpectralReflectance::neutral(1.0, 81),
+            ior_spd: None,
+            absorption: None,
+        };
+
+        let base_ior = 1.5;
+        let blue_ior = bsdf.get_ior(450.0, base_ior);
+        let red_ior = bsdf.get_ior(650.0, base_ior);
+
+        // Blue should have higher IOR (more refraction)
+        assert!(blue_ior > red_ior);
+    }
+
+    #[test]
+    fn test_daylight_illuminant() {
+        let d65 = SpectralPowerDistribution::d65(81);
+        let d50 = SpectralPowerDistribution::d50(81);
+
+        // D65 is bluer (cooler) than D50
+        let d65_blue = d65.sample(450.0) / d65.sample(600.0);
+        let d50_blue = d50.sample(450.0) / d50.sample(600.0);
+
+        assert!(d65_blue > d50_blue);
+    }
+}

@@ -1,0 +1,597 @@
+// =============================================================================
+// qcsv — CSV-to-JSON converter written in BuildLang
+// =============================================================================
+// Third showcase program. Converts CSV input to JSON output.
+//
+// Usage:
+//   qcsv input.csv              — convert CSV to JSON array of objects
+//   cat data.csv | qcsv         — read from stdin
+//   qcsv -p input.csv           — pretty-print (2-space indent)
+//   qcsv -a input.csv           — output as array of arrays (no header mapping)
+//   qcsv --help                 — usage info
+//
+// Features:
+//   - Quoted fields: "hello, world" is one field
+//   - Escaped quotes: "" inside quoted field becomes "
+//   - Empty fields preserved
+//   - Auto-detect numeric values (output without quotes in JSON)
+//
+// Design: ALL state lives in one flat struct (CSV) to avoid the &mut sub-struct
+// copy codegen limitation. Strings are pooled in a single buffer. Lines are
+// found by scanning for newlines. Fields are stored in flat parallel arrays.
+// =============================================================================
+
+// --- Helpers ---
+fn is_digit(c: String) -> bool {
+    c == "0" || c == "1" || c == "2" || c == "3" || c == "4" || c == "5" || c == "6" || c == "7" || c == "8" || c == "9"
+}
+
+// --- Flat combined struct ---
+// String pool fields (sp_buf/sp_starts/sp_lens/sp_n) match stdlib/string_pool.bld pattern.
+// Kept inline to avoid nested-struct &mut and sp_add/sp_get name collisions.
+struct CSV {
+    // Input
+    input: String,
+    ilen: i32,
+    // String pool (matches stdlib/string_pool.bld pattern)
+    sp_buf: String,
+    sp_n: i32,
+    sp_starts: Vec<i32>,
+    sp_lens: Vec<i32>,
+    // Line offsets: line_starts[i], line_lens[i]
+    ln_n: i32,
+    ln_starts: Vec<i32>,
+    ln_lens: Vec<i32>,
+    // Headers (string-pool IDs)
+    hdr_ids: Vec<i32>,
+    hdr_n: i32,
+    // Row storage: flat array of string-pool IDs
+    // row_starts[r] = index into row_fids where row r begins
+    // row_counts[r] = number of fields in row r
+    row_fids: Vec<i32>,
+    row_starts: Vec<i32>,
+    row_counts: Vec<i32>,
+    row_n: i32,
+}
+
+fn csv_new(input: String) -> CSV {
+    let ilen = input.len();
+    CSV {
+        input: input, ilen: ilen,
+        sp_buf: "", sp_n: 0, sp_starts: vec![], sp_lens: vec![],
+        ln_n: 0, ln_starts: vec![], ln_lens: vec![],
+        hdr_ids: vec![], hdr_n: 0,
+        row_fids: vec![], row_starts: vec![], row_counts: vec![], row_n: 0,
+    }
+}
+
+// --- String pool ops ---
+fn sp_add(csv: &mut CSV, s: String) -> i32 {
+    let id = csv.sp_n;
+    let st = csv.sp_buf.len();
+    csv.sp_buf = csv.sp_buf + s;
+    let en = csv.sp_buf.len();
+    vec_push(csv.sp_starts, st);
+    vec_push(csv.sp_lens, en - st);
+    csv.sp_n = csv.sp_n + 1;
+    id
+}
+
+fn sp_get(csv: &CSV, id: i32) -> String {
+    let st = vec_get(csv.sp_starts, id);
+    let ln = vec_get(csv.sp_lens, id);
+    csv.sp_buf.substring(st, ln)
+}
+
+// --- Find lines by scanning for \n ---
+fn find_lines(csv: &mut CSV) {
+    let mut pos = 0;
+    let mut line_start = 0;
+    let mut go = true;
+    while go {
+        if pos >= csv.ilen {
+            // Last line (no trailing newline)
+            let ln = pos - line_start;
+            if ln > 0 {
+                vec_push(csv.ln_starts, line_start);
+                vec_push(csv.ln_lens, ln);
+                csv.ln_n = csv.ln_n + 1;
+            }
+            go = false;
+        } else {
+            let c = csv.input.char_at(pos);
+            if c == "\n" {
+                let mut ln = pos - line_start;
+                // Strip trailing \r
+                if ln > 0 {
+                    let last_pos = line_start + ln - 1;
+                    let lc = csv.input.char_at(last_pos);
+                    if lc == "\r" { ln = ln - 1; }
+                }
+                vec_push(csv.ln_starts, line_start);
+                vec_push(csv.ln_lens, ln);
+                csv.ln_n = csv.ln_n + 1;
+                line_start = pos + 1;
+                pos = pos + 1;
+            } else {
+                pos = pos + 1;
+            }
+        }
+    }
+}
+
+fn get_line(csv: &CSV, idx: i32) -> String {
+    let st = vec_get(csv.ln_starts, idx);
+    let ln = vec_get(csv.ln_lens, idx);
+    if ln == 0 { return ""; }
+    csv.input.substring(st, ln)
+}
+
+// --- Parse one CSV line, pushing field string-pool IDs into row_fids ---
+// Returns the number of fields parsed.
+fn parse_line(csv: &mut CSV, line: String) -> i32 {
+    let slen = line.len();
+    if slen == 0 {
+        return 0;
+    }
+
+    let mut count = 0;
+    let mut pos = 0;
+    let mut go = true;
+
+    while go {
+        if pos >= slen {
+            go = false;
+        } else {
+            let c = line.char_at(pos);
+            if c == "\"" {
+                // Quoted field
+                pos = pos + 1;
+                let mut val = "";
+                let mut qgo = true;
+                while qgo {
+                    if pos >= slen {
+                        qgo = false;
+                    } else {
+                        let qc = line.char_at(pos);
+                        if qc == "\"" {
+                            if pos + 1 < slen {
+                                let nx = line.char_at(pos + 1);
+                                if nx == "\"" {
+                                    val = val + "\"";
+                                    pos = pos + 2;
+                                } else {
+                                    pos = pos + 1;
+                                    qgo = false;
+                                }
+                            } else {
+                                pos = pos + 1;
+                                qgo = false;
+                            }
+                        } else {
+                            val = val + qc;
+                            pos = pos + 1;
+                        }
+                    }
+                }
+                let id = sp_add(csv, val);
+                vec_push(csv.row_fids, id);
+                count = count + 1;
+                // Skip comma after quoted field (if present)
+                if pos < slen {
+                    let sc = line.char_at(pos);
+                    if sc == "," {
+                        pos = pos + 1;
+                        // Trailing comma: add empty field
+                        if pos >= slen {
+                            let eid = sp_add(csv, "");
+                            vec_push(csv.row_fids, eid);
+                            count = count + 1;
+                        }
+                    }
+                }
+            } else {
+                // Unquoted field: read until comma or end
+                let mut val = "";
+                let mut ugo = true;
+                while ugo {
+                    if pos >= slen {
+                        ugo = false;
+                    } else {
+                        let uc = line.char_at(pos);
+                        if uc == "," {
+                            ugo = false;
+                        } else {
+                            val = val + uc;
+                            pos = pos + 1;
+                        }
+                    }
+                }
+                let id = sp_add(csv, val);
+                vec_push(csv.row_fids, id);
+                count = count + 1;
+                // Skip comma separator
+                if pos < slen {
+                    pos = pos + 1;
+                    // Trailing comma: add empty field
+                    if pos >= slen {
+                        let eid = sp_add(csv, "");
+                        vec_push(csv.row_fids, eid);
+                        count = count + 1;
+                    }
+                }
+            }
+        }
+    }
+    count
+}
+
+// --- Parse headers (line 0) ---
+fn parse_headers(csv: &mut CSV) {
+    let line = get_line(csv, 0);
+    let slen = line.len();
+    if slen == 0 { return; }
+    let mut pos = 0;
+    let mut go = true;
+    while go {
+        if pos >= slen {
+            go = false;
+        } else {
+            let c = line.char_at(pos);
+            if c == "\"" {
+                // Quoted header
+                pos = pos + 1;
+                let mut val = "";
+                let mut qgo = true;
+                while qgo {
+                    if pos >= slen { qgo = false; }
+                    else {
+                        let qc = line.char_at(pos);
+                        if qc == "\"" {
+                            if pos + 1 < slen {
+                                let nx = line.char_at(pos + 1);
+                                if nx == "\"" { val = val + "\""; pos = pos + 2; }
+                                else { pos = pos + 1; qgo = false; }
+                            } else { pos = pos + 1; qgo = false; }
+                        } else { val = val + qc; pos = pos + 1; }
+                    }
+                }
+                let id = sp_add(csv, val);
+                vec_push(csv.hdr_ids, id);
+                csv.hdr_n = csv.hdr_n + 1;
+                if pos < slen {
+                    let sc = line.char_at(pos);
+                    if sc == "," { pos = pos + 1; }
+                }
+            } else {
+                // Unquoted header
+                let mut val = "";
+                let mut ugo = true;
+                while ugo {
+                    if pos >= slen { ugo = false; }
+                    else {
+                        let uc = line.char_at(pos);
+                        if uc == "," { ugo = false; }
+                        else { val = val + uc; pos = pos + 1; }
+                    }
+                }
+                let id = sp_add(csv, val);
+                vec_push(csv.hdr_ids, id);
+                csv.hdr_n = csv.hdr_n + 1;
+                if pos < slen { pos = pos + 1; }
+            }
+        }
+    }
+}
+
+// --- Parse all data rows (lines 1..N) ---
+fn parse_rows(csv: &mut CSV) {
+    let mut li = 1;
+    while li < csv.ln_n {
+        let line = get_line(csv, li);
+        if line.len() > 0 {
+            let start = vec_len(csv.row_fids);
+            vec_push(csv.row_starts, start);
+            let fc = parse_line(csv, line);
+            vec_push(csv.row_counts, fc);
+            csv.row_n = csv.row_n + 1;
+        }
+        li = li + 1;
+    }
+}
+
+// --- JSON string escaping ---
+fn escape_json(s: String) -> String {
+    let slen = s.len();
+    if slen == 0 { return ""; }
+    let mut out = "";
+    let mut i = 0;
+    while i < slen {
+        let c = s.char_at(i);
+        if c == "\\" { out = out + "\\\\"; }
+        else if c == "\"" { out = out + "\\\""; }
+        else if c == "\n" { out = out + "\\n"; }
+        else if c == "\r" { out = out + "\\r"; }
+        else if c == "\t" { out = out + "\\t"; }
+        else { out = out + c; }
+        i = i + 1;
+    }
+    out
+}
+
+// --- Numeric detection ---
+fn is_numeric(s: String) -> bool {
+    let slen = s.len();
+    if slen == 0 { return false; }
+    let mut pos = 0;
+    let first = s.char_at(0);
+    if first == "-" {
+        pos = pos + 1;
+        if pos >= slen { return false; }
+    }
+    if pos >= slen { return false; }
+    let d0 = s.char_at(pos);
+    if !is_digit(d0) { return false; }
+    let mut go = true;
+    while go {
+        if pos >= slen { go = false; }
+        else {
+            let dc = s.char_at(pos);
+            if is_digit(dc) { pos = pos + 1; }
+            else { go = false; }
+        }
+    }
+    if pos < slen {
+        let dot = s.char_at(pos);
+        if dot == "." {
+            pos = pos + 1;
+            if pos >= slen { return false; }
+            let dd = s.char_at(pos);
+            if !is_digit(dd) { return false; }
+            let mut dgo = true;
+            while dgo {
+                if pos >= slen { dgo = false; }
+                else {
+                    let dc = s.char_at(pos);
+                    if is_digit(dc) { pos = pos + 1; }
+                    else { dgo = false; }
+                }
+            }
+        }
+    }
+    if pos < slen {
+        let ec = s.char_at(pos);
+        if ec == "e" || ec == "E" {
+            pos = pos + 1;
+            if pos < slen {
+                let sc = s.char_at(pos);
+                if sc == "+" || sc == "-" { pos = pos + 1; }
+            }
+            if pos >= slen { return false; }
+            let ed = s.char_at(pos);
+            if !is_digit(ed) { return false; }
+            let mut ego = true;
+            while ego {
+                if pos >= slen { ego = false; }
+                else {
+                    let dc = s.char_at(pos);
+                    if is_digit(dc) { pos = pos + 1; }
+                    else { ego = false; }
+                }
+            }
+        }
+    }
+    pos == slen
+}
+
+// --- Help message ---
+fn print_help() ~ Console {
+    println!("qcsv — CSV-to-JSON converter");
+    println!("");
+    println!("Usage:");
+    println!("  qcsv [OPTIONS] [FILE]");
+    println!("  cat data.csv | qcsv [OPTIONS]");
+    println!("");
+    println!("Options:");
+    println!("  -p         Pretty-print output (2-space indent)");
+    println!("  -a         Output as array of arrays (no header mapping)");
+    println!("  --help     Show this help message");
+    println!("");
+    println!("Examples:");
+    println!("  qcsv input.csv");
+    println!("  qcsv -p input.csv");
+    println!("  echo \"name,age\\nZain,25\" | qcsv");
+}
+
+// --- Build compact JSON (object mode) ---
+fn build_compact_objects(csv: &CSV) -> String {
+    let mut out = "[";
+    let mut r = 0;
+    while r < csv.row_n {
+        let rs = vec_get(csv.row_starts, r);
+        let rc = vec_get(csv.row_counts, r);
+        if r > 0 { out = out + ","; }
+        out = out + "{";
+        let mut cols = csv.hdr_n;
+        if rc < cols { cols = rc; }
+        let mut c = 0;
+        while c < cols {
+            let hid = vec_get(csv.hdr_ids, c);
+            let key = sp_get(csv, hid);
+            let fid = vec_get(csv.row_fids, rs + c);
+            let val = sp_get(csv, fid);
+            if c > 0 { out = out + ","; }
+            out = out + "\"" + escape_json(key) + "\":";
+            if is_numeric(val) { out = out + val; }
+            else { out = out + "\"" + escape_json(val) + "\""; }
+            c = c + 1;
+        }
+        out = out + "}";
+        r = r + 1;
+    }
+    out + "]"
+}
+
+// --- Build pretty JSON (object mode) ---
+fn build_pretty_objects(csv: &CSV) -> String {
+    let mut out = "[\n";
+    let mut r = 0;
+    while r < csv.row_n {
+        let rs = vec_get(csv.row_starts, r);
+        let rc = vec_get(csv.row_counts, r);
+        out = out + "  {\n";
+        let mut cols = csv.hdr_n;
+        if rc < cols { cols = rc; }
+        let mut c = 0;
+        while c < cols {
+            let hid = vec_get(csv.hdr_ids, c);
+            let key = sp_get(csv, hid);
+            let fid = vec_get(csv.row_fids, rs + c);
+            let val = sp_get(csv, fid);
+            out = out + "    \"" + escape_json(key) + "\": ";
+            if is_numeric(val) { out = out + val; }
+            else { out = out + "\"" + escape_json(val) + "\""; }
+            if c < cols - 1 { out = out + ","; }
+            out = out + "\n";
+            c = c + 1;
+        }
+        out = out + "  }";
+        if r < csv.row_n - 1 { out = out + ","; }
+        out = out + "\n";
+        r = r + 1;
+    }
+    out + "]"
+}
+
+// --- Build compact JSON (array mode) ---
+fn build_compact_arrays(csv: &CSV) -> String {
+    let mut out = "[";
+    let mut r = 0;
+    while r < csv.row_n {
+        let rs = vec_get(csv.row_starts, r);
+        let rc = vec_get(csv.row_counts, r);
+        if r > 0 { out = out + ","; }
+        out = out + "[";
+        let mut c = 0;
+        while c < rc {
+            let fid = vec_get(csv.row_fids, rs + c);
+            let val = sp_get(csv, fid);
+            if c > 0 { out = out + ","; }
+            if is_numeric(val) { out = out + val; }
+            else { out = out + "\"" + escape_json(val) + "\""; }
+            c = c + 1;
+        }
+        out = out + "]";
+        r = r + 1;
+    }
+    out + "]"
+}
+
+// --- Build pretty JSON (array mode) ---
+fn build_pretty_arrays(csv: &CSV) -> String {
+    let mut out = "[\n";
+    let mut r = 0;
+    while r < csv.row_n {
+        let rs = vec_get(csv.row_starts, r);
+        let rc = vec_get(csv.row_counts, r);
+        out = out + "  [";
+        let mut c = 0;
+        while c < rc {
+            let fid = vec_get(csv.row_fids, rs + c);
+            let val = sp_get(csv, fid);
+            if c > 0 { out = out + ", "; }
+            if is_numeric(val) { out = out + val; }
+            else { out = out + "\"" + escape_json(val) + "\""; }
+            c = c + 1;
+        }
+        out = out + "]";
+        if r < csv.row_n - 1 { out = out + ","; }
+        out = out + "\n";
+        r = r + 1;
+    }
+    out + "]"
+}
+
+// =============================================================================
+// MAIN
+// =============================================================================
+
+fn main() ~ Console + Environment + FileSystem + Process {
+    let nargs = args_count();
+
+    // --- Parse arguments ---
+    let mut do_pretty = false;
+    let mut array_mode = false;
+    let mut filename = "";
+    let mut has_file = false;
+
+    let mut i = 1;
+    while i < nargs {
+        let arg = args_get(i);
+        if arg == "--help" || arg == "-h" {
+            print_help();
+            process_exit(0);
+        } else if arg == "-p" {
+            do_pretty = true;
+        } else if arg == "-a" {
+            array_mode = true;
+        } else if arg == "-pa" || arg == "-ap" {
+            do_pretty = true;
+            array_mode = true;
+        } else if arg.starts_with("-") {
+            // Combined flags
+            if arg.contains("p") { do_pretty = true; }
+            if arg.contains("a") { array_mode = true; }
+        } else {
+            filename = arg;
+            has_file = true;
+        }
+        i = i + 1;
+    }
+
+    // --- Read input ---
+    let mut input = "";
+    if has_file {
+        if !file_exists(filename) {
+            println!("Error: file not found: {}", filename);
+            process_exit(1);
+        }
+        input = read_file(filename);
+    } else {
+        if stdin_is_pipe() {
+            input = read_all();
+        } else {
+            print_help();
+            process_exit(0);
+        }
+    }
+
+    let trimmed = input.trim();
+    if trimmed.len() == 0 {
+        println!("Error: empty input");
+        process_exit(1);
+    }
+
+    // --- Parse CSV ---
+    let mut csv = csv_new(trimmed);
+    find_lines(&mut csv);
+
+    if csv.ln_n == 0 {
+        println!("Error: no data");
+        process_exit(1);
+    }
+
+    parse_headers(&mut csv);
+    parse_rows(&mut csv);
+
+    // --- Build and print JSON output ---
+    let result = if array_mode {
+        if do_pretty { build_pretty_arrays(&csv) }
+        else { build_compact_arrays(&csv) }
+    } else {
+        if do_pretty { build_pretty_objects(&csv) }
+        else { build_compact_objects(&csv) }
+    };
+
+    println!("{}", result);
+}

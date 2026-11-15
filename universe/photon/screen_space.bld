@@ -1,0 +1,1617 @@
+// ═══════════════════════════════════════════════════════════════════════════════
+// PHOTON ENGINE - SCREEN-SPACE EFFECTS MODULE
+// ═══════════════════════════════════════════════════════════════════════════════
+// Copyright © 2024-2025 Zain Dana Harper. All Rights Reserved.
+// Copyright (c) 2024-2025 Zain Dana Harper. All Rights Reserved.
+// ═══════════════════════════════════════════════════════════════════════════════
+//
+// Comprehensive screen-space rendering techniques featuring:
+// - Screen-Space Reflections (SSR) with stochastic ray marching (WP-007, WP-144)
+// - Cone-traced reflections for roughness (WP-052)
+// - Screen-Space Ambient Occlusion (SSAO, HBAO, GTAO) (WP-062, WP-127)
+// - Screen-Space Global Illumination (SSGI) (WP-013)
+// - Screen-Space Subsurface Scattering (WP-121)
+// - Screen-Space Contact Shadows (WP-128)
+// - Screen-Space Photon Mapping (WP-072)
+// - Hierarchical Z-Buffer Occlusion (WP-008)
+//
+// ═══════════════════════════════════════════════════════════════════════════════
+
+module photon::screen_space
+
+use std::collections::{HashMap, VecDeque}
+use std::sync::{Arc, Mutex, RwLock}
+use std::math::{Vec2, Vec3, Vec4, Mat3, Mat4}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// G-BUFFER STRUCTURES
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// G-buffer data for screen-space techniques
+#[derive(Debug, Clone)]
+pub struct GBuffer {
+    pub depth: Vec<f32>,
+    pub normal: Vec<Vec3>,
+    pub albedo: Vec<Vec3>,
+    pub metallic: Vec<f32>,
+    pub roughness: Vec<f32>,
+    pub velocity: Vec<Vec2>,
+    pub material_id: Vec<u32>,
+    pub width: u32,
+    pub height: u32,
+}
+
+impl GBuffer {
+    pub fn new(width: u32, height: u32) -> Self {
+        let size = (width * height) as usize;
+        GBuffer {
+            depth: vec![1.0; size],
+            normal: vec![Vec3::Z; size],
+            albedo: vec![Vec3::ZERO; size],
+            metallic: vec![0.0; size],
+            roughness: vec![0.5; size],
+            velocity: vec![Vec2::ZERO; size],
+            material_id: vec![0; size],
+            width,
+            height,
+        }
+    }
+
+    pub fn sample_depth(&self, x: u32, y: u32) -> f32 {
+        let idx = (y.min(self.height - 1) * self.width + x.min(self.width - 1)) as usize;
+        self.depth[idx]
+    }
+
+    pub fn sample_normal(&self, x: u32, y: u32) -> Vec3 {
+        let idx = (y.min(self.height - 1) * self.width + x.min(self.width - 1)) as usize;
+        self.normal[idx]
+    }
+
+    pub fn sample_depth_bilinear(&self, uv: Vec2) -> f32 {
+        let x = uv.x * self.width as f32 - 0.5;
+        let y = uv.y * self.height as f32 - 0.5;
+
+        let x0 = x.floor() as i32;
+        let y0 = y.floor() as i32;
+        let fx = x - x0 as f32;
+        let fy = y - y0 as f32;
+
+        let sample = |px: i32, py: i32| -> f32 {
+            let px = px.clamp(0, self.width as i32 - 1) as u32;
+            let py = py.clamp(0, self.height as i32 - 1) as u32;
+            self.depth[(py * self.width + px) as usize]
+        };
+
+        let d00 = sample(x0, y0);
+        let d10 = sample(x0 + 1, y0);
+        let d01 = sample(x0, y0 + 1);
+        let d11 = sample(x0 + 1, y0 + 1);
+
+        let d0 = d00 * (1.0 - fx) + d10 * fx;
+        let d1 = d01 * (1.0 - fx) + d11 * fx;
+
+        d0 * (1.0 - fy) + d1 * fy
+    }
+}
+
+/// Hierarchical Z-buffer for occlusion culling (WP-008)
+pub struct HiZBuffer {
+    levels: Vec<Vec<f32>>,
+    widths: Vec<u32>,
+    heights: Vec<u32>,
+}
+
+impl HiZBuffer {
+    pub fn build(depth: &[f32], width: u32, height: u32) -> Self {
+        let num_levels = (width.max(height) as f32).log2().ceil() as usize + 1;
+        let mut levels = Vec::with_capacity(num_levels);
+        let mut widths = Vec::with_capacity(num_levels);
+        let mut heights = Vec::with_capacity(num_levels);
+
+        // Level 0 is original depth
+        levels.push(depth.to_vec());
+        widths.push(width);
+        heights.push(height);
+
+        // Build mip chain with min filter
+        for level in 1..num_levels {
+            let prev_width = widths[level - 1];
+            let prev_height = heights[level - 1];
+            let prev_level = &levels[level - 1];
+
+            let new_width = (prev_width / 2).max(1);
+            let new_height = (prev_height / 2).max(1);
+
+            let mut new_level = vec![0.0; (new_width * new_height) as usize];
+
+            for y in 0..new_height {
+                for x in 0..new_width {
+                    let src_x = x * 2;
+                    let src_y = y * 2;
+
+                    // 2x2 min filter for conservative depth
+                    let mut min_depth = f32::MAX;
+
+                    for dy in 0..2 {
+                        for dx in 0..2 {
+                            let sx = (src_x + dx).min(prev_width - 1);
+                            let sy = (src_y + dy).min(prev_height - 1);
+                            let d = prev_level[(sy * prev_width + sx) as usize];
+                            min_depth = min_depth.min(d);
+                        }
+                    }
+
+                    new_level[(y * new_width + x) as usize] = min_depth;
+                }
+            }
+
+            levels.push(new_level);
+            widths.push(new_width);
+            heights.push(new_height);
+        }
+
+        HiZBuffer { levels, widths, heights }
+    }
+
+    /// Sample depth at mip level
+    pub fn sample(&self, level: usize, uv: Vec2) -> f32 {
+        let level = level.min(self.levels.len() - 1);
+        let width = self.widths[level] as f32;
+        let height = self.heights[level] as f32;
+
+        let x = (uv.x * width).clamp(0.0, width - 1.0) as u32;
+        let y = (uv.y * height).clamp(0.0, height - 1.0) as u32;
+
+        self.levels[level][(y * self.widths[level] + x) as usize]
+    }
+
+    /// Check if point is occluded
+    pub fn is_occluded(&self, uv: Vec2, depth: f32, level: usize) -> bool {
+        let hi_z = self.sample(level, uv);
+        depth > hi_z
+    }
+
+    /// Find appropriate mip level for ray step size
+    pub fn get_level_for_step(&self, step_size: f32) -> usize {
+        let base_width = self.widths[0] as f32;
+        let level = (step_size * base_width).log2().ceil() as usize;
+        level.clamp(0, self.levels.len() - 1)
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// SCREEN-SPACE REFLECTIONS (WP-007, WP-144)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// SSR quality settings
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum SSRQuality {
+    Low,        // 16 steps, no jitter
+    Medium,     // 32 steps, temporal jitter
+    High,       // 64 steps, Hi-Z traversal
+    Ultra,      // 128 steps, stochastic + Hi-Z
+}
+
+/// SSR configuration
+#[derive(Debug, Clone)]
+pub struct SSRConfig {
+    pub quality: SSRQuality,
+    pub max_distance: f32,
+    pub thickness: f32,
+    pub stride: f32,
+    pub jitter_strength: f32,
+    pub fade_distance: f32,
+    pub edge_fade: f32,
+    pub roughness_cutoff: f32,
+    pub temporal_blend: f32,
+}
+
+impl Default for SSRConfig {
+    fn default() -> Self {
+        SSRConfig {
+            quality: SSRQuality::High,
+            max_distance: 100.0,
+            thickness: 0.1,
+            stride: 2.0,
+            jitter_strength: 0.3,
+            fade_distance: 50.0,
+            edge_fade: 0.1,
+            roughness_cutoff: 0.5,
+            temporal_blend: 0.9,
+        }
+    }
+}
+
+/// SSR hit result
+#[derive(Debug, Clone, Copy)]
+pub struct SSRHit {
+    pub hit: bool,
+    pub uv: Vec2,
+    pub confidence: f32,
+    pub pdf: f32,
+}
+
+/// Screen-Space Reflections implementation
+pub struct ScreenSpaceReflections {
+    config: SSRConfig,
+    hi_z: Option<HiZBuffer>,
+    history: Vec<Vec3>,
+    width: u32,
+    height: u32,
+    view_matrix: Mat4,
+    proj_matrix: Mat4,
+    inv_view_proj: Mat4,
+    frame_index: u32,
+}
+
+impl ScreenSpaceReflections {
+    pub fn new(width: u32, height: u32, config: SSRConfig) -> Self {
+        ScreenSpaceReflections {
+            config,
+            hi_z: None,
+            history: vec![Vec3::ZERO; (width * height) as usize],
+            width,
+            height,
+            view_matrix: Mat4::IDENTITY,
+            proj_matrix: Mat4::IDENTITY,
+            inv_view_proj: Mat4::IDENTITY,
+            frame_index: 0,
+        }
+    }
+
+    /// Update matrices
+    pub fn set_matrices(&mut self, view: Mat4, proj: Mat4) {
+        self.view_matrix = view;
+        self.proj_matrix = proj;
+        self.inv_view_proj = (proj * view).inverse();
+    }
+
+    /// Build Hi-Z buffer for acceleration
+    pub fn build_hi_z(&mut self, depth: &[f32]) {
+        self.hi_z = Some(HiZBuffer::build(depth, self.width, self.height));
+    }
+
+    /// Convert view-space position to UV
+    fn view_to_uv(&self, view_pos: Vec3) -> Option<Vec2> {
+        let clip = self.proj_matrix.transform_point(view_pos);
+        if clip.z <= 0.0 {
+            return None;
+        }
+
+        let ndc = Vec2::new(clip.x / clip.z, clip.y / clip.z);
+        let uv = (ndc + Vec2::ONE) * 0.5;
+
+        if uv.x >= 0.0 && uv.x <= 1.0 && uv.y >= 0.0 && uv.y <= 1.0 {
+            Some(uv)
+        } else {
+            None
+        }
+    }
+
+    /// Convert UV to view-space position at depth
+    fn uv_to_view(&self, uv: Vec2, depth: f32) -> Vec3 {
+        let ndc = uv * 2.0 - Vec2::ONE;
+        let clip = Vec4::new(ndc.x, ndc.y, depth, 1.0);
+        let view_pos = self.inv_view_proj * clip;
+        Vec3::new(
+            view_pos.x / view_pos.w,
+            view_pos.y / view_pos.w,
+            view_pos.z / view_pos.w,
+        )
+    }
+
+    /// Linear ray march
+    fn ray_march_linear(
+        &self,
+        origin: Vec3,
+        direction: Vec3,
+        gbuffer: &GBuffer,
+        max_steps: u32,
+    ) -> SSRHit {
+        let mut position = origin;
+        let step = direction * self.config.stride;
+
+        for i in 0..max_steps {
+            position += step;
+
+            if let Some(uv) = self.view_to_uv(position) {
+                let scene_depth = gbuffer.sample_depth_bilinear(uv);
+                let ray_depth = (self.proj_matrix.transform_point(position).z).max(0.0);
+
+                let depth_diff = ray_depth - scene_depth;
+
+                if depth_diff > 0.0 && depth_diff < self.config.thickness {
+                    // Hit detected - binary search for refinement
+                    let refined = self.binary_search_hit(
+                        position - step,
+                        position,
+                        gbuffer,
+                        8,
+                    );
+
+                    let dist = (position - origin).length();
+                    let fade = 1.0 - (dist / self.config.max_distance).min(1.0);
+                    let edge_fade = self.compute_edge_fade(uv);
+
+                    return SSRHit {
+                        hit: true,
+                        uv: refined,
+                        confidence: fade * edge_fade,
+                        pdf: 1.0,
+                    };
+                }
+            } else {
+                break;
+            }
+        }
+
+        SSRHit {
+            hit: false,
+            uv: Vec2::ZERO,
+            confidence: 0.0,
+            pdf: 0.0,
+        }
+    }
+
+    /// Hierarchical ray march using Hi-Z buffer
+    fn ray_march_hi_z(
+        &self,
+        origin: Vec3,
+        direction: Vec3,
+        gbuffer: &GBuffer,
+    ) -> SSRHit {
+        let hi_z = match &self.hi_z {
+            Some(h) => h,
+            None => return self.ray_march_linear(origin, direction, gbuffer, 64),
+        };
+
+        let mut position = origin;
+        let mut level = 0;
+        let max_steps = 128;
+        let mut step_count = 0;
+
+        while step_count < max_steps {
+            step_count += 1;
+
+            // Adaptive step size based on Hi-Z level
+            let step_size = self.config.stride * (1 << level) as f32;
+            let step = direction * step_size;
+            position += step;
+
+            if let Some(uv) = self.view_to_uv(position) {
+                let hi_z_depth = hi_z.sample(level, uv);
+                let ray_depth = (self.proj_matrix.transform_point(position).z).max(0.0);
+
+                if ray_depth > hi_z_depth {
+                    if level == 0 {
+                        // At finest level - check actual depth
+                        let scene_depth = gbuffer.sample_depth_bilinear(uv);
+                        let depth_diff = ray_depth - scene_depth;
+
+                        if depth_diff < self.config.thickness {
+                            // Valid hit
+                            let dist = (position - origin).length();
+                            let fade = 1.0 - (dist / self.config.max_distance).min(1.0);
+                            let edge_fade = self.compute_edge_fade(uv);
+
+                            return SSRHit {
+                                hit: true,
+                                uv,
+                                confidence: fade * edge_fade,
+                                pdf: 1.0,
+                            };
+                        }
+                    } else {
+                        // Go to finer level and step back
+                        level -= 1;
+                        position -= step;
+                    }
+                } else {
+                    // No intersection at this level - try coarser
+                    level = (level + 1).min(hi_z.levels.len() - 1);
+                }
+            } else {
+                break;
+            }
+        }
+
+        SSRHit {
+            hit: false,
+            uv: Vec2::ZERO,
+            confidence: 0.0,
+            pdf: 0.0,
+        }
+    }
+
+    /// Binary search for hit refinement
+    fn binary_search_hit(&self, start: Vec3, end: Vec3, gbuffer: &GBuffer, iterations: u32) -> Vec2 {
+        let mut lo = start;
+        let mut hi = end;
+
+        for _ in 0..iterations {
+            let mid = (lo + hi) * 0.5;
+
+            if let Some(uv) = self.view_to_uv(mid) {
+                let scene_depth = gbuffer.sample_depth_bilinear(uv);
+                let ray_depth = (self.proj_matrix.transform_point(mid).z).max(0.0);
+
+                if ray_depth > scene_depth {
+                    hi = mid;
+                } else {
+                    lo = mid;
+                }
+            } else {
+                break;
+            }
+        }
+
+        self.view_to_uv((lo + hi) * 0.5).unwrap_or(Vec2::ZERO)
+    }
+
+    /// Compute edge fade to hide artifacts at screen borders
+    fn compute_edge_fade(&self, uv: Vec2) -> f32 {
+        let edge = self.config.edge_fade;
+
+        let fade_x = (uv.x / edge).min((1.0 - uv.x) / edge).min(1.0);
+        let fade_y = (uv.y / edge).min((1.0 - uv.y) / edge).min(1.0);
+
+        fade_x * fade_y
+    }
+
+    /// Trace single reflection ray
+    pub fn trace_reflection(
+        &self,
+        pixel: (u32, u32),
+        gbuffer: &GBuffer,
+        view_pos: Vec3,
+        normal: Vec3,
+        roughness: f32,
+    ) -> (Vec3, f32) {
+        // Skip if too rough
+        if roughness > self.config.roughness_cutoff {
+            return (Vec3::ZERO, 0.0);
+        }
+
+        // Compute reflection direction
+        let view_dir = view_pos.normalize();
+        let reflect_dir = view_dir - normal * 2.0 * view_dir.dot(normal);
+
+        // Apply roughness-based jitter
+        let jittered_dir = if roughness > 0.01 && self.config.jitter_strength > 0.0 {
+            self.apply_roughness_jitter(reflect_dir, normal, roughness, pixel)
+        } else {
+            reflect_dir
+        };
+
+        // Ray march
+        let hit = match self.config.quality {
+            SSRQuality::Low => self.ray_march_linear(view_pos, jittered_dir, gbuffer, 16),
+            SSRQuality::Medium => self.ray_march_linear(view_pos, jittered_dir, gbuffer, 32),
+            SSRQuality::High | SSRQuality::Ultra => {
+                self.ray_march_hi_z(view_pos, jittered_dir, gbuffer)
+            }
+        };
+
+        if hit.hit {
+            // Sample color from hit location
+            let idx = ((hit.uv.y * self.height as f32) as u32 * self.width +
+                       (hit.uv.x * self.width as f32) as u32) as usize;
+
+            if idx < gbuffer.albedo.len() {
+                // In practice, sample from previous frame color buffer
+                let color = gbuffer.albedo[idx];
+                return (color, hit.confidence);
+            }
+        }
+
+        (Vec3::ZERO, 0.0)
+    }
+
+    /// Apply roughness-based jitter for stochastic SSR
+    fn apply_roughness_jitter(
+        &self,
+        reflect_dir: Vec3,
+        normal: Vec3,
+        roughness: f32,
+        pixel: (u32, u32),
+    ) -> Vec3 {
+        // Generate quasi-random offset based on pixel and frame
+        let hash = self.pixel_hash(pixel.0, pixel.1, self.frame_index);
+        let theta = hash.x * 2.0 * std::f32::consts::PI;
+        let r = hash.y.sqrt() * roughness * self.config.jitter_strength;
+
+        // Create tangent frame
+        let up = if normal.y.abs() < 0.999 { Vec3::Y } else { Vec3::X };
+        let tangent = up.cross(reflect_dir).normalize();
+        let bitangent = reflect_dir.cross(tangent);
+
+        // Apply jitter
+        let offset = tangent * r * theta.cos() + bitangent * r * theta.sin();
+        (reflect_dir + offset).normalize()
+    }
+
+    fn pixel_hash(&self, x: u32, y: u32, frame: u32) -> Vec2 {
+        let mut n = (x * 73856093) ^ (y * 19349663) ^ (frame * 83492791);
+        n = (n >> 13) ^ n;
+        n = n.wrapping_mul(n.wrapping_mul(n.wrapping_mul(60493).wrapping_add(19990303)).wrapping_add(1376312589));
+        let x = (n & 0xFFFF) as f32 / 65535.0;
+        let y = ((n >> 16) & 0xFFFF) as f32 / 65535.0;
+        Vec2::new(x, y)
+    }
+
+    /// Advance frame
+    pub fn next_frame(&mut self) {
+        self.frame_index += 1;
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// CONE-TRACED REFLECTIONS (WP-052)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Cone tracing for glossy reflections
+pub struct ConeTracedReflections {
+    color_pyramid: Vec<Vec<Vec3>>,
+    depth_pyramid: Vec<Vec<f32>>,
+    pyramid_widths: Vec<u32>,
+    pyramid_heights: Vec<u32>,
+    width: u32,
+    height: u32,
+}
+
+impl ConeTracedReflections {
+    pub fn new(width: u32, height: u32) -> Self {
+        ConeTracedReflections {
+            color_pyramid: Vec::new(),
+            depth_pyramid: Vec::new(),
+            pyramid_widths: Vec::new(),
+            pyramid_heights: Vec::new(),
+            width,
+            height,
+        }
+    }
+
+    /// Build mip pyramids from color and depth buffers
+    pub fn build_pyramids(&mut self, color: &[Vec3], depth: &[f32]) {
+        let num_levels = (self.width.max(self.height) as f32).log2().ceil() as usize + 1;
+
+        self.color_pyramid.clear();
+        self.depth_pyramid.clear();
+        self.pyramid_widths.clear();
+        self.pyramid_heights.clear();
+
+        // Level 0
+        self.color_pyramid.push(color.to_vec());
+        self.depth_pyramid.push(depth.to_vec());
+        self.pyramid_widths.push(self.width);
+        self.pyramid_heights.push(self.height);
+
+        // Build mip chain
+        for level in 1..num_levels {
+            let prev_w = self.pyramid_widths[level - 1];
+            let prev_h = self.pyramid_heights[level - 1];
+
+            let new_w = (prev_w / 2).max(1);
+            let new_h = (prev_h / 2).max(1);
+
+            let mut new_color = vec![Vec3::ZERO; (new_w * new_h) as usize];
+            let mut new_depth = vec![0.0f32; (new_w * new_h) as usize];
+
+            for y in 0..new_h {
+                for x in 0..new_w {
+                    let src_x = x * 2;
+                    let src_y = y * 2;
+
+                    let mut sum_color = Vec3::ZERO;
+                    let mut min_depth = f32::MAX;
+                    let mut count = 0;
+
+                    for dy in 0..2 {
+                        for dx in 0..2 {
+                            let sx = (src_x + dx).min(prev_w - 1);
+                            let sy = (src_y + dy).min(prev_h - 1);
+                            let idx = (sy * prev_w + sx) as usize;
+
+                            sum_color += self.color_pyramid[level - 1][idx];
+                            min_depth = min_depth.min(self.depth_pyramid[level - 1][idx]);
+                            count += 1;
+                        }
+                    }
+
+                    let idx = (y * new_w + x) as usize;
+                    new_color[idx] = sum_color / count as f32;
+                    new_depth[idx] = min_depth;
+                }
+            }
+
+            self.color_pyramid.push(new_color);
+            self.depth_pyramid.push(new_depth);
+            self.pyramid_widths.push(new_w);
+            self.pyramid_heights.push(new_h);
+        }
+    }
+
+    /// Sample color pyramid at LOD
+    fn sample_color(&self, uv: Vec2, lod: f32) -> Vec3 {
+        let lod = lod.clamp(0.0, (self.color_pyramid.len() - 1) as f32);
+        let level0 = lod.floor() as usize;
+        let level1 = (level0 + 1).min(self.color_pyramid.len() - 1);
+        let t = lod.fract();
+
+        let sample_level = |level: usize| -> Vec3 {
+            let w = self.pyramid_widths[level] as f32;
+            let h = self.pyramid_heights[level] as f32;
+            let x = (uv.x * w).clamp(0.0, w - 1.0) as u32;
+            let y = (uv.y * h).clamp(0.0, h - 1.0) as u32;
+            self.color_pyramid[level][(y * self.pyramid_widths[level] + x) as usize]
+        };
+
+        let c0 = sample_level(level0);
+        let c1 = sample_level(level1);
+
+        c0 * (1.0 - t) + c1 * t
+    }
+
+    /// Trace cone for glossy reflection
+    pub fn trace_cone(
+        &self,
+        origin: Vec3,
+        direction: Vec3,
+        roughness: f32,
+        proj_matrix: &Mat4,
+        gbuffer: &GBuffer,
+    ) -> Vec3 {
+        // Cone angle based on roughness
+        let cone_angle = roughness * std::f32::consts::PI * 0.5;
+
+        let mut position = origin;
+        let step_size = 1.0;
+        let max_steps = 64;
+
+        for step in 0..max_steps {
+            position += direction * step_size;
+
+            // Compute cone footprint
+            let distance = step as f32 * step_size;
+            let cone_radius = distance * cone_angle.tan();
+
+            // Project to screen
+            let clip = proj_matrix.transform_point(position);
+            if clip.z <= 0.0 {
+                break;
+            }
+
+            let ndc = Vec2::new(clip.x / clip.z, clip.y / clip.z);
+            let uv = (ndc + Vec2::ONE) * 0.5;
+
+            if uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0 {
+                break;
+            }
+
+            // Compute appropriate mip level
+            let pixel_radius = cone_radius * proj_matrix.m[0][0] * self.width as f32 * 0.5;
+            let lod = pixel_radius.log2().max(0.0);
+
+            // Check depth
+            let level = lod.floor() as usize;
+            if level < self.depth_pyramid.len() {
+                let w = self.pyramid_widths[level];
+                let h = self.pyramid_heights[level];
+                let x = (uv.x * w as f32).clamp(0.0, w as f32 - 1.0) as u32;
+                let y = (uv.y * h as f32).clamp(0.0, h as f32 - 1.0) as u32;
+                let scene_depth = self.depth_pyramid[level][(y * w + x) as usize];
+
+                let ray_depth = clip.z;
+
+                if ray_depth > scene_depth {
+                    // Hit - sample filtered color
+                    return self.sample_color(uv, lod);
+                }
+            }
+        }
+
+        Vec3::ZERO
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// AMBIENT OCCLUSION (WP-062, WP-127)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// AO algorithm type
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum AOAlgorithm {
+    SSAO,       // Classic screen-space ambient occlusion
+    HBAO,       // Horizon-based ambient occlusion
+    GTAO,       // Ground-truth ambient occlusion
+    CapsuleAO,  // Capsule-based AO (WP-127)
+}
+
+/// AO configuration
+#[derive(Debug, Clone)]
+pub struct AOConfig {
+    pub algorithm: AOAlgorithm,
+    pub radius: f32,
+    pub intensity: f32,
+    pub bias: f32,
+    pub sample_count: u32,
+    pub blur_enabled: bool,
+    pub blur_radius: u32,
+    pub temporal_filter: bool,
+}
+
+impl Default for AOConfig {
+    fn default() -> Self {
+        AOConfig {
+            algorithm: AOAlgorithm::GTAO,
+            radius: 2.0,
+            intensity: 1.5,
+            bias: 0.01,
+            sample_count: 16,
+            blur_enabled: true,
+            blur_radius: 4,
+            temporal_filter: true,
+        }
+    }
+}
+
+/// Screen-Space Ambient Occlusion implementations
+pub struct AmbientOcclusion {
+    config: AOConfig,
+    kernel: Vec<Vec3>,
+    noise: Vec<Vec3>,
+    noise_size: u32,
+    history: Vec<f32>,
+    width: u32,
+    height: u32,
+    proj_matrix: Mat4,
+    inv_proj_matrix: Mat4,
+}
+
+impl AmbientOcclusion {
+    pub fn new(width: u32, height: u32, config: AOConfig) -> Self {
+        let kernel = Self::generate_kernel(config.sample_count);
+        let noise_size = 4;
+        let noise = Self::generate_noise(noise_size * noise_size);
+
+        AmbientOcclusion {
+            config,
+            kernel,
+            noise,
+            noise_size,
+            history: vec![1.0; (width * height) as usize],
+            width,
+            height,
+            proj_matrix: Mat4::IDENTITY,
+            inv_proj_matrix: Mat4::IDENTITY,
+        }
+    }
+
+    /// Generate hemisphere sample kernel
+    fn generate_kernel(sample_count: u32) -> Vec<Vec3> {
+        let mut kernel = Vec::with_capacity(sample_count as usize);
+
+        for i in 0..sample_count {
+            // Cosine-weighted hemisphere sampling
+            let xi1 = Self::radical_inverse(i, 2);
+            let xi2 = Self::radical_inverse(i, 3);
+
+            let r = xi1.sqrt();
+            let theta = 2.0 * std::f32::consts::PI * xi2;
+
+            let x = r * theta.cos();
+            let y = r * theta.sin();
+            let z = (1.0 - xi1).sqrt();
+
+            // Scale by distance (more samples near origin)
+            let scale = (i as f32 + 1.0) / sample_count as f32;
+            let scale = 0.1 + scale * scale * 0.9;
+
+            kernel.push(Vec3::new(x, y, z) * scale);
+        }
+
+        kernel
+    }
+
+    /// Generate random rotation vectors
+    fn generate_noise(count: u32) -> Vec<Vec3> {
+        let mut noise = Vec::with_capacity(count as usize);
+
+        for i in 0..count {
+            let xi1 = Self::radical_inverse(i, 2);
+            let xi2 = Self::radical_inverse(i, 3);
+
+            let angle = xi1 * 2.0 * std::f32::consts::PI;
+            noise.push(Vec3::new(angle.cos(), angle.sin(), 0.0));
+        }
+
+        noise
+    }
+
+    fn radical_inverse(mut n: u32, base: u32) -> f32 {
+        let mut result = 0.0;
+        let mut f = 1.0 / base as f32;
+
+        while n > 0 {
+            result += f * (n % base) as f32;
+            n /= base;
+            f /= base as f32;
+        }
+
+        result
+    }
+
+    /// Set matrices
+    pub fn set_matrices(&mut self, proj: Mat4) {
+        self.proj_matrix = proj;
+        self.inv_proj_matrix = proj.inverse();
+    }
+
+    /// Compute AO for single pixel using SSAO
+    fn compute_ssao(&self, x: u32, y: u32, gbuffer: &GBuffer) -> f32 {
+        let idx = (y * self.width + x) as usize;
+        let depth = gbuffer.depth[idx];
+        let normal = gbuffer.normal[idx];
+
+        // Reconstruct view-space position
+        let uv = Vec2::new(x as f32 / self.width as f32, y as f32 / self.height as f32);
+        let ndc = uv * 2.0 - Vec2::ONE;
+        let clip = Vec4::new(ndc.x, ndc.y, depth, 1.0);
+        let view_pos = self.inv_proj_matrix * clip;
+        let position = Vec3::new(view_pos.x, view_pos.y, view_pos.z) / view_pos.w;
+
+        // Get noise rotation
+        let noise_idx = ((y % self.noise_size) * self.noise_size + (x % self.noise_size)) as usize;
+        let rotation = self.noise[noise_idx];
+
+        // Create TBN matrix
+        let tangent = (rotation - normal * rotation.dot(normal)).normalize();
+        let bitangent = normal.cross(tangent);
+
+        let mut occlusion = 0.0;
+
+        for sample in &self.kernel {
+            // Rotate sample
+            let sample_vec = tangent * sample.x + bitangent * sample.y + normal * sample.z;
+            let sample_pos = position + sample_vec * self.config.radius;
+
+            // Project to screen
+            let clip = self.proj_matrix.transform_point(sample_pos);
+            let sample_uv = Vec2::new(
+                (clip.x / clip.z + 1.0) * 0.5,
+                (clip.y / clip.z + 1.0) * 0.5,
+            );
+
+            // Sample depth
+            let sample_depth = gbuffer.sample_depth_bilinear(sample_uv);
+
+            // Compare depths
+            let range_check = ((position.z - sample_pos.z).abs() / self.config.radius).min(1.0);
+            let ao_value = if clip.z > sample_depth + self.config.bias {
+                1.0 - range_check
+            } else {
+                0.0
+            };
+
+            occlusion += ao_value;
+        }
+
+        1.0 - (occlusion / self.kernel.len() as f32) * self.config.intensity
+    }
+
+    /// Compute AO using HBAO algorithm
+    fn compute_hbao(&self, x: u32, y: u32, gbuffer: &GBuffer) -> f32 {
+        let idx = (y * self.width + x) as usize;
+        let depth = gbuffer.depth[idx];
+        let normal = gbuffer.normal[idx];
+
+        // Reconstruct view-space position
+        let uv = Vec2::new(x as f32 / self.width as f32, y as f32 / self.height as f32);
+        let ndc = uv * 2.0 - Vec2::ONE;
+        let clip = Vec4::new(ndc.x, ndc.y, depth, 1.0);
+        let view_pos = self.inv_proj_matrix * clip;
+        let position = Vec3::new(view_pos.x, view_pos.y, view_pos.z) / view_pos.w;
+
+        let num_directions = 8;
+        let num_steps = 4;
+        let mut occlusion = 0.0;
+
+        for dir in 0..num_directions {
+            let angle = (dir as f32 / num_directions as f32) * 2.0 * std::f32::consts::PI;
+            let ray_dir = Vec2::new(angle.cos(), angle.sin());
+
+            let mut max_horizon = -1.0f32;
+
+            for step in 1..=num_steps {
+                let offset = ray_dir * step as f32 * self.config.radius / num_steps as f32;
+                let sample_uv = uv + offset / Vec2::new(self.width as f32, self.height as f32);
+
+                if sample_uv.x < 0.0 || sample_uv.x > 1.0 || sample_uv.y < 0.0 || sample_uv.y > 1.0 {
+                    continue;
+                }
+
+                let sample_depth = gbuffer.sample_depth_bilinear(sample_uv);
+
+                // Reconstruct sample position
+                let sample_ndc = sample_uv * 2.0 - Vec2::ONE;
+                let sample_clip = Vec4::new(sample_ndc.x, sample_ndc.y, sample_depth, 1.0);
+                let sample_view = self.inv_proj_matrix * sample_clip;
+                let sample_pos = Vec3::new(sample_view.x, sample_view.y, sample_view.z) / sample_view.w;
+
+                // Compute horizon angle
+                let diff = sample_pos - position;
+                let horizon = diff.z / diff.xy().length();
+
+                max_horizon = max_horizon.max(horizon);
+            }
+
+            // Compute occlusion from horizon
+            let tangent_angle = normal.xy().dot(ray_dir) / normal.z.abs().max(0.001);
+            let ao = (tangent_angle - max_horizon).max(0.0);
+            occlusion += ao;
+        }
+
+        1.0 - (occlusion / num_directions as f32) * self.config.intensity
+    }
+
+    /// Compute AO using GTAO algorithm (most accurate)
+    fn compute_gtao(&self, x: u32, y: u32, gbuffer: &GBuffer) -> f32 {
+        let idx = (y * self.width + x) as usize;
+        let depth = gbuffer.depth[idx];
+        let normal = gbuffer.normal[idx];
+
+        // Reconstruct view-space position
+        let uv = Vec2::new(x as f32 / self.width as f32, y as f32 / self.height as f32);
+        let ndc = uv * 2.0 - Vec2::ONE;
+        let clip = Vec4::new(ndc.x, ndc.y, depth, 1.0);
+        let view_pos = self.inv_proj_matrix * clip;
+        let position = Vec3::new(view_pos.x, view_pos.y, view_pos.z) / view_pos.w;
+
+        let num_slices = 4;
+        let num_steps = 8;
+        let mut visibility = 0.0;
+
+        // Get noise for rotation
+        let noise_idx = ((y % self.noise_size) * self.noise_size + (x % self.noise_size)) as usize;
+        let noise_rotation = self.noise[noise_idx].x * std::f32::consts::PI;
+
+        for slice in 0..num_slices {
+            let phi = (slice as f32 / num_slices as f32) * std::f32::consts::PI + noise_rotation;
+            let slice_dir = Vec3::new(phi.cos(), phi.sin(), 0.0);
+
+            // Compute bent normal projection
+            let proj_normal = normal - slice_dir * slice_dir.dot(normal);
+            let proj_normal_len = proj_normal.length();
+
+            if proj_normal_len < 0.001 {
+                visibility += 1.0;
+                continue;
+            }
+
+            let proj_normal = proj_normal / proj_normal_len;
+            let sign = if slice_dir.cross(normal).z > 0.0 { 1.0 } else { -1.0 };
+            let cos_n = proj_normal.z;
+            let n = sign * (std::f32::consts::PI * 0.5 - cos_n.acos());
+
+            let mut h1 = -1.0f32;
+            let mut h2 = -1.0f32;
+
+            // March in both directions
+            for side in [-1.0f32, 1.0f32] {
+                let step_dir = slice_dir * side;
+
+                for step in 1..=num_steps {
+                    let step_size = self.config.radius * step as f32 / num_steps as f32;
+                    let sample_offset = step_dir.xy() * step_size;
+                    let sample_uv = uv + sample_offset / Vec2::new(self.width as f32, self.height as f32);
+
+                    if sample_uv.x < 0.0 || sample_uv.x > 1.0 || sample_uv.y < 0.0 || sample_uv.y > 1.0 {
+                        continue;
+                    }
+
+                    let sample_depth = gbuffer.sample_depth_bilinear(sample_uv);
+
+                    // Reconstruct sample position
+                    let sample_ndc = sample_uv * 2.0 - Vec2::ONE;
+                    let sample_clip = Vec4::new(sample_ndc.x, sample_ndc.y, sample_depth, 1.0);
+                    let sample_view = self.inv_proj_matrix * sample_clip;
+                    let sample_pos = Vec3::new(sample_view.x, sample_view.y, sample_view.z) / sample_view.w;
+
+                    let diff = sample_pos - position;
+                    let len = diff.length();
+
+                    if len < 0.001 || len > self.config.radius {
+                        continue;
+                    }
+
+                    // Falloff
+                    let falloff = 1.0 - (len / self.config.radius);
+                    let horizon = (-diff.z / diff.xy().length()).atan();
+
+                    if side < 0.0 {
+                        h1 = h1.max(horizon * falloff);
+                    } else {
+                        h2 = h2.max(horizon * falloff);
+                    }
+                }
+            }
+
+            // Compute visibility for this slice
+            let h1 = h1.clamp(-std::f32::consts::PI * 0.5, std::f32::consts::PI * 0.5);
+            let h2 = h2.clamp(-std::f32::consts::PI * 0.5, std::f32::consts::PI * 0.5);
+
+            // Integrate visibility
+            let inner_integral = |h: f32, n: f32| -> f32 {
+                0.25 * (-2.0 * h * n.sin() + n.cos() - (2.0 * h - n).cos())
+            };
+
+            visibility += inner_integral(h1, n) + inner_integral(h2, n);
+        }
+
+        (visibility / num_slices as f32 * self.config.intensity).clamp(0.0, 1.0)
+    }
+
+    /// Compute AO for full screen
+    pub fn compute(&self, gbuffer: &GBuffer) -> Vec<f32> {
+        let mut ao = vec![1.0; (self.width * self.height) as usize];
+
+        for y in 0..self.height {
+            for x in 0..self.width {
+                let idx = (y * self.width + x) as usize;
+
+                ao[idx] = match self.config.algorithm {
+                    AOAlgorithm::SSAO => self.compute_ssao(x, y, gbuffer),
+                    AOAlgorithm::HBAO => self.compute_hbao(x, y, gbuffer),
+                    AOAlgorithm::GTAO => self.compute_gtao(x, y, gbuffer),
+                    AOAlgorithm::CapsuleAO => 1.0, // Would use capsule data
+                };
+            }
+        }
+
+        // Apply bilateral blur if enabled
+        if self.config.blur_enabled {
+            self.bilateral_blur(&mut ao, gbuffer);
+        }
+
+        ao
+    }
+
+    /// Apply bilateral blur to preserve edges
+    fn bilateral_blur(&self, ao: &mut [f32], gbuffer: &GBuffer) {
+        let radius = self.config.blur_radius as i32;
+        let temp = ao.to_vec();
+
+        for y in 0..self.height {
+            for x in 0..self.width {
+                let center_idx = (y * self.width + x) as usize;
+                let center_depth = gbuffer.depth[center_idx];
+                let center_normal = gbuffer.normal[center_idx];
+
+                let mut sum = 0.0;
+                let mut weight_sum = 0.0;
+
+                for dy in -radius..=radius {
+                    for dx in -radius..=radius {
+                        let sx = (x as i32 + dx).clamp(0, self.width as i32 - 1) as u32;
+                        let sy = (y as i32 + dy).clamp(0, self.height as i32 - 1) as u32;
+                        let sample_idx = (sy * self.width + sx) as usize;
+
+                        let sample_depth = gbuffer.depth[sample_idx];
+                        let sample_normal = gbuffer.normal[sample_idx];
+
+                        // Depth weight
+                        let depth_diff = (center_depth - sample_depth).abs();
+                        let depth_weight = (-depth_diff * 1000.0).exp();
+
+                        // Normal weight
+                        let normal_dot = center_normal.dot(sample_normal).max(0.0);
+                        let normal_weight = normal_dot.powi(8);
+
+                        // Spatial weight
+                        let dist_sq = (dx * dx + dy * dy) as f32;
+                        let spatial_weight = (-(dist_sq) / (2.0 * radius as f32 * radius as f32)).exp();
+
+                        let weight = depth_weight * normal_weight * spatial_weight;
+                        sum += temp[sample_idx] * weight;
+                        weight_sum += weight;
+                    }
+                }
+
+                if weight_sum > 0.0 {
+                    ao[center_idx] = sum / weight_sum;
+                }
+            }
+        }
+    }
+
+    /// Apply temporal filtering
+    pub fn temporal_filter(&mut self, current: &mut [f32], velocity: &[Vec2]) {
+        if !self.config.temporal_filter {
+            return;
+        }
+
+        for y in 0..self.height {
+            for x in 0..self.width {
+                let idx = (y * self.width + x) as usize;
+                let motion = velocity[idx];
+
+                // Reproject
+                let prev_x = (x as f32 - motion.x).round() as i32;
+                let prev_y = (y as f32 - motion.y).round() as i32;
+
+                if prev_x >= 0 && prev_x < self.width as i32 &&
+                   prev_y >= 0 && prev_y < self.height as i32 {
+                    let prev_idx = (prev_y as u32 * self.width + prev_x as u32) as usize;
+
+                    // Blend
+                    current[idx] = current[idx] * 0.1 + self.history[prev_idx] * 0.9;
+                }
+            }
+        }
+
+        self.history.copy_from_slice(current);
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// SCREEN-SPACE GLOBAL ILLUMINATION (WP-013)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// SSGI configuration
+#[derive(Debug, Clone)]
+pub struct SSGIConfig {
+    pub ray_count: u32,
+    pub max_distance: f32,
+    pub thickness: f32,
+    pub intensity: f32,
+    pub indirect_scale: f32,
+    pub temporal_blend: f32,
+}
+
+impl Default for SSGIConfig {
+    fn default() -> Self {
+        SSGIConfig {
+            ray_count: 4,
+            max_distance: 10.0,
+            thickness: 0.2,
+            intensity: 1.0,
+            indirect_scale: 1.0,
+            temporal_blend: 0.9,
+        }
+    }
+}
+
+/// Screen-Space Global Illumination
+pub struct SSGI {
+    config: SSGIConfig,
+    history: Vec<Vec3>,
+    width: u32,
+    height: u32,
+    proj_matrix: Mat4,
+    inv_proj_matrix: Mat4,
+    frame_index: u32,
+}
+
+impl SSGI {
+    pub fn new(width: u32, height: u32, config: SSGIConfig) -> Self {
+        SSGI {
+            config,
+            history: vec![Vec3::ZERO; (width * height) as usize],
+            width,
+            height,
+            proj_matrix: Mat4::IDENTITY,
+            inv_proj_matrix: Mat4::IDENTITY,
+            frame_index: 0,
+        }
+    }
+
+    pub fn set_matrices(&mut self, proj: Mat4) {
+        self.proj_matrix = proj;
+        self.inv_proj_matrix = proj.inverse();
+    }
+
+    /// Compute indirect lighting for pixel
+    fn compute_pixel(&self, x: u32, y: u32, gbuffer: &GBuffer, direct_light: &[Vec3]) -> Vec3 {
+        let idx = (y * self.width + x) as usize;
+        let depth = gbuffer.depth[idx];
+        let normal = gbuffer.normal[idx];
+
+        // Reconstruct position
+        let uv = Vec2::new(x as f32 / self.width as f32, y as f32 / self.height as f32);
+        let ndc = uv * 2.0 - Vec2::ONE;
+        let clip = Vec4::new(ndc.x, ndc.y, depth, 1.0);
+        let view_pos = self.inv_proj_matrix * clip;
+        let position = Vec3::new(view_pos.x, view_pos.y, view_pos.z) / view_pos.w;
+
+        let mut indirect = Vec3::ZERO;
+
+        for ray in 0..self.config.ray_count {
+            // Generate ray direction
+            let hash = self.hash_pixel(x, y, ray, self.frame_index);
+            let xi1 = hash.x;
+            let xi2 = hash.y;
+
+            // Cosine-weighted hemisphere
+            let r = xi1.sqrt();
+            let theta = 2.0 * std::f32::consts::PI * xi2;
+            let local_dir = Vec3::new(r * theta.cos(), r * theta.sin(), (1.0 - xi1).sqrt());
+
+            // Transform to world space
+            let up = if normal.y.abs() < 0.999 { Vec3::Y } else { Vec3::X };
+            let tangent = up.cross(normal).normalize();
+            let bitangent = normal.cross(tangent);
+            let ray_dir = tangent * local_dir.x + bitangent * local_dir.y + normal * local_dir.z;
+
+            // Trace ray
+            if let Some((hit_uv, hit_dist)) = self.trace_ray(position, ray_dir, gbuffer) {
+                let hit_idx = ((hit_uv.y * self.height as f32) as u32 * self.width +
+                               (hit_uv.x * self.width as f32) as u32) as usize;
+
+                if hit_idx < direct_light.len() {
+                    let hit_color = direct_light[hit_idx] * gbuffer.albedo[hit_idx];
+                    let attenuation = 1.0 / (1.0 + hit_dist * hit_dist * 0.1);
+                    indirect += hit_color * attenuation;
+                }
+            }
+        }
+
+        indirect / self.config.ray_count as f32 * self.config.intensity * self.config.indirect_scale
+    }
+
+    /// Trace ray and return hit UV and distance
+    fn trace_ray(&self, origin: Vec3, direction: Vec3, gbuffer: &GBuffer) -> Option<(Vec2, f32)> {
+        let mut position = origin + direction * 0.1; // Offset to avoid self-intersection
+        let step_size = 0.5;
+        let max_steps = (self.config.max_distance / step_size) as u32;
+
+        for _ in 0..max_steps {
+            position += direction * step_size;
+
+            let clip = self.proj_matrix.transform_point(position);
+            if clip.z <= 0.0 {
+                return None;
+            }
+
+            let ndc = Vec2::new(clip.x / clip.z, clip.y / clip.z);
+            let uv = (ndc + Vec2::ONE) * 0.5;
+
+            if uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0 {
+                return None;
+            }
+
+            let scene_depth = gbuffer.sample_depth_bilinear(uv);
+            let ray_depth = clip.z;
+
+            let depth_diff = ray_depth - scene_depth;
+
+            if depth_diff > 0.0 && depth_diff < self.config.thickness {
+                let dist = (position - origin).length();
+                return Some((uv, dist));
+            }
+        }
+
+        None
+    }
+
+    fn hash_pixel(&self, x: u32, y: u32, ray: u32, frame: u32) -> Vec2 {
+        let mut n = (x * 73856093) ^ (y * 19349663) ^ (ray * 83492791) ^ (frame * 15485863);
+        n = (n >> 13) ^ n;
+        n = n.wrapping_mul(n.wrapping_mul(n.wrapping_mul(60493).wrapping_add(19990303)).wrapping_add(1376312589));
+        Vec2::new(
+            (n & 0xFFFF) as f32 / 65535.0,
+            ((n >> 16) & 0xFFFF) as f32 / 65535.0,
+        )
+    }
+
+    /// Compute SSGI for full frame
+    pub fn compute(&mut self, gbuffer: &GBuffer, direct_light: &[Vec3]) -> Vec<Vec3> {
+        let mut result = vec![Vec3::ZERO; (self.width * self.height) as usize];
+
+        for y in 0..self.height {
+            for x in 0..self.width {
+                let idx = (y * self.width + x) as usize;
+                result[idx] = self.compute_pixel(x, y, gbuffer, direct_light);
+            }
+        }
+
+        // Temporal blend
+        if self.config.temporal_blend > 0.0 {
+            for i in 0..result.len() {
+                result[i] = result[i] * (1.0 - self.config.temporal_blend) +
+                            self.history[i] * self.config.temporal_blend;
+            }
+            self.history.copy_from_slice(&result);
+        }
+
+        self.frame_index += 1;
+        result
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// CONTACT SHADOWS (WP-128)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Contact shadows for fine detail shadowing
+pub struct ContactShadows {
+    ray_length: f32,
+    ray_steps: u32,
+    thickness: f32,
+    temporal_blend: f32,
+    history: Vec<f32>,
+    width: u32,
+    height: u32,
+    proj_matrix: Mat4,
+}
+
+impl ContactShadows {
+    pub fn new(width: u32, height: u32) -> Self {
+        ContactShadows {
+            ray_length: 0.2,
+            ray_steps: 16,
+            thickness: 0.01,
+            temporal_blend: 0.8,
+            history: vec![1.0; (width * height) as usize],
+            width,
+            height,
+            proj_matrix: Mat4::IDENTITY,
+        }
+    }
+
+    pub fn set_projection(&mut self, proj: Mat4) {
+        self.proj_matrix = proj;
+    }
+
+    /// Trace contact shadow for pixel
+    pub fn trace(
+        &self,
+        position: Vec3,
+        light_dir: Vec3,
+        gbuffer: &GBuffer,
+    ) -> f32 {
+        let inv_proj = self.proj_matrix.inverse();
+
+        // Step in light direction
+        let step = light_dir * (self.ray_length / self.ray_steps as f32);
+        let mut pos = position;
+
+        for i in 1..=self.ray_steps {
+            pos += step;
+
+            // Project to screen
+            let clip = self.proj_matrix.transform_point(pos);
+            if clip.z <= 0.0 {
+                break;
+            }
+
+            let ndc = Vec2::new(clip.x / clip.z, clip.y / clip.z);
+            let uv = (ndc + Vec2::ONE) * 0.5;
+
+            if uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0 {
+                break;
+            }
+
+            let scene_depth = gbuffer.sample_depth_bilinear(uv);
+            let ray_depth = clip.z;
+
+            let depth_diff = ray_depth - scene_depth;
+
+            if depth_diff > 0.0 && depth_diff < self.thickness {
+                // Fade by step
+                let fade = i as f32 / self.ray_steps as f32;
+                return 1.0 - (1.0 - fade) * 0.5;
+            }
+        }
+
+        1.0
+    }
+
+    /// Compute contact shadows for frame
+    pub fn compute(
+        &mut self,
+        gbuffer: &GBuffer,
+        light_dir: Vec3,
+    ) -> Vec<f32> {
+        let inv_proj = self.proj_matrix.inverse();
+        let mut result = vec![1.0; (self.width * self.height) as usize];
+
+        for y in 0..self.height {
+            for x in 0..self.width {
+                let idx = (y * self.width + x) as usize;
+                let depth = gbuffer.depth[idx];
+
+                // Reconstruct position
+                let uv = Vec2::new(x as f32 / self.width as f32, y as f32 / self.height as f32);
+                let ndc = uv * 2.0 - Vec2::ONE;
+                let clip = Vec4::new(ndc.x, ndc.y, depth, 1.0);
+                let view_pos = inv_proj * clip;
+                let position = Vec3::new(view_pos.x, view_pos.y, view_pos.z) / view_pos.w;
+
+                result[idx] = self.trace(position, light_dir, gbuffer);
+            }
+        }
+
+        // Temporal blend
+        for i in 0..result.len() {
+            result[i] = result[i] * (1.0 - self.temporal_blend) +
+                        self.history[i] * self.temporal_blend;
+        }
+        self.history.copy_from_slice(&result);
+
+        result
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// SCREEN-SPACE SUBSURFACE SCATTERING (WP-121)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// SSS profile for different materials
+#[derive(Debug, Clone)]
+pub struct SSSProfile {
+    pub name: String,
+    pub scatter_color: Vec3,
+    pub scatter_distance: f32,
+    pub falloff: Vec3,
+}
+
+impl SSSProfile {
+    pub fn skin() -> Self {
+        SSSProfile {
+            name: "Skin".to_string(),
+            scatter_color: Vec3::new(0.8, 0.4, 0.3),
+            scatter_distance: 0.1,
+            falloff: Vec3::new(1.0, 0.37, 0.12),
+        }
+    }
+
+    pub fn marble() -> Self {
+        SSSProfile {
+            name: "Marble".to_string(),
+            scatter_color: Vec3::new(0.9, 0.9, 0.8),
+            scatter_distance: 0.3,
+            falloff: Vec3::new(0.8, 0.8, 0.7),
+        }
+    }
+}
+
+/// Screen-space subsurface scattering
+pub struct ScreenSpaceSSS {
+    profiles: Vec<SSSProfile>,
+    kernel_size: u32,
+    width: u32,
+    height: u32,
+}
+
+impl ScreenSpaceSSS {
+    pub fn new(width: u32, height: u32) -> Self {
+        ScreenSpaceSSS {
+            profiles: vec![SSSProfile::skin()],
+            kernel_size: 25,
+            width,
+            height,
+        }
+    }
+
+    pub fn add_profile(&mut self, profile: SSSProfile) {
+        self.profiles.push(profile);
+    }
+
+    /// Apply separable SSS blur
+    pub fn apply(
+        &self,
+        color: &[Vec3],
+        sss_mask: &[f32],
+        gbuffer: &GBuffer,
+        profile_id: usize,
+    ) -> Vec<Vec3> {
+        let profile = &self.profiles[profile_id.min(self.profiles.len() - 1)];
+
+        // Horizontal pass
+        let mut horizontal = vec![Vec3::ZERO; (self.width * self.height) as usize];
+        self.blur_pass(color, &mut horizontal, sss_mask, gbuffer, profile, true);
+
+        // Vertical pass
+        let mut result = vec![Vec3::ZERO; (self.width * self.height) as usize];
+        self.blur_pass(&horizontal, &mut result, sss_mask, gbuffer, profile, false);
+
+        result
+    }
+
+    fn blur_pass(
+        &self,
+        input: &[Vec3],
+        output: &mut [Vec3],
+        sss_mask: &[f32],
+        gbuffer: &GBuffer,
+        profile: &SSSProfile,
+        horizontal: bool,
+    ) {
+        let half_kernel = (self.kernel_size / 2) as i32;
+
+        for y in 0..self.height {
+            for x in 0..self.width {
+                let center_idx = (y * self.width + x) as usize;
+                let center_depth = gbuffer.depth[center_idx];
+                let mask = sss_mask[center_idx];
+
+                if mask < 0.01 {
+                    output[center_idx] = input[center_idx];
+                    continue;
+                }
+
+                let mut sum = Vec3::ZERO;
+                let mut weight_sum = Vec3::ZERO;
+
+                for k in -half_kernel..=half_kernel {
+                    let (sx, sy) = if horizontal {
+                        ((x as i32 + k).clamp(0, self.width as i32 - 1) as u32, y)
+                    } else {
+                        (x, (y as i32 + k).clamp(0, self.height as i32 - 1) as u32)
+                    };
+
+                    let sample_idx = (sy * self.width + sx) as usize;
+                    let sample_depth = gbuffer.depth[sample_idx];
+
+                    // Compute kernel weight
+                    let dist = k.abs() as f32 / half_kernel as f32;
+                    let falloff_weight = Vec3::new(
+                        (-dist / profile.falloff.x).exp(),
+                        (-dist / profile.falloff.y).exp(),
+                        (-dist / profile.falloff.z).exp(),
+                    );
+
+                    // Depth weight
+                    let depth_diff = (center_depth - sample_depth).abs();
+                    let depth_weight = (-depth_diff * 100.0).exp();
+
+                    let weight = falloff_weight * depth_weight * mask;
+                    sum += input[sample_idx] * weight;
+                    weight_sum += weight;
+                }
+
+                // Normalize
+                output[center_idx] = Vec3::new(
+                    if weight_sum.x > 0.0 { sum.x / weight_sum.x } else { input[center_idx].x },
+                    if weight_sum.y > 0.0 { sum.y / weight_sum.y } else { input[center_idx].y },
+                    if weight_sum.z > 0.0 { sum.z / weight_sum.z } else { input[center_idx].z },
+                );
+            }
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// TESTS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_gbuffer_creation() {
+        let gbuffer = GBuffer::new(1920, 1080);
+        assert_eq!(gbuffer.depth.len(), 1920 * 1080);
+    }
+
+    #[test]
+    fn test_hi_z_build() {
+        let depth: Vec<f32> = vec![0.5; 64 * 64];
+        let hi_z = HiZBuffer::build(&depth, 64, 64);
+        assert!(!hi_z.levels.is_empty());
+    }
+
+    #[test]
+    fn test_ao_kernel_generation() {
+        let config = AOConfig::default();
+        let ao = AmbientOcclusion::new(800, 600, config);
+        assert!(!ao.kernel.is_empty());
+    }
+
+    #[test]
+    fn test_sss_profile() {
+        let skin = SSSProfile::skin();
+        assert!(skin.scatter_distance > 0.0);
+    }
+}

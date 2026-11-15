@@ -1,0 +1,9 @@
+[
+  {"op":"register_view","view":1,"resource":21042,"kind":"srv"},
+  {"op":"register_view","view":2,"resource":21042,"kind":"rtv"},
+  {"op":"set_render_targets","rtvs":[2],"dsv":0},
+  {"op":"set_shader_resources","stage":"ps","start":27,"views":[1]},
+  {"op":"draw"},
+  {"op":"set_shader_resources","stage":"ps","start":27,"views":[0]},
+  {"op":"draw"}
+]

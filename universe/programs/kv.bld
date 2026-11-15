@@ -1,0 +1,533 @@
+// =============================================================================
+// qkv — Persistent key-value database CLI written in BuildLang
+// =============================================================================
+// Step 1 toward a SQLite-class database. Proves file persistence,
+// serialization, and data structure management using an append-only log
+// (write-ahead log pattern, same as Redis AOF).
+//
+// Usage:
+//   qkv set key value        — store key-value pair
+//   qkv get key              — retrieve value (prints to stdout)
+//   qkv del key              — delete key
+//   qkv keys                 — list all keys
+//   qkv count                — number of stored pairs
+//   qkv dump                 — dump all key=value pairs
+//   qkv import file.csv      — import key=value lines from file
+//   qkv compact              — compact the database file
+//   qkv --help               — usage info
+//   qkv --db path.db set k v — use custom db file (default: qkv.db)
+//
+// Storage format (append-only log):
+//   SET key value\n
+//   DEL key\n
+//
+// On startup: replay log into in-memory index.
+// On SET: append SET line to log.
+// On DEL: append DEL line to log.
+// On COMPACT: rewrite log with only current state.
+//
+// Design: String pool stores values. Map (str->f64) maps keys to entry
+// indices for O(1) lookup. Keys stored in parallel arrays for iteration.
+// Map kept outside struct (codegen limitation), passed alongside.
+// =============================================================================
+
+// --- KV Store state (no map inside — codegen limitation) ---
+struct KVStore {
+    // String pool for values
+    pool: String,
+    pool_starts: Vec<i32>,
+    pool_lens: Vec<i32>,
+    pool_n: i32,
+
+    // Key storage: parallel arrays
+    key_pool: String,
+    key_starts: Vec<i32>,
+    key_lens: Vec<i32>,
+    key_n: i32,
+
+    // Maps entry_index -> value pool id (-1 = deleted)
+    val_ids: Vec<i32>,
+
+    // Active entry count
+    count: i32,
+
+    // Config
+    db_path: String,
+}
+
+fn kv_new(db_path: String) -> KVStore {
+    KVStore {
+        pool: "",
+        pool_starts: vec![],
+        pool_lens: vec![],
+        pool_n: 0,
+        key_pool: "",
+        key_starts: vec![],
+        key_lens: vec![],
+        key_n: 0,
+        val_ids: vec![],
+        count: 0,
+        db_path: db_path,
+    }
+}
+
+// --- String pool: add a value ---
+fn pool_add(store: &mut KVStore, text: String) -> i32 {
+    let id = store.pool_n;
+    let st = store.pool.len();
+    store.pool = store.pool + text;
+    let en = store.pool.len();
+    vec_push(store.pool_starts, st);
+    vec_push(store.pool_lens, en - st);
+    store.pool_n = store.pool_n + 1;
+    id
+}
+
+// --- String pool: get a value ---
+fn pool_get(store: &KVStore, id: i32) -> String {
+    let st = vec_get(store.pool_starts, id);
+    let ln = vec_get(store.pool_lens, id);
+    store.pool.substring(st, ln)
+}
+
+// --- Key pool: add a key ---
+fn key_add(store: &mut KVStore, text: String) -> i32 {
+    let id = store.key_n;
+    let st = store.key_pool.len();
+    store.key_pool = store.key_pool + text;
+    let en = store.key_pool.len();
+    vec_push(store.key_starts, st);
+    vec_push(store.key_lens, en - st);
+    store.key_n = store.key_n + 1;
+    id
+}
+
+// --- Key pool: get a key ---
+fn key_get(store: &KVStore, id: i32) -> String {
+    let st = vec_get(store.key_starts, id);
+    let ln = vec_get(store.key_lens, id);
+    store.key_pool.substring(st, ln)
+}
+
+// --- Find entry index by key (linear scan, returns -1 if not found) ---
+fn find_entry(store: &KVStore, key: String) -> i64 {
+    let mut result: i64 = -1;
+    let n = vec_len(store.val_ids);
+    let mut i: i64 = 0;
+    let mut found = false;
+    while i < n {
+        if !found {
+            let vid = vec_get(store.val_ids, i);
+            if vid >= 0 {
+                let k = key_get(store, i);
+                if k == key {
+                    result = i;
+                    found = true;
+                }
+            }
+        }
+        i = i + 1;
+    }
+    result
+}
+
+// --- Internal SET (no log append, used during replay) ---
+fn kv_set_internal(store: &mut KVStore, key: String, value: String) {
+    let vid = pool_add(store, value);
+    let existing = find_entry(store, key);
+
+    if existing >= 0 {
+        // Key exists: update value, rebuild val_ids
+        let n = vec_len(store.val_ids);
+        let mut new_vals: Vec<i32> = vec![];
+        let mut i: i64 = 0;
+        while i < n {
+            if i == existing {
+                vec_push(new_vals, vid);
+            } else {
+                vec_push(new_vals, vec_get(store.val_ids, i));
+            }
+            i = i + 1;
+        }
+        store.val_ids = new_vals;
+    } else {
+        // New key
+        key_add(store, key);
+        vec_push(store.val_ids, vid);
+        store.count = store.count + 1;
+    }
+}
+
+// --- Internal DEL (no log append, used during replay) ---
+fn kv_del_internal(store: &mut KVStore, key: String) -> bool {
+    let existing = find_entry(store, key);
+    if existing < 0 {
+        return false;
+    }
+
+    // Mark as deleted: set val_id to -1
+    let n = vec_len(store.val_ids);
+    let mut new_vals: Vec<i32> = vec![];
+    let mut i: i64 = 0;
+    while i < n {
+        if i == existing {
+            vec_push(new_vals, -1);
+        } else {
+            vec_push(new_vals, vec_get(store.val_ids, i));
+        }
+        i = i + 1;
+    }
+    store.val_ids = new_vals;
+    store.count = store.count - 1;
+    true
+}
+
+// --- Append a line to the log file ---
+fn kv_append_log(store: &KVStore, line: String) ~ FileSystem {
+    let existing = if file_exists(store.db_path) {
+        read_file(store.db_path)
+    } else {
+        ""
+    };
+    let content = existing + line + "\n";
+    write_file(store.db_path, content);
+}
+
+// --- Load: replay log file into memory ---
+fn kv_load(store: &mut KVStore) ~ FileSystem {
+    if !file_exists(store.db_path) {
+        return;
+    }
+    let content = read_file(store.db_path);
+    let clen = content.len();
+    if clen == 0 {
+        return;
+    }
+
+    // Parse line by line
+    let mut pos: i64 = 0;
+    let mut go = true;
+    while go {
+        if pos >= clen {
+            go = false;
+        } else {
+            // Find end of line
+            let rest = content.substring(pos, clen - pos);
+            let nl_idx = rest.index_of("\n");
+            let line = if nl_idx < 0 {
+                rest
+            } else {
+                rest.substring(0, nl_idx)
+            };
+            if nl_idx < 0 {
+                pos = clen;
+            } else {
+                pos = pos + nl_idx + 1;
+            }
+
+            // Strip \r
+            let llen = line.len();
+            let clean = if llen > 0 {
+                let last = line.char_at(llen - 1);
+                if last == "\r" {
+                    line.substring(0, llen - 1)
+                } else {
+                    line
+                }
+            } else {
+                line
+            };
+
+            let clen2 = clean.len();
+            if clen2 == 0 {
+                // Skip empty lines
+            } else if clean.starts_with("SET ") {
+                // Parse: SET key value
+                let after_set = clean.substring(4, clen2 - 4);
+                let sp_idx = after_set.index_of(" ");
+                if sp_idx >= 0 {
+                    let key = after_set.substring(0, sp_idx);
+                    let val = after_set.substring(
+                        sp_idx + 1,
+                        after_set.len() - sp_idx - 1
+                    );
+                    kv_set_internal(store, key, val);
+                }
+            } else if clean.starts_with("DEL ") {
+                let key = clean.substring(4, clen2 - 4);
+                kv_del_internal(store, key);
+            }
+        }
+    }
+}
+
+// --- Public SET: update memory + append log ---
+fn kv_set(store: &mut KVStore, key: String, value: String) ~ FileSystem {
+    kv_set_internal(store, key, value);
+    let line = "SET " + key + " " + value;
+    kv_append_log(store, line);
+}
+
+// --- Public GET: lookup in memory ---
+fn kv_get(store: &KVStore, key: String) -> String {
+    let ei = find_entry(store, key);
+    if ei < 0 {
+        return "";
+    }
+    let vid = vec_get(store.val_ids, ei);
+    if vid < 0 {
+        return "";
+    }
+    pool_get(store, vid)
+}
+
+// --- Public DEL: update memory + append log ---
+fn kv_del(store: &mut KVStore, key: String) -> bool ~ FileSystem {
+    let ei = find_entry(store, key);
+    if ei < 0 {
+        return false;
+    }
+    kv_del_internal(store, key);
+    let line = "DEL " + key;
+    kv_append_log(store, line);
+    true
+}
+
+// --- KEYS: print all active keys ---
+fn kv_keys(store: &KVStore) ~ Console {
+    let n = vec_len(store.val_ids);
+    let mut i: i64 = 0;
+    while i < n {
+        let vid = vec_get(store.val_ids, i);
+        if vid >= 0 {
+            let key = key_get(store, i);
+            println!("{}", key);
+        }
+        i = i + 1;
+    }
+}
+
+// --- DUMP: print all key=value pairs ---
+fn kv_dump(store: &KVStore) ~ Console {
+    let n = vec_len(store.val_ids);
+    let mut i: i64 = 0;
+    while i < n {
+        let vid = vec_get(store.val_ids, i);
+        if vid >= 0 {
+            let key = key_get(store, i);
+            let val = pool_get(store, vid);
+            println!("{}={}", key, val);
+        }
+        i = i + 1;
+    }
+}
+
+// --- COMPACT: rewrite log with only current state ---
+fn kv_compact(store: &KVStore) ~ FileSystem {
+    let mut content = "";
+    let n = vec_len(store.val_ids);
+    let mut i: i64 = 0;
+    while i < n {
+        let vid = vec_get(store.val_ids, i);
+        if vid >= 0 {
+            let key = key_get(store, i);
+            let val = pool_get(store, vid);
+            content = content + "SET " + key + " " + val + "\n";
+        }
+        i = i + 1;
+    }
+    write_file(store.db_path, content);
+}
+
+// --- IMPORT: read key=value lines from a file ---
+fn kv_import(store: &mut KVStore, filepath: String) ~ Console + FileSystem + Process {
+    if !file_exists(filepath) {
+        println!("qkv: {}: No such file or directory", filepath);
+        process_exit(1);
+    }
+    let content = read_file(filepath);
+    let clen = content.len();
+    if clen == 0 {
+        return;
+    }
+
+    let mut imported = 0;
+    let mut pos: i64 = 0;
+    let mut go = true;
+    while go {
+        if pos >= clen {
+            go = false;
+        } else {
+            let rest = content.substring(pos, clen - pos);
+            let nl_idx = rest.index_of("\n");
+            let line = if nl_idx < 0 {
+                rest
+            } else {
+                rest.substring(0, nl_idx)
+            };
+            if nl_idx < 0 {
+                pos = clen;
+            } else {
+                pos = pos + nl_idx + 1;
+            }
+
+            // Strip \r
+            let llen = line.len();
+            let clean = if llen > 0 {
+                let last = line.char_at(llen - 1);
+                if last == "\r" {
+                    line.substring(0, llen - 1)
+                } else {
+                    line
+                }
+            } else {
+                line
+            };
+
+            let clen2 = clean.len();
+            if clen2 > 0 {
+                // Find = separator
+                let eq_idx = clean.index_of("=");
+                if eq_idx > 0 {
+                    let key = clean.substring(0, eq_idx);
+                    let value = clean.substring(
+                        eq_idx + 1,
+                        clen2 - eq_idx - 1
+                    );
+                    kv_set(store, key, value);
+                    imported = imported + 1;
+                }
+            }
+        }
+    }
+    println!("Imported {} key-value pairs", imported);
+}
+
+// --- Help ---
+fn print_help() ~ Console {
+    println!("qkv — Persistent key-value database");
+    println!("");
+    println!("Usage:");
+    println!("  qkv set KEY VALUE       Store a key-value pair");
+    println!("  qkv get KEY             Retrieve value by key");
+    println!("  qkv del KEY             Delete a key");
+    println!("  qkv keys                List all keys");
+    println!("  qkv count               Show number of stored pairs");
+    println!("  qkv dump                Print all key=value pairs");
+    println!("  qkv import FILE         Import key=value lines from file");
+    println!("  qkv compact             Compact the database file");
+    println!("  qkv --help              Show this help message");
+    println!("");
+    println!("Options:");
+    println!("  --db PATH               Use custom db file (default: qkv.db)");
+    println!("");
+    println!("Storage: append-only log (WAL pattern, like Redis AOF).");
+    println!("Built with BuildLang.");
+}
+
+// --- Main ---
+fn main() ~ Console + Environment + FileSystem + Process {
+    let nargs = args_count();
+
+    if nargs < 2 {
+        print_help();
+        process_exit(0);
+    }
+
+    // Parse --db flag and find command position
+    let mut db_path = "qkv.db";
+    let mut cmd_start: i64 = 1;
+
+    let first = args_get(1);
+    if first == "--help" || first == "-h" {
+        print_help();
+        process_exit(0);
+    }
+
+    if first == "--db" {
+        if nargs < 4 {
+            println!("qkv: --db requires a path and a command");
+            process_exit(1);
+        }
+        db_path = args_get(2);
+        cmd_start = 3;
+    }
+
+    if cmd_start >= nargs {
+        print_help();
+        process_exit(0);
+    }
+
+    // Initialize store and load existing data
+    let mut store = kv_new(db_path);
+    kv_load(&mut store);
+
+    // Parse command
+    let cmd = args_get(cmd_start);
+
+    if cmd == "set" {
+        if cmd_start + 2 >= nargs {
+            println!("qkv: set requires KEY and VALUE");
+            println!("Usage: qkv set KEY VALUE");
+            process_exit(1);
+        }
+        let key = args_get(cmd_start + 1);
+        // Collect remaining args as value (supports spaces)
+        let mut value = args_get(cmd_start + 2);
+        let mut vi = cmd_start + 3;
+        while vi < nargs {
+            value = value + " " + args_get(vi);
+            vi = vi + 1;
+        }
+        kv_set(&mut store, key, value);
+    } else if cmd == "get" {
+        if cmd_start + 1 >= nargs {
+            println!("qkv: get requires KEY");
+            println!("Usage: qkv get KEY");
+            process_exit(1);
+        }
+        let key = args_get(cmd_start + 1);
+        let ei = find_entry(&store, key);
+        if ei < 0 {
+            println!("qkv: key not found: {}", key);
+            process_exit(1);
+        }
+        let val = kv_get(&store, key);
+        println!("{}", val);
+    } else if cmd == "del" {
+        if cmd_start + 1 >= nargs {
+            println!("qkv: del requires KEY");
+            println!("Usage: qkv del KEY");
+            process_exit(1);
+        }
+        let key = args_get(cmd_start + 1);
+        let ok = kv_del(&mut store, key);
+        if !ok {
+            println!("qkv: key not found: {}", key);
+            process_exit(1);
+        }
+    } else if cmd == "keys" {
+        kv_keys(&store);
+    } else if cmd == "count" {
+        println!("{}", store.count);
+    } else if cmd == "dump" {
+        kv_dump(&store);
+    } else if cmd == "import" {
+        if cmd_start + 1 >= nargs {
+            println!("qkv: import requires FILE");
+            println!("Usage: qkv import FILE");
+            process_exit(1);
+        }
+        let filepath = args_get(cmd_start + 1);
+        kv_import(&mut store, filepath);
+    } else if cmd == "compact" {
+        kv_compact(&store);
+        println!("Database compacted: {} entries", store.count);
+    } else if cmd == "--help" || cmd == "-h" {
+        print_help();
+    } else {
+        println!("qkv: unknown command: {}", cmd);
+        println!("Run 'qkv --help' for usage.");
+        process_exit(1);
+    }
+}

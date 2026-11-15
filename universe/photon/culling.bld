@@ -1,0 +1,1447 @@
+// ============================================================================
+// PHOTON ENGINE - ADVANCED CULLING SYSTEMS
+// GPU-Accelerated Visibility Determination
+// Based on Harper Engine WP-167: Hierarchical Culling Architecture
+// ============================================================================
+
+module photon::culling;
+
+use core::memory::{GpuBuffer, GpuTexture};
+use core::math::{Vec3, Vec4, Mat4, AABB, Sphere, Plane, Frustum};
+use photon::gpu::{CommandBuffer, ComputeShader, BindGroup};
+
+// ============================================================================
+// FRUSTUM CULLING
+// Based on Harper Engine RT-1671: Frustum Culling Fundamentals
+// ============================================================================
+
+/// Frustum plane extraction from view-projection matrix
+impl Frustum {
+    /// Extract frustum planes from view-projection matrix
+    fn from_view_proj(vp: &Mat4) -> Self {
+        // Gribb/Hartmann method
+        let row0 = vp.row(0);
+        let row1 = vp.row(1);
+        let row2 = vp.row(2);
+        let row3 = vp.row(3);
+
+        let planes = [
+            Plane::from_vec4(row3 + row0),  // Left
+            Plane::from_vec4(row3 - row0),  // Right
+            Plane::from_vec4(row3 + row1),  // Bottom
+            Plane::from_vec4(row3 - row1),  // Top
+            Plane::from_vec4(row3 + row2),  // Near (reverse-Z)
+            Plane::from_vec4(row3 - row2),  // Far
+        ];
+
+        Self { planes }
+    }
+
+    /// Test if AABB is inside or intersecting frustum
+    fn test_aabb(&self, aabb: &AABB) -> CullResult {
+        let mut result = CullResult::Inside;
+
+        for plane in &self.planes {
+            let p = Vec3::new(
+                if plane.normal.x >= 0.0 { aabb.max.x } else { aabb.min.x },
+                if plane.normal.y >= 0.0 { aabb.max.y } else { aabb.min.y },
+                if plane.normal.z >= 0.0 { aabb.max.z } else { aabb.min.z },
+            );
+
+            let n = Vec3::new(
+                if plane.normal.x >= 0.0 { aabb.min.x } else { aabb.max.x },
+                if plane.normal.y >= 0.0 { aabb.min.y } else { aabb.max.y },
+                if plane.normal.z >= 0.0 { aabb.min.z } else { aabb.max.z },
+            );
+
+            if plane.distance_to_point(p) < 0.0 {
+                return CullResult::Outside;
+            }
+
+            if plane.distance_to_point(n) < 0.0 {
+                result = CullResult::Intersecting;
+            }
+        }
+
+        result
+    }
+
+    /// Test if sphere is inside or intersecting frustum
+    fn test_sphere(&self, center: Vec3, radius: f32) -> CullResult {
+        let mut result = CullResult::Inside;
+
+        for plane in &self.planes {
+            let distance = plane.distance_to_point(center);
+
+            if distance < -radius {
+                return CullResult::Outside;
+            }
+
+            if distance < radius {
+                result = CullResult::Intersecting;
+            }
+        }
+
+        result
+    }
+}
+
+/// Culling test result
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CullResult {
+    Outside,
+    Inside,
+    Intersecting,
+}
+
+/// GPU frustum culling system
+struct GpuFrustumCuller {
+    /// Frustum culling compute shader
+    cull_shader: ComputeShader,
+    /// Object bounds buffer
+    bounds_buffer: GpuBuffer,
+    /// Visibility results buffer
+    visibility_buffer: GpuBuffer,
+    /// Visible count (atomic)
+    visible_count_buffer: GpuBuffer,
+    /// Indirect draw commands
+    draw_commands_buffer: GpuBuffer,
+    /// Maximum objects
+    max_objects: u32,
+}
+
+impl GpuFrustumCuller {
+    fn new(device: &GpuDevice, max_objects: u32) -> Self {
+        let bounds_buffer = device.create_buffer(&BufferDescriptor {
+            size: max_objects as u64 * std::mem::size_of::<GpuBounds>() as u64,
+            usage: BufferUsage::STORAGE,
+            ..Default::default()
+        });
+
+        let visibility_buffer = device.create_buffer(&BufferDescriptor {
+            size: max_objects as u64 * 4, // u32 per object
+            usage: BufferUsage::STORAGE,
+            ..Default::default()
+        });
+
+        let visible_count_buffer = device.create_buffer(&BufferDescriptor {
+            size: 4,
+            usage: BufferUsage::STORAGE | BufferUsage::INDIRECT,
+            ..Default::default()
+        });
+
+        let draw_commands_buffer = device.create_buffer(&BufferDescriptor {
+            size: max_objects as u64 * std::mem::size_of::<DrawIndirectCommand>() as u64,
+            usage: BufferUsage::STORAGE | BufferUsage::INDIRECT,
+            ..Default::default()
+        });
+
+        let cull_shader = Self::create_cull_shader(device);
+
+        Self {
+            cull_shader,
+            bounds_buffer,
+            visibility_buffer,
+            visible_count_buffer,
+            draw_commands_buffer,
+            max_objects,
+        }
+    }
+
+    fn create_cull_shader(device: &GpuDevice) -> ComputeShader {
+        let shader = r#"
+            struct Bounds {
+                center: vec3<f32>,
+                extent: vec3<f32>,
+                sphere_radius: f32,
+                flags: u32,
+            };
+
+            struct CullUniforms {
+                frustum_planes: array<vec4<f32>, 6>,
+                camera_pos: vec3<f32>,
+                object_count: u32,
+            };
+
+            struct DrawCommand {
+                vertex_count: u32,
+                instance_count: u32,
+                first_vertex: u32,
+                first_instance: u32,
+            };
+
+            @group(0) @binding(0) var<uniform> uniforms: CullUniforms;
+            @group(0) @binding(1) var<storage, read> bounds: array<Bounds>;
+            @group(0) @binding(2) var<storage, read_write> visibility: array<u32>;
+            @group(0) @binding(3) var<storage, read_write> visible_count: atomic<u32>;
+            @group(0) @binding(4) var<storage, read_write> draw_commands: array<DrawCommand>;
+            @group(0) @binding(5) var<storage, read> base_commands: array<DrawCommand>;
+
+            fn test_plane(plane: vec4<f32>, center: vec3<f32>, extent: vec3<f32>) -> bool {
+                let e = abs(plane.xyz) * extent;
+                let s = dot(plane.xyz, center) + plane.w;
+                return s + e.x + e.y + e.z >= 0.0;
+            }
+
+            fn frustum_cull(center: vec3<f32>, extent: vec3<f32>) -> bool {
+                for (var i = 0u; i < 6u; i++) {
+                    if (!test_plane(uniforms.frustum_planes[i], center, extent)) {
+                        return false;
+                    }
+                }
+                return true;
+            }
+
+            @compute @workgroup_size(64, 1, 1)
+            fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+                let idx = gid.x;
+
+                if (idx >= uniforms.object_count) {
+                    return;
+                }
+
+                let obj_bounds = bounds[idx];
+
+                // Frustum test
+                let visible = frustum_cull(obj_bounds.center, obj_bounds.extent);
+
+                if (visible) {
+                    // Add to visible list
+                    let visible_idx = atomicAdd(&visible_count, 1u);
+                    visibility[visible_idx] = idx;
+
+                    // Copy draw command
+                    draw_commands[visible_idx] = base_commands[idx];
+                }
+            }
+        "#;
+
+        device.create_compute_shader(shader)
+    }
+
+    /// Perform frustum culling
+    fn cull(&self, cmd: &mut CommandBuffer, frustum: &Frustum, object_count: u32) {
+        // Reset visible count
+        cmd.fill_buffer(&self.visible_count_buffer, 0, 4, 0);
+        cmd.barrier(BarrierType::BufferWriteToRead);
+
+        // Run culling shader
+        cmd.set_compute_shader(&self.cull_shader);
+        // ... set bind group with frustum planes ...
+
+        cmd.dispatch((object_count + 63) / 64, 1, 1);
+
+        cmd.barrier(BarrierType::ComputeToIndirect);
+    }
+}
+
+#[repr(C)]
+struct GpuBounds {
+    center: Vec3,
+    extent: Vec3,
+    sphere_radius: f32,
+    flags: u32,
+}
+
+struct DrawIndirectCommand {
+    vertex_count: u32,
+    instance_count: u32,
+    first_vertex: u32,
+    first_instance: u32,
+}
+
+// ============================================================================
+// HIERARCHICAL Z-BUFFER OCCLUSION CULLING
+// Based on Harper Engine RT-1672: Hi-Z Occlusion Culling
+// ============================================================================
+
+/// Hierarchical Z-buffer for occlusion culling
+struct HierarchicalZBuffer {
+    /// Hi-Z pyramid texture
+    hiz_texture: GpuTexture,
+    /// Number of mip levels
+    mip_levels: u32,
+    /// Width at base level
+    width: u32,
+    /// Height at base level
+    height: u32,
+    /// Downsample compute shader
+    downsample_shader: ComputeShader,
+    /// Occlusion test compute shader
+    occlusion_shader: ComputeShader,
+}
+
+impl HierarchicalZBuffer {
+    fn new(device: &GpuDevice, width: u32, height: u32) -> Self {
+        let mip_levels = (width.max(height) as f32).log2().ceil() as u32;
+
+        let hiz_texture = device.create_texture(&TextureDescriptor {
+            width,
+            height,
+            mip_levels,
+            format: TextureFormat::R32_FLOAT,
+            usage: TextureUsage::SHADER_READ | TextureUsage::SHADER_WRITE,
+            ..Default::default()
+        });
+
+        let downsample_shader = Self::create_downsample_shader(device);
+        let occlusion_shader = Self::create_occlusion_shader(device);
+
+        Self {
+            hiz_texture,
+            mip_levels,
+            width,
+            height,
+            downsample_shader,
+            occlusion_shader,
+        }
+    }
+
+    fn create_downsample_shader(device: &GpuDevice) -> ComputeShader {
+        let shader = r#"
+            @group(0) @binding(0) var src_mip: texture_2d<f32>;
+            @group(0) @binding(1) var dst_mip: texture_storage_2d<r32float, write>;
+
+            struct DownsampleParams {
+                src_size: vec2<u32>,
+                dst_size: vec2<u32>,
+            };
+            @group(0) @binding(2) var<uniform> params: DownsampleParams;
+
+            @compute @workgroup_size(8, 8, 1)
+            fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+                if (gid.x >= params.dst_size.x || gid.y >= params.dst_size.y) {
+                    return;
+                }
+
+                let src_coord = gid.xy * 2u;
+
+                // Sample 2x2 block and take minimum (reverse-Z)
+                let d00 = textureLoad(src_mip, src_coord + vec2<u32>(0, 0), 0).r;
+                let d01 = textureLoad(src_mip, src_coord + vec2<u32>(0, 1), 0).r;
+                let d10 = textureLoad(src_mip, src_coord + vec2<u32>(1, 0), 0).r;
+                let d11 = textureLoad(src_mip, src_coord + vec2<u32>(1, 1), 0).r;
+
+                // For reverse-Z, min is furthest (conservative for occlusion)
+                let min_depth = min(min(d00, d01), min(d10, d11));
+
+                textureStore(dst_mip, gid.xy, vec4<f32>(min_depth, 0.0, 0.0, 0.0));
+            }
+        "#;
+
+        device.create_compute_shader(shader)
+    }
+
+    fn create_occlusion_shader(device: &GpuDevice) -> ComputeShader {
+        let shader = r#"
+            struct OcclusionBounds {
+                center: vec3<f32>,
+                extent: vec3<f32>,
+            };
+
+            struct OcclusionUniforms {
+                view_proj: mat4x4<f32>,
+                hiz_size: vec2<f32>,
+                near_plane: f32,
+                object_count: u32,
+            };
+
+            @group(0) @binding(0) var<uniform> uniforms: OcclusionUniforms;
+            @group(0) @binding(1) var hiz_texture: texture_2d<f32>;
+            @group(0) @binding(2) var<storage, read> bounds: array<OcclusionBounds>;
+            @group(0) @binding(3) var<storage, read_write> visibility: array<u32>;
+            @group(0) @binding(4) var<storage, read_write> visible_count: atomic<u32>;
+
+            fn project_sphere(center: vec3<f32>, radius: f32) -> vec4<f32> {
+                // Returns (min_x, min_y, max_x, max_y) in screen space
+                let clip = uniforms.view_proj * vec4<f32>(center, 1.0);
+
+                if (clip.w <= 0.0) {
+                    return vec4<f32>(-1.0, -1.0, 2.0, 2.0); // Behind camera
+                }
+
+                let ndc = clip.xyz / clip.w;
+                let screen = (ndc.xy * 0.5 + 0.5) * uniforms.hiz_size;
+
+                // Project radius to screen space
+                let screen_radius = (radius / clip.w) * uniforms.hiz_size.x * 0.5;
+
+                return vec4<f32>(
+                    screen.x - screen_radius,
+                    screen.y - screen_radius,
+                    screen.x + screen_radius,
+                    screen.y + screen_radius
+                );
+            }
+
+            fn get_hiz_mip(rect: vec4<f32>) -> u32 {
+                let width = rect.z - rect.x;
+                let height = rect.w - rect.y;
+                let max_extent = max(width, height);
+                return u32(max(0.0, log2(max_extent)));
+            }
+
+            fn is_occluded(center: vec3<f32>, extent: vec3<f32>) -> bool {
+                // Calculate bounding sphere
+                let radius = length(extent);
+
+                // Project to screen
+                let rect = project_sphere(center, radius);
+
+                // Check if off-screen
+                if (rect.x > uniforms.hiz_size.x || rect.z < 0.0 ||
+                    rect.y > uniforms.hiz_size.y || rect.w < 0.0) {
+                    return false; // Off-screen is not occluded (conservative)
+                }
+
+                // Clamp to screen
+                let clamped_rect = clamp(rect, vec4<f32>(0.0), vec4<f32>(uniforms.hiz_size, uniforms.hiz_size));
+
+                // Get appropriate mip level
+                let mip = get_hiz_mip(clamped_rect);
+
+                // Sample Hi-Z at corners
+                let mip_scale = 1.0 / f32(1u << mip);
+                let min_coord = vec2<u32>(clamped_rect.xy * mip_scale);
+                let max_coord = vec2<u32>(clamped_rect.zw * mip_scale);
+
+                var max_hiz_depth = 0.0;
+                for (var y = min_coord.y; y <= max_coord.y; y++) {
+                    for (var x = min_coord.x; x <= max_coord.x; x++) {
+                        let hiz_depth = textureLoad(hiz_texture, vec2<u32>(x, y), i32(mip)).r;
+                        max_hiz_depth = max(max_hiz_depth, hiz_depth);
+                    }
+                }
+
+                // Calculate object's closest depth
+                let near_point = center - normalize(center) * radius;
+                let near_clip = uniforms.view_proj * vec4<f32>(near_point, 1.0);
+                let object_depth = near_clip.z / near_clip.w;
+
+                // Reverse-Z: object is occluded if its closest point is further than Hi-Z
+                return object_depth < max_hiz_depth;
+            }
+
+            @compute @workgroup_size(64, 1, 1)
+            fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+                let idx = gid.x;
+
+                if (idx >= uniforms.object_count) {
+                    return;
+                }
+
+                let obj_bounds = bounds[idx];
+
+                if (!is_occluded(obj_bounds.center, obj_bounds.extent)) {
+                    let visible_idx = atomicAdd(&visible_count, 1u);
+                    visibility[visible_idx] = idx;
+                }
+            }
+        "#;
+
+        device.create_compute_shader(shader)
+    }
+
+    /// Build Hi-Z pyramid from depth buffer
+    fn build_pyramid(&self, cmd: &mut CommandBuffer, depth_buffer: &GpuTexture) {
+        // Copy base level from depth buffer
+        cmd.copy_texture_to_texture(depth_buffer, &self.hiz_texture, 0);
+
+        // Downsample each mip level
+        let mut width = self.width;
+        let mut height = self.height;
+
+        for mip in 1..self.mip_levels {
+            width = (width + 1) / 2;
+            height = (height + 1) / 2;
+
+            cmd.set_compute_shader(&self.downsample_shader);
+            // ... set bind group with src/dst mips ...
+
+            cmd.dispatch((width + 7) / 8, (height + 7) / 8, 1);
+            cmd.barrier(BarrierType::TextureWriteToRead);
+        }
+    }
+
+    /// Test objects against Hi-Z buffer
+    fn test_occlusion(&self, cmd: &mut CommandBuffer, bounds_buffer: &GpuBuffer, count: u32) {
+        cmd.set_compute_shader(&self.occlusion_shader);
+        // ... set bind group ...
+
+        cmd.dispatch((count + 63) / 64, 1, 1);
+        cmd.barrier(BarrierType::ComputeToCompute);
+    }
+}
+
+// ============================================================================
+// SOFTWARE OCCLUSION CULLING
+// Based on Harper Engine RT-1673: CPU Rasterization Culling
+// ============================================================================
+
+/// Software occlusion buffer for CPU-side culling
+struct SoftwareOcclusionBuffer {
+    /// Depth buffer (hierarchical)
+    depth_buffer: Vec<f32>,
+    /// Width
+    width: u32,
+    /// Height
+    height: u32,
+    /// Mip levels
+    mip_levels: u32,
+    /// Mip offsets into depth_buffer
+    mip_offsets: Vec<usize>,
+}
+
+impl SoftwareOcclusionBuffer {
+    fn new(width: u32, height: u32) -> Self {
+        let mip_levels = (width.max(height) as f32).log2().ceil() as u32;
+
+        let mut total_size = 0usize;
+        let mut mip_offsets = Vec::new();
+        let mut w = width;
+        let mut h = height;
+
+        for _ in 0..mip_levels {
+            mip_offsets.push(total_size);
+            total_size += (w * h) as usize;
+            w = (w + 1) / 2;
+            h = (h + 1) / 2;
+        }
+
+        Self {
+            depth_buffer: vec![0.0; total_size],
+            width,
+            height,
+            mip_levels,
+            mip_offsets,
+        }
+    }
+
+    /// Clear depth buffer
+    fn clear(&mut self) {
+        self.depth_buffer.fill(0.0); // Reverse-Z: 0 = far
+    }
+
+    /// Rasterize occluder triangle
+    fn rasterize_triangle(&mut self, v0: Vec4, v1: Vec4, v2: Vec4) {
+        // Clip-space to NDC
+        if v0.w <= 0.0 || v1.w <= 0.0 || v2.w <= 0.0 {
+            return;
+        }
+
+        let p0 = Vec3::new(v0.x / v0.w, v0.y / v0.w, v0.z / v0.w);
+        let p1 = Vec3::new(v1.x / v1.w, v1.y / v1.w, v1.z / v1.w);
+        let p2 = Vec3::new(v2.x / v2.w, v2.y / v2.w, v2.z / v2.w);
+
+        // NDC to screen space
+        let s0 = self.ndc_to_screen(p0);
+        let s1 = self.ndc_to_screen(p1);
+        let s2 = self.ndc_to_screen(p2);
+
+        // Compute bounding box
+        let min_x = (s0.x.min(s1.x).min(s2.x).floor() as i32).max(0) as u32;
+        let max_x = (s0.x.max(s1.x).max(s2.x).ceil() as i32).min(self.width as i32 - 1) as u32;
+        let min_y = (s0.y.min(s1.y).min(s2.y).floor() as i32).max(0) as u32;
+        let max_y = (s0.y.max(s1.y).max(s2.y).ceil() as i32).min(self.height as i32 - 1) as u32;
+
+        // Edge equation coefficients
+        let e01 = Vec3::new(s1.y - s0.y, s0.x - s1.x, s1.x * s0.y - s0.x * s1.y);
+        let e12 = Vec3::new(s2.y - s1.y, s1.x - s2.x, s2.x * s1.y - s1.x * s2.y);
+        let e20 = Vec3::new(s0.y - s2.y, s2.x - s0.x, s0.x * s2.y - s2.x * s0.y);
+
+        let area = e01.z + e12.z + e20.z;
+        if area <= 0.0 {
+            return; // Backface
+        }
+
+        let inv_area = 1.0 / area;
+
+        // Rasterize
+        for y in min_y..=max_y {
+            for x in min_x..=max_x {
+                let px = x as f32 + 0.5;
+                let py = y as f32 + 0.5;
+
+                let w0 = e12.x * px + e12.y * py + e12.z;
+                let w1 = e20.x * px + e20.y * py + e20.z;
+                let w2 = e01.x * px + e01.y * py + e01.z;
+
+                if w0 >= 0.0 && w1 >= 0.0 && w2 >= 0.0 {
+                    // Inside triangle - interpolate depth
+                    let depth = (w0 * p0.z + w1 * p1.z + w2 * p2.z) * inv_area;
+
+                    let idx = (y * self.width + x) as usize;
+                    // Reverse-Z: max is closest
+                    self.depth_buffer[idx] = self.depth_buffer[idx].max(depth);
+                }
+            }
+        }
+    }
+
+    fn ndc_to_screen(&self, ndc: Vec3) -> Vec3 {
+        Vec3::new(
+            (ndc.x * 0.5 + 0.5) * self.width as f32,
+            (ndc.y * 0.5 + 0.5) * self.height as f32,
+            ndc.z
+        )
+    }
+
+    /// Build mip pyramid
+    fn build_pyramid(&mut self) {
+        let mut w = self.width;
+        let mut h = self.height;
+
+        for mip in 1..self.mip_levels {
+            let src_offset = self.mip_offsets[(mip - 1) as usize];
+            let dst_offset = self.mip_offsets[mip as usize];
+
+            let new_w = (w + 1) / 2;
+            let new_h = (h + 1) / 2;
+
+            for y in 0..new_h {
+                for x in 0..new_w {
+                    let sx = x * 2;
+                    let sy = y * 2;
+
+                    // Sample 2x2 block
+                    let d00 = self.depth_buffer[src_offset + (sy * w + sx) as usize];
+                    let d01 = if sy + 1 < h {
+                        self.depth_buffer[src_offset + ((sy + 1) * w + sx) as usize]
+                    } else { d00 };
+                    let d10 = if sx + 1 < w {
+                        self.depth_buffer[src_offset + (sy * w + sx + 1) as usize]
+                    } else { d00 };
+                    let d11 = if sx + 1 < w && sy + 1 < h {
+                        self.depth_buffer[src_offset + ((sy + 1) * w + sx + 1) as usize]
+                    } else { d00 };
+
+                    // Min for reverse-Z (conservative)
+                    let min_depth = d00.min(d01).min(d10).min(d11);
+                    self.depth_buffer[dst_offset + (y * new_w + x) as usize] = min_depth;
+                }
+            }
+
+            w = new_w;
+            h = new_h;
+        }
+    }
+
+    /// Test if AABB is occluded
+    fn is_occluded(&self, aabb: &AABB, view_proj: &Mat4) -> bool {
+        // Project AABB corners to screen space
+        let corners = aabb.get_corners();
+        let mut min_x = f32::MAX;
+        let mut max_x = f32::MIN;
+        let mut min_y = f32::MAX;
+        let mut max_y = f32::MIN;
+        let mut max_z = f32::MIN; // Closest depth
+
+        for corner in &corners {
+            let clip = *view_proj * Vec4::new(corner.x, corner.y, corner.z, 1.0);
+            if clip.w <= 0.0 {
+                return false; // Behind camera, not occluded
+            }
+
+            let ndc = Vec3::new(clip.x / clip.w, clip.y / clip.w, clip.z / clip.w);
+            let screen = self.ndc_to_screen(ndc);
+
+            min_x = min_x.min(screen.x);
+            max_x = max_x.max(screen.x);
+            min_y = min_y.min(screen.y);
+            max_y = max_y.max(screen.y);
+            max_z = max_z.max(ndc.z); // Closest for reverse-Z
+        }
+
+        // Clamp to screen
+        min_x = min_x.max(0.0);
+        max_x = max_x.min(self.width as f32 - 1.0);
+        min_y = min_y.max(0.0);
+        max_y = max_y.min(self.height as f32 - 1.0);
+
+        if max_x <= min_x || max_y <= min_y {
+            return false;
+        }
+
+        // Choose appropriate mip level
+        let rect_width = max_x - min_x;
+        let rect_height = max_y - min_y;
+        let mip = (rect_width.max(rect_height).log2().ceil() as u32).min(self.mip_levels - 1);
+
+        let scale = 1.0 / (1 << mip) as f32;
+        let mip_offset = self.mip_offsets[mip as usize];
+        let mip_width = (self.width >> mip).max(1);
+
+        let ix0 = (min_x * scale) as u32;
+        let iy0 = (min_y * scale) as u32;
+        let ix1 = (max_x * scale).min((self.width >> mip) as f32 - 1.0) as u32;
+        let iy1 = (max_y * scale).min((self.height >> mip) as f32 - 1.0) as u32;
+
+        // Check if all samples are further than object's closest point
+        for y in iy0..=iy1 {
+            for x in ix0..=ix1 {
+                let hiz_depth = self.depth_buffer[mip_offset + (y * mip_width + x) as usize];
+                // Reverse-Z: if Hi-Z (furthest in region) is closer than object's closest, not occluded
+                if hiz_depth >= max_z {
+                    return false;
+                }
+            }
+        }
+
+        true
+    }
+}
+
+// ============================================================================
+// PORTAL CULLING
+// Based on Harper Engine RT-1674: Portal-Based Visibility
+// ============================================================================
+
+/// Portal for visibility determination
+struct Portal {
+    /// Vertices defining the portal polygon
+    vertices: Vec<Vec3>,
+    /// Normal direction (front side)
+    normal: Vec3,
+    /// Connected cells
+    cell_front: u32,
+    cell_back: u32,
+    /// Portal bounds for quick rejection
+    bounds: AABB,
+}
+
+/// Cell (room/sector) in portal graph
+struct Cell {
+    /// Cell bounds
+    bounds: AABB,
+    /// Objects in this cell
+    objects: Vec<u32>,
+    /// Portals leading from this cell
+    portals: Vec<u32>,
+    /// PVS (potentially visible set) - compressed bitfield
+    pvs: Option<Vec<u64>>,
+}
+
+/// Portal visibility system
+struct PortalSystem {
+    /// All cells
+    cells: Vec<Cell>,
+    /// All portals
+    portals: Vec<Portal>,
+    /// Current camera cell
+    camera_cell: Option<u32>,
+}
+
+impl PortalSystem {
+    fn new() -> Self {
+        Self {
+            cells: Vec::new(),
+            portals: Vec::new(),
+            camera_cell: None,
+        }
+    }
+
+    /// Add a cell to the system
+    fn add_cell(&mut self, bounds: AABB) -> u32 {
+        let id = self.cells.len() as u32;
+        self.cells.push(Cell {
+            bounds,
+            objects: Vec::new(),
+            portals: Vec::new(),
+            pvs: None,
+        });
+        id
+    }
+
+    /// Add a portal between cells
+    fn add_portal(&mut self, vertices: Vec<Vec3>, cell_front: u32, cell_back: u32) -> u32 {
+        let id = self.portals.len() as u32;
+
+        // Calculate normal and bounds
+        let normal = if vertices.len() >= 3 {
+            let e1 = vertices[1] - vertices[0];
+            let e2 = vertices[2] - vertices[0];
+            e1.cross(e2).normalize()
+        } else {
+            Vec3::Z
+        };
+
+        let mut bounds = AABB::EMPTY;
+        for v in &vertices {
+            bounds = bounds.expand_to_include(*v);
+        }
+
+        self.portals.push(Portal {
+            vertices,
+            normal,
+            cell_front,
+            cell_back,
+            bounds,
+        });
+
+        // Register portal with cells
+        self.cells[cell_front as usize].portals.push(id);
+        self.cells[cell_back as usize].portals.push(id);
+
+        id
+    }
+
+    /// Find which cell contains a point
+    fn find_cell(&self, point: Vec3) -> Option<u32> {
+        for (i, cell) in self.cells.iter().enumerate() {
+            if cell.bounds.contains(point) {
+                return Some(i as u32);
+            }
+        }
+        None
+    }
+
+    /// Determine visible cells from camera position
+    fn determine_visibility(&self, camera_pos: Vec3, frustum: &Frustum) -> Vec<u32> {
+        let camera_cell = match self.find_cell(camera_pos) {
+            Some(c) => c,
+            None => return Vec::new(),
+        };
+
+        let mut visible_cells = Vec::new();
+        let mut visited = vec![false; self.cells.len()];
+
+        self.traverse_portals(
+            camera_cell,
+            camera_pos,
+            frustum.clone(),
+            &mut visited,
+            &mut visible_cells
+        );
+
+        visible_cells
+    }
+
+    fn traverse_portals(
+        &self,
+        cell_id: u32,
+        camera_pos: Vec3,
+        frustum: Frustum,
+        visited: &mut [bool],
+        visible_cells: &mut Vec<u32>
+    ) {
+        if visited[cell_id as usize] {
+            return;
+        }
+
+        visited[cell_id as usize] = true;
+        visible_cells.push(cell_id);
+
+        let cell = &self.cells[cell_id as usize];
+
+        for &portal_id in &cell.portals {
+            let portal = &self.portals[portal_id as usize];
+
+            // Determine which cell is on the other side
+            let other_cell = if portal.cell_front == cell_id {
+                portal.cell_back
+            } else {
+                portal.cell_front
+            };
+
+            // Check if portal is visible
+            if !self.is_portal_visible(portal, &camera_pos, &frustum) {
+                continue;
+            }
+
+            // Clip frustum to portal
+            if let Some(clipped_frustum) = self.clip_frustum_to_portal(&frustum, portal, camera_pos) {
+                self.traverse_portals(
+                    other_cell,
+                    camera_pos,
+                    clipped_frustum,
+                    visited,
+                    visible_cells
+                );
+            }
+        }
+    }
+
+    fn is_portal_visible(&self, portal: &Portal, camera_pos: &Vec3, frustum: &Frustum) -> bool {
+        // Check if camera is on front side of portal
+        let to_portal = portal.vertices[0] - *camera_pos;
+        if to_portal.dot(portal.normal) <= 0.0 {
+            return false;
+        }
+
+        // Frustum test
+        frustum.test_aabb(&portal.bounds) != CullResult::Outside
+    }
+
+    fn clip_frustum_to_portal(&self, frustum: &Frustum, portal: &Portal, camera_pos: Vec3) -> Option<Frustum> {
+        // Create new frustum planes from camera through portal edges
+        let mut new_planes = Vec::with_capacity(portal.vertices.len());
+
+        for i in 0..portal.vertices.len() {
+            let v0 = portal.vertices[i];
+            let v1 = portal.vertices[(i + 1) % portal.vertices.len()];
+
+            let edge = v1 - v0;
+            let to_edge = v0 - camera_pos;
+            let normal = edge.cross(to_edge).normalize();
+
+            new_planes.push(Plane {
+                normal,
+                distance: -normal.dot(camera_pos),
+            });
+        }
+
+        // Intersect with original frustum
+        let mut combined_planes = frustum.planes.to_vec();
+        combined_planes.extend(new_planes);
+
+        if combined_planes.len() <= 6 {
+            Some(Frustum {
+                planes: combined_planes.try_into().ok()?,
+            })
+        } else {
+            // Too many planes, use original frustum
+            Some(frustum.clone())
+        }
+    }
+
+    /// Precompute PVS for all cells
+    fn compute_pvs(&mut self) {
+        let cell_count = self.cells.len();
+
+        for i in 0..cell_count {
+            let mut pvs = vec![0u64; (cell_count + 63) / 64];
+
+            // Sample visibility from multiple points in cell
+            let cell = &self.cells[i];
+            let sample_points = self.generate_sample_points(&cell.bounds);
+
+            for sample in &sample_points {
+                let visible = self.sample_visibility(*sample);
+                for &cell_id in &visible {
+                    let word = cell_id as usize / 64;
+                    let bit = cell_id as usize % 64;
+                    pvs[word] |= 1 << bit;
+                }
+            }
+
+            self.cells[i].pvs = Some(pvs);
+        }
+    }
+
+    fn generate_sample_points(&self, bounds: &AABB) -> Vec<Vec3> {
+        // Generate sample points within bounds
+        let mut points = Vec::new();
+        let step = 3; // 3x3x3 = 27 samples
+
+        for z in 0..step {
+            for y in 0..step {
+                for x in 0..step {
+                    let t = Vec3::new(
+                        (x as f32 + 0.5) / step as f32,
+                        (y as f32 + 0.5) / step as f32,
+                        (z as f32 + 0.5) / step as f32,
+                    );
+                    let point = bounds.min + (bounds.max - bounds.min) * t;
+                    points.push(point);
+                }
+            }
+        }
+
+        points
+    }
+
+    fn sample_visibility(&self, sample_pos: Vec3) -> Vec<u32> {
+        // Use portal traversal with omnidirectional frustum
+        let frustum = Frustum::from_view_proj(&Mat4::IDENTITY); // Simplified
+        self.determine_visibility(sample_pos, &frustum)
+    }
+}
+
+// ============================================================================
+// QUADTREE/OCTREE CULLING
+// Based on Harper Engine RT-1675: Spatial Partitioning for Culling
+// ============================================================================
+
+/// Octree node for spatial culling
+struct OctreeNode {
+    /// Node bounds
+    bounds: AABB,
+    /// Child nodes (None if leaf)
+    children: Option<Box<[OctreeNode; 8]>>,
+    /// Objects in this node (leaf only)
+    objects: Vec<u32>,
+    /// Depth in tree
+    depth: u32,
+}
+
+impl OctreeNode {
+    fn new(bounds: AABB, depth: u32) -> Self {
+        Self {
+            bounds,
+            children: None,
+            objects: Vec::new(),
+            depth,
+        }
+    }
+
+    /// Insert object into octree
+    fn insert(&mut self, object_id: u32, object_bounds: &AABB, max_depth: u32, max_objects: usize) {
+        if !self.bounds.intersects(object_bounds) {
+            return;
+        }
+
+        if self.children.is_some() {
+            // Internal node - insert into children
+            if let Some(ref mut children) = self.children {
+                for child in children.iter_mut() {
+                    child.insert(object_id, object_bounds, max_depth, max_objects);
+                }
+            }
+        } else if self.objects.len() >= max_objects && self.depth < max_depth {
+            // Subdivide
+            self.subdivide();
+            // Re-insert existing objects
+            let objects = std::mem::take(&mut self.objects);
+            for obj_id in objects {
+                // Would need object bounds lookup here
+                self.insert(obj_id, object_bounds, max_depth, max_objects);
+            }
+            self.insert(object_id, object_bounds, max_depth, max_objects);
+        } else {
+            // Leaf node - add object
+            self.objects.push(object_id);
+        }
+    }
+
+    fn subdivide(&mut self) {
+        let center = (self.bounds.min + self.bounds.max) * 0.5;
+        let min = self.bounds.min;
+        let max = self.bounds.max;
+
+        self.children = Some(Box::new([
+            OctreeNode::new(AABB { min, max: center }, self.depth + 1),
+            OctreeNode::new(AABB { min: Vec3::new(center.x, min.y, min.z), max: Vec3::new(max.x, center.y, center.z) }, self.depth + 1),
+            OctreeNode::new(AABB { min: Vec3::new(min.x, center.y, min.z), max: Vec3::new(center.x, max.y, center.z) }, self.depth + 1),
+            OctreeNode::new(AABB { min: Vec3::new(center.x, center.y, min.z), max: Vec3::new(max.x, max.y, center.z) }, self.depth + 1),
+            OctreeNode::new(AABB { min: Vec3::new(min.x, min.y, center.z), max: Vec3::new(center.x, center.y, max.z) }, self.depth + 1),
+            OctreeNode::new(AABB { min: Vec3::new(center.x, min.y, center.z), max: Vec3::new(max.x, center.y, max.z) }, self.depth + 1),
+            OctreeNode::new(AABB { min: Vec3::new(min.x, center.y, center.z), max: Vec3::new(center.x, max.y, max.z) }, self.depth + 1),
+            OctreeNode::new(AABB { min: center, max }, self.depth + 1),
+        ]));
+    }
+
+    /// Query objects visible in frustum
+    fn query_frustum(&self, frustum: &Frustum, results: &mut Vec<u32>) {
+        match frustum.test_aabb(&self.bounds) {
+            CullResult::Outside => return,
+            CullResult::Inside => {
+                // All objects in subtree are visible
+                self.collect_all_objects(results);
+            }
+            CullResult::Intersecting => {
+                if let Some(ref children) = self.children {
+                    for child in children.iter() {
+                        child.query_frustum(frustum, results);
+                    }
+                } else {
+                    results.extend(&self.objects);
+                }
+            }
+        }
+    }
+
+    fn collect_all_objects(&self, results: &mut Vec<u32>) {
+        results.extend(&self.objects);
+        if let Some(ref children) = self.children {
+            for child in children.iter() {
+                child.collect_all_objects(results);
+            }
+        }
+    }
+}
+
+/// Octree for scene culling
+struct Octree {
+    root: OctreeNode,
+    max_depth: u32,
+    max_objects_per_node: usize,
+}
+
+impl Octree {
+    fn new(bounds: AABB, max_depth: u32, max_objects_per_node: usize) -> Self {
+        Self {
+            root: OctreeNode::new(bounds, 0),
+            max_depth,
+            max_objects_per_node,
+        }
+    }
+
+    fn insert(&mut self, object_id: u32, object_bounds: &AABB) {
+        self.root.insert(object_id, object_bounds, self.max_depth, self.max_objects_per_node);
+    }
+
+    fn query_frustum(&self, frustum: &Frustum) -> Vec<u32> {
+        let mut results = Vec::new();
+        self.root.query_frustum(frustum, &mut results);
+        results
+    }
+}
+
+// ============================================================================
+// CONTRIBUTION CULLING
+// Based on Harper Engine RT-1676: Screen-Space Contribution Culling
+// ============================================================================
+
+/// Contribution-based culling (small object culling)
+struct ContributionCuller {
+    /// Minimum screen-space size in pixels
+    min_screen_size: f32,
+    /// Size fade range for smooth transitions
+    fade_range: f32,
+}
+
+impl ContributionCuller {
+    fn new(min_screen_size: f32) -> Self {
+        Self {
+            min_screen_size,
+            fade_range: min_screen_size * 0.5,
+        }
+    }
+
+    /// Calculate screen-space size of object
+    fn calculate_screen_size(
+        &self,
+        bounds: &Sphere,
+        camera_pos: Vec3,
+        fov_y: f32,
+        screen_height: f32
+    ) -> f32 {
+        let distance = (camera_pos - bounds.center).length();
+        if distance < 0.001 {
+            return screen_height;
+        }
+
+        let projected_radius = bounds.radius / distance;
+        let screen_size = projected_radius / (fov_y / 2.0).tan() * screen_height;
+
+        screen_size * 2.0 // Diameter
+    }
+
+    /// Test if object should be culled based on contribution
+    fn should_cull(&self, screen_size: f32) -> ContributionResult {
+        if screen_size < self.min_screen_size - self.fade_range {
+            ContributionResult::Culled
+        } else if screen_size < self.min_screen_size {
+            let fade = (screen_size - (self.min_screen_size - self.fade_range)) / self.fade_range;
+            ContributionResult::Fading { alpha: fade }
+        } else {
+            ContributionResult::Visible
+        }
+    }
+
+    /// Generate shader for contribution-based fading
+    fn generate_contribution_shader() -> String {
+        r#"
+            struct ContributionParams {
+                min_screen_size: f32,
+                fade_range: f32,
+                screen_height: f32,
+                fov_tan: f32,
+            };
+
+            @group(2) @binding(0) var<uniform> contrib_params: ContributionParams;
+
+            fn calculate_contribution_fade(world_pos: vec3<f32>, radius: f32, camera_pos: vec3<f32>) -> f32 {
+                let distance = length(world_pos - camera_pos);
+                let projected_size = radius / distance / contrib_params.fov_tan * contrib_params.screen_height * 2.0;
+
+                let fade_start = contrib_params.min_screen_size - contrib_params.fade_range;
+
+                if (projected_size < fade_start) {
+                    return 0.0;
+                } else if (projected_size < contrib_params.min_screen_size) {
+                    return (projected_size - fade_start) / contrib_params.fade_range;
+                } else {
+                    return 1.0;
+                }
+            }
+        "#.to_string()
+    }
+}
+
+enum ContributionResult {
+    Culled,
+    Fading { alpha: f32 },
+    Visible,
+}
+
+// ============================================================================
+// COMBINED CULLING PIPELINE
+// Based on Harper Engine RT-1677: Multi-Stage Culling
+// ============================================================================
+
+/// Combined culling pipeline
+struct CullingPipeline {
+    /// Spatial structure for coarse culling
+    octree: Octree,
+    /// GPU frustum culler
+    frustum_culler: GpuFrustumCuller,
+    /// Hi-Z occlusion culler
+    hiz_culler: HierarchicalZBuffer,
+    /// Contribution culler
+    contribution_culler: ContributionCuller,
+    /// Portal system (optional)
+    portal_system: Option<PortalSystem>,
+    /// Statistics
+    stats: CullingStats,
+}
+
+struct CullingStats {
+    objects_total: u32,
+    objects_after_spatial: u32,
+    objects_after_frustum: u32,
+    objects_after_occlusion: u32,
+    objects_after_contribution: u32,
+    culling_time_us: u32,
+}
+
+impl CullingPipeline {
+    fn new(device: &GpuDevice, scene_bounds: AABB, max_objects: u32, screen_size: (u32, u32)) -> Self {
+        Self {
+            octree: Octree::new(scene_bounds, 8, 32),
+            frustum_culler: GpuFrustumCuller::new(device, max_objects),
+            hiz_culler: HierarchicalZBuffer::new(device, screen_size.0, screen_size.1),
+            contribution_culler: ContributionCuller::new(2.0),
+            portal_system: None,
+            stats: CullingStats::default(),
+        }
+    }
+
+    /// Run full culling pipeline
+    fn cull(
+        &mut self,
+        cmd: &mut CommandBuffer,
+        camera_pos: Vec3,
+        frustum: &Frustum,
+        depth_buffer: &GpuTexture,
+        fov_y: f32,
+        screen_height: f32
+    ) -> CullingResult {
+        let start_time = std::time::Instant::now();
+
+        // Stage 1: Spatial (octree) culling on CPU
+        let spatial_visible = self.octree.query_frustum(frustum);
+        self.stats.objects_after_spatial = spatial_visible.len() as u32;
+
+        // Stage 2: Portal culling (if available)
+        let portal_filtered = if let Some(ref portal_system) = self.portal_system {
+            let visible_cells = portal_system.determine_visibility(camera_pos, frustum);
+            // Filter spatial_visible by cell membership
+            spatial_visible // Simplified - would filter by cell
+        } else {
+            spatial_visible
+        };
+
+        // Stage 3: GPU frustum culling
+        self.frustum_culler.cull(cmd, frustum, portal_filtered.len() as u32);
+        // Results are in frustum_culler.visibility_buffer
+
+        // Stage 4: Hi-Z occlusion culling
+        self.hiz_culler.build_pyramid(cmd, depth_buffer);
+        self.hiz_culler.test_occlusion(cmd, &self.frustum_culler.bounds_buffer, portal_filtered.len() as u32);
+
+        // Stage 5: Contribution culling (on GPU)
+        // Would run as part of material shader
+
+        self.stats.culling_time_us = start_time.elapsed().as_micros() as u32;
+
+        CullingResult {
+            visible_count_buffer: &self.frustum_culler.visible_count_buffer,
+            visible_indices_buffer: &self.frustum_culler.visibility_buffer,
+            draw_commands_buffer: &self.frustum_culler.draw_commands_buffer,
+        }
+    }
+}
+
+struct CullingResult<'a> {
+    visible_count_buffer: &'a GpuBuffer,
+    visible_indices_buffer: &'a GpuBuffer,
+    draw_commands_buffer: &'a GpuBuffer,
+}
+
+impl Default for CullingStats {
+    fn default() -> Self {
+        Self {
+            objects_total: 0,
+            objects_after_spatial: 0,
+            objects_after_frustum: 0,
+            objects_after_occlusion: 0,
+            objects_after_contribution: 0,
+            culling_time_us: 0,
+        }
+    }
+}
+
+// ============================================================================
+// UNIT TESTS
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_frustum_sphere_inside() {
+        let frustum = Frustum::from_view_proj(&Mat4::perspective(1.0, 1.0, 0.1, 100.0));
+
+        // Sphere at origin should be inside/intersecting
+        let result = frustum.test_sphere(Vec3::ZERO, 1.0);
+        assert_ne!(result, CullResult::Outside);
+    }
+
+    #[test]
+    fn test_frustum_sphere_outside() {
+        let frustum = Frustum::from_view_proj(&Mat4::perspective(1.0, 1.0, 0.1, 100.0));
+
+        // Sphere far to the side should be outside
+        let result = frustum.test_sphere(Vec3::new(1000.0, 0.0, 10.0), 1.0);
+        assert_eq!(result, CullResult::Outside);
+    }
+
+    #[test]
+    fn test_frustum_aabb() {
+        let frustum = Frustum::from_view_proj(&Mat4::perspective(1.0, 1.0, 0.1, 100.0));
+
+        let inside_aabb = AABB {
+            min: Vec3::new(-1.0, -1.0, 5.0),
+            max: Vec3::new(1.0, 1.0, 10.0),
+        };
+
+        let result = frustum.test_aabb(&inside_aabb);
+        assert_ne!(result, CullResult::Outside);
+    }
+
+    #[test]
+    fn test_software_occlusion_clear() {
+        let mut buffer = SoftwareOcclusionBuffer::new(64, 64);
+        buffer.clear();
+
+        for depth in &buffer.depth_buffer {
+            assert_eq!(*depth, 0.0);
+        }
+    }
+
+    #[test]
+    fn test_software_occlusion_pyramid() {
+        let mut buffer = SoftwareOcclusionBuffer::new(64, 64);
+
+        // Set some depths
+        buffer.depth_buffer[0] = 0.5;
+        buffer.depth_buffer[1] = 0.6;
+        buffer.depth_buffer[64] = 0.4;
+        buffer.depth_buffer[65] = 0.7;
+
+        buffer.build_pyramid();
+
+        // Mip 1 should have min of 2x2 block
+        let mip1_offset = buffer.mip_offsets[1];
+        assert_eq!(buffer.depth_buffer[mip1_offset], 0.4);
+    }
+
+    #[test]
+    fn test_octree_insert() {
+        let mut octree = Octree::new(
+            AABB { min: Vec3::splat(-100.0), max: Vec3::splat(100.0) },
+            4,
+            8
+        );
+
+        let obj_bounds = AABB {
+            min: Vec3::new(-1.0, -1.0, -1.0),
+            max: Vec3::new(1.0, 1.0, 1.0),
+        };
+
+        octree.insert(0, &obj_bounds);
+
+        // Query should find the object
+        let frustum = Frustum::from_view_proj(&Mat4::IDENTITY);
+        let results = octree.query_frustum(&frustum);
+
+        assert!(results.contains(&0));
+    }
+
+    #[test]
+    fn test_contribution_culler() {
+        let culler = ContributionCuller::new(4.0);
+
+        // Large object should be visible
+        let screen_size = culler.calculate_screen_size(
+            &Sphere { center: Vec3::ZERO, radius: 10.0 },
+            Vec3::new(0.0, 0.0, 50.0),
+            1.0,
+            1080.0
+        );
+
+        let result = culler.should_cull(screen_size);
+        assert!(matches!(result, ContributionResult::Visible));
+    }
+
+    #[test]
+    fn test_contribution_culler_small() {
+        let culler = ContributionCuller::new(4.0);
+
+        // Very small object should be culled
+        let screen_size = culler.calculate_screen_size(
+            &Sphere { center: Vec3::ZERO, radius: 0.01 },
+            Vec3::new(0.0, 0.0, 1000.0),
+            1.0,
+            1080.0
+        );
+
+        let result = culler.should_cull(screen_size);
+        assert!(matches!(result, ContributionResult::Culled));
+    }
+
+    #[test]
+    fn test_portal_system() {
+        let mut portal_system = PortalSystem::new();
+
+        let cell0 = portal_system.add_cell(AABB {
+            min: Vec3::new(0.0, 0.0, 0.0),
+            max: Vec3::new(10.0, 10.0, 10.0),
+        });
+
+        let cell1 = portal_system.add_cell(AABB {
+            min: Vec3::new(10.0, 0.0, 0.0),
+            max: Vec3::new(20.0, 10.0, 10.0),
+        });
+
+        portal_system.add_portal(
+            vec![
+                Vec3::new(10.0, 0.0, 0.0),
+                Vec3::new(10.0, 10.0, 0.0),
+                Vec3::new(10.0, 10.0, 10.0),
+                Vec3::new(10.0, 0.0, 10.0),
+            ],
+            cell0,
+            cell1
+        );
+
+        assert_eq!(portal_system.find_cell(Vec3::new(5.0, 5.0, 5.0)), Some(cell0));
+        assert_eq!(portal_system.find_cell(Vec3::new(15.0, 5.0, 5.0)), Some(cell1));
+    }
+
+    #[test]
+    fn test_hiz_mip_levels() {
+        // 1920x1080 should have log2(1920) ≈ 11 mip levels
+        let mip_levels = (1920u32.max(1080) as f32).log2().ceil() as u32;
+        assert_eq!(mip_levels, 11);
+    }
+
+    #[test]
+    fn test_cull_result_enum() {
+        assert_eq!(CullResult::Outside, CullResult::Outside);
+        assert_ne!(CullResult::Inside, CullResult::Outside);
+        assert_ne!(CullResult::Intersecting, CullResult::Inside);
+    }
+}

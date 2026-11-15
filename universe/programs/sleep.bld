@@ -1,0 +1,105 @@
+// =============================================================================
+// qsleep — Delay for a specified time (sleep clone) written in BuildLang
+// =============================================================================
+// Usage:
+//   qsleep 2                -> wait 2 seconds
+//   qsleep 0.5              -> wait 500ms
+//   qsleep 100ms            -> wait 100 milliseconds
+//   qsleep --help           -> usage
+//
+// Implementation: clock_ms() busy-wait loop until elapsed >= target.
+// =============================================================================
+
+fn print_help() ~ Console {
+    println!("qsleep -- delay for a specified amount of time");
+    println!("");
+    println!("Usage:");
+    println!("  qsleep SECONDS          pause for SECONDS seconds");
+    println!("  qsleep NUMBERms         pause for NUMBER milliseconds");
+    println!("  qsleep --help           display this help and exit");
+    println!("");
+    println!("SECONDS may be a decimal (e.g. 0.5 for 500ms).");
+}
+
+// Parse a duration string to milliseconds.
+// "2" -> 2000, "0.5" -> 500, "100ms" -> 100
+fn parse_duration_ms(s: String) -> i64 {
+    let slen = s.len();
+
+    // Check for "ms" suffix
+    if slen > 2 {
+        let tail = s.substring(slen - 2, 2);
+        if tail == "ms" {
+            let num_part = s.substring(0, slen - 2);
+            let ms = num_part.parse_int();
+            return ms;
+        }
+    }
+
+    // Try to parse as decimal seconds
+    // Look for a dot
+    let dot_pos = s.index_of(".");
+    if dot_pos < 0 {
+        // Integer seconds
+        let secs = s.parse_int();
+        return secs * 1000;
+    }
+
+    // Has decimal point: parse whole and fractional parts
+    let whole_str = s.substring(0, dot_pos);
+    let frac_start = dot_pos + 1;
+    let frac_len = slen - frac_start;
+    let frac_str = s.substring(frac_start, frac_len);
+
+    let whole_ms = whole_str.parse_int() * 1000;
+
+    // Convert fractional part to ms
+    // "5" -> 500, "50" -> 500, "500" -> 500, "25" -> 250
+    let frac_val = frac_str.parse_int();
+    let frac_ms = if frac_len == 1 {
+        frac_val * 100
+    } else if frac_len == 2 {
+        frac_val * 10
+    } else if frac_len == 3 {
+        frac_val
+    } else {
+        // More than 3 digits — truncate to ms precision
+        let mut v = frac_val;
+        let mut d = frac_len;
+        while d > 3 {
+            v = v / 10;
+            d = d - 1;
+        }
+        v
+    };
+
+    whole_ms + frac_ms
+}
+
+fn main() ~ Console + Environment + Process + Clock {
+    let nargs = args_count();
+
+    if nargs < 2 {
+        print_help();
+        process_exit(1);
+    }
+
+    let first = args_get(1);
+    if first == "--help" || first == "-h" {
+        print_help();
+        process_exit(0);
+    }
+
+    let target_ms = parse_duration_ms(first);
+    if target_ms <= 0 {
+        println!("qsleep: invalid time interval: {}", first);
+        process_exit(1);
+    }
+
+    // Busy-wait loop
+    let start = clock_ms();
+    let mut now = start;
+    while now - start < target_ms {
+        now = clock_ms();
+    }
+}

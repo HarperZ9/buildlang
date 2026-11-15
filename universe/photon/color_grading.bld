@@ -1,0 +1,1677 @@
+// =============================================================================
+// PHOTON COLOR GRADING AND TONEMAPPING SYSTEM
+// =============================================================================
+// Copyright (c) 2024-2025 Zain Dana Harper. All Rights Reserved.
+// Copyright (c) 2024-2025 Zain Dana Harper. All Rights Reserved.
+// =============================================================================
+//
+// Comprehensive color processing pipeline implementing:
+// - Multiple Tonemapping Operators (WP-031)
+// - LUT-Based Color Grading (WP-032)
+// - HDR Bloom with Threshold (WP-033)
+// - Chromatic Aberration (WP-034)
+// - Film Grain and Dithering (WP-035)
+// - Vignette and Lens Effects (WP-036)
+// - Auto-Exposure with Histogram (WP-037)
+// - Color Space Conversions (WP-038)
+//
+// =============================================================================
+
+module photon::color_grading;
+
+use core::math::{Vec2, Vec3, Vec4, Mat3, Mat4};
+use core::memory::{Buffer, Texture2D, Texture3D, Arena};
+
+// =============================================================================
+// COLOR GRADING CONFIGURATION
+// =============================================================================
+
+/// Configuration for color grading pipeline
+pub struct ColorGradingConfig {
+    /// Enable tonemapping
+    tonemapping_enabled: bool,
+    /// Tonemapping operator
+    tonemapper: Tonemapper,
+    /// Exposure value (EV)
+    exposure: f32,
+    /// Enable auto-exposure
+    auto_exposure: bool,
+    /// Auto-exposure adaptation speed
+    adaptation_speed: f32,
+    /// Target luminance for auto-exposure
+    target_luminance: f32,
+    /// Enable bloom
+    bloom_enabled: bool,
+    /// Bloom intensity
+    bloom_intensity: f32,
+    /// Bloom threshold
+    bloom_threshold: f32,
+    /// Enable color LUT
+    lut_enabled: bool,
+    /// LUT blend factor
+    lut_blend: f32,
+    /// Saturation adjustment
+    saturation: f32,
+    /// Contrast adjustment
+    contrast: f32,
+    /// Gamma correction
+    gamma: f32,
+    /// Color temperature (Kelvin)
+    temperature: f32,
+    /// Color tint (green/magenta)
+    tint: f32,
+    /// Enable vignette
+    vignette_enabled: bool,
+    /// Vignette intensity
+    vignette_intensity: f32,
+    /// Enable chromatic aberration
+    chromatic_aberration: bool,
+    /// Chromatic aberration intensity
+    ca_intensity: f32,
+    /// Enable film grain
+    film_grain: bool,
+    /// Film grain intensity
+    grain_intensity: f32,
+    /// Enable dithering
+    dithering: bool,
+}
+
+impl ColorGradingConfig {
+    pub fn default() -> Self {
+        Self {
+            tonemapping_enabled: true,
+            tonemapper: Tonemapper::ACES,
+            exposure: 0.0,
+            auto_exposure: true,
+            adaptation_speed: 2.0,
+            target_luminance: 0.18,
+            bloom_enabled: true,
+            bloom_intensity: 0.04,
+            bloom_threshold: 1.0,
+            lut_enabled: false,
+            lut_blend: 1.0,
+            saturation: 1.0,
+            contrast: 1.0,
+            gamma: 2.2,
+            temperature: 6500.0,
+            tint: 0.0,
+            vignette_enabled: true,
+            vignette_intensity: 0.3,
+            chromatic_aberration: false,
+            ca_intensity: 0.002,
+            film_grain: false,
+            grain_intensity: 0.02,
+            dithering: true,
+        }
+    }
+
+    pub fn cinematic() -> Self {
+        Self {
+            tonemapping_enabled: true,
+            tonemapper: Tonemapper::ACES,
+            exposure: -0.5,
+            auto_exposure: true,
+            adaptation_speed: 1.5,
+            target_luminance: 0.15,
+            bloom_enabled: true,
+            bloom_intensity: 0.06,
+            bloom_threshold: 0.8,
+            lut_enabled: true,
+            lut_blend: 1.0,
+            saturation: 0.95,
+            contrast: 1.1,
+            gamma: 2.2,
+            temperature: 6200.0,
+            tint: 0.05,
+            vignette_enabled: true,
+            vignette_intensity: 0.4,
+            chromatic_aberration: true,
+            ca_intensity: 0.003,
+            film_grain: true,
+            grain_intensity: 0.03,
+            dithering: true,
+        }
+    }
+
+    pub fn neutral() -> Self {
+        Self {
+            tonemapping_enabled: true,
+            tonemapper: Tonemapper::Neutral,
+            exposure: 0.0,
+            auto_exposure: false,
+            adaptation_speed: 2.0,
+            target_luminance: 0.18,
+            bloom_enabled: false,
+            bloom_intensity: 0.0,
+            bloom_threshold: 1.0,
+            lut_enabled: false,
+            lut_blend: 0.0,
+            saturation: 1.0,
+            contrast: 1.0,
+            gamma: 2.2,
+            temperature: 6500.0,
+            tint: 0.0,
+            vignette_enabled: false,
+            vignette_intensity: 0.0,
+            chromatic_aberration: false,
+            ca_intensity: 0.0,
+            film_grain: false,
+            grain_intensity: 0.0,
+            dithering: false,
+        }
+    }
+}
+
+// =============================================================================
+// TONEMAPPING OPERATORS (WP-031)
+// =============================================================================
+
+/// Available tonemapping operators
+#[derive(Clone, Copy, PartialEq)]
+pub enum Tonemapper {
+    /// Linear (no tonemapping)
+    Linear,
+    /// Reinhard simple
+    Reinhard,
+    /// Extended Reinhard with white point
+    ReinhardExtended { white_point: f32 },
+    /// Filmic (Uncharted 2 style)
+    Filmic,
+    /// ACES (Academy Color Encoding System)
+    ACES,
+    /// ACES fitted approximation
+    ACESFitted,
+    /// Tony McMapface (neutral, minimal hue shift)
+    TonyMcMapface,
+    /// AgX (Blender-style)
+    AgX,
+    /// Neutral tonemapper
+    Neutral,
+    /// Gran Turismo style
+    GranTurismo,
+    /// Custom curve
+    Custom { curve: ToneCurve },
+}
+
+/// Custom tonemapping curve
+#[derive(Clone, Copy)]
+pub struct ToneCurve {
+    /// Toe strength (dark region)
+    toe_strength: f32,
+    /// Toe length
+    toe_length: f32,
+    /// Shoulder strength (bright region)
+    shoulder_strength: f32,
+    /// Shoulder length
+    shoulder_length: f32,
+    /// Shoulder angle
+    shoulder_angle: f32,
+    /// Linear section gamma
+    gamma: f32,
+}
+
+impl ToneCurve {
+    pub fn default() -> Self {
+        Self {
+            toe_strength: 0.5,
+            toe_length: 0.5,
+            shoulder_strength: 2.0,
+            shoulder_length: 0.5,
+            shoulder_angle: 1.0,
+            gamma: 1.0,
+        }
+    }
+}
+
+/// Tonemapping implementation
+pub struct TonemappingPass {
+    tonemapper: Tonemapper,
+    exposure_scale: f32,
+}
+
+impl TonemappingPass {
+    pub fn new(tonemapper: Tonemapper) -> Self {
+        Self {
+            tonemapper,
+            exposure_scale: 1.0,
+        }
+    }
+
+    /// Set exposure value
+    pub fn set_exposure(&mut self, ev: f32) {
+        self.exposure_scale = 2.0f32.powf(ev);
+    }
+
+    /// Apply tonemapping to HDR color
+    pub fn apply(&self, hdr: Vec3) -> Vec3 {
+        let exposed = hdr * self.exposure_scale;
+
+        match self.tonemapper {
+            Tonemapper::Linear => exposed.clamp(0.0, 1.0),
+            Tonemapper::Reinhard => self.reinhard(exposed),
+            Tonemapper::ReinhardExtended { white_point } => {
+                self.reinhard_extended(exposed, white_point)
+            }
+            Tonemapper::Filmic => self.filmic(exposed),
+            Tonemapper::ACES => self.aces(exposed),
+            Tonemapper::ACESFitted => self.aces_fitted(exposed),
+            Tonemapper::TonyMcMapface => self.tony_mcmapface(exposed),
+            Tonemapper::AgX => self.agx(exposed),
+            Tonemapper::Neutral => self.neutral(exposed),
+            Tonemapper::GranTurismo => self.gran_turismo(exposed),
+            Tonemapper::Custom { curve } => self.custom_curve(exposed, &curve),
+        }
+    }
+
+    /// Simple Reinhard tonemapping
+    fn reinhard(&self, color: Vec3) -> Vec3 {
+        color / (Vec3::one() + color)
+    }
+
+    /// Extended Reinhard with white point
+    fn reinhard_extended(&self, color: Vec3, white: f32) -> Vec3 {
+        let white_sq = white * white;
+        let numerator = color * (Vec3::one() + color / white_sq);
+        numerator / (Vec3::one() + color)
+    }
+
+    /// Filmic tonemapping (Uncharted 2)
+    fn filmic(&self, color: Vec3) -> Vec3 {
+        let a = 0.15f32; // Shoulder strength
+        let b = 0.50f32; // Linear strength
+        let c = 0.10f32; // Linear angle
+        let d = 0.20f32; // Toe strength
+        let e = 0.02f32; // Toe numerator
+        let f = 0.30f32; // Toe denominator
+
+        let map = |x: f32| -> f32 {
+            ((x * (a * x + c * b) + d * e) / (x * (a * x + b) + d * f)) - e / f
+        };
+
+        let white = 11.2f32;
+        let scale = 1.0 / map(white);
+
+        Vec3::new(
+            map(color.x) * scale,
+            map(color.y) * scale,
+            map(color.z) * scale
+        )
+    }
+
+    /// ACES tonemapping
+    fn aces(&self, color: Vec3) -> Vec3 {
+        // ACES input transform (AP0 to AP1)
+        let aces_input = Mat3::new(
+            0.59719, 0.07600, 0.02840,
+            0.35458, 0.90834, 0.13383,
+            0.04823, 0.01566, 0.83777
+        );
+
+        // ACES output transform (AP1 to sRGB)
+        let aces_output = Mat3::new(
+            1.60475, -0.10208, -0.00327,
+            -0.53108,  1.10813, -0.07276,
+            -0.07367, -0.00605,  1.07602
+        );
+
+        let v = aces_input * color;
+
+        // RRT + ODT approximation
+        let a = v * (v + 0.0245786) - 0.000090537;
+        let b = v * (0.983729 * v + 0.4329510) + 0.238081;
+        let mapped = a / b;
+
+        (aces_output * mapped).clamp(0.0, 1.0)
+    }
+
+    /// ACES fitted approximation (Krzysztof Narkowicz)
+    fn aces_fitted(&self, color: Vec3) -> Vec3 {
+        let a = 2.51f32;
+        let b = 0.03f32;
+        let c = 2.43f32;
+        let d = 0.59f32;
+        let e = 0.14f32;
+
+        let map = |x: f32| -> f32 {
+            ((x * (a * x + b)) / (x * (c * x + d) + e)).clamp(0.0, 1.0)
+        };
+
+        Vec3::new(map(color.x), map(color.y), map(color.z))
+    }
+
+    /// Tony McMapface - minimal hue shift tonemapper
+    fn tony_mcmapface(&self, color: Vec3) -> Vec3 {
+        // Attempt to maintain hue while compressing luminance
+        let luminance = color.luminance();
+
+        if luminance <= 0.0 {
+            return Vec3::zero();
+        }
+
+        // Compress luminance using smooth curve
+        let compressed = luminance / (luminance + 1.0);
+        let ratio = compressed / luminance;
+
+        // Apply ratio to maintain hue
+        let result = color * ratio;
+
+        // Slight desaturation in highlights to prevent neon colors
+        let sat_factor = 1.0 - (luminance / (luminance + 2.0)).powf(2.0) * 0.3;
+        let gray = Vec3::splat(result.luminance());
+
+        result.lerp(gray, 1.0 - sat_factor)
+    }
+
+    /// AgX tonemapper (Blender style)
+    fn agx(&self, color: Vec3) -> Vec3 {
+        // AgX Log encoding
+        let min_ev = -12.47393f32;
+        let max_ev = 4.026069f32;
+
+        let log_color = Vec3::new(
+            Self::agx_log(color.x, min_ev, max_ev),
+            Self::agx_log(color.y, min_ev, max_ev),
+            Self::agx_log(color.z, min_ev, max_ev)
+        );
+
+        // AgX Base contrast
+        let agx_mat = Mat3::new(
+            0.842479, 0.0423738, 0.0423738,
+            0.0784336, 0.878468, 0.0784336,
+            0.0792206, 0.0791492, 0.879142
+        );
+
+        let base = agx_mat * log_color;
+
+        // Apply S-curve
+        let sigmoid = Vec3::new(
+            Self::agx_default_curve(base.x),
+            Self::agx_default_curve(base.y),
+            Self::agx_default_curve(base.z)
+        );
+
+        // AgX output transform
+        let agx_out = Mat3::new(
+            1.19687, -0.0528968, -0.0529716,
+            -0.0980208, 1.15190, -0.0980434,
+            -0.0990297, -0.0989612, 1.15107
+        );
+
+        (agx_out * sigmoid).clamp(0.0, 1.0)
+    }
+
+    fn agx_log(x: f32, min_ev: f32, max_ev: f32) -> f32 {
+        let t = x.max(1e-10).log2().clamp(min_ev, max_ev);
+        (t - min_ev) / (max_ev - min_ev)
+    }
+
+    fn agx_default_curve(x: f32) -> f32 {
+        // Attempt at AgX's sigmoid curve
+        let x_2 = x * x;
+        let x_4 = x_2 * x_2;
+        15.5 * x_4 * x_2 - 40.14 * x_4 * x + 31.96 * x_4 - 6.868 * x_2 * x + 0.4298 * x_2 + 0.1191 * x - 0.00232
+    }
+
+    /// Neutral tonemapper
+    fn neutral(&self, color: Vec3) -> Vec3 {
+        // Simple S-curve with minimal color shift
+        let a = 0.2f32;
+        let b = 0.29f32;
+        let c = 0.24f32;
+        let d = 0.272f32;
+        let e = 0.02f32;
+
+        let map = |x: f32| -> f32 {
+            let x = x.max(0.0);
+            (x * (a * x + c * b) + d * e) / (x * (a * x + b) + d) - e
+        };
+
+        Vec3::new(
+            map(color.x).clamp(0.0, 1.0),
+            map(color.y).clamp(0.0, 1.0),
+            map(color.z).clamp(0.0, 1.0)
+        )
+    }
+
+    /// Gran Turismo style tonemapper
+    fn gran_turismo(&self, color: Vec3) -> Vec3 {
+        let p = 1.0f32;  // max brightness
+        let a = 1.0f32;  // contrast
+        let m = 0.22f32; // linear section start
+        let l = 0.4f32;  // linear section length
+        let c = 1.33f32; // black tightness
+        let b = 0.0f32;  // pedestal
+
+        let gt_curve = |x: f32| -> f32 {
+            let l0 = ((p - m) * l) / a;
+            let s0 = m + l0;
+            let s1 = m + a * l0;
+            let c2 = (a * p) / (p - s1);
+            let cp = -c2 / p;
+
+            let w0 = 1.0 - ((-c * (x - b)).exp()).min(1.0);
+            let w2 = if x < m + l0 { 0.0 } else { 1.0 };
+            let w1 = 1.0 - w0 - w2;
+
+            let t = m * (x / m).powf(c) + b;
+            let s = p - (p - s1) * ((-c2 * (x - s0) / p).exp());
+            let u = m + a * (x - m);
+
+            t * w0 + u * w1 + s * w2
+        };
+
+        Vec3::new(
+            gt_curve(color.x),
+            gt_curve(color.y),
+            gt_curve(color.z)
+        )
+    }
+
+    /// Custom curve tonemapper
+    fn custom_curve(&self, color: Vec3, curve: &ToneCurve) -> Vec3 {
+        // Simplified filmic curve with custom parameters
+        let map = |x: f32| -> f32 {
+            let toe = curve.toe_strength * curve.toe_length;
+            let shoulder = curve.shoulder_strength * curve.shoulder_length;
+
+            // Toe section
+            if x < curve.toe_length {
+                let t = x / curve.toe_length;
+                return curve.toe_length * t.powf(curve.toe_strength);
+            }
+
+            // Shoulder section
+            let linear_end = 1.0 - curve.shoulder_length;
+            if x > linear_end {
+                let t = (x - linear_end) / curve.shoulder_length;
+                let shoulder_val = 1.0 - (1.0 - t).powf(curve.shoulder_strength);
+                return linear_end + curve.shoulder_length * shoulder_val;
+            }
+
+            // Linear section
+            x.powf(curve.gamma)
+        };
+
+        Vec3::new(
+            map(color.x).clamp(0.0, 1.0),
+            map(color.y).clamp(0.0, 1.0),
+            map(color.z).clamp(0.0, 1.0)
+        )
+    }
+}
+
+// =============================================================================
+// LUT-BASED COLOR GRADING (WP-032)
+// =============================================================================
+
+/// 3D LUT for color grading
+pub struct ColorLUT {
+    /// LUT data (typically 32x32x32 or 64x64x64)
+    data: Texture3D,
+    /// LUT size per dimension
+    size: u32,
+    /// Neutral LUT (identity transform)
+    is_neutral: bool,
+}
+
+impl ColorLUT {
+    /// Create a neutral (identity) LUT
+    pub fn neutral(size: u32) -> Self {
+        let mut data = Vec::with_capacity((size * size * size * 4) as usize);
+
+        for b in 0..size {
+            for g in 0..size {
+                for r in 0..size {
+                    let color = Vec4::new(
+                        r as f32 / (size - 1) as f32,
+                        g as f32 / (size - 1) as f32,
+                        b as f32 / (size - 1) as f32,
+                        1.0
+                    );
+                    data.push(color.x);
+                    data.push(color.y);
+                    data.push(color.z);
+                    data.push(color.w);
+                }
+            }
+        }
+
+        Self {
+            data: Texture3D::from_rgba(&data, size, size, size),
+            size,
+            is_neutral: true,
+        }
+    }
+
+    /// Load LUT from data
+    pub fn from_data(data: &[f32], size: u32) -> Self {
+        Self {
+            data: Texture3D::from_rgba(data, size, size, size),
+            size,
+            is_neutral: false,
+        }
+    }
+
+    /// Apply LUT to color
+    pub fn apply(&self, color: Vec3) -> Vec3 {
+        // Clamp input to [0, 1]
+        let clamped = color.clamp(0.0, 1.0);
+
+        // Scale to LUT coordinates
+        let scale = (self.size - 1) as f32;
+        let coord = Vec3::new(
+            clamped.x * scale,
+            clamped.y * scale,
+            clamped.z * scale
+        );
+
+        // Trilinear interpolation
+        self.sample_trilinear(coord)
+    }
+
+    fn sample_trilinear(&self, coord: Vec3) -> Vec3 {
+        let size = self.size as f32;
+
+        let x0 = (coord.x as u32).min(self.size - 1);
+        let y0 = (coord.y as u32).min(self.size - 1);
+        let z0 = (coord.z as u32).min(self.size - 1);
+        let x1 = (x0 + 1).min(self.size - 1);
+        let y1 = (y0 + 1).min(self.size - 1);
+        let z1 = (z0 + 1).min(self.size - 1);
+
+        let fx = coord.x - x0 as f32;
+        let fy = coord.y - y0 as f32;
+        let fz = coord.z - z0 as f32;
+
+        // Sample 8 corners
+        let c000 = self.sample_point(x0, y0, z0);
+        let c100 = self.sample_point(x1, y0, z0);
+        let c010 = self.sample_point(x0, y1, z0);
+        let c110 = self.sample_point(x1, y1, z0);
+        let c001 = self.sample_point(x0, y0, z1);
+        let c101 = self.sample_point(x1, y0, z1);
+        let c011 = self.sample_point(x0, y1, z1);
+        let c111 = self.sample_point(x1, y1, z1);
+
+        // Interpolate
+        let c00 = c000.lerp(c100, fx);
+        let c10 = c010.lerp(c110, fx);
+        let c01 = c001.lerp(c101, fx);
+        let c11 = c011.lerp(c111, fx);
+
+        let c0 = c00.lerp(c10, fy);
+        let c1 = c01.lerp(c11, fy);
+
+        c0.lerp(c1, fz)
+    }
+
+    fn sample_point(&self, x: u32, y: u32, z: u32) -> Vec3 {
+        let color = self.data.get_pixel(x, y, z);
+        Vec3::new(color.x, color.y, color.z)
+    }
+
+    /// Blend two LUTs
+    pub fn blend(&self, other: &ColorLUT, factor: f32) -> ColorLUT {
+        assert_eq!(self.size, other.size);
+
+        let mut data = Vec::with_capacity((self.size * self.size * self.size * 4) as usize);
+
+        for z in 0..self.size {
+            for y in 0..self.size {
+                for x in 0..self.size {
+                    let a = self.sample_point(x, y, z);
+                    let b = other.sample_point(x, y, z);
+                    let blended = a.lerp(b, factor);
+
+                    data.push(blended.x);
+                    data.push(blended.y);
+                    data.push(blended.z);
+                    data.push(1.0);
+                }
+            }
+        }
+
+        ColorLUT::from_data(&data, self.size)
+    }
+}
+
+/// LUT-based color grader
+pub struct LUTColorGrader {
+    /// Current LUT
+    lut: ColorLUT,
+    /// Blend factor with original
+    blend: f32,
+}
+
+impl LUTColorGrader {
+    pub fn new(lut: ColorLUT) -> Self {
+        Self { lut, blend: 1.0 }
+    }
+
+    pub fn set_blend(&mut self, blend: f32) {
+        self.blend = blend.clamp(0.0, 1.0);
+    }
+
+    pub fn apply(&self, color: Vec3) -> Vec3 {
+        if self.blend <= 0.0 || self.lut.is_neutral {
+            return color;
+        }
+
+        let graded = self.lut.apply(color);
+
+        if self.blend >= 1.0 {
+            graded
+        } else {
+            color.lerp(graded, self.blend)
+        }
+    }
+}
+
+// =============================================================================
+// HDR BLOOM (WP-033)
+// =============================================================================
+
+/// HDR Bloom effect
+pub struct BloomPass {
+    /// Bloom configuration
+    intensity: f32,
+    threshold: f32,
+    soft_threshold: f32,
+    /// Number of blur iterations
+    iterations: u32,
+    /// Downsample chain
+    mip_chain: Vec<Texture2D>,
+    /// Blur direction
+    horizontal: bool,
+}
+
+impl BloomPass {
+    pub fn new(width: u32, height: u32, iterations: u32) -> Self {
+        let mut mip_chain = Vec::with_capacity(iterations as usize);
+
+        let mut w = width / 2;
+        let mut h = height / 2;
+
+        for _ in 0..iterations {
+            mip_chain.push(Texture2D::new(w, h));
+            w = (w / 2).max(1);
+            h = (h / 2).max(1);
+        }
+
+        Self {
+            intensity: 0.04,
+            threshold: 1.0,
+            soft_threshold: 0.5,
+            iterations,
+            mip_chain,
+            horizontal: true,
+        }
+    }
+
+    pub fn set_intensity(&mut self, intensity: f32) {
+        self.intensity = intensity;
+    }
+
+    pub fn set_threshold(&mut self, threshold: f32, soft_knee: f32) {
+        self.threshold = threshold;
+        self.soft_threshold = soft_knee;
+    }
+
+    /// Apply bloom to HDR image
+    pub fn apply(&mut self, input: &Texture2D) -> Texture2D {
+        if self.intensity <= 0.0 || self.mip_chain.is_empty() {
+            return input.clone();
+        }
+
+        // Threshold and downsample
+        self.downsample_with_threshold(input);
+
+        // Blur at each level
+        self.blur_mip_chain();
+
+        // Upsample and combine
+        self.upsample_and_combine();
+
+        // Combine with original
+        self.combine_with_input(input)
+    }
+
+    fn downsample_with_threshold(&mut self, input: &Texture2D) {
+        if self.mip_chain.is_empty() {
+            return;
+        }
+
+        let first_mip = &mut self.mip_chain[0];
+
+        for y in 0..first_mip.height() {
+            for x in 0..first_mip.width() {
+                let uv = Vec2::new(
+                    (x as f32 + 0.5) / first_mip.width() as f32,
+                    (y as f32 + 0.5) / first_mip.height() as f32
+                );
+
+                // 13-tap downsample (better quality)
+                let color = self.downsample_13tap(input, uv);
+
+                // Apply threshold with soft knee
+                let brightness = color.luminance();
+                let knee = self.threshold * self.soft_threshold;
+                let soft = brightness - self.threshold + knee;
+                let contribution = soft.clamp(0.0, 2.0 * knee);
+                let contribution = contribution * contribution / (4.0 * knee + 0.0001);
+
+                let weight = if brightness > self.threshold {
+                    1.0
+                } else {
+                    contribution / brightness.max(0.0001)
+                };
+
+                first_mip.set_pixel(x, y, color * weight);
+            }
+        }
+
+        // Continue downsampling
+        for i in 1..self.mip_chain.len() {
+            let (prev, current) = self.mip_chain.split_at_mut(i);
+            let prev_mip = &prev[i - 1];
+            let current_mip = &mut current[0];
+
+            for y in 0..current_mip.height() {
+                for x in 0..current_mip.width() {
+                    let uv = Vec2::new(
+                        (x as f32 + 0.5) / current_mip.width() as f32,
+                        (y as f32 + 0.5) / current_mip.height() as f32
+                    );
+
+                    let color = self.downsample_13tap(prev_mip, uv);
+                    current_mip.set_pixel(x, y, color);
+                }
+            }
+        }
+    }
+
+    fn downsample_13tap(&self, tex: &Texture2D, uv: Vec2) -> Vec4 {
+        let pixel_size = Vec2::new(1.0 / tex.width() as f32, 1.0 / tex.height() as f32);
+
+        // 13-tap filter kernel
+        let offsets = [
+            Vec2::new(-2.0, -2.0), Vec2::new(0.0, -2.0), Vec2::new(2.0, -2.0),
+            Vec2::new(-1.0, -1.0), Vec2::new(1.0, -1.0),
+            Vec2::new(-2.0, 0.0),  Vec2::new(0.0, 0.0),  Vec2::new(2.0, 0.0),
+            Vec2::new(-1.0, 1.0),  Vec2::new(1.0, 1.0),
+            Vec2::new(-2.0, 2.0),  Vec2::new(0.0, 2.0),  Vec2::new(2.0, 2.0),
+        ];
+
+        let weights = [
+            0.0625, 0.125, 0.0625,
+            0.125, 0.125,
+            0.0625, 0.125, 0.0625,
+            0.125, 0.125,
+            0.0625, 0.125, 0.0625,
+        ];
+
+        let mut sum = Vec4::zero();
+
+        for (offset, weight) in offsets.iter().zip(weights.iter()) {
+            let sample_uv = uv + *offset * pixel_size;
+            sum = sum + tex.sample(sample_uv) * *weight;
+        }
+
+        sum
+    }
+
+    fn blur_mip_chain(&mut self) {
+        // Two-pass Gaussian blur at each level
+        for i in 0..self.mip_chain.len() {
+            self.blur_horizontal(i);
+            self.blur_vertical(i);
+        }
+    }
+
+    fn blur_horizontal(&mut self, level: usize) {
+        let mip = &self.mip_chain[level];
+        let width = mip.width();
+        let height = mip.height();
+        let mut temp = Texture2D::new(width, height);
+
+        let kernel = [0.0625, 0.25, 0.375, 0.25, 0.0625];
+        let pixel_size = 1.0 / width as f32;
+
+        for y in 0..height {
+            for x in 0..width {
+                let uv = Vec2::new(
+                    (x as f32 + 0.5) / width as f32,
+                    (y as f32 + 0.5) / height as f32
+                );
+
+                let mut sum = Vec4::zero();
+                for (i, weight) in kernel.iter().enumerate() {
+                    let offset = (i as i32 - 2) as f32 * pixel_size;
+                    let sample_uv = Vec2::new(uv.x + offset, uv.y);
+                    sum = sum + mip.sample(sample_uv) * *weight;
+                }
+
+                temp.set_pixel(x, y, sum);
+            }
+        }
+
+        self.mip_chain[level] = temp;
+    }
+
+    fn blur_vertical(&mut self, level: usize) {
+        let mip = &self.mip_chain[level];
+        let width = mip.width();
+        let height = mip.height();
+        let mut temp = Texture2D::new(width, height);
+
+        let kernel = [0.0625, 0.25, 0.375, 0.25, 0.0625];
+        let pixel_size = 1.0 / height as f32;
+
+        for y in 0..height {
+            for x in 0..width {
+                let uv = Vec2::new(
+                    (x as f32 + 0.5) / width as f32,
+                    (y as f32 + 0.5) / height as f32
+                );
+
+                let mut sum = Vec4::zero();
+                for (i, weight) in kernel.iter().enumerate() {
+                    let offset = (i as i32 - 2) as f32 * pixel_size;
+                    let sample_uv = Vec2::new(uv.x, uv.y + offset);
+                    sum = sum + mip.sample(sample_uv) * *weight;
+                }
+
+                temp.set_pixel(x, y, sum);
+            }
+        }
+
+        self.mip_chain[level] = temp;
+    }
+
+    fn upsample_and_combine(&mut self) {
+        // Work backwards through mip chain, upsampling and combining
+        for i in (0..self.mip_chain.len() - 1).rev() {
+            let higher_idx = i + 1;
+
+            // Get dimensions of lower resolution mip
+            let (low_w, low_h) = {
+                let higher = &self.mip_chain[higher_idx];
+                (higher.width(), higher.height())
+            };
+
+            let high_w = self.mip_chain[i].width();
+            let high_h = self.mip_chain[i].height();
+
+            let mut upsampled = Texture2D::new(high_w, high_h);
+
+            for y in 0..high_h {
+                for x in 0..high_w {
+                    let uv = Vec2::new(
+                        (x as f32 + 0.5) / high_w as f32,
+                        (y as f32 + 0.5) / high_h as f32
+                    );
+
+                    // Tent filter upsample
+                    let lower = self.upsample_tent(&self.mip_chain[higher_idx], uv);
+                    let current = self.mip_chain[i].sample(uv);
+
+                    // Combine with lerp (energy-conserving)
+                    upsampled.set_pixel(x, y, current + lower * 0.5);
+                }
+            }
+
+            self.mip_chain[i] = upsampled;
+        }
+    }
+
+    fn upsample_tent(&self, tex: &Texture2D, uv: Vec2) -> Vec4 {
+        let pixel_size = Vec2::new(1.0 / tex.width() as f32, 1.0 / tex.height() as f32);
+
+        // 9-tap tent filter
+        let offsets = [
+            Vec2::new(-1.0, -1.0), Vec2::new(0.0, -1.0), Vec2::new(1.0, -1.0),
+            Vec2::new(-1.0, 0.0),  Vec2::new(0.0, 0.0),  Vec2::new(1.0, 0.0),
+            Vec2::new(-1.0, 1.0),  Vec2::new(0.0, 1.0),  Vec2::new(1.0, 1.0),
+        ];
+
+        let weights = [
+            0.0625, 0.125, 0.0625,
+            0.125, 0.25, 0.125,
+            0.0625, 0.125, 0.0625,
+        ];
+
+        let mut sum = Vec4::zero();
+
+        for (offset, weight) in offsets.iter().zip(weights.iter()) {
+            let sample_uv = uv + *offset * pixel_size;
+            sum = sum + tex.sample(sample_uv) * *weight;
+        }
+
+        sum
+    }
+
+    fn combine_with_input(&self, input: &Texture2D) -> Texture2D {
+        let width = input.width();
+        let height = input.height();
+        let mut output = Texture2D::new(width, height);
+
+        if self.mip_chain.is_empty() {
+            return input.clone();
+        }
+
+        for y in 0..height {
+            for x in 0..width {
+                let uv = Vec2::new(
+                    (x as f32 + 0.5) / width as f32,
+                    (y as f32 + 0.5) / height as f32
+                );
+
+                let original = input.get_pixel(x, y);
+                let bloom = self.mip_chain[0].sample(uv);
+
+                output.set_pixel(x, y, original + bloom * self.intensity);
+            }
+        }
+
+        output
+    }
+}
+
+// =============================================================================
+// AUTO-EXPOSURE (WP-037)
+// =============================================================================
+
+/// Auto-exposure system using luminance histogram
+pub struct AutoExposure {
+    /// Current exposure value
+    current_ev: f32,
+    /// Target exposure value
+    target_ev: f32,
+    /// Adaptation speed
+    adaptation_speed: f32,
+    /// Target middle gray
+    target_luminance: f32,
+    /// Minimum EV
+    min_ev: f32,
+    /// Maximum EV
+    max_ev: f32,
+    /// Luminance histogram
+    histogram: [u32; 256],
+    /// Low percentile for exposure calculation
+    low_percentile: f32,
+    /// High percentile for exposure calculation
+    high_percentile: f32,
+}
+
+impl AutoExposure {
+    pub fn new() -> Self {
+        Self {
+            current_ev: 0.0,
+            target_ev: 0.0,
+            adaptation_speed: 2.0,
+            target_luminance: 0.18,
+            min_ev: -4.0,
+            max_ev: 4.0,
+            histogram: [0; 256],
+            low_percentile: 0.1,
+            high_percentile: 0.9,
+        }
+    }
+
+    /// Update exposure from scene
+    pub fn update(&mut self, input: &Texture2D, dt: f32) {
+        // Build histogram
+        self.build_histogram(input);
+
+        // Calculate target exposure
+        self.calculate_target_exposure();
+
+        // Smooth adaptation
+        let speed = self.adaptation_speed * dt;
+        self.current_ev = self.current_ev + (self.target_ev - self.current_ev) * speed.min(1.0);
+        self.current_ev = self.current_ev.clamp(self.min_ev, self.max_ev);
+    }
+
+    fn build_histogram(&mut self, input: &Texture2D) {
+        // Clear histogram
+        self.histogram.fill(0);
+
+        let width = input.width();
+        let height = input.height();
+
+        for y in 0..height {
+            for x in 0..width {
+                let color = input.get_pixel(x, y);
+                let luminance = Vec3::new(color.x, color.y, color.z).luminance();
+
+                // Convert luminance to histogram bin (log scale)
+                let log_lum = if luminance > 0.001 {
+                    ((luminance.log2() + 10.0) / 20.0).clamp(0.0, 1.0)
+                } else {
+                    0.0
+                };
+
+                let bin = (log_lum * 255.0) as usize;
+                self.histogram[bin.min(255)] += 1;
+            }
+        }
+    }
+
+    fn calculate_target_exposure(&mut self) {
+        let total_pixels: u32 = self.histogram.iter().sum();
+
+        if total_pixels == 0 {
+            return;
+        }
+
+        // Find percentile bounds
+        let low_count = (total_pixels as f32 * self.low_percentile) as u32;
+        let high_count = (total_pixels as f32 * self.high_percentile) as u32;
+
+        let mut sum_lum = 0.0;
+        let mut count = 0u32;
+        let mut running_count = 0u32;
+
+        for (i, &bin_count) in self.histogram.iter().enumerate() {
+            running_count += bin_count;
+
+            if running_count > low_count && running_count < high_count {
+                // Convert bin back to luminance
+                let t = i as f32 / 255.0;
+                let log_lum = t * 20.0 - 10.0;
+                let luminance = 2.0f32.powf(log_lum);
+
+                sum_lum += luminance * bin_count as f32;
+                count += bin_count;
+            }
+        }
+
+        if count > 0 {
+            let avg_luminance = sum_lum / count as f32;
+            // Calculate EV needed to reach target luminance
+            self.target_ev = (self.target_luminance / avg_luminance).log2();
+            self.target_ev = self.target_ev.clamp(self.min_ev, self.max_ev);
+        }
+    }
+
+    pub fn get_exposure(&self) -> f32 {
+        self.current_ev
+    }
+
+    pub fn get_exposure_scale(&self) -> f32 {
+        2.0f32.powf(self.current_ev)
+    }
+}
+
+// =============================================================================
+// COLOR ADJUSTMENTS
+// =============================================================================
+
+/// Color adjustment operations
+pub struct ColorAdjustments {
+    /// Saturation multiplier
+    saturation: f32,
+    /// Contrast
+    contrast: f32,
+    /// Brightness offset
+    brightness: f32,
+    /// Color temperature (Kelvin)
+    temperature: f32,
+    /// Tint (green/magenta)
+    tint: f32,
+    /// Shadows color tint
+    shadows_color: Vec3,
+    /// Midtones color tint
+    midtones_color: Vec3,
+    /// Highlights color tint
+    highlights_color: Vec3,
+    /// Shadow/midtone/highlight split points
+    split_shadows: f32,
+    split_highlights: f32,
+}
+
+impl ColorAdjustments {
+    pub fn new() -> Self {
+        Self {
+            saturation: 1.0,
+            contrast: 1.0,
+            brightness: 0.0,
+            temperature: 6500.0,
+            tint: 0.0,
+            shadows_color: Vec3::one(),
+            midtones_color: Vec3::one(),
+            highlights_color: Vec3::one(),
+            split_shadows: 0.3,
+            split_highlights: 0.7,
+        }
+    }
+
+    /// Apply adjustments to color
+    pub fn apply(&self, color: Vec3) -> Vec3 {
+        let mut result = color;
+
+        // Temperature and tint
+        result = self.apply_white_balance(result);
+
+        // Brightness
+        result = result + Vec3::splat(self.brightness);
+
+        // Contrast (pivot at 0.5)
+        result = (result - 0.5) * self.contrast + 0.5;
+
+        // Saturation
+        let luminance = result.luminance();
+        let gray = Vec3::splat(luminance);
+        result = gray.lerp(result, self.saturation);
+
+        // Color wheels (shadows, midtones, highlights)
+        result = self.apply_color_wheels(result);
+
+        result
+    }
+
+    fn apply_white_balance(&self, color: Vec3) -> Vec3 {
+        // Convert temperature to RGB multiplier
+        let temp_color = Self::temperature_to_rgb(self.temperature);
+
+        // Apply tint (green/magenta)
+        let tinted = Vec3::new(
+            temp_color.x + self.tint * 0.1,
+            temp_color.y,
+            temp_color.z - self.tint * 0.1
+        );
+
+        // Normalize and apply
+        let scale = 1.0 / tinted.max_component();
+        Vec3::new(
+            color.x * tinted.x * scale,
+            color.y * tinted.y * scale,
+            color.z * tinted.z * scale
+        )
+    }
+
+    fn temperature_to_rgb(kelvin: f32) -> Vec3 {
+        // Approximate color temperature to RGB
+        let temp = kelvin / 100.0;
+
+        let r = if temp <= 66.0 {
+            1.0
+        } else {
+            let x = temp - 60.0;
+            (329.698727446 * x.powf(-0.1332047592)) / 255.0
+        };
+
+        let g = if temp <= 66.0 {
+            let x = temp;
+            (99.4708025861 * x.ln() - 161.1195681661) / 255.0
+        } else {
+            let x = temp - 60.0;
+            (288.1221695283 * x.powf(-0.0755148492)) / 255.0
+        };
+
+        let b = if temp >= 66.0 {
+            1.0
+        } else if temp <= 19.0 {
+            0.0
+        } else {
+            let x = temp - 10.0;
+            (138.5177312231 * x.ln() - 305.0447927307) / 255.0
+        };
+
+        Vec3::new(r.clamp(0.0, 1.0), g.clamp(0.0, 1.0), b.clamp(0.0, 1.0))
+    }
+
+    fn apply_color_wheels(&self, color: Vec3) -> Vec3 {
+        let luminance = color.luminance();
+
+        // Calculate weights for each region
+        let shadow_weight = (1.0 - luminance / self.split_shadows).clamp(0.0, 1.0);
+        let highlight_weight = ((luminance - self.split_highlights) /
+            (1.0 - self.split_highlights)).clamp(0.0, 1.0);
+        let midtone_weight = 1.0 - shadow_weight - highlight_weight;
+
+        // Apply color tints
+        let shadows_contrib = color * self.shadows_color * shadow_weight;
+        let midtones_contrib = color * self.midtones_color * midtone_weight;
+        let highlights_contrib = color * self.highlights_color * highlight_weight;
+
+        shadows_contrib + midtones_contrib + highlights_contrib
+    }
+}
+
+// =============================================================================
+// POST-PROCESSING EFFECTS
+// =============================================================================
+
+/// Vignette effect
+pub struct Vignette {
+    intensity: f32,
+    smoothness: f32,
+    roundness: f32,
+    center: Vec2,
+}
+
+impl Vignette {
+    pub fn new(intensity: f32) -> Self {
+        Self {
+            intensity,
+            smoothness: 0.3,
+            roundness: 1.0,
+            center: Vec2::new(0.5, 0.5),
+        }
+    }
+
+    pub fn apply(&self, color: Vec3, uv: Vec2) -> Vec3 {
+        let dist = uv - self.center;
+        let dist_scaled = Vec2::new(dist.x, dist.y * self.roundness);
+        let radius = dist_scaled.length() * 2.0;
+
+        let vignette = 1.0 - radius.powf(2.0 / self.smoothness.max(0.01)) * self.intensity;
+
+        color * vignette.max(0.0)
+    }
+}
+
+/// Chromatic aberration effect
+pub struct ChromaticAberration {
+    intensity: f32,
+    sample_count: u32,
+}
+
+impl ChromaticAberration {
+    pub fn new(intensity: f32) -> Self {
+        Self {
+            intensity,
+            sample_count: 3,
+        }
+    }
+
+    pub fn apply(&self, input: &Texture2D, output: &mut Texture2D) {
+        let width = input.width();
+        let height = input.height();
+
+        for y in 0..height {
+            for x in 0..width {
+                let uv = Vec2::new(
+                    (x as f32 + 0.5) / width as f32,
+                    (y as f32 + 0.5) / height as f32
+                );
+
+                // Direction from center
+                let center = Vec2::new(0.5, 0.5);
+                let dir = uv - center;
+                let dist = dir.length();
+
+                // Sample each channel with different offsets
+                let r_offset = dir * self.intensity * 1.0;
+                let g_offset = dir * self.intensity * 0.0;
+                let b_offset = dir * self.intensity * -1.0;
+
+                let r = input.sample(uv - r_offset).x;
+                let g = input.sample(uv - g_offset).y;
+                let b = input.sample(uv - b_offset).z;
+
+                output.set_pixel(x, y, Vec4::new(r, g, b, 1.0));
+            }
+        }
+    }
+}
+
+/// Film grain effect
+pub struct FilmGrain {
+    intensity: f32,
+    response: f32,
+}
+
+impl FilmGrain {
+    pub fn new(intensity: f32) -> Self {
+        Self {
+            intensity,
+            response: 0.8,
+        }
+    }
+
+    pub fn apply(&self, color: Vec3, uv: Vec2, time: f32) -> Vec3 {
+        let grain = self.generate_grain(uv, time);
+
+        // Response curve - more grain in shadows
+        let luminance = color.luminance();
+        let response = (1.0 - luminance).powf(self.response);
+
+        let noise = (grain - 0.5) * self.intensity * response;
+
+        color + Vec3::splat(noise)
+    }
+
+    fn generate_grain(&self, uv: Vec2, time: f32) -> f32 {
+        let p = Vec3::new(uv.x * 1000.0, uv.y * 1000.0, time);
+        Self::hash_3d(p)
+    }
+
+    fn hash_3d(p: Vec3) -> f32 {
+        let h = (p.x * 127.1 + p.y * 311.7 + p.z * 758.5).sin() * 43758.5453123;
+        h.fract()
+    }
+}
+
+/// Dithering for banding reduction
+pub struct Dithering {
+    bayer_matrix: [[f32; 8]; 8],
+}
+
+impl Dithering {
+    pub fn new() -> Self {
+        // 8x8 Bayer matrix normalized to [0, 1]
+        let bayer: [[f32; 8]; 8] = [
+            [0.0, 32.0, 8.0, 40.0, 2.0, 34.0, 10.0, 42.0],
+            [48.0, 16.0, 56.0, 24.0, 50.0, 18.0, 58.0, 26.0],
+            [12.0, 44.0, 4.0, 36.0, 14.0, 46.0, 6.0, 38.0],
+            [60.0, 28.0, 52.0, 20.0, 62.0, 30.0, 54.0, 22.0],
+            [3.0, 35.0, 11.0, 43.0, 1.0, 33.0, 9.0, 41.0],
+            [51.0, 19.0, 59.0, 27.0, 49.0, 17.0, 57.0, 25.0],
+            [15.0, 47.0, 7.0, 39.0, 13.0, 45.0, 5.0, 37.0],
+            [63.0, 31.0, 55.0, 23.0, 61.0, 29.0, 53.0, 21.0],
+        ];
+
+        let mut normalized = [[0.0f32; 8]; 8];
+        for y in 0..8 {
+            for x in 0..8 {
+                normalized[y][x] = bayer[y][x] / 64.0;
+            }
+        }
+
+        Self { bayer_matrix: normalized }
+    }
+
+    pub fn apply(&self, color: Vec3, x: u32, y: u32) -> Vec3 {
+        let bayer = self.bayer_matrix[(y % 8) as usize][(x % 8) as usize];
+
+        // Dither to 8-bit (1/255 noise amplitude)
+        let dither = (bayer - 0.5) / 255.0;
+
+        color + Vec3::splat(dither)
+    }
+}
+
+// =============================================================================
+// COLOR GRADING PIPELINE
+// =============================================================================
+
+/// Full color grading pipeline
+pub struct ColorGradingPipeline {
+    config: ColorGradingConfig,
+    tonemapper: TonemappingPass,
+    auto_exposure: AutoExposure,
+    bloom: BloomPass,
+    lut_grader: Option<LUTColorGrader>,
+    adjustments: ColorAdjustments,
+    vignette: Vignette,
+    chromatic_aberration: ChromaticAberration,
+    film_grain: FilmGrain,
+    dithering: Dithering,
+    time: f32,
+}
+
+impl ColorGradingPipeline {
+    pub fn new(config: ColorGradingConfig, width: u32, height: u32) -> Self {
+        Self {
+            tonemapper: TonemappingPass::new(config.tonemapper),
+            auto_exposure: AutoExposure::new(),
+            bloom: BloomPass::new(width, height, 5),
+            lut_grader: if config.lut_enabled {
+                Some(LUTColorGrader::new(ColorLUT::neutral(32)))
+            } else {
+                None
+            },
+            adjustments: ColorAdjustments::new(),
+            vignette: Vignette::new(config.vignette_intensity),
+            chromatic_aberration: ChromaticAberration::new(config.ca_intensity),
+            film_grain: FilmGrain::new(config.grain_intensity),
+            dithering: Dithering::new(),
+            config,
+            time: 0.0,
+        }
+    }
+
+    /// Process HDR frame
+    pub fn process(&mut self, input: &Texture2D, dt: f32) -> Texture2D {
+        self.time += dt;
+        let width = input.width();
+        let height = input.height();
+
+        // Auto-exposure
+        if self.config.auto_exposure {
+            self.auto_exposure.update(input, dt);
+            self.tonemapper.set_exposure(
+                self.auto_exposure.get_exposure() + self.config.exposure
+            );
+        } else {
+            self.tonemapper.set_exposure(self.config.exposure);
+        }
+
+        // Apply bloom (before tonemapping)
+        let bloomed = if self.config.bloom_enabled {
+            self.bloom.set_intensity(self.config.bloom_intensity);
+            self.bloom.set_threshold(self.config.bloom_threshold, 0.5);
+            self.bloom.apply(input)
+        } else {
+            input.clone()
+        };
+
+        let mut output = Texture2D::new(width, height);
+
+        // Process each pixel
+        for y in 0..height {
+            for x in 0..width {
+                let uv = Vec2::new(
+                    (x as f32 + 0.5) / width as f32,
+                    (y as f32 + 0.5) / height as f32
+                );
+
+                let hdr_color = bloomed.get_pixel(x, y);
+                let mut color = Vec3::new(hdr_color.x, hdr_color.y, hdr_color.z);
+
+                // Tonemapping
+                if self.config.tonemapping_enabled {
+                    color = self.tonemapper.apply(color);
+                }
+
+                // Color adjustments
+                color = self.adjustments.apply(color);
+
+                // LUT color grading
+                if let Some(ref grader) = self.lut_grader {
+                    color = grader.apply(color);
+                }
+
+                // Vignette
+                if self.config.vignette_enabled {
+                    color = self.vignette.apply(color, uv);
+                }
+
+                // Film grain
+                if self.config.film_grain {
+                    color = self.film_grain.apply(color, uv, self.time);
+                }
+
+                // Dithering
+                if self.config.dithering {
+                    color = self.dithering.apply(color, x, y);
+                }
+
+                // Gamma correction (linear to sRGB)
+                color = Self::linear_to_srgb(color);
+
+                output.set_pixel(x, y, Vec4::new(color.x, color.y, color.z, 1.0));
+            }
+        }
+
+        // Chromatic aberration (post-process)
+        if self.config.chromatic_aberration {
+            let mut ca_output = Texture2D::new(width, height);
+            self.chromatic_aberration.apply(&output, &mut ca_output);
+            output = ca_output;
+        }
+
+        output
+    }
+
+    fn linear_to_srgb(color: Vec3) -> Vec3 {
+        let srgb_gamma = |c: f32| -> f32 {
+            if c <= 0.0031308 {
+                c * 12.92
+            } else {
+                1.055 * c.powf(1.0 / 2.4) - 0.055
+            }
+        };
+
+        Vec3::new(
+            srgb_gamma(color.x),
+            srgb_gamma(color.y),
+            srgb_gamma(color.z)
+        )
+    }
+
+    pub fn set_lut(&mut self, lut: ColorLUT, blend: f32) {
+        self.lut_grader = Some(LUTColorGrader::new(lut));
+        if let Some(ref mut grader) = self.lut_grader {
+            grader.set_blend(blend);
+        }
+        self.config.lut_enabled = true;
+    }
+}
+
+// =============================================================================
+// HELPER IMPLEMENTATIONS
+// =============================================================================
+
+impl Vec3 {
+    pub fn one() -> Self {
+        Vec3::new(1.0, 1.0, 1.0)
+    }
+
+    pub fn splat(v: f32) -> Self {
+        Vec3::new(v, v, v)
+    }
+
+    pub fn clamp(&self, min: f32, max: f32) -> Self {
+        Vec3::new(
+            self.x.clamp(min, max),
+            self.y.clamp(min, max),
+            self.z.clamp(min, max)
+        )
+    }
+
+    pub fn luminance(&self) -> f32 {
+        self.x * 0.2126 + self.y * 0.7152 + self.z * 0.0722
+    }
+
+    pub fn lerp(&self, other: Self, t: f32) -> Self {
+        Vec3::new(
+            self.x + (other.x - self.x) * t,
+            self.y + (other.y - self.y) * t,
+            self.z + (other.z - self.z) * t
+        )
+    }
+
+    pub fn max_component(&self) -> f32 {
+        self.x.max(self.y).max(self.z)
+    }
+}
+
+impl Vec4 {
+    pub fn zero() -> Self {
+        Vec4::new(0.0, 0.0, 0.0, 0.0)
+    }
+}
+
+impl Mat3 {
+    pub fn new(
+        m00: f32, m01: f32, m02: f32,
+        m10: f32, m11: f32, m12: f32,
+        m20: f32, m21: f32, m22: f32,
+    ) -> Self {
+        Mat3 {
+            m: [
+                [m00, m01, m02],
+                [m10, m11, m12],
+                [m20, m21, m22],
+            ]
+        }
+    }
+}
+
+impl core::ops::Mul<Vec3> for Mat3 {
+    type Output = Vec3;
+
+    fn mul(self, v: Vec3) -> Vec3 {
+        Vec3::new(
+            self.m[0][0] * v.x + self.m[0][1] * v.y + self.m[0][2] * v.z,
+            self.m[1][0] * v.x + self.m[1][1] * v.y + self.m[1][2] * v.z,
+            self.m[2][0] * v.x + self.m[2][1] * v.y + self.m[2][2] * v.z,
+        )
+    }
+}
+
+// =============================================================================
+// TESTS
+// =============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_tonemappers() {
+        let reinhard = TonemappingPass::new(Tonemapper::Reinhard);
+        let aces = TonemappingPass::new(Tonemapper::ACES);
+
+        let hdr = Vec3::new(2.0, 1.5, 0.5);
+
+        let reinhard_result = reinhard.apply(hdr);
+        let aces_result = aces.apply(hdr);
+
+        // Both should produce values in [0, 1]
+        assert!(reinhard_result.x <= 1.0 && reinhard_result.x >= 0.0);
+        assert!(aces_result.x <= 1.0 && aces_result.x >= 0.0);
+    }
+
+    #[test]
+    fn test_lut_neutral() {
+        let lut = ColorLUT::neutral(32);
+
+        // Neutral LUT should be identity transform
+        let test_color = Vec3::new(0.5, 0.3, 0.8);
+        let result = lut.apply(test_color);
+
+        assert!((result.x - test_color.x).abs() < 0.01);
+        assert!((result.y - test_color.y).abs() < 0.01);
+        assert!((result.z - test_color.z).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_vignette() {
+        let vignette = Vignette::new(0.5);
+        let center = Vec3::new(1.0, 1.0, 1.0);
+        let edge = Vec3::new(1.0, 1.0, 1.0);
+
+        let center_result = vignette.apply(center, Vec2::new(0.5, 0.5));
+        let edge_result = vignette.apply(edge, Vec2::new(0.0, 0.0));
+
+        // Center should be brighter than edges
+        assert!(center_result.luminance() > edge_result.luminance());
+    }
+
+    #[test]
+    fn test_temperature_conversion() {
+        // Daylight (6500K) should be close to white
+        let daylight = ColorAdjustments::temperature_to_rgb(6500.0);
+        assert!((daylight.x - 1.0).abs() < 0.1);
+        assert!((daylight.y - 1.0).abs() < 0.1);
+        assert!((daylight.z - 1.0).abs() < 0.1);
+
+        // Warm light (3000K) should be orange-ish
+        let warm = ColorAdjustments::temperature_to_rgb(3000.0);
+        assert!(warm.x > warm.z);
+    }
+}

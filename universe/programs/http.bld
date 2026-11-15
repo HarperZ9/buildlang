@@ -1,0 +1,239 @@
+// =============================================================================
+// qhttp -- HTTP client (httpie-lite) written in BuildLang
+// =============================================================================
+// A lightweight HTTP/1.1 client using BuildLang's TCP socket builtins.
+//
+// Usage:
+//   qhttp GET http://example.com
+//   qhttp GET http://httpbin.org/get
+//   qhttp POST http://httpbin.org/post --data '{"name":"Zain"}'
+//   qhttp -b GET http://example.com        (body only)
+//   qhttp --help
+// =============================================================================
+
+fn print_help() ~ Console {
+    println!("qhttp -- HTTP client (httpie-lite) written in BuildLang");
+    println!("");
+    println!("Usage: qhttp [OPTIONS] METHOD URL [--data BODY]");
+    println!("");
+    println!("Methods: GET, POST, PUT, DELETE, HEAD, PATCH");
+    println!("");
+    println!("Options:");
+    println!("  -b          print response body only");
+    println!("  --help      display this help and exit");
+    println!("");
+    println!("Examples:");
+    println!("  qhttp GET http://example.com");
+    println!("  qhttp -b GET http://example.com");
+    println!("  qhttp POST http://httpbin.org/post --data '{\"key\":\"val\"}'");
+}
+
+// Parse host from URL: extract everything between :// and the next / or :
+fn parse_host(url: String) -> String {
+    // Skip past "http://"
+    let after_proto = url.substring(7, url.len() - 7);
+    let slash_pos = after_proto.index_of("/");
+    let colon_pos = after_proto.index_of(":");
+    let host_end = if colon_pos >= 0 {
+        if slash_pos >= 0 {
+            if colon_pos < slash_pos { colon_pos } else { slash_pos }
+        } else {
+            colon_pos
+        }
+    } else {
+        if slash_pos >= 0 { slash_pos } else { after_proto.len() }
+    };
+    after_proto.substring(0, host_end)
+}
+
+// Parse port from URL (default 80)
+fn parse_port(url: String) -> i64 {
+    let after_proto = url.substring(7, url.len() - 7);
+    let colon_pos = after_proto.index_of(":");
+    if colon_pos < 0 {
+        80
+    } else {
+        let after_colon = after_proto.substring(colon_pos + 1, after_proto.len() - colon_pos - 1);
+        let slash_pos = after_colon.index_of("/");
+        let port_str = if slash_pos >= 0 {
+            after_colon.substring(0, slash_pos)
+        } else {
+            after_colon
+        };
+        port_str.parse_int()
+    }
+}
+
+// Parse path from URL (default "/")
+fn parse_path(url: String) -> String {
+    let after_proto = url.substring(7, url.len() - 7);
+    // Find the first slash that is the path separator (skip host:port)
+    let slash_pos = after_proto.index_of("/");
+    if slash_pos < 0 {
+        "/"
+    } else {
+        after_proto.substring(slash_pos, after_proto.len() - slash_pos)
+    }
+}
+
+// Build an HTTP request string
+fn build_request(method: String, host: String, path: String, body: String) -> String {
+    let mut req = method + " " + path + " HTTP/1.1\r\nHost: " + host + "\r\n";
+    req = req + "User-Agent: qhttp/1.0 (BuildLang)\r\n";
+    req = req + "Accept: */*\r\n";
+    req = req + "Connection: close\r\n";
+
+    if body.len() > 0 {
+        let blen = to_string_i32(body.len());
+        req = req + "Content-Type: application/json\r\n";
+        req = req + "Content-Length: " + blen + "\r\n";
+        req = req + "\r\n" + body;
+    } else {
+        req = req + "\r\n";
+    }
+    req
+}
+
+// Parse status line from raw HTTP response
+fn parse_status_line(response: String) -> String {
+    let idx = response.index_of("\r\n");
+    if idx < 0 {
+        let idx2 = response.index_of("\n");
+        if idx2 < 0 { response } else { response.substring(0, idx2) }
+    } else {
+        response.substring(0, idx)
+    }
+}
+
+// Parse status code from status line like "HTTP/1.1 200 OK"
+fn parse_status_code(status_line: String) -> i64 {
+    let sp1 = status_line.index_of(" ");
+    if sp1 < 0 { 0 } else {
+        let after_ver = status_line.substring(sp1 + 1, status_line.len() - sp1 - 1);
+        let sp2 = after_ver.index_of(" ");
+        let code_str = if sp2 >= 0 { after_ver.substring(0, sp2) } else { after_ver };
+        code_str.parse_int()
+    }
+}
+
+// Split response into headers and body at the \r\n\r\n boundary
+fn get_headers(response: String) -> String {
+    let sep = response.index_of("\r\n\r\n");
+    if sep < 0 {
+        let sep2 = response.index_of("\n\n");
+        if sep2 < 0 { response } else { response.substring(0, sep2) }
+    } else {
+        response.substring(0, sep)
+    }
+}
+
+fn get_body(response: String) -> String {
+    let sep = response.index_of("\r\n\r\n");
+    if sep < 0 {
+        let sep2 = response.index_of("\n\n");
+        if sep2 < 0 { "" } else { response.substring(sep2 + 2, response.len() - sep2 - 2) }
+    } else {
+        response.substring(sep + 4, response.len() - sep - 4)
+    }
+}
+
+fn main() ~ Console + Environment + Process + Network {
+    let nargs = args_count();
+
+    if nargs < 2 {
+        print_help();
+        process_exit(0);
+    }
+
+    // Parse arguments
+    let mut body_only = false;
+    let mut method = "GET";
+    let mut url = "";
+    let mut body = "";
+    let mut method_set = false;
+    let mut url_set = false;
+
+    let mut i: i64 = 1;
+    while i < nargs {
+        let arg = args_get(i);
+
+        if arg == "--help" {
+            print_help();
+            process_exit(0);
+        } else if arg == "-b" {
+            body_only = true;
+        } else if arg == "--data" {
+            if i + 1 < nargs {
+                i = i + 1;
+                body = args_get(i);
+            } else {
+                println!("qhttp: --data requires an argument");
+                process_exit(1);
+            }
+        } else if !method_set {
+            method = arg.to_uppercase();
+            method_set = true;
+        } else if !url_set {
+            url = arg;
+            url_set = true;
+        }
+
+        i = i + 1;
+    }
+
+    if !url_set {
+        println!("qhttp: missing URL");
+        println!("Try 'qhttp --help' for more information.");
+        process_exit(1);
+    }
+
+    // Validate URL starts with http://
+    if !url.starts_with("http://") {
+        println!("qhttp: only http:// URLs are supported (no https)");
+        process_exit(1);
+    }
+
+    // Parse URL components
+    let host = parse_host(url);
+    let port = parse_port(url);
+    let path = parse_path(url);
+
+    // Build the HTTP request
+    let request = build_request(method, host, path, body);
+
+    // Connect
+    let sock = tcp_connect(host, port);
+    if sock < 0 {
+        println!("qhttp: failed to connect to {}:{}", host, port);
+        process_exit(1);
+    }
+
+    // Send request
+    let sent = tcp_send(sock, request);
+    if sent < 0 {
+        println!("qhttp: failed to send request");
+        tcp_close(sock);
+        process_exit(1);
+    }
+
+    // Receive response
+    let response = tcp_recv(sock);
+    tcp_close(sock);
+
+    if response.len() == 0 {
+        println!("qhttp: empty response from server");
+        process_exit(1);
+    }
+
+    // Parse and display response
+    let headers = get_headers(response);
+    let resp_body = get_body(response);
+
+    if body_only {
+        println!("{}", resp_body);
+    } else {
+        println!("{}", headers);
+        println!("");
+        println!("{}", resp_body);
+    }
+}

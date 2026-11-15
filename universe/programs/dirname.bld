@@ -1,0 +1,146 @@
+// =============================================================================
+// qdirname — Extract directory component from pathname (GNU dirname clone)
+// =============================================================================
+// Usage:
+//   qdirname /home/user/file.txt     -> /home/user
+//   qdirname file.txt                -> .
+//   qdirname /home/user/             -> /home
+//   echo "/a/b/c" | qdirname        -> /a/b
+//   qdirname --help                  -> usage
+// =============================================================================
+
+fn print_help() ~ Console {
+    println!("qdirname -- strip last component from file name");
+    println!("");
+    println!("Usage:");
+    println!("  qdirname [OPTION] NAME...");
+    println!("");
+    println!("Options:");
+    println!("  --help   display this help and exit");
+    println!("");
+    println!("Output each NAME with its last non-slash component removed.");
+    println!("If NAME contains no /'s, output '.' (meaning the current directory).");
+}
+
+fn strip_trailing_sep(path: String) -> String {
+    let mut len = path.len();
+    if len == 0 { return ""; }
+    // Don't strip the root slash itself
+    let mut go = true;
+    while go {
+        if len <= 1 {
+            go = false;
+        } else {
+            let c = path.char_at(len - 1);
+            if c == "/" || c == "\\" {
+                len = len - 1;
+            } else {
+                go = false;
+            }
+        }
+    }
+    path.substring(0, len)
+}
+
+fn find_last_sep(path: String) -> i64 {
+    let len = path.len();
+    if len == 0 { return -1; }
+    let mut i: i64 = len - 1;
+    let mut go = true;
+    let mut found: i64 = -1;
+    while go {
+        let c = path.char_at(i);
+        if c == "/" || c == "\\" {
+            found = i;
+            go = false;
+        } else if i == 0 {
+            go = false;
+        } else {
+            i = i - 1;
+        }
+    }
+    found
+}
+
+fn dirname(path: String) -> String {
+    if path.len() == 0 { return "."; }
+
+    // Strip trailing separators (but not root)
+    let clean = strip_trailing_sep(path);
+    if clean.len() == 0 { return "/"; }
+
+    // Find last separator
+    let sep_pos = find_last_sep(clean);
+
+    if sep_pos < 0 {
+        // No separator found — current directory
+        return ".";
+    }
+
+    if sep_pos == 0 {
+        // Separator is at root position
+        return "/";
+    }
+
+    // Return everything before the last separator, then strip trailing seps
+    let prefix = clean.substring(0, sep_pos);
+    strip_trailing_sep(prefix)
+}
+
+fn strip_cr(line: String) -> String {
+    let len = line.len();
+    if len == 0 { return ""; }
+    if line.char_at(len - 1) == "\r" {
+        if len == 1 { return ""; }
+        line.substring(0, len - 1)
+    } else { line }
+}
+
+fn process_stdin() ~ Console {
+    let content = read_all();
+    let clen = content.len();
+    let mut pos: i64 = 0;
+
+    while pos < clen {
+        let rest = content.substring(pos, clen - pos);
+        let nl = rest.index_of("\n");
+        let raw = if nl < 0 { rest } else { rest.substring(0, nl) };
+        if nl < 0 {
+            pos = clen;
+        } else {
+            pos = pos + nl + 1;
+        }
+        let line = strip_cr(raw);
+        if line.len() > 0 {
+            println!("{}", dirname(line));
+        }
+    }
+}
+
+fn main() ~ Console + Environment + Process {
+    let nargs = args_count();
+
+    if nargs < 2 {
+        // No args: try stdin
+        let piped = stdin_is_pipe();
+        if piped {
+            process_stdin();
+        } else {
+            print_help();
+        }
+        process_exit(0);
+    }
+
+    let mut i: i64 = 1;
+    while i < nargs {
+        let arg = args_get(i);
+
+        if arg == "--help" || arg == "-h" {
+            print_help();
+            process_exit(0);
+        }
+
+        println!("{}", dirname(arg));
+        i = i + 1;
+    }
+}

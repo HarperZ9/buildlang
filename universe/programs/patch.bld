@@ -1,0 +1,201 @@
+// qpatch — Apply unified diff patches (pairs with qdiff)
+// Usage: qpatch [--dry-run] [-R] FILE DIFF
+
+// String pool fields (pool/starts/lens/n, dpool/dstarts/dlens/dn) match
+// stdlib/string_pool.bld pattern (x2, one for source lines, one for diff ops).
+// Kept inline to avoid nested-struct &mut and sp_add/sp_get name collisions.
+struct Patch {
+    pool: String, starts: Vec<i32>, lens: Vec<i32>, n: i32,
+    dpool: String, dstarts: Vec<i32>, dlens: Vec<i32>, dn: i32,
+    hunk_os: Vec<i32>, hunk_ob: Vec<i32>, hunk_oe: Vec<i32>, hc: i32,
+    ot: Vec<i32>, oi: Vec<i32>, on: i32, digits: String,
+}
+
+fn patch_new() -> Patch {
+    Patch {
+        pool: "", starts: vec![], lens: vec![], n: 0,
+        dpool: "", dstarts: vec![], dlens: vec![], dn: 0,
+        hunk_os: vec![], hunk_ob: vec![], hunk_oe: vec![], hc: 0,
+        ot: vec![], oi: vec![], on: 0, digits: "0123456789",
+    }
+}
+
+fn sp_add(p: &mut Patch, t: String) -> i32 {
+    let id = p.n; let st = p.pool.len();
+    p.pool = p.pool + t;
+    vec_push(p.starts, st); vec_push(p.lens, p.pool.len() - st); p.n = p.n + 1;
+    id
+}
+
+fn sp_get(p: &Patch, id: i32) -> String {
+    let ln = vec_get(p.lens, id);
+    if ln == 0 { return ""; }
+    p.pool.substring(vec_get(p.starts, id), ln)
+}
+
+fn dp_add(p: &mut Patch, t: String) -> i32 {
+    let id = p.dn; let st = p.dpool.len();
+    p.dpool = p.dpool + t;
+    vec_push(p.dstarts, st); vec_push(p.dlens, p.dpool.len() - st); p.dn = p.dn + 1;
+    id
+}
+
+fn dp_get(p: &Patch, id: i32) -> String {
+    let ln = vec_get(p.dlens, id);
+    if ln == 0 { return ""; }
+    p.dpool.substring(vec_get(p.dstarts, id), ln)
+}
+
+fn add_op(p: &mut Patch, ty: i32, c: String) {
+    let did = dp_add(p, c);
+    vec_push(p.ot, ty);
+    vec_push(p.oi, did);
+    p.on = p.on + 1;
+}
+
+fn parse_lines(p: &mut Patch, c: String) {
+    let cl = c.len();
+    let mut pos: i64 = 0;
+    let mut ls: i64 = 0;
+    while pos <= cl {
+        if pos >= cl {
+            if pos > ls {
+                let t = c.substring(ls, pos - ls);
+                let tl = t.len();
+                if tl > 0 && t.char_at(tl - 1) == "\r" {
+                    sp_add(p, if tl == 1 { "" } else { t.substring(0, tl - 1) });
+                } else { sp_add(p, t); }
+            }
+            return;
+        }
+        if c.char_at(pos) == "\n" {
+            let mut ln = pos - ls;
+            if ln > 0 && c.char_at(ls + ln - 1) == "\r" { ln = ln - 1; }
+            sp_add(p, if ln > 0 { c.substring(ls, ln) } else { "" });
+            ls = pos + 1;
+        }
+        pos = pos + 1;
+    }
+}
+
+fn parse_num(s: String, st: i64, d: String) -> i64 {
+    let sl = s.len();
+    let mut r: i64 = 0;
+    let mut i = st;
+    while i < sl {
+        let v = d.index_of(s.char_at(i));
+        if v < 0 { return r; }
+        r = r * 10 + v;
+        i = i + 1;
+    }
+    r
+}
+
+fn proc_line(p: &mut Patch, line: String, ll: i64, ih: bool) {
+    if !ih || ll < 1 { return; }
+    let px = line.char_at(0);
+    let ct = if ll > 1 { line.substring(1, ll - 1) } else { line.substring(0, 0) };
+    if px == " " { add_op(p, 0, ct); }
+    else if px == "-" { add_op(p, 1, ct); }
+    else if px == "+" { add_op(p, 2, ct); }
+}
+
+fn parse_diff(p: &mut Patch, dc: String) {
+    let dl = dc.len();
+    let mut pos: i64 = 0;
+    let mut ih = false;
+    while pos < dl {
+        let mut le = pos;
+        let mut nl = false;
+        while le < dl && !nl {
+            if dc.char_at(le) == "\n" { nl = true; } else { le = le + 1; }
+        }
+        let mut ln = le - pos;
+        if ln > 0 && dc.char_at(pos + ln - 1) == "\r" { ln = ln - 1; }
+        let line = dc.substring(pos, ln);
+        let ll = line.len();
+        if ll >= 4 && line.substring(0, 4) == "@@ -" {
+            if ih { vec_push(p.hunk_oe, p.on); }
+            let da = line.index_of("-");
+            vec_push(p.hunk_os, if da >= 0 { parse_num(line, da + 1, p.digits) } else { 1 });
+            vec_push(p.hunk_ob, p.on);
+            p.hc = p.hc + 1;
+            ih = true;
+        } else if ll >= 3 {
+            let p3 = line.substring(0, 3);
+            if p3 != "---" && p3 != "+++" { proc_line(p, line, ll, ih); }
+        } else { proc_line(p, line, ll, ih); }
+        pos = if nl { le + 1 } else { dl };
+    }
+    if ih { vec_push(p.hunk_oe, p.on); }
+}
+
+fn aln(r: String, l: String) -> String {
+    if r == "" { l } else { r + "\n" + l }
+}
+
+fn apply(p: &Patch, rev: bool) -> String {
+    let mut r = "";
+    let mut fl: i64 = 0;
+    let mut h: i64 = 0;
+    while h < p.hc {
+        let os = vec_get(p.hunk_os, h) - 1;
+        let ob = vec_get(p.hunk_ob, h);
+        let oe = vec_get(p.hunk_oe, h);
+        while fl < os && fl < p.n { r = aln(r, sp_get(p, fl)); fl = fl + 1; }
+        let mut op: i64 = ob;
+        while op < oe {
+            let t = vec_get(p.ot, op);
+            let c = dp_get(p, vec_get(p.oi, op));
+            let e = if rev { if t == 1 { 2 } else if t == 2 { 1 } else { 0 } } else { t };
+            if e == 0 { r = aln(r, c); fl = fl + 1; }
+            else if e == 1 { fl = fl + 1; }
+            else if e == 2 { r = aln(r, c); }
+            op = op + 1;
+        }
+        h = h + 1;
+    }
+    while fl < p.n { r = aln(r, sp_get(p, fl)); fl = fl + 1; }
+    r + "\n"
+}
+
+fn print_help() ~ Console {
+    println!("qpatch — apply unified diff patches");
+    println!("Usage: qpatch [--dry-run] [-R] FILE DIFF");
+    println!("  -R         reverse patch (unapply)");
+    println!("  --dry-run  show result without modifying");
+    println!("  --help     display this help");
+}
+
+fn main() ~ Console + Environment + FileSystem + Process {
+    let nargs = args_count();
+    if nargs < 2 { print_help(); process_exit(0); }
+    let mut p = patch_new();
+    let mut fp = "";
+    let mut dp = "";
+    let mut fc: i64 = 0;
+    let mut rev = false;
+    let mut dry = false;
+    let mut i: i64 = 1;
+    while i < nargs {
+        let a = args_get(i);
+        if a == "--help" || a == "-h" { print_help(); process_exit(0); }
+        else if a.starts_with("--dry") { dry = true; }
+        else if a == "-R" { rev = true; }
+        else if a.starts_with("-") { if a.contains("R") { rev = true; } }
+        else {
+            if fc == 0 { fp = a; fc = 1; }
+            else if fc == 1 { dp = a; fc = 2; }
+            else { println!("qpatch: too many arguments"); process_exit(2); }
+        }
+        i = i + 1;
+    }
+    if fc < 2 { println!("qpatch: missing operand"); process_exit(2); }
+    if !file_exists(fp) { println!("qpatch: {}: No such file", fp); process_exit(2); }
+    if !file_exists(dp) { println!("qpatch: {}: No such file", dp); process_exit(2); }
+    parse_lines(&mut p, read_file(fp));
+    parse_diff(&mut p, read_file(dp));
+    let result = apply(&p, rev);
+    if dry { print!("{}", result); }
+    else { write_file(fp, result); println!("patching file {}", fp); }
+}

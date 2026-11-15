@@ -1,0 +1,876 @@
+include!("stdlib/lines.bld");
+
+// =============================================================================
+// qawk — AWK-lite text processing tool written in BuildLang
+// =============================================================================
+// A simplified AWK clone supporting field splitting, pattern matching, print,
+// simple variables (sum+=, count++), BEGIN/END blocks, and comparisons.
+//
+// Usage:
+//   echo "Alice 25 NYC" | qawk '{print $1}'          -> Alice
+//   echo "Alice 25 NYC" | qawk '{print $1, $3}'      -> Alice NYC
+//   cat data.txt | qawk '/error/ {print}'            -> lines matching "error"
+//   cat data.txt | qawk '{sum+=$2} END {print sum}'  -> sum of field 2
+//   cat nums.txt | qawk '{print NR, $0}'             -> line numbers
+//   echo "a:b:c" | qawk -F: '{print $2}'             -> b (custom delimiter)
+//   qawk --help                                       -> usage
+//
+// Design: Flat struct with string pools. The awk program is stored as-is
+// and re-parsed for each line (simple approach). Variables stored in
+// parallel vecs. Fields rebuilt each line.
+// =============================================================================
+
+// --- State struct ---
+struct Awk {
+    // Field splitter delimiter
+    delim: String,
+    use_whitespace: bool,
+
+    // Current line fields (rebuilt each line)
+    f_buf: String,
+    f_starts: Vec<i32>,
+    f_lens: Vec<i32>,
+    f_n: i32,
+
+    // Variable storage (name -> i64 value)
+    var_name_buf: String,
+    var_name_starts: Vec<i32>,
+    var_name_lens: Vec<i32>,
+    var_vals: Vec<i64>,
+    var_n: i32,
+
+    // NR (line number)
+    nr: i64,
+}
+
+fn awk_new() -> Awk {
+    Awk {
+        delim: " ", use_whitespace: true,
+        f_buf: "", f_starts: vec![], f_lens: vec![], f_n: 0,
+        var_name_buf: "", var_name_starts: vec![], var_name_lens: vec![],
+        var_vals: vec![], var_n: 0,
+        nr: 0,
+    }
+}
+
+// --- Helpers ---
+fn is_digit(c: String) -> bool {
+    c == "0" || c == "1" || c == "2" || c == "3" || c == "4" ||
+    c == "5" || c == "6" || c == "7" || c == "8" || c == "9"
+}
+
+fn is_alpha(c: String) -> bool {
+    c == "a" || c == "b" || c == "c" || c == "d" || c == "e" ||
+    c == "f" || c == "g" || c == "h" || c == "i" || c == "j" ||
+    c == "k" || c == "l" || c == "m" || c == "n" || c == "o" ||
+    c == "p" || c == "q" || c == "r" || c == "s" || c == "t" ||
+    c == "u" || c == "v" || c == "w" || c == "x" || c == "y" ||
+    c == "z" || c == "A" || c == "B" || c == "C" || c == "D" ||
+    c == "E" || c == "F" || c == "G" || c == "H" || c == "I" ||
+    c == "J" || c == "K" || c == "L" || c == "M" || c == "N" ||
+    c == "O" || c == "P" || c == "Q" || c == "R" || c == "S" ||
+    c == "T" || c == "U" || c == "V" || c == "W" || c == "X" ||
+    c == "Y" || c == "Z" || c == "_"
+}
+
+fn is_ws(c: String) -> bool {
+    c == " " || c == "\t"
+}
+
+fn i64_to_str(v: i64) -> String {
+    if v == 0 { return "0"; }
+    let mut n = v;
+    let mut neg = false;
+    if n < 0 { neg = true; n = 0 - n; }
+    let mut buf = "";
+    let mut go = true;
+    while go {
+        if n == 0 {
+            go = false;
+        } else {
+            let d = n - (n / 10) * 10;
+            let dc = if d == 0 { "0" }
+                else if d == 1 { "1" }
+                else if d == 2 { "2" }
+                else if d == 3 { "3" }
+                else if d == 4 { "4" }
+                else if d == 5 { "5" }
+                else if d == 6 { "6" }
+                else if d == 7 { "7" }
+                else if d == 8 { "8" }
+                else { "9" };
+            buf = dc + buf;
+            n = n / 10;
+        }
+    }
+    if neg { buf = "-" + buf; }
+    buf
+}
+
+fn parse_int_at(s: String, pos: i32) -> i64 {
+    let slen = s.len();
+    let mut val: i64 = 0;
+    let mut found = false;
+    let mut p = pos;
+    let mut neg = false;
+    if p < slen {
+        let c = s.char_at(p);
+        if c == "-" {
+            neg = true;
+            p = p + 1;
+        }
+    }
+    let mut go = true;
+    while go {
+        if p >= slen {
+            go = false;
+        } else {
+            let c = s.char_at(p);
+            if is_digit(c) {
+                let digit: i64 = if c == "0" { 0 }
+                    else if c == "1" { 1 }
+                    else if c == "2" { 2 }
+                    else if c == "3" { 3 }
+                    else if c == "4" { 4 }
+                    else if c == "5" { 5 }
+                    else if c == "6" { 6 }
+                    else if c == "7" { 7 }
+                    else if c == "8" { 8 }
+                    else { 9 };
+                val = val * 10 + digit;
+                found = true;
+                p = p + 1;
+            } else {
+                go = false;
+            }
+        }
+    }
+    if !found { return 0; }
+    if neg { 0 - val } else { val }
+}
+
+fn digit_count_at(s: String, pos: i32) -> i32 {
+    let slen = s.len();
+    let mut count: i32 = 0;
+    let mut p = pos;
+    let mut go = true;
+    while go {
+        if p >= slen {
+            go = false;
+        } else {
+            let c = s.char_at(p);
+            if is_digit(c) {
+                count = count + 1;
+                p = p + 1;
+            } else {
+                go = false;
+            }
+        }
+    }
+    count
+}
+
+// Convert a full string to i64 by parsing all its digits
+fn str_to_i64(s: String) -> i64 {
+    parse_int_at(s, 0)
+}
+
+fn skip_ws_str(s: String, pos: i32) -> i32 {
+    let slen = s.len();
+    let mut p = pos;
+    let mut go = true;
+    while go {
+        if p >= slen {
+            go = false;
+        } else {
+            let c = s.char_at(p);
+            if is_ws(c) {
+                p = p + 1;
+            } else {
+                go = false;
+            }
+        }
+    }
+    p
+}
+
+// --- Variable lookup/create ---
+fn var_find(a: &Awk, name: String) -> i32 {
+    let mut i: i32 = 0;
+    let mut result: i32 = -1;
+    let mut go = true;
+    while go {
+        if i >= a.var_n {
+            go = false;
+        } else {
+            let st = vec_get(a.var_name_starts, i);
+            let ln = vec_get(a.var_name_lens, i);
+            let vn = a.var_name_buf.substring(st, ln);
+            if vn == name {
+                result = i;
+                go = false;
+            } else {
+                i = i + 1;
+            }
+        }
+    }
+    result
+}
+
+fn var_get(a: &Awk, name: String) -> i64 {
+    let idx = var_find(a, name);
+    if idx < 0 { return 0; }
+    vec_get(a.var_vals, idx)
+}
+
+fn var_set(a: &mut Awk, name: String, val: i64) {
+    let idx = var_find(a, name);
+    if idx < 0 {
+        let st = a.var_name_buf.len();
+        a.var_name_buf = a.var_name_buf + name;
+        let en = a.var_name_buf.len();
+        vec_push(a.var_name_starts, st);
+        vec_push(a.var_name_lens, en - st);
+        vec_push(a.var_vals, val);
+        a.var_n = a.var_n + 1;
+    } else {
+        let mut new_vals: Vec<i64> = vec![];
+        let mut i: i32 = 0;
+        while i < a.var_n {
+            if i == idx {
+                vec_push(new_vals, val);
+            } else {
+                vec_push(new_vals, vec_get(a.var_vals, i));
+            }
+            i = i + 1;
+        }
+        a.var_vals = new_vals;
+    }
+}
+
+// --- Field splitting ---
+fn reset_fields(a: &mut Awk) {
+    a.f_buf = "";
+    a.f_starts = vec![];
+    a.f_lens = vec![];
+    a.f_n = 0;
+}
+
+fn add_field(a: &mut Awk, text: String) {
+    let st = a.f_buf.len();
+    a.f_buf = a.f_buf + text;
+    let en = a.f_buf.len();
+    vec_push(a.f_starts, st);
+    vec_push(a.f_lens, en - st);
+    a.f_n = a.f_n + 1;
+}
+
+fn get_field(a: &Awk, idx: i32) -> String {
+    if idx < 0 || idx >= a.f_n { return ""; }
+    let st = vec_get(a.f_starts, idx);
+    let ln = vec_get(a.f_lens, idx);
+    if ln == 0 { return ""; }
+    a.f_buf.substring(st, ln)
+}
+
+fn split_whitespace(a: &mut Awk, line: String) {
+    reset_fields(a);
+    let llen = line.len();
+    let mut pos: i32 = 0;
+    let mut field_start: i32 = -1;
+    let mut in_field = false;
+
+    let mut go = true;
+    while go {
+        if pos >= llen {
+            if in_field {
+                let flen = pos - field_start;
+                let text = line.substring(field_start, flen);
+                add_field(a, text);
+            }
+            go = false;
+        } else {
+            let c = line.char_at(pos);
+            if is_ws(c) {
+                if in_field {
+                    let flen = pos - field_start;
+                    let text = line.substring(field_start, flen);
+                    add_field(a, text);
+                    in_field = false;
+                }
+                pos = pos + 1;
+            } else {
+                if !in_field {
+                    field_start = pos;
+                    in_field = true;
+                }
+                pos = pos + 1;
+            }
+        }
+    }
+}
+
+fn split_delim(a: &mut Awk, line: String, delim: String) {
+    reset_fields(a);
+    let llen = line.len();
+    let dlen = delim.len();
+    if llen == 0 {
+        add_field(a, "");
+        return;
+    }
+    let mut pos: i32 = 0;
+    let mut field_start: i32 = 0;
+    let mut go = true;
+    while go {
+        if pos >= llen {
+            let flen = pos - field_start;
+            let text = if flen > 0 { line.substring(field_start, flen) } else { "" };
+            add_field(a, text);
+            go = false;
+        } else {
+            let mut is_d = false;
+            if pos + dlen <= llen {
+                let chunk = line.substring(pos, dlen);
+                if chunk == delim {
+                    is_d = true;
+                }
+            }
+            if is_d {
+                let flen = pos - field_start;
+                let text = if flen > 0 { line.substring(field_start, flen) } else { "" };
+                add_field(a, text);
+                pos = pos + dlen;
+                field_start = pos;
+            } else {
+                pos = pos + 1;
+            }
+        }
+    }
+}
+
+fn split_line(a: &mut Awk, line: String) {
+    if a.use_whitespace {
+        split_whitespace(a, line);
+    } else {
+        split_delim(a, line, a.delim);
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// INTERPRETER: Instead of pre-parsing rules, we interpret the program string
+// directly against each line. This avoids complex parallel-vec gymnastics
+// and the type inference issue with locally-built strings.
+// ═══════════════════════════════════════════════════════════════════════════
+
+// Skip to matching '}', returning position after it.
+fn skip_block(prog: String, start: i32) -> i32 {
+    let plen = prog.len();
+    let mut pos = start;
+    let mut depth: i32 = 1;
+    let mut go = true;
+    while go {
+        if pos >= plen {
+            go = false;
+        } else {
+            let c = prog.char_at(pos);
+            if c == "{" {
+                depth = depth + 1;
+                pos = pos + 1;
+            } else if c == "}" {
+                depth = depth - 1;
+                if depth == 0 {
+                    pos = pos + 1;
+                    go = false;
+                } else {
+                    pos = pos + 1;
+                }
+            } else {
+                pos = pos + 1;
+            }
+        }
+    }
+    pos
+}
+
+// Read a word (identifier) from prog starting at pos. Returns the word.
+fn read_word(prog: String, pos: i32) -> String {
+    let plen = prog.len();
+    let mut p = pos;
+    let mut word = "";
+    let mut go = true;
+    while go {
+        if p >= plen {
+            go = false;
+        } else {
+            let c = prog.char_at(p);
+            if is_alpha(c) || is_digit(c) {
+                word = word + c;
+                p = p + 1;
+            } else {
+                go = false;
+            }
+        }
+    }
+    word
+}
+
+// Return length of word starting at pos
+fn word_len(prog: String, pos: i32) -> i32 {
+    let plen = prog.len();
+    let mut p = pos;
+    let mut go = true;
+    while go {
+        if p >= plen {
+            go = false;
+        } else {
+            let c = prog.char_at(p);
+            if is_alpha(c) || is_digit(c) {
+                p = p + 1;
+            } else {
+                go = false;
+            }
+        }
+    }
+    p - pos
+}
+
+// Execute the action block (text between { and }) for a given line.
+// `prog` is the full program, `bstart` is position after the '{',
+// returns position after the matching '}'.
+fn exec_action(a: &mut Awk, prog: String, bstart: i32, line: String) -> i32 ~ Console {
+    let plen = prog.len();
+    let mut pos = bstart;
+    let mut depth: i32 = 1;
+
+    // Find the action boundaries first, then work within them
+    let mut stmt_start = pos;
+
+    let mut go = true;
+    while go {
+        pos = skip_ws_str(prog, pos);
+        if pos >= plen {
+            go = false;
+        } else {
+            let c = prog.char_at(pos);
+            if c == "}" {
+                depth = depth - 1;
+                if depth == 0 {
+                    pos = pos + 1;
+                    go = false;
+                } else {
+                    pos = pos + 1;
+                }
+            } else if c == ";" || c == "\n" {
+                pos = pos + 1;
+            } else if c == "p" && pos + 5 <= plen && prog.substring(pos, 5) == "print" && (pos + 5 >= plen || !is_alpha(prog.char_at(pos + 5))) {
+                // print statement
+                pos = pos + 5;
+                pos = skip_ws_str(prog, pos);
+
+                // Check what follows print
+                if pos >= plen || prog.char_at(pos) == ";" || prog.char_at(pos) == "}" || prog.char_at(pos) == "\n" {
+                    // Bare print = print $0
+                    println!("{}", line);
+                } else if prog.char_at(pos) == "$" || prog.char_at(pos) == "N" || is_alpha(prog.char_at(pos)) {
+                    // print arguments
+                    let mut out = "";
+                    let mut first = true;
+                    let mut arg_go = true;
+                    while arg_go {
+                        pos = skip_ws_str(prog, pos);
+                        if pos >= plen || prog.char_at(pos) == ";" || prog.char_at(pos) == "}" || prog.char_at(pos) == "\n" {
+                            arg_go = false;
+                        } else if prog.char_at(pos) == "," {
+                            pos = pos + 1;
+                        } else if prog.char_at(pos) == "$" {
+                            pos = pos + 1;
+                            if pos < plen && prog.char_at(pos) == "N" && pos + 1 < plen && prog.char_at(pos + 1) == "F" {
+                                // $NF = last field
+                                if !first { out = out + " "; }
+                                out = out + get_field(a, a.f_n - 1);
+                                first = false;
+                                pos = pos + 2;
+                            } else {
+                                let num = parse_int_at(prog, pos);
+                                let dc = digit_count_at(prog, pos);
+                                if dc > 0 { pos = pos + dc; }
+                                if !first { out = out + " "; }
+                                if num == 0 {
+                                    out = out + line;
+                                } else {
+                                    out = out + get_field(a, num - 1);
+                                }
+                                first = false;
+                            }
+                        } else if prog.char_at(pos) == "N" && pos + 1 < plen && prog.char_at(pos + 1) == "R" && (pos + 2 >= plen || !is_alpha(prog.char_at(pos + 2))) {
+                            if !first { out = out + " "; }
+                            out = out + i64_to_str(a.nr);
+                            first = false;
+                            pos = pos + 2;
+                        } else if prog.char_at(pos) == "N" && pos + 1 < plen && prog.char_at(pos + 1) == "F" && (pos + 2 >= plen || !is_alpha(prog.char_at(pos + 2))) {
+                            if !first { out = out + " "; }
+                            out = out + i64_to_str(a.f_n);
+                            first = false;
+                            pos = pos + 2;
+                        } else if is_alpha(prog.char_at(pos)) {
+                            // Variable name
+                            let vname = read_word(prog, pos);
+                            let vlen = word_len(prog, pos);
+                            pos = pos + vlen;
+                            if !first { out = out + " "; }
+                            let val = var_get(a, vname);
+                            out = out + i64_to_str(val);
+                            first = false;
+                        } else {
+                            arg_go = false;
+                        }
+                    }
+                    println!("{}", out);
+                } else {
+                    println!("{}", line);
+                }
+            } else if c == "$" {
+                // Could be bare $var usage, skip
+                pos = pos + 1;
+                let dc = digit_count_at(prog, pos);
+                if dc > 0 { pos = pos + dc; }
+            } else if is_alpha(c) {
+                // Variable operation: var+=$N, var++
+                let vname = read_word(prog, pos);
+                let vlen = word_len(prog, pos);
+                pos = pos + vlen;
+                pos = skip_ws_str(prog, pos);
+
+                if pos + 2 <= plen && prog.substring(pos, 2) == "+=" {
+                    // var += $N or var += number
+                    pos = pos + 2;
+                    pos = skip_ws_str(prog, pos);
+                    let mut add_val: i64 = 0;
+                    if pos < plen && prog.char_at(pos) == "$" {
+                        pos = pos + 1;
+                        let fnum = parse_int_at(prog, pos);
+                        let dc = digit_count_at(prog, pos);
+                        if dc > 0 { pos = pos + dc; }
+                        if fnum == 0 {
+                            add_val = str_to_i64(line);
+                        } else {
+                            let fld = get_field(a, fnum - 1);
+                            add_val = str_to_i64(fld);
+                        }
+                    } else {
+                        add_val = parse_int_at(prog, pos);
+                        let dc = digit_count_at(prog, pos);
+                        if dc > 0 { pos = pos + dc; }
+                    }
+                    let cur = var_get(a, vname);
+                    var_set(a, vname, cur + add_val);
+                } else if pos + 2 <= plen && prog.substring(pos, 2) == "++" {
+                    // var++
+                    pos = pos + 2;
+                    let cur = var_get(a, vname);
+                    var_set(a, vname, cur + 1);
+                } else {
+                    // Unknown, skip to next statement
+                    let mut sk = true;
+                    while sk {
+                        if pos >= plen || prog.char_at(pos) == ";" || prog.char_at(pos) == "}" || prog.char_at(pos) == "\n" {
+                            sk = false;
+                        } else {
+                            pos = pos + 1;
+                        }
+                    }
+                }
+            } else {
+                pos = pos + 1;
+            }
+        }
+    }
+    pos
+}
+
+// Execute the program against a single line.
+// `mode`: 0 = normal lines, 1 = BEGIN only, 2 = END only
+fn run_program(a: &mut Awk, prog: String, line: String, mode: i32) ~ Console {
+    let plen = prog.len();
+    let mut pos: i32 = 0;
+
+    let mut go = true;
+    while go {
+        pos = skip_ws_str(prog, pos);
+        if pos >= plen {
+            go = false;
+        } else {
+            let c = prog.char_at(pos);
+
+            if c == "{" {
+                // No pattern = always match (for normal lines)
+                pos = pos + 1;
+                if mode == 0 {
+                    pos = exec_action(a, prog, pos, line);
+                } else {
+                    pos = skip_block(prog, pos);
+                }
+            } else if c == "/" {
+                // Regex pattern /pat/ { action }
+                pos = pos + 1;
+                let pat_start = pos;
+                // Find closing /
+                let mut pfind = true;
+                while pfind {
+                    if pos >= plen {
+                        pfind = false;
+                    } else {
+                        if prog.char_at(pos) == "/" {
+                            pfind = false;
+                        } else {
+                            pos = pos + 1;
+                        }
+                    }
+                }
+                let pat_len = pos - pat_start;
+                let pat = if pat_len > 0 { prog.substring(pat_start, pat_len) } else { "" };
+                if pos < plen { pos = pos + 1; } // skip /
+                pos = skip_ws_str(prog, pos);
+
+                if pos < plen && prog.char_at(pos) == "{" {
+                    pos = pos + 1;
+                    if mode == 0 && line.contains(pat) {
+                        pos = exec_action(a, prog, pos, line);
+                    } else {
+                        pos = skip_block(prog, pos);
+                    }
+                }
+            } else if c == "$" {
+                // Comparison pattern: $N op val { action }
+                pos = pos + 1;
+                let fnum = parse_int_at(prog, pos);
+                let dc = digit_count_at(prog, pos);
+                if dc > 0 { pos = pos + dc; }
+                pos = skip_ws_str(prog, pos);
+
+                // Read operator
+                let mut op_type: i32 = 0; // 0=gt, 1=lt, 2=ge, 3=le, 4=eq, 5=ne
+                if pos + 2 <= plen && prog.substring(pos, 2) == ">=" {
+                    op_type = 2; pos = pos + 2;
+                } else if pos + 2 <= plen && prog.substring(pos, 2) == "<=" {
+                    op_type = 3; pos = pos + 2;
+                } else if pos + 2 <= plen && prog.substring(pos, 2) == "==" {
+                    op_type = 4; pos = pos + 2;
+                } else if pos + 2 <= plen && prog.substring(pos, 2) == "!=" {
+                    op_type = 5; pos = pos + 2;
+                } else if pos < plen && prog.char_at(pos) == ">" {
+                    op_type = 0; pos = pos + 1;
+                } else if pos < plen && prog.char_at(pos) == "<" {
+                    op_type = 1; pos = pos + 1;
+                }
+
+                pos = skip_ws_str(prog, pos);
+                let cval = parse_int_at(prog, pos);
+                // Skip digits (and possible leading minus)
+                if pos < plen && prog.char_at(pos) == "-" { pos = pos + 1; }
+                let dc2 = digit_count_at(prog, pos);
+                if dc2 > 0 { pos = pos + dc2; }
+
+                pos = skip_ws_str(prog, pos);
+
+                // Evaluate comparison
+                let mut matches = false;
+                if mode == 0 {
+                    let field_val = if fnum == 0 {
+                        str_to_i64(line)
+                    } else {
+                        let fld2 = get_field(a, fnum - 1);
+                        str_to_i64(fld2)
+                    };
+                    if op_type == 0 { matches = field_val > cval; }
+                    if op_type == 1 { matches = field_val < cval; }
+                    if op_type == 2 { matches = field_val >= cval; }
+                    if op_type == 3 { matches = field_val <= cval; }
+                    if op_type == 4 { matches = field_val == cval; }
+                    if op_type == 5 { matches = field_val != cval; }
+                }
+
+                if pos < plen && prog.char_at(pos) == "{" {
+                    pos = pos + 1;
+                    if mode == 0 && matches {
+                        pos = exec_action(a, prog, pos, line);
+                    } else {
+                        pos = skip_block(prog, pos);
+                    }
+                }
+            } else if c == "B" && pos + 5 <= plen && prog.substring(pos, 5) == "BEGIN" && (pos + 5 >= plen || !is_alpha(prog.char_at(pos + 5))) {
+                pos = pos + 5;
+                pos = skip_ws_str(prog, pos);
+                if pos < plen && prog.char_at(pos) == "{" {
+                    pos = pos + 1;
+                    if mode == 1 {
+                        pos = exec_action(a, prog, pos, line);
+                    } else {
+                        pos = skip_block(prog, pos);
+                    }
+                }
+            } else if c == "E" && pos + 3 <= plen && prog.substring(pos, 3) == "END" && (pos + 3 >= plen || !is_alpha(prog.char_at(pos + 3))) {
+                pos = pos + 3;
+                pos = skip_ws_str(prog, pos);
+                if pos < plen && prog.char_at(pos) == "{" {
+                    pos = pos + 1;
+                    if mode == 2 {
+                        pos = exec_action(a, prog, pos, line);
+                    } else {
+                        pos = skip_block(prog, pos);
+                    }
+                }
+            } else {
+                pos = pos + 1;
+            }
+        }
+    }
+}
+
+// --- Process all input lines ---
+fn process_input(a: &mut Awk, prog: String, content: String) ~ Console {
+    let lr = lr_new(content);
+    let mut i: i32 = 0;
+    while i < lr.count {
+        let raw_line = lr_get(&lr, i);
+        // Strip trailing \r
+        let llen = raw_line.len();
+        let clean = if llen > 0 {
+            let last = raw_line.char_at(llen - 1);
+            if last == "\r" {
+                if llen == 1 { "" } else { raw_line.substring(0, llen - 1) }
+            } else {
+                raw_line
+            }
+        } else {
+            raw_line
+        };
+        a.nr = a.nr + 1;
+        split_line(a, clean);
+        run_program(a, prog, clean, 0);
+        i = i + 1;
+    }
+}
+
+// --- Help ---
+fn print_help() ~ Console {
+    println!("qawk -- AWK-lite text processing tool");
+    println!("");
+    println!("Usage:");
+    println!("  qawk [OPTIONS] 'PROGRAM' [FILE]");
+    println!("");
+    println!("Options:");
+    println!("  -F DELIM  set field delimiter (default: whitespace)");
+    println!("  --help    display this help and exit");
+    println!("");
+    println!("Program syntax:");
+    println!("  {{print}}             print entire line");
+    println!("  {{print $1}}          print first field");
+    println!("  {{print $1, $3}}      print fields 1 and 3");
+    println!("  {{print NR, $0}}      print line number and line");
+    println!("  /pattern/ {{print}}   print lines matching pattern");
+    println!("  $2 > 100 {{print $1}} conditional on field value");
+    println!("  {{sum+=$2}}           accumulate field 2 into sum");
+    println!("  {{count++}}           increment counter");
+    println!("  BEGIN {{print hi}}    run before input");
+    println!("  END {{print sum}}     run after input");
+    println!("");
+    println!("Built-in variables:");
+    println!("  $0   entire line");
+    println!("  $N   Nth field (1-indexed)");
+    println!("  $NF  last field");
+    println!("  NR   current line number");
+    println!("  NF   number of fields");
+    println!("");
+    println!("Examples:");
+    println!("  echo \"Alice 25 NYC\" | qawk '{{print $1}}'");
+    println!("  cat data.txt | qawk '{{sum+=$2}} END {{print sum}}'");
+}
+
+// --- Main ---
+fn main() ~ Console + Environment + FileSystem + Process {
+    let nargs = args_count();
+
+    if nargs < 2 {
+        print_help();
+        process_exit(0);
+    }
+
+    let mut a = awk_new();
+    let mut prog = "";
+    let mut has_prog = false;
+    let mut filename = "";
+    let mut has_file = false;
+
+    let mut i: i64 = 1;
+    while i < nargs {
+        let arg = args_get(i);
+
+        if arg == "--help" || arg == "-h" {
+            print_help();
+            process_exit(0);
+        } else if arg == "-F" {
+            i = i + 1;
+            if i < nargs {
+                let d = args_get(i);
+                a.delim = d;
+                a.use_whitespace = false;
+            }
+        } else if arg.starts_with("-F") {
+            let alen = arg.len();
+            if alen > 2 {
+                let d = arg.substring(2, alen - 2);
+                a.delim = d;
+                a.use_whitespace = false;
+            }
+        } else if arg.starts_with("-") {
+            println!("qawk: unknown option '{}'", arg);
+            process_exit(2);
+        } else {
+            if !has_prog {
+                prog = arg;
+                has_prog = true;
+            } else {
+                filename = arg;
+                has_file = true;
+            }
+        }
+
+        i = i + 1;
+    }
+
+    if !has_prog {
+        println!("qawk: no program specified");
+        println!("Try 'qawk --help' for usage.");
+        process_exit(2);
+    }
+
+    // Read input
+    let input = if has_file {
+        let exists = file_exists(filename);
+        if !exists {
+            println!("qawk: {}: No such file or directory", filename);
+            process_exit(2);
+        }
+        read_file(filename)
+    } else {
+        let piped = stdin_is_pipe();
+        if !piped {
+            println!("qawk: no input (pipe data or specify a file)");
+            println!("Try 'qawk --help' for usage.");
+            process_exit(0);
+        }
+        read_all()
+    };
+
+    // Execute BEGIN blocks
+    run_program(&mut a, prog, "", 1);
+
+    // Process input
+    if input.len() > 0 {
+        process_input(&mut a, prog, input);
+    }
+
+    // Execute END blocks
+    run_program(&mut a, prog, "", 2);
+}

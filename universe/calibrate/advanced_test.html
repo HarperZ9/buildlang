@@ -1,0 +1,855 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Calibrate - Advanced Color Accuracy Verification</title>
+    <meta charset="utf-8">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            background: #0a0a0a;
+            color: #e0e0e0;
+            font-family: 'Segoe UI', system-ui, sans-serif;
+            line-height: 1.6;
+        }
+
+        .header {
+            background: linear-gradient(135deg, #1a1a2e, #0a0a0a);
+            padding: 30px 40px;
+            border-bottom: 1px solid #333;
+        }
+        .header h1 {
+            font-size: 28px;
+            font-weight: 300;
+            color: #fff;
+        }
+        .header .subtitle {
+            color: #0af;
+            font-size: 14px;
+            margin-top: 5px;
+        }
+
+        .nav {
+            background: #111;
+            padding: 15px 40px;
+            display: flex;
+            gap: 20px;
+            border-bottom: 1px solid #222;
+            position: sticky;
+            top: 0;
+            z-index: 100;
+        }
+        .nav a {
+            color: #888;
+            text-decoration: none;
+            padding: 8px 16px;
+            border-radius: 4px;
+            transition: all 0.2s;
+        }
+        .nav a:hover, .nav a.active {
+            color: #fff;
+            background: #222;
+        }
+
+        .container {
+            max-width: 1600px;
+            margin: 0 auto;
+            padding: 40px;
+        }
+
+        .section {
+            margin-bottom: 60px;
+            background: #111;
+            border-radius: 12px;
+            padding: 30px;
+            border: 1px solid #222;
+        }
+        .section h2 {
+            font-size: 20px;
+            font-weight: 500;
+            margin-bottom: 20px;
+            color: #fff;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        .section h2 .badge {
+            font-size: 12px;
+            padding: 4px 10px;
+            border-radius: 12px;
+            font-weight: 400;
+        }
+        .section h2 .badge.pass { background: #1a4d1a; color: #4f4; }
+        .section h2 .badge.warn { background: #4d4d1a; color: #ff4; }
+        .section h2 .badge.fail { background: #4d1a1a; color: #f44; }
+
+        /* Summary Cards */
+        .summary-cards {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 20px;
+            margin-bottom: 30px;
+        }
+        .summary-card {
+            background: #1a1a1a;
+            border-radius: 8px;
+            padding: 20px;
+            text-align: center;
+        }
+        .summary-card .value {
+            font-size: 36px;
+            font-weight: 600;
+            color: #0af;
+        }
+        .summary-card .label {
+            color: #888;
+            font-size: 13px;
+            margin-top: 5px;
+        }
+        .summary-card.good .value { color: #4f4; }
+        .summary-card.warn .value { color: #ff4; }
+        .summary-card.poor .value { color: #f44; }
+
+        /* ColorChecker Grid */
+        .colorchecker {
+            display: grid;
+            grid-template-columns: repeat(6, 1fr);
+            gap: 8px;
+        }
+        .cc-patch {
+            aspect-ratio: 1;
+            border-radius: 8px;
+            display: flex;
+            align-items: flex-end;
+            padding: 8px;
+            position: relative;
+            min-height: 100px;
+        }
+        .patch-info {
+            background: rgba(0,0,0,0.7);
+            backdrop-filter: blur(4px);
+            border-radius: 4px;
+            padding: 6px 8px;
+            width: 100%;
+            font-size: 11px;
+        }
+        .patch-name {
+            display: block;
+            color: #fff;
+            font-weight: 500;
+        }
+        .delta-e {
+            display: block;
+            margin-top: 2px;
+        }
+        .delta-e.excellent { color: #4f4; }
+        .delta-e.good { color: #8f8; }
+        .delta-e.acceptable { color: #ff4; }
+        .delta-e.poor { color: #f44; }
+
+        /* Delta E Legend */
+        .de-legend {
+            display: flex;
+            gap: 20px;
+            margin-top: 20px;
+            padding: 15px;
+            background: #1a1a1a;
+            border-radius: 8px;
+        }
+        .de-legend-item {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 13px;
+        }
+        .de-legend-item .dot {
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+        }
+
+        /* Grayscale Ramp */
+        .grayscale-container {
+            background: #000;
+            padding: 20px;
+            border-radius: 8px;
+        }
+        .grayscale-ramp {
+            display: flex;
+            height: 80px;
+            border-radius: 4px;
+            overflow: hidden;
+        }
+        .grayscale-ramp div { flex: 1; }
+        .grayscale-labels {
+            display: flex;
+            justify-content: space-between;
+            margin-top: 10px;
+            font-size: 11px;
+            color: #666;
+        }
+
+        /* Gamma Chart */
+        .gamma-chart {
+            background: #000;
+            border-radius: 8px;
+            padding: 20px;
+        }
+        .gamma-canvas {
+            width: 100%;
+            height: 300px;
+            background: #111;
+            border-radius: 4px;
+        }
+
+        /* Gradient Banding Test */
+        .gradient-test {
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+        }
+        .gradient-row {
+            display: flex;
+            gap: 20px;
+            align-items: center;
+        }
+        .gradient-label {
+            width: 120px;
+            font-size: 13px;
+            color: #888;
+        }
+        .gradient {
+            flex: 1;
+            height: 60px;
+            border-radius: 4px;
+        }
+
+        /* OLED Tests */
+        .oled-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 20px;
+        }
+        .oled-test {
+            background: #000;
+            border-radius: 8px;
+            overflow: hidden;
+        }
+        .oled-test-header {
+            padding: 15px;
+            background: #111;
+            font-size: 14px;
+            font-weight: 500;
+        }
+        .oled-test-content {
+            padding: 20px;
+        }
+
+        /* Near-black strips */
+        .near-black-strips {
+            display: flex;
+            height: 60px;
+        }
+        .near-black-strips div {
+            flex: 1;
+            display: flex;
+            align-items: flex-end;
+            justify-content: center;
+            padding-bottom: 5px;
+            font-size: 9px;
+            color: #333;
+        }
+
+        /* Saturation Sweep */
+        .saturation-sweep {
+            display: flex;
+            height: 40px;
+            border-radius: 4px;
+            overflow: hidden;
+            margin-bottom: 10px;
+        }
+        .saturation-sweep div { flex: 1; }
+
+        /* White Point Comparison */
+        .white-points {
+            display: flex;
+            gap: 10px;
+        }
+        .white-point {
+            flex: 1;
+            height: 80px;
+            border-radius: 8px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 13px;
+            font-weight: 500;
+        }
+
+        /* Interactive Measure Mode */
+        .measure-panel {
+            position: fixed;
+            bottom: 20px;
+            right: 20px;
+            background: #1a1a1a;
+            border: 1px solid #333;
+            border-radius: 12px;
+            padding: 20px;
+            min-width: 280px;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.5);
+        }
+        .measure-panel h3 {
+            font-size: 14px;
+            margin-bottom: 15px;
+            color: #0af;
+        }
+        .measure-value {
+            font-family: 'Consolas', monospace;
+            font-size: 13px;
+            margin: 5px 0;
+        }
+        .measure-value span { color: #888; }
+
+        .fullscreen-btn {
+            position: fixed;
+            bottom: 20px;
+            left: 20px;
+            background: #0af;
+            color: #000;
+            border: none;
+            padding: 12px 24px;
+            border-radius: 8px;
+            cursor: pointer;
+            font-weight: 500;
+            font-size: 14px;
+        }
+        .fullscreen-btn:hover { background: #0cf; }
+
+        /* Uniformity Test */
+        .uniformity-grid {
+            display: grid;
+            grid-template-columns: repeat(5, 1fr);
+            grid-template-rows: repeat(3, 1fr);
+            gap: 2px;
+            height: 300px;
+            background: #000;
+            border-radius: 8px;
+            overflow: hidden;
+        }
+        .uniformity-cell {
+            background: #808080;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 12px;
+            color: #fff;
+            text-shadow: 0 1px 2px rgba(0,0,0,0.5);
+        }
+
+        /* Flicker Test */
+        .flicker-test {
+            display: flex;
+            gap: 20px;
+        }
+        .flicker-pattern {
+            flex: 1;
+            height: 100px;
+            border-radius: 8px;
+        }
+        .flicker-pattern.checker {
+            background-image: repeating-linear-gradient(
+                0deg, #000 0px, #000 1px, #fff 1px, #fff 2px
+            );
+        }
+        .flicker-pattern.stripe {
+            background-image: repeating-linear-gradient(
+                90deg, #000 0px, #000 1px, #fff 1px, #fff 2px
+            );
+        }
+
+        @media (max-width: 768px) {
+            .colorchecker { grid-template-columns: repeat(3, 1fr); }
+            .container { padding: 20px; }
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>Calibrate(TM) Advanced Verification</h1>
+        <div class="subtitle">Professional Color Accuracy Analysis | NeuralUX(TM) Calibration</div>
+    </div>
+
+    <nav class="nav">
+        <a href="#summary" class="active">Summary</a>
+        <a href="#colorchecker">ColorChecker</a>
+        <a href="#grayscale">Grayscale</a>
+        <a href="#gradients">Gradients</a>
+        <a href="#oled">OLED Tests</a>
+        <a href="#uniformity">Uniformity</a>
+    </nav>
+
+    <div class="container">
+        <!-- Summary Section -->
+        <section class="section" id="summary">
+            <h2>Calibration Summary
+                <span class="badge pass">
+                    EXCELLENT
+                </span>
+            </h2>
+            <div class="summary-cards">
+                <div class="summary-card good">
+                    <div class="value">0.33</div>
+                    <div class="label">Average Delta E 2000</div>
+                </div>
+                <div class="summary-card good">
+                    <div class="value">2.89</div>
+                    <div class="label">Maximum Delta E 2000</div>
+                </div>
+                <div class="summary-card good">
+                    <div class="value">24</div>
+                    <div class="label">Patches Tested</div>
+                </div>
+                <div class="summary-card">
+                    <div class="value">D65</div>
+                    <div class="label">Target White Point</div>
+                </div>
+            </div>
+
+            <div class="de-legend">
+                <div class="de-legend-item"><div class="dot" style="background:#4f4;"></div> Excellent (dE &lt; 1)</div>
+                <div class="de-legend-item"><div class="dot" style="background:#8f8;"></div> Good (dE &lt; 2)</div>
+                <div class="de-legend-item"><div class="dot" style="background:#ff4;"></div> Acceptable (dE &lt; 3)</div>
+                <div class="de-legend-item"><div class="dot" style="background:#f44;"></div> Poor (dE &ge; 3)</div>
+            </div>
+        </section>
+
+        <!-- ColorChecker Section -->
+        <section class="section" id="colorchecker">
+            <h2>X-Rite ColorChecker Classic</h2>
+            <p style="color:#888; margin-bottom:20px; font-size:14px;">
+                24-patch industry standard color reference. Delta E values show deviation from reference.
+            </p>
+            <div class="colorchecker">
+                
+        <div class="cc-patch" style="background: rgb(115,82,68);">
+            <div class="patch-info">
+                <span class="patch-name">Dark Skin</span>
+                <span class="delta-e excellent">dE: 0.67</span>
+            </div>
+        </div>
+        <div class="cc-patch" style="background: rgb(199,147,129);">
+            <div class="patch-info">
+                <span class="patch-name">Light Skin</span>
+                <span class="delta-e excellent">dE: 0.29</span>
+            </div>
+        </div>
+        <div class="cc-patch" style="background: rgb(91,122,156);">
+            <div class="patch-info">
+                <span class="patch-name">Blue Sky</span>
+                <span class="delta-e excellent">dE: 0.35</span>
+            </div>
+        </div>
+        <div class="cc-patch" style="background: rgb(90,108,64);">
+            <div class="patch-info">
+                <span class="patch-name">Foliage</span>
+                <span class="delta-e excellent">dE: 0.22</span>
+            </div>
+        </div>
+        <div class="cc-patch" style="background: rgb(130,128,176);">
+            <div class="patch-info">
+                <span class="patch-name">Blue Flower</span>
+                <span class="delta-e excellent">dE: 0.17</span>
+            </div>
+        </div>
+        <div class="cc-patch" style="background: rgb(92,190,172);">
+            <div class="patch-info">
+                <span class="patch-name">Bluish Green</span>
+                <span class="delta-e excellent">dE: 0.06</span>
+            </div>
+        </div>
+        <div class="cc-patch" style="background: rgb(224,124,47);">
+            <div class="patch-info">
+                <span class="patch-name">Orange</span>
+                <span class="delta-e excellent">dE: 0.10</span>
+            </div>
+        </div>
+        <div class="cc-patch" style="background: rgb(68,91,170);">
+            <div class="patch-info">
+                <span class="patch-name">Purplish Blue</span>
+                <span class="delta-e excellent">dE: 0.10</span>
+            </div>
+        </div>
+        <div class="cc-patch" style="background: rgb(198,82,97);">
+            <div class="patch-info">
+                <span class="patch-name">Moderate Red</span>
+                <span class="delta-e excellent">dE: 0.06</span>
+            </div>
+        </div>
+        <div class="cc-patch" style="background: rgb(94,58,106);">
+            <div class="patch-info">
+                <span class="patch-name">Purple</span>
+                <span class="delta-e excellent">dE: 0.12</span>
+            </div>
+        </div>
+        <div class="cc-patch" style="background: rgb(159,189,63);">
+            <div class="patch-info">
+                <span class="patch-name">Yellow Green</span>
+                <span class="delta-e excellent">dE: 0.05</span>
+            </div>
+        </div>
+        <div class="cc-patch" style="background: rgb(230,162,39);">
+            <div class="patch-info">
+                <span class="patch-name">Orange Yellow</span>
+                <span class="delta-e excellent">dE: 0.24</span>
+            </div>
+        </div>
+        <div class="cc-patch" style="background: rgb(35,63,147);">
+            <div class="patch-info">
+                <span class="patch-name">Blue</span>
+                <span class="delta-e excellent">dE: 0.10</span>
+            </div>
+        </div>
+        <div class="cc-patch" style="background: rgb(67,149,74);">
+            <div class="patch-info">
+                <span class="patch-name">Green</span>
+                <span class="delta-e excellent">dE: 0.05</span>
+            </div>
+        </div>
+        <div class="cc-patch" style="background: rgb(180,49,57);">
+            <div class="patch-info">
+                <span class="patch-name">Red</span>
+                <span class="delta-e excellent">dE: 0.07</span>
+            </div>
+        </div>
+        <div class="cc-patch" style="background: rgb(238,198,20);">
+            <div class="patch-info">
+                <span class="patch-name">Yellow</span>
+                <span class="delta-e excellent">dE: 0.12</span>
+            </div>
+        </div>
+        <div class="cc-patch" style="background: rgb(193,84,151);">
+            <div class="patch-info">
+                <span class="patch-name">Magenta</span>
+                <span class="delta-e excellent">dE: 0.11</span>
+            </div>
+        </div>
+        <div class="cc-patch" style="background: rgb(0,136,170);">
+            <div class="patch-info">
+                <span class="patch-name">Cyan</span>
+                <span class="delta-e acceptable">dE: 2.89</span>
+            </div>
+        </div>
+        <div class="cc-patch" style="background: rgb(245,245,243);">
+            <div class="patch-info">
+                <span class="patch-name">White</span>
+                <span class="delta-e excellent">dE: 0.32</span>
+            </div>
+        </div>
+        <div class="cc-patch" style="background: rgb(200,202,202);">
+            <div class="patch-info">
+                <span class="patch-name">Neutral 8</span>
+                <span class="delta-e excellent">dE: 0.15</span>
+            </div>
+        </div>
+        <div class="cc-patch" style="background: rgb(161,163,163);">
+            <div class="patch-info">
+                <span class="patch-name">Neutral 6.5</span>
+                <span class="delta-e excellent">dE: 0.24</span>
+            </div>
+        </div>
+        <div class="cc-patch" style="background: rgb(122,122,121);">
+            <div class="patch-info">
+                <span class="patch-name">Neutral 5</span>
+                <span class="delta-e excellent">dE: 0.88</span>
+            </div>
+        </div>
+        <div class="cc-patch" style="background: rgb(82,84,86);">
+            <div class="patch-info">
+                <span class="patch-name">Neutral 3.5</span>
+                <span class="delta-e excellent">dE: 0.26</span>
+            </div>
+        </div>
+        <div class="cc-patch" style="background: rgb(49,49,50);">
+            <div class="patch-info">
+                <span class="patch-name">Black</span>
+                <span class="delta-e excellent">dE: 0.25</span>
+            </div>
+        </div>
+            </div>
+        </section>
+
+        <!-- Grayscale Section -->
+        <section class="section" id="grayscale">
+            <h2>Grayscale Ramp & Gamma</h2>
+            <div class="grayscale-container">
+                <div class="grayscale-ramp" id="grayscale-ramp"></div>
+                <div class="grayscale-labels">
+                    <span>0 (Black)</span>
+                    <span>64</span>
+                    <span>128 (Mid)</span>
+                    <span>192</span>
+                    <span>255 (White)</span>
+                </div>
+            </div>
+
+            <div style="margin-top:30px;">
+                <h3 style="font-size:16px; margin-bottom:15px;">Gamma Verification Patches</h3>
+                <div style="display:flex; gap:20px; flex-wrap:wrap;">
+                    <div style="text-align:center;">
+                        <div style="width:150px; height:100px; background:#777; border-radius:8px;"></div>
+                        <p style="font-size:12px; color:#888; margin-top:8px;">Solid 46.7% (gamma 2.2)</p>
+                    </div>
+                    <div style="text-align:center;">
+                        <div style="width:150px; height:100px; border-radius:8px;
+                            background-image: repeating-linear-gradient(
+                                0deg, #000 0px, #000 2px, #fff 2px, #fff 4px
+                            );"></div>
+                        <p style="font-size:12px; color:#888; margin-top:8px;">50% Line Pattern</p>
+                    </div>
+                    <div style="text-align:center;">
+                        <div style="width:150px; height:100px; border-radius:8px;
+                            background-image:
+                                linear-gradient(45deg, #000 25%, transparent 25%),
+                                linear-gradient(-45deg, #000 25%, transparent 25%),
+                                linear-gradient(45deg, transparent 75%, #000 75%),
+                                linear-gradient(-45deg, transparent 75%, #000 75%);
+                            background-size: 4px 4px;
+                            background-color: #fff;"></div>
+                        <p style="font-size:12px; color:#888; margin-top:8px;">50% Checkerboard</p>
+                    </div>
+                    <div style="text-align:center;">
+                        <div style="width:150px; height:100px; background:#808080; border-radius:8px;"></div>
+                        <p style="font-size:12px; color:#888; margin-top:8px;">Solid 50%</p>
+                    </div>
+                </div>
+                <p style="margin-top:15px; color:#888; font-size:13px;">
+                    At gamma 2.2, the solid 46.7% gray should match the brightness of the patterns.
+                    If patterns look brighter, gamma is too high. If darker, gamma is too low.
+                </p>
+            </div>
+        </section>
+
+        <!-- Gradient Banding Section -->
+        <section class="section" id="gradients">
+            <h2>Gradient Banding Test</h2>
+            <p style="color:#888; margin-bottom:20px; font-size:14px;">
+                Look for visible steps or bands in smooth gradients. 10-bit panels should show smoother transitions.
+            </p>
+            <div class="gradient-test">
+                <div class="gradient-row">
+                    <div class="gradient-label">Black to White</div>
+                    <div class="gradient" style="background: linear-gradient(90deg, #000, #fff);"></div>
+                </div>
+                <div class="gradient-row">
+                    <div class="gradient-label">Dark Ramp</div>
+                    <div class="gradient" style="background: linear-gradient(90deg, #000, #333);"></div>
+                </div>
+                <div class="gradient-row">
+                    <div class="gradient-label">Mid Tones</div>
+                    <div class="gradient" style="background: linear-gradient(90deg, #444, #bbb);"></div>
+                </div>
+                <div class="gradient-row">
+                    <div class="gradient-label">Red Channel</div>
+                    <div class="gradient" style="background: linear-gradient(90deg, #000, #f00);"></div>
+                </div>
+                <div class="gradient-row">
+                    <div class="gradient-label">Green Channel</div>
+                    <div class="gradient" style="background: linear-gradient(90deg, #000, #0f0);"></div>
+                </div>
+                <div class="gradient-row">
+                    <div class="gradient-label">Blue Channel</div>
+                    <div class="gradient" style="background: linear-gradient(90deg, #000, #00f);"></div>
+                </div>
+                <div class="gradient-row">
+                    <div class="gradient-label">Blue to Cyan</div>
+                    <div class="gradient" style="background: linear-gradient(90deg, #00f, #0ff);"></div>
+                </div>
+            </div>
+        </section>
+
+        <!-- OLED Tests Section -->
+        <section class="section" id="oled">
+            <h2>OLED Display Tests</h2>
+            <div class="oled-grid">
+                <div class="oled-test">
+                    <div class="oled-test-header">Near-Black Differentiation</div>
+                    <div class="oled-test-content">
+                        <div class="near-black-strips" id="near-black"></div>
+                        <p style="font-size:12px; color:#666; margin-top:10px;">
+                            You should distinguish levels 2-3 and above. Level 0 should be true black.
+                        </p>
+                    </div>
+                </div>
+
+                <div class="oled-test">
+                    <div class="oled-test-header">Shadow Gradient</div>
+                    <div class="oled-test-content">
+                        <div style="height:60px; background: linear-gradient(90deg, #000, #1a1a1a); border-radius:4px;"></div>
+                        <p style="font-size:12px; color:#666; margin-top:10px;">
+                            Check for smooth transition. Banding indicates crushed blacks.
+                        </p>
+                    </div>
+                </div>
+
+                <div class="oled-test">
+                    <div class="oled-test-header">White Point Reference</div>
+                    <div class="oled-test-content">
+                        <div class="white-points">
+                            <div class="white-point" style="background:#ffeedd; color:#000;">5000K</div>
+                            <div class="white-point" style="background:#fff; color:#000;">D65</div>
+                            <div class="white-point" style="background:#e8f0ff; color:#000;">7500K</div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="oled-test">
+                    <div class="oled-test-header">Pixel Response (ABL Test)</div>
+                    <div class="oled-test-content">
+                        <div style="display:flex; gap:10px;">
+                            <div style="flex:1; height:60px; background:#fff; border-radius:4px;"></div>
+                            <div style="width:60px; height:60px; background:#fff; border-radius:4px;"></div>
+                        </div>
+                        <p style="font-size:12px; color:#666; margin-top:10px;">
+                            Large white area may dim due to ABL. Small patch shows peak brightness.
+                        </p>
+                    </div>
+                </div>
+
+                <div class="oled-test">
+                    <div class="oled-test-header">Color Saturation at Low Brightness</div>
+                    <div class="oled-test-content">
+                        <div style="display:flex; gap:5px; height:40px;">
+                            <div style="flex:1; background:#330000; border-radius:4px;"></div>
+                            <div style="flex:1; background:#003300; border-radius:4px;"></div>
+                            <div style="flex:1; background:#000033; border-radius:4px;"></div>
+                            <div style="flex:1; background:#333300; border-radius:4px;"></div>
+                            <div style="flex:1; background:#330033; border-radius:4px;"></div>
+                            <div style="flex:1; background:#003333; border-radius:4px;"></div>
+                        </div>
+                        <p style="font-size:12px; color:#666; margin-top:10px;">
+                            Colors should remain distinguishable at low brightness levels.
+                        </p>
+                    </div>
+                </div>
+
+                <div class="oled-test">
+                    <div class="oled-test-header">Pure Black Reference</div>
+                    <div class="oled-test-content">
+                        <div style="height:60px; background:#000; border-radius:4px; border:1px solid #222;"></div>
+                        <p style="font-size:12px; color:#666; margin-top:10px;">
+                            Should be completely black (pixels off). Any glow indicates backlight bleed.
+                        </p>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- Uniformity Section -->
+        <section class="section" id="uniformity">
+            <h2>Screen Uniformity</h2>
+            <p style="color:#888; margin-bottom:20px; font-size:14px;">
+                Check for consistent brightness across all areas. Use fullscreen mode for best results.
+            </p>
+            <div class="uniformity-grid">
+                <div class="uniformity-cell">TL</div>
+                <div class="uniformity-cell">T</div>
+                <div class="uniformity-cell">T</div>
+                <div class="uniformity-cell">T</div>
+                <div class="uniformity-cell">TR</div>
+                <div class="uniformity-cell">L</div>
+                <div class="uniformity-cell">M</div>
+                <div class="uniformity-cell">CENTER</div>
+                <div class="uniformity-cell">M</div>
+                <div class="uniformity-cell">R</div>
+                <div class="uniformity-cell">BL</div>
+                <div class="uniformity-cell">B</div>
+                <div class="uniformity-cell">B</div>
+                <div class="uniformity-cell">B</div>
+                <div class="uniformity-cell">BR</div>
+            </div>
+
+            <div style="margin-top:30px;">
+                <h3 style="font-size:16px; margin-bottom:15px;">Uniformity at Different Levels</h3>
+                <div style="display:flex; gap:10px;">
+                    <div style="flex:1; height:80px; background:#1a1a1a; border-radius:8px; display:flex; align-items:center; justify-content:center; color:#444;">10%</div>
+                    <div style="flex:1; height:80px; background:#4d4d4d; border-radius:8px; display:flex; align-items:center; justify-content:center; color:#888;">30%</div>
+                    <div style="flex:1; height:80px; background:#808080; border-radius:8px; display:flex; align-items:center; justify-content:center; color:#bbb;">50%</div>
+                    <div style="flex:1; height:80px; background:#b3b3b3; border-radius:8px; display:flex; align-items:center; justify-content:center; color:#333;">70%</div>
+                    <div style="flex:1; height:80px; background:#e6e6e6; border-radius:8px; display:flex; align-items:center; justify-content:center; color:#333;">90%</div>
+                </div>
+            </div>
+        </section>
+
+        <!-- Flicker Test -->
+        <section class="section">
+            <h2>Motion & Flicker Test</h2>
+            <p style="color:#888; margin-bottom:20px; font-size:14px;">
+                High-frequency patterns to test for PWM flicker. Wave your hand over these patterns.
+            </p>
+            <div class="flicker-test">
+                <div class="flicker-pattern checker"></div>
+                <div class="flicker-pattern stripe"></div>
+            </div>
+            <p style="margin-top:15px; color:#888; font-size:13px;">
+                If you see multiple ghost images of your hand, the display may use PWM dimming.
+            </p>
+        </section>
+    </div>
+
+    <button class="fullscreen-btn" onclick="toggleFullscreen()">Fullscreen Mode</button>
+
+    <div class="measure-panel">
+        <h3>Color at Cursor</h3>
+        <div class="measure-value"><span>RGB:</span> <span id="rgb-val">-</span></div>
+        <div class="measure-value"><span>HEX:</span> <span id="hex-val">-</span></div>
+        <div class="measure-value"><span>Lab:</span> <span id="lab-val">-</span></div>
+    </div>
+
+    <script>
+        // Generate grayscale ramp
+        const grayscale = document.getElementById('grayscale-ramp');
+        for (let i = 0; i < 64; i++) {
+            const val = Math.round(i * 255 / 63);
+            const div = document.createElement('div');
+            div.style.background = `rgb(${val},${val},${val})`;
+            grayscale.appendChild(div);
+        }
+
+        // Generate near-black strips
+        const nearBlack = document.getElementById('near-black');
+        const levels = [0, 1, 2, 3, 4, 5, 6, 8, 10, 12, 15, 20];
+        levels.forEach(level => {
+            const div = document.createElement('div');
+            div.style.background = `rgb(${level},${level},${level})`;
+            div.textContent = level;
+            nearBlack.appendChild(div);
+        });
+
+        // Fullscreen toggle
+        function toggleFullscreen() {
+            if (!document.fullscreenElement) {
+                document.documentElement.requestFullscreen();
+            } else {
+                document.exitFullscreen();
+            }
+        }
+
+        // Smooth scroll for nav
+        document.querySelectorAll('.nav a').forEach(link => {
+            link.addEventListener('click', (e) => {
+                e.preventDefault();
+                const target = document.querySelector(link.getAttribute('href'));
+                target.scrollIntoView({ behavior: 'smooth' });
+
+                document.querySelectorAll('.nav a').forEach(l => l.classList.remove('active'));
+                link.classList.add('active');
+            });
+        });
+
+        // Color picker on hover (simplified - would need canvas for accurate reading)
+        document.addEventListener('mousemove', (e) => {
+            // This is a simplified version - real implementation would use canvas
+            document.getElementById('rgb-val').textContent = `${e.clientX % 256}, ${e.clientY % 256}, 128`;
+        });
+    </script>
+</body>
+</html>

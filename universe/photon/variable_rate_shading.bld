@@ -1,0 +1,1631 @@
+// =============================================================================
+// PHOTON VARIABLE RATE SHADING - Harper Engine Adaptive Rendering
+// =============================================================================
+// Implements Variable Rate Shading (VRS) for optimized rendering performance
+// Based on Harper Engine Whitepapers:
+// - WP-066: Variable Rate Shading Fundamentals
+// - WP-067: Content-Adaptive VRS
+// - WP-068: Motion-Adaptive VRS
+// - WP-069: Foveated Rendering with VRS
+// - WP-070: VRS for VR/AR Applications
+// - WP-071: Perceptual VRS Optimization
+// =============================================================================
+
+use core::mem;
+use core::simd;
+use crate::photon::{RenderContext, Pipeline, Buffer, Texture};
+
+// =============================================================================
+// VRS CONSTANTS AND RATES (WP-066)
+// =============================================================================
+
+/// Supported shading rates
+#[repr(u8)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum ShadingRate {
+    /// 1x1 - Full resolution (1 pixel per sample)
+    Rate1x1 = 0,
+    /// 1x2 - Half vertical resolution
+    Rate1x2 = 1,
+    /// 2x1 - Half horizontal resolution
+    Rate2x1 = 2,
+    /// 2x2 - Quarter resolution (4 pixels share one shading)
+    Rate2x2 = 3,
+    /// 2x4 - One-eighth resolution
+    Rate2x4 = 4,
+    /// 4x2 - One-eighth resolution
+    Rate4x2 = 5,
+    /// 4x4 - One-sixteenth resolution (16 pixels share one shading)
+    Rate4x4 = 6,
+}
+
+impl ShadingRate {
+    /// Get the coarse pixel width
+    fn width(&self) -> u32 {
+        match self {
+            ShadingRate::Rate1x1 | ShadingRate::Rate1x2 => 1,
+            ShadingRate::Rate2x1 | ShadingRate::Rate2x2 | ShadingRate::Rate2x4 => 2,
+            ShadingRate::Rate4x2 | ShadingRate::Rate4x4 => 4,
+        }
+    }
+
+    /// Get the coarse pixel height
+    fn height(&self) -> u32 {
+        match self {
+            ShadingRate::Rate1x1 | ShadingRate::Rate2x1 => 1,
+            ShadingRate::Rate1x2 | ShadingRate::Rate2x2 | ShadingRate::Rate4x2 => 2,
+            ShadingRate::Rate2x4 | ShadingRate::Rate4x4 => 4,
+        }
+    }
+
+    /// Get the number of pixels covered
+    fn pixel_count(&self) -> u32 {
+        self.width() * self.height()
+    }
+
+    /// Get reduction factor (for performance calculations)
+    fn reduction_factor(&self) -> f32 {
+        1.0 / self.pixel_count() as f32
+    }
+
+    /// Combine two shading rates (takes the coarser rate)
+    fn combine_coarser(a: ShadingRate, b: ShadingRate) -> ShadingRate {
+        let a_size = a.pixel_count();
+        let b_size = b.pixel_count();
+        if a_size >= b_size { a } else { b }
+    }
+
+    /// Combine two shading rates (takes the finer rate)
+    fn combine_finer(a: ShadingRate, b: ShadingRate) -> ShadingRate {
+        let a_size = a.pixel_count();
+        let b_size = b.pixel_count();
+        if a_size <= b_size { a } else { b }
+    }
+}
+
+/// VRS tile size (hardware-defined)
+const VRS_TILE_SIZE: u32 = 16;
+
+/// Maximum supported VRS image dimension
+const MAX_VRS_DIMENSION: u32 = 4096;
+
+// =============================================================================
+// VRS COMBINER MODES (WP-066)
+// =============================================================================
+
+/// How to combine per-draw and per-tile shading rates
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum VRSCombinerMode {
+    /// Use per-draw rate only
+    Passthrough,
+    /// Override with per-tile rate
+    Override,
+    /// Use minimum (finer) of two rates
+    Min,
+    /// Use maximum (coarser) of two rates
+    Max,
+    /// Sum the rates (clamp to valid range)
+    Sum,
+}
+
+impl VRSCombinerMode {
+    fn combine(&self, per_draw: ShadingRate, per_tile: ShadingRate) -> ShadingRate {
+        match self {
+            VRSCombinerMode::Passthrough => per_draw,
+            VRSCombinerMode::Override => per_tile,
+            VRSCombinerMode::Min => ShadingRate::combine_finer(per_draw, per_tile),
+            VRSCombinerMode::Max => ShadingRate::combine_coarser(per_draw, per_tile),
+            VRSCombinerMode::Sum => {
+                let sum = (per_draw as u8 + per_tile as u8).min(6);
+                unsafe { std::mem::transmute(sum) }
+            }
+        }
+    }
+}
+
+// =============================================================================
+// SHADING RATE IMAGE (WP-066)
+// =============================================================================
+
+/// Image specifying per-tile shading rates
+struct ShadingRateImage {
+    /// Shading rate data (one byte per tile)
+    data: Vec<ShadingRate>,
+    /// Width in tiles
+    width: u32,
+    /// Height in tiles
+    height: u32,
+    /// GPU texture
+    texture: Option<Texture>,
+}
+
+impl ShadingRateImage {
+    fn new(width: u32, height: u32) -> Self {
+        let tile_width = (width + VRS_TILE_SIZE - 1) / VRS_TILE_SIZE;
+        let tile_height = (height + VRS_TILE_SIZE - 1) / VRS_TILE_SIZE;
+        let size = (tile_width * tile_height) as usize;
+
+        Self {
+            data: vec![ShadingRate::Rate1x1; size],
+            width: tile_width,
+            height: tile_height,
+            texture: None,
+        }
+    }
+
+    /// Set shading rate for a tile
+    fn set_rate(&mut self, tile_x: u32, tile_y: u32, rate: ShadingRate) {
+        if tile_x < self.width && tile_y < self.height {
+            let idx = (tile_y * self.width + tile_x) as usize;
+            self.data[idx] = rate;
+        }
+    }
+
+    /// Get shading rate for a tile
+    fn get_rate(&self, tile_x: u32, tile_y: u32) -> ShadingRate {
+        if tile_x < self.width && tile_y < self.height {
+            let idx = (tile_y * self.width + tile_x) as usize;
+            self.data[idx]
+        } else {
+            ShadingRate::Rate1x1
+        }
+    }
+
+    /// Get shading rate for a pixel position
+    fn get_rate_at_pixel(&self, x: u32, y: u32) -> ShadingRate {
+        let tile_x = x / VRS_TILE_SIZE;
+        let tile_y = y / VRS_TILE_SIZE;
+        self.get_rate(tile_x, tile_y)
+    }
+
+    /// Fill entire image with a single rate
+    fn fill(&mut self, rate: ShadingRate) {
+        for r in &mut self.data {
+            *r = rate;
+        }
+    }
+
+    /// Upload to GPU
+    fn upload(&mut self, ctx: &RenderContext) {
+        if self.texture.is_none() {
+            self.texture = Some(Texture::new_2d(
+                ctx,
+                self.width,
+                self.height,
+                TextureFormat::R8Uint,
+            ));
+        }
+
+        if let Some(ref texture) = self.texture {
+            let data: Vec<u8> = self.data.iter().map(|r| *r as u8).collect();
+            texture.upload(ctx, &data);
+        }
+    }
+
+    /// Get average shading rate
+    fn average_rate(&self) -> f32 {
+        let sum: f32 = self.data.iter()
+            .map(|r| r.reduction_factor())
+            .sum();
+        sum / self.data.len() as f32
+    }
+}
+
+// =============================================================================
+// CONTENT-ADAPTIVE VRS (WP-067)
+// =============================================================================
+
+/// Content-adaptive VRS configuration
+struct ContentAdaptiveConfig {
+    /// Enable luminance-based adaptation
+    luminance_adaptive: bool,
+    /// Luminance variance threshold for rate reduction
+    luminance_threshold: f32,
+
+    /// Enable edge-based adaptation
+    edge_adaptive: bool,
+    /// Edge strength threshold
+    edge_threshold: f32,
+
+    /// Enable depth-based adaptation
+    depth_adaptive: bool,
+    /// Depth discontinuity threshold
+    depth_threshold: f32,
+
+    /// Enable texture detail adaptation
+    texture_adaptive: bool,
+    /// Texture frequency threshold
+    texture_threshold: f32,
+
+    /// Maximum allowed rate reduction
+    max_rate: ShadingRate,
+}
+
+impl ContentAdaptiveConfig {
+    fn default() -> Self {
+        Self {
+            luminance_adaptive: true,
+            luminance_threshold: 0.02,
+            edge_adaptive: true,
+            edge_threshold: 0.1,
+            depth_adaptive: true,
+            depth_threshold: 0.05,
+            texture_adaptive: true,
+            texture_threshold: 0.3,
+            max_rate: ShadingRate::Rate4x4,
+        }
+    }
+
+    fn conservative() -> Self {
+        Self {
+            luminance_adaptive: true,
+            luminance_threshold: 0.01,
+            edge_adaptive: true,
+            edge_threshold: 0.05,
+            depth_adaptive: true,
+            depth_threshold: 0.02,
+            texture_adaptive: false,
+            texture_threshold: 0.0,
+            max_rate: ShadingRate::Rate2x2,
+        }
+    }
+
+    fn aggressive() -> Self {
+        Self {
+            luminance_adaptive: true,
+            luminance_threshold: 0.05,
+            edge_adaptive: true,
+            edge_threshold: 0.2,
+            depth_adaptive: true,
+            depth_threshold: 0.1,
+            texture_adaptive: true,
+            texture_threshold: 0.5,
+            max_rate: ShadingRate::Rate4x4,
+        }
+    }
+}
+
+/// Content-adaptive VRS analyzer
+struct ContentAdaptiveVRS {
+    config: ContentAdaptiveConfig,
+    /// Previous frame luminance for temporal analysis
+    prev_luminance: Vec<f32>,
+    /// Edge detection kernel
+    sobel_kernel: [[f32; 3]; 3],
+}
+
+impl ContentAdaptiveVRS {
+    fn new(config: ContentAdaptiveConfig) -> Self {
+        Self {
+            config,
+            prev_luminance: Vec::new(),
+            sobel_kernel: [
+                [-1.0, 0.0, 1.0],
+                [-2.0, 0.0, 2.0],
+                [-1.0, 0.0, 1.0],
+            ],
+        }
+    }
+
+    /// Analyze frame and generate shading rate image
+    fn analyze(
+        &mut self,
+        color_buffer: &[Vec4<f32>],
+        depth_buffer: &[f32],
+        width: u32,
+        height: u32,
+    ) -> ShadingRateImage {
+        let mut sri = ShadingRateImage::new(width, height);
+
+        for tile_y in 0..sri.height {
+            for tile_x in 0..sri.width {
+                let rate = self.analyze_tile(
+                    tile_x, tile_y,
+                    color_buffer, depth_buffer,
+                    width, height,
+                );
+                sri.set_rate(tile_x, tile_y, rate);
+            }
+        }
+
+        // Store luminance for next frame
+        if self.config.luminance_adaptive {
+            self.prev_luminance = color_buffer.iter()
+                .map(|c| Self::rgb_to_luminance(c.x, c.y, c.z))
+                .collect();
+        }
+
+        sri
+    }
+
+    /// Analyze a single tile
+    fn analyze_tile(
+        &self,
+        tile_x: u32,
+        tile_y: u32,
+        color: &[Vec4<f32>],
+        depth: &[f32],
+        width: u32,
+        height: u32,
+    ) -> ShadingRate {
+        let start_x = tile_x * VRS_TILE_SIZE;
+        let start_y = tile_y * VRS_TILE_SIZE;
+        let end_x = (start_x + VRS_TILE_SIZE).min(width);
+        let end_y = (start_y + VRS_TILE_SIZE).min(height);
+
+        let mut max_luminance_var = 0.0f32;
+        let mut max_edge = 0.0f32;
+        let mut max_depth_diff = 0.0f32;
+
+        // Analyze tile content
+        for y in start_y..end_y {
+            for x in start_x..end_x {
+                let idx = (y * width + x) as usize;
+
+                if self.config.luminance_adaptive {
+                    let lum = Self::rgb_to_luminance(
+                        color[idx].x,
+                        color[idx].y,
+                        color[idx].z,
+                    );
+
+                    // Calculate local variance
+                    let var = self.calculate_local_variance(color, x, y, width, height);
+                    max_luminance_var = max_luminance_var.max(var);
+                }
+
+                if self.config.edge_adaptive && x > 0 && y > 0 && x < width - 1 && y < height - 1 {
+                    let edge = self.calculate_edge_strength(color, x, y, width);
+                    max_edge = max_edge.max(edge);
+                }
+
+                if self.config.depth_adaptive && x > 0 && y > 0 {
+                    let depth_diff = self.calculate_depth_discontinuity(depth, x, y, width);
+                    max_depth_diff = max_depth_diff.max(depth_diff);
+                }
+            }
+        }
+
+        // Determine shading rate based on analysis
+        self.determine_rate(max_luminance_var, max_edge, max_depth_diff)
+    }
+
+    /// Calculate local luminance variance
+    fn calculate_local_variance(
+        &self,
+        color: &[Vec4<f32>],
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+    ) -> f32 {
+        let idx = (y * width + x) as usize;
+        let center_lum = Self::rgb_to_luminance(color[idx].x, color[idx].y, color[idx].z);
+
+        let mut variance = 0.0f32;
+        let mut count = 0;
+
+        for dy in -1i32..=1 {
+            for dx in -1i32..=1 {
+                let nx = x as i32 + dx;
+                let ny = y as i32 + dy;
+
+                if nx >= 0 && ny >= 0 && nx < width as i32 && ny < height as i32 {
+                    let nidx = (ny as u32 * width + nx as u32) as usize;
+                    let lum = Self::rgb_to_luminance(
+                        color[nidx].x,
+                        color[nidx].y,
+                        color[nidx].z,
+                    );
+                    variance += (lum - center_lum).powi(2);
+                    count += 1;
+                }
+            }
+        }
+
+        if count > 0 { variance / count as f32 } else { 0.0 }
+    }
+
+    /// Calculate edge strength using Sobel operator
+    fn calculate_edge_strength(
+        &self,
+        color: &[Vec4<f32>],
+        x: u32,
+        y: u32,
+        width: u32,
+    ) -> f32 {
+        let mut gx = 0.0f32;
+        let mut gy = 0.0f32;
+
+        for ky in 0..3 {
+            for kx in 0..3 {
+                let px = (x as i32 + kx as i32 - 1) as u32;
+                let py = (y as i32 + ky as i32 - 1) as u32;
+                let idx = (py * width + px) as usize;
+
+                let lum = Self::rgb_to_luminance(color[idx].x, color[idx].y, color[idx].z);
+
+                gx += lum * self.sobel_kernel[ky][kx];
+                gy += lum * self.sobel_kernel[kx][ky];
+            }
+        }
+
+        (gx * gx + gy * gy).sqrt()
+    }
+
+    /// Calculate depth discontinuity
+    fn calculate_depth_discontinuity(
+        &self,
+        depth: &[f32],
+        x: u32,
+        y: u32,
+        width: u32,
+    ) -> f32 {
+        let idx = (y * width + x) as usize;
+        let center = depth[idx];
+
+        let left = depth[(y * width + x - 1) as usize];
+        let top = depth[((y - 1) * width + x) as usize];
+
+        let dx = (center - left).abs();
+        let dy = (center - top).abs();
+
+        dx.max(dy)
+    }
+
+    /// Determine shading rate from analysis results
+    fn determine_rate(
+        &self,
+        luminance_var: f32,
+        edge_strength: f32,
+        depth_diff: f32,
+    ) -> ShadingRate {
+        // High detail needed - use fine rate
+        if self.config.edge_adaptive && edge_strength > self.config.edge_threshold {
+            return ShadingRate::Rate1x1;
+        }
+
+        if self.config.depth_adaptive && depth_diff > self.config.depth_threshold {
+            return ShadingRate::Rate1x1;
+        }
+
+        if self.config.luminance_adaptive && luminance_var > self.config.luminance_threshold {
+            return ShadingRate::Rate1x1;
+        }
+
+        // Low detail area - can use coarser rate
+        let low_variance = luminance_var < self.config.luminance_threshold * 0.5;
+        let low_edges = edge_strength < self.config.edge_threshold * 0.5;
+        let smooth_depth = depth_diff < self.config.depth_threshold * 0.5;
+
+        if low_variance && low_edges && smooth_depth {
+            return self.config.max_rate;
+        }
+
+        // Medium detail - use intermediate rate
+        ShadingRate::Rate2x2
+    }
+
+    /// Convert RGB to luminance
+    fn rgb_to_luminance(r: f32, g: f32, b: f32) -> f32 {
+        0.2126 * r + 0.7152 * g + 0.0722 * b
+    }
+}
+
+// =============================================================================
+// MOTION-ADAPTIVE VRS (WP-068)
+// =============================================================================
+
+/// Motion-adaptive VRS configuration
+struct MotionAdaptiveConfig {
+    /// Enable motion-based adaptation
+    enabled: bool,
+    /// Motion velocity threshold for rate reduction (pixels/frame)
+    velocity_threshold: f32,
+    /// Maximum rate for fast-moving regions
+    motion_max_rate: ShadingRate,
+    /// Temporal smoothing factor
+    temporal_smoothing: f32,
+}
+
+impl MotionAdaptiveConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            velocity_threshold: 5.0, // pixels per frame
+            motion_max_rate: ShadingRate::Rate4x4,
+            temporal_smoothing: 0.8,
+        }
+    }
+}
+
+/// Motion-adaptive VRS analyzer
+struct MotionAdaptiveVRS {
+    config: MotionAdaptiveConfig,
+    /// Previous frame shading rate for temporal smoothing
+    prev_rates: Vec<ShadingRate>,
+}
+
+impl MotionAdaptiveVRS {
+    fn new(config: MotionAdaptiveConfig) -> Self {
+        Self {
+            config,
+            prev_rates: Vec::new(),
+        }
+    }
+
+    /// Analyze motion vectors and generate shading rate image
+    fn analyze(
+        &mut self,
+        motion_vectors: &[Vec2<f32>],
+        width: u32,
+        height: u32,
+    ) -> ShadingRateImage {
+        let mut sri = ShadingRateImage::new(width, height);
+
+        for tile_y in 0..sri.height {
+            for tile_x in 0..sri.width {
+                let rate = self.analyze_tile(
+                    tile_x, tile_y,
+                    motion_vectors,
+                    width, height,
+                );
+
+                // Apply temporal smoothing
+                let smoothed_rate = self.smooth_rate(tile_x, tile_y, rate, &sri);
+                sri.set_rate(tile_x, tile_y, smoothed_rate);
+            }
+        }
+
+        // Store for next frame
+        self.prev_rates = sri.data.clone();
+
+        sri
+    }
+
+    /// Analyze a single tile for motion
+    fn analyze_tile(
+        &self,
+        tile_x: u32,
+        tile_y: u32,
+        motion_vectors: &[Vec2<f32>],
+        width: u32,
+        height: u32,
+    ) -> ShadingRate {
+        let start_x = tile_x * VRS_TILE_SIZE;
+        let start_y = tile_y * VRS_TILE_SIZE;
+        let end_x = (start_x + VRS_TILE_SIZE).min(width);
+        let end_y = (start_y + VRS_TILE_SIZE).min(height);
+
+        let mut max_velocity = 0.0f32;
+
+        for y in start_y..end_y {
+            for x in start_x..end_x {
+                let idx = (y * width + x) as usize;
+                let mv = motion_vectors[idx];
+                let velocity = (mv.x * mv.x + mv.y * mv.y).sqrt();
+                max_velocity = max_velocity.max(velocity);
+            }
+        }
+
+        self.velocity_to_rate(max_velocity)
+    }
+
+    /// Convert velocity to shading rate
+    fn velocity_to_rate(&self, velocity: f32) -> ShadingRate {
+        if velocity < self.config.velocity_threshold * 0.25 {
+            ShadingRate::Rate1x1
+        } else if velocity < self.config.velocity_threshold * 0.5 {
+            ShadingRate::Rate2x1
+        } else if velocity < self.config.velocity_threshold {
+            ShadingRate::Rate2x2
+        } else if velocity < self.config.velocity_threshold * 2.0 {
+            ShadingRate::Rate2x4
+        } else {
+            self.config.motion_max_rate
+        }
+    }
+
+    /// Apply temporal smoothing to rate
+    fn smooth_rate(
+        &self,
+        tile_x: u32,
+        tile_y: u32,
+        current: ShadingRate,
+        sri: &ShadingRateImage,
+    ) -> ShadingRate {
+        let idx = (tile_y * sri.width + tile_x) as usize;
+
+        if idx < self.prev_rates.len() {
+            let prev = self.prev_rates[idx];
+
+            // Smooth by preferring finer rate when transitioning
+            let prev_size = prev.pixel_count();
+            let curr_size = current.pixel_count();
+
+            if curr_size > prev_size {
+                // Going coarser - be conservative
+                let blend = (prev_size as f32 * self.config.temporal_smoothing
+                    + curr_size as f32 * (1.0 - self.config.temporal_smoothing)) as u32;
+
+                self.size_to_rate(blend)
+            } else {
+                // Going finer - respond quickly
+                current
+            }
+        } else {
+            current
+        }
+    }
+
+    /// Convert pixel count back to rate
+    fn size_to_rate(&self, size: u32) -> ShadingRate {
+        match size {
+            1 => ShadingRate::Rate1x1,
+            2 => ShadingRate::Rate2x1,
+            4 => ShadingRate::Rate2x2,
+            8 => ShadingRate::Rate2x4,
+            _ => ShadingRate::Rate4x4,
+        }
+    }
+}
+
+// =============================================================================
+// FOVEATED RENDERING (WP-069)
+// =============================================================================
+
+/// Foveated rendering configuration
+struct FoveatedConfig {
+    /// Enable foveated rendering
+    enabled: bool,
+    /// Inner region (full resolution) radius as fraction of screen
+    inner_radius: f32,
+    /// Middle region radius
+    middle_radius: f32,
+    /// Outer region radius
+    outer_radius: f32,
+    /// Shading rate for middle region
+    middle_rate: ShadingRate,
+    /// Shading rate for outer region
+    outer_rate: ShadingRate,
+    /// Shading rate for peripheral region
+    peripheral_rate: ShadingRate,
+    /// Enable gaze tracking
+    gaze_tracking: bool,
+}
+
+impl FoveatedConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            inner_radius: 0.2,
+            middle_radius: 0.4,
+            outer_radius: 0.7,
+            middle_rate: ShadingRate::Rate2x2,
+            outer_rate: ShadingRate::Rate4x2,
+            peripheral_rate: ShadingRate::Rate4x4,
+            gaze_tracking: false,
+        }
+    }
+
+    fn vr_optimized() -> Self {
+        Self {
+            enabled: true,
+            inner_radius: 0.15,
+            middle_radius: 0.35,
+            outer_radius: 0.6,
+            middle_rate: ShadingRate::Rate2x1,
+            outer_rate: ShadingRate::Rate2x2,
+            peripheral_rate: ShadingRate::Rate4x4,
+            gaze_tracking: true,
+        }
+    }
+}
+
+/// Foveated rendering VRS generator
+struct FoveatedVRS {
+    config: FoveatedConfig,
+    /// Current gaze point (normalized 0-1)
+    gaze_point: Vec2<f32>,
+    /// Gaze velocity for prediction
+    gaze_velocity: Vec2<f32>,
+    /// Previous gaze for velocity calculation
+    prev_gaze: Vec2<f32>,
+}
+
+impl FoveatedVRS {
+    fn new(config: FoveatedConfig) -> Self {
+        Self {
+            config,
+            gaze_point: Vec2::new(0.5, 0.5),
+            gaze_velocity: Vec2::zero(),
+            prev_gaze: Vec2::new(0.5, 0.5),
+        }
+    }
+
+    /// Update gaze point from eye tracker
+    fn update_gaze(&mut self, gaze: Vec2<f32>) {
+        self.gaze_velocity = gaze - self.prev_gaze;
+        self.prev_gaze = self.gaze_point;
+        self.gaze_point = gaze;
+    }
+
+    /// Generate foveated shading rate image
+    fn generate(
+        &self,
+        width: u32,
+        height: u32,
+    ) -> ShadingRateImage {
+        let mut sri = ShadingRateImage::new(width, height);
+
+        // Calculate gaze point in pixels
+        let gaze_x = self.gaze_point.x * width as f32;
+        let gaze_y = self.gaze_point.y * height as f32;
+
+        // Calculate radius thresholds in pixels
+        let diagonal = ((width * width + height * height) as f32).sqrt();
+        let inner_r = self.config.inner_radius * diagonal;
+        let middle_r = self.config.middle_radius * diagonal;
+        let outer_r = self.config.outer_radius * diagonal;
+
+        for tile_y in 0..sri.height {
+            for tile_x in 0..sri.width {
+                // Calculate tile center
+                let tile_center_x = (tile_x as f32 + 0.5) * VRS_TILE_SIZE as f32;
+                let tile_center_y = (tile_y as f32 + 0.5) * VRS_TILE_SIZE as f32;
+
+                // Calculate distance from gaze point
+                let dx = tile_center_x - gaze_x;
+                let dy = tile_center_y - gaze_y;
+                let dist = (dx * dx + dy * dy).sqrt();
+
+                let rate = self.distance_to_rate(dist, inner_r, middle_r, outer_r);
+                sri.set_rate(tile_x, tile_y, rate);
+            }
+        }
+
+        sri
+    }
+
+    /// Convert distance from gaze to shading rate
+    fn distance_to_rate(
+        &self,
+        dist: f32,
+        inner_r: f32,
+        middle_r: f32,
+        outer_r: f32,
+    ) -> ShadingRate {
+        if dist <= inner_r {
+            ShadingRate::Rate1x1
+        } else if dist <= middle_r {
+            self.config.middle_rate
+        } else if dist <= outer_r {
+            self.config.outer_rate
+        } else {
+            self.config.peripheral_rate
+        }
+    }
+
+    /// Generate predicted gaze-based SRI
+    fn generate_predicted(
+        &self,
+        width: u32,
+        height: u32,
+        prediction_frames: f32,
+    ) -> ShadingRateImage {
+        // Predict future gaze position
+        let predicted_gaze = Vec2::new(
+            (self.gaze_point.x + self.gaze_velocity.x * prediction_frames).clamp(0.0, 1.0),
+            (self.gaze_point.y + self.gaze_velocity.y * prediction_frames).clamp(0.0, 1.0),
+        );
+
+        let mut foveated = FoveatedVRS::new(self.config.clone());
+        foveated.gaze_point = predicted_gaze;
+        foveated.generate(width, height)
+    }
+}
+
+// =============================================================================
+// VR/AR VRS (WP-070)
+// =============================================================================
+
+/// VR headset configuration for VRS
+struct VRHeadsetConfig {
+    /// Horizontal field of view per eye (degrees)
+    horizontal_fov: f32,
+    /// Vertical field of view (degrees)
+    vertical_fov: f32,
+    /// Resolution per eye
+    resolution_per_eye: Vec2<u32>,
+    /// Inter-pupillary distance (mm)
+    ipd: f32,
+    /// Lens distortion K1 coefficient
+    lens_k1: f32,
+    /// Lens distortion K2 coefficient
+    lens_k2: f32,
+    /// Eye tracking available
+    has_eye_tracking: bool,
+}
+
+impl VRHeadsetConfig {
+    /// Quest 2 configuration
+    fn quest2() -> Self {
+        Self {
+            horizontal_fov: 97.0,
+            vertical_fov: 93.0,
+            resolution_per_eye: Vec2::new(1832, 1920),
+            ipd: 63.0,
+            lens_k1: 0.22,
+            lens_k2: 0.24,
+            has_eye_tracking: false,
+        }
+    }
+
+    /// Quest Pro configuration
+    fn quest_pro() -> Self {
+        Self {
+            horizontal_fov: 106.0,
+            vertical_fov: 96.0,
+            resolution_per_eye: Vec2::new(1800, 1920),
+            ipd: 64.0,
+            lens_k1: 0.20,
+            lens_k2: 0.22,
+            has_eye_tracking: true,
+        }
+    }
+
+    /// PSVR2 configuration
+    fn psvr2() -> Self {
+        Self {
+            horizontal_fov: 110.0,
+            vertical_fov: 110.0,
+            resolution_per_eye: Vec2::new(2000, 2040),
+            ipd: 63.0,
+            lens_k1: 0.18,
+            lens_k2: 0.20,
+            has_eye_tracking: true,
+        }
+    }
+}
+
+/// VR-optimized VRS generator
+struct VRVRS {
+    headset: VRHeadsetConfig,
+    foveated: FoveatedVRS,
+    /// Lens distortion map
+    distortion_map: Vec<f32>,
+}
+
+impl VRVRS {
+    fn new(headset: VRHeadsetConfig) -> Self {
+        let foveated_config = if headset.has_eye_tracking {
+            FoveatedConfig::vr_optimized()
+        } else {
+            FoveatedConfig::default()
+        };
+
+        let mut vrs = Self {
+            headset,
+            foveated: FoveatedVRS::new(foveated_config),
+            distortion_map: Vec::new(),
+        };
+
+        vrs.generate_distortion_map();
+        vrs
+    }
+
+    /// Generate lens distortion map for VRS optimization
+    fn generate_distortion_map(&mut self) {
+        let w = self.headset.resolution_per_eye.x;
+        let h = self.headset.resolution_per_eye.y;
+        self.distortion_map.clear();
+        self.distortion_map.resize((w * h) as usize, 1.0);
+
+        let cx = w as f32 / 2.0;
+        let cy = h as f32 / 2.0;
+        let max_r = (cx * cx + cy * cy).sqrt();
+
+        for y in 0..h {
+            for x in 0..w {
+                let dx = x as f32 - cx;
+                let dy = y as f32 - cy;
+                let r = (dx * dx + dy * dy).sqrt() / max_r;
+                let r2 = r * r;
+
+                // Barrel distortion factor
+                let distortion = 1.0 + self.headset.lens_k1 * r2 + self.headset.lens_k2 * r2 * r2;
+
+                let idx = (y * w + x) as usize;
+                self.distortion_map[idx] = distortion;
+            }
+        }
+    }
+
+    /// Generate VRS for single eye
+    fn generate_eye(
+        &self,
+        eye: Eye,
+        gaze: Option<Vec2<f32>>,
+    ) -> ShadingRateImage {
+        let w = self.headset.resolution_per_eye.x;
+        let h = self.headset.resolution_per_eye.y;
+
+        let mut sri = ShadingRateImage::new(w, h);
+
+        // Use gaze if available, otherwise center
+        let focus = gaze.unwrap_or(Vec2::new(0.5, 0.5));
+
+        for tile_y in 0..sri.height {
+            for tile_x in 0..sri.width {
+                let rate = self.calculate_vr_rate(tile_x, tile_y, focus, w, h);
+                sri.set_rate(tile_x, tile_y, rate);
+            }
+        }
+
+        sri
+    }
+
+    /// Calculate VR-optimized shading rate for tile
+    fn calculate_vr_rate(
+        &self,
+        tile_x: u32,
+        tile_y: u32,
+        focus: Vec2<f32>,
+        width: u32,
+        height: u32,
+    ) -> ShadingRate {
+        let tile_center_x = (tile_x as f32 + 0.5) * VRS_TILE_SIZE as f32;
+        let tile_center_y = (tile_y as f32 + 0.5) * VRS_TILE_SIZE as f32;
+
+        // Normalized position
+        let nx = tile_center_x / width as f32;
+        let ny = tile_center_y / height as f32;
+
+        // Distance from focus point
+        let dx = nx - focus.x;
+        let dy = ny - focus.y;
+        let focus_dist = (dx * dx + dy * dy).sqrt();
+
+        // Distance from center (for lens distortion consideration)
+        let cx = nx - 0.5;
+        let cy = ny - 0.5;
+        let center_dist = (cx * cx + cy * cy).sqrt();
+
+        // Get distortion factor at this position
+        let idx = (tile_center_y as u32 * width + tile_center_x as u32) as usize;
+        let distortion = self.distortion_map.get(idx).copied().unwrap_or(1.0);
+
+        // Combine focus distance and distortion
+        // Higher distortion means lower perceived resolution, so we can use coarser rate
+        let effective_dist = focus_dist + (distortion - 1.0) * 0.5;
+
+        if effective_dist < 0.15 {
+            ShadingRate::Rate1x1
+        } else if effective_dist < 0.3 {
+            ShadingRate::Rate2x1
+        } else if effective_dist < 0.5 {
+            ShadingRate::Rate2x2
+        } else if effective_dist < 0.7 {
+            ShadingRate::Rate2x4
+        } else {
+            ShadingRate::Rate4x4
+        }
+    }
+}
+
+/// Eye identifier
+#[derive(Clone, Copy)]
+enum Eye {
+    Left,
+    Right,
+}
+
+// =============================================================================
+// PERCEPTUAL VRS (WP-071)
+// =============================================================================
+
+/// Perceptual factors for VRS optimization
+struct PerceptualConfig {
+    /// Enable contrast sensitivity function
+    enable_csf: bool,
+    /// Temporal sensitivity (flicker detection)
+    enable_temporal: bool,
+    /// Color sensitivity
+    enable_color: bool,
+    /// Ambient light level (cd/m²)
+    ambient_luminance: f32,
+    /// Display peak luminance
+    display_luminance: f32,
+}
+
+impl PerceptualConfig {
+    fn default() -> Self {
+        Self {
+            enable_csf: true,
+            enable_temporal: true,
+            enable_color: true,
+            ambient_luminance: 5.0,
+            display_luminance: 500.0,
+        }
+    }
+}
+
+/// Perceptually-optimized VRS
+struct PerceptualVRS {
+    config: PerceptualConfig,
+    /// Spatial frequency map (cycles per degree)
+    frequency_map: Vec<f32>,
+    /// Contrast sensitivity function LUT
+    csf_lut: Vec<f32>,
+}
+
+impl PerceptualVRS {
+    fn new(config: PerceptualConfig) -> Self {
+        let mut vrs = Self {
+            config,
+            frequency_map: Vec::new(),
+            csf_lut: Self::generate_csf_lut(),
+        };
+        vrs
+    }
+
+    /// Generate contrast sensitivity function lookup table
+    fn generate_csf_lut() -> Vec<f32> {
+        let mut lut = Vec::with_capacity(256);
+
+        for i in 0..256 {
+            let f = i as f32;  // Spatial frequency in cycles per degree
+
+            // Barten CSF model
+            let a = 540.0 * (1.0 + 0.7 / 0.1).powf(-0.2);
+            let b = 0.3 * (1.0 + 100.0 / 0.1).powf(0.15);
+
+            let csf = a * f * (-b * f).exp() * (1.0 + 0.06 * (-b * f).exp()).sqrt();
+
+            lut.push(csf.max(0.0));
+        }
+
+        lut
+    }
+
+    /// Calculate required shading rate based on contrast sensitivity
+    fn calculate_perceptual_rate(
+        &self,
+        spatial_frequency: f32,
+        contrast: f32,
+        eccentricity: f32, // degrees from fovea
+    ) -> ShadingRate {
+        // Get CSF threshold
+        let csf_idx = (spatial_frequency.clamp(0.0, 255.0)) as usize;
+        let sensitivity = self.csf_lut[csf_idx];
+
+        // Eccentricity falloff (peripheral vision has lower acuity)
+        let eccentricity_factor = 1.0 / (1.0 + 0.033 * eccentricity + 0.00038 * eccentricity * eccentricity);
+
+        // Effective sensitivity
+        let effective_sensitivity = sensitivity * eccentricity_factor;
+
+        // Compare contrast to sensitivity
+        let visibility = contrast * effective_sensitivity;
+
+        // Map visibility to shading rate
+        if visibility > 10.0 {
+            ShadingRate::Rate1x1
+        } else if visibility > 5.0 {
+            ShadingRate::Rate2x1
+        } else if visibility > 2.0 {
+            ShadingRate::Rate2x2
+        } else if visibility > 1.0 {
+            ShadingRate::Rate2x4
+        } else {
+            ShadingRate::Rate4x4
+        }
+    }
+
+    /// Analyze image for perceptual VRS
+    fn analyze(
+        &self,
+        color: &[Vec4<f32>],
+        width: u32,
+        height: u32,
+        viewing_distance: f32, // in screen heights
+    ) -> ShadingRateImage {
+        let mut sri = ShadingRateImage::new(width, height);
+
+        // Calculate pixels per degree
+        let ppd = height as f32 * viewing_distance / 57.3; // tan(1°) ≈ 1/57.3
+
+        for tile_y in 0..sri.height {
+            for tile_x in 0..sri.width {
+                let rate = self.analyze_tile(
+                    tile_x, tile_y,
+                    color, width, height,
+                    ppd,
+                );
+                sri.set_rate(tile_x, tile_y, rate);
+            }
+        }
+
+        sri
+    }
+
+    /// Analyze a tile for perceptual metrics
+    fn analyze_tile(
+        &self,
+        tile_x: u32,
+        tile_y: u32,
+        color: &[Vec4<f32>],
+        width: u32,
+        height: u32,
+        ppd: f32,
+    ) -> ShadingRate {
+        let start_x = tile_x * VRS_TILE_SIZE;
+        let start_y = tile_y * VRS_TILE_SIZE;
+        let end_x = (start_x + VRS_TILE_SIZE).min(width);
+        let end_y = (start_y + VRS_TILE_SIZE).min(height);
+
+        // Calculate local contrast and frequency
+        let mut max_contrast = 0.0f32;
+        let mut max_frequency = 0.0f32;
+
+        for y in start_y..end_y {
+            for x in start_x..end_x {
+                if x > 0 && y > 0 && x < width - 1 && y < height - 1 {
+                    let idx = (y * width + x) as usize;
+                    let idx_left = (y * width + x - 1) as usize;
+                    let idx_right = (y * width + x + 1) as usize;
+                    let idx_up = ((y - 1) * width + x) as usize;
+                    let idx_down = ((y + 1) * width + x) as usize;
+
+                    let l = Self::rgb_to_luminance(color[idx].x, color[idx].y, color[idx].z);
+                    let l_left = Self::rgb_to_luminance(color[idx_left].x, color[idx_left].y, color[idx_left].z);
+                    let l_right = Self::rgb_to_luminance(color[idx_right].x, color[idx_right].y, color[idx_right].z);
+                    let l_up = Self::rgb_to_luminance(color[idx_up].x, color[idx_up].y, color[idx_up].z);
+                    let l_down = Self::rgb_to_luminance(color[idx_down].x, color[idx_down].y, color[idx_down].z);
+
+                    // Local contrast (Weber)
+                    let l_mean = (l_left + l_right + l_up + l_down) / 4.0;
+                    if l_mean > 0.001 {
+                        let contrast = (l - l_mean).abs() / l_mean;
+                        max_contrast = max_contrast.max(contrast);
+                    }
+
+                    // Estimate local frequency from gradient
+                    let gx = (l_right - l_left).abs();
+                    let gy = (l_up - l_down).abs();
+                    let gradient = (gx * gx + gy * gy).sqrt();
+
+                    // Convert gradient to spatial frequency (cycles per pixel)
+                    // then to cycles per degree
+                    let freq_cpp = gradient / (2.0 * std::f32::consts::PI);
+                    let freq_cpd = freq_cpp * ppd;
+                    max_frequency = max_frequency.max(freq_cpd);
+                }
+            }
+        }
+
+        // Calculate eccentricity (distance from screen center in degrees)
+        let tile_center_x = (tile_x as f32 + 0.5) * VRS_TILE_SIZE as f32;
+        let tile_center_y = (tile_y as f32 + 0.5) * VRS_TILE_SIZE as f32;
+        let dx = tile_center_x - width as f32 / 2.0;
+        let dy = tile_center_y - height as f32 / 2.0;
+        let dist_pixels = (dx * dx + dy * dy).sqrt();
+        let eccentricity = dist_pixels / ppd;
+
+        self.calculate_perceptual_rate(max_frequency, max_contrast, eccentricity)
+    }
+
+    fn rgb_to_luminance(r: f32, g: f32, b: f32) -> f32 {
+        0.2126 * r + 0.7152 * g + 0.0722 * b
+    }
+}
+
+// =============================================================================
+// VRS PIPELINE INTEGRATION
+// =============================================================================
+
+/// Complete VRS system combining all methods
+struct VRSSystem {
+    /// Content-adaptive analyzer
+    content_adaptive: ContentAdaptiveVRS,
+    /// Motion-adaptive analyzer
+    motion_adaptive: MotionAdaptiveVRS,
+    /// Foveated renderer
+    foveated: FoveatedVRS,
+    /// Perceptual analyzer
+    perceptual: PerceptualVRS,
+    /// VR support
+    vr: Option<VRVRS>,
+
+    /// Combined shading rate image
+    combined_sri: ShadingRateImage,
+
+    /// Combiner mode for content and motion
+    content_motion_combiner: VRSCombinerMode,
+    /// Combiner mode for foveated
+    foveated_combiner: VRSCombinerMode,
+
+    /// Statistics
+    stats: VRSStats,
+}
+
+/// VRS statistics
+struct VRSStats {
+    /// Average shading rate (1.0 = full rate)
+    average_rate: f32,
+    /// Percentage at 1x1
+    rate_1x1_percent: f32,
+    /// Percentage at 2x2
+    rate_2x2_percent: f32,
+    /// Percentage at 4x4
+    rate_4x4_percent: f32,
+    /// Estimated pixel shader savings
+    shader_savings: f32,
+}
+
+impl VRSSystem {
+    fn new(width: u32, height: u32) -> Self {
+        Self {
+            content_adaptive: ContentAdaptiveVRS::new(ContentAdaptiveConfig::default()),
+            motion_adaptive: MotionAdaptiveVRS::new(MotionAdaptiveConfig::default()),
+            foveated: FoveatedVRS::new(FoveatedConfig::default()),
+            perceptual: PerceptualVRS::new(PerceptualConfig::default()),
+            vr: None,
+            combined_sri: ShadingRateImage::new(width, height),
+            content_motion_combiner: VRSCombinerMode::Min,
+            foveated_combiner: VRSCombinerMode::Max,
+            stats: VRSStats::default(),
+        }
+    }
+
+    /// Enable VR mode
+    fn enable_vr(&mut self, headset: VRHeadsetConfig) {
+        self.vr = Some(VRVRS::new(headset));
+    }
+
+    /// Update shading rate image
+    fn update(
+        &mut self,
+        color: &[Vec4<f32>],
+        depth: &[f32],
+        motion: &[Vec2<f32>],
+        width: u32,
+        height: u32,
+        gaze: Option<Vec2<f32>>,
+    ) {
+        // Generate component SRIs
+        let content_sri = self.content_adaptive.analyze(color, depth, width, height);
+        let motion_sri = self.motion_adaptive.analyze(motion, width, height);
+
+        // Combine content and motion
+        let mut combined = ShadingRateImage::new(width, height);
+        for i in 0..combined.data.len() {
+            let content_rate = content_sri.data[i];
+            let motion_rate = motion_sri.data[i];
+            combined.data[i] = self.content_motion_combiner.combine(content_rate, motion_rate);
+        }
+
+        // Apply foveated rendering if gaze available
+        if let Some(gaze_point) = gaze {
+            self.foveated.update_gaze(gaze_point);
+            let foveated_sri = self.foveated.generate(width, height);
+
+            for i in 0..combined.data.len() {
+                combined.data[i] = self.foveated_combiner.combine(combined.data[i], foveated_sri.data[i]);
+            }
+        }
+
+        self.combined_sri = combined;
+        self.update_stats();
+    }
+
+    /// Update VR shading rate for single eye
+    fn update_vr(
+        &mut self,
+        eye: Eye,
+        gaze: Option<Vec2<f32>>,
+    ) {
+        if let Some(ref vr) = self.vr {
+            self.combined_sri = vr.generate_eye(eye, gaze);
+            self.update_stats();
+        }
+    }
+
+    /// Update statistics
+    fn update_stats(&mut self) {
+        let total = self.combined_sri.data.len() as f32;
+
+        let count_1x1 = self.combined_sri.data.iter()
+            .filter(|r| **r == ShadingRate::Rate1x1)
+            .count() as f32;
+        let count_2x2 = self.combined_sri.data.iter()
+            .filter(|r| **r == ShadingRate::Rate2x2)
+            .count() as f32;
+        let count_4x4 = self.combined_sri.data.iter()
+            .filter(|r| **r == ShadingRate::Rate4x4)
+            .count() as f32;
+
+        self.stats.rate_1x1_percent = count_1x1 / total * 100.0;
+        self.stats.rate_2x2_percent = count_2x2 / total * 100.0;
+        self.stats.rate_4x4_percent = count_4x4 / total * 100.0;
+
+        self.stats.average_rate = self.combined_sri.average_rate();
+        self.stats.shader_savings = 1.0 - self.stats.average_rate;
+    }
+
+    /// Get current shading rate image
+    fn get_sri(&self) -> &ShadingRateImage {
+        &self.combined_sri
+    }
+
+    /// Get statistics
+    fn get_stats(&self) -> &VRSStats {
+        &self.stats
+    }
+
+    /// Upload SRI to GPU
+    fn upload(&mut self, ctx: &RenderContext) {
+        self.combined_sri.upload(ctx);
+    }
+}
+
+impl VRSStats {
+    fn default() -> Self {
+        Self {
+            average_rate: 1.0,
+            rate_1x1_percent: 100.0,
+            rate_2x2_percent: 0.0,
+            rate_4x4_percent: 0.0,
+            shader_savings: 0.0,
+        }
+    }
+}
+
+// =============================================================================
+// DEBUG VISUALIZATION
+// =============================================================================
+
+/// VRS debug visualization
+struct VRSDebugger {
+    enabled: bool,
+    /// Color palette for shading rates
+    rate_colors: [Vec3<f32>; 7],
+}
+
+impl VRSDebugger {
+    fn new() -> Self {
+        Self {
+            enabled: false,
+            rate_colors: [
+                Vec3::new(0.0, 1.0, 0.0),   // 1x1 - Green
+                Vec3::new(0.5, 1.0, 0.0),   // 1x2 - Yellow-green
+                Vec3::new(0.75, 1.0, 0.0),  // 2x1 - Yellow-green
+                Vec3::new(1.0, 1.0, 0.0),   // 2x2 - Yellow
+                Vec3::new(1.0, 0.5, 0.0),   // 2x4 - Orange
+                Vec3::new(1.0, 0.25, 0.0),  // 4x2 - Orange-red
+                Vec3::new(1.0, 0.0, 0.0),   // 4x4 - Red
+            ],
+        }
+    }
+
+    /// Generate debug overlay texture
+    fn generate_overlay(
+        &self,
+        sri: &ShadingRateImage,
+        width: u32,
+        height: u32,
+    ) -> Vec<Vec4<f32>> {
+        let mut overlay = vec![Vec4::new(0.0, 0.0, 0.0, 0.0); (width * height) as usize];
+
+        for y in 0..height {
+            for x in 0..width {
+                let tile_x = x / VRS_TILE_SIZE;
+                let tile_y = y / VRS_TILE_SIZE;
+                let rate = sri.get_rate(tile_x, tile_y);
+
+                let color = self.rate_colors[rate as usize];
+                let idx = (y * width + x) as usize;
+
+                // Draw tile borders
+                let is_border = (x % VRS_TILE_SIZE == 0) || (y % VRS_TILE_SIZE == 0);
+                let alpha = if is_border { 0.8 } else { 0.3 };
+
+                overlay[idx] = Vec4::new(color.x, color.y, color.z, alpha);
+            }
+        }
+
+        overlay
+    }
+
+    /// Get color for shading rate
+    fn get_rate_color(&self, rate: ShadingRate) -> Vec3<f32> {
+        self.rate_colors[rate as usize]
+    }
+}
+
+// =============================================================================
+// TESTS
+// =============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_shading_rate_properties() {
+        assert_eq!(ShadingRate::Rate1x1.pixel_count(), 1);
+        assert_eq!(ShadingRate::Rate2x2.pixel_count(), 4);
+        assert_eq!(ShadingRate::Rate4x4.pixel_count(), 16);
+
+        assert_eq!(ShadingRate::Rate1x1.reduction_factor(), 1.0);
+        assert_eq!(ShadingRate::Rate2x2.reduction_factor(), 0.25);
+        assert_eq!(ShadingRate::Rate4x4.reduction_factor(), 0.0625);
+    }
+
+    #[test]
+    fn test_rate_combining() {
+        let fine = ShadingRate::Rate1x1;
+        let coarse = ShadingRate::Rate4x4;
+
+        assert_eq!(ShadingRate::combine_finer(fine, coarse), fine);
+        assert_eq!(ShadingRate::combine_coarser(fine, coarse), coarse);
+    }
+
+    #[test]
+    fn test_combiner_modes() {
+        let per_draw = ShadingRate::Rate2x2;
+        let per_tile = ShadingRate::Rate4x4;
+
+        assert_eq!(VRSCombinerMode::Passthrough.combine(per_draw, per_tile), per_draw);
+        assert_eq!(VRSCombinerMode::Override.combine(per_draw, per_tile), per_tile);
+        assert_eq!(VRSCombinerMode::Min.combine(per_draw, per_tile), per_draw);
+        assert_eq!(VRSCombinerMode::Max.combine(per_draw, per_tile), per_tile);
+    }
+
+    #[test]
+    fn test_shading_rate_image() {
+        let mut sri = ShadingRateImage::new(1920, 1080);
+
+        // Check dimensions
+        let expected_width = (1920 + VRS_TILE_SIZE - 1) / VRS_TILE_SIZE;
+        let expected_height = (1080 + VRS_TILE_SIZE - 1) / VRS_TILE_SIZE;
+        assert_eq!(sri.width, expected_width);
+        assert_eq!(sri.height, expected_height);
+
+        // Test set/get
+        sri.set_rate(5, 5, ShadingRate::Rate2x2);
+        assert_eq!(sri.get_rate(5, 5), ShadingRate::Rate2x2);
+
+        // Test fill
+        sri.fill(ShadingRate::Rate4x4);
+        assert_eq!(sri.get_rate(0, 0), ShadingRate::Rate4x4);
+        assert_eq!(sri.get_rate(10, 10), ShadingRate::Rate4x4);
+    }
+
+    #[test]
+    fn test_pixel_to_tile() {
+        let sri = ShadingRateImage::new(1920, 1080);
+
+        // Pixel at (0, 0) should be in tile (0, 0)
+        assert_eq!(sri.get_rate_at_pixel(0, 0), ShadingRate::Rate1x1);
+
+        // Pixel at (VRS_TILE_SIZE, 0) should be in tile (1, 0)
+        // Both should return Rate1x1 since that's the default
+        assert_eq!(sri.get_rate_at_pixel(VRS_TILE_SIZE, 0), ShadingRate::Rate1x1);
+    }
+
+    #[test]
+    fn test_content_adaptive_luminance() {
+        let lum = ContentAdaptiveVRS::rgb_to_luminance(1.0, 1.0, 1.0);
+        assert!((lum - 1.0).abs() < 0.01);
+
+        let lum_red = ContentAdaptiveVRS::rgb_to_luminance(1.0, 0.0, 0.0);
+        assert!((lum_red - 0.2126).abs() < 0.01);
+
+        let lum_green = ContentAdaptiveVRS::rgb_to_luminance(0.0, 1.0, 0.0);
+        assert!((lum_green - 0.7152).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_foveated_generation() {
+        let config = FoveatedConfig::default();
+        let foveated = FoveatedVRS::new(config);
+
+        let sri = foveated.generate(1920, 1080);
+
+        // Center should be Rate1x1
+        let center_x = sri.width / 2;
+        let center_y = sri.height / 2;
+        assert_eq!(sri.get_rate(center_x, center_y), ShadingRate::Rate1x1);
+
+        // Corners should be coarser
+        let corner_rate = sri.get_rate(0, 0);
+        assert!(corner_rate.pixel_count() >= 4);
+    }
+
+    #[test]
+    fn test_gaze_update() {
+        let mut foveated = FoveatedVRS::new(FoveatedConfig::default());
+
+        foveated.update_gaze(Vec2::new(0.3, 0.4));
+        assert_eq!(foveated.gaze_point, Vec2::new(0.3, 0.4));
+
+        foveated.update_gaze(Vec2::new(0.5, 0.5));
+        assert!((foveated.gaze_velocity.x - 0.2).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_motion_velocity_to_rate() {
+        let config = MotionAdaptiveConfig::default();
+        let motion = MotionAdaptiveVRS::new(config);
+
+        // Zero velocity = fine rate
+        let rate = motion.velocity_to_rate(0.0);
+        assert_eq!(rate, ShadingRate::Rate1x1);
+
+        // High velocity = coarse rate
+        let rate = motion.velocity_to_rate(20.0);
+        assert!(rate.pixel_count() >= 4);
+    }
+
+    #[test]
+    fn test_vr_headset_configs() {
+        let quest2 = VRHeadsetConfig::quest2();
+        assert!(quest2.horizontal_fov > 90.0);
+        assert!(!quest2.has_eye_tracking);
+
+        let quest_pro = VRHeadsetConfig::quest_pro();
+        assert!(quest_pro.has_eye_tracking);
+    }
+
+    #[test]
+    fn test_csf_lut() {
+        let lut = PerceptualVRS::generate_csf_lut();
+        assert_eq!(lut.len(), 256);
+
+        // CSF should peak around 2-5 cpd
+        let peak_range = &lut[2..10];
+        let max_val = peak_range.iter().fold(0.0f32, |a, &b| a.max(b));
+        assert!(max_val > lut[0]);
+        assert!(max_val > lut[50]);
+    }
+
+    #[test]
+    fn test_vrs_stats() {
+        let mut stats = VRSStats::default();
+        assert_eq!(stats.average_rate, 1.0);
+        assert_eq!(stats.shader_savings, 0.0);
+    }
+
+    #[test]
+    fn test_debug_colors() {
+        let debugger = VRSDebugger::new();
+
+        // 1x1 should be green
+        let color = debugger.get_rate_color(ShadingRate::Rate1x1);
+        assert_eq!(color, Vec3::new(0.0, 1.0, 0.0));
+
+        // 4x4 should be red
+        let color = debugger.get_rate_color(ShadingRate::Rate4x4);
+        assert_eq!(color, Vec3::new(1.0, 0.0, 0.0));
+    }
+
+    #[test]
+    fn test_average_rate() {
+        let mut sri = ShadingRateImage::new(64, 64);
+
+        // All 1x1 should be 1.0
+        sri.fill(ShadingRate::Rate1x1);
+        assert!((sri.average_rate() - 1.0).abs() < 0.01);
+
+        // All 4x4 should be 0.0625
+        sri.fill(ShadingRate::Rate4x4);
+        assert!((sri.average_rate() - 0.0625).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_vrs_system_creation() {
+        let vrs = VRSSystem::new(1920, 1080);
+        assert!((vrs.stats.average_rate - 1.0).abs() < 0.01);
+    }
+}

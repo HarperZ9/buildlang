@@ -1,0 +1,743 @@
+// BUILD Standard Library - Logging Module
+// Copyright (c) 2024 BUILD Language Project
+// Structured logging with multiple outputs and formatting
+
+module foundation::logging;
+
+use foundation::core::*;
+use foundation::time::{DateTime, SystemTime};
+use foundation::io_extended::*;
+use foundation::fs::{File, OpenOptions};
+use foundation::serialization::json;
+
+// ============================================================================
+// LOG LEVELS
+// ============================================================================
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Level {
+    Trace = 0,
+    Debug = 1,
+    Info = 2,
+    Warn = 3,
+    Error = 4,
+    Fatal = 5,
+}
+
+impl Level {
+    pub fn as_str(self: &Self) -> &'static str {
+        match self {
+            Level::Trace => "TRACE",
+            Level::Debug => "DEBUG",
+            Level::Info => "INFO",
+            Level::Warn => "WARN",
+            Level::Error => "ERROR",
+            Level::Fatal => "FATAL",
+        }
+    }
+
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s.to_uppercase().as_str() {
+            "TRACE" => Some(Level::Trace),
+            "DEBUG" => Some(Level::Debug),
+            "INFO" => Some(Level::Info),
+            "WARN" | "WARNING" => Some(Level::Warn),
+            "ERROR" => Some(Level::Error),
+            "FATAL" | "CRITICAL" => Some(Level::Fatal),
+            _ => None,
+        }
+    }
+
+    pub fn color_code(self: &Self) -> &'static str {
+        match self {
+            Level::Trace => "\x1b[37m",   // White
+            Level::Debug => "\x1b[36m",   // Cyan
+            Level::Info => "\x1b[32m",    // Green
+            Level::Warn => "\x1b[33m",    // Yellow
+            Level::Error => "\x1b[31m",   // Red
+            Level::Fatal => "\x1b[35m",   // Magenta
+        }
+    }
+}
+
+// ============================================================================
+// LOG RECORD
+// ============================================================================
+
+/// A single log record
+#[derive(Debug, Clone)]
+pub struct Record {
+    pub level: Level,
+    pub message: String,
+    pub target: String,
+    pub file: Option<String>,
+    pub line: Option<u32>,
+    pub timestamp: DateTime,
+    pub fields: Vec<(String, Value)>,
+}
+
+impl Record {
+    pub fn new(level: Level, message: String) -> Self {
+        Record {
+            level,
+            message,
+            target: String::new(),
+            file: None,
+            line: None,
+            timestamp: DateTime::now_utc(),
+            fields: Vec::new(),
+        }
+    }
+
+    pub fn target(mut self: Self, target: &str) -> Self {
+        self.target = target.to_string(); self
+    }
+
+    pub fn file(mut self: Self, file: &str) -> Self {
+        self.file = Some(file.to_string()); self
+    }
+
+    pub fn line(mut self: Self, line: u32) -> Self {
+        self.line = Some(line); self
+    }
+
+    pub fn field<V: Into<Value>>(mut self: Self, key: &str, value: V) -> Self {
+        self.fields.push((key.to_string(), value.into())); self
+    }
+}
+
+/// Dynamic value for structured logging
+#[derive(Debug, Clone)]
+pub enum Value {
+    Null,
+    Bool(bool),
+    Int(i64),
+    Float(f64),
+    String(String),
+    Array(Vec<Value>),
+    Object(Vec<(String, Value)>),
+}
+
+impl From<bool> for Value { fn from(v: bool) -> Self { Value::Bool(v) } }
+impl From<i32> for Value { fn from(v: i32) -> Self { Value::Int(v as i64) } }
+impl From<i64> for Value { fn from(v: i64) -> Self { Value::Int(v) } }
+impl From<u32> for Value { fn from(v: u32) -> Self { Value::Int(v as i64) } }
+impl From<u64> for Value { fn from(v: u64) -> Self { Value::Int(v as i64) } }
+impl From<f32> for Value { fn from(v: f32) -> Self { Value::Float(v as f64) } }
+impl From<f64> for Value { fn from(v: f64) -> Self { Value::Float(v) } }
+impl From<&str> for Value { fn from(v: &str) -> Self { Value::String(v.to_string()) } }
+impl From<String> for Value { fn from(v: String) -> Self { Value::String(v) } }
+
+impl Value {
+    pub fn to_json(self: &Self) -> String {
+        match self {
+            Value::Null => "null".to_string(),
+            Value::Bool(b) => if *b { "true" } else { "false" }.to_string(),
+            Value::Int(i) => i.to_string(),
+            Value::Float(f) => f.to_string(),
+            Value::String(s) => format!("\"{}\"", s.replace('\"', "\\\"")),
+            Value::Array(arr) => {
+                let items: Vec<_> = arr.iter().map(|v| v.to_json()).collect();
+                format!("[{}]", items.join(","))
+            }
+            Value::Object(obj) => {
+                let items: Vec<_> = obj.iter()
+                    .map(|(k, v)| format!("\"{}\":{}", k, v.to_json()))
+                    .collect();
+                format!("{{{}}}", items.join(","))
+            }
+        }
+    }
+}
+
+// ============================================================================
+// FORMATTERS
+// ============================================================================
+
+/// Log record formatter trait
+pub trait Formatter: Send + Sync {
+    fn format(self: &Self, record: &Record) -> String;
+}
+
+/// Simple text formatter
+pub struct TextFormatter {
+    include_timestamp: bool,
+    include_level: bool,
+    include_target: bool,
+    include_location: bool,
+    color: bool,
+}
+
+impl TextFormatter {
+    pub fn new() -> Self {
+        TextFormatter {
+            include_timestamp: true,
+            include_level: true,
+            include_target: true,
+            include_location: false,
+            color: false,
+        }
+    }
+
+    pub fn with_color(mut self: Self) -> Self { self.color = true; self }
+    pub fn with_location(mut self: Self) -> Self { self.include_location = true; self }
+    pub fn without_timestamp(mut self: Self) -> Self { self.include_timestamp = false; self }
+}
+
+impl Formatter for TextFormatter {
+    fn format(self: &Self, record: &Record) -> String {
+        let mut parts = Vec::new();
+
+        if self.include_timestamp {
+            parts.push(record.timestamp.format("%Y-%m-%d %H:%M:%S%.3f"));
+        }
+
+        if self.include_level {
+            let level_str = if self.color {
+                format!("{}{}{}",
+                    record.level.color_code(),
+                    record.level.as_str(),
+                    "\x1b[0m"
+                )
+            } else {
+                format!("[{:5}]", record.level.as_str())
+            };
+            parts.push(level_str);
+        }
+
+        if self.include_target && !record.target.is_empty() {
+            parts.push(format!("[{}]", record.target));
+        }
+
+        if self.include_location {
+            if let (Some(ref file), Some(line)) = (&record.file, record.line) {
+                parts.push(format!("{}:{}", file, line));
+            }
+        }
+
+        parts.push(record.message.clone());
+
+        if !record.fields.is_empty() {
+            let fields: Vec<_> = record.fields.iter()
+                .map(|(k, v)| format!("{}={}", k, v.to_json()))
+                .collect();
+            parts.push(format!("{{{}}}", fields.join(", ")));
+        }
+
+        parts.join(" ")
+    }
+}
+
+/// JSON formatter for structured logging
+pub struct JsonFormatter {
+    pretty: bool,
+}
+
+impl JsonFormatter {
+    pub fn new() -> Self { JsonFormatter { pretty: false } }
+    pub fn pretty(mut self: Self) -> Self { self.pretty = true; self }
+}
+
+impl Formatter for JsonFormatter {
+    fn format(self: &Self, record: &Record) -> String {
+        let mut obj = Vec::new();
+
+        obj.push(("timestamp".to_string(), Value::String(record.timestamp.to_iso8601())));
+        obj.push(("level".to_string(), Value::String(record.level.as_str().to_string())));
+        obj.push(("message".to_string(), Value::String(record.message.clone())));
+
+        if !record.target.is_empty() {
+            obj.push(("target".to_string(), Value::String(record.target.clone())));
+        }
+
+        if let Some(ref file) = record.file {
+            obj.push(("file".to_string(), Value::String(file.clone())));
+        }
+
+        if let Some(line) = record.line {
+            obj.push(("line".to_string(), Value::Int(line as i64)));
+        }
+
+        for (k, v) in &record.fields {
+            obj.push((k.clone(), v.clone()));
+        }
+
+        Value::Object(obj).to_json()
+    }
+}
+
+/// Logfmt formatter (key=value pairs)
+pub struct LogfmtFormatter;
+
+impl Formatter for LogfmtFormatter {
+    fn format(self: &Self, record: &Record) -> String {
+        let mut parts = Vec::new();
+
+        parts.push(format!("time=\"{}\"", record.timestamp.to_iso8601()));
+        parts.push(format!("level={}", record.level.as_str().to_lowercase()));
+        parts.push(format!("msg=\"{}\"", record.message.replace('\"', "\\\"")));
+
+        if !record.target.is_empty() {
+            parts.push(format!("target={}", record.target));
+        }
+
+        for (k, v) in &record.fields {
+            parts.push(format!("{}={}", k, v.to_json()));
+        }
+
+        parts.join(" ")
+    }
+}
+
+// ============================================================================
+// OUTPUTS (APPENDERS)
+// ============================================================================
+
+/// Log output trait
+pub trait Output: Send + Sync {
+    fn write(self: &mut Self, formatted: &str);
+    fn flush(self: &mut Self);
+}
+
+/// Console output (stdout/stderr)
+pub struct ConsoleOutput {
+    use_stderr: bool,
+    stderr_level: Level,
+}
+
+impl ConsoleOutput {
+    pub fn stdout() -> Self {
+        ConsoleOutput { use_stderr: false, stderr_level: Level::Error }
+    }
+
+    pub fn stderr() -> Self {
+        ConsoleOutput { use_stderr: true, stderr_level: Level::Trace }
+    }
+
+    pub fn split_at(level: Level) -> Self {
+        ConsoleOutput { use_stderr: false, stderr_level: level }
+    }
+}
+
+impl Output for ConsoleOutput {
+    fn write(self: &mut Self, formatted: &str) {
+        if self.use_stderr {
+            eprintln!("{}", formatted);
+        } else {
+            println!("{}", formatted);
+        }
+    }
+
+    fn flush(self: &mut Self) {
+        // Stdout/stderr auto-flush on newline
+    }
+}
+
+/// File output with rotation
+pub struct FileOutput {
+    file: File,
+    path: String,
+    max_size: usize,
+    max_backups: usize,
+    current_size: usize,
+}
+
+impl FileOutput {
+    pub fn new(path: &str) -> Result<Self, IoError> {
+        let file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)?;
+
+        Ok(FileOutput {
+            file,
+            path: path.to_string(),
+            max_size: 10 * 1024 * 1024, // 10 MB
+            max_backups: 5,
+            current_size: 0,
+        })
+    }
+
+    pub fn max_size(mut self: Self, bytes: usize) -> Self {
+        self.max_size = bytes; self
+    }
+
+    pub fn max_backups(mut self: Self, n: usize) -> Self {
+        self.max_backups = n; self
+    }
+
+    fn rotate(self: &mut Self) {
+        // Rotate existing backups
+        for i in (1..self.max_backups).rev() {
+            let old = format!("{}.{}", self.path, i);
+            let new = format!("{}.{}", self.path, i + 1);
+            let _ = std::fs::rename(&old, &new);
+        }
+
+        // Move current log to .1
+        let backup = format!("{}.1", self.path);
+        let _ = std::fs::rename(&self.path, &backup);
+
+        // Create new log file
+        if let Ok(f) = OpenOptions::new().create(true).write(true).open(&self.path) {
+            self.file = f;
+            self.current_size = 0;
+        }
+    }
+}
+
+impl Output for FileOutput {
+    fn write(self: &mut Self, formatted: &str) {
+        let bytes = formatted.as_bytes();
+
+        if self.current_size + bytes.len() > self.max_size {
+            self.rotate();
+        }
+
+        if let Ok(n) = self.file.write(bytes) {
+            self.current_size += n;
+        }
+        let _ = self.file.write(b"\n");
+        self.current_size += 1;
+    }
+
+    fn flush(self: &mut Self) {
+        let _ = self.file.flush();
+    }
+}
+
+/// Memory buffer output (for testing)
+pub struct MemoryOutput {
+    buffer: std::sync::Mutex<Vec<String>>,
+    max_entries: usize,
+}
+
+impl MemoryOutput {
+    pub fn new() -> Self {
+        MemoryOutput {
+            buffer: std::sync::Mutex::new(Vec::new()),
+            max_entries: 10000,
+        }
+    }
+
+    pub fn entries(self: &Self) -> Vec<String> {
+        self.buffer.lock().unwrap().clone()
+    }
+
+    pub fn clear(self: &Self) {
+        self.buffer.lock().unwrap().clear();
+    }
+}
+
+impl Output for MemoryOutput {
+    fn write(self: &mut Self, formatted: &str) {
+        let mut buf = self.buffer.lock().unwrap();
+        if buf.len() >= self.max_entries {
+            buf.remove(0);
+        }
+        buf.push(formatted.to_string());
+    }
+
+    fn flush(self: &mut Self) {}
+}
+
+// ============================================================================
+// LOGGER
+// ============================================================================
+
+/// Logger configuration
+pub struct LoggerConfig {
+    level: Level,
+    outputs: Vec<(Box<dyn Output>, Box<dyn Formatter>)>,
+    target_levels: HashMap<String, Level>,
+}
+
+impl LoggerConfig {
+    pub fn new() -> Self {
+        LoggerConfig {
+            level: Level::Info,
+            outputs: Vec::new(),
+            target_levels: HashMap::new(),
+        }
+    }
+
+    pub fn level(mut self: Self, level: Level) -> Self {
+        self.level = level; self
+    }
+
+    pub fn add_output<O, F>(mut self: Self, output: O, formatter: F) -> Self
+    where O: Output + 'static, F: Formatter + 'static {
+        self.outputs.push((Box::new(output), Box::new(formatter))); self
+    }
+
+    pub fn target_level(mut self: Self, target: &str, level: Level) -> Self {
+        self.target_levels.insert(target.to_string(), level); self
+    }
+}
+
+/// The main logger
+pub struct Logger {
+    config: std::sync::RwLock<LoggerConfig>,
+}
+
+impl Logger {
+    pub fn new(config: LoggerConfig) -> Self {
+        Logger { config: std::sync::RwLock::new(config) }
+    }
+
+    pub fn log(self: &Self, record: Record) {
+        let config = self.config.read().unwrap();
+
+        // Check level filtering
+        let min_level = config.target_levels.get(&record.target)
+            .copied()
+            .unwrap_or(config.level);
+
+        if record.level < min_level { return; }
+
+        // Write to all outputs
+        for (output, formatter) in &config.outputs {
+            let formatted = formatter.format(&record);
+            // output.write(&formatted);  // Needs mutable access
+        }
+    }
+
+    pub fn trace(self: &Self, message: &str) {
+        self.log(Record::new(Level::Trace, message.to_string()));
+    }
+
+    pub fn debug(self: &Self, message: &str) {
+        self.log(Record::new(Level::Debug, message.to_string()));
+    }
+
+    pub fn info(self: &Self, message: &str) {
+        self.log(Record::new(Level::Info, message.to_string()));
+    }
+
+    pub fn warn(self: &Self, message: &str) {
+        self.log(Record::new(Level::Warn, message.to_string()));
+    }
+
+    pub fn error(self: &Self, message: &str) {
+        self.log(Record::new(Level::Error, message.to_string()));
+    }
+
+    pub fn fatal(self: &Self, message: &str) {
+        self.log(Record::new(Level::Fatal, message.to_string()));
+    }
+}
+
+// ============================================================================
+// GLOBAL LOGGER
+// ============================================================================
+
+static GLOBAL_LOGGER: std::sync::OnceLock<Logger> = std::sync::OnceLock::new();
+
+/// Initialize the global logger
+pub fn init(config: LoggerConfig) {
+    let _ = GLOBAL_LOGGER.set(Logger::new(config));
+}
+
+/// Initialize with default configuration
+pub fn init_default() {
+    init(LoggerConfig::new()
+        .level(Level::Info)
+        .add_output(ConsoleOutput::stdout(), TextFormatter::new().with_color()));
+}
+
+/// Get the global logger
+pub fn logger() -> &'static Logger {
+    GLOBAL_LOGGER.get().expect("Logger not initialized")
+}
+
+// Convenience macros (as functions in Build)
+pub fn trace(message: &str) { if let Some(l) = GLOBAL_LOGGER.get() { l.trace(message); } }
+pub fn debug(message: &str) { if let Some(l) = GLOBAL_LOGGER.get() { l.debug(message); } }
+pub fn info(message: &str) { if let Some(l) = GLOBAL_LOGGER.get() { l.info(message); } }
+pub fn warn(message: &str) { if let Some(l) = GLOBAL_LOGGER.get() { l.warn(message); } }
+pub fn error(message: &str) { if let Some(l) = GLOBAL_LOGGER.get() { l.error(message); } }
+pub fn fatal(message: &str) { if let Some(l) = GLOBAL_LOGGER.get() { l.fatal(message); } }
+
+// ============================================================================
+// STRUCTURED LOGGING BUILDER
+// ============================================================================
+
+/// Builder for structured log records
+pub struct LogBuilder {
+    record: Record,
+}
+
+impl LogBuilder {
+    pub fn new(level: Level, message: &str) -> Self {
+        LogBuilder { record: Record::new(level, message.to_string()) }
+    }
+
+    pub fn target(mut self: Self, target: &str) -> Self {
+        self.record = self.record.target(target); self
+    }
+
+    pub fn field<V: Into<Value>>(mut self: Self, key: &str, value: V) -> Self {
+        self.record = self.record.field(key, value); self
+    }
+
+    pub fn file(mut self: Self, file: &str) -> Self {
+        self.record = self.record.file(file); self
+    }
+
+    pub fn line(mut self: Self, line: u32) -> Self {
+        self.record = self.record.line(line); self
+    }
+
+    pub fn log(self: Self) {
+        if let Some(l) = GLOBAL_LOGGER.get() { l.log(self.record); }
+    }
+}
+
+// Convenience builders
+pub fn trace_with(message: &str) -> LogBuilder { LogBuilder::new(Level::Trace, message) }
+pub fn debug_with(message: &str) -> LogBuilder { LogBuilder::new(Level::Debug, message) }
+pub fn info_with(message: &str) -> LogBuilder { LogBuilder::new(Level::Info, message) }
+pub fn warn_with(message: &str) -> LogBuilder { LogBuilder::new(Level::Warn, message) }
+pub fn error_with(message: &str) -> LogBuilder { LogBuilder::new(Level::Error, message) }
+
+// ============================================================================
+// SPAN-BASED TRACING
+// ============================================================================
+
+/// A span for distributed tracing
+pub struct Span {
+    name: String,
+    trace_id: u128,
+    span_id: u64,
+    parent_span_id: Option<u64>,
+    start_time: Instant,
+    fields: Vec<(String, Value)>,
+}
+
+impl Span {
+    pub fn new(name: &str) -> Self {
+        Span {
+            name: name.to_string(),
+            trace_id: generate_trace_id(),
+            span_id: generate_span_id(),
+            parent_span_id: None,
+            start_time: Instant::now(),
+            fields: Vec::new(),
+        }
+    }
+
+    pub fn child(self: &Self, name: &str) -> Span {
+        Span {
+            name: name.to_string(),
+            trace_id: self.trace_id,
+            span_id: generate_span_id(),
+            parent_span_id: Some(self.span_id),
+            start_time: Instant::now(),
+            fields: Vec::new(),
+        }
+    }
+
+    pub fn field<V: Into<Value>>(mut self: Self, key: &str, value: V) -> Self {
+        self.fields.push((key.to_string(), value.into())); self
+    }
+
+    pub fn enter(self: &Self) {
+        info_with(&format!("enter span: {}", self.name))
+            .field("trace_id", format!("{:032x}", self.trace_id))
+            .field("span_id", format!("{:016x}", self.span_id))
+            .log();
+    }
+
+    pub fn exit(self: &Self) {
+        let duration = self.start_time.elapsed();
+        info_with(&format!("exit span: {}", self.name))
+            .field("trace_id", format!("{:032x}", self.trace_id))
+            .field("span_id", format!("{:016x}", self.span_id))
+            .field("duration_ms", duration.as_millis() as i64)
+            .log();
+    }
+}
+
+fn generate_trace_id() -> u128 {
+    use foundation::crypto::random_bytes;
+    let bytes = random_bytes(16);
+    u128::from_le_bytes(bytes.try_into().unwrap())
+}
+
+fn generate_span_id() -> u64 {
+    use foundation::crypto::random_bytes;
+    let bytes = random_bytes(8);
+    u64::from_le_bytes(bytes.try_into().unwrap())
+}
+
+/// Guard that logs span exit on drop
+pub struct SpanGuard {
+    span: Span,
+}
+
+impl SpanGuard {
+    pub fn new(name: &str) -> Self {
+        let span = Span::new(name);
+        span.enter();
+        SpanGuard { span }
+    }
+}
+
+impl Drop for SpanGuard {
+    fn drop(self: &mut Self) {
+        self.span.exit();
+    }
+}
+
+// ============================================================================
+// TESTS
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_level_ordering() {
+        assert!(Level::Trace < Level::Debug);
+        assert!(Level::Debug < Level::Info);
+        assert!(Level::Info < Level::Warn);
+        assert!(Level::Warn < Level::Error);
+        assert!(Level::Error < Level::Fatal);
+    }
+
+    #[test]
+    fn test_text_formatter() {
+        let formatter = TextFormatter::new();
+        let record = Record::new(Level::Info, "test message".to_string())
+            .target("test");
+        let output = formatter.format(&record);
+        assert!(output.contains("INFO"));
+        assert!(output.contains("test message"));
+    }
+
+    #[test]
+    fn test_json_formatter() {
+        let formatter = JsonFormatter::new();
+        let record = Record::new(Level::Error, "error occurred".to_string())
+            .field("code", 500);
+        let output = formatter.format(&record);
+        assert!(output.contains("\"level\":\"ERROR\""));
+        assert!(output.contains("\"code\":500"));
+    }
+
+    #[test]
+    fn test_memory_output() {
+        let mut output = MemoryOutput::new();
+        output.write("test entry");
+        assert_eq!(output.entries().len(), 1);
+    }
+
+    #[test]
+    fn test_value_json() {
+        assert_eq!(Value::Null.to_json(), "null");
+        assert_eq!(Value::Bool(true).to_json(), "true");
+        assert_eq!(Value::Int(42).to_json(), "42");
+        assert_eq!(Value::String("hello".into()).to_json(), "\"hello\"");
+    }
+}

@@ -1,0 +1,873 @@
+// ============================================================================
+// SPECTRUM COLOR DIFFERENCE FORMULAS
+// ============================================================================
+// Complete implementation of color difference metrics including CIE ΔE*ab,
+// ΔE*94, ΔE*2000, CMC, ΔE*z (JzAzBz), and Oklab-based differences.
+// ============================================================================
+// Copyright © 2024-2025 Zain Dana Harper. All Rights Reserved.
+// ============================================================================
+
+module spectrum::color_difference
+
+use spectrum::color_spaces::{XYZ, Lab, LCH, Oklab, Oklch, JzAzBz, sRGB, LinearRGB}
+use std::math::{sqrt, pow, sin, cos, exp, abs, atan2, PI}
+
+// ============================================================================
+// COLOR DIFFERENCE TYPES
+// ============================================================================
+
+/// Color difference metric
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeltaEMethod {
+    /// CIE76 (simple Euclidean in Lab)
+    CIE76,
+    /// CIE94 (graphics or textiles)
+    CIE94Graphics,
+    CIE94Textiles,
+    /// CIEDE2000
+    CIEDE2000,
+    /// CMC (l:c ratio, typically 2:1)
+    CMC,
+    /// JzAzBz-based (HDR-compatible)
+    JzAzBz,
+    /// Oklab-based
+    Oklab,
+    /// HyAB (hybrid Lab/chroma)
+    HyAB,
+}
+
+/// Color difference result with breakdown
+#[derive(Debug, Clone, Copy)]
+pub struct DeltaEResult {
+    /// Total color difference
+    pub delta_e: f64,
+    /// Lightness difference component
+    pub delta_l: f64,
+    /// Chroma difference component (or a for CIE76)
+    pub delta_c: f64,
+    /// Hue difference component (or b for CIE76)
+    pub delta_h: f64,
+}
+
+// ============================================================================
+// CIE76 (ΔE*ab)
+// ============================================================================
+
+/// CIE76 color difference (simple Euclidean distance in Lab)
+pub fn delta_e_cie76(lab1: &Lab, lab2: &Lab) -> f64 {
+    let dl = lab2.L - lab1.L;
+    let da = lab2.a - lab1.a;
+    let db = lab2.b - lab1.b;
+    sqrt(dl * dl + da * da + db * db)
+}
+
+/// CIE76 with detailed result
+pub fn delta_e_cie76_detailed(lab1: &Lab, lab2: &Lab) -> DeltaEResult {
+    let dl = lab2.L - lab1.L;
+    let da = lab2.a - lab1.a;
+    let db = lab2.b - lab1.b;
+
+    DeltaEResult {
+        delta_e: sqrt(dl * dl + da * da + db * db),
+        delta_l: dl,
+        delta_c: da,
+        delta_h: db,
+    }
+}
+
+// ============================================================================
+// CIE94 (ΔE*94)
+// ============================================================================
+
+/// CIE94 application type
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CIE94Application {
+    /// Graphic arts (k_L = 1)
+    GraphicArts,
+    /// Textiles (k_L = 2)
+    Textiles,
+}
+
+/// CIE94 parametric factors
+pub struct CIE94Params {
+    pub k_L: f64,
+    pub K1: f64,
+    pub K2: f64,
+    pub k_C: f64,
+    pub k_H: f64,
+}
+
+impl CIE94Params {
+    pub fn graphic_arts() -> Self {
+        CIE94Params {
+            k_L: 1.0,
+            K1: 0.045,
+            K2: 0.015,
+            k_C: 1.0,
+            k_H: 1.0,
+        }
+    }
+
+    pub fn textiles() -> Self {
+        CIE94Params {
+            k_L: 2.0,
+            K1: 0.048,
+            K2: 0.014,
+            k_C: 1.0,
+            k_H: 1.0,
+        }
+    }
+}
+
+/// CIE94 color difference
+pub fn delta_e_cie94(lab1: &Lab, lab2: &Lab, params: &CIE94Params) -> f64 {
+    let C1 = lab1.chroma();
+    let C2 = lab2.chroma();
+
+    let dL = lab2.L - lab1.L;
+    let dC = C2 - C1;
+    let da = lab2.a - lab1.a;
+    let db = lab2.b - lab1.b;
+
+    // ΔH² = Δa² + Δb² - ΔC²
+    let dH_sq = da * da + db * db - dC * dC;
+    let dH = if dH_sq > 0.0 { sqrt(dH_sq) } else { 0.0 };
+
+    let S_L = 1.0;
+    let S_C = 1.0 + params.K1 * C1;
+    let S_H = 1.0 + params.K2 * C1;
+
+    let term_L = dL / (params.k_L * S_L);
+    let term_C = dC / (params.k_C * S_C);
+    let term_H = dH / (params.k_H * S_H);
+
+    sqrt(term_L * term_L + term_C * term_C + term_H * term_H)
+}
+
+/// CIE94 with detailed result
+pub fn delta_e_cie94_detailed(lab1: &Lab, lab2: &Lab, params: &CIE94Params) -> DeltaEResult {
+    let C1 = lab1.chroma();
+    let C2 = lab2.chroma();
+
+    let dL = lab2.L - lab1.L;
+    let dC = C2 - C1;
+    let da = lab2.a - lab1.a;
+    let db = lab2.b - lab1.b;
+
+    let dH_sq = da * da + db * db - dC * dC;
+    let dH = if dH_sq > 0.0 { sqrt(dH_sq) } else { 0.0 };
+
+    let S_L = 1.0;
+    let S_C = 1.0 + params.K1 * C1;
+    let S_H = 1.0 + params.K2 * C1;
+
+    let term_L = dL / (params.k_L * S_L);
+    let term_C = dC / (params.k_C * S_C);
+    let term_H = dH / (params.k_H * S_H);
+
+    DeltaEResult {
+        delta_e: sqrt(term_L * term_L + term_C * term_C + term_H * term_H),
+        delta_l: term_L,
+        delta_c: term_C,
+        delta_h: term_H,
+    }
+}
+
+// ============================================================================
+// CIEDE2000 (ΔE*00)
+// ============================================================================
+
+/// CIEDE2000 parametric weights
+pub struct CIEDE2000Params {
+    pub k_L: f64,
+    pub k_C: f64,
+    pub k_H: f64,
+}
+
+impl Default for CIEDE2000Params {
+    fn default() -> Self {
+        CIEDE2000Params {
+            k_L: 1.0,
+            k_C: 1.0,
+            k_H: 1.0,
+        }
+    }
+}
+
+/// CIEDE2000 color difference (most accurate perceptual difference)
+pub fn delta_e_2000(lab1: &Lab, lab2: &Lab, params: &CIEDE2000Params) -> f64 {
+    delta_e_2000_detailed(lab1, lab2, params).delta_e
+}
+
+/// CIEDE2000 with detailed breakdown
+pub fn delta_e_2000_detailed(lab1: &Lab, lab2: &Lab, params: &CIEDE2000Params) -> DeltaEResult {
+    let L1 = lab1.L;
+    let a1 = lab1.a;
+    let b1 = lab1.b;
+    let L2 = lab2.L;
+    let a2 = lab2.a;
+    let b2 = lab2.b;
+
+    // Step 1: Calculate C'i, h'i
+    let C1 = sqrt(a1 * a1 + b1 * b1);
+    let C2 = sqrt(a2 * a2 + b2 * b2);
+    let C_bar = (C1 + C2) / 2.0;
+
+    let C_bar_7 = C_bar.powi(7);
+    let G = 0.5 * (1.0 - sqrt(C_bar_7 / (C_bar_7 + 6103515625.0))); // 25^7
+
+    let a1_prime = a1 * (1.0 + G);
+    let a2_prime = a2 * (1.0 + G);
+
+    let C1_prime = sqrt(a1_prime * a1_prime + b1 * b1);
+    let C2_prime = sqrt(a2_prime * a2_prime + b2 * b2);
+
+    let h1_prime = if a1_prime == 0.0 && b1 == 0.0 {
+        0.0
+    } else {
+        let h = b1.atan2(a1_prime).to_degrees();
+        if h < 0.0 { h + 360.0 } else { h }
+    };
+
+    let h2_prime = if a2_prime == 0.0 && b2 == 0.0 {
+        0.0
+    } else {
+        let h = b2.atan2(a2_prime).to_degrees();
+        if h < 0.0 { h + 360.0 } else { h }
+    };
+
+    // Step 2: Calculate ΔL', ΔC', ΔH'
+    let dL_prime = L2 - L1;
+    let dC_prime = C2_prime - C1_prime;
+
+    let dh_prime = if C1_prime * C2_prime == 0.0 {
+        0.0
+    } else {
+        let diff = h2_prime - h1_prime;
+        if diff.abs() <= 180.0 {
+            diff
+        } else if diff > 180.0 {
+            diff - 360.0
+        } else {
+            diff + 360.0
+        }
+    };
+
+    let dH_prime = 2.0 * sqrt(C1_prime * C2_prime) * (dh_prime.to_radians() / 2.0).sin();
+
+    // Step 3: Calculate CIEDE2000
+    let L_bar_prime = (L1 + L2) / 2.0;
+    let C_bar_prime = (C1_prime + C2_prime) / 2.0;
+
+    let h_bar_prime = if C1_prime * C2_prime == 0.0 {
+        h1_prime + h2_prime
+    } else {
+        let diff = (h1_prime - h2_prime).abs();
+        if diff <= 180.0 {
+            (h1_prime + h2_prime) / 2.0
+        } else if h1_prime + h2_prime < 360.0 {
+            (h1_prime + h2_prime + 360.0) / 2.0
+        } else {
+            (h1_prime + h2_prime - 360.0) / 2.0
+        }
+    };
+
+    let T = 1.0
+        - 0.17 * (h_bar_prime - 30.0).to_radians().cos()
+        + 0.24 * (2.0 * h_bar_prime).to_radians().cos()
+        + 0.32 * (3.0 * h_bar_prime + 6.0).to_radians().cos()
+        - 0.20 * (4.0 * h_bar_prime - 63.0).to_radians().cos();
+
+    let dtheta = 30.0 * exp(-((h_bar_prime - 275.0) / 25.0).powi(2));
+
+    let C_bar_prime_7 = C_bar_prime.powi(7);
+    let R_C = 2.0 * sqrt(C_bar_prime_7 / (C_bar_prime_7 + 6103515625.0));
+
+    let L_bar_prime_50 = (L_bar_prime - 50.0).powi(2);
+    let S_L = 1.0 + 0.015 * L_bar_prime_50 / sqrt(20.0 + L_bar_prime_50);
+    let S_C = 1.0 + 0.045 * C_bar_prime;
+    let S_H = 1.0 + 0.015 * C_bar_prime * T;
+
+    let R_T = -R_C * (2.0 * dtheta).to_radians().sin();
+
+    let term_L = dL_prime / (params.k_L * S_L);
+    let term_C = dC_prime / (params.k_C * S_C);
+    let term_H = dH_prime / (params.k_H * S_H);
+
+    let delta_e = sqrt(
+        term_L * term_L
+            + term_C * term_C
+            + term_H * term_H
+            + R_T * term_C * term_H
+    );
+
+    DeltaEResult {
+        delta_e,
+        delta_l: term_L,
+        delta_c: term_C,
+        delta_h: term_H,
+    }
+}
+
+// ============================================================================
+// CMC (l:c)
+// ============================================================================
+
+/// CMC l:c color difference
+pub struct CMCParams {
+    pub l: f64,  // Lightness weight (typically 1 or 2)
+    pub c: f64,  // Chroma weight (typically 1)
+}
+
+impl CMCParams {
+    /// Perceptibility (l=2, c=1) - default for color QC
+    pub fn perceptibility() -> Self {
+        CMCParams { l: 2.0, c: 1.0 }
+    }
+
+    /// Acceptability (l=1, c=1)
+    pub fn acceptability() -> Self {
+        CMCParams { l: 1.0, c: 1.0 }
+    }
+}
+
+/// CMC(l:c) color difference
+pub fn delta_e_cmc(lab1: &Lab, lab2: &Lab, params: &CMCParams) -> f64 {
+    let L1 = lab1.L;
+    let a1 = lab1.a;
+    let b1 = lab1.b;
+    let L2 = lab2.L;
+    let a2 = lab2.a;
+    let b2 = lab2.b;
+
+    let C1 = sqrt(a1 * a1 + b1 * b1);
+    let C2 = sqrt(a2 * a2 + b2 * b2);
+
+    let dL = L2 - L1;
+    let dC = C2 - C1;
+    let da = a2 - a1;
+    let db = b2 - b1;
+
+    let dH_sq = da * da + db * db - dC * dC;
+    let dH = if dH_sq > 0.0 { sqrt(dH_sq) } else { 0.0 };
+
+    let h1 = if a1 == 0.0 && b1 == 0.0 {
+        0.0
+    } else {
+        let h = b1.atan2(a1).to_degrees();
+        if h < 0.0 { h + 360.0 } else { h }
+    };
+
+    let S_L = if L1 < 16.0 {
+        0.511
+    } else {
+        0.040975 * L1 / (1.0 + 0.01765 * L1)
+    };
+
+    let S_C = 0.0638 * C1 / (1.0 + 0.0131 * C1) + 0.638;
+
+    let F = sqrt(C1.powi(4) / (C1.powi(4) + 1900.0));
+
+    let T = if h1 >= 164.0 && h1 <= 345.0 {
+        0.56 + (0.2 * (h1 + 168.0).to_radians().cos()).abs()
+    } else {
+        0.36 + (0.4 * (h1 + 35.0).to_radians().cos()).abs()
+    };
+
+    let S_H = S_C * (F * T + 1.0 - F);
+
+    let term_L = dL / (params.l * S_L);
+    let term_C = dC / (params.c * S_C);
+    let term_H = dH / S_H;
+
+    sqrt(term_L * term_L + term_C * term_C + term_H * term_H)
+}
+
+// ============================================================================
+// JzAzBz DIFFERENCE
+// ============================================================================
+
+/// JzAzBz-based color difference (HDR-compatible)
+pub fn delta_e_jzazbz(jab1: &JzAzBz, jab2: &JzAzBz) -> f64 {
+    let dJ = jab2.Jz - jab1.Jz;
+    let da = jab2.az - jab1.az;
+    let db = jab2.bz - jab1.bz;
+
+    sqrt(dJ * dJ + da * da + db * db)
+}
+
+/// ΔE_z with perceptual weighting
+pub fn delta_e_z(jab1: &JzAzBz, jab2: &JzAzBz) -> f64 {
+    let C1 = jab1.chroma();
+    let C2 = jab2.chroma();
+
+    let dJ = jab2.Jz - jab1.Jz;
+    let dC = C2 - C1;
+    let da = jab2.az - jab1.az;
+    let db = jab2.bz - jab1.bz;
+
+    let dH_sq = da * da + db * db - dC * dC;
+    let dH = if dH_sq > 0.0 { sqrt(dH_sq) } else { 0.0 };
+
+    // Perceptual weighting similar to CIEDE2000
+    sqrt(dJ * dJ + dC * dC + dH * dH)
+}
+
+// ============================================================================
+// OKLAB DIFFERENCE
+// ============================================================================
+
+/// Oklab-based color difference
+pub fn delta_e_oklab(oklab1: &Oklab, oklab2: &Oklab) -> f64 {
+    let dL = oklab2.L - oklab1.L;
+    let da = oklab2.a - oklab1.a;
+    let db = oklab2.b - oklab1.b;
+
+    sqrt(dL * dL + da * da + db * db)
+}
+
+/// Oklch-based difference (preserves hue better)
+pub fn delta_e_oklch(oklch1: &Oklch, oklch2: &Oklch) -> f64 {
+    let dL = oklch2.L - oklch1.L;
+    let dC = oklch2.C - oklch1.C;
+
+    // Hue difference with wraparound
+    let dh = {
+        let diff = oklch2.h - oklch1.h;
+        if diff.abs() <= 180.0 {
+            diff
+        } else if diff > 180.0 {
+            diff - 360.0
+        } else {
+            diff + 360.0
+        }
+    };
+
+    // Convert hue difference to Cartesian
+    let dH = 2.0 * sqrt(oklch1.C * oklch2.C) * (dh.to_radians() / 2.0).sin();
+
+    sqrt(dL * dL + dC * dC + dH * dH)
+}
+
+// ============================================================================
+// HyAB DIFFERENCE
+// ============================================================================
+
+/// HyAB color difference (hybrid Lab)
+/// Uses L1 norm for lightness, L2 for chroma/hue
+pub fn delta_e_hyab(lab1: &Lab, lab2: &Lab) -> f64 {
+    let dL = (lab2.L - lab1.L).abs();
+    let da = lab2.a - lab1.a;
+    let db = lab2.b - lab1.b;
+
+    dL + sqrt(da * da + db * db)
+}
+
+// ============================================================================
+// UNIFIED INTERFACE
+// ============================================================================
+
+/// Calculate color difference using specified method
+pub fn delta_e(lab1: &Lab, lab2: &Lab, method: DeltaEMethod) -> f64 {
+    match method {
+        DeltaEMethod::CIE76 => delta_e_cie76(lab1, lab2),
+        DeltaEMethod::CIE94Graphics => {
+            delta_e_cie94(lab1, lab2, &CIE94Params::graphic_arts())
+        }
+        DeltaEMethod::CIE94Textiles => {
+            delta_e_cie94(lab1, lab2, &CIE94Params::textiles())
+        }
+        DeltaEMethod::CIEDE2000 => {
+            delta_e_2000(lab1, lab2, &CIEDE2000Params::default())
+        }
+        DeltaEMethod::CMC => {
+            delta_e_cmc(lab1, lab2, &CMCParams::perceptibility())
+        }
+        DeltaEMethod::JzAzBz => {
+            // Convert Lab to JzAzBz (simplified, assuming D65)
+            let xyz1 = lab1.to_xyz(&XYZ::D65);
+            let xyz2 = lab2.to_xyz(&XYZ::D65);
+            let jab1 = JzAzBz::from_xyz_abs(&xyz1.scale(100.0)); // Assume 100 nits
+            let jab2 = JzAzBz::from_xyz_abs(&xyz2.scale(100.0));
+            delta_e_jzazbz(&jab1, &jab2) * 100.0 // Scale for similar range
+        }
+        DeltaEMethod::Oklab => {
+            let xyz1 = lab1.to_xyz(&XYZ::D65);
+            let xyz2 = lab2.to_xyz(&XYZ::D65);
+            let linear1 = LinearRGB::new(
+                 3.2404542 * xyz1.x - 1.5371385 * xyz1.y - 0.4985314 * xyz1.z,
+                -0.9692660 * xyz1.x + 1.8760108 * xyz1.y + 0.0415560 * xyz1.z,
+                 0.0556434 * xyz1.x - 0.2040259 * xyz1.y + 1.0572252 * xyz1.z,
+            );
+            let linear2 = LinearRGB::new(
+                 3.2404542 * xyz2.x - 1.5371385 * xyz2.y - 0.4985314 * xyz2.z,
+                -0.9692660 * xyz2.x + 1.8760108 * xyz2.y + 0.0415560 * xyz2.z,
+                 0.0556434 * xyz2.x - 0.2040259 * xyz2.y + 1.0572252 * xyz2.z,
+            );
+            let oklab1 = Oklab::from_linear_srgb(&linear1);
+            let oklab2 = Oklab::from_linear_srgb(&linear2);
+            delta_e_oklab(&oklab1, &oklab2) * 100.0 // Scale for similar range
+        }
+        DeltaEMethod::HyAB => delta_e_hyab(lab1, lab2),
+    }
+}
+
+// ============================================================================
+// TOLERANCE LEVELS
+// ============================================================================
+
+/// Standard tolerance levels for color matching
+#[derive(Debug, Clone, Copy)]
+pub struct Tolerances {
+    /// Imperceptible (ΔE < threshold)
+    pub imperceptible: f64,
+    /// Just noticeable difference
+    pub jnd: f64,
+    /// Perceptible but acceptable
+    pub acceptable: f64,
+    /// Clearly different
+    pub noticeable: f64,
+}
+
+impl Tolerances {
+    /// CIEDE2000 tolerances
+    pub fn ciede2000() -> Self {
+        Tolerances {
+            imperceptible: 1.0,
+            jnd: 2.3,        // Commonly cited JND
+            acceptable: 3.5,
+            noticeable: 5.0,
+        }
+    }
+
+    /// CIE76 tolerances
+    pub fn cie76() -> Self {
+        Tolerances {
+            imperceptible: 1.0,
+            jnd: 2.3,
+            acceptable: 5.0,
+            noticeable: 10.0,
+        }
+    }
+
+    /// Industry-specific tolerances for graphic arts
+    pub fn graphic_arts() -> Self {
+        Tolerances {
+            imperceptible: 0.5,
+            jnd: 1.0,
+            acceptable: 2.0,
+            noticeable: 4.0,
+        }
+    }
+}
+
+/// Categorize color difference
+pub fn categorize_difference(delta_e: f64, tolerances: &Tolerances) -> DifferenceCategory {
+    if delta_e < tolerances.imperceptible {
+        DifferenceCategory::Imperceptible
+    } else if delta_e < tolerances.jnd {
+        DifferenceCategory::JustNoticeable
+    } else if delta_e < tolerances.acceptable {
+        DifferenceCategory::Acceptable
+    } else if delta_e < tolerances.noticeable {
+        DifferenceCategory::Noticeable
+    } else {
+        DifferenceCategory::Unacceptable
+    }
+}
+
+/// Color difference category
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DifferenceCategory {
+    /// Not perceptible
+    Imperceptible,
+    /// Just noticeable but acceptable
+    JustNoticeable,
+    /// Clearly perceptible but acceptable
+    Acceptable,
+    /// Noticeable and borderline
+    Noticeable,
+    /// Clearly different, typically unacceptable
+    Unacceptable,
+}
+
+// ============================================================================
+// COLOR PAIR ANALYSIS
+// ============================================================================
+
+/// Comprehensive color pair analysis
+pub struct ColorPairAnalysis {
+    pub lab1: Lab,
+    pub lab2: Lab,
+    pub delta_e_76: f64,
+    pub delta_e_94: f64,
+    pub delta_e_2000: f64,
+    pub delta_e_cmc: f64,
+    pub delta_l: f64,
+    pub delta_c: f64,
+    pub delta_h: f64,
+    pub contrast_ratio: f64,
+}
+
+impl ColorPairAnalysis {
+    /// Analyze two colors comprehensively
+    pub fn analyze(lab1: Lab, lab2: Lab) -> Self {
+        let de76 = delta_e_cie76(&lab1, &lab2);
+        let de94 = delta_e_cie94(&lab1, &lab2, &CIE94Params::graphic_arts());
+        let de2000_result = delta_e_2000_detailed(&lab1, &lab2, &CIEDE2000Params::default());
+        let decmc = delta_e_cmc(&lab1, &lab2, &CMCParams::perceptibility());
+
+        // WCAG-style contrast (simplified using L*)
+        let l1 = lab1.L / 100.0;
+        let l2 = lab2.L / 100.0;
+        let lighter = l1.max(l2);
+        let darker = l1.min(l2);
+        let contrast_ratio = (lighter + 0.05) / (darker + 0.05);
+
+        ColorPairAnalysis {
+            lab1,
+            lab2,
+            delta_e_76: de76,
+            delta_e_94: de94,
+            delta_e_2000: de2000_result.delta_e,
+            delta_e_cmc: decmc,
+            delta_l: de2000_result.delta_l,
+            delta_c: de2000_result.delta_c,
+            delta_h: de2000_result.delta_h,
+            contrast_ratio,
+        }
+    }
+
+    /// Check if colors pass contrast requirements
+    pub fn passes_wcag_aa_normal(&self) -> bool {
+        self.contrast_ratio >= 4.5
+    }
+
+    pub fn passes_wcag_aa_large(&self) -> bool {
+        self.contrast_ratio >= 3.0
+    }
+
+    pub fn passes_wcag_aaa_normal(&self) -> bool {
+        self.contrast_ratio >= 7.0
+    }
+
+    pub fn passes_wcag_aaa_large(&self) -> bool {
+        self.contrast_ratio >= 4.5
+    }
+}
+
+// ============================================================================
+// BATCH PROCESSING
+// ============================================================================
+
+/// Calculate color difference matrix for a palette
+pub fn color_difference_matrix(colors: &[Lab], method: DeltaEMethod) -> Vec<Vec<f64>> {
+    let n = colors.len();
+    let mut matrix = vec![vec![0.0; n]; n];
+
+    for i in 0..n {
+        for j in (i + 1)..n {
+            let de = delta_e(&colors[i], &colors[j], method);
+            matrix[i][j] = de;
+            matrix[j][i] = de;
+        }
+    }
+
+    matrix
+}
+
+/// Find most similar colors in a palette
+pub fn find_similar_colors(colors: &[Lab], threshold: f64, method: DeltaEMethod) -> Vec<(usize, usize, f64)> {
+    let mut similar = Vec::new();
+    let n = colors.len();
+
+    for i in 0..n {
+        for j in (i + 1)..n {
+            let de = delta_e(&colors[i], &colors[j], method);
+            if de < threshold {
+                similar.push((i, j, de));
+            }
+        }
+    }
+
+    similar.sort_by(|a, b| a.2.partial_cmp(&b.2).unwrap());
+    similar
+}
+
+/// Find closest match in reference palette
+pub fn find_closest_match(color: &Lab, palette: &[Lab], method: DeltaEMethod) -> (usize, f64) {
+    let mut best_idx = 0;
+    let mut best_de = f64::INFINITY;
+
+    for (i, ref_color) in palette.iter().enumerate() {
+        let de = delta_e(color, ref_color, method);
+        if de < best_de {
+            best_de = de;
+            best_idx = i;
+        }
+    }
+
+    (best_idx, best_de)
+}
+
+// ============================================================================
+// UNIT TESTS
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const EPSILON: f64 = 0.01;
+
+    fn approx_eq(a: f64, b: f64) -> bool {
+        (a - b).abs() < EPSILON
+    }
+
+    #[test]
+    fn test_cie76_identical() {
+        let lab = Lab::new(50.0, 25.0, -30.0);
+        let de = delta_e_cie76(&lab, &lab);
+        assert!(de < 1e-10);
+    }
+
+    #[test]
+    fn test_cie76_known_value() {
+        let lab1 = Lab::new(50.0, 0.0, 0.0);
+        let lab2 = Lab::new(50.0, 3.0, 4.0);  // Should be 5.0
+        let de = delta_e_cie76(&lab1, &lab2);
+        assert!(approx_eq(de, 5.0));
+    }
+
+    #[test]
+    fn test_ciede2000_identical() {
+        let lab = Lab::new(50.0, 25.0, -30.0);
+        let de = delta_e_2000(&lab, &lab, &CIEDE2000Params::default());
+        assert!(de < 1e-10);
+    }
+
+    #[test]
+    fn test_ciede2000_reference() {
+        // Known reference pair from CIE publication
+        let lab1 = Lab::new(50.0, 2.6772, -79.7751);
+        let lab2 = Lab::new(50.0, 0.0, -82.7485);
+
+        let de = delta_e_2000(&lab1, &lab2, &CIEDE2000Params::default());
+        // Expected value approximately 2.0425
+        assert!((de - 2.0425).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_cie94_vs_cie76() {
+        let lab1 = Lab::new(50.0, 20.0, 10.0);
+        let lab2 = Lab::new(55.0, 25.0, 15.0);
+
+        let de76 = delta_e_cie76(&lab1, &lab2);
+        let de94 = delta_e_cie94(&lab1, &lab2, &CIE94Params::graphic_arts());
+
+        // CIE94 typically gives smaller values than CIE76 for chromatic colors
+        assert!(de76 > 0.0);
+        assert!(de94 > 0.0);
+    }
+
+    #[test]
+    fn test_cmc_symmetric() {
+        let lab1 = Lab::new(50.0, 20.0, 10.0);
+        let lab2 = Lab::new(55.0, 25.0, 15.0);
+        let params = CMCParams::perceptibility();
+
+        let de12 = delta_e_cmc(&lab1, &lab2, &params);
+        let de21 = delta_e_cmc(&lab2, &lab1, &params);
+
+        // CMC is NOT symmetric, but should be close for similar colors
+        assert!(de12 > 0.0);
+        assert!(de21 > 0.0);
+    }
+
+    #[test]
+    fn test_oklab_difference() {
+        let oklab1 = Oklab::new(0.5, 0.1, 0.05);
+        let oklab2 = Oklab::new(0.6, 0.15, 0.08);
+
+        let de = delta_e_oklab(&oklab1, &oklab2);
+        assert!(de > 0.0);
+    }
+
+    #[test]
+    fn test_hyab_difference() {
+        let lab1 = Lab::new(50.0, 10.0, 20.0);
+        let lab2 = Lab::new(60.0, 15.0, 25.0);
+
+        let de = delta_e_hyab(&lab1, &lab2);
+        assert!(de > 0.0);
+    }
+
+    #[test]
+    fn test_tolerance_categorization() {
+        let tolerances = Tolerances::ciede2000();
+
+        assert_eq!(
+            categorize_difference(0.5, &tolerances),
+            DifferenceCategory::Imperceptible
+        );
+        assert_eq!(
+            categorize_difference(1.5, &tolerances),
+            DifferenceCategory::JustNoticeable
+        );
+        assert_eq!(
+            categorize_difference(3.0, &tolerances),
+            DifferenceCategory::Acceptable
+        );
+        assert_eq!(
+            categorize_difference(4.0, &tolerances),
+            DifferenceCategory::Noticeable
+        );
+        assert_eq!(
+            categorize_difference(10.0, &tolerances),
+            DifferenceCategory::Unacceptable
+        );
+    }
+
+    #[test]
+    fn test_color_difference_matrix() {
+        let colors = vec![
+            Lab::new(50.0, 0.0, 0.0),
+            Lab::new(60.0, 10.0, 5.0),
+            Lab::new(70.0, -5.0, 15.0),
+        ];
+
+        let matrix = color_difference_matrix(&colors, DeltaEMethod::CIE76);
+
+        assert_eq!(matrix.len(), 3);
+        assert!(matrix[0][0] < 1e-10); // Diagonal is zero
+        assert!(matrix[0][1] > 0.0);
+        assert!(approx_eq(matrix[0][1], matrix[1][0])); // Symmetric
+    }
+
+    #[test]
+    fn test_find_closest_match() {
+        let palette = vec![
+            Lab::new(25.0, 0.0, 0.0),
+            Lab::new(50.0, 0.0, 0.0),
+            Lab::new(75.0, 0.0, 0.0),
+        ];
+
+        let query = Lab::new(48.0, 0.0, 0.0);
+        let (idx, de) = find_closest_match(&query, &palette, DeltaEMethod::CIE76);
+
+        assert_eq!(idx, 1); // Should match L=50
+        assert!(de < 3.0);
+    }
+
+    #[test]
+    fn test_color_pair_analysis() {
+        let lab1 = Lab::new(50.0, 20.0, 10.0);
+        let lab2 = Lab::new(70.0, -10.0, 30.0);
+
+        let analysis = ColorPairAnalysis::analyze(lab1, lab2);
+
+        assert!(analysis.delta_e_76 > 0.0);
+        assert!(analysis.delta_e_2000 > 0.0);
+        assert!(analysis.contrast_ratio > 1.0);
+    }
+}

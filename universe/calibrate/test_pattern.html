@@ -1,0 +1,336 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Calibrate - Display Test Patterns</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            background: #1a1a1a;
+            color: #fff;
+            font-family: system-ui, -apple-system, sans-serif;
+            min-height: 100vh;
+        }
+        .header {
+            background: linear-gradient(135deg, #2a2a2a, #1a1a1a);
+            padding: 20px 40px;
+            border-bottom: 1px solid #333;
+        }
+        .header h1 { font-size: 24px; font-weight: 300; }
+        .header p { color: #888; margin-top: 5px; }
+
+        .container { padding: 40px; max-width: 1400px; margin: 0 auto; }
+
+        .section {
+            margin-bottom: 60px;
+        }
+        .section h2 {
+            font-size: 18px;
+            font-weight: 500;
+            margin-bottom: 20px;
+            color: #0af;
+        }
+
+        /* Grayscale Ramp */
+        .grayscale-ramp {
+            display: flex;
+            height: 80px;
+            border-radius: 8px;
+            overflow: hidden;
+        }
+        .grayscale-ramp div {
+            flex: 1;
+        }
+
+        /* Gamma Test */
+        .gamma-test {
+            display: flex;
+            gap: 20px;
+            flex-wrap: wrap;
+        }
+        .gamma-patch {
+            width: 200px;
+            text-align: center;
+        }
+        .gamma-patch .patch {
+            height: 100px;
+            border-radius: 8px;
+            margin-bottom: 10px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 14px;
+            font-weight: 500;
+        }
+        .gamma-patch .checkerboard {
+            background-image:
+                linear-gradient(45deg, #808080 25%, transparent 25%),
+                linear-gradient(-45deg, #808080 25%, transparent 25%),
+                linear-gradient(45deg, transparent 75%, #808080 75%),
+                linear-gradient(-45deg, transparent 75%, #808080 75%);
+            background-size: 4px 4px;
+            background-position: 0 0, 0 2px, 2px -2px, -2px 0px;
+        }
+
+        /* Color Bars */
+        .color-bars {
+            display: flex;
+            height: 120px;
+            border-radius: 8px;
+            overflow: hidden;
+        }
+        .color-bars div { flex: 1; }
+
+        /* Primary Colors */
+        .primaries {
+            display: flex;
+            gap: 20px;
+        }
+        .primary-patch {
+            flex: 1;
+            height: 150px;
+            border-radius: 8px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: 500;
+        }
+
+        /* White Point Test */
+        .white-test {
+            display: flex;
+            gap: 20px;
+        }
+        .white-patch {
+            flex: 1;
+            height: 100px;
+            border-radius: 8px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 14px;
+        }
+
+        /* Near-Black Test */
+        .near-black {
+            display: flex;
+            height: 100px;
+            border-radius: 8px;
+            overflow: hidden;
+            background: #000;
+        }
+        .near-black div {
+            flex: 1;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 10px;
+            color: #444;
+        }
+
+        /* Uniformity Test */
+        .uniformity {
+            height: 200px;
+            background: #808080;
+            border-radius: 8px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: #fff;
+        }
+
+        .instructions {
+            background: #252525;
+            border-radius: 8px;
+            padding: 20px;
+            margin-top: 20px;
+        }
+        .instructions h3 {
+            font-size: 14px;
+            margin-bottom: 10px;
+            color: #0af;
+        }
+        .instructions ul {
+            margin-left: 20px;
+            color: #aaa;
+            font-size: 13px;
+            line-height: 1.8;
+        }
+
+        .fullscreen-btn {
+            position: fixed;
+            bottom: 20px;
+            right: 20px;
+            background: #0af;
+            color: #000;
+            border: none;
+            padding: 12px 24px;
+            border-radius: 8px;
+            cursor: pointer;
+            font-weight: 500;
+        }
+        .fullscreen-btn:hover { background: #0cf; }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>Calibrate(TM) Display Verification</h1>
+        <p>NeuralUX(TM) Calibration Test Patterns</p>
+    </div>
+
+    <div class="container">
+        <!-- Grayscale Ramp -->
+        <div class="section">
+            <h2>1. Grayscale Ramp (0-255)</h2>
+            <div class="grayscale-ramp" id="grayscale"></div>
+            <div class="instructions">
+                <h3>What to look for:</h3>
+                <ul>
+                    <li>Smooth transitions with no banding or steps</li>
+                    <li>All 32 steps should be distinguishable</li>
+                    <li>No color tint in the grays (should be neutral)</li>
+                </ul>
+            </div>
+        </div>
+
+        <!-- Gamma Test -->
+        <div class="section">
+            <h2>2. Gamma Verification (Target: 2.2-2.4)</h2>
+            <div class="gamma-test">
+                <div class="gamma-patch">
+                    <div class="patch" style="background: #777;">Solid 47%</div>
+                    <p>Should match checkerboard</p>
+                </div>
+                <div class="gamma-patch">
+                    <div class="patch checkerboard"></div>
+                    <p>50% Checkerboard</p>
+                </div>
+                <div class="gamma-patch">
+                    <div class="patch" style="background: #808080;">Solid 50%</div>
+                    <p>Reference mid-gray</p>
+                </div>
+            </div>
+            <div class="instructions">
+                <h3>Gamma Test:</h3>
+                <ul>
+                    <li>At gamma 2.2, the solid 47% gray should match the checkerboard brightness</li>
+                    <li>If the checkerboard looks brighter, gamma is too high</li>
+                    <li>If the checkerboard looks darker, gamma is too low</li>
+                </ul>
+            </div>
+        </div>
+
+        <!-- Color Bars -->
+        <div class="section">
+            <h2>3. Color Bars (100% Saturation)</h2>
+            <div class="color-bars">
+                <div style="background: #fff;"></div>
+                <div style="background: #ff0;"></div>
+                <div style="background: #0ff;"></div>
+                <div style="background: #0f0;"></div>
+                <div style="background: #f0f;"></div>
+                <div style="background: #f00;"></div>
+                <div style="background: #00f;"></div>
+                <div style="background: #000;"></div>
+            </div>
+            <div class="instructions">
+                <h3>What to look for:</h3>
+                <ul>
+                    <li>Colors should be vivid and saturated</li>
+                    <li>No color bleeding between bars</li>
+                    <li>White should be neutral (no pink/green/blue tint)</li>
+                </ul>
+            </div>
+        </div>
+
+        <!-- Primary Colors -->
+        <div class="section">
+            <h2>4. Primary & Secondary Colors</h2>
+            <div class="primaries">
+                <div class="primary-patch" style="background: #f00; color: #fff;">RED<br>255, 0, 0</div>
+                <div class="primary-patch" style="background: #0f0; color: #000;">GREEN<br>0, 255, 0</div>
+                <div class="primary-patch" style="background: #00f; color: #fff;">BLUE<br>0, 0, 255</div>
+            </div>
+            <div style="height: 20px;"></div>
+            <div class="primaries">
+                <div class="primary-patch" style="background: #ff0; color: #000;">YELLOW<br>255, 255, 0</div>
+                <div class="primary-patch" style="background: #f0f; color: #fff;">MAGENTA<br>255, 0, 255</div>
+                <div class="primary-patch" style="background: #0ff; color: #000;">CYAN<br>0, 255, 255</div>
+            </div>
+        </div>
+
+        <!-- White Point -->
+        <div class="section">
+            <h2>5. White Point Test (D65 = 6500K)</h2>
+            <div class="white-test">
+                <div class="white-patch" style="background: #ffeedd; color: #000;">Warm (5000K)</div>
+                <div class="white-patch" style="background: #fff; color: #000;">D65 (6500K)</div>
+                <div class="white-patch" style="background: #eef4ff; color: #000;">Cool (7500K)</div>
+            </div>
+            <div class="instructions">
+                <h3>White Point Check:</h3>
+                <ul>
+                    <li>The center patch should appear as pure white</li>
+                    <li>Left patch should look slightly warm/yellow</li>
+                    <li>Right patch should look slightly cool/blue</li>
+                    <li>If center looks tinted, white point may be off</li>
+                </ul>
+            </div>
+        </div>
+
+        <!-- Near Black -->
+        <div class="section">
+            <h2>6. Shadow Detail (Near-Black)</h2>
+            <div class="near-black">
+                <div style="background: rgb(0,0,0);">0</div>
+                <div style="background: rgb(1,1,1);">1</div>
+                <div style="background: rgb(2,2,2);">2</div>
+                <div style="background: rgb(3,3,3);">3</div>
+                <div style="background: rgb(4,4,4);">4</div>
+                <div style="background: rgb(5,5,5);">5</div>
+                <div style="background: rgb(8,8,8);">8</div>
+                <div style="background: rgb(10,10,10);">10</div>
+                <div style="background: rgb(15,15,15);">15</div>
+                <div style="background: rgb(20,20,20);">20</div>
+            </div>
+            <div class="instructions">
+                <h3>Shadow Detail (OLED Important):</h3>
+                <ul>
+                    <li>On OLED: Level 0 should be pure black (pixel off)</li>
+                    <li>You should be able to distinguish levels 3-5 and above</li>
+                    <li>If all look the same, shadow detail is crushed</li>
+                </ul>
+            </div>
+        </div>
+
+        <!-- Uniformity -->
+        <div class="section">
+            <h2>7. Screen Uniformity</h2>
+            <div class="uniformity">
+                <p>Check for brightness variations across the screen.<br>
+                Look at corners and edges vs center.</p>
+            </div>
+        </div>
+    </div>
+
+    <button class="fullscreen-btn" onclick="toggleFullscreen()">Toggle Fullscreen</button>
+
+    <script>
+        // Generate grayscale ramp
+        const grayscale = document.getElementById('grayscale');
+        for (let i = 0; i < 32; i++) {
+            const val = Math.round(i * 255 / 31);
+            const div = document.createElement('div');
+            div.style.background = `rgb(${val},${val},${val})`;
+            grayscale.appendChild(div);
+        }
+
+        function toggleFullscreen() {
+            if (!document.fullscreenElement) {
+                document.documentElement.requestFullscreen();
+            } else {
+                document.exitFullscreen();
+            }
+        }
+    </script>
+</body>
+</html>

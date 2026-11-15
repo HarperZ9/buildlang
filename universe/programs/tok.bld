@@ -1,0 +1,289 @@
+// =============================================================================
+// qtok - BuildLang Tokenizer written in BuildLang
+// =============================================================================
+// Third self-hosting tool. A lexer that reads .bld source and outputs a
+// token stream. This is the first compiler component written in BuildLang.
+//
+// Usage:
+//   qtok file.bld              tokenize, print token stream
+//   qtok --json file.bld       output as JSON array
+//   qtok --count file.bld      just count tokens by type
+//   cat code.bld | qtok        from stdin
+//   qtok --help                   usage
+//
+// Token types: KEYWORD, IDENT, INT_LIT, FLOAT_LIT, STR_LIT, CHAR_LIT,
+//              PLUS, MINUS, STAR, SLASH, PERCENT, ASSIGN, EQ, NEQ, LT, GT,
+//              LE, GE, AND, OR, NOT, BIT_AND, BIT_OR, BIT_XOR, SHL, SHR,
+//              PLUS_EQ, MINUS_EQ, STAR_EQ, SLASH_EQ, ARROW, FAT_ARROW,
+//              COLONCOLON, DOTDOT, DOTDOTEQ,
+//              LPAREN, RPAREN, LBRACE, RBRACE, LBRACK, RBRACK,
+//              COMMA, SEMI, COLON, DOT, AT, HASH, QUESTION
+// =============================================================================
+
+include!("stdlib/chars.bld");
+include!("stdlib/tokenizer.bld");
+
+// --- Token type name ---
+fn type_name(ttype: i32) -> String {
+    if ttype == 1 { return "KEYWORD"; }
+    if ttype == 2 { return "IDENT"; }
+    if ttype == 3 { return "INT_LIT"; }
+    if ttype == 4 { return "FLOAT_LIT"; }
+    if ttype == 5 { return "STR_LIT"; }
+    if ttype == 6 { return "CHAR_LIT"; }
+    if ttype == 10 { return "PLUS"; }
+    if ttype == 11 { return "MINUS"; }
+    if ttype == 12 { return "STAR"; }
+    if ttype == 13 { return "SLASH"; }
+    if ttype == 14 { return "PERCENT"; }
+    if ttype == 15 { return "ASSIGN"; }
+    if ttype == 16 { return "EQ"; }
+    if ttype == 17 { return "NEQ"; }
+    if ttype == 18 { return "LT"; }
+    if ttype == 19 { return "GT"; }
+    if ttype == 20 { return "LE"; }
+    if ttype == 21 { return "GE"; }
+    if ttype == 22 { return "AND"; }
+    if ttype == 23 { return "OR"; }
+    if ttype == 24 { return "NOT"; }
+    if ttype == 25 { return "BIT_AND"; }
+    if ttype == 26 { return "BIT_OR"; }
+    if ttype == 27 { return "BIT_XOR"; }
+    if ttype == 28 { return "SHL"; }
+    if ttype == 29 { return "SHR"; }
+    if ttype == 30 { return "PLUS_EQ"; }
+    if ttype == 31 { return "MINUS_EQ"; }
+    if ttype == 32 { return "STAR_EQ"; }
+    if ttype == 33 { return "SLASH_EQ"; }
+    if ttype == 34 { return "ARROW"; }
+    if ttype == 35 { return "FAT_ARROW"; }
+    if ttype == 36 { return "COLONCOLON"; }
+    if ttype == 37 { return "DOTDOT"; }
+    if ttype == 38 { return "DOTDOTEQ"; }
+    if ttype == 40 { return "LPAREN"; }
+    if ttype == 41 { return "RPAREN"; }
+    if ttype == 42 { return "LBRACE"; }
+    if ttype == 43 { return "RBRACE"; }
+    if ttype == 44 { return "LBRACK"; }
+    if ttype == 45 { return "RBRACK"; }
+    if ttype == 46 { return "COMMA"; }
+    if ttype == 47 { return "SEMI"; }
+    if ttype == 48 { return "COLON"; }
+    if ttype == 49 { return "DOT"; }
+    if ttype == 50 { return "AT"; }
+    if ttype == 51 { return "HASH"; }
+    if ttype == 52 { return "QUESTION"; }
+    "UNKNOWN"
+}
+
+// --- Pad string to fixed width ---
+fn pad_right(s: String, width: i32) -> String {
+    let slen = s.len();
+    let mut out = s;
+    let mut i = slen;
+    while i < width {
+        out = out + " ";
+        i = i + 1;
+    }
+    out
+}
+
+fn pad_left(s: String, width: i32) -> String {
+    let slen = s.len();
+    let mut out = "";
+    let mut i = slen;
+    while i < width {
+        out = out + " ";
+        i = i + 1;
+    }
+    out + s
+}
+
+// --- Output: default tabular format ---
+fn output_table(t: &Tok) ~ Console {
+    let mut i: i32 = 0;
+    while i < t.count {
+        let ttype = vec_get(t.t_types, i);
+        let tstart = vec_get(t.t_starts, i);
+        let tlen = vec_get(t.t_lens, i);
+        let tline = vec_get(t.t_lines, i);
+        let tcol = vec_get(t.t_cols, i);
+        let text = pool_get(t, tstart, tlen);
+        let name = type_name(ttype);
+
+        let line_s = to_string_i32(tline);
+        let col_s = to_string_i32(tcol);
+        let loc = pad_right(line_s + ":" + col_s, 8);
+        let tname = pad_right(name, 12);
+        println!("  {} {} {}", loc, tname, text);
+
+        i = i + 1;
+    }
+}
+
+// --- Output: JSON format ---
+fn output_json(t: &Tok) ~ Console {
+    println!("[");
+    let mut i: i32 = 0;
+    while i < t.count {
+        let ttype = vec_get(t.t_types, i);
+        let tstart = vec_get(t.t_starts, i);
+        let tlen = vec_get(t.t_lens, i);
+        let tline = vec_get(t.t_lines, i);
+        let tcol = vec_get(t.t_cols, i);
+        let text = pool_get(t, tstart, tlen);
+        let name = type_name(ttype);
+
+        let comma = if i < t.count - 1 { "," } else { "" };
+
+        // Escape text for JSON: replace \ with \\, " with \"
+        let mut escaped = "";
+        let text_len = text.len();
+        let mut j: i32 = 0;
+        while j < text_len {
+            let c = text.char_at(j);
+            if c == "\\" {
+                escaped = escaped + "\\\\";
+            } else if c == "\"" {
+                escaped = escaped + "\\\"";
+            } else if c == "\n" {
+                escaped = escaped + "\\n";
+            } else if c == "\t" {
+                escaped = escaped + "\\t";
+            } else {
+                escaped = escaped + c;
+            }
+            j = j + 1;
+        }
+
+        println!("  {{\"type\":\"{}\",\"text\":\"{}\",\"line\":{},\"col\":{}}}{}",
+                 name, escaped, tline, tcol, comma);
+
+        i = i + 1;
+    }
+    println!("]");
+}
+
+// --- Output: count by type ---
+fn output_count(t: &Tok) ~ Console {
+    // Count each type using simple counters
+    let mut n_kw: i32 = 0;
+    let mut n_id: i32 = 0;
+    let mut n_int: i32 = 0;
+    let mut n_flt: i32 = 0;
+    let mut n_str: i32 = 0;
+    let mut n_chr: i32 = 0;
+    let mut n_op: i32 = 0;
+    let mut n_punc: i32 = 0;
+
+    let mut i: i32 = 0;
+    while i < t.count {
+        let ttype = vec_get(t.t_types, i);
+        if ttype == 1 { n_kw = n_kw + 1; }
+        else if ttype == 2 { n_id = n_id + 1; }
+        else if ttype == 3 { n_int = n_int + 1; }
+        else if ttype == 4 { n_flt = n_flt + 1; }
+        else if ttype == 5 { n_str = n_str + 1; }
+        else if ttype == 6 { n_chr = n_chr + 1; }
+        else if ttype >= 10 && ttype <= 38 { n_op = n_op + 1; }
+        else if ttype >= 40 { n_punc = n_punc + 1; }
+        i = i + 1;
+    }
+
+    println!("Token counts:");
+    println!("  KEYWORD      {}", n_kw);
+    println!("  IDENT        {}", n_id);
+    println!("  INT_LIT      {}", n_int);
+    println!("  FLOAT_LIT    {}", n_flt);
+    println!("  STR_LIT      {}", n_str);
+    println!("  CHAR_LIT     {}", n_chr);
+    println!("  OPERATOR     {}", n_op);
+    println!("  PUNCTUATION  {}", n_punc);
+    println!("  ─────────────────");
+    println!("  TOTAL        {}", t.count);
+}
+
+// --- Help ---
+fn print_help() ~ Console {
+    println!("qtok - BuildLang tokenizer (self-hosting compiler step 1)");
+    println!("");
+    println!("Usage:");
+    println!("  qtok FILE              tokenize, print token stream");
+    println!("  qtok --json FILE       output as JSON array");
+    println!("  qtok --count FILE      count tokens by type");
+    println!("  cat file | qtok        tokenize from stdin");
+    println!("  qtok --help            display this help and exit");
+    println!("");
+    println!("Token types:");
+    println!("  KEYWORD  IDENT  INT_LIT  FLOAT_LIT  STR_LIT  CHAR_LIT");
+    println!("  Operators: + - * / % = == != < > <= >= && || ! & | ^");
+    println!("             << >> += -= *= /= -> => :: .. ..=");
+    println!("  Punctuation: ( ) {{ }} [ ] , ; : . @ # ?");
+}
+
+// --- Main ---
+fn main() ~ Console + Environment + FileSystem + Process {
+    let nargs = args_count();
+
+    // Parse flags
+    let mut mode: i32 = 0;   // 0=table, 1=json, 2=count
+    let mut filename = "";
+    let mut has_file = false;
+
+    let mut i: i32 = 1;
+    while i < nargs {
+        let arg = args_get(i);
+
+        if arg == "--help" || arg == "-h" {
+            print_help();
+            process_exit(0);
+        } else if arg == "--json" {
+            mode = 1;
+        } else if arg == "--count" {
+            mode = 2;
+        } else if arg.starts_with("-") {
+            // Unknown flag
+            println!("qtok: unknown option '{}'", arg);
+            process_exit(2);
+        } else {
+            filename = arg;
+            has_file = true;
+        }
+
+        i = i + 1;
+    }
+
+    // Read input
+    let input = if has_file {
+        let exists = file_exists(filename);
+        if !exists {
+            println!("qtok: {}: No such file or directory", filename);
+            process_exit(2);
+        }
+        read_file(filename)
+    } else {
+        let piped = stdin_is_pipe();
+        if !piped {
+            print_help();
+            process_exit(0);
+        }
+        read_all()
+    };
+
+    if input.len() == 0 {
+        process_exit(0);
+    }
+
+    // Tokenize
+    let mut t = tok_new(input);
+    tokenize(&mut t);
+
+    // Output
+    if mode == 1 {
+        output_json(&t);
+    } else if mode == 2 {
+        output_count(&t);
+    } else {
+        output_table(&t);
+    }
+}

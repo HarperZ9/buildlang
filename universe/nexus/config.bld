@@ -1,0 +1,1287 @@
+// ============================================================================
+// NEXUS - Configuration System
+// ============================================================================
+// Comprehensive configuration management for mods
+// Supports schemas, validation, hot-reload, and UI generation
+// ============================================================================
+
+module nexus::config;
+
+use core::io::{File, Path};
+use core::sync::{Mutex, RwLock};
+use core::collections::{HashMap, Vec, BTreeMap};
+
+// ============================================================================
+// Configuration Value Types
+// ============================================================================
+
+/// Configuration value type
+@derive(Clone)]
+pub enum ConfigValue {
+    Null,
+    Bool(bool),
+    Int(i64),
+    Float(f64),
+    String(String),
+    Color(Color),
+    Vec2(f32, f32),
+    Vec3(f32, f32, f32),
+    Vec4(f32, f32, f32, f32),
+    Array(Vec<ConfigValue>),
+    Object(HashMap<String, ConfigValue>),
+    Path(String),
+    Enum { value: String, options: Vec<String> },
+    Keybind(KeyBinding)
+}
+
+impl ConfigValue {
+    pub fn type_name(&self) -> &'static str {
+        match self {
+            Self::Null => "null",
+            Self::Bool(_) => "bool",
+            Self::Int(_) => "int",
+            Self::Float(_) => "float",
+            Self::String(_) => "string",
+            Self::Color(_) => "color",
+            Self::Vec2(_, _) => "vec2",
+            Self::Vec3(_, _, _) => "vec3",
+            Self::Vec4(_, _, _, _) => "vec4",
+            Self::Array(_) => "array",
+            Self::Object(_) => "object",
+            Self::Path(_) => "path",
+            Self::Enum { .. } => "enum",
+            Self::Keybind(_) => "keybind"
+        }
+    }
+
+    pub fn as_bool(&self) -> Option<bool> {
+        match self {
+            Self::Bool(v) => Some(*v),
+            _ => None
+        }
+    }
+
+    pub fn as_int(&self) -> Option<i64> {
+        match self {
+            Self::Int(v) => Some(*v),
+            _ => None
+        }
+    }
+
+    pub fn as_float(&self) -> Option<f64> {
+        match self {
+            Self::Float(v) => Some(*v),
+            Self::Int(v) => Some(*v as f64),
+            _ => None
+        }
+    }
+
+    pub fn as_string(&self) -> Option<&str> {
+        match self {
+            Self::String(v) => Some(v),
+            Self::Path(v) => Some(v),
+            _ => None
+        }
+    }
+
+    pub fn as_color(&self) -> Option<&Color> {
+        match self {
+            Self::Color(v) => Some(v),
+            _ => None
+        }
+    }
+
+    pub fn as_array(&self) -> Option<&Vec<ConfigValue>> {
+        match self {
+            Self::Array(v) => Some(v),
+            _ => None
+        }
+    }
+
+    pub fn as_object(&self) -> Option<&HashMap<String, ConfigValue>> {
+        match self {
+            Self::Object(v) => Some(v),
+            _ => None
+        }
+    }
+
+    pub fn get(&self, key: &str) -> Option<&ConfigValue> {
+        match self {
+            Self::Object(map) => map.get(key),
+            _ => None
+        }
+    }
+
+    pub fn is_null(&self) -> bool {
+        matches!(self, Self::Null)
+    }
+
+    /// Deep clone with path prefix
+    pub fn with_path_prefix(&self, prefix: &str) -> Self {
+        match self {
+            Self::Path(p) => Self::Path(format!("{}/{}", prefix, p)),
+            Self::Array(arr) => Self::Array(
+                arr.iter().map(|v| v.with_path_prefix(prefix)).collect()
+            ),
+            Self::Object(map) => Self::Object(
+                map.iter().map(|(k, v)| (k.clone(), v.with_path_prefix(prefix))).collect()
+            ),
+            _ => self.clone()
+        }
+    }
+}
+
+/// Color value
+@derive(Clone, Copy)]
+pub struct Color {
+    pub r: f32,
+    pub g: f32,
+    pub b: f32,
+    pub a: f32
+}
+
+impl Color {
+    pub fn new(r: f32, g: f32, b: f32, a: f32) -> Self {
+        Self { r, g, b, a }
+    }
+
+    pub fn rgb(r: f32, g: f32, b: f32) -> Self {
+        Self { r, g, b, a: 1.0 }
+    }
+
+    pub fn from_hex(hex: &str) -> Option<Self> {
+        let hex = hex.trim_start_matches('#');
+
+        let (r, g, b, a) = match hex.len() {
+            6 => {
+                let r = u8::from_str_radix(&hex[0..2], 16).ok()?;
+                let g = u8::from_str_radix(&hex[2..4], 16).ok()?;
+                let b = u8::from_str_radix(&hex[4..6], 16).ok()?;
+                (r, g, b, 255u8)
+            }
+            8 => {
+                let r = u8::from_str_radix(&hex[0..2], 16).ok()?;
+                let g = u8::from_str_radix(&hex[2..4], 16).ok()?;
+                let b = u8::from_str_radix(&hex[4..6], 16).ok()?;
+                let a = u8::from_str_radix(&hex[6..8], 16).ok()?;
+                (r, g, b, a)
+            }
+            _ => return None
+        };
+
+        Some(Self {
+            r: r as f32 / 255.0,
+            g: g as f32 / 255.0,
+            b: b as f32 / 255.0,
+            a: a as f32 / 255.0
+        })
+    }
+
+    pub fn to_hex(&self) -> String {
+        format!("#{:02X}{:02X}{:02X}{:02X}",
+            (self.r * 255.0) as u8,
+            (self.g * 255.0) as u8,
+            (self.b * 255.0) as u8,
+            (self.a * 255.0) as u8
+        )
+    }
+
+    pub fn to_rgba_u8(&self) -> [u8; 4] {
+        [
+            (self.r * 255.0) as u8,
+            (self.g * 255.0) as u8,
+            (self.b * 255.0) as u8,
+            (self.a * 255.0) as u8
+        ]
+    }
+}
+
+/// Key binding
+@derive(Clone)]
+pub struct KeyBinding {
+    pub key: u32,
+    pub modifiers: KeyModifiers
+}
+
+impl KeyBinding {
+    pub fn new(key: u32) -> Self {
+        Self {
+            key,
+            modifiers: KeyModifiers::default()
+        }
+    }
+
+    pub fn with_ctrl(mut self) -> Self {
+        self.modifiers.ctrl = true;
+        self
+    }
+
+    pub fn with_shift(mut self) -> Self {
+        self.modifiers.shift = true;
+        self
+    }
+
+    pub fn with_alt(mut self) -> Self {
+        self.modifiers.alt = true;
+        self
+    }
+
+    pub fn to_string(&self) -> String {
+        let mut parts = Vec::new();
+
+        if self.modifiers.ctrl { parts.push("Ctrl"); }
+        if self.modifiers.shift { parts.push("Shift"); }
+        if self.modifiers.alt { parts.push("Alt"); }
+
+        parts.push(&key_name(self.key));
+        parts.join("+")
+    }
+}
+
+@derive(Clone, Default)]
+pub struct KeyModifiers {
+    pub ctrl: bool,
+    pub shift: bool,
+    pub alt: bool,
+    pub super_key: bool
+}
+
+fn key_name(key: u32) -> String {
+    match key {
+        0x41..=0x5A => ((key as u8) as char).to_string(),
+        0x30..=0x39 => ((key as u8) as char).to_string(),
+        0x70 => "F1".to_string(),
+        0x71 => "F2".to_string(),
+        0x72 => "F3".to_string(),
+        0x73 => "F4".to_string(),
+        0x74 => "F5".to_string(),
+        0x75 => "F6".to_string(),
+        0x76 => "F7".to_string(),
+        0x77 => "F8".to_string(),
+        0x78 => "F9".to_string(),
+        0x79 => "F10".to_string(),
+        0x7A => "F11".to_string(),
+        0x7B => "F12".to_string(),
+        0x1B => "Escape".to_string(),
+        0x09 => "Tab".to_string(),
+        0x20 => "Space".to_string(),
+        0x0D => "Enter".to_string(),
+        0x08 => "Backspace".to_string(),
+        _ => format!("Key{:02X}", key)
+    }
+}
+
+// ============================================================================
+// Configuration Schema
+// ============================================================================
+
+/// Schema for configuration validation and UI generation
+pub struct ConfigSchema {
+    name: String,
+    version: String,
+    entries: Vec<SchemaEntry>,
+    groups: Vec<SchemaGroup>
+}
+
+impl ConfigSchema {
+    pub fn new(name: &str, version: &str) -> Self {
+        Self {
+            name: name.to_string(),
+            version: version.to_string(),
+            entries: Vec::new(),
+            groups: Vec::new()
+        }
+    }
+
+    pub fn add_entry(&mut self, entry: SchemaEntry) {
+        self.entries.push(entry);
+    }
+
+    pub fn add_group(&mut self, group: SchemaGroup) {
+        self.groups.push(group);
+    }
+
+    pub fn entries(&self) -> &[SchemaEntry] {
+        &self.entries
+    }
+
+    pub fn groups(&self) -> &[SchemaGroup] {
+        &self.groups
+    }
+
+    pub fn get_entry(&self, key: &str) -> Option<&SchemaEntry> {
+        self.entries.iter().find(|e| e.key == key)
+    }
+
+    pub fn validate(&self, config: &ModConfig) -> Vec<ValidationError> {
+        let mut errors = Vec::new();
+
+        for entry in &self.entries {
+            match config.get(&entry.key) {
+                Some(value) => {
+                    if let Some(err) = entry.validate(value) {
+                        errors.push(err);
+                    }
+                }
+                None if !entry.optional => {
+                    errors.push(ValidationError {
+                        key: entry.key.clone(),
+                        message: "Required field is missing".to_string(),
+                        severity: ValidationSeverity::Error
+                    });
+                }
+                _ => {}
+            }
+        }
+
+        errors
+    }
+
+    /// Generate default config from schema
+    pub fn generate_defaults(&self) -> ModConfig {
+        let mut config = ModConfig::new("");
+
+        for entry in &self.entries {
+            if let Some(ref default) = entry.default_value {
+                config.set(&entry.key, default.clone());
+            }
+        }
+
+        config
+    }
+
+    /// Parse schema from TOML
+    pub fn from_toml(content: &str) -> Result<Self, ConfigError> {
+        let mut schema = ConfigSchema::new("", "1.0.0");
+
+        // Would parse TOML here
+        Ok(schema)
+    }
+}
+
+/// Schema entry for a single configuration value
+pub struct SchemaEntry {
+    key: String,
+    name: String,
+    description: String,
+    value_type: ValueType,
+    default_value: Option<ConfigValue>,
+    constraints: Vec<Constraint>,
+    ui_hints: UiHints,
+    optional: bool,
+    deprecated: bool,
+    deprecated_message: Option<String>
+}
+
+impl SchemaEntry {
+    pub fn new(key: &str, value_type: ValueType) -> Self {
+        Self {
+            key: key.to_string(),
+            name: key.to_string(),
+            description: String::new(),
+            value_type,
+            default_value: None,
+            constraints: Vec::new(),
+            ui_hints: UiHints::default(),
+            optional: false,
+            deprecated: false,
+            deprecated_message: None
+        }
+    }
+
+    pub fn with_name(mut self, name: &str) -> Self {
+        self.name = name.to_string();
+        self
+    }
+
+    pub fn with_description(mut self, desc: &str) -> Self {
+        self.description = desc.to_string();
+        self
+    }
+
+    pub fn with_default(mut self, value: ConfigValue) -> Self {
+        self.default_value = Some(value);
+        self
+    }
+
+    pub fn with_constraint(mut self, constraint: Constraint) -> Self {
+        self.constraints.push(constraint);
+        self
+    }
+
+    pub fn with_ui_hints(mut self, hints: UiHints) -> Self {
+        self.ui_hints = hints;
+        self
+    }
+
+    pub fn optional(mut self) -> Self {
+        self.optional = true;
+        self
+    }
+
+    pub fn deprecated(mut self, message: &str) -> Self {
+        self.deprecated = true;
+        self.deprecated_message = Some(message.to_string());
+        self
+    }
+
+    pub fn key(&self) -> &str { &self.key }
+    pub fn name(&self) -> &str { &self.name }
+    pub fn description(&self) -> &str { &self.description }
+    pub fn value_type(&self) -> &ValueType { &self.value_type }
+    pub fn default_value(&self) -> Option<&ConfigValue> { self.default_value.as_ref() }
+    pub fn is_optional(&self) -> bool { self.optional }
+    pub fn is_deprecated(&self) -> bool { self.deprecated }
+
+    pub fn validate(&self, value: &ConfigValue) -> Option<ValidationError> {
+        // Check type match
+        if !self.value_type.matches(value) {
+            return Some(ValidationError {
+                key: self.key.clone(),
+                message: format!("Expected type {}, got {}",
+                               self.value_type.name(), value.type_name()),
+                severity: ValidationSeverity::Error
+            });
+        }
+
+        // Check constraints
+        for constraint in &self.constraints {
+            if let Some(err) = constraint.validate(&self.key, value) {
+                return Some(err);
+            }
+        }
+
+        None
+    }
+}
+
+/// Value type for schema
+@derive(Clone)]
+pub enum ValueType {
+    Bool,
+    Int,
+    Float,
+    String,
+    Color,
+    Vec2,
+    Vec3,
+    Vec4,
+    Array(Box<ValueType>),
+    Object(Vec<(String, ValueType)>),
+    Path,
+    Enum(Vec<String>),
+    Keybind,
+    Any
+}
+
+impl ValueType {
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::Bool => "bool",
+            Self::Int => "int",
+            Self::Float => "float",
+            Self::String => "string",
+            Self::Color => "color",
+            Self::Vec2 => "vec2",
+            Self::Vec3 => "vec3",
+            Self::Vec4 => "vec4",
+            Self::Array(_) => "array",
+            Self::Object(_) => "object",
+            Self::Path => "path",
+            Self::Enum(_) => "enum",
+            Self::Keybind => "keybind",
+            Self::Any => "any"
+        }
+    }
+
+    pub fn matches(&self, value: &ConfigValue) -> bool {
+        match (self, value) {
+            (Self::Bool, ConfigValue::Bool(_)) => true,
+            (Self::Int, ConfigValue::Int(_)) => true,
+            (Self::Float, ConfigValue::Float(_)) => true,
+            (Self::Float, ConfigValue::Int(_)) => true,
+            (Self::String, ConfigValue::String(_)) => true,
+            (Self::Color, ConfigValue::Color(_)) => true,
+            (Self::Vec2, ConfigValue::Vec2(_, _)) => true,
+            (Self::Vec3, ConfigValue::Vec3(_, _, _)) => true,
+            (Self::Vec4, ConfigValue::Vec4(_, _, _, _)) => true,
+            (Self::Array(_), ConfigValue::Array(_)) => true,
+            (Self::Object(_), ConfigValue::Object(_)) => true,
+            (Self::Path, ConfigValue::Path(_)) => true,
+            (Self::Enum(_), ConfigValue::Enum { .. }) => true,
+            (Self::Keybind, ConfigValue::Keybind(_)) => true,
+            (Self::Any, _) => true,
+            _ => false
+        }
+    }
+}
+
+/// Constraint for value validation
+pub enum Constraint {
+    Min(f64),
+    Max(f64),
+    Range(f64, f64),
+    MinLength(usize),
+    MaxLength(usize),
+    Pattern(String),
+    OneOf(Vec<ConfigValue>),
+    NotEmpty,
+    PathExists,
+    Custom(Box<dyn Fn(&ConfigValue) -> bool + Send + Sync>)
+}
+
+impl Constraint {
+    pub fn validate(&self, key: &str, value: &ConfigValue) -> Option<ValidationError> {
+        let valid = match self {
+            Self::Min(min) => {
+                value.as_float().map(|v| v >= *min).unwrap_or(true)
+            }
+            Self::Max(max) => {
+                value.as_float().map(|v| v <= *max).unwrap_or(true)
+            }
+            Self::Range(min, max) => {
+                value.as_float().map(|v| v >= *min && v <= *max).unwrap_or(true)
+            }
+            Self::MinLength(min) => {
+                value.as_string().map(|s| s.len() >= *min).unwrap_or(true)
+            }
+            Self::MaxLength(max) => {
+                value.as_string().map(|s| s.len() <= *max).unwrap_or(true)
+            }
+            Self::Pattern(pattern) => {
+                // Would use actual regex
+                value.as_string().map(|s| s.contains(pattern)).unwrap_or(true)
+            }
+            Self::OneOf(options) => {
+                options.iter().any(|opt| match (opt, value) {
+                    (ConfigValue::Int(a), ConfigValue::Int(b)) => a == b,
+                    (ConfigValue::String(a), ConfigValue::String(b)) => a == b,
+                    _ => false
+                })
+            }
+            Self::NotEmpty => {
+                value.as_string().map(|s| !s.is_empty()).unwrap_or(true)
+            }
+            Self::PathExists => {
+                if let ConfigValue::Path(p) = value {
+                    Path::from(p).exists()
+                } else {
+                    true
+                }
+            }
+            Self::Custom(f) => f(value)
+        };
+
+        if valid {
+            None
+        } else {
+            Some(ValidationError {
+                key: key.to_string(),
+                message: self.error_message(),
+                severity: ValidationSeverity::Error
+            })
+        }
+    }
+
+    fn error_message(&self) -> String {
+        match self {
+            Self::Min(v) => format!("Value must be at least {}", v),
+            Self::Max(v) => format!("Value must be at most {}", v),
+            Self::Range(min, max) => format!("Value must be between {} and {}", min, max),
+            Self::MinLength(v) => format!("Length must be at least {}", v),
+            Self::MaxLength(v) => format!("Length must be at most {}", v),
+            Self::Pattern(p) => format!("Value must match pattern: {}", p),
+            Self::OneOf(_) => "Value must be one of the allowed options".to_string(),
+            Self::NotEmpty => "Value cannot be empty".to_string(),
+            Self::PathExists => "Path must exist".to_string(),
+            Self::Custom(_) => "Custom validation failed".to_string()
+        }
+    }
+}
+
+/// Schema group for organizing entries
+pub struct SchemaGroup {
+    name: String,
+    description: String,
+    entries: Vec<String>,
+    collapsed: bool,
+    icon: Option<String>
+}
+
+impl SchemaGroup {
+    pub fn new(name: &str) -> Self {
+        Self {
+            name: name.to_string(),
+            description: String::new(),
+            entries: Vec::new(),
+            collapsed: false,
+            icon: None
+        }
+    }
+
+    pub fn with_description(mut self, desc: &str) -> Self {
+        self.description = desc.to_string();
+        self
+    }
+
+    pub fn with_entries(mut self, entries: Vec<&str>) -> Self {
+        self.entries = entries.iter().map(|s| s.to_string()).collect();
+        self
+    }
+
+    pub fn collapsed(mut self) -> Self {
+        self.collapsed = true;
+        self
+    }
+
+    pub fn with_icon(mut self, icon: &str) -> Self {
+        self.icon = Some(icon.to_string());
+        self
+    }
+}
+
+/// UI hints for config entry display
+#[derive(Default)]
+pub struct UiHints {
+    pub widget: Widget,
+    pub tooltip: Option<String>,
+    pub placeholder: Option<String>,
+    pub suffix: Option<String>,
+    pub prefix: Option<String>,
+    pub step: Option<f64>,
+    pub precision: Option<u32>,
+    pub multiline: bool,
+    pub password: bool,
+    pub file_filter: Option<String>,
+    pub color_format: ColorFormat
+}
+
+#[derive(Default, Clone, Copy)]
+pub enum Widget {
+    #[default]
+    Auto,
+    Checkbox,
+    Slider,
+    SpinBox,
+    TextField,
+    TextArea,
+    Dropdown,
+    ColorPicker,
+    FilePicker,
+    DirectoryPicker,
+    KeybindEditor,
+    Vec2Editor,
+    Vec3Editor,
+    Vec4Editor
+}
+
+#[derive(Default, Clone, Copy)]
+pub enum ColorFormat {
+    #[default]
+    RGBA,
+    RGB,
+    HSV,
+    Hex
+}
+
+// ============================================================================
+// Mod Configuration
+// ============================================================================
+
+/// Configuration for a single mod
+pub struct ModConfig {
+    mod_id: String,
+    values: HashMap<String, ConfigValue>,
+    defaults: HashMap<String, ConfigValue>,
+    schema: Option<ConfigSchema>,
+    file_path: Option<Path>,
+    dirty: bool,
+    last_modified: u64,
+    change_callbacks: Vec<Box<dyn Fn(&str, &ConfigValue, &ConfigValue) + Send + Sync>>
+}
+
+impl ModConfig {
+    pub fn new(mod_id: &str) -> Self {
+        Self {
+            mod_id: mod_id.to_string(),
+            values: HashMap::new(),
+            defaults: HashMap::new(),
+            schema: None,
+            file_path: None,
+            dirty: false,
+            last_modified: 0,
+            change_callbacks: Vec::new()
+        }
+    }
+
+    pub fn with_schema(mut self, schema: ConfigSchema) -> Self {
+        self.defaults = schema.entries().iter()
+            .filter_map(|e| e.default_value().map(|v| (e.key().to_string(), v.clone())))
+            .collect();
+        self.schema = Some(schema);
+        self
+    }
+
+    pub fn with_file(mut self, path: Path) -> Self {
+        self.file_path = Some(path);
+        self
+    }
+
+    pub fn mod_id(&self) -> &str { &self.mod_id }
+    pub fn is_dirty(&self) -> bool { self.dirty }
+
+    /// Get a configuration value
+    pub fn get(&self, key: &str) -> Option<&ConfigValue> {
+        self.values.get(key).or_else(|| self.defaults.get(key))
+    }
+
+    /// Get a value with type conversion
+    pub fn get_bool(&self, key: &str) -> Option<bool> {
+        self.get(key).and_then(|v| v.as_bool())
+    }
+
+    pub fn get_int(&self, key: &str) -> Option<i64> {
+        self.get(key).and_then(|v| v.as_int())
+    }
+
+    pub fn get_float(&self, key: &str) -> Option<f64> {
+        self.get(key).and_then(|v| v.as_float())
+    }
+
+    pub fn get_string(&self, key: &str) -> Option<&str> {
+        self.get(key).and_then(|v| v.as_string())
+    }
+
+    pub fn get_color(&self, key: &str) -> Option<&Color> {
+        self.get(key).and_then(|v| v.as_color())
+    }
+
+    /// Set a configuration value
+    pub fn set(&mut self, key: &str, value: ConfigValue) {
+        let old_value = self.values.get(key).cloned();
+
+        self.values.insert(key.to_string(), value.clone());
+        self.dirty = true;
+
+        // Notify callbacks
+        if let Some(ref old) = old_value {
+            for callback in &self.change_callbacks {
+                callback(key, old, &value);
+            }
+        }
+    }
+
+    /// Set with type-safe helpers
+    pub fn set_bool(&mut self, key: &str, value: bool) {
+        self.set(key, ConfigValue::Bool(value));
+    }
+
+    pub fn set_int(&mut self, key: &str, value: i64) {
+        self.set(key, ConfigValue::Int(value));
+    }
+
+    pub fn set_float(&mut self, key: &str, value: f64) {
+        self.set(key, ConfigValue::Float(value));
+    }
+
+    pub fn set_string(&mut self, key: &str, value: &str) {
+        self.set(key, ConfigValue::String(value.to_string()));
+    }
+
+    /// Remove a value (reverts to default if available)
+    pub fn remove(&mut self, key: &str) -> bool {
+        if self.values.remove(key).is_some() {
+            self.dirty = true;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Reset to defaults
+    pub fn reset(&mut self) {
+        self.values.clear();
+        self.dirty = true;
+    }
+
+    /// Reset a single key
+    pub fn reset_key(&mut self, key: &str) {
+        self.values.remove(key);
+        self.dirty = true;
+    }
+
+    /// Check if a key has been modified from default
+    pub fn is_modified(&self, key: &str) -> bool {
+        if let Some(value) = self.values.get(key) {
+            if let Some(default) = self.defaults.get(key) {
+                return !values_equal(value, default);
+            }
+            return true;
+        }
+        false
+    }
+
+    /// Validate configuration against schema
+    pub fn validate(&self) -> Vec<ValidationError> {
+        match &self.schema {
+            Some(schema) => schema.validate(self),
+            None => Vec::new()
+        }
+    }
+
+    /// Load from file
+    pub fn load(&mut self) -> Result<(), ConfigError> {
+        let path = self.file_path.as_ref()
+            .ok_or(ConfigError::NoFilePath)?;
+
+        let content = File::read_to_string(path)
+            .map_err(|e| ConfigError::IoError(e.to_string()))?;
+
+        self.parse_toml(&content)?;
+        self.dirty = false;
+
+        Ok(())
+    }
+
+    /// Save to file
+    pub fn save(&mut self) -> Result<(), ConfigError> {
+        let path = self.file_path.as_ref()
+            .ok_or(ConfigError::NoFilePath)?;
+
+        let content = self.to_toml();
+
+        File::write_all(path, content.as_bytes())
+            .map_err(|e| ConfigError::IoError(e.to_string()))?;
+
+        self.dirty = false;
+        Ok(())
+    }
+
+    fn parse_toml(&mut self, content: &str) -> Result<(), ConfigError> {
+        // Simple TOML parser
+        let mut current_section = String::new();
+
+        for line in content.lines() {
+            let line = line.trim();
+
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+
+            if line.starts_with('[') && line.ends_with(']') {
+                current_section = line[1..line.len()-1].to_string();
+                continue;
+            }
+
+            if let Some(pos) = line.find('=') {
+                let key = line[..pos].trim();
+                let value_str = line[pos + 1..].trim();
+
+                let full_key = if current_section.is_empty() {
+                    key.to_string()
+                } else {
+                    format!("{}.{}", current_section, key)
+                };
+
+                let value = self.parse_value(value_str)?;
+                self.values.insert(full_key, value);
+            }
+        }
+
+        Ok(())
+    }
+
+    fn parse_value(&self, s: &str) -> Result<ConfigValue, ConfigError> {
+        let s = s.trim();
+
+        // Boolean
+        if s == "true" { return Ok(ConfigValue::Bool(true)); }
+        if s == "false" { return Ok(ConfigValue::Bool(false)); }
+
+        // Integer
+        if let Ok(i) = s.parse::<i64>() {
+            return Ok(ConfigValue::Int(i));
+        }
+
+        // Float
+        if let Ok(f) = s.parse::<f64>() {
+            return Ok(ConfigValue::Float(f));
+        }
+
+        // String (quoted)
+        if (s.starts_with('"') && s.ends_with('"')) ||
+           (s.starts_with('\'') && s.ends_with('\'')) {
+            return Ok(ConfigValue::String(s[1..s.len()-1].to_string()));
+        }
+
+        // Color (hex)
+        if s.starts_with('#') {
+            if let Some(color) = Color::from_hex(s) {
+                return Ok(ConfigValue::Color(color));
+            }
+        }
+
+        // Default to string
+        Ok(ConfigValue::String(s.to_string()))
+    }
+
+    fn to_toml(&self) -> String {
+        let mut output = String::new();
+        let mut sections: BTreeMap<String, Vec<(String, &ConfigValue)>> = BTreeMap::new();
+
+        // Group by section
+        for (key, value) in &self.values {
+            let (section, name) = if let Some(pos) = key.rfind('.') {
+                (key[..pos].to_string(), key[pos + 1..].to_string())
+            } else {
+                (String::new(), key.clone())
+            };
+
+            sections.entry(section)
+                .or_insert_with(Vec::new)
+                .push((name, value));
+        }
+
+        // Write sections
+        for (section, entries) in sections {
+            if !section.is_empty() {
+                output.push_str(&format!("\n[{}]\n", section));
+            }
+
+            for (name, value) in entries {
+                output.push_str(&format!("{} = {}\n", name, self.value_to_toml(value)));
+            }
+        }
+
+        output
+    }
+
+    fn value_to_toml(&self, value: &ConfigValue) -> String {
+        match value {
+            ConfigValue::Null => "null".to_string(),
+            ConfigValue::Bool(b) => b.to_string(),
+            ConfigValue::Int(i) => i.to_string(),
+            ConfigValue::Float(f) => format!("{:.6}", f),
+            ConfigValue::String(s) => format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\"")),
+            ConfigValue::Color(c) => format!("\"{}\"", c.to_hex()),
+            ConfigValue::Vec2(x, y) => format!("[{}, {}]", x, y),
+            ConfigValue::Vec3(x, y, z) => format!("[{}, {}, {}]", x, y, z),
+            ConfigValue::Vec4(x, y, z, w) => format!("[{}, {}, {}, {}]", x, y, z, w),
+            ConfigValue::Path(p) => format!("\"{}\"", p),
+            ConfigValue::Enum { value, .. } => format!("\"{}\"", value),
+            _ => "null".to_string()
+        }
+    }
+
+    /// Add a change callback
+    pub fn on_change<F>(&mut self, callback: F)
+    where
+        F: Fn(&str, &ConfigValue, &ConfigValue) + Send + Sync + 'static
+    {
+        self.change_callbacks.push(Box::new(callback));
+    }
+
+    /// Get all keys
+    pub fn keys(&self) -> Vec<&str> {
+        self.values.keys().map(|s| s.as_str()).collect()
+    }
+
+    /// Get all values
+    pub fn iter(&self) -> impl Iterator<Item = (&str, &ConfigValue)> {
+        self.values.iter().map(|(k, v)| (k.as_str(), v))
+    }
+}
+
+fn values_equal(a: &ConfigValue, b: &ConfigValue) -> bool {
+    match (a, b) {
+        (ConfigValue::Bool(x), ConfigValue::Bool(y)) => x == y,
+        (ConfigValue::Int(x), ConfigValue::Int(y)) => x == y,
+        (ConfigValue::Float(x), ConfigValue::Float(y)) => (x - y).abs() < 1e-10,
+        (ConfigValue::String(x), ConfigValue::String(y)) => x == y,
+        _ => false
+    }
+}
+
+// ============================================================================
+// Config Migration
+// ============================================================================
+
+/// Migration for updating configuration between versions
+pub struct ConfigMigration {
+    from_version: String,
+    to_version: String,
+    migrations: Vec<MigrationStep>
+}
+
+impl ConfigMigration {
+    pub fn new(from: &str, to: &str) -> Self {
+        Self {
+            from_version: from.to_string(),
+            to_version: to.to_string(),
+            migrations: Vec::new()
+        }
+    }
+
+    pub fn rename(mut self, old_key: &str, new_key: &str) -> Self {
+        self.migrations.push(MigrationStep::Rename {
+            old_key: old_key.to_string(),
+            new_key: new_key.to_string()
+        });
+        self
+    }
+
+    pub fn remove(mut self, key: &str) -> Self {
+        self.migrations.push(MigrationStep::Remove(key.to_string()));
+        self
+    }
+
+    pub fn add(mut self, key: &str, value: ConfigValue) -> Self {
+        self.migrations.push(MigrationStep::Add {
+            key: key.to_string(),
+            value
+        });
+        self
+    }
+
+    pub fn transform(mut self, key: &str, f: Box<dyn Fn(&ConfigValue) -> ConfigValue + Send + Sync>) -> Self {
+        self.migrations.push(MigrationStep::Transform {
+            key: key.to_string(),
+            transformer: f
+        });
+        self
+    }
+
+    pub fn apply(&self, config: &mut ModConfig) {
+        for step in &self.migrations {
+            match step {
+                MigrationStep::Rename { old_key, new_key } => {
+                    if let Some(value) = config.values.remove(old_key) {
+                        config.values.insert(new_key.clone(), value);
+                    }
+                }
+                MigrationStep::Remove(key) => {
+                    config.values.remove(key);
+                }
+                MigrationStep::Add { key, value } => {
+                    if !config.values.contains_key(key) {
+                        config.values.insert(key.clone(), value.clone());
+                    }
+                }
+                MigrationStep::Transform { key, transformer } => {
+                    if let Some(value) = config.values.get(key) {
+                        let new_value = transformer(value);
+                        config.values.insert(key.clone(), new_value);
+                    }
+                }
+            }
+        }
+        config.dirty = true;
+    }
+}
+
+enum MigrationStep {
+    Rename { old_key: String, new_key: String },
+    Remove(String),
+    Add { key: String, value: ConfigValue },
+    Transform { key: String, transformer: Box<dyn Fn(&ConfigValue) -> ConfigValue + Send + Sync> }
+}
+
+// ============================================================================
+// Config Validator
+// ============================================================================
+
+/// Validation error
+@derive(Clone)]
+pub struct ValidationError {
+    pub key: String,
+    pub message: String,
+    pub severity: ValidationSeverity
+}
+
+@derive(Clone, Copy, PartialEq, Eq)]
+pub enum ValidationSeverity {
+    Error,
+    Warning,
+    Info
+}
+
+/// Config validator with custom rules
+pub struct ConfigValidator {
+    rules: Vec<ValidationRule>
+}
+
+impl ConfigValidator {
+    pub fn new() -> Self {
+        Self { rules: Vec::new() }
+    }
+
+    pub fn add_rule(&mut self, rule: ValidationRule) {
+        self.rules.push(rule);
+    }
+
+    pub fn validate(&self, config: &ModConfig) -> Vec<ValidationError> {
+        let mut errors = Vec::new();
+
+        for rule in &self.rules {
+            if let Some(error) = rule.validate(config) {
+                errors.push(error);
+            }
+        }
+
+        errors
+    }
+}
+
+/// Custom validation rule
+pub struct ValidationRule {
+    name: String,
+    validator: Box<dyn Fn(&ModConfig) -> Option<ValidationError> + Send + Sync>
+}
+
+impl ValidationRule {
+    pub fn new<F>(name: &str, validator: F) -> Self
+    where
+        F: Fn(&ModConfig) -> Option<ValidationError> + Send + Sync + 'static
+    {
+        Self {
+            name: name.to_string(),
+            validator: Box::new(validator)
+        }
+    }
+
+    pub fn validate(&self, config: &ModConfig) -> Option<ValidationError> {
+        (self.validator)(config)
+    }
+}
+
+// ============================================================================
+// Errors
+// ============================================================================
+
+@derive(Clone)]
+pub enum ConfigError {
+    NoFilePath,
+    IoError(String),
+    ParseError(String),
+    ValidationFailed(Vec<ValidationError>),
+    SchemaNotFound,
+    MigrationFailed(String)
+}
+
+impl ConfigError {
+    pub fn message(&self) -> String {
+        match self {
+            Self::NoFilePath => "No file path configured".to_string(),
+            Self::IoError(e) => format!("I/O error: {}", e),
+            Self::ParseError(e) => format!("Parse error: {}", e),
+            Self::ValidationFailed(errors) => {
+                let msgs: Vec<String> = errors.iter().map(|e| e.message.clone()).collect();
+                format!("Validation failed: {}", msgs.join("; "))
+            }
+            Self::SchemaNotFound => "Configuration schema not found".to_string(),
+            Self::MigrationFailed(e) => format!("Migration failed: {}", e)
+        }
+    }
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_config_value_types() {
+        assert_eq!(ConfigValue::Bool(true).type_name(), "bool");
+        assert_eq!(ConfigValue::Int(42).type_name(), "int");
+        assert_eq!(ConfigValue::Float(3.14).type_name(), "float");
+        assert_eq!(ConfigValue::String("test".to_string()).type_name(), "string");
+    }
+
+    #[test]
+    fn test_config_value_conversions() {
+        assert_eq!(ConfigValue::Bool(true).as_bool(), Some(true));
+        assert_eq!(ConfigValue::Int(42).as_int(), Some(42));
+        assert_eq!(ConfigValue::Float(3.14).as_float(), Some(3.14));
+        assert_eq!(ConfigValue::String("test".to_string()).as_string(), Some("test"));
+    }
+
+    #[test]
+    fn test_color_from_hex() {
+        let color = Color::from_hex("#FF0000FF").unwrap();
+        assert!((color.r - 1.0).abs() < 0.01);
+        assert!(color.g.abs() < 0.01);
+        assert!(color.b.abs() < 0.01);
+        assert!((color.a - 1.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_color_to_hex() {
+        let color = Color::new(1.0, 0.0, 0.0, 1.0);
+        assert_eq!(color.to_hex(), "#FF0000FF");
+    }
+
+    #[test]
+    fn test_mod_config_get_set() {
+        let mut config = ModConfig::new("test_mod");
+
+        config.set_bool("enabled", true);
+        config.set_int("count", 42);
+        config.set_float("ratio", 0.5);
+        config.set_string("name", "test");
+
+        assert_eq!(config.get_bool("enabled"), Some(true));
+        assert_eq!(config.get_int("count"), Some(42));
+        assert_eq!(config.get_float("ratio"), Some(0.5));
+        assert_eq!(config.get_string("name"), Some("test"));
+    }
+
+    #[test]
+    fn test_config_defaults() {
+        let schema = ConfigSchema::new("test", "1.0.0");
+        let mut entry = SchemaEntry::new("setting", ValueType::Bool)
+            .with_default(ConfigValue::Bool(true));
+
+        let mut schema = schema;
+        schema.add_entry(entry);
+
+        let config = ModConfig::new("test").with_schema(schema);
+
+        assert_eq!(config.get_bool("setting"), Some(true));
+    }
+
+    #[test]
+    fn test_constraint_range() {
+        let constraint = Constraint::Range(0.0, 100.0);
+
+        assert!(constraint.validate("key", &ConfigValue::Float(50.0)).is_none());
+        assert!(constraint.validate("key", &ConfigValue::Float(-1.0)).is_some());
+        assert!(constraint.validate("key", &ConfigValue::Float(101.0)).is_some());
+    }
+
+    #[test]
+    fn test_config_migration() {
+        let mut config = ModConfig::new("test");
+        config.set_string("old_key", "value");
+
+        let migration = ConfigMigration::new("1.0.0", "2.0.0")
+            .rename("old_key", "new_key")
+            .add("new_setting", ConfigValue::Bool(true));
+
+        migration.apply(&mut config);
+
+        assert!(config.get_string("old_key").is_none());
+        assert_eq!(config.get_string("new_key"), Some("value"));
+        assert_eq!(config.get_bool("new_setting"), Some(true));
+    }
+
+    #[test]
+    fn test_value_type_matching() {
+        assert!(ValueType::Bool.matches(&ConfigValue::Bool(true)));
+        assert!(!ValueType::Bool.matches(&ConfigValue::Int(1)));
+        assert!(ValueType::Float.matches(&ConfigValue::Int(1))); // Int can coerce to Float
+        assert!(ValueType::Any.matches(&ConfigValue::String("any".to_string())));
+    }
+}

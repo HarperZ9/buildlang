@@ -1,0 +1,1168 @@
+// BUILD-UNIVERSE: Refract - Particle Lights System
+// ENB particle light integration for dynamic lighting
+// Version: 1.0.0
+
+module refract::particle_lights;
+
+use super::lib::*;
+use super::effects::*;
+
+// ============================================================================
+// PARTICLE LIGHT TYPES
+// ============================================================================
+
+/// Particle light source
+pub struct ParticleLight {
+    pub position: Vec3,
+    pub color: Vec3,
+    pub intensity: f32,
+    pub radius: f32,
+
+    // Falloff
+    pub falloff_type: FalloffType,
+    pub falloff_exponent: f32,
+
+    // Animation
+    pub flicker_enabled: bool,
+    pub flicker_speed: f32,
+    pub flicker_amount: f32,
+    pub pulse_enabled: bool,
+    pub pulse_speed: f32,
+    pub pulse_amount: f32,
+
+    // Shadow
+    pub cast_shadows: bool,
+    pub shadow_softness: f32,
+
+    // Volumetric
+    pub volumetric_enabled: bool,
+    pub volumetric_intensity: f32,
+
+    // Lifetime
+    pub lifetime: f32,
+    pub age: f32,
+    pub fade_in_time: f32,
+    pub fade_out_time: f32,
+
+    // Source tracking
+    pub source_id: u64,
+    pub source_type: ParticleSourceType,
+}
+
+/// Light falloff types
+pub enum FalloffType {
+    Linear,
+    Quadratic,
+    InverseSquare,
+    Exponential,
+    Custom(f32),
+}
+
+/// Particle source types
+pub enum ParticleSourceType {
+    Fire,
+    Magic,
+    Torch,
+    Candle,
+    Lightning,
+    Explosion,
+    Ambient,
+    Custom(String),
+}
+
+impl ParticleLight {
+    pub fn new(position: Vec3, color: Vec3, intensity: f32, radius: f32) -> Self {
+        Self {
+            position,
+            color,
+            intensity,
+            radius,
+            falloff_type: FalloffType::Quadratic,
+            falloff_exponent: 2.0,
+            flicker_enabled: false,
+            flicker_speed: 10.0,
+            flicker_amount: 0.2,
+            pulse_enabled: false,
+            pulse_speed: 1.0,
+            pulse_amount: 0.1,
+            cast_shadows: false,
+            shadow_softness: 0.5,
+            volumetric_enabled: false,
+            volumetric_intensity: 1.0,
+            lifetime: -1.0, // Infinite
+            age: 0.0,
+            fade_in_time: 0.1,
+            fade_out_time: 0.2,
+            source_id: 0,
+            source_type: ParticleSourceType::Ambient,
+        }
+    }
+
+    /// Create a fire-type light
+    pub fn fire(position: Vec3, intensity: f32, radius: f32) -> Self {
+        Self {
+            position,
+            color: Vec3::new(1.0, 0.6, 0.2),
+            intensity,
+            radius,
+            falloff_type: FalloffType::Quadratic,
+            falloff_exponent: 2.0,
+            flicker_enabled: true,
+            flicker_speed: 15.0,
+            flicker_amount: 0.3,
+            pulse_enabled: true,
+            pulse_speed: 3.0,
+            pulse_amount: 0.15,
+            cast_shadows: true,
+            shadow_softness: 0.8,
+            volumetric_enabled: true,
+            volumetric_intensity: 0.5,
+            lifetime: -1.0,
+            age: 0.0,
+            fade_in_time: 0.2,
+            fade_out_time: 0.3,
+            source_id: 0,
+            source_type: ParticleSourceType::Fire,
+        }
+    }
+
+    /// Create a magic-type light
+    pub fn magic(position: Vec3, color: Vec3, intensity: f32, radius: f32) -> Self {
+        Self {
+            position,
+            color,
+            intensity,
+            radius,
+            falloff_type: FalloffType::Exponential,
+            falloff_exponent: 1.5,
+            flicker_enabled: true,
+            flicker_speed: 20.0,
+            flicker_amount: 0.15,
+            pulse_enabled: true,
+            pulse_speed: 2.0,
+            pulse_amount: 0.25,
+            cast_shadows: false,
+            shadow_softness: 1.0,
+            volumetric_enabled: true,
+            volumetric_intensity: 0.8,
+            lifetime: -1.0,
+            age: 0.0,
+            fade_in_time: 0.15,
+            fade_out_time: 0.25,
+            source_id: 0,
+            source_type: ParticleSourceType::Magic,
+        }
+    }
+
+    /// Create a torch-type light
+    pub fn torch(position: Vec3) -> Self {
+        Self {
+            position,
+            color: Vec3::new(1.0, 0.7, 0.4),
+            intensity: 1.0,
+            radius: 8.0,
+            falloff_type: FalloffType::Quadratic,
+            falloff_exponent: 2.0,
+            flicker_enabled: true,
+            flicker_speed: 12.0,
+            flicker_amount: 0.2,
+            pulse_enabled: true,
+            pulse_speed: 4.0,
+            pulse_amount: 0.1,
+            cast_shadows: true,
+            shadow_softness: 0.6,
+            volumetric_enabled: true,
+            volumetric_intensity: 0.4,
+            lifetime: -1.0,
+            age: 0.0,
+            fade_in_time: 0.1,
+            fade_out_time: 0.2,
+            source_id: 0,
+            source_type: ParticleSourceType::Torch,
+        }
+    }
+
+    /// Update light animation
+    pub fn update(&mut self, delta_time: f32, time: f32) {
+        self.age += delta_time;
+
+        // Calculate current intensity with animations
+        let mut anim_intensity = self.intensity;
+
+        if self.flicker_enabled {
+            let flicker = Self::noise(time * self.flicker_speed);
+            anim_intensity *= 1.0 - flicker * self.flicker_amount;
+        }
+
+        if self.pulse_enabled {
+            let pulse = (time * self.pulse_speed * std::f32::consts::TAU).sin() * 0.5 + 0.5;
+            anim_intensity *= 1.0 - pulse * self.pulse_amount;
+        }
+
+        // Apply fade in/out
+        let fade = self.calculate_fade();
+        anim_intensity *= fade;
+    }
+
+    fn noise(x: f32) -> f32 {
+        // Simple pseudo-noise for flicker
+        let x = x.fract();
+        let x2 = x * x;
+        x2 * (3.0 - 2.0 * x)
+    }
+
+    fn calculate_fade(&self) -> f32 {
+        if self.lifetime < 0.0 {
+            // Infinite lifetime, only fade in
+            return (self.age / self.fade_in_time).min(1.0);
+        }
+
+        let remaining = self.lifetime - self.age;
+
+        if self.age < self.fade_in_time {
+            self.age / self.fade_in_time
+        } else if remaining < self.fade_out_time {
+            remaining / self.fade_out_time
+        } else {
+            1.0
+        }
+    }
+
+    /// Check if light is dead
+    pub fn is_dead(&self) -> bool {
+        self.lifetime >= 0.0 && self.age >= self.lifetime
+    }
+
+    /// Calculate light contribution at a point
+    pub fn calculate_contribution(&self, point: Vec3, time: f32) -> Vec3 {
+        let direction = point - self.position;
+        let distance = direction.length();
+
+        if distance > self.radius {
+            return Vec3::zero();
+        }
+
+        // Calculate falloff
+        let falloff = match self.falloff_type {
+            FalloffType::Linear => {
+                1.0 - distance / self.radius
+            },
+            FalloffType::Quadratic => {
+                let normalized = 1.0 - distance / self.radius;
+                normalized * normalized
+            },
+            FalloffType::InverseSquare => {
+                let d = (distance + 0.1).max(0.1);
+                1.0 / (d * d)
+            },
+            FalloffType::Exponential => {
+                (-distance / self.radius * self.falloff_exponent).exp()
+            },
+            FalloffType::Custom(exp) => {
+                (1.0 - distance / self.radius).powf(exp)
+            },
+        };
+
+        // Apply animation
+        let mut intensity = self.intensity;
+
+        if self.flicker_enabled {
+            let flicker = Self::noise(time * self.flicker_speed + self.source_id as f32 * 0.1);
+            intensity *= 1.0 - flicker * self.flicker_amount;
+        }
+
+        if self.pulse_enabled {
+            let pulse = (time * self.pulse_speed * std::f32::consts::TAU).sin() * 0.5 + 0.5;
+            intensity *= 1.0 - pulse * self.pulse_amount;
+        }
+
+        intensity *= self.calculate_fade();
+
+        self.color * intensity * falloff
+    }
+}
+
+// ============================================================================
+// PARTICLE LIGHT SYSTEM
+// ============================================================================
+
+/// GPU-packed particle light data
+#[repr(C)]
+pub struct GPUParticleLight {
+    pub position: Vec4,     // xyz = position, w = radius
+    pub color: Vec4,        // xyz = color, w = intensity
+    pub params: Vec4,       // x = falloff, y = shadow, z = volumetric, w = source_type
+}
+
+/// Particle light system configuration
+pub struct ParticleLightConfig {
+    pub enabled: bool,
+    pub max_lights: u32,
+    pub max_radius: f32,
+    pub intensity_multiplier: f32,
+    pub radius_multiplier: f32,
+
+    // Quality
+    pub shadow_quality: QualityLevel,
+    pub volumetric_quality: QualityLevel,
+
+    // Culling
+    pub cull_distance: f32,
+    pub fade_distance: f32,
+
+    // Complex particles
+    pub complex_enabled: bool,
+    pub complex_max_lights: u32,
+    pub complex_shadow_resolution: u32,
+}
+
+impl Default for ParticleLightConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            max_lights: 512,
+            max_radius: 50.0,
+            intensity_multiplier: 1.0,
+            radius_multiplier: 1.0,
+            shadow_quality: QualityLevel::Medium,
+            volumetric_quality: QualityLevel::Medium,
+            cull_distance: 200.0,
+            fade_distance: 150.0,
+            complex_enabled: true,
+            complex_max_lights: 32,
+            complex_shadow_resolution: 256,
+        }
+    }
+}
+
+/// Particle light system
+pub struct ParticleLightSystem {
+    config: ParticleLightConfig,
+
+    // Light storage
+    lights: Vec<ParticleLight>,
+    sorted_lights: Vec<usize>,
+    visible_lights: Vec<usize>,
+
+    // GPU resources
+    light_buffer: Option<*mut ID3D11Buffer>,
+    light_srv: Option<*mut ID3D11ShaderResourceView>,
+    shadow_atlas: Option<ENBTexture>,
+    shadow_matrices: Vec<Mat4>,
+
+    // Cluster grid for light culling
+    cluster_grid: ClusterGrid,
+
+    // Complex particle lights (with shadows)
+    complex_lights: Vec<ComplexParticleLight>,
+    complex_shadow_textures: Vec<ENBTexture>,
+
+    // Statistics
+    active_light_count: u32,
+    visible_light_count: u32,
+    culled_light_count: u32,
+
+    // Shaders
+    cluster_assign_shader: Option<*mut ID3D11ComputeShader>,
+    light_apply_shader: Option<*mut ID3D11PixelShader>,
+    shadow_shader: Option<*mut ID3D11PixelShader>,
+    volumetric_shader: Option<*mut ID3D11PixelShader>,
+}
+
+impl ParticleLightSystem {
+    pub fn new(config: ParticleLightConfig) -> Self {
+        Self {
+            config,
+            lights: Vec::with_capacity(512),
+            sorted_lights: Vec::with_capacity(512),
+            visible_lights: Vec::with_capacity(512),
+            light_buffer: None,
+            light_srv: None,
+            shadow_atlas: None,
+            shadow_matrices: Vec::new(),
+            cluster_grid: ClusterGrid::new(16, 8, 24),
+            complex_lights: Vec::with_capacity(32),
+            complex_shadow_textures: Vec::new(),
+            active_light_count: 0,
+            visible_light_count: 0,
+            culled_light_count: 0,
+            cluster_assign_shader: None,
+            light_apply_shader: None,
+            shadow_shader: None,
+            volumetric_shader: None,
+        }
+    }
+
+    /// Initialize GPU resources
+    pub fn initialize(&mut self, device: *mut ID3D11Device) -> Result<(), ENBError> {
+        // Create light buffer
+        let buffer_size = std::mem::size_of::<GPUParticleLight>() * self.config.max_lights as usize;
+
+        unsafe {
+            let desc = D3D11_BUFFER_DESC {
+                ByteWidth: buffer_size as u32,
+                Usage: D3D11_USAGE_DYNAMIC,
+                BindFlags: D3D11_BIND_SHADER_RESOURCE,
+                CPUAccessFlags: D3D11_CPU_ACCESS_WRITE,
+                MiscFlags: D3D11_RESOURCE_MISC_BUFFER_STRUCTURED,
+                StructureByteStride: std::mem::size_of::<GPUParticleLight>() as u32,
+            };
+
+            let mut buffer: *mut ID3D11Buffer = std::ptr::null_mut();
+            let hr = (*device).CreateBuffer(&desc, std::ptr::null(), &mut buffer);
+
+            if hr >= 0 {
+                self.light_buffer = Some(buffer);
+
+                // Create SRV
+                let srv_desc = D3D11_SHADER_RESOURCE_VIEW_DESC {
+                    Format: DXGI_FORMAT_UNKNOWN,
+                    ViewDimension: D3D11_SRV_DIMENSION_BUFFER,
+                    Buffer: D3D11_BUFFER_SRV {
+                        FirstElement: 0,
+                        NumElements: self.config.max_lights,
+                    },
+                };
+
+                let mut srv: *mut ID3D11ShaderResourceView = std::ptr::null_mut();
+                (*device).CreateShaderResourceView(buffer as *mut _, &srv_desc, &mut srv);
+                self.light_srv = Some(srv);
+            }
+        }
+
+        // Create shadow atlas for complex lights
+        if self.config.complex_enabled {
+            let atlas_size = self.config.complex_shadow_resolution * 8;
+            self.shadow_atlas = Some(ENBTexture::create(
+                device,
+                atlas_size,
+                atlas_size,
+                DXGI_FORMAT_R16_FLOAT,
+                TextureFlags::RenderTarget
+            )?);
+        }
+
+        // Initialize cluster grid
+        self.cluster_grid.initialize(device)?;
+
+        Ok(())
+    }
+
+    /// Add a particle light
+    pub fn add_light(&mut self, light: ParticleLight) -> Option<usize> {
+        if self.lights.len() >= self.config.max_lights as usize {
+            return None;
+        }
+
+        let index = self.lights.len();
+        self.lights.push(light);
+        Some(index)
+    }
+
+    /// Add a light from particle effect data
+    pub fn add_from_particle(&mut self, position: Vec3, color: Vec3, intensity: f32, radius: f32, source_type: ParticleSourceType) {
+        let light = match source_type {
+            ParticleSourceType::Fire => ParticleLight::fire(position, intensity, radius),
+            ParticleSourceType::Magic => ParticleLight::magic(position, color, intensity, radius),
+            ParticleSourceType::Torch => ParticleLight::torch(position),
+            _ => ParticleLight::new(position, color, intensity, radius),
+        };
+
+        self.add_light(light);
+    }
+
+    /// Update all lights
+    pub fn update(&mut self, camera_position: Vec3, delta_time: f32, time: f32) {
+        // Update lights and remove dead ones
+        self.lights.retain_mut(|light| {
+            light.update(delta_time, time);
+            !light.is_dead()
+        });
+
+        self.active_light_count = self.lights.len() as u32;
+
+        // Cull and sort lights by distance
+        self.cull_and_sort_lights(camera_position);
+
+        // Update GPU buffer
+        self.update_gpu_buffer();
+
+        // Update cluster grid
+        self.update_cluster_grid(camera_position);
+    }
+
+    fn cull_and_sort_lights(&mut self, camera_position: Vec3) {
+        self.visible_lights.clear();
+        self.sorted_lights.clear();
+
+        // Collect visible lights with distances
+        let mut light_distances: Vec<(usize, f32)> = Vec::with_capacity(self.lights.len());
+
+        for (i, light) in self.lights.iter().enumerate() {
+            let distance = (light.position - camera_position).length();
+
+            // Distance culling
+            if distance > self.config.cull_distance + light.radius {
+                continue;
+            }
+
+            light_distances.push((i, distance));
+        }
+
+        // Sort by distance
+        light_distances.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+
+        // Take closest lights up to max visible
+        let max_visible = self.config.max_lights.min(512) as usize;
+        for (i, (light_idx, _)) in light_distances.iter().enumerate() {
+            if i >= max_visible {
+                break;
+            }
+            self.visible_lights.push(*light_idx);
+            self.sorted_lights.push(*light_idx);
+        }
+
+        self.visible_light_count = self.visible_lights.len() as u32;
+        self.culled_light_count = self.active_light_count - self.visible_light_count;
+    }
+
+    fn update_gpu_buffer(&mut self) {
+        if self.light_buffer.is_none() || self.visible_lights.is_empty() {
+            return;
+        }
+
+        // Map buffer and update
+        unsafe {
+            // Map, write, unmap would go here
+            // For now, just a placeholder
+        }
+    }
+
+    fn update_cluster_grid(&mut self, _camera_position: Vec3) {
+        // Assign lights to clusters
+        self.cluster_grid.clear();
+
+        for &light_idx in &self.visible_lights {
+            let light = &self.lights[light_idx];
+            self.cluster_grid.assign_light(light_idx as u32, light.position, light.radius);
+        }
+
+        self.cluster_grid.upload_to_gpu();
+    }
+
+    /// Render particle light contributions
+    pub fn render(&self, context: &RenderContext) {
+        if !self.config.enabled || self.visible_lights.is_empty() {
+            return;
+        }
+
+        // Render complex light shadows first
+        if self.config.complex_enabled {
+            self.render_complex_shadows(context);
+        }
+
+        // Apply particle lights
+        self.apply_lights(context);
+
+        // Render volumetric contributions
+        if self.config.volumetric_quality != QualityLevel::Low {
+            self.render_volumetrics(context);
+        }
+    }
+
+    fn render_complex_shadows(&self, _context: &RenderContext) {
+        shader {
+            @pixel_shader
+            fn particle_shadow(input: VertexOutput) -> f32 {
+                let uv = input.texcoord;
+                let depth = sample_depth(uv);
+                let world_pos = reconstruct_position(uv, depth, inverse_view_projection);
+
+                var shadow = 1.0;
+
+                for i in 0..num_complex_lights {
+                    let light = complex_lights[i];
+                    let light_pos = light.position.xyz;
+                    let light_radius = light.position.w;
+
+                    let to_light = world_pos - light_pos;
+                    let dist = length(to_light);
+
+                    if dist < light_radius {
+                        // Sample shadow map
+                        let shadow_uv = get_shadow_atlas_uv(i, to_light);
+                        let shadow_depth = sample_shadow_atlas(shadow_uv);
+
+                        let bias = 0.01 * (1.0 - dot(normalize(to_light), normal));
+                        if dist > shadow_depth + bias {
+                            shadow *= 1.0 - light.params.y; // Shadow intensity
+                        }
+                    }
+                }
+
+                return shadow;
+            }
+        }
+    }
+
+    fn apply_lights(&self, _context: &RenderContext) {
+        shader {
+            @pixel_shader
+            fn apply_particle_lights(input: VertexOutput) -> Vec4 {
+                let uv = input.texcoord;
+                let depth = sample_depth(uv);
+                let world_pos = reconstruct_position(uv, depth, inverse_view_projection);
+                let normal = decode_normal(sample_gbuffer_normal(uv));
+                let albedo = sample_gbuffer_albedo(uv).rgb;
+                let roughness = sample_gbuffer_roughness(uv);
+
+                // Get cluster for this pixel
+                let cluster = get_cluster(world_pos);
+                let light_indices = cluster_light_indices[cluster];
+                let light_count = cluster_light_counts[cluster];
+
+                var total_light = vec3<f32>(0.0);
+
+                for i in 0..light_count {
+                    let light_idx = light_indices[i];
+                    let light = particle_lights[light_idx];
+
+                    let light_pos = light.position.xyz;
+                    let light_radius = light.position.w;
+                    let light_color = light.color.xyz;
+                    let light_intensity = light.color.w;
+                    let falloff_type = u32(light.params.x);
+
+                    let to_light = light_pos - world_pos;
+                    let dist = length(to_light);
+
+                    if dist > light_radius {
+                        continue;
+                    }
+
+                    let light_dir = normalize(to_light);
+
+                    // Calculate falloff
+                    var falloff = 0.0;
+                    switch falloff_type {
+                        0 => { // Linear
+                            falloff = 1.0 - dist / light_radius;
+                        }
+                        1 => { // Quadratic
+                            let n = 1.0 - dist / light_radius;
+                            falloff = n * n;
+                        }
+                        2 => { // Inverse square
+                            falloff = 1.0 / (dist * dist + 1.0);
+                        }
+                        3 => { // Exponential
+                            falloff = exp(-dist / light_radius * 2.0);
+                        }
+                        default => {
+                            falloff = 1.0 - dist / light_radius;
+                        }
+                    }
+
+                    // Distance fade
+                    let camera_dist = length(camera_position.xyz - world_pos);
+                    let dist_fade = 1.0 - saturate((camera_dist - fade_distance) / (cull_distance - fade_distance));
+
+                    // Lighting
+                    let ndotl = max(dot(normal, light_dir), 0.0);
+                    let diffuse = albedo * ndotl;
+
+                    // Simple specular
+                    let view_dir = normalize(camera_position.xyz - world_pos);
+                    let half_vec = normalize(light_dir + view_dir);
+                    let ndoth = max(dot(normal, half_vec), 0.0);
+                    let specular = pow(ndoth, (1.0 - roughness) * 128.0) * (1.0 - roughness);
+
+                    let contribution = (diffuse + specular) * light_color * light_intensity * falloff * dist_fade;
+                    total_light += contribution;
+                }
+
+                // Apply intensity multiplier
+                total_light *= intensity_multiplier;
+
+                let scene_color = sample_color(uv);
+                return vec4<f32>(scene_color.rgb + total_light, scene_color.a);
+            }
+        }
+    }
+
+    fn render_volumetrics(&self, _context: &RenderContext) {
+        shader {
+            @pixel_shader
+            fn particle_light_volumetrics(input: VertexOutput) -> Vec4 {
+                let uv = input.texcoord;
+                let depth = sample_depth(uv);
+                let world_pos = reconstruct_position(uv, depth, inverse_view_projection);
+
+                let ray_start = camera_position.xyz;
+                let ray_dir = normalize(world_pos - ray_start);
+                let ray_length = length(world_pos - ray_start);
+
+                let step_count = 32;
+                let step_size = ray_length / f32(step_count);
+
+                var accumulated = vec3<f32>(0.0);
+                var transmittance = 1.0;
+
+                for step in 0..step_count {
+                    let t = (f32(step) + 0.5) / f32(step_count);
+                    let sample_pos = ray_start + ray_dir * t * ray_length;
+
+                    // Sample all volumetric lights
+                    var light_contribution = vec3<f32>(0.0);
+
+                    for i in 0..num_volumetric_lights {
+                        let light = particle_lights[volumetric_light_indices[i]];
+
+                        if light.params.z < 0.01 { // Volumetric intensity
+                            continue;
+                        }
+
+                        let light_pos = light.position.xyz;
+                        let light_radius = light.position.w;
+                        let light_color = light.color.xyz;
+                        let light_intensity = light.color.w;
+                        let vol_intensity = light.params.z;
+
+                        let to_light = sample_pos - light_pos;
+                        let dist = length(to_light);
+
+                        if dist < light_radius {
+                            // Mie scattering phase function
+                            let phase = mie_phase(dot(normalize(to_light), -ray_dir), 0.8);
+
+                            let falloff = 1.0 - dist / light_radius;
+                            let contribution = light_color * light_intensity * falloff * phase * vol_intensity;
+
+                            light_contribution += contribution;
+                        }
+                    }
+
+                    // Accumulate with transmittance
+                    accumulated += light_contribution * transmittance * step_size * 0.1;
+                    transmittance *= exp(-step_size * 0.01);
+                }
+
+                return vec4<f32>(accumulated, 1.0 - transmittance);
+            }
+
+            fn mie_phase(cos_theta: f32, g: f32) -> f32 {
+                let g2 = g * g;
+                let denom = pow(1.0 + g2 - 2.0 * g * cos_theta, 1.5);
+                return (1.0 - g2) / (4.0 * PI * denom);
+            }
+        }
+    }
+
+    /// Get light count
+    pub fn get_light_count(&self) -> u32 {
+        self.active_light_count
+    }
+
+    /// Get visible light count
+    pub fn get_visible_light_count(&self) -> u32 {
+        self.visible_light_count
+    }
+
+    /// Clear all lights
+    pub fn clear(&mut self) {
+        self.lights.clear();
+        self.visible_lights.clear();
+        self.sorted_lights.clear();
+        self.active_light_count = 0;
+        self.visible_light_count = 0;
+        self.culled_light_count = 0;
+    }
+}
+
+// ============================================================================
+// COMPLEX PARTICLE LIGHTS
+// ============================================================================
+
+/// Complex particle light with shadow casting
+pub struct ComplexParticleLight {
+    pub base: ParticleLight,
+
+    // Shadow mapping
+    pub shadow_texture: Option<ENBTexture>,
+    pub shadow_matrix: Mat4,
+    pub shadow_bias: f32,
+    pub shadow_resolution: u32,
+
+    // Volumetric
+    pub volumetric_density: f32,
+    pub volumetric_scattering: f32,
+    pub volumetric_absorption: f32,
+
+    // IES profile
+    pub ies_profile: Option<ENBTexture>,
+    pub ies_multiplier: f32,
+
+    // Gobo/Cookie
+    pub cookie_texture: Option<ENBTexture>,
+    pub cookie_scale: Vec2,
+    pub cookie_rotation: f32,
+}
+
+impl ComplexParticleLight {
+    pub fn new(base: ParticleLight) -> Self {
+        Self {
+            base,
+            shadow_texture: None,
+            shadow_matrix: Mat4::identity(),
+            shadow_bias: 0.001,
+            shadow_resolution: 256,
+            volumetric_density: 1.0,
+            volumetric_scattering: 0.5,
+            volumetric_absorption: 0.1,
+            ies_profile: None,
+            ies_multiplier: 1.0,
+            cookie_texture: None,
+            cookie_scale: Vec2::new(1.0, 1.0),
+            cookie_rotation: 0.0,
+        }
+    }
+
+    /// Render shadow map for this light
+    pub fn render_shadow(&self, _context: &RenderContext) {
+        shader {
+            @vertex_shader
+            fn shadow_vs(input: VertexInput) -> VertexOutput {
+                var output: VertexOutput;
+                output.position = shadow_matrix * vec4<f32>(input.position, 1.0);
+                return output;
+            }
+
+            @pixel_shader
+            fn shadow_ps(input: VertexOutput) -> f32 {
+                // Distance to light center
+                return length(input.position.xyz);
+            }
+        }
+    }
+}
+
+// ============================================================================
+// CLUSTER GRID
+// ============================================================================
+
+/// 3D cluster grid for light culling
+pub struct ClusterGrid {
+    grid_x: u32,
+    grid_y: u32,
+    grid_z: u32,
+
+    // Per-cluster light lists
+    cluster_light_counts: Vec<u32>,
+    cluster_light_indices: Vec<Vec<u32>>,
+
+    // GPU resources
+    count_buffer: Option<*mut ID3D11Buffer>,
+    index_buffer: Option<*mut ID3D11Buffer>,
+    count_srv: Option<*mut ID3D11ShaderResourceView>,
+    index_srv: Option<*mut ID3D11ShaderResourceView>,
+}
+
+impl ClusterGrid {
+    pub fn new(x: u32, y: u32, z: u32) -> Self {
+        let total_clusters = (x * y * z) as usize;
+
+        Self {
+            grid_x: x,
+            grid_y: y,
+            grid_z: z,
+            cluster_light_counts: vec![0; total_clusters],
+            cluster_light_indices: vec![Vec::with_capacity(64); total_clusters],
+            count_buffer: None,
+            index_buffer: None,
+            count_srv: None,
+            index_srv: None,
+        }
+    }
+
+    pub fn initialize(&mut self, _device: *mut ID3D11Device) -> Result<(), ENBError> {
+        // Create GPU buffers for cluster data
+        Ok(())
+    }
+
+    pub fn clear(&mut self) {
+        for count in &mut self.cluster_light_counts {
+            *count = 0;
+        }
+        for indices in &mut self.cluster_light_indices {
+            indices.clear();
+        }
+    }
+
+    pub fn assign_light(&mut self, light_index: u32, position: Vec3, radius: f32) {
+        // Calculate cluster bounds that light intersects
+        let min_cluster = self.world_to_cluster(position - Vec3::splat(radius));
+        let max_cluster = self.world_to_cluster(position + Vec3::splat(radius));
+
+        for z in min_cluster.2..=max_cluster.2 {
+            for y in min_cluster.1..=max_cluster.1 {
+                for x in min_cluster.0..=max_cluster.0 {
+                    let idx = self.cluster_index(x, y, z);
+                    if idx < self.cluster_light_indices.len() {
+                        if self.cluster_light_indices[idx].len() < 64 {
+                            self.cluster_light_indices[idx].push(light_index);
+                            self.cluster_light_counts[idx] += 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn world_to_cluster(&self, pos: Vec3) -> (u32, u32, u32) {
+        // Convert world position to cluster coordinates
+        // This is simplified - real implementation would use view frustum
+        let x = ((pos.x / 100.0 + 0.5) * self.grid_x as f32).clamp(0.0, (self.grid_x - 1) as f32) as u32;
+        let y = ((pos.y / 100.0 + 0.5) * self.grid_y as f32).clamp(0.0, (self.grid_y - 1) as f32) as u32;
+        let z = ((pos.z / 500.0) * self.grid_z as f32).clamp(0.0, (self.grid_z - 1) as f32) as u32;
+        (x, y, z)
+    }
+
+    fn cluster_index(&self, x: u32, y: u32, z: u32) -> usize {
+        (z * self.grid_y * self.grid_x + y * self.grid_x + x) as usize
+    }
+
+    pub fn upload_to_gpu(&self) {
+        // Upload cluster data to GPU buffers
+    }
+}
+
+// ============================================================================
+// PARTICLE EFFECT DETECTION
+// ============================================================================
+
+/// Particle effect detector for automatic light creation
+pub struct ParticleDetector {
+    target_game: TargetGame,
+
+    // Known particle effect hashes for light emission
+    fire_effects: HashSet<u64>,
+    magic_effects: HashSet<u64>,
+    torch_effects: HashSet<u64>,
+    candle_effects: HashSet<u64>,
+    lightning_effects: HashSet<u64>,
+    explosion_effects: HashSet<u64>,
+
+    // Detection thresholds
+    brightness_threshold: f32,
+    saturation_threshold: f32,
+    min_particle_size: f32,
+}
+
+impl ParticleDetector {
+    pub fn new(game: TargetGame) -> Self {
+        let mut detector = Self {
+            target_game: game,
+            fire_effects: HashSet::new(),
+            magic_effects: HashSet::new(),
+            torch_effects: HashSet::new(),
+            candle_effects: HashSet::new(),
+            lightning_effects: HashSet::new(),
+            explosion_effects: HashSet::new(),
+            brightness_threshold: 0.5,
+            saturation_threshold: 0.3,
+            min_particle_size: 0.1,
+        };
+
+        detector.populate_known_effects();
+        detector
+    }
+
+    fn populate_known_effects(&mut self) {
+        match self.target_game {
+            TargetGame::SkyrimSE | TargetGame::SkyrimAE => {
+                // Skyrim particle effect form IDs/hashes
+                self.fire_effects.extend([
+                    0x000D7F68, // FireEmberSmallNoLight
+                    0x000D7F69, // FireEmberMedNoLight
+                    0x000D7F6A, // FireEmberLargeNoLight
+                    // ... more
+                ]);
+
+                self.magic_effects.extend([
+                    0x000EAFD9, // MagicHitShock
+                    0x000EAFDA, // MagicHitFire
+                    0x000EAFDB, // MagicHitFrost
+                    // ... more
+                ]);
+            },
+            TargetGame::Fallout4 => {
+                // Fallout 4 particle effects
+                self.fire_effects.extend([
+                    0x001D9710, // FireBarrelAmbientSmoke
+                    // ... more
+                ]);
+            },
+            _ => {}
+        }
+    }
+
+    /// Analyze a particle effect and determine if it should emit light
+    pub fn analyze_effect(
+        &self,
+        effect_id: u64,
+        color: Vec3,
+        size: f32,
+        position: Vec3
+    ) -> Option<ParticleLight> {
+        // Check known effects
+        if self.fire_effects.contains(&effect_id) {
+            return Some(ParticleLight::fire(position, 1.0, size * 4.0));
+        }
+
+        if self.magic_effects.contains(&effect_id) {
+            return Some(ParticleLight::magic(position, color, 1.0, size * 3.0));
+        }
+
+        if self.torch_effects.contains(&effect_id) {
+            return Some(ParticleLight::torch(position));
+        }
+
+        if self.lightning_effects.contains(&effect_id) {
+            return Some(ParticleLight {
+                position,
+                color: Vec3::new(0.8, 0.85, 1.0),
+                intensity: 3.0,
+                radius: size * 10.0,
+                falloff_type: FalloffType::Exponential,
+                falloff_exponent: 3.0,
+                flicker_enabled: true,
+                flicker_speed: 50.0,
+                flicker_amount: 0.8,
+                pulse_enabled: false,
+                pulse_speed: 0.0,
+                pulse_amount: 0.0,
+                cast_shadows: true,
+                shadow_softness: 0.2,
+                volumetric_enabled: true,
+                volumetric_intensity: 1.5,
+                lifetime: 0.2,
+                age: 0.0,
+                fade_in_time: 0.01,
+                fade_out_time: 0.1,
+                source_id: effect_id,
+                source_type: ParticleSourceType::Lightning,
+            });
+        }
+
+        // Heuristic detection based on color
+        let brightness = (color.x + color.y + color.z) / 3.0;
+        let max_component = color.x.max(color.y).max(color.z);
+        let min_component = color.x.min(color.y).min(color.z);
+        let saturation = if max_component > 0.0 {
+            (max_component - min_component) / max_component
+        } else {
+            0.0
+        };
+
+        if brightness > self.brightness_threshold && size > self.min_particle_size {
+            // Determine type from color
+            let source_type = if color.x > color.y && color.x > color.z && saturation > 0.5 {
+                ParticleSourceType::Fire
+            } else if color.z > color.x && color.z > color.y && saturation > 0.3 {
+                ParticleSourceType::Magic
+            } else {
+                ParticleSourceType::Ambient
+            };
+
+            return Some(ParticleLight {
+                position,
+                color,
+                intensity: brightness,
+                radius: size * 3.0,
+                falloff_type: FalloffType::Quadratic,
+                falloff_exponent: 2.0,
+                flicker_enabled: source_type == ParticleSourceType::Fire,
+                flicker_speed: 10.0,
+                flicker_amount: 0.2,
+                pulse_enabled: source_type == ParticleSourceType::Magic,
+                pulse_speed: 2.0,
+                pulse_amount: 0.2,
+                cast_shadows: false,
+                shadow_softness: 0.5,
+                volumetric_enabled: false,
+                volumetric_intensity: 0.0,
+                lifetime: -1.0,
+                age: 0.0,
+                fade_in_time: 0.1,
+                fade_out_time: 0.2,
+                source_id: effect_id,
+                source_type,
+            });
+        }
+
+        None
+    }
+}
+
+// ============================================================================
+// CONSTANTS AND EXTERNAL TYPES
+// ============================================================================
+
+const PI: f32 = std::f32::consts::PI;
+
+const D3D11_USAGE_DYNAMIC: u32 = 2;
+const D3D11_BIND_SHADER_RESOURCE: u32 = 8;
+const D3D11_CPU_ACCESS_WRITE: u32 = 0x10000;
+const D3D11_RESOURCE_MISC_BUFFER_STRUCTURED: u32 = 64;
+const D3D11_SRV_DIMENSION_BUFFER: u32 = 1;
+const DXGI_FORMAT_UNKNOWN: u32 = 0;
+const DXGI_FORMAT_R16_FLOAT: u32 = 54;
+
+#[repr(C)]
+struct D3D11_BUFFER_DESC {
+    ByteWidth: u32,
+    Usage: u32,
+    BindFlags: u32,
+    CPUAccessFlags: u32,
+    MiscFlags: u32,
+    StructureByteStride: u32,
+}
+
+#[repr(C)]
+struct D3D11_BUFFER_SRV {
+    FirstElement: u32,
+    NumElements: u32,
+}
+
+#[repr(C)]
+struct D3D11_SHADER_RESOURCE_VIEW_DESC {
+    Format: u32,
+    ViewDimension: u32,
+    Buffer: D3D11_BUFFER_SRV,
+}
+
+struct ID3D11Buffer;
+struct ID3D11ComputeShader;
+
+use std::collections::HashSet;
+
+// ============================================================================
+// MODULE EXPORTS
+// ============================================================================
+
+pub use self::{
+    // Types
+    ParticleLight,
+    FalloffType,
+    ParticleSourceType,
+    GPUParticleLight,
+
+    // Config
+    ParticleLightConfig,
+
+    // System
+    ParticleLightSystem,
+    ComplexParticleLight,
+    ClusterGrid,
+    ParticleDetector,
+};

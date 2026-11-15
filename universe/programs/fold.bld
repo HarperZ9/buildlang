@@ -1,0 +1,184 @@
+// qfold — Wrap long lines to a specified width, written in BuildLang
+// Usage: qfold [-w N] [-s] [FILE]     (default: 80 columns, from stdin)
+
+include!("stdlib/lines.bld");
+
+fn strip_cr(line: String) -> String {
+    let len = line.len();
+    if len == 0 { return ""; }
+    if line.char_at(len - 1) == "\r" {
+        if len == 1 { return ""; }
+        line.substring(0, len - 1)
+    } else { line }
+}
+
+// --- Fold a single line at exact column boundary ---
+fn fold_line_hard(line: String, width: i32) ~ Console {
+    let len = line.len();
+    if len <= width {
+        println!("{}", line);
+        return;
+    }
+
+    let mut pos: i32 = 0;
+    while pos < len {
+        let remaining = len - pos;
+        if remaining <= width {
+            let chunk = line.substring(pos, remaining);
+            println!("{}", chunk);
+            pos = len;
+        } else {
+            let chunk = line.substring(pos, width);
+            println!("{}", chunk);
+            pos = pos + width;
+        }
+    }
+}
+
+// --- Find last space at or before position ---
+fn find_last_space(line: String, start: i32, limit: i32) -> i32 {
+    let mut pos = start + limit - 1;
+    if pos >= line.len() {
+        pos = line.len() - 1;
+    }
+    let mut found: i32 = -1;
+    let mut go = true;
+    while go {
+        if pos < start {
+            go = false;
+        } else {
+            let c = line.char_at(pos);
+            if c == " " {
+                found = pos;
+                go = false;
+            } else {
+                pos = pos - 1;
+            }
+        }
+    }
+    found
+}
+
+// --- Fold a single line breaking at spaces ---
+fn fold_line_soft(line: String, width: i32) ~ Console {
+    let len = line.len();
+    if len <= width {
+        println!("{}", line);
+        return;
+    }
+
+    let mut pos: i32 = 0;
+    while pos < len {
+        let remaining = len - pos;
+        if remaining <= width {
+            let chunk = line.substring(pos, remaining);
+            println!("{}", chunk);
+            pos = len;
+        } else {
+            let sp = find_last_space(line, pos, width);
+            if sp > pos {
+                // Break at the space
+                let chunk_len = sp - pos;
+                let chunk = line.substring(pos, chunk_len);
+                println!("{}", chunk);
+                pos = sp + 1;
+            } else {
+                // No space found — hard break
+                let chunk = line.substring(pos, width);
+                println!("{}", chunk);
+                pos = pos + width;
+            }
+        }
+    }
+}
+
+// --- Process content line by line ---
+fn process(content: String, width: i32, soft_wrap: bool) ~ Console {
+    let lr = lr_new(content);
+    let mut i = 0;
+    while i < lr.count {
+        let raw = lr_get(&lr, i);
+        let line = strip_cr(raw);
+        if soft_wrap {
+            fold_line_soft(line, width);
+        } else {
+            fold_line_hard(line, width);
+        }
+        i = i + 1;
+    }
+}
+
+// --- Help ---
+fn print_help() ~ Console {
+    println!("qfold — wrap long lines to fit a specified width");
+    println!("");
+    println!("Usage: qfold [OPTIONS] [FILE]");
+    println!("");
+    println!("Options:");
+    println!("  -w N       set line width to N (default: 80)");
+    println!("  -s         break at spaces (word wrap)");
+    println!("  --help     display this help and exit");
+    println!("");
+    println!("If no FILE is given, reads from stdin.");
+}
+
+// --- Main ---
+fn main() ~ Console + Environment + FileSystem + Process {
+    let nargs = args_count();
+    let mut width: i32 = 80;
+    let mut soft_wrap = false;
+    let mut filename = "";
+    let mut has_file = false;
+
+    let mut i: i32 = 1;
+    while i < nargs {
+        let arg = args_get(i);
+
+        if arg == "--help" || arg == "-h" {
+            print_help();
+            process_exit(0);
+        } else if arg == "-w" {
+            i = i + 1;
+            if i < nargs {
+                let val = args_get(i);
+                width = val.parse_int();
+                if width < 1 {
+                    println!("qfold: invalid width");
+                    process_exit(2);
+                }
+            }
+        } else if arg == "-s" {
+            soft_wrap = true;
+        } else if arg.starts_with("-") {
+            println!("qfold: unknown option '{}'", arg);
+            process_exit(2);
+        } else {
+            filename = arg;
+            has_file = true;
+        }
+
+        i = i + 1;
+    }
+
+    // Read input
+    let input = if has_file {
+        if !file_exists(filename) {
+            println!("qfold: {}: No such file or directory", filename);
+            process_exit(2);
+        }
+        read_file(filename)
+    } else {
+        let piped = stdin_is_pipe();
+        if !piped {
+            print_help();
+            process_exit(0);
+        }
+        read_all()
+    };
+
+    if input.len() == 0 {
+        process_exit(0);
+    }
+
+    process(input, width, soft_wrap);
+}

@@ -1,0 +1,19 @@
+[package]
+name = "photon-frametrace"
+version = "0.1.0"
+edition = "2021"
+description = "A symbol table for the D3D11 immediate-context frame: binding table plus read/write hazard detection for photon/refract."
+license = "MIT"
+
+[lib]
+name = "photon_frametrace"
+path = "src/lib.rs"
+crate-type = ["rlib", "staticlib"]
+
+[dependencies]
+serde = { version = "=1.0.228", features = ["derive"], optional = true }
+serde_json = { version = "=1.0.149", optional = true }
+
+[features]
+default = ["trace"]
+trace = ["dep:serde", "dep:serde_json"]

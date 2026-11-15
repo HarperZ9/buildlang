@@ -1,0 +1,5731 @@
+// ═══════════════════════════════════════════════════════════════════════════════
+// BUILDOS v2.0.0
+// Hobby OS kernel for x86-64
+// ═══════════════════════════════════════════════════════════════════════════════
+// Copyright © 2024-2025 Zain Dana Harper. All Rights Reserved.
+// Copyright (c) 2024-2025 Zain Dana Harper. All Rights Reserved.
+// ═══════════════════════════════════════════════════════════════════════════════
+//
+// BuildOS is a hobby operating system featuring:
+// - Process scheduler with priority-based scheduling
+// - Self-Healing Engine with automatic fault recovery
+// - First-class AI inference support in the kernel
+// - Differential checkpointing for instant recovery
+// - Zero-copy AI tensor sharing between processes
+//
+//
+// ═══════════════════════════════════════════════════════════════════════════════
+
+module buildos
+
+use std::collections::{HashMap, Vec, VecDeque, BTreeMap}
+use std::sync::{Mutex, RwLock, Arc, AtomicU64, AtomicBool}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// SYSTEM CONSTANTS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Memory constants
+pub const PAGE_SIZE: usize = 4096;
+pub const PAGE_SHIFT: usize = 12;
+pub const HUGE_PAGE_SIZE: usize = 2 * 1024 * 1024; // 2MB
+pub const KERNEL_HEAP_START: u64 = 0xFFFF_8000_0000_0000;
+pub const KERNEL_HEAP_SIZE: usize = 128 * 1024 * 1024; // 128MB
+pub const USER_SPACE_END: u64 = 0x0000_7FFF_FFFF_FFFF;
+pub const MAX_PROCESSES: usize = 65536;
+pub const MAX_THREADS_PER_PROCESS: usize = 1024;
+pub const MAX_FDS_PER_PROCESS: usize = 4096;
+
+/// System call numbers - Standard
+pub const SYS_READ: u64 = 0;
+pub const SYS_WRITE: u64 = 1;
+pub const SYS_OPEN: u64 = 2;
+pub const SYS_CLOSE: u64 = 3;
+pub const SYS_MMAP: u64 = 9;
+pub const SYS_MUNMAP: u64 = 11;
+pub const SYS_BRK: u64 = 12;
+pub const SYS_FORK: u64 = 57;
+pub const SYS_EXECVE: u64 = 59;
+pub const SYS_EXIT: u64 = 60;
+pub const SYS_WAIT4: u64 = 61;
+pub const SYS_KILL: u64 = 62;
+pub const SYS_GETPID: u64 = 39;
+pub const SYS_CLONE: u64 = 56;
+
+/// System call numbers - AI-specific (500 series)
+pub const SYS_AI_QUERY: u64 = 500;
+pub const SYS_AI_INFER: u64 = 501;
+pub const SYS_AI_TRAIN_STEP: u64 = 502;
+pub const SYS_AI_LOAD_MODEL: u64 = 503;
+pub const SYS_AI_UNLOAD_MODEL: u64 = 504;
+pub const SYS_AI_TENSOR_ALLOC: u64 = 505;
+pub const SYS_AI_TENSOR_FREE: u64 = 506;
+pub const SYS_AI_TENSOR_SHARE: u64 = 507;
+pub const SYS_AI_PRIORITY_BOOST: u64 = 508;
+pub const SYS_AI_REGISTER_CALLBACK: u64 = 509;
+pub const SYS_CHECKPOINT: u64 = 510;
+pub const SYS_RESTORE: u64 = 511;
+pub const SYS_HEAL: u64 = 512;
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ARCHITECTURE DEFINITIONS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Supported architectures
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Architecture {
+    X86_64,
+    ARM64,
+    RISCV64,
+}
+
+impl Architecture {
+    pub fn page_levels(&self) -> usize {
+        match self {
+            Architecture::X86_64 => 4,  // PML4 -> PDPT -> PD -> PT
+            Architecture::ARM64 => 4,   // L0 -> L1 -> L2 -> L3
+            Architecture::RISCV64 => 4, // Sv48
+        }
+    }
+
+    pub fn phys_addr_width(&self) -> usize {
+        match self {
+            Architecture::X86_64 => 52,
+            Architecture::ARM64 => 48,
+            Architecture::RISCV64 => 56,
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ERROR TYPES
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KernelError {
+    OutOfMemory,
+    InvalidAddress,
+    InvalidPid,
+    InvalidTid,
+    InvalidFd,
+    ProcessNotFound,
+    ThreadNotFound,
+    PermissionDenied,
+    ResourceBusy,
+    Deadlock,
+    InvalidSyscall,
+    AIModelNotLoaded,
+    AIInferenceFailed,
+    CheckpointFailed,
+    RestoreFailed,
+    IoError,
+    NotImplemented,
+}
+
+pub type KernelResult<T> = Result<T, KernelError>;
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// PHYSICAL MEMORY MANAGEMENT
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Physical address wrapper
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct PhysAddr(pub u64);
+
+impl PhysAddr {
+    pub fn new(addr: u64) -> Self {
+        PhysAddr(addr & 0x000F_FFFF_FFFF_F000) // Mask to valid physical address
+    }
+
+    pub fn as_u64(&self) -> u64 {
+        self.0
+    }
+
+    pub fn offset(&self, offset: u64) -> Self {
+        PhysAddr(self.0 + offset)
+    }
+
+    pub fn page_index(&self) -> usize {
+        (self.0 >> PAGE_SHIFT) as usize
+    }
+}
+
+/// Virtual address wrapper
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct VirtAddr(pub u64);
+
+impl VirtAddr {
+    pub fn new(addr: u64) -> Self {
+        // Sign extend for canonical addresses
+        let sign_extended = if addr & (1 << 47) != 0 {
+            addr | 0xFFFF_0000_0000_0000
+        } else {
+            addr & 0x0000_FFFF_FFFF_FFFF
+        };
+        VirtAddr(sign_extended)
+    }
+
+    pub fn as_u64(&self) -> u64 {
+        self.0
+    }
+
+    pub fn page_offset(&self) -> usize {
+        (self.0 & 0xFFF) as usize
+    }
+
+    pub fn pml4_index(&self) -> usize {
+        ((self.0 >> 39) & 0x1FF) as usize
+    }
+
+    pub fn pdpt_index(&self) -> usize {
+        ((self.0 >> 30) & 0x1FF) as usize
+    }
+
+    pub fn pd_index(&self) -> usize {
+        ((self.0 >> 21) & 0x1FF) as usize
+    }
+
+    pub fn pt_index(&self) -> usize {
+        ((self.0 >> 12) & 0x1FF) as usize
+    }
+}
+
+/// Physical memory region type
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemoryRegionType {
+    Available,
+    Reserved,
+    AcpiReclaimable,
+    AcpiNvs,
+    BadMemory,
+    KernelCode,
+    KernelData,
+    KernelStack,
+    FrameBuffer,
+    AITensorPool,
+}
+
+/// Memory region descriptor
+#[derive(Debug, Clone)]
+pub struct MemoryRegion {
+    pub start: PhysAddr,
+    pub size: usize,
+    pub region_type: MemoryRegionType,
+}
+
+/// Buddy allocator for physical pages
+pub struct BuddyAllocator {
+    /// Free lists for each order (0 = 4KB, 1 = 8KB, ..., 10 = 4MB)
+    free_lists: [Vec<PhysAddr>; 11],
+    /// Total available memory
+    total_memory: usize,
+    /// Currently free memory
+    free_memory: usize,
+    /// Bitmap of allocated pages
+    bitmap: Vec<u64>,
+}
+
+impl BuddyAllocator {
+    pub fn new(total_pages: usize) -> Self {
+        let bitmap_size = (total_pages + 63) / 64;
+        BuddyAllocator {
+            free_lists: Default::default(),
+            total_memory: total_pages * PAGE_SIZE,
+            free_memory: 0,
+            bitmap: vec![0; bitmap_size],
+        }
+    }
+
+    /// Initialize with memory map
+    pub fn init(&mut self, regions: &[MemoryRegion]) {
+        for region in regions {
+            if region.region_type == MemoryRegionType::Available {
+                let start_page = region.start.page_index();
+                let num_pages = region.size / PAGE_SIZE;
+
+                // Add to highest possible order
+                let mut remaining = num_pages;
+                let mut current_page = start_page;
+
+                while remaining > 0 {
+                    let order = self.find_order(remaining, current_page);
+                    let pages_in_block = 1 << order;
+
+                    self.free_lists[order].push(PhysAddr::new((current_page as u64) << PAGE_SHIFT));
+                    self.free_memory += pages_in_block * PAGE_SIZE;
+
+                    current_page += pages_in_block;
+                    remaining -= pages_in_block;
+                }
+            }
+        }
+    }
+
+    fn find_order(&self, remaining: usize, page: usize) -> usize {
+        for order in (0..=10).rev() {
+            let block_size = 1 << order;
+            if remaining >= block_size && (page % block_size) == 0 {
+                return order;
+            }
+        }
+        0
+    }
+
+    /// Allocate contiguous pages
+    pub fn allocate(&mut self, order: usize) -> KernelResult<PhysAddr> {
+        if order > 10 {
+            return Err(KernelError::InvalidAddress);
+        }
+
+        // Find smallest available block
+        for o in order..=10 {
+            if let Some(addr) = self.free_lists[o].pop() {
+                // Split larger blocks if necessary
+                let mut current_order = o;
+                let mut current_addr = addr;
+
+                while current_order > order {
+                    current_order -= 1;
+                    let buddy_addr = PhysAddr::new(
+                        current_addr.as_u64() + ((1 << current_order) * PAGE_SIZE) as u64
+                    );
+                    self.free_lists[current_order].push(buddy_addr);
+                }
+
+                let pages = 1 << order;
+                self.free_memory -= pages * PAGE_SIZE;
+
+                // Mark as allocated in bitmap
+                let start_page = current_addr.page_index();
+                for i in 0..pages {
+                    self.mark_allocated(start_page + i);
+                }
+
+                return Ok(current_addr);
+            }
+        }
+
+        Err(KernelError::OutOfMemory)
+    }
+
+    /// Free contiguous pages
+    pub fn free(&mut self, addr: PhysAddr, order: usize) {
+        if order > 10 {
+            return;
+        }
+
+        let pages = 1 << order;
+        let start_page = addr.page_index();
+
+        // Mark as free in bitmap
+        for i in 0..pages {
+            self.mark_free(start_page + i);
+        }
+
+        // Try to coalesce with buddy
+        let mut current_addr = addr;
+        let mut current_order = order;
+
+        while current_order < 10 {
+            let buddy_addr = self.get_buddy(current_addr, current_order);
+
+            // Check if buddy is free
+            if let Some(idx) = self.free_lists[current_order].iter().position(|&a| a == buddy_addr) {
+                self.free_lists[current_order].remove(idx);
+                current_addr = PhysAddr::new(current_addr.as_u64().min(buddy_addr.as_u64()));
+                current_order += 1;
+            } else {
+                break;
+            }
+        }
+
+        self.free_lists[current_order].push(current_addr);
+        self.free_memory += pages * PAGE_SIZE;
+    }
+
+    fn get_buddy(&self, addr: PhysAddr, order: usize) -> PhysAddr {
+        let buddy_offset = (1 << order) * PAGE_SIZE;
+        PhysAddr::new(addr.as_u64() ^ buddy_offset as u64)
+    }
+
+    fn mark_allocated(&mut self, page: usize) {
+        let word = page / 64;
+        let bit = page % 64;
+        if word < self.bitmap.len() {
+            self.bitmap[word] |= 1 << bit;
+        }
+    }
+
+    fn mark_free(&mut self, page: usize) {
+        let word = page / 64;
+        let bit = page % 64;
+        if word < self.bitmap.len() {
+            self.bitmap[word] &= !(1 << bit);
+        }
+    }
+
+    pub fn available_memory(&self) -> usize {
+        self.free_memory
+    }
+
+    pub fn total_memory(&self) -> usize {
+        self.total_memory
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// VIRTUAL MEMORY MANAGEMENT
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Page table entry flags
+#[derive(Debug, Clone, Copy)]
+pub struct PageFlags(u64);
+
+impl PageFlags {
+    pub const PRESENT: u64 = 1 << 0;
+    pub const WRITABLE: u64 = 1 << 1;
+    pub const USER: u64 = 1 << 2;
+    pub const WRITE_THROUGH: u64 = 1 << 3;
+    pub const NO_CACHE: u64 = 1 << 4;
+    pub const ACCESSED: u64 = 1 << 5;
+    pub const DIRTY: u64 = 1 << 6;
+    pub const HUGE_PAGE: u64 = 1 << 7;
+    pub const GLOBAL: u64 = 1 << 8;
+    pub const NO_EXECUTE: u64 = 1 << 63;
+
+    pub fn new() -> Self {
+        PageFlags(0)
+    }
+
+    pub fn present(mut self) -> Self {
+        self.0 |= Self::PRESENT;
+        self
+    }
+
+    pub fn writable(mut self) -> Self {
+        self.0 |= Self::WRITABLE;
+        self
+    }
+
+    pub fn user(mut self) -> Self {
+        self.0 |= Self::USER;
+        self
+    }
+
+    pub fn no_execute(mut self) -> Self {
+        self.0 |= Self::NO_EXECUTE;
+        self
+    }
+
+    pub fn as_u64(&self) -> u64 {
+        self.0
+    }
+
+    pub fn is_present(&self) -> bool {
+        self.0 & Self::PRESENT != 0
+    }
+
+    pub fn is_writable(&self) -> bool {
+        self.0 & Self::WRITABLE != 0
+    }
+
+    pub fn is_user(&self) -> bool {
+        self.0 & Self::USER != 0
+    }
+}
+
+/// Page table entry
+#[derive(Debug, Clone, Copy)]
+pub struct PageTableEntry(u64);
+
+impl PageTableEntry {
+    pub fn new() -> Self {
+        PageTableEntry(0)
+    }
+
+    pub fn from_addr(addr: PhysAddr, flags: PageFlags) -> Self {
+        PageTableEntry(addr.as_u64() | flags.as_u64())
+    }
+
+    pub fn address(&self) -> PhysAddr {
+        PhysAddr::new(self.0 & 0x000F_FFFF_FFFF_F000)
+    }
+
+    pub fn flags(&self) -> PageFlags {
+        PageFlags(self.0 & 0xFFF)
+    }
+
+    pub fn is_present(&self) -> bool {
+        self.0 & PageFlags::PRESENT != 0
+    }
+
+    pub fn set_address(&mut self, addr: PhysAddr) {
+        self.0 = (self.0 & 0xFFF) | addr.as_u64();
+    }
+
+    pub fn set_flags(&mut self, flags: PageFlags) {
+        self.0 = (self.0 & !0xFFF) | flags.as_u64();
+    }
+}
+
+/// Page table (512 entries)
+#[repr(C, align(4096))]
+pub struct PageTable {
+    entries: [PageTableEntry; 512],
+}
+
+impl PageTable {
+    pub fn new() -> Self {
+        PageTable {
+            entries: [PageTableEntry::new(); 512],
+        }
+    }
+
+    pub fn entry(&self, index: usize) -> &PageTableEntry {
+        &self.entries[index]
+    }
+
+    pub fn entry_mut(&mut self, index: usize) -> &mut PageTableEntry {
+        &mut self.entries[index]
+    }
+}
+
+/// Virtual address space for a process
+pub struct AddressSpace {
+    /// Root page table physical address
+    pub root: PhysAddr,
+    /// VMA (Virtual Memory Area) list
+    pub vmas: Vec<VirtualMemoryArea>,
+    /// Architecture
+    pub arch: Architecture,
+}
+
+/// Virtual Memory Area descriptor
+#[derive(Debug, Clone)]
+pub struct VirtualMemoryArea {
+    pub start: VirtAddr,
+    pub end: VirtAddr,
+    pub flags: VmaFlags,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct VmaFlags(u32);
+
+impl VmaFlags {
+    pub const READ: u32 = 1 << 0;
+    pub const WRITE: u32 = 1 << 1;
+    pub const EXECUTE: u32 = 1 << 2;
+    pub const SHARED: u32 = 1 << 3;
+    pub const GROWSDOWN: u32 = 1 << 4; // Stack
+
+    pub fn new() -> Self {
+        VmaFlags(0)
+    }
+
+    pub fn read(mut self) -> Self {
+        self.0 |= Self::READ;
+        self
+    }
+
+    pub fn write(mut self) -> Self {
+        self.0 |= Self::WRITE;
+        self
+    }
+
+    pub fn execute(mut self) -> Self {
+        self.0 |= Self::EXECUTE;
+        self
+    }
+}
+
+impl AddressSpace {
+    pub fn new(arch: Architecture, root: PhysAddr) -> Self {
+        AddressSpace {
+            root,
+            vmas: Vec::new(),
+            arch,
+        }
+    }
+
+    /// Map a virtual address to a physical address
+    pub fn map(
+        &mut self,
+        virt: VirtAddr,
+        phys: PhysAddr,
+        flags: PageFlags,
+        allocator: &mut BuddyAllocator,
+    ) -> KernelResult<()> {
+        // This would walk the page tables and set up the mapping
+        // Simplified for demonstration
+        Ok(())
+    }
+
+    /// Unmap a virtual address
+    pub fn unmap(&mut self, virt: VirtAddr) -> KernelResult<PhysAddr> {
+        // Would walk page tables and clear the mapping
+        Ok(PhysAddr::new(0))
+    }
+
+    /// Add a VMA
+    pub fn add_vma(&mut self, vma: VirtualMemoryArea) {
+        self.vmas.push(vma);
+        self.vmas.sort_by_key(|v| v.start);
+    }
+
+    /// Find VMA containing address
+    pub fn find_vma(&self, addr: VirtAddr) -> Option<&VirtualMemoryArea> {
+        self.vmas.iter().find(|vma| addr.0 >= vma.start.0 && addr.0 < vma.end.0)
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// PROCESS MANAGEMENT
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Process identifier
+pub type Pid = u64;
+
+/// Thread identifier
+pub type Tid = u64;
+
+/// Process state
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProcessState {
+    Created,
+    Ready,
+    Running,
+    Blocked,
+    Sleeping,
+    Zombie,
+    AIInference,   // Waiting for AI inference completion
+    Checkpointing, // Being checkpointed
+}
+
+/// Thread state
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThreadState {
+    Ready,
+    Running,
+    Blocked,
+    Sleeping,
+    Terminated,
+}
+
+/// CPU context for context switching
+#[derive(Debug, Clone, Default)]
+pub struct CpuContext {
+    // General purpose registers (x86_64)
+    pub rax: u64,
+    pub rbx: u64,
+    pub rcx: u64,
+    pub rdx: u64,
+    pub rsi: u64,
+    pub rdi: u64,
+    pub rbp: u64,
+    pub rsp: u64,
+    pub r8: u64,
+    pub r9: u64,
+    pub r10: u64,
+    pub r11: u64,
+    pub r12: u64,
+    pub r13: u64,
+    pub r14: u64,
+    pub r15: u64,
+    // Instruction pointer
+    pub rip: u64,
+    // Flags
+    pub rflags: u64,
+    // Segment selectors
+    pub cs: u64,
+    pub ss: u64,
+    pub fs_base: u64,
+    pub gs_base: u64,
+    // FPU/SSE state (simplified)
+    pub fpu_state: [u8; 512],
+}
+
+/// Thread Control Block
+pub struct Thread {
+    pub tid: Tid,
+    pub pid: Pid,
+    pub state: ThreadState,
+    pub context: CpuContext,
+    pub kernel_stack: VirtAddr,
+    pub user_stack: VirtAddr,
+    pub priority: i8,
+    pub time_slice: u32,
+    pub cpu_affinity: u64,
+    pub blocked_on: Option<WaitReason>,
+}
+
+#[derive(Debug, Clone)]
+pub enum WaitReason {
+    IO(u64),           // Waiting on file descriptor
+    Sleep(u64),        // Sleep until timestamp
+    Mutex(u64),        // Waiting on mutex
+    Semaphore(u64),    // Waiting on semaphore
+    ChildProcess(Pid), // Waiting for child
+    AIInference(u64),  // Waiting for AI inference
+}
+
+/// Process Control Block
+pub struct Process {
+    pub pid: Pid,
+    pub parent_pid: Option<Pid>,
+    pub state: ProcessState,
+    pub name: String,
+    pub address_space: AddressSpace,
+    pub threads: Vec<Tid>,
+    pub children: Vec<Pid>,
+    pub file_descriptors: HashMap<u32, FileDescriptor>,
+    pub exit_code: Option<i32>,
+    // Scheduling
+    pub priority: i8,
+    pub ai_priority: f32,
+    pub cpu_time: u64,
+    pub creation_time: u64,
+    // Resource limits
+    pub memory_limit: usize,
+    pub fd_limit: usize,
+    // AI-specific
+    pub ai_models: Vec<AIModelHandle>,
+    pub tensor_pool: Option<TensorPoolHandle>,
+    // Checkpointing
+    pub last_checkpoint: Option<u64>,
+    pub checkpoint_interval: Option<u64>,
+}
+
+/// File descriptor
+#[derive(Debug, Clone)]
+pub struct FileDescriptor {
+    pub fd: u32,
+    pub file_type: FileType,
+    pub flags: u32,
+    pub offset: u64,
+    pub inode: u64,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum FileType {
+    Regular,
+    Directory,
+    CharDevice,
+    BlockDevice,
+    Pipe,
+    Socket,
+    Symlink,
+}
+
+/// AI model handle
+#[derive(Debug, Clone)]
+pub struct AIModelHandle {
+    pub id: u64,
+    pub name: String,
+    pub memory_usage: usize,
+    pub loaded: bool,
+}
+
+/// Tensor pool handle for zero-copy sharing
+#[derive(Debug, Clone)]
+pub struct TensorPoolHandle {
+    pub id: u64,
+    pub size: usize,
+    pub shared_with: Vec<Pid>,
+}
+
+impl Process {
+    pub fn new(
+        pid: Pid,
+        parent: Option<Pid>,
+        name: &str,
+        address_space: AddressSpace,
+    ) -> Self {
+        Process {
+            pid,
+            parent_pid: parent,
+            state: ProcessState::Created,
+            name: name.to_string(),
+            address_space,
+            threads: Vec::new(),
+            children: Vec::new(),
+            file_descriptors: HashMap::new(),
+            exit_code: None,
+            priority: 0,
+            ai_priority: 0.5,
+            cpu_time: 0,
+            creation_time: 0,
+            memory_limit: 1024 * 1024 * 1024, // 1GB default
+            fd_limit: MAX_FDS_PER_PROCESS,
+            ai_models: Vec::new(),
+            tensor_pool: None,
+            last_checkpoint: None,
+            checkpoint_interval: None,
+        }
+    }
+
+    pub fn add_thread(&mut self, tid: Tid) {
+        self.threads.push(tid);
+    }
+
+    pub fn remove_thread(&mut self, tid: Tid) {
+        self.threads.retain(|&t| t != tid);
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// NEURAL PROCESS SCHEDULER
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Scheduling policy
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SchedulingPolicy {
+    Normal,          // Time-sharing
+    Fifo,            // First-in-first-out real-time
+    RoundRobin,      // Round-robin real-time
+    Deadline,        // Earliest deadline first
+    AIOptimized,     // ML-based scheduling (Neural Scheduler)
+}
+
+/// Priority class for the Neural Scheduler
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum PriorityClass {
+    Idle = 0,
+    Background = 1,
+    Normal = 2,
+    Interactive = 3,
+    AIInference = 4,
+    RealTime = 5,
+    Critical = 6,
+}
+
+/// Neural Scheduler - ML-based process scheduling
+pub struct NeuralScheduler {
+    /// Ready queues for each priority class
+    ready_queues: [VecDeque<Tid>; 7],
+    /// All processes
+    processes: HashMap<Pid, Process>,
+    /// All threads
+    threads: HashMap<Tid, Thread>,
+    /// Running threads per CPU
+    running: HashMap<u32, Tid>,
+    /// Next PID/TID
+    next_pid: Pid,
+    next_tid: Tid,
+    /// Scheduling statistics for ML
+    stats: SchedulerStats,
+    /// ML model for priority prediction
+    priority_predictor: PriorityPredictor,
+    /// Time quantum (microseconds)
+    time_quantum: u64,
+    /// Current tick
+    current_tick: u64,
+}
+
+/// Scheduler statistics for ML training
+#[derive(Debug, Default)]
+pub struct SchedulerStats {
+    pub total_context_switches: u64,
+    pub total_processes_created: u64,
+    pub total_processes_terminated: u64,
+    pub avg_wait_time: f64,
+    pub avg_turnaround_time: f64,
+    pub cpu_utilization: f64,
+    pub throughput: f64,
+    pub ai_inference_count: u64,
+}
+
+/// ML-based priority predictor
+pub struct PriorityPredictor {
+    /// Feature weights for priority prediction
+    weights: Vec<f64>,
+    /// Learning rate
+    learning_rate: f64,
+    /// Training samples
+    samples: Vec<PrioritySample>,
+}
+
+#[derive(Debug, Clone)]
+struct PrioritySample {
+    features: Vec<f64>,
+    actual_priority: f32,
+}
+
+impl PriorityPredictor {
+    pub fn new() -> Self {
+        PriorityPredictor {
+            weights: vec![0.0; 10], // 10 features
+            learning_rate: 0.01,
+            samples: Vec::new(),
+        }
+    }
+
+    /// Predict optimal priority for a process
+    pub fn predict(&self, process: &Process, thread: &Thread) -> f32 {
+        let features = self.extract_features(process, thread);
+
+        // Linear model prediction
+        let mut score: f64 = 0.0;
+        for (i, &f) in features.iter().enumerate() {
+            if i < self.weights.len() {
+                score += f * self.weights[i];
+            }
+        }
+
+        // Sigmoid to bound between 0 and 1
+        (1.0 / (1.0 + (-score).exp())) as f32
+    }
+
+    fn extract_features(&self, process: &Process, thread: &Thread) -> Vec<f64> {
+        vec![
+            process.cpu_time as f64 / 1_000_000.0,           // CPU time (normalized)
+            process.priority as f64 / 20.0,                   // Static priority
+            process.ai_priority as f64,                       // AI priority
+            thread.time_slice as f64 / 100.0,                // Time slice remaining
+            process.threads.len() as f64 / 10.0,             // Thread count
+            if process.state == ProcessState::AIInference { 1.0 } else { 0.0 },
+            process.memory_limit as f64 / (1024.0 * 1024.0 * 1024.0),
+            process.ai_models.len() as f64 / 5.0,            // AI model count
+            process.children.len() as f64 / 10.0,            // Child process count
+            thread.priority as f64 / 20.0,                    // Thread priority
+        ]
+    }
+
+    /// Update model with feedback
+    pub fn update(&mut self, process: &Process, thread: &Thread, actual_performance: f32) {
+        let features = self.extract_features(process, thread);
+        let predicted = self.predict(process, thread);
+        let error = actual_performance - predicted;
+
+        // Gradient descent update
+        for (i, &f) in features.iter().enumerate() {
+            if i < self.weights.len() {
+                self.weights[i] += self.learning_rate * error as f64 * f;
+            }
+        }
+
+        self.samples.push(PrioritySample {
+            features,
+            actual_priority: actual_performance,
+        });
+
+        // Keep only recent samples
+        if self.samples.len() > 10000 {
+            self.samples.remove(0);
+        }
+    }
+}
+
+impl NeuralScheduler {
+    pub fn new() -> Self {
+        NeuralScheduler {
+            ready_queues: Default::default(),
+            processes: HashMap::new(),
+            threads: HashMap::new(),
+            running: HashMap::new(),
+            next_pid: 1,
+            next_tid: 1,
+            stats: SchedulerStats::default(),
+            priority_predictor: PriorityPredictor::new(),
+            time_quantum: 10000, // 10ms
+            current_tick: 0,
+        }
+    }
+
+    /// Create a new process
+    pub fn spawn_process(&mut self, name: &str, parent: Option<Pid>) -> KernelResult<Pid> {
+        let pid = self.next_pid;
+        self.next_pid += 1;
+
+        // Create address space (would allocate root page table)
+        let address_space = AddressSpace::new(Architecture::X86_64, PhysAddr::new(0));
+
+        let process = Process::new(pid, parent, name, address_space);
+        self.processes.insert(pid, process);
+
+        // Create main thread
+        let tid = self.spawn_thread(pid)?;
+
+        // Update parent's children list
+        if let Some(parent_pid) = parent {
+            if let Some(parent_proc) = self.processes.get_mut(&parent_pid) {
+                parent_proc.children.push(pid);
+            }
+        }
+
+        self.stats.total_processes_created += 1;
+
+        Ok(pid)
+    }
+
+    /// Create a new thread in a process
+    pub fn spawn_thread(&mut self, pid: Pid) -> KernelResult<Tid> {
+        let tid = self.next_tid;
+        self.next_tid += 1;
+
+        let thread = Thread {
+            tid,
+            pid,
+            state: ThreadState::Ready,
+            context: CpuContext::default(),
+            kernel_stack: VirtAddr::new(0),
+            user_stack: VirtAddr::new(0),
+            priority: 0,
+            time_slice: 100,
+            cpu_affinity: u64::MAX, // All CPUs
+            blocked_on: None,
+        };
+
+        self.threads.insert(tid, thread);
+
+        if let Some(process) = self.processes.get_mut(&pid) {
+            process.add_thread(tid);
+            process.state = ProcessState::Ready;
+
+            // Use ML to determine priority queue
+            let priority_class = self.compute_priority_class(pid, tid);
+            self.ready_queues[priority_class as usize].push_back(tid);
+        } else {
+            return Err(KernelError::ProcessNotFound);
+        }
+
+        Ok(tid)
+    }
+
+    /// Compute priority class using Neural Scheduler ML model
+    fn compute_priority_class(&self, pid: Pid, tid: Tid) -> PriorityClass {
+        let process = match self.processes.get(&pid) {
+            Some(p) => p,
+            None => return PriorityClass::Normal,
+        };
+
+        let thread = match self.threads.get(&tid) {
+            Some(t) => t,
+            None => return PriorityClass::Normal,
+        };
+
+        // AI inference processes get priority boost
+        if process.state == ProcessState::AIInference {
+            return PriorityClass::AIInference;
+        }
+
+        // Use ML model to predict optimal priority
+        let ai_priority = self.priority_predictor.predict(process, thread);
+
+        match ai_priority {
+            p if p < 0.15 => PriorityClass::Idle,
+            p if p < 0.30 => PriorityClass::Background,
+            p if p < 0.50 => PriorityClass::Normal,
+            p if p < 0.70 => PriorityClass::Interactive,
+            p if p < 0.85 => PriorityClass::AIInference,
+            _ => PriorityClass::RealTime,
+        }
+    }
+
+    /// Select next thread to run (main scheduling decision)
+    pub fn schedule(&mut self, cpu_id: u32) -> Option<Tid> {
+        // Check highest priority queues first
+        for priority in (0..7).rev() {
+            if let Some(tid) = self.ready_queues[priority].pop_front() {
+                if let Some(thread) = self.threads.get_mut(&tid) {
+                    thread.state = ThreadState::Running;
+                }
+                self.running.insert(cpu_id, tid);
+                self.stats.total_context_switches += 1;
+                return Some(tid);
+            }
+        }
+        None
+    }
+
+    /// Yield current thread
+    pub fn yield_thread(&mut self, cpu_id: u32) {
+        if let Some(tid) = self.running.remove(&cpu_id) {
+            if let Some(thread) = self.threads.get_mut(&tid) {
+                thread.state = ThreadState::Ready;
+
+                // Re-evaluate priority with ML
+                let priority_class = self.compute_priority_class(thread.pid, tid);
+                self.ready_queues[priority_class as usize].push_back(tid);
+            }
+        }
+    }
+
+    /// Block a thread
+    pub fn block_thread(&mut self, tid: Tid, reason: WaitReason) -> KernelResult<()> {
+        if let Some(thread) = self.threads.get_mut(&tid) {
+            thread.state = ThreadState::Blocked;
+            thread.blocked_on = Some(reason);
+            Ok(())
+        } else {
+            Err(KernelError::ThreadNotFound)
+        }
+    }
+
+    /// Wake up a thread
+    pub fn wake_thread(&mut self, tid: Tid) -> KernelResult<()> {
+        if let Some(thread) = self.threads.get_mut(&tid) {
+            thread.state = ThreadState::Ready;
+            thread.blocked_on = None;
+
+            let priority_class = self.compute_priority_class(thread.pid, tid);
+            self.ready_queues[priority_class as usize].push_back(tid);
+            Ok(())
+        } else {
+            Err(KernelError::ThreadNotFound)
+        }
+    }
+
+    /// Timer tick handler
+    pub fn tick(&mut self) {
+        self.current_tick += 1;
+
+        // Decrement time slices for running threads
+        for (&cpu_id, &tid) in &self.running.clone() {
+            if let Some(thread) = self.threads.get_mut(&tid) {
+                if thread.time_slice > 0 {
+                    thread.time_slice -= 1;
+                }
+
+                // Preempt if time slice exhausted
+                if thread.time_slice == 0 {
+                    thread.time_slice = 100; // Reset
+                    self.yield_thread(cpu_id);
+                }
+            }
+        }
+
+        // Update statistics
+        let total_threads = self.threads.len();
+        let running_threads = self.running.len();
+        if total_threads > 0 {
+            self.stats.cpu_utilization =
+                running_threads as f64 / total_threads as f64;
+        }
+    }
+
+    /// Exit a process
+    pub fn exit_process(&mut self, pid: Pid, exit_code: i32) -> KernelResult<()> {
+        if let Some(process) = self.processes.get_mut(&pid) {
+            process.state = ProcessState::Zombie;
+            process.exit_code = Some(exit_code);
+
+            // Terminate all threads
+            for &tid in &process.threads.clone() {
+                if let Some(thread) = self.threads.get_mut(&tid) {
+                    thread.state = ThreadState::Terminated;
+                }
+            }
+
+            // Reparent children to init (PID 1)
+            for &child_pid in &process.children.clone() {
+                if let Some(child) = self.processes.get_mut(&child_pid) {
+                    child.parent_pid = Some(1);
+                }
+            }
+
+            self.stats.total_processes_terminated += 1;
+            Ok(())
+        } else {
+            Err(KernelError::ProcessNotFound)
+        }
+    }
+
+    /// Get process by PID
+    pub fn get_process(&self, pid: Pid) -> Option<&Process> {
+        self.processes.get(&pid)
+    }
+
+    /// Get thread by TID
+    pub fn get_thread(&self, tid: Tid) -> Option<&Thread> {
+        self.threads.get(&tid)
+    }
+
+    /// Set AI priority for a process
+    pub fn set_ai_priority(&mut self, pid: Pid, priority: f32) -> KernelResult<()> {
+        if let Some(process) = self.processes.get_mut(&pid) {
+            process.ai_priority = priority.clamp(0.0, 1.0);
+
+            // Re-queue threads with new priority
+            for &tid in &process.threads {
+                // Remove from current queue and re-add
+                for queue in &mut self.ready_queues {
+                    queue.retain(|&t| t != tid);
+                }
+
+                if let Some(thread) = self.threads.get(&tid) {
+                    if thread.state == ThreadState::Ready {
+                        let priority_class = self.compute_priority_class(pid, tid);
+                        self.ready_queues[priority_class as usize].push_back(tid);
+                    }
+                }
+            }
+
+            Ok(())
+        } else {
+            Err(KernelError::ProcessNotFound)
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// SELF-HEALING ENGINE
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Checkpoint data for process state
+#[derive(Debug, Clone)]
+pub struct Checkpoint {
+    pub id: u64,
+    pub pid: Pid,
+    pub timestamp: u64,
+    /// Serialized process state
+    pub process_state: Vec<u8>,
+    /// Memory pages (address -> data)
+    pub memory_pages: HashMap<u64, Vec<u8>>,
+    /// Thread contexts
+    pub thread_contexts: Vec<(Tid, CpuContext)>,
+    /// File descriptor states
+    pub fd_states: Vec<(u32, u64)>, // (fd, offset)
+    /// Incremental checkpoint parent
+    pub parent_checkpoint: Option<u64>,
+    /// Changed pages since parent (for incremental)
+    pub dirty_pages: Vec<u64>,
+}
+
+/// Anomaly type for self-healing
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AnomalyType {
+    MemoryCorruption,
+    InvalidPointer,
+    StackOverflow,
+    HeapCorruption,
+    InfiniteLoop,
+    Deadlock,
+    ResourceLeak,
+    SecurityViolation,
+    AIModelFailure,
+}
+
+/// Anomaly detection result
+#[derive(Debug, Clone)]
+pub struct AnomalyReport {
+    pub anomaly_type: AnomalyType,
+    pub pid: Pid,
+    pub tid: Option<Tid>,
+    pub address: Option<VirtAddr>,
+    pub timestamp: u64,
+    pub severity: u8, // 0-255
+    pub recommended_action: HealingAction,
+}
+
+/// Healing action
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HealingAction {
+    Ignore,
+    RestartThread,
+    RestartProcess,
+    RollbackToCheckpoint,
+    IsolateProcess,
+    TerminateProcess,
+    RebootSystem,
+}
+
+/// Self-Healing Engine
+pub struct SelfHealingEngine {
+    /// Checkpoints by checkpoint ID
+    checkpoints: HashMap<u64, Checkpoint>,
+    /// Latest checkpoint per process
+    latest_checkpoint: HashMap<Pid, u64>,
+    /// Next checkpoint ID
+    next_checkpoint_id: u64,
+    /// Anomaly history
+    anomaly_history: Vec<AnomalyReport>,
+    /// Healing statistics
+    stats: HealingStats,
+    /// Memory watchpoints for corruption detection
+    watchpoints: HashMap<VirtAddr, WatchpointConfig>,
+    /// Process health scores (ML-based)
+    health_scores: HashMap<Pid, f32>,
+}
+
+#[derive(Debug, Default)]
+pub struct HealingStats {
+    pub total_checkpoints: u64,
+    pub total_restores: u64,
+    pub total_anomalies_detected: u64,
+    pub successful_heals: u64,
+    pub failed_heals: u64,
+    pub avg_checkpoint_size: usize,
+    pub avg_restore_time_us: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct WatchpointConfig {
+    pub address: VirtAddr,
+    pub size: usize,
+    pub expected_hash: u64,
+    pub on_violation: HealingAction,
+}
+
+impl SelfHealingEngine {
+    pub fn new() -> Self {
+        SelfHealingEngine {
+            checkpoints: HashMap::new(),
+            latest_checkpoint: HashMap::new(),
+            next_checkpoint_id: 1,
+            anomaly_history: Vec::new(),
+            stats: HealingStats::default(),
+            watchpoints: HashMap::new(),
+            health_scores: HashMap::new(),
+        }
+    }
+
+    /// Create a checkpoint for a process
+    pub fn checkpoint(&mut self, process: &Process, threads: &[&Thread]) -> KernelResult<u64> {
+        let checkpoint_id = self.next_checkpoint_id;
+        self.next_checkpoint_id += 1;
+
+        // Determine if this should be incremental
+        let parent_checkpoint = self.latest_checkpoint.get(&process.pid).copied();
+
+        let checkpoint = Checkpoint {
+            id: checkpoint_id,
+            pid: process.pid,
+            timestamp: self.current_timestamp(),
+            process_state: self.serialize_process_state(process),
+            memory_pages: self.capture_memory(process),
+            thread_contexts: threads.iter().map(|t| (t.tid, t.context.clone())).collect(),
+            fd_states: process.file_descriptors.iter()
+                .map(|(&fd, desc)| (fd, desc.offset))
+                .collect(),
+            parent_checkpoint,
+            dirty_pages: self.get_dirty_pages(process, parent_checkpoint),
+        };
+
+        let size = self.estimate_checkpoint_size(&checkpoint);
+        self.stats.avg_checkpoint_size =
+            (self.stats.avg_checkpoint_size * self.stats.total_checkpoints as usize + size)
+            / (self.stats.total_checkpoints + 1) as usize;
+
+        self.checkpoints.insert(checkpoint_id, checkpoint);
+        self.latest_checkpoint.insert(process.pid, checkpoint_id);
+        self.stats.total_checkpoints += 1;
+
+        Ok(checkpoint_id)
+    }
+
+    /// Restore a process from checkpoint
+    pub fn restore(&mut self, checkpoint_id: u64) -> KernelResult<RestoreData> {
+        let checkpoint = self.checkpoints.get(&checkpoint_id)
+            .ok_or(KernelError::RestoreFailed)?;
+
+        // If incremental, we need to reconstruct from chain
+        let full_state = if let Some(parent_id) = checkpoint.parent_checkpoint {
+            self.reconstruct_state(checkpoint_id)?
+        } else {
+            checkpoint.clone()
+        };
+
+        self.stats.total_restores += 1;
+
+        Ok(RestoreData {
+            checkpoint_id,
+            process_state: full_state.process_state,
+            memory_pages: full_state.memory_pages,
+            thread_contexts: full_state.thread_contexts,
+            fd_states: full_state.fd_states,
+        })
+    }
+
+    /// Reconstruct full state from incremental checkpoint chain
+    fn reconstruct_state(&self, checkpoint_id: u64) -> KernelResult<Checkpoint> {
+        let mut chain = Vec::new();
+        let mut current_id = Some(checkpoint_id);
+
+        // Build chain from newest to oldest
+        while let Some(id) = current_id {
+            let checkpoint = self.checkpoints.get(&id)
+                .ok_or(KernelError::RestoreFailed)?;
+            chain.push(checkpoint.clone());
+            current_id = checkpoint.parent_checkpoint;
+        }
+
+        // Apply from oldest to newest
+        chain.reverse();
+
+        let mut full_checkpoint = chain[0].clone();
+        for checkpoint in chain.iter().skip(1) {
+            // Apply dirty pages
+            for &page_addr in &checkpoint.dirty_pages {
+                if let Some(data) = checkpoint.memory_pages.get(&page_addr) {
+                    full_checkpoint.memory_pages.insert(page_addr, data.clone());
+                }
+            }
+            full_checkpoint.thread_contexts = checkpoint.thread_contexts.clone();
+            full_checkpoint.fd_states = checkpoint.fd_states.clone();
+        }
+
+        Ok(full_checkpoint)
+    }
+
+    /// Detect anomalies in a process
+    pub fn detect_anomalies(&mut self, process: &Process, threads: &[&Thread]) -> Vec<AnomalyReport> {
+        let mut anomalies = Vec::new();
+
+        // Check watchpoints
+        for (addr, config) in &self.watchpoints {
+            // Would check memory hash against expected
+            // Simplified for demonstration
+        }
+
+        // Check for deadlock
+        if self.detect_deadlock(process, threads) {
+            anomalies.push(AnomalyReport {
+                anomaly_type: AnomalyType::Deadlock,
+                pid: process.pid,
+                tid: None,
+                address: None,
+                timestamp: self.current_timestamp(),
+                severity: 200,
+                recommended_action: HealingAction::RestartThread,
+            });
+        }
+
+        // Check thread health
+        for thread in threads {
+            if let Some(anomaly) = self.check_thread_health(process, thread) {
+                anomalies.push(anomaly);
+            }
+        }
+
+        // Update health score
+        let health = self.compute_health_score(process, &anomalies);
+        self.health_scores.insert(process.pid, health);
+
+        // Log anomalies
+        self.anomaly_history.extend(anomalies.clone());
+        self.stats.total_anomalies_detected += anomalies.len() as u64;
+
+        anomalies
+    }
+
+    fn detect_deadlock(&self, process: &Process, threads: &[&Thread]) -> bool {
+        // Simple deadlock detection: multiple threads blocked on each other
+        let blocked_threads: Vec<_> = threads.iter()
+            .filter(|t| t.state == ThreadState::Blocked)
+            .collect();
+
+        // Would implement proper cycle detection in wait-for graph
+        blocked_threads.len() >= 2 && threads.iter().all(|t|
+            t.state == ThreadState::Blocked || t.state == ThreadState::Terminated
+        )
+    }
+
+    fn check_thread_health(&self, process: &Process, thread: &Thread) -> Option<AnomalyReport> {
+        // Check for stack overflow (simplified)
+        // Would compare stack pointer against stack bounds
+
+        // Check for infinite loop (simplified)
+        // Would track instruction pointer history
+
+        None
+    }
+
+    fn compute_health_score(&self, process: &Process, recent_anomalies: &[AnomalyReport]) -> f32 {
+        let base_score = 1.0;
+        let anomaly_penalty: f32 = recent_anomalies.iter()
+            .map(|a| a.severity as f32 / 255.0)
+            .sum();
+
+        (base_score - anomaly_penalty * 0.1).max(0.0)
+    }
+
+    /// Heal a process based on anomaly
+    pub fn heal(&mut self, anomaly: &AnomalyReport) -> KernelResult<HealingAction> {
+        match anomaly.recommended_action {
+            HealingAction::RollbackToCheckpoint => {
+                if let Some(&checkpoint_id) = self.latest_checkpoint.get(&anomaly.pid) {
+                    self.restore(checkpoint_id)?;
+                    self.stats.successful_heals += 1;
+                    Ok(HealingAction::RollbackToCheckpoint)
+                } else {
+                    self.stats.failed_heals += 1;
+                    Err(KernelError::RestoreFailed)
+                }
+            }
+            action => {
+                // Other actions would be implemented similarly
+                self.stats.successful_heals += 1;
+                Ok(action)
+            }
+        }
+    }
+
+    /// Add a memory watchpoint
+    pub fn add_watchpoint(&mut self, config: WatchpointConfig) {
+        self.watchpoints.insert(config.address, config);
+    }
+
+    /// Get process health score
+    pub fn get_health_score(&self, pid: Pid) -> f32 {
+        *self.health_scores.get(&pid).unwrap_or(&1.0)
+    }
+
+    fn current_timestamp(&self) -> u64 {
+        // Would read from system timer
+        0
+    }
+
+    fn serialize_process_state(&self, process: &Process) -> Vec<u8> {
+        // Would serialize process metadata
+        Vec::new()
+    }
+
+    fn capture_memory(&self, process: &Process) -> HashMap<u64, Vec<u8>> {
+        // Would capture memory pages
+        HashMap::new()
+    }
+
+    fn get_dirty_pages(&self, process: &Process, parent: Option<u64>) -> Vec<u64> {
+        // Would track dirty pages since last checkpoint
+        Vec::new()
+    }
+
+    fn estimate_checkpoint_size(&self, checkpoint: &Checkpoint) -> usize {
+        checkpoint.process_state.len()
+            + checkpoint.memory_pages.values().map(|p| p.len()).sum::<usize>()
+            + checkpoint.thread_contexts.len() * std::mem::size_of::<CpuContext>()
+    }
+}
+
+/// Data returned from restore operation
+#[derive(Debug)]
+pub struct RestoreData {
+    pub checkpoint_id: u64,
+    pub process_state: Vec<u8>,
+    pub memory_pages: HashMap<u64, Vec<u8>>,
+    pub thread_contexts: Vec<(Tid, CpuContext)>,
+    pub fd_states: Vec<(u32, u64)>,
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// SYSTEM CALL INTERFACE
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// System call handler result
+pub type SyscallResult = KernelResult<u64>;
+
+/// System call dispatcher
+pub struct SyscallDispatcher {
+    handlers: HashMap<u64, fn(&mut Kernel, &[u64]) -> SyscallResult>,
+}
+
+impl SyscallDispatcher {
+    pub fn new() -> Self {
+        let mut dispatcher = SyscallDispatcher {
+            handlers: HashMap::new(),
+        };
+
+        // Register handlers
+        dispatcher.register(SYS_READ, Self::sys_read);
+        dispatcher.register(SYS_WRITE, Self::sys_write);
+        dispatcher.register(SYS_OPEN, Self::sys_open);
+        dispatcher.register(SYS_CLOSE, Self::sys_close);
+        dispatcher.register(SYS_EXIT, Self::sys_exit);
+        dispatcher.register(SYS_FORK, Self::sys_fork);
+        dispatcher.register(SYS_GETPID, Self::sys_getpid);
+
+        // AI syscalls
+        dispatcher.register(SYS_AI_QUERY, Self::sys_ai_query);
+        dispatcher.register(SYS_AI_INFER, Self::sys_ai_infer);
+        dispatcher.register(SYS_AI_LOAD_MODEL, Self::sys_ai_load_model);
+        dispatcher.register(SYS_CHECKPOINT, Self::sys_checkpoint);
+        dispatcher.register(SYS_RESTORE, Self::sys_restore);
+
+        dispatcher
+    }
+
+    pub fn register(&mut self, num: u64, handler: fn(&mut Kernel, &[u64]) -> SyscallResult) {
+        self.handlers.insert(num, handler);
+    }
+
+    pub fn dispatch(&self, kernel: &mut Kernel, syscall_num: u64, args: &[u64]) -> SyscallResult {
+        if let Some(&handler) = self.handlers.get(&syscall_num) {
+            handler(kernel, args)
+        } else {
+            Err(KernelError::InvalidSyscall)
+        }
+    }
+
+    // Standard syscall implementations
+    fn sys_read(kernel: &mut Kernel, args: &[u64]) -> SyscallResult {
+        let fd = args[0] as u32;
+        let buf = args[1];
+        let count = args[2] as usize;
+        // Would read from file descriptor
+        Ok(0)
+    }
+
+    fn sys_write(kernel: &mut Kernel, args: &[u64]) -> SyscallResult {
+        let fd = args[0] as u32;
+        let buf = args[1];
+        let count = args[2] as usize;
+        // Would write to file descriptor
+        Ok(count as u64)
+    }
+
+    fn sys_open(kernel: &mut Kernel, args: &[u64]) -> SyscallResult {
+        let path = args[0];
+        let flags = args[1] as u32;
+        let mode = args[2] as u32;
+        // Would open file and return fd
+        Ok(3) // Return new fd
+    }
+
+    fn sys_close(kernel: &mut Kernel, args: &[u64]) -> SyscallResult {
+        let fd = args[0] as u32;
+        // Would close file descriptor
+        Ok(0)
+    }
+
+    fn sys_exit(kernel: &mut Kernel, args: &[u64]) -> SyscallResult {
+        let exit_code = args[0] as i32;
+        // Would exit current process
+        Ok(0)
+    }
+
+    fn sys_fork(kernel: &mut Kernel, args: &[u64]) -> SyscallResult {
+        // Would fork current process
+        Ok(0)
+    }
+
+    fn sys_getpid(kernel: &mut Kernel, args: &[u64]) -> SyscallResult {
+        // Would return current PID
+        Ok(1)
+    }
+
+    // AI syscall implementations
+    fn sys_ai_query(kernel: &mut Kernel, args: &[u64]) -> SyscallResult {
+        let model_id = args[0];
+        let query_ptr = args[1];
+        let query_len = args[2] as usize;
+        let result_ptr = args[3];
+        let result_max_len = args[4] as usize;
+
+        // Would perform AI query
+        // This is where the kernel-integrated AI inference happens
+        Ok(0)
+    }
+
+    fn sys_ai_infer(kernel: &mut Kernel, args: &[u64]) -> SyscallResult {
+        let model_id = args[0];
+        let input_tensor_ptr = args[1];
+        let output_tensor_ptr = args[2];
+
+        // Would perform tensor inference
+        Ok(0)
+    }
+
+    fn sys_ai_load_model(kernel: &mut Kernel, args: &[u64]) -> SyscallResult {
+        let model_path_ptr = args[0];
+        let model_path_len = args[1] as usize;
+
+        // Would load AI model into kernel memory
+        // Returns model handle
+        Ok(1)
+    }
+
+    fn sys_checkpoint(kernel: &mut Kernel, args: &[u64]) -> SyscallResult {
+        // Checkpoint current process
+        Ok(0)
+    }
+
+    fn sys_restore(kernel: &mut Kernel, args: &[u64]) -> SyscallResult {
+        let checkpoint_id = args[0];
+        // Restore from checkpoint
+        Ok(0)
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// DEVICE DRIVER FRAMEWORK
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Device type
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeviceType {
+    Block,
+    Character,
+    Network,
+    GPU,
+    AIAccelerator,
+}
+
+/// Device driver trait
+pub trait Driver {
+    fn name(&self) -> &str;
+    fn device_type(&self) -> DeviceType;
+    fn init(&mut self) -> KernelResult<()>;
+    fn shutdown(&mut self) -> KernelResult<()>;
+}
+
+/// Block device operations
+pub trait BlockDevice: Driver {
+    fn read_block(&self, block: u64, buffer: &mut [u8]) -> KernelResult<()>;
+    fn write_block(&mut self, block: u64, data: &[u8]) -> KernelResult<()>;
+    fn block_size(&self) -> usize;
+    fn total_blocks(&self) -> u64;
+}
+
+/// Character device operations
+pub trait CharDevice: Driver {
+    fn read(&self, buffer: &mut [u8]) -> KernelResult<usize>;
+    fn write(&mut self, data: &[u8]) -> KernelResult<usize>;
+}
+
+/// AI accelerator operations (TPU, NPU, etc.)
+pub trait AIAccelerator: Driver {
+    fn load_model(&mut self, model_data: &[u8]) -> KernelResult<u64>;
+    fn unload_model(&mut self, model_id: u64) -> KernelResult<()>;
+    fn infer(&self, model_id: u64, input: &[u8], output: &mut [u8]) -> KernelResult<()>;
+    fn get_capabilities(&self) -> AICapabilities;
+}
+
+#[derive(Debug, Clone)]
+pub struct AICapabilities {
+    pub max_models: usize,
+    pub max_tensor_size: usize,
+    pub supported_ops: Vec<String>,
+    pub compute_units: u32,
+    pub memory_mb: u32,
+}
+
+/// Device manager
+pub struct DeviceManager {
+    block_devices: HashMap<String, Box<dyn BlockDevice>>,
+    char_devices: HashMap<String, Box<dyn CharDevice>>,
+    ai_accelerators: HashMap<String, Box<dyn AIAccelerator>>,
+}
+
+impl DeviceManager {
+    pub fn new() -> Self {
+        DeviceManager {
+            block_devices: HashMap::new(),
+            char_devices: HashMap::new(),
+            ai_accelerators: HashMap::new(),
+        }
+    }
+
+    pub fn register_block_device(&mut self, name: &str, device: Box<dyn BlockDevice>) {
+        self.block_devices.insert(name.to_string(), device);
+    }
+
+    pub fn register_char_device(&mut self, name: &str, device: Box<dyn CharDevice>) {
+        self.char_devices.insert(name.to_string(), device);
+    }
+
+    pub fn register_ai_accelerator(&mut self, name: &str, device: Box<dyn AIAccelerator>) {
+        self.ai_accelerators.insert(name.to_string(), device);
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// VIRTUAL FILE SYSTEM
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Inode number
+pub type InodeNum = u64;
+
+/// File system type
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileSystemType {
+    Ext4,
+    Btrfs,
+    Fat32,
+    TmpFs,
+    ProcFs,
+    SysFs,
+    DevFs,
+    AIModelFs, // Virtual FS for AI models
+}
+
+/// VFS inode
+pub struct Inode {
+    pub num: InodeNum,
+    pub mode: u32,
+    pub uid: u32,
+    pub gid: u32,
+    pub size: u64,
+    pub atime: u64,
+    pub mtime: u64,
+    pub ctime: u64,
+    pub links: u32,
+    pub blocks: u64,
+    pub fs_type: FileSystemType,
+}
+
+/// Directory entry
+pub struct DirEntry {
+    pub inode: InodeNum,
+    pub name: String,
+    pub file_type: FileType,
+}
+
+/// Mount point
+pub struct MountPoint {
+    pub path: String,
+    pub fs_type: FileSystemType,
+    pub device: Option<String>,
+    pub flags: u32,
+    pub root_inode: InodeNum,
+}
+
+/// Virtual File System
+pub struct VFS {
+    mounts: Vec<MountPoint>,
+    inodes: HashMap<InodeNum, Inode>,
+    next_inode: InodeNum,
+}
+
+impl VFS {
+    pub fn new() -> Self {
+        VFS {
+            mounts: Vec::new(),
+            inodes: HashMap::new(),
+            next_inode: 2, // 1 is reserved for root
+        }
+    }
+
+    pub fn mount(&mut self, path: &str, fs_type: FileSystemType, device: Option<&str>) -> KernelResult<()> {
+        let inode = self.next_inode;
+        self.next_inode += 1;
+
+        let root_inode = Inode {
+            num: inode,
+            mode: 0o755,
+            uid: 0,
+            gid: 0,
+            size: 0,
+            atime: 0,
+            mtime: 0,
+            ctime: 0,
+            links: 2,
+            blocks: 0,
+            fs_type,
+        };
+
+        self.inodes.insert(inode, root_inode);
+        self.mounts.push(MountPoint {
+            path: path.to_string(),
+            fs_type,
+            device: device.map(|s| s.to_string()),
+            flags: 0,
+            root_inode: inode,
+        });
+
+        Ok(())
+    }
+
+    pub fn lookup(&self, path: &str) -> KernelResult<&Inode> {
+        // Would walk path and resolve to inode
+        self.inodes.get(&1).ok_or(KernelError::IoError)
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// KERNEL MAIN STRUCTURE
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// The BuildOS Kernel
+pub struct Kernel {
+    pub arch: Architecture,
+    pub scheduler: NeuralScheduler,
+    pub healer: SelfHealingEngine,
+    pub memory: BuddyAllocator,
+    pub syscalls: SyscallDispatcher,
+    pub devices: DeviceManager,
+    pub vfs: VFS,
+    pub boot_time: u64,
+    pub uptime_ticks: u64,
+}
+
+impl Kernel {
+    pub fn new(arch: Architecture, total_memory_pages: usize) -> Self {
+        Kernel {
+            arch,
+            scheduler: NeuralScheduler::new(),
+            healer: SelfHealingEngine::new(),
+            memory: BuddyAllocator::new(total_memory_pages),
+            syscalls: SyscallDispatcher::new(),
+            devices: DeviceManager::new(),
+            vfs: VFS::new(),
+            boot_time: 0,
+            uptime_ticks: 0,
+        }
+    }
+
+    pub fn init(&mut self, memory_regions: &[MemoryRegion]) -> KernelResult<()> {
+        // Initialize memory allocator
+        self.memory.init(memory_regions);
+
+        // Mount root filesystem
+        self.vfs.mount("/", FileSystemType::Ext4, Some("/dev/sda1"))?;
+
+        // Mount virtual filesystems
+        self.vfs.mount("/proc", FileSystemType::ProcFs, None)?;
+        self.vfs.mount("/sys", FileSystemType::SysFs, None)?;
+        self.vfs.mount("/dev", FileSystemType::DevFs, None)?;
+        self.vfs.mount("/ai", FileSystemType::AIModelFs, None)?;
+
+        // Create init process (PID 1)
+        self.scheduler.spawn_process("init", None)?;
+
+        Ok(())
+    }
+
+    pub fn tick(&mut self) {
+        self.uptime_ticks += 1;
+        self.scheduler.tick();
+
+        // Periodic health check
+        if self.uptime_ticks % 1000 == 0 {
+            self.periodic_health_check();
+        }
+    }
+
+    fn periodic_health_check(&mut self) {
+        // Would iterate through processes and check health
+        // Auto-checkpoint critical processes
+        // Heal detected anomalies
+    }
+
+    pub fn syscall(&mut self, num: u64, args: &[u64]) -> SyscallResult {
+        self.syscalls.dispatch(self, num, args)
+    }
+
+    pub fn available_memory(&self) -> usize {
+        self.memory.available_memory()
+    }
+
+    pub fn process_count(&self) -> usize {
+        self.scheduler.processes.len()
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// NETWORK STACK
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// IPv4 address
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Ipv4Addr(pub [u8; 4]);
+
+impl Ipv4Addr {
+    pub const LOCALHOST: Ipv4Addr = Ipv4Addr([127, 0, 0, 1]);
+    pub const BROADCAST: Ipv4Addr = Ipv4Addr([255, 255, 255, 255]);
+    pub const UNSPECIFIED: Ipv4Addr = Ipv4Addr([0, 0, 0, 0]);
+
+    pub fn new(a: u8, b: u8, c: u8, d: u8) -> Self {
+        Ipv4Addr([a, b, c, d])
+    }
+
+    pub fn from_u32(addr: u32) -> Self {
+        Ipv4Addr(addr.to_be_bytes())
+    }
+
+    pub fn to_u32(&self) -> u32 {
+        u32::from_be_bytes(self.0)
+    }
+
+    pub fn is_loopback(&self) -> bool {
+        self.0[0] == 127
+    }
+
+    pub fn is_private(&self) -> bool {
+        match self.0 {
+            [10, ..] => true,
+            [172, b, ..] if b >= 16 && b <= 31 => true,
+            [192, 168, ..] => true,
+            _ => false,
+        }
+    }
+}
+
+/// IPv6 address
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Ipv6Addr(pub [u8; 16]);
+
+impl Ipv6Addr {
+    pub const LOCALHOST: Ipv6Addr = Ipv6Addr([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
+    pub const UNSPECIFIED: Ipv6Addr = Ipv6Addr([0; 16]);
+
+    pub fn new(segments: [u16; 8]) -> Self {
+        let mut bytes = [0u8; 16];
+        for (i, &seg) in segments.iter().enumerate() {
+            let be = seg.to_be_bytes();
+            bytes[i * 2] = be[0];
+            bytes[i * 2 + 1] = be[1];
+        }
+        Ipv6Addr(bytes)
+    }
+}
+
+/// IP address (v4 or v6)
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IpAddr {
+    V4(Ipv4Addr),
+    V6(Ipv6Addr),
+}
+
+/// Socket address
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SocketAddr {
+    pub ip: IpAddr,
+    pub port: u16,
+}
+
+impl SocketAddr {
+    pub fn new(ip: IpAddr, port: u16) -> Self {
+        SocketAddr { ip, port }
+    }
+}
+
+/// MAC address
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct MacAddr(pub [u8; 6]);
+
+impl MacAddr {
+    pub const BROADCAST: MacAddr = MacAddr([0xFF; 6]);
+
+    pub fn new(bytes: [u8; 6]) -> Self {
+        MacAddr(bytes)
+    }
+}
+
+/// Network protocol
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Protocol {
+    Tcp,
+    Udp,
+    Icmp,
+    Raw,
+}
+
+/// Socket type
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SocketType {
+    Stream,    // TCP
+    Datagram,  // UDP
+    Raw,       // Raw socket
+}
+
+/// Socket state
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SocketState {
+    Closed,
+    Listen,
+    SynSent,
+    SynReceived,
+    Established,
+    FinWait1,
+    FinWait2,
+    CloseWait,
+    Closing,
+    LastAck,
+    TimeWait,
+}
+
+/// Network socket
+pub struct Socket {
+    pub fd: u32,
+    pub socket_type: SocketType,
+    pub protocol: Protocol,
+    pub state: SocketState,
+    pub local_addr: Option<SocketAddr>,
+    pub remote_addr: Option<SocketAddr>,
+    pub recv_buffer: VecDeque<u8>,
+    pub send_buffer: VecDeque<u8>,
+    pub recv_buffer_size: usize,
+    pub send_buffer_size: usize,
+    pub blocking: bool,
+    pub reuse_addr: bool,
+    pub keep_alive: bool,
+    pub tcp_nodelay: bool,
+}
+
+impl Socket {
+    pub fn new(socket_type: SocketType, protocol: Protocol) -> Self {
+        Socket {
+            fd: 0,
+            socket_type,
+            protocol,
+            state: SocketState::Closed,
+            local_addr: None,
+            remote_addr: None,
+            recv_buffer: VecDeque::new(),
+            send_buffer: VecDeque::new(),
+            recv_buffer_size: 65536,
+            send_buffer_size: 65536,
+            blocking: true,
+            reuse_addr: false,
+            keep_alive: false,
+            tcp_nodelay: false,
+        }
+    }
+}
+
+/// TCP segment header
+#[derive(Clone, Debug)]
+pub struct TcpHeader {
+    pub src_port: u16,
+    pub dst_port: u16,
+    pub seq_num: u32,
+    pub ack_num: u32,
+    pub data_offset: u8,
+    pub flags: TcpFlags,
+    pub window: u16,
+    pub checksum: u16,
+    pub urgent_ptr: u16,
+    pub options: Vec<TcpOption>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct TcpFlags(pub u8);
+
+impl TcpFlags {
+    pub const FIN: u8 = 0x01;
+    pub const SYN: u8 = 0x02;
+    pub const RST: u8 = 0x04;
+    pub const PSH: u8 = 0x08;
+    pub const ACK: u8 = 0x10;
+    pub const URG: u8 = 0x20;
+    pub const ECE: u8 = 0x40;
+    pub const CWR: u8 = 0x80;
+
+    pub fn has(&self, flag: u8) -> bool {
+        self.0 & flag != 0
+    }
+}
+
+#[derive(Clone, Debug)]
+pub enum TcpOption {
+    Mss(u16),
+    WindowScale(u8),
+    SackPermitted,
+    Sack(Vec<(u32, u32)>),
+    Timestamps(u32, u32),
+}
+
+/// UDP datagram header
+#[derive(Clone, Debug)]
+pub struct UdpHeader {
+    pub src_port: u16,
+    pub dst_port: u16,
+    pub length: u16,
+    pub checksum: u16,
+}
+
+/// IP packet header
+#[derive(Clone, Debug)]
+pub struct Ipv4Header {
+    pub version: u8,
+    pub ihl: u8,
+    pub dscp: u8,
+    pub ecn: u8,
+    pub total_length: u16,
+    pub identification: u16,
+    pub flags: u8,
+    pub fragment_offset: u16,
+    pub ttl: u8,
+    pub protocol: u8,
+    pub checksum: u16,
+    pub src_addr: Ipv4Addr,
+    pub dst_addr: Ipv4Addr,
+}
+
+/// Ethernet frame header
+#[derive(Clone, Debug)]
+pub struct EthernetHeader {
+    pub dst_mac: MacAddr,
+    pub src_mac: MacAddr,
+    pub ethertype: u16,
+}
+
+impl EthernetHeader {
+    pub const ETHERTYPE_IPV4: u16 = 0x0800;
+    pub const ETHERTYPE_IPV6: u16 = 0x86DD;
+    pub const ETHERTYPE_ARP: u16 = 0x0806;
+}
+
+/// Network interface
+pub struct NetworkInterface {
+    pub name: String,
+    pub mac_addr: MacAddr,
+    pub ipv4_addr: Option<Ipv4Addr>,
+    pub ipv4_netmask: Option<Ipv4Addr>,
+    pub ipv6_addr: Option<Ipv6Addr>,
+    pub mtu: u16,
+    pub flags: InterfaceFlags,
+    pub rx_packets: u64,
+    pub tx_packets: u64,
+    pub rx_bytes: u64,
+    pub tx_bytes: u64,
+    pub rx_errors: u64,
+    pub tx_errors: u64,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct InterfaceFlags(pub u32);
+
+impl InterfaceFlags {
+    pub const UP: u32 = 1 << 0;
+    pub const BROADCAST: u32 = 1 << 1;
+    pub const LOOPBACK: u32 = 1 << 3;
+    pub const RUNNING: u32 = 1 << 6;
+    pub const PROMISC: u32 = 1 << 8;
+}
+
+/// Routing table entry
+#[derive(Clone, Debug)]
+pub struct RouteEntry {
+    pub destination: Ipv4Addr,
+    pub netmask: Ipv4Addr,
+    pub gateway: Option<Ipv4Addr>,
+    pub interface: String,
+    pub metric: u32,
+    pub flags: RouteFlags,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct RouteFlags(pub u32);
+
+impl RouteFlags {
+    pub const UP: u32 = 1 << 0;
+    pub const GATEWAY: u32 = 1 << 1;
+    pub const HOST: u32 = 1 << 2;
+}
+
+/// ARP cache entry
+#[derive(Clone, Debug)]
+pub struct ArpEntry {
+    pub ip_addr: Ipv4Addr,
+    pub mac_addr: MacAddr,
+    pub interface: String,
+    pub state: ArpState,
+    pub expires: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ArpState {
+    Incomplete,
+    Reachable,
+    Stale,
+    Delay,
+    Probe,
+}
+
+/// Network stack
+pub struct NetworkStack {
+    interfaces: HashMap<String, NetworkInterface>,
+    sockets: HashMap<u32, Socket>,
+    routing_table: Vec<RouteEntry>,
+    arp_cache: HashMap<Ipv4Addr, ArpEntry>,
+    next_socket_fd: u32,
+    tcp_connections: HashMap<(SocketAddr, SocketAddr), TcpConnection>,
+}
+
+/// TCP connection state
+pub struct TcpConnection {
+    pub state: SocketState,
+    pub local_addr: SocketAddr,
+    pub remote_addr: SocketAddr,
+    pub send_seq: u32,
+    pub recv_seq: u32,
+    pub send_window: u16,
+    pub recv_window: u16,
+    pub rtt_estimate: u32,
+    pub retransmit_queue: VecDeque<TcpSegment>,
+    pub congestion_window: u32,
+    pub slow_start_threshold: u32,
+}
+
+#[derive(Clone)]
+pub struct TcpSegment {
+    pub header: TcpHeader,
+    pub data: Vec<u8>,
+    pub sent_time: u64,
+    pub retransmit_count: u8,
+}
+
+impl NetworkStack {
+    pub fn new() -> Self {
+        NetworkStack {
+            interfaces: HashMap::new(),
+            sockets: HashMap::new(),
+            routing_table: Vec::new(),
+            arp_cache: HashMap::new(),
+            next_socket_fd: 100,
+            tcp_connections: HashMap::new(),
+        }
+    }
+
+    /// Create a new socket
+    pub fn socket(&mut self, socket_type: SocketType, protocol: Protocol) -> KernelResult<u32> {
+        let fd = self.next_socket_fd;
+        self.next_socket_fd += 1;
+
+        let mut socket = Socket::new(socket_type, protocol);
+        socket.fd = fd;
+
+        self.sockets.insert(fd, socket);
+        Ok(fd)
+    }
+
+    /// Bind socket to address
+    pub fn bind(&mut self, fd: u32, addr: SocketAddr) -> KernelResult<()> {
+        let socket = self.sockets.get_mut(&fd).ok_or(KernelError::InvalidFd)?;
+        socket.local_addr = Some(addr);
+        Ok(())
+    }
+
+    /// Listen for connections
+    pub fn listen(&mut self, fd: u32, backlog: u32) -> KernelResult<()> {
+        let socket = self.sockets.get_mut(&fd).ok_or(KernelError::InvalidFd)?;
+        socket.state = SocketState::Listen;
+        Ok(())
+    }
+
+    /// Accept a connection
+    pub fn accept(&mut self, fd: u32) -> KernelResult<(u32, SocketAddr)> {
+        let socket = self.sockets.get(&fd).ok_or(KernelError::InvalidFd)?;
+        if socket.state != SocketState::Listen {
+            return Err(KernelError::InvalidFd);
+        }
+        // Would wait for and accept connection
+        Err(KernelError::ResourceBusy)
+    }
+
+    /// Connect to remote address
+    pub fn connect(&mut self, fd: u32, addr: SocketAddr) -> KernelResult<()> {
+        let socket = self.sockets.get_mut(&fd).ok_or(KernelError::InvalidFd)?;
+        socket.remote_addr = Some(addr);
+        socket.state = SocketState::SynSent;
+        // Would initiate TCP handshake
+        Ok(())
+    }
+
+    /// Send data
+    pub fn send(&mut self, fd: u32, data: &[u8]) -> KernelResult<usize> {
+        let socket = self.sockets.get_mut(&fd).ok_or(KernelError::InvalidFd)?;
+        socket.send_buffer.extend(data);
+        Ok(data.len())
+    }
+
+    /// Receive data
+    pub fn recv(&mut self, fd: u32, buffer: &mut [u8]) -> KernelResult<usize> {
+        let socket = self.sockets.get_mut(&fd).ok_or(KernelError::InvalidFd)?;
+        let len = socket.recv_buffer.len().min(buffer.len());
+        for i in 0..len {
+            buffer[i] = socket.recv_buffer.pop_front().unwrap_or(0);
+        }
+        Ok(len)
+    }
+
+    /// Close socket
+    pub fn close(&mut self, fd: u32) -> KernelResult<()> {
+        self.sockets.remove(&fd);
+        Ok(())
+    }
+
+    /// Add network interface
+    pub fn add_interface(&mut self, interface: NetworkInterface) {
+        self.interfaces.insert(interface.name.clone(), interface);
+    }
+
+    /// Add route
+    pub fn add_route(&mut self, route: RouteEntry) {
+        self.routing_table.push(route);
+        self.routing_table.sort_by(|a, b| {
+            // More specific routes first
+            b.netmask.to_u32().count_ones().cmp(&a.netmask.to_u32().count_ones())
+        });
+    }
+
+    /// Lookup route
+    pub fn route_lookup(&self, dest: Ipv4Addr) -> Option<&RouteEntry> {
+        for route in &self.routing_table {
+            let dest_masked = dest.to_u32() & route.netmask.to_u32();
+            let route_masked = route.destination.to_u32() & route.netmask.to_u32();
+            if dest_masked == route_masked {
+                return Some(route);
+            }
+        }
+        None
+    }
+
+    /// Process incoming packet
+    pub fn process_packet(&mut self, interface: &str, data: &[u8]) {
+        if data.len() < 14 {
+            return; // Too short for Ethernet header
+        }
+
+        let ethertype = u16::from_be_bytes([data[12], data[13]]);
+
+        match ethertype {
+            EthernetHeader::ETHERTYPE_IPV4 => self.process_ipv4(&data[14..]),
+            EthernetHeader::ETHERTYPE_ARP => self.process_arp(&data[14..]),
+            _ => {}
+        }
+    }
+
+    fn process_ipv4(&mut self, data: &[u8]) {
+        if data.len() < 20 {
+            return;
+        }
+
+        let protocol = data[9];
+        let header_len = ((data[0] & 0x0F) * 4) as usize;
+
+        match protocol {
+            6 => self.process_tcp(&data[header_len..]),  // TCP
+            17 => self.process_udp(&data[header_len..]), // UDP
+            1 => self.process_icmp(&data[header_len..]), // ICMP
+            _ => {}
+        }
+    }
+
+    fn process_tcp(&mut self, data: &[u8]) {
+        // Would process TCP segment
+    }
+
+    fn process_udp(&mut self, data: &[u8]) {
+        // Would process UDP datagram
+    }
+
+    fn process_icmp(&mut self, data: &[u8]) {
+        // Would process ICMP message
+    }
+
+    fn process_arp(&mut self, data: &[u8]) {
+        // Would process ARP request/reply
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// INTER-PROCESS COMMUNICATION
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Shared memory region
+pub struct SharedMemory {
+    pub id: u64,
+    pub key: u64,
+    pub size: usize,
+    pub phys_addr: PhysAddr,
+    pub owner_pid: Pid,
+    pub permissions: u32,
+    pub attached: HashMap<Pid, VirtAddr>,
+    pub created: u64,
+    pub last_attach: u64,
+    pub last_detach: u64,
+}
+
+/// Message queue
+pub struct MessageQueue {
+    pub id: u64,
+    pub key: u64,
+    pub messages: VecDeque<Message>,
+    pub max_messages: usize,
+    pub max_size: usize,
+    pub current_size: usize,
+    pub owner_pid: Pid,
+    pub permissions: u32,
+    pub senders_waiting: VecDeque<Tid>,
+    pub receivers_waiting: VecDeque<Tid>,
+}
+
+/// IPC message
+#[derive(Clone)]
+pub struct Message {
+    pub msg_type: i64,
+    pub data: Vec<u8>,
+    pub sender_pid: Pid,
+    pub timestamp: u64,
+}
+
+/// Semaphore
+pub struct Semaphore {
+    pub id: u64,
+    pub key: u64,
+    pub value: i32,
+    pub max_value: i32,
+    pub owner_pid: Pid,
+    pub permissions: u32,
+    pub waiters: VecDeque<Tid>,
+}
+
+/// Named pipe (FIFO)
+pub struct NamedPipe {
+    pub path: String,
+    pub buffer: VecDeque<u8>,
+    pub buffer_size: usize,
+    pub readers: Vec<(Pid, u32)>,  // (pid, fd)
+    pub writers: Vec<(Pid, u32)>,
+    pub read_waiters: VecDeque<Tid>,
+    pub write_waiters: VecDeque<Tid>,
+}
+
+/// Unix domain socket
+pub struct UnixSocket {
+    pub path: Option<String>,
+    pub socket_type: SocketType,
+    pub state: SocketState,
+    pub peer: Option<u64>,
+    pub recv_buffer: VecDeque<u8>,
+    pub send_buffer: VecDeque<u8>,
+    pub credentials: Credentials,
+    pub ancillary: VecDeque<AncillaryData>,
+}
+
+#[derive(Clone, Debug)]
+pub struct Credentials {
+    pub pid: Pid,
+    pub uid: u32,
+    pub gid: u32,
+}
+
+#[derive(Clone)]
+pub enum AncillaryData {
+    FileDescriptors(Vec<u32>),
+    Credentials(Credentials),
+}
+
+/// Signal
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Signal {
+    SIGHUP = 1,
+    SIGINT = 2,
+    SIGQUIT = 3,
+    SIGILL = 4,
+    SIGTRAP = 5,
+    SIGABRT = 6,
+    SIGBUS = 7,
+    SIGFPE = 8,
+    SIGKILL = 9,
+    SIGUSR1 = 10,
+    SIGSEGV = 11,
+    SIGUSR2 = 12,
+    SIGPIPE = 13,
+    SIGALRM = 14,
+    SIGTERM = 15,
+    SIGCHLD = 17,
+    SIGCONT = 18,
+    SIGSTOP = 19,
+    SIGTSTP = 20,
+}
+
+/// Signal handler
+pub enum SignalHandler {
+    Default,
+    Ignore,
+    Custom(VirtAddr),
+}
+
+/// Signal mask
+#[derive(Clone, Copy, Default)]
+pub struct SignalMask(pub u64);
+
+impl SignalMask {
+    pub fn block(&mut self, sig: Signal) {
+        self.0 |= 1 << (sig as u64);
+    }
+
+    pub fn unblock(&mut self, sig: Signal) {
+        self.0 &= !(1 << (sig as u64));
+    }
+
+    pub fn is_blocked(&self, sig: Signal) -> bool {
+        self.0 & (1 << (sig as u64)) != 0
+    }
+}
+
+/// IPC Manager
+pub struct IpcManager {
+    shared_memory: HashMap<u64, SharedMemory>,
+    message_queues: HashMap<u64, MessageQueue>,
+    semaphores: HashMap<u64, Semaphore>,
+    pipes: HashMap<String, NamedPipe>,
+    unix_sockets: HashMap<u64, UnixSocket>,
+    next_ipc_id: u64,
+    key_to_shm: HashMap<u64, u64>,
+    key_to_mq: HashMap<u64, u64>,
+    key_to_sem: HashMap<u64, u64>,
+}
+
+impl IpcManager {
+    pub fn new() -> Self {
+        IpcManager {
+            shared_memory: HashMap::new(),
+            message_queues: HashMap::new(),
+            semaphores: HashMap::new(),
+            pipes: HashMap::new(),
+            unix_sockets: HashMap::new(),
+            next_ipc_id: 1,
+            key_to_shm: HashMap::new(),
+            key_to_mq: HashMap::new(),
+            key_to_sem: HashMap::new(),
+        }
+    }
+
+    /// Create shared memory segment
+    pub fn shmget(&mut self, key: u64, size: usize, flags: u32, pid: Pid) -> KernelResult<u64> {
+        if let Some(&id) = self.key_to_shm.get(&key) {
+            return Ok(id);
+        }
+
+        let id = self.next_ipc_id;
+        self.next_ipc_id += 1;
+
+        let shm = SharedMemory {
+            id,
+            key,
+            size,
+            phys_addr: PhysAddr::new(0), // Would allocate physical memory
+            owner_pid: pid,
+            permissions: flags & 0o777,
+            attached: HashMap::new(),
+            created: 0,
+            last_attach: 0,
+            last_detach: 0,
+        };
+
+        self.shared_memory.insert(id, shm);
+        self.key_to_shm.insert(key, id);
+
+        Ok(id)
+    }
+
+    /// Attach shared memory
+    pub fn shmat(&mut self, id: u64, pid: Pid, addr: Option<VirtAddr>) -> KernelResult<VirtAddr> {
+        let shm = self.shared_memory.get_mut(&id).ok_or(KernelError::InvalidAddress)?;
+
+        let virt = addr.unwrap_or(VirtAddr::new(0x7F000000)); // Would find free region
+        shm.attached.insert(pid, virt);
+        shm.last_attach = 0; // Would use current time
+
+        Ok(virt)
+    }
+
+    /// Detach shared memory
+    pub fn shmdt(&mut self, id: u64, pid: Pid) -> KernelResult<()> {
+        let shm = self.shared_memory.get_mut(&id).ok_or(KernelError::InvalidAddress)?;
+        shm.attached.remove(&pid);
+        shm.last_detach = 0;
+        Ok(())
+    }
+
+    /// Create message queue
+    pub fn msgget(&mut self, key: u64, flags: u32, pid: Pid) -> KernelResult<u64> {
+        if let Some(&id) = self.key_to_mq.get(&key) {
+            return Ok(id);
+        }
+
+        let id = self.next_ipc_id;
+        self.next_ipc_id += 1;
+
+        let mq = MessageQueue {
+            id,
+            key,
+            messages: VecDeque::new(),
+            max_messages: 1024,
+            max_size: 1024 * 1024,
+            current_size: 0,
+            owner_pid: pid,
+            permissions: flags & 0o777,
+            senders_waiting: VecDeque::new(),
+            receivers_waiting: VecDeque::new(),
+        };
+
+        self.message_queues.insert(id, mq);
+        self.key_to_mq.insert(key, id);
+
+        Ok(id)
+    }
+
+    /// Send message
+    pub fn msgsnd(&mut self, id: u64, msg_type: i64, data: &[u8], pid: Pid) -> KernelResult<()> {
+        let mq = self.message_queues.get_mut(&id).ok_or(KernelError::InvalidAddress)?;
+
+        if mq.current_size + data.len() > mq.max_size {
+            return Err(KernelError::ResourceBusy);
+        }
+
+        mq.messages.push_back(Message {
+            msg_type,
+            data: data.to_vec(),
+            sender_pid: pid,
+            timestamp: 0,
+        });
+        mq.current_size += data.len();
+
+        // Wake up receivers
+        if let Some(tid) = mq.receivers_waiting.pop_front() {
+            // Would wake thread
+        }
+
+        Ok(())
+    }
+
+    /// Receive message
+    pub fn msgrcv(&mut self, id: u64, msg_type: i64) -> KernelResult<Message> {
+        let mq = self.message_queues.get_mut(&id).ok_or(KernelError::InvalidAddress)?;
+
+        let idx = mq.messages.iter().position(|m| {
+            if msg_type == 0 {
+                true
+            } else if msg_type > 0 {
+                m.msg_type == msg_type
+            } else {
+                m.msg_type <= -msg_type
+            }
+        });
+
+        if let Some(i) = idx {
+            let msg = mq.messages.remove(i).unwrap();
+            mq.current_size -= msg.data.len();
+            Ok(msg)
+        } else {
+            Err(KernelError::ResourceBusy)
+        }
+    }
+
+    /// Create semaphore
+    pub fn semget(&mut self, key: u64, value: i32, flags: u32, pid: Pid) -> KernelResult<u64> {
+        if let Some(&id) = self.key_to_sem.get(&key) {
+            return Ok(id);
+        }
+
+        let id = self.next_ipc_id;
+        self.next_ipc_id += 1;
+
+        let sem = Semaphore {
+            id,
+            key,
+            value,
+            max_value: i32::MAX,
+            owner_pid: pid,
+            permissions: flags & 0o777,
+            waiters: VecDeque::new(),
+        };
+
+        self.semaphores.insert(id, sem);
+        self.key_to_sem.insert(key, id);
+
+        Ok(id)
+    }
+
+    /// Semaphore wait (P operation)
+    pub fn sem_wait(&mut self, id: u64, tid: Tid) -> KernelResult<bool> {
+        let sem = self.semaphores.get_mut(&id).ok_or(KernelError::InvalidAddress)?;
+
+        if sem.value > 0 {
+            sem.value -= 1;
+            Ok(true)
+        } else {
+            sem.waiters.push_back(tid);
+            Ok(false)
+        }
+    }
+
+    /// Semaphore signal (V operation)
+    pub fn sem_signal(&mut self, id: u64) -> KernelResult<Option<Tid>> {
+        let sem = self.semaphores.get_mut(&id).ok_or(KernelError::InvalidAddress)?;
+
+        if let Some(tid) = sem.waiters.pop_front() {
+            Ok(Some(tid))
+        } else {
+            sem.value += 1;
+            Ok(None)
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// SYNCHRONIZATION PRIMITIVES
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Kernel mutex
+pub struct KMutex {
+    locked: AtomicBool,
+    owner: Mutex<Option<Tid>>,
+    waiters: Mutex<VecDeque<Tid>>,
+    priority_ceiling: Option<i8>,
+}
+
+impl KMutex {
+    pub fn new() -> Self {
+        KMutex {
+            locked: AtomicBool::new(false),
+            owner: Mutex::new(None),
+            waiters: Mutex::new(VecDeque::new()),
+            priority_ceiling: None,
+        }
+    }
+
+    pub fn with_priority_ceiling(ceiling: i8) -> Self {
+        let mut m = Self::new();
+        m.priority_ceiling = Some(ceiling);
+        m
+    }
+
+    pub fn try_lock(&self, tid: Tid) -> bool {
+        if self.locked.compare_exchange(
+            false,
+            true,
+            std::sync::atomic::Ordering::Acquire,
+            std::sync::atomic::Ordering::Relaxed,
+        ).is_ok() {
+            *self.owner.lock().unwrap() = Some(tid);
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn lock(&self, tid: Tid) -> bool {
+        if self.try_lock(tid) {
+            return true;
+        }
+
+        self.waiters.lock().unwrap().push_back(tid);
+        false
+    }
+
+    pub fn unlock(&self) -> Option<Tid> {
+        let mut owner = self.owner.lock().unwrap();
+        *owner = None;
+
+        let mut waiters = self.waiters.lock().unwrap();
+        if let Some(next_tid) = waiters.pop_front() {
+            *owner = Some(next_tid);
+            Some(next_tid)
+        } else {
+            self.locked.store(false, std::sync::atomic::Ordering::Release);
+            None
+        }
+    }
+}
+
+/// Read-write lock
+pub struct KRwLock {
+    readers: AtomicU64,
+    writer: AtomicBool,
+    writer_tid: Mutex<Option<Tid>>,
+    read_waiters: Mutex<VecDeque<Tid>>,
+    write_waiters: Mutex<VecDeque<Tid>>,
+}
+
+impl KRwLock {
+    pub fn new() -> Self {
+        KRwLock {
+            readers: AtomicU64::new(0),
+            writer: AtomicBool::new(false),
+            writer_tid: Mutex::new(None),
+            read_waiters: Mutex::new(VecDeque::new()),
+            write_waiters: Mutex::new(VecDeque::new()),
+        }
+    }
+
+    pub fn read_lock(&self, tid: Tid) -> bool {
+        if !self.writer.load(std::sync::atomic::Ordering::Acquire) {
+            self.readers.fetch_add(1, std::sync::atomic::Ordering::Acquire);
+            true
+        } else {
+            self.read_waiters.lock().unwrap().push_back(tid);
+            false
+        }
+    }
+
+    pub fn read_unlock(&self) {
+        self.readers.fetch_sub(1, std::sync::atomic::Ordering::Release);
+    }
+
+    pub fn write_lock(&self, tid: Tid) -> bool {
+        if self.readers.load(std::sync::atomic::Ordering::Acquire) == 0 {
+            if self.writer.compare_exchange(
+                false,
+                true,
+                std::sync::atomic::Ordering::Acquire,
+                std::sync::atomic::Ordering::Relaxed,
+            ).is_ok() {
+                *self.writer_tid.lock().unwrap() = Some(tid);
+                return true;
+            }
+        }
+        self.write_waiters.lock().unwrap().push_back(tid);
+        false
+    }
+
+    pub fn write_unlock(&self) -> Vec<Tid> {
+        *self.writer_tid.lock().unwrap() = None;
+        self.writer.store(false, std::sync::atomic::Ordering::Release);
+
+        // Wake all waiting readers or one writer
+        let mut to_wake = Vec::new();
+        let mut write_waiters = self.write_waiters.lock().unwrap();
+
+        if let Some(tid) = write_waiters.pop_front() {
+            to_wake.push(tid);
+        } else {
+            let mut read_waiters = self.read_waiters.lock().unwrap();
+            to_wake.extend(read_waiters.drain(..));
+        }
+
+        to_wake
+    }
+}
+
+/// Condition variable
+pub struct KCondVar {
+    waiters: Mutex<VecDeque<Tid>>,
+}
+
+impl KCondVar {
+    pub fn new() -> Self {
+        KCondVar {
+            waiters: Mutex::new(VecDeque::new()),
+        }
+    }
+
+    pub fn wait(&self, tid: Tid) {
+        self.waiters.lock().unwrap().push_back(tid);
+    }
+
+    pub fn signal(&self) -> Option<Tid> {
+        self.waiters.lock().unwrap().pop_front()
+    }
+
+    pub fn broadcast(&self) -> Vec<Tid> {
+        self.waiters.lock().unwrap().drain(..).collect()
+    }
+}
+
+/// Barrier
+pub struct KBarrier {
+    count: u32,
+    waiting: AtomicU64,
+    waiters: Mutex<Vec<Tid>>,
+    generation: AtomicU64,
+}
+
+impl KBarrier {
+    pub fn new(count: u32) -> Self {
+        KBarrier {
+            count,
+            waiting: AtomicU64::new(0),
+            waiters: Mutex::new(Vec::new()),
+            generation: AtomicU64::new(0),
+        }
+    }
+
+    pub fn wait(&self, tid: Tid) -> Option<Vec<Tid>> {
+        let n = self.waiting.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+
+        if n as u32 == self.count {
+            self.waiting.store(0, std::sync::atomic::Ordering::SeqCst);
+            self.generation.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Some(self.waiters.lock().unwrap().drain(..).collect())
+        } else {
+            self.waiters.lock().unwrap().push(tid);
+            None
+        }
+    }
+}
+
+/// Spinlock for interrupt handlers
+pub struct Spinlock {
+    locked: AtomicBool,
+}
+
+impl Spinlock {
+    pub const fn new() -> Self {
+        Spinlock {
+            locked: AtomicBool::new(false),
+        }
+    }
+
+    pub fn lock(&self) {
+        while self.locked.compare_exchange_weak(
+            false,
+            true,
+            std::sync::atomic::Ordering::Acquire,
+            std::sync::atomic::Ordering::Relaxed,
+        ).is_err() {
+            std::hint::spin_loop();
+        }
+    }
+
+    pub fn unlock(&self) {
+        self.locked.store(false, std::sync::atomic::Ordering::Release);
+    }
+
+    pub fn try_lock(&self) -> bool {
+        self.locked.compare_exchange(
+            false,
+            true,
+            std::sync::atomic::Ordering::Acquire,
+            std::sync::atomic::Ordering::Relaxed,
+        ).is_ok()
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// SECURITY SUBSYSTEM
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// User ID
+pub type Uid = u32;
+/// Group ID
+pub type Gid = u32;
+
+/// Process credentials
+#[derive(Clone, Debug)]
+pub struct ProcessCredentials {
+    pub uid: Uid,
+    pub gid: Gid,
+    pub euid: Uid,  // Effective UID
+    pub egid: Gid,  // Effective GID
+    pub suid: Uid,  // Saved UID
+    pub sgid: Gid,  // Saved GID
+    pub fsuid: Uid, // Filesystem UID
+    pub fsgid: Gid, // Filesystem GID
+    pub groups: Vec<Gid>,
+    pub capabilities: CapabilitySet,
+    pub securebits: u32,
+}
+
+/// Linux-style capabilities
+#[derive(Clone, Copy, Debug, Default)]
+pub struct CapabilitySet {
+    pub effective: u64,
+    pub permitted: u64,
+    pub inheritable: u64,
+    pub bounding: u64,
+    pub ambient: u64,
+}
+
+impl CapabilitySet {
+    pub const CAP_CHOWN: u64 = 1 << 0;
+    pub const CAP_DAC_OVERRIDE: u64 = 1 << 1;
+    pub const CAP_DAC_READ_SEARCH: u64 = 1 << 2;
+    pub const CAP_FOWNER: u64 = 1 << 3;
+    pub const CAP_FSETID: u64 = 1 << 4;
+    pub const CAP_KILL: u64 = 1 << 5;
+    pub const CAP_SETGID: u64 = 1 << 6;
+    pub const CAP_SETUID: u64 = 1 << 7;
+    pub const CAP_SETPCAP: u64 = 1 << 8;
+    pub const CAP_NET_BIND_SERVICE: u64 = 1 << 10;
+    pub const CAP_NET_RAW: u64 = 1 << 13;
+    pub const CAP_SYS_CHROOT: u64 = 1 << 18;
+    pub const CAP_SYS_PTRACE: u64 = 1 << 19;
+    pub const CAP_SYS_ADMIN: u64 = 1 << 21;
+    pub const CAP_SYS_BOOT: u64 = 1 << 22;
+    pub const CAP_SYS_RESOURCE: u64 = 1 << 24;
+    pub const CAP_MKNOD: u64 = 1 << 27;
+
+    pub fn has(&self, cap: u64) -> bool {
+        self.effective & cap != 0
+    }
+
+    pub fn grant(&mut self, cap: u64) {
+        self.effective |= cap;
+        self.permitted |= cap;
+    }
+
+    pub fn revoke(&mut self, cap: u64) {
+        self.effective &= !cap;
+    }
+}
+
+/// Mandatory Access Control (MAC) label
+#[derive(Clone, Debug)]
+pub struct SecurityLabel {
+    pub user: String,
+    pub role: String,
+    pub type_: String,
+    pub level: SecurityLevel,
+}
+
+#[derive(Clone, Debug)]
+pub struct SecurityLevel {
+    pub sensitivity: u16,
+    pub categories: Vec<u16>,
+}
+
+/// Seccomp filter mode
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum SeccompMode {
+    Disabled,
+    Strict,
+    Filter,
+}
+
+/// Seccomp BPF filter
+#[derive(Clone)]
+pub struct SeccompFilter {
+    pub mode: SeccompMode,
+    pub rules: Vec<SeccompRule>,
+}
+
+#[derive(Clone)]
+pub struct SeccompRule {
+    pub syscall: u64,
+    pub action: SeccompAction,
+    pub args: Vec<SeccompArg>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum SeccompAction {
+    Allow,
+    Kill,
+    Trap,
+    Errno(i32),
+    Trace,
+    Log,
+}
+
+#[derive(Clone)]
+pub struct SeccompArg {
+    pub index: u8,
+    pub op: SeccompOp,
+    pub value: u64,
+}
+
+#[derive(Clone, Copy)]
+pub enum SeccompOp {
+    Eq,
+    Ne,
+    Lt,
+    Le,
+    Gt,
+    Ge,
+    MaskedEq(u64),
+}
+
+impl SeccompFilter {
+    pub fn new(mode: SeccompMode) -> Self {
+        SeccompFilter {
+            mode,
+            rules: Vec::new(),
+        }
+    }
+
+    pub fn add_rule(&mut self, rule: SeccompRule) {
+        self.rules.push(rule);
+    }
+
+    pub fn check(&self, syscall: u64, args: &[u64]) -> SeccompAction {
+        if self.mode == SeccompMode::Disabled {
+            return SeccompAction::Allow;
+        }
+
+        if self.mode == SeccompMode::Strict {
+            return match syscall {
+                SYS_READ | SYS_WRITE | SYS_EXIT => SeccompAction::Allow,
+                _ => SeccompAction::Kill,
+            };
+        }
+
+        for rule in &self.rules {
+            if rule.syscall == syscall && self.match_args(&rule.args, args) {
+                return rule.action;
+            }
+        }
+
+        SeccompAction::Allow
+    }
+
+    fn match_args(&self, rule_args: &[SeccompArg], actual_args: &[u64]) -> bool {
+        for arg in rule_args {
+            if arg.index as usize >= actual_args.len() {
+                return false;
+            }
+
+            let val = actual_args[arg.index as usize];
+            let matches = match arg.op {
+                SeccompOp::Eq => val == arg.value,
+                SeccompOp::Ne => val != arg.value,
+                SeccompOp::Lt => val < arg.value,
+                SeccompOp::Le => val <= arg.value,
+                SeccompOp::Gt => val > arg.value,
+                SeccompOp::Ge => val >= arg.value,
+                SeccompOp::MaskedEq(mask) => (val & mask) == arg.value,
+            };
+
+            if !matches {
+                return false;
+            }
+        }
+        true
+    }
+}
+
+/// Security manager
+pub struct SecurityManager {
+    mac_enabled: bool,
+    audit_enabled: bool,
+    audit_log: Vec<AuditEvent>,
+}
+
+#[derive(Clone, Debug)]
+pub struct AuditEvent {
+    pub timestamp: u64,
+    pub pid: Pid,
+    pub uid: Uid,
+    pub event_type: AuditEventType,
+    pub result: AuditResult,
+    pub details: String,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum AuditEventType {
+    Syscall,
+    FileAccess,
+    NetworkAccess,
+    ProcessCreate,
+    ProcessExit,
+    CapabilityUse,
+    SecurityViolation,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum AuditResult {
+    Success,
+    Denied,
+    Failed,
+}
+
+impl SecurityManager {
+    pub fn new() -> Self {
+        SecurityManager {
+            mac_enabled: false,
+            audit_enabled: false,
+            audit_log: Vec::new(),
+        }
+    }
+
+    pub fn enable_mac(&mut self) {
+        self.mac_enabled = true;
+    }
+
+    pub fn enable_audit(&mut self) {
+        self.audit_enabled = true;
+    }
+
+    pub fn check_permission(
+        &mut self,
+        creds: &ProcessCredentials,
+        resource: &str,
+        action: &str,
+    ) -> bool {
+        // Check capabilities
+        let allowed = match action {
+            "chown" => creds.capabilities.has(CapabilitySet::CAP_CHOWN),
+            "kill" => creds.capabilities.has(CapabilitySet::CAP_KILL),
+            "bind_low_port" => creds.capabilities.has(CapabilitySet::CAP_NET_BIND_SERVICE),
+            _ => true,
+        };
+
+        if self.audit_enabled {
+            self.audit_log.push(AuditEvent {
+                timestamp: 0,
+                pid: 0,
+                uid: creds.uid,
+                event_type: AuditEventType::FileAccess,
+                result: if allowed { AuditResult::Success } else { AuditResult::Denied },
+                details: format!("{} on {}", action, resource),
+            });
+        }
+
+        allowed
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// CONTAINERIZATION (NAMESPACES AND CGROUPS)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Namespace type
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum NamespaceType {
+    Mount,
+    Pid,
+    Network,
+    Ipc,
+    Uts,
+    User,
+    Cgroup,
+    Time,
+}
+
+/// Namespace
+#[derive(Clone)]
+pub struct Namespace {
+    pub id: u64,
+    pub ns_type: NamespaceType,
+    pub parent: Option<u64>,
+    pub processes: Vec<Pid>,
+}
+
+/// Container
+pub struct Container {
+    pub id: String,
+    pub name: String,
+    pub namespaces: HashMap<NamespaceType, u64>,
+    pub cgroup: CgroupPath,
+    pub root_fs: String,
+    pub state: ContainerState,
+    pub config: ContainerConfig,
+    pub init_pid: Option<Pid>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ContainerState {
+    Created,
+    Running,
+    Paused,
+    Stopped,
+}
+
+#[derive(Clone)]
+pub struct ContainerConfig {
+    pub hostname: String,
+    pub env: HashMap<String, String>,
+    pub cmd: Vec<String>,
+    pub working_dir: String,
+    pub user: String,
+    pub memory_limit: Option<usize>,
+    pub cpu_shares: Option<u32>,
+    pub cpu_quota: Option<i64>,
+    pub pids_limit: Option<u32>,
+    pub network_mode: NetworkMode,
+    pub capabilities: CapabilitySet,
+    pub seccomp: Option<SeccompFilter>,
+    pub readonly_rootfs: bool,
+}
+
+#[derive(Clone, Debug)]
+pub enum NetworkMode {
+    None,
+    Host,
+    Bridge(String),
+    Container(String),
+}
+
+/// Cgroup path
+#[derive(Clone, Debug)]
+pub struct CgroupPath(pub String);
+
+/// Cgroup controller
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CgroupController {
+    Cpu,
+    Cpuacct,
+    Cpuset,
+    Memory,
+    Blkio,
+    Devices,
+    Freezer,
+    NetCls,
+    NetPrio,
+    PerfEvent,
+    Pids,
+}
+
+/// Cgroup v2 unified hierarchy
+pub struct Cgroup {
+    pub path: CgroupPath,
+    pub controllers: Vec<CgroupController>,
+    pub processes: Vec<Pid>,
+    pub limits: CgroupLimits,
+    pub stats: CgroupStats,
+}
+
+#[derive(Clone, Default)]
+pub struct CgroupLimits {
+    // Memory
+    pub memory_max: Option<usize>,
+    pub memory_high: Option<usize>,
+    pub memory_low: Option<usize>,
+    pub memory_swap_max: Option<usize>,
+
+    // CPU
+    pub cpu_weight: Option<u32>,
+    pub cpu_max: Option<(u64, u64)>,  // (quota, period)
+    pub cpuset_cpus: Option<Vec<u32>>,
+    pub cpuset_mems: Option<Vec<u32>>,
+
+    // PIDs
+    pub pids_max: Option<u32>,
+
+    // I/O
+    pub io_weight: Option<u32>,
+    pub io_max: Option<Vec<IoLimit>>,
+}
+
+#[derive(Clone)]
+pub struct IoLimit {
+    pub device: (u32, u32),  // major:minor
+    pub rbps: Option<u64>,
+    pub wbps: Option<u64>,
+    pub riops: Option<u64>,
+    pub wiops: Option<u64>,
+}
+
+#[derive(Clone, Default)]
+pub struct CgroupStats {
+    pub memory_current: usize,
+    pub memory_peak: usize,
+    pub memory_swap_current: usize,
+    pub cpu_usage_usec: u64,
+    pub cpu_user_usec: u64,
+    pub cpu_system_usec: u64,
+    pub pids_current: u32,
+    pub io_read_bytes: u64,
+    pub io_write_bytes: u64,
+}
+
+/// Container runtime
+pub struct ContainerRuntime {
+    containers: HashMap<String, Container>,
+    namespaces: HashMap<u64, Namespace>,
+    cgroups: HashMap<CgroupPath, Cgroup>,
+    next_ns_id: u64,
+}
+
+impl ContainerRuntime {
+    pub fn new() -> Self {
+        ContainerRuntime {
+            containers: HashMap::new(),
+            namespaces: HashMap::new(),
+            cgroups: HashMap::new(),
+            next_ns_id: 1,
+        }
+    }
+
+    /// Create a new container
+    pub fn create(&mut self, id: &str, config: ContainerConfig) -> KernelResult<()> {
+        // Create namespaces
+        let mut ns_map = HashMap::new();
+
+        for ns_type in [
+            NamespaceType::Mount,
+            NamespaceType::Pid,
+            NamespaceType::Network,
+            NamespaceType::Ipc,
+            NamespaceType::Uts,
+            NamespaceType::User,
+        ] {
+            let ns_id = self.create_namespace(ns_type)?;
+            ns_map.insert(ns_type, ns_id);
+        }
+
+        // Create cgroup
+        let cgroup_path = CgroupPath(format!("/sys/fs/cgroup/{}", id));
+        let mut cgroup = Cgroup {
+            path: cgroup_path.clone(),
+            controllers: vec![
+                CgroupController::Memory,
+                CgroupController::Cpu,
+                CgroupController::Pids,
+            ],
+            processes: Vec::new(),
+            limits: CgroupLimits::default(),
+            stats: CgroupStats::default(),
+        };
+
+        // Apply limits from config
+        cgroup.limits.memory_max = config.memory_limit;
+        if let Some(shares) = config.cpu_shares {
+            cgroup.limits.cpu_weight = Some(shares);
+        }
+        cgroup.limits.pids_max = config.pids_limit;
+
+        self.cgroups.insert(cgroup_path.clone(), cgroup);
+
+        let container = Container {
+            id: id.to_string(),
+            name: id.to_string(),
+            namespaces: ns_map,
+            cgroup: cgroup_path,
+            root_fs: String::new(),
+            state: ContainerState::Created,
+            config,
+            init_pid: None,
+        };
+
+        self.containers.insert(id.to_string(), container);
+        Ok(())
+    }
+
+    /// Start a container
+    pub fn start(&mut self, id: &str) -> KernelResult<Pid> {
+        let container = self.containers.get_mut(id).ok_or(KernelError::ProcessNotFound)?;
+        container.state = ContainerState::Running;
+        // Would fork/exec container init process
+        Ok(1)
+    }
+
+    /// Stop a container
+    pub fn stop(&mut self, id: &str) -> KernelResult<()> {
+        let container = self.containers.get_mut(id).ok_or(KernelError::ProcessNotFound)?;
+        container.state = ContainerState::Stopped;
+        // Would send SIGTERM/SIGKILL to container processes
+        Ok(())
+    }
+
+    /// Pause a container
+    pub fn pause(&mut self, id: &str) -> KernelResult<()> {
+        let container = self.containers.get_mut(id).ok_or(KernelError::ProcessNotFound)?;
+        container.state = ContainerState::Paused;
+        // Would freeze cgroup
+        Ok(())
+    }
+
+    /// Resume a container
+    pub fn resume(&mut self, id: &str) -> KernelResult<()> {
+        let container = self.containers.get_mut(id).ok_or(KernelError::ProcessNotFound)?;
+        container.state = ContainerState::Running;
+        // Would unfreeze cgroup
+        Ok(())
+    }
+
+    /// Delete a container
+    pub fn delete(&mut self, id: &str) -> KernelResult<()> {
+        self.containers.remove(id);
+        Ok(())
+    }
+
+    fn create_namespace(&mut self, ns_type: NamespaceType) -> KernelResult<u64> {
+        let id = self.next_ns_id;
+        self.next_ns_id += 1;
+
+        let ns = Namespace {
+            id,
+            ns_type,
+            parent: None,
+            processes: Vec::new(),
+        };
+
+        self.namespaces.insert(id, ns);
+        Ok(id)
+    }
+
+    /// Get container stats
+    pub fn stats(&self, id: &str) -> Option<&CgroupStats> {
+        let container = self.containers.get(id)?;
+        let cgroup = self.cgroups.get(&container.cgroup)?;
+        Some(&cgroup.stats)
+    }
+
+    /// Update cgroup limits
+    pub fn update_limits(&mut self, id: &str, limits: CgroupLimits) -> KernelResult<()> {
+        let container = self.containers.get(id).ok_or(KernelError::ProcessNotFound)?;
+        let cgroup = self.cgroups.get_mut(&container.cgroup).ok_or(KernelError::ProcessNotFound)?;
+        cgroup.limits = limits;
+        Ok(())
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// POWER MANAGEMENT
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// CPU frequency governor
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum CpuGovernor {
+    Performance,
+    Powersave,
+    Ondemand,
+    Conservative,
+    Schedutil,
+    Userspace,
+}
+
+/// Power state
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum PowerState {
+    S0,  // Working
+    S1,  // Power on suspend
+    S2,  // CPU off
+    S3,  // Suspend to RAM
+    S4,  // Hibernate
+    S5,  // Soft off
+}
+
+/// CPU power state
+#[derive(Clone, Copy, Debug)]
+pub struct CpuPState {
+    pub current_freq: u64,
+    pub min_freq: u64,
+    pub max_freq: u64,
+    pub turbo_enabled: bool,
+    pub c_state: u8,
+}
+
+/// Power manager
+pub struct PowerManager {
+    pub governor: CpuGovernor,
+    pub power_state: PowerState,
+    pub cpu_states: HashMap<u32, CpuPState>,
+    pub battery_level: Option<u8>,
+    pub ac_power: bool,
+    pub thermal_zones: Vec<ThermalZone>,
+}
+
+#[derive(Clone)]
+pub struct ThermalZone {
+    pub name: String,
+    pub temperature: i32,  // millidegrees Celsius
+    pub trip_points: Vec<TripPoint>,
+    pub cooling_device: Option<String>,
+}
+
+#[derive(Clone)]
+pub struct TripPoint {
+    pub temperature: i32,
+    pub trip_type: TripType,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum TripType {
+    Active,
+    Passive,
+    Hot,
+    Critical,
+}
+
+impl PowerManager {
+    pub fn new() -> Self {
+        PowerManager {
+            governor: CpuGovernor::Ondemand,
+            power_state: PowerState::S0,
+            cpu_states: HashMap::new(),
+            battery_level: None,
+            ac_power: true,
+            thermal_zones: Vec::new(),
+        }
+    }
+
+    pub fn set_governor(&mut self, governor: CpuGovernor) {
+        self.governor = governor;
+    }
+
+    pub fn set_cpu_frequency(&mut self, cpu: u32, freq: u64) -> KernelResult<()> {
+        if let Some(state) = self.cpu_states.get_mut(&cpu) {
+            if freq >= state.min_freq && freq <= state.max_freq {
+                state.current_freq = freq;
+                Ok(())
+            } else {
+                Err(KernelError::InvalidAddress)
+            }
+        } else {
+            Err(KernelError::InvalidAddress)
+        }
+    }
+
+    pub fn suspend(&mut self, state: PowerState) -> KernelResult<()> {
+        match state {
+            PowerState::S3 => {
+                // Save state to RAM
+                self.power_state = PowerState::S3;
+                Ok(())
+            }
+            PowerState::S4 => {
+                // Write state to disk (hibernate)
+                self.power_state = PowerState::S4;
+                Ok(())
+            }
+            _ => Err(KernelError::NotImplemented),
+        }
+    }
+
+    pub fn resume(&mut self) -> KernelResult<()> {
+        self.power_state = PowerState::S0;
+        Ok(())
+    }
+
+    pub fn handle_thermal_event(&mut self) {
+        for zone in &self.thermal_zones {
+            for trip in &zone.trip_points {
+                if zone.temperature >= trip.temperature {
+                    match trip.trip_type {
+                        TripType::Critical => {
+                            // Emergency shutdown
+                        }
+                        TripType::Hot => {
+                            // Throttle CPU
+                        }
+                        TripType::Passive => {
+                            // Reduce frequency
+                        }
+                        TripType::Active => {
+                            // Enable cooling
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// KERNEL MODULES
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Kernel module
+pub struct KernelModule {
+    pub name: String,
+    pub version: String,
+    pub author: String,
+    pub description: String,
+    pub license: String,
+    pub state: ModuleState,
+    pub size: usize,
+    pub base_addr: VirtAddr,
+    pub init_fn: Option<fn() -> KernelResult<()>>,
+    pub exit_fn: Option<fn()>,
+    pub dependencies: Vec<String>,
+    pub ref_count: AtomicU64,
+    pub parameters: HashMap<String, ModuleParameter>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ModuleState {
+    Unloaded,
+    Loading,
+    Live,
+    Unloading,
+}
+
+#[derive(Clone)]
+pub struct ModuleParameter {
+    pub name: String,
+    pub description: String,
+    pub value: ParameterValue,
+    pub permissions: u32,
+}
+
+#[derive(Clone)]
+pub enum ParameterValue {
+    Bool(bool),
+    Int(i64),
+    UInt(u64),
+    String(String),
+    Array(Vec<ParameterValue>),
+}
+
+/// Module manager
+pub struct ModuleManager {
+    modules: HashMap<String, KernelModule>,
+    symbol_table: HashMap<String, VirtAddr>,
+}
+
+impl ModuleManager {
+    pub fn new() -> Self {
+        ModuleManager {
+            modules: HashMap::new(),
+            symbol_table: HashMap::new(),
+        }
+    }
+
+    /// Load a kernel module
+    pub fn load(&mut self, name: &str, data: &[u8]) -> KernelResult<()> {
+        // Would parse ELF, relocate, resolve symbols
+        let module = KernelModule {
+            name: name.to_string(),
+            version: String::new(),
+            author: String::new(),
+            description: String::new(),
+            license: String::new(),
+            state: ModuleState::Loading,
+            size: data.len(),
+            base_addr: VirtAddr::new(0),
+            init_fn: None,
+            exit_fn: None,
+            dependencies: Vec::new(),
+            ref_count: AtomicU64::new(0),
+            parameters: HashMap::new(),
+        };
+
+        self.modules.insert(name.to_string(), module);
+
+        // Call init function
+        if let Some(module) = self.modules.get_mut(name) {
+            if let Some(init) = module.init_fn {
+                init()?;
+            }
+            module.state = ModuleState::Live;
+        }
+
+        Ok(())
+    }
+
+    /// Unload a kernel module
+    pub fn unload(&mut self, name: &str) -> KernelResult<()> {
+        let module = self.modules.get_mut(name).ok_or(KernelError::ProcessNotFound)?;
+
+        if module.ref_count.load(std::sync::atomic::Ordering::SeqCst) > 0 {
+            return Err(KernelError::ResourceBusy);
+        }
+
+        module.state = ModuleState::Unloading;
+
+        if let Some(exit) = module.exit_fn {
+            exit();
+        }
+
+        self.modules.remove(name);
+        Ok(())
+    }
+
+    /// Get module info
+    pub fn info(&self, name: &str) -> Option<&KernelModule> {
+        self.modules.get(name)
+    }
+
+    /// List all modules
+    pub fn list(&self) -> Vec<&KernelModule> {
+        self.modules.values().collect()
+    }
+
+    /// Export symbol
+    pub fn export_symbol(&mut self, name: &str, addr: VirtAddr) {
+        self.symbol_table.insert(name.to_string(), addr);
+    }
+
+    /// Lookup symbol
+    pub fn lookup_symbol(&self, name: &str) -> Option<VirtAddr> {
+        self.symbol_table.get(name).copied()
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// NUMA SUPPORT
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// NUMA node
+pub struct NumaNode {
+    pub id: u32,
+    pub cpus: Vec<u32>,
+    pub memory_start: PhysAddr,
+    pub memory_size: usize,
+    pub free_memory: usize,
+    pub distances: HashMap<u32, u32>,
+}
+
+/// NUMA policy
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum NumaPolicy {
+    Default,
+    Bind,
+    Interleave,
+    Preferred,
+    Local,
+}
+
+/// NUMA memory policy
+#[derive(Clone)]
+pub struct MemPolicy {
+    pub policy: NumaPolicy,
+    pub nodes: Vec<u32>,
+}
+
+/// NUMA manager
+pub struct NumaManager {
+    nodes: HashMap<u32, NumaNode>,
+    process_policies: HashMap<Pid, MemPolicy>,
+}
+
+impl NumaManager {
+    pub fn new() -> Self {
+        NumaManager {
+            nodes: HashMap::new(),
+            process_policies: HashMap::new(),
+        }
+    }
+
+    /// Add NUMA node
+    pub fn add_node(&mut self, node: NumaNode) {
+        self.nodes.insert(node.id, node);
+    }
+
+    /// Get best node for allocation
+    pub fn get_best_node(&self, current_cpu: u32, size: usize) -> Option<u32> {
+        // Find local node first
+        for (id, node) in &self.nodes {
+            if node.cpus.contains(&current_cpu) && node.free_memory >= size {
+                return Some(*id);
+            }
+        }
+
+        // Find nearest node with memory
+        let local_node = self.get_node_for_cpu(current_cpu)?;
+        let local = self.nodes.get(&local_node)?;
+
+        local.distances.iter()
+            .filter(|(&node_id, _)| {
+                self.nodes.get(&node_id)
+                    .map(|n| n.free_memory >= size)
+                    .unwrap_or(false)
+            })
+            .min_by_key(|(_, &dist)| dist)
+            .map(|(&node_id, _)| node_id)
+    }
+
+    /// Get node for CPU
+    pub fn get_node_for_cpu(&self, cpu: u32) -> Option<u32> {
+        for (id, node) in &self.nodes {
+            if node.cpus.contains(&cpu) {
+                return Some(*id);
+            }
+        }
+        None
+    }
+
+    /// Set memory policy for process
+    pub fn set_policy(&mut self, pid: Pid, policy: MemPolicy) {
+        self.process_policies.insert(pid, policy);
+    }
+
+    /// Get memory policy for process
+    pub fn get_policy(&self, pid: Pid) -> Option<&MemPolicy> {
+        self.process_policies.get(&pid)
+    }
+
+    /// Migrate pages to node
+    pub fn migrate(&mut self, pid: Pid, target_node: u32) -> KernelResult<usize> {
+        // Would migrate process pages to target node
+        Ok(0)
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// TRACING AND DEBUGGING
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Trace event
+#[derive(Clone)]
+pub struct TraceEvent {
+    pub timestamp: u64,
+    pub cpu: u32,
+    pub pid: Pid,
+    pub tid: Tid,
+    pub event_type: TraceEventType,
+    pub data: Vec<u8>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum TraceEventType {
+    Syscall,
+    SchedSwitch,
+    SchedWakeup,
+    Irq,
+    SoftIrq,
+    PageFault,
+    Kmalloc,
+    Kfree,
+    Custom(u32),
+}
+
+/// Kprobe (kernel probe)
+pub struct Kprobe {
+    pub address: VirtAddr,
+    pub symbol: String,
+    pub offset: usize,
+    pub handler: fn(&KprobeContext),
+    pub enabled: bool,
+}
+
+pub struct KprobeContext {
+    pub regs: CpuContext,
+    pub address: VirtAddr,
+}
+
+/// Uprobe (userspace probe)
+pub struct Uprobe {
+    pub pid: Pid,
+    pub address: VirtAddr,
+    pub handler: fn(&UprobeContext),
+    pub enabled: bool,
+}
+
+pub struct UprobeContext {
+    pub regs: CpuContext,
+    pub pid: Pid,
+    pub address: VirtAddr,
+}
+
+/// Perf event
+pub struct PerfEvent {
+    pub event_type: PerfEventType,
+    pub config: u64,
+    pub sample_period: u64,
+    pub sample_type: u64,
+    pub enabled: bool,
+    pub pid: Option<Pid>,
+    pub cpu: Option<u32>,
+    pub buffer: VecDeque<PerfSample>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum PerfEventType {
+    Hardware,
+    Software,
+    Tracepoint,
+    HwCache,
+    Raw,
+    Breakpoint,
+}
+
+#[derive(Clone)]
+pub struct PerfSample {
+    pub timestamp: u64,
+    pub cpu: u32,
+    pub pid: Pid,
+    pub tid: Tid,
+    pub ip: u64,
+    pub period: u64,
+    pub callchain: Vec<u64>,
+}
+
+/// Tracer subsystem
+pub struct Tracer {
+    events: VecDeque<TraceEvent>,
+    kprobes: HashMap<VirtAddr, Kprobe>,
+    uprobes: HashMap<(Pid, VirtAddr), Uprobe>,
+    perf_events: Vec<PerfEvent>,
+    buffer_size: usize,
+    enabled: bool,
+}
+
+impl Tracer {
+    pub fn new(buffer_size: usize) -> Self {
+        Tracer {
+            events: VecDeque::with_capacity(buffer_size),
+            kprobes: HashMap::new(),
+            uprobes: HashMap::new(),
+            perf_events: Vec::new(),
+            buffer_size,
+            enabled: false,
+        }
+    }
+
+    /// Enable tracing
+    pub fn enable(&mut self) {
+        self.enabled = true;
+    }
+
+    /// Disable tracing
+    pub fn disable(&mut self) {
+        self.enabled = false;
+    }
+
+    /// Record trace event
+    pub fn record(&mut self, event: TraceEvent) {
+        if !self.enabled {
+            return;
+        }
+
+        if self.events.len() >= self.buffer_size {
+            self.events.pop_front();
+        }
+        self.events.push_back(event);
+    }
+
+    /// Register kprobe
+    pub fn register_kprobe(&mut self, probe: Kprobe) {
+        self.kprobes.insert(probe.address, probe);
+    }
+
+    /// Unregister kprobe
+    pub fn unregister_kprobe(&mut self, address: VirtAddr) {
+        self.kprobes.remove(&address);
+    }
+
+    /// Register uprobe
+    pub fn register_uprobe(&mut self, probe: Uprobe) {
+        self.uprobes.insert((probe.pid, probe.address), probe);
+    }
+
+    /// Get trace buffer
+    pub fn get_events(&self) -> &VecDeque<TraceEvent> {
+        &self.events
+    }
+
+    /// Clear trace buffer
+    pub fn clear(&mut self) {
+        self.events.clear();
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// TESTS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_phys_addr() {
+        let addr = PhysAddr::new(0x1000);
+        assert_eq!(addr.page_index(), 1);
+    }
+
+    #[test]
+    fn test_virt_addr() {
+        let addr = VirtAddr::new(0x7FFF_FFFF_F000);
+        assert_eq!(addr.page_offset(), 0);
+    }
+
+    #[test]
+    fn test_buddy_allocator() {
+        let mut allocator = BuddyAllocator::new(1024);
+
+        let regions = vec![MemoryRegion {
+            start: PhysAddr::new(0x100000),
+            size: 4 * 1024 * 1024, // 4MB
+            region_type: MemoryRegionType::Available,
+        }];
+
+        allocator.init(&regions);
+        assert!(allocator.available_memory() > 0);
+
+        // Allocate a single page
+        let page = allocator.allocate(0);
+        assert!(page.is_ok());
+    }
+
+    #[test]
+    fn test_scheduler() {
+        let mut scheduler = NeuralScheduler::new();
+
+        let pid = scheduler.spawn_process("test", None);
+        assert!(pid.is_ok());
+
+        let pid = pid.unwrap();
+        let process = scheduler.get_process(pid);
+        assert!(process.is_some());
+        assert_eq!(process.unwrap().name, "test");
+    }
+
+    #[test]
+    fn test_self_healing() {
+        let mut healer = SelfHealingEngine::new();
+
+        // Create a mock process
+        let address_space = AddressSpace::new(Architecture::X86_64, PhysAddr::new(0));
+        let process = Process::new(1, None, "test", address_space);
+
+        let thread = Thread {
+            tid: 1,
+            pid: 1,
+            state: ThreadState::Running,
+            context: CpuContext::default(),
+            kernel_stack: VirtAddr::new(0),
+            user_stack: VirtAddr::new(0),
+            priority: 0,
+            time_slice: 100,
+            cpu_affinity: u64::MAX,
+            blocked_on: None,
+        };
+
+        // Create checkpoint
+        let checkpoint_id = healer.checkpoint(&process, &[&thread]);
+        assert!(checkpoint_id.is_ok());
+
+        // Restore
+        let restore = healer.restore(checkpoint_id.unwrap());
+        assert!(restore.is_ok());
+    }
+
+    #[test]
+    fn test_kernel_init() {
+        let mut kernel = Kernel::new(Architecture::X86_64, 262144); // 1GB
+
+        let regions = vec![MemoryRegion {
+            start: PhysAddr::new(0x100000),
+            size: 1024 * 1024 * 1024, // 1GB
+            region_type: MemoryRegionType::Available,
+        }];
+
+        let result = kernel.init(&regions);
+        assert!(result.is_ok());
+        assert_eq!(kernel.process_count(), 1); // init process
+    }
+
+    #[test]
+    fn test_priority_predictor() {
+        let predictor = PriorityPredictor::new();
+
+        let address_space = AddressSpace::new(Architecture::X86_64, PhysAddr::new(0));
+        let process = Process::new(1, None, "test", address_space);
+
+        let thread = Thread {
+            tid: 1,
+            pid: 1,
+            state: ThreadState::Ready,
+            context: CpuContext::default(),
+            kernel_stack: VirtAddr::new(0),
+            user_stack: VirtAddr::new(0),
+            priority: 0,
+            time_slice: 100,
+            cpu_affinity: u64::MAX,
+            blocked_on: None,
+        };
+
+        let priority = predictor.predict(&process, &thread);
+        assert!(priority >= 0.0 && priority <= 1.0);
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// CONTAINER RUNTIME - Lightweight Container Isolation
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Container runtime for lightweight isolation
+pub struct ContainerRuntime {
+    /// Active containers
+    containers: HashMap<ContainerId, Container>,
+    /// Container images
+    images: HashMap<ImageId, ContainerImage>,
+    /// Network namespaces
+    networks: HashMap<NetworkId, ContainerNetwork>,
+    /// Volume mounts
+    volumes: HashMap<VolumeId, ContainerVolume>,
+    /// Container ID counter
+    next_id: AtomicU64,
+    /// Runtime configuration
+    config: ContainerConfig,
+}
+
+pub type ContainerId = u64;
+pub type ImageId = String;
+pub type NetworkId = u64;
+pub type VolumeId = u64;
+
+/// Container instance
+pub struct Container {
+    pub id: ContainerId,
+    pub name: String,
+    pub image: ImageId,
+    pub state: ContainerState,
+    pub pid: Option<Pid>,
+    pub namespaces: ContainerNamespaces,
+    pub cgroups: ContainerCgroups,
+    pub mounts: Vec<MountPoint>,
+    pub env: HashMap<String, String>,
+    pub command: Vec<String>,
+    pub created_at: u64,
+    pub started_at: Option<u64>,
+    pub exit_code: Option<i32>,
+    pub resource_limits: ResourceLimits,
+    pub security_context: SecurityContext,
+}
+
+/// Container state
+#[derive(Debug, Clone, PartialEq)]
+pub enum ContainerState {
+    Created,
+    Starting,
+    Running,
+    Paused,
+    Stopping,
+    Stopped,
+    Exited(i32),
+    Error(String),
+}
+
+/// Container namespaces
+pub struct ContainerNamespaces {
+    pub pid: Option<u64>,
+    pub net: Option<u64>,
+    pub mnt: Option<u64>,
+    pub ipc: Option<u64>,
+    pub uts: Option<u64>,
+    pub user: Option<u64>,
+    pub cgroup: Option<u64>,
+}
+
+/// Container cgroups
+pub struct ContainerCgroups {
+    pub cpu: CpuCgroup,
+    pub memory: MemoryCgroup,
+    pub io: IoCgroup,
+    pub pids: PidsCgroup,
+}
+
+/// CPU cgroup limits
+pub struct CpuCgroup {
+    pub shares: u64,
+    pub quota: i64,
+    pub period: u64,
+    pub cpus: Option<String>,
+    pub mems: Option<String>,
+}
+
+/// Memory cgroup limits
+pub struct MemoryCgroup {
+    pub limit: u64,
+    pub soft_limit: u64,
+    pub swap_limit: u64,
+    pub oom_kill_disable: bool,
+    pub usage: AtomicU64,
+}
+
+/// I/O cgroup limits
+pub struct IoCgroup {
+    pub weight: u16,
+    pub read_bps_limit: Option<u64>,
+    pub write_bps_limit: Option<u64>,
+    pub read_iops_limit: Option<u64>,
+    pub write_iops_limit: Option<u64>,
+}
+
+/// PIDs cgroup limits
+pub struct PidsCgroup {
+    pub max: u64,
+    pub current: AtomicU64,
+}
+
+/// Mount point in container
+pub struct MountPoint {
+    pub source: String,
+    pub target: String,
+    pub fs_type: String,
+    pub options: Vec<String>,
+    pub read_only: bool,
+}
+
+/// Container image
+pub struct ContainerImage {
+    pub id: ImageId,
+    pub name: String,
+    pub tag: String,
+    pub layers: Vec<ImageLayer>,
+    pub config: ImageConfig,
+    pub size: u64,
+    pub created_at: u64,
+}
+
+/// Image layer
+pub struct ImageLayer {
+    pub id: String,
+    pub digest: String,
+    pub size: u64,
+    pub diff_path: PathBuf,
+}
+
+/// Image configuration
+pub struct ImageConfig {
+    pub cmd: Vec<String>,
+    pub entrypoint: Vec<String>,
+    pub env: Vec<String>,
+    pub working_dir: String,
+    pub user: String,
+    pub exposed_ports: Vec<u16>,
+    pub labels: HashMap<String, String>,
+}
+
+/// Container network
+pub struct ContainerNetwork {
+    pub id: NetworkId,
+    pub name: String,
+    pub driver: NetworkDriver,
+    pub subnet: IpNetwork,
+    pub gateway: IpAddr,
+    pub containers: Vec<ContainerId>,
+}
+
+#[derive(Debug, Clone)]
+pub enum NetworkDriver {
+    Bridge,
+    Host,
+    None,
+    Overlay,
+    Macvlan,
+}
+
+/// IP network definition
+pub struct IpNetwork {
+    pub address: IpAddr,
+    pub prefix_len: u8,
+}
+
+/// Container volume
+pub struct ContainerVolume {
+    pub id: VolumeId,
+    pub name: String,
+    pub driver: VolumeDriver,
+    pub mount_point: PathBuf,
+    pub size: Option<u64>,
+    pub labels: HashMap<String, String>,
+}
+
+#[derive(Debug, Clone)]
+pub enum VolumeDriver {
+    Local,
+    Nfs,
+    Ceph,
+    Custom(String),
+}
+
+/// Container runtime configuration
+pub struct ContainerConfig {
+    pub root_dir: PathBuf,
+    pub state_dir: PathBuf,
+    pub default_runtime: String,
+    pub cgroup_driver: CgroupDriver,
+    pub enable_seccomp: bool,
+    pub enable_apparmor: bool,
+    pub default_ulimits: HashMap<String, (u64, u64)>,
+}
+
+#[derive(Debug, Clone)]
+pub enum CgroupDriver {
+    Cgroupfs,
+    Systemd,
+}
+
+/// Security context for containers
+pub struct SecurityContext {
+    pub privileged: bool,
+    pub capabilities_add: Vec<String>,
+    pub capabilities_drop: Vec<String>,
+    pub seccomp_profile: Option<SeccompProfile>,
+    pub apparmor_profile: Option<String>,
+    pub selinux_options: Option<SelinuxOptions>,
+    pub read_only_root_fs: bool,
+    pub run_as_user: Option<u32>,
+    pub run_as_group: Option<u32>,
+}
+
+/// Seccomp profile
+pub struct SeccompProfile {
+    pub default_action: SeccompAction,
+    pub syscalls: Vec<SeccompRule>,
+}
+
+#[derive(Debug, Clone)]
+pub enum SeccompAction {
+    Allow,
+    Errno(i32),
+    Kill,
+    Trap,
+    Log,
+}
+
+pub struct SeccompRule {
+    pub names: Vec<String>,
+    pub action: SeccompAction,
+    pub args: Vec<SeccompArg>,
+}
+
+pub struct SeccompArg {
+    pub index: u32,
+    pub value: u64,
+    pub op: SeccompOp,
+}
+
+#[derive(Debug, Clone)]
+pub enum SeccompOp {
+    Equal,
+    NotEqual,
+    GreaterThan,
+    LessThan,
+    MaskedEqual(u64),
+}
+
+/// SELinux options
+pub struct SelinuxOptions {
+    pub user: String,
+    pub role: String,
+    pub context_type: String,
+    pub level: String,
+}
+
+impl ContainerRuntime {
+    pub fn new(config: ContainerConfig) -> Self {
+        Self {
+            containers: HashMap::new(),
+            images: HashMap::new(),
+            networks: HashMap::new(),
+            volumes: HashMap::new(),
+            next_id: AtomicU64::new(1),
+            config,
+        }
+    }
+
+    /// Create a new container
+    pub fn create_container(
+        &mut self,
+        name: &str,
+        image: &str,
+        command: Vec<String>,
+        env: HashMap<String, String>,
+    ) -> Result<ContainerId, OsError> {
+        let id = self.next_id.fetch_add(1, Ordering::SeqCst);
+
+        let container = Container {
+            id,
+            name: name.to_string(),
+            image: image.to_string(),
+            state: ContainerState::Created,
+            pid: None,
+            namespaces: ContainerNamespaces::new(),
+            cgroups: ContainerCgroups::new(),
+            mounts: Vec::new(),
+            env,
+            command,
+            created_at: self.current_time(),
+            started_at: None,
+            exit_code: None,
+            resource_limits: ResourceLimits::default(),
+            security_context: SecurityContext::default(),
+        };
+
+        self.containers.insert(id, container);
+        Ok(id)
+    }
+
+    /// Start a container
+    pub fn start_container(&mut self, id: ContainerId) -> Result<(), OsError> {
+        let container = self.containers.get_mut(&id)
+            .ok_or(OsError::NotFound)?;
+
+        if container.state != ContainerState::Created && container.state != ContainerState::Stopped {
+            return Err(OsError::InvalidState);
+        }
+
+        // Setup namespaces
+        self.setup_namespaces(container)?;
+
+        // Setup cgroups
+        self.setup_cgroups(container)?;
+
+        // Setup mounts
+        self.setup_mounts(container)?;
+
+        // Fork and exec
+        container.state = ContainerState::Starting;
+        container.started_at = Some(self.current_time());
+
+        // In a real implementation, this would fork a new process
+        container.state = ContainerState::Running;
+        container.pid = Some(1000 + id as usize); // Mock PID
+
+        Ok(())
+    }
+
+    /// Stop a container
+    pub fn stop_container(&mut self, id: ContainerId, timeout: Duration) -> Result<(), OsError> {
+        let container = self.containers.get_mut(&id)
+            .ok_or(OsError::NotFound)?;
+
+        if container.state != ContainerState::Running {
+            return Err(OsError::InvalidState);
+        }
+
+        container.state = ContainerState::Stopping;
+
+        // Send SIGTERM, wait, then SIGKILL
+        // In a real implementation, this would signal the process
+
+        container.state = ContainerState::Stopped;
+        container.exit_code = Some(0);
+
+        Ok(())
+    }
+
+    /// Remove a container
+    pub fn remove_container(&mut self, id: ContainerId) -> Result<(), OsError> {
+        let container = self.containers.get(&id)
+            .ok_or(OsError::NotFound)?;
+
+        match container.state {
+            ContainerState::Running | ContainerState::Paused => {
+                return Err(OsError::InvalidState);
+            }
+            _ => {}
+        }
+
+        // Cleanup cgroups and namespaces
+        self.cleanup_container(id)?;
+
+        self.containers.remove(&id);
+        Ok(())
+    }
+
+    /// Pause a container
+    pub fn pause_container(&mut self, id: ContainerId) -> Result<(), OsError> {
+        let container = self.containers.get_mut(&id)
+            .ok_or(OsError::NotFound)?;
+
+        if container.state != ContainerState::Running {
+            return Err(OsError::InvalidState);
+        }
+
+        // Freeze cgroup
+        container.state = ContainerState::Paused;
+        Ok(())
+    }
+
+    /// Unpause a container
+    pub fn unpause_container(&mut self, id: ContainerId) -> Result<(), OsError> {
+        let container = self.containers.get_mut(&id)
+            .ok_or(OsError::NotFound)?;
+
+        if container.state != ContainerState::Paused {
+            return Err(OsError::InvalidState);
+        }
+
+        // Thaw cgroup
+        container.state = ContainerState::Running;
+        Ok(())
+    }
+
+    /// Execute command in container
+    pub fn exec_in_container(
+        &mut self,
+        id: ContainerId,
+        command: Vec<String>,
+        env: HashMap<String, String>,
+    ) -> Result<ExecResult, OsError> {
+        let container = self.containers.get(&id)
+            .ok_or(OsError::NotFound)?;
+
+        if container.state != ContainerState::Running {
+            return Err(OsError::InvalidState);
+        }
+
+        // In a real implementation, this would nsenter and exec
+        Ok(ExecResult {
+            exit_code: 0,
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+        })
+    }
+
+    /// Get container stats
+    pub fn container_stats(&self, id: ContainerId) -> Result<ContainerStats, OsError> {
+        let container = self.containers.get(&id)
+            .ok_or(OsError::NotFound)?;
+
+        Ok(ContainerStats {
+            cpu_usage: 0.0,
+            memory_usage: container.cgroups.memory.usage.load(Ordering::Relaxed),
+            memory_limit: container.cgroups.memory.limit,
+            network_rx_bytes: 0,
+            network_tx_bytes: 0,
+            block_read_bytes: 0,
+            block_write_bytes: 0,
+            pids: container.cgroups.pids.current.load(Ordering::Relaxed),
+        })
+    }
+
+    /// List containers
+    pub fn list_containers(&self) -> Vec<&Container> {
+        self.containers.values().collect()
+    }
+
+    fn setup_namespaces(&self, _container: &mut Container) -> Result<(), OsError> {
+        // Setup PID, NET, MNT, IPC, UTS, USER namespaces
+        Ok(())
+    }
+
+    fn setup_cgroups(&self, _container: &mut Container) -> Result<(), OsError> {
+        // Create and configure cgroups
+        Ok(())
+    }
+
+    fn setup_mounts(&self, _container: &mut Container) -> Result<(), OsError> {
+        // Setup rootfs and bind mounts
+        Ok(())
+    }
+
+    fn cleanup_container(&self, _id: ContainerId) -> Result<(), OsError> {
+        // Remove cgroups and cleanup namespaces
+        Ok(())
+    }
+
+    fn current_time(&self) -> u64 {
+        // Return current timestamp
+        0
+    }
+}
+
+/// Container execution result
+pub struct ExecResult {
+    pub exit_code: i32,
+    pub stdout: Vec<u8>,
+    pub stderr: Vec<u8>,
+}
+
+/// Container statistics
+pub struct ContainerStats {
+    pub cpu_usage: f64,
+    pub memory_usage: u64,
+    pub memory_limit: u64,
+    pub network_rx_bytes: u64,
+    pub network_tx_bytes: u64,
+    pub block_read_bytes: u64,
+    pub block_write_bytes: u64,
+    pub pids: u64,
+}
+
+impl ContainerNamespaces {
+    pub fn new() -> Self {
+        Self {
+            pid: None,
+            net: None,
+            mnt: None,
+            ipc: None,
+            uts: None,
+            user: None,
+            cgroup: None,
+        }
+    }
+}
+
+impl ContainerCgroups {
+    pub fn new() -> Self {
+        Self {
+            cpu: CpuCgroup {
+                shares: 1024,
+                quota: -1,
+                period: 100000,
+                cpus: None,
+                mems: None,
+            },
+            memory: MemoryCgroup {
+                limit: u64::MAX,
+                soft_limit: u64::MAX,
+                swap_limit: u64::MAX,
+                oom_kill_disable: false,
+                usage: AtomicU64::new(0),
+            },
+            io: IoCgroup {
+                weight: 100,
+                read_bps_limit: None,
+                write_bps_limit: None,
+                read_iops_limit: None,
+                write_iops_limit: None,
+            },
+            pids: PidsCgroup {
+                max: u64::MAX,
+                current: AtomicU64::new(0),
+            },
+        }
+    }
+}
+
+impl Default for SecurityContext {
+    fn default() -> Self {
+        Self {
+            privileged: false,
+            capabilities_add: Vec::new(),
+            capabilities_drop: Vec::new(),
+            seccomp_profile: None,
+            apparmor_profile: None,
+            selinux_options: None,
+            read_only_root_fs: false,
+            run_as_user: None,
+            run_as_group: None,
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// POWER MANAGEMENT - CPU and Device Power States
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Power management subsystem
+pub struct PowerManager {
+    /// CPU power states
+    cpu_states: Vec<CpuPowerState>,
+    /// Device power states
+    device_states: HashMap<DeviceId, DevicePowerState>,
+    /// Power policies
+    policies: HashMap<String, PowerPolicy>,
+    /// Active policy
+    active_policy: String,
+    /// Suspend/resume handlers
+    suspend_handlers: Vec<Box<dyn SuspendHandler>>,
+    /// Power event log
+    events: VecDeque<PowerEvent>,
+    /// Statistics
+    stats: PowerStats,
+}
+
+pub type DeviceId = u64;
+
+/// CPU power state
+pub struct CpuPowerState {
+    pub cpu_id: u32,
+    pub state: CpuState,
+    pub frequency: u64,
+    pub voltage: u32,
+    pub temperature: i32,
+    pub idle_time: Duration,
+    pub active_time: Duration,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum CpuState {
+    Active,
+    Idle(u8),       // C-state level
+    Offline,
+}
+
+/// Device power state
+pub struct DevicePowerState {
+    pub device_id: DeviceId,
+    pub device_name: String,
+    pub state: DeviceState,
+    pub runtime_suspended: bool,
+    pub wakeup_enabled: bool,
+    pub last_activity: Instant,
+    pub auto_suspend_delay: Duration,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum DeviceState {
+    D0,     // Fully on
+    D1,     // Intermediate
+    D2,     // Intermediate
+    D3Hot,  // Software off
+    D3Cold, // Hardware off
+}
+
+/// Power policy
+pub struct PowerPolicy {
+    pub name: String,
+    pub governor: CpuGovernor,
+    pub min_frequency: u64,
+    pub max_frequency: u64,
+    pub energy_preference: EnergyPreference,
+    pub turbo_enabled: bool,
+    pub suspend_timeout: Duration,
+    pub hibernate_timeout: Duration,
+}
+
+#[derive(Debug, Clone)]
+pub enum CpuGovernor {
+    Performance,
+    Powersave,
+    Ondemand,
+    Conservative,
+    Schedutil,
+    Userspace,
+}
+
+#[derive(Debug, Clone)]
+pub enum EnergyPreference {
+    Performance,
+    BalancePerformance,
+    Balance,
+    BalancePower,
+    Power,
+}
+
+/// Suspend handler trait
+pub trait SuspendHandler: Send + Sync {
+    fn name(&self) -> &str;
+    fn suspend(&mut self) -> Result<(), OsError>;
+    fn resume(&mut self) -> Result<(), OsError>;
+    fn priority(&self) -> i32;
+}
+
+/// Power event
+pub struct PowerEvent {
+    pub timestamp: Instant,
+    pub event_type: PowerEventType,
+    pub device_id: Option<DeviceId>,
+    pub details: String,
+}
+
+#[derive(Debug, Clone)]
+pub enum PowerEventType {
+    CpuFrequencyChange,
+    CpuStateChange,
+    DeviceStateChange,
+    SystemSuspend,
+    SystemResume,
+    PolicyChange,
+    ThermalThrottle,
+}
+
+/// Power statistics
+pub struct PowerStats {
+    pub total_energy: f64,
+    pub cpu_energy: f64,
+    pub device_energy: f64,
+    pub suspend_count: u64,
+    pub resume_count: u64,
+    pub time_in_suspend: Duration,
+    pub time_active: Duration,
+}
+
+impl PowerManager {
+    pub fn new(cpu_count: u32) -> Self {
+        let mut cpu_states = Vec::with_capacity(cpu_count as usize);
+        for i in 0..cpu_count {
+            cpu_states.push(CpuPowerState {
+                cpu_id: i,
+                state: CpuState::Active,
+                frequency: 2400_000_000, // 2.4 GHz
+                voltage: 1000,           // 1.0V
+                temperature: 50,
+                idle_time: Duration::ZERO,
+                active_time: Duration::ZERO,
+            });
+        }
+
+        let mut policies = HashMap::new();
+        policies.insert("balanced".to_string(), PowerPolicy::balanced());
+        policies.insert("performance".to_string(), PowerPolicy::performance());
+        policies.insert("powersave".to_string(), PowerPolicy::powersave());
+
+        Self {
+            cpu_states,
+            device_states: HashMap::new(),
+            policies,
+            active_policy: "balanced".to_string(),
+            suspend_handlers: Vec::new(),
+            events: VecDeque::with_capacity(1000),
+            stats: PowerStats::new(),
+        }
+    }
+
+    /// Set CPU frequency
+    pub fn set_cpu_frequency(&mut self, cpu_id: u32, frequency: u64) -> Result<(), OsError> {
+        let state = self.cpu_states.get_mut(cpu_id as usize)
+            .ok_or(OsError::NotFound)?;
+
+        let policy = self.policies.get(&self.active_policy).unwrap();
+
+        if frequency < policy.min_frequency || frequency > policy.max_frequency {
+            return Err(OsError::InvalidArgument);
+        }
+
+        state.frequency = frequency;
+        self.log_event(PowerEventType::CpuFrequencyChange, None,
+            format!("CPU {} frequency set to {} Hz", cpu_id, frequency));
+
+        Ok(())
+    }
+
+    /// Set CPU state
+    pub fn set_cpu_state(&mut self, cpu_id: u32, state: CpuState) -> Result<(), OsError> {
+        let cpu_state = self.cpu_states.get_mut(cpu_id as usize)
+            .ok_or(OsError::NotFound)?;
+
+        cpu_state.state = state.clone();
+        self.log_event(PowerEventType::CpuStateChange, None,
+            format!("CPU {} state changed to {:?}", cpu_id, state));
+
+        Ok(())
+    }
+
+    /// Set device power state
+    pub fn set_device_state(&mut self, device_id: DeviceId, state: DeviceState) -> Result<(), OsError> {
+        let device = self.device_states.get_mut(&device_id)
+            .ok_or(OsError::NotFound)?;
+
+        device.state = state.clone();
+        self.log_event(PowerEventType::DeviceStateChange, Some(device_id),
+            format!("Device {} state changed to {:?}", device.device_name, state));
+
+        Ok(())
+    }
+
+    /// Register a device for power management
+    pub fn register_device(&mut self, device_id: DeviceId, name: &str) {
+        self.device_states.insert(device_id, DevicePowerState {
+            device_id,
+            device_name: name.to_string(),
+            state: DeviceState::D0,
+            runtime_suspended: false,
+            wakeup_enabled: true,
+            last_activity: Instant::now(),
+            auto_suspend_delay: Duration::from_secs(5),
+        });
+    }
+
+    /// Set active power policy
+    pub fn set_policy(&mut self, policy_name: &str) -> Result<(), OsError> {
+        if !self.policies.contains_key(policy_name) {
+            return Err(OsError::NotFound);
+        }
+
+        self.active_policy = policy_name.to_string();
+        self.apply_policy()?;
+
+        self.log_event(PowerEventType::PolicyChange, None,
+            format!("Policy changed to {}", policy_name));
+
+        Ok(())
+    }
+
+    /// System suspend
+    pub fn suspend(&mut self) -> Result<(), OsError> {
+        self.log_event(PowerEventType::SystemSuspend, None, "System suspending".to_string());
+
+        // Sort handlers by priority
+        self.suspend_handlers.sort_by_key(|h| -h.priority());
+
+        // Call suspend handlers
+        for handler in &mut self.suspend_handlers {
+            handler.suspend()?;
+        }
+
+        self.stats.suspend_count += 1;
+        Ok(())
+    }
+
+    /// System resume
+    pub fn resume(&mut self) -> Result<(), OsError> {
+        // Call resume handlers in reverse order
+        for handler in self.suspend_handlers.iter_mut().rev() {
+            handler.resume()?;
+        }
+
+        self.stats.resume_count += 1;
+        self.log_event(PowerEventType::SystemResume, None, "System resumed".to_string());
+
+        Ok(())
+    }
+
+    /// Register suspend handler
+    pub fn register_suspend_handler(&mut self, handler: Box<dyn SuspendHandler>) {
+        self.suspend_handlers.push(handler);
+    }
+
+    /// Get power statistics
+    pub fn get_stats(&self) -> &PowerStats {
+        &self.stats
+    }
+
+    /// Get CPU power states
+    pub fn get_cpu_states(&self) -> &[CpuPowerState] {
+        &self.cpu_states
+    }
+
+    fn apply_policy(&mut self) -> Result<(), OsError> {
+        let policy = self.policies.get(&self.active_policy).unwrap().clone();
+
+        for cpu_state in &mut self.cpu_states {
+            if cpu_state.frequency < policy.min_frequency {
+                cpu_state.frequency = policy.min_frequency;
+            } else if cpu_state.frequency > policy.max_frequency {
+                cpu_state.frequency = policy.max_frequency;
+            }
+        }
+
+        Ok(())
+    }
+
+    fn log_event(&mut self, event_type: PowerEventType, device_id: Option<DeviceId>, details: String) {
+        self.events.push_back(PowerEvent {
+            timestamp: Instant::now(),
+            event_type,
+            device_id,
+            details,
+        });
+
+        if self.events.len() > 1000 {
+            self.events.pop_front();
+        }
+    }
+}
+
+impl PowerPolicy {
+    pub fn balanced() -> Self {
+        Self {
+            name: "balanced".to_string(),
+            governor: CpuGovernor::Schedutil,
+            min_frequency: 800_000_000,
+            max_frequency: 3_600_000_000,
+            energy_preference: EnergyPreference::Balance,
+            turbo_enabled: true,
+            suspend_timeout: Duration::from_secs(1800),
+            hibernate_timeout: Duration::from_secs(7200),
+        }
+    }
+
+    pub fn performance() -> Self {
+        Self {
+            name: "performance".to_string(),
+            governor: CpuGovernor::Performance,
+            min_frequency: 2_000_000_000,
+            max_frequency: 5_000_000_000,
+            energy_preference: EnergyPreference::Performance,
+            turbo_enabled: true,
+            suspend_timeout: Duration::from_secs(0),
+            hibernate_timeout: Duration::from_secs(0),
+        }
+    }
+
+    pub fn powersave() -> Self {
+        Self {
+            name: "powersave".to_string(),
+            governor: CpuGovernor::Powersave,
+            min_frequency: 400_000_000,
+            max_frequency: 2_000_000_000,
+            energy_preference: EnergyPreference::Power,
+            turbo_enabled: false,
+            suspend_timeout: Duration::from_secs(300),
+            hibernate_timeout: Duration::from_secs(1800),
+        }
+    }
+}
+
+impl PowerStats {
+    pub fn new() -> Self {
+        Self {
+            total_energy: 0.0,
+            cpu_energy: 0.0,
+            device_energy: 0.0,
+            suspend_count: 0,
+            resume_count: 0,
+            time_in_suspend: Duration::ZERO,
+            time_active: Duration::ZERO,
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// SECURITY MODULE - Mandatory Access Control
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Mandatory access control module
+pub struct SecurityModule {
+    /// Security policies
+    policies: HashMap<String, SecurityPolicy>,
+    /// Subject labels (processes)
+    subject_labels: HashMap<Pid, SecurityLabel>,
+    /// Object labels (files, sockets, etc.)
+    object_labels: HashMap<u64, SecurityLabel>,
+    /// Type enforcement rules
+    type_rules: Vec<TypeEnforcementRule>,
+    /// Role-based access control
+    rbac: RbacManager,
+    /// Audit log
+    audit_log: VecDeque<SecurityAuditEvent>,
+    /// Module configuration
+    config: SecurityModuleConfig,
+    /// Enforcing mode
+    enforcing: AtomicBool,
+}
+
+/// Security label
+#[derive(Clone, Debug)]
+pub struct SecurityLabel {
+    pub user: String,
+    pub role: String,
+    pub label_type: String,
+    pub level: SecurityLevel,
+    pub categories: HashSet<String>,
+}
+
+/// Security level (MLS)
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct SecurityLevel {
+    pub sensitivity: u8,
+    pub categories: Vec<u16>,
+}
+
+/// Security policy
+pub struct SecurityPolicy {
+    pub name: String,
+    pub version: u32,
+    pub types: Vec<TypeDefinition>,
+    pub roles: Vec<RoleDefinition>,
+    pub users: Vec<UserDefinition>,
+    pub rules: Vec<PolicyRule>,
+}
+
+/// Type definition
+pub struct TypeDefinition {
+    pub name: String,
+    pub attributes: Vec<String>,
+    pub aliases: Vec<String>,
+}
+
+/// Role definition
+pub struct RoleDefinition {
+    pub name: String,
+    pub types: Vec<String>,
+    pub dominates: Vec<String>,
+}
+
+/// User definition
+pub struct UserDefinition {
+    pub name: String,
+    pub roles: Vec<String>,
+    pub default_level: SecurityLevel,
+    pub range: (SecurityLevel, SecurityLevel),
+}
+
+/// Policy rule
+pub struct PolicyRule {
+    pub rule_type: PolicyRuleType,
+    pub source: String,
+    pub target: String,
+    pub class: String,
+    pub permissions: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub enum PolicyRuleType {
+    Allow,
+    Deny,
+    Audit,
+    DontAudit,
+    TypeTransition,
+    TypeMember,
+    TypeChange,
+}
+
+/// Type enforcement rule
+pub struct TypeEnforcementRule {
+    pub source_type: String,
+    pub target_type: String,
+    pub object_class: String,
+    pub permissions: HashSet<String>,
+    pub audit: bool,
+}
+
+/// Role-based access control manager
+pub struct RbacManager {
+    /// User to role mappings
+    user_roles: HashMap<String, Vec<String>>,
+    /// Role to permission mappings
+    role_permissions: HashMap<String, HashSet<String>>,
+    /// Role hierarchy
+    role_hierarchy: HashMap<String, Vec<String>>,
+}
+
+/// Security audit event
+pub struct SecurityAuditEvent {
+    pub timestamp: Instant,
+    pub event_type: AuditEventType,
+    pub subject: Option<SecurityLabel>,
+    pub object: Option<SecurityLabel>,
+    pub action: String,
+    pub result: AuditResult,
+    pub details: String,
+}
+
+#[derive(Debug, Clone)]
+pub enum AuditEventType {
+    AccessCheck,
+    PolicyLoad,
+    PolicyChange,
+    LabelChange,
+    EnforcementChange,
+    SecurityViolation,
+}
+
+#[derive(Debug, Clone)]
+pub enum AuditResult {
+    Granted,
+    Denied,
+    Error(String),
+}
+
+/// Security module configuration
+pub struct SecurityModuleConfig {
+    pub enforce_by_default: bool,
+    pub audit_denied: bool,
+    pub audit_granted: bool,
+    pub max_audit_events: usize,
+    pub default_user: String,
+    pub default_role: String,
+    pub default_type: String,
+}
+
+impl SecurityModule {
+    pub fn new(config: SecurityModuleConfig) -> Self {
+        Self {
+            policies: HashMap::new(),
+            subject_labels: HashMap::new(),
+            object_labels: HashMap::new(),
+            type_rules: Vec::new(),
+            rbac: RbacManager::new(),
+            audit_log: VecDeque::with_capacity(config.max_audit_events),
+            enforcing: AtomicBool::new(config.enforce_by_default),
+            config,
+        }
+    }
+
+    /// Load a security policy
+    pub fn load_policy(&mut self, policy: SecurityPolicy) -> Result<(), OsError> {
+        self.audit_event(AuditEventType::PolicyLoad, None, None,
+            "policy_load", AuditResult::Granted,
+            format!("Loading policy: {}", policy.name));
+
+        // Build type enforcement rules from policy
+        for rule in &policy.rules {
+            if matches!(rule.rule_type, PolicyRuleType::Allow) {
+                self.type_rules.push(TypeEnforcementRule {
+                    source_type: rule.source.clone(),
+                    target_type: rule.target.clone(),
+                    object_class: rule.class.clone(),
+                    permissions: rule.permissions.iter().cloned().collect(),
+                    audit: false,
+                });
+            }
+        }
+
+        self.policies.insert(policy.name.clone(), policy);
+        Ok(())
+    }
+
+    /// Check access permission
+    pub fn check_access(
+        &self,
+        subject_pid: Pid,
+        object_id: u64,
+        object_class: &str,
+        permission: &str,
+    ) -> Result<bool, OsError> {
+        let subject_label = self.subject_labels.get(&subject_pid)
+            .ok_or(OsError::NotFound)?;
+
+        let object_label = self.object_labels.get(&object_id)
+            .ok_or(OsError::NotFound)?;
+
+        // Check type enforcement
+        let allowed = self.check_type_enforcement(
+            &subject_label.label_type,
+            &object_label.label_type,
+            object_class,
+            permission,
+        );
+
+        // Check MLS constraints
+        let mls_allowed = self.check_mls(subject_label, object_label, permission);
+
+        let result = allowed && mls_allowed;
+
+        if self.config.audit_denied && !result {
+            self.audit_access(subject_label, object_label, object_class, permission, AuditResult::Denied);
+        } else if self.config.audit_granted && result {
+            self.audit_access(subject_label, object_label, object_class, permission, AuditResult::Granted);
+        }
+
+        if !result && self.enforcing.load(Ordering::SeqCst) {
+            return Ok(false);
+        }
+
+        Ok(result || !self.enforcing.load(Ordering::SeqCst))
+    }
+
+    /// Set subject label
+    pub fn set_subject_label(&mut self, pid: Pid, label: SecurityLabel) {
+        self.subject_labels.insert(pid, label);
+    }
+
+    /// Set object label
+    pub fn set_object_label(&mut self, object_id: u64, label: SecurityLabel) {
+        self.object_labels.insert(object_id, label);
+    }
+
+    /// Set enforcing mode
+    pub fn set_enforcing(&self, enforcing: bool) {
+        self.enforcing.store(enforcing, Ordering::SeqCst);
+        // Audit this change
+    }
+
+    /// Check if enforcing
+    pub fn is_enforcing(&self) -> bool {
+        self.enforcing.load(Ordering::SeqCst)
+    }
+
+    /// Get audit log
+    pub fn get_audit_log(&self) -> &VecDeque<SecurityAuditEvent> {
+        &self.audit_log
+    }
+
+    fn check_type_enforcement(
+        &self,
+        source_type: &str,
+        target_type: &str,
+        object_class: &str,
+        permission: &str,
+    ) -> bool {
+        for rule in &self.type_rules {
+            if rule.source_type == source_type
+                && rule.target_type == target_type
+                && rule.object_class == object_class
+                && rule.permissions.contains(permission)
+            {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn check_mls(&self, subject: &SecurityLabel, object: &SecurityLabel, permission: &str) -> bool {
+        // Bell-LaPadula model:
+        // - No read up (subject level >= object level for read)
+        // - No write down (subject level <= object level for write)
+
+        match permission {
+            "read" | "getattr" | "search" => {
+                subject.level >= object.level
+            }
+            "write" | "append" | "create" | "unlink" => {
+                subject.level <= object.level
+            }
+            _ => {
+                // Default: require equal levels
+                subject.level == object.level
+            }
+        }
+    }
+
+    fn audit_access(
+        &self,
+        subject: &SecurityLabel,
+        object: &SecurityLabel,
+        object_class: &str,
+        permission: &str,
+        result: AuditResult,
+    ) {
+        // In a real implementation, this would add to audit log
+        let _ = (subject, object, object_class, permission, result);
+    }
+
+    fn audit_event(
+        &mut self,
+        event_type: AuditEventType,
+        subject: Option<SecurityLabel>,
+        object: Option<SecurityLabel>,
+        action: &str,
+        result: AuditResult,
+        details: String,
+    ) {
+        self.audit_log.push_back(SecurityAuditEvent {
+            timestamp: Instant::now(),
+            event_type,
+            subject,
+            object,
+            action: action.to_string(),
+            result,
+            details,
+        });
+
+        if self.audit_log.len() > self.config.max_audit_events {
+            self.audit_log.pop_front();
+        }
+    }
+}
+
+impl RbacManager {
+    pub fn new() -> Self {
+        Self {
+            user_roles: HashMap::new(),
+            role_permissions: HashMap::new(),
+            role_hierarchy: HashMap::new(),
+        }
+    }
+
+    pub fn assign_role(&mut self, user: &str, role: &str) {
+        self.user_roles.entry(user.to_string())
+            .or_insert_with(Vec::new)
+            .push(role.to_string());
+    }
+
+    pub fn add_permission(&mut self, role: &str, permission: &str) {
+        self.role_permissions.entry(role.to_string())
+            .or_insert_with(HashSet::new)
+            .insert(permission.to_string());
+    }
+
+    pub fn has_permission(&self, user: &str, permission: &str) -> bool {
+        if let Some(roles) = self.user_roles.get(user) {
+            for role in roles {
+                if self.role_has_permission(role, permission) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    fn role_has_permission(&self, role: &str, permission: &str) -> bool {
+        if let Some(perms) = self.role_permissions.get(role) {
+            if perms.contains(permission) {
+                return true;
+            }
+        }
+
+        // Check role hierarchy
+        if let Some(parent_roles) = self.role_hierarchy.get(role) {
+            for parent in parent_roles {
+                if self.role_has_permission(parent, permission) {
+                    return true;
+                }
+            }
+        }
+
+        false
+    }
+}
+
+impl Default for SecurityModuleConfig {
+    fn default() -> Self {
+        Self {
+            enforce_by_default: true,
+            audit_denied: true,
+            audit_granted: false,
+            max_audit_events: 10000,
+            default_user: "system_u".to_string(),
+            default_role: "system_r".to_string(),
+            default_type: "unconfined_t".to_string(),
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// OS ERROR TYPES
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[derive(Debug)]
+pub enum OsError {
+    NotFound,
+    PermissionDenied,
+    InvalidArgument,
+    InvalidState,
+    OutOfMemory,
+    ResourceBusy,
+    IoError(String),
+    NetworkError(String),
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// EXTENDED TESTS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[cfg(test)]
+mod extended_tests {
+    use super::*;
+
+    #[test]
+    fn test_container_runtime_creation() {
+        let config = ContainerConfig {
+            root_dir: PathBuf::from("/var/lib/containers"),
+            state_dir: PathBuf::from("/run/containers"),
+            default_runtime: "build".to_string(),
+            cgroup_driver: CgroupDriver::Cgroupfs,
+            enable_seccomp: true,
+            enable_apparmor: true,
+            default_ulimits: HashMap::new(),
+        };
+
+        let runtime = ContainerRuntime::new(config);
+        assert!(runtime.containers.is_empty());
+    }
+
+    #[test]
+    fn test_container_lifecycle() {
+        let config = ContainerConfig {
+            root_dir: PathBuf::from("/var/lib/containers"),
+            state_dir: PathBuf::from("/run/containers"),
+            default_runtime: "build".to_string(),
+            cgroup_driver: CgroupDriver::Cgroupfs,
+            enable_seccomp: true,
+            enable_apparmor: true,
+            default_ulimits: HashMap::new(),
+        };
+
+        let mut runtime = ContainerRuntime::new(config);
+
+        // Create container
+        let id = runtime.create_container(
+            "test",
+            "alpine:latest",
+            vec!["sh".to_string()],
+            HashMap::new(),
+        );
+        assert!(id.is_ok());
+
+        let id = id.unwrap();
+
+        // Start container
+        let result = runtime.start_container(id);
+        assert!(result.is_ok());
+
+        // Check state
+        let container = runtime.containers.get(&id).unwrap();
+        assert_eq!(container.state, ContainerState::Running);
+
+        // Stop container
+        let result = runtime.stop_container(id, Duration::from_secs(10));
+        assert!(result.is_ok());
+
+        // Remove container
+        let result = runtime.remove_container(id);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_container_cgroups() {
+        let cgroups = ContainerCgroups::new();
+
+        assert_eq!(cgroups.cpu.shares, 1024);
+        assert_eq!(cgroups.cpu.quota, -1);
+        assert_eq!(cgroups.memory.limit, u64::MAX);
+    }
+
+    #[test]
+    fn test_power_manager() {
+        let mut pm = PowerManager::new(4);
+
+        assert_eq!(pm.cpu_states.len(), 4);
+        assert_eq!(pm.active_policy, "balanced");
+
+        // Set CPU frequency
+        let result = pm.set_cpu_frequency(0, 2_000_000_000);
+        assert!(result.is_ok());
+
+        // Set policy
+        let result = pm.set_policy("performance");
+        assert!(result.is_ok());
+        assert_eq!(pm.active_policy, "performance");
+    }
+
+    #[test]
+    fn test_power_policy() {
+        let balanced = PowerPolicy::balanced();
+        let perf = PowerPolicy::performance();
+        let save = PowerPolicy::powersave();
+
+        assert!(perf.max_frequency > balanced.max_frequency);
+        assert!(save.max_frequency < balanced.max_frequency);
+    }
+
+    #[test]
+    fn test_device_power_management() {
+        let mut pm = PowerManager::new(2);
+
+        // Register device
+        pm.register_device(1, "eth0");
+        pm.register_device(2, "sda");
+
+        // Set device state
+        let result = pm.set_device_state(1, DeviceState::D3Hot);
+        assert!(result.is_ok());
+
+        let device = pm.device_states.get(&1).unwrap();
+        assert_eq!(device.state, DeviceState::D3Hot);
+    }
+
+    #[test]
+    fn test_security_module() {
+        let config = SecurityModuleConfig::default();
+        let mut sec = SecurityModule::new(config);
+
+        // Set subject label
+        sec.set_subject_label(1, SecurityLabel {
+            user: "system_u".to_string(),
+            role: "system_r".to_string(),
+            label_type: "init_t".to_string(),
+            level: SecurityLevel { sensitivity: 0, categories: vec![] },
+            categories: HashSet::new(),
+        });
+
+        // Set object label
+        sec.set_object_label(100, SecurityLabel {
+            user: "system_u".to_string(),
+            role: "object_r".to_string(),
+            label_type: "etc_t".to_string(),
+            level: SecurityLevel { sensitivity: 0, categories: vec![] },
+            categories: HashSet::new(),
+        });
+
+        assert!(sec.subject_labels.contains_key(&1));
+        assert!(sec.object_labels.contains_key(&100));
+    }
+
+    #[test]
+    fn test_rbac_manager() {
+        let mut rbac = RbacManager::new();
+
+        rbac.assign_role("alice", "admin");
+        rbac.add_permission("admin", "read_sensitive");
+        rbac.add_permission("admin", "write_config");
+
+        assert!(rbac.has_permission("alice", "read_sensitive"));
+        assert!(rbac.has_permission("alice", "write_config"));
+        assert!(!rbac.has_permission("alice", "delete_users"));
+        assert!(!rbac.has_permission("bob", "read_sensitive"));
+    }
+
+    #[test]
+    fn test_security_level_ordering() {
+        let low = SecurityLevel { sensitivity: 0, categories: vec![] };
+        let mid = SecurityLevel { sensitivity: 5, categories: vec![] };
+        let high = SecurityLevel { sensitivity: 10, categories: vec![] };
+
+        assert!(low < mid);
+        assert!(mid < high);
+        assert!(low < high);
+    }
+
+    #[test]
+    fn test_container_namespaces() {
+        let ns = ContainerNamespaces::new();
+
+        assert!(ns.pid.is_none());
+        assert!(ns.net.is_none());
+        assert!(ns.mnt.is_none());
+    }
+
+    #[test]
+    fn test_security_context_default() {
+        let ctx = SecurityContext::default();
+
+        assert!(!ctx.privileged);
+        assert!(ctx.capabilities_add.is_empty());
+        assert!(!ctx.read_only_root_fs);
+    }
+
+    #[test]
+    fn test_power_stats() {
+        let stats = PowerStats::new();
+
+        assert_eq!(stats.suspend_count, 0);
+        assert_eq!(stats.resume_count, 0);
+        assert_eq!(stats.total_energy, 0.0);
+    }
+
+    #[test]
+    fn test_container_stats() {
+        let stats = ContainerStats {
+            cpu_usage: 25.5,
+            memory_usage: 1024 * 1024 * 100,
+            memory_limit: 1024 * 1024 * 512,
+            network_rx_bytes: 1000,
+            network_tx_bytes: 500,
+            block_read_bytes: 2000,
+            block_write_bytes: 1500,
+            pids: 10,
+        };
+
+        assert!(stats.memory_usage < stats.memory_limit);
+        assert_eq!(stats.pids, 10);
+    }
+}

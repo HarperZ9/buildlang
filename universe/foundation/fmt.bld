@@ -1,0 +1,1657 @@
+// ═══════════════════════════════════════════════════════════════════════════════
+// BUILD FOUNDATION - FMT MODULE
+// ═══════════════════════════════════════════════════════════════════════════════
+// Copyright © 2025 Zain Dana Harper. All Rights Reserved.
+// ═══════════════════════════════════════════════════════════════════════════════
+//
+// Advanced formatting utilities including:
+// - Format trait for custom type formatting
+// - Format strings with placeholders
+// - Number formatting (decimal, hex, binary, octal)
+// - Alignment and padding
+// - Debug formatting
+// - Display formatting
+// - Write trait for format output
+// - Formatter configuration
+//
+// ═══════════════════════════════════════════════════════════════════════════════
+
+use std::collections::Vec;
+use std::string::StringBuilder;
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// CORE TRAITS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Trait for types that can be formatted for display
+pub trait Display {
+    /// Format the value for display
+    fn fmt(self: &Self, f: &mut Formatter) -> Result<(), FormatError>;
+}
+
+/// Trait for types that can be formatted for debugging
+pub trait Debug {
+    /// Format the value for debugging
+    fn fmt(self: &Self, f: &mut Formatter) -> Result<(), FormatError>;
+}
+
+/// Trait for types that can be formatted as binary
+pub trait Binary {
+    /// Format the value as binary
+    fn fmt(self: &Self, f: &mut Formatter) -> Result<(), FormatError>;
+}
+
+/// Trait for types that can be formatted as octal
+pub trait Octal {
+    /// Format the value as octal
+    fn fmt(self: &Self, f: &mut Formatter) -> Result<(), FormatError>;
+}
+
+/// Trait for types that can be formatted as lowercase hex
+pub trait LowerHex {
+    /// Format the value as lowercase hexadecimal
+    fn fmt(self: &Self, f: &mut Formatter) -> Result<(), FormatError>;
+}
+
+/// Trait for types that can be formatted as uppercase hex
+pub trait UpperHex {
+    /// Format the value as uppercase hexadecimal
+    fn fmt(self: &Self, f: &mut Formatter) -> Result<(), FormatError>;
+}
+
+/// Trait for types that can be formatted as lowercase exponential
+pub trait LowerExp {
+    /// Format the value as lowercase exponential
+    fn fmt(self: &Self, f: &mut Formatter) -> Result<(), FormatError>;
+}
+
+/// Trait for types that can be formatted as uppercase exponential
+pub trait UpperExp {
+    /// Format the value as uppercase exponential
+    fn fmt(self: &Self, f: &mut Formatter) -> Result<(), FormatError>;
+}
+
+/// Trait for types that can be formatted as a pointer
+pub trait Pointer {
+    /// Format the value as a pointer address
+    fn fmt(self: &Self, f: &mut Formatter) -> Result<(), FormatError>;
+}
+
+/// Trait for writing formatted output
+pub trait Write {
+    /// Write a string slice
+    fn write_str(self: &mut Self, s: &str) -> Result<(), FormatError>;
+
+    /// Write a character
+    fn write_char(self: &mut Self, c: char) -> Result<(), FormatError> {
+        let mut buf = [0u8; 4];
+        let s = c.encode_utf8(&mut buf);
+        self.write_str(s)
+    }
+
+    /// Write formatted arguments
+    fn write_fmt(self: &mut Self, args: Arguments) -> Result<(), FormatError> {
+        write_formatted(self, args)
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// FORMATTER
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Error type for formatting operations
+#[derive(Debug, Clone, PartialEq)]
+pub enum FormatError {
+    /// An error occurred during writing
+    WriteError,
+    /// Invalid format specification
+    InvalidFormat(String),
+    /// Width overflow
+    WidthOverflow,
+    /// Precision overflow
+    PrecisionOverflow,
+}
+
+/// Alignment options for formatted output
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Alignment {
+    /// Left-align within the width
+    Left,
+    /// Right-align within the width
+    Right,
+    /// Center within the width
+    Center,
+}
+
+/// Sign display options
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Sign {
+    /// Only show sign for negative numbers
+    Minus,
+    /// Always show sign
+    Plus,
+}
+
+/// Debug formatting style
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum DebugStyle {
+    /// Normal debug output
+    Normal,
+    /// Pretty-printed debug output
+    Pretty,
+    /// Alternate form (includes 0x prefix for hex, etc.)
+    Alternate,
+}
+
+/// Configuration for a formatter
+#[derive(Debug, Clone)]
+pub struct FormatterConfig {
+    /// Fill character for padding
+    pub fill: char,
+    /// Alignment within width
+    pub alignment: Alignment,
+    /// Minimum width
+    pub width: Option<usize>,
+    /// Precision for floats or max width for strings
+    pub precision: Option<usize>,
+    /// Sign display
+    pub sign: Sign,
+    /// Alternate form flag
+    pub alternate: bool,
+    /// Zero padding flag
+    pub zero_pad: bool,
+    /// Debug style
+    pub debug_style: DebugStyle,
+}
+
+impl FormatterConfig {
+    /// Create a new default configuration
+    pub fn new() -> Self {
+        FormatterConfig {
+            fill: ' ',
+            alignment: Alignment::Left,
+            width: None,
+            precision: None,
+            sign: Sign::Minus,
+            alternate: false,
+            zero_pad: false,
+            debug_style: DebugStyle::Normal,
+        }
+    }
+
+    /// Set fill character
+    pub fn fill(mut self: Self, c: char) -> Self {
+        self.fill = c;
+        self
+    }
+
+    /// Set alignment
+    pub fn align(mut self: Self, alignment: Alignment) -> Self {
+        self.alignment = alignment;
+        self
+    }
+
+    /// Set width
+    pub fn width(mut self: Self, w: usize) -> Self {
+        self.width = Some(w);
+        self
+    }
+
+    /// Set precision
+    pub fn precision(mut self: Self, p: usize) -> Self {
+        self.precision = Some(p);
+        self
+    }
+
+    /// Set sign display to always show
+    pub fn sign_plus(mut self: Self) -> Self {
+        self.sign = Sign::Plus;
+        self
+    }
+
+    /// Enable alternate form
+    pub fn alternate(mut self: Self) -> Self {
+        self.alternate = true;
+        self
+    }
+
+    /// Enable zero padding
+    pub fn zero_pad(mut self: Self) -> Self {
+        self.zero_pad = true;
+        self
+    }
+
+    /// Set debug style
+    pub fn debug_style(mut self: Self, style: DebugStyle) -> Self {
+        self.debug_style = style;
+        self
+    }
+}
+
+impl Default for FormatterConfig {
+    fn default() -> Self {
+        FormatterConfig::new()
+    }
+}
+
+/// A formatter for writing formatted output
+pub struct Formatter<'a> {
+    /// The output buffer
+    buf: &'a mut dyn Write,
+    /// Configuration
+    config: FormatterConfig,
+}
+
+impl<'a> Formatter<'a> {
+    /// Create a new formatter with the given output buffer
+    pub fn new(buf: &'a mut dyn Write) -> Self {
+        Formatter {
+            buf,
+            config: FormatterConfig::new(),
+        }
+    }
+
+    /// Create a new formatter with configuration
+    pub fn with_config(buf: &'a mut dyn Write, config: FormatterConfig) -> Self {
+        Formatter { buf, config }
+    }
+
+    /// Get the fill character
+    pub fn fill(self: &Self) -> char {
+        self.config.fill
+    }
+
+    /// Get the alignment
+    pub fn align(self: &Self) -> Alignment {
+        self.config.alignment
+    }
+
+    /// Get the width
+    pub fn width(self: &Self) -> Option<usize> {
+        self.config.width
+    }
+
+    /// Get the precision
+    pub fn precision(self: &Self) -> Option<usize> {
+        self.config.precision
+    }
+
+    /// Check if sign should always be shown
+    pub fn sign_plus(self: &Self) -> bool {
+        self.config.sign == Sign::Plus
+    }
+
+    /// Check if alternate form is enabled
+    pub fn alternate(self: &Self) -> bool {
+        self.config.alternate
+    }
+
+    /// Check if zero padding is enabled
+    pub fn sign_aware_zero_pad(self: &Self) -> bool {
+        self.config.zero_pad
+    }
+
+    /// Write a string slice
+    pub fn write_str(self: &mut Self, s: &str) -> Result<(), FormatError> {
+        self.buf.write_str(s)
+    }
+
+    /// Write a character
+    pub fn write_char(self: &mut Self, c: char) -> Result<(), FormatError> {
+        self.buf.write_char(c)
+    }
+
+    /// Pad and write a pre-formatted string
+    pub fn pad(self: &mut Self, s: &str) -> Result<(), FormatError> {
+        let len = s.chars().count();
+
+        if let Some(width) = self.config.width {
+            if len >= width {
+                return self.write_str(s);
+            }
+
+            let padding = width - len;
+            let fill = self.config.fill;
+
+            match self.config.alignment {
+                Alignment::Left => {
+                    self.write_str(s)?;
+                    for _ in 0..padding {
+                        self.write_char(fill)?;
+                    }
+                }
+                Alignment::Right => {
+                    for _ in 0..padding {
+                        self.write_char(fill)?;
+                    }
+                    self.write_str(s)?;
+                }
+                Alignment::Center => {
+                    let left_pad = padding / 2;
+                    let right_pad = padding - left_pad;
+
+                    for _ in 0..left_pad {
+                        self.write_char(fill)?;
+                    }
+                    self.write_str(s)?;
+                    for _ in 0..right_pad {
+                        self.write_char(fill)?;
+                    }
+                }
+            }
+
+            Ok(())
+        } else {
+            self.write_str(s)
+        }
+    }
+
+    /// Pad an integer with sign-aware zero padding
+    pub fn pad_integral(
+        self: &mut Self,
+        is_positive: bool,
+        prefix: &str,
+        digits: &str,
+    ) -> Result<(), FormatError> {
+        let sign = if !is_positive {
+            "-"
+        } else if self.config.sign == Sign::Plus {
+            "+"
+        } else {
+            ""
+        };
+
+        let prefix = if self.config.alternate { prefix } else { "" };
+
+        let content_len = sign.len() + prefix.len() + digits.len();
+
+        if let Some(width) = self.config.width {
+            if content_len >= width {
+                self.write_str(sign)?;
+                self.write_str(prefix)?;
+                return self.write_str(digits);
+            }
+
+            let padding = width - content_len;
+
+            if self.config.zero_pad {
+                self.write_str(sign)?;
+                self.write_str(prefix)?;
+                for _ in 0..padding {
+                    self.write_char('0')?;
+                }
+                self.write_str(digits)
+            } else {
+                match self.config.alignment {
+                    Alignment::Left => {
+                        self.write_str(sign)?;
+                        self.write_str(prefix)?;
+                        self.write_str(digits)?;
+                        for _ in 0..padding {
+                            self.write_char(self.config.fill)?;
+                        }
+                        Ok(())
+                    }
+                    Alignment::Right => {
+                        for _ in 0..padding {
+                            self.write_char(self.config.fill)?;
+                        }
+                        self.write_str(sign)?;
+                        self.write_str(prefix)?;
+                        self.write_str(digits)
+                    }
+                    Alignment::Center => {
+                        let left = padding / 2;
+                        let right = padding - left;
+                        for _ in 0..left {
+                            self.write_char(self.config.fill)?;
+                        }
+                        self.write_str(sign)?;
+                        self.write_str(prefix)?;
+                        self.write_str(digits)?;
+                        for _ in 0..right {
+                            self.write_char(self.config.fill)?;
+                        }
+                        Ok(())
+                    }
+                }
+            }
+        } else {
+            self.write_str(sign)?;
+            self.write_str(prefix)?;
+            self.write_str(digits)
+        }
+    }
+
+    /// Write a Debug value
+    pub fn debug_struct(self: &mut Self, name: &str) -> DebugStruct<'_, 'a> {
+        DebugStruct::new(self, name)
+    }
+
+    /// Write a Debug tuple
+    pub fn debug_tuple(self: &mut Self, name: &str) -> DebugTuple<'_, 'a> {
+        DebugTuple::new(self, name)
+    }
+
+    /// Write a Debug list
+    pub fn debug_list(self: &mut Self) -> DebugList<'_, 'a> {
+        DebugList::new(self)
+    }
+
+    /// Write a Debug set
+    pub fn debug_set(self: &mut Self) -> DebugSet<'_, 'a> {
+        DebugSet::new(self)
+    }
+
+    /// Write a Debug map
+    pub fn debug_map(self: &mut Self) -> DebugMap<'_, 'a> {
+        DebugMap::new(self)
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// DEBUG HELPERS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Helper for debugging struct formatting
+pub struct DebugStruct<'a, 'b> {
+    fmt: &'a mut Formatter<'b>,
+    name: String,
+    fields: Vec<(String, String)>,
+    has_fields: bool,
+}
+
+impl<'a, 'b> DebugStruct<'a, 'b> {
+    fn new(fmt: &'a mut Formatter<'b>, name: &str) -> Self {
+        DebugStruct {
+            fmt,
+            name: name.to_string(),
+            fields: Vec::new(),
+            has_fields: false,
+        }
+    }
+
+    /// Add a field to the debug output
+    pub fn field<V: Debug>(mut self: Self, name: &str, value: &V) -> Self {
+        let mut buf = StringBuffer::new();
+        let mut f = Formatter::new(&mut buf);
+        let _ = value.fmt(&mut f);
+        self.fields.push((name.to_string(), buf.into_string()));
+        self.has_fields = true;
+        self
+    }
+
+    /// Finish the debug output
+    pub fn finish(self: Self) -> Result<(), FormatError> {
+        self.fmt.write_str(&self.name)?;
+
+        if !self.has_fields {
+            return Ok(());
+        }
+
+        let pretty = self.fmt.config.debug_style == DebugStyle::Pretty;
+
+        if pretty {
+            self.fmt.write_str(" {\n")?;
+            for (name, value) in &self.fields {
+                self.fmt.write_str("    ")?;
+                self.fmt.write_str(name)?;
+                self.fmt.write_str(": ")?;
+                self.fmt.write_str(value)?;
+                self.fmt.write_str(",\n")?;
+            }
+            self.fmt.write_str("}")
+        } else {
+            self.fmt.write_str(" { ")?;
+            let mut first = true;
+            for (name, value) in &self.fields {
+                if !first {
+                    self.fmt.write_str(", ")?;
+                }
+                first = false;
+                self.fmt.write_str(name)?;
+                self.fmt.write_str(": ")?;
+                self.fmt.write_str(value)?;
+            }
+            self.fmt.write_str(" }")
+        }
+    }
+
+    /// Finish without outputting fields
+    pub fn finish_non_exhaustive(self: Self) -> Result<(), FormatError> {
+        self.fmt.write_str(&self.name)?;
+        self.fmt.write_str(" { .. }")
+    }
+}
+
+/// Helper for debugging tuple formatting
+pub struct DebugTuple<'a, 'b> {
+    fmt: &'a mut Formatter<'b>,
+    name: String,
+    fields: Vec<String>,
+}
+
+impl<'a, 'b> DebugTuple<'a, 'b> {
+    fn new(fmt: &'a mut Formatter<'b>, name: &str) -> Self {
+        DebugTuple {
+            fmt,
+            name: name.to_string(),
+            fields: Vec::new(),
+        }
+    }
+
+    /// Add a field to the tuple
+    pub fn field<V: Debug>(mut self: Self, value: &V) -> Self {
+        let mut buf = StringBuffer::new();
+        let mut f = Formatter::new(&mut buf);
+        let _ = value.fmt(&mut f);
+        self.fields.push(buf.into_string());
+        self
+    }
+
+    /// Finish the tuple output
+    pub fn finish(self: Self) -> Result<(), FormatError> {
+        self.fmt.write_str(&self.name)?;
+        self.fmt.write_str("(")?;
+
+        let mut first = true;
+        for field in &self.fields {
+            if !first {
+                self.fmt.write_str(", ")?;
+            }
+            first = false;
+            self.fmt.write_str(field)?;
+        }
+
+        self.fmt.write_str(")")
+    }
+}
+
+/// Helper for debugging list formatting
+pub struct DebugList<'a, 'b> {
+    fmt: &'a mut Formatter<'b>,
+    entries: Vec<String>,
+}
+
+impl<'a, 'b> DebugList<'a, 'b> {
+    fn new(fmt: &'a mut Formatter<'b>) -> Self {
+        DebugList {
+            fmt,
+            entries: Vec::new(),
+        }
+    }
+
+    /// Add an entry to the list
+    pub fn entry<V: Debug>(mut self: Self, value: &V) -> Self {
+        let mut buf = StringBuffer::new();
+        let mut f = Formatter::new(&mut buf);
+        let _ = value.fmt(&mut f);
+        self.entries.push(buf.into_string());
+        self
+    }
+
+    /// Add multiple entries
+    pub fn entries<I, V>(mut self: Self, entries: I) -> Self
+    where
+        I: IntoIterator<Item = V>,
+        V: Debug,
+    {
+        for entry in entries {
+            self = self.entry(&entry);
+        }
+        self
+    }
+
+    /// Finish the list output
+    pub fn finish(self: Self) -> Result<(), FormatError> {
+        self.fmt.write_str("[")?;
+
+        let mut first = true;
+        for entry in &self.entries {
+            if !first {
+                self.fmt.write_str(", ")?;
+            }
+            first = false;
+            self.fmt.write_str(entry)?;
+        }
+
+        self.fmt.write_str("]")
+    }
+}
+
+/// Helper for debugging set formatting
+pub struct DebugSet<'a, 'b> {
+    fmt: &'a mut Formatter<'b>,
+    entries: Vec<String>,
+}
+
+impl<'a, 'b> DebugSet<'a, 'b> {
+    fn new(fmt: &'a mut Formatter<'b>) -> Self {
+        DebugSet {
+            fmt,
+            entries: Vec::new(),
+        }
+    }
+
+    /// Add an entry to the set
+    pub fn entry<V: Debug>(mut self: Self, value: &V) -> Self {
+        let mut buf = StringBuffer::new();
+        let mut f = Formatter::new(&mut buf);
+        let _ = value.fmt(&mut f);
+        self.entries.push(buf.into_string());
+        self
+    }
+
+    /// Finish the set output
+    pub fn finish(self: Self) -> Result<(), FormatError> {
+        self.fmt.write_str("{")?;
+
+        let mut first = true;
+        for entry in &self.entries {
+            if !first {
+                self.fmt.write_str(", ")?;
+            }
+            first = false;
+            self.fmt.write_str(entry)?;
+        }
+
+        self.fmt.write_str("}")
+    }
+}
+
+/// Helper for debugging map formatting
+pub struct DebugMap<'a, 'b> {
+    fmt: &'a mut Formatter<'b>,
+    entries: Vec<(String, String)>,
+}
+
+impl<'a, 'b> DebugMap<'a, 'b> {
+    fn new(fmt: &'a mut Formatter<'b>) -> Self {
+        DebugMap {
+            fmt,
+            entries: Vec::new(),
+        }
+    }
+
+    /// Add a key-value entry
+    pub fn entry<K: Debug, V: Debug>(mut self: Self, key: &K, value: &V) -> Self {
+        let mut key_buf = StringBuffer::new();
+        let mut f = Formatter::new(&mut key_buf);
+        let _ = key.fmt(&mut f);
+
+        let mut val_buf = StringBuffer::new();
+        let mut f = Formatter::new(&mut val_buf);
+        let _ = value.fmt(&mut f);
+
+        self.entries.push((key_buf.into_string(), val_buf.into_string()));
+        self
+    }
+
+    /// Finish the map output
+    pub fn finish(self: Self) -> Result<(), FormatError> {
+        self.fmt.write_str("{")?;
+
+        let mut first = true;
+        for (key, value) in &self.entries {
+            if !first {
+                self.fmt.write_str(", ")?;
+            }
+            first = false;
+            self.fmt.write_str(key)?;
+            self.fmt.write_str(": ")?;
+            self.fmt.write_str(value)?;
+        }
+
+        self.fmt.write_str("}")
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// STRING BUFFER
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// A buffer for building formatted strings
+pub struct StringBuffer {
+    buf: String,
+}
+
+impl StringBuffer {
+    /// Create a new empty buffer
+    pub fn new() -> Self {
+        StringBuffer { buf: String::new() }
+    }
+
+    /// Create a buffer with capacity
+    pub fn with_capacity(cap: usize) -> Self {
+        StringBuffer { buf: String::with_capacity(cap) }
+    }
+
+    /// Convert into the final string
+    pub fn into_string(self: Self) -> String {
+        self.buf
+    }
+
+    /// Get the current string
+    pub fn as_str(self: &Self) -> &str {
+        &self.buf
+    }
+}
+
+impl Write for StringBuffer {
+    fn write_str(self: &mut Self, s: &str) -> Result<(), FormatError> {
+        self.buf.push_str(s);
+        Ok(())
+    }
+
+    fn write_char(self: &mut Self, c: char) -> Result<(), FormatError> {
+        self.buf.push(c);
+        Ok(())
+    }
+}
+
+impl Default for StringBuffer {
+    fn default() -> Self {
+        StringBuffer::new()
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// FORMAT ARGUMENTS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Arguments for formatted output
+pub struct Arguments<'a> {
+    pieces: &'a [&'a str],
+    args: &'a [Argument<'a>],
+}
+
+impl<'a> Arguments<'a> {
+    /// Create new format arguments
+    pub fn new(pieces: &'a [&'a str], args: &'a [Argument<'a>]) -> Self {
+        Arguments { pieces, args }
+    }
+}
+
+/// A single format argument
+pub struct Argument<'a> {
+    value: &'a dyn FormatArg,
+    formatter: fn(&dyn FormatArg, &mut Formatter) -> Result<(), FormatError>,
+}
+
+impl<'a> Argument<'a> {
+    /// Create a new Display argument
+    pub fn new_display<T: Display>(value: &'a T) -> Self {
+        Argument {
+            value,
+            formatter: |v, f| (v as &dyn Display).fmt(f),
+        }
+    }
+
+    /// Create a new Debug argument
+    pub fn new_debug<T: Debug>(value: &'a T) -> Self {
+        Argument {
+            value,
+            formatter: |v, f| (v as &dyn Debug).fmt(f),
+        }
+    }
+}
+
+/// Trait object for format arguments
+trait FormatArg {}
+impl<T: Display> FormatArg for T {}
+
+/// Write formatted arguments to a writer
+fn write_formatted<W: Write + ?Sized>(w: &mut W, args: Arguments) -> Result<(), FormatError> {
+    let mut arg_idx = 0;
+
+    for (i, piece) in args.pieces.iter().enumerate() {
+        w.write_str(piece)?;
+
+        if arg_idx < args.args.len() {
+            let arg = &args.args[arg_idx];
+            let mut formatter = Formatter::new(w);
+            (arg.formatter)(arg.value, &mut formatter)?;
+            arg_idx += 1;
+        }
+    }
+
+    Ok(())
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// NUMBER FORMATTING
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Format an integer as decimal
+pub fn format_int<T: Into<i128>>(value: T) -> String {
+    let v: i128 = value.into();
+    format_int_with_config(v, &FormatterConfig::new())
+}
+
+/// Format an integer with configuration
+pub fn format_int_with_config(value: i128, config: &FormatterConfig) -> String {
+    let is_positive = value >= 0;
+    let abs_value = if value < 0 { -value } else { value } as u128;
+
+    let digits = format_unsigned_decimal(abs_value);
+
+    let mut buf = StringBuffer::new();
+    let mut f = Formatter::with_config(&mut buf, config.clone());
+    let _ = f.pad_integral(is_positive, "", &digits);
+    buf.into_string()
+}
+
+fn format_unsigned_decimal(mut value: u128) -> String {
+    if value == 0 {
+        return "0".to_string();
+    }
+
+    let mut digits = Vec::new();
+    while value > 0 {
+        digits.push((b'0' + (value % 10) as u8) as char);
+        value /= 10;
+    }
+    digits.reverse();
+    digits.into_iter().collect()
+}
+
+/// Format an integer as hexadecimal (lowercase)
+pub fn format_hex_lower<T: Into<u128>>(value: T) -> String {
+    format_hex_impl(value.into(), false, false)
+}
+
+/// Format an integer as hexadecimal (uppercase)
+pub fn format_hex_upper<T: Into<u128>>(value: T) -> String {
+    format_hex_impl(value.into(), true, false)
+}
+
+/// Format an integer as hexadecimal with 0x prefix
+pub fn format_hex_prefixed<T: Into<u128>>(value: T) -> String {
+    format_hex_impl(value.into(), false, true)
+}
+
+fn format_hex_impl(mut value: u128, uppercase: bool, prefixed: bool) -> String {
+    if value == 0 {
+        return if prefixed { "0x0".to_string() } else { "0".to_string() };
+    }
+
+    let chars = if uppercase {
+        b"0123456789ABCDEF"
+    } else {
+        b"0123456789abcdef"
+    };
+
+    let mut digits = Vec::new();
+    while value > 0 {
+        digits.push(chars[(value & 0xF) as usize] as char);
+        value >>= 4;
+    }
+    digits.reverse();
+
+    let s: String = digits.into_iter().collect();
+    if prefixed {
+        format!("0x{}", s)
+    } else {
+        s
+    }
+}
+
+/// Format an integer as binary
+pub fn format_binary<T: Into<u128>>(value: T) -> String {
+    format_binary_impl(value.into(), false)
+}
+
+/// Format an integer as binary with 0b prefix
+pub fn format_binary_prefixed<T: Into<u128>>(value: T) -> String {
+    format_binary_impl(value.into(), true)
+}
+
+fn format_binary_impl(mut value: u128, prefixed: bool) -> String {
+    if value == 0 {
+        return if prefixed { "0b0".to_string() } else { "0".to_string() };
+    }
+
+    let mut bits = Vec::new();
+    while value > 0 {
+        bits.push(if value & 1 == 1 { '1' } else { '0' });
+        value >>= 1;
+    }
+    bits.reverse();
+
+    let s: String = bits.into_iter().collect();
+    if prefixed {
+        format!("0b{}", s)
+    } else {
+        s
+    }
+}
+
+/// Format an integer as octal
+pub fn format_octal<T: Into<u128>>(value: T) -> String {
+    format_octal_impl(value.into(), false)
+}
+
+/// Format an integer as octal with 0o prefix
+pub fn format_octal_prefixed<T: Into<u128>>(value: T) -> String {
+    format_octal_impl(value.into(), true)
+}
+
+fn format_octal_impl(mut value: u128, prefixed: bool) -> String {
+    if value == 0 {
+        return if prefixed { "0o0".to_string() } else { "0".to_string() };
+    }
+
+    let mut digits = Vec::new();
+    while value > 0 {
+        digits.push((b'0' + (value & 7) as u8) as char);
+        value >>= 3;
+    }
+    digits.reverse();
+
+    let s: String = digits.into_iter().collect();
+    if prefixed {
+        format!("0o{}", s)
+    } else {
+        s
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// FLOAT FORMATTING
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Format a floating-point number
+pub fn format_float(value: f64) -> String {
+    format_float_with_precision(value, 6)
+}
+
+/// Format a floating-point number with specified precision
+pub fn format_float_with_precision(value: f64, precision: usize) -> String {
+    if value.is_nan() {
+        return "NaN".to_string();
+    }
+    if value.is_infinite() {
+        return if value > 0.0 { "inf".to_string() } else { "-inf".to_string() };
+    }
+
+    let is_negative = value < 0.0;
+    let abs_value = if is_negative { -value } else { value };
+
+    // Split into integer and fractional parts
+    let int_part = abs_value.floor() as u128;
+    let frac_part = abs_value - (int_part as f64);
+
+    let int_str = format_unsigned_decimal(int_part);
+
+    // Format fractional part
+    let mut frac_str = String::new();
+    let mut frac = frac_part;
+    for _ in 0..precision {
+        frac *= 10.0;
+        let digit = frac.floor() as u8;
+        frac_str.push((b'0' + digit) as char);
+        frac -= digit as f64;
+    }
+
+    // Round last digit
+    if frac >= 0.5 && !frac_str.is_empty() {
+        // Simple rounding - just increment last digit if needed
+        let mut chars: Vec<char> = frac_str.chars().collect();
+        let mut carry = true;
+        for i in (0..chars.len()).rev() {
+            if carry {
+                if chars[i] == '9' {
+                    chars[i] = '0';
+                } else {
+                    chars[i] = ((chars[i] as u8) + 1) as char;
+                    carry = false;
+                }
+            }
+        }
+        frac_str = chars.into_iter().collect();
+    }
+
+    let sign = if is_negative { "-" } else { "" };
+
+    if precision == 0 {
+        format!("{}{}", sign, int_str)
+    } else {
+        format!("{}{}.{}", sign, int_str, frac_str)
+    }
+}
+
+/// Format a floating-point number in exponential notation
+pub fn format_exp(value: f64) -> String {
+    format_exp_with_precision(value, 6, false)
+}
+
+/// Format in uppercase exponential notation
+pub fn format_exp_upper(value: f64) -> String {
+    format_exp_with_precision(value, 6, true)
+}
+
+/// Format in exponential notation with precision
+pub fn format_exp_with_precision(value: f64, precision: usize, uppercase: bool) -> String {
+    if value.is_nan() {
+        return "NaN".to_string();
+    }
+    if value.is_infinite() {
+        return if value > 0.0 { "inf".to_string() } else { "-inf".to_string() };
+    }
+    if value == 0.0 {
+        let e = if uppercase { "E" } else { "e" };
+        return format!("0.{}{}+00", "0".repeat(precision), e);
+    }
+
+    let is_negative = value < 0.0;
+    let abs_value = if is_negative { -value } else { value };
+
+    // Calculate exponent
+    let exp = abs_value.log10().floor() as i32;
+    let mantissa = abs_value / 10.0_f64.powi(exp);
+
+    let mantissa_str = format_float_with_precision(mantissa, precision);
+    let e = if uppercase { "E" } else { "e" };
+    let sign = if is_negative { "-" } else { "" };
+    let exp_sign = if exp >= 0 { "+" } else { "" };
+
+    format!("{}{}{}{}{:02}", sign, mantissa_str, e, exp_sign, exp.abs())
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// NUMERIC FORMATTING UTILITIES
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Format a number with thousands separators
+pub fn format_with_separators<T: Into<i128>>(value: T, separator: char) -> String {
+    let v: i128 = value.into();
+    let is_negative = v < 0;
+    let abs_v = if is_negative { -v } else { v } as u128;
+
+    let digits = format_unsigned_decimal(abs_v);
+    let chars: Vec<char> = digits.chars().collect();
+
+    let mut result = Vec::new();
+    for (i, &c) in chars.iter().rev().enumerate() {
+        if i > 0 && i % 3 == 0 {
+            result.push(separator);
+        }
+        result.push(c);
+    }
+    result.reverse();
+
+    let s: String = result.into_iter().collect();
+    if is_negative {
+        format!("-{}", s)
+    } else {
+        s
+    }
+}
+
+/// Format a number with comma separators (US style)
+pub fn format_comma_separated<T: Into<i128>>(value: T) -> String {
+    format_with_separators(value, ',')
+}
+
+/// Format bytes as human-readable size
+pub fn format_bytes(bytes: u64) -> String {
+    const UNITS: &[&str] = &["B", "KB", "MB", "GB", "TB", "PB", "EB"];
+
+    if bytes == 0 {
+        return "0 B".to_string();
+    }
+
+    let mut value = bytes as f64;
+    let mut unit_idx = 0;
+
+    while value >= 1024.0 && unit_idx < UNITS.len() - 1 {
+        value /= 1024.0;
+        unit_idx += 1;
+    }
+
+    if unit_idx == 0 {
+        format!("{} {}", bytes, UNITS[0])
+    } else {
+        format!("{:.2} {}", value, UNITS[unit_idx])
+    }
+}
+
+/// Format bytes using binary units (KiB, MiB, etc.)
+pub fn format_bytes_binary(bytes: u64) -> String {
+    const UNITS: &[&str] = &["B", "KiB", "MiB", "GiB", "TiB", "PiB", "EiB"];
+
+    if bytes == 0 {
+        return "0 B".to_string();
+    }
+
+    let mut value = bytes as f64;
+    let mut unit_idx = 0;
+
+    while value >= 1024.0 && unit_idx < UNITS.len() - 1 {
+        value /= 1024.0;
+        unit_idx += 1;
+    }
+
+    if unit_idx == 0 {
+        format!("{} {}", bytes, UNITS[0])
+    } else {
+        format!("{:.2} {}", value, UNITS[unit_idx])
+    }
+}
+
+/// Format a duration in human-readable form
+pub fn format_duration_human(total_seconds: u64) -> String {
+    if total_seconds == 0 {
+        return "0s".to_string();
+    }
+
+    let days = total_seconds / 86400;
+    let hours = (total_seconds % 86400) / 3600;
+    let minutes = (total_seconds % 3600) / 60;
+    let seconds = total_seconds % 60;
+
+    let mut parts = Vec::new();
+
+    if days > 0 {
+        parts.push(format!("{}d", days));
+    }
+    if hours > 0 {
+        parts.push(format!("{}h", hours));
+    }
+    if minutes > 0 {
+        parts.push(format!("{}m", minutes));
+    }
+    if seconds > 0 || parts.is_empty() {
+        parts.push(format!("{}s", seconds));
+    }
+
+    parts.join(" ")
+}
+
+/// Format a percentage
+pub fn format_percent(value: f64, precision: usize) -> String {
+    format!("{}%", format_float_with_precision(value * 100.0, precision))
+}
+
+/// Format ordinal number (1st, 2nd, 3rd, etc.)
+pub fn format_ordinal(n: i64) -> String {
+    let abs_n = n.abs() as u64;
+    let suffix = match abs_n % 100 {
+        11 | 12 | 13 => "th",
+        _ => match abs_n % 10 {
+            1 => "st",
+            2 => "nd",
+            3 => "rd",
+            _ => "th",
+        },
+    };
+
+    format!("{}{}", n, suffix)
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// STRING FORMATTING
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Pad a string on the left
+pub fn pad_left(s: &str, width: usize, fill: char) -> String {
+    let len = s.chars().count();
+    if len >= width {
+        return s.to_string();
+    }
+
+    let padding: String = std::iter::repeat(fill).take(width - len).collect();
+    format!("{}{}", padding, s)
+}
+
+/// Pad a string on the right
+pub fn pad_right(s: &str, width: usize, fill: char) -> String {
+    let len = s.chars().count();
+    if len >= width {
+        return s.to_string();
+    }
+
+    let padding: String = std::iter::repeat(fill).take(width - len).collect();
+    format!("{}{}", s, padding)
+}
+
+/// Center a string
+pub fn center(s: &str, width: usize, fill: char) -> String {
+    let len = s.chars().count();
+    if len >= width {
+        return s.to_string();
+    }
+
+    let total_padding = width - len;
+    let left_padding = total_padding / 2;
+    let right_padding = total_padding - left_padding;
+
+    let left: String = std::iter::repeat(fill).take(left_padding).collect();
+    let right: String = std::iter::repeat(fill).take(right_padding).collect();
+
+    format!("{}{}{}", left, s, right)
+}
+
+/// Truncate a string with ellipsis
+pub fn truncate(s: &str, max_len: usize) -> String {
+    truncate_with(s, max_len, "...")
+}
+
+/// Truncate with custom suffix
+pub fn truncate_with(s: &str, max_len: usize, suffix: &str) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    if chars.len() <= max_len {
+        return s.to_string();
+    }
+
+    let suffix_len = suffix.chars().count();
+    if max_len <= suffix_len {
+        return suffix.chars().take(max_len).collect();
+    }
+
+    let truncate_at = max_len - suffix_len;
+    let truncated: String = chars[..truncate_at].iter().collect();
+    format!("{}{}", truncated, suffix)
+}
+
+/// Indent each line of text
+pub fn indent(s: &str, prefix: &str) -> String {
+    s.lines()
+        .map(|line| format!("{}{}", prefix, line))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Dedent text by removing common leading whitespace
+pub fn dedent(s: &str) -> String {
+    let lines: Vec<&str> = s.lines().collect();
+
+    // Find minimum indentation
+    let min_indent = lines.iter()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| line.len() - line.trim_start().len())
+        .min()
+        .unwrap_or(0);
+
+    lines.iter()
+        .map(|line| {
+            if line.len() >= min_indent {
+                &line[min_indent..]
+            } else {
+                *line
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// PRIMITIVE TYPE IMPLEMENTATIONS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+impl Display for str {
+    fn fmt(self: &Self, f: &mut Formatter) -> Result<(), FormatError> {
+        f.pad(self)
+    }
+}
+
+impl Display for String {
+    fn fmt(self: &Self, f: &mut Formatter) -> Result<(), FormatError> {
+        f.pad(self.as_str())
+    }
+}
+
+impl Debug for str {
+    fn fmt(self: &Self, f: &mut Formatter) -> Result<(), FormatError> {
+        f.write_char('"')?;
+        for c in self.chars() {
+            match c {
+                '"' => f.write_str("\\\"")?,
+                '\\' => f.write_str("\\\\")?,
+                '\n' => f.write_str("\\n")?,
+                '\r' => f.write_str("\\r")?,
+                '\t' => f.write_str("\\t")?,
+                c if c.is_control() => {
+                    f.write_str(&format!("\\u{{{:04x}}}", c as u32))?;
+                }
+                c => f.write_char(c)?,
+            }
+        }
+        f.write_char('"')
+    }
+}
+
+impl Debug for String {
+    fn fmt(self: &Self, f: &mut Formatter) -> Result<(), FormatError> {
+        Debug::fmt(self.as_str(), f)
+    }
+}
+
+impl Display for bool {
+    fn fmt(self: &Self, f: &mut Formatter) -> Result<(), FormatError> {
+        f.pad(if *self { "true" } else { "false" })
+    }
+}
+
+impl Debug for bool {
+    fn fmt(self: &Self, f: &mut Formatter) -> Result<(), FormatError> {
+        Display::fmt(self, f)
+    }
+}
+
+impl Display for char {
+    fn fmt(self: &Self, f: &mut Formatter) -> Result<(), FormatError> {
+        f.write_char(*self)
+    }
+}
+
+impl Debug for char {
+    fn fmt(self: &Self, f: &mut Formatter) -> Result<(), FormatError> {
+        f.write_char('\'')?;
+        match *self {
+            '\'' => f.write_str("\\'")?,
+            '\\' => f.write_str("\\\\")?,
+            '\n' => f.write_str("\\n")?,
+            '\r' => f.write_str("\\r")?,
+            '\t' => f.write_str("\\t")?,
+            c if c.is_control() => {
+                f.write_str(&format!("\\u{{{:04x}}}", c as u32))?;
+            }
+            c => f.write_char(c)?,
+        }
+        f.write_char('\'')
+    }
+}
+
+// Integer implementations
+macro_rules! impl_int_display {
+    ($($t:ty),*) => {
+        $(
+            impl Display for $t {
+                fn fmt(self: &Self, f: &mut Formatter) -> Result<(), FormatError> {
+                    let s = format_int(*self as i128);
+                    f.pad(&s)
+                }
+            }
+
+            impl Debug for $t {
+                fn fmt(self: &Self, f: &mut Formatter) -> Result<(), FormatError> {
+                    Display::fmt(self, f)
+                }
+            }
+
+            impl Binary for $t {
+                fn fmt(self: &Self, f: &mut Formatter) -> Result<(), FormatError> {
+                    let s = if f.alternate() {
+                        format_binary_prefixed(*self as u128)
+                    } else {
+                        format_binary(*self as u128)
+                    };
+                    f.pad(&s)
+                }
+            }
+
+            impl Octal for $t {
+                fn fmt(self: &Self, f: &mut Formatter) -> Result<(), FormatError> {
+                    let s = if f.alternate() {
+                        format_octal_prefixed(*self as u128)
+                    } else {
+                        format_octal(*self as u128)
+                    };
+                    f.pad(&s)
+                }
+            }
+
+            impl LowerHex for $t {
+                fn fmt(self: &Self, f: &mut Formatter) -> Result<(), FormatError> {
+                    let s = if f.alternate() {
+                        format_hex_prefixed(*self as u128)
+                    } else {
+                        format_hex_lower(*self as u128)
+                    };
+                    f.pad(&s)
+                }
+            }
+
+            impl UpperHex for $t {
+                fn fmt(self: &Self, f: &mut Formatter) -> Result<(), FormatError> {
+                    let s = if f.alternate() {
+                        format!("0x{}", format_hex_upper(*self as u128))
+                    } else {
+                        format_hex_upper(*self as u128)
+                    };
+                    f.pad(&s)
+                }
+            }
+        )*
+    };
+}
+
+impl_int_display!(i8, i16, i32, i64, i128, isize, u8, u16, u32, u64, u128, usize);
+
+// Float implementations
+macro_rules! impl_float_display {
+    ($($t:ty),*) => {
+        $(
+            impl Display for $t {
+                fn fmt(self: &Self, f: &mut Formatter) -> Result<(), FormatError> {
+                    let precision = f.precision().unwrap_or(6);
+                    let s = format_float_with_precision(*self as f64, precision);
+                    f.pad(&s)
+                }
+            }
+
+            impl Debug for $t {
+                fn fmt(self: &Self, f: &mut Formatter) -> Result<(), FormatError> {
+                    Display::fmt(self, f)
+                }
+            }
+
+            impl LowerExp for $t {
+                fn fmt(self: &Self, f: &mut Formatter) -> Result<(), FormatError> {
+                    let precision = f.precision().unwrap_or(6);
+                    let s = format_exp_with_precision(*self as f64, precision, false);
+                    f.pad(&s)
+                }
+            }
+
+            impl UpperExp for $t {
+                fn fmt(self: &Self, f: &mut Formatter) -> Result<(), FormatError> {
+                    let precision = f.precision().unwrap_or(6);
+                    let s = format_exp_with_precision(*self as f64, precision, true);
+                    f.pad(&s)
+                }
+            }
+        )*
+    };
+}
+
+impl_float_display!(f32, f64);
+
+// Option implementation
+impl<T: Debug> Debug for Option<T> {
+    fn fmt(self: &Self, f: &mut Formatter) -> Result<(), FormatError> {
+        match self {
+            Some(v) => {
+                f.write_str("Some(")?;
+                v.fmt(f)?;
+                f.write_str(")")
+            }
+            None => f.write_str("None"),
+        }
+    }
+}
+
+impl<T: Display> Display for Option<T> {
+    fn fmt(self: &Self, f: &mut Formatter) -> Result<(), FormatError> {
+        match self {
+            Some(v) => v.fmt(f),
+            None => Ok(()),
+        }
+    }
+}
+
+// Result implementation
+impl<T: Debug, E: Debug> Debug for Result<T, E> {
+    fn fmt(self: &Self, f: &mut Formatter) -> Result<(), FormatError> {
+        match self {
+            Ok(v) => {
+                f.write_str("Ok(")?;
+                v.fmt(f)?;
+                f.write_str(")")
+            }
+            Err(e) => {
+                f.write_str("Err(")?;
+                e.fmt(f)?;
+                f.write_str(")")
+            }
+        }
+    }
+}
+
+// Vec implementation
+impl<T: Debug> Debug for Vec<T> {
+    fn fmt(self: &Self, f: &mut Formatter) -> Result<(), FormatError> {
+        f.debug_list().entries(self.iter()).finish()
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// TESTS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_format_int() {
+        assert_eq!(format_int(42), "42");
+        assert_eq!(format_int(-123), "-123");
+        assert_eq!(format_int(0), "0");
+    }
+
+    #[test]
+    fn test_format_hex() {
+        assert_eq!(format_hex_lower(255u32), "ff");
+        assert_eq!(format_hex_upper(255u32), "FF");
+        assert_eq!(format_hex_prefixed(255u32), "0xff");
+    }
+
+    #[test]
+    fn test_format_binary() {
+        assert_eq!(format_binary(5u32), "101");
+        assert_eq!(format_binary_prefixed(5u32), "0b101");
+    }
+
+    #[test]
+    fn test_format_octal() {
+        assert_eq!(format_octal(8u32), "10");
+        assert_eq!(format_octal_prefixed(8u32), "0o10");
+    }
+
+    #[test]
+    fn test_format_float() {
+        assert_eq!(format_float_with_precision(3.14159, 2), "3.14");
+        assert_eq!(format_float_with_precision(-2.5, 1), "-2.5");
+    }
+
+    #[test]
+    fn test_format_exp() {
+        let s = format_exp(1234.5);
+        assert!(s.contains("e+03") || s.contains("e+3"));
+    }
+
+    #[test]
+    fn test_format_bytes() {
+        assert_eq!(format_bytes(0), "0 B");
+        assert_eq!(format_bytes(1023), "1023 B");
+        assert_eq!(format_bytes(1024), "1.00 KB");
+        assert_eq!(format_bytes(1048576), "1.00 MB");
+    }
+
+    #[test]
+    fn test_format_duration() {
+        assert_eq!(format_duration_human(0), "0s");
+        assert_eq!(format_duration_human(59), "59s");
+        assert_eq!(format_duration_human(60), "1m");
+        assert_eq!(format_duration_human(3661), "1h 1m 1s");
+        assert_eq!(format_duration_human(86400), "1d");
+    }
+
+    #[test]
+    fn test_format_ordinal() {
+        assert_eq!(format_ordinal(1), "1st");
+        assert_eq!(format_ordinal(2), "2nd");
+        assert_eq!(format_ordinal(3), "3rd");
+        assert_eq!(format_ordinal(4), "4th");
+        assert_eq!(format_ordinal(11), "11th");
+        assert_eq!(format_ordinal(21), "21st");
+    }
+
+    #[test]
+    fn test_format_percent() {
+        assert_eq!(format_percent(0.5, 0), "50%");
+        assert_eq!(format_percent(0.123, 1), "12.3%");
+    }
+
+    #[test]
+    fn test_comma_separated() {
+        assert_eq!(format_comma_separated(1000), "1,000");
+        assert_eq!(format_comma_separated(1000000), "1,000,000");
+        assert_eq!(format_comma_separated(-1234567), "-1,234,567");
+    }
+
+    #[test]
+    fn test_pad() {
+        assert_eq!(pad_left("42", 5, '0'), "00042");
+        assert_eq!(pad_right("hi", 5, ' '), "hi   ");
+        assert_eq!(center("x", 5, '-'), "--x--");
+    }
+
+    #[test]
+    fn test_truncate() {
+        assert_eq!(truncate("hello world", 8), "hello...");
+        assert_eq!(truncate("hi", 10), "hi");
+    }
+
+    #[test]
+    fn test_indent() {
+        assert_eq!(indent("a\nb", "  "), "  a\n  b");
+    }
+
+    #[test]
+    fn test_string_buffer() {
+        let mut buf = StringBuffer::new();
+        buf.write_str("hello").unwrap();
+        buf.write_char(' ').unwrap();
+        buf.write_str("world").unwrap();
+        assert_eq!(buf.into_string(), "hello world");
+    }
+
+    #[test]
+    fn test_formatter_pad() {
+        let mut buf = StringBuffer::new();
+        let config = FormatterConfig::new().width(10).align(Alignment::Right);
+        let mut f = Formatter::with_config(&mut buf, config);
+        f.pad("hello").unwrap();
+        assert_eq!(buf.into_string(), "     hello");
+    }
+
+    #[test]
+    fn test_debug_struct() {
+        let mut buf = StringBuffer::new();
+        {
+            let mut f = Formatter::new(&mut buf);
+            f.debug_struct("Point")
+                .field("x", &10i32)
+                .field("y", &20i32)
+                .finish()
+                .unwrap();
+        }
+        let s = buf.into_string();
+        assert!(s.contains("Point"));
+        assert!(s.contains("x"));
+        assert!(s.contains("10"));
+    }
+}

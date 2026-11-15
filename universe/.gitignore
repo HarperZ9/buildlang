@@ -1,0 +1,77 @@
+# BuildLang compiler has its own repo (HarperZ9/buildlang)
+buildlang/
+
+# Calibrate Pro Python artifacts
+calibrate/__pycache__/
+calibrate/*.pyc
+calibrate/build/
+calibrate/dist/
+calibrate/*.egg-info/
+calibrate/.pytest_cache/
+
+# Build artifacts & archives
+target/
+*.o
+*.obj
+*.exe
+*.dll
+*.so
+*.dylib
+*.zip
+*.tar.gz
+*.cube
+*.icc
+build_output.txt
+nul
+
+# Test output
+calibration_output/
+test_simple.c
+
+# Large/generated directories
+harper-engine-complete.zip
+build-v4.2.0/
+
+# IDE
+.vscode/
+.idea/
+.claude/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+# Generated C output from buildc compilation
+*/lib.c
+tests/programs/*.c
+programs/*.c
+
+# safe_write pre-calibration archive
+.warden-safe-cache/
+
+# coherence-membrane build-state witnesses (per-machine)
+tools/coherence/witness/
+
+# release/build artifacts
+__pycache__/
+*.pyc
+*.spec
+*.bin
+*.bak
+
+# Local-only Claude instructions (global standard: never commit)
+CLAUDE.local.md
+
+# Environment files (global standard: never commit)
+.env
+.env.*
+# ...but the committed template must survive the .env.* rule above
+!.env.example
+
+# Build output (global standard: never commit)
+dist/
+
+# direnv environment files (can hold exported secrets)
+.envrc
+.envrc.local

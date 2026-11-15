@@ -1,0 +1,1392 @@
+// =============================================================================
+// Lumina Color Grading - Professional Color Correction Pipeline
+// =============================================================================
+// Comprehensive color grading system with LUT support, color wheels,
+// film emulation, and professional color science.
+// Target: Film/TV production, game engines, photo editing
+// =============================================================================
+
+module lumina::color_grading;
+
+use core::math::{Vec2, Vec3, Vec4, Mat3, Mat4, lerp, saturate, smoothstep};
+use core::simd::{f32x4, f32x8};
+use spectrum::{ColorSpace, ColorSpaceConversion};
+
+// =============================================================================
+// Color Grading Configuration
+// =============================================================================
+
+/// Color wheel zones
+@[repr(u8)]
+enum ColorZone {
+    Shadows,
+    Midtones,
+    Highlights,
+    Global,
+}
+
+/// Tone curve mode
+@[repr(u8)]
+enum ToneCurveMode {
+    Linear,
+    Logarithmic,
+    FilmicSlog,
+    FilmicArri,
+    AcesCC,
+    Custom,
+}
+
+/// Color grading preset
+@[repr(u8)]
+enum GradingPreset {
+    None,
+    // Film emulation
+    Kodak2383,
+    Kodak2393,
+    FujiEterna,
+    ArriLogC,
+
+    // Stylized
+    Bleached,
+    CrossProcess,
+    Vintage,
+    Cinematic,
+    Noir,
+    Teal_Orange,
+    Sepia,
+    Desaturated,
+
+    // Technical
+    Rec709,
+    SLog3ToRec709,
+    LogCToRec709,
+}
+
+/// Color grading configuration
+struct GradingConfig {
+    enabled: bool,
+
+    // Exposure and base adjustments
+    exposure: f32,              // EV adjustment (-5 to +5)
+    contrast: f32,              // Contrast multiplier (0.5 to 2.0)
+    saturation: f32,            // Global saturation (0 to 2)
+    vibrance: f32,              // Intelligent saturation (0 to 2)
+    gamma: f32,                 // Gamma correction
+
+    // White balance
+    temperature: f32,           // Kelvin offset (-100 to 100)
+    tint: f32,                  // Green-magenta tint (-100 to 100)
+
+    // Color wheels
+    shadows: ColorWheelSettings,
+    midtones: ColorWheelSettings,
+    highlights: ColorWheelSettings,
+
+    // Tone curves
+    tone_curve_mode: ToneCurveMode,
+    custom_curve: Option<ToneCurve>,
+
+    // Channel mixer
+    channel_mixer: ChannelMixer,
+
+    // HSL adjustments
+    hsl_adjustments: Vec<HslAdjustment>,
+
+    // Split toning
+    split_shadows: Vec3,        // Shadow tint color
+    split_highlights: Vec3,     // Highlight tint color
+    split_balance: f32,         // Balance between shadows/highlights
+
+    // Film grain
+    grain_enabled: bool,
+    grain_intensity: f32,
+    grain_size: f32,
+
+    // Vignette
+    vignette_enabled: bool,
+    vignette_intensity: f32,
+    vignette_softness: f32,
+
+    // LUT
+    lut_enabled: bool,
+    lut_intensity: f32,
+}
+
+impl GradingConfig {
+    /// Default neutral configuration
+    pub fn default() -> Self {
+        Self {
+            enabled: true,
+            exposure: 0.0,
+            contrast: 1.0,
+            saturation: 1.0,
+            vibrance: 1.0,
+            gamma: 1.0,
+            temperature: 0.0,
+            tint: 0.0,
+            shadows: ColorWheelSettings::neutral(),
+            midtones: ColorWheelSettings::neutral(),
+            highlights: ColorWheelSettings::neutral(),
+            tone_curve_mode: ToneCurveMode::Linear,
+            custom_curve: None,
+            channel_mixer: ChannelMixer::identity(),
+            hsl_adjustments: Vec::new(),
+            split_shadows: Vec3::ZERO,
+            split_highlights: Vec3::ZERO,
+            split_balance: 0.0,
+            grain_enabled: false,
+            grain_intensity: 0.0,
+            grain_size: 1.0,
+            vignette_enabled: false,
+            vignette_intensity: 0.0,
+            vignette_softness: 0.5,
+            lut_enabled: false,
+            lut_intensity: 1.0,
+        }
+    }
+
+    /// Cinematic preset
+    pub fn cinematic() -> Self {
+        let mut config = Self::default();
+        config.contrast = 1.15;
+        config.saturation = 0.95;
+        config.shadows.saturation = 1.1;
+        config.highlights.saturation = 0.9;
+        config.split_shadows = Vec3::new(0.0, 0.02, 0.05);  // Cool shadows
+        config.split_highlights = Vec3::new(0.05, 0.03, 0.0); // Warm highlights
+        config.split_balance = -0.2;
+        config.vignette_enabled = true;
+        config.vignette_intensity = 0.3;
+        config
+    }
+
+    /// Teal and orange look
+    pub fn teal_orange() -> Self {
+        let mut config = Self::default();
+        config.shadows.offset = Vec3::new(-0.05, 0.0, 0.1);
+        config.highlights.offset = Vec3::new(0.1, 0.05, -0.05);
+        config.saturation = 1.1;
+        config
+    }
+}
+
+// =============================================================================
+// Color Wheel
+// =============================================================================
+
+/// Color wheel settings for a tonal zone
+struct ColorWheelSettings {
+    offset: Vec3,       // Color offset/lift
+    power: Vec3,        // Color power/gamma
+    slope: Vec3,        // Color slope/gain
+    saturation: f32,    // Zone saturation
+}
+
+impl ColorWheelSettings {
+    /// Neutral settings
+    pub fn neutral() -> Self {
+        Self {
+            offset: Vec3::ZERO,
+            power: Vec3::new(1.0, 1.0, 1.0),
+            slope: Vec3::new(1.0, 1.0, 1.0),
+            saturation: 1.0,
+        }
+    }
+
+    /// Apply lift/gamma/gain to color
+    pub fn apply(&self, color: Vec3) -> Vec3 {
+        // ASC CDL formula: out = (in * slope + offset) ^ power
+        let lifted = color * self.slope + self.offset;
+        Vec3::new(
+            lifted.x.max(0.0).powf(self.power.x),
+            lifted.y.max(0.0).powf(self.power.y),
+            lifted.z.max(0.0).powf(self.power.z)
+        )
+    }
+}
+
+/// Color wheel processor
+struct ColorWheel {
+    shadows: ColorWheelSettings,
+    midtones: ColorWheelSettings,
+    highlights: ColorWheelSettings,
+}
+
+impl ColorWheel {
+    pub fn new(
+        shadows: ColorWheelSettings,
+        midtones: ColorWheelSettings,
+        highlights: ColorWheelSettings
+    ) -> Self {
+        Self { shadows, midtones, highlights }
+    }
+
+    /// Calculate zone weight for a luminance value
+    fn zone_weight(luminance: f32, zone: ColorZone) -> f32 {
+        match zone {
+            ColorZone::Shadows => {
+                saturate(1.0 - luminance * 2.0)
+            },
+            ColorZone::Midtones => {
+                let low = smoothstep(0.0, 0.5, luminance);
+                let high = smoothstep(1.0, 0.5, luminance);
+                low * high * 2.0
+            },
+            ColorZone::Highlights => {
+                saturate(luminance * 2.0 - 1.0)
+            },
+            ColorZone::Global => 1.0,
+        }
+    }
+
+    /// Apply color wheels to a pixel
+    pub fn apply(&self, color: Vec3) -> Vec3 {
+        let luminance = color.x * 0.2126 + color.y * 0.7152 + color.z * 0.0722;
+
+        let shadow_weight = Self::zone_weight(luminance, ColorZone::Shadows);
+        let mid_weight = Self::zone_weight(luminance, ColorZone::Midtones);
+        let highlight_weight = Self::zone_weight(luminance, ColorZone::Highlights);
+
+        let shadow_color = self.shadows.apply(color);
+        let mid_color = self.midtones.apply(color);
+        let highlight_color = self.highlights.apply(color);
+
+        // Blend based on weights
+        let total_weight = shadow_weight + mid_weight + highlight_weight;
+        if total_weight > 0.001 {
+            (shadow_color * shadow_weight +
+             mid_color * mid_weight +
+             highlight_color * highlight_weight) / total_weight
+        } else {
+            color
+        }
+    }
+}
+
+// =============================================================================
+// Tone Curve
+// =============================================================================
+
+/// Cubic bezier control point
+struct CurvePoint {
+    x: f32,
+    y: f32,
+}
+
+/// Custom tone curve
+struct ToneCurve {
+    points: Vec<CurvePoint>,
+    lut: Vec<f32>,           // Pre-computed LUT
+    lut_size: u32,
+}
+
+impl ToneCurve {
+    /// Create from control points
+    pub fn new(points: Vec<CurvePoint>) -> Self {
+        let mut curve = Self {
+            points,
+            lut: Vec::new(),
+            lut_size: 256,
+        };
+        curve.build_lut();
+        curve
+    }
+
+    /// Create linear curve
+    pub fn linear() -> Self {
+        Self::new(vec![
+            CurvePoint { x: 0.0, y: 0.0 },
+            CurvePoint { x: 1.0, y: 1.0 },
+        ])
+    }
+
+    /// Create S-curve for contrast
+    pub fn s_curve(strength: f32) -> Self {
+        let mid = 0.5;
+        let offset = strength * 0.15;
+
+        Self::new(vec![
+            CurvePoint { x: 0.0, y: 0.0 },
+            CurvePoint { x: 0.25, y: 0.25 - offset },
+            CurvePoint { x: 0.5, y: 0.5 },
+            CurvePoint { x: 0.75, y: 0.75 + offset },
+            CurvePoint { x: 1.0, y: 1.0 },
+        ])
+    }
+
+    /// Build LUT from curve points
+    fn build_lut(&mut self) {
+        self.lut.clear();
+        self.lut.reserve(self.lut_size as usize);
+
+        for i in 0..self.lut_size {
+            let x = i as f32 / (self.lut_size - 1) as f32;
+            self.lut.push(self.evaluate_curve(x));
+        }
+    }
+
+    /// Evaluate curve at x using catmull-rom interpolation
+    fn evaluate_curve(&self, x: f32) -> f32 {
+        if self.points.is_empty() {
+            return x;
+        }
+
+        // Find segment
+        let mut p1_idx = 0;
+        for i in 0..self.points.len() - 1 {
+            if x >= self.points[i].x && x <= self.points[i + 1].x {
+                p1_idx = i;
+                break;
+            }
+        }
+
+        let p0 = if p1_idx > 0 {
+            &self.points[p1_idx - 1]
+        } else {
+            &self.points[p1_idx]
+        };
+        let p1 = &self.points[p1_idx];
+        let p2 = &self.points[(p1_idx + 1).min(self.points.len() - 1)];
+        let p3 = &self.points[(p1_idx + 2).min(self.points.len() - 1)];
+
+        let segment_x = p2.x - p1.x;
+        if segment_x < 0.001 {
+            return p1.y;
+        }
+
+        let t = (x - p1.x) / segment_x;
+
+        // Catmull-Rom interpolation
+        let t2 = t * t;
+        let t3 = t2 * t;
+
+        0.5 * ((2.0 * p1.y) +
+               (-p0.y + p2.y) * t +
+               (2.0 * p0.y - 5.0 * p1.y + 4.0 * p2.y - p3.y) * t2 +
+               (-p0.y + 3.0 * p1.y - 3.0 * p2.y + p3.y) * t3)
+    }
+
+    /// Apply curve using LUT
+    pub fn apply(&self, value: f32) -> f32 {
+        if self.lut.is_empty() {
+            return value;
+        }
+
+        let idx = (value * (self.lut_size - 1) as f32).max(0.0);
+        let idx_low = (idx as u32).min(self.lut_size - 2);
+        let idx_high = idx_low + 1;
+        let frac = idx - idx_low as f32;
+
+        lerp(self.lut[idx_low as usize], self.lut[idx_high as usize], frac)
+    }
+
+    /// Apply curve to RGB
+    pub fn apply_rgb(&self, color: Vec3) -> Vec3 {
+        Vec3::new(
+            self.apply(color.x),
+            self.apply(color.y),
+            self.apply(color.z)
+        )
+    }
+}
+
+// =============================================================================
+// Channel Mixer
+// =============================================================================
+
+/// RGB channel mixer
+struct ChannelMixer {
+    red_out: Vec3,      // Output red from RGB inputs
+    green_out: Vec3,    // Output green from RGB inputs
+    blue_out: Vec3,     // Output blue from RGB inputs
+}
+
+impl ChannelMixer {
+    /// Identity mixer (no change)
+    pub fn identity() -> Self {
+        Self {
+            red_out: Vec3::new(1.0, 0.0, 0.0),
+            green_out: Vec3::new(0.0, 1.0, 0.0),
+            blue_out: Vec3::new(0.0, 0.0, 1.0),
+        }
+    }
+
+    /// Create from matrix
+    pub fn from_matrix(mat: Mat3) -> Self {
+        Self {
+            red_out: Vec3::new(mat.m[0][0], mat.m[0][1], mat.m[0][2]),
+            green_out: Vec3::new(mat.m[1][0], mat.m[1][1], mat.m[1][2]),
+            blue_out: Vec3::new(mat.m[2][0], mat.m[2][1], mat.m[2][2]),
+        }
+    }
+
+    /// Convert to matrix
+    pub fn to_matrix(&self) -> Mat3 {
+        Mat3::from_rows([
+            [self.red_out.x, self.red_out.y, self.red_out.z],
+            [self.green_out.x, self.green_out.y, self.green_out.z],
+            [self.blue_out.x, self.blue_out.y, self.blue_out.z],
+        ])
+    }
+
+    /// Apply channel mix
+    pub fn apply(&self, color: Vec3) -> Vec3 {
+        Vec3::new(
+            color.dot(self.red_out),
+            color.dot(self.green_out),
+            color.dot(self.blue_out)
+        )
+    }
+}
+
+// =============================================================================
+// HSL Adjustments
+// =============================================================================
+
+/// HSL hue range
+@[repr(u8)]
+enum HueRange {
+    All,
+    Reds,
+    Oranges,
+    Yellows,
+    Greens,
+    Cyans,
+    Blues,
+    Purples,
+    Magentas,
+}
+
+/// HSL adjustment for a hue range
+struct HslAdjustment {
+    range: HueRange,
+    hue_shift: f32,         // Degrees (-180 to 180)
+    saturation: f32,        // Multiplier (0 to 2)
+    luminance: f32,         // Multiplier (0 to 2)
+}
+
+impl HslAdjustment {
+    /// Get weight for hue value (0-1)
+    fn weight_for_hue(&self, hue: f32) -> f32 {
+        match self.range {
+            HueRange::All => 1.0,
+            HueRange::Reds => Self::hue_weight(hue, 0.0, 30.0),
+            HueRange::Oranges => Self::hue_weight(hue, 30.0, 30.0),
+            HueRange::Yellows => Self::hue_weight(hue, 60.0, 30.0),
+            HueRange::Greens => Self::hue_weight(hue, 120.0, 60.0),
+            HueRange::Cyans => Self::hue_weight(hue, 180.0, 30.0),
+            HueRange::Blues => Self::hue_weight(hue, 240.0, 60.0),
+            HueRange::Purples => Self::hue_weight(hue, 270.0, 30.0),
+            HueRange::Magentas => Self::hue_weight(hue, 300.0, 30.0),
+        }
+    }
+
+    /// Calculate weight based on hue distance
+    fn hue_weight(hue: f32, center: f32, width: f32) -> f32 {
+        let hue_deg = hue * 360.0;
+        let mut dist = (hue_deg - center).abs();
+        if dist > 180.0 {
+            dist = 360.0 - dist;
+        }
+        saturate(1.0 - dist / width)
+    }
+}
+
+/// HSL color processor
+struct HslProcessor {
+    adjustments: Vec<HslAdjustment>,
+}
+
+impl HslProcessor {
+    pub fn new(adjustments: Vec<HslAdjustment>) -> Self {
+        Self { adjustments }
+    }
+
+    /// RGB to HSL
+    fn rgb_to_hsl(rgb: Vec3) -> Vec3 {
+        let max = rgb.x.max(rgb.y).max(rgb.z);
+        let min = rgb.x.min(rgb.y).min(rgb.z);
+        let l = (max + min) * 0.5;
+
+        if (max - min).abs() < 0.001 {
+            return Vec3::new(0.0, 0.0, l);
+        }
+
+        let d = max - min;
+        let s = if l > 0.5 {
+            d / (2.0 - max - min)
+        } else {
+            d / (max + min)
+        };
+
+        let h = if (max - rgb.x).abs() < 0.001 {
+            let mut h = (rgb.y - rgb.z) / d;
+            if rgb.y < rgb.z {
+                h += 6.0;
+            }
+            h
+        } else if (max - rgb.y).abs() < 0.001 {
+            (rgb.z - rgb.x) / d + 2.0
+        } else {
+            (rgb.x - rgb.y) / d + 4.0
+        } / 6.0;
+
+        Vec3::new(h, s, l)
+    }
+
+    /// HSL to RGB
+    fn hsl_to_rgb(hsl: Vec3) -> Vec3 {
+        if hsl.y < 0.001 {
+            return Vec3::new(hsl.z, hsl.z, hsl.z);
+        }
+
+        let q = if hsl.z < 0.5 {
+            hsl.z * (1.0 + hsl.y)
+        } else {
+            hsl.z + hsl.y - hsl.z * hsl.y
+        };
+        let p = 2.0 * hsl.z - q;
+
+        Vec3::new(
+            Self::hue_to_rgb(p, q, hsl.x + 1.0/3.0),
+            Self::hue_to_rgb(p, q, hsl.x),
+            Self::hue_to_rgb(p, q, hsl.x - 1.0/3.0)
+        )
+    }
+
+    fn hue_to_rgb(p: f32, q: f32, mut t: f32) -> f32 {
+        if t < 0.0 { t += 1.0; }
+        if t > 1.0 { t -= 1.0; }
+
+        if t < 1.0/6.0 {
+            p + (q - p) * 6.0 * t
+        } else if t < 0.5 {
+            q
+        } else if t < 2.0/3.0 {
+            p + (q - p) * (2.0/3.0 - t) * 6.0
+        } else {
+            p
+        }
+    }
+
+    /// Apply HSL adjustments
+    pub fn apply(&self, color: Vec3) -> Vec3 {
+        let mut hsl = Self::rgb_to_hsl(color);
+
+        for adj in &self.adjustments {
+            let weight = adj.weight_for_hue(hsl.x);
+            if weight > 0.001 {
+                // Hue shift
+                hsl.x += (adj.hue_shift / 360.0) * weight;
+                if hsl.x < 0.0 { hsl.x += 1.0; }
+                if hsl.x > 1.0 { hsl.x -= 1.0; }
+
+                // Saturation
+                hsl.y *= lerp(1.0, adj.saturation, weight);
+
+                // Luminance
+                hsl.z *= lerp(1.0, adj.luminance, weight);
+            }
+        }
+
+        hsl.y = hsl.y.max(0.0).min(1.0);
+        hsl.z = hsl.z.max(0.0).min(1.0);
+
+        Self::hsl_to_rgb(hsl)
+    }
+}
+
+// =============================================================================
+// LUT (Look-Up Table)
+// =============================================================================
+
+/// 3D LUT for color grading
+struct Lut3D {
+    size: u32,
+    data: Vec<Vec3>,
+    title: String,
+}
+
+impl Lut3D {
+    /// Create identity LUT
+    pub fn identity(size: u32) -> Self {
+        let total = (size * size * size) as usize;
+        let mut data = Vec::with_capacity(total);
+
+        for b in 0..size {
+            for g in 0..size {
+                for r in 0..size {
+                    data.push(Vec3::new(
+                        r as f32 / (size - 1) as f32,
+                        g as f32 / (size - 1) as f32,
+                        b as f32 / (size - 1) as f32
+                    ));
+                }
+            }
+        }
+
+        Self {
+            size,
+            data,
+            title: "Identity".to_string(),
+        }
+    }
+
+    /// Parse .cube file format
+    pub fn from_cube(content: &str) -> Result<Self, String> {
+        let mut size = 0u32;
+        let mut title = String::new();
+        let mut data = Vec::new();
+        let mut domain_min = Vec3::ZERO;
+        let mut domain_max = Vec3::new(1.0, 1.0, 1.0);
+
+        for line in content.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+
+            if line.starts_with("TITLE") {
+                title = line.split_once('"')
+                    .and_then(|(_, rest)| rest.rsplit_once('"'))
+                    .map(|(t, _)| t.to_string())
+                    .unwrap_or_default();
+            } else if line.starts_with("LUT_3D_SIZE") {
+                size = line.split_whitespace()
+                    .nth(1)
+                    .and_then(|s| s.parse().ok())
+                    .ok_or("Invalid LUT size")?;
+            } else if line.starts_with("DOMAIN_MIN") {
+                let parts: Vec<f32> = line.split_whitespace()
+                    .skip(1)
+                    .filter_map(|s| s.parse().ok())
+                    .collect();
+                if parts.len() == 3 {
+                    domain_min = Vec3::new(parts[0], parts[1], parts[2]);
+                }
+            } else if line.starts_with("DOMAIN_MAX") {
+                let parts: Vec<f32> = line.split_whitespace()
+                    .skip(1)
+                    .filter_map(|s| s.parse().ok())
+                    .collect();
+                if parts.len() == 3 {
+                    domain_max = Vec3::new(parts[0], parts[1], parts[2]);
+                }
+            } else {
+                // Data line
+                let parts: Vec<f32> = line.split_whitespace()
+                    .filter_map(|s| s.parse().ok())
+                    .collect();
+                if parts.len() >= 3 {
+                    data.push(Vec3::new(parts[0], parts[1], parts[2]));
+                }
+            }
+        }
+
+        if size == 0 || data.len() != (size * size * size) as usize {
+            return Err("Invalid LUT data".to_string());
+        }
+
+        Ok(Self { size, data, title })
+    }
+
+    /// Sample LUT with trilinear interpolation
+    pub fn sample(&self, color: Vec3) -> Vec3 {
+        let r = (color.x * (self.size - 1) as f32).max(0.0);
+        let g = (color.y * (self.size - 1) as f32).max(0.0);
+        let b = (color.z * (self.size - 1) as f32).max(0.0);
+
+        let r0 = (r as u32).min(self.size - 2);
+        let g0 = (g as u32).min(self.size - 2);
+        let b0 = (b as u32).min(self.size - 2);
+
+        let r1 = r0 + 1;
+        let g1 = g0 + 1;
+        let b1 = b0 + 1;
+
+        let fr = r - r0 as f32;
+        let fg = g - g0 as f32;
+        let fb = b - b0 as f32;
+
+        // Fetch 8 corners
+        let c000 = self.get(r0, g0, b0);
+        let c100 = self.get(r1, g0, b0);
+        let c010 = self.get(r0, g1, b0);
+        let c110 = self.get(r1, g1, b0);
+        let c001 = self.get(r0, g0, b1);
+        let c101 = self.get(r1, g0, b1);
+        let c011 = self.get(r0, g1, b1);
+        let c111 = self.get(r1, g1, b1);
+
+        // Trilinear interpolation
+        let c00 = c000 * (1.0 - fr) + c100 * fr;
+        let c10 = c010 * (1.0 - fr) + c110 * fr;
+        let c01 = c001 * (1.0 - fr) + c101 * fr;
+        let c11 = c011 * (1.0 - fr) + c111 * fr;
+
+        let c0 = c00 * (1.0 - fg) + c10 * fg;
+        let c1 = c01 * (1.0 - fg) + c11 * fg;
+
+        c0 * (1.0 - fb) + c1 * fb
+    }
+
+    /// Get value at grid position
+    fn get(&self, r: u32, g: u32, b: u32) -> Vec3 {
+        let idx = (b * self.size * self.size + g * self.size + r) as usize;
+        self.data[idx.min(self.data.len() - 1)]
+    }
+
+    /// Apply LUT with intensity
+    pub fn apply(&self, color: Vec3, intensity: f32) -> Vec3 {
+        let graded = self.sample(color.clamp(Vec3::ZERO, Vec3::ONE));
+        lerp(color, graded, intensity)
+    }
+}
+
+// =============================================================================
+// Film Emulation
+// =============================================================================
+
+/// Film stock emulation
+struct FilmEmulation {
+    // Tone response
+    toe_strength: f32,
+    toe_length: f32,
+    shoulder_strength: f32,
+    shoulder_length: f32,
+
+    // Color response
+    cross_talk: Mat3,
+    saturation_curve: Vec<(f32, f32)>,
+
+    // Grain
+    grain_response: f32,
+}
+
+impl FilmEmulation {
+    /// Kodak 2383 print film emulation
+    pub fn kodak_2383() -> Self {
+        Self {
+            toe_strength: 0.5,
+            toe_length: 0.4,
+            shoulder_strength: 0.85,
+            shoulder_length: 0.5,
+            cross_talk: Mat3::from_rows([
+                [0.95, 0.03, 0.02],
+                [0.02, 0.95, 0.03],
+                [0.03, 0.02, 0.95],
+            ]),
+            saturation_curve: vec![
+                (0.0, 0.9), (0.5, 1.0), (1.0, 0.85)
+            ],
+            grain_response: 1.0,
+        }
+    }
+
+    /// Apply filmic tone curve
+    fn apply_curve(&self, x: f32) -> f32 {
+        // Simplified filmic curve based on Hable's formula
+        let toe = self.toe_length * (1.0 - (-x / self.toe_length).exp());
+        let shoulder_start = 1.0 - self.shoulder_length;
+
+        if x < shoulder_start {
+            lerp(toe, x, saturate(x / shoulder_start))
+        } else {
+            let t = (x - shoulder_start) / self.shoulder_length;
+            let shoulder = shoulder_start +
+                self.shoulder_length * (1.0 - (-t * self.shoulder_strength * 2.0).exp()) / 2.0;
+            shoulder
+        }
+    }
+
+    /// Apply film emulation
+    pub fn apply(&self, color: Vec3) -> Vec3 {
+        // Apply cross-talk
+        let mixed = self.cross_talk * color;
+
+        // Apply tone curve per channel
+        let curved = Vec3::new(
+            self.apply_curve(mixed.x),
+            self.apply_curve(mixed.y),
+            self.apply_curve(mixed.z)
+        );
+
+        // Apply saturation curve based on luminance
+        let lum = curved.x * 0.2126 + curved.y * 0.7152 + curved.z * 0.0722;
+        let sat_mult = self.interpolate_saturation(lum);
+
+        let gray = Vec3::new(lum, lum, lum);
+        lerp(gray, curved, sat_mult)
+    }
+
+    /// Interpolate saturation curve
+    fn interpolate_saturation(&self, lum: f32) -> f32 {
+        if self.saturation_curve.is_empty() {
+            return 1.0;
+        }
+
+        for i in 0..self.saturation_curve.len() - 1 {
+            let (x0, y0) = self.saturation_curve[i];
+            let (x1, y1) = self.saturation_curve[i + 1];
+
+            if lum >= x0 && lum <= x1 {
+                let t = (lum - x0) / (x1 - x0);
+                return lerp(y0, y1, t);
+            }
+        }
+
+        self.saturation_curve.last().map(|(_, y)| *y).unwrap_or(1.0)
+    }
+}
+
+// =============================================================================
+// Color Grading Processor
+// =============================================================================
+
+/// Main color grading processor
+struct ColorGrader {
+    config: GradingConfig,
+    color_wheel: ColorWheel,
+    tone_curve: ToneCurve,
+    hsl_processor: HslProcessor,
+    lut: Option<Lut3D>,
+    film_emulation: Option<FilmEmulation>,
+}
+
+impl ColorGrader {
+    /// Create new color grader
+    pub fn new(config: GradingConfig) -> Self {
+        let color_wheel = ColorWheel::new(
+            config.shadows.clone(),
+            config.midtones.clone(),
+            config.highlights.clone()
+        );
+
+        let tone_curve = config.custom_curve.clone()
+            .unwrap_or_else(ToneCurve::linear);
+
+        let hsl_processor = HslProcessor::new(config.hsl_adjustments.clone());
+
+        Self {
+            config,
+            color_wheel,
+            tone_curve,
+            hsl_processor,
+            lut: None,
+            film_emulation: None,
+        }
+    }
+
+    /// Set LUT
+    pub fn set_lut(&mut self, lut: Lut3D) {
+        self.lut = Some(lut);
+    }
+
+    /// Set film emulation
+    pub fn set_film_emulation(&mut self, film: FilmEmulation) {
+        self.film_emulation = Some(film);
+    }
+
+    /// Apply white balance
+    fn apply_white_balance(&self, color: Vec3) -> Vec3 {
+        // Temperature: shift between blue and orange
+        let temp_shift = self.config.temperature / 100.0;
+        let r_mult = 1.0 + temp_shift * 0.1;
+        let b_mult = 1.0 - temp_shift * 0.1;
+
+        // Tint: shift between green and magenta
+        let tint_shift = self.config.tint / 100.0;
+        let g_mult = 1.0 - tint_shift * 0.1;
+
+        Vec3::new(
+            color.x * r_mult,
+            color.y * g_mult,
+            color.z * b_mult
+        )
+    }
+
+    /// Apply exposure
+    fn apply_exposure(&self, color: Vec3) -> Vec3 {
+        let mult = 2.0f32.powf(self.config.exposure);
+        color * mult
+    }
+
+    /// Apply contrast
+    fn apply_contrast(&self, color: Vec3) -> Vec3 {
+        let midpoint = Vec3::new(0.5, 0.5, 0.5);
+        midpoint + (color - midpoint) * self.config.contrast
+    }
+
+    /// Apply saturation
+    fn apply_saturation(&self, color: Vec3) -> Vec3 {
+        let lum = color.x * 0.2126 + color.y * 0.7152 + color.z * 0.0722;
+        let gray = Vec3::new(lum, lum, lum);
+        lerp(gray, color, self.config.saturation)
+    }
+
+    /// Apply vibrance (intelligent saturation)
+    fn apply_vibrance(&self, color: Vec3) -> Vec3 {
+        let lum = color.x * 0.2126 + color.y * 0.7152 + color.z * 0.0722;
+        let gray = Vec3::new(lum, lum, lum);
+
+        // Calculate current saturation
+        let max_c = color.x.max(color.y).max(color.z);
+        let min_c = color.x.min(color.y).min(color.z);
+        let sat = if max_c > 0.001 {
+            (max_c - min_c) / max_c
+        } else {
+            0.0
+        };
+
+        // Less saturated colors get more boost
+        let vibrance_mult = 1.0 + (self.config.vibrance - 1.0) * (1.0 - sat);
+        lerp(gray, color, vibrance_mult)
+    }
+
+    /// Apply split toning
+    fn apply_split_toning(&self, color: Vec3) -> Vec3 {
+        let lum = color.x * 0.2126 + color.y * 0.7152 + color.z * 0.0722;
+
+        // Shadow/highlight balance
+        let balance = self.config.split_balance * 0.5 + 0.5;
+        let shadow_weight = smoothstep(balance, 0.0, lum);
+        let highlight_weight = smoothstep(1.0 - balance, 1.0, lum);
+
+        let tint = self.config.split_shadows * shadow_weight +
+                   self.config.split_highlights * highlight_weight;
+
+        color + tint
+    }
+
+    /// Apply gamma
+    fn apply_gamma(&self, color: Vec3) -> Vec3 {
+        let inv_gamma = 1.0 / self.config.gamma;
+        Vec3::new(
+            color.x.max(0.0).powf(inv_gamma),
+            color.y.max(0.0).powf(inv_gamma),
+            color.z.max(0.0).powf(inv_gamma)
+        )
+    }
+
+    /// Grade a single pixel
+    pub fn grade(&self, color: Vec3) -> Vec3 {
+        if !self.config.enabled {
+            return color;
+        }
+
+        let mut result = color;
+
+        // 1. Exposure
+        result = self.apply_exposure(result);
+
+        // 2. White balance
+        result = self.apply_white_balance(result);
+
+        // 3. Tone curve
+        result = match self.config.tone_curve_mode {
+            ToneCurveMode::Linear => result,
+            ToneCurveMode::Custom => self.tone_curve.apply_rgb(result),
+            _ => result, // Other modes would have their own curves
+        };
+
+        // 4. Color wheels (lift/gamma/gain)
+        result = self.color_wheel.apply(result);
+
+        // 5. Channel mixer
+        result = self.config.channel_mixer.apply(result);
+
+        // 6. HSL adjustments
+        result = self.hsl_processor.apply(result);
+
+        // 7. Contrast
+        result = self.apply_contrast(result);
+
+        // 8. Saturation and vibrance
+        result = self.apply_saturation(result);
+        result = self.apply_vibrance(result);
+
+        // 9. Split toning
+        if self.config.split_shadows != Vec3::ZERO ||
+           self.config.split_highlights != Vec3::ZERO {
+            result = self.apply_split_toning(result);
+        }
+
+        // 10. Film emulation
+        if let Some(ref film) = self.film_emulation {
+            result = film.apply(result);
+        }
+
+        // 11. LUT
+        if self.config.lut_enabled {
+            if let Some(ref lut) = self.lut {
+                result = lut.apply(result, self.config.lut_intensity);
+            }
+        }
+
+        // 12. Gamma
+        result = self.apply_gamma(result);
+
+        // Clamp to valid range
+        Vec3::new(
+            result.x.max(0.0),
+            result.y.max(0.0),
+            result.z.max(0.0)
+        )
+    }
+
+    /// Grade entire image
+    pub fn grade_image(&self, image: &[Vec4], width: u32, height: u32) -> Vec<Vec4> {
+        image.iter().map(|pixel| {
+            let graded = self.grade(pixel.xyz());
+            Vec4::from_vec3(graded, pixel.w)
+        }).collect()
+    }
+}
+
+// =============================================================================
+// WGSL Shaders
+// =============================================================================
+
+mod shaders {
+    /// Color grading compute shader
+    pub const COLOR_GRADING: &str = r#"
+struct GradingParams {
+    exposure: f32,
+    contrast: f32,
+    saturation: f32,
+    vibrance: f32,
+    gamma: f32,
+    temperature: f32,
+    tint: f32,
+    lut_intensity: f32,
+}
+
+struct ColorWheelParams {
+    shadow_offset: vec3<f32>,
+    shadow_power: f32,
+    shadow_slope: vec3<f32>,
+    mid_offset: vec3<f32>,
+    mid_power: f32,
+    mid_slope: vec3<f32>,
+    highlight_offset: vec3<f32>,
+    highlight_power: f32,
+    highlight_slope: vec3<f32>,
+}
+
+@group(0) @binding(0) var<uniform> params: GradingParams;
+@group(0) @binding(1) var<uniform> wheel: ColorWheelParams;
+@group(0) @binding(2) var input_tex: texture_2d<f32>;
+@group(0) @binding(3) var lut_tex: texture_3d<f32>;
+@group(0) @binding(4) var output_tex: texture_storage_2d<rgba16float, write>;
+@group(0) @binding(5) var linear_sampler: sampler;
+
+fn luminance(color: vec3<f32>) -> f32 {
+    return dot(color, vec3<f32>(0.2126, 0.7152, 0.0722));
+}
+
+fn apply_exposure(color: vec3<f32>) -> vec3<f32> {
+    return color * pow(2.0, params.exposure);
+}
+
+fn apply_white_balance(color: vec3<f32>) -> vec3<f32> {
+    let temp_shift = params.temperature / 100.0;
+    let tint_shift = params.tint / 100.0;
+    return vec3<f32>(
+        color.r * (1.0 + temp_shift * 0.1),
+        color.g * (1.0 - tint_shift * 0.1),
+        color.b * (1.0 - temp_shift * 0.1)
+    );
+}
+
+fn apply_contrast(color: vec3<f32>) -> vec3<f32> {
+    return vec3<f32>(0.5) + (color - vec3<f32>(0.5)) * params.contrast;
+}
+
+fn apply_saturation(color: vec3<f32>) -> vec3<f32> {
+    let lum = luminance(color);
+    return mix(vec3<f32>(lum), color, params.saturation);
+}
+
+fn zone_weight(lum: f32, zone: u32) -> f32 {
+    switch zone {
+        case 0u: { return saturate(1.0 - lum * 2.0); } // Shadows
+        case 1u: { return smoothstep(0.0, 0.5, lum) * smoothstep(1.0, 0.5, lum) * 2.0; } // Midtones
+        case 2u: { return saturate(lum * 2.0 - 1.0); } // Highlights
+        default: { return 0.0; }
+    }
+}
+
+fn apply_color_wheel(color: vec3<f32>) -> vec3<f32> {
+    let lum = luminance(color);
+
+    let shadow_w = zone_weight(lum, 0u);
+    let mid_w = zone_weight(lum, 1u);
+    let highlight_w = zone_weight(lum, 2u);
+
+    // Apply lift/gamma/gain per zone
+    let shadow_color = pow(max(color * wheel.shadow_slope.xyz + wheel.shadow_offset, vec3<f32>(0.0)), vec3<f32>(wheel.shadow_power));
+    let mid_color = pow(max(color * wheel.mid_slope.xyz + wheel.mid_offset, vec3<f32>(0.0)), vec3<f32>(wheel.mid_power));
+    let highlight_color = pow(max(color * wheel.highlight_slope.xyz + wheel.highlight_offset, vec3<f32>(0.0)), vec3<f32>(wheel.highlight_power));
+
+    let total = shadow_w + mid_w + highlight_w;
+    if (total < 0.001) {
+        return color;
+    }
+
+    return (shadow_color * shadow_w + mid_color * mid_w + highlight_color * highlight_w) / total;
+}
+
+fn sample_lut(color: vec3<f32>) -> vec3<f32> {
+    let lut_size = vec3<f32>(textureDimensions(lut_tex));
+    let scale = (lut_size - 1.0) / lut_size;
+    let offset = 0.5 / lut_size;
+    let coords = saturate(color) * scale + offset;
+    return textureSampleLevel(lut_tex, linear_sampler, coords, 0.0).rgb;
+}
+
+@compute @workgroup_size(8, 8)
+fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+    let dims = textureDimensions(input_tex);
+    if (id.x >= dims.x || id.y >= dims.y) {
+        return;
+    }
+
+    var color = textureLoad(input_tex, id.xy, 0);
+
+    // Apply grading pipeline
+    var rgb = color.rgb;
+    rgb = apply_exposure(rgb);
+    rgb = apply_white_balance(rgb);
+    rgb = apply_color_wheel(rgb);
+    rgb = apply_contrast(rgb);
+    rgb = apply_saturation(rgb);
+
+    // Apply LUT
+    let lut_color = sample_lut(rgb);
+    rgb = mix(rgb, lut_color, params.lut_intensity);
+
+    // Gamma
+    rgb = pow(max(rgb, vec3<f32>(0.0)), vec3<f32>(1.0 / params.gamma));
+
+    textureStore(output_tex, id.xy, vec4<f32>(rgb, color.a));
+}
+"#;
+
+    /// Vignette shader
+    pub const VIGNETTE: &str = r#"
+struct VignetteParams {
+    intensity: f32,
+    softness: f32,
+    roundness: f32,
+    center: vec2<f32>,
+}
+
+@group(0) @binding(0) var<uniform> params: VignetteParams;
+@group(0) @binding(1) var input_tex: texture_2d<f32>;
+@group(0) @binding(2) var output_tex: texture_storage_2d<rgba16float, write>;
+
+@compute @workgroup_size(8, 8)
+fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+    let dims = textureDimensions(input_tex);
+    if (id.x >= dims.x || id.y >= dims.y) {
+        return;
+    }
+
+    let uv = (vec2<f32>(id.xy) + 0.5) / vec2<f32>(dims);
+    let color = textureLoad(input_tex, id.xy, 0);
+
+    let centered = uv - params.center;
+    let aspect = f32(dims.x) / f32(dims.y);
+    let adjusted = vec2<f32>(centered.x * aspect, centered.y);
+
+    let dist = length(adjusted);
+    let vignette = 1.0 - smoothstep(params.softness, params.softness + 0.5, dist) * params.intensity;
+
+    textureStore(output_tex, id.xy, vec4<f32>(color.rgb * vignette, color.a));
+}
+"#;
+
+    /// Film grain shader
+    pub const FILM_GRAIN: &str = r#"
+struct GrainParams {
+    intensity: f32,
+    size: f32,
+    frame: f32,
+    _pad: f32,
+}
+
+@group(0) @binding(0) var<uniform> params: GrainParams;
+@group(0) @binding(1) var input_tex: texture_2d<f32>;
+@group(0) @binding(2) var output_tex: texture_storage_2d<rgba16float, write>;
+
+fn hash(p: vec2<f32>) -> f32 {
+    let p3 = fract(vec3<f32>(p.xyx) * 0.1031);
+    let p3_shifted = p3 + dot(p3, p3.yzx + 33.33);
+    return fract((p3_shifted.x + p3_shifted.y) * p3_shifted.z);
+}
+
+fn grain(uv: vec2<f32>, t: f32) -> f32 {
+    let scale = 1.0 / params.size;
+    let scaled_uv = uv * scale + vec2<f32>(t * 0.1, t * 0.07);
+    return (hash(scaled_uv) - 0.5) * 2.0;
+}
+
+@compute @workgroup_size(8, 8)
+fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+    let dims = textureDimensions(input_tex);
+    if (id.x >= dims.x || id.y >= dims.y) {
+        return;
+    }
+
+    let uv = vec2<f32>(id.xy);
+    let color = textureLoad(input_tex, id.xy, 0);
+
+    // Luminance-based grain response
+    let lum = dot(color.rgb, vec3<f32>(0.2126, 0.7152, 0.0722));
+    let grain_strength = params.intensity * (1.0 - lum * 0.5);
+
+    let noise = grain(uv, params.frame);
+    let graded = color.rgb + vec3<f32>(noise * grain_strength);
+
+    textureStore(output_tex, id.xy, vec4<f32>(max(graded, vec3<f32>(0.0)), color.a));
+}
+"#;
+}
+
+// =============================================================================
+// Unit Tests
+// =============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_config_presets() {
+        let default = GradingConfig::default();
+        assert!(default.enabled);
+        assert_eq!(default.exposure, 0.0);
+        assert_eq!(default.saturation, 1.0);
+
+        let cinematic = GradingConfig::cinematic();
+        assert!(cinematic.vignette_enabled);
+    }
+
+    #[test]
+    fn test_color_wheel_neutral() {
+        let neutral = ColorWheelSettings::neutral();
+        let color = Vec3::new(0.5, 0.3, 0.7);
+        let result = neutral.apply(color);
+
+        // Neutral should not change the color
+        assert!((result.x - color.x).abs() < 0.001);
+        assert!((result.y - color.y).abs() < 0.001);
+        assert!((result.z - color.z).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_tone_curve_linear() {
+        let curve = ToneCurve::linear();
+
+        // Linear curve should not change values
+        assert!((curve.apply(0.0) - 0.0).abs() < 0.01);
+        assert!((curve.apply(0.5) - 0.5).abs() < 0.01);
+        assert!((curve.apply(1.0) - 1.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_tone_curve_s_curve() {
+        let curve = ToneCurve::s_curve(1.0);
+
+        // S-curve should lower shadows and raise highlights
+        assert!(curve.apply(0.25) < 0.25);
+        assert!(curve.apply(0.75) > 0.75);
+        // Midpoint should stay roughly the same
+        assert!((curve.apply(0.5) - 0.5).abs() < 0.1);
+    }
+
+    #[test]
+    fn test_channel_mixer_identity() {
+        let mixer = ChannelMixer::identity();
+        let color = Vec3::new(0.5, 0.3, 0.7);
+        let result = mixer.apply(color);
+
+        assert!((result.x - color.x).abs() < 0.001);
+        assert!((result.y - color.y).abs() < 0.001);
+        assert!((result.z - color.z).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_hsl_roundtrip() {
+        let colors = vec![
+            Vec3::new(1.0, 0.0, 0.0),  // Red
+            Vec3::new(0.0, 1.0, 0.0),  // Green
+            Vec3::new(0.0, 0.0, 1.0),  // Blue
+            Vec3::new(0.5, 0.5, 0.5),  // Gray
+            Vec3::new(0.8, 0.4, 0.2),  // Orange
+        ];
+
+        for color in colors {
+            let hsl = HslProcessor::rgb_to_hsl(color);
+            let back = HslProcessor::hsl_to_rgb(hsl);
+
+            assert!((back.x - color.x).abs() < 0.01);
+            assert!((back.y - color.y).abs() < 0.01);
+            assert!((back.z - color.z).abs() < 0.01);
+        }
+    }
+
+    #[test]
+    fn test_lut_identity() {
+        let lut = Lut3D::identity(8);
+        assert_eq!(lut.size, 8);
+        assert_eq!(lut.data.len(), 8 * 8 * 8);
+
+        // Identity LUT should return input color
+        let color = Vec3::new(0.5, 0.3, 0.7);
+        let result = lut.sample(color);
+
+        assert!((result.x - color.x).abs() < 0.02);
+        assert!((result.y - color.y).abs() < 0.02);
+        assert!((result.z - color.z).abs() < 0.02);
+    }
+
+    #[test]
+    fn test_color_grader_exposure() {
+        let mut config = GradingConfig::default();
+        config.exposure = 1.0;  // +1 EV
+
+        let grader = ColorGrader::new(config);
+        let color = Vec3::new(0.25, 0.25, 0.25);
+        let result = grader.grade(color);
+
+        // +1 EV should double the values
+        assert!((result.x - 0.5).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_color_grader_saturation() {
+        let mut config = GradingConfig::default();
+        config.saturation = 0.0;  // Desaturate
+
+        let grader = ColorGrader::new(config);
+        let color = Vec3::new(1.0, 0.0, 0.0);  // Pure red
+        let result = grader.grade(color);
+
+        // Fully desaturated should be gray
+        assert!((result.x - result.y).abs() < 0.01);
+        assert!((result.y - result.z).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_film_emulation() {
+        let film = FilmEmulation::kodak_2383();
+        let color = Vec3::new(0.5, 0.5, 0.5);
+        let result = film.apply(color);
+
+        // Film emulation should produce valid output
+        assert!(result.x >= 0.0);
+        assert!(result.y >= 0.0);
+        assert!(result.z >= 0.0);
+    }
+}

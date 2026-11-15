@@ -1,0 +1,1700 @@
+// =============================================================================
+// Lumina Ambient Occlusion - Screen-Space Ambient Occlusion Techniques
+// =============================================================================
+// Comprehensive ambient occlusion implementation including SSAO, HBAO+,
+// GTAO, and multi-scale AO for realistic indirect shadowing.
+// Target: Game engines, architectural visualization, real-time rendering
+// =============================================================================
+
+module lumina::ambient_occlusion;
+
+use core::math::{Vec2, Vec3, Vec4, Mat4, lerp, saturate, smoothstep};
+use core::simd::{f32x4, f32x8};
+use lumina::{RenderTarget, Texture2D, TextureFormat, SamplerState};
+
+// =============================================================================
+// Constants and Configuration
+// =============================================================================
+
+/// Maximum number of AO samples
+const MAX_AO_SAMPLES: u32 = 64;
+
+/// Default AO radius
+const DEFAULT_AO_RADIUS: f32 = 0.5;
+
+/// Default AO intensity
+const DEFAULT_AO_INTENSITY: f32 = 1.0;
+
+/// AO algorithm types
+@[repr(u8)]
+enum AoAlgorithm {
+    // Basic techniques
+    Ssao,           // Basic SSAO (Crytek)
+    SsaoPlus,       // Enhanced SSAO with depth-aware blur
+
+    // Horizon-based
+    Hbao,           // Horizon-Based Ambient Occlusion
+    HbaoPlus,       // NVIDIA HBAO+
+
+    // Ground truth
+    Gtao,           // Ground Truth Ambient Occlusion
+    GtaoMultiBounce, // GTAO with multi-bounce approximation
+
+    // Specialized
+    Ssdo,           // Screen-Space Directional Occlusion
+    Alchemy,        // Alchemy AO (Starcraft 2)
+    Scalable,       // Scalable AO (Intel)
+
+    // Multi-scale
+    MultiScaleAo,   // Combined near/far AO
+}
+
+/// AO quality presets
+@[repr(u8)]
+enum AoQuality {
+    Low = 0,        // 4 samples
+    Medium = 1,     // 8 samples
+    High = 2,       // 16 samples
+    Ultra = 3,      // 32 samples
+    Extreme = 4,    // 64 samples
+}
+
+/// Ambient occlusion configuration
+struct AoConfig {
+    enabled: bool,
+    algorithm: AoAlgorithm,
+    quality: AoQuality,
+
+    // Radius and falloff
+    radius: f32,                // World-space AO radius
+    radius_multiplier: f32,     // Additional radius scale
+    falloff_start: f32,         // Distance where falloff begins
+    falloff_end: f32,           // Distance where AO disappears
+
+    // Intensity
+    intensity: f32,             // AO strength
+    power: f32,                 // AO curve power
+    bias: f32,                  // Depth bias to prevent self-occlusion
+
+    // Samples
+    sample_count: u32,          // Number of samples
+    directions: u32,            // Number of directions (HBAO)
+    steps: u32,                 // Steps per direction (HBAO)
+
+    // Quality options
+    half_resolution: bool,      // Compute at half res
+    temporal_filter: bool,      // Use temporal accumulation
+    bilateral_blur: bool,       // Edge-preserving blur
+    blur_sharpness: f32,        // Blur edge sensitivity
+
+    // Advanced
+    thickness_heuristic: f32,   // Thickness assumption
+    thin_occluder_compensation: f32,
+    detail_ao: bool,            // High-frequency detail AO
+}
+
+impl AoConfig {
+    /// Default high-quality configuration
+    pub fn default() -> Self {
+        Self {
+            enabled: true,
+            algorithm: AoAlgorithm::Gtao,
+            quality: AoQuality::High,
+            radius: 0.5,
+            radius_multiplier: 1.0,
+            falloff_start: 50.0,
+            falloff_end: 300.0,
+            intensity: 1.0,
+            power: 1.5,
+            bias: 0.03,
+            sample_count: 16,
+            directions: 8,
+            steps: 4,
+            half_resolution: false,
+            temporal_filter: true,
+            bilateral_blur: true,
+            blur_sharpness: 8.0,
+            thickness_heuristic: 1.0,
+            thin_occluder_compensation: 0.5,
+            detail_ao: false,
+        }
+    }
+
+    /// Performance-oriented preset
+    pub fn performance() -> Self {
+        Self {
+            enabled: true,
+            algorithm: AoAlgorithm::Ssao,
+            quality: AoQuality::Medium,
+            radius: 0.4,
+            radius_multiplier: 1.0,
+            falloff_start: 30.0,
+            falloff_end: 150.0,
+            intensity: 1.2,
+            power: 2.0,
+            bias: 0.05,
+            sample_count: 8,
+            directions: 4,
+            steps: 3,
+            half_resolution: true,
+            temporal_filter: true,
+            bilateral_blur: true,
+            blur_sharpness: 4.0,
+            thickness_heuristic: 0.8,
+            thin_occluder_compensation: 0.3,
+            detail_ao: false,
+        }
+    }
+
+    /// Maximum quality preset
+    pub fn ultra() -> Self {
+        Self {
+            enabled: true,
+            algorithm: AoAlgorithm::GtaoMultiBounce,
+            quality: AoQuality::Ultra,
+            radius: 0.6,
+            radius_multiplier: 1.0,
+            falloff_start: 100.0,
+            falloff_end: 500.0,
+            intensity: 1.0,
+            power: 1.2,
+            bias: 0.02,
+            sample_count: 32,
+            directions: 12,
+            steps: 6,
+            half_resolution: false,
+            temporal_filter: true,
+            bilateral_blur: true,
+            blur_sharpness: 16.0,
+            thickness_heuristic: 1.2,
+            thin_occluder_compensation: 0.7,
+            detail_ao: true,
+        }
+    }
+
+    /// Get sample count from quality
+    pub fn samples_for_quality(quality: AoQuality) -> u32 {
+        match quality {
+            AoQuality::Low => 4,
+            AoQuality::Medium => 8,
+            AoQuality::High => 16,
+            AoQuality::Ultra => 32,
+            AoQuality::Extreme => 64,
+        }
+    }
+}
+
+// =============================================================================
+// Sample Generation
+// =============================================================================
+
+/// Hemisphere sample generator
+struct HemisphereSampler {
+    samples: Vec<Vec3>,
+    noise_texture: Vec<Vec3>,
+    noise_size: u32,
+}
+
+impl HemisphereSampler {
+    /// Create sampler with given sample count
+    pub fn new(sample_count: u32, noise_size: u32) -> Self {
+        let mut sampler = Self {
+            samples: Vec::with_capacity(sample_count as usize),
+            noise_texture: Vec::with_capacity((noise_size * noise_size) as usize),
+            noise_size,
+        };
+
+        sampler.generate_samples(sample_count);
+        sampler.generate_noise();
+        sampler
+    }
+
+    /// Generate cosine-weighted hemisphere samples
+    fn generate_samples(&mut self, count: u32) {
+        self.samples.clear();
+
+        for i in 0..count {
+            // Halton sequence for quasi-random distribution
+            let xi1 = Self::halton(i + 1, 2);
+            let xi2 = Self::halton(i + 1, 3);
+
+            // Cosine-weighted hemisphere
+            let phi = 2.0 * std::f32::consts::PI * xi1;
+            let cos_theta = (1.0 - xi2).sqrt();
+            let sin_theta = xi2.sqrt();
+
+            let sample = Vec3::new(
+                sin_theta * phi.cos(),
+                sin_theta * phi.sin(),
+                cos_theta
+            );
+
+            // Scale to concentrate samples near origin
+            let scale = (i as f32 + 1.0) / count as f32;
+            let scale = lerp(0.1, 1.0, scale * scale);
+
+            self.samples.push(sample * scale);
+        }
+    }
+
+    /// Generate random rotation vectors for noise
+    fn generate_noise(&mut self) {
+        self.noise_texture.clear();
+
+        for i in 0..(self.noise_size * self.noise_size) {
+            let angle = Self::halton(i + 1, 2) * 2.0 * std::f32::consts::PI;
+            self.noise_texture.push(Vec3::new(
+                angle.cos(),
+                angle.sin(),
+                0.0
+            ));
+        }
+    }
+
+    /// Halton sequence for quasi-random sampling
+    fn halton(index: u32, base: u32) -> f32 {
+        let mut f = 1.0f32;
+        let mut r = 0.0f32;
+        let mut i = index;
+
+        while i > 0 {
+            f = f / base as f32;
+            r = r + f * (i % base) as f32;
+            i = i / base;
+        }
+
+        r
+    }
+
+    /// Get sample rotated by noise
+    pub fn get_rotated_sample(&self, sample_idx: usize, pixel_x: u32, pixel_y: u32) -> Vec3 {
+        let noise_idx = ((pixel_y % self.noise_size) * self.noise_size +
+                        (pixel_x % self.noise_size)) as usize;
+        let noise = self.noise_texture[noise_idx];
+        let sample = self.samples[sample_idx];
+
+        // Rotate sample around Z axis by noise angle
+        Vec3::new(
+            sample.x * noise.x - sample.y * noise.y,
+            sample.x * noise.y + sample.y * noise.x,
+            sample.z
+        )
+    }
+}
+
+// =============================================================================
+// Basic SSAO (Crytek-style)
+// =============================================================================
+
+/// Screen-Space Ambient Occlusion (original Crytek method)
+struct Ssao {
+    sampler: HemisphereSampler,
+    config: AoConfig,
+}
+
+impl Ssao {
+    pub fn new(config: AoConfig) -> Self {
+        Self {
+            sampler: HemisphereSampler::new(config.sample_count, 4),
+            config,
+        }
+    }
+
+    /// Reconstruct view-space position from depth
+    fn reconstruct_position(&self, uv: Vec2, depth: f32, inv_proj: &Mat4) -> Vec3 {
+        let ndc = Vec4::new(
+            uv.x * 2.0 - 1.0,
+            1.0 - uv.y * 2.0,
+            depth,
+            1.0
+        );
+
+        let view_pos = *inv_proj * ndc;
+        Vec3::new(
+            view_pos.x / view_pos.w,
+            view_pos.y / view_pos.w,
+            view_pos.z / view_pos.w
+        )
+    }
+
+    /// Compute normal from depth
+    fn compute_normal(&self, position: Vec3, positions: &[Vec3], x: u32, y: u32, width: u32) -> Vec3 {
+        let idx = (y * width + x) as usize;
+        let idx_right = (y * width + (x + 1).min(width - 1)) as usize;
+        let idx_up = (((y + 1).min((positions.len() as u32 / width) - 1)) * width + x) as usize;
+
+        let dx = positions[idx_right] - position;
+        let dy = positions[idx_up] - position;
+
+        dy.cross(dx).normalize()
+    }
+
+    /// Calculate occlusion at a point
+    pub fn calculate_occlusion(
+        &self,
+        position: Vec3,
+        normal: Vec3,
+        depth_buffer: &[f32],
+        proj: &Mat4,
+        width: u32,
+        height: u32,
+        pixel_x: u32,
+        pixel_y: u32
+    ) -> f32 {
+        let mut occlusion = 0.0;
+        let radius = self.config.radius * self.config.radius_multiplier;
+
+        for i in 0..self.config.sample_count as usize {
+            // Get rotated sample
+            let sample = self.sampler.get_rotated_sample(i, pixel_x, pixel_y);
+
+            // Orient sample along normal
+            let tangent = if normal.z.abs() < 0.999 {
+                Vec3::new(0.0, 0.0, 1.0).cross(normal).normalize()
+            } else {
+                Vec3::new(1.0, 0.0, 0.0).cross(normal).normalize()
+            };
+            let bitangent = normal.cross(tangent);
+
+            let oriented_sample = Vec3::new(
+                sample.x * tangent.x + sample.y * bitangent.x + sample.z * normal.x,
+                sample.x * tangent.y + sample.y * bitangent.y + sample.z * normal.y,
+                sample.x * tangent.z + sample.y * bitangent.z + sample.z * normal.z
+            ) * radius;
+
+            // Sample position in view space
+            let sample_pos = position + oriented_sample;
+
+            // Project to screen space
+            let clip = *proj * Vec4::from_vec3(sample_pos, 1.0);
+            let ndc = Vec2::new(clip.x / clip.w, clip.y / clip.w);
+            let sample_uv = Vec2::new(
+                (ndc.x + 1.0) * 0.5,
+                (1.0 - ndc.y) * 0.5
+            );
+
+            // Check bounds
+            if sample_uv.x < 0.0 || sample_uv.x > 1.0 ||
+               sample_uv.y < 0.0 || sample_uv.y > 1.0 {
+                continue;
+            }
+
+            // Sample depth buffer
+            let sample_x = (sample_uv.x * width as f32) as u32;
+            let sample_y = (sample_uv.y * height as f32) as u32;
+            let sample_depth = depth_buffer[(sample_y * width + sample_x) as usize];
+
+            // Convert to linear depth for comparison
+            let sample_z = sample_pos.z;
+            let buffer_z = self.linear_depth(sample_depth, 0.1, 1000.0);
+
+            // Range check
+            let range_check = smoothstep(0.0, 1.0,
+                radius / (sample_z - buffer_z).abs());
+
+            // Occlusion contribution
+            if buffer_z < sample_z - self.config.bias {
+                occlusion += range_check;
+            }
+        }
+
+        1.0 - (occlusion / self.config.sample_count as f32) * self.config.intensity
+    }
+
+    /// Convert depth buffer value to linear depth
+    fn linear_depth(&self, depth: f32, near: f32, far: f32) -> f32 {
+        let z_ndc = depth * 2.0 - 1.0;
+        (2.0 * near * far) / (far + near - z_ndc * (far - near))
+    }
+
+    /// Apply SSAO to entire image
+    pub fn apply(
+        &self,
+        depth_buffer: &[f32],
+        normal_buffer: Option<&[Vec3]>,
+        proj: &Mat4,
+        inv_proj: &Mat4,
+        width: u32,
+        height: u32
+    ) -> Vec<f32> {
+        let mut ao_buffer = vec![1.0f32; (width * height) as usize];
+
+        // Reconstruct positions
+        let positions: Vec<Vec3> = (0..height).flat_map(|y| {
+            (0..width).map(move |x| {
+                let uv = Vec2::new(
+                    (x as f32 + 0.5) / width as f32,
+                    (y as f32 + 0.5) / height as f32
+                );
+                let depth = depth_buffer[(y * width + x) as usize];
+                self.reconstruct_position(uv, depth, inv_proj)
+            })
+        }).collect();
+
+        for y in 0..height {
+            for x in 0..width {
+                let idx = (y * width + x) as usize;
+                let position = positions[idx];
+
+                // Use provided normals or compute from depth
+                let normal = if let Some(normals) = normal_buffer {
+                    normals[idx]
+                } else {
+                    self.compute_normal(position, &positions, x, y, width)
+                };
+
+                ao_buffer[idx] = self.calculate_occlusion(
+                    position, normal, depth_buffer,
+                    proj, width, height, x, y
+                );
+            }
+        }
+
+        ao_buffer
+    }
+}
+
+// =============================================================================
+// HBAO - Horizon-Based Ambient Occlusion
+// =============================================================================
+
+/// Horizon-Based Ambient Occlusion
+struct Hbao {
+    config: AoConfig,
+    direction_jitter: Vec<f32>,
+    step_jitter: Vec<f32>,
+}
+
+impl Hbao {
+    pub fn new(config: AoConfig) -> Self {
+        let mut hbao = Self {
+            config,
+            direction_jitter: Vec::new(),
+            step_jitter: Vec::new(),
+        };
+        hbao.generate_jitter(16);
+        hbao
+    }
+
+    /// Generate jitter values for noise
+    fn generate_jitter(&mut self, size: u32) {
+        self.direction_jitter.clear();
+        self.step_jitter.clear();
+
+        for i in 0..(size * size) {
+            // Use Halton sequence for blue-noise-like distribution
+            self.direction_jitter.push(HemisphereSampler::halton(i + 1, 2));
+            self.step_jitter.push(HemisphereSampler::halton(i + 1, 3));
+        }
+    }
+
+    /// Calculate horizon angle in a direction
+    fn trace_horizon(
+        &self,
+        origin: Vec3,
+        direction: Vec2,
+        positions: &[Vec3],
+        width: u32,
+        height: u32,
+        start_x: u32,
+        start_y: u32
+    ) -> f32 {
+        let mut max_horizon = -std::f32::consts::PI / 2.0;
+        let radius = self.config.radius * self.config.radius_multiplier;
+        let step_size = radius / self.config.steps as f32;
+
+        for step in 1..=self.config.steps {
+            let t = step as f32 * step_size;
+            let sample_x = (start_x as f32 + direction.x * t * width as f32) as i32;
+            let sample_y = (start_y as f32 + direction.y * t * height as f32) as i32;
+
+            if sample_x < 0 || sample_x >= width as i32 ||
+               sample_y < 0 || sample_y >= height as i32 {
+                continue;
+            }
+
+            let sample_idx = (sample_y as u32 * width + sample_x as u32) as usize;
+            let sample_pos = positions[sample_idx];
+
+            // Calculate horizon angle
+            let diff = sample_pos - origin;
+            let horiz_dist = (diff.x * diff.x + diff.y * diff.y).sqrt();
+            let horizon_angle = (diff.z / horiz_dist.max(0.0001)).atan();
+
+            // Apply falloff
+            let falloff = 1.0 - (t / radius).powf(2.0);
+            let weighted_angle = horizon_angle * falloff;
+
+            max_horizon = max_horizon.max(weighted_angle);
+        }
+
+        max_horizon
+    }
+
+    /// Calculate HBAO at a point
+    pub fn calculate_occlusion(
+        &self,
+        position: Vec3,
+        normal: Vec3,
+        positions: &[Vec3],
+        width: u32,
+        height: u32,
+        pixel_x: u32,
+        pixel_y: u32
+    ) -> f32 {
+        let jitter_idx = ((pixel_y % 16) * 16 + (pixel_x % 16)) as usize;
+        let dir_jitter = self.direction_jitter[jitter_idx] * std::f32::consts::PI / self.config.directions as f32;
+
+        let mut occlusion = 0.0;
+        let tangent_angle = (normal.z / (normal.x * normal.x + normal.y * normal.y).sqrt().max(0.0001)).atan();
+
+        for dir in 0..self.config.directions {
+            let angle = (dir as f32 / self.config.directions as f32) * std::f32::consts::PI * 2.0 + dir_jitter;
+            let direction = Vec2::new(angle.cos(), angle.sin());
+
+            // Trace horizon in positive and negative directions
+            let horizon_pos = self.trace_horizon(
+                position, direction, positions, width, height, pixel_x, pixel_y
+            );
+            let horizon_neg = self.trace_horizon(
+                position, Vec2::new(-direction.x, -direction.y),
+                positions, width, height, pixel_x, pixel_y
+            );
+
+            // Integrate occlusion
+            let h_pos = horizon_pos.max(-tangent_angle);
+            let h_neg = horizon_neg.max(-tangent_angle);
+
+            // Horizon-based AO formula
+            let ao = (h_pos.sin() - tangent_angle.sin()) + (h_neg.sin() - tangent_angle.sin());
+            occlusion += ao.max(0.0);
+        }
+
+        let result = 1.0 - (occlusion / (self.config.directions as f32 * 2.0)) * self.config.intensity;
+        result.powf(self.config.power)
+    }
+
+    /// Apply HBAO to entire image
+    pub fn apply(
+        &self,
+        positions: &[Vec3],
+        normals: &[Vec3],
+        width: u32,
+        height: u32
+    ) -> Vec<f32> {
+        let mut ao_buffer = vec![1.0f32; (width * height) as usize];
+
+        for y in 0..height {
+            for x in 0..width {
+                let idx = (y * width + x) as usize;
+                ao_buffer[idx] = self.calculate_occlusion(
+                    positions[idx], normals[idx],
+                    positions, width, height, x, y
+                );
+            }
+        }
+
+        ao_buffer
+    }
+}
+
+// =============================================================================
+// GTAO - Ground Truth Ambient Occlusion
+// =============================================================================
+
+/// Ground Truth Ambient Occlusion (Jimenez et al.)
+struct Gtao {
+    config: AoConfig,
+    spatial_noise: Vec<f32>,
+    temporal_offset: f32,
+}
+
+impl Gtao {
+    pub fn new(config: AoConfig) -> Self {
+        let mut gtao = Self {
+            config,
+            spatial_noise: Vec::new(),
+            temporal_offset: 0.0,
+        };
+        gtao.generate_noise(4);
+        gtao
+    }
+
+    /// Generate spatial noise pattern
+    fn generate_noise(&mut self, size: u32) {
+        self.spatial_noise.clear();
+        for i in 0..(size * size) {
+            self.spatial_noise.push(HemisphereSampler::halton(i + 1, 2));
+        }
+    }
+
+    /// Update temporal offset for TAA
+    pub fn advance_frame(&mut self, frame: u32) {
+        self.temporal_offset = (frame % 4) as f32 * 0.25;
+    }
+
+    /// Integrate horizon with multi-bounce approximation
+    fn integrate_horizon(&self, horizon_cos: f32, view_cos: f32) -> f32 {
+        let gamma = horizon_cos.acos() - view_cos.acos();
+        let cos_gamma = gamma.cos();
+        let sin_gamma_sq = 1.0 - cos_gamma * cos_gamma;
+
+        // Ground truth visibility integral
+        0.25 * (-cos_gamma * 2.0 * sin_gamma_sq + std::f32::consts::FRAC_PI_2 - gamma + gamma.sin() * cos_gamma)
+    }
+
+    /// Multi-bounce approximation
+    fn multi_bounce(&self, ao: f32, albedo: Vec3) -> Vec3 {
+        let a = 2.0404 * albedo - Vec3::splat(0.3324);
+        let b = -4.7951 * albedo + Vec3::splat(0.6417);
+        let c = 2.7552 * albedo + Vec3::splat(0.6903);
+
+        let ao2 = ao * ao;
+        let ao3 = ao2 * ao;
+
+        a * ao3 + b * ao2 + c * ao
+    }
+
+    /// Calculate GTAO at a point
+    pub fn calculate_occlusion(
+        &self,
+        position: Vec3,
+        normal: Vec3,
+        view_dir: Vec3,
+        positions: &[Vec3],
+        width: u32,
+        height: u32,
+        pixel_x: u32,
+        pixel_y: u32
+    ) -> f32 {
+        let noise_idx = ((pixel_y % 4) * 4 + (pixel_x % 4)) as usize;
+        let noise = self.spatial_noise[noise_idx];
+
+        let radius = self.config.radius * self.config.radius_multiplier;
+        let slice_count = self.config.directions;
+        let steps = self.config.steps;
+
+        let mut visibility = 0.0;
+
+        // For each slice
+        for slice in 0..slice_count {
+            let phi = (std::f32::consts::PI / slice_count as f32)
+                * (slice as f32 + noise + self.temporal_offset);
+
+            let slice_dir = Vec2::new(phi.cos(), phi.sin());
+
+            // Find horizon in both directions
+            let mut h1 = -1.0f32; // cosine of horizon angle (direction 1)
+            let mut h2 = -1.0f32; // cosine of horizon angle (direction 2)
+
+            for step in 1..=steps {
+                let t = step as f32 / steps as f32;
+                let sample_radius = radius * t;
+
+                // Direction 1
+                let offset1 = Vec2::new(
+                    slice_dir.x * sample_radius,
+                    slice_dir.y * sample_radius
+                );
+
+                let sx1 = (pixel_x as f32 + offset1.x * width as f32) as i32;
+                let sy1 = (pixel_y as f32 + offset1.y * height as f32) as i32;
+
+                if sx1 >= 0 && sx1 < width as i32 && sy1 >= 0 && sy1 < height as i32 {
+                    let sample_pos = positions[(sy1 as u32 * width + sx1 as u32) as usize];
+                    let diff = sample_pos - position;
+                    let horizon_vec = diff.normalize();
+                    let horizon_cos = horizon_vec.dot(view_dir);
+                    h1 = h1.max(horizon_cos);
+                }
+
+                // Direction 2
+                let offset2 = Vec2::new(
+                    -slice_dir.x * sample_radius,
+                    -slice_dir.y * sample_radius
+                );
+
+                let sx2 = (pixel_x as f32 + offset2.x * width as f32) as i32;
+                let sy2 = (pixel_y as f32 + offset2.y * height as f32) as i32;
+
+                if sx2 >= 0 && sx2 < width as i32 && sy2 >= 0 && sy2 < height as i32 {
+                    let sample_pos = positions[(sy2 as u32 * width + sx2 as u32) as usize];
+                    let diff = sample_pos - position;
+                    let horizon_vec = diff.normalize();
+                    let horizon_cos = horizon_vec.dot(view_dir);
+                    h2 = h2.max(horizon_cos);
+                }
+            }
+
+            // Project normal to slice plane
+            let normal_cos = normal.dot(view_dir);
+
+            // Integrate visibility for this slice
+            let vis1 = self.integrate_horizon(h1, normal_cos);
+            let vis2 = self.integrate_horizon(h2, normal_cos);
+
+            visibility += vis1 + vis2;
+        }
+
+        let ao = visibility / (slice_count as f32 * 2.0);
+        (ao * self.config.intensity).powf(self.config.power).clamp(0.0, 1.0)
+    }
+}
+
+// =============================================================================
+// Alchemy AO
+// =============================================================================
+
+/// Alchemy Ambient Occlusion (Starcraft 2 style)
+struct AlchemyAo {
+    config: AoConfig,
+    samples: Vec<Vec3>,
+}
+
+impl AlchemyAo {
+    pub fn new(config: AoConfig) -> Self {
+        let mut alchemy = Self {
+            config,
+            samples: Vec::new(),
+        };
+        alchemy.generate_samples();
+        alchemy
+    }
+
+    /// Generate sphere samples
+    fn generate_samples(&mut self) {
+        self.samples.clear();
+        let sample_count = self.config.sample_count;
+
+        for i in 0..sample_count {
+            let xi1 = HemisphereSampler::halton(i + 1, 2);
+            let xi2 = HemisphereSampler::halton(i + 1, 3);
+
+            // Uniform sphere distribution
+            let z = xi1 * 2.0 - 1.0;
+            let r = (1.0 - z * z).sqrt();
+            let phi = xi2 * 2.0 * std::f32::consts::PI;
+
+            let sample = Vec3::new(r * phi.cos(), r * phi.sin(), z);
+
+            // Exponential falloff for sample distance
+            let scale = (i as f32 + 1.0) / sample_count as f32;
+            let scale = lerp(0.1, 1.0, scale);
+
+            self.samples.push(sample * scale);
+        }
+    }
+
+    /// Calculate Alchemy AO
+    pub fn calculate_occlusion(
+        &self,
+        position: Vec3,
+        normal: Vec3,
+        depth_buffer: &[f32],
+        proj: &Mat4,
+        width: u32,
+        height: u32
+    ) -> f32 {
+        let radius = self.config.radius * self.config.radius_multiplier;
+        let mut occlusion = 0.0;
+
+        // Screen-space radius
+        let screen_radius = radius * proj.m[0][0] / position.z.abs();
+
+        for sample in &self.samples {
+            // Flip sample if pointing away from normal
+            let flip = if sample.dot(normal) < 0.0 { -1.0 } else { 1.0 };
+            let oriented_sample = *sample * flip * radius;
+
+            let sample_pos = position + oriented_sample;
+
+            // Project to screen
+            let clip = *proj * Vec4::from_vec3(sample_pos, 1.0);
+            if clip.w <= 0.0 {
+                continue;
+            }
+
+            let ndc = Vec2::new(clip.x / clip.w, clip.y / clip.w);
+            let uv = Vec2::new((ndc.x + 1.0) * 0.5, (1.0 - ndc.y) * 0.5);
+
+            if uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0 {
+                continue;
+            }
+
+            let sx = (uv.x * width as f32) as u32;
+            let sy = (uv.y * height as f32) as u32;
+            let sample_depth = depth_buffer[(sy * width + sx) as usize];
+
+            // Alchemy uses screen-space depth comparison
+            let depth_diff = (clip.z / clip.w) - sample_depth;
+
+            if depth_diff > self.config.bias && depth_diff < screen_radius {
+                // Weight by normal alignment and distance
+                let weight = sample.dot(normal).max(0.0);
+                let dist_weight = 1.0 - (depth_diff / screen_radius);
+                occlusion += weight * dist_weight;
+            }
+        }
+
+        let ao = 1.0 - (occlusion / self.config.sample_count as f32) * self.config.intensity;
+        ao.powf(self.config.power).clamp(0.0, 1.0)
+    }
+}
+
+// =============================================================================
+// Bilateral Blur
+// =============================================================================
+
+/// Edge-preserving bilateral blur for AO
+struct BilateralBlur {
+    kernel_radius: u32,
+    spatial_sigma: f32,
+    depth_sigma: f32,
+    normal_sigma: f32,
+}
+
+impl BilateralBlur {
+    pub fn new(kernel_radius: u32, sharpness: f32) -> Self {
+        Self {
+            kernel_radius,
+            spatial_sigma: kernel_radius as f32 / 2.0,
+            depth_sigma: 0.1 / sharpness,
+            normal_sigma: 0.5,
+        }
+    }
+
+    /// Gaussian weight
+    fn gaussian(&self, x: f32, sigma: f32) -> f32 {
+        (-x * x / (2.0 * sigma * sigma)).exp()
+    }
+
+    /// Apply bilateral blur
+    pub fn apply(
+        &self,
+        ao: &[f32],
+        depth: &[f32],
+        normals: Option<&[Vec3]>,
+        width: u32,
+        height: u32
+    ) -> Vec<f32> {
+        let mut result = vec![0.0f32; ao.len()];
+
+        for y in 0..height {
+            for x in 0..width {
+                let idx = (y * width + x) as usize;
+                let center_ao = ao[idx];
+                let center_depth = depth[idx];
+                let center_normal = normals.map(|n| n[idx]);
+
+                let mut sum = 0.0;
+                let mut weight_sum = 0.0;
+
+                for ky in -(self.kernel_radius as i32)..=(self.kernel_radius as i32) {
+                    for kx in -(self.kernel_radius as i32)..=(self.kernel_radius as i32) {
+                        let sx = (x as i32 + kx).max(0).min(width as i32 - 1) as u32;
+                        let sy = (y as i32 + ky).max(0).min(height as i32 - 1) as u32;
+                        let sample_idx = (sy * width + sx) as usize;
+
+                        // Spatial weight
+                        let spatial_dist = ((kx * kx + ky * ky) as f32).sqrt();
+                        let spatial_weight = self.gaussian(spatial_dist, self.spatial_sigma);
+
+                        // Depth weight
+                        let depth_diff = (depth[sample_idx] - center_depth).abs();
+                        let depth_weight = self.gaussian(depth_diff, self.depth_sigma);
+
+                        // Normal weight
+                        let normal_weight = if let (Some(ns), Some(cn)) = (normals, center_normal) {
+                            let dot = ns[sample_idx].dot(cn).max(0.0);
+                            self.gaussian(1.0 - dot, self.normal_sigma)
+                        } else {
+                            1.0
+                        };
+
+                        let weight = spatial_weight * depth_weight * normal_weight;
+                        sum += ao[sample_idx] * weight;
+                        weight_sum += weight;
+                    }
+                }
+
+                result[idx] = if weight_sum > 0.0 { sum / weight_sum } else { center_ao };
+            }
+        }
+
+        result
+    }
+
+    /// Separable blur pass (horizontal)
+    pub fn blur_horizontal(
+        &self,
+        ao: &[f32],
+        depth: &[f32],
+        width: u32,
+        height: u32
+    ) -> Vec<f32> {
+        let mut result = vec![0.0f32; ao.len()];
+
+        for y in 0..height {
+            for x in 0..width {
+                let idx = (y * width + x) as usize;
+                let center_depth = depth[idx];
+
+                let mut sum = 0.0;
+                let mut weight_sum = 0.0;
+
+                for kx in -(self.kernel_radius as i32)..=(self.kernel_radius as i32) {
+                    let sx = (x as i32 + kx).max(0).min(width as i32 - 1) as u32;
+                    let sample_idx = (y * width + sx) as usize;
+
+                    let spatial_weight = self.gaussian(kx.abs() as f32, self.spatial_sigma);
+                    let depth_diff = (depth[sample_idx] - center_depth).abs();
+                    let depth_weight = self.gaussian(depth_diff, self.depth_sigma);
+
+                    let weight = spatial_weight * depth_weight;
+                    sum += ao[sample_idx] * weight;
+                    weight_sum += weight;
+                }
+
+                result[idx] = if weight_sum > 0.0 { sum / weight_sum } else { ao[idx] };
+            }
+        }
+
+        result
+    }
+
+    /// Separable blur pass (vertical)
+    pub fn blur_vertical(
+        &self,
+        ao: &[f32],
+        depth: &[f32],
+        width: u32,
+        height: u32
+    ) -> Vec<f32> {
+        let mut result = vec![0.0f32; ao.len()];
+
+        for y in 0..height {
+            for x in 0..width {
+                let idx = (y * width + x) as usize;
+                let center_depth = depth[idx];
+
+                let mut sum = 0.0;
+                let mut weight_sum = 0.0;
+
+                for ky in -(self.kernel_radius as i32)..=(self.kernel_radius as i32) {
+                    let sy = (y as i32 + ky).max(0).min(height as i32 - 1) as u32;
+                    let sample_idx = (sy * width + x) as usize;
+
+                    let spatial_weight = self.gaussian(ky.abs() as f32, self.spatial_sigma);
+                    let depth_diff = (depth[sample_idx] - center_depth).abs();
+                    let depth_weight = self.gaussian(depth_diff, self.depth_sigma);
+
+                    let weight = spatial_weight * depth_weight;
+                    sum += ao[sample_idx] * weight;
+                    weight_sum += weight;
+                }
+
+                result[idx] = if weight_sum > 0.0 { sum / weight_sum } else { ao[idx] };
+            }
+        }
+
+        result
+    }
+}
+
+// =============================================================================
+// Temporal Filter
+// =============================================================================
+
+/// Temporal accumulation filter for AO
+struct TemporalFilter {
+    history: Vec<f32>,
+    blend_factor: f32,
+    motion_threshold: f32,
+}
+
+impl TemporalFilter {
+    pub fn new(width: u32, height: u32) -> Self {
+        Self {
+            history: vec![1.0f32; (width * height) as usize],
+            blend_factor: 0.1,
+            motion_threshold: 0.01,
+        }
+    }
+
+    /// Apply temporal filtering
+    pub fn apply(
+        &mut self,
+        current_ao: &[f32],
+        velocity: Option<&[Vec2]>,
+        width: u32,
+        height: u32
+    ) -> Vec<f32> {
+        let mut result = vec![0.0f32; current_ao.len()];
+
+        for y in 0..height {
+            for x in 0..width {
+                let idx = (y * width + x) as usize;
+
+                // Determine blend factor based on motion
+                let blend = if let Some(vel) = velocity {
+                    let motion = vel[idx].length();
+                    if motion > self.motion_threshold {
+                        // More motion = less history
+                        lerp(self.blend_factor, 1.0, saturate(motion / 0.1))
+                    } else {
+                        self.blend_factor
+                    }
+                } else {
+                    self.blend_factor
+                };
+
+                // Blend with history
+                result[idx] = lerp(self.history[idx], current_ao[idx], blend);
+            }
+        }
+
+        // Update history
+        self.history = result.clone();
+
+        result
+    }
+
+    /// Reset history
+    pub fn reset(&mut self) {
+        for h in &mut self.history {
+            *h = 1.0;
+        }
+    }
+}
+
+// =============================================================================
+// AO Renderer
+// =============================================================================
+
+/// Main AO renderer that combines all techniques
+struct AoRenderer {
+    config: AoConfig,
+    ssao: Option<Ssao>,
+    hbao: Option<Hbao>,
+    gtao: Option<Gtao>,
+    alchemy: Option<AlchemyAo>,
+    bilateral_blur: BilateralBlur,
+    temporal_filter: TemporalFilter,
+    frame_count: u32,
+}
+
+impl AoRenderer {
+    /// Create new AO renderer
+    pub fn new(width: u32, height: u32, config: AoConfig) -> Self {
+        let mut renderer = Self {
+            ssao: None,
+            hbao: None,
+            gtao: None,
+            alchemy: None,
+            bilateral_blur: BilateralBlur::new(4, config.blur_sharpness),
+            temporal_filter: TemporalFilter::new(width, height),
+            frame_count: 0,
+            config,
+        };
+
+        renderer.initialize_algorithm();
+        renderer
+    }
+
+    /// Initialize selected algorithm
+    fn initialize_algorithm(&mut self) {
+        match self.config.algorithm {
+            AoAlgorithm::Ssao | AoAlgorithm::SsaoPlus => {
+                self.ssao = Some(Ssao::new(self.config.clone()));
+            },
+            AoAlgorithm::Hbao | AoAlgorithm::HbaoPlus => {
+                self.hbao = Some(Hbao::new(self.config.clone()));
+            },
+            AoAlgorithm::Gtao | AoAlgorithm::GtaoMultiBounce => {
+                self.gtao = Some(Gtao::new(self.config.clone()));
+            },
+            AoAlgorithm::Alchemy => {
+                self.alchemy = Some(AlchemyAo::new(self.config.clone()));
+            },
+            _ => {
+                self.gtao = Some(Gtao::new(self.config.clone()));
+            },
+        }
+    }
+
+    /// Set configuration
+    pub fn set_config(&mut self, config: AoConfig) {
+        let algo_changed = !matches!(
+            (&self.config.algorithm, &config.algorithm),
+            (a, b) if std::mem::discriminant(a) == std::mem::discriminant(b)
+        );
+
+        self.config = config;
+        self.bilateral_blur = BilateralBlur::new(4, self.config.blur_sharpness);
+
+        if algo_changed {
+            self.ssao = None;
+            self.hbao = None;
+            self.gtao = None;
+            self.alchemy = None;
+            self.initialize_algorithm();
+        }
+    }
+
+    /// Render AO
+    pub fn render(
+        &mut self,
+        depth: &[f32],
+        normals: Option<&[Vec3]>,
+        positions: &[Vec3],
+        velocity: Option<&[Vec2]>,
+        proj: &Mat4,
+        inv_proj: &Mat4,
+        width: u32,
+        height: u32
+    ) -> Vec<f32> {
+        if !self.config.enabled {
+            return vec![1.0f32; (width * height) as usize];
+        }
+
+        // Calculate raw AO
+        let raw_ao = match self.config.algorithm {
+            AoAlgorithm::Ssao | AoAlgorithm::SsaoPlus => {
+                if let Some(ref ssao) = self.ssao {
+                    ssao.apply(depth, normals, proj, inv_proj, width, height)
+                } else {
+                    vec![1.0f32; (width * height) as usize]
+                }
+            },
+            AoAlgorithm::Hbao | AoAlgorithm::HbaoPlus => {
+                if let Some(ref hbao) = self.hbao {
+                    let normals = normals.unwrap_or(&vec![Vec3::Z; positions.len()]);
+                    hbao.apply(positions, normals, width, height)
+                } else {
+                    vec![1.0f32; (width * height) as usize]
+                }
+            },
+            AoAlgorithm::Gtao | AoAlgorithm::GtaoMultiBounce => {
+                if let Some(ref gtao) = self.gtao {
+                    let normals = normals.unwrap_or(&vec![Vec3::Z; positions.len()]);
+                    let mut ao = vec![1.0f32; (width * height) as usize];
+
+                    for y in 0..height {
+                        for x in 0..width {
+                            let idx = (y * width + x) as usize;
+                            ao[idx] = gtao.calculate_occlusion(
+                                positions[idx],
+                                normals[idx],
+                                Vec3::new(0.0, 0.0, -1.0), // View direction (simplified)
+                                positions,
+                                width, height, x, y
+                            );
+                        }
+                    }
+
+                    ao
+                } else {
+                    vec![1.0f32; (width * height) as usize]
+                }
+            },
+            AoAlgorithm::Alchemy => {
+                if let Some(ref alchemy) = self.alchemy {
+                    let normals = normals.unwrap_or(&vec![Vec3::Z; positions.len()]);
+                    let mut ao = vec![1.0f32; (width * height) as usize];
+
+                    for y in 0..height {
+                        for x in 0..width {
+                            let idx = (y * width + x) as usize;
+                            ao[idx] = alchemy.calculate_occlusion(
+                                positions[idx],
+                                normals[idx],
+                                depth, proj, width, height
+                            );
+                        }
+                    }
+
+                    ao
+                } else {
+                    vec![1.0f32; (width * height) as usize]
+                }
+            },
+            _ => {
+                vec![1.0f32; (width * height) as usize]
+            },
+        };
+
+        // Apply bilateral blur
+        let blurred = if self.config.bilateral_blur {
+            let h_blur = self.bilateral_blur.blur_horizontal(&raw_ao, depth, width, height);
+            self.bilateral_blur.blur_vertical(&h_blur, depth, width, height)
+        } else {
+            raw_ao
+        };
+
+        // Apply temporal filter
+        let result = if self.config.temporal_filter {
+            self.temporal_filter.apply(&blurred, velocity, width, height)
+        } else {
+            blurred
+        };
+
+        self.frame_count += 1;
+
+        // Update temporal offset for GTAO
+        if let Some(ref mut gtao) = self.gtao {
+            gtao.advance_frame(self.frame_count);
+        }
+
+        result
+    }
+}
+
+// =============================================================================
+// WGSL Shaders
+// =============================================================================
+
+mod shaders {
+    /// SSAO compute shader
+    pub const SSAO_COMPUTE: &str = r#"
+struct AoParams {
+    proj: mat4x4<f32>,
+    inv_proj: mat4x4<f32>,
+    resolution: vec2<f32>,
+    radius: f32,
+    bias: f32,
+    intensity: f32,
+    power: f32,
+    sample_count: u32,
+    _pad: u32,
+}
+
+struct Sample {
+    offset: vec3<f32>,
+    _pad: f32,
+}
+
+@group(0) @binding(0) var<uniform> params: AoParams;
+@group(0) @binding(1) var<storage, read> samples: array<Sample>;
+@group(0) @binding(2) var depth_tex: texture_2d<f32>;
+@group(0) @binding(3) var normal_tex: texture_2d<f32>;
+@group(0) @binding(4) var noise_tex: texture_2d<f32>;
+@group(0) @binding(5) var ao_tex: texture_storage_2d<r16float, write>;
+@group(0) @binding(6) var point_sampler: sampler;
+
+fn reconstruct_position(uv: vec2<f32>, depth: f32) -> vec3<f32> {
+    let ndc = vec4<f32>(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, depth, 1.0);
+    let view = params.inv_proj * ndc;
+    return view.xyz / view.w;
+}
+
+@compute @workgroup_size(8, 8)
+fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+    let dims = textureDimensions(depth_tex);
+    if (id.x >= dims.x || id.y >= dims.y) {
+        return;
+    }
+
+    let uv = (vec2<f32>(id.xy) + 0.5) / vec2<f32>(dims);
+    let depth = textureLoad(depth_tex, id.xy, 0).r;
+    let position = reconstruct_position(uv, depth);
+    let normal = textureLoad(normal_tex, id.xy, 0).xyz * 2.0 - 1.0;
+
+    // Get noise for rotation
+    let noise_uv = vec2<f32>(id.xy) / 4.0;
+    let noise = textureSampleLevel(noise_tex, point_sampler, fract(noise_uv), 0.0).xy * 2.0 - 1.0;
+
+    // Build TBN matrix
+    let tangent = normalize(vec3<f32>(noise.x, noise.y, 0.0) - normal * dot(normal, vec3<f32>(noise.x, noise.y, 0.0)));
+    let bitangent = cross(normal, tangent);
+
+    var occlusion = 0.0;
+
+    for (var i = 0u; i < params.sample_count; i++) {
+        let sample_offset = samples[i].offset;
+
+        // Orient sample
+        let oriented = tangent * sample_offset.x + bitangent * sample_offset.y + normal * sample_offset.z;
+        let sample_pos = position + oriented * params.radius;
+
+        // Project
+        let clip = params.proj * vec4<f32>(sample_pos, 1.0);
+        let sample_uv = vec2<f32>(
+            (clip.x / clip.w + 1.0) * 0.5,
+            (1.0 - clip.y / clip.w) * 0.5
+        );
+
+        if (sample_uv.x < 0.0 || sample_uv.x > 1.0 || sample_uv.y < 0.0 || sample_uv.y > 1.0) {
+            continue;
+        }
+
+        let sample_depth = textureSampleLevel(depth_tex, point_sampler, sample_uv, 0.0).r;
+        let sample_z = reconstruct_position(sample_uv, sample_depth).z;
+
+        let range_check = smoothstep(0.0, 1.0, params.radius / abs(position.z - sample_z));
+
+        if (sample_z < sample_pos.z - params.bias) {
+            occlusion += range_check;
+        }
+    }
+
+    let ao = 1.0 - (occlusion / f32(params.sample_count)) * params.intensity;
+    let result = pow(saturate(ao), params.power);
+
+    textureStore(ao_tex, id.xy, vec4<f32>(result, 0.0, 0.0, 1.0));
+}
+"#;
+
+    /// GTAO compute shader
+    pub const GTAO_COMPUTE: &str = r#"
+struct GtaoParams {
+    proj: mat4x4<f32>,
+    inv_proj: mat4x4<f32>,
+    resolution: vec2<f32>,
+    radius: f32,
+    thickness: f32,
+    intensity: f32,
+    power: f32,
+    slice_count: u32,
+    steps: u32,
+    temporal_offset: f32,
+    _pad: f32,
+}
+
+@group(0) @binding(0) var<uniform> params: GtaoParams;
+@group(0) @binding(1) var depth_tex: texture_2d<f32>;
+@group(0) @binding(2) var normal_tex: texture_2d<f32>;
+@group(0) @binding(3) var ao_tex: texture_storage_2d<r16float, write>;
+@group(0) @binding(4) var point_sampler: sampler;
+
+fn spatial_noise(coord: vec2<u32>) -> f32 {
+    // Simple hash for spatial noise
+    let x = coord.x + coord.y * 1024u;
+    return fract(f32(x) * 0.6180339887);
+}
+
+fn integrate_arc(h1: f32, h2: f32, n_cos: f32) -> f32 {
+    let sin_n = sqrt(1.0 - n_cos * n_cos);
+    let cos_h1 = cos(h1);
+    let cos_h2 = cos(h2);
+    return 0.25 * ((-cos(2.0 * h1 - acos(n_cos)) + n_cos + 2.0 * h1 * sin_n) +
+                   (-cos(2.0 * h2 - acos(n_cos)) + n_cos + 2.0 * h2 * sin_n));
+}
+
+@compute @workgroup_size(8, 8)
+fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+    let dims = textureDimensions(depth_tex);
+    if (id.x >= dims.x || id.y >= dims.y) {
+        return;
+    }
+
+    let uv = (vec2<f32>(id.xy) + 0.5) / vec2<f32>(dims);
+    let depth = textureLoad(depth_tex, id.xy, 0).r;
+    let normal = textureLoad(normal_tex, id.xy, 0).xyz * 2.0 - 1.0;
+
+    let noise = spatial_noise(id.xy);
+
+    var visibility = 0.0;
+
+    for (var slice = 0u; slice < params.slice_count; slice++) {
+        let phi = (3.14159265 / f32(params.slice_count)) * (f32(slice) + noise + params.temporal_offset);
+        let slice_dir = vec2<f32>(cos(phi), sin(phi));
+
+        var h1 = -1.0;
+        var h2 = -1.0;
+
+        for (var step = 1u; step <= params.steps; step++) {
+            let t = f32(step) / f32(params.steps);
+            let sample_radius = params.radius * t;
+
+            // Direction 1
+            let offset1 = slice_dir * sample_radius / params.resolution;
+            let sample_uv1 = uv + offset1;
+
+            if (sample_uv1.x >= 0.0 && sample_uv1.x <= 1.0 && sample_uv1.y >= 0.0 && sample_uv1.y <= 1.0) {
+                let sample_depth1 = textureSampleLevel(depth_tex, point_sampler, sample_uv1, 0.0).r;
+                let diff1 = sample_depth1 - depth;
+                let horizon1 = diff1 / (sample_radius * 0.01);
+                h1 = max(h1, atan(horizon1));
+            }
+
+            // Direction 2
+            let offset2 = -slice_dir * sample_radius / params.resolution;
+            let sample_uv2 = uv + offset2;
+
+            if (sample_uv2.x >= 0.0 && sample_uv2.x <= 1.0 && sample_uv2.y >= 0.0 && sample_uv2.y <= 1.0) {
+                let sample_depth2 = textureSampleLevel(depth_tex, point_sampler, sample_uv2, 0.0).r;
+                let diff2 = sample_depth2 - depth;
+                let horizon2 = diff2 / (sample_radius * 0.01);
+                h2 = max(h2, atan(horizon2));
+            }
+        }
+
+        let n_cos = dot(normal, vec3<f32>(0.0, 0.0, 1.0));
+        visibility += integrate_arc(h1, h2, n_cos);
+    }
+
+    let ao = visibility / f32(params.slice_count);
+    let result = pow(saturate(ao * params.intensity), params.power);
+
+    textureStore(ao_tex, id.xy, vec4<f32>(result, 0.0, 0.0, 1.0));
+}
+"#;
+
+    /// Bilateral blur shader
+    pub const BILATERAL_BLUR: &str = r#"
+struct BlurParams {
+    direction: vec2<f32>,
+    kernel_radius: i32,
+    spatial_sigma: f32,
+    depth_sigma: f32,
+    _pad: f32,
+}
+
+@group(0) @binding(0) var<uniform> params: BlurParams;
+@group(0) @binding(1) var ao_in: texture_2d<f32>;
+@group(0) @binding(2) var depth_tex: texture_2d<f32>;
+@group(0) @binding(3) var ao_out: texture_storage_2d<r16float, write>;
+
+fn gaussian(x: f32, sigma: f32) -> f32 {
+    return exp(-(x * x) / (2.0 * sigma * sigma));
+}
+
+@compute @workgroup_size(8, 8)
+fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+    let dims = textureDimensions(ao_in);
+    if (id.x >= dims.x || id.y >= dims.y) {
+        return;
+    }
+
+    let center_ao = textureLoad(ao_in, id.xy, 0).r;
+    let center_depth = textureLoad(depth_tex, id.xy, 0).r;
+
+    var sum = 0.0;
+    var weight_sum = 0.0;
+
+    for (var i = -params.kernel_radius; i <= params.kernel_radius; i++) {
+        let offset = vec2<i32>(params.direction * f32(i));
+        let sample_pos = vec2<i32>(id.xy) + offset;
+
+        if (sample_pos.x < 0 || sample_pos.x >= i32(dims.x) ||
+            sample_pos.y < 0 || sample_pos.y >= i32(dims.y)) {
+            continue;
+        }
+
+        let sample_ao = textureLoad(ao_in, vec2<u32>(sample_pos), 0).r;
+        let sample_depth = textureLoad(depth_tex, vec2<u32>(sample_pos), 0).r;
+
+        let spatial_weight = gaussian(f32(abs(i)), params.spatial_sigma);
+        let depth_weight = gaussian(abs(sample_depth - center_depth), params.depth_sigma);
+
+        let weight = spatial_weight * depth_weight;
+        sum += sample_ao * weight;
+        weight_sum += weight;
+    }
+
+    let result = select(center_ao, sum / weight_sum, weight_sum > 0.0);
+    textureStore(ao_out, id.xy, vec4<f32>(result, 0.0, 0.0, 1.0));
+}
+"#;
+
+    /// AO application shader
+    pub const AO_APPLY: &str = r#"
+struct ApplyParams {
+    ao_strength: f32,
+    _pad0: f32,
+    _pad1: f32,
+    _pad2: f32,
+}
+
+@group(0) @binding(0) var<uniform> params: ApplyParams;
+@group(0) @binding(1) var color_tex: texture_2d<f32>;
+@group(0) @binding(2) var ao_tex: texture_2d<f32>;
+@group(0) @binding(3) var output_tex: texture_storage_2d<rgba16float, write>;
+
+@compute @workgroup_size(8, 8)
+fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+    let dims = textureDimensions(color_tex);
+    if (id.x >= dims.x || id.y >= dims.y) {
+        return;
+    }
+
+    let color = textureLoad(color_tex, id.xy, 0);
+    let ao = textureLoad(ao_tex, id.xy, 0).r;
+
+    let adjusted_ao = mix(1.0, ao, params.ao_strength);
+    let result = vec4<f32>(color.rgb * adjusted_ao, color.a);
+
+    textureStore(output_tex, id.xy, result);
+}
+"#;
+}
+
+// =============================================================================
+// Unit Tests
+// =============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_config_presets() {
+        let default = AoConfig::default();
+        assert!(default.enabled);
+        assert_eq!(default.sample_count, 16);
+
+        let perf = AoConfig::performance();
+        assert!(perf.half_resolution);
+        assert_eq!(perf.sample_count, 8);
+
+        let ultra = AoConfig::ultra();
+        assert!(ultra.detail_ao);
+        assert_eq!(ultra.sample_count, 32);
+    }
+
+    #[test]
+    fn test_sample_count_quality() {
+        assert_eq!(AoConfig::samples_for_quality(AoQuality::Low), 4);
+        assert_eq!(AoConfig::samples_for_quality(AoQuality::Medium), 8);
+        assert_eq!(AoConfig::samples_for_quality(AoQuality::High), 16);
+        assert_eq!(AoConfig::samples_for_quality(AoQuality::Ultra), 32);
+        assert_eq!(AoConfig::samples_for_quality(AoQuality::Extreme), 64);
+    }
+
+    #[test]
+    fn test_hemisphere_sampler() {
+        let sampler = HemisphereSampler::new(16, 4);
+        assert_eq!(sampler.samples.len(), 16);
+        assert_eq!(sampler.noise_texture.len(), 16);
+
+        // All samples should be in upper hemisphere
+        for sample in &sampler.samples {
+            assert!(sample.z >= 0.0);
+        }
+    }
+
+    #[test]
+    fn test_halton_sequence() {
+        let h1 = HemisphereSampler::halton(1, 2);
+        let h2 = HemisphereSampler::halton(2, 2);
+        let h3 = HemisphereSampler::halton(3, 2);
+
+        // Halton sequence should produce different values
+        assert!(h1 != h2);
+        assert!(h2 != h3);
+
+        // Values should be in [0, 1)
+        assert!(h1 >= 0.0 && h1 < 1.0);
+        assert!(h2 >= 0.0 && h2 < 1.0);
+    }
+
+    #[test]
+    fn test_bilateral_blur_creation() {
+        let blur = BilateralBlur::new(4, 8.0);
+        assert_eq!(blur.kernel_radius, 4);
+        assert!(blur.spatial_sigma > 0.0);
+    }
+
+    #[test]
+    fn test_bilateral_gaussian() {
+        let blur = BilateralBlur::new(4, 8.0);
+
+        // Gaussian at 0 should be 1
+        let g0 = blur.gaussian(0.0, 1.0);
+        assert!((g0 - 1.0).abs() < 0.001);
+
+        // Gaussian should decrease with distance
+        let g1 = blur.gaussian(1.0, 1.0);
+        let g2 = blur.gaussian(2.0, 1.0);
+        assert!(g1 < g0);
+        assert!(g2 < g1);
+    }
+
+    #[test]
+    fn test_temporal_filter() {
+        let mut filter = TemporalFilter::new(64, 64);
+
+        let ao = vec![0.5f32; 64 * 64];
+        let result = filter.apply(&ao, None, 64, 64);
+
+        // First frame should blend toward input
+        assert!(result[0] < 1.0); // Started at 1.0
+
+        // Apply again
+        let result2 = filter.apply(&ao, None, 64, 64);
+
+        // Should be closer to 0.5 now
+        assert!((result2[0] - 0.5).abs() < (result[0] - 0.5).abs());
+    }
+
+    #[test]
+    fn test_gtao_frame_advance() {
+        let mut gtao = Gtao::new(AoConfig::default());
+
+        let offset0 = gtao.temporal_offset;
+        gtao.advance_frame(1);
+        let offset1 = gtao.temporal_offset;
+        gtao.advance_frame(2);
+        let offset2 = gtao.temporal_offset;
+
+        assert!(offset0 != offset1);
+        assert!(offset1 != offset2);
+    }
+
+    #[test]
+    fn test_ssao_linear_depth() {
+        let ssao = Ssao::new(AoConfig::default());
+
+        let near = 0.1;
+        let far = 1000.0;
+
+        // Near plane should map to near
+        let linear_near = ssao.linear_depth(0.0, near, far);
+        assert!((linear_near - near).abs() < 0.01);
+
+        // Mid-range depth
+        let linear_mid = ssao.linear_depth(0.5, near, far);
+        assert!(linear_mid > near && linear_mid < far);
+    }
+
+    #[test]
+    fn test_ao_renderer_creation() {
+        let config = AoConfig::default();
+        let renderer = AoRenderer::new(256, 256, config.clone());
+
+        assert!(renderer.gtao.is_some()); // Default is GTAO
+        assert!(renderer.ssao.is_none());
+    }
+
+    #[test]
+    fn test_ao_renderer_disabled() {
+        let mut config = AoConfig::default();
+        config.enabled = false;
+
+        let mut renderer = AoRenderer::new(64, 64, config);
+
+        let depth = vec![0.5f32; 64 * 64];
+        let positions = vec![Vec3::ZERO; 64 * 64];
+        let proj = Mat4::IDENTITY;
+        let inv_proj = Mat4::IDENTITY;
+
+        let result = renderer.render(
+            &depth, None, &positions, None,
+            &proj, &inv_proj, 64, 64
+        );
+
+        // When disabled, should return all 1.0
+        assert!(result.iter().all(|&v| v == 1.0));
+    }
+
+    #[test]
+    fn test_alchemy_ao_samples() {
+        let alchemy = AlchemyAo::new(AoConfig::default());
+
+        // Check samples are on unit sphere
+        for sample in &alchemy.samples {
+            let len = sample.length();
+            assert!(len <= 1.0 + 0.001);
+        }
+    }
+}

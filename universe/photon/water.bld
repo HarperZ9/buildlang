@@ -1,0 +1,2198 @@
+// =============================================================================
+// PHOTON ENGINE - Advanced Water & Ocean Rendering System
+// Harper Engine Whitepapers WP-129 to WP-142: Water Technology
+// =============================================================================
+//
+// Comprehensive water rendering system with:
+// - FFT-based ocean simulation
+// - Gerstner wave system
+// - Tessellation and displacement
+// - Underwater rendering
+// - Caustics simulation
+// - Foam and spray particles
+// - Shoreline effects
+// - River and lake systems
+// - Reflections and refractions
+// - Subsurface scattering
+//
+// =============================================================================
+
+use core::memory::{Buffer, Arena, Pool};
+use core::math::{Vec2, Vec3, Vec4, Mat4, Quat, AABB, Transform, Complex};
+use core::simd::{f32x4, f32x8, simd_operations};
+use photon::lib::{RenderContext, Shader, ComputeShader, Pipeline, Texture, Sampler};
+
+// =============================================================================
+// REGION: Ocean Spectrum (WP-129)
+// =============================================================================
+
+/// Ocean spectrum types
+pub enum SpectrumType {
+    Phillips,
+    Jonswap,
+    TMA,
+    PiersonMoskowitz,
+    Donelan,
+    Unified,
+}
+
+/// Ocean spectrum parameters
+pub struct OceanSpectrum {
+    spectrum_type: SpectrumType,
+    wind_speed: f32,
+    wind_direction: Vec2,
+    fetch: f32,
+    depth: f32,
+    scale: f32,
+    choppy: f32,
+    small_wave_factor: f32,
+    gravity: f32,
+}
+
+impl OceanSpectrum {
+    pub fn new(spectrum_type: SpectrumType) -> Self {
+        Self {
+            spectrum_type,
+            wind_speed: 10.0,
+            wind_direction: Vec2::new(1.0, 0.0).normalize(),
+            fetch: 100000.0,
+            depth: 100.0,
+            scale: 1.0,
+            choppy: 1.0,
+            small_wave_factor: 1.0,
+            gravity: 9.81,
+        }
+    }
+
+    /// Phillips spectrum - classic deep water spectrum
+    pub fn phillips(&self, k: Vec2) -> f32 {
+        let k_len = k.length();
+        if k_len < 0.0001 {
+            return 0.0;
+        }
+
+        let l = self.wind_speed * self.wind_speed / self.gravity;
+        let k_sq = k_len * k_len;
+        let k_l_sq = (k_len * l) * (k_len * l);
+
+        let k_dot_w = k.dot(self.wind_direction) / k_len;
+
+        let damping = 0.001;
+        let l_sq = l * l * damping * damping;
+
+        let phillips = self.scale * (-1.0 / (k_sq * l * l)).exp() / (k_sq * k_sq)
+            * (k_dot_w * k_dot_w)
+            * (-k_sq * l_sq).exp();
+
+        // Suppress waves moving against the wind
+        let directional = if k_dot_w < 0.0 { 0.07 } else { 1.0 };
+
+        phillips * directional
+    }
+
+    /// JONSWAP spectrum - more realistic for fetch-limited conditions
+    pub fn jonswap(&self, k: Vec2) -> f32 {
+        let k_len = k.length();
+        if k_len < 0.0001 {
+            return 0.0;
+        }
+
+        let omega = (self.gravity * k_len * (self.depth * k_len).tanh()).sqrt();
+        let omega_p = 22.0 * (self.gravity * self.gravity / (self.wind_speed * self.fetch)).powf(1.0 / 3.0);
+
+        let alpha = 0.076 * (self.wind_speed * self.wind_speed / (self.fetch * self.gravity)).powf(0.22);
+        let gamma = 3.3;
+
+        let sigma = if omega <= omega_p { 0.07 } else { 0.09 };
+        let r = (-(omega - omega_p).powi(2) / (2.0 * sigma * sigma * omega_p * omega_p)).exp();
+
+        let pm = alpha * self.gravity * self.gravity / omega.powi(5)
+            * (-1.25 * (omega_p / omega).powi(4)).exp();
+
+        let jonswap = pm * gamma.powf(r);
+
+        // Directional spreading
+        let k_dot_w = k.dot(self.wind_direction) / k_len;
+        let spreading = ((1.0 + k_dot_w) / 2.0).powf(2.0);
+
+        jonswap * spreading
+    }
+
+    /// TMA spectrum - shallow water modification of JONSWAP
+    pub fn tma(&self, k: Vec2) -> f32 {
+        let jonswap = self.jonswap(k);
+        let k_len = k.length();
+
+        let omega = (self.gravity * k_len * (self.depth * k_len).tanh()).sqrt();
+        let omega_h = omega * (self.depth / self.gravity).sqrt();
+
+        let phi = if omega_h <= 1.0 {
+            0.5 * omega_h * omega_h
+        } else if omega_h <= 2.0 {
+            1.0 - 0.5 * (2.0 - omega_h).powi(2)
+        } else {
+            1.0
+        };
+
+        jonswap * phi
+    }
+
+    /// Evaluate spectrum based on type
+    pub fn evaluate(&self, k: Vec2) -> f32 {
+        match self.spectrum_type {
+            SpectrumType::Phillips => self.phillips(k),
+            SpectrumType::Jonswap => self.jonswap(k),
+            SpectrumType::TMA => self.tma(k),
+            SpectrumType::PiersonMoskowitz => self.pierson_moskowitz(k),
+            SpectrumType::Donelan => self.donelan(k),
+            SpectrumType::Unified => self.unified(k),
+        }
+    }
+
+    fn pierson_moskowitz(&self, k: Vec2) -> f32 {
+        let k_len = k.length();
+        if k_len < 0.0001 {
+            return 0.0;
+        }
+
+        let omega = (self.gravity * k_len).sqrt();
+        let omega_p = self.gravity / (1.026 * self.wind_speed);
+
+        let alpha = 0.0081;
+        let pm = alpha * self.gravity * self.gravity / omega.powi(5)
+            * (-1.25 * (omega_p / omega).powi(4)).exp();
+
+        let k_dot_w = k.dot(self.wind_direction) / k_len;
+        pm * ((1.0 + k_dot_w) / 2.0).powi(2)
+    }
+
+    fn donelan(&self, k: Vec2) -> f32 {
+        // Donelan-Hamilton-Hui spectrum
+        self.jonswap(k)  // Simplified
+    }
+
+    fn unified(&self, k: Vec2) -> f32 {
+        // Unified spectrum combining multiple models
+        let deep = self.phillips(k);
+        let shallow = self.tma(k);
+
+        let depth_factor = (self.depth / 100.0).min(1.0);
+        deep * depth_factor + shallow * (1.0 - depth_factor)
+    }
+
+    /// Calculate dispersion relation
+    pub fn dispersion(&self, k_len: f32) -> f32 {
+        // Deep water: omega = sqrt(g * k)
+        // Shallow water: omega = sqrt(g * k * tanh(k * d))
+        (self.gravity * k_len * (self.depth * k_len).tanh()).sqrt()
+    }
+}
+
+// =============================================================================
+// REGION: FFT Ocean Simulation (WP-130)
+// =============================================================================
+
+/// FFT ocean simulation
+pub struct FFTOcean {
+    resolution: u32,
+    patch_size: f32,
+    spectrum: OceanSpectrum,
+
+    // GPU resources
+    h0_texture: Texture,          // Initial spectrum
+    ht_texture: Texture,          // Time-evolved spectrum
+    displacement_texture: Texture, // xyz displacement, w = jacobian
+    normal_texture: Texture,
+    folding_texture: Texture,     // For foam detection
+
+    // Compute shaders
+    init_spectrum_shader: ComputeShader,
+    update_spectrum_shader: ComputeShader,
+    fft_horizontal_shader: ComputeShader,
+    fft_vertical_shader: ComputeShader,
+    compute_normals_shader: ComputeShader,
+    compute_folding_shader: ComputeShader,
+
+    // FFT buffers
+    fft_buffer_a: Texture,
+    fft_buffer_b: Texture,
+    butterfly_texture: Texture,
+
+    // State
+    time: f32,
+    cascades: Vec<OceanCascade>,
+}
+
+/// Multi-cascade ocean for different wave scales
+pub struct OceanCascade {
+    patch_size: f32,
+    displacement: Texture,
+    derivatives: Texture,
+    foam: Texture,
+    blend_weight: f32,
+}
+
+impl FFTOcean {
+    pub fn new(context: &RenderContext, resolution: u32, patch_size: f32) -> Self {
+        // Create textures
+        let h0_texture = context.create_texture_2d(
+            resolution, resolution,
+            TextureFormat::RG32F,
+            &vec![0.0f32; (resolution * resolution * 2) as usize],
+        );
+
+        let ht_texture = context.create_texture_2d(
+            resolution, resolution,
+            TextureFormat::RG32F,
+            &vec![0.0f32; (resolution * resolution * 2) as usize],
+        );
+
+        let displacement_texture = context.create_texture_2d(
+            resolution, resolution,
+            TextureFormat::RGBA32F,
+            &vec![0.0f32; (resolution * resolution * 4) as usize],
+        );
+
+        let normal_texture = context.create_texture_2d(
+            resolution, resolution,
+            TextureFormat::RGBA16F,
+            &vec![0.0f32; (resolution * resolution * 4) as usize],
+        );
+
+        let folding_texture = context.create_texture_2d(
+            resolution, resolution,
+            TextureFormat::R16F,
+            &vec![0.0f32; (resolution * resolution) as usize],
+        );
+
+        // Create FFT buffers
+        let fft_buffer_a = context.create_texture_2d(
+            resolution, resolution,
+            TextureFormat::RG32F,
+            &vec![0.0f32; (resolution * resolution * 2) as usize],
+        );
+
+        let fft_buffer_b = context.create_texture_2d(
+            resolution, resolution,
+            TextureFormat::RG32F,
+            &vec![0.0f32; (resolution * resolution * 2) as usize],
+        );
+
+        // Precompute butterfly lookup texture
+        let butterfly_texture = Self::create_butterfly_texture(context, resolution);
+
+        // Load compute shaders
+        let init_spectrum_shader = context.load_compute_shader("ocean_init_spectrum.comp");
+        let update_spectrum_shader = context.load_compute_shader("ocean_update_spectrum.comp");
+        let fft_horizontal_shader = context.load_compute_shader("ocean_fft_horizontal.comp");
+        let fft_vertical_shader = context.load_compute_shader("ocean_fft_vertical.comp");
+        let compute_normals_shader = context.load_compute_shader("ocean_normals.comp");
+        let compute_folding_shader = context.load_compute_shader("ocean_folding.comp");
+
+        // Create cascades for different scales
+        let cascades = vec![
+            Self::create_cascade(context, resolution, patch_size * 0.25, 1.0),
+            Self::create_cascade(context, resolution, patch_size, 0.5),
+            Self::create_cascade(context, resolution, patch_size * 4.0, 0.25),
+        ];
+
+        let mut ocean = Self {
+            resolution,
+            patch_size,
+            spectrum: OceanSpectrum::new(SpectrumType::Jonswap),
+            h0_texture,
+            ht_texture,
+            displacement_texture,
+            normal_texture,
+            folding_texture,
+            init_spectrum_shader,
+            update_spectrum_shader,
+            fft_horizontal_shader,
+            fft_vertical_shader,
+            compute_normals_shader,
+            compute_folding_shader,
+            fft_buffer_a,
+            fft_buffer_b,
+            butterfly_texture,
+            time: 0.0,
+            cascades,
+        };
+
+        ocean.init_spectrum(context);
+        ocean
+    }
+
+    fn create_cascade(context: &RenderContext, resolution: u32, patch_size: f32, blend_weight: f32) -> OceanCascade {
+        OceanCascade {
+            patch_size,
+            displacement: context.create_texture_2d(
+                resolution, resolution,
+                TextureFormat::RGBA32F,
+                &vec![0.0f32; (resolution * resolution * 4) as usize],
+            ),
+            derivatives: context.create_texture_2d(
+                resolution, resolution,
+                TextureFormat::RGBA16F,
+                &vec![0.0f32; (resolution * resolution * 4) as usize],
+            ),
+            foam: context.create_texture_2d(
+                resolution, resolution,
+                TextureFormat::R16F,
+                &vec![0.0f32; (resolution * resolution) as usize],
+            ),
+            blend_weight,
+        }
+    }
+
+    fn create_butterfly_texture(context: &RenderContext, resolution: u32) -> Texture {
+        let log_n = (resolution as f32).log2() as u32;
+        let mut data = vec![Vec4::ZERO; (log_n * resolution) as usize];
+
+        for stage in 0..log_n {
+            let blocks = 1 << stage;
+            let size = resolution / blocks;
+
+            for block in 0..blocks {
+                for i in 0..size / 2 {
+                    let k = (i * blocks * 2) % resolution;
+                    let twiddle = -2.0 * std::f32::consts::PI * k as f32 / resolution as f32;
+
+                    let idx0 = block * size + i;
+                    let idx1 = block * size + i + size / 2;
+
+                    let pixel_idx = (stage * resolution + idx0) as usize;
+                    data[pixel_idx] = Vec4::new(
+                        twiddle.cos(),
+                        twiddle.sin(),
+                        idx0 as f32,
+                        idx1 as f32,
+                    );
+                }
+            }
+        }
+
+        context.create_texture_2d_with_data(log_n, resolution, TextureFormat::RGBA32F, &data)
+    }
+
+    fn init_spectrum(&mut self, context: &RenderContext) {
+        context.set_uniform("u_resolution", self.resolution);
+        context.set_uniform("u_patch_size", self.patch_size);
+        context.set_uniform("u_wind_speed", self.spectrum.wind_speed);
+        context.set_uniform("u_wind_direction", self.spectrum.wind_direction);
+        context.set_uniform("u_gravity", self.spectrum.gravity);
+        context.set_uniform("u_depth", self.spectrum.depth);
+        context.set_uniform("u_scale", self.spectrum.scale);
+
+        let groups = (self.resolution + 7) / 8;
+        context.dispatch_compute(&self.init_spectrum_shader, groups, groups, 1);
+    }
+
+    pub fn update(&mut self, context: &RenderContext, dt: f32) {
+        self.time += dt;
+
+        // Update spectrum with time evolution
+        context.set_uniform("u_time", self.time);
+        context.set_uniform("u_resolution", self.resolution);
+        context.set_uniform("u_choppy", self.spectrum.choppy);
+
+        context.bind_texture(0, &self.h0_texture);
+
+        let groups = (self.resolution + 7) / 8;
+        context.dispatch_compute(&self.update_spectrum_shader, groups, groups, 1);
+
+        // Perform IFFT to get displacement
+        self.perform_ifft(context);
+
+        // Compute normals and folding
+        self.compute_derivatives(context);
+
+        // Update cascades
+        for cascade in &self.cascades {
+            self.update_cascade(context, cascade);
+        }
+    }
+
+    fn perform_ifft(&self, context: &RenderContext) {
+        let log_n = (self.resolution as f32).log2() as u32;
+
+        // Horizontal FFT passes
+        for stage in 0..log_n {
+            context.set_uniform("u_stage", stage);
+            context.bind_texture(0, &self.butterfly_texture);
+
+            let groups = (self.resolution + 7) / 8;
+            context.dispatch_compute(&self.fft_horizontal_shader, groups, self.resolution, 1);
+        }
+
+        // Vertical FFT passes
+        for stage in 0..log_n {
+            context.set_uniform("u_stage", stage);
+
+            let groups = (self.resolution + 7) / 8;
+            context.dispatch_compute(&self.fft_vertical_shader, self.resolution, groups, 1);
+        }
+    }
+
+    fn compute_derivatives(&self, context: &RenderContext) {
+        context.bind_texture(0, &self.displacement_texture);
+
+        let groups = (self.resolution + 7) / 8;
+        context.dispatch_compute(&self.compute_normals_shader, groups, groups, 1);
+        context.dispatch_compute(&self.compute_folding_shader, groups, groups, 1);
+    }
+
+    fn update_cascade(&self, context: &RenderContext, cascade: &OceanCascade) {
+        context.set_uniform("u_patch_size", cascade.patch_size);
+        context.set_uniform("u_blend_weight", cascade.blend_weight);
+
+        let groups = (self.resolution + 7) / 8;
+        context.dispatch_compute(&self.update_spectrum_shader, groups, groups, 1);
+    }
+
+    pub fn get_displacement_at(&self, x: f32, z: f32) -> Vec3 {
+        // Sample displacement texture (would be done on GPU)
+        Vec3::ZERO
+    }
+
+    pub fn get_normal_at(&self, x: f32, z: f32) -> Vec3 {
+        Vec3::Y
+    }
+}
+
+// =============================================================================
+// REGION: Gerstner Waves (WP-131)
+// =============================================================================
+
+/// Single Gerstner wave component
+pub struct GerstnerWave {
+    direction: Vec2,
+    steepness: f32,
+    wavelength: f32,
+    amplitude: f32,
+    speed: f32,
+    phase: f32,
+}
+
+impl GerstnerWave {
+    pub fn new(direction: Vec2, steepness: f32, wavelength: f32) -> Self {
+        let direction = direction.normalize();
+        let amplitude = steepness * wavelength / (2.0 * std::f32::consts::PI);
+        let speed = (9.81 * wavelength / (2.0 * std::f32::consts::PI)).sqrt();
+
+        Self {
+            direction,
+            steepness,
+            wavelength,
+            amplitude,
+            speed,
+            phase: 0.0,
+        }
+    }
+
+    /// Calculate displacement at position and time
+    pub fn displacement(&self, position: Vec2, time: f32) -> Vec3 {
+        let k = 2.0 * std::f32::consts::PI / self.wavelength;
+        let omega = self.speed * k;
+        let phase = k * position.dot(self.direction) - omega * time + self.phase;
+
+        Vec3::new(
+            -self.direction.x * self.amplitude * phase.sin(),
+            self.amplitude * phase.cos(),
+            -self.direction.y * self.amplitude * phase.sin(),
+        )
+    }
+
+    /// Calculate tangent (for normal computation)
+    pub fn tangent(&self, position: Vec2, time: f32) -> Vec3 {
+        let k = 2.0 * std::f32::consts::PI / self.wavelength;
+        let omega = self.speed * k;
+        let phase = k * position.dot(self.direction) - omega * time + self.phase;
+
+        let wa = k * self.amplitude;
+
+        Vec3::new(
+            1.0 - self.direction.x * self.direction.x * self.steepness * phase.sin(),
+            self.direction.x * wa * phase.cos(),
+            -self.direction.x * self.direction.y * self.steepness * phase.sin(),
+        )
+    }
+
+    /// Calculate binormal (for normal computation)
+    pub fn binormal(&self, position: Vec2, time: f32) -> Vec3 {
+        let k = 2.0 * std::f32::consts::PI / self.wavelength;
+        let omega = self.speed * k;
+        let phase = k * position.dot(self.direction) - omega * time + self.phase;
+
+        let wa = k * self.amplitude;
+
+        Vec3::new(
+            -self.direction.x * self.direction.y * self.steepness * phase.sin(),
+            self.direction.y * wa * phase.cos(),
+            1.0 - self.direction.y * self.direction.y * self.steepness * phase.sin(),
+        )
+    }
+}
+
+/// Gerstner wave system with multiple wave components
+pub struct GerstnerWaveSystem {
+    waves: Vec<GerstnerWave>,
+    max_waves: u32,
+    wave_buffer: Buffer<GerstnerWaveGPU>,
+    compute_shader: ComputeShader,
+}
+
+@repr(C, align(16))
+pub struct GerstnerWaveGPU {
+    direction: Vec2,
+    wavelength: f32,
+    steepness: f32,
+    amplitude: f32,
+    speed: f32,
+    phase: f32,
+    _pad: f32,
+}
+
+impl GerstnerWaveSystem {
+    pub fn new(context: &RenderContext, max_waves: u32) -> Self {
+        Self {
+            waves: Vec::new(),
+            max_waves,
+            wave_buffer: context.create_buffer::<GerstnerWaveGPU>(max_waves as usize),
+            compute_shader: context.load_compute_shader("gerstner_waves.comp"),
+        }
+    }
+
+    pub fn add_wave(&mut self, wave: GerstnerWave) -> bool {
+        if self.waves.len() >= self.max_waves as usize {
+            return false;
+        }
+        self.waves.push(wave);
+        true
+    }
+
+    /// Generate waves from wind parameters
+    pub fn generate_from_wind(&mut self, wind_speed: f32, wind_direction: Vec2, wave_count: u32) {
+        self.waves.clear();
+
+        let base_wavelength = wind_speed * wind_speed * 0.1;
+        let angle_spread = std::f32::consts::PI / 3.0;
+
+        for i in 0..wave_count {
+            let t = i as f32 / wave_count as f32;
+
+            // Vary wavelength
+            let wavelength = base_wavelength * (0.5 + t * 2.0);
+
+            // Vary direction within spread
+            let angle_offset = (t - 0.5) * angle_spread;
+            let angle = wind_direction.y.atan2(wind_direction.x) + angle_offset;
+            let direction = Vec2::new(angle.cos(), angle.sin());
+
+            // Steepness decreases with wavelength
+            let steepness = 0.5 * (1.0 - t * 0.5);
+
+            self.add_wave(GerstnerWave::new(direction, steepness, wavelength));
+        }
+    }
+
+    pub fn update_gpu_buffer(&self, context: &RenderContext) {
+        let gpu_data: Vec<GerstnerWaveGPU> = self.waves.iter().map(|w| {
+            GerstnerWaveGPU {
+                direction: w.direction,
+                wavelength: w.wavelength,
+                steepness: w.steepness,
+                amplitude: w.amplitude,
+                speed: w.speed,
+                phase: w.phase,
+                _pad: 0.0,
+            }
+        }).collect();
+
+        context.update_buffer(&self.wave_buffer, &gpu_data);
+    }
+
+    /// Calculate combined displacement
+    pub fn displacement(&self, position: Vec2, time: f32) -> Vec3 {
+        let mut total = Vec3::ZERO;
+        for wave in &self.waves {
+            total += wave.displacement(position, time);
+        }
+        total
+    }
+
+    /// Calculate combined normal
+    pub fn normal(&self, position: Vec2, time: f32) -> Vec3 {
+        let mut tangent = Vec3::X;
+        let mut binormal = Vec3::Z;
+
+        for wave in &self.waves {
+            tangent += wave.tangent(position, time) - Vec3::X;
+            binormal += wave.binormal(position, time) - Vec3::Z;
+        }
+
+        binormal.cross(tangent).normalize()
+    }
+}
+
+// =============================================================================
+// REGION: Water Mesh and Tessellation (WP-132)
+// =============================================================================
+
+/// Water mesh LOD configuration
+pub struct WaterMeshConfig {
+    tile_size: f32,
+    num_tiles: u32,
+    min_tessellation: f32,
+    max_tessellation: f32,
+    tessellation_distance: f32,
+    displacement_scale: f32,
+}
+
+/// Tessellated water mesh
+pub struct WaterMesh {
+    config: WaterMeshConfig,
+    tile_buffer: Buffer<WaterTile>,
+    vertex_buffer: Buffer<WaterVertex>,
+    index_buffer: Buffer<u32>,
+    indirect_buffer: Buffer<DrawIndirectArgs>,
+
+    // Shaders
+    tessellation_shader: Shader,
+    cull_shader: ComputeShader,
+    lod_shader: ComputeShader,
+
+    // Visible tiles
+    visible_tiles: Vec<WaterTile>,
+}
+
+@repr(C, align(16))
+pub struct WaterTile {
+    position: Vec3,
+    size: f32,
+    lod: u32,
+    tessellation: f32,
+    _pad: [u32; 2],
+}
+
+@repr(C, align(16))
+pub struct WaterVertex {
+    position: Vec3,
+    texcoord: Vec2,
+    _pad: f32,
+}
+
+impl WaterMesh {
+    pub fn new(context: &RenderContext, config: WaterMeshConfig) -> Self {
+        let total_tiles = config.num_tiles * config.num_tiles;
+
+        let mut tiles = Vec::with_capacity(total_tiles as usize);
+        let half_size = config.num_tiles as f32 * config.tile_size * 0.5;
+
+        for y in 0..config.num_tiles {
+            for x in 0..config.num_tiles {
+                tiles.push(WaterTile {
+                    position: Vec3::new(
+                        x as f32 * config.tile_size - half_size,
+                        0.0,
+                        y as f32 * config.tile_size - half_size,
+                    ),
+                    size: config.tile_size,
+                    lod: 0,
+                    tessellation: config.max_tessellation,
+                    _pad: [0; 2],
+                });
+            }
+        }
+
+        // Create grid vertices
+        let (vertices, indices) = Self::create_grid(16);
+
+        Self {
+            config,
+            tile_buffer: context.create_buffer_with_data(&tiles),
+            vertex_buffer: context.create_buffer_with_data(&vertices),
+            index_buffer: context.create_buffer_with_data(&indices),
+            indirect_buffer: context.create_buffer::<DrawIndirectArgs>(total_tiles as usize),
+            tessellation_shader: context.load_shader_with_stages(&[
+                ("water.vert", ShaderStage::Vertex),
+                ("water.hull", ShaderStage::Hull),
+                ("water.domain", ShaderStage::Domain),
+                ("water.frag", ShaderStage::Fragment),
+            ]),
+            cull_shader: context.load_compute_shader("water_cull.comp"),
+            lod_shader: context.load_compute_shader("water_lod.comp"),
+            visible_tiles: tiles,
+        }
+    }
+
+    fn create_grid(resolution: u32) -> (Vec<WaterVertex>, Vec<u32>) {
+        let mut vertices = Vec::new();
+        let mut indices = Vec::new();
+
+        for y in 0..=resolution {
+            for x in 0..=resolution {
+                let u = x as f32 / resolution as f32;
+                let v = y as f32 / resolution as f32;
+
+                vertices.push(WaterVertex {
+                    position: Vec3::new(u - 0.5, 0.0, v - 0.5),
+                    texcoord: Vec2::new(u, v),
+                    _pad: 0.0,
+                });
+            }
+        }
+
+        let stride = resolution + 1;
+        for y in 0..resolution {
+            for x in 0..resolution {
+                let i = y * stride + x;
+                indices.extend_from_slice(&[
+                    i, i + 1, i + stride,
+                    i + 1, i + stride + 1, i + stride,
+                ]);
+            }
+        }
+
+        (vertices, indices)
+    }
+
+    pub fn update(&mut self, context: &RenderContext, camera: &Camera) {
+        // Frustum culling
+        context.set_uniform("u_frustum_planes", camera.frustum().planes);
+        context.set_uniform("u_camera_pos", camera.position);
+
+        let total_tiles = self.config.num_tiles * self.config.num_tiles;
+        let groups = (total_tiles + 63) / 64;
+        context.dispatch_compute(&self.cull_shader, groups, 1, 1);
+
+        // LOD selection
+        context.set_uniform("u_tessellation_distance", self.config.tessellation_distance);
+        context.set_uniform("u_min_tessellation", self.config.min_tessellation);
+        context.set_uniform("u_max_tessellation", self.config.max_tessellation);
+
+        context.dispatch_compute(&self.lod_shader, groups, 1, 1);
+    }
+
+    pub fn render(&self, context: &RenderContext, camera: &Camera) {
+        context.bind_shader(&self.tessellation_shader);
+        context.bind_buffer(&self.vertex_buffer);
+        context.bind_buffer(&self.index_buffer);
+
+        context.set_uniform("u_view_proj", camera.view_projection());
+        context.set_uniform("u_displacement_scale", self.config.displacement_scale);
+
+        // Draw all visible tiles instanced
+        let total_tiles = self.config.num_tiles * self.config.num_tiles;
+        context.draw_indexed_instanced_indirect(&self.indirect_buffer, total_tiles);
+    }
+}
+
+// =============================================================================
+// REGION: Water Shading (WP-133)
+// =============================================================================
+
+/// Water material properties
+pub struct WaterMaterial {
+    // Color
+    shallow_color: Vec3,
+    deep_color: Vec3,
+    scatter_color: Vec3,
+    depth_max: f32,
+
+    // Specular
+    specular_intensity: f32,
+    roughness: f32,
+    fresnel_power: f32,
+
+    // Refraction
+    refraction_strength: f32,
+    refraction_chromatic: f32,
+    ior: f32,
+
+    // Subsurface
+    sss_intensity: f32,
+    sss_ambient: f32,
+    sss_distortion: f32,
+
+    // Foam
+    foam_color: Vec3,
+    foam_threshold: f32,
+    foam_softness: f32,
+
+    // Textures
+    normal_map: Option<Texture>,
+    detail_normal_map: Option<Texture>,
+    foam_texture: Option<Texture>,
+    caustics_texture: Option<Texture>,
+}
+
+impl WaterMaterial {
+    pub fn ocean() -> Self {
+        Self {
+            shallow_color: Vec3::new(0.1, 0.4, 0.5),
+            deep_color: Vec3::new(0.0, 0.1, 0.2),
+            scatter_color: Vec3::new(0.0, 0.5, 0.3),
+            depth_max: 50.0,
+            specular_intensity: 1.0,
+            roughness: 0.1,
+            fresnel_power: 5.0,
+            refraction_strength: 0.5,
+            refraction_chromatic: 0.01,
+            ior: 1.333,
+            sss_intensity: 0.3,
+            sss_ambient: 0.2,
+            sss_distortion: 0.1,
+            foam_color: Vec3::new(0.9, 0.95, 1.0),
+            foam_threshold: 0.5,
+            foam_softness: 0.3,
+            normal_map: None,
+            detail_normal_map: None,
+            foam_texture: None,
+            caustics_texture: None,
+        }
+    }
+
+    pub fn lake() -> Self {
+        let mut mat = Self::ocean();
+        mat.shallow_color = Vec3::new(0.15, 0.35, 0.4);
+        mat.deep_color = Vec3::new(0.05, 0.15, 0.2);
+        mat.roughness = 0.05;
+        mat
+    }
+
+    pub fn river() -> Self {
+        let mut mat = Self::ocean();
+        mat.shallow_color = Vec3::new(0.2, 0.4, 0.35);
+        mat.deep_color = Vec3::new(0.1, 0.2, 0.15);
+        mat.foam_threshold = 0.3;
+        mat
+    }
+
+    pub fn pool() -> Self {
+        Self {
+            shallow_color: Vec3::new(0.3, 0.6, 0.8),
+            deep_color: Vec3::new(0.1, 0.3, 0.5),
+            scatter_color: Vec3::new(0.2, 0.5, 0.7),
+            depth_max: 3.0,
+            specular_intensity: 1.0,
+            roughness: 0.02,
+            fresnel_power: 5.0,
+            refraction_strength: 0.8,
+            refraction_chromatic: 0.02,
+            ior: 1.333,
+            sss_intensity: 0.1,
+            sss_ambient: 0.1,
+            sss_distortion: 0.05,
+            foam_color: Vec3::ONE,
+            foam_threshold: 0.9,
+            foam_softness: 0.1,
+            normal_map: None,
+            detail_normal_map: None,
+            foam_texture: None,
+            caustics_texture: None,
+        }
+    }
+
+    pub fn bind(&self, context: &RenderContext) {
+        context.set_uniform("u_shallow_color", self.shallow_color);
+        context.set_uniform("u_deep_color", self.deep_color);
+        context.set_uniform("u_scatter_color", self.scatter_color);
+        context.set_uniform("u_depth_max", self.depth_max);
+        context.set_uniform("u_specular_intensity", self.specular_intensity);
+        context.set_uniform("u_roughness", self.roughness);
+        context.set_uniform("u_fresnel_power", self.fresnel_power);
+        context.set_uniform("u_refraction_strength", self.refraction_strength);
+        context.set_uniform("u_refraction_chromatic", self.refraction_chromatic);
+        context.set_uniform("u_ior", self.ior);
+        context.set_uniform("u_sss_intensity", self.sss_intensity);
+        context.set_uniform("u_sss_ambient", self.sss_ambient);
+        context.set_uniform("u_sss_distortion", self.sss_distortion);
+        context.set_uniform("u_foam_color", self.foam_color);
+        context.set_uniform("u_foam_threshold", self.foam_threshold);
+        context.set_uniform("u_foam_softness", self.foam_softness);
+
+        if let Some(ref tex) = self.normal_map {
+            context.bind_texture(0, tex);
+        }
+        if let Some(ref tex) = self.detail_normal_map {
+            context.bind_texture(1, tex);
+        }
+        if let Some(ref tex) = self.foam_texture {
+            context.bind_texture(2, tex);
+        }
+        if let Some(ref tex) = self.caustics_texture {
+            context.bind_texture(3, tex);
+        }
+    }
+}
+
+// =============================================================================
+// REGION: Underwater Rendering (WP-134)
+// =============================================================================
+
+/// Underwater rendering configuration
+pub struct UnderwaterConfig {
+    fog_color: Vec3,
+    fog_density: f32,
+    fog_height_falloff: f32,
+
+    caustics_intensity: f32,
+    caustics_scale: f32,
+    caustics_speed: f32,
+
+    godrays_enabled: bool,
+    godrays_intensity: f32,
+    godrays_decay: f32,
+
+    distortion_enabled: bool,
+    distortion_strength: f32,
+    distortion_speed: f32,
+
+    particle_density: f32,
+}
+
+/// Underwater rendering system
+pub struct UnderwaterRenderer {
+    config: UnderwaterConfig,
+    underwater_shader: Shader,
+    caustics_shader: ComputeShader,
+    godrays_shader: Shader,
+
+    // Textures
+    caustics_texture: Texture,
+    underwater_mask: Texture,
+    godray_texture: Texture,
+
+    // State
+    is_underwater: bool,
+    water_surface_height: f32,
+    depth_factor: f32,
+}
+
+impl UnderwaterRenderer {
+    pub fn new(context: &RenderContext, config: UnderwaterConfig) -> Self {
+        let caustics_texture = context.create_texture_2d(
+            512, 512,
+            TextureFormat::R16F,
+            &vec![0.0f32; 512 * 512],
+        );
+
+        Self {
+            config,
+            underwater_shader: context.load_shader("underwater"),
+            caustics_shader: context.load_compute_shader("caustics.comp"),
+            godrays_shader: context.load_shader("underwater_godrays"),
+            caustics_texture,
+            underwater_mask: context.create_texture_2d(
+                1920, 1080,
+                TextureFormat::R8,
+                &vec![0u8; 1920 * 1080],
+            ),
+            godray_texture: context.create_texture_2d(
+                960, 540,
+                TextureFormat::RGBA16F,
+                &vec![0.0f32; 960 * 540 * 4],
+            ),
+            is_underwater: false,
+            water_surface_height: 0.0,
+            depth_factor: 0.0,
+        }
+    }
+
+    pub fn update(&mut self, context: &RenderContext, camera_pos: Vec3, water_height: f32, time: f32) {
+        self.water_surface_height = water_height;
+        self.is_underwater = camera_pos.y < water_height;
+
+        if self.is_underwater {
+            self.depth_factor = (water_height - camera_pos.y).max(0.0);
+
+            // Update caustics
+            self.update_caustics(context, time);
+        }
+    }
+
+    fn update_caustics(&self, context: &RenderContext, time: f32) {
+        context.set_uniform("u_time", time);
+        context.set_uniform("u_caustics_scale", self.config.caustics_scale);
+        context.set_uniform("u_caustics_speed", self.config.caustics_speed);
+
+        context.dispatch_compute(&self.caustics_shader, 512 / 8, 512 / 8, 1);
+    }
+
+    pub fn render_underwater_effects(&self, context: &RenderContext, camera: &Camera,
+                                       scene_color: &Texture, scene_depth: &Texture,
+                                       light_dir: Vec3) {
+        if !self.is_underwater {
+            return;
+        }
+
+        // Render god rays if enabled
+        if self.config.godrays_enabled {
+            self.render_godrays(context, camera, scene_depth, light_dir);
+        }
+
+        // Apply underwater post-processing
+        context.bind_shader(&self.underwater_shader);
+        context.bind_texture(0, scene_color);
+        context.bind_texture(1, scene_depth);
+        context.bind_texture(2, &self.caustics_texture);
+        context.bind_texture(3, &self.godray_texture);
+
+        context.set_uniform("u_fog_color", self.config.fog_color);
+        context.set_uniform("u_fog_density", self.config.fog_density);
+        context.set_uniform("u_fog_height_falloff", self.config.fog_height_falloff);
+        context.set_uniform("u_caustics_intensity", self.config.caustics_intensity);
+        context.set_uniform("u_depth_factor", self.depth_factor);
+        context.set_uniform("u_distortion_strength", self.config.distortion_strength);
+        context.set_uniform("u_water_surface_height", self.water_surface_height);
+
+        context.draw_fullscreen_quad();
+    }
+
+    fn render_godrays(&self, context: &RenderContext, camera: &Camera,
+                      scene_depth: &Texture, light_dir: Vec3) {
+        context.set_render_target(&self.godray_texture);
+        context.bind_shader(&self.godrays_shader);
+        context.bind_texture(0, scene_depth);
+
+        // Calculate light screen position
+        let light_pos = camera.position + light_dir * 1000.0;
+        let light_clip = camera.view_projection() * Vec4::from_point(light_pos);
+        let light_screen = Vec2::new(
+            light_clip.x / light_clip.w * 0.5 + 0.5,
+            light_clip.y / light_clip.w * 0.5 + 0.5,
+        );
+
+        context.set_uniform("u_light_screen_pos", light_screen);
+        context.set_uniform("u_godrays_intensity", self.config.godrays_intensity);
+        context.set_uniform("u_godrays_decay", self.config.godrays_decay);
+        context.set_uniform("u_surface_height", self.water_surface_height);
+
+        context.draw_fullscreen_quad();
+    }
+
+    pub fn is_underwater(&self) -> bool {
+        self.is_underwater
+    }
+}
+
+// =============================================================================
+// REGION: Caustics (WP-135)
+// =============================================================================
+
+/// Caustics rendering system
+pub struct CausticsRenderer {
+    resolution: u32,
+    caustics_texture: Texture,
+    caustics_volume: Texture,
+    compute_shader: ComputeShader,
+    project_shader: Shader,
+
+    intensity: f32,
+    scale: f32,
+    speed: f32,
+    depth_fade: f32,
+    chromatic_aberration: f32,
+}
+
+impl CausticsRenderer {
+    pub fn new(context: &RenderContext, resolution: u32) -> Self {
+        let caustics_texture = context.create_texture_2d(
+            resolution, resolution,
+            TextureFormat::RGBA16F,
+            &vec![0.0f32; (resolution * resolution * 4) as usize],
+        );
+
+        let caustics_volume = context.create_texture_3d(
+            resolution, resolution, 64,
+            TextureFormat::R16F,
+            &vec![0.0f32; (resolution * resolution * 64) as usize],
+        );
+
+        Self {
+            resolution,
+            caustics_texture,
+            caustics_volume,
+            compute_shader: context.load_compute_shader("caustics_compute.comp"),
+            project_shader: context.load_shader("caustics_project"),
+            intensity: 1.0,
+            scale: 1.0,
+            speed: 1.0,
+            depth_fade: 0.1,
+            chromatic_aberration: 0.02,
+        }
+    }
+
+    /// Compute caustics from water surface normals
+    pub fn compute(&self, context: &RenderContext, water_normals: &Texture,
+                   light_dir: Vec3, time: f32) {
+        context.bind_texture(0, water_normals);
+
+        context.set_uniform("u_light_dir", light_dir);
+        context.set_uniform("u_time", time);
+        context.set_uniform("u_scale", self.scale);
+        context.set_uniform("u_speed", self.speed);
+        context.set_uniform("u_intensity", self.intensity);
+        context.set_uniform("u_chromatic_aberration", self.chromatic_aberration);
+
+        let groups = (self.resolution + 7) / 8;
+        context.dispatch_compute(&self.compute_shader, groups, groups, 1);
+    }
+
+    /// Project caustics onto scene
+    pub fn project(&self, context: &RenderContext, camera: &Camera,
+                   water_height: f32, light_dir: Vec3) {
+        context.bind_shader(&self.project_shader);
+        context.bind_texture(0, &self.caustics_texture);
+
+        context.set_uniform("u_view_proj", camera.view_projection());
+        context.set_uniform("u_water_height", water_height);
+        context.set_uniform("u_light_dir", light_dir);
+        context.set_uniform("u_depth_fade", self.depth_fade);
+        context.set_uniform("u_intensity", self.intensity);
+
+        context.draw_fullscreen_quad();
+    }
+
+    pub fn get_caustics_texture(&self) -> &Texture {
+        &self.caustics_texture
+    }
+}
+
+// =============================================================================
+// REGION: Foam System (WP-136)
+// =============================================================================
+
+/// Foam configuration
+pub struct FoamConfig {
+    foam_color: Vec3,
+    foam_scale: f32,
+    foam_speed: f32,
+    foam_persistence: f32,
+    foam_coverage: f32,
+    foam_shore_width: f32,
+    foam_shore_intensity: f32,
+    foam_wave_threshold: f32,
+}
+
+/// Foam rendering system
+pub struct FoamRenderer {
+    config: FoamConfig,
+    foam_texture: Texture,
+    foam_normal: Texture,
+    shore_foam_texture: Texture,
+
+    // Persistent foam buffer
+    foam_accumulation: Texture,
+    foam_compute_shader: ComputeShader,
+    foam_decay_shader: ComputeShader,
+
+    // Shoreline
+    shore_distance_field: Option<Texture>,
+}
+
+impl FoamRenderer {
+    pub fn new(context: &RenderContext, resolution: u32, config: FoamConfig) -> Self {
+        let foam_accumulation = context.create_texture_2d(
+            resolution, resolution,
+            TextureFormat::RG16F,  // Amount, age
+            &vec![0.0f32; (resolution * resolution * 2) as usize],
+        );
+
+        Self {
+            config,
+            foam_texture: context.load_texture("foam_diffuse.png"),
+            foam_normal: context.load_texture("foam_normal.png"),
+            shore_foam_texture: context.load_texture("shore_foam.png"),
+            foam_accumulation,
+            foam_compute_shader: context.load_compute_shader("foam_compute.comp"),
+            foam_decay_shader: context.load_compute_shader("foam_decay.comp"),
+            shore_distance_field: None,
+        }
+    }
+
+    pub fn set_shore_distance_field(&mut self, sdf: Texture) {
+        self.shore_distance_field = Some(sdf);
+    }
+
+    /// Update foam based on wave folding
+    pub fn update(&self, context: &RenderContext, folding_map: &Texture, dt: f32, time: f32) {
+        // Accumulate foam from wave folding
+        context.bind_texture(0, folding_map);
+        context.bind_texture(1, &self.foam_accumulation);
+
+        context.set_uniform("u_threshold", self.config.foam_wave_threshold);
+        context.set_uniform("u_accumulation_rate", 1.0);
+        context.set_uniform("u_time", time);
+
+        let resolution = self.foam_accumulation.width();
+        let groups = (resolution + 7) / 8;
+        context.dispatch_compute(&self.foam_compute_shader, groups, groups, 1);
+
+        // Decay foam over time
+        context.set_uniform("u_decay_rate", self.config.foam_persistence);
+        context.set_uniform("u_dt", dt);
+        context.dispatch_compute(&self.foam_decay_shader, groups, groups, 1);
+    }
+
+    /// Calculate foam intensity at position
+    pub fn sample_foam(&self, uv: Vec2, depth: f32) -> f32 {
+        let mut foam = 0.0;
+
+        // Wave-generated foam (from accumulation buffer)
+        // foam += sample_texture(foam_accumulation, uv).r;
+
+        // Shore foam
+        if let Some(ref sdf) = self.shore_distance_field {
+            let shore_dist = 0.0;  // Sample SDF
+            if shore_dist < self.config.foam_shore_width {
+                let shore_factor = 1.0 - shore_dist / self.config.foam_shore_width;
+                foam += shore_factor * self.config.foam_shore_intensity;
+            }
+        }
+
+        // Depth-based foam
+        foam += (1.0 - depth / 2.0).max(0.0) * self.config.foam_coverage;
+
+        foam.min(1.0)
+    }
+
+    pub fn bind(&self, context: &RenderContext) {
+        context.bind_texture(4, &self.foam_texture);
+        context.bind_texture(5, &self.foam_normal);
+        context.bind_texture(6, &self.foam_accumulation);
+
+        if let Some(ref sdf) = self.shore_distance_field {
+            context.bind_texture(7, sdf);
+        }
+
+        context.set_uniform("u_foam_color", self.config.foam_color);
+        context.set_uniform("u_foam_scale", self.config.foam_scale);
+        context.set_uniform("u_foam_shore_width", self.config.foam_shore_width);
+    }
+}
+
+// =============================================================================
+// REGION: Shoreline Effects (WP-137)
+// =============================================================================
+
+/// Shoreline wave configuration
+pub struct ShorelineConfig {
+    wave_amplitude: f32,
+    wave_frequency: f32,
+    wave_speed: f32,
+    wave_steepness: f32,
+    break_distance: f32,
+    break_intensity: f32,
+    wet_sand_distance: f32,
+    wet_sand_intensity: f32,
+}
+
+/// Shoreline rendering system
+pub struct ShorelineRenderer {
+    config: ShorelineConfig,
+    shore_distance_field: Texture,
+    shore_gradient: Texture,
+    wet_sand_mask: Texture,
+
+    compute_shore_sdf_shader: ComputeShader,
+    shore_wave_shader: ComputeShader,
+}
+
+impl ShorelineRenderer {
+    pub fn new(context: &RenderContext, resolution: u32, config: ShorelineConfig) -> Self {
+        let shore_distance_field = context.create_texture_2d(
+            resolution, resolution,
+            TextureFormat::RG16F,  // Distance, gradient direction
+            &vec![0.0f32; (resolution * resolution * 2) as usize],
+        );
+
+        let shore_gradient = context.create_texture_2d(
+            resolution, resolution,
+            TextureFormat::RG16F,
+            &vec![0.0f32; (resolution * resolution * 2) as usize],
+        );
+
+        let wet_sand_mask = context.create_texture_2d(
+            resolution, resolution,
+            TextureFormat::R8,
+            &vec![0u8; (resolution * resolution) as usize],
+        );
+
+        Self {
+            config,
+            shore_distance_field,
+            shore_gradient,
+            wet_sand_mask,
+            compute_shore_sdf_shader: context.load_compute_shader("shore_sdf.comp"),
+            shore_wave_shader: context.load_compute_shader("shore_wave.comp"),
+        }
+    }
+
+    /// Compute shore distance field from terrain
+    pub fn compute_shore_sdf(&self, context: &RenderContext, terrain_heightmap: &Texture,
+                              water_height: f32) {
+        context.bind_texture(0, terrain_heightmap);
+
+        context.set_uniform("u_water_height", water_height);
+
+        let resolution = self.shore_distance_field.width();
+        let groups = (resolution + 7) / 8;
+        context.dispatch_compute(&self.compute_shore_sdf_shader, groups, groups, 1);
+    }
+
+    /// Update shoreline effects
+    pub fn update(&self, context: &RenderContext, time: f32, dt: f32) {
+        context.bind_texture(0, &self.shore_distance_field);
+
+        context.set_uniform("u_time", time);
+        context.set_uniform("u_wave_amplitude", self.config.wave_amplitude);
+        context.set_uniform("u_wave_frequency", self.config.wave_frequency);
+        context.set_uniform("u_wave_speed", self.config.wave_speed);
+        context.set_uniform("u_wave_steepness", self.config.wave_steepness);
+        context.set_uniform("u_break_distance", self.config.break_distance);
+        context.set_uniform("u_break_intensity", self.config.break_intensity);
+
+        let resolution = self.shore_distance_field.width();
+        let groups = (resolution + 7) / 8;
+        context.dispatch_compute(&self.shore_wave_shader, groups, groups, 1);
+    }
+
+    /// Get wave height modification at shore
+    pub fn get_shore_wave_height(&self, distance_to_shore: f32, time: f32) -> f32 {
+        if distance_to_shore > self.config.break_distance * 2.0 {
+            return 0.0;
+        }
+
+        let phase = time * self.config.wave_speed - distance_to_shore * self.config.wave_frequency;
+
+        // Wave breaks near shore
+        let break_factor = (distance_to_shore / self.config.break_distance).min(1.0);
+
+        // Steeper waves near shore
+        let steepness = self.config.wave_steepness * (1.0 + (1.0 - break_factor) * 2.0);
+
+        let height = self.config.wave_amplitude * phase.sin() * break_factor;
+
+        // Add breaking crest
+        if break_factor < 0.3 {
+            height + self.config.break_intensity * (1.0 - break_factor / 0.3)
+        } else {
+            height
+        }
+    }
+
+    pub fn get_shore_distance_field(&self) -> &Texture {
+        &self.shore_distance_field
+    }
+
+    pub fn get_wet_sand_mask(&self) -> &Texture {
+        &self.wet_sand_mask
+    }
+}
+
+// =============================================================================
+// REGION: Rivers and Lakes (WP-138)
+// =============================================================================
+
+/// River segment definition
+pub struct RiverSegment {
+    start: Vec3,
+    end: Vec3,
+    start_width: f32,
+    end_width: f32,
+    flow_speed: f32,
+    depth: f32,
+}
+
+/// River spline for curved rivers
+pub struct RiverSpline {
+    control_points: Vec<Vec3>,
+    widths: Vec<f32>,
+    depths: Vec<f32>,
+    flow_speeds: Vec<f32>,
+}
+
+/// River rendering system
+pub struct RiverRenderer {
+    splines: Vec<RiverSpline>,
+    river_mesh: Buffer<WaterVertex>,
+    river_indices: Buffer<u32>,
+    flow_map: Texture,
+    foam_map: Texture,
+
+    river_shader: Shader,
+    flow_compute_shader: ComputeShader,
+
+    time: f32,
+}
+
+impl RiverRenderer {
+    pub fn new(context: &RenderContext) -> Self {
+        Self {
+            splines: Vec::new(),
+            river_mesh: context.create_buffer::<WaterVertex>(0),
+            river_indices: context.create_buffer::<u32>(0),
+            flow_map: context.create_texture_2d(512, 512, TextureFormat::RG16F, &vec![0.0f32; 512 * 512 * 2]),
+            foam_map: context.create_texture_2d(512, 512, TextureFormat::R16F, &vec![0.0f32; 512 * 512]),
+            river_shader: context.load_shader("river"),
+            flow_compute_shader: context.load_compute_shader("river_flow.comp"),
+            time: 0.0,
+        }
+    }
+
+    pub fn add_spline(&mut self, spline: RiverSpline) {
+        self.splines.push(spline);
+    }
+
+    /// Generate river mesh from splines
+    pub fn generate_mesh(&mut self, context: &RenderContext, segments_per_unit: f32) {
+        let mut vertices = Vec::new();
+        let mut indices = Vec::new();
+
+        for spline in &self.splines {
+            self.generate_spline_mesh(spline, segments_per_unit, &mut vertices, &mut indices);
+        }
+
+        self.river_mesh = context.create_buffer_with_data(&vertices);
+        self.river_indices = context.create_buffer_with_data(&indices);
+    }
+
+    fn generate_spline_mesh(&self, spline: &RiverSpline, segments_per_unit: f32,
+                            vertices: &mut Vec<WaterVertex>, indices: &mut Vec<u32>) {
+        if spline.control_points.len() < 2 {
+            return;
+        }
+
+        let base_vertex = vertices.len() as u32;
+
+        // Calculate spline length
+        let mut length = 0.0;
+        for i in 0..spline.control_points.len() - 1 {
+            length += (spline.control_points[i + 1] - spline.control_points[i]).length();
+        }
+
+        let segments = (length * segments_per_unit) as u32;
+
+        for i in 0..=segments {
+            let t = i as f32 / segments as f32;
+
+            let (position, tangent) = self.evaluate_spline(spline, t);
+            let width = self.interpolate_width(spline, t);
+
+            let right = tangent.cross(Vec3::Y).normalize();
+
+            // Left and right vertices
+            vertices.push(WaterVertex {
+                position: position - right * width * 0.5,
+                texcoord: Vec2::new(0.0, t * length),
+                _pad: 0.0,
+            });
+            vertices.push(WaterVertex {
+                position: position + right * width * 0.5,
+                texcoord: Vec2::new(1.0, t * length),
+                _pad: 0.0,
+            });
+
+            if i < segments {
+                let idx = base_vertex + i * 2;
+                indices.extend_from_slice(&[
+                    idx, idx + 1, idx + 2,
+                    idx + 1, idx + 3, idx + 2,
+                ]);
+            }
+        }
+    }
+
+    fn evaluate_spline(&self, spline: &RiverSpline, t: f32) -> (Vec3, Vec3) {
+        let points = &spline.control_points;
+        let n = points.len() - 1;
+        let segment = (t * n as f32).floor() as usize;
+        let local_t = t * n as f32 - segment as f32;
+
+        let segment = segment.min(n - 1);
+
+        // Catmull-Rom spline
+        let p0 = points[segment.saturating_sub(1)];
+        let p1 = points[segment];
+        let p2 = points[(segment + 1).min(n)];
+        let p3 = points[(segment + 2).min(n)];
+
+        let t2 = local_t * local_t;
+        let t3 = t2 * local_t;
+
+        let position = 0.5 * (
+            (2.0 * p1) +
+            (-p0 + p2) * local_t +
+            (2.0 * p0 - 5.0 * p1 + 4.0 * p2 - p3) * t2 +
+            (-p0 + 3.0 * p1 - 3.0 * p2 + p3) * t3
+        );
+
+        // Tangent (derivative)
+        let tangent = 0.5 * (
+            (-p0 + p2) +
+            (4.0 * p0 - 10.0 * p1 + 8.0 * p2 - 2.0 * p3) * local_t +
+            (-3.0 * p0 + 9.0 * p1 - 9.0 * p2 + 3.0 * p3) * t2
+        );
+
+        (position, tangent.normalize())
+    }
+
+    fn interpolate_width(&self, spline: &RiverSpline, t: f32) -> f32 {
+        if spline.widths.len() < 2 {
+            return spline.widths.get(0).copied().unwrap_or(5.0);
+        }
+
+        let n = spline.widths.len() - 1;
+        let segment = (t * n as f32).floor() as usize;
+        let local_t = t * n as f32 - segment as f32;
+
+        let w0 = spline.widths[segment.min(n)];
+        let w1 = spline.widths[(segment + 1).min(n)];
+
+        w0 + (w1 - w0) * local_t
+    }
+
+    pub fn update(&mut self, context: &RenderContext, dt: f32) {
+        self.time += dt;
+
+        // Update flow map
+        context.set_uniform("u_time", self.time);
+        context.dispatch_compute(&self.flow_compute_shader, 512 / 8, 512 / 8, 1);
+    }
+
+    pub fn render(&self, context: &RenderContext, camera: &Camera, water_material: &WaterMaterial) {
+        context.bind_shader(&self.river_shader);
+        context.bind_buffer(&self.river_mesh);
+        context.bind_buffer(&self.river_indices);
+
+        context.bind_texture(0, &self.flow_map);
+        context.bind_texture(1, &self.foam_map);
+
+        water_material.bind(context);
+
+        context.set_uniform("u_view_proj", camera.view_projection());
+        context.set_uniform("u_time", self.time);
+
+        context.draw_indexed(self.river_indices.len() as u32, 0, 0);
+    }
+}
+
+/// Lake body definition
+pub struct Lake {
+    center: Vec3,
+    bounds: AABB,
+    water_height: f32,
+    depth_map: Option<Texture>,
+    shore_distance: Texture,
+}
+
+/// Lake rendering system
+pub struct LakeRenderer {
+    lakes: Vec<Lake>,
+    mesh: WaterMesh,
+    material: WaterMaterial,
+}
+
+impl LakeRenderer {
+    pub fn new(context: &RenderContext) -> Self {
+        let config = WaterMeshConfig {
+            tile_size: 10.0,
+            num_tiles: 32,
+            min_tessellation: 1.0,
+            max_tessellation: 16.0,
+            tessellation_distance: 100.0,
+            displacement_scale: 0.2,
+        };
+
+        Self {
+            lakes: Vec::new(),
+            mesh: WaterMesh::new(context, config),
+            material: WaterMaterial::lake(),
+        }
+    }
+
+    pub fn add_lake(&mut self, lake: Lake) {
+        self.lakes.push(lake);
+    }
+
+    pub fn update(&mut self, context: &RenderContext, camera: &Camera) {
+        self.mesh.update(context, camera);
+    }
+
+    pub fn render(&self, context: &RenderContext, camera: &Camera) {
+        for lake in &self.lakes {
+            // Set lake-specific uniforms
+            context.set_uniform("u_water_height", lake.water_height);
+            context.set_uniform("u_bounds_min", lake.bounds.min);
+            context.set_uniform("u_bounds_max", lake.bounds.max);
+
+            if let Some(ref depth_map) = lake.depth_map {
+                context.bind_texture(8, depth_map);
+            }
+
+            self.material.bind(context);
+            self.mesh.render(context, camera);
+        }
+    }
+}
+
+// =============================================================================
+// REGION: Water Interaction (WP-139)
+// =============================================================================
+
+/// Water interaction types
+pub enum WaterInteractionType {
+    Splash { radius: f32, height: f32 },
+    Wake { length: f32, width: f32 },
+    Ripple { radius: f32, amplitude: f32 },
+    Displacement { shape: Texture },
+}
+
+/// Single water interaction event
+pub struct WaterInteraction {
+    position: Vec3,
+    velocity: Vec3,
+    interaction_type: WaterInteractionType,
+    time: f32,
+    duration: f32,
+    intensity: f32,
+}
+
+/// Water interaction system
+pub struct WaterInteractionSystem {
+    interactions: Vec<WaterInteraction>,
+    max_interactions: u32,
+
+    // Heightmap perturbation
+    perturbation_buffer: [Texture; 2],
+    current_buffer: u32,
+
+    // Compute shaders
+    propagate_shader: ComputeShader,
+    add_interaction_shader: ComputeShader,
+    decay_shader: ComputeShader,
+
+    // Configuration
+    wave_speed: f32,
+    damping: f32,
+    resolution: u32,
+}
+
+impl WaterInteractionSystem {
+    pub fn new(context: &RenderContext, resolution: u32, max_interactions: u32) -> Self {
+        let perturbation_buffer = [
+            context.create_texture_2d(resolution, resolution, TextureFormat::RG32F,
+                &vec![0.0f32; (resolution * resolution * 2) as usize]),
+            context.create_texture_2d(resolution, resolution, TextureFormat::RG32F,
+                &vec![0.0f32; (resolution * resolution * 2) as usize]),
+        ];
+
+        Self {
+            interactions: Vec::new(),
+            max_interactions,
+            perturbation_buffer,
+            current_buffer: 0,
+            propagate_shader: context.load_compute_shader("water_propagate.comp"),
+            add_interaction_shader: context.load_compute_shader("water_add_interaction.comp"),
+            decay_shader: context.load_compute_shader("water_decay.comp"),
+            wave_speed: 1.0,
+            damping: 0.98,
+            resolution,
+        }
+    }
+
+    pub fn add_interaction(&mut self, interaction: WaterInteraction) {
+        if self.interactions.len() < self.max_interactions as usize {
+            self.interactions.push(interaction);
+        }
+    }
+
+    pub fn add_splash(&mut self, position: Vec3, radius: f32, height: f32) {
+        self.add_interaction(WaterInteraction {
+            position,
+            velocity: Vec3::ZERO,
+            interaction_type: WaterInteractionType::Splash { radius, height },
+            time: 0.0,
+            duration: 2.0,
+            intensity: 1.0,
+        });
+    }
+
+    pub fn add_wake(&mut self, position: Vec3, velocity: Vec3, length: f32, width: f32) {
+        self.add_interaction(WaterInteraction {
+            position,
+            velocity,
+            interaction_type: WaterInteractionType::Wake { length, width },
+            time: 0.0,
+            duration: 3.0,
+            intensity: velocity.length() / 10.0,
+        });
+    }
+
+    pub fn update(&mut self, context: &RenderContext, dt: f32) {
+        // Update interaction timers
+        self.interactions.retain_mut(|i| {
+            i.time += dt;
+            i.time < i.duration
+        });
+
+        // Apply new interactions
+        for interaction in &self.interactions {
+            if interaction.time < dt * 2.0 {
+                self.apply_interaction(context, interaction);
+            }
+        }
+
+        // Propagate waves
+        let prev_buffer = self.current_buffer;
+        self.current_buffer = 1 - self.current_buffer;
+
+        context.bind_texture(0, &self.perturbation_buffer[prev_buffer as usize]);
+        context.set_uniform("u_wave_speed", self.wave_speed);
+        context.set_uniform("u_damping", self.damping);
+        context.set_uniform("u_dt", dt);
+
+        let groups = (self.resolution + 7) / 8;
+        context.dispatch_compute(&self.propagate_shader, groups, groups, 1);
+    }
+
+    fn apply_interaction(&self, context: &RenderContext, interaction: &WaterInteraction) {
+        context.set_uniform("u_position", interaction.position);
+        context.set_uniform("u_velocity", interaction.velocity);
+        context.set_uniform("u_intensity", interaction.intensity);
+        context.set_uniform("u_time", interaction.time);
+
+        match &interaction.interaction_type {
+            WaterInteractionType::Splash { radius, height } => {
+                context.set_uniform("u_radius", *radius);
+                context.set_uniform("u_height", *height);
+                context.set_uniform("u_type", 0u32);
+            }
+            WaterInteractionType::Wake { length, width } => {
+                context.set_uniform("u_length", *length);
+                context.set_uniform("u_width", *width);
+                context.set_uniform("u_type", 1u32);
+            }
+            WaterInteractionType::Ripple { radius, amplitude } => {
+                context.set_uniform("u_radius", *radius);
+                context.set_uniform("u_amplitude", *amplitude);
+                context.set_uniform("u_type", 2u32);
+            }
+            WaterInteractionType::Displacement { shape } => {
+                context.bind_texture(1, shape);
+                context.set_uniform("u_type", 3u32);
+            }
+        }
+
+        let groups = (self.resolution + 7) / 8;
+        context.dispatch_compute(&self.add_interaction_shader, groups, groups, 1);
+    }
+
+    pub fn get_perturbation_texture(&self) -> &Texture {
+        &self.perturbation_buffer[self.current_buffer as usize]
+    }
+}
+
+// =============================================================================
+// REGION: Complete Water System (WP-140)
+// =============================================================================
+
+/// Complete water rendering system
+pub struct WaterSystem {
+    // Simulation
+    fft_ocean: FFTOcean,
+    gerstner_waves: GerstnerWaveSystem,
+
+    // Mesh
+    mesh: WaterMesh,
+
+    // Shading
+    material: WaterMaterial,
+    underwater: UnderwaterRenderer,
+
+    // Effects
+    caustics: CausticsRenderer,
+    foam: FoamRenderer,
+    shoreline: ShorelineRenderer,
+    interactions: WaterInteractionSystem,
+
+    // Rivers and lakes
+    rivers: RiverRenderer,
+    lakes: LakeRenderer,
+
+    // Reflections
+    reflection_texture: Texture,
+    refraction_texture: Texture,
+    reflection_depth: Texture,
+
+    // Configuration
+    config: WaterConfig,
+
+    // State
+    time: f32,
+}
+
+pub struct WaterConfig {
+    ocean_enabled: bool,
+    gerstner_enabled: bool,
+    fft_resolution: u32,
+    patch_size: f32,
+    mesh_resolution: u32,
+    reflection_resolution: u32,
+    caustics_enabled: bool,
+    foam_enabled: bool,
+    underwater_enabled: bool,
+}
+
+impl WaterSystem {
+    pub fn new(context: &RenderContext, config: WaterConfig) -> Self {
+        let mesh_config = WaterMeshConfig {
+            tile_size: config.patch_size / config.mesh_resolution as f32,
+            num_tiles: config.mesh_resolution,
+            min_tessellation: 1.0,
+            max_tessellation: 64.0,
+            tessellation_distance: 200.0,
+            displacement_scale: 2.0,
+        };
+
+        let foam_config = FoamConfig {
+            foam_color: Vec3::new(0.9, 0.95, 1.0),
+            foam_scale: 1.0,
+            foam_speed: 1.0,
+            foam_persistence: 0.95,
+            foam_coverage: 0.3,
+            foam_shore_width: 10.0,
+            foam_shore_intensity: 0.8,
+            foam_wave_threshold: 0.5,
+        };
+
+        let shoreline_config = ShorelineConfig {
+            wave_amplitude: 0.5,
+            wave_frequency: 0.5,
+            wave_speed: 2.0,
+            wave_steepness: 0.3,
+            break_distance: 20.0,
+            break_intensity: 0.5,
+            wet_sand_distance: 5.0,
+            wet_sand_intensity: 0.3,
+        };
+
+        let underwater_config = UnderwaterConfig {
+            fog_color: Vec3::new(0.0, 0.2, 0.3),
+            fog_density: 0.1,
+            fog_height_falloff: 0.5,
+            caustics_intensity: 0.5,
+            caustics_scale: 1.0,
+            caustics_speed: 1.0,
+            godrays_enabled: true,
+            godrays_intensity: 0.3,
+            godrays_decay: 0.95,
+            distortion_enabled: true,
+            distortion_strength: 0.02,
+            distortion_speed: 1.0,
+            particle_density: 100.0,
+        };
+
+        Self {
+            fft_ocean: FFTOcean::new(context, config.fft_resolution, config.patch_size),
+            gerstner_waves: GerstnerWaveSystem::new(context, 16),
+            mesh: WaterMesh::new(context, mesh_config),
+            material: WaterMaterial::ocean(),
+            underwater: UnderwaterRenderer::new(context, underwater_config),
+            caustics: CausticsRenderer::new(context, 512),
+            foam: FoamRenderer::new(context, 512, foam_config),
+            shoreline: ShorelineRenderer::new(context, 512, shoreline_config),
+            interactions: WaterInteractionSystem::new(context, 512, 64),
+            rivers: RiverRenderer::new(context),
+            lakes: LakeRenderer::new(context),
+            reflection_texture: context.create_texture_2d(
+                config.reflection_resolution, config.reflection_resolution,
+                TextureFormat::RGBA16F,
+                &vec![0.0f32; (config.reflection_resolution * config.reflection_resolution * 4) as usize],
+            ),
+            refraction_texture: context.create_texture_2d(
+                config.reflection_resolution, config.reflection_resolution,
+                TextureFormat::RGBA16F,
+                &vec![0.0f32; (config.reflection_resolution * config.reflection_resolution * 4) as usize],
+            ),
+            reflection_depth: context.create_depth_texture(
+                config.reflection_resolution,
+                config.reflection_resolution,
+            ),
+            config,
+            time: 0.0,
+        }
+    }
+
+    pub fn update(&mut self, context: &RenderContext, camera: &Camera, dt: f32) {
+        self.time += dt;
+
+        // Update simulation
+        if self.config.ocean_enabled {
+            self.fft_ocean.update(context, dt);
+        }
+
+        if self.config.gerstner_enabled {
+            self.gerstner_waves.update_gpu_buffer(context);
+        }
+
+        // Update mesh
+        self.mesh.update(context, camera);
+
+        // Update effects
+        if self.config.foam_enabled {
+            self.foam.update(context, &self.fft_ocean.folding_texture, dt, self.time);
+        }
+
+        self.shoreline.update(context, self.time, dt);
+        self.interactions.update(context, dt);
+
+        // Update underwater if enabled
+        if self.config.underwater_enabled {
+            self.underwater.update(context, camera.position, 0.0, self.time);
+
+            if self.config.caustics_enabled {
+                self.caustics.compute(context, &self.fft_ocean.normal_texture,
+                                       Vec3::new(0.0, -1.0, 0.5).normalize(), self.time);
+            }
+        }
+
+        // Update rivers and lakes
+        self.rivers.update(context, dt);
+        self.lakes.update(context, camera);
+    }
+
+    pub fn render_reflections(&self, context: &RenderContext, camera: &Camera,
+                               scene_render: impl Fn(&RenderContext, &Camera)) {
+        // Set up reflection camera (mirrored across water plane)
+        let water_height = 0.0;
+        let mut reflection_camera = camera.clone();
+        reflection_camera.position.y = 2.0 * water_height - camera.position.y;
+        reflection_camera.forward.y = -camera.forward.y;
+        reflection_camera.up.y = -camera.up.y;
+
+        context.set_render_target(&self.reflection_texture);
+        context.set_depth_target(&self.reflection_depth);
+        context.clear(Vec4::new(0.0, 0.0, 0.0, 0.0));
+
+        // Enable clip plane
+        context.set_clip_plane(Vec4::new(0.0, 1.0, 0.0, -water_height));
+
+        scene_render(context, &reflection_camera);
+
+        context.disable_clip_plane();
+    }
+
+    pub fn render_refractions(&self, context: &RenderContext, camera: &Camera,
+                               scene_render: impl Fn(&RenderContext, &Camera)) {
+        context.set_render_target(&self.refraction_texture);
+        context.clear(Vec4::new(0.0, 0.0, 0.0, 0.0));
+
+        let water_height = 0.0;
+        context.set_clip_plane(Vec4::new(0.0, -1.0, 0.0, water_height));
+
+        scene_render(context, camera);
+
+        context.disable_clip_plane();
+    }
+
+    pub fn render(&self, context: &RenderContext, camera: &Camera, light_dir: Vec3) {
+        // Bind simulation textures
+        context.bind_texture(0, &self.fft_ocean.displacement_texture);
+        context.bind_texture(1, &self.fft_ocean.normal_texture);
+        context.bind_texture(2, &self.reflection_texture);
+        context.bind_texture(3, &self.refraction_texture);
+
+        // Bind effect textures
+        self.foam.bind(context);
+
+        // Bind material
+        self.material.bind(context);
+
+        // Render main water surface
+        context.set_uniform("u_time", self.time);
+        context.set_uniform("u_light_dir", light_dir);
+        context.set_uniform("u_camera_pos", camera.position);
+
+        self.mesh.render(context, camera);
+
+        // Render rivers
+        self.rivers.render(context, camera, &self.material);
+
+        // Render lakes
+        self.lakes.render(context, camera);
+
+        // Render caustics on underwater surfaces
+        if self.config.caustics_enabled && !self.underwater.is_underwater() {
+            self.caustics.project(context, camera, 0.0, light_dir);
+        }
+    }
+
+    pub fn render_underwater(&self, context: &RenderContext, camera: &Camera,
+                              scene_color: &Texture, scene_depth: &Texture,
+                              light_dir: Vec3) {
+        if self.config.underwater_enabled {
+            self.underwater.render_underwater_effects(context, camera,
+                                                       scene_color, scene_depth, light_dir);
+        }
+    }
+
+    /// Get water height at world position
+    pub fn get_height_at(&self, x: f32, z: f32) -> f32 {
+        let mut height = 0.0;
+
+        if self.config.ocean_enabled {
+            height += self.fft_ocean.get_displacement_at(x, z).y;
+        }
+
+        if self.config.gerstner_enabled {
+            height += self.gerstner_waves.displacement(Vec2::new(x, z), self.time).y;
+        }
+
+        height
+    }
+
+    /// Get water normal at world position
+    pub fn get_normal_at(&self, x: f32, z: f32) -> Vec3 {
+        if self.config.ocean_enabled {
+            self.fft_ocean.get_normal_at(x, z)
+        } else if self.config.gerstner_enabled {
+            self.gerstner_waves.normal(Vec2::new(x, z), self.time)
+        } else {
+            Vec3::Y
+        }
+    }
+
+    pub fn add_splash(&mut self, position: Vec3, radius: f32, height: f32) {
+        self.interactions.add_splash(position, radius, height);
+    }
+
+    pub fn add_wake(&mut self, position: Vec3, velocity: Vec3) {
+        self.interactions.add_wake(position, velocity, 5.0, 1.0);
+    }
+
+    pub fn is_underwater(&self, position: Vec3) -> bool {
+        position.y < self.get_height_at(position.x, position.z)
+    }
+}
+
+// =============================================================================
+// REGION: Tests
+// =============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_spectrum_phillips() {
+        let spectrum = OceanSpectrum::new(SpectrumType::Phillips);
+        let k = Vec2::new(0.1, 0.0);
+
+        let value = spectrum.phillips(k);
+        assert!(value >= 0.0);
+    }
+
+    #[test]
+    fn test_gerstner_wave() {
+        let wave = GerstnerWave::new(Vec2::new(1.0, 0.0), 0.5, 10.0);
+
+        let displacement = wave.displacement(Vec2::ZERO, 0.0);
+        assert!(displacement.length() < wave.amplitude * 2.0);
+    }
+
+    #[test]
+    fn test_gerstner_system() {
+        let context = RenderContext::mock();
+        let mut system = GerstnerWaveSystem::new(&context, 16);
+
+        system.generate_from_wind(10.0, Vec2::X, 8);
+        assert_eq!(system.waves.len(), 8);
+    }
+
+    #[test]
+    fn test_water_material_presets() {
+        let ocean = WaterMaterial::ocean();
+        let lake = WaterMaterial::lake();
+        let pool = WaterMaterial::pool();
+
+        assert!(ocean.roughness > lake.roughness);
+        assert!(pool.refraction_strength > ocean.refraction_strength);
+    }
+
+    #[test]
+    fn test_foam_config() {
+        let config = FoamConfig {
+            foam_color: Vec3::ONE,
+            foam_scale: 1.0,
+            foam_speed: 1.0,
+            foam_persistence: 0.95,
+            foam_coverage: 0.3,
+            foam_shore_width: 10.0,
+            foam_shore_intensity: 0.8,
+            foam_wave_threshold: 0.5,
+        };
+
+        assert!(config.foam_persistence > 0.0 && config.foam_persistence <= 1.0);
+    }
+
+    #[test]
+    fn test_water_interaction() {
+        let context = RenderContext::mock();
+        let mut interactions = WaterInteractionSystem::new(&context, 256, 32);
+
+        interactions.add_splash(Vec3::ZERO, 1.0, 0.5);
+        assert_eq!(interactions.interactions.len(), 1);
+    }
+
+    #[test]
+    fn test_river_spline() {
+        let spline = RiverSpline {
+            control_points: vec![
+                Vec3::new(0.0, 0.0, 0.0),
+                Vec3::new(10.0, 0.0, 5.0),
+                Vec3::new(20.0, 0.0, 0.0),
+            ],
+            widths: vec![5.0, 6.0, 4.0],
+            depths: vec![2.0, 3.0, 2.0],
+            flow_speeds: vec![1.0, 1.5, 1.0],
+        };
+
+        assert_eq!(spline.control_points.len(), 3);
+    }
+
+    #[test]
+    fn test_dispersion_relation() {
+        let spectrum = OceanSpectrum::new(SpectrumType::Phillips);
+
+        // Deep water
+        let omega_deep = spectrum.dispersion(0.1);
+        assert!(omega_deep > 0.0);
+
+        // Shallow water has lower frequency
+        let mut shallow = OceanSpectrum::new(SpectrumType::Phillips);
+        shallow.depth = 1.0;
+        let omega_shallow = shallow.dispersion(0.1);
+
+        assert!(omega_shallow <= omega_deep);
+    }
+
+    #[test]
+    fn test_shoreline_config() {
+        let config = ShorelineConfig {
+            wave_amplitude: 0.5,
+            wave_frequency: 0.5,
+            wave_speed: 2.0,
+            wave_steepness: 0.3,
+            break_distance: 20.0,
+            break_intensity: 0.5,
+            wet_sand_distance: 5.0,
+            wet_sand_intensity: 0.3,
+        };
+
+        assert!(config.break_distance > config.wet_sand_distance);
+    }
+}
+
+use std::collections::HashMap;

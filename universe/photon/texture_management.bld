@@ -1,0 +1,3983 @@
+// =============================================================================
+// TEXTURE MANAGEMENT SYSTEM - Photon Renderer
+// =============================================================================
+// Comprehensive texture management including streaming, virtual texturing,
+// compression, mipmap generation, and bindless textures.
+// Techniques from Harper Engine whitepapers on texture systems.
+// =============================================================================
+
+module photon::texture_management
+
+// =============================================================================
+// TEXTURE FORMAT DEFINITIONS
+// =============================================================================
+
+/// Supported texture formats
+enum TextureFormat {
+    // Uncompressed formats
+    R8_UNORM,
+    R8_SNORM,
+    R8_UINT,
+    R8_SINT,
+    R16_FLOAT,
+    R16_UNORM,
+    R16_SNORM,
+    R16_UINT,
+    R16_SINT,
+    R32_FLOAT,
+    R32_UINT,
+    R32_SINT,
+
+    RG8_UNORM,
+    RG8_SNORM,
+    RG8_UINT,
+    RG8_SINT,
+    RG16_FLOAT,
+    RG16_UNORM,
+    RG16_SNORM,
+    RG16_UINT,
+    RG16_SINT,
+    RG32_FLOAT,
+    RG32_UINT,
+    RG32_SINT,
+
+    RGBA8_UNORM,
+    RGBA8_UNORM_SRGB,
+    RGBA8_SNORM,
+    RGBA8_UINT,
+    RGBA8_SINT,
+    RGBA16_FLOAT,
+    RGBA16_UNORM,
+    RGBA16_SNORM,
+    RGBA16_UINT,
+    RGBA16_SINT,
+    RGBA32_FLOAT,
+    RGBA32_UINT,
+    RGBA32_SINT,
+
+    RGB10A2_UNORM,
+    RGB10A2_UINT,
+    RG11B10_FLOAT,
+    RGB9E5_FLOAT,
+
+    // Depth/stencil formats
+    D16_UNORM,
+    D24_UNORM,
+    D32_FLOAT,
+    D24_UNORM_S8_UINT,
+    D32_FLOAT_S8_UINT,
+
+    // Block compressed formats (BC/DXT)
+    BC1_UNORM,          // DXT1 - RGB, 1-bit alpha
+    BC1_UNORM_SRGB,
+    BC2_UNORM,          // DXT3 - RGB with explicit alpha
+    BC2_UNORM_SRGB,
+    BC3_UNORM,          // DXT5 - RGB with interpolated alpha
+    BC3_UNORM_SRGB,
+    BC4_UNORM,          // Single channel
+    BC4_SNORM,
+    BC5_UNORM,          // Two channels (normal maps)
+    BC5_SNORM,
+    BC6H_UF16,          // HDR unsigned
+    BC6H_SF16,          // HDR signed
+    BC7_UNORM,          // High quality RGB/RGBA
+    BC7_UNORM_SRGB,
+
+    // ASTC formats (mobile)
+    ASTC_4x4_UNORM,
+    ASTC_4x4_UNORM_SRGB,
+    ASTC_5x4_UNORM,
+    ASTC_5x4_UNORM_SRGB,
+    ASTC_5x5_UNORM,
+    ASTC_5x5_UNORM_SRGB,
+    ASTC_6x5_UNORM,
+    ASTC_6x5_UNORM_SRGB,
+    ASTC_6x6_UNORM,
+    ASTC_6x6_UNORM_SRGB,
+    ASTC_8x5_UNORM,
+    ASTC_8x5_UNORM_SRGB,
+    ASTC_8x6_UNORM,
+    ASTC_8x6_UNORM_SRGB,
+    ASTC_8x8_UNORM,
+    ASTC_8x8_UNORM_SRGB,
+    ASTC_10x5_UNORM,
+    ASTC_10x5_UNORM_SRGB,
+    ASTC_10x6_UNORM,
+    ASTC_10x6_UNORM_SRGB,
+    ASTC_10x8_UNORM,
+    ASTC_10x8_UNORM_SRGB,
+    ASTC_10x10_UNORM,
+    ASTC_10x10_UNORM_SRGB,
+    ASTC_12x10_UNORM,
+    ASTC_12x10_UNORM_SRGB,
+    ASTC_12x12_UNORM,
+    ASTC_12x12_UNORM_SRGB,
+
+    // ETC formats (mobile)
+    ETC2_RGB8_UNORM,
+    ETC2_RGB8_UNORM_SRGB,
+    ETC2_RGB8A1_UNORM,
+    ETC2_RGB8A1_UNORM_SRGB,
+    ETC2_RGBA8_UNORM,
+    ETC2_RGBA8_UNORM_SRGB,
+    EAC_R11_UNORM,
+    EAC_R11_SNORM,
+    EAC_RG11_UNORM,
+    EAC_RG11_SNORM,
+}
+
+/// Texture dimension type
+enum TextureDimension {
+    Texture1D,
+    Texture2D,
+    Texture3D,
+    TextureCube,
+    Texture1DArray,
+    Texture2DArray,
+    TextureCubeArray,
+}
+
+/// Texture usage flags
+flags TextureUsage {
+    SAMPLED         = 0x01,
+    STORAGE         = 0x02,
+    RENDER_TARGET   = 0x04,
+    DEPTH_STENCIL   = 0x08,
+    TRANSFER_SRC    = 0x10,
+    TRANSFER_DST    = 0x20,
+}
+
+/// Sampler filter mode
+enum FilterMode {
+    Nearest,
+    Linear,
+}
+
+/// Sampler address mode
+enum AddressMode {
+    Repeat,
+    MirroredRepeat,
+    ClampToEdge,
+    ClampToBorder,
+}
+
+/// Comparison function for depth/shadow sampling
+enum CompareFunction {
+    Never,
+    Less,
+    Equal,
+    LessEqual,
+    Greater,
+    NotEqual,
+    GreaterEqual,
+    Always,
+}
+
+// =============================================================================
+// FORMAT UTILITIES
+// =============================================================================
+
+struct TextureFormatInfo {
+    format: TextureFormat,
+    bytes_per_pixel: f32,        // Can be fractional for compressed
+    block_width: u32,
+    block_height: u32,
+    block_bytes: u32,
+    is_compressed: bool,
+    is_srgb: bool,
+    is_depth: bool,
+    is_stencil: bool,
+    channel_count: u32,
+}
+
+fn get_format_info(format: TextureFormat) -> TextureFormatInfo {
+    match format {
+        // Uncompressed single channel
+        TextureFormat::R8_UNORM | TextureFormat::R8_SNORM |
+        TextureFormat::R8_UINT | TextureFormat::R8_SINT => TextureFormatInfo {
+            format, bytes_per_pixel: 1.0, block_width: 1, block_height: 1,
+            block_bytes: 1, is_compressed: false, is_srgb: false,
+            is_depth: false, is_stencil: false, channel_count: 1,
+        },
+        TextureFormat::R16_FLOAT | TextureFormat::R16_UNORM |
+        TextureFormat::R16_SNORM | TextureFormat::R16_UINT |
+        TextureFormat::R16_SINT => TextureFormatInfo {
+            format, bytes_per_pixel: 2.0, block_width: 1, block_height: 1,
+            block_bytes: 2, is_compressed: false, is_srgb: false,
+            is_depth: false, is_stencil: false, channel_count: 1,
+        },
+        TextureFormat::R32_FLOAT | TextureFormat::R32_UINT |
+        TextureFormat::R32_SINT => TextureFormatInfo {
+            format, bytes_per_pixel: 4.0, block_width: 1, block_height: 1,
+            block_bytes: 4, is_compressed: false, is_srgb: false,
+            is_depth: false, is_stencil: false, channel_count: 1,
+        },
+
+        // Two channel formats
+        TextureFormat::RG8_UNORM | TextureFormat::RG8_SNORM |
+        TextureFormat::RG8_UINT | TextureFormat::RG8_SINT => TextureFormatInfo {
+            format, bytes_per_pixel: 2.0, block_width: 1, block_height: 1,
+            block_bytes: 2, is_compressed: false, is_srgb: false,
+            is_depth: false, is_stencil: false, channel_count: 2,
+        },
+        TextureFormat::RG16_FLOAT | TextureFormat::RG16_UNORM |
+        TextureFormat::RG16_SNORM | TextureFormat::RG16_UINT |
+        TextureFormat::RG16_SINT => TextureFormatInfo {
+            format, bytes_per_pixel: 4.0, block_width: 1, block_height: 1,
+            block_bytes: 4, is_compressed: false, is_srgb: false,
+            is_depth: false, is_stencil: false, channel_count: 2,
+        },
+        TextureFormat::RG32_FLOAT | TextureFormat::RG32_UINT |
+        TextureFormat::RG32_SINT => TextureFormatInfo {
+            format, bytes_per_pixel: 8.0, block_width: 1, block_height: 1,
+            block_bytes: 8, is_compressed: false, is_srgb: false,
+            is_depth: false, is_stencil: false, channel_count: 2,
+        },
+
+        // Four channel formats
+        TextureFormat::RGBA8_UNORM | TextureFormat::RGBA8_SNORM |
+        TextureFormat::RGBA8_UINT | TextureFormat::RGBA8_SINT => TextureFormatInfo {
+            format, bytes_per_pixel: 4.0, block_width: 1, block_height: 1,
+            block_bytes: 4, is_compressed: false, is_srgb: false,
+            is_depth: false, is_stencil: false, channel_count: 4,
+        },
+        TextureFormat::RGBA8_UNORM_SRGB => TextureFormatInfo {
+            format, bytes_per_pixel: 4.0, block_width: 1, block_height: 1,
+            block_bytes: 4, is_compressed: false, is_srgb: true,
+            is_depth: false, is_stencil: false, channel_count: 4,
+        },
+        TextureFormat::RGBA16_FLOAT | TextureFormat::RGBA16_UNORM |
+        TextureFormat::RGBA16_SNORM | TextureFormat::RGBA16_UINT |
+        TextureFormat::RGBA16_SINT => TextureFormatInfo {
+            format, bytes_per_pixel: 8.0, block_width: 1, block_height: 1,
+            block_bytes: 8, is_compressed: false, is_srgb: false,
+            is_depth: false, is_stencil: false, channel_count: 4,
+        },
+        TextureFormat::RGBA32_FLOAT | TextureFormat::RGBA32_UINT |
+        TextureFormat::RGBA32_SINT => TextureFormatInfo {
+            format, bytes_per_pixel: 16.0, block_width: 1, block_height: 1,
+            block_bytes: 16, is_compressed: false, is_srgb: false,
+            is_depth: false, is_stencil: false, channel_count: 4,
+        },
+
+        // Packed formats
+        TextureFormat::RGB10A2_UNORM | TextureFormat::RGB10A2_UINT => TextureFormatInfo {
+            format, bytes_per_pixel: 4.0, block_width: 1, block_height: 1,
+            block_bytes: 4, is_compressed: false, is_srgb: false,
+            is_depth: false, is_stencil: false, channel_count: 4,
+        },
+        TextureFormat::RG11B10_FLOAT | TextureFormat::RGB9E5_FLOAT => TextureFormatInfo {
+            format, bytes_per_pixel: 4.0, block_width: 1, block_height: 1,
+            block_bytes: 4, is_compressed: false, is_srgb: false,
+            is_depth: false, is_stencil: false, channel_count: 3,
+        },
+
+        // Depth formats
+        TextureFormat::D16_UNORM => TextureFormatInfo {
+            format, bytes_per_pixel: 2.0, block_width: 1, block_height: 1,
+            block_bytes: 2, is_compressed: false, is_srgb: false,
+            is_depth: true, is_stencil: false, channel_count: 1,
+        },
+        TextureFormat::D24_UNORM => TextureFormatInfo {
+            format, bytes_per_pixel: 4.0, block_width: 1, block_height: 1,
+            block_bytes: 4, is_compressed: false, is_srgb: false,
+            is_depth: true, is_stencil: false, channel_count: 1,
+        },
+        TextureFormat::D32_FLOAT => TextureFormatInfo {
+            format, bytes_per_pixel: 4.0, block_width: 1, block_height: 1,
+            block_bytes: 4, is_compressed: false, is_srgb: false,
+            is_depth: true, is_stencil: false, channel_count: 1,
+        },
+        TextureFormat::D24_UNORM_S8_UINT => TextureFormatInfo {
+            format, bytes_per_pixel: 4.0, block_width: 1, block_height: 1,
+            block_bytes: 4, is_compressed: false, is_srgb: false,
+            is_depth: true, is_stencil: true, channel_count: 2,
+        },
+        TextureFormat::D32_FLOAT_S8_UINT => TextureFormatInfo {
+            format, bytes_per_pixel: 8.0, block_width: 1, block_height: 1,
+            block_bytes: 8, is_compressed: false, is_srgb: false,
+            is_depth: true, is_stencil: true, channel_count: 2,
+        },
+
+        // BC formats (4x4 blocks)
+        TextureFormat::BC1_UNORM | TextureFormat::BC1_UNORM_SRGB => TextureFormatInfo {
+            format, bytes_per_pixel: 0.5, block_width: 4, block_height: 4,
+            block_bytes: 8, is_compressed: true,
+            is_srgb: format == TextureFormat::BC1_UNORM_SRGB,
+            is_depth: false, is_stencil: false, channel_count: 4,
+        },
+        TextureFormat::BC2_UNORM | TextureFormat::BC2_UNORM_SRGB |
+        TextureFormat::BC3_UNORM | TextureFormat::BC3_UNORM_SRGB => TextureFormatInfo {
+            format, bytes_per_pixel: 1.0, block_width: 4, block_height: 4,
+            block_bytes: 16, is_compressed: true,
+            is_srgb: format == TextureFormat::BC2_UNORM_SRGB ||
+                     format == TextureFormat::BC3_UNORM_SRGB,
+            is_depth: false, is_stencil: false, channel_count: 4,
+        },
+        TextureFormat::BC4_UNORM | TextureFormat::BC4_SNORM => TextureFormatInfo {
+            format, bytes_per_pixel: 0.5, block_width: 4, block_height: 4,
+            block_bytes: 8, is_compressed: true, is_srgb: false,
+            is_depth: false, is_stencil: false, channel_count: 1,
+        },
+        TextureFormat::BC5_UNORM | TextureFormat::BC5_SNORM => TextureFormatInfo {
+            format, bytes_per_pixel: 1.0, block_width: 4, block_height: 4,
+            block_bytes: 16, is_compressed: true, is_srgb: false,
+            is_depth: false, is_stencil: false, channel_count: 2,
+        },
+        TextureFormat::BC6H_UF16 | TextureFormat::BC6H_SF16 => TextureFormatInfo {
+            format, bytes_per_pixel: 1.0, block_width: 4, block_height: 4,
+            block_bytes: 16, is_compressed: true, is_srgb: false,
+            is_depth: false, is_stencil: false, channel_count: 3,
+        },
+        TextureFormat::BC7_UNORM | TextureFormat::BC7_UNORM_SRGB => TextureFormatInfo {
+            format, bytes_per_pixel: 1.0, block_width: 4, block_height: 4,
+            block_bytes: 16, is_compressed: true,
+            is_srgb: format == TextureFormat::BC7_UNORM_SRGB,
+            is_depth: false, is_stencil: false, channel_count: 4,
+        },
+
+        // ASTC formats (variable block sizes)
+        TextureFormat::ASTC_4x4_UNORM | TextureFormat::ASTC_4x4_UNORM_SRGB => TextureFormatInfo {
+            format, bytes_per_pixel: 1.0, block_width: 4, block_height: 4,
+            block_bytes: 16, is_compressed: true,
+            is_srgb: format == TextureFormat::ASTC_4x4_UNORM_SRGB,
+            is_depth: false, is_stencil: false, channel_count: 4,
+        },
+        TextureFormat::ASTC_8x8_UNORM | TextureFormat::ASTC_8x8_UNORM_SRGB => TextureFormatInfo {
+            format, bytes_per_pixel: 0.25, block_width: 8, block_height: 8,
+            block_bytes: 16, is_compressed: true,
+            is_srgb: format == TextureFormat::ASTC_8x8_UNORM_SRGB,
+            is_depth: false, is_stencil: false, channel_count: 4,
+        },
+        TextureFormat::ASTC_12x12_UNORM | TextureFormat::ASTC_12x12_UNORM_SRGB => TextureFormatInfo {
+            format, bytes_per_pixel: 0.111, block_width: 12, block_height: 12,
+            block_bytes: 16, is_compressed: true,
+            is_srgb: format == TextureFormat::ASTC_12x12_UNORM_SRGB,
+            is_depth: false, is_stencil: false, channel_count: 4,
+        },
+
+        // ETC2 formats
+        TextureFormat::ETC2_RGB8_UNORM | TextureFormat::ETC2_RGB8_UNORM_SRGB => TextureFormatInfo {
+            format, bytes_per_pixel: 0.5, block_width: 4, block_height: 4,
+            block_bytes: 8, is_compressed: true,
+            is_srgb: format == TextureFormat::ETC2_RGB8_UNORM_SRGB,
+            is_depth: false, is_stencil: false, channel_count: 3,
+        },
+        TextureFormat::ETC2_RGBA8_UNORM | TextureFormat::ETC2_RGBA8_UNORM_SRGB => TextureFormatInfo {
+            format, bytes_per_pixel: 1.0, block_width: 4, block_height: 4,
+            block_bytes: 16, is_compressed: true,
+            is_srgb: format == TextureFormat::ETC2_RGBA8_UNORM_SRGB,
+            is_depth: false, is_stencil: false, channel_count: 4,
+        },
+
+        _ => TextureFormatInfo {
+            format, bytes_per_pixel: 4.0, block_width: 1, block_height: 1,
+            block_bytes: 4, is_compressed: false, is_srgb: false,
+            is_depth: false, is_stencil: false, channel_count: 4,
+        },
+    }
+}
+
+/// Calculate mipmap count for given dimensions
+fn calculate_mip_count(width: u32, height: u32) -> u32 {
+    let max_dim = max(width, height);
+    floor(log2(max_dim as f32)) as u32 + 1
+}
+
+/// Calculate size of a mip level
+fn calculate_mip_size(base_size: u32, mip_level: u32) -> u32 {
+    max(1, base_size >> mip_level)
+}
+
+/// Calculate byte size for a texture level
+fn calculate_level_size(width: u32, height: u32, format: TextureFormat) -> u64 {
+    let info = get_format_info(format);
+
+    if info.is_compressed {
+        let blocks_x = (width + info.block_width - 1) / info.block_width;
+        let blocks_y = (height + info.block_height - 1) / info.block_height;
+        (blocks_x * blocks_y * info.block_bytes) as u64
+    } else {
+        (width * height) as u64 * info.bytes_per_pixel as u64
+    }
+}
+
+// =============================================================================
+// TEXTURE DESCRIPTOR
+// =============================================================================
+
+/// Complete texture description
+struct TextureDesc {
+    width: u32,
+    height: u32,
+    depth: u32,
+    array_layers: u32,
+    mip_levels: u32,
+    format: TextureFormat,
+    dimension: TextureDimension,
+    usage: TextureUsage,
+    sample_count: u32,
+    name: string,
+}
+
+impl TextureDesc {
+    fn new_2d(width: u32, height: u32, format: TextureFormat) -> Self {
+        TextureDesc {
+            width,
+            height,
+            depth: 1,
+            array_layers: 1,
+            mip_levels: calculate_mip_count(width, height),
+            format,
+            dimension: TextureDimension::Texture2D,
+            usage: TextureUsage::SAMPLED | TextureUsage::TRANSFER_DST,
+            sample_count: 1,
+            name: "",
+        }
+    }
+
+    fn new_2d_array(width: u32, height: u32, layers: u32, format: TextureFormat) -> Self {
+        TextureDesc {
+            width,
+            height,
+            depth: 1,
+            array_layers: layers,
+            mip_levels: calculate_mip_count(width, height),
+            format,
+            dimension: TextureDimension::Texture2DArray,
+            usage: TextureUsage::SAMPLED | TextureUsage::TRANSFER_DST,
+            sample_count: 1,
+            name: "",
+        }
+    }
+
+    fn new_cube(size: u32, format: TextureFormat) -> Self {
+        TextureDesc {
+            width: size,
+            height: size,
+            depth: 1,
+            array_layers: 6,
+            mip_levels: calculate_mip_count(size, size),
+            format,
+            dimension: TextureDimension::TextureCube,
+            usage: TextureUsage::SAMPLED | TextureUsage::TRANSFER_DST,
+            sample_count: 1,
+            name: "",
+        }
+    }
+
+    fn new_3d(width: u32, height: u32, depth: u32, format: TextureFormat) -> Self {
+        TextureDesc {
+            width,
+            height,
+            depth,
+            array_layers: 1,
+            mip_levels: calculate_mip_count(max(max(width, height), depth), 1),
+            format,
+            dimension: TextureDimension::Texture3D,
+            usage: TextureUsage::SAMPLED | TextureUsage::TRANSFER_DST,
+            sample_count: 1,
+            name: "",
+        }
+    }
+
+    fn with_usage(mut self, usage: TextureUsage) -> Self {
+        self.usage = usage;
+        self
+    }
+
+    fn with_mips(mut self, mip_levels: u32) -> Self {
+        self.mip_levels = mip_levels;
+        self
+    }
+
+    fn with_name(mut self, name: string) -> Self {
+        self.name = name;
+        self
+    }
+
+    fn calculate_total_size(&self) -> u64 {
+        let mut total: u64 = 0;
+
+        for layer in 0..self.array_layers {
+            for mip in 0..self.mip_levels {
+                let mip_width = calculate_mip_size(self.width, mip);
+                let mip_height = calculate_mip_size(self.height, mip);
+                let mip_depth = if self.dimension == TextureDimension::Texture3D {
+                    calculate_mip_size(self.depth, mip)
+                } else {
+                    1
+                };
+
+                total += calculate_level_size(mip_width, mip_height, self.format) * mip_depth as u64;
+            }
+        }
+
+        total
+    }
+}
+
+// =============================================================================
+// SAMPLER DESCRIPTOR
+// =============================================================================
+
+/// Sampler configuration
+struct SamplerDesc {
+    min_filter: FilterMode,
+    mag_filter: FilterMode,
+    mipmap_filter: FilterMode,
+    address_mode_u: AddressMode,
+    address_mode_v: AddressMode,
+    address_mode_w: AddressMode,
+    lod_min_clamp: f32,
+    lod_max_clamp: f32,
+    compare: Option<CompareFunction>,
+    anisotropy_clamp: u32,
+    border_color: vec4,
+    name: string,
+}
+
+impl SamplerDesc {
+    fn linear_repeat() -> Self {
+        SamplerDesc {
+            min_filter: FilterMode::Linear,
+            mag_filter: FilterMode::Linear,
+            mipmap_filter: FilterMode::Linear,
+            address_mode_u: AddressMode::Repeat,
+            address_mode_v: AddressMode::Repeat,
+            address_mode_w: AddressMode::Repeat,
+            lod_min_clamp: 0.0,
+            lod_max_clamp: 1000.0,
+            compare: None,
+            anisotropy_clamp: 1,
+            border_color: vec4(0.0, 0.0, 0.0, 0.0),
+            name: "",
+        }
+    }
+
+    fn nearest_repeat() -> Self {
+        SamplerDesc {
+            min_filter: FilterMode::Nearest,
+            mag_filter: FilterMode::Nearest,
+            mipmap_filter: FilterMode::Nearest,
+            address_mode_u: AddressMode::Repeat,
+            address_mode_v: AddressMode::Repeat,
+            address_mode_w: AddressMode::Repeat,
+            lod_min_clamp: 0.0,
+            lod_max_clamp: 1000.0,
+            compare: None,
+            anisotropy_clamp: 1,
+            border_color: vec4(0.0, 0.0, 0.0, 0.0),
+            name: "",
+        }
+    }
+
+    fn linear_clamp() -> Self {
+        SamplerDesc {
+            min_filter: FilterMode::Linear,
+            mag_filter: FilterMode::Linear,
+            mipmap_filter: FilterMode::Linear,
+            address_mode_u: AddressMode::ClampToEdge,
+            address_mode_v: AddressMode::ClampToEdge,
+            address_mode_w: AddressMode::ClampToEdge,
+            lod_min_clamp: 0.0,
+            lod_max_clamp: 1000.0,
+            compare: None,
+            anisotropy_clamp: 1,
+            border_color: vec4(0.0, 0.0, 0.0, 0.0),
+            name: "",
+        }
+    }
+
+    fn shadow() -> Self {
+        SamplerDesc {
+            min_filter: FilterMode::Linear,
+            mag_filter: FilterMode::Linear,
+            mipmap_filter: FilterMode::Nearest,
+            address_mode_u: AddressMode::ClampToBorder,
+            address_mode_v: AddressMode::ClampToBorder,
+            address_mode_w: AddressMode::ClampToBorder,
+            lod_min_clamp: 0.0,
+            lod_max_clamp: 0.0,
+            compare: Some(CompareFunction::LessEqual),
+            anisotropy_clamp: 1,
+            border_color: vec4(1.0, 1.0, 1.0, 1.0),
+            name: "",
+        }
+    }
+
+    fn with_anisotropy(mut self, level: u32) -> Self {
+        self.anisotropy_clamp = clamp(level, 1, 16);
+        self
+    }
+
+    fn with_name(mut self, name: string) -> Self {
+        self.name = name;
+        self
+    }
+}
+
+// =============================================================================
+// TEXTURE HANDLE AND RESOURCE
+// =============================================================================
+
+/// Opaque handle to a texture resource
+struct TextureHandle {
+    id: u32,
+    generation: u32,
+}
+
+impl TextureHandle {
+    fn invalid() -> Self {
+        TextureHandle { id: 0xFFFFFFFF, generation: 0 }
+    }
+
+    fn is_valid(&self) -> bool {
+        self.id != 0xFFFFFFFF
+    }
+}
+
+/// Opaque handle to a sampler resource
+struct SamplerHandle {
+    id: u32,
+}
+
+impl SamplerHandle {
+    fn invalid() -> Self {
+        SamplerHandle { id: 0xFFFFFFFF }
+    }
+
+    fn is_valid(&self) -> bool {
+        self.id != 0xFFFFFFFF
+    }
+}
+
+/// Internal texture resource
+struct TextureResource {
+    handle: TextureHandle,
+    desc: TextureDesc,
+    gpu_texture: GpuTexture,
+    views: Array<GpuTextureView>,
+    resident_mip_levels: u32,           // For streaming
+    last_used_frame: u64,
+    memory_size: u64,
+    is_streaming: bool,
+    stream_priority: f32,
+}
+
+// =============================================================================
+// MIPMAP GENERATION
+// =============================================================================
+
+/// Mipmap generation method
+enum MipmapMethod {
+    Box,                // Simple 2x2 box filter
+    Kaiser,             // Kaiser-windowed sinc filter
+    Lanczos,            // Lanczos filter (sharper)
+    Mitchell,           // Mitchell-Netravali filter
+    CatmullRom,         // Catmull-Rom spline
+    GaussianSharpen,    // Gaussian with sharpening
+    AlphaCoverage,      // Preserve alpha coverage for cutout textures
+}
+
+/// Mipmap generator configuration
+struct MipmapConfig {
+    method: MipmapMethod,
+    gamma_correct: bool,            // Convert to linear, filter, convert back
+    preserve_coverage: bool,        // For alpha-tested textures
+    alpha_cutoff: f32,              // Coverage preservation threshold
+    sharpness: f32,                 // For methods that support sharpening
+    filter_radius: f32,             // Custom filter radius
+}
+
+impl MipmapConfig {
+    fn default() -> Self {
+        MipmapConfig {
+            method: MipmapMethod::Kaiser,
+            gamma_correct: true,
+            preserve_coverage: false,
+            alpha_cutoff: 0.5,
+            sharpness: 0.0,
+            filter_radius: 2.0,
+        }
+    }
+
+    fn for_albedo() -> Self {
+        MipmapConfig {
+            method: MipmapMethod::Kaiser,
+            gamma_correct: true,
+            preserve_coverage: false,
+            alpha_cutoff: 0.5,
+            sharpness: 0.0,
+            filter_radius: 2.0,
+        }
+    }
+
+    fn for_normal_map() -> Self {
+        MipmapConfig {
+            method: MipmapMethod::Box,
+            gamma_correct: false,
+            preserve_coverage: false,
+            alpha_cutoff: 0.5,
+            sharpness: 0.0,
+            filter_radius: 1.0,
+        }
+    }
+
+    fn for_cutout() -> Self {
+        MipmapConfig {
+            method: MipmapMethod::AlphaCoverage,
+            gamma_correct: true,
+            preserve_coverage: true,
+            alpha_cutoff: 0.5,
+            sharpness: 0.0,
+            filter_radius: 2.0,
+        }
+    }
+}
+
+/// GPU-accelerated mipmap generator
+struct MipmapGenerator {
+    device: GpuDevice,
+    box_pipeline: GpuComputePipeline,
+    kaiser_pipeline: GpuComputePipeline,
+    coverage_pipeline: GpuComputePipeline,
+    normal_pipeline: GpuComputePipeline,
+}
+
+impl MipmapGenerator {
+    fn new(device: &GpuDevice) -> Self {
+        let box_pipeline = device.create_compute_pipeline(ComputePipelineDesc {
+            shader: device.create_shader(MIPMAP_BOX_SHADER),
+            entry_point: "main",
+        });
+
+        let kaiser_pipeline = device.create_compute_pipeline(ComputePipelineDesc {
+            shader: device.create_shader(MIPMAP_KAISER_SHADER),
+            entry_point: "main",
+        });
+
+        let coverage_pipeline = device.create_compute_pipeline(ComputePipelineDesc {
+            shader: device.create_shader(MIPMAP_COVERAGE_SHADER),
+            entry_point: "main",
+        });
+
+        let normal_pipeline = device.create_compute_pipeline(ComputePipelineDesc {
+            shader: device.create_shader(MIPMAP_NORMAL_SHADER),
+            entry_point: "main",
+        });
+
+        MipmapGenerator {
+            device: device.clone(),
+            box_pipeline,
+            kaiser_pipeline,
+            coverage_pipeline,
+            normal_pipeline,
+        }
+    }
+
+    fn generate(&self, texture: &GpuTexture, config: &MipmapConfig, encoder: &mut GpuCommandEncoder) {
+        let mip_count = texture.mip_level_count();
+
+        for mip in 1..mip_count {
+            let src_view = texture.create_view(TextureViewDesc {
+                base_mip_level: mip - 1,
+                mip_level_count: 1,
+                ..Default::default()
+            });
+
+            let dst_view = texture.create_view(TextureViewDesc {
+                base_mip_level: mip,
+                mip_level_count: 1,
+                ..Default::default()
+            });
+
+            let src_width = calculate_mip_size(texture.width(), mip - 1);
+            let src_height = calculate_mip_size(texture.height(), mip - 1);
+            let dst_width = calculate_mip_size(texture.width(), mip);
+            let dst_height = calculate_mip_size(texture.height(), mip);
+
+            let pipeline = match config.method {
+                MipmapMethod::Box => &self.box_pipeline,
+                MipmapMethod::Kaiser | MipmapMethod::Lanczos |
+                MipmapMethod::Mitchell | MipmapMethod::CatmullRom |
+                MipmapMethod::GaussianSharpen => &self.kaiser_pipeline,
+                MipmapMethod::AlphaCoverage => &self.coverage_pipeline,
+            };
+
+            let bind_group = self.device.create_bind_group(BindGroupDesc {
+                entries: [
+                    BindGroupEntry::texture_view(0, &src_view),
+                    BindGroupEntry::storage_texture(1, &dst_view),
+                ],
+            });
+
+            let uniforms = MipmapUniforms {
+                src_size: vec2(src_width as f32, src_height as f32),
+                dst_size: vec2(dst_width as f32, dst_height as f32),
+                gamma_correct: config.gamma_correct as u32,
+                alpha_cutoff: config.alpha_cutoff,
+                sharpness: config.sharpness,
+                filter_radius: config.filter_radius,
+            };
+
+            encoder.set_pipeline(pipeline);
+            encoder.set_bind_group(0, &bind_group);
+            encoder.set_push_constants(&uniforms);
+            encoder.dispatch(
+                (dst_width + 7) / 8,
+                (dst_height + 7) / 8,
+                1,
+            );
+        }
+    }
+
+    fn generate_normal_map_mips(&self, texture: &GpuTexture, encoder: &mut GpuCommandEncoder) {
+        // Special handling for normal maps - renormalize after filtering
+        let mip_count = texture.mip_level_count();
+
+        for mip in 1..mip_count {
+            let src_view = texture.create_view(TextureViewDesc {
+                base_mip_level: mip - 1,
+                mip_level_count: 1,
+                ..Default::default()
+            });
+
+            let dst_view = texture.create_view(TextureViewDesc {
+                base_mip_level: mip,
+                mip_level_count: 1,
+                ..Default::default()
+            });
+
+            let dst_width = calculate_mip_size(texture.width(), mip);
+            let dst_height = calculate_mip_size(texture.height(), mip);
+
+            let bind_group = self.device.create_bind_group(BindGroupDesc {
+                entries: [
+                    BindGroupEntry::texture_view(0, &src_view),
+                    BindGroupEntry::storage_texture(1, &dst_view),
+                ],
+            });
+
+            encoder.set_pipeline(&self.normal_pipeline);
+            encoder.set_bind_group(0, &bind_group);
+            encoder.dispatch(
+                (dst_width + 7) / 8,
+                (dst_height + 7) / 8,
+                1,
+            );
+        }
+    }
+}
+
+struct MipmapUniforms {
+    src_size: vec2,
+    dst_size: vec2,
+    gamma_correct: u32,
+    alpha_cutoff: f32,
+    sharpness: f32,
+    filter_radius: f32,
+}
+
+// =============================================================================
+// TEXTURE COMPRESSION
+// =============================================================================
+
+/// Compression quality setting
+enum CompressionQuality {
+    Fast,       // Quick compression, lower quality
+    Normal,     // Balanced
+    High,       // Slower, better quality
+    Ultra,      // Best quality, slowest
+}
+
+/// Texture compression configuration
+struct CompressionConfig {
+    target_format: TextureFormat,
+    quality: CompressionQuality,
+    perceptual: bool,              // Use perceptual metrics
+    weight_by_alpha: bool,         // Weight RGB by alpha for cutouts
+    normal_map: bool,              // Special handling for normal maps
+    preserve_extremes: bool,       // Preserve min/max values (for masks)
+}
+
+impl CompressionConfig {
+    fn bc1_fast() -> Self {
+        CompressionConfig {
+            target_format: TextureFormat::BC1_UNORM,
+            quality: CompressionQuality::Fast,
+            perceptual: true,
+            weight_by_alpha: false,
+            normal_map: false,
+            preserve_extremes: false,
+        }
+    }
+
+    fn bc3_quality() -> Self {
+        CompressionConfig {
+            target_format: TextureFormat::BC3_UNORM,
+            quality: CompressionQuality::High,
+            perceptual: true,
+            weight_by_alpha: true,
+            normal_map: false,
+            preserve_extremes: false,
+        }
+    }
+
+    fn bc5_normal() -> Self {
+        CompressionConfig {
+            target_format: TextureFormat::BC5_UNORM,
+            quality: CompressionQuality::High,
+            perceptual: false,
+            weight_by_alpha: false,
+            normal_map: true,
+            preserve_extremes: false,
+        }
+    }
+
+    fn bc7_ultra() -> Self {
+        CompressionConfig {
+            target_format: TextureFormat::BC7_UNORM,
+            quality: CompressionQuality::Ultra,
+            perceptual: true,
+            weight_by_alpha: true,
+            normal_map: false,
+            preserve_extremes: false,
+        }
+    }
+
+    fn bc6h_hdr() -> Self {
+        CompressionConfig {
+            target_format: TextureFormat::BC6H_UF16,
+            quality: CompressionQuality::High,
+            perceptual: true,
+            weight_by_alpha: false,
+            normal_map: false,
+            preserve_extremes: true,
+        }
+    }
+}
+
+/// GPU texture compressor
+struct TextureCompressor {
+    device: GpuDevice,
+    bc1_pipeline: GpuComputePipeline,
+    bc3_pipeline: GpuComputePipeline,
+    bc4_pipeline: GpuComputePipeline,
+    bc5_pipeline: GpuComputePipeline,
+    bc6h_pipeline: GpuComputePipeline,
+    bc7_pipeline: GpuComputePipeline,
+}
+
+impl TextureCompressor {
+    fn new(device: &GpuDevice) -> Self {
+        TextureCompressor {
+            device: device.clone(),
+            bc1_pipeline: device.create_compute_pipeline(ComputePipelineDesc {
+                shader: device.create_shader(BC1_COMPRESS_SHADER),
+                entry_point: "main",
+            }),
+            bc3_pipeline: device.create_compute_pipeline(ComputePipelineDesc {
+                shader: device.create_shader(BC3_COMPRESS_SHADER),
+                entry_point: "main",
+            }),
+            bc4_pipeline: device.create_compute_pipeline(ComputePipelineDesc {
+                shader: device.create_shader(BC4_COMPRESS_SHADER),
+                entry_point: "main",
+            }),
+            bc5_pipeline: device.create_compute_pipeline(ComputePipelineDesc {
+                shader: device.create_shader(BC5_COMPRESS_SHADER),
+                entry_point: "main",
+            }),
+            bc6h_pipeline: device.create_compute_pipeline(ComputePipelineDesc {
+                shader: device.create_shader(BC6H_COMPRESS_SHADER),
+                entry_point: "main",
+            }),
+            bc7_pipeline: device.create_compute_pipeline(ComputePipelineDesc {
+                shader: device.create_shader(BC7_COMPRESS_SHADER),
+                entry_point: "main",
+            }),
+        }
+    }
+
+    fn compress(
+        &self,
+        source: &GpuTexture,
+        config: &CompressionConfig,
+        encoder: &mut GpuCommandEncoder,
+    ) -> GpuTexture {
+        let format_info = get_format_info(config.target_format);
+
+        // Create compressed destination texture
+        let compressed = self.device.create_texture(TextureDesc {
+            width: source.width(),
+            height: source.height(),
+            depth: source.depth(),
+            array_layers: source.array_layers(),
+            mip_levels: source.mip_level_count(),
+            format: config.target_format,
+            dimension: source.dimension(),
+            usage: TextureUsage::SAMPLED | TextureUsage::STORAGE | TextureUsage::TRANSFER_SRC,
+            sample_count: 1,
+            name: format!("{}_compressed", source.name()),
+        });
+
+        let pipeline = match config.target_format {
+            TextureFormat::BC1_UNORM | TextureFormat::BC1_UNORM_SRGB => &self.bc1_pipeline,
+            TextureFormat::BC3_UNORM | TextureFormat::BC3_UNORM_SRGB => &self.bc3_pipeline,
+            TextureFormat::BC4_UNORM | TextureFormat::BC4_SNORM => &self.bc4_pipeline,
+            TextureFormat::BC5_UNORM | TextureFormat::BC5_SNORM => &self.bc5_pipeline,
+            TextureFormat::BC6H_UF16 | TextureFormat::BC6H_SF16 => &self.bc6h_pipeline,
+            TextureFormat::BC7_UNORM | TextureFormat::BC7_UNORM_SRGB => &self.bc7_pipeline,
+            _ => &self.bc1_pipeline,
+        };
+
+        // Compress each mip level
+        for mip in 0..source.mip_level_count() {
+            let mip_width = calculate_mip_size(source.width(), mip);
+            let mip_height = calculate_mip_size(source.height(), mip);
+
+            let blocks_x = (mip_width + format_info.block_width - 1) / format_info.block_width;
+            let blocks_y = (mip_height + format_info.block_height - 1) / format_info.block_height;
+
+            let src_view = source.create_view(TextureViewDesc {
+                base_mip_level: mip,
+                mip_level_count: 1,
+                ..Default::default()
+            });
+
+            let dst_view = compressed.create_view(TextureViewDesc {
+                base_mip_level: mip,
+                mip_level_count: 1,
+                ..Default::default()
+            });
+
+            let uniforms = CompressionUniforms {
+                width: mip_width,
+                height: mip_height,
+                quality: config.quality as u32,
+                perceptual: config.perceptual as u32,
+                weight_alpha: config.weight_by_alpha as u32,
+                normal_map: config.normal_map as u32,
+            };
+
+            let bind_group = self.device.create_bind_group(BindGroupDesc {
+                entries: [
+                    BindGroupEntry::texture_view(0, &src_view),
+                    BindGroupEntry::storage_texture(1, &dst_view),
+                ],
+            });
+
+            encoder.set_pipeline(pipeline);
+            encoder.set_bind_group(0, &bind_group);
+            encoder.set_push_constants(&uniforms);
+            encoder.dispatch(blocks_x, blocks_y, 1);
+        }
+
+        compressed
+    }
+}
+
+struct CompressionUniforms {
+    width: u32,
+    height: u32,
+    quality: u32,
+    perceptual: u32,
+    weight_alpha: u32,
+    normal_map: u32,
+}
+
+// =============================================================================
+// TEXTURE STREAMING SYSTEM
+// =============================================================================
+
+/// Streaming priority for texture mips
+enum StreamPriority {
+    Critical,       // Must be loaded immediately
+    High,           // Load soon
+    Normal,         // Standard priority
+    Low,            // Load when idle
+    Background,     // Very low priority
+}
+
+/// Streaming request for a texture
+struct StreamRequest {
+    texture: TextureHandle,
+    target_mip: u32,            // Target mip level to load
+    priority: StreamPriority,
+    distance_sq: f32,           // Distance from camera (for priority)
+    screen_coverage: f32,       // Screen space coverage
+    timestamp: u64,
+}
+
+/// Streaming tile for virtual texturing
+struct StreamTile {
+    texture_id: u32,
+    mip_level: u32,
+    tile_x: u32,
+    tile_y: u32,
+    state: TileState,
+    page_index: u32,            // Physical page index
+    last_used_frame: u64,
+}
+
+enum TileState {
+    NotResident,
+    Loading,
+    Resident,
+    Evicting,
+}
+
+/// Texture streaming manager
+struct TextureStreamingManager {
+    device: GpuDevice,
+    budget_bytes: u64,
+    used_bytes: u64,
+    min_resident_mip: u32,              // Always keep this many mips resident
+    pending_requests: PriorityQueue<StreamRequest>,
+    active_uploads: Array<StreamUpload>,
+    upload_budget_per_frame: u64,       // Bytes per frame for uploads
+    staging_buffer: GpuBuffer,
+    textures: HashMap<TextureHandle, StreamingTextureData>,
+}
+
+struct StreamingTextureData {
+    handle: TextureHandle,
+    source_path: string,
+    resident_mip: u32,          // Currently loaded mip (0 = all, higher = less detail)
+    target_mip: u32,            // Target mip level
+    total_size: u64,
+    resident_size: u64,
+    priority: f32,
+    last_visible_frame: u64,
+}
+
+struct StreamUpload {
+    texture: TextureHandle,
+    mip_level: u32,
+    data_offset: u64,
+    data_size: u64,
+    state: UploadState,
+}
+
+enum UploadState {
+    Pending,
+    Staging,
+    Uploading,
+    Complete,
+}
+
+impl TextureStreamingManager {
+    fn new(device: &GpuDevice, budget_mb: u32) -> Self {
+        let budget_bytes = budget_mb as u64 * 1024 * 1024;
+        let upload_buffer_size = 64 * 1024 * 1024; // 64MB staging buffer
+
+        TextureStreamingManager {
+            device: device.clone(),
+            budget_bytes,
+            used_bytes: 0,
+            min_resident_mip: 4,  // Always keep bottom 4 mips
+            pending_requests: PriorityQueue::new(),
+            active_uploads: Array::new(),
+            upload_budget_per_frame: 16 * 1024 * 1024, // 16MB per frame
+            staging_buffer: device.create_buffer(BufferDesc {
+                size: upload_buffer_size,
+                usage: BufferUsage::COPY_SRC | BufferUsage::MAP_WRITE,
+                mapped_at_creation: false,
+            }),
+            textures: HashMap::new(),
+        }
+    }
+
+    /// Register a streaming texture
+    fn register_texture(
+        &mut self,
+        handle: TextureHandle,
+        source_path: &str,
+        total_size: u64,
+    ) {
+        self.textures.insert(handle, StreamingTextureData {
+            handle,
+            source_path: source_path.to_string(),
+            resident_mip: 255,  // Nothing loaded yet
+            target_mip: 255,
+            total_size,
+            resident_size: 0,
+            priority: 0.0,
+            last_visible_frame: 0,
+        });
+    }
+
+    /// Update streaming based on visibility
+    fn update_visibility(
+        &mut self,
+        texture: TextureHandle,
+        distance_sq: f32,
+        screen_coverage: f32,
+        frame: u64,
+    ) {
+        if let Some(data) = self.textures.get_mut(&texture) {
+            data.last_visible_frame = frame;
+
+            // Calculate desired mip level based on screen coverage
+            let desired_mip = if screen_coverage > 0.0 {
+                let pixels = screen_coverage * 1920.0 * 1080.0; // Assume 1080p
+                let texels_per_pixel = 1.0;
+                let mip = log2(sqrt(pixels) / texels_per_pixel).floor() as u32;
+                mip.min(self.min_resident_mip)
+            } else {
+                self.min_resident_mip
+            };
+
+            // Queue load request if we need higher detail
+            if desired_mip < data.resident_mip {
+                let priority = if screen_coverage > 0.1 {
+                    StreamPriority::High
+                } else if screen_coverage > 0.01 {
+                    StreamPriority::Normal
+                } else {
+                    StreamPriority::Low
+                };
+
+                data.target_mip = desired_mip;
+
+                self.pending_requests.push(StreamRequest {
+                    texture,
+                    target_mip: desired_mip,
+                    priority,
+                    distance_sq,
+                    screen_coverage,
+                    timestamp: frame,
+                });
+            }
+        }
+    }
+
+    /// Process pending streaming requests
+    fn process_requests(&mut self, frame: u64, encoder: &mut GpuCommandEncoder) {
+        let mut bytes_uploaded: u64 = 0;
+
+        // Process uploads in priority order
+        while let Some(request) = self.pending_requests.pop() {
+            if bytes_uploaded >= self.upload_budget_per_frame {
+                // Re-queue for next frame
+                self.pending_requests.push(request);
+                break;
+            }
+
+            if let Some(data) = self.textures.get(&request.texture) {
+                // Skip if already at target detail
+                if data.resident_mip <= request.target_mip {
+                    continue;
+                }
+
+                // Calculate size of mip level to load
+                let mip_to_load = data.resident_mip - 1;
+                let mip_size = self.calculate_mip_size(data);
+
+                // Check budget
+                if self.used_bytes + mip_size > self.budget_bytes {
+                    // Need to evict something first
+                    self.evict_lru(mip_size, frame);
+                }
+
+                if self.used_bytes + mip_size <= self.budget_bytes {
+                    // Queue the upload
+                    self.active_uploads.push(StreamUpload {
+                        texture: request.texture,
+                        mip_level: mip_to_load,
+                        data_offset: 0,
+                        data_size: mip_size,
+                        state: UploadState::Pending,
+                    });
+
+                    bytes_uploaded += mip_size;
+                }
+            }
+        }
+
+        // Process active uploads
+        self.process_uploads(encoder);
+    }
+
+    fn calculate_mip_size(&self, data: &StreamingTextureData) -> u64 {
+        // Simplified - actual implementation would read from texture metadata
+        data.total_size / 4  // Rough estimate
+    }
+
+    fn evict_lru(&mut self, needed_bytes: u64, current_frame: u64) {
+        let mut candidates: Vec<(TextureHandle, u64, u64)> = Vec::new();
+
+        for (handle, data) in &self.textures {
+            if data.resident_mip < 255 {
+                let age = current_frame - data.last_visible_frame;
+                candidates.push((*handle, age, data.resident_size));
+            }
+        }
+
+        // Sort by age (oldest first)
+        candidates.sort_by(|a, b| b.1.cmp(&a.1));
+
+        let mut freed: u64 = 0;
+        for (handle, _, size) in candidates {
+            if freed >= needed_bytes {
+                break;
+            }
+
+            if let Some(data) = self.textures.get_mut(&handle) {
+                // Evict one mip level
+                data.resident_mip += 1;
+                self.used_bytes -= size / 4; // Rough estimate
+                freed += size / 4;
+            }
+        }
+    }
+
+    fn process_uploads(&mut self, encoder: &mut GpuCommandEncoder) {
+        for upload in &mut self.active_uploads {
+            match upload.state {
+                UploadState::Pending => {
+                    // Load from disk (async in real implementation)
+                    upload.state = UploadState::Staging;
+                }
+                UploadState::Staging => {
+                    // Copy to staging buffer
+                    upload.state = UploadState::Uploading;
+                }
+                UploadState::Uploading => {
+                    // Issue GPU copy
+                    if let Some(data) = self.textures.get_mut(&upload.texture) {
+                        data.resident_mip = upload.mip_level;
+                        data.resident_size += upload.data_size;
+                        self.used_bytes += upload.data_size;
+                    }
+                    upload.state = UploadState::Complete;
+                }
+                UploadState::Complete => {}
+            }
+        }
+
+        // Remove completed uploads
+        self.active_uploads.retain(|u| u.state != UploadState::Complete);
+    }
+
+    /// Get streaming statistics
+    fn get_stats(&self) -> StreamingStats {
+        StreamingStats {
+            budget_bytes: self.budget_bytes,
+            used_bytes: self.used_bytes,
+            pending_requests: self.pending_requests.len() as u32,
+            active_uploads: self.active_uploads.len() as u32,
+            texture_count: self.textures.len() as u32,
+        }
+    }
+}
+
+struct StreamingStats {
+    budget_bytes: u64,
+    used_bytes: u64,
+    pending_requests: u32,
+    active_uploads: u32,
+    texture_count: u32,
+}
+
+// =============================================================================
+// VIRTUAL TEXTURING SYSTEM
+// =============================================================================
+
+/// Virtual texture page table entry
+struct PageTableEntry {
+    physical_page: u32,     // Index into physical page pool (0xFFFFFFFF = not resident)
+    mip_level: u32,
+}
+
+/// Physical page info
+struct PhysicalPage {
+    virtual_texture_id: u32,
+    mip_level: u32,
+    tile_x: u32,
+    tile_y: u32,
+    last_used_frame: u64,
+    locked: bool,
+}
+
+/// Virtual texture configuration
+struct VirtualTextureConfig {
+    page_size: u32,                 // Typically 128 or 256
+    physical_pages_x: u32,          // Physical texture atlas dimensions in pages
+    physical_pages_y: u32,
+    border_size: u32,               // Border for filtering (typically 4)
+    max_anisotropy: u32,
+    feedback_buffer_scale: f32,     // Feedback buffer relative to screen
+}
+
+impl VirtualTextureConfig {
+    fn default() -> Self {
+        VirtualTextureConfig {
+            page_size: 128,
+            physical_pages_x: 64,
+            physical_pages_y: 64,
+            border_size: 4,
+            max_anisotropy: 8,
+            feedback_buffer_scale: 0.25,
+        }
+    }
+
+    fn physical_texture_size(&self) -> u32 {
+        self.physical_pages_x * (self.page_size + 2 * self.border_size)
+    }
+
+    fn usable_page_size(&self) -> u32 {
+        self.page_size
+    }
+
+    fn total_page_size(&self) -> u32 {
+        self.page_size + 2 * self.border_size
+    }
+}
+
+/// Virtual texturing system
+struct VirtualTextureSystem {
+    device: GpuDevice,
+    config: VirtualTextureConfig,
+
+    // Physical texture atlas
+    physical_texture: GpuTexture,
+
+    // Page tables (one per virtual texture, stored in texture array)
+    page_table_texture: GpuTexture,
+
+    // Physical page management
+    physical_pages: Array<PhysicalPage>,
+    free_pages: Array<u32>,
+
+    // Feedback system
+    feedback_buffer: GpuTexture,
+    feedback_readback: GpuBuffer,
+
+    // Streaming
+    pending_tiles: HashSet<(u32, u32, u32, u32)>,  // (vt_id, mip, tile_x, tile_y)
+
+    // Pipelines
+    feedback_analyze_pipeline: GpuComputePipeline,
+    page_update_pipeline: GpuComputePipeline,
+
+    // Virtual textures
+    virtual_textures: HashMap<u32, VirtualTextureData>,
+    next_vt_id: u32,
+}
+
+struct VirtualTextureData {
+    id: u32,
+    width: u32,
+    height: u32,
+    mip_count: u32,
+    format: TextureFormat,
+    source_path: string,
+    page_table_layer: u32,
+}
+
+impl VirtualTextureSystem {
+    fn new(device: &GpuDevice, config: VirtualTextureConfig) -> Self {
+        let physical_size = config.physical_texture_size();
+        let total_pages = config.physical_pages_x * config.physical_pages_y;
+
+        // Create physical texture atlas
+        let physical_texture = device.create_texture(TextureDesc::new_2d(
+            physical_size,
+            physical_size,
+            TextureFormat::BC7_UNORM_SRGB,
+        ).with_usage(TextureUsage::SAMPLED | TextureUsage::TRANSFER_DST));
+
+        // Create page table texture array
+        let page_table_texture = device.create_texture(TextureDesc::new_2d_array(
+            4096 / config.page_size,  // Max 4K texture support
+            4096 / config.page_size,
+            256,  // Max 256 virtual textures
+            TextureFormat::RG32_UINT,
+        ).with_usage(TextureUsage::SAMPLED | TextureUsage::STORAGE)
+         .with_mips(12));  // Support up to 12 mip levels
+
+        // Create feedback buffer
+        let feedback_width = (1920.0 * config.feedback_buffer_scale) as u32;
+        let feedback_height = (1080.0 * config.feedback_buffer_scale) as u32;
+
+        let feedback_buffer = device.create_texture(TextureDesc::new_2d(
+            feedback_width,
+            feedback_height,
+            TextureFormat::RGBA32_UINT,
+        ).with_usage(TextureUsage::RENDER_TARGET | TextureUsage::SAMPLED | TextureUsage::TRANSFER_SRC)
+         .with_mips(1));
+
+        let feedback_readback = device.create_buffer(BufferDesc {
+            size: (feedback_width * feedback_height * 16) as u64,
+            usage: BufferUsage::COPY_DST | BufferUsage::MAP_READ,
+            mapped_at_creation: false,
+        });
+
+        // Initialize free page list
+        let mut free_pages = Array::with_capacity(total_pages as usize);
+        for i in 0..total_pages {
+            free_pages.push(i);
+        }
+
+        // Initialize physical page tracking
+        let mut physical_pages = Array::with_capacity(total_pages as usize);
+        for _ in 0..total_pages {
+            physical_pages.push(PhysicalPage {
+                virtual_texture_id: 0xFFFFFFFF,
+                mip_level: 0,
+                tile_x: 0,
+                tile_y: 0,
+                last_used_frame: 0,
+                locked: false,
+            });
+        }
+
+        let feedback_analyze_pipeline = device.create_compute_pipeline(ComputePipelineDesc {
+            shader: device.create_shader(VT_FEEDBACK_ANALYZE_SHADER),
+            entry_point: "main",
+        });
+
+        let page_update_pipeline = device.create_compute_pipeline(ComputePipelineDesc {
+            shader: device.create_shader(VT_PAGE_UPDATE_SHADER),
+            entry_point: "main",
+        });
+
+        VirtualTextureSystem {
+            device: device.clone(),
+            config,
+            physical_texture,
+            page_table_texture,
+            physical_pages,
+            free_pages,
+            feedback_buffer,
+            feedback_readback,
+            pending_tiles: HashSet::new(),
+            feedback_analyze_pipeline,
+            page_update_pipeline,
+            virtual_textures: HashMap::new(),
+            next_vt_id: 0,
+        }
+    }
+
+    /// Create a new virtual texture
+    fn create_virtual_texture(
+        &mut self,
+        width: u32,
+        height: u32,
+        format: TextureFormat,
+        source_path: &str,
+    ) -> u32 {
+        let id = self.next_vt_id;
+        self.next_vt_id += 1;
+
+        let mip_count = calculate_mip_count(width, height);
+
+        self.virtual_textures.insert(id, VirtualTextureData {
+            id,
+            width,
+            height,
+            mip_count,
+            format,
+            source_path: source_path.to_string(),
+            page_table_layer: id,
+        });
+
+        id
+    }
+
+    /// Analyze feedback buffer to determine which tiles are needed
+    fn analyze_feedback(&mut self, frame: u64, encoder: &mut GpuCommandEncoder) {
+        // Copy feedback to CPU-readable buffer
+        encoder.copy_texture_to_buffer(
+            &self.feedback_buffer,
+            &self.feedback_readback,
+            TextureCopyInfo::default(),
+        );
+
+        // In real implementation, this would be async
+        // For now, assume we can read immediately
+        let feedback_data = self.feedback_readback.map_read();
+
+        // Parse feedback and queue tile requests
+        for pixel in feedback_data.chunks(16) {
+            let vt_id = u32::from_le_bytes([pixel[0], pixel[1], pixel[2], pixel[3]]);
+            let mip = u32::from_le_bytes([pixel[4], pixel[5], pixel[6], pixel[7]]);
+            let tile_x = u32::from_le_bytes([pixel[8], pixel[9], pixel[10], pixel[11]]);
+            let tile_y = u32::from_le_bytes([pixel[12], pixel[13], pixel[14], pixel[15]]);
+
+            if vt_id != 0xFFFFFFFF {
+                self.request_tile(vt_id, mip, tile_x, tile_y);
+            }
+        }
+
+        self.feedback_readback.unmap();
+    }
+
+    /// Request a tile to be loaded
+    fn request_tile(&mut self, vt_id: u32, mip: u32, tile_x: u32, tile_y: u32) {
+        let key = (vt_id, mip, tile_x, tile_y);
+
+        // Check if already resident or pending
+        if !self.is_tile_resident(vt_id, mip, tile_x, tile_y) {
+            self.pending_tiles.insert(key);
+        }
+    }
+
+    fn is_tile_resident(&self, vt_id: u32, mip: u32, tile_x: u32, tile_y: u32) -> bool {
+        // Check physical pages
+        for page in &self.physical_pages {
+            if page.virtual_texture_id == vt_id &&
+               page.mip_level == mip &&
+               page.tile_x == tile_x &&
+               page.tile_y == tile_y {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Process pending tile requests
+    fn process_tile_requests(&mut self, frame: u64, encoder: &mut GpuCommandEncoder) {
+        let mut tiles_to_load: Vec<(u32, u32, u32, u32)> = Vec::new();
+
+        for tile in &self.pending_tiles {
+            if self.free_pages.len() > 0 {
+                tiles_to_load.push(*tile);
+            } else {
+                // Need to evict
+                self.evict_lru_tile(frame);
+                if self.free_pages.len() > 0 {
+                    tiles_to_load.push(*tile);
+                }
+            }
+        }
+
+        for (vt_id, mip, tile_x, tile_y) in tiles_to_load {
+            self.load_tile(vt_id, mip, tile_x, tile_y, frame, encoder);
+            self.pending_tiles.remove(&(vt_id, mip, tile_x, tile_y));
+        }
+    }
+
+    fn evict_lru_tile(&mut self, current_frame: u64) {
+        let mut oldest_idx: Option<usize> = None;
+        let mut oldest_frame: u64 = current_frame;
+
+        for (i, page) in self.physical_pages.iter().enumerate() {
+            if !page.locked && page.virtual_texture_id != 0xFFFFFFFF {
+                if page.last_used_frame < oldest_frame {
+                    oldest_frame = page.last_used_frame;
+                    oldest_idx = Some(i);
+                }
+            }
+        }
+
+        if let Some(idx) = oldest_idx {
+            let page = &mut self.physical_pages[idx];
+
+            // Update page table to mark as not resident
+            // (In real implementation, update the texture)
+
+            page.virtual_texture_id = 0xFFFFFFFF;
+            self.free_pages.push(idx as u32);
+        }
+    }
+
+    fn load_tile(
+        &mut self,
+        vt_id: u32,
+        mip: u32,
+        tile_x: u32,
+        tile_y: u32,
+        frame: u64,
+        encoder: &mut GpuCommandEncoder,
+    ) {
+        if let Some(page_idx) = self.free_pages.pop() {
+            let page = &mut self.physical_pages[page_idx as usize];
+            page.virtual_texture_id = vt_id;
+            page.mip_level = mip;
+            page.tile_x = tile_x;
+            page.tile_y = tile_y;
+            page.last_used_frame = frame;
+            page.locked = false;
+
+            // Calculate physical location
+            let pages_per_row = self.config.physical_pages_x;
+            let phys_x = (page_idx % pages_per_row) * self.config.total_page_size();
+            let phys_y = (page_idx / pages_per_row) * self.config.total_page_size();
+
+            // Load tile data from disk and upload
+            // (Actual disk I/O would be async)
+
+            // Update page table
+            self.update_page_table(vt_id, mip, tile_x, tile_y, page_idx, encoder);
+        }
+    }
+
+    fn update_page_table(
+        &self,
+        vt_id: u32,
+        mip: u32,
+        tile_x: u32,
+        tile_y: u32,
+        page_idx: u32,
+        encoder: &mut GpuCommandEncoder,
+    ) {
+        // Update page table texture
+        let uniforms = PageTableUpdateUniforms {
+            vt_id,
+            mip,
+            tile_x,
+            tile_y,
+            physical_page: page_idx,
+            pages_per_row: self.config.physical_pages_x,
+        };
+
+        let bind_group = self.device.create_bind_group(BindGroupDesc {
+            entries: [
+                BindGroupEntry::storage_texture(0, &self.page_table_texture.create_view_default()),
+            ],
+        });
+
+        encoder.set_pipeline(&self.page_update_pipeline);
+        encoder.set_bind_group(0, &bind_group);
+        encoder.set_push_constants(&uniforms);
+        encoder.dispatch(1, 1, 1);
+    }
+
+    /// Get bindings for virtual texture sampling
+    fn get_bindings(&self) -> VirtualTextureBindings {
+        VirtualTextureBindings {
+            physical_texture: self.physical_texture.create_view_default(),
+            page_table: self.page_table_texture.create_view_default(),
+            page_size: self.config.page_size,
+            border_size: self.config.border_size,
+            physical_pages_x: self.config.physical_pages_x,
+        }
+    }
+
+    fn get_feedback_target(&self) -> &GpuTexture {
+        &self.feedback_buffer
+    }
+}
+
+struct PageTableUpdateUniforms {
+    vt_id: u32,
+    mip: u32,
+    tile_x: u32,
+    tile_y: u32,
+    physical_page: u32,
+    pages_per_row: u32,
+}
+
+struct VirtualTextureBindings {
+    physical_texture: GpuTextureView,
+    page_table: GpuTextureView,
+    page_size: u32,
+    border_size: u32,
+    physical_pages_x: u32,
+}
+
+// =============================================================================
+// TEXTURE ATLAS SYSTEM
+// =============================================================================
+
+/// Rectangle in an atlas
+struct AtlasRect {
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+}
+
+/// Atlas node for binary tree packing
+struct AtlasNode {
+    rect: AtlasRect,
+    children: Option<(Box<AtlasNode>, Box<AtlasNode>)>,
+    texture_id: Option<u32>,
+}
+
+impl AtlasNode {
+    fn new(x: u32, y: u32, width: u32, height: u32) -> Self {
+        AtlasNode {
+            rect: AtlasRect { x, y, width, height },
+            children: None,
+            texture_id: None,
+        }
+    }
+
+    fn insert(&mut self, width: u32, height: u32, padding: u32) -> Option<AtlasRect> {
+        // If we have children, try them first
+        if let Some((ref mut left, ref mut right)) = self.children {
+            if let Some(rect) = left.insert(width, height, padding) {
+                return Some(rect);
+            }
+            return right.insert(width, height, padding);
+        }
+
+        // If this node is occupied, can't insert
+        if self.texture_id.is_some() {
+            return None;
+        }
+
+        let padded_w = width + padding * 2;
+        let padded_h = height + padding * 2;
+
+        // If doesn't fit, return None
+        if padded_w > self.rect.width || padded_h > self.rect.height {
+            return None;
+        }
+
+        // If perfect fit, use this node
+        if padded_w == self.rect.width && padded_h == self.rect.height {
+            return Some(AtlasRect {
+                x: self.rect.x + padding,
+                y: self.rect.y + padding,
+                width,
+                height,
+            });
+        }
+
+        // Split this node
+        let dw = self.rect.width - padded_w;
+        let dh = self.rect.height - padded_h;
+
+        let (left, right) = if dw > dh {
+            // Split vertically
+            (
+                Box::new(AtlasNode::new(self.rect.x, self.rect.y, padded_w, self.rect.height)),
+                Box::new(AtlasNode::new(self.rect.x + padded_w, self.rect.y, dw, self.rect.height)),
+            )
+        } else {
+            // Split horizontally
+            (
+                Box::new(AtlasNode::new(self.rect.x, self.rect.y, self.rect.width, padded_h)),
+                Box::new(AtlasNode::new(self.rect.x, self.rect.y + padded_h, self.rect.width, dh)),
+            )
+        };
+
+        self.children = Some((left, right));
+
+        // Insert into first child
+        if let Some((ref mut left, _)) = self.children {
+            return left.insert(width, height, padding);
+        }
+
+        None
+    }
+}
+
+/// Texture atlas for packing multiple textures
+struct TextureAtlas {
+    device: GpuDevice,
+    texture: GpuTexture,
+    width: u32,
+    height: u32,
+    format: TextureFormat,
+    root: AtlasNode,
+    padding: u32,
+    entries: HashMap<u32, AtlasEntry>,
+    next_id: u32,
+}
+
+struct AtlasEntry {
+    id: u32,
+    rect: AtlasRect,
+    uv_min: vec2,
+    uv_max: vec2,
+}
+
+impl TextureAtlas {
+    fn new(device: &GpuDevice, width: u32, height: u32, format: TextureFormat) -> Self {
+        let texture = device.create_texture(TextureDesc::new_2d(width, height, format)
+            .with_usage(TextureUsage::SAMPLED | TextureUsage::TRANSFER_DST | TextureUsage::RENDER_TARGET)
+            .with_mips(1));
+
+        TextureAtlas {
+            device: device.clone(),
+            texture,
+            width,
+            height,
+            format,
+            root: AtlasNode::new(0, 0, width, height),
+            padding: 2,
+            entries: HashMap::new(),
+            next_id: 0,
+        }
+    }
+
+    /// Add a texture to the atlas
+    fn add(&mut self, data: &[u8], tex_width: u32, tex_height: u32) -> Option<u32> {
+        // Try to find space
+        let rect = self.root.insert(tex_width, tex_height, self.padding)?;
+
+        let id = self.next_id;
+        self.next_id += 1;
+
+        // Calculate UV coordinates
+        let uv_min = vec2(
+            rect.x as f32 / self.width as f32,
+            rect.y as f32 / self.height as f32,
+        );
+        let uv_max = vec2(
+            (rect.x + rect.width) as f32 / self.width as f32,
+            (rect.y + rect.height) as f32 / self.height as f32,
+        );
+
+        self.entries.insert(id, AtlasEntry {
+            id,
+            rect,
+            uv_min,
+            uv_max,
+        });
+
+        // Upload texture data
+        self.device.queue().write_texture(
+            &self.texture,
+            data,
+            TextureDataLayout {
+                offset: 0,
+                bytes_per_row: tex_width * 4,
+                rows_per_image: tex_height,
+            },
+            Origin3d { x: rect.x, y: rect.y, z: 0 },
+            Extent3d { width: tex_width, height: tex_height, depth: 1 },
+        );
+
+        Some(id)
+    }
+
+    /// Get UV coordinates for an entry
+    fn get_uvs(&self, id: u32) -> Option<(vec2, vec2)> {
+        self.entries.get(&id).map(|e| (e.uv_min, e.uv_max))
+    }
+
+    /// Get the atlas texture
+    fn texture(&self) -> &GpuTexture {
+        &self.texture
+    }
+
+    /// Get atlas utilization
+    fn utilization(&self) -> f32 {
+        let mut used_area: u64 = 0;
+        for entry in self.entries.values() {
+            used_area += (entry.rect.width * entry.rect.height) as u64;
+        }
+        used_area as f32 / (self.width * self.height) as f32
+    }
+}
+
+// =============================================================================
+// BINDLESS TEXTURE SYSTEM
+// =============================================================================
+
+/// Bindless texture handle (index into descriptor array)
+struct BindlessHandle {
+    index: u32,
+}
+
+impl BindlessHandle {
+    fn invalid() -> Self {
+        BindlessHandle { index: 0xFFFFFFFF }
+    }
+
+    fn is_valid(&self) -> bool {
+        self.index != 0xFFFFFFFF
+    }
+}
+
+/// Bindless texture manager using descriptor indexing
+struct BindlessTextureManager {
+    device: GpuDevice,
+    max_textures: u32,
+    descriptor_heap: GpuBindGroup,
+    texture_views: Array<Option<GpuTextureView>>,
+    free_indices: Array<u32>,
+    sampler_heap: GpuBindGroup,
+    samplers: Array<Option<GpuSampler>>,
+    free_sampler_indices: Array<u32>,
+}
+
+impl BindlessTextureManager {
+    fn new(device: &GpuDevice, max_textures: u32, max_samplers: u32) -> Self {
+        // Create descriptor heap for textures
+        let mut texture_views = Array::with_capacity(max_textures as usize);
+        let mut free_indices = Array::with_capacity(max_textures as usize);
+
+        for i in 0..max_textures {
+            texture_views.push(None);
+            free_indices.push(max_textures - 1 - i);
+        }
+
+        // Create sampler heap
+        let mut samplers = Array::with_capacity(max_samplers as usize);
+        let mut free_sampler_indices = Array::with_capacity(max_samplers as usize);
+
+        for i in 0..max_samplers {
+            samplers.push(None);
+            free_sampler_indices.push(max_samplers - 1 - i);
+        }
+
+        // Create bind group layouts (requires bindless support)
+        let descriptor_heap = device.create_bindless_bind_group(BindlessBindGroupDesc {
+            texture_count: max_textures,
+            sampler_count: 0,
+        });
+
+        let sampler_heap = device.create_bindless_bind_group(BindlessBindGroupDesc {
+            texture_count: 0,
+            sampler_count: max_samplers,
+        });
+
+        BindlessTextureManager {
+            device: device.clone(),
+            max_textures,
+            descriptor_heap,
+            texture_views,
+            free_indices,
+            sampler_heap,
+            samplers,
+            free_sampler_indices,
+        }
+    }
+
+    /// Register a texture and get a bindless handle
+    fn register_texture(&mut self, view: GpuTextureView) -> BindlessHandle {
+        if let Some(index) = self.free_indices.pop() {
+            self.texture_views[index as usize] = Some(view.clone());
+
+            // Update descriptor heap
+            self.device.update_bindless_descriptor(
+                &self.descriptor_heap,
+                index,
+                &view,
+            );
+
+            BindlessHandle { index }
+        } else {
+            BindlessHandle::invalid()
+        }
+    }
+
+    /// Unregister a texture
+    fn unregister_texture(&mut self, handle: BindlessHandle) {
+        if handle.is_valid() && (handle.index as usize) < self.texture_views.len() {
+            self.texture_views[handle.index as usize] = None;
+            self.free_indices.push(handle.index);
+        }
+    }
+
+    /// Register a sampler
+    fn register_sampler(&mut self, sampler: GpuSampler) -> u32 {
+        if let Some(index) = self.free_sampler_indices.pop() {
+            self.samplers[index as usize] = Some(sampler.clone());
+
+            self.device.update_bindless_sampler(
+                &self.sampler_heap,
+                index,
+                &sampler,
+            );
+
+            index
+        } else {
+            0xFFFFFFFF
+        }
+    }
+
+    /// Get bind groups for rendering
+    fn get_bind_groups(&self) -> (&GpuBindGroup, &GpuBindGroup) {
+        (&self.descriptor_heap, &self.sampler_heap)
+    }
+}
+
+// =============================================================================
+// TEXTURE CACHE
+// =============================================================================
+
+/// Texture loading status
+enum TextureLoadStatus {
+    NotLoaded,
+    Loading,
+    Loaded,
+    Failed,
+}
+
+/// Cached texture entry
+struct CachedTexture {
+    handle: TextureHandle,
+    path: string,
+    status: TextureLoadStatus,
+    ref_count: u32,
+    size_bytes: u64,
+    last_accessed: u64,
+    format: TextureFormat,
+}
+
+/// Texture cache for automatic loading and memory management
+struct TextureCache {
+    device: GpuDevice,
+    textures: HashMap<string, CachedTexture>,
+    handles: HashMap<TextureHandle, string>,
+    memory_budget: u64,
+    memory_used: u64,
+    next_handle_id: u32,
+    generation: u32,
+    mipmap_generator: MipmapGenerator,
+    compressor: TextureCompressor,
+    default_texture: TextureHandle,
+}
+
+impl TextureCache {
+    fn new(device: &GpuDevice, memory_budget_mb: u32) -> Self {
+        let mipmap_generator = MipmapGenerator::new(device);
+        let compressor = TextureCompressor::new(device);
+
+        // Create default fallback texture (pink/black checkerboard)
+        let default_data = Self::generate_default_texture_data();
+        let default_texture = device.create_texture(TextureDesc::new_2d(64, 64, TextureFormat::RGBA8_UNORM));
+        device.queue().write_texture(&default_texture, &default_data, TextureDataLayout::default(),
+            Origin3d::default(), Extent3d { width: 64, height: 64, depth: 1 });
+
+        TextureCache {
+            device: device.clone(),
+            textures: HashMap::new(),
+            handles: HashMap::new(),
+            memory_budget: memory_budget_mb as u64 * 1024 * 1024,
+            memory_used: 0,
+            next_handle_id: 1,
+            generation: 0,
+            mipmap_generator,
+            compressor,
+            default_texture: TextureHandle { id: 0, generation: 0 },
+        }
+    }
+
+    fn generate_default_texture_data() -> Vec<u8> {
+        let mut data = Vec::with_capacity(64 * 64 * 4);
+        for y in 0..64 {
+            for x in 0..64 {
+                let checker = ((x / 8) + (y / 8)) % 2 == 0;
+                if checker {
+                    data.extend_from_slice(&[255, 0, 255, 255]); // Pink
+                } else {
+                    data.extend_from_slice(&[0, 0, 0, 255]); // Black
+                }
+            }
+        }
+        data
+    }
+
+    /// Load or get cached texture
+    fn load(&mut self, path: &str) -> TextureHandle {
+        // Check cache first
+        if let Some(cached) = self.textures.get_mut(path) {
+            cached.ref_count += 1;
+            cached.last_accessed = self.generation as u64;
+            return cached.handle;
+        }
+
+        // Create handle
+        let handle = TextureHandle {
+            id: self.next_handle_id,
+            generation: self.generation,
+        };
+        self.next_handle_id += 1;
+
+        // Create cache entry (loading will happen async)
+        let cached = CachedTexture {
+            handle,
+            path: path.to_string(),
+            status: TextureLoadStatus::Loading,
+            ref_count: 1,
+            size_bytes: 0,
+            last_accessed: self.generation as u64,
+            format: TextureFormat::RGBA8_UNORM,
+        };
+
+        self.textures.insert(path.to_string(), cached);
+        self.handles.insert(handle, path.to_string());
+
+        // Queue async load
+        self.queue_load(path.to_string(), handle);
+
+        handle
+    }
+
+    fn queue_load(&self, path: String, handle: TextureHandle) {
+        // In real implementation, this would be async
+        // For now, simulate immediate load
+    }
+
+    /// Release a texture reference
+    fn release(&mut self, handle: TextureHandle) {
+        if let Some(path) = self.handles.get(&handle).cloned() {
+            if let Some(cached) = self.textures.get_mut(&path) {
+                cached.ref_count = cached.ref_count.saturating_sub(1);
+
+                // Don't immediately remove - let LRU handle it
+            }
+        }
+    }
+
+    /// Get texture handle, returning default if not loaded
+    fn get(&self, handle: TextureHandle) -> TextureHandle {
+        if let Some(path) = self.handles.get(&handle) {
+            if let Some(cached) = self.textures.get(path) {
+                if cached.status == TextureLoadStatus::Loaded {
+                    return handle;
+                }
+            }
+        }
+        self.default_texture
+    }
+
+    /// Perform cache maintenance
+    fn maintain(&mut self) {
+        self.generation += 1;
+
+        // Evict textures if over budget
+        while self.memory_used > self.memory_budget {
+            self.evict_lru();
+        }
+    }
+
+    fn evict_lru(&mut self) {
+        let mut oldest_path: Option<String> = None;
+        let mut oldest_access: u64 = u64::MAX;
+
+        for (path, cached) in &self.textures {
+            if cached.ref_count == 0 && cached.last_accessed < oldest_access {
+                oldest_access = cached.last_accessed;
+                oldest_path = Some(path.clone());
+            }
+        }
+
+        if let Some(path) = oldest_path {
+            if let Some(cached) = self.textures.remove(&path) {
+                self.handles.remove(&cached.handle);
+                self.memory_used -= cached.size_bytes;
+            }
+        }
+    }
+
+    /// Get cache statistics
+    fn get_stats(&self) -> TextureCacheStats {
+        let mut loaded_count: u32 = 0;
+        let mut loading_count: u32 = 0;
+
+        for cached in self.textures.values() {
+            match cached.status {
+                TextureLoadStatus::Loaded => loaded_count += 1,
+                TextureLoadStatus::Loading => loading_count += 1,
+                _ => {}
+            }
+        }
+
+        TextureCacheStats {
+            texture_count: self.textures.len() as u32,
+            loaded_count,
+            loading_count,
+            memory_used: self.memory_used,
+            memory_budget: self.memory_budget,
+        }
+    }
+}
+
+struct TextureCacheStats {
+    texture_count: u32,
+    loaded_count: u32,
+    loading_count: u32,
+    memory_used: u64,
+    memory_budget: u64,
+}
+
+// =============================================================================
+// PROCEDURAL TEXTURE GENERATION
+// =============================================================================
+
+/// Procedural texture type
+enum ProceduralTextureType {
+    WhiteNoise,
+    PerlinNoise,
+    SimplexNoise,
+    WorleyNoise,
+    FBM,
+    Turbulence,
+    Checkerboard,
+    Grid,
+    Gradient,
+    Ramp,
+}
+
+/// Procedural texture configuration
+struct ProceduralConfig {
+    texture_type: ProceduralTextureType,
+    width: u32,
+    height: u32,
+    seed: u32,
+    scale: f32,
+    octaves: u32,
+    persistence: f32,
+    lacunarity: f32,
+    color_a: vec4,
+    color_b: vec4,
+}
+
+impl ProceduralConfig {
+    fn perlin(width: u32, height: u32) -> Self {
+        ProceduralConfig {
+            texture_type: ProceduralTextureType::PerlinNoise,
+            width,
+            height,
+            seed: 12345,
+            scale: 8.0,
+            octaves: 4,
+            persistence: 0.5,
+            lacunarity: 2.0,
+            color_a: vec4(0.0, 0.0, 0.0, 1.0),
+            color_b: vec4(1.0, 1.0, 1.0, 1.0),
+        }
+    }
+
+    fn fbm(width: u32, height: u32, octaves: u32) -> Self {
+        ProceduralConfig {
+            texture_type: ProceduralTextureType::FBM,
+            width,
+            height,
+            seed: 12345,
+            scale: 4.0,
+            octaves,
+            persistence: 0.5,
+            lacunarity: 2.0,
+            color_a: vec4(0.0, 0.0, 0.0, 1.0),
+            color_b: vec4(1.0, 1.0, 1.0, 1.0),
+        }
+    }
+
+    fn worley(width: u32, height: u32) -> Self {
+        ProceduralConfig {
+            texture_type: ProceduralTextureType::WorleyNoise,
+            width,
+            height,
+            seed: 12345,
+            scale: 8.0,
+            octaves: 1,
+            persistence: 0.5,
+            lacunarity: 2.0,
+            color_a: vec4(0.0, 0.0, 0.0, 1.0),
+            color_b: vec4(1.0, 1.0, 1.0, 1.0),
+        }
+    }
+}
+
+/// GPU procedural texture generator
+struct ProceduralGenerator {
+    device: GpuDevice,
+    white_noise_pipeline: GpuComputePipeline,
+    perlin_pipeline: GpuComputePipeline,
+    worley_pipeline: GpuComputePipeline,
+    fbm_pipeline: GpuComputePipeline,
+    pattern_pipeline: GpuComputePipeline,
+}
+
+impl ProceduralGenerator {
+    fn new(device: &GpuDevice) -> Self {
+        ProceduralGenerator {
+            device: device.clone(),
+            white_noise_pipeline: device.create_compute_pipeline(ComputePipelineDesc {
+                shader: device.create_shader(PROCEDURAL_WHITE_NOISE_SHADER),
+                entry_point: "main",
+            }),
+            perlin_pipeline: device.create_compute_pipeline(ComputePipelineDesc {
+                shader: device.create_shader(PROCEDURAL_PERLIN_SHADER),
+                entry_point: "main",
+            }),
+            worley_pipeline: device.create_compute_pipeline(ComputePipelineDesc {
+                shader: device.create_shader(PROCEDURAL_WORLEY_SHADER),
+                entry_point: "main",
+            }),
+            fbm_pipeline: device.create_compute_pipeline(ComputePipelineDesc {
+                shader: device.create_shader(PROCEDURAL_FBM_SHADER),
+                entry_point: "main",
+            }),
+            pattern_pipeline: device.create_compute_pipeline(ComputePipelineDesc {
+                shader: device.create_shader(PROCEDURAL_PATTERN_SHADER),
+                entry_point: "main",
+            }),
+        }
+    }
+
+    fn generate(&self, config: &ProceduralConfig, encoder: &mut GpuCommandEncoder) -> GpuTexture {
+        let texture = self.device.create_texture(TextureDesc::new_2d(
+            config.width,
+            config.height,
+            TextureFormat::RGBA8_UNORM,
+        ).with_usage(TextureUsage::SAMPLED | TextureUsage::STORAGE));
+
+        let pipeline = match config.texture_type {
+            ProceduralTextureType::WhiteNoise => &self.white_noise_pipeline,
+            ProceduralTextureType::PerlinNoise | ProceduralTextureType::SimplexNoise => &self.perlin_pipeline,
+            ProceduralTextureType::WorleyNoise => &self.worley_pipeline,
+            ProceduralTextureType::FBM | ProceduralTextureType::Turbulence => &self.fbm_pipeline,
+            ProceduralTextureType::Checkerboard | ProceduralTextureType::Grid |
+            ProceduralTextureType::Gradient | ProceduralTextureType::Ramp => &self.pattern_pipeline,
+        };
+
+        let uniforms = ProceduralUniforms {
+            width: config.width,
+            height: config.height,
+            seed: config.seed,
+            scale: config.scale,
+            octaves: config.octaves,
+            persistence: config.persistence,
+            lacunarity: config.lacunarity,
+            texture_type: config.texture_type as u32,
+            color_a: config.color_a,
+            color_b: config.color_b,
+        };
+
+        let bind_group = self.device.create_bind_group(BindGroupDesc {
+            entries: [
+                BindGroupEntry::storage_texture(0, &texture.create_view_default()),
+            ],
+        });
+
+        encoder.set_pipeline(pipeline);
+        encoder.set_bind_group(0, &bind_group);
+        encoder.set_push_constants(&uniforms);
+        encoder.dispatch(
+            (config.width + 7) / 8,
+            (config.height + 7) / 8,
+            1,
+        );
+
+        texture
+    }
+}
+
+struct ProceduralUniforms {
+    width: u32,
+    height: u32,
+    seed: u32,
+    scale: f32,
+    octaves: u32,
+    persistence: f32,
+    lacunarity: f32,
+    texture_type: u32,
+    color_a: vec4,
+    color_b: vec4,
+}
+
+// =============================================================================
+// WGSL SHADERS
+// =============================================================================
+
+const MIPMAP_BOX_SHADER: &str = r#"
+struct Uniforms {
+    src_size: vec2<f32>,
+    dst_size: vec2<f32>,
+    gamma_correct: u32,
+    alpha_cutoff: f32,
+    sharpness: f32,
+    filter_radius: f32,
+}
+
+@group(0) @binding(0) var src_texture: texture_2d<f32>;
+@group(0) @binding(1) var dst_texture: texture_storage_2d<rgba8unorm, write>;
+
+var<push_constant> uniforms: Uniforms;
+
+fn srgb_to_linear(c: vec3<f32>) -> vec3<f32> {
+    return select(
+        c / 12.92,
+        pow((c + 0.055) / 1.055, vec3<f32>(2.4)),
+        c > vec3<f32>(0.04045)
+    );
+}
+
+fn linear_to_srgb(c: vec3<f32>) -> vec3<f32> {
+    return select(
+        c * 12.92,
+        1.055 * pow(c, vec3<f32>(1.0/2.4)) - 0.055,
+        c > vec3<f32>(0.0031308)
+    );
+}
+
+@compute @workgroup_size(8, 8, 1)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let dst_coord = gid.xy;
+    if (dst_coord.x >= u32(uniforms.dst_size.x) || dst_coord.y >= u32(uniforms.dst_size.y)) {
+        return;
+    }
+
+    // Sample 2x2 block from source
+    let src_coord = dst_coord * 2u;
+
+    var color = vec4<f32>(0.0);
+    for (var dy = 0u; dy < 2u; dy++) {
+        for (var dx = 0u; dx < 2u; dx++) {
+            var sample = textureLoad(src_texture, src_coord + vec2<u32>(dx, dy), 0);
+
+            if (uniforms.gamma_correct != 0u) {
+                sample = vec4<f32>(srgb_to_linear(sample.rgb), sample.a);
+            }
+
+            color += sample;
+        }
+    }
+
+    color /= 4.0;
+
+    if (uniforms.gamma_correct != 0u) {
+        color = vec4<f32>(linear_to_srgb(color.rgb), color.a);
+    }
+
+    textureStore(dst_texture, dst_coord, color);
+}
+"#;
+
+const MIPMAP_KAISER_SHADER: &str = r#"
+struct Uniforms {
+    src_size: vec2<f32>,
+    dst_size: vec2<f32>,
+    gamma_correct: u32,
+    alpha_cutoff: f32,
+    sharpness: f32,
+    filter_radius: f32,
+}
+
+@group(0) @binding(0) var src_texture: texture_2d<f32>;
+@group(0) @binding(1) var dst_texture: texture_storage_2d<rgba8unorm, write>;
+
+var<push_constant> uniforms: Uniforms;
+
+// Kaiser-Bessel window function
+fn kaiser(x: f32, alpha: f32) -> f32 {
+    if (abs(x) >= 1.0) { return 0.0; }
+    let t = sqrt(1.0 - x * x);
+    // Approximation of I0(alpha * t) / I0(alpha)
+    let a = alpha * t;
+    return (1.0 + a * a * (0.25 + a * a * (0.015625 + a * a * 0.000434))) /
+           (1.0 + alpha * alpha * (0.25 + alpha * alpha * (0.015625 + alpha * alpha * 0.000434)));
+}
+
+fn sinc(x: f32) -> f32 {
+    if (abs(x) < 0.0001) { return 1.0; }
+    let px = 3.14159265359 * x;
+    return sin(px) / px;
+}
+
+fn kaiser_sinc(x: f32, radius: f32, alpha: f32) -> f32 {
+    return sinc(x) * kaiser(x / radius, alpha);
+}
+
+fn srgb_to_linear(c: vec3<f32>) -> vec3<f32> {
+    return select(
+        c / 12.92,
+        pow((c + 0.055) / 1.055, vec3<f32>(2.4)),
+        c > vec3<f32>(0.04045)
+    );
+}
+
+fn linear_to_srgb(c: vec3<f32>) -> vec3<f32> {
+    return select(
+        c * 12.92,
+        1.055 * pow(c, vec3<f32>(1.0/2.4)) - 0.055,
+        c > vec3<f32>(0.0031308)
+    );
+}
+
+@compute @workgroup_size(8, 8, 1)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let dst_coord = gid.xy;
+    if (dst_coord.x >= u32(uniforms.dst_size.x) || dst_coord.y >= u32(uniforms.dst_size.y)) {
+        return;
+    }
+
+    let scale = uniforms.src_size / uniforms.dst_size;
+    let center = (vec2<f32>(dst_coord) + 0.5) * scale;
+    let radius = uniforms.filter_radius;
+    let alpha = 4.0; // Kaiser alpha parameter
+
+    var color = vec4<f32>(0.0);
+    var weight_sum = 0.0;
+
+    let filter_size = i32(ceil(radius * 2.0));
+    let start = vec2<i32>(floor(center - vec2<f32>(radius)));
+
+    for (var dy = 0; dy < filter_size; dy++) {
+        for (var dx = 0; dx < filter_size; dx++) {
+            let sample_pos = start + vec2<i32>(dx, dy);
+
+            if (sample_pos.x < 0 || sample_pos.y < 0 ||
+                sample_pos.x >= i32(uniforms.src_size.x) ||
+                sample_pos.y >= i32(uniforms.src_size.y)) {
+                continue;
+            }
+
+            let offset = vec2<f32>(sample_pos) + 0.5 - center;
+            let dist = length(offset / scale);
+
+            if (dist < radius) {
+                let w = kaiser_sinc(dist, radius, alpha);
+                var sample = textureLoad(src_texture, vec2<u32>(sample_pos), 0);
+
+                if (uniforms.gamma_correct != 0u) {
+                    sample = vec4<f32>(srgb_to_linear(sample.rgb), sample.a);
+                }
+
+                color += sample * w;
+                weight_sum += w;
+            }
+        }
+    }
+
+    if (weight_sum > 0.0) {
+        color /= weight_sum;
+    }
+
+    // Apply sharpening if requested
+    if (uniforms.sharpness > 0.0) {
+        let center_sample = textureLoad(src_texture, vec2<u32>(center), 0);
+        color = mix(color, center_sample, uniforms.sharpness);
+    }
+
+    if (uniforms.gamma_correct != 0u) {
+        color = vec4<f32>(linear_to_srgb(color.rgb), color.a);
+    }
+
+    textureStore(dst_texture, dst_coord, color);
+}
+"#;
+
+const MIPMAP_COVERAGE_SHADER: &str = r#"
+struct Uniforms {
+    src_size: vec2<f32>,
+    dst_size: vec2<f32>,
+    gamma_correct: u32,
+    alpha_cutoff: f32,
+    sharpness: f32,
+    filter_radius: f32,
+}
+
+@group(0) @binding(0) var src_texture: texture_2d<f32>;
+@group(0) @binding(1) var dst_texture: texture_storage_2d<rgba8unorm, write>;
+
+var<push_constant> uniforms: Uniforms;
+
+fn srgb_to_linear(c: vec3<f32>) -> vec3<f32> {
+    return select(
+        c / 12.92,
+        pow((c + 0.055) / 1.055, vec3<f32>(2.4)),
+        c > vec3<f32>(0.04045)
+    );
+}
+
+fn linear_to_srgb(c: vec3<f32>) -> vec3<f32> {
+    return select(
+        c * 12.92,
+        1.055 * pow(c, vec3<f32>(1.0/2.4)) - 0.055,
+        c > vec3<f32>(0.0031308)
+    );
+}
+
+@compute @workgroup_size(8, 8, 1)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let dst_coord = gid.xy;
+    if (dst_coord.x >= u32(uniforms.dst_size.x) || dst_coord.y >= u32(uniforms.dst_size.y)) {
+        return;
+    }
+
+    let src_coord = dst_coord * 2u;
+
+    // Calculate target coverage from source mip
+    var target_coverage = 0.0;
+    var sample_count = 0.0;
+
+    for (var dy = 0u; dy < 2u; dy++) {
+        for (var dx = 0u; dx < 2u; dx++) {
+            let sample = textureLoad(src_texture, src_coord + vec2<u32>(dx, dy), 0);
+            if (sample.a >= uniforms.alpha_cutoff) {
+                target_coverage += 1.0;
+            }
+            sample_count += 1.0;
+        }
+    }
+    target_coverage /= sample_count;
+
+    // Sample and average (box filter for RGB)
+    var color = vec4<f32>(0.0);
+    for (var dy = 0u; dy < 2u; dy++) {
+        for (var dx = 0u; dx < 2u; dx++) {
+            var sample = textureLoad(src_texture, src_coord + vec2<u32>(dx, dy), 0);
+
+            if (uniforms.gamma_correct != 0u) {
+                sample = vec4<f32>(srgb_to_linear(sample.rgb), sample.a);
+            }
+
+            color += sample;
+        }
+    }
+    color /= 4.0;
+
+    // Adjust alpha to preserve coverage
+    // Binary search to find alpha that gives same coverage percentage
+    var lo = 0.0;
+    var hi = 1.0;
+
+    for (var i = 0; i < 8; i++) {
+        let mid = (lo + hi) * 0.5;
+        let coverage = select(0.0, 1.0, mid >= uniforms.alpha_cutoff);
+
+        if (coverage < target_coverage) {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+
+    // Use the averaged alpha scaled to preserve coverage
+    if (target_coverage > 0.0) {
+        color.a = (lo + hi) * 0.5;
+    }
+
+    if (uniforms.gamma_correct != 0u) {
+        color = vec4<f32>(linear_to_srgb(color.rgb), color.a);
+    }
+
+    textureStore(dst_texture, dst_coord, color);
+}
+"#;
+
+const MIPMAP_NORMAL_SHADER: &str = r#"
+@group(0) @binding(0) var src_texture: texture_2d<f32>;
+@group(0) @binding(1) var dst_texture: texture_storage_2d<rgba8snorm, write>;
+
+@compute @workgroup_size(8, 8, 1)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let dst_size = textureDimensions(dst_texture);
+    let dst_coord = gid.xy;
+
+    if (dst_coord.x >= dst_size.x || dst_coord.y >= dst_size.y) {
+        return;
+    }
+
+    let src_coord = dst_coord * 2u;
+
+    // Average normals from 2x2 block
+    var normal = vec3<f32>(0.0);
+
+    for (var dy = 0u; dy < 2u; dy++) {
+        for (var dx = 0u; dx < 2u; dx++) {
+            let sample = textureLoad(src_texture, src_coord + vec2<u32>(dx, dy), 0);
+            // Decode from [0,1] to [-1,1]
+            let n = sample.xyz * 2.0 - 1.0;
+            normal += n;
+        }
+    }
+
+    // Renormalize
+    normal = normalize(normal);
+
+    // Encode back to [0,1]
+    let result = vec4<f32>(normal * 0.5 + 0.5, 1.0);
+
+    textureStore(dst_texture, dst_coord, result);
+}
+"#;
+
+const BC1_COMPRESS_SHADER: &str = r#"
+struct Uniforms {
+    width: u32,
+    height: u32,
+    quality: u32,
+    perceptual: u32,
+    weight_alpha: u32,
+    normal_map: u32,
+}
+
+@group(0) @binding(0) var src_texture: texture_2d<f32>;
+@group(0) @binding(1) var dst_texture: texture_storage_2d<rgba32uint, write>;
+
+var<push_constant> uniforms: Uniforms;
+
+fn rgb_to_565(color: vec3<f32>) -> u32 {
+    let r = u32(clamp(color.r, 0.0, 1.0) * 31.0 + 0.5);
+    let g = u32(clamp(color.g, 0.0, 1.0) * 63.0 + 0.5);
+    let b = u32(clamp(color.b, 0.0, 1.0) * 31.0 + 0.5);
+    return (r << 11u) | (g << 5u) | b;
+}
+
+fn color_565_to_rgb(c: u32) -> vec3<f32> {
+    let r = f32((c >> 11u) & 31u) / 31.0;
+    let g = f32((c >> 5u) & 63u) / 63.0;
+    let b = f32(c & 31u) / 31.0;
+    return vec3<f32>(r, g, b);
+}
+
+fn color_distance_sq(a: vec3<f32>, b: vec3<f32>) -> f32 {
+    let d = a - b;
+    return dot(d, d);
+}
+
+fn perceptual_distance_sq(a: vec3<f32>, b: vec3<f32>) -> f32 {
+    let d = a - b;
+    // Luminance weights
+    return d.r * d.r * 0.299 + d.g * d.g * 0.587 + d.b * d.b * 0.114;
+}
+
+@compute @workgroup_size(1, 1, 1)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let block_x = gid.x;
+    let block_y = gid.y;
+
+    let blocks_x = (uniforms.width + 3u) / 4u;
+    let blocks_y = (uniforms.height + 3u) / 4u;
+
+    if (block_x >= blocks_x || block_y >= blocks_y) {
+        return;
+    }
+
+    // Load 4x4 block
+    var block: array<vec3<f32>, 16>;
+    var min_color = vec3<f32>(1.0);
+    var max_color = vec3<f32>(0.0);
+
+    for (var y = 0u; y < 4u; y++) {
+        for (var x = 0u; x < 4u; x++) {
+            let px = block_x * 4u + x;
+            let py = block_y * 4u + y;
+
+            var color: vec3<f32>;
+            if (px < uniforms.width && py < uniforms.height) {
+                color = textureLoad(src_texture, vec2<u32>(px, py), 0).rgb;
+            } else {
+                color = vec3<f32>(0.0);
+            }
+
+            block[y * 4u + x] = color;
+            min_color = min(min_color, color);
+            max_color = max(max_color, color);
+        }
+    }
+
+    // Principal Component Analysis for better endpoint selection (simplified)
+    // For fast quality, just use min/max
+    var endpoint0 = max_color;
+    var endpoint1 = min_color;
+
+    // Encode endpoints as 565
+    var c0 = rgb_to_565(endpoint0);
+    var c1 = rgb_to_565(endpoint1);
+
+    // Ensure c0 > c1 for 4-color mode
+    if (c0 < c1) {
+        let tmp = c0;
+        c0 = c1;
+        c1 = tmp;
+        let tmp_v = endpoint0;
+        endpoint0 = endpoint1;
+        endpoint1 = tmp_v;
+    }
+
+    // Generate palette
+    let palette0 = color_565_to_rgb(c0);
+    let palette1 = color_565_to_rgb(c1);
+    let palette2 = palette0 * (2.0/3.0) + palette1 * (1.0/3.0);
+    let palette3 = palette0 * (1.0/3.0) + palette1 * (2.0/3.0);
+
+    // Find best indices
+    var indices: u32 = 0u;
+
+    for (var i = 0u; i < 16u; i++) {
+        let color = block[i];
+
+        var best_idx: u32 = 0u;
+        var best_dist = 1000000.0;
+
+        let dist0 = select(color_distance_sq(color, palette0), perceptual_distance_sq(color, palette0), uniforms.perceptual != 0u);
+        let dist1 = select(color_distance_sq(color, palette1), perceptual_distance_sq(color, palette1), uniforms.perceptual != 0u);
+        let dist2 = select(color_distance_sq(color, palette2), perceptual_distance_sq(color, palette2), uniforms.perceptual != 0u);
+        let dist3 = select(color_distance_sq(color, palette3), perceptual_distance_sq(color, palette3), uniforms.perceptual != 0u);
+
+        if (dist0 < best_dist) { best_dist = dist0; best_idx = 0u; }
+        if (dist1 < best_dist) { best_dist = dist1; best_idx = 1u; }
+        if (dist2 < best_dist) { best_dist = dist2; best_idx = 2u; }
+        if (dist3 < best_dist) { best_dist = dist3; best_idx = 3u; }
+
+        indices |= best_idx << (i * 2u);
+    }
+
+    // Pack result: c0 (16 bits) | c1 (16 bits) | indices (32 bits)
+    let packed = vec4<u32>(c0 | (c1 << 16u), indices, 0u, 0u);
+
+    textureStore(dst_texture, vec2<u32>(block_x, block_y), packed);
+}
+"#;
+
+const BC3_COMPRESS_SHADER: &str = r#"
+struct Uniforms {
+    width: u32,
+    height: u32,
+    quality: u32,
+    perceptual: u32,
+    weight_alpha: u32,
+    normal_map: u32,
+}
+
+@group(0) @binding(0) var src_texture: texture_2d<f32>;
+@group(0) @binding(1) var dst_texture: texture_storage_2d<rgba32uint, write>;
+
+var<push_constant> uniforms: Uniforms;
+
+// BC3 = BC1 color + interpolated alpha block
+// Similar to BC1 but with separate alpha compression
+
+fn rgb_to_565(color: vec3<f32>) -> u32 {
+    let r = u32(clamp(color.r, 0.0, 1.0) * 31.0 + 0.5);
+    let g = u32(clamp(color.g, 0.0, 1.0) * 63.0 + 0.5);
+    let b = u32(clamp(color.b, 0.0, 1.0) * 31.0 + 0.5);
+    return (r << 11u) | (g << 5u) | b;
+}
+
+fn color_565_to_rgb(c: u32) -> vec3<f32> {
+    let r = f32((c >> 11u) & 31u) / 31.0;
+    let g = f32((c >> 5u) & 63u) / 63.0;
+    let b = f32(c & 31u) / 31.0;
+    return vec3<f32>(r, g, b);
+}
+
+@compute @workgroup_size(1, 1, 1)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let block_x = gid.x;
+    let block_y = gid.y;
+
+    let blocks_x = (uniforms.width + 3u) / 4u;
+    let blocks_y = (uniforms.height + 3u) / 4u;
+
+    if (block_x >= blocks_x || block_y >= blocks_y) {
+        return;
+    }
+
+    // Load 4x4 block
+    var block: array<vec4<f32>, 16>;
+    var min_color = vec3<f32>(1.0);
+    var max_color = vec3<f32>(0.0);
+    var min_alpha = 1.0;
+    var max_alpha = 0.0;
+
+    for (var y = 0u; y < 4u; y++) {
+        for (var x = 0u; x < 4u; x++) {
+            let px = block_x * 4u + x;
+            let py = block_y * 4u + y;
+
+            var color: vec4<f32>;
+            if (px < uniforms.width && py < uniforms.height) {
+                color = textureLoad(src_texture, vec2<u32>(px, py), 0);
+            } else {
+                color = vec4<f32>(0.0);
+            }
+
+            block[y * 4u + x] = color;
+            min_color = min(min_color, color.rgb);
+            max_color = max(max_color, color.rgb);
+            min_alpha = min(min_alpha, color.a);
+            max_alpha = max(max_alpha, color.a);
+        }
+    }
+
+    // Compress alpha block (8 levels)
+    let alpha0 = u32(max_alpha * 255.0);
+    let alpha1 = u32(min_alpha * 255.0);
+
+    var alpha_indices: u64 = 0u64;
+    for (var i = 0u; i < 16u; i++) {
+        let a = block[i].a;
+        // Find best alpha index (0-7)
+        let t = (a - min_alpha) / max(max_alpha - min_alpha, 0.001);
+        let idx = u32(clamp(t * 7.0, 0.0, 7.0));
+        alpha_indices |= u64(idx) << (i * 3u);
+    }
+
+    // Compress color block (same as BC1)
+    var c0 = rgb_to_565(max_color);
+    var c1 = rgb_to_565(min_color);
+
+    if (c0 < c1) {
+        let tmp = c0; c0 = c1; c1 = tmp;
+    }
+
+    let palette0 = color_565_to_rgb(c0);
+    let palette1 = color_565_to_rgb(c1);
+    let palette2 = palette0 * (2.0/3.0) + palette1 * (1.0/3.0);
+    let palette3 = palette0 * (1.0/3.0) + palette1 * (2.0/3.0);
+
+    var color_indices: u32 = 0u;
+    for (var i = 0u; i < 16u; i++) {
+        let color = block[i].rgb;
+        let d0 = dot(color - palette0, color - palette0);
+        let d1 = dot(color - palette1, color - palette1);
+        let d2 = dot(color - palette2, color - palette2);
+        let d3 = dot(color - palette3, color - palette3);
+
+        var best_idx: u32 = 0u;
+        var best_dist = d0;
+        if (d1 < best_dist) { best_dist = d1; best_idx = 1u; }
+        if (d2 < best_dist) { best_dist = d2; best_idx = 2u; }
+        if (d3 < best_dist) { best_dist = d3; best_idx = 3u; }
+
+        color_indices |= best_idx << (i * 2u);
+    }
+
+    // Pack: alpha0 | alpha1 | alpha_indices (48 bits) | c0 | c1 | color_indices
+    let packed = vec4<u32>(
+        alpha0 | (alpha1 << 8u) | (u32(alpha_indices & 0xFFFFu) << 16u),
+        u32((alpha_indices >> 16u) & 0xFFFFFFFFu),
+        c0 | (c1 << 16u),
+        color_indices
+    );
+
+    textureStore(dst_texture, vec2<u32>(block_x, block_y), packed);
+}
+"#;
+
+const BC4_COMPRESS_SHADER: &str = r#"
+struct Uniforms {
+    width: u32,
+    height: u32,
+    quality: u32,
+    perceptual: u32,
+    weight_alpha: u32,
+    normal_map: u32,
+}
+
+@group(0) @binding(0) var src_texture: texture_2d<f32>;
+@group(0) @binding(1) var dst_texture: texture_storage_2d<rg32uint, write>;
+
+var<push_constant> uniforms: Uniforms;
+
+@compute @workgroup_size(1, 1, 1)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let block_x = gid.x;
+    let block_y = gid.y;
+
+    let blocks_x = (uniforms.width + 3u) / 4u;
+    let blocks_y = (uniforms.height + 3u) / 4u;
+
+    if (block_x >= blocks_x || block_y >= blocks_y) {
+        return;
+    }
+
+    // Load 4x4 block (single channel)
+    var block: array<f32, 16>;
+    var min_val = 1.0;
+    var max_val = 0.0;
+
+    for (var y = 0u; y < 4u; y++) {
+        for (var x = 0u; x < 4u; x++) {
+            let px = block_x * 4u + x;
+            let py = block_y * 4u + y;
+
+            var val: f32;
+            if (px < uniforms.width && py < uniforms.height) {
+                val = textureLoad(src_texture, vec2<u32>(px, py), 0).r;
+            } else {
+                val = 0.0;
+            }
+
+            block[y * 4u + x] = val;
+            min_val = min(min_val, val);
+            max_val = max(max_val, val);
+        }
+    }
+
+    let r0 = u32(max_val * 255.0);
+    let r1 = u32(min_val * 255.0);
+
+    // 8-level interpolation
+    var indices: u64 = 0u64;
+    for (var i = 0u; i < 16u; i++) {
+        let v = block[i];
+        let t = (v - min_val) / max(max_val - min_val, 0.001);
+        let idx = u32(clamp(t * 7.0, 0.0, 7.0));
+        indices |= u64(idx) << (i * 3u);
+    }
+
+    // Pack: r0 (8) | r1 (8) | indices (48)
+    let packed = vec2<u32>(
+        r0 | (r1 << 8u) | (u32(indices & 0xFFFFu) << 16u),
+        u32((indices >> 16u) & 0xFFFFFFFFu)
+    );
+
+    textureStore(dst_texture, vec2<u32>(block_x, block_y), vec4<u32>(packed.x, packed.y, 0u, 0u));
+}
+"#;
+
+const BC5_COMPRESS_SHADER: &str = r#"
+struct Uniforms {
+    width: u32,
+    height: u32,
+    quality: u32,
+    perceptual: u32,
+    weight_alpha: u32,
+    normal_map: u32,
+}
+
+@group(0) @binding(0) var src_texture: texture_2d<f32>;
+@group(0) @binding(1) var dst_texture: texture_storage_2d<rgba32uint, write>;
+
+var<push_constant> uniforms: Uniforms;
+
+@compute @workgroup_size(1, 1, 1)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let block_x = gid.x;
+    let block_y = gid.y;
+
+    let blocks_x = (uniforms.width + 3u) / 4u;
+    let blocks_y = (uniforms.height + 3u) / 4u;
+
+    if (block_x >= blocks_x || block_y >= blocks_y) {
+        return;
+    }
+
+    // Load 4x4 block (two channels)
+    var block_r: array<f32, 16>;
+    var block_g: array<f32, 16>;
+    var min_r = 1.0; var max_r = 0.0;
+    var min_g = 1.0; var max_g = 0.0;
+
+    for (var y = 0u; y < 4u; y++) {
+        for (var x = 0u; x < 4u; x++) {
+            let px = block_x * 4u + x;
+            let py = block_y * 4u + y;
+
+            var rg: vec2<f32>;
+            if (px < uniforms.width && py < uniforms.height) {
+                rg = textureLoad(src_texture, vec2<u32>(px, py), 0).rg;
+            } else {
+                rg = vec2<f32>(0.5, 0.5);
+            }
+
+            block_r[y * 4u + x] = rg.r;
+            block_g[y * 4u + x] = rg.g;
+            min_r = min(min_r, rg.r); max_r = max(max_r, rg.r);
+            min_g = min(min_g, rg.g); max_g = max(max_g, rg.g);
+        }
+    }
+
+    // Compress R channel
+    let r0 = u32(max_r * 255.0);
+    let r1 = u32(min_r * 255.0);
+    var indices_r: u64 = 0u64;
+    for (var i = 0u; i < 16u; i++) {
+        let t = (block_r[i] - min_r) / max(max_r - min_r, 0.001);
+        let idx = u32(clamp(t * 7.0, 0.0, 7.0));
+        indices_r |= u64(idx) << (i * 3u);
+    }
+
+    // Compress G channel
+    let g0 = u32(max_g * 255.0);
+    let g1 = u32(min_g * 255.0);
+    var indices_g: u64 = 0u64;
+    for (var i = 0u; i < 16u; i++) {
+        let t = (block_g[i] - min_g) / max(max_g - min_g, 0.001);
+        let idx = u32(clamp(t * 7.0, 0.0, 7.0));
+        indices_g |= u64(idx) << (i * 3u);
+    }
+
+    // Pack both channels
+    let packed = vec4<u32>(
+        r0 | (r1 << 8u) | (u32(indices_r & 0xFFFFu) << 16u),
+        u32((indices_r >> 16u) & 0xFFFFFFFFu),
+        g0 | (g1 << 8u) | (u32(indices_g & 0xFFFFu) << 16u),
+        u32((indices_g >> 16u) & 0xFFFFFFFFu)
+    );
+
+    textureStore(dst_texture, vec2<u32>(block_x, block_y), packed);
+}
+"#;
+
+const BC6H_COMPRESS_SHADER: &str = r#"
+struct Uniforms {
+    width: u32,
+    height: u32,
+    quality: u32,
+    perceptual: u32,
+    weight_alpha: u32,
+    normal_map: u32,
+}
+
+@group(0) @binding(0) var src_texture: texture_2d<f32>;
+@group(0) @binding(1) var dst_texture: texture_storage_2d<rgba32uint, write>;
+
+var<push_constant> uniforms: Uniforms;
+
+// BC6H compression is complex - this is a simplified version
+// Real implementation would use mode selection and partition optimization
+
+fn float_to_half(f: f32) -> u32 {
+    // Simplified float to half conversion
+    let bits = bitcast<u32>(f);
+    let sign = (bits >> 16u) & 0x8000u;
+    let exp = ((bits >> 23u) & 0xFFu) as i32 - 127 + 15;
+    let mant = (bits >> 13u) & 0x3FFu;
+
+    if (exp <= 0) { return sign; }
+    if (exp >= 31) { return sign | 0x7C00u; }
+    return sign | (u32(exp) << 10u) | mant;
+}
+
+@compute @workgroup_size(1, 1, 1)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let block_x = gid.x;
+    let block_y = gid.y;
+
+    let blocks_x = (uniforms.width + 3u) / 4u;
+    let blocks_y = (uniforms.height + 3u) / 4u;
+
+    if (block_x >= blocks_x || block_y >= blocks_y) {
+        return;
+    }
+
+    // Load 4x4 HDR block
+    var block: array<vec3<f32>, 16>;
+    var min_color = vec3<f32>(1000000.0);
+    var max_color = vec3<f32>(-1000000.0);
+
+    for (var y = 0u; y < 4u; y++) {
+        for (var x = 0u; x < 4u; x++) {
+            let px = block_x * 4u + x;
+            let py = block_y * 4u + y;
+
+            var color: vec3<f32>;
+            if (px < uniforms.width && py < uniforms.height) {
+                color = textureLoad(src_texture, vec2<u32>(px, py), 0).rgb;
+            } else {
+                color = vec3<f32>(0.0);
+            }
+
+            block[y * 4u + x] = color;
+            min_color = min(min_color, color);
+            max_color = max(max_color, color);
+        }
+    }
+
+    // Use mode 0 (simple) - real implementation would select optimal mode
+    // Endpoints as half floats
+    let e0_r = float_to_half(max_color.r);
+    let e0_g = float_to_half(max_color.g);
+    let e0_b = float_to_half(max_color.b);
+    let e1_r = float_to_half(min_color.r);
+    let e1_g = float_to_half(min_color.g);
+    let e1_b = float_to_half(min_color.b);
+
+    // Generate indices (simplified - 4 levels)
+    var indices: u32 = 0u;
+    for (var i = 0u; i < 16u; i++) {
+        let color = block[i];
+        let range = max_color - min_color;
+        let t = (color - min_color) / max(range, vec3<f32>(0.001));
+        let avg_t = (t.r + t.g + t.b) / 3.0;
+        let idx = u32(clamp(avg_t * 3.0, 0.0, 3.0));
+        indices |= idx << (i * 2u);
+    }
+
+    // Pack (simplified)
+    let packed = vec4<u32>(
+        e0_r | (e0_g << 16u),
+        e0_b | (e1_r << 16u),
+        e1_g | (e1_b << 16u),
+        indices
+    );
+
+    textureStore(dst_texture, vec2<u32>(block_x, block_y), packed);
+}
+"#;
+
+const BC7_COMPRESS_SHADER: &str = r#"
+struct Uniforms {
+    width: u32,
+    height: u32,
+    quality: u32,
+    perceptual: u32,
+    weight_alpha: u32,
+    normal_map: u32,
+}
+
+@group(0) @binding(0) var src_texture: texture_2d<f32>;
+@group(0) @binding(1) var dst_texture: texture_storage_2d<rgba32uint, write>;
+
+var<push_constant> uniforms: Uniforms;
+
+// BC7 is the most complex format - 8 modes with different tradeoffs
+// This is a heavily simplified version using mode 6
+
+@compute @workgroup_size(1, 1, 1)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let block_x = gid.x;
+    let block_y = gid.y;
+
+    let blocks_x = (uniforms.width + 3u) / 4u;
+    let blocks_y = (uniforms.height + 3u) / 4u;
+
+    if (block_x >= blocks_x || block_y >= blocks_y) {
+        return;
+    }
+
+    // Load 4x4 block
+    var block: array<vec4<f32>, 16>;
+    var min_color = vec4<f32>(1.0);
+    var max_color = vec4<f32>(0.0);
+
+    for (var y = 0u; y < 4u; y++) {
+        for (var x = 0u; x < 4u; x++) {
+            let px = block_x * 4u + x;
+            let py = block_y * 4u + y;
+
+            var color: vec4<f32>;
+            if (px < uniforms.width && py < uniforms.height) {
+                color = textureLoad(src_texture, vec2<u32>(px, py), 0);
+            } else {
+                color = vec4<f32>(0.0, 0.0, 0.0, 1.0);
+            }
+
+            block[y * 4u + x] = color;
+            min_color = min(min_color, color);
+            max_color = max(max_color, color);
+        }
+    }
+
+    // Mode 6: RGBA 7777 endpoints, 4-bit indices, P-bits
+    // 1 subset, no partition
+
+    // Quantize endpoints to 7 bits
+    let e0 = vec4<u32>(max_color * 127.0 + 0.5);
+    let e1 = vec4<u32>(min_color * 127.0 + 0.5);
+
+    // Generate 4-bit indices
+    var indices: u64 = 0u64;
+    for (var i = 0u; i < 16u; i++) {
+        let color = block[i];
+        let t = (color - min_color) / max(max_color - min_color, vec4<f32>(0.001));
+        let avg_t = (t.r + t.g + t.b + t.a) / 4.0;
+        let idx = u32(clamp(avg_t * 15.0, 0.0, 15.0));
+        indices |= u64(idx) << (i * 4u);
+    }
+
+    // Pack mode 6 block
+    // Mode bit (6) | endpoints | p-bits | indices
+    let mode = 6u;
+    let packed = vec4<u32>(
+        (1u << mode) | (e0.r << 7u) | (e0.g << 14u) | (e0.b << 21u) | ((e0.a & 7u) << 28u),
+        ((e0.a >> 3u) & 15u) | (e1.r << 4u) | (e1.g << 11u) | (e1.b << 18u) | ((e1.a & 3u) << 25u),
+        ((e1.a >> 2u) & 31u) | (u32(indices & 0x7FFFFFFu) << 5u),
+        u32((indices >> 27u) & 0xFFFFFFFFu)
+    );
+
+    textureStore(dst_texture, vec2<u32>(block_x, block_y), packed);
+}
+"#;
+
+const VT_FEEDBACK_ANALYZE_SHADER: &str = r#"
+struct Request {
+    vt_id: u32,
+    mip: u32,
+    tile_x: u32,
+    tile_y: u32,
+}
+
+@group(0) @binding(0) var feedback_texture: texture_2d<u32>;
+@group(0) @binding(1) var<storage, read_write> requests: array<Request>;
+@group(0) @binding(2) var<storage, read_write> request_count: atomic<u32>;
+
+@compute @workgroup_size(8, 8, 1)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let size = textureDimensions(feedback_texture);
+    if (gid.x >= size.x || gid.y >= size.y) {
+        return;
+    }
+
+    let feedback = textureLoad(feedback_texture, gid.xy, 0);
+    let vt_id = feedback.x;
+    let mip = feedback.y;
+    let tile_x = feedback.z;
+    let tile_y = feedback.w;
+
+    // Check if valid request (vt_id != 0xFFFFFFFF)
+    if (vt_id != 0xFFFFFFFFu) {
+        let idx = atomicAdd(&request_count, 1u);
+        if (idx < arrayLength(&requests)) {
+            requests[idx] = Request(vt_id, mip, tile_x, tile_y);
+        }
+    }
+}
+"#;
+
+const VT_PAGE_UPDATE_SHADER: &str = r#"
+struct Uniforms {
+    vt_id: u32,
+    mip: u32,
+    tile_x: u32,
+    tile_y: u32,
+    physical_page: u32,
+    pages_per_row: u32,
+}
+
+@group(0) @binding(0) var page_table: texture_storage_2d_array<rg32uint, write>;
+
+var<push_constant> uniforms: Uniforms;
+
+@compute @workgroup_size(1, 1, 1)
+fn main() {
+    // Calculate physical UV from page index
+    let phys_x = uniforms.physical_page % uniforms.pages_per_row;
+    let phys_y = uniforms.physical_page / uniforms.pages_per_row;
+
+    // Store in page table
+    let entry = vec2<u32>(uniforms.physical_page, uniforms.mip);
+
+    textureStore(
+        page_table,
+        vec2<u32>(uniforms.tile_x, uniforms.tile_y),
+        i32(uniforms.vt_id),
+        vec4<u32>(entry, 0u, 0u)
+    );
+}
+"#;
+
+const PROCEDURAL_WHITE_NOISE_SHADER: &str = r#"
+struct Uniforms {
+    width: u32,
+    height: u32,
+    seed: u32,
+    scale: f32,
+    octaves: u32,
+    persistence: f32,
+    lacunarity: f32,
+    texture_type: u32,
+    color_a: vec4<f32>,
+    color_b: vec4<f32>,
+}
+
+@group(0) @binding(0) var output: texture_storage_2d<rgba8unorm, write>;
+
+var<push_constant> uniforms: Uniforms;
+
+fn pcg_hash(input: u32) -> u32 {
+    var state = input * 747796405u + 2891336453u;
+    var word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
+    return (word >> 22u) ^ word;
+}
+
+fn random(seed: u32) -> f32 {
+    return f32(pcg_hash(seed)) / 4294967295.0;
+}
+
+@compute @workgroup_size(8, 8, 1)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    if (gid.x >= uniforms.width || gid.y >= uniforms.height) {
+        return;
+    }
+
+    let pixel_seed = uniforms.seed + gid.x + gid.y * uniforms.width;
+    let noise = random(pixel_seed);
+
+    let color = mix(uniforms.color_a, uniforms.color_b, noise);
+    textureStore(output, gid.xy, color);
+}
+"#;
+
+const PROCEDURAL_PERLIN_SHADER: &str = r#"
+struct Uniforms {
+    width: u32,
+    height: u32,
+    seed: u32,
+    scale: f32,
+    octaves: u32,
+    persistence: f32,
+    lacunarity: f32,
+    texture_type: u32,
+    color_a: vec4<f32>,
+    color_b: vec4<f32>,
+}
+
+@group(0) @binding(0) var output: texture_storage_2d<rgba8unorm, write>;
+
+var<push_constant> uniforms: Uniforms;
+
+fn pcg_hash(input: u32) -> u32 {
+    var state = input * 747796405u + 2891336453u;
+    var word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
+    return (word >> 22u) ^ word;
+}
+
+fn hash2d(x: i32, y: i32, seed: u32) -> vec2<f32> {
+    let h = pcg_hash(u32(x) + pcg_hash(u32(y) + seed));
+    let angle = f32(h) / 4294967295.0 * 6.28318530718;
+    return vec2<f32>(cos(angle), sin(angle));
+}
+
+fn smoothstep_d(t: f32) -> f32 {
+    return t * t * t * (t * (t * 6.0 - 15.0) + 10.0);
+}
+
+fn perlin(p: vec2<f32>, seed: u32) -> f32 {
+    let pi = vec2<i32>(floor(p));
+    let pf = fract(p);
+
+    let g00 = hash2d(pi.x, pi.y, seed);
+    let g10 = hash2d(pi.x + 1, pi.y, seed);
+    let g01 = hash2d(pi.x, pi.y + 1, seed);
+    let g11 = hash2d(pi.x + 1, pi.y + 1, seed);
+
+    let d00 = pf - vec2<f32>(0.0, 0.0);
+    let d10 = pf - vec2<f32>(1.0, 0.0);
+    let d01 = pf - vec2<f32>(0.0, 1.0);
+    let d11 = pf - vec2<f32>(1.0, 1.0);
+
+    let n00 = dot(g00, d00);
+    let n10 = dot(g10, d10);
+    let n01 = dot(g01, d01);
+    let n11 = dot(g11, d11);
+
+    let u = vec2<f32>(smoothstep_d(pf.x), smoothstep_d(pf.y));
+
+    let nx0 = mix(n00, n10, u.x);
+    let nx1 = mix(n01, n11, u.x);
+
+    return mix(nx0, nx1, u.y) * 0.5 + 0.5;
+}
+
+@compute @workgroup_size(8, 8, 1)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    if (gid.x >= uniforms.width || gid.y >= uniforms.height) {
+        return;
+    }
+
+    let uv = vec2<f32>(gid.xy) / vec2<f32>(f32(uniforms.width), f32(uniforms.height));
+    let p = uv * uniforms.scale;
+
+    let noise = perlin(p, uniforms.seed);
+    let color = mix(uniforms.color_a, uniforms.color_b, noise);
+
+    textureStore(output, gid.xy, color);
+}
+"#;
+
+const PROCEDURAL_WORLEY_SHADER: &str = r#"
+struct Uniforms {
+    width: u32,
+    height: u32,
+    seed: u32,
+    scale: f32,
+    octaves: u32,
+    persistence: f32,
+    lacunarity: f32,
+    texture_type: u32,
+    color_a: vec4<f32>,
+    color_b: vec4<f32>,
+}
+
+@group(0) @binding(0) var output: texture_storage_2d<rgba8unorm, write>;
+
+var<push_constant> uniforms: Uniforms;
+
+fn pcg_hash(input: u32) -> u32 {
+    var state = input * 747796405u + 2891336453u;
+    var word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
+    return (word >> 22u) ^ word;
+}
+
+fn random_point(cell: vec2<i32>, seed: u32) -> vec2<f32> {
+    let h1 = pcg_hash(u32(cell.x) + pcg_hash(u32(cell.y) + seed));
+    let h2 = pcg_hash(h1);
+    return vec2<f32>(f32(h1), f32(h2)) / 4294967295.0;
+}
+
+fn worley(p: vec2<f32>, seed: u32) -> f32 {
+    let cell = vec2<i32>(floor(p));
+    let frac_p = fract(p);
+
+    var min_dist = 1.0;
+
+    for (var dy = -1; dy <= 1; dy++) {
+        for (var dx = -1; dx <= 1; dx++) {
+            let neighbor = cell + vec2<i32>(dx, dy);
+            let point = random_point(neighbor, seed);
+            let offset = vec2<f32>(f32(dx), f32(dy));
+            let dist = length(offset + point - frac_p);
+            min_dist = min(min_dist, dist);
+        }
+    }
+
+    return min_dist;
+}
+
+@compute @workgroup_size(8, 8, 1)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    if (gid.x >= uniforms.width || gid.y >= uniforms.height) {
+        return;
+    }
+
+    let uv = vec2<f32>(gid.xy) / vec2<f32>(f32(uniforms.width), f32(uniforms.height));
+    let p = uv * uniforms.scale;
+
+    let noise = worley(p, uniforms.seed);
+    let color = mix(uniforms.color_a, uniforms.color_b, noise);
+
+    textureStore(output, gid.xy, color);
+}
+"#;
+
+const PROCEDURAL_FBM_SHADER: &str = r#"
+struct Uniforms {
+    width: u32,
+    height: u32,
+    seed: u32,
+    scale: f32,
+    octaves: u32,
+    persistence: f32,
+    lacunarity: f32,
+    texture_type: u32,
+    color_a: vec4<f32>,
+    color_b: vec4<f32>,
+}
+
+@group(0) @binding(0) var output: texture_storage_2d<rgba8unorm, write>;
+
+var<push_constant> uniforms: Uniforms;
+
+fn pcg_hash(input: u32) -> u32 {
+    var state = input * 747796405u + 2891336453u;
+    var word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
+    return (word >> 22u) ^ word;
+}
+
+fn hash2d(x: i32, y: i32, seed: u32) -> vec2<f32> {
+    let h = pcg_hash(u32(x) + pcg_hash(u32(y) + seed));
+    let angle = f32(h) / 4294967295.0 * 6.28318530718;
+    return vec2<f32>(cos(angle), sin(angle));
+}
+
+fn smoothstep_d(t: f32) -> f32 {
+    return t * t * t * (t * (t * 6.0 - 15.0) + 10.0);
+}
+
+fn perlin(p: vec2<f32>, seed: u32) -> f32 {
+    let pi = vec2<i32>(floor(p));
+    let pf = fract(p);
+
+    let g00 = hash2d(pi.x, pi.y, seed);
+    let g10 = hash2d(pi.x + 1, pi.y, seed);
+    let g01 = hash2d(pi.x, pi.y + 1, seed);
+    let g11 = hash2d(pi.x + 1, pi.y + 1, seed);
+
+    let d00 = pf - vec2<f32>(0.0, 0.0);
+    let d10 = pf - vec2<f32>(1.0, 0.0);
+    let d01 = pf - vec2<f32>(0.0, 1.0);
+    let d11 = pf - vec2<f32>(1.0, 1.0);
+
+    let n00 = dot(g00, d00);
+    let n10 = dot(g10, d10);
+    let n01 = dot(g01, d01);
+    let n11 = dot(g11, d11);
+
+    let u = vec2<f32>(smoothstep_d(pf.x), smoothstep_d(pf.y));
+
+    let nx0 = mix(n00, n10, u.x);
+    let nx1 = mix(n01, n11, u.x);
+
+    return mix(nx0, nx1, u.y);
+}
+
+fn fbm(p: vec2<f32>, octaves: u32, persistence: f32, lacunarity: f32, seed: u32) -> f32 {
+    var value = 0.0;
+    var amplitude = 0.5;
+    var frequency = 1.0;
+    var max_value = 0.0;
+
+    for (var i = 0u; i < octaves; i++) {
+        value += amplitude * perlin(p * frequency, seed + i);
+        max_value += amplitude;
+        amplitude *= persistence;
+        frequency *= lacunarity;
+    }
+
+    return value / max_value * 0.5 + 0.5;
+}
+
+@compute @workgroup_size(8, 8, 1)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    if (gid.x >= uniforms.width || gid.y >= uniforms.height) {
+        return;
+    }
+
+    let uv = vec2<f32>(gid.xy) / vec2<f32>(f32(uniforms.width), f32(uniforms.height));
+    let p = uv * uniforms.scale;
+
+    let noise = fbm(p, uniforms.octaves, uniforms.persistence, uniforms.lacunarity, uniforms.seed);
+    let color = mix(uniforms.color_a, uniforms.color_b, noise);
+
+    textureStore(output, gid.xy, color);
+}
+"#;
+
+const PROCEDURAL_PATTERN_SHADER: &str = r#"
+struct Uniforms {
+    width: u32,
+    height: u32,
+    seed: u32,
+    scale: f32,
+    octaves: u32,
+    persistence: f32,
+    lacunarity: f32,
+    texture_type: u32,
+    color_a: vec4<f32>,
+    color_b: vec4<f32>,
+}
+
+@group(0) @binding(0) var output: texture_storage_2d<rgba8unorm, write>;
+
+var<push_constant> uniforms: Uniforms;
+
+const CHECKERBOARD: u32 = 6u;
+const GRID: u32 = 7u;
+const GRADIENT: u32 = 8u;
+const RAMP: u32 = 9u;
+
+@compute @workgroup_size(8, 8, 1)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    if (gid.x >= uniforms.width || gid.y >= uniforms.height) {
+        return;
+    }
+
+    let uv = vec2<f32>(gid.xy) / vec2<f32>(f32(uniforms.width), f32(uniforms.height));
+    var t = 0.0;
+
+    switch (uniforms.texture_type) {
+        case CHECKERBOARD: {
+            let scaled = uv * uniforms.scale;
+            let checker = (i32(floor(scaled.x)) + i32(floor(scaled.y))) % 2;
+            t = f32(checker);
+        }
+        case GRID: {
+            let scaled = uv * uniforms.scale;
+            let grid = fract(scaled);
+            let line_width = 0.05;
+            t = select(0.0, 1.0, grid.x < line_width || grid.y < line_width);
+        }
+        case GRADIENT: {
+            t = length(uv - 0.5) * 1.414;
+        }
+        case RAMP: {
+            t = uv.x;
+        }
+        default: {
+            t = 0.5;
+        }
+    }
+
+    let color = mix(uniforms.color_a, uniforms.color_b, t);
+    textureStore(output, gid.xy, color);
+}
+"#;
+
+// =============================================================================
+// VIRTUAL TEXTURE SAMPLING SHADER (Include in materials)
+// =============================================================================
+
+const VIRTUAL_TEXTURE_SAMPLE_SHADER: &str = r#"
+struct VTParams {
+    page_size: u32,
+    border_size: u32,
+    physical_pages_x: u32,
+    physical_size: u32,
+}
+
+@group(2) @binding(0) var physical_texture: texture_2d<f32>;
+@group(2) @binding(1) var page_table: texture_2d_array<u32>;
+@group(2) @binding(2) var vt_sampler: sampler;
+@group(2) @binding(3) var<uniform> vt_params: VTParams;
+
+fn sample_virtual_texture(vt_id: u32, uv: vec2<f32>, mip: f32) -> vec4<f32> {
+    let page_size = f32(vt_params.page_size);
+    let mip_level = u32(mip);
+
+    // Calculate tile coordinates
+    let scaled_uv = uv * f32(textureDimensions(page_table, 0).x);
+    let tile_coord = vec2<u32>(floor(scaled_uv));
+    let in_tile_uv = fract(scaled_uv);
+
+    // Lookup page table
+    let page_entry = textureLoad(page_table, tile_coord, i32(vt_id), i32(mip_level));
+    let physical_page = page_entry.x;
+
+    // Check if resident
+    if (physical_page == 0xFFFFFFFFu) {
+        // Fallback to lower mip
+        return vec4<f32>(1.0, 0.0, 1.0, 1.0); // Debug: magenta for missing
+    }
+
+    // Calculate physical UV
+    let phys_page_x = physical_page % vt_params.physical_pages_x;
+    let phys_page_y = physical_page / vt_params.physical_pages_x;
+
+    let total_page_size = f32(vt_params.page_size + 2u * vt_params.border_size);
+    let phys_origin = vec2<f32>(f32(phys_page_x), f32(phys_page_y)) * total_page_size;
+    let border = f32(vt_params.border_size);
+
+    let physical_uv = (phys_origin + border + in_tile_uv * page_size) / f32(vt_params.physical_size);
+
+    return textureSampleLevel(physical_texture, vt_sampler, physical_uv, 0.0);
+}
+
+// For feedback pass - write required tiles
+fn write_vt_feedback(vt_id: u32, uv: vec2<f32>, mip: f32) -> vec4<u32> {
+    let page_size = f32(vt_params.page_size);
+    let mip_level = u32(mip);
+
+    let scaled_uv = uv * f32(textureDimensions(page_table, 0).x);
+    let tile_coord = vec2<u32>(floor(scaled_uv));
+
+    return vec4<u32>(vt_id, mip_level, tile_coord.x, tile_coord.y);
+}
+"#;
+
+// =============================================================================
+// UNIT TESTS
+// =============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_format_info() {
+        let rgba8 = get_format_info(TextureFormat::RGBA8_UNORM);
+        assert_eq!(rgba8.bytes_per_pixel, 4.0);
+        assert_eq!(rgba8.block_width, 1);
+        assert!(!rgba8.is_compressed);
+
+        let bc1 = get_format_info(TextureFormat::BC1_UNORM);
+        assert_eq!(bc1.bytes_per_pixel, 0.5);
+        assert_eq!(bc1.block_width, 4);
+        assert!(bc1.is_compressed);
+
+        let bc7_srgb = get_format_info(TextureFormat::BC7_UNORM_SRGB);
+        assert!(bc7_srgb.is_srgb);
+        assert!(bc7_srgb.is_compressed);
+    }
+
+    #[test]
+    fn test_mip_calculations() {
+        assert_eq!(calculate_mip_count(1024, 1024), 11);
+        assert_eq!(calculate_mip_count(512, 256), 10);
+        assert_eq!(calculate_mip_count(1, 1), 1);
+
+        assert_eq!(calculate_mip_size(1024, 0), 1024);
+        assert_eq!(calculate_mip_size(1024, 1), 512);
+        assert_eq!(calculate_mip_size(1024, 10), 1);
+    }
+
+    #[test]
+    fn test_texture_desc() {
+        let desc = TextureDesc::new_2d(1024, 1024, TextureFormat::RGBA8_UNORM);
+        assert_eq!(desc.width, 1024);
+        assert_eq!(desc.mip_levels, 11);
+
+        let total_size = desc.calculate_total_size();
+        // 1024^2*4 + 512^2*4 + ... should be about 1.33 * 1024^2*4
+        assert!(total_size > 4 * 1024 * 1024);
+        assert!(total_size < 6 * 1024 * 1024);
+    }
+
+    #[test]
+    fn test_sampler_presets() {
+        let linear = SamplerDesc::linear_repeat();
+        assert_eq!(linear.min_filter, FilterMode::Linear);
+        assert_eq!(linear.address_mode_u, AddressMode::Repeat);
+
+        let shadow = SamplerDesc::shadow();
+        assert!(shadow.compare.is_some());
+        assert_eq!(shadow.address_mode_u, AddressMode::ClampToBorder);
+    }
+
+    #[test]
+    fn test_atlas_packing() {
+        // Simulate atlas packing
+        let mut root = AtlasNode::new(0, 0, 1024, 1024);
+
+        let rect1 = root.insert(256, 256, 2);
+        assert!(rect1.is_some());
+
+        let rect2 = root.insert(512, 256, 2);
+        assert!(rect2.is_some());
+
+        let rect3 = root.insert(800, 800, 2);
+        assert!(rect3.is_none()); // Too big for remaining space
+    }
+
+    #[test]
+    fn test_mipmap_config() {
+        let albedo_config = MipmapConfig::for_albedo();
+        assert!(albedo_config.gamma_correct);
+        assert!(!albedo_config.preserve_coverage);
+
+        let normal_config = MipmapConfig::for_normal_map();
+        assert!(!normal_config.gamma_correct);
+
+        let cutout_config = MipmapConfig::for_cutout();
+        assert!(cutout_config.preserve_coverage);
+    }
+
+    #[test]
+    fn test_compression_config() {
+        let bc1 = CompressionConfig::bc1_fast();
+        assert_eq!(bc1.target_format, TextureFormat::BC1_UNORM);
+        assert_eq!(bc1.quality, CompressionQuality::Fast);
+
+        let bc5 = CompressionConfig::bc5_normal();
+        assert_eq!(bc5.target_format, TextureFormat::BC5_UNORM);
+        assert!(bc5.normal_map);
+    }
+
+    #[test]
+    fn test_virtual_texture_config() {
+        let config = VirtualTextureConfig::default();
+        assert_eq!(config.page_size, 128);
+
+        let phys_size = config.physical_texture_size();
+        assert_eq!(phys_size, 64 * (128 + 8)); // 64 pages * (128 + 2*4 border)
+    }
+
+    #[test]
+    fn test_procedural_config() {
+        let perlin = ProceduralConfig::perlin(256, 256);
+        assert_eq!(perlin.width, 256);
+        assert_eq!(perlin.texture_type, ProceduralTextureType::PerlinNoise);
+
+        let fbm = ProceduralConfig::fbm(512, 512, 6);
+        assert_eq!(fbm.octaves, 6);
+    }
+
+    #[test]
+    fn test_bindless_handle() {
+        let invalid = BindlessHandle::invalid();
+        assert!(!invalid.is_valid());
+
+        let valid = BindlessHandle { index: 42 };
+        assert!(valid.is_valid());
+    }
+
+    #[test]
+    fn test_level_size_calculation() {
+        // Uncompressed RGBA8
+        let size = calculate_level_size(1024, 1024, TextureFormat::RGBA8_UNORM);
+        assert_eq!(size, 1024 * 1024 * 4);
+
+        // BC1 compressed (0.5 bytes per pixel)
+        let bc1_size = calculate_level_size(1024, 1024, TextureFormat::BC1_UNORM);
+        assert_eq!(bc1_size, 256 * 256 * 8); // 256x256 blocks * 8 bytes per block
+    }
+}

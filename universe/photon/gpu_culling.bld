@@ -1,0 +1,1689 @@
+// =============================================================================
+// GPU OCCLUSION CULLING SYSTEM - Photon Renderer
+// =============================================================================
+// Comprehensive GPU-based visibility culling including hierarchical Z-buffer,
+// two-pass occlusion culling, and indirect draw command generation.
+// Techniques from Harper Engine whitepapers on GPU-driven rendering.
+// =============================================================================
+
+module photon::gpu_culling
+
+// =============================================================================
+// CULLING CONSTANTS
+// =============================================================================
+
+const MAX_INSTANCES: u32 = 1_000_000;
+const MAX_DRAW_COMMANDS: u32 = 100_000;
+const HIZ_MIP_LEVELS: u32 = 12;
+const OCCLUSION_QUERY_POOL_SIZE: u32 = 65536;
+const TILE_SIZE: u32 = 8;
+
+// =============================================================================
+// BOUNDING VOLUME TYPES
+// =============================================================================
+
+/// Axis-aligned bounding box
+struct AABB {
+    min: vec3,
+    max: vec3,
+}
+
+impl AABB {
+    fn new(min: vec3, max: vec3) -> Self {
+        AABB { min, max }
+    }
+
+    fn from_points(points: &[vec3]) -> Self {
+        let mut min = vec3(f32::MAX, f32::MAX, f32::MAX);
+        let mut max = vec3(f32::MIN, f32::MIN, f32::MIN);
+
+        for p in points {
+            min = vec3_min(min, *p);
+            max = vec3_max(max, *p);
+        }
+
+        AABB { min, max }
+    }
+
+    fn center(&self) -> vec3 {
+        (self.min + self.max) * 0.5
+    }
+
+    fn extents(&self) -> vec3 {
+        (self.max - self.min) * 0.5
+    }
+
+    fn size(&self) -> vec3 {
+        self.max - self.min
+    }
+
+    fn transform(&self, matrix: &mat4) -> Self {
+        // Transform all 8 corners
+        let corners = [
+            vec3(self.min.x, self.min.y, self.min.z),
+            vec3(self.max.x, self.min.y, self.min.z),
+            vec3(self.min.x, self.max.y, self.min.z),
+            vec3(self.max.x, self.max.y, self.min.z),
+            vec3(self.min.x, self.min.y, self.max.z),
+            vec3(self.max.x, self.min.y, self.max.z),
+            vec3(self.min.x, self.max.y, self.max.z),
+            vec3(self.max.x, self.max.y, self.max.z),
+        ];
+
+        let mut transformed_min = vec3(f32::MAX, f32::MAX, f32::MAX);
+        let mut transformed_max = vec3(f32::MIN, f32::MIN, f32::MIN);
+
+        for corner in &corners {
+            let transformed = matrix.transform_point(*corner);
+            transformed_min = vec3_min(transformed_min, transformed);
+            transformed_max = vec3_max(transformed_max, transformed);
+        }
+
+        AABB { min: transformed_min, max: transformed_max }
+    }
+
+    fn expand(&mut self, other: &AABB) {
+        self.min = vec3_min(self.min, other.min);
+        self.max = vec3_max(self.max, other.max);
+    }
+
+    fn contains_point(&self, point: vec3) -> bool {
+        point.x >= self.min.x && point.x <= self.max.x &&
+        point.y >= self.min.y && point.y <= self.max.y &&
+        point.z >= self.min.z && point.z <= self.max.z
+    }
+
+    fn intersects(&self, other: &AABB) -> bool {
+        self.min.x <= other.max.x && self.max.x >= other.min.x &&
+        self.min.y <= other.max.y && self.max.y >= other.min.y &&
+        self.min.z <= other.max.z && self.max.z >= other.min.z
+    }
+
+    fn surface_area(&self) -> f32 {
+        let d = self.max - self.min;
+        2.0 * (d.x * d.y + d.y * d.z + d.z * d.x)
+    }
+}
+
+/// Bounding sphere
+struct BoundingSphere {
+    center: vec3,
+    radius: f32,
+}
+
+impl BoundingSphere {
+    fn new(center: vec3, radius: f32) -> Self {
+        BoundingSphere { center, radius }
+    }
+
+    fn from_aabb(aabb: &AABB) -> Self {
+        let center = aabb.center();
+        let radius = length(aabb.extents());
+        BoundingSphere { center, radius }
+    }
+
+    fn from_points(points: &[vec3]) -> Self {
+        // Ritter's algorithm for bounding sphere
+        if points.is_empty() {
+            return BoundingSphere { center: vec3(0.0, 0.0, 0.0), radius: 0.0 };
+        }
+
+        // Find initial sphere from most separated pair along each axis
+        let mut min_x = points[0];
+        let mut max_x = points[0];
+        let mut min_y = points[0];
+        let mut max_y = points[0];
+        let mut min_z = points[0];
+        let mut max_z = points[0];
+
+        for p in points {
+            if p.x < min_x.x { min_x = *p; }
+            if p.x > max_x.x { max_x = *p; }
+            if p.y < min_y.y { min_y = *p; }
+            if p.y > max_y.y { max_y = *p; }
+            if p.z < min_z.z { min_z = *p; }
+            if p.z > max_z.z { max_z = *p; }
+        }
+
+        let dx = length(max_x - min_x);
+        let dy = length(max_y - min_y);
+        let dz = length(max_z - min_z);
+
+        let (p1, p2) = if dx >= dy && dx >= dz {
+            (min_x, max_x)
+        } else if dy >= dz {
+            (min_y, max_y)
+        } else {
+            (min_z, max_z)
+        };
+
+        let mut center = (p1 + p2) * 0.5;
+        let mut radius = length(p2 - p1) * 0.5;
+
+        // Expand to include all points
+        for p in points {
+            let d = length(*p - center);
+            if d > radius {
+                radius = (radius + d) * 0.5;
+                center = center + (*p - center) * (1.0 - radius / d);
+            }
+        }
+
+        BoundingSphere { center, radius }
+    }
+
+    fn transform(&self, matrix: &mat4) -> Self {
+        let center = matrix.transform_point(self.center);
+        // Scale radius by maximum scale factor
+        let scale = vec3(
+            length(vec3(matrix.m[0][0], matrix.m[0][1], matrix.m[0][2])),
+            length(vec3(matrix.m[1][0], matrix.m[1][1], matrix.m[1][2])),
+            length(vec3(matrix.m[2][0], matrix.m[2][1], matrix.m[2][2])),
+        );
+        let max_scale = max(scale.x, max(scale.y, scale.z));
+        BoundingSphere { center, radius: self.radius * max_scale }
+    }
+
+    fn contains_point(&self, point: vec3) -> bool {
+        length_squared(point - self.center) <= self.radius * self.radius
+    }
+
+    fn intersects_sphere(&self, other: &BoundingSphere) -> bool {
+        let dist_sq = length_squared(other.center - self.center);
+        let radius_sum = self.radius + other.radius;
+        dist_sq <= radius_sum * radius_sum
+    }
+}
+
+// =============================================================================
+// FRUSTUM CULLING
+// =============================================================================
+
+/// Frustum plane
+struct Plane {
+    normal: vec3,
+    distance: f32,
+}
+
+impl Plane {
+    fn new(normal: vec3, distance: f32) -> Self {
+        Plane { normal, distance }
+    }
+
+    fn from_points(p0: vec3, p1: vec3, p2: vec3) -> Self {
+        let v1 = p1 - p0;
+        let v2 = p2 - p0;
+        let normal = normalize(cross(v1, v2));
+        let distance = -dot(normal, p0);
+        Plane { normal, distance }
+    }
+
+    fn normalize(&mut self) {
+        let len = length(self.normal);
+        self.normal /= len;
+        self.distance /= len;
+    }
+
+    fn distance_to_point(&self, point: vec3) -> f32 {
+        dot(self.normal, point) + self.distance
+    }
+}
+
+/// View frustum for culling
+struct Frustum {
+    planes: [Plane; 6],  // Left, Right, Bottom, Top, Near, Far
+}
+
+impl Frustum {
+    fn from_view_projection(vp: &mat4) -> Self {
+        let m = vp;
+
+        // Extract frustum planes from view-projection matrix
+        let mut planes = [
+            // Left
+            Plane::new(
+                vec3(m.m[0][3] + m.m[0][0], m.m[1][3] + m.m[1][0], m.m[2][3] + m.m[2][0]),
+                m.m[3][3] + m.m[3][0],
+            ),
+            // Right
+            Plane::new(
+                vec3(m.m[0][3] - m.m[0][0], m.m[1][3] - m.m[1][0], m.m[2][3] - m.m[2][0]),
+                m.m[3][3] - m.m[3][0],
+            ),
+            // Bottom
+            Plane::new(
+                vec3(m.m[0][3] + m.m[0][1], m.m[1][3] + m.m[1][1], m.m[2][3] + m.m[2][1]),
+                m.m[3][3] + m.m[3][1],
+            ),
+            // Top
+            Plane::new(
+                vec3(m.m[0][3] - m.m[0][1], m.m[1][3] - m.m[1][1], m.m[2][3] - m.m[2][1]),
+                m.m[3][3] - m.m[3][1],
+            ),
+            // Near
+            Plane::new(
+                vec3(m.m[0][3] + m.m[0][2], m.m[1][3] + m.m[1][2], m.m[2][3] + m.m[2][2]),
+                m.m[3][3] + m.m[3][2],
+            ),
+            // Far
+            Plane::new(
+                vec3(m.m[0][3] - m.m[0][2], m.m[1][3] - m.m[1][2], m.m[2][3] - m.m[2][2]),
+                m.m[3][3] - m.m[3][2],
+            ),
+        ];
+
+        // Normalize all planes
+        for plane in &mut planes {
+            plane.normalize();
+        }
+
+        Frustum { planes }
+    }
+
+    fn contains_point(&self, point: vec3) -> bool {
+        for plane in &self.planes {
+            if plane.distance_to_point(point) < 0.0 {
+                return false;
+            }
+        }
+        true
+    }
+
+    fn intersects_aabb(&self, aabb: &AABB) -> bool {
+        for plane in &self.planes {
+            // Find the point of the AABB most in the direction of the plane normal
+            let p = vec3(
+                if plane.normal.x >= 0.0 { aabb.max.x } else { aabb.min.x },
+                if plane.normal.y >= 0.0 { aabb.max.y } else { aabb.min.y },
+                if plane.normal.z >= 0.0 { aabb.max.z } else { aabb.min.z },
+            );
+
+            if plane.distance_to_point(p) < 0.0 {
+                return false;
+            }
+        }
+        true
+    }
+
+    fn intersects_sphere(&self, sphere: &BoundingSphere) -> bool {
+        for plane in &self.planes {
+            if plane.distance_to_point(sphere.center) < -sphere.radius {
+                return false;
+            }
+        }
+        true
+    }
+}
+
+// =============================================================================
+// HIERARCHICAL Z-BUFFER (HiZ)
+// =============================================================================
+
+/// HiZ pyramid for occlusion culling
+struct HierarchicalZBuffer {
+    device: GpuDevice,
+    depth_pyramid: GpuTexture,
+    mip_views: Array<GpuTextureView>,
+    downsample_pipeline: GpuComputePipeline,
+    width: u32,
+    height: u32,
+    mip_count: u32,
+}
+
+impl HierarchicalZBuffer {
+    fn new(device: &GpuDevice, width: u32, height: u32) -> Self {
+        let mip_count = calculate_mip_count(width, height).min(HIZ_MIP_LEVELS);
+
+        let depth_pyramid = device.create_texture(TextureDesc {
+            width,
+            height,
+            depth: 1,
+            array_layers: 1,
+            mip_levels: mip_count,
+            format: TextureFormat::R32_FLOAT,
+            dimension: TextureDimension::Texture2D,
+            usage: TextureUsage::SAMPLED | TextureUsage::STORAGE,
+            sample_count: 1,
+            name: "HiZ Pyramid",
+        });
+
+        let mut mip_views = Array::with_capacity(mip_count as usize);
+        for mip in 0..mip_count {
+            let view = depth_pyramid.create_view(TextureViewDesc {
+                base_mip_level: mip,
+                mip_level_count: 1,
+                ..Default::default()
+            });
+            mip_views.push(view);
+        }
+
+        let downsample_pipeline = device.create_compute_pipeline(ComputePipelineDesc {
+            shader: device.create_shader(HIZ_DOWNSAMPLE_SHADER),
+            entry_point: "main",
+        });
+
+        HierarchicalZBuffer {
+            device: device.clone(),
+            depth_pyramid,
+            mip_views,
+            downsample_pipeline,
+            width,
+            height,
+            mip_count,
+        }
+    }
+
+    fn build(&self, depth_buffer: &GpuTexture, encoder: &mut GpuCommandEncoder) {
+        // Copy depth to mip 0
+        encoder.copy_texture_to_texture(
+            depth_buffer,
+            &self.depth_pyramid,
+            TextureCopyInfo {
+                src_mip: 0,
+                dst_mip: 0,
+                ..Default::default()
+            },
+        );
+
+        // Generate mip chain using min reduction
+        for mip in 1..self.mip_count {
+            let src_width = max(1, self.width >> (mip - 1));
+            let src_height = max(1, self.height >> (mip - 1));
+            let dst_width = max(1, self.width >> mip);
+            let dst_height = max(1, self.height >> mip);
+
+            let uniforms = HizDownsampleUniforms {
+                src_size: vec2(src_width as f32, src_height as f32),
+                dst_size: vec2(dst_width as f32, dst_height as f32),
+            };
+
+            let bind_group = self.device.create_bind_group(BindGroupDesc {
+                entries: [
+                    BindGroupEntry::texture_view(0, &self.mip_views[(mip - 1) as usize]),
+                    BindGroupEntry::storage_texture(1, &self.mip_views[mip as usize]),
+                ],
+            });
+
+            encoder.set_pipeline(&self.downsample_pipeline);
+            encoder.set_bind_group(0, &bind_group);
+            encoder.set_push_constants(&uniforms);
+            encoder.dispatch((dst_width + 7) / 8, (dst_height + 7) / 8, 1);
+        }
+    }
+
+    fn get_texture(&self) -> &GpuTexture {
+        &self.depth_pyramid
+    }
+
+    fn get_mip_view(&self, mip: u32) -> &GpuTextureView {
+        &self.mip_views[mip.min(self.mip_count - 1) as usize]
+    }
+}
+
+struct HizDownsampleUniforms {
+    src_size: vec2,
+    dst_size: vec2,
+}
+
+fn calculate_mip_count(width: u32, height: u32) -> u32 {
+    let max_dim = max(width, height);
+    (32 - max_dim.leading_zeros()) as u32
+}
+
+// =============================================================================
+// GPU CULLING DATA STRUCTURES
+// =============================================================================
+
+/// Instance data for GPU culling
+#[repr(C)]
+struct CullInstanceData {
+    world_matrix: mat4,
+    aabb_min: vec3,
+    padding0: f32,
+    aabb_max: vec3,
+    padding1: f32,
+    mesh_id: u32,
+    material_id: u32,
+    lod_bias: f32,
+    flags: u32,
+}
+
+/// Indirect draw command (matches GPU structure)
+#[repr(C)]
+struct IndirectDrawCommand {
+    vertex_count: u32,
+    instance_count: u32,
+    first_vertex: u32,
+    first_instance: u32,
+}
+
+/// Indexed indirect draw command
+#[repr(C)]
+struct IndirectDrawIndexedCommand {
+    index_count: u32,
+    instance_count: u32,
+    first_index: u32,
+    vertex_offset: i32,
+    first_instance: u32,
+}
+
+/// Mesh LOD information
+#[repr(C)]
+struct MeshLodInfo {
+    index_count: u32,
+    first_index: u32,
+    vertex_offset: i32,
+    lod_distance_sq: f32,
+}
+
+/// Mesh descriptor for GPU
+#[repr(C)]
+struct GpuMeshDescriptor {
+    lod_count: u32,
+    base_lod_index: u32,
+    aabb_min: vec3,
+    aabb_max: vec3,
+}
+
+/// Draw call batch
+#[repr(C)]
+struct DrawBatch {
+    mesh_id: u32,
+    material_id: u32,
+    instance_offset: u32,
+    instance_count: u32,
+}
+
+// =============================================================================
+// GPU CULLING SYSTEM
+// =============================================================================
+
+/// Culling mode
+enum CullingMode {
+    None,               // No culling
+    FrustumOnly,        // Frustum culling only
+    FrustumHiZ,         // Frustum + HiZ occlusion
+    TwoPass,            // Two-pass occlusion culling
+}
+
+/// GPU culling configuration
+struct CullingConfig {
+    mode: CullingMode,
+    enable_lod: bool,
+    lod_scale: f32,
+    small_object_threshold: f32,    // Cull objects smaller than this in screen space
+    debug_freeze_culling: bool,
+    debug_show_bounds: bool,
+}
+
+impl CullingConfig {
+    fn default() -> Self {
+        CullingConfig {
+            mode: CullingMode::FrustumHiZ,
+            enable_lod: true,
+            lod_scale: 1.0,
+            small_object_threshold: 1.0,  // 1 pixel minimum
+            debug_freeze_culling: false,
+            debug_show_bounds: false,
+        }
+    }
+}
+
+/// GPU culling uniforms
+#[repr(C)]
+struct CullUniforms {
+    view_matrix: mat4,
+    proj_matrix: mat4,
+    view_proj_matrix: mat4,
+    frustum_planes: [vec4; 6],
+    camera_position: vec3,
+    near_plane: f32,
+    far_plane: f32,
+    screen_width: f32,
+    screen_height: f32,
+    hiz_mip_count: u32,
+    lod_scale: f32,
+    small_object_threshold: f32,
+    flags: u32,
+    instance_count: u32,
+}
+
+/// GPU culling system
+struct GpuCullingSystem {
+    device: GpuDevice,
+    config: CullingConfig,
+
+    // HiZ
+    hiz: HierarchicalZBuffer,
+
+    // Buffers
+    instance_buffer: GpuBuffer,
+    visible_instance_buffer: GpuBuffer,
+    draw_command_buffer: GpuBuffer,
+    draw_count_buffer: GpuBuffer,
+    mesh_descriptor_buffer: GpuBuffer,
+    lod_info_buffer: GpuBuffer,
+    uniform_buffer: GpuBuffer,
+
+    // Pipelines
+    frustum_cull_pipeline: GpuComputePipeline,
+    hiz_cull_pipeline: GpuComputePipeline,
+    compact_pipeline: GpuComputePipeline,
+    generate_draws_pipeline: GpuComputePipeline,
+
+    // State
+    max_instances: u32,
+    current_instance_count: u32,
+}
+
+impl GpuCullingSystem {
+    fn new(device: &GpuDevice, width: u32, height: u32, max_instances: u32) -> Self {
+        let hiz = HierarchicalZBuffer::new(device, width, height);
+
+        // Create buffers
+        let instance_buffer = device.create_buffer(BufferDesc {
+            size: max_instances as u64 * std::mem::size_of::<CullInstanceData>() as u64,
+            usage: BufferUsage::STORAGE | BufferUsage::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let visible_instance_buffer = device.create_buffer(BufferDesc {
+            size: max_instances as u64 * 4, // Indices
+            usage: BufferUsage::STORAGE | BufferUsage::VERTEX,
+            mapped_at_creation: false,
+        });
+
+        let draw_command_buffer = device.create_buffer(BufferDesc {
+            size: MAX_DRAW_COMMANDS as u64 * std::mem::size_of::<IndirectDrawIndexedCommand>() as u64,
+            usage: BufferUsage::STORAGE | BufferUsage::INDIRECT,
+            mapped_at_creation: false,
+        });
+
+        let draw_count_buffer = device.create_buffer(BufferDesc {
+            size: 4,
+            usage: BufferUsage::STORAGE | BufferUsage::INDIRECT | BufferUsage::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let mesh_descriptor_buffer = device.create_buffer(BufferDesc {
+            size: 65536 * std::mem::size_of::<GpuMeshDescriptor>() as u64,
+            usage: BufferUsage::STORAGE | BufferUsage::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let lod_info_buffer = device.create_buffer(BufferDesc {
+            size: 65536 * 8 * std::mem::size_of::<MeshLodInfo>() as u64, // Max 8 LODs per mesh
+            usage: BufferUsage::STORAGE | BufferUsage::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let uniform_buffer = device.create_buffer(BufferDesc {
+            size: std::mem::size_of::<CullUniforms>() as u64,
+            usage: BufferUsage::UNIFORM | BufferUsage::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        // Create pipelines
+        let frustum_cull_pipeline = device.create_compute_pipeline(ComputePipelineDesc {
+            shader: device.create_shader(FRUSTUM_CULL_SHADER),
+            entry_point: "main",
+        });
+
+        let hiz_cull_pipeline = device.create_compute_pipeline(ComputePipelineDesc {
+            shader: device.create_shader(HIZ_CULL_SHADER),
+            entry_point: "main",
+        });
+
+        let compact_pipeline = device.create_compute_pipeline(ComputePipelineDesc {
+            shader: device.create_shader(COMPACT_VISIBLE_SHADER),
+            entry_point: "main",
+        });
+
+        let generate_draws_pipeline = device.create_compute_pipeline(ComputePipelineDesc {
+            shader: device.create_shader(GENERATE_DRAWS_SHADER),
+            entry_point: "main",
+        });
+
+        GpuCullingSystem {
+            device: device.clone(),
+            config: CullingConfig::default(),
+            hiz,
+            instance_buffer,
+            visible_instance_buffer,
+            draw_command_buffer,
+            draw_count_buffer,
+            mesh_descriptor_buffer,
+            lod_info_buffer,
+            uniform_buffer,
+            frustum_cull_pipeline,
+            hiz_cull_pipeline,
+            compact_pipeline,
+            generate_draws_pipeline,
+            max_instances,
+            current_instance_count: 0,
+        }
+    }
+
+    /// Upload instance data for culling
+    fn upload_instances(&mut self, instances: &[CullInstanceData], queue: &GpuQueue) {
+        self.current_instance_count = instances.len() as u32;
+        queue.write_buffer(
+            &self.instance_buffer,
+            0,
+            bytemuck::cast_slice(instances),
+        );
+    }
+
+    /// Build HiZ from depth buffer
+    fn build_hiz(&self, depth_buffer: &GpuTexture, encoder: &mut GpuCommandEncoder) {
+        self.hiz.build(depth_buffer, encoder);
+    }
+
+    /// Perform GPU culling
+    fn cull(
+        &self,
+        camera: &CameraParams,
+        encoder: &mut GpuCommandEncoder,
+    ) {
+        // Update uniforms
+        let frustum = Frustum::from_view_projection(&camera.view_proj);
+
+        let uniforms = CullUniforms {
+            view_matrix: camera.view,
+            proj_matrix: camera.projection,
+            view_proj_matrix: camera.view_proj,
+            frustum_planes: [
+                vec4(frustum.planes[0].normal.x, frustum.planes[0].normal.y, frustum.planes[0].normal.z, frustum.planes[0].distance),
+                vec4(frustum.planes[1].normal.x, frustum.planes[1].normal.y, frustum.planes[1].normal.z, frustum.planes[1].distance),
+                vec4(frustum.planes[2].normal.x, frustum.planes[2].normal.y, frustum.planes[2].normal.z, frustum.planes[2].distance),
+                vec4(frustum.planes[3].normal.x, frustum.planes[3].normal.y, frustum.planes[3].normal.z, frustum.planes[3].distance),
+                vec4(frustum.planes[4].normal.x, frustum.planes[4].normal.y, frustum.planes[4].normal.z, frustum.planes[4].distance),
+                vec4(frustum.planes[5].normal.x, frustum.planes[5].normal.y, frustum.planes[5].normal.z, frustum.planes[5].distance),
+            ],
+            camera_position: camera.position,
+            near_plane: camera.near,
+            far_plane: camera.far,
+            screen_width: self.hiz.width as f32,
+            screen_height: self.hiz.height as f32,
+            hiz_mip_count: self.hiz.mip_count,
+            lod_scale: self.config.lod_scale,
+            small_object_threshold: self.config.small_object_threshold,
+            flags: self.config.enable_lod as u32,
+            instance_count: self.current_instance_count,
+        };
+
+        encoder.write_buffer(&self.uniform_buffer, 0, bytemuck::cast_slice(&[uniforms]));
+
+        // Clear draw count
+        encoder.clear_buffer(&self.draw_count_buffer);
+
+        match self.config.mode {
+            CullingMode::None => {
+                // Skip culling, all instances visible
+            }
+            CullingMode::FrustumOnly => {
+                self.frustum_cull(encoder);
+            }
+            CullingMode::FrustumHiZ => {
+                self.frustum_cull(encoder);
+                self.hiz_cull(encoder);
+            }
+            CullingMode::TwoPass => {
+                self.two_pass_cull(encoder);
+            }
+        }
+
+        // Compact visible instances
+        self.compact_visible(encoder);
+
+        // Generate draw commands
+        self.generate_draw_commands(encoder);
+    }
+
+    fn frustum_cull(&self, encoder: &mut GpuCommandEncoder) {
+        let bind_group = self.device.create_bind_group(BindGroupDesc {
+            entries: [
+                BindGroupEntry::uniform_buffer(0, &self.uniform_buffer),
+                BindGroupEntry::storage_buffer(1, &self.instance_buffer),
+                BindGroupEntry::storage_buffer(2, &self.visible_instance_buffer),
+            ],
+        });
+
+        encoder.set_pipeline(&self.frustum_cull_pipeline);
+        encoder.set_bind_group(0, &bind_group);
+        encoder.dispatch((self.current_instance_count + 63) / 64, 1, 1);
+    }
+
+    fn hiz_cull(&self, encoder: &mut GpuCommandEncoder) {
+        let bind_group = self.device.create_bind_group(BindGroupDesc {
+            entries: [
+                BindGroupEntry::uniform_buffer(0, &self.uniform_buffer),
+                BindGroupEntry::storage_buffer(1, &self.instance_buffer),
+                BindGroupEntry::storage_buffer(2, &self.visible_instance_buffer),
+                BindGroupEntry::texture_view(3, &self.hiz.get_texture().create_view_default()),
+            ],
+        });
+
+        encoder.set_pipeline(&self.hiz_cull_pipeline);
+        encoder.set_bind_group(0, &bind_group);
+        encoder.dispatch((self.current_instance_count + 63) / 64, 1, 1);
+    }
+
+    fn two_pass_cull(&self, encoder: &mut GpuCommandEncoder) {
+        // First pass: Test against previous frame's HiZ
+        self.hiz_cull(encoder);
+
+        // Render occluders (handled externally)
+        // ...
+
+        // Rebuild HiZ from occluder depth
+        // ...
+
+        // Second pass: Test remaining objects against updated HiZ
+        self.hiz_cull(encoder);
+    }
+
+    fn compact_visible(&self, encoder: &mut GpuCommandEncoder) {
+        let bind_group = self.device.create_bind_group(BindGroupDesc {
+            entries: [
+                BindGroupEntry::storage_buffer(0, &self.visible_instance_buffer),
+                BindGroupEntry::storage_buffer(1, &self.draw_count_buffer),
+            ],
+        });
+
+        encoder.set_pipeline(&self.compact_pipeline);
+        encoder.set_bind_group(0, &bind_group);
+        encoder.dispatch((self.current_instance_count + 63) / 64, 1, 1);
+    }
+
+    fn generate_draw_commands(&self, encoder: &mut GpuCommandEncoder) {
+        let bind_group = self.device.create_bind_group(BindGroupDesc {
+            entries: [
+                BindGroupEntry::storage_buffer(0, &self.visible_instance_buffer),
+                BindGroupEntry::storage_buffer(1, &self.instance_buffer),
+                BindGroupEntry::storage_buffer(2, &self.mesh_descriptor_buffer),
+                BindGroupEntry::storage_buffer(3, &self.lod_info_buffer),
+                BindGroupEntry::storage_buffer(4, &self.draw_command_buffer),
+                BindGroupEntry::storage_buffer(5, &self.draw_count_buffer),
+                BindGroupEntry::uniform_buffer(6, &self.uniform_buffer),
+            ],
+        });
+
+        encoder.set_pipeline(&self.generate_draws_pipeline);
+        encoder.set_bind_group(0, &bind_group);
+        encoder.dispatch((self.current_instance_count + 63) / 64, 1, 1);
+    }
+
+    /// Get indirect draw buffer for rendering
+    fn get_draw_command_buffer(&self) -> &GpuBuffer {
+        &self.draw_command_buffer
+    }
+
+    /// Get draw count buffer
+    fn get_draw_count_buffer(&self) -> &GpuBuffer {
+        &self.draw_count_buffer
+    }
+
+    /// Get visible instance buffer
+    fn get_visible_instances(&self) -> &GpuBuffer {
+        &self.visible_instance_buffer
+    }
+}
+
+/// Camera parameters for culling
+struct CameraParams {
+    view: mat4,
+    projection: mat4,
+    view_proj: mat4,
+    position: vec3,
+    near: f32,
+    far: f32,
+}
+
+// =============================================================================
+// SOFTWARE OCCLUSION CULLING (Fallback)
+// =============================================================================
+
+/// Software rasterizer for CPU occlusion culling
+struct SoftwareOcclusionCuller {
+    depth_buffer: Vec<f32>,
+    width: u32,
+    height: u32,
+    tile_size: u32,
+    hierarchical_depth: Vec<Vec<f32>>,
+}
+
+impl SoftwareOcclusionCuller {
+    fn new(width: u32, height: u32) -> Self {
+        let tile_count_x = (width + TILE_SIZE - 1) / TILE_SIZE;
+        let tile_count_y = (height + TILE_SIZE - 1) / TILE_SIZE;
+
+        let depth_buffer = vec![1.0f32; (width * height) as usize];
+
+        // Build hierarchical structure
+        let mut hierarchical_depth = Vec::new();
+        let mut w = tile_count_x;
+        let mut h = tile_count_y;
+
+        while w > 0 && h > 0 {
+            hierarchical_depth.push(vec![1.0f32; (w * h) as usize]);
+            w /= 2;
+            h /= 2;
+        }
+
+        SoftwareOcclusionCuller {
+            depth_buffer,
+            width,
+            height,
+            tile_size: TILE_SIZE,
+            hierarchical_depth,
+        }
+    }
+
+    fn clear(&mut self) {
+        self.depth_buffer.fill(1.0);
+        for level in &mut self.hierarchical_depth {
+            level.fill(1.0);
+        }
+    }
+
+    /// Rasterize an occluder triangle
+    fn rasterize_triangle(&mut self, v0: vec4, v1: vec4, v2: vec4, view_proj: &mat4) {
+        // Transform to clip space
+        let p0 = *view_proj * v0;
+        let p1 = *view_proj * v1;
+        let p2 = *view_proj * v2;
+
+        // Perspective divide
+        let ndc0 = vec3(p0.x / p0.w, p0.y / p0.w, p0.z / p0.w);
+        let ndc1 = vec3(p1.x / p1.w, p1.y / p1.w, p1.z / p1.w);
+        let ndc2 = vec3(p2.x / p2.w, p2.y / p2.w, p2.z / p2.w);
+
+        // To screen space
+        let screen0 = self.ndc_to_screen(ndc0);
+        let screen1 = self.ndc_to_screen(ndc1);
+        let screen2 = self.ndc_to_screen(ndc2);
+
+        // Compute bounding box
+        let min_x = max(0, min(screen0.x as i32, min(screen1.x as i32, screen2.x as i32)));
+        let max_x = min(self.width as i32 - 1, max(screen0.x as i32, max(screen1.x as i32, screen2.x as i32)));
+        let min_y = max(0, min(screen0.y as i32, min(screen1.y as i32, screen2.y as i32)));
+        let max_y = min(self.height as i32 - 1, max(screen0.y as i32, max(screen1.y as i32, screen2.y as i32)));
+
+        // Edge functions
+        let edge01 = vec2(screen1.y - screen0.y, screen0.x - screen1.x);
+        let edge12 = vec2(screen2.y - screen1.y, screen1.x - screen2.x);
+        let edge20 = vec2(screen0.y - screen2.y, screen2.x - screen0.x);
+
+        // Rasterize
+        for y in min_y..=max_y {
+            for x in min_x..=max_x {
+                let p = vec2(x as f32 + 0.5, y as f32 + 0.5);
+
+                let w0 = edge_function(screen1.xy(), screen2.xy(), p);
+                let w1 = edge_function(screen2.xy(), screen0.xy(), p);
+                let w2 = edge_function(screen0.xy(), screen1.xy(), p);
+
+                if w0 >= 0.0 && w1 >= 0.0 && w2 >= 0.0 {
+                    let area = w0 + w1 + w2;
+                    if area > 0.0 {
+                        // Interpolate depth
+                        let depth = (w0 * ndc0.z + w1 * ndc1.z + w2 * ndc2.z) / area;
+                        let idx = (y as u32 * self.width + x as u32) as usize;
+
+                        // Conservative depth update
+                        if depth < self.depth_buffer[idx] {
+                            self.depth_buffer[idx] = depth;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn ndc_to_screen(&self, ndc: vec3) -> vec3 {
+        vec3(
+            (ndc.x * 0.5 + 0.5) * self.width as f32,
+            (ndc.y * 0.5 + 0.5) * self.height as f32,
+            ndc.z * 0.5 + 0.5,
+        )
+    }
+
+    /// Build hierarchical depth pyramid
+    fn build_hierarchy(&mut self) {
+        let tile_count_x = (self.width + self.tile_size - 1) / self.tile_size;
+        let tile_count_y = (self.height + self.tile_size - 1) / self.tile_size;
+
+        // First level from depth buffer
+        for ty in 0..tile_count_y {
+            for tx in 0..tile_count_x {
+                let mut max_depth = 0.0f32;
+
+                for dy in 0..self.tile_size {
+                    for dx in 0..self.tile_size {
+                        let x = tx * self.tile_size + dx;
+                        let y = ty * self.tile_size + dy;
+
+                        if x < self.width && y < self.height {
+                            let idx = (y * self.width + x) as usize;
+                            max_depth = max_depth.max(self.depth_buffer[idx]);
+                        }
+                    }
+                }
+
+                let tile_idx = (ty * tile_count_x + tx) as usize;
+                self.hierarchical_depth[0][tile_idx] = max_depth;
+            }
+        }
+
+        // Build remaining levels
+        let mut prev_width = tile_count_x;
+        let mut prev_height = tile_count_y;
+
+        for level in 1..self.hierarchical_depth.len() {
+            let curr_width = (prev_width + 1) / 2;
+            let curr_height = (prev_height + 1) / 2;
+
+            for ty in 0..curr_height {
+                for tx in 0..curr_width {
+                    let mut max_depth = 0.0f32;
+
+                    for dy in 0..2 {
+                        for dx in 0..2 {
+                            let px = tx * 2 + dx;
+                            let py = ty * 2 + dy;
+
+                            if px < prev_width && py < prev_height {
+                                let idx = (py * prev_width + px) as usize;
+                                max_depth = max_depth.max(self.hierarchical_depth[level - 1][idx]);
+                            }
+                        }
+                    }
+
+                    let idx = (ty * curr_width + tx) as usize;
+                    self.hierarchical_depth[level][idx] = max_depth;
+                }
+            }
+
+            prev_width = curr_width;
+            prev_height = curr_height;
+        }
+    }
+
+    /// Test AABB visibility against hierarchical depth
+    fn test_aabb(&self, aabb: &AABB, view_proj: &mat4) -> bool {
+        // Project AABB corners
+        let corners = [
+            vec4(aabb.min.x, aabb.min.y, aabb.min.z, 1.0),
+            vec4(aabb.max.x, aabb.min.y, aabb.min.z, 1.0),
+            vec4(aabb.min.x, aabb.max.y, aabb.min.z, 1.0),
+            vec4(aabb.max.x, aabb.max.y, aabb.min.z, 1.0),
+            vec4(aabb.min.x, aabb.min.y, aabb.max.z, 1.0),
+            vec4(aabb.max.x, aabb.min.y, aabb.max.z, 1.0),
+            vec4(aabb.min.x, aabb.max.y, aabb.max.z, 1.0),
+            vec4(aabb.max.x, aabb.max.y, aabb.max.z, 1.0),
+        ];
+
+        let mut min_x = f32::MAX;
+        let mut max_x = f32::MIN;
+        let mut min_y = f32::MAX;
+        let mut max_y = f32::MIN;
+        let mut min_z = f32::MAX;
+
+        for corner in &corners {
+            let clip = *view_proj * *corner;
+            if clip.w <= 0.0 {
+                return true; // Behind camera, assume visible
+            }
+
+            let ndc = vec3(clip.x / clip.w, clip.y / clip.w, clip.z / clip.w);
+            let screen = self.ndc_to_screen(ndc);
+
+            min_x = min_x.min(screen.x);
+            max_x = max_x.max(screen.x);
+            min_y = min_y.min(screen.y);
+            max_y = max_y.max(screen.y);
+            min_z = min_z.min(ndc.z * 0.5 + 0.5);
+        }
+
+        // Clamp to screen
+        min_x = min_x.max(0.0);
+        max_x = max_x.min(self.width as f32 - 1.0);
+        min_y = min_y.max(0.0);
+        max_y = max_y.min(self.height as f32 - 1.0);
+
+        if min_x > max_x || min_y > max_y {
+            return false; // Off screen
+        }
+
+        // Calculate tile range
+        let tile_min_x = (min_x / self.tile_size as f32) as u32;
+        let tile_max_x = (max_x / self.tile_size as f32) as u32;
+        let tile_min_y = (min_y / self.tile_size as f32) as u32;
+        let tile_max_y = (max_y / self.tile_size as f32) as u32;
+
+        // Select appropriate mip level based on bounding box size
+        let tile_width = tile_max_x - tile_min_x + 1;
+        let tile_height = tile_max_y - tile_min_y + 1;
+        let mip_level = (max(tile_width, tile_height) as f32).log2().floor() as usize;
+        let mip_level = mip_level.min(self.hierarchical_depth.len() - 1);
+
+        // Sample hierarchical depth
+        let scale = 1 << mip_level;
+        let mip_x = tile_min_x / scale as u32;
+        let mip_y = tile_min_y / scale as u32;
+
+        let tile_count_x = (self.width + self.tile_size - 1) / self.tile_size;
+        let mip_width = (tile_count_x >> mip_level).max(1);
+
+        let idx = (mip_y * mip_width + mip_x) as usize;
+        if idx < self.hierarchical_depth[mip_level].len() {
+            let occluder_depth = self.hierarchical_depth[mip_level][idx];
+            return min_z <= occluder_depth;
+        }
+
+        true // Default to visible
+    }
+}
+
+fn edge_function(a: vec2, b: vec2, c: vec2) -> f32 {
+    (c.x - a.x) * (b.y - a.y) - (c.y - a.y) * (b.x - a.x)
+}
+
+// =============================================================================
+// VISIBILITY BUFFER
+// =============================================================================
+
+/// Visibility buffer for GPU-driven rendering
+struct VisibilityBuffer {
+    device: GpuDevice,
+    vis_buffer: GpuTexture,         // R32_UINT: packed (instance_id, primitive_id)
+    depth_buffer: GpuTexture,
+    width: u32,
+    height: u32,
+    classify_pipeline: GpuComputePipeline,
+    material_pipelines: HashMap<u32, GpuRenderPipeline>,
+}
+
+impl VisibilityBuffer {
+    fn new(device: &GpuDevice, width: u32, height: u32) -> Self {
+        let vis_buffer = device.create_texture(TextureDesc::new_2d(
+            width, height, TextureFormat::R32_UINT,
+        ).with_usage(TextureUsage::RENDER_TARGET | TextureUsage::SAMPLED | TextureUsage::STORAGE));
+
+        let depth_buffer = device.create_texture(TextureDesc::new_2d(
+            width, height, TextureFormat::D32_FLOAT,
+        ).with_usage(TextureUsage::DEPTH_STENCIL | TextureUsage::SAMPLED));
+
+        let classify_pipeline = device.create_compute_pipeline(ComputePipelineDesc {
+            shader: device.create_shader(VISIBILITY_CLASSIFY_SHADER),
+            entry_point: "main",
+        });
+
+        VisibilityBuffer {
+            device: device.clone(),
+            vis_buffer,
+            depth_buffer,
+            width,
+            height,
+            classify_pipeline,
+            material_pipelines: HashMap::new(),
+        }
+    }
+
+    fn get_vis_buffer(&self) -> &GpuTexture {
+        &self.vis_buffer
+    }
+
+    fn get_depth_buffer(&self) -> &GpuTexture {
+        &self.depth_buffer
+    }
+
+    /// Classify pixels by material for deferred shading
+    fn classify(&self, encoder: &mut GpuCommandEncoder) {
+        let bind_group = self.device.create_bind_group(BindGroupDesc {
+            entries: [
+                BindGroupEntry::texture_view(0, &self.vis_buffer.create_view_default()),
+            ],
+        });
+
+        encoder.set_pipeline(&self.classify_pipeline);
+        encoder.set_bind_group(0, &bind_group);
+        encoder.dispatch((self.width + 7) / 8, (self.height + 7) / 8, 1);
+    }
+}
+
+// =============================================================================
+// WGSL SHADERS
+// =============================================================================
+
+const HIZ_DOWNSAMPLE_SHADER: &str = r#"
+struct Uniforms {
+    src_size: vec2<f32>,
+    dst_size: vec2<f32>,
+}
+
+@group(0) @binding(0) var src_texture: texture_2d<f32>;
+@group(0) @binding(1) var dst_texture: texture_storage_2d<r32float, write>;
+
+var<push_constant> uniforms: Uniforms;
+
+@compute @workgroup_size(8, 8, 1)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let dst_size = vec2<u32>(uniforms.dst_size);
+    if (gid.x >= dst_size.x || gid.y >= dst_size.y) { return; }
+
+    let src_coord = gid.xy * 2u;
+
+    // Take max of 2x2 block (for reversed-Z, use min)
+    let d00 = textureLoad(src_texture, src_coord, 0).r;
+    let d10 = textureLoad(src_texture, src_coord + vec2<u32>(1u, 0u), 0).r;
+    let d01 = textureLoad(src_texture, src_coord + vec2<u32>(0u, 1u), 0).r;
+    let d11 = textureLoad(src_texture, src_coord + vec2<u32>(1u, 1u), 0).r;
+
+    // For standard Z buffer, use max (conservative)
+    let max_depth = max(max(d00, d10), max(d01, d11));
+
+    textureStore(dst_texture, gid.xy, vec4<f32>(max_depth, 0.0, 0.0, 0.0));
+}
+"#;
+
+const FRUSTUM_CULL_SHADER: &str = r#"
+struct CullUniforms {
+    view_matrix: mat4x4<f32>,
+    proj_matrix: mat4x4<f32>,
+    view_proj_matrix: mat4x4<f32>,
+    frustum_planes: array<vec4<f32>, 6>,
+    camera_position: vec3<f32>,
+    near_plane: f32,
+    far_plane: f32,
+    screen_width: f32,
+    screen_height: f32,
+    hiz_mip_count: u32,
+    lod_scale: f32,
+    small_object_threshold: f32,
+    flags: u32,
+    instance_count: u32,
+}
+
+struct Instance {
+    world_matrix: mat4x4<f32>,
+    aabb_min: vec3<f32>,
+    padding0: f32,
+    aabb_max: vec3<f32>,
+    padding1: f32,
+    mesh_id: u32,
+    material_id: u32,
+    lod_bias: f32,
+    flags: u32,
+}
+
+@group(0) @binding(0) var<uniform> uniforms: CullUniforms;
+@group(0) @binding(1) var<storage, read> instances: array<Instance>;
+@group(0) @binding(2) var<storage, read_write> visibility: array<u32>;
+
+fn test_plane(plane: vec4<f32>, aabb_min: vec3<f32>, aabb_max: vec3<f32>) -> bool {
+    // Find the point most in the direction of the plane normal
+    let p = vec3<f32>(
+        select(aabb_min.x, aabb_max.x, plane.x >= 0.0),
+        select(aabb_min.y, aabb_max.y, plane.y >= 0.0),
+        select(aabb_min.z, aabb_max.z, plane.z >= 0.0),
+    );
+
+    return dot(plane.xyz, p) + plane.w >= 0.0;
+}
+
+fn frustum_test(aabb_min: vec3<f32>, aabb_max: vec3<f32>) -> bool {
+    for (var i = 0u; i < 6u; i++) {
+        if (!test_plane(uniforms.frustum_planes[i], aabb_min, aabb_max)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+@compute @workgroup_size(64, 1, 1)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let idx = gid.x;
+    if (idx >= uniforms.instance_count) { return; }
+
+    let instance = instances[idx];
+
+    // Transform AABB by world matrix
+    let center = (instance.aabb_min + instance.aabb_max) * 0.5;
+    let extents = (instance.aabb_max - instance.aabb_min) * 0.5;
+
+    // Transform center
+    let world_center = (instance.world_matrix * vec4<f32>(center, 1.0)).xyz;
+
+    // Compute transformed extents (conservative)
+    let abs_m = mat3x3<f32>(
+        abs(instance.world_matrix[0].xyz),
+        abs(instance.world_matrix[1].xyz),
+        abs(instance.world_matrix[2].xyz)
+    );
+    let world_extents = abs_m * extents;
+
+    let world_min = world_center - world_extents;
+    let world_max = world_center + world_extents;
+
+    // Frustum test
+    let visible = frustum_test(world_min, world_max);
+
+    visibility[idx] = select(0u, 1u, visible);
+}
+"#;
+
+const HIZ_CULL_SHADER: &str = r#"
+struct CullUniforms {
+    view_matrix: mat4x4<f32>,
+    proj_matrix: mat4x4<f32>,
+    view_proj_matrix: mat4x4<f32>,
+    frustum_planes: array<vec4<f32>, 6>,
+    camera_position: vec3<f32>,
+    near_plane: f32,
+    far_plane: f32,
+    screen_width: f32,
+    screen_height: f32,
+    hiz_mip_count: u32,
+    lod_scale: f32,
+    small_object_threshold: f32,
+    flags: u32,
+    instance_count: u32,
+}
+
+struct Instance {
+    world_matrix: mat4x4<f32>,
+    aabb_min: vec3<f32>,
+    padding0: f32,
+    aabb_max: vec3<f32>,
+    padding1: f32,
+    mesh_id: u32,
+    material_id: u32,
+    lod_bias: f32,
+    flags: u32,
+}
+
+@group(0) @binding(0) var<uniform> uniforms: CullUniforms;
+@group(0) @binding(1) var<storage, read> instances: array<Instance>;
+@group(0) @binding(2) var<storage, read_write> visibility: array<u32>;
+@group(0) @binding(3) var hiz_texture: texture_2d<f32>;
+
+fn project_sphere(center: vec3<f32>, radius: f32) -> vec4<f32> {
+    // Returns (min_x, min_y, max_x, max_y) in screen space
+
+    let clip = uniforms.view_proj_matrix * vec4<f32>(center, 1.0);
+
+    if (clip.w <= 0.0) {
+        // Behind camera
+        return vec4<f32>(-1.0, -1.0, 2.0, 2.0);
+    }
+
+    // Approximate screen space bounds
+    let ndc = clip.xyz / clip.w;
+
+    // Radius in screen space (approximate)
+    let screen_radius = radius / clip.w * uniforms.screen_width;
+
+    let screen_center = vec2<f32>(
+        (ndc.x * 0.5 + 0.5) * uniforms.screen_width,
+        (ndc.y * 0.5 + 0.5) * uniforms.screen_height
+    );
+
+    return vec4<f32>(
+        screen_center.x - screen_radius,
+        screen_center.y - screen_radius,
+        screen_center.x + screen_radius,
+        screen_center.y + screen_radius
+    );
+}
+
+fn test_hiz(min_screen: vec2<f32>, max_screen: vec2<f32>, min_z: f32) -> bool {
+    // Clamp to screen bounds
+    let clamped_min = max(min_screen, vec2<f32>(0.0));
+    let clamped_max = min(max_screen, vec2<f32>(uniforms.screen_width, uniforms.screen_height));
+
+    if (clamped_min.x >= clamped_max.x || clamped_min.y >= clamped_max.y) {
+        return false; // Off screen
+    }
+
+    // Calculate appropriate mip level
+    let size = clamped_max - clamped_min;
+    let mip_level = u32(ceil(log2(max(size.x, size.y))));
+    let safe_mip = min(mip_level, uniforms.hiz_mip_count - 1u);
+
+    // Sample HiZ at corners
+    let mip_scale = 1.0 / f32(1u << safe_mip);
+    let mip_min = vec2<u32>(clamped_min * mip_scale);
+    let mip_max = vec2<u32>(clamped_max * mip_scale);
+
+    var max_occluder_depth = 0.0;
+
+    // Sample 4 corners
+    let d00 = textureLoad(hiz_texture, mip_min, i32(safe_mip)).r;
+    let d10 = textureLoad(hiz_texture, vec2<u32>(mip_max.x, mip_min.y), i32(safe_mip)).r;
+    let d01 = textureLoad(hiz_texture, vec2<u32>(mip_min.x, mip_max.y), i32(safe_mip)).r;
+    let d11 = textureLoad(hiz_texture, mip_max, i32(safe_mip)).r;
+
+    max_occluder_depth = max(max(d00, d10), max(d01, d11));
+
+    // Test: object's nearest depth vs occluder's farthest depth
+    // For standard Z buffer: object visible if min_z < max_occluder_depth
+    return min_z <= max_occluder_depth;
+}
+
+@compute @workgroup_size(64, 1, 1)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let idx = gid.x;
+    if (idx >= uniforms.instance_count) { return; }
+
+    // Skip if already culled by frustum
+    if (visibility[idx] == 0u) { return; }
+
+    let instance = instances[idx];
+
+    // Compute world space bounding sphere
+    let center = (instance.aabb_min + instance.aabb_max) * 0.5;
+    let world_center = (instance.world_matrix * vec4<f32>(center, 1.0)).xyz;
+
+    let extents = (instance.aabb_max - instance.aabb_min) * 0.5;
+    let radius = length(extents);
+
+    // Scale radius by max scale
+    let scale_x = length(instance.world_matrix[0].xyz);
+    let scale_y = length(instance.world_matrix[1].xyz);
+    let scale_z = length(instance.world_matrix[2].xyz);
+    let max_scale = max(max(scale_x, scale_y), scale_z);
+    let world_radius = radius * max_scale;
+
+    // Project to screen
+    let screen_bounds = project_sphere(world_center, world_radius);
+
+    // Calculate min depth
+    let view_center = uniforms.view_matrix * vec4<f32>(world_center, 1.0);
+    let nearest_z = -view_center.z - world_radius;
+    let min_depth = (uniforms.far_plane * (nearest_z - uniforms.near_plane)) /
+                    (nearest_z * (uniforms.far_plane - uniforms.near_plane));
+
+    // Small object culling
+    let screen_size = max(screen_bounds.z - screen_bounds.x, screen_bounds.w - screen_bounds.y);
+    if (screen_size < uniforms.small_object_threshold) {
+        visibility[idx] = 0u;
+        return;
+    }
+
+    // HiZ test
+    let hiz_visible = test_hiz(screen_bounds.xy, screen_bounds.zw, min_depth);
+
+    visibility[idx] = select(0u, 1u, hiz_visible);
+}
+"#;
+
+const COMPACT_VISIBLE_SHADER: &str = r#"
+@group(0) @binding(0) var<storage, read_write> visibility: array<u32>;
+@group(0) @binding(1) var<storage, read_write> visible_count: atomic<u32>;
+
+var<workgroup> local_count: atomic<u32>;
+var<workgroup> local_offset: u32;
+
+@compute @workgroup_size(64, 1, 1)
+fn main(
+    @builtin(global_invocation_id) gid: vec3<u32>,
+    @builtin(local_invocation_id) lid: vec3<u32>,
+    @builtin(workgroup_id) wid: vec3<u32>
+) {
+    // Initialize local counter
+    if (lid.x == 0u) {
+        atomicStore(&local_count, 0u);
+    }
+    workgroupBarrier();
+
+    let idx = gid.x;
+    let is_visible = visibility[idx] == 1u;
+
+    // Count visible in workgroup
+    var local_index: u32 = 0u;
+    if (is_visible) {
+        local_index = atomicAdd(&local_count, 1u);
+    }
+    workgroupBarrier();
+
+    // First thread allocates global space
+    if (lid.x == 0u) {
+        local_offset = atomicAdd(&visible_count, atomicLoad(&local_count));
+    }
+    workgroupBarrier();
+
+    // Write visible instance indices
+    if (is_visible) {
+        visibility[local_offset + local_index] = idx;
+    }
+}
+"#;
+
+const GENERATE_DRAWS_SHADER: &str = r#"
+struct CullUniforms {
+    view_matrix: mat4x4<f32>,
+    proj_matrix: mat4x4<f32>,
+    view_proj_matrix: mat4x4<f32>,
+    frustum_planes: array<vec4<f32>, 6>,
+    camera_position: vec3<f32>,
+    near_plane: f32,
+    far_plane: f32,
+    screen_width: f32,
+    screen_height: f32,
+    hiz_mip_count: u32,
+    lod_scale: f32,
+    small_object_threshold: f32,
+    flags: u32,
+    instance_count: u32,
+}
+
+struct Instance {
+    world_matrix: mat4x4<f32>,
+    aabb_min: vec3<f32>,
+    padding0: f32,
+    aabb_max: vec3<f32>,
+    padding1: f32,
+    mesh_id: u32,
+    material_id: u32,
+    lod_bias: f32,
+    flags: u32,
+}
+
+struct MeshDescriptor {
+    lod_count: u32,
+    base_lod_index: u32,
+    aabb_min: vec3<f32>,
+    aabb_max: vec3<f32>,
+}
+
+struct LodInfo {
+    index_count: u32,
+    first_index: u32,
+    vertex_offset: i32,
+    lod_distance_sq: f32,
+}
+
+struct DrawCommand {
+    index_count: u32,
+    instance_count: u32,
+    first_index: u32,
+    vertex_offset: i32,
+    first_instance: u32,
+}
+
+@group(0) @binding(0) var<storage, read> visible_indices: array<u32>;
+@group(0) @binding(1) var<storage, read> instances: array<Instance>;
+@group(0) @binding(2) var<storage, read> mesh_descriptors: array<MeshDescriptor>;
+@group(0) @binding(3) var<storage, read> lod_infos: array<LodInfo>;
+@group(0) @binding(4) var<storage, read_write> draw_commands: array<DrawCommand>;
+@group(0) @binding(5) var<storage, read_write> draw_count: atomic<u32>;
+@group(0) @binding(6) var<uniform> uniforms: CullUniforms;
+
+fn select_lod(instance: Instance, mesh: MeshDescriptor) -> u32 {
+    if (mesh.lod_count <= 1u || (uniforms.flags & 1u) == 0u) {
+        return 0u;
+    }
+
+    // Calculate distance to camera
+    let center = (instance.aabb_min + instance.aabb_max) * 0.5;
+    let world_center = (instance.world_matrix * vec4<f32>(center, 1.0)).xyz;
+    let distance_sq = dot(world_center - uniforms.camera_position, world_center - uniforms.camera_position);
+
+    // Select LOD based on distance
+    let adjusted_distance_sq = distance_sq * uniforms.lod_scale * instance.lod_bias;
+
+    for (var i = 0u; i < mesh.lod_count - 1u; i++) {
+        let lod_info = lod_infos[mesh.base_lod_index + i];
+        if (adjusted_distance_sq < lod_info.lod_distance_sq) {
+            return i;
+        }
+    }
+
+    return mesh.lod_count - 1u;
+}
+
+@compute @workgroup_size(64, 1, 1)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let visible_count = atomicLoad(&draw_count);
+    if (gid.x >= visible_count) { return; }
+
+    let instance_idx = visible_indices[gid.x];
+    let instance = instances[instance_idx];
+    let mesh = mesh_descriptors[instance.mesh_id];
+
+    // Select LOD
+    let lod = select_lod(instance, mesh);
+    let lod_info = lod_infos[mesh.base_lod_index + lod];
+
+    // Generate draw command
+    let draw_idx = atomicAdd(&draw_count, 1u);
+
+    draw_commands[draw_idx] = DrawCommand(
+        lod_info.index_count,
+        1u,
+        lod_info.first_index,
+        lod_info.vertex_offset,
+        instance_idx
+    );
+}
+"#;
+
+const VISIBILITY_CLASSIFY_SHADER: &str = r#"
+@group(0) @binding(0) var vis_buffer: texture_2d<u32>;
+@group(0) @binding(1) var<storage, read_write> material_counts: array<atomic<u32>>;
+@group(0) @binding(2) var<storage, read_write> pixel_materials: array<u32>;
+
+@compute @workgroup_size(8, 8, 1)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let size = textureDimensions(vis_buffer);
+    if (gid.x >= size.x || gid.y >= size.y) { return; }
+
+    let packed = textureLoad(vis_buffer, gid.xy, 0).r;
+
+    // Unpack instance ID and triangle ID
+    let instance_id = packed >> 16u;
+    let triangle_id = packed & 0xFFFFu;
+
+    if (packed == 0xFFFFFFFFu) {
+        // Background pixel
+        return;
+    }
+
+    // Look up material from instance (would need instance buffer binding)
+    // For now, just count
+    let material_id = instance_id; // Placeholder
+
+    atomicAdd(&material_counts[material_id], 1u);
+
+    let pixel_idx = gid.y * size.x + gid.x;
+    pixel_materials[pixel_idx] = material_id;
+}
+"#;
+
+// =============================================================================
+// UNIT TESTS
+// =============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_aabb_creation() {
+        let aabb = AABB::new(vec3(-1.0, -1.0, -1.0), vec3(1.0, 1.0, 1.0));
+        assert_eq!(aabb.center(), vec3(0.0, 0.0, 0.0));
+        assert_eq!(aabb.extents(), vec3(1.0, 1.0, 1.0));
+        assert_eq!(aabb.size(), vec3(2.0, 2.0, 2.0));
+    }
+
+    #[test]
+    fn test_aabb_contains_point() {
+        let aabb = AABB::new(vec3(0.0, 0.0, 0.0), vec3(2.0, 2.0, 2.0));
+        assert!(aabb.contains_point(vec3(1.0, 1.0, 1.0)));
+        assert!(!aabb.contains_point(vec3(3.0, 1.0, 1.0)));
+    }
+
+    #[test]
+    fn test_aabb_intersection() {
+        let aabb1 = AABB::new(vec3(0.0, 0.0, 0.0), vec3(2.0, 2.0, 2.0));
+        let aabb2 = AABB::new(vec3(1.0, 1.0, 1.0), vec3(3.0, 3.0, 3.0));
+        let aabb3 = AABB::new(vec3(5.0, 5.0, 5.0), vec3(6.0, 6.0, 6.0));
+
+        assert!(aabb1.intersects(&aabb2));
+        assert!(!aabb1.intersects(&aabb3));
+    }
+
+    #[test]
+    fn test_bounding_sphere() {
+        let sphere = BoundingSphere::new(vec3(0.0, 0.0, 0.0), 1.0);
+        assert!(sphere.contains_point(vec3(0.5, 0.5, 0.0)));
+        assert!(!sphere.contains_point(vec3(2.0, 0.0, 0.0)));
+    }
+
+    #[test]
+    fn test_sphere_intersection() {
+        let sphere1 = BoundingSphere::new(vec3(0.0, 0.0, 0.0), 1.0);
+        let sphere2 = BoundingSphere::new(vec3(1.5, 0.0, 0.0), 1.0);
+        let sphere3 = BoundingSphere::new(vec3(5.0, 0.0, 0.0), 1.0);
+
+        assert!(sphere1.intersects_sphere(&sphere2));
+        assert!(!sphere1.intersects_sphere(&sphere3));
+    }
+
+    #[test]
+    fn test_plane_distance() {
+        let plane = Plane::new(vec3(0.0, 1.0, 0.0), 0.0);
+        assert_eq!(plane.distance_to_point(vec3(0.0, 5.0, 0.0)), 5.0);
+        assert_eq!(plane.distance_to_point(vec3(0.0, -3.0, 0.0)), -3.0);
+    }
+
+    #[test]
+    fn test_mip_count_calculation() {
+        assert_eq!(calculate_mip_count(1024, 1024), 11);
+        assert_eq!(calculate_mip_count(512, 512), 10);
+        assert_eq!(calculate_mip_count(1920, 1080), 11);
+    }
+
+    #[test]
+    fn test_culling_config_default() {
+        let config = CullingConfig::default();
+        assert!(config.enable_lod);
+        assert_eq!(config.lod_scale, 1.0);
+    }
+
+    #[test]
+    fn test_surface_area() {
+        let aabb = AABB::new(vec3(0.0, 0.0, 0.0), vec3(1.0, 1.0, 1.0));
+        assert_eq!(aabb.surface_area(), 6.0); // 6 faces * 1.0 each
+    }
+
+    #[test]
+    fn test_sphere_from_aabb() {
+        let aabb = AABB::new(vec3(-1.0, -1.0, -1.0), vec3(1.0, 1.0, 1.0));
+        let sphere = BoundingSphere::from_aabb(&aabb);
+        assert_eq!(sphere.center, vec3(0.0, 0.0, 0.0));
+        assert!((sphere.radius - 1.732).abs() < 0.01); // sqrt(3)
+    }
+}

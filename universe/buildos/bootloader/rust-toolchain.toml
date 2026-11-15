@@ -1,0 +1,10 @@
+# ===============================================================================
+# BUILDOS BOOTLOADER - RUST TOOLCHAIN
+# ===============================================================================
+# Copyright (c) 2024-2025 Zain Dana Harper. All Rights Reserved.
+# ===============================================================================
+
+[toolchain]
+channel = "nightly"
+components = ["rust-src", "llvm-tools"]
+targets = ["x86_64-unknown-uefi"]

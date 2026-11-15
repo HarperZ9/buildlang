@@ -1,0 +1,1624 @@
+// ============================================================================
+// PHOTON ENGINE - LOD AND ASSET STREAMING SYSTEM
+// Level-of-Detail Management and Runtime Asset Streaming
+// Based on Harper Engine WP-156: Dynamic LOD and Streaming Architecture
+// ============================================================================
+
+module photon::lod_streaming;
+
+use core::memory::{GpuBuffer, GpuTexture, MemoryPool, AsyncLoader};
+use core::math::{Vec3, Vec4, Mat4, AABB, Sphere, Frustum};
+use core::io::{FileStream, CompressedReader};
+use photon::mesh::{Mesh, MeshLod, SubMesh, VertexBuffer, IndexBuffer};
+use photon::texture::{Texture, TextureFormat, MipLevel};
+
+// ============================================================================
+// LOD CORE TYPES
+// Based on Harper Engine RT-1561: LOD Fundamentals
+// ============================================================================
+
+/// LOD selection mode
+enum LodSelectionMode {
+    /// Screen-space error metric
+    ScreenSpaceError,
+    /// Distance-based selection
+    Distance,
+    /// Combined distance and error
+    Hybrid,
+    /// Manual override
+    Manual { level: u32 },
+    /// Performance adaptive
+    PerformanceAdaptive,
+}
+
+/// LOD transition type
+enum LodTransition {
+    /// Immediate pop
+    Immediate,
+    /// Alpha fade
+    AlphaFade { duration: f32 },
+    /// Dither fade
+    DitherFade { duration: f32 },
+    /// Geometry morph
+    Morph { duration: f32 },
+    /// Cross-fade (render both LODs)
+    CrossFade { duration: f32 },
+}
+
+/// LOD bias for quality vs performance tuning
+struct LodBias {
+    /// Global LOD bias (negative = higher detail)
+    global_bias: f32,
+    /// Per-category biases
+    character_bias: f32,
+    environment_bias: f32,
+    prop_bias: f32,
+    vegetation_bias: f32,
+    /// Shadow LOD bias (usually lower detail)
+    shadow_bias: f32,
+    /// Reflection LOD bias
+    reflection_bias: f32,
+}
+
+impl Default for LodBias {
+    fn default() -> Self {
+        Self {
+            global_bias: 0.0,
+            character_bias: -0.5,  // Higher detail for characters
+            environment_bias: 0.0,
+            prop_bias: 0.5,        // Lower detail for props
+            vegetation_bias: 0.0,
+            shadow_bias: 1.0,      // Lower detail for shadows
+            reflection_bias: 1.0,  // Lower detail for reflections
+        }
+    }
+}
+
+/// LOD level definition
+struct LodLevel {
+    /// LOD index (0 = highest detail)
+    level: u32,
+    /// Screen height percentage threshold (0.0-1.0)
+    screen_size: f32,
+    /// Distance threshold in world units
+    distance: f32,
+    /// Maximum screen-space error in pixels
+    max_error: f32,
+    /// Mesh for this LOD level
+    mesh: Option<MeshHandle>,
+    /// Triangle reduction ratio from LOD 0
+    triangle_ratio: f32,
+    /// Whether this LOD uses impostor
+    is_impostor: bool,
+}
+
+/// Handle to a mesh resource
+struct MeshHandle {
+    id: u32,
+    resident: bool,
+}
+
+/// LOD chain for an object
+struct LodChain {
+    /// All LOD levels
+    levels: Vec<LodLevel>,
+    /// Bounding sphere for LOD calculations
+    bounding_sphere: Sphere,
+    /// Object category for bias lookup
+    category: ObjectCategory,
+    /// Custom LOD distances (overrides defaults)
+    custom_distances: Option<Vec<f32>>,
+    /// Transition type between LODs
+    transition: LodTransition,
+    /// Current active LOD
+    current_lod: u32,
+    /// Transition progress (0.0-1.0)
+    transition_progress: f32,
+    /// Previous LOD (for transitions)
+    previous_lod: Option<u32>,
+}
+
+/// Object category for LOD biasing
+enum ObjectCategory {
+    Character,
+    Vehicle,
+    Environment,
+    Prop,
+    Vegetation,
+    Particle,
+    Decal,
+}
+
+impl LodChain {
+    fn new(levels: Vec<LodLevel>, bounding_sphere: Sphere, category: ObjectCategory) -> Self {
+        Self {
+            levels,
+            bounding_sphere,
+            category,
+            custom_distances: None,
+            transition: LodTransition::DitherFade { duration: 0.2 },
+            current_lod: 0,
+            transition_progress: 1.0,
+            previous_lod: None,
+        }
+    }
+
+    /// Calculate desired LOD based on camera
+    fn calculate_lod(
+        &self,
+        camera_pos: Vec3,
+        fov_y: f32,
+        screen_height: f32,
+        bias: &LodBias,
+        mode: LodSelectionMode
+    ) -> u32 {
+        match mode {
+            LodSelectionMode::ScreenSpaceError => {
+                self.calculate_lod_screen_error(camera_pos, fov_y, screen_height, bias)
+            }
+            LodSelectionMode::Distance => {
+                self.calculate_lod_distance(camera_pos, bias)
+            }
+            LodSelectionMode::Hybrid => {
+                let error_lod = self.calculate_lod_screen_error(camera_pos, fov_y, screen_height, bias);
+                let dist_lod = self.calculate_lod_distance(camera_pos, bias);
+                error_lod.max(dist_lod)
+            }
+            LodSelectionMode::Manual { level } => {
+                level.min(self.levels.len() as u32 - 1)
+            }
+            LodSelectionMode::PerformanceAdaptive => {
+                // Would use frame timing feedback
+                self.calculate_lod_distance(camera_pos, bias)
+            }
+        }
+    }
+
+    fn calculate_lod_screen_error(&self, camera_pos: Vec3, fov_y: f32, screen_height: f32, bias: &LodBias) -> u32 {
+        let distance = (camera_pos - self.bounding_sphere.center).length();
+        let effective_bias = bias.global_bias + self.get_category_bias(bias);
+
+        // Project bounding sphere to screen space
+        let screen_radius = (self.bounding_sphere.radius / distance) *
+                           (screen_height / (2.0 * (fov_y / 2.0).tan()));
+
+        let screen_size = 2.0 * screen_radius / screen_height;
+
+        // Find LOD where screen size is below threshold
+        for (i, level) in self.levels.iter().enumerate() {
+            let adjusted_threshold = level.screen_size * (2.0f32).powf(-effective_bias);
+            if screen_size >= adjusted_threshold {
+                return i as u32;
+            }
+        }
+
+        (self.levels.len() - 1) as u32
+    }
+
+    fn calculate_lod_distance(&self, camera_pos: Vec3, bias: &LodBias) -> u32 {
+        let distance = (camera_pos - self.bounding_sphere.center).length();
+        let effective_bias = bias.global_bias + self.get_category_bias(bias);
+
+        // Find LOD where distance is below threshold
+        for (i, level) in self.levels.iter().enumerate() {
+            let adjusted_distance = level.distance * (2.0f32).powf(effective_bias);
+            if distance <= adjusted_distance {
+                return i as u32;
+            }
+        }
+
+        (self.levels.len() - 1) as u32
+    }
+
+    fn get_category_bias(&self, bias: &LodBias) -> f32 {
+        match self.category {
+            ObjectCategory::Character => bias.character_bias,
+            ObjectCategory::Vehicle => bias.character_bias,
+            ObjectCategory::Environment => bias.environment_bias,
+            ObjectCategory::Prop => bias.prop_bias,
+            ObjectCategory::Vegetation => bias.vegetation_bias,
+            ObjectCategory::Particle => bias.prop_bias,
+            ObjectCategory::Decal => bias.prop_bias,
+        }
+    }
+
+    /// Update LOD with transition
+    fn update(&mut self, target_lod: u32, delta_time: f32) {
+        if target_lod != self.current_lod && self.transition_progress >= 1.0 {
+            // Start new transition
+            self.previous_lod = Some(self.current_lod);
+            self.current_lod = target_lod;
+            self.transition_progress = 0.0;
+        }
+
+        // Progress transition
+        if self.transition_progress < 1.0 {
+            let duration = match self.transition {
+                LodTransition::Immediate => 0.0,
+                LodTransition::AlphaFade { duration } => duration,
+                LodTransition::DitherFade { duration } => duration,
+                LodTransition::Morph { duration } => duration,
+                LodTransition::CrossFade { duration } => duration,
+            };
+
+            if duration > 0.0 {
+                self.transition_progress = (self.transition_progress + delta_time / duration).min(1.0);
+            } else {
+                self.transition_progress = 1.0;
+            }
+
+            if self.transition_progress >= 1.0 {
+                self.previous_lod = None;
+            }
+        }
+    }
+}
+
+// ============================================================================
+// HLOD (HIERARCHICAL LOD) SYSTEM
+// Based on Harper Engine RT-1562: Hierarchical LOD for Large Scenes
+// ============================================================================
+
+/// Hierarchical LOD node
+struct HlodNode {
+    /// Node bounds
+    bounds: AABB,
+    /// Child nodes (if internal node)
+    children: Vec<HlodNodeHandle>,
+    /// Merged mesh for this node (activated at distance)
+    merged_mesh: Option<MeshHandle>,
+    /// Original objects contained (leaf node)
+    objects: Vec<ObjectHandle>,
+    /// Distance at which to use merged mesh
+    merge_distance: f32,
+    /// Screen size at which to use merged mesh
+    merge_screen_size: f32,
+    /// Current state
+    state: HlodState,
+}
+
+struct HlodNodeHandle(u32);
+struct ObjectHandle(u32);
+
+enum HlodState {
+    /// Using individual objects
+    Objects,
+    /// Using merged mesh
+    Merged,
+    /// Transitioning between states
+    Transitioning { progress: f32, from_merged: bool },
+}
+
+/// HLOD tree for a scene
+struct HlodTree {
+    /// All nodes in the tree
+    nodes: Vec<HlodNode>,
+    /// Root node index
+    root: u32,
+    /// Maximum depth
+    max_depth: u32,
+    /// Objects per leaf node
+    objects_per_leaf: u32,
+}
+
+impl HlodTree {
+    fn new(objects: &[ObjectData], objects_per_leaf: u32) -> Self {
+        let mut tree = Self {
+            nodes: Vec::new(),
+            root: 0,
+            max_depth: 0,
+            objects_per_leaf,
+        };
+
+        // Build tree using spatial subdivision
+        tree.root = tree.build_node(objects, 0);
+
+        tree
+    }
+
+    fn build_node(&mut self, objects: &[ObjectData], depth: u32) -> u32 {
+        self.max_depth = self.max_depth.max(depth);
+
+        // Calculate bounds
+        let bounds = objects.iter()
+            .fold(AABB::EMPTY, |acc, obj| acc.union(&obj.bounds));
+
+        let node_idx = self.nodes.len() as u32;
+
+        if objects.len() <= self.objects_per_leaf as usize || depth >= 8 {
+            // Leaf node
+            self.nodes.push(HlodNode {
+                bounds,
+                children: Vec::new(),
+                merged_mesh: None,
+                objects: objects.iter().map(|o| o.handle).collect(),
+                merge_distance: 0.0,
+                merge_screen_size: 0.0,
+                state: HlodState::Objects,
+            });
+        } else {
+            // Split and create internal node
+            let (left_objects, right_objects) = self.split_objects(objects, &bounds);
+
+            // Placeholder node
+            self.nodes.push(HlodNode {
+                bounds,
+                children: Vec::new(),
+                merged_mesh: None,
+                objects: Vec::new(),
+                merge_distance: Self::calculate_merge_distance(&bounds),
+                merge_screen_size: 0.02,
+                state: HlodState::Objects,
+            });
+
+            // Recursively build children
+            let left_child = self.build_node(&left_objects, depth + 1);
+            let right_child = self.build_node(&right_objects, depth + 1);
+
+            // Update node with children
+            self.nodes[node_idx as usize].children = vec![
+                HlodNodeHandle(left_child),
+                HlodNodeHandle(right_child),
+            ];
+        }
+
+        node_idx
+    }
+
+    fn split_objects<'a>(&self, objects: &'a [ObjectData], bounds: &AABB) -> (Vec<ObjectData>, Vec<ObjectData>) {
+        // Split along longest axis
+        let size = bounds.max - bounds.min;
+        let axis = if size.x >= size.y && size.x >= size.z {
+            0
+        } else if size.y >= size.z {
+            1
+        } else {
+            2
+        };
+
+        let mid = (bounds.min[axis] + bounds.max[axis]) / 2.0;
+
+        let mut left = Vec::new();
+        let mut right = Vec::new();
+
+        for obj in objects {
+            let center = (obj.bounds.min + obj.bounds.max) / 2.0;
+            if center[axis] < mid {
+                left.push(obj.clone());
+            } else {
+                right.push(obj.clone());
+            }
+        }
+
+        // Ensure both sides have objects
+        if left.is_empty() && !right.is_empty() {
+            left.push(right.pop().unwrap());
+        } else if right.is_empty() && !left.is_empty() {
+            right.push(left.pop().unwrap());
+        }
+
+        (left, right)
+    }
+
+    fn calculate_merge_distance(bounds: &AABB) -> f32 {
+        // Distance at which the cluster should merge
+        let size = bounds.max - bounds.min;
+        let diagonal = size.length();
+        diagonal * 10.0 // Merge when object is 1/10th of screen
+    }
+
+    /// Traverse tree and determine visible nodes
+    fn traverse(
+        &self,
+        camera_pos: Vec3,
+        frustum: &Frustum,
+        screen_height: f32,
+        fov_y: f32
+    ) -> TraversalResult {
+        let mut result = TraversalResult::default();
+        self.traverse_node(self.root, camera_pos, frustum, screen_height, fov_y, &mut result);
+        result
+    }
+
+    fn traverse_node(
+        &self,
+        node_idx: u32,
+        camera_pos: Vec3,
+        frustum: &Frustum,
+        screen_height: f32,
+        fov_y: f32,
+        result: &mut TraversalResult
+    ) {
+        let node = &self.nodes[node_idx as usize];
+
+        // Frustum culling
+        if !frustum.intersects_aabb(&node.bounds) {
+            return;
+        }
+
+        // Calculate screen size
+        let distance = node.bounds.distance_to_point(camera_pos);
+        let size = (node.bounds.max - node.bounds.min).length();
+        let screen_size = (size / distance) * (screen_height / (2.0 * (fov_y / 2.0).tan()));
+        let normalized_size = screen_size / screen_height;
+
+        if node.children.is_empty() {
+            // Leaf node - render objects
+            result.visible_objects.extend(node.objects.iter().cloned());
+        } else if normalized_size < node.merge_screen_size && node.merged_mesh.is_some() {
+            // Use merged mesh
+            result.merged_meshes.push(node.merged_mesh.clone().unwrap());
+        } else {
+            // Traverse children
+            for child in &node.children {
+                self.traverse_node(child.0, camera_pos, frustum, screen_height, fov_y, result);
+            }
+        }
+    }
+}
+
+struct ObjectData {
+    handle: ObjectHandle,
+    bounds: AABB,
+}
+
+impl Clone for ObjectData {
+    fn clone(&self) -> Self {
+        Self {
+            handle: ObjectHandle(self.handle.0),
+            bounds: self.bounds,
+        }
+    }
+}
+
+#[derive(Default)]
+struct TraversalResult {
+    visible_objects: Vec<ObjectHandle>,
+    merged_meshes: Vec<MeshHandle>,
+}
+
+// ============================================================================
+// IMPOSTOR SYSTEM
+// Based on Harper Engine RT-1563: Billboard Impostors for Distant Objects
+// ============================================================================
+
+/// Impostor type for distant objects
+enum ImpostorType {
+    /// Single billboard facing camera
+    Billboard,
+    /// Octahedral impostor (8 views)
+    Octahedral,
+    /// Hemispherical impostor (12+ views)
+    Hemispherical { view_count: u32 },
+    /// 3D impostor with multiple depth layers
+    Volumetric { layers: u32 },
+}
+
+/// Impostor atlas entry
+struct ImpostorEntry {
+    /// Object this impostor represents
+    object_id: u32,
+    /// Atlas UV coordinates
+    uv_min: Vec2,
+    uv_max: Vec2,
+    /// Original object bounds
+    bounds: Sphere,
+    /// Capture views (for octahedral/hemispherical)
+    views: Vec<ImpostorView>,
+    /// Impostor type
+    impostor_type: ImpostorType,
+}
+
+use core::math::Vec2;
+
+struct ImpostorView {
+    /// View direction
+    direction: Vec3,
+    /// UV in atlas for this view
+    uv_min: Vec2,
+    uv_max: Vec2,
+    /// Depth texture UV (if volumetric)
+    depth_uv: Option<(Vec2, Vec2)>,
+}
+
+/// Impostor atlas manager
+struct ImpostorAtlas {
+    /// Color atlas texture
+    color_atlas: GpuTexture,
+    /// Normal atlas texture
+    normal_atlas: GpuTexture,
+    /// Depth atlas (for volumetric)
+    depth_atlas: Option<GpuTexture>,
+    /// Atlas dimensions
+    atlas_size: u32,
+    /// Entry size in pixels
+    entry_size: u32,
+    /// All impostor entries
+    entries: Vec<ImpostorEntry>,
+    /// Free slots in atlas
+    free_slots: Vec<(u32, u32)>,
+    /// Render pipeline for impostor capture
+    capture_pipeline: RenderPipeline,
+}
+
+use photon::gpu::RenderPipeline;
+
+impl ImpostorAtlas {
+    fn new(device: &GpuDevice, atlas_size: u32, entry_size: u32) -> Self {
+        let entries_per_side = atlas_size / entry_size;
+
+        let color_atlas = device.create_texture(&TextureDescriptor {
+            width: atlas_size,
+            height: atlas_size,
+            format: TextureFormat::RGBA8_SRGB,
+            usage: TextureUsage::RENDER_TARGET | TextureUsage::SHADER_READ,
+            ..Default::default()
+        });
+
+        let normal_atlas = device.create_texture(&TextureDescriptor {
+            width: atlas_size,
+            height: atlas_size,
+            format: TextureFormat::RG16_SNORM,
+            usage: TextureUsage::RENDER_TARGET | TextureUsage::SHADER_READ,
+            ..Default::default()
+        });
+
+        let mut free_slots = Vec::new();
+        for y in 0..entries_per_side {
+            for x in 0..entries_per_side {
+                free_slots.push((x, y));
+            }
+        }
+
+        let capture_pipeline = Self::create_capture_pipeline(device);
+
+        Self {
+            color_atlas,
+            normal_atlas,
+            depth_atlas: None,
+            atlas_size,
+            entry_size,
+            entries: Vec::new(),
+            free_slots,
+            capture_pipeline,
+        }
+    }
+
+    fn create_capture_pipeline(device: &GpuDevice) -> RenderPipeline {
+        // Pipeline for rendering objects to impostor atlas
+        RenderPipeline::default()
+    }
+
+    /// Capture impostor for an object
+    fn capture_impostor(
+        &mut self,
+        cmd: &mut CommandBuffer,
+        object: &Object,
+        impostor_type: ImpostorType
+    ) -> Option<u32> {
+        let slot = self.free_slots.pop()?;
+
+        let views = match impostor_type {
+            ImpostorType::Billboard => vec![ImpostorView {
+                direction: Vec3::Z,
+                uv_min: self.slot_to_uv(slot, 0, 1),
+                uv_max: self.slot_to_uv_max(slot, 0, 1),
+                depth_uv: None,
+            }],
+            ImpostorType::Octahedral => self.generate_octahedral_views(slot),
+            ImpostorType::Hemispherical { view_count } => {
+                self.generate_hemispherical_views(slot, view_count)
+            }
+            ImpostorType::Volumetric { layers } => {
+                self.generate_volumetric_views(slot, layers)
+            }
+        };
+
+        // Render each view to atlas
+        for view in &views {
+            self.render_view(cmd, object, view);
+        }
+
+        let entry_id = self.entries.len() as u32;
+        self.entries.push(ImpostorEntry {
+            object_id: object.id,
+            uv_min: views[0].uv_min,
+            uv_max: views.last().unwrap().uv_max,
+            bounds: object.bounding_sphere,
+            views,
+            impostor_type,
+        });
+
+        Some(entry_id)
+    }
+
+    fn slot_to_uv(&self, slot: (u32, u32), view_idx: u32, view_count: u32) -> Vec2 {
+        let entry_uv_size = self.entry_size as f32 / self.atlas_size as f32;
+        let views_per_side = (view_count as f32).sqrt().ceil() as u32;
+        let view_size = entry_uv_size / views_per_side as f32;
+
+        let base_u = slot.0 as f32 * entry_uv_size;
+        let base_v = slot.1 as f32 * entry_uv_size;
+
+        let view_u = (view_idx % views_per_side) as f32 * view_size;
+        let view_v = (view_idx / views_per_side) as f32 * view_size;
+
+        Vec2::new(base_u + view_u, base_v + view_v)
+    }
+
+    fn slot_to_uv_max(&self, slot: (u32, u32), view_idx: u32, view_count: u32) -> Vec2 {
+        let uv_min = self.slot_to_uv(slot, view_idx, view_count);
+        let views_per_side = (view_count as f32).sqrt().ceil() as u32;
+        let view_size = (self.entry_size as f32 / self.atlas_size as f32) / views_per_side as f32;
+        Vec2::new(uv_min.x + view_size, uv_min.y + view_size)
+    }
+
+    fn generate_octahedral_views(&self, slot: (u32, u32)) -> Vec<ImpostorView> {
+        // 8 views around the object
+        let directions = [
+            Vec3::new(1.0, 0.0, 0.0),
+            Vec3::new(-1.0, 0.0, 0.0),
+            Vec3::new(0.0, 1.0, 0.0),
+            Vec3::new(0.0, -1.0, 0.0),
+            Vec3::new(0.0, 0.0, 1.0),
+            Vec3::new(0.0, 0.0, -1.0),
+            Vec3::new(0.707, 0.707, 0.0),
+            Vec3::new(-0.707, 0.707, 0.0),
+        ];
+
+        directions.iter().enumerate().map(|(i, dir)| {
+            ImpostorView {
+                direction: *dir,
+                uv_min: self.slot_to_uv(slot, i as u32, 9), // 3x3 grid
+                uv_max: self.slot_to_uv_max(slot, i as u32, 9),
+                depth_uv: None,
+            }
+        }).collect()
+    }
+
+    fn generate_hemispherical_views(&self, slot: (u32, u32), count: u32) -> Vec<ImpostorView> {
+        let mut views = Vec::new();
+
+        // Fibonacci sphere distribution
+        let golden_ratio = (1.0 + 5.0f32.sqrt()) / 2.0;
+
+        for i in 0..count {
+            let theta = 2.0 * std::f32::consts::PI * i as f32 / golden_ratio;
+            let phi = (1.0 - 2.0 * (i as f32 + 0.5) / count as f32).acos();
+
+            let direction = Vec3::new(
+                phi.sin() * theta.cos(),
+                phi.sin() * theta.sin(),
+                phi.cos()
+            );
+
+            // Only upper hemisphere
+            if direction.z >= 0.0 {
+                views.push(ImpostorView {
+                    direction,
+                    uv_min: self.slot_to_uv(slot, views.len() as u32, count),
+                    uv_max: self.slot_to_uv_max(slot, views.len() as u32, count),
+                    depth_uv: None,
+                });
+            }
+        }
+
+        views
+    }
+
+    fn generate_volumetric_views(&self, slot: (u32, u32), layers: u32) -> Vec<ImpostorView> {
+        // 6 main views with depth layers
+        let directions = [
+            Vec3::X, Vec3::NEG_X,
+            Vec3::Y, Vec3::NEG_Y,
+            Vec3::Z, Vec3::NEG_Z,
+        ];
+
+        directions.iter().enumerate().map(|(i, dir)| {
+            ImpostorView {
+                direction: *dir,
+                uv_min: self.slot_to_uv(slot, i as u32, 6),
+                uv_max: self.slot_to_uv_max(slot, i as u32, 6),
+                depth_uv: Some((
+                    self.slot_to_uv(slot, i as u32, 6),
+                    self.slot_to_uv_max(slot, i as u32, 6)
+                )),
+            }
+        }).collect()
+    }
+
+    fn render_view(&self, cmd: &mut CommandBuffer, object: &Object, view: &ImpostorView) {
+        // Render object from view direction to atlas slot
+    }
+}
+
+struct Object {
+    id: u32,
+    bounding_sphere: Sphere,
+}
+
+use photon::gpu::CommandBuffer;
+
+/// Impostor rendering shader
+fn generate_impostor_shader() -> String {
+    r#"
+        struct ImpostorVertex {
+            @location(0) position: vec3<f32>,
+            @location(1) uv: vec2<f32>,
+            @location(2) view_weights: vec4<f32>,
+            @location(3) view_indices: vec4<u32>,
+        };
+
+        struct ImpostorUniforms {
+            world_matrix: mat4x4<f32>,
+            view_proj: mat4x4<f32>,
+            camera_pos: vec3<f32>,
+            impostor_center: vec3<f32>,
+            impostor_radius: f32,
+        };
+
+        @group(0) @binding(0) var<uniform> uniforms: ImpostorUniforms;
+        @group(0) @binding(1) var color_atlas: texture_2d<f32>;
+        @group(0) @binding(2) var normal_atlas: texture_2d<f32>;
+        @group(0) @binding(3) var atlas_sampler: sampler;
+        @group(0) @binding(4) var<storage, read> views: array<ImpostorView>;
+
+        struct ImpostorView {
+            direction: vec3<f32>,
+            uv_min: vec2<f32>,
+            uv_max: vec2<f32>,
+        };
+
+        // Octahedral mapping for view interpolation
+        fn octahedral_encode(n: vec3<f32>) -> vec2<f32> {
+            var p = n.xy / (abs(n.x) + abs(n.y) + abs(n.z));
+            if (n.z < 0.0) {
+                p = (1.0 - abs(p.yx)) * sign(p);
+            }
+            return p * 0.5 + 0.5;
+        }
+
+        fn sample_impostor(view_dir: vec3<f32>, local_uv: vec2<f32>) -> vec4<f32> {
+            // Find closest views and interpolate
+            let oct = octahedral_encode(view_dir);
+
+            // Bilinear interpolation between 4 closest views
+            // ... implementation ...
+
+            return vec4<f32>(1.0);
+        }
+
+        @vertex
+        fn vs_main(in: ImpostorVertex) -> VertexOutput {
+            var out: VertexOutput;
+
+            // Billboard orientation
+            let to_camera = normalize(uniforms.camera_pos - uniforms.impostor_center);
+            let right = normalize(cross(vec3<f32>(0.0, 1.0, 0.0), to_camera));
+            let up = cross(to_camera, right);
+
+            let world_pos = uniforms.impostor_center +
+                           right * in.position.x * uniforms.impostor_radius +
+                           up * in.position.y * uniforms.impostor_radius;
+
+            out.position = uniforms.view_proj * vec4<f32>(world_pos, 1.0);
+            out.uv = in.uv;
+            out.view_dir = to_camera;
+
+            return out;
+        }
+
+        struct VertexOutput {
+            @builtin(position) position: vec4<f32>,
+            @location(0) uv: vec2<f32>,
+            @location(1) view_dir: vec3<f32>,
+        };
+
+        @fragment
+        fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
+            let color = sample_impostor(in.view_dir, in.uv);
+
+            // Alpha test
+            if (color.a < 0.5) {
+                discard;
+            }
+
+            return color;
+        }
+    "#.to_string()
+}
+
+// ============================================================================
+// ASSET STREAMING SYSTEM
+// Based on Harper Engine RT-1564: Runtime Asset Streaming
+// ============================================================================
+
+/// Priority for streaming requests
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct StreamPriority(u32);
+
+impl StreamPriority {
+    const CRITICAL: Self = Self(0);      // Must load immediately
+    const HIGH: Self = Self(100);        // Player-facing, visible
+    const MEDIUM: Self = Self(200);      // Coming into view soon
+    const LOW: Self = Self(300);         // Background loading
+    const PREFETCH: Self = Self(400);    // Speculative loading
+}
+
+/// Streaming request for an asset
+struct StreamRequest {
+    /// Asset identifier
+    asset_id: AssetId,
+    /// Request priority
+    priority: StreamPriority,
+    /// Mip level (for textures) or LOD level (for meshes)
+    detail_level: u32,
+    /// Frame when requested
+    request_frame: u32,
+    /// Distance to camera when requested
+    distance: f32,
+}
+
+/// Asset identifier
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+struct AssetId {
+    asset_type: AssetType,
+    id: u32,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum AssetType {
+    Mesh,
+    Texture,
+    Material,
+    Animation,
+    Audio,
+}
+
+/// Asset residency state
+enum ResidencyState {
+    /// Not loaded
+    NotResident,
+    /// Currently loading
+    Loading { progress: f32 },
+    /// Partially loaded (some mips/LODs)
+    PartiallyResident { loaded_level: u32 },
+    /// Fully loaded
+    FullyResident,
+    /// Marked for eviction
+    PendingEviction,
+}
+
+/// Streaming budget configuration
+struct StreamingBudget {
+    /// Maximum GPU memory for streamed assets
+    gpu_memory_limit: u64,
+    /// Maximum pending IO operations
+    max_pending_io: u32,
+    /// IO bandwidth limit (bytes/sec)
+    io_bandwidth_limit: u64,
+    /// Frame budget for uploads (microseconds)
+    upload_time_budget_us: u32,
+    /// Prefetch distance multiplier
+    prefetch_multiplier: f32,
+}
+
+impl Default for StreamingBudget {
+    fn default() -> Self {
+        Self {
+            gpu_memory_limit: 2 * 1024 * 1024 * 1024, // 2 GB
+            max_pending_io: 64,
+            io_bandwidth_limit: 500 * 1024 * 1024, // 500 MB/s
+            upload_time_budget_us: 2000, // 2ms
+            prefetch_multiplier: 2.0,
+        }
+    }
+}
+
+/// Main streaming manager
+struct StreamingManager {
+    /// Streaming budget
+    budget: StreamingBudget,
+    /// Current GPU memory usage
+    current_gpu_memory: u64,
+    /// Pending requests queue
+    pending_requests: BinaryHeap<StreamRequest>,
+    /// Active IO operations
+    active_io: Vec<ActiveIO>,
+    /// Asset residency states
+    residency: HashMap<AssetId, ResidencyState>,
+    /// Asset metadata
+    metadata: HashMap<AssetId, AssetMetadata>,
+    /// IO thread pool
+    io_pool: IOThreadPool,
+    /// Upload staging buffer
+    staging_buffer: GpuBuffer,
+    /// Upload ring buffer
+    upload_ring: RingBuffer,
+    /// Statistics
+    stats: StreamingStats,
+}
+
+use std::collections::{BinaryHeap, HashMap};
+
+impl PartialEq for StreamRequest {
+    fn eq(&self, other: &Self) -> bool {
+        self.priority == other.priority
+    }
+}
+
+impl Eq for StreamRequest {}
+
+impl PartialOrd for StreamRequest {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for StreamRequest {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        // Lower priority value = higher priority
+        other.priority.cmp(&self.priority)
+    }
+}
+
+struct ActiveIO {
+    request: StreamRequest,
+    file_handle: FileHandle,
+    bytes_read: u64,
+    total_bytes: u64,
+}
+
+struct FileHandle(u64);
+
+struct AssetMetadata {
+    file_path: String,
+    file_offset: u64,
+    compressed_size: u64,
+    uncompressed_size: u64,
+    mip_levels: u32,
+    lod_levels: u32,
+}
+
+struct IOThreadPool {
+    thread_count: u32,
+}
+
+struct RingBuffer {
+    buffer: GpuBuffer,
+    write_offset: u64,
+    read_offset: u64,
+    capacity: u64,
+}
+
+struct StreamingStats {
+    bytes_streamed: u64,
+    assets_loaded: u32,
+    assets_evicted: u32,
+    cache_hit_rate: f32,
+    average_latency_ms: f32,
+}
+
+impl StreamingManager {
+    fn new(device: &GpuDevice, budget: StreamingBudget) -> Self {
+        let staging_size = 64 * 1024 * 1024; // 64 MB staging
+
+        let staging_buffer = device.create_buffer(&BufferDescriptor {
+            size: staging_size,
+            usage: BufferUsage::COPY_SRC | BufferUsage::MAP_WRITE,
+            ..Default::default()
+        });
+
+        Self {
+            budget,
+            current_gpu_memory: 0,
+            pending_requests: BinaryHeap::new(),
+            active_io: Vec::new(),
+            residency: HashMap::new(),
+            metadata: HashMap::new(),
+            io_pool: IOThreadPool { thread_count: 4 },
+            staging_buffer,
+            upload_ring: RingBuffer {
+                buffer: staging_buffer.clone(),
+                write_offset: 0,
+                read_offset: 0,
+                capacity: staging_size,
+            },
+            stats: StreamingStats::default(),
+        }
+    }
+
+    /// Request an asset to be streamed
+    fn request(&mut self, asset_id: AssetId, priority: StreamPriority, detail_level: u32, distance: f32, frame: u32) {
+        // Check if already resident at required level
+        match self.residency.get(&asset_id) {
+            Some(ResidencyState::FullyResident) => return,
+            Some(ResidencyState::PartiallyResident { loaded_level }) if *loaded_level <= detail_level => return,
+            Some(ResidencyState::Loading { .. }) => return,
+            _ => {}
+        }
+
+        self.pending_requests.push(StreamRequest {
+            asset_id,
+            priority,
+            detail_level,
+            request_frame: frame,
+            distance,
+        });
+    }
+
+    /// Update streaming system (call once per frame)
+    fn update(&mut self, cmd: &mut CommandBuffer, frame: u32) {
+        // 1. Poll completed IO operations
+        self.poll_io_completions(cmd);
+
+        // 2. Start new IO operations
+        self.start_pending_io();
+
+        // 3. Evict unused assets if over budget
+        self.evict_if_needed(frame);
+
+        // 4. Upload completed data to GPU
+        self.process_uploads(cmd);
+
+        // 5. Update statistics
+        self.update_stats();
+    }
+
+    fn poll_io_completions(&mut self, cmd: &mut CommandBuffer) {
+        let mut completed = Vec::new();
+
+        for (i, io) in self.active_io.iter().enumerate() {
+            // Check if IO is complete
+            // In practice, this would poll async file operations
+            if io.bytes_read >= io.total_bytes {
+                completed.push(i);
+            }
+        }
+
+        // Process completions in reverse to maintain indices
+        for i in completed.into_iter().rev() {
+            let io = self.active_io.remove(i);
+            self.finalize_load(cmd, io);
+        }
+    }
+
+    fn finalize_load(&mut self, cmd: &mut CommandBuffer, io: ActiveIO) {
+        // Update residency state
+        self.residency.insert(io.request.asset_id, ResidencyState::FullyResident);
+        self.stats.assets_loaded += 1;
+        self.stats.bytes_streamed += io.total_bytes;
+    }
+
+    fn start_pending_io(&mut self) {
+        while self.active_io.len() < self.budget.max_pending_io as usize {
+            if let Some(request) = self.pending_requests.pop() {
+                self.start_io(request);
+            } else {
+                break;
+            }
+        }
+    }
+
+    fn start_io(&mut self, request: StreamRequest) {
+        if let Some(metadata) = self.metadata.get(&request.asset_id) {
+            self.residency.insert(request.asset_id, ResidencyState::Loading { progress: 0.0 });
+
+            self.active_io.push(ActiveIO {
+                request,
+                file_handle: FileHandle(0), // Would open file
+                bytes_read: 0,
+                total_bytes: metadata.compressed_size,
+            });
+        }
+    }
+
+    fn evict_if_needed(&mut self, current_frame: u32) {
+        while self.current_gpu_memory > self.budget.gpu_memory_limit {
+            // Find least recently used asset
+            let lru_asset = self.find_lru_asset(current_frame);
+
+            if let Some(asset_id) = lru_asset {
+                self.evict_asset(asset_id);
+            } else {
+                break; // Nothing to evict
+            }
+        }
+    }
+
+    fn find_lru_asset(&self, current_frame: u32) -> Option<AssetId> {
+        // In practice, track last-used frame per asset
+        self.residency.iter()
+            .filter(|(_, state)| matches!(state, ResidencyState::FullyResident))
+            .map(|(id, _)| *id)
+            .next()
+    }
+
+    fn evict_asset(&mut self, asset_id: AssetId) {
+        if let Some(metadata) = self.metadata.get(&asset_id) {
+            self.current_gpu_memory -= metadata.uncompressed_size;
+            self.residency.insert(asset_id, ResidencyState::NotResident);
+            self.stats.assets_evicted += 1;
+        }
+    }
+
+    fn process_uploads(&mut self, cmd: &mut CommandBuffer) {
+        // Upload pending data from staging buffer to GPU resources
+        // Respecting upload_time_budget_us
+    }
+
+    fn update_stats(&mut self) {
+        let total_requests = self.stats.assets_loaded + self.pending_requests.len() as u32;
+        if total_requests > 0 {
+            self.stats.cache_hit_rate = self.stats.assets_loaded as f32 / total_requests as f32;
+        }
+    }
+}
+
+// ============================================================================
+// PREDICTIVE PREFETCHING
+// Based on Harper Engine RT-1565: Predictive Asset Loading
+// ============================================================================
+
+/// Predictive prefetch system
+struct PredictivePrefetcher {
+    /// Movement history for prediction
+    movement_history: VecDeque<MovementSample>,
+    /// Predicted future positions
+    predicted_positions: Vec<Vec3>,
+    /// Prediction horizon in seconds
+    prediction_horizon: f32,
+    /// Minimum confidence for prefetch
+    min_confidence: f32,
+    /// Spatial hash for nearby assets
+    spatial_hash: SpatialHash,
+}
+
+use std::collections::VecDeque;
+
+struct MovementSample {
+    position: Vec3,
+    velocity: Vec3,
+    timestamp: f32,
+}
+
+struct SpatialHash {
+    cell_size: f32,
+    cells: HashMap<(i32, i32, i32), Vec<AssetId>>,
+}
+
+impl SpatialHash {
+    fn new(cell_size: f32) -> Self {
+        Self {
+            cell_size,
+            cells: HashMap::new(),
+        }
+    }
+
+    fn cell_coords(&self, pos: Vec3) -> (i32, i32, i32) {
+        (
+            (pos.x / self.cell_size).floor() as i32,
+            (pos.y / self.cell_size).floor() as i32,
+            (pos.z / self.cell_size).floor() as i32,
+        )
+    }
+
+    fn insert(&mut self, pos: Vec3, asset_id: AssetId) {
+        let coords = self.cell_coords(pos);
+        self.cells.entry(coords).or_default().push(asset_id);
+    }
+
+    fn query_radius(&self, pos: Vec3, radius: f32) -> Vec<AssetId> {
+        let mut results = Vec::new();
+        let cells_radius = (radius / self.cell_size).ceil() as i32;
+        let center = self.cell_coords(pos);
+
+        for dx in -cells_radius..=cells_radius {
+            for dy in -cells_radius..=cells_radius {
+                for dz in -cells_radius..=cells_radius {
+                    let coords = (center.0 + dx, center.1 + dy, center.2 + dz);
+                    if let Some(assets) = self.cells.get(&coords) {
+                        results.extend(assets.iter().cloned());
+                    }
+                }
+            }
+        }
+
+        results
+    }
+}
+
+impl PredictivePrefetcher {
+    fn new(prediction_horizon: f32) -> Self {
+        Self {
+            movement_history: VecDeque::with_capacity(60),
+            predicted_positions: Vec::new(),
+            prediction_horizon,
+            min_confidence: 0.7,
+            spatial_hash: SpatialHash::new(50.0),
+        }
+    }
+
+    /// Record player position for prediction
+    fn record_position(&mut self, position: Vec3, velocity: Vec3, timestamp: f32) {
+        self.movement_history.push_back(MovementSample {
+            position,
+            velocity,
+            timestamp,
+        });
+
+        // Keep last 60 samples (~1 second at 60fps)
+        while self.movement_history.len() > 60 {
+            self.movement_history.pop_front();
+        }
+    }
+
+    /// Predict future positions and return assets to prefetch
+    fn predict_and_prefetch(&mut self, streaming: &mut StreamingManager, frame: u32) {
+        // Simple linear prediction
+        if self.movement_history.len() < 2 {
+            return;
+        }
+
+        let latest = self.movement_history.back().unwrap();
+        let avg_velocity = self.calculate_average_velocity();
+
+        // Predict positions at intervals
+        self.predicted_positions.clear();
+        let intervals = 5;
+        for i in 1..=intervals {
+            let t = (i as f32 / intervals as f32) * self.prediction_horizon;
+            let predicted_pos = latest.position + avg_velocity * t;
+            self.predicted_positions.push(predicted_pos);
+        }
+
+        // Query assets near predicted positions
+        for predicted_pos in &self.predicted_positions {
+            let nearby_assets = self.spatial_hash.query_radius(*predicted_pos, 100.0);
+
+            for asset_id in nearby_assets {
+                streaming.request(
+                    asset_id,
+                    StreamPriority::PREFETCH,
+                    0,
+                    (*predicted_pos - latest.position).length(),
+                    frame
+                );
+            }
+        }
+    }
+
+    fn calculate_average_velocity(&self) -> Vec3 {
+        if self.movement_history.is_empty() {
+            return Vec3::ZERO;
+        }
+
+        let sum: Vec3 = self.movement_history.iter()
+            .map(|s| s.velocity)
+            .fold(Vec3::ZERO, |a, b| a + b);
+
+        sum / self.movement_history.len() as f32
+    }
+
+    /// Register asset location for spatial queries
+    fn register_asset(&mut self, asset_id: AssetId, position: Vec3) {
+        self.spatial_hash.insert(position, asset_id);
+    }
+}
+
+// ============================================================================
+// TEXTURE MIPMAP STREAMING
+// Based on Harper Engine RT-1566: Mipmap-Level Streaming
+// ============================================================================
+
+/// Texture streaming with mip-level granularity
+struct TextureMipStreamer {
+    /// Texture residency info
+    textures: HashMap<u32, TextureResidency>,
+    /// Mip tail size (smallest resident mips)
+    mip_tail_size: u32,
+    /// Sparse texture support
+    sparse_textures: bool,
+}
+
+struct TextureResidency {
+    /// Texture dimensions
+    width: u32,
+    height: u32,
+    /// Total mip levels
+    mip_levels: u32,
+    /// Currently resident mip level (0 = all, higher = coarser)
+    resident_mip: u32,
+    /// Target mip level based on screen size
+    target_mip: u32,
+    /// Last frame accessed
+    last_used_frame: u32,
+    /// GPU texture handle
+    texture: GpuTexture,
+    /// Sparse page table (if supported)
+    page_table: Option<Vec<bool>>,
+}
+
+impl TextureMipStreamer {
+    fn new(sparse_textures: bool) -> Self {
+        Self {
+            textures: HashMap::new(),
+            mip_tail_size: 4, // 16x16 and smaller always resident
+            sparse_textures,
+        }
+    }
+
+    /// Calculate required mip level based on screen-space size
+    fn calculate_required_mip(&self, texture_id: u32, screen_size: f32, screen_height: f32) -> u32 {
+        if let Some(tex) = self.textures.get(&texture_id) {
+            // Mip level where texel size matches pixel size
+            let texel_to_pixel = tex.width as f32 / (screen_size * screen_height);
+            let mip = texel_to_pixel.log2().max(0.0) as u32;
+            mip.min(tex.mip_levels - 1)
+        } else {
+            0
+        }
+    }
+
+    /// Update mip targets based on visibility
+    fn update_targets(&mut self, visibility_info: &[(u32, f32)], screen_height: f32) {
+        // visibility_info: (texture_id, max_screen_size)
+        for (texture_id, screen_size) in visibility_info {
+            if let Some(tex) = self.textures.get_mut(texture_id) {
+                let required_mip = self.calculate_required_mip(*texture_id, *screen_size, screen_height);
+                tex.target_mip = required_mip;
+            }
+        }
+    }
+
+    /// Stream mips toward targets
+    fn stream_mips(&mut self, streaming: &mut StreamingManager, frame: u32) {
+        for (&texture_id, tex) in &mut self.textures {
+            if tex.resident_mip > tex.target_mip {
+                // Need to load finer mips
+                let next_mip = tex.resident_mip - 1;
+                streaming.request(
+                    AssetId { asset_type: AssetType::Texture, id: texture_id },
+                    StreamPriority::HIGH,
+                    next_mip,
+                    0.0,
+                    frame
+                );
+            } else if tex.resident_mip < tex.target_mip {
+                // Can evict finer mips (handled separately)
+            }
+        }
+    }
+
+    /// Generate shader code for sparse texture sampling
+    fn generate_sparse_sampling_shader() -> String {
+        r#"
+            @group(1) @binding(0) var sparse_texture: texture_2d<f32>;
+            @group(1) @binding(1) var tex_sampler: sampler;
+            @group(1) @binding(2) var<storage, read> residency_map: array<u32>;
+
+            struct SparseInfo {
+                min_resident_mip: u32,
+                resident_pages: u32,
+            };
+
+            fn get_sparse_info(texture_id: u32) -> SparseInfo {
+                let packed = residency_map[texture_id];
+                return SparseInfo(
+                    packed & 0xFFu,
+                    packed >> 8u
+                );
+            }
+
+            fn sample_sparse_texture(
+                tex: texture_2d<f32>,
+                s: sampler,
+                uv: vec2<f32>,
+                dx: vec2<f32>,
+                dy: vec2<f32>,
+                info: SparseInfo
+            ) -> vec4<f32> {
+                // Calculate ideal mip level
+                let max_deriv = max(length(dx), length(dy));
+                let mip = log2(max_deriv * f32(textureDimensions(tex).x));
+
+                // Clamp to resident mip
+                let clamped_mip = max(mip, f32(info.min_resident_mip));
+
+                return textureSampleLevel(tex, s, uv, clamped_mip);
+            }
+        "#.to_string()
+    }
+}
+
+// ============================================================================
+// UNIT TESTS
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_lod_distance_selection() {
+        let levels = vec![
+            LodLevel { level: 0, screen_size: 0.5, distance: 10.0, max_error: 1.0, mesh: None, triangle_ratio: 1.0, is_impostor: false },
+            LodLevel { level: 1, screen_size: 0.25, distance: 25.0, max_error: 2.0, mesh: None, triangle_ratio: 0.5, is_impostor: false },
+            LodLevel { level: 2, screen_size: 0.1, distance: 50.0, max_error: 4.0, mesh: None, triangle_ratio: 0.25, is_impostor: false },
+        ];
+
+        let chain = LodChain::new(
+            levels,
+            Sphere { center: Vec3::ZERO, radius: 1.0 },
+            ObjectCategory::Prop
+        );
+
+        let bias = LodBias::default();
+
+        // Close distance should use LOD 0
+        let lod = chain.calculate_lod(Vec3::new(0.0, 0.0, 5.0), 1.0, 1080.0, &bias, LodSelectionMode::Distance);
+        assert_eq!(lod, 0);
+
+        // Medium distance should use LOD 1
+        let lod = chain.calculate_lod(Vec3::new(0.0, 0.0, 20.0), 1.0, 1080.0, &bias, LodSelectionMode::Distance);
+        assert_eq!(lod, 1);
+
+        // Far distance should use LOD 2
+        let lod = chain.calculate_lod(Vec3::new(0.0, 0.0, 60.0), 1.0, 1080.0, &bias, LodSelectionMode::Distance);
+        assert_eq!(lod, 2);
+    }
+
+    #[test]
+    fn test_lod_bias() {
+        let bias = LodBias::default();
+
+        assert!(bias.character_bias < 0.0); // Characters get more detail
+        assert!(bias.shadow_bias > 0.0);    // Shadows get less detail
+    }
+
+    #[test]
+    fn test_lod_transition() {
+        let levels = vec![
+            LodLevel { level: 0, screen_size: 0.5, distance: 10.0, max_error: 1.0, mesh: None, triangle_ratio: 1.0, is_impostor: false },
+            LodLevel { level: 1, screen_size: 0.25, distance: 25.0, max_error: 2.0, mesh: None, triangle_ratio: 0.5, is_impostor: false },
+        ];
+
+        let mut chain = LodChain::new(
+            levels,
+            Sphere { center: Vec3::ZERO, radius: 1.0 },
+            ObjectCategory::Prop
+        );
+
+        chain.transition = LodTransition::AlphaFade { duration: 1.0 };
+
+        // Start at LOD 0
+        assert_eq!(chain.current_lod, 0);
+        assert!(chain.transition_progress >= 1.0);
+
+        // Switch to LOD 1
+        chain.update(1, 0.0);
+        assert_eq!(chain.current_lod, 1);
+        assert_eq!(chain.transition_progress, 0.0);
+
+        // Progress transition
+        chain.update(1, 0.5);
+        assert_eq!(chain.transition_progress, 0.5);
+
+        chain.update(1, 0.5);
+        assert_eq!(chain.transition_progress, 1.0);
+    }
+
+    #[test]
+    fn test_stream_priority_ordering() {
+        let high = StreamPriority::HIGH;
+        let low = StreamPriority::LOW;
+        let critical = StreamPriority::CRITICAL;
+
+        assert!(critical < high);
+        assert!(high < low);
+    }
+
+    #[test]
+    fn test_spatial_hash() {
+        let mut hash = SpatialHash::new(10.0);
+
+        let asset1 = AssetId { asset_type: AssetType::Mesh, id: 1 };
+        let asset2 = AssetId { asset_type: AssetType::Mesh, id: 2 };
+        let asset3 = AssetId { asset_type: AssetType::Mesh, id: 3 };
+
+        hash.insert(Vec3::new(5.0, 5.0, 5.0), asset1);
+        hash.insert(Vec3::new(15.0, 5.0, 5.0), asset2);
+        hash.insert(Vec3::new(100.0, 100.0, 100.0), asset3);
+
+        // Query should find nearby assets
+        let nearby = hash.query_radius(Vec3::new(10.0, 5.0, 5.0), 15.0);
+        assert!(nearby.contains(&asset1));
+        assert!(nearby.contains(&asset2));
+        assert!(!nearby.contains(&asset3));
+    }
+
+    #[test]
+    fn test_streaming_budget_defaults() {
+        let budget = StreamingBudget::default();
+
+        assert_eq!(budget.gpu_memory_limit, 2 * 1024 * 1024 * 1024);
+        assert_eq!(budget.max_pending_io, 64);
+        assert_eq!(budget.upload_time_budget_us, 2000);
+    }
+
+    #[test]
+    fn test_mip_calculation() {
+        let streamer = TextureMipStreamer::new(false);
+
+        // 1024x1024 texture at various screen sizes
+        // At 100% screen height, mip 0
+        // At 50% screen height, mip 1
+        // At 25% screen height, mip 2
+
+        let screen_height = 1080.0;
+
+        // Full screen coverage needs mip 0
+        let mip = (1024.0 / (1.0 * screen_height)).log2().max(0.0) as u32;
+        assert_eq!(mip, 0);
+
+        // Half screen needs mip 1
+        let mip = (1024.0 / (0.5 * screen_height)).log2().max(0.0) as u32;
+        assert_eq!(mip, 1);
+    }
+
+    #[test]
+    fn test_hlod_merge_distance() {
+        let bounds = AABB {
+            min: Vec3::new(-10.0, -10.0, -10.0),
+            max: Vec3::new(10.0, 10.0, 10.0),
+        };
+
+        let merge_dist = HlodTree::calculate_merge_distance(&bounds);
+
+        // Diagonal is ~34.64, merge at 10x that
+        assert!(merge_dist > 300.0);
+        assert!(merge_dist < 400.0);
+    }
+
+    #[test]
+    fn test_octahedral_view_count() {
+        let atlas = ImpostorAtlas::new(&GpuDevice::default(), 2048, 256);
+        let views = atlas.generate_octahedral_views((0, 0));
+
+        assert_eq!(views.len(), 8);
+    }
+
+    #[test]
+    fn test_hemispherical_view_distribution() {
+        let atlas = ImpostorAtlas::new(&GpuDevice::default(), 2048, 256);
+        let views = atlas.generate_hemispherical_views((0, 0), 20);
+
+        // Should have approximately half the views (upper hemisphere)
+        assert!(views.len() >= 8);
+        assert!(views.len() <= 12);
+
+        // All views should have positive Z
+        for view in &views {
+            assert!(view.direction.z >= 0.0);
+        }
+    }
+
+    #[test]
+    fn test_predictive_prefetcher_velocity() {
+        let mut prefetcher = PredictivePrefetcher::new(2.0);
+
+        // Record movement samples
+        for i in 0..10 {
+            prefetcher.record_position(
+                Vec3::new(i as f32 * 10.0, 0.0, 0.0),
+                Vec3::new(10.0, 0.0, 0.0),
+                i as f32 * 0.016
+            );
+        }
+
+        let avg_velocity = prefetcher.calculate_average_velocity();
+        assert!((avg_velocity.x - 10.0).abs() < 0.01);
+        assert!(avg_velocity.y.abs() < 0.01);
+        assert!(avg_velocity.z.abs() < 0.01);
+    }
+}

@@ -1,0 +1,1015 @@
+// ============================================================================
+// BUILD UNIVERSE - Foundation Random Module
+// Copyright 2024-2025 Zain Dana Harper. All Rights Reserved.
+// Proprietary and confidential. Unauthorized copying, distribution,
+// or modification is strictly prohibited.
+// ============================================================================
+
+//! Random number generation and probability distributions.
+//!
+//! Provides various PRNGs and statistical distributions for simulation,
+//! sampling, and randomized algorithms.
+
+use foundation::collections::Vec;
+use foundation::time::SystemTime;
+
+// ============================================================================
+// Core RNG Trait
+// ============================================================================
+
+/// Trait for random number generators.
+pub trait Rng {
+    /// Generate next u64 value.
+    fn next_u64(self: &mut Self) -> u64;
+
+    /// Generate next u32 value.
+    fn next_u32(self: &mut Self) -> u32 {
+        self.next_u64() as u32
+    }
+
+    /// Generate f64 in [0, 1).
+    fn next_f64(self: &mut Self) -> f64 {
+        (self.next_u64() >> 11) as f64 * (1.0 / (1u64 << 53) as f64)
+    }
+
+    /// Generate f32 in [0, 1).
+    fn next_f32(self: &mut Self) -> f32 {
+        (self.next_u32() >> 8) as f32 * (1.0 / (1u32 << 24) as f32)
+    }
+
+    /// Generate bool with probability p.
+    fn next_bool(self: &mut Self, p: f64) -> bool {
+        self.next_f64() < p
+    }
+
+    /// Fill bytes buffer.
+    fn fill_bytes(self: &mut Self, dest: &mut [u8]) {
+        let mut i = 0;
+        while i < dest.len() {
+            let val = self.next_u64();
+            for j in 0..8 {
+                if i + j < dest.len() {
+                    dest[i + j] = (val >> (j * 8)) as u8;
+                }
+            }
+            i += 8;
+        }
+    }
+
+    /// Generate u64 in range [0, bound).
+    fn next_u64_bounded(self: &mut Self, bound: u64) -> u64 {
+        if bound == 0 {
+            return 0;
+        }
+        // Rejection sampling for uniformity
+        let threshold = bound.wrapping_neg() % bound;
+        loop {
+            let r = self.next_u64();
+            if r >= threshold {
+                return r % bound;
+            }
+        }
+    }
+
+    /// Generate i64 in range [low, high).
+    fn next_i64_range(self: &mut Self, low: i64, high: i64) -> i64 {
+        let range = (high - low) as u64;
+        low + self.next_u64_bounded(range) as i64
+    }
+
+    /// Generate f64 in range [low, high).
+    fn next_f64_range(self: &mut Self, low: f64, high: f64) -> f64 {
+        low + self.next_f64() * (high - low)
+    }
+}
+
+// ============================================================================
+// Xorshift128+ Generator
+// ============================================================================
+
+/// Xorshift128+ PRNG - fast and good statistical properties.
+pub struct Xorshift128Plus {
+    s0: u64,
+    s1: u64,
+}
+
+impl Xorshift128Plus {
+    /// Create with seed.
+    pub fn new(seed: u64) -> Self {
+        // Use splitmix64 to initialize state
+        let mut sm = SplitMix64::new(seed);
+        Self {
+            s0: sm.next_u64(),
+            s1: sm.next_u64(),
+        }
+    }
+
+    /// Create from current time.
+    pub fn from_time() -> Self {
+        let seed = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(12345);
+        Self::new(seed)
+    }
+
+    /// Jump ahead 2^64 steps.
+    pub fn jump(self: &mut Self) {
+        const JUMP: [u64; 2] = [0xdf900294d8f554a5, 0x170865df4b3201fc];
+        let mut s0 = 0u64;
+        let mut s1 = 0u64;
+
+        for j in JUMP.iter() {
+            for b in 0..64 {
+                if (j >> b) & 1 != 0 {
+                    s0 ^= self.s0;
+                    s1 ^= self.s1;
+                }
+                self.next_u64();
+            }
+        }
+
+        self.s0 = s0;
+        self.s1 = s1;
+    }
+}
+
+impl Rng for Xorshift128Plus {
+    fn next_u64(self: &mut Self) -> u64 {
+        let mut s1 = self.s0;
+        let s0 = self.s1;
+        let result = s0.wrapping_add(s1);
+        self.s0 = s0;
+        s1 ^= s1 << 23;
+        self.s1 = s1 ^ s0 ^ (s1 >> 18) ^ (s0 >> 5);
+        result
+    }
+}
+
+// ============================================================================
+// Xoshiro256** Generator
+// ============================================================================
+
+/// Xoshiro256** - excellent statistical properties, recommended for general use.
+pub struct Xoshiro256StarStar {
+    s: [u64; 4],
+}
+
+impl Xoshiro256StarStar {
+    /// Create with seed.
+    pub fn new(seed: u64) -> Self {
+        let mut sm = SplitMix64::new(seed);
+        Self {
+            s: [sm.next_u64(), sm.next_u64(), sm.next_u64(), sm.next_u64()],
+        }
+    }
+
+    /// Create from current time.
+    pub fn from_time() -> Self {
+        let seed = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(12345);
+        Self::new(seed)
+    }
+
+    fn rotl(x: u64, k: i32) -> u64 {
+        (x << k) | (x >> (64 - k))
+    }
+
+    /// Jump ahead 2^128 steps.
+    pub fn jump(self: &mut Self) {
+        const JUMP: [u64; 4] = [
+            0x180ec6d33cfd0aba, 0xd5a61266f0c9392c,
+            0xa9582618e03fc9aa, 0x39abdc4529b1661c,
+        ];
+
+        let mut s = [0u64; 4];
+        for j in JUMP.iter() {
+            for b in 0..64 {
+                if (j >> b) & 1 != 0 {
+                    for i in 0..4 {
+                        s[i] ^= self.s[i];
+                    }
+                }
+                self.next_u64();
+            }
+        }
+        self.s = s;
+    }
+
+    /// Long jump ahead 2^192 steps.
+    pub fn long_jump(self: &mut Self) {
+        const LONG_JUMP: [u64; 4] = [
+            0x76e15d3efefdcbbf, 0xc5004e441c522fb3,
+            0x77710069854ee241, 0x39109bb02acbe635,
+        ];
+
+        let mut s = [0u64; 4];
+        for j in LONG_JUMP.iter() {
+            for b in 0..64 {
+                if (j >> b) & 1 != 0 {
+                    for i in 0..4 {
+                        s[i] ^= self.s[i];
+                    }
+                }
+                self.next_u64();
+            }
+        }
+        self.s = s;
+    }
+}
+
+impl Rng for Xoshiro256StarStar {
+    fn next_u64(self: &mut Self) -> u64 {
+        let result = Self::rotl(self.s[1].wrapping_mul(5), 7).wrapping_mul(9);
+        let t = self.s[1] << 17;
+
+        self.s[2] ^= self.s[0];
+        self.s[3] ^= self.s[1];
+        self.s[1] ^= self.s[2];
+        self.s[0] ^= self.s[3];
+        self.s[2] ^= t;
+        self.s[3] = Self::rotl(self.s[3], 45);
+
+        result
+    }
+}
+
+// ============================================================================
+// SplitMix64 Generator
+// ============================================================================
+
+/// SplitMix64 - simple, fast generator good for seeding other PRNGs.
+pub struct SplitMix64 {
+    state: u64,
+}
+
+impl SplitMix64 {
+    pub fn new(seed: u64) -> Self {
+        Self { state: seed }
+    }
+}
+
+impl Rng for SplitMix64 {
+    fn next_u64(self: &mut Self) -> u64 {
+        self.state = self.state.wrapping_add(0x9e3779b97f4a7c15);
+        let mut z = self.state;
+        z = (z ^ (z >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94d049bb133111eb);
+        z ^ (z >> 31)
+    }
+}
+
+// ============================================================================
+// PCG Generator
+// ============================================================================
+
+/// PCG-XSH-RR - Permuted Congruential Generator.
+pub struct Pcg32 {
+    state: u64,
+    inc: u64,
+}
+
+impl Pcg32 {
+    /// Create with seed and stream.
+    pub fn new(seed: u64, stream: u64) -> Self {
+        let mut rng = Self {
+            state: 0,
+            inc: (stream << 1) | 1,
+        };
+        rng.next_u32();
+        rng.state = rng.state.wrapping_add(seed);
+        rng.next_u32();
+        rng
+    }
+
+    /// Create from time.
+    pub fn from_time() -> Self {
+        let seed = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(12345);
+        Self::new(seed, seed >> 32)
+    }
+}
+
+impl Rng for Pcg32 {
+    fn next_u64(self: &mut Self) -> u64 {
+        ((self.next_u32() as u64) << 32) | (self.next_u32() as u64)
+    }
+
+    fn next_u32(self: &mut Self) -> u32 {
+        let old_state = self.state;
+        self.state = old_state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(self.inc);
+
+        let xorshifted = (((old_state >> 18) ^ old_state) >> 27) as u32;
+        let rot = (old_state >> 59) as u32;
+        (xorshifted >> rot) | (xorshifted << ((!rot).wrapping_add(1) & 31))
+    }
+}
+
+// ============================================================================
+// Mersenne Twister
+// ============================================================================
+
+/// Mersenne Twister MT19937-64.
+pub struct MersenneTwister {
+    mt: [u64; 312],
+    index: usize,
+}
+
+impl MersenneTwister {
+    const N: usize = 312;
+    const M: usize = 156;
+    const MATRIX_A: u64 = 0xB5026F5AA96619E9;
+    const UM: u64 = 0xFFFFFFFF80000000;
+    const LM: u64 = 0x7FFFFFFF;
+
+    /// Create with seed.
+    pub fn new(seed: u64) -> Self {
+        let mut mt = [0u64; Self::N];
+        mt[0] = seed;
+        for i in 1..Self::N {
+            mt[i] = 6364136223846793005u64
+                .wrapping_mul(mt[i - 1] ^ (mt[i - 1] >> 62))
+                .wrapping_add(i as u64);
+        }
+        Self { mt, index: Self::N }
+    }
+
+    fn twist(self: &mut Self) {
+        for i in 0..Self::N {
+            let x = (self.mt[i] & Self::UM) | (self.mt[(i + 1) % Self::N] & Self::LM);
+            let mut x_a = x >> 1;
+            if x & 1 != 0 {
+                x_a ^= Self::MATRIX_A;
+            }
+            self.mt[i] = self.mt[(i + Self::M) % Self::N] ^ x_a;
+        }
+        self.index = 0;
+    }
+}
+
+impl Rng for MersenneTwister {
+    fn next_u64(self: &mut Self) -> u64 {
+        if self.index >= Self::N {
+            self.twist();
+        }
+
+        let mut y = self.mt[self.index];
+        self.index += 1;
+
+        // Tempering
+        y ^= (y >> 29) & 0x5555555555555555;
+        y ^= (y << 17) & 0x71D67FFFEDA60000;
+        y ^= (y << 37) & 0xFFF7EEE000000000;
+        y ^= y >> 43;
+
+        y
+    }
+}
+
+// ============================================================================
+// Distributions
+// ============================================================================
+
+/// Trait for probability distributions.
+pub trait Distribution<T> {
+    /// Sample a value from the distribution.
+    fn sample<R: Rng>(self: &Self, rng: &mut R) -> T;
+
+    /// Sample n values.
+    fn sample_n<R: Rng>(self: &Self, rng: &mut R, n: usize) -> Vec<T> {
+        (0..n).map(|_| self.sample(rng)).collect()
+    }
+}
+
+/// Uniform distribution over [low, high).
+pub struct Uniform<T> {
+    low: T,
+    high: T,
+}
+
+impl Uniform<f64> {
+    pub fn new(low: f64, high: f64) -> Self {
+        assert!(low < high);
+        Self { low, high }
+    }
+}
+
+impl Distribution<f64> for Uniform<f64> {
+    fn sample<R: Rng>(self: &Self, rng: &mut R) -> f64 {
+        self.low + rng.next_f64() * (self.high - self.low)
+    }
+}
+
+impl Uniform<i64> {
+    pub fn new(low: i64, high: i64) -> Self {
+        assert!(low < high);
+        Self { low, high }
+    }
+}
+
+impl Distribution<i64> for Uniform<i64> {
+    fn sample<R: Rng>(self: &Self, rng: &mut R) -> i64 {
+        rng.next_i64_range(self.low, self.high)
+    }
+}
+
+/// Standard normal distribution (mean=0, std=1).
+pub struct StandardNormal;
+
+impl Distribution<f64> for StandardNormal {
+    fn sample<R: Rng>(self: &Self, rng: &mut R) -> f64 {
+        // Box-Muller transform
+        let u1 = rng.next_f64();
+        let u2 = rng.next_f64();
+        (-2.0 * u1.ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).cos()
+    }
+}
+
+/// Normal (Gaussian) distribution.
+pub struct Normal {
+    mean: f64,
+    std_dev: f64,
+}
+
+impl Normal {
+    pub fn new(mean: f64, std_dev: f64) -> Self {
+        assert!(std_dev > 0.0);
+        Self { mean, std_dev }
+    }
+}
+
+impl Distribution<f64> for Normal {
+    fn sample<R: Rng>(self: &Self, rng: &mut R) -> f64 {
+        self.mean + self.std_dev * StandardNormal.sample(rng)
+    }
+}
+
+/// Exponential distribution.
+pub struct Exponential {
+    lambda: f64,
+}
+
+impl Exponential {
+    pub fn new(lambda: f64) -> Self {
+        assert!(lambda > 0.0);
+        Self { lambda }
+    }
+}
+
+impl Distribution<f64> for Exponential {
+    fn sample<R: Rng>(self: &Self, rng: &mut R) -> f64 {
+        -rng.next_f64().ln() / self.lambda
+    }
+}
+
+/// Poisson distribution.
+pub struct Poisson {
+    lambda: f64,
+}
+
+impl Poisson {
+    pub fn new(lambda: f64) -> Self {
+        assert!(lambda > 0.0);
+        Self { lambda }
+    }
+}
+
+impl Distribution<u64> for Poisson {
+    fn sample<R: Rng>(self: &Self, rng: &mut R) -> u64 {
+        if self.lambda < 30.0 {
+            // Direct method for small lambda
+            let l = (-self.lambda).exp();
+            let mut k = 0u64;
+            let mut p = 1.0;
+
+            loop {
+                k += 1;
+                p *= rng.next_f64();
+                if p <= l {
+                    return k - 1;
+                }
+            }
+        } else {
+            // Normal approximation for large lambda
+            let n = Normal::new(self.lambda, self.lambda.sqrt());
+            n.sample(rng).round().max(0.0) as u64
+        }
+    }
+}
+
+/// Binomial distribution.
+pub struct Binomial {
+    n: u64,
+    p: f64,
+}
+
+impl Binomial {
+    pub fn new(n: u64, p: f64) -> Self {
+        assert!((0.0..=1.0).contains(&p));
+        Self { n, p }
+    }
+}
+
+impl Distribution<u64> for Binomial {
+    fn sample<R: Rng>(self: &Self, rng: &mut R) -> u64 {
+        if self.n < 25 {
+            // Direct method
+            (0..self.n).filter(|_| rng.next_bool(self.p)).count() as u64
+        } else {
+            // Normal approximation
+            let mean = self.n as f64 * self.p;
+            let std_dev = (mean * (1.0 - self.p)).sqrt();
+            Normal::new(mean, std_dev).sample(rng).round().clamp(0.0, self.n as f64) as u64
+        }
+    }
+}
+
+/// Bernoulli distribution.
+pub struct Bernoulli {
+    p: f64,
+}
+
+impl Bernoulli {
+    pub fn new(p: f64) -> Self {
+        assert!((0.0..=1.0).contains(&p));
+        Self { p }
+    }
+}
+
+impl Distribution<bool> for Bernoulli {
+    fn sample<R: Rng>(self: &Self, rng: &mut R) -> bool {
+        rng.next_bool(self.p)
+    }
+}
+
+/// Geometric distribution (number of failures before first success).
+pub struct Geometric {
+    p: f64,
+}
+
+impl Geometric {
+    pub fn new(p: f64) -> Self {
+        assert!((0.0..1.0).contains(&p) && p > 0.0);
+        Self { p }
+    }
+}
+
+impl Distribution<u64> for Geometric {
+    fn sample<R: Rng>(self: &Self, rng: &mut R) -> u64 {
+        (rng.next_f64().ln() / (1.0 - self.p).ln()).floor() as u64
+    }
+}
+
+/// Beta distribution.
+pub struct Beta {
+    alpha: f64,
+    beta: f64,
+}
+
+impl Beta {
+    pub fn new(alpha: f64, beta: f64) -> Self {
+        assert!(alpha > 0.0 && beta > 0.0);
+        Self { alpha, beta }
+    }
+}
+
+impl Distribution<f64> for Beta {
+    fn sample<R: Rng>(self: &Self, rng: &mut R) -> f64 {
+        // Use gamma distribution relationship
+        let x = Gamma::new(self.alpha, 1.0).sample(rng);
+        let y = Gamma::new(self.beta, 1.0).sample(rng);
+        x / (x + y)
+    }
+}
+
+/// Gamma distribution.
+pub struct Gamma {
+    shape: f64,  // k or alpha
+    scale: f64,  // theta
+}
+
+impl Gamma {
+    pub fn new(shape: f64, scale: f64) -> Self {
+        assert!(shape > 0.0 && scale > 0.0);
+        Self { shape, scale }
+    }
+}
+
+impl Distribution<f64> for Gamma {
+    fn sample<R: Rng>(self: &Self, rng: &mut R) -> f64 {
+        // Marsaglia and Tsang's method
+        if self.shape < 1.0 {
+            let u = rng.next_f64();
+            return Gamma::new(self.shape + 1.0, self.scale).sample(rng) * u.powf(1.0 / self.shape);
+        }
+
+        let d = self.shape - 1.0 / 3.0;
+        let c = 1.0 / (9.0 * d).sqrt();
+
+        loop {
+            let x = StandardNormal.sample(rng);
+            let v = 1.0 + c * x;
+            if v <= 0.0 {
+                continue;
+            }
+
+            let v = v * v * v;
+            let u = rng.next_f64();
+
+            if u < 1.0 - 0.0331 * x * x * x * x {
+                return d * v * self.scale;
+            }
+
+            if u.ln() < 0.5 * x * x + d * (1.0 - v + v.ln()) {
+                return d * v * self.scale;
+            }
+        }
+    }
+}
+
+/// Chi-squared distribution.
+pub struct ChiSquared {
+    k: f64,  // degrees of freedom
+}
+
+impl ChiSquared {
+    pub fn new(k: f64) -> Self {
+        assert!(k > 0.0);
+        Self { k }
+    }
+}
+
+impl Distribution<f64> for ChiSquared {
+    fn sample<R: Rng>(self: &Self, rng: &mut R) -> f64 {
+        Gamma::new(self.k / 2.0, 2.0).sample(rng)
+    }
+}
+
+/// Student's t-distribution.
+pub struct StudentT {
+    nu: f64,  // degrees of freedom
+}
+
+impl StudentT {
+    pub fn new(nu: f64) -> Self {
+        assert!(nu > 0.0);
+        Self { nu }
+    }
+}
+
+impl Distribution<f64> for StudentT {
+    fn sample<R: Rng>(self: &Self, rng: &mut R) -> f64 {
+        let z = StandardNormal.sample(rng);
+        let v = ChiSquared::new(self.nu).sample(rng);
+        z / (v / self.nu).sqrt()
+    }
+}
+
+/// Cauchy distribution.
+pub struct Cauchy {
+    location: f64,
+    scale: f64,
+}
+
+impl Cauchy {
+    pub fn new(location: f64, scale: f64) -> Self {
+        assert!(scale > 0.0);
+        Self { location, scale }
+    }
+}
+
+impl Distribution<f64> for Cauchy {
+    fn sample<R: Rng>(self: &Self, rng: &mut R) -> f64 {
+        let u = rng.next_f64() - 0.5;
+        self.location + self.scale * (std::f64::consts::PI * u).tan()
+    }
+}
+
+/// Log-normal distribution.
+pub struct LogNormal {
+    mu: f64,
+    sigma: f64,
+}
+
+impl LogNormal {
+    pub fn new(mu: f64, sigma: f64) -> Self {
+        assert!(sigma > 0.0);
+        Self { mu, sigma }
+    }
+}
+
+impl Distribution<f64> for LogNormal {
+    fn sample<R: Rng>(self: &Self, rng: &mut R) -> f64 {
+        Normal::new(self.mu, self.sigma).sample(rng).exp()
+    }
+}
+
+/// Weibull distribution.
+pub struct Weibull {
+    scale: f64,  // lambda
+    shape: f64,  // k
+}
+
+impl Weibull {
+    pub fn new(scale: f64, shape: f64) -> Self {
+        assert!(scale > 0.0 && shape > 0.0);
+        Self { scale, shape }
+    }
+}
+
+impl Distribution<f64> for Weibull {
+    fn sample<R: Rng>(self: &Self, rng: &mut R) -> f64 {
+        self.scale * (-rng.next_f64().ln()).powf(1.0 / self.shape)
+    }
+}
+
+/// Pareto distribution.
+pub struct Pareto {
+    scale: f64,  // x_m
+    shape: f64,  // alpha
+}
+
+impl Pareto {
+    pub fn new(scale: f64, shape: f64) -> Self {
+        assert!(scale > 0.0 && shape > 0.0);
+        Self { scale, shape }
+    }
+}
+
+impl Distribution<f64> for Pareto {
+    fn sample<R: Rng>(self: &Self, rng: &mut R) -> f64 {
+        self.scale / rng.next_f64().powf(1.0 / self.shape)
+    }
+}
+
+/// Dirichlet distribution.
+pub struct Dirichlet {
+    alpha: Vec<f64>,
+}
+
+impl Dirichlet {
+    pub fn new(alpha: Vec<f64>) -> Self {
+        assert!(alpha.iter().all(|&a| a > 0.0));
+        Self { alpha }
+    }
+}
+
+impl Distribution<Vec<f64>> for Dirichlet {
+    fn sample<R: Rng>(self: &Self, rng: &mut R) -> Vec<f64> {
+        let mut samples: Vec<f64> = self.alpha.iter()
+            .map(|&a| Gamma::new(a, 1.0).sample(rng))
+            .collect();
+        let sum: f64 = samples.iter().sum();
+        for s in samples.iter_mut() {
+            *s /= sum;
+        }
+        samples
+    }
+}
+
+// ============================================================================
+// Sampling Utilities
+// ============================================================================
+
+/// Shuffle slice in place using Fisher-Yates.
+pub fn shuffle<T, R: Rng>(rng: &mut R, slice: &mut [T]) {
+    for i in (1..slice.len()).rev() {
+        let j = rng.next_u64_bounded((i + 1) as u64) as usize;
+        slice.swap(i, j);
+    }
+}
+
+/// Sample k elements without replacement.
+pub fn sample<T: Clone, R: Rng>(rng: &mut R, items: &[T], k: usize) -> Vec<T> {
+    let n = items.len();
+    if k >= n {
+        return items.to_vec();
+    }
+
+    if k < n / 4 {
+        // Selection sampling for small k
+        let mut result = Vec::with_capacity(k);
+        let mut selected = std::collections::HashSet::new();
+        while result.len() < k {
+            let i = rng.next_u64_bounded(n as u64) as usize;
+            if selected.insert(i) {
+                result.push(items[i].clone());
+            }
+        }
+        result
+    } else {
+        // Shuffle-based for larger k
+        let mut indices: Vec<usize> = (0..n).collect();
+        for i in 0..k {
+            let j = i + rng.next_u64_bounded((n - i) as u64) as usize;
+            indices.swap(i, j);
+        }
+        indices[..k].iter().map(|&i| items[i].clone()).collect()
+    }
+}
+
+/// Weighted random choice.
+pub fn weighted_choice<T: Clone, R: Rng>(rng: &mut R, items: &[T], weights: &[f64]) -> Option<T> {
+    assert_eq!(items.len(), weights.len());
+    if items.is_empty() {
+        return None;
+    }
+
+    let total: f64 = weights.iter().sum();
+    let mut r = rng.next_f64() * total;
+
+    for (item, &weight) in items.iter().zip(weights.iter()) {
+        r -= weight;
+        if r <= 0.0 {
+            return Some(item.clone());
+        }
+    }
+
+    Some(items.last().unwrap().clone())
+}
+
+/// Reservoir sampling for streaming data.
+pub struct ReservoirSampler<T> {
+    reservoir: Vec<T>,
+    k: usize,
+    count: usize,
+}
+
+impl<T: Clone> ReservoirSampler<T> {
+    pub fn new(k: usize) -> Self {
+        Self {
+            reservoir: Vec::with_capacity(k),
+            k,
+            count: 0,
+        }
+    }
+
+    pub fn add<R: Rng>(self: &mut Self, rng: &mut R, item: T) {
+        self.count += 1;
+        if self.reservoir.len() < self.k {
+            self.reservoir.push(item);
+        } else {
+            let j = rng.next_u64_bounded(self.count as u64) as usize;
+            if j < self.k {
+                self.reservoir[j] = item;
+            }
+        }
+    }
+
+    pub fn sample(self: &Self) -> &[T] {
+        &self.reservoir
+    }
+}
+
+// ============================================================================
+// Thread-local RNG
+// ============================================================================
+
+thread_local! {
+    static THREAD_RNG: std::cell::RefCell<Xoshiro256StarStar> = {
+        std::cell::RefCell::new(Xoshiro256StarStar::from_time())
+    };
+}
+
+/// Get random f64 from thread-local RNG.
+pub fn random() -> f64 {
+    THREAD_RNG.with(|rng| rng.borrow_mut().next_f64())
+}
+
+/// Get random u64 from thread-local RNG.
+pub fn random_u64() -> u64 {
+    THREAD_RNG.with(|rng| rng.borrow_mut().next_u64())
+}
+
+/// Get random bool with probability p.
+pub fn random_bool(p: f64) -> bool {
+    THREAD_RNG.with(|rng| rng.borrow_mut().next_bool(p))
+}
+
+/// Get random integer in range [low, high).
+pub fn random_range(low: i64, high: i64) -> i64 {
+    THREAD_RNG.with(|rng| rng.borrow_mut().next_i64_range(low, high))
+}
+
+/// Shuffle slice using thread-local RNG.
+pub fn shuffle_inplace<T>(slice: &mut [T]) {
+    THREAD_RNG.with(|rng| shuffle(&mut *rng.borrow_mut(), slice));
+}
+
+/// Choose random element.
+pub fn choose<T: Clone>(items: &[T]) -> Option<T> {
+    if items.is_empty() {
+        None
+    } else {
+        let i = THREAD_RNG.with(|rng| rng.borrow_mut().next_u64_bounded(items.len() as u64)) as usize;
+        Some(items[i].clone())
+    }
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_xorshift() {
+        let mut rng = Xorshift128Plus::new(12345);
+        let values: Vec<u64> = (0..100).map(|_| rng.next_u64()).collect();
+        // Check all values are different (very unlikely to have duplicates)
+        let unique: std::collections::HashSet<_> = values.iter().collect();
+        assert_eq!(unique.len(), 100);
+    }
+
+    #[test]
+    fn test_uniform_f64() {
+        let mut rng = Xoshiro256StarStar::new(12345);
+        let dist = Uniform::<f64>::new(0.0, 1.0);
+        for _ in 0..1000 {
+            let x = dist.sample(&mut rng);
+            assert!(x >= 0.0 && x < 1.0);
+        }
+    }
+
+    #[test]
+    fn test_normal() {
+        let mut rng = Xoshiro256StarStar::new(12345);
+        let dist = Normal::new(100.0, 15.0);
+        let samples: Vec<f64> = (0..10000).map(|_| dist.sample(&mut rng)).collect();
+
+        let mean = samples.iter().sum::<f64>() / samples.len() as f64;
+        assert!((mean - 100.0).abs() < 1.0);
+    }
+
+    #[test]
+    fn test_shuffle() {
+        let mut rng = Xoshiro256StarStar::new(12345);
+        let mut items = vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+        let original = items.clone();
+        shuffle(&mut rng, &mut items);
+
+        // Should have same elements
+        let mut sorted = items.clone();
+        sorted.sort();
+        assert_eq!(sorted, original);
+
+        // Should be different order (very unlikely to be same)
+        assert_ne!(items, original);
+    }
+
+    #[test]
+    fn test_sample() {
+        let mut rng = Xoshiro256StarStar::new(12345);
+        let items: Vec<i32> = (0..100).collect();
+        let sampled = sample(&mut rng, &items, 10);
+
+        assert_eq!(sampled.len(), 10);
+        // All unique
+        let unique: std::collections::HashSet<_> = sampled.iter().collect();
+        assert_eq!(unique.len(), 10);
+    }
+
+    #[test]
+    fn test_bernoulli() {
+        let mut rng = Xoshiro256StarStar::new(12345);
+        let dist = Bernoulli::new(0.7);
+        let successes: usize = (0..10000)
+            .map(|_| if dist.sample(&mut rng) { 1 } else { 0 })
+            .sum();
+
+        let rate = successes as f64 / 10000.0;
+        assert!((rate - 0.7).abs() < 0.02);
+    }
+
+    #[test]
+    fn test_exponential() {
+        let mut rng = Xoshiro256StarStar::new(12345);
+        let dist = Exponential::new(2.0);
+        let samples: Vec<f64> = (0..10000).map(|_| dist.sample(&mut rng)).collect();
+
+        let mean = samples.iter().sum::<f64>() / samples.len() as f64;
+        // Mean of exponential(lambda) = 1/lambda = 0.5
+        assert!((mean - 0.5).abs() < 0.02);
+    }
+
+    #[test]
+    fn test_reservoir_sampling() {
+        let mut rng = Xoshiro256StarStar::new(12345);
+        let mut sampler = ReservoirSampler::new(10);
+
+        for i in 0..1000 {
+            sampler.add(&mut rng, i);
+        }
+
+        let sample = sampler.sample();
+        assert_eq!(sample.len(), 10);
+    }
+}
