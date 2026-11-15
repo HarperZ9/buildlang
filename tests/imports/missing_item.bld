@@ -1,0 +1,6 @@
+// shapes.bld is beside this program and declares no `Hexagon`.
+use shapes::Hexagon;
+
+fn main() ~ Console {
+    println!("{}", 1);
+}

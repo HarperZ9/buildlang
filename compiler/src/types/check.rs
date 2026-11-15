@@ -39,6 +39,82 @@ pub struct FunctionEffectSummary {
     pub propagated_effects: BTreeMap<String, BTreeSet<String>>,
 }
 
+/// A `use` path of the file being checked, waiting for
+/// [`TypeChecker::verify_use_paths`].
+struct PendingUse {
+    /// The path segments, without the `*` of a glob.
+    segs: Vec<Arc<str>>,
+    /// Whether the path ends in `::*`.
+    glob: bool,
+    /// Where the path is written.
+    span: Span,
+}
+
+/// Second segments of `std::` and `core::` paths that name a module the
+/// compiler provides itself: its types, traits and functions are built in, so
+/// there is no file to look in and the path is accepted at the module level.
+/// A name the compiler does not have still fails where it is used.
+const BUILTIN_STD_MODULES: &[&str] = &[
+    "alloc",
+    "any",
+    "array",
+    "ascii",
+    "borrow",
+    "boxed",
+    "cell",
+    "char",
+    "clone",
+    "cmp",
+    "collections",
+    "convert",
+    "default",
+    "env",
+    "error",
+    "f32",
+    "f64",
+    "ffi",
+    "fmt",
+    "fs",
+    "future",
+    "hash",
+    "hint",
+    "i16",
+    "i32",
+    "i64",
+    "i8",
+    "io",
+    "isize",
+    "iter",
+    "marker",
+    "mem",
+    "net",
+    "num",
+    "ops",
+    "option",
+    "os",
+    "panic",
+    "path",
+    "pin",
+    "prelude",
+    "process",
+    "ptr",
+    "rc",
+    "result",
+    "slice",
+    "str",
+    "string",
+    "sync",
+    "task",
+    "thread",
+    "time",
+    "u16",
+    "u32",
+    "u64",
+    "u8",
+    "usize",
+    "vec",
+];
+
 /// The type checker for items and declarations.
 pub struct TypeChecker<'ctx> {
     /// The type context.
@@ -63,6 +139,14 @@ pub struct TypeChecker<'ctx> {
     /// value can never perturb the consumer's own types the way collecting the
     /// module's items would. The cache keeps each module parsed at most once.
     use_module_exports: HashMap<Arc<str>, Option<HashSet<Arc<str>>>>,
+    /// Every `use` path written in the file being checked, kept until the
+    /// first pass has collected all items so a path whose root is declared
+    /// later in the file is not reported. See [`Self::verify_use_paths`].
+    pending_uses: Vec<PendingUse>,
+    /// Names of the items the first pass has collected. A `use` path whose
+    /// root is one of them names something inside this program (an enum's
+    /// variants, an inline module), not a module file.
+    local_item_names: HashSet<Arc<str>>,
     /// Source text for span-backed token evidence during inference.
     source_text: Option<Arc<str>>,
     /// Source ID associated with `source_text`.
@@ -81,6 +165,8 @@ impl<'ctx> TypeChecker<'ctx> {
             source_dir: None,
             loading_modules: HashSet::new(),
             use_module_exports: HashMap::new(),
+            pending_uses: Vec::new(),
+            local_item_names: HashSet::new(),
             source_text: None,
             source_id: None,
             function_effect_summaries: Vec::new(),
@@ -187,6 +273,11 @@ impl<'ctx> TypeChecker<'ctx> {
         for item in &module.items {
             self.collect_item(item);
         }
+
+        // Every `use` path names something the compiler can find, or the
+        // import is an error (BL0611). Runs after collection so every item of
+        // the file is known.
+        self.verify_use_paths();
 
         // Linear containment: a non-`#[linear]` aggregate may not hold a linear
         // field (it would launder the resource past no-cloning). Runs after all
@@ -358,6 +449,9 @@ impl<'ctx> TypeChecker<'ctx> {
 
     /// Collect type definitions from an item (first pass).
     fn collect_item(&mut self, item: &ast::Item) {
+        if let Some(name) = item.name() {
+            self.local_item_names.insert(name.name.clone());
+        }
         match &item.kind {
             ItemKind::Struct(s) => {
                 if Self::has_derive(&item.attrs, "Clone") {
@@ -452,6 +546,25 @@ impl<'ctx> TypeChecker<'ctx> {
                     }
                 }
                 self.loading_modules.remove(&key);
+            } else if self.loading_modules.is_empty()
+                && !dir.join(mod_name).join("mod.bld").is_file()
+            {
+                // `mod NAME;` with no file behind it used to be skipped in
+                // silence; the names it was meant to bring then failed later.
+                self.error(
+                    TypeError::UnresolvedImport {
+                        path: mod_name.to_string(),
+                        reason: format!(
+                            "no file for `mod {};`: looked for `{}.bld` and `{}/mod.bld` in {}, and for `{}.bld` in the standard library",
+                            mod_name,
+                            mod_name,
+                            mod_name,
+                            dir.display(),
+                            mod_name
+                        ),
+                    },
+                    m.name.span,
+                );
             }
         }
     }
@@ -1605,6 +1718,7 @@ impl<'ctx> TypeChecker<'ctx> {
             ast::UseTreeKind::Simple { path, rename } => {
                 let mut segs: Vec<Arc<str>> = prefix.to_vec();
                 segs.extend(path.segments.iter().map(|s| s.ident.name.clone()));
+                self.note_use_path(&segs, false, tree.span);
                 if segs.len() < 2 || Self::is_reserved_use_root(&segs[0]) {
                     return;
                 }
@@ -1637,6 +1751,7 @@ impl<'ctx> TypeChecker<'ctx> {
             ast::UseTreeKind::Glob(path) => {
                 let mut segs: Vec<Arc<str>> = prefix.to_vec();
                 segs.extend(path.segments.iter().map(|s| s.ident.name.clone()));
+                self.note_use_path(&segs, true, tree.span);
                 if segs.is_empty() || Self::is_reserved_use_root(&segs[0]) {
                     return;
                 }
@@ -1665,6 +1780,199 @@ impl<'ctx> TypeChecker<'ctx> {
                 }
             }
         }
+    }
+
+    /// Remember a `use` path of the file being checked for
+    /// [`Self::verify_use_paths`]. Paths inside a file loaded by `mod NAME;`
+    /// are left to that file's own check: their spans belong to another file.
+    fn note_use_path(&mut self, segs: &[Arc<str>], glob: bool, span: Span) {
+        if segs.is_empty() || !self.loading_modules.is_empty() {
+            return;
+        }
+        self.pending_uses.push(PendingUse {
+            segs: segs.to_vec(),
+            glob,
+            span,
+        });
+    }
+
+    /// Report every `use` path that names nothing the compiler can find
+    /// (BL0611), all of them in one run. An unresolved import used to pass
+    /// silently, and the missing name then surfaced as errors about something
+    /// else on later lines.
+    ///
+    /// What counts as found:
+    /// - `crate::`, `self::` and `super::` paths are not checked here.
+    /// - `std::M` and `core::M`: `M` is a built-in module name
+    ///   ([`BUILTIN_STD_MODULES`]), or the standard library directory holds
+    ///   `M.bld` and, when the path goes on, that file declares the next name
+    ///   or the compiler knows it as a built-in.
+    /// - a path whose root is an item of this program (an enum, a module).
+    /// - any other path: some leading part of it is a module file found by
+    ///   [`Self::resolve_use_module_file`], and the next name is declared or
+    ///   imported at the top level of that file.
+    fn verify_use_paths(&mut self) {
+        let pending = std::mem::take(&mut self.pending_uses);
+        for p in pending {
+            if let Some(reason) = self.unresolved_use_reason(&p.segs, p.glob) {
+                let mut path = p
+                    .segs
+                    .iter()
+                    .map(|s| s.as_ref())
+                    .collect::<Vec<_>>()
+                    .join("::");
+                if p.glob {
+                    path.push_str("::*");
+                }
+                self.error(TypeError::UnresolvedImport { path, reason }, p.span);
+            }
+        }
+    }
+
+    /// Why `segs` does not resolve, or `None` when it does.
+    fn unresolved_use_reason(&mut self, segs: &[Arc<str>], glob: bool) -> Option<String> {
+        let root = segs[0].as_ref();
+        if matches!(root, "crate" | "self" | "super") {
+            return None;
+        }
+        if matches!(root, "std" | "core") {
+            let module = segs.get(1)?;
+            if BUILTIN_STD_MODULES.contains(&module.as_ref()) {
+                return None;
+            }
+            let dir = STDLIB_DIR_FINDER.get().and_then(|finder| finder())?;
+            let file = dir.join(format!("{}.bld", module));
+            if !file.is_file() {
+                return Some(format!(
+                    "the standard library has no module `{}`: it is not a built-in module and there is no `{}.bld` in {}",
+                    module,
+                    module,
+                    dir.display()
+                ));
+            }
+            let item = segs.get(2)?;
+            if item.as_ref() == "self" || self.name_is_known(item) {
+                return None;
+            }
+            let (names, has_glob) = Self::collect_declared_and_imported_names(&file)?;
+            if has_glob || names.contains(item) {
+                return None;
+            }
+            return Some(format!(
+                "the standard library module `{}` ({}) has no item `{}`",
+                module,
+                file.display(),
+                item
+            ));
+        }
+        if segs.len() < 2
+            || self.local_item_names.contains(root)
+            || self.ctx.lookup_type_by_name(root).is_some()
+            || self.ctx.lookup_trait_by_name(root).is_some()
+            || self.ctx.clone_module_bindings(root).is_some()
+        {
+            return None;
+        }
+        let start = self.source_dir.clone()?;
+        for k in (1..=segs.len()).rev() {
+            let Some(file) = self.resolve_use_module_file(&segs[..k]) else {
+                continue;
+            };
+            let next = segs.get(k)?;
+            if next.as_ref() == "self" {
+                return None;
+            }
+            let module = segs[..k]
+                .iter()
+                .map(|s| s.as_ref())
+                .collect::<Vec<_>>()
+                .join("::");
+            return match Self::collect_declared_and_imported_names(&file) {
+                None => Some(format!(
+                    "the module `{}` is the file {}, which does not lex or parse",
+                    module,
+                    file.display()
+                )),
+                Some((names, has_glob)) if has_glob || names.contains(next) => None,
+                Some(_) => Some(format!(
+                    "the module `{}` ({}) has no top-level item `{}`",
+                    module,
+                    file.display(),
+                    next
+                )),
+            };
+        }
+        let module_len = if glob { segs.len() } else { segs.len() - 1 };
+        let module = &segs[..module_len];
+        let name = module
+            .iter()
+            .map(|s| s.as_ref())
+            .collect::<Vec<_>>()
+            .join("::");
+        let file = module
+            .iter()
+            .map(|s| s.as_ref())
+            .collect::<Vec<_>>()
+            .join("/");
+        Some(format!(
+            "no module file for `{}`: looked for `{}.bld`, `{}/lib.bld` and `{}/mod.bld`, and the same for each shorter path, in {} and in the 7 directories above it",
+            name,
+            file,
+            file,
+            file,
+            start.display()
+        ))
+    }
+
+    /// Whether `name` is something the compiler already knows: a value, a
+    /// type or a trait, built in or declared in this program.
+    fn name_is_known(&self, name: &str) -> bool {
+        self.ctx.lookup_var(name).is_some()
+            || self.ctx.lookup_type_by_name(name).is_some()
+            || self.ctx.lookup_trait_by_name(name).is_some()
+    }
+
+    /// The names a module file declares at its top level together with the
+    /// last name of each of its own `use` paths (a re-export), and whether it
+    /// has a glob `use` (then any name may come through it). Read-only, like
+    /// [`Self::collect_export_names`]. `None` when the file does not lex or
+    /// parse.
+    fn collect_declared_and_imported_names(
+        path: &std::path::Path,
+    ) -> Option<(HashSet<Arc<str>>, bool)> {
+        fn walk(tree: &ast::UseTree, names: &mut HashSet<Arc<str>>, glob: &mut bool) {
+            match &tree.kind {
+                ast::UseTreeKind::Simple { path, rename } => {
+                    if let Some(r) = rename {
+                        names.insert(r.name.clone());
+                    } else if let Some(last) = path.segments.last() {
+                        names.insert(last.ident.name.clone());
+                    }
+                }
+                ast::UseTreeKind::Glob(_) => *glob = true,
+                ast::UseTreeKind::Nested { trees, .. } => {
+                    for t in trees {
+                        walk(t, names, glob);
+                    }
+                }
+            }
+        }
+        let source_text = std::fs::read_to_string(path).ok()?;
+        let source = crate::lexer::SourceFile::new(path.to_string_lossy().as_ref(), source_text);
+        let mut lexer = crate::lexer::Lexer::new(&source);
+        let tokens = lexer.tokenize().ok()?;
+        let mut parser = crate::parser::Parser::new(&source, tokens);
+        let module_ast = parser.parse().ok()?;
+        let mut names: HashSet<Arc<str>> = HashSet::new();
+        let mut glob = false;
+        for item in &module_ast.items {
+            if let ItemKind::Use(u) = &item.kind {
+                walk(&u.tree, &mut names, &mut glob);
+            } else if let Some(name) = item.name() {
+                names.insert(name.name.clone());
+            }
+        }
+        Some((names, glob))
     }
 
     /// Roots that name the standard library or a path relative to the current

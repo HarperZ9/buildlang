@@ -228,6 +228,7 @@ pub fn type_code(error: &TypeError) -> &'static str {
         E::UnitRootNotExact { .. } => "BL0604",
         E::MeasuredConstantInvalid { .. } => "BL0605",
         E::ModuleImportCycle { .. } => "BL0610",
+        E::UnresolvedImport { .. } => "BL0611",
         E::FormatArgNotStringLiteral { .. } => "BL0620",
         E::SpecRefuted { .. } => "BL0801",
         E::SpecInconsistent { .. } => "BL0802",
@@ -404,6 +405,7 @@ pub const CODES: &[CodeInfo] = &[
     c("BL0604", "root of a unit has no integer exponents"),
     c("BL0605", "measured constant without a valid source"),
     c("BL0610", "module import cycle"),
+    c("BL0611", "unresolved import"),
     c("BL0620", "formatting macro needs a string literal first"),
     c(
         "BL0701",

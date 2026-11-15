@@ -230,6 +230,10 @@ fn type_samples() -> Vec<TypeError> {
             path: s("a.bld"),
             module: s("b"),
         },
+        E::UnresolvedImport {
+            path: s("core::simd::f32x4"),
+            reason: s("the standard library has no module `simd`"),
+        },
         E::FormatArgNotStringLiteral {
             macro_name: s("println"),
             found: s("an expression"),

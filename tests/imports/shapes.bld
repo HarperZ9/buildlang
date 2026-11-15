@@ -1,0 +1,8 @@
+// A module file the import programs beside it name.
+pub struct Square {
+    pub side: i64,
+}
+
+pub fn area(s: Square) -> i64 {
+    s.side * s.side
+}

@@ -1,0 +1,6 @@
+// The standard library has no `simd` module.
+use core::simd::f32x4;
+
+fn main() ~ Console {
+    println!("{}", 1);
+}
