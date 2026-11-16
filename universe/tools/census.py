@@ -106,7 +106,11 @@ def run_check(buildc, rel):
         if m:
             diags.append((0, m.group(1), m.group(2).strip()))
     if not diags and (proc.returncode < 0 or proc.returncode > 128 or "memory allocation" in out):
-        return 125, [], f"exit {proc.returncode}: " + (out.strip().splitlines() or ["no output"])[-1]
+        tail = out.strip().splitlines()[-15:] or ["no output"]
+        shown = "".join("\n  " + line for line in tail)
+        print(f"census: crash in {rel} (exit {proc.returncode}):{shown}", file=sys.stderr, flush=True)
+        message = next((line for line in tail if "panicked" in line or "memory allocation" in line), tail[-1])
+        return 125, [], f"exit {proc.returncode}: {message.strip()}"
     return proc.returncode, diags, out
 
 
