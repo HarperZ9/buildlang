@@ -395,16 +395,7 @@ pub(crate) enum IterTerminal<'a> {
 /// few levels; a chain that reaches this does not end.
 pub(crate) const MAX_GENERIC_NESTING: usize = 24;
 
-/// Where the elements of a lowered iterator chain come from.
-pub(crate) enum ChainSource {
-    /// A vector in `local`, read with the runtime accessor `get_fn`.
-    Vec { local: LocalId, get_fn: String },
-    /// A range: element `i` is `first + i` (`first` held as an `i64`).
-    Range { first: LocalId },
-}
-
-/// A fully parsed iterator chain: `source.iter().<steps>.<terminal>`, or
-/// `(a..b).<steps>.<terminal>` over a range.
+/// A fully parsed iterator chain: `source.iter().<steps>.<terminal>`.
 pub(crate) struct IterChain<'a> {
     /// The source expression (the thing `.iter()` is called on).
     pub(crate) source: &'a ast::Expr,
