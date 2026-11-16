@@ -10,6 +10,10 @@ tracked in `STATUS.md`, `README.md`, and
 
 ## Unreleased
 
+### Tooling
+
+- CI: a commit whose message has a line `test-only: <name>` runs only `compiler/tests/<name>.rs` (every test in it, `--no-fail-fast`) in the test job, then fails the job whatever the tests did, so a revert check reads one test binary in minutes and such a commit can never satisfy a merge; a push to main never narrows. The rule is `.github/test-only.sh`. Nothing is committed for it, so lint has nothing to refuse (an earlier design used a `.github/test-only` file that lint had to reject). The universe census prints its step-0 diagnostic count beside the committed `universe/CENSUS-BASELINE.txt` ("census: step-0 diagnostics N, baseline B, removed B - N"); not a gate.
+
 ### Compiler
 
 - What the formula kernels need, second part. `std::stats` has Student's t for a whole number of degrees of freedom: `student_t_cdf`, `student_t_pdf` and `student_t_quantile`, from the finite series of Abramowitz and Stegun 26.7.3 and 26.7.4 (trigonometry and arithmetic only) with Newton steps from the normal quantile; within 3e-14 of SciPy on 1 to 30 degrees of freedom, with probabilities below about 1e-12 losing relative accuracy. `std::math` declares `Mat3` (three `Vec3` columns; `Mat3::new` takes nine numbers column by column, `from_cols`, `from_rows`, `identity`, `from_diagonal`, `transpose`, `determinant`, `inverse`, `mul_vec3`, `m * m`) and `Quaternion` (`x`, `y`, `z`, `w`; `IDENTITY`, `from_axis_angle`, `normalize`, `conjugate`, `inverse`, `q * r`, `mul_vec3`, `to_mat3`, `slerp`), both `f32` like `Vec3`. Universe callers wrote `Mat3::new` three ways (nine numbers by column, a flat array by row, an array of rows); the nine-number form is the one of record. Tests: `compiler/tests/kernel_needs.rs`.

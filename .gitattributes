@@ -15,3 +15,6 @@ registry/** -text
 
 # The held-out probe is checked against MANIFEST.sha256, so its bytes stay as committed.
 bench/heldout-2026-11-08/** -text
+
+# Run by bash on every runner, the Windows one included: a CR would end each line.
+.github/test-only.sh text eol=lf
