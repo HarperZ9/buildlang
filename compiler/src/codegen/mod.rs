@@ -90,6 +90,9 @@ pub struct CodeGenerator<'ctx> {
     /// can lower once and reuse the same MIR, but the output must be
     /// discarded when this is non-empty).
     linear_errors: Vec<TypeErrorWithSpan>,
+    /// When `generate()` failed in lowering: the refusals after the one it
+    /// returned, one per function the backend cannot compile.
+    further_rejections: Vec<CodegenError>,
 }
 
 impl<'ctx> CodeGenerator<'ctx> {
@@ -104,6 +107,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             reshade: false,
             wasm_text: false,
             linear_errors: Vec::new(),
+            further_rejections: Vec::new(),
         }
     }
 
@@ -118,6 +122,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             reshade: false,
             wasm_text: false,
             linear_errors: Vec::new(),
+            further_rejections: Vec::new(),
         }
     }
 
@@ -128,6 +133,14 @@ impl<'ctx> CodeGenerator<'ctx> {
     /// linear-valid.
     pub fn linear_errors(&self) -> &[TypeErrorWithSpan] {
         &self.linear_errors
+    }
+
+    /// When `generate()` returned an error from lowering, the refusals that
+    /// follow it: `generate()` returns the first function the backend cannot
+    /// compile and this holds the others, in source order. A caller that
+    /// reports the error reports these too, so one run shows them all.
+    pub fn further_rejections(&self) -> &[CodegenError] {
+        &self.further_rejections
     }
 
     /// Set the runtime stdio policy for generated programs.
@@ -200,7 +213,14 @@ impl<'ctx> CodeGenerator<'ctx> {
         } else {
             MirLowerer::new(self.ctx)
         };
-        let mir = lowerer.lower_module(module)?;
+        let mir = match lowerer.lower_module_all(module) {
+            Ok(mir) => mir,
+            Err(mut all) => {
+                let first = all.remove(0);
+                self.further_rejections = all;
+                return Err(first);
+            }
+        };
         self.mir = Some(mir);
 
         // Select backend and generate
