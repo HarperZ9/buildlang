@@ -1628,7 +1628,8 @@ static uint32_t build_f32_to_bits(float v) { uint32_t b; memcpy(&b, &v, sizeof b
 static float build_f32_from_bits(uint32_t b) { float v; memcpy(&v, &b, sizeof v); return v; }
 // --- DETMATH transcendentals ---
 /* BuildLang portable transcendentals: exp, log, pow, sin and cos by the fdlibm 5.3
- * algorithms, written with memcpy word access so the result depends only on
+ * algorithms, and a correctly rounded cbrt of BuildLang's own (after cos), all
+ * written with memcpy word access so the result depends only on
  * IEEE 754 double arithmetic (round to nearest, no contraction).
  *
  * Algorithms and constants from fdlibm (http://www.netlib.org/fdlibm):
@@ -2230,6 +2231,103 @@ static double build_det_cos(double x) {
         case 2: return -bl_dm_kcos(y[0], y[1]);
         default: return bl_dm_ksin(y[0], y[1], 1);
     }
+}
+
+/* cbrt, correctly rounded for every double (BuildLang's own, not fdlibm's).
+ * A guess (a quadratic on [1, 2) and two Halley steps) lands within a few units
+ * in the last place; exact integer arithmetic then moves it to the double
+ * nearest the true cube root. With t = |x| scaled to [1, 8) and y the root
+ * scaled to an integer in [2^52, 2^53], y is right when
+ * (2y - 1)^3 < t * 2^107 < (2y + 1)^3, compared as 192-bit integers in 32-bit
+ * limbs. A midpoint is never the exact cube root of a double (its cube needs
+ * more than 53 bits), so there are no ties. */
+static void bl_dm_cube64(uint64_t a, uint32_t out[6]) {
+    uint32_t x[2], s[4] = {0, 0, 0, 0};
+    int i, j;
+    x[0] = (uint32_t)a;
+    x[1] = (uint32_t)(a >> 32);
+    for (i = 0; i < 6; i++) out[i] = 0;
+    for (i = 0; i < 2; i++) {
+        uint64_t c = 0;
+        for (j = 0; j < 2; j++) {
+            uint64_t t = (uint64_t)x[i] * x[j] + s[i + j] + c;
+            s[i + j] = (uint32_t)t;
+            c = t >> 32;
+        }
+        s[i + 2] = (uint32_t)c;
+    }
+    for (i = 0; i < 4; i++) {
+        uint64_t c = 0;
+        for (j = 0; j < 2; j++) {
+            uint64_t t = (uint64_t)s[i] * x[j] + out[i + j] + c;
+            out[i + j] = (uint32_t)t;
+            c = t >> 32;
+        }
+        out[i + 2] = (uint32_t)c;
+    }
+}
+
+/* -1, 0 or 1 as a^3 is below, equal to or above n (192 bits, low limb first). */
+static int bl_dm_cube_cmp(uint64_t a, const uint32_t n[6]) {
+    uint32_t c[6];
+    int i;
+    bl_dm_cube64(a, c);
+    for (i = 5; i >= 0; i--) {
+        if (c[i] != n[i]) return c[i] < n[i] ? -1 : 1;
+    }
+    return 0;
+}
+
+static double build_det_cbrt(double x) {
+    static const double c3[3] = {1.0, 1.2599210498948731648, 1.5874010519681994748};
+    uint64_t b, sign, m, t, y, pb;
+    uint32_t n8[6];
+    int e, r, q;
+    double mf, tf, g, g3, p;
+    memcpy(&b, &x, 8);
+    sign = b & 0x8000000000000000ULL;
+    b &= 0x7fffffffffffffffULL;
+    if (b >= 0x7ff0000000000000ULL || b == 0) return x + x; /* NaN, infinities, zeros */
+    e = (int)(b >> 52);
+    if (e == 0) { /* subnormal: scale by 2^54, exactly */
+        double s;
+        memcpy(&s, &b, 8);
+        s *= 18014398509481984.0;
+        memcpy(&b, &s, 8);
+        e = (int)(b >> 52) - 54;
+    }
+    m = (b & 0x000fffffffffffffULL) | 0x0010000000000000ULL; /* |x| = m * 2^(e - 1075) */
+    e -= 1023;
+    r = (e + 1200) % 3;
+    q = (e - r) / 3;
+    t = m << r; /* |x| = t * 2^(3q - 52), t / 2^52 in [1, 8) */
+    b = (m & 0x000fffffffffffffULL) | 0x3ff0000000000000ULL;
+    memcpy(&mf, &b, 8);
+    tf = mf * (double)(1 << r);
+    g = (0.6263612094449067 + mf * (0.4335581666053484 - mf * 0.058635810828108204)) * c3[r];
+    g3 = g * g * g;
+    g = g * (g3 + 2.0 * tf) / (2.0 * g3 + tf);
+    g3 = g * g * g;
+    g = g * (g3 + 2.0 * tf) / (2.0 * g3 + tf);
+    y = (uint64_t)(g * 4503599627370496.0 + 0.5);
+    if (y < 0x0010000000000000ULL) y = 0x0010000000000000ULL;
+    if (y > 0x0020000000000000ULL) y = 0x0020000000000000ULL;
+    n8[0] = 0;
+    n8[1] = 0;
+    n8[2] = 0;
+    n8[3] = (uint32_t)(t << 11);
+    n8[4] = (uint32_t)(t >> 21);
+    n8[5] = (uint32_t)(t >> 53);
+    while (bl_dm_cube_cmp(2 * y + 1, n8) < 0) y++;
+    while (bl_dm_cube_cmp(2 * y - 1, n8) > 0) y--;
+    /* y * 2^(q - 52): exact, q is in [-358, 341] */
+    pb = (uint64_t)(q + 1023 - 52) << 52;
+    memcpy(&p, &pb, 8);
+    p *= (double)y;
+    memcpy(&b, &p, 8);
+    b |= sign;
+    memcpy(&p, &b, 8);
+    return p;
 }
 
 

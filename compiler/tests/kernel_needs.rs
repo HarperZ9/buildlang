@@ -30,8 +30,9 @@
 //!   is (0, 0, sin pi/8, cos pi/8).
 //!
 //! Floats are compared within a relative 1e-15 (a few units in the last
-//! place): `cbrt(2)` is 1.259921049894873 with glibc and 1.2599210498948732
-//! with the mingw C library.
+//! place). `cbrt` itself is the runtime's correctly rounded one
+//! (`tests/native_cbrt.rs`): `cbrt(2)` is 1.2599210498948732 on every C
+//! library, where glibc's own gives 1.259921049894873, one unit low.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -132,7 +133,7 @@ fn ln_cbrt_erf_erfc_are_free_built_ins() {
         &lines,
         &[
             &[0.6931471805599453, 2.302585092994046],
-            &[3.0, 1.259921049894873, -2.0],
+            &[3.0, 1.2599210498948732, -2.0],
             &[0.5204998778130465, -0.8427007929497149],
             &[0.004677734981047265, 1.5374597944280351e-12],
         ],

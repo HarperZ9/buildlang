@@ -1,0 +1,31 @@
+// Translation validation of the DETMATH float methods and free calls: each
+// function must be certified, which needs the checker and the C backend to
+// name the same portable function (build_det_*) for the call.
+fn cbrt_method(x: f64) -> f64 {
+    x.cbrt() * 2.0
+}
+
+fn cbrt_free(x: f64) -> f64 {
+    cbrt(x) + 1.0
+}
+
+fn exp_method(x: f64) -> f64 {
+    x.exp()
+}
+
+fn ln_method(x: f64) -> f64 {
+    x.ln()
+}
+
+fn sin_cos_method(x: f64) -> f64 {
+    x.sin() + x.cos()
+}
+
+fn powf_method(x: f64, y: f64) -> f64 {
+    x.powf(y)
+}
+
+fn main() ~ Console {
+    println!("{}", cbrt_method(8.0) + cbrt_free(27.0) + exp_method(1.0));
+    println!("{}", ln_method(2.0) + sin_cos_method(0.5) + powf_method(2.0, 0.5));
+}
