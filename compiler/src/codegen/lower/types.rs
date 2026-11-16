@@ -288,7 +288,6 @@ impl<'ctx> MirLowerer<'ctx> {
                         );
                         if !subst.is_empty() {
                             let mangled = Self::mangle_generic_name(type_name, &subst);
-                            self.note_generic_shape(&mangled, type_name, &subst);
                             return MirType::Struct(mangled);
                         }
                     }
@@ -803,7 +802,7 @@ impl<'ctx> MirLowerer<'ctx> {
     /// this, a generic instantiated with a string arg (`fn h<T>(a: T)` called as
     /// `h("x")`) collapsed to the `i32` fallback and emitted an `int32_t`
     /// parameter under a `_BuildString` mangled name -> invalid C.
-    pub(super) fn mir_type_to_build_name(ty: &MirType) -> String {
+    fn mir_type_to_build_name(ty: &MirType) -> String {
         match ty {
             MirType::Bool => "bool".to_string(),
             MirType::Int(IntSize::I8, true) => "i8".to_string(),
@@ -1214,7 +1213,7 @@ impl<'ctx> MirLowerer<'ctx> {
     }
 
     /// Substitute all generic type parameters in an AST Type using a multi-param map.
-    pub(super) fn substitute_type_in_ast_type_multi(
+    fn substitute_type_in_ast_type_multi(
         ty: &ast::Type,
         subst: &HashMap<Arc<str>, MirType>,
     ) -> ast::Type {

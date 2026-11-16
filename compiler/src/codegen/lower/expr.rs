@@ -1747,10 +1747,12 @@ impl<'ctx> MirLowerer<'ctx> {
                 _ => None,
             };
             if let Some(method) = method_name {
-                if let Some(mangled_fn) = self.impl_method_for_call(type_name, method)? {
+                let key = (type_name.clone(), Arc::from(method));
+                if let Some(mangled_fn) = self.impl_methods.get(&key).cloned() {
                     let ret_ty = self
-                        .known_fn_sig(mangled_fn.as_ref())
-                        .map(|s| s.ret)
+                        .module
+                        .find_function(mangled_fn.as_ref())
+                        .map(|f| f.sig.ret.clone())
                         .unwrap_or(left_ty.clone());
                     let builder = self
                         .current_fn
@@ -2022,10 +2024,12 @@ impl<'ctx> MirLowerer<'ctx> {
         if matches!(op, AstUnaryOp::Neg) {
             let inner_ty = self.type_of_value(&inner_val);
             if let MirType::Struct(ref type_name) = inner_ty {
-                if let Some(mangled_fn) = self.impl_method_for_call(type_name, "neg")? {
+                let key = (type_name.clone(), Arc::from("neg"));
+                if let Some(mangled_fn) = self.impl_methods.get(&key).cloned() {
                     let ret_ty = self
-                        .known_fn_sig(mangled_fn.as_ref())
-                        .map(|s| s.ret)
+                        .module
+                        .find_function(mangled_fn.as_ref())
+                        .map(|f| f.sig.ret.clone())
                         .unwrap_or(inner_ty.clone());
                     let builder = self
                         .current_fn
@@ -3245,9 +3249,6 @@ impl<'ctx> MirLowerer<'ctx> {
         // runtime function goes to the user's function (see `shadow_fns`).
         if let Some(renamed) = self.shadowed_callee(func) {
             return self.lower_call(&renamed, args);
-        }
-        if let Some(instance_call) = self.generic_assoc_callee(func)? {
-            return self.lower_call(&instance_call, args);
         }
         // M5: par_for(n, &ctx, f) / par_map(xs, f) lower to a thread-pool
         // wrapper; a user function of the same name keeps its meaning.
@@ -4761,8 +4762,8 @@ impl<'ctx> MirLowerer<'ctx> {
                     };
                     if let MirType::Struct(sname) = base {
                         let mangled = format!("{}_{}", sname, method.name);
-                        if let Some(sig) = self.known_fn_sig(mangled.as_str()) {
-                            return sig.ret;
+                        if let Some(f) = self.module.find_function(mangled.as_str()) {
+                            return f.sig.ret.clone();
                         }
                     }
                 }
@@ -4940,8 +4941,8 @@ impl<'ctx> MirLowerer<'ctx> {
         };
         if let Some(ref fn_name) = name {
             // Check module-level function declarations first.
-            if let Some(sig) = self.known_fn_sig(fn_name.as_str()) {
-                return sig.ret;
+            if let Some(func) = self.module.find_function(fn_name.as_str()) {
+                return func.sig.ret.clone();
             }
             // Inside a module, also try the prefixed name (e.g., Vec3_new → std_Vec3_new)
             if !self.module_prefix.is_empty() {
@@ -6180,17 +6181,21 @@ impl<'ctx> MirLowerer<'ctx> {
 
         // Try to resolve the method via impl_methods registry.
         // Auto-deref: if receiver is &T (pointer to struct), look up on T.
-        let receiver_struct = match &receiver_ty {
-            MirType::Struct(type_name) => Some(type_name.clone()),
-            MirType::Ptr(inner) => match inner.as_ref() {
-                MirType::Struct(type_name) => Some(type_name.clone()),
-                _ => None,
-            },
+        let resolved_fn_name = match &receiver_ty {
+            MirType::Struct(ref type_name) => self
+                .impl_methods
+                .get(&(type_name.clone(), method.name.clone()))
+                .cloned(),
+            MirType::Ptr(inner) => {
+                if let MirType::Struct(ref type_name) = **inner {
+                    self.impl_methods
+                        .get(&(type_name.clone(), method.name.clone()))
+                        .cloned()
+                } else {
+                    None
+                }
+            }
             _ => None,
-        };
-        let resolved_fn_name = match receiver_struct {
-            Some(type_name) => self.impl_method_for_call(&type_name, &method.name)?,
-            None => None,
         };
 
         if let Some(mangled_name) = resolved_fn_name {
@@ -9775,8 +9780,11 @@ impl<'ctx> MirLowerer<'ctx> {
         };
 
         // Resolve the `next` method
-        let next_fn_name = match self.impl_method_for_call(&type_name, "next")? {
-            Some(name) => name,
+        let next_fn_name = match self
+            .impl_methods
+            .get(&(type_name.clone(), Arc::from("next")))
+        {
+            Some(name) => name.clone(),
             None => return Ok(values::unit()),
         };
 
