@@ -6,6 +6,10 @@
 //! it was named, `chain` named `Chain<Chain<..>, R>`, and memory grew by a
 //! few hundred megabytes a second until the process was killed.
 //!
+//! Since the methods of a generic instance are compiled at their first
+//! call, the reproduction builds. A method that calls itself on a larger
+//! instance still has no end, and is refused.
+//!
 //! Every check here runs under a deadline, and on Unix under an address
 //! space limit, so a compiler that hangs again fails the test in seconds and
 //! cannot take the machine down.
@@ -61,8 +65,9 @@ fn program(name: &str, text: &str) -> PathBuf {
     main
 }
 
-/// `buildc check <file>` under the deadline. `None` when it had to be killed.
-fn check_within_deadline(file: &Path) -> Option<(bool, String)> {
+/// `buildc <command> <file>` under the deadline. `None` when it had to be
+/// killed.
+fn buildc_within_deadline(command_name: &str, file: &Path) -> Option<(bool, String)> {
     let dir = file.parent().expect("program folder");
     let out_path = dir.join("out.txt");
     let err_path = dir.join("err.txt");
@@ -76,15 +81,16 @@ fn check_within_deadline(file: &Path) -> Option<(bool, String)> {
     let mut command = {
         let mut c = Command::new("sh");
         c.arg("-c")
-            .arg("ulimit -v 2097152; exec \"$0\" check \"$1\"")
+            .arg("ulimit -v 2097152; exec \"$0\" \"$1\" \"$2\"")
             .arg(buildc)
+            .arg(command_name)
             .arg(file);
         c
     };
     #[cfg(not(unix))]
     let mut command = {
         let mut c = Command::new(buildc);
-        c.arg("check").arg(file);
+        c.arg(command_name).arg(file);
         c
     };
 
@@ -114,19 +120,69 @@ fn check_within_deadline(file: &Path) -> Option<(bool, String)> {
     Some((status.success(), text))
 }
 
+fn check_within_deadline(file: &Path) -> Option<(bool, String)> {
+    buildc_within_deadline("check", file)
+}
+
+/// The reproduction of issue 303 passes the check: the methods of `Chain`
+/// are compiled when they are called, and nothing calls `chain`.
 #[test]
-fn a_default_method_that_wraps_self_is_refused_and_the_check_returns() {
+fn a_default_method_that_wraps_self_passes_the_check() {
     let main = program("wraps", WRAPS_SELF);
     let Some((passed, text)) = check_within_deadline(&main) else {
         panic!("`buildc check` did not return within {DEADLINE:?} (issue 303)");
     };
-    assert!(!passed, "the check passed\n{text}");
-    for part in ["BL0901", "generic type `Chain`", "without end"] {
-        assert!(text.contains(part), "no {part:?} in\n{text}");
+    assert!(
+        passed,
+        "the check failed
+{text}"
+    );
+}
+
+/// A method of `W<T>` that calls itself on `W<W<T>>` needs an instance
+/// inside an instance without end. It is refused within the deadline.
+const CALLS_A_LARGER_SELF: &str = r#"struct W<T> {
+    v: T,
+}
+
+impl<T> W<T> {
+    fn deeper(self, n: i32) -> i32 {
+        if n == 0 {
+            return 0;
+        }
+        let w = W { v: self };
+        w.deeper(n - 1) + 1
+    }
+}
+
+fn main() ~ Console {
+    let w = W { v: 1 };
+    println!("{}", w.deeper(3));
+}
+"#;
+
+#[test]
+fn a_method_that_calls_itself_on_a_larger_instance_is_refused() {
+    let main = program("larger", CALLS_A_LARGER_SELF);
+    let Some((passed, text)) = check_within_deadline(&main) else {
+        panic!("`buildc check` did not return within {DEADLINE:?}");
+    };
+    assert!(
+        !passed,
+        "the check passed
+{text}"
+    );
+    for part in ["BL0901", "generic type `W`", "without end"] {
+        assert!(
+            text.contains(part),
+            "no {part:?} in
+{text}"
+        );
     }
     assert!(
         !text.contains("memory allocation") && !text.contains("panicked"),
-        "the compiler crashed\n{text}"
+        "the compiler crashed
+{text}"
     );
 }
 

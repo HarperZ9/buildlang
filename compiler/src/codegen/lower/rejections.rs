@@ -76,5 +76,6 @@ impl<'ctx> MirLowerer<'ctx> {
         self.expected_type = None;
         self.type_param_subst.clear();
         self.mono_depth = 0;
+        self.generic_lowering_stack.clear();
     }
 }

@@ -429,6 +429,21 @@ impl<'ctx> MirLowerer<'ctx> {
             }
         }
 
+        // A generic struct written without arguments takes them from the
+        // type it is expected to be (`-> Buffer<T>` in a method of
+        // `Buffer<i32>`, or a `let` annotation), so its fields are lowered
+        // against the instance's types (#305).
+        let expected_instance = if self.generic_structs.contains_key(raw_name.as_ref())
+            && path.last_generics().map_or(true, |g| g.is_empty())
+        {
+            self.expected_instance_of(raw_name.as_ref())?
+        } else {
+            None
+        };
+        if let Some(instance) = &expected_instance {
+            raw_name = instance.clone();
+        }
+
         // Lower the field values in the order written (their side effects run
         // in that order), each against its declared type, so `tags: Vec::new()`
         // builds the field's vector type and not a `Vec<i32>` (M4 pilot).

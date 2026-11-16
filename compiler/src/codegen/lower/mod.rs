@@ -21,6 +21,7 @@ mod drops;
 mod env_macro;
 mod expr;
 mod format;
+mod generic_methods;
 mod global_init;
 mod global_places;
 mod limits;
@@ -238,6 +239,17 @@ pub struct MirLowerer<'ctx> {
     /// How many generic types are being instantiated inside one another
     /// right now (see `monomorphize_impl_methods`).
     pub(crate) mono_depth: usize,
+    /// Methods of generic instances whose bodies wait for their first
+    /// call, by C name (see `generic_methods.rs`).
+    pending_generic_methods: HashMap<Arc<str>, generic_methods::PendingMethod>,
+    /// The signature of every scheduled method of a generic instance.
+    generic_method_sigs: HashMap<Arc<str>, MirFnSig>,
+    /// The generic types whose method bodies are being lowered inside one
+    /// another right now, innermost last.
+    generic_lowering_stack: Vec<Arc<str>>,
+    /// Mangled instance name -> the generic type and its arguments, for
+    /// every instance named in a type (it may not be created yet).
+    generic_shapes: std::cell::RefCell<HashMap<Arc<str>, (Arc<str>, generic_methods::Subst)>>,
     /// Visibility of the current item being lowered (set by lower_function_with_vis).
     current_item_vis: Option<bool>,
     /// The current impl block's type name (for resolving `Self` in MIR lowering).
@@ -441,6 +453,10 @@ impl<'ctx> MirLowerer<'ctx> {
             fn_ast_sigs: HashMap::new(),
             generic_impls: HashMap::new(),
             mono_depth: 0,
+            pending_generic_methods: HashMap::new(),
+            generic_method_sigs: HashMap::new(),
+            generic_lowering_stack: Vec::new(),
+            generic_shapes: std::cell::RefCell::new(HashMap::new()),
             current_item_vis: None,
             current_impl_type: None,
             module_prefix: Vec::new(),
@@ -519,6 +535,10 @@ impl<'ctx> MirLowerer<'ctx> {
             fn_ast_sigs: HashMap::new(),
             generic_impls: HashMap::new(),
             mono_depth: 0,
+            pending_generic_methods: HashMap::new(),
+            generic_method_sigs: HashMap::new(),
+            generic_lowering_stack: Vec::new(),
+            generic_shapes: std::cell::RefCell::new(HashMap::new()),
             current_item_vis: None,
             current_impl_type: None,
             module_prefix: Vec::new(),
@@ -1075,6 +1095,28 @@ impl<'ctx> MirLowerer<'ctx> {
         for item in &items {
             self.collect_multi_fn_signatures(item);
             self.collect_repr_c(item);
+        }
+
+        // Pre-pass: know every generic struct and enum before any signature
+        // is lowered, so `fn make() -> Buffer<f64>` declared above a merged
+        // `Buffer<T>` names the instance `Buffer_f64`, not a plain `Buffer`.
+        for item in &items {
+            let has_type_params = |g: &ast::Generics| {
+                g.params
+                    .iter()
+                    .any(|p| matches!(p.kind, ast::GenericParamKind::Type { .. }))
+            };
+            match &item.kind {
+                ItemKind::Struct(s) if has_type_params(&s.generics) => {
+                    self.generic_structs
+                        .insert(s.name.name.clone(), (**s).clone());
+                }
+                ItemKind::Enum(e) if has_type_params(&e.generics) => {
+                    self.generic_enums
+                        .insert(e.name.name.clone(), (**e).clone());
+                }
+                _ => {}
+            }
         }
 
         // First pass: collect type definitions and function signatures
@@ -1713,6 +1755,7 @@ impl<'ctx> MirLowerer<'ctx> {
             Some(e) => e,
             None => return Ok(Arc::from(enum_name)), // Not generic, use as-is
         };
+        self.note_generic_shape(&mangled_name, enum_name, subst);
 
         // Build monomorphized variants using the substitution map
         let variants: Vec<_> = enum_def
@@ -1774,6 +1817,7 @@ impl<'ctx> MirLowerer<'ctx> {
             Some(s) => s,
             None => return Ok(Arc::from(struct_name)), // Not generic, use as-is
         };
+        self.note_generic_shape(&mangled_name, struct_name, subst);
 
         let fields = match &struct_def.fields {
             ast::StructFields::Named(fields) => fields
@@ -1830,12 +1874,27 @@ impl<'ctx> MirLowerer<'ctx> {
                             if !inner_subst.is_empty() {
                                 let mangled =
                                     Self::mangle_generic_name(ident.name.as_ref(), &inner_subst);
+                                self.note_generic_shape(
+                                    &mangled,
+                                    ident.name.as_ref(),
+                                    &inner_subst,
+                                );
                                 return MirType::Struct(mangled);
                             }
                         }
                     }
                 }
-                self.lower_type_from_ast(ty)
+                // A type argument with no exact source spelling (a vector,
+                // a tuple) would be written back as `i32`; those keep the
+                // old lowering, which leaves the parameter unresolved.
+                let spelled = subst.values().all(|v| {
+                    Self::mir_type_to_build_name(v) != "i32"
+                        || matches!(v, MirType::Int(IntSize::I32, true))
+                });
+                if subst.is_empty() || !spelled {
+                    return self.lower_type_from_ast(ty);
+                }
+                self.lower_type_from_ast(&Self::substitute_type_in_ast_type_multi(ty, subst))
             }
             ast::TypeKind::Ref { ty: inner, .. } | ast::TypeKind::Ptr { ty: inner, .. } => {
                 MirType::Ptr(Box::new(self.substitute_type_from_ast(inner, subst)))
@@ -1950,23 +2009,11 @@ impl<'ctx> MirLowerer<'ctx> {
         // (`fn chain(self, next: R) -> Chain<Self, R>` where `Chain` has the
         // method too). Every instance is compiled as soon as it is named, so
         // the chain never ended and the compiler ran out of memory (#303).
+        // Method bodies now wait for their first call (`generic_methods.rs`),
+        // so only a `drop` body is lowered here and the count rises through
+        // `lower_pending_generic_method` instead.
         if self.mono_depth >= MAX_GENERIC_NESTING {
-            let shown: String = mangled_type_name.chars().take(60).collect();
-            return Err(crate::codegen::CodegenError::Rejected {
-                message: format!(
-                    "the methods of generic type `{base_type_name}` build \
-                     `{base_type_name}` around their own type without end: stopped \
-                     at {MAX_GENERIC_NESTING} instances inside one another \
-                     (`{shown}...`)"
-                ),
-                location: None,
-                help: Some(format!(
-                    "each instance of `{base_type_name}` is compiled with all its \
-                     methods, and one of them returns `{base_type_name}` holding the \
-                     instance itself; return a type without that method, or write \
-                     the method as a free function"
-                )),
-            });
+            return Err(Self::nesting_refusal(base_type_name, mangled_type_name));
         }
         self.mono_depth += 1;
         let done =
@@ -1999,11 +2046,12 @@ impl<'ctx> MirLowerer<'ctx> {
                         mangled_fn_name.clone(),
                     );
 
-                    // Skip if already generated
+                    // Skip if already generated or scheduled
                     if self.monomorphized.contains(&mangled_fn_name) {
                         continue;
                     }
                     self.monomorphized.insert(mangled_fn_name.clone());
+                    let lazy = method_name.as_ref() != "drop";
 
                     // Build a specialized FnDef with type params replaced.
                     // We need to also replace `self` type references with the
@@ -2018,6 +2066,15 @@ impl<'ctx> MirLowerer<'ctx> {
                         name: mangled_fn_name.clone(),
                         span: f.name.span,
                     };
+                    if lazy {
+                        self.schedule_generic_method(
+                            base_type_name,
+                            mangled_type_name,
+                            specialized,
+                            subst,
+                        );
+                        continue;
+                    }
 
                     // Save context, lower as impl method, restore.
                     // lower_impl_method will NOT re-mangle; it uses the
