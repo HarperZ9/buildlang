@@ -162,24 +162,35 @@ fn a_name_the_memory_module_lacks_is_still_refused() {
 
 const BUFFER: &str = "use std::memory::Buffer;\n\nfn main() ~ Console {\n    let mut b: Buffer<i32> = Buffer::new(4);\n    b.push(3);\n    b.push(4);\n    b.set(0, 7);\n    println!(\"{} {} {}\", b.len(), b.get(0), b.get(1));\n}\n";
 
-/// `Buffer<T>` is declared and imports resolve, and a program that calls
-/// its methods is refused by the C backend: the methods of a generic type
-/// whose field is `Vec<T>` are not compiled yet (issue 305). The test is
-/// strict in both directions: the import must resolve, and the day the
-/// program builds this test fails and becomes a run test that expects
-/// `2 7 4`.
+const BUFFER_F64: &str = "use std::memory::Buffer;\n\nfn make() -> Buffer<f64> {\n    let mut b: Buffer<f64> = Buffer::new(0);\n    b.push(1.0);\n    b.push(2.5);\n    b.push(0.25);\n    b\n}\n\nfn main() ~ Console {\n    let b = make();\n    println!(\"{} {} {}\", b.len(), b.get(1), b.get(2));\n}\n";
+
+const BUFFER_UNTYPED: &str = "use std::memory::Buffer;\n\nfn main() ~ Console {\n    let b = Buffer::new(4);\n    println!(\"{}\", b.len());\n}\n";
+
+/// `Buffer<T>` from `std::memory` builds and runs: `Buffer::new` takes its
+/// instance from the annotation, and the methods of `Buffer<i32>` are
+/// compiled when they are called, with the field `Vec<T>` as a `Vec<i32>`
+/// (issue 305; before, the C backend refused them).
 #[test]
-fn a_buffer_resolves_and_its_methods_are_refused_by_the_c_backend() {
+fn a_buffer_from_std_memory_builds_and_runs() {
     let main = program("buffer", BUFFER);
+    checks_and_prints(&main, "2 7 4");
+}
+
+/// The same with a `Buffer<f64>` returned from a function: the instance
+/// comes from the return type, and the elements keep their own type.
+#[test]
+fn a_buffer_of_f64_from_a_return_type_builds_and_runs() {
+    let main = program("buffer_f64", BUFFER_F64);
+    checks_and_prints(&main, "3 2.5 0.25");
+}
+
+/// Fail closed: with no annotation the element type cannot be told, and
+/// the call stays refused.
+#[test]
+fn a_buffer_new_with_no_element_type_is_refused() {
+    let main = program("buffer_untyped", BUFFER_UNTYPED);
     let check = buildc("check", &main);
     let log = text(&check);
-    assert!(
-        !log.contains("[BL0611]"),
-        "the import did not resolve\n{log}"
-    );
-    assert!(
-        !check.status.success(),
-        "the check passed: turn this into a run test (issue 305)\n{log}"
-    );
-    assert!(log.contains("[BL0901]"), "no C backend refusal in\n{log}");
+    assert!(!check.status.success(), "the check passed\n{log}");
+    assert!(log.contains("[BL0"), "no diagnostic in\n{log}");
 }
