@@ -4568,9 +4568,16 @@ impl<'ctx> MirLowerer<'ctx> {
         // `lerp(a, b, t)` on numbers is `a + (b - a) * t`, the runtime's
         // `build_mix`. Before, it fell through to the three-component
         // `build_lerp3`: the check passed and the C compiler refused the call.
+        // A program's own `fn lerp` keeps the name: it is in the module by now.
+        let own_lerp = self.fn_ast_sigs.contains_key(name)
+            || self
+                .module
+                .find_function(self.resolve_fn_name(name).as_ref())
+                .is_some();
         let scalar_lerp = n.is_none()
             && name == "lerp"
             && args.len() == 3
+            && !own_lerp
             && matches!(first_ty, MirType::Float(_) | MirType::Int(_, _));
         let n = match n {
             Some(n) => n,

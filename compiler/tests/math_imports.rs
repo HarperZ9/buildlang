@@ -177,6 +177,25 @@ fn a_function_the_program_declares_keeps_the_name() {
     assert_eq!(runs("own-imported", &imported), "101\n");
 }
 
+/// The same for `lerp`, which is not a C library name and so takes another
+/// path in the compiler. The program's function adds 100, so the answer is
+/// 1 + (3 - 1) * 0.5 + 100 = 102; the built-in would give 2. The first fix
+/// run sent this call to the built-in, and `tests/tv_float.rs` caught it.
+#[test]
+fn a_lerp_the_program_declares_keeps_the_name() {
+    let own = r#"fn lerp(a: f64, b: f64, t: f64) -> f64 {
+    a + (b - a) * t + 100.0
+}
+
+fn main() ~ Console {
+    println!("{}", lerp(1.0, 3.0, 0.5));
+}
+"#;
+    assert_eq!(runs("own-lerp", own), "102\n");
+    let imported = format!("use std::math::lerp;\n{own}");
+    assert_eq!(runs("own-lerp-imported", &imported), "102\n");
+}
+
 fn refused(name: &str, source: &str, needles: &[&str]) {
     let main = program(name, source);
     let check = buildc("check", &main);
