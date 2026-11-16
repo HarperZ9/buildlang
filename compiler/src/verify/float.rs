@@ -110,7 +110,9 @@ pub fn conv(to: Ty, from: Option<Ty>, v: Term) -> Result<Term, String> {
 
 /// The C function a float maths method lowers to, by method name, arity
 /// (not counting the receiver) and width. Only `f64` is listed: the `f32`
-/// methods go through `double` functions in the backend.
+/// methods go through `double` functions in the backend. The DETMATH names
+/// (`build_det_*`) are the ones the C backend emits for exp, log, pow, sin,
+/// cos and cbrt, so both sides of a check call the same function.
 pub fn method_c_name(method: &str, arity: usize, ty: Ty) -> Option<&'static str> {
     if ty != Ty::F64 {
         return None;
@@ -118,13 +120,13 @@ pub fn method_c_name(method: &str, arity: usize, ty: Ty) -> Option<&'static str>
     Some(match (method, arity) {
         ("abs", 0) => "fabs",
         ("sqrt", 0) => "sqrt",
-        ("cbrt", 0) => "cbrt",
+        ("cbrt", 0) => "build_det_cbrt",
         ("ceil", 0) => "ceil",
         ("floor", 0) => "floor",
         ("round", 0) => "round",
         ("trunc", 0) => "trunc",
-        ("sin", 0) => "sin",
-        ("cos", 0) => "cos",
+        ("sin", 0) => "build_det_sin",
+        ("cos", 0) => "build_det_cos",
         ("tan", 0) => "tan",
         ("asin", 0) => "asin",
         ("acos", 0) => "acos",
@@ -132,12 +134,12 @@ pub fn method_c_name(method: &str, arity: usize, ty: Ty) -> Option<&'static str>
         ("sinh", 0) => "sinh",
         ("cosh", 0) => "cosh",
         ("tanh", 0) => "tanh",
-        ("exp", 0) => "exp",
+        ("exp", 0) => "build_det_exp",
         ("exp2", 0) => "exp2",
-        ("ln", 0) => "log",
+        ("ln", 0) => "build_det_log",
         ("log2", 0) => "log2",
         ("log10", 0) => "log10",
-        ("powi" | "powf", 1) => "pow",
+        ("powi" | "powf", 1) => "build_det_pow",
         ("log", 1) => "build_det_log_base",
         ("atan2", 1) => "atan2",
         ("hypot", 1) => "hypot",
@@ -154,6 +156,7 @@ pub fn builtin_c_name(name: &str, arity: usize) -> Option<&'static str> {
         ("sqrt", 1) => "sqrt",
         ("sin", 1) => "build_det_sin",
         ("cos", 1) => "build_det_cos",
+        ("cbrt", 1) => "build_det_cbrt",
         ("exp", 1) => "build_det_exp",
         ("log", 1) => "build_det_log",
         ("pow", 2) => "build_det_pow",
@@ -176,7 +179,7 @@ pub fn builtin_c_name(name: &str, arity: usize) -> Option<&'static str> {
 /// Whether a C function name is one the tables above produce, with its
 /// result width. A call to it is the same uninterpreted function on both sides.
 pub fn c_math(name: &str) -> Option<Ty> {
-    const NAMES: [&str; 34] = [
+    const NAMES: [&str; 35] = [
         "fabs",
         "sqrt",
         "cbrt",
@@ -207,6 +210,7 @@ pub fn c_math(name: &str) -> Option<Ty> {
         "build_min_f64",
         "build_det_sin",
         "build_det_cos",
+        "build_det_cbrt",
         "build_det_exp",
         "build_det_log",
         "build_det_pow",

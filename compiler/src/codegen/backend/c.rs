@@ -3340,7 +3340,7 @@ impl CBackend {
                     "intrinsic_sinh" => "sinh".to_string(),
                     "intrinsic_cosh" => "cosh".to_string(),
                     "intrinsic_tanh" => "tanh".to_string(),
-                    "intrinsic_cbrt" => "cbrt".to_string(),
+                    "intrinsic_cbrt" => "build_det_cbrt".to_string(),
                     "intrinsic_log" => "build_det_log".to_string(),
                     "intrinsic_log2" => "log2".to_string(),
                     "intrinsic_log10" => "log10".to_string(),
@@ -4260,7 +4260,8 @@ impl CBackend {
                     name.to_string()
                 } else if let Some(det) = Self::detmath_name(name) {
                     // DETMATH: exp, log, pow, sin and cos are the runtime's portable
-                    // fdlibm versions, the same bits on every C library.
+                    // fdlibm versions and cbrt its correctly rounded one, the same
+                    // bits on every C library.
                     det.to_string()
                 } else if Self::is_runtime_or_builtin_fn(name) {
                     name.to_string()
@@ -4273,7 +4274,7 @@ impl CBackend {
         }
     }
 
-    /// The portable runtime function for an f64 `exp`, `log`, `pow`, `sin` or `cos` (spec
+    /// The portable runtime function for an f64 `exp`, `log`, `pow`, `sin`, `cos` or `cbrt` (spec
     /// section 5.5), or `None` for any other name.
     fn detmath_name(name: &str) -> Option<&'static str> {
         match name {
@@ -4282,6 +4283,7 @@ impl CBackend {
             "pow" => Some("build_det_pow"),
             "sin" => Some("build_det_sin"),
             "cos" => Some("build_det_cos"),
+            "cbrt" => Some("build_det_cbrt"),
             _ => None,
         }
     }
