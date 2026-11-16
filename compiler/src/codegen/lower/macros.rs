@@ -2995,25 +2995,21 @@ impl<'ctx> MirLowerer<'ctx> {
             );
         }
         // An empty range runs no pass: a negative count becomes 0, so the
-        // reversed form (which starts at len - 1) does not run either.
-        let negative = builder.create_local(MirType::Bool);
-        builder.binary_op(
-            negative,
-            BinOp::Lt,
-            values::local(len),
-            MirValue::Const(MirConst::Int(0, MirType::i64())),
-        );
-        let clamp = builder.create_block();
+        // reversed form (which starts at len - 1) does not run either. A
+        // call, not a branch: the count is `build_max_i64(len, 0)`.
+        let count = builder.create_local(MirType::i64());
         let cont = builder.create_block();
-        builder.branch(values::local(negative), clamp, cont);
-        builder.switch_to_block(clamp);
-        builder.assign(
-            len,
-            MirRValue::Use(MirValue::Const(MirConst::Int(0, MirType::i64()))),
+        builder.call(
+            MirValue::Function(Arc::from("build_max_i64")),
+            vec![
+                values::local(len),
+                MirValue::Const(MirConst::Int(0, MirType::i64())),
+            ],
+            Some(count),
+            cont,
         );
-        builder.goto(cont);
         builder.switch_to_block(cont);
-        Ok((elem_ty, ChainSource::Range { first }, len))
+        Ok((elem_ty, ChainSource::Range { first }, count))
     }
 
     /// Inline-lower a `.map()` closure call: evaluate the closure body
