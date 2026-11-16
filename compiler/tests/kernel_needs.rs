@@ -366,3 +366,124 @@ fn normal_quantile_and_cdf_match_their_references() {
         assert!(close_within(*g, w, 1e-13), "cdf: got {g:e}, want {w:e}");
     }
 }
+
+#[test]
+fn student_t_matches_scipy() {
+    let lines = run_lines(
+        "student-t",
+        "use std::stats::{student_t_quantile, student_t_cdf, student_t_pdf};\n\n\
+         fn row(nu: i64) ~ Console {\n    \
+         println!(\"{} {} {} {} {}\", student_t_quantile(0.975, nu), student_t_quantile(0.995, nu), \
+         student_t_quantile(0.9, nu), student_t_quantile(0.05, nu), student_t_quantile(0.001, nu));\n}\n\n\
+         fn main() ~ Console {\n    \
+         row(1);\n    row(2);\n    row(3);\n    row(5);\n    row(10);\n    row(30);\n    \
+         println!(\"{} {} {}\", student_t_cdf(2.0, 3), student_t_cdf(-1.5, 10), student_t_pdf(0.5, 4));\n    \
+         println!(\"{} {} {}\", student_t_quantile(0.5, 7), student_t_quantile(0.0, 7), student_t_quantile(1.0, 7));\n    \
+         println!(\"{} {}\", student_t_quantile(0.975, 0), student_t_cdf(1.0, 0));\n}\n",
+    );
+    // SciPy 1.17 `scipy.stats.t.ppf`, `t.cdf` and `t.pdf`.
+    let want: [&[f64]; 9] = [
+        &[
+            12.706204736174694,
+            63.656741162871526,
+            3.0776835371752544,
+            -6.313751514675044,
+            -318.30883898555044,
+        ],
+        &[
+            4.302652729749462,
+            9.924843200918287,
+            1.8856180831641272,
+            -2.9199855803537256,
+            -22.327124770119873,
+        ],
+        &[
+            3.1824463052837078,
+            5.840909309733355,
+            1.637744353696209,
+            -2.353363434801824,
+            -10.214531852407386,
+        ],
+        &[
+            2.570581835636315,
+            4.032142983555228,
+            1.4758840488244815,
+            -2.015048373333024,
+            -5.893429531356009,
+        ],
+        &[
+            2.2281388519862744,
+            3.16927267261695,
+            1.372183641110336,
+            -1.8124611228116758,
+            -4.143700494046589,
+        ],
+        &[
+            2.0422724563012378,
+            2.7499956535672254,
+            1.3104150253913958,
+            -1.6972608865939576,
+            -3.385184866829305,
+        ],
+        &[0.9303370157205785, 0.08225366322272007, 0.3222618685603871],
+        &[0.0, f64::NEG_INFINITY, f64::INFINITY],
+        &[f64::NAN, f64::NAN],
+    ];
+    assert_eq!(lines.len(), want.len(), "{lines:?}");
+    for (line, w) in lines.iter().zip(want) {
+        let got = numbers(line);
+        assert_eq!(got.len(), w.len(), "{line:?}");
+        for (g, x) in got.iter().zip(w.iter()) {
+            assert!(
+                close_within(*g, *x, 1e-12),
+                "student t: got {g:e}, want {x:e} in {line:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn mat3_and_quaternion_rotate_and_invert() {
+    let lines = run_lines(
+        "mat3-quat",
+        "use std::math::{Vec3, Mat3, Quaternion};\n\n\
+         fn show(v: Vec3) ~ Console {\n    println!(\"{} {} {}\", v.x, v.y, v.z);\n}\n\n\
+         fn main() ~ Console {\n    \
+         let q = Quaternion::from_axis_angle(Vec3::new(0.0, 0.0, 1.0), 1.5707964);\n    \
+         show(q.mul_vec3(Vec3::new(1.0, 0.0, 0.0)));\n    \
+         show(q.to_mat3().mul_vec3(Vec3::new(1.0, 0.0, 0.0)));\n    \
+         let m = Mat3::new(2.0, 0.0, 0.0, 1.0, 3.0, 0.0, 0.0, 0.0, 4.0);\n    \
+         println!(\"{}\", m.determinant());\n    \
+         let i = m * m.inverse();\n    show(i.x_axis);\n    show(i.y_axis);\n    show(i.z_axis);\n    \
+         show(m.mul_vec3(Vec3::new(1.0, 1.0, 1.0)));\n    show(m.transpose().mul_vec3(Vec3::new(1.0, 1.0, 1.0)));\n    \
+         let h = Quaternion::identity().slerp(q, 0.5);\n    println!(\"{} {}\", h.z, h.w);\n    \
+         let r = q * q.conjugate();\n    println!(\"{} {}\", r.z, r.w);\n    \
+         println!(\"{}\", Quaternion::IDENTITY.w);\n}\n",
+    );
+    // f32 arithmetic: compare within 1e-6 absolute.
+    let want: [&[f64]; 11] = [
+        &[0.0, 1.0, 0.0],
+        &[0.0, 1.0, 0.0],
+        &[24.0],
+        &[1.0, 0.0, 0.0],
+        &[0.0, 1.0, 0.0],
+        &[0.0, 0.0, 1.0],
+        &[3.0, 3.0, 4.0],
+        &[2.0, 4.0, 4.0],
+        // Half of a quarter turn: sin and cos of pi / 8.
+        &[0.3826834323650898, 0.9238795325112867],
+        &[0.0, 1.0],
+        &[1.0],
+    ];
+    assert_eq!(lines.len(), want.len(), "{lines:?}");
+    for (line, w) in lines.iter().zip(want) {
+        let got = numbers(line);
+        assert_eq!(got.len(), w.len(), "{line:?}");
+        for (g, x) in got.iter().zip(w.iter()) {
+            assert!(
+                (g - x).abs() <= 1e-6,
+                "mat3/quat: got {g}, want {x} in {line:?}"
+            );
+        }
+    }
+}
