@@ -211,9 +211,9 @@ fn refused(name: &str, source: &str, needles: &[&str]) {
 #[test]
 fn a_name_that_is_not_a_built_in_is_still_refused() {
     refused(
-        "ln",
-        "use std::math::ln;\n\nfn main() ~ Console {\n    println!(\"{}\", 1);\n}\n",
-        &["[BL0611]", "`std::math::ln`", "has no item `ln`"],
+        "lgamma",
+        "use std::math::lgamma;\n\nfn main() ~ Console {\n    println!(\"{}\", 1);\n}\n",
+        &["[BL0611]", "`std::math::lgamma`", "has no item `lgamma`"],
     );
     refused(
         "nonsense",

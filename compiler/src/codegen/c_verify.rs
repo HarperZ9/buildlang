@@ -183,6 +183,8 @@ const C_STDLIB: &[&str] = &[
     "fminf",
     "fmaxf",
     "cbrt",
+    "erf",
+    "erfc",
     "hypot",
     "isnan",
     "isinf",

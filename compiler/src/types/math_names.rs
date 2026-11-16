@@ -28,10 +28,14 @@ pub(crate) const MATH_BUILTINS: &[&str] = &[
     "acos",
     "atan",
     "log",
+    "ln",
     "log2",
     "log10",
     "exp",
     "exp2",
+    "cbrt",
+    "erf",
+    "erfc",
     "atan2",
     "floor",
     "ceil",
@@ -93,8 +97,15 @@ mod tests {
     }
 
     #[test]
+    fn the_names_the_formula_kernels_need_are_built_ins() {
+        for name in ["ln", "cbrt", "erf", "erfc", "log", "exp", "pow"] {
+            assert!(is_math_builtin(name), "{name}");
+        }
+    }
+
+    #[test]
     fn a_name_the_compiler_does_not_provide_is_not_a_built_in() {
-        for name in ["ln", "cbrt", "TWO_PI", "Quaternion", "sqrtf", ""] {
+        for name in ["TWO_PI", "Quaternion", "sqrtf", "lgamma", ""] {
             assert!(!is_math_builtin(name), "{name}");
         }
     }

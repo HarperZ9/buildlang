@@ -1,0 +1,164 @@
+// BuildLang Standard Library - Complex numbers
+//
+// `Complex` holds two `f64` parts. `a + b`, `a - b`, `a * b`, `a / b` and `-a`
+// are complex operations; `scale(s)` multiplies by a real number. Division
+// is Smith's method (R. L. Smith, "Algorithm 116: Complex division",
+// Communications of the ACM 5(8), 1962), which avoids the overflow of the
+// textbook formula when the divisor's parts are large.
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Complex {
+    pub re: f64,
+    pub im: f64,
+}
+
+impl Complex {
+    /// `re + im i`.
+    pub fn new(re: f64, im: f64) -> Complex {
+        Complex { re: re, im: im }
+    }
+
+    /// A real number as a complex one.
+    pub fn from_real(re: f64) -> Complex {
+        Complex { re: re, im: 0.0 }
+    }
+
+    /// The imaginary unit `i`.
+    pub fn i() -> Complex {
+        Complex { re: 0.0, im: 1.0 }
+    }
+
+    /// `r (cos theta + i sin theta)`.
+    pub fn from_polar(r: f64, theta: f64) -> Complex {
+        Complex { re: r * theta.cos(), im: r * theta.sin() }
+    }
+
+    /// The complex conjugate `re - im i`.
+    pub fn conj(self) -> Complex {
+        Complex { re: self.re, im: -self.im }
+    }
+
+    /// The modulus `|z|`, by `hypot` so it does not overflow early.
+    pub fn abs(self) -> f64 {
+        self.re.hypot(self.im)
+    }
+
+    /// The squared modulus `re^2 + im^2`.
+    pub fn norm_sqr(self) -> f64 {
+        self.re * self.re + self.im * self.im
+    }
+
+    /// The argument in (-pi, pi], `atan2(im, re)`.
+    pub fn arg(self) -> f64 {
+        self.im.atan2(self.re)
+    }
+
+    /// `(r, theta)` with `r = |z|` and `theta = arg z`.
+    pub fn to_polar(self) -> (f64, f64) {
+        (self.abs(), self.arg())
+    }
+
+    /// The product with a real number.
+    pub fn scale(self, s: f64) -> Complex {
+        Complex { re: self.re * s, im: self.im * s }
+    }
+
+    /// `1 / z`.
+    pub fn recip(self) -> Complex {
+        Complex::from_real(1.0) / self
+    }
+
+    /// `e^z = e^re (cos im + i sin im)`.
+    pub fn exp(self) -> Complex {
+        let m = self.re.exp();
+        Complex { re: m * self.im.cos(), im: m * self.im.sin() }
+    }
+
+    /// The principal natural logarithm `ln |z| + i arg z`.
+    pub fn ln(self) -> Complex {
+        Complex { re: self.abs().ln(), im: self.arg() }
+    }
+
+    /// The principal square root (the root with `re >= 0`; on the negative
+    /// real axis the sign of `im` picks the half-plane, as in C99 `csqrt`).
+    pub fn sqrt(self) -> Complex {
+        if self.re == 0.0 && self.im == 0.0 {
+            return Complex { re: 0.0, im: self.im };
+        }
+        let t = ((self.abs() + self.re.abs()) / 2.0).sqrt();
+        if self.re >= 0.0 {
+            Complex { re: t, im: self.im / (2.0 * t) }
+        } else {
+            Complex { re: self.im.abs() / (2.0 * t), im: t.copysign(self.im) }
+        }
+    }
+
+    /// `z^n` for an integer `n`, by repeated squaring; `z^0` is 1. A negative
+    /// `n` takes the reciprocal of `z^-n`, the order CPython uses.
+    pub fn powi(self, n: i32) -> Complex {
+        let mut base = self;
+        let negative = n < 0;
+        let mut e: i64 = n as i64;
+        if negative {
+            e = -e;
+        }
+        let mut out = Complex::from_real(1.0);
+        while e > 0 {
+            if e % 2 == 1 {
+                out = out * base;
+            }
+            base = base * base;
+            e = e / 2;
+        }
+        if negative {
+            return out.recip();
+        }
+        out
+    }
+}
+
+impl Add for Complex {
+    type Output = Complex;
+    fn add(self, o: Complex) -> Complex {
+        Complex { re: self.re + o.re, im: self.im + o.im }
+    }
+}
+
+impl Sub for Complex {
+    type Output = Complex;
+    fn sub(self, o: Complex) -> Complex {
+        Complex { re: self.re - o.re, im: self.im - o.im }
+    }
+}
+
+impl Mul for Complex {
+    type Output = Complex;
+    fn mul(self, o: Complex) -> Complex {
+        Complex {
+            re: self.re * o.re - self.im * o.im,
+            im: self.re * o.im + self.im * o.re,
+        }
+    }
+}
+
+impl Div for Complex {
+    type Output = Complex;
+    fn div(self, o: Complex) -> Complex {
+        if o.re.abs() >= o.im.abs() {
+            let r = o.im / o.re;
+            let d = o.re + o.im * r;
+            Complex { re: (self.re + self.im * r) / d, im: (self.im - self.re * r) / d }
+        } else {
+            let r = o.re / o.im;
+            let d = o.re * r + o.im;
+            Complex { re: (self.re * r + self.im) / d, im: (self.im * r - self.re) / d }
+        }
+    }
+}
+
+impl Neg for Complex {
+    type Output = Complex;
+    fn neg(self) -> Complex {
+        Complex { re: -self.re, im: -self.im }
+    }
+}
