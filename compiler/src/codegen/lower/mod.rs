@@ -235,6 +235,9 @@ pub struct MirLowerer<'ctx> {
     /// Generic impl blocks stored for deferred monomorphization.
     /// Maps base type name (e.g., "Option") -> list of impl defs.
     generic_impls: HashMap<Arc<str>, Vec<ast::ImplDef>>,
+    /// How many generic types are being instantiated inside one another
+    /// right now (see `monomorphize_impl_methods`).
+    pub(crate) mono_depth: usize,
     /// Visibility of the current item being lowered (set by lower_function_with_vis).
     current_item_vis: Option<bool>,
     /// The current impl block's type name (for resolving `Self` in MIR lowering).
@@ -368,6 +371,11 @@ pub(crate) enum IterTerminal<'a> {
     All { closure: &'a ast::Expr },
 }
 
+/// The deepest a generic type may be instantiated inside its own methods.
+/// Real nesting (`Option<Vec<Pair<T>>>` built in a method of `Pair`) is a
+/// few levels; a chain that reaches this does not end.
+pub(crate) const MAX_GENERIC_NESTING: usize = 24;
+
 /// A fully parsed iterator chain: `source.iter().<steps>.<terminal>`.
 pub(crate) struct IterChain<'a> {
     /// The source expression (the thing `.iter()` is called on).
@@ -432,6 +440,7 @@ impl<'ctx> MirLowerer<'ctx> {
             local_env_closure: HashMap::new(),
             fn_ast_sigs: HashMap::new(),
             generic_impls: HashMap::new(),
+            mono_depth: 0,
             current_item_vis: None,
             current_impl_type: None,
             module_prefix: Vec::new(),
@@ -509,6 +518,7 @@ impl<'ctx> MirLowerer<'ctx> {
             local_env_closure: HashMap::new(),
             fn_ast_sigs: HashMap::new(),
             generic_impls: HashMap::new(),
+            mono_depth: 0,
             current_item_vis: None,
             current_impl_type: None,
             module_prefix: Vec::new(),
@@ -1930,6 +1940,42 @@ impl<'ctx> MirLowerer<'ctx> {
     /// Monomorphize all impl blocks for a generic type using the given substitution map.
     /// For each method in the impl, generates a specialized version like `Option_T_i32_unwrap_or`.
     fn monomorphize_impl_methods(
+        &mut self,
+        base_type_name: &str,
+        mangled_type_name: &Arc<str>,
+        subst: &HashMap<Arc<str>, MirType>,
+    ) -> CodegenResult<()> {
+        // A method that builds its own generic type around `Self` needs the
+        // methods of that larger type, which need a larger one again
+        // (`fn chain(self, next: R) -> Chain<Self, R>` where `Chain` has the
+        // method too). Every instance is compiled as soon as it is named, so
+        // the chain never ended and the compiler ran out of memory (#303).
+        if self.mono_depth >= MAX_GENERIC_NESTING {
+            let shown: String = mangled_type_name.chars().take(60).collect();
+            return Err(crate::codegen::CodegenError::Rejected {
+                message: format!(
+                    "the methods of generic type `{base_type_name}` build \
+                     `{base_type_name}` around their own type without end: stopped \
+                     at {MAX_GENERIC_NESTING} instances inside one another \
+                     (`{shown}...`)"
+                ),
+                location: None,
+                help: Some(format!(
+                    "each instance of `{base_type_name}` is compiled with all its \
+                     methods, and one of them returns `{base_type_name}` holding the \
+                     instance itself; return a type without that method, or write \
+                     the method as a free function"
+                )),
+            });
+        }
+        self.mono_depth += 1;
+        let done =
+            self.monomorphize_impl_methods_at_depth(base_type_name, mangled_type_name, subst);
+        self.mono_depth -= 1;
+        done
+    }
+
+    fn monomorphize_impl_methods_at_depth(
         &mut self,
         base_type_name: &str,
         mangled_type_name: &Arc<str>,
