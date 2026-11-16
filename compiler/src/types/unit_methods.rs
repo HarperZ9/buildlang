@@ -57,8 +57,6 @@ const DIMENSIONLESS_ONLY: &[&str] = &[
     "ln",
     "log2",
     "log10",
-    "erf",
-    "erfc",
     "to_radians",
     "to_degrees",
     "sin_cos",

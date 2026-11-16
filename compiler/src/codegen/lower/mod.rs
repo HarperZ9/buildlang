@@ -234,10 +234,6 @@ pub struct MirLowerer<'ctx> {
     /// generic, by name, so a function named as a value has a type before
     /// its body is lowered.
     pub(crate) fn_ast_sigs: HashMap<Arc<str>, (Vec<ast::Type>, Option<ast::Type>)>,
-    /// Top-level functions with a foreign ABI (`extern "C" fn`). The module
-    /// loader leaves their names unprefixed, so `kern::fk_area` names
-    /// `fk_area` (see `qualified_fn_name`).
-    pub(crate) c_abi_fns: HashSet<Arc<str>>,
     /// Generic impl blocks stored for deferred monomorphization.
     /// Maps base type name (e.g., "Option") -> list of impl defs.
     generic_impls: HashMap<Arc<str>, Vec<ast::ImplDef>>,
@@ -458,7 +454,6 @@ impl<'ctx> MirLowerer<'ctx> {
             closure_env_fields: HashMap::new(),
             local_env_closure: HashMap::new(),
             fn_ast_sigs: HashMap::new(),
-            c_abi_fns: HashSet::new(),
             generic_impls: HashMap::new(),
             module_uses: HashMap::new(),
             mono_depth: 0,
@@ -542,7 +537,6 @@ impl<'ctx> MirLowerer<'ctx> {
             closure_env_fields: HashMap::new(),
             local_env_closure: HashMap::new(),
             fn_ast_sigs: HashMap::new(),
-            c_abi_fns: HashSet::new(),
             generic_impls: HashMap::new(),
             module_uses: HashMap::new(),
             mono_depth: 0,
@@ -1073,9 +1067,6 @@ impl<'ctx> MirLowerer<'ctx> {
         let items = Self::add_trait_default_methods(items);
         for item in &items {
             if let ItemKind::Function(f) = &item.kind {
-                if f.sig.abi.is_some() {
-                    self.c_abi_fns.insert(f.name.name.clone());
-                }
                 if !self.fn_has_type_generics(f) {
                     let params = f.sig.params.iter().map(|p| (*p.ty).clone()).collect();
                     let ret = f.sig.return_ty.as_ref().map(|t| (**t).clone());

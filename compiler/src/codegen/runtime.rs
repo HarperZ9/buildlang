@@ -3604,11 +3604,6 @@ pub fn math_builtin_to_c(name: &str) -> Option<&'static str> {
         "cos" => Some("cos"),
         "tan" => Some("tan"),
         "log" => Some("log"),
-        // `ln` is the natural logarithm, the name of the method form `x.ln()`.
-        "ln" => Some("log"),
-        "cbrt" => Some("cbrt"),
-        "erf" => Some("erf"),
-        "erfc" => Some("erfc"),
         "log2" => Some("log2"),
         "log10" => Some("log10"),
         "exp" => Some("exp"),
@@ -3808,10 +3803,6 @@ mod tests {
         assert_eq!(math_builtin_to_c("round"), Some("round"));
         assert_eq!(math_builtin_to_c("min"), Some("build_min_i32"));
         assert_eq!(math_builtin_to_c("max"), Some("build_max_i32"));
-        assert_eq!(math_builtin_to_c("ln"), Some("log"));
-        assert_eq!(math_builtin_to_c("cbrt"), Some("cbrt"));
-        assert_eq!(math_builtin_to_c("erf"), Some("erf"));
-        assert_eq!(math_builtin_to_c("erfc"), Some("erfc"));
         assert_eq!(math_builtin_to_c("unknown"), None);
     }
 
