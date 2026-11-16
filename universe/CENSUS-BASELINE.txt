@@ -1,0 +1,5 @@
+# Step-0 diagnostics of the universe census: what one `buildc check` of each
+# failing file reports, summed. universe/tools/census.py prints the count of a
+# run beside this baseline ("removed N"). Update it in the PR that moves it.
+# Set from PR 312 (main 304a487c), universe run 43863376556.
+step0_diagnostics 12668

@@ -388,6 +388,26 @@ def walk(buildc, rel, max_steps, deadline):
             os.remove(scratch)
 
 
+BASELINE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "CENSUS-BASELINE.txt")
+
+
+def step0_count(table):
+    """Diagnostics at step 0: what one `buildc check` of each file reports."""
+    return sum(1 for row in table[1:] if row.split("\t")[1:2] == ["0"])
+
+
+def print_removed(table):
+    """Print the step-0 count beside the committed baseline. Not a gate."""
+    now = step0_count(table)
+    try:
+        with open(BASELINE, encoding="utf-8") as fh:
+            base = int(fh.read().split()[-1])
+    except (OSError, ValueError, IndexError) as err:
+        print(f"census: step-0 diagnostics {now}; no baseline ({err})")
+        return
+    print(f"census: step-0 diagnostics {now}, baseline {base}, removed {base - now}")
+
+
 def listed_files():
     files = []
     with open(os.path.join(HERE, "CHECK-FAILS.txt"), encoding="utf-8") as fh:
@@ -463,6 +483,7 @@ def main():
     print("=== DIAGNOSTICS BEGIN ===")
     print("\n".join(table))
     print("=== DIAGNOSTICS END ===")
+    print_removed(table)
     if args.out:
         os.makedirs(args.out, exist_ok=True)
         with open(os.path.join(args.out, "census.tsv"), "w", encoding="utf-8", newline="\n") as fh:
