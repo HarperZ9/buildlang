@@ -1,0 +1,14 @@
+struct P { x: f64 }
+fn pick<T>(a: T, b: T, first: bool) -> T { if first { a } else { b } }
+fn half(x: f64) -> f64 { x / 2.0 }
+fn main() ~ Console {
+    let p: P = P { x: 2.5 };
+    let v: Vec<f64> = vec![0.25, 0.75];
+    println!("{}", pick(1.0 + 0.5, 2.5, true));
+    println!("{}", pick(half(3.0), 2.5, true));
+    println!("{}", pick(p.x, 1.0, true));
+    println!("{}", pick(v[1], 1.0, true));
+    println!("{}", pick(-1.5, 1.0, true));
+    println!("{}", pick(3 as f64, 1.5, false));
+    println!("{}", pick(half(3.0).min(9.0), 2.5, true));
+}

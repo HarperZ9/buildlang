@@ -1,0 +1,5 @@
+Lexing... OK (51 tokens)
+Parsing... OK (1 items)
+Type errors found:
+  1:41: [BL0901] `parse` cannot be compiled: the C backend has no function or method by that name (also: unwrap)
+  help: string parsing is not supported by the C backend yet; convert digits by hand (`let d = c as i64 - 48;`) and keep the value in a plain integer

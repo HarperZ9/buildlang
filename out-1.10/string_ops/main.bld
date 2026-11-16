@@ -1,0 +1,1 @@
+fn main() ~ Console { let a: String = String::from("hello"); let b: String = a + " world"; println!("{} {} {}", "hello".len(), b, b.contains("wor")); }

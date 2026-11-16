@@ -1,0 +1,2 @@
+fn show(s: &str) -> i32 { s.len() as i32 }
+fn main() ~ Console { println!("{}", show("abc")); }

@@ -1,0 +1,8 @@
+effect Ask { fn ask() -> i32, }
+fn use_it() -> i32 ~ Ask + Console { let v: i32 = perform Ask.ask(); println!("after perform {}", v); v + 1 }
+fn main() ~ Console {
+    let v: i32 = handle { use_it() } with { Ask.ask() => |resume| { resume(4) }, };
+    println!("{}", v);
+    let w: i32 = handle { let a: i32 = use_it(); a * 100 } with { Ask.ask() => |resume| { let r: i32 = resume(4); println!("resumed gave {}", r); r + 1000 }, };
+    println!("{}", w);
+}

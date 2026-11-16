@@ -1,0 +1,23 @@
+const S: &str = "abc";
+const B: bool = true;
+const A: i32 = 4;
+const R: i32 = A;
+const C: char = 'x';
+const U: u64 = 0xFFFF_FFFF_FFFF;
+const H: f64 = 0.5;
+static T: i32 = 9;
+const NEG: i32 = -A;
+const SUM: i32 = A + 3;
+const SH: u64 = 1 << 40;
+const CAST: f64 = 3 as f64;
+const MIX: f64 = H * 4.0 - 1.0;
+const PAREN: i32 = (A);
+const NOT: bool = !B;
+const CMP: bool = A > 3;
+const WIDE: i64 = 3000000000;
+const MOD: i32 = 17 % 5;
+const BITS: u32 = 0xF0 | 0x0F;
+fn main() ~ Console {
+    println!("{} {} {} {} {} {} {} {}", S, B, A, R, C, U, H, T);
+    println!("{} {} {} {} {} {} {} {} {} {} {}", NEG, SUM, SH, CAST, MIX, PAREN, NOT, CMP, WIDE, MOD, BITS);
+}

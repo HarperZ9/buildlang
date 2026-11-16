@@ -1,0 +1,2 @@
+struct P { x: i32 }
+fn main() ~ Console { let mut p: P = P { x: 4 }; p.x = p.x + 5; println!("{}", p.x); }

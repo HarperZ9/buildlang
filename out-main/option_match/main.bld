@@ -1,0 +1,3 @@
+fn find(v: i32) -> Option<i32> { if v > 0 { Some(v) } else { None } }
+fn get(o: Option<i32>) -> i32 { match o { Some(x) => x, None => -1 } }
+fn main() ~ Console { println!("{} {}", get(find(5)), get(find(0))); }

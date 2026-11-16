@@ -1,0 +1,4 @@
+struct P { x: f64 }
+impl P { fn get(self) -> f64 { self.x } }
+fn pick<T>(a: T, b: T, first: bool) -> T { if first { a } else { b } }
+fn main() ~ Console { let p: P = P { x: 2.5 }; println!("{}", pick(p.get(), 1.0, true)); }

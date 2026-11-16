@@ -1,0 +1,5 @@
+fn a() -> i32 { loop { return 1; } }
+fn b(n: i32) -> i32 { let mut i: i32 = 0; loop { if i > n { break; } i = i + 1; } i }
+fn c() -> i32 { let x: i32 = loop { break 5; }; x }
+fn d(n: i32) -> i32 { loop { let mut k: i32 = 0; while k < n { if k == 2 { break; } k = k + 1; } return k; } }
+fn main() ~ Console { println!("{} {} {} {}", a(), b(3), c(), d(5)); }

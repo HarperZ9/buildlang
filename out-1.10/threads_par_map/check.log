@@ -1,0 +1,4 @@
+Lexing... OK (84 tokens)
+Parsing... OK (2 items)
+Type errors found:
+  2:77: [BL0310] undefined variable: `par_map`

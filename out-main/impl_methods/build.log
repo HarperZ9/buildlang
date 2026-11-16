@@ -1,0 +1,14 @@
+Building project at '.'
+Entry point: .\main.bld
+Mode: release
+Target: c
+
+[1/5] Lexing... OK (92 tokens)
+[2/5] Parsing... OK (3 items)
+[3/5] Type checking... OK
+[4/5] Code generation (c)... OK (130604 bytes)
+[5/5] Compiling C -> executable (using gcc)...
+     Compilation... OK
+
+Build successful!
+Output: .\target\release\main.exe

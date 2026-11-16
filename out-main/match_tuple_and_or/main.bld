@@ -1,0 +1,2 @@
+fn k(a: i32, b: i32) -> str { match (a, b) { (0, _) | (_, 0) => "a", (1, 1) => "b", _ => "c" } }
+fn main() ~ Console { println!("{} {} {}", k(1, 1), k(0, 5), k(2, 3)); }

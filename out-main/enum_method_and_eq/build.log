@@ -1,0 +1,19 @@
+Building project at '.'
+Entry point: .\main.bld
+Mode: release
+Target: c
+
+[1/5] Lexing... OK (89 tokens)
+[2/5] Parsing... OK (3 items)
+[3/5] Type checking... OK
+[4/5] Code generation (c)... OK (131168 bytes)
+[5/5] Compiling C -> executable (using gcc)...
+C compilation failed (exit code: Some(1)):
+.\target\release\main.c: In function 'main':
+.\target\release\main.c:3390:14: error: invalid operands to binary == (have 'Dir' and 'Dir')
+ 3390 |     _5 = (_3 == _4);
+      |              ^~
+.\target\release\main.c:3391:8: warning: assignment discards 'const' qualifier from pointer target type [-Wdiscarded-qualifiers]
+ 3391 |     _6 = __str0;
+      |        ^
+

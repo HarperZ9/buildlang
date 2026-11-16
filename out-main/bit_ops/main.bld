@@ -1,0 +1,1 @@
+fn main() ~ Console { let a: i32 = 6; println!("{} {} {} {}", a << 1, a >> 1, (a & 7) | 2, !7); }

@@ -1,0 +1,20 @@
+Building project at '.'
+Entry point: .\main.bld
+Mode: release
+Target: c
+
+[1/5] Lexing... OK (59 tokens)
+[2/5] Parsing... OK (3 items)
+[3/5] Type checking... OK
+[4/5] Code generation (c)... OK (129893 bytes)
+[5/5] Compiling C -> executable (using gcc)...
+C compilation failed (exit code: Some(1)):
+.\target\release\main.c: In function 'main':
+.\target\release\main.c:3326:8: warning: assignment discards 'const' qualifier from pointer target type [-Wdiscarded-qualifiers]
+ 3326 |     _3 = __str0;
+      |        ^
+.\target\release\main.c:3327:16: error: 'P_DIM' undeclared (first use in this function)
+ 3327 |     printf(_3, P_DIM, _2);
+      |                ^~~~~
+.\target\release\main.c:3327:16: note: each undeclared identifier is reported only once for each function it appears in
+

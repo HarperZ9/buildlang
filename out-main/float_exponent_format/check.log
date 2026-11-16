@@ -1,0 +1,5 @@
+Lexing... OK (17 tokens)
+Parsing... OK (1 items)
+Type errors found:
+  [BL0901] format type `e` in `{:e}` is not supported
+  help: supported: `{}`, `{:?}`, `{name}`, `{0}`, width, `<` `>` alignment, `+`, `#`, `0`, precision, and `x` `X` `o`

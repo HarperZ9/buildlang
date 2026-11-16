@@ -1,0 +1,2 @@
+fn len<const N: usize>(a: [i32; N]) -> usize { N }
+fn main() ~ Console { println!("{}", len([1, 2, 3, 4])); }

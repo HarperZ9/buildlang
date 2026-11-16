@@ -1,0 +1,4 @@
+Lexing... OK (165 tokens)
+Parsing... OK (6 items)
+Type errors found:
+  [BL0901] the C backend cannot compile this program: unsupported feature: a vector of `*dyn Area` elements is not supported yet: the Vec runtime stores scalar (integer, float, bool, char), string, struct, nested-vector, and map elements, not a tuple or array element

@@ -1,0 +1,4 @@
+Lexing... OK (39 tokens)
+Parsing... OK (2 items)
+Type errors found:
+  2:42: [BL0327] type `i32` cannot be used with `.await`

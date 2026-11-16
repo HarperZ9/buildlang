@@ -1,0 +1,5 @@
+Lexing... OK (58 tokens)
+Parsing... OK (2 items)
+Type errors found:
+  2:56: [BL0901] `f` cannot be compiled: the C backend cannot call a function value
+  help: `f` holds a function value; calling a function stored in a variable, field or collection is not supported by the C backend yet. Call the function by its own name, or branch with `if`/`match` and call each function directly

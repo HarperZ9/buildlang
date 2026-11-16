@@ -1,0 +1,2 @@
+type Meters = f64;
+fn main() ~ Console { let d: Meters = 5.0; println!("{}", d); }

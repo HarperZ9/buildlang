@@ -1,0 +1,23 @@
+const A: i32 = 4;
+const SUM: i32 = A + 3;
+const SH: u64 = 1 << 40;
+const CAST: f64 = 3 as f64;
+const MIX: f64 = 0.5 * 4.0 - 1.0;
+const PAREN: i32 = (A);
+const NOT: bool = !true;
+const CMP: bool = A > 3;
+const REM: i32 = 17 % 5;
+const BITS: u32 = 0xF0 | 0x0F;
+const WRAP: u8 = 300 as u8;
+const WIDE: i64 = ((2000000000) as i64) * 3;
+const HALF: f64 = (A as f64) / 8.0;
+static T: i32 = 2 * 3;
+struct P { x: i32 }
+impl P { const DIM: i32 = 1 + 2; }
+fn main() ~ Console {
+    println!("{} {} {} {} {}", SUM, SH, CAST, MIX, PAREN);
+    println!("{} {} {} {} {}", NOT, CMP, REM, BITS, WRAP);
+    println!("{} {} {} {}", WIDE, HALF, T, P::DIM);
+    let xs: [i32; SUM] = [1; SUM];
+    println!("{}", xs[6] + xs[0] + 5);
+}

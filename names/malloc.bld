@@ -1,0 +1,2 @@
+fn malloc(x: i32) -> i32 { x + 1 }
+fn main() ~ Console { println!("{}", malloc(2)); }

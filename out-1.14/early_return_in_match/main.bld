@@ -1,0 +1,2 @@
+fn f(o: Option<i32>) -> i32 { let v: i32 = match o { Some(x) => x, None => return 1 }; v * 2 }
+fn main() ~ Console { println!("{}", f(None)); }

@@ -1,0 +1,2 @@
+fn index(x: i32) -> i32 { x + 1 }
+fn main() ~ Console { println!("{}", index(2)); }

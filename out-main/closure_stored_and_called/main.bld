@@ -1,0 +1,1 @@
+fn main() ~ Console { let f = |x: i32| -> i32 { x + 1 }; let g = f; println!("{}", g(6)); }

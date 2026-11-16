@@ -1,0 +1,239 @@
+=== generic_fn :: 7 2.5
+fn pick<T>(a: T, b: T, first: bool) -> T { if first { a } else { b } }
+fn main() ~ Console { println!("{} {}", pick(7, 9, true), pick(1.5, 2.5, false)); }
+=== generic_struct :: 3 4
+struct Pair<T> { a: T, b: T }
+fn main() ~ Console { let p: Pair<i32> = Pair { a: 3, b: 4 }; println!("{} {}", p.a, p.b); }
+=== impl_methods :: 25
+struct P { x: i32, y: i32 }
+impl P { fn new(x: i32, y: i32) -> P { P { x: x, y: y } } fn sq(self) -> i32 { self.x * self.x + self.y * self.y } }
+fn main() ~ Console { println!("{}", P::new(3, 4).sq()); }
+=== trait_static :: 12 3
+trait Area { fn area(self) -> i32; }
+struct R { w: i32, h: i32 }
+struct S { s: i32 }
+impl Area for R { fn area(self) -> i32 { self.w * self.h } }
+impl Area for S { fn area(self) -> i32 { self.s * self.s } }
+fn show<T: Area>(t: T) -> i32 { t.area() }
+fn main() ~ Console { println!("{} {}", show(R { w: 3, h: 4 }), R { w: 1, h: 3 }.area()); }
+=== trait_default_method :: 10
+trait Named { fn base(self) -> i32; fn twice(self) -> i32 { self.base() * 2 } }
+struct A { v: i32 }
+impl Named for A { fn base(self) -> i32 { self.v } }
+fn main() ~ Console { println!("{}", A { v: 5 }.twice()); }
+=== trait_object_dyn :: 12 9
+trait Area { fn area(&self) -> i32; }
+struct R { w: i32, h: i32 }
+struct S { s: i32 }
+impl Area for R { fn area(&self) -> i32 { self.w * self.h } }
+impl Area for S { fn area(&self) -> i32 { self.s * self.s } }
+fn main() ~ Console {
+    let shapes: Vec<Box<dyn Area>> = Vec::new();
+    shapes.push(Box::new(R { w: 3, h: 4 }));
+    shapes.push(Box::new(S { s: 3 }));
+    println!("{} {}", shapes[0].area(), shapes[1].area());
+}
+=== enum_payload_match :: 12 9
+enum Shape { Rect(i32, i32), Square(i32), Empty }
+fn area(s: Shape) -> i32 { match s { Shape::Rect(w, h) => w * h, Shape::Square(a) => a * a, Shape::Empty => 0 } }
+fn main() ~ Console { println!("{} {}", area(Shape::Rect(3, 4)), area(Shape::Square(3))); }
+=== option_match :: 5 -1
+fn find(v: i32) -> Option<i32> { if v > 0 { Some(v) } else { None } }
+fn get(o: Option<i32>) -> i32 { match o { Some(x) => x, None => -1 } }
+fn main() ~ Console { println!("{} {}", get(find(5)), get(find(0))); }
+=== result_question_mark :: 6 bad
+fn half(v: i32) -> Result<i32, str> { if v % 2 == 0 { Ok(v / 2) } else { Err("bad") } }
+fn both(a: i32, b: i32) -> Result<i32, str> { let x: i32 = half(a)?; let y: i32 = half(b)?; Ok(x + y) }
+fn main() ~ Console {
+    match both(4, 8) { Ok(v) => println!("{}", v), Err(e) => println!("{}", e) }
+    match both(4, 7) { Ok(v) => println!("{}", v), Err(e) => println!("{}", e) }
+}
+=== closure_capture :: 15
+fn main() ~ Console { let k: i32 = 10; let add = |x: i32| -> i32 { x + k }; println!("{}", add(5)); }
+=== higher_order_fn :: 16
+fn apply(f: fn(i32) -> i32, v: i32) -> i32 { f(f(v)) }
+fn dbl(x: i32) -> i32 { x * 2 }
+fn main() ~ Console { println!("{}", apply(dbl, 4)); }
+=== closure_as_argument :: 11
+fn apply<F: Fn(i32) -> i32>(f: F, v: i32) -> i32 { f(v) }
+fn main() ~ Console { let k: i32 = 6; println!("{}", apply(|x: i32| -> i32 { x + k }, 5)); }
+=== closure_returned :: 9
+fn adder(k: i32) -> impl Fn(i32) -> i32 { move |x: i32| -> i32 { x + k } }
+fn main() ~ Console { let f = adder(4); println!("{}", f(5)); }
+=== for_range :: 10
+fn main() ~ Console { let mut s: i32 = 0; for i in 0..5 { s = s + i; } println!("{}", s); }
+=== for_range_inclusive :: 15
+fn main() ~ Console { let mut s: i32 = 0; for i in 0..=5 { s = s + i; } println!("{}", s); }
+=== for_over_vec :: 6
+fn main() ~ Console { let v: Vec<i32> = Vec::new(); v.push(1); v.push(2); v.push(3); let mut s: i32 = 0; for x in v { s = s + x; } println!("{}", s); }
+=== vec_macro :: 3 6
+fn main() ~ Console { let v: Vec<i32> = vec![1, 2, 3]; println!("{} {}", v.len(), v[0] + v[1] + v[2]); }
+=== iterator_chain :: 18
+fn main() ~ Console { let v: Vec<i32> = vec![1, 2, 3, 4]; let s: i32 = v.iter().map(|x| x * 2).filter(|x| *x > 2).sum(); println!("{}", s); }
+=== loop_break_value :: 8
+fn main() ~ Console { let mut i: i32 = 1; let r: i32 = loop { i = i * 2; if i > 5 { break i; } }; println!("{}", r); }
+=== while_break_continue :: 4
+fn main() ~ Console { let mut i: i32 = 0; let mut n: i32 = 0; while i < 10 { i = i + 1; if i % 2 == 0 { continue; } if i > 8 { break; } n = n + 1; } println!("{}", n); }
+=== if_let :: 7
+fn main() ~ Console { let o: Option<i32> = Some(7); if let Some(x) = o { println!("{}", x); } else { println!("none"); } }
+=== while_let :: 6
+fn main() ~ Console { let v: Vec<i32> = vec![1, 2, 3]; let mut s: i32 = 0; while let Some(x) = v.pop() { s = s + x; } println!("{}", s); }
+=== match_guard_and_ranges :: small big neg
+fn kind(x: i32) -> str { match x { n if n < 0 => "neg", 0..=9 => "small", _ => "big" } }
+fn main() ~ Console { println!("{} {} {}", kind(3), kind(50), kind(-2)); }
+=== tuple :: 3 4.5
+fn two() -> (i32, f64) { (3, 4.5) }
+fn main() ~ Console { let (a, b) = two(); println!("{} {}", a, b); }
+=== struct_destructure :: 7
+struct P { x: i32, y: i32 }
+fn main() ~ Console { let p: P = P { x: 3, y: 4 }; let P { x, y } = p; println!("{}", x + y); }
+=== fixed_array_and_slice :: 6 3
+fn sum(s: &[i32]) -> i32 { let mut t: i32 = 0; for x in s { t = t + *x; } t }
+fn main() ~ Console { let a: [i32; 3] = [1, 2, 3]; println!("{} {}", sum(&a), a.len()); }
+=== string_ops :: 5 hello world true
+fn main() ~ Console { let a: String = String::from("hello"); let b: String = a + " world"; println!("{} {} {}", "hello".len(), b, b.contains("wor")); }
+=== format_macro :: x=3 y=2.50
+fn main() ~ Console { let s: String = format!("x={} y={:.2}", 3, 2.5); println!("{}", s); }
+=== string_chars :: 3
+fn main() ~ Console { let mut n: i32 = 0; for c in "a1b2c3".chars() { if c >= '0' && c <= '9' { n = n + 1; } } println!("{}", n); }
+=== hashmap :: 2 7
+fn main() ~ Console { let m: HashMap<str, i32> = HashMap::new(); m.insert("a", 3); m.insert("b", 4); println!("{} {}", m.len(), m.get("a") + m.get("b")); }
+=== operator_overload :: 4 6
+struct V { x: i32, y: i32 }
+impl Add for V { type Output = V; fn add(self, o: V) -> V { V { x: self.x + o.x, y: self.y + o.y } } }
+fn main() ~ Console { let c: V = V { x: 1, y: 2 } + V { x: 3, y: 4 }; println!("{} {}", c.x, c.y); }
+=== const_and_static :: 42
+const ANSWER: i32 = 42;
+fn main() ~ Console { println!("{}", ANSWER); }
+=== type_alias :: 5
+type Meters = f64;
+fn main() ~ Console { let d: Meters = 5.0; println!("{}", d); }
+=== recursive_enum_box :: 6
+enum List { Cons(i32, Box<List>), Nil }
+fn sum(l: List) -> i32 { match l { List::Cons(v, rest) => v + sum(*rest), List::Nil => 0 } }
+fn main() ~ Console { println!("{}", sum(List::Cons(1, Box::new(List::Cons(2, Box::new(List::Cons(3, Box::new(List::Nil)))))))); }
+=== integer_widths_and_casts :: 255 -1 65535
+fn main() ~ Console { let a: u8 = 255; let b: i8 = -1; let c: u16 = 65535; println!("{} {} {}", a, b, c as i32); }
+=== bit_ops :: 12 3 6 -8
+fn main() ~ Console { let a: i32 = 6; println!("{} {} {} {}", a << 1, a >> 1, (a & 7) | 2, !7); }
+=== char_type :: 97 b
+fn main() ~ Console { let c: char = 'a'; println!("{} {}", c as i32, ((c as u8) + 1) as char); }
+=== mut_reference :: 8
+fn bump(x: &mut i32) { *x = *x + 3; }
+fn main() ~ Console { let mut v: i32 = 5; bump(&mut v); println!("{}", v); }
+=== struct_field_mutation :: 9
+struct P { x: i32 }
+fn main() ~ Console { let mut p: P = P { x: 4 }; p.x = p.x + 5; println!("{}", p.x); }
+=== inline_module :: 9
+mod geo { pub fn sq(x: i32) -> i32 { x * x } }
+fn main() ~ Console { println!("{}", geo::sq(3)); }
+=== const_generic :: 4
+fn len<const N: usize>(a: [i32; N]) -> usize { N }
+fn main() ~ Console { println!("{}", len([1, 2, 3, 4])); }
+=== associated_const_and_fn :: 3 0
+struct P { x: i32 }
+impl P { const DIM: i32 = 3; fn zero() -> P { P { x: 0 } } }
+fn main() ~ Console { println!("{} {}", P::DIM, P::zero().x); }
+=== generic_enum_user :: 5
+enum Maybe<T> { Just(T), Nothing }
+fn main() ~ Console { let m: Maybe<i32> = Maybe::Just(5); match m { Maybe::Just(v) => println!("{}", v), Maybe::Nothing => println!("no") } }
+=== sort_vec :: 1 2 3
+fn main() ~ Console { let v: Vec<i32> = vec![3, 1, 2]; v.sort(); println!("{} {} {}", v[0], v[1], v[2]); }
+=== float_precision :: 3.142
+fn main() ~ Console { println!("{:.3}", 3.14159); }
+=== nested_generics :: 3
+fn main() ~ Console { let v: Vec<Vec<i32>> = Vec::new(); let a: Vec<i32> = vec![1, 2]; v.push(a); println!("{}", v[0][0] + v[0][1]); }
+=== early_return_in_match :: 1
+fn f(o: Option<i32>) -> i32 { let v: i32 = match o { Some(x) => x, None => return 1 }; v * 2 }
+fn main() ~ Console { println!("{}", f(None)); }
+=== macro_rules :: 9
+macro_rules! sq { ($x:expr) => { $x * $x }; }
+fn main() ~ Console { println!("{}", sq!(3)); }
+=== drop_trait :: in drop
+struct G { v: i32 }
+impl Drop for G { fn drop(&mut self) ~ Console { println!("drop"); } }
+fn main() ~ Console { { let g: G = G { v: 1 }; println!("in"); } }
+=== async_await :: 7
+async fn seven() -> i32 { 7 }
+async fn main() ~ Console { let v: i32 = seven().await; println!("{}", v); }
+=== unit_of_measure :: 10
+fn main() ~ Console { let d: f64<m> = 20.0; let t: f64<s> = 2.0; let v: f64<m/s> = d / t; println!("{}", v); }
+=== where_clause :: 4
+trait Sz { fn sz(self) -> i32; }
+struct A { v: i32 }
+impl Sz for A { fn sz(self) -> i32 { self.v } }
+fn f<T>(t: T) -> i32 where T: Sz { t.sz() }
+fn main() ~ Console { println!("{}", f(A { v: 4 })); }
+=== derive_and_eq :: true
+#[derive(PartialEq, Clone)]
+struct P { x: i32 }
+fn main() ~ Console { let a: P = P { x: 1 }; let b: P = a.clone(); println!("{}", a == b); }
+=== u64_wrapping_and_hex :: 6b109408de3efc63
+fn main() ~ Console {
+    let b: u32 = (0.7555893531601992 as f32).to_bits();
+    let mut h: u64 = 1469598103934665603; let mut k: u32 = 0;
+    while k < 4 { h = (h ^ (((b >> (8 * k)) & 255) as u64)).wrapping_mul(1099511628211); k = k + 1; }
+    println!("{:x}", h);
+}
+=== string_parse_and_to_string :: 42 7
+fn main() ~ Console { let n: i32 = "41".parse::<i32>().unwrap() + 1; let s: String = 7.to_string(); println!("{} {}", n, s); }
+=== option_combinators :: 6 9
+fn main() ~ Console { let a: Option<i32> = Some(3); let b: Option<i32> = None; println!("{} {}", a.map(|x| x * 2).unwrap_or(0), b.unwrap_or(9)); }
+=== threads_par_map :: 30
+fn sq(x: i32) -> i32 { x * x }
+fn main() ~ Console { let v: Vec<i32> = vec![1, 2, 3, 4]; let r: Vec<i32> = par_map(v, sq); println!("{}", r[0] + r[1] + r[2] + r[3]); }
+=== float_exponent_format :: 1e3
+fn main() ~ Console { println!("{:e}", 1000.0); }
+=== effect_handler :: Hello, Alice!
+effect Greeting { fn greet(name: str) -> (), }
+fn welcome() ~ Greeting { perform Greeting.greet("Alice"); }
+fn main() ~ Console { handle { welcome() } with { Greeting.greet(name) => { println!("Hello, {}!", name) }, } }
+=== effect_resume_value :: 5
+effect Ask { fn ask() -> i32, }
+fn use_it() -> i32 ~ Ask { let v: i32 = perform Ask.ask(); v + 1 }
+fn main() ~ Console { let v: i32 = handle { use_it() } with { Ask.ask() => |resume| { resume(4) }, }; println!("{}", v); }
+=== generic_fn_computed_args :: 1.5 1.5 2.5 0.75 -1.5 1.5 1.5
+struct P { x: f64 }
+fn pick<T>(a: T, b: T, first: bool) -> T { if first { a } else { b } }
+fn half(x: f64) -> f64 { x / 2.0 }
+fn main() ~ Console {
+    let p: P = P { x: 2.5 };
+    let v: Vec<f64> = vec![0.25, 0.75];
+    println!("{}", pick(1.0 + 0.5, 2.5, true));
+    println!("{}", pick(half(3.0), 2.5, true));
+    println!("{}", pick(p.x, 1.0, true));
+    println!("{}", pick(v[1], 1.0, true));
+    println!("{}", pick(-1.5, 1.0, true));
+    println!("{}", pick(3 as f64, 1.5, false));
+    println!("{}", pick(half(3.0).min(9.0), 2.5, true));
+}
+=== generic_fn_user_method_arg :: 2.5
+struct P { x: f64 }
+impl P { fn get(self) -> f64 { self.x } }
+fn pick<T>(a: T, b: T, first: bool) -> T { if first { a } else { b } }
+fn main() ~ Console { let p: P = P { x: 2.5 }; println!("{}", pick(p.get(), 1.0, true)); }
+=== closure_stored_and_called :: 7
+fn main() ~ Console { let f = |x: i32| -> i32 { x + 1 }; let g = f; println!("{}", g(6)); }
+=== struct_with_fn_field :: 8
+struct Op { f: fn(i32) -> i32 }
+fn dbl(x: i32) -> i32 { x * 2 }
+fn main() ~ Console { let o: Op = Op { f: dbl }; println!("{}", (o.f)(4)); }
+=== generic_struct_method :: 7
+struct W<T> { v: T }
+impl<T> W<T> { fn get(self) -> T { self.v } }
+fn main() ~ Console { let w: W<i32> = W { v: 7 }; println!("{}", w.get()); }
+=== string_builder_loop :: 0,1,2,
+fn main() ~ Console { let mut s: String = String::new(); for i in 0..3 { s = s + &format!("{},", i); } println!("{}", s); }
+=== match_tuple_and_or :: b a c
+fn k(a: i32, b: i32) -> str { match (a, b) { (0, _) | (_, 0) => "a", (1, 1) => "b", _ => "c" } }
+fn main() ~ Console { println!("{} {} {}", k(1, 1), k(0, 5), k(2, 3)); }
+=== enum_method_and_eq :: 2 true
+#[derive(PartialEq)]
+enum Dir { N, E, S, W }
+impl Dir { fn idx(self) -> i32 { match self { Dir::N => 0, Dir::E => 1, Dir::S => 2, Dir::W => 3 } } }
+fn main() ~ Console { println!("{} {}", Dir::S.idx(), Dir::N == Dir::N); }
+=== vec_of_structs_mutation :: 9
+struct P { x: i32 }
+fn main() ~ Console { let v: Vec<P> = Vec::new(); v.push(P { x: 4 }); v[0].x = v[0].x + 5; println!("{}", v[0].x); }
+=== shadowing_and_block_expr :: 12
+fn main() ~ Console { let x: i32 = 5; let x: i32 = { let y: i32 = x + 1; y * 2 }; println!("{}", x); }

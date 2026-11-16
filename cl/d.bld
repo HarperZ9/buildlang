@@ -1,0 +1,3 @@
+struct Btn { on: fn(i32) -> i32 }
+fn inc(x: i32) -> i32 { x + 1 }
+fn main() ~ Console { let b = Btn { on: inc }; println!("{}", (b.on)(5)); }

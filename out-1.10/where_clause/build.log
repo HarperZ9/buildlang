@@ -1,0 +1,29 @@
+Building project at '.'
+Entry point: .\main.bld
+Mode: release
+Target: c
+
+[1/5] Lexing... OK (85 tokens)
+[2/5] Parsing... OK (5 items)
+[3/5] Type checking... OK
+[4/5] Code generation (c)... OK (118856 bytes)
+[5/5] Compiling C -> executable (using gcc)...
+C compilation failed (exit code: Some(1)):
+.\target\release\main.c: In function 'f_i32':
+.\target\release\main.c:3081:10: warning: implicit declaration of function 'sz'; did you mean 'A_sz'? [-Wimplicit-function-declaration]
+ 3081 |     _2 = sz(t);
+      |          ^~
+      |          A_sz
+.\target\release\main.c: In function 'main':
+.\target\release\main.c:3093:16: error: incompatible type for argument 1 of 'f_i32'
+ 3093 |     _2 = f_i32(_1);
+      |                ^~
+      |                |
+      |                A
+.\target\release\main.c:3078:30: note: expected 'int32_t' {aka 'int'} but argument is of type 'A'
+ 3078 | static int32_t f_i32(int32_t t) {
+      |                      ~~~~~~~~^
+.\target\release\main.c:3094:8: warning: assignment discards 'const' qualifier from pointer target type [-Wdiscarded-qualifiers]
+ 3094 |     _3 = __str0;
+      |        ^
+

@@ -1,0 +1,5 @@
+Lexing... OK (41 tokens)
+Parsing... 1 items (1 parse errors)
+error[E:/wt/bl-probe/out-1.10/macro_rules//main.bld:1:1]: [BL0202] expected item, found `macro_rules`
+  1 | macro_rules! sq { ($x:expr) => { $x * $x }; }
+    | ^^^^^^^^^^^

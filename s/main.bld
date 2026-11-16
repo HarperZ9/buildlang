@@ -1,0 +1,25 @@
+fn shout(s: String) -> String { s + "!" }
+fn first(v: Vec<String>, cell: Vec<i32>) -> String { cell[0] = cell[0] + 1; v[0] }
+fn main() ~ Console + Process {
+    let a: String = String::from("hi");
+    let b: String = shout(a);
+    let c: String = shout(a);
+    let v: Vec<String> = Vec::new();
+    v.push(a);
+    v.push(b + c);
+    let cell: Vec<i32> = vec![0];
+    let f: String = first(v, cell);
+    let g: String = first(v, cell);
+    print!("{} {} ", f, g);
+    println!("{} {} {}", v[1], cell[0], v.len());
+    let t: bool = 3 > 2;
+    println!("{} {}", t as i32, (65 as u8) as char);
+    let n: i32 = 7;
+    let s: String = n.to_string();
+    let mut k: usize = 2;
+    k = k - 1;
+    println!("{} {} {}", s, format!("{}-{}", n, k), v[k]);
+    let bs = "x%d".as_bytes();
+    println!("{} {}", bs[1], bs.len());
+    if n > 100 { exit(3); }
+}

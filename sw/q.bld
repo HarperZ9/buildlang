@@ -1,0 +1,9 @@
+fn k(n: i32) -> i32 {
+    {
+        loop {
+            if n == 1 { return 5; }
+            break;
+        }
+    }
+}
+fn main() ~ Console { println!("{}", k(1)); }

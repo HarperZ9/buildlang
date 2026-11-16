@@ -1,0 +1,4 @@
+Lexing... OK (76 tokens)
+Parsing... OK (3 items)
+Type errors found:
+  2:28: [BL0310] undefined variable: `Ask`

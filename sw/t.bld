@@ -1,0 +1,2 @@
+fn f(n: i32) -> i32 { loop { let mut k: i32 = 0; while k < n { break; } return k + 7; } }
+fn main() ~ Console { println!("{}", f(1)); }

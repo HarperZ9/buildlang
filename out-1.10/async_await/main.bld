@@ -1,0 +1,2 @@
+async fn seven() -> i32 { 7 }
+async fn main() ~ Console { let v: i32 = seven().await; println!("{}", v); }

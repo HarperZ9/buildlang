@@ -1,0 +1,5 @@
+Lexing... OK (50 tokens)
+Parsing... OK (2 items)
+Type errors found:
+  1:48: [BL0310] undefined variable: `N`
+  2:38: [BL0304] array length mismatch: expected `0`, found `4`

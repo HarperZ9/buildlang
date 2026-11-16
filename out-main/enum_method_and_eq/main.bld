@@ -1,0 +1,4 @@
+#[derive(PartialEq)]
+enum Dir { N, E, S, W }
+impl Dir { fn idx(self) -> i32 { match self { Dir::N => 0, Dir::E => 1, Dir::S => 2, Dir::W => 3 } } }
+fn main() ~ Console { println!("{} {}", Dir::S.idx(), Dir::N == Dir::N); }

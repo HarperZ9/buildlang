@@ -1,0 +1,2 @@
+fn read(x: i32) -> i32 { x + 1 }
+fn main() ~ Console { println!("{}", read(2)); }

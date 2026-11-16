@@ -1,0 +1,1 @@
+fn main() ~ Console { let c: char = 'a'; println!("{} {}", c as i32, ((c as u8) + 1) as char); }

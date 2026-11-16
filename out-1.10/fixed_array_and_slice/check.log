@@ -1,0 +1,5 @@
+Lexing... OK (80 tokens)
+Parsing... OK (2 items)
+Type errors found:
+  1:57: [BL0901] `for` cannot iterate over a `*[i32]` in the C backend
+  help: iterate a vector, array, string or range, or loop with an index

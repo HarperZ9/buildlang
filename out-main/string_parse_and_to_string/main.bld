@@ -1,0 +1,1 @@
+fn main() ~ Console { let n: i32 = "41".parse::<i32>().unwrap() + 1; let s: String = 7.to_string(); println!("{} {}", n, s); }

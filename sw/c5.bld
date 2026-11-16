@@ -1,0 +1,3 @@
+const S: &str = "abc";
+const G: String = "x";
+fn main() ~ Console { println!("{}", S); }

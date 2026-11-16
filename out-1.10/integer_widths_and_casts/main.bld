@@ -1,0 +1,1 @@
+fn main() ~ Console { let a: u8 = 255; let b: i8 = -1; let c: u16 = 65535; println!("{} {} {}", a, b, c as i32); }

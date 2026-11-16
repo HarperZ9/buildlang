@@ -1,0 +1,1 @@
+fn main() ~ Console { let d: f64<m> = 20.0; let t: f64<s> = 2.0; let v: f64<m/s> = d / t; println!("{}", v); }

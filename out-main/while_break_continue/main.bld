@@ -1,0 +1,1 @@
+fn main() ~ Console { let mut i: i32 = 0; let mut n: i32 = 0; while i < 10 { i = i + 1; if i % 2 == 0 { continue; } if i > 8 { break; } n = n + 1; } println!("{}", n); }

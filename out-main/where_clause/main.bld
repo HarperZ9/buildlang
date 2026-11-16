@@ -1,0 +1,5 @@
+trait Sz { fn sz(self) -> i32; }
+struct A { v: i32 }
+impl Sz for A { fn sz(self) -> i32 { self.v } }
+fn f<T>(t: T) -> i32 where T: Sz { t.sz() }
+fn main() ~ Console { println!("{}", f(A { v: 4 })); }

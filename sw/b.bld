@@ -1,0 +1,11 @@
+const B: bool = true;
+const C: char = 120 as char;
+const K: char = 'k';
+const W: u8 = 44;
+fn main() ~ Console {
+    let b: bool = B;
+    println!("{}", b);
+    println!("{}", W);
+    println!("{}", K);
+    println!("{}", B);
+}

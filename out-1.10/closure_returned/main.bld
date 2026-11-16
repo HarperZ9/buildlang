@@ -1,0 +1,2 @@
+fn adder(k: i32) -> impl Fn(i32) -> i32 { move |x: i32| -> i32 { x + k } }
+fn main() ~ Console { let f = adder(4); println!("{}", f(5)); }

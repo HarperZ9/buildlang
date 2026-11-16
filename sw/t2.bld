@@ -1,0 +1,2 @@
+fn f(n: i32) -> i32 { while n > 5 { return 2; } }
+fn main() ~ Console { println!("{}", f(1)); }

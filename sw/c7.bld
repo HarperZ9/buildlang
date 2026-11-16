@@ -1,0 +1,5 @@
+const X: f64 = 1e5;
+const Y: f32 = 1.5;
+const Z: u32 = 4000000000;
+const W: i64 = 2000000000;
+fn main() ~ Console { println!("{} {} {} {}", X, Y, Z, W / (7 as i64)); }

@@ -1,0 +1,2 @@
+const N: i32 = 2.5;
+fn main() ~ Console { println!("{}", 1); }

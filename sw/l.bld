@@ -1,0 +1,2 @@
+fn show(s: &str) -> usize { s.len() }
+fn main() ~ Console { println!("{}", show("abc")); }

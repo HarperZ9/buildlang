@@ -1,0 +1,7 @@
+const BIG: i64 = ((2000000000) as i64);
+const F: f64 = (2 as f64);
+const N: i32 = 3 + 4;
+const M: i64 = 5;
+fn main() ~ Console {
+    println!("{} {} {} {}", BIG, F, N, M);
+}

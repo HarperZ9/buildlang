@@ -1,0 +1,10 @@
+struct Ops {
+    loader: (fn(str) -> str) with FileSystem
+}
+fn load_config(path: str) -> str ~ FileSystem {
+    read_file(path)
+}
+fn main() ~ FileSystem + Console {
+    let ops = Ops { loader: load_config };
+    println!("{}", (ops.loader)("ops.txt"));
+}

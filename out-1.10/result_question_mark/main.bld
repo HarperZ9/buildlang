@@ -1,0 +1,6 @@
+fn half(v: i32) -> Result<i32, str> { if v % 2 == 0 { Ok(v / 2) } else { Err("bad") } }
+fn both(a: i32, b: i32) -> Result<i32, str> { let x: i32 = half(a)?; let y: i32 = half(b)?; Ok(x + y) }
+fn main() ~ Console {
+    match both(4, 8) { Ok(v) => println!("{}", v), Err(e) => println!("{}", e) }
+    match both(4, 7) { Ok(v) => println!("{}", v), Err(e) => println!("{}", e) }
+}

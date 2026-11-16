@@ -1,0 +1,3 @@
+mod m;
+use m::*;
+fn main() ~ Console { let t: T = mk(); println!("{} {}", one(), t.a); }

@@ -1,0 +1,5 @@
+Lexing... OK (62 tokens)
+Parsing... OK (1 items)
+Type errors found:
+  1:100: [BL0901] `map` cannot be compiled: the C backend has no function or method by that name (also: unwrap_or)
+  help: no function or method named `map` exists for the C backend; check the spelling, define it as a `fn`, or declare it in an `extern "C"` block

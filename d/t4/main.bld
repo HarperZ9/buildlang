@@ -1,0 +1,28 @@
+
+struct Ops {
+    loader: (fn(str) -> str) with FileSystem
+}
+
+struct Outer {
+    ops: Ops
+}
+
+enum Slot {
+    Ready(i32),
+}
+
+fn load_config(path: str) -> str ~ FileSystem {
+    read_file(path)
+}
+
+fn load_secret(path: str) -> str ~ FileSystem {
+    read_file(path)
+}
+
+fn main() ~ FileSystem {
+    let slot = Slot::Ready(0);
+    let config = Ops { loader: load_config };
+    let secret = Ops { loader: load_secret };
+    let Outer { ops } = Outer { ops: if let Slot::Ready(version) = slot { secret } else { config } };
+    (ops.loader)("ops.txt");
+}

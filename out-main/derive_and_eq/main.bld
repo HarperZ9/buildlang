@@ -1,0 +1,3 @@
+#[derive(PartialEq, Clone)]
+struct P { x: i32 }
+fn main() ~ Console { let a: P = P { x: 1 }; let b: P = a.clone(); println!("{}", a == b); }

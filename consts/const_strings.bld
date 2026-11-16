@@ -1,0 +1,16 @@
+const NAME: &str = "abc";
+const OWNED: String = "de";
+const PLAIN: str = "f";
+static GREETING: &str = "hi";
+fn show(s: &str) -> bool { s == "abc" }
+fn pass(s: String) -> String { s + "!" }
+fn main() ~ Console {
+    println!("{} {} {} {}", NAME, OWNED, PLAIN, GREETING);
+    println!("{} {}", NAME.len(), show(NAME));
+    println!("{}", NAME == "abc");
+    println!("{}", pass(OWNED));
+    let joined: String = NAME + OWNED;
+    println!("{}", joined);
+    let n: &str = NAME;
+    println!("{}", n);
+}

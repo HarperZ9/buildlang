@@ -1,0 +1,5 @@
+Lexing... OK (29 tokens)
+Parsing... OK (2 items)
+Type errors found:
+  [BL0901] `d` has type `Meters`, which cannot be formatted by the C backend
+  help: format its fields one by one, or give the type a `to_string` method and print that

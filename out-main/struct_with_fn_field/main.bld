@@ -1,0 +1,3 @@
+struct Op { f: fn(i32) -> i32 }
+fn dbl(x: i32) -> i32 { x * 2 }
+fn main() ~ Console { let o: Op = Op { f: dbl }; println!("{}", (o.f)(4)); }

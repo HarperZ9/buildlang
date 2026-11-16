@@ -1,0 +1,85 @@
+// Ported from C by `port`. Every conversion C made silently is written as a cast.
+const LIMIT: i32 = 12;
+const SCALE: f64 = 2.5;
+const OFFSET: i32 = -3;
+const BIG: i64 = ((2000000000) as i64);
+fn kind(n: i32) -> i32 {
+    let mut n: i32 = n;
+    {
+        let sw_1: i32 = (n % 5);
+        loop {
+            if sw_1 == 0 {
+                return 10;
+            }
+            if sw_1 == 1 || sw_1 == 2 {
+                return (20 + n);
+            }
+            {
+                return (-1);
+            }
+            break;
+        }
+    }
+    panic!("kind reached its end without a return value");
+}
+
+fn main() ~ Console {
+    let mut total: i32 = 0;
+    let mut wide: i64 = BIG;
+    {
+        let mut i: i32 = 0;
+        while (i < LIMIT) {
+            let mut k: i32 = kind(i);
+            {
+                let sw_2: i32 = k;
+                loop {
+                    if sw_2 == 10 {
+                        total = (total + 1);
+                        break;
+                    }
+                    if sw_2 == (-1) {
+                        {
+                            let mut j: i32 = 0;
+                            while (j < 3) {
+                                j = j + 1;
+                                if (j == 2) {
+                                    continue;
+                                }
+                                total = (total + j);
+                            }
+                            break;
+                        }
+                    }
+                    {
+                        if (k > 25) {
+                            total = (total + 100);
+                            break;
+                        }
+                        total = (total + k);
+                        break;
+                    }
+                    break;
+                }
+            }
+            i = i + 1;
+        }
+    }
+    let mut c: u8 = ((98) as u8);
+    {
+        let sw_3: u8 = c;
+        loop {
+            if sw_3 == ((97) as u8) {
+                println!("a");
+                break;
+            }
+            if sw_3 == ((98) as u8) {
+                println!("b {}", (total + OFFSET));
+                break;
+            }
+            break;
+        }
+    }
+    println!("{} {:.2} {}", total, (SCALE * ((LIMIT) as f64)), (wide / ((7) as i64)));
+    return;
+}
+

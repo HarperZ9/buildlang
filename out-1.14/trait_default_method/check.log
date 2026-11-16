@@ -1,0 +1,5 @@
+Lexing... OK (79 tokens)
+Parsing... OK (4 items)
+Type errors found:
+  [BL0901] `A_twice` cannot be compiled: the C backend has no function or method by that name
+  help: no function or method named `A_twice` exists for the C backend; check the spelling, define it as a `fn`, or declare it in an `extern "C"` block

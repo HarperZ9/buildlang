@@ -1,0 +1,70 @@
+BUILD-FAIL associated_const_and_fn :: .\target\release\main.c:3333:16: error: 'P_DIM' undeclared (first use in this function) 
+REJECTED   async_await :: Lexing... OK (39 tokens) Parsing... OK (2 items) 
+PASS       bit_ops
+PASS       char_type
+REJECTED   closure_as_argument :: Lexing... OK (69 tokens) Parsing... OK (2 items) 
+PASS       closure_capture
+REJECTED   closure_returned :: Lexing... OK (58 tokens) Parsing... OK (2 items) 
+PASS       closure_stored_and_called
+PASS       const_and_static
+REJECTED   const_generic :: Lexing... OK (50 tokens) Parsing... OK (2 items) 
+BUILD-FAIL derive_and_eq :: .\target\release\main.c:3335:13: error: invalid operands to binary == (have 'P' and 'P') 
+WRONG      drop_trait :: want [in drop] got [in]
+PASS       early_return_in_match
+PASS       effect_handler
+WRONG      effect_resume_value :: want [5] got [4]
+BUILD-FAIL enum_method_and_eq :: .\target\release\main.c:3390:14: error: invalid operands to binary == (have 'Dir' and 'Dir') 
+PASS       enum_payload_match
+REJECTED   fixed_array_and_slice :: Lexing... OK (80 tokens) Parsing... OK (2 items) 
+REJECTED   float_exponent_format :: Lexing... OK (17 tokens) Parsing... OK (1 items) 
+PASS       float_precision
+PASS       for_over_vec
+PASS       for_range
+PASS       for_range_inclusive
+PASS       format_macro
+PASS       generic_enum_user
+PASS       generic_fn
+PASS       generic_fn_computed_args
+PASS       generic_fn_user_method_arg
+PASS       generic_struct
+PASS       generic_struct_method
+PASS       hashmap
+PASS       higher_order_fn
+PASS       if_let
+PASS       impl_methods
+PASS       inline_module
+PASS       integer_widths_and_casts
+PASS       iterator_chain
+PASS       loop_break_value
+REJECTED   macro_rules :: Lexing... OK (41 tokens) Parsing... 1 items (1 parse errors) 
+PASS       match_guard_and_ranges
+PASS       match_tuple_and_or
+PASS       mut_reference
+PASS       nested_generics
+PASS       operator_overload
+REJECTED   option_combinators :: Lexing... OK (62 tokens) Parsing... OK (1 items) 
+PASS       option_match
+PASS       recursive_enum_box
+PASS       result_question_mark
+PASS       shadowing_and_block_expr
+PASS       sort_vec
+PASS       string_builder_loop
+PASS       string_chars
+PASS       string_ops
+REJECTED   string_parse_and_to_string :: Lexing... OK (51 tokens) Parsing... OK (1 items) 
+BUILD-FAIL struct_destructure :: .\target\release\main.c:3326:11: error: 'x' undeclared (first use in this function) .\target\release\main.c:3326:15: error: 'y' undeclared (first use 
+PASS       struct_field_mutation
+PASS       struct_with_fn_field
+PASS       threads_par_map
+REJECTED   trait_default_method :: Lexing... OK (79 tokens) Parsing... OK (4 items) 
+REJECTED   trait_object_dyn :: Lexing... OK (165 tokens) Parsing... OK (6 items) 
+PASS       trait_static
+PASS       tuple
+REJECTED   type_alias :: Lexing... OK (29 tokens) Parsing... OK (2 items) 
+PASS       u64_wrapping_and_hex
+PASS       unit_of_measure
+PASS       vec_macro
+PASS       vec_of_structs_mutation
+PASS       where_clause
+PASS       while_break_continue
+PASS       while_let

@@ -1,0 +1,29 @@
+Building project at '.'
+Entry point: .\main.bld
+Mode: release
+Target: c
+
+[1/5] Lexing... OK (139 tokens)
+[2/5] Parsing... OK (7 items)
+[3/5] Type checking... OK
+[4/5] Code generation (c)... OK (131041 bytes)
+[5/5] Compiling C -> executable (using gcc)...
+C compilation failed (exit code: Some(1)):
+.\target\release\main.c: In function 'show_i32':
+.\target\release\main.c:3364:10: warning: implicit declaration of function 'area'; did you mean 'S_area'? [-Wimplicit-function-declaration]
+ 3364 |     _2 = area(t);
+      |          ^~~~
+      |          S_area
+.\target\release\main.c: In function 'main':
+.\target\release\main.c:3378:19: error: incompatible type for argument 1 of 'show_i32'
+ 3378 |     _2 = show_i32(_1);
+      |                   ^~
+      |                   |
+      |                   R
+.\target\release\main.c:3361:33: note: expected 'int32_t' {aka 'int'} but argument is of type 'R'
+ 3361 | static int32_t show_i32(int32_t t) {
+      |                         ~~~~~~~~^
+.\target\release\main.c:3381:8: warning: assignment discards 'const' qualifier from pointer target type [-Wdiscarded-qualifiers]
+ 3381 |     _5 = __str0;
+      |        ^
+

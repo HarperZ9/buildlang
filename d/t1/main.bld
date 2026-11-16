@@ -1,0 +1,18 @@
+
+struct Ops {
+    loader: (fn(str) -> str) with FileSystem
+}
+
+struct Outer {
+    ops: Ops
+}
+
+fn load_config(path: str) -> str ~ FileSystem {
+    read_file(path)
+}
+
+fn main() ~ FileSystem {
+    let ops = Ops { loader: load_config };
+    let Outer { ops: unpacked } = Outer { ops };
+    (unpacked.loader)("ops.txt");
+}

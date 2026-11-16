@@ -1,0 +1,2 @@
+const S: str = "abc";
+fn main() ~ Console { println!("{}", S); }

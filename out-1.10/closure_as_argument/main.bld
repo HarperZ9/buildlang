@@ -1,0 +1,2 @@
+fn apply<F: Fn(i32) -> i32>(f: F, v: i32) -> i32 { f(v) }
+fn main() ~ Console { let k: i32 = 6; println!("{}", apply(|x: i32| -> i32 { x + k }, 5)); }

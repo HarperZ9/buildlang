@@ -1,0 +1,2 @@
+fn f(n: i32) -> i32 { loop { if n > 0 { return 1; } break; } }
+fn main() ~ Console { println!("{}", f(1)); }

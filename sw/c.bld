@@ -1,0 +1,7 @@
+const BIG: i64 = 2000000000;
+fn main() ~ Console {
+    let mut wide: i64 = BIG;
+    println!("{} {}", wide / (7 as i64), BIG);
+    let w2: i64 = 2000000000;
+    println!("{}", w2 / (7 as i64));
+}
