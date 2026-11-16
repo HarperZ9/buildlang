@@ -28,7 +28,6 @@ pub const FILES: &[(&str, &str)] = &[
     ("json.bld", include_str!("../stdlib/json.bld")),
     ("linalg.bld", include_str!("../stdlib/linalg.bld")),
     ("math.bld", include_str!("../stdlib/math.bld")),
-    ("memory.bld", include_str!("../stdlib/memory.bld")),
     ("option.bld", include_str!("../stdlib/option.bld")),
     ("result.bld", include_str!("../stdlib/result.bld")),
     ("sorting.bld", include_str!("../stdlib/sorting.bld")),
