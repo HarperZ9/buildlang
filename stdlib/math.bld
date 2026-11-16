@@ -1,7 +1,7 @@
 // BuildLang Standard Library - Math Module
 // Extended math functions built on top of C math.h builtins (sqrt, sin, etc.),
 // the vector and matrix types `Vec2`, `Vec3`, `Vec4`, `Mat3` and `Mat4`, and
-// `Quaternion`.
+// `Quaternion`, with the f64 forms `DVec3`, `DMat3` and `DQuat`.
 
 // ---------------------------------------------------------------------------
 // Angle conversion
@@ -216,6 +216,9 @@ impl Vec3 {
     }
     pub fn truncate(self) -> Vec2 {
         Vec2 { x: self.x, y: self.y }
+    }
+    pub fn as_dvec3(self) -> DVec3 {
+        DVec3 { x: self.x as f64, y: self.y as f64, z: self.z as f64 }
     }
 }
 
@@ -502,6 +505,9 @@ impl Mat3 {
             z_axis: self.mul_vec3(o.z_axis),
         }
     }
+    pub fn as_dmat3(self) -> DMat3 {
+        DMat3 { x_axis: self.x_axis.as_dvec3(), y_axis: self.y_axis.as_dvec3(), z_axis: self.z_axis.as_dvec3() }
+    }
 }
 
 impl Mul for Mat3 {
@@ -621,11 +627,330 @@ impl Quaternion {
             w: self.w * a + end.w * b,
         }
     }
+    pub fn as_dquat(self) -> DQuat {
+        DQuat { x: self.x as f64, y: self.y as f64, z: self.z as f64, w: self.w as f64 }
+    }
 }
 
 impl Mul for Quaternion {
     type Output = Quaternion;
     fn mul(self, o: Quaternion) -> Quaternion {
+        self.mul_quat(o)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// DVec3, DMat3 and DQuat: the f64 forms
+// ---------------------------------------------------------------------------
+// The same API as `Vec3`, `Mat3` and `Quaternion` in f64, with glam's names.
+// Every method uses the same formula in the same order as the f32 form, so a
+// slow f64 reference written from these formulas gets the same bits wherever
+// the method uses only + - * / and sqrt (all correctly rounded in IEEE 754):
+// dot, cross, length, normalize, determinant, inverse, the products,
+// mul_vec3, to_mat3 and the nlerp branch of slerp. `from_axis_angle` and the
+// arc branch of `slerp` call sin, cos and acos from the C library, which can
+// differ in the last place between C libraries.
+// `as_dvec3`, `as_dmat3` and `as_dquat` widen exactly; `as_vec3`, `as_mat3`
+// and `as_quat` round each entry to the nearest f32.
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DVec3 {
+    pub x: f64,
+    pub y: f64,
+    pub z: f64,
+}
+
+impl DVec3 {
+    pub const ZERO: DVec3 = DVec3 { x: 0.0, y: 0.0, z: 0.0 };
+    pub const ONE: DVec3 = DVec3 { x: 1.0, y: 1.0, z: 1.0 };
+    pub const X: DVec3 = DVec3 { x: 1.0, y: 0.0, z: 0.0 };
+    pub const Y: DVec3 = DVec3 { x: 0.0, y: 1.0, z: 0.0 };
+    pub const Z: DVec3 = DVec3 { x: 0.0, y: 0.0, z: 1.0 };
+
+    pub fn new(x: f64, y: f64, z: f64) -> DVec3 {
+        DVec3 { x: x, y: y, z: z }
+    }
+    pub fn splat(v: f64) -> DVec3 {
+        DVec3 { x: v, y: v, z: v }
+    }
+    pub fn zero() -> DVec3 {
+        DVec3 { x: 0.0, y: 0.0, z: 0.0 }
+    }
+    pub fn one() -> DVec3 {
+        DVec3 { x: 1.0, y: 1.0, z: 1.0 }
+    }
+    pub fn dot(self, o: DVec3) -> f64 {
+        self.x * o.x + self.y * o.y + self.z * o.z
+    }
+    pub fn cross(self, o: DVec3) -> DVec3 {
+        DVec3 {
+            x: self.y * o.z - self.z * o.y,
+            y: self.z * o.x - self.x * o.z,
+            z: self.x * o.y - self.y * o.x,
+        }
+    }
+    pub fn length_squared(self) -> f64 {
+        self.x * self.x + self.y * self.y + self.z * self.z
+    }
+    pub fn length(self) -> f64 {
+        self.length_squared().sqrt()
+    }
+    pub fn distance(self, o: DVec3) -> f64 {
+        DVec3::new(self.x - o.x, self.y - o.y, self.z - o.z).length()
+    }
+    pub fn scale(self, s: f64) -> DVec3 {
+        DVec3 { x: self.x * s, y: self.y * s, z: self.z * s }
+    }
+    pub fn mul_components(self, o: DVec3) -> DVec3 {
+        DVec3 { x: self.x * o.x, y: self.y * o.y, z: self.z * o.z }
+    }
+    pub fn normalize(self) -> DVec3 {
+        let len = self.length();
+        if len > 0.0 {
+            self.scale(1.0 / len)
+        } else {
+            self
+        }
+    }
+    pub fn lerp(self, o: DVec3, t: f64) -> DVec3 {
+        DVec3 {
+            x: self.x + (o.x - self.x) * t,
+            y: self.y + (o.y - self.y) * t,
+            z: self.z + (o.z - self.z) * t,
+        }
+    }
+    pub fn as_vec3(self) -> Vec3 {
+        Vec3 { x: self.x as f32, y: self.y as f32, z: self.z as f32 }
+    }
+}
+
+impl Add for DVec3 {
+    type Output = DVec3;
+    fn add(self, o: DVec3) -> DVec3 {
+        DVec3 { x: self.x + o.x, y: self.y + o.y, z: self.z + o.z }
+    }
+}
+
+impl Sub for DVec3 {
+    type Output = DVec3;
+    fn sub(self, o: DVec3) -> DVec3 {
+        DVec3 { x: self.x - o.x, y: self.y - o.y, z: self.z - o.z }
+    }
+}
+
+impl Mul<f64> for DVec3 {
+    type Output = DVec3;
+    fn mul(self, s: f64) -> DVec3 {
+        DVec3 { x: self.x * s, y: self.y * s, z: self.z * s }
+    }
+}
+
+impl Div<f64> for DVec3 {
+    type Output = DVec3;
+    fn div(self, s: f64) -> DVec3 {
+        DVec3 { x: self.x / s, y: self.y / s, z: self.z / s }
+    }
+}
+
+impl Neg for DVec3 {
+    type Output = DVec3;
+    fn neg(self) -> DVec3 {
+        DVec3 { x: 0.0 - self.x, y: 0.0 - self.y, z: 0.0 - self.z }
+    }
+}
+
+/// A 3 by 3 f64 matrix held as three `DVec3` columns, like `Mat3`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DMat3 {
+    pub x_axis: DVec3,
+    pub y_axis: DVec3,
+    pub z_axis: DVec3,
+}
+
+impl DMat3 {
+    pub fn new(m00: f64, m10: f64, m20: f64, m01: f64, m11: f64, m21: f64, m02: f64, m12: f64, m22: f64) -> DMat3 {
+        DMat3 {
+            x_axis: DVec3 { x: m00, y: m10, z: m20 },
+            y_axis: DVec3 { x: m01, y: m11, z: m21 },
+            z_axis: DVec3 { x: m02, y: m12, z: m22 },
+        }
+    }
+    pub fn from_cols(x_axis: DVec3, y_axis: DVec3, z_axis: DVec3) -> DMat3 {
+        DMat3 { x_axis: x_axis, y_axis: y_axis, z_axis: z_axis }
+    }
+    pub fn from_rows(r0: DVec3, r1: DVec3, r2: DVec3) -> DMat3 {
+        DMat3 {
+            x_axis: DVec3 { x: r0.x, y: r1.x, z: r2.x },
+            y_axis: DVec3 { x: r0.y, y: r1.y, z: r2.y },
+            z_axis: DVec3 { x: r0.z, y: r1.z, z: r2.z },
+        }
+    }
+    pub fn identity() -> DMat3 {
+        DMat3::new(1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0)
+    }
+    pub fn from_diagonal(d: DVec3) -> DMat3 {
+        DMat3::new(d.x, 0.0, 0.0, 0.0, d.y, 0.0, 0.0, 0.0, d.z)
+    }
+    pub fn transpose(self) -> DMat3 {
+        DMat3::from_rows(self.x_axis, self.y_axis, self.z_axis)
+    }
+    pub fn determinant(self) -> f64 {
+        self.z_axis.dot(self.x_axis.cross(self.y_axis))
+    }
+    /// The inverse, by the adjugate. A singular matrix (determinant 0) gives
+    /// non-finite entries.
+    pub fn inverse(self) -> DMat3 {
+        let r0 = self.y_axis.cross(self.z_axis);
+        let r1 = self.z_axis.cross(self.x_axis);
+        let r2 = self.x_axis.cross(self.y_axis);
+        let inv_det = 1.0 / r2.dot(self.z_axis);
+        DMat3::from_rows(r0.scale(inv_det), r1.scale(inv_det), r2.scale(inv_det))
+    }
+    pub fn mul_vec3(self, v: DVec3) -> DVec3 {
+        DVec3 {
+            x: self.x_axis.x * v.x + self.y_axis.x * v.y + self.z_axis.x * v.z,
+            y: self.x_axis.y * v.x + self.y_axis.y * v.y + self.z_axis.y * v.z,
+            z: self.x_axis.z * v.x + self.y_axis.z * v.y + self.z_axis.z * v.z,
+        }
+    }
+    pub fn mul_mat3(self, o: DMat3) -> DMat3 {
+        DMat3 {
+            x_axis: self.mul_vec3(o.x_axis),
+            y_axis: self.mul_vec3(o.y_axis),
+            z_axis: self.mul_vec3(o.z_axis),
+        }
+    }
+    pub fn as_mat3(self) -> Mat3 {
+        Mat3 { x_axis: self.x_axis.as_vec3(), y_axis: self.y_axis.as_vec3(), z_axis: self.z_axis.as_vec3() }
+    }
+}
+
+impl Mul for DMat3 {
+    type Output = DMat3;
+    fn mul(self, o: DMat3) -> DMat3 {
+        self.mul_mat3(o)
+    }
+}
+
+/// `x i + y j + z k + w` in f64, like `Quaternion`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DQuat {
+    pub x: f64,
+    pub y: f64,
+    pub z: f64,
+    pub w: f64,
+}
+
+impl DQuat {
+    pub const IDENTITY: DQuat = DQuat { x: 0.0, y: 0.0, z: 0.0, w: 1.0 };
+
+    pub fn new(x: f64, y: f64, z: f64, w: f64) -> DQuat {
+        DQuat { x: x, y: y, z: z, w: w }
+    }
+    pub fn identity() -> DQuat {
+        DQuat { x: 0.0, y: 0.0, z: 0.0, w: 1.0 }
+    }
+    /// The rotation by `angle` radians about the unit vector `axis`.
+    pub fn from_axis_angle(axis: DVec3, angle: f64) -> DQuat {
+        let h = angle * 0.5;
+        let s = h.sin();
+        DQuat { x: axis.x * s, y: axis.y * s, z: axis.z * s, w: h.cos() }
+    }
+    pub fn dot(self, o: DQuat) -> f64 {
+        self.x * o.x + self.y * o.y + self.z * o.z + self.w * o.w
+    }
+    pub fn length(self) -> f64 {
+        self.dot(self).sqrt()
+    }
+    pub fn normalize(self) -> DQuat {
+        let len = self.length();
+        if len > 0.0 {
+            DQuat { x: self.x / len, y: self.y / len, z: self.z / len, w: self.w / len }
+        } else {
+            self
+        }
+    }
+    pub fn conjugate(self) -> DQuat {
+        DQuat { x: -self.x, y: -self.y, z: -self.z, w: self.w }
+    }
+    /// The inverse: the conjugate over the squared length.
+    pub fn inverse(self) -> DQuat {
+        let n = self.dot(self);
+        DQuat { x: -self.x / n, y: -self.y / n, z: -self.z / n, w: self.w / n }
+    }
+    /// The Hamilton product `self * o`.
+    pub fn mul_quat(self, o: DQuat) -> DQuat {
+        DQuat {
+            x: self.w * o.x + self.x * o.w + self.y * o.z - self.z * o.y,
+            y: self.w * o.y - self.x * o.z + self.y * o.w + self.z * o.x,
+            z: self.w * o.z + self.x * o.y - self.y * o.x + self.z * o.w,
+            w: self.w * o.w - self.x * o.x - self.y * o.y - self.z * o.z,
+        }
+    }
+    /// `v` rotated by this unit quaternion: v + 2 w (u x v) + 2 u x (u x v)
+    /// with `u` the vector part.
+    pub fn mul_vec3(self, v: DVec3) -> DVec3 {
+        let u = DVec3 { x: self.x, y: self.y, z: self.z };
+        let t = u.cross(v).scale(2.0);
+        v + t.scale(self.w) + u.cross(t)
+    }
+    /// The rotation matrix of this unit quaternion.
+    pub fn to_mat3(self) -> DMat3 {
+        let x2 = self.x + self.x;
+        let y2 = self.y + self.y;
+        let z2 = self.z + self.z;
+        let xx = self.x * x2;
+        let xy = self.x * y2;
+        let xz = self.x * z2;
+        let yy = self.y * y2;
+        let yz = self.y * z2;
+        let zz = self.z * z2;
+        let wx = self.w * x2;
+        let wy = self.w * y2;
+        let wz = self.w * z2;
+        DMat3::new(
+            1.0 - (yy + zz), xy + wz, xz - wy,
+            xy - wz, 1.0 - (xx + zz), yz + wx,
+            xz + wy, yz - wx, 1.0 - (xx + yy),
+        )
+    }
+    /// Spherical interpolation from `self` (t = 0) to `o` (t = 1) along the
+    /// shorter arc; nearly parallel inputs fall back to a normalized lerp.
+    pub fn slerp(self, o: DQuat, t: f64) -> DQuat {
+        let mut end = o;
+        let mut d = self.dot(o);
+        if d < 0.0 {
+            end = DQuat { x: -o.x, y: -o.y, z: -o.z, w: -o.w };
+            d = -d;
+        }
+        if d > 0.9995 {
+            let q = DQuat {
+                x: self.x + (end.x - self.x) * t,
+                y: self.y + (end.y - self.y) * t,
+                z: self.z + (end.z - self.z) * t,
+                w: self.w + (end.w - self.w) * t,
+            };
+            return q.normalize();
+        }
+        let theta = d.acos();
+        let s = theta.sin();
+        let a = ((1.0 - t) * theta).sin() / s;
+        let b = (t * theta).sin() / s;
+        DQuat {
+            x: self.x * a + end.x * b,
+            y: self.y * a + end.y * b,
+            z: self.z * a + end.z * b,
+            w: self.w * a + end.w * b,
+        }
+    }
+    pub fn as_quat(self) -> Quaternion {
+        Quaternion { x: self.x as f32, y: self.y as f32, z: self.z as f32, w: self.w as f32 }
+    }
+}
+
+impl Mul for DQuat {
+    type Output = DQuat;
+    fn mul(self, o: DQuat) -> DQuat {
         self.mul_quat(o)
     }
 }
