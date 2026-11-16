@@ -15,9 +15,8 @@
 //
 // =============================================================================
 
-use core::memory::{Buffer, Arena, Pool};
+use core::memory::{Buffer};
 use core::math::{Vec2, Vec3, Vec4, Mat4, Quat, AABB, Transform};
-use core::simd::{f32x4, f32x8, simd_operations};
 use photon::lib::{RenderContext, Shader, ComputeShader, Pipeline, Texture, Sampler};
 
 // =============================================================================

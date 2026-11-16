@@ -13,7 +13,6 @@
 // =============================================================================
 
 use core::mem;
-use core::simd;
 use crate::photon::{RenderContext, Pipeline, Buffer, Shader};
 use crate::photon::gpu_driven::{MeshletMesh, Meshlet, IndirectDrawBuffer};
 

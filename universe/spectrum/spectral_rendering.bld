@@ -2,7 +2,6 @@
 // Full spectral color representation and rendering for physically accurate color
 // Implements wavelength-based color handling, spectral uplifting, and spectral integration
 
-use core::simd;
 use std::collections::HashMap;
 
 // ============================================================================

@@ -2,7 +2,6 @@
 // Algorithms for mapping colors between different color gamuts
 // Implements compression, clipping, and perceptual gamut mapping
 
-use core::simd;
 use std::collections::HashMap;
 
 // ============================================================================

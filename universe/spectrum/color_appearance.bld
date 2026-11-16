@@ -4,7 +4,7 @@
 
 module spectrum::color_appearance;
 
-use core::simd::{Vec3, Vec4, Mat3x3};
+use core::math::{Vec3, Mat3x3};
 use core::math::{pow, sqrt, abs, sin, cos, atan2, exp, log, PI, TWO_PI};
 
 // ============================================================================

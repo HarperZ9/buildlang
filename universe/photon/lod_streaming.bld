@@ -6,7 +6,7 @@
 
 module photon::lod_streaming;
 
-use core::memory::{GpuBuffer, GpuTexture, MemoryPool, AsyncLoader};
+use photon::gpu::{GpuBuffer, GpuTexture};
 use core::math::{Vec3, Vec4, Mat4, AABB, Sphere, Frustum};
 use core::io::{FileStream, CompressedReader};
 use photon::mesh::{Mesh, MeshLod, SubMesh, VertexBuffer, IndexBuffer};

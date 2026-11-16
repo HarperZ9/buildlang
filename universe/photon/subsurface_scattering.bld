@@ -6,7 +6,6 @@
 
 module photon::subsurface_scattering {
     use core::mem;
-    use core::simd;
     use math::{Vec2, Vec3, Vec4, Mat4};
     use gpu::{Buffer, Texture, Sampler, Pipeline, ComputePipeline, BindGroup, CommandEncoder};
 

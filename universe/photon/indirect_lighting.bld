@@ -4,9 +4,7 @@
 
 use std::collections::{HashMap, Vec, VecDeque, BinaryHeap}
 use std::math::{Vec2, Vec3, Vec4, Mat3, Mat4, Quaternion, sqrt, pow, exp, sin, cos, PI, floor, ceil, clamp, lerp, min, max, abs, dot, cross, normalize, length}
-use std::memory::{Arena, Pool, Box, Arc, Rc}
 use std::sync::{Mutex, RwLock, Atomic}
-use std::simd::{f32x4, f32x8, i32x4, i32x8}
 
 // ============================================================================
 // SPHERICAL HARMONICS

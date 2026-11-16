@@ -6,7 +6,7 @@
 
 module photon::visibility_buffer;
 
-use core::memory::{GpuBuffer, GpuTexture, MemoryPool};
+use photon::gpu::{GpuBuffer, GpuTexture};
 use core::math::{Vec2, Vec3, Vec4, Mat4, Frustum, AABB};
 use photon::gpu::{CommandBuffer, ComputeShader, RenderPipeline, BindGroup};
 use photon::mesh::{Mesh, MeshInstance, DrawIndirectCommand};

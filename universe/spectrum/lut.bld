@@ -2,7 +2,6 @@
 // Comprehensive 1D and 3D LUT implementation for color grading
 // Supports .cube, .3dl, .csp, and other industry formats
 
-use core::simd;
 use std::collections::HashMap;
 use std::io::{Read, Write, BufRead};
 use std::fs::File;

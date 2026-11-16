@@ -20,8 +20,7 @@
 module photon::deferred;
 
 use core::math::{Vec2, Vec3, Vec4, Mat4, Frustum};
-use core::memory::{Buffer, Texture2D, Arena};
-use core::simd::{f32x4, f32x8, u32x4};
+use core::memory::{Buffer, Texture2D};
 
 // =============================================================================
 // DEFERRED RENDERING CONFIGURATION

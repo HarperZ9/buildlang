@@ -20,7 +20,7 @@
 module photon::color_grading;
 
 use core::math::{Vec2, Vec3, Vec4, Mat3, Mat4};
-use core::memory::{Buffer, Texture2D, Texture3D, Arena};
+use core::memory::{Texture2D, Texture3D};
 
 // =============================================================================
 // COLOR GRADING CONFIGURATION

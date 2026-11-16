@@ -1,0 +1,275 @@
+// BuildLang Standard Library - Memory Module
+// Plain data that lives in main memory: a growable typed buffer and CPU
+// textures with four `f32` channels per texel.
+//
+// `use std::memory::{Buffer, Texture2D, Texture3D};` (or `core::memory`)
+// brings these. Nothing here talks to a graphics device: a texture is a
+// width, a height and a vector of numbers. Device resources are declared by
+// the code that owns the device.
+
+use std::math::{Vec2, Vec3, Vec4};
+
+// ---------------------------------------------------------------------------
+// Buffer<T>: a vector under the name render code uses for it
+// ---------------------------------------------------------------------------
+
+pub struct Buffer<T> {
+    pub data: Vec<T>,
+}
+
+impl<T> Buffer<T> {
+    /// An empty buffer. `capacity` is a hint and reserves nothing.
+    pub fn new(capacity: usize) -> Buffer<T> {
+        Buffer { data: Vec::new() }
+    }
+    pub fn len(&self) -> usize {
+        self.data.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.data.len() == 0
+    }
+    pub fn push(&mut self, value: T) {
+        self.data.push(value);
+    }
+    pub fn get(&self, index: usize) -> T {
+        self.data[index]
+    }
+    pub fn set(&mut self, index: usize, value: T) {
+        self.data[index] = value;
+    }
+    pub fn clear(&mut self) {
+        self.data.clear();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Texture2D: width * height texels, RGBA as f32, row by row from the top
+// ---------------------------------------------------------------------------
+
+pub struct Texture2D {
+    pub width: u32,
+    pub height: u32,
+    pub data: Vec<f32>,
+}
+
+impl Texture2D {
+    /// A texture of zeros.
+    pub fn new(width: u32, height: u32) -> Texture2D {
+        let count = (width as usize) * (height as usize) * 4;
+        let mut data: Vec<f32> = Vec::new();
+        let mut i: usize = 0;
+        while i < count {
+            data.push(0.0);
+            i += 1;
+        }
+        Texture2D { width: width, height: height, data: data }
+    }
+    pub fn width(&self) -> u32 {
+        self.width
+    }
+    pub fn height(&self) -> u32 {
+        self.height
+    }
+    /// The texel at (x, y). Outside the texture it is (0, 0, 0, 0).
+    pub fn get_pixel(&self, x: u32, y: u32) -> Vec4 {
+        if x >= self.width || y >= self.height {
+            return Vec4::new(0.0, 0.0, 0.0, 0.0);
+        }
+        let i = ((y as usize) * (self.width as usize) + (x as usize)) * 4;
+        Vec4::new(self.data[i], self.data[i + 1], self.data[i + 2], self.data[i + 3])
+    }
+    /// Write the texel at (x, y). Outside the texture nothing is written.
+    pub fn set_pixel(&mut self, x: u32, y: u32, color: Vec4) {
+        if x >= self.width || y >= self.height {
+            return;
+        }
+        let i = ((y as usize) * (self.width as usize) + (x as usize)) * 4;
+        self.data[i] = color.x;
+        self.data[i + 1] = color.y;
+        self.data[i + 2] = color.z;
+        self.data[i + 3] = color.w;
+    }
+    /// The nearest texel to `uv`. (0, 0) is the near corner of the first
+    /// texel and (1, 1) the far corner of the last. `uv` is clamped.
+    pub fn sample(&self, uv: Vec2) -> Vec4 {
+        if self.width == 0 || self.height == 0 {
+            return Vec4::new(0.0, 0.0, 0.0, 0.0);
+        }
+        let x = texel_index(uv.x, self.width);
+        let y = texel_index(uv.y, self.height);
+        self.get_pixel(x, y)
+    }
+    /// Write `color` to every texel.
+    pub fn clear(&mut self, color: Vec4) {
+        let mut y: u32 = 0;
+        while y < self.height {
+            let mut x: u32 = 0;
+            while x < self.width {
+                self.set_pixel(x, y, color);
+                x += 1;
+            }
+            y += 1;
+        }
+    }
+}
+
+/// The texel index of the normalized coordinate `t` along a side of `size`
+/// texels, clamped to `0 ..= size - 1`. `size` is at least 1.
+fn texel_index(t: f32, size: u32) -> u32 {
+    if t <= 0.0 {
+        return 0;
+    }
+    let scaled = t * (size as f32);
+    if scaled >= (size as f32) {
+        return size - 1;
+    }
+    scaled as u32
+}
+
+// ---------------------------------------------------------------------------
+// Texture3D: width * height * depth texels, RGBA as f32, slice by slice
+// ---------------------------------------------------------------------------
+
+pub struct Texture3D {
+    pub width: u32,
+    pub height: u32,
+    pub depth: u32,
+    pub data: Vec<f32>,
+}
+
+impl Texture3D {
+    /// A texture of zeros.
+    pub fn new(width: u32, height: u32, depth: u32) -> Texture3D {
+        let count = (width as usize) * (height as usize) * (depth as usize) * 4;
+        let mut data: Vec<f32> = Vec::new();
+        let mut i: usize = 0;
+        while i < count {
+            data.push(0.0);
+            i += 1;
+        }
+        Texture3D { width: width, height: height, depth: depth, data: data }
+    }
+    /// A texture from four numbers per texel (red, green, blue, alpha).
+    /// Texels past the end of `values` stay zero.
+    pub fn from_rgba(values: &Vec<f32>, width: u32, height: u32, depth: u32) -> Texture3D {
+        let mut tex = Texture3D::new(width, height, depth);
+        let count = tex.data.len();
+        let mut i: usize = 0;
+        while i < count && i < values.len() {
+            tex.data[i] = values[i];
+            i += 1;
+        }
+        tex
+    }
+    /// A texture from one number per texel: the number goes to red, green
+    /// and blue, and alpha is 1. Texels past the end of `values` stay zero.
+    pub fn from_data(values: &Vec<f32>, width: u32, height: u32, depth: u32) -> Texture3D {
+        let mut tex = Texture3D::new(width, height, depth);
+        let texels = tex.data.len() / 4;
+        let mut i: usize = 0;
+        while i < texels && i < values.len() {
+            tex.data[i * 4] = values[i];
+            tex.data[i * 4 + 1] = values[i];
+            tex.data[i * 4 + 2] = values[i];
+            tex.data[i * 4 + 3] = 1.0;
+            i += 1;
+        }
+        tex
+    }
+    pub fn width(&self) -> u32 {
+        self.width
+    }
+    pub fn height(&self) -> u32 {
+        self.height
+    }
+    pub fn depth(&self) -> u32 {
+        self.depth
+    }
+    /// The texel at (x, y, z). Outside the texture it is (0, 0, 0, 0).
+    pub fn get_pixel(&self, x: u32, y: u32, z: u32) -> Vec4 {
+        if x >= self.width || y >= self.height || z >= self.depth {
+            return Vec4::new(0.0, 0.0, 0.0, 0.0);
+        }
+        let row = (z as usize) * (self.height as usize) + (y as usize);
+        let i = (row * (self.width as usize) + (x as usize)) * 4;
+        Vec4::new(self.data[i], self.data[i + 1], self.data[i + 2], self.data[i + 3])
+    }
+    /// Write the texel at (x, y, z). Outside the texture nothing is written.
+    pub fn set_pixel(&mut self, x: u32, y: u32, z: u32, color: Vec4) {
+        if x >= self.width || y >= self.height || z >= self.depth {
+            return;
+        }
+        let row = (z as usize) * (self.height as usize) + (y as usize);
+        let i = (row * (self.width as usize) + (x as usize)) * 4;
+        self.data[i] = color.x;
+        self.data[i + 1] = color.y;
+        self.data[i + 2] = color.z;
+        self.data[i + 3] = color.w;
+    }
+    /// The texel that holds the texel-space point `coord` (a coordinate of
+    /// 2.7 is texel 2), clamped to the texture.
+    pub fn sample_point(&self, coord: Vec3) -> Vec4 {
+        if self.width == 0 || self.height == 0 || self.depth == 0 {
+            return Vec4::new(0.0, 0.0, 0.0, 0.0);
+        }
+        let x = clamp_texel(coord.x, self.width);
+        let y = clamp_texel(coord.y, self.height);
+        let z = clamp_texel(coord.z, self.depth);
+        self.get_pixel(x, y, z)
+    }
+    /// The nearest texel of the first slice to the normalized `uv`.
+    pub fn sample_2d(&self, uv: Vec2) -> Vec4 {
+        if self.width == 0 || self.height == 0 || self.depth == 0 {
+            return Vec4::new(0.0, 0.0, 0.0, 0.0);
+        }
+        let x = texel_index(uv.x, self.width);
+        let y = texel_index(uv.y, self.height);
+        self.get_pixel(x, y, 0)
+    }
+    /// Trilinear blend of the eight texels around the normalized `uvw`.
+    /// Texel centres sit at `(i + 0.5) / size`; the edges clamp.
+    pub fn sample_trilinear(&self, uvw: Vec3) -> Vec4 {
+        if self.width == 0 || self.height == 0 || self.depth == 0 {
+            return Vec4::new(0.0, 0.0, 0.0, 0.0);
+        }
+        let fx = uvw.x * (self.width as f32) - 0.5;
+        let fy = uvw.y * (self.height as f32) - 0.5;
+        let fz = uvw.z * (self.depth as f32) - 0.5;
+        let x0 = clamp_texel(fx, self.width);
+        let y0 = clamp_texel(fy, self.height);
+        let z0 = clamp_texel(fz, self.depth);
+        let x1 = clamp_texel(fx + 1.0, self.width);
+        let y1 = clamp_texel(fy + 1.0, self.height);
+        let z1 = clamp_texel(fz + 1.0, self.depth);
+        let tx = blend_weight(fx);
+        let ty = blend_weight(fy);
+        let tz = blend_weight(fz);
+        let c00 = self.get_pixel(x0, y0, z0).lerp(self.get_pixel(x1, y0, z0), tx);
+        let c10 = self.get_pixel(x0, y1, z0).lerp(self.get_pixel(x1, y1, z0), tx);
+        let c01 = self.get_pixel(x0, y0, z1).lerp(self.get_pixel(x1, y0, z1), tx);
+        let c11 = self.get_pixel(x0, y1, z1).lerp(self.get_pixel(x1, y1, z1), tx);
+        let c0 = c00.lerp(c10, ty);
+        let c1 = c01.lerp(c11, ty);
+        c0.lerp(c1, tz)
+    }
+}
+
+/// The texel index of the texel-space coordinate `t`, clamped to
+/// `0 ..= size - 1`. `size` is at least 1.
+fn clamp_texel(t: f32, size: u32) -> u32 {
+    if t <= 0.0 {
+        return 0;
+    }
+    if t >= (size as f32) {
+        return size - 1;
+    }
+    t as u32
+}
+
+/// The fraction of `t` past the texel below it; 0 below the first texel.
+fn blend_weight(t: f32) -> f32 {
+    if t <= 0.0 {
+        return 0.0;
+    }
+    t - ((t as u32) as f32)
+}

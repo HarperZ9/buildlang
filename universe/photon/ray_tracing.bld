@@ -15,7 +15,6 @@
 // =============================================================================
 
 use core::mem;
-use core::simd;
 use crate::photon::{RenderContext, Pipeline, Buffer, Texture};
 use crate::photon::path_tracing::{Ray, HitInfo, Material, BSDF};
 

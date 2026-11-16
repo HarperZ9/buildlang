@@ -3,10 +3,9 @@
 // Comprehensive image manipulation, filters, and transformations
 // ============================================================================
 
-use std::memory::{Buffer, Arena, Pool};
+use std::memory::{Buffer};
 use std::math::{Vector2, Vector3, Vector4, Matrix3x3, Matrix4x4, clamp, lerp};
 use std::collections::{Array, HashMap};
-use std::simd::{simd_f32x8, simd_i32x8};
 
 // ============================================================================
 // IMAGE REPRESENTATION

@@ -6,9 +6,8 @@
 // Based on Harper Engine WP-009, WP-126-142 atmospheric rendering papers.
 // =============================================================================
 
-use core::memory::{Arena, Pool, Buffer, GpuBuffer};
+use photon::gpu::{GpuBuffer};
 use core::math::{Vec2, Vec3, Vec4, Mat4, Quaternion, Transform};
-use core::simd::{f32x4, f32x8, SimdMath};
 use photon::gpu::{ComputeShader, RenderPipeline, Texture, Sampler};
 use photon::color::{Color, ColorSpace, Spectrum};
 
