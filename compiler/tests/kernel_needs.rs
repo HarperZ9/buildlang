@@ -23,6 +23,11 @@
 //!   implements the same algorithm (Wichura 1988, AS 241); `normal_cdf`:
 //!   SciPy 1.17 `scipy.stats.norm.cdf`.
 //! * Complex arithmetic: CPython 3.12 `complex` and `cmath`.
+//! * Student's t: SciPy 1.17 `scipy.stats.t`, within 1e-12 (the series of
+//!   Abramowitz and Stegun 26.7.3 and 26.7.4 agree to about 3e-14).
+//! * `Mat3` and `Quaternion` (`f32`): a quarter turn about z takes x to y, a
+//!   matrix times its inverse is the identity, and half of the turn by `slerp`
+//!   is (0, 0, sin pi/8, cos pi/8).
 //!
 //! Floats are compared within a relative 1e-15 (a few units in the last
 //! place): `cbrt(2)` is 1.259921049894873 with glibc and 1.2599210498948732
