@@ -51,6 +51,7 @@ mod error;
 mod hkt;
 mod infer;
 mod macro_args;
+mod math_names;
 pub mod measured;
 pub mod package_duplicates;
 mod parallel;

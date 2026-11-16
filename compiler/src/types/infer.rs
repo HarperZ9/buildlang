@@ -3699,19 +3699,11 @@ impl<'ctx> TypeInfer<'ctx> {
             }
             let is_builtin = matches!(
                 name,
-                // Math builtins
-                "sqrt" | "sin" | "cos" | "tan" | "pow" | "abs" |
-                "sinh" | "cosh" | "tanh" | "asin" | "acos" | "atan" |
-                "log" | "log2" | "log10" | "exp" | "exp2" | "atan2" |
-                "floor" | "ceil" | "round" | "min" | "max" |
+                // The maths functions and constants are in `math_names`.
                 // Vector constructors
                 "vec2" | "vec3" | "vec4" | "mat4" |
-                // Vector math builtins
-                "dot" | "cross" | "normalize" | "length" | "reflect" | "lerp" |
                 // Matrix builtins
                 "mat4_identity" | "mat4_translate" | "mat4_scale" | "mat4_perspective" |
-                // Shader math builtins
-                "clamp" | "smoothstep" | "mix" | "fract" | "step" |
                 // Texture sampling builtins
                 "texture_sample" | "tex2d" | "tex2d_depth" |
                 // I/O builtins
@@ -3755,10 +3747,8 @@ impl<'ctx> TypeInfer<'ctx> {
                 // Vulkan runtime builtins
                 "build_vk_init" | "build_vk_load_shader_file" | "build_vk_run_compute" | "build_vk_shutdown" |
                 // M5 parallel map and for (checked by types::parallel)
-                "par_for" | "par_map" |
-                // Math constants
-                "PI" | "E" | "TAU"
-            );
+                "par_for" | "par_map"
+            ) || super::math_names::is_math_builtin(name);
             if is_builtin {
                 // Return a generic function type - the lowerer handles the actual dispatch
                 Ty::error() // Silently accept; codegen resolves these
