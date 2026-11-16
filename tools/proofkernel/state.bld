@@ -1,0 +1,91 @@
+
+pub struct K {
+    pos: i64, ts: i64, te: i64,
+    // tokens
+    table: Vec<i32>, tok_s: Vec<i32>, tok_e: Vec<i32>, ntok: i64,
+    sym: Vec<i32>,      // 0 unknown, 1 constant, 2 variable
+    vact: Vec<i32>,     // variable active in scope
+    varf: Vec<i32>,     // active $f statement of a variable, or -1
+    lab: Vec<i32>,      // statement carrying this label, or -1
+    mark: Vec<i32>,     // mandatory-variable stamp
+    sub_s: Vec<i32>, sub_l: Vec<i32>,
+    // statements
+    st_kind: Vec<i32>, st_lab: Vec<i32>, st_off: Vec<i32>, st_len: Vec<i32>,
+    st_fr: Vec<i32>, st_nh: Vec<i32>, st_dv: Vec<i32>, st_nd: Vec<i32>,
+    st_act: Vec<i32>, st_mand: Vec<i32>,
+    nst: i64,
+    // arenas
+    a: Vec<i32>, top: i64,
+    fr: Vec<i32>, frn: i64,
+    // scope
+    hyps: Vec<i32>, nhyp: i64,
+    vars: Vec<i32>, nvar: i64,
+    dvs: Vec<i32>, ndv: i64,
+    sc_h: Vec<i32>, sc_v: Vec<i32>, sc_d: Vec<i32>, depth: i64,
+    dk1: Vec<i32>, dk2: Vec<i32>, dc: Vec<i32>,
+    // proof machine
+    ss: Vec<i32>, sl: Vec<i32>, sp: i64,
+    vs: Vec<i32>, vl: Vec<i32>, nsv: i64,
+    list: Vec<i32>, nlist: i64,
+    stamp: i32, cn: i64, cz: bool,
+    // tallies
+    errs: i64, proofs: i64, steps: i64,
+}
+
+pub fn new_k() -> K {
+    let n: i64 = 1024;
+    K { pos: 0, ts: 0, te: 0,
+        table: vec![0; 2097152], tok_s: vec![0; n], tok_e: vec![0; n], ntok: 0,
+        sym: vec![0; n], vact: vec![0; n], varf: vec![0; n], lab: vec![0; n],
+        mark: vec![0; n], sub_s: vec![0; n], sub_l: vec![0; n],
+        st_kind: vec![0; n], st_lab: vec![0; n], st_off: vec![0; n], st_len: vec![0; n],
+        st_fr: vec![0; n], st_nh: vec![0; n], st_dv: vec![0; n], st_nd: vec![0; n],
+        st_act: vec![0; n], st_mand: vec![0; n], nst: 0,
+        a: vec![0; 1048576], top: 0, fr: vec![0; 65536], frn: 0,
+        hyps: vec![0; n], nhyp: 0, vars: vec![0; n], nvar: 0, dvs: vec![0; n], ndv: 0,
+        sc_h: vec![0; n], sc_v: vec![0; n], sc_d: vec![0; n], depth: 0,
+        dk1: vec![0; 1048576], dk2: vec![0; 1048576], dc: vec![0; 1048576],
+        ss: vec![0; n], sl: vec![0; n], sp: 0, vs: vec![0; n], vl: vec![0; n], nsv: 0,
+        list: vec![0; n], nlist: 0, stamp: 0, cn: 0, cz: false, errs: 0, proofs: 0, steps: 0 }
+}
+
+pub fn at(s: &str, i: i64) -> u8 { s.as_bytes()[i] }
+
+// ---- growth helpers. A vector grows by pushing, indices stay bounds checked.
+pub fn grow(v: Vec<i32>, want: i64) {
+    let mut n = vec_len(v) as i64;
+    while n <= want {
+        vec_push(v, 0);
+        n = n + 1;
+    }
+}
+
+// ---- diagnostics
+pub fn line_of(b: &str, pos: i64) -> i64 {
+    let mut i: i64 = 0;
+    let mut n: i64 = 1;
+    while i < pos {
+        if at(b, i) == 10u8 { n = n + 1; }
+        i = i + 1;
+    }
+    n
+}
+
+pub fn tok_str(k: &K, s: &str, t: i64) -> str {
+    s[(k.tok_s[t] as i64)..(k.tok_e[t] as i64)]
+}
+
+pub fn report(k: &mut K, s: &str, class: &str, label: &str) ~ Console + Process {
+    k.errs = k.errs + 1;
+    if k.errs <= 1000 {
+        println!("ERR {} {} line {}", class, label, line_of(s, k.ts));
+    }
+}
+
+// Faults that leave the parser with no safe way to continue.
+pub fn fatal(k: &mut K, s: &str, class: &str, label: &str) ~ Console + Process {
+    report(k, s, class, label);
+    println!("FAIL errors={} statements={}", k.errs, k.nst);
+    process_exit(1);
+}
+

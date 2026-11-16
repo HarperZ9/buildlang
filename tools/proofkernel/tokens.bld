@@ -1,0 +1,122 @@
+const TOKENS_TABLE: i64 = 2097152;
+
+// ---- tokenizer
+pub fn is_ws(c: u8) -> bool {
+    c == 32u8 || c == 10u8 || c == 13u8 || c == 9u8 || c == 12u8
+}
+
+// Sets k.ts and k.te to the next token. Returns false state::at end of input.
+pub fn next_raw(k: &mut state::K, b: &str, s: &str) -> bool ~ Console + Process {
+    let n = b.as_bytes().len() as i64;
+    let mut p = k.pos;
+    while p < n && is_ws(state::at(b, p)) { p = p + 1; }
+    if p >= n { k.pos = p; k.ts = p; k.te = p; return false; }
+    let st = p;
+    while p < n && !is_ws(state::at(b, p)) {
+        let c = state::at(b, p);
+        if c < 33u8 || c > 126u8 {
+            k.ts = p;
+            state::fatal(k, s, "bad-char", "-");
+        }
+        p = p + 1;
+    }
+    k.ts = st; k.te = p; k.pos = p;
+    true
+}
+
+pub fn tok_is(k: &state::K, b: &str, c: u8) -> bool {
+    k.te - k.ts == 2 && state::at(b, k.ts) == 36u8 && state::at(b, k.ts + 1) == c
+}
+
+// Skips comments, rejecting nesting and unterminated ones.
+pub fn skip_comment(k: &mut state::K, b: &str, s: &str) ~ Console + Process {
+    let st = k.ts;
+    loop {
+        if !next_raw(k, b, s) {
+            k.ts = st;
+            state::fatal(k, s, "unterminated-comment", "-");
+        }
+        if tok_is(k, b, 41u8) { return; }
+        if tok_is(k, b, 40u8) { state::fatal(k, s, "nested-comment", "-"); }
+        let mut i = k.ts;
+        while i + 1 < k.te {
+            if state::at(b, i) == 36u8 && (state::at(b, i + 1) == 40u8 || state::at(b, i + 1) == 41u8) {
+                state::fatal(k, s, "comment-marker-in-token", "-");
+            }
+            i = i + 1;
+        }
+    }
+}
+
+pub fn next_tok(k: &mut state::K, b: &str, s: &str) -> bool ~ Console + Process {
+    loop {
+        if !next_raw(k, b, s) { return false; }
+        if tok_is(k, b, 40u8) { skip_comment(k, b, s); } else { return true; }
+    }
+    false
+}
+
+// ---- interning
+pub fn hash_tok(b: &str, s0: i64, e0: i64) -> i64 {
+    let mut h: i64 = 2166136261;
+    let mut i = s0;
+    while i < e0 {
+        h = ((h ^ (state::at(b, i) as i64)) * 16777619) & 4294967295;
+        i = i + 1;
+    }
+    h
+}
+
+pub fn tok_eq(k: &state::K, b: &str, t: i64, s0: i64, e0: i64) -> bool {
+    let a0 = k.tok_s[t] as i64;
+    if (k.tok_e[t] as i64) - a0 != e0 - s0 { return false; }
+    let mut i: i64 = 0;
+    while i < e0 - s0 {
+        if state::at(b, a0 + i) != state::at(b, s0 + i) { return false; }
+        i = i + 1;
+    }
+    true
+}
+
+// Returns the id of the current token, or -1 when it was never seen.
+pub fn lookup(k: &state::K, b: &str) -> i64 {
+    let mut h = hash_tok(b, k.ts, k.te) & (TOKENS_TABLE - 1);
+    loop {
+        let t = k.table[h] as i64;
+        if t == 0 { return -1; }
+        if tok_eq(k, b, t - 1, k.ts, k.te) { return t - 1; }
+        h = (h + 1) & (TOKENS_TABLE - 1);
+    }
+    -1
+}
+
+pub fn new_token(k: &mut state::K) -> i64 {
+    let t = k.ntok;
+    k.ntok = t + 1;
+    if t >= (vec_len(k.tok_s) as i64) {
+        let w = t * 2;
+        state::grow(k.tok_s, w); state::grow(k.tok_e, w); state::grow(k.sym, w); state::grow(k.vact, w);
+        state::grow(k.varf, w); state::grow(k.lab, w); state::grow(k.mark, w); state::grow(k.sub_s, w); state::grow(k.sub_l, w);
+    }
+    k.tok_s[t] = k.ts as i32;
+    k.tok_e[t] = k.te as i32;
+    k.varf[t] = -1;
+    k.lab[t] = -1;
+    t
+}
+
+pub fn intern(k: &mut state::K, b: &str) -> i64 {
+    let mut h = hash_tok(b, k.ts, k.te) & (TOKENS_TABLE - 1);
+    loop {
+        let t = k.table[h] as i64;
+        if t == 0 {
+            let id = new_token(k);
+            k.table[h] = (id + 1) as i32;
+            return id;
+        }
+        if tok_eq(k, b, t - 1, k.ts, k.te) { return t - 1; }
+        h = (h + 1) & (TOKENS_TABLE - 1);
+    }
+    -1
+}
+
