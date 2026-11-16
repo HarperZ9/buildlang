@@ -1,7 +1,9 @@
 // BuildLang Tokenizer — shared stdlib module
 // Include via: include!("stdlib/tokenizer.bld");
 //
-// Requires: include!("stdlib/chars.bld") before this file.
+// Includes chars.bld, which it calls; a program that includes chars.bld
+// first gets it once (an include is loaded once).
+include!("chars.bld");
 
 // ---------------------------------------------------------------------------
 // Token type constants

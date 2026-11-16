@@ -1,0 +1,49 @@
+// A bare name brought into an inline module by `use`: a glob of a sibling
+// module's functions and constants, and one function imported by name.
+pub struct M {
+    pub a: f64,
+}
+
+impl M {
+    pub fn twice(&self, x: f64) -> f64 {
+        self.a * x * 2.0
+    }
+}
+
+pub mod k {
+    use super::M;
+    pub const ONE: M = M { a: 1.0 };
+}
+
+pub mod t {
+    pub fn half(x: f64) -> f64 {
+        x / 2.0
+    }
+    pub fn quarter(x: f64) -> f64 {
+        x / 4.0
+    }
+}
+
+pub mod c {
+    use super::*;
+    use super::k::*;
+    use super::t::*;
+
+    pub fn go(x: f64) -> f64 {
+        half(ONE.twice(x))
+    }
+}
+
+pub mod d {
+    use super::t::quarter;
+
+    pub fn go(x: f64) -> f64 {
+        quarter(x)
+    }
+}
+
+fn main() ~ Console {
+    println!("{}", c::go(2.5));
+    println!("{}", d::go(1.0));
+    println!("{}", 4.0_f64.recip());
+}
