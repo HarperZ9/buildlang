@@ -218,16 +218,23 @@
       }
     },
     "merkle": {
-      "version": "1.0.0",
+      "version": "1.0.1",
       "description": "RFC 6962 Merkle roots, inclusion and consistency proofs (port of Flywheel harness/merkle.py)",
       "author": "Zain Dana Harper",
       "license": "FSL-1.1-MIT",
-      "checksum": "sha256:89ff0270f2953b410ca0768eb497fc01bec78f363d520ba2d71aea95f0a56ed8",
-      "path": "packages/merkle/1.0.0",
+      "checksum": "sha256:d6f0f79d056d221723ad5714054b850898c73c5fd851fcf5e45cdc37f2ec5063",
+      "path": "packages/merkle/1.0.1",
       "versions": {
         "1.0.0": {
           "path": "packages/merkle/1.0.0",
           "checksum": "sha256:89ff0270f2953b410ca0768eb497fc01bec78f363d520ba2d71aea95f0a56ed8",
+          "dependencies": {
+            "sha256": "^1.0.0"
+          }
+        },
+        "1.0.1": {
+          "path": "packages/merkle/1.0.1",
+          "checksum": "sha256:d6f0f79d056d221723ad5714054b850898c73c5fd851fcf5e45cdc37f2ec5063",
           "dependencies": {
             "sha256": "^1.0.0"
           }
