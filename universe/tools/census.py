@@ -29,8 +29,14 @@ taken out, the functions stubbed, the diagnostics seen by code, and where the wa
               type, an `impl` header) stops the walk
     NOLINE    a refusal with no line, usually functions the program calls that have
               no C function behind them (the names are in the detail column)
+    CRASH     the compiler stopped with no diagnostic: it was killed by a signal, or it
+              asked for more memory than --memory-mb allows (a compiler fault; the
+              detail column has the last line it printed)
     PARSE, LEX, TIMEOUT, LIMIT (more than --max-steps steps, or the file's time budget),
     BUDGET (the run's time budget ended before the file)
+
+One line per file goes to stderr when its walk starts and when it ends, so a run that
+is stopped from outside still shows which files were in flight.
 
 PASS is necessary for "these diagnostics are all of it", not sufficient: a stubbed function
 shows every type error it has, but only the first refusal of the C backend gate inside it.
@@ -46,6 +52,7 @@ import argparse
 import concurrent.futures
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -61,12 +68,24 @@ FN_HEAD = re.compile(
 UNRESOLVED = re.compile(r"^unresolved import `([^`]+)`")
 SCRATCH = "__census.bld"
 STUB = "{ loop { } }"
+# Address space one `buildc check` may take, in MiB (0: no cap). Set from --memory-mb.
+# A check that runs away would otherwise take the machine down with it.
+MEMORY_MB = 0
+
+
+def check_command(buildc, rel):
+    """`buildc check rel`, under `prlimit` when a memory cap is set and the tool exists."""
+    command = [buildc, "check", rel]
+    prlimit = shutil.which("prlimit") if MEMORY_MB > 0 else None
+    if prlimit:
+        command = [prlimit, f"--as={MEMORY_MB * 1024 * 1024}"] + command
+    return command
 
 
 def run_check(buildc, rel):
     try:
         proc = subprocess.run(
-            [buildc, "check", rel],
+            check_command(buildc, rel),
             cwd=HERE,
             capture_output=True,
             text=True,
@@ -86,6 +105,8 @@ def run_check(buildc, rel):
         m = DIAG_NO_LINE.match(line) or DIAG_LEX.match(line)
         if m:
             diags.append((0, m.group(1), m.group(2).strip()))
+    if not diags and (proc.returncode < 0 or proc.returncode > 128 or "memory allocation" in out):
+        return 125, [], f"exit {proc.returncode}: " + (out.strip().splitlines() or ["no output"])[-1]
     return proc.returncode, diags, out
 
 
@@ -262,11 +283,13 @@ def walk(buildc, rel, max_steps, deadline):
         return run_check(buildc, scratch_rel)
 
     def parses(result):
+        if result[0] == 125:
+            return True  # the copy parsed and the compiler then crashed: the walk ends there
         return result[0] == 0 or (result[0] != 124 and stage_of(result[2]) == "types")
 
     try:
         result = check(lines)
-        stage = "types" if result[0] in (0, 124) else stage_of(result[2])
+        stage = "types" if result[0] in (0, 124, 125) else stage_of(result[2])
 
         def done(terminal, detail=""):
             return stage, steps, terminal, detail, imports, stubbed, rows
@@ -277,6 +300,8 @@ def walk(buildc, rel, max_steps, deadline):
                 return done("PASS")
             if code == 124:
                 return done("TIMEOUT")
+            if code == 125:
+                return done("CRASH", out[:300])
             if not diags:
                 last = (out.strip().splitlines() or ["no output"])[-1]
                 return done("NODIAG", last[:200])
@@ -378,7 +403,15 @@ def main():
     ap.add_argument("--file-seconds", type=float, default=40.0, help="time budget for one file")
     ap.add_argument("--jobs", type=int, default=os.cpu_count() or 2, help="walks at a time")
     ap.add_argument("--total-seconds", type=float, default=690.0, help="time budget for the run")
+    ap.add_argument(
+        "--memory-mb",
+        type=int,
+        default=3072,
+        help="address space one check may take, through `prlimit` where it exists (0: no cap)",
+    )
     args = ap.parse_args()
+    global MEMORY_MB
+    MEMORY_MB = args.memory_mb
     buildc = os.path.abspath(args.buildc)
     files = args.files or listed_files()
 
@@ -391,7 +424,15 @@ def main():
     def one(rel):
         if time.monotonic() - started > args.total_seconds:
             return rel, None
-        return rel, walk(buildc, rel, args.max_steps, time.monotonic() + args.file_seconds)
+        began = time.monotonic()
+        print(f"census: start {rel}", file=sys.stderr, flush=True)
+        result = walk(buildc, rel, args.max_steps, began + args.file_seconds)
+        print(
+            f"census: end {rel} {result[2]} after {result[1]} steps, {time.monotonic() - began:.0f} s",
+            file=sys.stderr,
+            flush=True,
+        )
+        return rel, result
 
     # The walks are independent (each has its own scratch copy) and spend their time in
     # `buildc`, so threads are enough. Results are written in the order of the list.

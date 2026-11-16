@@ -7,7 +7,7 @@
 //!
 //! The refused form used here is `for (i, x) in bag.enumerate()` over a
 //! struct with no `next` method: the type checker accepts it and the backend
-//! has no loop for it ("`for` cannot iterate over a `i32` in the C backend").
+//! has no loop for it ("`for` cannot iterate over a `Bag` in the C backend").
 //!
 //! Expected, worked out before the runs. In `THREE` the refused expressions
 //! are `bag` at line 7 column 20, `bag` at line 19 column 20 and `other` at
@@ -88,7 +88,7 @@ fn main() ~ Console {
 }
 "#;
 
-const REFUSAL: &str = "`for` cannot iterate over a `i32` in the C backend";
+const REFUSAL: &str = "`for` cannot iterate over a `Bag` in the C backend";
 
 #[test]
 fn check_reports_three_refused_functions() {

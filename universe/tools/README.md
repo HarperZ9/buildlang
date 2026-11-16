@@ -39,3 +39,6 @@ every diagnostic it met and where the walk ended. Use it before choosing a fix: 
 a change would turn green, then make the change. The universe CI job prints both tables; the
 step is not a gate. A walk that ends in PASS lists what stands between the file and green, with
 one limit: inside a stubbed function only the first refusal of the C backend gate was seen.
+Each check runs under a memory cap (`--memory-mb`, 3072 by default, through `prlimit` where it
+exists); a check that is killed or runs out of memory ends the walk as CRASH, which is a
+compiler fault to fix. The start and end of each walk go to stderr.
