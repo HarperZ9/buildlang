@@ -57,10 +57,7 @@ pub fn check_buffer(file: &SourceFile) -> Vec<Diagnostic> {
         match codegen.generate(&ast) {
             Ok(_) => type_errors.extend(codegen.linear_errors().to_vec()),
             Err(e) if !has_gpu_entry_point(&ast) => {
-                type_errors.push(codegen_error_as_type_error(&e, file));
-                for more in codegen.further_rejections() {
-                    type_errors.push(codegen_error_as_type_error(more, file));
-                }
+                type_errors.push(codegen_error_as_type_error(&e, file))
             }
             Err(_) => {}
         }
