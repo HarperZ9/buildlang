@@ -6021,19 +6021,6 @@ impl<'ctx> MirLowerer<'ctx> {
                 }
             }
 
-            // recip: 1 / x in the receiver's own width. Before, it was refused
-            // ("`recip` cannot be compiled").
-            if method_name == "recip" && args.is_empty() {
-                let one = MirValue::Const(MirConst::Float(1.0, receiver_ty.clone()));
-                let builder = self
-                    .current_fn
-                    .as_mut()
-                    .ok_or_else(|| CodegenError::Internal("No current function".to_string()))?;
-                let result = builder.create_local(receiver_ty.clone());
-                builder.binary_op(result, BinOp::Div, one, receiver_val);
-                return Ok(values::local(result));
-            }
-
             // to_bits: the IEEE 754 bit pattern as an unsigned integer.
             if method_name == "to_bits" && args.is_empty() {
                 let (helper, ty) = match &receiver_ty {

@@ -63,7 +63,7 @@ jobs:
         env:
           # A fuzz run skipped for want of a C compiler fails on Linux.
           BUILDLANG_FUZZ_REQUIRE_CC: ${{ runner.os == 'Linux' && '1' || '0' }}
-        run: cargo test -- --skip spirv::tests::test_triangle --skip spirv::tests::test_write
+        run: cargo test --no-fail-fast --test feature_matrix
       - name: Build release
         working-directory: compiler
         run: cargo build --release

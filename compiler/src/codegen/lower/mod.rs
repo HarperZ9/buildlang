@@ -37,7 +37,6 @@ mod tail_resume;
 mod tests;
 mod types;
 mod unwrap_trap;
-mod use_globs;
 mod vec_range;
 
 use std::collections::{HashMap, HashSet};
@@ -237,8 +236,6 @@ pub struct MirLowerer<'ctx> {
     /// Generic impl blocks stored for deferred monomorphization.
     /// Maps base type name (e.g., "Option") -> list of impl defs.
     generic_impls: HashMap<Arc<str>, Vec<ast::ImplDef>>,
-    /// The `use` items of each module, by module path (see `use_globs.rs`).
-    module_uses: HashMap<String, use_globs::ModuleUses>,
     /// How many generic types are being instantiated inside one another
     /// right now (see `monomorphize_impl_methods`).
     pub(crate) mono_depth: usize,
@@ -455,7 +452,6 @@ impl<'ctx> MirLowerer<'ctx> {
             local_env_closure: HashMap::new(),
             fn_ast_sigs: HashMap::new(),
             generic_impls: HashMap::new(),
-            module_uses: HashMap::new(),
             mono_depth: 0,
             pending_generic_methods: HashMap::new(),
             generic_method_sigs: HashMap::new(),
@@ -538,7 +534,6 @@ impl<'ctx> MirLowerer<'ctx> {
             local_env_closure: HashMap::new(),
             fn_ast_sigs: HashMap::new(),
             generic_impls: HashMap::new(),
-            module_uses: HashMap::new(),
             mono_depth: 0,
             pending_generic_methods: HashMap::new(),
             generic_method_sigs: HashMap::new(),
@@ -598,9 +593,6 @@ impl<'ctx> MirLowerer<'ctx> {
             if self.module.find_function(prefixed.as_ref()).is_some() {
                 return prefixed;
             }
-        }
-        if let Some(found) = self.use_resolved(bare_name) {
-            return found;
         }
         if self.shadow_fns.contains(bare_name) {
             return Self::user_fn_c_name(bare_name);
@@ -1195,12 +1187,9 @@ impl<'ctx> MirLowerer<'ctx> {
             // Inline module: push module name onto prefix stack and
             // recursively collect all contained items.
             ItemKind::Mod(m) => self.collect_inline_mod(m),
-            // Use declarations: recorded, so a bare name brought in by a
-            // glob or by name finds its module-prefixed function or global.
-            ItemKind::Use(u) => {
-                self.note_use(u);
-                Ok(())
-            }
+            // Use declarations (e.g. `use super::*`) are handled implicitly
+            // by the flattened naming scheme - no collection needed.
+            ItemKind::Use(_) => Ok(()),
             _ => Ok(()),
         }
     }
