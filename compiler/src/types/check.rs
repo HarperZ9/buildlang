@@ -2054,6 +2054,11 @@ impl<'ctx> TypeChecker<'ctx> {
             if item.as_ref() == "self" || self.name_is_known(item) {
                 return None;
             }
+            // `use std::math::sqrt;` names the built-in `sqrt`: the import
+            // binds nothing, and the name resolves as it does with no import.
+            if module.as_ref() == "math" && super::math_names::is_math_builtin(item) {
+                return None;
+            }
             let (names, has_glob) = Self::collect_declared_and_imported_names(&file)?;
             if has_glob || names.contains(item) {
                 return None;
