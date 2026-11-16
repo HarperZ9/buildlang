@@ -55,12 +55,7 @@ fn text(out: &Output) -> String {
 /// Check, build and run the program; its stdout must be `wanted`.
 fn checks_and_prints(main: &Path, wanted: &str) {
     let check = buildc("check", main);
-    assert!(
-        check.status.success(),
-        "the check failed
-{}",
-        text(&check)
-    );
+    assert!(check.status.success(), "the check failed\n{}", text(&check));
 
     let run = buildc("run", main);
     let log = text(&run);
@@ -69,17 +64,12 @@ fn checks_and_prints(main: &Path, wanted: &str) {
     if log.contains("no C compiler") {
         assert!(
             std::env::var_os("CI").is_none(),
-            "CI has no C compiler
-{log}"
+            "CI has no C compiler\n{log}"
         );
         return;
     }
     assert_eq!(run.status.code(), Some(0), "{log}");
-    let stdout = String::from_utf8_lossy(&run.stdout).replace(
-        "
-", "
-",
-    );
+    let stdout = String::from_utf8_lossy(&run.stdout).replace("\r\n", "\n");
     assert_eq!(stdout.trim_end(), wanted, "{log}");
 }
 
@@ -119,29 +109,14 @@ const TEXTURES: &str = r#"fn main() ~ Console {
 }
 "#;
 
-const TEXTURES_PRINT: &str = "4 2 32
-1 2 3 4
-0
-4
-0
-1.5
-1 6 1
-7
-3.5
-0
-3
-4 5 6 7
-8 0";
+const TEXTURES_PRINT: &str = "4 2 32\n1 2 3 4\n0\n4\n0\n1.5\n1 6 1\n7\n3.5\n0\n3\n4 5 6 7\n8 0";
 
 #[test]
 fn textures_from_std_memory_build_and_run() {
     let main = program(
         "std",
         &format!(
-            "use std::memory::{{Texture2D, Texture3D}};
-use std::math::{{Vec2, Vec3, Vec4}};
-
-{TEXTURES}"
+            "use std::memory::{{Texture2D, Texture3D}};\nuse std::math::{{Vec2, Vec3, Vec4}};\n\n{TEXTURES}"
         ),
     );
     checks_and_prints(&main, TEXTURES_PRINT);
@@ -152,10 +127,7 @@ fn textures_from_core_memory_build_and_run() {
     let main = program(
         "core",
         &format!(
-            "use core::memory::{{Texture2D, Texture3D}};
-use core::math::{{Vec2, Vec3, Vec4}};
-
-{TEXTURES}"
+            "use core::memory::{{Texture2D, Texture3D}};\nuse core::math::{{Vec2, Vec3, Vec4}};\n\n{TEXTURES}"
         ),
     );
     checks_and_prints(&main, TEXTURES_PRINT);
@@ -167,61 +139,28 @@ fn without_the_import_a_texture_is_an_unknown_name() {
     let main = program("noimport", TEXTURES);
     let check = buildc("check", &main);
     let log = text(&check);
-    assert!(
-        !check.status.success(),
-        "the check passed
-{log}"
-    );
-    assert!(
-        log.contains("Texture2D"),
-        "no `Texture2D` in
-{log}"
-    );
+    assert!(!check.status.success(), "the check passed\n{log}");
+    assert!(log.contains("Texture2D"), "no `Texture2D` in\n{log}");
 }
 
 #[test]
 fn a_name_the_memory_module_lacks_is_still_refused() {
     let main = program(
         "arena",
-        "use std::memory::{Texture2D, Arena};
-
-fn main() {}
-",
+        "use std::memory::{Texture2D, Arena};\n\nfn main() {}\n",
     );
     let check = buildc("check", &main);
     let log = text(&check);
-    assert!(
-        !check.status.success(),
-        "the check passed
-{log}"
-    );
-    assert!(
-        log.contains("[BL0611]"),
-        "no BL0611 in
-{log}"
-    );
-    assert!(
-        log.contains("`std::memory::Arena`"),
-        "no path in
-{log}"
-    );
+    assert!(!check.status.success(), "the check passed\n{log}");
+    assert!(log.contains("[BL0611]"), "no BL0611 in\n{log}");
+    assert!(log.contains("`std::memory::Arena`"), "no path in\n{log}");
     assert!(
         !log.contains("`std::memory::Texture2D`"),
-        "Texture2D resolves and must not be reported
-{log}"
+        "Texture2D resolves and must not be reported\n{log}"
     );
 }
 
-const BUFFER: &str = "use std::memory::Buffer;
-
-fn main() ~ Console {
-    let mut b: Buffer<i32> = Buffer::new(4);
-    b.push(3);
-    b.push(4);
-    b.set(0, 7);
-    println!(\"{} {} {}\", b.len(), b.get(0), b.get(1));
-}
-";
+const BUFFER: &str = "use std::memory::Buffer;\n\nfn main() ~ Console {\n    let mut b: Buffer<i32> = Buffer::new(4);\n    b.push(3);\n    b.push(4);\n    b.set(0, 7);\n    println!(\"{} {} {}\", b.len(), b.get(0), b.get(1));\n}\n";
 
 /// `Buffer<T>` is declared and imports resolve, and a program that calls
 /// its methods is refused by the C backend: the methods of a generic type
@@ -236,17 +175,11 @@ fn a_buffer_resolves_and_its_methods_are_refused_by_the_c_backend() {
     let log = text(&check);
     assert!(
         !log.contains("[BL0611]"),
-        "the import did not resolve
-{log}"
+        "the import did not resolve\n{log}"
     );
     assert!(
         !check.status.success(),
-        "the check passed: turn this into a run test (issue 305)
-{log}"
+        "the check passed: turn this into a run test (issue 305)\n{log}"
     );
-    assert!(
-        log.contains("[BL0901]"),
-        "no C backend refusal in
-{log}"
-    );
+    assert!(log.contains("[BL0901]"), "no C backend refusal in\n{log}");
 }
