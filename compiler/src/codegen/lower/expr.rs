@@ -1384,12 +1384,7 @@ impl<'ctx> MirLowerer<'ctx> {
         // Complex path - treat as module-qualified reference.
         // Join segments with `_` so that `mod::func` resolves to the
         // mangled name `mod_func` produced by the module loader.
-        let name = path
-            .segments
-            .iter()
-            .map(|s| s.ident.name.as_ref())
-            .collect::<Vec<_>>()
-            .join("_");
+        let name = self.qualified_fn_name(path);
         // Inside a module, check if the prefixed name exists in the module.
         // e.g., `Vec3_new` → `std_Vec3_new` when inside `mod math`.
         if !self.module_prefix.is_empty() {
@@ -3806,12 +3801,7 @@ impl<'ctx> MirLowerer<'ctx> {
         // inside another inline module.
         if let ExprKind::Path(path) = &func.kind {
             if path.segments.len() > 1 {
-                let joined: String = path
-                    .segments
-                    .iter()
-                    .map(|s| s.ident.name.as_ref())
-                    .collect::<Vec<_>>()
-                    .join("_");
+                let joined = self.qualified_fn_name(path);
                 if self.module.find_function(joined.as_str()).is_some() {
                     return true;
                 }
@@ -3824,6 +3814,28 @@ impl<'ctx> MirLowerer<'ctx> {
             }
         }
         false
+    }
+
+    /// The function a module path names: the segments joined with `_`
+    /// (`geom::area` is `geom_area`, the loader's name), or the last segment
+    /// when that names a C-ABI function and the joined name names none. The
+    /// loader keeps C-ABI functions unprefixed (`main.rs`,
+    /// `merge_module_file`), so `kern::fk_area` is `fk_area`.
+    pub(super) fn qualified_fn_name(&self, path: &ast::Path) -> String {
+        let joined = path
+            .segments
+            .iter()
+            .map(|s| s.ident.name.as_ref())
+            .collect::<Vec<_>>()
+            .join("_");
+        if path.segments.len() > 1 && !self.fn_ast_sigs.contains_key(joined.as_str()) {
+            if let Some(last) = path.last_ident() {
+                if self.c_abi_fns.contains(last.name.as_ref()) {
+                    return last.name.to_string();
+                }
+            }
+        }
+        joined
     }
 
     /// If `func` resolves to a recognised math built-in (abs, sqrt, pow, ...),
@@ -4924,13 +4936,7 @@ impl<'ctx> MirLowerer<'ctx> {
                 // For module-qualified paths like `math::add`, join with `_`
                 // to match the mangled name `math_add`.
                 if path.segments.len() > 1 {
-                    Some(
-                        path.segments
-                            .iter()
-                            .map(|s| s.ident.name.as_ref())
-                            .collect::<Vec<_>>()
-                            .join("_"),
-                    )
+                    Some(self.qualified_fn_name(path))
                 } else {
                     path.last_ident()
                         .map(|i| self.resolve_fn_name(&i.name).to_string())
@@ -4978,10 +4984,14 @@ impl<'ctx> MirLowerer<'ctx> {
                     | "atan"
                     | "atan2"
                     | "log"
+                    | "ln"
                     | "log2"
                     | "log10"
                     | "exp"
                     | "exp2"
+                    | "cbrt"
+                    | "erf"
+                    | "erfc"
                     | "pow"
                     | "abs"
                     | "floor"
