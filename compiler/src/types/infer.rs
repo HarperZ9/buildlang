@@ -4236,14 +4236,13 @@ impl<'ctx> TypeInfer<'ctx> {
         let name = ident.name.as_ref();
         let (method, arities): (&str, &[usize]) = match name {
             "pow" => ("powf", &[2]),
-            "log" => ("ln", &[1]),
+            "log" | "ln" => ("ln", &[1]),
             "atan" => ("atan", &[1, 2]),
             "atan2" | "min" | "max" => (name, &[2]),
             "clamp" => (name, &[3]),
             "sqrt" | "sin" | "cos" | "tan" | "abs" | "sinh" | "cosh" | "tanh" | "asin" | "acos"
-            | "log2" | "log10" | "exp" | "exp2" | "floor" | "ceil" | "round" | "fract" => {
-                (name, &[1])
-            }
+            | "log2" | "log10" | "exp" | "exp2" | "floor" | "ceil" | "round" | "fract" | "cbrt"
+            | "erf" | "erfc" => (name, &[1]),
             _ => return None,
         };
         if self.ctx.lookup_var(name).is_some() {

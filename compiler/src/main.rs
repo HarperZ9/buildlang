@@ -10285,12 +10285,18 @@ fn merge_module_file(
 
     // Collect names defined in this module (for intra-module rewriting).
     // Functions merged in from the module's own sub-modules carry their
-    // final names already and are left as they are.
+    // final names already and are left as they are. So does a function with
+    // a foreign ABI (`extern "C" fn`): its name is the symbol C code links
+    // against, so `kern.bld` exporting `fk_area` must emit `fk_area`, not
+    // `kern_fk_area`. A path call `kern::fk_area(..)` finds it through the
+    // lowerer's `c_abi_fns`.
     let mod_defined: std::collections::HashSet<String> = mod_ast
         .items
         .iter()
         .filter_map(|item| match &item.kind {
-            ItemKind::Function(f) if !loaded.final_names.contains(f.name.name.as_ref()) => {
+            ItemKind::Function(f)
+                if !loaded.final_names.contains(f.name.name.as_ref()) && f.sig.abi.is_none() =>
+            {
                 Some(f.name.name.to_string())
             }
             _ => None,

@@ -5785,6 +5785,8 @@ impl CBackend {
             name,
             "sqrt"
                 | "cbrt"
+                | "erf"
+                | "erfc"
                 | "sin"
                 | "cos"
                 | "tan"
