@@ -10,6 +10,10 @@ tracked in `STATUS.md`, `README.md`, and
 
 ## Unreleased
 
+### Compiler
+
+- A range starts an iterator chain: `(0..n).map(|_| make()).collect()`, `(1..=10).sum()`, `(5..2).count()`, `(0..4).rev().map(f).collect()`. Before, the chain lowering knew only `v.iter()` as a source, so such a chain passed the check and the C backend refused it ("`collect` cannot be compiled"). Element `i` is `start + i` in the bounds' integer type; the count is worked out in `i64`, so a range whose end is below its start is empty and an unsigned range does not wrap. Over a range, an unannotated `map` closure takes its result type from the vector the chain is bound to (`let v: Vec<Item> = ...`); over a vector the old rule stays. Bounds that are not integers are refused. `universe/prism/shadows.bld` passes: 81 of 268 files pass, 187 fail. Tests: `compiler/tests/range_chains.rs`.
+
 ### Tooling
 
 - CI: a commit whose message has a line `test-only: <name>` runs only `compiler/tests/<name>.rs` (every test in it, `--no-fail-fast`) in the test job, then fails the job whatever the tests did, so a revert check reads one test binary in minutes and such a commit can never satisfy a merge; a push to main never narrows. The rule is `.github/test-only.sh`. Nothing is committed for it, so lint has nothing to refuse (an earlier design used a `.github/test-only` file that lint had to reject). The universe census prints its step-0 diagnostic count beside the committed `universe/CENSUS-BASELINE.txt` ("census: step-0 diagnostics N, baseline B, removed B - N"); not a gate.

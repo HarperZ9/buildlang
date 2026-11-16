@@ -4,8 +4,8 @@
 # fails when a line here stops being true or a file fails that is not listed, so a fix to the
 # compiler or to a module has to remove its line.
 #
-# State on 2026-11-16 with the compiler CI built from main (buildc 1.15.0, Linux): 80 of 268
-# files pass and 188 fail (1 lex, 21 parse, 166 types). buildc 1.14.0 passed 69. 1.15.0 accepts
+# State on 2026-11-16 with the compiler CI built from main (buildc 1.15.0, Linux): 81 of 268
+# files pass and 187 fail (1 lex, 21 parse, 165 types). buildc 1.14.0 passed 69. 1.15.0 accepts
 # programs/check.bld, find.bld, lint.bld and watch.bld, which 1.14.0 refused. 1.15.0 refused
 # prism/pbr.bld (`Self::default()` had no C function behind it); `Self::name` paths in an impl
 # block resolve to the type since then, and the file passes again.
@@ -159,7 +159,6 @@ prism/effects.bld types
 prism/lib.bld types
 prism/motion_blur.bld types
 prism/raytracing.bld types
-prism/shadows.bld types
 prism/ssao.bld types
 prism/ssr.bld types
 prism/subsurface.bld types
