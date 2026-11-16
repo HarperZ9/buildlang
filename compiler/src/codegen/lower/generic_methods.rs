@@ -239,6 +239,14 @@ impl<'ctx> MirLowerer<'ctx> {
         method: &str,
     ) -> CodegenResult<Option<Arc<str>>> {
         let key = (type_name.clone(), Arc::from(method));
+        // An instance named only in a signature (`fn make() -> Buffer<f64>`,
+        // called before its body is lowered) has no methods yet: create it.
+        if !self.impl_methods.contains_key(&key) {
+            let shape = self.generic_shapes.borrow().get(type_name).cloned();
+            if let Some((base, subst)) = shape {
+                self.instantiate_generic(&base, &subst)?;
+            }
+        }
         let Some(name) = self.impl_methods.get(&key).cloned() else {
             return Ok(None);
         };
