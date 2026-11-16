@@ -1,0 +1,14 @@
+target/release/main.c: In function 'main':
+target/release/main.c:3821:9: warning: assignment discards 'const' qualifier from pointer target type [-Wdiscarded-qualifiers]
+ 3821 |     _72 = __str0;
+      |         ^
+target/release/main.c:3840:9: warning: assignment discards 'const' qualifier from pointer target type [-Wdiscarded-qualifiers]
+ 3840 |     _79 = __str0;
+      |         ^
+target/release/main.c: In function 'main':
+target/release/main.c:3821:9: warning: assignment discards 'const' qualifier from pointer target type [-Wdiscarded-qualifiers]
+ 3821 |     _72 = __str0;
+      |         ^
+target/release/main.c:3840:9: warning: assignment discards 'const' qualifier from pointer target type [-Wdiscarded-qualifiers]
+ 3840 |     _79 = __str0;
+      |         ^
