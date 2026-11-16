@@ -17,7 +17,7 @@ use crate::codegen::backend::{CodegenError, CodegenResult};
 use crate::codegen::builder::{values, MirBuilder};
 use crate::codegen::ir::*;
 
-use super::{IterChain, IterStep, IterTerminal, MirLowerer};
+use super::{ChainSource, IterChain, IterStep, IterTerminal, MirLowerer};
 
 impl<'ctx> MirLowerer<'ctx> {
     // =========================================================================
@@ -2413,6 +2413,16 @@ impl<'ctx> MirLowerer<'ctx> {
                         _ => return None, // Unknown intermediate method
                     }
                 }
+                // `(a..b).map(f)`: a range with both bounds is a source; its
+                // elements are the integers themselves.
+                _ if Self::range_source_bounds(current).is_some() => {
+                    steps.reverse();
+                    return Some(IterChain {
+                        source: current,
+                        steps,
+                        terminal,
+                    });
+                }
                 _ => return None, // Chain doesn't lead to a MethodCall
             }
         }
@@ -2442,43 +2452,16 @@ impl<'ctx> MirLowerer<'ctx> {
     /// acc
     /// ```
     pub(crate) fn lower_iter_chain(&mut self, chain: &IterChain<'_>) -> CodegenResult<MirValue> {
-        // 1. Lower the source vec expression.
-        let source_val = self.lower_expr(chain.source)?;
-        let source_ty = self.type_of_value(&source_val);
-
-        // Determine the element type from the Vec type.
-        let elem_ty = match &source_ty {
-            MirType::Vec(inner) => inner.as_ref().clone(),
-            _ => MirType::f64(), // Fallback; most spectrum usage is f64
+        // The vector a `collect` is bound to (`let v: Vec<T> = ...`), read
+        // before the source is lowered resets it.
+        let expected_collect = match (&chain.terminal, &self.expected_type) {
+            (IterTerminal::Collect, Some(MirType::Vec(inner))) => Some(inner.as_ref().clone()),
+            _ => None,
         };
-
-        // Select the correct runtime function names for the element type.
-        let (get_fn_name, len_fn_name) = Self::vec_get_len_fn_names(&elem_ty)?;
-
-        // Store source in a local so we can reference it in the loop.
-        let source_local = {
-            let builder = self
-                .current_fn
-                .as_mut()
-                .ok_or_else(|| CodegenError::Internal("No current function".to_string()))?;
-            let loc = builder.create_local(source_ty.clone());
-            builder.assign(loc, MirRValue::Use(source_val));
-            loc
-        };
-
-        // 2. Get the length: len = vec_len(source)
-        let len_local = {
-            let builder = self.current_fn.as_mut().unwrap();
-            let len = builder.create_local(MirType::i64());
-            let cont = builder.create_block();
-            builder.call(
-                MirValue::Function(Arc::from(len_fn_name)),
-                vec![values::local(source_local)],
-                Some(len),
-                cont,
-            );
-            builder.switch_to_block(cont);
-            len
+        // 1. Lower the source: a vector, or a range `a..b` / `a..=b`.
+        let (elem_ty, source, len_local) = match Self::range_source_bounds(chain.source) {
+            Some((start, end, inclusive)) => self.lower_range_source(start, end, inclusive)?,
+            None => self.lower_vec_source(chain.source)?,
         };
 
         // 3. Check for enumerate step - affects how many closure params we
@@ -2491,7 +2474,18 @@ impl<'ctx> MirLowerer<'ctx> {
         // 4. Determine result element type by walking the steps.
         //    After map closures, the type may change based on the closure's
         //    return type annotation.  For now we infer from the closure.
-        let output_elem_ty = self.infer_chain_output_type(&elem_ty, &chain.steps);
+        let mut output_elem_ty = self.infer_chain_output_type(&elem_ty, &chain.steps);
+        // Over a range, an unannotated `map` closure says nothing about its
+        // result (`|_| make()`); the vector the result is bound to does.
+        if let (ChainSource::Range { .. }, Some(want)) = (&source, &expected_collect) {
+            let annotated = chain.steps.iter().any(|s| {
+                matches!(s, IterStep::Map { closure }
+                    if matches!(&closure.kind, ExprKind::Closure { return_type: Some(_), .. }))
+            });
+            if !annotated {
+                output_elem_ty = want.clone();
+            }
+        }
         let (new_fn_name, push_fn_name) = Self::vec_fn_names_for_type(&output_elem_ty)?;
 
         // 5. Set up the result value depending on terminal type.
@@ -2670,14 +2664,34 @@ impl<'ctx> MirLowerer<'ctx> {
         let elem_local = {
             let builder = self.current_fn.as_mut().unwrap();
             let elem = builder.create_local(elem_ty.clone());
-            let cont = builder.create_block();
-            builder.call(
-                MirValue::Function(Arc::from(get_fn_name)),
-                vec![values::local(source_local), values::local(idx_local)],
-                Some(elem),
-                cont,
-            );
-            builder.switch_to_block(cont);
+            match &source {
+                ChainSource::Vec { local, get_fn } => {
+                    let cont = builder.create_block();
+                    builder.call(
+                        MirValue::Function(Arc::from(get_fn.as_str())),
+                        vec![values::local(*local), values::local(idx_local)],
+                        Some(elem),
+                        cont,
+                    );
+                    builder.switch_to_block(cont);
+                }
+                ChainSource::Range { first } => {
+                    // elem = start + idx, in the range's own integer type.
+                    let wide = builder.create_local(MirType::i64());
+                    builder.binary_op(
+                        wide,
+                        BinOp::Add,
+                        values::local(*first),
+                        values::local(idx_local),
+                    );
+                    builder.cast(
+                        elem,
+                        CastKind::IntToInt,
+                        values::local(wide),
+                        elem_ty.clone(),
+                    );
+                }
+            }
             elem
         };
 
@@ -2881,6 +2895,125 @@ impl<'ctx> MirLowerer<'ctx> {
         }
 
         Ok(values::local(result_local))
+    }
+
+    /// The bounds of `a..b` or `a..=b` (through parentheses), when both are
+    /// written: the only ranges an iterator chain can start from.
+    fn range_source_bounds(expr: &ast::Expr) -> Option<(&ast::Expr, &ast::Expr, bool)> {
+        match &expr.kind {
+            ExprKind::Paren(inner) => Self::range_source_bounds(inner),
+            ExprKind::Range {
+                start: Some(start),
+                end: Some(end),
+                inclusive,
+            } => Some((start, end, *inclusive)),
+            _ => None,
+        }
+    }
+
+    /// A vector as the source of a chain: its element type, the local that
+    /// holds it with its accessor, and its length.
+    fn lower_vec_source(
+        &mut self,
+        source_expr: &ast::Expr,
+    ) -> CodegenResult<(MirType, ChainSource, LocalId)> {
+        let source_val = self.lower_expr(source_expr)?;
+        let source_ty = self.type_of_value(&source_val);
+        // Determine the element type from the Vec type.
+        let elem_ty = match &source_ty {
+            MirType::Vec(inner) => inner.as_ref().clone(),
+            _ => MirType::f64(), // Fallback; most spectrum usage is f64
+        };
+        // Select the correct runtime function names for the element type.
+        let (get_fn_name, len_fn_name) = Self::vec_get_len_fn_names(&elem_ty)?;
+        let builder = self
+            .current_fn
+            .as_mut()
+            .ok_or_else(|| CodegenError::Internal("No current function".to_string()))?;
+        let local = builder.create_local(source_ty.clone());
+        builder.assign(local, MirRValue::Use(source_val));
+        // len = vec_len(source)
+        let len = builder.create_local(MirType::i64());
+        let cont = builder.create_block();
+        builder.call(
+            MirValue::Function(Arc::from(len_fn_name)),
+            vec![values::local(local)],
+            Some(len),
+            cont,
+        );
+        builder.switch_to_block(cont);
+        Ok((
+            elem_ty,
+            ChainSource::Vec {
+                local,
+                get_fn: get_fn_name,
+            },
+            len,
+        ))
+    }
+
+    /// A range as the source of a chain. The elements have the type of the
+    /// bounds (a literal bound takes the other's type, as in `for`); the
+    /// count is worked out in `i64`, so `5..2` is empty and an unsigned
+    /// range does not wrap.
+    fn lower_range_source(
+        &mut self,
+        start: &ast::Expr,
+        end: &ast::Expr,
+        inclusive: bool,
+    ) -> CodegenResult<(MirType, ChainSource, LocalId)> {
+        let start_val = self.lower_expr(start)?;
+        let end_val = self.lower_expr(end)?;
+        let elem_ty = if matches!(start_val, MirValue::Const(_)) {
+            self.type_of_value(&end_val)
+        } else {
+            self.type_of_value(&start_val)
+        };
+        if !matches!(elem_ty, MirType::Int(..)) {
+            return Err(self.reject_at(
+                end,
+                "an iterator chain over a range needs integer bounds".to_string(),
+                "write the bounds as integers, `(0..n).map(...)`".to_string(),
+            ));
+        }
+        let builder = self
+            .current_fn
+            .as_mut()
+            .ok_or_else(|| CodegenError::Internal("No current function".to_string()))?;
+        let first = builder.create_local(MirType::i64());
+        builder.cast(first, CastKind::IntToInt, start_val, MirType::i64());
+        let last = builder.create_local(MirType::i64());
+        builder.cast(last, CastKind::IntToInt, end_val, MirType::i64());
+        let len = builder.create_local(MirType::i64());
+        builder.binary_op(len, BinOp::Sub, values::local(last), values::local(first));
+        if inclusive {
+            builder.binary_op(
+                len,
+                BinOp::Add,
+                values::local(len),
+                MirValue::Const(MirConst::Int(1, MirType::i64())),
+            );
+        }
+        // An empty range runs no pass: a negative count becomes 0, so the
+        // reversed form (which starts at len - 1) does not run either.
+        let negative = builder.create_local(MirType::Bool);
+        builder.binary_op(
+            negative,
+            BinOp::Lt,
+            values::local(len),
+            MirValue::Const(MirConst::Int(0, MirType::i64())),
+        );
+        let clamp = builder.create_block();
+        let cont = builder.create_block();
+        builder.branch(values::local(negative), clamp, cont);
+        builder.switch_to_block(clamp);
+        builder.assign(
+            len,
+            MirRValue::Use(MirValue::Const(MirConst::Int(0, MirType::i64()))),
+        );
+        builder.goto(cont);
+        builder.switch_to_block(cont);
+        Ok((elem_ty, ChainSource::Range { first }, len))
     }
 
     /// Inline-lower a `.map()` closure call: evaluate the closure body
