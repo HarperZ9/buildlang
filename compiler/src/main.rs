@@ -6469,7 +6469,10 @@ fn run_check_unit(unit: CheckUnit, early: &mut Option<Diagnostic>) -> Result<Che
             // `buildc check` means the program compiles. Shader and GPU kernel
             // programs target HLSL, GLSL or SPIR-V, so the C gate does not apply.
             Err(e) if !has_gpu_entry_point(&ast) => {
-                type_errors.push(codegen_error_as_type_error(&e, &source_file))
+                type_errors.push(codegen_error_as_type_error(&e, &source_file));
+                for more in codegen.further_rejections() {
+                    type_errors.push(codegen_error_as_type_error(more, &source_file));
+                }
             }
             Err(_) => {}
         }
@@ -7398,8 +7401,12 @@ fn cmd_build(
     // Code generation - pass source for macro string extraction
     let mut codegen = CodeGenerator::with_source(&ctx, target, Arc::from(source_file.source()));
     codegen.set_stdio_mode(stdio_mode);
-    let output = codegen.generate(&ast).map_err(|e| {
+    let generated = codegen.generate(&ast);
+    let output = generated.map_err(|e| {
         report_codegen_error(&e, &source_file);
+        for more in codegen.further_rejections() {
+            report_codegen_error(more, &source_file);
+        }
         1
     })?;
     if !codegen.linear_errors().is_empty() {
@@ -8034,8 +8041,12 @@ fn compile_program_to_exe(
     // Generate C code - pass source for macro string extraction
     let mut codegen = CodeGenerator::with_source(&ctx, Target::C, Arc::from(source_file.source()));
     codegen.set_stdio_mode(stdio_mode);
-    let output = codegen.generate(&ast).map_err(|e| {
+    let generated = codegen.generate(&ast);
+    let output = generated.map_err(|e| {
         report_codegen_error(&e, &source_file);
+        for more in codegen.further_rejections() {
+            report_codegen_error(more, &source_file);
+        }
         1
     })?;
     if !codegen.linear_errors().is_empty() {
@@ -10917,7 +10928,8 @@ fn cmd_compile(
     if output_path.extension().and_then(|e| e.to_str()) == Some("fx") {
         codegen.reshade = true;
     }
-    let generated = codegen.generate(&ast).map_err(|e| {
+    let generated = codegen.generate(&ast);
+    let generated = generated.map_err(|e| {
         let rejected = matches!(
             e,
             buildlang::codegen::backend::CodegenError::Rejected { .. }
@@ -10931,6 +10943,9 @@ fn cmd_compile(
             );
         } else {
             report_codegen_error(&e, &source_file);
+            for more in codegen.further_rejections() {
+                report_codegen_error(more, &source_file);
+            }
         }
         1
     })?;
