@@ -1097,6 +1097,28 @@ impl<'ctx> MirLowerer<'ctx> {
             self.collect_repr_c(item);
         }
 
+        // Pre-pass: know every generic struct and enum before any signature
+        // is lowered, so `fn make() -> Buffer<f64>` declared above a merged
+        // `Buffer<T>` names the instance `Buffer_f64`, not a plain `Buffer`.
+        for item in &items {
+            let has_type_params = |g: &ast::Generics| {
+                g.params
+                    .iter()
+                    .any(|p| matches!(p.kind, ast::GenericParamKind::Type { .. }))
+            };
+            match &item.kind {
+                ItemKind::Struct(s) if has_type_params(&s.generics) => {
+                    self.generic_structs
+                        .insert(s.name.name.clone(), (**s).clone());
+                }
+                ItemKind::Enum(e) if has_type_params(&e.generics) => {
+                    self.generic_enums
+                        .insert(e.name.name.clone(), (**e).clone());
+                }
+                _ => {}
+            }
+        }
+
         // First pass: collect type definitions and function signatures
         for item in &items {
             self.collect_item(item)?;
