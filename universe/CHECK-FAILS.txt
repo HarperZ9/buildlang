@@ -4,7 +4,7 @@
 # fails when a line here stops being true or a file fails that is not listed, so a fix to the
 # compiler or to a module has to remove its line.
 #
-# State on 2026-11-15 with the compiler CI built from main (buildc 1.15.0, Linux): 77 of 267
+# State on 2026-11-16 with the compiler CI built from main (buildc 1.15.0, Linux): 78 of 268
 # files pass and 190 fail (1 lex, 21 parse, 168 types). buildc 1.14.0 passed 69. 1.15.0 accepts
 # programs/check.bld, find.bld, lint.bld and watch.bld, which 1.14.0 refused. 1.15.0 refused
 # prism/pbr.bld (`Self::default()` had no C function behind it); `Self::name` paths in an impl

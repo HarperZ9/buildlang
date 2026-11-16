@@ -6,7 +6,6 @@
 
 module photon::light_clustering {
     use core::mem;
-    use core::simd;
     use math::{Vec2, Vec3, Vec4, Mat4, Quat, Frustum, Aabb, Sphere};
     use gpu::{Buffer, Texture, Sampler, Pipeline, ComputePipeline, BindGroup, CommandEncoder};
 

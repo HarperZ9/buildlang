@@ -20,8 +20,7 @@
 module photon::motion_blur;
 
 use core::math::{Vec2, Vec3, Vec4, Mat4};
-use core::memory::{Buffer, Texture2D, Arena};
-use core::simd::{f32x4, f32x8};
+use core::memory::{Texture2D};
 
 // =============================================================================
 // MOTION BLUR CONFIGURATION
@@ -1066,21 +1065,8 @@ impl Vec2 {
     }
 }
 
+// `sample` and `clear` are methods of `Texture2D` in `core::memory`.
 impl Texture2D {
-    pub fn sample(&self, uv: Vec2) -> Vec4 {
-        let x = ((uv.x * self.width() as f32) as u32).min(self.width() - 1);
-        let y = ((uv.y * self.height() as f32) as u32).min(self.height() - 1);
-        self.get_pixel(x, y)
-    }
-
-    pub fn clear(&mut self, color: Vec4) {
-        for y in 0..self.height() {
-            for x in 0..self.width() {
-                self.set_pixel(x, y, color);
-            }
-        }
-    }
-
     pub fn clone(&self) -> Self {
         let mut new_tex = Texture2D::new(self.width(), self.height());
         for y in 0..self.height() {

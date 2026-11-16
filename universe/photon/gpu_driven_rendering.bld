@@ -7,7 +7,7 @@
 // ============================================================================
 
 use core::types::*;
-use core::memory::*;
+use photon::gpu::{GpuBuffer};
 use photon::gpu_culling::*;
 use photon::material::*;
 

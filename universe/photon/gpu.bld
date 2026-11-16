@@ -1,0 +1,72 @@
+// =============================================================================
+// BUILD Photon - GPU resource descriptions
+// =============================================================================
+// `GpuBuffer` and `GpuTexture` describe a resource that a graphics device
+// owns: how large it is and what it is for. They hold no texel and no byte.
+// Reading and writing the contents belongs to the device that created the
+// resource, and no device is declared here yet, so there is no `write`,
+// `from_slice` or `bind_*` method: a module that calls one does not check.
+//
+// The photon modules import both names from here:
+//     use photon::gpu::{GpuBuffer, GpuTexture};
+// CPU-side data (`Buffer<T>`, `Texture2D`, `Texture3D`) is in `std::memory`.
+
+/// What a buffer is bound as.
+pub enum BufferUsage {
+    Storage,
+    Uniform,
+    Vertex,
+    Index,
+    Indirect,
+    Query,
+}
+
+/// A buffer on the device: its size in bytes and its use.
+pub struct GpuBuffer {
+    pub size: usize,
+    pub usage: BufferUsage,
+}
+
+impl GpuBuffer {
+    pub fn new(size: usize, usage: BufferUsage) -> GpuBuffer {
+        GpuBuffer { size: size, usage: usage }
+    }
+    pub fn new_uniform(size: usize) -> GpuBuffer {
+        GpuBuffer { size: size, usage: BufferUsage::Uniform }
+    }
+    pub fn new_vertex(size: usize) -> GpuBuffer {
+        GpuBuffer { size: size, usage: BufferUsage::Vertex }
+    }
+    pub fn new_index(size: usize) -> GpuBuffer {
+        GpuBuffer { size: size, usage: BufferUsage::Index }
+    }
+    pub fn new_query(size: usize) -> GpuBuffer {
+        GpuBuffer { size: size, usage: BufferUsage::Query }
+    }
+    /// The size in bytes.
+    pub fn size(&self) -> usize {
+        self.size
+    }
+}
+
+/// A two-dimensional texture on the device: its size in texels.
+pub struct GpuTexture {
+    pub width: u32,
+    pub height: u32,
+}
+
+impl GpuTexture {
+    pub fn new(width: u32, height: u32) -> GpuTexture {
+        GpuTexture { width: width, height: height }
+    }
+    pub fn width(&self) -> u32 {
+        self.width
+    }
+    pub fn height(&self) -> u32 {
+        self.height
+    }
+    /// (width, height) in texels.
+    pub fn dimensions(&self) -> (u32, u32) {
+        (self.width, self.height)
+    }
+}

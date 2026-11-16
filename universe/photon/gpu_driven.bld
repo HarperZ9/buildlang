@@ -20,8 +20,7 @@
 module photon::gpu_driven;
 
 use core::math::{Vec2, Vec3, Vec4, Mat4, Frustum, AABB};
-use core::memory::{Buffer, Texture2D, Arena};
-use core::simd::{f32x4, f32x8, u32x4};
+use core::memory::{Buffer, Texture2D};
 use core::atomic::{AtomicU32, Ordering};
 
 // =============================================================================

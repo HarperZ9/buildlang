@@ -4,7 +4,7 @@
 
 module lumina::dof;
 
-use core::simd::{Vec2, Vec3, Vec4, Mat4x4};
+use core::math::{Vec2, Vec3};
 use core::math::{pow, sqrt, abs, sin, cos, exp, log, PI, clamp, lerp, smoothstep, floor, ceil};
 use core::gpu::{Texture2D, TextureFormat, RenderTarget, ComputeShader};
 

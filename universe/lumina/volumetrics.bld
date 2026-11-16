@@ -9,7 +9,6 @@
 module lumina::volumetrics;
 
 use core::math::{Vec2, Vec3, Vec4, Mat4, lerp, saturate, smoothstep};
-use core::simd::{f32x4, f32x8};
 use lumina::{RenderTarget, Texture2D, TextureFormat, SamplerState};
 
 // =============================================================================

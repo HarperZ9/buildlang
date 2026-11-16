@@ -2,7 +2,6 @@
 // High Dynamic Range color processing, transfer functions, and metadata handling
 // Implements PQ (ST.2084), HLG, HDR10, HDR10+, and Dolby Vision support
 
-use core::simd;
 use core::mem;
 use std::collections::HashMap;
 

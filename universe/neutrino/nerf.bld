@@ -2,9 +2,7 @@
 // Neural Radiance Fields (NeRF) and Novel View Synthesis
 // Implements NeRF, Instant-NGP, 3D Gaussian Splatting, and real-time rendering
 
-use core::memory::{Buffer, Arena, MemoryPool};
 use core::math::{Vec2, Vec3, Vec4, Mat3, Mat4, Quaternion};
-use core::simd::{float4, float8, int4};
 use lib::{
     Tensor, TensorShape, DataType, Device,
     Layer, Sequential, Activation, ActivationType,

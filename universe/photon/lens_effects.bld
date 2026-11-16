@@ -6,7 +6,7 @@
 
 module photon::lens_effects;
 
-use core::memory::{GpuBuffer, GpuTexture, MemoryPool};
+use photon::gpu::{GpuBuffer, GpuTexture};
 use core::math::{Vec2, Vec3, Vec4, Mat4};
 use photon::gpu::{CommandBuffer, ComputeShader, RenderPipeline, BindGroup};
 

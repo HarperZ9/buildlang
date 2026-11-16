@@ -6,7 +6,7 @@
 
 module photon::virtual_texturing;
 
-use core::memory::{GpuBuffer, GpuTexture, MemoryPool, PageAllocator};
+use photon::gpu::{GpuBuffer, GpuTexture};
 use core::math::{Vec2, Vec3, Vec4, UVec2, UVec4};
 use core::io::{AsyncFileReader, CompressedStream};
 use photon::gpu::{CommandBuffer, ComputeShader, RenderPipeline, BindGroup};
