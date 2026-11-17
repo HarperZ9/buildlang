@@ -50,7 +50,7 @@ jobs:
         run: bash .github/install-shader-tools.sh
       - name: CPU reference drivers (unit tests of the gpu module)
         working-directory: compiler
-        run: cargo test --features gpu --bin buildc gpu::
+        run: cargo test --features gpu --bin buildc -- 'gpu::'
       - name: GPU tests on lavapipe
         working-directory: compiler
         env:
