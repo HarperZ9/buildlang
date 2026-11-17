@@ -77,6 +77,52 @@ fn matmul_cpu_reference_builds_and_runs() {
     assert_eq!(got, b, "identity x B == B");
 }
 
+/// The 1D driver gives each invocation the lane and group the device would for
+/// the kernel's declared group size: lane = i % size, group = i / size. The
+/// same kernel read with another size gives other values, so the reference
+/// depends on the size and a device that ran a different LocalSize disagrees.
+#[test]
+fn lane_ids_cpu_reference_follows_the_declared_group_size() {
+    let path = example("lane_ids.bld");
+    let sig = discover_kernel_sig(&path).expect("kernel signature");
+    assert_eq!(sig.local_size, Some([32, 1, 1]));
+    let kernel = kernel_c(&path, &sig.entry);
+    let n = 80;
+    let names: Vec<&str> = sig.buffers().map(|(name, _, _)| name).collect();
+    let buffers = vec![(names[0], vec![7.0f32; n]), (names[1], vec![0.0f32; n])];
+
+    let closed_form = |size: usize| -> Vec<f32> {
+        (0..n)
+            .map(|i| (i % size) as f32 + 100.0 * (i / size) as f32)
+            .collect()
+    };
+    let got = cpu_c_reference(&sig, &kernel, &buffers, &[], n).expect("CPU reference runs");
+    assert_eq!(got, closed_form(32));
+
+    let mut sig16 = sig.clone();
+    sig16.local_size = Some([16, 1, 1]);
+    let got16 = cpu_c_reference(&sig16, &kernel, &buffers, &[], n).expect("CPU reference runs");
+    assert_eq!(got16, closed_form(16));
+    assert_ne!(got, got16, "the group size changes the result");
+}
+
+/// A 1D driver refuses a declared size it cannot model.
+#[test]
+fn one_dimensional_driver_refuses_a_2d_group() {
+    let sig = KernelSig {
+        entry: "k".to_string(),
+        params: vec![],
+        local_size: Some([8, 8, 1]),
+    };
+    let e = sig.local_x_1d().unwrap_err();
+    assert!(e.contains("workgroup_size y = 8"), "{e}");
+    let sig = KernelSig {
+        local_size: Some([8, 1, 4]),
+        ..sig
+    };
+    assert!(sig.local_xy((64, 1)).unwrap_err().contains("z = 4"));
+}
+
 /// The C backend has emitted slices by pointer and by value; the driver must
 /// pass `&a` to the first and `a` to the second. Passing `&a` to a by-value
 /// kernel was the 2026-11-16 CI failure ("incompatible type for argument 4 of

@@ -165,6 +165,11 @@ struct Cli {
     #[arg(long)]
     target: Option<String>,
 
+    /// Shader targets (spirv, hlsl, glsl): emit only this entry point, for a
+    /// file with several `#[compute]` (or vertex/fragment) functions
+    #[arg(long, value_name = "NAME")]
+    entry: Option<String>,
+
     /// Generated-program stdio behavior: native, portable-lf. portable-lf is C-backend only.
     #[arg(long, default_value_t = StdioMode::Native)]
     stdio_mode: StdioMode,
@@ -945,6 +950,7 @@ fn run_cli(cli: Cli) -> Result<(), i32> {
                     cli.opt_level,
                     cli.debug,
                     cli.target.as_deref(),
+                    cli.entry.as_deref(),
                     cli.stdio_mode,
                 )
             } else {
@@ -10791,6 +10797,7 @@ fn cmd_compile(
     opt_level: u8,
     debug: bool,
     target_override: Option<&str>,
+    entry: Option<&str>,
     stdio_mode: StdioMode,
 ) -> Result<(), i32> {
     // Read source file
@@ -10894,6 +10901,12 @@ fn cmd_compile(
             None => output.and_then(|p| p.extension()).and_then(|e| e.to_str()) == Some("wat"),
         };
     reject_unsupported_stdio_mode(stdio_mode, target)?;
+    if entry.is_some() && !matches!(target, Target::SpirV | Target::Hlsl | Target::Glsl) {
+        eprintln!(
+            "Error: --entry selects a shader entry point; target `{target}` is not a shader target (spirv, hlsl, glsl)"
+        );
+        return Err(1);
+    }
 
     // `-o NAME.exe` with no explicit target asks for an executable. It used to
     // write C source under the .exe name (issue #84); build the program the
@@ -10929,6 +10942,7 @@ fn cmd_compile(
     // Code generation (pass source for macro expansion)
     let mut codegen = CodeGenerator::with_source(&ctx, target, source_file.source().into());
     codegen.wasm_text = wants_wat;
+    codegen.entry = entry.map(str::to_string);
     codegen.set_stdio_mode(stdio_mode);
     // Enable ReShade boilerplate for .fx output files
     if output_path.extension().and_then(|e| e.to_str()) == Some("fx") {

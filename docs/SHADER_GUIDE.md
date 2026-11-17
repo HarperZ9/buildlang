@@ -79,6 +79,39 @@ On the experimental SPIR-V path, the annotated function is intended to become
 the shader entry point. Treat that path as backend research until validated for
 the specific fixture you are using.
 
+### Compute group size and several entry points
+
+`#[compute(workgroup_size = [x, y, z])]` sets the entry's group size; on the
+SPIR-V target it becomes that entry's `OpExecutionMode LocalSize x y z`. Each
+dimension is at least 1, x and y at most 1024, z at most 64, and x * y * z at
+most 1024; anything else is refused at compile time. A Vulkan device may allow
+less (its `maxComputeWorkGroupSize` and `maxComputeWorkGroupInvocations`), and
+pipeline creation on that device refuses a size it cannot run. A bare
+`#[compute]` keeps the size the backend picks: 64 x 1 x 1, or 16 x 16 x 1 when
+the kernel reads `gl_GlobalInvocationID.y`.
+
+A file may hold several entries, each with its own size. Buffer bindings count
+from 0 in each entry. `--entry NAME` keeps one entry and drops the rest; an
+unknown name is refused with the list of entries the file has. Two entry
+points of one name are refused.
+
+```build
+#[compute(workgroup_size = [64, 1, 1])]
+fn cs_pack(n: u32, a: &[f32], out: &mut [f32]) ~ Gpu { ... }
+
+#[compute(workgroup_size = [8, 8, 1])]
+fn cs_main(w: u32, h: u32, out: &mut [f32]) ~ Gpu { ... }
+```
+
+```sh
+buildc passes.bld --target spirv -o passes.spv                  # both entries
+buildc passes.bld --target spirv --entry cs_main -o main.spv    # one entry
+```
+
+The HLSL and GLSL backends do not emit compute entries yet.
+`examples/gpu/compute_entries.bld` and `examples/gpu/lane_ids.bld` are the
+worked examples.
+
 ---
 
 ## Built-in Types
@@ -529,7 +562,7 @@ fn main() {
 | `Texture2D.Sample()`    | texture sampling (in progress)    |
 | `#include`              | functions are just functions      |
 | separate `.hlsl` files  | same `.bld` file for CPU + GPU |
-| `[numthreads(8,8,1)]`   | `#[compute]`                      |
+| `[numthreads(8,8,1)]`   | `#[compute(workgroup_size = [8, 8, 1])]` (SPIR-V target) |
 
 Key differences from HLSL/GLSL:
 - **No separate shader language.** Your shader functions are normal functions.
