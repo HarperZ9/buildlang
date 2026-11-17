@@ -16,6 +16,11 @@
 //! Device tests (Layer B/C) are gated behind `vulkan_device_available()` and the
 //! `gpu` cargo feature so CI (no device, default features) stays green and no
 //! test lies about hardware.
+//!
+//! A test whose tool or device is missing skips locally. With
+//! `BUILDLANG_SHADER_TOOLS_REQUIRE=1` (set by CI on Linux, which installs
+//! spirv-tools, glslang, DXC and Mesa lavapipe) the same test fails instead,
+//! so a skip cannot pass for a run.
 
 use std::{
     path::{Path, PathBuf},
@@ -49,18 +54,77 @@ fn stencil_example() -> PathBuf {
     repo_root().join("examples").join("gpu").join("stencil.bld")
 }
 
-/// Resolve `spirv-val` on PATH (Vulkan SDK adds it). Returns the program name
-/// to invoke, or `None` if the tool is not installed -> the caller skips.
-fn spirv_val_available() -> Option<&'static str> {
-    let ok = Command::new("spirv-val")
-        .arg("--version")
+/// True when `BUILDLANG_SHADER_TOOLS_REQUIRE` is `1`: a missing shader tool or
+/// Vulkan device then fails the test instead of skipping it.
+fn shader_tools_required() -> bool {
+    std::env::var("BUILDLANG_SHADER_TOOLS_REQUIRE").as_deref() == Ok("1")
+}
+
+/// What a test does when `missing` (a tool or device) is absent: panic when
+/// `required`, otherwise print a skip line. The caller returns afterwards.
+fn skip_or_fail(test: &str, missing: &str, required: bool) {
+    assert!(
+        !required,
+        "{test}: {missing}, and BUILDLANG_SHADER_TOOLS_REQUIRE is 1"
+    );
+    eprintln!("skipping {test}: {missing}");
+}
+
+/// True iff `program arg` runs and exits 0.
+fn tool_runs(program: &str, arg: &str) -> bool {
+    Command::new(program)
+        .arg(arg)
         .output()
         .map(|o| o.status.success())
-        .unwrap_or(false);
-    if ok {
-        Some("spirv-val")
-    } else {
-        None
+        .unwrap_or(false)
+}
+
+/// Resolve `spirv-val` on PATH (Vulkan SDK adds it). Returns the program name
+/// to invoke, or `None` if the tool is not installed.
+fn spirv_val_available() -> Option<&'static str> {
+    tool_runs("spirv-val", "--version").then_some("spirv-val")
+}
+
+/// `spirv-val` for test `test`, or `None` after a skip; panics instead of
+/// skipping when `BUILDLANG_SHADER_TOOLS_REQUIRE` is 1.
+fn spirv_val_or_skip(test: &str) -> Option<&'static str> {
+    let tool = spirv_val_available();
+    if tool.is_none() {
+        skip_or_fail(test, "spirv-val not on PATH", shader_tools_required());
+    }
+    tool
+}
+
+/// The switch itself: a missing tool must fail the test when it is required.
+#[test]
+#[should_panic(expected = "BUILDLANG_SHADER_TOOLS_REQUIRE is 1")]
+fn missing_tool_fails_when_required() {
+    skip_or_fail("probe", "spirv-val not on PATH", true);
+}
+
+/// And it must only skip when it is not required (the local default).
+#[test]
+fn missing_tool_skips_when_not_required() {
+    skip_or_fail("probe", "spirv-val not on PATH", false);
+}
+
+/// Every shader tool the compute work needs is on PATH. Skips locally; with the
+/// switch set (CI on Linux) a missing tool fails here by name.
+#[test]
+fn shader_tools_on_path() {
+    for (program, arg) in [
+        ("spirv-val", "--version"),
+        ("spirv-as", "--version"),
+        ("glslangValidator", "--version"),
+        ("dxc", "--version"),
+    ] {
+        if !tool_runs(program, arg) {
+            skip_or_fail(
+                "shader_tools_on_path",
+                &format!("{program} not on PATH"),
+                shader_tools_required(),
+            );
+        }
     }
 }
 
@@ -180,8 +244,7 @@ fn spirv_val_ok(tool: &str, spv: &Path) -> (bool, String) {
 
 #[test]
 fn emits_valid_compute_spirv() {
-    let Some(tool) = spirv_val_available() else {
-        eprintln!("skipping emits_valid_compute_spirv: spirv-val not on PATH");
+    let Some(tool) = spirv_val_or_skip("emits_valid_compute_spirv") else {
         return;
     };
     let out = temp_spv("valid");
@@ -202,8 +265,7 @@ fn emits_valid_compute_spirv() {
 /// non-zero exit.
 #[test]
 fn spirv_val_rejects_corrupt_module() {
-    let Some(tool) = spirv_val_available() else {
-        eprintln!("skipping spirv_val_rejects_corrupt_module: spirv-val not on PATH");
+    let Some(tool) = spirv_val_or_skip("spirv_val_rejects_corrupt_module") else {
         return;
     };
     let out = temp_spv("corrupt");
@@ -239,8 +301,7 @@ fn spirv_val_rejects_corrupt_module() {
 /// `saxpy`, not `vec_add`) emits VALID dispatchable compute SPIR-V.
 #[test]
 fn saxpy_emits_valid_compute_spirv() {
-    let Some(tool) = spirv_val_available() else {
-        eprintln!("skipping saxpy_emits_valid_compute_spirv: spirv-val not on PATH");
+    let Some(tool) = spirv_val_or_skip("saxpy_emits_valid_compute_spirv") else {
         return;
     };
     let out = temp_spv("saxpy_valid");
@@ -263,8 +324,7 @@ fn saxpy_emits_valid_compute_spirv() {
 /// SPIR-V typing path.
 #[test]
 fn matmul_emits_valid_compute_spirv() {
-    let Some(tool) = spirv_val_available() else {
-        eprintln!("skipping matmul_emits_valid_compute_spirv: spirv-val not on PATH");
+    let Some(tool) = spirv_val_or_skip("matmul_emits_valid_compute_spirv") else {
         return;
     };
     let out = temp_spv("matmul_valid");
@@ -287,8 +347,7 @@ fn matmul_emits_valid_compute_spirv() {
 /// validates -- the exact structured-control-flow shape the recent fix enables.
 #[test]
 fn stencil_emits_valid_compute_spirv() {
-    let Some(tool) = spirv_val_available() else {
-        eprintln!("skipping stencil_emits_valid_compute_spirv: spirv-val not on PATH");
+    let Some(tool) = spirv_val_or_skip("stencil_emits_valid_compute_spirv") else {
         return;
     };
     let out = temp_spv("stencil_valid");
@@ -317,8 +376,7 @@ fn stencil_emits_valid_compute_spirv() {
 /// `OpSelectionMerge`/`OpLoopMerge`.
 #[test]
 fn loop_in_selection_emits_valid_spirv() {
-    let Some(tool) = spirv_val_available() else {
-        eprintln!("skipping loop_in_selection_emits_valid_spirv: spirv-val not on PATH");
+    let Some(tool) = spirv_val_or_skip("loop_in_selection_emits_valid_spirv") else {
         return;
     };
     let dir = std::env::temp_dir().join(format!("buildlang_gpu_nestcf_{}", std::process::id()));
@@ -400,8 +458,7 @@ fn loop_in_selection_emits_valid_spirv() {
 /// directions, closing the if-in-while / if-else-in-while coverage gap.
 #[test]
 fn selection_in_loop_emits_valid_spirv() {
-    let Some(tool) = spirv_val_available() else {
-        eprintln!("skipping selection_in_loop_emits_valid_spirv: spirv-val not on PATH");
+    let Some(tool) = spirv_val_or_skip("selection_in_loop_emits_valid_spirv") else {
         return;
     };
     let dir = std::env::temp_dir().join(format!("buildlang_gpu_selloop_{}", std::process::id()));
@@ -540,8 +597,7 @@ fn two_scratch_example() -> PathBuf {
 /// workgroup-class variables.
 #[test]
 fn two_same_shape_workgroup_arrays_do_not_alias() {
-    let Some(tool) = spirv_val_available() else {
-        eprintln!("skipping two_same_shape_workgroup_arrays_do_not_alias: spirv-val not on PATH");
+    let Some(tool) = spirv_val_or_skip("two_same_shape_workgroup_arrays_do_not_alias") else {
         return;
     };
     let out = temp_spv("two_scratch");
@@ -580,8 +636,7 @@ fn two_same_shape_workgroup_arrays_do_not_alias() {
 /// cross-check of the summed per-workgroup partials).
 #[test]
 fn reduce_emits_valid_compute_spirv() {
-    let Some(tool) = spirv_val_available() else {
-        eprintln!("skipping reduce_emits_valid_compute_spirv: spirv-val not on PATH");
+    let Some(tool) = spirv_val_or_skip("reduce_emits_valid_compute_spirv") else {
         return;
     };
     let out = temp_spv("reduce_valid");
@@ -614,8 +669,7 @@ fn reduce_emits_valid_compute_spirv() {
 /// vacuous.
 #[test]
 fn reduce_corrupt_barrier_is_rejected() {
-    let Some(tool) = spirv_val_available() else {
-        eprintln!("skipping reduce_corrupt_barrier_is_rejected: spirv-val not on PATH");
+    let Some(tool) = spirv_val_or_skip("reduce_corrupt_barrier_is_rejected") else {
         return;
     };
     let out = temp_spv("reduce_corrupt_barrier");
@@ -694,8 +748,7 @@ fn reduce_corrupt_barrier_is_rejected() {
 /// this left-literal shape needs its own guard.
 #[test]
 fn left_literal_unsigned_binop_emits_valid_spirv() {
-    let Some(tool) = spirv_val_available() else {
-        eprintln!("skipping left_literal_unsigned_binop_emits_valid_spirv: spirv-val not on PATH");
+    let Some(tool) = spirv_val_or_skip("left_literal_unsigned_binop_emits_valid_spirv") else {
         return;
     };
     let dir = std::env::temp_dir().join(format!("buildlang_gpu_litleft_{}", std::process::id()));
@@ -848,10 +901,19 @@ mod device {
         stdout.contains("gpu      ready")
     }
 
+    /// True when a device is present; otherwise skips, or panics when
+    /// `BUILDLANG_SHADER_TOOLS_REQUIRE` is 1 (CI installs Mesa lavapipe).
+    fn vulkan_device_or_skip(test: &str) -> bool {
+        let present = vulkan_device_available();
+        if !present {
+            skip_or_fail(test, "no Vulkan device", shader_tools_required());
+        }
+        present
+    }
+
     #[test]
     fn gpu_matches_cpu_within_tolerance() {
-        if !vulkan_device_available() {
-            eprintln!("skipping gpu_matches_cpu_within_tolerance: no Vulkan device");
+        if !vulkan_device_or_skip("gpu_matches_cpu_within_tolerance") {
             return;
         }
         let output = buildc()
@@ -882,8 +944,7 @@ mod device {
     /// cross-check MUST report a mismatch and exit non-zero.
     #[test]
     fn wrong_gpu_result_is_caught() {
-        if !vulkan_device_available() {
-            eprintln!("skipping wrong_gpu_result_is_caught: no Vulkan device");
+        if !vulkan_device_or_skip("wrong_gpu_result_is_caught") {
             return;
         }
         let output = buildc()
@@ -908,8 +969,7 @@ mod device {
     /// real hardware.
     #[test]
     fn saxpy_gpu_matches_cpu() {
-        if !vulkan_device_available() {
-            eprintln!("skipping saxpy_gpu_matches_cpu: no Vulkan device");
+        if !vulkan_device_or_skip("saxpy_gpu_matches_cpu") {
             return;
         }
         let output = buildc()
@@ -935,8 +995,7 @@ mod device {
     /// MUST be caught by the tolerance gate (non-zero exit).
     #[test]
     fn wrong_saxpy_result_is_caught() {
-        if !vulkan_device_available() {
-            eprintln!("skipping wrong_saxpy_result_is_caught: no Vulkan device");
+        if !vulkan_device_or_skip("wrong_saxpy_result_is_caught") {
             return;
         }
         let output = buildc()
@@ -962,8 +1021,7 @@ mod device {
     /// the same body agree. Both verdicts must appear in the output.
     #[test]
     fn matmul_gpu_matches_cpu() {
-        if !vulkan_device_available() {
-            eprintln!("skipping matmul_gpu_matches_cpu: no Vulkan device");
+        if !vulkan_device_or_skip("matmul_gpu_matches_cpu") {
             return;
         }
         let output = buildc()
@@ -993,8 +1051,7 @@ mod device {
     /// MUST be caught by the tolerance gate (non-zero exit).
     #[test]
     fn wrong_matmul_result_is_caught() {
-        if !vulkan_device_available() {
-            eprintln!("skipping wrong_matmul_result_is_caught: no Vulkan device");
+        if !vulkan_device_or_skip("wrong_matmul_result_is_caught") {
             return;
         }
         let output = buildc()
@@ -1023,8 +1080,7 @@ mod device {
     /// in-range output. Dims are square (m == k) so identity holds exactly.
     #[test]
     fn matmul_nonmultiple_dims_match_cpu() {
-        if !vulkan_device_available() {
-            eprintln!("skipping matmul_nonmultiple_dims_match_cpu: no Vulkan device");
+        if !vulkan_device_or_skip("matmul_nonmultiple_dims_match_cpu") {
             return;
         }
         let output = buildc()
@@ -1066,8 +1122,7 @@ mod device {
     /// non-multiple PASS above is a real agreement, not a gate that never fires.
     #[test]
     fn wrong_nonmultiple_matmul_result_is_caught() {
-        if !vulkan_device_available() {
-            eprintln!("skipping wrong_nonmultiple_matmul_result_is_caught: no Vulkan device");
+        if !vulkan_device_or_skip("wrong_nonmultiple_matmul_result_is_caught") {
             return;
         }
         let output = buildc()
@@ -1097,8 +1152,7 @@ mod device {
     /// lowerings of the same body agree. Both verdicts must appear in the output.
     #[test]
     fn stencil_gpu_matches_cpu() {
-        if !vulkan_device_available() {
-            eprintln!("skipping stencil_gpu_matches_cpu: no Vulkan device");
+        if !vulkan_device_or_skip("stencil_gpu_matches_cpu") {
             return;
         }
         let output = buildc()
@@ -1134,8 +1188,7 @@ mod device {
     /// out-of-range `a[i-1]`/`a[i+1]` read -- produced the edge values.
     #[test]
     fn stencil_clamped_boundary_is_exact() {
-        if !vulkan_device_available() {
-            eprintln!("skipping stencil_clamped_boundary_is_exact: no Vulkan device");
+        if !vulkan_device_or_skip("stencil_clamped_boundary_is_exact") {
             return;
         }
         let output = buildc()
@@ -1189,8 +1242,7 @@ mod device {
     /// never fires.
     #[test]
     fn wrong_stencil_result_is_caught() {
-        if !vulkan_device_available() {
-            eprintln!("skipping wrong_stencil_result_is_caught: no Vulkan device");
+        if !vulkan_device_or_skip("wrong_stencil_result_is_caught") {
             return;
         }
         let output = buildc()
@@ -1258,8 +1310,7 @@ mod device {
 
     #[test]
     fn gpu_receipt_verifies_and_detects_tamper() {
-        if !vulkan_device_available() {
-            eprintln!("skipping gpu_receipt_verifies_and_detects_tamper: no Vulkan device");
+        if !vulkan_device_or_skip("gpu_receipt_verifies_and_detects_tamper") {
             return;
         }
         let receipt =

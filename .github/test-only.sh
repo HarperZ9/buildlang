@@ -16,7 +16,7 @@ if [ "${IS_MAIN:-false}" != "true" ] && [ -n "${HEAD_SHA:-}" ]; then
 fi
 
 if [ -z "$only" ]; then
-  exec cargo test -- --skip spirv::tests::test_triangle --skip spirv::tests::test_write
+  exec cargo test
 fi
 
 if [ ! -f "tests/$only.rs" ]; then

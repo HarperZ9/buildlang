@@ -13,7 +13,48 @@ concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  # DXC pinned for the shader tests: DirectXShaderCompiler v1.9.2609
+  # (2026-09-29), Linux x86_64 build. .github/install-shader-tools.sh refuses
+  # a download whose SHA-256 differs.
+  DXC_TAG: v1.9.2609
+  DXC_ASSET: linux_dxc_2026_09_28.x86_x64.tar.gz
+  DXC_SHA256: 96faadc7f5c282d2ffda49804beb4c3ee38127bc252b723234e3c5cdf7aa39a1
+
 jobs:
+  skips:
+    # Every skipped test links its issue; the self-test plants two unlinked
+    # skips and two linked ones and needs the first refused, the second accepted.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: The skip check refuses planted unlinked skips
+        run: bash .github/check-skips.sh --self-test
+      - name: Every skip in this repository links an issue
+        run: bash .github/check-skips.sh
+
+  gpu-device:
+    # The device tests in compiler/tests/gpu.rs (feature `gpu`) dispatch on
+    # Mesa lavapipe and cross-check the CPU. A missing tool or device fails.
+    runs-on: ubuntu-latest
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: compiler
+          key: gpu-feature
+      - name: Install shader tools and lavapipe
+        run: bash .github/install-shader-tools.sh
+      - name: GPU tests on lavapipe
+        working-directory: compiler
+        env:
+          BUILDLANG_SHADER_TOOLS_REQUIRE: '1'
+        run: cargo test --features gpu --test gpu
+
+
   lint:
     runs-on: ubuntu-latest
     env:
@@ -58,11 +99,17 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: compiler
+      - name: Install shader tools
+        if: runner.os == 'Linux'
+        run: bash .github/install-shader-tools.sh
       - name: Run tests
         working-directory: compiler
         env:
           # A fuzz run skipped for want of a C compiler fails on Linux.
           BUILDLANG_FUZZ_REQUIRE_CC: ${{ runner.os == 'Linux' && '1' || '0' }}
+          # A shader test skipped for want of spirv-val, glslang, DXC or a
+          # Vulkan device fails on Linux, where the step above installs them.
+          BUILDLANG_SHADER_TOOLS_REQUIRE: ${{ runner.os == 'Linux' && '1' || '0' }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
           IS_MAIN: ${{ github.ref == 'refs/heads/main' }}
         shell: bash
