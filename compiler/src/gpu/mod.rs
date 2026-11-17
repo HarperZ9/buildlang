@@ -78,9 +78,40 @@ enum KernelParam {
 struct KernelSig {
     entry: String,
     params: Vec<KernelParam>,
+    /// The group size from `#[compute(workgroup_size = [x, y, z])]`, or
+    /// `None` for a bare `#[compute]` (the backend's default size).
+    local_size: Option<[u32; 3]>,
 }
 
 impl KernelSig {
+    /// The (x, y) group size the device runs this kernel with: the declared
+    /// size, else `default` (the size the SPIR-V backend picks for a bare
+    /// `#[compute]`). The host dispatches 2D grids only, so a declared z other
+    /// than 1 is refused.
+    fn local_xy(&self, default: (u32, u32)) -> Result<(u32, u32), String> {
+        match self.local_size {
+            None => Ok(default),
+            Some([x, y, 1]) => Ok((x, y)),
+            Some([_, _, z]) => Err(format!(
+                "the --gpu path dispatches 1D and 2D grids; `{}` declares workgroup_size z = {z}",
+                self.entry
+            )),
+        }
+    }
+
+    /// The x group size of a 1D kernel; a declared y other than 1 is refused,
+    /// because the 1D drivers index the grid by x alone.
+    fn local_x_1d(&self) -> Result<u32, String> {
+        let (x, y) = self.local_xy((LOCAL_SIZE_X, 1))?;
+        if y != 1 {
+            return Err(format!(
+                "`{}` reads only gl_GlobalInvocationID.x but declares workgroup_size y = {y}; a 1D kernel takes [x, 1, 1]",
+                self.entry
+            ));
+        }
+        Ok(x)
+    }
+
     /// Buffer parameters in declaration order (the descriptor bindings 0..N).
     fn buffers(&self) -> impl Iterator<Item = (&str, bool, ScalarKind)> {
         self.params.iter().filter_map(|p| match p {
@@ -173,6 +204,7 @@ fn discover_kernel_sig(source_path: &Path) -> Result<KernelSig, String> {
     let tokens = lexer.tokenize().map_err(|e| format!("lex: {e}"))?;
     let mut parser = Parser::new(&source_file, tokens);
     let module = parser.parse().map_err(|e| format!("parse: {e}"))?;
+    let source_text = source_file.source();
 
     let mut found: Option<KernelSig> = None;
     for item in &module.items {
@@ -198,6 +230,8 @@ fn discover_kernel_sig(source_path: &Path) -> Result<KernelSig, String> {
         }
 
         let entry = f.name.name.to_string();
+        let local_size =
+            buildlang::codegen::compute_attr::workgroup_size_of(&item.attrs, Some(source_text))?;
         let mut params = Vec::with_capacity(f.sig.params.len());
         for p in &f.sig.params {
             let name = match &p.pattern.kind {
@@ -234,7 +268,11 @@ fn discover_kernel_sig(source_path: &Path) -> Result<KernelSig, String> {
                 }
             }
         }
-        found = Some(KernelSig { entry, params });
+        found = Some(KernelSig {
+            entry,
+            params,
+            local_size,
+        });
     }
 
     found.ok_or_else(|| "no `#[compute]` kernel found in the file".to_string())
@@ -445,6 +483,8 @@ fn cpu_c_reference(
 int main(void) {{
 {decls}    for (uint32_t i = 0; i < {n}; ++i) {{
         buildc_gl_global_invocation_x = i;
+        buildc_gl_local_invocation_x = i % {lx}u;
+        buildc_gl_workgroup_x = i / {lx}u;
         {entry}({args});
     }}
     for (size_t i = 0; i < {n}; ++i) {{
@@ -460,12 +500,16 @@ int main(void) {{
         args = call_args.join(", "),
         out = out_name,
         n = n,
+        lx = sig.local_x_1d()?,
     );
 
     // The emitted kernel names its slices `BlSlice_f32`; the prelude makes that
     // name an alias of `bl_slice_f32`, so a buffer passes with no cast. A C
     // compiler error here is a hard error surfaced to the user.
-    let dir = std::env::temp_dir().join(format!("buildlang_gpu_cpu_{}", std::process::id()));
+    // One directory per call: unit tests run this concurrently in one process.
+    static CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let call = CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("buildlang_gpu_cpu_{}_{call}", std::process::id()));
     std::fs::create_dir_all(&dir).map_err(|e| format!("create temp dir: {e}"))?;
     let c_path = dir.join("cpu_ref.c");
     std::fs::write(&c_path, driver).map_err(|e| format!("write cpu_ref.c: {e}"))?;
@@ -557,9 +601,18 @@ fn driver_prelude() -> &'static str {
 #include <stddef.h>
 #include <stdbool.h>
 
-/* Ambient GPU thread-index vars the kernel body reads; the driver sets them per invocation. */
+/* Ambient GPU thread-index vars the kernel body reads; the driver sets them per invocation.
+   Local and workgroup indices follow the kernel's group size: local = global % size,
+   workgroup = global / size, per axis. */
 uint32_t buildc_gl_global_invocation_x;
 uint32_t buildc_gl_global_invocation_y;
+uint32_t buildc_gl_global_invocation_z;
+uint32_t buildc_gl_local_invocation_x;
+uint32_t buildc_gl_local_invocation_y;
+uint32_t buildc_gl_local_invocation_z;
+uint32_t buildc_gl_workgroup_x;
+uint32_t buildc_gl_workgroup_y;
+uint32_t buildc_gl_workgroup_z;
 
 typedef struct { float* ptr; size_t len; } bl_slice_f32;
 typedef bl_slice_f32 BlSlice_f32;
@@ -619,6 +672,7 @@ fn cpu_c_matmul_reference(
     k: usize,
     n: usize,
 ) -> Result<Vec<f32>, String> {
+    let local = sig.local_xy(LOCAL_SIZE_2D)?;
     let fmt_arr = |v: &[f32]| -> String {
         v.iter()
             .map(|x| format!("{:.9}f", x))
@@ -675,6 +729,10 @@ int main(void) {{
         for (uint32_t gx = 0; gx < n; ++gx) {{
             buildc_gl_global_invocation_y = gy;
             buildc_gl_global_invocation_x = gx;
+            buildc_gl_local_invocation_y = gy % {ly}u;
+            buildc_gl_local_invocation_x = gx % {lx}u;
+            buildc_gl_workgroup_y = gy / {ly}u;
+            buildc_gl_workgroup_x = gx / {lx}u;
             {entry}({args});
         }}
     }}
@@ -690,6 +748,8 @@ int main(void) {{
         entry = sig.entry,
         args = call_args.join(", "),
         out = c_name,
+        lx = local.0,
+        ly = local.1,
     );
 
     let dir = std::env::temp_dir().join(format!("buildlang_gpu_mm_{}", std::process::id()));
@@ -808,11 +868,16 @@ fn run_matmul_cross_check(
     // 2. SHAPE VALIDATION (device-free): A = m*k, B = k*n, C = m*n. A mismatch
     //    would read/write out of bounds on the device, so refuse before dispatch.
     let c_zero = vec![0.0f32; m * n];
-    vulkan_host::validate_matmul_shapes(m, k, n, a.len(), b.len(), c_zero.len(), LOCAL_SIZE_2D)
-        .map_err(|e| {
+    let local = sig.local_xy(LOCAL_SIZE_2D).map_err(|e| {
+        eprintln!("GPU: {e}");
+        1
+    })?;
+    vulkan_host::validate_matmul_shapes(m, k, n, a.len(), b.len(), c_zero.len(), local).map_err(
+        |e| {
             eprintln!("GPU: {e}");
             1
-        })?;
+        },
+    )?;
 
     let buffer_args = vec![
         vulkan_host::BufferArg {
@@ -839,7 +904,7 @@ fn run_matmul_cross_check(
         &buffer_args,
         &push_bytes,
         vulkan_host::Grid::D2 { gx: n, gy: m },
-        LOCAL_SIZE_2D,
+        local,
     )
     .map_err(|e| {
         eprintln!("GPU: matmul device dispatch failed: {e}");
@@ -1017,6 +1082,8 @@ fn cpu_c_stencil_reference(
 int main(void) {{
 {decls}    for (uint32_t i = 0; i < {n}; ++i) {{
         buildc_gl_global_invocation_x = i;
+        buildc_gl_local_invocation_x = i % {lx}u;
+        buildc_gl_workgroup_x = i / {lx}u;
         {entry}({args});
     }}
     for (size_t i = 0; i < {n}; ++i) {{
@@ -1031,6 +1098,7 @@ int main(void) {{
         entry = sig.entry,
         args = call_args.join(", "),
         out = out_name,
+        lx = sig.local_x_1d()?,
     );
 
     let dir = std::env::temp_dir().join(format!("buildlang_gpu_stencil_{}", std::process::id()));
@@ -1091,6 +1159,10 @@ fn run_stencil_cross_check(
     emit_receipt: Option<&Path>,
 ) -> Result<(), i32> {
     let n = parse_stencil_n_override().unwrap_or(STENCIL_N);
+    let local_x = sig.local_x_1d().map_err(|e| {
+        eprintln!("GPU: {e}");
+        1
+    })?;
 
     // Ramp input a[i] = i + 1: distinct, small, exactly-representable f32 values,
     // so a mis-indexed or unclamped kernel would visibly diverge from the closed
@@ -1128,7 +1200,7 @@ fn run_stencil_cross_check(
         &buffer_args,
         &push_bytes,
         vulkan_host::Grid::D1(n),
-        (LOCAL_SIZE_X, 1),
+        (local_x, 1),
     )
     .map_err(|e| {
         eprintln!("GPU: stencil device dispatch failed: {e}");
@@ -1288,6 +1360,12 @@ pub fn run_gpu_cross_check(file: &Path, emit_receipt: Option<&Path>) -> Result<(
         return run_stencil_cross_check(file, &sig, emit_receipt);
     }
 
+    // The group size the device runs: declared by the attribute, else 64.
+    let local_x = sig.local_x_1d().map_err(|e| {
+        eprintln!("GPU: {e}");
+        1
+    })?;
+
     // 1. Fixed, checkable inputs, derived from the signature. Each read-only
     //    input buffer gets a distinct deterministic fill; each scalar a fixed
     //    value; the output buffer starts zeroed.
@@ -1348,7 +1426,7 @@ pub fn run_gpu_cross_check(file: &Path, emit_receipt: Option<&Path>) -> Result<(
         &buffer_args,
         &push_bytes,
         vulkan_host::Grid::D1(N),
-        (LOCAL_SIZE_X, 1),
+        (local_x, 1),
     )
     .map_err(|e| {
         eprintln!("GPU: device dispatch failed: {e}");

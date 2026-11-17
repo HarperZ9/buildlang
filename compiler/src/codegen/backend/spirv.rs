@@ -564,6 +564,16 @@ pub enum SpvMemorySemantics {
 // SPIR-V BACKEND
 // =============================================================================
 
+/// One compute entry's resource maps, saved after its interface is set up and
+/// restored when its body is generated.
+#[derive(Clone)]
+struct ComputeEntryState {
+    buffers: HashMap<LocalId, ComputeBuffer>,
+    push_constants: HashMap<LocalId, ComputePushConstant>,
+    pc_var: Option<u32>,
+    workgroup_slots: HashMap<LocalId, WorkgroupSlot>,
+}
+
 /// A compute-kernel StorageBuffer binding mapped from a slice/array parameter.
 #[derive(Clone)]
 struct ComputeBuffer {
@@ -672,6 +682,17 @@ pub struct SpirvBackend {
     /// `gen_workgroup_element_ptr` -- NOT the SSBO path. Added in Phase 4a.
     workgroup_slots: HashMap<LocalId, WorkgroupSlot>,
 
+    /// The four compute maps above as `setup_shader_io` left them for each
+    /// compute entry, by entry name. Entry setup runs for every entry before
+    /// any body is generated, so `gen_function` restores the entry's own maps;
+    /// without this a module with two kernels emitted the first kernel's body
+    /// against the second kernel's buffers.
+    compute_entry_states: HashMap<Arc<str>, ComputeEntryState>,
+    /// Compute SSBO variables by (set, binding, element type, writable). Two
+    /// entries may put different buffers at one binding; each gets its own
+    /// variable, and entries that agree share one.
+    compute_ssbo_ids: HashMap<(u32, u32, String, bool), u32>,
+
     // == Layout-ordered section buffers (SPIR-V requires strict instruction order) ==
     /// Collected debug instructions (OpName, OpMemberName) -- layout section 7.
     pending_names: Vec<u32>,
@@ -703,24 +724,27 @@ pub struct SpirvBackend {
 /// thread-index read is always an `Assign { value: NullaryOp(ThreadIndex(c)) }`
 /// after lowering, so scanning assignment rvalues is sufficient.
 fn mir_reads_thread_axis_ge(mir: &MirModule, axis: u32) -> bool {
-    mir.functions.iter().any(|f| {
-        f.blocks.as_ref().is_some_and(|blocks| {
-            blocks.iter().any(|b| {
-                b.stmts.iter().any(|s| match &s.kind {
-                    MirStmtKind::Assign { value, .. }
-                    | MirStmtKind::DerefAssign { value, .. }
-                    | MirStmtKind::FieldDerefAssign { value, .. }
-                    | MirStmtKind::FieldAssign { value, .. } => {
-                        matches!(
-                            value,
-                            MirRValue::NullaryOp(NullaryOp::ThreadIndex(c), _) if *c >= axis
-                        )
-                    }
-                    _ => false,
+    mir.functions
+        .iter()
+        .filter(|f| f.workgroup_size.is_none())
+        .any(|f| {
+            f.blocks.as_ref().is_some_and(|blocks| {
+                blocks.iter().any(|b| {
+                    b.stmts.iter().any(|s| match &s.kind {
+                        MirStmtKind::Assign { value, .. }
+                        | MirStmtKind::DerefAssign { value, .. }
+                        | MirStmtKind::FieldDerefAssign { value, .. }
+                        | MirStmtKind::FieldAssign { value, .. } => {
+                            matches!(
+                                value,
+                                MirRValue::NullaryOp(NullaryOp::ThreadIndex(c), _) if *c >= axis
+                            )
+                        }
+                        _ => false,
+                    })
                 })
             })
         })
-    })
 }
 
 impl SpirvBackend {
@@ -769,6 +793,8 @@ impl SpirvBackend {
             compute_push_constants: HashMap::new(),
             compute_pc_var: None,
             workgroup_slots: HashMap::new(),
+            compute_entry_states: HashMap::new(),
+            compute_ssbo_ids: HashMap::new(),
             pending_names: Vec::new(),
             pending_annotations: Vec::new(),
             pending_globals: Vec::new(),
@@ -829,6 +855,8 @@ impl SpirvBackend {
         self.compute_push_constants.clear();
         self.compute_pc_var = None;
         self.workgroup_slots.clear();
+        self.compute_entry_states.clear();
+        self.compute_ssbo_ids.clear();
         self.pending_names.clear();
         self.pending_annotations.clear();
         self.pending_globals.clear();
@@ -1981,8 +2009,13 @@ impl SpirvBackend {
         elem_ty: &MirType,
         writable: bool,
     ) -> u32 {
-        let key = (set, binding);
-        if let Some(&id) = self.buffer_bindings.get(&key) {
+        // Keyed by element type and writability as well as the binding: two
+        // compute entries in one module number their buffers from 0 each, and
+        // binding 0 may be a read-only `&[f32]` in one and a `&mut [u32]` in
+        // the other. Reusing the first variable would give the second entry
+        // the wrong type and the wrong NonWritable decoration.
+        let key = (set, binding, format!("{elem_ty:?}"), writable);
+        if let Some(&id) = self.compute_ssbo_ids.get(&key) {
             return id;
         }
 
@@ -2029,7 +2062,7 @@ impl SpirvBackend {
             self.emit_decoration(var_id, SpvDecoration::NonWritable, &[]);
         }
 
-        self.buffer_bindings.insert(key, var_id);
+        self.compute_ssbo_ids.insert(key, var_id);
         var_id
     }
 
@@ -2130,6 +2163,24 @@ impl SpirvBackend {
 
         self.local_ids.clear();
         self.block_ids.clear();
+
+        // A compute entry's body reads its own buffers, push constants and
+        // workgroup arrays; any other function reads none of them (its
+        // parameters are values, and a LocalId means nothing across functions).
+        match self.compute_entry_states.get(&func.name).cloned() {
+            Some(state) => {
+                self.compute_buffers = state.buffers;
+                self.compute_push_constants = state.push_constants;
+                self.compute_pc_var = state.pc_var;
+                self.workgroup_slots = state.workgroup_slots;
+            }
+            None => {
+                self.compute_buffers.clear();
+                self.compute_push_constants.clear();
+                self.compute_pc_var = None;
+                self.workgroup_slots.clear();
+            }
+        }
 
         // Shader entry points have special handling:
         // - Must return void (outputs go to Output variables)
@@ -5013,6 +5064,15 @@ impl SpirvBackend {
                         .insert(local.id, WorkgroupSlot { var_id, elem_ty });
                 }
             }
+            self.compute_entry_states.insert(
+                func.name.clone(),
+                ComputeEntryState {
+                    buffers: self.compute_buffers.clone(),
+                    push_constants: self.compute_push_constants.clone(),
+                    pc_var: self.compute_pc_var,
+                    workgroup_slots: self.workgroup_slots.clone(),
+                },
+            );
             return;
         }
 
@@ -5445,6 +5505,12 @@ impl Backend for SpirvBackend {
         // dispatches over a 2D grid, so give it a 2D local size (16x16x1) instead
         // of the 1D default (64x1x1). Group counts on the host mirror this
         // (div_ceil per axis). Purely additive: 1D kernels keep (64,1,1).
+        //
+        // This is the size of an entry WITHOUT `#[compute(workgroup_size = ..)]`.
+        // An entry with the attribute gets exactly the size it declares (see
+        // the execution modes below), and its body is left out of this scan so
+        // a declared 2D entry does not turn a bare 1D entry in the same file
+        // into 16x16x1. A file with no attribute scans what it always scanned.
         if has_shaders && mir_reads_thread_axis_ge(mir, 1) {
             self.workgroup_size = (16, 16, 1);
         }
@@ -5552,8 +5618,12 @@ impl Backend for SpirvBackend {
         }
 
         // -- Sections 5-6: entry points and execution modes -------------------
-        // Collect into a separate buffer so they stay before debug/annotations.
+        // Collect into separate buffers so they stay before debug/annotations.
+        // Every OpEntryPoint must precede every OpExecutionMode (logical
+        // layout sections 5 and 6), so with several entries the modes are
+        // held back and appended after the last entry point.
         let mut entry_point_buf: Vec<u32> = Vec::new();
+        let mut exec_mode_buf: Vec<u32> = Vec::new();
 
         for func in &mir.functions {
             // When shader stages are present, only shader-annotated functions
@@ -5584,24 +5654,23 @@ impl Backend for SpirvBackend {
                 operands.extend_from_slice(&self.io_var_ids);
                 Self::emit_to(&mut entry_point_buf, SpvOp::OpEntryPoint, &operands);
 
-                // Execution mode (section 6) -- into entry_point_buf
+                // Execution mode (section 6) -- into exec_mode_buf
                 match exec_model {
                     SpvExecutionModel::GLCompute | SpvExecutionModel::Kernel => {
+                        // The entry's declared size, else the module default.
+                        let (x, y, z) = func
+                            .workgroup_size
+                            .map(|[x, y, z]| (x, y, z))
+                            .unwrap_or(self.workgroup_size);
                         Self::emit_to(
-                            &mut entry_point_buf,
+                            &mut exec_mode_buf,
                             SpvOp::OpExecutionMode,
-                            &[
-                                func_id,
-                                SpvExecutionMode::LocalSize as u32,
-                                self.workgroup_size.0,
-                                self.workgroup_size.1,
-                                self.workgroup_size.2,
-                            ],
+                            &[func_id, SpvExecutionMode::LocalSize as u32, x, y, z],
                         );
                     }
                     SpvExecutionModel::Fragment => {
                         Self::emit_to(
-                            &mut entry_point_buf,
+                            &mut exec_mode_buf,
                             SpvOp::OpExecutionMode,
                             &[func_id, SpvExecutionMode::OriginUpperLeft as u32],
                         );
@@ -5640,6 +5709,7 @@ impl Backend for SpirvBackend {
 
         // Section 5-6: entry points + execution modes
         self.output.extend_from_slice(&entry_point_buf);
+        self.output.extend_from_slice(&exec_mode_buf);
 
         // Section 7: debug names (OpName, OpMemberName)
         self.output.extend_from_slice(&self.pending_names);

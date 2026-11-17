@@ -2790,6 +2790,32 @@ impl<'ctx> MirLowerer<'ctx> {
         None
     }
 
+    /// The group size `#[compute(workgroup_size = [x, y, z])]` declares on `f`,
+    /// or a refusal located at the attribute.
+    fn lower_workgroup_size(
+        &self,
+        f: &ast::FnDef,
+        attrs: &[ast::Attribute],
+    ) -> Result<Option<[u32; 3]>, crate::codegen::CodegenError> {
+        use crate::codegen::compute_attr;
+        compute_attr::workgroup_size_of(attrs, self.source.as_deref()).map_err(|message| {
+            let span = attrs
+                .iter()
+                .find(|a| compute_attr::has_stage_attr(std::slice::from_ref(*a)))
+                .map(|a| a.span)
+                .unwrap_or(f.name.span);
+            crate::codegen::CodegenError::Rejected {
+                message,
+                location: (span.end.0 > span.start.0).then_some((span.start.0, span.end.0)),
+                help: Some(
+                    "write `#[compute(workgroup_size = [x, y, z])]` with each dimension at least 1, \
+                     x and y at most 1024, z at most 64, and x * y * z at most 1024"
+                        .to_string(),
+                ),
+            }
+        })
+    }
+
     /// Extract uniform binding info from attributes: #[uniform(binding = N, set = M)]
     fn extract_uniform_binding(&self, attrs: &[ast::Attribute]) -> Option<(u32, u32)> {
         for attr in attrs {
@@ -3110,6 +3136,9 @@ impl<'ctx> MirLowerer<'ctx> {
             if func.shader_stage.is_some() {
                 func.is_public = true; // shader entry points must be public
             }
+            // `#[compute(workgroup_size = [x, y, z])]`: the entry's own group
+            // size. A bad size, or two stage attributes, is refused here.
+            func.workgroup_size = self.lower_workgroup_size(f, attrs)?;
 
             self.module.add_function(func);
 

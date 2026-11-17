@@ -1,0 +1,22 @@
+// ============================================================================
+// BUILDLANG COMPUTE SHADER - LANE IDS, a kernel whose output is its group size
+// ============================================================================
+// out[i] = lane + 100 * group, where lane is the invocation's index inside its
+// workgroup (gl_LocalInvocationID.x) and group is the workgroup's index
+// (gl_WorkgroupID.x). With `workgroup_size = [32, 1, 1]` element 33 is
+// 1 + 100 * 1 = 101; with 16 it would be 1 + 100 * 2 = 201. So the output shows
+// which group size the device ran, and the `--gpu` cross-check (CPU-C driver
+// with lane = i % 32, group = i / 32) fails if the emitted LocalSize differs
+// from the declared one.
+//
+//   buildc examples/gpu/lane_ids.bld --target spirv -o lane_ids.spv
+//   buildc run examples/gpu/lane_ids.bld --gpu
+// ============================================================================
+
+#[compute(workgroup_size = [32, 1, 1])]
+fn lane_ids(a: &[f32], out: &mut [f32]) ~ Gpu {
+    let i = gl_GlobalInvocationID.x;
+    let lane = gl_LocalInvocationID.x;
+    let group = gl_WorkgroupID.x;
+    out[i] = a[i] * 0.0 + (lane as f32) + 100.0 * (group as f32);
+}

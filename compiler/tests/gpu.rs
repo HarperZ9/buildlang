@@ -967,6 +967,41 @@ mod device {
         );
     }
 
+    /// `#[compute(workgroup_size = [32, 1, 1])]` on the device: `lane_ids`
+    /// writes lane + 100 * group, which depends on the group size, and the
+    /// CPU-C driver computes lane = i % 32, group = i / 32. Agreement means the
+    /// device ran 32 x 1 x 1 groups. An emitted LocalSize other than the
+    /// declared one (for example x and y swapped, 1 x 32 x 1) leaves most
+    /// elements unwritten and fails the agreement gate.
+    #[test]
+    fn declared_group_size_runs_on_the_device() {
+        if !vulkan_device_or_skip("declared_group_size_runs_on_the_device") {
+            return;
+        }
+        let output = buildc()
+            .arg("run")
+            .arg(
+                repo_root()
+                    .join("examples")
+                    .join("gpu")
+                    .join("lane_ids.bld"),
+            )
+            .arg("--gpu")
+            .output()
+            .expect("run buildc run --gpu on lane_ids");
+        assert!(
+            output.status.success(),
+            "lane_ids on the device should agree with the CPU-C driver\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains("gpu-cpu agreement: PASS"),
+            "expected the agreement verdict\nstdout:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+        );
+    }
+
     /// Phase 1: the arbitrary-elementwise `saxpy` kernel (scalar push constant +
     /// two inputs + one output) dispatches on the physical device and agrees
     /// with the CPU-C scalar loop within tolerance. Proves the generalized path

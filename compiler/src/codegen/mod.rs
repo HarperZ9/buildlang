@@ -51,6 +51,7 @@ pub(crate) mod analysis;
 pub mod backend;
 pub mod builder;
 pub mod c_verify;
+pub mod compute_attr;
 pub mod debug;
 pub mod ir;
 pub mod lower;
@@ -82,6 +83,9 @@ pub struct CodeGenerator<'ctx> {
     pub reshade: bool,
     /// Emit WebAssembly text (WAT) instead of a binary module for the wasm target.
     pub wasm_text: bool,
+    /// `--entry NAME`: keep only this shader entry point; the others stop
+    /// being entries. `None` keeps every entry.
+    pub entry: Option<String>,
     /// Errors from the MIR `#[linear]` checker (`codegen::analysis::linear`),
     /// populated by `generate()` right after `lower_module`. Non-empty means
     /// the program is linearity-invalid: callers must treat this as a compile
@@ -106,6 +110,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             source: None,
             reshade: false,
             wasm_text: false,
+            entry: None,
             linear_errors: Vec::new(),
             further_rejections: Vec::new(),
         }
@@ -121,6 +126,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             source: Some(source),
             reshade: false,
             wasm_text: false,
+            entry: None,
             linear_errors: Vec::new(),
             further_rejections: Vec::new(),
         }
@@ -207,6 +213,16 @@ impl<'ctx> CodeGenerator<'ctx> {
     }
 
     pub fn generate(&mut self, module: &ast::Module) -> CodegenResult<GeneratedCode> {
+        // Two shader entry points of one name: an entry is found by name, so
+        // refuse before lowering (overloads are mangled apart in MIR).
+        if let Some((message, span)) = compute_attr::duplicate_entry(module) {
+            return Err(CodegenError::Rejected {
+                message,
+                location: (span.end.0 > span.start.0).then_some((span.start.0, span.end.0)),
+                help: Some("rename one of the entry points".to_string()),
+            });
+        }
+
         // Lower AST to MIR
         let lowerer = if let Some(ref source) = self.source {
             MirLowerer::with_source(self.ctx, source.clone())
@@ -222,6 +238,18 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
         };
         self.mir = Some(mir);
+
+        if let Some(entry) = self.entry.as_deref() {
+            let mir = self.mir.as_mut().expect("MIR was just stored");
+            compute_attr::select_entry(mir, entry).map_err(|message| CodegenError::Rejected {
+                message,
+                location: None,
+                help: Some(
+                    "pass the name of a `#[compute]`, `#[vertex]` or `#[fragment]` function"
+                        .to_string(),
+                ),
+            })?;
+        }
 
         // Select backend and generate
         let mir = self.mir.as_ref().unwrap();

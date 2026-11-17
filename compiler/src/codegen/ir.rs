@@ -277,6 +277,12 @@ pub struct MirFunction {
     pub linkage: Linkage,
     /// Optional GPU shader stage (vertex, fragment, compute).
     pub shader_stage: Option<ShaderStage>,
+    /// Compute group size from `#[compute(workgroup_size = [x, y, z])]`.
+    /// `None` for a bare `#[compute]`: the backend then picks the size it
+    /// always has. Skipped during serialization when absent so MIR without
+    /// the attribute is unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workgroup_size: Option<[u32; 3]>,
     /// Shader resource bindings (uniform buffers, textures, samplers).
     pub bindings: Vec<ShaderBinding>,
     /// Backing C header for a foreign declaration, from an extern block's
@@ -355,6 +361,7 @@ impl MirFunction {
             is_public: false,
             linkage: Linkage::Internal,
             shader_stage: None,
+            workgroup_size: None,
             bindings: Vec::new(),
             link_header: None,
             link_lib: None,
@@ -374,6 +381,7 @@ impl MirFunction {
             is_public: false,
             linkage: Linkage::External,
             shader_stage: None,
+            workgroup_size: None,
             bindings: Vec::new(),
             link_header: None,
             link_lib: None,

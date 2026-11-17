@@ -1,0 +1,38 @@
+// ============================================================================
+// BUILDLANG COMPUTE SHADER - SEVERAL ENTRY POINTS IN ONE FILE
+// ============================================================================
+// Each `#[compute]` function is its own entry point with its own group size:
+//
+//   cs_scale  workgroup_size = [64, 1, 1]  one push constant, binding 0 read-only
+//   cs_grid   workgroup_size = [8, 8, 1]   two push constants, binding 0 writable
+//   cs_bare   no size: the backend's default, 64 x 1 x 1 for a 1D kernel
+//
+// Buffer bindings count from 0 in each entry, so binding 0 is `a` (read-only)
+// in cs_scale and `out` (writable) in cs_grid.
+//
+//   buildc examples/gpu/compute_entries.bld --target spirv -o all.spv
+//   buildc examples/gpu/compute_entries.bld --target spirv --entry cs_grid -o grid.spv
+// ============================================================================
+
+#[compute(workgroup_size = [64, 1, 1])]
+fn cs_scale(n: u32, a: &[f32], out: &mut [f32]) ~ Gpu {
+    let i = gl_GlobalInvocationID.x;
+    if i < n {
+        out[i] = a[i] * 2.0;
+    }
+}
+
+#[compute(workgroup_size = [8, 8, 1])]
+fn cs_grid(w: u32, h: u32, out: &mut [f32]) ~ Gpu {
+    let x = gl_GlobalInvocationID.x;
+    let y = gl_GlobalInvocationID.y;
+    if x < w && y < h {
+        out[y * w + x] = (x + y) as f32;
+    }
+}
+
+#[compute]
+fn cs_bare(a: &[f32], out: &mut [f32]) ~ Gpu {
+    let i = gl_GlobalInvocationID.x;
+    out[i] = a[i] + 1.0;
+}
