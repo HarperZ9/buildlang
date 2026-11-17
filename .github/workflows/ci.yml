@@ -48,6 +48,8 @@ jobs:
           key: gpu-feature
       - name: Install shader tools and lavapipe
         run: bash .github/install-shader-tools.sh
+      - name: PLANTED CONTROL, reverted next commit - remove spirv-val
+        run: sudo rm -f "$(command -v spirv-val)" && ! command -v spirv-val
       - name: CPU reference drivers (unit tests of the gpu module)
         working-directory: compiler
         run: cargo test --features gpu --bin buildc -- 'gpu::'
@@ -105,6 +107,9 @@ jobs:
       - name: Install shader tools
         if: runner.os == 'Linux'
         run: bash .github/install-shader-tools.sh
+      - name: PLANTED CONTROL, reverted next commit - remove spirv-val
+        if: runner.os == 'Linux'
+        run: sudo rm -f "$(command -v spirv-val)" && ! command -v spirv-val
       - name: Run tests
         working-directory: compiler
         env:
