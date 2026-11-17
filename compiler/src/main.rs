@@ -11255,27 +11255,31 @@ fn cmd_watch(path: &PathBuf, target_str: &str) -> Result<(), i32> {
                                 elapsed.as_secs_f64() * 1000.0
                             );
 
-                            // Auto-validate SPIR-V if spirv-val is available
+                            // Auto-validate SPIR-V if spirv-val is available:
+                            // the same lookup as a single build, PATH first.
                             if target_ext == "spv" {
-                                let spirv_val_paths =
-                                    ["C:\\VulkanSDK\\1.4.341.1\\Bin\\spirv-val.exe", "spirv-val"];
-                                for val_path in &spirv_val_paths {
-                                    if let Ok(result) = std::process::Command::new(val_path)
+                                if let Some(val_path) = find_spirv_val() {
+                                    match std::process::Command::new(&val_path)
                                         .arg("--target-env")
                                         .arg("vulkan1.0")
                                         .arg(&output)
                                         .output()
                                     {
-                                        if result.status.success() {
+                                        Ok(result) if result.status.success() => {
                                             println!("     spirv-val: PASSED (Vulkan 1.0)");
-                                        } else {
+                                        }
+                                        Ok(result) => {
                                             let stderr = String::from_utf8_lossy(&result.stderr);
                                             eprintln!(
-                                                "     spirv-val: FAILED\n     {}",
+                                                "     spirv-val: FAILED
+     {}",
                                                 stderr.trim()
                                             );
                                         }
-                                        break;
+                                        Err(e) => eprintln!(
+                                            "     spirv-val: could not run {}: {}",
+                                            val_path, e
+                                        ),
                                     }
                                 }
                             }
