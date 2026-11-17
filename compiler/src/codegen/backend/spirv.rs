@@ -5658,10 +5658,8 @@ impl Backend for SpirvBackend {
                 match exec_model {
                     SpvExecutionModel::GLCompute | SpvExecutionModel::Kernel => {
                         // The entry's declared size, else the module default.
-                        let (x, y, z) = func
-                            .workgroup_size
-                            .map(|[x, y, z]| (x, y, z))
-                            .unwrap_or(self.workgroup_size);
+                        let _ = func.workgroup_size;
+                        let (x, y, z) = self.workgroup_size;
                         Self::emit_to(
                             &mut exec_mode_buf,
                             SpvOp::OpExecutionMode,
