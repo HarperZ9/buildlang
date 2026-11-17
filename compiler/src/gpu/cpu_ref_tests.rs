@@ -76,3 +76,27 @@ fn matmul_cpu_reference_builds_and_runs() {
         .expect("the matmul CPU reference compiles and runs");
     assert_eq!(got, b, "identity x B == B");
 }
+
+/// The C backend has emitted slices by pointer and by value; the driver must
+/// pass `&a` to the first and `a` to the second. Passing `&a` to a by-value
+/// kernel was the 2026-11-16 CI failure ("incompatible type for argument 4 of
+/// 'matmul'").
+#[test]
+fn driver_passes_slices_the_way_the_kernel_takes_them() {
+    let by_value = "static void saxpy(float alpha, BlSlice_f32 a, BlSlice_f32 out) {\n}\n";
+    let by_pointer = "static void saxpy(float alpha, BlSlice_f32* a, BlSlice_f32* out) {\n}\n";
+    assert!(!kernel_takes_slice_pointers(by_value, "saxpy"));
+    assert!(kernel_takes_slice_pointers(by_pointer, "saxpy"));
+}
+
+/// The emitted runtime calls `getaddrinfo`, which glibc declares only when the
+/// POSIX feature macros precede the first system header.
+#[test]
+fn driver_prelude_defines_feature_macros_before_any_header() {
+    let prelude = driver_prelude();
+    let posix = prelude
+        .find("_POSIX_C_SOURCE")
+        .expect("POSIX feature macro");
+    let first_include = prelude.find("#include").expect("an include");
+    assert!(posix < first_include);
+}

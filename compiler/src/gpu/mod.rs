@@ -427,17 +427,9 @@ fn cpu_c_reference(
         ));
     }
 
-    // The call argument list, in the kernel's PARAMETER order: a scalar is
-    // passed by value, a buffer by address (`&name`, matching the emitted C
-    // `bl_slice_f32*` parameter).
-    let call_args: Vec<String> = sig
-        .params
-        .iter()
-        .map(|p| match p {
-            KernelParam::Scalar { name, .. } => name.clone(),
-            KernelParam::Buffer { name, .. } => format!("&{name}"),
-        })
-        .collect();
+    // The call argument list, in the kernel's PARAMETER order (see
+    // `driver_call_args`).
+    let call_args = driver_call_args(sig, kernel_fn_c);
 
     // The output buffer's name (the single writable one) is what we print.
     let out_name = sig
@@ -470,9 +462,9 @@ int main(void) {{
         n = n,
     );
 
-    // The emitted kernel takes `BlSlice_f32*` parameters; the prelude makes that
-    // name an alias of `bl_slice_f32`, so `&a` passes with no cast. A C compiler
-    // error here is a hard error surfaced to the user.
+    // The emitted kernel names its slices `BlSlice_f32`; the prelude makes that
+    // name an alias of `bl_slice_f32`, so a buffer passes with no cast. A C
+    // compiler error here is a hard error surfaced to the user.
     let dir = std::env::temp_dir().join(format!("buildlang_gpu_cpu_{}", std::process::id()));
     std::fs::create_dir_all(&dir).map_err(|e| format!("create temp dir: {e}"))?;
     let c_path = dir.join("cpu_ref.c");
@@ -514,13 +506,53 @@ int main(void) {{
     Ok(values)
 }
 
+/// True when the emitted `entry` function takes its slices by pointer
+/// (`BlSlice_f32* a`), false when by value (`BlSlice_f32 a`). The C backend has
+/// emitted both forms, so the driver reads the kernel's own parameter list
+/// rather than assuming one: no scalar parameter is a pointer, so any `*`
+/// there belongs to a slice.
+fn kernel_takes_slice_pointers(kernel_fn_c: &str, entry: &str) -> bool {
+    let start = kernel_fn_c
+        .rfind(&format!(" {entry}("))
+        .map(|i| i + entry.len() + 2)
+        .unwrap_or(0);
+    let rest = &kernel_fn_c[start..];
+    let params = &rest[..rest.find(')').unwrap_or(rest.len())];
+    params.contains('*')
+}
+
+/// The driver's argument list for one kernel call, in parameter order: a
+/// scalar by value, a buffer by value or by address to match the kernel.
+fn driver_call_args(sig: &KernelSig, kernel_fn_c: &str) -> Vec<String> {
+    let by_pointer = kernel_takes_slice_pointers(kernel_fn_c, &sig.entry);
+    sig.params
+        .iter()
+        .map(|p| match p {
+            KernelParam::Scalar { name, .. } => name.clone(),
+            KernelParam::Buffer { name, .. } if by_pointer => format!("&{name}"),
+            KernelParam::Buffer { name, .. } => name.clone(),
+        })
+        .collect()
+}
+
 /// The declarations every CPU-C reference driver puts ahead of the kernel: the
 /// headers, the ambient thread-index variables, and the slice fat pointer under
 /// both spellings (the driver's `bl_slice_f32` and the C backend's named
 /// `BlSlice_f32`). The runtime the kernel calls into comes with the kernel, from
 /// [`extract_kernel_with_runtime`].
 fn driver_prelude() -> &'static str {
-    r#"#include <stdio.h>
+    // The feature macros come first, as in the emitted C: the runtime that
+    // follows uses POSIX declarations (`getaddrinfo`, `struct addrinfo`) that
+    // glibc hides once a header is included without them.
+    r#"#ifndef _WIN32
+#ifndef _POSIX_C_SOURCE
+#define _POSIX_C_SOURCE 200809L
+#endif
+#ifndef _DEFAULT_SOURCE
+#define _DEFAULT_SOURCE
+#endif
+#endif
+#include <stdio.h>
 #include <stdint.h>
 #include <stddef.h>
 #include <stdbool.h>
@@ -631,16 +663,8 @@ fn cpu_c_matmul_reference(
         "    uint32_t m = {m}; uint32_t k = {k}; uint32_t n = {n};\n"
     ));
 
-    // Call argument list in parameter order: scalars by value, buffers by
-    // address (matching the emitted `bl_slice_f32*` parameters).
-    let call_args: Vec<String> = sig
-        .params
-        .iter()
-        .map(|p| match p {
-            KernelParam::Scalar { name, .. } => name.clone(),
-            KernelParam::Buffer { name, .. } => format!("&{name}"),
-        })
-        .collect();
+    // Call argument list in parameter order (see `driver_call_args`).
+    let call_args = driver_call_args(sig, kernel_fn_c);
 
     let driver = format!(
         r#"{prelude}
@@ -983,16 +1007,8 @@ fn cpu_c_stencil_reference(
     ));
     decls.push_str(&format!("    uint32_t {n_name} = {n};\n"));
 
-    // Call argument list in parameter order: the scalar by value, buffers by
-    // address (matching the emitted `bl_slice_f32*` parameters).
-    let call_args: Vec<String> = sig
-        .params
-        .iter()
-        .map(|p| match p {
-            KernelParam::Scalar { name, .. } => name.clone(),
-            KernelParam::Buffer { name, .. } => format!("&{name}"),
-        })
-        .collect();
+    // Call argument list in parameter order (see `driver_call_args`).
+    let call_args = driver_call_args(sig, kernel_fn_c);
 
     let driver = format!(
         r#"{prelude}

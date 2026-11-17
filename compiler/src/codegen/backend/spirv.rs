@@ -6121,20 +6121,56 @@ mod tests {
         );
     }
 
+    /// True when `BUILDLANG_SHADER_TOOLS_REQUIRE` is `1`: a missing `spirv-val`
+    /// then fails the test instead of skipping it. CI on Linux sets it.
+    fn shader_tools_required() -> bool {
+        std::env::var("BUILDLANG_SHADER_TOOLS_REQUIRE").as_deref() == Ok("1")
+    }
+
+    /// `spirv-val` from PATH (`SPIRV_VAL` overrides the program name), or `None`.
+    fn spirv_val_program() -> Option<String> {
+        let tool = std::env::var("SPIRV_VAL").unwrap_or_else(|_| "spirv-val".to_string());
+        let ok = std::process::Command::new(&tool)
+            .arg("--version")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        ok.then_some(tool)
+    }
+
     /// Write SPIR-V bytes to a temporary file and run spirv-val.
-    /// Returns Ok(()) if validation passes, Err(message) if it fails.
+    /// Returns Ok(()) if validation passes, Err(message) if it fails. With no
+    /// `spirv-val` on PATH it panics when `BUILDLANG_SHADER_TOOLS_REQUIRE` is 1
+    /// and otherwise prints a skip and returns Ok(()).
     fn validate_spirv_bytes(bytes: &[u8], label: &str) -> Result<(), String> {
         use std::io::Write;
 
-        let tmp_path = std::env::temp_dir().join(format!("buildlang_test_{}.spv", label));
+        let Some(spirv_val) = spirv_val_program() else {
+            assert!(
+                !shader_tools_required(),
+                "spirv-val not on PATH for {label}, and BUILDLANG_SHADER_TOOLS_REQUIRE is 1"
+            );
+            eprintln!("skipping spirv-val for {label}: spirv-val not on PATH");
+            return Ok(());
+        };
+
+        // Tests run in parallel and two of them validate the same label, so the
+        // file name carries the process id and a per-call counter.
+        static CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let n = CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let tmp_path = std::env::temp_dir().join(format!(
+            "buildlang_test_{}_{}_{}.spv",
+            label,
+            std::process::id(),
+            n
+        ));
         let mut f = std::fs::File::create(&tmp_path)
             .map_err(|e| format!("Failed to create temp file: {}", e))?;
         f.write_all(bytes)
             .map_err(|e| format!("Failed to write temp file: {}", e))?;
         drop(f);
 
-        let spirv_val = "C:/VulkanSDK/1.4.341.1/Bin/spirv-val.exe";
-        let output = std::process::Command::new(spirv_val)
+        let output = std::process::Command::new(&spirv_val)
             .arg(tmp_path.to_str().unwrap())
             .output()
             .map_err(|e| format!("Failed to run spirv-val: {}", e))?;
@@ -6216,7 +6252,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore] // Requires Vulkan SDK installed
     fn test_uniform_vertex_shader_validates() {
         let mut backend = SpirvBackend::new();
         let bytes = backend.generate_uniform_vertex_shader();
@@ -6241,7 +6276,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore] // Requires Vulkan SDK installed
     fn test_textured_fragment_shader_validates() {
         let mut backend = SpirvBackend::new();
         let bytes = backend.generate_textured_fragment_shader();
@@ -6266,7 +6300,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore] // Requires Vulkan SDK installed
     fn test_write_a5_shaders_to_examples() {
         use std::io::Write;
 
