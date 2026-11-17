@@ -42,7 +42,8 @@ fn collect(dir: &Path, out: &mut Vec<PathBuf>) {
 fn skip_reason(src: &str) -> Option<&'static str> {
     let stage = src.contains("#[fragment]") || src.contains("#[vertex]");
     let kernel_only =
-        (src.contains("#[compute]") || src.contains("#[kernel]")) && !src.contains("fn main");
+        (src.contains("#[compute]") || src.contains("#[compute(") || src.contains("#[kernel]"))
+            && !src.contains("fn main");
     if stage || kernel_only {
         return Some("GPU or shader entry points; C is not their target");
     }
