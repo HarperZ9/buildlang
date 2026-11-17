@@ -960,6 +960,11 @@ mod device {
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr),
         );
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("gpu-cpu agreement: FAIL"),
+            "the run must fail at the GPU-vs-CPU agreement gate, not at an earlier step\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stderr),
+        );
     }
 
     /// Phase 1: the arbitrary-elementwise `saxpy` kernel (scalar push constant +
@@ -1009,6 +1014,11 @@ mod device {
             !output.status.success(),
             "a divergent saxpy readback MUST be caught (non-zero exit)\nstdout:\n{}\nstderr:\n{}",
             String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("gpu-cpu agreement: FAIL"),
+            "the run must fail at the GPU-vs-CPU agreement gate, not at an earlier step\nstderr:\n{}",
             String::from_utf8_lossy(&output.stderr),
         );
     }
@@ -1065,6 +1075,11 @@ mod device {
             !output.status.success(),
             "a divergent matmul readback MUST be caught (non-zero exit)\nstdout:\n{}\nstderr:\n{}",
             String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("gpu-cpu agreement: FAIL"),
+            "the run must fail at the GPU-vs-CPU agreement gate, not at an earlier step\nstderr:\n{}",
             String::from_utf8_lossy(&output.stderr),
         );
     }
@@ -1138,6 +1153,11 @@ mod device {
             "a divergent readback at a non-multiple dim MUST be caught (non-zero exit)\n\
              stdout:\n{}\nstderr:\n{}",
             String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("gpu-cpu agreement: FAIL"),
+            "the run must fail at the GPU-vs-CPU agreement gate, not at an earlier step\nstderr:\n{}",
             String::from_utf8_lossy(&output.stderr),
         );
     }
@@ -1256,6 +1276,11 @@ mod device {
             !output.status.success(),
             "a divergent stencil readback MUST be caught (non-zero exit)\nstdout:\n{}\nstderr:\n{}",
             String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("gpu-cpu agreement: FAIL"),
+            "the run must fail at the GPU-vs-CPU agreement gate, not at an earlier step\nstderr:\n{}",
             String::from_utf8_lossy(&output.stderr),
         );
     }
