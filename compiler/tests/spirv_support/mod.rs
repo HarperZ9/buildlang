@@ -112,9 +112,12 @@ const MODE_LOCAL_SIZE: u32 = 17;
 const MODEL_GL_COMPUTE: u32 = 5;
 
 /// Each GLCompute entry point's name with its LocalSize, read from the words.
+/// Also checks the layout rule spirv-val enforces: every OpEntryPoint comes
+/// before every OpExecutionMode, so the check holds where spirv-val is absent.
 pub fn local_sizes(words: &[u32]) -> BTreeMap<String, (u32, u32, u32)> {
     let mut names: BTreeMap<u32, String> = BTreeMap::new();
     let mut sizes: BTreeMap<u32, (u32, u32, u32)> = BTreeMap::new();
+    let mut seen_mode = false;
     let mut i = 5usize;
     while i < words.len() {
         let count = (words[i] >> 16) as usize;
@@ -124,6 +127,13 @@ pub fn local_sizes(words: &[u32]) -> BTreeMap<String, (u32, u32, u32)> {
             "malformed instruction stream"
         );
         let ins = &words[i..i + count];
+        if op == OP_EXECUTION_MODE {
+            seen_mode = true;
+        }
+        assert!(
+            !(op == OP_ENTRY_POINT && seen_mode),
+            "OpEntryPoint after an OpExecutionMode: invalid layout section"
+        );
         if op == OP_ENTRY_POINT && ins[1] == MODEL_GL_COMPUTE {
             let mut bytes = Vec::new();
             for w in &ins[3..] {

@@ -5618,8 +5618,12 @@ impl Backend for SpirvBackend {
         }
 
         // -- Sections 5-6: entry points and execution modes -------------------
-        // Collect into a separate buffer so they stay before debug/annotations.
+        // Collect into separate buffers so they stay before debug/annotations.
+        // Every OpEntryPoint must precede every OpExecutionMode (logical
+        // layout sections 5 and 6), so with several entries the modes are
+        // held back and appended after the last entry point.
         let mut entry_point_buf: Vec<u32> = Vec::new();
+        let mut exec_mode_buf: Vec<u32> = Vec::new();
 
         for func in &mir.functions {
             // When shader stages are present, only shader-annotated functions
@@ -5650,7 +5654,7 @@ impl Backend for SpirvBackend {
                 operands.extend_from_slice(&self.io_var_ids);
                 Self::emit_to(&mut entry_point_buf, SpvOp::OpEntryPoint, &operands);
 
-                // Execution mode (section 6) -- into entry_point_buf
+                // Execution mode (section 6) -- into exec_mode_buf
                 match exec_model {
                     SpvExecutionModel::GLCompute | SpvExecutionModel::Kernel => {
                         // The entry's declared size, else the module default.
@@ -5659,14 +5663,14 @@ impl Backend for SpirvBackend {
                             .map(|[x, y, z]| (x, y, z))
                             .unwrap_or(self.workgroup_size);
                         Self::emit_to(
-                            &mut entry_point_buf,
+                            &mut exec_mode_buf,
                             SpvOp::OpExecutionMode,
                             &[func_id, SpvExecutionMode::LocalSize as u32, x, y, z],
                         );
                     }
                     SpvExecutionModel::Fragment => {
                         Self::emit_to(
-                            &mut entry_point_buf,
+                            &mut exec_mode_buf,
                             SpvOp::OpExecutionMode,
                             &[func_id, SpvExecutionMode::OriginUpperLeft as u32],
                         );
@@ -5705,6 +5709,7 @@ impl Backend for SpirvBackend {
 
         // Section 5-6: entry points + execution modes
         self.output.extend_from_slice(&entry_point_buf);
+        self.output.extend_from_slice(&exec_mode_buf);
 
         // Section 7: debug names (OpName, OpMemberName)
         self.output.extend_from_slice(&self.pending_names);
