@@ -18,8 +18,9 @@
 //! test lies about hardware.
 //!
 //! A test whose tool or device is missing skips locally. With
-//! `BUILDLANG_SHADER_TOOLS_REQUIRE=1` (set by CI on Linux, which installs
-//! spirv-tools, glslang, DXC and Mesa lavapipe) the same test fails instead,
+//! `BUILDLANG_SHADER_TOOLS_REQUIRE=1` (set by CI, which installs spirv-tools,
+//! glslang and DXC on Linux and Windows, and Mesa lavapipe on Linux for the
+//! device tests) the same test fails instead,
 //! so a skip cannot pass for a run.
 
 use std::{

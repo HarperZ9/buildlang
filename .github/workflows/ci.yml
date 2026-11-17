@@ -20,6 +20,16 @@ env:
   DXC_TAG: v1.9.2609
   DXC_ASSET: linux_dxc_2026_09_28.x86_x64.tar.gz
   DXC_SHA256: 96faadc7f5c282d2ffda49804beb4c3ee38127bc252b723234e3c5cdf7aa39a1
+  # The same tools on the Windows runner, each pinned by URL and SHA-256 and
+  # refused by .github/install-shader-tools-windows.sh when the digest differs:
+  # SPIRV-Tools v2026.4 (conda-forge win-64 build; Khronos publishes no
+  # Windows binaries), glslang 16.6.0 (Khronos release) and DXC v1.9.2609.
+  SPIRV_TOOLS_WIN_URL: https://conda.anaconda.org/conda-forge/win-64/spirv-tools-2026.4-h49e36cd_0.conda
+  SPIRV_TOOLS_WIN_SHA256: 1dc41c5196116e25c2da19288839462f4b6ded5013d39a5798631096632a7734
+  GLSLANG_WIN_URL: https://github.com/KhronosGroup/glslang/releases/download/16.6.0/glslang-16.6.0-windows-x86_64-release.zip
+  GLSLANG_WIN_SHA256: 82bf434e69b9bb4829de7e2b4bc2c5e7a7861e53d66cf75e5cc70f5f694a8d9b
+  DXC_WIN_URL: https://github.com/microsoft/DirectXShaderCompiler/releases/download/v1.9.2609/dxc_2026_09_29.zip
+  DXC_WIN_SHA256: ad31b1fc8443175d204f77a611fdb3ef2ec42759bdc2f1167368de24a4a7e7f1
 
 jobs:
   skips:
@@ -105,14 +115,20 @@ jobs:
       - name: Install shader tools
         if: runner.os == 'Linux'
         run: bash .github/install-shader-tools.sh
+      - name: Install shader tools (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: bash .github/install-shader-tools-windows.sh
       - name: Run tests
         working-directory: compiler
         env:
           # A fuzz run skipped for want of a C compiler fails on Linux.
           BUILDLANG_FUZZ_REQUIRE_CC: ${{ runner.os == 'Linux' && '1' || '0' }}
-          # A shader test skipped for want of spirv-val, glslang, DXC or a
-          # Vulkan device fails on Linux, where the step above installs them.
-          BUILDLANG_SHADER_TOOLS_REQUIRE: ${{ runner.os == 'Linux' && '1' || '0' }}
+          # A shader test skipped for want of spirv-val, glslang or DXC fails
+          # on both systems, where the steps above install them. This job runs
+          # default features, so no device test is compiled here; the device
+          # tests run on lavapipe in gpu-device. Windows device tests: #321.
+          BUILDLANG_SHADER_TOOLS_REQUIRE: '1'
           HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
           IS_MAIN: ${{ github.ref == 'refs/heads/main' }}
         shell: bash

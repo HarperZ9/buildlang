@@ -9,7 +9,7 @@
 //! id, OpExecutionMode LocalSize per id), so it checks something on any machine.
 //! Where `spirv-val` and `spirv-dis` are on PATH the module is also validated
 //! and the disassembly must hold the expected execution-mode line. With
-//! `BUILDLANG_SHADER_TOOLS_REQUIRE=1` (CI on Linux) a missing tool fails.
+//! `BUILDLANG_SHADER_TOOLS_REQUIRE=1` (CI on Linux and Windows) a missing tool fails.
 
 mod spirv_support;
 
