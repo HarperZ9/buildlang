@@ -1,0 +1,208 @@
+// Row-major against Morton (Z-order) storage for Amanatides and Woo traversal
+// on a 256-cubed grid (registry row GEO-023). Both layouts hold the same
+// occupancy and every ray must find the same first hit in both; only the
+// memory order differs. Timing is printed, not asserted: it depends on the
+// machine. Build with `buildc build --release` (gcc -O2) before reading the
+// times; `buildc run` compiles without optimisation.
+//
+// Scene: a heightfield terrain, solid below h(x, y). Two cameras of 384 by
+// 384 rays each: one looks along +x (row-major's fast axis), one along +z
+// (row-major's slowest axis, 65,536 bytes per step).
+
+const N: i64 = 256;
+const W: i64 = 384;
+
+fn spread3(v: i64) -> i64 {
+    let mut x = v & 1023;
+    x = (x | (x << 16)) & 50331903;
+    x = (x | (x << 8)) & 50393103;
+    x = (x | (x << 4)) & 51130563;
+    x = (x | (x << 2)) & 153391689;
+    x
+}
+
+fn height(x: i64, y: i64) -> f64 {
+    let fx = x as f64;
+    let fy = y as f64;
+    90.0 + 40.0 * (fx / 23.0).sin() * (fy / 31.0).cos() + 18.0 * ((fx + fy) / 11.0).sin()
+}
+
+struct Tables {
+    mx: Vec<i64>,
+    my: Vec<i64>,
+    mz: Vec<i64>,
+}
+
+fn tables() -> Tables {
+    let mut mx: Vec<i64> = Vec::new();
+    let mut my: Vec<i64> = Vec::new();
+    let mut mz: Vec<i64> = Vec::new();
+    let mut i: i64 = 0;
+    while i < N {
+        mx.push(spread3(i));
+        my.push(spread3(i) << 1);
+        mz.push(spread3(i) << 2);
+        i = i + 1;
+    }
+    Tables { mx: mx, my: my, mz: mz }
+}
+
+fn index(t: &Tables, x: i64, y: i64, z: i64, use_morton: bool) -> i64 {
+    if use_morton {
+        t.mx[x as usize] | t.my[y as usize] | t.mz[z as usize]
+    } else {
+        x + N * (y + N * z)
+    }
+}
+
+fn build_grid(t: &Tables, use_morton: bool) -> Vec<u8> {
+    let mut g: Vec<u8> = Vec::new();
+    let mut i: i64 = 0;
+    while i < N * N * N {
+        g.push(0);
+        i = i + 1;
+    }
+    // solid where the coordinate along the "up" axis (z) is below the terrain,
+    // with the terrain's axes swapped for the second camera handled by the ray
+    let mut y: i64 = 0;
+    while y < N {
+        let mut x: i64 = 0;
+        while x < N {
+            let h = height(x, y) as i64;
+            let mut z: i64 = 0;
+            while z < N && z < h {
+                g[index(t, x, y, z, use_morton) as usize] = 1;
+                z = z + 1;
+            }
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    g
+}
+
+fn first_cross(o: f64, d: f64, i: i64) -> f64 {
+    if d > 0.0 { ((i + 1) as f64 - o) / d } else if d < 0.0 { ((i as f64) - o) / d } else { 1.0e300 }
+}
+
+fn step_of(d: f64) -> i64 {
+    if d > 0.0 { 1 } else if d < 0.0 { -1 } else { 0 }
+}
+
+fn delta_of(d: f64) -> f64 {
+    if d == 0.0 { 1.0e300 } else { (1.0 / d).abs() }
+}
+
+// Origin must be inside the grid. Returns the hit cell's row-major id or -1,
+// and adds the cells stepped to steps[0].
+fn march(g: &Vec<u8>, t: &Tables, use_morton: bool, ox: f64, oy: f64, oz: f64, dx: f64, dy: f64, dz: f64, steps: &mut Vec<i64>) -> i64 {
+    let mut x = ox.floor() as i64;
+    let mut y = oy.floor() as i64;
+    let mut z = oz.floor() as i64;
+    let sx = step_of(dx);
+    let sy = step_of(dy);
+    let sz = step_of(dz);
+    let ddx = delta_of(dx);
+    let ddy = delta_of(dy);
+    let ddz = delta_of(dz);
+    let mut tx = first_cross(ox, dx, x);
+    let mut ty = first_cross(oy, dy, y);
+    let mut tz = first_cross(oz, dz, z);
+    let mut n: i64 = 0;
+    let mut hit: i64 = -1;
+    loop {
+        n = n + 1;
+        if g[index(t, x, y, z, use_morton) as usize] != 0 {
+            hit = x + N * (y + N * z);
+            break;
+        }
+        if tx <= ty && tx <= tz {
+            x = x + sx;
+            tx = tx + ddx;
+        } else if ty <= tz {
+            y = y + sy;
+            ty = ty + ddy;
+        } else {
+            z = z + sz;
+            tz = tz + ddz;
+        }
+        if x < 0 || x >= N || y < 0 || y >= N || z < 0 || z >= N {
+            break;
+        }
+    }
+    steps[0] = steps[0] + n;
+    hit
+}
+
+struct Run {
+    sum: i64,
+    steps: i64,
+    ms: i64,
+}
+
+// view 0 looks mostly along +x, view 1 mostly along -z (down at the terrain)
+fn render(g: &Vec<u8>, t: &Tables, use_morton: bool, view: i64) -> Run ~ Clock {
+    let start = clock_ms();
+    let mut steps: Vec<i64> = Vec::new();
+    steps.push(0);
+    let mut sum: i64 = 0;
+    let mut py: i64 = 0;
+    while py < W {
+        let mut px: i64 = 0;
+        while px < W {
+            let u = ((px as f64) + 0.5) / (W as f64) - 0.5;
+            let v = ((py as f64) + 0.5) / (W as f64) - 0.5;
+            let mut ox: f64 = 0.5;
+            let mut oy: f64 = 128.3;
+            let mut oz: f64 = 200.7;
+            let mut dx: f64 = 1.0;
+            let mut dy: f64 = u * 0.9;
+            let mut dz: f64 = v * 0.9 - 0.35;
+            if view == 1 {
+                ox = 128.3;
+                oy = 127.9;
+                oz = 255.5;
+                dx = u * 0.9;
+                dy = v * 0.9 + 0.2;
+                dz = -1.0;
+            }
+            let len = (dx * dx + dy * dy + dz * dz).sqrt();
+            let h = march(g, t, use_morton, ox, oy, oz, dx / len, dy / len, dz / len, &mut steps);
+            sum = (sum * 31 + h + 7) % 1000000007;
+            px = px + 1;
+        }
+        py = py + 1;
+    }
+    Run { sum: sum, steps: steps[0], ms: clock_ms() - start }
+}
+
+fn best(g: &Vec<u8>, t: &Tables, use_morton: bool, view: i64) -> Run ~ Clock {
+    let mut r = render(g, t, use_morton, view);
+    let mut k: i64 = 0;
+    while k < 4 {
+        let s = render(g, t, use_morton, view);
+        if s.ms < r.ms {
+            r = s;
+        }
+        k = k + 1;
+    }
+    r
+}
+
+fn main() ~ Console + Clock {
+    let t = tables();
+    let rows = build_grid(&t, false);
+    let zord = build_grid(&t, true);
+    let mut view: i64 = 0;
+    let mut agree = true;
+    while view < 2 {
+        let a = best(&rows, &t, false, view);
+        let b = best(&zord, &t, true, view);
+        if a.sum != b.sum || a.steps != b.steps {
+            agree = false;
+        }
+        println!("view {} rays {} steps {} row_major_ms {} morton_ms {}", view, W * W, a.steps, a.ms, b.ms);
+        view = view + 1;
+    }
+    println!("layouts agree {}", if agree { "ok" } else { "FAIL" });
+}
