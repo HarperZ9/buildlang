@@ -26,6 +26,17 @@ pub fn runtime_header() -> &'static str {
 // Embedded in generated C output - do not edit
 // ============================================================================
 
+// --- 128-bit integers ---
+// i128 and u128 lower to the GCC and Clang extension __int128. MSVC has no
+// 128-bit integer type, so with MSVC the runtime leaves out everything that
+// needs one (a program that uses i128 or u128 does not compile there), and the
+// 64-bit wrapping helpers work in uint64_t, which wraps the same way.
+#if defined(__SIZEOF_INT128__)
+#define BL_HAVE_INT128 1
+#else
+#define BL_HAVE_INT128 0
+#endif
+
 // --- I/O initialization ---
 static void __build_init_io(void) {
     setvbuf(stdout, NULL, _IONBF, 0);
@@ -48,6 +59,7 @@ static int32_t  bl_f2i_i32(double v){ if (v!=v) return 0; if (v>= 0x1p31) return
 static uint32_t bl_f2i_u32(double v){ if (v!=v) return 0; if (v<=0.0) return 0; if (v>= 0x1p32) return UINT32_MAX; return (uint32_t)v; }
 static int64_t  bl_f2i_i64(double v){ if (v!=v) return 0; if (v>= 0x1p63) return INT64_MAX;  if (v<=-0x1p63) return INT64_MIN;  return (int64_t)v; }
 static uint64_t bl_f2i_u64(double v){ if (v!=v) return 0; if (v<=0.0) return 0; if (v>= 0x1p64) return UINT64_MAX; return (uint64_t)v; }
+#if BL_HAVE_INT128
 static __int128 bl_f2i_i128(double v){
     if (v!=v) return 0;
     __int128 imax = (__int128)(((unsigned __int128)1 << 127) - 1);
@@ -56,6 +68,7 @@ static __int128 bl_f2i_i128(double v){
     if (v<=-0x1p127) return imin;
     return (__int128)v;
 }
+#endif
 
 // --- Integer division and remainder traps ---
 // Rust's `/` and `%` panic on a zero divisor and on the one signed overflow
@@ -85,12 +98,14 @@ static void bl_match_fail(void) {
 // checked operations. Route them through helpers so generated C never relies on
 // C signed-overflow behavior or unsigned wrap for plain arithmetic. The helpers
 // reuse the same fail-closed exit path as division/remainder traps.
+#if BL_HAVE_INT128
 static __int128 bl_i128_max(void) {
     return (__int128)(((unsigned __int128)1 << 127) - 1);
 }
 static __int128 bl_i128_min(void) {
     return -bl_i128_max() - 1;
 }
+#endif
 
 // With gcc or clang the checks use the overflow builtins: the same result and
 // the same trap (the exact result does not fit TYPE), without the division the
@@ -164,13 +179,17 @@ BL_DEFINE_SIGNED_ARITH(i8, int8_t, INT8_MIN, INT8_MAX)
 BL_DEFINE_SIGNED_ARITH(i16, int16_t, INT16_MIN, INT16_MAX)
 BL_DEFINE_SIGNED_ARITH(i32, int32_t, INT32_MIN, INT32_MAX)
 BL_DEFINE_SIGNED_ARITH(i64, int64_t, INT64_MIN, INT64_MAX)
+#if BL_HAVE_INT128
 BL_DEFINE_SIGNED_ARITH(i128, __int128, bl_i128_min(), bl_i128_max())
+#endif
 BL_DEFINE_SIGNED_ARITH(isize, intptr_t, INTPTR_MIN, INTPTR_MAX)
 BL_DEFINE_UNSIGNED_ARITH(u8, uint8_t, UINT8_MAX)
 BL_DEFINE_UNSIGNED_ARITH(u16, uint16_t, UINT16_MAX)
 BL_DEFINE_UNSIGNED_ARITH(u32, uint32_t, UINT32_MAX)
 BL_DEFINE_UNSIGNED_ARITH(u64, uint64_t, UINT64_MAX)
+#if BL_HAVE_INT128
 BL_DEFINE_UNSIGNED_ARITH(u128, unsigned __int128, ~((unsigned __int128)0))
+#endif
 BL_DEFINE_UNSIGNED_ARITH(usize, uintptr_t, UINTPTR_MAX)
 
 #define BL_DEFINE_SIGNED_EXPLICIT_ARITH(SUFFIX, TYPE, UTYPE, WORKTYPE, MINV, MAXV, SIGNBIT, UMASK) \
@@ -220,15 +239,19 @@ static TYPE bl_umul_saturating_##SUFFIX(TYPE a, TYPE b){ if (b != 0 && a > (TYPE
 BL_DEFINE_SIGNED_EXPLICIT_ARITH(i8, int8_t, uint8_t, uint32_t, INT8_MIN, INT8_MAX, ((uint8_t)1 << 7), UINT8_MAX)
 BL_DEFINE_SIGNED_EXPLICIT_ARITH(i16, int16_t, uint16_t, uint32_t, INT16_MIN, INT16_MAX, ((uint16_t)1 << 15), UINT16_MAX)
 BL_DEFINE_SIGNED_EXPLICIT_ARITH(i32, int32_t, uint32_t, uint64_t, INT32_MIN, INT32_MAX, ((uint32_t)1 << 31), UINT32_MAX)
-BL_DEFINE_SIGNED_EXPLICIT_ARITH(i64, int64_t, uint64_t, unsigned __int128, INT64_MIN, INT64_MAX, ((uint64_t)1 << 63), UINT64_MAX)
+BL_DEFINE_SIGNED_EXPLICIT_ARITH(i64, int64_t, uint64_t, uint64_t, INT64_MIN, INT64_MAX, ((uint64_t)1 << 63), UINT64_MAX)
+#if BL_HAVE_INT128
 BL_DEFINE_SIGNED_EXPLICIT_ARITH(i128, __int128, unsigned __int128, unsigned __int128, bl_i128_min(), bl_i128_max(), ((unsigned __int128)1 << 127), ~((unsigned __int128)0))
-BL_DEFINE_SIGNED_EXPLICIT_ARITH(isize, intptr_t, uintptr_t, unsigned __int128, INTPTR_MIN, INTPTR_MAX, ((uintptr_t)1 << (sizeof(uintptr_t) * CHAR_BIT - 1)), UINTPTR_MAX)
+#endif
+BL_DEFINE_SIGNED_EXPLICIT_ARITH(isize, intptr_t, uintptr_t, uintptr_t, INTPTR_MIN, INTPTR_MAX, ((uintptr_t)1 << (sizeof(uintptr_t) * CHAR_BIT - 1)), UINTPTR_MAX)
 BL_DEFINE_UNSIGNED_EXPLICIT_ARITH(u8, uint8_t, uint32_t, UINT8_MAX)
 BL_DEFINE_UNSIGNED_EXPLICIT_ARITH(u16, uint16_t, uint32_t, UINT16_MAX)
 BL_DEFINE_UNSIGNED_EXPLICIT_ARITH(u32, uint32_t, uint64_t, UINT32_MAX)
-BL_DEFINE_UNSIGNED_EXPLICIT_ARITH(u64, uint64_t, unsigned __int128, UINT64_MAX)
+BL_DEFINE_UNSIGNED_EXPLICIT_ARITH(u64, uint64_t, uint64_t, UINT64_MAX)
+#if BL_HAVE_INT128
 BL_DEFINE_UNSIGNED_EXPLICIT_ARITH(u128, unsigned __int128, unsigned __int128, ~((unsigned __int128)0))
-BL_DEFINE_UNSIGNED_EXPLICIT_ARITH(usize, uintptr_t, unsigned __int128, UINTPTR_MAX)
+#endif
+BL_DEFINE_UNSIGNED_EXPLICIT_ARITH(usize, uintptr_t, uintptr_t, UINTPTR_MAX)
 
 #undef BL_DEFINE_SIGNED_ARITH
 #undef BL_DEFINE_UNSIGNED_ARITH
@@ -239,24 +262,32 @@ static int8_t   bl_idiv_i8  (int8_t   a, int8_t   b){ if(b==0) bl_arith_panic("a
 static int16_t  bl_idiv_i16 (int16_t  a, int16_t  b){ if(b==0) bl_arith_panic("attempt to divide by zero"); if(a==INT16_MIN && b==-1) bl_arith_panic("attempt to divide with overflow"); return a/b; }
 static int32_t  bl_idiv_i32 (int32_t  a, int32_t  b){ if(b==0) bl_arith_panic("attempt to divide by zero"); if(a==INT32_MIN && b==-1) bl_arith_panic("attempt to divide with overflow"); return a/b; }
 static int64_t  bl_idiv_i64 (int64_t  a, int64_t  b){ if(b==0) bl_arith_panic("attempt to divide by zero"); if(a==INT64_MIN && b==-1) bl_arith_panic("attempt to divide with overflow"); return a/b; }
+#if BL_HAVE_INT128
 static __int128 bl_idiv_i128(__int128 a, __int128 b){ if(b==0) bl_arith_panic("attempt to divide by zero"); __int128 imin = -(__int128)(((unsigned __int128)1<<127)-1)-1; if(a==imin && b==-1) bl_arith_panic("attempt to divide with overflow"); return a/b; }
+#endif
 static int8_t   bl_irem_i8  (int8_t   a, int8_t   b){ if(b==0) bl_arith_panic("attempt to calculate the remainder with a divisor of zero"); if(a==INT8_MIN  && b==-1) bl_arith_panic("attempt to calculate the remainder with overflow"); return a%b; }
 static int16_t  bl_irem_i16 (int16_t  a, int16_t  b){ if(b==0) bl_arith_panic("attempt to calculate the remainder with a divisor of zero"); if(a==INT16_MIN && b==-1) bl_arith_panic("attempt to calculate the remainder with overflow"); return a%b; }
 static int32_t  bl_irem_i32 (int32_t  a, int32_t  b){ if(b==0) bl_arith_panic("attempt to calculate the remainder with a divisor of zero"); if(a==INT32_MIN && b==-1) bl_arith_panic("attempt to calculate the remainder with overflow"); return a%b; }
 static int64_t  bl_irem_i64 (int64_t  a, int64_t  b){ if(b==0) bl_arith_panic("attempt to calculate the remainder with a divisor of zero"); if(a==INT64_MIN && b==-1) bl_arith_panic("attempt to calculate the remainder with overflow"); return a%b; }
+#if BL_HAVE_INT128
 static __int128 bl_irem_i128(__int128 a, __int128 b){ if(b==0) bl_arith_panic("attempt to calculate the remainder with a divisor of zero"); __int128 imin = -(__int128)(((unsigned __int128)1<<127)-1)-1; if(a==imin && b==-1) bl_arith_panic("attempt to calculate the remainder with overflow"); return a%b; }
+#endif
 static uint8_t          bl_udiv_u8  (uint8_t          a, uint8_t          b){ if(b==0) bl_arith_panic("attempt to divide by zero"); return a/b; }
 static uint16_t         bl_udiv_u16 (uint16_t         a, uint16_t         b){ if(b==0) bl_arith_panic("attempt to divide by zero"); return a/b; }
 static uint32_t         bl_udiv_u32 (uint32_t         a, uint32_t         b){ if(b==0) bl_arith_panic("attempt to divide by zero"); return a/b; }
 static uint64_t         bl_udiv_u64 (uint64_t         a, uint64_t         b){ if(b==0) bl_arith_panic("attempt to divide by zero"); return a/b; }
+#if BL_HAVE_INT128
 static unsigned __int128 bl_udiv_u128(unsigned __int128 a, unsigned __int128 b){ if(b==0) bl_arith_panic("attempt to divide by zero"); return a/b; }
+#endif
 static intptr_t bl_idiv_isize(intptr_t a, intptr_t b){ if(b==0) bl_arith_panic("attempt to divide by zero"); if(a==INTPTR_MIN && b==-1) bl_arith_panic("attempt to divide with overflow"); return a/b; }
 static uintptr_t bl_udiv_usize(uintptr_t a, uintptr_t b){ if(b==0) bl_arith_panic("attempt to divide by zero"); return a/b; }
 static uint8_t          bl_urem_u8  (uint8_t          a, uint8_t          b){ if(b==0) bl_arith_panic("attempt to calculate the remainder with a divisor of zero"); return a%b; }
 static uint16_t         bl_urem_u16 (uint16_t         a, uint16_t         b){ if(b==0) bl_arith_panic("attempt to calculate the remainder with a divisor of zero"); return a%b; }
 static uint32_t         bl_urem_u32 (uint32_t         a, uint32_t         b){ if(b==0) bl_arith_panic("attempt to calculate the remainder with a divisor of zero"); return a%b; }
 static uint64_t         bl_urem_u64 (uint64_t         a, uint64_t         b){ if(b==0) bl_arith_panic("attempt to calculate the remainder with a divisor of zero"); return a%b; }
+#if BL_HAVE_INT128
 static unsigned __int128 bl_urem_u128(unsigned __int128 a, unsigned __int128 b){ if(b==0) bl_arith_panic("attempt to calculate the remainder with a divisor of zero"); return a%b; }
+#endif
 static intptr_t bl_irem_isize(intptr_t a, intptr_t b){ if(b==0) bl_arith_panic("attempt to calculate the remainder with a divisor of zero"); if(a==INTPTR_MIN && b==-1) bl_arith_panic("attempt to calculate the remainder with overflow"); return a%b; }
 static uintptr_t bl_urem_usize(uintptr_t a, uintptr_t b){ if(b==0) bl_arith_panic("attempt to calculate the remainder with a divisor of zero"); return a%b; }
 
@@ -268,6 +299,7 @@ static uintptr_t bl_urem_usize(uintptr_t a, uintptr_t b){ if(b==0) bl_arith_pani
 #define BL_TLS __thread
 #endif
 
+#if BL_HAVE_INT128
 // Decimal formatting for 128-bit integers. printf has no standard format
 // specifier for __int128. The `_into` helpers write into caller-owned
 // storage so variadic calls can safely pass any number of i128/u128 arguments.
@@ -325,6 +357,8 @@ static char* bl_fmt_i128(__int128 v) {
     return out;
 }
 
+#endif
+
 // Place a %e-formatted number ("[-]D[.DDD]e[+-]EE") as plain positional decimal
 // with no exponent, the way Rust's float Display renders. Writes into `out`.
 static void bl_sci_to_plain(const char* sci, char* out) {
@@ -363,7 +397,7 @@ static char* bl_fmt_f64(double v) {
     char* out = pool[slot];
     slot = (slot + 1u) & 15u;
     if (v != v) { strcpy(out, "NaN"); return out; }
-    double inf = 1.0 / 0.0;
+    double inf = (double)INFINITY;
     if (v == inf) { strcpy(out, "inf"); return out; }
     if (v == -inf) { strcpy(out, "-inf"); return out; }
     if (v == 0.0) { strcpy(out, signbit(v) ? "-0" : "0"); return out; }
@@ -386,7 +420,7 @@ static char* bl_fmt_f32(float x) {
     char* out = pool[slot];
     slot = (slot + 1u) & 15u;
     if (x != x) { strcpy(out, "NaN"); return out; }
-    float inf = 1.0f / 0.0f;
+    float inf = INFINITY;
     if (x == inf) { strcpy(out, "inf"); return out; }
     if (x == -inf) { strcpy(out, "-inf"); return out; }
     if (x == 0.0f) { strcpy(out, signbit(x) ? "-0" : "0"); return out; }
@@ -416,8 +450,10 @@ typedef struct {
     union {
         int64_t i;
         uint64_t u;
+#if BL_HAVE_INT128
         __int128 i128;
         unsigned __int128 u128;
+#endif
         double f;
         void* p;
     } value;
@@ -430,16 +466,20 @@ typedef struct {
     union {
         int64_t ok_i;
         uint64_t ok_u;
+#if BL_HAVE_INT128
         __int128 ok_i128;
         unsigned __int128 ok_u128;
+#endif
         double ok_f;
         void* ok_p;
     } ok;
     union {
         int64_t err_i;
         uint64_t err_u;
+#if BL_HAVE_INT128
         __int128 err_i128;
         unsigned __int128 err_u128;
+#endif
         double err_f;
         void* err_p;
     } err;
@@ -482,13 +522,17 @@ BL_DEFINE_SIGNED_CHECKED_ARITH(i8, int8_t, INT8_MIN, INT8_MAX, i, int64_t)
 BL_DEFINE_SIGNED_CHECKED_ARITH(i16, int16_t, INT16_MIN, INT16_MAX, i, int64_t)
 BL_DEFINE_SIGNED_CHECKED_ARITH(i32, int32_t, INT32_MIN, INT32_MAX, i, int64_t)
 BL_DEFINE_SIGNED_CHECKED_ARITH(i64, int64_t, INT64_MIN, INT64_MAX, i, int64_t)
+#if BL_HAVE_INT128
 BL_DEFINE_SIGNED_CHECKED_ARITH(i128, __int128, bl_i128_min(), bl_i128_max(), i128, __int128)
+#endif
 BL_DEFINE_SIGNED_CHECKED_ARITH(isize, intptr_t, INTPTR_MIN, INTPTR_MAX, i, int64_t)
 BL_DEFINE_UNSIGNED_CHECKED_ARITH(u8, uint8_t, UINT8_MAX, u, uint64_t)
 BL_DEFINE_UNSIGNED_CHECKED_ARITH(u16, uint16_t, UINT16_MAX, u, uint64_t)
 BL_DEFINE_UNSIGNED_CHECKED_ARITH(u32, uint32_t, UINT32_MAX, u, uint64_t)
 BL_DEFINE_UNSIGNED_CHECKED_ARITH(u64, uint64_t, UINT64_MAX, u, uint64_t)
+#if BL_HAVE_INT128
 BL_DEFINE_UNSIGNED_CHECKED_ARITH(u128, unsigned __int128, ~((unsigned __int128)0), u128, unsigned __int128)
+#endif
 BL_DEFINE_UNSIGNED_CHECKED_ARITH(usize, uintptr_t, UINTPTR_MAX, u, uint64_t)
 
 #undef BL_OPTION_NONE
@@ -897,6 +941,7 @@ static BuildString build_u64_to_string(uint64_t v) {
     BuildString qs; qs.ptr = heap; qs.len = n; qs.cap = n + 1;
     return qs;
 }
+#if BL_HAVE_INT128
 static BuildString build_i128_to_string(__int128 v) {
     char buf[64];
     bl_fmt_i128_into(buf, v);
@@ -907,6 +952,7 @@ static BuildString build_u128_to_string(unsigned __int128 v) {
     bl_fmt_u128_into(buf, v);
     return build_format_str("%s", buf);
 }
+#endif
 static BuildString build_f64_to_string(double v) { return build_format_str("%s", bl_fmt_f64(v)); }
 static BuildString build_bool_to_string(bool v) { return build_string_new(v ? "true" : "false"); }
 // s.parse::<T>() gives Result<T, str>, with Rust's rules and error texts: the
@@ -970,6 +1016,7 @@ static Result bl_parse_err(const char* msg) {
     r.err.err_p = (void*)e;
     return r;
 }
+#if BL_HAVE_INT128
 static Result build_parse_int(BuildString s, int32_t bits, bool is_signed) {
     __int128 lo = is_signed ? -((__int128)1 << (bits - 1)) : 0;
     __int128 hi = is_signed ? ((__int128)1 << (bits - 1)) - 1 : ((__int128)1 << bits) - 1;
@@ -993,6 +1040,35 @@ static Result build_parse_int(BuildString s, int32_t bits, bool is_signed) {
     if (lo == 0) { uint64_t pu = (uint64_t)v; memcpy(&r.ok, &pu, sizeof pu); } else { int64_t pi = (int64_t)v; memcpy(&r.ok, &pi, sizeof pi); }
     return r;
 }
+#else
+// Without a 128-bit type: the magnitude in uint64_t against the target's limit
+// (2^(bits-1) for a negative signed value, 2^(bits-1)-1 for a positive one,
+// 2^bits-1 unsigned), checked before each step so nothing wraps. The same
+// results and error texts as the 128-bit version.
+static Result build_parse_int(BuildString s, int32_t bits, bool is_signed) {
+    size_t i = 0;
+    bool neg = false;
+    if (s.len == 0) return bl_parse_err("cannot parse integer from empty string");
+    if (s.ptr[0] == '+' || s.ptr[0] == '-') { neg = s.ptr[0] == '-'; i = 1; }
+    if (i == s.len || (neg && !is_signed)) return bl_parse_err("invalid digit found in string");
+    uint64_t umax = bits >= 64 ? UINT64_MAX : (((uint64_t)1 << bits) - 1);
+    uint64_t limit = !is_signed ? umax : (neg ? ((uint64_t)1 << (bits - 1)) : (((uint64_t)1 << (bits - 1)) - 1));
+    uint64_t m = 0;
+    for (; i < s.len; i++) {
+        char c = s.ptr[i];
+        if (c < '0' || c > '9') return bl_parse_err("invalid digit found in string");
+        uint64_t d = (uint64_t)(c - '0');
+        if (m > (limit - d) / 10) return bl_parse_err(neg ? "number too small to fit in target type" : "number too large to fit in target type");
+        m = m * 10 + d;
+    }
+    Result r;
+    memset(&r, 0, sizeof r);
+    r.is_ok = true;
+    if (!is_signed) { memcpy(&r.ok, &m, sizeof m); }
+    else { int64_t pi = neg ? (m == ((uint64_t)1 << 63) ? INT64_MIN : -(int64_t)m) : (int64_t)m; memcpy(&r.ok, &pi, sizeof pi); }
+    return r;
+}
+#endif
 static Result build_parse_float(BuildString s, bool single) {
     if (s.len == 0) return bl_parse_err("cannot parse float from empty string");
     for (size_t i = 0; i < s.len; i++) {
