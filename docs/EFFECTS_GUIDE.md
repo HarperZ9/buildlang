@@ -73,11 +73,11 @@ macro expansion.
 
 | Capability | Direct ambient surfaces |
 |------------|-------------------------|
-| `FileSystem` | `read_file`, `write_file`, `file_exists`, `read_bytes`, `write_bytes`, `append_file`, `list_dir`, `is_dir`, `file_size`, compile-time include macros such as `include!`, `include_str!`, and `include_bytes!` |
+| `FileSystem` | `read_file`, `write_file`, `file_exists`, `read_bytes`, `write_bytes`, `append_file`, `write_file_bytes`, `append_file_bytes`, `read_file_bytes`, `list_dir`, `is_dir`, `file_size`, compile-time include macros such as `include!`, `include_str!`, and `include_bytes!` |
 | `Network` | `tcp_connect`, `tcp_send`, `tcp_recv`, `tcp_close` |
 | `Process` | `exit`, `process_exit` |
 | `Environment` | `getenv`, `args_count`, `args_get`, compile-time environment macros such as `env!` and `option_env!` |
-| `Clock` | `clock_ms`, `time_unix` |
+| `Clock` | `clock_ms`, `clock_ns`, `time_unix` |
 | `Console` | `read_line`, `read_all`, `stdin_is_pipe`, direct print helpers, console macros such as `println!`, `print!`, `eprintln!`, `eprint!`, and diagnostic logging macros |
 | `Foreign` | calls to unknown functions declared in `extern` blocks and reads from foreign statics |
 | `Gpu` | direct `build_vk_*` and `build_gfx_*` runtime helpers |

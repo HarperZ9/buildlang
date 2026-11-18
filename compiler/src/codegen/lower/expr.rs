@@ -3686,6 +3686,31 @@ impl<'ctx> MirLowerer<'ctx> {
             }
         }
 
+        // ---- Byte-buffer writers take the vector handle by value ----
+        // `write_file_bytes(path, &bytes)`: the runtime reads the buffer through
+        // the handle, so a borrowed vector is loaded first. A vector of anything
+        // but `u8` is refused here, before C sees a mismatched element size.
+        if matches!(
+            self.extract_call_name(func),
+            Some("write_file_bytes" | "append_file_bytes")
+        ) && arg_vals.len() == 2
+        {
+            let loaded = self.deref_if_pointer(arg_vals[1].clone())?;
+            match self.type_of_value(&loaded) {
+                MirType::Vec(elem) if *elem == MirType::u8() => arg_vals[1] = loaded,
+                other => {
+                    return Err(self.reject_at(
+                        &args[1],
+                        format!(
+                            "the bytes to write are a `{}`, not a `Vec<u8>`",
+                            Self::source_type_name(&other)
+                        ),
+                        "pass `&bytes` with `let bytes: Vec<u8> = Vec::new();`".to_string(),
+                    ))
+                }
+            }
+        }
+
         // ---- Coerce BuildString args to char* for builtin I/O calls ----
         // Runtime builtins like read_file, write_file, file_exists expect
         // const char* but the lowerer passes BuildString values.
@@ -3700,6 +3725,9 @@ impl<'ctx> MirLowerer<'ctx> {
                     | "append_file"
                     | "rename_file"
                     | "fsync_file"
+                    | "write_file_bytes"
+                    | "append_file_bytes"
+                    | "read_file_bytes"
                     | "build_vk_load_shader_file"
                     | "build_vk_run_compute"
                     | "map_insert"
@@ -5051,6 +5079,8 @@ impl<'ctx> MirLowerer<'ctx> {
                 "append_file" => return MirType::Bool,
                 "rename_file" => return MirType::Bool,
                 "fsync_file" => return MirType::Bool,
+                "write_file_bytes" | "append_file_bytes" => return MirType::Bool,
+                "read_file_bytes" => return MirType::Vec(Box::new(MirType::u8())),
                 // CLI / stdin builtins
                 "args_count" => return MirType::i64(),
                 "args_get" => return MirType::Struct(Arc::from("BuildString")),
@@ -5090,7 +5120,7 @@ impl<'ctx> MirLowerer<'ctx> {
                 // Environment variable builtins
                 "getenv" => return MirType::Struct(Arc::from("BuildString")),
                 // Clock / time builtins
-                "clock_ms" | "time_unix" => return MirType::i64(),
+                "clock_ms" | "clock_ns" | "time_unix" => return MirType::i64(),
                 // Seeded random builtin
                 "random_f64" => return MirType::f64(),
                 // Model-call builtin
@@ -6590,6 +6620,35 @@ impl<'ctx> MirLowerer<'ctx> {
         if let MirType::Vec(ref elem_ty) = receiver_ty {
             let method_name = method.name.as_ref();
             let type_suffix = Self::hvec_elem_suffix(elem_ty.as_ref())?;
+
+            // `v.as_ptr()` / `v.as_mut_ptr()`: the element buffer, for passing a
+            // vector over the C ABI. As in Rust the pointer is valid until the
+            // vector next grows or is released. The runtime checks that the
+            // vector stores elements of `T`'s size, so a vector whose storage
+            // is wider than its element type (a `Vec<f32>` stores f64s) stops
+            // with the layout message instead of handing C the wrong stride.
+            if (method_name == "as_ptr" || method_name == "as_mut_ptr") && args.is_empty() {
+                let elem = elem_ty.as_ref().clone();
+                let builder = self
+                    .current_fn
+                    .as_mut()
+                    .ok_or_else(|| CodegenError::Internal("No current function".to_string()))?;
+                let size = builder.create_local(MirType::usize());
+                builder.assign(
+                    size,
+                    MirRValue::NullaryOp(crate::codegen::ir::NullaryOp::SizeOf, elem.clone()),
+                );
+                let data = builder.create_local(MirType::Ptr(Box::new(elem)));
+                let cont = builder.create_block();
+                builder.call(
+                    MirValue::Function(Arc::from("build_hvec_data")),
+                    vec![receiver_val, values::local(size)],
+                    Some(data),
+                    cont,
+                );
+                builder.switch_to_block(cont);
+                return Ok(values::local(data));
+            }
 
             // `v.remove(i)` returns the element at `i` and closes the gap;
             // `v.insert(i, x)` pushes `x` and moves it to `i`. Both check `i`

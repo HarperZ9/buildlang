@@ -2218,6 +2218,15 @@ impl<'ctx> TypeInfer<'ctx> {
                 vec![str_ty.clone(), str_ty.clone(), i64_ty.clone()],
                 bool_ty,
             ),
+            // Byte buffers in binary mode: `write_file_bytes(path, &bytes)`.
+            "write_file_bytes" | "append_file_bytes" => (
+                vec![
+                    str_ty.clone(),
+                    Ty::reference(None, Mutability::Immutable, Ty::vec(Ty::int(IntTy::U8))),
+                ],
+                bool_ty.clone(),
+            ),
+            "read_file_bytes" => (vec![str_ty.clone()], Ty::vec(Ty::int(IntTy::U8))),
             "file_exists" | "is_dir" => (vec![str_ty.clone()], bool_ty),
             "list_dir" => (vec![str_ty.clone()], Ty::vec(str_ty.clone())),
             "file_size" => (vec![str_ty.clone()], i64_ty.clone()),
@@ -2229,7 +2238,7 @@ impl<'ctx> TypeInfer<'ctx> {
             "getenv" => (vec![str_ty.clone()], str_ty.clone()),
             "args_count" => (vec![], i64_ty.clone()),
             "args_get" => (vec![i64_ty.clone()], str_ty.clone()),
-            "clock_ms" | "time_unix" => (vec![], i64_ty.clone()),
+            "clock_ms" | "clock_ns" | "time_unix" => (vec![], i64_ty.clone()),
             "random_f64" => (vec![], Ty::float(FloatTy::F64)),
             "model_complete" => (vec![str_ty.clone()], str_ty.clone()),
             "build_vk_init" => (vec![], bool_ty.clone()),
@@ -3722,7 +3731,7 @@ impl<'ctx> TypeInfer<'ctx> {
                 // Environment variable builtins
                 "getenv" |
                 // Clock / time builtins
-                "clock_ms" | "time_unix" |
+                "clock_ms" | "clock_ns" | "time_unix" |
                 // Seeded random builtin
                 "random_f64" |
                 // Model-call builtin
@@ -6070,6 +6079,24 @@ impl<'ctx> TypeInfer<'ctx> {
                 return Ty::fresh_var();
             }
             "join" => return Ty::str(),
+            // `v.as_ptr()` / `v.as_mut_ptr()` on a `Vec<T>` (or a reference to
+            // one): a raw pointer to the element buffer, for the C ABI.
+            "as_ptr" | "as_mut_ptr" if args.is_empty() => {
+                let vec_ty = match &receiver_ty.kind {
+                    TyKind::Ref(_, _, inner) => inner.as_ref(),
+                    _ => &receiver_ty,
+                };
+                if let TyKind::Adt(def_id, substs) = &vec_ty.kind {
+                    if *def_id == DefId::DUMMY && substs.len() == 1 {
+                        let m = if method_name == "as_ptr" {
+                            Mutability::Immutable
+                        } else {
+                            Mutability::Mutable
+                        };
+                        return Ty::ptr(m, substs[0].clone());
+                    }
+                }
+            }
             "with_capacity" | "from_slice" | "to_vec" | "into_vec" | "into_boxed_slice" => {
                 return Ty::fresh_var();
             }

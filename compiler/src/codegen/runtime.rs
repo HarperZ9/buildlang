@@ -2643,6 +2643,51 @@ static bool build_append_file(const char* path, const char* data) {
     return true;
 }
 
+// --- Byte-buffer file I/O ---
+// A `Vec<u8>` written or read as raw bytes. The file is always opened in binary
+// mode, so a zero byte, 0x0A and 0x1A reach the disk unchanged on Windows as on
+// Linux. A vector that does not hold 1-byte elements is refused with the layout
+// message. A write reports false when the file cannot be opened, a byte is not
+// written, or the close fails; a read of a file that cannot be opened gives an
+// empty vector (`file_exists` tells that case apart from an empty file).
+static bool bl_write_vec_bytes(const char* path, BuildVecHandle v, const char* mode) {
+    if (v.inner->elem_size != 1) bl_vec_layout_fail(v.inner->elem_size, 1);
+    FILE* f = fopen(path, mode);
+    if (!f) return false;
+    size_t n = v.inner->len;
+    size_t w = n ? fwrite(v.inner->ptr, 1, n, f) : 0;
+    int closed = fclose(f);
+    return w == n && closed == 0;
+}
+static bool build_write_file_bytes(const char* path, BuildVecHandle v) {
+    return bl_write_vec_bytes(path, v, "wb");
+}
+static bool build_append_file_bytes(const char* path, BuildVecHandle v) {
+    return bl_write_vec_bytes(path, v, "ab");
+}
+static BuildVecHandle build_read_file_bytes(const char* path) {
+    BuildVecHandle h;
+    h.inner = (BuildVec*)malloc(sizeof(BuildVec));
+    *h.inner = build_vec_new(1);
+    FILE* f = fopen(path, "rb");
+    if (!f) return h;
+    // Read in blocks rather than trusting ftell, whose `long` is 32 bits on
+    // Windows and cannot size a file over 2 GB.
+    for (;;) {
+        if (h.inner->cap - h.inner->len < 65536) {
+            size_t cap = h.inner->cap == 0 ? 65536 : h.inner->cap * 2;
+            h.inner->ptr = realloc(h.inner->ptr, cap);
+            if (!h.inner->ptr) { fprintf(stderr, "read_file_bytes: out of memory\n"); exit(101); }
+            h.inner->cap = cap;
+        }
+        size_t got = fread((char*)h.inner->ptr + h.inner->len, 1, h.inner->cap - h.inner->len, f);
+        h.inner->len += got;
+        if (got == 0) break;
+    }
+    fclose(f);
+    return h;
+}
+
 // --- Process / Environment ---
 
 static int32_t build_exit(int32_t code) {
@@ -3367,6 +3412,25 @@ static int64_t build_clock_ms(void) {
     #endif
 }
 
+// Monotonic nanoseconds. On Windows the counter is split into whole seconds
+// and a remainder so `count * 1e9` cannot overflow 64 bits (it would after
+// about 15 minutes of uptime at a 10 MHz counter); the resolution is the
+// counter's own (100 ns on most machines). Elsewhere CLOCK_MONOTONIC.
+static int64_t build_clock_ns(void) {
+    #ifdef _WIN32
+    LARGE_INTEGER freq, count;
+    QueryPerformanceFrequency(&freq);
+    QueryPerformanceCounter(&count);
+    int64_t whole = count.QuadPart / freq.QuadPart;
+    int64_t part = count.QuadPart % freq.QuadPart;
+    return whole * 1000000000LL + part * 1000000000LL / freq.QuadPart;
+    #else
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (int64_t)ts.tv_sec * 1000000000LL + (int64_t)ts.tv_nsec;
+    #endif
+}
+
 static int64_t build_time_unix(void) {
     return (int64_t)time(NULL);
 }
@@ -3661,6 +3725,9 @@ pub const MATH_BUILTINS: &[&str] = &[
     "append_file",
     "rename_file",
     "fsync_file",
+    "write_file_bytes",
+    "append_file_bytes",
+    "read_file_bytes",
     // Vector math builtins
     "dot",
     "cross",
@@ -3754,6 +3821,7 @@ pub const MATH_BUILTINS: &[&str] = &[
     "getenv",
     // Clock / time builtins
     "clock_ms",
+    "clock_ns",
     "time_unix",
     // Seeded random builtin
     "random_f64",
@@ -3801,6 +3869,9 @@ pub fn math_builtin_to_c(name: &str) -> Option<&'static str> {
         "append_file" => Some("build_append_file"),
         "rename_file" => Some("build_rename_file"),
         "fsync_file" => Some("build_fsync_file"),
+        "write_file_bytes" => Some("build_write_file_bytes"),
+        "append_file_bytes" => Some("build_append_file_bytes"),
+        "read_file_bytes" => Some("build_read_file_bytes"),
         "vec_new" => Some("build_hvec_new_i32"),
         "vec_push" => Some("build_hvec_push_i32"),
         "vec_get" => Some("build_hvec_get_i32"),
@@ -3893,6 +3964,7 @@ pub fn math_builtin_to_c(name: &str) -> Option<&'static str> {
         "getenv" => Some("build_getenv"),
         // Clock / time builtins
         "clock_ms" => Some("build_clock_ms"),
+        "clock_ns" => Some("build_clock_ns"),
         "time_unix" => Some("build_time_unix"),
         // Seeded random builtin
         "random_f64" => Some("build_random_f64"),
@@ -3991,8 +4063,11 @@ mod tests {
 
     #[test]
     fn test_math_builtins_list() {
-        assert_eq!(MATH_BUILTINS.len(), 100);
+        assert_eq!(MATH_BUILTINS.len(), 104);
         assert!(MATH_BUILTINS.contains(&"abs"));
+        assert!(MATH_BUILTINS.contains(&"write_file_bytes"));
+        assert!(MATH_BUILTINS.contains(&"read_file_bytes"));
+        assert!(MATH_BUILTINS.contains(&"clock_ns"));
         assert!(MATH_BUILTINS.contains(&"random_f64"));
         assert!(MATH_BUILTINS.contains(&"model_complete"));
         assert!(MATH_BUILTINS.contains(&"min"));

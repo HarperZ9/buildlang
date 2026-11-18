@@ -20,6 +20,7 @@ use std::path::PathBuf;
 pub const FILES: &[(&str, &str)] = &[
     ("algorithms.bld", include_str!("../stdlib/algorithms.bld")),
     ("bitwise.bld", include_str!("../stdlib/bitwise.bld")),
+    ("bytes.bld", include_str!("../stdlib/bytes.bld")),
     ("complex.bld", include_str!("../stdlib/complex.bld")),
     ("core.bld", include_str!("../stdlib/core.bld")),
     ("effects.bld", include_str!("../stdlib/effects.bld")),

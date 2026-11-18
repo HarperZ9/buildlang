@@ -1,0 +1,32 @@
+// `*const T` in an export keeps its `const` in the generated header, so a C or
+// C++ host can pass a pointer to read-only data without a cast.
+
+extern "C" fn cc_sum(p: *const u8, n: usize) -> u32 {
+    let xs = unsafe { slice::from_raw_parts(p, n) };
+    let mut s: u32 = 0;
+    let mut i: usize = 0;
+    while i < n {
+        s = s + xs[i] as u32;
+        i = i + 1;
+    }
+    s
+}
+
+extern "C" fn cc_fill(p: *mut u8, n: usize, v: u8) {
+    let xs = unsafe { slice::from_raw_parts_mut(p, n) };
+    let mut i: usize = 0;
+    while i < n {
+        xs[i] = v;
+        i = i + 1;
+    }
+}
+
+// Returns its argument: a `*const` return keeps its `const` too.
+extern "C" fn cc_same(p: *const u8) -> *const u8 {
+    p
+}
+
+// Nested levels: the header states each one.
+extern "C" fn cc_rows(rows: *const *const u8, n: usize) -> usize {
+    n
+}
