@@ -84,7 +84,9 @@ pub fn capability_effect_for_call(name: &str) -> Option<&'static str> {
         | "append_file" | "rename_file" | "fsync_file" | "list_dir" | "is_dir" | "file_size"
         | "build_read_file" | "build_rename_file" | "build_fsync_file"
         | "build_write_file" | "build_file_exists" | "build_read_bytes" | "build_write_bytes"
-        | "build_append_file" | "build_list_dir" | "build_is_dir" | "build_file_size" => {
+        | "build_append_file" | "build_list_dir" | "build_is_dir" | "build_file_size"
+        | "write_file_bytes" | "append_file_bytes" | "read_file_bytes"
+        | "build_write_file_bytes" | "build_append_file_bytes" | "build_read_file_bytes" => {
             Some(FILE_SYSTEM)
         }
         "tcp_connect" | "tcp_send" | "tcp_recv" | "tcp_close" | "build_tcp_connect"
@@ -92,7 +94,8 @@ pub fn capability_effect_for_call(name: &str) -> Option<&'static str> {
         "exit" | "process_exit" | "build_exit" | "build_process_exit" => Some(PROCESS),
         "getenv" | "args_count" | "args_get" | "build_getenv" | "build_args_init"
         | "build_args_count" | "build_args_get" => Some(ENVIRONMENT),
-        "clock_ms" | "time_unix" | "build_clock_ms" | "build_time_unix" => Some(CLOCK),
+        "clock_ms" | "clock_ns" | "time_unix" | "build_clock_ms" | "build_clock_ns"
+        | "build_time_unix" => Some(CLOCK),
         // The seeded PRNG builtin. Its own capability (not Clock, not
         // Environment) because the scientific receipt treats it distinctly:
         // an UNSEEDED draw is a nondeterminism hazard, but a draw under a

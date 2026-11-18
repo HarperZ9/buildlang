@@ -159,3 +159,97 @@ impl<'ctx> MirLowerer<'ctx> {
         }
     }
 }
+
+/// The annotation prefix that carries a raw pointer's `const` levels from the
+/// source type to the generated C header (see [`c_const_levels`]).
+pub(crate) const C_CONST_ANNOTATION: &str = "c_const:";
+
+/// The `const` levels of a raw pointer type, outermost first: `T` where that
+/// level is `*const`, `F` where it is `*mut`. `*const *mut u8` gives `TF`.
+/// `None` when the type is not a raw pointer or no level is `const`, so a
+/// header for a signature without `*const` is unchanged.
+pub(crate) fn c_const_levels(ty: &ast::Type) -> Option<Arc<str>> {
+    let mut levels = String::new();
+    let mut cur = ty;
+    while let ast::TypeKind::Ptr { mutability, ty } = &cur.kind {
+        levels.push(if *mutability == ast::Mutability::Immutable {
+            'T'
+        } else {
+            'F'
+        });
+        cur = ty;
+    }
+    levels.contains('T').then(|| Arc::from(levels.as_str()))
+}
+
+/// Record the `const` levels of an export's raw-pointer parameters and return
+/// type on its MIR, for the header. The C definition is left as it was: the
+/// symbol and its calling convention do not depend on `const`, and the body
+/// may pass the pointer on to runtime helpers that take a plain pointer.
+pub(super) fn record_c_const(f: &ast::FnDef, func: &mut MirFunction) {
+    for (i, param) in f.sig.params.iter().enumerate() {
+        if let (Some(levels), Some(local)) = (c_const_levels(&param.ty), func.locals.get_mut(i)) {
+            if local.is_param {
+                local
+                    .annotations
+                    .push(Arc::from(format!("{C_CONST_ANNOTATION}{levels}").as_str()));
+            }
+        }
+    }
+    func.c_const_ret = f.sig.return_ty.as_deref().and_then(c_const_levels);
+}
+
+/// The C spelling of a pointer type whose levels are `levels` (outermost
+/// first, as [`c_const_levels`] gives them) over the pointee `base`:
+/// `*const *const u8` is `const uint8_t* const*`. `None` when `ty` does not
+/// have that many pointer levels, so the caller keeps its plain spelling.
+pub(crate) fn c_const_pointer(
+    ty: &MirType,
+    levels: &str,
+    base_to_c: impl Fn(&MirType) -> String,
+) -> Option<String> {
+    let flags: Vec<bool> = levels.chars().map(|c| c == 'T').collect();
+    let mut base = ty;
+    for _ in 0..flags.len() {
+        match base {
+            MirType::Ptr(inner) => base = inner,
+            _ => return None,
+        }
+    }
+    let n = flags.len();
+    let mut s = base_to_c(base);
+    if flags[n - 1] {
+        s = format!("const {s}");
+    }
+    for i in (0..n).rev() {
+        s.push('*');
+        if i > 0 && flags[i - 1] {
+            s.push_str(" const");
+        }
+    }
+    Some(s)
+}
+
+#[cfg(test)]
+mod const_tests {
+    use super::*;
+
+    fn render(ty: &MirType, levels: &str) -> Option<String> {
+        c_const_pointer(ty, levels, |t| match t {
+            MirType::Int(_, false) => "uint8_t".to_string(),
+            other => format!("{other:?}"),
+        })
+    }
+
+    #[test]
+    fn const_levels_render_in_c_order() {
+        let p = MirType::Ptr(Box::new(MirType::u8()));
+        let pp = MirType::Ptr(Box::new(p.clone()));
+        assert_eq!(render(&p, "T").as_deref(), Some("const uint8_t*"));
+        assert_eq!(render(&pp, "TT").as_deref(), Some("const uint8_t* const*"));
+        assert_eq!(render(&pp, "TF").as_deref(), Some("uint8_t* const*"));
+        assert_eq!(render(&pp, "FT").as_deref(), Some("const uint8_t**"));
+        // More levels than the type has: the plain spelling is kept.
+        assert_eq!(render(&p, "TT"), None);
+    }
+}

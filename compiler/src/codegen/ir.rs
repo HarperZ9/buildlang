@@ -307,6 +307,11 @@ pub struct MirFunction {
     /// so other languages can call them. Skipped when false.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub is_c_export: bool,
+    /// The `const` levels of an export's raw-pointer return type, outermost
+    /// first (`T` for `*const`, `F` for `*mut`), for the generated header.
+    /// Skipped when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub c_const_ret: Option<Arc<str>>,
     /// Source spans for statements/terminators, keyed by (block position,
     /// index). In-memory only: populated at lowering, consumed by the MIR
     /// linear checker immediately after, and NOT serialized (the linear
@@ -334,6 +339,7 @@ impl PartialEq for MirFunction {
             && self.link_lib == other.link_lib
             && self.link_source == other.link_source
             && self.is_c_export == other.is_c_export
+            && self.c_const_ret == other.c_const_ret
     }
 }
 
@@ -367,6 +373,7 @@ impl MirFunction {
             link_lib: None,
             link_source: None,
             is_c_export: false,
+            c_const_ret: None,
             spans: MirSpanTable::default(),
         }
     }
@@ -387,6 +394,7 @@ impl MirFunction {
             link_lib: None,
             link_source: None,
             is_c_export: false,
+            c_const_ret: None,
             spans: MirSpanTable::default(),
         }
     }

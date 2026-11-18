@@ -383,6 +383,12 @@ enum Commands {
         #[arg(long)]
         gpu: bool,
 
+        /// Compile the generated C with optimisation (`-O2`, or `/O2` with
+        /// MSVC) instead of debug info. Refused with `--emit-receipt`, whose
+        /// verifier rebuilds the program the default way.
+        #[arg(long)]
+        release: bool,
+
         /// Arguments to pass to the program
         #[arg(trailing_var_arg = true)]
         args: Vec<String>,
@@ -844,9 +850,15 @@ fn run_cli(cli: Cli) -> Result<(), i32> {
             budget_wall_seconds,
             cross_backend,
             gpu,
+            release,
             args,
         }) => {
-            if gpu {
+            if release && (gpu || emit_receipt.is_some()) {
+                eprintln!(
+                    "Error: --release is not supported with --gpu or --emit-receipt (a receipt's verifier rebuilds the program without optimisation)"
+                );
+                Err(1)
+            } else if gpu {
                 if seed.is_some() {
                     eprintln!(
                         "--seed is not supported with --gpu (the GPU cross-check has no Random capability)"
@@ -904,6 +916,7 @@ fn run_cli(cli: Cli) -> Result<(), i32> {
                     budget_consumed,
                     budget_wall_seconds,
                     cross_backend.as_deref(),
+                    release,
                 )
             }
         }
@@ -7992,6 +8005,7 @@ fn compile_program_to_exe(
     file: &Path,
     stdio_mode: StdioMode,
     compiler_override: Option<&str>,
+    release: bool,
 ) -> Result<CompiledProgram, i32> {
     // Read source file
     let source = std::fs::read_to_string(file).map_err(|e| {
@@ -8101,7 +8115,13 @@ fn compile_program_to_exe(
         })?,
     };
 
-    invoke_c_compiler(&compiler, &c_file, &exe_file, false, &output.link_libraries)?;
+    invoke_c_compiler(
+        &compiler,
+        &c_file,
+        &exe_file,
+        release,
+        &output.link_libraries,
+    )?;
 
     // Verify the executable was created
     if !exe_file.exists() {
@@ -8139,7 +8159,7 @@ fn compile_and_capture_run(
     seed: Option<u64>,
 ) -> Result<CapturedRun, i32> {
     let CompiledProgram { temp_dir, exe_file } =
-        compile_program_to_exe(file, stdio_mode, compiler_override)?;
+        compile_program_to_exe(file, stdio_mode, compiler_override, false)?;
 
     // Hash the produced executable BEFORE running (the temp dir is removed
     // after the run). FAIL CLOSED on a read failure: a receipt must never
@@ -8540,6 +8560,7 @@ fn cmd_run(
     budget_consumed: Option<u64>,
     budget_wall_seconds: Option<f64>,
     cross_backend: Option<&str>,
+    release: bool,
 ) -> Result<(), i32> {
     // The Monte Carlo declaration is all-or-nothing, validated whenever ANY
     // mc flag is present (like --units: a typo is never silently accepted):
@@ -8771,7 +8792,7 @@ fn cmd_run(
     let Some(receipt_path) = emit_receipt else {
         // No receipt: compile, then run with inherited stdout via `.status()`.
         let CompiledProgram { temp_dir, exe_file } =
-            compile_program_to_exe(file, stdio_mode, None)?;
+            compile_program_to_exe(file, stdio_mode, None, release)?;
         let status = {
             let mut run_cmd = std::process::Command::new(&exe_file);
             run_cmd.args(args);
@@ -10918,7 +10939,7 @@ fn cmd_compile(
                 .is_some_and(|e| e.eq_ignore_ascii_case("exe"))
         }) {
             let CompiledProgram { temp_dir, exe_file } =
-                compile_program_to_exe(input, stdio_mode, None)?;
+                compile_program_to_exe(input, stdio_mode, None, opt_level > 0)?;
             let copied = std::fs::copy(&exe_file, dest);
             let _ = std::fs::remove_dir_all(&temp_dir);
             copied.map_err(|e| {

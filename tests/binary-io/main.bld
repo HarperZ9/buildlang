@@ -1,0 +1,41 @@
+// Binary file I/O round trip: every byte value, then little-endian fields.
+// Usage: main <out.bin>. Writes the file, reads it back and prints what it
+// finds; compiler/tests/binary_io.rs checks the file's bytes and SHA-256.
+
+mod bytes;
+
+fn main() ~ Console + Environment + FileSystem {
+    let path = args_get(1);
+    let mut b: Vec<u8> = Vec::new();
+    let mut i: u64 = 0;
+    while i < 256 {
+        put_u8(&mut b, i as u8);
+        i = i + 1;
+    }
+    put_u16_le(&mut b, 48879);
+    put_u32_le(&mut b, 3735928559);
+    put_u64_le(&mut b, 81985529216486895);
+    put_f32_le(&mut b, 1.5);
+    put_f64_le(&mut b, -0.1);
+    println!("write {}", write_file_bytes(path, &b));
+
+    let r = read_file_bytes(path);
+    println!("len {}", r.len());
+    let mut same = r.len() == b.len();
+    let mut k: usize = 0;
+    while same && k < b.len() {
+        if r[k] != b[k] {
+            println!("first difference at {}", k);
+            same = false;
+        }
+        k = k + 1;
+    }
+    println!("match {}", same);
+    println!("zero {} ff {} lf {} sub {}", get_u8(&r, 0), get_u8(&r, 255), get_u8(&r, 10), get_u8(&r, 26));
+    println!("u16 {}", get_u16_le(&r, 256));
+    println!("u32 {}", get_u32_le(&r, 258));
+    println!("u64 {}", get_u64_le(&r, 262));
+    println!("f32 {}", get_f32_le(&r, 270));
+    println!("f64 {}", get_f64_le(&r, 274));
+    println!("missing {}", read_file_bytes("no/such/file.bin").len());
+}

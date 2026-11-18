@@ -1,0 +1,36 @@
+// `buildc run --release` builds the generated C with optimisation, and
+// `clock_ns` counts monotonic nanoseconds.
+
+extern "C" source "opt.c" {
+    fn bl_opt_state() -> i32;
+}
+
+fn main() ~ Console + Clock + Foreign {
+    println!("opt {}", bl_opt_state());
+    // Four timed stretches of busy work. A clock that only counts whole
+    // milliseconds gives every interval as a multiple of 1,000,000 ns; a
+    // finer clock almost never does, four times over.
+    let mut ordered = true;
+    let mut fine = false;
+    let mut x: u64 = 1;
+    let mut k = 0;
+    while k < 4 {
+        let t0 = clock_ns();
+        let mut i: u64 = 0;
+        while i < 200000 {
+            x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            i = i + 1;
+        }
+        let t1 = clock_ns();
+        if t1 < t0 { ordered = false; }
+        if (t1 - t0) % 1000000 != 0 { fine = true; }
+        k = k + 1;
+    }
+    let m0 = clock_ms();
+    let n0 = clock_ns();
+    println!("ordered {}", ordered);
+    println!("sub-ms {}", fine);
+    // clock_ms and clock_ns read the same monotonic clock.
+    println!("agree {}", (n0 / 1000000 - m0) * (n0 / 1000000 - m0) <= 1);
+    println!("x {}", x % 7);
+}

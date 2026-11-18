@@ -16,7 +16,7 @@
 
 mod array_places;
 mod asserts;
-mod c_abi;
+pub(crate) mod c_abi;
 mod drops;
 mod env_macro;
 mod expr;
@@ -3128,6 +3128,7 @@ impl<'ctx> MirLowerer<'ctx> {
                 func.linkage = Linkage::External;
                 func.is_c_export = true;
                 self.check_c_export_signature(f, &func)?;
+                c_abi::record_c_const(f, &mut func);
             }
             func.is_public = is_main || self.current_item_vis.unwrap_or(true);
 

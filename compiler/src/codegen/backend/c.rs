@@ -18,6 +18,7 @@ use std::sync::Arc;
 
 use super::{Backend, CodegenError, CodegenResult, StdioMode, Target};
 use crate::codegen::ir::*;
+use crate::codegen::lower::c_abi::{c_const_pointer, C_CONST_ANNOTATION};
 use crate::codegen::runtime;
 use crate::codegen::{GeneratedCode, OutputFormat};
 
@@ -2687,13 +2688,22 @@ impl CBackend {
     /// Render a C prototype string `ret name(params)` for a function, with no
     /// linkage qualifier and no trailing `;`. Mirrors the definition signature
     /// so the header and the emitted `.c` agree on the symbol.
+    /// The C spelling of a raw pointer type with its source `const` levels
+    /// (see `lower::c_abi::c_const_levels`), or `None` to keep the plain one.
+    fn c_const_type(&self, ty: &MirType, levels: &str) -> Option<String> {
+        c_const_pointer(ty, levels, |base| self.type_to_c(base))
+    }
+
     fn c_callable_prototype(&self, func: &MirFunction) -> String {
         let mut s = String::new();
         let array_ret_out = self.array_ret_out_param(&func.sig.ret);
         let ret = if array_ret_out.is_some() {
             "void".to_string()
         } else {
-            self.type_to_c(&func.sig.ret)
+            func.c_const_ret
+                .as_deref()
+                .and_then(|levels| self.c_const_type(&func.sig.ret, levels))
+                .unwrap_or_else(|| self.type_to_c(&func.sig.ret))
         };
         let name = Self::user_fn_emit_name(func.name.as_ref());
         s.push_str(&format!("{} {}(", ret, name));
@@ -2725,7 +2735,14 @@ impl CBackend {
                     let fp: Vec<_> = fsig.params.iter().map(|p| self.type_to_c(p)).collect();
                     s.push_str(&format!("{} (*{})({})", r, pname, fp.join(", ")));
                 } else {
-                    s.push_str(&format!("{} {}", self.type_to_c(&param.ty), pname));
+                    // A `*const T` parameter keeps its `const` in the header.
+                    let ty = param
+                        .annotations
+                        .iter()
+                        .find_map(|a| a.strip_prefix(C_CONST_ANNOTATION))
+                        .and_then(|levels| self.c_const_type(&param.ty, levels))
+                        .unwrap_or_else(|| self.type_to_c(&param.ty));
+                    s.push_str(&format!("{} {}", ty, pname));
                 }
             }
             if func.sig.is_variadic {

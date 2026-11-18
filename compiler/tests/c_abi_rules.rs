@@ -78,7 +78,7 @@ fn rules_module_behind_an_opaque_handle_passes_the_host_checks() {
         !header.contains("typedef struct LwRules {"),
         "an opaque handle's fields must stay out of the header:\n{header}"
     );
-    assert!(header.contains("LwRules* lw_rules_create(uint8_t* lwd_text, uint32_t seed);"));
+    assert!(header.contains("LwRules* lw_rules_create(const uint8_t* lwd_text, uint32_t seed);"));
 
     let link_flags = std::fs::read_to_string(lib_dir.join("main.link")).expect("main.link written");
     let exe = lib_dir.join(if cfg!(windows) {
