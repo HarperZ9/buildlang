@@ -21,14 +21,14 @@ int main(void) {
     CHECK(lw_rules_skill(r, S("sum")) == 1);
     CHECK(lw_rules_become(r, S("clerk")) == 0);
     CHECK(lw_rules_attr(r, S("pen")) == 3); CHECK(lw_rules_skill(r, S("sum")) == 6);
-    uint8_t* label = NULL;
+    const uint8_t* label = NULL;
     CHECK(lw_rules_passive(r, S("sum"), 6, &label) == 1); CHECK(strcmp(T(label), "Trivial") == 0);
     CHECK(lw_rules_passive(r, S("sum"), 8, &label) == 0); CHECK(strcmp(T(label), "Easy") == 0);
     CHECK(lw_rules_become(r, S("nobody")) == -1);
     CHECK(strcmp(T(lw_rules_last_error()), "become: no archetype nobody") == 0);
     CHECK(lw_rules_meter(r, S("cold")) == 2);
     CHECK(lw_rules_meter_add(r, S("cold"), 99) == 0); CHECK(lw_rules_meter(r, S("cold")) == 10);
-    uint8_t* id = NULL; uint8_t* node = lw_rules_take_full(r, &id);
+    const uint8_t* id = NULL; const uint8_t* node = lw_rules_take_full(r, &id);
     CHECK(node && strcmp(T(node), "chilled") == 0 && strcmp(T(id), "cold") == 0);
     CHECK(lw_rules_take_full(r, &id) == NULL);
     CHECK(lw_rules_meter_add(r, S("nope"), 1) == -1);
