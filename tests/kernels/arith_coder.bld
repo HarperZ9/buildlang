@@ -1,0 +1,352 @@
+// Adaptive arithmetic coder with an order-2 context model that learns as it
+// codes (registry row SIG-051).
+//
+// The coder is the integer interval coder of Witten, Neal and Cleary (1987)
+// on a 32-bit register. The model counts each byte under the two bytes before
+// it (hashed into 4096 contexts) and adds INC to the count it has just coded,
+// so the decoder must replay every update bit for bit. Every count, total and
+// interval bound is an integer; the only floats are the code-length bound,
+// which never feeds the coder.
+//
+// Checks, printed one per line for compiler/tests/shared_video_kernels.rs:
+//   roundtrip  decode(encode(m)) == m, byte for byte
+//   bound      code length within [L - 2, L + 2 + n / 8192] bits of
+//              L = sum -log2 p(symbol | context), the message's cost under the
+//              same adaptive model
+//   digest     FNV-1a 64 of the message and the packed code; the expected
+//              file pins both, so Linux and Windows CI must agree to the bit
+//   control    a decoder whose update step sums its learning rate in another
+//              order (0.1 + (0.2 + 0.3) against (0.1 + 0.2) + 0.3) must
+//              fail to decode; the program reports where it diverged
+
+const NCTX: i64 = 4096;
+const NSYM: i64 = 256;
+const LIMIT: i64 = 65536;
+const TOP: i64 = 4294967295;
+const HALF: i64 = 2147483648;
+const Q1: i64 = 1073741824;
+const Q3: i64 = 3221225472;
+
+struct Model {
+    counts: Vec<i64>,
+    totals: Vec<i64>,
+}
+
+fn new_model() -> Model {
+    let mut counts: Vec<i64> = Vec::new();
+    let mut totals: Vec<i64> = Vec::new();
+    let mut i: i64 = 0;
+    while i < NCTX * NSYM {
+        counts.push(1);
+        i = i + 1;
+    }
+    i = 0;
+    while i < NCTX {
+        totals.push(NSYM);
+        i = i + 1;
+    }
+    Model { counts: counts, totals: totals }
+}
+
+fn context(p2: i64, p1: i64) -> i64 {
+    // multiplicative hash of the two previous bytes into NCTX slots
+    (((p2 * 256 + p1) * 40503) % 65536) / 16
+}
+
+// The learning rate as a count increment. order_a is the order every honest
+// encoder and decoder uses; the control decoder passes false.
+fn increment(order_a: bool, a: f64, b: f64, c: f64) -> i64 {
+    let s = if order_a { (a + b) + c } else { a + (b + c) };
+    (s * 40.0).ceil() as i64
+}
+
+fn update(m: &mut Model, ctx: i64, sym: i64, inc: i64) {
+    let base = ctx * NSYM;
+    m.counts[(base + sym) as usize] = m.counts[(base + sym) as usize] + inc;
+    m.totals[ctx as usize] = m.totals[ctx as usize] + inc;
+    if m.totals[ctx as usize] >= LIMIT {
+        let mut t: i64 = 0;
+        let mut k: i64 = 0;
+        while k < NSYM {
+            let c = (m.counts[(base + k) as usize] + 1) / 2;
+            m.counts[(base + k) as usize] = c;
+            t = t + c;
+            k = k + 1;
+        }
+        m.totals[ctx as usize] = t;
+    }
+}
+
+fn cum_below(m: &Model, ctx: i64, sym: i64) -> i64 {
+    let base = ctx * NSYM;
+    let mut s: i64 = 0;
+    let mut k: i64 = 0;
+    while k < sym {
+        s = s + m.counts[(base + k) as usize];
+        k = k + 1;
+    }
+    s
+}
+
+struct Bits {
+    bits: Vec<i64>,
+    pending: i64,
+}
+
+fn emit(out: &mut Bits, bit: i64) {
+    out.bits.push(bit);
+    while out.pending > 0 {
+        out.bits.push(1 - bit);
+        out.pending = out.pending - 1;
+    }
+}
+
+struct Coded {
+    bits: Vec<i64>,
+    ideal: f64,
+}
+
+fn encode(msg: &Vec<i64>, a: f64, b: f64, c: f64) -> Coded {
+    let mut m = new_model();
+    let mut out = Bits { bits: Vec::new(), pending: 0 };
+    let mut low: i64 = 0;
+    let mut high: i64 = TOP;
+    let mut ideal: f64 = 0.0;
+    let ln2 = (2.0 as f64).ln();
+    let inc = increment(true, a, b, c);
+    let mut p2: i64 = 0;
+    let mut p1: i64 = 0;
+    let mut i: usize = 0;
+    while i < msg.len() {
+        let sym = msg[i];
+        let ctx = context(p2, p1);
+        let total = m.totals[ctx as usize];
+        let lo = cum_below(&m, ctx, sym);
+        let hi = lo + m.counts[(ctx * NSYM + sym) as usize];
+        ideal = ideal + ((total as f64).ln() - ((hi - lo) as f64).ln()) / ln2;
+        let range = high - low + 1;
+        high = low + (range * hi) / total - 1;
+        low = low + (range * lo) / total;
+        loop {
+            if high < HALF {
+                emit(&mut out, 0);
+            } else if low >= HALF {
+                emit(&mut out, 1);
+                low = low - HALF;
+                high = high - HALF;
+            } else if low >= Q1 && high < Q3 {
+                out.pending = out.pending + 1;
+                low = low - Q1;
+                high = high - Q1;
+            } else {
+                break;
+            }
+            low = 2 * low;
+            high = 2 * high + 1;
+        }
+        update(&mut m, ctx, sym, inc);
+        p2 = p1;
+        p1 = sym;
+        i = i + 1;
+    }
+    out.pending = out.pending + 1;
+    if low < Q1 {
+        emit(&mut out, 0);
+    } else {
+        emit(&mut out, 1);
+    }
+    Coded { bits: out.bits, ideal: ideal }
+}
+
+fn bit_at(bits: &Vec<i64>, i: i64) -> i64 {
+    if i < (bits.len() as i64) { bits[i as usize] } else { 0 }
+}
+
+fn decode(bits: &Vec<i64>, n: i64, order_a: bool, a: f64, b: f64, c: f64) -> Vec<i64> {
+    let mut m = new_model();
+    let mut out: Vec<i64> = Vec::new();
+    let inc = increment(order_a, a, b, c);
+    let mut low: i64 = 0;
+    let mut high: i64 = TOP;
+    let mut value: i64 = 0;
+    let mut pos: i64 = 0;
+    while pos < 32 {
+        value = 2 * value + bit_at(bits, pos);
+        pos = pos + 1;
+    }
+    let mut p2: i64 = 0;
+    let mut p1: i64 = 0;
+    let mut i: i64 = 0;
+    while i < n {
+        let ctx = context(p2, p1);
+        let total = m.totals[ctx as usize];
+        let range = high - low + 1;
+        let scaled = ((value - low + 1) * total - 1) / range;
+        let base = ctx * NSYM;
+        let mut sym: i64 = 0;
+        let mut lo: i64 = 0;
+        while sym < NSYM - 1 && lo + m.counts[(base + sym) as usize] <= scaled {
+            lo = lo + m.counts[(base + sym) as usize];
+            sym = sym + 1;
+        }
+        let hi = lo + m.counts[(base + sym) as usize];
+        high = low + (range * hi) / total - 1;
+        low = low + (range * lo) / total;
+        loop {
+            if high < HALF {
+            } else if low >= HALF {
+                low = low - HALF;
+                high = high - HALF;
+                value = value - HALF;
+            } else if low >= Q1 && high < Q3 {
+                low = low - Q1;
+                high = high - Q1;
+                value = value - Q1;
+            } else {
+                break;
+            }
+            low = 2 * low;
+            high = 2 * high + 1;
+            value = 2 * value + bit_at(bits, pos);
+            pos = pos + 1;
+        }
+        out.push(sym);
+        update(&mut m, ctx, sym, inc);
+        p2 = p1;
+        p1 = sym;
+        i = i + 1;
+    }
+    out
+}
+
+fn fnv_step(h: u64, byte: i64) -> u64 {
+    (h ^ (byte as u64)).wrapping_mul(1099511628211)
+}
+
+fn digest_bytes(v: &Vec<i64>) -> u64 {
+    let mut h: u64 = 14695981039346656037;
+    let mut i: usize = 0;
+    while i < v.len() {
+        h = fnv_step(h, v[i]);
+        i = i + 1;
+    }
+    h
+}
+
+fn digest_bits(bits: &Vec<i64>) -> u64 {
+    // pack eight bits to a byte, most significant first, last byte zero-padded
+    let mut h: u64 = 14695981039346656037;
+    let mut byte: i64 = 0;
+    let mut k: i64 = 0;
+    let mut i: usize = 0;
+    while i < bits.len() {
+        byte = 2 * byte + bits[i];
+        k = k + 1;
+        if k == 8 {
+            h = fnv_step(h, byte);
+            byte = 0;
+            k = 0;
+        }
+        i = i + 1;
+    }
+    if k > 0 {
+        while k < 8 {
+            byte = 2 * byte;
+            k = k + 1;
+        }
+        h = fnv_step(h, byte);
+    }
+    h
+}
+
+fn push_str(msg: &mut Vec<i64>, s: str) {
+    for ch in s.chars() {
+        msg.push(ch as i64);
+    }
+}
+
+// The test message: sentences drawn from a fixed vocabulary by a seeded
+// Lehmer stream, so it has the repeated word structure an order-2 model learns.
+fn word(msg: &mut Vec<i64>, k: i64) {
+    if k == 0 { push_str(msg, "the"); }
+    else if k == 1 { push_str(msg, "coder"); }
+    else if k == 2 { push_str(msg, "model"); }
+    else if k == 3 { push_str(msg, "learns"); }
+    else if k == 4 { push_str(msg, "each"); }
+    else if k == 5 { push_str(msg, "symbol"); }
+    else if k == 6 { push_str(msg, "and"); }
+    else if k == 7 { push_str(msg, "interval"); }
+    else if k == 8 { push_str(msg, "narrows"); }
+    else if k == 9 { push_str(msg, "by"); }
+    else if k == 10 { push_str(msg, "its"); }
+    else if k == 11 { push_str(msg, "probability"); }
+    else if k == 12 { push_str(msg, "decoder"); }
+    else if k == 13 { push_str(msg, "replays"); }
+    else if k == 14 { push_str(msg, "every"); }
+    else { push_str(msg, "update"); }
+}
+
+fn message(n_words: i64) -> Vec<i64> {
+    let mut msg: Vec<i64> = Vec::new();
+    let mut s: i64 = 20261117;
+    let mut i: i64 = 0;
+    while i < n_words {
+        s = (s * 48271) % 2147483647;
+        word(&mut msg, s % 16);
+        s = (s * 48271) % 2147483647;
+        if s % 9 == 0 {
+            push_str(&mut msg, ". ");
+        } else {
+            push_str(&mut msg, " ");
+        }
+        i = i + 1;
+    }
+    msg
+}
+
+fn first_difference(a: &Vec<i64>, b: &Vec<i64>) -> i64 {
+    let mut i: usize = 0;
+    while i < a.len() && i < b.len() {
+        if a[i] != b[i] {
+            return i as i64;
+        }
+        i = i + 1;
+    }
+    if a.len() == b.len() { -1 } else { i as i64 }
+}
+
+fn main() ~ Console {
+    // the learning-rate terms come from a runtime computation so no compiler
+    // folds the two summation orders into one constant
+    let msg = message(4000);
+    let n = msg.len() as i64;
+    let a = (n as f64) * 0.0 + 0.1;
+    let b = 0.2;
+    let c = 0.3;
+    let coded = encode(&msg, a, b, c);
+    let nbits = coded.bits.len() as i64;
+    let back = decode(&coded.bits, n, true, a, b, c);
+    let same = first_difference(&msg, &back) < 0;
+    println!("symbols {}", n);
+    println!("roundtrip {}", if same { "ok" } else { "FAIL" });
+    let excess = (nbits as f64) - coded.ideal;
+    let slack = 2.0 + (n as f64) / 8192.0;
+    let in_bound = excess >= -2.0 && excess <= slack;
+    println!("bits {} ideal {:.3} excess {:.3} slack {:.3}", nbits, coded.ideal, excess, slack);
+    println!("bound {}", if in_bound { "ok" } else { "FAIL" });
+    println!("bits_per_symbol {:.4}", (nbits as f64) / (n as f64));
+    println!("digest message {:016x} code {:016x}", digest_bytes(&msg), digest_bits(&coded.bits));
+    let again = encode(&msg, a, b, c);
+    println!("repeat {}", if digest_bits(&again.bits) == digest_bits(&coded.bits) { "ok" } else { "FAIL" });
+    // control: the decoder's update sums the same three terms in another order
+    let inc_a = increment(true, a, b, c);
+    let inc_b = increment(false, a, b, c);
+    let bad = decode(&coded.bits, n, false, a, b, c);
+    let d = first_difference(&msg, &bad);
+    println!("control increments {} {}", inc_a, inc_b);
+    if d >= 0 {
+        println!("control caught: decode diverged at symbol {}", d);
+    } else {
+        println!("control MISSED: reordered update still decoded");
+    }
+}

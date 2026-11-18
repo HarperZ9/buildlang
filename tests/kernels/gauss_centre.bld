@@ -1,0 +1,248 @@
+// Gaussian centre fit with Poisson noise against its Cramer-Rao bound
+// (registry row OPT-048).
+//
+// Model, per pixel k of a 15 by 15 grid with unit pixels centred on integer
+// coordinates: mu_k = b + A g(x_k - x0) g(y_k - y0), g(t) = exp(-t^2 / 2s^2),
+// with the amplitude A, width s and background b known. Counts n_k are
+// Poisson(mu_k). The bound is the inverse Fisher information of exactly this
+// discrete model: I_ij = sum_k (d mu_k / d theta_i)(d mu_k / d theta_j) / mu_k,
+// so no continuum or large-pixel approximation enters it.
+//
+// The fit is maximum likelihood by Fisher scoring from the centroid.
+//
+// Checks, one per line for compiler/tests/shared_video_kernels.rs:
+//   variance   for x and y, the fitted variance over T trials divided by the
+//              bound lies in the 99.9 percent interval of a chi-square with
+//              T - 1 degrees of freedom: 1 +- 3.29 sqrt(2 / (T - 1))
+//   bias       the mean error is within 3.29 standard errors of zero
+//   control 1  a fitter whose pixel grid is shifted by a quarter of the
+//              bound's standard deviation (a coordinate-convention slip) must
+//              fail the bias check
+//   control 2  the plain centroid, which ignores the background, must fail
+//              the variance check: it is inefficient, so the check has to be
+//              able to say so
+
+const W: i64 = 15;
+const T: i64 = 4000;
+
+struct P {
+    x0: f64,
+    y0: f64,
+    a: f64,
+    s: f64,
+    b: f64,
+}
+
+fn g(t: f64, s: f64) -> f64 {
+    (-(t * t) / (2.0 * s * s)).exp()
+}
+
+fn mu(p: &P, x0: f64, y0: f64, i: i64, j: i64, origin: f64) -> f64 {
+    let xi = (i as f64) + origin;
+    let yj = (j as f64) + origin;
+    p.b + p.a * g(xi - x0, p.s) * g(yj - y0, p.s)
+}
+
+struct Fisher {
+    xx: f64,
+    xy: f64,
+    yy: f64,
+    sx: f64,
+    sy: f64,
+}
+
+// Fisher information at (x0, y0) and, if counts are given, the score.
+fn fisher(p: &P, x0: f64, y0: f64, counts: &Vec<i64>, with_score: bool, origin: f64) -> Fisher {
+    let mut f = Fisher { xx: 0.0, xy: 0.0, yy: 0.0, sx: 0.0, sy: 0.0 };
+    let s2 = p.s * p.s;
+    let mut j: i64 = 0;
+    while j < W {
+        let mut i: i64 = 0;
+        while i < W {
+            let xi = (i as f64) + origin;
+            let yj = (j as f64) + origin;
+            let peak = p.a * g(xi - x0, p.s) * g(yj - y0, p.s);
+            let m = p.b + peak;
+            let dx = peak * (xi - x0) / s2;
+            let dy = peak * (yj - y0) / s2;
+            f.xx = f.xx + dx * dx / m;
+            f.xy = f.xy + dx * dy / m;
+            f.yy = f.yy + dy * dy / m;
+            if with_score {
+                let r = (counts[(j * W + i) as usize] as f64) / m - 1.0;
+                f.sx = f.sx + r * dx;
+                f.sy = f.sy + r * dy;
+            }
+            i = i + 1;
+        }
+        j = j + 1;
+    }
+    f
+}
+
+struct Rng {
+    s: u64,
+}
+
+fn next_unit(r: &mut Rng) -> f64 {
+    r.s = r.s.wrapping_add(11400714819323198485);
+    let mut z = r.s;
+    z = (z ^ (z >> 30)).wrapping_mul(13787848793156543929);
+    z = (z ^ (z >> 27)).wrapping_mul(10723151780598845931);
+    z = z ^ (z >> 31);
+    ((z >> 11) as f64) / 9007199254740992.0
+}
+
+// Knuth's product-of-uniforms Poisson draw; exact for any mean whose exp(-mean)
+// is a normal double (here the mean stays below 200).
+fn poisson(r: &mut Rng, lambda: f64) -> i64 {
+    let l = (-lambda).exp();
+    let mut k: i64 = 0;
+    let mut prod = next_unit(r);
+    while prod > l {
+        k = k + 1;
+        prod = prod * next_unit(r);
+    }
+    k
+}
+
+struct Fit {
+    x: f64,
+    y: f64,
+}
+
+fn centroid(counts: &Vec<i64>) -> Fit {
+    let mut sw: f64 = 0.0;
+    let mut sx: f64 = 0.0;
+    let mut sy: f64 = 0.0;
+    let mut j: i64 = 0;
+    while j < W {
+        let mut i: i64 = 0;
+        while i < W {
+            let c = counts[(j * W + i) as usize] as f64;
+            sw = sw + c;
+            sx = sx + c * (i as f64);
+            sy = sy + c * (j as f64);
+            i = i + 1;
+        }
+        j = j + 1;
+    }
+    Fit { x: sx / sw, y: sy / sw }
+}
+
+fn mle(p: &P, counts: &Vec<i64>, origin: f64) -> Fit {
+    let c = centroid(counts);
+    let mut x = c.x + origin;
+    let mut y = c.y + origin;
+    let mut k: i64 = 0;
+    while k < 40 {
+        let f = fisher(p, x, y, counts, true, origin);
+        let det = f.xx * f.yy - f.xy * f.xy;
+        let ux = (f.yy * f.sx - f.xy * f.sy) / det;
+        let uy = (f.xx * f.sy - f.xy * f.sx) / det;
+        x = x + ux;
+        y = y + uy;
+        if ux.abs() < 1.0e-12 && uy.abs() < 1.0e-12 {
+            break;
+        }
+        k = k + 1;
+    }
+    Fit { x: x, y: y }
+}
+
+struct Stats {
+    n: f64,
+    sum: f64,
+    sumsq: f64,
+}
+
+fn add(s: &mut Stats, e: f64) {
+    s.n = s.n + 1.0;
+    s.sum = s.sum + e;
+    s.sumsq = s.sumsq + e * e;
+}
+
+fn mean(s: &Stats) -> f64 {
+    s.sum / s.n
+}
+
+fn var(s: &Stats) -> f64 {
+    let m = mean(s);
+    (s.sumsq - s.n * m * m) / (s.n - 1.0)
+}
+
+fn verdict(ok: bool) -> str {
+    if ok { "ok" } else { "FAIL" }
+}
+
+fn report(label: str, sx: &Stats, sy: &Stats, crb_x: f64, crb_y: f64, half: f64) -> bool ~ Console {
+    let rx = var(sx) / crb_x;
+    let ry = var(sy) / crb_y;
+    let tx = mean(sx) / (var(sx) / sx.n).sqrt();
+    let ty = mean(sy) / (var(sy) / sy.n).sqrt();
+    let var_ok = (rx - 1.0).abs() <= half && (ry - 1.0).abs() <= half;
+    let bias_ok = tx.abs() <= 3.29 && ty.abs() <= 3.29;
+    println!("{} variance {} ratio_x {:.4} ratio_y {:.4} interval {:.4} {:.4}", label, verdict(var_ok), rx, ry, 1.0 - half, 1.0 + half);
+    println!("{} bias {} t_x {:.2} t_y {:.2} mean_x {:.5} mean_y {:.5}", label, verdict(bias_ok), tx, ty, mean(sx), mean(sy));
+    var_ok && bias_ok
+}
+
+fn main() ~ Console {
+    // about 2000 photons in the blob over a background of 2 per pixel
+    let p = P { x0: 7.3, y0: 6.85, a: 141.0, s: 1.5, b: 2.0 };
+    let none: Vec<i64> = Vec::new();
+    let f = fisher(&p, p.x0, p.y0, &none, false, 0.0);
+    let det = f.xx * f.yy - f.xy * f.xy;
+    let crb_x = f.yy / det;
+    let crb_y = f.xx / det;
+    let mut photons: f64 = 0.0;
+    let mut j: i64 = 0;
+    while j < W {
+        let mut i: i64 = 0;
+        while i < W {
+            photons = photons + mu(&p, p.x0, p.y0, i, j, 0.0) - p.b;
+            i = i + 1;
+        }
+        j = j + 1;
+    }
+    println!("photons {:.1} background {:.1} width {:.2} trials {}", photons, p.b, p.s, T);
+    println!("crb_sd_x {:.5} crb_sd_y {:.5} width_over_root_photons {:.5}", crb_x.sqrt(), crb_y.sqrt(), p.s / photons.sqrt());
+    let half = 3.29 * (2.0 / ((T - 1) as f64)).sqrt();
+    let shift = 0.25 * crb_x.sqrt();
+    let mut r = Rng { s: 20261118 };
+    let mut ex = Stats { n: 0.0, sum: 0.0, sumsq: 0.0 };
+    let mut ey = Stats { n: 0.0, sum: 0.0, sumsq: 0.0 };
+    let mut bx = Stats { n: 0.0, sum: 0.0, sumsq: 0.0 };
+    let mut by = Stats { n: 0.0, sum: 0.0, sumsq: 0.0 };
+    let mut cx = Stats { n: 0.0, sum: 0.0, sumsq: 0.0 };
+    let mut cy = Stats { n: 0.0, sum: 0.0, sumsq: 0.0 };
+    let mut t: i64 = 0;
+    while t < T {
+        let mut counts: Vec<i64> = Vec::new();
+        j = 0;
+        while j < W {
+            let mut i: i64 = 0;
+            while i < W {
+                counts.push(poisson(&mut r, mu(&p, p.x0, p.y0, i, j, 0.0)));
+                i = i + 1;
+            }
+            j = j + 1;
+        }
+        let fit = mle(&p, &counts, 0.0);
+        add(&mut ex, fit.x - p.x0);
+        add(&mut ey, fit.y - p.y0);
+        let slip = mle(&p, &counts, shift);
+        add(&mut bx, slip.x - p.x0);
+        add(&mut by, slip.y - p.y0);
+        let c = centroid(&counts);
+        add(&mut cx, c.x - p.x0);
+        add(&mut cy, c.y - p.y0);
+        t = t + 1;
+    }
+    let honest = report("mle", &ex, &ey, crb_x, crb_y, half);
+    let slipped = report("control_shift", &bx, &by, crb_x, crb_y, half);
+    let cent = report("control_centroid", &cx, &cy, crb_x, crb_y, half);
+    println!("check {}", verdict(honest));
+    println!("control shift {}", if slipped { "MISSED" } else { "caught" });
+    println!("control centroid {}", if cent { "MISSED" } else { "caught" });
+}
