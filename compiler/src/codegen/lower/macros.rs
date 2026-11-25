@@ -1800,7 +1800,7 @@ impl<'ctx> MirLowerer<'ctx> {
             location: None,
             help: Some(
                 "supported: `{}`, `{:?}`, `{name}`, `{0}`, width, `<` `>` alignment, `+`, `#`, `0`, \
-                 precision, and `x` `X` `o`"
+                 precision, and `x` `X` `o` `e` `E`"
                     .to_string(),
             ),
         })?;

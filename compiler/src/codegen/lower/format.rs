@@ -46,7 +46,7 @@ pub(crate) struct Spec {
     pub zero: bool,
     pub width: Option<usize>,
     pub precision: Option<usize>,
-    /// `' '` for Display, `'?'` for Debug, or `x`, `X`, `o`.
+    /// `' '` for Display, `'?'` for Debug, `x`, `X`, `o` for radix, or `e`, `E` for exponent.
     pub kind: char,
 }
 
@@ -197,6 +197,8 @@ fn parse_spec(spec: &str) -> Result<Spec, String> {
         ['x'] => out.kind = 'x',
         ['X'] => out.kind = 'X',
         ['o'] => out.kind = 'o',
+        ['e'] => out.kind = 'e',
+        ['E'] => out.kind = 'E',
         rest => {
             let rest: String = rest.iter().collect();
             return Err(format!(
@@ -310,6 +312,16 @@ impl<'ctx> MirLowerer<'ctx> {
             return Ok((format!("{}s", c_flags(spec, true, false)), Some(arg)));
         }
         let radix = matches!(spec.kind, 'x' | 'X' | 'o');
+        let exp = matches!(spec.kind, 'e' | 'E');
+        if exp && !matches!(&ty, MirType::Float(_)) {
+            return Err(self.fmt_reject(
+                format!(
+                    "exponent formatting `{{:{}}}` of non-float `{what}` is not supported",
+                    spec.kind
+                ),
+                "cast to f64 first or format with `{}`",
+            ));
+        }
         match &ty {
             MirType::Int(IntSize::I128, signed) => {
                 if radix {
@@ -358,6 +370,32 @@ impl<'ctx> MirLowerer<'ctx> {
                         format!("hex or octal formatting of the float `{what}` is not supported"),
                         "format the float with `{}` or `{:.N}`",
                     ));
+                }
+                if exp {
+                    if spec.zero {
+                        return Err(self.fmt_reject(
+                            format!("`0` padding with exponent formatting on `{what}` is not supported"),
+                            "drop the `0` flag, for example `{:e}` or `{:.2e}`",
+                        ));
+                    }
+                    let func = match size {
+                        FloatSize::F32 => "build_f32_to_exp_string",
+                        FloatSize::F64 => "build_f64_to_exp_string",
+                    };
+                    let upper = MirValue::Const(MirConst::Int(
+                        if spec.kind == 'E' { 1 } else { 0 },
+                        MirType::i32(),
+                    ));
+                    let prec = MirValue::Const(MirConst::Int(
+                        spec.precision.map(|p| p as i128).unwrap_or(-1),
+                        MirType::i32(),
+                    ));
+                    let plus = MirValue::Const(MirConst::Int(
+                        if spec.plus { 1 } else { 0 },
+                        MirType::i32(),
+                    ));
+                    let arg = self.fmt_string_call(func, vec![val, upper, prec, plus])?;
+                    return Ok((format!("{}s", c_flags(spec, false, false)), Some(arg)));
                 }
                 if let Some(p) = spec.precision {
                     return Ok((format!("{}.{p}f", c_flags(spec, false, true)), Some(val)));
@@ -488,10 +526,25 @@ mod tests {
     }
 
     #[test]
+    fn parses_exponent_specs() {
+        let p = parse_format("{:e} {:E} {:.2e} {:+E}").unwrap();
+        let specs: Vec<Spec> = p
+            .into_iter()
+            .filter_map(|x| match x {
+                Piece::Arg(_, s) => Some(s),
+                Piece::Text(_) => None,
+            })
+            .collect();
+        assert_eq!(specs.len(), 4);
+        assert_eq!(specs[0].kind, 'e');
+        assert_eq!(specs[1].kind, 'E');
+        assert_eq!((specs[2].kind, specs[2].precision), ('e', Some(2)));
+        assert_eq!((specs[3].kind, specs[3].plus), ('E', true));
+    }
+
+    #[test]
     fn rejects_what_c_cannot_print() {
-        for bad in [
-            "{:^5}", "{:*<5}", "{:1$}", "{:e}", "{:b}", "{", "}", "{a.b}",
-        ] {
+        for bad in ["{:^5}", "{:*<5}", "{:1$}", "{:b}", "{", "}", "{a.b}"] {
             assert!(parse_format(bad).is_err(), "{bad} should be rejected");
         }
     }

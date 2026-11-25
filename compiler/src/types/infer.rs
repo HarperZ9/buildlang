@@ -161,6 +161,10 @@ pub struct TypeInfer<'ctx> {
     source_bindings: Vec<BTreeMap<String, Vec<String>>>,
     /// Source evidence visible at each explicit `break` from the current loop.
     loop_break_source_frames: Vec<BreakSourceFrame>,
+    /// Active loop frames for break-value type inference: `(label, break_value_tys)`.
+    /// Each entry is `None` for a plain `break;` or `Some(ty)` for `break expr;`.
+    /// A `loop` with no breaks targeting it has type `!`.
+    loop_break_type_frames: Vec<(Option<String>, Vec<Option<Ty>>)>,
     /// Whether any explicit `return` statement was found.
     has_return: bool,
     /// Unannotated `let NAME = ...` bindings and their type variables, for
@@ -499,6 +503,7 @@ impl<'ctx> TypeInfer<'ctx> {
             propagated_effect_sources: BTreeMap::new(),
             source_bindings: vec![BTreeMap::new()],
             loop_break_source_frames: Vec::new(),
+            loop_break_type_frames: Vec::new(),
             has_return: false,
             unannotated_lets: Vec::new(),
             borrow_state: super::ty::BorrowState::new(),
@@ -549,6 +554,7 @@ impl<'ctx> TypeInfer<'ctx> {
             propagated_effect_sources: BTreeMap::new(),
             source_bindings: vec![BTreeMap::new()],
             loop_break_source_frames: Vec::new(),
+            loop_break_type_frames: Vec::new(),
             has_return: false,
             unannotated_lets: Vec::new(),
             borrow_state: super::ty::BorrowState::new(),
@@ -629,14 +635,32 @@ impl<'ctx> TypeInfer<'ctx> {
 
     fn record_call_capability(&mut self, call_source: &str) {
         let lookup_name = call_source.rsplit("::").next().unwrap_or(call_source);
+        if self.ctx.is_foreign_function(lookup_name) {
+            if let Some(effect_name) = super::capabilities::capability_effect_for_call(lookup_name)
+            {
+                self.current_effects
+                    .add(super::effects::Effect::new(effect_name));
+                self.record_capability_source(effect_name, call_source);
+            } else {
+                self.current_effects
+                    .add(super::effects::Effect::new(super::capabilities::FOREIGN));
+                self.record_capability_source(super::capabilities::FOREIGN, call_source);
+            }
+            return;
+        }
+        // A user-defined (non-foreign) function shadows an ambient builtin
+        // name (e.g. `fn exit(x: i32) -> i32`); its own effects, if any, are
+        // checked via the binding's function type. Pre-registered builtin
+        // placeholders like `println` use `TyKind::Var`, not `TyKind::Fn`.
+        if let Some(binding_ty) = self.ctx.lookup_var(lookup_name) {
+            if matches!(self.apply(&binding_ty).kind, TyKind::Fn { .. }) {
+                return;
+            }
+        }
         if let Some(effect_name) = super::capabilities::capability_effect_for_call(lookup_name) {
             self.current_effects
                 .add(super::effects::Effect::new(effect_name));
             self.record_capability_source(effect_name, call_source);
-        } else if self.ctx.is_foreign_function(lookup_name) {
-            self.current_effects
-                .add(super::effects::Effect::new(super::capabilities::FOREIGN));
-            self.record_capability_source(super::capabilities::FOREIGN, call_source);
         }
     }
 
@@ -6398,7 +6422,11 @@ impl<'ctx> TypeInfer<'ctx> {
             self.source_bindings =
                 Self::merge_source_binding_snapshots(&[then_sources, else_sources]);
             self.linear_slots = Self::merge_linear_snapshots(&[then_linear, else_linear]);
-            self.merge_future_effect_annotations(&then_ty, &else_ty)
+            if matches!(self.apply(&then_ty).kind, TyKind::Never) {
+                else_ty
+            } else {
+                self.merge_future_effect_annotations(&then_ty, &else_ty)
+            }
         } else {
             self.source_bindings =
                 Self::merge_source_binding_snapshots(&[pre_branch_sources, then_sources]);
@@ -6439,7 +6467,11 @@ impl<'ctx> TypeInfer<'ctx> {
             self.source_bindings =
                 Self::merge_source_binding_snapshots(&[then_sources, else_sources]);
             self.linear_slots = Self::merge_linear_snapshots(&[then_linear, else_linear]);
-            self.merge_future_effect_annotations(&then_ty, &else_ty)
+            if matches!(self.apply(&then_ty).kind, TyKind::Never) {
+                else_ty
+            } else {
+                self.merge_future_effect_annotations(&then_ty, &else_ty)
+            }
         } else {
             self.source_bindings =
                 Self::merge_source_binding_snapshots(&[pre_branch_sources, then_sources]);
@@ -6456,6 +6488,7 @@ impl<'ctx> TypeInfer<'ctx> {
         let mut arm_linear_snapshots: Vec<HashMap<String, LinearSlot>> = Vec::new();
 
         let mut result_ty = Ty::fresh_var();
+        let mut all_arms_diverge = !arms.is_empty();
 
         for arm in arms {
             self.source_bindings = pre_match_sources.clone();
@@ -6477,6 +6510,7 @@ impl<'ctx> TypeInfer<'ctx> {
             // to `!` would hide the other arms' type.
             let body_ty = self.infer_expr(&arm.body);
             if !matches!(self.apply(&body_ty).kind, TyKind::Never) {
+                all_arms_diverge = false;
                 let _ = self.unify(&result_ty, &body_ty, span);
             }
             result_ty = self.merge_future_effect_annotations(&result_ty, &body_ty);
@@ -6484,6 +6518,9 @@ impl<'ctx> TypeInfer<'ctx> {
             self.source_bindings.pop();
             arm_source_snapshots.push(self.source_bindings.clone());
             arm_linear_snapshots.push(self.linear_slots.clone());
+        }
+        if all_arms_diverge {
+            result_ty = Ty::never();
         }
 
         if arm_source_snapshots.is_empty() {
@@ -6639,9 +6676,16 @@ impl<'ctx> TypeInfer<'ctx> {
             .push(BreakSourceFrame::new(pre_loop_scope_count));
 
         self.push_loop_label(label);
+        self.loop_break_type_frames
+            .push((label.map(|l| l.as_str().to_string()), Vec::new()));
         self.push_scope(ScopeKind::Loop);
         let _ = self.infer_block(body);
         self.pop_scope();
+        let breaks = self
+            .loop_break_type_frames
+            .pop()
+            .map(|(_, bs)| bs)
+            .unwrap_or_default();
         self.pop_loop_label();
         let body_exit_sources = self.source_bindings.clone();
 
@@ -6657,8 +6701,22 @@ impl<'ctx> TypeInfer<'ctx> {
             self.source_bindings = Self::merge_source_binding_snapshots(&break_source_snapshots);
         }
 
-        // Loop returns never (unless break with value)
-        Ty::never()
+        // A `loop` diverges (`!`) only when no `break` targets it. A plain
+        // `break;` exits with `()`; `break value;` exits with `value`'s type.
+        if breaks.is_empty() {
+            Ty::never()
+        } else {
+            let mut loop_ty: Option<Ty> = None;
+            for b in breaks {
+                let bty = b.unwrap_or_else(Ty::unit);
+                if let Some(ref existing) = loop_ty {
+                    let _ = self.unify(existing, &bty, body.span);
+                } else {
+                    loop_ty = Some(bty);
+                }
+            }
+            loop_ty.unwrap_or_else(Ty::unit)
+        }
     }
 
     fn infer_while(
@@ -6676,9 +6734,12 @@ impl<'ctx> TypeInfer<'ctx> {
         let pre_loop_sources = self.source_bindings.clone();
 
         self.push_loop_label(label);
+        self.loop_break_type_frames
+            .push((label.map(|l| l.as_str().to_string()), Vec::new()));
         self.push_scope(ScopeKind::Loop);
         let _ = self.infer_block(body);
         self.pop_scope();
+        let _ = self.loop_break_type_frames.pop();
         self.pop_loop_label();
         let body_exit_sources = self.source_bindings.clone();
 
@@ -6704,10 +6765,13 @@ impl<'ctx> TypeInfer<'ctx> {
         let pre_loop_sources = self.source_bindings.clone();
 
         self.push_loop_label(label);
+        self.loop_break_type_frames
+            .push((label.map(|l| l.as_str().to_string()), Vec::new()));
         self.push_scope(ScopeKind::Loop);
         self.check_pattern(pattern, &item_ty);
         let _ = self.infer_block(body);
         self.pop_scope();
+        let _ = self.loop_break_type_frames.pop();
         self.pop_loop_label();
         let body_exit_sources = self.source_bindings.clone();
 
@@ -6732,11 +6796,14 @@ impl<'ctx> TypeInfer<'ctx> {
         let pre_loop_sources = self.source_bindings.clone();
 
         self.push_loop_label(label);
+        self.loop_break_type_frames
+            .push((label.map(|l| l.as_str().to_string()), Vec::new()));
         self.push_scope(ScopeKind::Loop);
         self.check_pattern(pattern, &expr_ty);
         self.bind_pattern_call_sources(pattern, expr);
         let _ = self.infer_block(body);
         self.pop_scope();
+        let _ = self.loop_break_type_frames.pop();
         self.pop_loop_label();
         let body_exit_sources = self.source_bindings.clone();
 
@@ -6763,8 +6830,20 @@ impl<'ctx> TypeInfer<'ctx> {
             let remaining = &block.stmts[i + 1..];
             self.release_dead_borrows(remaining);
 
-            result_ty = self.infer_stmt(stmt);
-            if stmt_diverges(stmt) {
+            let (stmt_ty, stmt_expr_diverges) = match &stmt.kind {
+                ast::StmtKind::Semi(expr) => {
+                    let e_ty = self.infer_expr(expr);
+                    let div = matches!(self.apply(&e_ty).kind, TyKind::Never);
+                    (Ty::unit(), div)
+                }
+                _ => {
+                    let t = self.infer_stmt(stmt);
+                    let div = matches!(self.apply(&t).kind, TyKind::Never);
+                    (t, div)
+                }
+            };
+            result_ty = stmt_ty;
+            if stmt_expr_diverges || stmt_diverges(stmt) {
                 diverges = true;
             }
         }
@@ -7096,12 +7175,23 @@ impl<'ctx> TypeInfer<'ctx> {
             }
         }
 
-        if let Some(expr) = value {
-            let _ = self.infer_expr(expr);
-        }
+        let break_val_ty = value.map(|expr| self.infer_expr(expr));
 
         if self.ctx.in_loop() {
             self.record_loop_break_source_snapshot();
+            if let Some(lbl) = label {
+                let target_name = lbl.as_str();
+                if let Some((_, breaks)) = self
+                    .loop_break_type_frames
+                    .iter_mut()
+                    .rev()
+                    .find(|(fl, _)| fl.as_deref() == Some(target_name))
+                {
+                    breaks.push(break_val_ty);
+                }
+            } else if let Some((_, breaks)) = self.loop_break_type_frames.last_mut() {
+                breaks.push(break_val_ty);
+            }
         }
 
         Ty::never()

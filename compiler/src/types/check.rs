@@ -1396,7 +1396,7 @@ impl<'ctx> TypeChecker<'ctx> {
                 let capability_sources = infer.capability_sources().clone();
                 let propagated_effect_sources = infer.propagated_effect_sources().clone();
                 let has_return = infer.has_explicit_return();
-                let tail = (!has_return && !is_generic).then_some((&body_ty, &expected_ret));
+                let tail = (!is_generic).then_some((&body_ty, &expected_ret));
                 infer.record_inferred_local_ints(tail);
                 (
                     body_ty,
@@ -1408,12 +1408,14 @@ impl<'ctx> TypeChecker<'ctx> {
                 )
             };
 
-            // Unify body type with return type.
-            // If the function contains explicit `return` statements, the body
-            // type might be `()` (e.g., from a while loop that returns via
-            // `return` inside an `if`). In this case, the return type was
-            // already validated by infer_return(), so skip the body check.
-            if !has_return && !is_generic {
+            // Unify body type with return type on all control-flow exits.
+            // A body that always returns, panics, or enters a non-breaking
+            // `loop` produces `Ty::never()`, which unifies with any return
+            // type. A body that can fall through (such as a `while` loop or
+            // a `loop` exited by a plain `break;`) produces `()`, which is
+            // rejected when `expected_ret` is not `()`.
+            let _ = has_return;
+            if !is_generic {
                 if let Err(_) = super::unify::unify(&body_ty, &expected_ret) {
                     // When ADT types mismatch by DefId, check if they match by
                     // name.  This handles cases where inline module re-exports
@@ -4574,6 +4576,65 @@ mod tests {
                 "identity-shaped methods must not be refused: {errors:#?}"
             );
         }
+    }
+
+    #[test]
+    fn non_returning_while_tail_is_refused() {
+        let errors = check_source(
+            "fn f(x: bool) -> i32 { while x { return 1; } } fn main() { let _ = f(false); }",
+        );
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(&e.error, TypeError::ReturnTypeMismatch { .. })),
+            "expected ReturnTypeMismatch for while tail, got: {errors:#?}"
+        );
+    }
+
+    #[test]
+    fn non_returning_loop_with_plain_break_is_refused() {
+        let errors = check_source(
+            "fn f(x: bool) -> i32 { loop { if x { return 1; } break; } } fn main() { let _ = f(false); }",
+        );
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(&e.error, TypeError::ReturnTypeMismatch { .. })),
+            "expected ReturnTypeMismatch for loop left by plain break, got: {errors:#?}"
+        );
+    }
+
+    #[test]
+    fn loop_without_break_tail_is_accepted() {
+        let errors = check_source(
+            "fn f(x: bool) -> i32 { loop { if x { return 1; } return 2; } } fn main() { let _ = f(true); }",
+        );
+        assert!(
+            errors.is_empty(),
+            "valid loop tail should pass: {errors:#?}"
+        );
+    }
+
+    #[test]
+    fn loop_with_inner_while_break_still_diverges() {
+        let errors = check_source(
+            "fn f(x: bool) -> i32 { loop { while x { break; } return 1; } } fn main() { let _ = f(true); }",
+        );
+        assert!(
+            errors.is_empty(),
+            "break inside inner while must not poison outer loop: {errors:#?}"
+        );
+    }
+
+    #[test]
+    fn if_else_both_returning_is_accepted() {
+        let errors = check_source(
+            "fn f(x: bool) -> i32 { if x { return 1; } else { return 2; } } fn main() { let _ = f(true); }",
+        );
+        assert!(
+            errors.is_empty(),
+            "if/else both returning should pass: {errors:#?}"
+        );
     }
 }
 

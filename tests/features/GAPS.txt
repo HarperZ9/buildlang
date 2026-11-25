@@ -2,13 +2,7 @@
 # rejected: `buildc check` refuses the program. broken: the check passes and the program then
 # fails to build or prints something else. The test fails when a line here stops being true,
 # so a fixed feature has to be moved out of this file.
-#
-# Not expressible as a row here, because the program is wrong and the check should refuse it:
-# a function with a value whose body ends in a `while`, or in a `loop` left by a plain `break`,
-# passes the check. It builds, and stops the program if it reaches the end. Found 2026-11-12, open.
 async_await rejected
 const_generic rejected
-float_exponent_format rejected
 macro_rules rejected
 trait_object_dyn rejected
-user_fn_named_exit rejected

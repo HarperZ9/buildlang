@@ -3595,6 +3595,107 @@ static BuildString build_f32_to_debug_string(float v) {
     return build_f64_to_debug_string((double)v);
 }
 
+// LowerExp (`{:e}`) and UpperExp (`{:E}`) float formatting, matching Rust:
+// shortest round-trip significand when prec < 0 (with trailing fractional zeros
+// trimmed), or exact `prec` fractional digits when prec >= 0, followed by `e`
+// or `E` and the signed exponent with no `+` and no leading zeros.
+static void bl_sci_to_rust_exp(const char* sci, int upper, int trim_zeros, int plus, char* out) {
+    const char* s = sci;
+    char* o = out;
+    if (*s == '-') { *o++ = '-'; s++; }
+    else if (plus) { *o++ = '+'; }
+    char* mant_start = o;
+    int has_dot = 0;
+    while (*s && *s != 'e' && *s != 'E') {
+        if (*s == '.') has_dot = 1;
+        *o++ = *s++;
+    }
+    if (trim_zeros && has_dot) {
+        while (o > mant_start && *(o - 1) == '0') o--;
+        if (o > mant_start && *(o - 1) == '.') o--;
+    }
+    int E = (*s == 'e' || *s == 'E') ? atoi(s + 1) : 0;
+    *o++ = upper ? 'E' : 'e';
+    o += sprintf(o, "%d", E);
+    *o = '\0';
+}
+
+static BuildString build_f64_to_exp_string(double v, int32_t upper, int32_t prec, int32_t plus) {
+    char out[256];
+    if (v != v) return build_format_str("%s", "NaN");
+    double inf = (double)INFINITY;
+    if (v == inf) return build_format_str("%s", plus ? "+inf" : "inf");
+    if (v == -inf) return build_format_str("%s", "-inf");
+    if (v == 0.0) {
+        char* o = out;
+        if (signbit(v)) *o++ = '-';
+        else if (plus) *o++ = '+';
+        *o++ = '0';
+        if (prec > 0) {
+            int p = prec > 100 ? 100 : prec;
+            *o++ = '.';
+            for (int i = 0; i < p; ++i) *o++ = '0';
+        }
+        *o++ = upper ? 'E' : 'e';
+        *o++ = '0';
+        *o = '\0';
+        return build_format_str("%s", out);
+    }
+    char sci[160];
+    if (prec < 0) {
+        int p = 17;
+        for (int q = 1; q <= 17; ++q) {
+            snprintf(sci, sizeof sci, "%.*e", q - 1, v);
+            if (strtod(sci, NULL) == v) { p = q; break; }
+        }
+        snprintf(sci, sizeof sci, "%.*e", p - 1, v);
+        bl_sci_to_rust_exp(sci, upper, 1, plus, out);
+    } else {
+        int p = prec > 100 ? 100 : prec;
+        snprintf(sci, sizeof sci, "%.*e", p, v);
+        bl_sci_to_rust_exp(sci, upper, 0, plus, out);
+    }
+    return build_format_str("%s", out);
+}
+
+static BuildString build_f32_to_exp_string(float x, int32_t upper, int32_t prec, int32_t plus) {
+    char out[256];
+    if (x != x) return build_format_str("%s", "NaN");
+    float inf = INFINITY;
+    if (x == inf) return build_format_str("%s", plus ? "+inf" : "inf");
+    if (x == -inf) return build_format_str("%s", "-inf");
+    if (x == 0.0f) {
+        char* o = out;
+        if (signbit(x)) *o++ = '-';
+        else if (plus) *o++ = '+';
+        *o++ = '0';
+        if (prec > 0) {
+            int p = prec > 100 ? 100 : prec;
+            *o++ = '.';
+            for (int i = 0; i < p; ++i) *o++ = '0';
+        }
+        *o++ = upper ? 'E' : 'e';
+        *o++ = '0';
+        *o = '\0';
+        return build_format_str("%s", out);
+    }
+    char sci[160];
+    if (prec < 0) {
+        int p = 9;
+        for (int q = 1; q <= 9; ++q) {
+            snprintf(sci, sizeof sci, "%.*e", q - 1, (double)x);
+            if (strtof(sci, NULL) == x) { p = q; break; }
+        }
+        snprintf(sci, sizeof sci, "%.*e", p - 1, (double)x);
+        bl_sci_to_rust_exp(sci, upper, 1, plus, out);
+    } else {
+        int p = prec > 100 ? 100 : prec;
+        snprintf(sci, sizeof sci, "%.*e", p, (double)x);
+        bl_sci_to_rust_exp(sci, upper, 0, plus, out);
+    }
+    return build_format_str("%s", out);
+}
+
 // `{:?}` of a vector: `[a, b, c]`, strings quoted, as Rust prints a Vec.
 static BuildString build_hvec_debug_open(void) { return build_string_new("["); }
 static BuildString build_hvec_debug_close(BuildString acc) {

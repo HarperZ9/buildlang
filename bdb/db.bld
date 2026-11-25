@@ -728,20 +728,92 @@ fn concat_parts(parts: Vec<String>) -> String {
     parts.join("")
 }
 
+// Page size for deterministic 32-bit FNV-1a storage page checksums (4 KiB).
+fn db_page_size() -> i64 { 4096 }
+
+// FNV-1a 32-bit checksum over bytes s[start..end]. Operates directly on the
+// byte buffer without allocating substrings, covering embedded NUL bytes too.
+fn fnv_range(s: String, start: i64, end: i64) -> i64 {
+    let b = s.as_bytes();
+    let mut h = fnv_init();
+    let mut i: i64 = start;
+    while i < end {
+        h = ((h ^ (b[i] as i64)) * 16777619) & 4294967295;
+        i = i + 1;
+    }
+    h
+}
+
+fn i64_to_text(v: i64) -> String {
+    if v == 0 { return "0"; }
+    let digits = "0123456789";
+    let mut n = v;
+    let mut neg = false;
+    if n < 0 { neg = true; n = 0 - n; }
+    let mut out = "";
+    while n > 0 {
+        out = digits.char_at(n % 10) + out;
+        n = n / 10;
+    }
+    if neg { "-" + out } else { out }
+}
+
+fn parse_nonneg_i64(s: String) -> i64 {
+    let n = s.len();
+    if n < 1 || n > 15 { return 0 - 1; }
+    let b = s.as_bytes();
+    let mut v: i64 = 0;
+    let mut i: i64 = 0;
+    while i < n {
+        let c = b[i];
+        if c < 48 || c > 57 { return 0 - 1; }
+        v = v * 10 + ((c - 48) as i64);
+        i = i + 1;
+    }
+    v
+}
+
+fn is_hex8(s: String) -> bool {
+    if s.len() != 8 { return false; }
+    let b = s.as_bytes();
+    let mut i: i64 = 0;
+    while i < 8 {
+        let c = b[i];
+        let ok = (c >= 48 && c <= 57) || (c >= 97 && c <= 102);
+        if !ok { return false; }
+        i = i + 1;
+    }
+    true
+}
+
+// Compute comma-separated 32-bit FNV-1a checksums for each 4 KiB page of
+// content[start..end]. Returns "-" when empty.
+fn db_page_checksums(content: String, start: i64, end: i64) -> String {
+    if end <= start { return "-"; }
+    let psize = db_page_size();
+    let mut parts: Vec<String> = vec![];
+    let mut off = start;
+    while off < end {
+        let mut stop = off + psize;
+        if stop > end { stop = end; }
+        if off > start { vec_push(parts, ","); }
+        vec_push(parts, hex32(fnv_range(content, off, stop)));
+        off = stop;
+    }
+    let out = parts.join("");
+    parts.release();
+    out
+}
+
 // Serialize the entire database (all tables, rows, and index declarations)
 // to the text-based file format and write to d.db_path. Returns the number
 // of bytes written, which the checkpoint policy compares the WAL against.
-// Does NOT write WAL — this is the "clean" checkpoint format.
+// Does NOT write WAL -- this is the "clean" checkpoint format.
 fn db_text(d: &DB) -> String {
     // Every piece of the file is pushed once and joined once (P29). No piece
     // is copied before the join: a cell with nothing to escape is the pool's
     // own string.
     let mut parts: Vec<String> = vec![];
-    // Format 2 header: every transaction up to txn_id is in this file.
-    vec_push(parts, "QDB 2 ");
-    vec_push(parts, to_string_i32(d.txn_id));
-    vec_push(parts, "
-");
     let mut t = 0;
     while t < d.tbl_count {
         let tname = sp_get(d, vec_get(d.tbl_names, t));
@@ -810,11 +882,17 @@ INDEX ");
 ");
         ix = ix + 1;
     }
-    let all = parts.join("");
+    let body = parts.join("");
     // The vector's buffer goes back to the allocator (Vec.release frees it);
     // parts is not used again.
     parts.release();
-    all
+    // Format 2 header with per-4KiB-page FNV-1a checksums and header checksum:
+    //   QDB 2 <txid> <body_len> <p0>,<p1>,... <hdr_crc>\n
+    let blen = body.len();
+    let page_hashes = db_page_checksums(body, 0, blen);
+    let hdr_core = "QDB 2 " + to_string_i32(d.txn_id) + " " + i64_to_text(blen) + " " + page_hashes;
+    let hdr_crc = hex32(fnv_extend(fnv_init(), hdr_core));
+    hdr_core + " " + hdr_crc + "\n" + body
 }
 
 // Rewrite the .db from memory. Returns the bytes written, which the
@@ -838,12 +916,140 @@ fn db_save(d: &mut DB) -> i64 ~ Console + FileSystem + Process {
     all.len()
 }
 
+fn db_corrupt(reason: String) ~ Console + Process {
+    eprintln!("Error: corrupt database file ({})", reason);
+    process_exit(1);
+}
+
+// Verify the .db header and every 4 KiB page checksum before loading any rows.
+// Returns the byte offset where the body begins. Any mismatch or malformed
+// header stops qdb with exit code 1 instead of silently returning bad data.
+fn db_verify_header(d: &mut DB, content: String) -> i64 ~ Console + Process {
+    let clen = content.len();
+    let cb = content.as_bytes();
+    let mut nl: i64 = 0 - 1;
+    let mut i: i64 = 0;
+    while i < clen && nl < 0 {
+        let ch = cb[i];
+        if ch == 0 { db_corrupt("NUL byte in header"); }
+        if ch == 10 { nl = i; }
+        i = i + 1;
+    }
+    if nl < 0 { db_corrupt("truncated or missing header"); }
+    let raw_first = content.substring(0, nl);
+    let body_start = nl + 1;
+    let body_len = clen - body_start;
+
+    // Legacy format 1 (no checksum; used by bql export and format-1 compat test):
+    // must be exactly "QDB 1 <nonneg-txid>" with no trailing garbage.
+    let clean_first = strip_cr(raw_first);
+    if clean_first.starts_with("QDB 1 ") {
+        let rest1 = clean_first.substring(6, clean_first.len() - 6);
+        let hid1 = txid_text(rest1);
+        if hid1 < 0 { db_corrupt("invalid QDB 1 header"); }
+        d.fmt_escaped = true;
+        d.fmt_nulls = false;
+        d.applied_txid = hid1;
+        d.txn_id = hid1;
+        return body_start;
+    }
+
+    if !raw_first.starts_with("QDB 2 ") {
+        db_corrupt("unrecognized header");
+    }
+
+    // Format 2 with checksums: "QDB 2 <txid> <body_len> <page_hashes> <hdr_crc>"
+    // Split strictly on single ASCII spaces (no strip_cr: an injected \r fails CRC).
+    let flen = raw_first.len();
+    let fb = raw_first.as_bytes();
+    let mut toks: Vec<String> = vec![];
+    let mut tstart: i64 = 0;
+    let mut ti: i64 = 0;
+    while ti <= flen {
+        if ti == flen || fb[ti] == 32 {
+            vec_push(toks, raw_first.substring(tstart, ti - tstart));
+            tstart = ti + 1;
+        }
+        ti = ti + 1;
+    }
+    if vec_len(toks) != 6 {
+        toks.release();
+        db_corrupt("invalid QDB 2 header");
+    }
+    let tx_tok = vec_get(toks, 2);
+    let len_tok = vec_get(toks, 3);
+    let pages_tok = vec_get(toks, 4);
+    let crc_tok = vec_get(toks, 5);
+    toks.release();
+
+    if !is_hex8(crc_tok) {
+        db_corrupt("malformed header checksum");
+    }
+    let hdr_core = raw_first.substring(0, flen - 9);
+    let got_hdr_crc = hex32(fnv_extend(fnv_init(), hdr_core));
+    if got_hdr_crc != crc_tok {
+        db_corrupt("header checksum mismatch");
+    }
+
+    let hid2 = txid_text(tx_tok);
+    if hid2 < 0 { db_corrupt("invalid txid in header"); }
+    let want_len = parse_nonneg_i64(len_tok);
+    if want_len < 0 || want_len != body_len {
+        db_corrupt("body length mismatch");
+    }
+
+    // Verify every 4 KiB page of the body against its stored 32-bit FNV-1a hash.
+    if body_len == 0 {
+        if pages_tok != "-" { db_corrupt("unexpected page checksums for empty body"); }
+    } else {
+        let psize = db_page_size();
+        let plen = pages_tok.len();
+        let mut ppos: i64 = 0;
+        let mut off = body_start;
+        let mut page_idx: i64 = 0;
+        while off < clen {
+            let mut stop = off + psize;
+            if stop > clen { stop = clen; }
+            if page_idx > 0 {
+                if ppos >= plen || pages_tok.char_at(ppos) != "," {
+                    db_corrupt("page checksum list truncated");
+                }
+                ppos = ppos + 1;
+            }
+            if ppos + 8 > plen {
+                db_corrupt("page checksum entry truncated");
+            }
+            let want_p = pages_tok.substring(ppos, 8);
+            ppos = ppos + 8;
+            if !is_hex8(want_p) {
+                db_corrupt("malformed page checksum");
+            }
+            let got_p = hex32(fnv_range(content, off, stop));
+            if got_p != want_p {
+                db_corrupt("page " + i64_to_text(page_idx) + " checksum mismatch");
+            }
+            off = stop;
+            page_idx = page_idx + 1;
+        }
+        if ppos != plen {
+            db_corrupt("extra page checksum entries");
+        }
+    }
+
+    d.fmt_escaped = true;
+    d.fmt_nulls = true;
+    d.applied_txid = hid2;
+    d.txn_id = hid2;
+    body_start
+}
+
 // Load the database from the text file at d.db_path.
-// Parses TABLE/SCHEMA/ROW/END/INDEX lines and populates all parallel arrays.
+// Verifies header and per-4KiB-page checksums, then parses TABLE/SCHEMA/ROW/END/INDEX
+// lines and populates all parallel arrays.
 // If the file doesn't exist or is empty, returns immediately (empty database).
 // After loading, the caller should also call wal_replay() to recover any
 // committed transactions from the WAL that haven't been checkpointed.
-fn db_load(d: &mut DB) ~ FileSystem {
+fn db_load(d: &mut DB) ~ Console + FileSystem + Process {
     let mut content = "";
     let mut have = false;
     if file_exists(d.ckpt_path) {
@@ -864,9 +1070,11 @@ fn db_load(d: &mut DB) ~ FileSystem {
     if clen == 0 { return; }
 
     d.db_bytes = clen;
+    let body_start = db_verify_header(d, content);
+    let body = content.substring(body_start, clen - body_start);
     // Split once. Slicing off the rest of the content for every line copied
     // the remainder of the file per line, O(size^2) for a large .db.
-    let lines: Vec<String> = content.lines();
+    let lines: Vec<String> = body.lines();
     let nlines = vec_len(lines);
     let mut li: i64 = 0;
     let mut go = true;
@@ -886,12 +1094,6 @@ fn db_load(d: &mut DB) ~ FileSystem {
             let clen2 = clean.len();
             if clen2 == 0 {
                 // skip empty
-            } else if clean.starts_with("QDB 1 ") || clean.starts_with("QDB 2 ") {
-                d.fmt_escaped = true;
-                d.fmt_nulls = clean.starts_with("QDB 2 ");
-                let hid = txid_text(clean.substring(6, clen2 - 6));
-                d.applied_txid = if hid < 0 { 0 } else { hid };
-                d.txn_id = d.applied_txid;
             } else if clean.starts_with("TABLE ") {
                 let tname = clean.substring(6, clen2 - 6);
                 let tid = sp_add(d, tname);
