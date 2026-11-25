@@ -1,0 +1,520 @@
+// SPDX-FileCopyrightText: 2026 Zain Dana Harper
+// SPDX-License-Identifier: AGPL-3.0-only
+//
+// BuildLang Dogfood Native Workstation MCP Server & Governance Gate (Layer 3):
+//   - Zero Python / Node runtime overhead; compiles directly to native machine code.
+//   - Effect-sandboxed capability row: ~ Console + FileSystem + Clock + Environment
+//     (compiler statically proves zero Network, zero Process, zero Foreign authority).
+//   - Speaks MCP JSON-RPC 2.0 over stdio (initialize, ping, tools/list, tools/call).
+//   - Tools:
+//       1. workstation_health: native file/dir probe with nanosecond latency via clock_ns()
+//       2. check_em_dash_and_secret: UTF-8 byte scanner catching em dashes (0xE2 0x80 0x94),
+//          en dashes (0xE2 0x80 0x93), and common secret/token leak prefixes in text or files.
+//   - Run with `--self-test` for deterministic known-answer + planted-failure verification.
+
+mod json;
+
+// ---------------------------------------------------------------- String helpers
+
+fn trim_crlf(s: str) -> str {
+    let b = s.as_bytes();
+    let mut n: usize = s.len();
+    while n > 0 && (b[n - 1] == 10 || b[n - 1] == 13 || b[n - 1] == 32 || b[n - 1] == 9) {
+        n = n - 1;
+    }
+    let mut start: usize = 0;
+    while start < n && (b[start] == 32 || b[start] == 9) {
+        start = start + 1;
+    }
+    s.substring(start, n - start)
+}
+
+fn empty_json_obj() -> Json {
+    let ks: Vec<str> = Vec::new();
+    let vs: Vec<Json> = Vec::new();
+    Json::Obj(ks, vs)
+}
+
+fn count_pattern_bytes(s: str, pat: str) -> i64 {
+    let sb = s.as_bytes();
+    let pb = pat.as_bytes();
+    let slen: usize = s.len();
+    let plen: usize = pat.len();
+    if plen == 0 || plen > slen {
+        return 0;
+    }
+    let mut hits: i64 = 0;
+    let mut i: usize = 0;
+    while i + plen <= slen {
+        let mut ok: bool = true;
+        let mut j: usize = 0;
+        while j < plen {
+            if sb[i + j] != pb[j] {
+                ok = false;
+                j = plen;
+            } else {
+                j = j + 1;
+            }
+        }
+        if ok {
+            hits = hits + 1;
+            i = i + plen;
+        } else {
+            i = i + 1;
+        }
+    }
+    hits
+}
+
+fn count_utf8_dash(s: str, third_byte: u8) -> i64 {
+    let b = s.as_bytes();
+    let n: usize = s.len();
+    let mut count: i64 = 0;
+    let mut i: usize = 0;
+    while i + 2 < n {
+        if b[i] == 226 && b[i + 1] == 128 && b[i + 2] == third_byte {
+            count = count + 1;
+            i = i + 3;
+        } else {
+            i = i + 1;
+        }
+    }
+    count
+}
+
+struct ScanReport {
+    em_dashes: i64,
+    en_dashes: i64,
+    secret_hits: i64,
+    bytes_scanned: i64,
+}
+
+// Pure byte scanner (~ ()): detects UTF-8 em/en dashes and common credential markers.
+// Prefixes are split so the scanner source itself never contains a live credential pattern.
+fn scan_text(text: str) -> ScanReport {
+    let em: i64 = count_utf8_dash(text, 148);
+    let en: i64 = count_utf8_dash(text, 147);
+    let mut secrets: i64 = 0;
+    secrets = secrets + count_pattern_bytes(text, "sk" + "_live_");
+    secrets = secrets + count_pattern_bytes(text, "sk" + "_test_");
+    secrets = secrets + count_pattern_bytes(text, "ghp" + "_");
+    secrets = secrets + count_pattern_bytes(text, "gho" + "_");
+    secrets = secrets + count_pattern_bytes(text, "AI" + "za");
+    secrets = secrets + count_pattern_bytes(text, "AK" + "IA");
+    secrets = secrets + count_pattern_bytes(text, "BEGIN " + "PRIVATE KEY");
+    secrets = secrets + count_pattern_bytes(text, "api_" + "key=");
+    secrets = secrets + count_pattern_bytes(text, "api_" + "key =");
+    ScanReport {
+        em_dashes: em,
+        en_dashes: en,
+        secret_hits: secrets,
+        bytes_scanned: text.len() as i64,
+    }
+}
+
+// ---------------------------------------------------------------- JSON-RPC / MCP responses
+
+fn rpc_ok(id_json: str, result_json: str) -> str {
+    let mut ks: Vec<str> = Vec::new();
+    let mut vs: Vec<str> = Vec::new();
+    ks.push("jsonrpc");
+    vs.push(json_quote("2.0"));
+    ks.push("id");
+    vs.push(id_json);
+    ks.push("result");
+    vs.push(result_json);
+    json_obj(ks, vs)
+}
+
+fn rpc_err(id_json: str, code: i64, message: str) -> str {
+    let mut eks: Vec<str> = Vec::new();
+    let mut evs: Vec<str> = Vec::new();
+    eks.push("code");
+    evs.push(format!("{}", code));
+    eks.push("message");
+    evs.push(json_quote(message));
+    let err_obj: str = json_obj(eks, evs);
+
+    let mut ks: Vec<str> = Vec::new();
+    let mut vs: Vec<str> = Vec::new();
+    ks.push("jsonrpc");
+    vs.push(json_quote("2.0"));
+    ks.push("id");
+    vs.push(id_json);
+    ks.push("error");
+    vs.push(err_obj);
+    json_obj(ks, vs)
+}
+
+fn error_payload(msg: str) -> str {
+    let mut eks: Vec<str> = Vec::new();
+    let mut evs: Vec<str> = Vec::new();
+    eks.push("error");
+    evs.push(json_quote(msg));
+    json_obj(eks, evs)
+}
+
+fn mcp_tool_result(payload_json: str, is_error: bool) -> str {
+    let mut item_ks: Vec<str> = Vec::new();
+    let mut item_vs: Vec<str> = Vec::new();
+    item_ks.push("type");
+    item_vs.push(json_quote("text"));
+    item_ks.push("text");
+    item_vs.push(json_quote(payload_json));
+    let mut items: Vec<str> = Vec::new();
+    items.push(json_obj(item_ks, item_vs));
+
+    let mut ks: Vec<str> = Vec::new();
+    let mut vs: Vec<str> = Vec::new();
+    ks.push("content");
+    vs.push(json_arr(items));
+    ks.push("structuredContent");
+    vs.push(payload_json);
+    ks.push("isError");
+    if is_error {
+        vs.push("true");
+    } else {
+        vs.push("false");
+    }
+    json_obj(ks, vs)
+}
+
+fn handle_initialize() -> str {
+    let mut info_ks: Vec<str> = Vec::new();
+    let mut info_vs: Vec<str> = Vec::new();
+    info_ks.push("name");
+    info_vs.push(json_quote("buildlang-workstation-mcp"));
+    info_ks.push("version");
+    info_vs.push(json_quote("0.1.0"));
+
+    let mut tcap_ks: Vec<str> = Vec::new();
+    let mut tcap_vs: Vec<str> = Vec::new();
+    tcap_ks.push("listChanged");
+    tcap_vs.push("false");
+
+    let mut cap_ks: Vec<str> = Vec::new();
+    let mut cap_vs: Vec<str> = Vec::new();
+    cap_ks.push("tools");
+    cap_vs.push(json_obj(tcap_ks, tcap_vs));
+
+    let mut ks: Vec<str> = Vec::new();
+    let mut vs: Vec<str> = Vec::new();
+    ks.push("protocolVersion");
+    vs.push(json_quote("2025-06-18"));
+    ks.push("capabilities");
+    vs.push(json_obj(cap_ks, cap_vs));
+    ks.push("serverInfo");
+    vs.push(json_obj(info_ks, info_vs));
+    json_obj(ks, vs)
+}
+
+fn tool_schema_obj(name: str, desc: str, props_json: str) -> str {
+    let mut schema_ks: Vec<str> = Vec::new();
+    let mut schema_vs: Vec<str> = Vec::new();
+    schema_ks.push("type");
+    schema_vs.push(json_quote("object"));
+    schema_ks.push("properties");
+    schema_vs.push(props_json);
+    schema_ks.push("additionalProperties");
+    schema_vs.push("false");
+
+    let mut ann_ks: Vec<str> = Vec::new();
+    let mut ann_vs: Vec<str> = Vec::new();
+    ann_ks.push("readOnlyHint");
+    ann_vs.push("true");
+    ann_ks.push("openWorldHint");
+    ann_vs.push("false");
+
+    let mut ks: Vec<str> = Vec::new();
+    let mut vs: Vec<str> = Vec::new();
+    ks.push("name");
+    vs.push(json_quote(name));
+    ks.push("description");
+    vs.push(json_quote(desc));
+    ks.push("inputSchema");
+    vs.push(json_obj(schema_ks, schema_vs));
+    ks.push("annotations");
+    vs.push(json_obj(ann_ks, ann_vs));
+    json_obj(ks, vs)
+}
+
+fn handle_tools_list() -> str {
+    let path_prop: str = "{\"path\":{\"type\":\"string\"}}";
+    let scan_prop: str = "{\"path\":{\"type\":\"string\"},\"text\":{\"type\":\"string\"}}";
+
+    let mut tools: Vec<str> = Vec::new();
+    tools.push(tool_schema_obj(
+        "workstation_health",
+        "Inspect a workstation path natively with FileSystem and Clock capabilities.",
+        path_prop
+    ));
+    tools.push(tool_schema_obj(
+        "check_em_dash_and_secret",
+        "Scan text or a file natively for UTF-8 em/en dashes and credential leak markers.",
+        scan_prop
+    ));
+
+    let mut ks: Vec<str> = Vec::new();
+    let mut vs: Vec<str> = Vec::new();
+    ks.push("tools");
+    vs.push(json_arr(tools));
+    json_obj(ks, vs)
+}
+
+fn extract_optional_str(args: Json, key: str, default_val: str) -> Result<str, str> {
+    if !json_has(args, key) {
+        return Ok(default_val);
+    }
+    field_str(args, key)
+}
+
+fn tool_workstation_health(args: Json) -> str ~ FileSystem + Clock {
+    let t0: i64 = clock_ns();
+    let target: str = match extract_optional_str(args, "path", ".") {
+        Ok(p) => p,
+        Err(e) => return mcp_tool_result(error_payload(e), true),
+    };
+    let dir: bool = is_dir(target);
+    let exists: bool = file_exists(target) || dir;
+    let mut size: i64 = 0;
+    if exists && !dir {
+        size = file_size(target);
+    }
+    let elapsed_ns: i64 = clock_ns() - t0;
+
+    let mut ks: Vec<str> = Vec::new();
+    let mut vs: Vec<str> = Vec::new();
+    ks.push("path");
+    vs.push(json_quote(target));
+    ks.push("exists");
+    if exists { vs.push("true"); } else { vs.push("false"); }
+    ks.push("is_dir");
+    if dir { vs.push("true"); } else { vs.push("false"); }
+    ks.push("bytes");
+    vs.push(format!("{}", size));
+    ks.push("elapsed_ns");
+    vs.push(format!("{}", elapsed_ns));
+    ks.push("runtime");
+    vs.push(json_quote("buildlang-native"));
+    mcp_tool_result(json_obj(ks, vs), false)
+}
+
+fn load_scan_input(args: Json) -> Result<(str, str), str> ~ FileSystem {
+    if json_has(args, "text") {
+        let s: str = field_str(args, "text")?;
+        return Ok(("text", s));
+    }
+    if json_has(args, "path") {
+        let p: str = field_str(args, "path")?;
+        if !file_exists(p) {
+            return Err("file not found");
+        }
+        return Ok(("file", read_file(p)));
+    }
+    Err("pass either text or path")
+}
+
+fn tool_check_em_dash_and_secret(args: Json) -> str ~ FileSystem + Clock {
+    let t0: i64 = clock_ns();
+    let loaded: (str, str) = match load_scan_input(args) {
+        Ok(pair) => pair,
+        Err(e) => return mcp_tool_result(error_payload(e), true),
+    };
+    let source_kind: str = loaded.0;
+    let content: str = loaded.1;
+
+    let report: ScanReport = scan_text(content);
+    let clean: bool = report.em_dashes == 0 && report.en_dashes == 0 && report.secret_hits == 0;
+    let elapsed_ns: i64 = clock_ns() - t0;
+
+    let mut ks: Vec<str> = Vec::new();
+    let mut vs: Vec<str> = Vec::new();
+    ks.push("clean");
+    if clean { vs.push("true"); } else { vs.push("false"); }
+    ks.push("source");
+    vs.push(json_quote(source_kind));
+    ks.push("em_dashes");
+    vs.push(format!("{}", report.em_dashes));
+    ks.push("en_dashes");
+    vs.push(format!("{}", report.en_dashes));
+    ks.push("secret_hits");
+    vs.push(format!("{}", report.secret_hits));
+    ks.push("bytes_scanned");
+    vs.push(format!("{}", report.bytes_scanned));
+    ks.push("elapsed_ns");
+    vs.push(format!("{}", elapsed_ns));
+    mcp_tool_result(json_obj(ks, vs), false)
+}
+
+fn handle_tools_call(id_json: str, params: Json) -> str ~ FileSystem + Clock {
+    let tool_name: str = match field_str(params, "name") {
+        Ok(n) => n,
+        Err(_) => return rpc_err(id_json, -32602, "tools/call requires a string name"),
+    };
+    let args: Json = match json_get(params, "arguments") {
+        Ok(a) => a,
+        Err(_) => empty_json_obj(),
+    };
+    if tool_name == "workstation_health" {
+        return rpc_ok(id_json, tool_workstation_health(args));
+    }
+    if tool_name == "check_em_dash_and_secret" {
+        return rpc_ok(id_json, tool_check_em_dash_and_secret(args));
+    }
+    rpc_err(id_json, -32602, format!("unknown tool: {}", tool_name))
+}
+
+// Handles one JSON-RPC 2.0 request line. Returns "" for notifications (no reply).
+fn handle_mcp_line(line: str) -> str ~ FileSystem + Clock {
+    let clean: str = trim_crlf(line);
+    if clean.len() == 0 {
+        return "";
+    }
+    let msg: Json = match json_parse(clean) {
+        Ok(v) => v,
+        Err(e) => return rpc_err("null", -32700, e),
+    };
+    if !json_has(msg, "id") {
+        if json_has(msg, "method") {
+            return "";
+        }
+        return rpc_err("null", -32600, "invalid request");
+    }
+    let id_json: str = match json_get(msg, "id") {
+        Ok(v) => json_stringify(v),
+        Err(_) => "null",
+    };
+    let method: str = match field_str(msg, "method") {
+        Ok(m) => m,
+        Err(_) => return "",
+    };
+    if method == "initialize" {
+        return rpc_ok(id_json, handle_initialize());
+    }
+    if method == "ping" {
+        return rpc_ok(id_json, "{}");
+    }
+    if method == "tools/list" {
+        return rpc_ok(id_json, handle_tools_list());
+    }
+    if method == "tools/call" {
+        let params: Json = match json_get(msg, "params") {
+            Ok(p) => p,
+            Err(_) => empty_json_obj(),
+        };
+        return handle_tools_call(id_json, params);
+    }
+    rpc_err(id_json, -32601, format!("method not found: {}", method))
+}
+
+// ---------------------------------------------------------------- Self-test & stdio server
+
+fn assert_contains(label: str, haystack: str, needle: str) -> i32 ~ Console {
+    if haystack.contains(needle) {
+        println!("[PASS] {}", label);
+        return 0;
+    }
+    println!("[FAIL] {} missing={} got={}", label, needle, haystack);
+    1
+}
+
+fn call_req(id: i64, name: str, args_json: str) -> str {
+    let head: str = "{\"jsonrpc\":\"2.0\",\"id\":";
+    let mid: str = ",\"method\":\"tools/call\",\"params\":{\"name\":";
+    head + format!("{}", id) + mid + json_quote(name) + ",\"arguments\":" + args_json + "}}"
+}
+
+fn run_self_test() -> i32 ~ Console + FileSystem + Clock {
+    let mut failures: i32 = 0;
+
+    // 1. initialize handshake
+    let init_req: str = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\","
+        + "\"params\":{\"protocolVersion\":\"2025-06-18\"}}";
+    let r_init: str = handle_mcp_line(init_req);
+    failures = failures + assert_contains("mcp_initialize", r_init, "buildlang-workstation-mcp");
+
+    // 2. notification produces no reply
+    let notif_req: str = "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}";
+    let r_notif: str = handle_mcp_line(notif_req);
+    if r_notif.len() == 0 {
+        println!("[PASS] mcp_notification_silent");
+    } else {
+        println!("[FAIL] mcp_notification_silent got={}", r_notif);
+        failures = failures + 1;
+    }
+
+    // 3. tools/list exposes both workstation tools
+    let list_req: str = "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\"}";
+    let r_list: str = handle_mcp_line(list_req);
+    failures = failures + assert_contains("mcp_tools_list_health", r_list, "workstation_health");
+    failures = failures + assert_contains("mcp_tools_list_gate", r_list, "check_em_dash_and_secret");
+
+    // 4. workstation_health on current directory
+    let r_health: str = handle_mcp_line(call_req(3, "workstation_health", "{\"path\":\".\"}"));
+    failures = failures + assert_contains("mcp_health_dir_exists", r_health, "\"exists\":true");
+    failures = failures + assert_contains("mcp_health_is_dir", r_health, "\"is_dir\":true");
+
+    // 5. check_em_dash_and_secret on clean ASCII text
+    let clean_args: str = "{\"text\":\"Clean ASCII prose with hyphens - zero leaks.\"}";
+    let r_clean: str = handle_mcp_line(call_req(4, "check_em_dash_and_secret", clean_args));
+    failures = failures + assert_contains("mcp_scan_clean", r_clean, "\"clean\":true");
+
+    // 6. Planted control 1: dynamically constructed UTF-8 em dash (U+2014) MUST be caught
+    let planted_em: str = format!("bad {} dash", 8212 as char);
+    let em_args: str = "{\"text\":" + json_quote(planted_em) + "}";
+    let r_em: str = handle_mcp_line(call_req(5, "check_em_dash_and_secret", em_args));
+    failures = failures + assert_contains("planted_control_em_dash_clean_false", r_em, "\"clean\":false");
+    failures = failures + assert_contains("planted_control_em_dash_count", r_em, "\"em_dashes\":1");
+
+    // 7. Planted control 2: dynamically constructed token prefixes MUST be caught
+    let planted_sec: str = "demo " + "sk" + "_live_12345678 and " + "ghp" + "_abcdef987654";
+    let sec_args: str = "{\"text\":" + json_quote(planted_sec) + "}";
+    let r_sec: str = handle_mcp_line(call_req(6, "check_em_dash_and_secret", sec_args));
+    failures = failures + assert_contains("planted_control_secret_clean_false", r_sec, "\"clean\":false");
+    failures = failures + assert_contains("planted_control_secret_hits", r_sec, "\"secret_hits\":2");
+
+    // 8. Planted control 3: malformed JSON returns -32700 parse error
+    let r_parse: str = handle_mcp_line("{broken json");
+    failures = failures + assert_contains("planted_control_parse_error", r_parse, "-32700");
+
+    // 9. Planted control 4: unknown method returns -32601 method not found
+    let r_method: str = handle_mcp_line("{\"jsonrpc\":\"2.0\",\"id\":9,\"method\":\"unknown/op\"}");
+    failures = failures + assert_contains("planted_control_unknown_method", r_method, "-32601");
+
+    if failures == 0 {
+        println!("[PASS] workstation_mcp summary failures=0");
+    } else {
+        println!("[FAIL] workstation_mcp summary failures={}", failures);
+    }
+    failures
+}
+
+fn serve_stdio() ~ Console + FileSystem + Clock {
+    loop {
+        let line: str = read_line();
+        if line.len() == 0 {
+            break;
+        }
+        let reply: str = handle_mcp_line(line);
+        if reply.len() > 0 {
+            println!("{}", reply);
+        }
+    }
+}
+
+fn main() ~ Console + FileSystem + Clock + Environment {
+    let n_args: i64 = args_count();
+    let mut self_test: bool = false;
+    let mut i: i64 = 1;
+    while i < n_args {
+        if args_get(i) == "--self-test" {
+            self_test = true;
+        }
+        i = i + 1;
+    }
+    if self_test {
+        let _rc: i32 = run_self_test();
+        return;
+    }
+    serve_stdio();
+}

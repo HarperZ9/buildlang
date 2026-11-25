@@ -1,0 +1,291 @@
+// SPDX-FileCopyrightText: 2026 Zain Dana Harper
+// SPDX-License-Identifier: AGPL-3.0-only
+//
+// BuildLang Dogfood Kernel Suite (Layer 1):
+//   - FNV-1a 64-bit hash matching RAW/Superframe native/bld/kit.bld (offset 1469598103934665603)
+//   - COL-001 IEC 61966-2-1 sRGB-to-linear and inverse transfer functions
+//   - OPT-002 Unpolarized dielectric Fresnel reflectance with total internal reflection
+//   - Deterministic par_for parallel kernel sweep verified bit-exact against serial reference
+//   - Known-answer checks, planted-failure controls, and nanosecond benchmark via clock_ns()
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 {
+        return -x;
+    }
+    x
+}
+
+// ---------------------------------------------------------------- FNV-1a 64-bit (Superframe parity)
+
+// Matches superframe/native/bld/kit.bld fnv_start() exactly.
+fn fnv_start() -> u64 {
+    1469598103934665603
+}
+
+fn fnv_u8(h0: u64, b: u64) -> u64 {
+    (h0 ^ b).wrapping_mul(1099511628211)
+}
+
+fn fnv_f32(h0: u64, v: f64) -> u64 {
+    let bits: u32 = (v as f32).to_bits();
+    let mut h: u64 = h0;
+    let mut k: u32 = 0;
+    while k < 4 {
+        h = fnv_u8(h, ((bits >> (8 * k)) & 255) as u64);
+        k = k + 1;
+    }
+    h
+}
+
+fn fnv_u64(h0: u64, v: u64) -> u64 {
+    let mut h: u64 = h0;
+    let mut k: u64 = 0;
+    while k < 8 {
+        h = fnv_u8(h, (v >> (8 * k)) & 255);
+        k = k + 1;
+    }
+    h
+}
+
+fn fnv_str(s: str) -> u64 {
+    let b = s.as_bytes();
+    let n = s.len();
+    let mut h: u64 = fnv_start();
+    let mut i: usize = 0;
+    while i < n {
+        h = fnv_u8(h, b[i] as u64);
+        i = i + 1;
+    }
+    h
+}
+
+// ---------------------------------------------------------------- COL-001: sRGB transfer
+
+fn srgb_to_linear(v: f64) -> f64 {
+    if v <= 0.04045 {
+        return v / 12.92;
+    }
+    pow((v + 0.055) / 1.055, 2.4)
+}
+
+fn linear_to_srgb(lin: f64) -> f64 {
+    if lin <= 0.0031308 {
+        return lin * 12.92;
+    }
+    1.055 * pow(lin, 1.0 / 2.4) - 0.055
+}
+
+// Planted-fault control: naive power-2.2 gamma (must be rejected by COL-001 check).
+fn srgb_to_linear_planted_wrong(v: f64) -> f64 {
+    pow(v, 2.2)
+}
+
+// ---------------------------------------------------------------- OPT-002: Fresnel dielectric
+
+fn fresnel_dielectric(n1: f64, n2: f64, cos_i: f64) -> f64 {
+    let sin2_i: f64 = 1.0 - cos_i * cos_i;
+    let eta: f64 = n1 / n2;
+    let sin2_t: f64 = eta * eta * sin2_i;
+    if sin2_t >= 1.0 {
+        return 1.0;
+    }
+    let cos_t: f64 = sqrt(1.0 - sin2_t);
+    let rs_num: f64 = n1 * cos_i - n2 * cos_t;
+    let rs_den: f64 = n1 * cos_i + n2 * cos_t;
+    let rp_num: f64 = n1 * cos_t - n2 * cos_i;
+    let rp_den: f64 = n1 * cos_t + n2 * cos_i;
+    let rs: f64 = (rs_num / rs_den) * (rs_num / rs_den);
+    let rp: f64 = (rp_num / rp_den) * (rp_num / rp_den);
+    0.5 * (rs + rp)
+}
+
+// Planted-fault control: missing TIR branch clamps cos_t to 0.5 (must fail TIR check).
+fn fresnel_planted_missing_tir(n1: f64, n2: f64, cos_i: f64) -> f64 {
+    let sin2_i: f64 = 1.0 - cos_i * cos_i;
+    let eta: f64 = n1 / n2;
+    let sin2_t: f64 = eta * eta * sin2_i;
+    let mut cos_t: f64 = 0.5;
+    if sin2_t < 1.0 {
+        cos_t = sqrt(1.0 - sin2_t);
+    }
+    let rs_num: f64 = n1 * cos_i - n2 * cos_t;
+    let rs_den: f64 = n1 * cos_i + n2 * cos_t;
+    let rp_num: f64 = n1 * cos_t - n2 * cos_i;
+    let rp_den: f64 = n1 * cos_t + n2 * cos_i;
+    let rs: f64 = (rs_num / rs_den) * (rs_num / rs_den);
+    let rp: f64 = (rp_num / rp_den) * (rp_num / rp_den);
+    0.5 * (rs + rp)
+}
+
+// ---------------------------------------------------------------- Pure parallel sweep kernel
+
+struct SweepCtx {
+    chunks: i64,
+    chunk_len: i64,
+}
+
+// Pure function (~ ()): safe for par_for across any thread count with bit-identical output.
+fn eval_chunk(ctx: &SweepCtx, chunk_id: i64) -> u64 {
+    let total: f64 = (ctx.chunks * ctx.chunk_len) as f64;
+    let base: i64 = chunk_id * ctx.chunk_len;
+    let mut h: u64 = fnv_start();
+    let mut j: i64 = 0;
+    while j < ctx.chunk_len {
+        let idx: f64 = (base + j) as f64;
+        let u: f64 = (idx + 0.5) / total;
+        let lin: f64 = srgb_to_linear(u);
+        let r_air_glass: f64 = fresnel_dielectric(1.0, 1.5, u);
+        let r_glass_air: f64 = fresnel_dielectric(1.5, 1.0, u);
+        h = fnv_f32(h, lin);
+        h = fnv_f32(h, r_air_glass);
+        h = fnv_f32(h, r_glass_air);
+        j = j + 1;
+    }
+    h
+}
+
+fn reduce_chunk_hashes(parts: &Vec<u64>) -> u64 {
+    let mut h: u64 = fnv_start();
+    let mut i: usize = 0;
+    while i < parts.len() {
+        h = fnv_u64(h, parts[i]);
+        i = i + 1;
+    }
+    h
+}
+
+// ---------------------------------------------------------------- Verification driver
+
+fn check_near(label: str, got: f64, want: f64, tol: f64) -> i32 ~ Console {
+    let diff: f64 = abs_f64(got - want);
+    if diff <= tol {
+        println!("[PASS] {} got={} want={} diff={}", label, got, want, diff);
+        return 0;
+    }
+    println!("[FAIL] {} got={} want={} diff={} tol={}", label, got, want, diff, tol);
+    1
+}
+
+fn main() ~ Console + Clock {
+    let mut failures: i32 = 0;
+
+    // 1. Known-answer FNV-1a parity check (offset = 1469598103934665603)
+    let h_empty: u64 = fnv_str("");
+    if h_empty == 1469598103934665603 {
+        println!("[PASS] fnv_empty offset={}", h_empty);
+    } else {
+        println!("[FAIL] fnv_empty got={}", h_empty);
+        failures = failures + 1;
+    }
+    let h_hello: u64 = fnv_str("buildlang-kcore");
+    let h_hello_2: u64 = fnv_str("buildlang-kcore");
+    if h_hello == h_hello_2 && h_hello != h_empty {
+        println!("[PASS] fnv_str deterministic hash={:x}", h_hello);
+    } else {
+        println!("[FAIL] fnv_str non-deterministic");
+        failures = failures + 1;
+    }
+
+    // Planted control 1: 1-bit offset perturbation must diverge.
+    let h_bad_offset: u64 = (1469598103934665604 ^ 97).wrapping_mul(1099511628211);
+    let h_good_a: u64 = fnv_u8(fnv_start(), 97);
+    if h_bad_offset != h_good_a {
+        println!("[PASS] planted_control_fnv_offset caught bad={:x} good={:x}", h_bad_offset, h_good_a);
+    } else {
+        println!("[FAIL] planted_control_fnv_offset missed");
+        failures = failures + 1;
+    }
+
+    // 2. Known-answer COL-001 sRGB-to-linear and inverse round-trip
+    failures = failures + check_near("COL-001_zero", srgb_to_linear(0.0), 0.0, 1e-14);
+    failures = failures + check_near("COL-001_one", srgb_to_linear(1.0), 1.0, 1e-12);
+    failures = failures + check_near("COL-001_half", srgb_to_linear(0.5), 0.21404114048223255, 1e-12);
+    failures = failures + check_near("COL-001_knee", srgb_to_linear(0.04045), 0.0031308049535603718, 1e-12);
+
+    let mut rt_max_err: f64 = 0.0;
+    let mut k: i64 = 0;
+    while k <= 1000 {
+        let v: f64 = (k as f64) / 1000.0;
+        let back: f64 = linear_to_srgb(srgb_to_linear(v));
+        let e: f64 = abs_f64(back - v);
+        if e > rt_max_err {
+            rt_max_err = e;
+        }
+        k = k + 1;
+    }
+    failures = failures + check_near("COL-001_roundtrip_max_err", rt_max_err, 0.0, 1e-12);
+
+    // Planted control 2: naive gamma 2.2 must fail COL-001 tolerance at 0.5.
+    let bad_srgb: f64 = srgb_to_linear_planted_wrong(0.5);
+    let bad_err: f64 = abs_f64(bad_srgb - 0.21404114048223255);
+    if bad_err > 1e-3 {
+        println!("[PASS] planted_control_col001_gamma22 caught diff={}", bad_err);
+    } else {
+        println!("[FAIL] planted_control_col001_gamma22 missed diff={}", bad_err);
+        failures = failures + 1;
+    }
+
+    // 3. Known-answer OPT-002 Fresnel dielectric
+    failures = failures + check_near("OPT-002_normal_n1.5", fresnel_dielectric(1.0, 1.5, 1.0), 0.04, 1e-14);
+    failures = failures + check_near("OPT-002_grazing", fresnel_dielectric(1.0, 1.5, 0.0), 1.0, 1e-14);
+    let cos_brewster: f64 = 1.0 / sqrt(1.0 + 1.5 * 1.5);
+    let r_brewster: f64 = fresnel_dielectric(1.0, 1.5, cos_brewster);
+    let sin2_b: f64 = 1.0 - cos_brewster * cos_brewster;
+    let cos_tb: f64 = sqrt(1.0 - (1.0 / 2.25) * sin2_b);
+    let rs_b: f64 = ((cos_brewster - 1.5 * cos_tb) / (cos_brewster + 1.5 * cos_tb));
+    failures = failures + check_near("OPT-002_brewster", r_brewster, 0.5 * rs_b * rs_b, 1e-12);
+    failures = failures + check_near("OPT-002_tir_glass_air", fresnel_dielectric(1.5, 1.0, 0.5), 1.0, 1e-14);
+
+    // Planted control 3: Fresnel without TIR must fail glass->air critical-angle check.
+    let bad_tir: f64 = fresnel_planted_missing_tir(1.5, 1.0, 0.5);
+    if abs_f64(bad_tir - 1.0) > 0.1 {
+        println!("[PASS] planted_control_opt002_tir caught got={}", bad_tir);
+    } else {
+        println!("[FAIL] planted_control_opt002_tir missed got={}", bad_tir);
+        failures = failures + 1;
+    }
+
+    // 4. Deterministic par_for vs serial benchmark (64 chunks * 16384 = 1,048,576 points)
+    let ctx = SweepCtx { chunks: 64, chunk_len: 16384 };
+
+    let t0: i64 = clock_ns();
+    let mut serial_parts: Vec<u64> = Vec::new();
+    let mut c: i64 = 0;
+    while c < ctx.chunks {
+        serial_parts.push(eval_chunk(&ctx, c));
+        c = c + 1;
+    }
+    let serial_hash: u64 = reduce_chunk_hashes(&serial_parts);
+    let t1: i64 = clock_ns();
+
+    let t2: i64 = clock_ns();
+    let par_parts: Vec<u64> = par_for(ctx.chunks, &ctx, eval_chunk);
+    let par_hash: u64 = reduce_chunk_hashes(&par_parts);
+    let t3: i64 = clock_ns();
+
+    let serial_ns: i64 = t1 - t0;
+    let par_ns: i64 = t3 - t2;
+
+    if par_hash == serial_hash {
+        println!(
+            "[PASS] par_for_bit_exact hash={:x} points={} serial_ns={} par_ns={}",
+            par_hash,
+            ctx.chunks * ctx.chunk_len,
+            serial_ns,
+            par_ns
+        );
+    } else {
+        println!(
+            "[FAIL] par_for_bit_exact serial={:x} par={:x}",
+            serial_hash,
+            par_hash
+        );
+        failures = failures + 1;
+    }
+
+    if failures == 0 {
+        println!("[PASS] kcore_fast summary failures=0");
+    } else {
+        println!("[FAIL] kcore_fast summary failures={}", failures);
+    }
+}
