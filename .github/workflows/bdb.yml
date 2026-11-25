@@ -50,9 +50,10 @@ concurrency:
 
 env:
   QDB_ORACLE_REF: 7efcedd935467fc298e20035ebd3468099164f54  # build-universe 577abe4
-  # P21 (2026-11-09): a transaction writes its WAL lines once, at COMMIT, so the write sequence
-  # and the digest changed; equal on Windows and Linux.
-  QDB_FAULTS_DIGEST: 77a49282bfb71d4786b2a8ac6be890f1e5952b2e6dc960b26033ccbdaa24c47f
+  # 2026-11-25: format 2 .db header now carries body length, per-4-KiB-page 32-bit FNV-1a
+  # checksums, and a header checksum, so the .db bytes and faults digest changed; deterministic
+  # across Windows and Linux.
+  QDB_FAULTS_DIGEST: 409e37eeaadca9fa95800632e94f94c4a7e6036550ccd35bc58816c6d1096f90
 
 jobs:
   qdb:
@@ -152,9 +153,10 @@ jobs:
       - name: End of input ends the REPL (a script with no .quit must exit 0)
         run: python3 bdb/tests/test_qdb_eof.py bdb/qdb.exe
 
-      - name: WAL damage fuzzer (2,000 seeded cases; a planted replay defect must be caught)
-        # Seed 20261109. Each case damages the WAL once; qdb must exit 0 or 1 and return only
-        # whole committed transactions. The .db cases are counted, not gated (no checksum yet).
+      - name: WAL and .db damage fuzzer (2,000 WAL + 500 .db seeded cases; planted defects must be caught)
+        # Seed 20261109. Each WAL case damages the WAL once; qdb must exit 0 or 1 and return only
+        # whole committed transactions. Each .db case damages the .db once; page/header FNV-1a
+        # checksums must prevent silent corruption (0 silent wrong answers, planted 1-byte flip caught).
         run: |
           BUILDC=compiler/target/release/buildc
           python3 bdb/tests/fuzz_qdb_wal.py --write-planted bdb/db.bld "$RUNNER_TEMP/fuzz_planted.bld"

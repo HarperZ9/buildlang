@@ -16,9 +16,11 @@ What a damaged WAL may do (the invariants):
       margin) is recovered.
 I2 to I4 apply when qdb exits 0. An exit 1 is a clean refusal and is counted.
 
-The .db file carries no checksum yet, so --db-cases only counts: crashes and
-hangs, clean refusals, and answers that changed with no error. None of them
-fails the run until the checksum lands (bdb/COMPLETE.md, fuzzing plan).
+The .db file carries a header checksum and per-4-KiB-page 32-bit FNV-1a
+checksums, so --db-cases gates .db integrity: crashes/hangs and silent wrong
+answers (answers that changed without exit code 1) fail the run. A planted
+1-byte flip in a .db file is also tested on every run and must be refused with
+exit code 1.
 
 Every case is (seed, index); `--case N` replays one. A failing mutation is
 shrunk (shorter span, fewer inserted bytes) while it still fails, and printed
@@ -316,7 +318,7 @@ def fuzz_wal(qdb, d, cases, seed, only, keep, quiet=False):
 
 
 def fuzz_db(qdb, d, cases, seed):
-    """.db damage, counted only: (cases, crashes or hangs, refused, changed silently, same, size)."""
+    """.db damage, gated by page checksums: (cases, bad, refused, silent, same, size, planted_ok)."""
     db = os.path.join(d, "dsrc.db")
     _, stmts = workload()
     script = "CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT);\n" + "\n".join(stmts) + "\n.quit\n"
@@ -327,6 +329,16 @@ def fuzz_db(qdb, d, cases, seed):
         good = f.read()
     work = os.path.join(d, "dwork.db")
     _, ref = recover(qdb, work, good, b"")
+
+    # Planted-corruption control: flip 1 byte in the body of the .db file and
+    # verify qdb detects and refuses it with exit code 1.
+    body_off = good.index(b"\n") + 1
+    flip_pos = min(body_off + 12, len(good) - 1)
+    planted_bytes = bytearray(good)
+    planted_bytes[flip_pos] ^= 0x01
+    prc, _ = recover(qdb, work, bytes(planted_bytes), b"")
+    planted_ok = prc == 1
+
     bad, refused, silent, same = [], 0, 0, 0
     for i in range(cases):
         m = mutate(random.Random("%d:db:%d" % (seed, i)), good)
@@ -334,7 +346,7 @@ def fuzz_db(qdb, d, cases, seed):
         if rc is None or rc not in (0, 1):
             bad.append((i, m, "hang" if rc is None else "exit code %d" % rc))
             if len(bad) <= 3:
-                print("counted, .db case %d: %s; mutation %s at byte %d, %d removed, %d inserted"
+                print("FAIL .db case %d: %s; mutation %s at byte %d, %d removed, %d inserted"
                       % (i, bad[-1][2], m[0], m[1], m[2], len(m[3])))
         elif rc == 1:
             refused += 1
@@ -342,7 +354,10 @@ def fuzz_db(qdb, d, cases, seed):
             same += 1
         else:
             silent += 1
-    return cases, bad, refused, silent, same, len(good)
+            if silent <= 3:
+                print("FAIL .db silent corruption case %d: mutation %s at byte %d, %d removed, %d inserted"
+                      % (i, m[0], m[1], m[2], len(m[3])))
+    return cases, bad, refused, silent, same, len(good), planted_ok
 
 
 def main():
@@ -375,10 +390,12 @@ def main():
                  "; by mutation: " + ", ".join("%s %d" % kv for kv in sorted(by_kind.items())) if by_kind else ""))
         ok = ok and not fails
         if a.db_cases and a.case is None:
-            n, bad, refused, silent, same, db_len = fuzz_db(os.path.abspath(a.qdb), d, a.db_cases, a.seed)
+            n, bad, refused, silent, same, db_len, planted_ok = fuzz_db(os.path.abspath(a.qdb), d, a.db_cases, a.seed)
             print(".db: seed %d, %d cases on a %d-byte file, %d crashes or hangs, %d clean refusals, "
-                  "%d answers unchanged, %d answers changed with no error (no checksum yet; counted, not failed)"
-                  % (a.seed, n, db_len, len(bad), refused, same, silent))
+                  "%d answers unchanged, %d answers changed with no error; planted 1-byte flip: %s"
+                  % (a.seed, n, db_len, len(bad), refused, same, silent,
+                     "caught" if planted_ok else "MISSED"))
+            ok = ok and not bad and silent == 0 and planted_ok
     if a.planted:
         with tempfile.TemporaryDirectory() as d:
             n, fails, _, _, _ = fuzz_wal(os.path.abspath(a.planted), d, a.cases, a.seed, None, None, quiet=True)

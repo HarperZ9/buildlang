@@ -724,6 +724,7 @@ impl<'ctx> MirLowerer<'ctx> {
                 | "calloc"
                 | "realloc"
                 | "free"
+                | "exit"
                 | "_Exit"
                 | "quick_exit"
                 | "at_quick_exit"
