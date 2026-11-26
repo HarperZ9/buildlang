@@ -169,20 +169,20 @@ install_buildlang() {
 
   if [ -n "$local_dir" ]; then
     [ -f "$local_dir/$asset" ] || { echo "Archive not found: $local_dir/$asset" >&2; return 1; }
-    cp "$local_dir/$asset" "$archive"
-    cp "$local_dir/SHA256SUMS" "$sums"
+    cp "$local_dir/$asset" "$archive" || return 1
+    cp "$local_dir/SHA256SUMS" "$sums" || return 1
   else
     base_url="https://github.com/${REPO}/releases/download/${tag}"
     echo "Downloading $asset and SHA256SUMS from $REPO ($tag)..."
-    curl -fsSL "$base_url/SHA256SUMS" -o "$sums"
-    curl -fsSL "$base_url/$asset" -o "$archive"
+    curl -fsSL "$base_url/SHA256SUMS" -o "$sums" || return 1
+    curl -fsSL "$base_url/$asset" -o "$archive" || return 1
   fi
 
-  verify_sha256 "$archive" "$sums" "$asset"
+  verify_sha256 "$archive" "$sums" "$asset" || return 1
 
   extract="$work/extract"
-  mkdir -p "$extract" "$dest"
-  tar -xzf "$archive" -C "$extract"
+  mkdir -p "$extract" "$dest" || return 1
+  tar -xzf "$archive" -C "$extract" || return 1
 
   for bin in buildc qdb port; do
     found="$(find "$extract" -type f -name "$bin" | head -n 1)"
@@ -190,8 +190,8 @@ install_buildlang() {
       echo "Fail-closed: expected binary $bin missing from $asset" >&2
       return 1
     fi
-    cp "$found" "$dest/$bin"
-    chmod 755 "$dest/$bin"
+    cp "$found" "$dest/$bin" || return 1
+    chmod 755 "$dest/$bin" || return 1
   done
 
   if [ "$skip_path" -eq 0 ]; then
@@ -199,7 +199,7 @@ install_buildlang() {
   fi
 
   for bin in buildc qdb; do
-    ver="$("$dest/$bin" --version)"
+    ver="$("$dest/$bin" --version)" || return 1
     echo "Verified $bin: $ver"
   done
   [ -x "$dest/port" ] || { echo "Verification failed: port not executable in $dest" >&2; return 1; }
