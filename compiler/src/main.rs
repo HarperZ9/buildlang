@@ -178,6 +178,15 @@ struct Cli {
     /// Generated-program stdio behavior: native, portable-lf. portable-lf is C-backend only.
     #[arg(long, default_value_t = StdioMode::Native)]
     stdio_mode: StdioMode,
+
+    /// Run the V5 certified e-graph superoptimizer over MIR before backend codegen
+    #[arg(long)]
+    superopt: bool,
+
+    /// Write the sealed `buildlang.superopt-cert/v1` proof certificate to PATH ('-' = stdout).
+    /// Implies `--superopt`.
+    #[arg(long, value_name = "PATH")]
+    emit_cert: Option<PathBuf>,
 }
 
 #[derive(Subcommand)]
@@ -262,6 +271,15 @@ enum Commands {
         /// Generated-program stdio behavior: native, portable-lf. portable-lf is C-backend only.
         #[arg(long, default_value_t = StdioMode::Native)]
         stdio_mode: StdioMode,
+
+        /// Run the V5 certified e-graph superoptimizer over MIR before backend codegen
+        #[arg(long)]
+        superopt: bool,
+
+        /// Write the sealed `buildlang.superopt-cert/v1` proof certificate to PATH ('-' = stdout).
+        /// Implies `--superopt`.
+        #[arg(long, value_name = "PATH")]
+        emit_cert: Option<PathBuf>,
     },
 
     /// Run a file directly
@@ -393,6 +411,15 @@ enum Commands {
         /// verifier rebuilds the program the default way.
         #[arg(long)]
         release: bool,
+
+        /// Run the V5 certified e-graph superoptimizer over MIR before C codegen
+        #[arg(long)]
+        superopt: bool,
+
+        /// Write the sealed `buildlang.superopt-cert/v1` proof certificate to PATH ('-' = stdout).
+        /// Implies `--superopt`.
+        #[arg(long, value_name = "PATH")]
+        emit_cert: Option<PathBuf>,
 
         /// Arguments to pass to the program
         #[arg(trailing_var_arg = true)]
@@ -555,6 +582,12 @@ enum Commands {
     Bdf {
         #[command(subcommand)]
         command: BdfCommands,
+    },
+
+    /// Independently verify a `buildlang.superopt-cert/v1` certificate JSON file (fail-closed)
+    VerifyCert {
+        /// Path to the superoptimization certificate JSON file
+        file: PathBuf,
     },
 
     /// Print version information
@@ -833,7 +866,18 @@ fn run_cli(cli: Cli) -> Result<(), i32> {
             keep_c,
             target,
             stdio_mode,
-        }) => cmd_build(&path, release, &emit, keep_c, &target, stdio_mode),
+            superopt,
+            emit_cert,
+        }) => cmd_build(
+            &path,
+            release,
+            &emit,
+            keep_c,
+            &target,
+            stdio_mode,
+            superopt || emit_cert.is_some(),
+            emit_cert.as_deref(),
+        ),
         Some(Commands::Run {
             file,
             stdio_mode,
@@ -856,6 +900,8 @@ fn run_cli(cli: Cli) -> Result<(), i32> {
             cross_backend,
             gpu,
             release,
+            superopt,
+            emit_cert,
             args,
         }) => {
             if release && (gpu || emit_receipt.is_some()) {
@@ -922,6 +968,8 @@ fn run_cli(cli: Cli) -> Result<(), i32> {
                     budget_wall_seconds,
                     cross_backend.as_deref(),
                     release,
+                    superopt || emit_cert.is_some(),
+                    emit_cert.as_deref(),
                 )
             }
         }
@@ -956,6 +1004,7 @@ fn run_cli(cli: Cli) -> Result<(), i32> {
             verbose,
             no_fail_fast,
         }) => cmd_test(&directory, filter.as_deref(), verbose, no_fail_fast),
+        Some(Commands::VerifyCert { file }) => cmd_verify_cert(&file),
         Some(Commands::Version) => {
             print_version();
             Ok(())
@@ -970,6 +1019,8 @@ fn run_cli(cli: Cli) -> Result<(), i32> {
                     cli.target.as_deref(),
                     cli.entry.as_deref(),
                     cli.stdio_mode,
+                    cli.superopt || cli.emit_cert.is_some(),
+                    cli.emit_cert.as_deref(),
                 )
             } else {
                 eprintln!("No input file specified. Use --help for usage information.");
@@ -988,6 +1039,67 @@ fn print_version() {
         buildlang::LANGUAGE_VERSION.2
     );
     println!("{}", buildlang::COPYRIGHT);
+}
+
+fn write_superopt_cert(
+    cert: &buildlang::codegen::SuperoptCertificate,
+    path: &Path,
+) -> Result<(), i32> {
+    let json = serde_json::to_string_pretty(cert).map_err(|e| {
+        eprintln!("Failed to serialize superopt certificate: {}", e);
+        1
+    })?;
+    if path.as_os_str() == "-" {
+        println!("{}", json);
+    } else {
+        if let Some(parent) = path.parent() {
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent).map_err(|e| {
+                    eprintln!("Failed to create directory for '{}': {}", path.display(), e);
+                    1
+                })?;
+            }
+        }
+        std::fs::write(path, format!("{json}\n")).map_err(|e| {
+            eprintln!(
+                "Failed to write superopt certificate '{}': {}",
+                path.display(),
+                e
+            );
+            1
+        })?;
+    }
+    Ok(())
+}
+
+fn cmd_verify_cert(file: &Path) -> Result<(), i32> {
+    let raw = std::fs::read_to_string(file).map_err(|e| {
+        eprintln!("Error reading certificate '{}': {}", file.display(), e);
+        1
+    })?;
+    let cert: buildlang::codegen::SuperoptCertificate =
+        serde_json::from_str(&raw).map_err(|e| {
+            eprintln!(
+                "Invalid superopt certificate JSON '{}': {}",
+                file.display(),
+                e
+            );
+            1
+        })?;
+    buildlang::codegen::superopt::verify_certificate(&cert).map_err(|e| {
+        eprintln!("SUPEROPT_CERT VERIFY FAILED: {}", e);
+        1
+    })?;
+    println!(
+        "OK: {} verified (target={}, rewrites={}, cost={}->{}, sha256={})",
+        cert.schema,
+        cert.target,
+        cert.rewrites_applied,
+        cert.total_cost_before,
+        cert.total_cost_after,
+        cert.cert_sha256
+    );
+    Ok(())
 }
 
 fn command_version(command: &str, args: &[&str]) -> Option<String> {
@@ -7300,6 +7412,8 @@ fn cmd_build(
     keep_c: bool,
     target_str: &str,
     stdio_mode: StdioMode,
+    superopt: bool,
+    emit_cert: Option<&Path>,
 ) -> Result<(), i32> {
     // Look for Build.toml or main.bld in the project directory
     let manifest_path = path.join("Build.toml");
@@ -7429,6 +7543,7 @@ fn cmd_build(
     // Code generation - pass source for macro string extraction
     let mut codegen = CodeGenerator::with_source(&ctx, target, Arc::from(source_file.source()));
     codegen.set_stdio_mode(stdio_mode);
+    codegen.superopt = superopt;
     let generated = codegen.generate(&ast);
     let output = generated.map_err(|e| {
         report_codegen_error(&e, &source_file);
@@ -7443,6 +7558,9 @@ fn cmd_build(
             eprintln!("  {}", err);
         }
         return Err(1);
+    }
+    if let (Some(cert_path), Some(cert)) = (emit_cert, codegen.superopt_cert()) {
+        write_superopt_cert(cert, cert_path)?;
     }
     println!(
         "[4/{}] Code generation ({})... OK ({} bytes)",
@@ -8022,6 +8140,8 @@ fn compile_program_to_exe(
     stdio_mode: StdioMode,
     compiler_override: Option<&str>,
     release: bool,
+    superopt: bool,
+    emit_cert: Option<&Path>,
 ) -> Result<CompiledProgram, i32> {
     // Read source file
     let source = std::fs::read_to_string(file).map_err(|e| {
@@ -8077,6 +8197,7 @@ fn compile_program_to_exe(
     // Generate C code - pass source for macro string extraction
     let mut codegen = CodeGenerator::with_source(&ctx, Target::C, Arc::from(source_file.source()));
     codegen.set_stdio_mode(stdio_mode);
+    codegen.superopt = superopt;
     let generated = codegen.generate(&ast);
     let output = generated.map_err(|e| {
         report_codegen_error(&e, &source_file);
@@ -8091,6 +8212,9 @@ fn compile_program_to_exe(
             eprintln!("  {}", err);
         }
         return Err(1);
+    }
+    if let (Some(cert_path), Some(cert)) = (emit_cert, codegen.superopt_cert()) {
+        write_superopt_cert(cert, cert_path)?;
     }
 
     // Write to temp file
@@ -8175,7 +8299,7 @@ fn compile_and_capture_run(
     seed: Option<u64>,
 ) -> Result<CapturedRun, i32> {
     let CompiledProgram { temp_dir, exe_file } =
-        compile_program_to_exe(file, stdio_mode, compiler_override, false)?;
+        compile_program_to_exe(file, stdio_mode, compiler_override, false, false, None)?;
 
     // Hash the produced executable BEFORE running (the temp dir is removed
     // after the run). FAIL CLOSED on a read failure: a receipt must never
@@ -8577,6 +8701,8 @@ fn cmd_run(
     budget_wall_seconds: Option<f64>,
     cross_backend: Option<&str>,
     release: bool,
+    superopt: bool,
+    emit_cert: Option<&Path>,
 ) -> Result<(), i32> {
     // The Monte Carlo declaration is all-or-nothing, validated whenever ANY
     // mc flag is present (like --units: a typo is never silently accepted):
@@ -8808,7 +8934,7 @@ fn cmd_run(
     let Some(receipt_path) = emit_receipt else {
         // No receipt: compile, then run with inherited stdout via `.status()`.
         let CompiledProgram { temp_dir, exe_file } =
-            compile_program_to_exe(file, stdio_mode, None, release)?;
+            compile_program_to_exe(file, stdio_mode, None, release, superopt, emit_cert)?;
         let status = {
             let mut run_cmd = std::process::Command::new(&exe_file);
             run_cmd.args(args);
@@ -10839,6 +10965,8 @@ fn cmd_compile(
     target_override: Option<&str>,
     entry: Option<&str>,
     stdio_mode: StdioMode,
+    superopt: bool,
+    emit_cert: Option<&Path>,
 ) -> Result<(), i32> {
     // Read source file
     let source = std::fs::read_to_string(input).map_err(|e| {
@@ -10962,8 +11090,14 @@ fn cmd_compile(
                 .and_then(|e| e.to_str())
                 .is_some_and(|e| e.eq_ignore_ascii_case("exe"))
         }) {
-            let CompiledProgram { temp_dir, exe_file } =
-                compile_program_to_exe(input, stdio_mode, None, opt_level > 0)?;
+            let CompiledProgram { temp_dir, exe_file } = compile_program_to_exe(
+                input,
+                stdio_mode,
+                None,
+                opt_level > 0,
+                superopt,
+                emit_cert,
+            )?;
             let copied = std::fs::copy(&exe_file, dest);
             let _ = std::fs::remove_dir_all(&temp_dir);
             copied.map_err(|e| {
@@ -10989,6 +11123,7 @@ fn cmd_compile(
     codegen.wasm_text = wants_wat;
     codegen.entry = entry.map(str::to_string);
     codegen.set_stdio_mode(stdio_mode);
+    codegen.superopt = superopt;
     // Enable ReShade boilerplate for .fx output files
     if output_path.extension().and_then(|e| e.to_str()) == Some("fx") {
         codegen.reshade = true;
@@ -11020,6 +11155,9 @@ fn cmd_compile(
             eprintln!("  {}", err);
         }
         return Err(1);
+    }
+    if let (Some(cert_path), Some(cert)) = (emit_cert, codegen.superopt_cert()) {
+        write_superopt_cert(cert, cert_path)?;
     }
 
     // Write output

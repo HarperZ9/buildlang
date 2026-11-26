@@ -4406,7 +4406,7 @@ impl<'ctx> TypeInfer<'ctx> {
                         return Some(first);
                     }
                 }
-                ("dot", 2) => {
+                ("dot", 2) | ("distance", 2) | ("length", 1) => {
                     let first = self.apply(&arg_tys[0]);
                     if let Some(vname) = is_vec_adt(&first) {
                         return Some(if vname == "DVec3" {
@@ -6524,7 +6524,8 @@ impl<'ctx> TypeInfer<'ctx> {
             // Collection accessors - return element or fresh var
             "pop" | "pop_front" | "pop_back" => return Ty::fresh_var(),
             "remove" | "swap_remove" => return Ty::fresh_var(),
-            "get" | "get_mut" | "entry" | "first" | "last" | "front" | "back" => {
+            "get" | "get_mut" | "entry" | "first" | "first_mut" | "last" | "last_mut" | "front"
+            | "back" => {
                 return Ty::fresh_var();
             }
             "split" | "splitn" | "rsplit" | "split_once" | "rsplit_once" | "split_whitespace"

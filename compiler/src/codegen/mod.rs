@@ -56,11 +56,13 @@ pub mod debug;
 pub mod ir;
 pub mod lower;
 pub mod runtime;
+pub mod superopt;
 
 pub use backend::{Backend, CodegenError, CodegenResult, StdioMode, Target};
 pub use builder::*;
 pub use ir::*;
 pub use lower::*;
+pub use superopt::{SuperoptCertificate, SuperoptRule, SuperoptStep, SUPEROPT_CERT_SCHEMA};
 
 use std::sync::Arc;
 
@@ -86,6 +88,11 @@ pub struct CodeGenerator<'ctx> {
     /// `--entry NAME`: keep only this shader entry point; the others stop
     /// being entries. `None` keeps every entry.
     pub entry: Option<String>,
+    /// Enable the V5 certified e-graph superoptimizer pass (`--superopt`) over
+    /// MIR before target backend emission.
+    pub superopt: bool,
+    /// Sealed V5 superoptimization certificate emitted when `superopt` runs.
+    superopt_cert: Option<SuperoptCertificate>,
     /// Errors from the MIR `#[linear]` checker (`codegen::analysis::linear`),
     /// populated by `generate()` right after `lower_module`. Non-empty means
     /// the program is linearity-invalid: callers must treat this as a compile
@@ -111,6 +118,8 @@ impl<'ctx> CodeGenerator<'ctx> {
             reshade: false,
             wasm_text: false,
             entry: None,
+            superopt: false,
+            superopt_cert: None,
             linear_errors: Vec::new(),
             further_rejections: Vec::new(),
         }
@@ -127,9 +136,16 @@ impl<'ctx> CodeGenerator<'ctx> {
             reshade: false,
             wasm_text: false,
             entry: None,
+            superopt: false,
+            superopt_cert: None,
             linear_errors: Vec::new(),
             further_rejections: Vec::new(),
         }
+    }
+
+    /// Get the sealed V5 superoptimization certificate, if `--superopt` ran.
+    pub fn superopt_cert(&self) -> Option<&SuperoptCertificate> {
+        self.superopt_cert.as_ref()
     }
 
     /// Errors from the MIR `#[linear]` checker, if `generate()` has run.
@@ -249,6 +265,32 @@ impl<'ctx> CodeGenerator<'ctx> {
                         .to_string(),
                 ),
             })?;
+        }
+
+        // Run V5 certified e-graph superoptimization on MIR before backend emission
+        // when `--superopt` is requested, and verify the emitted proof certificate
+        // fail-closed before producing any target output.
+        self.superopt_cert = None;
+        if self.superopt {
+            let mir = self.mir.as_mut().expect("MIR was just stored");
+            let target_label = self.target.to_string();
+            let cert = superopt::superoptimize_module(mir, &target_label).map_err(|message| {
+                CodegenError::Rejected {
+                    message: format!("superoptimization certificate check failed: {message}"),
+                    location: None,
+                    help: Some(
+                        "forged or unsound superopt rewrites are rejected fail-closed".to_string(),
+                    ),
+                }
+            })?;
+            superopt::verify_certificate(&cert).map_err(|message| CodegenError::Rejected {
+                message: format!("superoptimization certificate verification failed: {message}"),
+                location: None,
+                help: Some(
+                    "forged or tampered superopt certificates are rejected fail-closed".to_string(),
+                ),
+            })?;
+            self.superopt_cert = Some(cert);
         }
 
         // Select backend and generate
