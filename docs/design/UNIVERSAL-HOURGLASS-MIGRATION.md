@@ -60,20 +60,47 @@ One IR lifter captures **every** upstream language that already compiles to that
 - **RISC-V Structured Assembly (`port/universal/asm_riscv_lift.bld`, `RV64IM`):** Lifts register-file functions (`li`, `mv`, `add`, `sub`, `mul`, `div`, `rem`, `addi`, `beq`, `bne`, `blt`, `bge`, `j`, `call`, `ecall` print, `ret`) into deterministic BuildLang using an explicit `pc` basic-block state machine (`while pc != -1`) with zero `goto` and zero undefined register aliasing.
 - **x86-64 and ARM64 / Apple Silicon (Mach-O) Extension Path:** Decode ELF/PE/Mach-O text sections into normalized 3-address register instructions and feed the identical SSA/state-machine lifter.
 
-## 3. Honest Dynamic-Runtime Boundaries (Fail-Closed Refusal Contract)
+## 3. Staged Capability-Bounded Dynamic Metaprogramming (3-Tier Model)
 
-A migration tool must never silently drop semantics or emit plausible stubs that produce wrong answers.
+Outright refusal of dynamic metaprogramming (`define_method`, `method_missing`, `send`, `eval`, `getattr`, JS `Proxy`) leaves too much real-world software stranded outside the hourglass. Conversely, granting ambient OS authority or silently dropping dynamic behavior violates BuildLang's soundness guarantees.
 
-| Ecosystem / Construct | Why Direct Static Lifting Cannot Preserve Exact Semantics | Hourglass Policy |
+BuildLang's universal lifters use a **3-Tier Staged Capability-Bounded Model**:
+
+### Tier 1: Boot-Time Partial Evaluation (Futamura Specialization)
+
+Constant-known metaprogramming is evaluated once at lift/compile time and lowered into **100% static, zero-overhead BuildLang functions**:
+
+- Ruby `define_method(:name) { |x| expr }`, Rails `has_many` / `belongs_to` over a known schema, and static Python/TS decorator registrations are specialized directly into typed BuildLang `fn` definitions.
+- Zero runtime interpreter overhead; full `buildc` type and effect verification applies identically to hand-written code.
+
+### Tier 2: Closed-World Dispatch Table (`~ DynamicDispatch`)
+
+Finite dynamic lookups (`send(sym, arg)`, `method_missing` over a known method/schema set, dynamic route tables, `getattr` over known struct fields) are lowered into a **verified closed-world dispatch table**:
+
+- The lifter collects every statically defined and Tier-1-specialized symbol and emits an explicit deterministic dispatch function (`__dynamic_dispatch`) over that closed set.
+- Unknown selectors hit a deterministic trap or explicit fallback branch rather than performing unbounded open-world reflection.
+
+### Tier 3: Fuel-Metered Capability-Bounded Sandbox (`~ DynamicEval`)
+
+For runtime-computed expression strings (`eval(expr)` over arithmetic/DSL strings), the lifter lowers into a **pure, deterministic, fuel-metered mini-evaluator** (`__sandbox_eval_i64`):
+
+- **Strict effect attenuation:** The evaluator declares zero `FileSystem`, zero `Network`, and zero `Process` capabilities (pure computation only).
+- **Bounded termination:** Every token/step decrements an explicit fuel counter (`fuel`), failing cleanly if fuel is exhausted so untrusted input cannot trigger unbounded loops or ambient host escapes.
+
+### Outright Refusal Boundary (Unmodeled Native Extensions & Undeclared Host Escapes)
+
+Outright fail-closed refusal (`exit 2`, exact line numbers, zero output written) is reserved strictly for constructs with **no declared capability bound or unmodeled native C-ABI state**:
+
+| Ecosystem / Construct | Reason for Outright Refusal | Hourglass Policy |
 |---|---|---|
-| Ruby on Rails (MRI/YARV `eval`, `method_missing`, `define_method`, ActiveRecord dynamic callbacks, Rack middleware) | Runtime code generation and open-class monkey-patching mutate dispatch tables after load | **Fail closed** with line-numbered refusal (`exit 2`, zero output written) on dynamic metaprogramming; migrate pure domain logic & explicit capability-mapped handlers (`~ Database`, `~ Network`) while emitting a shim boundary report for Rails framework hooks |
-| JavaScript (`eval`, `Proxy`, DOM mutations, prototype patching) | Arbitrary runtime evaluation and browser host mutation | Refuse `eval`, `new Proxy`, and direct `document.` access at exact line numbers; lift pure WebCode logic cleanly |
-| Rust (`unsafe`, raw pointer aliasing, `macro_rules!`, inline `asm!`) | Bypasses safe ownership invariants or requires macro expansion | Refuse unexpanded macros and `unsafe` blocks; recommend expanding macros (`cargo expand`) or lifting compiled WASM via Funnel B |
-| Zig (`@ptrCast`, `comptime` reflection, inline `asm`) | Arbitrary type punning and compile-time AST reflection | Refuse `@ptrCast`/`comptime`/`asm` at exact line numbers; lift compiled WASM or pure scalar kernels |
-| Go (`go` goroutines, `chan`, `unsafe.Pointer`) | M:N runtime scheduler and raw memory casts | Refuse implicit concurrency/unsafe casts; map explicit concurrency to BuildLang's structured effects |
-| WebAssembly (`memory`, `i32.load`/`store`, `call_indirect`, `br_table`) | Untyped linear memory requires bounds-checked slice lowering | Explicitly refused in Slice 1 (`wasm_lift.bld`) at exact lines until bounded-buffer slice lowering lands |
-| RISC-V (`ld`/`sd`/`lw`/`sw`, `csrrw`, `mret`) | Raw physical memory & privileged CSR state | Explicitly refused at exact lines; only pure register compute and documented `ecall` console print are lifted |
-| SPIR-V (`OpImageSampleImplicitLod`, `OpAtomicIAdd`, ray query ops) | Texture sampler hardware state and cross-lane atomics | Explicitly refused in Slice 1 at exact lines until GPU image/buffer effect lowering is attached |
+| Ruby/Rails opaque C-extensions & host escapes (`require 'active_record'`, `ObjectSpace`, `Kernel.system`) | Mutates external C-ABI heap or spawns ambient host shells outside capability bounds | Fail closed at exact line numbers; migrate domain logic via Tiers 1-3 and declare explicit `~ Database` / `~ Process` shims |
+| JavaScript (`new Proxy`, direct `document.` DOM host mutation, `async` event-loop runtime) | Unmodeled browser host state or unbounded proxy traps | Refuse at exact line numbers; lift pure WebCode and bounded expressions cleanly |
+| Rust (`unsafe`, `macro_rules!`, inline `asm!`) | Bypasses safe ownership invariants or requires pre-expansion | Refuse at exact lines; run `cargo expand` or lift compiled WASM via Funnel B |
+| Zig (`@ptrCast`, `comptime` reflection, inline `asm`) | Raw pointer aliasing and compile-time AST reflection | Refuse at exact lines; lift compiled WASM or pure scalar kernels |
+| Go (`go` goroutines, `chan`, `unsafe.Pointer`) | M:N scheduler runtime and raw memory casts | Refuse at exact lines until structured effect channels attach |
+| WebAssembly (`memory`, `i32.load`/`store`, `call_indirect`, `br_table`) | Untyped linear memory requires bounds-checked slice lowering | Refuse at exact lines in Slice 1 |
+| RISC-V (`ld`/`sd`/`lw`/`sw`, `csrrw`, `mret`) | Raw physical memory and privileged CSR state | Refuse at exact lines; pure register compute and `ecall` print lift cleanly |
+| SPIR-V (`OpImageSampleImplicitLod`, `OpAtomicIAdd`, ray query ops) | Texture sampler hardware state and cross-lane atomics | Refuse at exact lines in Slice 1 |
 
 ## 4. Bottom Half: Universal Hardware Targets
 

@@ -1,7 +1,7 @@
-# Dynamic Rails and Ruby metaprogramming must be refused
+# Unmodeled native C-ABI extensions and ambient host escapes must be refused
 require 'active_record'
 def demo
-    method_missing(:foo)
+    ObjectSpace.each_object
     x = 1
-    eval("x + 2")
+    Kernel.system("echo escape")
 end

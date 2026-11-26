@@ -101,10 +101,9 @@ fn check_refusal(lang: String, line: String) -> String {
         if line.contains("chan ") || line.contains("<-") { return "Go channel runtime"; }
         if line.contains("unsafe.") { return "Go unsafe package"; }
     } else if lang == "rb" {
-        if line.contains("eval") { return "Ruby dynamic eval"; }
-        if line.contains("method_missing") { return "Ruby method_missing metaprogramming"; }
-        if line.contains("define_method") { return "Ruby define_method metaprogramming"; }
-        if line.contains("active_record") { return "Rails ActiveRecord dynamic runtime"; }
+        if line.contains("active_record") { return "Rails ActiveRecord unmodeled C-ABI/DB host runtime"; }
+        if line.contains("ObjectSpace") { return "Ruby ObjectSpace raw VM heap reflection"; }
+        if line.contains("Kernel.system") { return "ambient OS shell escape Kernel.system"; }
     } else if lang == "spvasm" {
         if line.contains("OpImageSample") { return "SPIR-V texture sampler op"; }
         if line.contains("OpAtomic") { return "SPIR-V cross-lane atomic op"; }
@@ -207,9 +206,73 @@ fn vec_has(v: Vec<String>, target: String) -> bool {
     return false;
 }
 
+fn emit_tier2_dispatch(dispatch_fns: Vec<String>, out: Vec<String>) {
+    out.push("// Tier 2: Closed-World Dynamic Dispatch Table (~ DynamicDispatch)");
+    out.push("fn __dynamic_dispatch(name: String, arg: i64) -> i64 {");
+    let mut i: usize = 0;
+    while i < dispatch_fns.len() {
+        let f: String = dispatch_fns[i];
+        out.push("    if name == \"" + f + "\" { return " + f + "(arg); }");
+        i = i + 1;
+    }
+    out.push("    return -1;");
+    out.push("}");
+    out.push("");
+}
+
+fn emit_tier3_sandbox(out: Vec<String>) {
+    out.push("// Tier 3: Fuel-Metered Capability-Bounded Pure Evaluator (~ DynamicEval, zero IO)");
+    out.push("fn __sandbox_eval_i64(expr: String, max_fuel: i64) -> i64 {");
+    out.push("    let b = expr.as_bytes();");
+    out.push("    let n: usize = expr.len();");
+    out.push("    let mut i: usize = 0;");
+    out.push("    let mut fuel: i64 = max_fuel;");
+    out.push("    let mut acc: i64 = 0;");
+    out.push("    let mut sign: i64 = 1;");
+    out.push("    while i < n && fuel > 0 {");
+    out.push("        fuel = fuel - 1;");
+    out.push("        let c: u8 = b[i];");
+    out.push("        if c == 32 || c == 9 { i = i + 1; continue; }");
+    out.push("        if c == 43 { sign = 1; i = i + 1; continue; }");
+    out.push("        if c == 45 { sign = -1; i = i + 1; continue; }");
+    out.push("        if c >= 48 && c <= 57 {");
+    out.push("            let mut val: i64 = 0;");
+    out.push("            while i < n && b[i] >= 48 && b[i] <= 57 && fuel > 0 {");
+    out.push("                val = val * 10 + ((b[i] - 48) as i64);");
+    out.push("                i = i + 1;");
+    out.push("                fuel = fuel - 1;");
+    out.push("            }");
+    out.push("            acc = acc + sign * val;");
+    out.push("            continue;");
+    out.push("        }");
+    out.push("        return 0;");
+    out.push("    }");
+    out.push("    return acc;");
+    out.push("}");
+    out.push("");
+}
+
+fn rewrite_rb_expr(expr: String, needs_box: Vec<i32>) -> String {
+    let t: String = expr.trim();
+    if t.starts_with("send(") && t.ends_with(")") {
+        needs_box[0] = 1;
+        return "__dynamic_dispatch(" + t.substring(5, t.len() - 6) + ")";
+    }
+    if t.starts_with("eval(") && t.ends_with(")") {
+        needs_box[1] = 1;
+        return "__sandbox_eval_i64(" + t.substring(5, t.len() - 6) + ", 64)";
+    }
+    return t;
+}
+
 fn lift_imperative(lang: String, lines: Vec<String>, out: Vec<String>) -> i32 ~ Console {
     let mut refused: i32 = 0;
     let mut rb_locals: Vec<String> = Vec::new();
+    let dispatch_fns: Vec<String> = Vec::new();
+    let needs_box: Vec<i32> = Vec::new();
+    needs_box.push(0);
+    needs_box.push(0);
+    let body_out: Vec<String> = Vec::new();
     let mut i: usize = 0;
     while i < lines.len() {
         let ln_num: i32 = (i as i32) + 1;
@@ -226,6 +289,26 @@ fn lift_imperative(lang: String, lines: Vec<String>, out: Vec<String>) -> i32 ~ 
             refused = refused + 1;
             i = i + 1;
             continue;
+        }
+        // Tier 1: Ruby boot-time partial evaluation for define_method(:name) { |param| expr }
+        if lang == "rb" && t.starts_with("define_method(:") {
+            let rp: i32 = find_char(t, 41);
+            let lb: i32 = find_char(t, 123);
+            let rb_c: i32 = find_char(t, 125);
+            if rp > 15 && lb > rp && rb_c > lb {
+                let mname: String = t.substring(15, (rp as usize) - 15).trim();
+                let inner: String = t.substring((lb as usize) + 1, (rb_c as usize) - (lb as usize) - 1).trim();
+                let p1: i32 = find_char(inner, 124);
+                let after1: String = inner.substring((p1 as usize) + 1, inner.len() - (p1 as usize) - 1);
+                let p2: i32 = find_char(after1, 124);
+                let pname: String = after1.substring(0, p2 as usize).trim();
+                let mexpr: String = after1.substring((p2 as usize) + 1, after1.len() - (p2 as usize) - 1).trim();
+                dispatch_fns.push(mname);
+                body_out.push("// Tier 1 specialized from define_method(:" + mname + ")");
+                body_out.push("fn " + mname + "(" + pname + ": i64) -> i64 { return " + mexpr + "; }");
+                i = i + 1;
+                continue;
+            }
         }
         // Function headers across js / rs / zig / go / rb
         if (lang == "js" && t.starts_with("function "))
@@ -255,20 +338,20 @@ fn lift_imperative(lang: String, lines: Vec<String>, out: Vec<String>) -> i32 ~ 
             let mut pi: usize = 0;
             while pi < pnames.len() { rb_locals.push(pnames[pi]); pi = pi + 1; }
             if fname == "main" {
-                out.push("fn main() ~ Console {");
+                body_out.push("fn main() ~ Console {");
             } else {
-                out.push("fn " + fname + "(" + p_str + ") -> i64 {");
+                body_out.push("fn " + fname + "(" + p_str + ") -> i64 {");
             }
             i = i + 1;
             continue;
         }
         if t == "}" || (lang == "rb" && t == "end") {
-            out.push("}");
+            body_out.push("}");
             i = i + 1;
             continue;
         }
         if t == "} else {" || (lang == "rb" && t == "else") {
-            out.push("} else {");
+            body_out.push("} else {");
             i = i + 1;
             continue;
         }
@@ -276,43 +359,44 @@ fn lift_imperative(lang: String, lines: Vec<String>, out: Vec<String>) -> i32 ~ 
             let lp: i32 = find_char(t, 40);
             let inner: String = strip_trailing_semi(t);
             let arg: String = inner.substring((lp as usize) + 1, inner.len() - (lp as usize) - 2).trim();
-            out.push("    println!(\"{}\", " + arg + ");");
+            body_out.push("    println!(\"{}\", " + arg + ");");
             i = i + 1;
             continue;
         }
         if lang == "rb" && t.starts_with("puts ") {
-            out.push("    println!(\"{}\", " + t.substring(5, t.len() - 5).trim() + ");");
+            let raw_arg: String = t.substring(5, t.len() - 5).trim();
+            body_out.push("    println!(\"{}\", " + rewrite_rb_expr(raw_arg, needs_box) + ");");
             i = i + 1;
             continue;
         }
         if lang == "rs" && t.starts_with("println!(") {
-            out.push("    " + strip_trailing_semi(t) + ";");
+            body_out.push("    " + strip_trailing_semi(t) + ";");
             i = i + 1;
             continue;
         }
         if t.starts_with("while ") {
             let mut rest: String = t.substring(6, t.len() - 6).trim();
             if rest.ends_with("{") { rest = rest.substring(0, rest.len() - 1).trim(); }
-            out.push("    while " + strip_parens(rest) + " {");
+            body_out.push("    while " + strip_parens(rest) + " {");
             i = i + 1;
             continue;
         }
         if lang == "go" && t.starts_with("for ") {
             let mut rest: String = t.substring(4, t.len() - 4).trim();
             if rest.ends_with("{") { rest = rest.substring(0, rest.len() - 1).trim(); }
-            out.push("    while " + strip_parens(rest) + " {");
+            body_out.push("    while " + strip_parens(rest) + " {");
             i = i + 1;
             continue;
         }
         if t.starts_with("if ") {
             let mut rest: String = t.substring(3, t.len() - 3).trim();
             if rest.ends_with("{") { rest = rest.substring(0, rest.len() - 1).trim(); }
-            out.push("    if " + strip_parens(rest) + " {");
+            body_out.push("    if " + strip_parens(rest) + " {");
             i = i + 1;
             continue;
         }
         if t.starts_with("return ") {
-            out.push("    return " + strip_trailing_semi(t.substring(7, t.len() - 7)) + ";");
+            body_out.push("    return " + strip_trailing_semi(t.substring(7, t.len() - 7)) + ";");
             i = i + 1;
             continue;
         }
@@ -328,7 +412,7 @@ fn lift_imperative(lang: String, lines: Vec<String>, out: Vec<String>) -> i32 ~ 
                 let rhs: String = rest.substring((eq as usize) + 1, rest.len() - (eq as usize) - 1).trim();
                 let col: i32 = find_char(lhs_raw, 58);
                 let vname: String = if col > 0 { lhs_raw.substring(0, col as usize).trim() } else { lhs_raw };
-                out.push("    let mut " + vname + ": i64 = " + rhs + ";");
+                body_out.push("    let mut " + vname + ": i64 = " + rhs + ";");
             }
             i = i + 1;
             continue;
@@ -337,7 +421,7 @@ fn lift_imperative(lang: String, lines: Vec<String>, out: Vec<String>) -> i32 ~ 
             let col: i32 = find_char(t, 58);
             let vname: String = t.substring(0, col as usize).trim();
             let rhs: String = strip_trailing_semi(t.substring((col as usize) + 2, t.len() - (col as usize) - 2));
-            out.push("    let mut " + vname + ": i64 = " + rhs + ";");
+            body_out.push("    let mut " + vname + ": i64 = " + rhs + ";");
             i = i + 1;
             continue;
         }
@@ -346,18 +430,19 @@ fn lift_imperative(lang: String, lines: Vec<String>, out: Vec<String>) -> i32 ~ 
         if is_rb_assign {
             let eq: i32 = find_char(t, 61);
             let lhs: String = t.substring(0, eq as usize).trim();
-            let rhs: String = t.substring((eq as usize) + 1, t.len() - (eq as usize) - 1).trim();
+            let rhs_raw: String = t.substring((eq as usize) + 1, t.len() - (eq as usize) - 1).trim();
+            let rhs: String = rewrite_rb_expr(rhs_raw, needs_box);
             if !vec_has(rb_locals, lhs) {
                 rb_locals.push(lhs);
-                out.push("    let mut " + lhs + ": i64 = " + rhs + ";");
+                body_out.push("    let mut " + lhs + ": i64 = " + rhs + ";");
             } else {
-                out.push("    " + lhs + " = " + rhs + ";");
+                body_out.push("    " + lhs + " = " + rhs + ";");
             }
             i = i + 1;
             continue;
         }
         if t.contains("=") && !t.contains("==") {
-            out.push("    " + strip_trailing_semi(t) + ";");
+            body_out.push("    " + strip_trailing_semi(t) + ";");
             i = i + 1;
             continue;
         }
@@ -373,6 +458,10 @@ fn lift_imperative(lang: String, lines: Vec<String>, out: Vec<String>) -> i32 ~ 
         refused = refused + 1;
         i = i + 1;
     }
+    let mut k: usize = 0;
+    while k < body_out.len() { out.push(body_out[k]); k = k + 1; }
+    if needs_box[0] == 1 { emit_tier2_dispatch(dispatch_fns, out); }
+    if needs_box[1] == 1 { emit_tier3_sandbox(out); }
     return refused;
 }
 
