@@ -4,8 +4,13 @@
 # fails when a line here stops being true or a file fails that is not listed, so a fix to the
 # compiler or to a module has to remove its line.
 #
-# State on 2026-11-26 with buildc 1.15.0: 104 of 275 files pass and 171 fail
-# (1 lex, 21 parse, 149 types). Previously 91 of 272 passed and 181 failed;
+# State on 2026-11-26 with buildc 1.15.0: 106 of 276 files pass and 170 fail
+# (1 lex, 21 parse, 148 types). Previously 104 of 275 passed and 171 failed;
+# Wave 25D wired the V5 certified e-graph superoptimizer (`--superopt`,
+# `--emit-cert`, `buildc verify-cert`) into buildc across C, WGSL, MSL, and
+# RISC-V, added `Ptr(BuildString)` auto-deref for borrowed string methods
+# (`len`/`is_empty`), `Vec::first_mut`/`last_mut`, `Vec2::exp`/`Vec3::exp`,
+# and vector `length`/`distance` overloads, turning `nexus/sandbox.bld` green.
 # Wave 10B added sota_ml_physics_kernels.bld, vault_verifier.bld, and
 # null_cone_gravity_check.bld, plus compiler and stdlib support for PatternKind::RefBind,
 # float rem_euclid, Vec::clone/get_mut/retain, chunks/chunks_mut/zip loops,
@@ -98,7 +103,6 @@ nexus/networking.bld types
 nexus/persistence.bld types
 nexus/profiles.bld types
 nexus/registry.bld types
-nexus/sandbox.bld types
 nexus/scripting.bld types
 nexus/ui.bld types
 nova/lib.bld types

@@ -4552,7 +4552,10 @@ impl<'ctx> MirLowerer<'ctx> {
             ..
         } = &scrutinee.kind
         {
-            if matches!(method.name.as_ref(), "pop" | "get" | "first" | "last") {
+            if matches!(
+                method.name.as_ref(),
+                "pop" | "get" | "get_mut" | "first" | "first_mut" | "last" | "last_mut"
+            ) {
                 let recv_ty = self.infer_expr_type(receiver);
                 if let MirType::Vec(elem) = recv_ty {
                     return self.lower_vec_option_method(
@@ -4646,8 +4649,8 @@ impl<'ctx> MirLowerer<'ctx> {
         // Index of the element to read, and whether it exists.
         let idx = builder.create_local(MirType::i64());
         match (method, index) {
-            ("get", Some(i)) => builder.assign(idx, MirRValue::Use(i)),
-            ("last", _) | ("pop", _) => builder.binary_op(
+            ("get" | "get_mut", Some(i)) => builder.assign(idx, MirRValue::Use(i)),
+            ("last" | "last_mut", _) | ("pop", _) => builder.binary_op(
                 idx,
                 BinOp::Sub,
                 values::local(len),
@@ -5227,12 +5230,11 @@ impl<'ctx> MirLowerer<'ctx> {
                         MirType::Vec(e) => *e,
                         _ => MirType::i32(),
                     },
-                    "pop" | "pop_front" | "pop_back" | "first" | "last" | "front" | "back" => {
-                        match recv {
-                            MirType::Vec(e) => *e,
-                            _ => MirType::i32(),
-                        }
-                    }
+                    "pop" | "pop_front" | "pop_back" | "first" | "first_mut" | "last"
+                    | "last_mut" | "front" | "back" => match recv {
+                        MirType::Vec(e) => *e,
+                        _ => MirType::i32(),
+                    },
                     // Float methods that return the receiver's type.
                     "min" | "max" | "abs" | "sqrt" | "floor" | "ceil" | "round" | "trunc"
                     | "fract" | "signum" | "sin" | "cos" | "tan" | "exp" | "ln" | "powf"
@@ -6419,7 +6421,18 @@ impl<'ctx> MirLowerer<'ctx> {
         // String method calls: s.len(), s.is_empty(), s.starts_with(),
         // s.ends_with(), s.contains(), s.to_uppercase(), s.to_lowercase(),
         // s.trim(), s.split(), s.split_whitespace(), s.lines()
+        // Auto-dereference `&String` / `&&str` (`Ptr(BuildString)`) so string
+        // methods work uniformly on borrowed string values (e.g. from
+        // `parts.iter().enumerate()`).
         // =================================================================
+        let (receiver_val, receiver_ty) = match &receiver_ty {
+            MirType::Ptr(inner) if matches!(inner.as_ref(), MirType::Struct(n) if n.as_ref() == "BuildString") =>
+            {
+                let loaded = self.deref_if_pointer(receiver_val)?;
+                (loaded, inner.as_ref().clone())
+            }
+            _ => (receiver_val, receiver_ty),
+        };
         if let MirType::Struct(ref name) = receiver_ty {
             if name.as_ref() == "BuildString" {
                 let method_name = method.name.as_ref();

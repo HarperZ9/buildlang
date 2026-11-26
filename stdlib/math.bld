@@ -117,6 +117,9 @@ impl Vec2 {
     pub fn clamp(self, lo: Vec2, hi: Vec2) -> Vec2 {
         Vec2 { x: self.x.clamp(lo.x, hi.x), y: self.y.clamp(lo.y, hi.y) }
     }
+    pub fn exp(self) -> Vec2 {
+        Vec2 { x: self.x.exp(), y: self.y.exp() }
+    }
 }
 
 impl Add for Vec2 {
@@ -256,6 +259,9 @@ impl Vec3 {
             y: self.y.clamp(lo.y, hi.y),
             z: self.z.clamp(lo.z, hi.z),
         }
+    }
+    pub fn exp(self) -> Vec3 {
+        Vec3 { x: self.x.exp(), y: self.y.exp(), z: self.z.exp() }
     }
 }
 

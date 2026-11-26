@@ -329,7 +329,7 @@ fn build(
     std::fs::create_dir_all(&work).map_err(|e| fail(PkgError::io(&work, e)))?;
     write(&work.join("main.bld"), &input.source).map_err(fail)?;
 
-    crate::cmd_build(&work, release, emit, true, "c", stdio)?;
+    crate::cmd_build(&work, release, emit, true, "c", stdio, false, None)?;
 
     let mode = if release { "release" } else { "debug" };
     let built = work.join("target").join(mode);
