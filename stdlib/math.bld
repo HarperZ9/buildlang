@@ -532,7 +532,7 @@ impl Mat4 {
         let b11 = a22 * a33 - a23 * a32;
         let det = b00 * b11 - b01 * b10 + b02 * b09 + b03 * b08 - b04 * b07 + b05 * b06;
         if det == 0.0 {
-            return Mat4::IDENTITY;
+            return Mat4::identity();
         }
         let inv = 1.0 / det;
         Mat4 {
