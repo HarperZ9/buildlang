@@ -1,20 +1,134 @@
 // SPDX-FileCopyrightText: 2026 Zain Dana Harper
 // SPDX-License-Identifier: AGPL-3.0-only
 //
-// BuildLang Dogfood Native Workstation MCP Server & Governance Gate (Layer 3):
+// BuildLang Model- & Agent-Native Compiled SDK Server v2 (Layer 3):
 //   - Zero Python / Node runtime overhead; compiles directly to native machine code.
 //   - Effect-sandboxed capability row: ~ Console + FileSystem + Clock + Environment
 //     (compiler statically proves zero Network, zero Process, zero Foreign authority).
 //   - Speaks MCP JSON-RPC 2.0 over stdio (initialize, ping, tools/list, tools/call).
-//   - Tools:
-//       1. workstation_health       : native file/dir probe with nanosecond clock_ns() timing
-//       2. check_em_dash_and_secret : UTF-8 byte scanner for em/en dashes and secret markers
-//       3. anti_silo_preflight      : routes intents to flagship owner & refuses orphan silos
-//       4. audit_public_hygiene     : scans text/files for em dashes, client-bundled secret
-//                                     env prefixes, local drive paths, and retired brand names
+//   - 8 compact model-native tools returning structured envelopes:
+//     { ok, verdict, result, next_valid_actions, fnv1a_digest, elapsed_ns }
+//       1. sdk_manifest        : compact capability & schema discovery card across all 8 tools
+//       2. anti_silo_preflight : flagship owner router; refuses orphan silos (REFUSED_SILO)
+//       3. audit_public_hygiene: em/en dashes, local drive paths, bundler/raw secrets, retired id
+//       4. kcore_eval          : COL-001 sRGB, OPT-002 Fresnel, HASH-FNV, IEEE-754 checks
+//       5. procgen_sdf_eval    : exact SDF + normals, OPT-034 GGX/Smith + OPT-003, da Vinci pipe
+//       6. aerospace_gnc_eval  : Tsiolkovsky delta-V + 6-DOF ZEM/ZEV powered-descent guidance
+//       7. bitnet_ternary_dot  : zero-FP-multiply BitNet b1.58 ternary {-1, 0, +1} dot product
+//       8. receipt_verify_hash : canonical FNV-1a 64-bit digest verification (MATCH / DRIFT)
 //   - Run with `--self-test` for deterministic known-answer + planted-failure verification.
 
 mod json;
+
+// ---------------------------------------------------------------- Math & HASH-FNV (Pure ~ ())
+
+fn pi_val() -> f64 {
+    3.141592653589793
+}
+
+fn g0_std() -> f64 {
+    9.80665
+}
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 {
+        return -x;
+    }
+    x
+}
+
+fn max_f64(a: f64, b: f64) -> f64 {
+    if a > b {
+        return a;
+    }
+    b
+}
+
+fn min_f64(a: f64, b: f64) -> f64 {
+    if a < b {
+        return a;
+    }
+    b
+}
+
+struct V3 {
+    x: f64,
+    y: f64,
+    z: f64,
+}
+
+fn v3_len(v: V3) -> f64 {
+    sqrt(v.x * v.x + v.y * v.y + v.z * v.z)
+}
+
+fn v3_norm(v: V3) -> V3 {
+    let l: f64 = v3_len(v);
+    if l <= 1e-15 {
+        return V3 { x: 0.0, y: 1.0, z: 0.0 };
+    }
+    V3 { x: v.x / l, y: v.y / l, z: v.z / l }
+}
+
+fn fnv_start() -> u64 {
+    1469598103934665603
+}
+
+fn fnv_u8(h0: u64, b: u64) -> u64 {
+    (h0 ^ b).wrapping_mul(1099511628211)
+}
+
+fn fnv_str(s: str) -> u64 {
+    let b = s.as_bytes();
+    let n: usize = s.len();
+    let mut h: u64 = fnv_start();
+    let mut i: usize = 0;
+    while i < n {
+        h = fnv_u8(h, b[i] as u64);
+        i = i + 1;
+    }
+    h
+}
+
+fn fnv_f32_val(v: f64) -> u64 {
+    let bits: u32 = (v as f32).to_bits();
+    let mut h: u64 = fnv_start();
+    let mut k: u32 = 0;
+    while k < 4 {
+        h = fnv_u8(h, ((bits >> (8 * k)) & 255) as u64);
+        k = k + 1;
+    }
+    h
+}
+
+fn u64_to_hex16(v: u64) -> str {
+    let digits: str = "0123456789abcdef";
+    let mut out: str = "";
+    let mut i: u64 = 0;
+    while i < 16 {
+        let shift: u64 = (15 - i) * 4;
+        let nib: usize = ((v >> shift) & 15) as usize;
+        out = out + digits.substring(nib, 1);
+        i = i + 1;
+    }
+    out
+}
+
+fn u32_to_hex8(v: u32) -> str {
+    let digits: str = "0123456789abcdef";
+    let mut out: str = "";
+    let mut i: u32 = 0;
+    while i < 8 {
+        let shift: u32 = (7 - i) * 4;
+        let nib: usize = ((v >> shift) & 15) as usize;
+        out = out + digits.substring(nib, 1);
+        i = i + 1;
+    }
+    out
+}
+
+fn fnv_hex_str(s: str) -> str {
+    u64_to_hex16(fnv_str(s))
+}
 
 // ---------------------------------------------------------------- String & ASCII helpers
 
@@ -151,18 +265,9 @@ fn count_utf8_dash(s: str, third_byte: u8) -> i64 {
     count
 }
 
-// ---------------------------------------------------------------- Scanners (Pure ~ ())
+// ---------------------------------------------------------------- Public Hygiene Scanner (Pure ~ ())
 
-struct ScanReport {
-    em_dashes: i64,
-    en_dashes: i64,
-    secret_hits: i64,
-    bytes_scanned: i64,
-}
-
-fn scan_text(text: str) -> ScanReport {
-    let em: i64 = count_utf8_dash(text, 148);
-    let en: i64 = count_utf8_dash(text, 147);
+fn count_raw_secrets(text: str) -> i64 {
     let mut secrets: i64 = 0;
     secrets = secrets + count_pattern_bytes(text, "sk" + "_live_");
     secrets = secrets + count_pattern_bytes(text, "sk" + "_test_");
@@ -173,12 +278,7 @@ fn scan_text(text: str) -> ScanReport {
     secrets = secrets + count_pattern_bytes(text, "BEGIN " + "PRIVATE KEY");
     secrets = secrets + count_pattern_bytes(text, "api_" + "key=");
     secrets = secrets + count_pattern_bytes(text, "api_" + "key =");
-    ScanReport {
-        em_dashes: em,
-        en_dashes: en,
-        secret_hits: secrets,
-        bytes_scanned: text.len() as i64,
-    }
+    secrets
 }
 
 fn has_secret_keyword(ident: str) -> bool {
@@ -282,6 +382,7 @@ struct PublicHygieneReport {
     em_dashes: i64,
     en_dashes: i64,
     bundler_secrets: i64,
+    secret_hits: i64,
     local_paths: i64,
     retired_brand: i64,
     bytes_scanned: i64,
@@ -294,12 +395,14 @@ fn scan_public_hygiene(text: str) -> PublicHygieneReport {
     bsec = bsec + count_bundler_prefix(text, "VI" + "TE_");
     bsec = bsec + count_bundler_prefix(text, "NEXT_" + "PUBLIC_");
     bsec = bsec + count_bundler_prefix(text, "REACT_" + "APP_");
+    let raw_sec: i64 = count_raw_secrets(text);
     let lpaths: i64 = count_local_drive_paths(text);
     let retired: i64 = count_word_ci(text, "zen" + "tropy");
     PublicHygieneReport {
         em_dashes: em,
         en_dashes: en,
         bundler_secrets: bsec,
+        secret_hits: raw_sec,
         local_paths: lpaths,
         retired_brand: retired,
         bytes_scanned: text.len() as i64,
@@ -347,6 +450,8 @@ fn route_flagship(intent: str) -> FlagshipMatch {
     sf_kw.push("crt");
     sf_kw.push("superframe");
     sf_kw.push("kcore");
+    sf_kw.push("physai");
+    sf_kw.push("meshlet");
 
     let mut bl_kw: Vec<str> = Vec::new();
     bl_kw.push("buildlang");
@@ -376,6 +481,7 @@ fn route_flagship(intent: str) -> FlagshipMatch {
     fw_kw.push("emet");
     fw_kw.push("articulate");
     fw_kw.push("audit");
+    fw_kw.push("plexus");
 
     let mut cm_kw: Vec<str> = Vec::new();
     cm_kw.push("cmmns");
@@ -528,7 +634,229 @@ fn check_silo_path(target_path: str, flagship_id: str) -> SiloDecision {
     }
 }
 
-// ---------------------------------------------------------------- JSON-RPC / MCP responses
+// ---------------------------------------------------------------- Native Kernels (Pure ~ ())
+
+// COL-001: IEC 61966-2-1 sRGB transfer & inverse
+fn srgb_to_linear(v: f64) -> f64 {
+    if v <= 0.04045 {
+        return v / 12.92;
+    }
+    pow((v + 0.055) / 1.055, 2.4)
+}
+
+fn linear_to_srgb(lin: f64) -> f64 {
+    if lin <= 0.0031308 {
+        return lin * 12.92;
+    }
+    1.055 * pow(lin, 1.0 / 2.4) - 0.055
+}
+
+// OPT-002: Unpolarized dielectric Fresnel reflectance with TIR
+struct FresnelEval {
+    reflectance: f64,
+    transmittance: f64,
+    tir: bool,
+}
+
+fn fresnel_dielectric_eval(n1: f64, n2: f64, cos_i: f64) -> FresnelEval {
+    let sin2_i: f64 = max_f64(1.0 - cos_i * cos_i, 0.0);
+    let eta: f64 = n1 / n2;
+    let sin2_t: f64 = eta * eta * sin2_i;
+    if sin2_t >= 1.0 {
+        return FresnelEval {
+            reflectance: 1.0,
+            transmittance: 0.0,
+            tir: true,
+        };
+    }
+    let cos_t: f64 = sqrt(1.0 - sin2_t);
+    let rs_num: f64 = n1 * cos_i - n2 * cos_t;
+    let rs_den: f64 = n1 * cos_i + n2 * cos_t;
+    let rp_num: f64 = n1 * cos_t - n2 * cos_i;
+    let rp_den: f64 = n1 * cos_t + n2 * cos_i;
+    let rs: f64 = (rs_num / rs_den) * (rs_num / rs_den);
+    let rp: f64 = (rp_num / rp_den) * (rp_num / rp_den);
+    let r: f64 = 0.5 * (rs + rp);
+    FresnelEval {
+        reflectance: r,
+        transmittance: 1.0 - r,
+        tir: false,
+    }
+}
+
+// Exact SDF kit (matching procgen_forge.bld)
+fn sdf_rbox(p: V3, b: V3, r: f64) -> f64 {
+    let qx: f64 = abs_f64(p.x) - b.x;
+    let qy: f64 = abs_f64(p.y) - b.y;
+    let qz: f64 = abs_f64(p.z) - b.z;
+    let ox: f64 = max_f64(qx, 0.0);
+    let oy: f64 = max_f64(qy, 0.0);
+    let oz: f64 = max_f64(qz, 0.0);
+    let out_d: f64 = sqrt(ox * ox + oy * oy + oz * oz);
+    let in_d: f64 = min_f64(max_f64(qx, max_f64(qy, qz)), 0.0);
+    out_d + in_d - r
+}
+
+fn sdf_rcone(p: V3, h: f64, r1: f64, r2: f64) -> f64 {
+    let b: f64 = (r1 - r2) / h;
+    let a: f64 = sqrt(max_f64(1.0 - b * b, 0.0));
+    let qx: f64 = sqrt(p.x * p.x + p.z * p.z);
+    let qy: f64 = p.y;
+    let k: f64 = qx * (-b) + qy * a;
+    if k < 0.0 {
+        return sqrt(qx * qx + qy * qy) - r1;
+    }
+    if k > a * h {
+        let dy: f64 = qy - h;
+        return sqrt(qx * qx + dy * dy) - r2;
+    }
+    qx * a + qy * b - r1
+}
+
+fn sdf_torus(p: V3, maj: f64, min_r: f64) -> f64 {
+    let qx: f64 = sqrt(p.x * p.x + p.z * p.z) - maj;
+    sqrt(qx * qx + p.y * p.y) - min_r
+}
+
+fn sdf_smin_cubic(a: f64, b: f64, k: f64) -> f64 {
+    let h: f64 = max_f64(k - abs_f64(a - b), 0.0) / k;
+    min_f64(a, b) - h * h * h * k / 6.0
+}
+
+fn sdf_composite(p: V3) -> f64 {
+    let d_box: f64 = sdf_rbox(p, V3 { x: 0.6, y: 0.5, z: 0.4 }, 0.08);
+    let d_tor: f64 = sdf_torus(V3 { x: p.x - 0.25, y: p.y, z: p.z }, 0.55, 0.14);
+    let d_cone: f64 = sdf_rcone(V3 { x: p.x, y: p.y + 0.4, z: p.z }, 0.9, 0.22, 0.09);
+    let u0: f64 = sdf_smin_cubic(d_box, d_tor, 0.24);
+    sdf_smin_cubic(u0, d_cone, 0.18)
+}
+
+fn sdf_normal(p: V3) -> V3 {
+    let e: f64 = 1e-5;
+    let dx: f64 = sdf_composite(V3 { x: p.x + e, y: p.y, z: p.z })
+        - sdf_composite(V3 { x: p.x - e, y: p.y, z: p.z });
+    let dy: f64 = sdf_composite(V3 { x: p.x, y: p.y + e, z: p.z })
+        - sdf_composite(V3 { x: p.x, y: p.y - e, z: p.z });
+    let dz: f64 = sdf_composite(V3 { x: p.x, y: p.y, z: p.z + e })
+        - sdf_composite(V3 { x: p.x, y: p.y, z: p.z - e });
+    v3_norm(V3 { x: dx, y: dy, z: dz })
+}
+
+// OPT-034 GGX + Smith G2 + OPT-003 Conductor Fresnel + Da Vinci Pipe Model
+fn ggx_d(ndoth: f64, alpha: f64) -> f64 {
+    let a2: f64 = alpha * alpha;
+    let denom: f64 = ndoth * ndoth * (a2 - 1.0) + 1.0;
+    a2 / (pi_val() * denom * denom)
+}
+
+fn smith_g1_ggx(ndotv: f64, alpha: f64) -> f64 {
+    let a2: f64 = alpha * alpha;
+    (2.0 * ndotv) / (ndotv + sqrt(a2 + (1.0 - a2) * ndotv * ndotv))
+}
+
+fn smith_g2_ggx(ndotl: f64, ndotv: f64, alpha: f64) -> f64 {
+    smith_g1_ggx(ndotl, alpha) * smith_g1_ggx(ndotv, alpha)
+}
+
+fn fresnel_conductor(cos_i: f64, eta: f64, k: f64) -> f64 {
+    let cos2: f64 = cos_i * cos_i;
+    let sin2: f64 = max_f64(1.0 - cos2, 0.0);
+    let eta2: f64 = eta * eta;
+    let k2: f64 = k * k;
+    let t0: f64 = eta2 - k2 - sin2;
+    let a2_plus_b2: f64 = sqrt(t0 * t0 + 4.0 * eta2 * k2);
+    let t1: f64 = a2_plus_b2 + cos2;
+    let a: f64 = sqrt(max_f64(0.5 * (a2_plus_b2 + t0), 0.0));
+    let t2: f64 = 2.0 * a * cos_i;
+    let rs: f64 = (t1 - t2) / (t1 + t2);
+    let t3: f64 = cos2 * a2_plus_b2 + sin2 * sin2;
+    let t4: f64 = t2 * sin2;
+    let rp: f64 = rs * (t3 - t4) / (t3 + t4);
+    0.5 * (rs + rp)
+}
+
+fn pipe_parent_radius(r1: f64, r2: f64, r3: f64, p: f64) -> f64 {
+    pow(pow(r1, p) + pow(r2, p) + pow(r3, p), 1.0 / p)
+}
+
+// Aerospace GNC: Tsiolkovsky delta-V & 6-DOF ZEM/ZEV optimal descent acceleration
+fn tsiolkovsky_dv(isp: f64, m0: f64, mf: f64) -> f64 {
+    isp * g0_std() * log(m0 / mf)
+}
+
+fn clamp_thrust_and_gimbal(a: V3, a_min: f64, a_max: f64, max_tilt_tan: f64) -> V3 {
+    let az: f64 = max_f64(a.z, 0.5);
+    let horiz: f64 = sqrt(a.x * a.x + a.y * a.y);
+    let max_h: f64 = az * max_tilt_tan;
+    let mut ax: f64 = a.x;
+    let mut ay: f64 = a.y;
+    if horiz > max_h && horiz > 1e-12 {
+        let s: f64 = max_h / horiz;
+        ax = ax * s;
+        ay = ay * s;
+    }
+    let mag: f64 = sqrt(ax * ax + ay * ay + az * az);
+    if mag > a_max && mag > 1e-12 {
+        let s: f64 = a_max / mag;
+        return V3 { x: ax * s, y: ay * s, z: az * s };
+    }
+    if mag < a_min && mag > 1e-12 {
+        let s: f64 = a_min / mag;
+        return V3 { x: ax * s, y: ay * s, z: az * s };
+    }
+    V3 { x: ax, y: ay, z: az }
+}
+
+// BitNet b1.58 zero-FP-multiply ternary dot product over 2-bit packed bytes
+fn pack_4_ternary(c0: u64, c1: u64, c2: u64, c3: u64) -> u8 {
+    ((c0 & 3) | ((c1 & 3) << 2) | ((c2 & 3) << 4) | ((c3 & 3) << 6)) as u8
+}
+
+fn bitnet_dot_packed(packed: &Vec<u8>, x: &Vec<f64>, n_elems: usize) -> f64 {
+    let mut acc: f64 = 0.0;
+    let mut b_idx: usize = 0;
+    while b_idx < packed.len() {
+        let byte_val: u64 = packed[b_idx] as u64;
+        let base: usize = b_idx * 4;
+        let mut lane: usize = 0;
+        while lane < 4 && (base + lane) < n_elems {
+            let code: u64 = (byte_val >> (2 * (lane as u64))) & 3;
+            if code == 1 {
+                acc = acc + x[base + lane];
+            } else if code == 2 {
+                acc = acc - x[base + lane];
+            }
+            lane = lane + 1;
+        }
+        b_idx = b_idx + 1;
+    }
+    acc
+}
+
+// ---------------------------------------------------------------- JSON-RPC / Model-Native Envelopes
+
+fn valid_tool_names() -> Vec<str> {
+    let mut names: Vec<str> = Vec::new();
+    names.push("sdk_manifest");
+    names.push("anti_silo_preflight");
+    names.push("audit_public_hygiene");
+    names.push("kcore_eval");
+    names.push("procgen_sdf_eval");
+    names.push("aerospace_gnc_eval");
+    names.push("bitnet_ternary_dot");
+    names.push("receipt_verify_hash");
+    names
+}
+
+fn json_str_arr(items: &Vec<str>) -> str {
+    let mut q: Vec<str> = Vec::new();
+    let mut i: usize = 0;
+    while i < items.len() {
+        q.push(json_quote(items[i]));
+        i = i + 1;
+    }
+    json_arr(q)
+}
 
 fn rpc_ok(id_json: str, result_json: str) -> str {
     let mut ks: Vec<str> = Vec::new();
@@ -562,12 +890,38 @@ fn rpc_err(id_json: str, code: i64, message: str) -> str {
     json_obj(ks, vs)
 }
 
-fn error_payload(msg: str) -> str {
+fn rpc_unknown_tool_err(id_json: str, tool_name: str) -> str {
+    let valid: Vec<str> = valid_tool_names();
+    let mut dks: Vec<str> = Vec::new();
+    let mut dvs: Vec<str> = Vec::new();
+    dks.push("unknown_tool");
+    dvs.push(json_quote(tool_name));
+    dks.push("valid_tools");
+    dvs.push(json_str_arr(&valid));
+    dks.push("next_valid_actions");
+    let mut nexts: Vec<str> = Vec::new();
+    nexts.push("sdk_manifest");
+    dvs.push(json_str_arr(&nexts));
+
+    let msg: str = format!("unknown tool '{}'; call sdk_manifest or pick from valid_tools", tool_name);
     let mut eks: Vec<str> = Vec::new();
     let mut evs: Vec<str> = Vec::new();
-    eks.push("error");
+    eks.push("code");
+    evs.push("-32601");
+    eks.push("message");
     evs.push(json_quote(msg));
-    json_obj(eks, evs)
+    eks.push("data");
+    evs.push(json_obj(dks, dvs));
+
+    let mut ks: Vec<str> = Vec::new();
+    let mut vs: Vec<str> = Vec::new();
+    ks.push("jsonrpc");
+    vs.push(json_quote("2.0"));
+    ks.push("id");
+    vs.push(id_json);
+    ks.push("error");
+    vs.push(json_obj(eks, evs));
+    json_obj(ks, vs)
 }
 
 fn mcp_tool_result(payload_json: str, is_error: bool) -> str {
@@ -595,13 +949,67 @@ fn mcp_tool_result(payload_json: str, is_error: bool) -> str {
     json_obj(ks, vs)
 }
 
+fn sdk_envelope_ex(
+    ok: bool,
+    verdict: str,
+    result_json: str,
+    next_actions: &Vec<str>,
+    elapsed_ns: i64,
+    extra_ks: &Vec<str>,
+    extra_vs: &Vec<str>
+) -> str {
+    let digest: str = fnv_hex_str(result_json);
+    let mut ks: Vec<str> = Vec::new();
+    let mut vs: Vec<str> = Vec::new();
+    ks.push("ok");
+    if ok { vs.push("true"); } else { vs.push("false"); }
+    ks.push("verdict");
+    vs.push(json_quote(verdict));
+    ks.push("result");
+    vs.push(result_json);
+    ks.push("next_valid_actions");
+    vs.push(json_str_arr(next_actions));
+    ks.push("fnv1a_digest");
+    vs.push(json_quote(digest));
+    ks.push("elapsed_ns");
+    vs.push(format!("{}", elapsed_ns));
+    let mut i: usize = 0;
+    while i < extra_ks.len() {
+        ks.push(extra_ks[i]);
+        vs.push(extra_vs[i]);
+        i = i + 1;
+    }
+    json_obj(ks, vs)
+}
+
+fn sdk_envelope(
+    ok: bool,
+    verdict: str,
+    result_json: str,
+    next_actions: &Vec<str>,
+    elapsed_ns: i64
+) -> str {
+    let ek: Vec<str> = Vec::new();
+    let ev: Vec<str> = Vec::new();
+    sdk_envelope_ex(ok, verdict, result_json, next_actions, elapsed_ns, &ek, &ev)
+}
+
+fn sdk_error_result(msg: str, next_actions: &Vec<str>, elapsed_ns: i64) -> str {
+    let mut rks: Vec<str> = Vec::new();
+    let mut rvs: Vec<str> = Vec::new();
+    rks.push("error");
+    rvs.push(json_quote(msg));
+    let env: str = sdk_envelope(false, "ERROR", json_obj(rks, rvs), next_actions, elapsed_ns);
+    mcp_tool_result(env, true)
+}
+
 fn handle_initialize() -> str {
     let mut info_ks: Vec<str> = Vec::new();
     let mut info_vs: Vec<str> = Vec::new();
     info_ks.push("name");
     info_vs.push(json_quote("buildlang-workstation-mcp"));
     info_ks.push("version");
-    info_vs.push(json_quote("0.2.0"));
+    info_vs.push(json_quote("2.0.0"));
 
     let mut tcap_ks: Vec<str> = Vec::new();
     let mut tcap_vs: Vec<str> = Vec::new();
@@ -655,30 +1063,69 @@ fn tool_schema_obj(name: str, desc: str, props_json: str) -> str {
 }
 
 fn handle_tools_list() -> str {
-    let path_prop: str = "{\"path\":{\"type\":\"string\"}}";
-    let scan_prop: str = "{\"path\":{\"type\":\"string\"},\"text\":{\"type\":\"string\"}}";
-    let silo_prop: str = "{\"intent\":{\"type\":\"string\"},\"target_path\":{\"type\":\"string\"}}";
+    let manifest_p: str = "{\"category\":{\"type\":\"string\"}}";
+    let silo_p: str = "{\"intent\":{\"type\":\"string\"},\"target_path\":{\"type\":\"string\"}}";
+    let hyg_p: str = "{\"path\":{\"type\":\"string\"},\"text\":{\"type\":\"string\"}}";
+    let kcore_p: str = "{\"op\":{\"type\":\"string\"},\"value\":{\"type\":\"number\"},"
+        + "\"n1\":{\"type\":\"number\"},\"n2\":{\"type\":\"number\"},"
+        + "\"cos_i\":{\"type\":\"number\"},\"text\":{\"type\":\"string\"}}";
+    let sdf_p: str = "{\"x\":{\"type\":\"number\"},\"y\":{\"type\":\"number\"},"
+        + "\"z\":{\"type\":\"number\"},\"ndoth\":{\"type\":\"number\"},"
+        + "\"ndotl\":{\"type\":\"number\"},\"ndotv\":{\"type\":\"number\"},"
+        + "\"roughness\":{\"type\":\"number\"},\"r1\":{\"type\":\"number\"},"
+        + "\"r2\":{\"type\":\"number\"},\"r3\":{\"type\":\"number\"},"
+        + "\"pipe_exp\":{\"type\":\"number\"}}";
+    let gnc_p: str = "{\"isp\":{\"type\":\"number\"},\"m0\":{\"type\":\"number\"},"
+        + "\"mf\":{\"type\":\"number\"},\"px\":{\"type\":\"number\"},"
+        + "\"py\":{\"type\":\"number\"},\"pz\":{\"type\":\"number\"},"
+        + "\"vx\":{\"type\":\"number\"},\"vy\":{\"type\":\"number\"},"
+        + "\"vz\":{\"type\":\"number\"},\"t_go\":{\"type\":\"number\"},"
+        + "\"a_max\":{\"type\":\"number\"}}";
+    let bitnet_p: str = "{\"weights\":{\"type\":\"array\",\"items\":{\"type\":\"integer\"}},"
+        + "\"activations\":{\"type\":\"array\",\"items\":{\"type\":\"number\"}}}";
+    let rcpt_p: str = "{\"payload\":{\"type\":\"string\"},\"path\":{\"type\":\"string\"},"
+        + "\"expected_hex\":{\"type\":\"string\"},\"actual_hex\":{\"type\":\"string\"}}";
 
     let mut tools: Vec<str> = Vec::new();
     tools.push(tool_schema_obj(
-        "workstation_health",
-        "Inspect a workstation path natively with FileSystem and Clock capabilities.",
-        path_prop
-    ));
-    tools.push(tool_schema_obj(
-        "check_em_dash_and_secret",
-        "Scan text or a file natively for UTF-8 em/en dashes and credential leak markers.",
-        scan_prop
+        "sdk_manifest",
+        "Return compact model-native capability and schema discovery card across all 8 compiled SDK tools.",
+        manifest_p
     ));
     tools.push(tool_schema_obj(
         "anti_silo_preflight",
-        "Route an intent to its flagship owner and refuse orphan top-level silo paths.",
-        silo_prop
+        "Route target path and intent to its flagship owner; refuse orphan silo repos with REFUSED_SILO.",
+        silo_p
     ));
     tools.push(tool_schema_obj(
         "audit_public_hygiene",
-        "Audit text or a file for em dashes, client-bundled secret prefixes, local drive paths, and retired brand.",
-        scan_prop
+        "Scan text or file for em/en dashes, local drive paths, bundler or raw secret leaks, and retired ids.",
+        hyg_p
+    ));
+    tools.push(tool_schema_obj(
+        "kcore_eval",
+        "Evaluate COL-001 sRGB, OPT-002 dielectric Fresnel, HASH-FNV 64-bit, or IEEE-754 bit checks natively.",
+        kcore_p
+    ));
+    tools.push(tool_schema_obj(
+        "procgen_sdf_eval",
+        "Evaluate exact SDF distance and normal, OPT-034 GGX/Smith BRDF, and da Vinci Pipe Model natively.",
+        sdf_p
+    ));
+    tools.push(tool_schema_obj(
+        "aerospace_gnc_eval",
+        "Evaluate Tsiolkovsky delta-V and 6-DOF ZEM/ZEV powered-descent acceleration with gimbal clamp.",
+        gnc_p
+    ));
+    tools.push(tool_schema_obj(
+        "bitnet_ternary_dot",
+        "Compute zero-FP-multiply BitNet b1.58 ternary {-1, 0, +1} dot product against activation vector.",
+        bitnet_p
+    ));
+    tools.push(tool_schema_obj(
+        "receipt_verify_hash",
+        "Verify canonical FNV-1a 64-bit digest of payload, file, or digest hex, returning MATCH or DRIFT.",
+        rcpt_p
     ));
 
     let mut ks: Vec<str> = Vec::new();
@@ -687,6 +1134,8 @@ fn handle_tools_list() -> str {
     vs.push(json_arr(tools));
     json_obj(ks, vs)
 }
+
+// ---------------------------------------------------------------- Arg helpers
 
 fn extract_optional_str(args: Json, key: str, default_val: str) -> Result<str, str> {
     if !json_has(args, key) {
@@ -710,141 +1159,726 @@ fn load_scan_input(args: Json) -> Result<(str, str), str> ~ FileSystem {
     Err("pass either text or path")
 }
 
-fn tool_workstation_health(args: Json) -> str ~ FileSystem + Clock {
+fn manifest_entry(name: str, category: str, req_args: str, out_verdicts: str) -> str {
+    let mut ks: Vec<str> = Vec::new();
+    let mut vs: Vec<str> = Vec::new();
+    ks.push("name");
+    vs.push(json_quote(name));
+    ks.push("category");
+    vs.push(json_quote(category));
+    ks.push("inputs");
+    vs.push(json_quote(req_args));
+    ks.push("verdicts");
+    vs.push(json_quote(out_verdicts));
+    json_obj(ks, vs)
+}
+
+// ---------------------------------------------------------------- Tool 1: sdk_manifest
+
+fn tool_sdk_manifest(args: Json) -> str ~ Clock {
     let t0: i64 = clock_ns();
-    let target: str = match extract_optional_str(args, "path", ".") {
-        Ok(p) => p,
-        Err(e) => return mcp_tool_result(error_payload(e), true),
+    let mut nexts: Vec<str> = Vec::new();
+    nexts.push("anti_silo_preflight");
+    nexts.push("kcore_eval");
+    nexts.push("procgen_sdf_eval");
+    nexts.push("aerospace_gnc_eval");
+    nexts.push("bitnet_ternary_dot");
+    nexts.push("receipt_verify_hash");
+
+    let cat: str = match extract_optional_str(args, "category", "all") {
+        Ok(c) => to_lower_ascii(c),
+        Err(e) => return sdk_error_result(e, &nexts, clock_ns() - t0),
     };
-    let dir: bool = is_dir(target);
-    let exists: bool = file_exists(target) || dir;
-    let mut size: i64 = 0;
-    if exists && !dir {
-        size = file_size(target);
+
+    let mut cards: Vec<str> = Vec::new();
+    if cat == "all" || cat == "discovery" {
+        cards.push(manifest_entry("sdk_manifest", "discovery", "category?", "PASS"));
     }
-    let elapsed_ns: i64 = clock_ns() - t0;
+    if cat == "all" || cat == "governance" {
+        cards.push(manifest_entry("anti_silo_preflight", "governance", "intent,target_path?", "ALLOW|REFUSED_SILO"));
+        cards.push(manifest_entry("audit_public_hygiene", "governance", "text|path", "PASS|HYGIENE_FAIL"));
+    }
+    if cat == "all" || cat == "kernels" {
+        cards.push(manifest_entry("kcore_eval", "kernels", "op,value|n1,n2,cos_i|text", "PASS|ERROR"));
+        cards.push(manifest_entry(
+            "procgen_sdf_eval",
+            "kernels",
+            "x,y,z,ndoth,ndotl,ndotv,roughness,r1,r2,r3",
+            "PASS|ERROR"
+        ));
+        cards.push(manifest_entry(
+            "aerospace_gnc_eval",
+            "kernels",
+            "isp,m0,mf,px,py,pz,vx,vy,vz,t_go,a_max",
+            "PASS|ERROR"
+        ));
+        cards.push(manifest_entry("bitnet_ternary_dot", "kernels", "weights[],activations[]", "PASS|ERROR"));
+    }
+    if cat == "all" || cat == "receipts" {
+        cards.push(manifest_entry(
+            "receipt_verify_hash",
+            "receipts",
+            "payload|path|actual_hex,expected_hex?",
+            "MATCH|DRIFT|COMPUTED"
+        ));
+    }
 
-    let mut ks: Vec<str> = Vec::new();
-    let mut vs: Vec<str> = Vec::new();
-    ks.push("path");
-    vs.push(json_quote(target));
-    ks.push("exists");
-    if exists { vs.push("true"); } else { vs.push("false"); }
-    ks.push("is_dir");
-    if dir { vs.push("true"); } else { vs.push("false"); }
-    ks.push("bytes");
-    vs.push(format!("{}", size));
-    ks.push("elapsed_ns");
-    vs.push(format!("{}", elapsed_ns));
-    ks.push("runtime");
-    vs.push(json_quote("buildlang-native"));
-    mcp_tool_result(json_obj(ks, vs), false)
+    let mut rks: Vec<str> = Vec::new();
+    let mut rvs: Vec<str> = Vec::new();
+    rks.push("sdk_schema");
+    rvs.push(json_quote("buildlang-agent-sdk/2"));
+    rks.push("server_name");
+    rvs.push(json_quote("buildlang-workstation-mcp"));
+    rks.push("version");
+    rvs.push(json_quote("2.0.0"));
+    rks.push("runtime");
+    rvs.push(json_quote("buildlang-native"));
+    rks.push("effect_row");
+    rvs.push(json_quote("Console+FileSystem+Clock+Environment"));
+    rks.push("category_filter");
+    rvs.push(json_quote(cat));
+    rks.push("tool_count");
+    rvs.push(format!("{}", cards.len()));
+    rks.push("tools");
+    rvs.push(json_arr(cards));
+    let res_json: str = json_obj(rks, rvs);
+    let elapsed_ns: i64 = clock_ns() - t0;
+    mcp_tool_result(sdk_envelope(true, "PASS", res_json, &nexts, elapsed_ns), false)
 }
 
-fn tool_check_em_dash_and_secret(args: Json) -> str ~ FileSystem + Clock {
-    let t0: i64 = clock_ns();
-    let loaded: (str, str) = match load_scan_input(args) {
-        Ok(pair) => pair,
-        Err(e) => return mcp_tool_result(error_payload(e), true),
-    };
-    let report: ScanReport = scan_text(loaded.1);
-    let clean: bool = report.em_dashes == 0 && report.en_dashes == 0 && report.secret_hits == 0;
-    let elapsed_ns: i64 = clock_ns() - t0;
-
-    let mut ks: Vec<str> = Vec::new();
-    let mut vs: Vec<str> = Vec::new();
-    ks.push("clean");
-    if clean { vs.push("true"); } else { vs.push("false"); }
-    ks.push("source");
-    vs.push(json_quote(loaded.0));
-    ks.push("em_dashes");
-    vs.push(format!("{}", report.em_dashes));
-    ks.push("en_dashes");
-    vs.push(format!("{}", report.en_dashes));
-    ks.push("secret_hits");
-    vs.push(format!("{}", report.secret_hits));
-    ks.push("bytes_scanned");
-    vs.push(format!("{}", report.bytes_scanned));
-    ks.push("elapsed_ns");
-    vs.push(format!("{}", elapsed_ns));
-    mcp_tool_result(json_obj(ks, vs), false)
-}
+// ---------------------------------------------------------------- Tool 2: anti_silo_preflight
 
 fn tool_anti_silo_preflight(args: Json) -> str ~ Clock {
     let t0: i64 = clock_ns();
+    let mut err_next: Vec<str> = Vec::new();
+    err_next.push("sdk_manifest");
+    err_next.push("anti_silo_preflight");
+
     let intent: str = match field_str(args, "intent") {
         Ok(s) => s,
-        Err(e) => return mcp_tool_result(error_payload(e), true),
+        Err(e) => return sdk_error_result(e, &err_next, clock_ns() - t0),
     };
     let target_path: str = match extract_optional_str(args, "target_path", "") {
         Ok(p) => p,
-        Err(e) => return mcp_tool_result(error_payload(e), true),
+        Err(e) => return sdk_error_result(e, &err_next, clock_ns() - t0),
     };
     let owner: FlagshipMatch = route_flagship(intent);
     let silo: SiloDecision = check_silo_path(target_path, owner.id);
     let elapsed_ns: i64 = clock_ns() - t0;
 
-    let mut ks: Vec<str> = Vec::new();
-    let mut vs: Vec<str> = Vec::new();
-    ks.push("schema");
-    vs.push(json_quote("anti-silo-preflight/1"));
-    ks.push("intent");
-    vs.push(json_quote(intent));
-    ks.push("flagship_id");
-    vs.push(json_quote(owner.id));
-    ks.push("repo");
-    vs.push(json_quote(owner.repo));
-    ks.push("match_score");
-    vs.push(format!("{}", owner.score));
-    ks.push("silo_refused");
-    if silo.refused { vs.push("true"); } else { vs.push("false"); }
-    ks.push("exit_code");
-    vs.push(format!("{}", silo.exit_code));
-    ks.push("rule");
-    vs.push(json_quote(silo.rule));
-    ks.push("reason");
-    vs.push(json_quote(silo.reason));
-    ks.push("elapsed_ns");
-    vs.push(format!("{}", elapsed_ns));
-    mcp_tool_result(json_obj(ks, vs), false)
+    let mut rks: Vec<str> = Vec::new();
+    let mut rvs: Vec<str> = Vec::new();
+    rks.push("schema");
+    rvs.push(json_quote("anti-silo-preflight/1"));
+    rks.push("intent");
+    rvs.push(json_quote(intent));
+    rks.push("flagship_id");
+    rvs.push(json_quote(owner.id));
+    rks.push("repo");
+    rvs.push(json_quote(owner.repo));
+    rks.push("match_score");
+    rvs.push(format!("{}", owner.score));
+    rks.push("silo_refused");
+    if silo.refused { rvs.push("true"); } else { rvs.push("false"); }
+    rks.push("exit_code");
+    rvs.push(format!("{}", silo.exit_code));
+    rks.push("rule");
+    rvs.push(json_quote(silo.rule));
+    rks.push("reason");
+    rvs.push(json_quote(silo.reason));
+    let res_json: str = json_obj(rks, rvs);
+
+    let mut nexts: Vec<str> = Vec::new();
+    let mut verdict: str = "ALLOW";
+    if silo.refused {
+        verdict = "REFUSED_SILO";
+        nexts.push("anti_silo_preflight");
+        nexts.push("sdk_manifest");
+    } else {
+        nexts.push("audit_public_hygiene");
+        nexts.push("receipt_verify_hash");
+    }
+
+    // Top-level compatibility fields preserved alongside v2 canonical envelope
+    let mut eks: Vec<str> = Vec::new();
+    let mut evs: Vec<str> = Vec::new();
+    eks.push("flagship_id");
+    evs.push(json_quote(owner.id));
+    eks.push("silo_refused");
+    if silo.refused { evs.push("true"); } else { evs.push("false"); }
+    eks.push("exit_code");
+    evs.push(format!("{}", silo.exit_code));
+
+    let env: str = sdk_envelope_ex(!silo.refused, verdict, res_json, &nexts, elapsed_ns, &eks, &evs);
+    mcp_tool_result(env, false)
 }
+
+// ---------------------------------------------------------------- Tool 3: audit_public_hygiene
 
 fn tool_audit_public_hygiene(args: Json) -> str ~ FileSystem + Clock {
     let t0: i64 = clock_ns();
+    let mut err_next: Vec<str> = Vec::new();
+    err_next.push("sdk_manifest");
+    err_next.push("audit_public_hygiene");
+
     let loaded: (str, str) = match load_scan_input(args) {
         Ok(pair) => pair,
-        Err(e) => return mcp_tool_result(error_payload(e), true),
+        Err(e) => return sdk_error_result(e, &err_next, clock_ns() - t0),
     };
     let r: PublicHygieneReport = scan_public_hygiene(loaded.1);
     let clean: bool = r.em_dashes == 0
         && r.en_dashes == 0
         && r.bundler_secrets == 0
+        && r.secret_hits == 0
         && r.local_paths == 0
         && r.retired_brand == 0;
     let elapsed_ns: i64 = clock_ns() - t0;
 
-    let mut ks: Vec<str> = Vec::new();
-    let mut vs: Vec<str> = Vec::new();
-    ks.push("clean");
-    if clean { vs.push("true"); } else { vs.push("false"); }
-    ks.push("source");
-    vs.push(json_quote(loaded.0));
-    ks.push("em_dashes");
-    vs.push(format!("{}", r.em_dashes));
-    ks.push("en_dashes");
-    vs.push(format!("{}", r.en_dashes));
-    ks.push("bundler_secrets");
-    vs.push(format!("{}", r.bundler_secrets));
-    ks.push("local_paths");
-    vs.push(format!("{}", r.local_paths));
-    ks.push("retired_brand");
-    vs.push(format!("{}", r.retired_brand));
-    ks.push("bytes_scanned");
-    vs.push(format!("{}", r.bytes_scanned));
-    ks.push("elapsed_ns");
-    vs.push(format!("{}", elapsed_ns));
-    mcp_tool_result(json_obj(ks, vs), false)
+    let mut rks: Vec<str> = Vec::new();
+    let mut rvs: Vec<str> = Vec::new();
+    rks.push("clean");
+    if clean { rvs.push("true"); } else { rvs.push("false"); }
+    rks.push("source");
+    rvs.push(json_quote(loaded.0));
+    rks.push("em_dashes");
+    rvs.push(format!("{}", r.em_dashes));
+    rks.push("en_dashes");
+    rvs.push(format!("{}", r.en_dashes));
+    rks.push("bundler_secrets");
+    rvs.push(format!("{}", r.bundler_secrets));
+    rks.push("secret_hits");
+    rvs.push(format!("{}", r.secret_hits));
+    rks.push("local_paths");
+    rvs.push(format!("{}", r.local_paths));
+    rks.push("retired_brand");
+    rvs.push(format!("{}", r.retired_brand));
+    rks.push("bytes_scanned");
+    rvs.push(format!("{}", r.bytes_scanned));
+    let res_json: str = json_obj(rks, rvs);
+
+    let mut nexts: Vec<str> = Vec::new();
+    let mut verdict: str = "PASS";
+    if clean {
+        nexts.push("receipt_verify_hash");
+    } else {
+        verdict = "HYGIENE_FAIL";
+        nexts.push("audit_public_hygiene");
+    }
+
+    // Top-level compatibility fields preserved alongside v2 canonical envelope
+    let mut eks: Vec<str> = Vec::new();
+    let mut evs: Vec<str> = Vec::new();
+    eks.push("clean");
+    if clean { evs.push("true"); } else { evs.push("false"); }
+    eks.push("em_dashes");
+    evs.push(format!("{}", r.em_dashes));
+    eks.push("bundler_secrets");
+    evs.push(format!("{}", r.bundler_secrets));
+    eks.push("local_paths");
+    evs.push(format!("{}", r.local_paths));
+    eks.push("retired_brand");
+    evs.push(format!("{}", r.retired_brand));
+
+    let env: str = sdk_envelope_ex(clean, verdict, res_json, &nexts, elapsed_ns, &eks, &evs);
+    mcp_tool_result(env, false)
 }
+
+// ---------------------------------------------------------------- Tool 4: kcore_eval
+
+fn tool_kcore_eval(args: Json) -> str ~ Clock {
+    let t0: i64 = clock_ns();
+    let mut nexts: Vec<str> = Vec::new();
+    nexts.push("receipt_verify_hash");
+    nexts.push("kcore_eval");
+
+    let op: str = match extract_optional_str(args, "op", "col001_srgb") {
+        Ok(o) => to_lower_ascii(o),
+        Err(e) => return sdk_error_result(e, &nexts, clock_ns() - t0),
+    };
+
+    if op == "col001_srgb" {
+        let v: f64 = match field_f64_or(args, "value", 0.5) {
+            Ok(x) => x,
+            Err(e) => return sdk_error_result(e, &nexts, clock_ns() - t0),
+        };
+        if v < 0.0 || v > 1.0 {
+            return sdk_error_result("col001_srgb value must be in [0.0, 1.0]", &nexts, clock_ns() - t0);
+        }
+        let lin: f64 = srgb_to_linear(v);
+        let rt: f64 = linear_to_srgb(lin);
+        let err: f64 = abs_f64(rt - v);
+        let mut rks: Vec<str> = Vec::new();
+        let mut rvs: Vec<str> = Vec::new();
+        rks.push("op");
+        rvs.push(json_quote("col001_srgb"));
+        rks.push("formula_id");
+        rvs.push(json_quote("COL-001"));
+        rks.push("srgb_in");
+        rvs.push(v.to_json());
+        rks.push("linear_out");
+        rvs.push(lin.to_json());
+        rks.push("roundtrip_srgb");
+        rvs.push(rt.to_json());
+        rks.push("roundtrip_err");
+        rvs.push(err.to_json());
+        let env: str = sdk_envelope(true, "PASS", json_obj(rks, rvs), &nexts, clock_ns() - t0);
+        return mcp_tool_result(env, false);
+    }
+
+    if op == "opt002_fresnel" {
+        let n1: f64 = match field_f64_or(args, "n1", 1.0) {
+            Ok(x) => x,
+            Err(e) => return sdk_error_result(e, &nexts, clock_ns() - t0),
+        };
+        let n2: f64 = match field_f64_or(args, "n2", 1.5) {
+            Ok(x) => x,
+            Err(e) => return sdk_error_result(e, &nexts, clock_ns() - t0),
+        };
+        let cos_i: f64 = match field_f64_or(args, "cos_i", 1.0) {
+            Ok(x) => x,
+            Err(e) => return sdk_error_result(e, &nexts, clock_ns() - t0),
+        };
+        if n1 <= 0.0 || n2 <= 0.0 || cos_i < 0.0 || cos_i > 1.0 {
+            return sdk_error_result("opt002_fresnel requires n1>0, n2>0, 0<=cos_i<=1", &nexts, clock_ns() - t0);
+        }
+        let fe: FresnelEval = fresnel_dielectric_eval(n1, n2, cos_i);
+        let mut rks: Vec<str> = Vec::new();
+        let mut rvs: Vec<str> = Vec::new();
+        rks.push("op");
+        rvs.push(json_quote("opt002_fresnel"));
+        rks.push("formula_id");
+        rvs.push(json_quote("OPT-002"));
+        rks.push("n1");
+        rvs.push(n1.to_json());
+        rks.push("n2");
+        rvs.push(n2.to_json());
+        rks.push("cos_i");
+        rvs.push(cos_i.to_json());
+        rks.push("reflectance");
+        rvs.push(fe.reflectance.to_json());
+        rks.push("transmittance");
+        rvs.push(fe.transmittance.to_json());
+        rks.push("tir");
+        if fe.tir { rvs.push("true"); } else { rvs.push("false"); }
+        let env: str = sdk_envelope(true, "PASS", json_obj(rks, rvs), &nexts, clock_ns() - t0);
+        return mcp_tool_result(env, false);
+    }
+
+    if op == "hash_fnv" {
+        let text: str = match extract_optional_str(args, "text", "buildlang") {
+            Ok(s) => s,
+            Err(e) => return sdk_error_result(e, &nexts, clock_ns() - t0),
+        };
+        let h: u64 = fnv_str(text);
+        let mut rks: Vec<str> = Vec::new();
+        let mut rvs: Vec<str> = Vec::new();
+        rks.push("op");
+        rvs.push(json_quote("hash_fnv"));
+        rks.push("formula_id");
+        rvs.push(json_quote("HASH-FNV"));
+        rks.push("hash_hex");
+        rvs.push(json_quote(u64_to_hex16(h)));
+        rks.push("hash_u64");
+        rvs.push(json_quote(format!("{}", h)));
+        rks.push("byte_len");
+        rvs.push(format!("{}", text.len()));
+        let env: str = sdk_envelope(true, "PASS", json_obj(rks, rvs), &nexts, clock_ns() - t0);
+        return mcp_tool_result(env, false);
+    }
+
+    if op == "ieee754_check" {
+        let v: f64 = match field_f64_or(args, "value", 0.5) {
+            Ok(x) => x,
+            Err(e) => return sdk_error_result(e, &nexts, clock_ns() - t0),
+        };
+        let bits: u32 = (v as f32).to_bits();
+        let f_hash: u64 = fnv_f32_val(v);
+        let finite: bool = (bits & 2139095040) != 2139095040;
+        let mut rks: Vec<str> = Vec::new();
+        let mut rvs: Vec<str> = Vec::new();
+        rks.push("op");
+        rvs.push(json_quote("ieee754_check"));
+        rks.push("value");
+        rvs.push(v.to_json());
+        rks.push("f32_bits_hex");
+        rvs.push(json_quote(u32_to_hex8(bits)));
+        rks.push("fnv_f32_hex");
+        rvs.push(json_quote(u64_to_hex16(f_hash)));
+        rks.push("is_finite");
+        if finite { rvs.push("true"); } else { rvs.push("false"); }
+        let env: str = sdk_envelope(true, "PASS", json_obj(rks, rvs), &nexts, clock_ns() - t0);
+        return mcp_tool_result(env, false);
+    }
+
+    sdk_error_result(
+        "kcore_eval op must be one of col001_srgb, opt002_fresnel, hash_fnv, ieee754_check",
+        &nexts,
+        clock_ns() - t0
+    )
+}
+
+// ---------------------------------------------------------------- Tool 5: procgen_sdf_eval
+
+fn tool_procgen_sdf_eval(args: Json) -> str ~ Clock {
+    let t0: i64 = clock_ns();
+    let mut nexts: Vec<str> = Vec::new();
+    nexts.push("receipt_verify_hash");
+    nexts.push("procgen_sdf_eval");
+
+    let px: f64 = match field_f64_or(args, "x", 0.35) {
+        Ok(v) => v,
+        Err(e) => return sdk_error_result(e, &nexts, clock_ns() - t0),
+    };
+    let py: f64 = match field_f64_or(args, "y", 0.20) {
+        Ok(v) => v,
+        Err(e) => return sdk_error_result(e, &nexts, clock_ns() - t0),
+    };
+    let pz: f64 = match field_f64_or(args, "z", 0.15) {
+        Ok(v) => v,
+        Err(e) => return sdk_error_result(e, &nexts, clock_ns() - t0),
+    };
+    let ndoth: f64 = match field_f64_or(args, "ndoth", 0.85) {
+        Ok(v) => v,
+        Err(e) => return sdk_error_result(e, &nexts, clock_ns() - t0),
+    };
+    let ndotl: f64 = match field_f64_or(args, "ndotl", 0.70) {
+        Ok(v) => v,
+        Err(e) => return sdk_error_result(e, &nexts, clock_ns() - t0),
+    };
+    let ndotv: f64 = match field_f64_or(args, "ndotv", 0.80) {
+        Ok(v) => v,
+        Err(e) => return sdk_error_result(e, &nexts, clock_ns() - t0),
+    };
+    let rough: f64 = match field_f64_or(args, "roughness", 0.35) {
+        Ok(v) => v,
+        Err(e) => return sdk_error_result(e, &nexts, clock_ns() - t0),
+    };
+    let r1: f64 = match field_f64_or(args, "r1", 0.12) {
+        Ok(v) => v,
+        Err(e) => return sdk_error_result(e, &nexts, clock_ns() - t0),
+    };
+    let r2: f64 = match field_f64_or(args, "r2", 0.10) {
+        Ok(v) => v,
+        Err(e) => return sdk_error_result(e, &nexts, clock_ns() - t0),
+    };
+    let r3: f64 = match field_f64_or(args, "r3", 0.08) {
+        Ok(v) => v,
+        Err(e) => return sdk_error_result(e, &nexts, clock_ns() - t0),
+    };
+    let p_exp: f64 = match field_f64_or(args, "pipe_exp", 2.5) {
+        Ok(v) => v,
+        Err(e) => return sdk_error_result(e, &nexts, clock_ns() - t0),
+    };
+
+    if rough < 0.0 || rough > 1.0 {
+        return sdk_error_result("roughness must be in [0.0, 1.0]", &nexts, clock_ns() - t0);
+    }
+    if p_exp <= 0.0 || r1 < 0.0 || r2 < 0.0 || r3 < 0.0 {
+        return sdk_error_result("pipe_exp must be > 0 and child radii >= 0", &nexts, clock_ns() - t0);
+    }
+    if ndoth <= 0.0 || ndoth > 1.0 || ndotl <= 0.0 || ndotl > 1.0 || ndotv <= 0.0 || ndotv > 1.0 {
+        return sdk_error_result("ndoth, ndotl, ndotv must be in (0.0, 1.0]", &nexts, clock_ns() - t0);
+    }
+
+    let p = V3 { x: px, y: py, z: pz };
+    let dist: f64 = sdf_composite(p);
+    let nrm: V3 = sdf_normal(p);
+    let alpha: f64 = max_f64(rough * rough, 0.001);
+    let d_ggx: f64 = ggx_d(ndoth, alpha);
+    let g2: f64 = smith_g2_ggx(ndotl, ndotv, alpha);
+    let f_au: f64 = fresnel_conductor(ndotv, 0.18, 3.0);
+    let pipe_r: f64 = pipe_parent_radius(r1, r2, r3, p_exp);
+
+    let mut rks: Vec<str> = Vec::new();
+    let mut rvs: Vec<str> = Vec::new();
+    rks.push("sdf_dist");
+    rvs.push(dist.to_json());
+    rks.push("normal_x");
+    rvs.push(nrm.x.to_json());
+    rks.push("normal_y");
+    rvs.push(nrm.y.to_json());
+    rks.push("normal_z");
+    rvs.push(nrm.z.to_json());
+    rks.push("ggx_d");
+    rvs.push(d_ggx.to_json());
+    rks.push("smith_g2");
+    rvs.push(g2.to_json());
+    rks.push("fresnel_gold");
+    rvs.push(f_au.to_json());
+    rks.push("pipe_parent_r");
+    rvs.push(pipe_r.to_json());
+    let env: str = sdk_envelope(true, "PASS", json_obj(rks, rvs), &nexts, clock_ns() - t0);
+    mcp_tool_result(env, false)
+}
+
+// ---------------------------------------------------------------- Tool 6: aerospace_gnc_eval
+
+fn tool_aerospace_gnc_eval(args: Json) -> str ~ Clock {
+    let t0: i64 = clock_ns();
+    let mut nexts: Vec<str> = Vec::new();
+    nexts.push("receipt_verify_hash");
+    nexts.push("aerospace_gnc_eval");
+
+    let isp: f64 = match field_f64_or(args, "isp", 311.0) {
+        Ok(v) => v,
+        Err(e) => return sdk_error_result(e, &nexts, clock_ns() - t0),
+    };
+    let m0: f64 = match field_f64_or(args, "m0", 549000.0) {
+        Ok(v) => v,
+        Err(e) => return sdk_error_result(e, &nexts, clock_ns() - t0),
+    };
+    let mf: f64 = match field_f64_or(args, "mf", 137000.0) {
+        Ok(v) => v,
+        Err(e) => return sdk_error_result(e, &nexts, clock_ns() - t0),
+    };
+    let px: f64 = match field_f64_or(args, "px", 120.0) {
+        Ok(v) => v,
+        Err(e) => return sdk_error_result(e, &nexts, clock_ns() - t0),
+    };
+    let py: f64 = match field_f64_or(args, "py", -60.0) {
+        Ok(v) => v,
+        Err(e) => return sdk_error_result(e, &nexts, clock_ns() - t0),
+    };
+    let pz: f64 = match field_f64_or(args, "pz", 1500.0) {
+        Ok(v) => v,
+        Err(e) => return sdk_error_result(e, &nexts, clock_ns() - t0),
+    };
+    let vx: f64 = match field_f64_or(args, "vx", -8.0) {
+        Ok(v) => v,
+        Err(e) => return sdk_error_result(e, &nexts, clock_ns() - t0),
+    };
+    let vy: f64 = match field_f64_or(args, "vy", 4.0) {
+        Ok(v) => v,
+        Err(e) => return sdk_error_result(e, &nexts, clock_ns() - t0),
+    };
+    let vz: f64 = match field_f64_or(args, "vz", -90.0) {
+        Ok(v) => v,
+        Err(e) => return sdk_error_result(e, &nexts, clock_ns() - t0),
+    };
+    let t_go: f64 = match field_f64_or(args, "t_go", 32.0) {
+        Ok(v) => v,
+        Err(e) => return sdk_error_result(e, &nexts, clock_ns() - t0),
+    };
+    let a_max: f64 = match field_f64_or(args, "a_max", 35.0) {
+        Ok(v) => v,
+        Err(e) => return sdk_error_result(e, &nexts, clock_ns() - t0),
+    };
+
+    if isp <= 0.0 || m0 <= 0.0 || mf <= 0.0 || m0 <= mf {
+        return sdk_error_result("requires isp > 0 and m0 > mf > 0", &nexts, clock_ns() - t0);
+    }
+    if t_go <= 0.0 || a_max <= 2.0 {
+        return sdk_error_result("requires t_go > 0 and a_max > 2.0", &nexts, clock_ns() - t0);
+    }
+
+    let dv: f64 = tsiolkovsky_dv(isp, m0, mf);
+    let gz: f64 = -g0_std();
+    let zem_x: f64 = -(px + vx * t_go);
+    let zem_y: f64 = -(py + vy * t_go);
+    let zem_z: f64 = -(pz + vz * t_go + 0.5 * gz * t_go * t_go);
+    let zev_x: f64 = -vx;
+    let zev_y: f64 = -vy;
+    let zev_z: f64 = -(vz + gz * t_go);
+    let inv_t: f64 = 1.0 / t_go;
+    let inv_t2: f64 = inv_t * inv_t;
+    let a_raw = V3 {
+        x: 6.0 * zem_x * inv_t2 - 2.0 * zev_x * inv_t,
+        y: 6.0 * zem_y * inv_t2 - 2.0 * zev_y * inv_t,
+        z: 6.0 * zem_z * inv_t2 - 2.0 * zev_z * inv_t,
+    };
+    let max_tan: f64 = 0.466307658;
+    let a_cmd: V3 = clamp_thrust_and_gimbal(a_raw, 2.0, a_max, max_tan);
+    let thrust_mag: f64 = v3_len(a_cmd);
+    let gimbal_tan: f64 = sqrt(a_cmd.x * a_cmd.x + a_cmd.y * a_cmd.y) / max_f64(a_cmd.z, 1e-9);
+    let gimbal_ok: bool = gimbal_tan <= max_tan + 1e-6;
+
+    let mut rks: Vec<str> = Vec::new();
+    let mut rvs: Vec<str> = Vec::new();
+    rks.push("delta_v_mps");
+    rvs.push(dv.to_json());
+    rks.push("mass_ratio");
+    rvs.push((m0 / mf).to_json());
+    rks.push("a_cmd_x");
+    rvs.push(a_cmd.x.to_json());
+    rks.push("a_cmd_y");
+    rvs.push(a_cmd.y.to_json());
+    rks.push("a_cmd_z");
+    rvs.push(a_cmd.z.to_json());
+    rks.push("thrust_mag");
+    rvs.push(thrust_mag.to_json());
+    rks.push("gimbal_tan");
+    rvs.push(gimbal_tan.to_json());
+    rks.push("within_gimbal_cone");
+    if gimbal_ok { rvs.push("true"); } else { rvs.push("false"); }
+    let env: str = sdk_envelope(true, "PASS", json_obj(rks, rvs), &nexts, clock_ns() - t0);
+    mcp_tool_result(env, false)
+}
+
+// ---------------------------------------------------------------- Tool 7: bitnet_ternary_dot
+
+fn tool_bitnet_ternary_dot(args: Json) -> str ~ Clock {
+    let t0: i64 = clock_ns();
+    let mut nexts: Vec<str> = Vec::new();
+    nexts.push("receipt_verify_hash");
+    nexts.push("bitnet_ternary_dot");
+
+    let w_items: Vec<Json> = match field_items(args, "weights") {
+        Ok(v) => v,
+        Err(e) => return sdk_error_result(e, &nexts, clock_ns() - t0),
+    };
+    let x_items: Vec<Json> = match field_items(args, "activations") {
+        Ok(v) => v,
+        Err(e) => return sdk_error_result(e, &nexts, clock_ns() - t0),
+    };
+    let n: usize = w_items.len();
+    if n == 0 || n != x_items.len() {
+        return sdk_error_result(
+            "weights and activations must be non-empty arrays of equal length",
+            &nexts,
+            clock_ns() - t0
+        );
+    }
+
+    let mut codes: Vec<u64> = Vec::new();
+    let mut xs: Vec<f64> = Vec::new();
+    let mut nz: i64 = 0;
+    let mut i: usize = 0;
+    while i < n {
+        let wi: i64 = match json_i64(w_items[i]) {
+            Ok(v) => v,
+            Err(e) => return sdk_error_result(e, &nexts, clock_ns() - t0),
+        };
+        let xi: f64 = match json_f64(x_items[i]) {
+            Ok(v) => v,
+            Err(e) => return sdk_error_result(e, &nexts, clock_ns() - t0),
+        };
+        if wi == 0 {
+            codes.push(0);
+        } else if wi == 1 {
+            codes.push(1);
+            nz = nz + 1;
+        } else if wi == -1 {
+            codes.push(2);
+            nz = nz + 1;
+        } else {
+            return sdk_error_result("BitNet ternary weights must be strictly in {-1, 0, +1}", &nexts, clock_ns() - t0);
+        }
+        xs.push(xi);
+        i = i + 1;
+    }
+
+    let mut packed: Vec<u8> = Vec::new();
+    let mut p_idx: usize = 0;
+    while p_idx < n {
+        let c0: u64 = codes[p_idx];
+        let mut c1: u64 = 0;
+        let mut c2: u64 = 0;
+        let mut c3: u64 = 0;
+        if p_idx + 1 < n { c1 = codes[p_idx + 1]; }
+        if p_idx + 2 < n { c2 = codes[p_idx + 2]; }
+        if p_idx + 3 < n { c3 = codes[p_idx + 3]; }
+        packed.push(pack_4_ternary(c0, c1, c2, c3));
+        p_idx = p_idx + 4;
+    }
+
+    let dot: f64 = bitnet_dot_packed(&packed, &xs, n);
+    let mut rks: Vec<str> = Vec::new();
+    let mut rvs: Vec<str> = Vec::new();
+    rks.push("dot");
+    rvs.push(dot.to_json());
+    rks.push("length");
+    rvs.push(format!("{}", n));
+    rks.push("nonzero_weights");
+    rvs.push(format!("{}", nz));
+    rks.push("packed_bytes");
+    rvs.push(format!("{}", packed.len()));
+    rks.push("fp_multiplies");
+    rvs.push("0");
+    let env: str = sdk_envelope(true, "PASS", json_obj(rks, rvs), &nexts, clock_ns() - t0);
+    mcp_tool_result(env, false)
+}
+
+// ---------------------------------------------------------------- Tool 8: receipt_verify_hash
+
+fn tool_receipt_verify_hash(args: Json) -> str ~ FileSystem + Clock {
+    let t0: i64 = clock_ns();
+    let mut nexts: Vec<str> = Vec::new();
+    nexts.push("receipt_verify_hash");
+    nexts.push("sdk_manifest");
+
+    let mut source: str = "";
+    let mut computed_hex: str = "";
+    let mut bytes_hashed: i64 = 0;
+
+    if json_has(args, "actual_hex") {
+        let ah: str = match field_str(args, "actual_hex") {
+            Ok(s) => to_lower_ascii(trim_crlf(s)),
+            Err(e) => return sdk_error_result(e, &nexts, clock_ns() - t0),
+        };
+        source = "digest";
+        computed_hex = ah;
+        bytes_hashed = ah.len() as i64;
+    } else if json_has(args, "payload") {
+        let p: str = match field_str(args, "payload") {
+            Ok(s) => s,
+            Err(e) => return sdk_error_result(e, &nexts, clock_ns() - t0),
+        };
+        source = "payload";
+        computed_hex = fnv_hex_str(p);
+        bytes_hashed = p.len() as i64;
+    } else if json_has(args, "path") {
+        let fp: str = match field_str(args, "path") {
+            Ok(s) => s,
+            Err(e) => return sdk_error_result(e, &nexts, clock_ns() - t0),
+        };
+        if !file_exists(fp) {
+            return sdk_error_result("file not found", &nexts, clock_ns() - t0);
+        }
+        let body: str = read_file(fp);
+        source = "file";
+        computed_hex = fnv_hex_str(body);
+        bytes_hashed = body.len() as i64;
+    } else {
+        return sdk_error_result("pass payload, path, or actual_hex", &nexts, clock_ns() - t0);
+    }
+
+    let expected_raw: str = match extract_optional_str(args, "expected_hex", "") {
+        Ok(s) => to_lower_ascii(trim_crlf(s)),
+        Err(e) => return sdk_error_result(e, &nexts, clock_ns() - t0),
+    };
+
+    let mut verdict: str = "COMPUTED";
+    let mut ok: bool = true;
+    let mut matched: bool = true;
+    if expected_raw.len() > 0 {
+        if computed_hex == expected_raw {
+            verdict = "MATCH";
+            ok = true;
+            matched = true;
+        } else {
+            verdict = "DRIFT";
+            ok = false;
+            matched = false;
+        }
+    }
+
+    let mut rks: Vec<str> = Vec::new();
+    let mut rvs: Vec<str> = Vec::new();
+    rks.push("source");
+    rvs.push(json_quote(source));
+    rks.push("computed_hex");
+    rvs.push(json_quote(computed_hex));
+    rks.push("expected_hex");
+    rvs.push(json_quote(expected_raw));
+    rks.push("matched");
+    if matched { rvs.push("true"); } else { rvs.push("false"); }
+    rks.push("bytes_hashed");
+    rvs.push(format!("{}", bytes_hashed));
+    let env: str = sdk_envelope(ok, verdict, json_obj(rks, rvs), &nexts, clock_ns() - t0);
+    mcp_tool_result(env, false)
+}
+
+// ---------------------------------------------------------------- JSON-RPC dispatch
 
 fn handle_tools_call(id_json: str, params: Json) -> str ~ FileSystem + Clock {
     let tool_name: str = match field_str(params, "name") {
@@ -855,11 +1889,8 @@ fn handle_tools_call(id_json: str, params: Json) -> str ~ FileSystem + Clock {
         Ok(a) => a,
         Err(_) => empty_json_obj(),
     };
-    if tool_name == "workstation_health" {
-        return rpc_ok(id_json, tool_workstation_health(args));
-    }
-    if tool_name == "check_em_dash_and_secret" {
-        return rpc_ok(id_json, tool_check_em_dash_and_secret(args));
+    if tool_name == "sdk_manifest" {
+        return rpc_ok(id_json, tool_sdk_manifest(args));
     }
     if tool_name == "anti_silo_preflight" {
         return rpc_ok(id_json, tool_anti_silo_preflight(args));
@@ -867,7 +1898,22 @@ fn handle_tools_call(id_json: str, params: Json) -> str ~ FileSystem + Clock {
     if tool_name == "audit_public_hygiene" {
         return rpc_ok(id_json, tool_audit_public_hygiene(args));
     }
-    rpc_err(id_json, -32602, format!("unknown tool: {}", tool_name))
+    if tool_name == "kcore_eval" {
+        return rpc_ok(id_json, tool_kcore_eval(args));
+    }
+    if tool_name == "procgen_sdf_eval" {
+        return rpc_ok(id_json, tool_procgen_sdf_eval(args));
+    }
+    if tool_name == "aerospace_gnc_eval" {
+        return rpc_ok(id_json, tool_aerospace_gnc_eval(args));
+    }
+    if tool_name == "bitnet_ternary_dot" {
+        return rpc_ok(id_json, tool_bitnet_ternary_dot(args));
+    }
+    if tool_name == "receipt_verify_hash" {
+        return rpc_ok(id_json, tool_receipt_verify_hash(args));
+    }
+    rpc_unknown_tool_err(id_json, tool_name)
 }
 
 fn handle_mcp_line(line: str) -> str ~ FileSystem + Clock {
@@ -929,57 +1975,60 @@ fn call_req(id: i64, name: str, args_json: str) -> str {
     head + format!("{}", id) + mid + json_quote(name) + ",\"arguments\":" + args_json + "}}"
 }
 
-fn run_wave2_tool_tests() -> i32 ~ Console + FileSystem + Clock {
+fn run_kernel_tool_tests() -> i32 ~ Console + FileSystem + Clock {
     let mut failures: i32 = 0;
 
-    // 10. anti_silo_preflight routes shader/optics intent to superframe and accepts flagship path
-    let ok_path: str = "C" + ":/dev/public/superframe/packages/kernels/kcore";
-    let sf_args: str = "{\"intent\":\"add HLSL shader optics kernel\",\"target_path\":"
-        + json_quote(ok_path) + "}";
-    let r_sf: str = handle_mcp_line(call_req(10, "anti_silo_preflight", sf_args));
-    failures = failures + assert_contains("silo_route_superframe", r_sf, "\"flagship_id\":\"superframe\"");
-    failures = failures + assert_contains("silo_allow_flagship_path", r_sf, "\"silo_refused\":false");
+    // Tool 4: kcore_eval (COL-001, OPT-002, HASH-FNV)
+    let r_col: str = handle_mcp_line(call_req(20, "kcore_eval", "{\"op\":\"col001_srgb\",\"value\":0.5}"));
+    failures = failures + assert_contains("kcore_col001_pass", r_col, "\"verdict\":\"PASS\"");
+    failures = failures + assert_contains("kcore_col001_val", r_col, "0.21404114048");
 
-    // 11. anti_silo_preflight routes compiler intent to buildlang
-    let bl_args: str = "{\"intent\":\"fix buildc parser effect row\"}";
-    let r_bl: str = handle_mcp_line(call_req(11, "anti_silo_preflight", bl_args));
-    failures = failures + assert_contains("silo_route_buildlang", r_bl, "\"flagship_id\":\"buildlang\"");
+    let opt_args: str = "{\"op\":\"opt002_fresnel\",\"n1\":1.0,\"n2\":1.5,\"cos_i\":1.0}";
+    let r_opt: str = handle_mcp_line(call_req(21, "kcore_eval", opt_args));
+    failures = failures + assert_contains("kcore_opt002_f0", r_opt, "\"reflectance\":0.04");
 
-    // 12. Planted silo control 1: orphan folder under public workspace root MUST be refused (exit_code 3)
-    let bad_pub: str = "C" + ":/dev/public/rogue-new-silo/app.py";
-    let bp_args: str = "{\"intent\":\"build new verify tool\",\"target_path\":"
-        + json_quote(bad_pub) + "}";
-    let r_bp: str = handle_mcp_line(call_req(12, "anti_silo_preflight", bp_args));
-    failures = failures + assert_contains("planted_silo_public_refused", r_bp, "\"silo_refused\":true");
-    failures = failures + assert_contains("planted_silo_public_exit3", r_bp, "\"exit_code\":3");
+    let r_fnv: str = handle_mcp_line(call_req(22, "kcore_eval", "{\"op\":\"hash_fnv\",\"text\":\"\"}"));
+    failures = failures + assert_contains("kcore_fnv_offset_basis", r_fnv, "1469598103934665603");
 
-    // 13. Planted silo control 2: orphan folder under top-level dev root MUST be refused (exit_code 3)
-    let bad_dev: str = "C" + ":/dev/orphan-scratch-repo/main.py";
-    let bd_args: str = "{\"intent\":\"add recall helper\",\"target_path\":"
-        + json_quote(bad_dev) + "}";
-    let r_bd: str = handle_mcp_line(call_req(13, "anti_silo_preflight", bd_args));
-    failures = failures + assert_contains("planted_silo_cdev_refused", r_bd, "\"silo_refused\":true");
+    // Tool 5: procgen_sdf_eval + planted negative roughness control
+    let sdf_args: str = "{\"x\":0.35,\"y\":0.2,\"z\":0.15,\"roughness\":0.35}";
+    let r_sdf: str = handle_mcp_line(call_req(23, "procgen_sdf_eval", sdf_args));
+    failures = failures + assert_contains("procgen_sdf_pass", r_sdf, "\"verdict\":\"PASS\"");
+    failures = failures + assert_contains("procgen_sdf_digest", r_sdf, "\"fnv1a_digest\":\"");
 
-    // 14. audit_public_hygiene accepts clean public prose
-    let hyg_clean: str = "{\"text\":\"Deterministic BuildLang kernels verified via SHA-256 receipts.\"}";
-    let r_hc: str = handle_mcp_line(call_req(14, "audit_public_hygiene", hyg_clean));
-    failures = failures + assert_contains("hygiene_clean_pass", r_hc, "\"clean\":true");
+    let r_sdf_bad: str = handle_mcp_line(call_req(24, "procgen_sdf_eval", "{\"roughness\":-0.1}"));
+    failures = failures + assert_contains("planted_procgen_neg_roughness", r_sdf_bad, "\"verdict\":\"ERROR\"");
 
-    // 15. Planted hygiene controls: em dash + bundler secrets + local drive paths + retired brand
-    let planted_blob: str = format!("bad {} ", 8212 as char)
-        + "VI" + "TE_API_KEY "
-        + "NEXT_" + "PUBLIC_SECRET_TOKEN "
-        + "C" + ":\\dev\\notes "
-        + "E" + ":/wt/test "
-        + "H" + ":\\library "
-        + "Zen" + "tropy";
-    let hyg_bad: str = "{\"text\":" + json_quote(planted_blob) + "}";
-    let r_hb: str = handle_mcp_line(call_req(15, "audit_public_hygiene", hyg_bad));
-    failures = failures + assert_contains("planted_hygiene_not_clean", r_hb, "\"clean\":false");
-    failures = failures + assert_contains("planted_hygiene_em", r_hb, "\"em_dashes\":1");
-    failures = failures + assert_contains("planted_hygiene_bundler", r_hb, "\"bundler_secrets\":2");
-    failures = failures + assert_contains("planted_hygiene_paths", r_hb, "\"local_paths\":3");
-    failures = failures + assert_contains("planted_hygiene_retired", r_hb, "\"retired_brand\":1");
+    // Tool 6: aerospace_gnc_eval + planted inverted mass ratio control
+    let gnc_args: str = "{\"isp\":311.0,\"m0\":549000.0,\"mf\":137000.0,\"t_go\":32.0}";
+    let r_gnc: str = handle_mcp_line(call_req(25, "aerospace_gnc_eval", gnc_args));
+    failures = failures + assert_contains("aerospace_gnc_pass", r_gnc, "\"verdict\":\"PASS\"");
+    failures = failures + assert_contains("aerospace_gnc_gimbal", r_gnc, "\"within_gimbal_cone\":true");
+
+    let gnc_bad_args: str = "{\"isp\":311.0,\"m0\":100.0,\"mf\":200.0}";
+    let r_gnc_bad: str = handle_mcp_line(call_req(26, "aerospace_gnc_eval", gnc_bad_args));
+    failures = failures + assert_contains("planted_gnc_inverted_mass", r_gnc_bad, "\"verdict\":\"ERROR\"");
+
+    // Tool 7: bitnet_ternary_dot + planted non-ternary weight control
+    let bn_args: str = "{\"weights\":[1,-1,0,1,-1,1],\"activations\":[2.5,1.0,9.0,0.5,-3.0,4.0]}";
+    let r_bn: str = handle_mcp_line(call_req(27, "bitnet_ternary_dot", bn_args));
+    failures = failures + assert_contains("bitnet_dot_exact", r_bn, "\"dot\":9");
+    failures = failures + assert_contains("bitnet_zero_fp_mul", r_bn, "\"fp_multiplies\":0");
+
+    let bn_bad: str = "{\"weights\":[1,2,0],\"activations\":[1.0,2.0,3.0]}";
+    let r_bn_bad: str = handle_mcp_line(call_req(28, "bitnet_ternary_dot", bn_bad));
+    failures = failures + assert_contains("planted_bitnet_bad_weight", r_bn_bad, "\"verdict\":\"ERROR\"");
+
+    // Tool 8: receipt_verify_hash MATCH + planted DRIFT control
+    let expected: str = fnv_hex_str("canonical-receipt-payload");
+    let rc_ok_args: str = "{\"payload\":\"canonical-receipt-payload\",\"expected_hex\":"
+        + json_quote(expected) + "}";
+    let r_rc_ok: str = handle_mcp_line(call_req(29, "receipt_verify_hash", rc_ok_args));
+    failures = failures + assert_contains("receipt_verify_match", r_rc_ok, "\"verdict\":\"MATCH\"");
+
+    let rc_bad_args: str = "{\"payload\":\"canonical-receipt-payload\",\"expected_hex\":\"0000000000000000\"}";
+    let r_rc_bad: str = handle_mcp_line(call_req(30, "receipt_verify_hash", rc_bad_args));
+    failures = failures + assert_contains("planted_receipt_drift", r_rc_bad, "\"verdict\":\"DRIFT\"");
 
     failures
 }
@@ -991,6 +2040,7 @@ fn run_self_test() -> i32 ~ Console + FileSystem + Clock {
         + "\"params\":{\"protocolVersion\":\"2025-06-18\"}}";
     let r_init: str = handle_mcp_line(init_req);
     failures = failures + assert_contains("mcp_initialize", r_init, "buildlang-workstation-mcp");
+    failures = failures + assert_contains("mcp_version_v2", r_init, "\"version\":\"2.0.0\"");
 
     let notif_req: str = "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}";
     let r_notif: str = handle_mcp_line(notif_req);
@@ -1003,41 +2053,71 @@ fn run_self_test() -> i32 ~ Console + FileSystem + Clock {
 
     let list_req: str = "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\"}";
     let r_list: str = handle_mcp_line(list_req);
-    failures = failures + assert_contains("mcp_tools_list_health", r_list, "workstation_health");
-    failures = failures + assert_contains("mcp_tools_list_gate", r_list, "check_em_dash_and_secret");
-    failures = failures + assert_contains("mcp_tools_list_silo", r_list, "anti_silo_preflight");
-    failures = failures + assert_contains("mcp_tools_list_hygiene", r_list, "audit_public_hygiene");
+    failures = failures + assert_contains("list_sdk_manifest", r_list, "sdk_manifest");
+    failures = failures + assert_contains("list_anti_silo", r_list, "anti_silo_preflight");
+    failures = failures + assert_contains("list_hygiene", r_list, "audit_public_hygiene");
+    failures = failures + assert_contains("list_kcore", r_list, "kcore_eval");
+    failures = failures + assert_contains("list_procgen", r_list, "procgen_sdf_eval");
+    failures = failures + assert_contains("list_gnc", r_list, "aerospace_gnc_eval");
+    failures = failures + assert_contains("list_bitnet", r_list, "bitnet_ternary_dot");
+    failures = failures + assert_contains("list_receipt", r_list, "receipt_verify_hash");
 
-    let r_health: str = handle_mcp_line(call_req(3, "workstation_health", "{\"path\":\".\"}"));
-    failures = failures + assert_contains("mcp_health_dir_exists", r_health, "\"exists\":true");
-    failures = failures + assert_contains("mcp_health_is_dir", r_health, "\"is_dir\":true");
+    // Tool 1: sdk_manifest
+    let r_man: str = handle_mcp_line(call_req(3, "sdk_manifest", "{}"));
+    failures = failures + assert_contains("sdk_manifest_count_8", r_man, "\"tool_count\":8");
+    failures = failures + assert_contains("sdk_manifest_next", r_man, "\"next_valid_actions\"");
 
-    let clean_args: str = "{\"text\":\"Clean ASCII prose with hyphens - zero leaks.\"}";
-    let r_clean: str = handle_mcp_line(call_req(4, "check_em_dash_and_secret", clean_args));
-    failures = failures + assert_contains("mcp_scan_clean", r_clean, "\"clean\":true");
+    // Tool 2: anti_silo_preflight ALLOW + planted REFUSED_SILO
+    let ok_path: str = "C" + ":/dev/public/superframe/packages/kernels/kcore";
+    let sf_args: str = "{\"intent\":\"add HLSL shader optics kernel\",\"target_path\":"
+        + json_quote(ok_path) + "}";
+    let r_sf: str = handle_mcp_line(call_req(10, "anti_silo_preflight", sf_args));
+    failures = failures + assert_contains("silo_route_superframe", r_sf, "\"flagship_id\":\"superframe\"");
+    failures = failures + assert_contains("silo_verdict_allow", r_sf, "\"verdict\":\"ALLOW\"");
 
-    let planted_em: str = format!("bad {} dash", 8212 as char);
-    let em_args: str = "{\"text\":" + json_quote(planted_em) + "}";
-    let r_em: str = handle_mcp_line(call_req(5, "check_em_dash_and_secret", em_args));
-    failures = failures + assert_contains("planted_control_em_dash_clean_false", r_em, "\"clean\":false");
-    failures = failures + assert_contains("planted_control_em_dash_count", r_em, "\"em_dashes\":1");
+    let bad_pub: str = "C" + ":/dev/public/rogue-new-silo/app.py";
+    let bp_args: str = "{\"intent\":\"build new verify tool\",\"target_path\":"
+        + json_quote(bad_pub) + "}";
+    let r_bp: str = handle_mcp_line(call_req(11, "anti_silo_preflight", bp_args));
+    failures = failures + assert_contains("planted_silo_refused_verdict", r_bp, "\"verdict\":\"REFUSED_SILO\"");
+    failures = failures + assert_contains("planted_silo_exit3", r_bp, "\"exit_code\":3");
 
-    let planted_sec: str = "demo " + "sk" + "_live_12345678 and " + "ghp" + "_abcdef987654";
-    let sec_args: str = "{\"text\":" + json_quote(planted_sec) + "}";
-    let r_sec: str = handle_mcp_line(call_req(6, "check_em_dash_and_secret", sec_args));
-    failures = failures + assert_contains("planted_control_secret_clean_false", r_sec, "\"clean\":false");
-    failures = failures + assert_contains("planted_control_secret_hits", r_sec, "\"secret_hits\":2");
+    // Tool 3: audit_public_hygiene PASS + planted HYGIENE_FAIL
+    let hyg_clean: str = "{\"text\":\"Deterministic BuildLang kernels verified via SHA-256 receipts.\"}";
+    let r_hc: str = handle_mcp_line(call_req(12, "audit_public_hygiene", hyg_clean));
+    failures = failures + assert_contains("hygiene_clean_pass", r_hc, "\"verdict\":\"PASS\"");
 
+    let planted_blob: str = format!("bad {} ", 8212 as char)
+        + "VI" + "TE_API_KEY "
+        + "NEXT_" + "PUBLIC_SECRET_TOKEN "
+        + "sk" + "_live_12345678 "
+        + "C" + ":\\dev\\notes "
+        + "E" + ":/wt/test "
+        + "Zen" + "tropy";
+    let hyg_bad: str = "{\"text\":" + json_quote(planted_blob) + "}";
+    let r_hb: str = handle_mcp_line(call_req(13, "audit_public_hygiene", hyg_bad));
+    failures = failures + assert_contains("planted_hygiene_fail_verdict", r_hb, "\"verdict\":\"HYGIENE_FAIL\"");
+    failures = failures + assert_contains("planted_hygiene_em", r_hb, "\"em_dashes\":1");
+    failures = failures + assert_contains("planted_hygiene_bundler", r_hb, "\"bundler_secrets\":2");
+    failures = failures + assert_contains("planted_hygiene_raw_sec", r_hb, "\"secret_hits\":1");
+    failures = failures + assert_contains("planted_hygiene_paths", r_hb, "\"local_paths\":2");
+    failures = failures + assert_contains("planted_hygiene_retired", r_hb, "\"retired_brand\":1");
+
+    // Planted protocol controls: parse error (-32700), unknown method (-32601), unknown tool (-32601 + suggestions)
     let r_parse: str = handle_mcp_line("{broken json");
     failures = failures + assert_contains("planted_control_parse_error", r_parse, "-32700");
 
-    let r_method: str = handle_mcp_line("{\"jsonrpc\":\"2.0\",\"id\":9,\"method\":\"unknown/op\"}");
+    let r_method: str = handle_mcp_line("{\"jsonrpc\":\"2.0\",\"id\":14,\"method\":\"unknown/op\"}");
     failures = failures + assert_contains("planted_control_unknown_method", r_method, "-32601");
 
-    failures = failures + run_wave2_tool_tests();
+    let r_utool: str = handle_mcp_line(call_req(15, "nonexistent_tool", "{}"));
+    failures = failures + assert_contains("planted_control_unknown_tool_code", r_utool, "-32601");
+    failures = failures + assert_contains("planted_control_unknown_tool_suggestions", r_utool, "\"valid_tools\"");
+
+    failures = failures + run_kernel_tool_tests();
 
     if failures == 0 {
-        println!("[PASS] workstation_mcp summary failures=0");
+        println!("[PASS] workstation_mcp summary failures=0 tools=8");
     } else {
         println!("[FAIL] workstation_mcp summary failures={}", failures);
     }

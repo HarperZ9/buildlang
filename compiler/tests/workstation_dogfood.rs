@@ -1,6 +1,6 @@
 //! Dogfood verification for `universe/workstation/kcore_fast.bld` (12 verified
 //! FORMULAS.tsv equations) and `universe/workstation/workstation_mcp.bld`
-//! (4 native MCP JSON-RPC 2.0 tools including anti-silo & public-hygiene gates).
+//! (8 compact model-native MCP JSON-RPC 2.0 Agent SDK v2 tools).
 //!
 //! Runs `buildc check`, `buildc lint`, and `buildc run --release` on both
 //! modules, verifies multi-thread `par_for` bit-exact determinism at 1 and 2
@@ -141,6 +141,10 @@ fn workstation_mcp_checks_lints_passes_self_test_and_serves_stdio_jsonrpc() {
         format!(
             r#"{{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{{"name":"audit_public_hygiene","arguments":{{"path":"{readme}"}}}}}}"#
         ),
+        r#"{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"bitnet_ternary_dot","arguments":{"weights":[1,-1,0,1],"activations":[2.0,0.5,9.0,1.5]}}}"#
+            .to_string(),
+        r#"{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"unknown_sdk_tool","arguments":{}}}"#
+            .to_string(),
     ];
     {
         let stdin = child.stdin.as_mut().expect("piped stdin");
@@ -156,19 +160,24 @@ fn workstation_mcp_checks_lints_passes_self_test_and_serves_stdio_jsonrpc() {
     );
     let stdout = String::from_utf8_lossy(&out.stdout).replace("\r\n", "\n");
     let lines: Vec<&str> = stdout.lines().filter(|l| !l.trim().is_empty()).collect();
-    assert_eq!(lines.len(), 4, "expected 4 JSON-RPC responses:\n{stdout}");
+    assert_eq!(lines.len(), 6, "expected 6 JSON-RPC responses:\n{stdout}");
 
     let init: serde_json::Value = serde_json::from_str(lines[0]).expect("init json");
     assert_eq!(
         init["result"]["serverInfo"]["name"],
         "buildlang-workstation-mcp"
     );
+    assert_eq!(init["result"]["serverInfo"]["version"], "2.0.0");
 
     let list: serde_json::Value = serde_json::from_str(lines[1]).expect("list json");
-    assert_eq!(list["result"]["tools"].as_array().map(Vec::len), Some(4));
+    assert_eq!(list["result"]["tools"].as_array().map(Vec::len), Some(8));
 
     let silo: serde_json::Value = serde_json::from_str(lines[2]).expect("silo json");
     assert_eq!(silo["result"]["isError"], false);
+    assert_eq!(
+        silo["result"]["structuredContent"]["verdict"],
+        "REFUSED_SILO"
+    );
     assert_eq!(
         silo["result"]["structuredContent"]["flagship_id"],
         "superframe"
@@ -178,10 +187,29 @@ fn workstation_mcp_checks_lints_passes_self_test_and_serves_stdio_jsonrpc() {
 
     let hyg: serde_json::Value = serde_json::from_str(lines[3]).expect("hygiene json");
     assert_eq!(hyg["result"]["isError"], false);
+    assert_eq!(hyg["result"]["structuredContent"]["verdict"], "PASS");
     assert_eq!(hyg["result"]["structuredContent"]["clean"], true);
     assert_eq!(hyg["result"]["structuredContent"]["em_dashes"], 0);
     assert_eq!(hyg["result"]["structuredContent"]["bundler_secrets"], 0);
     assert_eq!(hyg["result"]["structuredContent"]["local_paths"], 0);
     assert_eq!(hyg["result"]["structuredContent"]["retired_brand"], 0);
+
+    let bitnet: serde_json::Value = serde_json::from_str(lines[4]).expect("bitnet json");
+    assert_eq!(bitnet["result"]["structuredContent"]["ok"], true);
+    assert_eq!(
+        bitnet["result"]["structuredContent"]["result"]["dot"].as_f64(),
+        Some(3.0)
+    );
+    assert_eq!(
+        bitnet["result"]["structuredContent"]["result"]["fp_multiplies"],
+        0
+    );
+
+    let unk: serde_json::Value = serde_json::from_str(lines[5]).expect("unknown tool json");
+    assert_eq!(unk["error"]["code"], -32601);
+    assert_eq!(
+        unk["error"]["data"]["valid_tools"].as_array().map(Vec::len),
+        Some(8)
+    );
     assert!(Path::new(&readme).is_file());
 }
