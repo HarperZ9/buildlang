@@ -18,6 +18,28 @@ use std::sync::Arc;
 
 use super::ty::*;
 
+/// Receiver key for operator trait implementations (`Add`, `Mul`, etc.).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum OperatorTarget {
+    Adt(DefId),
+    Int(IntTy),
+    Float(FloatTy),
+    Bool,
+}
+
+impl OperatorTarget {
+    pub fn from_ty(ty: &Ty) -> Option<Self> {
+        match &ty.kind {
+            TyKind::Adt(def_id, _) => Some(Self::Adt(*def_id)),
+            TyKind::Int(it) => Some(Self::Int(*it)),
+            TyKind::Float(ft) => Some(Self::Float(*ft)),
+            TyKind::Bool => Some(Self::Bool),
+            TyKind::Ref(_, _, inner) => Self::from_ty(inner),
+            _ => None,
+        }
+    }
+}
+
 /// The type context holds all type information during type checking.
 #[derive(Debug)]
 pub struct TypeContext {
@@ -63,11 +85,15 @@ pub struct TypeContext {
     /// multiple types in different modules share the same name.
     inherent_methods: HashMap<(DefId, Arc<str>), TraitMethod>,
 
-    /// Operator implementations of user types: `(type, method)` to the type
-    /// of the right operand (`None` for unary minus) and the result type.
-    /// `impl Mul<f32> for Vec3 { fn mul(self, s: f32) -> Vec3 }` is stored
-    /// under `(Vec3, "mul")` as `(Some(f32), Vec3)`.
-    operator_methods: HashMap<(DefId, Arc<str>), (Option<Ty>, Ty)>,
+    /// Associated constants: (type_def_id, const_name) → constant type.
+    assoc_consts: HashMap<(DefId, Arc<str>), Ty>,
+
+    /// Operator implementations keyed by `(receiver, method)` to all `(rhs, ret)`
+    /// overloads (`rhs` is `None` for unary minus). Storing a list preserves
+    /// multiple overloads on one receiver (e.g. `impl Mul<f32> for Vec3` and
+    /// `impl Mul<Vec3> for Vec3`, or `impl Mul<Vec4> for Mat4` and `impl Mul<Mat4> for Mat4`),
+    /// as well as primitive left-hand sides like `impl Mul<Vec3> for f32`.
+    operator_methods: HashMap<(OperatorTarget, Arc<str>), Vec<(Option<Ty>, Ty)>>,
 
     /// Type parameter trait bounds: param_name → [trait_name, ...].
     /// Populated when entering a generic function so that lookup_method can
@@ -137,6 +163,8 @@ struct Scope {
     bindings: HashMap<Arc<str>, TypeScheme>,
     /// Type parameters in scope.
     type_params: HashMap<Arc<str>, Ty>,
+    /// Named type definitions declared in this scope (shadows outer modules).
+    type_defs: HashMap<Arc<str>, DefId>,
     /// Kind of scope.
     kind: ScopeKind,
     /// Bindings in this scope declared without `mut` and initialised, which
@@ -164,6 +192,7 @@ impl Scope {
         Self {
             bindings: HashMap::new(),
             type_params: HashMap::new(),
+            type_defs: HashMap::new(),
             kind,
             immutable: std::collections::HashSet::new(),
         }
@@ -368,6 +397,7 @@ impl TypeContext {
             linear_defs: HashSet::new(),
             current_self_ty: None,
             inherent_methods: HashMap::new(),
+            assoc_consts: HashMap::new(),
             operator_methods: HashMap::new(),
             param_trait_bounds: HashMap::new(),
             module_bindings: HashMap::new(),
@@ -410,20 +440,54 @@ impl TypeContext {
             "Iterator",
             "IntoIterator",
             "FromIterator",
+            "DoubleEndedIterator",
+            "ExactSizeIterator",
             "From",
             "Into",
             "TryFrom",
             "TryInto",
             "AsRef",
             "AsMut",
+            "Borrow",
+            "BorrowMut",
+            "ToOwned",
+            "ToString",
+            "FromStr",
             "Deref",
             "DerefMut",
+            "Index",
+            "IndexMut",
             "Add",
             "Sub",
             "Mul",
             "Div",
             "Rem",
             "Neg",
+            "Not",
+            "AddAssign",
+            "SubAssign",
+            "MulAssign",
+            "DivAssign",
+            "RemAssign",
+            "BitAnd",
+            "BitOr",
+            "BitXor",
+            "BitAndAssign",
+            "BitOrAssign",
+            "BitXorAssign",
+            "Shl",
+            "Shr",
+            "ShlAssign",
+            "ShrAssign",
+            "Fn",
+            "FnMut",
+            "FnOnce",
+            "Future",
+            "Error",
+            "Read",
+            "Write",
+            "Seek",
+            "BufRead",
             "Serialize",
             "Deserialize",
         ];
@@ -698,7 +762,17 @@ impl TypeContext {
     /// Register a type definition.
     pub fn register_type(&mut self, def: TypeDef) {
         super::ty::register_def_name(def.def_id, def.name.clone());
+        if let Some(scope) = self.scopes.last_mut() {
+            scope.type_defs.insert(def.name.clone(), def.def_id);
+        }
         self.types.insert(def.def_id, def);
+    }
+
+    /// Look up a type definition declared directly in the innermost scope.
+    pub fn lookup_type_in_current_scope(&self, name: &str) -> Option<DefId> {
+        self.scopes
+            .last()
+            .and_then(|scope| scope.type_defs.get(name).copied())
     }
 
     /// Look up a type definition by ID.
@@ -707,9 +781,17 @@ impl TypeContext {
     }
 
     /// Look up a type definition by name.
-    /// When multiple types share the same name (e.g., in different modules),
-    /// returns the one with the lowest DefId for deterministic behavior.
+    /// Prefers definitions in the innermost enclosing scope (so inline modules
+    /// with same-named enums/structs do not collide); falls back to the lowest
+    /// DefId in the global table for deterministic behavior.
     pub fn lookup_type_by_name(&self, name: &str) -> Option<&TypeDef> {
+        for scope in self.scopes.iter().rev() {
+            if let Some(def_id) = scope.type_defs.get(name) {
+                if let Some(def) = self.types.get(def_id) {
+                    return Some(def);
+                }
+            }
+        }
         self.types
             .iter()
             .filter(|(_, t)| t.name.as_ref() == name)
@@ -909,28 +991,52 @@ impl TypeContext {
     // MODULE BINDINGS
     // =========================================================================
 
-    /// Record an operator implementation of a user type. The first one of
-    /// a type and method stays: the C backend has one function per pair.
+    /// Record an associated constant on a type (`impl T { const C: Ty = ... }`).
+    pub fn register_assoc_const(&mut self, type_def_id: DefId, name: Arc<str>, ty: Ty) {
+        self.assoc_consts.insert((type_def_id, name), ty);
+    }
+
+    /// Look up an associated constant by type name and constant name.
+    pub fn lookup_assoc_const_by_name(&self, type_name: &str, const_name: &str) -> Option<&Ty> {
+        let def_id = self.lookup_type_by_name(type_name)?.def_id;
+        self.assoc_consts.get(&(def_id, Arc::from(const_name)))
+    }
+
+    /// Record an operator implementation overload for a receiver type.
     pub fn register_operator_method(
         &mut self,
-        type_def_id: DefId,
+        target: OperatorTarget,
         method: Arc<str>,
         rhs: Option<Ty>,
         ret: Ty,
     ) {
-        self.operator_methods
-            .entry((type_def_id, method))
-            .or_insert((rhs, ret));
+        let entry = self.operator_methods.entry((target, method)).or_default();
+        if !entry.iter().any(|(existing_rhs, _)| *existing_rhs == rhs) {
+            entry.push((rhs, ret));
+        }
     }
 
-    /// The right operand type and the result type of an operator a user type
+    /// All registered `(rhs, ret)` overloads of an operator on `target`.
+    pub fn lookup_operator_methods(
+        &self,
+        target: OperatorTarget,
+        method: &str,
+    ) -> &[(Option<Ty>, Ty)] {
+        self.operator_methods
+            .get(&(target, Arc::from(method)))
+            .map(|v| v.as_slice())
+            .unwrap_or(&[])
+    }
+
+    /// The first right operand type and result type of an operator a user type
     /// implements.
     pub fn lookup_operator_method(
         &self,
         type_def_id: DefId,
         method: &str,
     ) -> Option<&(Option<Ty>, Ty)> {
-        self.operator_methods.get(&(type_def_id, Arc::from(method)))
+        self.lookup_operator_methods(OperatorTarget::Adt(type_def_id), method)
+            .first()
     }
 
     /// Record that the struct `name` is declared with `#[derive(Clone)]`.

@@ -372,6 +372,13 @@ impl<'ctx> TypeChecker<'ctx> {
             .filter(|item| !matches!(item.kind, ItemKind::Use(_)))
             .filter_map(|item| item.name().map(|n| n.name.clone()))
             .collect();
+        // Pre-pass: register stub DefIds for all top-level structs and enums so
+        // forward references and merged stdlib types (e.g. `Vec3` appended after
+        // user items) resolve to their real DefId when lowering struct fields,
+        // enum variants, and function signatures in the collection pass below.
+        for item in &module.items {
+            self.predeclare_type_item(item);
+        }
         for item in &module.items {
             self.collect_item(item);
         }
@@ -653,6 +660,7 @@ impl<'ctx> TypeChecker<'ctx> {
                             for item in &module_ast.items {
                                 self.collect_item(item);
                             }
+                            self.collect_operator_impls(&module_ast);
                         }
                     }
                 }
@@ -694,22 +702,31 @@ impl<'ctx> TypeChecker<'ctx> {
         }
     }
 
-    /// A type written as a plain name that is not `Self` (`f32`, `Vec3`).
+    /// A type written as a plain named type (or `&T` / `Self`).
     fn is_plain_named_type(ty: &ast::Type) -> bool {
         match &ty.kind {
-            ast::TypeKind::Path(path) => {
-                path.segments.len() == 1 && path.segments[0].ident.name.as_ref() != "Self"
-            }
+            ast::TypeKind::Path(path) => path.segments.len() == 1,
+            ast::TypeKind::Ref { ty: inner, .. } => Self::is_plain_named_type(inner),
             _ => false,
         }
     }
 
     /// Register `impl Add for T`, `impl Mul<R> for T`, `impl Neg for T` and
-    /// the like for the non-generic types of this program. Only signatures
-    /// written with plain type names are taken; any other form keeps the
-    /// older rule (both operands of one type, the result of that type).
+    /// the like for both user types and primitive left-hand sides (e.g.
+    /// `impl Mul<Vec3> for f32`), preserving all overloads on one receiver.
     fn collect_operator_impls(&mut self, module: &ast::Module) {
         for item in &module.items {
+            if let ItemKind::Mod(m) = &item.kind {
+                if let Some(sub_content) = &m.content {
+                    let sub_mod = ast::Module {
+                        items: sub_content.items.clone(),
+                        attrs: Vec::new(),
+                        span: item.span,
+                    };
+                    self.collect_operator_impls(&sub_mod);
+                }
+                continue;
+            }
             let ItemKind::Impl(impl_) = &item.kind else {
                 continue;
             };
@@ -726,11 +743,12 @@ impl<'ctx> TypeChecker<'ctx> {
             else {
                 continue;
             };
-            let Some(def_id) = Self::extract_type_name_from_ast(&impl_.self_ty)
-                .and_then(|n| self.ctx.lookup_type_by_name(&n).map(|td| td.def_id))
-            else {
+            let self_ty = self.lower_type(&impl_.self_ty);
+            let Some(target) = OperatorTarget::from_ty(&self_ty) else {
                 continue;
             };
+            let prev_self = self.ctx.get_self_ty().cloned();
+            self.ctx.set_self_ty(Some(self_ty.clone()));
             for impl_item in &impl_.items {
                 let ImplItemKind::Function(f) = &impl_item.kind else {
                     continue;
@@ -757,18 +775,17 @@ impl<'ctx> TypeChecker<'ctx> {
                 let rhs = rhs_ast.map(|t| self.lower_type(t));
                 let ret = self.lower_type(ret_ast);
                 self.ctx
-                    .register_operator_method(def_id, Arc::from(method), rhs, ret);
+                    .register_operator_method(target, Arc::from(method), rhs, ret);
             }
+            self.ctx.set_self_ty(prev_self);
         }
     }
 
-    /// Collect inherent impl methods during the first pass so they're
-    /// available for method resolution when function bodies are checked.
+    /// Collect impl methods during the first pass so they're available for
+    /// method resolution when function bodies are checked (including forward
+    /// references between trait impls like `PartialOrd` calling `Ord::cmp`).
     fn collect_impl(&mut self, impl_: &ast::ImplDef, _span: Span) {
-        // Only collect inherent impls (no trait). Trait impls are handled in check_impl.
-        if impl_.trait_ref.is_some() {
-            return;
-        }
+        let is_trait_impl = impl_.trait_ref.is_some();
 
         // Push a scope for generic type parameters so they don't leak
         // into the surrounding module's type namespace.
@@ -780,7 +797,9 @@ impl<'ctx> TypeChecker<'ctx> {
             }
         }
 
-        let _self_ty = self.lower_type(&impl_.self_ty);
+        let self_ty = self.lower_type(&impl_.self_ty);
+        let prev_self = self.ctx.get_self_ty().cloned();
+        self.ctx.set_self_ty(Some(self_ty));
         let type_name = Self::extract_type_name_from_ast(&impl_.self_ty);
         let type_def_id = type_name
             .as_ref()
@@ -790,22 +809,38 @@ impl<'ctx> TypeChecker<'ctx> {
             match &item.kind {
                 ImplItemKind::Function(f) => {
                     if let Some(def_id) = type_def_id {
+                        // Do not overwrite an existing inherent method with a
+                        // trait method of the same name.
+                        if is_trait_impl
+                            && self
+                                .ctx
+                                .lookup_inherent_method(def_id, f.name.name.as_ref())
+                                .is_some()
+                        {
+                            continue;
+                        }
                         let sig = self.build_fn_sig_from_ast(f);
                         self.ctx
                             .register_inherent_method(def_id, f.name.name.clone(), sig);
                     }
                 }
                 ImplItemKind::Const { name, ty, .. } => {
-                    // Register associated constants at module scope so they're
-                    // accessible from other impl blocks (e.g., BRADFORD in
-                    // chromatic_adaptation.bld).
                     let const_ty = self.lower_type(ty);
-                    self.ctx.define_var(name.name.clone(), const_ty);
+                    if let Some(def_id) = type_def_id {
+                        self.ctx
+                            .register_assoc_const(def_id, name.name.clone(), const_ty.clone());
+                    }
+                    // Also keep module-scope fallback for unqualified references
+                    // inside impl blocks (e.g., BRADFORD in chromatic_adaptation.bld).
+                    if !is_trait_impl {
+                        self.ctx.define_var(name.name.clone(), const_ty);
+                    }
                 }
                 _ => {}
             }
         }
 
+        self.ctx.set_self_ty(prev_self);
         self.ctx.pop_scope();
     }
 
@@ -908,8 +943,60 @@ impl<'ctx> TypeChecker<'ctx> {
         }
     }
 
+    /// Pre-declare a struct or enum name with a fresh `DefId` in the current
+    /// scope before lowering any field or parameter types.
+    fn predeclare_type_item(&mut self, item: &ast::Item) {
+        match &item.kind {
+            ItemKind::Struct(s) => {
+                if self
+                    .ctx
+                    .lookup_type_in_current_scope(&s.name.name)
+                    .is_none()
+                {
+                    let def_id = self.ctx.fresh_def_id();
+                    if Self::has_linear_attr(&item.attrs) {
+                        self.ctx.mark_linear(def_id);
+                    }
+                    self.ctx.register_type(TypeDef {
+                        def_id,
+                        name: s.name.name.clone(),
+                        generics: Vec::new(),
+                        kind: TypeDefKind::Struct(StructDef {
+                            fields: Vec::new(),
+                            is_tuple: matches!(s.fields, StructFields::Tuple(_)),
+                        }),
+                    });
+                }
+            }
+            ItemKind::Enum(e) => {
+                if self
+                    .ctx
+                    .lookup_type_in_current_scope(&e.name.name)
+                    .is_none()
+                {
+                    let def_id = self.ctx.fresh_def_id();
+                    if Self::has_linear_attr(&item.attrs) {
+                        self.ctx.mark_linear(def_id);
+                    }
+                    self.ctx.register_type(TypeDef {
+                        def_id,
+                        name: e.name.name.clone(),
+                        generics: Vec::new(),
+                        kind: TypeDefKind::Enum(EnumDef {
+                            variants: Vec::new(),
+                        }),
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+
     fn collect_struct(&mut self, s: &ast::StructDef, _span: Span, is_linear: bool) {
-        let def_id = self.ctx.fresh_def_id();
+        let def_id = self
+            .ctx
+            .lookup_type_in_current_scope(&s.name.name)
+            .unwrap_or_else(|| self.ctx.fresh_def_id());
         if is_linear {
             self.ctx.mark_linear(def_id);
         }
@@ -970,7 +1057,10 @@ impl<'ctx> TypeChecker<'ctx> {
     }
 
     fn collect_enum(&mut self, e: &ast::EnumDef, _span: Span, is_linear: bool) {
-        let def_id = self.ctx.fresh_def_id();
+        let def_id = self
+            .ctx
+            .lookup_type_in_current_scope(&e.name.name)
+            .unwrap_or_else(|| self.ctx.fresh_def_id());
         if is_linear {
             self.ctx.mark_linear(def_id);
         }
@@ -1765,6 +1855,25 @@ impl<'ctx> TypeChecker<'ctx> {
 
     /// Build a FnSig from an AST function definition for method registration.
     fn build_fn_sig_from_ast(&mut self, f: &ast::FnDef) -> FnSig {
+        // Push the method's own generic type parameters so parameters like
+        // `fn set_constant_buffer<T>(&mut self, slot: u32, data: &T)` lower
+        // to `Ty::param("T", ...)` and can be freshened independently at each
+        // call site rather than sharing one unbound `TyVar`.
+        let has_method_generics = f
+            .generics
+            .params
+            .iter()
+            .any(|p| matches!(p.kind, ast::GenericParamKind::Type { .. }));
+        if has_method_generics {
+            self.ctx.push_scope(ScopeKind::Block);
+            for (idx, param) in f.generics.params.iter().enumerate() {
+                if let ast::GenericParamKind::Type { .. } = &param.kind {
+                    let ty = Ty::param(param.ident.name.clone(), 1000 + idx as u32);
+                    self.ctx.define_type_param(param.ident.name.clone(), ty);
+                }
+            }
+        }
+
         let params: Vec<(Arc<str>, Ty)> = f
             .sig
             .params
@@ -1790,6 +1899,10 @@ impl<'ctx> TypeChecker<'ctx> {
             .as_ref()
             .map(|t| self.lower_type(t))
             .unwrap_or(Ty::unit());
+
+        if has_method_generics {
+            self.ctx.pop_scope();
+        }
 
         // Extract lifetime parameters from generics
         let lifetime_params: Vec<Arc<str>> = f
@@ -2379,6 +2492,11 @@ impl<'ctx> TypeChecker<'ctx> {
         }
         if let Some(content) = &m.content {
             self.ctx.push_scope(ScopeKind::Module);
+
+            // Pre-declare types in this module before collecting fields/sigs.
+            for item in &content.items {
+                self.predeclare_type_item(item);
+            }
 
             // First pass: collect
             for item in &content.items {
@@ -4634,6 +4752,123 @@ mod tests {
         assert!(
             errors.is_empty(),
             "if/else both returning should pass: {errors:#?}"
+        );
+    }
+
+    #[test]
+    fn contextual_resume_and_with_member_idents() {
+        let errors = check_source(
+            r#"
+            struct Worker { state: i32 }
+            impl Worker {
+                fn resume(&mut self) -> i32 { self.state }
+                fn with(&self, x: i32) -> i32 { self.state + x }
+            }
+            fn main() {
+                let mut w = Worker { state: 1 };
+                let _ = w.resume() + w.with(2);
+            }
+            "#,
+        );
+        assert!(
+            errors.is_empty(),
+            "resume/with member identifiers should parse and typecheck: {errors:#?}"
+        );
+    }
+
+    #[test]
+    fn macro_rules_item_parses_multiple_semicolon_arms() {
+        let errors = check_source(
+            r#"
+            macro_rules! my_macro {
+                ($x:expr) => { $x };
+                ($x:expr, $y:expr) => { $x + $y };
+            }
+            fn main() -> i32 { 0 }
+            "#,
+        );
+        assert!(
+            errors.is_empty(),
+            "macro_rules! with semicolon-separated rules should pass: {errors:#?}"
+        );
+    }
+
+    #[test]
+    fn forward_referenced_struct_field_resolves_concrete_type() {
+        let errors = check_source(
+            r#"
+            struct Outer { inner: Inner }
+            struct Inner { value: i32 }
+            fn bad(o: Outer) -> bool { o.inner }
+            "#,
+        );
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(&e.error, TypeError::ReturnTypeMismatch { .. })),
+            "forward-referenced struct field must keep its concrete type, got: {errors:#?}"
+        );
+    }
+
+    #[test]
+    fn sibling_inline_modules_isolate_same_named_enums() {
+        let errors = check_source(
+            r#"
+            pub mod m1 {
+                pub enum Variant { Standard, UrlSafe }
+                pub fn f(v: Variant) -> i32 {
+                    match v {
+                        Variant::Standard => 1,
+                        Variant::UrlSafe => 2,
+                    }
+                }
+            }
+            pub mod m2 {
+                pub enum Variant { Standard, Hex }
+                pub fn g(v: Variant) -> i32 {
+                    match v {
+                        Variant::Standard => 1,
+                        Variant::Hex => 2,
+                    }
+                }
+            }
+            "#,
+        );
+        assert!(
+            errors.is_empty(),
+            "sibling inline module enums should not collide: {errors:#?}"
+        );
+    }
+
+    #[test]
+    fn assoc_consts_and_ref_clone_and_self_tuple_ctor() {
+        let errors = check_source(
+            r#"
+            struct A { x: f32 }
+            struct B { x: f64 }
+            impl A { pub const ONE: A = A { x: 1.0 }; }
+            impl B { pub const ONE: B = B { x: 1.0 }; }
+            struct Wrap(i32);
+            impl Wrap {
+                fn make(v: i32) -> Self { Self(v) }
+            }
+            fn clone_ref(a: &A) -> A { a.clone() }
+            fn check_replace(x: &mut Option<i32>) -> Option<i32> {
+                let old = std::mem::replace(x, None);
+                Some(old?)
+            }
+            fn main() {
+                let a: A = A::ONE;
+                let b: B = B::ONE;
+                let _ = clone_ref(&a);
+                let _ = b;
+                let _ = Wrap::make(7);
+            }
+            "#,
+        );
+        assert!(
+            errors.is_empty(),
+            "assoc consts, &T::clone, Self(..) tuple ctor, and std::mem::replace should pass: {errors:#?}"
         );
     }
 }

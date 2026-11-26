@@ -133,6 +133,15 @@ impl<'ctx> MirLowerer<'ctx> {
         if !is_aggregate(ty) {
             return self.scalar_initializer(name, expr, ty);
         }
+        // An opaque external struct/enum not defined in this module (for
+        // example, an imported type in a standalone `buildc check` file) has
+        // no field or variant layout here to constant-evaluate against.
+        if let MirType::Struct(struct_name) = ty {
+            if struct_name.as_ref() != "BuildString" && self.module.find_type(struct_name).is_none()
+            {
+                return Ok(self.try_const_eval(expr));
+            }
+        }
         if let Some(c) = self.const_eval_typed(expr, ty) {
             return Ok(Some(c));
         }

@@ -615,12 +615,13 @@ impl Ty {
         }
     }
 
-    /// Replace all Param types with fresh type variables.
-    /// Used when instantiating generic methods so the unifier
-    /// can solve type parameters from calling context.
-    pub fn freshen_params(&self) -> Ty {
-        use std::collections::HashMap;
-        fn freshen(ty: &Ty, cache: &mut HashMap<(Arc<str>, u32), Ty>) -> Ty {
+    /// Replace all Param types with fresh type variables, sharing a single
+    /// cache across multiple types (e.g. a method's parameters and return type).
+    pub fn freshen_params_with_cache(
+        &self,
+        cache: &mut std::collections::HashMap<(Arc<str>, u32), Ty>,
+    ) -> Ty {
+        fn freshen(ty: &Ty, cache: &mut std::collections::HashMap<(Arc<str>, u32), Ty>) -> Ty {
             match &ty.kind {
                 TyKind::Param(name, idx) => {
                     let key = (name.clone(), *idx);
@@ -648,8 +649,15 @@ impl Ty {
                 _ => ty.clone(),
             }
         }
-        let mut cache = HashMap::new();
-        freshen(self, &mut cache)
+        freshen(self, cache)
+    }
+
+    /// Replace all Param types with fresh type variables.
+    /// Used when instantiating generic methods so the unifier
+    /// can solve type parameters from calling context.
+    pub fn freshen_params(&self) -> Ty {
+        let mut cache = std::collections::HashMap::new();
+        self.freshen_params_with_cache(&mut cache)
     }
 }
 
@@ -1062,7 +1070,7 @@ pub fn clear_def_names() {
     DEF_NAMES.with(|names| names.borrow_mut().clear());
 }
 
-fn def_name(id: DefId) -> Option<Arc<str>> {
+pub(crate) fn def_name(id: DefId) -> Option<Arc<str>> {
     DEF_NAMES.with(|names| names.borrow().get(&id).cloned())
 }
 

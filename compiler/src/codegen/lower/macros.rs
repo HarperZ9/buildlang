@@ -408,6 +408,73 @@ impl<'ctx> MirLowerer<'ctx> {
         fields: &[ast::FieldExpr],
         rest: Option<&ast::Expr>,
     ) -> CodegenResult<MirValue> {
+        // Handle enum struct variant literals: `EnumName::Variant { field: val, .. }`.
+        if path.segments.len() >= 2 && rest.is_none() {
+            let mut enum_name = path.segments[path.segments.len() - 2].ident.name.clone();
+            if enum_name.as_ref() == "Self" {
+                if let Some(ref impl_ty) = self.current_impl_type {
+                    enum_name = impl_ty.clone();
+                }
+            }
+            if !self.module_prefix.is_empty() {
+                let prefixed = self.prefixed_name(&enum_name);
+                if self.module.find_type(prefixed.as_ref()).is_some() {
+                    enum_name = prefixed;
+                }
+            }
+            let variant_name = path
+                .last_ident()
+                .map(|i| i.name.clone())
+                .unwrap_or(Arc::from(""));
+            if let Some((disc, variant_fields)) =
+                self.lookup_enum_variant(&enum_name, &variant_name)
+            {
+                let mut field_vals: Vec<MirValue> = Vec::with_capacity(fields.len());
+                for f in fields {
+                    let expected = variant_fields
+                        .iter()
+                        .find(|(n, _)| n.as_deref() == Some(f.name.name.as_ref()))
+                        .map(|(_, t)| t.clone());
+                    let prev_expected = match expected {
+                        Some(t) => self.expected_type.replace(t),
+                        None => self.expected_type.take(),
+                    };
+                    let val = if let Some(v) = &f.value {
+                        self.lower_expr(v)
+                    } else {
+                        self.lower_ident(&f.name)
+                    };
+                    self.expected_type = prev_expected;
+                    field_vals.push(val?);
+                }
+                let mut ordered = Vec::with_capacity(variant_fields.len());
+                for (vfname, _) in &variant_fields {
+                    if let Some(pos) = fields
+                        .iter()
+                        .position(|f| Some(f.name.name.as_ref()) == vfname.as_deref())
+                    {
+                        ordered.push(field_vals[pos].clone());
+                    }
+                }
+                let operands = if ordered.len() == variant_fields.len() {
+                    ordered
+                } else {
+                    field_vals
+                };
+                let builder = self
+                    .current_fn
+                    .as_mut()
+                    .ok_or_else(|| CodegenError::Internal("No current function".to_string()))?;
+                let result = builder.create_local(MirType::Struct(enum_name.clone()));
+                builder.aggregate(
+                    result,
+                    AggregateKind::Variant(enum_name, disc as u32, variant_name),
+                    operands,
+                );
+                return Ok(values::local(result));
+            }
+        }
+
         let mut raw_name = path
             .last_ident()
             .map(|i| i.name.clone())
@@ -561,7 +628,48 @@ impl<'ctx> MirLowerer<'ctx> {
         let decl = self
             .struct_field_types(struct_name.as_ref())
             .ok_or_else(unsupported)?;
-        let base = self.lower_expr(rest)?;
+        // Handle `..Default::default()` / `..Self::default()` using the target
+        // struct's `default` method (or zero-initialization if derived/implicit).
+        let is_default_call = matches!(
+            &rest.kind,
+            ExprKind::Call { func, args } if args.is_empty() && matches!(
+                &func.kind,
+                ExprKind::Path(p) if p.segments.len() >= 2
+                    && matches!(p.segments[p.segments.len() - 2].ident.name.as_ref(), "Default" | "Self")
+                    && p.last_ident().is_some_and(|i| i.name.as_ref() == "default")
+            )
+        );
+        let base = if is_default_call {
+            if let Some(def_fn) = self
+                .impl_methods
+                .get(&(struct_name.clone(), Arc::from("default")))
+                .cloned()
+            {
+                let builder = self
+                    .current_fn
+                    .as_mut()
+                    .ok_or_else(|| CodegenError::Internal("No current function".to_string()))?;
+                let res = builder.create_local(MirType::Struct(struct_name.clone()));
+                let cont = builder.create_block();
+                builder.call(MirValue::Function(def_fn), vec![], Some(res), cont);
+                builder.switch_to_block(cont);
+                values::local(res)
+            } else {
+                let struct_ty = MirType::Struct(struct_name.clone());
+                let builder = self
+                    .current_fn
+                    .as_mut()
+                    .ok_or_else(|| CodegenError::Internal("No current function".to_string()))?;
+                let res = builder.create_local(struct_ty.clone());
+                builder.assign(
+                    res,
+                    MirRValue::Use(MirValue::Const(MirConst::Zeroed(struct_ty))),
+                );
+                values::local(res)
+            }
+        } else {
+            self.lower_expr(rest)?
+        };
         let mut operands = Vec::with_capacity(decl.len());
         for (name, ty) in decl {
             let name = name.ok_or_else(unsupported)?;
@@ -1448,6 +1556,11 @@ impl<'ctx> MirLowerer<'ctx> {
                     MirType::Slice(e) => MirType::slice_type_name(e).to_string(),
                     _ => unreachable!(),
                 }
+            }
+            MirType::Ptr(inner)
+                if !crate::codegen::backend::c::CBackend::is_dyn_trait_type(inner) =>
+            {
+                crate::codegen::backend::c::CBackend::hvec_ptr_suffix(inner)
             }
             _ => {
                 return Err(CodegenError::Unsupported(format!(
