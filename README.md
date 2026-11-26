@@ -5,7 +5,7 @@
 
 # buildlang
 
-Systems language with typed capability effects and native C output.
+Deterministic systems and GPU language (`buildc 1.15.0`) with typed capability effects, native C binary output, HLSL/GLSL shaders, BuildDB/BuildQL (`bdb/`), and fast `f64` ML, physics, and workstation kernels.
 
 ```bash
 cargo install buildlang
@@ -17,12 +17,14 @@ cargo install buildlang
 ![rust edition 2021](https://img.shields.io/badge/rust-edition_2021-e6e1d6?style=flat-square&labelColor=1a1712)
 
 BuildLang compiles `.bld` source to native binaries through a C backend, emits
-HLSL and GLSL for shader work, and carries experimental SPIR-V, LLVM IR,
-WebAssembly, Rust, x86-64, and ARM64 backends. The type system pairs
-Hindley-Milner inference with typed algebraic effects and an opt-in
-experimental `#[linear]` attribute for no-cloning values. The `buildc` CLI
-covers build, run, test, repl, fmt, pkg, watch, and doctor, plus a bundled LSP
-server with completion, hover, diagnostics, and go-to-definition.
+HLSL and GLSL for shader work, and includes experimental SPIR-V, LLVM IR,
+WebAssembly, Rust, x86-64, and ARM64 backends. Every function signature lists
+its side effects (`~ Console`, `~ FileSystem`, `~ Network`, `~ Foreign`) and
+`par_for` checks parallel loop bodies against those same effect rows. One
+`buildc` binary ships the compiler, runner, test runner, formatter, linter,
+package manager, receipt verifier, LSP server, and MCP server, alongside
+BuildDB (`bdb/db.bld`) and compiled `f64` workstation/ML/physics kernels under
+`universe/workstation/`.
 
 [Landing page](https://harperz9.github.io/buildlang/) | [Build Universe](universe/) | [Editor support](editors/)
 
@@ -148,7 +150,7 @@ profile and print a receipt:
 buildc check examples/quickstart/hello.bld --profile console-only --receipt -
 ```
 
-Output (excerpt, verified against buildc 1.2.0):
+Output (excerpt, `buildc 1.15.0`):
 
 ```text
 Type checking... OK
@@ -156,7 +158,7 @@ Type checking... OK
 No errors found in 'examples/quickstart/hello.bld'
 {
   "schema": "buildlang-check-receipt/v1",
-  "compiler_version": "1.2.0",
+  "compiler_version": "1.15.0",
   "status": "passed",
   "declared_effects": { "main": ["Console"] },
   ...
@@ -263,11 +265,25 @@ at a time. Schema and flags:
 model boundary receipts (`buildlang-model-boundary-receipt/v0`) from a model
 harness shim, and Flywheel tool-call receipts (`flywheel.tool-call-receipt/v1`).
 
+## BuildDB and compiled workstation kernels
+
+- **BuildDB / BuildQL (`bdb/`):** Embedded SQL/BuildQL engine written in BuildLang (`bdb/db.bld`, compiled to `qdb`), verified with 32-bit FNV-1a checksums on every 4 KiB page and header (`0/500` silent fuzz corruptions, crash recovery, and differential SQLite oracle tests).
+- **Compiled `f64` ML, physics, and MCP kernels (`universe/workstation/`):**
+  - `kcore_fast.bld`: 12 canonical colour, optics, and entropy equations (`HASH-FNV`, `COL-001/003/005/030`, `OPT-001/002/004/008/014/033`, `SIG-013`) with deterministic `par_for` parity across thread counts.
+  - `sota_ml_physics_kernels.bld`: `par_for` thread-count-invariant `f64` reference kernels for RMSNorm, RoPE, SwiGLU, Flash online softmax, BitNet b1.58 ternary GEMV, and 6-DOF Velocity-Verlet + Rodrigues quaternion + Tsiolkovsky powered descent.
+  - `workstation_mcp.bld`: native compiled JSON-RPC 2.0 stdio MCP server implementing preflight routing and public hygiene checks.
+
+```bash
+buildc run --release universe/workstation/kcore_fast.bld
+buildc run --release universe/workstation/sota_ml_physics_kernels.bld
+buildc run --release universe/workstation/workstation_mcp.bld -- --self-test
+```
+
 ## Status
 
-BuildLang 1.15.0. The C backend, effect checking, HLSL and GLSL output, and
-receipts are the supported core. SPIR-V, LLVM IR, WASM, Rust, x86-64, ARM64, GPU dispatch
-and `#[linear]` types are experimental. Release test results are in
+BuildLang 1.15.0. The C backend, effect checking, HLSL and GLSL output, BuildDB (`bdb/`), and
+receipts are the supported core. SPIR-V, LLVM IR, WASM, Rust, x86-64, ARM64, GPU dispatch,
+and `#[linear]` types are experimental. Live test and burn-down results are in
 [STATUS.md](STATUS.md) and changes in [CHANGELOG.md](CHANGELOG.md).
 
 ## Documentation and ecosystem
@@ -280,16 +296,14 @@ and `#[linear]` types are experimental. Release test results are in
 - [docs/LINEAR-TYPES.md](docs/LINEAR-TYPES.md): linear types
 - [DESIGN.md](DESIGN.md) and [ARCHITECTURE.md](ARCHITECTURE.md): pipeline and rationale
 - Build suite: [suite/](suite/) holds build-engine, build-ui, build-finance, build-oracle and
-  build-ecosystem, which were separate repositories before November 2026
-- Build Universe: [universe/](universe/) holds the BuildLang modules and example programs for
-  graphics, colour, finance and systems work, a hobby OS kernel and the frametrace tracer. It
-  was the build-universe repository until November 2026. CI runs `buildc check` on each of its
-  268 `.bld` files; [universe/CHECK-FAILS.txt](universe/CHECK-FAILS.txt) lists the 190 the
-  compiler does not accept yet
-- Editor support: [editors/](editors/) holds two VS Code extensions and the TextMate grammar.
-  `editors/vscode-syntax` and `editors/tmLanguage` were the buildlang-vscode and
-  buildlang-tmLanguage repositories until November 2026; [editors/README.md](editors/README.md)
-  says what each folder is and what is published where
+  build-ecosystem, consolidated in November 2026
+- Build Universe: [universe/](universe/) holds BuildLang modules for graphics, colour, finance,
+  systems, workstation kernels, a hobby OS kernel, and the frametrace tracer. CI runs
+  `buildc check` on all 275 `.bld` files; 104 pass and [universe/CHECK-FAILS.txt](universe/CHECK-FAILS.txt)
+  lists the 171 the compiler does not accept yet (with 4 remaining compiler feature gaps tracked in
+  [tests/features/GAPS.txt](tests/features/GAPS.txt))
+- Editor support: [editors/](editors/) holds the VS Code extensions and TextMate grammar;
+  [editors/README.md](editors/README.md) says what each folder is and what is published where
 
 <p align="center"><img src=".github/assets/banner.svg" alt="buildlang: A real systems language: typed capability effects, sum and linear types, C FFI, native binaries." width="100%"></p>
 
