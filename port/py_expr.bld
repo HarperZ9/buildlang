@@ -1,0 +1,579 @@
+// SPDX-License-Identifier: MIT
+//
+// port/py_expr.bld: Shared line splitter, expression lexer/parser, and print
+// lowering for the Python-subset and Controlled Plain-English frontends.
+
+use lex::*;
+use state::*;
+
+// Type codes for py/plain frontends:
+// 0 void, 2 i64 (int), 3 f64 (float), 7 bool, 8 String (str/text).
+
+pub fn py_tname(t: i32) -> String {
+    if t == 2 { return String::from("i64"); }
+    if t == 3 { return String::from("f64"); }
+    if t == 7 { return String::from("bool"); }
+    if t == 8 { return String::from("String"); }
+    String::from("()")
+}
+
+pub fn py_parse_tname(w: String) -> i32 {
+    if w == "int" || w == "i64" || w == "integer" { return 2; }
+    if w == "float" || w == "f64" || w == "number" { return 3; }
+    if w == "bool" || w == "flag" { return 7; }
+    if w == "str" || w == "text" || w == "string" || w == "String" { return 8; }
+    if w == "None" || w == "void" { return 0; }
+    -1
+}
+
+pub fn py_conv(text: String, from: i32, to: i32) -> String {
+    if from == to { return text; }
+    if from == 2 && to == 3 { return "((" + text + ") as f64)"; }
+    if from == 3 && to == 2 { return "((" + text + ") as i64)"; }
+    text
+}
+
+pub fn py_refuse_line(st: Vec<i32>, ln: i32, why: String, at_tok: String) ~ Console {
+    if ln == st[8] { return; }
+    st[8] = ln;
+    println!("  line {}: {} (at `{}`)", ln, why, at_tok);
+    st[2] = st[2] + 1;
+}
+
+// Strip trailing `# comment` outside quoted strings.
+fn strip_hash_comment(line: String) -> String {
+    let b = line.as_bytes();
+    let n: usize = line.len();
+    let mut i: usize = 0;
+    let mut in_q: u8 = 0;
+    while i < n {
+        let c: u8 = b[i];
+        if in_q != 0 {
+            if c == 92 && i + 1 < n { i = i + 2; continue; }
+            if c == in_q { in_q = 0; }
+            i = i + 1;
+            continue;
+        }
+        if c == 34 || c == 39 { in_q = c; i = i + 1; continue; }
+        if c == 35 { return line.substring(0, i); }
+        i = i + 1;
+    }
+    line
+}
+
+// Split source text into logical non-empty lines with indent and 1-based line numbers.
+pub fn split_src_lines(src: String, lines: Vec<String>, indents: Vec<i32>, lnums: Vec<i32>) {
+    let b = src.as_bytes();
+    let n: usize = src.len();
+    let mut i: usize = 0;
+    let mut ln: i32 = 1;
+    while i <= n {
+        let start: usize = i;
+        while i < n && b[i] != 10 { i = i + 1; }
+        let mut end: usize = i;
+        if end > start && b[end - 1] == 13 { end = end - 1; }
+        let raw: String = src.substring(start, end - start);
+        let no_cmt: String = strip_hash_comment(raw);
+        let trimmed: String = no_cmt.trim();
+        if trimmed.len() > 0 {
+            let nb = no_cmt.as_bytes();
+            let mut ind: i32 = 0;
+            let mut k: usize = 0;
+            while k < no_cmt.len() && (nb[k] == 32 || nb[k] == 9) {
+                if nb[k] == 9 { ind = ind + 4; } else { ind = ind + 1; }
+                k = k + 1;
+            }
+            lines.push(trimmed);
+            indents.push(ind);
+            lnums.push(ln);
+        }
+        if i == n { break; }
+        i = i + 1;
+        ln = ln + 1;
+    }
+}
+
+// Split a comma-separated list respecting parentheses and quoted strings.
+pub fn split_top_commas(s: String, parts: Vec<String>) {
+    let b = s.as_bytes();
+    let n: usize = s.len();
+    let mut i: usize = 0;
+    let mut start: usize = 0;
+    let mut depth: i32 = 0;
+    let mut in_q: u8 = 0;
+    while i < n {
+        let c: u8 = b[i];
+        if in_q != 0 {
+            if c == 92 && i + 1 < n { i = i + 2; continue; }
+            if c == in_q { in_q = 0; }
+            i = i + 1;
+            continue;
+        }
+        if c == 34 || c == 39 { in_q = c; i = i + 1; continue; }
+        if c == 40 || c == 91 { depth = depth + 1; }
+        if c == 41 || c == 93 { depth = depth - 1; }
+        if c == 44 && depth == 0 {
+            parts.push(s.substring(start, i - start).trim());
+            start = i + 1;
+        }
+        i = i + 1;
+    }
+    let tail: String = s.substring(start, n - start).trim();
+    if tail.len() > 0 { parts.push(tail); }
+}
+
+// Find top-level index of a 1-byte or 2-byte operator outside strings/parens.
+pub fn find_top_char(s: String, ch: u8) -> i32 {
+    let b = s.as_bytes();
+    let n: usize = s.len();
+    let mut i: usize = 0;
+    let mut depth: i32 = 0;
+    let mut in_q: u8 = 0;
+    while i < n {
+        let c: u8 = b[i];
+        if in_q != 0 {
+            if c == 92 && i + 1 < n { i = i + 2; continue; }
+            if c == in_q { in_q = 0; }
+            i = i + 1;
+            continue;
+        }
+        if c == 34 || c == 39 { in_q = c; i = i + 1; continue; }
+        if c == 41 || c == 93 { depth = depth - 1; }
+        if depth == 0 && c == ch { return i as i32; }
+        if c == 40 || c == 91 { depth = depth + 1; }
+        i = i + 1;
+    }
+    -1
+}
+
+// Tokenize a single Python expression:
+// 0 end, 1 ident, 2 int, 3 float, 4 string, 5 f-string, 6 punct/op.
+pub fn lex_py_expr(src: String, ln: i32, kind: Vec<i32>, text: Vec<String>, line: Vec<i32>) {
+    let b = src.as_bytes();
+    let n: usize = src.len();
+    let mut i: usize = 0;
+    while i < n {
+        let c: u8 = b[i];
+        if c == 32 || c == 9 || c == 13 { i = i + 1; continue; }
+        let start: usize = i;
+        if c == 102 && i + 1 < n && (b[i + 1] == 34 || b[i + 1] == 39) {
+            let q: u8 = b[i + 1];
+            i = i + 2;
+            let content_start: usize = i;
+            while i < n && b[i] != q {
+                if b[i] == 92 && i + 1 < n { i = i + 2; continue; }
+                i = i + 1;
+            }
+            kind.push(5);
+            text.push(src.substring(content_start, i - content_start));
+            line.push(ln);
+            if i < n { i = i + 1; }
+            continue;
+        }
+        if c == 34 || c == 39 {
+            let q: u8 = c;
+            i = i + 1;
+            let mut inner: String = String::new();
+            while i < n && b[i] != q {
+                if b[i] == 92 && i + 1 < n {
+                    inner = inner + src.substring(i, 2);
+                    i = i + 2;
+                    continue;
+                }
+                if b[i] == 34 {
+                    inner = inner + "\\\"";
+                } else {
+                    inner = inner + src.substring(i, 1);
+                }
+                i = i + 1;
+            }
+            if i < n { i = i + 1; }
+            kind.push(4);
+            text.push("\"" + inner + "\"");
+            line.push(ln);
+            continue;
+        }
+        if is_alpha(c) {
+            while i < n && (is_alpha(b[i]) || is_digit(b[i])) { i = i + 1; }
+            kind.push(1);
+            text.push(src.substring(start, i - start));
+            line.push(ln);
+            continue;
+        }
+        if is_digit(c) || (c == 46 && i + 1 < n && is_digit(b[i + 1])) {
+            let mut is_f: bool = false;
+            while i < n {
+                let d: u8 = b[i];
+                if is_digit(d) { i = i + 1; continue; }
+                if d == 46 { is_f = true; i = i + 1; continue; }
+                if (d == 101 || d == 69) && i > start {
+                    is_f = true;
+                    i = i + 1;
+                    if i < n && (b[i] == 43 || b[i] == 45) { i = i + 1; }
+                    continue;
+                }
+                break;
+            }
+            kind.push(if is_f { 3 } else { 2 });
+            text.push(src.substring(start, i - start));
+            line.push(ln);
+            continue;
+        }
+        if i + 1 < n {
+            let two: String = src.substring(i, 2);
+            if two == "==" || two == "!=" || two == "<=" || two == ">="
+                || two == "//" || two == "**" || two == "->"
+            {
+                kind.push(6); text.push(two); line.push(ln); i = i + 2; continue;
+            }
+        }
+        kind.push(6); text.push(src.substring(i, 1)); line.push(ln); i = i + 1;
+    }
+    kind.push(0); text.push(String::from("")); line.push(ln);
+}
+
+fn is_math_builtin(w: String) -> bool {
+    w == "sqrt" || w == "sin" || w == "cos" || w == "tan"
+        || w == "exp" || w == "log" || w == "floor" || w == "ceil"
+        || w == "fabs" || w == "pow"
+}
+
+fn py_e_or(t: Toks, est: Vec<i32>, sy: Syms, f: Fns, st: Vec<i32>) -> String ~ Console {
+    let mut left: String = py_e_and(t, est, sy, f, st);
+    let mut lt: i32 = est[1];
+    while cur(t, est) == "or" {
+        advance(est);
+        let right: String = py_e_and(t, est, sy, f, st);
+        left = "(" + left + " || " + right + ")";
+        lt = 7;
+    }
+    est[1] = lt;
+    left
+}
+
+fn py_e_and(t: Toks, est: Vec<i32>, sy: Syms, f: Fns, st: Vec<i32>) -> String ~ Console {
+    let mut left: String = py_e_not(t, est, sy, f, st);
+    let mut lt: i32 = est[1];
+    while cur(t, est) == "and" {
+        advance(est);
+        let right: String = py_e_not(t, est, sy, f, st);
+        left = "(" + left + " && " + right + ")";
+        lt = 7;
+    }
+    est[1] = lt;
+    left
+}
+
+fn py_e_not(t: Toks, est: Vec<i32>, sy: Syms, f: Fns, st: Vec<i32>) -> String ~ Console {
+    if cur(t, est) == "not" {
+        advance(est);
+        let inner: String = py_e_not(t, est, sy, f, st);
+        est[1] = 7;
+        return "(!" + inner + ")";
+    }
+    py_e_cmp(t, est, sy, f, st)
+}
+
+fn py_e_cmp(t: Toks, est: Vec<i32>, sy: Syms, f: Fns, st: Vec<i32>) -> String ~ Console {
+    let mut left: String = py_e_add(t, est, sy, f, st);
+    let mut lt: i32 = est[1];
+    let op: String = cur(t, est);
+    if op == "==" || op == "!=" || op == "<" || op == "<=" || op == ">" || op == ">=" {
+        advance(est);
+        let right: String = py_e_add(t, est, sy, f, st);
+        let rt: i32 = est[1];
+        if (lt == 2 && rt == 3) || (lt == 3 && rt == 2) {
+            left = "(" + py_conv(left, lt, 3) + " " + op + " " + py_conv(right, rt, 3) + ")";
+        } else {
+            left = "(" + left + " " + op + " " + right + ")";
+        }
+        lt = 7;
+    }
+    est[1] = lt;
+    left
+}
+
+fn py_e_add(t: Toks, est: Vec<i32>, sy: Syms, f: Fns, st: Vec<i32>) -> String ~ Console {
+    let mut left: String = py_e_mul(t, est, sy, f, st);
+    let mut lt: i32 = est[1];
+    while cur(t, est) == "+" || cur(t, est) == "-" {
+        let op: String = cur(t, est);
+        advance(est);
+        let right: String = py_e_mul(t, est, sy, f, st);
+        let rt: i32 = est[1];
+        if lt == 8 && rt == 8 && op == "+" {
+            left = "(" + left + " + " + right + ")";
+            lt = 8;
+        } else if lt == 3 || rt == 3 {
+            left = "(" + py_conv(left, lt, 3) + " " + op + " " + py_conv(right, rt, 3) + ")";
+            lt = 3;
+        } else {
+            left = "(" + left + " " + op + " " + right + ")";
+            lt = 2;
+        }
+    }
+    est[1] = lt;
+    left
+}
+
+fn py_e_mul(t: Toks, est: Vec<i32>, sy: Syms, f: Fns, st: Vec<i32>) -> String ~ Console {
+    let mut left: String = py_e_unary(t, est, sy, f, st);
+    let mut lt: i32 = est[1];
+    while cur(t, est) == "*" || cur(t, est) == "/" || cur(t, est) == "//" || cur(t, est) == "%" {
+        let op: String = cur(t, est);
+        advance(est);
+        let right: String = py_e_unary(t, est, sy, f, st);
+        let rt: i32 = est[1];
+        if op == "/" {
+            left = "(" + py_conv(left, lt, 3) + " / " + py_conv(right, rt, 3) + ")";
+            lt = 3;
+        } else if op == "//" {
+            left = "(" + py_conv(left, lt, 2) + " / " + py_conv(right, rt, 2) + ")";
+            lt = 2;
+        } else if lt == 3 || rt == 3 {
+            left = "(" + py_conv(left, lt, 3) + " " + op + " " + py_conv(right, rt, 3) + ")";
+            lt = 3;
+        } else {
+            left = "(" + left + " " + op + " " + right + ")";
+            lt = 2;
+        }
+    }
+    est[1] = lt;
+    left
+}
+
+fn py_e_unary(t: Toks, est: Vec<i32>, sy: Syms, f: Fns, st: Vec<i32>) -> String ~ Console {
+    if cur(t, est) == "-" {
+        advance(est);
+        let inner: String = py_e_unary(t, est, sy, f, st);
+        return "(-" + inner + ")";
+    }
+    if cur(t, est) == "+" {
+        advance(est);
+        return py_e_unary(t, est, sy, f, st);
+    }
+    py_e_pow(t, est, sy, f, st)
+}
+
+fn py_e_pow(t: Toks, est: Vec<i32>, sy: Syms, f: Fns, st: Vec<i32>) -> String ~ Console {
+    let left: String = py_e_prim(t, est, sy, f, st);
+    let lt: i32 = est[1];
+    if cur(t, est) == "**" {
+        advance(est);
+        let right: String = py_e_unary(t, est, sy, f, st);
+        let rt: i32 = est[1];
+        est[1] = 3;
+        return "pow(" + py_conv(left, lt, 3) + ", " + py_conv(right, rt, 3) + ")";
+    }
+    est[1] = lt;
+    left
+}
+
+fn py_e_call(name: String, t: Toks, est: Vec<i32>, sy: Syms, f: Fns, st: Vec<i32>) -> String ~ Console {
+    let ln: i32 = t.line[est[0] as usize];
+    advance(est);
+    let args: Vec<String> = Vec::new();
+    let atys: Vec<i32> = Vec::new();
+    while cur(t, est) != ")" && cur_kind(t, est) != 0 {
+        let a: String = py_e_or(t, est, sy, f, st);
+        args.push(a);
+        atys.push(est[1]);
+        if cur(t, est) == "," { advance(est); } else { break; }
+    }
+    if cur(t, est) == ")" { advance(est); }
+    if name == "abs" && args.len() == 1 {
+        if atys[0] == 3 { est[1] = 3; return "abs(" + args[0] + ")"; }
+        est[1] = 2;
+        return "(if (" + args[0] + ") < 0 { -(" + args[0] + ") } else { " + args[0] + " })";
+    }
+    if name == "fabs" && args.len() == 1 {
+        est[1] = 3;
+        return "abs(" + py_conv(args[0], atys[0], 3) + ")";
+    }
+    if is_math_builtin(name) {
+        let mut s: String = name + "(";
+        let mut i: usize = 0;
+        while i < args.len() {
+            if i > 0 { s = s + ", "; }
+            s = s + py_conv(args[i], atys[i], 3);
+            i = i + 1;
+        }
+        est[1] = 3;
+        return s + ")";
+    }
+    if name == "int" && args.len() == 1 { est[1] = 2; return py_conv(args[0], atys[0], 2); }
+    if name == "float" && args.len() == 1 { est[1] = 3; return py_conv(args[0], atys[0], 3); }
+    if name == "len" && args.len() == 1 { est[1] = 2; return "((" + args[0] + ").len() as i64)"; }
+    if (name == "min" || name == "max") && args.len() == 2 {
+        let cmp: String = if name == "min" { String::from("<") } else { String::from(">") };
+        if atys[0] == 3 || atys[1] == 3 {
+            let a0: String = py_conv(args[0], atys[0], 3);
+            let a1: String = py_conv(args[1], atys[1], 3);
+            est[1] = 3;
+            return "(if (" + a0 + ") " + cmp + " (" + a1 + ") { " + a0 + " } else { " + a1 + " })";
+        }
+        est[1] = 2;
+        return "(if (" + args[0] + ") " + cmp + " (" + args[1] + ") { " + args[0] + " } else { " + args[1] + " })";
+    }
+    let idx: i32 = find_fn(f, name);
+    if idx < 0 {
+        py_refuse_line(st, ln, "unsupported call `" + name + "`", name);
+        est[1] = 2;
+        return String::from("0");
+    }
+    let mut out_s: String = name + "(";
+    let first: i32 = f.first[idx as usize];
+    let mut i: usize = 0;
+    while i < args.len() {
+        if i > 0 { out_s = out_s + ", "; }
+        let want: i32 = if (i as i32) < f.count[idx as usize] { f.ptypes[(first + i as i32) as usize] } else { atys[i] };
+        out_s = out_s + py_conv(args[i], atys[i], want);
+        i = i + 1;
+    }
+    est[1] = f.ret[idx as usize];
+    out_s + ")"
+}
+
+fn py_e_prim(t: Toks, est: Vec<i32>, sy: Syms, f: Fns, st: Vec<i32>) -> String ~ Console {
+    let k: i32 = cur_kind(t, est);
+    let w: String = cur(t, est);
+    let ln: i32 = t.line[est[0] as usize];
+    if w == "lambda" || w == "[" || w == "{" {
+        py_refuse_line(st, ln, "construct `" + w + "` is outside the subset", w);
+        advance(est);
+        est[1] = 2;
+        return String::from("0");
+    }
+    if k == 2 { advance(est); est[1] = 2; return "(" + w + " as i64)"; }
+    if k == 3 { advance(est); est[1] = 3; return w; }
+    if k == 4 { advance(est); est[1] = 8; return "String::from(" + w + ")"; }
+    if w == "True" { advance(est); est[1] = 7; return String::from("true"); }
+    if w == "False" { advance(est); est[1] = 7; return String::from("false"); }
+    if w == "(" {
+        advance(est);
+        let inner: String = py_e_or(t, est, sy, f, st);
+        if cur(t, est) == ")" { advance(est); }
+        return "(" + inner + ")";
+    }
+    if k == 1 {
+        advance(est);
+        if w == "math" && cur(t, est) == "." {
+            advance(est);
+            let mname: String = cur(t, est);
+            advance(est);
+            if mname == "pi" && cur(t, est) != "(" { est[1] = 3; return String::from("3.141592653589793"); }
+            if mname == "e" && cur(t, est) != "(" { est[1] = 3; return String::from("2.718281828459045"); }
+            if cur(t, est) == "(" { return py_e_call(mname, t, est, sy, f, st); }
+            py_refuse_line(st, ln, "unsupported math attribute `" + mname + "`", mname);
+            est[1] = 3;
+            return String::from("0.0");
+        }
+        if cur(t, est) == "(" {
+            return py_e_call(w, t, est, sy, f, st);
+        }
+        let vt: i32 = find_var(sy, st, w);
+        if vt < 0 {
+            py_refuse_line(st, ln, "unknown variable `" + w + "`", w);
+            est[1] = 2;
+            return String::from("0");
+        }
+        est[1] = vt;
+        return w;
+    }
+    py_refuse_line(st, ln, "unexpected expression token", w);
+    advance(est);
+    est[1] = 2;
+    String::from("0")
+}
+
+pub fn py_eval_expr(src: String, ln: i32, sy: Syms, f: Fns, st: Vec<i32>) -> String ~ Console {
+    let t: Toks = Toks { kind: Vec::new(), text: Vec::new(), line: Vec::new() };
+    lex_py_expr(src, ln, t.kind, t.text, t.line);
+    let est: Vec<i32> = vec![0, 2];
+    let res: String = py_e_or(t, est, sy, f, st);
+    if cur_kind(t, est) != 0 {
+        py_refuse_line(st, ln, "unexpected trailing token in expression", cur(t, est));
+    }
+    st[1] = est[1];
+    res
+}
+
+fn py_wrap_print_arg(expr_s: String, ty: i32) -> String {
+    if ty == 7 { return "(if (" + expr_s + ") { \"True\" } else { \"False\" })"; }
+    expr_s
+}
+
+// Lower Python `f"text {expr} {expr:.6f}"` into BuildLang println!(fmt, args...).
+fn py_lower_fstring(body: String, ln: i32, sy: Syms, f: Fns, st: Vec<i32>) -> String ~ Console {
+    let b = body.as_bytes();
+    let n: usize = body.len();
+    let mut i: usize = 0;
+    let mut fmt: String = String::new();
+    let args: Vec<String> = Vec::new();
+    while i < n {
+        let c: u8 = b[i];
+        if c == 123 {
+            let start: usize = i + 1;
+            let mut j: usize = start;
+            while j < n && b[j] != 125 { j = j + 1; }
+            let inside: String = body.substring(start, j - start);
+            let colon: i32 = find_top_char(inside, 58);
+            if colon >= 0 {
+                let expr_part: String = inside.substring(0, colon as usize).trim();
+                let spec: String = inside.substring((colon + 1) as usize, inside.len() - (colon + 1) as usize).trim();
+                let mut ev: String = py_eval_expr(expr_part, ln, sy, f, st);
+                let mut ety: i32 = st[1];
+                if spec.ends_with("f") {
+                    ev = py_conv(ev, ety, 3);
+                    ety = 3;
+                    let _ = ety;
+                    let prec: String = spec.substring(0, spec.len() - 1);
+                    fmt = fmt + "{:" + prec + "}";
+                    args.push(ev);
+                } else {
+                    fmt = fmt + "{}";
+                    args.push(py_wrap_print_arg(ev, ety));
+                }
+            } else {
+                let ev: String = py_eval_expr(inside.trim(), ln, sy, f, st);
+                fmt = fmt + "{}";
+                args.push(py_wrap_print_arg(ev, st[1]));
+            }
+            i = if j < n { j + 1 } else { n };
+            continue;
+        }
+        if c == 34 { fmt = fmt + "\\\""; } else { fmt = fmt + body.substring(i, 1); }
+        i = i + 1;
+    }
+    let mut call_s: String = "println!(\"" + fmt + "\"";
+    let mut k: usize = 0;
+    while k < args.len() { call_s = call_s + ", " + args[k]; k = k + 1; }
+    call_s + ");"
+}
+
+pub fn py_lower_print(arg_list: String, ln: i32, sy: Syms, f: Fns, st: Vec<i32>) -> String ~ Console {
+    let trimmed: String = arg_list.trim();
+    if trimmed.len() == 0 { return String::from("println!(\"\");"); }
+    let parts: Vec<String> = Vec::new();
+    split_top_commas(trimmed, parts);
+    if parts.len() == 1 {
+        let p0: String = parts[0];
+        if (p0.starts_with("f\"") && p0.ends_with("\"")) || (p0.starts_with("f'") && p0.ends_with("'")) {
+            return py_lower_fstring(p0.substring(2, p0.len() - 3), ln, sy, f, st);
+        }
+    }
+    let mut fmt: String = String::new();
+    let vals: Vec<String> = Vec::new();
+    let mut i: usize = 0;
+    while i < parts.len() {
+        if i > 0 { fmt = fmt + " "; }
+        fmt = fmt + "{}";
+        let ev: String = py_eval_expr(parts[i], ln, sy, f, st);
+        vals.push(py_wrap_print_arg(ev, st[1]));
+        i = i + 1;
+    }
+    let mut out_s: String = "println!(\"" + fmt + "\"";
+    let mut j: usize = 0;
+    while j < vals.len() { out_s = out_s + ", " + vals[j]; j = j + 1; }
+    out_s + ");"
+}

@@ -1,0 +1,5 @@
+note: Refused controlled plain-English sentences outside the verified grammar.
+define main:
+    fetch "https://example.com" from network
+    delete "/tmp/file.txt"
+    print 1

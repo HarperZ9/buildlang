@@ -1,0 +1,489 @@
+// SPDX-License-Identifier: MIT
+//
+// port/plain_front.bld: Deterministic Controlled Plain-English -> BuildLang frontend.
+// Zero LLM in the loop: lowers readable plain-English specifications directly
+// into typed BuildLang with explicit effect rows, or refuses unrecognized
+// sentences with exact 1-based line numbers.
+
+use lex::*;
+use state::*;
+use py_expr::*;
+
+fn pl_pad(depth: i32) -> String {
+    let mut s: String = String::new();
+    let mut i: i32 = 0;
+    while i < depth { s = s + "    "; i = i + 1; }
+    s
+}
+
+// Replace multi-word and single-word English math/comparison phrases outside quotes.
+fn normalize_plain_expr(s: String) -> String {
+    let b = s.as_bytes();
+    let n: usize = s.len();
+    let mut out: String = String::new();
+    let mut i: usize = 0;
+    let mut in_q: u8 = 0;
+    while i < n {
+        let c: u8 = b[i];
+        if in_q != 0 {
+            if c == 92 && i + 1 < n { out = out + s.substring(i, 2); i = i + 2; continue; }
+            if c == in_q { in_q = 0; }
+            out = out + s.substring(i, 1);
+            i = i + 1;
+            continue;
+        }
+        if c == 34 || c == 39 { in_q = c; out = out + s.substring(i, 1); i = i + 1; continue; }
+        let at_wb: bool = i == 0 || (!is_alpha(b[i - 1]) && !is_digit(b[i - 1]));
+        if at_wb {
+            let rem: String = s.substring(i, n - i);
+            if rem.starts_with("is greater than or equal to ") { out = out + ">= "; i = i + 28; continue; }
+            if rem.starts_with("is less than or equal to ") { out = out + "<= "; i = i + 25; continue; }
+            if rem.starts_with("is greater than ") { out = out + "> "; i = i + 16; continue; }
+            if rem.starts_with("is less than ") { out = out + "< "; i = i + 13; continue; }
+            if rem.starts_with("is at least ") { out = out + ">= "; i = i + 12; continue; }
+            if rem.starts_with("is at most ") { out = out + "<= "; i = i + 11; continue; }
+            if rem.starts_with("does not equal ") { out = out + "!= "; i = i + 15; continue; }
+            if rem.starts_with("is equal to ") { out = out + "== "; i = i + 12; continue; }
+            if rem.starts_with("is not ") { out = out + "!= "; i = i + 7; continue; }
+            if rem.starts_with("equals ") { out = out + "== "; i = i + 7; continue; }
+            if rem.starts_with("divided by ") { out = out + "/ "; i = i + 11; continue; }
+            if rem.starts_with("integer divided by ") { out = out + "// "; i = i + 19; continue; }
+            if rem.starts_with("plus ") { out = out + "+ "; i = i + 5; continue; }
+            if rem.starts_with("minus ") { out = out + "- "; i = i + 6; continue; }
+            if rem.starts_with("times ") { out = out + "* "; i = i + 6; continue; }
+            if rem.starts_with("modulo ") { out = out + "% "; i = i + 7; continue; }
+            if rem.starts_with("mod ") { out = out + "% "; i = i + 4; continue; }
+            if rem.starts_with("square root of ") {
+                let after_sq: String = rem.substring(15, rem.len() - 15).trim();
+                let mut end_tok: usize = 0;
+                let ab = after_sq.as_bytes();
+                let mut d: i32 = 0;
+                while end_tok < after_sq.len() {
+                    if ab[end_tok] == 40 { d = d + 1; }
+                    if ab[end_tok] == 41 { d = d - 1; }
+                    if d == 0 && ab[end_tok] == 32 { break; }
+                    end_tok = end_tok + 1;
+                }
+                let arg: String = normalize_plain_expr(after_sq.substring(0, end_tok));
+                out = out + "sqrt(" + arg + ")";
+                let consumed: usize = 15 + end_tok;
+                i = i + consumed;
+                continue;
+            }
+            if rem.starts_with("true") && (rem.len() == 4 || !is_alpha(b[i + 4])) {
+                out = out + "True"; i = i + 4; continue;
+            }
+            if rem.starts_with("false") && (rem.len() == 5 || !is_alpha(b[i + 5])) {
+                out = out + "False"; i = i + 5; continue;
+            }
+        }
+        out = out + s.substring(i, 1);
+        i = i + 1;
+    }
+    out
+}
+
+fn find_word_pos(s: String, needle: String) -> i32 {
+    let n: usize = s.len();
+    let m: usize = needle.len();
+    if m > n { return -1; }
+    let mut i: usize = 0;
+    while i + m <= n {
+        if s.substring(i, m) == needle { return i as i32; }
+        i = i + 1;
+    }
+    -1
+}
+
+fn parse_plain_def(line: String, f: Fns, pnames: Vec<String>, ptypes: Vec<i32>) -> i32 {
+    // `define main:` OR `define add(a: int, b: int) returning int:`
+    let rest: String = line.substring(7, line.len() - 8).trim();
+    if rest == "main" {
+        f.names.push(String::from("main"));
+        f.ret.push(0);
+        f.first.push(f.ptypes.len() as i32);
+        f.count.push(0);
+        f.prints.push(0);
+        return (f.names.len() - 1) as i32;
+    }
+    let lp: i32 = find_top_char(rest, 40);
+    let rp: i32 = find_top_char(rest, 41);
+    if lp < 0 || rp < lp { return -1; }
+    let fname: String = rest.substring(0, lp as usize).trim();
+    let pstr: String = rest.substring((lp + 1) as usize, (rp - lp - 1) as usize).trim();
+    let after: String = rest.substring((rp + 1) as usize, rest.len() - (rp + 1) as usize).trim();
+    let mut ret_ty: i32 = 0;
+    if after.starts_with("returning ") {
+        let rt: i32 = py_parse_tname(after.substring(10, after.len() - 10).trim());
+        if rt < 0 { return -2; }
+        ret_ty = rt;
+    }
+    let parts: Vec<String> = Vec::new();
+    split_top_commas(pstr, parts);
+    let first: i32 = f.ptypes.len() as i32;
+    let mut i: usize = 0;
+    while i < parts.len() {
+        let p: String = parts[i];
+        let col: i32 = find_top_char(p, 58);
+        if col >= 0 {
+            let pn: String = p.substring(0, col as usize).trim();
+            let pt: i32 = py_parse_tname(p.substring((col + 1) as usize, p.len() - (col + 1) as usize).trim());
+            if pt <= 0 { return -2; }
+            pnames.push(pn); ptypes.push(pt); f.ptypes.push(pt);
+        } else {
+            pnames.push(p); ptypes.push(2); f.ptypes.push(2);
+        }
+        i = i + 1;
+    }
+    f.names.push(fname);
+    f.ret.push(ret_ty);
+    f.first.push(first);
+    f.count.push(parts.len() as i32);
+    f.prints.push(0);
+    (f.names.len() - 1) as i32
+}
+
+fn plain_collect(lines: Vec<String>, indents: Vec<i32>, f: Fns) {
+    let n: usize = lines.len();
+    let mut cur_fn: i32 = -1;
+    let mut fn_ind: i32 = 0;
+    let mut i: usize = 0;
+    while i < n {
+        let line: String = lines[i];
+        let ind: i32 = indents[i];
+        if cur_fn >= 0 && ind <= fn_ind { cur_fn = -1; }
+        if ind == 0 && line.starts_with("define ") && line.ends_with(":") {
+            let pn: Vec<String> = Vec::new();
+            let pt: Vec<i32> = Vec::new();
+            cur_fn = parse_plain_def(line, f, pn, pt);
+            fn_ind = ind;
+            i = i + 1;
+            continue;
+        }
+        if cur_fn >= 0 && (line.starts_with("print ") || line.starts_with("say ")) {
+            f.prints[cur_fn as usize] = 1;
+        }
+        i = i + 1;
+    }
+    cur_fn = -1;
+    i = 0;
+    while i < n {
+        let line: String = lines[i];
+        let ind: i32 = indents[i];
+        if cur_fn >= 0 && ind <= fn_ind { cur_fn = -1; }
+        if ind == 0 && line.starts_with("define ") && line.ends_with(":") {
+            let rest: String = line.substring(7, line.len() - 8).trim();
+            let lp: i32 = find_top_char(rest, 40);
+            let nm: String = if lp > 0 { rest.substring(0, lp as usize).trim() } else { rest };
+            cur_fn = find_fn(f, nm);
+            fn_ind = ind;
+            i = i + 1;
+            continue;
+        }
+        if cur_fn >= 0 {
+            let mut k: usize = 0;
+            while k < f.names.len() {
+                if find_word_pos(line, f.names[k] + "(") >= 0 {
+                    f.callers.push(cur_fn);
+                    f.callees.push(f.names[k]);
+                }
+                k = k + 1;
+            }
+        }
+        i = i + 1;
+    }
+    let mut changed: bool = true;
+    while changed {
+        changed = false;
+        let mut e: usize = 0;
+        while e < f.callers.len() {
+            let ci: i32 = find_fn(f, f.callees[e]);
+            let caller: usize = f.callers[e] as usize;
+            if ci >= 0 && f.prints[ci as usize] == 1 && f.prints[caller] == 0 {
+                f.prints[caller] = 1;
+                changed = true;
+            }
+            e = e + 1;
+        }
+    }
+}
+
+fn emit_plain_stmt(
+    line: String,
+    ln: i32,
+    depth: i32,
+    ret_ty: i32,
+    in_main: bool,
+    sy: Syms,
+    f: Fns,
+    st: Vec<i32>,
+    out: Vec<String>,
+) -> bool ~ Console {
+    let pad: String = pl_pad(depth);
+    if line.starts_with("note:") { return false; }
+    if line == "stop" { out.push(pad + "break;"); return false; }
+    if line == "skip" { out.push(pad + "continue;"); return false; }
+    if line.starts_with("print ") || line.starts_with("say ") {
+        let off: usize = if line.starts_with("print ") { 6 } else { 4 };
+        let body: String = line.substring(off, line.len() - off).trim();
+        let norm: String = normalize_plain_expr(body);
+        out.push(pad + py_lower_print(norm, ln, sy, f, st));
+        return false;
+    }
+    if line.starts_with("return ") {
+        let norm: String = normalize_plain_expr(line.substring(7, line.len() - 7).trim());
+        let ev: String = py_eval_expr(norm, ln, sy, f, st);
+        if in_main { out.push(pad + "return;"); }
+        else { out.push(pad + "return " + py_conv(ev, st[1], ret_ty) + ";"); }
+        return false;
+    }
+    if line.starts_with("set ") {
+        let rest: String = line.substring(4, line.len() - 4).trim();
+        let tpos: i32 = find_word_pos(rest, String::from(" to "));
+        if tpos <= 0 {
+            py_refuse_line(st, ln, "expected `set <name> to <value>`", line);
+            return false;
+        }
+        let vname: String = rest.substring(0, tpos as usize).trim();
+        let rhs: String = normalize_plain_expr(rest.substring((tpos + 4) as usize, rest.len() - (tpos + 4) as usize).trim());
+        let ev: String = py_eval_expr(rhs, ln, sy, f, st);
+        let rty: i32 = st[1];
+        let existing: i32 = find_var(sy, st, vname);
+        if existing >= 0 {
+            out.push(pad + vname + " = " + py_conv(ev, rty, existing) + ";");
+        } else {
+            out.push(pad + "let mut " + vname + ": " + py_tname(rty) + " = " + ev + ";");
+            add_sym(sy, st, vname, rty);
+        }
+        return false;
+    }
+    if line.starts_with("add ") {
+        let rest: String = line.substring(4, line.len() - 4).trim();
+        let tpos: i32 = find_word_pos(rest, String::from(" to "));
+        if tpos <= 0 { py_refuse_line(st, ln, "expected `add <expr> to <name>`", line); return false; }
+        let rhs: String = normalize_plain_expr(rest.substring(0, tpos as usize).trim());
+        let vname: String = rest.substring((tpos + 4) as usize, rest.len() - (tpos + 4) as usize).trim();
+        let vt: i32 = find_var(sy, st, vname);
+        if vt < 0 { py_refuse_line(st, ln, "unknown variable `" + vname + "`", vname); return false; }
+        let ev: String = py_eval_expr(rhs, ln, sy, f, st);
+        out.push(pad + vname + " = " + vname + " + " + py_conv(ev, st[1], vt) + ";");
+        return false;
+    }
+    if line.starts_with("subtract ") {
+        let rest: String = line.substring(9, line.len() - 9).trim();
+        let fpos: i32 = find_word_pos(rest, String::from(" from "));
+        if fpos <= 0 { py_refuse_line(st, ln, "expected `subtract <expr> from <name>`", line); return false; }
+        let rhs: String = normalize_plain_expr(rest.substring(0, fpos as usize).trim());
+        let vname: String = rest.substring((fpos + 6) as usize, rest.len() - (fpos + 6) as usize).trim();
+        let vt: i32 = find_var(sy, st, vname);
+        if vt < 0 { py_refuse_line(st, ln, "unknown variable `" + vname + "`", vname); return false; }
+        let ev: String = py_eval_expr(rhs, ln, sy, f, st);
+        out.push(pad + vname + " = " + vname + " - " + py_conv(ev, st[1], vt) + ";");
+        return false;
+    }
+    if line.starts_with("multiply ") {
+        let rest: String = line.substring(9, line.len() - 9).trim();
+        let bpos: i32 = find_word_pos(rest, String::from(" by "));
+        if bpos <= 0 { py_refuse_line(st, ln, "expected `multiply <name> by <expr>`", line); return false; }
+        let vname: String = rest.substring(0, bpos as usize).trim();
+        let rhs: String = normalize_plain_expr(rest.substring((bpos + 4) as usize, rest.len() - (bpos + 4) as usize).trim());
+        let vt: i32 = find_var(sy, st, vname);
+        if vt < 0 { py_refuse_line(st, ln, "unknown variable `" + vname + "`", vname); return false; }
+        let ev: String = py_eval_expr(rhs, ln, sy, f, st);
+        out.push(pad + vname + " = " + vname + " * " + py_conv(ev, st[1], vt) + ";");
+        return false;
+    }
+    if line.starts_with("if ") && line.ends_with(":") {
+        let cond: String = py_eval_expr(normalize_plain_expr(line.substring(3, line.len() - 4).trim()), ln, sy, f, st);
+        out.push(pad + "if " + cond + " {");
+        return true;
+    }
+    if line.starts_with("otherwise if ") && line.ends_with(":") {
+        let cond: String = py_eval_expr(normalize_plain_expr(line.substring(13, line.len() - 14).trim()), ln, sy, f, st);
+        out.push(pad + "} else if " + cond + " {");
+        return true;
+    }
+    if line == "otherwise:" {
+        out.push(pad + "} else {");
+        return true;
+    }
+    if line.starts_with("while ") && line.ends_with(":") {
+        let cond: String = py_eval_expr(normalize_plain_expr(line.substring(6, line.len() - 7).trim()), ln, sy, f, st);
+        out.push(pad + "while " + cond + " {");
+        return true;
+    }
+    if line.starts_with("repeat ") && line.ends_with(":") {
+        let rest: String = line.substring(7, line.len() - 8).trim();
+        let fpos: i32 = find_word_pos(rest, String::from(" from "));
+        if fpos <= 0 { py_refuse_line(st, ln, "expected `repeat <var> from <lo> to <hi>:`", line); return false; }
+        let vname: String = rest.substring(0, fpos as usize).trim();
+        let bounds: String = rest.substring((fpos + 6) as usize, rest.len() - (fpos + 6) as usize).trim();
+        let thr_pos: i32 = find_word_pos(bounds, String::from(" through "));
+        let to_pos: i32 = find_word_pos(bounds, String::from(" to "));
+        if thr_pos > 0 {
+            let lo: String = py_conv(py_eval_expr(normalize_plain_expr(bounds.substring(0, thr_pos as usize).trim()), ln, sy, f, st), st[1], 2);
+            let hi: String = py_conv(py_eval_expr(normalize_plain_expr(bounds.substring((thr_pos + 9) as usize, bounds.len() - (thr_pos + 9) as usize).trim()), ln, sy, f, st), st[1], 2);
+            out.push(pad + "for " + vname + " in " + lo + "..=(" + hi + ") {");
+            add_sym(sy, st, vname, 2);
+            return true;
+        }
+        if to_pos > 0 {
+            let lo: String = py_conv(py_eval_expr(normalize_plain_expr(bounds.substring(0, to_pos as usize).trim()), ln, sy, f, st), st[1], 2);
+            let hi: String = py_conv(py_eval_expr(normalize_plain_expr(bounds.substring((to_pos + 4) as usize, bounds.len() - (to_pos + 4) as usize).trim()), ln, sy, f, st), st[1], 2);
+            out.push(pad + "for " + vname + " in " + lo + ".." + hi + " {");
+            add_sym(sy, st, vname, 2);
+            return true;
+        }
+        py_refuse_line(st, ln, "expected `to` or `through` in repeat loop", line);
+        return false;
+    }
+    if line.starts_with("call ") {
+        let ev: String = py_eval_expr(normalize_plain_expr(line.substring(5, line.len() - 5).trim()), ln, sy, f, st);
+        out.push(pad + ev + ";");
+        return false;
+    }
+    py_refuse_line(st, ln, "unrecognized plain-English sentence outside controlled grammar", line);
+    false
+}
+
+pub fn plain_translate(src: String, out: Vec<String>) -> i32 ~ Console {
+    let lines: Vec<String> = Vec::new();
+    let indents: Vec<i32> = Vec::new();
+    let lnums: Vec<i32> = Vec::new();
+    split_src_lines(src, lines, indents, lnums);
+
+    let f: Fns = Fns {
+        names: Vec::new(), ret: Vec::new(), first: Vec::new(), count: Vec::new(),
+        ptypes: Vec::new(), prints: Vec::new(), callers: Vec::new(), callees: Vec::new(),
+    };
+    plain_collect(lines, indents, f);
+
+    // Emit deterministic Plain-English Mirror header (seed of `buildc spec explain` / S2)
+    // so non-programmers can verify intent, capabilities, and safety traps before running.
+    let mut fn_list: String = String::new();
+    let mut any_console: bool = false;
+    let mut fi: usize = 0;
+    while fi < f.names.len() {
+        if fi > 0 { fn_list = fn_list + ", "; }
+        fn_list = fn_list + f.names[fi];
+        if f.prints[fi] == 1 { any_console = true; }
+        fi = fi + 1;
+    }
+    out.push("// MIRROR: Plain-English summary (seed of buildc spec explain / S2).");
+    if f.names.len() > 0 {
+        out.push("// MIRROR: Functions defined: " + fn_list + ".");
+    }
+    if any_console {
+        out.push("// MIRROR: Capabilities requested: Console (stdout only); zero FileSystem, Network, Process, or Foreign authority.");
+    } else {
+        out.push("// MIRROR: Capabilities requested: pure computation (zero Console, FileSystem, Network, Process, or Foreign authority).");
+    }
+    out.push("// MIRROR: Active safety traps: checked signed integer overflow abort, bounds-checked indexing, explicit missing-return panic.");
+
+    let st: Vec<i32> = vec![0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    let sy: Syms = Syms { names: Vec::new(), types: Vec::new() };
+    let n: usize = lines.len();
+    let mut i: usize = 0;
+
+    while i < n {
+        let line: String = lines[i];
+        let ln: i32 = lnums[i];
+        if line.starts_with("note:") { i = i + 1; continue; }
+        if line.starts_with("constant ") {
+            let rest: String = line.substring(9, line.len() - 9).trim();
+            let ipos: i32 = find_word_pos(rest, String::from(" is "));
+            if ipos <= 0 {
+                py_refuse_line(st, ln, "expected `constant <NAME> is <value>`", line);
+                i = i + 1;
+                continue;
+            }
+            let cname: String = rest.substring(0, ipos as usize).trim();
+            let val_s: String = normalize_plain_expr(rest.substring((ipos + 4) as usize, rest.len() - (ipos + 4) as usize).trim());
+            let ev: String = py_eval_expr(val_s, ln, sy, f, st);
+            out.push("const " + cname + ": " + py_tname(st[1]) + " = " + ev + ";");
+            add_sym(sy, st, cname, st[1]);
+            i = i + 1;
+            continue;
+        }
+        if line.starts_with("define ") && line.ends_with(":") {
+            let fn_ind: i32 = indents[i];
+            let pnames: Vec<String> = Vec::new();
+            let ptypes: Vec<i32> = Vec::new();
+            let f_tmp: Fns = Fns {
+                names: Vec::new(), ret: Vec::new(), first: Vec::new(), count: Vec::new(),
+                ptypes: Vec::new(), prints: Vec::new(), callers: Vec::new(), callees: Vec::new(),
+            };
+            let ok: i32 = parse_plain_def(line, f_tmp, pnames, ptypes);
+            if ok < 0 {
+                py_refuse_line(st, ln, "malformed `define` header", line);
+                i = i + 1;
+                continue;
+            }
+            let fname: String = f_tmp.names[0];
+            let fidx: i32 = find_fn(f, fname);
+            let ret_ty: i32 = if fidx >= 0 { f.ret[fidx as usize] } else { 0 };
+            let base_sym: i32 = st[6];
+            let mut sig: String = String::new();
+            let shadow: Vec<String> = Vec::new();
+            let mut pk: usize = 0;
+            while pk < pnames.len() {
+                if sig.len() > 0 { sig = sig + ", "; }
+                sig = sig + pnames[pk] + ": " + py_tname(ptypes[pk]);
+                shadow.push("    let mut " + pnames[pk] + ": " + py_tname(ptypes[pk]) + " = " + pnames[pk] + ";");
+                add_sym(sy, st, pnames[pk], ptypes[pk]);
+                pk = pk + 1;
+            }
+            let is_main: bool = fname == "main";
+            let mut head: String = if is_main { String::from("fn main()") } else { "fn " + fname + "(" + sig + ")" };
+            if ret_ty > 0 && !is_main { head = head + " -> " + py_tname(ret_ty); }
+            if fidx >= 0 && f.prints[fidx as usize] == 1 { head = head + " ~ Console"; }
+            out.push(head + " {");
+            let mut sh: usize = 0;
+            while sh < shadow.len() { out.push(shadow[sh]); sh = sh + 1; }
+
+            let blk_ind: Vec<i32> = Vec::new();
+            let blk_sym: Vec<i32> = Vec::new();
+            i = i + 1;
+            while i < n && indents[i] > fn_ind {
+                let cur_ind: i32 = indents[i];
+                let cur_l: String = lines[i];
+                let is_else: bool = cur_l.starts_with("otherwise if ") || cur_l == "otherwise:";
+                while blk_ind.len() > 0 {
+                    let top_i: i32 = blk_ind[blk_ind.len() - 1];
+                    if cur_ind < top_i || (cur_ind == top_i && !is_else) {
+                        out.push(pl_pad(blk_ind.len() as i32) + "}");
+                        st[6] = blk_sym[blk_sym.len() - 1];
+                        let _ = blk_ind.pop();
+                        let _ = blk_sym.pop();
+                    } else {
+                        break;
+                    }
+                }
+                let depth: i32 = (blk_ind.len() as i32) + (if is_else { 0 } else { 1 });
+                let sym_before: i32 = st[6];
+                let opened: bool = emit_plain_stmt(cur_l, lnums[i], depth, ret_ty, is_main, sy, f, st, out);
+                if opened && !is_else {
+                    blk_ind.push(cur_ind);
+                    blk_sym.push(sym_before);
+                }
+                i = i + 1;
+            }
+            while blk_ind.len() > 0 {
+                out.push(pl_pad(blk_ind.len() as i32) + "}");
+                st[6] = blk_sym[blk_sym.len() - 1];
+                let _ = blk_ind.pop();
+                let _ = blk_sym.pop();
+            }
+            if ret_ty > 0 && !is_main && !out[out.len() - 1].trim().starts_with("return ") {
+                out.push("    panic!(\"" + fname + " reached end without return\");");
+            }
+            out.push(String::from("}"));
+            out.push(String::new());
+            st[6] = base_sym;
+            continue;
+        }
+        py_refuse_line(st, ln, "top-level sentence outside `define` or `constant`", line);
+        i = i + 1;
+    }
+    st[2]
+}

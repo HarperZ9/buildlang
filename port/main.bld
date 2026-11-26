@@ -22,6 +22,9 @@ mod exprs;
 mod decls;
 mod stmts;
 mod file;
+mod py_expr;
+mod py_front;
+mod plain_front;
 
 use types::*;
 use lex::*;
@@ -30,21 +33,37 @@ use exprs::*;
 use decls::*;
 use stmts::*;
 use file::*;
+use py_front::*;
+use plain_front::*;
 
 fn main() ~ Console + FileSystem + Environment + Process {
-    if args_count() != 4 || args_get(1) != "c" {
-        println!("usage: port c input.c output.bld");
+    if args_count() != 4 {
+        println!("usage: port <c|py|plain> input output.bld");
+        exit(1);
+    }
+    let lang: String = args_get(1);
+    if lang != "c" && lang != "py" && lang != "plain" {
+        println!("usage: port <c|py|plain> input output.bld");
         exit(1);
     }
     let src: String = read_file(args_get(2));
-    let t: Toks = Toks { kind: Vec::new(), text: Vec::new(), line: Vec::new() };
-    lex(src, t.kind, t.text, t.line);
-    let f: Fns = Fns { names: Vec::new(), ret: Vec::new(), first: Vec::new(), count: Vec::new(), ptypes: Vec::new(), prints: Vec::new(), callers: Vec::new(), callees: Vec::new() };
-    collect(t, f);
     let out: Vec<String> = Vec::new();
-    out.push("// Ported from C by `port`. Every conversion C made silently is written as a cast.");
     println!("port: {}", args_get(2));
-    let refused: i32 = translate(t, f, out);
+    let mut refused: i32 = 0;
+    if lang == "c" {
+        let t: Toks = Toks { kind: Vec::new(), text: Vec::new(), line: Vec::new() };
+        lex(src, t.kind, t.text, t.line);
+        let f: Fns = Fns { names: Vec::new(), ret: Vec::new(), first: Vec::new(), count: Vec::new(), ptypes: Vec::new(), prints: Vec::new(), callers: Vec::new(), callees: Vec::new() };
+        collect(t, f);
+        out.push("// Ported from C by `port`. Every conversion C made silently is written as a cast.");
+        refused = translate(t, f, out);
+    } else if lang == "py" {
+        out.push("// Ported from Python by `port py`. Effects and integer/float casts are explicit.");
+        refused = py_translate(src, out);
+    } else {
+        out.push("// Ported from Controlled Plain-English by `port plain`. Zero LLM; deterministic.");
+        refused = plain_translate(src, out);
+    }
     if refused > 0 {
         println!("refused: {} construct(s) outside the subset; nothing written", refused);
         exit(2);

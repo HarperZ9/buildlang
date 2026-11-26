@@ -27,7 +27,7 @@ def furnish(layout, pages, theme):
     for layer in theme.get("art", []):
         from .art import art_layer
         for page in pages:
-            g = art_layer(layer, page, theme)
+            g = art_layer(layer, page, theme, layout=layout)
             (page.furniture_under if layer.get("under", True) else page.furniture).extend(g)
 
 

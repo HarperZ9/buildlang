@@ -136,6 +136,53 @@ class Output(unittest.TestCase):
         b = _read(os.path.join(self.dir, "a2.pdf"))
         self.assertEqual(a, b)
 
+    def test_art_rule_anchors_above_clear_body_h2(self):
+        from engine.layout import Layout
+        from engine.render import furnish
+        from engine.theme import load_theme
+        src = os.path.join(self.dir, "anchor.tsv")
+        write_ir(
+            src,
+            [
+                ("h1", "Zain Dana Harper"),
+                ("contact", "contact@example.com"),
+                ("subtitle", "Compact Header"),
+                ("h2", "Selected Work"),
+                ("p", "Body paragraph."),
+            ],
+            theme="press-resume",
+        )
+        doc = docir.load(src)
+        theme = load_theme("press-resume")
+        theme["page"]["top"] = 36
+        theme["blocks"]["subtitle"]["after"] = 2
+        lay = Layout(doc, theme)
+        pages = lay.run()
+        furnish(lay, pages, theme)
+        rules = [g for g in pages[0].furniture_under if g.get("role") == "rule"]
+        self.assertEqual(len(rules), 1)
+        rule_y = rules[0]["d"][0][2]
+        h2_tops = [
+            pages[0].top + y - 1.2 * lay.style("h2")["size"]
+            for y, ln in pages[0].items
+            if lay.doc.blocks[ln.block].kind == "h2"
+        ]
+        self.assertTrue(h2_tops)
+        # Rule must track strictly above the first h2 (and below fixed y=135 under compact spacing)
+        self.assertLess(rule_y, h2_tops[0])
+        self.assertAlmostEqual(rule_y, h2_tops[0] - 6.0, places=3)
+        self.assertLess(rule_y, 135.0)
+
+        # Fallback: without any h2 block, rule uses its explicit spec["y"] = 135
+        src_no_h2 = os.path.join(self.dir, "noh2.tsv")
+        write_ir(src_no_h2, [("h1", "No Heading"), ("p", "Just a paragraph.")], theme="press-resume")
+        doc2 = docir.load(src_no_h2)
+        lay2 = Layout(doc2, theme)
+        pages2 = lay2.run()
+        furnish(lay2, pages2, theme)
+        rules2 = [g for g in pages2[0].furniture_under if g.get("role") == "rule"]
+        self.assertEqual(rules2[0]["d"][0][2], 135)
+
 
 KP_EXE = os.path.join(ROOT, "kp", "knuth_plass.exe")
 PAPER = os.path.join(ROOT, "proof", "docs", "paper-proof-packets.doc.tsv")

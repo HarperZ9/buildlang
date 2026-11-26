@@ -1,0 +1,573 @@
+// SPDX-License-Identifier: MIT
+//
+// port/py_front.bld: Deterministic Python-subset -> BuildLang frontend.
+// Pass 1 collects function signatures and transitive Console effects;
+// Pass 2 emits checked BuildLang with explicit types and casts, or refuses
+// unsupported constructs with exact 1-based line numbers.
+
+use lex::*;
+use state::*;
+use py_expr::*;
+
+fn pad_spaces(depth: i32) -> String {
+    let mut s: String = String::new();
+    let mut i: i32 = 0;
+    while i < depth { s = s + "    "; i = i + 1; }
+    s
+}
+
+fn is_py_refused_kw(line: String) -> String {
+    if line.starts_with("class ") { return String::from("class"); }
+    if line.starts_with("try:") || line == "try:" { return String::from("try"); }
+    if line.starts_with("except") { return String::from("except"); }
+    if line.starts_with("finally:") { return String::from("finally"); }
+    if line.starts_with("with ") { return String::from("with"); }
+    if line.starts_with("raise ") || line == "raise" { return String::from("raise"); }
+    if line.starts_with("yield ") || line == "yield" { return String::from("yield"); }
+    if line.starts_with("async ") { return String::from("async"); }
+    if line.starts_with("global ") { return String::from("global"); }
+    if line.starts_with("nonlocal ") { return String::from("nonlocal"); }
+    if line.starts_with("del ") { return String::from("del"); }
+    if line.starts_with("@") { return String::from("@decorator"); }
+    String::from("")
+}
+
+fn is_ident_str(s: String) -> bool {
+    if s.len() == 0 { return false; }
+    let b = s.as_bytes();
+    if !is_alpha(b[0]) { return false; }
+    let mut i: usize = 1;
+    while i < s.len() {
+        if !is_alpha(b[i]) && !is_digit(b[i]) { return false; }
+        i = i + 1;
+    }
+    true
+}
+
+fn parse_def_header(line: String, f: Fns, param_names: Vec<String>, param_types: Vec<i32>) -> i32 {
+    // Expect: `def name(a: int, b: float) -> float:`
+    let rest: String = line.substring(4, line.len() - 4).trim();
+    let lp: i32 = find_top_char(rest, 40);
+    let rp: i32 = find_top_char(rest, 41);
+    if lp < 0 || rp < lp { return -1; }
+    let fname: String = rest.substring(0, lp as usize).trim();
+    let pstr: String = rest.substring((lp + 1) as usize, (rp - lp - 1) as usize).trim();
+    let mut ret_ty: i32 = 0;
+    let after: String = rest.substring((rp + 1) as usize, rest.len() - (rp + 1) as usize).trim();
+    if after.starts_with("->") {
+        let mut rpart: String = after.substring(2, after.len() - 2).trim();
+        if rpart.ends_with(":") { rpart = rpart.substring(0, rpart.len() - 1).trim(); }
+        let parsed: i32 = py_parse_tname(rpart);
+        if parsed < 0 { return -2; }
+        ret_ty = parsed;
+    }
+    let parts: Vec<String> = Vec::new();
+    split_top_commas(pstr, parts);
+    let first: i32 = f.ptypes.len() as i32;
+    let mut i: usize = 0;
+    while i < parts.len() {
+        let p: String = parts[i];
+        let col: i32 = find_top_char(p, 58);
+        if col >= 0 {
+            let pn: String = p.substring(0, col as usize).trim();
+            let pt_s: String = p.substring((col + 1) as usize, p.len() - (col + 1) as usize).trim();
+            let pt: i32 = py_parse_tname(pt_s);
+            if pt <= 0 { return -2; }
+            param_names.push(pn);
+            param_types.push(pt);
+            f.ptypes.push(pt);
+        } else {
+            param_names.push(p);
+            param_types.push(2);
+            f.ptypes.push(2);
+        }
+        i = i + 1;
+    }
+    f.names.push(fname);
+    f.ret.push(ret_ty);
+    f.first.push(first);
+    f.count.push(parts.len() as i32);
+    f.prints.push(0);
+    (f.names.len() - 1) as i32
+}
+
+fn line_calls_fn(line: String, callee: String) -> bool {
+    let needle: String = callee + "(";
+    let n: usize = line.len();
+    let m: usize = needle.len();
+    if m > n { return false; }
+    let b = line.as_bytes();
+    let mut i: usize = 0;
+    while i + m <= n {
+        if line.substring(i, m) == needle {
+            if i == 0 || (!is_alpha(b[i - 1]) && !is_digit(b[i - 1])) { return true; }
+        }
+        i = i + 1;
+    }
+    false
+}
+
+// Pass 1: collect all def signatures and transitive Console effect propagation.
+fn py_collect(lines: Vec<String>, indents: Vec<i32>, f: Fns) {
+    let n: usize = lines.len();
+    let mut cur_fn: i32 = -1;
+    let mut fn_ind: i32 = 0;
+    let mut i: usize = 0;
+    while i < n {
+        let line: String = lines[i];
+        let ind: i32 = indents[i];
+        if cur_fn >= 0 && ind <= fn_ind { cur_fn = -1; }
+        if ind == 0 && line.starts_with("def ") && line.ends_with(":") {
+            let pn: Vec<String> = Vec::new();
+            let pt: Vec<i32> = Vec::new();
+            cur_fn = parse_def_header(line, f, pn, pt);
+            fn_ind = ind;
+            i = i + 1;
+            continue;
+        }
+        if cur_fn >= 0 {
+            if line_calls_fn(line, String::from("print")) {
+                f.prints[cur_fn as usize] = 1;
+            }
+            if line.starts_with("return ") && f.ret[cur_fn as usize] == 0 {
+                let rv: String = line.substring(7, line.len() - 7).trim();
+                if rv == "True" || rv == "False" { f.ret[cur_fn as usize] = 7; }
+                else if rv.starts_with("\"") || rv.starts_with("'") { f.ret[cur_fn as usize] = 8; }
+                else if find_top_char(rv, 46) >= 0 { f.ret[cur_fn as usize] = 3; }
+                else { f.ret[cur_fn as usize] = 2; }
+            }
+        }
+        i = i + 1;
+    }
+    // Collect caller -> callee edges and propagate prints transitively.
+    cur_fn = -1;
+    i = 0;
+    while i < n {
+        let line: String = lines[i];
+        let ind: i32 = indents[i];
+        if cur_fn >= 0 && ind <= fn_ind { cur_fn = -1; }
+        if ind == 0 && line.starts_with("def ") && line.ends_with(":") {
+            let rest: String = line.substring(4, line.len() - 4).trim();
+            let lp: i32 = find_top_char(rest, 40);
+            if lp > 0 { cur_fn = find_fn(f, rest.substring(0, lp as usize).trim()); fn_ind = ind; }
+            i = i + 1;
+            continue;
+        }
+        if cur_fn >= 0 {
+            let mut k: usize = 0;
+            while k < f.names.len() {
+                if line_calls_fn(line, f.names[k]) {
+                    f.callers.push(cur_fn);
+                    f.callees.push(f.names[k]);
+                }
+                k = k + 1;
+            }
+        }
+        i = i + 1;
+    }
+    let mut changed: bool = true;
+    while changed {
+        changed = false;
+        let mut e: usize = 0;
+        while e < f.callers.len() {
+            let ci: i32 = find_fn(f, f.callees[e]);
+            let caller: usize = f.callers[e] as usize;
+            if ci >= 0 && f.prints[ci as usize] == 1 && f.prints[caller] == 0 {
+                f.prints[caller] = 1;
+                changed = true;
+            }
+            e = e + 1;
+        }
+    }
+}
+
+fn find_compound_assign(line: String) -> i32 {
+    let b = line.as_bytes();
+    let n: usize = line.len();
+    let mut i: usize = 0;
+    let mut in_q: u8 = 0;
+    while i + 1 < n {
+        let c: u8 = b[i];
+        if in_q != 0 {
+            if c == 92 && i + 1 < n { i = i + 2; continue; }
+            if c == in_q { in_q = 0; }
+            i = i + 1; continue;
+        }
+        if c == 34 || c == 39 { in_q = c; i = i + 1; continue; }
+        if b[i + 1] == 61 && (c == 43 || c == 45 || c == 42 || c == 47) {
+            return i as i32;
+        }
+        i = i + 1;
+    }
+    -1
+}
+
+fn find_plain_assign(line: String) -> i32 {
+    let b = line.as_bytes();
+    let n: usize = line.len();
+    let mut i: usize = 0;
+    let mut depth: i32 = 0;
+    let mut in_q: u8 = 0;
+    while i < n {
+        let c: u8 = b[i];
+        if in_q != 0 {
+            if c == 92 && i + 1 < n { i = i + 2; continue; }
+            if c == in_q { in_q = 0; }
+            i = i + 1; continue;
+        }
+        if c == 34 || c == 39 { in_q = c; i = i + 1; continue; }
+        if c == 40 { depth = depth + 1; }
+        if c == 41 { depth = depth - 1; }
+        if depth == 0 && c == 61 {
+            let prev_ok: bool = i == 0 || (b[i - 1] != 61 && b[i - 1] != 33 && b[i - 1] != 60 && b[i - 1] != 62);
+            let next_ok: bool = i + 1 >= n || b[i + 1] != 61;
+            if prev_ok && next_ok { return i as i32; }
+        }
+        i = i + 1;
+    }
+    -1
+}
+
+fn emit_py_stmt(
+    line: String,
+    ln: i32,
+    depth: i32,
+    ret_ty: i32,
+    in_main: bool,
+    sy: Syms,
+    f: Fns,
+    st: Vec<i32>,
+    out: Vec<String>,
+) -> bool ~ Console {
+    let pad: String = pad_spaces(depth);
+    let bad: String = is_py_refused_kw(line);
+    if bad.len() > 0 {
+        py_refuse_line(st, ln, "construct `" + bad + "` is outside the Python subset", bad);
+        return false;
+    }
+    if line == "pass" { return false; }
+    if line == "break" { out.push(pad + "break;"); return false; }
+    if line == "continue" { out.push(pad + "continue;"); return false; }
+    if line == "return" { out.push(pad + "return;"); return false; }
+    if line.starts_with("return ") {
+        let ev: String = py_eval_expr(line.substring(7, line.len() - 7).trim(), ln, sy, f, st);
+        if in_main {
+            out.push(pad + "return;");
+        } else {
+            out.push(pad + "return " + py_conv(ev, st[1], ret_ty) + ";");
+        }
+        return false;
+    }
+    if line.starts_with("print(") && line.ends_with(")") {
+        let inner: String = line.substring(6, line.len() - 7);
+        out.push(pad + py_lower_print(inner, ln, sy, f, st));
+        return false;
+    }
+    if line.starts_with("if ") && line.ends_with(":") {
+        let cond: String = py_eval_expr(line.substring(3, line.len() - 4).trim(), ln, sy, f, st);
+        out.push(pad + "if " + cond + " {");
+        return true;
+    }
+    if line.starts_with("elif ") && line.ends_with(":") {
+        let cond: String = py_eval_expr(line.substring(5, line.len() - 6).trim(), ln, sy, f, st);
+        out.push(pad + "} else if " + cond + " {");
+        return true;
+    }
+    if line == "else:" {
+        out.push(pad + "} else {");
+        return true;
+    }
+    if line.starts_with("while ") && line.ends_with(":") {
+        let cond: String = py_eval_expr(line.substring(6, line.len() - 7).trim(), ln, sy, f, st);
+        out.push(pad + "while " + cond + " {");
+        return true;
+    }
+    if line.starts_with("for ") && line.ends_with(":") {
+        let rest: String = line.substring(4, line.len() - 5).trim();
+        let mut in_pos: i32 = -1;
+        let mut p: usize = 0;
+        while p + 4 <= rest.len() {
+            if rest.substring(p, 4) == " in " { in_pos = p as i32; break; }
+            p = p + 1;
+        }
+        if in_pos <= 0 {
+            py_refuse_line(st, ln, "malformed for loop", line);
+            return false;
+        }
+        let var: String = rest.substring(0, in_pos as usize).trim();
+        let iter_s: String = rest.substring((in_pos + 4) as usize, rest.len() - (in_pos + 4) as usize).trim();
+        if !iter_s.starts_with("range(") || !iter_s.ends_with(")") {
+            py_refuse_line(st, ln, "only `for x in range(...)` is in the Python subset", iter_s);
+            return false;
+        }
+        let rargs: Vec<String> = Vec::new();
+        split_top_commas(iter_s.substring(6, iter_s.len() - 7), rargs);
+        if rargs.len() == 1 {
+            let stop_e: String = py_conv(py_eval_expr(rargs[0], ln, sy, f, st), st[1], 2);
+            out.push(pad + "for " + var + " in (0 as i64).." + stop_e + " {");
+            add_sym(sy, st, var, 2);
+            return true;
+        }
+        if rargs.len() == 2 {
+            let start_e: String = py_conv(py_eval_expr(rargs[0], ln, sy, f, st), st[1], 2);
+            let stop_e: String = py_conv(py_eval_expr(rargs[1], ln, sy, f, st), st[1], 2);
+            out.push(pad + "for " + var + " in " + start_e + ".." + stop_e + " {");
+            add_sym(sy, st, var, 2);
+            return true;
+        }
+        if rargs.len() == 3 {
+            let start_e: String = py_conv(py_eval_expr(rargs[0], ln, sy, f, st), st[1], 2);
+            let stop_e: String = py_conv(py_eval_expr(rargs[1], ln, sy, f, st), st[1], 2);
+            let step_e: String = py_conv(py_eval_expr(rargs[2], ln, sy, f, st), st[1], 2);
+            let step_var: String = "__step_" + var;
+            out.push(pad + "let mut " + var + ": i64 = " + start_e + ";");
+            out.push(pad + "let " + step_var + ": i64 = " + step_e + ";");
+            out.push(pad + "while (if " + step_var + " > 0 { " + var + " < " + stop_e + " } else { " + var + " > " + stop_e + " }) {");
+            add_sym(sy, st, var, 2);
+            st[7] = st[7] + 1;
+            return true;
+        }
+        py_refuse_line(st, ln, "range() takes 1 to 3 arguments", iter_s);
+        return false;
+    }
+    // Compound assignment: `x += e`, `x -= e`, `x *= e`, `x /= e`
+    let cpos: i32 = find_compound_assign(line);
+    if cpos > 0 {
+        let lhs: String = line.substring(0, cpos as usize).trim();
+        let op: String = line.substring(cpos as usize, 1);
+        let rhs: String = line.substring((cpos + 2) as usize, line.len() - (cpos + 2) as usize).trim();
+        let vt: i32 = find_var(sy, st, lhs);
+        if vt < 0 {
+            py_refuse_line(st, ln, "assignment to undeclared variable `" + lhs + "`", lhs);
+            return false;
+        }
+        let rv: String = py_eval_expr(rhs, ln, sy, f, st);
+        let rhs_conv: String = if op == "/" { py_conv(rv, st[1], 3) } else { py_conv(rv, st[1], vt) };
+        out.push(pad + lhs + " = " + lhs + " " + op + " " + rhs_conv + ";");
+        return false;
+    }
+    // Plain or typed assignment: `x = e` or `x: int = e`
+    let apos: i32 = find_plain_assign(line);
+    if apos > 0 {
+        let lhs_raw: String = line.substring(0, apos as usize).trim();
+        let rhs: String = line.substring((apos + 1) as usize, line.len() - (apos + 1) as usize).trim();
+        let col: i32 = find_top_char(lhs_raw, 58);
+        let mut vname: String = lhs_raw;
+        let mut ann_ty: i32 = -1;
+        if col >= 0 {
+            vname = lhs_raw.substring(0, col as usize).trim();
+            ann_ty = py_parse_tname(lhs_raw.substring((col + 1) as usize, lhs_raw.len() - (col + 1) as usize).trim());
+            if ann_ty <= 0 {
+                py_refuse_line(st, ln, "unsupported type annotation", lhs_raw);
+                return false;
+            }
+        }
+        if !is_ident_str(vname) {
+            py_refuse_line(st, ln, "only simple variable assignment is in the Python subset", lhs_raw);
+            return false;
+        }
+        let rv: String = py_eval_expr(rhs, ln, sy, f, st);
+        let rty: i32 = st[1];
+        let existing: i32 = find_var(sy, st, vname);
+        if existing >= 0 {
+            out.push(pad + vname + " = " + py_conv(rv, rty, existing) + ";");
+        } else {
+            let target: i32 = if ann_ty > 0 { ann_ty } else { rty };
+            out.push(pad + "let mut " + vname + ": " + py_tname(target) + " = " + py_conv(rv, rty, target) + ";");
+            add_sym(sy, st, vname, target);
+        }
+        return false;
+    }
+    // Expression statement (function call)
+    let ev: String = py_eval_expr(line, ln, sy, f, st);
+    out.push(pad + ev + ";");
+    false
+}
+
+pub fn py_translate(src: String, out: Vec<String>) -> i32 ~ Console {
+    let lines: Vec<String> = Vec::new();
+    let indents: Vec<i32> = Vec::new();
+    let lnums: Vec<i32> = Vec::new();
+    split_src_lines(src, lines, indents, lnums);
+
+    let f: Fns = Fns {
+        names: Vec::new(), ret: Vec::new(), first: Vec::new(), count: Vec::new(),
+        ptypes: Vec::new(), prints: Vec::new(), callers: Vec::new(), callees: Vec::new(),
+    };
+    py_collect(lines, indents, f);
+
+    let st: Vec<i32> = vec![0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    let sy: Syms = Syms { names: Vec::new(), types: Vec::new() };
+    let n: usize = lines.len();
+    let mut i: usize = 0;
+    let mut has_main: bool = find_fn(f, String::from("main")) >= 0;
+    let main_stmts: Vec<String> = Vec::new();
+    let mut main_prints: bool = false;
+
+    while i < n {
+        let line: String = lines[i];
+        let ln: i32 = lnums[i];
+        let bad: String = is_py_refused_kw(line);
+        if bad.len() > 0 {
+            py_refuse_line(st, ln, "construct `" + bad + "` is outside the Python subset", bad);
+            i = i + 1;
+            continue;
+        }
+        if line == "import math" || line.starts_with("from math import ") {
+            i = i + 1;
+            continue;
+        }
+        if line.starts_with("import ") || line.starts_with("from ") {
+            py_refuse_line(st, ln, "only `import math` is in the Python subset", line);
+            i = i + 1;
+            continue;
+        }
+        if line.starts_with("if __name__") && line.ends_with(":") {
+            let base_ind: i32 = indents[i];
+            i = i + 1;
+            while i < n && indents[i] > base_ind {
+                let sl: String = lines[i];
+                if sl != "main()" {
+                    if line_calls_fn(sl, String::from("print")) { main_prints = true; }
+                    let _ = emit_py_stmt(sl, lnums[i], 1, 0, true, sy, f, st, main_stmts);
+                }
+                i = i + 1;
+            }
+            continue;
+        }
+        if line.starts_with("def ") && line.ends_with(":") {
+            let fn_ind: i32 = indents[i];
+            let rest: String = line.substring(4, line.len() - 4).trim();
+            let lp: i32 = find_top_char(rest, 40);
+            let rp: i32 = find_top_char(rest, 41);
+            if lp < 0 || rp < lp {
+                py_refuse_line(st, ln, "malformed function header", line);
+                i = i + 1;
+                continue;
+            }
+            let fname: String = rest.substring(0, lp as usize).trim();
+            let fidx: i32 = find_fn(f, fname);
+            if fidx < 0 {
+                py_refuse_line(st, ln, "unsupported function signature", line);
+                i = i + 1;
+                continue;
+            }
+            let ret_ty: i32 = f.ret[fidx as usize];
+            let pstr: String = rest.substring((lp + 1) as usize, (rp - lp - 1) as usize).trim();
+            let parts: Vec<String> = Vec::new();
+            split_top_commas(pstr, parts);
+            let base_sym: i32 = st[6];
+            let mut sig: String = String::new();
+            let shadow: Vec<String> = Vec::new();
+            let first: i32 = f.first[fidx as usize];
+            let mut pk: usize = 0;
+            while pk < parts.len() {
+                let p: String = parts[pk];
+                let col: i32 = find_top_char(p, 58);
+                let pn: String = if col >= 0 { p.substring(0, col as usize).trim() } else { p };
+                let pt: i32 = f.ptypes[(first + pk as i32) as usize];
+                if sig.len() > 0 { sig = sig + ", "; }
+                sig = sig + pn + ": " + py_tname(pt);
+                shadow.push("    let mut " + pn + ": " + py_tname(pt) + " = " + pn + ";");
+                add_sym(sy, st, pn, pt);
+                pk = pk + 1;
+            }
+            let is_main: bool = fname == "main";
+            let mut head: String = if is_main { String::from("fn main()") } else { "fn " + fname + "(" + sig + ")" };
+            if ret_ty > 0 && !is_main { head = head + " -> " + py_tname(ret_ty); }
+            if f.prints[fidx as usize] == 1 { head = head + " ~ Console"; }
+            out.push(head + " {");
+            let mut sh: usize = 0;
+            while sh < shadow.len() { out.push(shadow[sh]); sh = sh + 1; }
+
+            let blk_ind: Vec<i32> = Vec::new();
+            let blk_sym: Vec<i32> = Vec::new();
+            let blk_step: Vec<String> = Vec::new();
+            i = i + 1;
+            while i < n && indents[i] > fn_ind {
+                let cur_ind: i32 = indents[i];
+                let cur_l: String = lines[i];
+                let is_elif_else: bool = cur_l.starts_with("elif ") || cur_l == "else:";
+                while blk_ind.len() > 0 {
+                    let top_i: i32 = blk_ind[blk_ind.len() - 1];
+                    if cur_ind < top_i || (cur_ind == top_i && !is_elif_else) {
+                        let d: i32 = blk_ind.len() as i32;
+                        let stp: String = blk_step[blk_step.len() - 1];
+                        if stp.len() > 0 { out.push(pad_spaces(d + 1) + stp); }
+                        out.push(pad_spaces(d) + "}");
+                        st[6] = blk_sym[blk_sym.len() - 1];
+                        let _ = blk_ind.pop();
+                        let _ = blk_sym.pop();
+                        let _ = blk_step.pop();
+                    } else {
+                        break;
+                    }
+                }
+                let depth: i32 = (blk_ind.len() as i32) + (if is_elif_else { 0 } else { 1 });
+                let prev_step_cnt: i32 = st[7];
+                let sym_before: i32 = st[6];
+                let opened: bool = emit_py_stmt(cur_l, lnums[i], depth, ret_ty, is_main, sy, f, st, out);
+                if opened && !is_elif_else {
+                    blk_ind.push(cur_ind);
+                    blk_sym.push(sym_before);
+                    if st[7] > prev_step_cnt {
+                        let rest_f: String = cur_l.substring(4, cur_l.len() - 5).trim();
+                        let mut ip: usize = 0;
+                        while ip + 4 <= rest_f.len() && rest_f.substring(ip, 4) != " in " { ip = ip + 1; }
+                        let vname_f: String = rest_f.substring(0, ip).trim();
+                        blk_step.push(vname_f + " = " + vname_f + " + __step_" + vname_f + ";");
+                    } else {
+                        blk_step.push(String::from(""));
+                    }
+                }
+                i = i + 1;
+            }
+            while blk_ind.len() > 0 {
+                let d: i32 = blk_ind.len() as i32;
+                let stp: String = blk_step[blk_step.len() - 1];
+                if stp.len() > 0 { out.push(pad_spaces(d + 1) + stp); }
+                out.push(pad_spaces(d) + "}");
+                st[6] = blk_sym[blk_sym.len() - 1];
+                let _ = blk_ind.pop();
+                let _ = blk_sym.pop();
+                let _ = blk_step.pop();
+            }
+            if ret_ty > 0 && !is_main && !out[out.len() - 1].trim().starts_with("return ") {
+                out.push("    panic!(\"" + fname + " reached end without return\");");
+            }
+            out.push(String::from("}"));
+            out.push(String::new());
+            st[6] = base_sym;
+            continue;
+        }
+        // Top-level constant assignment `NAME = expr` or `NAME: T = expr`
+        let apos: i32 = find_plain_assign(line);
+        if apos > 0 {
+            let lhs_raw: String = line.substring(0, apos as usize).trim();
+            let rhs: String = line.substring((apos + 1) as usize, line.len() - (apos + 1) as usize).trim();
+            let col: i32 = find_top_char(lhs_raw, 58);
+            let vname: String = if col >= 0 { lhs_raw.substring(0, col as usize).trim() } else { lhs_raw };
+            let ann_ty: i32 = if col >= 0 { py_parse_tname(lhs_raw.substring((col + 1) as usize, lhs_raw.len() - (col + 1) as usize).trim()) } else { -1 };
+            let rv: String = py_eval_expr(rhs, ln, sy, f, st);
+            let target: i32 = if ann_ty > 0 { ann_ty } else { st[1] };
+            out.push("const " + vname + ": " + py_tname(target) + " = " + py_conv(rv, st[1], target) + ";");
+            add_sym(sy, st, vname, target);
+            i = i + 1;
+            continue;
+        }
+        // Other top-level executable statement -> collect into generated main()
+        if line_calls_fn(line, String::from("print")) { main_prints = true; }
+        let _ = emit_py_stmt(line, ln, 1, 0, true, sy, f, st, main_stmts);
+        i = i + 1;
+    }
+
+    if !has_main && main_stmts.len() > 0 {
+        let mut eff: String = String::new();
+        if main_prints { eff = String::from(" ~ Console"); }
+        out.push("fn main()" + eff + " {");
+        let mut m: usize = 0;
+        while m < main_stmts.len() { out.push(main_stmts[m]); m = m + 1; }
+        out.push(String::from("}"));
+    }
+    st[2]
+}

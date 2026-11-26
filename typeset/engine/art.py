@@ -65,7 +65,34 @@ def halftone(x, y, w, h, color, cell=4.2, alpha=0.5):
     return out
 
 
-def art_layer(spec, page, theme):
+def _anchored_rule_y(spec, page, theme, layout):
+    y = spec["y"]
+    anchor = spec.get("anchor_above")
+    if not anchor or layout is None:
+        return y
+    if anchor == "clear_body":
+        kinds = (theme.get("emboss") or {}).get("clear_body") or []
+    elif isinstance(anchor, (list, tuple, set)):
+        kinds = list(anchor)
+    else:
+        kinds = [anchor]
+    if not kinds:
+        return y
+    offset = float(spec.get("anchor_offset", 6.0))
+    for item_y, line in page.items:
+        kind = layout.doc.blocks[line.block].kind
+        if kind in kinds:
+            top = page.top + item_y - 1.2 * layout.style(kind)["size"]
+            anchored = top - offset
+            if "y_min" in spec:
+                anchored = max(float(spec["y_min"]), anchored)
+            if "y_max" in spec:
+                anchored = min(float(spec["y_max"]), anchored)
+            return anchored
+    return y
+
+
+def art_layer(spec, page, theme, layout=None):
     if spec.get("first_page_only", True) and page.number != 1:
         return []
     colors = theme.get("colors", {})
@@ -79,7 +106,8 @@ def art_layer(spec, page, theme):
     if k == "halftone":
         return halftone(spec["x"], spec["y"], spec["w"], spec["h"], col, spec.get("cell", 4.2), spec.get("alpha", 0.5))
     if k == "rule":
-        return [{"type": "path", "d": [("M", spec["x"], spec["y"]), ("L", spec["x"] + spec["w"], spec["y"])],
+        ry = _anchored_rule_y(spec, page, theme, layout)
+        return [{"type": "path", "d": [("M", spec["x"], ry), ("L", spec["x"] + spec["w"], ry)],
                  "stroke": col, "width": spec.get("width", 0.6), "role": "rule", "plate": spec.get("plate"),
                  "plate_cmyk": spec.get("plate_cmyk")}]
     raise ValueError(f"unknown art layer kind {k!r}")
