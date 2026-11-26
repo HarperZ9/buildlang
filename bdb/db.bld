@@ -12058,6 +12058,10 @@ fn main() ~ Console + Environment + FileSystem + Process {
     }
 
     let arg1 = args_get(1);
+    if arg1 == "--version" || arg1 == "-V" {
+        println!("qdb 1.15.0 (BuildDB format 2)");
+        process_exit(0);
+    }
     if arg1 == "--help" || arg1 == "-h" {
         println!("Usage: qdb <database> [sql]");
         println!("       qdb mydb.db                    — interactive REPL");

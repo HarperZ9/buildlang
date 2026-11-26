@@ -7,7 +7,16 @@
 
 Deterministic systems and GPU language (`buildc 1.15.0`) with typed capability effects, native C binary output, HLSL/GLSL shaders, BuildDB/BuildQL (`bdb/`), and fast `f64` ML, physics, and workstation kernels.
 
+```powershell
+# Windows (PowerShell) - installs buildc, qdb, and port with SHA-256 verification
+irm https://raw.githubusercontent.com/HarperZ9/buildlang/main/install.ps1 | iex
+```
+
 ```bash
+# Linux and macOS - installs buildc, qdb, and port with SHA-256 verification
+curl -fsSL https://raw.githubusercontent.com/HarperZ9/buildlang/main/install.sh | sh
+
+# Or build buildc from crates.io
 cargo install buildlang
 ```
 
@@ -77,7 +86,21 @@ published on the site yet.
 
 ## Install
 
-From crates.io (installs the `buildc` binary, version 1.15.0):
+Precompiled binaries (`buildc`, `qdb`, and `port`) with fail-closed `SHA256SUMS` verification (no Rust or C toolchain required to install):
+
+```powershell
+# Windows (x64)
+irm https://raw.githubusercontent.com/HarperZ9/buildlang/main/install.ps1 | iex
+```
+
+```bash
+# Linux (x64) and macOS (arm64/x64)
+curl -fsSL https://raw.githubusercontent.com/HarperZ9/buildlang/main/install.sh | sh
+```
+
+Pin a release with `BUILDLANG_VERSION=v1.15.0` or verify locally with `-SelfTest` / `--self-test`. Packaging templates live under [packaging/winget/HarperZ9.BuildLang.yaml](packaging/winget/HarperZ9.BuildLang.yaml) and [packaging/homebrew/buildlang.rb](packaging/homebrew/buildlang.rb).
+
+Or install `buildc` from crates.io (version 1.15.0):
 
 ```bash
 cargo install buildlang
