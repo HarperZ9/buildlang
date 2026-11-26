@@ -3265,7 +3265,11 @@ impl<'ctx> MirLowerer<'ctx> {
         if let Some(sname) = tuple_struct_name {
             if self.module.find_function(&sname).is_none() {
                 if let Some(fields) = self.struct_field_list(&sname) {
-                    if fields.len() == args.len() && fields.iter().all(|(n, _)| n.is_none()) {
+                    if fields.len() == args.len()
+                        && fields
+                            .iter()
+                            .all(|(n, fty)| n.is_none() && !matches!(fty, MirType::FnPtr(_)))
+                    {
                         let prev_expected = self.expected_type.take();
                         let mut vals = Vec::with_capacity(args.len());
                         for (arg, (_, fty)) in args.iter().zip(&fields) {
