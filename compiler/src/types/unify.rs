@@ -249,6 +249,15 @@ impl Unifier {
                 self.unify_impl(t1, inner, invariant)
             }
 
+            // Box<Adt> auto-deref: `Box<T>` is represented as `*mut T` in the
+            // typechecker, so matching `Enum::Variant(Box<T>)` binds `inner: *mut T`
+            // which deref-coerces to `&T` / `T` (preserving Ptr-vs-Ptr invariance).
+            (TyKind::Adt(..), TyKind::Ptr(Mutability::Mutable, inner))
+                if !invariant && matches!(inner.kind, TyKind::Adt(..)) =>
+            {
+                self.unify_impl(t1, inner, invariant)
+            }
+
             // Tuples: must have same length and unify element-wise
             (TyKind::Tuple(elems1), TyKind::Tuple(elems2)) => {
                 if elems1.len() != elems2.len() {
@@ -327,6 +336,18 @@ impl Unifier {
                     // Elided lifetimes or matching lifetimes are acceptable
                     _ => {}
                 }
+                // Deref coercion through `&Box<Adt>` (`&*mut Adt`) to `&Adt`.
+                if *mut1 == Mutability::Immutable {
+                    let a1 = self.apply(ty1);
+                    let a2 = self.apply(ty2);
+                    if let (TyKind::Adt(..), TyKind::Ptr(Mutability::Mutable, inner)) =
+                        (&a1.kind, &a2.kind)
+                    {
+                        if matches!(inner.kind, TyKind::Adt(..)) {
+                            return self.unify_mode(&a1, inner, true);
+                        }
+                    }
+                }
                 // A mutable or shared reference pins its pointee width: reading
                 // or writing through it moves a fixed number of bytes, so the
                 // pointee unifies invariantly.
@@ -400,10 +421,24 @@ impl Unifier {
                     });
                 }
                 if args1.len() != args2.len() {
-                    return Err(TypeError::TypeMismatch {
-                        expected: t1.clone(),
-                        found: t2.clone(),
-                    });
+                    // Allow elided unconstrained inference parameters on the SAME ADT
+                    // (e.g. `StrategyContext` vs `StrategyContext<?T>` where lifetime/generic
+                    // parameters were elided on one side), while rejecting concrete arity mismatches.
+                    let only_elided_vars = (args1.is_empty()
+                        && args2
+                            .iter()
+                            .all(|a| matches!(self.apply(a).kind, TyKind::Var(_))))
+                        || (args2.is_empty()
+                            && args1
+                                .iter()
+                                .all(|a| matches!(self.apply(a).kind, TyKind::Var(_))));
+                    if !only_elided_vars {
+                        return Err(TypeError::TypeMismatch {
+                            expected: t1.clone(),
+                            found: t2.clone(),
+                        });
+                    }
+                    return Ok(());
                 }
                 for (a1, a2) in args1.iter().zip(args2.iter()) {
                     self.unify_mode(a1, a2, invariant)?;

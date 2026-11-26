@@ -1,0 +1,116 @@
+// BuildLang Standard Library - GPU Resource Descriptors & Types
+// Portable host-side GPU types shared across rendering and compute libraries.
+
+pub enum TextureFormat {
+    R8Unorm,
+    Rg8Unorm,
+    Rgba8Unorm,
+    Rgba8UnormSrgb,
+    Bgra8Unorm,
+    R16Float,
+    Rg16Float,
+    Rgba16Float,
+    R32Float,
+    Rg32Float,
+    Rgba32Float,
+    Rg11b10Float,
+    Depth24Plus,
+    Depth32Float,
+}
+
+pub struct Texture2D {
+    pub id: u64,
+    pub width: u32,
+    pub height: u32,
+    pub mip_levels: u32,
+    pub format: TextureFormat,
+}
+
+impl Texture2D {
+    pub fn new(width: u32, height: u32, format: TextureFormat) -> Texture2D {
+        Texture2D {
+            id: 0,
+            width,
+            height,
+            mip_levels: 1,
+            format,
+        }
+    }
+
+    pub fn dimensions(&self) -> (u32, u32) {
+        (self.width, self.height)
+    }
+}
+
+pub struct RenderTarget {
+    pub id: u64,
+    pub width: u32,
+    pub height: u32,
+    pub format: TextureFormat,
+    pub samples: u32,
+}
+
+impl RenderTarget {
+    pub fn new(width: u32, height: u32, format: TextureFormat) -> RenderTarget {
+        RenderTarget {
+            id: 0,
+            width,
+            height,
+            format,
+            samples: 1,
+        }
+    }
+}
+
+pub struct ComputeShader {
+    pub id: u64,
+    pub entry_point: String,
+    pub workgroup_x: u32,
+    pub workgroup_y: u32,
+    pub workgroup_z: u32,
+}
+
+impl ComputeShader {
+    pub fn new(entry_point: String, workgroup_x: u32, workgroup_y: u32, workgroup_z: u32) -> ComputeShader {
+        ComputeShader {
+            id: 0,
+            entry_point,
+            workgroup_x,
+            workgroup_y,
+            workgroup_z,
+        }
+    }
+}
+
+pub struct Sampler {
+    pub id: u64,
+    pub anisotropy: u32,
+}
+
+pub struct BindGroup {
+    pub id: u64,
+}
+
+pub struct RenderPipeline {
+    pub id: u64,
+}
+
+pub struct BufferDescriptor {
+    pub size: usize,
+    pub usage: u32,
+    pub mapped_at_creation: bool,
+}
+
+pub struct TextureDescriptor {
+    pub width: u32,
+    pub height: u32,
+    pub depth: u32,
+    pub mip_levels: u32,
+    pub format: TextureFormat,
+    pub usage: u32,
+}
+
+pub struct RenderPassDescriptor {
+    pub color_attachment_count: u32,
+    pub has_depth: bool,
+}

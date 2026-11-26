@@ -345,6 +345,10 @@ pub struct MirLowerer<'ctx> {
     /// Refusals of the body pass, one per top-level function or method,
     /// in source order (see `rejections.rs`).
     pub(crate) rejections: Vec<crate::codegen::CodegenError>,
+    /// Type name -> C function name for `impl Display for Type` (`Type_display_fmt`).
+    pub(crate) display_impls: HashMap<Arc<str>, Arc<str>>,
+    /// Type name -> C function name for `impl Debug for Type` (`Type_debug_fmt`).
+    pub(crate) debug_impls: HashMap<Arc<str>, Arc<str>>,
 }
 
 // =============================================================================
@@ -369,6 +373,8 @@ pub(crate) enum IterStep<'a> {
     Skip { count: &'a ast::Expr },
     /// `.flat_map(|x| inner_iter)` - flatten an inner iterator per element.
     FlatMap { closure: &'a ast::Expr },
+    /// `.zip(other)` - lockstep iteration with a second iterator source.
+    Zip { other: &'a ast::Expr },
 }
 
 /// Terminal operation of an iterator chain.
@@ -390,6 +396,10 @@ pub(crate) enum IterTerminal<'a> {
     Any { closure: &'a ast::Expr },
     /// `.all(|x| pred)` - true if the predicate holds for every element.
     All { closure: &'a ast::Expr },
+    /// `.max()` - largest element as `Option<T>`.
+    Max,
+    /// `.min()` - smallest element as `Option<T>`.
+    Min,
 }
 
 /// The deepest a generic type may be instantiated inside its own methods.
@@ -500,6 +510,8 @@ impl<'ctx> MirLowerer<'ctx> {
             repr_c_structs: HashSet::new(),
             multi_fns: HashMap::new(),
             rejections: Vec::new(),
+            display_impls: HashMap::new(),
+            debug_impls: HashMap::new(),
         }
     }
 
@@ -584,6 +596,8 @@ impl<'ctx> MirLowerer<'ctx> {
             repr_c_structs: HashSet::new(),
             multi_fns: HashMap::new(),
             rejections: Vec::new(),
+            display_impls: HashMap::new(),
+            debug_impls: HashMap::new(),
         }
     }
 
@@ -1094,11 +1108,12 @@ impl<'ctx> MirLowerer<'ctx> {
                     let params = f.sig.params.iter().map(|p| (*p.ty).clone()).collect();
                     let ret = f.sig.return_ty.as_ref().map(|t| (**t).clone());
                     self.fn_ast_sigs.insert(f.name.name.clone(), (params, ret));
-                    if f.sig
-                        .return_ty
-                        .as_ref()
-                        .is_some_and(|t| matches!(t.kind, ast::TypeKind::ImplTrait { .. }))
-                    {
+                    if f.sig.return_ty.as_ref().is_some_and(|t| {
+                        matches!(
+                            t.kind,
+                            ast::TypeKind::ImplTrait { .. } | ast::TypeKind::FnTrait { .. }
+                        )
+                    }) {
                         self.impl_return_fns
                             .insert(f.name.name.clone(), (**f).clone());
                     }
@@ -1662,7 +1677,11 @@ impl<'ctx> MirLowerer<'ctx> {
                         if let Some(ref src) = self.source {
                             let start = t.span.start.to_usize();
                             let end = t.span.end.to_usize();
-                            if end <= src.len() && &src[start..end] == target {
+                            if end <= src.len()
+                                && src.is_char_boundary(start)
+                                && src.is_char_boundary(end)
+                                && &src[start..end] == target
+                            {
                                 return true;
                             }
                         }
@@ -2489,29 +2508,17 @@ impl<'ctx> MirLowerer<'ctx> {
             return Ok(());
         }
 
-        // Standard-library formatting traits need `std::fmt::Formatter`, which
-        // the C backend does not provide; the impl used to emit an unknown C
-        // type. Reject it with the supported alternative.
-        if let Some(tr) = impl_def.trait_ref.as_ref() {
-            let segs: Vec<&str> = tr
-                .path
-                .segments
-                .iter()
-                .map(|s| s.ident.name.as_ref())
-                .collect();
-            if let Some(last @ ("Display" | "Debug")) = segs.last().copied() {
-                let span = tr.path.span;
-                return Err(crate::codegen::CodegenError::Rejected {
-                    message: format!(
-                        "implementing `{last}` is not supported by the C backend: it has no `std::fmt::Formatter`"
-                    ),
-                    location: (span.end.0 > span.start.0).then_some((span.start.0, span.end.0)),
-                    help: Some(format!(
-                        "give `{type_name}` a method that builds the text, for example `fn to_string(&self) -> String {{ format!(\"...\", self.x) }}`, and print that"
-                    )),
-                });
-            }
-        }
+        // Track formatting trait impls (`Display` / `Debug`) so `format!`/`println!`
+        // can invoke them through the C runtime `BuildFormatter`.
+        let fmt_trait_kind = impl_def
+            .trait_ref
+            .as_ref()
+            .and_then(|tr| tr.path.segments.last())
+            .and_then(|seg| match seg.ident.name.as_ref() {
+                "Display" => Some("Display"),
+                "Debug" => Some("Debug"),
+                _ => None,
+            });
 
         // Track trait implementations for vtable generation
         let trait_name = impl_def.trait_ref.as_ref().map(|tr| {
@@ -2530,6 +2537,9 @@ impl<'ctx> MirLowerer<'ctx> {
                 let const_ty = Self::replace_self_mir_type(self.lower_type_from_ast(ty), &self_ty);
                 let prev_impl_type = self.current_impl_type.replace(type_name.clone());
                 let init = self.global_initializer(&const_name, value, &const_ty)?;
+                if let Some(ref cval) = init {
+                    self.const_values.insert(const_name.clone(), cval.clone());
+                }
                 self.current_impl_type = prev_impl_type;
                 let mut global = MirGlobal::new(const_name, const_ty);
                 global.init = init;
@@ -2539,6 +2549,14 @@ impl<'ctx> MirLowerer<'ctx> {
             }
             if let ast::ImplItemKind::Function(f) = &impl_item.kind {
                 let mangled = self.register_impl_method_name(&type_name, impl_def, f);
+                if f.name.name.as_ref() == "fmt" {
+                    if fmt_trait_kind == Some("Display") {
+                        self.display_impls
+                            .insert(type_name.clone(), mangled.clone());
+                    } else if fmt_trait_kind == Some("Debug") {
+                        self.debug_impls.insert(type_name.clone(), mangled.clone());
+                    }
+                }
                 impl_method_names.push(mangled.clone());
 
                 // Forward-declare the method signature so resolve_call_return_type
@@ -3282,6 +3300,26 @@ impl<'ctx> MirLowerer<'ctx> {
         f: &ast::FnDef,
     ) -> Arc<str> {
         let base_name: Arc<str> = Arc::from(format!("{}_{}", type_name, f.name.name));
+        let fmt_trait = impl_def
+            .trait_ref
+            .as_ref()
+            .and_then(|tr| tr.path.last_ident())
+            .and_then(|id| match id.name.as_ref() {
+                "Display" if f.name.name.as_ref() == "fmt" => Some("display"),
+                "Debug" if f.name.name.as_ref() == "fmt" => Some("debug"),
+                _ => None,
+            });
+        if let Some(tag) = fmt_trait {
+            let key = (type_name.clone(), Arc::from(format!("{}_fmt", tag)));
+            let chosen: Arc<str> = Arc::from(format!("{}_{}_fmt", type_name, tag));
+            self.impl_methods.insert(key, chosen.clone());
+            if tag == "display" {
+                self.impl_methods
+                    .entry((type_name.clone(), f.name.name.clone()))
+                    .or_insert_with(|| chosen.clone());
+            }
+            return chosen;
+        }
         let is_op_trait = impl_def
             .trait_ref
             .as_ref()
@@ -3324,6 +3362,21 @@ impl<'ctx> MirLowerer<'ctx> {
         impl_def: &ast::ImplDef,
         f: &ast::FnDef,
     ) -> Arc<str> {
+        let fmt_trait = impl_def
+            .trait_ref
+            .as_ref()
+            .and_then(|tr| tr.path.last_ident())
+            .and_then(|id| match id.name.as_ref() {
+                "Display" if f.name.name.as_ref() == "fmt" => Some("display"),
+                "Debug" if f.name.name.as_ref() == "fmt" => Some("debug"),
+                _ => None,
+            });
+        if let Some(tag) = fmt_trait {
+            let key = (type_name.clone(), Arc::from(format!("{}_fmt", tag)));
+            if let Some(chosen) = self.impl_methods.get(&key).cloned() {
+                return chosen;
+            }
+        }
         let is_op_trait = impl_def
             .trait_ref
             .as_ref()

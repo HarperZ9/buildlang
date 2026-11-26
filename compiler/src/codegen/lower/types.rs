@@ -237,13 +237,16 @@ impl<'ctx> MirLowerer<'ctx> {
                         return MirType::Option(Box::new(MirType::i32()));
                     }
 
-                    // Special-case Vec<T> and HashSet<T>/BTreeSet<T>: resolve to MirType::Vec(element_type)
-                    if matches!(type_name, "Vec" | "HashSet" | "BTreeSet") {
+                    // Special-case Vec<T>, Array<T>, VecDeque<T>, and HashSet<T>/BTreeSet<T>: resolve to MirType::Vec(element_type)
+                    if matches!(
+                        type_name,
+                        "Vec" | "Array" | "VecDeque" | "HashSet" | "BTreeSet"
+                    ) {
                         if let Some(ast::GenericArg::Type(arg_ty)) = generic_args.first() {
                             let elem_ty = self.lower_type_from_ast(arg_ty);
                             return MirType::Vec(Box::new(elem_ty));
                         }
-                        if type_name == "Vec" {
+                        if matches!(type_name, "Vec" | "Array" | "VecDeque") {
                             return MirType::Vec(Box::new(MirType::i32()));
                         }
                         return MirType::Vec(Box::new(MirType::Struct(Arc::from("BuildString"))));
@@ -315,6 +318,13 @@ impl<'ctx> MirLowerer<'ctx> {
                 "bool" => MirType::Bool,
                 "char" => MirType::u32(),
                 "str" | "String" => MirType::Struct(Arc::from("BuildString")),
+                "Formatter" => MirType::Struct(Arc::from("BuildFormatter")),
+                "Result"
+                    if path.segments.len() >= 2
+                        && path.segments[path.segments.len() - 2].ident.name.as_ref() == "fmt" =>
+                {
+                    MirType::i32()
+                }
                 "vec2" => MirType::Struct(Arc::from("build_vec2")),
                 "vec3" => MirType::Struct(Arc::from("build_vec3")),
                 "vec4" => MirType::Struct(Arc::from("build_vec4")),
@@ -401,6 +411,17 @@ impl<'ctx> MirLowerer<'ctx> {
                     let assoc = p.segments[1].ident.name.as_ref();
                     if let Some(c) = Self::primitive_assoc_const(ty_name, assoc) {
                         return Some(c);
+                    }
+                    let resolved_ty = if ty_name == "Self" {
+                        self.current_impl_type.as_deref()
+                    } else {
+                        Some(ty_name)
+                    };
+                    if let Some(tname) = resolved_ty {
+                        let key: Arc<str> = Arc::from(format!("{tname}_{assoc}"));
+                        if let Some(c) = self.const_values.get(&key) {
+                            return Some(c.clone());
+                        }
                     }
                 }
                 p.last_ident()

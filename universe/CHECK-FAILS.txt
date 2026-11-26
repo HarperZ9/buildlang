@@ -65,7 +65,6 @@ foundation/fmt.bld parse
 foundation/fs.bld types
 foundation/io_extended.bld types
 foundation/itertools.bld types
-foundation/lib.bld types
 foundation/logging.bld types
 foundation/math_extended.bld types
 foundation/net.bld types
@@ -78,11 +77,8 @@ foundation/text.bld types
 foundation/time.bld types
 foundation/uuid.bld types
 lsp/lib.bld types
-lumina/bloom.bld types
 lumina/color_grading.bld types
-lumina/dof.bld types
 lumina/lib.bld types
-lumina/volumetrics.bld types
 main.bld types
 neutrino/denoise.bld types
 neutrino/enhancement.bld types
@@ -148,7 +144,6 @@ photon/screen_space.bld types
 photon/shadows.bld types
 photon/sky_clouds.bld types
 photon/subsurface_scattering.bld types
-photon/temporal.bld types
 photon/terrain.bld types
 photon/texture_management.bld parse
 photon/variable_rate_shading.bld types
@@ -181,11 +176,9 @@ repl/lib.bld types
 runtime/lib.bld types
 spectrum/chromatic_adaptation.bld types
 spectrum/color_difference.bld types
-spectrum/hdr_pipeline.bld types
 spectrum/icc_profile.bld types
 spectrum/lib.bld types
 spectrum/lut.bld types
-spectrum/spectral_rendering.bld types
 test/lib.bld parse
 tests/benchmarks.bld types
 tests/foundation_unit.bld types

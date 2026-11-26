@@ -24,6 +24,7 @@ pub const FILES: &[(&str, &str)] = &[
     ("complex.bld", include_str!("../stdlib/complex.bld")),
     ("core.bld", include_str!("../stdlib/core.bld")),
     ("effects.bld", include_str!("../stdlib/effects.bld")),
+    ("gpu.bld", include_str!("../stdlib/gpu.bld")),
     ("graphics.bld", include_str!("../stdlib/graphics.bld")),
     ("io.bld", include_str!("../stdlib/io.bld")),
     ("iter.bld", include_str!("../stdlib/iter.bld")),
@@ -41,6 +42,7 @@ pub const FILES: &[(&str, &str)] = &[
         include_str!("../stdlib/string_utils.bld"),
     ),
     ("strings.bld", include_str!("../stdlib/strings.bld")),
+    ("test.bld", include_str!("../stdlib/test.bld")),
 ];
 
 /// Write the embedded modules to `dir` (created if missing). A file that

@@ -170,6 +170,30 @@ impl<'a> Parser<'a> {
             // =================================================================
             TokenKind::Keyword(Keyword::Impl) => {
                 self.advance();
+                // `impl Fn(A) -> B` / `impl FnMut(A) -> B` / `impl FnOnce(A) -> B`:
+                // parse directly as a FnTrait type so codegen lowers it to a real
+                // function pointer (`MirType::FnPtr`) rather than an opaque i32.
+                let fn_trait_kind = if self.check_ident()
+                    && matches!(self.peek().kind, TokenKind::OpenDelim(Delimiter::Paren))
+                {
+                    match self.source.slice(self.current_span()) {
+                        "Fn" => Some(FnTraitKind::Fn),
+                        "FnMut" => Some(FnTraitKind::FnMut),
+                        "FnOnce" => Some(FnTraitKind::FnOnce),
+                        _ => None,
+                    }
+                } else {
+                    None
+                };
+                if let Some(kind) = fn_trait_kind {
+                    let mut fn_ty = self.parse_fn_trait_type(kind)?;
+                    // Consume any trailing `+ Send + Sync + 'static` bounds.
+                    while self.eat(&TokenKind::Plus) {
+                        let _ = self.parse_type_bound()?;
+                    }
+                    fn_ty.span = start.merge(&self.tokens[self.pos.saturating_sub(1)].span);
+                    return Ok(fn_ty);
+                }
                 let bounds = self.parse_type_bounds()?;
                 let span = start.merge(&self.tokens[self.pos.saturating_sub(1)].span);
                 Ok(Type::new(TypeKind::ImplTrait { bounds }, span))

@@ -120,6 +120,15 @@ impl Vec2 {
     pub fn exp(self) -> Vec2 {
         Vec2 { x: self.x.exp(), y: self.y.exp() }
     }
+    pub fn abs(self) -> Vec2 {
+        Vec2 { x: self.x.abs(), y: self.y.abs() }
+    }
+    pub fn min(self, o: Vec2) -> Vec2 {
+        Vec2 { x: self.x.min(o.x), y: self.y.min(o.y) }
+    }
+    pub fn max(self, o: Vec2) -> Vec2 {
+        Vec2 { x: self.x.max(o.x), y: self.y.max(o.y) }
+    }
 }
 
 impl Add for Vec2 {
@@ -263,6 +272,18 @@ impl Vec3 {
     pub fn exp(self) -> Vec3 {
         Vec3 { x: self.x.exp(), y: self.y.exp(), z: self.z.exp() }
     }
+    pub fn abs(self) -> Vec3 {
+        Vec3 { x: self.x.abs(), y: self.y.abs(), z: self.z.abs() }
+    }
+    pub fn min(self, o: Vec3) -> Vec3 {
+        Vec3 { x: self.x.min(o.x), y: self.y.min(o.y), z: self.z.min(o.z) }
+    }
+    pub fn max(self, o: Vec3) -> Vec3 {
+        Vec3 { x: self.x.max(o.x), y: self.y.max(o.y), z: self.z.max(o.z) }
+    }
+    pub fn xy(self) -> Vec2 {
+        Vec2 { x: self.x, y: self.y }
+    }
 }
 
 impl Add for Vec3 {
@@ -387,6 +408,18 @@ impl Vec4 {
     }
     pub fn xyz(self) -> Vec3 {
         Vec3 { x: self.x, y: self.y, z: self.z }
+    }
+    pub fn xy(self) -> Vec2 {
+        Vec2 { x: self.x, y: self.y }
+    }
+    pub fn abs(self) -> Vec4 {
+        Vec4 { x: self.x.abs(), y: self.y.abs(), z: self.z.abs(), w: self.w.abs() }
+    }
+    pub fn min(self, o: Vec4) -> Vec4 {
+        Vec4 { x: self.x.min(o.x), y: self.y.min(o.y), z: self.z.min(o.z), w: self.w.min(o.w) }
+    }
+    pub fn max(self, o: Vec4) -> Vec4 {
+        Vec4 { x: self.x.max(o.x), y: self.y.max(o.y), z: self.z.max(o.z), w: self.w.max(o.w) }
     }
 }
 
@@ -566,6 +599,17 @@ impl Mat4 {
                 z: (a31 * b01 - a30 * b03 - a32 * b00) * inv,
                 w: (a20 * b03 - a21 * b01 + a22 * b00) * inv,
             },
+        }
+    }
+    pub fn row(self, index: usize) -> Vec4 {
+        if index == 0 {
+            Vec4 { x: self.x_axis.x, y: self.y_axis.x, z: self.z_axis.x, w: self.w_axis.x }
+        } else if index == 1 {
+            Vec4 { x: self.x_axis.y, y: self.y_axis.y, z: self.z_axis.y, w: self.w_axis.y }
+        } else if index == 2 {
+            Vec4 { x: self.x_axis.z, y: self.y_axis.z, z: self.z_axis.z, w: self.w_axis.z }
+        } else {
+            Vec4 { x: self.x_axis.w, y: self.y_axis.w, z: self.z_axis.w, w: self.w_axis.w }
         }
     }
 }
@@ -1214,3 +1258,214 @@ impl Mul<DVec3> for DQuat {
         self.mul_vec3(v)
     }
 }
+
+// ---------------------------------------------------------------------------
+// Geometry & rendering math primitives
+// ---------------------------------------------------------------------------
+
+pub type Quat = Quaternion;
+pub type Vector2 = Vec2;
+pub type Vector3 = Vec3;
+pub type Vector4 = Vec4;
+pub type Matrix3x3 = Mat3;
+pub type Matrix4x4 = Mat4;
+pub type Mat4x4 = Mat4;
+pub type Mat3x3 = Mat3;
+
+pub struct AABB {
+    pub min: Vec3,
+    pub max: Vec3,
+}
+
+impl AABB {
+    pub fn new(min: Vec3, max: Vec3) -> AABB {
+        AABB { min, max }
+    }
+
+    pub fn center(&self) -> Vec3 {
+        Vec3::new(
+            (self.min.x + self.max.x) * 0.5,
+            (self.min.y + self.max.y) * 0.5,
+            (self.min.z + self.max.z) * 0.5,
+        )
+    }
+
+    pub fn extents(&self) -> Vec3 {
+        Vec3::new(
+            (self.max.x - self.min.x) * 0.5,
+            (self.max.y - self.min.y) * 0.5,
+            (self.max.z - self.min.z) * 0.5,
+        )
+    }
+
+    pub fn distance_to_point(&self, point: Vec3) -> f32 {
+        let dx = if point.x < self.min.x {
+            self.min.x - point.x
+        } else if point.x > self.max.x {
+            point.x - self.max.x
+        } else {
+            0.0
+        };
+        let dy = if point.y < self.min.y {
+            self.min.y - point.y
+        } else if point.y > self.max.y {
+            point.y - self.max.y
+        } else {
+            0.0
+        };
+        let dz = if point.z < self.min.z {
+            self.min.z - point.z
+        } else if point.z > self.max.z {
+            point.z - self.max.z
+        } else {
+            0.0
+        };
+        sqrt((dx * dx + dy * dy + dz * dz) as f64) as f32
+    }
+
+    pub fn get_corners(&self) -> [Vec3; 8] {
+        [
+            Vec3::new(self.min.x, self.min.y, self.min.z),
+            Vec3::new(self.max.x, self.min.y, self.min.z),
+            Vec3::new(self.min.x, self.max.y, self.min.z),
+            Vec3::new(self.max.x, self.max.y, self.min.z),
+            Vec3::new(self.min.x, self.min.y, self.max.z),
+            Vec3::new(self.max.x, self.min.y, self.max.z),
+            Vec3::new(self.min.x, self.max.y, self.max.z),
+            Vec3::new(self.max.x, self.max.y, self.max.z),
+        ]
+    }
+
+    pub fn intersects(&self, other: &AABB) -> bool {
+        self.min.x <= other.max.x
+            && self.max.x >= other.min.x
+            && self.min.y <= other.max.y
+            && self.max.y >= other.min.y
+            && self.min.z <= other.max.z
+            && self.max.z >= other.min.z
+    }
+}
+
+pub type Aabb = AABB;
+
+pub struct Plane {
+    pub normal: Vec3,
+    pub distance: f32,
+}
+
+impl Plane {
+    pub fn new(normal: Vec3, distance: f32) -> Plane {
+        Plane { normal, distance }
+    }
+
+    pub fn signed_distance(&self, point: Vec3) -> f32 {
+        self.normal.dot(point) + self.distance
+    }
+
+    pub fn distance_to_point(&self, point: Vec3) -> f32 {
+        self.normal.dot(point) + self.distance
+    }
+}
+
+pub struct Sphere {
+    pub center: Vec3,
+    pub radius: f32,
+}
+
+impl Sphere {
+    pub fn new(center: Vec3, radius: f32) -> Sphere {
+        Sphere { center, radius }
+    }
+}
+
+pub struct Frustum {
+    pub planes: [Plane; 6],
+}
+
+impl Frustum {
+    pub fn planes(&self) -> [Vec4; 6] {
+        [
+            Vec4::new(self.planes[0].normal.x, self.planes[0].normal.y, self.planes[0].normal.z, self.planes[0].distance),
+            Vec4::new(self.planes[1].normal.x, self.planes[1].normal.y, self.planes[1].normal.z, self.planes[1].distance),
+            Vec4::new(self.planes[2].normal.x, self.planes[2].normal.y, self.planes[2].normal.z, self.planes[2].distance),
+            Vec4::new(self.planes[3].normal.x, self.planes[3].normal.y, self.planes[3].normal.z, self.planes[3].distance),
+            Vec4::new(self.planes[4].normal.x, self.planes[4].normal.y, self.planes[4].normal.z, self.planes[4].distance),
+            Vec4::new(self.planes[5].normal.x, self.planes[5].normal.y, self.planes[5].normal.z, self.planes[5].distance),
+        ]
+    }
+
+    pub fn contains_sphere(&self, center: Vec3, radius: f32) -> bool {
+        let mut i: usize = 0;
+        while i < 6 {
+            if self.planes[i].signed_distance(center) < -radius {
+                return false;
+            }
+            i = i + 1;
+        }
+        true
+    }
+
+    pub fn contains_point(&self, point: Vec3) -> bool {
+        self.contains_sphere(point, 0.0)
+    }
+
+    pub fn intersects_aabb(&self, aabb: &AABB) -> bool {
+        let center = aabb.center();
+        let ext = aabb.extents();
+        let radius = sqrt((ext.x * ext.x + ext.y * ext.y + ext.z * ext.z) as f64) as f32;
+        self.contains_sphere(center, radius)
+    }
+}
+
+pub struct Transform {
+    pub position: Vec3,
+    pub rotation: Quaternion,
+    pub scale: Vec3,
+}
+
+impl Transform {
+    pub fn identity() -> Transform {
+        Transform {
+            position: Vec3::zero(),
+            rotation: Quaternion::identity(),
+            scale: Vec3::one(),
+        }
+    }
+}
+
+pub struct OBB {
+    pub center: Vec3,
+    pub half_extents: Vec3,
+    pub orientation: Quaternion,
+}
+
+pub struct Color {
+    pub r: f32,
+    pub g: f32,
+    pub b: f32,
+    pub a: f32,
+}
+
+impl Color {
+    pub fn new(r: f32, g: f32, b: f32, a: f32) -> Color {
+        Color { r, g, b, a }
+    }
+}
+
+pub struct Spectrum {
+    pub r: f32,
+    pub g: f32,
+    pub b: f32,
+}
+
+pub struct Complex {
+    pub re: f64,
+    pub im: f64,
+}
+
+impl Complex {
+    pub fn new(re: f64, im: f64) -> Complex {
+        Complex { re, im }
+    }
+}
+

@@ -36,7 +36,7 @@ pub(crate) enum ArgRef {
 /// The parts of a `{:spec}` the C backend supports.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct Spec {
-    /// `<` or `>`; `None` is the type's default (left for text, right for numbers).
+    /// `<`, `>` or `^`; `None` is the type's default (left for text, right for numbers).
     pub align: Option<char>,
     /// `+`: always print the sign of a number.
     pub plus: bool,
@@ -45,6 +45,8 @@ pub(crate) struct Spec {
     /// `0`: pad numbers with zeros.
     pub zero: bool,
     pub width: Option<usize>,
+    /// Dynamic width from an argument (`{:w$}` or `{:1$}`).
+    pub dynamic_width: Option<ArgRef>,
     pub precision: Option<usize>,
     /// `' '` for Display, `'?'` for Debug, `x`, `X`, `o` for radix, or `e`, `E` for exponent.
     pub kind: char,
@@ -146,11 +148,6 @@ fn parse_spec(spec: &str) -> Result<Spec, String> {
         i = 1;
     }
     if i < s.len() && matches!(s[i], '<' | '>' | '^') {
-        if s[i] == '^' {
-            return Err(format!(
-                "centre alignment `^` in `{{:{spec}}}` is not supported"
-            ));
-        }
         out.align = Some(s[i]);
         i += 1;
     }
@@ -173,12 +170,24 @@ fn parse_spec(spec: &str) -> Result<Spec, String> {
         i += 1;
     }
     if i > start {
-        out.width = Some(s[start..i].iter().collect::<String>().parse().unwrap_or(0));
-    }
-    if i < s.len() && s[i] == '$' {
-        return Err(format!(
-            "a width taken from an argument in `{{:{spec}}}` is not supported"
-        ));
+        let num = s[start..i].iter().collect::<String>().parse().unwrap_or(0);
+        if i < s.len() && s[i] == '$' {
+            out.dynamic_width = Some(ArgRef::Index(num));
+            i += 1;
+        } else {
+            out.width = Some(num);
+        }
+    } else if i < s.len() && (s[i].is_ascii_alphabetic() || s[i] == '_') {
+        let id_start = i;
+        let mut j = i;
+        while j < s.len() && (s[j].is_ascii_alphanumeric() || s[j] == '_') {
+            j += 1;
+        }
+        if j < s.len() && s[j] == '$' {
+            let name: String = s[id_start..j].iter().collect();
+            out.dynamic_width = Some(ArgRef::Name(name));
+            i = j + 1;
+        }
     }
     if i < s.len() && s[i] == '.' {
         i += 1;
@@ -383,7 +392,86 @@ impl<'ctx> MirLowerer<'ctx> {
         val: MirValue,
         spec: &Spec,
         what: &str,
+        dyn_width: Option<MirValue>,
     ) -> CodegenResult<(String, Option<MirValue>)> {
+        // Centre alignment (`^`) or dynamic width (`w$` / `N$`): format the
+        // value into a BuildString with its base spec, then pad via
+        // `build_fmt_align(str, width_i64, align_code)`.
+        if spec.align == Some('^') || dyn_width.is_some() {
+            let inner_spec = Spec {
+                align: None,
+                width: None,
+                dynamic_width: None,
+                ..spec.clone()
+            };
+            let val_deref = self.deref_if_pointer(val.clone())?;
+            let is_numeric = matches!(
+                self.type_of_value(&val_deref),
+                MirType::Int(..) | MirType::Float(_)
+            );
+            let (inner_conv, inner_arg) = self.fmt_placeholder(val, &inner_spec, what, None)?;
+            let inner_str_idx = self.module.intern_string(inner_conv);
+            let width_val = if let Some(dw) = dyn_width {
+                let dw = self.deref_if_pointer(dw)?;
+                let dw_ty = self.type_of_value(&dw);
+                if dw_ty == MirType::i64() {
+                    dw
+                } else {
+                    let builder = self.current_fn.as_mut().unwrap();
+                    let w_local = builder.create_local(MirType::i64());
+                    builder.cast(w_local, CastKind::IntToInt, dw, MirType::i64());
+                    MirValue::Local(w_local)
+                }
+            } else {
+                MirValue::Const(MirConst::Int(
+                    spec.width.unwrap_or(0) as i128,
+                    MirType::i64(),
+                ))
+            };
+            let align_code: i128 = match spec.align {
+                Some('<') => 0,
+                Some('>') => 1,
+                Some('^') => 2,
+                _ => {
+                    if is_numeric {
+                        1
+                    } else {
+                        0
+                    }
+                }
+            };
+            let formatted = {
+                let builder = self.current_fn.as_mut().unwrap();
+                let fmt_l = builder.create_local(MirType::Ptr(Box::new(MirType::i8())));
+                builder.assign(
+                    fmt_l,
+                    MirRValue::Use(MirValue::Const(MirConst::Str(inner_str_idx))),
+                );
+                let out_s = builder.create_local(MirType::Struct(Arc::from(STR)));
+                let cont = builder.create_block();
+                let mut call_args = vec![MirValue::Local(fmt_l)];
+                if let Some(a) = inner_arg {
+                    call_args.push(a);
+                }
+                builder.call(
+                    MirValue::Function(Arc::from("build_sprintf")),
+                    call_args,
+                    Some(out_s),
+                    cont,
+                );
+                builder.switch_to_block(cont);
+                MirValue::Local(out_s)
+            };
+            let aligned_ptr = self.fmt_string_call(
+                "build_fmt_align",
+                vec![
+                    formatted,
+                    width_val,
+                    MirValue::Const(MirConst::Int(align_code, MirType::i32())),
+                ],
+            )?;
+            return Ok(("%s".to_string(), Some(aligned_ptr)));
+        }
         let val = self.deref_if_pointer(val)?;
         let ty = self.type_of_value(&val);
         let debug = spec.kind == '?';
@@ -554,6 +642,86 @@ impl<'ctx> MirLowerer<'ctx> {
                 Ok((format!("{}s", c_flags(spec, true, false)), Some(arg)))
             }
             MirType::Struct(name)
+                if (debug && self.debug_impls.contains_key(name))
+                    || self.display_impls.contains_key(name) =>
+            {
+                let fmt_fn = if debug {
+                    self.debug_impls
+                        .get(name)
+                        .or_else(|| self.display_impls.get(name))
+                        .cloned()
+                        .unwrap()
+                } else {
+                    self.display_impls.get(name).cloned().unwrap()
+                };
+                let by_val = self
+                    .by_value_self
+                    .contains(&(name.clone(), Arc::from("fmt")));
+                let val_ty = MirType::Struct(name.clone());
+                let fmt_ty = MirType::Struct(Arc::from("BuildFormatter"));
+                let finished_str = {
+                    let builder = self.current_fn.as_mut().unwrap();
+                    let val_local = match val {
+                        MirValue::Local(id) => id,
+                        other => {
+                            let tmp = builder.create_local(val_ty.clone());
+                            builder.assign(tmp, MirRValue::Use(other));
+                            tmp
+                        }
+                    };
+                    let self_arg = if by_val {
+                        MirValue::Local(val_local)
+                    } else {
+                        let ptr = builder.create_local(MirType::Ptr(Box::new(val_ty)));
+                        builder.assign(
+                            ptr,
+                            MirRValue::Ref {
+                                place: MirPlace::local(val_local),
+                                is_mut: false,
+                            },
+                        );
+                        MirValue::Local(ptr)
+                    };
+                    let f_local = builder.create_local(fmt_ty.clone());
+                    let cont1 = builder.create_block();
+                    builder.call(
+                        MirValue::Function(Arc::from("build_formatter_new")),
+                        vec![],
+                        Some(f_local),
+                        cont1,
+                    );
+                    builder.switch_to_block(cont1);
+                    let f_ptr = builder.create_local(MirType::Ptr(Box::new(fmt_ty)));
+                    builder.assign(
+                        f_ptr,
+                        MirRValue::Ref {
+                            place: MirPlace::local(f_local),
+                            is_mut: true,
+                        },
+                    );
+                    let cont2 = builder.create_block();
+                    builder.call(
+                        MirValue::Function(fmt_fn),
+                        vec![self_arg, MirValue::Local(f_ptr)],
+                        None,
+                        cont2,
+                    );
+                    builder.switch_to_block(cont2);
+                    let res_s = builder.create_local(MirType::Struct(Arc::from(STR)));
+                    let cont3 = builder.create_block();
+                    builder.call(
+                        MirValue::Function(Arc::from("build_formatter_finish")),
+                        vec![MirValue::Local(f_ptr)],
+                        Some(res_s),
+                        cont3,
+                    );
+                    builder.switch_to_block(cont3);
+                    MirValue::Local(res_s)
+                };
+                let arg = self.fmt_ptr_of(finished_str);
+                Ok((format!("{}s", c_flags(spec, true, false)), Some(arg)))
+            }
+            MirType::Struct(name)
                 if matches!(
                     self.module.find_type(name).map(|td| &td.kind),
                     Some(TypeDefKind::Enum { .. })
@@ -639,8 +807,26 @@ mod tests {
     }
 
     #[test]
+    fn parses_center_and_dynamic_width() {
+        let p = parse_format("{:^5}{:^w$}{:<1$}").unwrap();
+        let specs: Vec<Spec> = p
+            .into_iter()
+            .filter_map(|x| match x {
+                Piece::Arg(_, s) => Some(s),
+                Piece::Text(_) => None,
+            })
+            .collect();
+        assert_eq!(specs[0].align, Some('^'));
+        assert_eq!(specs[0].width, Some(5));
+        assert_eq!(specs[1].align, Some('^'));
+        assert_eq!(specs[1].dynamic_width, Some(ArgRef::Name("w".into())));
+        assert_eq!(specs[2].align, Some('<'));
+        assert_eq!(specs[2].dynamic_width, Some(ArgRef::Index(1)));
+    }
+
+    #[test]
     fn rejects_what_c_cannot_print() {
-        for bad in ["{:^5}", "{:*<5}", "{:1$}", "{:b}", "{", "}", "{a.b}"] {
+        for bad in ["{:*<5}", "{:b}", "{", "}", "{a.b}"] {
             assert!(parse_format(bad).is_err(), "{bad} should be rejected");
         }
     }
