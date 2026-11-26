@@ -195,7 +195,7 @@ impl<'a> Parser<'a> {
                 };
 
                 Ok(Pattern::new(
-                    PatternKind::Ident {
+                    PatternKind::RefBind {
                         mutability,
                         name,
                         subpattern,
@@ -330,7 +330,7 @@ impl<'a> Parser<'a> {
             let field_start = self.current_span();
 
             // Check for ref/mut modifiers
-            let _by_ref = self.eat_keyword(Keyword::Ref);
+            let by_ref = self.eat_keyword(Keyword::Ref);
             let mutability = if self.eat_keyword(Keyword::Mut) {
                 Mutability::Mutable
             } else {
@@ -342,6 +342,18 @@ impl<'a> Parser<'a> {
             // Check for : pattern
             let (pattern, is_shorthand) = if self.eat(&TokenKind::Colon) {
                 (self.parse_pattern()?, false)
+            } else if by_ref {
+                (
+                    Pattern::new(
+                        PatternKind::RefBind {
+                            mutability,
+                            name: name.clone(),
+                            subpattern: None,
+                        },
+                        name.span,
+                    ),
+                    true,
+                )
             } else {
                 // Shorthand: just field name
                 (

@@ -1282,6 +1282,8 @@ impl MirType {
                 MirType::Float(FloatSize::F64) => "f64",
                 MirType::Ptr(_) => "ptr",
                 MirType::Struct(name) => name.as_ref(),
+                MirType::Vec(_) => "vec",
+                MirType::Map(_, _) => "map",
                 MirType::Option(_) => "option",
                 _ => "unknown",
             })

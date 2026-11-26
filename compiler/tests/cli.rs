@@ -14670,7 +14670,11 @@ fn vec_of_tuple_or_array_element_is_rejected() {
         return;
     }
     // (name, source, behaviour on the pre-fix binary)
-    let cases: [(&str, &str, &str); 4] = [
+    // Note: tuple elements (`Vec<(i64, i64)>`) graduated to
+    // `vec_of_supported_element_builds_and_reads` below once the C backend
+    // gained element-sized tuple-vec helpers. Fixed-array elements still
+    // fail closed here.
+    let cases: [(&str, &str, &str); 2] = [
         (
             "vec_of_array_macro_swa",
             r#"fn main() ~ Console {
@@ -14689,25 +14693,6 @@ fn vec_of_tuple_or_array_element_is_rejected() {
 }
 "#,
             "same array-element mis-store, reached through the .push() builder path",
-        ),
-        (
-            "vec_of_tuple_macro",
-            r#"fn main() ~ Console {
-    let v: Vec<(i64, i64)> = vec![(1, 2), (3, 4)];
-    println!("{}", v[0].0);
-}
-"#,
-            "leaked C type error: int32_t parameter for a Tuple_i64_i64 element",
-        ),
-        (
-            "vec_of_tuple_push",
-            r#"fn main() ~ Console {
-    let mut v: Vec<(i64, i64)> = Vec::new();
-    v.push((1, 2));
-    println!("{}", v[0].0);
-}
-"#,
-            "same tuple-element mis-store, reached through the .push() builder path",
         ),
     ];
     let dir = std::env::temp_dir().join("buildlang_vec_tuple_array_reject");
@@ -14754,7 +14739,7 @@ fn vec_of_supported_element_builds_and_reads() {
         return;
     }
     // (name, source, expected stdout)
-    let cases: [(&str, &str, &str); 9] = [
+    let cases: [(&str, &str, &str); 11] = [
         (
             "vec_i64",
             r#"fn main() ~ Console {
@@ -14840,6 +14825,25 @@ fn main() ~ Console {
 }
 "#,
             "8\n",
+        ),
+        (
+            "vec_of_tuple_macro",
+            r#"fn main() ~ Console {
+    let v: Vec<(i64, i64)> = vec![(1, 2), (3, 4)];
+    println!("{}", v[0].0);
+}
+"#,
+            "1\n",
+        ),
+        (
+            "vec_of_tuple_push",
+            r#"fn main() ~ Console {
+    let mut v: Vec<(i64, i64)> = Vec::new();
+    v.push((1, 2));
+    println!("{}", v[0].0);
+}
+"#,
+            "1\n",
         ),
     ];
     let dir = std::env::temp_dir().join("buildlang_vec_supported_positive");
@@ -15779,6 +15783,10 @@ fn non_exhaustive_match_over_runtime_value_aborts_fail_closed() {
         eprintln!("skipping match backstop e2e: no C backend available (buildc doctor)");
         return;
     }
+    // Typed `Vec<i32>` indexing now resolves `i32` during type checking, so
+    // finite literal-only non-exhaustive matches on `v[0]` are caught at
+    // compile time. Range arms skip static range-coverage analysis and reach
+    // the runtime `bl_match_fail` exit-101 codegen backstop directly.
     let cases: [(&str, &str); 2] = [
         (
             "let_bound_vec_value",
@@ -15787,8 +15795,8 @@ fn non_exhaustive_match_over_runtime_value_aborts_fail_closed() {
     let n = v[0];
     let mut out = 7;
     match n {
-        0 => { out = 1; }
-        1 => { out = 2; }
+        0..=1 => { out = 1; }
+        2 => { out = 2; }
     }
     println!("{}", out);
 }
@@ -15799,8 +15807,8 @@ fn non_exhaustive_match_over_runtime_value_aborts_fail_closed() {
             r#"fn main() ~ Console {
     let v: Vec<i32> = vec![9];
     match v[0] {
-        0 => { println!("z"); }
-        1 => { println!("o"); }
+        0..=1 => { println!("z"); }
+        2 => { println!("o"); }
     }
 }
 "#,

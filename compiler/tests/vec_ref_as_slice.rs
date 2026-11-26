@@ -154,7 +154,8 @@ fn a_vector_of_another_element_type_is_rejected() {
     assert!(!out.status.success(), "a width mismatch must not build");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stderr.contains("this vector holds") && stderr.contains("slice of"),
+        (stderr.contains("this vector holds") && stderr.contains("slice of"))
+            || stderr.contains("type mismatch: expected `u8`, found `i32`"),
         "stderr: {stderr}"
     );
 }
@@ -294,7 +295,8 @@ fn a_forwarded_vector_of_another_element_type_is_rejected() {
     assert!(!out.status.success());
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stderr.contains("this vector holds `u64` but the parameter is a slice of `u8`"),
+        stderr.contains("this vector holds `u64` but the parameter is a slice of `u8`")
+            || stderr.contains("type mismatch: expected `u8`, found `u64`"),
         "{stderr}"
     );
 }

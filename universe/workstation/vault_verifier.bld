@@ -1,0 +1,106 @@
+// SPDX-FileCopyrightText: 2026 Zain Dana Harper
+// SPDX-License-Identifier: AGPL-3.0-only
+//
+// Antigravity Lossless Vault Verifier Kernel (Pure BuildLang)
+// Verifies canonical FNV-1a manifest digests, deduplication byte conservation,
+// and planted-tamper rejection deterministically.
+
+fn fnv1a_byte(h: i64, b: i64) -> i64 {
+    let x = h ^ b;
+    let p: i64 = 1099511628211;
+    x.wrapping_mul(p)
+}
+
+fn fnv1a_bytes(xs: &Vec<i64>) -> i64 {
+    let mut h: i64 = -3750763034362895579;
+    let mut i: i64 = 0;
+    let n = xs.len() as i64;
+    while i < n {
+        h = fnv1a_byte(h, xs[i as usize] & 255);
+        i = i + 1;
+    }
+    h
+}
+
+fn verify_dedup_conservation(raw_bytes: i64, unique_bytes: i64, dedup_saved_bytes: i64) -> bool {
+    if raw_bytes < 0 || unique_bytes < 0 || dedup_saved_bytes < 0 {
+        return false;
+    }
+    unique_bytes + dedup_saved_bytes == raw_bytes
+}
+
+fn verify_bundle_ratio(raw_bytes: i64, vault_bytes: i64) -> bool {
+    if raw_bytes < 0 || vault_bytes < 0 {
+        return false;
+    }
+    if raw_bytes == 0 {
+        return vault_bytes >= 0;
+    }
+    vault_bytes > 0
+}
+
+fn verify_digest_match(expected: i64, actual: i64) -> bool {
+    expected == actual
+}
+
+fn main() ~ Console {
+    let mut failures: i64 = 0;
+
+    // Known-answer test 1: canonical FNV-1a-64 over ASCII "hello"
+    // [104, 101, 108, 108, 111] -> 0xa430d84680aabd0b (-6615550055289275125 signed i64)
+    let mut hello: Vec<i64> = Vec::new();
+    hello.push(104);
+    hello.push(101);
+    hello.push(108);
+    hello.push(108);
+    hello.push(111);
+    let h_hello = fnv1a_bytes(&hello);
+    let expected_hello: i64 = -6615550055289275125;
+    if !verify_digest_match(expected_hello, h_hello) {
+        println!("FAIL fnv1a_hello got {}", h_hello);
+        failures = failures + 1;
+    }
+
+    // Planted control 1: 1-byte flip must change digest
+    let mut flipped: Vec<i64> = Vec::new();
+    flipped.push(104);
+    flipped.push(101);
+    flipped.push(108);
+    flipped.push(108);
+    flipped.push(110);
+    let h_flip = fnv1a_bytes(&flipped);
+    if verify_digest_match(h_hello, h_flip) {
+        println!("FAIL planted_flip_not_caught");
+        failures = failures + 1;
+    }
+
+    // Known-answer test 2: dedup byte conservation holds
+    if !verify_dedup_conservation(1048576, 655360, 393216) {
+        println!("FAIL dedup_conservation_valid");
+        failures = failures + 1;
+    }
+
+    // Planted control 2: dedup imbalance rejected
+    if verify_dedup_conservation(1048576, 655360, 393215) {
+        println!("FAIL planted_dedup_imbalance_not_caught");
+        failures = failures + 1;
+    }
+
+    // Known-answer test 3: negative bytes rejected
+    if verify_dedup_conservation(-1, 0, -1) {
+        println!("FAIL negative_bytes_not_caught");
+        failures = failures + 1;
+    }
+
+    // Known-answer test 4: non-empty raw requires positive vault size
+    if !verify_bundle_ratio(1000, 320) || verify_bundle_ratio(1000, 0) {
+        println!("FAIL bundle_ratio_check");
+        failures = failures + 1;
+    }
+
+    if failures == 0 {
+        println!("VAULT_VERIFIER PASS checks=6 failures=0 fnv1a_hello={}", h_hello);
+    } else {
+        println!("VAULT_VERIFIER FAIL failures={}", failures);
+    }
+}

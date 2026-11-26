@@ -4,6 +4,12 @@
 // `Quaternion`, with the f64 forms `DVec3`, `DMat3` and `DQuat`.
 
 // ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+
+pub const TWO_PI: f64 = 6.28318530717958647692;
+
+// ---------------------------------------------------------------------------
 // Angle conversion
 // ---------------------------------------------------------------------------
 
@@ -108,6 +114,9 @@ impl Vec2 {
     pub fn extend(self, z: f32) -> Vec3 {
         Vec3 { x: self.x, y: self.y, z: z }
     }
+    pub fn clamp(self, lo: Vec2, hi: Vec2) -> Vec2 {
+        Vec2 { x: self.x.clamp(lo.x, hi.x), y: self.y.clamp(lo.y, hi.y) }
+    }
 }
 
 impl Add for Vec2 {
@@ -131,10 +140,31 @@ impl Mul<f32> for Vec2 {
     }
 }
 
+impl Mul<Vec2> for Vec2 {
+    type Output = Vec2;
+    fn mul(self, o: Vec2) -> Vec2 {
+        Vec2 { x: self.x * o.x, y: self.y * o.y }
+    }
+}
+
+impl Mul<Vec2> for f32 {
+    type Output = Vec2;
+    fn mul(self, v: Vec2) -> Vec2 {
+        Vec2 { x: self * v.x, y: self * v.y }
+    }
+}
+
 impl Div<f32> for Vec2 {
     type Output = Vec2;
     fn div(self, s: f32) -> Vec2 {
         Vec2 { x: self.x / s, y: self.y / s }
+    }
+}
+
+impl Div<Vec2> for Vec2 {
+    type Output = Vec2;
+    fn div(self, o: Vec2) -> Vec2 {
+        Vec2 { x: self.x / o.x, y: self.y / o.y }
     }
 }
 
@@ -220,6 +250,13 @@ impl Vec3 {
     pub fn as_dvec3(self) -> DVec3 {
         DVec3 { x: self.x as f64, y: self.y as f64, z: self.z as f64 }
     }
+    pub fn clamp(self, lo: Vec3, hi: Vec3) -> Vec3 {
+        Vec3 {
+            x: self.x.clamp(lo.x, hi.x),
+            y: self.y.clamp(lo.y, hi.y),
+            z: self.z.clamp(lo.z, hi.z),
+        }
+    }
 }
 
 impl Add for Vec3 {
@@ -243,10 +280,31 @@ impl Mul<f32> for Vec3 {
     }
 }
 
+impl Mul<Vec3> for Vec3 {
+    type Output = Vec3;
+    fn mul(self, o: Vec3) -> Vec3 {
+        Vec3 { x: self.x * o.x, y: self.y * o.y, z: self.z * o.z }
+    }
+}
+
+impl Mul<Vec3> for f32 {
+    type Output = Vec3;
+    fn mul(self, v: Vec3) -> Vec3 {
+        Vec3 { x: self * v.x, y: self * v.y, z: self * v.z }
+    }
+}
+
 impl Div<f32> for Vec3 {
     type Output = Vec3;
     fn div(self, s: f32) -> Vec3 {
         Vec3 { x: self.x / s, y: self.y / s, z: self.z / s }
+    }
+}
+
+impl Div<Vec3> for Vec3 {
+    type Output = Vec3;
+    fn div(self, o: Vec3) -> Vec3 {
+        Vec3 { x: self.x / o.x, y: self.y / o.y, z: self.z / o.z }
     }
 }
 
@@ -347,10 +405,31 @@ impl Mul<f32> for Vec4 {
     }
 }
 
+impl Mul<Vec4> for Vec4 {
+    type Output = Vec4;
+    fn mul(self, o: Vec4) -> Vec4 {
+        Vec4 { x: self.x * o.x, y: self.y * o.y, z: self.z * o.z, w: self.w * o.w }
+    }
+}
+
+impl Mul<Vec4> for f32 {
+    type Output = Vec4;
+    fn mul(self, v: Vec4) -> Vec4 {
+        Vec4 { x: self * v.x, y: self * v.y, z: self * v.z, w: self * v.w }
+    }
+}
+
 impl Div<f32> for Vec4 {
     type Output = Vec4;
     fn div(self, s: f32) -> Vec4 {
         Vec4 { x: self.x / s, y: self.y / s, z: self.z / s, w: self.w / s }
+    }
+}
+
+impl Div<Vec4> for Vec4 {
+    type Output = Vec4;
+    fn div(self, o: Vec4) -> Vec4 {
+        Vec4 { x: self.x / o.x, y: self.y / o.y, z: self.z / o.z, w: self.w / o.w }
     }
 }
 
@@ -426,12 +505,76 @@ impl Mat4 {
         let v = self.mul_vec4(Vec4 { x: d.x, y: d.y, z: d.z, w: 0.0 });
         Vec3 { x: v.x, y: v.y, z: v.z }
     }
+    pub fn translation(v: Vec3) -> Mat4 {
+        Mat4 {
+            x_axis: Vec4 { x: 1.0, y: 0.0, z: 0.0, w: 0.0 },
+            y_axis: Vec4 { x: 0.0, y: 1.0, z: 0.0, w: 0.0 },
+            z_axis: Vec4 { x: 0.0, y: 0.0, z: 1.0, w: 0.0 },
+            w_axis: Vec4 { x: v.x, y: v.y, z: v.z, w: 1.0 },
+        }
+    }
+    pub fn inverse(self) -> Mat4 {
+        let a00 = self.x_axis.x; let a01 = self.x_axis.y; let a02 = self.x_axis.z; let a03 = self.x_axis.w;
+        let a10 = self.y_axis.x; let a11 = self.y_axis.y; let a12 = self.y_axis.z; let a13 = self.y_axis.w;
+        let a20 = self.z_axis.x; let a21 = self.z_axis.y; let a22 = self.z_axis.z; let a23 = self.z_axis.w;
+        let a30 = self.w_axis.x; let a31 = self.w_axis.y; let a32 = self.w_axis.z; let a33 = self.w_axis.w;
+        let b00 = a00 * a11 - a01 * a10;
+        let b01 = a00 * a12 - a02 * a10;
+        let b02 = a00 * a13 - a03 * a10;
+        let b03 = a01 * a12 - a02 * a11;
+        let b04 = a01 * a13 - a03 * a11;
+        let b05 = a02 * a13 - a03 * a12;
+        let b06 = a20 * a31 - a21 * a30;
+        let b07 = a20 * a32 - a22 * a30;
+        let b08 = a20 * a33 - a23 * a30;
+        let b09 = a21 * a32 - a22 * a31;
+        let b10 = a21 * a33 - a23 * a31;
+        let b11 = a22 * a33 - a23 * a32;
+        let det = b00 * b11 - b01 * b10 + b02 * b09 + b03 * b08 - b04 * b07 + b05 * b06;
+        if det == 0.0 {
+            return Mat4::identity();
+        }
+        let inv = 1.0 / det;
+        Mat4 {
+            x_axis: Vec4 {
+                x: (a11 * b11 - a12 * b10 + a13 * b09) * inv,
+                y: (a02 * b10 - a01 * b11 - a03 * b09) * inv,
+                z: (a31 * b05 - a32 * b04 + a33 * b03) * inv,
+                w: (a22 * b04 - a21 * b05 - a23 * b03) * inv,
+            },
+            y_axis: Vec4 {
+                x: (a12 * b08 - a10 * b11 - a13 * b07) * inv,
+                y: (a00 * b11 - a02 * b08 + a03 * b07) * inv,
+                z: (a32 * b02 - a30 * b05 - a33 * b01) * inv,
+                w: (a20 * b05 - a22 * b02 + a23 * b01) * inv,
+            },
+            z_axis: Vec4 {
+                x: (a10 * b10 - a11 * b08 + a13 * b06) * inv,
+                y: (a01 * b08 - a00 * b10 - a03 * b06) * inv,
+                z: (a30 * b04 - a31 * b02 + a33 * b00) * inv,
+                w: (a21 * b02 - a20 * b04 - a23 * b00) * inv,
+            },
+            w_axis: Vec4 {
+                x: (a11 * b07 - a10 * b09 - a12 * b06) * inv,
+                y: (a00 * b09 - a01 * b07 + a02 * b06) * inv,
+                z: (a31 * b01 - a30 * b03 - a32 * b00) * inv,
+                w: (a20 * b03 - a21 * b01 + a22 * b00) * inv,
+            },
+        }
+    }
 }
 
 impl Mul for Mat4 {
     type Output = Mat4;
     fn mul(self, o: Mat4) -> Mat4 {
         self.mul_mat4(o)
+    }
+}
+
+impl Mul<Vec4> for Mat4 {
+    type Output = Vec4;
+    fn mul(self, v: Vec4) -> Vec4 {
+        self.mul_vec4(v)
     }
 }
 
@@ -508,12 +651,81 @@ impl Mat3 {
     pub fn as_dmat3(self) -> DMat3 {
         DMat3 { x_axis: self.x_axis.as_dvec3(), y_axis: self.y_axis.as_dvec3(), z_axis: self.z_axis.as_dvec3() }
     }
+    pub fn row(self, i: usize) -> Vec3 {
+        if i == 0 {
+            Vec3 { x: self.x_axis.x, y: self.y_axis.x, z: self.z_axis.x }
+        } else if i == 1 {
+            Vec3 { x: self.x_axis.y, y: self.y_axis.y, z: self.z_axis.y }
+        } else {
+            Vec3 { x: self.x_axis.z, y: self.y_axis.z, z: self.z_axis.z }
+        }
+    }
+    pub fn column(self, i: usize) -> Vec3 {
+        if i == 0 {
+            self.x_axis
+        } else if i == 1 {
+            self.y_axis
+        } else {
+            self.z_axis
+        }
+    }
+}
+
+pub type Mat3x3 = Mat3;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct UVec2 {
+    pub x: u32,
+    pub y: u32,
+}
+
+impl UVec2 {
+    pub const ZERO: UVec2 = UVec2 { x: 0, y: 0 };
+    pub const ONE: UVec2 = UVec2 { x: 1, y: 1 };
+    pub fn new(x: u32, y: u32) -> UVec2 { UVec2 { x: x, y: y } }
+    pub fn splat(v: u32) -> UVec2 { UVec2 { x: v, y: v } }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct UVec3 {
+    pub x: u32,
+    pub y: u32,
+    pub z: u32,
+}
+
+impl UVec3 {
+    pub const ZERO: UVec3 = UVec3 { x: 0, y: 0, z: 0 };
+    pub const ONE: UVec3 = UVec3 { x: 1, y: 1, z: 1 };
+    pub fn new(x: u32, y: u32, z: u32) -> UVec3 { UVec3 { x: x, y: y, z: z } }
+    pub fn splat(v: u32) -> UVec3 { UVec3 { x: v, y: v, z: v } }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct UVec4 {
+    pub x: u32,
+    pub y: u32,
+    pub z: u32,
+    pub w: u32,
+}
+
+impl UVec4 {
+    pub const ZERO: UVec4 = UVec4 { x: 0, y: 0, z: 0, w: 0 };
+    pub const ONE: UVec4 = UVec4 { x: 1, y: 1, z: 1, w: 1 };
+    pub fn new(x: u32, y: u32, z: u32, w: u32) -> UVec4 { UVec4 { x: x, y: y, z: z, w: w } }
+    pub fn splat(v: u32) -> UVec4 { UVec4 { x: v, y: v, z: v, w: v } }
 }
 
 impl Mul for Mat3 {
     type Output = Mat3;
     fn mul(self, o: Mat3) -> Mat3 {
         self.mul_mat3(o)
+    }
+}
+
+impl Mul<Vec3> for Mat3 {
+    type Output = Vec3;
+    fn mul(self, v: Vec3) -> Vec3 {
+        self.mul_vec3(v)
     }
 }
 
@@ -639,6 +851,13 @@ impl Mul for Quaternion {
     }
 }
 
+impl Mul<Vec3> for Quaternion {
+    type Output = Vec3;
+    fn mul(self, v: Vec3) -> Vec3 {
+        self.mul_vec3(v)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // DVec3, DMat3 and DQuat: the f64 forms
 // ---------------------------------------------------------------------------
@@ -745,10 +964,31 @@ impl Mul<f64> for DVec3 {
     }
 }
 
+impl Mul<DVec3> for DVec3 {
+    type Output = DVec3;
+    fn mul(self, o: DVec3) -> DVec3 {
+        DVec3 { x: self.x * o.x, y: self.y * o.y, z: self.z * o.z }
+    }
+}
+
+impl Mul<DVec3> for f64 {
+    type Output = DVec3;
+    fn mul(self, v: DVec3) -> DVec3 {
+        DVec3 { x: self * v.x, y: self * v.y, z: self * v.z }
+    }
+}
+
 impl Div<f64> for DVec3 {
     type Output = DVec3;
     fn div(self, s: f64) -> DVec3 {
         DVec3 { x: self.x / s, y: self.y / s, z: self.z / s }
+    }
+}
+
+impl Div<DVec3> for DVec3 {
+    type Output = DVec3;
+    fn div(self, o: DVec3) -> DVec3 {
+        DVec3 { x: self.x / o.x, y: self.y / o.y, z: self.z / o.z }
     }
 }
 
@@ -829,6 +1069,13 @@ impl Mul for DMat3 {
     type Output = DMat3;
     fn mul(self, o: DMat3) -> DMat3 {
         self.mul_mat3(o)
+    }
+}
+
+impl Mul<DVec3> for DMat3 {
+    type Output = DVec3;
+    fn mul(self, v: DVec3) -> DVec3 {
+        self.mul_vec3(v)
     }
 }
 
@@ -952,5 +1199,12 @@ impl Mul for DQuat {
     type Output = DQuat;
     fn mul(self, o: DQuat) -> DQuat {
         self.mul_quat(o)
+    }
+}
+
+impl Mul<DVec3> for DQuat {
+    type Output = DVec3;
+    fn mul(self, v: DVec3) -> DVec3 {
+        self.mul_vec3(v)
     }
 }

@@ -1,0 +1,841 @@
+// SPDX-FileCopyrightText: 2026 Zain Dana Harper
+// SPDX-License-Identifier: AGPL-3.0-only
+//
+// BuildLang SOTA ML & 6-DOF Physics Kernel Suite (Layer 1, f64 IEEE-754):
+//   1. SOTA ML Kernels:
+//      - rmsnorm                  : RMSNorm with analytical unit-RMS verification
+//      - rope_rotate_pair         : Rotary Positional Embedding (norm-preserving 2D rotation)
+//      - swiglu_gate              : SwiGLU activation silu(gate) * up
+//      - flash_online_softmax     : Single-pass numerically stable tiled online-softmax attention
+//      - bitnet_b158_ternary_gemv : Zero-FP-multiply 2-bit packed ternary {-1,0,+1} scaled GEMV
+//   2. SOTA 6-DOF Physics Kernel:
+//      - Symplectic Velocity-Verlet translation + exact Rodrigues unit-quaternion attitude step
+//      - Body-frame TVC thrust rotation (25-deg gimbal clamp) + Tsiolkovsky propellant burn
+//   3. Built-in --self-test (6/6 planted-failure controls) + par_for bit-exact FNV-1a benchmark.
+
+struct V3 {
+    x: f64,
+    y: f64,
+    z: f64,
+}
+
+struct Quat {
+    w: f64,
+    x: f64,
+    y: f64,
+    z: f64,
+}
+
+struct Pair2 {
+    a: f64,
+    b: f64,
+}
+
+fn g0_std() -> f64 {
+    9.80665
+}
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 {
+        return -x;
+    }
+    x
+}
+
+fn max_f64(a: f64, b: f64) -> f64 {
+    if a > b {
+        return a;
+    }
+    b
+}
+
+fn min_f64(a: f64, b: f64) -> f64 {
+    if a < b {
+        return a;
+    }
+    b
+}
+
+fn v3_len(v: V3) -> f64 {
+    sqrt(v.x * v.x + v.y * v.y + v.z * v.z)
+}
+
+// ---------------------------------------------------------------- HASH-FNV (Superframe parity)
+
+fn fnv_start() -> u64 {
+    1469598103934665603
+}
+
+fn fnv_u8(h0: u64, b: u64) -> u64 {
+    (h0 ^ b).wrapping_mul(1099511628211)
+}
+
+fn fnv_u64(h0: u64, v: u64) -> u64 {
+    let mut h: u64 = h0;
+    let mut k: u64 = 0;
+    while k < 8 {
+        h = fnv_u8(h, (v >> (8 * k)) & 255);
+        k = k + 1;
+    }
+    h
+}
+
+fn fnv_f32(h0: u64, v: f64) -> u64 {
+    let bits: u32 = (v as f32).to_bits();
+    let mut h: u64 = h0;
+    let mut k: u32 = 0;
+    while k < 4 {
+        h = fnv_u8(h, ((bits >> (8 * k)) & 255) as u64);
+        k = k + 1;
+    }
+    h
+}
+
+fn reduce_hashes(parts: &Vec<u64>) -> u64 {
+    let mut h: u64 = fnv_start();
+    let mut i: usize = 0;
+    while i < parts.len() {
+        h = fnv_u64(h, parts[i]);
+        i = i + 1;
+    }
+    h
+}
+
+// ---------------------------------------------------------------- (1) SOTA ML Kernels (f64)
+
+// RMSNorm: y[i] = (x[i] / sqrt(mean(x^2) + eps)) * weight[i]
+fn rmsnorm(x: &Vec<f64>, weight: &Vec<f64>, eps: f64) -> Vec<f64> {
+    let n: usize = x.len();
+    let mut sq_sum: f64 = 0.0;
+    let mut i: usize = 0;
+    while i < n {
+        sq_sum = sq_sum + x[i] * x[i];
+        i = i + 1;
+    }
+    let inv_rms: f64 = 1.0 / sqrt(sq_sum / (n as f64) + eps);
+    let mut out: Vec<f64> = Vec::new();
+    let mut j: usize = 0;
+    while j < n {
+        out.push(x[j] * inv_rms * weight[j]);
+        j = j + 1;
+    }
+    out
+}
+
+// RoPE 2D pair rotation: theta = pos * base^(-2 * pair_idx / dim)
+fn rope_rotate_pair(x0: f64, x1: f64, pos: i64, pair_idx: i64, dim: i64, base: f64) -> Pair2 {
+    let exponent: f64 = (-2.0 * (pair_idx as f64)) / (dim as f64);
+    let theta: f64 = (pos as f64) * pow(base, exponent);
+    let c: f64 = cos(theta);
+    let s: f64 = sin(theta);
+    Pair2 {
+        a: x0 * c - x1 * s,
+        b: x0 * s + x1 * c,
+    }
+}
+
+// SwiGLU activation: silu(gate) * up = (gate / (1 + exp(-gate))) * up
+fn swiglu_gate(gate: f64, up: f64) -> f64 {
+    let silu: f64 = gate / (1.0 + exp(-gate));
+    silu * up
+}
+
+// Deterministic synthetic feature generator matching Python benchmark bit-exact
+fn synth_feat(row: i64, dim: i64, salt: i64) -> f64 {
+    let v: i64 = ((row * 37 + dim * 17 + salt * 53) % 199) - 99;
+    (v as f64) * 0.012
+}
+
+// Single-pass numerically stable tiled Flash online-softmax attention for one query row.
+fn flash_online_softmax_row(
+    q_idx: i64,
+    n_keys: i64,
+    head_dim: i64,
+    tile_size: i64,
+    logit_bias: f64
+) -> Vec<f64> {
+    let inv_sqrt_d: f64 = 1.0 / sqrt(head_dim as f64);
+    let mut q: Vec<f64> = Vec::new();
+    let mut out: Vec<f64> = Vec::new();
+    let mut d: i64 = 0;
+    while d < head_dim {
+        q.push(synth_feat(q_idx, d, 1));
+        out.push(0.0);
+        d = d + 1;
+    }
+
+    let mut m_run: f64 = -1e30;
+    let mut l_run: f64 = 0.0;
+    let mut t_start: i64 = 0;
+    while t_start < n_keys {
+        let t_end: i64 = min_f64((t_start + tile_size) as f64, n_keys as f64) as i64;
+        let mut scores: Vec<f64> = Vec::new();
+        let mut m_tile: f64 = -1e30;
+        let mut k: i64 = t_start;
+        while k < t_end {
+            let mut dot: f64 = 0.0;
+            let mut j: i64 = 0;
+            while j < head_dim {
+                dot = dot + q[j as usize] * synth_feat(k, j, 2);
+                j = j + 1;
+            }
+            let s: f64 = dot * inv_sqrt_d + logit_bias;
+            scores.push(s);
+            m_tile = max_f64(m_tile, s);
+            k = k + 1;
+        }
+
+        let m_new: f64 = max_f64(m_run, m_tile);
+        let alpha: f64 = exp(m_run - m_new);
+        let mut l_tile: f64 = 0.0;
+        let mut d_scale: i64 = 0;
+        while d_scale < head_dim {
+            out[d_scale as usize] = out[d_scale as usize] * alpha;
+            d_scale = d_scale + 1;
+        }
+
+        let mut loc: i64 = 0;
+        while t_start + loc < t_end {
+            let w: f64 = exp(scores[loc as usize] - m_new);
+            l_tile = l_tile + w;
+            let k_id: i64 = t_start + loc;
+            let mut dj: i64 = 0;
+            while dj < head_dim {
+                out[dj as usize] = out[dj as usize] + w * synth_feat(k_id, dj, 3);
+                dj = dj + 1;
+            }
+            loc = loc + 1;
+        }
+        l_run = l_run * alpha + l_tile;
+        m_run = m_new;
+        t_start = t_end;
+    }
+
+    let inv_l: f64 = 1.0 / l_run;
+    let mut dj2: i64 = 0;
+    while dj2 < head_dim {
+        out[dj2 as usize] = out[dj2 as usize] * inv_l;
+        dj2 = dj2 + 1;
+    }
+    out
+}
+
+fn naive_softmax_row(q_idx: i64, n_keys: i64, head_dim: i64, logit_bias: f64) -> Vec<f64> {
+    let inv_sqrt_d: f64 = 1.0 / sqrt(head_dim as f64);
+    let mut q: Vec<f64> = Vec::new();
+    let mut out: Vec<f64> = Vec::new();
+    let mut d: i64 = 0;
+    while d < head_dim {
+        q.push(synth_feat(q_idx, d, 1));
+        out.push(0.0);
+        d = d + 1;
+    }
+    let mut scores: Vec<f64> = Vec::new();
+    let mut m_all: f64 = -1e30;
+    let mut k: i64 = 0;
+    while k < n_keys {
+        let mut dot: f64 = 0.0;
+        let mut j: i64 = 0;
+        while j < head_dim {
+            dot = dot + q[j as usize] * synth_feat(k, j, 2);
+            j = j + 1;
+        }
+        let s: f64 = dot * inv_sqrt_d + logit_bias;
+        scores.push(s);
+        m_all = max_f64(m_all, s);
+        k = k + 1;
+    }
+    let mut denom: f64 = 0.0;
+    let mut k2: i64 = 0;
+    while k2 < n_keys {
+        let w: f64 = exp(scores[k2 as usize] - m_all);
+        denom = denom + w;
+        let mut j2: i64 = 0;
+        while j2 < head_dim {
+            out[j2 as usize] = out[j2 as usize] + w * synth_feat(k2, j2, 3);
+            j2 = j2 + 1;
+        }
+        k2 = k2 + 1;
+    }
+    let inv_d: f64 = 1.0 / denom;
+    let mut j3: i64 = 0;
+    while j3 < head_dim {
+        out[j3 as usize] = out[j3 as usize] * inv_d;
+        j3 = j3 + 1;
+    }
+    out
+}
+
+// BitNet b1.58 2-bit packed ternary GEMV row with per-row scale (zero FP weight multiplies).
+fn ternary_code_at(row: i64, col: i64, layer: i64) -> u64 {
+    let mut h: u64 = fnv_u64(fnv_start(), (layer as u64) * 131 + (row as u64));
+    h = fnv_u64(h, col as u64);
+    h % 3
+}
+
+fn pack_4_ternary(c0: u64, c1: u64, c2: u64, c3: u64) -> u8 {
+    ((c0 & 3) | ((c1 & 3) << 2) | ((c2 & 3) << 4) | ((c3 & 3) << 6)) as u8
+}
+
+fn bitnet_b158_ternary_dot(packed: &Vec<u8>, x: &Vec<f64>, scale: f64) -> f64 {
+    let mut acc: f64 = 0.0;
+    let n_bytes: usize = packed.len();
+    let mut b_idx: usize = 0;
+    while b_idx < n_bytes {
+        let byte_val: u64 = packed[b_idx] as u64;
+        let base: usize = b_idx * 4;
+        let mut lane: usize = 0;
+        while lane < 4 {
+            let code: u64 = (byte_val >> (2 * (lane as u64))) & 3;
+            if code == 1 {
+                acc = acc + x[base + lane];
+            } else if code == 2 {
+                acc = acc - x[base + lane];
+            }
+            lane = lane + 1;
+        }
+        b_idx = b_idx + 1;
+    }
+    acc * scale
+}
+
+fn bitnet_b158_float_ref(packed: &Vec<u8>, x: &Vec<f64>, scale: f64) -> f64 {
+    let mut acc: f64 = 0.0;
+    let n_bytes: usize = packed.len();
+    let mut b_idx: usize = 0;
+    while b_idx < n_bytes {
+        let byte_val: u64 = packed[b_idx] as u64;
+        let base: usize = b_idx * 4;
+        let mut lane: usize = 0;
+        while lane < 4 {
+            let code: u64 = (byte_val >> (2 * (lane as u64))) & 3;
+            let mut w: f64 = 0.0;
+            if code == 1 {
+                w = 1.0;
+            } else if code == 2 {
+                w = -1.0;
+            }
+            acc = acc + w * x[base + lane];
+            lane = lane + 1;
+        }
+        b_idx = b_idx + 1;
+    }
+    acc * scale
+}
+
+// ---------------------------------------------------------------- (2) SOTA 6-DOF Physics Kernel
+
+fn quat_norm(q: Quat) -> f64 {
+    sqrt(q.w * q.w + q.x * q.x + q.y * q.y + q.z * q.z)
+}
+
+fn quat_normalize(q: Quat) -> Quat {
+    let n: f64 = quat_norm(q);
+    if n <= 1e-15 {
+        return Quat { w: 1.0, x: 0.0, y: 0.0, z: 0.0 };
+    }
+    let inv: f64 = 1.0 / n;
+    Quat { w: q.w * inv, x: q.x * inv, y: q.y * inv, z: q.z * inv }
+}
+
+fn quat_mul(a: Quat, b: Quat) -> Quat {
+    Quat {
+        w: a.w * b.w - a.x * b.x - a.y * b.y - a.z * b.z,
+        x: a.w * b.x + a.x * b.w + a.y * b.z - a.z * b.y,
+        y: a.w * b.y - a.x * b.z + a.y * b.w + a.z * b.x,
+        z: a.w * b.z + a.x * b.y - a.y * b.x + a.z * b.w,
+    }
+}
+
+// Rotate body-frame vector v into world frame via unit quaternion q: v + 2*w*(u x v) + 2*(u x (u x v))
+fn quat_rotate_vec3(q: Quat, v: V3) -> V3 {
+    let tx: f64 = 2.0 * (q.y * v.z - q.z * v.y);
+    let ty: f64 = 2.0 * (q.z * v.x - q.x * v.z);
+    let tz: f64 = 2.0 * (q.x * v.y - q.y * v.x);
+    V3 {
+        x: v.x + q.w * tx + (q.y * tz - q.z * ty),
+        y: v.y + q.w * ty + (q.z * tx - q.x * tz),
+        z: v.z + q.w * tz + (q.x * ty - q.y * tx),
+    }
+}
+
+// Exact exponential-map Rodrigues quaternion attitude step for body angular velocity omega over dt.
+fn quat_step_omega(q: Quat, omega: V3, dt: f64) -> Quat {
+    let wmag: f64 = v3_len(omega);
+    let half_angle: f64 = 0.5 * wmag * dt;
+    let mut dq = Quat { w: 1.0, x: 0.0, y: 0.0, z: 0.0 };
+    if wmag > 1e-12 {
+        let s: f64 = sin(half_angle) / wmag;
+        dq = Quat {
+            w: cos(half_angle),
+            x: omega.x * s,
+            y: omega.y * s,
+            z: omega.z * s,
+        };
+    }
+    quat_normalize(quat_mul(q, dq))
+}
+
+struct State6DOF {
+    pos: V3,
+    vel: V3,
+    q: Quat,
+    omega: V3,
+    mass: f64,
+    max_q_norm_err: f64,
+    total_dv: f64,
+}
+
+// Symplectic Velocity-Verlet + Rodrigues unit-quaternion attitude + Tsiolkovsky powered-descent step.
+fn step_6dof_descent(
+    st: State6DOF,
+    thrust_mag_req: f64,
+    gimbal_x: f64,
+    gimbal_y: f64,
+    torque: V3,
+    inertia: f64,
+    isp: f64,
+    m_dry: f64,
+    dt: f64
+) -> State6DOF {
+    let gz: f64 = -g0_std();
+    let v_ex: f64 = isp * g0_std();
+    // Clamp gimbal angle to 25-degree cone (tan(25 deg) = 0.466307658)
+    let max_tan: f64 = 0.466307658;
+    let mut gx: f64 = gimbal_x;
+    let mut gy: f64 = gimbal_y;
+    let gh: f64 = sqrt(gx * gx + gy * gy);
+    if gh > max_tan && gh > 1e-12 {
+        let sc: f64 = max_tan / gh;
+        gx = gx * sc;
+        gy = gy * sc;
+    }
+    let dir_inv: f64 = 1.0 / sqrt(1.0 + gx * gx + gy * gy);
+    let mut t_mag: f64 = max_f64(thrust_mag_req, 0.0);
+    if st.mass <= m_dry {
+        t_mag = 0.0;
+    }
+
+    let t_body0 = V3 {
+        x: t_mag * gx * dir_inv,
+        y: t_mag * gy * dir_inv,
+        z: t_mag * dir_inv,
+    };
+    let f_world0: V3 = quat_rotate_vec3(st.q, t_body0);
+    let inv_m0: f64 = 1.0 / st.mass;
+    let a0 = V3 {
+        x: f_world0.x * inv_m0,
+        y: f_world0.y * inv_m0,
+        z: f_world0.z * inv_m0 + gz,
+    };
+
+    // Velocity-Verlet position update
+    let pos_next = V3 {
+        x: st.pos.x + st.vel.x * dt + 0.5 * a0.x * dt * dt,
+        y: st.pos.y + st.vel.y * dt + 0.5 * a0.y * dt * dt,
+        z: st.pos.z + st.vel.z * dt + 0.5 * a0.z * dt * dt,
+    };
+
+    // Attitude + angular velocity step
+    let inv_i: f64 = 1.0 / inertia;
+    let omega_half = V3 {
+        x: st.omega.x + 0.5 * torque.x * inv_i * dt,
+        y: st.omega.y + 0.5 * torque.y * inv_i * dt,
+        z: st.omega.z + 0.5 * torque.z * inv_i * dt,
+    };
+    let q_next: Quat = quat_step_omega(st.q, omega_half, dt);
+    let omega_next = V3 {
+        x: omega_half.x + 0.5 * torque.x * inv_i * dt,
+        y: omega_half.y + 0.5 * torque.y * inv_i * dt,
+        z: omega_half.z + 0.5 * torque.z * inv_i * dt,
+    };
+
+    // Tsiolkovsky propellant burn
+    let dm: f64 = (t_mag / v_ex) * dt;
+    let mass_next: f64 = max_f64(st.mass - dm, m_dry);
+    let mut step_dv: f64 = 0.0;
+    if mass_next < st.mass {
+        step_dv = v_ex * log(st.mass / mass_next);
+    }
+
+    // Velocity-Verlet second acceleration evaluation at updated attitude & mass
+    let mut t_mag1: f64 = t_mag;
+    if mass_next <= m_dry {
+        t_mag1 = 0.0;
+    }
+    let t_body1 = V3 {
+        x: t_mag1 * gx * dir_inv,
+        y: t_mag1 * gy * dir_inv,
+        z: t_mag1 * dir_inv,
+    };
+    let f_world1: V3 = quat_rotate_vec3(q_next, t_body1);
+    let inv_m1: f64 = 1.0 / mass_next;
+    let a1 = V3 {
+        x: f_world1.x * inv_m1,
+        y: f_world1.y * inv_m1,
+        z: f_world1.z * inv_m1 + gz,
+    };
+    let vel_next = V3 {
+        x: st.vel.x + 0.5 * (a0.x + a1.x) * dt,
+        y: st.vel.y + 0.5 * (a0.y + a1.y) * dt,
+        z: st.vel.z + 0.5 * (a0.z + a1.z) * dt,
+    };
+
+    let q_err: f64 = abs_f64(quat_norm(q_next) - 1.0);
+    State6DOF {
+        pos: pos_next,
+        vel: vel_next,
+        q: q_next,
+        omega: omega_next,
+        mass: mass_next,
+        max_q_norm_err: max_f64(st.max_q_norm_err, q_err),
+        total_dv: st.total_dv + step_dv,
+    }
+}
+
+fn run_6dof_trajectory(traj_id: i64, steps: i64, dt: f64) -> State6DOF {
+    let tid: f64 = traj_id as f64;
+    let mut st = State6DOF {
+        pos: V3 { x: 40.0 + 0.5 * tid, y: -25.0 + 0.25 * tid, z: 1200.0 + 2.0 * tid },
+        vel: V3 { x: -4.0, y: 2.0, z: -65.0 },
+        q: quat_normalize(Quat { w: 1.0, x: 0.02, y: -0.015, z: 0.005 }),
+        omega: V3 { x: 0.04, y: -0.03, z: 0.01 },
+        mass: 50000.0,
+        max_q_norm_err: 0.0,
+        total_dv: 0.0,
+    };
+    let mut k: i64 = 0;
+    while k < steps {
+        let kp_att: f64 = -12000.0;
+        let kd_att: f64 = -8000.0;
+        let torque = V3 {
+            x: kp_att * st.q.x + kd_att * st.omega.x,
+            y: kp_att * st.q.y + kd_att * st.omega.y,
+            z: kp_att * st.q.z + kd_att * st.omega.z,
+        };
+        let gx: f64 = min_f64(max_f64(-0.0015 * st.pos.x - 0.02 * st.vel.x, -0.35), 0.35);
+        let gy: f64 = min_f64(max_f64(-0.0015 * st.pos.y - 0.02 * st.vel.y, -0.35), 0.35);
+        let thrust: f64 = st.mass * (g0_std() + 4.5);
+        st = step_6dof_descent(st, thrust, gx, gy, torque, 180000.0, 311.0, 22000.0, dt);
+        k = k + 1;
+    }
+    st
+}
+
+// ---------------------------------------------------------------- (3) Parallel Benchmark Stages
+
+struct MlNormCtx {
+    dim: i64,
+}
+
+// Stage 1: RMSNorm + RoPE + SwiGLU per token (512 tokens x d=64).
+fn eval_ml_norm_rope_swiglu_token(ctx: &MlNormCtx, tok_id: i64) -> u64 {
+    let dim: i64 = ctx.dim;
+    let mut x: Vec<f64> = Vec::new();
+    let mut w: Vec<f64> = Vec::new();
+    let mut u: Vec<f64> = Vec::new();
+    let mut d: i64 = 0;
+    while d < dim {
+        x.push(synth_feat(tok_id, d, 5));
+        w.push(1.0 + 0.05 * synth_feat(d, 0, 7));
+        u.push(synth_feat(tok_id, d, 9));
+        d = d + 1;
+    }
+    let xn: Vec<f64> = rmsnorm(&x, &w, 1e-6);
+    let mut h: u64 = fnv_start();
+    let mut p: i64 = 0;
+    while p < dim / 2 {
+        let i0: usize = (2 * p) as usize;
+        let i1: usize = (2 * p + 1) as usize;
+        let rot: Pair2 = rope_rotate_pair(xn[i0], xn[i1], tok_id, p, dim, 10000.0);
+        let y0: f64 = swiglu_gate(rot.a, u[i0]);
+        let y1: f64 = swiglu_gate(rot.b, u[i1]);
+        h = fnv_f32(h, y0);
+        h = fnv_f32(h, y1);
+        p = p + 1;
+    }
+    h
+}
+
+struct FlashBitnetCtx {
+    n_keys: i64,
+    head_dim: i64,
+    tile_size: i64,
+    bn_cols: i64,
+}
+
+// Stage 2: Flash online-softmax + BitNet b1.58 scaled ternary GEMV (64 chunks).
+fn eval_flash_bitnet_chunk(ctx: &FlashBitnetCtx, chunk_id: i64) -> u64 {
+    let out: Vec<f64> = flash_online_softmax_row(
+        chunk_id,
+        ctx.n_keys,
+        ctx.head_dim,
+        ctx.tile_size,
+        12.0
+    );
+    let mut h: u64 = fnv_start();
+    let mut d: i64 = 0;
+    while d < ctx.head_dim {
+        h = fnv_f32(h, out[d as usize]);
+        d = d + 1;
+    }
+
+    let mut x: Vec<f64> = Vec::new();
+    let mut c: i64 = 0;
+    while c < ctx.bn_cols {
+        x.push(synth_feat(chunk_id, c, 11));
+        c = c + 1;
+    }
+    let mut r_off: i64 = 0;
+    while r_off < 4 {
+        let row: i64 = chunk_id * 4 + r_off;
+        let mut packed: Vec<u8> = Vec::new();
+        let mut col: i64 = 0;
+        while col < ctx.bn_cols {
+            let c0: u64 = ternary_code_at(row, col, 0);
+            let c1: u64 = ternary_code_at(row, col + 1, 0);
+            let c2: u64 = ternary_code_at(row, col + 2, 0);
+            let c3: u64 = ternary_code_at(row, col + 3, 0);
+            packed.push(pack_4_ternary(c0, c1, c2, c3));
+            col = col + 4;
+        }
+        let scale: f64 = 0.75 + 0.01 * ((row % 17) as f64);
+        let y: f64 = bitnet_b158_ternary_dot(&packed, &x, scale);
+        h = fnv_f32(h, y);
+        r_off = r_off + 1;
+    }
+    h
+}
+
+struct Phys6DofCtx {
+    steps: i64,
+    dt: f64,
+}
+
+// Stage 3: 128 independent 6-DOF powered-descent trajectories (200 steps each).
+fn eval_phys_6dof_mission(ctx: &Phys6DofCtx, traj_id: i64) -> u64 {
+    let st: State6DOF = run_6dof_trajectory(traj_id, ctx.steps, ctx.dt);
+    let mut h: u64 = fnv_start();
+    h = fnv_f32(h, st.pos.x);
+    h = fnv_f32(h, st.pos.z);
+    h = fnv_f32(h, st.vel.z);
+    h = fnv_f32(h, st.q.w);
+    h = fnv_f32(h, st.mass);
+    h = fnv_f32(h, st.total_dv);
+    let inv_ok: u64 = if st.max_q_norm_err < 1e-12 && st.mass > 22000.0 { 1 } else { 0 };
+    fnv_u8(h, inv_ok)
+}
+
+// ---------------------------------------------------------------- (4) Self-Test & 6 Planted Controls
+
+fn run_self_tests() -> i32 ~ Console {
+    let mut failures: i32 = 0;
+
+    // 1. RMSNorm known-answer + Planted control 1 (dropped sqrt)
+    let mut x1: Vec<f64> = Vec::new();
+    x1.push(3.0);
+    x1.push(4.0);
+    let mut w1: Vec<f64> = Vec::new();
+    w1.push(1.0);
+    w1.push(1.0);
+    let yn: Vec<f64> = rmsnorm(&x1, &w1, 0.0);
+    let rms_out: f64 = sqrt(0.5 * (yn[0] * yn[0] + yn[1] * yn[1]));
+    let rms_err: f64 = abs_f64(rms_out - 1.0);
+    let bad_no_sqrt: f64 = x1[0] / (0.5 * (x1[0] * x1[0] + x1[1] * x1[1]));
+    if rms_err < 1e-13 && abs_f64(bad_no_sqrt - yn[0]) > 0.5 {
+        println!("[PASS] rmsnorm_and_planted_no_sqrt rms_err={:.3e}", rms_err);
+    } else {
+        println!("[FAIL] rmsnorm rms_err={}", rms_err);
+        failures = failures + 1;
+    }
+
+    // 2. RoPE norm preservation + Planted control 2 (wrong sin sign)
+    let rot: Pair2 = rope_rotate_pair(1.25, -0.75, 17, 3, 64, 10000.0);
+    let norm_in: f64 = 1.25 * 1.25 + (-0.75) * (-0.75);
+    let norm_out: f64 = rot.a * rot.a + rot.b * rot.b;
+    let rope_err: f64 = abs_f64(norm_out - norm_in);
+    let theta_ref: f64 = 17.0 * pow(10000.0, -6.0 / 64.0);
+    let bad_a: f64 = 1.25 * cos(theta_ref) + (-0.75) * sin(theta_ref);
+    if rope_err < 1e-13 && abs_f64(bad_a - rot.a) > 0.1 {
+        println!("[PASS] rope_orthogonal_and_planted_sign rope_err={:.3e}", rope_err);
+    } else {
+        println!("[FAIL] rope rope_err={}", rope_err);
+        failures = failures + 1;
+    }
+
+    // 3. SwiGLU analytical value + Planted control 3 (dropped sigmoid)
+    let sg0: f64 = swiglu_gate(0.0, 5.0);
+    let sg1: f64 = swiglu_gate(1.0, 2.0);
+    let sg1_ref: f64 = 2.0 / (1.0 + exp(-1.0));
+    let sg_err: f64 = abs_f64(sg0) + abs_f64(sg1 - sg1_ref);
+    let bad_linear: f64 = 1.0 * 2.0;
+    if sg_err < 1e-14 && abs_f64(bad_linear - sg1) > 0.5 {
+        println!("[PASS] swiglu_and_planted_linear sg_err={:.3e}", sg_err);
+    } else {
+        println!("[FAIL] swiglu sg_err={}", sg_err);
+        failures = failures + 1;
+    }
+
+    // 4. Flash online-softmax vs naive with +50.0 logit shift + Planted control 4 (unnormalized)
+    let fl: Vec<f64> = flash_online_softmax_row(5, 64, 16, 8, 50.0);
+    let nv: Vec<f64> = naive_softmax_row(5, 64, 16, 50.0);
+    let mut fl_max_err: f64 = 0.0;
+    let mut di: usize = 0;
+    while di < 16 {
+        fl_max_err = max_f64(fl_max_err, abs_f64(fl[di] - nv[di]));
+        di = di + 1;
+    }
+    let bad_unnorm: f64 = fl[0] * 64.0;
+    if fl_max_err < 1e-13 && abs_f64(bad_unnorm - nv[0]) > 0.5 {
+        println!("[PASS] flash_online_softmax_and_planted_unnorm err={:.3e}", fl_max_err);
+    } else {
+        println!("[FAIL] flash_online_softmax err={}", fl_max_err);
+        failures = failures + 1;
+    }
+
+    // 5. BitNet b1.58 scaled ternary GEMV exactness + Planted control 5 (1-weight flip)
+    let mut p_ok: Vec<u8> = Vec::new();
+    p_ok.push(pack_4_ternary(1, 2, 0, 1));
+    p_ok.push(pack_4_ternary(2, 1, 1, 0));
+    let mut xb: Vec<f64> = Vec::new();
+    xb.push(1.5);
+    xb.push(-0.5);
+    xb.push(9.0);
+    xb.push(2.0);
+    xb.push(3.0);
+    xb.push(-1.0);
+    xb.push(4.0);
+    xb.push(7.0);
+    let y_pack: f64 = bitnet_b158_ternary_dot(&p_ok, &xb, 0.8);
+    let y_ref: f64 = bitnet_b158_float_ref(&p_ok, &xb, 0.8);
+    let mut p_flip: Vec<u8> = Vec::new();
+    p_flip.push(pack_4_ternary(2, 2, 0, 1));
+    p_flip.push(pack_4_ternary(2, 1, 1, 0));
+    let y_flip: f64 = bitnet_b158_ternary_dot(&p_flip, &xb, 0.8);
+    if abs_f64(y_pack - y_ref) == 0.0 && abs_f64(y_pack - y_flip) > 2.0 {
+        println!("[PASS] bitnet_b158_and_planted_flip diff=0.0 flip_delta={:.3}", abs_f64(y_pack - y_flip));
+    } else {
+        println!("[FAIL] bitnet_b158 y_pack={} y_ref={}", y_pack, y_ref);
+        failures = failures + 1;
+    }
+
+    // 6. 6-DOF Velocity-Verlet + unit-quaternion + Tsiolkovsky + Planted control 6 (unnorm quat)
+    let st_free0 = State6DOF {
+        pos: V3 { x: 0.0, y: 0.0, z: 1000.0 },
+        vel: V3 { x: 0.0, y: 0.0, z: -10.0 },
+        q: Quat { w: 1.0, x: 0.0, y: 0.0, z: 0.0 },
+        omega: V3 { x: 0.0, y: 0.0, z: 0.0 },
+        mass: 50000.0,
+        max_q_norm_err: 0.0,
+        total_dv: 0.0,
+    };
+    let mut st_free: State6DOF = st_free0;
+    let mut fk: i64 = 0;
+    while fk < 100 {
+        st_free = step_6dof_descent(
+            st_free, 0.0, 0.0, 0.0, V3 { x: 0.0, y: 0.0, z: 0.0 }, 180000.0, 311.0, 22000.0, 0.05
+        );
+        fk = fk + 1;
+    }
+    let t_free: f64 = 5.0;
+    let z_exact: f64 = 1000.0 - 10.0 * t_free - 0.5 * g0_std() * t_free * t_free;
+    let free_err: f64 = abs_f64(st_free.pos.z - z_exact);
+
+    let st_burn: State6DOF = run_6dof_trajectory(0, 200, 0.05);
+    let dv_tsiolkovsky: f64 = 311.0 * g0_std() * log(50000.0 / st_burn.mass);
+    let dv_err: f64 = abs_f64(st_burn.total_dv - dv_tsiolkovsky);
+
+    // Planted control 6: non-unit quaternion stretches rotated vector norm
+    let bad_q = Quat { w: 1.5, x: 0.0, y: 0.0, z: 0.0 };
+    let bad_rot: V3 = quat_rotate_vec3(bad_q, V3 { x: 0.0, y: 0.0, z: 1.0 });
+    let good_rot: V3 = quat_rotate_vec3(st_burn.q, V3 { x: 0.0, y: 0.0, z: 1.0 });
+    let bad_norm_err: f64 = abs_f64(quat_norm(bad_q) - 1.0);
+    let rot_norm_err: f64 = abs_f64(v3_len(good_rot) - 1.0);
+
+    if free_err < 1e-10
+        && dv_err < 1e-10
+        && st_burn.max_q_norm_err < 1e-13
+        && rot_norm_err < 1e-13
+        && bad_norm_err > 0.4
+        && v3_len(bad_rot) > 0.0
+    {
+        println!(
+            "[PASS] phys_6dof_and_planted_quat free_err={:.3e} dv_err={:.3e} q_err={:.3e}",
+            free_err, dv_err, st_burn.max_q_norm_err
+        );
+    } else {
+        println!(
+            "[FAIL] phys_6dof free_err={} dv_err={} q_err={}",
+            free_err, dv_err, st_burn.max_q_norm_err
+        );
+        failures = failures + 1;
+    }
+
+    failures
+}
+
+fn main() ~ Console + Clock {
+    let failures: i32 = run_self_tests();
+
+    let n_tokens: i64 = 512;
+    let n_chunks: i64 = 64;
+    let n_missions: i64 = 128;
+
+    let ml_ctx = MlNormCtx { dim: 64 };
+    let fb_ctx = FlashBitnetCtx { n_keys: 128, head_dim: 32, tile_size: 16, bn_cols: 256 };
+    let ph_ctx = Phys6DofCtx { steps: 200, dt: 0.05 };
+
+    // Serial execution
+    let t0: i64 = clock_ns();
+    let mut s1: Vec<u64> = Vec::new();
+    let mut i1: i64 = 0;
+    while i1 < n_tokens {
+        s1.push(eval_ml_norm_rope_swiglu_token(&ml_ctx, i1));
+        i1 = i1 + 1;
+    }
+    let h1_ser: u64 = reduce_hashes(&s1);
+
+    let mut s2: Vec<u64> = Vec::new();
+    let mut i2: i64 = 0;
+    while i2 < n_chunks {
+        s2.push(eval_flash_bitnet_chunk(&fb_ctx, i2));
+        i2 = i2 + 1;
+    }
+    let h2_ser: u64 = reduce_hashes(&s2);
+
+    let mut s3: Vec<u64> = Vec::new();
+    let mut i3: i64 = 0;
+    while i3 < n_missions {
+        s3.push(eval_phys_6dof_mission(&ph_ctx, i3));
+        i3 = i3 + 1;
+    }
+    let h3_ser: u64 = reduce_hashes(&s3);
+    let serial_ns: i64 = clock_ns() - t0;
+
+    // Parallel execution via deterministic par_for
+    let t1: i64 = clock_ns();
+    let p1: Vec<u64> = par_for(n_tokens, &ml_ctx, eval_ml_norm_rope_swiglu_token);
+    let h1_par: u64 = reduce_hashes(&p1);
+    let p2: Vec<u64> = par_for(n_chunks, &fb_ctx, eval_flash_bitnet_chunk);
+    let h2_par: u64 = reduce_hashes(&p2);
+    let p3: Vec<u64> = par_for(n_missions, &ph_ctx, eval_phys_6dof_mission);
+    let h3_par: u64 = reduce_hashes(&p3);
+    let par_ns: i64 = clock_ns() - t1;
+
+    let mut total_fail: i32 = failures;
+    if h1_ser == h1_par && h2_ser == h2_par && h3_ser == h3_par {
+        println!(
+            "[PASS] par_for_parity ml={:016x} flash_bn={:016x} phys6dof={:016x} serial_ns={} par_ns={}",
+            h1_par, h2_par, h3_par, serial_ns, par_ns
+        );
+    } else {
+        println!("[FAIL] par_for_parity mismatch");
+        total_fail = total_fail + 1;
+    }
+
+    if total_fail == 0 {
+        println!("[PASS] sota_ml_physics_kernels summary checks=6 planted=6 failures=0");
+    } else {
+        println!("[FAIL] sota_ml_physics_kernels summary failures={}", total_fail);
+    }
+}

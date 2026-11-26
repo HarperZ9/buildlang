@@ -1562,6 +1562,11 @@ impl<'ctx> MirLowerer<'ctx> {
             {
                 crate::codegen::backend::c::CBackend::hvec_ptr_suffix(inner)
             }
+            MirType::Tuple(elems)
+                if crate::codegen::backend::c::CBackend::is_supported_vec_tuple(elems) =>
+            {
+                MirType::tuple_type_name(elems).to_string()
+            }
             _ => {
                 return Err(CodegenError::Unsupported(format!(
                     "a vector of `{elem_ty}` elements is not supported yet: the Vec \
@@ -2486,8 +2491,8 @@ impl<'ctx> MirLowerer<'ctx> {
                 } => {
                     let name = method.name.as_ref();
                     match name {
-                        "iter" => {
-                            // Found the base - `receiver` is the source vec.
+                        "iter" | "iter_mut" | "into_iter" => {
+                            // Found the base - `receiver` is the source collection.
                             steps.reverse();
                             return Some(IterChain {
                                 source: receiver,
@@ -2499,6 +2504,10 @@ impl<'ctx> MirLowerer<'ctx> {
                             steps.push(IterStep::Map { closure: &args[0] });
                             current = receiver;
                         }
+                        "flat_map" if args.len() == 1 => {
+                            steps.push(IterStep::FlatMap { closure: &args[0] });
+                            current = receiver;
+                        }
                         "filter" if args.len() == 1 => {
                             steps.push(IterStep::Filter { closure: &args[0] });
                             current = receiver;
@@ -2507,7 +2516,7 @@ impl<'ctx> MirLowerer<'ctx> {
                             steps.push(IterStep::Enumerate);
                             current = receiver;
                         }
-                        "cloned" if args.is_empty() => {
+                        "cloned" | "copied" if args.is_empty() => {
                             steps.push(IterStep::Cloned);
                             current = receiver;
                         }
@@ -2569,6 +2578,11 @@ impl<'ctx> MirLowerer<'ctx> {
         // before the source is lowered resets it.
         let expected_collect = match (&chain.terminal, &self.expected_type) {
             (IterTerminal::Collect, Some(MirType::Vec(inner))) => Some(inner.as_ref().clone()),
+            (IterTerminal::Sum | IterTerminal::Product, Some(t))
+                if matches!(t, MirType::Int(..) | MirType::Float(..)) =>
+            {
+                Some(t.clone())
+            }
             _ => None,
         };
         // 1. Lower the source: a vector, or a range `a..b` / `a..=b`.
@@ -2588,9 +2602,9 @@ impl<'ctx> MirLowerer<'ctx> {
         //    After map closures, the type may change based on the closure's
         //    return type annotation.  For now we infer from the closure.
         let mut output_elem_ty = self.infer_chain_output_type(&elem_ty, &chain.steps);
-        // Over a range, an unannotated `map` closure says nothing about its
-        // result (`|_| make()`); the vector the result is bound to does.
-        if let (ChainSource::Range { .. }, Some(want)) = (&source, &expected_collect) {
+        // When the target binding annotates `let v: Vec<T> = ...collect()` and
+        // the map closure has no explicit return annotation, use `T` directly.
+        if let Some(want) = &expected_collect {
             let annotated = chain.steps.iter().any(|s| {
                 matches!(s, IterStep::Map { closure }
                     if matches!(&closure.kind, ExprKind::Closure { return_type: Some(_), .. }))
@@ -2788,6 +2802,16 @@ impl<'ctx> MirLowerer<'ctx> {
                     );
                     builder.switch_to_block(cont);
                 }
+                ChainSource::Indexed { local } => {
+                    builder.assign(
+                        elem,
+                        MirRValue::IndexAccess {
+                            base: values::local(*local),
+                            index: values::local(idx_local),
+                            elem_ty: elem_ty.clone(),
+                        },
+                    );
+                }
                 ChainSource::Range { first } => {
                     // elem = start + idx, in the range's own integer type.
                     let wide = builder.create_local(MirType::i64());
@@ -2810,8 +2834,130 @@ impl<'ctx> MirLowerer<'ctx> {
 
         // Apply each step transform to produce the final value.
         let mut current_val = values::local(elem_local);
+        let mut flat_mapped = false;
         for (step_idx, step) in chain.steps.iter().enumerate() {
             match step {
+                IterStep::FlatMap { closure } => {
+                    if let ExprKind::Closure { params, body, .. } = &closure.kind {
+                        let mut saved: Vec<(Arc<str>, Option<LocalId>)> = Vec::new();
+                        if let Some(p0) = params.first() {
+                            let pname = match &p0.pattern.kind {
+                                ast::PatternKind::Ident { name, .. }
+                                | ast::PatternKind::RefBind { name, .. } => Some(name.name.clone()),
+                                _ => None,
+                            };
+                            if let Some(name) = pname {
+                                if name.as_ref() != "_" {
+                                    let old = self.var_map.get(&name).copied();
+                                    saved.push((name.clone(), old));
+                                    let pty = p0
+                                        .ty
+                                        .as_ref()
+                                        .map(|t| self.lower_type_from_ast(t))
+                                        .unwrap_or_else(|| self.type_of_value(&current_val));
+                                    let b = self.current_fn.as_mut().unwrap();
+                                    let loc = b.create_named_local(name.clone(), pty);
+                                    b.assign(loc, MirRValue::Use(current_val.clone()));
+                                    self.var_map.insert(name, loc);
+                                }
+                            }
+                        }
+                        // Unwrap a single-expression block body `{ inner_iter }`.
+                        let mut inner_expr: &ast::Expr = body;
+                        loop {
+                            match &inner_expr.kind {
+                                ExprKind::Paren(e) => inner_expr = e,
+                                ExprKind::Block(blk) if blk.stmts.len() == 1 => {
+                                    if let StmtKind::Expr(e) = &blk.stmts[0].kind {
+                                        inner_expr = e;
+                                    } else {
+                                        break;
+                                    }
+                                }
+                                _ => break,
+                            }
+                        }
+                        let inner_vec = if let Some(inner_chain) =
+                            Self::try_parse_iter_chain(inner_expr, "collect", &[])
+                        {
+                            let prev_exp = self
+                                .expected_type
+                                .replace(MirType::Vec(Box::new(output_elem_ty.clone())));
+                            let res = self.lower_iter_chain(&inner_chain);
+                            self.expected_type = prev_exp;
+                            res?
+                        } else {
+                            self.lower_expr(body)?
+                        };
+                        for (name, old) in saved {
+                            if let Some(id) = old {
+                                self.var_map.insert(name, id);
+                            } else {
+                                self.var_map.remove(&name);
+                            }
+                        }
+                        // Append all elements of `inner_vec` into `result_local` for Collect.
+                        if matches!(chain.terminal, IterTerminal::Collect) {
+                            let inner_ty = self.type_of_value(&inner_vec);
+                            let inner_elem = match &inner_ty {
+                                MirType::Vec(e) => (**e).clone(),
+                                _ => output_elem_ty.clone(),
+                            };
+                            let (get_fn, len_fn) = Self::vec_get_len_fn_names(&inner_elem)?;
+                            let b = self.current_fn.as_mut().unwrap();
+                            let iv_loc = b.create_local(inner_ty);
+                            b.assign(iv_loc, MirRValue::Use(inner_vec));
+                            let ilen = b.create_local(MirType::i64());
+                            let c1 = b.create_block();
+                            b.call(
+                                MirValue::Function(Arc::from(len_fn)),
+                                vec![values::local(iv_loc)],
+                                Some(ilen),
+                                c1,
+                            );
+                            b.switch_to_block(c1);
+                            let iidx = b.create_local(MirType::i64());
+                            b.assign_const(iidx, MirConst::Int(0, MirType::i64()));
+                            let icond = b.create_block();
+                            let ibody = b.create_block();
+                            let iexit = b.create_block();
+                            b.goto(icond);
+                            b.switch_to_block(icond);
+                            let icmp = b.create_local(MirType::Bool);
+                            b.binary_op(icmp, BinOp::Lt, values::local(iidx), values::local(ilen));
+                            b.branch(values::local(icmp), ibody, iexit);
+                            b.switch_to_block(ibody);
+                            let ielem = b.create_local(inner_elem);
+                            let c2 = b.create_block();
+                            b.call(
+                                MirValue::Function(Arc::from(get_fn.as_str())),
+                                vec![values::local(iv_loc), values::local(iidx)],
+                                Some(ielem),
+                                c2,
+                            );
+                            b.switch_to_block(c2);
+                            let c3 = b.create_block();
+                            b.call(
+                                MirValue::Function(Arc::from(push_fn_name.as_str())),
+                                vec![values::local(result_local), values::local(ielem)],
+                                None,
+                                c3,
+                            );
+                            b.switch_to_block(c3);
+                            let inext = b.create_local(MirType::i64());
+                            b.binary_op(
+                                inext,
+                                BinOp::Add,
+                                values::local(iidx),
+                                MirValue::Const(MirConst::Int(1, MirType::i64())),
+                            );
+                            b.assign(iidx, MirRValue::Use(values::local(inext)));
+                            b.goto(icond);
+                            b.switch_to_block(iexit);
+                            flat_mapped = true;
+                        }
+                    }
+                }
                 IterStep::Map { closure } => {
                     current_val = self.lower_iter_map_inline(
                         closure,
@@ -2906,15 +3052,17 @@ impl<'ctx> MirLowerer<'ctx> {
         // 8. Terminal: push to result vec OR update accumulator.
         match &chain.terminal {
             IterTerminal::Collect => {
-                let builder = self.current_fn.as_mut().unwrap();
-                let cont = builder.create_block();
-                builder.call(
-                    MirValue::Function(Arc::from(push_fn_name)),
-                    vec![values::local(result_local), current_val],
-                    None,
-                    cont,
-                );
-                builder.switch_to_block(cont);
+                if !flat_mapped {
+                    let builder = self.current_fn.as_mut().unwrap();
+                    let cont = builder.create_block();
+                    builder.call(
+                        MirValue::Function(Arc::from(push_fn_name)),
+                        vec![values::local(result_local), current_val],
+                        None,
+                        cont,
+                    );
+                    builder.switch_to_block(cont);
+                }
             }
             IterTerminal::Fold { closure, .. } => {
                 // Inline the fold closure: acc = closure(acc, current_val)
@@ -3030,8 +3178,66 @@ impl<'ctx> MirLowerer<'ctx> {
         &mut self,
         source_expr: &ast::Expr,
     ) -> CodegenResult<(MirType, ChainSource, LocalId)> {
-        let source_val = self.lower_expr(source_expr)?;
-        let source_ty = self.type_of_value(&source_val);
+        let raw_val = self.lower_expr(source_expr)?;
+        let raw_ty = self.type_of_value(&raw_val);
+        let (source_val, source_ty) = match &raw_ty {
+            MirType::Ptr(inner)
+                if matches!(inner.as_ref(), MirType::Vec(_) | MirType::Array(..)) =>
+            {
+                let derefed = self.deref_if_pointer(raw_val)?;
+                let ty = self.type_of_value(&derefed);
+                (derefed, ty)
+            }
+            _ => (raw_val, raw_ty),
+        };
+        // Slice `&[T]` / `[T]` source
+        let slice_elem = match &source_ty {
+            MirType::Slice(inner) => Some((**inner).clone()),
+            MirType::Ptr(inner) => match inner.as_ref() {
+                MirType::Slice(e) => Some((**e).clone()),
+                _ => None,
+            },
+            _ => None,
+        };
+        if let Some(elem_ty) = slice_elem {
+            let builder = self
+                .current_fn
+                .as_mut()
+                .ok_or_else(|| CodegenError::Internal("No current function".to_string()))?;
+            let local = builder.create_local(source_ty);
+            builder.assign(local, MirRValue::Use(source_val));
+            let len_u = builder.create_local(MirType::usize());
+            builder.assign(
+                len_u,
+                MirRValue::FieldAccess {
+                    base: values::local(local),
+                    field_name: Arc::from("len"),
+                    field_ty: MirType::usize(),
+                },
+            );
+            let len = builder.create_local(MirType::i64());
+            builder.cast(
+                len,
+                CastKind::IntToInt,
+                values::local(len_u),
+                MirType::i64(),
+            );
+            return Ok((elem_ty, ChainSource::Indexed { local }, len));
+        }
+        // Fixed array `[T; N]` source
+        if let MirType::Array(inner, n) = &source_ty {
+            let elem_ty = (**inner).clone();
+            let n = *n;
+            let builder = self
+                .current_fn
+                .as_mut()
+                .ok_or_else(|| CodegenError::Internal("No current function".to_string()))?;
+            let local = builder.create_local(source_ty);
+            builder.assign(local, MirRValue::Use(source_val));
+            let len = builder.create_local(MirType::i64());
+            builder.assign_const(len, MirConst::Int(n as i128, MirType::i64()));
+            return Ok((elem_ty, ChainSource::Indexed { local }, len));
+        }
         // Determine the element type from the Vec type.
         let elem_ty = match &source_ty {
             MirType::Vec(inner) => inner.as_ref().clone(),
@@ -3203,8 +3409,14 @@ impl<'ctx> MirLowerer<'ctx> {
                     }
                 }
             } else if let Some(first_param) = params.first() {
-                // Single-param: |x| body
-                if let ast::PatternKind::Ident { name, .. } = &first_param.pattern.kind {
+                // Single-param: |x| body or |&x| body
+                let inner_pat = match &first_param.pattern.kind {
+                    ast::PatternKind::Ref { pattern, .. } => pattern.as_ref(),
+                    _ => &first_param.pattern,
+                };
+                if let ast::PatternKind::Ident { name, .. }
+                | ast::PatternKind::RefBind { name, .. } = &inner_pat.kind
+                {
                     let old = self.var_map.get(&name.name).copied();
                     saved.push((name.name.clone(), old));
 
@@ -3434,8 +3646,9 @@ impl<'ctx> MirLowerer<'ctx> {
                 | IterStep::Cloned
                 | IterStep::Rev
                 | IterStep::Take { .. }
-                | IterStep::Skip { .. } => {
-                    // These don't change the element type.
+                | IterStep::Skip { .. }
+                | IterStep::FlatMap { .. } => {
+                    // These don't change the element type (flat_map uses expected_collect).
                 }
             }
         }

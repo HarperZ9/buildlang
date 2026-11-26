@@ -237,14 +237,16 @@ impl<'ctx> MirLowerer<'ctx> {
                         return MirType::Option(Box::new(MirType::i32()));
                     }
 
-                    // Special-case Vec<T>: resolve to MirType::Vec(element_type)
-                    if type_name == "Vec" {
+                    // Special-case Vec<T> and HashSet<T>/BTreeSet<T>: resolve to MirType::Vec(element_type)
+                    if matches!(type_name, "Vec" | "HashSet" | "BTreeSet") {
                         if let Some(ast::GenericArg::Type(arg_ty)) = generic_args.first() {
                             let elem_ty = self.lower_type_from_ast(arg_ty);
                             return MirType::Vec(Box::new(elem_ty));
                         }
-                        // Vec without type arg defaults to Vec<i32>
-                        return MirType::Vec(Box::new(MirType::i32()));
+                        if type_name == "Vec" {
+                            return MirType::Vec(Box::new(MirType::i32()));
+                        }
+                        return MirType::Vec(Box::new(MirType::Struct(Arc::from("BuildString"))));
                     }
 
                     // Special-case HashMap<K, V>: resolve to MirType::Map(key, value)

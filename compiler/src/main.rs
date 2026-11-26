@@ -10413,6 +10413,9 @@ fn collect_pattern_names(pat: &ast::Pattern, out: &mut HashSet<Arc<str>>) {
     match &pat.kind {
         P::Ident {
             name, subpattern, ..
+        }
+        | P::RefBind {
+            name, subpattern, ..
         } => {
             out.insert(name.name.clone());
             if let Some(sub) = subpattern {

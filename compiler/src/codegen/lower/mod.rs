@@ -367,6 +367,8 @@ pub(crate) enum IterStep<'a> {
     Take { count: &'a ast::Expr },
     /// `.skip(n)` - skip the first `n` elements (by source position).
     Skip { count: &'a ast::Expr },
+    /// `.flat_map(|x| inner_iter)` - flatten an inner iterator per element.
+    FlatMap { closure: &'a ast::Expr },
 }
 
 /// Terminal operation of an iterator chain.
@@ -399,6 +401,8 @@ pub(crate) const MAX_GENERIC_NESTING: usize = 24;
 pub(crate) enum ChainSource {
     /// A vector in `local`, read with the runtime accessor `get_fn`.
     Vec { local: LocalId, get_fn: String },
+    /// A slice or fixed array in `local`, read with `IndexAccess`.
+    Indexed { local: LocalId },
     /// A range: element `i` is `first + i` (`first` held as an `i64`).
     Range { first: LocalId },
 }
@@ -2520,15 +2524,26 @@ impl<'ctx> MirLowerer<'ctx> {
         let mut impl_method_names = Vec::new();
 
         for impl_item in &impl_def.items {
+            if let ast::ImplItemKind::Const { name, ty, value } = &impl_item.kind {
+                let self_ty = Self::self_mir_type(&type_name);
+                let const_name: Arc<str> = Arc::from(format!("{}_{}", type_name, name.name));
+                let const_ty = Self::replace_self_mir_type(self.lower_type_from_ast(ty), &self_ty);
+                let prev_impl_type = self.current_impl_type.replace(type_name.clone());
+                let init = self.global_initializer(&const_name, value, &const_ty)?;
+                self.current_impl_type = prev_impl_type;
+                let mut global = MirGlobal::new(const_name, const_ty);
+                global.init = init;
+                global.is_mut = false;
+                self.module.add_global(global);
+                continue;
+            }
             if let ast::ImplItemKind::Function(f) = &impl_item.kind {
-                let method_name = f.name.name.clone();
-                let mangled: Arc<str> = Arc::from(format!("{}_{}", type_name, method_name));
-                self.impl_methods
-                    .insert((type_name.clone(), method_name.clone()), mangled.clone());
+                let mangled = self.register_impl_method_name(&type_name, impl_def, f);
                 impl_method_names.push(mangled.clone());
 
                 // Forward-declare the method signature so resolve_call_return_type
                 // can find the correct return type during lowering.
+                let self_ty = Self::self_mir_type(&type_name);
                 let mut params = Vec::new();
                 for param in &f.sig.params {
                     let is_self = matches!(
@@ -2537,9 +2552,9 @@ impl<'ctx> MirLowerer<'ctx> {
                     );
                     if is_self {
                         if matches!(param.ty.kind, ast::TypeKind::Ref { .. }) {
-                            params.push(MirType::Ptr(Box::new(MirType::Struct(type_name.clone()))));
+                            params.push(MirType::Ptr(Box::new(self_ty.clone())));
                         } else {
-                            params.push(MirType::Struct(type_name.clone()));
+                            params.push(self_ty.clone());
                         }
                     } else {
                         params.push(self.lower_type_from_ast(&param.ty));
@@ -2551,37 +2566,30 @@ impl<'ctx> MirLowerer<'ctx> {
                     .as_ref()
                     .map(|t| self.lower_type_from_ast(t))
                     .unwrap_or(MirType::Void);
-                // Resolve Self in the return type to the concrete impl type so
-                // callers outside the impl see the real type (e.g. fn new() -> Self).
-                let ret = match ret {
-                    MirType::Struct(ref name) if name.as_ref() == "Self" => {
-                        MirType::Struct(type_name.clone())
-                    }
-                    MirType::Ptr(ref inner) => {
-                        if let MirType::Struct(ref name) = **inner {
-                            if name.as_ref() == "Self" {
-                                MirType::Ptr(Box::new(MirType::Struct(type_name.clone())))
-                            } else {
-                                ret
-                            }
-                        } else {
-                            ret
-                        }
-                    }
-                    _ => ret,
-                };
+                // Resolve Self in the return type (including Option<Self>, Vec<Self>, etc.)
+                // to the concrete impl type so callers outside the impl see the real type.
+                let ret = Self::replace_self_mir_type(ret, &self_ty);
                 // Thread the method's Result/Option payload types, keyed by the
                 // mangled name, so a `match recv.method() { ... }` reads the
                 // correct union slot (mirrors collect_function for free fns).
                 if let Some(ref ret_ty) = f.sig.return_ty {
                     if let Some(ok_ty) = self.result_ok_inner_from_ast(ret_ty) {
-                        self.fn_result_ok_types.insert(mangled.clone(), ok_ty);
+                        self.fn_result_ok_types.insert(
+                            mangled.clone(),
+                            Self::replace_self_mir_type(ok_ty, &self_ty),
+                        );
                     }
                     if let Some(err_ty) = self.result_err_inner_from_ast(ret_ty) {
-                        self.fn_result_err_types.insert(mangled.clone(), err_ty);
+                        self.fn_result_err_types.insert(
+                            mangled.clone(),
+                            Self::replace_self_mir_type(err_ty, &self_ty),
+                        );
                     }
                     if let Some(inner_ty) = self.option_inner_from_ast(ret_ty) {
-                        self.fn_option_inner_types.insert(mangled.clone(), inner_ty);
+                        self.fn_option_inner_types.insert(
+                            mangled.clone(),
+                            Self::replace_self_mir_type(inner_ty, &self_ty),
+                        );
                     }
                     if Self::ast_type_is_char(ret_ty) {
                         self.fn_returns_char.insert(mangled.clone());
@@ -3193,20 +3201,27 @@ impl<'ctx> MirLowerer<'ctx> {
         // PASS 1: Forward-declare ALL method signatures before lowering bodies.
         // This fixes forward references: method A can call method B even if B
         // is defined after A in the source, because B's signature is already known.
+        let mut method_names: Vec<Arc<str>> = Vec::new();
         for impl_item in &impl_def.items {
             if let ast::ImplItemKind::Function(f) = &impl_item.kind {
-                self.declare_impl_method(&type_name, f)?;
+                let mangled = self.lookup_impl_method_name(&type_name, impl_def, f);
+                self.declare_impl_method(&type_name, &mangled, f)?;
+                method_names.push(mangled);
             }
             // An associated constant `Type::NAME` is the global `Type_NAME`,
-            // the name a path to it lowers to.
+            // the name a path to it lowers to. Skip if already registered in collect_impl.
             if let ast::ImplItemKind::Const { name, ty, value } = &impl_item.kind {
                 let global_name: Arc<str> = Arc::from(format!("{}_{}", type_name, name.name));
-                let mir_ty = self.lower_type_from_ast(ty);
-                let init = self.global_initializer(&global_name, value, &mir_ty)?;
-                let mut global = MirGlobal::new(global_name, mir_ty);
-                global.init = init;
-                global.is_mut = false;
-                self.module.add_global(global);
+                if self.module.find_global(&global_name).is_none() {
+                    let self_ty = Self::self_mir_type(&type_name);
+                    let mir_ty =
+                        Self::replace_self_mir_type(self.lower_type_from_ast(ty), &self_ty);
+                    let init = self.global_initializer(&global_name, value, &mir_ty)?;
+                    let mut global = MirGlobal::new(global_name, mir_ty);
+                    global.init = init;
+                    global.is_mut = false;
+                    self.module.add_global(global);
+                }
             }
         }
 
@@ -3214,12 +3229,17 @@ impl<'ctx> MirLowerer<'ctx> {
         // top level a refused method is kept and the next one is lowered;
         // an impl inside a function body is part of that function's report.
         let top_level = self.current_fn.is_none();
+        let mut fn_idx = 0usize;
         for impl_item in &impl_def.items {
             if let ast::ImplItemKind::Function(f) = &impl_item.kind {
+                let mangled = method_names[fn_idx].clone();
+                fn_idx += 1;
                 if top_level {
-                    self.lower_keeping_rejection(|this| this.lower_impl_method(&type_name, f));
+                    self.lower_keeping_rejection(|this| {
+                        this.lower_impl_method(&type_name, &mangled, f)
+                    });
                 } else {
-                    self.lower_impl_method(&type_name, f)?;
+                    self.lower_impl_method(&type_name, &mangled, f)?;
                 }
             }
         }
@@ -3228,10 +3248,118 @@ impl<'ctx> MirLowerer<'ctx> {
         Ok(())
     }
 
+    fn mir_type_op_suffix(ty: &MirType) -> Option<String> {
+        match ty {
+            MirType::Struct(n) => Some(n.to_string()),
+            MirType::Float(FloatSize::F32) => Some("f32".to_string()),
+            MirType::Float(FloatSize::F64) => Some("f64".to_string()),
+            MirType::Int(IntSize::I32, true) => Some("i32".to_string()),
+            MirType::Int(IntSize::I64, true) => Some("i64".to_string()),
+            MirType::Ptr(inner) => Self::mir_type_op_suffix(inner),
+            _ => None,
+        }
+    }
+
+    fn self_mir_type(type_name: &Arc<str>) -> MirType {
+        match type_name.as_ref() {
+            "f32" => MirType::Float(FloatSize::F32),
+            "f64" => MirType::Float(FloatSize::F64),
+            "i32" => MirType::i32(),
+            "i64" => MirType::i64(),
+            "bool" => MirType::Bool,
+            _ => MirType::Struct(type_name.clone()),
+        }
+    }
+
+    /// Register a unique C symbol for an impl method during `collect_impl`,
+    /// disambiguating multiple operator trait overloads (`impl Mul<Vec4> for Mat4`,
+    /// `impl Mul<Vec3> for f32`) with a `__<Rhs>` suffix while preserving
+    /// `{Type}_{method}` for the first impl on a user struct.
+    fn register_impl_method_name(
+        &mut self,
+        type_name: &Arc<str>,
+        impl_def: &ast::ImplDef,
+        f: &ast::FnDef,
+    ) -> Arc<str> {
+        let base_name: Arc<str> = Arc::from(format!("{}_{}", type_name, f.name.name));
+        let is_op_trait = impl_def
+            .trait_ref
+            .as_ref()
+            .and_then(|tr| tr.path.last_ident())
+            .is_some_and(|id| matches!(id.name.as_ref(), "Add" | "Sub" | "Mul" | "Div" | "Rem"));
+        let is_prim = matches!(type_name.as_ref(), "f32" | "f64" | "i32" | "i64" | "bool");
+        if is_op_trait && f.sig.params.len() == 2 {
+            let rhs_mir = self.lower_type_from_ast(&f.sig.params[1].ty);
+            if let Some(rhs_suf) = Self::mir_type_op_suffix(&rhs_mir) {
+                let rhs_key = (
+                    type_name.clone(),
+                    Arc::from(format!("{}__{}", f.name.name, rhs_suf)),
+                );
+                if let Some(existing) = self.impl_methods.get(&rhs_key).cloned() {
+                    return existing;
+                }
+                let base_key = (type_name.clone(), f.name.name.clone());
+                let disambig = is_prim || self.impl_methods.contains_key(&base_key);
+                let chosen: Arc<str> = if disambig {
+                    Arc::from(format!("{}_{}__{}", type_name, f.name.name, rhs_suf))
+                } else {
+                    base_name.clone()
+                };
+                self.impl_methods.insert(rhs_key, chosen.clone());
+                if !disambig {
+                    self.impl_methods.insert(base_key, chosen.clone());
+                }
+                return chosen;
+            }
+        }
+        self.impl_methods
+            .insert((type_name.clone(), f.name.name.clone()), base_name.clone());
+        base_name
+    }
+
+    /// Look up the exact C symbol already registered by `collect_impl` for this method.
+    fn lookup_impl_method_name(
+        &mut self,
+        type_name: &Arc<str>,
+        impl_def: &ast::ImplDef,
+        f: &ast::FnDef,
+    ) -> Arc<str> {
+        let is_op_trait = impl_def
+            .trait_ref
+            .as_ref()
+            .and_then(|tr| tr.path.last_ident())
+            .is_some_and(|id| matches!(id.name.as_ref(), "Add" | "Sub" | "Mul" | "Div" | "Rem"));
+        if is_op_trait && f.sig.params.len() == 2 {
+            let rhs_mir = self.lower_type_from_ast(&f.sig.params[1].ty);
+            if let Some(rhs_suf) = Self::mir_type_op_suffix(&rhs_mir) {
+                let rhs_key = (
+                    type_name.clone(),
+                    Arc::from(format!("{}__{}", f.name.name, rhs_suf)),
+                );
+                if let Some(chosen) = self.impl_methods.get(&rhs_key).cloned() {
+                    return chosen;
+                }
+            }
+        }
+        if let Some(chosen) = self
+            .impl_methods
+            .get(&(type_name.clone(), f.name.name.clone()))
+            .cloned()
+        {
+            return chosen;
+        }
+        self.register_impl_method_name(type_name, impl_def, f)
+    }
+
     /// Forward-declare an impl method's signature without lowering the body.
     /// This enables forward references within the same impl block.
-    fn declare_impl_method(&mut self, type_name: &Arc<str>, f: &ast::FnDef) -> CodegenResult<()> {
-        let mangled_name: Arc<str> = Arc::from(format!("{}_{}", type_name, f.name.name));
+    fn declare_impl_method(
+        &mut self,
+        type_name: &Arc<str>,
+        mangled_name: &Arc<str>,
+        f: &ast::FnDef,
+    ) -> CodegenResult<()> {
+        let self_ty = Self::self_mir_type(type_name);
 
         // Build parameter types
         let mut params = Vec::new();
@@ -3242,9 +3370,9 @@ impl<'ctx> MirLowerer<'ctx> {
             );
             if is_self {
                 if matches!(param.ty.kind, ast::TypeKind::Ref { .. }) {
-                    params.push(MirType::Ptr(Box::new(MirType::Struct(type_name.clone()))));
+                    params.push(MirType::Ptr(Box::new(self_ty.clone())));
                 } else {
-                    params.push(MirType::Struct(type_name.clone()));
+                    params.push(self_ty.clone());
                 }
             } else {
                 params.push(self.lower_type_from_ast(&param.ty));
@@ -3258,25 +3386,9 @@ impl<'ctx> MirLowerer<'ctx> {
             .map(|t| self.lower_type_from_ast(t))
             .unwrap_or(MirType::Void);
 
-        // Resolve any remaining Self in return type to the concrete impl type.
-        // This ensures callers outside the impl block see the real type.
-        let ret = match ret {
-            MirType::Struct(ref name) if name.as_ref() == "Self" => {
-                MirType::Struct(type_name.clone())
-            }
-            MirType::Ptr(ref inner) => {
-                if let MirType::Struct(ref name) = **inner {
-                    if name.as_ref() == "Self" {
-                        MirType::Ptr(Box::new(MirType::Struct(type_name.clone())))
-                    } else {
-                        ret
-                    }
-                } else {
-                    ret
-                }
-            }
-            _ => ret,
-        };
+        // Resolve any remaining Self in return type (including inside Option<Self>,
+        // Vec<Self>, Ptr(Self), Tuple(...)) to the concrete impl type.
+        let ret = Self::replace_self_mir_type(ret, &self_ty);
 
         // Register tuple type defs for any tuple types in the signature
         // (mirrors lower_function; impl methods returning a tuple of named
@@ -3286,15 +3398,50 @@ impl<'ctx> MirLowerer<'ctx> {
         }
 
         let sig = MirFnSig::new(params, ret);
-        self.module.declare_function(mangled_name, sig);
+        self.module.declare_function(mangled_name.clone(), sig);
         Ok(())
+    }
+
+    /// Replace `MirType::Struct("Self")` recursively inside `ty` with `self_ty`.
+    fn replace_self_mir_type(ty: MirType, self_ty: &MirType) -> MirType {
+        match ty {
+            MirType::Struct(ref name) if name.as_ref() == "Self" => self_ty.clone(),
+            MirType::Ptr(inner) => {
+                MirType::Ptr(Box::new(Self::replace_self_mir_type(*inner, self_ty)))
+            }
+            MirType::Option(inner) => {
+                MirType::Option(Box::new(Self::replace_self_mir_type(*inner, self_ty)))
+            }
+            MirType::Vec(inner) => {
+                MirType::Vec(Box::new(Self::replace_self_mir_type(*inner, self_ty)))
+            }
+            MirType::Slice(inner) => {
+                MirType::Slice(Box::new(Self::replace_self_mir_type(*inner, self_ty)))
+            }
+            MirType::Array(inner, n) => {
+                MirType::Array(Box::new(Self::replace_self_mir_type(*inner, self_ty)), n)
+            }
+            MirType::Tuple(elems) => MirType::Tuple(
+                elems
+                    .into_iter()
+                    .map(|e| Self::replace_self_mir_type(e, self_ty))
+                    .collect(),
+            ),
+            other => other,
+        }
     }
 
     /// Lower a single impl method as a free function.
     /// The method `fn area(self) -> f64` on type `Rectangle` becomes
     /// `fn Rectangle_area(self: Rectangle) -> f64`.
-    fn lower_impl_method(&mut self, type_name: &Arc<str>, f: &ast::FnDef) -> CodegenResult<()> {
-        let mangled_name: Arc<str> = Arc::from(format!("{}_{}", type_name, f.name.name));
+    fn lower_impl_method(
+        &mut self,
+        type_name: &Arc<str>,
+        mangled_name: &Arc<str>,
+        f: &ast::FnDef,
+    ) -> CodegenResult<()> {
+        let mangled_name: Arc<str> = mangled_name.clone();
+        let self_ty = Self::self_mir_type(type_name);
 
         // Build parameter types: `self` becomes the struct type, `&self`/`&mut self`
         // becomes a pointer to the struct type, others are lowered normally.
@@ -3306,9 +3453,9 @@ impl<'ctx> MirLowerer<'ctx> {
             if is_self {
                 // Check if the type is a reference (&Self or &mut Self)
                 if matches!(param.ty.kind, ast::TypeKind::Ref { .. }) {
-                    params.push(MirType::Ptr(Box::new(MirType::Struct(type_name.clone()))));
+                    params.push(MirType::Ptr(Box::new(self_ty.clone())));
                 } else {
-                    params.push(MirType::Struct(type_name.clone()));
+                    params.push(self_ty.clone());
                 }
             } else {
                 params.push(self.lower_type_from_ast(&param.ty));
@@ -3322,24 +3469,8 @@ impl<'ctx> MirLowerer<'ctx> {
             .map(|t| self.lower_type_from_ast(t))
             .unwrap_or(MirType::Void);
 
-        // Resolve Self in return type to concrete impl type
-        let ret = match ret {
-            MirType::Struct(ref name) if name.as_ref() == "Self" => {
-                MirType::Struct(type_name.clone())
-            }
-            MirType::Ptr(ref inner) => {
-                if let MirType::Struct(ref name) = **inner {
-                    if name.as_ref() == "Self" {
-                        MirType::Ptr(Box::new(MirType::Struct(type_name.clone())))
-                    } else {
-                        ret
-                    }
-                } else {
-                    ret
-                }
-            }
-            _ => ret,
-        };
+        // Resolve Self in return type (including Option<Self>, Vec<Self>, etc.)
+        let ret = Self::replace_self_mir_type(ret, &self_ty);
 
         // Register tuple type defs for any tuple types in the signature
         // (mirrors lower_function; impl methods returning a tuple of named

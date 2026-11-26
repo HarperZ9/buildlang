@@ -85,3 +85,41 @@ impl Mulberry32 {
         ((self.next_f64() * (n as f64)) as u64)
     }
 }
+
+/// Convenience seeded random generator wrapper around `Mulberry32`.
+#[derive(Clone, Copy)]
+pub struct Random {
+    pub rng: Mulberry32,
+}
+
+impl Random {
+    /// Create a generator with a deterministic default seed.
+    pub fn new() -> Random {
+        Random { rng: Mulberry32::new(0x9E3779B9) }
+    }
+
+    /// Create a generator from an explicit 32-bit seed.
+    pub fn from_seed(seed: u32) -> Random {
+        Random { rng: Mulberry32::new(seed) }
+    }
+
+    /// Next 32-bit unsigned draw.
+    pub fn next_u32(&mut self) -> u32 {
+        self.rng.next_u32()
+    }
+
+    /// Next float draw in [0, 1).
+    pub fn next_f64(&mut self) -> f64 {
+        self.rng.next_f64()
+    }
+
+    /// Next f32 draw in [0, 1).
+    pub fn next_f32(&mut self) -> f32 {
+        self.rng.next_f64() as f32
+    }
+
+    /// Next integer index in [0, n).
+    pub fn next_index(&mut self, n: u64) -> u64 {
+        self.rng.next_index(n)
+    }
+}

@@ -57,8 +57,15 @@ impl Pattern {
             PatternKind::Wildcard => true,
             PatternKind::Ident {
                 subpattern: None, ..
+            }
+            | PatternKind::RefBind {
+                subpattern: None, ..
             } => true,
             PatternKind::Ident {
+                subpattern: Some(p),
+                ..
+            }
+            | PatternKind::RefBind {
                 subpattern: Some(p),
                 ..
             } => p.is_irrefutable(),
@@ -73,7 +80,7 @@ impl Pattern {
     pub fn binds_variables(&self) -> bool {
         match &self.kind {
             PatternKind::Wildcard | PatternKind::Rest => false,
-            PatternKind::Ident { .. } => true,
+            PatternKind::Ident { .. } | PatternKind::RefBind { .. } => true,
             PatternKind::Literal(_) | PatternKind::Path(_) => false,
             PatternKind::Tuple(patterns) | PatternKind::Slice(patterns) => {
                 patterns.iter().any(|p| p.binds_variables())
@@ -151,6 +158,13 @@ pub enum PatternKind {
     Ref {
         mutability: Mutability,
         pattern: Box<Pattern>,
+    },
+
+    /// By-reference identifier binding pattern: `ref x`, `ref mut x`
+    RefBind {
+        mutability: Mutability,
+        name: Ident,
+        subpattern: Option<Box<Pattern>>,
     },
 
     /// Box pattern: `box x`

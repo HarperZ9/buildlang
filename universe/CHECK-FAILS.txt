@@ -4,13 +4,18 @@
 # fails when a line here stops being true or a file fails that is not listed, so a fix to the
 # compiler or to a module has to remove its line.
 #
-# State on 2026-11-25 with buildc 1.15.0: 87 of 270 files pass and 183 fail
-# (1 lex, 21 parse, 161 types). Previously 81 of 268 failed 187 on 2026-11-16;
-# Wave 2 added matches!, integer min/max/clamp/abs, slice to_vec(), Vec-to-slice
-# deref coercion, Option/Result as_ref/as_mut/as_deref, std/core::mem::size_of/align_of,
-# byte/float consts, and iterator-chain map output inference, turning
-# lumina/anti_aliasing.bld, prism/deferred.bld, programs/stdlib/string_utils.bld,
-# and programs/test_nested_include.bld green.
+# State on 2026-11-26 with buildc 1.15.0: 104 of 275 files pass and 171 fail
+# (1 lex, 21 parse, 149 types). Previously 91 of 272 passed and 181 failed;
+# Wave 10B added sota_ml_physics_kernels.bld, vault_verifier.bld, and
+# null_cone_gravity_check.bld, plus compiler and stdlib support for PatternKind::RefBind,
+# float rem_euclid, Vec::clone/get_mut/retain, chunks/chunks_mut/zip loops,
+# trim_start_matches/trim_end_matches, int::from_str_radix, integer leading_zeros/trailing_zeros/
+# count_ones/count_zeros, impl associated const globals (Vec2::ZERO), flat_map iter chains,
+# std::mem::discriminant, tuple-of-Options if-let, monomorphized T::zero/T::one, and
+# std::math/std::random vector/matrix overloads, turning foundation/math.bld,
+# lumina/ambient_occlusion.bld, lumina/lens_effects.bld, lumina/motion_blur.bld,
+# prism/effects.bld, prism/water.bld, spectrum/color_appearance.bld,
+# spectrum/color_blindness.bld, spectrum/color_spaces.bld, and spectrum/gamut_mapping.bld green.
 #
 # What the failures are, counted as files showing each diagnostic (buildc 1.14.0, 2026-11-15):
 # BL0314 undefined method 62, BL0301 type mismatch 52, BL0901 the C backend cannot compile the
@@ -57,7 +62,6 @@ foundation/io_extended.bld types
 foundation/itertools.bld types
 foundation/lib.bld types
 foundation/logging.bld types
-foundation/math.bld types
 foundation/math_extended.bld types
 foundation/net.bld types
 foundation/process.bld types
@@ -69,13 +73,10 @@ foundation/text.bld types
 foundation/time.bld types
 foundation/uuid.bld types
 lsp/lib.bld types
-lumina/ambient_occlusion.bld types
 lumina/bloom.bld types
 lumina/color_grading.bld types
 lumina/dof.bld types
-lumina/lens_effects.bld types
 lumina/lib.bld types
-lumina/motion_blur.bld types
 lumina/volumetrics.bld types
 main.bld types
 neutrino/denoise.bld types
@@ -154,7 +155,6 @@ photon/water.bld types
 photon/water_ocean.bld types
 pkg/lib.bld types
 prism/dof.bld types
-prism/effects.bld types
 prism/lib.bld types
 prism/motion_blur.bld types
 prism/ssao.bld types
@@ -162,7 +162,6 @@ prism/ssr.bld types
 prism/subsurface.bld types
 prism/vegetation.bld types
 prism/volumetrics.bld types
-prism/water.bld types
 profiler/lib.bld lex
 quantum-finance/backtest.bld types
 quantum-finance/lib.bld types
@@ -177,11 +176,7 @@ refract/weather.bld types
 repl/lib.bld types
 runtime/lib.bld types
 spectrum/chromatic_adaptation.bld types
-spectrum/color_appearance.bld types
-spectrum/color_blindness.bld types
 spectrum/color_difference.bld types
-spectrum/color_spaces.bld types
-spectrum/gamut_mapping.bld types
 spectrum/hdr_pipeline.bld types
 spectrum/icc_profile.bld types
 spectrum/lib.bld types
