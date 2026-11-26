@@ -4,7 +4,7 @@
 include!("chars.bld");
 
 fn trim_left(s: String) -> String {
-    let i = 0;
+    let mut i = 0;
     let len = s.len();
     while i < len {
         let c = s.char_at(i);

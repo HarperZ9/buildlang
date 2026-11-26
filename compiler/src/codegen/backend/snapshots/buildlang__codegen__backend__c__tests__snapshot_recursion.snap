@@ -2638,12 +2638,6 @@ static bool build_write_file(const char* path, const char* content) {
     return written == len;
 }
 
-static bool build_file_exists(const char* path) {
-    FILE* f = fopen(path, "rb");
-    if (f) { fclose(f); return true; }
-    return false;
-}
-
 // --- Binary file I/O ---
 
 static bool build_write_bytes(const char* path, const char* data, int64_t len) {
@@ -3290,6 +3284,15 @@ static BuildVecHandle build_list_dir(const char* path) {
     }
     #endif
     return v;
+}
+
+static bool build_file_exists(const char* path) {
+    #ifdef _WIN32
+    return GetFileAttributesA(path) != INVALID_FILE_ATTRIBUTES;
+    #else
+    struct stat st;
+    return stat(path, &st) == 0;
+    #endif
 }
 
 static bool build_is_dir(const char* path) {

@@ -365,6 +365,7 @@ impl<'ctx> MirLowerer<'ctx> {
                 Literal::Float { value, .. } => Some(MirConst::Float(*value, MirType::f64())),
                 Literal::Bool(b) => Some(MirConst::Bool(*b)),
                 Literal::Char(c) => Some(MirConst::Uint(*c as u128, MirType::u32())),
+                Literal::Byte(b) => Some(MirConst::Uint(*b as u128, MirType::u8())),
                 _ => None,
             },
             ExprKind::Struct { path, fields, .. } => {
@@ -392,9 +393,17 @@ impl<'ctx> MirLowerer<'ctx> {
                 }
             }
             ExprKind::Ident(id) => self.const_values.get(&id.name).cloned(),
-            ExprKind::Path(p) => p
-                .last_ident()
-                .and_then(|i| self.const_values.get(&i.name).cloned()),
+            ExprKind::Path(p) => {
+                if p.segments.len() == 2 {
+                    let ty_name = p.segments[0].ident.name.as_ref();
+                    let assoc = p.segments[1].ident.name.as_ref();
+                    if let Some(c) = Self::primitive_assoc_const(ty_name, assoc) {
+                        return Some(c);
+                    }
+                }
+                p.last_ident()
+                    .and_then(|i| self.const_values.get(&i.name).cloned())
+            }
             ExprKind::Paren(inner) => self.try_const_eval(inner),
             ExprKind::Unary {
                 op: ast::UnaryOp::Not,
@@ -412,6 +421,50 @@ impl<'ctx> MirLowerer<'ctx> {
                 let r = self.try_const_eval(right)?;
                 Self::const_binary(*op, l, r)
             }
+            _ => None,
+        }
+    }
+
+    /// Built-in associated constants on primitive numeric types (`f64::INFINITY`,
+    /// `i32::MAX`, etc.) usable in `const` and `static` initializers.
+    fn primitive_assoc_const(ty_name: &str, assoc: &str) -> Option<MirConst> {
+        match (ty_name, assoc) {
+            ("f64", "INFINITY") => Some(MirConst::Float(f64::INFINITY, MirType::f64())),
+            ("f64", "NEG_INFINITY") => Some(MirConst::Float(f64::NEG_INFINITY, MirType::f64())),
+            ("f64", "NAN") => Some(MirConst::Float(f64::NAN, MirType::f64())),
+            ("f64", "EPSILON") => Some(MirConst::Float(f64::EPSILON, MirType::f64())),
+            ("f64", "MIN_POSITIVE") => Some(MirConst::Float(f64::MIN_POSITIVE, MirType::f64())),
+            ("f64", "MAX") => Some(MirConst::Float(f64::MAX, MirType::f64())),
+            ("f64", "MIN") => Some(MirConst::Float(f64::MIN, MirType::f64())),
+            ("f32", "INFINITY") => Some(MirConst::Float(f64::INFINITY, MirType::f32())),
+            ("f32", "NEG_INFINITY") => Some(MirConst::Float(f64::NEG_INFINITY, MirType::f32())),
+            ("f32", "NAN") => Some(MirConst::Float(f64::NAN, MirType::f32())),
+            ("f32", "EPSILON") => Some(MirConst::Float(f32::EPSILON as f64, MirType::f32())),
+            ("f32", "MIN_POSITIVE") => {
+                Some(MirConst::Float(f32::MIN_POSITIVE as f64, MirType::f32()))
+            }
+            ("f32", "MAX") => Some(MirConst::Float(f32::MAX as f64, MirType::f32())),
+            ("f32", "MIN") => Some(MirConst::Float(f32::MIN as f64, MirType::f32())),
+            ("i8", "MIN") => Some(MirConst::Int(i8::MIN as i128, MirType::i8())),
+            ("i8", "MAX") => Some(MirConst::Int(i8::MAX as i128, MirType::i8())),
+            ("i16", "MIN") => Some(MirConst::Int(i16::MIN as i128, MirType::i16())),
+            ("i16", "MAX") => Some(MirConst::Int(i16::MAX as i128, MirType::i16())),
+            ("i32", "MIN") => Some(MirConst::Int(i32::MIN as i128, MirType::i32())),
+            ("i32", "MAX") => Some(MirConst::Int(i32::MAX as i128, MirType::i32())),
+            ("i64", "MIN") => Some(MirConst::Int(i64::MIN as i128, MirType::i64())),
+            ("i64", "MAX") => Some(MirConst::Int(i64::MAX as i128, MirType::i64())),
+            ("isize", "MIN") => Some(MirConst::Int(i64::MIN as i128, MirType::isize())),
+            ("isize", "MAX") => Some(MirConst::Int(i64::MAX as i128, MirType::isize())),
+            ("u8", "MIN") => Some(MirConst::Uint(0, MirType::u8())),
+            ("u8", "MAX") => Some(MirConst::Uint(u8::MAX as u128, MirType::u8())),
+            ("u16", "MIN") => Some(MirConst::Uint(0, MirType::u16())),
+            ("u16", "MAX") => Some(MirConst::Uint(u16::MAX as u128, MirType::u16())),
+            ("u32", "MIN") => Some(MirConst::Uint(0, MirType::u32())),
+            ("u32", "MAX") => Some(MirConst::Uint(u32::MAX as u128, MirType::u32())),
+            ("u64", "MIN") => Some(MirConst::Uint(0, MirType::u64())),
+            ("u64", "MAX") => Some(MirConst::Uint(u64::MAX as u128, MirType::u64())),
+            ("usize", "MIN") => Some(MirConst::Uint(0, MirType::usize())),
+            ("usize", "MAX") => Some(MirConst::Uint(u64::MAX as u128, MirType::usize())),
             _ => None,
         }
     }

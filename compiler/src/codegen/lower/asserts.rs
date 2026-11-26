@@ -104,7 +104,7 @@ pub(super) fn unknown_macro(name: &str, tokens: &[ast::TokenTree]) -> CodegenErr
         trees_span(tokens),
         "implemented macros: println, print, eprintln, eprint, dbg, format, vec, panic, asm, \
          assert, assert_eq, assert_ne, debug_assert, debug_assert_eq, debug_assert_ne, \
-         unreachable, todo, unimplemented, env",
+         unreachable, todo, unimplemented, env, matches",
     )
 }
 
@@ -269,5 +269,26 @@ impl<'ctx> MirLowerer<'ctx> {
         builder.assert(MirValue::Const(MirConst::Bool(false)), true, msg, dead);
         builder.switch_to_block(dead);
         Ok(())
+    }
+
+    /// Lower `matches!(expr, pat [if guard])` by desugaring to
+    /// `match (expr) { pat [if guard] => true, _ => false }`.
+    pub(super) fn lower_matches_macro(
+        &mut self,
+        tokens: &[ast::TokenTree],
+    ) -> CodegenResult<MirValue> {
+        let parts = split_commas(inner(tokens));
+        if parts.len() != 2 || parts[0].is_empty() || parts[1].is_empty() {
+            return Err(rejected(
+                "`matches!` needs two arguments: a value and a pattern".to_string(),
+                trees_span(tokens),
+                "write `matches!(value, Pattern)` or `matches!(value, Pattern if guard)`",
+            ));
+        }
+        let loc = trees_span(tokens);
+        let (_, expr_low, _) = self.macro_arg_text("matches", parts[0])?;
+        let (_, pat_low, _) = self.macro_arg_text("matches", parts[1])?;
+        let match_text = format!("match ({expr_low}) {{ {pat_low} => true, _ => false }}");
+        self.lower_expr_text("matches", &match_text, loc)
     }
 }

@@ -3233,6 +3233,8 @@ impl<'ctx> TypeInfer<'ctx> {
                 if macro_name == "env" {
                     // `env!` lowers to a string holding the variable's value.
                     Ty::str()
+                } else if macro_name == "matches" {
+                    Ty::bool()
                 } else {
                     Ty::fresh_var()
                 }
@@ -3828,7 +3830,12 @@ impl<'ctx> TypeInfer<'ctx> {
                 "std::mem::swap" => {
                     return Ty::function(vec![Ty::fresh_var(), Ty::fresh_var()], Ty::unit());
                 }
-                "std::mem::size_of" | "std::mem::align_of" => {
+                "std::mem::size_of"
+                | "std::mem::align_of"
+                | "core::mem::size_of"
+                | "core::mem::align_of"
+                | "mem::size_of"
+                | "mem::align_of" => {
                     return Ty::function(vec![], Ty::int(IntTy::Usize));
                 }
                 "std::mem::drop" | "std::mem::forget" => {
@@ -4921,7 +4928,12 @@ impl<'ctx> TypeInfer<'ctx> {
 
     fn infer_tuple_field(&mut self, expr: &ast::Expr, index: u32, span: Span) -> Ty {
         let expr_ty = self.infer_expr(expr);
-        let expr_ty = self.apply(&expr_ty);
+        let mut expr_ty = self.apply(&expr_ty);
+        // Auto-deref references so `&self.0` on a tuple struct or `&(a, b).0`
+        // resolves the same way named struct fields do.
+        while let TyKind::Ref(_, _, inner) = &expr_ty.kind {
+            expr_ty = self.apply(inner);
+        }
 
         match &expr_ty.kind {
             TyKind::Tuple(elems) => {
@@ -5543,6 +5555,30 @@ impl<'ctx> TypeInfer<'ctx> {
                 }
                 Ty::fresh_var()
             }
+            // A call through `dyn Fn/FnMut/FnOnce` (directly, via `&dyn Fn`, or
+            // via `Box<dyn Fn>` / `&Box<dyn Fn>`, which lowers to `*mut dyn Fn`
+            // or `&*mut dyn Fn`). Non-Fn trait objects still fail closed below.
+            _ if {
+                let mut cur = &func_ty;
+                loop {
+                    match &cur.kind {
+                        TyKind::Ref(_, _, inner) | TyKind::Ptr(_, inner) => cur = inner,
+                        TyKind::TraitObject(traits) => {
+                            break traits
+                                .iter()
+                                .any(|t| matches!(t.as_ref(), "Fn" | "FnMut" | "FnOnce"));
+                        }
+                        _ => break false,
+                    }
+                }
+            } =>
+            {
+                let arg_tys: Vec<_> = args.iter().map(|a| self.infer_expr(a)).collect();
+                for (arg, ty) in args.iter().zip(arg_tys.iter()) {
+                    self.reject_linear_escape(ty, arg.span, "a call through a `dyn Fn` object");
+                }
+                Ty::fresh_var()
+            }
             _ => {
                 self.error(TypeError::NotCallable { ty: func_ty }, span);
                 Ty::error()
@@ -6076,7 +6112,28 @@ impl<'ctx> TypeInfer<'ctx> {
                 return receiver_ty.clone();
             }
             "to_string" | "to_owned" | "to_json" => return Ty::str(),
-            "as_str" | "as_ref" => return Ty::str(),
+            "as_str" => return Ty::str(),
+            "as_ref" => {
+                let inner_recv = match &receiver_ty.kind {
+                    TyKind::Ref(_, _, inner) => self.apply(inner),
+                    _ => receiver_ty.clone(),
+                };
+                if let TyKind::Adt(def_id, substs) = &inner_recv.kind {
+                    if Some(*def_id) == self.well_known_types.option && !substs.is_empty() {
+                        let ref_inner =
+                            Ty::reference(None, Mutability::Immutable, substs[0].clone());
+                        if let Some(res) = self.option_ty(ref_inner) {
+                            return res;
+                        }
+                    }
+                    if Some(*def_id) == self.well_known_types.result && substs.len() >= 2 {
+                        let ok_ref = Ty::reference(None, Mutability::Immutable, substs[0].clone());
+                        let err_ref = Ty::reference(None, Mutability::Immutable, substs[1].clone());
+                        return Ty::new(TyKind::Adt(*def_id, vec![ok_ref, err_ref]));
+                    }
+                }
+                return Ty::str();
+            }
             "parse_int" => return Ty::int(IntTy::I64),
             "parse_float" => return Ty::float(FloatTy::F64),
 
@@ -6121,7 +6178,19 @@ impl<'ctx> TypeInfer<'ctx> {
                     }
                 }
             }
-            "with_capacity" | "from_slice" | "to_vec" | "into_vec" | "into_boxed_slice" => {
+            "to_vec" => {
+                let inner = match &receiver_ty.kind {
+                    TyKind::Ref(_, _, inner) => self.apply(inner),
+                    _ => receiver_ty.clone(),
+                };
+                match &inner.kind {
+                    TyKind::Slice(elem) | TyKind::Array(elem, _) => {
+                        return Ty::vec(elem.as_ref().clone());
+                    }
+                    _ => return Ty::fresh_var(),
+                }
+            }
+            "with_capacity" | "from_slice" | "into_vec" | "into_boxed_slice" => {
                 return Ty::fresh_var();
             }
 
@@ -6184,7 +6253,62 @@ impl<'ctx> TypeInfer<'ctx> {
                 return receiver_ty.clone();
             }
             "is_some" | "is_none" | "is_ok" | "is_err" => return Ty::bool(),
-            "as_mut" => return Ty::fresh_var(),
+            "as_deref" => {
+                let opt_ty = match &receiver_ty.kind {
+                    TyKind::Ref(_, _, inner) => self.apply(inner),
+                    _ => receiver_ty.clone(),
+                };
+                if let TyKind::Adt(def_id, substs) = &opt_ty.kind {
+                    if Some(*def_id) == self.well_known_types.option && !substs.is_empty() {
+                        let inner = self.apply(&substs[0]);
+                        let deref_target = match &inner.kind {
+                            TyKind::Str => Ty::str(),
+                            TyKind::Adt(id, _)
+                                if self
+                                    .ctx
+                                    .lookup_type(*id)
+                                    .is_some_and(|td| td.name.as_ref() == "String") =>
+                            {
+                                Ty::str()
+                            }
+                            _ => Ty::reference(None, Mutability::Immutable, inner),
+                        };
+                        if let Some(res) = self.option_ty(deref_target) {
+                            return res;
+                        }
+                    }
+                }
+                return Ty::fresh_var();
+            }
+            "is_null"
+                if matches!(&receiver_ty.kind, TyKind::Ptr(_, _))
+                    || matches!(
+                        derefed_ty.as_ref().map(|t| &t.kind),
+                        Some(TyKind::Ptr(_, _))
+                    ) =>
+            {
+                return Ty::bool();
+            }
+            "as_mut" => {
+                let inner_recv = match &receiver_ty.kind {
+                    TyKind::Ref(_, _, inner) => self.apply(inner),
+                    _ => receiver_ty.clone(),
+                };
+                if let TyKind::Adt(def_id, substs) = &inner_recv.kind {
+                    if Some(*def_id) == self.well_known_types.option && !substs.is_empty() {
+                        let ref_inner = Ty::reference(None, Mutability::Mutable, substs[0].clone());
+                        if let Some(res) = self.option_ty(ref_inner) {
+                            return res;
+                        }
+                    }
+                    if Some(*def_id) == self.well_known_types.result && substs.len() >= 2 {
+                        let ok_ref = Ty::reference(None, Mutability::Mutable, substs[0].clone());
+                        let err_ref = Ty::reference(None, Mutability::Mutable, substs[1].clone());
+                        return Ty::new(TyKind::Adt(*def_id, vec![ok_ref, err_ref]));
+                    }
+                }
+                return Ty::fresh_var();
+            }
 
             // =================================================================
             // INTEGER METHODS
@@ -6275,6 +6399,27 @@ impl<'ctx> TypeInfer<'ctx> {
             "parse" => return Ty::fresh_var(),
             "rfind" if matches!(&receiver_ty.kind, TyKind::Str | TyKind::Ref(_, _, _)) => {
                 return Ty::fresh_var();
+            }
+            "strip_prefix" | "strip_suffix" => {
+                let inner = match &receiver_ty.kind {
+                    TyKind::Ref(_, _, inner) => self.apply(inner),
+                    _ => receiver_ty.clone(),
+                };
+                let is_str_like = matches!(&inner.kind, TyKind::Str)
+                    || matches!(
+                        &inner.kind,
+                        TyKind::Adt(id, _)
+                            if self
+                                .ctx
+                                .lookup_type(*id)
+                                .is_some_and(|td| td.name.as_ref() == "String")
+                    );
+                if is_str_like {
+                    if let Some(opt_str) = self.option_ty(Ty::str()) {
+                        return opt_str;
+                    }
+                    return Ty::fresh_var();
+                }
             }
             "is_ascii"
             | "is_ascii_alphanumeric"

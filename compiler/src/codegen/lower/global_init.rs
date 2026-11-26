@@ -235,6 +235,18 @@ impl<'ctx> MirLowerer<'ctx> {
                 },
                 MirType::Struct(name),
             ) => self.const_struct(name, fields),
+            (ExprKind::Path(p), MirType::Struct(name)) if p.segments.len() >= 2 => {
+                let variant = p.last_ident()?.name.as_ref();
+                let (disc, fields) = self.lookup_enum_variant(name, variant)?;
+                if fields.is_empty() {
+                    Some(MirConst::Struct(
+                        name.clone(),
+                        vec![MirConst::Int(disc, MirType::i32())],
+                    ))
+                } else {
+                    None
+                }
+            }
             (ExprKind::Tuple(elems), MirType::Tuple(tys)) if elems.len() == tys.len() => {
                 let values: Option<Vec<MirConst>> = elems
                     .iter()
