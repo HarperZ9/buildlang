@@ -260,6 +260,24 @@ fn vault_verifier_and_null_cone_gravity_check_pass() {
         gravity_out.contains("NULL_CONE_GRAVITY_CHECK PASS failures=0 planted_caught=4/4"),
         "null_cone_gravity_check failed:\n{gravity_out}"
     );
+
+    let w15_rel = "universe/workstation/wave15_online_rkl_noh4_oracle.bld";
+    assert_check_and_lint(w15_rel);
+    let w15_1 = run_release(w15_rel, Some(1), &[]);
+    let w15_2 = run_release(w15_rel, Some(2), &[]);
+    for (label, out) in [("1-thread", &w15_1), ("2-thread", &w15_2)] {
+        assert!(
+            out.contains(
+                "[PASS] wave15_online_rkl_noh4_oracle summary checks=4 planted=4 failures=0"
+            ),
+            "{label} wave15 oracle failed:\n{out}"
+        );
+        assert!(
+            out.contains("kl=0.018721847303"),
+            "{label} wave15 KL parity drifted:\n{out}"
+        );
+        assert!(!out.contains("[FAIL]"), "{label} reported failure:\n{out}");
+    }
 }
 
 #[test]
