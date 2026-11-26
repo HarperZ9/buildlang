@@ -1,0 +1,756 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 Zain Dana Harper.
+//
+// Wave 21B-1 Oracle 1: Near-Linear Expected-Time SSSP (arXiv:2611.34911)
+//
+// Clean-room pure-BuildLang implementation of a bucketed, pivot-splitting
+// single-source shortest path solver inspired by Gholami & Hajiaghayi
+// (arXiv:2611.34911, expected O(m + n log log log n) frontier splitting for
+// non-negative real edge weights), differentially verified bit-for-bit against
+// exact binary-heap Dijkstra across multi-scale weighted graphs:
+// 1. Small edge-case graph (n=64): zero-weight edges, parallel edges, and
+//    disconnected unreachable vertices.
+// 2. Medium grid + long-range shortcuts (n=1024): high dynamic range weights.
+// 3. 10-seed stress suite (n=256 each): uniform and heavy-tailed weights.
+// 4. Large sparse benchmark (n=16384, m~81920): compiled timing vs Dijkstra.
+// 5. Planted corrupted-relaxation control (MUST be caught by the oracle).
+// 6. Planted negative-edge control (MUST be refused fail-closed by both solvers).
+
+struct Graph {
+    n: i32,
+    m: i32,
+    row_ptr: Vec<i64>,
+    col_idx: Vec<i64>,
+    weights: Vec<f64>,
+}
+
+struct SsspResult {
+    ok: bool,
+    dist: Vec<f64>,
+    relaxations: i64,
+    bucket_sweeps: i64,
+}
+
+struct DiffStats {
+    mismatch_count: i32,
+    unreach_mismatch: i32,
+    max_abs_diff: f64,
+    reachable_count: i32,
+    digest: i64,
+}
+
+fn sssp_inf() -> f64 {
+    1e300
+}
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { -x } else { x }
+}
+
+fn is_finite_f64(x: f64) -> bool {
+    x == x && abs_f64(x) < 1e299
+}
+
+// Deterministic xorshift64 PRNG (positive non-zero state)
+fn next_rng(state: i64) -> i64 {
+    let mut x: i64 = state;
+    if x == 0 {
+        x = 88172645463325252;
+    }
+    x = x ^ (x << 13);
+    x = x ^ ((x >> 7) & 144115188075855871);
+    x = x ^ (x << 17);
+    if x < 0 { -x } else { x }
+}
+
+// FNV-1a 64-bit style deterministic digest over quantized distance vector
+fn digest_dists(dist: Vec<f64>, n: i32) -> i64 {
+    let mut h: i64 = 2166136261;
+    let inf_thr: f64 = 1e200;
+    let mut i: i32 = 0;
+    while i < n {
+        let d: f64 = vec_get_f64(dist, i);
+        let q: i64 = if d >= inf_thr { -1 } else { (d * 1024.0) as i64 };
+        h = (h ^ q) * 16777619;
+        h = h & 2147483647;
+        i = i + 1;
+    }
+    h
+}
+
+// Build a deterministic CSR graph with backbone, local mesh, random shortcuts,
+// optional zero-weight edges, and an unreachable tail island.
+fn build_synthetic_graph(
+    n: i32,
+    extra_deg: i32,
+    seed: i64,
+    heavy_tail: bool,
+    with_zero_edges: bool,
+    island_size: i32,
+) -> Graph {
+    let row_ptr: Vec<i64> = vec_new_i64();
+    let col_idx: Vec<i64> = vec_new_i64();
+    let weights: Vec<f64> = vec_new_f64();
+    let active_n: i32 = n - island_size;
+    let mut rng: i64 = seed;
+    let mut edge_total: i32 = 0;
+
+    let mut u: i32 = 0;
+    while u < n {
+        vec_push_i64(row_ptr, edge_total as i64);
+        if u < active_n {
+            // Backbone forward edge ensures connectivity across active_n
+            if u + 1 < active_n {
+                rng = next_rng(rng);
+                let step_q: i64 = if with_zero_edges && (u % 11 == 0) {
+                    0
+                } else {
+                    1 + (rng % 32)
+                };
+                let w: f64 = (step_q as f64) * 0.25;
+                vec_push_i64(col_idx, (u + 1) as i64);
+                vec_push_f64(weights, w);
+                edge_total = edge_total + 1;
+            }
+            // Local short skip edge (+3)
+            if u + 3 < active_n {
+                rng = next_rng(rng);
+                let w2: f64 = ((1 + (rng % 48)) as f64) * 0.25;
+                vec_push_i64(col_idx, (u + 3) as i64);
+                vec_push_f64(weights, w2);
+                edge_total = edge_total + 1;
+            }
+            // Extra random edges (uniform or heavy-tailed multi-scale)
+            let mut k: i32 = 0;
+            while k < extra_deg {
+                rng = next_rng(rng);
+                let v: i32 = (rng % (active_n as i64)) as i32;
+                rng = next_rng(rng);
+                let w_raw: f64 = if heavy_tail && (rng % 9 == 0) {
+                    ((1 + (rng % 4096)) as f64) * 0.5
+                } else if with_zero_edges && (rng % 23 == 0) {
+                    0.0
+                } else {
+                    ((1 + (rng % 128)) as f64) * 0.25
+                };
+                if v != u {
+                    vec_push_i64(col_idx, v as i64);
+                    vec_push_f64(weights, w_raw);
+                    edge_total = edge_total + 1;
+                }
+                k = k + 1;
+            }
+        } else {
+            // Disconnected island internal edge (unreachable from node 0)
+            if u + 1 < n {
+                vec_push_i64(col_idx, (u + 1) as i64);
+                vec_push_f64(weights, 1.5);
+                edge_total = edge_total + 1;
+            }
+        }
+        u = u + 1;
+    }
+    vec_push_i64(row_ptr, edge_total as i64);
+    Graph {
+        n: n,
+        m: edge_total,
+        row_ptr: row_ptr,
+        col_idx: col_idx,
+        weights: weights,
+    }
+}
+
+// Validate non-negative finite weights fail-closed
+fn validate_nonneg_graph(g: &Graph) -> bool {
+    let mut e: i32 = 0;
+    while e < g.m {
+        let w: f64 = vec_get_f64(g.weights, e);
+        if !is_finite_f64(w) || w < 0.0 {
+            return false;
+        }
+        e = e + 1;
+    }
+    true
+}
+
+// Reference Exact Binary-Heap Dijkstra
+fn sssp_dijkstra(g: &Graph, src: i32) -> SsspResult {
+    let mut dist: Vec<f64> = vec_new_f64();
+    if !validate_nonneg_graph(g) || src < 0 || src >= g.n {
+        return SsspResult { ok: false, dist: dist, relaxations: 0, bucket_sweeps: 0 };
+    }
+    let inf: f64 = sssp_inf();
+    let mut i: i32 = 0;
+    while i < g.n {
+        vec_push_f64(dist, inf);
+        i = i + 1;
+    }
+    dist[src] = 0.0;
+
+    let mut heap_d: Vec<f64> = vec_new_f64();
+    let mut heap_u: Vec<i64> = vec_new_i64();
+    vec_push_f64(heap_d, 0.0);
+    vec_push_i64(heap_u, src as i64);
+    let mut hsize: i32 = 1;
+    let mut relax: i64 = 0;
+
+    while hsize > 0 {
+        let cur_d: f64 = vec_get_f64(heap_d, 0);
+        let cur_u: i32 = vec_get_i64(heap_u, 0) as i32;
+        hsize = hsize - 1;
+        if hsize > 0 {
+            heap_d[0] = vec_get_f64(heap_d, hsize);
+            heap_u[0] = vec_get_i64(heap_u, hsize);
+            let mut pos: i32 = 0;
+            let mut down: bool = true;
+            while down {
+                let left: i32 = pos * 2 + 1;
+                let right: i32 = left + 1;
+                let mut best: i32 = pos;
+                if left < hsize && vec_get_f64(heap_d, left) < vec_get_f64(heap_d, best) {
+                    best = left;
+                }
+                if right < hsize && vec_get_f64(heap_d, right) < vec_get_f64(heap_d, best) {
+                    best = right;
+                }
+                if best != pos {
+                    let td: f64 = vec_get_f64(heap_d, pos);
+                    let tu: i64 = vec_get_i64(heap_u, pos);
+                    heap_d[pos] = vec_get_f64(heap_d, best);
+                    heap_u[pos] = vec_get_i64(heap_u, best);
+                    heap_d[best] = td;
+                    heap_u[best] = tu;
+                    pos = best;
+                } else {
+                    down = false;
+                }
+            }
+        }
+        if cur_d > vec_get_f64(dist, cur_u) {
+            continue;
+        }
+        let start: i32 = vec_get_i64(g.row_ptr, cur_u) as i32;
+        let end: i32 = vec_get_i64(g.row_ptr, cur_u + 1) as i32;
+        let mut e: i32 = start;
+        while e < end {
+            let v: i32 = vec_get_i64(g.col_idx, e) as i32;
+            let nd: f64 = cur_d + vec_get_f64(g.weights, e);
+            if nd < vec_get_f64(dist, v) {
+                dist[v] = nd;
+                relax = relax + 1;
+                let hcap: i32 = vec_len(heap_u);
+                if hsize < hcap {
+                    heap_d[hsize] = nd;
+                    heap_u[hsize] = v as i64;
+                } else {
+                    vec_push_f64(heap_d, nd);
+                    vec_push_i64(heap_u, v as i64);
+                }
+                let mut pos: i32 = hsize;
+                hsize = hsize + 1;
+                while pos > 0 {
+                    let par: i32 = (pos - 1) / 2;
+                    if vec_get_f64(heap_d, pos) < vec_get_f64(heap_d, par) {
+                        let td: f64 = vec_get_f64(heap_d, par);
+                        let tu: i64 = vec_get_i64(heap_u, par);
+                        heap_d[par] = vec_get_f64(heap_d, pos);
+                        heap_u[par] = vec_get_i64(heap_u, pos);
+                        heap_d[pos] = td;
+                        heap_u[pos] = tu;
+                        pos = par;
+                    } else {
+                        pos = 0;
+                    }
+                }
+            }
+            e = e + 1;
+        }
+    }
+    SsspResult { ok: true, dist: dist, relaxations: relax, bucket_sweeps: 0 }
+}
+
+// Compute adaptive base bucket width delta using a two-pass outlier-trimmed
+// mean so heavy-tailed outlier edges do not collapse the bucket hierarchy.
+fn compute_adaptive_delta(g: &Graph) -> f64 {
+    let mut sum_w: f64 = 0.0;
+    let mut pos_cnt: i64 = 0;
+    let mut e: i32 = 0;
+    while e < g.m {
+        let w: f64 = vec_get_f64(g.weights, e);
+        if w > 0.0 {
+            sum_w = sum_w + w;
+            pos_cnt = pos_cnt + 1;
+        }
+        e = e + 1;
+    }
+    if pos_cnt == 0 {
+        return 1.0;
+    }
+    let raw_mean: f64 = sum_w / (pos_cnt as f64);
+    // Second pass: trim heavy outliers above raw_mean so bucket width tracks
+    // typical local edge scales while keeping multi-bucket frontier splitting.
+    let mut trim_sum: f64 = 0.0;
+    let mut trim_cnt: i64 = 0;
+    e = 0;
+    while e < g.m {
+        let w: f64 = vec_get_f64(g.weights, e);
+        if w > 0.0 && w <= raw_mean {
+            trim_sum = trim_sum + w;
+            trim_cnt = trim_cnt + 1;
+        }
+        e = e + 1;
+    }
+    let base_scale: f64 = if trim_cnt > 0 { trim_sum / (trim_cnt as f64) } else { raw_mean };
+    let d: f64 = base_scale * 0.5;
+    if d < 0.25 { 0.25 } else { d }
+}
+
+// Near-Linear Expected-Time Bucketed/Pivoted SSSP (arXiv:2611.34911 inspired).
+// Uses a sliding hierarchical bucket window + coarse 64-bucket skip counters +
+// overflow rebase jumps + light-edge pivot frontier sweeps (w <= delta)
+// followed by batch heavy-edge placement (w > delta).
+// When corrupt_mode is true, intentionally drops every 19th heavy relaxation
+// as a planted-failure control that the differential oracle MUST catch.
+fn sssp_bucket_pivot(g: &Graph, src: i32, corrupt_mode: bool) -> SsspResult {
+    let mut dist: Vec<f64> = vec_new_f64();
+    if !validate_nonneg_graph(g) || src < 0 || src >= g.n {
+        return SsspResult { ok: false, dist: dist, relaxations: 0, bucket_sweeps: 0 };
+    }
+    let inf: f64 = sssp_inf();
+    let mut seen_epoch: Vec<i64> = vec_new_i64();
+    let mut i: i32 = 0;
+    while i < g.n {
+        vec_push_f64(dist, inf);
+        vec_push_i64(seen_epoch, 0);
+        i = i + 1;
+    }
+    dist[src] = 0.0;
+
+    let delta: f64 = compute_adaptive_delta(g);
+    let inv_delta: f64 = 1.0 / delta;
+    let num_b: i32 = 2048;
+    let num_blocks: i32 = 32; // 2048 / 64
+
+    let mut b_head: Vec<i64> = vec_new_i64();
+    let mut b: i32 = 0;
+    while b < num_b {
+        vec_push_i64(b_head, -1);
+        b = b + 1;
+    }
+    let mut block_cnt: Vec<i64> = vec_new_i64();
+    let mut blk: i32 = 0;
+    while blk < num_blocks {
+        vec_push_i64(block_cnt, 0);
+        blk = blk + 1;
+    }
+
+    // Append-only bucket node arena (O(1) push, zero per-edge heap sift)
+    let ent_u: Vec<i64> = vec_new_i64();
+    let ent_d: Vec<f64> = vec_new_f64();
+    let ent_next: Vec<i64> = vec_new_i64();
+
+    // Overflow staging buffers for distances beyond active window
+    let mut ov_u: Vec<i64> = vec_new_i64();
+    let mut ov_d: Vec<f64> = vec_new_f64();
+    let mut ov_len: i32 = 0;
+
+    // Active light-frontier & settled-batch queues
+    let mut light_q: Vec<i64> = vec_new_i64();
+    let mut batch_u: Vec<i64> = vec_new_i64();
+
+    // Insert source into bucket 0
+    vec_push_i64(ent_u, src as i64);
+    vec_push_f64(ent_d, 0.0);
+    vec_push_i64(ent_next, -1);
+    b_head[0] = 0;
+    block_cnt[0] = 1;
+
+    let mut base_b: i64 = 0;
+    let mut cur_off: i32 = 0;
+    let mut epoch: i64 = 1;
+    let mut relax: i64 = 0;
+    let mut sweeps: i64 = 0;
+    let mut active_in_win: i64 = 1;
+
+    let mut running: bool = true;
+    while running {
+        // Advance across empty buckets inside window using coarse block counters
+        while cur_off < num_b && vec_get_i64(b_head, cur_off) < 0 {
+            if (cur_off & 63) == 0 && vec_get_i64(block_cnt, cur_off / 64) == 0 {
+                cur_off = cur_off + 64;
+            } else {
+                cur_off = cur_off + 1;
+            }
+        }
+
+        // If active window is exhausted, rebase directly to minimum overflow bucket
+        if cur_off >= num_b {
+            if ov_len == 0 {
+                running = false;
+                continue;
+            }
+            let mut min_b: i64 = -1;
+            let mut k: i32 = 0;
+            while k < ov_len {
+                let u0: i32 = vec_get_i64(ov_u, k) as i32;
+                let d0: f64 = vec_get_f64(ov_d, k);
+                if d0 <= vec_get_f64(dist, u0) {
+                    let bi: i64 = (d0 * inv_delta) as i64;
+                    if min_b < 0 || bi < min_b {
+                        min_b = bi;
+                    }
+                }
+                k = k + 1;
+            }
+            if min_b < 0 {
+                ov_len = 0;
+                running = false;
+                continue;
+            }
+            base_b = min_b;
+            cur_off = 0;
+            active_in_win = 0;
+            let mut new_ov: i32 = 0;
+            k = 0;
+            while k < ov_len {
+                let u0: i32 = vec_get_i64(ov_u, k) as i32;
+                let d0: f64 = vec_get_f64(ov_d, k);
+                if d0 <= vec_get_f64(dist, u0) {
+                    let bi: i64 = (d0 * inv_delta) as i64;
+                    let off64: i64 = bi - base_b;
+                    if off64 >= 0 && off64 < (num_b as i64) {
+                        let off: i32 = off64 as i32;
+                        let eid: i64 = vec_len(ent_u) as i64;
+                        let prev_h: i64 = vec_get_i64(b_head, off);
+                        vec_push_i64(ent_u, u0 as i64);
+                        vec_push_f64(ent_d, d0);
+                        vec_push_i64(ent_next, prev_h);
+                        b_head[off] = eid;
+                        let blk_i: i32 = off / 64;
+                        block_cnt[blk_i] = vec_get_i64(block_cnt, blk_i) + 1;
+                        active_in_win = active_in_win + 1;
+                    } else {
+                        ov_u[new_ov] = u0 as i64;
+                        ov_d[new_ov] = d0;
+                        new_ov = new_ov + 1;
+                    }
+                }
+                k = k + 1;
+            }
+            ov_len = new_ov;
+            if active_in_win == 0 {
+                running = false;
+            }
+            continue;
+        }
+
+        // Drain current bucket cur_off into light frontier queue
+        let cur_b: i64 = base_b + (cur_off as i64);
+        let mut head_e: i64 = vec_get_i64(b_head, cur_off);
+        b_head[cur_off] = -1;
+        let blk_cur: i32 = cur_off / 64;
+
+        let mut lq_len: i32 = 0;
+        let mut batch_len: i32 = 0;
+        epoch = epoch + 1;
+        sweeps = sweeps + 1;
+
+        while head_e >= 0 {
+            let idx: i32 = head_e as i32;
+            let u: i32 = vec_get_i64(ent_u, idx) as i32;
+            let d_ent: f64 = vec_get_f64(ent_d, idx);
+            head_e = vec_get_i64(ent_next, idx);
+            block_cnt[blk_cur] = vec_get_i64(block_cnt, blk_cur) - 1;
+            active_in_win = active_in_win - 1;
+            if d_ent <= vec_get_f64(dist, u) {
+                if lq_len < vec_len(light_q) {
+                    light_q[lq_len] = u as i64;
+                } else {
+                    vec_push_i64(light_q, u as i64);
+                }
+                lq_len = lq_len + 1;
+                if vec_get_i64(seen_epoch, u) != epoch {
+                    seen_epoch[u] = epoch;
+                    if batch_len < vec_len(batch_u) {
+                        batch_u[batch_len] = u as i64;
+                    } else {
+                        vec_push_i64(batch_u, u as i64);
+                    }
+                    batch_len = batch_len + 1;
+                }
+            }
+        }
+
+        // Phase 1: Light-edge pivoted frontier contraction within bucket cur_b
+        let mut lq_head: i32 = 0;
+        while lq_head < lq_len {
+            let u: i32 = vec_get_i64(light_q, lq_head) as i32;
+            lq_head = lq_head + 1;
+            let du: f64 = vec_get_f64(dist, u);
+            let start: i32 = vec_get_i64(g.row_ptr, u) as i32;
+            let end: i32 = vec_get_i64(g.row_ptr, u + 1) as i32;
+            let mut e: i32 = start;
+            while e < end {
+                let w: f64 = vec_get_f64(g.weights, e);
+                if w <= delta {
+                    let v: i32 = vec_get_i64(g.col_idx, e) as i32;
+                    let bias: f64 = if corrupt_mode && (e % 17 == 0) { 0.25 } else { 0.0 };
+                    let nd: f64 = du + w + bias;
+                    if nd < vec_get_f64(dist, v) {
+                        dist[v] = nd;
+                        relax = relax + 1;
+                        let bi: i64 = (nd * inv_delta) as i64;
+                        if bi == cur_b {
+                            if lq_len < vec_len(light_q) {
+                                light_q[lq_len] = v as i64;
+                            } else {
+                                vec_push_i64(light_q, v as i64);
+                            }
+                            lq_len = lq_len + 1;
+                            if vec_get_i64(seen_epoch, v) != epoch {
+                                seen_epoch[v] = epoch;
+                                if batch_len < vec_len(batch_u) {
+                                    batch_u[batch_len] = v as i64;
+                                } else {
+                                    vec_push_i64(batch_u, v as i64);
+                                }
+                                batch_len = batch_len + 1;
+                            }
+                        } else {
+                            let off64: i64 = bi - base_b;
+                            if off64 >= 0 && off64 < (num_b as i64) {
+                                let off: i32 = off64 as i32;
+                                let eid: i64 = vec_len(ent_u) as i64;
+                                let prev_h: i64 = vec_get_i64(b_head, off);
+                                vec_push_i64(ent_u, v as i64);
+                                vec_push_f64(ent_d, nd);
+                                vec_push_i64(ent_next, prev_h);
+                                b_head[off] = eid;
+                                let blk_i: i32 = off / 64;
+                                block_cnt[blk_i] = vec_get_i64(block_cnt, blk_i) + 1;
+                                active_in_win = active_in_win + 1;
+                            } else {
+                                if ov_len < vec_len(ov_u) {
+                                    ov_u[ov_len] = v as i64;
+                                    ov_d[ov_len] = nd;
+                                } else {
+                                    vec_push_i64(ov_u, v as i64);
+                                    vec_push_f64(ov_d, nd);
+                                }
+                                ov_len = ov_len + 1;
+                            }
+                        }
+                    }
+                }
+                e = e + 1;
+            }
+        }
+
+        // Phase 2: Batch heavy-edge placement from settled bucket cur_b
+        let mut bi_u: i32 = 0;
+        while bi_u < batch_len {
+            let u: i32 = vec_get_i64(batch_u, bi_u) as i32;
+            let du: f64 = vec_get_f64(dist, u);
+            let start: i32 = vec_get_i64(g.row_ptr, u) as i32;
+            let end: i32 = vec_get_i64(g.row_ptr, u + 1) as i32;
+            let mut e: i32 = start;
+            while e < end {
+                let w: f64 = vec_get_f64(g.weights, e);
+                if w > delta {
+                    if corrupt_mode && (e % 19 == 0) {
+                        e = e + 1;
+                        continue;
+                    }
+                    let v: i32 = vec_get_i64(g.col_idx, e) as i32;
+                    let nd: f64 = du + w;
+                    if nd < vec_get_f64(dist, v) {
+                        dist[v] = nd;
+                        relax = relax + 1;
+                        let bi: i64 = (nd * inv_delta) as i64;
+                        let off64: i64 = bi - base_b;
+                        if off64 >= 0 && off64 < (num_b as i64) {
+                            let off: i32 = off64 as i32;
+                            let eid: i64 = vec_len(ent_u) as i64;
+                            let prev_h: i64 = vec_get_i64(b_head, off);
+                            vec_push_i64(ent_u, v as i64);
+                            vec_push_f64(ent_d, nd);
+                            vec_push_i64(ent_next, prev_h);
+                            b_head[off] = eid;
+                            let blk_i: i32 = off / 64;
+                            block_cnt[blk_i] = vec_get_i64(block_cnt, blk_i) + 1;
+                            active_in_win = active_in_win + 1;
+                        } else {
+                            if ov_len < vec_len(ov_u) {
+                                ov_u[ov_len] = v as i64;
+                                ov_d[ov_len] = nd;
+                            } else {
+                                vec_push_i64(ov_u, v as i64);
+                                vec_push_f64(ov_d, nd);
+                            }
+                            ov_len = ov_len + 1;
+                        }
+                    }
+                }
+                e = e + 1;
+            }
+            bi_u = bi_u + 1;
+        }
+        cur_off = cur_off + 1;
+    }
+
+    SsspResult { ok: true, dist: dist, relaxations: relax, bucket_sweeps: sweeps }
+}
+
+// Compare two SSSP distance vectors bit-for-bit
+fn compare_sssp(ref_d: Vec<f64>, cand_d: Vec<f64>, n: i32) -> DiffStats {
+    let inf_thr: f64 = 1e200;
+    let mut mism: i32 = 0;
+    let mut unreach_mism: i32 = 0;
+    let mut max_diff: f64 = 0.0;
+    let mut reach: i32 = 0;
+    let mut i: i32 = 0;
+    while i < n {
+        let a: f64 = vec_get_f64(ref_d, i);
+        let b: f64 = vec_get_f64(cand_d, i);
+        let a_inf: bool = a >= inf_thr;
+        let b_inf: bool = b >= inf_thr;
+        if a_inf != b_inf {
+            unreach_mism = unreach_mism + 1;
+            mism = mism + 1;
+        } else if !a_inf {
+            reach = reach + 1;
+            let df: f64 = abs_f64(a - b);
+            if df > max_diff {
+                max_diff = df;
+            }
+            if a != b {
+                mism = mism + 1;
+            }
+        }
+        i = i + 1;
+    }
+    let dig: i64 = digest_dists(cand_d, n);
+    DiffStats {
+        mismatch_count: mism,
+        unreach_mismatch: unreach_mism,
+        max_abs_diff: max_diff,
+        reachable_count: reach,
+        digest: dig,
+    }
+}
+
+fn main() -> i32 ~ Console + Clock {
+    let mut failures: i32 = 0;
+
+    // 1. Small edge-case graph: zero-weight edges, disconnected island
+    let g_small: Graph = build_synthetic_graph(64, 4, 1337, false, true, 4);
+    let r_small_ref: SsspResult = sssp_dijkstra(&g_small, 0);
+    let r_small_fast: SsspResult = sssp_bucket_pivot(&g_small, 0, false);
+    let d_small: DiffStats = compare_sssp(r_small_ref.dist, r_small_fast.dist, g_small.n);
+    if !r_small_ref.ok || !r_small_fast.ok || d_small.mismatch_count != 0
+        || d_small.max_abs_diff != 0.0 || d_small.reachable_count != 60
+    {
+        println!("FAIL small_edge_cases");
+        failures = failures + 1;
+    } else {
+        println!(
+            "PASS small_edge_cases n=64 m={} reach={} max_diff={} digest={}",
+            g_small.m, d_small.reachable_count, d_small.max_abs_diff, d_small.digest
+        );
+    }
+
+    // 2. Medium heavy-tailed graph (n=1024, m~5120)
+    let g_med: Graph = build_synthetic_graph(1024, 3, 20261126, true, true, 8);
+    let r_med_ref: SsspResult = sssp_dijkstra(&g_med, 0);
+    let r_med_fast: SsspResult = sssp_bucket_pivot(&g_med, 0, false);
+    let d_med: DiffStats = compare_sssp(r_med_ref.dist, r_med_fast.dist, g_med.n);
+    if !r_med_ref.ok || !r_med_fast.ok || d_med.mismatch_count != 0
+        || d_med.max_abs_diff != 0.0 || d_med.reachable_count != 1016
+    {
+        println!("FAIL medium_heavy_tail");
+        failures = failures + 1;
+    } else {
+        println!(
+            "PASS medium_heavy_tail n=1024 m={} reach={} max_diff={} sweeps={}",
+            g_med.m, d_med.reachable_count, d_med.max_abs_diff, r_med_fast.bucket_sweeps
+        );
+    }
+
+    // 3. 10-seed differential stress matrix (n=256 each)
+    let mut s_ok: i32 = 0;
+    let mut seed_idx: i32 = 0;
+    while seed_idx < 10 {
+        let ht: bool = (seed_idx % 2) == 1;
+        let ze: bool = (seed_idx % 3) == 0;
+        let gs: Graph = build_synthetic_graph(256, 4, 9001 + (seed_idx as i64) * 7919, ht, ze, 5);
+        let ra: SsspResult = sssp_dijkstra(&gs, 0);
+        let rb: SsspResult = sssp_bucket_pivot(&gs, 0, false);
+        let ds: DiffStats = compare_sssp(ra.dist, rb.dist, gs.n);
+        if ra.ok && rb.ok && ds.mismatch_count == 0 && ds.max_abs_diff == 0.0 {
+            s_ok = s_ok + 1;
+        }
+        seed_idx = seed_idx + 1;
+    }
+    if s_ok != 10 {
+        println!("FAIL stress_10_seeds passed={}", s_ok);
+        failures = failures + 1;
+    } else {
+        println!("PASS stress_10_seeds passed=10/10 max_diff=0.0");
+    }
+
+    // 4. Large sparse benchmark graph (n=16384, m~81920)
+    let g_big: Graph = build_synthetic_graph(16384, 3, 424242, true, false, 16);
+    let t0: i64 = clock_ns();
+    let r_big_ref: SsspResult = sssp_dijkstra(&g_big, 0);
+    let t1: i64 = clock_ns();
+    let r_big_fast: SsspResult = sssp_bucket_pivot(&g_big, 0, false);
+    let t2: i64 = clock_ns();
+    let d_big: DiffStats = compare_sssp(r_big_ref.dist, r_big_fast.dist, g_big.n);
+    let dijk_ms: f64 = ((t1 - t0) as f64) / 1000000.0;
+    let fast_ms: f64 = ((t2 - t1) as f64) / 1000000.0;
+    if !r_big_ref.ok || !r_big_fast.ok || d_big.mismatch_count != 0
+        || d_big.max_abs_diff != 0.0 || d_big.reachable_count != 16368
+    {
+        println!("FAIL large_sparse_bench mismatches={}", d_big.mismatch_count);
+        failures = failures + 1;
+    } else {
+        println!(
+            "PASS large_sparse_bench n=16384 m={} max_diff={} dijkstra_ms={} bucket_ms={} digest={}",
+            g_big.m, d_big.max_abs_diff, dijk_ms, fast_ms, d_big.digest
+        );
+    }
+
+    // 5. Planted corrupted-relaxation control (MUST be caught with mismatches > 0)
+    let r_bad: SsspResult = sssp_bucket_pivot(&g_med, 0, true);
+    let d_bad: DiffStats = compare_sssp(r_med_ref.dist, r_bad.dist, g_med.n);
+    if d_bad.mismatch_count == 0 || d_bad.max_abs_diff == 0.0 {
+        println!("FAIL planted_corrupt_relaxation not caught");
+        failures = failures + 1;
+    } else {
+        println!(
+            "PASS planted_corrupt_relaxation_caught mismatches={} max_diff={}",
+            d_bad.mismatch_count, d_bad.max_abs_diff
+        );
+    }
+
+    // 6. Planted negative-edge refusal control (MUST fail closed on both solvers)
+    let g_neg: Graph = build_synthetic_graph(32, 2, 777, false, false, 0);
+    let mut neg_w: Vec<f64> = g_neg.weights;
+    neg_w[3] = -0.5;
+    let r_neg_ref: SsspResult = sssp_dijkstra(&g_neg, 0);
+    let r_neg_fast: SsspResult = sssp_bucket_pivot(&g_neg, 0, false);
+    if r_neg_ref.ok || r_neg_fast.ok {
+        println!("FAIL planted_negative_edge_refusal not refused");
+        failures = failures + 1;
+    } else {
+        println!("PASS planted_negative_edge_refusal dijkstra_ok=false bucket_ok=false");
+    }
+
+    if failures == 0 {
+        println!("SSSP_FAST_ORACLE ALL_PASS checks=6 failures=0");
+        0
+    } else {
+        println!("SSSP_FAST_ORACLE FAILED failures={}", failures);
+        1
+    }
+}
