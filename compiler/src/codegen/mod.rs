@@ -53,6 +53,7 @@ pub mod builder;
 pub mod c_verify;
 pub mod compute_attr;
 pub mod debug;
+pub mod gpu_polyhedral;
 pub mod ir;
 pub mod lower;
 pub mod runtime;
@@ -60,6 +61,9 @@ pub mod superopt;
 
 pub use backend::{Backend, CodegenError, CodegenResult, StdioMode, Target};
 pub use builder::*;
+pub use gpu_polyhedral::{
+    GpuTvCertificate, PolyhedralSchedule, SubgroupMode, SubgroupReductionPlan, GPU_TV_CERT_SCHEMA,
+};
 pub use ir::*;
 pub use lower::*;
 pub use superopt::{SuperoptCertificate, SuperoptRule, SuperoptStep, SUPEROPT_CERT_SCHEMA};
@@ -91,8 +95,18 @@ pub struct CodeGenerator<'ctx> {
     /// Enable the V5 certified e-graph superoptimizer pass (`--superopt`) over
     /// MIR before target backend emission.
     pub superopt: bool,
+    /// Enable Wave 26D polyhedral tiling (`H * delta >= 0`), subgroup
+    /// uniformity verification, and `buildlang.gpu-tv-cert/v1` sealing on GPU
+    /// shader targets (`wgsl`, `hlsl`, `msl`, `spirv`).
+    pub gpu_tv: bool,
+    /// Subgroup reduction determinism mode (`true` = `strict_bit_exact`
+    /// fixed-point associative mode; `false` = Higham `bounded_ulp` mode).
+    pub subgroup_strict_bit_exact: bool,
     /// Sealed V5 superoptimization certificate emitted when `superopt` runs.
     superopt_cert: Option<SuperoptCertificate>,
+    /// Sealed GPU translation-validation certificate emitted when `gpu_tv`
+    /// runs on a supported GPU shader target with `#[compute]` kernels.
+    gpu_tv_cert: Option<GpuTvCertificate>,
     /// Errors from the MIR `#[linear]` checker (`codegen::analysis::linear`),
     /// populated by `generate()` right after `lower_module`. Non-empty means
     /// the program is linearity-invalid: callers must treat this as a compile
@@ -119,7 +133,10 @@ impl<'ctx> CodeGenerator<'ctx> {
             wasm_text: false,
             entry: None,
             superopt: false,
+            gpu_tv: false,
+            subgroup_strict_bit_exact: true,
             superopt_cert: None,
+            gpu_tv_cert: None,
             linear_errors: Vec::new(),
             further_rejections: Vec::new(),
         }
@@ -137,7 +154,10 @@ impl<'ctx> CodeGenerator<'ctx> {
             wasm_text: false,
             entry: None,
             superopt: false,
+            gpu_tv: false,
+            subgroup_strict_bit_exact: true,
             superopt_cert: None,
+            gpu_tv_cert: None,
             linear_errors: Vec::new(),
             further_rejections: Vec::new(),
         }
@@ -146,6 +166,12 @@ impl<'ctx> CodeGenerator<'ctx> {
     /// Get the sealed V5 superoptimization certificate, if `--superopt` ran.
     pub fn superopt_cert(&self) -> Option<&SuperoptCertificate> {
         self.superopt_cert.as_ref()
+    }
+
+    /// Get the sealed `buildlang.gpu-tv-cert/v1` certificate, if GPU
+    /// translation validation ran on a compute shader target.
+    pub fn gpu_tv_cert(&self) -> Option<&GpuTvCertificate> {
+        self.gpu_tv_cert.as_ref()
     }
 
     /// Errors from the MIR `#[linear]` checker, if `generate()` has run.
@@ -268,10 +294,12 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
 
         // Run V5 certified e-graph superoptimization on MIR before backend emission
-        // when `--superopt` is requested, and verify the emitted proof certificate
-        // fail-closed before producing any target output.
+        // when `--superopt` or `--emit-gpu-cert` is requested, and verify the
+        // emitted proof certificate fail-closed before producing any target output.
         self.superopt_cert = None;
-        if self.superopt {
+        self.gpu_tv_cert = None;
+        let run_superopt = self.superopt || self.gpu_tv;
+        if run_superopt {
             let mir = self.mir.as_mut().expect("MIR was just stored");
             let target_label = self.target.to_string();
             let cert = superopt::superoptimize_module(mir, &target_label).map_err(|message| {
@@ -292,6 +320,34 @@ impl<'ctx> CodeGenerator<'ctx> {
             })?;
             self.superopt_cert = Some(cert);
         }
+
+        // Wave 26D: polyhedral dependence legality (`H * delta >= 0`) and
+        // subgroup/barrier uniformity verification on GPU shader targets.
+        let is_gpu_tv_target = matches!(
+            self.target,
+            Target::Wgsl | Target::Hlsl | Target::Msl | Target::SpirV
+        );
+        let gpu_analysis = if run_superopt && is_gpu_tv_target {
+            let mir = self.mir.as_ref().expect("MIR was just stored");
+            let (schedules, all_uniform) =
+                gpu_polyhedral::analyze_gpu_module(mir).map_err(|message| {
+                    CodegenError::Rejected {
+                        message: format!("GPU polyhedral/uniformity check failed: {message}"),
+                        location: None,
+                        help: Some(
+                            "eliminate loop-carried dependences along parallel GPU axes and keep barriers uniform"
+                                .to_string(),
+                        ),
+                    }
+                })?;
+            if schedules.is_empty() {
+                None
+            } else {
+                Some((schedules, all_uniform))
+            }
+        } else {
+            None
+        };
 
         // Select backend and generate
         let mir = self.mir.as_ref().unwrap();
@@ -319,16 +375,16 @@ impl<'ctx> CodeGenerator<'ctx> {
         // print them with source spans and fail the compile.
         self.linear_errors = analysis::linear::check_module(&mir.functions);
 
-        match self.target {
+        let generated = match self.target {
             Target::C => {
                 let mut backend = backend::c::CBackend::with_stdio_mode(self.stdio_mode);
                 let code = backend.generate(mir)?;
                 self.verify_c_calls(&code)?;
-                Ok(code)
+                code
             }
             Target::X86_64 => {
                 let mut backend = backend::x86_64::X86_64Backend::new();
-                backend.generate(mir)
+                backend.generate(mir)?
             }
             Target::X86_64Pe | Target::X86_64Elf => {
                 use backend::x86_64_exe_asm::ExeOs;
@@ -337,31 +393,31 @@ impl<'ctx> CodeGenerator<'ctx> {
                 } else {
                     ExeOs::Linux
                 };
-                backend::x86_64_exe::NativeExeBackend::new(os).generate(mir)
+                backend::x86_64_exe::NativeExeBackend::new(os).generate(mir)?
             }
             Target::Arm64 => {
                 let mut backend = backend::arm64::Arm64Backend::new();
-                backend.generate(mir)
+                backend.generate(mir)?
             }
             Target::Riscv64 => {
                 let mut backend = backend::riscv64::Riscv64Backend::new();
-                backend.generate(mir)
+                backend.generate(mir)?
             }
             Target::Wasm => {
                 let mut backend = backend::wasm::WasmBackend::new();
                 if self.wasm_text {
-                    backend.generate_wat(mir)
+                    backend.generate_wat(mir)?
                 } else {
-                    backend.generate(mir)
+                    backend.generate(mir)?
                 }
             }
             Target::SpirV => {
                 let mut backend = backend::spirv::SpirvBackend::new();
-                backend.generate(mir)
+                backend.generate(mir)?
             }
             Target::LlvmIr => {
                 let mut backend = backend::llvm::LlvmBackend::new();
-                backend.generate(mir)
+                backend.generate(mir)?
             }
             Target::Hlsl => {
                 let mut backend = backend::hlsl::HlslBackend::new();
@@ -370,32 +426,50 @@ impl<'ctx> CodeGenerator<'ctx> {
                 } else {
                     backend.generate(mir)?
                 };
-                Ok(GeneratedCode::new(
-                    OutputFormat::Hlsl,
-                    hlsl_code.into_bytes(),
-                ))
+                GeneratedCode::new(OutputFormat::Hlsl, hlsl_code.into_bytes())
             }
             Target::Glsl => {
                 let mut backend = backend::glsl::GlslBackend::new();
                 let glsl_code = backend.generate(mir)?;
-                Ok(GeneratedCode::new(
-                    OutputFormat::Glsl,
-                    glsl_code.into_bytes(),
-                ))
+                GeneratedCode::new(OutputFormat::Glsl, glsl_code.into_bytes())
             }
             Target::Msl => {
                 let mut backend = backend::msl::MslBackend::new();
-                backend.generate(mir)
+                backend.generate(mir)?
             }
             Target::Wgsl => {
                 let mut backend = backend::wgsl::WgslBackend::new();
-                backend.generate(mir)
+                backend.generate(mir)?
             }
             Target::Rust => {
                 let mut backend = backend::rust::RustBackend::new();
-                backend.generate(mir)
+                backend.generate(mir)?
             }
+        };
+
+        if let (Some((schedules, all_uniform)), Some(superopt_cert)) =
+            (gpu_analysis, self.superopt_cert.clone())
+        {
+            let target_label = self.target.to_string();
+            let gpu_cert = gpu_polyhedral::seal_gpu_tv_certificate(
+                &target_label,
+                superopt_cert,
+                schedules,
+                self.subgroup_strict_bit_exact,
+                all_uniform,
+                &generated.data,
+            )
+            .map_err(|message| CodegenError::Rejected {
+                message: format!("GPU TV certificate sealing failed: {message}"),
+                location: None,
+                help: Some(
+                    "GPU translation-validation certificates are checked fail-closed".to_string(),
+                ),
+            })?;
+            self.gpu_tv_cert = Some(gpu_cert);
         }
+
+        Ok(generated)
     }
 
     /// Get the generated MIR (for debugging/inspection).
