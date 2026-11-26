@@ -7,14 +7,16 @@
 //     (compiler statically proves zero Network, zero Process, zero Foreign authority).
 //   - Speaks MCP JSON-RPC 2.0 over stdio (initialize, ping, tools/list, tools/call).
 //   - Tools:
-//       1. workstation_health: native file/dir probe with nanosecond latency via clock_ns()
-//       2. check_em_dash_and_secret: UTF-8 byte scanner catching em dashes (0xE2 0x80 0x94),
-//          en dashes (0xE2 0x80 0x93), and common secret/token leak prefixes in text or files.
+//       1. workstation_health       : native file/dir probe with nanosecond clock_ns() timing
+//       2. check_em_dash_and_secret : UTF-8 byte scanner for em/en dashes and secret markers
+//       3. anti_silo_preflight      : routes intents to flagship owner & refuses orphan silos
+//       4. audit_public_hygiene     : scans text/files for em dashes, client-bundled secret
+//                                     env prefixes, local drive paths, and retired brand names
 //   - Run with `--self-test` for deterministic known-answer + planted-failure verification.
 
 mod json;
 
-// ---------------------------------------------------------------- String helpers
+// ---------------------------------------------------------------- String & ASCII helpers
 
 fn trim_crlf(s: str) -> str {
     let b = s.as_bytes();
@@ -33,6 +35,73 @@ fn empty_json_obj() -> Json {
     let ks: Vec<str> = Vec::new();
     let vs: Vec<Json> = Vec::new();
     Json::Obj(ks, vs)
+}
+
+fn is_ascii_alpha(c: u8) -> bool {
+    (c >= 65 && c <= 90) || (c >= 97 && c <= 122)
+}
+
+fn is_ascii_alnum_or_us(c: u8) -> bool {
+    is_ascii_alpha(c) || (c >= 48 && c <= 57) || c == 95
+}
+
+fn is_path_char(c: u8) -> bool {
+    is_ascii_alnum_or_us(c) || c == 46 || c == 45
+}
+
+fn ascii_lower_byte(c: u8) -> u8 {
+    if c >= 65 && c <= 90 {
+        return c + 32;
+    }
+    c
+}
+
+fn to_lower_ascii(s: str) -> str {
+    let b = s.as_bytes();
+    let n: usize = s.len();
+    let mut out: str = "";
+    let mut run: usize = 0;
+    let mut i: usize = 0;
+    while i < n {
+        let c: u8 = b[i];
+        if c >= 65 && c <= 90 {
+            out = out + s.substring(run, i - run) + format!("{}", (c + 32) as char);
+            run = i + 1;
+        }
+        i = i + 1;
+    }
+    out + s.substring(run, n - run)
+}
+
+fn normalize_slashes_lower(s: str) -> str {
+    let lo: str = to_lower_ascii(s);
+    let b = lo.as_bytes();
+    let n: usize = lo.len();
+    let mut out: str = "";
+    let mut run: usize = 0;
+    let mut i: usize = 0;
+    while i < n {
+        if b[i] == 92 {
+            out = out + lo.substring(run, i - run) + "/";
+            run = i + 1;
+        }
+        i = i + 1;
+    }
+    out + lo.substring(run, n - run)
+}
+
+fn starts_with_str(s: str, prefix: str) -> bool {
+    if prefix.len() > s.len() {
+        return false;
+    }
+    s.substring(0, prefix.len()) == prefix
+}
+
+fn ends_with_str(s: str, suffix: str) -> bool {
+    if suffix.len() > s.len() {
+        return false;
+    }
+    s.substring(s.len() - suffix.len(), suffix.len()) == suffix
 }
 
 fn count_pattern_bytes(s: str, pat: str) -> i64 {
@@ -82,6 +151,8 @@ fn count_utf8_dash(s: str, third_byte: u8) -> i64 {
     count
 }
 
+// ---------------------------------------------------------------- Scanners (Pure ~ ())
+
 struct ScanReport {
     em_dashes: i64,
     en_dashes: i64,
@@ -89,8 +160,6 @@ struct ScanReport {
     bytes_scanned: i64,
 }
 
-// Pure byte scanner (~ ()): detects UTF-8 em/en dashes and common credential markers.
-// Prefixes are split so the scanner source itself never contains a live credential pattern.
 fn scan_text(text: str) -> ScanReport {
     let em: i64 = count_utf8_dash(text, 148);
     let en: i64 = count_utf8_dash(text, 147);
@@ -109,6 +178,353 @@ fn scan_text(text: str) -> ScanReport {
         en_dashes: en,
         secret_hits: secrets,
         bytes_scanned: text.len() as i64,
+    }
+}
+
+fn has_secret_keyword(ident: str) -> bool {
+    if ident.contains("KEY") { return true; }
+    if ident.contains("SECRET") { return true; }
+    if ident.contains("TOKEN") { return true; }
+    if ident.contains("PASS") { return true; }
+    if ident.contains("AUTH") { return true; }
+    false
+}
+
+fn count_bundler_prefix(text: str, prefix: str) -> i64 {
+    let b = text.as_bytes();
+    let pb = prefix.as_bytes();
+    let n: usize = text.len();
+    let plen: usize = prefix.len();
+    if plen == 0 || plen >= n {
+        return 0;
+    }
+    let mut hits: i64 = 0;
+    let mut i: usize = 0;
+    while i + plen <= n {
+        let prev_ok: bool = i == 0 || !is_ascii_alnum_or_us(b[i - 1]);
+        let mut matched: bool = prev_ok;
+        let mut j: usize = 0;
+        while matched && j < plen {
+            if b[i + j] != pb[j] {
+                matched = false;
+            }
+            j = j + 1;
+        }
+        if matched {
+            let mut end: usize = i + plen;
+            while end < n && is_ascii_alnum_or_us(b[end]) {
+                end = end + 1;
+            }
+            let ident: str = text.substring(i, end - i);
+            if has_secret_keyword(ident) {
+                hits = hits + 1;
+            }
+            i = end;
+        } else {
+            i = i + 1;
+        }
+    }
+    hits
+}
+
+fn count_local_drive_paths(text: str) -> i64 {
+    let b = text.as_bytes();
+    let n: usize = text.len();
+    let mut hits: i64 = 0;
+    let mut i: usize = 0;
+    while i + 2 < n {
+        let c: u8 = ascii_lower_byte(b[i]);
+        let is_drive: bool = c >= 99 && c <= 104;
+        let prev_ok: bool = i == 0 || !is_ascii_alnum_or_us(b[i - 1]);
+        let sep_ok: bool = b[i + 1] == 58 && (b[i + 2] == 47 || b[i + 2] == 92);
+        if is_drive && prev_ok && sep_ok && i + 3 < n && is_path_char(b[i + 3]) {
+            hits = hits + 1;
+            i = i + 3;
+        } else {
+            i = i + 1;
+        }
+    }
+    hits
+}
+
+fn count_word_ci(text: str, word_lower: str) -> i64 {
+    let b = text.as_bytes();
+    let wb = word_lower.as_bytes();
+    let n: usize = text.len();
+    let wlen: usize = word_lower.len();
+    if wlen == 0 || wlen > n {
+        return 0;
+    }
+    let mut hits: i64 = 0;
+    let mut i: usize = 0;
+    while i + wlen <= n {
+        let prev_ok: bool = i == 0 || !is_ascii_alnum_or_us(b[i - 1]);
+        let next_ok: bool = (i + wlen == n) || !is_ascii_alnum_or_us(b[i + wlen]);
+        let mut ok: bool = prev_ok && next_ok;
+        let mut j: usize = 0;
+        while ok && j < wlen {
+            if ascii_lower_byte(b[i + j]) != wb[j] {
+                ok = false;
+            }
+            j = j + 1;
+        }
+        if ok {
+            hits = hits + 1;
+            i = i + wlen;
+        } else {
+            i = i + 1;
+        }
+    }
+    hits
+}
+
+struct PublicHygieneReport {
+    em_dashes: i64,
+    en_dashes: i64,
+    bundler_secrets: i64,
+    local_paths: i64,
+    retired_brand: i64,
+    bytes_scanned: i64,
+}
+
+fn scan_public_hygiene(text: str) -> PublicHygieneReport {
+    let em: i64 = count_utf8_dash(text, 148);
+    let en: i64 = count_utf8_dash(text, 147);
+    let mut bsec: i64 = 0;
+    bsec = bsec + count_bundler_prefix(text, "VI" + "TE_");
+    bsec = bsec + count_bundler_prefix(text, "NEXT_" + "PUBLIC_");
+    bsec = bsec + count_bundler_prefix(text, "REACT_" + "APP_");
+    let lpaths: i64 = count_local_drive_paths(text);
+    let retired: i64 = count_word_ci(text, "zen" + "tropy");
+    PublicHygieneReport {
+        em_dashes: em,
+        en_dashes: en,
+        bundler_secrets: bsec,
+        local_paths: lpaths,
+        retired_brand: retired,
+        bytes_scanned: text.len() as i64,
+    }
+}
+
+// ---------------------------------------------------------------- Anti-Silo Router (Pure ~ ())
+
+struct FlagshipMatch {
+    id: str,
+    repo: str,
+    score: i64,
+}
+
+fn score_keywords(intent_lo: str, kws: &Vec<str>) -> i64 {
+    let mut s: i64 = 0;
+    let mut i: usize = 0;
+    while i < kws.len() {
+        if intent_lo.contains(kws[i]) {
+            s = s + 2;
+        }
+        i = i + 1;
+    }
+    s
+}
+
+fn route_flagship(intent: str) -> FlagshipMatch {
+    let lo: str = to_lower_ascii(intent);
+
+    let mut sf_kw: Vec<str> = Vec::new();
+    sf_kw.push("renderer");
+    sf_kw.push("shader");
+    sf_kw.push("hlsl");
+    sf_kw.push("wgsl");
+    sf_kw.push("dx12");
+    sf_kw.push("vulkan");
+    sf_kw.push("optics");
+    sf_kw.push("color");
+    sf_kw.push("colour");
+    sf_kw.push("audio");
+    sf_kw.push("daw");
+    sf_kw.push("cosmo");
+    sf_kw.push("physics");
+    sf_kw.push("lens");
+    sf_kw.push("crt");
+    sf_kw.push("superframe");
+    sf_kw.push("kcore");
+
+    let mut bl_kw: Vec<str> = Vec::new();
+    bl_kw.push("buildlang");
+    bl_kw.push("buildc");
+    bl_kw.push("compiler");
+    bl_kw.push("parser");
+    bl_kw.push("lexer");
+    bl_kw.push("effect");
+    bl_kw.push("mir");
+    bl_kw.push("bdb");
+    bl_kw.push("builddb");
+    bl_kw.push("typecheck");
+    bl_kw.push("par_for");
+    bl_kw.push("bend");
+
+    let mut fw_kw: Vec<str> = Vec::new();
+    fw_kw.push("flywheel");
+    fw_kw.push("receipt");
+    fw_kw.push("verify");
+    fw_kw.push("oracle");
+    fw_kw.push("harness");
+    fw_kw.push("recall");
+    fw_kw.push("interop");
+    fw_kw.push("silo");
+    fw_kw.push("crucible");
+    fw_kw.push("gather");
+    fw_kw.push("emet");
+    fw_kw.push("articulate");
+    fw_kw.push("audit");
+
+    let mut cm_kw: Vec<str> = Vec::new();
+    cm_kw.push("cmmns");
+    cm_kw.push("commons");
+    cm_kw.push("daylight");
+    cm_kw.push("saves");
+    cm_kw.push("bookmarks");
+    cm_kw.push("civic");
+    cm_kw.push("extension");
+
+    let mut st_kw: Vec<str> = Vec::new();
+    st_kw.push("portfolio");
+    st_kw.push("site");
+    st_kw.push("html");
+    st_kw.push("css");
+    st_kw.push("typography");
+    st_kw.push("accessibility");
+    st_kw.push("showcase");
+
+    let s_sf: i64 = score_keywords(lo, &sf_kw);
+    let s_bl: i64 = score_keywords(lo, &bl_kw);
+    let s_fw: i64 = score_keywords(lo, &fw_kw);
+    let s_cm: i64 = score_keywords(lo, &cm_kw);
+    let s_st: i64 = score_keywords(lo, &st_kw);
+
+    let mut best_id: str = "flywheel";
+    let mut best_repo: str = "HarperZ9/flywheel";
+    let mut best_score: i64 = s_fw;
+
+    if s_sf > best_score {
+        best_id = "superframe";
+        best_repo = "HarperZ9/superframe";
+        best_score = s_sf;
+    }
+    if s_bl > best_score {
+        best_id = "buildlang";
+        best_repo = "HarperZ9/buildlang";
+        best_score = s_bl;
+    }
+    if s_cm > best_score {
+        best_id = "cmmns";
+        best_repo = "HarperZ9/cmmns";
+        best_score = s_cm;
+    }
+    if s_st > best_score {
+        best_id = "HarperZ9.github.io";
+        best_repo = "HarperZ9/HarperZ9.github.io";
+        best_score = s_st;
+    }
+
+    FlagshipMatch {
+        id: best_id,
+        repo: best_repo,
+        score: best_score,
+    }
+}
+
+fn first_segment(rest: str) -> str {
+    let b = rest.as_bytes();
+    let n: usize = rest.len();
+    let mut i: usize = 0;
+    while i < n && b[i] != 47 {
+        i = i + 1;
+    }
+    rest.substring(0, i)
+}
+
+fn is_allowed_public_top(top: str) -> bool {
+    if top == "superframe" { return true; }
+    if top == "flywheel" { return true; }
+    if top == "cmmns" { return true; }
+    if top == "portfolio-site" { return true; }
+    if top == "raw" { return true; }
+    if top == "calibrate-pro" { return true; }
+    if top == "phantom" { return true; }
+    if top == "profile" { return true; }
+    false
+}
+
+fn is_allowed_cdev_top(top: str) -> bool {
+    if top == "buildlang" { return true; }
+    if top == "mission-control" { return true; }
+    if top == "project-docs" { return true; }
+    if top == "public" { return true; }
+    if top == "state" { return true; }
+    if top == "tools" { return true; }
+    if top == "docs" { return true; }
+    if top == "data" { return true; }
+    if top == "fixtures" { return true; }
+    if top == "protected" { return true; }
+    if top == "private" { return true; }
+    if top == "secrets" { return true; }
+    ends_with_str(top, ".md")
+}
+
+struct SiloDecision {
+    refused: bool,
+    exit_code: i64,
+    rule: str,
+    reason: str,
+}
+
+fn check_silo_path(target_path: str, flagship_id: str) -> SiloDecision {
+    if target_path.len() == 0 {
+        return SiloDecision {
+            refused: false,
+            exit_code: 0,
+            rule: "none",
+            reason: "no target_path supplied",
+        };
+    }
+    let norm: str = normalize_slashes_lower(target_path);
+    let pub_prefix: str = "c" + ":/dev/public/";
+    if starts_with_str(norm, pub_prefix) {
+        let rest: str = norm.substring(pub_prefix.len(), norm.len() - pub_prefix.len());
+        let top: str = first_segment(rest);
+        if top.len() > 0 && !is_allowed_public_top(top) {
+            return SiloDecision {
+                refused: true,
+                exit_code: 3,
+                rule: "no-silo-repo",
+                reason: format!("orphan folder '{}' under public root; extend flagship '{}'", top, flagship_id),
+            };
+        }
+        return SiloDecision {
+            refused: false,
+            exit_code: 0,
+            rule: "allowed-flagship",
+            reason: "target sits inside an allowed public flagship",
+        };
+    }
+    let dev_prefix: str = "c" + ":/dev/";
+    if starts_with_str(norm, dev_prefix) {
+        let rest: str = norm.substring(dev_prefix.len(), norm.len() - dev_prefix.len());
+        let top: str = first_segment(rest);
+        if top.len() > 0 && !is_allowed_cdev_top(top) {
+            return SiloDecision {
+                refused: true,
+                exit_code: 3,
+                rule: "no-silo-repo",
+                reason: format!("orphan top-level folder '{}'; place inside flagship '{}'", top, flagship_id),
+            };
+        }
+    }
+    SiloDecision {
+        refused: false,
+        exit_code: 0,
+        rule: "allowed",
+        reason: "target path permitted",
     }
 }
 
@@ -185,7 +601,7 @@ fn handle_initialize() -> str {
     info_ks.push("name");
     info_vs.push(json_quote("buildlang-workstation-mcp"));
     info_ks.push("version");
-    info_vs.push(json_quote("0.1.0"));
+    info_vs.push(json_quote("0.2.0"));
 
     let mut tcap_ks: Vec<str> = Vec::new();
     let mut tcap_vs: Vec<str> = Vec::new();
@@ -241,6 +657,7 @@ fn tool_schema_obj(name: str, desc: str, props_json: str) -> str {
 fn handle_tools_list() -> str {
     let path_prop: str = "{\"path\":{\"type\":\"string\"}}";
     let scan_prop: str = "{\"path\":{\"type\":\"string\"},\"text\":{\"type\":\"string\"}}";
+    let silo_prop: str = "{\"intent\":{\"type\":\"string\"},\"target_path\":{\"type\":\"string\"}}";
 
     let mut tools: Vec<str> = Vec::new();
     tools.push(tool_schema_obj(
@@ -251,6 +668,16 @@ fn handle_tools_list() -> str {
     tools.push(tool_schema_obj(
         "check_em_dash_and_secret",
         "Scan text or a file natively for UTF-8 em/en dashes and credential leak markers.",
+        scan_prop
+    ));
+    tools.push(tool_schema_obj(
+        "anti_silo_preflight",
+        "Route an intent to its flagship owner and refuse orphan top-level silo paths.",
+        silo_prop
+    ));
+    tools.push(tool_schema_obj(
+        "audit_public_hygiene",
+        "Audit text or a file for em dashes, client-bundled secret prefixes, local drive paths, and retired brand.",
         scan_prop
     ));
 
@@ -266,6 +693,21 @@ fn extract_optional_str(args: Json, key: str, default_val: str) -> Result<str, s
         return Ok(default_val);
     }
     field_str(args, key)
+}
+
+fn load_scan_input(args: Json) -> Result<(str, str), str> ~ FileSystem {
+    if json_has(args, "text") {
+        let s: str = field_str(args, "text")?;
+        return Ok(("text", s));
+    }
+    if json_has(args, "path") {
+        let p: str = field_str(args, "path")?;
+        if !file_exists(p) {
+            return Err("file not found");
+        }
+        return Ok(("file", read_file(p)));
+    }
+    Err("pass either text or path")
 }
 
 fn tool_workstation_health(args: Json) -> str ~ FileSystem + Clock {
@@ -299,31 +741,13 @@ fn tool_workstation_health(args: Json) -> str ~ FileSystem + Clock {
     mcp_tool_result(json_obj(ks, vs), false)
 }
 
-fn load_scan_input(args: Json) -> Result<(str, str), str> ~ FileSystem {
-    if json_has(args, "text") {
-        let s: str = field_str(args, "text")?;
-        return Ok(("text", s));
-    }
-    if json_has(args, "path") {
-        let p: str = field_str(args, "path")?;
-        if !file_exists(p) {
-            return Err("file not found");
-        }
-        return Ok(("file", read_file(p)));
-    }
-    Err("pass either text or path")
-}
-
 fn tool_check_em_dash_and_secret(args: Json) -> str ~ FileSystem + Clock {
     let t0: i64 = clock_ns();
     let loaded: (str, str) = match load_scan_input(args) {
         Ok(pair) => pair,
         Err(e) => return mcp_tool_result(error_payload(e), true),
     };
-    let source_kind: str = loaded.0;
-    let content: str = loaded.1;
-
-    let report: ScanReport = scan_text(content);
+    let report: ScanReport = scan_text(loaded.1);
     let clean: bool = report.em_dashes == 0 && report.en_dashes == 0 && report.secret_hits == 0;
     let elapsed_ns: i64 = clock_ns() - t0;
 
@@ -332,7 +756,7 @@ fn tool_check_em_dash_and_secret(args: Json) -> str ~ FileSystem + Clock {
     ks.push("clean");
     if clean { vs.push("true"); } else { vs.push("false"); }
     ks.push("source");
-    vs.push(json_quote(source_kind));
+    vs.push(json_quote(loaded.0));
     ks.push("em_dashes");
     vs.push(format!("{}", report.em_dashes));
     ks.push("en_dashes");
@@ -341,6 +765,82 @@ fn tool_check_em_dash_and_secret(args: Json) -> str ~ FileSystem + Clock {
     vs.push(format!("{}", report.secret_hits));
     ks.push("bytes_scanned");
     vs.push(format!("{}", report.bytes_scanned));
+    ks.push("elapsed_ns");
+    vs.push(format!("{}", elapsed_ns));
+    mcp_tool_result(json_obj(ks, vs), false)
+}
+
+fn tool_anti_silo_preflight(args: Json) -> str ~ Clock {
+    let t0: i64 = clock_ns();
+    let intent: str = match field_str(args, "intent") {
+        Ok(s) => s,
+        Err(e) => return mcp_tool_result(error_payload(e), true),
+    };
+    let target_path: str = match extract_optional_str(args, "target_path", "") {
+        Ok(p) => p,
+        Err(e) => return mcp_tool_result(error_payload(e), true),
+    };
+    let owner: FlagshipMatch = route_flagship(intent);
+    let silo: SiloDecision = check_silo_path(target_path, owner.id);
+    let elapsed_ns: i64 = clock_ns() - t0;
+
+    let mut ks: Vec<str> = Vec::new();
+    let mut vs: Vec<str> = Vec::new();
+    ks.push("schema");
+    vs.push(json_quote("anti-silo-preflight/1"));
+    ks.push("intent");
+    vs.push(json_quote(intent));
+    ks.push("flagship_id");
+    vs.push(json_quote(owner.id));
+    ks.push("repo");
+    vs.push(json_quote(owner.repo));
+    ks.push("match_score");
+    vs.push(format!("{}", owner.score));
+    ks.push("silo_refused");
+    if silo.refused { vs.push("true"); } else { vs.push("false"); }
+    ks.push("exit_code");
+    vs.push(format!("{}", silo.exit_code));
+    ks.push("rule");
+    vs.push(json_quote(silo.rule));
+    ks.push("reason");
+    vs.push(json_quote(silo.reason));
+    ks.push("elapsed_ns");
+    vs.push(format!("{}", elapsed_ns));
+    mcp_tool_result(json_obj(ks, vs), false)
+}
+
+fn tool_audit_public_hygiene(args: Json) -> str ~ FileSystem + Clock {
+    let t0: i64 = clock_ns();
+    let loaded: (str, str) = match load_scan_input(args) {
+        Ok(pair) => pair,
+        Err(e) => return mcp_tool_result(error_payload(e), true),
+    };
+    let r: PublicHygieneReport = scan_public_hygiene(loaded.1);
+    let clean: bool = r.em_dashes == 0
+        && r.en_dashes == 0
+        && r.bundler_secrets == 0
+        && r.local_paths == 0
+        && r.retired_brand == 0;
+    let elapsed_ns: i64 = clock_ns() - t0;
+
+    let mut ks: Vec<str> = Vec::new();
+    let mut vs: Vec<str> = Vec::new();
+    ks.push("clean");
+    if clean { vs.push("true"); } else { vs.push("false"); }
+    ks.push("source");
+    vs.push(json_quote(loaded.0));
+    ks.push("em_dashes");
+    vs.push(format!("{}", r.em_dashes));
+    ks.push("en_dashes");
+    vs.push(format!("{}", r.en_dashes));
+    ks.push("bundler_secrets");
+    vs.push(format!("{}", r.bundler_secrets));
+    ks.push("local_paths");
+    vs.push(format!("{}", r.local_paths));
+    ks.push("retired_brand");
+    vs.push(format!("{}", r.retired_brand));
+    ks.push("bytes_scanned");
+    vs.push(format!("{}", r.bytes_scanned));
     ks.push("elapsed_ns");
     vs.push(format!("{}", elapsed_ns));
     mcp_tool_result(json_obj(ks, vs), false)
@@ -361,10 +861,15 @@ fn handle_tools_call(id_json: str, params: Json) -> str ~ FileSystem + Clock {
     if tool_name == "check_em_dash_and_secret" {
         return rpc_ok(id_json, tool_check_em_dash_and_secret(args));
     }
+    if tool_name == "anti_silo_preflight" {
+        return rpc_ok(id_json, tool_anti_silo_preflight(args));
+    }
+    if tool_name == "audit_public_hygiene" {
+        return rpc_ok(id_json, tool_audit_public_hygiene(args));
+    }
     rpc_err(id_json, -32602, format!("unknown tool: {}", tool_name))
 }
 
-// Handles one JSON-RPC 2.0 request line. Returns "" for notifications (no reply).
 fn handle_mcp_line(line: str) -> str ~ FileSystem + Clock {
     let clean: str = trim_crlf(line);
     if clean.len() == 0 {
@@ -424,16 +929,69 @@ fn call_req(id: i64, name: str, args_json: str) -> str {
     head + format!("{}", id) + mid + json_quote(name) + ",\"arguments\":" + args_json + "}}"
 }
 
+fn run_wave2_tool_tests() -> i32 ~ Console + FileSystem + Clock {
+    let mut failures: i32 = 0;
+
+    // 10. anti_silo_preflight routes shader/optics intent to superframe and accepts flagship path
+    let ok_path: str = "C" + ":/dev/public/superframe/packages/kernels/kcore";
+    let sf_args: str = "{\"intent\":\"add HLSL shader optics kernel\",\"target_path\":"
+        + json_quote(ok_path) + "}";
+    let r_sf: str = handle_mcp_line(call_req(10, "anti_silo_preflight", sf_args));
+    failures = failures + assert_contains("silo_route_superframe", r_sf, "\"flagship_id\":\"superframe\"");
+    failures = failures + assert_contains("silo_allow_flagship_path", r_sf, "\"silo_refused\":false");
+
+    // 11. anti_silo_preflight routes compiler intent to buildlang
+    let bl_args: str = "{\"intent\":\"fix buildc parser effect row\"}";
+    let r_bl: str = handle_mcp_line(call_req(11, "anti_silo_preflight", bl_args));
+    failures = failures + assert_contains("silo_route_buildlang", r_bl, "\"flagship_id\":\"buildlang\"");
+
+    // 12. Planted silo control 1: orphan folder under C:/dev/public/ MUST be refused (exit_code 3)
+    let bad_pub: str = "C" + ":/dev/public/rogue-new-silo/app.py";
+    let bp_args: str = "{\"intent\":\"build new verify tool\",\"target_path\":"
+        + json_quote(bad_pub) + "}";
+    let r_bp: str = handle_mcp_line(call_req(12, "anti_silo_preflight", bp_args));
+    failures = failures + assert_contains("planted_silo_public_refused", r_bp, "\"silo_refused\":true");
+    failures = failures + assert_contains("planted_silo_public_exit3", r_bp, "\"exit_code\":3");
+
+    // 13. Planted silo control 2: orphan folder under C:/dev/ MUST be refused (exit_code 3)
+    let bad_dev: str = "C" + ":/dev/orphan-scratch-repo/main.py";
+    let bd_args: str = "{\"intent\":\"add recall helper\",\"target_path\":"
+        + json_quote(bad_dev) + "}";
+    let r_bd: str = handle_mcp_line(call_req(13, "anti_silo_preflight", bd_args));
+    failures = failures + assert_contains("planted_silo_cdev_refused", r_bd, "\"silo_refused\":true");
+
+    // 14. audit_public_hygiene accepts clean public prose
+    let hyg_clean: str = "{\"text\":\"Deterministic BuildLang kernels verified via SHA-256 receipts.\"}";
+    let r_hc: str = handle_mcp_line(call_req(14, "audit_public_hygiene", hyg_clean));
+    failures = failures + assert_contains("hygiene_clean_pass", r_hc, "\"clean\":true");
+
+    // 15. Planted hygiene controls: em dash + bundler secrets + local drive paths + retired brand
+    let planted_blob: str = format!("bad {} ", 8212 as char)
+        + "VI" + "TE_API_KEY "
+        + "NEXT_" + "PUBLIC_SECRET_TOKEN "
+        + "C" + ":\\dev\\notes "
+        + "E" + ":/wt/test "
+        + "H" + ":\\library "
+        + "Zen" + "tropy";
+    let hyg_bad: str = "{\"text\":" + json_quote(planted_blob) + "}";
+    let r_hb: str = handle_mcp_line(call_req(15, "audit_public_hygiene", hyg_bad));
+    failures = failures + assert_contains("planted_hygiene_not_clean", r_hb, "\"clean\":false");
+    failures = failures + assert_contains("planted_hygiene_em", r_hb, "\"em_dashes\":1");
+    failures = failures + assert_contains("planted_hygiene_bundler", r_hb, "\"bundler_secrets\":2");
+    failures = failures + assert_contains("planted_hygiene_paths", r_hb, "\"local_paths\":3");
+    failures = failures + assert_contains("planted_hygiene_retired", r_hb, "\"retired_brand\":1");
+
+    failures
+}
+
 fn run_self_test() -> i32 ~ Console + FileSystem + Clock {
     let mut failures: i32 = 0;
 
-    // 1. initialize handshake
     let init_req: str = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\","
         + "\"params\":{\"protocolVersion\":\"2025-06-18\"}}";
     let r_init: str = handle_mcp_line(init_req);
     failures = failures + assert_contains("mcp_initialize", r_init, "buildlang-workstation-mcp");
 
-    // 2. notification produces no reply
     let notif_req: str = "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}";
     let r_notif: str = handle_mcp_line(notif_req);
     if r_notif.len() == 0 {
@@ -443,43 +1001,40 @@ fn run_self_test() -> i32 ~ Console + FileSystem + Clock {
         failures = failures + 1;
     }
 
-    // 3. tools/list exposes both workstation tools
     let list_req: str = "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\"}";
     let r_list: str = handle_mcp_line(list_req);
     failures = failures + assert_contains("mcp_tools_list_health", r_list, "workstation_health");
     failures = failures + assert_contains("mcp_tools_list_gate", r_list, "check_em_dash_and_secret");
+    failures = failures + assert_contains("mcp_tools_list_silo", r_list, "anti_silo_preflight");
+    failures = failures + assert_contains("mcp_tools_list_hygiene", r_list, "audit_public_hygiene");
 
-    // 4. workstation_health on current directory
     let r_health: str = handle_mcp_line(call_req(3, "workstation_health", "{\"path\":\".\"}"));
     failures = failures + assert_contains("mcp_health_dir_exists", r_health, "\"exists\":true");
     failures = failures + assert_contains("mcp_health_is_dir", r_health, "\"is_dir\":true");
 
-    // 5. check_em_dash_and_secret on clean ASCII text
     let clean_args: str = "{\"text\":\"Clean ASCII prose with hyphens - zero leaks.\"}";
     let r_clean: str = handle_mcp_line(call_req(4, "check_em_dash_and_secret", clean_args));
     failures = failures + assert_contains("mcp_scan_clean", r_clean, "\"clean\":true");
 
-    // 6. Planted control 1: dynamically constructed UTF-8 em dash (U+2014) MUST be caught
     let planted_em: str = format!("bad {} dash", 8212 as char);
     let em_args: str = "{\"text\":" + json_quote(planted_em) + "}";
     let r_em: str = handle_mcp_line(call_req(5, "check_em_dash_and_secret", em_args));
     failures = failures + assert_contains("planted_control_em_dash_clean_false", r_em, "\"clean\":false");
     failures = failures + assert_contains("planted_control_em_dash_count", r_em, "\"em_dashes\":1");
 
-    // 7. Planted control 2: dynamically constructed token prefixes MUST be caught
     let planted_sec: str = "demo " + "sk" + "_live_12345678 and " + "ghp" + "_abcdef987654";
     let sec_args: str = "{\"text\":" + json_quote(planted_sec) + "}";
     let r_sec: str = handle_mcp_line(call_req(6, "check_em_dash_and_secret", sec_args));
     failures = failures + assert_contains("planted_control_secret_clean_false", r_sec, "\"clean\":false");
     failures = failures + assert_contains("planted_control_secret_hits", r_sec, "\"secret_hits\":2");
 
-    // 8. Planted control 3: malformed JSON returns -32700 parse error
     let r_parse: str = handle_mcp_line("{broken json");
     failures = failures + assert_contains("planted_control_parse_error", r_parse, "-32700");
 
-    // 9. Planted control 4: unknown method returns -32601 method not found
     let r_method: str = handle_mcp_line("{\"jsonrpc\":\"2.0\",\"id\":9,\"method\":\"unknown/op\"}");
     failures = failures + assert_contains("planted_control_unknown_method", r_method, "-32601");
+
+    failures = failures + run_wave2_tool_tests();
 
     if failures == 0 {
         println!("[PASS] workstation_mcp summary failures=0");
