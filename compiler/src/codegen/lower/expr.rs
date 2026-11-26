@@ -2544,6 +2544,211 @@ impl<'ctx> MirLowerer<'ctx> {
 
         // Handle dereference assignment: `*ptr = value` and `*ptr OP= value`.
         if let ExprKind::Deref(inner) = &target.kind {
+            // `*map.entry(key).or_insert(init) = val` / `OP= val` and
+            // `*map.entry(key).or_insert_with(f) = val` / `OP= val`: perform the
+            // read-modify-write directly against the map slot so scalar mutations
+            // persist in the map instead of dereferencing a by-value return.
+            if let ExprKind::MethodCall {
+                receiver: entry_recv,
+                method: or_m,
+                args: or_args,
+                ..
+            } = &inner.kind
+            {
+                if matches!(or_m.name.as_ref(), "or_insert" | "or_insert_with")
+                    && or_args.len() == 1
+                {
+                    if let ExprKind::MethodCall {
+                        receiver: map_expr,
+                        method: entry_m,
+                        args: entry_args,
+                        ..
+                    } = &entry_recv.kind
+                    {
+                        if entry_m.name.as_ref() == "entry" && entry_args.len() == 1 {
+                            let raw_map = self.lower_expr(map_expr)?;
+                            let raw_map_ty = self.type_of_value(&raw_map);
+                            let (map_val, map_ty) = match &raw_map_ty {
+                                MirType::Ptr(inner_ty)
+                                    if matches!(inner_ty.as_ref(), MirType::Map(..)) =>
+                                {
+                                    let loaded = self.deref_if_pointer(raw_map)?;
+                                    (loaded, (**inner_ty).clone())
+                                }
+                                _ => (raw_map, raw_map_ty),
+                            };
+                            if let MirType::Map(_k_ty, val_ty) = map_ty {
+                                let key_val = self.lower_expr(&entry_args[0])?;
+                                let key_val = self.deref_if_pointer(key_val)?;
+                                let key_ty_v = self.type_of_value(&key_val);
+                                let (key_for_val, key_cstr) = if matches!(&key_ty_v, MirType::Struct(n) if n.as_ref() == "BuildString")
+                                {
+                                    let b = self.current_fn.as_mut().unwrap();
+                                    let kl = match key_val {
+                                        MirValue::Local(id) => id,
+                                        other => {
+                                            let t = b.create_local(key_ty_v.clone());
+                                            b.assign(t, MirRValue::Use(other));
+                                            t
+                                        }
+                                    };
+                                    let kp = b.create_local(MirType::Ptr(Box::new(MirType::i8())));
+                                    b.assign(
+                                        kp,
+                                        MirRValue::FieldAccess {
+                                            base: values::local(kl),
+                                            field_name: Arc::from("ptr"),
+                                            field_ty: MirType::Ptr(Box::new(MirType::i8())),
+                                        },
+                                    );
+                                    (values::local(kl), values::local(kp))
+                                } else {
+                                    let b = self.current_fn.as_mut().unwrap();
+                                    let ks =
+                                        b.create_local(MirType::Struct(Arc::from("BuildString")));
+                                    let after_s = b.create_block();
+                                    b.call(
+                                        MirValue::Function(Arc::from("build_string_new")),
+                                        vec![key_val.clone()],
+                                        Some(ks),
+                                        after_s,
+                                    );
+                                    b.switch_to_block(after_s);
+                                    (values::local(ks), key_val)
+                                };
+                                let present_bb = {
+                                    let b = self.current_fn.as_mut().unwrap();
+                                    let has = b.create_local(MirType::Bool);
+                                    let after_has = b.create_block();
+                                    b.call(
+                                        MirValue::Function(Arc::from(
+                                            "build_hmap_contains_str_f64",
+                                        )),
+                                        vec![map_val.clone(), key_cstr.clone()],
+                                        Some(has),
+                                        after_has,
+                                    );
+                                    b.switch_to_block(after_has);
+                                    let miss = b.create_block();
+                                    let pres = b.create_block();
+                                    b.branch(values::local(has), pres, miss);
+                                    b.switch_to_block(miss);
+                                    pres
+                                };
+                                let prev_exp = self.expected_type.replace((*val_ty).clone());
+                                let init_val = if or_m.name.as_ref() == "or_insert_with" {
+                                    match &or_args[0].kind {
+                                        ExprKind::Closure { body, .. } => self.lower_expr(body),
+                                        ExprKind::Path(_) | ExprKind::Ident(_) => {
+                                            self.lower_call(&or_args[0], &[])
+                                        }
+                                        _ => self.lower_expr(&or_args[0]),
+                                    }
+                                } else {
+                                    self.lower_expr(&or_args[0])
+                                };
+                                self.expected_type = prev_exp;
+                                let init_val = init_val?;
+                                {
+                                    let b = self.current_fn.as_mut().unwrap();
+                                    let after_ins = b.create_block();
+                                    if matches!(val_ty.as_ref(), MirType::Float(_)) {
+                                        b.call(
+                                            MirValue::Function(Arc::from(
+                                                "build_hmap_insert_str_f64",
+                                            )),
+                                            vec![map_val.clone(), key_cstr.clone(), init_val],
+                                            None,
+                                            after_ins,
+                                        );
+                                    } else {
+                                        let ins_fn = format!(
+                                            "build_hmap_insert_val_{}",
+                                            map_value_mangle(&val_ty)
+                                        );
+                                        b.call(
+                                            MirValue::Function(Arc::from(ins_fn.as_str())),
+                                            vec![map_val.clone(), key_for_val.clone(), init_val],
+                                            None,
+                                            after_ins,
+                                        );
+                                    }
+                                    b.switch_to_block(after_ins);
+                                    b.goto(present_bb);
+                                    b.switch_to_block(present_bb);
+                                }
+                                let new_val = if op == ast::AssignOp::Assign {
+                                    val
+                                } else {
+                                    let bin_op = match op {
+                                        ast::AssignOp::AddAssign => BinOp::Add,
+                                        ast::AssignOp::SubAssign => BinOp::Sub,
+                                        ast::AssignOp::MulAssign => BinOp::Mul,
+                                        ast::AssignOp::DivAssign => BinOp::Div,
+                                        ast::AssignOp::RemAssign => BinOp::Rem,
+                                        ast::AssignOp::BitAndAssign => BinOp::BitAnd,
+                                        ast::AssignOp::BitOrAssign => BinOp::BitOr,
+                                        ast::AssignOp::BitXorAssign => BinOp::BitXor,
+                                        ast::AssignOp::ShlAssign => BinOp::Shl,
+                                        ast::AssignOp::ShrAssign => BinOp::Shr,
+                                        _ => BinOp::Add,
+                                    };
+                                    let b = self.current_fn.as_mut().unwrap();
+                                    let cur = b.create_local((*val_ty).clone());
+                                    let after_get = b.create_block();
+                                    if matches!(val_ty.as_ref(), MirType::Float(_)) {
+                                        b.call(
+                                            MirValue::Function(Arc::from("build_hmap_get_str_f64")),
+                                            vec![map_val.clone(), key_cstr.clone()],
+                                            Some(cur),
+                                            after_get,
+                                        );
+                                    } else {
+                                        let get_fn = format!(
+                                            "build_hmap_get_val_{}",
+                                            map_value_mangle(&val_ty)
+                                        );
+                                        b.call(
+                                            MirValue::Function(Arc::from(get_fn.as_str())),
+                                            vec![map_val.clone(), key_for_val.clone()],
+                                            Some(cur),
+                                            after_get,
+                                        );
+                                    }
+                                    b.switch_to_block(after_get);
+                                    let combined = b.create_local((*val_ty).clone());
+                                    b.binary_op(combined, bin_op, values::local(cur), val);
+                                    values::local(combined)
+                                };
+                                let b = self.current_fn.as_mut().unwrap();
+                                let after_put = b.create_block();
+                                if matches!(val_ty.as_ref(), MirType::Float(_)) {
+                                    b.call(
+                                        MirValue::Function(Arc::from("build_hmap_insert_str_f64")),
+                                        vec![map_val, key_cstr, new_val],
+                                        None,
+                                        after_put,
+                                    );
+                                } else {
+                                    let ins_fn = format!(
+                                        "build_hmap_insert_val_{}",
+                                        map_value_mangle(&val_ty)
+                                    );
+                                    b.call(
+                                        MirValue::Function(Arc::from(ins_fn.as_str())),
+                                        vec![map_val, key_for_val, new_val],
+                                        None,
+                                        after_put,
+                                    );
+                                }
+                                b.switch_to_block(after_put);
+                                return Ok(values::unit());
+                            }
+                        }
+                    }
+                }
+            }
+
             let ptr_val = self.lower_expr(inner)?;
             let ptr_ty = self.type_of_value(&ptr_val);
             let ptr_local = match &ptr_val {

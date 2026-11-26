@@ -187,6 +187,11 @@ fn main() ~ Console {
     g.push(42);
     let got = groups.get("k").len();
 
+    let mut counts: HashMap<String, i32> = HashMap::new();
+    *counts.entry(String::from("a")).or_insert(0) += 1;
+    *counts.entry(String::from("a")).or_insert(0) += 2;
+    let cnt_a = counts.get("a");
+
     let mut items: Vec<i32> = vec![1, 2, 3];
     let mut drained = 0;
     for x in items.drain(..) {
@@ -199,11 +204,11 @@ fn main() ~ Console {
     let o0 = opts[0].unwrap_or(0);
     let o1 = opts[1].unwrap_or(9);
 
-    println!("{} {} {} {} {} {} {} {}", a, b, c, got, drained, items.len(), o0, o1);
+    println!("{} {} {} {} {} {} {} {} {}", a, b, c, got, cnt_a, drained, items.len(), o0, o1);
 }
 "#,
     );
-    checks_and_prints(&main, "5 20 10 1 6 0 7 9");
+    checks_and_prints(&main, "5 20 10 1 3 6 0 7 9");
 }
 
 #[test]
