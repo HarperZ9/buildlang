@@ -1,0 +1,619 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 Zain Dana Harper.
+//
+// Wave 21B-1 Oracle 2: Single-Pass Fused LoopCD-Logits (arXiv:2610.02185)
+// and XStack Numerical Fidelity Classifier (arXiv:2611.08472).
+//
+// Part A (LoopCD-Logits, justrach/nanoattention single-pass pattern):
+//   Contrastive decoding for Looped Transformers computes
+//     L_out = (1 + omega) * L_last - omega * L_mid,  0 <= omega <= 0.5
+//   By linearity of the LM head W * h + b (since (1 + omega) - omega == 1),
+//   pre-fusing h_fused = (1 + omega) * h_last - omega * h_mid computes L_out
+//   with a SINGLE vocab-head scan instead of TWO, cutting memory traffic ~2x.
+//   Verified with 0.0 bit-exact drift on dyadic weights, < 1e-12 f64 parity on
+//   general transcendental weights (V=16384, D=64), 0.0 drift under thinking
+//   mode (omega_eff = 0.0), and fail-closed refusal for omega > 0.5 or < 0.0.
+//
+// Part B (XStack Numerical Fidelity Classifier, arXiv:2611.08472):
+//   Implements the 5-class migration fidelity taxonomy:
+//     0 = PASS
+//     1 = WRONG_EXPERIMENT
+//     2 = FIDELITY_GAP
+//     3 = NAN_CRASH
+//     4 = JUDGE_REJECTION
+//   Verified across live 16-step SGD trajectories, all 5 classes, planted
+//   NaN/Inf/step-mismatch/gradient-scale-drift/judge-invariant cases, and a
+//   direct cross-check on LoopCD-Logits outputs.
+
+fn xstack_pass() -> i32 { 0 }
+fn xstack_wrong_experiment() -> i32 { 1 }
+fn xstack_fidelity_gap() -> i32 { 2 }
+fn xstack_nan_crash() -> i32 { 3 }
+fn xstack_judge_rejection() -> i32 { 4 }
+
+struct LoopCdOut {
+    ok: bool,
+    omega_eff: f64,
+    logits: Vec<f64>,
+    argmax_idx: i32,
+    max_logit: f64,
+}
+
+struct RunTrace {
+    exp_id: i64,
+    param_count: i64,
+    crashed: bool,
+    losses: Vec<f64>,
+    grad_norms: Vec<f64>,
+    final_metric: f64,
+}
+
+struct XStackContract {
+    atol: f64,
+    rtol: f64,
+    min_final_metric: f64,
+    max_grad_norm: f64,
+    require_loss_decrease: bool,
+}
+
+struct XStackVerdict {
+    code: i32,
+    max_abs_diff: f64,
+    bad_step: i32,
+}
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { -x } else { x }
+}
+
+fn is_finite_f64(x: f64) -> bool {
+    x == x && abs_f64(x) < 1e299
+}
+
+// Reference 2-pass LoopCD-Logits: scans W twice (L_last then L_mid)
+fn loopcd_two_pass(
+    w_flat: Vec<f64>,
+    bias: Vec<f64>,
+    h_last: Vec<f64>,
+    h_mid: Vec<f64>,
+    vocab: i32,
+    dim: i32,
+    omega: f64,
+    is_thinking: bool,
+) -> LoopCdOut {
+    let out: Vec<f64> = vec_new_f64();
+    if !is_finite_f64(omega) || omega < 0.0 || omega > 0.5 {
+        return LoopCdOut { ok: false, omega_eff: 0.0, logits: out, argmax_idx: -1, max_logit: 0.0 };
+    }
+    let om: f64 = if is_thinking { 0.0 } else { omega };
+    let l_last: Vec<f64> = vec_new_f64();
+    let l_mid: Vec<f64> = vec_new_f64();
+
+    // Pass 1 over W: compute L_last = W * h_last + b
+    let mut v: i32 = 0;
+    while v < vocab {
+        let row: i32 = v * dim;
+        let mut acc: f64 = vec_get_f64(bias, v);
+        let mut j: i32 = 0;
+        while j < dim {
+            acc = acc + vec_get_f64(w_flat, row + j) * vec_get_f64(h_last, j);
+            j = j + 1;
+        }
+        vec_push_f64(l_last, acc);
+        v = v + 1;
+    }
+
+    // Pass 2 over W: compute L_mid = W * h_mid + b
+    v = 0;
+    while v < vocab {
+        let row: i32 = v * dim;
+        let mut acc: f64 = vec_get_f64(bias, v);
+        let mut j: i32 = 0;
+        while j < dim {
+            acc = acc + vec_get_f64(w_flat, row + j) * vec_get_f64(h_mid, j);
+            j = j + 1;
+        }
+        vec_push_f64(l_mid, acc);
+        v = v + 1;
+    }
+
+    // Combine logits
+    let mut best_i: i32 = 0;
+    let mut best_v: f64 = -1e300;
+    let scale_last: f64 = 1.0 + om;
+    v = 0;
+    while v < vocab {
+        let val: f64 = scale_last * vec_get_f64(l_last, v) - om * vec_get_f64(l_mid, v);
+        vec_push_f64(out, val);
+        if val > best_v {
+            best_v = val;
+            best_i = v;
+        }
+        v = v + 1;
+    }
+    LoopCdOut { ok: true, omega_eff: om, logits: out, argmax_idx: best_i, max_logit: best_v }
+}
+
+// Single-pass fused LoopCD-Logits: pre-fuses h_fused in O(D), scans W ONCE
+fn loopcd_single_pass_fused(
+    w_flat: Vec<f64>,
+    bias: Vec<f64>,
+    h_last: Vec<f64>,
+    h_mid: Vec<f64>,
+    vocab: i32,
+    dim: i32,
+    omega: f64,
+    is_thinking: bool,
+) -> LoopCdOut {
+    let out: Vec<f64> = vec_new_f64();
+    if !is_finite_f64(omega) || omega < 0.0 || omega > 0.5 {
+        return LoopCdOut { ok: false, omega_eff: 0.0, logits: out, argmax_idx: -1, max_logit: 0.0 };
+    }
+    let om: f64 = if is_thinking { 0.0 } else { omega };
+    let scale_last: f64 = 1.0 + om;
+
+    // Pre-fuse hidden state once (D elements)
+    let h_fused: Vec<f64> = vec_new_f64();
+    let mut j: i32 = 0;
+    while j < dim {
+        let hf: f64 = scale_last * vec_get_f64(h_last, j) - om * vec_get_f64(h_mid, j);
+        vec_push_f64(h_fused, hf);
+        j = j + 1;
+    }
+
+    // Single pass over vocab head W
+    let mut best_i: i32 = 0;
+    let mut best_v: f64 = -1e300;
+    let mut v: i32 = 0;
+    while v < vocab {
+        let row: i32 = v * dim;
+        let mut acc: f64 = vec_get_f64(bias, v);
+        j = 0;
+        while j < dim {
+            acc = acc + vec_get_f64(w_flat, row + j) * vec_get_f64(h_fused, j);
+            j = j + 1;
+        }
+        vec_push_f64(out, acc);
+        if acc > best_v {
+            best_v = acc;
+            best_i = v;
+        }
+        v = v + 1;
+    }
+    LoopCdOut { ok: true, omega_eff: om, logits: out, argmax_idx: best_i, max_logit: best_v }
+}
+
+fn max_vec_diff(a: Vec<f64>, b: Vec<f64>, n: i32) -> f64 {
+    let mut m: f64 = 0.0;
+    let mut i: i32 = 0;
+    while i < n {
+        let d: f64 = abs_f64(vec_get_f64(a, i) - vec_get_f64(b, i));
+        if d > m {
+            m = d;
+        }
+        i = i + 1;
+    }
+    m
+}
+
+// XStack (arXiv:2611.08472) 5-class deterministic numerical fidelity classifier
+fn classify_xstack(
+    ref_t: &RunTrace,
+    cand_t: &RunTrace,
+    c: &XStackContract,
+) -> XStackVerdict {
+    // 1. NAN_CRASH: crashed flag, empty trace, or any non-finite value
+    let n_cand: i32 = vec_len(cand_t.losses);
+    let n_cgrad: i32 = vec_len(cand_t.grad_norms);
+    if cand_t.crashed || n_cand == 0 || n_cgrad != n_cand || !is_finite_f64(cand_t.final_metric) {
+        return XStackVerdict { code: xstack_nan_crash(), max_abs_diff: 0.0, bad_step: -1 };
+    }
+    let mut i: i32 = 0;
+    while i < n_cand {
+        let lv: f64 = vec_get_f64(cand_t.losses, i);
+        let gv: f64 = vec_get_f64(cand_t.grad_norms, i);
+        if !is_finite_f64(lv) || !is_finite_f64(gv) {
+            return XStackVerdict { code: xstack_nan_crash(), max_abs_diff: 0.0, bad_step: i };
+        }
+        i = i + 1;
+    }
+
+    // 2. WRONG_EXPERIMENT: experiment ID, parameter count, or step count mismatch
+    let n_ref: i32 = vec_len(ref_t.losses);
+    if cand_t.exp_id != ref_t.exp_id
+        || cand_t.param_count != ref_t.param_count
+        || n_cand != n_ref
+    {
+        return XStackVerdict { code: xstack_wrong_experiment(), max_abs_diff: 0.0, bad_step: -1 };
+    }
+
+    // 3. FIDELITY_GAP: finite run of right experiment, but numerical divergence
+    let mut max_diff: f64 = 0.0;
+    let mut first_bad: i32 = -1;
+    i = 0;
+    while i < n_ref {
+        let rl: f64 = vec_get_f64(ref_t.losses, i);
+        let cl: f64 = vec_get_f64(cand_t.losses, i);
+        let dl: f64 = abs_f64(cl - rl);
+        if dl > max_diff {
+            max_diff = dl;
+        }
+        let tol_l: f64 = c.atol + c.rtol * abs_f64(rl);
+        if dl > tol_l && first_bad < 0 {
+            first_bad = i;
+        }
+        let rg: f64 = vec_get_f64(ref_t.grad_norms, i);
+        let cg: f64 = vec_get_f64(cand_t.grad_norms, i);
+        let dg: f64 = abs_f64(cg - rg);
+        if dg > max_diff {
+            max_diff = dg;
+        }
+        let tol_g: f64 = c.atol + c.rtol * abs_f64(rg);
+        if dg > tol_g && first_bad < 0 {
+            first_bad = i;
+        }
+        i = i + 1;
+    }
+    if first_bad >= 0 {
+        return XStackVerdict {
+            code: xstack_fidelity_gap(),
+            max_abs_diff: max_diff,
+            bad_step: first_bad,
+        };
+    }
+
+    // 4. JUDGE_REJECTION: contract / invariant check (convergence, grad norm, metric floor)
+    if cand_t.final_metric < c.min_final_metric {
+        return XStackVerdict {
+            code: xstack_judge_rejection(),
+            max_abs_diff: max_diff,
+            bad_step: n_cand - 1,
+        };
+    }
+    if c.require_loss_decrease && n_cand >= 2 {
+        let l_first: f64 = vec_get_f64(cand_t.losses, 0);
+        let l_last: f64 = vec_get_f64(cand_t.losses, n_cand - 1);
+        if l_last >= l_first {
+            return XStackVerdict {
+                code: xstack_judge_rejection(),
+                max_abs_diff: max_diff,
+                bad_step: n_cand - 1,
+            };
+        }
+    }
+    i = 0;
+    while i < n_cand {
+        let gv: f64 = vec_get_f64(cand_t.grad_norms, i);
+        if gv < 0.0 || gv > c.max_grad_norm {
+            return XStackVerdict {
+                code: xstack_judge_rejection(),
+                max_abs_diff: max_diff,
+                bad_step: i,
+            };
+        }
+        i = i + 1;
+    }
+
+    XStackVerdict { code: xstack_pass(), max_abs_diff: max_diff, bad_step: -1 }
+}
+
+// Deterministic 16-step L2-regularized SGD trajectory generator
+// grad_scale_bug injects a realistic migration bug (missing 1/N normalization)
+fn run_sgd_trace(
+    exp_id: i64,
+    n_steps: i32,
+    lr: f64,
+    grad_scale: f64,
+    inject_nan_step: i32,
+    final_metric_override: f64,
+) -> RunTrace {
+    let losses: Vec<f64> = vec_new_f64();
+    let gnorms: Vec<f64> = vec_new_f64();
+    let mut w0: f64 = 0.25;
+    let mut w1: f64 = -0.5;
+    let mut w2: f64 = 0.75;
+    let mut w3: f64 = -0.125;
+    let t0: f64 = 1.5;
+    let t1: f64 = -1.0;
+    let t2: f64 = 0.5;
+    let t3: f64 = 2.0;
+
+    let mut step: i32 = 0;
+    while step < n_steps {
+        let e0: f64 = w0 - t0;
+        let e1: f64 = w1 - t1;
+        let e2: f64 = w2 - t2;
+        let e3: f64 = w3 - t3;
+        let mut loss: f64 = 0.25 * (e0 * e0 + e1 * e1 + e2 * e2 + e3 * e3);
+        let g0: f64 = 0.5 * e0 * grad_scale;
+        let g1: f64 = 0.5 * e1 * grad_scale;
+        let g2: f64 = 0.5 * e2 * grad_scale;
+        let g3: f64 = 0.5 * e3 * grad_scale;
+        let gnorm: f64 = sqrt(g0 * g0 + g1 * g1 + g2 * g2 + g3 * g3);
+
+        if step == inject_nan_step {
+            let z: f64 = 0.0;
+            loss = z / z;
+        }
+        vec_push_f64(losses, loss);
+        vec_push_f64(gnorms, gnorm);
+
+        w0 = w0 - lr * g0;
+        w1 = w1 - lr * g1;
+        w2 = w2 - lr * g2;
+        w3 = w3 - lr * g3;
+        step = step + 1;
+    }
+
+    let last_l: f64 = if n_steps > 0 { vec_get_f64(losses, n_steps - 1) } else { 1.0 };
+    let metric: f64 = if final_metric_override >= 0.0 {
+        final_metric_override
+    } else {
+        1.0 / (1.0 + last_l)
+    };
+    RunTrace {
+        exp_id: exp_id,
+        param_count: 4,
+        crashed: false,
+        losses: losses,
+        grad_norms: gnorms,
+        final_metric: metric,
+    }
+}
+
+fn main() -> i32 ~ Console + Clock {
+    let mut failures: i32 = 0;
+
+    // -------------------------------------------------------------------------
+    // PART A: Single-Pass Fused LoopCD-Logits (arXiv:2610.02185)
+    // -------------------------------------------------------------------------
+
+    // A1. Bit-exact 0.0 drift check on dyadic-exact weights (V=512, D=32, omega=0.5)
+    let v_exact: i32 = 512;
+    let d_exact: i32 = 32;
+    let w_ex: Vec<f64> = vec_new_f64();
+    let b_ex: Vec<f64> = vec_new_f64();
+    let hl_ex: Vec<f64> = vec_new_f64();
+    let hm_ex: Vec<f64> = vec_new_f64();
+    let mut j: i32 = 0;
+    while j < d_exact {
+        vec_push_f64(hl_ex, (((j % 7) - 3) as f64) * 0.25);
+        vec_push_f64(hm_ex, (((j % 5) - 2) as f64) * 0.25);
+        j = j + 1;
+    }
+    let mut v: i32 = 0;
+    while v < v_exact {
+        vec_push_f64(b_ex, (((v % 9) - 4) as f64) * 0.125);
+        j = 0;
+        while j < d_exact {
+            let cell: i32 = ((v * 13 + j * 7) % 15) - 7;
+            vec_push_f64(w_ex, (cell as f64) * 0.125);
+            j = j + 1;
+        }
+        v = v + 1;
+    }
+    let ex_2p: LoopCdOut = loopcd_two_pass(w_ex, b_ex, hl_ex, hm_ex, v_exact, d_exact, 0.5, false);
+    let ex_1p: LoopCdOut = loopcd_single_pass_fused(
+        w_ex, b_ex, hl_ex, hm_ex, v_exact, d_exact, 0.5, false,
+    );
+    let ex_diff: f64 = max_vec_diff(ex_2p.logits, ex_1p.logits, v_exact);
+    if !ex_2p.ok || !ex_1p.ok || ex_diff != 0.0 || ex_2p.argmax_idx != ex_1p.argmax_idx {
+        println!("FAIL loopcd_bit_exact diff={}", ex_diff);
+        failures = failures + 1;
+    } else {
+        println!(
+            "PASS loopcd_bit_exact V=512 D=32 omega=0.5 max_diff={} argmax={}",
+            ex_diff, ex_1p.argmax_idx
+        );
+    }
+
+    // A2. Large LM-head benchmark (V=16384, D=64, omega=0.35): 1-pass vs 2-pass
+    let v_big: i32 = 16384;
+    let d_big: i32 = 64;
+    let w_big: Vec<f64> = vec_new_f64();
+    let b_big: Vec<f64> = vec_new_f64();
+    let hl_big: Vec<f64> = vec_new_f64();
+    let hm_big: Vec<f64> = vec_new_f64();
+    j = 0;
+    while j < d_big {
+        vec_push_f64(hl_big, sin((j as f64) * 0.17) * 0.8);
+        vec_push_f64(hm_big, cos((j as f64) * 0.13) * 0.6);
+        j = j + 1;
+    }
+    v = 0;
+    while v < v_big {
+        vec_push_f64(b_big, (((v % 31) - 15) as f64) * 0.02);
+        j = 0;
+        while j < d_big {
+            let cell: i32 = ((v * 29 + j * 11) % 61) - 30;
+            vec_push_f64(w_big, (cell as f64) * 0.015625);
+            j = j + 1;
+        }
+        v = v + 1;
+    }
+    let t0: i64 = clock_ns();
+    let big_2p: LoopCdOut = loopcd_two_pass(w_big, b_big, hl_big, hm_big, v_big, d_big, 0.35, false);
+    let t1: i64 = clock_ns();
+    let big_1p: LoopCdOut = loopcd_single_pass_fused(
+        w_big, b_big, hl_big, hm_big, v_big, d_big, 0.35, false,
+    );
+    let t2: i64 = clock_ns();
+    let big_diff: f64 = max_vec_diff(big_2p.logits, big_1p.logits, v_big);
+    let ms_2p: f64 = ((t1 - t0) as f64) / 1000000.0;
+    let ms_1p: f64 = ((t2 - t1) as f64) / 1000000.0;
+    let speedup: f64 = if ms_1p > 0.0 { ms_2p / ms_1p } else { 1.0 };
+    if !big_2p.ok || !big_1p.ok || big_diff >= 1e-12 || big_2p.argmax_idx != big_1p.argmax_idx {
+        println!("FAIL loopcd_bench_16k diff={}", big_diff);
+        failures = failures + 1;
+    } else {
+        println!(
+            "PASS loopcd_bench_16k V=16384 D=64 max_diff={} argmax={} two_pass_ms={} one_pass_ms={} speedup={}x",
+            big_diff, big_1p.argmax_idx, ms_2p, ms_1p, speedup
+        );
+    }
+
+    // A3. Thinking-segment bypass (is_thinking=true -> omega_eff=0.0, 0.0 drift)
+    let th_2p: LoopCdOut = loopcd_two_pass(w_ex, b_ex, hl_ex, hm_ex, v_exact, d_exact, 0.4, true);
+    let th_1p: LoopCdOut = loopcd_single_pass_fused(
+        w_ex, b_ex, hl_ex, hm_ex, v_exact, d_exact, 0.4, true,
+    );
+    let th_diff: f64 = max_vec_diff(th_2p.logits, th_1p.logits, v_exact);
+    if !th_1p.ok || th_1p.omega_eff != 0.0 || th_diff != 0.0 {
+        println!("FAIL loopcd_thinking_clamp");
+        failures = failures + 1;
+    } else {
+        println!("PASS loopcd_thinking_clamp omega_eff=0.0 max_diff=0.0");
+    }
+
+    // A4. Planted omega guard controls (omega > 0.5 and omega < 0.0 MUST refuse)
+    let bad_hi: LoopCdOut = loopcd_single_pass_fused(
+        w_ex, b_ex, hl_ex, hm_ex, v_exact, d_exact, 0.75, false,
+    );
+    let bad_lo: LoopCdOut = loopcd_single_pass_fused(
+        w_ex, b_ex, hl_ex, hm_ex, v_exact, d_exact, -0.1, false,
+    );
+    if bad_hi.ok || bad_lo.ok {
+        println!("FAIL loopcd_omega_guard");
+        failures = failures + 1;
+    } else {
+        println!("PASS loopcd_omega_guard hi_ok=false lo_ok=false");
+    }
+
+    // -------------------------------------------------------------------------
+    // PART B: XStack (arXiv:2611.08472) 5-Class Numerical Fidelity Classifier
+    // -------------------------------------------------------------------------
+    let contract: XStackContract = XStackContract {
+        atol: 1e-6,
+        rtol: 1e-5,
+        min_final_metric: 0.7,
+        max_grad_norm: 10.0,
+        require_loss_decrease: true,
+    };
+
+    let ref_sgd: RunTrace = run_sgd_trace(101, 16, 0.2, 1.0, -1, -1.0);
+    let cand_ok: RunTrace = run_sgd_trace(101, 16, 0.2, 1.0, -1, -1.0);
+    let v_pass: XStackVerdict = classify_xstack(&ref_sgd, &cand_ok, &contract);
+
+    // Class 1: WRONG_EXPERIMENT (wrong step count 12 vs 16)
+    let cand_wrong: RunTrace = run_sgd_trace(101, 12, 0.2, 1.0, -1, -1.0);
+    let v_wrong: XStackVerdict = classify_xstack(&ref_sgd, &cand_wrong, &contract);
+
+    // Class 2: FIDELITY_GAP (compiles and finishes finite, but wrong grad scale 1.05)
+    let cand_gap: RunTrace = run_sgd_trace(101, 16, 0.2, 1.05, -1, -1.0);
+    let v_gap: XStackVerdict = classify_xstack(&ref_sgd, &cand_gap, &contract);
+
+    // Class 3: NAN_CRASH (planted NaN at step 7)
+    let cand_nan: RunTrace = run_sgd_trace(101, 16, 0.2, 1.0, 7, -1.0);
+    let v_nan: XStackVerdict = classify_xstack(&ref_sgd, &cand_nan, &contract);
+
+    // Class 4: JUDGE_REJECTION (matches loss curve but fails final metric floor 0.55 < 0.7)
+    let cand_judge: RunTrace = run_sgd_trace(101, 16, 0.2, 1.0, -1, 0.55);
+    let v_judge: XStackVerdict = classify_xstack(&ref_sgd, &cand_judge, &contract);
+
+    // Cross-link XStack onto LoopCD-Logits traces (clean PASS vs planted omega drift)
+    let lcd_c: XStackContract = XStackContract {
+        atol: 1e-9,
+        rtol: 1e-9,
+        min_final_metric: 0.9,
+        max_grad_norm: 100.0,
+        require_loss_decrease: false,
+    };
+    let lcd_ref_l: Vec<f64> = vec_new_f64();
+    let lcd_ref_g: Vec<f64> = vec_new_f64();
+    let lcd_ok_l: Vec<f64> = vec_new_f64();
+    let lcd_ok_g: Vec<f64> = vec_new_f64();
+    let lcd_bad_l: Vec<f64> = vec_new_f64();
+    let lcd_bad_g: Vec<f64> = vec_new_f64();
+    let bad_om: LoopCdOut = loopcd_single_pass_fused(
+        w_ex, b_ex, hl_ex, hm_ex, v_exact, d_exact, 0.45, false,
+    );
+    let mut k: i32 = 0;
+    while k < 16 {
+        vec_push_f64(lcd_ref_l, vec_get_f64(ex_2p.logits, k));
+        vec_push_f64(lcd_ref_g, 1.0);
+        vec_push_f64(lcd_ok_l, vec_get_f64(ex_1p.logits, k));
+        vec_push_f64(lcd_ok_g, 1.0);
+        vec_push_f64(lcd_bad_l, vec_get_f64(bad_om.logits, k));
+        vec_push_f64(lcd_bad_g, 1.0);
+        k = k + 1;
+    }
+    let tr_lcd_ref: RunTrace = RunTrace {
+        exp_id: 202,
+        param_count: 512,
+        crashed: false,
+        losses: lcd_ref_l,
+        grad_norms: lcd_ref_g,
+        final_metric: 1.0,
+    };
+    let tr_lcd_ok: RunTrace = RunTrace {
+        exp_id: 202,
+        param_count: 512,
+        crashed: false,
+        losses: lcd_ok_l,
+        grad_norms: lcd_ok_g,
+        final_metric: 1.0,
+    };
+    let tr_lcd_bad: RunTrace = RunTrace {
+        exp_id: 202,
+        param_count: 512,
+        crashed: false,
+        losses: lcd_bad_l,
+        grad_norms: lcd_bad_g,
+        final_metric: 1.0,
+    };
+    let v_lcd_ok: XStackVerdict = classify_xstack(&tr_lcd_ref, &tr_lcd_ok, &lcd_c);
+    let v_lcd_bad: XStackVerdict = classify_xstack(&tr_lcd_ref, &tr_lcd_bad, &lcd_c);
+
+    if v_pass.code != xstack_pass() || v_pass.max_abs_diff != 0.0 {
+        println!("FAIL xstack_class_pass code={}", v_pass.code);
+        failures = failures + 1;
+    } else {
+        println!("PASS xstack_class_pass code=0(PASS) max_diff={}", v_pass.max_abs_diff);
+    }
+    if v_wrong.code != xstack_wrong_experiment() {
+        println!("FAIL xstack_class_wrong_experiment code={}", v_wrong.code);
+        failures = failures + 1;
+    } else {
+        println!("PASS xstack_class_wrong_experiment code=1(WRONG_EXPERIMENT)");
+    }
+    if v_gap.code != xstack_fidelity_gap() || v_gap.bad_step < 0 {
+        println!("FAIL xstack_class_fidelity_gap code={}", v_gap.code);
+        failures = failures + 1;
+    } else {
+        println!(
+            "PASS xstack_class_fidelity_gap code=2(FIDELITY_GAP) bad_step={} max_diff={}",
+            v_gap.bad_step, v_gap.max_abs_diff
+        );
+    }
+    if v_nan.code != xstack_nan_crash() || v_nan.bad_step != 7 {
+        println!("FAIL xstack_class_nan_crash code={} step={}", v_nan.code, v_nan.bad_step);
+        failures = failures + 1;
+    } else {
+        println!("PASS xstack_class_nan_crash code=3(NAN_CRASH) bad_step={}", v_nan.bad_step);
+    }
+    if v_judge.code != xstack_judge_rejection() {
+        println!("FAIL xstack_class_judge_rejection code={}", v_judge.code);
+        failures = failures + 1;
+    } else {
+        println!("PASS xstack_class_judge_rejection code=4(JUDGE_REJECTION)");
+    }
+    if v_lcd_ok.code != xstack_pass() || v_lcd_ok.max_abs_diff != 0.0
+        || v_lcd_bad.code != xstack_fidelity_gap()
+    {
+        println!("FAIL xstack_loopcd_cross_check");
+        failures = failures + 1;
+    } else {
+        println!(
+            "PASS xstack_loopcd_cross_check ok_code=0(PASS) ok_diff={} bad_code=2(FIDELITY_GAP) bad_diff={}",
+            v_lcd_ok.max_abs_diff, v_lcd_bad.max_abs_diff
+        );
+    }
+
+    if failures == 0 {
+        println!("LOOPCD_XSTACK_ORACLE ALL_PASS checks=10 failures=0");
+        0
+    } else {
+        println!("LOOPCD_XSTACK_ORACLE FAILED failures={}", failures);
+        1
+    }
+}
