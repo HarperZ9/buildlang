@@ -1,10 +1,12 @@
-//! Dogfood verification for `universe/workstation/kcore_fast.bld` and
-//! `universe/workstation/workstation_mcp.bld`.
+//! Dogfood verification for `universe/workstation/kcore_fast.bld` (12 verified
+//! FORMULAS.tsv equations) and `universe/workstation/workstation_mcp.bld`
+//! (4 native MCP JSON-RPC 2.0 tools including anti-silo & public-hygiene gates).
 //!
 //! Runs `buildc check`, `buildc lint`, and `buildc run --release` on both
 //! modules, verifies multi-thread `par_for` bit-exact determinism at 1 and 2
-//! threads, runs the MCP `--self-test` suite (including planted controls), and
-//! drives a live piped JSON-RPC 2.0 stdio session against `workstation_mcp.bld`.
+//! threads against the Python f64 reference hash (`abb396501c5308dd`), runs
+//! the MCP `--self-test` suite (including planted controls), and drives a live
+//! piped JSON-RPC 2.0 stdio session against `workstation_mcp.bld`.
 
 use std::{
     io::Write,
@@ -83,7 +85,7 @@ fn kcore_fast_checks_lints_and_is_bit_exact_across_thread_counts() {
 
     for (label, out) in [("1-thread", &out_1), ("2-thread", &out_2)] {
         assert!(
-            out.contains("[PASS] kcore_fast summary failures=0"),
+            out.contains("[PASS] kcore_fast summary equations=12 failures=0"),
             "{label} failed:\n{out}"
         );
         assert!(!out.contains("[FAIL]"), "{label} reported failure:\n{out}");
@@ -93,8 +95,8 @@ fn kcore_fast_checks_lints_and_is_bit_exact_across_thread_counts() {
     let h2 = extract_par_hash(&out_2);
     assert_eq!(h1, h2, "par_for hash drifted between 1 and 2 threads");
     assert_eq!(
-        h1, "fc904aa6dfed3a04",
-        "unexpected FNV-1a parity hash for kcore_fast sweep"
+        h1, "abb396501c5308dd",
+        "unexpected FNV-1a parity hash for 12-equation kcore_fast sweep"
     );
 }
 
@@ -127,12 +129,17 @@ fn workstation_mcp_checks_lints_passes_self_test_and_serves_stdio_jsonrpc() {
         .join("universe/workstation/README.md")
         .to_string_lossy()
         .replace('\\', "/");
+    let orphan_target = format!("{}:/dev/public/orphan-silo/app.py", "C");
     let frames = [
-        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}"#.to_string(),
+        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}"#
+            .to_string(),
         r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#.to_string(),
         r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#.to_string(),
         format!(
-            r#"{{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{{"name":"check_em_dash_and_secret","arguments":{{"path":"{readme}"}}}}}}"#
+            r#"{{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{{"name":"anti_silo_preflight","arguments":{{"intent":"add HLSL shader kernel","target_path":"{orphan_target}"}}}}}}"#
+        ),
+        format!(
+            r#"{{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{{"name":"audit_public_hygiene","arguments":{{"path":"{readme}"}}}}}}"#
         ),
     ];
     {
@@ -149,7 +156,7 @@ fn workstation_mcp_checks_lints_passes_self_test_and_serves_stdio_jsonrpc() {
     );
     let stdout = String::from_utf8_lossy(&out.stdout).replace("\r\n", "\n");
     let lines: Vec<&str> = stdout.lines().filter(|l| !l.trim().is_empty()).collect();
-    assert_eq!(lines.len(), 3, "expected 3 JSON-RPC responses:\n{stdout}");
+    assert_eq!(lines.len(), 4, "expected 4 JSON-RPC responses:\n{stdout}");
 
     let init: serde_json::Value = serde_json::from_str(lines[0]).expect("init json");
     assert_eq!(
@@ -158,12 +165,23 @@ fn workstation_mcp_checks_lints_passes_self_test_and_serves_stdio_jsonrpc() {
     );
 
     let list: serde_json::Value = serde_json::from_str(lines[1]).expect("list json");
-    assert_eq!(list["result"]["tools"].as_array().map(Vec::len), Some(2));
+    assert_eq!(list["result"]["tools"].as_array().map(Vec::len), Some(4));
 
-    let scan: serde_json::Value = serde_json::from_str(lines[2]).expect("scan json");
-    assert_eq!(scan["result"]["isError"], false);
-    assert_eq!(scan["result"]["structuredContent"]["clean"], true);
-    assert_eq!(scan["result"]["structuredContent"]["em_dashes"], 0);
-    assert_eq!(scan["result"]["structuredContent"]["secret_hits"], 0);
+    let silo: serde_json::Value = serde_json::from_str(lines[2]).expect("silo json");
+    assert_eq!(silo["result"]["isError"], false);
+    assert_eq!(
+        silo["result"]["structuredContent"]["flagship_id"],
+        "superframe"
+    );
+    assert_eq!(silo["result"]["structuredContent"]["silo_refused"], true);
+    assert_eq!(silo["result"]["structuredContent"]["exit_code"], 3);
+
+    let hyg: serde_json::Value = serde_json::from_str(lines[3]).expect("hygiene json");
+    assert_eq!(hyg["result"]["isError"], false);
+    assert_eq!(hyg["result"]["structuredContent"]["clean"], true);
+    assert_eq!(hyg["result"]["structuredContent"]["em_dashes"], 0);
+    assert_eq!(hyg["result"]["structuredContent"]["bundler_secrets"], 0);
+    assert_eq!(hyg["result"]["structuredContent"]["local_paths"], 0);
+    assert_eq!(hyg["result"]["structuredContent"]["retired_brand"], 0);
     assert!(Path::new(&readme).is_file());
 }
