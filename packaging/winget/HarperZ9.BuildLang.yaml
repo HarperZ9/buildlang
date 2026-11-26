@@ -1,0 +1,38 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.singleton.1.6.0.schema.json
+# WinGet singleton manifest template for BuildLang (buildc, qdb, port).
+# Before submitting to microsoft/winget-pkgs, replace InstallerSha256 with the
+# exact SHA-256 of buildlang-v1.15.0-x86_64-pc-windows-msvc.zip from SHA256SUMS.
+
+PackageIdentifier: HarperZ9.BuildLang
+PackageVersion: 1.15.0
+PackageLocale: en-US
+Publisher: Zain Dana Harper
+PublisherUrl: https://harperz9.github.io/buildlang.html
+PublisherSupportUrl: https://github.com/HarperZ9/buildlang/issues
+PackageName: BuildLang
+PackageUrl: https://github.com/HarperZ9/buildlang
+License: AGPL-3.0-only
+LicenseUrl: https://github.com/HarperZ9/buildlang/blob/main/LICENSE
+ShortDescription: Deterministic systems and GPU compiler (buildc), BuildDB (qdb), and C-to-BuildLang port tool.
+Tags:
+  - compiler
+  - language
+  - effects
+  - shaders
+  - database
+  - buildlang
+Installers:
+  - Architecture: x64
+    InstallerType: zip
+    NestedInstallerType: portable
+    NestedInstallerFiles:
+      - RelativeFilePath: buildc.exe
+        PortableCommandAlias: buildc
+      - RelativeFilePath: qdb.exe
+        PortableCommandAlias: qdb
+      - RelativeFilePath: port.exe
+        PortableCommandAlias: port
+    InstallerUrl: https://github.com/HarperZ9/buildlang/releases/download/v1.15.0/buildlang-v1.15.0-x86_64-pc-windows-msvc.zip
+    InstallerSha256: REPLACE_WITH_SHA256_FROM_RELEASE_SHA256SUMS
+ManifestType: singleton
+ManifestVersion: 1.6.0

@@ -1,0 +1,235 @@
+name: release-binaries
+
+# Builds precompiled release archives for Windows x64, Linux x64, and macOS arm64
+# bundling buildc, qdb, and port, generates SHA256SUMS, self-tests install.ps1 and
+# install.sh (valid install + planted 1-byte tamper refusal), and uploads archives +
+# SHA256SUMS + installers onto the GitHub Release.
+
+on:
+  push:
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+    paths:
+      - "install.ps1"
+      - "install.sh"
+      - "packaging/**"
+      - ".github/workflows/release-binaries.yml"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to build/publish (defaults to v<Cargo.toml version>)"
+        required: false
+        default: ""
+      publish_release:
+        description: "Upload archives and SHA256SUMS to the GitHub Release"
+        required: false
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-binaries-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  installer-self-test:
+    name: Installer self-test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Verify install.sh syntax and self-test (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sh -n install.sh
+          sh install.sh --self-test
+      - name: Verify install.ps1 self-test (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          pwsh -NoProfile -File install.ps1 -SelfTest
+          powershell -NoProfile -ExecutionPolicy Bypass -File install.ps1 --self-test
+
+  build-release-archives:
+    name: Build release archive (${{ matrix.target }})
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            ext: zip
+            exe: ".exe"
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            ext: tar.gz
+            exe: ""
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            ext: tar.gz
+            exe: ""
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: compiler
+          key: release-bin-${{ matrix.target }}
+
+      - name: Resolve release tag
+        id: meta
+        shell: bash
+        run: |
+          if [ -n "${{ inputs.tag }}" ]; then
+            TAG="${{ inputs.tag }}"
+          elif [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            TAG="${GITHUB_REF_NAME}"
+          else
+            VER="$(grep -m1 '^version = ' compiler/Cargo.toml | sed 's/version = "\(.*\)"/\1/')"
+            TAG="v${VER}"
+          fi
+          case "$TAG" in
+            v*) ;;
+            *) TAG="v${TAG}" ;;
+          esac
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: Build buildc (release)
+        working-directory: compiler
+        run: cargo build --release --locked
+
+      - name: Build qdb and port and package archive
+        shell: bash
+        env:
+          TAG: ${{ steps.meta.outputs.tag }}
+          TARGET: ${{ matrix.target }}
+          EXT: ${{ matrix.ext }}
+          EXE: ${{ matrix.exe }}
+        run: |
+          set -euo pipefail
+          BUILDC="$PWD/compiler/target/release/buildc${EXE}"
+          export BUILDLANG_STDLIB="$PWD/stdlib"
+          STAGE="$RUNNER_TEMP/stage-${TARGET}"
+          DIST="$RUNNER_TEMP/dist-${TARGET}"
+          WORK_PORT="$RUNNER_TEMP/port-${TARGET}"
+          mkdir -p "$STAGE" "$DIST" "$WORK_PORT"
+
+          cp "$BUILDC" "$STAGE/buildc${EXE}"
+          cp LICENSE NOTICE "$STAGE/"
+
+          # Build qdb (BuildDB) from bdb/db.bld
+          "$BUILDC" bdb/db.bld --target c -o "$RUNNER_TEMP/qdb.c"
+          CC_BIN="cc"
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            CC_BIN="gcc"
+          elif [ "$RUNNER_OS" = "Linux" ]; then
+            CC_BIN="gcc"
+          fi
+          "$CC_BIN" -O2 -w -o "$STAGE/qdb${EXE}" "$RUNNER_TEMP/qdb.c" -lm
+
+          # Build port from port/*.bld
+          cp port/*.bld "$WORK_PORT/"
+          (cd "$WORK_PORT" && "$BUILDC" build --release .)
+          cp "$WORK_PORT/target/release/main${EXE}" "$STAGE/port${EXE}"
+
+          # Verify compiled binaries respond cleanly
+          "$STAGE/buildc${EXE}" --version
+          "$STAGE/qdb${EXE}" --version
+          test -f "$STAGE/port${EXE}"
+
+          ASSET="buildlang-${TAG}-${TARGET}.${EXT}"
+          if [ "$EXT" = "zip" ]; then
+            (cd "$STAGE" && 7z a -tzip "$DIST/$ASSET" buildc.exe qdb.exe port.exe LICENSE NOTICE)
+          else
+            chmod 755 "$STAGE/buildc" "$STAGE/qdb" "$STAGE/port"
+            tar -czf "$DIST/$ASSET" -C "$STAGE" buildc qdb port LICENSE NOTICE
+          fi
+          ls -lh "$DIST/$ASSET"
+
+      - name: Upload target archive artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-archive-${{ matrix.target }}
+          path: ${{ runner.temp }}/dist-${{ matrix.target }}/buildlang-*
+          retention-days: 7
+
+  publish-release-assets:
+    name: Generate SHA256SUMS, verify, and publish GitHub Release
+    needs: [installer-self-test, build-release-archives]
+    if: >-
+      startsWith(github.ref, 'refs/tags/v') ||
+      (github.event_name == 'workflow_dispatch' && inputs.publish_release == true)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Resolve release tag
+        id: meta
+        run: |
+          if [ -n "${{ inputs.tag }}" ]; then
+            TAG="${{ inputs.tag }}"
+          elif [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            TAG="${GITHUB_REF_NAME}"
+          else
+            VER="$(grep -m1 '^version = ' compiler/Cargo.toml | sed 's/version = "\(.*\)"/\1/')"
+            TAG="v${VER}"
+          fi
+          case "$TAG" in
+            v*) ;;
+            *) TAG="v${TAG}" ;;
+          esac
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: Download all target archives
+        uses: actions/download-artifact@v4
+        with:
+          pattern: release-archive-*
+          path: dist
+          merge-multiple: true
+
+      - name: Generate SHA256SUMS and stage installers
+        run: |
+          cp install.ps1 install.sh dist/
+          (cd dist && sha256sum buildlang-*.tar.gz buildlang-*.zip > SHA256SUMS)
+          cat dist/SHA256SUMS
+
+      - name: Verify Linux release archive via install.sh --from-dir
+        env:
+          TAG: ${{ steps.meta.outputs.tag }}
+        run: |
+          sh install.sh --version "$TAG" --from-dir dist --install-dir "$RUNNER_TEMP/verify-bin" --no-path
+
+      - name: Upload assets to GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ steps.meta.outputs.tag }}
+        run: |
+          VERSION="${TAG#v}"
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" --title "BuildLang ${VERSION}" --notes "Precompiled BuildLang ${VERSION} binaries (buildc, qdb, port) and SHA256SUMS."
+          fi
+          gh release upload "$TAG" dist/buildlang-*.tar.gz dist/buildlang-*.zip dist/SHA256SUMS dist/install.ps1 dist/install.sh --clobber
