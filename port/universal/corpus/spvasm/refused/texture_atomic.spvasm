@@ -1,0 +1,9 @@
+; Texture sampler and atomic ops refused in Slice 1
+OpCapability Shader
+OpMemoryModel Logical GLSL450
+%i64 = OpTypeInt 64 1
+%c1 = OpConstant %i64 1
+%c2 = OpConstant %i64 2
+%tex = OpImageSampleImplicitLod %i64 %s %uv
+%atm = OpAtomicIAdd %i64 %ptr %c1 %c2
+OpReturnValue %c1

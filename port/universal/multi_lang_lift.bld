@@ -1,0 +1,406 @@
+// SPDX-License-Identifier: MIT
+//
+// port/universal/multi_lang_lift.bld: Pure-BuildLang unified multi-language lifter.
+// Supports: js | rs | zig | go | rb | spvasm -> BuildLang (.bld)
+// Handles typed/untyped functions, local variables, arithmetic, while/for loops, if/else,
+// returns, print -> Console effect, SPIR-V SSA compute kernels, and exact line-numbered refusals.
+// Exit status: 0 written, 2 refused (line-numbered constructs, nothing written), 1 bad arguments.
+
+fn split_lines(src: String, out: Vec<String>) {
+    let b = src.as_bytes();
+    let n: usize = src.len();
+    let mut start: usize = 0;
+    let mut i: usize = 0;
+    while i < n {
+        if b[i] == 10 {
+            let mut end: usize = i;
+            if end > start && b[end - 1] == 13 { end = end - 1; }
+            out.push(src.substring(start, end - start));
+            start = i + 1;
+        }
+        i = i + 1;
+    }
+    if start <= n {
+        let mut end: usize = n;
+        if end > start && b[end - 1] == 13 { end = end - 1; }
+        out.push(src.substring(start, end - start));
+    }
+}
+
+fn find_char(s: String, ch: u8) -> i32 {
+    let b = s.as_bytes();
+    let mut i: usize = 0;
+    while i < s.len() {
+        if b[i] == ch { return i as i32; }
+        i = i + 1;
+    }
+    return -1;
+}
+
+fn strip_trailing_semi(s: String) -> String {
+    let t: String = s.trim();
+    if t.ends_with(";") { return t.substring(0, t.len() - 1).trim(); }
+    return t;
+}
+
+fn strip_parens(s: String) -> String {
+    let t: String = s.trim();
+    if t.starts_with("(") && t.ends_with(")") && t.len() >= 2 {
+        return t.substring(1, t.len() - 2).trim();
+    }
+    return t;
+}
+
+fn split_csv(s: String, out: Vec<String>) {
+    let b = s.as_bytes();
+    let n: usize = s.len();
+    let mut start: usize = 0;
+    let mut i: usize = 0;
+    while i < n {
+        if b[i] == 44 {
+            let part: String = s.substring(start, i - start).trim();
+            if part != "" { out.push(part); }
+            start = i + 1;
+        }
+        i = i + 1;
+    }
+    if start < n {
+        let part: String = s.substring(start, n - start).trim();
+        if part != "" { out.push(part); }
+    }
+}
+
+fn split_ws(s: String, out: Vec<String>) {
+    let b = s.as_bytes();
+    let n: usize = s.len();
+    let mut i: usize = 0;
+    while i < n {
+        while i < n && (b[i] == 32 || b[i] == 9) { i = i + 1; }
+        let start: usize = i;
+        while i < n && b[i] != 32 && b[i] != 9 { i = i + 1; }
+        if i > start { out.push(s.substring(start, i - start)); }
+    }
+}
+
+fn check_refusal(lang: String, line: String) -> String {
+    if lang == "js" {
+        if line.contains("eval(") { return "dynamic eval()"; }
+        if line.contains("new Proxy") { return "JS Proxy metaprogramming"; }
+        if line.contains("document.") { return "browser DOM mutation"; }
+        if line.starts_with("async ") { return "JS async/Promise runtime"; }
+    } else if lang == "rs" {
+        if line.contains("unsafe") { return "Rust unsafe block"; }
+        if line.contains("macro_rules!") { return "Rust macro_rules!"; }
+        if line.contains("asm!") { return "inline assembly asm!"; }
+    } else if lang == "zig" {
+        if line.contains("@ptrCast") { return "Zig @ptrCast raw pointer cast"; }
+        if line.contains("comptime") { return "Zig comptime reflection"; }
+        if line.starts_with("asm ") || line.contains(" asm ") { return "Zig inline asm"; }
+    } else if lang == "go" {
+        if line.starts_with("go ") { return "Go goroutine spawn"; }
+        if line.contains("chan ") || line.contains("<-") { return "Go channel runtime"; }
+        if line.contains("unsafe.") { return "Go unsafe package"; }
+    } else if lang == "rb" {
+        if line.contains("eval") { return "Ruby dynamic eval"; }
+        if line.contains("method_missing") { return "Ruby method_missing metaprogramming"; }
+        if line.contains("define_method") { return "Ruby define_method metaprogramming"; }
+        if line.contains("active_record") { return "Rails ActiveRecord dynamic runtime"; }
+    } else if lang == "spvasm" {
+        if line.contains("OpImageSample") { return "SPIR-V texture sampler op"; }
+        if line.contains("OpAtomic") { return "SPIR-V cross-lane atomic op"; }
+        if line.contains("OpRayQuery") { return "SPIR-V ray query hardware op"; }
+    }
+    return "";
+}
+
+fn format_params(lang: String, raw_params: String) -> String {
+    let parts: Vec<String> = Vec::new();
+    split_csv(raw_params, parts);
+    let mut res: String = String::new();
+    let mut i: usize = 0;
+    while i < parts.len() {
+        let p: String = parts[i];
+        let mut entry: String = p;
+        if lang == "js" || lang == "rb" {
+            entry = p + ": i64";
+        } else if lang == "go" {
+            let ws: Vec<String> = Vec::new();
+            split_ws(p, ws);
+            if ws.len() >= 2 { entry = ws[0] + ": i64"; }
+        }
+        if i > 0 { res = res + ", "; }
+        res = res + entry;
+        i = i + 1;
+    }
+    return res;
+}
+
+fn lift_spvasm(lines: Vec<String>, out: Vec<String>) -> i32 ~ Console {
+    let mut refused: i32 = 0;
+    let body: Vec<String> = Vec::new();
+    let mut ret_var: String = String::new();
+    let mut i: usize = 0;
+    while i < lines.len() {
+        let ln_num: i32 = (i as i32) + 1;
+        let t: String = lines[i].trim();
+        if t == "" || t.starts_with(";") || t.starts_with("OpCapability") || t.starts_with("OpMemoryModel")
+            || t.starts_with("OpEntryPoint") || t.starts_with("OpName") || t.starts_with("OpFunction")
+            || t.starts_with("OpLabel") || t.starts_with("%void") || t.starts_with("%i64")
+            || t.starts_with("%fn_") || t.starts_with("%main") {
+            i = i + 1;
+            continue;
+        }
+        let why: String = check_refusal("spvasm", t);
+        if why != "" {
+            println!("  line {}: {}", ln_num, why);
+            refused = refused + 1;
+            i = i + 1;
+            continue;
+        }
+        if t.starts_with("OpReturnValue") {
+            let ws: Vec<String> = Vec::new();
+            split_ws(t, ws);
+            if ws.len() >= 2 { ret_var = "v_" + ws[1].substring(1, ws[1].len() - 1); }
+            i = i + 1;
+            continue;
+        }
+        if t.starts_with("OpReturn") { i = i + 1; continue; }
+        let ws: Vec<String> = Vec::new();
+        split_ws(t, ws);
+        if ws.len() >= 4 && ws[1] == "=" && ws[0].starts_with("%") {
+            let lhs: String = "v_" + ws[0].substring(1, ws[0].len() - 1);
+            let op: String = ws[2];
+            if op == "OpConstant" && ws.len() >= 5 {
+                body.push("    let " + lhs + ": i64 = " + ws[4] + ";");
+            } else if (op == "OpIAdd" || op == "OpISub" || op == "OpIMul" || op == "OpSDiv") && ws.len() >= 6 {
+                let sym: String = if op == "OpIAdd" { "+" } else if op == "OpISub" { "-" }
+                    else if op == "OpIMul" { "*" } else { "/" };
+                let a: String = "v_" + ws[4].substring(1, ws[4].len() - 1);
+                let b: String = "v_" + ws[5].substring(1, ws[5].len() - 1);
+                body.push("    let " + lhs + ": i64 = " + a + " " + sym + " " + b + ";");
+            } else {
+                println!("  line {}: unsupported SPIR-V op `{}`", ln_num, op);
+                refused = refused + 1;
+            }
+        } else {
+            println!("  line {}: unsupported SPIR-V line `{}`", ln_num, t);
+            refused = refused + 1;
+        }
+        i = i + 1;
+    }
+    out.push("fn spv_kernel() -> i64 {");
+    let mut k: usize = 0;
+    while k < body.len() { out.push(body[k]); k = k + 1; }
+    if ret_var != "" { out.push("    return " + ret_var + ";"); } else { out.push("    return 0;"); }
+    out.push("}");
+    out.push("");
+    out.push("fn main() ~ Console { println!(\"{}\", spv_kernel()); }");
+    return refused;
+}
+
+fn vec_has(v: Vec<String>, target: String) -> bool {
+    let mut i: usize = 0;
+    while i < v.len() {
+        if v[i] == target { return true; }
+        i = i + 1;
+    }
+    return false;
+}
+
+fn lift_imperative(lang: String, lines: Vec<String>, out: Vec<String>) -> i32 ~ Console {
+    let mut refused: i32 = 0;
+    let mut rb_locals: Vec<String> = Vec::new();
+    let mut i: usize = 0;
+    while i < lines.len() {
+        let ln_num: i32 = (i as i32) + 1;
+        let t: String = lines[i].trim();
+        let skip_hdr: bool = t == "" || t.starts_with("//") || t.starts_with("#")
+            || t.starts_with("package ") || t.starts_with("import ") || t.starts_with("const std =");
+        if skip_hdr {
+            i = i + 1;
+            continue;
+        }
+        let why: String = check_refusal(lang, t);
+        if why != "" {
+            println!("  line {}: {}", ln_num, why);
+            refused = refused + 1;
+            i = i + 1;
+            continue;
+        }
+        // Function headers across js / rs / zig / go / rb
+        if (lang == "js" && t.starts_with("function "))
+            || (lang == "rs" && t.starts_with("fn "))
+            || (lang == "zig" && (t.starts_with("fn ") || t.starts_with("pub fn ")))
+            || (lang == "go" && t.starts_with("func "))
+            || (lang == "rb" && t.starts_with("def ")) {
+            let lp: i32 = find_char(t, 40);
+            let rp: i32 = find_char(t, 41);
+            let mut kw_end: usize = 3;
+            if t.starts_with("function ") { kw_end = 9; }
+            else if t.starts_with("pub fn ") { kw_end = 7; }
+            else if t.starts_with("func ") { kw_end = 5; }
+            else if t.starts_with("def ") { kw_end = 4; }
+            let mut fname: String = String::new();
+            let mut raw_p: String = String::new();
+            if lp > 0 && rp > lp {
+                fname = t.substring(kw_end, (lp as usize) - kw_end).trim();
+                raw_p = t.substring((lp as usize) + 1, (rp as usize) - (lp as usize) - 1).trim();
+            } else {
+                fname = t.substring(kw_end, t.len() - kw_end).trim();
+            }
+            let p_str: String = format_params(lang, raw_p);
+            rb_locals = Vec::new();
+            let pnames: Vec<String> = Vec::new();
+            split_csv(raw_p, pnames);
+            let mut pi: usize = 0;
+            while pi < pnames.len() { rb_locals.push(pnames[pi]); pi = pi + 1; }
+            if fname == "main" {
+                out.push("fn main() ~ Console {");
+            } else {
+                out.push("fn " + fname + "(" + p_str + ") -> i64 {");
+            }
+            i = i + 1;
+            continue;
+        }
+        if t == "}" || (lang == "rb" && t == "end") {
+            out.push("}");
+            i = i + 1;
+            continue;
+        }
+        if t == "} else {" || (lang == "rb" && t == "else") {
+            out.push("} else {");
+            i = i + 1;
+            continue;
+        }
+        if t.starts_with("console.log(") || t.starts_with("fmt.Println(") || t.starts_with("print(") {
+            let lp: i32 = find_char(t, 40);
+            let inner: String = strip_trailing_semi(t);
+            let arg: String = inner.substring((lp as usize) + 1, inner.len() - (lp as usize) - 2).trim();
+            out.push("    println!(\"{}\", " + arg + ");");
+            i = i + 1;
+            continue;
+        }
+        if lang == "rb" && t.starts_with("puts ") {
+            out.push("    println!(\"{}\", " + t.substring(5, t.len() - 5).trim() + ");");
+            i = i + 1;
+            continue;
+        }
+        if lang == "rs" && t.starts_with("println!(") {
+            out.push("    " + strip_trailing_semi(t) + ";");
+            i = i + 1;
+            continue;
+        }
+        if t.starts_with("while ") {
+            let mut rest: String = t.substring(6, t.len() - 6).trim();
+            if rest.ends_with("{") { rest = rest.substring(0, rest.len() - 1).trim(); }
+            out.push("    while " + strip_parens(rest) + " {");
+            i = i + 1;
+            continue;
+        }
+        if lang == "go" && t.starts_with("for ") {
+            let mut rest: String = t.substring(4, t.len() - 4).trim();
+            if rest.ends_with("{") { rest = rest.substring(0, rest.len() - 1).trim(); }
+            out.push("    while " + strip_parens(rest) + " {");
+            i = i + 1;
+            continue;
+        }
+        if t.starts_with("if ") {
+            let mut rest: String = t.substring(3, t.len() - 3).trim();
+            if rest.ends_with("{") { rest = rest.substring(0, rest.len() - 1).trim(); }
+            out.push("    if " + strip_parens(rest) + " {");
+            i = i + 1;
+            continue;
+        }
+        if t.starts_with("return ") {
+            out.push("    return " + strip_trailing_semi(t.substring(7, t.len() - 7)) + ";");
+            i = i + 1;
+            continue;
+        }
+        if t.starts_with("let mut ") || t.starts_with("let ") || t.starts_with("const ") || t.starts_with("var ") {
+            let mut rest: String = strip_trailing_semi(t);
+            if rest.starts_with("let mut ") { rest = rest.substring(8, rest.len() - 8).trim(); }
+            else if rest.starts_with("let ") { rest = rest.substring(4, rest.len() - 4).trim(); }
+            else if rest.starts_with("const ") { rest = rest.substring(6, rest.len() - 6).trim(); }
+            else if rest.starts_with("var ") { rest = rest.substring(4, rest.len() - 4).trim(); }
+            let eq: i32 = find_char(rest, 61);
+            if eq > 0 {
+                let lhs_raw: String = rest.substring(0, eq as usize).trim();
+                let rhs: String = rest.substring((eq as usize) + 1, rest.len() - (eq as usize) - 1).trim();
+                let col: i32 = find_char(lhs_raw, 58);
+                let vname: String = if col > 0 { lhs_raw.substring(0, col as usize).trim() } else { lhs_raw };
+                out.push("    let mut " + vname + ": i64 = " + rhs + ";");
+            }
+            i = i + 1;
+            continue;
+        }
+        if lang == "go" && t.contains(":=") {
+            let col: i32 = find_char(t, 58);
+            let vname: String = t.substring(0, col as usize).trim();
+            let rhs: String = strip_trailing_semi(t.substring((col as usize) + 2, t.len() - (col as usize) - 2));
+            out.push("    let mut " + vname + ": i64 = " + rhs + ";");
+            i = i + 1;
+            continue;
+        }
+        let is_rb_assign: bool = lang == "rb" && t.contains("=")
+            && !t.contains("==") && !t.contains("!=") && !t.contains("<=") && !t.contains(">=");
+        if is_rb_assign {
+            let eq: i32 = find_char(t, 61);
+            let lhs: String = t.substring(0, eq as usize).trim();
+            let rhs: String = t.substring((eq as usize) + 1, t.len() - (eq as usize) - 1).trim();
+            if !vec_has(rb_locals, lhs) {
+                rb_locals.push(lhs);
+                out.push("    let mut " + lhs + ": i64 = " + rhs + ";");
+            } else {
+                out.push("    " + lhs + " = " + rhs + ";");
+            }
+            i = i + 1;
+            continue;
+        }
+        if t.contains("=") && !t.contains("==") {
+            out.push("    " + strip_trailing_semi(t) + ";");
+            i = i + 1;
+            continue;
+        }
+        if lang == "rb" && t.starts_with("main") {
+            i = i + 1;
+            continue;
+        }
+        if lang == "js" && t == "main();" {
+            i = i + 1;
+            continue;
+        }
+        println!("  line {}: unsupported {} construct `{}`", ln_num, lang, t);
+        refused = refused + 1;
+        i = i + 1;
+    }
+    return refused;
+}
+
+fn main() ~ Console + FileSystem + Environment + Process {
+    if args_count() != 4 {
+        println!("usage: multi_lang_lift <js|rs|zig|go|rb|spvasm> input output.bld");
+        exit(1);
+    }
+    let lang: String = args_get(1);
+    if lang != "js" && lang != "rs" && lang != "zig" && lang != "go" && lang != "rb" && lang != "spvasm" {
+        println!("unsupported language: {}", lang);
+        exit(1);
+    }
+    let src: String = read_file(args_get(2));
+    let lines: Vec<String> = Vec::new();
+    split_lines(src, lines);
+    let out: Vec<String> = Vec::new();
+    out.push("// SPDX-License-Identifier: MIT");
+    out.push("// Lifted from " + lang + " by port/universal/multi_lang_lift.bld");
+    out.push("");
+    let refused: i32 = if lang == "spvasm" { lift_spvasm(lines, out) } else { lift_imperative(lang, lines, out) };
+    if refused > 0 {
+        println!("refused: {} construct(s) outside the {} subset; nothing written", refused, lang);
+        exit(2);
+    }
+    let mut text: String = String::new();
+    let mut k: usize = 0;
+    while k < out.len() { text = text + out[k] + "\n"; k = k + 1; }
+    write_file(args_get(3), text);
+    println!("written: {} ({} lines)", args_get(3), out.len());
+}

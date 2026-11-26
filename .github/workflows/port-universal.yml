@@ -1,0 +1,52 @@
+name: port-universal
+
+# Builds all 3 pure-BuildLang universal lifters under port/universal/ (wasm_lift.bld,
+# asm_riscv_lift.bld, multi_lang_lift.bld) with the checkout's buildc and runs
+# port/universal/check.sh across wat, riscv, js, rs, zig, go, rb, and spvasm corpora,
+# refusal line verification, and planted-mismatch control.
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "port/universal/**"
+      - "docs/design/UNIVERSAL-HOURGLASS-MIGRATION.md"
+      - ".github/workflows/port-universal.yml"
+  push:
+    branches: [main]
+    paths:
+      - "port/universal/**"
+      - "docs/design/UNIVERSAL-HOURGLASS-MIGRATION.md"
+      - ".github/workflows/port-universal.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: port-universal-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  port-universal:
+    name: Universal Hourglass lifters (WAT, RISC-V, JS, Rust, Zig, Go, Ruby, SPIR-V)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: compiler
+
+      - name: Build buildc
+        working-directory: compiler
+        run: cargo build --release --locked
+
+      - name: Run Universal Hourglass lifter corpus and refusal checks
+        env:
+          BUILDLANG_STDLIB: ${{ github.workspace }}/stdlib
+        run: bash port/universal/check.sh compiler/target/release/buildc
