@@ -8339,8 +8339,20 @@ impl<'ctx> MirLowerer<'ctx> {
                 } else {
                     for arg in args {
                         // `v.contains(&x)`: the runtime helpers take elements by
-                        // value, so load a borrowed argument first.
-                        let val = self.lower_expr(arg)?;
+                        // value, so load a borrowed argument first. For `v.push(x)`,
+                        // propagate the vector's element type so untyped numeric or
+                        // tuple literals (e.g. `(1, 2)` for `Vec<(i64, i64)>`) adopt
+                        // the declared element width.
+                        let prev_expected = if method_name == "push" {
+                            self.expected_type.replace(elem_ty.as_ref().clone())
+                        } else {
+                            None
+                        };
+                        let lowered = self.lower_expr(arg);
+                        if method_name == "push" {
+                            self.expected_type = prev_expected;
+                        }
+                        let val = lowered?;
                         arg_vals.push(self.deref_if_pointer(val)?);
                     }
                 }
