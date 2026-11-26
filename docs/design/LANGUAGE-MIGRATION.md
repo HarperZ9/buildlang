@@ -1,6 +1,6 @@
 # Language migration: other languages into BuildLang
 
-Status: the first frontend slice exists (2026-11-12): `port/` reads a C subset and is checked against gcc (`port/README.md`). The rest of this document is design. Written 2026-11-02.
+Status: Slice 1 (C subset, checked against gcc) and Slice 2 (Python subset checked against CPython + Controlled Plain-English checked against golden references) are live in `port/` (`port/README.md`, `port/check.sh`). JS/TS, Rust, and universal IR lifters follow the same pipeline. Updated 2026-11-26.
 
 ## Goal
 
@@ -67,8 +67,21 @@ reported as such and not counted as a mismatch. Python's unbounded `int` maps to
 with a checked overflow trap until a big-integer type exists, and the receipt names the
 trap as a semantic difference.
 
-## First milestone (H6)
+## First milestone (H6) and Slice 2 status
 
-A C-subset frontend that handles the semantic corpus programs written in C, plus a set of
-small numeric and string programs. Acceptance: every migrated program's output equals
-gcc's on its inputs, and the refusal report lists every construct outside the subset.
+- **Slice 1 (done):** `port c` handles the C-subset corpus (5/5 identical to `gcc -O1 -lm`, 2/2 refusals at exact line numbers).
+- **Slice 2 (done):** `port py` handles the Python-subset corpus (5/5 identical to CPython, 2/2 refusals at exact line numbers) and `port plain` provides a zero-LLM Controlled Plain-English frontend (3/3 identical to golden references, 1/1 refusal at exact line numbers), all gated by `port/check.sh` with planted mismatch controls.
+
+## Aurora-to-BuildLang accessible natural-language path
+
+Opening verified systems programming to newcomers, non-programmers, and analogical thinkers uses a two-layer bridge that eliminates punctuation-heavy syntax walls without allowing silent bugs:
+- **Layer 1 (`port plain`, deterministic, zero LLM):** Compiles Controlled Plain-English directly into typed `.bld` with explicit effect rows and emits a deterministic `// MIRROR:` summary header stating defined functions, exact capabilities requested, and active runtime safety traps (the seed of `buildc spec explain` / `S2`).
+- **Layer 2 (Conversational drafting with compiler back-translation):** When a user drafts from free-form conversation or analogy via an assistant, the compiler back-translates the resulting types, edge cases, bounds, and effect rows back into plain English; the user confirms intent, and `buildc verify` + `buildc tv` seal the compiled binary with a tamper-evident receipt.
+
+## Observable equivalence vs binary identity, and beating `-O2`
+
+Migration proves **byte-for-byte observable equivalence** (stdout, exit code, IEEE-754 floating-point values, and deterministic state hashes) against the source language toolchain, not raw ELF/PE executable byte identity. BuildLang intentionally upgrades migrated programs with explicit capability effect rows (`~ Console`, etc.), checked integer overflow, and deterministic lowering.
+
+Once migrated into BuildLang MIR, beating `-O2` C and hand-written assembly on hot numerical loops is handled by the compiler roadmap in `docs/STRATEGY-2026-10-SURPASS.md`:
+- **V4 (Translation validation):** Per-function equivalence certificates proving the emitted C/native lowering preserves MIR semantics.
+- **V5 (E-graph superoptimization):** Equality saturation with equivalence certificates discovering algebraic and vector rewrites across hot loops without breaking bit-exact guarantees.

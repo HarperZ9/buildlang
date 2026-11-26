@@ -176,6 +176,8 @@
    "kind": "rule",
    "x": 54,
    "y": 135,
+   "anchor_above": "clear_body",
+   "anchor_offset": 6,
    "w": 504,
    "width": 0.5,
    "color": "line",

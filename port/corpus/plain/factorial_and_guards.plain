@@ -1,0 +1,20 @@
+note: Recursive factorial, comparison words, while loop, and guards.
+define factorial(n: int) returning int:
+    if n is at most 1:
+        return 1
+    otherwise:
+        return n times factorial(n minus 1)
+
+define main:
+    repeat k from 1 through 6:
+        set fk to factorial(k)
+        if fk is greater than 100:
+            print "big", k, fk
+        otherwise:
+            print "small", k, fk
+    set acc to 1
+    set m to 1
+    while m is less than 5:
+        multiply acc by m
+        add 1 to m
+    print acc

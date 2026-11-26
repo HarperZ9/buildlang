@@ -1,0 +1,14 @@
+note: Constants, floating-point math, square root, and transitive Console effect.
+constant GRAVITY is 9.80665
+
+define impact_speed(height: float) returning float:
+    return square root of (2.0 times GRAVITY times height)
+
+define announce(label: text, val: float):
+    print f"{label}={val:.6f}"
+
+define main:
+    set v1 to impact_speed(10.0)
+    set v2 to impact_speed(45.0)
+    call announce("v10", v1)
+    call announce("v45", v2)

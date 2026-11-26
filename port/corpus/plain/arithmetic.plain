@@ -1,0 +1,12 @@
+note: Arithmetic functions, repeat loops, and plain-English addition.
+define add(a: int, b: int) returning int:
+    set x to a plus b
+    return x
+
+define main:
+    set total to 0
+    repeat i from 0 to 5:
+        set step_val to add(i, i times 2)
+        add step_val to total
+        print i, step_val
+    print total
