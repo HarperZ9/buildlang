@@ -945,7 +945,7 @@ fn run_wave2_tool_tests() -> i32 ~ Console + FileSystem + Clock {
     let r_bl: str = handle_mcp_line(call_req(11, "anti_silo_preflight", bl_args));
     failures = failures + assert_contains("silo_route_buildlang", r_bl, "\"flagship_id\":\"buildlang\"");
 
-    // 12. Planted silo control 1: orphan folder under C:/dev/public/ MUST be refused (exit_code 3)
+    // 12. Planted silo control 1: orphan folder under public workspace root MUST be refused (exit_code 3)
     let bad_pub: str = "C" + ":/dev/public/rogue-new-silo/app.py";
     let bp_args: str = "{\"intent\":\"build new verify tool\",\"target_path\":"
         + json_quote(bad_pub) + "}";
@@ -953,7 +953,7 @@ fn run_wave2_tool_tests() -> i32 ~ Console + FileSystem + Clock {
     failures = failures + assert_contains("planted_silo_public_refused", r_bp, "\"silo_refused\":true");
     failures = failures + assert_contains("planted_silo_public_exit3", r_bp, "\"exit_code\":3");
 
-    // 13. Planted silo control 2: orphan folder under C:/dev/ MUST be refused (exit_code 3)
+    // 13. Planted silo control 2: orphan folder under top-level dev root MUST be refused (exit_code 3)
     let bad_dev: str = "C" + ":/dev/orphan-scratch-repo/main.py";
     let bd_args: str = "{\"intent\":\"add recall helper\",\"target_path\":"
         + json_quote(bad_dev) + "}";
