@@ -1129,6 +1129,34 @@ static Result build_parse_float(BuildString s, bool single) {
     memcpy(&r.ok, &v, sizeof v);
     return r;
 }
+static Result build_parse_int_radix(BuildString s, int32_t radix, int32_t bits, bool is_signed) {
+    if (radix < 2 || radix > 36) return bl_parse_err("invalid radix");
+    if (s.len == 0) return bl_parse_err("cannot parse integer from empty string");
+    size_t i = 0;
+    bool neg = false;
+    if (s.ptr[0] == '+' || s.ptr[0] == '-') { neg = s.ptr[0] == '-'; i = 1; }
+    if (i == s.len || (neg && !is_signed)) return bl_parse_err("invalid digit found in string");
+    uint64_t umax = bits >= 64 ? UINT64_MAX : (((uint64_t)1 << bits) - 1);
+    uint64_t limit = !is_signed ? umax : (neg ? ((uint64_t)1 << (bits - 1)) : (((uint64_t)1 << (bits - 1)) - 1));
+    uint64_t m = 0;
+    uint64_t base = (uint64_t)radix;
+    for (; i < s.len; i++) {
+        char c = s.ptr[i];
+        int d = -1;
+        if (c >= '0' && c <= '9') d = c - '0';
+        else if (c >= 'a' && c <= 'z') d = 10 + (c - 'a');
+        else if (c >= 'A' && c <= 'Z') d = 10 + (c - 'A');
+        if (d < 0 || d >= radix) return bl_parse_err("invalid digit found in string");
+        if (m > (limit - (uint64_t)d) / base) return bl_parse_err("number out of range");
+        m = m * base + (uint64_t)d;
+    }
+    Result r;
+    memset(&r, 0, sizeof r);
+    r.is_ok = true;
+    if (!is_signed) { memcpy(&r.ok, &m, sizeof m); }
+    else { int64_t pi = neg ? (m == ((uint64_t)1 << 63) ? INT64_MIN : -(int64_t)m) : (int64_t)m; memcpy(&r.ok, &pi, sizeof pi); }
+    return r;
+}
 // JSON.stringify text for a double: ECMAScript Number::toString for finite
 // values (shortest round-trip digits; exponent form below 1e-6 and from 1e21),
 // "0" for both zeros, "null" for NaN and the infinities.
@@ -1476,6 +1504,18 @@ static bool build_hmap_remove_str_f64(BuildStrF64MapHandle h, const char* key) {
 
 static size_t build_hmap_len_str_f64(BuildStrF64MapHandle h) { return h.inner->len; }
 
+static void build_hmap_clear_str_f64(BuildStrF64MapHandle h) {
+    BuildStrF64Map* m = h.inner;
+    for (size_t i = 0; i < m->cap; i++) {
+        if (m->occupied[i]) {
+            free(m->keys[i]);
+            m->keys[i] = NULL;
+            m->occupied[i] = 0;
+        }
+    }
+    m->len = 0;
+}
+
 // BuildString-accepting wrappers (used by method dispatch which
 // passes BuildString values, not const char* pointers).
 static void build_hmap_insert_qs(BuildStrF64MapHandle h, BuildString key, double value) {
@@ -1679,6 +1719,60 @@ static float build_max_f32(float a, float b) {
     if (a != a || b != b) return a + b;
     if (a == b) return signbit(a) ? b : a;
     return a > b ? a : b;
+}
+static double build_rem_euclid_f64(double a, double b) {
+    double r = fmod(a, b);
+    return r < 0.0 ? r + fabs(b) : r;
+}
+static float build_rem_euclid_f32(float a, float b) {
+    float r = fmodf(a, b);
+    return r < 0.0f ? r + fabsf(b) : r;
+}
+static uint32_t build_leading_zeros_u64(uint64_t x) {
+    if (x == 0) return 64;
+    uint32_t n = 0;
+    while ((x & ((uint64_t)1 << 63)) == 0) { n++; x <<= 1; }
+    return n;
+}
+static uint32_t build_leading_zeros_u32(uint32_t x) {
+    if (x == 0) return 32;
+    uint32_t n = 0;
+    while ((x & ((uint32_t)1 << 31)) == 0) { n++; x <<= 1; }
+    return n;
+}
+static uint32_t build_leading_zeros_u16(uint16_t x) {
+    if (x == 0) return 16;
+    uint32_t n = 0;
+    while ((x & ((uint16_t)1 << 15)) == 0) { n++; x = (uint16_t)(x << 1); }
+    return n;
+}
+static uint32_t build_leading_zeros_u8(uint8_t x) {
+    if (x == 0) return 8;
+    uint32_t n = 0;
+    while ((x & ((uint8_t)1 << 7)) == 0) { n++; x = (uint8_t)(x << 1); }
+    return n;
+}
+static uint32_t build_trailing_zeros_u64(uint64_t x) {
+    if (x == 0) return 64;
+    uint32_t n = 0;
+    while ((x & 1) == 0) { n++; x >>= 1; }
+    return n;
+}
+static uint32_t build_trailing_zeros_u32(uint32_t x) {
+    if (x == 0) return 32;
+    uint32_t n = 0;
+    while ((x & 1) == 0) { n++; x >>= 1; }
+    return n;
+}
+static uint32_t build_count_ones_u64(uint64_t x) {
+    uint32_t n = 0;
+    while (x) { n += (uint32_t)(x & 1); x >>= 1; }
+    return n;
+}
+static uint32_t build_count_ones_u32(uint32_t x) {
+    uint32_t n = 0;
+    while (x) { n += (x & 1); x >>= 1; }
+    return n;
 }
 // ECMAScript ToUint32 / ToInt32: truncate toward zero, wrap modulo 2^32;
 // NaN and the infinities give 0. Exact: fmod and trunc do not round.
@@ -2954,6 +3048,35 @@ static BuildString build_string_trim(BuildString s) {
     memcpy(buf, s.ptr + start, new_len);
     buf[new_len] = '\0';
     BuildString qs; qs.ptr = buf; qs.len = new_len; qs.cap = new_len + 1;
+    return qs;
+}
+
+static BuildString build_string_trim_start_matches(BuildString s, BuildString pat) {
+    size_t start = 0;
+    if (pat.len > 0) {
+        while (start + pat.len <= s.len && memcmp(s.ptr + start, pat.ptr, pat.len) == 0) {
+            start += pat.len;
+        }
+    }
+    size_t new_len = s.len - start;
+    char* buf = (char*)malloc(new_len + 1);
+    memcpy(buf, s.ptr + start, new_len);
+    buf[new_len] = '\0';
+    BuildString qs; qs.ptr = buf; qs.len = new_len; qs.cap = new_len + 1;
+    return qs;
+}
+
+static BuildString build_string_trim_end_matches(BuildString s, BuildString pat) {
+    size_t end = s.len;
+    if (pat.len > 0) {
+        while (end >= pat.len && memcmp(s.ptr + end - pat.len, pat.ptr, pat.len) == 0) {
+            end -= pat.len;
+        }
+    }
+    char* buf = (char*)malloc(end + 1);
+    memcpy(buf, s.ptr, end);
+    buf[end] = '\0';
+    BuildString qs; qs.ptr = buf; qs.len = end; qs.cap = end + 1;
     return qs;
 }
 

@@ -213,3 +213,120 @@ fn workstation_mcp_checks_lints_passes_self_test_and_serves_stdio_jsonrpc() {
     );
     assert!(Path::new(&readme).is_file());
 }
+
+#[test]
+fn sota_ml_physics_kernels_checks_lints_and_is_bit_exact_across_thread_counts() {
+    let rel = "universe/workstation/sota_ml_physics_kernels.bld";
+    assert_check_and_lint(rel);
+
+    let out_1 = run_release(rel, Some(1), &[]);
+    let out_2 = run_release(rel, Some(2), &[]);
+
+    for (label, out) in [("1-thread", &out_1), ("2-thread", &out_2)] {
+        assert!(
+            out.contains("[PASS] sota_ml_physics_kernels summary checks=6 planted=6 failures=0"),
+            "{label} failed:\n{out}"
+        );
+        assert!(
+            out.contains("ml=999e289b7d8146d0"),
+            "{label} missing ml parity hash:\n{out}"
+        );
+        assert!(
+            out.contains("flash_bn=a9bf99b5e8a91b3b"),
+            "{label} missing flash_bn parity hash:\n{out}"
+        );
+        assert!(
+            out.contains("phys6dof=20d2716da5360737"),
+            "{label} missing phys6dof parity hash:\n{out}"
+        );
+        assert!(!out.contains("[FAIL]"), "{label} reported failure:\n{out}");
+    }
+}
+
+#[test]
+fn vault_verifier_and_null_cone_gravity_check_pass() {
+    let vault_rel = "universe/workstation/vault_verifier.bld";
+    assert_check_and_lint(vault_rel);
+    let vault_out = run_release(vault_rel, None, &[]);
+    assert!(
+        vault_out.contains("VAULT_VERIFIER PASS checks=6 failures=0"),
+        "vault_verifier failed:\n{vault_out}"
+    );
+
+    let gravity_rel = "universe/workstation/null_cone_gravity_check.bld";
+    assert_check_and_lint(gravity_rel);
+    let gravity_out = run_release(gravity_rel, None, &[]);
+    assert!(
+        gravity_out.contains("NULL_CONE_GRAVITY_CHECK PASS failures=0 planted_caught=4/4"),
+        "null_cone_gravity_check failed:\n{gravity_out}"
+    );
+}
+
+#[test]
+fn wave10_compiler_burndown_features_compile_and_run() {
+    let src = r##"
+struct Pair { a: i32, b: i32 }
+impl Pair {
+    pub const ZERO: Pair = Pair { a: 0, b: 0 };
+    fn sum(&self) -> i32 { self.a + self.b }
+}
+
+fn sum_chunks(data: &[i32]) -> i32 {
+    let mut acc: i32 = 0;
+    for chunk in data.chunks(2) {
+        acc += chunk[0] + chunk[1];
+    }
+    acc
+}
+
+fn main() ~ Console {
+    let p = Pair::ZERO;
+    assert_eq!(p.sum(), 0);
+
+    let r = (-1.5_f64).rem_euclid(4.0);
+    assert!(r > 2.49 && r < 2.51);
+
+    let mut v: Vec<i32> = vec![1, 2, 3, 4, 5, 6];
+    let v_copy = v.clone();
+    assert_eq!(v_copy.len(), 6);
+    v.retain(|x| *x % 2 == 0);
+    assert_eq!(v.len(), 3);
+
+    assert_eq!(sum_chunks(&v_copy), 21);
+
+    let parsed = u8::from_str_radix("#ff".trim_start_matches("#"), 16).unwrap_or(0);
+    assert_eq!(parsed, 255);
+    assert_eq!(63 - (16_u64).leading_zeros(), 4);
+
+    let flat: Vec<i32> = (0..2).flat_map(|y| (0..3).map(move |x| y * 10 + x)).collect();
+    assert_eq!(flat.len(), 6);
+    assert_eq!(flat[5], 12);
+
+    let oa: Option<i32> = Some(7);
+    let ob: Option<i32> = Some(5);
+    let tup_sum = if let (Some(a), Some(b)) = (oa, ob) { a + b } else { 0 };
+    assert_eq!(tup_sum, 12);
+
+    println!("WAVE10_FEATURES_OK");
+}
+"##;
+    let tmp = std::env::temp_dir().join("buildlang_wave10_burndown_test.bld");
+    std::fs::write(&tmp, src).expect("write temp bld");
+    let out = buildc()
+        .args(["run", "--release"])
+        .arg(&tmp)
+        .output()
+        .expect("run wave10 test");
+    let _ = std::fs::remove_file(&tmp);
+    assert!(
+        out.status.success(),
+        "wave10 feature test failed:\n{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("WAVE10_FEATURES_OK"),
+        "missing ok marker:\n{stdout}"
+    );
+}

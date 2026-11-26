@@ -281,8 +281,30 @@ impl CBackend {
             // element-sized wrapper. Trait-object pointers (`dyn Trait`) remain
             // unsupported until vtable dispatch is lowered in the C backend.
             MirType::Ptr(inner) if !Self::is_dyn_trait_type(inner) => Self::hvec_ptr_suffix(inner),
+            MirType::Tuple(elems) if Self::is_supported_vec_tuple(elems) => {
+                MirType::tuple_type_name(elems).to_string()
+            }
             _ => "i32".to_string(),
         }
+    }
+
+    /// True when `elems` is a non-empty tuple of concrete non-trait-object,
+    /// non-array, non-nested-tuple elements that the C Vec runtime can store by value.
+    pub(crate) fn is_supported_vec_tuple(elems: &[MirType]) -> bool {
+        !elems.is_empty()
+            && elems.iter().all(|e| {
+                !Self::is_dyn_trait_type(e)
+                    && matches!(
+                        e,
+                        MirType::Bool
+                            | MirType::Int(..)
+                            | MirType::Float(..)
+                            | MirType::Struct(_)
+                            | MirType::Ptr(_)
+                            | MirType::Vec(_)
+                            | MirType::Map(..)
+                    )
+            })
     }
 
     /// True when `ty` represents an unlowered `dyn Trait` object type.
@@ -291,6 +313,7 @@ impl CBackend {
             MirType::TraitObject(_) => true,
             MirType::Struct(n) => n.starts_with("dyn ") || n.starts_with("dyn_"),
             MirType::Ptr(inner) => Self::is_dyn_trait_type(inner),
+            MirType::Tuple(elems) => elems.iter().any(Self::is_dyn_trait_type),
             _ => false,
         }
     }
@@ -321,6 +344,7 @@ impl CBackend {
     fn vec_elem_needs_sized_wrapper(elem: &MirType) -> bool {
         Self::is_slice_ref(elem)
             || matches!(elem, MirType::Ptr(inner) if !Self::is_dyn_trait_type(inner))
+            || matches!(elem, MirType::Tuple(elems) if Self::is_supported_vec_tuple(elems))
             || matches!(elem, MirType::Struct(n) if n.as_ref() != "BuildString")
             || matches!(elem, MirType::Vec(_) | MirType::Map(_, _))
             || matches!(

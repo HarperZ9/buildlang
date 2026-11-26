@@ -244,6 +244,9 @@ impl<'ctx> MirLowerer<'ctx> {
                 },
                 MirType::Struct(name),
             ) => self.const_struct(name, fields),
+            (ExprKind::Call { func, args }, MirType::Struct(name)) => self
+                .const_math_ctor(name, func, args)
+                .or_else(|| self.const_tuple_struct(name, func, args)),
             (ExprKind::Path(p), MirType::Struct(name)) if p.segments.len() >= 2 => {
                 let variant = p.last_ident()?.name.as_ref();
                 let (disc, fields) = self.lookup_enum_variant(name, variant)?;
@@ -288,6 +291,214 @@ impl<'ctx> MirLowerer<'ctx> {
             values.push(self.const_eval_typed(value, fty)?);
         }
         Some(MirConst::Struct(name.clone(), values))
+    }
+
+    /// Evaluate a tuple-struct constant constructor (`CornerFlags(0)`,
+    /// `Wrapper(1 << 2)`).
+    fn const_tuple_struct(
+        &self,
+        name: &std::sync::Arc<str>,
+        func: &ast::Expr,
+        args: &[ast::Expr],
+    ) -> Option<MirConst> {
+        let callee = match &func.kind {
+            ExprKind::Ident(id) => id.name.as_ref(),
+            ExprKind::Path(p) => p.last_ident()?.name.as_ref(),
+            _ => return None,
+        };
+        if callee != name.as_ref() && callee != "Self" {
+            return None;
+        }
+        let decl = self.struct_field_list(name)?;
+        if decl.len() != args.len() {
+            return None;
+        }
+        let mut values = Vec::with_capacity(decl.len());
+        for ((_, fty), arg) in decl.iter().zip(args.iter()) {
+            values.push(self.const_eval_typed(arg, fty)?);
+        }
+        Some(MirConst::Struct(name.clone(), values))
+    }
+
+    /// Evaluate pure stdlib math struct constructors (`Vec3::new`, `Mat3::from_rows`,
+    /// `Mat3x3::from_rows`, `Mat4::from_cols`, etc.) as compile-time constants.
+    fn const_math_ctor(
+        &self,
+        name: &std::sync::Arc<str>,
+        func: &ast::Expr,
+        args: &[ast::Expr],
+    ) -> Option<MirConst> {
+        let ExprKind::Path(p) = &func.kind else {
+            return None;
+        };
+        if p.segments.len() < 2 {
+            return None;
+        }
+        let type_seg = p.segments[p.segments.len() - 2].ident.name.as_ref();
+        let method = p.segments[p.segments.len() - 1].ident.name.as_ref();
+        let canon = match type_seg {
+            "Mat3x3" => "Mat3",
+            other => other,
+        };
+        if canon != name.as_ref() && name.as_ref() != type_seg {
+            return None;
+        }
+        let f32_ty = MirType::Float(crate::codegen::ir::FloatSize::F32);
+        let f64_ty = MirType::Float(crate::codegen::ir::FloatSize::F64);
+        let mk_float = |e: &ast::Expr, ft: &MirType| self.const_eval_typed(e, ft);
+        let zero_f = |ft: &MirType| MirConst::Float(0.0, ft.clone());
+        let one_f = |ft: &MirType| MirConst::Float(1.0, ft.clone());
+
+        match (canon, method) {
+            ("Vec2", "new") if args.len() == 2 => Some(MirConst::Struct(
+                name.clone(),
+                vec![mk_float(&args[0], &f32_ty)?, mk_float(&args[1], &f32_ty)?],
+            )),
+            ("Vec2", "splat") if args.len() == 1 => {
+                let v = mk_float(&args[0], &f32_ty)?;
+                Some(MirConst::Struct(name.clone(), vec![v.clone(), v]))
+            }
+            ("Vec2", "zero") if args.is_empty() => Some(MirConst::Struct(
+                name.clone(),
+                vec![zero_f(&f32_ty), zero_f(&f32_ty)],
+            )),
+            ("Vec2", "one") if args.is_empty() => Some(MirConst::Struct(
+                name.clone(),
+                vec![one_f(&f32_ty), one_f(&f32_ty)],
+            )),
+            ("Vec3", "new") if args.len() == 3 => Some(MirConst::Struct(
+                name.clone(),
+                vec![
+                    mk_float(&args[0], &f32_ty)?,
+                    mk_float(&args[1], &f32_ty)?,
+                    mk_float(&args[2], &f32_ty)?,
+                ],
+            )),
+            ("Vec3", "splat") if args.len() == 1 => {
+                let v = mk_float(&args[0], &f32_ty)?;
+                Some(MirConst::Struct(
+                    name.clone(),
+                    vec![v.clone(), v.clone(), v],
+                ))
+            }
+            ("Vec3", "zero") if args.is_empty() => Some(MirConst::Struct(
+                name.clone(),
+                vec![zero_f(&f32_ty), zero_f(&f32_ty), zero_f(&f32_ty)],
+            )),
+            ("Vec3", "one") if args.is_empty() => Some(MirConst::Struct(
+                name.clone(),
+                vec![one_f(&f32_ty), one_f(&f32_ty), one_f(&f32_ty)],
+            )),
+            ("DVec3", "new") if args.len() == 3 => Some(MirConst::Struct(
+                name.clone(),
+                vec![
+                    mk_float(&args[0], &f64_ty)?,
+                    mk_float(&args[1], &f64_ty)?,
+                    mk_float(&args[2], &f64_ty)?,
+                ],
+            )),
+            ("Vec4" | "Quaternion", "new") if args.len() == 4 => Some(MirConst::Struct(
+                name.clone(),
+                vec![
+                    mk_float(&args[0], &f32_ty)?,
+                    mk_float(&args[1], &f32_ty)?,
+                    mk_float(&args[2], &f32_ty)?,
+                    mk_float(&args[3], &f32_ty)?,
+                ],
+            )),
+            ("DQuat", "new") if args.len() == 4 => Some(MirConst::Struct(
+                name.clone(),
+                vec![
+                    mk_float(&args[0], &f64_ty)?,
+                    mk_float(&args[1], &f64_ty)?,
+                    mk_float(&args[2], &f64_ty)?,
+                    mk_float(&args[3], &f64_ty)?,
+                ],
+            )),
+            ("Mat3" | "DMat3", "from_rows") if args.len() == 3 => {
+                let vec_name = std::sync::Arc::from(if canon == "Mat3" { "Vec3" } else { "DVec3" });
+                let vec_ty = MirType::Struct(vec_name);
+                let r0 = match self.const_eval_typed(&args[0], &vec_ty)? {
+                    MirConst::Struct(_, fs) if fs.len() == 3 => fs,
+                    _ => return None,
+                };
+                let r1 = match self.const_eval_typed(&args[1], &vec_ty)? {
+                    MirConst::Struct(_, fs) if fs.len() == 3 => fs,
+                    _ => return None,
+                };
+                let r2 = match self.const_eval_typed(&args[2], &vec_ty)? {
+                    MirConst::Struct(_, fs) if fs.len() == 3 => fs,
+                    _ => return None,
+                };
+                let vn: std::sync::Arc<str> =
+                    std::sync::Arc::from(if canon == "Mat3" { "Vec3" } else { "DVec3" });
+                let c0 = MirConst::Struct(
+                    vn.clone(),
+                    vec![r0[0].clone(), r1[0].clone(), r2[0].clone()],
+                );
+                let c1 = MirConst::Struct(
+                    vn.clone(),
+                    vec![r0[1].clone(), r1[1].clone(), r2[1].clone()],
+                );
+                let c2 = MirConst::Struct(vn, vec![r0[2].clone(), r1[2].clone(), r2[2].clone()]);
+                Some(MirConst::Struct(name.clone(), vec![c0, c1, c2]))
+            }
+            ("Mat3" | "DMat3", "from_cols") if args.len() == 3 => {
+                let vec_name = std::sync::Arc::from(if canon == "Mat3" { "Vec3" } else { "DVec3" });
+                let vec_ty = MirType::Struct(vec_name);
+                Some(MirConst::Struct(
+                    name.clone(),
+                    vec![
+                        self.const_eval_typed(&args[0], &vec_ty)?,
+                        self.const_eval_typed(&args[1], &vec_ty)?,
+                        self.const_eval_typed(&args[2], &vec_ty)?,
+                    ],
+                ))
+            }
+            ("Mat3" | "DMat3", "new") if args.len() == 9 => {
+                let ft = if canon == "Mat3" { &f32_ty } else { &f64_ty };
+                let vn: std::sync::Arc<str> =
+                    std::sync::Arc::from(if canon == "Mat3" { "Vec3" } else { "DVec3" });
+                let c0 = MirConst::Struct(
+                    vn.clone(),
+                    vec![
+                        mk_float(&args[0], ft)?,
+                        mk_float(&args[1], ft)?,
+                        mk_float(&args[2], ft)?,
+                    ],
+                );
+                let c1 = MirConst::Struct(
+                    vn.clone(),
+                    vec![
+                        mk_float(&args[3], ft)?,
+                        mk_float(&args[4], ft)?,
+                        mk_float(&args[5], ft)?,
+                    ],
+                );
+                let c2 = MirConst::Struct(
+                    vn,
+                    vec![
+                        mk_float(&args[6], ft)?,
+                        mk_float(&args[7], ft)?,
+                        mk_float(&args[8], ft)?,
+                    ],
+                );
+                Some(MirConst::Struct(name.clone(), vec![c0, c1, c2]))
+            }
+            ("Mat4", "from_cols") if args.len() == 4 => {
+                let vec_ty = MirType::Struct(std::sync::Arc::from("Vec4"));
+                Some(MirConst::Struct(
+                    name.clone(),
+                    vec![
+                        self.const_eval_typed(&args[0], &vec_ty)?,
+                        self.const_eval_typed(&args[1], &vec_ty)?,
+                        self.const_eval_typed(&args[2], &vec_ty)?,
+                        self.const_eval_typed(&args[3], &vec_ty)?,
+                    ],
+                ))
+            }
+            _ => None,
+        }
     }
 }
 

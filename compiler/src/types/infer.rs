@@ -2695,16 +2695,28 @@ impl<'ctx> TypeInfer<'ctx> {
 
     /// Resolve the Iterator::Item associated type.
     fn resolve_iterator_item(&self, iter_ty: &Ty) -> Ty {
+        let is_vec_def = |def_id: DefId| -> bool {
+            def_id == DefId::DUMMY
+                || super::ty::def_name(def_id).as_deref() == Some("Vec")
+                || self
+                    .ctx
+                    .lookup_type(def_id)
+                    .is_some_and(|td| td.name.as_ref() == "Vec")
+        };
         if let (Some(ref env), Some(ref builtins)) = (&self.trait_env, &self.builtin_traits) {
             let mut resolver = TraitResolver::new(env);
             if let Ok(item_ty) = resolver.resolve_assoc_type(iter_ty, builtins.iterator, "Item") {
-                return item_ty;
+                if !matches!(self.apply(&item_ty).kind, TyKind::Var(_) | TyKind::Infer(_)) {
+                    return item_ty;
+                }
             }
             // Try IntoIterator
             if let Ok(item_ty) =
                 resolver.resolve_assoc_type(iter_ty, builtins.into_iterator, "Item")
             {
-                return item_ty;
+                if !matches!(self.apply(&item_ty).kind, TyKind::Var(_) | TyKind::Infer(_)) {
+                    return item_ty;
+                }
             }
         }
         // Fallback: infer from common patterns
@@ -2713,11 +2725,15 @@ impl<'ctx> TypeInfer<'ctx> {
                 // Iterating over array/slice yields references to elements
                 Ty::reference(None, Mutability::Immutable, (**elem).clone())
             }
-            TyKind::Ref(_, _, inner) => {
+            TyKind::Adt(def_id, args) if is_vec_def(*def_id) && !args.is_empty() => args[0].clone(),
+            TyKind::Ref(_, mutability, inner) => {
                 // Iterating over &[T] or &Vec<T>
                 match &inner.kind {
                     TyKind::Array(elem, _) | TyKind::Slice(elem) => {
-                        Ty::reference(None, Mutability::Immutable, (**elem).clone())
+                        Ty::reference(None, *mutability, (**elem).clone())
+                    }
+                    TyKind::Adt(def_id, args) if is_vec_def(*def_id) && !args.is_empty() => {
+                        Ty::reference(None, *mutability, args[0].clone())
                     }
                     _ => Ty::fresh_var(),
                 }
@@ -3052,6 +3068,40 @@ impl<'ctx> TypeInfer<'ctx> {
                         if name1.is_some() && name1 == name2 {
                             return Ok(()); // Same type by name - allow it
                         }
+                    }
+                }
+                // Allow float array literals to coerce to built-in vector/matrix
+                // types (`[f; 2] -> vec2`, `[f; 3] -> vec3`, `[f; 4] -> vec4`,
+                // `[[f; 4]; 4] -> mat4`).
+                let is_float_like = |ty: &Ty| {
+                    matches!(
+                        &ty.kind,
+                        TyKind::Float(_)
+                            | TyKind::Infer(InferTy {
+                                kind: InferKind::Float,
+                                ..
+                            })
+                    )
+                };
+                let vec_array_match = |adt_id: DefId, arr_ty: &Ty| -> bool {
+                    let Some(td) = self.ctx.lookup_type(adt_id) else {
+                        return false;
+                    };
+                    match (td.name.as_ref(), &arr_ty.kind) {
+                        ("vec2", TyKind::Array(el, 2))
+                        | ("vec3", TyKind::Array(el, 3))
+                        | ("vec4", TyKind::Array(el, 4)) => is_float_like(el),
+                        ("mat4", TyKind::Array(row, 4)) => {
+                            matches!(&row.kind, TyKind::Array(el, 4) if is_float_like(el))
+                        }
+                        _ => false,
+                    }
+                };
+                if let (TyKind::Adt(d, _), arr) | (arr, TyKind::Adt(d, _)) =
+                    (&expected.kind, &found.kind)
+                {
+                    if vec_array_match(*d, &Ty::new(arr.clone())) {
+                        return Ok(());
                     }
                 }
                 let e = TypeError::TypeMismatch {
@@ -4525,67 +4575,89 @@ impl<'ctx> TypeInfer<'ctx> {
         if let Some(method) = operator_method {
             let left_applied = self.apply(&left_ty);
             let right_applied = self.apply(&right_ty);
-            if let Some(target) = super::context::OperatorTarget::from_ty(&left_applied) {
+            let rhs_matches = |rhs: &Ty, actual: &Ty| -> bool {
+                let rhs_inner = match &rhs.kind {
+                    TyKind::Ref(_, _, i) => i.as_ref(),
+                    _ => rhs,
+                };
+                let act_inner = match &actual.kind {
+                    TyKind::Ref(_, _, i) => i.as_ref(),
+                    _ => actual,
+                };
+                match (&rhs_inner.kind, &act_inner.kind) {
+                    (TyKind::Adt(d1, _), TyKind::Adt(d2, _)) => d1 == d2,
+                    (TyKind::Float(_), TyKind::Float(_))
+                    | (
+                        TyKind::Float(_),
+                        TyKind::Infer(InferTy {
+                            kind: InferKind::Float,
+                            ..
+                        }),
+                    )
+                    | (TyKind::Int(_), TyKind::Int(_))
+                    | (
+                        TyKind::Int(_),
+                        TyKind::Infer(InferTy {
+                            kind: InferKind::Int,
+                            ..
+                        }),
+                    )
+                    | (TyKind::Bool, TyKind::Bool) => true,
+                    _ => false,
+                }
+            };
+            // Resolve float-literal LHS against `impl Op<Adt> for f32/f64` (e.g. `2.0 * v`).
+            let candidate_targets: Vec<(super::context::OperatorTarget, Option<Ty>)> =
+                if let Some(target) = super::context::OperatorTarget::from_ty(&left_applied) {
+                    vec![(target, None)]
+                } else if matches!(
+                    left_applied.kind,
+                    TyKind::Infer(InferTy {
+                        kind: InferKind::Float,
+                        ..
+                    })
+                ) {
+                    vec![
+                        (
+                            super::context::OperatorTarget::Float(FloatTy::F32),
+                            Some(Ty::float(FloatTy::F32)),
+                        ),
+                        (
+                            super::context::OperatorTarget::Float(FloatTy::F64),
+                            Some(Ty::float(FloatTy::F64)),
+                        ),
+                    ]
+                } else {
+                    Vec::new()
+                };
+            for (target, concrete_lhs) in candidate_targets {
                 let overloads: Vec<(Option<Ty>, Ty)> =
                     self.ctx.lookup_operator_methods(target, method).to_vec();
-                if !overloads.is_empty() {
-                    let is_primitive_lhs = matches!(
-                        target,
-                        super::context::OperatorTarget::Int(_)
-                            | super::context::OperatorTarget::Float(_)
-                            | super::context::OperatorTarget::Bool
-                    );
-                    let rhs_matches = |rhs: &Ty, actual: &Ty| -> bool {
-                        let rhs_inner = match &rhs.kind {
-                            TyKind::Ref(_, _, i) => i.as_ref(),
-                            _ => rhs,
-                        };
-                        let act_inner = match &actual.kind {
-                            TyKind::Ref(_, _, i) => i.as_ref(),
-                            _ => actual,
-                        };
-                        match (&rhs_inner.kind, &act_inner.kind) {
-                            (TyKind::Adt(d1, _), TyKind::Adt(d2, _)) => d1 == d2,
-                            (TyKind::Float(_), TyKind::Float(_))
-                            | (
-                                TyKind::Float(_),
-                                TyKind::Infer(InferTy {
-                                    kind: InferKind::Float,
-                                    ..
-                                }),
-                            )
-                            | (TyKind::Int(_), TyKind::Int(_))
-                            | (
-                                TyKind::Int(_),
-                                TyKind::Infer(InferTy {
-                                    kind: InferKind::Int,
-                                    ..
-                                }),
-                            )
-                            | (TyKind::Bool, TyKind::Bool) => true,
-                            _ => false,
+                if overloads.is_empty() {
+                    continue;
+                }
+                let is_primitive_lhs = matches!(
+                    target,
+                    super::context::OperatorTarget::Int(_)
+                        | super::context::OperatorTarget::Float(_)
+                        | super::context::OperatorTarget::Bool
+                );
+                let matched = overloads
+                    .iter()
+                    .find(|(rhs, _)| rhs.as_ref().is_some_and(|r| rhs_matches(r, &right_applied)))
+                    .or_else(|| {
+                        if !is_primitive_lhs && overloads.len() == 1 {
+                            overloads.first()
+                        } else {
+                            None
                         }
-                    };
-                    let matched = overloads
-                        .iter()
-                        .find(|(rhs, _)| {
-                            rhs.as_ref().is_some_and(|r| rhs_matches(r, &right_applied))
-                        })
-                        .or_else(|| {
-                            // For user ADT LHS with a single overload, fall back
-                            // to it so inference variables unify (e.g. `v * x`);
-                            // for primitive LHS (like `f32 * f32`), only intercept
-                            // when the RHS matches a registered overload (like `f32 * Vec3`).
-                            if !is_primitive_lhs && overloads.len() == 1 {
-                                overloads.first()
-                            } else {
-                                None
-                            }
-                        });
-                    if let Some((Some(rhs), ret)) = matched {
-                        let _ = self.unify(rhs, &right_ty, span);
-                        return self.apply(ret);
+                    });
+                if let Some((Some(rhs), ret)) = matched {
+                    if let Some(lhs_ty) = concrete_lhs {
+                        let _ = self.unify(&left_ty, &lhs_ty, span);
                     }
+                    let _ = self.unify(rhs, &right_ty, span);
+                    return self.apply(ret);
                 }
             }
         }
@@ -4923,7 +4995,63 @@ impl<'ctx> TypeInfer<'ctx> {
         let target_ty = self.infer_expr(target);
         let value_sources = self.call_sources(value);
         let value_ty = self.infer_expr(value);
-        let _ = self.unify(&target_ty, &value_ty, span);
+        let compound_op_method = match op {
+            AssignOp::AddAssign => Some("add"),
+            AssignOp::SubAssign => Some("sub"),
+            AssignOp::MulAssign => Some("mul"),
+            AssignOp::DivAssign => Some("div"),
+            AssignOp::RemAssign => Some("rem"),
+            _ => None,
+        };
+        let mut matched_compound_op = false;
+        if let Some(method) = compound_op_method {
+            let target_applied = self.apply(&target_ty);
+            let value_applied = self.apply(&value_ty);
+            if let Some(target_key) = super::context::OperatorTarget::from_ty(&target_applied) {
+                let overloads: Vec<(Option<Ty>, Ty)> = self
+                    .ctx
+                    .lookup_operator_methods(target_key, method)
+                    .to_vec();
+                if let Some((Some(rhs), _)) = overloads.iter().find(|(rhs, _)| {
+                    rhs.as_ref().is_some_and(|r| {
+                        let ri = match &r.kind {
+                            TyKind::Ref(_, _, i) => i.as_ref(),
+                            _ => r,
+                        };
+                        let vi = match &value_applied.kind {
+                            TyKind::Ref(_, _, i) => i.as_ref(),
+                            _ => &value_applied,
+                        };
+                        match (&ri.kind, &vi.kind) {
+                            (TyKind::Adt(d1, _), TyKind::Adt(d2, _)) => d1 == d2,
+                            (TyKind::Float(_), TyKind::Float(_))
+                            | (
+                                TyKind::Float(_),
+                                TyKind::Infer(InferTy {
+                                    kind: InferKind::Float,
+                                    ..
+                                }),
+                            )
+                            | (TyKind::Int(_), TyKind::Int(_))
+                            | (
+                                TyKind::Int(_),
+                                TyKind::Infer(InferTy {
+                                    kind: InferKind::Int,
+                                    ..
+                                }),
+                            ) => true,
+                            _ => false,
+                        }
+                    })
+                }) {
+                    let _ = self.unify(rhs, &value_ty, span);
+                    matched_compound_op = true;
+                }
+            }
+        }
+        if !matched_compound_op {
+            let _ = self.unify(&target_ty, &value_ty, span);
+        }
         self.check_write_through_shared_ref(target, span);
         if let ExprKind::Ident(ident) = &target.kind {
             if self.ctx.var_is_immutable(ident.name.as_ref()) {
@@ -5108,7 +5236,7 @@ impl<'ctx> TypeInfer<'ctx> {
                     Ty::error()
                 }
             }
-            // Tuple structs: access fields by numeric index (e.g. `val.0`)
+            // Tuple structs and built-in vector types: access fields by numeric index (`val.0`).
             TyKind::Adt(def_id, _substs) => {
                 if let Some(type_def) = self.ctx.lookup_type(*def_id) {
                     if let TypeDefKind::Struct(struct_def) = &type_def.kind {
@@ -5118,6 +5246,13 @@ impl<'ctx> TypeInfer<'ctx> {
                                 if fname.as_ref() == idx_str {
                                     return fty.clone();
                                 }
+                            }
+                        } else if matches!(
+                            type_def.name.as_ref(),
+                            "vec2" | "vec3" | "vec4" | "uvec3"
+                        ) {
+                            if let Some((_, fty)) = struct_def.fields.get(index as usize) {
+                                return fty.clone();
                             }
                         }
                     }
@@ -6275,24 +6410,46 @@ impl<'ctx> TypeInfer<'ctx> {
             }
             "to_string" | "to_owned" | "to_json" => return Ty::str(),
             "as_str" => return Ty::str(),
-            "as_ref" => {
-                let inner_recv = match &receiver_ty.kind {
+            "as_ref" | "as_mut" => {
+                let is_mut = method_name == "as_mut";
+                let ref_mut = if is_mut {
+                    Mutability::Mutable
+                } else {
+                    Mutability::Immutable
+                };
+                let applied_recv = self.apply(&receiver_ty);
+                let inner_recv = match &applied_recv.kind {
                     TyKind::Ref(_, _, inner) => self.apply(inner),
-                    _ => receiver_ty.clone(),
+                    _ => applied_recv,
                 };
                 if let TyKind::Adt(def_id, substs) = &inner_recv.kind {
-                    if Some(*def_id) == self.well_known_types.option && !substs.is_empty() {
-                        let ref_inner =
-                            Ty::reference(None, Mutability::Immutable, substs[0].clone());
-                        if let Some(res) = self.option_ty(ref_inner) {
+                    let is_option = Some(*def_id) == self.well_known_types.option
+                        || super::ty::def_name(*def_id).as_deref() == Some("Option")
+                        || self
+                            .ctx
+                            .lookup_type(*def_id)
+                            .is_some_and(|td| td.name.as_ref() == "Option");
+                    if is_option && !substs.is_empty() {
+                        let ref_inner = Ty::reference(None, ref_mut, substs[0].clone());
+                        if let Some(res) = self.option_ty(ref_inner.clone()) {
                             return res;
                         }
+                        return Ty::new(TyKind::Adt(*def_id, vec![ref_inner]));
                     }
-                    if Some(*def_id) == self.well_known_types.result && substs.len() >= 2 {
-                        let ok_ref = Ty::reference(None, Mutability::Immutable, substs[0].clone());
-                        let err_ref = Ty::reference(None, Mutability::Immutable, substs[1].clone());
+                    let is_result = Some(*def_id) == self.well_known_types.result
+                        || super::ty::def_name(*def_id).as_deref() == Some("Result")
+                        || self
+                            .ctx
+                            .lookup_type(*def_id)
+                            .is_some_and(|td| td.name.as_ref() == "Result");
+                    if is_result && substs.len() >= 2 {
+                        let ok_ref = Ty::reference(None, ref_mut, substs[0].clone());
+                        let err_ref = Ty::reference(None, ref_mut, substs[1].clone());
                         return Ty::new(TyKind::Adt(*def_id, vec![ok_ref, err_ref]));
                     }
+                }
+                if is_mut || matches!(inner_recv.kind, TyKind::Infer(_) | TyKind::Var(_)) {
+                    return Ty::fresh_var();
                 }
                 return Ty::str();
             }
@@ -6527,26 +6684,6 @@ impl<'ctx> TypeInfer<'ctx> {
             {
                 return Ty::bool();
             }
-            "as_mut" => {
-                let inner_recv = match &receiver_ty.kind {
-                    TyKind::Ref(_, _, inner) => self.apply(inner),
-                    _ => receiver_ty.clone(),
-                };
-                if let TyKind::Adt(def_id, substs) = &inner_recv.kind {
-                    if Some(*def_id) == self.well_known_types.option && !substs.is_empty() {
-                        let ref_inner = Ty::reference(None, Mutability::Mutable, substs[0].clone());
-                        if let Some(res) = self.option_ty(ref_inner) {
-                            return res;
-                        }
-                    }
-                    if Some(*def_id) == self.well_known_types.result && substs.len() >= 2 {
-                        let ok_ref = Ty::reference(None, Mutability::Mutable, substs[0].clone());
-                        let err_ref = Ty::reference(None, Mutability::Mutable, substs[1].clone());
-                        return Ty::new(TyKind::Adt(*def_id, vec![ok_ref, err_ref]));
-                    }
-                }
-                return Ty::fresh_var();
-            }
 
             // =================================================================
             // INTEGER METHODS
@@ -6631,6 +6768,16 @@ impl<'ctx> TypeInfer<'ctx> {
                 } else {
                     Ty::int(IntTy::U64)
                 };
+            }
+            "to_le_bytes" | "to_be_bytes" | "to_ne_bytes" if is_float => {
+                return if matches!(receiver_ty.kind, TyKind::Float(FloatTy::F32)) {
+                    Ty::array(Ty::int(IntTy::U8), 4)
+                } else {
+                    Ty::array(Ty::int(IntTy::U8), 8)
+                };
+            }
+            "encode_utf8" if matches!(&receiver_ty.kind, TyKind::Char) => {
+                return Ty::reference(None, Mutability::Mutable, Ty::str());
             }
             "to_int_unchecked" if is_float => return Ty::fresh_var(),
             "classify" if is_float => return Ty::fresh_var(),
@@ -6893,6 +7040,7 @@ impl<'ctx> TypeInfer<'ctx> {
         for arm in arms {
             self.source_bindings = pre_match_sources.clone();
             self.linear_slots = pre_match_linear.clone();
+            self.ctx.push_scope(ScopeKind::Block);
 
             // Type check pattern against scrutinee
             self.check_pattern(&arm.pattern, &scrutinee_ty);
@@ -6916,6 +7064,7 @@ impl<'ctx> TypeInfer<'ctx> {
             result_ty = self.merge_future_effect_annotations(&result_ty, &body_ty);
 
             self.source_bindings.pop();
+            self.ctx.pop_scope();
             arm_source_snapshots.push(self.source_bindings.clone());
             arm_linear_snapshots.push(self.linear_slots.clone());
         }
@@ -8217,6 +8366,22 @@ impl<'ctx> TypeInfer<'ctx> {
                     self.bind_pattern_mode(sub, ty, mode);
                 }
             }
+            ast::PatternKind::RefBind {
+                mutability,
+                name,
+                subpattern,
+            } => {
+                let ref_mut = match mutability {
+                    ast::Mutability::Mutable => Mutability::Mutable,
+                    ast::Mutability::Immutable => Mutability::Immutable,
+                };
+                let bound = Ty::reference(None, ref_mut, ty.clone());
+                self.ctx.define_var(name.name.clone(), bound.clone());
+                self.register_linear_local(name.name.as_ref(), &bound);
+                if let Some(sub) = subpattern {
+                    self.bind_pattern_mode(sub, ty, mode);
+                }
+            }
             ast::PatternKind::Tuple(patterns) => {
                 match &ty.kind {
                     TyKind::Tuple(elem_tys) => {
@@ -8600,6 +8765,16 @@ impl<'ctx> TypeInfer<'ctx> {
                     let inner_ty = self.lower_type(inner);
                     return Ty::ptr(Mutability::Mutable, inner_ty);
                 }
+            }
+
+            // Vec<T>: built-in growable vector carrying its element type T.
+            // A user type named Vec takes priority.
+            if name == "Vec" && self.ctx.lookup_type_by_name(name).is_none() {
+                if let Some([ast::GenericArg::Type(inner)]) = path.last_generics() {
+                    let inner_ty = self.lower_type(inner);
+                    return Ty::vec(inner_ty);
+                }
+                return Ty::vec(Ty::fresh_var());
             }
 
             // Look up type definition by name
