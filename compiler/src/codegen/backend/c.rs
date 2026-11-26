@@ -2871,6 +2871,12 @@ impl CBackend {
                         return Ok(());
                     }
                 }
+                // Skip unit-constant assignments: a unit `match` with early-return
+                // arms inside `else if` may leave a temp assigned `MirConst::Unit`,
+                // which would otherwise emit `_N = ((void)0);`.
+                if matches!(value, MirRValue::Use(MirValue::Const(MirConst::Unit))) {
+                    return Ok(());
+                }
                 let dest_name = self.local_name(*dest, locals);
                 // Check if dest is an array type and value is an aggregate
                 let is_array_dest = locals
@@ -5485,8 +5491,11 @@ impl CBackend {
             .and_then(|l| l.name.as_ref())
             .map(|n| {
                 let name = n.to_string();
-                // Escape C reserved words/types by prefixing with underscore
-                let base = if Self::is_c_reserved(&name) {
+                // Escape C reserved words/types (and main's C entry parameters
+                // `argc`/`argv` inside `fn main()`) by prefixing with underscore.
+                let collides_main_param = self.current_fn_name.as_deref() == Some("main")
+                    && matches!(name.as_str(), "argc" | "argv");
+                let base = if Self::is_c_reserved(&name) || collides_main_param {
                     format!("_{}", name)
                 } else {
                     name.clone()

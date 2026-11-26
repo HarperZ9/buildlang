@@ -288,6 +288,19 @@ impl Unifier {
                 self.unify_mode(elem1, elem2, invariant)
             }
 
+            // Vec-to-slice deref coercion: Vec<T> unifies with [T] so `&Vec<T>`
+            // coerces to `&[T]` (preserving element-type invariance).
+            (TyKind::Adt(def_id, args), TyKind::Slice(elem2))
+                if *def_id == DefId::DUMMY && args.len() == 1 =>
+            {
+                self.unify_mode(&args[0], elem2, invariant)
+            }
+            (TyKind::Slice(elem1), TyKind::Adt(def_id, args))
+                if *def_id == DefId::DUMMY && args.len() == 1 =>
+            {
+                self.unify_mode(elem1, &args[0], invariant)
+            }
+
             // References: same mutability and unified pointee
             (TyKind::Ref(lt1, mut1, ty1), TyKind::Ref(lt2, mut2, ty2)) => {
                 if mut1 != mut2 {

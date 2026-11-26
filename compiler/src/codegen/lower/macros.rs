@@ -1418,7 +1418,7 @@ impl<'ctx> MirLowerer<'ctx> {
     /// `vec_elem_needs_sized_wrapper` in codegen/backend/c.rs and with the vec
     /// method and free-function accessor tables in codegen/lower/expr.rs, so a
     /// `vec![...]` builds the same typed handle those accessors later read.
-    fn vec_fn_names_for_type(elem_ty: &MirType) -> CodegenResult<(String, String)> {
+    pub(super) fn vec_fn_names_for_type(elem_ty: &MirType) -> CodegenResult<(String, String)> {
         let suffix: String = match elem_ty {
             MirType::Float(FloatSize::F64) | MirType::Float(FloatSize::F32) => "f64".to_string(),
             MirType::Int(IntSize::I8, true) => "i8".to_string(),
@@ -3208,31 +3208,110 @@ impl<'ctx> MirLowerer<'ctx> {
                         if let Some(ret_ty) = return_type {
                             ty = self.lower_type_from_ast(ret_ty);
                         } else {
-                            // Try to infer from the closure body: if the body
-                            // is a simple identifier matching a parameter, use
-                            // that parameter's type annotation.
-                            if let ExprKind::Ident(body_ident) = &body.kind {
-                                for param in params {
-                                    if let ast::PatternKind::Ident { name, .. } =
-                                        &param.pattern.kind
-                                    {
-                                        if name.name.as_ref() == body_ident.name.as_ref() {
-                                            if let Some(pt) = &param.ty {
-                                                ty = self.lower_type_from_ast(pt);
+                            let single_param_name = if params.len() == 1 {
+                                match &params[0].pattern.kind {
+                                    ast::PatternKind::Ident { name, .. } => {
+                                        Some(name.name.as_ref())
+                                    }
+                                    ast::PatternKind::Ref { pattern, .. } => match &pattern.kind {
+                                        ast::PatternKind::Ident { name, .. } => {
+                                            Some(name.name.as_ref())
+                                        }
+                                        _ => None,
+                                    },
+                                    _ => None,
+                                }
+                            } else {
+                                None
+                            };
+                            let expr_is_param = |e: &ast::Expr| -> bool {
+                                let mut cur = e;
+                                loop {
+                                    match &cur.kind {
+                                        ExprKind::Paren(inner) | ExprKind::Deref(inner) => {
+                                            cur = inner;
+                                        }
+                                        ExprKind::Ident(id) => {
+                                            return single_param_name == Some(id.name.as_ref());
+                                        }
+                                        _ => return false,
+                                    }
+                                }
+                            };
+                            let struct_name_of = |t: &MirType| -> Option<Arc<str>> {
+                                match t {
+                                    MirType::Struct(n) => Some(n.clone()),
+                                    MirType::Ptr(inner) => match inner.as_ref() {
+                                        MirType::Struct(n) => Some(n.clone()),
+                                        _ => None,
+                                    },
+                                    _ => None,
+                                }
+                            };
+                            match &body.kind {
+                                ExprKind::Cast { ty: cast_ty, .. } => {
+                                    ty = self.lower_type_from_ast(cast_ty);
+                                }
+                                ExprKind::MethodCall {
+                                    receiver, method, ..
+                                } if expr_is_param(receiver) => {
+                                    if let Some(sname) = struct_name_of(&ty) {
+                                        if let Some(mangled) =
+                                            self.impl_methods.get(&(sname, method.name.clone()))
+                                        {
+                                            if let Some(f) = self.module.find_function(mangled) {
+                                                ty = f.sig.ret.clone();
                                             }
-                                            break;
                                         }
                                     }
                                 }
-                            }
-                            // For binary expressions (e.g., |x| x * 2.0),
-                            // the type is preserved from the single param.
-                            else if params.len() == 1 {
-                                if let Some(p) = params.first() {
-                                    if let Some(pt) = &p.ty {
-                                        ty = self.lower_type_from_ast(pt);
+                                ExprKind::Field { expr, field } if expr_is_param(expr) => {
+                                    if let Some(sname) = struct_name_of(&ty) {
+                                        if let Some(fields) = self.struct_field_list(&sname) {
+                                            if let Some((_, fty)) = fields.iter().find(|(n, _)| {
+                                                n.as_deref() == Some(field.name.as_ref())
+                                            }) {
+                                                ty = fty.clone();
+                                            }
+                                        }
                                     }
                                 }
+                                ExprKind::Call { func, .. } => {
+                                    let fn_name = match &func.kind {
+                                        ExprKind::Ident(id) => Some(id.name.as_ref()),
+                                        ExprKind::Path(p) => {
+                                            p.last_ident().map(|i| i.name.as_ref())
+                                        }
+                                        _ => None,
+                                    };
+                                    if let Some(fname) = fn_name {
+                                        if let Some(f) = self.module.find_function(fname) {
+                                            ty = f.sig.ret.clone();
+                                        }
+                                    }
+                                }
+                                ExprKind::Ident(body_ident) => {
+                                    for param in params {
+                                        if let ast::PatternKind::Ident { name, .. } =
+                                            &param.pattern.kind
+                                        {
+                                            if name.name.as_ref() == body_ident.name.as_ref() {
+                                                if let Some(pt) = &param.ty {
+                                                    ty = self.lower_type_from_ast(pt);
+                                                }
+                                                break;
+                                            }
+                                        }
+                                    }
+                                }
+                                _ if params.len() == 1 => {
+                                    if let Some(p) = params.first() {
+                                        if let Some(pt) = &p.ty {
+                                            ty = self.lower_type_from_ast(pt);
+                                        }
+                                    }
+                                }
+                                _ => {}
                             }
                         }
                     }
