@@ -8,6 +8,7 @@ Compiled BuildLang programs verifying Layer 1 deterministic parallel kernels and
 - `sota_ml_physics_kernels.bld` + `bench_sota_ml_physics_kernels.py`: Pure-BuildLang SOTA ML (`rmsnorm`, `rope_rotate_pair`, `swiglu_gate`, tiled `flash_online_softmax`, scaled `bitnet_b158_ternary_gemv`) and 6-DOF symplectic Velocity-Verlet + Rodrigues unit-quaternion + Tsiolkovsky powered-descent physics suite with 6 planted-failure controls and bit-exact Python parity benchmark.
 - `vault_verifier.bld`: Pure-BuildLang Antigravity Lossless Vault Verifier kernel checking canonical FNV-1a manifest digests, deduplication byte conservation, and planted-tamper rejection.
 - `null_cone_gravity_check.bld`: Pure-BuildLang deterministic f64 verification kernel for null-cone gravity equations (Raychaudhuri Simpson quadrature, polylog crossover, corner-boost shift, clock-entropy log) with 4 planted-failure controls.
+- `wave15_online_rkl_noh4_oracle.bld`: Pure-BuildLang deterministic f64 1-Pass Online-Softmax Reverse-KL oracle over Qwen2.5 151,936-vocab logits (`par_for` associative chunk merge matching Python `dense_exact_reverse_kl` to `< 1e-13`, overflow-proof under `+800/-800` shift) plus NOH-4 proactive + reseating CODIT immune valve (`MACE4IRmol` 4-stream spread, energy residual, `K_settle=3` hysteresis, cosine-ramp re-admission, and 4 planted controls).
 - `workstation_mcp.bld` + `test_agent_sdk_mcp.py`: Pure-BuildLang Model- & Agent-Native Compiled SDK Server v2 (`~ Console + FileSystem + Clock + Environment`, zero Network/Process/Foreign authority) implementing JSON-RPC 2.0 MCP over stdio (`initialize`, `ping`, `tools/list`, `tools/call`) with 8 compact tools (`sdk_manifest`, `anti_silo_preflight`, `audit_public_hygiene`, `kcore_eval`, `procgen_sdf_eval`, `aerospace_gnc_eval`, `bitnet_ternary_dot`, `receipt_verify_hash`) returning `{ ok, verdict, result, next_valid_actions, fnv1a_digest, elapsed_ns }`, `--self-test`, and stdio latency/parity harness.
 
 ## Run
@@ -22,6 +23,7 @@ BUILDLANG_STDLIB=stdlib buildc run --release universe/workstation/sota_ml_physic
 python universe/workstation/bench_sota_ml_physics_kernels.py
 BUILDLANG_STDLIB=stdlib buildc run --release universe/workstation/vault_verifier.bld
 BUILDLANG_STDLIB=stdlib buildc run --release universe/workstation/null_cone_gravity_check.bld
+BUILDLANG_STDLIB=stdlib buildc run --release universe/workstation/wave15_online_rkl_noh4_oracle.bld
 BUILDLANG_STDLIB=stdlib buildc run --release universe/workstation/workstation_mcp.bld -- --self-test
 python universe/workstation/test_agent_sdk_mcp.py
 ```

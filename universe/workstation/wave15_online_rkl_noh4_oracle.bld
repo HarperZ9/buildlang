@@ -1,0 +1,396 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 Zain Dana Harper.
+//
+// Wave 15 Cross-Lane Deterministic BuildLang f64 Oracle:
+// 1. 1-Pass Online-Softmax Fused Reverse-KL (5-scalar associative chunk state
+//    (mq, lq, mp, lp, s_acc), exact on Qwen2.5 151,936-vocab procedural logits
+//    matching Python colab_h100_runner.py dense_exact_reverse_kl to < 1e-13,
+//    overflow-proof under +800.0 logit shift, and thread-count-invariant par_for).
+// 2. NOH-4 Two-Stage Proactive + Reseating CODIT Immune Valve combining
+//    MACE4IRmol 4-stream ensemble spread (std(delta_k) > tau_ens), variational
+//    energy residual (dE > tol), NOH-3 non-finite/pi-norm/quat guards,
+//    K_settle >= 3 consecutive clean ticks hysteresis, and cosine-ramp re-admission.
+
+struct RklState {
+    mq: f64,
+    lq: f64,
+    mp: f64,
+    lp: f64,
+    s_acc: f64,
+}
+
+struct RklChunkCtx {
+    vocab_size: i64,
+    chunk_size: i64,
+    q_shift: f64,
+    p_shift: f64,
+}
+
+struct Noh4Valve {
+    state: i32,
+    clean_streak: i32,
+    ramp_step: i32,
+    quarantine_count: i32,
+    reseat_count: i32,
+}
+
+struct Noh4StepOut {
+    valve: Noh4Valve,
+    gain: f64,
+    isolated: bool,
+}
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { -x } else { x }
+}
+
+fn max_f64(a: f64, b: f64) -> f64 {
+    if a > b { a } else { b }
+}
+
+fn is_finite_f64(x: f64) -> bool {
+    x == x && abs_f64(x) < 1e300
+}
+
+fn proc_q(i: i64, shift: f64) -> f64 {
+    let bump: f64 = if i % 97 == 0 { 0.4 } else { -0.2 };
+    sin((i as f64) * 0.013) * 1.8 + bump + shift
+}
+
+fn proc_p(i: i64, shift: f64) -> f64 {
+    sin((i as f64) * 0.013 + 0.15) * 1.6 - 0.15 + shift
+}
+
+fn rkl_merge(a: RklState, b: RklState) -> RklState {
+    if a.lq == 0.0 {
+        return b;
+    }
+    if b.lq == 0.0 {
+        return a;
+    }
+    let mq_new: f64 = max_f64(a.mq, b.mq);
+    let ea_q: f64 = exp(a.mq - mq_new);
+    let eb_q: f64 = exp(b.mq - mq_new);
+    let lq_new: f64 = a.lq * ea_q + b.lq * eb_q;
+    let s_new: f64 = a.s_acc * ea_q + b.s_acc * eb_q;
+
+    let mp_new: f64 = max_f64(a.mp, b.mp);
+    let lp_new: f64 = a.lp * exp(a.mp - mp_new) + b.lp * exp(b.mp - mp_new);
+    RklState { mq: mq_new, lq: lq_new, mp: mp_new, lp: lp_new, s_acc: s_new }
+}
+
+fn rkl_finalize(st: RklState) -> f64 {
+    let lse_q: f64 = st.mq + log(st.lq);
+    let lse_p: f64 = st.mp + log(st.lp);
+    let kl: f64 = (st.s_acc / st.lq) - (lse_q - lse_p);
+    if kl < 0.0 { 0.0 } else { kl }
+}
+
+fn eval_rkl_chunk(ctx: &RklChunkCtx, chunk_idx: i64) -> RklState {
+    let start: i64 = chunk_idx * ctx.chunk_size;
+    let mut end: i64 = start + ctx.chunk_size;
+    if end > ctx.vocab_size {
+        end = ctx.vocab_size;
+    }
+    if start >= end {
+        return RklState { mq: -1e300, lq: 0.0, mp: -1e300, lp: 0.0, s_acc: 0.0 };
+    }
+    let mut mq: f64 = -1e300;
+    let mut lq: f64 = 0.0;
+    let mut mp: f64 = -1e300;
+    let mut lp: f64 = 0.0;
+    let mut s_acc: f64 = 0.0;
+    let mut i: i64 = start;
+    while i < end {
+        let qv: f64 = proc_q(i, ctx.q_shift);
+        let pv: f64 = proc_p(i, ctx.p_shift);
+        let mq_n: f64 = max_f64(mq, qv);
+        let scale_q: f64 = if lq == 0.0 { 0.0 } else { exp(mq - mq_n) };
+        let wq: f64 = exp(qv - mq_n);
+        lq = lq * scale_q + wq;
+        s_acc = s_acc * scale_q + wq * (qv - pv);
+        mq = mq_n;
+
+        let mp_n: f64 = max_f64(mp, pv);
+        let scale_p: f64 = if lp == 0.0 { 0.0 } else { exp(mp - mp_n) };
+        lp = lp * scale_p + exp(pv - mp_n);
+        mp = mp_n;
+        i = i + 1;
+    }
+    RklState { mq: mq, lq: lq, mp: mp, lp: lp, s_acc: s_acc }
+}
+
+fn rkl_2pass_dense(vocab_size: i64, q_shift: f64, p_shift: f64) -> f64 {
+    let mut mq: f64 = -1e300;
+    let mut mp: f64 = -1e300;
+    let mut i: i64 = 0;
+    while i < vocab_size {
+        mq = max_f64(mq, proc_q(i, q_shift));
+        mp = max_f64(mp, proc_p(i, p_shift));
+        i = i + 1;
+    }
+    let mut sq: f64 = 0.0;
+    let mut sp: f64 = 0.0;
+    let mut j: i64 = 0;
+    while j < vocab_size {
+        sq = sq + exp(proc_q(j, q_shift) - mq);
+        sp = sp + exp(proc_p(j, p_shift) - mp);
+        j = j + 1;
+    }
+    let lse_q: f64 = mq + log(sq);
+    let lse_p: f64 = mp + log(sp);
+    let mut kl: f64 = 0.0;
+    let mut k: i64 = 0;
+    while k < vocab_size {
+        let qv: f64 = proc_q(k, q_shift);
+        let pv: f64 = proc_p(k, p_shift);
+        kl = kl + exp(qv - lse_q) * ((qv - lse_q) - (pv - lse_p));
+        k = k + 1;
+    }
+    if kl < 0.0 { 0.0 } else { kl }
+}
+
+fn stream_std_4(d0: f64, d1: f64, d2: f64, d3: f64) -> f64 {
+    let mean: f64 = 0.25 * (d0 + d1 + d2 + d3);
+    let v0: f64 = d0 - mean;
+    let v1: f64 = d1 - mean;
+    let v2: f64 = d2 - mean;
+    let v3: f64 = d3 - mean;
+    sqrt(0.25 * (v0 * v0 + v1 * v1 + v2 * v2 + v3 * v3))
+}
+
+fn noh4_step(
+    v: Noh4Valve,
+    pi_norm: f64,
+    quat_norm: f64,
+    d0: f64,
+    d1: f64,
+    d2: f64,
+    d3: f64,
+    energy_res: f64,
+    allow_reseat: bool,
+) -> Noh4StepOut {
+    let k_settle: i32 = 3;
+    let k_ramp: i32 = 4;
+    let pi_cap: f64 = 8.0;
+    let tau_ens: f64 = 0.35;
+    let energy_tol: f64 = 1e-3;
+    let quat_tol: f64 = 0.05;
+    let pi_val: f64 = 3.14159265358979323846;
+
+    let finite_ok: bool = is_finite_f64(pi_norm)
+        && is_finite_f64(quat_norm)
+        && is_finite_f64(d0)
+        && is_finite_f64(d1)
+        && is_finite_f64(d2)
+        && is_finite_f64(d3)
+        && is_finite_f64(energy_res);
+    let spread: f64 = if finite_ok { stream_std_4(d0, d1, d2, d3) } else { 1e9 };
+    let fault: bool = !finite_ok
+        || pi_norm > pi_cap
+        || abs_f64(quat_norm - 1.0) > quat_tol
+        || spread > tau_ens
+        || energy_res > energy_tol;
+    let clean_for_reseat: bool = finite_ok
+        && pi_norm < 0.5 * pi_cap
+        && abs_f64(quat_norm - 1.0) < 1e-6
+        && spread < 0.5 * tau_ens
+        && energy_res <= energy_tol;
+
+    let mut next: Noh4Valve = v;
+    if fault {
+        if next.state == 0 || next.state == 2 {
+            next.quarantine_count = next.quarantine_count + 1;
+        }
+        next.state = 1;
+        next.clean_streak = 0;
+        next.ramp_step = 0;
+        return Noh4StepOut { valve: next, gain: 0.0, isolated: true };
+    }
+    if next.state == 1 {
+        if !allow_reseat {
+            return Noh4StepOut { valve: next, gain: 0.0, isolated: true };
+        }
+        if clean_for_reseat {
+            next.clean_streak = next.clean_streak + 1;
+            if next.clean_streak >= k_settle {
+                next.state = 2;
+                next.ramp_step = 1;
+                let g: f64 = 0.5 * (1.0 - cos(pi_val * (next.ramp_step as f64) / (k_ramp as f64)));
+                return Noh4StepOut { valve: next, gain: g, isolated: false };
+            }
+        } else {
+            next.clean_streak = 0;
+        }
+        return Noh4StepOut { valve: next, gain: 0.0, isolated: true };
+    }
+    if next.state == 2 {
+        next.ramp_step = next.ramp_step + 1;
+        if next.ramp_step >= k_ramp {
+            next.state = 0;
+            next.reseat_count = next.reseat_count + 1;
+            return Noh4StepOut { valve: next, gain: 1.0, isolated: false };
+        }
+        let g: f64 = 0.5 * (1.0 - cos(pi_val * (next.ramp_step as f64) / (k_ramp as f64)));
+        return Noh4StepOut { valve: next, gain: g, isolated: false };
+    }
+    Noh4StepOut { valve: next, gain: 1.0, isolated: false }
+}
+
+fn run_noh4_scenarios() -> i32 ~ Console {
+    let mut failures: i32 = 0;
+    let init_v = Noh4Valve {
+        state: 0,
+        clean_streak: 0,
+        ramp_step: 0,
+        quarantine_count: 0,
+        reseat_count: 0,
+    };
+
+    // Scenario A: transient spike at t=3 -> NOH-3 stays locked (gain=0),
+    // NOH-4 isolates at t=3 and reseats cleanly by t=12 (gain=1.0).
+    let mut v3: Noh4Valve = init_v;
+    let mut v4: Noh4Valve = init_v;
+    let mut g3_end: f64 = 0.0;
+    let mut g4_end: f64 = 0.0;
+    let mut iso_t3: bool = false;
+    let mut t: i32 = 0;
+    while t <= 12 {
+        let spike: bool = t == 3;
+        let pi_n: f64 = if spike { 12.0 } else { 1.2 };
+        let spread_hi: f64 = if spike { 1.5 } else { 0.02 };
+        let o3: Noh4StepOut = noh4_step(v3, pi_n, 1.0, 0.0, spread_hi, 0.0, 0.0, 1e-5, false);
+        let o4: Noh4StepOut = noh4_step(v4, pi_n, 1.0, 0.0, spread_hi, 0.0, 0.0, 1e-5, true);
+        v3 = o3.valve;
+        v4 = o4.valve;
+        if t == 3 {
+            iso_t3 = o4.isolated && o3.isolated;
+        }
+        g3_end = o3.gain;
+        g4_end = o4.gain;
+        t = t + 1;
+    }
+    if iso_t3 && g3_end == 0.0 && g4_end == 1.0 && v4.reseat_count == 1 {
+        println!("[PASS] noh4_transient_reseat noh3_gain={} noh4_gain={} reseats={}", g3_end, g4_end, v4.reseat_count);
+    } else {
+        println!("[FAIL] noh4_transient_reseat g3={} g4={}", g3_end, g4_end);
+        failures = failures + 1;
+    }
+
+    // Scenario B (planted chatter control): alternating fault/clean every 2 ticks
+    // must NEVER reseat under K_settle=3 hysteresis.
+    let mut vc: Noh4Valve = init_v;
+    let mut tc: i32 = 0;
+    while tc < 12 {
+        let is_bad: bool = tc % 3 == 0;
+        let d_hi: f64 = if is_bad { 2.0 } else { 0.01 };
+        let oc: Noh4StepOut = noh4_step(vc, 1.0, 1.0, 0.0, d_hi, 0.0, 0.0, 1e-5, true);
+        vc = oc.valve;
+        tc = tc + 1;
+    }
+    if vc.state == 1 && vc.reseat_count == 0 {
+        println!("[PASS] noh4_hysteresis_blocks_chatter state={} reseats={}", vc.state, vc.reseat_count);
+    } else {
+        println!("[FAIL] noh4_hysteresis_blocks_chatter");
+        failures = failures + 1;
+    }
+
+    // Scenario C (planted persistent NaN/energy fault): stays permanently locked.
+    let mut vp: Noh4Valve = init_v;
+    let mut tp: i32 = 0;
+    while tp < 10 {
+        let nan_val: f64 = 0.0 / 0.0;
+        let op: Noh4StepOut = noh4_step(vp, nan_val, 1.0, 0.0, 0.0, 0.0, 0.0, 0.5, true);
+        vp = op.valve;
+        tp = tp + 1;
+    }
+    if vp.state == 1 && vp.reseat_count == 0 {
+        println!("[PASS] noh4_persistent_nan_locked state={} reseats={}", vp.state, vp.reseat_count);
+    } else {
+        println!("[FAIL] noh4_persistent_nan_locked");
+        failures = failures + 1;
+    }
+    failures
+}
+
+fn main() ~ Console + Clock {
+    let vocab: i64 = 151936;
+    let chunk: i64 = 256;
+    let n_chunks: i64 = (vocab + chunk - 1) / chunk;
+    let mut failures: i32 = 0;
+
+    let ctx_base = RklChunkCtx { vocab_size: vocab, chunk_size: chunk, q_shift: 0.0, p_shift: 0.0 };
+    let ctx_shift = RklChunkCtx { vocab_size: vocab, chunk_size: chunk, q_shift: 800.0, p_shift: -800.0 };
+
+    // Reference 2-pass dense Reverse-KL (matches colab_h100_runner.py dense_exact_reverse_kl)
+    let kl_2pass: f64 = rkl_2pass_dense(vocab, 0.0, 0.0);
+
+    // 1-pass serial chunked online-softmax Reverse-KL
+    let t0: i64 = clock_ns();
+    let mut acc_ser = RklState { mq: -1e300, lq: 0.0, mp: -1e300, lp: 0.0, s_acc: 0.0 };
+    let mut c: i64 = 0;
+    while c < n_chunks {
+        acc_ser = rkl_merge(acc_ser, eval_rkl_chunk(&ctx_base, c));
+        c = c + 1;
+    }
+    let kl_1pass_ser: f64 = rkl_finalize(acc_ser);
+    let ser_ns: i64 = clock_ns() - t0;
+
+    // 1-pass parallel par_for chunked online-softmax Reverse-KL
+    let t1: i64 = clock_ns();
+    let partials: Vec<RklState> = par_for(n_chunks, &ctx_base, eval_rkl_chunk);
+    let mut acc_par = RklState { mq: -1e300, lq: 0.0, mp: -1e300, lp: 0.0, s_acc: 0.0 };
+    let mut k: i64 = 0;
+    while k < n_chunks {
+        acc_par = rkl_merge(acc_par, partials[k as usize]);
+        k = k + 1;
+    }
+    let kl_1pass_par: f64 = rkl_finalize(acc_par);
+    let par_ns: i64 = clock_ns() - t1;
+
+    // Overflow-proof +800 / -800 logit shift invariance control
+    let shift_parts: Vec<RklState> = par_for(n_chunks, &ctx_shift, eval_rkl_chunk);
+    let mut acc_sh = RklState { mq: -1e300, lq: 0.0, mp: -1e300, lp: 0.0, s_acc: 0.0 };
+    let mut ks: i64 = 0;
+    while ks < n_chunks {
+        acc_sh = rkl_merge(acc_sh, shift_parts[ks as usize]);
+        ks = ks + 1;
+    }
+    let kl_shifted: f64 = rkl_finalize(acc_sh);
+
+    // Planted control: degenerate zero-KL state differs from true 151,936-vocab KL by > 0.01
+    let kl_zero: f64 = rkl_finalize(RklState { mq: 0.0, lq: 1.0, mp: 0.0, lp: 1.0, s_acc: 0.0 });
+
+    let py_ref: f64 = 0.018721847303216;
+    let err_2pass: f64 = abs_f64(kl_1pass_ser - kl_2pass);
+    let err_par: f64 = abs_f64(kl_1pass_par - kl_1pass_ser);
+    let err_shift: f64 = abs_f64(kl_shifted - kl_1pass_ser);
+    let err_py: f64 = abs_f64(kl_1pass_par - py_ref);
+    let planted_gap: f64 = abs_f64(kl_1pass_par - kl_zero);
+
+    if err_2pass < 1e-13
+        && err_par == 0.0
+        && err_shift < 1e-11
+        && err_py < 1e-13
+        && planted_gap > 0.01
+    {
+        println!(
+            "[PASS] online_1pass_rkl_151936 kl={:.12} e2={:.2e} esh={:.2e} epy={:.2e} ser_ns={} par_ns={}",
+            kl_1pass_par, err_2pass, err_shift, err_py, ser_ns, par_ns
+        );
+    } else {
+        println!(
+            "[FAIL] online_1pass_rkl_151936 kl={} err_2pass={} err_par={} err_shift={} err_py={}",
+            kl_1pass_par, err_2pass, err_par, err_shift, err_py
+        );
+        failures = failures + 1;
+    }
+
+    failures = failures + run_noh4_scenarios();
+
+    if failures == 0 {
+        println!("[PASS] wave15_online_rkl_noh4_oracle summary checks=4 planted=4 failures=0");
+    } else {
+        println!("[FAIL] wave15_online_rkl_noh4_oracle summary failures={}", failures);
+    }
+}
