@@ -93,13 +93,16 @@ fn parse_codegen_target(target: &str) -> Result<Target, String> {
         "x86_64-windows" | "x86-64-windows" => Ok(Target::X86_64Pe),
         "x86_64-linux" | "x86-64-linux" => Ok(Target::X86_64Elf),
         "arm64" | "aarch64" => Ok(Target::Arm64),
+        "riscv64" | "riscv" | "rv64" => Ok(Target::Riscv64),
         "wasm" | "wasm32" | "wat" => Ok(Target::Wasm),
         "spirv" | "spir-v" | "spv" => Ok(Target::SpirV),
         "hlsl" | "dx" | "directx" => Ok(Target::Hlsl),
         "glsl" | "opengl" | "gl" => Ok(Target::Glsl),
+        "msl" | "metal" => Ok(Target::Msl),
+        "wgsl" | "webgpu" => Ok(Target::Wgsl),
         "rust" | "rs" => Ok(Target::Rust),
         other => Err(format!(
-            "Unknown target '{}'. Supported: c, llvm, wasm, spirv, hlsl, glsl, rust, x86-64, x86_64-native, x86_64-windows, x86_64-linux, arm64",
+            "Unknown target '{}'. Supported: c, llvm, wasm, spirv, hlsl, glsl, msl, wgsl, rust, x86-64, x86_64-native, x86_64-windows, x86_64-linux, arm64, riscv64",
             other
         )),
     }
@@ -114,6 +117,8 @@ fn target_from_extension(ext: &str) -> Option<Target> {
         "s" | "asm" => Some(Target::X86_64),
         "hlsl" | "fx" => Some(Target::Hlsl),
         "glsl" => Some(Target::Glsl),
+        "metal" => Some(Target::Msl),
+        "wgsl" => Some(Target::Wgsl),
         "rs" => Some(Target::Rust),
         _ => None,
     }
@@ -7330,9 +7335,13 @@ fn cmd_build(
     reject_unsupported_stdio_mode(stdio_mode, target)?;
     let use_llvm = target == Target::LlvmIr;
     let use_spirv = target == Target::SpirV;
-    let use_native = target == Target::X86_64 || target == Target::Arm64;
+    let use_native =
+        target == Target::X86_64 || target == Target::Arm64 || target == Target::Riscv64;
     let use_wasm = target == Target::Wasm;
-    let use_shader = target == Target::Hlsl || target == Target::Glsl;
+    let use_shader = matches!(
+        target,
+        Target::Hlsl | Target::Glsl | Target::Msl | Target::Wgsl
+    );
     let use_rust = target == Target::Rust;
 
     println!("Building project at '{}'", path.display());
@@ -7486,11 +7495,11 @@ fn cmd_build(
         println!("Validate with: spirv-val {}", spv_output_file.display());
         return Ok(());
     } else if use_native {
-        // x86-64 / ARM64 target: write assembly file
-        let ext = if target == Target::X86_64 {
-            "x86_64.s"
-        } else {
-            "aarch64.s"
+        // x86-64 / ARM64 / RISC-V target: write assembly file
+        let ext = match target {
+            Target::X86_64 => "x86_64.s",
+            Target::Riscv64 => "riscv64.s",
+            _ => "aarch64.s",
         };
         let asm_output_file = output_dir.join(format!("main.{}", ext));
         std::fs::write(&asm_output_file, &output.data).map_err(|e| {
@@ -7500,14 +7509,16 @@ fn cmd_build(
 
         if !emit_c_only {
             // Try to assemble + link with system tools
-            let assembler = if target == Target::X86_64 {
-                if cfg!(windows) {
-                    "ml64"
-                } else {
-                    "as"
+            let assembler = match target {
+                Target::X86_64 => {
+                    if cfg!(windows) {
+                        "ml64"
+                    } else {
+                        "as"
+                    }
                 }
-            } else {
-                "aarch64-linux-gnu-as"
+                Target::Riscv64 => "riscv64-linux-gnu-as",
+                _ => "aarch64-linux-gnu-as",
             };
 
             let asm_ok = std::process::Command::new(assembler)
@@ -7535,6 +7546,9 @@ fn cmd_build(
                             asm_output_file.display()
                         );
                     }
+                } else if target == Target::Riscv64 {
+                    println!("To cross-compile:");
+                    println!("  riscv64-linux-gnu-as {} -o main.o && riscv64-linux-gnu-ld main.o -o main -lc", asm_output_file.display());
                 } else {
                     println!("To cross-compile:");
                     println!("  aarch64-linux-gnu-as {} -o main.o && aarch64-linux-gnu-ld main.o -o main -lc", asm_output_file.display());
@@ -7553,11 +7567,13 @@ fn cmd_build(
         println!("Output: {}", asm_output_file.display());
         return Ok(());
     } else if use_shader {
-        // HLSL/GLSL target: write shader source file
-        let (ext, label) = if target == Target::Hlsl {
-            ("hlsl", "HLSL")
-        } else {
-            ("glsl", "GLSL")
+        // HLSL/GLSL/MSL/WGSL target: write shader source file
+        let (ext, label) = match target {
+            Target::Hlsl => ("hlsl", "HLSL"),
+            Target::Glsl => ("glsl", "GLSL"),
+            Target::Msl => ("metal", "MSL"),
+            Target::Wgsl => ("wgsl", "WGSL"),
+            _ => unreachable!(),
         };
         let shader_output_file = output_dir.join(format!("main.{}", ext));
         std::fs::write(&shader_output_file, &output.data).map_err(|e| {
@@ -10925,9 +10941,14 @@ fn cmd_compile(
             None => output.and_then(|p| p.extension()).and_then(|e| e.to_str()) == Some("wat"),
         };
     reject_unsupported_stdio_mode(stdio_mode, target)?;
-    if entry.is_some() && !matches!(target, Target::SpirV | Target::Hlsl | Target::Glsl) {
+    if entry.is_some()
+        && !matches!(
+            target,
+            Target::SpirV | Target::Hlsl | Target::Glsl | Target::Msl | Target::Wgsl
+        )
+    {
         eprintln!(
-            "Error: --entry selects a shader entry point; target `{target}` is not a shader target (spirv, hlsl, glsl)"
+            "Error: --entry selects a shader entry point; target `{target}` is not a shader target (spirv, hlsl, glsl, msl, wgsl)"
         );
         return Err(1);
     }
@@ -11876,6 +11897,9 @@ mod tests {
             // Not on the card yet; the card and its SVG are redrawn separately.
             Target::X86_64Pe | Target::X86_64Elf => "x86_64-native",
             Target::Arm64 => "arm64",
+            Target::Riscv64 => "riscv64",
+            Target::Msl => "msl",
+            Target::Wgsl => "wgsl",
         }
     }
 

@@ -301,6 +301,10 @@ impl<'ctx> CodeGenerator<'ctx> {
                 let mut backend = backend::arm64::Arm64Backend::new();
                 backend.generate(mir)
             }
+            Target::Riscv64 => {
+                let mut backend = backend::riscv64::Riscv64Backend::new();
+                backend.generate(mir)
+            }
             Target::Wasm => {
                 let mut backend = backend::wasm::WasmBackend::new();
                 if self.wasm_text {
@@ -336,6 +340,14 @@ impl<'ctx> CodeGenerator<'ctx> {
                     OutputFormat::Glsl,
                     glsl_code.into_bytes(),
                 ))
+            }
+            Target::Msl => {
+                let mut backend = backend::msl::MslBackend::new();
+                backend.generate(mir)
+            }
+            Target::Wgsl => {
+                let mut backend = backend::wgsl::WgslBackend::new();
+                backend.generate(mir)
             }
             Target::Rust => {
                 let mut backend = backend::rust::RustBackend::new();
@@ -411,6 +423,8 @@ impl GeneratedCode {
             | OutputFormat::LlvmIr
             | OutputFormat::Hlsl
             | OutputFormat::Glsl
+            | OutputFormat::Msl
+            | OutputFormat::Wgsl
             | OutputFormat::RustSource => String::from_utf8(self.data.clone()).ok(),
             _ => None,
         }
@@ -440,6 +454,10 @@ pub enum OutputFormat {
     Hlsl,
     /// GLSL source code.
     Glsl,
+    /// Apple Metal Shading Language (MSL) source code.
+    Msl,
+    /// WebGPU Shading Language (WGSL) source code.
+    Wgsl,
     /// Rust source code.
     RustSource,
 }

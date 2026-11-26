@@ -15,10 +15,13 @@ pub mod c;
 pub mod glsl;
 pub mod hlsl;
 pub mod llvm;
+pub mod msl;
+pub mod riscv64;
 pub mod rust;
 pub mod spirv;
 pub mod wasm;
 pub mod wasm_bin;
+pub mod wgsl;
 pub mod x86_64;
 pub mod x86_64_enc;
 pub mod x86_64_exe;
@@ -45,6 +48,8 @@ pub enum Target {
     X86_64Elf,
     /// ARM64/AArch64 native code.
     Arm64,
+    /// 64-bit RISC-V (RV64IMAFD / LP64D) assembly.
+    Riscv64,
     /// WebAssembly.
     Wasm,
     /// SPIR-V for GPU.
@@ -55,6 +60,10 @@ pub enum Target {
     Hlsl,
     /// GLSL for OpenGL / Vulkan shader source.
     Glsl,
+    /// Apple Metal Shading Language (MSL).
+    Msl,
+    /// WebGPU Shading Language (WGSL).
+    Wgsl,
     /// Rust source code.
     Rust,
 }
@@ -65,6 +74,7 @@ impl Target {
         match self {
             Target::C => "c",
             Target::X86_64 | Target::Arm64 => "o",
+            Target::Riscv64 => "s",
             Target::X86_64Pe => "exe",
             Target::X86_64Elf => "out",
             Target::Wasm => "wasm",
@@ -72,6 +82,8 @@ impl Target {
             Target::LlvmIr => "ll",
             Target::Hlsl => "hlsl",
             Target::Glsl => "glsl",
+            Target::Msl => "metal",
+            Target::Wgsl => "wgsl",
             Target::Rust => "rs",
         }
     }
@@ -81,11 +93,11 @@ impl Target {
         match self {
             Target::C => 64, // Assume 64-bit
             Target::X86_64 | Target::X86_64Pe | Target::X86_64Elf => 64,
-            Target::Arm64 => 64,
+            Target::Arm64 | Target::Riscv64 => 64,
             Target::Wasm => 32, // wasm32
             Target::SpirV => 64,
-            Target::LlvmIr => 64,              // Default to 64-bit
-            Target::Hlsl | Target::Glsl => 32, // GPU
+            Target::LlvmIr => 64, // Default to 64-bit
+            Target::Hlsl | Target::Glsl | Target::Msl | Target::Wgsl => 32, // GPU
             Target::Rust => 64,
         }
     }
@@ -94,7 +106,7 @@ impl Target {
     pub fn is_native(&self) -> bool {
         matches!(
             self,
-            Target::X86_64 | Target::X86_64Pe | Target::X86_64Elf | Target::Arm64
+            Target::X86_64 | Target::X86_64Pe | Target::X86_64Elf | Target::Arm64 | Target::Riscv64
         )
     }
 
@@ -112,11 +124,14 @@ impl fmt::Display for Target {
             Target::X86_64Pe => write!(f, "x86_64-windows"),
             Target::X86_64Elf => write!(f, "x86_64-linux"),
             Target::Arm64 => write!(f, "arm64"),
+            Target::Riscv64 => write!(f, "riscv64"),
             Target::Wasm => write!(f, "wasm"),
             Target::SpirV => write!(f, "spirv"),
             Target::LlvmIr => write!(f, "llvm-ir"),
             Target::Hlsl => write!(f, "hlsl"),
             Target::Glsl => write!(f, "glsl"),
+            Target::Msl => write!(f, "msl"),
+            Target::Wgsl => write!(f, "wgsl"),
             Target::Rust => write!(f, "rust"),
         }
     }
