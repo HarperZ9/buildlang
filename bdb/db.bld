@@ -128,8 +128,22 @@ struct DB {
     db_path: String,
 
     // String pool: one entry per interned string, id = position.
+    // Non-negative canonical integers 0..=1_073_741_823 are encoded inline as
+    // (1073741824 + value) so numeric cells occupy 0 bytes in pool/pool_nk/pool_num.
     pool: Vec<String>,
     pn: i32,
+    pool_intern: HashMap<String, f64>,
+    // Per-statement temporary token strings released at statement exit.
+    stmt_trash: Vec<String>,
+    exec_depth: i32,
+    // Compact 1-bit-per-key bitset for the primary INTEGER PRIMARY KEY
+    // constraint (keys 0..3_999_999), avoiding millions of HashMap string entries.
+    ipk_bits: Vec<i32>,
+    ipk_k: i32,
+    ipk_max: f64,
+    // Bounded byte buffer for pending explicit-transaction WAL lines (flushes
+    // every 64 KiB when history is off so 100k-row txns stay bounded in RAM).
+    wal_pend_buf: Vec<u8>,
     // Per pool entry, filled on first use by sp_kind (P25): 0 not yet read,
     // 1 an integer as is_int_str reads it, 4 another number as is_numeric_str
     // reads it, 2 NULL, 3 other text; and the entry's parse_float, which
@@ -460,6 +474,8 @@ fn db_new(db_path: String) -> DB {
     // Typed local: a bare vec![] in the struct literal is built as a Vec<i32>
     // by the C backend, and pushing strings into that corrupts memory.
     let pool0: Vec<String> = vec![];
+    let trash0: Vec<String> = vec![];
+    let wbuf0: Vec<u8> = vec![];
     let parts0: Vec<String> = vec![];
     let txp0: Vec<String> = vec![];
     let wpd0: Vec<String> = vec![];
@@ -468,7 +484,9 @@ fn db_new(db_path: String) -> DB {
     let rowc0: Vec<String> = vec![];
     DB {
         db_path: db_path,
-        pool: pool0, pn: 0, pool_nk: vec![], pool_num: pnum0,
+        pool: pool0, pn: 0, pool_intern: map_new(), stmt_trash: trash0, exec_depth: 0,
+        ipk_bits: vec![], ipk_k: -1, ipk_max: 0.0, wal_pend_buf: wbuf0,
+        pool_nk: vec![], pool_num: pnum0,
         tbl_names: vec![], tbl_count: 0,
         col_names: vec![], col_types: vec![],
         tbl_col_starts: vec![], tbl_col_counts: vec![],
@@ -547,13 +565,65 @@ fn db_new(db_path: String) -> DB {
 // parsed tokens. Both calls are O(1). The pool used to be one contiguous
 // String grown by concatenation, which copied the whole pool on every
 // sp_add, so loading N rows cost O(N^2) time and memory.
+// Inline positive integer tag bit (0x40000000): ids >= 1073741824 encode
+// canonical non-negative integers 0..=1_073_741_823 without allocating any
+// pool entry or heap string. All ids stay strictly non-negative, preserving
+// every `id < 0` (-1 sentinel) check throughout the engine.
+fn sp_inline_tag() -> i32 { 1073741824 }
+
+fn sp_try_inline_int(text: String) -> i32 {
+    let n = text.len();
+    if n < 1 || n > 10 { return 0 - 1; }
+    let b = text.as_bytes();
+    if n > 1 && b[0] == 48 { return 0 - 1; }
+    let mut v: i64 = 0;
+    let mut i: i64 = 0;
+    while i < n {
+        let c = b[i];
+        if c < 48 || c > 57 { return 0 - 1; }
+        v = v * 10 + ((c - 48) as i64);
+        i = i + 1;
+    }
+    if v > 1073741823 { return 0 - 1; }
+    1073741824 + (v as i32)
+}
+
 fn sp_add(d: &mut DB, text: String) -> i32 {
+    let inl = sp_try_inline_int(text);
+    if inl >= 0 { return inl; }
+    let n = text.len();
+    if n <= 32 {
+        if map_contains(d.pool_intern, text) {
+            return map_get(d.pool_intern, text) as i32;
+        }
+    }
     let id = d.pn;
-    vec_push(d.pool, text);
+    // Copy when non-empty so pool entries never alias stmt_trash buffers.
+    let owned = if n > 0 { text.substring(0, n) } else { "" };
+    vec_push(d.pool, owned);
     vec_push(d.pool_nk, 0);
     vec_push(d.pool_num, 0.0);
     d.pn = d.pn + 1;
+    if n <= 32 && d.pn <= 2048 {
+        map_insert(d.pool_intern, owned, id as f64);
+    }
     id
+}
+
+fn stmt_trash_push(d: &mut DB, s: String) {
+    vec_push(d.stmt_trash, s);
+}
+
+fn stmt_trash_flush(d: &mut DB) {
+    d.tk_val = "";
+    let n = vec_len(d.stmt_trash);
+    let mut i: i64 = 0;
+    while i < n {
+        let s: String = vec_get(d.stmt_trash, i);
+        s.release();
+        i = i + 1;
+    }
+    d.stmt_trash.clear();
 }
 
 // is_numeric_str and is_int_str over the bytes (an optional '-', a digit,
@@ -578,6 +648,7 @@ fn numeric_bytes(t: String) -> i32 {
 
 // The kind of pool entry id (see pool_nk), read once and kept.
 fn sp_kind(d: &mut DB, id: i32) -> i32 {
+    if id >= 1073741824 { return 1; }
     let k = vec_get(d.pool_nk, id);
     if k != 0 { return k; }
     let t = vec_get(d.pool, id);
@@ -595,25 +666,20 @@ fn sp_kind(d: &mut DB, id: i32) -> i32 {
     nk
 }
 
-// The pool id of integer r's text: shared for 0..65535 through int_ids,
-// with its kind and number filled in; a new entry otherwise.
+// The pool id of integer r's text: encoded inline for 0..=1_073_741_823
+// (0 bytes of pool memory), or stored in the pool otherwise.
 fn sp_int(d: &mut DB, r: i32) -> i32 {
-    if r < 0 || r > 65535 { return sp_add(d, to_string_i32(r)); }
-    let ids = d.int_ids;
-    while vec_len(ids) <= r { vec_push(ids, -1); }
-    let have = vec_get(ids, r);
-    if have >= 0 { return have; }
-    let id = sp_add(d, to_string_i32(r));
-    let kinds = d.pool_nk;
-    kinds[id] = 1;
-    let nums = d.pool_num;
-    nums[id] = r as f64;
-    ids[r] = id;
-    id
+    if r >= 0 && r <= 1073741823 { return 1073741824 + r; }
+    sp_add(d, to_string_i32(r))
 }
 
 fn sp_get(d: &DB, id: i32) -> String {
     if id < 0 { return ""; }
+    if id >= 1073741824 {
+        let v = id - 1073741824;
+        if v < 64 && vec_len(d.int_strs) == 64 { return vec_get(d.int_strs, v); }
+        return to_string_i32(v);
+    }
     vec_get(d.pool, id)
 }
 
@@ -904,16 +970,208 @@ INDEX ");
 // untouched); a torn .db is ignored in favour of the complete .ckpt.
 fn ckpt_marker() -> String { "QDB CHECKPOINT COMPLETE\n" }
 
+fn pg_fnv_buf(buf: Vec<u8>) -> i64 {
+    let n = buf.len() as i64;
+    let mut h = fnv_init();
+    let mut i: i64 = 0;
+    while i < n {
+        h = ((h ^ (buf[i as usize] as i64)) * 16777619) & 4294967295;
+        i = i + 1;
+    }
+    h
+}
+
+fn pg_flush_chunk(mode: i32, path: String, pbuf: Vec<u8>, phashes: Vec<String>) ~ FileSystem {
+    if pbuf.len() == 0 { return; }
+    if mode == 0 {
+        if vec_len(phashes) > 0 { vec_push(phashes, ","); }
+        vec_push(phashes, hex32(pg_fnv_buf(pbuf)));
+    } else {
+        append_file_bytes(path, &pbuf);
+    }
+    pbuf.clear();
+}
+
+fn pg_emit_byte(mode: i32, path: String, pbuf: Vec<u8>, phashes: Vec<String>, blen: i64, byte: u8) -> i64 ~ FileSystem {
+    pbuf.push(byte);
+    if (pbuf.len() as i64) == db_page_size() {
+        pg_flush_chunk(mode, path, pbuf, phashes);
+    }
+    blen + 1
+}
+
+fn pg_emit_str(mode: i32, path: String, pbuf: Vec<u8>, phashes: Vec<String>, blen0: i64, s: String) -> i64 ~ FileSystem {
+    let b = s.as_bytes();
+    let n = s.len();
+    let mut blen = blen0;
+    let mut i: i64 = 0;
+    while i < n {
+        blen = pg_emit_byte(mode, path, pbuf, phashes, blen, b[i]);
+        i = i + 1;
+    }
+    blen
+}
+
+// Stream a non-negative i32 as ASCII digits directly into the 4 KiB page buffer
+// with zero heap string allocations.
+fn pg_emit_uint(mode: i32, path: String, pbuf: Vec<u8>, phashes: Vec<String>, blen0: i64, v0: i32) -> i64 ~ FileSystem {
+    if v0 == 0 {
+        return pg_emit_byte(mode, path, pbuf, phashes, blen0, 48 as u8);
+    }
+    let mut digs: [u8; 12] = [0; 12];
+    let mut nd = 0;
+    let mut v = v0;
+    while v > 0 {
+        digs[nd] = (48 + (v % 10)) as u8;
+        v = v / 10;
+        nd = nd + 1;
+    }
+    let mut blen = blen0;
+    let mut k = nd - 1;
+    while k >= 0 {
+        blen = pg_emit_byte(mode, path, pbuf, phashes, blen, digs[k]);
+        k = k - 1;
+    }
+    blen
+}
+
+fn pg_stream_body(d: &DB, mode: i32, path: String, pbuf: Vec<u8>, phashes: Vec<String>) -> i64 ~ FileSystem {
+    let mut blen: i64 = 0;
+    let mut t = 0;
+    while t < d.tbl_count {
+        let tname = sp_get(d, vec_get(d.tbl_names, t));
+        blen = pg_emit_str(mode, path, pbuf, phashes, blen, "TABLE ");
+        blen = pg_emit_str(mode, path, pbuf, phashes, blen, tname);
+        blen = pg_emit_str(mode, path, pbuf, phashes, blen, "\nSCHEMA");
+        let cs = vec_get(d.tbl_col_starts, t);
+        let cc = vec_get(d.tbl_col_counts, t);
+        let mut c = 0;
+        while c < cc {
+            let cname = sp_get(d, vec_get(d.col_names, cs + c));
+            let ctype = vec_get(d.col_types, cs + c);
+            let tstr = if ctype == 0 { ":INTEGER" } else if ctype == 1 { ":REAL" } else { ":TEXT" };
+            blen = pg_emit_str(mode, path, pbuf, phashes, blen, " ");
+            blen = pg_emit_str(mode, path, pbuf, phashes, blen, cname);
+            blen = pg_emit_str(mode, path, pbuf, phashes, blen, tstr);
+            c = c + 1;
+        }
+        blen = pg_emit_byte(mode, path, pbuf, phashes, blen, 10 as u8);
+        let ct = con_text(d, t, cs);
+        blen = pg_emit_str(mode, path, pbuf, phashes, blen, ct);
+        ct.release();
+        let rs = vec_get(d.tbl_row_starts, t);
+        let rc = vec_get(d.tbl_row_counts, t);
+        let mut r = 0;
+        while r < rc {
+            let mut ci = 0;
+            while ci < cc {
+                if ci == 0 { blen = pg_emit_str(mode, path, pbuf, phashes, blen, "ROW "); }
+                else { blen = pg_emit_byte(mode, path, pbuf, phashes, blen, 124 as u8); }
+                let cid = vec_get(d.cells, rs + r * cc + ci);
+                if cid >= 1073741824 {
+                    blen = pg_emit_uint(mode, path, pbuf, phashes, blen, cid - 1073741824);
+                } else {
+                    let cell = sp_get(d, cid);
+                    let esc = escape_cell(cell);
+                    blen = pg_emit_str(mode, path, pbuf, phashes, blen, esc);
+                    if needs_escape(cell, true) { esc.release(); }
+                }
+                ci = ci + 1;
+            }
+            if cc == 0 { blen = pg_emit_str(mode, path, pbuf, phashes, blen, "ROW "); }
+            blen = pg_emit_byte(mode, path, pbuf, phashes, blen, 10 as u8);
+            r = r + 1;
+        }
+        blen = pg_emit_str(mode, path, pbuf, phashes, blen, "END\n");
+        if t + 1 < d.tbl_count {
+            blen = pg_emit_byte(mode, path, pbuf, phashes, blen, 10 as u8);
+        }
+        t = t + 1;
+    }
+    let mut ix = 0;
+    while ix < d.idx_count {
+        let iname = sp_get(d, vec_get(d.idx_names, ix));
+        let tbl_idx = vec_get(d.idx_tables, ix);
+        let tname = sp_get(d, vec_get(d.tbl_names, tbl_idx));
+        let col_i = vec_get(d.idx_col_indices, ix);
+        let tcs = vec_get(d.tbl_col_starts, tbl_idx);
+        let cname = sp_get(d, vec_get(d.col_names, tcs + col_i));
+        blen = pg_emit_str(mode, path, pbuf, phashes, blen, "\nINDEX ");
+        blen = pg_emit_str(mode, path, pbuf, phashes, blen, iname);
+        blen = pg_emit_str(mode, path, pbuf, phashes, blen, " ON ");
+        blen = pg_emit_str(mode, path, pbuf, phashes, blen, tname);
+        blen = pg_emit_str(mode, path, pbuf, phashes, blen, " (");
+        blen = pg_emit_str(mode, path, pbuf, phashes, blen, cname);
+        blen = pg_emit_str(mode, path, pbuf, phashes, blen, ")\n");
+        ix = ix + 1;
+    }
+    pg_flush_chunk(mode, path, pbuf, phashes);
+    blen
+}
+
 fn db_save(d: &mut DB) -> i64 ~ Console + FileSystem + Process {
     // P14: one copy of the state, made atomic by rename: write <db>.tmp,
-    // flush it, rename it over <db>. A crash before the rename leaves the old
-    // .db and the WAL, which replay recovers; after it, the new .db.
-    let all = db_text(d);
+    // flush it, rename it over <db>. Small databases keep the single-write
+    // path; large databases (> 4096 cells) stream in 4 KiB pages so checkpoint
+    // peak RAM stays O(4 KiB) instead of O(database size).
     let tmp = d.db_path + ".tmp";
-    durable_write(d, tmp, all, false, "db_tmp");
+    if vec_len(d.cells) <= 4096 || d.crash_at > 0 || d.trace_writes {
+        let all = db_text(d);
+        let n = all.len();
+        durable_write(d, tmp, all, false, "db_tmp");
+        all.release();
+        durable_sync(d, tmp, "db_tmp_sync");
+        durable_rename(d, tmp, d.db_path, "db_rename");
+        tmp.release();
+        return n;
+    }
+    let pbuf: Vec<u8> = vec![];
+    let phashes: Vec<String> = vec![];
+    let blen = pg_stream_body(d, 0, tmp, pbuf, phashes);
+    let page_hashes = if blen == 0 { "-" } else { phashes.join("") };
+    let nh = vec_len(phashes);
+    let mut hi: i64 = 0;
+    while hi < nh {
+        let hs: String = vec_get(phashes, hi);
+        hs.release();
+        hi = hi + 1;
+    }
+    phashes.release();
+    let tx_s = to_string_i32(d.txn_id);
+    let bl_s = i64_to_text(blen);
+    let hdr_parts: Vec<String> = vec![];
+    vec_push(hdr_parts, "QDB 2 ");
+    vec_push(hdr_parts, tx_s);
+    vec_push(hdr_parts, " ");
+    vec_push(hdr_parts, bl_s);
+    vec_push(hdr_parts, " ");
+    vec_push(hdr_parts, page_hashes);
+    let hdr_core = hdr_parts.join("");
+    hdr_parts.release();
+    let hdr_crc = hex32(fnv_extend(fnv_init(), hdr_core));
+    let hdr_full_parts: Vec<String> = vec![];
+    vec_push(hdr_full_parts, hdr_core);
+    vec_push(hdr_full_parts, " ");
+    vec_push(hdr_full_parts, hdr_crc);
+    vec_push(hdr_full_parts, "\n");
+    let hdr = hdr_full_parts.join("");
+    hdr_full_parts.release();
+    let hlen = hdr.len();
+    durable_write(d, tmp, hdr, false, "db_tmp");
+    let dummy_hashes: Vec<String> = vec![];
+    pg_stream_body(d, 1, tmp, pbuf, dummy_hashes);
+    pbuf.release();
+    dummy_hashes.release();
+    tx_s.release();
+    bl_s.release();
+    page_hashes.release();
+    hdr_core.release();
+    hdr_crc.release();
+    hdr.release();
     durable_sync(d, tmp, "db_tmp_sync");
     durable_rename(d, tmp, d.db_path, "db_rename");
-    all.len()
+    tmp.release();
+    hlen + blen
 }
 
 fn db_corrupt(reason: String) ~ Console + Process {
@@ -1444,21 +1702,51 @@ fn wal_write(d: &mut DB, line: String, tag: String) ~ Console + FileSystem + Pro
     wal_append(d, line + "\n", tag);
 }
 
+fn wal_buf_push_str(buf: Vec<u8>, s: String) {
+    let b = s.as_bytes();
+    let n = s.len();
+    let mut i: i64 = 0;
+    while i < n {
+        buf.push(b[i]);
+        i = i + 1;
+    }
+}
+
+fn wal_flush_buf(d: &mut DB) ~ Console + FileSystem + Process {
+    let n = d.wal_pend_buf.len() as i64;
+    if n == 0 { return; }
+    append_file_bytes(d.wal_path, &d.wal_pend_buf);
+    d.wal_bytes = d.wal_bytes + n;
+    d.wal_pend_buf.clear();
+}
+
 // Hold a line of the open explicit transaction for its closing append (P21).
 // Nothing in a transaction is durable before its COMMIT record, and replay
-// drops a transaction without one, so holding the lines in memory loses
-// nothing a crash could have kept; it saves one file append per statement.
+// drops a transaction without one, so buffering in a bounded 64 KiB byte
+// vector loses nothing a crash could keep while keeping 100k-row transactions
+// O(64 KiB) in RAM.
 fn wal_hold_line(d: &mut DB, line: String) {
-    vec_push(d.wal_pend, line + "\n");
+    if d.crash_at > 0 || d.trace_writes {
+        vec_push(d.wal_pend, line + "\n");
+        return;
+    }
+    wal_buf_push_str(d.wal_pend_buf, line);
+    d.wal_pend_buf.push(10 as u8);
 }
 
 // Append the held lines and the closing line in one write.
 fn wal_flush_pend(d: &mut DB, last: String, tag: String) ~ Console + FileSystem + Process {
-    vec_push(d.wal_pend, last + "\n");
-    let text = concat_parts(d.wal_pend);
-    let fresh: Vec<String> = vec![];
-    d.wal_pend = fresh;
-    wal_append(d, text, tag);
+    if d.crash_at > 0 || d.trace_writes {
+        vec_push(d.wal_pend, last + "\n");
+        let text = concat_parts(d.wal_pend);
+        d.wal_pend.clear();
+        wal_append(d, text, tag);
+        text.release();
+        return;
+    }
+    wal_buf_push_str(d.wal_pend_buf, last);
+    d.wal_pend_buf.push(10 as u8);
+    wal_flush_buf(d);
 }
 
 // Checkpoint: merge WAL into main .db file, then clear WAL
@@ -1644,6 +1932,26 @@ fn copy_vec(v: Vec<i32>) -> Vec<i32> {
 }
 
 fn take_snapshot(d: &mut DB) {
+    d.snap_con_tbl.release();
+    d.snap_con_kind.release();
+    d.snap_con_cs.release();
+    d.snap_con_cn.release();
+    d.snap_con_cols.release();
+    d.snap_cells.release();
+    d.snap_row_starts.release();
+    d.snap_row_counts.release();
+    d.snap_tbl_names.release();
+    d.snap_col_names.release();
+    d.snap_col_types.release();
+    d.snap_col_starts.release();
+    d.snap_col_counts.release();
+    d.snap_idx_names.release();
+    d.snap_idx_tables.release();
+    d.snap_idx_col_indices.release();
+    d.snap_idx_keys.release();
+    d.snap_idx_rowids.release();
+    d.snap_idx_key_starts.release();
+    d.snap_idx_key_counts.release();
     d.snap_con_tbl = copy_vec(d.con_tbl);
     d.snap_con_kind = copy_vec(d.con_kind);
     d.snap_con_cs = copy_vec(d.con_cs);
@@ -1762,15 +2070,15 @@ fn restore_snapshot(d: &mut DB) {
     d.cells = copy_vec(d.snap_cells);
     d.tbl_row_starts = copy_vec(d.snap_row_starts);
     d.tbl_row_counts = copy_vec(d.snap_row_counts);
-    d.tbl_names = d.snap_tbl_names;
+    d.tbl_names = copy_vec(d.snap_tbl_names);
     d.tbl_count = d.snap_tbl_count;
-    d.col_names = d.snap_col_names;
-    d.col_types = d.snap_col_types;
-    d.tbl_col_starts = d.snap_col_starts;
-    d.tbl_col_counts = d.snap_col_counts;
-    d.idx_names = d.snap_idx_names;
-    d.idx_tables = d.snap_idx_tables;
-    d.idx_col_indices = d.snap_idx_col_indices;
+    d.col_names = copy_vec(d.snap_col_names);
+    d.col_types = copy_vec(d.snap_col_types);
+    d.tbl_col_starts = copy_vec(d.snap_col_starts);
+    d.tbl_col_counts = copy_vec(d.snap_col_counts);
+    d.idx_names = copy_vec(d.snap_idx_names);
+    d.idx_tables = copy_vec(d.snap_idx_tables);
+    d.idx_col_indices = copy_vec(d.snap_idx_col_indices);
     d.idx_count = d.snap_idx_count;
     d.idx_keys = copy_vec(d.snap_idx_keys);
     d.idx_num_ok = false;
@@ -1791,14 +2099,17 @@ fn wal_begin(d: &mut DB) ~ Console + FileSystem + Process {
     d.in_transaction = true;
     d.txn_id = d.txn_id + 1;
     take_snapshot(d);
-    let tl = "TXID " + to_string_i32(d.txn_id);
-    d.txn_hash = fnv_extend(fnv_init(), tl + "\n");
-    let fresh: Vec<String> = vec![];
-    d.txn_parts = fresh;
-    if d.hist_on { vec_push(d.txn_parts, tl + "\n"); }
-    let fresh2: Vec<String> = vec![];
-    d.wal_pend = fresh2;
+    let tx_s = to_string_i32(d.txn_id);
+    let tl = "TXID " + tx_s;
+    let tln = tl + "\n";
+    d.txn_hash = fnv_extend(fnv_init(), tln);
+    d.txn_parts.clear();
+    if d.hist_on { vec_push(d.txn_parts, tln); } else { tln.release(); }
+    d.wal_pend.clear();
+    d.wal_pend_buf.clear();
     wal_hold_line(d, tl);
+    tx_s.release();
+    tl.release();
 }
 
 // COMMIT — finalize the current transaction
@@ -1807,13 +2118,14 @@ fn wal_commit(d: &mut DB) ~ Console + FileSystem + Process {
         println!("Error: no transaction in progress");
         return;
     }
-    wal_flush_pend(d, commit_line(d.txn_hash), "wal_commit");
+    let cl = commit_line(d.txn_hash);
+    wal_flush_pend(d, cl, "wal_commit");
     durable_sync(d, d.wal_path, "wal_sync");
     if d.hist_on {
-        hist_append(d, concat_parts(d.txn_parts) + commit_line(d.txn_hash) + "\n");
+        hist_append(d, concat_parts(d.txn_parts) + cl + "\n");
     }
-    let fresh: Vec<String> = vec![];
-    d.txn_parts = fresh;
+    cl.release();
+    d.txn_parts.clear();
     d.in_transaction = false;
     maybe_checkpoint(d);
 }
@@ -1826,8 +2138,8 @@ fn wal_rollback(d: &mut DB) ~ Console + FileSystem + Process {
     }
     restore_snapshot(d);
     d.in_transaction = false;
-    let fresh: Vec<String> = vec![];
-    d.wal_pend = fresh;
+    d.wal_pend.clear();
+    d.wal_pend_buf.clear();
     // Discard WAL entries for this txn by checkpointing restored state
     wal_checkpoint(d);
 }
@@ -1847,23 +2159,30 @@ fn wal_op_sql(line: String) -> String {
     ""
 }
 
-// Inside an explicit transaction: hold one OP line (with its line feed) for
-// the COMMIT append, as wal_log_mutation does for a statement's text.
-fn wal_hold_op(d: &mut DB, oln: String) {
+// Inside an explicit transaction: hold one OP piece for the COMMIT append,
+// flushing in 64 KiB pages when history and fault-tracing are off.
+fn wal_hold_op(d: &mut DB, oln: String) ~ Console + FileSystem + Process {
     d.txn_hash = fnv_extend(d.txn_hash, oln);
     if d.hist_on { vec_push(d.txn_parts, oln); }
-    vec_push(d.wal_pend, oln);
+    if d.crash_at > 0 || d.trace_writes {
+        vec_push(d.wal_pend, oln);
+        return;
+    }
+    wal_buf_push_str(d.wal_pend_buf, oln);
+    if !d.hist_on && (d.wal_pend_buf.len() as i64) >= 65536 {
+        wal_flush_buf(d);
+    }
 }
 
 // Write a mutation to WAL and optionally auto-commit
 fn wal_log_mutation(d: &mut DB, sql: String) ~ Console + FileSystem + Process {
     if d.in_transaction {
-        // In explicit transaction — just append OP to WAL
+        // In explicit transaction: buffer OP bytes for WAL
         if needs_escape(sql, false) {
-            wal_hold_op(d, wal_op_line(sql) + "\n");
+            let line = wal_op_line(sql) + "\n";
+            wal_hold_op(d, line);
+            if !d.hist_on && d.crash_at == 0 && !d.trace_writes { line.release(); }
         } else {
-            // Held as three pieces: the closing append joins them, and the
-            // running hash takes the same bytes in the same order (P29).
             wal_hold_op(d, "OP ");
             wal_hold_op(d, sql);
             wal_hold_op(d, "\n");
@@ -2192,7 +2511,9 @@ fn next_token(d: &mut DB) {
                 }
             }
             d.pos = p;
-            d.tk_type = 3; d.tk_val = d.input.substring(st, p - st); return;
+            let num_s = d.input.substring(st, p - st);
+            stmt_trash_push(d, num_s);
+            d.tk_type = 3; d.tk_val = num_s; return;
         }
     }
 
@@ -2209,7 +2530,11 @@ fn next_token(d: &mut DB) {
         d.pos = p;
         let kw = kw_at(d.input, st, p - st);
         if kw.len() > 0 { d.tk_type = 0; d.tk_val = kw; }
-        else { d.tk_type = 1; d.tk_val = d.input.substring(st, p - st); }
+        else {
+            let id_s = d.input.substring(st, p - st);
+            stmt_trash_push(d, id_s);
+            d.tk_type = 1; d.tk_val = id_s;
+        }
         return;
     }
 
@@ -4161,10 +4486,13 @@ fn eval_cond_val(d: &DB, ci: i32, op: i32, cv: String) -> i32 {
     if op == 7 {
         return eval_in_pool(d, cv, vec_get(d.wc_in_start, ci), vec_get(d.wc_in_len, ci));
     }
-    let wr = sp_get(d, vec_get(d.wc_right, ci));
-    if is_null(cv) || is_null(wr) { return 2; }
-    if eval_where(cv, op, wr) { return 1; }
-    0
+    let rid = vec_get(d.wc_right, ci);
+    let wr = sp_get(d, rid);
+    let mut ans = 0;
+    if is_null(cv) || is_null(wr) { ans = 2; }
+    else if eval_where(cv, op, wr) { ans = 1; }
+    if rid >= 1073741824 && (rid - 1073741824) >= 64 { wr.release(); }
+    ans
 }
 
 // Evaluate DNF condition ci for a single-table row, applying its negate flag.
@@ -4175,8 +4503,26 @@ fn eval_cond_row(d: &DB, ci: i32, cs: i32, cc: i32, rs: i32, row: i32,
     let op = vec_get(d.wc_op, ci);
     let mut res = 0;
     if wcol >= 0 {
-        let cv = sp_get(d, vec_get(d.cells, rs + row * cc + wcol));
-        res = eval_cond_val(d, ci, op, cv);
+        let cid = vec_get(d.cells, rs + row * cc + wcol);
+        let rid = vec_get(d.wc_right, ci);
+        if op >= 0 && op <= 5 && cid >= 1073741824 && rid >= 1073741824 {
+            let lv = cid - 1073741824;
+            let rv = rid - 1073741824;
+            if op == 0 { if lv == rv { res = 1; } }
+            else if op == 1 { if lv < rv { res = 1; } }
+            else if op == 2 { if lv > rv { res = 1; } }
+            else if op == 3 { if lv <= rv { res = 1; } }
+            else if op == 4 { if lv >= rv { res = 1; } }
+            else { if lv != rv { res = 1; } }
+        } else if op == 8 && cid >= 1073741824 {
+            res = 0;
+        } else if op == 9 && cid >= 1073741824 {
+            res = 1;
+        } else {
+            let cv = sp_get(d, cid);
+            res = eval_cond_val(d, ci, op, cv);
+            if cid >= 1073741824 && (cid - 1073741824) >= 64 { cv.release(); }
+        }
     } else {
         // Column not found (where_cols_ok refuses these before a scan).
         if op == 8 { res = 1; }
@@ -4502,8 +4848,16 @@ fn exec_select(d: &mut DB) ~ Console + Process {
         let mut ri = 0;
         while ri < match_count {
             let row = vec_get(match_rows, ri);
-            let val = sp_get(d, vec_get(d.cells, rs + row * cc + col_idx));
-            let vlen = dlen(val);
+            let cid = vec_get(d.cells, rs + row * cc + col_idx);
+            let mut vlen = 0;
+            if cid >= 1073741824 {
+                let mut v = cid - 1073741824;
+                vlen = 1;
+                while v >= 10 { v = v / 10; vlen = vlen + 1; }
+            } else {
+                let val = sp_get(d, cid);
+                vlen = dlen(val);
+            }
             if vlen > w { w = vlen; }
             ri = ri + 1;
         }
@@ -4512,44 +4866,92 @@ fn exec_select(d: &mut DB) ~ Console + Process {
     }
 
     // Print header
-    let mut hdr_line = "";
-    let mut sep_line = "";
+    let hdr_parts: Vec<String> = vec![];
+    let sep_parts: Vec<String> = vec![];
     let mut hi = 0;
     while hi < show_count {
-        if hi > 0 { hdr_line = hdr_line + " | "; sep_line = sep_line + "-+-"; }
+        if hi > 0 { vec_push(hdr_parts, " | "); vec_push(sep_parts, "-+-"); }
         let hdr = sp_get(d, vec_get(hdr_names, hi));
         rows_hdr(d, hdr);
         let w = vec_get(widths, hi);
-        hdr_line = hdr_line + pad_right(hdr, w);
-        sep_line = sep_line + make_dashes(w);
+        let hp = pad_right(hdr, w);
+        let sp = make_dashes(w);
+        vec_push(hdr_parts, hp);
+        vec_push(sep_parts, sp);
         hi = hi + 1;
     }
+    let hdr_line = hdr_parts.join("");
+    let sep_line = sep_parts.join("");
+    let mut rpi: i64 = 0;
+    while rpi < vec_len(hdr_parts) {
+        let s1: String = vec_get(hdr_parts, rpi);
+        let s2: String = vec_get(sep_parts, rpi);
+        if s1 != " | " && (s1.len() as i32) > 0 {
+            let mut match_h = false;
+            if rpi % 2 == 0 {
+                let h_orig = sp_get(d, vec_get(hdr_names, (rpi / 2) as i32));
+                if s1.len() == h_orig.len() { match_h = true; }
+            }
+            if !match_h { s1.release(); }
+        }
+        if s2 != "-+-" { s2.release(); }
+        rpi = rpi + 1;
+    }
+    hdr_parts.release();
+    sep_parts.release();
     emit_line(d, hdr_line);
     emit_line(d, sep_line);
+    if !d.rcpt_on {
+        hdr_line.release();
+        sep_line.release();
+    }
 
     // Print rows
+    let row_parts: Vec<String> = vec![];
+    let row_free: Vec<String> = vec![];
     let mut ri = 0;
     while ri < match_count {
         let row = vec_get(match_rows, ri);
-        let mut row_line = "";
+        row_parts.clear();
+        row_free.clear();
         let mut ci = 0;
         while ci < show_count {
-            if ci > 0 { row_line = row_line + " | "; }
+            if ci > 0 { vec_push(row_parts, " | "); }
             let col_idx = vec_get(show_cols, ci);
-            let val = sp_get(d, vec_get(d.cells, rs + row * cc + col_idx));
+            let cid = vec_get(d.cells, rs + row * cc + col_idx);
+            let val = sp_get(d, cid);
+            let val_owned = cid >= 1073741824 && (cid - 1073741824) >= 64;
             rows_cell(d, val);
             let w = vec_get(widths, ci);
             let col_type = vec_get(d.col_types, cs + col_idx);
-            if col_type == 0 || col_type == 1 {
-                row_line = row_line + pad_left(val, w);
+            let is_num_col = col_type == 0 || col_type == 1;
+            let padded = if is_num_col {
+                pad_left(val, w)
             } else {
-                row_line = row_line + pad_right(val, w);
+                pad_right(val, w)
+            };
+            vec_push(row_parts, padded);
+            if is_num_col || padded.len() != val.len() || is_null(val) {
+                vec_push(row_free, padded);
+                if val_owned && !d.rows_on { vec_push(row_free, val); }
+            } else if val_owned && !d.rows_on {
+                vec_push(row_free, val);
             }
             ci = ci + 1;
         }
+        let row_line = row_parts.join("");
+        let mut fi: i64 = 0;
+        while fi < vec_len(row_free) {
+            let fs: String = vec_get(row_free, fi);
+            fs.release();
+            fi = fi + 1;
+        }
         emit_line(d, row_line);
+        if !d.rcpt_on { row_line.release(); }
         ri = ri + 1;
     }
+    row_parts.release();
+    row_free.release();
     // The work lists are local and held nowhere else; free them, or every
     // SELECT leaves four lists behind (P29).
     show_cols.release();
@@ -7150,7 +7552,13 @@ fn con_check_update(d: &mut DB, t: i32, rs: i32, cc: i32, scol: i32, rows: Vec<i
                     let tmp = row_with(d, rs + vec_get(rows, i) * cc, cc, scol, vec_get(new_ids, i));
                     let nk = con_key(d, k, tmp, 0);
                     if nk.len() > 0 {
-                        if map_contains(d.con_map, nk) && !map_contains(olds, nk) { return con_fail_text(d, k, t); }
+                        let mut exists = map_contains(d.con_map, nk);
+                        if !exists && k == d.ipk_k {
+                            let ncid = vec_get(new_ids, i);
+                            let nv = ipk_numeric_val(d, ncid);
+                            if nv >= 0 && ipk_bit_get(d, nv) { exists = true; }
+                        }
+                        if exists && !map_contains(olds, nk) { return con_fail_text(d, k, t); }
                         if map_contains(news, nk) { return con_fail_text(d, k, t); }
                         map_insert(news, nk, 1.0);
                     }
@@ -7205,7 +7613,6 @@ fn exec_update(d: &mut DB) ~ Console {
     if !where_cols_ok(d, cs, cc, tname, d.alias1) { return; }
 
     let set_col_name = sp_get(d, d.set_col);
-    let set_val_text = sp_get(d, d.set_val);
     let scol = find_col(d, cs, cc, set_col_name);
     if scol < 0 {
         d.stmt_failed = true;
@@ -7243,36 +7650,54 @@ fn exec_update(d: &mut DB) ~ Console {
     // their entries in the indexes on the SET column.
     let rows = where_rows(d, tidx, cs, cc, rs, rc, tname);
     let n = vec_len(rows);
-    if n == 0 { return; }
-    let new_val_id = sp_add(d, set_val_text);
+    if n == 0 {
+        rows.release();
+        return;
+    }
+    let new_val_id = d.set_val;
     let mut new_ids: Vec<i32> = vec![];
     let mut arith_err = false;
     let mut i = 0;
     while i < n {
         let mut cell_id = new_val_id;
         if d.set_op >= 0 {
-            let cur = sp_get(d, vec_get(d.cells, rs + vec_get(rows, i) * cc + scol));
-            if is_int_str(cur) {
-                let a = parse_int_str(cur);
+            let cur_cid = vec_get(d.cells, rs + vec_get(rows, i) * cc + scol);
+            if cur_cid >= 1073741824 {
+                let a = cur_cid - 1073741824;
                 let mut r = 0;
                 if d.set_op == 0 { r = a + operand_int; }
                 else if d.set_op == 1 { r = a - operand_int; }
                 else if d.set_op == 2 { r = a * operand_int; }
                 else { r = a / operand_int; }
-                cell_id = sp_add(d, int_to_str(r));
+                cell_id = sp_int(d, r);
             } else {
-                arith_err = true;
+                let cur = sp_get(d, cur_cid);
+                if is_int_str(cur) {
+                    let a = parse_int_str(cur);
+                    let mut r = 0;
+                    if d.set_op == 0 { r = a + operand_int; }
+                    else if d.set_op == 1 { r = a - operand_int; }
+                    else if d.set_op == 2 { r = a * operand_int; }
+                    else { r = a / operand_int; }
+                    cell_id = sp_int(d, r);
+                } else {
+                    arith_err = true;
+                }
             }
         }
         vec_push(new_ids, cell_id);
         i = i + 1;
     }
     if arith_err {
+        rows.release();
+        new_ids.release();
         d.stmt_failed = true;
         println!("Error: UPDATE arithmetic on a non-integer value in column '{}'", set_col_name);
         return;
     }
     update_apply(d, tidx, cs, cc, rs, scol, rows, new_ids, n as i32);
+    rows.release();
+    new_ids.release();
 }
 
 // The second half of an UPDATE (P20): check the constraints, write the new
@@ -8348,6 +8773,7 @@ fn index_eq_num_into(d: &mut DB, ix_id: i32, x: f64, out: Vec<i32>) -> i32 {
 // Entry key id as idx_num holds it: the pool entry's number, NULL as minus
 // infinity (NULL keys sort first and equal no number).
 fn ix_key_num(d: &mut DB, id: i32) -> f64 {
+    if id >= 1073741824 { return (id - 1073741824) as f64; }
     if sp_kind(d, id) == 2 { return 0.0 - 1.0e308 - 1.0e308; }
     vec_get(d.pool_num, id)
 }
@@ -10349,6 +10775,45 @@ fn con_key(d: &DB, k: i32, cells: Vec<i32>, base: i32) -> String {
     key
 }
 
+fn ipk_inline_val(cid: i32) -> i32 {
+    if cid >= 1073741824 {
+        let v = cid - 1073741824;
+        if v < 4000000 { return v; }
+    }
+    0 - 1
+}
+
+fn ipk_numeric_val(d: &DB, cid: i32) -> i32 {
+    if cid >= 1073741824 {
+        let v = cid - 1073741824;
+        if v < 4000000 { return v; }
+        return 0 - 1;
+    }
+    let v = sp_get(d, cid);
+    if is_numeric_str(v) {
+        let f = v.parse_float();
+        if f >= 0.0 && f < 4000000.0 {
+            let iv = f as i32;
+            if (iv as f64) == f { return iv; }
+        }
+    }
+    0 - 1
+}
+
+fn ipk_bit_get(d: &DB, v: i32) -> bool {
+    let w = v / 32;
+    if (w as i64) >= vec_len(d.ipk_bits) { return false; }
+    let mask = 1 << (v % 32);
+    (vec_get(d.ipk_bits, w) & mask) != 0
+}
+
+fn ipk_bit_set(d: &mut DB, v: i32) {
+    let w = v / 32;
+    while vec_len(d.ipk_bits) <= (w as i64) { vec_push(d.ipk_bits, 0); }
+    let bits = d.ipk_bits;
+    bits[w] = vec_get(bits, w) | (1 << (v % 32));
+}
+
 fn con_is_ipk(d: &DB, k: i32) -> bool {
     let t = vec_get(d.con_tbl, k);
     let cs = vec_get(d.tbl_col_starts, t);
@@ -10357,28 +10822,46 @@ fn con_is_ipk(d: &DB, k: i32) -> bool {
 }
 
 // Add rows (row-major in cells from base, nrows of them, cc columns) of
-// table t to the key map.
+// table t to the key map (or compact IPK bitset for the primary INTEGER PRIMARY KEY).
 fn con_map_add(d: &mut DB, t: i32, cells: Vec<i32>, base: i32, nrows: i32, cc: i32) {
     con_names_fill(d);
     let mut k = 0;
     while k < vec_len(d.con_tbl) {
         if vec_get(d.con_tbl, k) == t && vec_get(d.con_kind, k) != 2 {
             let ipk = con_is_ipk(d, k);
+            if ipk && d.ipk_k < 0 {
+                d.ipk_k = k;
+                d.ipk_max = 0.0;
+            }
+            let use_bits = ipk && k == d.ipk_k;
             let mk = vec_get(d.con_mk, k);
             let c0 = vec_get(d.con_cols, vec_get(d.con_cs, k));
-            let mut mx = 0.0;
-            if map_contains(d.con_map, mk) { mx = map_get(d.con_map, mk); }
+            let mut mx = if use_bits { d.ipk_max } else { 0.0 };
+            if !use_bits && map_contains(d.con_map, mk) { mx = map_get(d.con_map, mk); }
             let mut r = 0;
             while r < nrows {
-                let key = con_key(d, k, cells, base + r * cc);
-                if key.len() > 0 { map_insert(d.con_map, key, 1.0); }
-                if ipk {
-                    let v = sp_get(d, vec_get(cells, base + r * cc + c0));
-                    if is_numeric_str(v) && v.parse_float() > mx { mx = v.parse_float(); }
+                let cid = vec_get(cells, base + r * cc + c0);
+                let iv = if use_bits { ipk_numeric_val(d, cid) } else { 0 - 1 };
+                if iv >= 0 {
+                    ipk_bit_set(d, iv);
+                    if (iv as f64) > mx { mx = iv as f64; }
+                } else {
+                    let key = con_key(d, k, cells, base + r * cc);
+                    if key.len() > 0 { map_insert(d.con_map, key, 1.0); }
+                    if ipk {
+                        if cid >= 1073741824 {
+                            let fv = (cid - 1073741824) as f64;
+                            if fv > mx { mx = fv; }
+                        } else {
+                            let v = sp_get(d, cid);
+                            if is_numeric_str(v) && v.parse_float() > mx { mx = v.parse_float(); }
+                        }
+                    }
                 }
                 r = r + 1;
             }
-            if ipk { map_insert(d.con_map, mk, mx); }
+            if use_bits { d.ipk_max = mx; }
+            else if ipk { map_insert(d.con_map, mk, mx); }
         }
         k = k + 1;
     }
@@ -10393,15 +10876,30 @@ fn con_map_add_keys(d: &mut DB, t: i32, cells: Vec<i32>, keys: Vec<String>) {
         if vec_get(d.con_tbl, k) == t && vec_get(d.con_kind, k) != 2 {
             let key = vec_get(keys, q);
             q = q + 1;
-            if key.len() > 0 { map_insert(d.con_map, key, 1.0); }
-            if con_is_ipk(d, k) {
-                let mk = vec_get(d.con_mk, k);
-                let c0 = vec_get(d.con_cols, vec_get(d.con_cs, k));
-                let mut mx = 0.0;
-                if map_contains(d.con_map, mk) { mx = map_get(d.con_map, mk); }
-                let v = sp_get(d, vec_get(cells, c0));
-                if is_numeric_str(v) && v.parse_float() > mx { mx = v.parse_float(); }
-                map_insert(d.con_map, mk, mx);
+            let ipk = con_is_ipk(d, k);
+            let use_bits = ipk && k == d.ipk_k;
+            let c0 = vec_get(d.con_cols, vec_get(d.con_cs, k));
+            let cid = vec_get(cells, c0);
+            let iv = if use_bits { ipk_numeric_val(d, cid) } else { 0 - 1 };
+            if iv >= 0 {
+                ipk_bit_set(d, iv);
+                if (iv as f64) > d.ipk_max { d.ipk_max = iv as f64; }
+            } else {
+                if key.len() > 0 { map_insert(d.con_map, key, 1.0); }
+                if ipk {
+                    let mut mx = if use_bits { d.ipk_max } else { 0.0 };
+                    let mk = vec_get(d.con_mk, k);
+                    if !use_bits && map_contains(d.con_map, mk) { mx = map_get(d.con_map, mk); }
+                    if cid >= 1073741824 {
+                        let fv = (cid - 1073741824) as f64;
+                        if fv > mx { mx = fv; }
+                    } else {
+                        let v = sp_get(d, cid);
+                        if is_numeric_str(v) && v.parse_float() > mx { mx = v.parse_float(); }
+                    }
+                    if use_bits { d.ipk_max = mx; }
+                    else { map_insert(d.con_map, mk, mx); }
+                }
             }
         }
         k = k + 1;
@@ -10411,6 +10909,9 @@ fn con_map_add_keys(d: &mut DB, t: i32, cells: Vec<i32>, keys: Vec<String>) {
 // Rebuild the key map from every constrained table, in one pass each.
 fn con_map_build(d: &mut DB) {
     d.con_map = map_new();
+    vec_empty(d.ipk_bits);
+    d.ipk_k = 0 - 1;
+    d.ipk_max = 0.0;
     let mut t = 0;
     while t < d.tbl_count {
         let cc = vec_get(d.tbl_col_counts, t);
@@ -10438,21 +10939,33 @@ fn con_check_insert(d: &mut DB, t: i32, rows: Vec<i32>, nrows: i32) -> String {
             let kind = vec_get(d.con_kind, k);
             let st = vec_get(d.con_cs, k);
             let c0 = vec_get(d.con_cols, st);
-            if con_is_ipk(d, k) {
+            let ipk = con_is_ipk(d, k);
+            if ipk && d.ipk_k < 0 {
+                d.ipk_k = k;
+                d.ipk_max = 0.0;
+            }
+            let use_bits = ipk && k == d.ipk_k;
+            if ipk {
                 // INTEGER PRIMARY KEY: number NULLs after the largest key.
                 let mk = vec_get(d.con_mk, k);
-                let mut mx = 0.0;
-                if map_contains(d.con_map, mk) { mx = map_get(d.con_map, mk); }
+                let mut mx = if use_bits { d.ipk_max } else { 0.0 };
+                if !use_bits && map_contains(d.con_map, mk) { mx = map_get(d.con_map, mk); }
                 let mut r = 0;
                 while r < nrows {
-                    let v = sp_get(d, vec_get(rows, r * cc + c0));
-                    if is_numeric_str(v) && v.parse_float() > mx { mx = v.parse_float(); }
+                    let cid = vec_get(rows, r * cc + c0);
+                    if cid >= 1073741824 {
+                        let fv = (cid - 1073741824) as f64;
+                        if fv > mx { mx = fv; }
+                    } else {
+                        let v = sp_get(d, cid);
+                        if is_numeric_str(v) && v.parse_float() > mx { mx = v.parse_float(); }
+                    }
                     r = r + 1;
                 }
                 r = 0;
                 while r < nrows {
-                    let v = sp_get(d, vec_get(rows, r * cc + c0));
-                    if is_null(v) {
+                    let cid = vec_get(rows, r * cc + c0);
+                    if cid < 1073741824 && is_null(sp_get(d, cid)) {
                         mx = mx + 1.0;
                         if vec_len(keys) > 0 { stale = true; }
                         rows[r * cc + c0] = sp_add(d, xv_int(mx));
@@ -10463,25 +10976,43 @@ fn con_check_insert(d: &mut DB, t: i32, rows: Vec<i32>, nrows: i32) -> String {
             if kind == 2 {
                 let mut r = 0;
                 while r < nrows {
-                    if is_null(sp_get(d, vec_get(rows, r * cc + c0))) { return con_fail_text(d, k, t); }
+                    let cid = vec_get(rows, r * cc + c0);
+                    if cid < 1073741824 && is_null(sp_get(d, cid)) { return con_fail_text(d, k, t); }
                     r = r + 1;
                 }
             } else {
                 if nrows == 1 {
-                    // One row cannot collide with itself: no batch map (P29).
-                    let key = con_key(d, k, rows, 0);
-                    if key.len() > 0 {
-                        if map_contains(d.con_map, key) {
+                    let cid = vec_get(rows, c0);
+                    let iv = if use_bits { ipk_numeric_val(d, cid) } else { 0 - 1 };
+                    if iv >= 0 {
+                        if ipk_bit_get(d, iv) {
                             keys.release();
                             return con_fail_text(d, k, t);
                         }
+                        vec_push(keys, "");
+                    } else {
+                        // One row cannot collide with itself: no batch map (P29).
+                        let key = con_key(d, k, rows, 0);
+                        if key.len() > 0 {
+                            if map_contains(d.con_map, key) {
+                                key.release();
+                                keys.release();
+                                return con_fail_text(d, k, t);
+                            }
+                        }
+                        vec_push(keys, key);
                     }
-                    vec_push(keys, key);
                 } else {
                     let batch: HashMap<String, f64> = map_new();
                     let mut r = 0;
                     while r < nrows {
+                        let cid = vec_get(rows, r * cc + c0);
+                        let iv = if use_bits { ipk_numeric_val(d, cid) } else { 0 - 1 };
                         let key = con_key(d, k, rows, r * cc);
+                        if iv >= 0 && ipk_bit_get(d, iv) {
+                            key.release();
+                            return con_fail_text(d, k, t);
+                        }
                         if key.len() > 0 {
                             if map_contains(d.con_map, key) || map_contains(batch, key) { return con_fail_text(d, k, t); }
                             map_insert(batch, key, 1.0);
@@ -10501,6 +11032,7 @@ fn con_check_insert(d: &mut DB, t: i32, rows: Vec<i32>, nrows: i32) -> String {
 }
 
 fn exec_sql_no_wal(d: &mut DB, input: String) ~ Console + FileSystem + Process {
+    d.exec_depth = d.exec_depth + 1;
     reset_parser(d, input);
     parse_sql(d);
     let st = d.stmt_type;
@@ -10518,6 +11050,8 @@ fn exec_sql_no_wal(d: &mut DB, input: String) ~ Console + FileSystem + Process {
     else if st == 8 { wal_commit(d); }
     else if st == 9 { wal_rollback(d); }
     else if st == 10 { exec_alter_table(d); }
+    d.exec_depth = d.exec_depth - 1;
+    if d.exec_depth == 0 { stmt_trash_flush(d); }
 }
 
 // =========================================================================
@@ -10540,12 +11074,16 @@ fn as_of_pos(s: String) -> i64 {
     let mut j = i;
     while j > 0 && b[j - 1] == 32 { j = j - 1; }
     if j == i || j < 2 { return 0 - 1; }
-    if s.substring(j - 2, 2).to_uppercase() != "OF" { return 0 - 1; }
+    if !((b[j - 2] == 79 || b[j - 2] == 111) && (b[j - 1] == 70 || b[j - 1] == 102)) {
+        return 0 - 1;
+    }
     j = j - 2;
     let k = j;
     while j > 0 && b[j - 1] == 32 { j = j - 1; }
     if j == k || j < 3 { return 0 - 1; }
-    if s.substring(j - 2, 2).to_uppercase() != "AS" { return 0 - 1; }
+    if !((b[j - 2] == 65 || b[j - 2] == 97) && (b[j - 1] == 83 || b[j - 1] == 115)) {
+        return 0 - 1;
+    }
     j = j - 2;
     if b[j - 1] != 32 { return 0 - 1; }
     j - 1
@@ -10712,19 +11250,24 @@ fn exec_sql(d: &mut DB, input: String) ~ Console + FileSystem + Process {
     let iln = input.len();
     if iln == 5 || iln == 6 || iln == 8 { trimmed_upper = input.to_uppercase(); }
     if trimmed_upper == "BEGIN" {
+        trimmed_upper.release();
         wal_begin(d);
         return;
     }
     if trimmed_upper == "COMMIT" {
+        trimmed_upper.release();
         wal_commit(d);
         return;
     }
     if trimmed_upper == "ROLLBACK" {
+        trimmed_upper.release();
         d.state_sha = "";
         wal_rollback(d);
         return;
     }
+    if trimmed_upper.len() > 0 { trimmed_upper.release(); }
 
+    d.exec_depth = d.exec_depth + 1;
     reset_parser(d, input);
     parse_sql(d);
 
@@ -10748,10 +11291,11 @@ fn exec_sql(d: &mut DB, input: String) ~ Console + FileSystem + Process {
 
     // Read-only: SELECT — no WAL
     if st == 0 || st == 20 {
-        let fresh: Vec<String> = vec![];
-        d.rcpt_parts = fresh;
+        d.rcpt_parts.clear();
         if st == 0 { exec_select(d); } else { exec_xselect(d); }
         if d.rcpt_on { print_receipt(d, d.txn_id, input); }
+        d.exec_depth = d.exec_depth - 1;
+        if d.exec_depth == 0 { stmt_trash_flush(d); }
         return;
     }
 
@@ -10768,8 +11312,14 @@ fn exec_sql(d: &mut DB, input: String) ~ Console + FileSystem + Process {
     else if st == 5 { exec_drop(d); }
     else if st == 6 { exec_create_index(d); }
     else if st == 10 { exec_alter_table(d); }
-    else { return; }
+    else {
+        d.exec_depth = d.exec_depth - 1;
+        if d.exec_depth == 0 { stmt_trash_flush(d); }
+        return;
+    }
     if !d.stmt_failed { wal_log_mutation(d, input); }
+    d.exec_depth = d.exec_depth - 1;
+    if d.exec_depth == 0 { stmt_trash_flush(d); }
 }
 
 // =========================================================================
@@ -10820,56 +11370,62 @@ fn run_repl(d: &mut DB) ~ Console + FileSystem + Process {
         let llen = line.len();
         // End of input: read_line gives "" there (a blank line is "\n"). Without
         // this the loop spun forever on a script with no .quit. Leaves like .quit.
-        if llen == 0 { go = false; }
-        // Strip trailing \n and \r
-        let mut clean = line;
-        let clen = clean.len();
-        if clen > 0 {
-            let last = clean.char_at(clen - 1);
-            if last == "\n" { clean = clean.substring(0, clen - 1); }
-        }
-        let clen2 = clean.len();
-        if clen2 > 0 {
-            let last2 = clean.char_at(clen2 - 1);
-            if last2 == "\r" { clean = clean.substring(0, clen2 - 1); }
-        }
-
-        let trimmed = clean.trim();
-        let tlen = trimmed.len();
-        if tlen == 0 {
-            // skip
-        } else if trimmed == ".quit" || trimmed == ".exit" {
+        if llen == 0 {
+            line.release();
             go = false;
-        } else if trimmed == ".tables" {
-            cmd_tables(d);
-        } else if trimmed == ".wal" {
-            cmd_wal(d);
-        } else if trimmed.starts_with(".schema") {
-            if tlen > 8 {
-                let tname = trimmed.substring(8, tlen - 8);
-                cmd_schema(d, tname.trim());
-            } else {
-                // Show all tables
-                let mut ti = 0;
-                while ti < d.tbl_count {
-                    let tn = sp_get(d, vec_get(d.tbl_names, ti));
-                    cmd_schema(d, tn);
-                    ti = ti + 1;
-                }
-            }
         } else {
-            // Strip trailing semicolon
-            let mut sql = trimmed;
-            let sql_len = sql.len();
-            if sql_len > 0 {
-                let last_ch = sql.char_at(sql_len - 1);
-                if last_ch == ";" {
-                    sql = sql.substring(0, sql_len - 1);
+            // Trim whitespace and trailing \r/\n in place by byte indices so
+            // each REPL line costs at most one substring allocation.
+            let lb = line.as_bytes();
+            let mut s: i64 = 0;
+            let mut e: i64 = llen;
+            while s < e && (lb[s] == 32 || lb[s] == 9 || lb[s] == 10 || lb[s] == 13) { s = s + 1; }
+            while e > s && (lb[e - 1] == 32 || lb[e - 1] == 9 || lb[e - 1] == 10 || lb[e - 1] == 13) { e = e - 1; }
+            let tlen = e - s;
+            if tlen == 0 {
+                line.release();
+            } else if lb[s] == 46 {
+                let trimmed = line.substring(s, tlen);
+                line.release();
+                if trimmed == ".quit" || trimmed == ".exit" {
+                    go = false;
+                } else if trimmed == ".tables" {
+                    cmd_tables(d);
+                } else if trimmed == ".wal" {
+                    cmd_wal(d);
+                } else if trimmed.starts_with(".schema") {
+                    if tlen > 8 {
+                        let tname = trimmed.substring(8, tlen - 8);
+                        cmd_schema(d, tname.trim());
+                    } else {
+                        let mut ti = 0;
+                        while ti < d.tbl_count {
+                            let tn = sp_get(d, vec_get(d.tbl_names, ti));
+                            cmd_schema(d, tn);
+                            ti = ti + 1;
+                        }
+                    }
                 }
-            }
-            let sql_trimmed = sql.trim();
-            if sql_trimmed.len() > 0 {
-                exec_sql(d, sql_trimmed);
+                trimmed.release();
+            } else {
+                // Strip one trailing semicolon and any whitespace before it.
+                if e > s && lb[e - 1] == 59 {
+                    e = e - 1;
+                    while e > s && (lb[e - 1] == 32 || lb[e - 1] == 9 || lb[e - 1] == 10 || lb[e - 1] == 13) {
+                        e = e - 1;
+                    }
+                }
+                if e > s {
+                    let sql = line.substring(s, e - s);
+                    line.release();
+                    exec_sql(d, sql);
+                    if !d.hist_on && d.crash_at == 0 && !d.trace_writes {
+                        d.input = "";
+                        sql.release();
+                    }
+                } else {
+                    line.release();
+                }
             }
         }
     }
@@ -11387,7 +11943,7 @@ fn stmt_update_fast(d: &mut DB, st: &mut QStmt) -> bool ~ Console + FileSystem +
             while i < n {
                 let cid = vec_get(d.cells, rs + vec_get(rows, i) * cc + scol);
                 if sp_kind(d, cid) != 1 { return false; }
-                let af = vec_get(d.pool_num, cid);
+                let af = if cid >= 1073741824 { (cid - 1073741824) as f64 } else { vec_get(d.pool_num, cid) };
                 if af < 0.0 - 2147483647.0 || af > 2147483647.0 { return false; }
                 let a = af as i32;
                 let mut r = 0;

@@ -86,7 +86,9 @@ pub fn capability_effect_for_call(name: &str) -> Option<&'static str> {
         | "build_write_file" | "build_file_exists" | "build_read_bytes" | "build_write_bytes"
         | "build_append_file" | "build_list_dir" | "build_is_dir" | "build_file_size"
         | "write_file_bytes" | "append_file_bytes" | "read_file_bytes"
-        | "build_write_file_bytes" | "build_append_file_bytes" | "build_read_file_bytes" => {
+        | "write_file_at" | "read_file_at" | "remove_file"
+        | "build_write_file_bytes" | "build_append_file_bytes" | "build_read_file_bytes"
+        | "build_write_file_at" | "build_read_file_at" | "build_remove_file" => {
             Some(FILE_SYSTEM)
         }
         "tcp_connect" | "tcp_send" | "tcp_recv" | "tcp_close" | "build_tcp_connect"

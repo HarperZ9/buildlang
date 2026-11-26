@@ -276,8 +276,37 @@ impl CBackend {
             MirType::Ptr(inner) if matches!(inner.as_ref(), MirType::Slice(_)) => {
                 Self::type_name_of_slice_ref(inner)
             }
+            // A raw pointer / concrete reference element: keyed by a sanitized
+            // identifier so `Vec<&str>` / `Vec<*mut T>` each get a typed
+            // element-sized wrapper. Trait-object pointers (`dyn Trait`) remain
+            // unsupported until vtable dispatch is lowered in the C backend.
+            MirType::Ptr(inner) if !Self::is_dyn_trait_type(inner) => Self::hvec_ptr_suffix(inner),
             _ => "i32".to_string(),
         }
+    }
+
+    /// True when `ty` represents an unlowered `dyn Trait` object type.
+    pub(crate) fn is_dyn_trait_type(ty: &MirType) -> bool {
+        match ty {
+            MirType::TraitObject(_) => true,
+            MirType::Struct(n) => n.starts_with("dyn ") || n.starts_with("dyn_"),
+            MirType::Ptr(inner) => Self::is_dyn_trait_type(inner),
+            _ => false,
+        }
+    }
+
+    /// Sanitized C-identifier suffix for a non-slice pointer Vec element type.
+    pub(crate) fn hvec_ptr_suffix(inner: &MirType) -> String {
+        let raw = inner.to_string();
+        let mut out = String::from("ptr_");
+        for ch in raw.chars() {
+            if ch.is_ascii_alphanumeric() || ch == '_' {
+                out.push(ch);
+            } else {
+                out.push('_');
+            }
+        }
+        out
     }
 
     /// True when a Vec element type needs a monomorphized element-sized wrapper
@@ -291,6 +320,7 @@ impl CBackend {
 
     fn vec_elem_needs_sized_wrapper(elem: &MirType) -> bool {
         Self::is_slice_ref(elem)
+            || matches!(elem, MirType::Ptr(inner) if !Self::is_dyn_trait_type(inner))
             || matches!(elem, MirType::Struct(n) if n.as_ref() != "BuildString")
             || matches!(elem, MirType::Vec(_) | MirType::Map(_, _))
             || matches!(
@@ -3532,35 +3562,42 @@ impl CBackend {
                 if func_str == "Some" && args.len() == 1 {
                     if let Some(dest_local) = dest {
                         let dest_name = self.local_name(*dest_local, locals);
-                        let arg = self.value_to_c(&args[0], locals);
                         let arg_ty = self.sumtype_arg_type(&args[0], locals);
-                        let boxed = arg_ty
-                            .as_ref()
-                            .map(Self::payload_needs_boxing)
-                            .unwrap_or(false);
+                        let is_unit = matches!(arg_ty, Some(MirType::Void))
+                            || matches!(&args[0], MirValue::Const(MirConst::Unit));
                         write!(self.output, "{}.has_value = true;\n", dest_name).unwrap();
                         self.write_indent();
-                        if boxed {
-                            // Payload >8 bytes: box it (malloc + copy) and store
-                            // the pointer in the .p slot.
-                            let ct = self.type_to_c(arg_ty.as_ref().unwrap());
-                            write!(
-                                self.output,
-                                "{{ {ct}* __opt_box = ({ct}*)malloc(sizeof({ct})); \
-                                 *__opt_box = {arg}; {dest}.value.p = (void*)__opt_box; }}\n",
-                                ct = ct,
-                                arg = arg,
-                                dest = dest_name
-                            )
-                            .unwrap();
+                        if is_unit {
+                            write!(self.output, "{}.value.i = 0;\n", dest_name).unwrap();
                         } else {
-                            let (slot, cast) = Self::option_payload_slot_and_cast(arg_ty.as_ref());
-                            write!(
-                                self.output,
-                                "{}.value.{} = {}({});\n",
-                                dest_name, slot, cast, arg
-                            )
-                            .unwrap();
+                            let arg = self.value_to_c(&args[0], locals);
+                            let boxed = arg_ty
+                                .as_ref()
+                                .map(Self::payload_needs_boxing)
+                                .unwrap_or(false);
+                            if boxed {
+                                // Payload >8 bytes: box it (malloc + copy) and store
+                                // the pointer in the .p slot.
+                                let ct = self.type_to_c(arg_ty.as_ref().unwrap());
+                                write!(
+                                    self.output,
+                                    "{{ {ct}* __opt_box = ({ct}*)malloc(sizeof({ct})); \
+                                     *__opt_box = {arg}; {dest}.value.p = (void*)__opt_box; }}\n",
+                                    ct = ct,
+                                    arg = arg,
+                                    dest = dest_name
+                                )
+                                .unwrap();
+                            } else {
+                                let (slot, cast) =
+                                    Self::option_payload_slot_and_cast(arg_ty.as_ref());
+                                write!(
+                                    self.output,
+                                    "{}.value.{} = {}({});\n",
+                                    dest_name, slot, cast, arg
+                                )
+                                .unwrap();
+                            }
                         }
                     }
                     if let Some(target) = target {
@@ -3579,36 +3616,42 @@ impl CBackend {
                 if func_str == "Ok" && args.len() == 1 {
                     if let Some(dest_local) = dest {
                         let dest_name = self.local_name(*dest_local, locals);
-                        let arg = self.value_to_c(&args[0], locals);
                         let arg_ty = self.sumtype_arg_type(&args[0], locals);
-                        let boxed = arg_ty
-                            .as_ref()
-                            .map(Self::payload_needs_boxing)
-                            .unwrap_or(false);
+                        let is_unit = matches!(arg_ty, Some(MirType::Void))
+                            || matches!(&args[0], MirValue::Const(MirConst::Unit));
                         write!(self.output, "{}.is_ok = true;\n", dest_name).unwrap();
                         self.write_indent();
-                        if boxed {
-                            // Payload >8 bytes: box it and store the pointer in
-                            // the ok_p slot.
-                            let ct = self.type_to_c(arg_ty.as_ref().unwrap());
-                            write!(
-                                self.output,
-                                "{{ {ct}* __ok_box = ({ct}*)malloc(sizeof({ct})); \
-                                 *__ok_box = {arg}; {dest}.ok.ok_p = (void*)__ok_box; }}\n",
-                                ct = ct,
-                                arg = arg,
-                                dest = dest_name
-                            )
-                            .unwrap();
+                        if is_unit {
+                            write!(self.output, "{}.ok.ok_i = 0;\n", dest_name).unwrap();
                         } else {
-                            let (slot, cast) =
-                                Self::result_payload_slot_and_cast(arg_ty.as_ref(), true);
-                            write!(
-                                self.output,
-                                "{}.ok.{} = {}({});\n",
-                                dest_name, slot, cast, arg
-                            )
-                            .unwrap();
+                            let arg = self.value_to_c(&args[0], locals);
+                            let boxed = arg_ty
+                                .as_ref()
+                                .map(Self::payload_needs_boxing)
+                                .unwrap_or(false);
+                            if boxed {
+                                // Payload >8 bytes: box it and store the pointer in
+                                // the ok_p slot.
+                                let ct = self.type_to_c(arg_ty.as_ref().unwrap());
+                                write!(
+                                    self.output,
+                                    "{{ {ct}* __ok_box = ({ct}*)malloc(sizeof({ct})); \
+                                     *__ok_box = {arg}; {dest}.ok.ok_p = (void*)__ok_box; }}\n",
+                                    ct = ct,
+                                    arg = arg,
+                                    dest = dest_name
+                                )
+                                .unwrap();
+                            } else {
+                                let (slot, cast) =
+                                    Self::result_payload_slot_and_cast(arg_ty.as_ref(), true);
+                                write!(
+                                    self.output,
+                                    "{}.ok.{} = {}({});\n",
+                                    dest_name, slot, cast, arg
+                                )
+                                .unwrap();
+                            }
                         }
                     }
                     if let Some(target) = target {
@@ -3626,12 +3669,15 @@ impl CBackend {
                 if func_str == "Err" && args.len() == 1 {
                     if let Some(dest_local) = dest {
                         let dest_name = self.local_name(*dest_local, locals);
-                        let arg = self.value_to_c(&args[0], locals);
+                        let arg_ty = self.sumtype_arg_type(&args[0], locals);
+                        let is_unit = matches!(arg_ty, Some(MirType::Void))
+                            || matches!(&args[0], MirValue::Const(MirConst::Unit));
                         write!(self.output, "{}.is_ok = false;\n", dest_name).unwrap();
                         self.write_indent();
-                        // A raw string literal is a `const char*`: wrap it into a
-                        // BuildString and box it into the err_p slot.
-                        if let MirValue::Const(MirConst::Str(_)) = &args[0] {
+                        if is_unit {
+                            write!(self.output, "{}.err.err_i = 0;\n", dest_name).unwrap();
+                        } else if let MirValue::Const(MirConst::Str(_)) = &args[0] {
+                            let arg = self.value_to_c(&args[0], locals);
                             write!(
                                 self.output,
                                 "{{ BuildString* __err_box = (BuildString*)malloc(sizeof(BuildString)); \
@@ -3641,7 +3687,7 @@ impl CBackend {
                             )
                             .unwrap();
                         } else {
-                            let arg_ty = self.sumtype_arg_type(&args[0], locals);
+                            let arg = self.value_to_c(&args[0], locals);
                             let boxed = arg_ty
                                 .as_ref()
                                 .map(Self::payload_needs_boxing)

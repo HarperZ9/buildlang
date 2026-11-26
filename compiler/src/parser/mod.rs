@@ -282,6 +282,21 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// Expect an identifier in a member/function-name position (`fn <name>` or
+    /// `expr.<name>`), where contextual keywords like `resume` and `with` are
+    /// unambiguous identifiers.
+    fn expect_member_ident(&mut self) -> ParseResult<Ident> {
+        if matches!(
+            self.current_kind(),
+            TokenKind::Keyword(Keyword::Resume) | TokenKind::Keyword(Keyword::With)
+        ) {
+            let token_span = self.advance().span;
+            let name = self.source.slice(token_span);
+            return Ok(Ident::new(name, token_span));
+        }
+        self.expect_ident()
+    }
+
     /// Check if the current token is a keyword that can be used as an identifier
     /// in certain contexts (struct fields, variable names, type paths, etc.).
     fn is_contextual_keyword(&self) -> bool {

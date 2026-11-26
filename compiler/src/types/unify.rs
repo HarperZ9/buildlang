@@ -289,14 +289,20 @@ impl Unifier {
             }
 
             // Vec-to-slice deref coercion: Vec<T> unifies with [T] so `&Vec<T>`
-            // coerces to `&[T]` (preserving element-type invariance).
+            // coerces to `&[T]` (preserving element-type invariance). Covers
+            // both synthetic `Ty::vec` (`DefId::DUMMY`) and named `Vec<T>`
+            // type annotations.
             (TyKind::Adt(def_id, args), TyKind::Slice(elem2))
-                if *def_id == DefId::DUMMY && args.len() == 1 =>
+                if (*def_id == DefId::DUMMY
+                    || super::ty::def_name(*def_id).as_deref() == Some("Vec"))
+                    && args.len() == 1 =>
             {
                 self.unify_mode(&args[0], elem2, invariant)
             }
             (TyKind::Slice(elem1), TyKind::Adt(def_id, args))
-                if *def_id == DefId::DUMMY && args.len() == 1 =>
+                if (*def_id == DefId::DUMMY
+                    || super::ty::def_name(*def_id).as_deref() == Some("Vec"))
+                    && args.len() == 1 =>
             {
                 self.unify_mode(elem1, &args[0], invariant)
             }
@@ -383,7 +389,11 @@ impl Unifier {
 
             // ADTs: same definition and unified type arguments
             (TyKind::Adt(def1, args1), TyKind::Adt(def2, args2)) => {
-                if def1 != def2 {
+                let both_vec = (*def1 == DefId::DUMMY
+                    || super::ty::def_name(*def1).as_deref() == Some("Vec"))
+                    && (*def2 == DefId::DUMMY
+                        || super::ty::def_name(*def2).as_deref() == Some("Vec"));
+                if def1 != def2 && !both_vec {
                     return Err(TypeError::TypeMismatch {
                         expected: t1.clone(),
                         found: t2.clone(),
@@ -400,6 +410,12 @@ impl Unifier {
                 }
                 Ok(())
             }
+
+            // Trait object unsized coercion: `&Concrete` -> `&dyn Trait`,
+            // `Box<Concrete>` -> `Box<dyn Trait>`, and `dyn Trait` -> `dyn Trait`.
+            (TyKind::TraitObject(_), TyKind::TraitObject(_)) => Ok(()),
+            (TyKind::TraitObject(_), TyKind::Adt(_, _))
+            | (TyKind::Adt(_, _), TyKind::TraitObject(_)) => Ok(()),
 
             // Type parameters: must be identical
             (TyKind::Param(n1, i1), TyKind::Param(n2, i2)) => {

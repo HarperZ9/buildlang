@@ -289,6 +289,18 @@ impl<'a> Parser<'a> {
             // =================================================================
             // MACRO RULES
             // =================================================================
+            TokenKind::Keyword(Keyword::MacroRules) => {
+                self.advance();
+                self.expect(&TokenKind::Not)?;
+                let macro_rules = self.parse_macro_rules()?;
+                let span = start.merge(&self.tokens[self.pos.saturating_sub(1)].span);
+                Ok(Item::new(
+                    ItemKind::MacroRules(Box::new(macro_rules)),
+                    vis,
+                    attrs,
+                    span,
+                ))
+            }
             TokenKind::Keyword(Keyword::Macro) => {
                 self.advance();
                 if self.check_ident() && self.source.slice(self.current().span) == "rules" {
@@ -376,7 +388,7 @@ impl<'a> Parser<'a> {
         is_async: bool,
         is_const: bool,
     ) -> ParseResult<FnDef> {
-        let name = self.expect_ident()?;
+        let name = self.expect_member_ident()?;
         let generics = self.parse_generics()?;
 
         // Parse the parameter list, detecting a trailing C-style `...` variadic
@@ -683,7 +695,7 @@ impl<'a> Parser<'a> {
     fn parse_struct(&mut self) -> ParseResult<StructDef> {
         self.expect_keyword(Keyword::Struct)?;
 
-        let name = self.expect_ident()?;
+        let name = self.expect_member_ident()?;
         let generics = self.parse_generics()?;
 
         let fields = if self.check(&TokenKind::OpenDelim(Delimiter::Brace)) {
@@ -714,7 +726,7 @@ impl<'a> Parser<'a> {
         let vis = self.parse_visibility()?;
         let start = self.current_span();
 
-        let name = self.expect_ident()?;
+        let name = self.expect_member_ident()?;
         self.expect(&TokenKind::Colon)?;
         let ty = self.parse_type()?;
 
@@ -761,7 +773,7 @@ impl<'a> Parser<'a> {
     fn parse_enum(&mut self) -> ParseResult<EnumDef> {
         self.expect_keyword(Keyword::Enum)?;
 
-        let name = self.expect_ident()?;
+        let name = self.expect_member_ident()?;
         let generics = self.parse_generics()?;
 
         let (variants, _) = self.parse_brace_comma_seq(|p| p.parse_enum_variant())?;
@@ -778,7 +790,7 @@ impl<'a> Parser<'a> {
         let attrs = self.parse_outer_attrs()?;
         let start = self.current_span();
 
-        let name = self.expect_ident()?;
+        let name = self.expect_member_ident()?;
 
         let fields = if self.check(&TokenKind::OpenDelim(Delimiter::Brace)) {
             let (fields, _) = self.parse_brace_comma_seq(|p| p.parse_struct_field())?;
@@ -819,7 +831,7 @@ impl<'a> Parser<'a> {
 
     /// Parse trait definition after `trait` keyword.
     fn parse_trait_inner(&mut self, is_unsafe: bool) -> ParseResult<TraitDef> {
-        let name = self.expect_ident()?;
+        let name = self.expect_member_ident()?;
         let generics = self.parse_generics()?;
 
         let supertraits = if self.eat(&TokenKind::Colon) {
@@ -889,7 +901,7 @@ impl<'a> Parser<'a> {
 
             TokenKind::Keyword(Keyword::Type) => {
                 self.advance();
-                let name = self.expect_ident()?;
+                let name = self.expect_member_ident()?;
                 let generics = self.parse_generics()?;
 
                 let bounds = if self.eat(&TokenKind::Colon) {
@@ -916,7 +928,7 @@ impl<'a> Parser<'a> {
 
             TokenKind::Keyword(Keyword::Const) if !is_const => {
                 self.advance();
-                let name = self.expect_ident()?;
+                let name = self.expect_member_ident()?;
                 self.expect(&TokenKind::Colon)?;
                 let ty = self.parse_type()?;
 
@@ -1076,7 +1088,7 @@ impl<'a> Parser<'a> {
 
             TokenKind::Keyword(Keyword::Type) => {
                 self.advance();
-                let name = self.expect_ident()?;
+                let name = self.expect_member_ident()?;
                 let generics = self.parse_generics()?;
                 self.expect(&TokenKind::Eq)?;
                 let ty = self.parse_type()?;
@@ -1091,7 +1103,7 @@ impl<'a> Parser<'a> {
 
             TokenKind::Keyword(Keyword::Const) if !is_const => {
                 self.advance();
-                let name = self.expect_ident()?;
+                let name = self.expect_member_ident()?;
                 self.expect(&TokenKind::Colon)?;
                 let ty = self.parse_type()?;
                 self.expect(&TokenKind::Eq)?;
@@ -1128,7 +1140,7 @@ impl<'a> Parser<'a> {
     fn parse_type_alias(&mut self) -> ParseResult<TypeAliasDef> {
         self.expect_keyword(Keyword::Type)?;
 
-        let name = self.expect_ident()?;
+        let name = self.expect_member_ident()?;
         let generics = self.parse_generics()?;
 
         let bounds = if self.eat(&TokenKind::Colon) {
@@ -1165,7 +1177,7 @@ impl<'a> Parser<'a> {
 
     /// Parse const after keyword.
     fn parse_const_inner(&mut self) -> ParseResult<ConstDef> {
-        let name = self.expect_ident()?;
+        let name = self.expect_member_ident()?;
         self.expect(&TokenKind::Colon)?;
         let ty = self.parse_type()?;
 
@@ -1194,7 +1206,7 @@ impl<'a> Parser<'a> {
             Mutability::Immutable
         };
 
-        let name = self.expect_ident()?;
+        let name = self.expect_member_ident()?;
         self.expect(&TokenKind::Colon)?;
         let ty = self.parse_type()?;
 
@@ -1222,7 +1234,7 @@ impl<'a> Parser<'a> {
     fn parse_mod(&mut self, is_unsafe: bool) -> ParseResult<ModDef> {
         self.expect_keyword(Keyword::Mod)?;
 
-        let name = self.expect_ident()?;
+        let name = self.expect_member_ident()?;
 
         let content = if self.check(&TokenKind::OpenDelim(Delimiter::Brace)) {
             let brace_start = self.expect(&TokenKind::OpenDelim(Delimiter::Brace))?.span;
@@ -1269,7 +1281,7 @@ impl<'a> Parser<'a> {
         self.expect_keyword(Keyword::Module)?;
 
         // Parse the module name (may be a path like `std::math`)
-        let name = self.expect_ident()?;
+        let name = self.expect_member_ident()?;
 
         // Consume any `::segment` path components (e.g., `std::math::trig`)
         while self.eat(&TokenKind::ColonColon) {
@@ -1438,7 +1450,7 @@ impl<'a> Parser<'a> {
     fn parse_extern_crate(&mut self) -> ParseResult<ExternCrateDef> {
         self.expect_keyword(Keyword::Crate)?;
 
-        let name = self.expect_ident()?;
+        let name = self.expect_member_ident()?;
 
         let rename = if self.eat_keyword(Keyword::As) {
             Some(self.expect_ident()?)
@@ -1546,7 +1558,7 @@ impl<'a> Parser<'a> {
                 } else {
                     Mutability::Immutable
                 };
-                let name = self.expect_ident()?;
+                let name = self.expect_member_ident()?;
                 self.expect(&TokenKind::Colon)?;
                 let ty = self.parse_type()?;
                 self.expect(&TokenKind::Semi)?;
@@ -1560,7 +1572,7 @@ impl<'a> Parser<'a> {
 
             TokenKind::Keyword(Keyword::Type) => {
                 self.advance();
-                let name = self.expect_ident()?;
+                let name = self.expect_member_ident()?;
                 let bounds = if self.eat(&TokenKind::Colon) {
                     self.parse_type_bounds()?
                 } else {
@@ -1591,21 +1603,29 @@ impl<'a> Parser<'a> {
 
     /// Parse macro_rules! definition.
     fn parse_macro_rules(&mut self) -> ParseResult<MacroRulesDef> {
-        let name = self.expect_ident()?;
+        let name = self.expect_member_ident()?;
 
-        let (rules, _) = if self.check(&TokenKind::OpenDelim(Delimiter::Brace)) {
-            self.parse_brace_comma_seq(|p| p.parse_macro_rule())?
-        } else if self.check(&TokenKind::OpenDelim(Delimiter::Paren)) {
-            let result = self.parse_paren_comma_seq(|p| p.parse_macro_rule())?;
-            self.expect(&TokenKind::Semi)?;
-            result
-        } else if self.check(&TokenKind::OpenDelim(Delimiter::Bracket)) {
-            let result = self.parse_bracket_comma_seq(|p| p.parse_macro_rule())?;
-            self.expect(&TokenKind::Semi)?;
-            result
+        let (close_delim, needs_semi) = if self.eat(&TokenKind::OpenDelim(Delimiter::Brace)) {
+            (Delimiter::Brace, false)
+        } else if self.eat(&TokenKind::OpenDelim(Delimiter::Paren)) {
+            (Delimiter::Paren, true)
+        } else if self.eat(&TokenKind::OpenDelim(Delimiter::Bracket)) {
+            (Delimiter::Bracket, true)
         } else {
             return Err(self.error_expected("macro body"));
         };
+
+        let mut rules = Vec::new();
+        while !self.check(&TokenKind::CloseDelim(close_delim)) && !self.is_eof() {
+            rules.push(self.parse_macro_rule()?);
+            if !self.eat(&TokenKind::Semi) && !self.eat(&TokenKind::Comma) {
+                break;
+            }
+        }
+        self.expect(&TokenKind::CloseDelim(close_delim))?;
+        if needs_semi {
+            self.expect(&TokenKind::Semi)?;
+        }
 
         Ok(MacroRulesDef { name, rules })
     }
@@ -1614,8 +1634,16 @@ impl<'a> Parser<'a> {
     fn parse_macro_rule(&mut self) -> ParseResult<MacroRule> {
         let start = self.current_span();
 
-        // Parse pattern
-        let pattern = self.parse_token_trees_until(Delimiter::Paren)?;
+        // Parse pattern (may be delimited by (), {}, or [])
+        let pattern = if self.check(&TokenKind::OpenDelim(Delimiter::Paren)) {
+            self.parse_token_trees_until(Delimiter::Paren)?
+        } else if self.check(&TokenKind::OpenDelim(Delimiter::Brace)) {
+            self.parse_token_trees_until(Delimiter::Brace)?
+        } else if self.check(&TokenKind::OpenDelim(Delimiter::Bracket)) {
+            self.parse_token_trees_until(Delimiter::Bracket)?
+        } else {
+            return Err(self.error_expected("macro pattern"));
+        };
 
         self.expect(&TokenKind::FatArrow)?;
 
@@ -1660,7 +1688,7 @@ impl<'a> Parser<'a> {
     fn parse_effect(&mut self) -> ParseResult<EffectDef> {
         self.expect_keyword(Keyword::Effect)?;
 
-        let name = self.expect_ident()?;
+        let name = self.expect_member_ident()?;
         let generics = self.parse_generics()?;
 
         self.expect(&TokenKind::OpenDelim(Delimiter::Brace))?;
@@ -1685,7 +1713,7 @@ impl<'a> Parser<'a> {
         let start = self.current_span();
 
         self.expect_keyword(Keyword::Fn)?;
-        let name = self.expect_ident()?;
+        let name = self.expect_member_ident()?;
 
         let (params, _) = self.parse_paren_comma_seq(|p| p.parse_fn_param())?;
 

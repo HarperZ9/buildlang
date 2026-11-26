@@ -1635,6 +1635,14 @@ impl<'ctx> MirLowerer<'ctx> {
                         // The actual function will be generated in lower_item pass
                         // by checking for this registered method.
                     }
+                    let has_default = self.attr_has_derive_name(attr, "Default");
+                    if has_default {
+                        let type_name = name.name.clone();
+                        let method_name: Arc<str> = Arc::from(format!("{}_default", type_name));
+                        self.impl_methods
+                            .entry((type_name, Arc::from("default")))
+                            .or_insert(method_name);
+                    }
                 }
             }
         }
@@ -3563,6 +3571,31 @@ impl<'ctx> MirLowerer<'ctx> {
             self.module.add_function(func);
         }
 
+        let default_key = (type_name.clone(), Arc::from("default"));
+        if let Some(fn_name) = self.impl_methods.get(&default_key).cloned() {
+            if !self.monomorphized.contains(&fn_name)
+                && self.module.find_function(fn_name.as_ref()).is_none()
+            {
+                self.monomorphized.insert(fn_name.clone());
+                let struct_ty = MirType::Struct(type_name.clone());
+                let sig = MirFnSig::new(vec![], struct_ty.clone());
+                let mut builder = MirBuilder::with_linear_type_names(
+                    fn_name,
+                    sig,
+                    Arc::new(self.linear_type_names.clone()),
+                );
+                let zero = builder.create_local(struct_ty.clone());
+                builder.assign(
+                    zero,
+                    MirRValue::Use(MirValue::Const(MirConst::Zeroed(struct_ty))),
+                );
+                builder.ret(Some(values::local(zero)));
+                let mut func = builder.build();
+                func.is_public = true;
+                self.module.add_function(func);
+            }
+        }
+
         Ok(())
     }
 
@@ -3723,7 +3756,7 @@ impl<'ctx> MirLowerer<'ctx> {
         // `struct_name`, returning its matching field type. This is what lets a
         // record-pattern bind through a `match` on a struct-like enum variant
         // recover the true (possibly `#[linear]`) field type instead of the
-        // `i32` default — required for the MIR linear checker to see the field
+        // `i32` default; required for the MIR linear checker to see the field
         // extract as a move of a linear payload out of a shared borrow.
         self.module.find_variant_field_type(struct_name, field_name)
     }

@@ -672,7 +672,7 @@ impl<'a> Parser<'a> {
                     return Ok(Expr::new(ExprKind::Await(Box::new(lhs)), span));
                 }
 
-                let field = self.expect_ident()?;
+                let field = self.expect_member_ident()?;
 
                 // Check for method call - either `method(...)` or `method::<T>(...)`
                 let is_turbofish =

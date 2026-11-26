@@ -2681,6 +2681,48 @@ static BuildVecHandle build_read_file_bytes(const char* path) {
     fclose(f);
     return h;
 }
+static bool build_write_file_at(const char* path, int64_t offset, BuildVecHandle v) {
+    if (v.inner->elem_size != 1) bl_vec_layout_fail(v.inner->elem_size, 1);
+    if (offset < 0) return false;
+    FILE* f = fopen(path, "r+b");
+    if (!f) f = fopen(path, "w+b");
+    if (!f) return false;
+#ifdef _WIN32
+    int sk = _fseeki64(f, offset, SEEK_SET);
+#else
+    int sk = fseek(f, (long)offset, SEEK_SET);
+#endif
+    if (sk != 0) { fclose(f); return false; }
+    size_t n = v.inner->len;
+    size_t w = n ? fwrite(v.inner->ptr, 1, n, f) : 0;
+    int closed = fclose(f);
+    return w == n && closed == 0;
+}
+static BuildVecHandle build_read_file_at(const char* path, int64_t offset, int64_t len) {
+    BuildVecHandle h;
+    h.inner = (BuildVec*)malloc(sizeof(BuildVec));
+    *h.inner = build_vec_new(1);
+    if (offset < 0 || len <= 0) return h;
+    FILE* f = fopen(path, "rb");
+    if (!f) return h;
+#ifdef _WIN32
+    int sk = _fseeki64(f, offset, SEEK_SET);
+#else
+    int sk = fseek(f, (long)offset, SEEK_SET);
+#endif
+    if (sk != 0) { fclose(f); return h; }
+    size_t want = (size_t)len;
+    h.inner->ptr = realloc(h.inner->ptr, want);
+    if (!h.inner->ptr) { fprintf(stderr, "read_file_at: out of memory\n"); exit(101); }
+    h.inner->cap = want;
+    size_t got = fread(h.inner->ptr, 1, want, f);
+    h.inner->len = got;
+    fclose(f);
+    return h;
+}
+static bool build_remove_file(const char* path) {
+    return remove(path) == 0;
+}
 
 // --- Process / Environment ---
 
@@ -3976,6 +4018,9 @@ pub fn math_builtin_to_c(name: &str) -> Option<&'static str> {
         "write_file_bytes" => Some("build_write_file_bytes"),
         "append_file_bytes" => Some("build_append_file_bytes"),
         "read_file_bytes" => Some("build_read_file_bytes"),
+        "write_file_at" => Some("build_write_file_at"),
+        "read_file_at" => Some("build_read_file_at"),
+        "remove_file" => Some("build_remove_file"),
         "vec_new" => Some("build_hvec_new_i32"),
         "vec_push" => Some("build_hvec_push_i32"),
         "vec_get" => Some("build_hvec_get_i32"),

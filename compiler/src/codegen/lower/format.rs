@@ -254,6 +254,92 @@ impl<'ctx> MirLowerer<'ctx> {
         }
     }
 
+    /// Generate (once per enum type) a helper function `__bl_fmt_enum_<Name>`
+    /// that maps each variant tag to its variant name as a `BuildString`.
+    fn ensure_enum_fmt_helper(&mut self, enum_name: &Arc<str>) -> CodegenResult<Arc<str>> {
+        let fn_name: Arc<str> = Arc::from(format!("__bl_fmt_enum_{}", enum_name));
+        if self.monomorphized.contains(&fn_name)
+            || self.module.find_function(fn_name.as_ref()).is_some()
+        {
+            return Ok(fn_name);
+        }
+        self.monomorphized.insert(fn_name.clone());
+
+        let variants: Vec<(i128, Arc<str>)> =
+            match self.module.find_type(enum_name).map(|td| &td.kind) {
+                Some(TypeDefKind::Enum { variants, .. }) => variants
+                    .iter()
+                    .map(|v| (v.discriminant, v.name.clone()))
+                    .collect(),
+                _ => Vec::new(),
+            };
+
+        let enum_ty = MirType::Struct(enum_name.clone());
+        let str_ty = MirType::Struct(Arc::from(STR));
+        let sig = MirFnSig::new(vec![enum_ty], str_ty.clone());
+        let mut b = crate::codegen::MirBuilder::with_linear_type_names(
+            fn_name.clone(),
+            sig,
+            Arc::new(self.linear_type_names.clone()),
+        );
+        let p0 = b.param_local(0);
+        b.set_param_name(0, Arc::from("val"));
+
+        let tag = b.create_local(MirType::i32());
+        b.assign(
+            tag,
+            MirRValue::FieldAccess {
+                base: crate::codegen::values::local(p0),
+                field_name: Arc::from("tag"),
+                field_ty: MirType::i32(),
+            },
+        );
+
+        let fallback_str = MirConst::Struct(
+            Arc::from(STR),
+            vec![
+                MirConst::ByteStr(enum_name.as_bytes().to_vec()),
+                MirConst::Uint(enum_name.len() as u128, MirType::usize()),
+                MirConst::Uint(0, MirType::usize()),
+            ],
+        );
+
+        for (disc, vname) in variants {
+            let cmp = b.create_local(MirType::Bool);
+            b.binary_op(
+                cmp,
+                BinOp::Eq,
+                crate::codegen::values::local(tag),
+                MirValue::Const(MirConst::Int(disc, MirType::i32())),
+            );
+            let hit_bb = b.create_block();
+            let next_bb = b.create_block();
+            b.branch(crate::codegen::values::local(cmp), hit_bb, next_bb);
+            b.switch_to_block(hit_bb);
+            let s_val = MirConst::Struct(
+                Arc::from(STR),
+                vec![
+                    MirConst::ByteStr(vname.as_bytes().to_vec()),
+                    MirConst::Uint(vname.len() as u128, MirType::usize()),
+                    MirConst::Uint(0, MirType::usize()),
+                ],
+            );
+            let ret_l = b.create_local(str_ty.clone());
+            b.assign(ret_l, MirRValue::Use(MirValue::Const(s_val)));
+            b.ret(Some(crate::codegen::values::local(ret_l)));
+            b.switch_to_block(next_bb);
+        }
+
+        let def_l = b.create_local(str_ty);
+        b.assign(def_l, MirRValue::Use(MirValue::Const(fallback_str)));
+        b.ret(Some(crate::codegen::values::local(def_l)));
+
+        let mut func = b.build();
+        func.is_public = false;
+        self.module.add_function(func);
+        Ok(fn_name)
+    }
+
     /// Call a runtime function that returns a BuildString and give back its
     /// `.ptr` for `%s`.
     fn fmt_string_call(&mut self, func: &str, args: Vec<MirValue>) -> CodegenResult<MirValue> {
@@ -465,6 +551,16 @@ impl<'ctx> MirLowerer<'ctx> {
                     }
                 };
                 let arg = self.fmt_string_call(&format!("build_hvec_debug_{suffix}"), vec![val])?;
+                Ok((format!("{}s", c_flags(spec, true, false)), Some(arg)))
+            }
+            MirType::Struct(name)
+                if matches!(
+                    self.module.find_type(name).map(|td| &td.kind),
+                    Some(TypeDefKind::Enum { .. })
+                ) =>
+            {
+                let helper = self.ensure_enum_fmt_helper(name)?;
+                let arg = self.fmt_string_call(helper.as_ref(), vec![val])?;
                 Ok((format!("{}s", c_flags(spec, true, false)), Some(arg)))
             }
             other => Err(self.fmt_reject(
