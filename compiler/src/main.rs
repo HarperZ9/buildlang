@@ -187,6 +187,16 @@ struct Cli {
     /// Implies `--superopt`.
     #[arg(long, value_name = "PATH")]
     emit_cert: Option<PathBuf>,
+
+    /// Write the sealed `buildlang.gpu-tv-cert/v1` GPU polyhedral + subgroup translation
+    /// validation certificate to PATH ('-' = stdout). Implies `--superopt`.
+    #[arg(long, value_name = "PATH")]
+    emit_gpu_cert: Option<PathBuf>,
+
+    /// Subgroup reduction determinism mode for GPU translation validation:
+    /// `strict-bit-exact` (default) or `bounded-ulp`
+    #[arg(long, default_value = "strict-bit-exact", value_parser = ["strict-bit-exact", "bounded-ulp"])]
+    subgroup_mode: String,
 }
 
 #[derive(Subcommand)]
@@ -280,6 +290,16 @@ enum Commands {
         /// Implies `--superopt`.
         #[arg(long, value_name = "PATH")]
         emit_cert: Option<PathBuf>,
+
+        /// Write the sealed `buildlang.gpu-tv-cert/v1` GPU polyhedral + subgroup translation
+        /// validation certificate to PATH ('-' = stdout). Implies `--superopt`.
+        #[arg(long, value_name = "PATH")]
+        emit_gpu_cert: Option<PathBuf>,
+
+        /// Subgroup reduction determinism mode for GPU translation validation:
+        /// `strict-bit-exact` (default) or `bounded-ulp`
+        #[arg(long, default_value = "strict-bit-exact", value_parser = ["strict-bit-exact", "bounded-ulp"])]
+        subgroup_mode: String,
     },
 
     /// Run a file directly
@@ -584,10 +604,15 @@ enum Commands {
         command: BdfCommands,
     },
 
-    /// Independently verify a `buildlang.superopt-cert/v1` certificate JSON file (fail-closed)
+    /// Independently verify a `buildlang.superopt-cert/v1` or `buildlang.gpu-tv-cert/v1`
+    /// certificate JSON file (fail-closed)
     VerifyCert {
-        /// Path to the superoptimization certificate JSON file
+        /// Path to the certificate JSON file
         file: PathBuf,
+
+        /// Optional emitted GPU shader file to pin against `shader_sha256`
+        #[arg(long, value_name = "FILE")]
+        shader: Option<PathBuf>,
     },
 
     /// Print version information
@@ -868,6 +893,8 @@ fn run_cli(cli: Cli) -> Result<(), i32> {
             stdio_mode,
             superopt,
             emit_cert,
+            emit_gpu_cert,
+            subgroup_mode,
         }) => cmd_build(
             &path,
             release,
@@ -875,8 +902,10 @@ fn run_cli(cli: Cli) -> Result<(), i32> {
             keep_c,
             &target,
             stdio_mode,
-            superopt || emit_cert.is_some(),
+            superopt || emit_cert.is_some() || emit_gpu_cert.is_some(),
             emit_cert.as_deref(),
+            emit_gpu_cert.as_deref(),
+            subgroup_mode == "strict-bit-exact",
         ),
         Some(Commands::Run {
             file,
@@ -1004,7 +1033,7 @@ fn run_cli(cli: Cli) -> Result<(), i32> {
             verbose,
             no_fail_fast,
         }) => cmd_test(&directory, filter.as_deref(), verbose, no_fail_fast),
-        Some(Commands::VerifyCert { file }) => cmd_verify_cert(&file),
+        Some(Commands::VerifyCert { file, shader }) => cmd_verify_cert(&file, shader.as_deref()),
         Some(Commands::Version) => {
             print_version();
             Ok(())
@@ -1019,8 +1048,10 @@ fn run_cli(cli: Cli) -> Result<(), i32> {
                     cli.target.as_deref(),
                     cli.entry.as_deref(),
                     cli.stdio_mode,
-                    cli.superopt || cli.emit_cert.is_some(),
+                    cli.superopt || cli.emit_cert.is_some() || cli.emit_gpu_cert.is_some(),
                     cli.emit_cert.as_deref(),
+                    cli.emit_gpu_cert.as_deref(),
+                    cli.subgroup_mode == "strict-bit-exact",
                 )
             } else {
                 eprintln!("No input file specified. Use --help for usage information.");
@@ -1072,11 +1103,80 @@ fn write_superopt_cert(
     Ok(())
 }
 
-fn cmd_verify_cert(file: &Path) -> Result<(), i32> {
+fn write_gpu_tv_cert(cert: &buildlang::codegen::GpuTvCertificate, path: &Path) -> Result<(), i32> {
+    let json = serde_json::to_string_pretty(cert).map_err(|e| {
+        eprintln!("Failed to serialize GPU TV certificate: {}", e);
+        1
+    })?;
+    if path.as_os_str() == "-" {
+        println!("{}", json);
+    } else {
+        if let Some(parent) = path.parent() {
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent).map_err(|e| {
+                    eprintln!("Failed to create directory for '{}': {}", path.display(), e);
+                    1
+                })?;
+            }
+        }
+        std::fs::write(path, format!("{json}\n")).map_err(|e| {
+            eprintln!(
+                "Failed to write GPU TV certificate '{}': {}",
+                path.display(),
+                e
+            );
+            1
+        })?;
+    }
+    Ok(())
+}
+
+fn cmd_verify_cert(file: &Path, shader: Option<&Path>) -> Result<(), i32> {
     let raw = std::fs::read_to_string(file).map_err(|e| {
         eprintln!("Error reading certificate '{}': {}", file.display(), e);
         1
     })?;
+    let val: serde_json::Value = serde_json::from_str(&raw).map_err(|e| {
+        eprintln!("Invalid certificate JSON '{}': {}", file.display(), e);
+        1
+    })?;
+    let schema = val.get("schema").and_then(|s| s.as_str()).unwrap_or("");
+    if schema == buildlang::codegen::GPU_TV_CERT_SCHEMA {
+        let cert: buildlang::codegen::GpuTvCertificate =
+            serde_json::from_str(&raw).map_err(|e| {
+                eprintln!(
+                    "Invalid GPU TV certificate JSON '{}': {}",
+                    file.display(),
+                    e
+                );
+                1
+            })?;
+        let shader_bytes = match shader {
+            Some(p) => Some(std::fs::read(p).map_err(|e| {
+                eprintln!("Error reading shader '{}': {}", p.display(), e);
+                1
+            })?),
+            None => None,
+        };
+        buildlang::codegen::gpu_polyhedral::verify_gpu_tv_certificate(
+            &cert,
+            shader_bytes.as_deref(),
+        )
+        .map_err(|e| {
+            eprintln!("GPU_TV_CERT VERIFY FAILED: {}", e);
+            1
+        })?;
+        println!(
+            "OK: {} verified (target={}, intrinsic={}, schedules={}, rewrites={}, sha256={})",
+            cert.schema,
+            cert.target,
+            cert.subgroup_intrinsic,
+            cert.polyhedral_schedules.len(),
+            cert.superopt_cert.rewrites_applied,
+            cert.cert_sha256
+        );
+        return Ok(());
+    }
     let cert: buildlang::codegen::SuperoptCertificate =
         serde_json::from_str(&raw).map_err(|e| {
             eprintln!(
@@ -7405,6 +7505,7 @@ fn cmd_explain(code: Option<&str>) -> Result<(), i32> {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn cmd_build(
     path: &PathBuf,
     release: bool,
@@ -7414,6 +7515,8 @@ fn cmd_build(
     stdio_mode: StdioMode,
     superopt: bool,
     emit_cert: Option<&Path>,
+    emit_gpu_cert: Option<&Path>,
+    subgroup_strict_bit_exact: bool,
 ) -> Result<(), i32> {
     // Look for Build.toml or main.bld in the project directory
     let manifest_path = path.join("Build.toml");
@@ -7544,6 +7647,8 @@ fn cmd_build(
     let mut codegen = CodeGenerator::with_source(&ctx, target, Arc::from(source_file.source()));
     codegen.set_stdio_mode(stdio_mode);
     codegen.superopt = superopt;
+    codegen.gpu_tv = emit_gpu_cert.is_some();
+    codegen.subgroup_strict_bit_exact = subgroup_strict_bit_exact;
     let generated = codegen.generate(&ast);
     let output = generated.map_err(|e| {
         report_codegen_error(&e, &source_file);
@@ -7561,6 +7666,16 @@ fn cmd_build(
     }
     if let (Some(cert_path), Some(cert)) = (emit_cert, codegen.superopt_cert()) {
         write_superopt_cert(cert, cert_path)?;
+    }
+    if let Some(gpu_cert_path) = emit_gpu_cert {
+        if let Some(gpu_cert) = codegen.gpu_tv_cert() {
+            write_gpu_tv_cert(gpu_cert, gpu_cert_path)?;
+        } else {
+            eprintln!(
+                "Error: --emit-gpu-cert requires a GPU shader target (wgsl, hlsl, msl, spirv) with at least one #[compute] kernel"
+            );
+            return Err(1);
+        }
     }
     println!(
         "[4/{}] Code generation ({})... OK ({} bytes)",
@@ -10957,6 +11072,7 @@ fn rewrite_imported_calls(
     });
 }
 
+#[allow(clippy::too_many_arguments)]
 fn cmd_compile(
     input: &PathBuf,
     output: Option<&std::path::Path>,
@@ -10967,6 +11083,8 @@ fn cmd_compile(
     stdio_mode: StdioMode,
     superopt: bool,
     emit_cert: Option<&Path>,
+    emit_gpu_cert: Option<&Path>,
+    subgroup_strict_bit_exact: bool,
 ) -> Result<(), i32> {
     // Read source file
     let source = std::fs::read_to_string(input).map_err(|e| {
@@ -11124,6 +11242,8 @@ fn cmd_compile(
     codegen.entry = entry.map(str::to_string);
     codegen.set_stdio_mode(stdio_mode);
     codegen.superopt = superopt;
+    codegen.gpu_tv = emit_gpu_cert.is_some();
+    codegen.subgroup_strict_bit_exact = subgroup_strict_bit_exact;
     // Enable ReShade boilerplate for .fx output files
     if output_path.extension().and_then(|e| e.to_str()) == Some("fx") {
         codegen.reshade = true;
@@ -11158,6 +11278,16 @@ fn cmd_compile(
     }
     if let (Some(cert_path), Some(cert)) = (emit_cert, codegen.superopt_cert()) {
         write_superopt_cert(cert, cert_path)?;
+    }
+    if let Some(gpu_cert_path) = emit_gpu_cert {
+        if let Some(gpu_cert) = codegen.gpu_tv_cert() {
+            write_gpu_tv_cert(gpu_cert, gpu_cert_path)?;
+        } else {
+            eprintln!(
+                "Error: --emit-gpu-cert requires a GPU shader target (wgsl, hlsl, msl, spirv) with at least one #[compute] kernel"
+            );
+            return Err(1);
+        }
     }
 
     // Write output
