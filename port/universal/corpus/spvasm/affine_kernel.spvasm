@@ -1,0 +1,12 @@
+; SPIR-V compute kernel subset
+OpCapability Shader
+OpMemoryModel Logical GLSL450
+OpEntryPoint GLCompute %main "main"
+%void = OpTypeVoid
+%i64 = OpTypeInt 64 1
+%c1 = OpConstant %i64 17
+%c2 = OpConstant %i64 15
+%c3 = OpConstant %i64 20
+%prod = OpIMul %i64 %c1 %c2
+%res = OpISub %i64 %prod %c3
+OpReturnValue %res

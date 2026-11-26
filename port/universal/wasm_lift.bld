@@ -1,0 +1,346 @@
+// SPDX-License-Identifier: MIT
+//
+// port/universal/wasm_lift.bld: Pure-BuildLang WebAssembly Text (.wat) -> BuildLang (.bld) lifter.
+// Covers typed functions (i32/i64/f64), locals, arithmetic, comparisons, structured if/else,
+// direct calls, and host $print_i64/$print_i32/$print_f64 -> Console effect.
+// Exit status: 0 written, 2 refused (line-numbered constructs, nothing written), 1 bad arguments.
+
+fn is_ws(c: u8) -> bool { c == 32 || c == 9 || c == 10 || c == 13 }
+
+fn lex_wat(src: String, toks: Vec<String>, lines: Vec<i32>) {
+    let b = src.as_bytes();
+    let n: usize = src.len();
+    let mut i: usize = 0;
+    let mut ln: i32 = 1;
+    while i < n {
+        let c: u8 = b[i];
+        if c == 10 { ln = ln + 1; i = i + 1; continue; }
+        if is_ws(c) { i = i + 1; continue; }
+        if c == 59 && i + 1 < n && b[i + 1] == 59 {
+            while i < n && b[i] != 10 { i = i + 1; }
+            continue;
+        }
+        if c == 40 { toks.push("("); lines.push(ln); i = i + 1; continue; }
+        if c == 41 { toks.push(")"); lines.push(ln); i = i + 1; continue; }
+        if c == 34 {
+            let start: usize = i;
+            i = i + 1;
+            while i < n && b[i] != 34 {
+                if b[i] == 10 { ln = ln + 1; }
+                i = i + 1;
+            }
+            if i < n { i = i + 1; }
+            toks.push(src.substring(start, i - start));
+            lines.push(ln);
+            continue;
+        }
+        let start: usize = i;
+        while i < n && !is_ws(b[i]) && b[i] != 40 && b[i] != 41 { i = i + 1; }
+        toks.push(src.substring(start, i - start));
+        lines.push(ln);
+    }
+}
+
+fn clean_id(raw: String) -> String {
+    if raw.starts_with("$") { return raw.substring(1, raw.len() - 1); }
+    return raw;
+}
+
+fn map_type(wt: String) -> String {
+    if wt == "i32" { return "i32"; }
+    if wt == "i64" { return "i64"; }
+    if wt == "f64" { return "f64"; }
+    return "";
+}
+
+fn is_refused_wat_op(op: String) -> bool {
+    op == "memory" || op == "data" || op == "table" || op == "elem" || op == "call_indirect"
+        || op == "br_table" || op == "i32.load" || op == "i64.load" || op == "f64.load"
+        || op == "i32.store" || op == "i64.store" || op == "f64.store" || op == "memory.grow"
+}
+
+fn binop_sym(op: String) -> String {
+    if op == "i64.add" || op == "i32.add" || op == "f64.add" { return "+"; }
+    if op == "i64.sub" || op == "i32.sub" || op == "f64.sub" { return "-"; }
+    if op == "i64.mul" || op == "i32.mul" || op == "f64.mul" { return "*"; }
+    if op == "i64.div_s" || op == "i32.div_s" || op == "f64.div" { return "/"; }
+    if op == "i64.rem_s" || op == "i32.rem_s" { return "%"; }
+    if op == "i64.eq" || op == "i32.eq" || op == "f64.eq" { return "=="; }
+    if op == "i64.ne" || op == "i32.ne" || op == "f64.ne" { return "!="; }
+    if op == "i64.lt_s" || op == "i32.lt_s" || op == "f64.lt" { return "<"; }
+    if op == "i64.le_s" || op == "i32.le_s" || op == "f64.le" { return "<="; }
+    if op == "i64.gt_s" || op == "i32.gt_s" || op == "f64.gt" { return ">"; }
+    if op == "i64.ge_s" || op == "i32.ge_s" || op == "f64.ge" { return ">="; }
+    return "";
+}
+
+fn skip_sexpr(toks: Vec<String>, pos: usize) -> usize {
+    let mut i: usize = pos;
+    if i >= toks.len() { return i; }
+    if toks[i] != "(" { return i + 1; }
+    let mut depth: i32 = 0;
+    while i < toks.len() {
+        if toks[i] == "(" { depth = depth + 1; }
+        else if toks[i] == ")" { depth = depth - 1; if depth == 0 { return i + 1; } }
+        i = i + 1;
+    }
+    return i;
+}
+
+fn parse_expr(toks: Vec<String>, lines: Vec<i32>, pos_box: Vec<usize>, ref_box: Vec<i32>) -> String ~ Console {
+    let i: usize = pos_box[0];
+    if i >= toks.len() { return "0"; }
+    if toks[i] != "(" {
+        let v: String = toks[i];
+        pos_box[0] = i + 1;
+        return clean_id(v);
+    }
+    let op: String = toks[i + 1];
+    let ln: i32 = lines[i + 1];
+    if is_refused_wat_op(op) {
+        println!("  line {}: unsupported WAT construct `{}`", ln, op);
+        ref_box[0] = ref_box[0] + 1;
+        pos_box[0] = skip_sexpr(toks, i);
+        return "0";
+    }
+    if op == "i64.const" || op == "i32.const" || op == "f64.const" {
+        let lit: String = toks[i + 2];
+        pos_box[0] = i + 4;
+        if op == "f64.const" && !lit.contains(".") { return lit + ".0"; }
+        return lit;
+    }
+    if op == "local.get" {
+        let name: String = clean_id(toks[i + 2]);
+        pos_box[0] = i + 4;
+        return name;
+    }
+    let sym: String = binop_sym(op);
+    if sym != "" {
+        pos_box[0] = i + 2;
+        let lhs: String = parse_expr(toks, lines, pos_box, ref_box);
+        let rhs: String = parse_expr(toks, lines, pos_box, ref_box);
+        if pos_box[0] < toks.len() && toks[pos_box[0]] == ")" { pos_box[0] = pos_box[0] + 1; }
+        return "(" + lhs + " " + sym + " " + rhs + ")";
+    }
+    if op == "call" {
+        let fname: String = clean_id(toks[i + 2]);
+        pos_box[0] = i + 3;
+        let mut args_s: String = String::new();
+        let mut first: bool = true;
+        while pos_box[0] < toks.len() && toks[pos_box[0]] != ")" {
+            let a: String = parse_expr(toks, lines, pos_box, ref_box);
+            if !first { args_s = args_s + ", "; }
+            args_s = args_s + a;
+            first = false;
+        }
+        if pos_box[0] < toks.len() && toks[pos_box[0]] == ")" { pos_box[0] = pos_box[0] + 1; }
+        return fname + "(" + args_s + ")";
+    }
+    println!("  line {}: unsupported WAT expression `{}`", ln, op);
+    ref_box[0] = ref_box[0] + 1;
+    pos_box[0] = skip_sexpr(toks, i);
+    return "0";
+}
+
+fn emit_stmt(
+    toks: Vec<String>, lines: Vec<i32>, pos_box: Vec<usize>,
+    ref_box: Vec<i32>, out: Vec<String>, ind: String, prints_box: Vec<i32>,
+) ~ Console {
+    let i: usize = pos_box[0];
+    if i >= toks.len() || toks[i] != "(" { pos_box[0] = i + 1; return; }
+    let op: String = toks[i + 1];
+    let ln: i32 = lines[i + 1];
+    if is_refused_wat_op(op) {
+        println!("  line {}: unsupported WAT construct `{}`", ln, op);
+        ref_box[0] = ref_box[0] + 1;
+        pos_box[0] = skip_sexpr(toks, i);
+        return;
+    }
+    if op == "local" {
+        let name: String = clean_id(toks[i + 2]);
+        let ty: String = map_type(toks[i + 3]);
+        let z: String = if ty == "f64" { "0.0" } else { "0" };
+        out.push(ind + "let mut " + name + ": " + ty + " = " + z + ";");
+        pos_box[0] = skip_sexpr(toks, i);
+        return;
+    }
+    if op == "local.set" {
+        let name: String = clean_id(toks[i + 2]);
+        pos_box[0] = i + 3;
+        let val: String = parse_expr(toks, lines, pos_box, ref_box);
+        if pos_box[0] < toks.len() && toks[pos_box[0]] == ")" { pos_box[0] = pos_box[0] + 1; }
+        out.push(ind + name + " = " + val + ";");
+        return;
+    }
+    if op == "return" {
+        pos_box[0] = i + 2;
+        if pos_box[0] < toks.len() && toks[pos_box[0]] == ")" {
+            out.push(ind + "return;");
+            pos_box[0] = pos_box[0] + 1;
+        } else {
+            let val: String = parse_expr(toks, lines, pos_box, ref_box);
+            if pos_box[0] < toks.len() && toks[pos_box[0]] == ")" { pos_box[0] = pos_box[0] + 1; }
+            out.push(ind + "return " + val + ";");
+        }
+        return;
+    }
+    if op == "call" {
+        let fname: String = clean_id(toks[i + 2]);
+        if fname == "print_i64" || fname == "print_i32" || fname == "print_f64" {
+            prints_box[0] = 1;
+            pos_box[0] = i + 3;
+            let val: String = parse_expr(toks, lines, pos_box, ref_box);
+            if pos_box[0] < toks.len() && toks[pos_box[0]] == ")" { pos_box[0] = pos_box[0] + 1; }
+            if fname == "print_f64" {
+                out.push(ind + "println!(\"{}\", ((" + val + ") * 1000.0 + 0.5) as i64);");
+            } else {
+                out.push(ind + "println!(\"{}\", " + val + ");");
+            }
+            return;
+        }
+        let expr: String = parse_expr(toks, lines, pos_box, ref_box);
+        out.push(ind + expr + ";");
+        return;
+    }
+    if op == "if" {
+        pos_box[0] = i + 2;
+        let cond: String = parse_expr(toks, lines, pos_box, ref_box);
+        out.push(ind + "if " + cond + " {");
+        if pos_box[0] + 1 < toks.len() && toks[pos_box[0]] == "(" && toks[pos_box[0] + 1] == "then" {
+            pos_box[0] = pos_box[0] + 2;
+            while pos_box[0] < toks.len() && toks[pos_box[0]] != ")" {
+                emit_stmt(toks, lines, pos_box, ref_box, out, ind + "    ", prints_box);
+            }
+            if pos_box[0] < toks.len() { pos_box[0] = pos_box[0] + 1; }
+        }
+        if pos_box[0] + 1 < toks.len() && toks[pos_box[0]] == "(" && toks[pos_box[0] + 1] == "else" {
+            out.push(ind + "} else {");
+            pos_box[0] = pos_box[0] + 2;
+            while pos_box[0] < toks.len() && toks[pos_box[0]] != ")" {
+                emit_stmt(toks, lines, pos_box, ref_box, out, ind + "    ", prints_box);
+            }
+            if pos_box[0] < toks.len() { pos_box[0] = pos_box[0] + 1; }
+        }
+        out.push(ind + "}");
+        if pos_box[0] < toks.len() && toks[pos_box[0]] == ")" { pos_box[0] = pos_box[0] + 1; }
+        return;
+    }
+    if op == "while" {
+        pos_box[0] = i + 2;
+        let cond: String = parse_expr(toks, lines, pos_box, ref_box);
+        out.push(ind + "while " + cond + " {");
+        while pos_box[0] < toks.len() && toks[pos_box[0]] != ")" {
+            emit_stmt(toks, lines, pos_box, ref_box, out, ind + "    ", prints_box);
+        }
+        out.push(ind + "}");
+        if pos_box[0] < toks.len() && toks[pos_box[0]] == ")" { pos_box[0] = pos_box[0] + 1; }
+        return;
+    }
+    let expr: String = parse_expr(toks, lines, pos_box, ref_box);
+    out.push(ind + "return " + expr + ";");
+}
+
+fn lift_func(toks: Vec<String>, lines: Vec<i32>, pos_box: Vec<usize>, ref_box: Vec<i32>, out: Vec<String>) ~ Console {
+    let start: usize = pos_box[0];
+    let fname: String = clean_id(toks[start + 2]);
+    pos_box[0] = start + 3;
+    let mut params_s: String = String::new();
+    let mut first_p: bool = true;
+    let mut ret_ty: String = String::new();
+    while pos_box[0] + 1 < toks.len() && toks[pos_box[0]] == "(" {
+        let tag: String = toks[pos_box[0] + 1];
+        if tag == "param" {
+            let pname: String = clean_id(toks[pos_box[0] + 2]);
+            let pty: String = map_type(toks[pos_box[0] + 3]);
+            if !first_p { params_s = params_s + ", "; }
+            params_s = params_s + pname + ": " + pty;
+            first_p = false;
+            pos_box[0] = skip_sexpr(toks, pos_box[0]);
+            continue;
+        }
+        if tag == "result" {
+            ret_ty = map_type(toks[pos_box[0] + 2]);
+            pos_box[0] = skip_sexpr(toks, pos_box[0]);
+            continue;
+        }
+        if tag == "export" {
+            pos_box[0] = skip_sexpr(toks, pos_box[0]);
+            continue;
+        }
+        break;
+    }
+    let body: Vec<String> = Vec::new();
+    let prints_box: Vec<i32> = Vec::new();
+    prints_box.push(0);
+    while pos_box[0] < toks.len() && toks[pos_box[0]] != ")" {
+        emit_stmt(toks, lines, pos_box, ref_box, body, "    ", prints_box);
+    }
+    if pos_box[0] < toks.len() && toks[pos_box[0]] == ")" { pos_box[0] = pos_box[0] + 1; }
+    let eff: String = if prints_box[0] == 1 { " ~ Console" } else { "" };
+    let ret_part: String = if ret_ty != "" { " -> " + ret_ty } else { "" };
+    out.push("fn " + fname + "(" + params_s + ")" + ret_part + eff + " {");
+    let mut k: usize = 0;
+    while k < body.len() { out.push(body[k]); k = k + 1; }
+    out.push("}");
+    out.push("");
+}
+
+fn main() ~ Console + FileSystem + Environment + Process {
+    if args_count() != 3 {
+        println!("usage: wasm_lift input.wat output.bld");
+        exit(1);
+    }
+    let src: String = read_file(args_get(1));
+    let toks: Vec<String> = Vec::new();
+    let lines: Vec<i32> = Vec::new();
+    lex_wat(src, toks, lines);
+    let out: Vec<String> = Vec::new();
+    out.push("// SPDX-License-Identifier: MIT");
+    out.push("// Lifted from WebAssembly Text (.wat) by port/universal/wasm_lift.bld");
+    out.push("");
+    let pos_box: Vec<usize> = Vec::new();
+    pos_box.push(0);
+    let ref_box: Vec<i32> = Vec::new();
+    ref_box.push(0);
+    if toks.len() >= 2 && toks[0] == "(" && toks[1] == "module" {
+        pos_box[0] = 2;
+        while pos_box[0] < toks.len() && toks[pos_box[0]] != ")" {
+            let p: usize = pos_box[0];
+            if toks[p] == "(" && p + 1 < toks.len() {
+                let head: String = toks[p + 1];
+                if head == "func" {
+                    lift_func(toks, lines, pos_box, ref_box, out);
+                } else if head == "export" {
+                    pos_box[0] = skip_sexpr(toks, p);
+                } else if head == "import" {
+                    let imp_str: String = toks[p + 3];
+                    if imp_str == "\"print_i64\"" || imp_str == "\"print_i32\"" || imp_str == "\"print_f64\"" {
+                        pos_box[0] = skip_sexpr(toks, p);
+                    } else {
+                        println!("  line {}: unsupported WAT import {}", lines[p + 1], imp_str);
+                        ref_box[0] = ref_box[0] + 1;
+                        pos_box[0] = skip_sexpr(toks, p);
+                    }
+                } else {
+                    println!("  line {}: unsupported WAT module section `{}`", lines[p + 1], head);
+                    ref_box[0] = ref_box[0] + 1;
+                    pos_box[0] = skip_sexpr(toks, p);
+                }
+            } else {
+                pos_box[0] = p + 1;
+            }
+        }
+    } else {
+        println!("  line 1: expected top-level (module ...)");
+        ref_box[0] = ref_box[0] + 1;
+    }
+    if ref_box[0] > 0 {
+        println!("refused: {} construct(s) outside the WAT subset; nothing written", ref_box[0]);
+        exit(2);
+    }
+    let mut text: String = String::new();
+    let mut k: usize = 0;
+    while k < out.len() { text = text + out[k] + "\n"; k = k + 1; }
+    write_file(args_get(2), text);
+    println!("written: {} ({} lines)", args_get(2), out.len());
+}

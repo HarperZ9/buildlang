@@ -1,0 +1,237 @@
+// SPDX-License-Identifier: MIT
+//
+// port/universal/asm_riscv_lift.bld: Pure-BuildLang RISC-V (RV64IM subset) -> BuildLang (.bld) lifter.
+// Lifts li, mv, add, sub, mul, div, rem, addi, beq, bne, blt, bge, j, ecall (a7==1 print_i64), ret
+// via an explicit deterministic basic-block PC state machine (zero goto).
+// Exit status: 0 written, 2 refused (line-numbered constructs, nothing written), 1 bad arguments.
+
+fn split_lines(src: String, out: Vec<String>) {
+    let b = src.as_bytes();
+    let n: usize = src.len();
+    let mut start: usize = 0;
+    let mut i: usize = 0;
+    while i < n {
+        if b[i] == 10 {
+            let mut end: usize = i;
+            if end > start && b[end - 1] == 13 { end = end - 1; }
+            out.push(src.substring(start, end - start));
+            start = i + 1;
+        }
+        i = i + 1;
+    }
+    if start <= n {
+        let mut end: usize = n;
+        if end > start && b[end - 1] == 13 { end = end - 1; }
+        out.push(src.substring(start, end - start));
+    }
+}
+
+fn strip_comment(line: String) -> String {
+    let b = line.as_bytes();
+    let mut i: usize = 0;
+    while i < line.len() {
+        if b[i] == 35 { return line.substring(0, i).trim(); }
+        i = i + 1;
+    }
+    return line.trim();
+}
+
+fn split_operands(s: String, parts: Vec<String>) {
+    let b = s.as_bytes();
+    let n: usize = s.len();
+    let mut i: usize = 0;
+    while i < n {
+        while i < n && (b[i] == 32 || b[i] == 9 || b[i] == 44) { i = i + 1; }
+        let start: usize = i;
+        while i < n && b[i] != 32 && b[i] != 9 && b[i] != 44 { i = i + 1; }
+        if i > start { parts.push(s.substring(start, i - start)); }
+    }
+}
+
+fn reg_var(r: String) -> String {
+    if r == "zero" || r == "x0" { return "0"; }
+    if r == "a0" || r == "a1" || r == "a2" || r == "a3" || r == "a4" || r == "a5" || r == "a6" || r == "a7"
+        || r == "t0" || r == "t1" || r == "t2" || r == "t3" || r == "t4" || r == "t5" || r == "t6"
+        || r == "s0" || r == "s1" || r == "s2" || r == "s3" {
+        return "r_" + r;
+    }
+    return "";
+}
+
+fn find_label_pc(labels: Vec<String>, pcs: Vec<i32>, target: String) -> i32 {
+    let mut i: usize = 0;
+    while i < labels.len() {
+        if labels[i] == target { return pcs[i]; }
+        i = i + 1;
+    }
+    return -1;
+}
+
+fn main() ~ Console + FileSystem + Environment + Process {
+    if args_count() != 3 {
+        println!("usage: asm_riscv_lift input.s output.bld");
+        exit(1);
+    }
+    let src: String = read_file(args_get(1));
+    let raw_lines: Vec<String> = Vec::new();
+    split_lines(src, raw_lines);
+
+    // Pass 1: collect instructions & label -> pc map
+    let instr_txt: Vec<String> = Vec::new();
+    let instr_ln: Vec<i32> = Vec::new();
+    let lbl_names: Vec<String> = Vec::new();
+    let lbl_pcs: Vec<i32> = Vec::new();
+    let mut refused: i32 = 0;
+
+    let mut i: usize = 0;
+    while i < raw_lines.len() {
+        let ln_num: i32 = (i as i32) + 1;
+        let clean: String = strip_comment(raw_lines[i]);
+        if clean == "" || clean.starts_with(".globl") || clean.starts_with(".text") {
+            i = i + 1;
+            continue;
+        }
+        if clean.starts_with(".") && !clean.ends_with(":") {
+            println!("  line {}: unsupported assembler directive `{}`", ln_num, clean);
+            refused = refused + 1;
+            i = i + 1;
+            continue;
+        }
+        if clean.ends_with(":") {
+            let lname: String = clean.substring(0, clean.len() - 1).trim();
+            lbl_names.push(lname);
+            lbl_pcs.push(instr_txt.len() as i32);
+            i = i + 1;
+            continue;
+        }
+        instr_txt.push(clean);
+        instr_ln.push(ln_num);
+        i = i + 1;
+    }
+
+    // Pass 2: validate and emit deterministic PC state machine inside fn main() ~ Console
+    let body: Vec<String> = Vec::new();
+    let mut uses_console: bool = false;
+    let mut pc: usize = 0;
+    while pc < instr_txt.len() {
+        let parts: Vec<String> = Vec::new();
+        split_operands(instr_txt[pc], parts);
+        let op: String = parts[0];
+        let ln: i32 = instr_ln[pc];
+        let pc_s: String = format!("{}", pc);
+        let next_s: String = format!("{}", pc + 1);
+
+        if op == "li" && parts.len() == 3 {
+            let rd: String = reg_var(parts[1]);
+            if rd == "" {
+                println!("  line {}: unknown register `{}`", ln, parts[1]);
+                refused = refused + 1;
+            } else {
+                let st: String = rd + " = " + parts[2] + "; pc = " + next_s + "; continue;";
+                body.push("        if pc == " + pc_s + " { " + st + " }");
+            }
+        } else if op == "mv" && parts.len() == 3 {
+            let rd: String = reg_var(parts[1]);
+            let rs: String = reg_var(parts[2]);
+            if rd == "" || rs == "" {
+                println!("  line {}: unknown register in mv", ln);
+                refused = refused + 1;
+            } else {
+                let st: String = rd + " = " + rs + "; pc = " + next_s + "; continue;";
+                body.push("        if pc == " + pc_s + " { " + st + " }");
+            }
+        } else if (op == "add" || op == "sub" || op == "mul" || op == "div" || op == "rem") && parts.len() == 4 {
+            let rd: String = reg_var(parts[1]);
+            let r1: String = reg_var(parts[2]);
+            let r2: String = reg_var(parts[3]);
+            let sym: String = if op == "add" { "+" } else if op == "sub" { "-" }
+                else if op == "mul" { "*" } else if op == "div" { "/" } else { "%" };
+            if rd == "" || r1 == "" || r2 == "" {
+                println!("  line {}: unknown register in {}", ln, op);
+                refused = refused + 1;
+            } else {
+                let st: String = rd + " = " + r1 + " " + sym + " " + r2 + "; pc = " + next_s + "; continue;";
+                body.push("        if pc == " + pc_s + " { " + st + " }");
+            }
+        } else if op == "addi" && parts.len() == 4 {
+            let rd: String = reg_var(parts[1]);
+            let r1: String = reg_var(parts[2]);
+            if rd == "" || r1 == "" {
+                println!("  line {}: unknown register in addi", ln);
+                refused = refused + 1;
+            } else {
+                let st: String = rd + " = " + r1 + " + (" + parts[3] + "); pc = " + next_s + "; continue;";
+                body.push("        if pc == " + pc_s + " { " + st + " }");
+            }
+        } else if (op == "beq" || op == "bne" || op == "blt" || op == "bge") && parts.len() == 4 {
+            let r1: String = reg_var(parts[1]);
+            let r2: String = reg_var(parts[2]);
+            let tgt: i32 = find_label_pc(lbl_names, lbl_pcs, parts[3]);
+            let cmp: String = if op == "beq" { "==" } else if op == "bne" { "!=" }
+                else if op == "blt" { "<" } else { ">=" };
+            if r1 == "" || r2 == "" || tgt < 0 {
+                println!("  line {}: invalid branch `{}`", ln, instr_txt[pc]);
+                refused = refused + 1;
+            } else {
+                let tgt_s: String = format!("{}", tgt);
+                let br: String = "if " + r1 + " " + cmp + " " + r2 + " { pc = " + tgt_s + "; }";
+                body.push("        if pc == " + pc_s + " { " + br + " else { pc = " + next_s + "; } continue; }");
+            }
+        } else if op == "j" && parts.len() == 2 {
+            let tgt: i32 = find_label_pc(lbl_names, lbl_pcs, parts[1]);
+            if tgt < 0 {
+                println!("  line {}: unknown jump label `{}`", ln, parts[1]);
+                refused = refused + 1;
+            } else {
+                let tgt_s: String = format!("{}", tgt);
+                body.push("        if pc == " + pc_s + " { pc = " + tgt_s + "; continue; }");
+            }
+        } else if op == "ecall" {
+            uses_console = true;
+            let pr: String = "if r_a7 == 1 { println!(\"{}\", r_a0); } pc = " + next_s + "; continue;";
+            body.push("        if pc == " + pc_s + " { " + pr + " }");
+        } else if op == "ret" {
+            body.push("        if pc == " + pc_s + " { pc = -1; continue; }");
+        } else {
+            println!("  line {}: unsupported RISC-V instruction `{}`", ln, op);
+            refused = refused + 1;
+        }
+        pc = pc + 1;
+    }
+
+    if refused > 0 {
+        println!("refused: {} construct(s) outside the RISC-V subset; nothing written", refused);
+        exit(2);
+    }
+
+    let eff: String = if uses_console { " ~ Console" } else { "" };
+    let out: Vec<String> = Vec::new();
+    out.push("// SPDX-License-Identifier: MIT");
+    out.push("// Lifted from RISC-V RV64IM assembly by port/universal/asm_riscv_lift.bld");
+    out.push("");
+    out.push("fn main()" + eff + " {");
+    out.push("    let mut r_a0: i64 = 0; let mut r_a1: i64 = 0; let mut r_a2: i64 = 0; let mut r_a3: i64 = 0;");
+    out.push("    let mut r_a4: i64 = 0; let mut r_a5: i64 = 0; let mut r_a6: i64 = 0; let mut r_a7: i64 = 0;");
+    out.push("    let mut r_t0: i64 = 0; let mut r_t1: i64 = 0; let mut r_t2: i64 = 0; let mut r_t3: i64 = 0;");
+    out.push("    let mut r_t4: i64 = 0; let mut r_t5: i64 = 0; let mut r_t6: i64 = 0;");
+    out.push("    let mut r_s0: i64 = 0; let mut r_s1: i64 = 0; let mut r_s2: i64 = 0; let mut r_s3: i64 = 0;");
+    let entry_pc: i32 = find_label_pc(lbl_names, lbl_pcs, "main");
+    let start_pc: i32 = if entry_pc >= 0 { entry_pc } else { 0 };
+    out.push("    let mut pc: i64 = " + format!("{}", start_pc) + ";");
+    out.push("    let max_pc: i64 = " + format!("{}", instr_txt.len()) + ";");
+    out.push("    while pc >= 0 && pc < max_pc {");
+    let mut k: usize = 0;
+    while k < body.len() { out.push(body[k]); k = k + 1; }
+    out.push("        break;");
+    out.push("    }");
+    out.push("    let _ka: i64 = r_a0 + r_a1 + r_a2 + r_a3 + r_a4 + r_a5 + r_a6 + r_a7;");
+    out.push("    let _kt: i64 = r_t0 + r_t1 + r_t2 + r_t3 + r_t4 + r_t5 + r_t6 + r_s0 + r_s1 + r_s2 + r_s3;");
+    out.push("    let _keep: i64 = _ka + _kt;");
+    out.push("}");
+
+    let mut text: String = String::new();
+    let mut j: usize = 0;
+    while j < out.len() { text = text + out[j] + "\n"; j = j + 1; }
+    write_file(args_get(2), text);
+    println!("written: {} ({} lines)", args_get(2), out.len());
+}
