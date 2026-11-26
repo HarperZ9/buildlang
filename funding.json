@@ -1,0 +1,107 @@
+{
+  "$schema": "https://fundingjson.org/schema/v1.0.0.json",
+  "version": "v1.0.0",
+  "entity": {
+    "type": "individual",
+    "role": "owner",
+    "name": "Zain Dana Harper",
+    "email": "17142659+HarperZ9@users.noreply.github.com",
+    "description": "Independent researcher and toolmaker operating as a sole proprietor in Kent, Washington. Builds verifiable local-first compilers, AI evaluation harnesses, rendering engines, and open archival tools, publishing methods, data, and null results openly.",
+    "webpageUrl": {
+      "url": "https://harperz9.github.io/",
+      "wellKnown": "https://harperz9.github.io/.well-known/funding-manifest-urls"
+    }
+  },
+  "projects": [
+    {
+      "guid": "buildlang",
+      "name": "BuildLang",
+      "description": "Deterministic systems and GPU programming language (buildc 1.15.0) with algebraic effect types, 12 CPU and GPU backends (C, x86-64, RISC-V 64, WebAssembly, HLSL, GLSL, WGSL, Apple Metal MSL), a certified e-graph superoptimizer prototype, BuildDB/BuildQL (qdb) with checksummed paging, and BuildTeX checked PDF typesetting without TeX or Lean.",
+      "webpageUrl": {
+        "url": "https://harperz9.github.io/buildlang.html",
+        "wellKnown": "https://harperz9.github.io/.well-known/funding-manifest-urls"
+      },
+      "repositoryUrl": {
+        "url": "https://github.com/HarperZ9/buildlang",
+        "wellKnown": "https://raw.githubusercontent.com/HarperZ9/buildlang/main/.well-known/funding-manifest-urls"
+      },
+      "licenses": [
+        "spdx:AGPL-3.0-only"
+      ],
+      "tags": [
+        "programming",
+        "developer-tools",
+        "software-engineering",
+        "database",
+        "graphics",
+        "scientific-computing",
+        "publishing",
+        "security",
+        "science"
+      ]
+    }
+  ],
+  "funding": {
+    "channels": [
+      {
+        "guid": "github-sponsors",
+        "type": "payment-provider",
+        "address": "https://github.com/sponsors/HarperZ9",
+        "description": "GitHub Sponsors for Zain Dana Harper. Supports one-time or recurring sponsorship with full public disclosure on https://harperz9.github.io/income-ledger.html."
+      },
+      {
+        "guid": "direct-grant",
+        "type": "bank",
+        "address": "US wire or ACH grant transfer (sole proprietor, Kent, WA; contact via https://harperz9.github.io/hire.html)",
+        "description": "Direct bank transfer for institutional open-source infrastructure grants and fellowships (such as FLOSS/fund). Account details provided directly on award."
+      }
+    ],
+    "plans": [
+      {
+        "guid": "community-any",
+        "status": "active",
+        "name": "Community support (any amount)",
+        "description": "Flexible support for BuildLang compiler maintenance, BuildDB fuzzing, and cross-platform binary releases.",
+        "amount": 0,
+        "currency": "USD",
+        "frequency": "one-time",
+        "channels": [
+          "github-sponsors"
+        ]
+      },
+      {
+        "guid": "monthly-maintainer",
+        "status": "active",
+        "name": "Monthly compiler maintenance",
+        "description": "Recurring support for CI infrastructure, regression suites, and deterministic cross-platform builds across Windows, Linux, and macOS.",
+        "amount": 50,
+        "currency": "USD",
+        "frequency": "monthly",
+        "channels": [
+          "github-sponsors"
+        ]
+      },
+      {
+        "guid": "infra-grant-buildlang",
+        "status": "active",
+        "name": "Compiler and superoptimizer infrastructure grant",
+        "description": "Scoped milestone grant funding full certified e-graph superoptimization, Universal Hourglass language lifters, and verified GPU backend conformance tests for BuildLang.",
+        "amount": 25000,
+        "currency": "USD",
+        "frequency": "one-time",
+        "channels": [
+          "direct-grant",
+          "github-sponsors"
+        ]
+      }
+    ],
+    "history": [
+      {
+        "year": 2026,
+        "income": 0,
+        "currency": "USD",
+        "description": "Self-funded sole proprietorship with zero external grants, sponsors, or paid clients to date. Full public disclosure at https://harperz9.github.io/income-ledger.html."
+      }
+    ]
+  }
+}
