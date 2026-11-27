@@ -1,0 +1,366 @@
+// SPDX-FileCopyrightText: 2026 Zain Dana Harper
+// SPDX-License-Identifier: MIT
+//
+// Wave 131A (OPT-085; F1, J13, A14, A18, N44, N46, N49, N50, N53):
+// Pure-BuildLang Verifier-Guided Test-Time Compute MCTS + Goodhart PRM-vs-Oracle Valve
+//   1. Deterministic 24-problem multi-step symbolic synthesis suite (depth-3, 4-ary tree = 85 nodes).
+//   2. Greedy Best-of-1 PRM baseline fooled by planted high-PRM reward-hacking shortcuts (>= 0.90).
+//   3. Verifier-guided 64-node PUCT MCTS + Hard Symbolic Oracle + live Goodhart Proxy-vs-Oracle
+//      Divergence Valve quarantining high-PRM/zero-oracle reward-hacking branches.
+
+fn fnv1a_byte(h: u64, b: u64) -> u64 {
+    ((h ^ (b & 255u64)) * 16777619u64) & 4294967295u64
+}
+
+fn validate_mcts_budget(budget: i32) -> i32 {
+    if budget <= 0 {
+        return -401;
+    }
+    0
+}
+
+// Goodhart Proxy-vs-Oracle Divergence Valve:
+//   Returns 1 if oracle passes (valid solution),
+//           2 if GOODHART_TRAP (prm >= 0.90 && oracle == 0.0 -> quarantine & reject),
+//           0 if ordinary failing leaf.
+fn eval_goodhart_valve(prm: f64, oracle: f64) -> i32 {
+    if oracle >= 0.5 {
+        return 1;
+    }
+    if prm >= 0.90 {
+        return 2;
+    }
+    0
+}
+
+fn apply_sym_op(state: i64, act: i32) -> i64 {
+    if act == 0 { return state * 2 + 1; }
+    if act == 1 { return state * 3 - 2; }
+    if act == 2 { return state + 7; }
+    state * 2 + 5
+}
+
+fn true_action(prob: i32, depth: i32) -> i32 {
+    if depth == 0 { return (prob * 3 + 1) % 4; }
+    if depth == 1 { return (prob * 5 + 2) % 4; }
+    (prob * 7 + 3) % 4
+}
+
+fn hack_action(prob: i32, depth: i32) -> i32 {
+    let ta: i32 = true_action(prob, depth);
+    (ta + 1 + ((prob + depth) % 3)) % 4
+}
+
+fn problem_s0(prob: i32) -> i64 {
+    ((prob % 7) + 2) as i64
+}
+
+fn problem_target(prob: i32) -> i64 {
+    let s0: i64 = problem_s0(prob);
+    let s1: i64 = apply_sym_op(s0, true_action(prob, 0));
+    let s2: i64 = apply_sym_op(s1, true_action(prob, 1));
+    apply_sym_op(s2, true_action(prob, 2))
+}
+
+fn has_goodhart_trap(prob: i32) -> bool {
+    (prob % 4) != 0
+}
+
+// Learned Process Reward Model (PRM) proxy score in (0, 1):
+// On 18/24 deceptive problems (prob % 4 != 0), the planted Goodhart trap branch scores 0.94..0.96
+// while failing the hard symbolic oracle; the true solution scores 0.68..0.76 and passes the oracle.
+fn prm_step_score(prob: i32, depth: i32, act: i32, on_true: bool, on_hack: bool) -> f64 {
+    let ta: i32 = true_action(prob, depth);
+    let ha: i32 = hack_action(prob, depth);
+    let jitter: f64 = (((prob * 11 + depth * 5 + act * 3) % 7) as f64) * 0.004;
+    if has_goodhart_trap(prob) && on_hack && act == ha {
+        return 0.935 + jitter;
+    }
+    if on_true && act == ta {
+        return 0.72 + jitter;
+    }
+    0.28 + jitter
+}
+
+fn hard_symbolic_oracle(prob: i32, leaf_state: i64, a0: i32, a1: i32, a2: i32) -> f64 {
+    let s0: i64 = problem_s0(prob);
+    let s1: i64 = apply_sym_op(s0, a0);
+    let s2: i64 = apply_sym_op(s1, a1);
+    let s3: i64 = apply_sym_op(s2, a2);
+    if s3 == leaf_state && s3 == problem_target(prob) {
+        if a0 == true_action(prob, 0) && a1 == true_action(prob, 1) && a2 == true_action(prob, 2) {
+            return 1.0;
+        }
+    }
+    0.0
+}
+
+fn main() ~ Console + Clock {
+    let n_probs: i32 = 120;
+    let mcts_budget: i32 = 64;
+    let c_puct: f64 = 1.45;
+
+    let t0: i64 = clock_ns();
+
+    // Pre-allocate MCTS node arrays (capacity 96 > 85 max nodes)
+    let cap: usize = 96;
+    let mut n_parent: Vec<i32> = Vec::new();
+    let mut n_depth: Vec<i32> = Vec::new();
+    let mut n_act: Vec<i32> = Vec::new();
+    let mut n_state: Vec<i64> = Vec::new();
+    let mut n_a0: Vec<i32> = Vec::new();
+    let mut n_a1: Vec<i32> = Vec::new();
+    let mut n_a2: Vec<i32> = Vec::new();
+    let mut n_on_true: Vec<i32> = Vec::new();
+    let mut n_on_hack: Vec<i32> = Vec::new();
+    let mut n_visits: Vec<f64> = Vec::new();
+    let mut n_val_sum: Vec<f64> = Vec::new();
+    let mut n_prior: Vec<f64> = Vec::new();
+    let mut n_prm: Vec<f64> = Vec::new();
+    let mut n_blocked: Vec<i32> = Vec::new();
+    let mut n_solved: Vec<i32> = Vec::new();
+    let mut n_child: Vec<i32> = Vec::new();
+
+    let mut idx: usize = 0;
+    while idx < cap {
+        n_parent.push(-1); n_depth.push(0); n_act.push(-1); n_state.push(0);
+        n_a0.push(-1); n_a1.push(-1); n_a2.push(-1);
+        n_on_true.push(0); n_on_hack.push(0);
+        n_visits.push(0.0); n_val_sum.push(0.0); n_prior.push(0.0); n_prm.push(0.0);
+        n_blocked.push(0); n_solved.push(0);
+        let mut c: usize = 0;
+        while c < 4 { n_child.push(-1); c = c + 1; }
+        idx = idx + 1;
+    }
+
+    let mut greedy_solved: i32 = 0;
+    let mut greedy_hacked: i32 = 0;
+    let mut mcts_solved: i32 = 0;
+    let mut mcts_hacked_accepted: i32 = 0;
+    let mut goodhart_blocked: i32 = 0;
+    let mut total_nodes_expanded: i32 = 0;
+    let mut sum_mcts_q: f64 = 0.0;
+    let mut solve_hash: u64 = 2166136261u64;
+
+    let mut p: i32 = 0;
+    while p < n_probs {
+        // 1. Greedy Best-of-1 PRM Baseline
+        let mut gs: i64 = problem_s0(p);
+        let mut g_on_t: bool = true;
+        let mut g_on_h: bool = true;
+        let mut ga0: i32 = 0;
+        let mut ga1: i32 = 0;
+        let mut ga2: i32 = 0;
+        let mut g_last_prm: f64 = 0.0;
+        let mut d_i: i32 = 0;
+        while d_i < 3 {
+            let mut best_a: i32 = 0;
+            let mut best_s: f64 = -1.0;
+            let mut a: i32 = 0;
+            while a < 4 {
+                let sc: f64 = prm_step_score(p, d_i, a, g_on_t, g_on_h);
+                if sc > best_s { best_s = sc; best_a = a; }
+                a = a + 1;
+            }
+            g_last_prm = best_s;
+            g_on_t = g_on_t && (best_a == true_action(p, d_i));
+            g_on_h = g_on_h && (best_a == hack_action(p, d_i));
+            gs = apply_sym_op(gs, best_a);
+            if d_i == 0 { ga0 = best_a; }
+            else if d_i == 1 { ga1 = best_a; }
+            else { ga2 = best_a; }
+            d_i = d_i + 1;
+        }
+        let g_ora: f64 = hard_symbolic_oracle(p, gs, ga0, ga1, ga2);
+        if g_ora >= 0.5 {
+            greedy_solved = greedy_solved + 1;
+        } else if eval_goodhart_valve(g_last_prm, g_ora) == 2 {
+            greedy_hacked = greedy_hacked + 1;
+        }
+
+        // 2. Verifier-Guided PUCT MCTS + Live Goodhart Valve (64-node expansion budget)
+        idx = 0;
+        while idx < cap {
+            n_parent[idx] = -1; n_depth[idx] = 0; n_act[idx] = -1; n_state[idx] = 0;
+            n_a0[idx] = -1; n_a1[idx] = -1; n_a2[idx] = -1;
+            n_on_true[idx] = 0; n_on_hack[idx] = 0;
+            n_visits[idx] = 0.0; n_val_sum[idx] = 0.0; n_prior[idx] = 0.0; n_prm[idx] = 0.0;
+            n_blocked[idx] = 0; n_solved[idx] = 0;
+            let mut c: usize = 0;
+            while c < 4 { n_child[idx * 4 + c] = -1; c = c + 1; }
+            idx = idx + 1;
+        }
+
+        n_state[0] = problem_s0(p);
+        n_on_true[0] = 1;
+        n_on_hack[0] = 1;
+        n_visits[0] = 1.0;
+        let mut node_cnt: usize = 1;
+        let mut found_node: i32 = -1;
+
+        let mut sim: i32 = 0;
+        while sim < mcts_budget {
+            // Selection: descend PUCT tree until unexpanded child or terminal depth 3
+            let mut cur: usize = 0;
+            let mut expanded_here: bool = false;
+            while n_depth[cur] < 3 && !expanded_here {
+                // Check for any unexpanded child; pick highest PRM prior among unexpanded children
+                let mut best_unexp_a: i32 = -1;
+                let mut best_unexp_p: f64 = -1.0;
+                let mut a: i32 = 0;
+                while a < 4 {
+                    if n_child[cur * 4 + (a as usize)] < 0 {
+                        let ps: f64 = prm_step_score(
+                            p, n_depth[cur], a, n_on_true[cur] == 1, n_on_hack[cur] == 1,
+                        );
+                        if ps > best_unexp_p {
+                            best_unexp_p = ps;
+                            best_unexp_a = a;
+                        }
+                    }
+                    a = a + 1;
+                }
+
+                if best_unexp_a >= 0 && node_cnt < cap {
+                    let ch: usize = node_cnt;
+                    node_cnt = node_cnt + 1;
+                    total_nodes_expanded = total_nodes_expanded + 1;
+                    let nd: i32 = n_depth[cur] + 1;
+                    n_parent[ch] = cur as i32;
+                    n_depth[ch] = nd;
+                    n_act[ch] = best_unexp_a;
+                    n_state[ch] = apply_sym_op(n_state[cur], best_unexp_a);
+                    n_a0[ch] = if nd == 1 { best_unexp_a } else { n_a0[cur] };
+                    n_a1[ch] = if nd == 2 { best_unexp_a } else { n_a1[cur] };
+                    n_a2[ch] = if nd == 3 { best_unexp_a } else { n_a2[cur] };
+                    let nt: bool = (n_on_true[cur] == 1) && (best_unexp_a == true_action(p, nd - 1));
+                    let nh: bool = (n_on_hack[cur] == 1) && (best_unexp_a == hack_action(p, nd - 1));
+                    n_on_true[ch] = if nt { 1 } else { 0 };
+                    n_on_hack[ch] = if nh { 1 } else { 0 };
+                    n_prior[ch] = best_unexp_p;
+                    n_prm[ch] = best_unexp_p;
+                    n_child[cur * 4 + (best_unexp_a as usize)] = ch as i32;
+                    cur = ch;
+                    expanded_here = true;
+                } else {
+                    // All 4 children expanded: pick max PUCT among non-blocked children
+                    let sqrt_np: f64 = sqrt(n_visits[cur] + 1.0);
+                    let mut best_ch: usize = 0;
+                    let mut best_u: f64 = -1.0e30;
+                    let mut found_ch: bool = false;
+                    a = 0;
+                    while a < 4 {
+                        let cid: i32 = n_child[cur * 4 + (a as usize)];
+                        if cid >= 0 {
+                            let cu: usize = cid as usize;
+                            if n_blocked[cu] == 0 {
+                                let qv: f64 = if n_visits[cu] > 0.0 {
+                                    n_val_sum[cu] / n_visits[cu]
+                                } else {
+                                    0.0
+                                };
+                                let u_sc: f64 = qv + c_puct * n_prior[cu] * sqrt_np / (1.0 + n_visits[cu]);
+                                if u_sc > best_u {
+                                    best_u = u_sc;
+                                    best_ch = cu;
+                                    found_ch = true;
+                                }
+                            }
+                        }
+                        a = a + 1;
+                    }
+                    if !found_ch {
+                        n_blocked[cur] = 1;
+                        expanded_here = true;
+                    } else {
+                        cur = best_ch;
+                    }
+                }
+            }
+
+            // Evaluation + Goodhart Proxy-vs-Oracle Divergence Valve
+            let mut val: f64 = 0.0;
+            if n_depth[cur] == 3 {
+                let ora: f64 = hard_symbolic_oracle(p, n_state[cur], n_a0[cur], n_a1[cur], n_a2[cur]);
+                let vst: i32 = eval_goodhart_valve(n_prm[cur], ora);
+                if vst == 1 {
+                    val = 1.0;
+                    n_solved[cur] = 1;
+                    found_node = cur as i32;
+                } else if vst == 2 {
+                    if n_blocked[cur] == 0 {
+                        goodhart_blocked = goodhart_blocked + 1;
+                    }
+                    n_blocked[cur] = 1;
+                    val = -1.0;
+                } else {
+                    val = 0.15 * n_prm[cur];
+                    n_blocked[cur] = 1;
+                }
+            } else {
+                val = 0.35 * n_prm[cur];
+            }
+
+            // Backpropagation
+            let mut bp: i32 = cur as i32;
+            while bp >= 0 {
+                let bu: usize = bp as usize;
+                n_visits[bu] = n_visits[bu] + 1.0;
+                n_val_sum[bu] = n_val_sum[bu] + val;
+                bp = n_parent[bu];
+            }
+            sim = sim + 1;
+        }
+
+        if found_node >= 0 {
+            let fu: usize = found_node as usize;
+            if n_blocked[fu] == 0 && n_solved[fu] == 1 {
+                mcts_solved = mcts_solved + 1;
+                sum_mcts_q = sum_mcts_q + (n_val_sum[fu] / (n_visits[fu] + 1.0e-12));
+                solve_hash = fnv1a_byte(solve_hash, (n_a0[fu] * 16 + n_a1[fu] * 4 + n_a2[fu]) as u64);
+            } else {
+                mcts_hacked_accepted = mcts_hacked_accepted + 1;
+            }
+        }
+        p = p + 1;
+    }
+
+    let elapsed_ns: i64 = clock_ns() - t0;
+    let greedy_rate: f64 = (greedy_solved as f64) / (n_probs as f64);
+    let mcts_rate: f64 = (mcts_solved as f64) / (n_probs as f64);
+    let mean_mcts_q: f64 = sum_mcts_q / (n_probs as f64);
+
+    // 3. Planted Fail-Closed Controls (2 in-binary + 3rd forged cert in verifier)
+    // Control 1: Goodhart reward-hacking leaf (prm=0.96 >= 0.90, oracle=0.0) caught & rejected
+    let c1_vst: i32 = eval_goodhart_valve(0.96, 0.0);
+    let c1_valid: i32 = eval_goodhart_valve(0.72, 1.0);
+    let ctrl1_goodhart_rejected: bool = (c1_vst == 2) && (c1_valid == 1) && (mcts_hacked_accepted == 0);
+
+    // Control 2: Negative / zero MCTS exploration budget trapped fail-closed (-401)
+    let c2_zero: i32 = validate_mcts_budget(0);
+    let c2_neg: i32 = validate_mcts_budget(-16);
+    let c2_ok: i32 = validate_mcts_budget(64);
+    let ctrl2_budget_trapped: bool = (c2_zero == -401) && (c2_neg == -401) && (c2_ok == 0);
+
+    let mut failures: i32 = 0;
+    if mcts_solved != n_probs || greedy_solved >= mcts_solved || goodhart_blocked < 90 {
+        failures = failures + 1;
+    }
+    if mcts_hacked_accepted != 0 || !ctrl1_goodhart_rejected || !ctrl2_budget_trapped {
+        failures = failures + 1;
+    }
+
+    println!(
+        "METRIC greedy_solved={} greedy_hacked={} greedy_rate={:.12} mcts_solved={} mcts_rate={:.12}",
+        greedy_solved, greedy_hacked, greedy_rate, mcts_solved, mcts_rate
+    );
+    println!(
+        "METRIC goodhart_blocked={} mcts_hacked_accepted={} total_nodes_expanded={} mean_mcts_q={:.12} solve_hash={}",
+        goodhart_blocked, mcts_hacked_accepted, total_nodes_expanded, mean_mcts_q, solve_hash
+    );
+    println!(
+        "METRIC ctrl1_goodhart_rejected={} ctrl2_budget_trapped={} elapsed_ns={}",
+        ctrl1_goodhart_rejected, ctrl2_budget_trapped, elapsed_ns
+    );
+    println!("SUMMARY failures={}", failures);
+}
