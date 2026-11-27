@@ -298,10 +298,10 @@ fn main() ~ Console {
 #[test]
 fn planted_fail_closed_vec_of_fixed_array_refused() {
     let main = program(
-        "fail-vec-arr",
+        "fail-vec-tup-arr",
         r#"fn main() ~ Console {
-    let mut v: Vec<[i64; 2]> = Vec::new();
-    v.push([1, 2]);
+    let mut v: Vec<([i64; 2], i64)> = Vec::new();
+    v.push(([1, 2], 3));
     println!("{}", v.len());
 }
 "#,
@@ -309,7 +309,7 @@ fn planted_fail_closed_vec_of_fixed_array_refused() {
     let check = buildc("check", &main);
     assert!(
         !check.status.success(),
-        "Vec<[i64; 2]> must fail closed\n{}",
+        "Vec<([i64; 2], i64)> must fail closed\n{}",
         text(&check)
     );
 }

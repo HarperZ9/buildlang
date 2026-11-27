@@ -287,8 +287,60 @@ impl CBackend {
             MirType::Tuple(elems) if Self::is_supported_vec_tuple(elems) => {
                 MirType::tuple_type_name(elems).to_string()
             }
+            MirType::Array(inner, len) if Self::is_supported_vec_array(inner, *len) => {
+                Self::hvec_array_suffix(inner, *len)
+            }
             _ => "i32".to_string(),
         }
+    }
+
+    /// True when `[elem; len]` can be stored by value in the size-aware `BuildVec`
+    /// runtime via monomorphized array element wrappers.
+    pub(crate) fn is_supported_vec_array(elem: &MirType, len: u64) -> bool {
+        fn supported_elem(e: &MirType) -> bool {
+            match e {
+                MirType::Bool
+                | MirType::Int(..)
+                | MirType::Float(..)
+                | MirType::Ptr(_)
+                | MirType::FnPtr(_)
+                | MirType::Vec(_)
+                | MirType::Map(..) => true,
+                MirType::Struct(n) => !n.starts_with("dyn ") && !n.starts_with("dyn_"),
+                MirType::Option(inner) => supported_elem(inner),
+                MirType::Tuple(elems) => CBackend::is_supported_vec_tuple(elems),
+                MirType::Array(inner, n) => *n > 0 && supported_elem(inner),
+                _ => false,
+            }
+        }
+        len > 0 && supported_elem(elem)
+    }
+
+    /// Sanitized C-identifier suffix for a fixed-array Vec element type (`[T; N]`).
+    pub(crate) fn hvec_array_suffix(elem: &MirType, len: u64) -> String {
+        let raw = elem.to_string();
+        let mut out = String::from("arr_");
+        for ch in raw.chars() {
+            if ch.is_ascii_alphanumeric() || ch == '_' {
+                out.push(ch);
+            } else {
+                out.push('_');
+            }
+        }
+        out.push('_');
+        out.push_str(&len.to_string());
+        out
+    }
+
+    /// C byte-size expression for a fixed array `[elem; len]`, handling nested arrays.
+    fn array_byte_size_c(&self, elem: &MirType, len: u64) -> String {
+        let mut cur = elem;
+        let mut total = len;
+        while let MirType::Array(inner, n) = cur {
+            total = total.saturating_mul(*n);
+            cur = inner;
+        }
+        format!("(sizeof({}) * {})", self.type_to_c(cur), total)
     }
 
     /// True when `elems` is a non-empty tuple of concrete non-trait-object,
@@ -301,6 +353,7 @@ impl CBackend {
                 | MirType::Int(..)
                 | MirType::Float(..)
                 | MirType::Ptr(_)
+                | MirType::FnPtr(_)
                 | MirType::Vec(_)
                 | MirType::Map(..) => true,
                 MirType::Struct(n) => !n.starts_with("dyn ") && !n.starts_with("dyn_"),
@@ -367,6 +420,7 @@ impl CBackend {
         Self::is_slice_ref(elem)
             || matches!(elem, MirType::Ptr(_))
             || matches!(elem, MirType::Tuple(elems) if Self::is_supported_vec_tuple(elems))
+            || matches!(elem, MirType::Array(inner, len) if Self::is_supported_vec_array(inner, *len))
             || matches!(elem, MirType::Struct(n) if n.as_ref() != "BuildString")
             || matches!(
                 elem,
@@ -1464,61 +1518,80 @@ impl CBackend {
         // generic BuildVec via a per-type wrapper so `Vec<P>` push/get/pop work.
         {
             let mut vec_elem_types = std::collections::BTreeMap::<String, String>::new();
+            let mut vec_array_elems = std::collections::BTreeMap::<String, String>::new();
             fn collect_vec_elems(
                 backend: &CBackend,
                 ty: &MirType,
                 out: &mut std::collections::BTreeMap<String, String>,
+                arr_out: &mut std::collections::BTreeMap<String, String>,
             ) {
                 match ty {
                     MirType::Vec(elem) => {
-                        if CBackend::vec_elem_needs_sized_wrapper(elem) {
+                        if let MirType::Array(inner, len) = elem.as_ref() {
+                            if CBackend::is_supported_vec_array(inner, *len) {
+                                arr_out.insert(
+                                    CBackend::hvec_array_suffix(inner, *len),
+                                    backend.array_byte_size_c(inner, *len),
+                                );
+                            }
+                        } else if CBackend::vec_elem_needs_sized_wrapper(elem) {
                             out.insert(CBackend::hvec_elem_suffix(elem), backend.type_to_c(elem));
                         }
-                        collect_vec_elems(backend, elem, out);
+                        collect_vec_elems(backend, elem, out, arr_out);
                     }
                     MirType::Ptr(inner)
                     | MirType::Slice(inner)
                     | MirType::Array(inner, _)
-                    | MirType::Option(inner) => collect_vec_elems(backend, inner, out),
+                    | MirType::Option(inner) => collect_vec_elems(backend, inner, out, arr_out),
                     MirType::Tuple(elems) => {
                         for e in elems {
-                            collect_vec_elems(backend, e, out);
+                            collect_vec_elems(backend, e, out, arr_out);
                         }
                     }
                     MirType::Map(k, v) => {
-                        collect_vec_elems(backend, k, out);
-                        collect_vec_elems(backend, v, out);
+                        collect_vec_elems(backend, k, out, arr_out);
+                        collect_vec_elems(backend, v, out, arr_out);
                     }
                     _ => {}
                 }
             }
             for func in &module.functions {
                 for p in &func.sig.params {
-                    collect_vec_elems(self, p, &mut vec_elem_types);
+                    collect_vec_elems(self, p, &mut vec_elem_types, &mut vec_array_elems);
                 }
-                collect_vec_elems(self, &func.sig.ret, &mut vec_elem_types);
+                collect_vec_elems(
+                    self,
+                    &func.sig.ret,
+                    &mut vec_elem_types,
+                    &mut vec_array_elems,
+                );
                 for local in &func.locals {
-                    collect_vec_elems(self, &local.ty, &mut vec_elem_types);
+                    collect_vec_elems(self, &local.ty, &mut vec_elem_types, &mut vec_array_elems);
                 }
             }
             for td in &module.types {
                 match &td.kind {
                     TypeDefKind::Struct { fields, .. } => {
                         for (_, fty) in fields {
-                            collect_vec_elems(self, fty, &mut vec_elem_types);
+                            collect_vec_elems(self, fty, &mut vec_elem_types, &mut vec_array_elems);
                         }
                     }
                     TypeDefKind::Enum { variants, .. } => {
                         for v in variants {
                             for (_, fty) in &v.fields {
-                                collect_vec_elems(self, fty, &mut vec_elem_types);
+                                collect_vec_elems(
+                                    self,
+                                    fty,
+                                    &mut vec_elem_types,
+                                    &mut vec_array_elems,
+                                );
                             }
                         }
                     }
                     _ => {}
                 }
             }
-            if !vec_elem_types.is_empty() {
+            if !vec_elem_types.is_empty() || !vec_array_elems.is_empty() {
                 self.output.push_str(
                     "// Monomorphized Vec element wrappers for aggregate element types\n",
                 );
@@ -1533,6 +1606,14 @@ impl CBackend {
                     write!(self.output, "static void build_hvec_set_{suffix}(BuildVecHandle h, size_t i, {elem_c} val) {{ if (BL_UNLIKELY(i >= h.inner->len)) {{ fprintf(stderr, \"Vec index out of bounds: %zu >= %zu\\n\", i, h.inner->len); exit(101); }} *({elem_c}*)((char*)h.inner->ptr + i * h.inner->elem_size) = val; }}\n").unwrap();
                     write!(self.output, "static {elem_c} build_hvec_pop_{suffix}(BuildVecHandle h) {{ {elem_c} __z; memset(&__z, 0, sizeof(__z)); if (h.inner->len == 0) return __z; h.inner->len--; return *({elem_c}*)((char*)h.inner->ptr + h.inner->len * h.inner->elem_size); }}\n").unwrap();
                     write!(self.output, "static bool build_hvec_contains_{suffix}(BuildVecHandle h, {elem_c} val) {{ for (size_t __i = 0; __i < h.inner->len; __i++) {{ if (memcmp((char*)h.inner->ptr + __i * h.inner->elem_size, &val, sizeof({elem_c})) == 0) return true; }} return false; }}\n").unwrap();
+                }
+                for (suffix, byte_size_c) in vec_array_elems {
+                    write!(self.output, "static BuildVecHandle build_hvec_new_{suffix}(void) {{ BuildVecHandle h; h.inner = (BuildVec*)malloc(sizeof(BuildVec)); *h.inner = build_vec_new({byte_size_c}); return h; }}\n").unwrap();
+                    write!(self.output, "static void build_hvec_push_{suffix}(BuildVecHandle h, const void* val) {{ build_vec_push(h.inner, val); }}\n").unwrap();
+                    write!(self.output, "static void build_hvec_get_{suffix}(BuildVecHandle h, size_t index, void* out) {{ memcpy(out, build_vec_get(h.inner, index), {byte_size_c}); }}\n").unwrap();
+                    write!(self.output, "static void build_hvec_set_{suffix}(BuildVecHandle h, size_t i, const void* val) {{ if (BL_UNLIKELY(i >= h.inner->len)) {{ fprintf(stderr, \"Vec index out of bounds: %zu >= %zu\\n\", i, h.inner->len); exit(101); }} memcpy((char*)h.inner->ptr + i * h.inner->elem_size, val, {byte_size_c}); }}\n").unwrap();
+                    write!(self.output, "static void build_hvec_pop_{suffix}(BuildVecHandle h, void* out) {{ memset(out, 0, {byte_size_c}); if (h.inner->len == 0) return; h.inner->len--; memcpy(out, (char*)h.inner->ptr + h.inner->len * h.inner->elem_size, {byte_size_c}); }}\n").unwrap();
+                    write!(self.output, "static bool build_hvec_contains_{suffix}(BuildVecHandle h, const void* val) {{ for (size_t __i = 0; __i < h.inner->len; __i++) {{ if (memcmp((char*)h.inner->ptr + __i * h.inner->elem_size, val, {byte_size_c}) == 0) return true; }} return false; }}\n").unwrap();
                 }
                 self.output.push('\n');
             }
@@ -3203,6 +3284,38 @@ impl CBackend {
                             dest_name, src, dest_name
                         )
                         .unwrap();
+                    } else if let MirRValue::IndexAccess {
+                        base,
+                        index,
+                        elem_ty,
+                    } = value
+                    {
+                        let base_is_vec = match base {
+                            MirValue::Local(id) => locals
+                                .get(id.0 as usize)
+                                .map(|l| matches!(l.ty, MirType::Vec(_)))
+                                .unwrap_or(false),
+                            _ => false,
+                        };
+                        self.write_indent();
+                        if base_is_vec && matches!(elem_ty, MirType::Array(..)) {
+                            let base_str = self.value_to_c(base, locals);
+                            let index_str = self.value_to_c(index, locals);
+                            write!(
+                                self.output,
+                                "memcpy({}, build_vec_get({}.inner, {}), sizeof({}));\n",
+                                dest_name, base_str, index_str, dest_name
+                            )
+                            .unwrap();
+                        } else {
+                            let rvalue = self.rvalue_to_c(value, locals)?;
+                            write!(
+                                self.output,
+                                "memcpy({}, &({}), sizeof({}));\n",
+                                dest_name, rvalue, dest_name
+                            )
+                            .unwrap();
+                        }
                     } else {
                         self.write_indent();
                         let rvalue = self.rvalue_to_c(value, locals)?;
@@ -3730,9 +3843,10 @@ impl CBackend {
                 // is a BuildString here, whose char buffer is its `.ptr` field;
                 // anything else is already a `const char*`. (Without this,
                 // String::from lowered to an undefined `String_from` symbol.)
-                // Box::new(x) -> malloc a T, store x, keep the pointer (issue #83).
-                // Boxed memory is never freed in this release.
-                if func_str == "Box_new" && args.len() == 1 {
+                // Box::new(x), Arc::new(x), Rc::new(x) -> allocate heap T
+                // (Arc/Rc carry a refcount header before the payload).
+                if matches!(func_str.as_str(), "Box_new" | "Arc_new" | "Rc_new") && args.len() == 1
+                {
                     if let Some(dest_local) = dest {
                         let pointee = locals
                             .get(dest_local.0 as usize)
@@ -3741,18 +3855,36 @@ impl CBackend {
                                 _ => None,
                             })
                             .ok_or_else(|| {
-                                CodegenError::Internal(
-                                    "Box_new destination is not a pointer".to_string(),
-                                )
+                                CodegenError::Internal(format!(
+                                    "{func_str} destination is not a pointer"
+                                ))
                             })?;
                         let cty = self.type_to_c(&pointee);
                         let dest_name = self.local_name(*dest_local, locals);
                         let arg = self.value_to_c(&args[0], locals);
-                        write!(
-                            self.output,
-                            "{{ {cty}* _bx = ({cty}*)malloc(sizeof({cty})); if (!_bx) abort(); *_bx = {arg}; {dest_name} = _bx; }}\n"
-                        )
-                        .unwrap();
+                        match func_str.as_str() {
+                            "Box_new" => {
+                                write!(
+                                    self.output,
+                                    "{{ {cty}* _bx = ({cty}*)malloc(sizeof({cty})); if (!_bx) abort(); *_bx = {arg}; {dest_name} = _bx; }}\n"
+                                )
+                                .unwrap();
+                            }
+                            "Arc_new" => {
+                                write!(
+                                    self.output,
+                                    "{{ {cty}* _arc = ({cty}*)build_arc_alloc(sizeof({cty})); *_arc = {arg}; {dest_name} = _arc; }}\n"
+                                )
+                                .unwrap();
+                            }
+                            _ => {
+                                write!(
+                                    self.output,
+                                    "{{ {cty}* _rc = ({cty}*)build_rc_alloc(sizeof({cty})); *_rc = {arg}; {dest_name} = _rc; }}\n"
+                                )
+                                .unwrap();
+                            }
+                        }
                     }
                     if let Some(target) = target {
                         self.write_indent();
@@ -5351,6 +5483,13 @@ impl CBackend {
                         MirType::Int(..) | MirType::Bool => {
                             let suffix = Self::hvec_elem_suffix(elem_ty);
                             format!("build_hvec_get_{}({}, {})", suffix, base_str, index_str)
+                        }
+                        MirType::Array(inner, _) => {
+                            let elem_c = self.type_to_c(inner);
+                            format!(
+                                "(({}*)build_vec_get({}.inner, {}))",
+                                elem_c, base_str, index_str
+                            )
                         }
                         other => {
                             let ct = self.type_to_c(other);

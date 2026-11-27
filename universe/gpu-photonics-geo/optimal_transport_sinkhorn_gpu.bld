@@ -1,0 +1,44 @@
+// SPDX-FileCopyrightText: 2026 Zain Dana Harper
+// SPDX-License-Identifier: MIT
+// Photonics-Geo GPU 320-Pack: Sinkhorn-Knopp entropic optimal transport scaling kernel.
+// Evaluates four-column Gibbs kernel weights via bounded rational exp(-C/eps), updates the
+// primal row scaling factor u_i, and reports marginal residual plus transport cost.
+
+#[compute(workgroup_size = [64, 1, 1])]
+fn optimal_transport_sinkhorn_gpu(
+    inv_eps: f32,
+    c0_buf: &[f32],
+    c1_buf: &[f32],
+    c2_buf: &[f32],
+    c3_buf: &[f32],
+    v0_buf: &[f32],
+    v1_buf: &[f32],
+    v2_buf: &[f32],
+    v3_buf: &[f32],
+    marg_a_buf: &[f32],
+    u_out: &mut [f32],
+    cost_out: &mut [f32],
+) ~ Gpu {
+    let i = gl_GlobalInvocationID.x;
+    let z0: f32 = c0_buf[i] * inv_eps;
+    let z1: f32 = c1_buf[i] * inv_eps;
+    let z2: f32 = c2_buf[i] * inv_eps;
+    let z3: f32 = c3_buf[i] * inv_eps;
+
+    let k0: f32 = 1.0 / (1.0 + z0 + 0.5 * z0 * z0 + 0.16666667 * z0 * z0 * z0);
+    let k1: f32 = 1.0 / (1.0 + z1 + 0.5 * z1 * z1 + 0.16666667 * z1 * z1 * z1);
+    let k2: f32 = 1.0 / (1.0 + z2 + 0.5 * z2 * z2 + 0.16666667 * z2 * z2 * z2);
+    let k3: f32 = 1.0 / (1.0 + z3 + 0.5 * z3 * z3 + 0.16666667 * z3 * z3 * z3);
+
+    let kv0: f32 = k0 * v0_buf[i];
+    let kv1: f32 = k1 * v1_buf[i];
+    let kv2: f32 = k2 * v2_buf[i];
+    let kv3: f32 = k3 * v3_buf[i];
+
+    let row_sum: f32 = kv0 + kv1 + kv2 + kv3 + 0.000001;
+    let u_new: f32 = marg_a_buf[i] / row_sum;
+
+    let cost: f32 = u_new * (kv0 * c0_buf[i] + kv1 * c1_buf[i] + kv2 * c2_buf[i] + kv3 * c3_buf[i]);
+    u_out[i] = u_new;
+    cost_out[i] = cost;
+}

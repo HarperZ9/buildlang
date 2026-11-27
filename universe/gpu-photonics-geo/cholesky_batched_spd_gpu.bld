@@ -1,0 +1,59 @@
+// SPDX-FileCopyrightText: 2026 Zain Dana Harper
+// SPDX-License-Identifier: MIT
+// Photonics-Geo GPU 320-Pack: Batched 3x3 SPD Cholesky factorization and triangular solve kernel.
+// Factors each symmetric positive-definite 3x3 matrix A = L * L^T via Newton-Raphson sqrt
+// pivots and solves L * L^T * x = b for batched linear systems on GPU lanes.
+
+#[compute(workgroup_size = [64, 1, 1])]
+fn cholesky_batched_spd_gpu(
+    eps: f32,
+    a00_buf: &[f32],
+    a10_buf: &[f32],
+    a11_buf: &[f32],
+    a20_buf: &[f32],
+    a21_buf: &[f32],
+    a22_buf: &[f32],
+    b0_buf: &[f32],
+    b1_buf: &[f32],
+    b2_buf: &[f32],
+    x0_out: &mut [f32],
+    x1_out: &mut [f32],
+    x2_out: &mut [f32],
+) ~ Gpu {
+    let i = gl_GlobalInvocationID.x;
+    let d0: f32 = a00_buf[i] + eps;
+    let mut l00: f32 = 0.5 * (d0 + 1.0);
+    l00 = 0.5 * (l00 + d0 / l00);
+    l00 = 0.5 * (l00 + d0 / l00);
+
+    let l10: f32 = a10_buf[i] / l00;
+    let mut d1: f32 = a11_buf[i] - l10 * l10;
+    if d1 < eps {
+        d1 = eps;
+    }
+    let mut l11: f32 = 0.5 * (d1 + 1.0);
+    l11 = 0.5 * (l11 + d1 / l11);
+    l11 = 0.5 * (l11 + d1 / l11);
+
+    let l20: f32 = a20_buf[i] / l00;
+    let l21: f32 = (a21_buf[i] - l20 * l10) / l11;
+    let mut d2: f32 = a22_buf[i] - l20 * l20 - l21 * l21;
+    if d2 < eps {
+        d2 = eps;
+    }
+    let mut l22: f32 = 0.5 * (d2 + 1.0);
+    l22 = 0.5 * (l22 + d2 / l22);
+    l22 = 0.5 * (l22 + d2 / l22);
+
+    let y0: f32 = b0_buf[i] / l00;
+    let y1: f32 = (b1_buf[i] - l10 * y0) / l11;
+    let y2: f32 = (b2_buf[i] - l20 * y0 - l21 * y1) / l22;
+
+    let x2: f32 = y2 / l22;
+    let x1: f32 = (y1 - l21 * x2) / l11;
+    let x0: f32 = (y0 - l10 * x1 - l20 * x2) / l00;
+
+    x0_out[i] = x0;
+    x1_out[i] = x1;
+    x2_out[i] = x2;
+}

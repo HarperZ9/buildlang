@@ -42,6 +42,7 @@ fn parse_call(target: &MirType) -> Option<(&'static str, Vec<MirValue>)> {
                 FloatSize::F32
             )))],
         )),
+        MirType::Bool => Some(("build_parse_bool", vec![])),
         _ => None,
     }
 }

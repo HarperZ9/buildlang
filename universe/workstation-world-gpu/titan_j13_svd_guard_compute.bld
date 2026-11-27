@@ -1,0 +1,57 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Zain Dana Harper.
+// Titan-AI J13 Spectral Epigenetic LoRA rank-collapse guard GPU compute kernel.
+// Solves symmetric 2x2 LoRA Gram eigenvalues via Newton-Raphson square root, computes
+// participation effective rank and top-1 spectral energy ratio, and raises a rollback flag.
+
+#[compute(workgroup_size = [64, 1, 1])]
+fn titan_j13_svd_guard_compute(
+    min_eff_rank: f32,
+    max_top1: f32,
+    eps: f32,
+    g00_buf: &[f32],
+    g01_buf: &[f32],
+    g11_buf: &[f32],
+    eff_rank_out: &mut [f32],
+    top1_out: &mut [f32],
+    guard_flag_out: &mut [f32],
+) ~ Gpu {
+    let i = gl_GlobalInvocationID.x;
+    let g00: f32 = g00_buf[i];
+    let g01: f32 = g01_buf[i];
+    let g11: f32 = g11_buf[i];
+
+    let tr: f32 = g00 + g11 + eps;
+    let diff: f32 = g00 - g11;
+    let disc: f32 = diff * diff + 4.0 * g01 * g01 + eps;
+
+    let mut sq: f32 = 0.5 * (disc + 1.0);
+    sq = 0.5 * (sq + disc / sq);
+    sq = 0.5 * (sq + disc / sq);
+    sq = 0.5 * (sq + disc / sq);
+    sq = 0.5 * (sq + disc / sq);
+    sq = 0.5 * (sq + disc / sq);
+
+    let lam1: f32 = 0.5 * (tr + sq);
+    let mut lam2: f32 = 0.5 * (tr - sq);
+    if lam2 < 0.0 {
+        lam2 = 0.0;
+    }
+
+    let inv_sum: f32 = 1.0 / (lam1 + lam2 + eps);
+    let p1: f32 = lam1 * inv_sum;
+    let p2: f32 = lam2 * inv_sum;
+    let eff_rank: f32 = 1.0 / (p1 * p1 + p2 * p2 + eps);
+
+    let mut flag: f32 = 0.0;
+    if eff_rank < min_eff_rank {
+        flag = 1.0;
+    }
+    if p1 > max_top1 {
+        flag = 1.0;
+    }
+
+    eff_rank_out[i] = eff_rank;
+    top1_out[i] = p1;
+    guard_flag_out[i] = flag;
+}

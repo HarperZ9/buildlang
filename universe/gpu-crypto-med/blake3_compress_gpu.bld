@@ -1,0 +1,59 @@
+// SPDX-FileCopyrightText: 2026 Zain Dana Harper
+// SPDX-License-Identifier: MIT
+// Crypto-Med GPU 360-Pack: BLAKE3 7-round quarter-round GPU compression kernel.
+// Executes seven iterated BLAKE3 G quarter-round permutations (rotations 16, 12, 8, 7)
+// over 32-bit state lanes and XOR-folds compressed chaining values.
+
+#[compute(workgroup_size = [64, 1, 1])]
+fn blake3_compress_gpu(
+    flags: u32,
+    v0_buf: &[u32],
+    v1_buf: &[u32],
+    v2_buf: &[u32],
+    v3_buf: &[u32],
+    m0_buf: &[u32],
+    m1_buf: &[u32],
+    h0_out: &mut [u32],
+    h1_out: &mut [u32],
+    h2_out: &mut [u32],
+    h3_out: &mut [u32],
+) ~ Gpu {
+    let i = gl_GlobalInvocationID.x;
+    let init0: u32 = v0_buf[i];
+    let init1: u32 = v1_buf[i];
+    let init2: u32 = v2_buf[i];
+    let init3: u32 = v3_buf[i] ^ flags;
+
+    let mut a: u32 = init0;
+    let mut b: u32 = init1;
+    let mut c: u32 = init2;
+    let mut d: u32 = init3;
+    let mut mx: u32 = m0_buf[i];
+    let mut my: u32 = m1_buf[i];
+
+    let mut round: i32 = 0;
+    while round < 7 {
+        a = a + b + mx;
+        let d1: u32 = d ^ a;
+        d = (d1 >> 16) | (d1 << 16);
+        c = c + d;
+        let b1: u32 = b ^ c;
+        b = (b1 >> 12) | (b1 << 20);
+        a = a + b + my;
+        let d2: u32 = d ^ a;
+        d = (d2 >> 8) | (d2 << 24);
+        c = c + d;
+        let b2: u32 = b ^ c;
+        b = (b2 >> 7) | (b2 << 25);
+
+        let tmp_m: u32 = mx;
+        mx = my + 1664525;
+        my = tmp_m ^ 1013904223;
+        round = round + 1;
+    }
+
+    h0_out[i] = a ^ init0;
+    h1_out[i] = b ^ init1;
+    h2_out[i] = c ^ init2;
+    h3_out[i] = d ^ init3;
+}

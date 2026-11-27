@@ -1,0 +1,50 @@
+// SPDX-FileCopyrightText: 2026 Zain Dana Harper
+// SPDX-License-Identifier: MIT
+// Crypto-Med GPU 360-Pack: FIPS 203 ML-KEM q=3329 Barrett NTT butterfly kernel.
+// Performs exact modular Cooley-Tukey NTT butterfly over Z_3329 using Barrett reduction
+// (q = 3329, v = 20159, shift = 26) and canonicalizes outputs into [0, 3329).
+
+#[compute(workgroup_size = [64, 1, 1])]
+fn mlkem_ntt_q3329_gpu(
+    q_mod: i32,
+    barrett_v: i32,
+    a_buf: &[i32],
+    b_buf: &[i32],
+    zeta_buf: &[i32],
+    a_out: &mut [i32],
+    b_out: &mut [i32],
+) ~ Gpu {
+    let i = gl_GlobalInvocationID.x;
+    let a: i32 = a_buf[i];
+    let b: i32 = b_buf[i];
+    let zeta: i32 = zeta_buf[i];
+
+    let prod: i32 = b * zeta;
+    let q_est: i32 = (prod * barrett_v) / 67108864;
+    let mut t: i32 = prod - q_est * q_mod;
+    if t >= q_mod {
+        t = t - q_mod;
+    }
+    if t < 0 {
+        t = t + q_mod;
+    }
+
+    let mut sum_ab: i32 = a + t;
+    if sum_ab >= q_mod {
+        sum_ab = sum_ab - q_mod;
+    }
+    if sum_ab < 0 {
+        sum_ab = sum_ab + q_mod;
+    }
+
+    let mut diff_ab: i32 = a - t;
+    if diff_ab < 0 {
+        diff_ab = diff_ab + q_mod;
+    }
+    if diff_ab >= q_mod {
+        diff_ab = diff_ab - q_mod;
+    }
+
+    a_out[i] = sum_ab;
+    b_out[i] = diff_ab;
+}

@@ -1,0 +1,47 @@
+// SPDX-FileCopyrightText: 2026 Zain Dana Harper
+// SPDX-License-Identifier: MIT
+// Crypto-Med GPU 360-Pack: Centroidal Voronoi Tessellation (CVT) Lloyd relaxation kernel.
+// Computes density-weighted centroid of a 3-sample Voronoi cell, relaxes the site toward
+// its centroid with step alpha, and reports squared site displacement energy.
+
+#[compute(workgroup_size = [64, 1, 1])]
+fn voronoi_lloyd_relax_gpu(
+    relax_alpha: f32,
+    eps: f32,
+    sx_buf: &[f32],
+    sy_buf: &[f32],
+    p0x_buf: &[f32],
+    p0y_buf: &[f32],
+    w0_buf: &[f32],
+    p1x_buf: &[f32],
+    p1y_buf: &[f32],
+    w1_buf: &[f32],
+    p2x_buf: &[f32],
+    p2y_buf: &[f32],
+    w2_buf: &[f32],
+    sx_out: &mut [f32],
+    sy_out: &mut [f32],
+    shift2_out: &mut [f32],
+) ~ Gpu {
+    let i = gl_GlobalInvocationID.x;
+    let w0: f32 = w0_buf[i];
+    let w1: f32 = w1_buf[i];
+    let w2: f32 = w2_buf[i];
+    let w_sum: f32 = w0 + w1 + w2 + eps;
+    let inv_w: f32 = 1.0 / w_sum;
+
+    let cx: f32 = (w0 * p0x_buf[i] + w1 * p1x_buf[i] + w2 * p2x_buf[i]) * inv_w;
+    let cy: f32 = (w0 * p0y_buf[i] + w1 * p1y_buf[i] + w2 * p2y_buf[i]) * inv_w;
+
+    let sx: f32 = sx_buf[i];
+    let sy: f32 = sy_buf[i];
+    let dx: f32 = cx - sx;
+    let dy: f32 = cy - sy;
+
+    let nx: f32 = sx + relax_alpha * dx;
+    let ny: f32 = sy + relax_alpha * dy;
+
+    sx_out[i] = nx;
+    sy_out[i] = ny;
+    shift2_out[i] = dx * dx + dy * dy;
+}

@@ -1,0 +1,837 @@
+// SPDX-FileCopyrightText: 2026 Zain Dana Harper
+// SPDX-License-Identifier: MIT
+//
+// Wave 128C (OPT-084; F1, J13, A14, A18, N44, N46, N49, N50, N53):
+// Pure-BuildLang Tree-Attention Speculative Verify + Heavy-Hitter (H2O) KV Eviction + J13 Gate
+//   1. Heavy-Hitter (H2O) KV-cache eviction: S=128 tokens compressed to K=32 (4.0x compression:
+//      16 cumulative attention-mass heavy hitters + 16 recent window slots), beating naive FIFO.
+//   2. Tree-structured lossless speculative verification (depth-3 binary draft tree, 7 nodes/step
+//      across 24 steps) with exact ancestor-mask attention (zero sibling cross-talk) and
+//      exact Leviathan-Chen tree rejection sampling (max_tvd = 0.0 vs autoregressive).
+//   3. Live J13 4x4 QR + cyclic Jacobi SVD spectral health gate with bit-exact atomic rollback.
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { return -x; }
+    x
+}
+
+fn max_f64(a: f64, b: f64) -> f64 {
+    if a > b { return a; }
+    b
+}
+
+fn min_f64(a: f64, b: f64) -> f64 {
+    if a < b { return a; }
+    b
+}
+
+fn fnv1a_byte(h: u64, b: u64) -> u64 {
+    ((h ^ (b & 255u64)) * 16777619u64) & 4294967295u64
+}
+
+fn lcg_next(s: u64) -> u64 {
+    (s * 1664525u64 + 1013904223u64) & 4294967295u64
+}
+
+fn det_w(tag: i64, r: usize, c: usize) -> f64 {
+    let a: f64 = ((tag * 131 + (r as i64) * 37 + (c as i64) * 19 + 7) as f64) * 0.3719;
+    let b: f64 = ((tag * 73 + (r as i64) * 53 + (c as i64) * 29 + 11) as f64) * 0.6193;
+    0.26 * sin(a) + 0.16 * cos(b)
+}
+
+fn softmax_16(logits: &Vec<f64>, p_out: &mut Vec<f64>) {
+    let mut m: f64 = logits[0];
+    let mut i: usize = 1;
+    while i < 16 {
+        if logits[i] > m { m = logits[i]; }
+        i = i + 1;
+    }
+    let mut z: f64 = 0.0;
+    i = 0;
+    while i < 16 {
+        let ev: f64 = exp(logits[i] - m);
+        p_out[i] = ev;
+        z = z + ev;
+        i = i + 1;
+    }
+    let inv_z: f64 = 1.0 / z;
+    i = 0;
+    while i < 16 {
+        p_out[i] = p_out[i] * inv_z;
+        i = i + 1;
+    }
+}
+
+fn sample_cat_16(p: &Vec<f64>, u: f64) -> usize {
+    let mut cdf: f64 = 0.0;
+    let mut i: usize = 0;
+    while i < 15 {
+        cdf = cdf + p[i];
+        if u < cdf { return i; }
+        i = i + 1;
+    }
+    15
+}
+
+fn spec_residual_and_tvd(p: &Vec<f64>, q: &Vec<f64>, res_out: &mut Vec<f64>) -> f64 {
+    let mut z_res: f64 = 0.0;
+    let mut acc_m: f64 = 0.0;
+    let mut i: usize = 0;
+    while i < 16 {
+        let mn: f64 = min_f64(p[i], q[i]);
+        let df: f64 = max_f64(0.0, p[i] - q[i]);
+        acc_m = acc_m + mn;
+        res_out[i] = df;
+        z_res = z_res + df;
+        i = i + 1;
+    }
+    let rej_m: f64 = 1.0 - acc_m;
+    let mut tvd: f64 = 0.0;
+    if z_res > 1.0e-15 {
+        let inv_z: f64 = 1.0 / z_res;
+        i = 0;
+        while i < 16 {
+            res_out[i] = res_out[i] * inv_z;
+            let pe: f64 = min_f64(p[i], q[i]) + rej_m * res_out[i];
+            tvd = tvd + abs_f64(pe - p[i]);
+            i = i + 1;
+        }
+    } else {
+        i = 0;
+        while i < 16 {
+            res_out[i] = p[i];
+            tvd = tvd + abs_f64(min_f64(p[i], q[i]) - p[i]);
+            i = i + 1;
+        }
+    }
+    0.5 * tvd
+}
+
+// Tree ancestor check for 7-node complete binary tree:
+//   0 -> (1, 2); 1 -> (3, 4); 2 -> (5, 6)
+fn is_tree_ancestor(node: usize, cand: usize) -> bool {
+    if cand == node { return true; }
+    if cand == 0 { return true; }
+    if cand == 1 && (node == 3 || node == 4) { return true; }
+    if cand == 2 && (node == 5 || node == 6) { return true; }
+    false
+}
+
+fn run_tree_masked_attn(
+    tq: &Vec<f64>,
+    tk: &Vec<f64>,
+    tv: &Vec<f64>,
+    d: usize,
+    out_t: &mut Vec<f64>,
+    sc_buf: &mut Vec<f64>,
+) {
+    let inv_sd: f64 = 1.0 / sqrt(d as f64);
+    let mut u: usize = 0;
+    while u < 7 {
+        let mut max_s: f64 = -1.0e30;
+        let mut v: usize = 0;
+        while v < 7 {
+            if is_tree_ancestor(u, v) {
+                let mut dot: f64 = 0.0;
+                let mut j: usize = 0;
+                while j < d {
+                    dot = dot + tq[u * d + j] * tk[v * d + j];
+                    j = j + 1;
+                }
+                let s: f64 = dot * inv_sd;
+                sc_buf[v] = s;
+                if s > max_s { max_s = s; }
+            } else {
+                sc_buf[v] = -1.0e30;
+            }
+            v = v + 1;
+        }
+        let mut j: usize = 0;
+        while j < d { out_t[u * d + j] = 0.0; j = j + 1; }
+        let mut z_sum: f64 = 0.0;
+        v = 0;
+        while v < 7 {
+            if is_tree_ancestor(u, v) {
+                let w: f64 = exp(sc_buf[v] - max_s);
+                z_sum = z_sum + w;
+                j = 0;
+                while j < d {
+                    out_t[u * d + j] = out_t[u * d + j] + w * tv[v * d + j];
+                    j = j + 1;
+                }
+            }
+            v = v + 1;
+        }
+        let inv_z: f64 = 1.0 / z_sum;
+        j = 0;
+        while j < d {
+            out_t[u * d + j] = out_t[u * d + j] * inv_z;
+            j = j + 1;
+        }
+        u = u + 1;
+    }
+}
+
+// --- J13 4x4 QR + Cyclic Jacobi SVD Spectral Health Gate ---
+fn qr_cols_4(mat: &Vec<f64>, d: usize, q_out: &mut Vec<f64>, r_out: &mut Vec<f64>, v_tmp: &mut Vec<f64>) {
+    let mut idx: usize = 0;
+    while idx < 16 { r_out[idx] = 0.0; idx = idx + 1; }
+    let mut k: usize = 0;
+    while k < 4 {
+        let mut i: usize = 0;
+        while i < d { v_tmp[i] = mat[i * 4 + k]; i = i + 1; }
+        let mut j: usize = 0;
+        while j < k {
+            let mut proj: f64 = 0.0;
+            i = 0;
+            while i < d { proj = proj + q_out[i * 4 + j] * v_tmp[i]; i = i + 1; }
+            r_out[j * 4 + k] = proj;
+            i = 0;
+            while i < d { v_tmp[i] = v_tmp[i] - proj * q_out[i * 4 + j]; i = i + 1; }
+            j = j + 1;
+        }
+        let mut n2: f64 = 0.0;
+        i = 0;
+        while i < d { n2 = n2 + v_tmp[i] * v_tmp[i]; i = i + 1; }
+        let nrm: f64 = sqrt(n2);
+        if nrm > 1.0e-14 {
+            r_out[k * 4 + k] = nrm;
+            let inv_n: f64 = 1.0 / nrm;
+            i = 0;
+            while i < d { q_out[i * 4 + k] = v_tmp[i] * inv_n; i = i + 1; }
+        } else {
+            r_out[k * 4 + k] = 0.0;
+            i = 0;
+            while i < d { q_out[i * 4 + k] = 0.0; i = i + 1; }
+        }
+        k = k + 1;
+    }
+}
+
+fn qr_rows_4(mat: &Vec<f64>, d: usize, q_out: &mut Vec<f64>, r_out: &mut Vec<f64>, v_tmp: &mut Vec<f64>) {
+    let mut idx: usize = 0;
+    while idx < 16 { r_out[idx] = 0.0; idx = idx + 1; }
+    let mut k: usize = 0;
+    while k < 4 {
+        let mut i: usize = 0;
+        while i < d { v_tmp[i] = mat[k * d + i]; i = i + 1; }
+        let mut j: usize = 0;
+        while j < k {
+            let mut proj: f64 = 0.0;
+            i = 0;
+            while i < d { proj = proj + q_out[j * d + i] * v_tmp[i]; i = i + 1; }
+            r_out[j * 4 + k] = proj;
+            i = 0;
+            while i < d { v_tmp[i] = v_tmp[i] - proj * q_out[j * d + i]; i = i + 1; }
+            j = j + 1;
+        }
+        let mut n2: f64 = 0.0;
+        i = 0;
+        while i < d { n2 = n2 + v_tmp[i] * v_tmp[i]; i = i + 1; }
+        let nrm: f64 = sqrt(n2);
+        if nrm > 1.0e-14 {
+            r_out[k * 4 + k] = nrm;
+            let inv_n: f64 = 1.0 / nrm;
+            i = 0;
+            while i < d { q_out[k * d + i] = v_tmp[i] * inv_n; i = i + 1; }
+        } else {
+            r_out[k * 4 + k] = 0.0;
+            i = 0;
+            while i < d { q_out[k * d + i] = 0.0; i = i + 1; }
+        }
+        k = k + 1;
+    }
+}
+
+fn compute_j13_spectrum(
+    mat_b: &Vec<f64>,
+    mat_a: &Vec<f64>,
+    d: usize,
+    q_b: &mut Vec<f64>,
+    r_b: &mut Vec<f64>,
+    q_a: &mut Vec<f64>,
+    r_a: &mut Vec<f64>,
+    m4: &mut Vec<f64>,
+    g4: &mut Vec<f64>,
+    v_tmp: &mut Vec<f64>,
+    spec_out: &mut Vec<f64>,
+) {
+    qr_cols_4(mat_b, d, q_b, r_b, v_tmp);
+    qr_rows_4(mat_a, d, q_a, r_a, v_tmp);
+    let mut p: usize = 0;
+    while p < 4 {
+        let mut q: usize = 0;
+        while q < 4 {
+            let mut acc: f64 = 0.0;
+            let mut t: usize = 0;
+            while t < 4 { acc = acc + r_b[p * 4 + t] * r_a[q * 4 + t]; t = t + 1; }
+            m4[p * 4 + q] = acc;
+            q = q + 1;
+        }
+        p = p + 1;
+    }
+    p = 0;
+    while p < 4 {
+        let mut q: usize = 0;
+        while q < 4 {
+            let mut acc: f64 = 0.0;
+            let mut t: usize = 0;
+            while t < 4 { acc = acc + m4[t * 4 + p] * m4[t * 4 + q]; t = t + 1; }
+            g4[p * 4 + q] = acc;
+            q = q + 1;
+        }
+        p = p + 1;
+    }
+    let mut sw: usize = 0;
+    while sw < 18 {
+        p = 0;
+        while p < 4 {
+            let mut q: usize = p + 1;
+            while q < 4 {
+                let apq: f64 = g4[p * 4 + q];
+                if abs_f64(apq) > 1.0e-16 {
+                    let app: f64 = g4[p * 4 + p];
+                    let aqq: f64 = g4[q * 4 + q];
+                    let tau: f64 = (aqq - app) / (2.0 * apq);
+                    let tv: f64 = if tau >= 0.0 {
+                        1.0 / (tau + sqrt(1.0 + tau * tau))
+                    } else {
+                        -1.0 / (-tau + sqrt(1.0 + tau * tau))
+                    };
+                    let c: f64 = 1.0 / sqrt(1.0 + tv * tv);
+                    let s: f64 = tv * c;
+                    g4[p * 4 + p] = app - tv * apq;
+                    g4[q * 4 + q] = aqq + tv * apq;
+                    g4[p * 4 + q] = 0.0; g4[q * 4 + p] = 0.0;
+                    let mut k: usize = 0;
+                    while k < 4 {
+                        if k != p && k != q {
+                            let gkp: f64 = g4[k * 4 + p];
+                            let gkq: f64 = g4[k * 4 + q];
+                            let np: f64 = c * gkp - s * gkq;
+                            let nq: f64 = s * gkp + c * gkq;
+                            g4[k * 4 + p] = np; g4[p * 4 + k] = np;
+                            g4[k * 4 + q] = nq; g4[q * 4 + k] = nq;
+                        }
+                        k = k + 1;
+                    }
+                }
+                q = q + 1;
+            }
+            p = p + 1;
+        }
+        sw = sw + 1;
+    }
+    let mut e0: f64 = max_f64(0.0, g4[0]);
+    let mut e1: f64 = max_f64(0.0, g4[5]);
+    let mut e2: f64 = max_f64(0.0, g4[10]);
+    let mut e3: f64 = max_f64(0.0, g4[15]);
+    if e0 < e1 { let t: f64 = e0; e0 = e1; e1 = t; }
+    if e2 < e3 { let t: f64 = e2; e2 = e3; e3 = t; }
+    if e0 < e2 { let t: f64 = e0; e0 = e2; e2 = t; }
+    if e1 < e3 { let t: f64 = e1; e1 = e3; e3 = t; }
+    if e1 < e2 { let t: f64 = e1; e1 = e2; e2 = t; }
+    let et: f64 = e0 + e1 + e2 + e3;
+    if et > 1.0e-15 {
+        let p0: f64 = e0 / et;
+        let p1: f64 = e1 / et;
+        let p2: f64 = e2 / et;
+        let p3: f64 = e3 / et;
+        let mut ent: f64 = 0.0;
+        if p0 > 1.0e-15 { ent = ent - p0 * log(p0); }
+        if p1 > 1.0e-15 { ent = ent - p1 * log(p1); }
+        if p2 > 1.0e-15 { ent = ent - p2 * log(p2); }
+        if p3 > 1.0e-15 { ent = ent - p3 * log(p3); }
+        spec_out[0] = exp(ent);
+        spec_out[1] = p0;
+    } else {
+        spec_out[0] = 0.0;
+        spec_out[1] = 1.0;
+    }
+}
+
+fn main() ~ Console + Clock {
+    let seq_len: usize = 128;
+    let cache_cap: usize = 32;
+    let recent_win: usize = 16;
+    let d: usize = 16;
+    let inv_sd: f64 = 1.0 / sqrt(d as f64);
+
+    // 1. Setup S=128 token stream with structured Heavy-Hitter anchors (every 16th token)
+    let mut q_all: Vec<f64> = Vec::new();
+    let mut k_all: Vec<f64> = Vec::new();
+    let mut v_all: Vec<f64> = Vec::new();
+    let mut q_anchor: Vec<f64> = Vec::new();
+    let mut i: usize = 0;
+    while i < d {
+        q_anchor.push(1.25 * cos(((i + 1) as f64) * 0.43) + 0.45 * sin(((i + 2) as f64) * 0.71));
+        i = i + 1;
+    }
+    let mut t: usize = 0;
+    while t < seq_len {
+        let is_hh: bool = (t % 16) == 0 || (t % 16) == 1;
+        i = 0;
+        while i < d {
+            let qv: f64 = 0.85 * q_anchor[i] + 0.25 * det_w(11, t, i);
+            let kv: f64 = if is_hh {
+                1.95 * q_anchor[i] + 0.12 * det_w(19, t, i)
+            } else {
+                0.22 * det_w(29, t, i) - 0.15 * q_anchor[i]
+            };
+            let vv: f64 = if is_hh {
+                1.40 * det_w(41, t / 16, i) + 0.30 * q_anchor[i]
+            } else {
+                0.35 * det_w(47, t, i)
+            };
+            q_all.push(qv);
+            k_all.push(kv);
+            v_all.push(vv);
+            i = i + 1;
+        }
+        t = t + 1;
+    }
+
+    // LM head [16 x 16] and J13 LoRA router matrices
+    let mut w_lm: Vec<f64> = Vec::new();
+    let mut r_i: usize = 0;
+    while r_i < 16 {
+        let mut c_i: usize = 0;
+        while c_i < d { w_lm.push(1.35 * det_w(61, r_i, c_i)); c_i = c_i + 1; }
+        r_i = r_i + 1;
+    }
+
+    let mut q_b: Vec<f64> = Vec::new();
+    let mut q_a: Vec<f64> = Vec::new();
+    let mut r_b: Vec<f64> = Vec::new();
+    let mut r_a: Vec<f64> = Vec::new();
+    let mut m4: Vec<f64> = Vec::new();
+    let mut g4: Vec<f64> = Vec::new();
+    let mut v_tmp: Vec<f64> = Vec::new();
+    let mut spec_out: Vec<f64> = Vec::new();
+    i = 0;
+    while i < 4 * d { q_b.push(0.0); q_a.push(0.0); i = i + 1; }
+    i = 0;
+    while i < 16 { r_b.push(0.0); r_a.push(0.0); m4.push(0.0); g4.push(0.0); i = i + 1; }
+    i = 0;
+    while i < d { v_tmp.push(0.0); i = i + 1; }
+    spec_out.push(0.0); spec_out.push(0.0);
+
+    let mut u_raw: Vec<f64> = Vec::new();
+    let mut v_raw: Vec<f64> = Vec::new();
+    i = 0;
+    while i < d {
+        let mut k: usize = 0;
+        while k < 4 {
+            u_raw.push(det_w(83, i, k) + (if (i % 4) == k { 1.15 } else { 0.0 }));
+            k = k + 1;
+        }
+        i = i + 1;
+    }
+    let mut k_idx: usize = 0;
+    while k_idx < 4 {
+        i = 0;
+        while i < d {
+            v_raw.push(det_w(89, k_idx, i) + (if (i % 4) == k_idx { 1.15 } else { 0.0 }));
+            i = i + 1;
+        }
+        k_idx = k_idx + 1;
+    }
+    qr_cols_4(&u_raw, d, &mut q_b, &mut r_b, &mut v_tmp);
+    qr_rows_4(&v_raw, d, &mut q_a, &mut r_a, &mut v_tmp);
+    let mut sv_h: Vec<f64> = Vec::new();
+    sv_h.push(1.05); sv_h.push(0.95); sv_h.push(0.85); sv_h.push(0.75);
+
+    let mut mat_b: Vec<f64> = Vec::new();
+    let mut mat_a: Vec<f64> = Vec::new();
+    let mut bak_b: Vec<f64> = Vec::new();
+    let mut bak_a: Vec<f64> = Vec::new();
+    i = 0;
+    while i < 4 * d {
+        mat_b.push(q_b[i]); bak_b.push(q_b[i]);
+        i = i + 1;
+    }
+    k_idx = 0;
+    while k_idx < 4 {
+        i = 0;
+        while i < d {
+            let v: f64 = q_a[k_idx * d + i] * sv_h[k_idx];
+            mat_a.push(v); bak_a.push(v);
+            i = i + 1;
+        }
+        k_idx = k_idx + 1;
+    }
+
+    // Buffers for H2O cache, dense eval, and tree speculative verify
+    let mut cache_tok: Vec<usize> = Vec::new();
+    let mut cache_mass: Vec<f64> = Vec::new();
+    let mut sc_cache: Vec<f64> = Vec::new();
+    let mut sc_dense: Vec<f64> = Vec::new();
+    i = 0;
+    while i < cache_cap { cache_tok.push(0); cache_mass.push(0.0); sc_cache.push(0.0); i = i + 1; }
+    i = 0;
+    while i < seq_len { sc_dense.push(0.0); i = i + 1; }
+
+    let mut h2o_out: Vec<f64> = Vec::new();
+    let mut fifo_out: Vec<f64> = Vec::new();
+    let mut dense_out: Vec<f64> = Vec::new();
+    let mut h2o_summary: Vec<f64> = Vec::new();
+    i = 0;
+    while i < d { h2o_out.push(0.0); fifo_out.push(0.0); dense_out.push(0.0); h2o_summary.push(0.0); i = i + 1; }
+
+    let mut tq: Vec<f64> = Vec::new();
+    let mut tk: Vec<f64> = Vec::new();
+    let mut tv: Vec<f64> = Vec::new();
+    let mut out_t: Vec<f64> = Vec::new();
+    i = 0;
+    while i < 7 * d { tq.push(0.0); tk.push(0.0); tv.push(0.0); out_t.push(0.0); i = i + 1; }
+    let mut sc_t: Vec<f64> = Vec::new();
+    i = 0;
+    while i < 7 { sc_t.push(0.0); i = i + 1; }
+
+    let mut logits_p: Vec<f64> = Vec::new();
+    let mut logits_q: Vec<f64> = Vec::new();
+    let mut prob_p: Vec<f64> = Vec::new();
+    let mut prob_q: Vec<f64> = Vec::new();
+    let mut prob_res: Vec<f64> = Vec::new();
+    i = 0;
+    while i < 16 {
+        logits_p.push(0.0); logits_q.push(0.0);
+        prob_p.push(0.0); prob_q.push(0.0); prob_res.push(0.0);
+        i = i + 1;
+    }
+
+    // 2. TIMED PIPELINE: H2O KV Eviction + Tree-Attention Speculative Verify + J13 Gate
+    let t0: i64 = clock_ns();
+
+    // Stage A: Heavy-Hitter (H2O) KV-cache streaming eviction over S=128 with cap K=32 (4.0x)
+    let mut cur_len: usize = 0;
+    let mut evictions: usize = 0;
+    let mut sum_h2o_cos: f64 = 0.0;
+    let mut sum_fifo_cos: f64 = 0.0;
+    let mut eval_cnt: usize = 0;
+    t = 0;
+    while t < seq_len {
+        if cur_len < cache_cap {
+            cache_tok[cur_len] = t;
+            cache_mass[cur_len] = 0.0;
+            cur_len = cur_len + 1;
+        } else {
+            // Protect recent_win=16 tokens (tok_id + recent_win > t); evict lowest mass otherwise
+            let mut ev_slot: usize = 0;
+            let mut min_m: f64 = 1.0e30;
+            let mut s: usize = 0;
+            while s < cache_cap {
+                if cache_tok[s] + recent_win <= t {
+                    if cache_mass[s] < min_m {
+                        min_m = cache_mass[s];
+                        ev_slot = s;
+                    }
+                }
+                s = s + 1;
+            }
+            cache_tok[ev_slot] = t;
+            cache_mass[ev_slot] = 0.0;
+            evictions = evictions + 1;
+        }
+
+        // Compute attention over H2O cache & update cumulative heavy-hitter importance mass
+        let qo: usize = t * d;
+        let mut ms: f64 = -1.0e30;
+        let mut s: usize = 0;
+        while s < cur_len {
+            let ko: usize = cache_tok[s] * d;
+            let mut dot: f64 = 0.0;
+            i = 0;
+            while i < d { dot = dot + q_all[qo + i] * k_all[ko + i]; i = i + 1; }
+            let sc: f64 = dot * inv_sd;
+            sc_cache[s] = sc;
+            if sc > ms { ms = sc; }
+            s = s + 1;
+        }
+        let mut z_c: f64 = 0.0;
+        i = 0;
+        while i < d { h2o_out[i] = 0.0; i = i + 1; }
+        s = 0;
+        while s < cur_len {
+            let w: f64 = exp(sc_cache[s] - ms);
+            z_c = z_c + w;
+            let vo: usize = cache_tok[s] * d;
+            i = 0;
+            while i < d { h2o_out[i] = h2o_out[i] + w * v_all[vo + i]; i = i + 1; }
+            s = s + 1;
+        }
+        let inv_zc: f64 = 1.0 / z_c;
+        s = 0;
+        while s < cur_len {
+            let attn_w: f64 = exp(sc_cache[s] - ms) * inv_zc;
+            cache_mass[s] = cache_mass[s] + attn_w;
+            s = s + 1;
+        }
+        i = 0;
+        while i < d { h2o_out[i] = h2o_out[i] * inv_zc; i = i + 1; }
+
+        // On final 16 tokens (t=112..127), compare H2O vs Dense full KV and vs FIFO sliding 32
+        if t >= seq_len - 16 {
+            let mut ms_d: f64 = -1.0e30;
+            let mut j: usize = 0;
+            while j <= t {
+                let ko: usize = j * d;
+                let mut dot: f64 = 0.0;
+                i = 0;
+                while i < d { dot = dot + q_all[qo + i] * k_all[ko + i]; i = i + 1; }
+                let sc: f64 = dot * inv_sd;
+                sc_dense[j] = sc;
+                if sc > ms_d { ms_d = sc; }
+                j = j + 1;
+            }
+            let mut z_d: f64 = 0.0;
+            i = 0;
+            while i < d { dense_out[i] = 0.0; i = i + 1; }
+            j = 0;
+            while j <= t {
+                let w: f64 = exp(sc_dense[j] - ms_d);
+                z_d = z_d + w;
+                let vo: usize = j * d;
+                i = 0;
+                while i < d { dense_out[i] = dense_out[i] + w * v_all[vo + i]; i = i + 1; }
+                j = j + 1;
+            }
+            let inv_zd: f64 = 1.0 / z_d;
+            i = 0;
+            while i < d { dense_out[i] = dense_out[i] * inv_zd; i = i + 1; }
+
+            // FIFO sliding-window baseline (last 32 tokens only)
+            let f_start: usize = t + 1 - cache_cap;
+            let mut ms_f: f64 = -1.0e30;
+            j = f_start;
+            while j <= t {
+                if sc_dense[j] > ms_f { ms_f = sc_dense[j]; }
+                j = j + 1;
+            }
+            let mut z_f: f64 = 0.0;
+            i = 0;
+            while i < d { fifo_out[i] = 0.0; i = i + 1; }
+            j = f_start;
+            while j <= t {
+                let w: f64 = exp(sc_dense[j] - ms_f);
+                z_f = z_f + w;
+                let vo: usize = j * d;
+                i = 0;
+                while i < d { fifo_out[i] = fifo_out[i] + w * v_all[vo + i]; i = i + 1; }
+                j = j + 1;
+            }
+            let inv_zf: f64 = 1.0 / z_f;
+            i = 0;
+            while i < d { fifo_out[i] = fifo_out[i] * inv_zf; i = i + 1; }
+
+            let mut dh: f64 = 0.0;
+            let mut df: f64 = 0.0;
+            let mut nh: f64 = 0.0;
+            let mut nf: f64 = 0.0;
+            let mut nd: f64 = 0.0;
+            i = 0;
+            while i < d {
+                dh = dh + h2o_out[i] * dense_out[i];
+                df = df + fifo_out[i] * dense_out[i];
+                nh = nh + h2o_out[i] * h2o_out[i];
+                nf = nf + fifo_out[i] * fifo_out[i];
+                nd = nd + dense_out[i] * dense_out[i];
+                i = i + 1;
+            }
+            sum_h2o_cos = sum_h2o_cos + dh / (sqrt(nh * nd) + 1.0e-15);
+            sum_fifo_cos = sum_fifo_cos + df / (sqrt(nf * nd) + 1.0e-15);
+            eval_cnt = eval_cnt + 1;
+            if t == seq_len - 1 {
+                i = 0;
+                while i < d { h2o_summary[i] = h2o_out[i]; i = i + 1; }
+            }
+        }
+        t = t + 1;
+    }
+    let h2o_cos_sim: f64 = sum_h2o_cos / (eval_cnt as f64);
+    let fifo_cos_sim: f64 = sum_fifo_cos / (eval_cnt as f64);
+    let kv_compression_x: f64 = (seq_len as f64) / (cache_cap as f64);
+
+    // Stage B: Tree-Attention Lossless Speculative Verification (24 rounds x depth-3 binary tree)
+    let mut rng: u64 = 128001u64;
+    let mut gen_hash: u64 = 2166136261u64;
+    let mut max_tvd: f64 = 0.0;
+    let mut total_committed: usize = 0;
+    let mut total_draft_acc: usize = 0;
+    let mut total_draft_prop: usize = 0;
+    let mut step: usize = 0;
+    while step < 24 {
+        let mut u: usize = 0;
+        while u < 7 {
+            i = 0;
+            while i < d {
+                let idx_s: usize = u * d + i;
+                tq[idx_s] = h2o_summary[i] + 0.35 * det_w(101 + (step as i64), u, i);
+                tk[idx_s] = h2o_summary[i] + 0.30 * det_w(113 + (step as i64), u, i);
+                tv[idx_s] = h2o_summary[i] + 0.25 * det_w(127 + (step as i64), u, i);
+                i = i + 1;
+            }
+            u = u + 1;
+        }
+        run_tree_masked_attn(&tq, &tk, &tv, d, &mut out_t, &mut sc_t);
+
+        // Walk tree root (0) -> depth 1 -> depth 2 using exact lossless Leviathan-Chen tree verify
+        let mut cur_node: usize = 0;
+        let mut depth: usize = 0;
+        let mut cont: bool = true;
+        while depth < 3 && cont {
+            r_i = 0;
+            while r_i < 16 {
+                let mut dot: f64 = 0.0;
+                i = 0;
+                while i < d { dot = dot + w_lm[r_i * d + i] * out_t[cur_node * d + i]; i = i + 1; }
+                logits_p[r_i] = dot;
+                logits_q[r_i] = dot + 0.035 * sin(((r_i + step + cur_node) as f64) * 0.83);
+                r_i = r_i + 1;
+            }
+            softmax_16(&logits_p, &mut prob_p);
+            softmax_16(&logits_q, &mut prob_q);
+            let tvd: f64 = spec_residual_and_tvd(&prob_p, &prob_q, &mut prob_res);
+            if tvd > max_tvd { max_tvd = tvd; }
+
+            rng = lcg_next(rng);
+            let u1: f64 = ((rng >> 8) as f64) / 16777216.0;
+            let d_tok: usize = sample_cat_16(&prob_q, u1);
+            total_draft_prop = total_draft_prop + 1;
+
+            rng = lcg_next(rng);
+            let u2: f64 = ((rng >> 8) as f64) / 16777216.0;
+            let ratio: f64 = min_f64(1.0, prob_p[d_tok] / (prob_q[d_tok] + 1.0e-15));
+            if u2 < ratio {
+                total_draft_acc = total_draft_acc + 1;
+                total_committed = total_committed + 1;
+                gen_hash = fnv1a_byte(gen_hash, d_tok as u64);
+                // Advance down primary or secondary branch in the draft tree
+                if depth < 2 {
+                    cur_node = 2 * cur_node + 1 + (d_tok & 1);
+                }
+            } else {
+                rng = lcg_next(rng);
+                let u3: f64 = ((rng >> 8) as f64) / 16777216.0;
+                let res_tok: usize = sample_cat_16(&prob_res, u3);
+                total_committed = total_committed + 1;
+                gen_hash = fnv1a_byte(gen_hash, res_tok as u64);
+                cont = false;
+            }
+            depth = depth + 1;
+        }
+        step = step + 1;
+    }
+
+    // Stage C: Live J13 Spectral Health Gate on router adapter matrices
+    compute_j13_spectrum(
+        &mat_b, &mat_a, d, &mut q_b, &mut r_b, &mut q_a, &mut r_a, &mut m4, &mut g4, &mut v_tmp, &mut spec_out,
+    );
+    let healthy_eff_rank: f64 = spec_out[0];
+    let healthy_top1: f64 = spec_out[1];
+    let elapsed_ns: i64 = clock_ns() - t0;
+
+    let mean_tokens_per_step: f64 = (total_committed as f64) / 24.0;
+    let tree_accept_rate: f64 = (total_draft_acc as f64) / (total_draft_prop as f64);
+
+    // 3. Planted Fail-Closed Controls (2 in-binary + 3rd forged cert in Python verifier)
+    // Control 1: Tree sibling attention mask isolation (perturb sibling node 2 by +50.0 -> node 3 drift == 0.0)
+    let mut tk_p: Vec<f64> = Vec::new();
+    let mut tv_p: Vec<f64> = Vec::new();
+    let mut out_p: Vec<f64> = Vec::new();
+    i = 0;
+    while i < 7 * d {
+        let is_sib2: bool = (i >= 2 * d) && (i < 3 * d);
+        let bump: f64 = if is_sib2 { 50.0 } else { 0.0 };
+        tk_p.push(tk[i] + bump);
+        tv_p.push(tv[i] + bump);
+        out_p.push(0.0);
+        i = i + 1;
+    }
+    run_tree_masked_attn(&tq, &tk_p, &tv_p, d, &mut out_p, &mut sc_t);
+    let mut c1_sib_drift: f64 = 0.0;
+    i = 0;
+    while i < d {
+        c1_sib_drift = max_f64(c1_sib_drift, abs_f64(out_p[3 * d + i] - out_t[3 * d + i]));
+        i = i + 1;
+    }
+    // Contrast with unmasked sibling leak on node 3 attending to sibling node 2
+    let mut s_self: f64 = 0.0;
+    let mut s_sib: f64 = 0.0;
+    i = 0;
+    while i < d {
+        s_self = s_self + tq[3 * d + i] * tk_p[3 * d + i];
+        s_sib = s_sib + tq[3 * d + i] * tk_p[2 * d + i];
+        i = i + 1;
+    }
+    s_self = s_self * inv_sd;
+    s_sib = s_sib * inv_sd;
+    let sm_u: f64 = max_f64(s_self, s_sib);
+    let unmasked_val: f64 = (exp(s_self - sm_u) * tv_p[3 * d] + exp(s_sib - sm_u) * tv_p[2 * d])
+        / (exp(s_self - sm_u) + exp(s_sib - sm_u));
+    let c1_unmasked_leak: f64 = abs_f64(unmasked_val - out_t[3 * d]);
+    let ctrl1_tree_sibling_isolation: bool = (c1_sib_drift == 0.0) && (c1_unmasked_leak > 1.0);
+
+    // Control 2: J13 Rank-1 shortcut collapse triggers fail-closed halt & bit-exact atomic rollback
+    let mut shock_b: Vec<f64> = Vec::new();
+    let mut shock_a: Vec<f64> = Vec::new();
+    i = 0;
+    while i < 4 * d {
+        shock_b.push(mat_b[i] + (if (i % 4) == 0 { 120.0 } else { 0.0 }));
+        shock_a.push(mat_a[i] + (if i < d { 120.0 } else { 0.0 }));
+        i = i + 1;
+    }
+    compute_j13_spectrum(
+        &shock_b, &shock_a, d, &mut q_b, &mut r_b, &mut q_a, &mut r_a, &mut m4, &mut g4, &mut v_tmp, &mut spec_out,
+    );
+    let c2_collapse_eff_rank: f64 = spec_out[0];
+    let c2_collapse_top1: f64 = spec_out[1];
+    let c2_triggered: bool = (c2_collapse_eff_rank < 1.85) || (c2_collapse_top1 > 0.78);
+    if c2_triggered {
+        i = 0;
+        while i < 4 * d {
+            shock_b[i] = bak_b[i];
+            shock_a[i] = bak_a[i];
+            i = i + 1;
+        }
+    }
+    let mut c2_rb_err: f64 = 0.0;
+    i = 0;
+    while i < 4 * d {
+        c2_rb_err = max_f64(c2_rb_err, max_f64(abs_f64(shock_b[i] - mat_b[i]), abs_f64(shock_a[i] - mat_a[i])));
+        i = i + 1;
+    }
+    let ctrl2_j13_collapse_rollback: bool = c2_triggered && (c2_rb_err == 0.0);
+
+    let mut failures: i32 = 0;
+    if kv_compression_x < 4.0 || h2o_cos_sim < 0.99 || h2o_cos_sim <= fifo_cos_sim {
+        failures = failures + 1;
+    }
+    if max_tvd > 1.0e-12 || mean_tokens_per_step < 2.5 || tree_accept_rate < 0.85 {
+        failures = failures + 1;
+    }
+    if healthy_eff_rank < 1.85 || healthy_top1 > 0.78 {
+        failures = failures + 1;
+    }
+    if !ctrl1_tree_sibling_isolation || !ctrl2_j13_collapse_rollback {
+        failures = failures + 1;
+    }
+
+    println!(
+        "METRIC kv_compression_x={:.6} h2o_cos_sim={:.12} fifo_cos_sim={:.12} evictions={}",
+        kv_compression_x, h2o_cos_sim, fifo_cos_sim, evictions
+    );
+    println!(
+        "METRIC mean_tokens_per_step={:.12} tree_accept_rate={:.12} max_tvd={:.15} gen_hash={}",
+        mean_tokens_per_step, tree_accept_rate, max_tvd, gen_hash
+    );
+    println!(
+        "METRIC healthy_eff_rank={:.12} healthy_top1={:.12} c2_collapse_eff_rank={:.12} c2_collapse_top1={:.12}",
+        healthy_eff_rank, healthy_top1, c2_collapse_eff_rank, c2_collapse_top1
+    );
+    println!(
+        "METRIC c1_sib_drift={:.15} c1_unmasked_leak={:.6} ctrl1={} ctrl2={} elapsed_ns={}",
+        c1_sib_drift, c1_unmasked_leak, ctrl1_tree_sibling_isolation, ctrl2_j13_collapse_rollback, elapsed_ns
+    );
+    println!("SUMMARY failures={}", failures);
+}

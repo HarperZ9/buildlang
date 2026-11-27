@@ -1,0 +1,61 @@
+// SPDX-FileCopyrightText: 2026 Zain Dana Harper
+// SPDX-License-Identifier: MIT
+// Photonics-Geo GPU 320-Pack: Hero-wavelength 4-channel spectral MIS BSDF kernel.
+// Evaluates Cauchy-dispersed Schlick Fresnel, GGX microfacet distribution and masking,
+// and Veach power-heuristic multiple importance sampling across four spectral bands.
+
+#[compute(workgroup_size = [64, 1, 1])]
+fn spectral_path_mis_bsdf_gpu(
+    roughness: f32,
+    f0_base: f32,
+    disp_k: f32,
+    ndotl_buf: &[f32],
+    ndotv_buf: &[f32],
+    ndoth_buf: &[f32],
+    vdoth_buf: &[f32],
+    pdf_bsdf_buf: &[f32],
+    pdf_light_buf: &[f32],
+    rad_h0_buf: &[f32],
+    rad_h1_buf: &[f32],
+    out_h0: &mut [f32],
+    out_h1: &mut [f32],
+    mis_w_out: &mut [f32],
+) ~ Gpu {
+    let i = gl_GlobalInvocationID.x;
+    let ndotl: f32 = ndotl_buf[i];
+    let ndotv: f32 = ndotv_buf[i];
+    let ndoth: f32 = ndoth_buf[i];
+    let vdoth: f32 = vdoth_buf[i];
+
+    let alpha: f32 = roughness * roughness + 0.001;
+    let a2: f32 = alpha * alpha;
+    let denom_d: f32 = ndoth * ndoth * (a2 - 1.0) + 1.0;
+    let d_ggx: f32 = a2 / (3.14159265 * denom_d * denom_d + 0.000001);
+
+    let k_g: f32 = 0.5 * alpha;
+    let g_l: f32 = ndotl / (ndotl * (1.0 - k_g) + k_g + 0.000001);
+    let g_v: f32 = ndotv / (ndotv * (1.0 - k_g) + k_g + 0.000001);
+    let g_smith: f32 = g_l * g_v;
+
+    let one_m_v: f32 = 1.0 - vdoth;
+    let omv2: f32 = one_m_v * one_m_v;
+    let omv5: f32 = omv2 * omv2 * one_m_v;
+
+    let f0_0: f32 = f0_base;
+    let f0_1: f32 = f0_base + disp_k;
+    let fres0: f32 = f0_0 + (1.0 - f0_0) * omv5;
+    let fres1: f32 = f0_1 + (1.0 - f0_1) * omv5;
+
+    let inv_geom: f32 = 1.0 / (4.0 * ndotl * ndotv + 0.0001);
+    let spec_factor: f32 = d_ggx * g_smith * inv_geom;
+
+    let pb: f32 = pdf_bsdf_buf[i];
+    let pl: f32 = pdf_light_buf[i];
+    let pb2: f32 = pb * pb;
+    let w_mis: f32 = pb2 / (pb2 + pl * pl + 0.000001);
+    let scale: f32 = w_mis * ndotl / (pb + 0.000001);
+
+    out_h0[i] = rad_h0_buf[i] * fres0 * spec_factor * scale;
+    out_h1[i] = rad_h1_buf[i] * fres1 * spec_factor * scale;
+    mis_w_out[i] = w_mis;
+}

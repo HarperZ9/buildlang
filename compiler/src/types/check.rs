@@ -995,10 +995,11 @@ impl<'ctx> TypeChecker<'ctx> {
                     if Self::has_linear_attr(&item.attrs) {
                         self.ctx.mark_linear(def_id);
                     }
+                    let generics = self.collect_generics(&s.generics);
                     self.ctx.register_type(TypeDef {
                         def_id,
                         name: s.name.name.clone(),
-                        generics: Vec::new(),
+                        generics,
                         kind: TypeDefKind::Struct(StructDef {
                             fields: Vec::new(),
                             is_tuple: matches!(s.fields, StructFields::Tuple(_)),
@@ -1016,10 +1017,11 @@ impl<'ctx> TypeChecker<'ctx> {
                     if Self::has_linear_attr(&item.attrs) {
                         self.ctx.mark_linear(def_id);
                     }
+                    let generics = self.collect_generics(&e.generics);
                     self.ctx.register_type(TypeDef {
                         def_id,
                         name: e.name.name.clone(),
-                        generics: Vec::new(),
+                        generics,
                         kind: TypeDefKind::Enum(EnumDef {
                             variants: Vec::new(),
                         }),

@@ -2550,6 +2550,7 @@ impl<'ctx> TypeInfer<'ctx> {
                             .lookup_type(def_id)
                             .is_some_and(|td| td.name.as_ref() == "Option") =>
                 {
+                    self.ctx.record_inferred_local_is_option(span);
                     if let TyKind::Int(int_ty) = self.apply(&args[0]).kind {
                         self.ctx.record_inferred_local_option_int(span, int_ty);
                     }
@@ -2593,6 +2594,21 @@ impl<'ctx> TypeInfer<'ctx> {
                     };
                     if let Some(name) = elem_name {
                         self.ctx.record_inferred_local_vec_elem(span, name);
+                    } else {
+                        let resolved_elem = self.apply(&elem);
+                        let is_nested_vec = matches!(
+                            &resolved_elem.kind,
+                            TyKind::Adt(edef, eargs)
+                                if eargs.len() == 1
+                                    && (*edef == DefId::DUMMY
+                                        || self
+                                            .ctx
+                                            .lookup_type(*edef)
+                                            .is_some_and(|td| td.name.as_ref() == "Vec"))
+                        );
+                        if is_nested_vec {
+                            self.ctx.record_inferred_local_vec_ty(span, resolved_elem);
+                        }
                     }
                 }
                 _ => {}
@@ -2775,6 +2791,16 @@ impl<'ctx> TypeInfer<'ctx> {
                 Ty::reference(None, Mutability::Immutable, (**elem).clone())
             }
             TyKind::Adt(def_id, args) if is_vec_def(*def_id) && args.len() == 1 => args[0].clone(),
+            TyKind::Adt(def_id, args)
+                if args.len() == 1
+                    && (Some(*def_id) == self.well_known_types.range
+                        || Some(*def_id) == self.well_known_types.range_inclusive
+                        || self.ctx.lookup_type(*def_id).is_some_and(|td| {
+                            matches!(td.name.as_ref(), "Range" | "RangeInclusive")
+                        })) =>
+            {
+                self.apply(&args[0])
+            }
             TyKind::Adt(def_id, args) if *def_id == DefId::DUMMY && args.len() == 2 => {
                 Ty::tuple(vec![args[0].clone(), args[1].clone()])
             }
@@ -3205,6 +3231,33 @@ impl<'ctx> TypeInfer<'ctx> {
         ) = (&p.kind, &a.kind)
         {
             return self.unify(p_inner, a_inner, span);
+        }
+        // Auto-deref `&&T` -> `&T` in argument position (e.g. `for x in &[&T]`).
+        if let (TyKind::Ref(_, Mutability::Immutable, _), TyKind::Ref(_, _, a_outer)) =
+            (&p.kind, &a.kind)
+        {
+            let a_outer_applied = self.apply(a_outer);
+            if matches!(a_outer_applied.kind, TyKind::Ref(_, _, _)) {
+                return self.coerce_arg(&p, &a_outer_applied, span);
+            }
+        }
+        // Coerce `&Buffer<T>` / `&mut Buffer<T>` / `&Vec<T>` / `&mut Vec<T>` -> `&[T]` / `&mut [T]`.
+        if let (TyKind::Ref(_, pm, p_inner), TyKind::Ref(_, am, a_inner)) = (&p.kind, &a.kind) {
+            if *pm == Mutability::Immutable || *am == Mutability::Mutable {
+                let p_in = self.apply(p_inner);
+                let a_in = self.apply(a_inner);
+                if let (TyKind::Slice(pe), TyKind::Adt(did, args)) = (&p_in.kind, &a_in.kind) {
+                    if args.len() == 1
+                        && (*did == DefId::DUMMY
+                            || self
+                                .ctx
+                                .lookup_type(*did)
+                                .is_some_and(|td| matches!(td.name.as_ref(), "Vec" | "Buffer")))
+                    {
+                        return self.unify(pe, &args[0], span);
+                    }
+                }
+            }
         }
         self.unify(param, arg, span)
     }
@@ -4052,27 +4105,35 @@ impl<'ctx> TypeInfer<'ctx> {
             return ty;
         }
 
-        // Box::new(T) -> Box<T> (issue #83). Rc and Arc would lower to the same
-        // uncounted pointer, so they are refused until reference counting exists.
+        // Box::new(T) -> Box<T> (issue #83), Arc::new(T) -> Arc<T>, Rc::new(T) -> Rc<T>.
+        // Arc and Rc allocate a refcounted header before the payload in the C runtime.
         if segments.len() == 2
-            && segments[1] == "new"
             && matches!(segments[0], "Box" | "Rc" | "Arc")
             && self.ctx.lookup_type_by_name(segments[0]).is_none()
         {
-            if segments[0] != "Box" {
-                self.error(
-                    TypeError::UnsupportedConstruct {
-                        construct: format!("{}::new", segments[0]),
-                        detail:
-                            "reference counting is not implemented; use Box::new for a single owner"
-                                .to_string(),
-                    },
-                    span,
-                );
-                return Ty::error();
+            match segments[1] {
+                "new" => {
+                    let t = Ty::fresh_var();
+                    return Ty::function(vec![t.clone()], Ty::ptr(Mutability::Mutable, t));
+                }
+                "clone" if matches!(segments[0], "Rc" | "Arc") => {
+                    let t = Ty::fresh_var();
+                    let ptr_t = Ty::ptr(Mutability::Mutable, t);
+                    return Ty::function(
+                        vec![Ty::reference(None, Mutability::Immutable, ptr_t.clone())],
+                        ptr_t,
+                    );
+                }
+                "strong_count" if matches!(segments[0], "Rc" | "Arc") => {
+                    let t = Ty::fresh_var();
+                    let ptr_t = Ty::ptr(Mutability::Mutable, t);
+                    return Ty::function(
+                        vec![Ty::reference(None, Mutability::Immutable, ptr_t)],
+                        Ty::int(IntTy::Usize),
+                    );
+                }
+                _ => {}
             }
-            let t = Ty::fresh_var();
-            return Ty::function(vec![t.clone()], Ty::ptr(Mutability::Mutable, t));
         }
 
         // slice::from_raw_parts(p, n): a `&[T]` over `n` elements at `p`, the way a
@@ -4152,6 +4213,10 @@ impl<'ctx> TypeInfer<'ctx> {
                 ("u64", "MIN" | "MAX") => return Ty::int(IntTy::U64),
                 ("usize", "MIN" | "MAX") => return Ty::int(IntTy::Usize),
                 ("isize", "MIN" | "MAX") => return Ty::int(IntTy::Isize),
+                ("String", "new") => return Ty::function(vec![], Ty::str()),
+                ("String", "with_capacity") => {
+                    return Ty::function(vec![Ty::int(IntTy::Usize)], Ty::str());
+                }
                 _ => {}
             }
 
@@ -5200,6 +5265,12 @@ impl<'ctx> TypeInfer<'ctx> {
                             let field_name = field.name.as_ref();
                             for (fname, fty) in &struct_def.fields {
                                 if fname.as_ref() == field_name {
+                                    if matches!(type_def.name.as_ref(), "Vec2" | "Vec3" | "Vec4")
+                                        && substs.len() == 1
+                                        && matches!(field_name, "x" | "y" | "z" | "w")
+                                    {
+                                        return substs[0].clone();
+                                    }
                                     // Apply generic substitutions to field type
                                     let mut field_ty = fty.clone();
                                     if !substs.is_empty() && !type_def.generics.is_empty() {
@@ -5216,6 +5287,12 @@ impl<'ctx> TypeInfer<'ctx> {
                                     }
                                     return field_ty;
                                 }
+                            }
+                            if field_name == "m" && type_def.name.as_ref() == "Mat4" {
+                                return Ty::array(Ty::array(Ty::float(FloatTy::F32), 4), 4);
+                            }
+                            if field_name == "m" && type_def.name.as_ref() == "Mat3" {
+                                return Ty::array(Ty::array(Ty::float(FloatTy::F32), 3), 3);
                             }
                             // Field not found
                             self.error(
@@ -5242,8 +5319,8 @@ impl<'ctx> TypeInfer<'ctx> {
                 // Type definition not found - return fresh var
                 Ty::fresh_var()
             }
-            TyKind::Ref(_, _, inner) => {
-                // Auto-deref for field access on references
+            TyKind::Ref(_, _, inner) | TyKind::Ptr(_, inner) => {
+                // Auto-deref for field access on references and smart pointers (Box/Arc/Rc)
                 let result = self.infer_field_on_type(inner, field, span);
                 // No-cloning: a linear value cannot be moved out from behind a
                 // reference (`w.coin` where `w: &Wrap` borrows `w`, so the field
@@ -5271,21 +5348,48 @@ impl<'ctx> TypeInfer<'ctx> {
 
     /// Helper to look up a field on a type (without wrapping in an expression).
     fn infer_field_on_type(&mut self, ty: &Ty, field: &ast::Ident, span: Span) -> Ty {
+        let ty = self.apply(ty);
         match &ty.kind {
-            TyKind::Adt(def_id, _substs) => {
+            TyKind::Adt(def_id, substs) => {
                 if let Some(type_def) = self.ctx.lookup_type(*def_id) {
                     if let TypeDefKind::Struct(struct_def) = &type_def.kind {
                         let field_name = field.name.as_ref();
                         for (fname, fty) in &struct_def.fields {
                             if fname.as_ref() == field_name {
-                                return fty.clone();
+                                if matches!(type_def.name.as_ref(), "Vec2" | "Vec3" | "Vec4")
+                                    && substs.len() == 1
+                                    && matches!(field_name, "x" | "y" | "z" | "w")
+                                {
+                                    return substs[0].clone();
+                                }
+                                let mut field_ty = fty.clone();
+                                if !substs.is_empty() && !type_def.generics.is_empty() {
+                                    for (i, _param) in type_def.generics.iter().enumerate() {
+                                        if i < substs.len() {
+                                            if let TyKind::Param(_, idx) = &fty.kind {
+                                                if *idx as usize == i {
+                                                    field_ty = substs[i].clone();
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                return field_ty;
                             }
+                        }
+                        if field_name == "m" && type_def.name.as_ref() == "Mat4" {
+                            return Ty::array(Ty::array(Ty::float(FloatTy::F32), 4), 4);
+                        }
+                        if field_name == "m" && type_def.name.as_ref() == "Mat3" {
+                            return Ty::array(Ty::array(Ty::float(FloatTy::F32), 3), 3);
                         }
                     }
                 }
                 Ty::fresh_var()
             }
-            TyKind::Ref(_, _, inner) => self.infer_field_on_type(inner, field, span),
+            TyKind::Ref(_, _, inner) | TyKind::Ptr(_, inner) => {
+                self.infer_field_on_type(inner, field, span)
+            }
             _ => Ty::fresh_var(),
         }
     }
@@ -5373,7 +5477,12 @@ impl<'ctx> TypeInfer<'ctx> {
             let _ = self.unify(&index_ty, &Ty::int(IntTy::Usize), span);
         }
 
-        match &expr_ty.kind {
+        let mut base_ty = expr_ty.clone();
+        while let TyKind::Ref(_, _, inner) | TyKind::Ptr(_, inner) = &base_ty.kind {
+            base_ty = self.apply(inner);
+        }
+
+        match &base_ty.kind {
             TyKind::Array(elem, _) | TyKind::Slice(elem) => {
                 if is_range {
                     Ty::slice((**elem).clone())
@@ -5388,39 +5497,6 @@ impl<'ctx> TypeInfer<'ctx> {
                     Ty::int(IntTy::U8)
                 }
             }
-            TyKind::Ref(_, _, inner) => match &inner.kind {
-                TyKind::Array(elem, _) | TyKind::Slice(elem) => {
-                    if is_range {
-                        Ty::slice((**elem).clone())
-                    } else {
-                        (**elem).clone()
-                    }
-                }
-                TyKind::Str => {
-                    if is_range {
-                        Ty::str()
-                    } else {
-                        Ty::int(IntTy::U8)
-                    }
-                }
-                // ADT through reference (&Vec<T>, &mut HashMap<K,V>, etc.)
-                TyKind::Adt(_, substs) => {
-                    if !substs.is_empty() {
-                        if is_range {
-                            Ty::slice(substs[0].clone())
-                        } else {
-                            substs[0].clone()
-                        }
-                    } else {
-                        Ty::fresh_var()
-                    }
-                }
-                TyKind::Var(_) | TyKind::Infer(_) => Ty::fresh_var(),
-                _ => {
-                    self.error(TypeError::NotIndexable { ty: expr_ty }, span);
-                    Ty::error()
-                }
-            },
             // ADT types (Vec, HashMap, etc.)
             TyKind::Adt(_, substs) => {
                 if !substs.is_empty() {
@@ -5732,6 +5808,67 @@ impl<'ctx> TypeInfer<'ctx> {
                 &super::effects::EffectRow::empty(),
             );
             return ret;
+        }
+
+        // Generic integer vector construction: `Vec2::new(u32, u32) -> Vec2<u32>`,
+        // `Vec3::new(u32, u32, u32) -> Vec3<u32>`, `Vec4::new(u32, ...) -> Vec4<u32>`.
+        if let ExprKind::Path(path) = &func.kind {
+            if path.segments.len() == 2 && path.segments[1].ident.name.as_ref() == "new" {
+                let tname = path.segments[0].ident.name.as_ref();
+                let want = match tname {
+                    "Vec2" => Some(2usize),
+                    "Vec3" => Some(3usize),
+                    "Vec4" => Some(4usize),
+                    _ => None,
+                };
+                if let Some(arity) = want {
+                    if args.len() == arity {
+                        if let Some(td) = self.ctx.lookup_type_by_name(tname) {
+                            let def_id = td.def_id;
+                            let saved_errors = self.errors.len();
+                            let arg_tys: Vec<Ty> =
+                                args.iter().map(|a| self.infer_expr(a)).collect();
+                            let applied: Vec<Ty> = arg_tys.iter().map(|t| self.apply(t)).collect();
+                            let first_int = applied.iter().find_map(|t| match &t.kind {
+                                TyKind::Int(it) => Some(*it),
+                                _ => None,
+                            });
+                            let all_int_like = applied.iter().all(|t| {
+                                matches!(
+                                    t.kind,
+                                    TyKind::Int(_)
+                                        | TyKind::Infer(InferTy {
+                                            kind: InferKind::Int,
+                                            ..
+                                        })
+                                        | TyKind::Var(_)
+                                )
+                            });
+                            let has_any_int = first_int.is_some()
+                                || applied.iter().any(|t| {
+                                    matches!(
+                                        t.kind,
+                                        TyKind::Infer(InferTy {
+                                            kind: InferKind::Int,
+                                            ..
+                                        })
+                                    )
+                                });
+                            if has_any_int && all_int_like {
+                                let elem_ty = match first_int {
+                                    Some(int_ty) => Ty::int(int_ty),
+                                    None => Ty::fresh_var(),
+                                };
+                                for a in &arg_tys {
+                                    let _ = self.unify(&elem_ty, a, span);
+                                }
+                                return Ty::adt(def_id, vec![elem_ty]);
+                            }
+                            self.errors.truncate(saved_errors);
+                        }
+                    }
+                }
+            }
         }
 
         let call_sources = self.call_sources(func);
@@ -6346,6 +6483,27 @@ impl<'ctx> TypeInfer<'ctx> {
         }
 
         if let Some(method_ty) = method_result {
+            // Vector scalar clamp overload: `Vec2`/`Vec3`/`Vec4::clamp(min: f32, max: f32) -> VecN`
+            if method.name.as_ref() == "clamp" && args.len() == 2 {
+                let is_vec_recv = matches!(&receiver_ty.kind, TyKind::Adt(did, _) if self.ctx.lookup_type(*did).is_some_and(|td| matches!(td.name.as_ref(), "Vec2" | "Vec3" | "Vec4")));
+                let args_are_scalar = arg_tys.iter().all(|t| {
+                    let a = self.apply(t);
+                    matches!(
+                        a.kind,
+                        TyKind::Float(_)
+                            | TyKind::Infer(InferTy {
+                                kind: InferKind::Float,
+                                ..
+                            })
+                    )
+                });
+                if is_vec_recv && args_are_scalar {
+                    for arg_ty in &arg_tys {
+                        let _ = self.unify(&Ty::float(FloatTy::F32), arg_ty, span);
+                    }
+                    return receiver_ty.clone();
+                }
+            }
             // Unify with expected function type
             match &method_ty.kind {
                 TyKind::Fn(fn_ty) => {
@@ -6579,8 +6737,34 @@ impl<'ctx> TypeInfer<'ctx> {
             "parse_float" => return Ty::float(FloatTy::F64),
 
             // Collection mutators - return unit
-            "push"
-            | "push_str"
+            "push" => {
+                if let Some(arg_ty) = arg_tys.first() {
+                    let applied_recv = self.apply(&receiver_ty);
+                    let inner_recv = match &applied_recv.kind {
+                        TyKind::Ref(_, _, inner) => self.apply(inner),
+                        _ => applied_recv,
+                    };
+                    match &inner_recv.kind {
+                        TyKind::Var(_) if !matches!(self.apply(arg_ty).kind, TyKind::Char) => {
+                            let vec_ty = Ty::vec(arg_ty.clone());
+                            let _ = self.unifier.unify(&inner_recv, &vec_ty);
+                        }
+                        TyKind::Adt(def_id, substs)
+                            if substs.len() == 1
+                                && (*def_id == DefId::DUMMY
+                                    || self
+                                        .ctx
+                                        .lookup_type(*def_id)
+                                        .is_some_and(|td| td.name.as_ref() == "Vec")) =>
+                        {
+                            let _ = self.unifier.unify(&substs[0], arg_ty);
+                        }
+                        _ => {}
+                    }
+                }
+                return Ty::unit();
+            }
+            "push_str"
             | "push_back"
             | "push_front"
             | "insert"
@@ -6686,8 +6870,8 @@ impl<'ctx> TypeInfer<'ctx> {
                 return Ty::fresh_var();
             }
             "split" | "splitn" | "rsplit" | "split_once" | "rsplit_once" | "split_whitespace"
-            | "split_at" | "chunks" | "chunks_mut" | "chunks_exact" | "windows" | "lines"
-            | "drain" | "splice" => {
+            | "split_at" | "split_at_mut" | "chunks" | "chunks_mut" | "chunks_exact"
+            | "windows" | "lines" | "drain" | "splice" => {
                 return Ty::fresh_var();
             }
             "binary_search" | "binary_search_by" | "binary_search_by_key" => {
@@ -7228,6 +7412,52 @@ impl<'ctx> TypeInfer<'ctx> {
             let else_ty = self.infer_expr(else_expr);
             let else_sources = self.source_bindings.clone();
             let else_linear = self.linear_slots.clone();
+            // Coerce `&Vec<T>` + `&[U; N]` (such as `&[]`) to `&[T]`.
+            let slice_coercion = {
+                let ta = self.apply(&then_ty);
+                let ea = self.apply(&else_ty);
+                let vec_elem = |t: &Ty| -> Option<(Mutability, Ty)> {
+                    if let TyKind::Ref(_, m, inner) = &t.kind {
+                        let inner_a = self.apply(inner);
+                        if let TyKind::Adt(did, args) = &inner_a.kind {
+                            if args.len() == 1
+                                && (*did == DefId::DUMMY
+                                    || self
+                                        .ctx
+                                        .lookup_type(*did)
+                                        .is_some_and(|td| td.name.as_ref() == "Vec"))
+                            {
+                                return Some((*m, args[0].clone()));
+                            }
+                        }
+                    }
+                    None
+                };
+                let arr_elem = |t: &Ty| -> Option<(Mutability, Ty)> {
+                    if let TyKind::Ref(_, m, inner) = &t.kind {
+                        let inner_a = self.apply(inner);
+                        if let TyKind::Array(elem, _) | TyKind::Slice(elem) = &inner_a.kind {
+                            return Some((*m, (**elem).clone()));
+                        }
+                    }
+                    None
+                };
+                if let (Some((_, ve)), Some((_, ae))) = (vec_elem(&ta), arr_elem(&ea)) {
+                    let _ = self.unify(&ve, &ae, span);
+                    Some(Ty::reference(None, Mutability::Immutable, Ty::slice(ve)))
+                } else if let (Some((_, ae)), Some((_, ve))) = (arr_elem(&ta), vec_elem(&ea)) {
+                    let _ = self.unify(&ve, &ae, span);
+                    Some(Ty::reference(None, Mutability::Immutable, Ty::slice(ve)))
+                } else {
+                    None
+                }
+            };
+            if let Some(slice_ty) = slice_coercion {
+                self.source_bindings =
+                    Self::merge_source_binding_snapshots(&[then_sources, else_sources]);
+                self.linear_slots = Self::merge_linear_snapshots(&[then_linear, else_linear]);
+                return slice_ty;
+            }
             let _ = self.unify(&then_ty, &else_ty, span);
             self.source_bindings =
                 Self::merge_source_binding_snapshots(&[then_sources, else_sources]);
@@ -7317,6 +7547,52 @@ impl<'ctx> TypeInfer<'ctx> {
             let else_ty = self.infer_expr(else_expr);
             let else_sources = self.source_bindings.clone();
             let else_linear = self.linear_slots.clone();
+            // Coerce `&Vec<T>` + `&[U; N]` (such as `&[]`) to `&[T]`.
+            let slice_coercion = {
+                let ta = self.apply(&then_ty);
+                let ea = self.apply(&else_ty);
+                let vec_elem = |t: &Ty| -> Option<(Mutability, Ty)> {
+                    if let TyKind::Ref(_, m, inner) = &t.kind {
+                        let inner_a = self.apply(inner);
+                        if let TyKind::Adt(did, args) = &inner_a.kind {
+                            if args.len() == 1
+                                && (*did == DefId::DUMMY
+                                    || self
+                                        .ctx
+                                        .lookup_type(*did)
+                                        .is_some_and(|td| td.name.as_ref() == "Vec"))
+                            {
+                                return Some((*m, args[0].clone()));
+                            }
+                        }
+                    }
+                    None
+                };
+                let arr_elem = |t: &Ty| -> Option<(Mutability, Ty)> {
+                    if let TyKind::Ref(_, m, inner) = &t.kind {
+                        let inner_a = self.apply(inner);
+                        if let TyKind::Array(elem, _) | TyKind::Slice(elem) = &inner_a.kind {
+                            return Some((*m, (**elem).clone()));
+                        }
+                    }
+                    None
+                };
+                if let (Some((_, ve)), Some((_, ae))) = (vec_elem(&ta), arr_elem(&ea)) {
+                    let _ = self.unify(&ve, &ae, span);
+                    Some(Ty::reference(None, Mutability::Immutable, Ty::slice(ve)))
+                } else if let (Some((_, ae)), Some((_, ve))) = (arr_elem(&ta), vec_elem(&ea)) {
+                    let _ = self.unify(&ve, &ae, span);
+                    Some(Ty::reference(None, Mutability::Immutable, Ty::slice(ve)))
+                } else {
+                    None
+                }
+            };
+            if let Some(slice_ty) = slice_coercion {
+                self.source_bindings =
+                    Self::merge_source_binding_snapshots(&[then_sources, else_sources]);
+                self.linear_slots = Self::merge_linear_snapshots(&[then_linear, else_linear]);
+                return slice_ty;
+            }
             let _ = self.unify(&then_ty, &else_ty, span);
             self.source_bindings =
                 Self::merge_source_binding_snapshots(&[then_sources, else_sources]);
@@ -7639,11 +7915,29 @@ impl<'ctx> TypeInfer<'ctx> {
         label: Option<&ast::Ident>,
         _span: Span,
     ) -> Ty {
-        let iter_ty = self.infer_expr(iter);
-        let iter_ty = self.apply(&iter_ty);
-
-        // Resolve Iterator trait to get Item type
-        let item_ty = self.resolve_iterator_item(&iter_ty);
+        let item_ty = if let ExprKind::Range { start, end, .. } = &iter.kind {
+            match (start.as_deref(), end.as_deref()) {
+                (Some(s), Some(e)) => {
+                    let st = self.infer_expr(s);
+                    let et = self.infer_expr(e);
+                    let _ = self.unify(&st, &et, _span);
+                    self.apply(&st)
+                }
+                (Some(s), None) => {
+                    let st = self.infer_expr(s);
+                    self.apply(&st)
+                }
+                (None, Some(e)) => {
+                    let et = self.infer_expr(e);
+                    self.apply(&et)
+                }
+                (None, None) => Ty::fresh_var(),
+            }
+        } else {
+            let iter_ty = self.infer_expr(iter);
+            let iter_ty = self.apply(&iter_ty);
+            self.resolve_iterator_item(&iter_ty)
+        };
         let pre_loop_sources = self.source_bindings.clone();
 
         self.push_loop_label(label);
@@ -7838,6 +8132,14 @@ impl<'ctx> TypeInfer<'ctx> {
                             let _ = self.infer_expr(value);
                         }
                         self.ctx.define_var(c.name.name.clone(), ty);
+                    }
+                    ast::ItemKind::Static(s) => {
+                        // Register local static as a variable
+                        let ty = self.lower_type(&s.ty);
+                        if let Some(value) = &s.value {
+                            let _ = self.infer_expr(value);
+                        }
+                        self.ctx.define_var(s.name.name.clone(), ty);
                     }
                     ast::ItemKind::Use(use_def) => {
                         fn bind_local_use_tree(
@@ -8477,19 +8779,17 @@ impl<'ctx> TypeInfer<'ctx> {
         inclusive: bool,
         span: Span,
     ) -> Ty {
-        let elem_ty = if let Some(start) = start {
-            self.infer_expr(start)
-        } else if let Some(end) = end {
-            self.infer_expr(end)
-        } else {
-            Ty::fresh_var()
+        let elem_ty = match (start, end) {
+            (Some(start), Some(end)) => {
+                let start_ty = self.infer_expr(start);
+                let end_ty = self.infer_expr(end);
+                let _ = self.unify(&start_ty, &end_ty, span);
+                self.apply(&start_ty)
+            }
+            (Some(start), None) => self.infer_expr(start),
+            (None, Some(end)) => self.infer_expr(end),
+            (None, None) => Ty::fresh_var(),
         };
-
-        if let (Some(start), Some(end)) = (start, end) {
-            let start_ty = self.infer_expr(start);
-            let end_ty = self.infer_expr(end);
-            let _ = self.unify(&start_ty, &end_ty, span);
-        }
 
         // Return Range<T> or RangeInclusive<T> type
         self.make_range_type(self.apply(&elem_ty), inclusive)
@@ -8608,6 +8908,22 @@ impl<'ctx> TypeInfer<'ctx> {
         });
 
         if let Some((def_id, generics_len, struct_fields)) = struct_info {
+            // Virtual `m: [[f32; N]; N]` literal form for `Mat3`/`Mat4` (while keeping `x_axis..w_axis` canonical).
+            if matches!(struct_name, "Mat3" | "Mat4")
+                && fields.len() == 1
+                && fields[0].name.as_ref() == "m"
+                && rest.is_none()
+            {
+                let n = if struct_name == "Mat4" { 4 } else { 3 };
+                let expected_m = Ty::array(Ty::array(Ty::float(FloatTy::F32), n), n);
+                let val_ty = if let Some(value) = &fields[0].value {
+                    self.infer_expr(value)
+                } else {
+                    self.infer_ident(&fields[0].name, fields[0].span)
+                };
+                let _ = self.unify(&expected_m, &val_ty, fields[0].span);
+                return Ty::adt(def_id, Vec::new());
+            }
             // Create fresh type parameters for generics
             let substs: Vec<Ty> = (0..generics_len).map(|_| Ty::fresh_var()).collect();
 
@@ -9173,9 +9489,10 @@ impl<'ctx> TypeInfer<'ctx> {
                 return ty.clone();
             }
 
-            // Box<T>: an owned heap pointer to T (issue #83). A user type
-            // named Box takes priority.
-            if name == "Box" && self.ctx.lookup_type_by_name(name).is_none() {
+            // Box<T>, Rc<T>, Arc<T>: heap pointer to T (Rc/Arc carry a refcount header).
+            // A user type with the same name takes priority.
+            if matches!(name, "Box" | "Rc" | "Arc") && self.ctx.lookup_type_by_name(name).is_none()
+            {
                 if let Some([ast::GenericArg::Type(inner)]) = path.last_generics() {
                     let inner_ty = self.lower_type(inner);
                     return Ty::ptr(Mutability::Mutable, inner_ty);
@@ -9216,10 +9533,25 @@ impl<'ctx> TypeInfer<'ctx> {
             if let Some(type_def) = self.ctx.lookup_type_by_name(name) {
                 let def_id = type_def.def_id;
                 let expected_arity = type_def.generics.len();
-                // Get type arguments from path if present (ignore extra type args on
-                // non-generic math types like `Vec3<f32>` or `Mat4x4<f32>`).
+                // Get type arguments from path if present. Preserve a non-f32
+                // scalar type argument on `Vec2<T>`/`Vec3<T>`/`Vec4<T>` (such as
+                // `Vec3<u32>`) so field reads return `u32`, while `Vec3<f32>`
+                // remains compatible with bare `Vec3`.
                 let substs: Vec<Ty> = if expected_arity == 0 {
-                    Vec::new()
+                    if matches!(name, "Vec2" | "Vec3" | "Vec4") {
+                        if let Some([ast::GenericArg::Type(elem_ast)]) = path.last_generics() {
+                            let elem_ty = self.lower_type(elem_ast);
+                            if matches!(elem_ty.kind, TyKind::Float(FloatTy::F32)) {
+                                Vec::new()
+                            } else {
+                                vec![elem_ty]
+                            }
+                        } else {
+                            Vec::new()
+                        }
+                    } else {
+                        Vec::new()
+                    }
                 } else if let Some(generics) = path.last_generics() {
                     generics
                         .iter()

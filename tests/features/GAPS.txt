@@ -5,4 +5,3 @@
 async_await rejected
 const_generic rejected
 macro_rules rejected
-trait_object_dyn rejected

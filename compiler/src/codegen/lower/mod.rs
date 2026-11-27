@@ -181,6 +181,10 @@ pub struct MirLowerer<'ctx> {
     generic_enums: HashMap<Arc<str>, ast::EnumDef>,
     /// Generic struct ASTs stored for monomorphization: name -> StructDef clone.
     generic_structs: HashMap<Arc<str>, ast::StructDef>,
+    /// All non-generic/generic top-level struct and enum names declared anywhere in the module
+    /// (including merged stdlib modules), collected before Pass 1 so Pass 1 and Pass 2 agree
+    /// on whether `Vec2`/`Vec3`/`Vec4` refer to user/stdlib structs or built-in `build_vecN`.
+    defined_type_names: HashSet<Arc<str>>,
     /// Set of already-generated monomorphized specializations (mangled names).
     monomorphized: HashSet<Arc<str>>,
     /// Trait definitions: maps trait name -> ordered list of method signatures.
@@ -376,6 +380,8 @@ pub(crate) enum IterStep<'a> {
     TakeWhile { closure: &'a ast::Expr },
     /// `.skip(n)` - skip the first `n` elements (by source position).
     Skip { count: &'a ast::Expr },
+    /// `.step_by(n)` - yield every `n`-th element starting from the first.
+    StepBy { step: &'a ast::Expr },
     /// `.flat_map(|x| inner_iter)` - flatten an inner iterator per element.
     FlatMap { closure: &'a ast::Expr },
     /// `.filter_map(|x| opt_expr)` - keep `Some(v)` values and drop `None`.
@@ -438,6 +444,10 @@ pub(crate) enum IterTerminal<'a> {
     Nth { index: &'a ast::Expr },
     /// `.position(|x| pred)` - index of first matching element as `Option<usize>`.
     Position { closure: &'a ast::Expr },
+    /// `.find(|x| pred)` - first matching element as `Option<T>`.
+    Find { closure: &'a ast::Expr },
+    /// `.for_each(|x| body)` - execute a closure on each element, returning `()`.
+    ForEach { closure: &'a ast::Expr },
     /// `.reduce(f)` - fold without initial value, returning `Option<T>`.
     Reduce { closure: &'a ast::Expr },
     /// `.min_by(|a, b| ord)` - smallest element by comparator, returning `Option<T>`.
@@ -511,6 +521,7 @@ impl<'ctx> MirLowerer<'ctx> {
             generic_impl_owner: HashMap::new(),
             generic_enums: HashMap::new(),
             generic_structs: HashMap::new(),
+            defined_type_names: HashSet::new(),
             monomorphized: HashSet::new(),
             trait_methods: HashMap::new(),
             trait_impls: HashMap::new(),
@@ -598,6 +609,7 @@ impl<'ctx> MirLowerer<'ctx> {
             generic_impl_owner: HashMap::new(),
             generic_enums: HashMap::new(),
             generic_structs: HashMap::new(),
+            defined_type_names: HashSet::new(),
             monomorphized: HashSet::new(),
             trait_methods: HashMap::new(),
             trait_impls: HashMap::new(),
@@ -1220,13 +1232,19 @@ impl<'ctx> MirLowerer<'ctx> {
                     .any(|p| matches!(p.kind, ast::GenericParamKind::Type { .. }))
             };
             match &item.kind {
-                ItemKind::Struct(s) if has_type_params(&s.generics) => {
-                    self.generic_structs
-                        .insert(s.name.name.clone(), (**s).clone());
+                ItemKind::Struct(s) => {
+                    self.defined_type_names.insert(s.name.name.clone());
+                    if has_type_params(&s.generics) {
+                        self.generic_structs
+                            .insert(s.name.name.clone(), (**s).clone());
+                    }
                 }
-                ItemKind::Enum(e) if has_type_params(&e.generics) => {
-                    self.generic_enums
-                        .insert(e.name.name.clone(), (**e).clone());
+                ItemKind::Enum(e) => {
+                    self.defined_type_names.insert(e.name.name.clone());
+                    if has_type_params(&e.generics) {
+                        self.generic_enums
+                            .insert(e.name.name.clone(), (**e).clone());
+                    }
                 }
                 _ => {}
             }
@@ -1403,6 +1421,20 @@ impl<'ctx> MirLowerer<'ctx> {
                 vtable_params.extend(params.into_iter().skip(1));
 
                 let fn_sig = MirFnSig::new(vtable_params, ret);
+                // Record Result/Option payload types for trait methods so `?`
+                // and `match` on `dyn Trait` calls recover the concrete Ok/Some type.
+                if let Some(ref ret_ast) = fndef.sig.return_ty {
+                    let key: Arc<str> = Arc::from(format!("{}_{}", trait_name, fndef.name.name));
+                    if let Some(ok_ty) = self.result_ok_inner_from_ast(ret_ast) {
+                        self.fn_result_ok_types.insert(key.clone(), ok_ty);
+                    }
+                    if let Some(err_ty) = self.result_err_inner_from_ast(ret_ast) {
+                        self.fn_result_err_types.insert(key.clone(), err_ty);
+                    }
+                    if let Some(inner_ty) = self.option_inner_from_ast(ret_ast) {
+                        self.fn_option_inner_types.insert(key, inner_ty);
+                    }
+                }
                 methods.push((fndef.name.name.clone(), fn_sig));
             }
         }
@@ -2649,6 +2681,20 @@ impl<'ctx> MirLowerer<'ctx> {
             }
             if let ast::ImplItemKind::Function(f) = &impl_item.kind {
                 let mangled = self.register_impl_method_name(&type_name, impl_def, f);
+                let has_bounded_type_generic = f.generics.params.iter().any(|p| {
+                    matches!(&p.kind, ast::GenericParamKind::Type { bounds, .. }
+                        if !bounds.is_empty())
+                }) || f
+                    .generics
+                    .where_clause
+                    .as_ref()
+                    .is_some_and(|wc| wc.predicates.iter().any(|pred| !pred.bounds.is_empty()));
+                if has_bounded_type_generic {
+                    self.generic_functions
+                        .insert(mangled.clone(), (**f).clone());
+                    self.generic_impl_owner
+                        .insert(mangled.clone(), type_name.clone());
+                }
                 if f.name.name.as_ref() == "fmt" {
                     if fmt_trait_kind == Some("Display") {
                         self.display_impls
