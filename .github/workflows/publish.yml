@@ -42,7 +42,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Check the tag matches the crate version
         run: |
-          version=$(grep -m1 '^version = ' compiler/Cargo.toml | sed 's/version = "\(.*\)"/\1/')
+          version=$(grep -m1 '^version = ' compiler/Cargo.toml | tr -d '\r' | sed 's/version = "\(.*\)"/\1/')
           test "${GITHUB_REF_NAME}" = "v${version}" || { echo "tag ${GITHUB_REF_NAME} does not match crate version ${version}"; exit 1; }
       - name: Check the tagged commit is on main
         run: git merge-base --is-ancestor "${GITHUB_SHA}" origin/main

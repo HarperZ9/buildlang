@@ -10,7 +10,9 @@ tracked in `STATUS.md`, `README.md`, and
 
 ## Unreleased
 
-## [2.0.0] - 2026-11-27
+## 2.0.0 (2026-11-27)
+
+BuildLang 2.0.0 ships unified 4-pillar compile-time MIR assurance (`buildc check --sovereign-audit`), certified e-graph Superoptimizer V7, exact 5-way GPU FMA parity including GLSL, `buildc bench` and `buildc doctor --json`, and graduated pure-MIT BuildOS-2.0/2.1/2.2 and 600-shader GPU compute suites.
 
 ### Compiler and Assurance
 - Unified 4-pillar compile-time MIR assurance CLI (`buildc check --sovereign-audit`) combining `--deny-effect` capability-egress checks, `--max-stack-bytes` bounded-stack WCET analysis, `--constant-time` side-channel taint analysis, and `--strict-determinism` floating-point reproducibility checks.
