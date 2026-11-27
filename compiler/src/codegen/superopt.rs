@@ -330,12 +330,14 @@ pub fn expr_cost(expr: &CertExpr) -> u32 {
             let op_c = match op {
                 BinOp::Add
                 | BinOp::Sub
+                | BinOp::AddWrapping
+                | BinOp::SubWrapping
                 | BinOp::BitAnd
                 | BinOp::BitOr
                 | BinOp::BitXor
                 | BinOp::Shl
                 | BinOp::Shr => 1,
-                BinOp::Mul => 3,
+                BinOp::Mul | BinOp::MulWrapping => 3,
                 BinOp::Div | BinOp::Rem => 8,
                 _ => 4,
             };

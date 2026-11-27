@@ -379,6 +379,16 @@ impl<'ctx> CodeGenerator<'ctx> {
         // print them with source spans and fail the compile.
         self.linear_errors = analysis::linear::check_module(&mir.functions);
 
+        // Enforce unified cross-backend integer overflow semantics on GPU shader
+        // targets before emission: plain `+`, `-`, `*` on data integers must be
+        // proven overflow-free or use explicit `.wrapping_{add,sub,mul}`.
+        if matches!(
+            self.target,
+            Target::Hlsl | Target::Glsl | Target::Wgsl | Target::Msl | Target::SpirV
+        ) {
+            analysis::int_overflow::check_gpu_int_overflow(mir, self.target)?;
+        }
+
         let generated = match self.target {
             Target::C => {
                 let mut backend = backend::c::CBackend::with_stdio_mode(self.stdio_mode);

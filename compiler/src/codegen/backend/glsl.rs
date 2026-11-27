@@ -692,9 +692,9 @@ impl GlslBackend {
                 let l = self.value_to_glsl(left, &func.locals);
                 let r = self.value_to_glsl(right, &func.locals);
                 let op_str = match op {
-                    BinOp::Add => "+",
-                    BinOp::Sub => "-",
-                    BinOp::Mul => "*",
+                    BinOp::Add | BinOp::AddWrapping => "+",
+                    BinOp::Sub | BinOp::SubWrapping => "-",
+                    BinOp::Mul | BinOp::MulWrapping => "*",
                     BinOp::Div => "/",
                     BinOp::Rem => "%",
                     BinOp::Eq => "==",
