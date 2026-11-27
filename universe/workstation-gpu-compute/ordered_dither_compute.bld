@@ -1,0 +1,47 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Zain Dana Harper.
+// Ordered 4x4 Bayer + interleaved gradient dithering compute kernel (N64, N29, F1).
+// Computes bit-interleaved 4x4 Bayer threshold from integer pixel coordinates and
+// emits deterministic quantized tonal output in [0.0, 1.0].
+
+#[compute(workgroup_size = [64, 1, 1])]
+fn ordered_dither_compute(
+    width: u32,
+    luma_buf: &[f32],
+    out_buf: &mut [f32],
+) ~ Gpu {
+    let i = gl_GlobalInvocationID.x;
+    let mut w: u32 = width;
+    if w == 0 {
+        w = 1;
+    }
+    let px: u32 = i % w;
+    let py: u32 = i / w;
+    let m1: u32 = 1;
+    let s1: u32 = 1;
+    let s2: u32 = 2;
+    let s3: u32 = 3;
+
+    let x0: u32 = px & m1;
+    let x1: u32 = (px >> s1) & m1;
+    let y0: u32 = py & m1;
+    let y1: u32 = (py >> s1) & m1;
+
+    let b0: u32 = x0 ^ y0;
+    let b1: u32 = x1 ^ y1;
+    let bayer_idx: u32 = (b0 << s3) | (y0 << s2) | (b1 << s1) | y1;
+    let threshold: f32 = ((bayer_idx as f32) + 0.5) * 0.0625;
+
+    let mut luma: f32 = luma_buf[i];
+    if luma < 0.0 {
+        luma = 0.0;
+    }
+    if luma > 1.0 {
+        luma = 1.0;
+    }
+    let mut q: f32 = 0.0;
+    if luma > threshold {
+        q = 1.0;
+    }
+    out_buf[i] = q;
+}

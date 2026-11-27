@@ -1,0 +1,58 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Zain Dana Harper.
+// Cook-Torrance GGX microfacet PBR BRDF compute kernel (N64, F1, N29, N42).
+// Evaluates Trowbridge-Reitz NDF, Schlick Fresnel, Smith GGX visibility,
+// and energy-conserving Lambertian diffuse with strict [0, 1] clamping.
+
+#[compute(workgroup_size = [64, 1, 1])]
+fn pbr_ggx_brdf_compute(
+    roughness: f32,
+    f0: f32,
+    albedo: f32,
+    ndl_buf: &[f32],
+    ndv_buf: &[f32],
+    ndh_buf: &[f32],
+    out_buf: &mut [f32],
+) ~ Gpu {
+    let i = gl_GlobalInvocationID.x;
+    let mut ndl: f32 = ndl_buf[i];
+    let mut ndv: f32 = ndv_buf[i];
+    let mut ndh: f32 = ndh_buf[i];
+    if ndl < 0.001 {
+        ndl = 0.001;
+    }
+    if ndv < 0.001 {
+        ndv = 0.001;
+    }
+    if ndh < 0.0 {
+        ndh = 0.0;
+    }
+
+    let alpha: f32 = roughness * roughness;
+    let a2: f32 = alpha * alpha;
+    let denom_d: f32 = ndh * ndh * (a2 - 1.0) + 1.0;
+    let inv_pi: f32 = 0.31830989;
+    let d_ggx: f32 = a2 * inv_pi / (denom_d * denom_d + 0.00001);
+
+    let om: f32 = 1.0 - ndh;
+    let om2: f32 = om * om;
+    let om5: f32 = om2 * om2 * om;
+    let fresnel: f32 = f0 + (1.0 - f0) * om5;
+
+    let k: f32 = (roughness + 1.0) * (roughness + 1.0) * 0.125;
+    let g_l: f32 = ndl / (ndl * (1.0 - k) + k);
+    let g_v: f32 = ndv / (ndv * (1.0 - k) + k);
+    let g_smith: f32 = g_l * g_v;
+
+    let spec: f32 = (d_ggx * fresnel * g_smith) / (4.0 * ndl * ndv + 0.0001);
+    let kd: f32 = 1.0 - fresnel;
+    let diff: f32 = kd * albedo * inv_pi;
+    let mut radiance: f32 = (diff + spec) * ndl;
+    if radiance < 0.0 {
+        radiance = 0.0;
+    }
+    if radiance > 1.0 {
+        radiance = 1.0;
+    }
+    out_buf[i] = radiance;
+}

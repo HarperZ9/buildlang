@@ -1,0 +1,73 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Zain Dana Harper.
+// Kay-Kajiya slab ray-AABB BVH intersection compute kernel (N63, F1, N29, N42).
+// Computes entry/exit slab intervals along X, Y, Z axes and outputs nearest positive
+// hit distance t_hit >= 0.0 or miss sentinel -1.0.
+
+#[compute(workgroup_size = [64, 1, 1])]
+fn bvh_aabb_intersect_compute(
+    ox: f32,
+    oy: f32,
+    oz: f32,
+    inv_dx: f32,
+    inv_dy: f32,
+    inv_dz: f32,
+    minx_buf: &[f32],
+    maxx_buf: &[f32],
+    miny_buf: &[f32],
+    maxy_buf: &[f32],
+    minz_buf: &[f32],
+    maxz_buf: &[f32],
+    hit_out: &mut [f32],
+) ~ Gpu {
+    let i = gl_GlobalInvocationID.x;
+    let tx0: f32 = (minx_buf[i] - ox) * inv_dx;
+    let tx1: f32 = (maxx_buf[i] - ox) * inv_dx;
+    let mut tmin: f32 = tx0;
+    let mut tmax: f32 = tx1;
+    if tx1 < tx0 {
+        tmin = tx1;
+        tmax = tx0;
+    }
+
+    let ty0: f32 = (miny_buf[i] - oy) * inv_dy;
+    let ty1: f32 = (maxy_buf[i] - oy) * inv_dy;
+    let mut ty_lo: f32 = ty0;
+    let mut ty_hi: f32 = ty1;
+    if ty1 < ty0 {
+        ty_lo = ty1;
+        ty_hi = ty0;
+    }
+    if ty_lo > tmin {
+        tmin = ty_lo;
+    }
+    if ty_hi < tmax {
+        tmax = ty_hi;
+    }
+
+    let tz0: f32 = (minz_buf[i] - oz) * inv_dz;
+    let tz1: f32 = (maxz_buf[i] - oz) * inv_dz;
+    let mut tz_lo: f32 = tz0;
+    let mut tz_hi: f32 = tz1;
+    if tz1 < tz0 {
+        tz_lo = tz1;
+        tz_hi = tz0;
+    }
+    if tz_lo > tmin {
+        tmin = tz_lo;
+    }
+    if tz_hi < tmax {
+        tmax = tz_hi;
+    }
+
+    let mut res: f32 = -1.0;
+    if tmax >= tmin {
+        if tmax >= 0.0 {
+            res = tmin;
+            if res < 0.0 {
+                res = 0.0;
+            }
+        }
+    }
+    hit_out[i] = res;
+}

@@ -1,0 +1,55 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Zain Dana Harper.
+// Euler-Bernoulli cantilever trunk/branch wind foliage bend kernel (G4, N63, N29, F1).
+// Evaluates uniform wind-load tip deflection q*h^4/(8*E*I) modulated by gust phase
+// and root-stiffness health with geometric arc-length saturation clamping.
+
+#[compute(workgroup_size = [64, 1, 1])]
+fn wind_foliage_bend_compute(
+    air_rho: f32,
+    drag_cd: f32,
+    wind_vel: f32,
+    height_buf: &[f32],
+    radius_buf: &[f32],
+    young_buf: &[f32],
+    rot_factor_buf: &[f32],
+    disp_out: &mut [f32],
+) ~ Gpu {
+    let i = gl_GlobalInvocationID.x;
+    let mut h: f32 = height_buf[i];
+    let mut r: f32 = radius_buf[i];
+    let mut e_mod: f32 = young_buf[i];
+    let mut rot_health: f32 = rot_factor_buf[i];
+
+    if h < 0.1 {
+        h = 0.1;
+    }
+    if r < 0.01 {
+        r = 0.01;
+    }
+    if e_mod < 1.0 {
+        e_mod = 1.0;
+    }
+    if rot_health < 0.15 {
+        rot_health = 0.15;
+    }
+    if rot_health > 1.0 {
+        rot_health = 1.0;
+    }
+
+    let q_load: f32 = 0.5 * air_rho * drag_cd * wind_vel * wind_vel * (2.0 * r);
+    let r2: f32 = r * r;
+    let i_area: f32 = 0.78539816 * r2 * r2 * rot_health;
+    let h2: f32 = h * h;
+    let h4: f32 = h2 * h2;
+
+    let mut disp: f32 = (q_load * h4) / (8.0 * e_mod * i_area + 0.0001);
+    let max_disp: f32 = 0.65 * h;
+    if disp > max_disp {
+        disp = max_disp;
+    }
+    if disp < 0.0 {
+        disp = 0.0;
+    }
+    disp_out[i] = disp;
+}

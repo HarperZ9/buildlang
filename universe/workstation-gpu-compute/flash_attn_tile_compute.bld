@@ -1,0 +1,49 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Zain Dana Harper.
+// Online-softmax tiled FlashAttention-2 update step compute kernel (N44, F1, N29, N42).
+// Merges incoming tile logit s_new and value v_new into running (m_prev, l_prev, o_prev)
+// without O(N^2) score materialization using monotone rational exp(-d) rescaling.
+
+#[compute(workgroup_size = [64, 1, 1])]
+fn flash_attn_tile_compute(
+    inv_sqrt_d: f32,
+    m_prev_buf: &[f32],
+    l_prev_buf: &[f32],
+    o_prev_buf: &[f32],
+    qk_buf: &[f32],
+    v_buf: &[f32],
+    m_out: &mut [f32],
+    l_out: &mut [f32],
+    o_out: &mut [f32],
+) ~ Gpu {
+    let i = gl_GlobalInvocationID.x;
+    let m_old: f32 = m_prev_buf[i];
+    let l_old: f32 = l_prev_buf[i];
+    let o_old: f32 = o_prev_buf[i];
+    let s_tile: f32 = qk_buf[i] * inv_sqrt_d;
+    let v_tile: f32 = v_buf[i];
+
+    let mut m_new: f32 = m_old;
+    if s_tile > m_new {
+        m_new = s_tile;
+    }
+
+    let mut d_old: f32 = m_new - m_old;
+    if d_old < 0.0 {
+        d_old = 0.0;
+    }
+    let e_old: f32 = 1.0 / (1.0 + d_old + 0.5 * d_old * d_old + 0.16666667 * d_old * d_old * d_old);
+
+    let mut d_cur: f32 = m_new - s_tile;
+    if d_cur < 0.0 {
+        d_cur = 0.0;
+    }
+    let e_cur: f32 = 1.0 / (1.0 + d_cur + 0.5 * d_cur * d_cur + 0.16666667 * d_cur * d_cur * d_cur);
+
+    let l_new: f32 = l_old * e_old + e_cur + 0.000001;
+    let o_new: f32 = (o_old * l_old * e_old + e_cur * v_tile) / l_new;
+
+    m_out[i] = m_new;
+    l_out[i] = l_new;
+    o_out[i] = o_new;
+}

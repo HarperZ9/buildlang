@@ -1,0 +1,34 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Zain Dana Harper.
+// Anisotropic 2D Gaussian Splatting EWA projection compute kernel (F1, N29, N42).
+// Evaluates inverse 2x2 screen covariance quadratic form, 3rd-order rational Gaussian
+// falloff, opacity scaling, and 0.99 transmittance ceiling clamp.
+
+#[compute(workgroup_size = [64, 1, 1])]
+fn splat_3dgs_project_compute(
+    inv_xx: f32,
+    inv_xy: f32,
+    inv_yy: f32,
+    opacity: f32,
+    dx_buf: &[f32],
+    dy_buf: &[f32],
+    out_buf: &mut [f32],
+) ~ Gpu {
+    let i = gl_GlobalInvocationID.x;
+    let dx: f32 = dx_buf[i];
+    let dy: f32 = dy_buf[i];
+    let mut q: f32 = 0.5 * (inv_xx * dx * dx + 2.0 * inv_xy * dx * dy + inv_yy * dy * dy);
+    if q < 0.0 {
+        q = 0.0;
+    }
+    let q2: f32 = q * q;
+    let g: f32 = 1.0 / (1.0 + q + 0.5 * q2 + 0.16666667 * q2 * q);
+    let mut alpha: f32 = opacity * g;
+    if alpha > 0.99 {
+        alpha = 0.99;
+    }
+    if alpha < 0.00392157 {
+        alpha = 0.0;
+    }
+    out_buf[i] = alpha;
+}

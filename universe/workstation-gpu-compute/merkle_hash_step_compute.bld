@@ -1,0 +1,61 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Zain Dana Harper.
+// Bitwise FIPS 180-4 SHA-256 / RFC 6962 Merkle compression step kernel (F1, N49, N29).
+// Executes one deterministic SHA-256 round mixing (Sigma0, Sigma1, Ch, Maj) over
+// 32-bit state lanes in pure integer bitwise arithmetic across all 5 GPU targets.
+
+#[compute(workgroup_size = [64, 1, 1])]
+fn merkle_hash_step_compute(
+    k_round: u32,
+    w_msg: u32,
+    a_buf: &[u32],
+    b_buf: &[u32],
+    c_buf: &[u32],
+    d_buf: &[u32],
+    e_buf: &[u32],
+    f_buf: &[u32],
+    g_buf: &[u32],
+    h_buf: &[u32],
+    a_out: &mut [u32],
+    e_out: &mut [u32],
+) ~ Gpu {
+    let i = gl_GlobalInvocationID.x;
+    let a: u32 = a_buf[i];
+    let b: u32 = b_buf[i];
+    let c: u32 = c_buf[i];
+    let d: u32 = d_buf[i];
+    let e: u32 = e_buf[i];
+    let f: u32 = f_buf[i];
+    let g: u32 = g_buf[i];
+    let h: u32 = h_buf[i];
+
+    let all_ones: u32 = 4294967295;
+    let r6: u32 = 6;
+    let l26: u32 = 26;
+    let r11: u32 = 11;
+    let l21: u32 = 21;
+    let r25: u32 = 25;
+    let l7: u32 = 7;
+    let s1_a: u32 = (e >> r6) | (e << l26);
+    let s1_b: u32 = (e >> r11) | (e << l21);
+    let s1_c: u32 = (e >> r25) | (e << l7);
+    let sigma1: u32 = s1_a ^ s1_b ^ s1_c;
+    let ch: u32 = (e & f) ^ ((e ^ all_ones) & g);
+    let t1: u32 = h + sigma1 + ch + k_round + w_msg;
+
+    let r2: u32 = 2;
+    let l30: u32 = 30;
+    let r13: u32 = 13;
+    let l19: u32 = 19;
+    let r22: u32 = 22;
+    let l10: u32 = 10;
+    let s0_a: u32 = (a >> r2) | (a << l30);
+    let s0_b: u32 = (a >> r13) | (a << l19);
+    let s0_c: u32 = (a >> r22) | (a << l10);
+    let sigma0: u32 = s0_a ^ s0_b ^ s0_c;
+    let maj: u32 = (a & b) ^ (a & c) ^ (b & c);
+    let t2: u32 = sigma0 + maj;
+
+    a_out[i] = t1 + t2;
+    e_out[i] = d + t1;
+}

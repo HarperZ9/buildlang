@@ -1,0 +1,46 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Zain Dana Harper.
+// JONSWAP ocean wave height spectrum compute kernel (F1, N29, N42).
+// Evaluates deep-water dispersion via Newton-Raphson sqrt, Pierson-Moskowitz
+// equilibrium tail, and JONSWAP peak enhancement gamma factor.
+
+#[compute(workgroup_size = [64, 1, 1])]
+fn jonswap_wave_compute(
+    alpha_pm: f32,
+    omega_p: f32,
+    gamma_j: f32,
+    k_buf: &[f32],
+    out_buf: &mut [f32],
+) ~ Gpu {
+    let i = gl_GlobalInvocationID.x;
+    let k: f32 = k_buf[i];
+    let mut energy: f32 = 0.0;
+    if k > 0.0001 {
+        let gk: f32 = 9.81 * k;
+        let mut omega: f32 = 0.5 * (gk + 1.0);
+        omega = 0.5 * (omega + gk / omega);
+        omega = 0.5 * (omega + gk / omega);
+        omega = 0.5 * (omega + gk / omega);
+
+        let w2: f32 = omega * omega;
+        let w5: f32 = w2 * w2 * omega + 0.00001;
+        let ratio: f32 = omega_p / (omega + 0.00001);
+        let r2: f32 = ratio * ratio;
+        let r4: f32 = r2 * r2;
+        let pm_decay: f32 = 1.0 / (1.0 + 1.25 * r4 + 0.78125 * r4 * r4);
+
+        let mut sigma: f32 = 0.09;
+        if omega <= omega_p {
+            sigma = 0.07;
+        }
+        let d_om: f32 = (omega - omega_p) / (sigma * omega_p + 0.00001);
+        let bell: f32 = 1.0 / (1.0 + 0.5 * d_om * d_om);
+        let peak_boost: f32 = 1.0 + (gamma_j - 1.0) * bell;
+
+        energy = (alpha_pm * 96.2361 / w5) * pm_decay * peak_boost;
+        if energy < 0.0 {
+            energy = 0.0;
+        }
+    }
+    out_buf[i] = energy;
+}

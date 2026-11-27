@@ -1,0 +1,42 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Zain Dana Harper.
+// Edge-preserving bilateral A-trous spatial denoiser kernel (N64, N29, F1).
+// Blends center and two symmetric A-trous taps weighted by depth and luminance
+// edge-stopping functions with strict weight normalization.
+
+#[compute(workgroup_size = [64, 1, 1])]
+fn bilateral_atrous_denoise_compute(
+    phi_color: f32,
+    phi_depth: f32,
+    c_mid_buf: &[f32],
+    c_neg_buf: &[f32],
+    c_pos_buf: &[f32],
+    z_mid_buf: &[f32],
+    z_neg_buf: &[f32],
+    z_pos_buf: &[f32],
+    out_buf: &mut [f32],
+) ~ Gpu {
+    let i = gl_GlobalInvocationID.x;
+    let cm: f32 = c_mid_buf[i];
+    let cn: f32 = c_neg_buf[i];
+    let cp: f32 = c_pos_buf[i];
+    let zm: f32 = z_mid_buf[i];
+    let zn: f32 = z_neg_buf[i];
+    let zp: f32 = z_pos_buf[i];
+
+    let dc_n: f32 = (cm - cn) * (cm - cn) / (phi_color * phi_color + 0.0001);
+    let dz_n: f32 = (zm - zn) * (zm - zn) / (phi_depth * phi_depth + 0.0001);
+    let wn: f32 = 0.25 / (1.0 + dc_n + dz_n);
+
+    let dc_p: f32 = (cm - cp) * (cm - cp) / (phi_color * phi_color + 0.0001);
+    let dz_p: f32 = (zm - zp) * (zm - zp) / (phi_depth * phi_depth + 0.0001);
+    let wp: f32 = 0.25 / (1.0 + dc_p + dz_p);
+
+    let w_mid: f32 = 0.5;
+    let w_sum: f32 = w_mid + wn + wp + 0.000001;
+    let mut filtered: f32 = (w_mid * cm + wn * cn + wp * cp) / w_sum;
+    if filtered < 0.0 {
+        filtered = 0.0;
+    }
+    out_buf[i] = filtered;
+}

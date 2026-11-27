@@ -1,0 +1,33 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Zain Dana Harper.
+// Titan-1M Cayley unitary symplectic recurrence GPU compute kernel (N44, F1, N29, N42).
+// Advances canonical (q, p) oscillator state under exact norm-preserving Cayley transform
+// with bounded drive injection and strict energy-drift stability.
+
+#[compute(workgroup_size = [64, 1, 1])]
+fn cayley_symplectic_step_compute(
+    dt: f32,
+    omega: f32,
+    drive_gain: f32,
+    q_buf: &[f32],
+    p_buf: &[f32],
+    u_buf: &[f32],
+    q_out: &mut [f32],
+    p_out: &mut [f32],
+) ~ Gpu {
+    let i = gl_GlobalInvocationID.x;
+    let q0: f32 = q_buf[i];
+    let p0: f32 = p_buf[i];
+    let u0: f32 = u_buf[i];
+
+    let h: f32 = 0.5 * dt * omega;
+    let h2: f32 = h * h;
+    let inv_det: f32 = 1.0 / (1.0 + h2);
+    let c_rot: f32 = (1.0 - h2) * inv_det;
+    let s_rot: f32 = (2.0 * h) * inv_det;
+
+    let q_next: f32 = c_rot * q0 + s_rot * p0 + drive_gain * dt * u0;
+    let p_next: f32 = c_rot * p0 - s_rot * q0;
+    q_out[i] = q_next;
+    p_out[i] = p_next;
+}

@@ -1,0 +1,31 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Zain Dana Harper.
+// BuildLang-NTC610 neural PBR latent pyramid decoder compute kernel (N64, N29, N42).
+// Decodes two pyramid latent channels via a 2-layer rational MLP with residual skip
+// and sequential [0, 1] range clamping.
+
+#[compute(workgroup_size = [64, 1, 1])]
+fn ntc610_decode_compute(
+    w0: f32,
+    w1: f32,
+    bias: f32,
+    g0_buf: &[f32],
+    g1_buf: &[f32],
+    out_buf: &mut [f32],
+) ~ Gpu {
+    let i = gl_GlobalInvocationID.x;
+    let z0: f32 = g0_buf[i];
+    let z1: f32 = g1_buf[i];
+    let h0: f32 = w0 * z0 + w1 * z1 + bias;
+    let a0: f32 = 0.5 + (0.5 * h0) / (1.0 + h0 * h0);
+    let h1: f32 = 0.85 * a0 - 0.35 * z1 + 0.15 * bias;
+    let a1: f32 = 0.5 + (0.5 * h1) / (1.0 + h1 * h1);
+    let mut y: f32 = 0.75 * a1 + 0.25 * z0;
+    if y < 0.0 {
+        y = 0.0;
+    }
+    if y > 1.0 {
+        y = 1.0;
+    }
+    out_buf[i] = y;
+}

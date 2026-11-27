@@ -1,0 +1,41 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Zain Dana Harper.
+// 4-bit symmetric group-quantized INT4 dequant-FMA dot product kernel (N44, F1, N29, N42).
+// Unpacks four signed [-8, 7] 4-bit weights from a 16-bit/32-bit packed u32 lane,
+// rescales by per-group scale factor, and accumulates FMA dot products against x0..x3.
+
+#[compute(workgroup_size = [64, 1, 1])]
+fn int4_dequant_matvec_compute(
+    bias: f32,
+    packed_w_buf: &[u32],
+    scale_buf: &[f32],
+    x0_buf: &[f32],
+    x1_buf: &[f32],
+    x2_buf: &[f32],
+    x3_buf: &[f32],
+    out_buf: &mut [f32],
+) ~ Gpu {
+    let i = gl_GlobalInvocationID.x;
+    let pw: u32 = packed_w_buf[i];
+    let mut sc: f32 = scale_buf[i];
+    if sc < 0.000001 {
+        sc = 0.000001;
+    }
+
+    let mask: u32 = 15;
+    let s4: u32 = 4;
+    let s8: u32 = 8;
+    let s12: u32 = 12;
+    let n0: u32 = pw & mask;
+    let n1: u32 = (pw >> s4) & mask;
+    let n2: u32 = (pw >> s8) & mask;
+    let n3: u32 = (pw >> s12) & mask;
+
+    let w0: f32 = ((n0 as f32) - 8.0) * sc;
+    let w1: f32 = ((n1 as f32) - 8.0) * sc;
+    let w2: f32 = ((n2 as f32) - 8.0) * sc;
+    let w3: f32 = ((n3 as f32) - 8.0) * sc;
+
+    let acc: f32 = w0 * x0_buf[i] + w1 * x1_buf[i] + w2 * x2_buf[i] + w3 * x3_buf[i] + bias;
+    out_buf[i] = acc;
+}

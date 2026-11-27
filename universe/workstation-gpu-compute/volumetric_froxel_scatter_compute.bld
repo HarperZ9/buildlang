@@ -1,0 +1,51 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Zain Dana Harper.
+// Volumetric froxel Henyey-Greenstein aerial scattering kernel (N63, N29, F1).
+// Evaluates anisotropic HG phase function via Newton-Raphson sqrt and integrates
+// single-scattering radiance under Beer-Lambert extinction across a froxel slice.
+
+#[compute(workgroup_size = [64, 1, 1])]
+fn volumetric_froxel_scatter_compute(
+    g_aniso: f32,
+    sun_intensity: f32,
+    slice_dz: f32,
+    cos_buf: &[f32],
+    sigma_buf: &[f32],
+    trans_buf: &[f32],
+    out_buf: &mut [f32],
+) ~ Gpu {
+    let i = gl_GlobalInvocationID.x;
+    let mut cos_th: f32 = cos_buf[i];
+    if cos_th < -1.0 {
+        cos_th = -1.0;
+    }
+    if cos_th > 1.0 {
+        cos_th = 1.0;
+    }
+    let mut sigma: f32 = sigma_buf[i];
+    if sigma < 0.0 {
+        sigma = 0.0;
+    }
+    let trans_in: f32 = trans_buf[i];
+
+    let g2: f32 = g_aniso * g_aniso;
+    let mut base: f32 = 1.0 + g2 - 2.0 * g_aniso * cos_th;
+    if base < 0.0001 {
+        base = 0.0001;
+    }
+    let mut s_base: f32 = 0.5 * (base + 1.0);
+    s_base = 0.5 * (s_base + base / s_base);
+    s_base = 0.5 * (s_base + base / s_base);
+    s_base = 0.5 * (s_base + base / s_base);
+
+    let inv_4pi: f32 = 0.07957747;
+    let phase: f32 = (1.0 - g2) * inv_4pi / (base * s_base + 0.00001);
+    let tau: f32 = sigma * slice_dz;
+    let atten: f32 = 1.0 / (1.0 + tau + 0.5 * tau * tau);
+    let scatter_step: f32 = sun_intensity * phase * (1.0 - atten);
+    let mut radiance: f32 = trans_in * scatter_step;
+    if radiance < 0.0 {
+        radiance = 0.0;
+    }
+    out_buf[i] = radiance;
+}

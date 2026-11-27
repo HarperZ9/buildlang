@@ -1,0 +1,41 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Zain Dana Harper.
+// Four-band visible spectral reflectance to CIE 1931 XYZ kernel (N61, F1, N29, N42).
+// Integrates 450 nm, 530 nm, 600 nm, and 660 nm spectral bands under D65 illuminant
+// weights into non-negative CIE XYZ tristimulus buffers.
+
+#[compute(workgroup_size = [64, 1, 1])]
+fn spectral_xyz_eval_compute(
+    illum_gain: f32,
+    r450_buf: &[f32],
+    r530_buf: &[f32],
+    r600_buf: &[f32],
+    r660_buf: &[f32],
+    x_out: &mut [f32],
+    y_out: &mut [f32],
+    z_out: &mut [f32],
+) ~ Gpu {
+    let i = gl_GlobalInvocationID.x;
+    let b0: f32 = r450_buf[i] * illum_gain;
+    let b1: f32 = r530_buf[i] * illum_gain;
+    let b2: f32 = r600_buf[i] * illum_gain;
+    let b3: f32 = r660_buf[i] * illum_gain;
+
+    let mut cx: f32 = 0.3362 * b0 + 0.1655 * b1 + 1.0622 * b2 + 0.1649 * b3;
+    let mut cy: f32 = 0.0380 * b0 + 0.8620 * b1 + 0.6310 * b2 + 0.0610 * b3;
+    let mut cz: f32 = 1.7721 * b0 + 0.0422 * b1 + 0.0008 * b2 + 0.0000 * b3;
+
+    if cx < 0.0 {
+        cx = 0.0;
+    }
+    if cy < 0.0 {
+        cy = 0.0;
+    }
+    if cz < 0.0 {
+        cz = 0.0;
+    }
+
+    x_out[i] = cx;
+    y_out[i] = cy;
+    z_out[i] = cz;
+}
