@@ -1,0 +1,46 @@
+// SPDX-FileCopyrightText: 2026 Zain Dana Harper
+// SPDX-License-Identifier: MIT
+// Photonics-Geo GPU 320-Pack: D3Q19 Lattice-Boltzmann BGK fluid collision kernel.
+// Computes macroscopic density and 3D momentum velocity from principal lattice populations,
+// evaluates second-order Maxwell-Boltzmann equilibria, and applies BGK relaxation.
+
+#[compute(workgroup_size = [64, 1, 1])]
+fn lattice_boltzmann_d3q19_gpu(
+    omega: f32,
+    f0_buf: &[f32],
+    fxp_buf: &[f32],
+    fxm_buf: &[f32],
+    fyp_buf: &[f32],
+    fym_buf: &[f32],
+    fzp_buf: &[f32],
+    fzm_buf: &[f32],
+    f0_out: &mut [f32],
+    fxp_out: &mut [f32],
+    fyp_out: &mut [f32],
+    rho_out: &mut [f32],
+) ~ Gpu {
+    let i = gl_GlobalInvocationID.x;
+    let f0: f32 = f0_buf[i];
+    let fxp: f32 = fxp_buf[i];
+    let fxm: f32 = fxm_buf[i];
+    let fyp: f32 = fyp_buf[i];
+    let fym: f32 = fym_buf[i];
+    let fzp: f32 = fzp_buf[i];
+    let fzm: f32 = fzm_buf[i];
+
+    let rho: f32 = f0 + fxp + fxm + fyp + fym + fzp + fzm + 0.000001;
+    let inv_rho: f32 = 1.0 / rho;
+    let ux: f32 = (fxp - fxm) * inv_rho;
+    let uy: f32 = (fyp - fym) * inv_rho;
+    let uz: f32 = (fzp - fzm) * inv_rho;
+    let u2: f32 = ux * ux + uy * uy + uz * uz;
+
+    let feq_0: f32 = 0.33333334 * rho * (1.0 - 1.5 * u2);
+    let feq_xp: f32 = 0.05555556 * rho * (1.0 + 3.0 * ux + 4.5 * ux * ux - 1.5 * u2);
+    let feq_yp: f32 = 0.05555556 * rho * (1.0 + 3.0 * uy + 4.5 * uy * uy - 1.5 * u2);
+
+    f0_out[i] = f0 - omega * (f0 - feq_0);
+    fxp_out[i] = fxp - omega * (fxp - feq_xp);
+    fyp_out[i] = fyp - omega * (fyp - feq_yp);
+    rho_out[i] = rho;
+}
