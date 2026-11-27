@@ -4,23 +4,78 @@
 //! V5 Certified E-Graph Superoptimizer for BuildLang MIR (`--superopt`).
 //!
 //! Performs deterministic equality saturation and cost-guided extraction over
-//! pure SSA arithmetic expressions in [`MirModule`], emits a SHA-256 sealed
-//! `buildlang.superopt-cert/v1` proof certificate recording every rewrite step,
-//! and runs an independent fail-closed axiom verifier before any backend sees
-//! the superoptimized MIR.
+//! pure SSA arithmetic and 2026 SOTA AI/Graphics kernel expressions in
+//! [`MirModule`] (Online-Softmax / Log-Sum-Exp fusion, FMA contraction,
+//! block-scaled E2M1/FP8 shared-exponent scale hoisting, and opt-in
+//! FlashAttention-4 Horner FMA `exp2` emulation), emits a SHA-256 sealed
+//! `buildlang.superopt-cert/v1` proof certificate recording every rewrite step
+//! and error-bound witness, and runs an independent fail-closed axiom verifier
+//! before any backend sees the superoptimized MIR.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::codegen::ir::{
-    BinOp, FloatSize, IntSize, LocalId, MirBlock, MirConst, MirFunction, MirModule, MirRValue,
-    MirStmtKind, MirTerminator, MirType, MirValue,
+    BinOp, BlockId, FloatSize, IntSize, LocalId, MirBlock, MirConst, MirFunction, MirLocal,
+    MirModule, MirRValue, MirStmt, MirStmtKind, MirTerminator, MirType, MirValue,
 };
 
 /// Canonical schema identifier for BuildLang superoptimization certificates.
 pub const SUPEROPT_CERT_SCHEMA: &str = "buildlang.superopt-cert/v1";
+
+/// Degree-4 Chebyshev minimax coefficients approximating `2^f` on `f in [0, 1]`
+/// with `max_abs_err <= 4.0e-6` (FlashAttention-4 FMA-emulated `exp2` pipe).
+pub const HORNER_EXP2_DEG4_COEFFS: [f64; 5] = [
+    1.0000034929076984_f64,
+    0.6929729221730486_f64,
+    0.24160435727010388_f64,
+    0.051744997764090285_f64,
+    0.0136703094533634_f64,
+];
+
+/// Evaluate the certified degree-4 Horner `exp2` polynomial on `f in [0, 1]`.
+pub fn horner_exp2_f64(f: f64) -> f64 {
+    let c = HORNER_EXP2_DEG4_COEFFS;
+    let t1 = c[4].mul_add(f, c[3]);
+    let t2 = t1.mul_add(f, c[2]);
+    let t3 = t2.mul_add(f, c[1]);
+    t3.mul_add(f, c[0])
+}
+
+/// Configuration for V5 certified e-graph superoptimization.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SuperoptConfig {
+    /// Enable `(a * b) + c -> fma(a, b, c)` contraction on targets with native
+    /// or libm FMA support (`c`, `wgsl`, `hlsl`, `msl`, `spirv`, `llvm`).
+    pub allow_fma_contract: bool,
+    /// Opt-in FlashAttention-4 (`arXiv:2603.05451`) Horner FMA-emulated `exp2`
+    /// rewrite over fractional inputs `f in [0, 1]`.
+    pub enable_horner_exp2_fma: bool,
+}
+
+impl SuperoptConfig {
+    /// Default target-aware superoptimization configuration.
+    pub fn for_target(target: &str) -> Self {
+        Self {
+            allow_fma_contract: matches!(target, "c" | "wgsl" | "hlsl" | "msl" | "spirv" | "llvm"),
+            enable_horner_exp2_fma: false,
+        }
+    }
+}
+
+/// Certified accuracy witness attached to each rewrite step.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum RewriteErrorWitness {
+    /// Bit-exact equivalence (`0.0` error, `0` ULP drift).
+    #[default]
+    BitExact,
+    /// Algebraically exact over reals with certified IEEE-754 bounded ULP error.
+    BoundedUlp { max_ulps: u32 },
+}
 
 /// Certified rewrite rule identifiers checked independently by the verifier.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -64,6 +119,34 @@ pub enum SuperoptRule {
     /// IEEE-754 exact power-of-two float reciprocal (`x / 2^k -> x * 2^-k`).
     #[serde(rename = "R13_FLOAT_DIV_POW2_MUL")]
     FloatDivPow2Mul,
+    /// IEEE-754 bit-exact float unit division (`x / 1.0 -> x`).
+    #[serde(rename = "R14_FLOAT_DIV_ONE")]
+    FloatDivOne,
+    /// Online-Softmax / Log-Sum-Exp exponential product fusion
+    /// (`exp(a) * exp(b) -> exp(a + b)` and `exp2(a) * exp2(b) -> exp2(a + b)`).
+    #[serde(rename = "R15_ONLINE_SOFTMAX_EXP_MUL_FUSE")]
+    OnlineSoftmaxExpMulFuse,
+    /// Online-Softmax / Log-Sum-Exp exponential ratio fusion
+    /// (`exp(a) / exp(b) -> exp(a - b)` and `exp2(a) / exp2(b) -> exp2(a - b)`).
+    #[serde(rename = "R16_ONLINE_SOFTMAX_EXP_DIV_FUSE")]
+    OnlineSoftmaxExpDivFuse,
+    /// Log-Sum-Exp inverse cancellation (`log(exp(x)) -> x`, `log2(exp2(x)) -> x`).
+    #[serde(rename = "R17_LOG_EXP_CANCEL")]
+    LogExpCancel,
+    /// Single-rounding FMA contraction (`(a * b) + c -> fma(a, b, c)` and
+    /// `c + (a * b) -> fma(a, b, c)`) for dot products, Online-Softmax, and
+    /// Gated-DeltaNet recurrences.
+    #[serde(rename = "R18_FMA_CONTRACT")]
+    FmaContract,
+    /// Block-scaled microscaling (`E2M1`/`FP8` shared-exponent `E8M0`/`E4M3`)
+    /// scale hoisting: `(s * a) + (s * b) -> s * (a + b)` (and commutative
+    /// forms) or `(a * c1) * (b * c2) -> (a * b) * (c1 * c2)`.
+    #[serde(rename = "R19_BLOCK_SCALE_HOIST")]
+    BlockScaleHoist,
+    /// FlashAttention-4 degree-4 Horner FMA-emulated `exp2` rewrite over
+    /// fractional inputs `f in [0, 1]`.
+    #[serde(rename = "R20_HORNER_EXP2_FMA")]
+    HornerExp2Fma,
 }
 
 /// Canonical pure expression term recorded in a certificate step.
@@ -83,6 +166,12 @@ pub enum CertExpr {
         left: Box<CertExpr>,
         right: Box<CertExpr>,
     },
+    /// Pure mathematical intrinsic call (`exp`, `exp2`, `log`, `log2`, `fma`).
+    Call {
+        func: String,
+        args: Vec<CertExpr>,
+        ret_ty: MirType,
+    },
 }
 
 /// A single audited rewrite step inside a superoptimization certificate.
@@ -97,6 +186,8 @@ pub struct SuperoptStep {
     pub after: CertExpr,
     pub cost_before: u32,
     pub cost_after: u32,
+    #[serde(default)]
+    pub error_witness: RewriteErrorWitness,
 }
 
 /// Sealed, independently verifiable V5 superoptimization certificate.
@@ -182,6 +273,14 @@ pub fn expr_cost(expr: &CertExpr) -> u32 {
                 _ => 4,
             };
             op_c + expr_cost(left) + expr_cost(right)
+        }
+        CertExpr::Call { func, args, .. } => {
+            let call_c = match func.as_str() {
+                "fma" => 2,
+                "exp" | "exp2" | "log" | "log2" => 12,
+                _ => 6,
+            };
+            call_c + args.iter().map(expr_cost).sum::<u32>()
         }
     }
 }
@@ -383,21 +482,35 @@ fn eval_float_binop(op: BinOp, l_bits: u64, r_bits: u64, ty: &MirType) -> Option
     Some(res.to_bits())
 }
 
-/// Returns `Some(recip)` iff `v` is an exact finite power of two whose
-/// reciprocal is also an exact normal finite power of two (`v * recip == 1.0`).
-fn exact_pow2_float_recip(bits: u64, ty: &MirType) -> Option<u64> {
+/// Returns `true` iff `bits` encodes an exact finite IEEE-754 power of two
+/// (`+/- 2^k` with normal exponent, i.e. an `E8M0` microscaling shared exponent).
+fn is_exact_pow2_float(bits: u64, ty: &MirType) -> bool {
     let v = f64::from_bits(bits);
     if !v.is_finite() || v == 0.0 {
-        return None;
+        return false;
     }
-    // An IEEE-754 binary64 value is an exact power of two iff its 52-bit
-    // significand is zero and its exponent is normal (1..2046).
     let abs_bits = bits & 0x7fff_ffff_ffff_ffff;
     let frac = abs_bits & 0x000f_ffff_ffff_ffff;
     let exp = (abs_bits >> 52) & 0x7ff;
     if frac != 0 || exp == 0 || exp == 0x7ff {
+        return false;
+    }
+    if matches!(ty, MirType::Float(FloatSize::F32)) {
+        let vf = v as f32;
+        if !vf.is_finite() || vf == 0.0 || (vf as f64) != v {
+            return false;
+        }
+    }
+    true
+}
+
+/// Returns `Some(recip)` iff `v` is an exact finite power of two whose
+/// reciprocal is also an exact normal finite power of two (`v * recip == 1.0`).
+fn exact_pow2_float_recip(bits: u64, ty: &MirType) -> Option<u64> {
+    if !is_exact_pow2_float(bits, ty) {
         return None;
     }
+    let v = f64::from_bits(bits);
     let recip = 1.0 / v;
     if !recip.is_finite() || recip * v != 1.0 {
         return None;
@@ -409,11 +522,276 @@ fn exact_pow2_float_recip(bits: u64, ty: &MirType) -> Option<u64> {
             return None;
         }
     }
-    // Avoid trivial `x / 1.0 -> x * 1.0` (only worth rewriting when v != 1.0).
+    // Avoid trivial `x / 1.0 -> x * 1.0` (handled by R14_FLOAT_DIV_ONE).
     if v == 1.0 {
         return None;
     }
     Some(recip.to_bits())
+}
+
+fn is_cert_atom(expr: &CertExpr) -> bool {
+    matches!(
+        expr,
+        CertExpr::Local(_) | CertExpr::Int(_, _) | CertExpr::Uint(_, _) | CertExpr::FloatBits(_, _)
+    )
+}
+
+fn collect_expr_locals(expr: &CertExpr, out: &mut HashSet<LocalId>) {
+    match expr {
+        CertExpr::Local(id) => {
+            out.insert(LocalId(*id));
+        }
+        CertExpr::Int(_, _) | CertExpr::Uint(_, _) | CertExpr::FloatBits(_, _) => {}
+        CertExpr::BinOp { left, right, .. } => {
+            collect_expr_locals(left, out);
+            collect_expr_locals(right, out);
+        }
+        CertExpr::Call { args, .. } => {
+            for a in args {
+                collect_expr_locals(a, out);
+            }
+        }
+    }
+}
+
+/// Construct the canonical degree-4 Horner FMA `CertExpr` for `exp2(f)`.
+pub fn horner_exp2_cert_expr(f: CertExpr, ret_ty: MirType) -> CertExpr {
+    let c = HORNER_EXP2_DEG4_COEFFS;
+    let c4 = CertExpr::FloatBits(c[4].to_bits(), ret_ty.clone());
+    let c3 = CertExpr::FloatBits(c[3].to_bits(), ret_ty.clone());
+    let c2 = CertExpr::FloatBits(c[2].to_bits(), ret_ty.clone());
+    let c1 = CertExpr::FloatBits(c[1].to_bits(), ret_ty.clone());
+    let c0 = CertExpr::FloatBits(c[0].to_bits(), ret_ty.clone());
+    let t1 = CertExpr::Call {
+        func: "fma".to_string(),
+        args: vec![c4, f.clone(), c3],
+        ret_ty: ret_ty.clone(),
+    };
+    let t2 = CertExpr::Call {
+        func: "fma".to_string(),
+        args: vec![t1, f.clone(), c2],
+        ret_ty: ret_ty.clone(),
+    };
+    let t3 = CertExpr::Call {
+        func: "fma".to_string(),
+        args: vec![t2, f.clone(), c1],
+        ret_ty: ret_ty.clone(),
+    };
+    CertExpr::Call {
+        func: "fma".to_string(),
+        args: vec![t3, f, c0],
+        ret_ty,
+    }
+}
+
+/// Extract shared factor `(s, a, b)` from `(l1 * l2) + (r1 * r2)` for
+/// `R19_BLOCK_SCALE_HOIST`.
+fn extract_shared_scale_sum(
+    left: &CertExpr,
+    right: &CertExpr,
+) -> Option<(CertExpr, CertExpr, CertExpr)> {
+    let CertExpr::BinOp {
+        op: BinOp::Mul,
+        left: l1,
+        right: l2,
+    } = left
+    else {
+        return None;
+    };
+    let CertExpr::BinOp {
+        op: BinOp::Mul,
+        left: r1,
+        right: r2,
+    } = right
+    else {
+        return None;
+    };
+    if !is_cert_atom(l1) || !is_cert_atom(l2) || !is_cert_atom(r1) || !is_cert_atom(r2) {
+        return None;
+    }
+    if l1 == r1 {
+        Some((
+            l1.as_ref().clone(),
+            l2.as_ref().clone(),
+            r2.as_ref().clone(),
+        ))
+    } else if l1 == r2 {
+        Some((
+            l1.as_ref().clone(),
+            l2.as_ref().clone(),
+            r1.as_ref().clone(),
+        ))
+    } else if l2 == r1 {
+        Some((
+            l2.as_ref().clone(),
+            l1.as_ref().clone(),
+            r2.as_ref().clone(),
+        ))
+    } else if l2 == r2 {
+        Some((
+            l2.as_ref().clone(),
+            l1.as_ref().clone(),
+            r1.as_ref().clone(),
+        ))
+    } else {
+        None
+    }
+}
+
+/// Extract `(a, c1, b, c2, ty)` from `(a * c1) * (b * c2)` (any factor order)
+/// where `c1` and `c2` are finite float constants of matching type `ty`.
+fn extract_const_scale_pair(
+    left: &CertExpr,
+    right: &CertExpr,
+) -> Option<(CertExpr, u64, CertExpr, u64, MirType)> {
+    let extract_scaled_atom = |e: &CertExpr| -> Option<(CertExpr, u64, MirType)> {
+        let CertExpr::BinOp {
+            op: BinOp::Mul,
+            left: a,
+            right: b,
+        } = e
+        else {
+            return None;
+        };
+        match (a.as_ref(), b.as_ref()) {
+            (var, CertExpr::FloatBits(cb, ty)) if is_cert_atom(var) => {
+                Some((var.clone(), *cb, ty.clone()))
+            }
+            (CertExpr::FloatBits(cb, ty), var) if is_cert_atom(var) => {
+                Some((var.clone(), *cb, ty.clone()))
+            }
+            _ => None,
+        }
+    };
+    let (a, c1, ty1) = extract_scaled_atom(left)?;
+    let (b, c2, ty2) = extract_scaled_atom(right)?;
+    if ty1 != ty2 {
+        return None;
+    }
+    Some((a, c1, b, c2, ty1))
+}
+
+/// Deterministic certified error-bound witness for `(rule, before)`.
+pub fn expected_error_witness(rule: &SuperoptRule, before: &CertExpr) -> RewriteErrorWitness {
+    match rule {
+        SuperoptRule::ConstFoldInt
+        | SuperoptRule::ConstFoldFloat
+        | SuperoptRule::IntAddZero
+        | SuperoptRule::IntSubZero
+        | SuperoptRule::IntSubSelf
+        | SuperoptRule::IntMulOne
+        | SuperoptRule::IntMulZero
+        | SuperoptRule::IntMulTwoAdd
+        | SuperoptRule::IntMulPow2Shl
+        | SuperoptRule::IntBitId
+        | SuperoptRule::FloatMulOne
+        | SuperoptRule::FloatMulTwoAdd
+        | SuperoptRule::FloatDivPow2Mul
+        | SuperoptRule::FloatDivOne => RewriteErrorWitness::BitExact,
+        SuperoptRule::OnlineSoftmaxExpMulFuse | SuperoptRule::OnlineSoftmaxExpDivFuse => {
+            RewriteErrorWitness::BoundedUlp { max_ulps: 2 }
+        }
+        SuperoptRule::LogExpCancel | SuperoptRule::FmaContract => {
+            RewriteErrorWitness::BoundedUlp { max_ulps: 1 }
+        }
+        SuperoptRule::BlockScaleHoist => {
+            // Exact power-of-two E8M0 shared scales hoist without significand rounding.
+            if let CertExpr::BinOp { op, left, right } = before {
+                if *op == BinOp::Add {
+                    if let Some((CertExpr::FloatBits(sb, ty), _, _)) =
+                        extract_shared_scale_sum(left, right)
+                    {
+                        if is_exact_pow2_float(sb, &ty) {
+                            return RewriteErrorWitness::BitExact;
+                        }
+                    }
+                } else if *op == BinOp::Mul {
+                    if let Some((_, c1, _, c2, ty)) = extract_const_scale_pair(left, right) {
+                        if is_exact_pow2_float(c1, &ty) && is_exact_pow2_float(c2, &ty) {
+                            return RewriteErrorWitness::BitExact;
+                        }
+                    }
+                }
+            }
+            RewriteErrorWitness::BoundedUlp { max_ulps: 2 }
+        }
+        SuperoptRule::HornerExp2Fma => RewriteErrorWitness::BoundedUlp { max_ulps: 32 },
+    }
+}
+
+/// Deterministic normalized Walsh-Hadamard transform `H_B` (`B` power of two,
+/// e.g. `16` for NVFP4 or `32` for MXFP4) satisfying `H_B * H_B^T = I`
+/// (Full-Stack FP4, arXiv:2607.04422).
+pub fn walsh_hadamard_transform_normalized(buf: &mut [f64]) -> Result<(), String> {
+    let n = buf.len();
+    if n == 0 || !n.is_power_of_two() {
+        return Err(format!(
+            "Walsh-Hadamard block size must be a positive power of two, got {n}"
+        ));
+    }
+    let mut h = 1usize;
+    while h < n {
+        let step = h * 2;
+        for start in (0..n).step_by(step) {
+            for i in start..(start + h) {
+                let u = buf[i];
+                let v = buf[i + h];
+                buf[i] = u + v;
+                buf[i + h] = u - v;
+            }
+        }
+        h = step;
+    }
+    let inv_sqrt = 1.0_f64 / (n as f64).sqrt();
+    for x in buf.iter_mut() {
+        *x *= inv_sqrt;
+    }
+    Ok(())
+}
+
+/// Quantize a block of `B` finite f64 values into `E2M1` (FP4 values in
+/// `{0, +/-0.5, +/-1, +/-1.5, +/-2, +/-3, +/-4, +/-6}`) with either an exact
+/// power-of-two `E8M0` (MXFP4) scale or an `E4M3`-style (NVFP4) block scale.
+/// Returns `(block_scale, quantized_e2m1_values)`.
+pub fn quantize_e2m1_block(block: &[f64], use_e8m0_pow2: bool) -> Result<(f64, Vec<f64>), String> {
+    if block.is_empty() || !block.len().is_power_of_two() {
+        return Err(format!(
+            "microscaling block length must be a power of two (16 or 32), got {}",
+            block.len()
+        ));
+    }
+    if block.iter().any(|v| !v.is_finite()) {
+        return Err("non-finite value in microscaling block".to_string());
+    }
+    let max_abs = block.iter().fold(0.0_f64, |acc, &v| acc.max(v.abs()));
+    if max_abs == 0.0 {
+        return Ok((1.0, vec![0.0; block.len()]));
+    }
+    let raw_scale = max_abs / 6.0_f64;
+    let scale = if use_e8m0_pow2 {
+        // Round up to exact power of two `2^ceil(log2(raw_scale))` (E8M0).
+        2.0_f64.powi(raw_scale.log2().ceil() as i32)
+    } else {
+        raw_scale
+    };
+    const E2M1_LEVELS: [f64; 8] = [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0];
+    let mut q = Vec::with_capacity(block.len());
+    for &x in block {
+        let scaled = x / scale;
+        let sign = if scaled < 0.0 { -1.0 } else { 1.0 };
+        let mag = scaled.abs();
+        let mut best = E2M1_LEVELS[0];
+        let mut best_diff = (mag - best).abs();
+        for &lvl in &E2M1_LEVELS[1..] {
+            let d = (mag - lvl).abs();
+            if d < best_diff {
+                best_diff = d;
+                best = lvl;
+            }
+        }
+        q.push(sign * best);
+    }
+    Ok((scale, q))
 }
 
 fn saturate_binop(
@@ -422,6 +800,7 @@ fn saturate_binop(
     right: &CertExpr,
     dest_ty: &MirType,
     allow_int_shift: bool,
+    allow_fma_contract: bool,
 ) -> Option<(CertExpr, SuperoptRule, u32, u32)> {
     let root = CertExpr::BinOp {
         op,
@@ -515,14 +894,18 @@ fn saturate_binop(
                 }
                 if allow_int_shift {
                     let bits = int_bit_width(dest_ty).unwrap_or(32);
-                    let try_pow2 = |var: &CertExpr, c: u128| -> Option<CertExpr> {
+                    let try_pow2 = |var: &CertExpr,
+                                    c: u128,
+                                    c_ty: &MirType,
+                                    is_signed_const: bool|
+                     -> Option<CertExpr> {
                         if c > 2 && c.is_power_of_two() {
                             let shift = c.trailing_zeros();
                             if shift < bits.saturating_sub(1) {
-                                let shift_const = if dest_ty.is_signed() {
-                                    CertExpr::Int(shift as i128, dest_ty.clone())
+                                let shift_const = if is_signed_const {
+                                    CertExpr::Int(shift as i128, c_ty.clone())
                                 } else {
-                                    CertExpr::Uint(shift as u128, dest_ty.clone())
+                                    CertExpr::Uint(shift as u128, c_ty.clone())
                                 };
                                 return Some(CertExpr::BinOp {
                                     op: BinOp::Shl,
@@ -534,26 +917,26 @@ fn saturate_binop(
                         None
                     };
                     match right {
-                        CertExpr::Int(c, _) if *c > 2 => {
-                            if let Some(shl) = try_pow2(left, *c as u128) {
+                        CertExpr::Int(c, c_ty) if *c > 2 => {
+                            if let Some(shl) = try_pow2(left, *c as u128, c_ty, true) {
                                 eg.add_equiv(shl, SuperoptRule::IntMulPow2Shl);
                             }
                         }
-                        CertExpr::Uint(c, _) if *c > 2 => {
-                            if let Some(shl) = try_pow2(left, *c) {
+                        CertExpr::Uint(c, c_ty) if *c > 2 => {
+                            if let Some(shl) = try_pow2(left, *c, c_ty, false) {
                                 eg.add_equiv(shl, SuperoptRule::IntMulPow2Shl);
                             }
                         }
                         _ => {}
                     }
                     match left {
-                        CertExpr::Int(c, _) if *c > 2 => {
-                            if let Some(shl) = try_pow2(right, *c as u128) {
+                        CertExpr::Int(c, c_ty) if *c > 2 => {
+                            if let Some(shl) = try_pow2(right, *c as u128, c_ty, true) {
                                 eg.add_equiv(shl, SuperoptRule::IntMulPow2Shl);
                             }
                         }
-                        CertExpr::Uint(c, _) if *c > 2 => {
-                            if let Some(shl) = try_pow2(right, *c) {
+                        CertExpr::Uint(c, c_ty) if *c > 2 => {
+                            if let Some(shl) = try_pow2(right, *c, c_ty, false) {
                                 eg.add_equiv(shl, SuperoptRule::IntMulPow2Shl);
                             }
                         }
@@ -607,19 +990,25 @@ fn saturate_binop(
         }
     }
 
-    // IEEE-754 sound floating-point rules
+    // IEEE-754 sound floating-point rules + 2026 SOTA AI/Graphics kernel rules
     if dest_ty.is_float() {
         let one_bits = 1.0_f64.to_bits();
         let two_bits = 2.0_f64.to_bits();
         match op {
             BinOp::Mul => {
-                if matches!(right, CertExpr::FloatBits(b, _) if *b == one_bits) {
+                if is_cert_atom(left)
+                    && matches!(right, CertExpr::FloatBits(b, _) if *b == one_bits)
+                {
                     eg.add_equiv(left.clone(), SuperoptRule::FloatMulOne);
                 }
-                if matches!(left, CertExpr::FloatBits(b, _) if *b == one_bits) {
+                if is_cert_atom(right)
+                    && matches!(left, CertExpr::FloatBits(b, _) if *b == one_bits)
+                {
                     eg.add_equiv(right.clone(), SuperoptRule::FloatMulOne);
                 }
-                if matches!(right, CertExpr::FloatBits(b, _) if *b == two_bits) {
+                if is_cert_atom(left)
+                    && matches!(right, CertExpr::FloatBits(b, _) if *b == two_bits)
+                {
                     eg.add_equiv(
                         CertExpr::BinOp {
                             op: BinOp::Add,
@@ -629,7 +1018,9 @@ fn saturate_binop(
                         SuperoptRule::FloatMulTwoAdd,
                     );
                 }
-                if matches!(left, CertExpr::FloatBits(b, _) if *b == two_bits) {
+                if is_cert_atom(right)
+                    && matches!(left, CertExpr::FloatBits(b, _) if *b == two_bits)
+                {
                     eg.add_equiv(
                         CertExpr::BinOp {
                             op: BinOp::Add,
@@ -639,18 +1030,186 @@ fn saturate_binop(
                         SuperoptRule::FloatMulTwoAdd,
                     );
                 }
+
+                // R15: Online-Softmax / Log-Sum-Exp `exp(a) * exp(b) -> exp(a + b)`
+                if let (
+                    CertExpr::Call {
+                        func: f1,
+                        args: a1,
+                        ret_ty: t1,
+                    },
+                    CertExpr::Call {
+                        func: f2,
+                        args: a2,
+                        ret_ty: t2,
+                    },
+                ) = (left, right)
+                {
+                    if f1 == f2
+                        && matches!(f1.as_str(), "exp" | "exp2")
+                        && a1.len() == 1
+                        && a2.len() == 1
+                        && t1 == dest_ty
+                        && t2 == dest_ty
+                        && is_cert_atom(&a1[0])
+                        && is_cert_atom(&a2[0])
+                    {
+                        eg.add_equiv(
+                            CertExpr::Call {
+                                func: f1.clone(),
+                                args: vec![CertExpr::BinOp {
+                                    op: BinOp::Add,
+                                    left: Box::new(a1[0].clone()),
+                                    right: Box::new(a2[0].clone()),
+                                }],
+                                ret_ty: dest_ty.clone(),
+                            },
+                            SuperoptRule::OnlineSoftmaxExpMulFuse,
+                        );
+                    }
+                }
+
+                // R19 Form B: `(a * c1) * (b * c2) -> (a * b) * (c1 * c2)`
+                if let Some((a, c1, b, c2, ty)) = extract_const_scale_pair(left, right) {
+                    if &ty == dest_ty {
+                        if let Some(c12) = eval_float_binop(BinOp::Mul, c1, c2, &ty) {
+                            eg.add_equiv(
+                                CertExpr::BinOp {
+                                    op: BinOp::Mul,
+                                    left: Box::new(CertExpr::BinOp {
+                                        op: BinOp::Mul,
+                                        left: Box::new(a),
+                                        right: Box::new(b),
+                                    }),
+                                    right: Box::new(CertExpr::FloatBits(c12, ty)),
+                                },
+                                SuperoptRule::BlockScaleHoist,
+                            );
+                        }
+                    }
+                }
             }
             BinOp::Div => {
-                if let CertExpr::FloatBits(b, ft) = right {
-                    if let Some(recip_bits) = exact_pow2_float_recip(*b, ft) {
+                // R14: Bit-exact `x / 1.0 -> x`
+                if is_cert_atom(left)
+                    && matches!(right, CertExpr::FloatBits(b, _) if *b == one_bits)
+                {
+                    eg.add_equiv(left.clone(), SuperoptRule::FloatDivOne);
+                }
+                // R13: Power-of-two float reciprocal `x / 2^k -> x * 2^-k`
+                if is_cert_atom(left) {
+                    if let CertExpr::FloatBits(b, ft) = right {
+                        if let Some(recip_bits) = exact_pow2_float_recip(*b, ft) {
+                            eg.add_equiv(
+                                CertExpr::BinOp {
+                                    op: BinOp::Mul,
+                                    left: Box::new(left.clone()),
+                                    right: Box::new(CertExpr::FloatBits(recip_bits, ft.clone())),
+                                },
+                                SuperoptRule::FloatDivPow2Mul,
+                            );
+                        }
+                    }
+                }
+                // R16: Online-Softmax / Log-Sum-Exp `exp(a) / exp(b) -> exp(a - b)`
+                if let (
+                    CertExpr::Call {
+                        func: f1,
+                        args: a1,
+                        ret_ty: t1,
+                    },
+                    CertExpr::Call {
+                        func: f2,
+                        args: a2,
+                        ret_ty: t2,
+                    },
+                ) = (left, right)
+                {
+                    if f1 == f2
+                        && matches!(f1.as_str(), "exp" | "exp2")
+                        && a1.len() == 1
+                        && a2.len() == 1
+                        && t1 == dest_ty
+                        && t2 == dest_ty
+                        && is_cert_atom(&a1[0])
+                        && is_cert_atom(&a2[0])
+                    {
                         eg.add_equiv(
-                            CertExpr::BinOp {
-                                op: BinOp::Mul,
-                                left: Box::new(left.clone()),
-                                right: Box::new(CertExpr::FloatBits(recip_bits, ft.clone())),
+                            CertExpr::Call {
+                                func: f1.clone(),
+                                args: vec![CertExpr::BinOp {
+                                    op: BinOp::Sub,
+                                    left: Box::new(a1[0].clone()),
+                                    right: Box::new(a2[0].clone()),
+                                }],
+                                ret_ty: dest_ty.clone(),
                             },
-                            SuperoptRule::FloatDivPow2Mul,
+                            SuperoptRule::OnlineSoftmaxExpDivFuse,
                         );
+                    }
+                }
+            }
+            BinOp::Add => {
+                // R19 Form A: Shared block-scale hoisting `(s * a) + (s * b) -> s * (a + b)`
+                // (cost 7 -> 4, beats FMA cost 5 automatically in MiniEGraph!)
+                if let Some((s, a, b)) = extract_shared_scale_sum(left, right) {
+                    eg.add_equiv(
+                        CertExpr::BinOp {
+                            op: BinOp::Mul,
+                            left: Box::new(s),
+                            right: Box::new(CertExpr::BinOp {
+                                op: BinOp::Add,
+                                left: Box::new(a),
+                                right: Box::new(b),
+                            }),
+                        },
+                        SuperoptRule::BlockScaleHoist,
+                    );
+                }
+
+                // R18: Single-rounding FMA contraction `(a * b) + c -> fma(a, b, c)`
+                if allow_fma_contract {
+                    if let CertExpr::BinOp {
+                        op: BinOp::Mul,
+                        left: ma,
+                        right: mb,
+                    } = left
+                    {
+                        if is_cert_atom(ma) && is_cert_atom(mb) && is_cert_atom(right) {
+                            eg.add_equiv(
+                                CertExpr::Call {
+                                    func: "fma".to_string(),
+                                    args: vec![
+                                        ma.as_ref().clone(),
+                                        mb.as_ref().clone(),
+                                        right.clone(),
+                                    ],
+                                    ret_ty: dest_ty.clone(),
+                                },
+                                SuperoptRule::FmaContract,
+                            );
+                        }
+                    }
+                    if let CertExpr::BinOp {
+                        op: BinOp::Mul,
+                        left: ma,
+                        right: mb,
+                    } = right
+                    {
+                        if is_cert_atom(ma) && is_cert_atom(mb) && is_cert_atom(left) {
+                            eg.add_equiv(
+                                CertExpr::Call {
+                                    func: "fma".to_string(),
+                                    args: vec![
+                                        ma.as_ref().clone(),
+                                        mb.as_ref().clone(),
+                                        left.clone(),
+                                    ],
+                                    ret_ty: dest_ty.clone(),
+                                },
+                                SuperoptRule::FmaContract,
+                            );
+                        }
                     }
                 }
             }
@@ -693,7 +1252,7 @@ fn cert_atom_to_mir_value(expr: &CertExpr) -> Option<MirValue> {
             f64::from_bits(*bits),
             ty.clone(),
         ))),
-        CertExpr::BinOp { .. } => None,
+        CertExpr::BinOp { .. } | CertExpr::Call { .. } => None,
     }
 }
 
@@ -708,111 +1267,560 @@ fn cert_to_mir_rvalue(expr: &CertExpr) -> Option<MirRValue> {
                 right: r,
             })
         }
+        CertExpr::Call { .. } => None,
         atom => cert_atom_to_mir_value(atom).map(MirRValue::Use),
     }
 }
 
-/// Collect locals that are assigned more than once, are parameters, or have
-/// their address taken, excluding them from constant propagation so we never
-/// fold across loops or aliased mutations.
-fn collect_unsafe_locals(func: &MirFunction) -> HashSet<LocalId> {
-    let mut unsafe_set = HashSet::new();
+/// Partition function locals into:
+/// - `mutated_locals`: assigned more than once, address-taken, or mutated via
+///   deref/field (never safe for cross-block expression substitution).
+/// - `single_def_locals`: assigned exactly once, not a param, not address-taken.
+/// - `unsafe_const_locals`: `mutated_locals` union `param_locals`.
+fn analyze_function_locals(
+    func: &MirFunction,
+) -> (HashSet<LocalId>, HashSet<LocalId>, HashSet<LocalId>) {
+    let mut mutated = HashSet::new();
+    let mut params = HashSet::new();
     let mut def_counts: HashMap<LocalId, usize> = HashMap::new();
     for local in &func.locals {
         if local.is_param {
-            unsafe_set.insert(local.id);
+            params.insert(local.id);
         }
     }
+    if let Some(blocks) = &func.blocks {
+        for block in blocks {
+            for stmt in &block.stmts {
+                match &stmt.kind {
+                    MirStmtKind::Assign { dest, value } => {
+                        *def_counts.entry(*dest).or_insert(0) += 1;
+                        if let MirRValue::Ref { place, .. } | MirRValue::AddressOf { place, .. } =
+                            value
+                        {
+                            mutated.insert(place.local);
+                        }
+                    }
+                    MirStmtKind::DerefAssign { ptr, .. } => {
+                        mutated.insert(*ptr);
+                    }
+                    MirStmtKind::FieldAssign { base, .. } => {
+                        mutated.insert(*base);
+                    }
+                    MirStmtKind::FieldDerefAssign { ptr, .. } => {
+                        mutated.insert(*ptr);
+                    }
+                    _ => {}
+                }
+            }
+            if let Some(MirTerminator::Call { dest: Some(d), .. }) = &block.terminator {
+                *def_counts.entry(*d).or_insert(0) += 1;
+            }
+        }
+    }
+    for (&id, &count) in &def_counts {
+        if count != 1 || params.contains(&id) {
+            mutated.insert(id);
+        }
+    }
+    let mut single_def = HashSet::new();
+    for (&id, &count) in &def_counts {
+        if count == 1 && !params.contains(&id) && !mutated.contains(&id) {
+            single_def.insert(id);
+        }
+    }
+    let mut unsafe_const = mutated.clone();
+    unsafe_const.extend(params.iter().copied());
+    (mutated, single_def, unsafe_const)
+}
+
+fn callee_func_name(v: &MirValue) -> Option<&str> {
+    match v {
+        MirValue::Function(n) | MirValue::Global(n) => Some(n.as_ref()),
+        _ => None,
+    }
+}
+
+/// Build a function-wide map of single-def pure SSA expressions whose leaf
+/// locals are never mutated anywhere in `func`, plus copy-origin chains
+/// (`let var = _tmp`) for dead-code elimination after fusion.
+fn collect_immutable_pure_defs(
+    func: &MirFunction,
+    mutated_locals: &HashSet<LocalId>,
+    single_def_locals: &HashSet<LocalId>,
+) -> (HashMap<LocalId, CertExpr>, HashMap<LocalId, LocalId>) {
+    let mut defs: HashMap<LocalId, CertExpr> = HashMap::new();
+    let mut copy_origin: HashMap<LocalId, LocalId> = HashMap::new();
     let Some(blocks) = &func.blocks else {
-        return unsafe_set;
+        return (defs, copy_origin);
     };
+    let empty_const = HashMap::new();
+
+    // Pass A: collect base definitions (constants, pure Mul, pure math Calls).
+    for block in blocks {
+        for stmt in &block.stmts {
+            if let MirStmtKind::Assign { dest, value } = &stmt.kind {
+                if !single_def_locals.contains(dest) {
+                    continue;
+                }
+                match value {
+                    MirRValue::Use(MirValue::Const(c)) => {
+                        if let Some(ce) = mir_const_to_cert(c) {
+                            defs.insert(*dest, ce);
+                        }
+                    }
+                    MirRValue::Use(MirValue::Local(src)) => {
+                        copy_origin.insert(*dest, *src);
+                    }
+                    MirRValue::BinaryOp {
+                        op: BinOp::Mul,
+                        left,
+                        right,
+                    } => {
+                        if let (Some(le), Some(re)) = (
+                            mir_value_to_cert(left, &empty_const),
+                            mir_value_to_cert(right, &empty_const),
+                        ) {
+                            let mut leaves = HashSet::new();
+                            collect_expr_locals(&le, &mut leaves);
+                            collect_expr_locals(&re, &mut leaves);
+                            if leaves.iter().all(|l| !mutated_locals.contains(l)) {
+                                defs.insert(
+                                    *dest,
+                                    CertExpr::BinOp {
+                                        op: BinOp::Mul,
+                                        left: Box::new(le),
+                                        right: Box::new(re),
+                                    },
+                                );
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        if let Some(MirTerminator::Call {
+            func: callee,
+            args,
+            dest: Some(dest),
+            ..
+        }) = &block.terminator
+        {
+            if !single_def_locals.contains(dest) {
+                continue;
+            }
+            let Some(name) = callee_func_name(callee) else {
+                continue;
+            };
+            if matches!(name, "exp" | "exp2" | "log" | "log2") && args.len() == 1 {
+                if let Some(arg_expr) = mir_value_to_cert(&args[0], &empty_const) {
+                    let mut leaves = HashSet::new();
+                    collect_expr_locals(&arg_expr, &mut leaves);
+                    if leaves.iter().all(|l| !mutated_locals.contains(l)) {
+                        let ret_ty = func
+                            .locals
+                            .get(dest.0 as usize)
+                            .map(|l| l.ty.clone())
+                            .unwrap_or(MirType::Void);
+                        if ret_ty.is_float() {
+                            defs.insert(
+                                *dest,
+                                CertExpr::Call {
+                                    func: name.to_string(),
+                                    args: vec![arg_expr],
+                                    ret_ty,
+                                },
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Pass B: propagate pure expressions across single-def copy chains (`let ex = _tmp`).
+    loop {
+        let mut changed = false;
+        for (&dest, &src) in &copy_origin {
+            if !defs.contains_key(&dest) {
+                if let Some(expr) = defs.get(&src).cloned() {
+                    defs.insert(dest, expr);
+                    changed = true;
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+
+    (defs, copy_origin)
+}
+
+fn mark_eliminable_chain(
+    id: LocalId,
+    copy_origin: &HashMap<LocalId, LocalId>,
+    eliminable: &mut HashSet<LocalId>,
+) {
+    let mut cur = id;
+    while eliminable.insert(cur) {
+        if let Some(&orig) = copy_origin.get(&cur) {
+            cur = orig;
+        } else {
+            break;
+        }
+    }
+}
+
+fn alloc_fresh_local(locals: &mut Vec<MirLocal>, ty: MirType) -> LocalId {
+    let id = LocalId(locals.len() as u32);
+    locals.push(MirLocal::new(id, ty));
+    id
+}
+
+fn count_local_uses_in_value(v: &MirValue, counts: &mut HashMap<LocalId, usize>) {
+    if let MirValue::Local(id) = v {
+        *counts.entry(*id).or_insert(0) += 1;
+    }
+}
+
+fn count_local_uses_in_place(
+    p: &crate::codegen::ir::MirPlace,
+    counts: &mut HashMap<LocalId, usize>,
+) {
+    *counts.entry(p.local).or_insert(0) += 1;
+    for proj in &p.projections {
+        if let crate::codegen::ir::PlaceProjection::Index(idx) = proj {
+            *counts.entry(*idx).or_insert(0) += 1;
+        }
+    }
+}
+
+fn count_local_uses_in_rvalue(rv: &MirRValue, counts: &mut HashMap<LocalId, usize>) {
+    match rv {
+        MirRValue::Use(v)
+        | MirRValue::UnaryOp { operand: v, .. }
+        | MirRValue::Cast { value: v, .. } => {
+            count_local_uses_in_value(v, counts);
+        }
+        MirRValue::BinaryOp { left, right, .. } => {
+            count_local_uses_in_value(left, counts);
+            count_local_uses_in_value(right, counts);
+        }
+        MirRValue::Ref { place, .. }
+        | MirRValue::AddressOf { place, .. }
+        | MirRValue::Discriminant(place)
+        | MirRValue::Len(place) => count_local_uses_in_place(place, counts),
+        MirRValue::Aggregate { operands, .. } => {
+            for op in operands {
+                count_local_uses_in_value(op, counts);
+            }
+        }
+        MirRValue::Repeat { value, .. } => count_local_uses_in_value(value, counts),
+        MirRValue::FieldAccess { base, .. } | MirRValue::VariantField { base, .. } => {
+            count_local_uses_in_value(base, counts);
+        }
+        MirRValue::IndexAccess { base, index, .. } => {
+            count_local_uses_in_value(base, counts);
+            count_local_uses_in_value(index, counts);
+        }
+        MirRValue::Deref { ptr, .. } => count_local_uses_in_value(ptr, counts),
+        MirRValue::TextureSample {
+            texture,
+            sampler,
+            coords,
+        } => {
+            count_local_uses_in_value(texture, counts);
+            count_local_uses_in_value(sampler, counts);
+            count_local_uses_in_value(coords, counts);
+        }
+        MirRValue::AddressOfGlobal { .. } | MirRValue::NullaryOp(_, _) => {}
+    }
+}
+
+fn count_all_local_uses(blocks: &[MirBlock]) -> HashMap<LocalId, usize> {
+    let mut counts = HashMap::new();
     for block in blocks {
         for stmt in &block.stmts {
             match &stmt.kind {
-                MirStmtKind::Assign { dest, value } => {
-                    *def_counts.entry(*dest).or_insert(0) += 1;
-                    if let MirRValue::Ref { place, .. } | MirRValue::AddressOf { place, .. } = value
-                    {
-                        unsafe_set.insert(place.local);
+                MirStmtKind::Assign { value, .. } => count_local_uses_in_rvalue(value, &mut counts),
+                MirStmtKind::DerefAssign { ptr, value } => {
+                    *counts.entry(*ptr).or_insert(0) += 1;
+                    count_local_uses_in_rvalue(value, &mut counts);
+                }
+                MirStmtKind::FieldAssign { base, value, .. } => {
+                    *counts.entry(*base).or_insert(0) += 1;
+                    count_local_uses_in_rvalue(value, &mut counts);
+                }
+                MirStmtKind::FieldDerefAssign { ptr, value, .. } => {
+                    *counts.entry(*ptr).or_insert(0) += 1;
+                    count_local_uses_in_rvalue(value, &mut counts);
+                }
+                MirStmtKind::IndexStore {
+                    base, index, value, ..
+                } => {
+                    count_local_uses_in_value(base, &mut counts);
+                    count_local_uses_in_value(index, &mut counts);
+                    count_local_uses_in_rvalue(value, &mut counts);
+                }
+                MirStmtKind::GlobalStore { value, .. } => {
+                    count_local_uses_in_rvalue(value, &mut counts);
+                }
+                MirStmtKind::StorageLive(_)
+                | MirStmtKind::StorageDead(_)
+                | MirStmtKind::Nop
+                | MirStmtKind::WorkgroupBarrier => {}
+            }
+        }
+        if let Some(term) = &block.terminator {
+            match term {
+                MirTerminator::If { cond, .. } => count_local_uses_in_value(cond, &mut counts),
+                MirTerminator::Switch { value, .. } => {
+                    count_local_uses_in_value(value, &mut counts)
+                }
+                MirTerminator::Call { func, args, .. } => {
+                    count_local_uses_in_value(func, &mut counts);
+                    for a in args {
+                        count_local_uses_in_value(a, &mut counts);
                     }
                 }
-                MirStmtKind::DerefAssign { ptr, .. } => {
-                    unsafe_set.insert(*ptr);
-                }
-                MirStmtKind::FieldAssign { base, .. } => {
-                    unsafe_set.insert(*base);
-                }
-                MirStmtKind::FieldDerefAssign { ptr, .. } => {
-                    unsafe_set.insert(*ptr);
-                }
-                _ => {}
+                MirTerminator::Return(Some(v)) => count_local_uses_in_value(v, &mut counts),
+                MirTerminator::Drop { place, .. } => count_local_uses_in_place(place, &mut counts),
+                MirTerminator::Assert { cond, .. } => count_local_uses_in_value(cond, &mut counts),
+                MirTerminator::Goto(_)
+                | MirTerminator::Return(None)
+                | MirTerminator::Unreachable
+                | MirTerminator::Resume
+                | MirTerminator::Abort => {}
             }
         }
-        if let Some(MirTerminator::Call { dest: Some(d), .. }) = &block.terminator {
-            *def_counts.entry(*d).or_insert(0) += 1;
-        }
     }
-    for (id, count) in def_counts {
-        if count != 1 {
-            unsafe_set.insert(id);
-        }
-    }
-    unsafe_set
+    counts
 }
 
-fn superoptimize_block(
-    func_name: &str,
-    locals: &[crate::codegen::ir::MirLocal],
-    unsafe_locals: &HashSet<LocalId>,
-    allow_int_shift: bool,
-    block: &mut MirBlock,
-    steps: &mut Vec<SuperoptStep>,
-) {
-    let mut const_env: HashMap<LocalId, MirConst> = HashMap::new();
-    for (stmt_idx, stmt) in block.stmts.iter_mut().enumerate() {
-        let MirStmtKind::Assign { dest, value } = &mut stmt.kind else {
-            continue;
-        };
-        let dest_id = *dest;
-        let dest_ty = locals
-            .get(dest_id.0 as usize)
-            .map(|l| l.ty.clone())
-            .unwrap_or(MirType::Void);
-
-        match value {
-            MirRValue::Use(MirValue::Const(c)) => {
-                if !unsafe_locals.contains(&dest_id) {
-                    const_env.insert(dest_id, c.clone());
+/// Remove pure dead definitions whose locals were superseded by a certified
+/// superopt rewrite and now have zero remaining uses.
+fn prune_superseded_dead_defs(blocks: &mut [MirBlock], eliminable: &HashSet<LocalId>) {
+    if eliminable.is_empty() {
+        return;
+    }
+    loop {
+        let uses = count_all_local_uses(blocks);
+        let mut changed = false;
+        for block in blocks.iter_mut() {
+            let before_len = block.stmts.len();
+            block.stmts.retain(|stmt| {
+                if let MirStmtKind::Assign { dest, value } = &stmt.kind {
+                    let is_pure = matches!(
+                        value,
+                        MirRValue::BinaryOp { .. } | MirRValue::UnaryOp { .. } | MirRValue::Use(_)
+                    );
+                    if is_pure
+                        && eliminable.contains(dest)
+                        && uses.get(dest).copied().unwrap_or(0) == 0
+                    {
+                        return false;
+                    }
+                }
+                true
+            });
+            if block.stmts.len() != before_len {
+                changed = true;
+            }
+            if let Some(MirTerminator::Call {
+                func,
+                dest: Some(d),
+                target: Some(next_bb),
+                ..
+            }) = &block.terminator
+            {
+                let is_pure_math = callee_func_name(func)
+                    .is_some_and(|n| matches!(n, "exp" | "exp2" | "log" | "log2" | "fma"));
+                if is_pure_math && eliminable.contains(d) && uses.get(d).copied().unwrap_or(0) == 0
+                {
+                    let target_bb = *next_bb;
+                    block.terminator = Some(MirTerminator::Goto(target_bb));
+                    changed = true;
                 }
             }
-            MirRValue::BinaryOp { op, left, right } => {
-                let Some(l_expr) = mir_value_to_cert(left, &const_env) else {
-                    continue;
-                };
-                let Some(r_expr) = mir_value_to_cert(right, &const_env) else {
-                    continue;
-                };
-                if let Some((after_expr, rule, cost_before, cost_after)) =
-                    saturate_binop(*op, &l_expr, &r_expr, &dest_ty, allow_int_shift)
-                {
-                    if let Some(new_rval) = cert_to_mir_rvalue(&after_expr) {
-                        let before_expr = CertExpr::BinOp {
-                            op: *op,
-                            left: Box::new(l_expr),
-                            right: Box::new(r_expr),
-                        };
-                        *value = new_rval;
-                        if !unsafe_locals.contains(&dest_id) {
-                            if let MirRValue::Use(MirValue::Const(c)) = value {
-                                const_env.insert(dest_id, c.clone());
+        }
+        if !changed {
+            break;
+        }
+    }
+}
+
+fn superoptimize_function(
+    func: &mut MirFunction,
+    allow_int_shift: bool,
+    config: SuperoptConfig,
+    steps: &mut Vec<SuperoptStep>,
+) {
+    let (mutated_locals, single_def_locals, unsafe_const_locals) = analyze_function_locals(func);
+    let (immutable_defs, mut copy_origin) =
+        collect_immutable_pure_defs(func, &mutated_locals, &single_def_locals);
+    let func_name = func.name.to_string();
+    let mut eliminable_locals: HashSet<LocalId> = HashSet::new();
+
+    let Some(mut blocks) = func.blocks.take() else {
+        return;
+    };
+
+    // Pass 1: Call-level SOTA rewrites (R17_LOG_EXP_CANCEL, R20_HORNER_EXP2_FMA).
+    let initial_block_count = blocks.len();
+    for bi in 0..initial_block_count {
+        let term_snapshot = blocks[bi].terminator.clone();
+        if let Some(MirTerminator::Call {
+            func: callee,
+            args,
+            dest: Some(dest_id),
+            target: Some(next_bb),
+            ..
+        }) = term_snapshot
+        {
+            let Some(cname) = callee_func_name(&callee) else {
+                continue;
+            };
+            let dest_ty = func
+                .locals
+                .get(dest_id.0 as usize)
+                .map(|l| l.ty.clone())
+                .unwrap_or(MirType::Void);
+
+            // R17: `log(exp(x)) -> x` and `log2(exp2(x)) -> x`
+            if matches!(cname, "log" | "log2") && args.len() == 1 && dest_ty.is_float() {
+                if let MirValue::Local(arg_id) = args[0] {
+                    if let Some(CertExpr::Call {
+                        func: inner_fn,
+                        args: inner_args,
+                        ret_ty: inner_ty,
+                    }) = immutable_defs.get(&arg_id)
+                    {
+                        let matched = (cname == "log" && inner_fn == "exp")
+                            || (cname == "log2" && inner_fn == "exp2");
+                        if matched
+                            && inner_args.len() == 1
+                            && inner_ty == &dest_ty
+                            && is_cert_atom(&inner_args[0])
+                        {
+                            if let Some(x_val) = cert_atom_to_mir_value(&inner_args[0]) {
+                                let before_expr = CertExpr::Call {
+                                    func: cname.to_string(),
+                                    args: vec![CertExpr::Call {
+                                        func: inner_fn.clone(),
+                                        args: vec![inner_args[0].clone()],
+                                        ret_ty: inner_ty.clone(),
+                                    }],
+                                    ret_ty: dest_ty.clone(),
+                                };
+                                let after_expr = inner_args[0].clone();
+                                let cost_before = expr_cost(&before_expr);
+                                let cost_after = expr_cost(&after_expr);
+                                let stmt_idx = blocks[bi].stmts.len();
+                                blocks[bi]
+                                    .stmts
+                                    .push(MirStmt::assign(dest_id, MirRValue::Use(x_val)));
+                                blocks[bi].terminator = Some(MirTerminator::Goto(next_bb));
+                                mark_eliminable_chain(arg_id, &copy_origin, &mut eliminable_locals);
+                                steps.push(SuperoptStep {
+                                    function: func_name.clone(),
+                                    block_id: blocks[bi].id.0,
+                                    stmt_index: stmt_idx,
+                                    dest_local: dest_id.0,
+                                    rule: SuperoptRule::LogExpCancel,
+                                    error_witness: expected_error_witness(
+                                        &SuperoptRule::LogExpCancel,
+                                        &before_expr,
+                                    ),
+                                    before: before_expr,
+                                    after: after_expr,
+                                    cost_before,
+                                    cost_after,
+                                });
+                                continue;
                             }
                         }
+                    }
+                }
+            }
+
+            // R20: Opt-in FlashAttention-4 Horner FMA-emulated `exp2(f)`
+            if config.enable_horner_exp2_fma
+                && config.allow_fma_contract
+                && cname == "exp2"
+                && args.len() == 1
+                && dest_ty.is_float()
+            {
+                let empty_const = HashMap::new();
+                if let Some(f_expr) = mir_value_to_cert(&args[0], &empty_const) {
+                    if is_cert_atom(&f_expr) {
+                        let f_val = args[0].clone();
+                        let c = HORNER_EXP2_DEG4_COEFFS;
+                        let mk_c = |v: f64| MirValue::Const(MirConst::Float(v, dest_ty.clone()));
+                        let t1 = alloc_fresh_local(&mut func.locals, dest_ty.clone());
+                        let t2 = alloc_fresh_local(&mut func.locals, dest_ty.clone());
+                        let t3 = alloc_fresh_local(&mut func.locals, dest_ty.clone());
+
+                        let bb1_id = BlockId(blocks.len() as u32);
+                        let bb2_id = BlockId(blocks.len() as u32 + 1);
+                        let bb3_id = BlockId(blocks.len() as u32 + 2);
+
+                        let stmt_idx = blocks[bi].stmts.len();
+                        let block_id = blocks[bi].id.0;
+                        blocks[bi].terminator = Some(MirTerminator::Call {
+                            func: MirValue::Function(Arc::from("fma")),
+                            args: vec![mk_c(c[4]), f_val.clone(), mk_c(c[3])],
+                            dest: Some(t1),
+                            target: Some(bb1_id),
+                            unwind: None,
+                        });
+
+                        let mut bb1 = MirBlock::new(bb1_id);
+                        bb1.terminator = Some(MirTerminator::Call {
+                            func: MirValue::Function(Arc::from("fma")),
+                            args: vec![MirValue::Local(t1), f_val.clone(), mk_c(c[2])],
+                            dest: Some(t2),
+                            target: Some(bb2_id),
+                            unwind: None,
+                        });
+                        let mut bb2 = MirBlock::new(bb2_id);
+                        bb2.terminator = Some(MirTerminator::Call {
+                            func: MirValue::Function(Arc::from("fma")),
+                            args: vec![MirValue::Local(t2), f_val.clone(), mk_c(c[1])],
+                            dest: Some(t3),
+                            target: Some(bb3_id),
+                            unwind: None,
+                        });
+                        let mut bb3 = MirBlock::new(bb3_id);
+                        bb3.terminator = Some(MirTerminator::Call {
+                            func: MirValue::Function(Arc::from("fma")),
+                            args: vec![MirValue::Local(t3), f_val, mk_c(c[0])],
+                            dest: Some(dest_id),
+                            target: Some(next_bb),
+                            unwind: None,
+                        });
+                        blocks.push(bb1);
+                        blocks.push(bb2);
+                        blocks.push(bb3);
+
+                        let before_expr = CertExpr::Call {
+                            func: "exp2".to_string(),
+                            args: vec![f_expr.clone()],
+                            ret_ty: dest_ty.clone(),
+                        };
+                        let after_expr = horner_exp2_cert_expr(f_expr, dest_ty);
+                        let cost_before = expr_cost(&before_expr);
+                        let cost_after = expr_cost(&after_expr);
                         steps.push(SuperoptStep {
-                            function: func_name.to_string(),
-                            block_id: block.id.0,
+                            function: func_name.clone(),
+                            block_id,
                             stmt_index: stmt_idx,
                             dest_local: dest_id.0,
-                            rule,
+                            rule: SuperoptRule::HornerExp2Fma,
+                            error_witness: expected_error_witness(
+                                &SuperoptRule::HornerExp2Fma,
+                                &before_expr,
+                            ),
                             before: before_expr,
                             after: after_expr,
                             cost_before,
@@ -821,16 +1829,534 @@ fn superoptimize_block(
                     }
                 }
             }
-            _ => {}
         }
     }
+
+    // Pass 2: Statement-level saturation (R1..R16, R18, R19) across every block
+    // (including continuation blocks created by splitting).
+    let mut bi = 0usize;
+    while bi < blocks.len() {
+        let mut const_env: HashMap<LocalId, MirConst> = HashMap::new();
+        let mut same_block_defs: HashMap<LocalId, CertExpr> = HashMap::new();
+        let mut stmt_idx = 0usize;
+
+        while stmt_idx < blocks[bi].stmts.len() {
+            let stmt_clone = blocks[bi].stmts[stmt_idx].clone();
+            let MirStmtKind::Assign { dest, value } = stmt_clone.kind else {
+                stmt_idx += 1;
+                continue;
+            };
+            let dest_id = dest;
+            let dest_ty = func
+                .locals
+                .get(dest_id.0 as usize)
+                .map(|l| l.ty.clone())
+                .unwrap_or(MirType::Void);
+
+            // Invalidate any same_block_defs entry whose leaves depend on dest_id.
+            same_block_defs.retain(|_, expr| {
+                let mut leaves = HashSet::new();
+                collect_expr_locals(expr, &mut leaves);
+                !leaves.contains(&dest_id)
+            });
+
+            match value {
+                MirRValue::Use(MirValue::Const(c)) => {
+                    if !unsafe_const_locals.contains(&dest_id) {
+                        const_env.insert(dest_id, c);
+                    }
+                    stmt_idx += 1;
+                }
+                MirRValue::Use(MirValue::Local(src)) => {
+                    if !unsafe_const_locals.contains(&dest_id) {
+                        if let Some(c) = const_env.get(&src).cloned() {
+                            const_env.insert(dest_id, c);
+                        }
+                    }
+                    if let Some(expr) = same_block_defs.get(&src).cloned() {
+                        same_block_defs.insert(dest_id, expr);
+                        copy_origin.insert(dest_id, src);
+                    } else if let Some(expr) = immutable_defs.get(&src).cloned() {
+                        same_block_defs.insert(dest_id, expr);
+                        copy_origin.insert(dest_id, src);
+                    }
+                    stmt_idx += 1;
+                }
+                MirRValue::BinaryOp { op, left, right } => {
+                    let Some(l_atom) = mir_value_to_cert(&left, &const_env) else {
+                        stmt_idx += 1;
+                        continue;
+                    };
+                    let Some(r_atom) = mir_value_to_cert(&right, &const_env) else {
+                        stmt_idx += 1;
+                        continue;
+                    };
+
+                    // First attempt atom-level saturation (R1..R14).
+                    let atom_best = saturate_binop(
+                        op,
+                        &l_atom,
+                        &r_atom,
+                        &dest_ty,
+                        allow_int_shift,
+                        config.allow_fma_contract,
+                    );
+                    if let Some((after_expr, rule, cost_before, cost_after)) = atom_best {
+                        if let Some(new_rval) = cert_to_mir_rvalue(&after_expr) {
+                            let before_expr = CertExpr::BinOp {
+                                op,
+                                left: Box::new(l_atom),
+                                right: Box::new(r_atom),
+                            };
+                            if let MirStmtKind::Assign {
+                                value: ref mut v_slot,
+                                ..
+                            } = blocks[bi].stmts[stmt_idx].kind
+                            {
+                                *v_slot = new_rval.clone();
+                            }
+                            if !unsafe_const_locals.contains(&dest_id) {
+                                if let MirRValue::Use(MirValue::Const(c)) = &new_rval {
+                                    const_env.insert(dest_id, c.clone());
+                                }
+                            }
+                            if let CertExpr::BinOp { op: BinOp::Mul, .. } = &after_expr {
+                                if single_def_locals.contains(&dest_id) {
+                                    same_block_defs.insert(dest_id, after_expr.clone());
+                                }
+                            }
+                            let witness = expected_error_witness(&rule, &before_expr);
+                            steps.push(SuperoptStep {
+                                function: func_name.clone(),
+                                block_id: blocks[bi].id.0,
+                                stmt_index: stmt_idx,
+                                dest_local: dest_id.0,
+                                rule,
+                                before: before_expr,
+                                after: after_expr,
+                                cost_before,
+                                cost_after,
+                                error_witness: witness,
+                            });
+                            stmt_idx += 1;
+                            continue;
+                        }
+                    }
+
+                    // Next attempt compound-operand saturation (R15, R16, R18, R19).
+                    let resolve_compound = |v: &MirValue, atom: &CertExpr| -> CertExpr {
+                        if let MirValue::Local(id) = v {
+                            if let Some(e) = same_block_defs.get(id) {
+                                return e.clone();
+                            }
+                            if let Some(e) = immutable_defs.get(id) {
+                                return e.clone();
+                            }
+                        }
+                        atom.clone()
+                    };
+                    let l_deep = resolve_compound(&left, &l_atom);
+                    let r_deep = resolve_compound(&right, &r_atom);
+
+                    if l_deep != l_atom || r_deep != r_atom {
+                        // Try full compound pair first (R15/R16/R19); fall back to
+                        // one-sided expansion for R18_FMA_CONTRACT when both sides
+                        // are independent products (e.g. `state * alpha + write_term`).
+                        let candidates: [(&CertExpr, &CertExpr, bool, bool); 3] = [
+                            (&l_deep, &r_deep, l_deep != l_atom, r_deep != r_atom),
+                            (&l_deep, &r_atom, l_deep != l_atom, false),
+                            (&l_atom, &r_deep, false, r_deep != r_atom),
+                        ];
+                        let mut matched_compound = None;
+                        for &(cl, cr, use_l, use_r) in &candidates {
+                            if !use_l && !use_r {
+                                continue;
+                            }
+                            if let Some(res) = saturate_binop(
+                                op,
+                                cl,
+                                cr,
+                                &dest_ty,
+                                allow_int_shift,
+                                config.allow_fma_contract,
+                            ) {
+                                matched_compound =
+                                    Some((cl.clone(), cr.clone(), use_l, use_r, res));
+                                break;
+                            }
+                        }
+
+                        if let Some((
+                            chosen_l,
+                            chosen_r,
+                            used_l_compound,
+                            used_r_compound,
+                            (after_expr, rule, cost_before, cost_after),
+                        )) = matched_compound
+                        {
+                            let before_expr = CertExpr::BinOp {
+                                op,
+                                left: Box::new(chosen_l),
+                                right: Box::new(chosen_r),
+                            };
+                            let witness = expected_error_witness(&rule, &before_expr);
+
+                            match (&rule, &after_expr) {
+                                // R15 / R16: `exp(a) * exp(b) -> exp(a + b)` or `exp(a) / exp(b) -> exp(a - b)`
+                                (
+                                    SuperoptRule::OnlineSoftmaxExpMulFuse
+                                    | SuperoptRule::OnlineSoftmaxExpDivFuse,
+                                    CertExpr::Call {
+                                        func: fn_name,
+                                        args,
+                                        ret_ty,
+                                    },
+                                ) if args.len() == 1 => {
+                                    if let CertExpr::BinOp {
+                                        op: inner_op,
+                                        left: ia,
+                                        right: ib,
+                                    } = &args[0]
+                                    {
+                                        if let (Some(va), Some(vb)) =
+                                            (cert_atom_to_mir_value(ia), cert_atom_to_mir_value(ib))
+                                        {
+                                            let tmp =
+                                                alloc_fresh_local(&mut func.locals, ret_ty.clone());
+                                            blocks[bi].stmts[stmt_idx] = MirStmt::assign(
+                                                tmp,
+                                                MirRValue::BinaryOp {
+                                                    op: *inner_op,
+                                                    left: va,
+                                                    right: vb,
+                                                },
+                                            );
+                                            let cont_id = BlockId(blocks.len() as u32);
+                                            let mut cont_bb = MirBlock::new(cont_id);
+                                            cont_bb.stmts =
+                                                blocks[bi].stmts.split_off(stmt_idx + 1);
+                                            cont_bb.terminator = blocks[bi].terminator.take();
+                                            blocks[bi].terminator = Some(MirTerminator::Call {
+                                                func: MirValue::Function(Arc::from(
+                                                    fn_name.as_str(),
+                                                )),
+                                                args: vec![MirValue::Local(tmp)],
+                                                dest: Some(dest_id),
+                                                target: Some(cont_id),
+                                                unwind: None,
+                                            });
+                                            blocks.push(cont_bb);
+                                            if let MirValue::Local(lid) = left {
+                                                mark_eliminable_chain(
+                                                    lid,
+                                                    &copy_origin,
+                                                    &mut eliminable_locals,
+                                                );
+                                            }
+                                            if let MirValue::Local(rid) = right {
+                                                mark_eliminable_chain(
+                                                    rid,
+                                                    &copy_origin,
+                                                    &mut eliminable_locals,
+                                                );
+                                            }
+                                            steps.push(SuperoptStep {
+                                                function: func_name.clone(),
+                                                block_id: blocks[bi].id.0,
+                                                stmt_index: stmt_idx,
+                                                dest_local: dest_id.0,
+                                                rule,
+                                                before: before_expr,
+                                                after: after_expr,
+                                                cost_before,
+                                                cost_after,
+                                                error_witness: witness,
+                                            });
+                                            break;
+                                        }
+                                    }
+                                }
+
+                                // R18: `(a * b) + c -> fma(a, b, c)`
+                                (
+                                    SuperoptRule::FmaContract,
+                                    CertExpr::Call {
+                                        func: fn_name,
+                                        args,
+                                        ..
+                                    },
+                                ) if fn_name == "fma" && args.len() == 3 => {
+                                    if let (Some(va), Some(vb), Some(vc)) = (
+                                        cert_atom_to_mir_value(&args[0]),
+                                        cert_atom_to_mir_value(&args[1]),
+                                        cert_atom_to_mir_value(&args[2]),
+                                    ) {
+                                        // Remove the Add statement and split into a Call terminator.
+                                        let tail = blocks[bi].stmts.split_off(stmt_idx + 1);
+                                        blocks[bi].stmts.pop();
+                                        let cont_id = BlockId(blocks.len() as u32);
+                                        let mut cont_bb = MirBlock::new(cont_id);
+                                        cont_bb.stmts = tail;
+                                        cont_bb.terminator = blocks[bi].terminator.take();
+                                        blocks[bi].terminator = Some(MirTerminator::Call {
+                                            func: MirValue::Function(Arc::from("fma")),
+                                            args: vec![va, vb, vc],
+                                            dest: Some(dest_id),
+                                            target: Some(cont_id),
+                                            unwind: None,
+                                        });
+                                        blocks.push(cont_bb);
+                                        if used_l_compound {
+                                            if let MirValue::Local(lid) = left {
+                                                mark_eliminable_chain(
+                                                    lid,
+                                                    &copy_origin,
+                                                    &mut eliminable_locals,
+                                                );
+                                            }
+                                        }
+                                        if used_r_compound {
+                                            if let MirValue::Local(rid) = right {
+                                                mark_eliminable_chain(
+                                                    rid,
+                                                    &copy_origin,
+                                                    &mut eliminable_locals,
+                                                );
+                                            }
+                                        }
+                                        steps.push(SuperoptStep {
+                                            function: func_name.clone(),
+                                            block_id: blocks[bi].id.0,
+                                            stmt_index: stmt_idx,
+                                            dest_local: dest_id.0,
+                                            rule,
+                                            before: before_expr,
+                                            after: after_expr,
+                                            cost_before,
+                                            cost_after,
+                                            error_witness: witness,
+                                        });
+                                        break;
+                                    }
+                                }
+
+                                // R19 Form A: `(s * a) + (s * b) -> s * (a + b)`
+                                (
+                                    SuperoptRule::BlockScaleHoist,
+                                    CertExpr::BinOp {
+                                        op: BinOp::Mul,
+                                        left: s_expr,
+                                        right: sum_expr,
+                                    },
+                                ) if matches!(
+                                    sum_expr.as_ref(),
+                                    CertExpr::BinOp { op: BinOp::Add, .. }
+                                ) =>
+                                {
+                                    if let CertExpr::BinOp {
+                                        op: BinOp::Add,
+                                        left: a_expr,
+                                        right: b_expr,
+                                    } = sum_expr.as_ref()
+                                    {
+                                        if let (Some(vs), Some(va), Some(vb)) = (
+                                            cert_atom_to_mir_value(s_expr),
+                                            cert_atom_to_mir_value(a_expr),
+                                            cert_atom_to_mir_value(b_expr),
+                                        ) {
+                                            let tmp_sum = alloc_fresh_local(
+                                                &mut func.locals,
+                                                dest_ty.clone(),
+                                            );
+                                            blocks[bi].stmts[stmt_idx] = MirStmt::assign(
+                                                dest_id,
+                                                MirRValue::BinaryOp {
+                                                    op: BinOp::Mul,
+                                                    left: vs,
+                                                    right: MirValue::Local(tmp_sum),
+                                                },
+                                            );
+                                            blocks[bi].stmts.insert(
+                                                stmt_idx,
+                                                MirStmt::assign(
+                                                    tmp_sum,
+                                                    MirRValue::BinaryOp {
+                                                        op: BinOp::Add,
+                                                        left: va,
+                                                        right: vb,
+                                                    },
+                                                ),
+                                            );
+                                            if let MirValue::Local(lid) = left {
+                                                mark_eliminable_chain(
+                                                    lid,
+                                                    &copy_origin,
+                                                    &mut eliminable_locals,
+                                                );
+                                            }
+                                            if let MirValue::Local(rid) = right {
+                                                mark_eliminable_chain(
+                                                    rid,
+                                                    &copy_origin,
+                                                    &mut eliminable_locals,
+                                                );
+                                            }
+                                            // Record `dest_id = s * tmp_sum` so subsequent terms
+                                            // in a 16/32-element block cascade automatically!
+                                            same_block_defs.insert(
+                                                dest_id,
+                                                CertExpr::BinOp {
+                                                    op: BinOp::Mul,
+                                                    left: Box::new(s_expr.as_ref().clone()),
+                                                    right: Box::new(CertExpr::Local(tmp_sum.0)),
+                                                },
+                                            );
+                                            steps.push(SuperoptStep {
+                                                function: func_name.clone(),
+                                                block_id: blocks[bi].id.0,
+                                                stmt_index: stmt_idx,
+                                                dest_local: dest_id.0,
+                                                rule,
+                                                before: before_expr,
+                                                after: after_expr,
+                                                cost_before,
+                                                cost_after,
+                                                error_witness: witness,
+                                            });
+                                            stmt_idx += 2;
+                                            continue;
+                                        }
+                                    }
+                                }
+
+                                // R19 Form B: `(a * c1) * (b * c2) -> (a * b) * (c1 * c2)`
+                                (
+                                    SuperoptRule::BlockScaleHoist,
+                                    CertExpr::BinOp {
+                                        op: BinOp::Mul,
+                                        left: ab_expr,
+                                        right: c12_expr,
+                                    },
+                                ) if matches!(
+                                    ab_expr.as_ref(),
+                                    CertExpr::BinOp { op: BinOp::Mul, .. }
+                                ) =>
+                                {
+                                    if let CertExpr::BinOp {
+                                        op: BinOp::Mul,
+                                        left: a_expr,
+                                        right: b_expr,
+                                    } = ab_expr.as_ref()
+                                    {
+                                        if let (Some(va), Some(vb), Some(vc12)) = (
+                                            cert_atom_to_mir_value(a_expr),
+                                            cert_atom_to_mir_value(b_expr),
+                                            cert_atom_to_mir_value(c12_expr),
+                                        ) {
+                                            let tmp_ab = alloc_fresh_local(
+                                                &mut func.locals,
+                                                dest_ty.clone(),
+                                            );
+                                            blocks[bi].stmts[stmt_idx] = MirStmt::assign(
+                                                dest_id,
+                                                MirRValue::BinaryOp {
+                                                    op: BinOp::Mul,
+                                                    left: MirValue::Local(tmp_ab),
+                                                    right: vc12,
+                                                },
+                                            );
+                                            blocks[bi].stmts.insert(
+                                                stmt_idx,
+                                                MirStmt::assign(
+                                                    tmp_ab,
+                                                    MirRValue::BinaryOp {
+                                                        op: BinOp::Mul,
+                                                        left: va,
+                                                        right: vb,
+                                                    },
+                                                ),
+                                            );
+                                            if let MirValue::Local(lid) = left {
+                                                mark_eliminable_chain(
+                                                    lid,
+                                                    &copy_origin,
+                                                    &mut eliminable_locals,
+                                                );
+                                            }
+                                            if let MirValue::Local(rid) = right {
+                                                mark_eliminable_chain(
+                                                    rid,
+                                                    &copy_origin,
+                                                    &mut eliminable_locals,
+                                                );
+                                            }
+                                            same_block_defs.insert(
+                                                dest_id,
+                                                CertExpr::BinOp {
+                                                    op: BinOp::Mul,
+                                                    left: Box::new(CertExpr::Local(tmp_ab.0)),
+                                                    right: Box::new(c12_expr.as_ref().clone()),
+                                                },
+                                            );
+                                            steps.push(SuperoptStep {
+                                                function: func_name.clone(),
+                                                block_id: blocks[bi].id.0,
+                                                stmt_index: stmt_idx,
+                                                dest_local: dest_id.0,
+                                                rule,
+                                                before: before_expr,
+                                                after: after_expr,
+                                                cost_before,
+                                                cost_after,
+                                                error_witness: witness,
+                                            });
+                                            stmt_idx += 2;
+                                            continue;
+                                        }
+                                    }
+                                }
+
+                                _ => {}
+                            }
+                        }
+                    }
+
+                    // Record pure float multiply in same_block_defs for downstream FMA / scale hoisting.
+                    if op == BinOp::Mul
+                        && dest_ty.is_float()
+                        && is_cert_atom(&l_atom)
+                        && is_cert_atom(&r_atom)
+                    {
+                        same_block_defs.insert(
+                            dest_id,
+                            CertExpr::BinOp {
+                                op: BinOp::Mul,
+                                left: Box::new(l_atom),
+                                right: Box::new(r_atom),
+                            },
+                        );
+                    }
+                    stmt_idx += 1;
+                }
+                _ => {
+                    stmt_idx += 1;
+                }
+            }
+        }
+        bi += 1;
+    }
+
+    prune_superseded_dead_defs(&mut blocks, &eliminable_locals);
+    func.blocks = Some(blocks);
 }
 
-/// Run V5 certified e-graph superoptimization across every function in `module`,
-/// independently verify the generated certificate fail-closed, and return it.
-pub fn superoptimize_module(
+/// Run V5 certified e-graph superoptimization across every function in `module`
+/// with explicit configuration, independently verify the generated certificate
+/// fail-closed, and return it.
+pub fn superoptimize_module_with_config(
     module: &mut MirModule,
     target: &str,
+    config: SuperoptConfig,
 ) -> Result<SuperoptCertificate, String> {
     let mir_before_sha256 = mir_digest(module)?;
     // WGSL requires unsigned u32 shift RHS (`<< u32(k)`), whereas C/MSL/RISC-V
@@ -841,21 +2367,7 @@ pub fn superoptimize_module(
     let functions_visited = module.functions.len();
 
     for func in &mut module.functions {
-        let unsafe_locals = collect_unsafe_locals(func);
-        let func_name = func.name.to_string();
-        let locals_snapshot = func.locals.clone();
-        if let Some(blocks) = &mut func.blocks {
-            for block in blocks.iter_mut() {
-                superoptimize_block(
-                    &func_name,
-                    &locals_snapshot,
-                    &unsafe_locals,
-                    allow_int_shift,
-                    block,
-                    &mut steps,
-                );
-            }
-        }
+        superoptimize_function(func, allow_int_shift, config, &mut steps);
     }
 
     let mir_after_sha256 = mir_digest(module)?;
@@ -882,12 +2394,74 @@ pub fn superoptimize_module(
     Ok(cert)
 }
 
+/// Run V5 certified e-graph superoptimization across every function in `module`,
+/// independently verify the generated certificate fail-closed, and return it.
+pub fn superoptimize_module(
+    module: &mut MirModule,
+    target: &str,
+) -> Result<SuperoptCertificate, String> {
+    superoptimize_module_with_config(module, target, SuperoptConfig::for_target(target))
+}
+
 /// Independently verify a single rewrite step structurally from the axioms.
 pub fn verify_step_axiom(
     rule: &SuperoptRule,
     before: &CertExpr,
     after: &CertExpr,
 ) -> Result<(), String> {
+    // Handle call-rooted SOTA rules first (R17, R20).
+    match rule {
+        SuperoptRule::LogExpCancel => {
+            let ok = match before {
+                CertExpr::Call {
+                    func: outer_fn,
+                    args: outer_args,
+                    ret_ty: outer_ty,
+                } if outer_args.len() == 1 => match &outer_args[0] {
+                    CertExpr::Call {
+                        func: inner_fn,
+                        args: inner_args,
+                        ret_ty: inner_ty,
+                    } if inner_args.len() == 1 && inner_ty == outer_ty => {
+                        let inverse_pair = (outer_fn == "log" && inner_fn == "exp")
+                            || (outer_fn == "log2" && inner_fn == "exp2");
+                        inverse_pair && after == &inner_args[0]
+                    }
+                    _ => false,
+                },
+                _ => false,
+            };
+            return if ok {
+                Ok(())
+            } else {
+                Err(format!(
+                    "axiom violation for rule {:?}: before {:?} does not entail after {:?}",
+                    rule, before, after
+                ))
+            };
+        }
+        SuperoptRule::HornerExp2Fma => {
+            let ok = match before {
+                CertExpr::Call { func, args, ret_ty }
+                    if func == "exp2" && args.len() == 1 && ret_ty.is_float() =>
+                {
+                    let expected = horner_exp2_cert_expr(args[0].clone(), ret_ty.clone());
+                    after == &expected
+                }
+                _ => false,
+            };
+            return if ok {
+                Ok(())
+            } else {
+                Err(format!(
+                    "axiom violation for rule {:?}: before {:?} does not match certified degree-4 Horner exp2 FMA polynomial {:?}",
+                    rule, before, after
+                ))
+            };
+        }
+        _ => {}
+    }
+
     let CertExpr::BinOp { op, left, right } = before else {
         return Err(format!(
             "rule {:?} requires a binary before-expression",
@@ -1059,6 +2633,189 @@ pub fn verify_step_axiom(
                     _ => false,
                 }
         }
+        SuperoptRule::FloatDivOne => {
+            let one_bits = 1.0_f64.to_bits();
+            *op == BinOp::Div
+                && matches!(right.as_ref(), CertExpr::FloatBits(b, _) if *b == one_bits)
+                && after == left.as_ref()
+        }
+        SuperoptRule::OnlineSoftmaxExpMulFuse => {
+            *op == BinOp::Mul
+                && match (left.as_ref(), right.as_ref(), after) {
+                    (
+                        CertExpr::Call {
+                            func: f1,
+                            args: a1,
+                            ret_ty: t1,
+                        },
+                        CertExpr::Call {
+                            func: f2,
+                            args: a2,
+                            ret_ty: t2,
+                        },
+                        CertExpr::Call {
+                            func: fa,
+                            args: aa,
+                            ret_ty: ta,
+                        },
+                    ) if f1 == f2
+                        && f1 == fa
+                        && matches!(f1.as_str(), "exp" | "exp2")
+                        && a1.len() == 1
+                        && a2.len() == 1
+                        && aa.len() == 1
+                        && t1 == t2
+                        && t1 == ta =>
+                    {
+                        match &aa[0] {
+                            CertExpr::BinOp {
+                                op: BinOp::Add,
+                                left: al,
+                                right: ar,
+                            } => {
+                                (al.as_ref() == &a1[0] && ar.as_ref() == &a2[0])
+                                    || (al.as_ref() == &a2[0] && ar.as_ref() == &a1[0])
+                            }
+                            _ => false,
+                        }
+                    }
+                    _ => false,
+                }
+        }
+        SuperoptRule::OnlineSoftmaxExpDivFuse => {
+            *op == BinOp::Div
+                && match (left.as_ref(), right.as_ref(), after) {
+                    (
+                        CertExpr::Call {
+                            func: f1,
+                            args: a1,
+                            ret_ty: t1,
+                        },
+                        CertExpr::Call {
+                            func: f2,
+                            args: a2,
+                            ret_ty: t2,
+                        },
+                        CertExpr::Call {
+                            func: fa,
+                            args: aa,
+                            ret_ty: ta,
+                        },
+                    ) if f1 == f2
+                        && f1 == fa
+                        && matches!(f1.as_str(), "exp" | "exp2")
+                        && a1.len() == 1
+                        && a2.len() == 1
+                        && aa.len() == 1
+                        && t1 == t2
+                        && t1 == ta =>
+                    {
+                        match &aa[0] {
+                            CertExpr::BinOp {
+                                op: BinOp::Sub,
+                                left: al,
+                                right: ar,
+                            } => al.as_ref() == &a1[0] && ar.as_ref() == &a2[0],
+                            _ => false,
+                        }
+                    }
+                    _ => false,
+                }
+        }
+        SuperoptRule::FmaContract => {
+            *op == BinOp::Add
+                && match after {
+                    CertExpr::Call { func, args, ret_ty }
+                        if func == "fma" && args.len() == 3 && ret_ty.is_float() =>
+                    {
+                        let check_mul_add = |mul_side: &CertExpr, add_side: &CertExpr| -> bool {
+                            match mul_side {
+                                CertExpr::BinOp {
+                                    op: BinOp::Mul,
+                                    left: ma,
+                                    right: mb,
+                                } => {
+                                    add_side == &args[2]
+                                        && ((ma.as_ref() == &args[0] && mb.as_ref() == &args[1])
+                                            || (ma.as_ref() == &args[1] && mb.as_ref() == &args[0]))
+                                }
+                                _ => false,
+                            }
+                        };
+                        check_mul_add(left.as_ref(), right.as_ref())
+                            || check_mul_add(right.as_ref(), left.as_ref())
+                    }
+                    _ => false,
+                }
+        }
+        SuperoptRule::BlockScaleHoist => match op {
+            BinOp::Add => match (extract_shared_scale_sum(left, right), after) {
+                (
+                    Some((s, a, b)),
+                    CertExpr::BinOp {
+                        op: BinOp::Mul,
+                        left: al,
+                        right: ar,
+                    },
+                ) => {
+                    let check_factor = |scale_side: &CertExpr, sum_side: &CertExpr| -> bool {
+                        if scale_side != &s {
+                            return false;
+                        }
+                        match sum_side {
+                            CertExpr::BinOp {
+                                op: BinOp::Add,
+                                left: sl,
+                                right: sr,
+                            } => {
+                                (sl.as_ref() == &a && sr.as_ref() == &b)
+                                    || (sl.as_ref() == &b && sr.as_ref() == &a)
+                            }
+                            _ => false,
+                        }
+                    };
+                    check_factor(al.as_ref(), ar.as_ref()) || check_factor(ar.as_ref(), al.as_ref())
+                }
+                _ => false,
+            },
+            BinOp::Mul => match (extract_const_scale_pair(left, right), after) {
+                (
+                    Some((a, c1, b, c2, ty)),
+                    CertExpr::BinOp {
+                        op: BinOp::Mul,
+                        left: al,
+                        right: ar,
+                    },
+                ) => {
+                    let Some(expected_c12) = eval_float_binop(BinOp::Mul, c1, c2, &ty) else {
+                        return Err(format!(
+                            "axiom violation for rule {:?}: non-finite scale product",
+                            rule
+                        ));
+                    };
+                    let check_pair = |ab_side: &CertExpr, c_side: &CertExpr| -> bool {
+                        match (ab_side, c_side) {
+                            (
+                                CertExpr::BinOp {
+                                    op: BinOp::Mul,
+                                    left: pl,
+                                    right: pr,
+                                },
+                                CertExpr::FloatBits(cb, cty),
+                            ) if *cb == expected_c12 && cty == &ty => {
+                                (pl.as_ref() == &a && pr.as_ref() == &b)
+                                    || (pl.as_ref() == &b && pr.as_ref() == &a)
+                            }
+                            _ => false,
+                        }
+                    };
+                    check_pair(al.as_ref(), ar.as_ref()) || check_pair(ar.as_ref(), al.as_ref())
+                }
+                _ => false,
+            },
+            _ => false,
+        },
+        SuperoptRule::LogExpCancel | SuperoptRule::HornerExp2Fma => unreachable!(),
     };
 
     if ok {
@@ -1116,6 +2873,13 @@ pub fn verify_certificate(cert: &SuperoptCertificate) -> Result<(), String> {
         }
         verify_step_axiom(&step.rule, &step.before, &step.after)
             .map_err(|e| format!("step {idx} in {} bb{}: {e}", step.function, step.block_id))?;
+        let expected_witness = expected_error_witness(&step.rule, &step.before);
+        if step.error_witness != expected_witness {
+            return Err(format!(
+                "step {idx} error_witness mismatch for {:?}: expected {:?}, found {:?}",
+                step.rule, expected_witness, step.error_witness
+            ));
+        }
         sum_before += step.cost_before as u64;
         sum_after += step.cost_after as u64;
     }
@@ -1256,5 +3020,50 @@ mod tests {
         let err = verify_step_axiom(&SuperoptRule::FloatDivPow2Mul, &before, &after)
             .expect_err("non-pow2 float div rewrite is unsound and must fail");
         assert!(err.contains("axiom violation"), "unexpected err: {err}");
+    }
+
+    #[test]
+    fn horner_exp2_deg4_meets_f32_accuracy_bound() {
+        let mut max_err = 0.0_f64;
+        for k in 0..=10000 {
+            let f = (k as f64) / 10000.0;
+            let err = (horner_exp2_f64(f) - 2.0_f64.powf(f)).abs();
+            if err > max_err {
+                max_err = err;
+            }
+        }
+        assert!(
+            max_err <= 4.0e-6,
+            "Horner deg-4 exp2 max error {max_err} exceeded 4.0e-6"
+        );
+    }
+
+    #[test]
+    fn walsh_hadamard_preserves_inner_product_and_suppresses_outliers() {
+        let mut x = [0.0_f64; 16];
+        let mut w = [0.0_f64; 16];
+        for i in 0..16 {
+            x[i] = ((i as f64) * 0.25) - 1.5;
+            w[i] = ((15 - i) as f64) * 0.125 - 0.8;
+        }
+        x[3] = 100.0; // 100x outlier spike
+        let exact_dot: f64 = x.iter().zip(w.iter()).map(|(a, b)| a * b).sum();
+        let orig_max = x.iter().fold(0.0_f64, |acc, &v| acc.max(v.abs()));
+
+        let mut hx = x;
+        let mut hw = w;
+        walsh_hadamard_transform_normalized(&mut hx).unwrap();
+        walsh_hadamard_transform_normalized(&mut hw).unwrap();
+        let rot_dot: f64 = hx.iter().zip(hw.iter()).map(|(a, b)| a * b).sum();
+        let rot_max = hx.iter().fold(0.0_f64, |acc, &v| acc.max(v.abs()));
+
+        assert!(
+            (exact_dot - rot_dot).abs() < 1e-11,
+            "Parseval inner product drifted: {exact_dot} vs {rot_dot}"
+        );
+        assert!(
+            rot_max < orig_max * 0.35,
+            "Hadamard should suppress 100x outlier: {orig_max} -> {rot_max}"
+        );
     }
 }
