@@ -12426,14 +12426,8 @@ mod tests {
             c_vector_flags_for("gcc", "linux"),
             &["-ftree-vectorize", "-fvect-cost-model=dynamic"]
         );
-        assert_eq!(
-            c_vector_flags_for("clang", "linux"),
-            &["-ftree-vectorize"]
-        );
-        assert_eq!(
-            c_vector_flags_for("cc", "macos"),
-            &["-ftree-vectorize"]
-        );
+        assert_eq!(c_vector_flags_for("clang", "linux"), &["-ftree-vectorize"]);
+        assert_eq!(c_vector_flags_for("cc", "macos"), &["-ftree-vectorize"]);
         // DETMATH stays: no contraction, no fast maths, so vectorising reorders nothing.
         assert_eq!(c_fp_flags(false), &["-ffp-contract=off", "-fno-fast-math"]);
     }
