@@ -1570,10 +1570,10 @@ impl SpirvBackend {
             "floor" => Some(8),        // GLSLstd450Floor
             "ceil" => Some(9),         // GLSLstd450Ceil
             "round" => Some(1),        // GLSLstd450Round
-            "exp" => Some(27),  // GLSLstd450Exp
-            "log" => Some(28),  // GLSLstd450Log
-            "exp2" => Some(29), // GLSLstd450Exp2
-            "log2" => Some(30), // GLSLstd450Log2
+            "exp" => Some(27),         // GLSLstd450Exp
+            "log" => Some(28),         // GLSLstd450Log
+            "exp2" => Some(29),        // GLSLstd450Exp2
+            "log2" => Some(30),        // GLSLstd450Log2
 
             // Standard math (2-arg / 3-arg)
             "pow" => Some(26), // GLSLstd450Pow
