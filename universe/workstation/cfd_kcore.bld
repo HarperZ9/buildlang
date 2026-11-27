@@ -1,5 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Zain Dana Harper
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: MIT
 //
 // Wave 50A Kernel 2 (Author Idea C8):
 //   1D Sod Shock-Tube Compressible Euler Solver (2nd-Order MUSCL-Minmod + HLL Riemann Flux)

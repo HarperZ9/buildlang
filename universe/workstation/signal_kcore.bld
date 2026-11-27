@@ -1,5 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Zain Dana Harper
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: MIT
 //
 // Wave 49A Kernel 4 (Author Idea D1, FORMULAS.tsv SIG-059):
 //   Matched-Filter Linear-FM Chirp Detector (-15 dB input SNR) + Frequency-Domain Wiener

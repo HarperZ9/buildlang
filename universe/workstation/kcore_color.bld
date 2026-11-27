@@ -1,5 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Zain Dana Harper
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: MIT
 //
 // Wave 49A Kernel 3 (Author Idea B2, FORMULAS.tsv COL-039):
 //   Canonical sRGB <-> Linear <-> CIE XYZ (D65) <-> CIE Lab <-> Oklab + Sharma 2005 CIEDE2000.
