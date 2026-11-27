@@ -1,0 +1,156 @@
+// SPDX-FileCopyrightText: 2026 Zain Dana Harper
+// SPDX-License-Identifier: MIT
+//
+// Wave 53E (Author Idea A11): Divergence-Free 2D Fluid Marbling Advection (marbling_advect.bld)
+// - 2D curl-noise incompressible velocity field v = (dpsi/dy, -dpsi/dx) from smooth streamfunction psi
+// - Verifies discrete max |div v| < 1e-5 and dye-polygon area preservation across 500 RK4 steps
+// - Planted failing control: compressible radial-sink bug (|div v| > 0.1 & area collapse) caught fail-closed
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { return -x; }
+    x
+}
+
+// Smooth periodic marbling streamfunction psi(x, y)
+fn stream_psi(x: f64, y: f64) -> f64 {
+    let twopi: f64 = 6.283185307179586476925286766559;
+    0.15 * sin(twopi * x) * sin(twopi * y) + 0.06 * cos(twopi * (x + y)) * sin(twopi * (x - y))
+}
+
+struct Vec2 {
+    x: f64,
+    y: f64,
+}
+
+// Analytical curl velocity v = (dpsi/dy, -dpsi/dx) plus optional planted radial-sink compression
+fn velocity(x: f64, y: f64, sink_strength: f64) -> Vec2 {
+    let h: f64 = 1.0e-5;
+    let inv_12h: f64 = 1.0 / (12.0 * h);
+    // 4th-order central differences of streamfunction psi
+    let dpsi_dy: f64 = (
+        stream_psi(x, y - 2.0 * h) - 8.0 * stream_psi(x, y - h)
+        + 8.0 * stream_psi(x, y + h) - stream_psi(x, y + 2.0 * h)
+    ) * inv_12h;
+    let dpsi_dx: f64 = (
+        stream_psi(x - 2.0 * h, y) - 8.0 * stream_psi(x - h, y)
+        + 8.0 * stream_psi(x + h, y) - stream_psi(x + 2.0 * h, y)
+    ) * inv_12h;
+    Vec2 {
+        x: dpsi_dy - sink_strength * (x - 0.5),
+        y: -dpsi_dx - sink_strength * (y - 0.5),
+    }
+}
+
+fn discrete_div(x: f64, y: f64, sink_strength: f64) -> f64 {
+    let h: f64 = 1.0e-4;
+    let vx_p: Vec2 = velocity(x + h, y, sink_strength);
+    let vx_m: Vec2 = velocity(x - h, y, sink_strength);
+    let vy_p: Vec2 = velocity(x, y + h, sink_strength);
+    let vy_m: Vec2 = velocity(x, y - h, sink_strength);
+    (vx_p.x - vx_m.x) / (2.0 * h) + (vy_p.y - vy_m.y) / (2.0 * h)
+}
+
+fn polygon_area(px: &Vec<f64>, py: &Vec<f64>) -> f64 {
+    let n: usize = px.len();
+    let mut s: f64 = 0.0;
+    let mut i: usize = 0;
+    while i < n {
+        let j: usize = if i + 1 < n { i + 1 } else { 0 };
+        s = s + (px[i] * py[j] - px[j] * py[i]);
+        i = i + 1;
+    }
+    0.5 * abs_f64(s)
+}
+
+struct AdvectOut {
+    max_div: f64,
+    area_init: f64,
+    area_final: f64,
+    area_rel_err: f64,
+    checksum: f64,
+}
+
+fn run_marbling(sink_strength: f64, n_steps: i32) -> AdvectOut {
+    let twopi: f64 = 6.283185307179586476925286766559;
+    let n_pts: usize = 128;
+    let mut px: Vec<f64> = Vec::new();
+    let mut py: Vec<f64> = Vec::new();
+    let mut i: usize = 0;
+    while i < n_pts {
+        let ang: f64 = twopi * (i as f64) / (n_pts as f64);
+        px.push(0.5 + 0.015 * cos(ang));
+        py.push(0.5 + 0.015 * sin(ang));
+        i = i + 1;
+    }
+    let area0: f64 = polygon_area(&px, &py);
+    let dt: f64 = 0.001;
+    let mut max_div: f64 = 0.0;
+
+    let mut step: i32 = 0;
+    while step < n_steps {
+        let mut p: usize = 0;
+        while p < n_pts {
+            let x0: f64 = px[p];
+            let y0: f64 = py[p];
+            if step % 25 == 0 && p % 16 == 0 {
+                let dv: f64 = abs_f64(discrete_div(x0, y0, sink_strength));
+                if dv > max_div { max_div = dv; }
+            }
+            let k1: Vec2 = velocity(x0, y0, sink_strength);
+            let k2: Vec2 = velocity(x0 + 0.5 * dt * k1.x, y0 + 0.5 * dt * k1.y, sink_strength);
+            let k3: Vec2 = velocity(x0 + 0.5 * dt * k2.x, y0 + 0.5 * dt * k2.y, sink_strength);
+            let k4: Vec2 = velocity(x0 + dt * k3.x, y0 + dt * k3.y, sink_strength);
+            px[p] = x0 + (dt / 6.0) * (k1.x + 2.0 * k2.x + 2.0 * k3.x + k4.x);
+            py[p] = y0 + (dt / 6.0) * (k1.y + 2.0 * k2.y + 2.0 * k3.y + k4.y);
+            p = p + 1;
+        }
+        step = step + 1;
+    }
+    let area1: f64 = polygon_area(&px, &py);
+    let mut csum: f64 = 0.0;
+    i = 0;
+    while i < n_pts {
+        csum = csum + px[i] + py[i];
+        i = i + 1;
+    }
+    AdvectOut {
+        max_div: max_div,
+        area_init: area0,
+        area_final: area1,
+        area_rel_err: abs_f64(area1 - area0) / area0,
+        checksum: csum,
+    }
+}
+
+fn main() ~ Clock + Console {
+    let t0: i64 = clock_ns();
+
+    // 500 incompressible curl-noise marbling advection steps
+    let clean: AdvectOut = run_marbling(0.0, 500);
+    // Planted compressible radial-sink bug (sink_strength = 0.60 => exact div v = -1.20, |div v| > 0.1)
+    let sink: AdvectOut = run_marbling(0.60, 500);
+    let sink_caught: i32 = if sink.max_div > 0.1 && sink.area_rel_err > 0.25 { 1 } else { 0 };
+
+    let t1: i64 = clock_ns();
+    let elapsed_ms: f64 = ((t1 - t0) as f64) / 1.0e6;
+
+    println!("A11_CLEAN_MAX_DIV={:.15}", clean.max_div);
+    println!("A11_CLEAN_AREA_ERR={:.12}", clean.area_rel_err);
+    println!("A11_CLEAN_CHECKSUM={:.12}", clean.checksum);
+    println!("A11_SINK_MAX_DIV={:.12}", sink.max_div);
+    println!("A11_SINK_AREA_ERR={:.12}", sink.area_rel_err);
+    println!("A11_SINK_CAUGHT={}", sink_caught);
+    println!("A11_ELAPSED_MS={:.4}", elapsed_ms);
+
+    if clean.max_div < 1.0e-5 && clean.area_rel_err < 1.0e-3 && sink_caught == 1 {
+        println!(
+            "[PASS] A11_MARBLING_ADVECT max_div={:.3e} area_err={:.3e} sink_div={:.3} caught=1",
+            clean.max_div, clean.area_rel_err, sink.max_div
+        );
+    } else {
+        println!(
+            "[FAIL] A11_MARBLING_ADVECT max_div={:.3e} area_err={:.3e} caught={}",
+            clean.max_div, clean.area_rel_err, sink_caught
+        );
+    }
+}
