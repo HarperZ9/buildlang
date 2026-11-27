@@ -1,0 +1,207 @@
+// SPDX-FileCopyrightText: 2026 Zain Dana Harper
+// SPDX-License-Identifier: AGPL-3.0-only
+//
+// Wave 49A Kernel 1 (Author Ideas A3/AC4, FORMULAS.tsv PHY-064):
+//   Buckingham Pi Dimensionless Scale & Unified SI/dB/Bit/Pixel/Octave Exponent Algebra.
+//   Passes valid physics/media reductions and fails closed on planted meter+dB / unit mismatches.
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 {
+        return -x;
+    }
+    x
+}
+
+struct ScaleQty {
+    val: f64,
+    m_exp: i32,
+    l_exp: i32,
+    t_exp: i32,
+    bit_exp: i32,
+    px_exp: i32,
+    oct_exp: i32,
+    db_flag: i32,
+}
+
+struct ScaleAddRes {
+    ok: bool,
+    qty: ScaleQty,
+    err_code: i32,
+}
+
+fn make_qty(v: f64, m: i32, l: i32, t: i32, bit: i32, px: i32, oct: i32, db: i32) -> ScaleQty {
+    ScaleQty {
+        val: v,
+        m_exp: m,
+        l_exp: l,
+        t_exp: t,
+        bit_exp: bit,
+        px_exp: px,
+        oct_exp: oct,
+        db_flag: db,
+    }
+}
+
+fn is_dimensionless(q: &ScaleQty) -> bool {
+    q.m_exp == 0
+        && q.l_exp == 0
+        && q.t_exp == 0
+        && q.bit_exp == 0
+        && q.px_exp == 0
+        && q.oct_exp == 0
+        && q.db_flag == 0
+}
+
+fn scale_mul(a: &ScaleQty, b: &ScaleQty) -> ScaleAddRes {
+    if a.db_flag != 0 || b.db_flag != 0 {
+        return ScaleAddRes { ok: false, qty: make_qty(0.0, 0, 0, 0, 0, 0, 0, 0), err_code: 1 };
+    }
+    ScaleAddRes {
+        ok: true,
+        qty: make_qty(
+            a.val * b.val,
+            a.m_exp + b.m_exp,
+            a.l_exp + b.l_exp,
+            a.t_exp + b.t_exp,
+            a.bit_exp + b.bit_exp,
+            a.px_exp + b.px_exp,
+            a.oct_exp + b.oct_exp,
+            0,
+        ),
+        err_code: 0,
+    }
+}
+
+fn scale_div(a: &ScaleQty, b: &ScaleQty) -> ScaleAddRes {
+    if a.db_flag != 0 || b.db_flag != 0 || b.val == 0.0 {
+        return ScaleAddRes { ok: false, qty: make_qty(0.0, 0, 0, 0, 0, 0, 0, 0), err_code: 1 };
+    }
+    ScaleAddRes {
+        ok: true,
+        qty: make_qty(
+            a.val / b.val,
+            a.m_exp - b.m_exp,
+            a.l_exp - b.l_exp,
+            a.t_exp - b.t_exp,
+            a.bit_exp - b.bit_exp,
+            a.px_exp - b.px_exp,
+            a.oct_exp - b.oct_exp,
+            0,
+        ),
+        err_code: 0,
+    }
+}
+
+// Fail-closed addition: err_code 1=linear+dB mismatch, 2=exponent mismatch.
+fn scale_add(a: &ScaleQty, b: &ScaleQty) -> ScaleAddRes {
+    if a.db_flag != b.db_flag {
+        return ScaleAddRes { ok: false, qty: make_qty(0.0, 0, 0, 0, 0, 0, 0, 0), err_code: 1 };
+    }
+    if a.m_exp != b.m_exp
+        || a.l_exp != b.l_exp
+        || a.t_exp != b.t_exp
+        || a.bit_exp != b.bit_exp
+        || a.px_exp != b.px_exp
+        || a.oct_exp != b.oct_exp
+    {
+        return ScaleAddRes { ok: false, qty: make_qty(0.0, 0, 0, 0, 0, 0, 0, 0), err_code: 2 };
+    }
+    ScaleAddRes {
+        ok: true,
+        qty: make_qty(a.val + b.val, a.m_exp, a.l_exp, a.t_exp, a.bit_exp, a.px_exp, a.oct_exp, a.db_flag),
+        err_code: 0,
+    }
+}
+
+fn db_to_linear_ratio(q_db: &ScaleQty) -> ScaleQty {
+    let ln10: f64 = 2.302585092994045684017991454684364208;
+    let lin: f64 = exp((q_db.val / 10.0) * ln10);
+    make_qty(lin, 0, 0, 0, 0, 0, 0, 0)
+}
+
+fn shannon_capacity_bps(bw_hz: &ScaleQty, snr_db: &ScaleQty) -> ScaleQty {
+    let ln2: f64 = 0.693147180559945309417232121458176568;
+    let snr_lin: ScaleQty = db_to_linear_ratio(snr_db);
+    let bits_per_hz: f64 = log(1.0 + snr_lin.val) / ln2;
+    make_qty(bw_hz.val * bits_per_hz, 0, 0, -1, 1, 0, 0, 0)
+}
+
+fn main() ~ Console + Clock {
+    let mut failures: i32 = 0;
+
+    // 1. Buckingham Pi Reynolds number Re = rho * v * L / mu (dimensionless!)
+    let rho: ScaleQty = make_qty(1.225, 1, -3, 0, 0, 0, 0, 0);
+    let vel: ScaleQty = make_qty(12.0, 0, 1, -1, 0, 0, 0, 0);
+    let len: ScaleQty = make_qty(0.5, 0, 1, 0, 0, 0, 0, 0);
+    let mu: ScaleQty = make_qty(1.81e-5, 1, -1, -1, 0, 0, 0, 0);
+
+    let r1: ScaleAddRes = scale_mul(&rho, &vel);
+    let r2: ScaleAddRes = scale_mul(&r1.qty, &len);
+    let re_res: ScaleAddRes = scale_div(&r2.qty, &mu);
+
+    // 2. Media & Information algebra: pixel pitch * pixels -> meters; Shannon capacity -> bit/s
+    let px_count: ScaleQty = make_qty(3840.0, 0, 0, 0, 0, 1, 0, 0);
+    let pitch_m_per_px: ScaleQty = make_qty(0.00018, 0, 1, 0, 0, -1, 0, 0);
+    let width_m: ScaleAddRes = scale_mul(&px_count, &pitch_m_per_px);
+
+    let bw: ScaleQty = make_qty(20.0e6, 0, 0, -1, 0, 0, 0, 0);
+    let snr_db: ScaleQty = make_qty(10.0, 0, 0, 0, 0, 0, 0, 1);
+    let cap: ScaleQty = shannon_capacity_bps(&bw, &snr_db);
+
+    // Octave doubling: 440 Hz shifted +2 octaves -> 1760 Hz
+    let ln2: f64 = 0.693147180559945309417232121458176568;
+    let f_oct: f64 = 440.0 * exp(2.0 * ln2);
+
+    if re_res.ok
+        && is_dimensionless(&re_res.qty)
+        && width_m.ok
+        && width_m.qty.l_exp == 1
+        && width_m.qty.px_exp == 0
+        && cap.bit_exp == 1
+        && cap.t_exp == -1
+        && abs_f64(f_oct - 1760.0) <= 1.0e-11
+    {
+        println!(
+            "[PASS] scale_algebra_valid re={:.9} width_m={:.9} cap_bps={:.6} f_oct={:.9}",
+            re_res.qty.val,
+            width_m.qty.val,
+            cap.val,
+            f_oct
+        );
+    } else {
+        println!("[FAIL] scale_algebra_valid re={} width={}", re_res.qty.val, width_m.qty.val);
+        failures = failures + 1;
+    }
+
+    // 3. Planted failing controls: meter + decibel AND velocity + length MUST fail closed
+    let bad_db: ScaleAddRes = scale_add(&len, &snr_db);
+    let bad_unit: ScaleAddRes = scale_add(&vel, &len);
+    if !bad_db.ok && bad_db.err_code == 1 && !bad_unit.ok && bad_unit.err_code == 2 {
+        println!(
+            "[PASS] planted_scale_mismatch caught db_err={} unit_err={}",
+            bad_db.err_code,
+            bad_unit.err_code
+        );
+    } else {
+        println!("[FAIL] planted_scale_mismatch missed");
+        failures = failures + 1;
+    }
+
+    let t0: i64 = clock_ns();
+    let mut acc: f64 = 0.0;
+    let mut i: i64 = 0;
+    while i < 200000 {
+        let p1: ScaleAddRes = scale_mul(&rho, &vel);
+        let p2: ScaleAddRes = scale_div(&p1.qty, &mu);
+        acc = acc + p2.qty.val;
+        i = i + 1;
+    }
+    let t1: i64 = clock_ns();
+    println!("[BENCH] scale_algebra ops=200000 elapsed_ns={} acc={:.3}", t1 - t0, acc);
+
+    if failures == 0 {
+        println!("[PASS] scale_algebra summary failures=0");
+    } else {
+        println!("[FAIL] scale_algebra summary failures={}", failures);
+    }
+}

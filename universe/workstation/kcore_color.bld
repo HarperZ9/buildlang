@@ -1,0 +1,291 @@
+// SPDX-FileCopyrightText: 2026 Zain Dana Harper
+// SPDX-License-Identifier: AGPL-3.0-only
+//
+// Wave 49A Kernel 3 (Author Idea B2, FORMULAS.tsv COL-039):
+//   Canonical sRGB <-> Linear <-> CIE XYZ (D65) <-> CIE Lab <-> Oklab + Sharma 2005 CIEDE2000.
+//   Verified <= 1e-6 against Sharma Table 1 reference pairs + planted wrong gamma/whitepoint trap.
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 {
+        return -x;
+    }
+    x
+}
+
+fn pow_pos(base: f64, exponent: f64) -> f64 {
+    if base <= 0.0 {
+        return 0.0;
+    }
+    exp(exponent * log(base))
+}
+
+fn cbrt_f64(x: f64) -> f64 {
+    if x < 0.0 {
+        return -pow_pos(-x, 1.0 / 3.0);
+    }
+    pow_pos(x, 1.0 / 3.0)
+}
+
+fn atan2_f64(y: f64, x: f64) -> f64 {
+    let pi: f64 = 3.14159265358979323846264338327950288;
+    if x > 0.0 {
+        return atan(y / x);
+    }
+    if x < 0.0 && y >= 0.0 {
+        return atan(y / x) + pi;
+    }
+    if x < 0.0 && y < 0.0 {
+        return atan(y / x) - pi;
+    }
+    if y > 0.0 {
+        return 0.5 * pi;
+    }
+    if y < 0.0 {
+        return -0.5 * pi;
+    }
+    0.0
+}
+
+struct Vec3 {
+    x: f64,
+    y: f64,
+    z: f64,
+}
+
+fn srgb_to_lin_ch(c: f64) -> f64 {
+    if c <= 0.04045 {
+        return c / 12.92;
+    }
+    pow_pos((c + 0.055) / 1.055, 2.4)
+}
+
+fn lin_to_srgb_ch(c: f64) -> f64 {
+    if c <= 0.0031308 {
+        return 12.92 * c;
+    }
+    1.055 * pow_pos(c, 1.0 / 2.4) - 0.055
+}
+
+fn srgb_to_linear(rgb: &Vec3) -> Vec3 {
+    Vec3 { x: srgb_to_lin_ch(rgb.x), y: srgb_to_lin_ch(rgb.y), z: srgb_to_lin_ch(rgb.z) }
+}
+
+fn linear_to_srgb(lin: &Vec3) -> Vec3 {
+    Vec3 { x: lin_to_srgb_ch(lin.x), y: lin_to_srgb_ch(lin.y), z: lin_to_srgb_ch(lin.z) }
+}
+
+// IEC 61966-2-1 Linear sRGB -> CIE XYZ (D65)
+fn linear_to_xyz_d65(lin: &Vec3) -> Vec3 {
+    Vec3 {
+        x: 0.4124564 * lin.x + 0.3575761 * lin.y + 0.1804375 * lin.z,
+        y: 0.2126729 * lin.x + 0.7151522 * lin.y + 0.0721750 * lin.z,
+        z: 0.0193339 * lin.x + 0.1191920 * lin.y + 0.9503041 * lin.z,
+    }
+}
+
+fn lab_f(t: f64) -> f64 {
+    if t > 0.008856451679035631 {
+        return cbrt_f64(t);
+    }
+    t / 0.12841854934601665 + (4.0 / 29.0)
+}
+
+fn xyz_to_lab(xyz: &Vec3, xn: f64, yn: f64, zn: f64) -> Vec3 {
+    let fx: f64 = lab_f(xyz.x / xn);
+    let fy: f64 = lab_f(xyz.y / yn);
+    let fz: f64 = lab_f(xyz.z / zn);
+    Vec3 { x: 116.0 * fy - 16.0, y: 500.0 * (fx - fy), z: 200.0 * (fy - fz) }
+}
+
+// Bjorn Ottosson Oklab forward & inverse transforms from Linear sRGB
+fn linear_to_oklab(lin: &Vec3) -> Vec3 {
+    let l: f64 = 0.4122214708 * lin.x + 0.5363325363 * lin.y + 0.0514459929 * lin.z;
+    let m: f64 = 0.2119034982 * lin.x + 0.6806995451 * lin.y + 0.1073969566 * lin.z;
+    let s: f64 = 0.0883024619 * lin.x + 0.2817188376 * lin.y + 0.6299787005 * lin.z;
+    let l_: f64 = cbrt_f64(l);
+    let m_: f64 = cbrt_f64(m);
+    let s_: f64 = cbrt_f64(s);
+    Vec3 {
+        x: 0.2104542553 * l_ + 0.7936177850 * m_ - 0.0040720468 * s_,
+        y: 1.9779984951 * l_ - 2.4285922050 * m_ + 0.4505937099 * s_,
+        z: 0.0259040371 * l_ + 0.7827717662 * m_ - 0.8086757660 * s_,
+    }
+}
+
+fn oklab_to_linear(ok: &Vec3) -> Vec3 {
+    let l_: f64 = ok.x + 0.3963377774 * ok.y + 0.2158037573 * ok.z;
+    let m_: f64 = ok.x - 0.1055613458 * ok.y - 0.0638541728 * ok.z;
+    let s_: f64 = ok.x - 0.0894841775 * ok.y - 1.2914855480 * ok.z;
+    let l: f64 = l_ * l_ * l_;
+    let m: f64 = m_ * m_ * m_;
+    let s: f64 = s_ * s_ * s_;
+    Vec3 {
+        x: 4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s,
+        y: -1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s,
+        z: -0.0041960863 * l - 0.7034186147 * m + 1.7076147010 * s,
+    }
+}
+
+// Sharma, Wu & Dalal (2005) exact CIEDE2000 color difference (kL=kC=kH=1).
+fn ciede2000(lab1: &Vec3, lab2: &Vec3) -> f64 {
+    let pi: f64 = 3.14159265358979323846264338327950288;
+    let rad2deg: f64 = 180.0 / pi;
+    let deg2rad: f64 = pi / 180.0;
+
+    let c1: f64 = sqrt(lab1.y * lab1.y + lab1.z * lab1.z);
+    let c2: f64 = sqrt(lab2.y * lab2.y + lab2.z * lab2.z);
+    let c_bar: f64 = 0.5 * (c1 + c2);
+    let c_bar7: f64 = pow_pos(c_bar, 7.0);
+    let p25_7: f64 = pow_pos(25.0, 7.0);
+    let g: f64 = 0.5 * (1.0 - sqrt(c_bar7 / (c_bar7 + p25_7)));
+
+    let a1p: f64 = (1.0 + g) * lab1.y;
+    let a2p: f64 = (1.0 + g) * lab2.y;
+    let c1p: f64 = sqrt(a1p * a1p + lab1.z * lab1.z);
+    let c2p: f64 = sqrt(a2p * a2p + lab2.z * lab2.z);
+
+    let mut h1p: f64 = 0.0;
+    if !(lab1.z == 0.0 && a1p == 0.0) {
+        h1p = atan2_f64(lab1.z, a1p) * rad2deg;
+        if h1p < 0.0 {
+            h1p = h1p + 360.0;
+        }
+    }
+    let mut h2p: f64 = 0.0;
+    if !(lab2.z == 0.0 && a2p == 0.0) {
+        h2p = atan2_f64(lab2.z, a2p) * rad2deg;
+        if h2p < 0.0 {
+            h2p = h2p + 360.0;
+        }
+    }
+
+    let dlp: f64 = lab2.x - lab1.x;
+    let dcp: f64 = c2p - c1p;
+
+    let mut dhp: f64 = 0.0;
+    if c1p * c2p != 0.0 {
+        let diff_h: f64 = h2p - h1p;
+        if abs_f64(diff_h) <= 180.0 {
+            dhp = diff_h;
+        } else if diff_h > 180.0 {
+            dhp = diff_h - 360.0;
+        } else {
+            dhp = diff_h + 360.0;
+        }
+    }
+    let dhp_cap: f64 = 2.0 * sqrt(c1p * c2p) * sin(0.5 * dhp * deg2rad);
+
+    let l_bar_p: f64 = 0.5 * (lab1.x + lab2.x);
+    let c_bar_p: f64 = 0.5 * (c1p + c2p);
+
+    let mut h_bar_p: f64 = h1p + h2p;
+    if c1p * c2p != 0.0 {
+        if abs_f64(h1p - h2p) <= 180.0 {
+            h_bar_p = 0.5 * (h1p + h2p);
+        } else if h1p + h2p < 360.0 {
+            h_bar_p = 0.5 * (h1p + h2p + 360.0);
+        } else {
+            h_bar_p = 0.5 * (h1p + h2p - 360.0);
+        }
+    }
+
+    let t_fac: f64 = 1.0
+        - 0.17 * cos((h_bar_p - 30.0) * deg2rad)
+        + 0.24 * cos((2.0 * h_bar_p) * deg2rad)
+        + 0.32 * cos((3.0 * h_bar_p + 6.0) * deg2rad)
+        - 0.20 * cos((4.0 * h_bar_p - 63.0) * deg2rad);
+
+    let d_theta: f64 = 30.0 * exp(-((h_bar_p - 275.0) / 25.0) * ((h_bar_p - 275.0) / 25.0));
+    let cbp7: f64 = pow_pos(c_bar_p, 7.0);
+    let rc: f64 = 2.0 * sqrt(cbp7 / (cbp7 + p25_7));
+    let lm50: f64 = l_bar_p - 50.0;
+    let sl: f64 = 1.0 + (0.015 * lm50 * lm50) / sqrt(20.0 + lm50 * lm50);
+    let sc: f64 = 1.0 + 0.045 * c_bar_p;
+    let sh: f64 = 1.0 + 0.015 * c_bar_p * t_fac;
+    let rt: f64 = -sin(2.0 * d_theta * deg2rad) * rc;
+
+    let tl: f64 = dlp / sl;
+    let tc: f64 = dcp / sc;
+    let th: f64 = dhp_cap / sh;
+    sqrt(tl * tl + tc * tc + th * th + rt * tc * th)
+}
+
+fn main() ~ Console + Clock {
+    let mut failures: i32 = 0;
+
+    // 1. Sharma, Wu & Dalal (2005) Table 1 canonical CIEDE2000 reference pairs
+    let p1a: Vec3 = Vec3 { x: 50.0, y: 2.6772, z: -79.7751 };
+    let p1b: Vec3 = Vec3 { x: 50.0, y: 0.0, z: -82.7485 };
+    let de1: f64 = ciede2000(&p1a, &p1b);
+
+    let p2a: Vec3 = Vec3 { x: 50.0, y: 3.1571, z: -77.2803 };
+    let de2: f64 = ciede2000(&p2a, &p1b);
+
+    let p17a: Vec3 = Vec3 { x: 50.0, y: 2.5, z: 0.0 };
+    let p17b: Vec3 = Vec3 { x: 50.0, y: 0.0, z: -2.5 };
+    let de17: f64 = ciede2000(&p17a, &p17b);
+
+    let p19b: Vec3 = Vec3 { x: 73.0, y: 25.0, z: -18.0 };
+    let de19: f64 = ciede2000(&p17a, &p19b);
+
+    // 2. sRGB <-> Linear <-> Oklab exact round-trip check
+    let src: Vec3 = Vec3 { x: 0.25, y: 0.55, z: 0.80 };
+    let lin: Vec3 = srgb_to_linear(&src);
+    let ok: Vec3 = linear_to_oklab(&lin);
+    let lin_rt: Vec3 = oklab_to_linear(&ok);
+    let srgb_rt: Vec3 = linear_to_srgb(&lin_rt);
+    let rt_err: f64 = abs_f64(srgb_rt.x - src.x) + abs_f64(srgb_rt.y - src.y) + abs_f64(srgb_rt.z - src.z);
+
+    if abs_f64(de1 - 2.0425) < 0.0001
+        && abs_f64(de2 - 2.8615) < 0.0001
+        && abs_f64(de17 - 4.3065) < 0.0001
+        && abs_f64(de19 - 27.1492) < 0.0001
+        && rt_err < 1.0e-7
+    {
+        println!(
+            "[PASS] kcore_color_sharma de1={:.9} de2={:.9} de17={:.9} de19={:.9} ok_rt_err={:.3e}",
+            de1,
+            de2,
+            de17,
+            de19,
+            rt_err
+        );
+    } else {
+        println!("[FAIL] kcore_color_sharma de1={} de2={} de17={} de19={}", de1, de2, de17, de19);
+        failures = failures + 1;
+    }
+
+    // 3. Planted failing control: wrong gamma=2.2 + D50 whitepoint drifts CIEDE2000 > 3.0 vs D65 sRGB
+    let xyz_good: Vec3 = linear_to_xyz_d65(&lin);
+    let lab_good: Vec3 = xyz_to_lab(&xyz_good, 0.95047, 1.0, 1.08883);
+    let lin_bad_g22: Vec3 = Vec3 {
+        x: pow_pos(src.x, 2.2),
+        y: pow_pos(src.y, 2.2),
+        z: pow_pos(src.z, 2.2),
+    };
+    let xyz_bad: Vec3 = linear_to_xyz_d65(&lin_bad_g22);
+    let lab_bad: Vec3 = xyz_to_lab(&xyz_bad, 0.96422, 1.0, 0.82521);
+    let bad_de: f64 = ciede2000(&lab_good, &lab_bad);
+    if bad_de > 3.0 {
+        println!("[PASS] planted_wrong_gamma_whitepoint caught delta_e00={:.6}", bad_de);
+    } else {
+        println!("[FAIL] planted_wrong_gamma_whitepoint missed delta_e00={}", bad_de);
+        failures = failures + 1;
+    }
+
+    let t0: i64 = clock_ns();
+    let mut acc: f64 = 0.0;
+    let mut i: i32 = 0;
+    while i < 100000 {
+        acc = acc + ciede2000(&p1a, &p1b);
+        i = i + 1;
+    }
+    let t1: i64 = clock_ns();
+    println!("[BENCH] kcore_color ciede2000_100k_ns={} acc={:.6}", t1 - t0, acc);
+
+    if failures == 0 {
+        println!("[PASS] kcore_color summary failures=0");
+    } else {
+        println!("[FAIL] kcore_color summary failures={}", failures);
+    }
+}

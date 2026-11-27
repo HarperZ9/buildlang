@@ -1,0 +1,168 @@
+// SPDX-FileCopyrightText: 2026 Zain Dana Harper
+// SPDX-License-Identifier: AGPL-3.0-only
+//
+// Wave 49A Kernel 2 (Author Idea A24, FORMULAS.tsv PHY-065):
+//   Symplectic Velocity-Verlet Kepler Orbit Conservation Guard (|dE/E0| < 1e-5 over 10,000 steps)
+//   + Planted Explicit-Euler Energy Drift Failure Control (> 1e-2).
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 {
+        return -x;
+    }
+    x
+}
+
+fn max_f64(a: f64, b: f64) -> f64 {
+    if a > b {
+        return a;
+    }
+    b
+}
+
+struct OrbitStats {
+    final_x: f64,
+    final_y: f64,
+    max_rel_energy_drift: f64,
+    max_rel_angmom_drift: f64,
+}
+
+fn kepler_energy(x: f64, y: f64, vx: f64, vy: f64) -> f64 {
+    let r: f64 = sqrt(x * x + y * y);
+    0.5 * (vx * vx + vy * vy) - 1.0 / r
+}
+
+fn kepler_angmom(x: f64, y: f64, vx: f64, vy: f64) -> f64 {
+    x * vy - y * vx
+}
+
+// Symplectic Velocity-Verlet integrator for 2D Kepler orbit (GM = 1.0).
+fn run_verlet_kepler(ecc: f64, dt: f64, steps: i64) -> OrbitStats {
+    let mut x: f64 = 1.0 - ecc;
+    let mut y: f64 = 0.0;
+    let mut vx: f64 = 0.0;
+    let mut vy: f64 = sqrt((1.0 + ecc) / (1.0 - ecc));
+
+    let e0: f64 = kepler_energy(x, y, vx, vy);
+    let l0: f64 = kepler_angmom(x, y, vx, vy);
+    let mut max_de: f64 = 0.0;
+    let mut max_dl: f64 = 0.0;
+
+    let r0: f64 = sqrt(x * x + y * y);
+    let mut inv_r3: f64 = 1.0 / (r0 * r0 * r0);
+    let mut ax: f64 = -x * inv_r3;
+    let mut ay: f64 = -y * inv_r3;
+
+    let mut st: i64 = 0;
+    while st < steps {
+        x = x + vx * dt + 0.5 * ax * dt * dt;
+        y = y + vy * dt + 0.5 * ay * dt * dt;
+        let r: f64 = sqrt(x * x + y * y);
+        inv_r3 = 1.0 / (r * r * r);
+        let ax_new: f64 = -x * inv_r3;
+        let ay_new: f64 = -y * inv_r3;
+        vx = vx + 0.5 * (ax + ax_new) * dt;
+        vy = vy + 0.5 * (ay + ay_new) * dt;
+        ax = ax_new;
+        ay = ay_new;
+
+        let de: f64 = abs_f64(kepler_energy(x, y, vx, vy) - e0) / abs_f64(e0);
+        let dl: f64 = abs_f64(kepler_angmom(x, y, vx, vy) - l0) / abs_f64(l0);
+        max_de = max_f64(max_de, de);
+        max_dl = max_f64(max_dl, dl);
+        st = st + 1;
+    }
+
+    OrbitStats {
+        final_x: x,
+        final_y: y,
+        max_rel_energy_drift: max_de,
+        max_rel_angmom_drift: max_dl,
+    }
+}
+
+// Planted failing control: non-symplectic Explicit Forward Euler drifts > 1e-2 over 10,000 steps.
+fn run_planted_euler_kepler(ecc: f64, dt: f64, steps: i64) -> OrbitStats {
+    let mut x: f64 = 1.0 - ecc;
+    let mut y: f64 = 0.0;
+    let mut vx: f64 = 0.0;
+    let mut vy: f64 = sqrt((1.0 + ecc) / (1.0 - ecc));
+
+    let e0: f64 = kepler_energy(x, y, vx, vy);
+    let l0: f64 = kepler_angmom(x, y, vx, vy);
+    let mut max_de: f64 = 0.0;
+    let mut max_dl: f64 = 0.0;
+
+    let mut st: i64 = 0;
+    while st < steps {
+        let r: f64 = sqrt(x * x + y * y);
+        let inv_r3: f64 = 1.0 / (r * r * r);
+        let ax: f64 = -x * inv_r3;
+        let ay: f64 = -y * inv_r3;
+        x = x + vx * dt;
+        y = y + vy * dt;
+        vx = vx + ax * dt;
+        vy = vy + ay * dt;
+
+        let de: f64 = abs_f64(kepler_energy(x, y, vx, vy) - e0) / abs_f64(e0);
+        let dl: f64 = abs_f64(kepler_angmom(x, y, vx, vy) - l0) / abs_f64(l0);
+        max_de = max_f64(max_de, de);
+        max_dl = max_f64(max_dl, dl);
+        st = st + 1;
+    }
+
+    OrbitStats {
+        final_x: x,
+        final_y: y,
+        max_rel_energy_drift: max_de,
+        max_rel_angmom_drift: max_dl,
+    }
+}
+
+fn main() ~ Console + Clock {
+    let mut failures: i32 = 0;
+    let ecc: f64 = 0.4;
+    let dt: f64 = 0.002;
+    let steps: i64 = 10000;
+
+    let t0: i64 = clock_ns();
+    let v_stat: OrbitStats = run_verlet_kepler(ecc, dt, steps);
+    let t1: i64 = clock_ns();
+    let e_stat: OrbitStats = run_planted_euler_kepler(ecc, dt, steps);
+
+    if v_stat.max_rel_energy_drift < 1.0e-5 && v_stat.max_rel_angmom_drift < 1.0e-11 {
+        println!(
+            "[PASS] conservation_verlet steps=10000 max_dE={:.12e} max_dL={:.12e} fx={:.12} fy={:.12}",
+            v_stat.max_rel_energy_drift,
+            v_stat.max_rel_angmom_drift,
+            v_stat.final_x,
+            v_stat.final_y
+        );
+    } else {
+        println!(
+            "[FAIL] conservation_verlet max_dE={} max_dL={}",
+            v_stat.max_rel_energy_drift,
+            v_stat.max_rel_angmom_drift
+        );
+        failures = failures + 1;
+    }
+
+    if e_stat.max_rel_energy_drift > 1.0e-2 {
+        println!(
+            "[PASS] planted_euler_drift caught euler_dE={:.6e} verlet_dE={:.6e} ratio={:.1}x",
+            e_stat.max_rel_energy_drift,
+            v_stat.max_rel_energy_drift,
+            e_stat.max_rel_energy_drift / v_stat.max_rel_energy_drift
+        );
+    } else {
+        println!("[FAIL] planted_euler_drift missed euler_dE={}", e_stat.max_rel_energy_drift);
+        failures = failures + 1;
+    }
+
+    println!("[BENCH] conservation verlet_10k_ns={}", t1 - t0);
+
+    if failures == 0 {
+        println!("[PASS] conservation summary failures=0");
+    } else {
+        println!("[FAIL] conservation summary failures={}", failures);
+    }
+}
