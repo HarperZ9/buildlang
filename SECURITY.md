@@ -6,13 +6,13 @@ reports take top priority.
 
 ## Supported versions
 
-Fixes land on the latest published `1.15.x` line on crates.io. Older lines do not
+Fixes land on the latest published `2.0.x` line on crates.io. Older lines do not
 receive backports. Upgrade to the current release before reporting, and name the
 `buildc version` output in your report.
 
 | Version | Supported |
 |---|---|
-| latest `1.15.x` | yes |
+| latest `2.0.x` | yes |
 | earlier | no |
 
 ## Reporting a vulnerability

@@ -2,9 +2,9 @@ cff-version: 1.2.0
 message: "If you use this software, please cite it using these metadata."
 type: software
 title: "BuildLang"
-abstract: "BuildLang (buildc v1.15.0) is a deterministic systems and GPU language whose function types declare side effects (Console, FileSystem, Network, FFI). It compiles across 12 CPU and GPU targets (C, LLVM IR, x86-64, ARM64, RISC-V 64, WebAssembly, SPIR-V, HLSL, GLSL, WGSL, Apple Metal MSL, Rust), ships BuildDB/BuildQL (qdb), BuildTeX verified PDFs, a certified V5 e-graph superoptimizer, and GPU polyhedral translation validation."
-version: "1.15.0"
-date-released: "2026-11-26"
+abstract: "BuildLang (buildc v2.0.0) is a self-hosting deterministic systems and GPU language written in BuildLang (Stage-2 zero-C 5-ISA self-compilation across x64-pe, x64-elf, rv64-elf, aarch64-elf, and WebAssembly, with a Stage-0 Rust bootstrap). It compiles across 12 CPU and GPU targets with exact 5-way GLSL FMA parity, Superopt V7 certified e-graph rewrites, unified 4-pillar compile-time MIR assurance (--sovereign-audit), BuildOS-2.2 sovereign kernels, and 600/600 certified GPU compute shaders."
+version: "2.0.0"
+date-released: "2026-11-27"
 authors:
   - family-names: "Harper"
     given-names: "Zain Dana"
