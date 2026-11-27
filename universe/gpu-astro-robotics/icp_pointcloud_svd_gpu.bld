@@ -1,0 +1,52 @@
+// SPDX-FileCopyrightText: 2026 Zain Dana Harper
+// SPDX-License-Identifier: MIT
+// Astro-Robotics GPU 440-Pack: 3D LiDAR point-cloud ICP rigid-alignment covariance kernel.
+// Computes Huber-weighted centered correspondence outer-product terms H_xx, H_xy, H_xz
+// and squared alignment residual for batched point-to-point ICP registration.
+
+#[compute(workgroup_size = [64, 1, 1])]
+fn icp_pointcloud_svd_gpu(
+    huber_delta: f32,
+    mx: f32,
+    my: f32,
+    mz: f32,
+    nx: f32,
+    ny: f32,
+    nz: f32,
+    px_buf: &[f32],
+    py_buf: &[f32],
+    pz_buf: &[f32],
+    qx_buf: &[f32],
+    qy_buf: &[f32],
+    qz_buf: &[f32],
+    hxx_out: &mut [f32],
+    hxy_out: &mut [f32],
+    res_out: &mut [f32],
+) ~ Gpu {
+    let i = gl_GlobalInvocationID.x;
+    let pcx: f32 = px_buf[i] - mx;
+    let pcy: f32 = py_buf[i] - my;
+    let pcz: f32 = pz_buf[i] - mz;
+
+    let qcx: f32 = qx_buf[i] - nx;
+    let qcy: f32 = qy_buf[i] - ny;
+    let qcz: f32 = qz_buf[i] - nz;
+
+    let ex: f32 = pcx - qcx;
+    let ey: f32 = pcy - qcy;
+    let ez: f32 = pcz - qcz;
+    let err2: f32 = ex * ex + ey * ey + ez * ez + 0.000001;
+
+    let mut dist: f32 = 0.5 * (err2 + 1.0);
+    dist = 0.5 * (dist + err2 / dist);
+    dist = 0.5 * (dist + err2 / dist);
+
+    let mut w: f32 = 1.0;
+    if dist > huber_delta {
+        w = huber_delta / dist;
+    }
+
+    hxx_out[i] = w * pcx * qcx;
+    hxy_out[i] = w * (pcx * qcy + pcy * qcx + pcz * qcz);
+    res_out[i] = w * err2;
+}
