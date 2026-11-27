@@ -325,11 +325,11 @@ impl<'ctx> CodeGenerator<'ctx> {
             self.superopt_cert = Some(cert);
         }
 
-        // Wave 26D: polyhedral dependence legality (`H * delta >= 0`) and
-        // subgroup/barrier uniformity verification on GPU shader targets.
+        // Wave 26D / Wave 76A: polyhedral dependence legality (`H * delta >= 0`) and
+        // subgroup/barrier uniformity verification across all 5 GPU shader targets.
         let is_gpu_tv_target = matches!(
             self.target,
-            Target::Wgsl | Target::Hlsl | Target::Msl | Target::SpirV
+            Target::Wgsl | Target::Hlsl | Target::Msl | Target::SpirV | Target::Glsl
         );
         let gpu_analysis = if run_superopt && is_gpu_tv_target {
             let mir = self.mir.as_ref().expect("MIR was just stored");

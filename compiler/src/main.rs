@@ -7674,7 +7674,7 @@ fn cmd_build(
             write_gpu_tv_cert(gpu_cert, gpu_cert_path)?;
         } else {
             eprintln!(
-                "Error: --emit-gpu-cert requires a GPU shader target (wgsl, hlsl, msl, spirv) with at least one #[compute] kernel"
+                "Error: --emit-gpu-cert requires a GPU shader target (wgsl, hlsl, msl, spirv, glsl) with at least one #[compute] kernel"
             );
             return Err(1);
         }
@@ -11478,7 +11478,7 @@ fn cmd_compile(
             write_gpu_tv_cert(gpu_cert, gpu_cert_path)?;
         } else {
             eprintln!(
-                "Error: --emit-gpu-cert requires a GPU shader target (wgsl, hlsl, msl, spirv) with at least one #[compute] kernel"
+                "Error: --emit-gpu-cert requires a GPU shader target (wgsl, hlsl, msl, spirv, glsl) with at least one #[compute] kernel"
             );
             return Err(1);
         }

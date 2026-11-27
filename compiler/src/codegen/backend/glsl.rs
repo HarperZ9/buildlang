@@ -14,8 +14,18 @@
 //!
 //! Shares structured control flow reconstruction with the HLSL backend.
 
-use super::CodegenResult;
+use std::collections::{HashMap, HashSet};
+
+use super::{CodegenError, CodegenResult};
+use crate::codegen::analysis::structured_cfg::{self, HeaderKind, StructuredCfg};
 use crate::codegen::ir::*;
+
+struct ComputeBindings {
+    buffer_vars: HashMap<LocalId, String>,
+    scalar_fields: HashMap<LocalId, String>,
+    push_const_var: Option<String>,
+    workgroup_vars: HashMap<LocalId, String>,
+}
 
 /// GLSL backend for code generation.
 pub struct GlslBackend {
@@ -228,10 +238,20 @@ impl GlslBackend {
             self.generate_struct(ty)?;
         }
 
+        let compute_count = module
+            .functions
+            .iter()
+            .filter(|f| !f.is_declaration() && matches!(f.shader_stage, Some(ShaderStage::Compute)))
+            .count();
+
         // Function definitions
         for func in &module.functions {
             if !func.is_declaration() {
-                self.generate_function(func)?;
+                if matches!(func.shader_stage, Some(ShaderStage::Compute)) {
+                    self.generate_compute_function(func, compute_count > 1)?;
+                } else {
+                    self.generate_function(func)?;
+                }
             }
         }
 
@@ -960,5 +980,671 @@ impl GlslBackend {
                 }
             })
             .unwrap_or_else(|| format!("_{}", id.0))
+    }
+
+    fn compute_local_name(&self, id: LocalId, locals: &[MirLocal]) -> String {
+        locals
+            .iter()
+            .find(|l| l.id == id)
+            .and_then(|l| l.name.as_ref())
+            .map(|n| Self::sanitize_glsl_ident(n.as_ref()))
+            .unwrap_or_else(|| format!("v_{}", id.0))
+    }
+
+    fn sanitize_glsl_ident(raw: &str) -> String {
+        let trimmed = raw.trim_start_matches('_');
+        let base = if trimmed.is_empty() {
+            "v_tmp".to_string()
+        } else if raw.starts_with('_') {
+            format!("bl_{trimmed}")
+        } else {
+            raw.to_string()
+        };
+        let no_double = base.replace("__", "_x_");
+        match no_double.as_str() {
+            "in" | "out" | "inout" | "input" | "output" | "attribute" | "varying" | "uniform"
+            | "buffer" | "shared" | "sampler" | "image" | "texture" | "layout" | "readonly"
+            | "writeonly" | "restrict" | "coherent" | "volatile" | "precision" | "flat"
+            | "smooth" | "noperspective" | "centroid" | "sample" | "patch" | "invariant"
+            | "subroutine" | "struct" | "void" | "main" | "bool" | "int" | "uint" | "float"
+            | "double" | "vec2" | "vec3" | "vec4" | "mat4" => format!("bl_{no_double}"),
+            _ => no_double,
+        }
+    }
+
+    fn compute_buffer_elem_type(ty: &MirType) -> Option<&MirType> {
+        match ty {
+            MirType::Slice(elem) => Some(elem.as_ref()),
+            MirType::Ptr(inner) => match inner.as_ref() {
+                MirType::Slice(elem) | MirType::Array(elem, _) => Some(elem.as_ref()),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    fn compute_workgroup_array_len(local: &MirLocal) -> Option<u32> {
+        local
+            .annotations
+            .iter()
+            .find_map(|a| a.strip_prefix("Workgroup:")?.parse::<u32>().ok())
+    }
+
+    fn compute_find_written_buffers(func: &MirFunction) -> HashSet<LocalId> {
+        let mut out = HashSet::new();
+        if let Some(blocks) = &func.blocks {
+            for b in blocks {
+                for s in &b.stmts {
+                    if let MirStmtKind::IndexStore {
+                        base: MirValue::Local(id),
+                        ..
+                    } = &s.kind
+                    {
+                        out.insert(*id);
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    fn compute_reads_nullary(func: &MirFunction, pred: impl Fn(&NullaryOp) -> bool) -> bool {
+        func.blocks.as_ref().is_some_and(|blocks| {
+            blocks.iter().any(|b| {
+                b.stmts.iter().any(|s| match &s.kind {
+                    MirStmtKind::Assign {
+                        value: MirRValue::NullaryOp(op, _),
+                        ..
+                    } => pred(op),
+                    _ => false,
+                })
+            })
+        })
+    }
+
+    fn resolve_workgroup_size(func: &MirFunction) -> [u32; 3] {
+        if let Some(sz) = func.workgroup_size {
+            return sz;
+        }
+        if Self::compute_reads_nullary(
+            func,
+            |op| matches!(op, NullaryOp::ThreadIndex(c) if *c >= 1),
+        ) {
+            [16, 16, 1]
+        } else {
+            [64, 1, 1]
+        }
+    }
+
+    fn generate_compute_function(
+        &mut self,
+        func: &MirFunction,
+        multi_entry: bool,
+    ) -> CodegenResult<()> {
+        let wg = Self::resolve_workgroup_size(func);
+        if !multi_entry {
+            self.writeln(&format!(
+                "layout(local_size_x = {}, local_size_y = {}, local_size_z = {}) in;",
+                wg[0], wg[1], wg[2]
+            ));
+            self.output.push('\n');
+        }
+
+        let written = Self::compute_find_written_buffers(func);
+        let param_locals: Vec<&MirLocal> = func.locals.iter().filter(|l| l.is_param).collect();
+        let fn_tag = Self::sanitize_glsl_ident(func.name.as_ref());
+
+        let mut buffer_vars = HashMap::new();
+        let mut scalar_fields = HashMap::new();
+        let mut scalar_decls: Vec<(String, String)> = Vec::new();
+        let mut binding_idx: u32 = 0;
+
+        for (idx, param_ty) in func.sig.params.iter().enumerate() {
+            let local = param_locals.get(idx).copied();
+            let raw_name = local
+                .map(|l| self.compute_local_name(l.id, &func.locals))
+                .unwrap_or_else(|| format!("p_{idx}"));
+            let var_name = if multi_entry {
+                format!("{fn_tag}_{raw_name}")
+            } else {
+                raw_name.clone()
+            };
+
+            if let Some(elem_ty) = Self::compute_buffer_elem_type(param_ty) {
+                let elem_glsl = self.type_to_glsl(elem_ty);
+                let is_writable = local.is_some_and(|l| l.is_mut || written.contains(&l.id));
+                let qual = if is_writable { "" } else { "readonly " };
+                self.writeln(&format!(
+                    "layout(std430, set = 0, binding = {binding_idx}) {qual}buffer Buf_{binding_idx}_{var_name} {{ {elem_glsl} {var_name}[]; }};"
+                ));
+                if let Some(l) = local {
+                    buffer_vars.insert(l.id, var_name);
+                }
+                binding_idx += 1;
+            } else {
+                let gty = self.type_to_glsl(param_ty);
+                scalar_decls.push((raw_name.clone(), gty));
+                if let Some(l) = local {
+                    scalar_fields.insert(l.id, raw_name);
+                }
+            }
+        }
+
+        let push_const_var = if !scalar_decls.is_empty() {
+            let block_name = format!("Params_{fn_tag}");
+            let inst_name = format!("params_{fn_tag}");
+            self.writeln(&format!("layout(push_constant) uniform {block_name} {{"));
+            self.indent += 1;
+            for (fname, fty) in &scalar_decls {
+                self.writeln(&format!("{fty} {fname};"));
+            }
+            self.indent -= 1;
+            self.writeln(&format!("}} {inst_name};"));
+            Some(inst_name)
+        } else {
+            None
+        };
+
+        let mut workgroup_vars = HashMap::new();
+        for local in &func.locals {
+            if let Some(count) = Self::compute_workgroup_array_len(local) {
+                let elem_ty = match &local.ty {
+                    MirType::Array(inner, _) | MirType::Slice(inner) => inner.as_ref(),
+                    MirType::Ptr(inner) => match inner.as_ref() {
+                        MirType::Array(e, _) | MirType::Slice(e) => e.as_ref(),
+                        other => other,
+                    },
+                    other => other,
+                };
+                let elem_glsl = self.type_to_glsl(elem_ty);
+                let raw = self.compute_local_name(local.id, &func.locals);
+                let wg_name = if multi_entry {
+                    format!("{fn_tag}_{raw}")
+                } else {
+                    raw
+                };
+                self.writeln(&format!("shared {elem_glsl} {wg_name}[{count}];"));
+                workgroup_vars.insert(local.id, wg_name);
+            }
+        }
+
+        if !buffer_vars.is_empty() || push_const_var.is_some() || !workgroup_vars.is_empty() {
+            self.output.push('\n');
+        }
+
+        let bindings = ComputeBindings {
+            buffer_vars,
+            scalar_fields,
+            push_const_var,
+            workgroup_vars,
+        };
+
+        if multi_entry {
+            self.writeln(&format!("void {fn_tag}() {{"));
+        } else {
+            self.writeln("void main() {");
+        }
+        self.indent += 1;
+
+        for local in &func.locals {
+            if local.is_param
+                || matches!(local.ty, MirType::Void)
+                || bindings.workgroup_vars.contains_key(&local.id)
+            {
+                continue;
+            }
+            let name = self.compute_local_name(local.id, &func.locals);
+            let gty = self.type_to_glsl(&local.ty);
+            self.writeln(&format!("{gty} {name};"));
+        }
+
+        if let Some(blocks) = &func.blocks {
+            let cfg = structured_cfg::analyze(blocks);
+            let mut visited = HashSet::new();
+            if let Some(entry) = blocks.first() {
+                self.emit_compute_region(
+                    entry.id,
+                    None,
+                    blocks,
+                    func,
+                    &cfg,
+                    &bindings,
+                    &mut visited,
+                )?;
+            }
+        }
+
+        self.indent -= 1;
+        self.writeln("}\n");
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn emit_compute_region(
+        &mut self,
+        start: BlockId,
+        stop_at: Option<BlockId>,
+        blocks: &[MirBlock],
+        func: &MirFunction,
+        cfg: &StructuredCfg,
+        bindings: &ComputeBindings,
+        visited: &mut HashSet<BlockId>,
+    ) -> CodegenResult<()> {
+        let mut current = Some(start);
+        while let Some(bid) = current {
+            if stop_at == Some(bid) || !visited.insert(bid) {
+                break;
+            }
+            let Some(block) = blocks.iter().find(|b| b.id == bid) else {
+                break;
+            };
+
+            match cfg.header(bid) {
+                Some(HeaderKind::Loop { merge, .. }) => {
+                    let Some(MirTerminator::If {
+                        cond,
+                        then_block,
+                        else_block,
+                    }) = &block.terminator
+                    else {
+                        return Err(CodegenError::InvalidMir(
+                            "loop header missing If terminator".to_string(),
+                        ));
+                    };
+                    self.writeln("while (true) {");
+                    self.indent += 1;
+                    self.emit_compute_block_stmts(block, func, bindings)?;
+                    let cond_s = self.compute_value_to_glsl(cond, &func.locals, bindings)?;
+                    let (body_block, exit_block, negate) = if *else_block == merge {
+                        (*then_block, *else_block, true)
+                    } else {
+                        (*else_block, *then_block, false)
+                    };
+                    if negate {
+                        self.writeln(&format!("if (!({cond_s})) {{ break; }}"));
+                    } else {
+                        self.writeln(&format!("if ({cond_s}) {{ break; }}"));
+                    }
+                    self.emit_compute_region(
+                        body_block,
+                        Some(bid),
+                        blocks,
+                        func,
+                        cfg,
+                        bindings,
+                        visited,
+                    )?;
+                    self.indent -= 1;
+                    self.writeln("}");
+                    current = Some(exit_block);
+                }
+                Some(HeaderKind::Selection { merge }) => {
+                    self.emit_compute_block_stmts(block, func, bindings)?;
+                    let Some(MirTerminator::If {
+                        cond,
+                        then_block,
+                        else_block,
+                    }) = &block.terminator
+                    else {
+                        return Err(CodegenError::InvalidMir(
+                            "selection header missing If terminator".to_string(),
+                        ));
+                    };
+                    let cond_s = self.compute_value_to_glsl(cond, &func.locals, bindings)?;
+                    self.writeln(&format!("if ({cond_s}) {{"));
+                    self.indent += 1;
+                    self.emit_compute_region(
+                        *then_block,
+                        Some(merge),
+                        blocks,
+                        func,
+                        cfg,
+                        bindings,
+                        visited,
+                    )?;
+                    self.indent -= 1;
+                    if *else_block != merge {
+                        self.writeln("} else {");
+                        self.indent += 1;
+                        self.emit_compute_region(
+                            *else_block,
+                            Some(merge),
+                            blocks,
+                            func,
+                            cfg,
+                            bindings,
+                            visited,
+                        )?;
+                        self.indent -= 1;
+                    }
+                    self.writeln("}");
+                    current = Some(merge);
+                }
+                None => {
+                    self.emit_compute_block_stmts(block, func, bindings)?;
+                    current = self.emit_compute_plain_terminator(
+                        &block.terminator,
+                        func,
+                        bindings,
+                        stop_at,
+                    )?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn emit_compute_block_stmts(
+        &mut self,
+        block: &MirBlock,
+        func: &MirFunction,
+        bindings: &ComputeBindings,
+    ) -> CodegenResult<()> {
+        for stmt in &block.stmts {
+            match &stmt.kind {
+                MirStmtKind::Assign { dest, value } => {
+                    if bindings.workgroup_vars.contains_key(dest) {
+                        continue;
+                    }
+                    let dest_ty = func.locals.iter().find(|l| l.id == *dest).map(|l| &l.ty);
+                    if matches!(dest_ty, Some(MirType::Void)) {
+                        continue;
+                    }
+                    let lhs = self.compute_local_name(*dest, &func.locals);
+                    let rhs = self.compute_rvalue_to_glsl(value, func, bindings)?;
+                    self.writeln(&format!("{lhs} = {rhs};"));
+                }
+                MirStmtKind::IndexStore {
+                    base, index, value, ..
+                } => {
+                    let b = self.compute_value_to_glsl(base, &func.locals, bindings)?;
+                    let idx = self.compute_value_to_glsl(index, &func.locals, bindings)?;
+                    let val = self.compute_rvalue_to_glsl(value, func, bindings)?;
+                    self.writeln(&format!("{b}[{idx}] = {val};"));
+                }
+                MirStmtKind::FieldAssign {
+                    base,
+                    field_name,
+                    value,
+                } => {
+                    let b = self.compute_local_name(*base, &func.locals);
+                    let val = self.compute_rvalue_to_glsl(value, func, bindings)?;
+                    self.writeln(&format!("{b}.{field_name} = {val};"));
+                }
+                MirStmtKind::WorkgroupBarrier => {
+                    self.writeln("memoryBarrierShared();");
+                    self.writeln("barrier();");
+                }
+                MirStmtKind::StorageLive(_) | MirStmtKind::StorageDead(_) | MirStmtKind::Nop => {}
+                MirStmtKind::GlobalStore { name, .. } => {
+                    return Err(CodegenError::Unsupported(format!(
+                        "mutable module global `{name}` store is not supported in GLSL compute"
+                    )));
+                }
+                MirStmtKind::DerefAssign { .. } | MirStmtKind::FieldDerefAssign { .. } => {
+                    return Err(CodegenError::Unsupported(
+                        "raw pointer dereference assignment is not supported in GLSL compute"
+                            .to_string(),
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn emit_compute_plain_terminator(
+        &mut self,
+        term: &Option<MirTerminator>,
+        func: &MirFunction,
+        bindings: &ComputeBindings,
+        stop_at: Option<BlockId>,
+    ) -> CodegenResult<Option<BlockId>> {
+        match term {
+            None => Ok(None),
+            Some(MirTerminator::Goto(target)) => {
+                if stop_at == Some(*target) {
+                    Ok(None)
+                } else {
+                    Ok(Some(*target))
+                }
+            }
+            Some(MirTerminator::Return(_)) | Some(MirTerminator::Unreachable) => {
+                self.writeln("return;");
+                Ok(None)
+            }
+            Some(MirTerminator::Call {
+                func: callee,
+                args,
+                dest,
+                target,
+                ..
+            }) => {
+                let expr = self.compute_call_expr_to_glsl(callee, args, &func.locals, bindings)?;
+                if let Some(d) = dest {
+                    let lhs = self.compute_local_name(*d, &func.locals);
+                    self.writeln(&format!("{lhs} = {expr};"));
+                } else {
+                    self.writeln(&format!("{expr};"));
+                }
+                Ok(target.filter(|t| stop_at != Some(*t)))
+            }
+            Some(MirTerminator::If { .. }) => Err(CodegenError::Unsupported(
+                "unstructured control flow is not supported in GLSL compute".to_string(),
+            )),
+            Some(MirTerminator::Switch { .. }) => Err(CodegenError::Unsupported(
+                "switch terminator is not yet supported in GLSL compute".to_string(),
+            )),
+            Some(MirTerminator::Drop { target, .. })
+            | Some(MirTerminator::Assert { target, .. }) => Ok(Some(*target)),
+            Some(MirTerminator::Resume | MirTerminator::Abort) => Err(CodegenError::Unsupported(
+                "abort/unwind is not supported in GLSL compute shaders".to_string(),
+            )),
+        }
+    }
+
+    fn compute_rvalue_to_glsl(
+        &self,
+        rv: &MirRValue,
+        func: &MirFunction,
+        bindings: &ComputeBindings,
+    ) -> CodegenResult<String> {
+        match rv {
+            MirRValue::Use(v) => self.compute_value_to_glsl(v, &func.locals, bindings),
+            MirRValue::BinaryOp { op, left, right } => {
+                let l = self.compute_value_to_glsl(left, &func.locals, bindings)?;
+                let r = self.compute_value_to_glsl(right, &func.locals, bindings)?;
+                let sym = match op {
+                    BinOp::Add | BinOp::AddChecked | BinOp::AddWrapping | BinOp::AddSaturating => {
+                        "+"
+                    }
+                    BinOp::Sub | BinOp::SubChecked | BinOp::SubWrapping | BinOp::SubSaturating => {
+                        "-"
+                    }
+                    BinOp::Mul | BinOp::MulChecked | BinOp::MulWrapping | BinOp::MulSaturating => {
+                        "*"
+                    }
+                    BinOp::Div => "/",
+                    BinOp::Rem => "%",
+                    BinOp::Eq => "==",
+                    BinOp::Ne => "!=",
+                    BinOp::Lt => "<",
+                    BinOp::Le => "<=",
+                    BinOp::Gt => ">",
+                    BinOp::Ge => ">=",
+                    BinOp::BitAnd => "&",
+                    BinOp::BitOr => "|",
+                    BinOp::BitXor => "^",
+                    BinOp::Shl => "<<",
+                    BinOp::Shr => ">>",
+                    BinOp::Pow => return Ok(format!("pow({l}, {r})")),
+                };
+                Ok(format!("({l} {sym} {r})"))
+            }
+            MirRValue::UnaryOp { op, operand } => {
+                let v = self.compute_value_to_glsl(operand, &func.locals, bindings)?;
+                Ok(match op {
+                    UnaryOp::Neg => format!("(-{v})"),
+                    UnaryOp::Not => format!("(!{v})"),
+                    UnaryOp::BitNot => format!("(~{v})"),
+                })
+            }
+            MirRValue::Cast { value, ty, .. } => {
+                let v = self.compute_value_to_glsl(value, &func.locals, bindings)?;
+                let t = self.type_to_glsl(ty);
+                Ok(format!("{t}({v})"))
+            }
+            MirRValue::FieldAccess {
+                base, field_name, ..
+            } => {
+                let b = self.compute_value_to_glsl(base, &func.locals, bindings)?;
+                Ok(format!("{b}.{field_name}"))
+            }
+            MirRValue::IndexAccess { base, index, .. } => {
+                let b = self.compute_value_to_glsl(base, &func.locals, bindings)?;
+                let i = self.compute_value_to_glsl(index, &func.locals, bindings)?;
+                Ok(format!("{b}[{i}]"))
+            }
+            MirRValue::Aggregate { kind, operands } => {
+                let mut ops = Vec::with_capacity(operands.len());
+                for o in operands {
+                    ops.push(self.compute_value_to_glsl(o, &func.locals, bindings)?);
+                }
+                match kind {
+                    AggregateKind::Struct(name) => {
+                        let ctor = match name.as_ref() {
+                            "build_vec2" => "vec2",
+                            "build_vec3" => "vec3",
+                            "build_vec4" => "vec4",
+                            other => other,
+                        };
+                        Ok(format!("{ctor}({})", ops.join(", ")))
+                    }
+                    AggregateKind::Array(elem_ty) => {
+                        let gty = self.type_to_glsl(elem_ty);
+                        Ok(format!("{gty}[{}]({})", ops.len(), ops.join(", ")))
+                    }
+                    _ => Err(CodegenError::Unsupported(format!(
+                        "aggregate kind `{kind:?}` is not supported in GLSL compute"
+                    ))),
+                }
+            }
+            MirRValue::NullaryOp(op, _) => match op {
+                NullaryOp::ThreadIndex(0) => Ok("gl_GlobalInvocationID.x".to_string()),
+                NullaryOp::ThreadIndex(1) => Ok("gl_GlobalInvocationID.y".to_string()),
+                NullaryOp::ThreadIndex(2) => Ok("gl_GlobalInvocationID.z".to_string()),
+                NullaryOp::LocalInvocationId(0) => Ok("gl_LocalInvocationID.x".to_string()),
+                NullaryOp::LocalInvocationId(1) => Ok("gl_LocalInvocationID.y".to_string()),
+                NullaryOp::LocalInvocationId(2) => Ok("gl_LocalInvocationID.z".to_string()),
+                NullaryOp::WorkgroupId(0) => Ok("gl_WorkGroupID.x".to_string()),
+                NullaryOp::WorkgroupId(1) => Ok("gl_WorkGroupID.y".to_string()),
+                NullaryOp::WorkgroupId(2) => Ok("gl_WorkGroupID.z".to_string()),
+                other => Err(CodegenError::Unsupported(format!(
+                    "nullary op `{other:?}` is not supported in GLSL compute"
+                ))),
+            },
+            other => Err(CodegenError::Unsupported(format!(
+                "rvalue `{other:?}` is not supported in GLSL compute"
+            ))),
+        }
+    }
+
+    fn compute_call_expr_to_glsl(
+        &self,
+        callee: &MirValue,
+        args: &[MirValue],
+        locals: &[MirLocal],
+        bindings: &ComputeBindings,
+    ) -> CodegenResult<String> {
+        let name = match callee {
+            MirValue::Function(n) | MirValue::Global(n) => n.as_ref(),
+            _ => {
+                return Err(CodegenError::Unsupported(
+                    "indirect function calls are not supported in GLSL compute".to_string(),
+                ));
+            }
+        };
+        let mapped = match name {
+            "fabs" | "fabsf" => "abs",
+            "sqrtf" => "sqrt",
+            "sinf" => "sin",
+            "cosf" => "cos",
+            "tanf" => "tan",
+            "expf" => "exp",
+            "logf" => "log",
+            "powf" => "pow",
+            "floorf" => "floor",
+            "ceilf" => "ceil",
+            "fmaf" => "fma",
+            "build_dot2" | "build_dot3" | "build_dot4" => "dot",
+            "build_normalize2" | "build_normalize3" | "build_normalize4" => "normalize",
+            "build_length2" | "build_length3" | "build_length4" => "length",
+            "build_cross" => "cross",
+            "build_reflect3" => "reflect",
+            "build_mix" | "lerp" | "build_lerp2" | "build_lerp3" | "build_lerp4" => "mix",
+            "build_clampf" | "build_clamp3" => "clamp",
+            "build_smoothstep" => "smoothstep",
+            "build_fract" => "fract",
+            "build_step" => "step",
+            "build_min_f32" | "build_min_f64" | "build_min_i32" | "build_min_i64" => "min",
+            "build_max_f32" | "build_max_f64" | "build_max_i32" | "build_max_i64" => "max",
+            "build_vec2_new" => "vec2",
+            "build_vec3_new" => "vec3",
+            "build_vec4_new" => "vec4",
+            other => other,
+        };
+        let mut arg_strs = Vec::with_capacity(args.len());
+        for a in args {
+            arg_strs.push(self.compute_value_to_glsl(a, locals, bindings)?);
+        }
+        Ok(format!("{mapped}({})", arg_strs.join(", ")))
+    }
+
+    fn compute_value_to_glsl(
+        &self,
+        value: &MirValue,
+        locals: &[MirLocal],
+        bindings: &ComputeBindings,
+    ) -> CodegenResult<String> {
+        match value {
+            MirValue::Local(id) => {
+                if let Some(buf) = bindings.buffer_vars.get(id) {
+                    return Ok(buf.clone());
+                }
+                if let Some(wg) = bindings.workgroup_vars.get(id) {
+                    return Ok(wg.clone());
+                }
+                if let (Some(pvar), Some(field)) =
+                    (&bindings.push_const_var, bindings.scalar_fields.get(id))
+                {
+                    return Ok(format!("{pvar}.{field}"));
+                }
+                Ok(self.compute_local_name(*id, locals))
+            }
+            MirValue::Const(c) => self.compute_const_to_glsl(c),
+            MirValue::Global(name) | MirValue::Function(name) => Ok(name.to_string()),
+        }
+    }
+
+    fn compute_const_to_glsl(&self, c: &MirConst) -> CodegenResult<String> {
+        match c {
+            MirConst::Bool(b) => Ok(if *b { "true" } else { "false" }.to_string()),
+            MirConst::Int(v, ty) => match ty {
+                MirType::Int(_, false) => Ok(format!("{v}u")),
+                _ => Ok(format!("{v}")),
+            },
+            MirConst::Uint(v, _) => Ok(format!("{v}u")),
+            MirConst::Float(v, _) => {
+                let s = format!("{v}");
+                if !s.contains('.') && !s.contains('e') && !s.contains('E') {
+                    Ok(format!("{s}.0"))
+                } else {
+                    Ok(s)
+                }
+            }
+            MirConst::Unit => Ok("0u".to_string()),
+            other => Err(CodegenError::Unsupported(format!(
+                "constant `{other:?}` is not supported in GLSL compute"
+            ))),
+        }
     }
 }
