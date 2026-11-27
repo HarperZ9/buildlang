@@ -1,0 +1,1897 @@
+// SPDX-FileCopyrightText: 2026 Zain Dana Harper
+// SPDX-License-Identifier: AGPL-3.0-only
+//
+// Wave 50K: BuildLang Self-Hosting Fixed-Point Slice 3 (buildc_selfhost_s3.bld).
+// Adds struct + field access, enum + match dispatch, and fail-closed static type checking
+// while compiling ITSELF across Stage 0 -> Stage 1 -> Stage 2 -> Stage 3 with
+// sha256(stage2_s3.c) == sha256(stage3_s3.c)!
+
+fn is_alpha(b: i64) -> i64 {
+    if (b >= 65 && b <= 90) || (b >= 97 && b <= 122) || b == 95 { return 1; }
+    return 0;
+}
+
+fn is_digit(b: i64) -> i64 {
+    if b >= 48 && b <= 57 { return 1; }
+    return 0;
+}
+
+fn is_alnum(b: i64) -> i64 {
+    if is_alpha(b) != 0 || is_digit(b) != 0 { return 1; }
+    return 0;
+}
+
+fn emit_chunk(out: &mut Vec<u8>, val: i64) -> i64 {
+    let mut x: i64 = val;
+    while x > 0 {
+        let ch: i64 = x % 256;
+        out.push(ch as u8);
+        x = x / 256;
+    }
+    return 0;
+}
+
+fn emit_slice(out: &mut Vec<u8>, src: &Vec<u8>, start: i64, len: i64) -> i64 {
+    let mut i: i64 = 0;
+    while i < len {
+        let b: i64 = src[(start + i) as usize] as i64;
+        out.push(b as u8);
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn emit_int_dec(out: &mut Vec<u8>, n: i64) -> i64 {
+    if n == 0 {
+        out.push(48 as u8);
+        return 0;
+    }
+    let mut digs: Vec<i64> = Vec::new();
+    let mut x: i64 = n;
+    while x > 0 {
+        digs.push(x % 10);
+        x = x / 10;
+    }
+    let mut i: i64 = (digs.len() as i64) - 1;
+    while i >= 0 {
+        out.push((48 + digs[i as usize]) as u8);
+        i = i - 1;
+    }
+    return 0;
+}
+
+fn bytes_eq(src: &Vec<u8>, s1: i64, l1: i64, s2: i64, l2: i64) -> i64 {
+    if l1 != l2 { return 0; }
+    let mut i: i64 = 0;
+    while i < l1 {
+        if (src[(s1 + i) as usize] as i64) != (src[(s2 + i) as usize] as i64) {
+            return 0;
+        }
+        i = i + 1;
+    }
+    return 1;
+}
+
+fn kw_fn(src: &Vec<u8>, start: i64, len: i64) -> i64 {
+    if len != 2 { return 0; }
+    if (src[(start + 0) as usize] as i64) != 102 { return 0; }
+    if (src[(start + 1) as usize] as i64) != 110 { return 0; }
+    return 1;
+}
+
+fn kw_let(src: &Vec<u8>, start: i64, len: i64) -> i64 {
+    if len != 3 { return 0; }
+    if (src[(start + 0) as usize] as i64) != 108 { return 0; }
+    if (src[(start + 1) as usize] as i64) != 101 { return 0; }
+    if (src[(start + 2) as usize] as i64) != 116 { return 0; }
+    return 1;
+}
+
+fn kw_mut(src: &Vec<u8>, start: i64, len: i64) -> i64 {
+    if len != 3 { return 0; }
+    if (src[(start + 0) as usize] as i64) != 109 { return 0; }
+    if (src[(start + 1) as usize] as i64) != 117 { return 0; }
+    if (src[(start + 2) as usize] as i64) != 116 { return 0; }
+    return 1;
+}
+
+fn kw_if(src: &Vec<u8>, start: i64, len: i64) -> i64 {
+    if len != 2 { return 0; }
+    if (src[(start + 0) as usize] as i64) != 105 { return 0; }
+    if (src[(start + 1) as usize] as i64) != 102 { return 0; }
+    return 1;
+}
+
+fn kw_else(src: &Vec<u8>, start: i64, len: i64) -> i64 {
+    if len != 4 { return 0; }
+    if (src[(start + 0) as usize] as i64) != 101 { return 0; }
+    if (src[(start + 1) as usize] as i64) != 108 { return 0; }
+    if (src[(start + 2) as usize] as i64) != 115 { return 0; }
+    if (src[(start + 3) as usize] as i64) != 101 { return 0; }
+    return 1;
+}
+
+fn kw_while(src: &Vec<u8>, start: i64, len: i64) -> i64 {
+    if len != 5 { return 0; }
+    if (src[(start + 0) as usize] as i64) != 119 { return 0; }
+    if (src[(start + 1) as usize] as i64) != 104 { return 0; }
+    if (src[(start + 2) as usize] as i64) != 105 { return 0; }
+    if (src[(start + 3) as usize] as i64) != 108 { return 0; }
+    if (src[(start + 4) as usize] as i64) != 101 { return 0; }
+    return 1;
+}
+
+fn kw_return(src: &Vec<u8>, start: i64, len: i64) -> i64 {
+    if len != 6 { return 0; }
+    if (src[(start + 0) as usize] as i64) != 114 { return 0; }
+    if (src[(start + 1) as usize] as i64) != 101 { return 0; }
+    if (src[(start + 2) as usize] as i64) != 116 { return 0; }
+    if (src[(start + 3) as usize] as i64) != 117 { return 0; }
+    if (src[(start + 4) as usize] as i64) != 114 { return 0; }
+    if (src[(start + 5) as usize] as i64) != 110 { return 0; }
+    return 1;
+}
+
+fn kw_true(src: &Vec<u8>, start: i64, len: i64) -> i64 {
+    if len != 4 { return 0; }
+    if (src[(start + 0) as usize] as i64) != 116 { return 0; }
+    if (src[(start + 1) as usize] as i64) != 114 { return 0; }
+    if (src[(start + 2) as usize] as i64) != 117 { return 0; }
+    if (src[(start + 3) as usize] as i64) != 101 { return 0; }
+    return 1;
+}
+
+fn kw_false(src: &Vec<u8>, start: i64, len: i64) -> i64 {
+    if len != 5 { return 0; }
+    if (src[(start + 0) as usize] as i64) != 102 { return 0; }
+    if (src[(start + 1) as usize] as i64) != 97 { return 0; }
+    if (src[(start + 2) as usize] as i64) != 108 { return 0; }
+    if (src[(start + 3) as usize] as i64) != 115 { return 0; }
+    if (src[(start + 4) as usize] as i64) != 101 { return 0; }
+    return 1;
+}
+
+fn kw_println(src: &Vec<u8>, start: i64, len: i64) -> i64 {
+    if len != 7 { return 0; }
+    if (src[(start + 0) as usize] as i64) != 112 { return 0; }
+    if (src[(start + 1) as usize] as i64) != 114 { return 0; }
+    if (src[(start + 2) as usize] as i64) != 105 { return 0; }
+    if (src[(start + 3) as usize] as i64) != 110 { return 0; }
+    if (src[(start + 4) as usize] as i64) != 116 { return 0; }
+    if (src[(start + 5) as usize] as i64) != 108 { return 0; }
+    if (src[(start + 6) as usize] as i64) != 110 { return 0; }
+    return 1;
+}
+
+fn kw_break(src: &Vec<u8>, start: i64, len: i64) -> i64 {
+    if len != 5 { return 0; }
+    if (src[(start + 0) as usize] as i64) != 98 { return 0; }
+    if (src[(start + 1) as usize] as i64) != 114 { return 0; }
+    if (src[(start + 2) as usize] as i64) != 101 { return 0; }
+    if (src[(start + 3) as usize] as i64) != 97 { return 0; }
+    if (src[(start + 4) as usize] as i64) != 107 { return 0; }
+    return 1;
+}
+
+fn kw_as(src: &Vec<u8>, start: i64, len: i64) -> i64 {
+    if len != 2 { return 0; }
+    if (src[(start + 0) as usize] as i64) != 97 { return 0; }
+    if (src[(start + 1) as usize] as i64) != 115 { return 0; }
+    return 1;
+}
+
+fn kw_struct(src: &Vec<u8>, start: i64, len: i64) -> i64 {
+    if len != 6 { return 0; }
+    if (src[(start + 0) as usize] as i64) != 115 { return 0; }
+    if (src[(start + 1) as usize] as i64) != 116 { return 0; }
+    if (src[(start + 2) as usize] as i64) != 114 { return 0; }
+    if (src[(start + 3) as usize] as i64) != 117 { return 0; }
+    if (src[(start + 4) as usize] as i64) != 99 { return 0; }
+    if (src[(start + 5) as usize] as i64) != 116 { return 0; }
+    return 1;
+}
+
+fn kw_enum(src: &Vec<u8>, start: i64, len: i64) -> i64 {
+    if len != 4 { return 0; }
+    if (src[(start + 0) as usize] as i64) != 101 { return 0; }
+    if (src[(start + 1) as usize] as i64) != 110 { return 0; }
+    if (src[(start + 2) as usize] as i64) != 117 { return 0; }
+    if (src[(start + 3) as usize] as i64) != 109 { return 0; }
+    return 1;
+}
+
+fn kw_match(src: &Vec<u8>, start: i64, len: i64) -> i64 {
+    if len != 5 { return 0; }
+    if (src[(start + 0) as usize] as i64) != 109 { return 0; }
+    if (src[(start + 1) as usize] as i64) != 97 { return 0; }
+    if (src[(start + 2) as usize] as i64) != 116 { return 0; }
+    if (src[(start + 3) as usize] as i64) != 99 { return 0; }
+    if (src[(start + 4) as usize] as i64) != 104 { return 0; }
+    return 1;
+}
+
+fn kw_vec(src: &Vec<u8>, start: i64, len: i64) -> i64 {
+    if len != 3 { return 0; }
+    if (src[(start + 0) as usize] as i64) != 86 { return 0; }
+    if (src[(start + 1) as usize] as i64) != 101 { return 0; }
+    if (src[(start + 2) as usize] as i64) != 99 { return 0; }
+    return 1;
+}
+
+fn kw_main(src: &Vec<u8>, start: i64, len: i64) -> i64 {
+    if len != 4 { return 0; }
+    if (src[(start + 0) as usize] as i64) != 109 { return 0; }
+    if (src[(start + 1) as usize] as i64) != 97 { return 0; }
+    if (src[(start + 2) as usize] as i64) != 105 { return 0; }
+    if (src[(start + 3) as usize] as i64) != 110 { return 0; }
+    return 1;
+}
+
+fn ty_bool(src: &Vec<u8>, start: i64, len: i64) -> i64 {
+    if len != 4 { return 0; }
+    if (src[(start + 0) as usize] as i64) != 98 { return 0; }
+    if (src[(start + 1) as usize] as i64) != 111 { return 0; }
+    if (src[(start + 2) as usize] as i64) != 111 { return 0; }
+    if (src[(start + 3) as usize] as i64) != 108 { return 0; }
+    return 1;
+}
+
+fn ty_i64(src: &Vec<u8>, start: i64, len: i64) -> i64 {
+    if len != 3 { return 0; }
+    if (src[(start + 0) as usize] as i64) != 105 { return 0; }
+    if (src[(start + 1) as usize] as i64) != 54 { return 0; }
+    if (src[(start + 2) as usize] as i64) != 52 { return 0; }
+    return 1;
+}
+
+fn ty_u8(src: &Vec<u8>, start: i64, len: i64) -> i64 {
+    if len != 2 { return 0; }
+    if (src[(start + 0) as usize] as i64) != 117 { return 0; }
+    if (src[(start + 1) as usize] as i64) != 56 { return 0; }
+    return 1;
+}
+
+fn ty_usize(src: &Vec<u8>, start: i64, len: i64) -> i64 {
+    if len != 5 { return 0; }
+    if (src[(start + 0) as usize] as i64) != 117 { return 0; }
+    if (src[(start + 1) as usize] as i64) != 115 { return 0; }
+    if (src[(start + 2) as usize] as i64) != 105 { return 0; }
+    if (src[(start + 3) as usize] as i64) != 122 { return 0; }
+    if (src[(start + 4) as usize] as i64) != 101 { return 0; }
+    return 1;
+}
+
+fn ty_string(src: &Vec<u8>, start: i64, len: i64) -> i64 {
+    if len != 6 { return 0; }
+    if (src[(start + 0) as usize] as i64) != 83 { return 0; }
+    if (src[(start + 1) as usize] as i64) != 116 { return 0; }
+    if (src[(start + 2) as usize] as i64) != 114 { return 0; }
+    if (src[(start + 3) as usize] as i64) != 105 { return 0; }
+    if (src[(start + 4) as usize] as i64) != 110 { return 0; }
+    if (src[(start + 5) as usize] as i64) != 103 { return 0; }
+    return 1;
+}
+
+fn bi_args_count(src: &Vec<u8>, start: i64, len: i64) -> i64 {
+    if len != 10 { return 0; }
+    if (src[(start + 0) as usize] as i64) != 97 { return 0; }
+    if (src[(start + 1) as usize] as i64) != 114 { return 0; }
+    if (src[(start + 2) as usize] as i64) != 103 { return 0; }
+    if (src[(start + 3) as usize] as i64) != 115 { return 0; }
+    if (src[(start + 4) as usize] as i64) != 95 { return 0; }
+    if (src[(start + 5) as usize] as i64) != 99 { return 0; }
+    if (src[(start + 6) as usize] as i64) != 111 { return 0; }
+    if (src[(start + 7) as usize] as i64) != 117 { return 0; }
+    if (src[(start + 8) as usize] as i64) != 110 { return 0; }
+    if (src[(start + 9) as usize] as i64) != 116 { return 0; }
+    return 1;
+}
+
+fn bi_args_get(src: &Vec<u8>, start: i64, len: i64) -> i64 {
+    if len != 8 { return 0; }
+    if (src[(start + 0) as usize] as i64) != 97 { return 0; }
+    if (src[(start + 1) as usize] as i64) != 114 { return 0; }
+    if (src[(start + 2) as usize] as i64) != 103 { return 0; }
+    if (src[(start + 3) as usize] as i64) != 115 { return 0; }
+    if (src[(start + 4) as usize] as i64) != 95 { return 0; }
+    if (src[(start + 5) as usize] as i64) != 103 { return 0; }
+    if (src[(start + 6) as usize] as i64) != 101 { return 0; }
+    if (src[(start + 7) as usize] as i64) != 116 { return 0; }
+    return 1;
+}
+
+fn bi_read_file_bytes(src: &Vec<u8>, start: i64, len: i64) -> i64 {
+    if len != 15 { return 0; }
+    if (src[(start + 0) as usize] as i64) != 114 { return 0; }
+    if (src[(start + 1) as usize] as i64) != 101 { return 0; }
+    if (src[(start + 2) as usize] as i64) != 97 { return 0; }
+    if (src[(start + 3) as usize] as i64) != 100 { return 0; }
+    if (src[(start + 4) as usize] as i64) != 95 { return 0; }
+    if (src[(start + 5) as usize] as i64) != 102 { return 0; }
+    if (src[(start + 6) as usize] as i64) != 105 { return 0; }
+    if (src[(start + 7) as usize] as i64) != 108 { return 0; }
+    if (src[(start + 8) as usize] as i64) != 101 { return 0; }
+    if (src[(start + 9) as usize] as i64) != 95 { return 0; }
+    if (src[(start + 10) as usize] as i64) != 98 { return 0; }
+    if (src[(start + 11) as usize] as i64) != 121 { return 0; }
+    if (src[(start + 12) as usize] as i64) != 116 { return 0; }
+    if (src[(start + 13) as usize] as i64) != 101 { return 0; }
+    if (src[(start + 14) as usize] as i64) != 115 { return 0; }
+    return 1;
+}
+
+fn bi_write_file_bytes(src: &Vec<u8>, start: i64, len: i64) -> i64 {
+    if len != 16 { return 0; }
+    if (src[(start + 0) as usize] as i64) != 119 { return 0; }
+    if (src[(start + 1) as usize] as i64) != 114 { return 0; }
+    if (src[(start + 2) as usize] as i64) != 105 { return 0; }
+    if (src[(start + 3) as usize] as i64) != 116 { return 0; }
+    if (src[(start + 4) as usize] as i64) != 101 { return 0; }
+    if (src[(start + 5) as usize] as i64) != 95 { return 0; }
+    if (src[(start + 6) as usize] as i64) != 102 { return 0; }
+    if (src[(start + 7) as usize] as i64) != 105 { return 0; }
+    if (src[(start + 8) as usize] as i64) != 108 { return 0; }
+    if (src[(start + 9) as usize] as i64) != 101 { return 0; }
+    if (src[(start + 10) as usize] as i64) != 95 { return 0; }
+    if (src[(start + 11) as usize] as i64) != 98 { return 0; }
+    if (src[(start + 12) as usize] as i64) != 121 { return 0; }
+    if (src[(start + 13) as usize] as i64) != 116 { return 0; }
+    if (src[(start + 14) as usize] as i64) != 101 { return 0; }
+    if (src[(start + 15) as usize] as i64) != 115 { return 0; }
+    return 1;
+}
+
+fn bi_exit(src: &Vec<u8>, start: i64, len: i64) -> i64 {
+    if len != 4 { return 0; }
+    if (src[(start + 0) as usize] as i64) != 101 { return 0; }
+    if (src[(start + 1) as usize] as i64) != 120 { return 0; }
+    if (src[(start + 2) as usize] as i64) != 105 { return 0; }
+    if (src[(start + 3) as usize] as i64) != 116 { return 0; }
+    return 1;
+}
+
+fn m_push(src: &Vec<u8>, start: i64, len: i64) -> i64 {
+    if len != 4 { return 0; }
+    if (src[(start + 0) as usize] as i64) != 112 { return 0; }
+    if (src[(start + 1) as usize] as i64) != 117 { return 0; }
+    if (src[(start + 2) as usize] as i64) != 115 { return 0; }
+    if (src[(start + 3) as usize] as i64) != 104 { return 0; }
+    return 1;
+}
+
+fn m_len(src: &Vec<u8>, start: i64, len: i64) -> i64 {
+    if len != 3 { return 0; }
+    if (src[(start + 0) as usize] as i64) != 108 { return 0; }
+    if (src[(start + 1) as usize] as i64) != 101 { return 0; }
+    if (src[(start + 2) as usize] as i64) != 110 { return 0; }
+    return 1;
+}
+
+fn m_new(src: &Vec<u8>, start: i64, len: i64) -> i64 {
+    if len != 3 { return 0; }
+    if (src[(start + 0) as usize] as i64) != 110 { return 0; }
+    if (src[(start + 1) as usize] as i64) != 101 { return 0; }
+    if (src[(start + 2) as usize] as i64) != 119 { return 0; }
+    return 1;
+}
+
+
+fn classify_word(src: &Vec<u8>, start: i64, len: i64) -> i64 {
+    if kw_fn(src, start, len) != 0 { return 10; }
+    if kw_let(src, start, len) != 0 { return 11; }
+    if kw_mut(src, start, len) != 0 { return 12; }
+    if kw_if(src, start, len) != 0 { return 13; }
+    if kw_else(src, start, len) != 0 { return 14; }
+    if kw_while(src, start, len) != 0 { return 15; }
+    if kw_return(src, start, len) != 0 { return 16; }
+    if kw_true(src, start, len) != 0 { return 17; }
+    if kw_false(src, start, len) != 0 { return 18; }
+    if kw_println(src, start, len) != 0 { return 19; }
+    if kw_break(src, start, len) != 0 { return 50; }
+    if kw_as(src, start, len) != 0 { return 51; }
+    if kw_struct(src, start, len) != 0 { return 54; }
+    if kw_enum(src, start, len) != 0 { return 55; }
+    if kw_match(src, start, len) != 0 { return 56; }
+    return 1;
+}
+
+// Token kinds: 0=EOF, 1=IDENT, 2=INT, 3=STR, 10..19/50..56=keywords,
+// 20=(, 21=), 22={, 23=}, 24=,, 25=;, 26=:, 27=->, 28=~, 29=[, 45=], 46=., 47=::, 48=&, 57==>
+// 30=+, 31=-, 32=*, 33=/, 34=%, 35==, 36===, 37=!=, 38=<, 39=<=, 40=>, 41=>=, 42=&&, 43=||, 44=!
+// State slots st[0..10]:
+// 0=pos, 1=has_err, 2=err_line, 3=err_code, 4=in_main, 5=in_void,
+// 6=scope_id, 7=cur_ret_ty, 8=match_id, 9=next_sid, 10=next_eid
+// Symbol table sym (6 i64s per entry):
+// tag=1: [1, sid, name_s, name_l, 0, 0]       (struct type id = 100 + sid)
+// tag=2: [2, sid, fld_s, fld_l, fld_ty, 0]    (struct field)
+// tag=3: [3, eid, name_s, name_l, 0, 0]       (enum type id = 200 + eid)
+// tag=4: [4, eid, var_s, var_l, var_val, 0]   (enum variant)
+// tag=5: [5, fid, name_s, name_l, arity, ret] (function)
+// tag=6: [6, scope, name_s, name_l, ty, 0]    (local/param)
+
+fn sym_push(sym: &mut Vec<i64>, t: i64, a: i64, b: i64, c: i64, d: i64, e: i64) -> i64 {
+    sym.push(t);
+    sym.push(a);
+    sym.push(b);
+    sym.push(c);
+    sym.push(d);
+    sym.push(e);
+    return 0;
+}
+
+fn find_struct(src: &Vec<u8>, sym: &Vec<i64>, s: i64, l: i64) -> i64 {
+    let n: i64 = (sym.len() as i64) / 6;
+    let mut i: i64 = 0;
+    while i < n {
+        if sym[(i * 6) as usize] == 1 {
+            if bytes_eq(src, sym[(i * 6 + 2) as usize], sym[(i * 6 + 3) as usize], s, l) != 0 {
+                return sym[(i * 6 + 1) as usize];
+            }
+        }
+        i = i + 1;
+    }
+    return -1;
+}
+
+fn find_struct_field_ty(src: &Vec<u8>, sym: &Vec<i64>, sid: i64, fs: i64, fl: i64) -> i64 {
+    let n: i64 = (sym.len() as i64) / 6;
+    let mut i: i64 = 0;
+    while i < n {
+        if sym[(i * 6) as usize] == 2 && sym[(i * 6 + 1) as usize] == sid {
+            if bytes_eq(src, sym[(i * 6 + 2) as usize], sym[(i * 6 + 3) as usize], fs, fl) != 0 {
+                return sym[(i * 6 + 4) as usize];
+            }
+        }
+        i = i + 1;
+    }
+    return -1;
+}
+
+fn find_enum(src: &Vec<u8>, sym: &Vec<i64>, s: i64, l: i64) -> i64 {
+    let n: i64 = (sym.len() as i64) / 6;
+    let mut i: i64 = 0;
+    while i < n {
+        if sym[(i * 6) as usize] == 3 {
+            if bytes_eq(src, sym[(i * 6 + 2) as usize], sym[(i * 6 + 3) as usize], s, l) != 0 {
+                return sym[(i * 6 + 1) as usize];
+            }
+        }
+        i = i + 1;
+    }
+    return -1;
+}
+
+fn find_enum_variant(src: &Vec<u8>, sym: &Vec<i64>, eid: i64, vs: i64, vl: i64) -> i64 {
+    let n: i64 = (sym.len() as i64) / 6;
+    let mut i: i64 = 0;
+    while i < n {
+        if sym[(i * 6) as usize] == 4 && sym[(i * 6 + 1) as usize] == eid {
+            if bytes_eq(src, sym[(i * 6 + 2) as usize], sym[(i * 6 + 3) as usize], vs, vl) != 0 {
+                return sym[(i * 6 + 4) as usize];
+            }
+        }
+        i = i + 1;
+    }
+    return -1;
+}
+
+fn find_fn_idx(src: &Vec<u8>, sym: &Vec<i64>, s: i64, l: i64) -> i64 {
+    let n: i64 = (sym.len() as i64) / 6;
+    let mut i: i64 = 0;
+    while i < n {
+        if sym[(i * 6) as usize] == 5 {
+            if bytes_eq(src, sym[(i * 6 + 2) as usize], sym[(i * 6 + 3) as usize], s, l) != 0 {
+                return i;
+            }
+        }
+        i = i + 1;
+    }
+    return -1;
+}
+
+fn find_local_ty(src: &Vec<u8>, sym: &Vec<i64>, scope: i64, s: i64, l: i64) -> i64 {
+    let n: i64 = (sym.len() as i64) / 6;
+    let mut i: i64 = n - 1;
+    while i >= 0 {
+        if sym[(i * 6) as usize] == 6 && sym[(i * 6 + 1) as usize] == scope {
+            if bytes_eq(src, sym[(i * 6 + 2) as usize], sym[(i * 6 + 3) as usize], s, l) != 0 {
+                return sym[(i * 6 + 4) as usize];
+            }
+        }
+        i = i - 1;
+    }
+    return 0;
+}
+
+fn emit_c_type_from_id(src: &Vec<u8>, sym: &Vec<i64>, out: &mut Vec<u8>, tid: i64) -> i64 {
+    if tid == 3 {
+        emit_chunk(out, 182056212034);
+        return 0;
+    }
+    if tid >= 100 && tid < 200 {
+        let sid: i64 = tid - 100;
+        let n: i64 = (sym.len() as i64) / 6;
+        let mut i: i64 = 0;
+        while i < n {
+            if sym[(i * 6) as usize] == 1 && sym[(i * 6 + 1) as usize] == sid {
+                emit_chunk(out, 6255731);
+                emit_slice(out, src, sym[(i * 6 + 2) as usize], sym[(i * 6 + 3) as usize]);
+                return 0;
+            }
+            i = i + 1;
+        }
+    }
+    emit_chunk(out, 32755775154974313);
+    return 0;
+}
+
+fn push_tok(tk: &mut Vec<i64>, kind: i64, start: i64, len: i64, line: i64) -> i64 {
+    tk.push(kind); tk.push(start); tk.push(len); tk.push(line);
+    return 0;
+}
+
+fn set_err(st: &mut Vec<i64>, line: i64, code: i64) -> i64 {
+    if st[1] == 0 {
+        st[1] = 1;
+        st[2] = line;
+        st[3] = code;
+    }
+    return 0;
+}
+
+fn lex_source(src: &Vec<u8>, tk: &mut Vec<i64>, st: &mut Vec<i64>) -> i64 {
+    let n: i64 = src.len() as i64;
+    let mut i: i64 = 0;
+    let mut line: i64 = 1;
+    while i < n && st[1] == 0 {
+        let b: i64 = src[i as usize] as i64;
+        if b == 32 || b == 9 || b == 13 {
+            i = i + 1;
+        } else if b == 10 {
+            line = line + 1;
+            i = i + 1;
+        } else if b == 47 && i + 1 < n && (src[(i + 1) as usize] as i64) == 47 {
+            i = i + 2;
+            while i < n && (src[i as usize] as i64) != 10 { i = i + 1; }
+        } else if is_alpha(b) != 0 {
+            let start: i64 = i;
+            while i < n && is_alnum(src[i as usize] as i64) != 0 { i = i + 1; }
+            let k: i64 = classify_word(src, start, i - start);
+            push_tok(tk, k, start, i - start, line);
+        } else if is_digit(b) != 0 {
+            let start: i64 = i;
+            while i < n && is_digit(src[i as usize] as i64) != 0 { i = i + 1; }
+            push_tok(tk, 2, start, i - start, line);
+        } else if b == 34 {
+            let start: i64 = i + 1;
+            i = i + 1;
+            let mut closed: i64 = 0;
+            while i < n {
+                let c: i64 = src[i as usize] as i64;
+                if c == 34 {
+                    push_tok(tk, 3, start, i - start, line);
+                    i = i + 1; closed = 1; break;
+                }
+                if c == 10 { set_err(st, line, 101); break; }
+                if c == 92 && i + 1 < n { i = i + 2; } else { i = i + 1; }
+            }
+            if closed == 0 && st[1] == 0 { set_err(st, line, 102); }
+        } else if b == 45 && i + 1 < n && (src[(i + 1) as usize] as i64) == 62 {
+            push_tok(tk, 27, i, 2, line); i = i + 2;
+        } else if b == 61 && i + 1 < n && (src[(i + 1) as usize] as i64) == 62 {
+            push_tok(tk, 57, i, 2, line); i = i + 2;
+        } else if b == 58 && i + 1 < n && (src[(i + 1) as usize] as i64) == 58 {
+            push_tok(tk, 47, i, 2, line); i = i + 2;
+        } else if b == 61 && i + 1 < n && (src[(i + 1) as usize] as i64) == 61 {
+            push_tok(tk, 36, i, 2, line); i = i + 2;
+        } else if b == 33 && i + 1 < n && (src[(i + 1) as usize] as i64) == 61 {
+            push_tok(tk, 37, i, 2, line); i = i + 2;
+        } else if b == 60 && i + 1 < n && (src[(i + 1) as usize] as i64) == 61 {
+            push_tok(tk, 39, i, 2, line); i = i + 2;
+        } else if b == 62 && i + 1 < n && (src[(i + 1) as usize] as i64) == 61 {
+            push_tok(tk, 41, i, 2, line); i = i + 2;
+        } else if b == 38 && i + 1 < n && (src[(i + 1) as usize] as i64) == 38 {
+            push_tok(tk, 42, i, 2, line); i = i + 2;
+        } else if b == 124 && i + 1 < n && (src[(i + 1) as usize] as i64) == 124 {
+            push_tok(tk, 43, i, 2, line); i = i + 2;
+        } else if b == 40 { push_tok(tk, 20, i, 1, line); i = i + 1; }
+        else if b == 41 { push_tok(tk, 21, i, 1, line); i = i + 1; }
+        else if b == 123 { push_tok(tk, 22, i, 1, line); i = i + 1; }
+        else if b == 125 { push_tok(tk, 23, i, 1, line); i = i + 1; }
+        else if b == 91 { push_tok(tk, 29, i, 1, line); i = i + 1; }
+        else if b == 93 { push_tok(tk, 45, i, 1, line); i = i + 1; }
+        else if b == 46 { push_tok(tk, 46, i, 1, line); i = i + 1; }
+        else if b == 38 { push_tok(tk, 48, i, 1, line); i = i + 1; }
+        else if b == 44 { push_tok(tk, 24, i, 1, line); i = i + 1; }
+        else if b == 59 { push_tok(tk, 25, i, 1, line); i = i + 1; }
+        else if b == 58 { push_tok(tk, 26, i, 1, line); i = i + 1; }
+        else if b == 126 { push_tok(tk, 28, i, 1, line); i = i + 1; }
+        else if b == 43 { push_tok(tk, 30, i, 1, line); i = i + 1; }
+        else if b == 45 { push_tok(tk, 31, i, 1, line); i = i + 1; }
+        else if b == 42 { push_tok(tk, 32, i, 1, line); i = i + 1; }
+        else if b == 47 { push_tok(tk, 33, i, 1, line); i = i + 1; }
+        else if b == 37 { push_tok(tk, 34, i, 1, line); i = i + 1; }
+        else if b == 61 { push_tok(tk, 35, i, 1, line); i = i + 1; }
+        else if b == 60 { push_tok(tk, 38, i, 1, line); i = i + 1; }
+        else if b == 62 { push_tok(tk, 40, i, 1, line); i = i + 1; }
+        else if b == 33 { push_tok(tk, 44, i, 1, line); i = i + 1; }
+        else { set_err(st, line, 103); }
+    }
+    push_tok(tk, 0, 0, 0, line);
+    return 0;
+}
+
+fn tk_count(tk: &Vec<i64>) -> i64 { return (tk.len() as i64) / 4; }
+fn tk_kind(tk: &Vec<i64>, idx: i64) -> i64 {
+    if idx >= 0 && idx < tk_count(tk) { return tk[(idx * 4) as usize]; }
+    return 0;
+}
+fn tk_start(tk: &Vec<i64>, idx: i64) -> i64 {
+    if idx >= 0 && idx < tk_count(tk) { return tk[(idx * 4 + 1) as usize]; }
+    return 0;
+}
+fn tk_len(tk: &Vec<i64>, idx: i64) -> i64 {
+    if idx >= 0 && idx < tk_count(tk) { return tk[(idx * 4 + 2) as usize]; }
+    return 0;
+}
+fn tk_line(tk: &Vec<i64>, idx: i64) -> i64 {
+    if idx >= 0 && idx < tk_count(tk) { return tk[(idx * 4 + 3) as usize]; }
+    return 0;
+}
+fn cur_k(tk: &Vec<i64>, st: &Vec<i64>) -> i64 { return tk_kind(tk, st[0]); }
+fn cur_s(tk: &Vec<i64>, st: &Vec<i64>) -> i64 { return tk_start(tk, st[0]); }
+fn cur_l(tk: &Vec<i64>, st: &Vec<i64>) -> i64 { return tk_len(tk, st[0]); }
+fn cur_ln(tk: &Vec<i64>, st: &Vec<i64>) -> i64 { return tk_line(tk, st[0]); }
+fn adv(tk: &Vec<i64>, st: &mut Vec<i64>) -> i64 {
+    if st[0] + 1 < tk_count(tk) { st[0] = st[0] + 1; }
+    return 0;
+}
+
+fn expect(tk: &Vec<i64>, st: &mut Vec<i64>, kind: i64, code: i64) -> i64 {
+    if st[1] != 0 { return 0; }
+    if cur_k(tk, st) != kind {
+        set_err(st, cur_ln(tk, st), code);
+        return 0;
+    }
+    let idx: i64 = st[0];
+    adv(tk, st);
+    return idx;
+}
+
+fn resolve_type_name(src: &Vec<u8>, sym: &Vec<i64>, s: i64, l: i64) -> i64 {
+    if ty_bool(src, s, l) != 0 { return 2; }
+    if ty_i64(src, s, l) != 0 || ty_u8(src, s, l) != 0 || ty_usize(src, s, l) != 0 { return 1; }
+    if kw_vec(src, s, l) != 0 { return 3; }
+    if ty_string(src, s, l) != 0 { return 4; }
+    let sid: i64 = find_struct(src, sym, s, l);
+    if sid >= 0 { return 100 + sid; }
+    let eid: i64 = find_enum(src, sym, s, l);
+    if eid >= 0 { return 200 + eid; }
+    return 1;
+}
+
+fn parse_type_id(src: &Vec<u8>, tk: &Vec<i64>, st: &mut Vec<i64>, sym: &Vec<i64>) -> i64 {
+    if cur_k(tk, st) == 48 { adv(tk, st); }
+    if cur_k(tk, st) == 12 { adv(tk, st); }
+    let idx: i64 = expect(tk, st, 1, 201);
+    let tid: i64 = resolve_type_name(src, sym, tk_start(tk, idx), tk_len(tk, idx));
+    if cur_k(tk, st) == 38 {
+        adv(tk, st);
+        let _ = expect(tk, st, 1, 202);
+        let _ = expect(tk, st, 40, 203);
+    }
+    return tid;
+}
+
+fn emit_runtime_header(out: &mut Vec<u8>) -> i64 {
+    emit_chunk(out, 28550353911818799);
+    emit_chunk(out, 27620163288588658);
+    emit_chunk(out, 28266697867796601);
+    emit_chunk(out, 29386013322469219);
+    emit_chunk(out, 9063769870463855);
+    emit_chunk(out, 21502515018547752);
+    emit_chunk(out, 33892747117555297);
+    emit_chunk(out, 31078174245610597);
+    emit_chunk(out, 28538277087879284);
+    emit_chunk(out, 32216185155760928);
+    emit_chunk(out, 33053953074946933);
+    emit_chunk(out, 29382749079808877);
+    emit_chunk(out, 29382684907762731);
+    emit_chunk(out, 13275641527624549);
+    emit_chunk(out, 33051746585092874);
+    emit_chunk(out, 28275535949882724);
+    emit_chunk(out, 2883366944009833);
+    emit_chunk(out, 28276606056163619);
+    emit_chunk(out, 29665323866923109);
+    emit_chunk(out, 29593399458279023);
+    emit_chunk(out, 9118681395913582);
+    emit_chunk(out, 27700461980382012);
+    emit_chunk(out, 29593398583126062);
+    emit_chunk(out, 31078135946813542);
+    emit_chunk(out, 22033523127379045);
+    emit_chunk(out, 34938259177947989);
+    emit_chunk(out, 31078135946813564);
+    emit_chunk(out, 30508558754276453);
+    emit_chunk(out, 2860239366352481);
+    emit_chunk(out, 28550371616318499);
+    emit_chunk(out, 26775673830654496);
+    emit_chunk(out, 27700488018616671);
+    emit_chunk(out, 11303389155914869);
+    emit_chunk(out, 11650860936687221);
+    emit_chunk(out, 28555882038233641);
+    emit_chunk(out, 31078135946814218);
+    emit_chunk(out, 2908617556762725);
+    emit_chunk(out, 2927352609662243);
+    emit_chunk(out, 28539359489258506);
+    emit_chunk(out, 27995157134778470);
+    emit_chunk(out, 32772495093997684);
+    emit_chunk(out, 31560564104705078);
+    emit_chunk(out, 32772495089824372);
+    emit_chunk(out, 28547859294925878);
+    emit_chunk(out, 15327666301320046);
+    emit_chunk(out, 31632275765747508);
+    emit_chunk(out, 28523814660677691);
+    emit_chunk(out, 32758250072587107);
+    emit_chunk(out, 9135216813695849);
+    emit_chunk(out, 9116495206506343);
+    emit_chunk(out, 32777585078313021);
+    emit_chunk(out, 29382388335866977);
+    emit_chunk(out, 26853510631551585);
+    emit_chunk(out, 9074408889479777);
+    emit_chunk(out, 2825999566525774);
+    emit_chunk(out, 9116503830000755);
+    emit_chunk(out, 24279554635811906);
+    emit_chunk(out, 26870286606033765);
+    emit_chunk(out, 29677425830356334);
+    emit_chunk(out, 9042428642208100);
+    emit_chunk(out, 11931235911868448);
+    emit_chunk(out, 18621467392505376);
+    emit_chunk(out, 27423096313177430);
+    emit_chunk(out, 29681489858751596);
+    emit_chunk(out, 24279589281817978);
+    emit_chunk(out, 9018448464667493);
+    emit_chunk(out, 31593562367860768);
+    emit_chunk(out, 24011273391862388);
+    emit_chunk(out, 17501433926208588);
+    emit_chunk(out, 13546245791311212);
+    emit_chunk(out, 27412191442772027);
+    emit_chunk(out, 2879827652452464);
+    emit_chunk(out, 32762638138089504);
+    emit_chunk(out, 2880128303395445);
+    emit_chunk(out, 29682834468964989);
+    emit_chunk(out, 9101067044397155);
+    emit_chunk(out, 32755775154974313);
+    emit_chunk(out, 31073763570639392);
+    emit_chunk(out, 9053805645021736);
+    emit_chunk(out, 28554456478001526);
+    emit_chunk(out, 12796255616005492);
+    emit_chunk(out, 35219811716131902);
+    emit_chunk(out, 27981971266499338);
+    emit_chunk(out, 29590423597761056);
+    emit_chunk(out, 9135151501440110);
+    emit_chunk(out, 11386977943254626);
+    emit_chunk(out, 33249413680158274);
+    emit_chunk(out, 14696572485443628);
+    emit_chunk(out, 34656784364893279);
+    emit_chunk(out, 28826034323333130);
+    emit_chunk(out, 13546241496000544);
+    emit_chunk(out, 17487084444744736);
+    emit_chunk(out, 28547986954264637);
+    emit_chunk(out, 31637487082285422);
+    emit_chunk(out, 32414042826893682);
+    emit_chunk(out, 9056069311882356);
+    emit_chunk(out, 30440118505402146);
+    emit_chunk(out, 28266709407196268);
+    emit_chunk(out, 30443416129269340);
+    emit_chunk(out, 31084757628972655);
+    emit_chunk(out, 30443416133904743);
+    emit_chunk(out, 31084757628972655);
+    emit_chunk(out, 28547986954266983);
+    emit_chunk(out, 29687248282397038);
+    emit_chunk(out, 16652314864593012);
+    emit_chunk(out, 9042521603341600);
+    emit_chunk(out, 9128637130630514);
+    emit_chunk(out, 25740067305565558);
+    emit_chunk(out, 32381154480577897);
+    emit_chunk(out, 18612959805989236);
+    emit_chunk(out, 29677425693908812);
+    emit_chunk(out, 28555826493005924);
+    emit_chunk(out, 11931235911870580);
+    emit_chunk(out, 32772495088842272);
+    emit_chunk(out, 12500487087535158);
+    emit_chunk(out, 26797531273783584);
+    emit_chunk(out, 9052744723079284);
+    emit_chunk(out, 29590194904631931);
+    emit_chunk(out, 9073309155598438);
+    emit_chunk(out, 9122787503120432);
+    emit_chunk(out, 30467662461025598);
+    emit_chunk(out, 28746160817139301);
+    emit_chunk(out, 11371649323070064);
+    emit_chunk(out, 12510734628189299);
+    emit_chunk(out, 10450181286732320);
+    emit_chunk(out, 30518204449451116);
+    emit_chunk(out, 11294372996734052);
+    emit_chunk(out, 31362608844926828);
+    emit_chunk(out, 11294374183397230);
+    emit_chunk(out, 31362608844926828);
+    emit_chunk(out, 30467662461626222);
+    emit_chunk(out, 33888186311208549);
+    emit_chunk(out, 11594557098062953);
+    emit_chunk(out, 9042521241755707);
+    emit_chunk(out, 32216172773340704);
+    emit_chunk(out, 33249494159944027);
+    emit_chunk(out, 32381154480581729);
+    emit_chunk(out, 18612959805989236);
+    emit_chunk(out, 29677425693908812);
+    emit_chunk(out, 33056127585493092);
+    emit_chunk(out, 27977443845892211);
+    emit_chunk(out, 31077834343981098);
+    emit_chunk(out, 33249731437409908);
+    emit_chunk(out, 9018723191581793);
+    emit_chunk(out, 11294623290892320);
+    emit_chunk(out, 9128581141507446);
+    emit_chunk(out, 27934387670629694);
+    emit_chunk(out, 9018723191582817);
+    emit_chunk(out, 9042521604759584);
+    emit_chunk(out, 32755775154974313);
+    emit_chunk(out, 33249494160338464);
+    emit_chunk(out, 17768590575091245);
+    emit_chunk(out, 31632276264416800);
+    emit_chunk(out, 9071109209074208);
+    emit_chunk(out, 9042521237435446);
+    emit_chunk(out, 12796254301986848);
+    emit_chunk(out, 9074408823222334);
+    emit_chunk(out, 26797531273783592);
+    emit_chunk(out, 30506385819642484);
+    emit_chunk(out, 17501434063056748);
+    emit_chunk(out, 32413740971488368);
+    emit_chunk(out, 31007827231603305);
+    emit_chunk(out, 34455890340487267);
+    emit_chunk(out, 32772495226859365);
+    emit_chunk(out, 16652281648722998);
+    emit_chunk(out, 9042521604759562);
+    emit_chunk(out, 27412191442772000);
+    emit_chunk(out, 16716348264358000);
+    emit_chunk(out, 2952326698508298);
+    emit_chunk(out, 17501433924427808);
+    emit_chunk(out, 17501434919679088);
+    emit_chunk(out, 9109639248373100);
+    emit_chunk(out, 2880086444744765);
+    emit_chunk(out, 29682834468964989);
+    emit_chunk(out, 9101067044397155);
+    emit_chunk(out, 32755775154974313);
+    emit_chunk(out, 29117685139530272);
+    emit_chunk(out, 32772547957448563);
+    emit_chunk(out, 9052710497121832);
+    emit_chunk(out, 32217290123649147);
+    emit_chunk(out, 15327666301837422);
+    emit_chunk(out, 27407969422696244);
+    emit_chunk(out, 2952327155902322);
+    emit_chunk(out, 9116503830000755);
+    emit_chunk(out, 31352712937294914);
+    emit_chunk(out, 27417847696487278);
+    emit_chunk(out, 27407991848315506);
+    emit_chunk(out, 32762591955871602);
+    emit_chunk(out, 26797531273783592);
+    emit_chunk(out, 9142577318666356);
+    emit_chunk(out, 9128637130630514);
+    emit_chunk(out, 13546246289516840);
+    emit_chunk(out, 16924134485665312);
+    emit_chunk(out, 27979763651929888);
+    emit_chunk(out, 27407969268211753);
+    emit_chunk(out, 9109906342176626);
+    emit_chunk(out, 35219810436653114);
+    emit_chunk(out, 27981971266499338);
+    emit_chunk(out, 18612899506045472);
+    emit_chunk(out, 30507187774383446);
+    emit_chunk(out, 28815332359893599);
+    emit_chunk(out, 32784560712674409);
+    emit_chunk(out, 32491047005746021);
+    emit_chunk(out, 11947711710568564);
+    emit_chunk(out, 9018723191582752);
+    emit_chunk(out, 27977443845349408);
+    emit_chunk(out, 27619994627350570);
+    emit_chunk(out, 11584967313088374);
+    emit_chunk(out, 19738570719758907);
+    emit_chunk(out, 9119487588912201);
+    emit_chunk(out, 31073781017878589);
+    emit_chunk(out, 27710038611882024);
+    emit_chunk(out, 9042521237432610);
+    emit_chunk(out, 28746903850477856);
+    emit_chunk(out, 32217290123649065);
+    emit_chunk(out, 9042427574100078);
+    emit_chunk(out, 27901707135033376);
+    emit_chunk(out, 33530844578581051);
+    emit_chunk(out, 11303118674094440);
+    emit_chunk(out, 28542660972978275);
+    emit_chunk(out, 9052457039061876);
+    emit_chunk(out, 11617780321238305);
+    emit_chunk(out, 32498747820106272);
+    emit_chunk(out, 29598991204624488);
+    emit_chunk(out, 11668426291836014);
+    emit_chunk(out, 31075950044017960);
+    emit_chunk(out, 32195248312575077);
+    emit_chunk(out, 9042427569070889);
+    emit_chunk(out, 32492133636513824);
+    emit_chunk(out, 9018448468650085);
+    emit_chunk(out, 33060551330373664);
+    emit_chunk(out, 35195622590017138);
+    emit_chunk(out, 27981971266499338);
+    emit_chunk(out, 29590423597761056);
+    emit_chunk(out, 9135151501440110);
+    emit_chunk(out, 32767037648366690);
+    emit_chunk(out, 26851639086702437);
+    emit_chunk(out, 27910498782837090);
+    emit_chunk(out, 29382388621733487);
+    emit_chunk(out, 9056059342352993);
+    emit_chunk(out, 33249413680158274);
+    emit_chunk(out, 9042521241624617);
+    emit_chunk(out, 9053676375721504);
+    emit_chunk(out, 31647681809817702);
+    emit_chunk(out, 9605524440510053);
+    emit_chunk(out, 9018448464208503);
+    emit_chunk(out, 11294623290892320);
+    emit_chunk(out, 32762638138697249);
+    emit_chunk(out, 2879827655684725);
+    emit_chunk(out, 32210631761338400);
+    emit_chunk(out, 14696572485445664);
+    emit_chunk(out, 9074408666723423);
+    emit_chunk(out, 9073309155081008);
+    emit_chunk(out, 16728405512695158);
+    emit_chunk(out, 28745809854671648);
+    emit_chunk(out, 29599026486998384);
+    emit_chunk(out, 17501434059256942);
+    emit_chunk(out, 9109906341917808);
+    emit_chunk(out, 12430207477751846);
+    emit_chunk(out, 9042427569071648);
+    emit_chunk(out, 32492133636513824);
+    emit_chunk(out, 9018448468650085);
+    emit_chunk(out, 33060551330373664);
+    emit_chunk(out, 35195621432389234);
+    emit_chunk(out, 27981971266499338);
+    emit_chunk(out, 33249598294999584);
+    emit_chunk(out, 26859291493558639);
+    emit_chunk(out, 31077869910849637);
+    emit_chunk(out, 27901706879907444);
+    emit_chunk(out, 29687248286588969);
+    emit_chunk(out, 11668491604600948);
+    emit_chunk(out, 2826282295044451);
+    return 0;
+}
+
+fn emit_call_name(src: &Vec<u8>, out: &mut Vec<u8>, start: i64, len: i64) -> i64 {
+    if bi_args_count(src, start, len) != 0 {
+        emit_chunk(out, 32483363279301730);
+        emit_chunk(out, 128017765458783);
+        return 1;
+    }
+    if bi_args_get(src, start, len) != 0 {
+        emit_chunk(out, 32483363279301730);
+        emit_chunk(out, 1952802655);
+        return 4;
+    }
+    if bi_read_file_bytes(src, start, len) != 0 {
+        emit_chunk(out, 28254586009513058);
+        emit_chunk(out, 27689436932826719);
+        emit_chunk(out, 1936028793);
+        return 3;
+    }
+    if bi_write_file_bytes(src, start, len) != 0 {
+        emit_chunk(out, 32767037648366690);
+        emit_chunk(out, 26851639086702437);
+        emit_chunk(out, 495623371106);
+        return 2;
+    }
+    if bi_exit(src, start, len) != 0 {
+        emit_chunk(out, 32767063116180578);
+        return 0;
+    }
+    emit_chunk(out, 6253666);
+    emit_slice(out, src, start, len);
+    return -1;
+}
+
+fn builtin_arity(src: &Vec<u8>, start: i64, len: i64) -> i64 {
+    if bi_args_count(src, start, len) != 0 { return 0; }
+    if bi_args_get(src, start, len) != 0 { return 1; }
+    if bi_read_file_bytes(src, start, len) != 0 { return 1; }
+    if bi_write_file_bytes(src, start, len) != 0 { return 2; }
+    if bi_exit(src, start, len) != 0 { return 1; }
+    return -1;
+}
+
+fn parse_primary(src: &Vec<u8>, tk: &Vec<i64>, out: &mut Vec<u8>, st: &mut Vec<i64>, sym: &Vec<i64>) -> i64 {
+    if st[1] != 0 { return 0; }
+    let k: i64 = cur_k(tk, st);
+    if k == 2 {
+        let s: i64 = cur_s(tk, st);
+        let l: i64 = cur_l(tk, st);
+        adv(tk, st);
+        emit_chunk(out, 14696572485445672);
+        emit_chunk(out, 2716767);
+        emit_slice(out, src, s, l);
+        emit_chunk(out, 2706508);
+        return 1;
+    }
+    if k == 17 {
+        adv(tk, st);
+        emit_chunk(out, 14696572485445672);
+        emit_chunk(out, 11624364171162719);
+        return 2;
+    }
+    if k == 18 {
+        adv(tk, st);
+        emit_chunk(out, 14696572485445672);
+        emit_chunk(out, 11624364154385503);
+        return 2;
+    }
+    if k == 20 {
+        adv(tk, st);
+        out.push(40 as u8);
+        let ty: i64 = parse_expr(src, tk, out, st, sym);
+        let _ = expect(tk, st, 21, 301);
+        out.push(41 as u8);
+        return ty;
+    }
+    if k == 48 {
+        adv(tk, st);
+        if cur_k(tk, st) == 12 { adv(tk, st); }
+        return parse_postfix(src, tk, out, st, sym);
+    }
+    if k == 1 {
+        let ln: i64 = cur_ln(tk, st);
+        let s: i64 = cur_s(tk, st);
+        let l: i64 = cur_l(tk, st);
+        adv(tk, st);
+        if kw_vec(src, s, l) != 0 && cur_k(tk, st) == 47 {
+            adv(tk, st);
+            let mi: i64 = expect(tk, st, 1, 302);
+            if m_new(src, tk_start(tk, mi), tk_len(tk, mi)) == 0 { set_err(st, tk_line(tk, mi), 303); }
+            let _ = expect(tk, st, 20, 304);
+            let _ = expect(tk, st, 21, 305);
+            emit_chunk(out, 11390276595578466);
+            emit_chunk(out, 41);
+            return 3;
+        }
+        let eid: i64 = find_enum(src, sym, s, l);
+        if eid >= 0 && cur_k(tk, st) == 47 {
+            adv(tk, st);
+            let vi: i64 = expect(tk, st, 1, 319);
+            let vs: i64 = tk_start(tk, vi);
+            let vl: i64 = tk_len(tk, vi);
+            let vv: i64 = find_enum_variant(src, sym, eid, vs, vl);
+            if vv < 0 {
+                set_err(st, tk_line(tk, vi), 605);
+                return 0;
+            }
+            emit_chunk(out, 6254181);
+            emit_slice(out, src, s, l);
+            out.push(95 as u8);
+            emit_slice(out, src, vs, vl);
+            return 200 + eid;
+        }
+        let sid: i64 = find_struct(src, sym, s, l);
+        if sid >= 0 && cur_k(tk, st) == 22 {
+            adv(tk, st);
+            emit_chunk(out, 409975597096);
+            emit_slice(out, src, s, l);
+            emit_chunk(out, 2128681);
+            let mut first: i64 = 1;
+            while cur_k(tk, st) != 23 && cur_k(tk, st) != 0 && st[1] == 0 {
+                if first == 0 {
+                    emit_chunk(out, 8236);
+                }
+                first = 0;
+                let fi: i64 = expect(tk, st, 1, 320);
+                let fs: i64 = tk_start(tk, fi);
+                let fl: i64 = tk_len(tk, fi);
+                let exp_fty: i64 = find_struct_field_ty(src, sym, sid, fs, fl);
+                if exp_fty < 0 {
+                    set_err(st, tk_line(tk, fi), 604);
+                    return 0;
+                }
+                let _ = expect(tk, st, 26, 321);
+                emit_chunk(out, 6252078);
+                emit_slice(out, src, fs, fl);
+                emit_chunk(out, 673201440);
+                let got_fty: i64 = parse_expr(src, tk, out, st, sym);
+                out.push(41 as u8);
+                if got_fty != 0 && exp_fty != 0 && got_fty != exp_fty {
+                    set_err(st, tk_line(tk, fi), 601);
+                    return 0;
+                }
+                if cur_k(tk, st) == 24 { adv(tk, st); }
+            }
+            let _ = expect(tk, st, 23, 322);
+            emit_chunk(out, 2719008);
+            return 100 + sid;
+        }
+        if cur_k(tk, st) == 20 {
+            adv(tk, st);
+            let bi_ret: i64 = emit_call_name(src, out, s, l);
+            let bi_ar: i64 = builtin_arity(src, s, l);
+            let fidx: i64 = find_fn_idx(src, sym, s, l);
+            out.push(40 as u8);
+            let mut argc: i64 = 0;
+            while cur_k(tk, st) != 21 && cur_k(tk, st) != 0 && st[1] == 0 {
+                if argc > 0 {
+                    let _ = expect(tk, st, 24, 306);
+                    emit_chunk(out, 8236);
+                }
+                let _ = parse_expr(src, tk, out, st, sym);
+                argc = argc + 1;
+            }
+            let _ = expect(tk, st, 21, 307);
+            out.push(41 as u8);
+            if bi_ar >= 0 {
+                if argc != bi_ar { set_err(st, ln, 603); }
+                return bi_ret;
+            }
+            if fidx >= 0 {
+                let exp_ar: i64 = sym[(fidx * 6 + 4) as usize];
+                if argc != exp_ar { set_err(st, ln, 603); }
+                return sym[(fidx * 6 + 5) as usize];
+            }
+            set_err(st, ln, 607);
+            return 0;
+        }
+        emit_chunk(out, 24438);
+        emit_slice(out, src, s, l);
+        return find_local_ty(src, sym, st[6], s, l);
+    }
+    set_err(st, cur_ln(tk, st), 308);
+    return 0;
+}
+
+fn parse_postfix(src: &Vec<u8>, tk: &Vec<i64>, out: &mut Vec<u8>, st: &mut Vec<i64>, sym: &Vec<i64>) -> i64 {
+    let mut buf: Vec<u8> = Vec::new();
+    let mut ty: i64 = parse_primary(src, tk, &mut buf, st, sym);
+    while st[1] == 0 {
+        let k: i64 = cur_k(tk, st);
+        if k == 29 {
+            adv(tk, st);
+            let mut next_b: Vec<u8> = Vec::new();
+            emit_chunk(&mut next_b, 11386977943254626);
+            emit_slice(&mut next_b, &buf, 0, buf.len() as i64);
+            emit_chunk(&mut next_b, 8236);
+            let _ = parse_expr(src, tk, &mut next_b, st, sym);
+            let _ = expect(tk, st, 45, 310);
+            next_b.push(41 as u8);
+            buf = next_b;
+            ty = 1;
+        } else if k == 46 {
+            adv(tk, st);
+            let mi: i64 = expect(tk, st, 1, 311);
+            let ms: i64 = tk_start(tk, mi);
+            let ml: i64 = tk_len(tk, mi);
+            if cur_k(tk, st) == 20 {
+                adv(tk, st);
+                let mut next_b: Vec<u8> = Vec::new();
+                if m_len(src, ms, ml) != 0 {
+                    let _ = expect(tk, st, 21, 313);
+                    emit_chunk(&mut next_b, 11380380957374050);
+                    emit_slice(&mut next_b, &buf, 0, buf.len() as i64);
+                    next_b.push(41 as u8);
+                    ty = 1;
+                } else if m_push(src, ms, ml) != 0 {
+                    emit_chunk(&mut next_b, 29400345811580514);
+                    emit_chunk(&mut next_b, 40);
+                    emit_slice(&mut next_b, &buf, 0, buf.len() as i64);
+                    emit_chunk(&mut next_b, 8236);
+                    let _ = parse_expr(src, tk, &mut next_b, st, sym);
+                    let _ = expect(tk, st, 21, 314);
+                    next_b.push(41 as u8);
+                    ty = 0;
+                } else {
+                    set_err(st, tk_line(tk, mi), 315);
+                }
+                buf = next_b;
+            } else {
+                if ty < 100 || ty >= 200 {
+                    set_err(st, tk_line(tk, mi), 604);
+                    return 0;
+                }
+                let fty: i64 = find_struct_field_ty(src, sym, ty - 100, ms, ml);
+                if fty < 0 {
+                    set_err(st, tk_line(tk, mi), 604);
+                    return 0;
+                }
+                let mut next_b: Vec<u8> = Vec::new();
+                next_b.push(40 as u8);
+                emit_slice(&mut next_b, &buf, 0, buf.len() as i64);
+                emit_chunk(&mut next_b, 1600532009);
+                emit_slice(&mut next_b, src, ms, ml);
+                buf = next_b;
+                ty = fty;
+            }
+        } else if k == 51 {
+            adv(tk, st);
+            let ti: i64 = expect(tk, st, 1, 316);
+            let mut next_b: Vec<u8> = Vec::new();
+            emit_chunk(&mut next_b, 14696572485445672);
+            emit_chunk(&mut next_b, 673805407);
+            emit_slice(&mut next_b, &buf, 0, buf.len() as i64);
+            emit_chunk(&mut next_b, 10537);
+            buf = next_b;
+            ty = resolve_type_name(src, sym, tk_start(tk, ti), tk_len(tk, ti));
+        } else {
+            break;
+        }
+    }
+    emit_slice(out, &buf, 0, buf.len() as i64);
+    return ty;
+}
+
+fn parse_unary(src: &Vec<u8>, tk: &Vec<i64>, out: &mut Vec<u8>, st: &mut Vec<i64>, sym: &Vec<i64>) -> i64 {
+    if cur_k(tk, st) == 31 {
+        adv(tk, st);
+        emit_chunk(out, 2633000);
+        let _ = parse_unary(src, tk, out, st, sym);
+        emit_chunk(out, 10537);
+        return 1;
+    }
+    if cur_k(tk, st) == 44 {
+        adv(tk, st);
+        emit_chunk(out, 14696572485445672);
+        emit_chunk(out, 44122872837215);
+        let _ = parse_unary(src, tk, out, st, sym);
+        emit_chunk(out, 2697513);
+        return 2;
+    }
+    return parse_postfix(src, tk, out, st, sym);
+}
+
+fn parse_mul(src: &Vec<u8>, tk: &Vec<i64>, out: &mut Vec<u8>, st: &mut Vec<i64>, sym: &Vec<i64>) -> i64 {
+    let mut lhs: Vec<u8> = Vec::new();
+    let mut ty: i64 = parse_unary(src, tk, &mut lhs, st, sym);
+    while st[1] == 0 && (cur_k(tk, st) == 32 || cur_k(tk, st) == 33 || cur_k(tk, st) == 34) {
+        let op_s: i64 = cur_s(tk, st);
+        let op_l: i64 = cur_l(tk, st);
+        adv(tk, st);
+        let mut next_b: Vec<u8> = Vec::new();
+        next_b.push(40 as u8);
+        emit_slice(&mut next_b, &lhs, 0, lhs.len() as i64);
+        next_b.push(32 as u8);
+        emit_slice(&mut next_b, src, op_s, op_l);
+        next_b.push(32 as u8);
+        let _ = parse_unary(src, tk, &mut next_b, st, sym);
+        next_b.push(41 as u8);
+        lhs = next_b;
+        ty = 1;
+    }
+    emit_slice(out, &lhs, 0, lhs.len() as i64);
+    return ty;
+}
+
+fn parse_add(src: &Vec<u8>, tk: &Vec<i64>, out: &mut Vec<u8>, st: &mut Vec<i64>, sym: &Vec<i64>) -> i64 {
+    let mut lhs: Vec<u8> = Vec::new();
+    let mut ty: i64 = parse_mul(src, tk, &mut lhs, st, sym);
+    while st[1] == 0 && (cur_k(tk, st) == 30 || cur_k(tk, st) == 31) {
+        let op_s: i64 = cur_s(tk, st);
+        let op_l: i64 = cur_l(tk, st);
+        adv(tk, st);
+        let mut next_b: Vec<u8> = Vec::new();
+        next_b.push(40 as u8);
+        emit_slice(&mut next_b, &lhs, 0, lhs.len() as i64);
+        next_b.push(32 as u8);
+        emit_slice(&mut next_b, src, op_s, op_l);
+        next_b.push(32 as u8);
+        let _ = parse_mul(src, tk, &mut next_b, st, sym);
+        next_b.push(41 as u8);
+        lhs = next_b;
+        ty = 1;
+    }
+    emit_slice(out, &lhs, 0, lhs.len() as i64);
+    return ty;
+}
+
+fn parse_cmp(src: &Vec<u8>, tk: &Vec<i64>, out: &mut Vec<u8>, st: &mut Vec<i64>, sym: &Vec<i64>) -> i64 {
+    let mut lhs: Vec<u8> = Vec::new();
+    let mut ty: i64 = parse_add(src, tk, &mut lhs, st, sym);
+    while st[1] == 0 && (cur_k(tk, st) == 38 || cur_k(tk, st) == 39 || cur_k(tk, st) == 40 || cur_k(tk, st) == 41) {
+        let op_s: i64 = cur_s(tk, st);
+        let op_l: i64 = cur_l(tk, st);
+        adv(tk, st);
+        let mut next_b: Vec<u8> = Vec::new();
+        emit_chunk(&mut next_b, 14696572485445672);
+        emit_chunk(&mut next_b, 673805407);
+        emit_slice(&mut next_b, &lhs, 0, lhs.len() as i64);
+        next_b.push(32 as u8);
+        emit_slice(&mut next_b, src, op_s, op_l);
+        next_b.push(32 as u8);
+        let _ = parse_add(src, tk, &mut next_b, st, sym);
+        emit_chunk(&mut next_b, 10537);
+        lhs = next_b;
+        ty = 2;
+    }
+    emit_slice(out, &lhs, 0, lhs.len() as i64);
+    return ty;
+}
+
+fn parse_eq(src: &Vec<u8>, tk: &Vec<i64>, out: &mut Vec<u8>, st: &mut Vec<i64>, sym: &Vec<i64>) -> i64 {
+    let mut lhs: Vec<u8> = Vec::new();
+    let mut ty: i64 = parse_cmp(src, tk, &mut lhs, st, sym);
+    while st[1] == 0 && (cur_k(tk, st) == 36 || cur_k(tk, st) == 37) {
+        let op_s: i64 = cur_s(tk, st);
+        let op_l: i64 = cur_l(tk, st);
+        adv(tk, st);
+        let mut next_b: Vec<u8> = Vec::new();
+        emit_chunk(&mut next_b, 14696572485445672);
+        emit_chunk(&mut next_b, 673805407);
+        emit_slice(&mut next_b, &lhs, 0, lhs.len() as i64);
+        next_b.push(32 as u8);
+        emit_slice(&mut next_b, src, op_s, op_l);
+        next_b.push(32 as u8);
+        let _ = parse_cmp(src, tk, &mut next_b, st, sym);
+        emit_chunk(&mut next_b, 10537);
+        lhs = next_b;
+        ty = 2;
+    }
+    emit_slice(out, &lhs, 0, lhs.len() as i64);
+    return ty;
+}
+
+fn parse_and(src: &Vec<u8>, tk: &Vec<i64>, out: &mut Vec<u8>, st: &mut Vec<i64>, sym: &Vec<i64>) -> i64 {
+    let mut lhs: Vec<u8> = Vec::new();
+    let mut ty: i64 = parse_eq(src, tk, &mut lhs, st, sym);
+    while st[1] == 0 && cur_k(tk, st) == 42 {
+        adv(tk, st);
+        let mut next_b: Vec<u8> = Vec::new();
+        emit_chunk(&mut next_b, 14696572485445672);
+        emit_chunk(&mut next_b, 673805407);
+        emit_slice(&mut next_b, &lhs, 0, lhs.len() as i64);
+        emit_chunk(&mut next_b, 539371040);
+        let _ = parse_eq(src, tk, &mut next_b, st, sym);
+        emit_chunk(&mut next_b, 10537);
+        lhs = next_b;
+        ty = 2;
+    }
+    emit_slice(out, &lhs, 0, lhs.len() as i64);
+    return ty;
+}
+
+fn parse_expr(src: &Vec<u8>, tk: &Vec<i64>, out: &mut Vec<u8>, st: &mut Vec<i64>, sym: &Vec<i64>) -> i64 {
+    let mut lhs: Vec<u8> = Vec::new();
+    let mut ty: i64 = parse_and(src, tk, &mut lhs, st, sym);
+    while st[1] == 0 && cur_k(tk, st) == 43 {
+        adv(tk, st);
+        let mut next_b: Vec<u8> = Vec::new();
+        emit_chunk(&mut next_b, 14696572485445672);
+        emit_chunk(&mut next_b, 673805407);
+        emit_slice(&mut next_b, &lhs, 0, lhs.len() as i64);
+        emit_chunk(&mut next_b, 545029152);
+        let _ = parse_and(src, tk, &mut next_b, st, sym);
+        emit_chunk(&mut next_b, 10537);
+        lhs = next_b;
+        ty = 2;
+    }
+    emit_slice(out, &lhs, 0, lhs.len() as i64);
+    return ty;
+}
+
+fn parse_println(src: &Vec<u8>, tk: &Vec<i64>, out: &mut Vec<u8>, st: &mut Vec<i64>, sym: &Vec<i64>) -> i64 {
+    adv(tk, st);
+    let _ = expect(tk, st, 20, 401);
+    let fi: i64 = expect(tk, st, 3, 402);
+    let fs: i64 = tk_start(tk, fi);
+    let fl: i64 = tk_len(tk, fi);
+    emit_chunk(out, 29680698455498784);
+    emit_chunk(out, 146706691182);
+    let mut k: i64 = 0;
+    while k < fl {
+        let b: i64 = src[(fs + k) as usize] as i64;
+        if b == 123 && k + 1 < fl && (src[(fs + k + 1) as usize] as i64) == 125 {
+            emit_chunk(out, 1684827173);
+            k = k + 2;
+        } else {
+            out.push(b as u8);
+            k = k + 1;
+        }
+    }
+    emit_chunk(out, 2256476);
+    while cur_k(tk, st) == 24 && st[1] == 0 {
+        adv(tk, st);
+        emit_chunk(out, 29113347436191788);
+        emit_chunk(out, 11304523279592480);
+        let _ = parse_expr(src, tk, out, st, sym);
+        out.push(41 as u8);
+    }
+    let _ = expect(tk, st, 21, 403);
+    let _ = expect(tk, st, 25, 404);
+    emit_chunk(out, 670505);
+    return 0;
+}
+
+fn parse_match_stmt(src: &Vec<u8>, tk: &Vec<i64>, out: &mut Vec<u8>, st: &mut Vec<i64>, sym: &mut Vec<i64>) -> i64 {
+    adv(tk, st);
+    let mid: i64 = st[8];
+    st[8] = mid + 1;
+    emit_chunk(out, 29590585746661408);
+    emit_chunk(out, 9135151501440110);
+    emit_chunk(out, 7167839);
+    emit_int_dec(out, mid);
+    emit_chunk(out, 2112800);
+    let _ = parse_expr(src, tk, out, st, sym);
+    emit_chunk(out, 2619);
+    let _ = expect(tk, st, 22, 430);
+    let mut first: i64 = 1;
+    while cur_k(tk, st) != 23 && cur_k(tk, st) != 0 && st[1] == 0 {
+        let mut is_wild: i64 = 0;
+        if cur_k(tk, st) == 1 && cur_l(tk, st) == 1 && (src[cur_s(tk, st) as usize] as i64) == 95 {
+            is_wild = 1;
+            adv(tk, st);
+        }
+        if is_wild != 0 {
+            if first == 0 {
+                emit_chunk(out, 28464694429753376);
+                emit_chunk(out, 11523940774764);
+            } else {
+                emit_chunk(out, 11523936231456);
+            }
+        } else {
+            if first == 0 {
+                emit_chunk(out, 28464694429753376);
+                emit_chunk(out, 9119800955859820);
+                emit_chunk(out, 1834966824);
+            } else {
+                emit_chunk(out, 9119800951316512);
+                emit_chunk(out, 1834966824);
+            }
+            emit_int_dec(out, mid);
+            emit_chunk(out, 540884256);
+            let _ = parse_primary(src, tk, out, st, sym);
+            emit_chunk(out, 175841321);
+        }
+        first = 0;
+        let _ = expect(tk, st, 57, 431);
+        parse_block(src, tk, out, st, sym);
+        if cur_k(tk, st) == 24 { adv(tk, st); }
+    }
+    if first == 0 {
+        emit_chunk(out, 11532526166048);
+    }
+    let _ = expect(tk, st, 23, 432);
+    emit_chunk(out, 11532526166048);
+    return 0;
+}
+
+fn parse_block(src: &Vec<u8>, tk: &Vec<i64>, out: &mut Vec<u8>, st: &mut Vec<i64>, sym: &mut Vec<i64>) -> i64 {
+    let _ = expect(tk, st, 22, 410);
+    while cur_k(tk, st) != 23 && cur_k(tk, st) != 0 && st[1] == 0 {
+        parse_stmt(src, tk, out, st, sym);
+    }
+    let _ = expect(tk, st, 23, 411);
+    return 0;
+}
+
+fn parse_stmt(src: &Vec<u8>, tk: &Vec<i64>, out: &mut Vec<u8>, st: &mut Vec<i64>, sym: &mut Vec<i64>) -> i64 {
+    if st[1] != 0 { return 0; }
+    let k: i64 = cur_k(tk, st);
+    if k == 11 {
+        let ln: i64 = cur_ln(tk, st);
+        adv(tk, st);
+        if cur_k(tk, st) == 12 { adv(tk, st); }
+        let ni: i64 = expect(tk, st, 1, 420);
+        let ns: i64 = tk_start(tk, ni);
+        let nl: i64 = tk_len(tk, ni);
+        let mut decl_ty: i64 = 0;
+        if cur_k(tk, st) == 26 {
+            adv(tk, st);
+            decl_ty = parse_type_id(src, tk, st, sym);
+        }
+        let _ = expect(tk, st, 35, 421);
+        if nl == 1 && (src[ns as usize] as i64) == 95 {
+            emit_chunk(out, 31373637124628512);
+            emit_chunk(out, 673801321);
+            let _ = parse_expr(src, tk, out, st, sym);
+            let _ = expect(tk, st, 25, 422);
+            emit_chunk(out, 670505);
+            return 0;
+        }
+        let mut rhs_b: Vec<u8> = Vec::new();
+        let rhs_ty: i64 = parse_expr(src, tk, &mut rhs_b, st, sym);
+        let _ = expect(tk, st, 25, 423);
+        if decl_ty != 0 && rhs_ty != 0 && decl_ty != rhs_ty {
+            set_err(st, ln, 601);
+            return 0;
+        }
+        let mut final_ty: i64 = decl_ty;
+        if final_ty == 0 { final_ty = rhs_ty; }
+        if final_ty == 0 { final_ty = 1; }
+        sym_push(sym, 6, st[6], ns, nl, final_ty, 0);
+        emit_chunk(out, 538976288);
+        emit_c_type_from_id(src, sym, out, final_ty);
+        emit_chunk(out, 6256160);
+        emit_slice(out, src, ns, nl);
+        emit_chunk(out, 2112800);
+        emit_slice(out, &rhs_b, 0, rhs_b.len() as i64);
+        emit_chunk(out, 2619);
+        return 0;
+    }
+    if k == 13 {
+        adv(tk, st);
+        emit_chunk(out, 9119800951316512);
+        emit_chunk(out, 40);
+        let _ = parse_expr(src, tk, out, st, sym);
+        emit_chunk(out, 175841321);
+        parse_block(src, tk, out, st, sym);
+        if cur_k(tk, st) == 14 {
+            adv(tk, st);
+            if cur_k(tk, st) == 13 {
+                emit_chunk(out, 28464694429753376);
+                emit_chunk(out, 11523940774764);
+                parse_stmt(src, tk, out, st, sym);
+                emit_chunk(out, 11532526166048);
+                return 0;
+            }
+            emit_chunk(out, 28464694429753376);
+            emit_chunk(out, 11523940774764);
+            parse_block(src, tk, out, st, sym);
+        }
+        emit_chunk(out, 11532526166048);
+        return 0;
+    }
+    if k == 15 {
+        adv(tk, st);
+        emit_chunk(out, 29669733403992096);
+        emit_chunk(out, 673211756);
+        let _ = parse_expr(src, tk, out, st, sym);
+        emit_chunk(out, 175841321);
+        parse_block(src, tk, out, st, sym);
+        emit_chunk(out, 11532526166048);
+        return 0;
+    }
+    if k == 56 {
+        parse_match_stmt(src, tk, out, st, sym);
+        return 0;
+    }
+    if k == 50 {
+        adv(tk, st);
+        let _ = expect(tk, st, 25, 424);
+        emit_chunk(out, 28554738419114016);
+        emit_chunk(out, 171666273);
+        return 0;
+    }
+    if k == 16 {
+        let ln: i64 = cur_ln(tk, st);
+        adv(tk, st);
+        if cur_k(tk, st) == 25 {
+            adv(tk, st);
+            emit_chunk(out, 32762638138089504);
+            emit_chunk(out, 43946766965);
+            return 0;
+        }
+        emit_chunk(out, 32762638138089504);
+        emit_chunk(out, 544109173);
+        let rty: i64 = parse_expr(src, tk, out, st, sym);
+        let _ = expect(tk, st, 25, 425);
+        if st[7] != 0 && rty != 0 && st[7] != rty {
+            set_err(st, ln, 606);
+            return 0;
+        }
+        emit_chunk(out, 2619);
+        return 0;
+    }
+    if k == 19 {
+        parse_println(src, tk, out, st, sym);
+        return 0;
+    }
+    if k == 1 && tk_kind(tk, st[0] + 1) == 35 {
+        let ln: i64 = cur_ln(tk, st);
+        let ns: i64 = cur_s(tk, st);
+        let nl: i64 = cur_l(tk, st);
+        let lhs_ty: i64 = find_local_ty(src, sym, st[6], ns, nl);
+        adv(tk, st);
+        adv(tk, st);
+        emit_chunk(out, 104960949755936);
+        emit_slice(out, src, ns, nl);
+        emit_chunk(out, 2112800);
+        let rhs_ty: i64 = parse_expr(src, tk, out, st, sym);
+        let _ = expect(tk, st, 25, 426);
+        if lhs_ty != 0 && rhs_ty != 0 && lhs_ty != rhs_ty {
+            set_err(st, ln, 602);
+            return 0;
+        }
+        emit_chunk(out, 2619);
+        return 0;
+    }
+    if k == 1 && tk_kind(tk, st[0] + 1) == 29 {
+        let saved: i64 = st[0];
+        let ns: i64 = cur_s(tk, st);
+        let nl: i64 = cur_l(tk, st);
+        adv(tk, st);
+        adv(tk, st);
+        let mut idx_b: Vec<u8> = Vec::new();
+        let _ = parse_expr(src, tk, &mut idx_b, st, sym);
+        if cur_k(tk, st) == 45 && tk_kind(tk, st[0] + 1) == 35 {
+            adv(tk, st);
+            adv(tk, st);
+            emit_chunk(out, 26870286605361184);
+            emit_chunk(out, 104961089496435);
+            emit_slice(out, src, ns, nl);
+            emit_chunk(out, 8236);
+            emit_slice(out, &idx_b, 0, idx_b.len() as i64);
+            emit_chunk(out, 8236);
+            let _ = parse_expr(src, tk, out, st, sym);
+            let _ = expect(tk, st, 25, 427);
+            emit_chunk(out, 670505);
+            return 0;
+        }
+        st[0] = saved;
+    }
+    let mut ebuf: Vec<u8> = Vec::new();
+    let _ = parse_expr(src, tk, &mut ebuf, st, sym);
+    if cur_k(tk, st) == 25 {
+        adv(tk, st);
+        emit_chunk(out, 538976288);
+        emit_slice(out, &ebuf, 0, ebuf.len() as i64);
+        emit_chunk(out, 2619);
+        return 0;
+    }
+    set_err(st, cur_ln(tk, st), 428);
+    return 0;
+}
+
+fn parse_struct_decl(src: &Vec<u8>, tk: &Vec<i64>, out: &mut Vec<u8>, st: &mut Vec<i64>, sym: &mut Vec<i64>) -> i64 {
+    let _ = expect(tk, st, 54, 520);
+    let si: i64 = expect(tk, st, 1, 521);
+    let ss: i64 = tk_start(tk, si);
+    let sl: i64 = tk_len(tk, si);
+    let sid: i64 = st[9];
+    st[9] = sid + 1;
+    sym_push(sym, 1, sid, ss, sl, 0, 0);
+    let _ = expect(tk, st, 22, 522);
+    emit_chunk(out, 28821929497491828);
+    emit_chunk(out, 32760453380993824);
+    emit_chunk(out, 2128672);
+    while cur_k(tk, st) != 23 && cur_k(tk, st) != 0 && st[1] == 0 {
+        let fi: i64 = expect(tk, st, 1, 523);
+        let fs: i64 = tk_start(tk, fi);
+        let fl: i64 = tk_len(tk, fi);
+        let _ = expect(tk, st, 26, 524);
+        let fty: i64 = parse_type_id(src, tk, st, sym);
+        sym_push(sym, 2, sid, fs, fl, fty, 0);
+        emit_c_type_from_id(src, sym, out, fty);
+        emit_chunk(out, 6252064);
+        emit_slice(out, src, fs, fl);
+        emit_chunk(out, 8251);
+        if cur_k(tk, st) == 24 { adv(tk, st); }
+    }
+    let _ = expect(tk, st, 23, 525);
+    emit_chunk(out, 409975595133);
+    emit_slice(out, src, ss, sl);
+    emit_chunk(out, 2619);
+    return 0;
+}
+
+fn parse_enum_decl(src: &Vec<u8>, tk: &Vec<i64>, out: &mut Vec<u8>, st: &mut Vec<i64>, sym: &mut Vec<i64>) -> i64 {
+    let _ = expect(tk, st, 55, 530);
+    let ei: i64 = expect(tk, st, 1, 531);
+    let es: i64 = tk_start(tk, ei);
+    let el: i64 = tk_len(tk, ei);
+    let eid: i64 = st[10];
+    st[10] = eid + 1;
+    sym_push(sym, 3, eid, es, el, 0, 0);
+    let _ = expect(tk, st, 22, 532);
+    let mut vidx: i64 = 0;
+    while cur_k(tk, st) != 23 && cur_k(tk, st) != 0 && st[1] == 0 {
+        let vi: i64 = expect(tk, st, 1, 533);
+        let vs: i64 = tk_start(tk, vi);
+        let vl: i64 = tk_len(tk, vi);
+        sym_push(sym, 4, eid, vs, vl, vidx, 0);
+        emit_chunk(out, 28550371616318499);
+        emit_chunk(out, 1601070368);
+        emit_slice(out, src, es, el);
+        out.push(95 as u8);
+        emit_slice(out, src, vs, vl);
+        emit_chunk(out, 15327666301839392);
+        emit_chunk(out, 695492404);
+        emit_int_dec(out, vidx);
+        emit_chunk(out, 170478668);
+        vidx = vidx + 1;
+        if cur_k(tk, st) == 24 { adv(tk, st); }
+    }
+    let _ = expect(tk, st, 23, 534);
+    return 0;
+}
+
+fn emit_fn_sig(
+    src: &Vec<u8>, tk: &Vec<i64>, out: &mut Vec<u8>,
+    st: &mut Vec<i64>, sym: &mut Vec<i64>, is_proto: i64
+) -> i64 {
+    let _ = expect(tk, st, 10, 501);
+    let fi: i64 = expect(tk, st, 1, 502);
+    let fs: i64 = tk_start(tk, fi);
+    let fl: i64 = tk_len(tk, fi);
+    let is_m: i64 = kw_main(src, fs, fl);
+    let _ = expect(tk, st, 20, 503);
+    if is_proto == 0 { st[6] = st[6] + 1; }
+    let mut pbuf: Vec<u8> = Vec::new();
+    let mut pcount: i64 = 0;
+    while cur_k(tk, st) != 21 && cur_k(tk, st) != 0 && st[1] == 0 {
+        if pcount > 0 {
+            let _ = expect(tk, st, 24, 504);
+            emit_chunk(&mut pbuf, 8236);
+        }
+        let pi: i64 = expect(tk, st, 1, 505);
+        let _ = expect(tk, st, 26, 506);
+        let pty: i64 = parse_type_id(src, tk, st, sym);
+        if is_proto == 0 {
+            sym_push(sym, 6, st[6], tk_start(tk, pi), tk_len(tk, pi), pty, 0);
+        }
+        emit_c_type_from_id(src, sym, &mut pbuf, pty);
+        emit_chunk(&mut pbuf, 6256160);
+        emit_slice(&mut pbuf, src, tk_start(tk, pi), tk_len(tk, pi));
+        pcount = pcount + 1;
+    }
+    let _ = expect(tk, st, 21, 507);
+    let mut ret_ty: i64 = 0;
+    if cur_k(tk, st) == 27 {
+        adv(tk, st);
+        ret_ty = parse_type_id(src, tk, st, sym);
+    }
+    if cur_k(tk, st) == 28 {
+        adv(tk, st);
+        let _ = expect(tk, st, 1, 508);
+        while cur_k(tk, st) == 30 && st[1] == 0 {
+            adv(tk, st);
+            let _ = expect(tk, st, 1, 509);
+        }
+    }
+    if is_proto != 0 && is_m == 0 {
+        sym_push(sym, 5, 0, fs, fl, pcount, ret_ty);
+    }
+    if is_m != 0 {
+        if is_proto == 0 {
+            st[4] = 1;
+            st[5] = 0;
+            st[7] = 0;
+            emit_chunk(out, 29661993878449769);
+            emit_chunk(out, 27338757181614190);
+            emit_chunk(out, 29382387412723570);
+            emit_chunk(out, 32194938119287393);
+            emit_chunk(out, 9018723191584359);
+            emit_chunk(out, 32195209724960800);
+            emit_chunk(out, 32194938437395303);
+            emit_chunk(out, 27407969267966823);
+            emit_chunk(out, 27338519650658162);
+            emit_chunk(out, 43947288434);
+        }
+        return 1;
+    }
+    st[4] = 0;
+    st[7] = ret_ty;
+    if ret_ty == 0 {
+        st[5] = 1;
+        emit_chunk(out, 9116503830000755);
+        emit_chunk(out, 30507188747857782);
+        emit_chunk(out, 95);
+    } else {
+        st[5] = 0;
+        emit_chunk(out, 9116503830000755);
+        emit_c_type_from_id(src, sym, out, ret_ty);
+        emit_chunk(out, 1600938528);
+    }
+    emit_slice(out, src, fs, fl);
+    out.push(40 as u8);
+    if pcount == 0 {
+        emit_chunk(out, 1684631414);
+    } else {
+        emit_slice(out, &pbuf, 0, pbuf.len() as i64);
+    }
+    out.push(41 as u8);
+    if is_proto != 0 {
+        emit_chunk(out, 2619);
+    } else {
+        emit_chunk(out, 686880);
+    }
+    return 0;
+}
+
+fn skip_block(tk: &Vec<i64>, st: &mut Vec<i64>) -> i64 {
+    let _ = expect(tk, st, 22, 510);
+    let mut depth: i64 = 1;
+    while depth > 0 && cur_k(tk, st) != 0 && st[1] == 0 {
+        let k: i64 = cur_k(tk, st);
+        if k == 22 { depth = depth + 1; }
+        else if k == 23 { depth = depth - 1; }
+        adv(tk, st);
+    }
+    if depth != 0 { set_err(st, cur_ln(tk, st), 511); }
+    return 0;
+}
+
+fn skip_decl_block(tk: &Vec<i64>, st: &mut Vec<i64>) -> i64 {
+    adv(tk, st);
+    let _ = expect(tk, st, 1, 512);
+    skip_block(tk, st);
+    return 0;
+}
+
+fn compile_all(src: &Vec<u8>, out: &mut Vec<u8>, st: &mut Vec<i64>) -> i64 {
+    let mut tk: Vec<i64> = Vec::new();
+    let mut sym: Vec<i64> = Vec::new();
+    lex_source(src, &mut tk, st);
+    if st[1] != 0 { return 0; }
+    if cur_k(&tk, st) == 0 {
+        set_err(st, 1, 100);
+        return 0;
+    }
+    emit_runtime_header(out);
+    st[0] = 0;
+    while cur_k(&tk, st) != 0 && st[1] == 0 {
+        let k: i64 = cur_k(&tk, st);
+        if k == 54 {
+            parse_struct_decl(src, &tk, out, st, &mut sym);
+        } else if k == 55 {
+            parse_enum_decl(src, &tk, out, st, &mut sym);
+        } else {
+            let _ = emit_fn_sig(src, &tk, out, st, &mut sym, 1);
+            skip_block(&tk, st);
+        }
+    }
+    out.push(10 as u8);
+    if st[1] != 0 { return 0; }
+    st[0] = 0;
+    while cur_k(&tk, st) != 0 && st[1] == 0 {
+        let k: i64 = cur_k(&tk, st);
+        if k == 54 || k == 55 {
+            skip_decl_block(&tk, st);
+        } else {
+            let is_m: i64 = emit_fn_sig(src, &tk, out, st, &mut sym, 0);
+            parse_block(src, &tk, out, st, &mut sym);
+            if is_m != 0 {
+                emit_chunk(out, 30511886296424480);
+                emit_chunk(out, 28275535619060597);
+                emit_chunk(out, 9018448469587311);
+                emit_chunk(out, 33060551330373664);
+                emit_chunk(out, 35195621415612018);
+                emit_chunk(out, 2570);
+            } else if st[5] != 0 {
+                emit_chunk(out, 658045);
+            } else if st[7] >= 100 && st[7] < 200 {
+                emit_chunk(out, 538976288);
+                emit_c_type_from_id(src, &sym, out, st[7]);
+                emit_chunk(out, 9074408956059424);
+                emit_chunk(out, 28554455410356347);
+                emit_chunk(out, 26844715684099444);
+                emit_chunk(out, 11040163773306);
+            } else {
+                emit_chunk(out, 32762638138089504);
+                emit_chunk(out, 2879827655684725);
+                emit_chunk(out, 658045);
+            }
+        }
+    }
+    return tk_count(&tk);
+}
+
+fn main() ~ Console + FileSystem + Environment + Process {
+    if args_count() < 3 {
+        println("usage: buildc_selfhost_s3 <input.bld> <output.c>");
+        exit(2);
+    }
+    let src: Vec<u8> = read_file_bytes(args_get(1));
+    if (src.len() as i64) == 0 {
+        println("ERROR: empty or unreadable input");
+        exit(1);
+    }
+    let mut out: Vec<u8> = Vec::new();
+    let mut st: Vec<i64> = Vec::new();
+    let mut zi: i64 = 0;
+    while zi < 12 {
+        st.push(0);
+        zi = zi + 1;
+    }
+    let ntok: i64 = compile_all(&src, &mut out, &mut st);
+    if st[1] != 0 {
+        println("ERROR (line {}): code={}", st[2], st[3]);
+        exit(1);
+    }
+    let ok: bool = write_file_bytes(args_get(2), &out);
+    if !ok {
+        println("ERROR: failed to write output");
+        exit(1);
+    }
+    println("OK: selfhost_s3 compiled {} tokens -> {} bytes", ntok, out.len() as i64);
+}
