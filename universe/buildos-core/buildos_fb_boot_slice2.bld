@@ -1,0 +1,269 @@
+// SPDX-FileCopyrightText: 2026 Zain Dana Harper
+// SPDX-License-Identifier: MIT
+
+// BuildOS-Core Track 2 Slice 2: Capability-Gated virtio-fb 320x240 RGBA Boot Framebuffer Proof
+// Integrates os-cap (requiring explicit CAP_FB_WRITE capability token) and os-sv39 W^X MMIO guard
+// to render a deterministic 320x240 RGBA test-pattern frame (307,200 bytes) with bit-exact
+// double-run checksum verification and 4/4 planted fail-closed security controls.
+// Zero ambient authority. Zero em/en dashes. Safe BuildLang 1.15.0 idioms only.
+
+const FB_OK: i64 = 0;
+const ERR_SV39_WX_VIOLATION: i64 = -103;
+const ERR_FB_NO_CAP: i64 = -301;
+const ERR_CAP_REVOKED: i64 = -302;
+const ERR_FB_OOB: i64 = -303;
+
+const FB_WIDTH: usize = 320;
+const FB_HEIGHT: usize = 240;
+const FB_PIXELS: usize = 76800;
+
+// Capability rights
+const CAP_READ: u64 = 1_u64;
+const CAP_FB_WRITE: u64 = 128_u64;
+const OBJ_FB_MMIO: u64 = 10_u64;
+
+// Sv39 PTE flags
+const PTE_V: u64 = 1_u64;
+const PTE_R: u64 = 2_u64;
+const PTE_W: u64 = 4_u64;
+const PTE_X: u64 = 8_u64;
+const PTE_U: u64 = 16_u64;
+
+// Overflow-free deterministic 64-bit frame hash mixer (30-bit x 32-bit <= 62-bit < 2^64)
+fn mix64(h: u64, v: u64) -> u64 {
+    let x0: u64 = h ^ v ^ 0x9E3779B97F4A7C15_u64;
+    let lo1: u64 = x0 & 0x3FFFFFFF_u64;
+    let hi1: u64 = (x0 >> 30_u64) & 0x3FFFFFFF_u64;
+    let x1: u64 = (lo1 * 2654435761_u64) ^ ((hi1 * 2246822519_u64) << 1_u64) ^ (x0 >> 27_u64);
+    let lo2: u64 = x1 & 0x3FFFFFFF_u64;
+    let hi2: u64 = (x1 >> 30_u64) & 0x3FFFFFFF_u64;
+    let x2: u64 = (lo2 * 3266489917_u64) ^ ((hi2 * 668265263_u64) << 2_u64) ^ (x1 >> 31_u64);
+    x2 ^ (x2 >> 17_u64)
+}
+
+struct FbCap {
+    alive: i64,
+    obj_kind: u64,
+    obj_id: u64,
+    rights: u64,
+    gen: u64,
+}
+
+struct VirtioFb {
+    mapped: bool,
+    pte: u64,
+    fb_id: u64,
+    pixels: Vec<u64>,
+    writes: u64,
+}
+
+fn fb_new(fb_id: u64) -> VirtioFb {
+    let mut px: Vec<u64> = Vec::new();
+    let mut i: usize = 0;
+    while i < FB_PIXELS {
+        px.push(0_u64);
+        i = i + 1;
+    }
+    VirtioFb { mapped: false, pte: 0_u64, fb_id: fb_id, pixels: px, writes: 0_u64 }
+}
+
+// Sv39 W^X guard for framebuffer MMIO mapping
+fn fb_map_mmio(fb: &mut VirtioFb, ppn: u64, flags: u64) -> i64 {
+    let w: bool = (flags & PTE_W) != 0_u64;
+    let x: bool = (flags & PTE_X) != 0_u64;
+    if w && x {
+        return ERR_SV39_WX_VIOLATION;
+    }
+    fb.pte = (ppn << 10_u64) | (flags & 0xFF_u64) | PTE_V;
+    fb.mapped = true;
+    FB_OK
+}
+
+fn fb_check_cap(fb: &VirtioFb, cap: &FbCap, token_gen: u64) -> i64 {
+    if !fb.mapped {
+        return ERR_SV39_WX_VIOLATION;
+    }
+    if cap.alive == 0 || cap.gen != token_gen {
+        return ERR_CAP_REVOKED;
+    }
+    if cap.obj_kind != OBJ_FB_MMIO || cap.obj_id != fb.fb_id {
+        return ERR_FB_NO_CAP;
+    }
+    if (cap.rights & CAP_FB_WRITE) == 0_u64 {
+        return ERR_FB_NO_CAP;
+    }
+    FB_OK
+}
+
+fn pack_rgba(r: u64, g: u64, b: u64, a: u64) -> u64 {
+    ((r & 255_u64) << 24_u64) | ((g & 255_u64) << 16_u64) | ((b & 255_u64) << 8_u64) | (a & 255_u64)
+}
+
+fn fb_write_pixel(fb: &mut VirtioFb, cap: &FbCap, token_gen: u64, x: usize, y: usize, rgba: u64) -> i64 {
+    let crc: i64 = fb_check_cap(fb, cap, token_gen);
+    if crc != FB_OK {
+        return crc;
+    }
+    if x >= FB_WIDTH || y >= FB_HEIGHT {
+        return ERR_FB_OOB;
+    }
+    fb.pixels[y * FB_WIDTH + x] = rgba;
+    fb.writes = fb.writes + 1_u64;
+    FB_OK
+}
+
+// Deterministic Measured Drafting Sheet 320x240 RGBA boot test pattern
+fn fb_render_boot_pattern(fb: &mut VirtioFb, cap: &FbCap, token_gen: u64) -> i64 {
+    let crc: i64 = fb_check_cap(fb, cap, token_gen);
+    if crc != FB_OK {
+        return crc;
+    }
+    let mut y: usize = 0;
+    while y < FB_HEIGHT {
+        let mut x: usize = 0;
+        while x < FB_WIDTH {
+            let mut r: u64 = 244_u64;
+            let mut g: u64 = 241_u64;
+            let mut b: u64 = 234_u64;
+
+            // Top band (y < 64): 8 deterministic SMPTE-like calibration color bars
+            if y < 64 {
+                let band: usize = x / 40;
+                if band == 0 { r = 235_u64; g = 235_u64; b = 235_u64; }
+                if band == 1 { r = 235_u64; g = 235_u64; b = 16_u64; }
+                if band == 2 { r = 16_u64; g = 235_u64; b = 235_u64; }
+                if band == 3 { r = 16_u64; g = 235_u64; b = 16_u64; }
+                if band == 4 { r = 235_u64; g = 16_u64; b = 235_u64; }
+                if band == 5 { r = 235_u64; g = 16_u64; b = 16_u64; }
+                if band == 6 { r = 16_u64; g = 16_u64; b = 235_u64; }
+                if band >= 7 { r = 16_u64; g = 16_u64; b = 16_u64; }
+            } else if y >= 176 {
+                // Bottom band: monotonic 8-bit grayscale luminance ramp
+                let lum: u64 = ((x as u64) * 255_u64) / 319_u64;
+                r = lum;
+                g = lum;
+                b = lum;
+            } else {
+                // Middle drafting sheet: subtle 32px grid + corner crosshairs
+                if (x % 32) == 0 || (y % 32) == 0 {
+                    r = 200_u64;
+                    g = 198_u64;
+                    b = 192_u64;
+                }
+                if (x == 16 && y >= 72 && y <= 88) || (y == 80 && x >= 8 && x <= 24) {
+                    r = 24_u64;
+                    g = 24_u64;
+                    b = 24_u64;
+                }
+            }
+            fb.pixels[y * FB_WIDTH + x] = pack_rgba(r, g, b, 255_u64);
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    fb.writes = fb.writes + (FB_PIXELS as u64);
+    FB_OK
+}
+
+fn fb_checksum(fb: &VirtioFb) -> u64 {
+    let mut h: u64 = 0xCBF29CE484222325_u64;
+    let mut i: usize = 0;
+    while i < FB_PIXELS {
+        h = mix64(h, fb.pixels[i] ^ ((i as u64) << 32_u64));
+        i = i + 1;
+    }
+    h
+}
+
+fn run_fb_boot_once() -> u64 {
+    let mut fb: VirtioFb = fb_new(42_u64);
+    let _mrc: i64 = fb_map_mmio(&mut fb, 0x80200_u64, PTE_R | PTE_W | PTE_U);
+    let cap: FbCap = FbCap {
+        alive: 1,
+        obj_kind: OBJ_FB_MMIO,
+        obj_id: 42_u64,
+        rights: CAP_READ | CAP_FB_WRITE,
+        gen: 7_u64,
+    };
+    let _rrc: i64 = fb_render_boot_pattern(&mut fb, &cap, 7_u64);
+    fb_checksum(&fb)
+}
+
+fn main() -> i64 ~ Console {
+    let hash1: u64 = run_fb_boot_once();
+    let hash2: u64 = run_fb_boot_once();
+    let det_match: bool = hash1 == hash2 && hash1 != 0_u64;
+    println("FB_BOOT_RUN1: width=320 height=240 bytes=307200 hash={}", hash1);
+    println("FB_BOOT_RUN2: width=320 height=240 bytes=307200 hash={}", hash2);
+    println("FB_DETERMINISM: match={}", det_match);
+
+    let mut caught: i64 = 0;
+
+    // Control 1: Unprivileged task attempting FB write without CAP_FB_WRITE
+    let mut fb1: VirtioFb = fb_new(42_u64);
+    let _m1: i64 = fb_map_mmio(&mut fb1, 0x80200_u64, PTE_R | PTE_W | PTE_U);
+    let ro_cap: FbCap = FbCap {
+        alive: 1,
+        obj_kind: OBJ_FB_MMIO,
+        obj_id: 42_u64,
+        rights: CAP_READ,
+        gen: 9_u64,
+    };
+    let c1_rc: i64 = fb_render_boot_pattern(&mut fb1, &ro_cap, 9_u64);
+    let c1_px: i64 = fb_write_pixel(&mut fb1, &ro_cap, 9_u64, 10, 10, pack_rgba(255_u64, 0_u64, 0_u64, 255_u64));
+    if c1_rc == ERR_FB_NO_CAP && c1_px == ERR_FB_NO_CAP && fb1.writes == 0_u64 {
+        println(
+            "CONTROL_1_UNPRIV_FB_WRITE: CAUGHT_FAIL_CLOSED rc_render={} rc_px={} writes={}",
+            c1_rc, c1_px, fb1.writes
+        );
+        caught = caught + 1;
+    }
+
+    // Control 2: Revoked CAP_FB_WRITE token attempting FB write
+    let rev_cap: FbCap = FbCap {
+        alive: 0,
+        obj_kind: OBJ_FB_MMIO,
+        obj_id: 42_u64,
+        rights: CAP_READ | CAP_FB_WRITE,
+        gen: 12_u64,
+    };
+    let c2_rc: i64 = fb_write_pixel(&mut fb1, &rev_cap, 12_u64, 1, 1, pack_rgba(1_u64, 2_u64, 3_u64, 255_u64));
+    if c2_rc == ERR_CAP_REVOKED && fb1.writes == 0_u64 {
+        println("CONTROL_2_REVOKED_FB_CAP: CAUGHT_FAIL_CLOSED rc={}", c2_rc);
+        caught = caught + 1;
+    }
+
+    // Control 3: Sv39 W|X executable-writable MMIO mapping attempt
+    let mut fb_wx: VirtioFb = fb_new(43_u64);
+    let c3_rc: i64 = fb_map_mmio(&mut fb_wx, 0x80300_u64, PTE_R | PTE_W | PTE_X | PTE_U);
+    if c3_rc == ERR_SV39_WX_VIOLATION && !fb_wx.mapped {
+        println("CONTROL_3_FB_MMIO_WX: CAUGHT_FAIL_CLOSED rc={} mapped={}", c3_rc, fb_wx.mapped);
+        caught = caught + 1;
+    }
+
+    // Control 4: 1-pixel tamper shifts 307,200-byte framebuffer checksum
+    let mut fb_t: VirtioFb = fb_new(42_u64);
+    let _mt: i64 = fb_map_mmio(&mut fb_t, 0x80200_u64, PTE_R | PTE_W | PTE_U);
+    let ok_cap: FbCap = FbCap {
+        alive: 1,
+        obj_kind: OBJ_FB_MMIO,
+        obj_id: 42_u64,
+        rights: CAP_READ | CAP_FB_WRITE,
+        gen: 7_u64,
+    };
+    let _rt: i64 = fb_render_boot_pattern(&mut fb_t, &ok_cap, 7_u64);
+    let _tp: i64 = fb_write_pixel(&mut fb_t, &ok_cap, 7_u64, 160, 120, pack_rgba(1_u64, 1_u64, 1_u64, 255_u64));
+    let tampered_hash: u64 = fb_checksum(&fb_t);
+    if tampered_hash != hash1 {
+        println("CONTROL_4_FB_PIXEL_TAMPER: CAUGHT_FAIL_CLOSED tampered_hash={}", tampered_hash);
+        caught = caught + 1;
+    }
+
+    println("FB_CONTROLS: caught={}/4", caught);
+    if det_match && caught == 4 {
+        println("BUILDOS_FB_BOOT_SLICE2 ALL_PASS checks=5 failures=0");
+        return 0;
+    }
+    println("BUILDOS_FB_BOOT_SLICE2 FAILED");
+    1
+}

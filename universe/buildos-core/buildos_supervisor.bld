@@ -1,0 +1,358 @@
+// SPDX-FileCopyrightText: 2026 Zain Dana Harper
+// SPDX-License-Identifier: MIT
+
+// BuildOS Service Supervisor (Wave 52D): P8 Supervised Actors + os-cap Revocation + A/B Rollback
+// (buildos_supervisor.bld)
+// Implements:
+//   1. ONE_FOR_ONE (restart only crashed child, preserving exact sibling FIFO mailbox order)
+//   2. ONE_FOR_ALL (restart full dependent group in deterministic dependency order 0 -> 1 -> 2)
+//   3. Automatic CNode capability generation revocation + fresh attenuated cap mint on every restart
+//   4. Sliding-window crash-storm escalation (> 3 restarts in 100 ticks -> A/B boot-slot rollback)
+//   5. Double-run deterministic trace hash + 4/4 planted fail-closed controls
+// Zero ambient authority. Zero em/en dashes. Safe BuildLang 1.15.0 idioms only.
+
+const SUP_OK: i64 = 0;
+const ERR_BAD_CHILD: i64 = -501;
+const ERR_MAILBOX_FULL: i64 = -502;
+const ERR_CRASH_STORM_ROLLBACK: i64 = -503;
+const ERR_STALE_CAP_GEN: i64 = -504;
+const ERR_NO_MSG: i64 = -505;
+
+const STRAT_ONE_FOR_ONE: i64 = 1;
+const STRAT_ONE_FOR_ALL: i64 = 2;
+
+const SLOT_A: i64 = 0;
+const SLOT_B: i64 = 1;
+
+const MAX_CHILDREN: usize = 4;
+const MBOX_CAP: usize = 16;
+const MAX_RESTARTS_IN_WINDOW: u64 = 3_u64;
+const WINDOW_TICKS: u64 = 100_u64;
+
+// Capability rights
+const CAP_SVC_SEND: u64 = 1_u64;
+const CAP_SVC_RECV: u64 = 2_u64;
+const CAP_SVC_FS_RO: u64 = 4_u64;
+
+// Overflow-free deterministic 64-bit trace mixer
+fn mix64(h: u64, v: u64) -> u64 {
+    let x0: u64 = h ^ v ^ 0x9E3779B97F4A7C15_u64;
+    let lo1: u64 = x0 & 0x3FFFFFFF_u64;
+    let hi1: u64 = (x0 >> 30_u64) & 0x3FFFFFFF_u64;
+    let x1: u64 = (lo1 * 2654435761_u64) ^ ((hi1 * 2246822519_u64) << 1_u64) ^ (x0 >> 27_u64);
+    let lo2: u64 = x1 & 0x3FFFFFFF_u64;
+    let hi2: u64 = (x1 >> 30_u64) & 0x3FFFFFFF_u64;
+    let x2: u64 = (lo2 * 3266489917_u64) ^ ((hi2 * 668265263_u64) << 2_u64) ^ (x1 >> 31_u64);
+    x2 ^ (x2 >> 17_u64)
+}
+
+struct Supervisor {
+    strategy: i64,
+    n_children: usize,
+    global_gen: u64,
+    active_slot: i64,
+    last_known_good: i64,
+    ab_rollback_alarm: bool,
+    ab_rollbacks: u64,
+    // Per-child state
+    alive: Vec<i64>,
+    restarts: Vec<u64>,
+    cap_gen: Vec<u64>,
+    rights: Vec<u64>,
+    // Flat FIFO mailboxes: child c owns indices [c * MBOX_CAP .. (c + 1) * MBOX_CAP)
+    mbox_buf: Vec<u64>,
+    mbox_head: Vec<usize>,
+    mbox_tail: Vec<usize>,
+    mbox_len: Vec<usize>,
+    // Sliding-window restart history ticks
+    crash_ticks: Vec<u64>,
+    // Deterministic restart sequence log (encoded child IDs)
+    restart_seq: Vec<i64>,
+    trace_hash: u64,
+}
+
+fn sup_new(strategy: i64, n_children: usize, start_slot: i64) -> Supervisor {
+    let mut alive: Vec<i64> = Vec::new();
+    let mut restarts: Vec<u64> = Vec::new();
+    let mut cap_gen: Vec<u64> = Vec::new();
+    let mut rights: Vec<u64> = Vec::new();
+    let mut mbox_head: Vec<usize> = Vec::new();
+    let mut mbox_tail: Vec<usize> = Vec::new();
+    let mut mbox_len: Vec<usize> = Vec::new();
+    let mut mbox_buf: Vec<u64> = Vec::new();
+
+    let mut g: u64 = 10_u64;
+    let mut c: usize = 0;
+    while c < MAX_CHILDREN {
+        g = g + 1_u64;
+        if c < n_children {
+            alive.push(1);
+        } else {
+            alive.push(0);
+        }
+        restarts.push(0_u64);
+        cap_gen.push(g);
+        rights.push(CAP_SVC_SEND | CAP_SVC_RECV | CAP_SVC_FS_RO);
+        mbox_head.push(0);
+        mbox_tail.push(0);
+        mbox_len.push(0);
+        let mut j: usize = 0;
+        while j < MBOX_CAP {
+            mbox_buf.push(0_u64);
+            j = j + 1;
+        }
+        c = c + 1;
+    }
+
+    Supervisor {
+        strategy: strategy,
+        n_children: n_children,
+        global_gen: g,
+        active_slot: start_slot,
+        last_known_good: SLOT_A,
+        ab_rollback_alarm: false,
+        ab_rollbacks: 0_u64,
+        alive: alive,
+        restarts: restarts,
+        cap_gen: cap_gen,
+        rights: rights,
+        mbox_buf: mbox_buf,
+        mbox_head: mbox_head,
+        mbox_tail: mbox_tail,
+        mbox_len: mbox_len,
+        crash_ticks: Vec::new(),
+        restart_seq: Vec::new(),
+        trace_hash: 0xCBF29CE484222325_u64,
+    }
+}
+
+// Capability-checked FIFO enqueue into child mailbox
+fn sup_send_cap(sup: &mut Supervisor, child: usize, presented_gen: u64, msg: u64) -> i64 {
+    if child >= sup.n_children {
+        return ERR_BAD_CHILD;
+    }
+    if sup.alive[child] == 0 || sup.cap_gen[child] != presented_gen {
+        return ERR_STALE_CAP_GEN;
+    }
+    if (sup.rights[child] & CAP_SVC_SEND) == 0_u64 {
+        return ERR_STALE_CAP_GEN;
+    }
+    if sup.mbox_len[child] >= MBOX_CAP {
+        return ERR_MAILBOX_FULL;
+    }
+    let idx: usize = child * MBOX_CAP + sup.mbox_tail[child];
+    sup.mbox_buf[idx] = msg;
+    sup.mbox_tail[child] = (sup.mbox_tail[child] + 1) % MBOX_CAP;
+    sup.mbox_len[child] = sup.mbox_len[child] + 1;
+    sup.trace_hash = mix64(sup.trace_hash, ((child as u64) << 32_u64) ^ msg ^ presented_gen);
+    SUP_OK
+}
+
+// Capability-checked FIFO dequeue from child mailbox
+fn sup_recv_cap(sup: &mut Supervisor, child: usize, presented_gen: u64) -> i64 {
+    if child >= sup.n_children {
+        return ERR_BAD_CHILD;
+    }
+    if sup.alive[child] == 0 || sup.cap_gen[child] != presented_gen {
+        return ERR_STALE_CAP_GEN;
+    }
+    if sup.mbox_len[child] == 0 {
+        return ERR_NO_MSG;
+    }
+    let idx: usize = child * MBOX_CAP + sup.mbox_head[child];
+    let val: u64 = sup.mbox_buf[idx];
+    sup.mbox_head[child] = (sup.mbox_head[child] + 1) % MBOX_CAP;
+    sup.mbox_len[child] = sup.mbox_len[child] - 1;
+    sup.trace_hash = mix64(sup.trace_hash, val ^ 0x55AA_u64);
+    val as i64
+}
+
+// Revoke child's old CNode capability generation, clear its own queue, and mint fresh attenuated cap
+fn restart_one_child(sup: &mut Supervisor, child: usize, tick: u64) {
+    sup.alive[child] = 0;
+    sup.global_gen = sup.global_gen + 1_u64;
+    sup.cap_gen[child] = sup.global_gen;
+    // Attenuated fresh capability (preserves least privilege)
+    sup.rights[child] = CAP_SVC_SEND | CAP_SVC_RECV;
+    sup.mbox_head[child] = 0;
+    sup.mbox_tail[child] = 0;
+    sup.mbox_len[child] = 0;
+    sup.restarts[child] = sup.restarts[child] + 1_u64;
+    sup.alive[child] = 1;
+    sup.restart_seq.push(child as i64);
+    sup.trace_hash = mix64(
+        sup.trace_hash,
+        ((child as u64) << 40_u64) ^ (sup.cap_gen[child] << 16_u64) ^ tick
+    );
+}
+
+fn count_recent_crashes(ticks: &Vec<u64>, now_tick: u64) -> u64 {
+    let mut cnt: u64 = 0_u64;
+    let mut i: usize = 0;
+    while i < ticks.len() {
+        let t: u64 = ticks[i];
+        if now_tick >= t && (now_tick - t) < WINDOW_TICKS {
+            cnt = cnt + 1_u64;
+        }
+        i = i + 1;
+    }
+    cnt
+}
+
+// Handle a child crash at `tick`: enforces sliding-window max_restarts <= 3 in 100 ticks
+fn sup_handle_crash(sup: &mut Supervisor, crashed_child: usize, tick: u64) -> i64 {
+    if crashed_child >= sup.n_children {
+        return ERR_BAD_CHILD;
+    }
+    sup.crash_ticks.push(tick);
+    let recent: u64 = count_recent_crashes(&sup.crash_ticks, tick);
+    if recent > MAX_RESTARTS_IN_WINDOW {
+        // Escalate crash storm to A/B Boot-Slot Rollback Alarm
+        sup.ab_rollback_alarm = true;
+        sup.active_slot = sup.last_known_good;
+        sup.ab_rollbacks = sup.ab_rollbacks + 1_u64;
+        let mut c: usize = 0;
+        while c < sup.n_children {
+            sup.alive[c] = 0;
+            sup.global_gen = sup.global_gen + 1_u64;
+            sup.cap_gen[c] = sup.global_gen;
+            c = c + 1;
+        }
+        sup.trace_hash = mix64(sup.trace_hash, 0xDEAD_u64 ^ tick ^ recent);
+        return ERR_CRASH_STORM_ROLLBACK;
+    }
+
+    if sup.strategy == STRAT_ONE_FOR_ONE {
+        restart_one_child(sup, crashed_child, tick);
+        return SUP_OK;
+    }
+
+    // STRAT_ONE_FOR_ALL: restart full dependent group in deterministic dependency order 0 -> N-1
+    let mut k: usize = 0;
+    while k < sup.n_children {
+        restart_one_child(sup, k, tick);
+        k = k + 1;
+    }
+    SUP_OK
+}
+
+struct SuiteResult {
+    trace_hash: u64,
+    c1_ok: bool,
+    c2_ok: bool,
+    c3_ok: bool,
+    c4_ok: bool,
+    c3_rc: i64,
+    c4_rc: i64,
+    c3_slot: i64,
+    c3_rollbacks: u64,
+}
+
+fn run_supervisor_suite() -> SuiteResult {
+    // Control 1: ONE_FOR_ONE crash restarts ONLY crashed child; sibling FIFO order 100% preserved
+    let mut s1: Supervisor = sup_new(STRAT_ONE_FOR_ONE, 3, SLOT_B);
+    let g0_old: u64 = s1.cap_gen[0];
+    let g1_orig: u64 = s1.cap_gen[1];
+    let g2_orig: u64 = s1.cap_gen[2];
+    let _e1: i64 = sup_send_cap(&mut s1, 1, g1_orig, 101_u64);
+    let _e2: i64 = sup_send_cap(&mut s1, 1, g1_orig, 102_u64);
+    let _e3: i64 = sup_send_cap(&mut s1, 1, g1_orig, 103_u64);
+    let _e4: i64 = sup_send_cap(&mut s1, 2, g2_orig, 201_u64);
+    let _e5: i64 = sup_send_cap(&mut s1, 2, g2_orig, 202_u64);
+
+    let rc1: i64 = sup_handle_crash(&mut s1, 0, 10_u64);
+    let m1_a: i64 = sup_recv_cap(&mut s1, 1, g1_orig);
+    let m1_b: i64 = sup_recv_cap(&mut s1, 1, g1_orig);
+    let m1_c: i64 = sup_recv_cap(&mut s1, 1, g1_orig);
+    let m2_a: i64 = sup_recv_cap(&mut s1, 2, g2_orig);
+    let m2_b: i64 = sup_recv_cap(&mut s1, 2, g2_orig);
+    let fifo_ok: bool = m1_a == 101 && m1_b == 102 && m1_c == 103 && m2_a == 201 && m2_b == 202;
+    let c1_ok: bool = rc1 == SUP_OK && s1.restarts[0] == 1_u64
+        && s1.restarts[1] == 0_u64 && s1.restarts[2] == 0_u64
+        && s1.cap_gen[0] != g0_old && s1.cap_gen[1] == g1_orig && s1.cap_gen[2] == g2_orig
+        && fifo_ok;
+
+    // Control 4: Stale pre-crash capability token rejected fail-closed; fresh token succeeds
+    let stale_rc: i64 = sup_send_cap(&mut s1, 0, g0_old, 999_u64);
+    let fresh_gen: u64 = s1.cap_gen[0];
+    let fresh_rc: i64 = sup_send_cap(&mut s1, 0, fresh_gen, 777_u64);
+    let fresh_val: i64 = sup_recv_cap(&mut s1, 0, fresh_gen);
+    let c4_ok: bool = stale_rc == ERR_STALE_CAP_GEN && fresh_rc == SUP_OK && fresh_val == 777;
+
+    // Control 2: ONE_FOR_ALL dependency crash restarts full group in exact order 0 -> 1 -> 2
+    let mut s2: Supervisor = sup_new(STRAT_ONE_FOR_ALL, 3, SLOT_B);
+    let old0: u64 = s2.cap_gen[0];
+    let old1: u64 = s2.cap_gen[1];
+    let old2: u64 = s2.cap_gen[2];
+    let rc2: i64 = sup_handle_crash(&mut s2, 0, 20_u64);
+    let order_ok: bool = s2.restart_seq.len() == 3
+        && s2.restart_seq[0] == 0 && s2.restart_seq[1] == 1 && s2.restart_seq[2] == 2;
+    let all_revoked: bool = s2.cap_gen[0] != old0 && s2.cap_gen[1] != old1 && s2.cap_gen[2] != old2
+        && sup_send_cap(&mut s2, 1, old1, 5_u64) == ERR_STALE_CAP_GEN
+        && sup_send_cap(&mut s2, 2, old2, 5_u64) == ERR_STALE_CAP_GEN;
+    let c2_ok: bool = rc2 == SUP_OK && order_ok && all_revoked
+        && s2.restarts[0] == 1_u64 && s2.restarts[1] == 1_u64 && s2.restarts[2] == 1_u64;
+
+    // Control 3: Crash storm (4 crashes in < 100 ticks) escalates to A/B Boot-Slot Rollback Alarm
+    let mut s3: Supervisor = sup_new(STRAT_ONE_FOR_ONE, 3, SLOT_B);
+    let r_a: i64 = sup_handle_crash(&mut s3, 0, 10_u64);
+    let r_b: i64 = sup_handle_crash(&mut s3, 0, 25_u64);
+    let r_c: i64 = sup_handle_crash(&mut s3, 0, 40_u64);
+    let r_d: i64 = sup_handle_crash(&mut s3, 0, 60_u64);
+    let c3_ok: bool = r_a == SUP_OK && r_b == SUP_OK && r_c == SUP_OK
+        && r_d == ERR_CRASH_STORM_ROLLBACK && s3.ab_rollback_alarm
+        && s3.active_slot == SLOT_A && s3.ab_rollbacks == 1_u64;
+
+    let total_hash: u64 = mix64(mix64(s1.trace_hash, s2.trace_hash), s3.trace_hash);
+
+    SuiteResult {
+        trace_hash: total_hash,
+        c1_ok: c1_ok,
+        c2_ok: c2_ok,
+        c3_ok: c3_ok,
+        c4_ok: c4_ok,
+        c3_rc: r_d,
+        c4_rc: stale_rc,
+        c3_slot: s3.active_slot,
+        c3_rollbacks: s3.ab_rollbacks,
+    }
+}
+
+fn main() -> i64 ~ Console {
+    let r1: SuiteResult = run_supervisor_suite();
+    let r2: SuiteResult = run_supervisor_suite();
+    let det_match: bool = r1.trace_hash == r2.trace_hash && r1.trace_hash != 0_u64;
+
+    println("SUPERVISOR_RUN1: trace_hash={}", r1.trace_hash);
+    println("SUPERVISOR_RUN2: trace_hash={}", r2.trace_hash);
+    println("SUPERVISOR_DETERMINISM: match={}", det_match);
+
+    let mut caught: i64 = 0;
+    if r1.c1_ok {
+        println("CONTROL_1_ONE_FOR_ONE_FIFO: CAUGHT_FAIL_CLOSED sibling_fifo=preserved");
+        caught = caught + 1;
+    }
+    if r1.c2_ok {
+        println("CONTROL_2_ONE_FOR_ALL_DEP_ORDER: CAUGHT_FAIL_CLOSED order=0_1_2 all_revoked=true");
+        caught = caught + 1;
+    }
+    if r1.c3_ok {
+        println(
+            "CONTROL_3_CRASH_STORM_AB_ROLLBACK: CAUGHT_FAIL_CLOSED rc={} active_slot={} rollbacks={}",
+            r1.c3_rc, r1.c3_slot, r1.c3_rollbacks
+        );
+        caught = caught + 1;
+    }
+    if r1.c4_ok {
+        println("CONTROL_4_STALE_CAP_REJECTED: CAUGHT_FAIL_CLOSED rc={}", r1.c4_rc);
+        caught = caught + 1;
+    }
+
+    println("SUPERVISOR_CONTROLS: caught={}/4", caught);
+    if det_match && caught == 4 {
+        println("BUILDOS_SUPERVISOR ALL_PASS checks=5 failures=0");
+        return 0;
+    }
+    println("BUILDOS_SUPERVISOR FAILED");
+    1
+}

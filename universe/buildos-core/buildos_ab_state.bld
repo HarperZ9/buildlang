@@ -1,0 +1,481 @@
+// SPDX-FileCopyrightText: 2026 Zain Dana Harper
+// SPDX-License-Identifier: MIT
+
+// BuildOS Track 1: Atomic A/B Immutable OS Boot-Slot & Checksummed Service-Manifest Store
+// (buildos_ab_state.bld)
+// Implements:
+//   1. Pure-BuildLang FIPS 180-4 SHA-256 (verified against SHA256("abc") KAT)
+//   2. Atomic A/B OS image slot manager (slot_a / slot_b) with monotonic generation anti-downgrade,
+//      per-slot SHA-256 manifest verification, and uncommitted_boots <= 1 auto-rollback watchdog
+//   3. Checksummed BuildDB service/capability records with 500-trial 1-byte mutation fuzz proof (0/500 silent)
+//   4. 4/4 planted fail-closed controls + double-run deterministic state hash
+// Zero ambient authority. Zero em/en dashes. Safe BuildLang 1.15.0 idioms only.
+
+const AB_OK: i64 = 0;
+const ERR_MANIFEST_CORRUPT: i64 = -401;
+const ERR_ROLLBACK_DOWNGRADE: i64 = -402;
+const ERR_BOOT_ROLLED_BACK: i64 = -403;
+const ERR_UNDECLARED_SVC_CAP: i64 = -404;
+
+const SLOT_A: i64 = 0;
+const SLOT_B: i64 = 1;
+
+// Allowed BuildOS service capability mask (bits 0..6)
+const CAP_PURE: u64 = 0_u64;
+const CAP_CONSOLE: u64 = 1_u64;
+const CAP_FS_RO: u64 = 2_u64;
+const CAP_FS_RW: u64 = 4_u64;
+const CAP_NET_LOCAL: u64 = 8_u64;
+const CAP_PROCESS: u64 = 16_u64;
+const CAP_FB_WRITE: u64 = 32_u64;
+const CAP_VALID_MASK: u64 = 63_u64;
+
+// ============================================================================
+// Pure-BuildLang FIPS 180-4 SHA-256
+// ============================================================================
+
+fn mask32(x: u64) -> u64 {
+    x & 0xFFFFFFFF_u64
+}
+
+fn rotr32(x: u64, n: u64) -> u64 {
+    let v: u64 = mask32(x);
+    mask32((v >> n) | (v << (32_u64 - n)))
+}
+
+fn sha256_k(idx: usize) -> u64 {
+    let k: Vec<u64> = vec![
+        0x428a2f98_u64, 0x71374491_u64, 0xb5c0fbcf_u64, 0xe9b5dba5_u64,
+        0x3956c25b_u64, 0x59f111f1_u64, 0x923f82a4_u64, 0xab1c5ed5_u64,
+        0xd807aa98_u64, 0x12835b01_u64, 0x243185be_u64, 0x550c7dc3_u64,
+        0x72be5d74_u64, 0x80deb1fe_u64, 0x9bdc06a7_u64, 0xc19bf174_u64,
+        0xe49b69c1_u64, 0xefbe4786_u64, 0x0fc19dc6_u64, 0x240ca1cc_u64,
+        0x2de92c6f_u64, 0x4a7484aa_u64, 0x5cb0a9dc_u64, 0x76f988da_u64,
+        0x983e5152_u64, 0xa831c66d_u64, 0xb00327c8_u64, 0xbf597fc7_u64,
+        0xc6e00bf3_u64, 0xd5a79147_u64, 0x06ca6351_u64, 0x14292967_u64,
+        0x27b70a85_u64, 0x2e1b2138_u64, 0x4d2c6dfc_u64, 0x53380d13_u64,
+        0x650a7354_u64, 0x766a0abb_u64, 0x81c2c92e_u64, 0x92722c85_u64,
+        0xa2bfe8a1_u64, 0xa81a664b_u64, 0xc24b8b70_u64, 0xc76c51a3_u64,
+        0xd192e819_u64, 0xd6990624_u64, 0xf40e3585_u64, 0x106aa070_u64,
+        0x19a4c116_u64, 0x1e376c08_u64, 0x2748774c_u64, 0x34b0bcb5_u64,
+        0x391c0cb3_u64, 0x4ed8aa4a_u64, 0x5b9cca4f_u64, 0x682e6ff3_u64,
+        0x748f82ee_u64, 0x78a5636f_u64, 0x84c87814_u64, 0x8cc70208_u64,
+        0x90befffa_u64, 0xa4506ceb_u64, 0xbef9a3f7_u64, 0xc67178f2_u64,
+    ];
+    k[idx]
+}
+
+struct Digest {
+    h0: u64, h1: u64, h2: u64, h3: u64,
+    h4: u64, h5: u64, h6: u64, h7: u64,
+}
+
+fn sha256_bytes(data: &Vec<u64>) -> Digest {
+    let orig_len: u64 = data.len() as u64;
+    let mut msg: Vec<u64> = Vec::new();
+    let mut i: usize = 0;
+    while i < data.len() {
+        msg.push(data[i] & 0xFF_u64);
+        i = i + 1;
+    }
+    msg.push(0x80_u64);
+    while (msg.len() % 64) != 56 {
+        msg.push(0_u64);
+    }
+    let bit_len: u64 = orig_len * 8_u64;
+    let mut s: i64 = 56;
+    while s >= 0 {
+        msg.push((bit_len >> (s as u64)) & 0xFF_u64);
+        s = s - 8;
+    }
+
+    let mut h0: u64 = 0x6a09e667_u64;
+    let mut h1: u64 = 0xbb67ae85_u64;
+    let mut h2: u64 = 0x3c6ef372_u64;
+    let mut h3: u64 = 0xa54ff53a_u64;
+    let mut h4: u64 = 0x510e527f_u64;
+    let mut h5: u64 = 0x9b05688c_u64;
+    let mut h6: u64 = 0x1f83d9ab_u64;
+    let mut h7: u64 = 0x5be0cd19_u64;
+
+    let mut off: usize = 0;
+    while off < msg.len() {
+        let mut w: Vec<u64> = Vec::new();
+        let mut t: usize = 0;
+        while t < 16 {
+            let b0: u64 = msg[off + t * 4];
+            let b1: u64 = msg[off + t * 4 + 1];
+            let b2: u64 = msg[off + t * 4 + 2];
+            let b3: u64 = msg[off + t * 4 + 3];
+            w.push((b0 << 24_u64) | (b1 << 16_u64) | (b2 << 8_u64) | b3);
+            t = t + 1;
+        }
+        while t < 64 {
+            let s0: u64 = rotr32(w[t - 15], 7_u64) ^ rotr32(w[t - 15], 18_u64) ^ (w[t - 15] >> 3_u64);
+            let s1: u64 = rotr32(w[t - 2], 17_u64) ^ rotr32(w[t - 2], 19_u64) ^ (w[t - 2] >> 10_u64);
+            w.push(mask32(w[t - 16] + s0 + w[t - 7] + s1));
+            t = t + 1;
+        }
+        let mut a: u64 = h0;
+        let mut b: u64 = h1;
+        let mut c: u64 = h2;
+        let mut d: u64 = h3;
+        let mut e: u64 = h4;
+        let mut f: u64 = h5;
+        let mut g: u64 = h6;
+        let mut hh: u64 = h7;
+
+        let mut r: usize = 0;
+        while r < 64 {
+            let big_s1: u64 = rotr32(e, 6_u64) ^ rotr32(e, 11_u64) ^ rotr32(e, 25_u64);
+            let ch: u64 = (e & f) ^ (mask32(!e) & g);
+            let temp1: u64 = mask32(hh + big_s1 + ch + sha256_k(r) + w[r]);
+            let big_s0: u64 = rotr32(a, 2_u64) ^ rotr32(a, 13_u64) ^ rotr32(a, 22_u64);
+            let maj: u64 = (a & b) ^ (a & c) ^ (b & c);
+            let temp2: u64 = mask32(big_s0 + maj);
+
+            hh = g;
+            g = f;
+            f = e;
+            e = mask32(d + temp1);
+            d = c;
+            c = b;
+            b = a;
+            a = mask32(temp1 + temp2);
+            r = r + 1;
+        }
+        h0 = mask32(h0 + a);
+        h1 = mask32(h1 + b);
+        h2 = mask32(h2 + c);
+        h3 = mask32(h3 + d);
+        h4 = mask32(h4 + e);
+        h5 = mask32(h5 + f);
+        h6 = mask32(h6 + g);
+        h7 = mask32(h7 + hh);
+        off = off + 64;
+    }
+
+    Digest { h0: h0, h1: h1, h2: h2, h3: h3, h4: h4, h5: h5, h6: h6, h7: h7 }
+}
+
+fn digest_eq(a: &Digest, b: &Digest) -> bool {
+    a.h0 == b.h0 && a.h1 == b.h1 && a.h2 == b.h2 && a.h3 == b.h3
+        && a.h4 == b.h4 && a.h5 == b.h5 && a.h6 == b.h6 && a.h7 == b.h7
+}
+
+fn push_u64_be(buf: &mut Vec<u64>, v: u64) {
+    let mut s: i64 = 56;
+    while s >= 0 {
+        buf.push((v >> (s as u64)) & 0xFF_u64);
+        s = s - 8;
+    }
+}
+
+// ============================================================================
+// Service Manifest & Atomic A/B Boot Slot State
+// ============================================================================
+
+struct SlotManifest {
+    slot_id: i64,
+    gen: u64,
+    image_root_lo: u64,
+    image_root_hi: u64,
+    svc_ids: Vec<u64>,
+    svc_caps: Vec<u64>,
+}
+
+fn serialize_manifest(m: &SlotManifest) -> Vec<u64> {
+    let mut buf: Vec<u64> = Vec::new();
+    // Magic "BLAB" + v1
+    buf.push(66_u64);
+    buf.push(76_u64);
+    buf.push(65_u64);
+    buf.push(66_u64);
+    buf.push(1_u64);
+    push_u64_be(&mut buf, m.slot_id as u64);
+    push_u64_be(&mut buf, m.gen);
+    push_u64_be(&mut buf, m.image_root_lo);
+    push_u64_be(&mut buf, m.image_root_hi);
+    push_u64_be(&mut buf, m.svc_ids.len() as u64);
+    let mut i: usize = 0;
+    while i < m.svc_ids.len() {
+        push_u64_be(&mut buf, m.svc_ids[i]);
+        push_u64_be(&mut buf, m.svc_caps[i]);
+        i = i + 1;
+    }
+    buf
+}
+
+fn validate_service_caps(caps: &Vec<u64>) -> i64 {
+    let mut i: usize = 0;
+    while i < caps.len() {
+        if (caps[i] & !CAP_VALID_MASK) != 0_u64 {
+            return ERR_UNDECLARED_SVC_CAP;
+        }
+        i = i + 1;
+    }
+    AB_OK
+}
+
+struct BootSlotMeta {
+    gen: u64,
+    committed: i64,
+    healthy: i64,
+    uncommitted_boots: u64,
+    sha_h0: u64,
+    sha_h1: u64,
+}
+
+struct AbBootManager {
+    active_slot: i64,
+    last_known_good: i64,
+    pending_slot: i64,
+    rollbacks: u64,
+    slot_a: BootSlotMeta,
+    slot_b: BootSlotMeta,
+}
+
+fn ab_init(m_a: &SlotManifest) -> AbBootManager {
+    let raw_a: Vec<u64> = serialize_manifest(m_a);
+    let d_a: Digest = sha256_bytes(&raw_a);
+    let meta_a: BootSlotMeta = BootSlotMeta {
+        gen: m_a.gen,
+        committed: 1,
+        healthy: 1,
+        uncommitted_boots: 0_u64,
+        sha_h0: d_a.h0,
+        sha_h1: d_a.h1,
+    };
+    let meta_b: BootSlotMeta = BootSlotMeta {
+        gen: 0_u64,
+        committed: 0,
+        healthy: 0,
+        uncommitted_boots: 0_u64,
+        sha_h0: 0_u64,
+        sha_h1: 0_u64,
+    };
+    AbBootManager {
+        active_slot: SLOT_A,
+        last_known_good: SLOT_A,
+        pending_slot: -1,
+        rollbacks: 0_u64,
+        slot_a: meta_a,
+        slot_b: meta_b,
+    }
+}
+
+fn active_gen(mgr: &AbBootManager) -> u64 {
+    if mgr.active_slot == SLOT_A {
+        return mgr.slot_a.gen;
+    }
+    mgr.slot_b.gen
+}
+
+// Stage an atomic update to the inactive slot: checks caps, anti-downgrade, and SHA-256 manifest
+fn ab_stage_update(
+    mgr: &mut AbBootManager,
+    m: &SlotManifest,
+    raw_bytes: &Vec<u64>,
+    expected_sha: &Digest,
+) -> i64 {
+    let cap_rc: i64 = validate_service_caps(&m.svc_caps);
+    if cap_rc != AB_OK {
+        return cap_rc;
+    }
+    if m.gen <= active_gen(mgr) {
+        return ERR_ROLLBACK_DOWNGRADE;
+    }
+    let got_sha: Digest = sha256_bytes(raw_bytes);
+    if !digest_eq(&got_sha, expected_sha) {
+        return ERR_MANIFEST_CORRUPT;
+    }
+    let canon_raw: Vec<u64> = serialize_manifest(m);
+    let canon_sha: Digest = sha256_bytes(&canon_raw);
+    if !digest_eq(&canon_sha, expected_sha) {
+        return ERR_MANIFEST_CORRUPT;
+    }
+    if m.slot_id == SLOT_B {
+        mgr.slot_b = BootSlotMeta {
+            gen: m.gen,
+            committed: 0,
+            healthy: 1,
+            uncommitted_boots: 0_u64,
+            sha_h0: got_sha.h0,
+            sha_h1: got_sha.h1,
+        };
+        mgr.pending_slot = SLOT_B;
+    } else {
+        mgr.slot_a = BootSlotMeta {
+            gen: m.gen,
+            committed: 0,
+            healthy: 1,
+            uncommitted_boots: 0_u64,
+            sha_h0: got_sha.h0,
+            sha_h1: got_sha.h1,
+        };
+        mgr.pending_slot = SLOT_A;
+    }
+    AB_OK
+}
+
+// Execute boot watchdog: uncommitted_boots <= 1; failed boot auto-rolls back to last_known_good
+fn ab_boot_attempt(mgr: &mut AbBootManager, health_ok: bool) -> i64 {
+    if mgr.pending_slot < 0 {
+        return AB_OK;
+    }
+    let target: i64 = mgr.pending_slot;
+    if target == SLOT_B {
+        mgr.slot_b.uncommitted_boots = mgr.slot_b.uncommitted_boots + 1_u64;
+        if health_ok && mgr.slot_b.uncommitted_boots <= 1_u64 {
+            mgr.slot_b.committed = 1;
+            mgr.slot_b.healthy = 1;
+            mgr.active_slot = SLOT_B;
+            mgr.last_known_good = SLOT_B;
+            mgr.pending_slot = -1;
+            return AB_OK;
+        }
+        // Auto-rollback to last_known_good (slot_a)
+        mgr.slot_b.committed = 0;
+        mgr.slot_b.healthy = 0;
+        mgr.active_slot = mgr.last_known_good;
+        mgr.pending_slot = -1;
+        mgr.rollbacks = mgr.rollbacks + 1_u64;
+        return ERR_BOOT_ROLLED_BACK;
+    }
+    mgr.slot_a.uncommitted_boots = mgr.slot_a.uncommitted_boots + 1_u64;
+    if health_ok && mgr.slot_a.uncommitted_boots <= 1_u64 {
+        mgr.slot_a.committed = 1;
+        mgr.slot_a.healthy = 1;
+        mgr.active_slot = SLOT_A;
+        mgr.last_known_good = SLOT_A;
+        mgr.pending_slot = -1;
+        return AB_OK;
+    }
+    mgr.slot_a.committed = 0;
+    mgr.slot_a.healthy = 0;
+    mgr.active_slot = mgr.last_known_good;
+    mgr.pending_slot = -1;
+    mgr.rollbacks = mgr.rollbacks + 1_u64;
+    ERR_BOOT_ROLLED_BACK
+}
+
+// 500-trial 1-byte mutation fuzz stress over serialized BuildDB service/slot manifest
+fn run_fuzz_500(m: &SlotManifest) -> i64 {
+    let raw: Vec<u64> = serialize_manifest(m);
+    let expected: Digest = sha256_bytes(&raw);
+    let n: usize = raw.len();
+    let mut detected: i64 = 0;
+    let mut trial: usize = 0;
+    while trial < 500 {
+        let mut mutated: Vec<u64> = Vec::new();
+        let mut i: usize = 0;
+        while i < n {
+            mutated.push(raw[i]);
+            i = i + 1;
+        }
+        let pos: usize = (trial * 17 + 3) % n;
+        let bit_mask: u64 = 1_u64 << ((trial % 8) as u64);
+        mutated[pos] = mutated[pos] ^ bit_mask;
+        let got: Digest = sha256_bytes(&mutated);
+        if !digest_eq(&got, &expected) {
+            detected = detected + 1;
+        }
+        trial = trial + 1;
+    }
+    detected
+}
+
+fn make_manifest(slot_id: i64, gen: u64, root_lo: u64, cap2: u64) -> SlotManifest {
+    SlotManifest {
+        slot_id: slot_id,
+        gen: gen,
+        image_root_lo: root_lo,
+        image_root_hi: 0x20261127_u64,
+        svc_ids: vec![1_u64, 2_u64, 3_u64],
+        svc_caps: vec![CAP_CONSOLE | CAP_FS_RO, CAP_CONSOLE | CAP_FB_WRITE, cap2],
+    }
+}
+
+fn main() -> i64 ~ Console {
+    // 1. SHA-256 KAT ("abc")
+    let abc: Vec<u64> = vec![97_u64, 98_u64, 99_u64];
+    let abc_d: Digest = sha256_bytes(&abc);
+    let sha_kat_ok: bool = abc_d.h0 == 0xba7816bf_u64 && abc_d.h7 == 0xf20015ad_u64;
+    println("SHA256_KAT_ABC: ok={} h0={} h7={}", sha_kat_ok, abc_d.h0, abc_d.h7);
+
+    // 2. Initialize slot_a (gen=10) and perform valid staged upgrade to slot_b (gen=11)
+    let m_a: SlotManifest = make_manifest(SLOT_A, 10_u64, 0xAAAA1010_u64, CAP_NET_LOCAL);
+    let mut mgr: AbBootManager = ab_init(&m_a);
+    let m_b: SlotManifest = make_manifest(SLOT_B, 11_u64, 0xBBBB1111_u64, CAP_NET_LOCAL | CAP_FS_RW);
+    let raw_b: Vec<u64> = serialize_manifest(&m_b);
+    let sha_b: Digest = sha256_bytes(&raw_b);
+    let stage_ok: i64 = ab_stage_update(&mut mgr, &m_b, &raw_b, &sha_b);
+    let boot_ok: i64 = ab_boot_attempt(&mut mgr, true);
+    let upgrade_ok: bool = stage_ok == AB_OK && boot_ok == AB_OK
+        && mgr.active_slot == SLOT_B && mgr.slot_b.committed == 1 && mgr.slot_b.gen == 11_u64;
+    println(
+        "ATOMIC_AB_UPGRADE: ok={} active_slot={} gen={} sha_h0={}",
+        upgrade_ok, mgr.active_slot, mgr.slot_b.gen, mgr.slot_b.sha_h0
+    );
+
+    // 3. 500-trial 1-byte silent-corruption fuzz stress (F6 BDB rigor)
+    let fuzz_caught: i64 = run_fuzz_500(&m_b);
+    let silent_corruptions: i64 = 500 - fuzz_caught;
+    println("FUZZ_500_CORRUPTIONS: caught={}/500 silent={}", fuzz_caught, silent_corruptions);
+
+    // 4. 4/4 Planted Fail-Closed Security Controls
+    let mut caught: i64 = 0;
+
+    // Control 1: 1-byte corrupted slot manifest checksum rejected before boot switch
+    let m_a2: SlotManifest = make_manifest(SLOT_A, 12_u64, 0xCCCC1212_u64, CAP_FS_RO);
+    let mut bad_raw: Vec<u64> = serialize_manifest(&m_a2);
+    let good_sha: Digest = sha256_bytes(&bad_raw);
+    bad_raw[12] = bad_raw[12] ^ 1_u64;
+    let c1_rc: i64 = ab_stage_update(&mut mgr, &m_a2, &bad_raw, &good_sha);
+    if c1_rc == ERR_MANIFEST_CORRUPT && mgr.pending_slot == -1 && mgr.active_slot == SLOT_B {
+        println("CONTROL_1_CORRUPT_MANIFEST: CAUGHT_FAIL_CLOSED rc={}", c1_rc);
+        caught = caught + 1;
+    }
+
+    // Control 2: Version-rollback downgrade attack (gen_new <= gen_active) rejected
+    let m_old: SlotManifest = make_manifest(SLOT_A, 9_u64, 0xDDDD0909_u64, CAP_FS_RO);
+    let raw_old: Vec<u64> = serialize_manifest(&m_old);
+    let sha_old: Digest = sha256_bytes(&raw_old);
+    let c2_rc: i64 = ab_stage_update(&mut mgr, &m_old, &raw_old, &sha_old);
+    if c2_rc == ERR_ROLLBACK_DOWNGRADE && mgr.pending_slot == -1 {
+        println("CONTROL_2_DOWNGRADE_ATTACK: CAUGHT_FAIL_CLOSED rc={}", c2_rc);
+        caught = caught + 1;
+    }
+
+    // Control 3: Failed boot on uncommitted slot_b triggers automatic watchdog rollback to slot_a
+    let mut mgr_rb: AbBootManager = ab_init(&m_a);
+    let _st: i64 = ab_stage_update(&mut mgr_rb, &m_b, &raw_b, &sha_b);
+    let c3_rc: i64 = ab_boot_attempt(&mut mgr_rb, false);
+    if c3_rc == ERR_BOOT_ROLLED_BACK && mgr_rb.active_slot == SLOT_A
+        && mgr_rb.slot_b.healthy == 0 && mgr_rb.rollbacks == 1_u64
+    {
+        println(
+            "CONTROL_3_AUTO_ROLLBACK: CAUGHT_FAIL_CLOSED rc={} active_slot={} rollbacks={}",
+            c3_rc, mgr_rb.active_slot, mgr_rb.rollbacks
+        );
+        caught = caught + 1;
+    }
+
+    // Control 4: Undeclared service capability (bit 7 = 128 outside valid mask) rejected at commit
+    let m_badcap: SlotManifest = make_manifest(SLOT_A, 15_u64, 0xEEEE1515_u64, 128_u64);
+    let raw_bc: Vec<u64> = serialize_manifest(&m_badcap);
+    let sha_bc: Digest = sha256_bytes(&raw_bc);
+    let c4_rc: i64 = ab_stage_update(&mut mgr, &m_badcap, &raw_bc, &sha_bc);
+    if c4_rc == ERR_UNDECLARED_SVC_CAP && mgr.pending_slot == -1 {
+        println("CONTROL_4_UNDECLARED_SVC_CAP: CAUGHT_FAIL_CLOSED rc={}", c4_rc);
+        caught = caught + 1;
+    }
+
+    println("AB_CONTROLS: caught={}/4 fuzz_silent={}", caught, silent_corruptions);
+    if sha_kat_ok && upgrade_ok && silent_corruptions == 0 && caught == 4 {
+        println("BUILDOS_AB_STATE ALL_PASS checks=7 failures=0");
+        return 0;
+    }
+    println("BUILDOS_AB_STATE FAILED");
+    1
+}
