@@ -464,5 +464,46 @@ fn main() -> i32 ~ Console {
         "expected incompatible runtime container refusal, got: {msg}"
     );
 
+    // 4. Regression for `macros.rs` collect_as_string: `let chars: Vec<char> = s.chars().collect();`
+    //    inside a `-> String` function must collect into `Vec<char>`, not `BuildString`,
+    //    while returning `s.chars().rev().collect()` into `String` still produces `BuildString`.
+    let chars_collect_src = dir.join("chars_collect_in_string_fn.bld");
+    std::fs::write(
+        &chars_collect_src,
+        r#"
+fn reverse_via_vec(s: &str) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    let mut out = String::new();
+    let mut i = chars.len();
+    while i > 0 {
+        i = i - 1;
+        out.push(chars[i]);
+    }
+    out
+}
+
+fn main() -> i32 ~ Console {
+    let r = reverse_via_vec("buildlang");
+    println!("{}", r);
+    0
+}
+"#,
+    )
+    .unwrap();
+    let run_chars = Command::new(buildc_bin())
+        .env("BUILDLANG_STDLIB", stdlib_dir())
+        .args(["run", chars_collect_src.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(
+        run_chars.status.success(),
+        "reverse_via_vec failed: {}",
+        String::from_utf8_lossy(&run_chars.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&run_chars.stdout).trim(),
+        "gnaldliub"
+    );
+
     let _ = std::fs::remove_dir_all(&dir);
 }
