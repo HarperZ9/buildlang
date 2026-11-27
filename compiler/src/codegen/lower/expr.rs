@@ -11427,8 +11427,21 @@ impl<'ctx> MirLowerer<'ctx> {
                     return Ok(values::local(it));
                 }
 
-                // --- s.chars().collect() → Vec<char> (u32) ---
+                // --- s.chars().collect() / c.to_uppercase().collect() ---
+                // When the expected target type is `BuildString` (e.g.
+                // `c.to_uppercase().collect::<String>()` or
+                // `let s: String = c.to_lowercase().collect()`), the lowered
+                // `BuildString` receiver already holds the UTF-8 character
+                // sequence; return it directly instead of materializing a
+                // `Vec<char>` (`Vec(u32)`), which would fail [BL0901] on
+                // assignment into a `BuildString` slot.
                 if method_name == "collect" && args.is_empty() {
+                    if matches!(
+                        &self.expected_type,
+                        Some(MirType::Struct(n)) if n.as_ref() == "BuildString"
+                    ) {
+                        return Ok(receiver_val);
+                    }
                     let b = self
                         .current_fn
                         .as_mut()

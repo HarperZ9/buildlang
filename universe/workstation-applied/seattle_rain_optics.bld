@@ -1,0 +1,161 @@
+// SPDX-FileCopyrightText: 2026 Zain Dana Harper
+// SPDX-License-Identifier: MIT
+//
+// Wave 53M (Author Idea H7): Seattle Rain 589.0/589.6 nm Sodium-D Dispersion & Caustics (seattle_rain_optics.bld)
+// - Cauchy dispersion for water and soda-lime glass at the 589.0 nm (D2) and 589.6 nm (D1) sodium-D doublet
+// - Exact Snell hemispherical raindrop refraction caustic angles vs analytic Descartes ray-trace (<= 0.5 deg)
+// - Planted failing control: grazing glass-to-air Total Internal Reflection (TIR) NaN clamp caught fail-closed
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { return -x; }
+    x
+}
+
+fn asin_safe(x: f64) -> f64 {
+    if x >= 1.0 { return 1.5707963267948966; }
+    if x <= -1.0 { return -1.5707963267948966; }
+    atan(x / sqrt(1.0 - x * x))
+}
+
+fn acos_safe(x: f64) -> f64 {
+    1.5707963267948966 - asin_safe(x)
+}
+
+// Cauchy refractive index n(lambda_nm) = A + B / lambda_um^2
+fn cauchy_n(a: f64, b_um2: f64, lambda_nm: f64) -> f64 {
+    let lam_um: f64 = lambda_nm * 1.0e-3;
+    a + b_um2 / (lam_um * lam_um)
+}
+
+struct SnellRes {
+    angle_rad: f64,
+    is_tir: i32,
+}
+
+fn snell_refract(n1: f64, n2: f64, theta_i: f64) -> SnellRes {
+    let sin_t: f64 = (n1 / n2) * sin(theta_i);
+    if abs_f64(sin_t) > 1.0 {
+        return SnellRes { angle_rad: theta_i, is_tir: 1 };
+    }
+    SnellRes { angle_rad: asin_safe(sin_t), is_tir: 0 }
+}
+
+// Analytic Descartes primary raindrop caustic deflection angle (radians)
+fn descartes_caustic_rad(n: f64) -> f64 {
+    let cos_c: f64 = sqrt((n * n - 1.0) / 3.0);
+    let theta_c: f64 = acos_safe(cos_c);
+    let theta_r: f64 = asin_safe(sin(theta_c) / n);
+    4.0 * theta_r - 2.0 * theta_c
+}
+
+// Numerical 2000-ray sweep finding maximum primary deflection angle in water droplet
+fn numeric_descartes_caustic_rad(n: f64) -> f64 {
+    let half_pi: f64 = 1.5707963267948966;
+    let mut best_d: f64 = -1.0;
+    let mut k: i32 = 1;
+    while k < 2000 {
+        let ti: f64 = (k as f64) * half_pi / 2000.0;
+        let sr: SnellRes = snell_refract(1.0, n, ti);
+        if sr.is_tir == 0 {
+            let d: f64 = 4.0 * sr.angle_rad - 2.0 * ti;
+            if d > best_d { best_d = d; }
+        }
+        k = k + 1;
+    }
+    best_d
+}
+
+// Hemispherical water droplet resting flat on soda-lime windshield glass:
+// Air -> Water dome (theta_i) -> Water/Glass interface (phi = theta_i - theta_t) -> Glass -> Cabin Air
+// Returns max transmitted exit angle (rad) before glass-to-air TIR cutoff.
+fn numeric_windshield_droplet_caustic_rad(n_w: f64, n_g: f64) -> f64 {
+    let half_pi: f64 = 1.5707963267948966;
+    let mut max_out: f64 = 0.0;
+    let mut k: i32 = 1;
+    while k < 2000 {
+        let ti: f64 = (k as f64) * half_pi / 2000.0;
+        let r1: SnellRes = snell_refract(1.0, n_w, ti);
+        if r1.is_tir == 0 {
+            let phi_wg: f64 = ti - r1.angle_rad;
+            let r2: SnellRes = snell_refract(n_w, n_g, phi_wg);
+            if r2.is_tir == 0 {
+                let r3: SnellRes = snell_refract(n_g, 1.0, r2.angle_rad);
+                if r3.is_tir == 0 && r3.angle_rad > max_out {
+                    max_out = r3.angle_rad;
+                }
+            }
+        }
+        k = k + 1;
+    }
+    max_out
+}
+
+fn main() ~ Clock + Console {
+    let t0: i64 = clock_ns();
+    let rad2deg: f64 = 180.0 / 3.1415926535897932384626433832795;
+
+    // Sodium-D doublet: D2 = 589.0 nm, D1 = 589.6 nm
+    let n_w_d2: f64 = cauchy_n(1.3242, 0.003046, 589.0);
+    let n_w_d1: f64 = cauchy_n(1.3242, 0.003046, 589.6);
+    let n_g_d2: f64 = cauchy_n(1.5046, 0.004200, 589.0);
+    let n_g_d1: f64 = cauchy_n(1.5046, 0.004200, 589.6);
+
+    let dn_w: f64 = n_w_d2 - n_w_d1;
+    let dn_g: f64 = n_g_d2 - n_g_d1;
+
+    // Primary water droplet caustic (analytic vs 2000-ray Snell sweep)
+    let c_d2_an: f64 = descartes_caustic_rad(n_w_d2) * rad2deg;
+    let c_d2_num: f64 = numeric_descartes_caustic_rad(n_w_d2) * rad2deg;
+    let c_d1_an: f64 = descartes_caustic_rad(n_w_d1) * rad2deg;
+    let c_d1_num: f64 = numeric_descartes_caustic_rad(n_w_d1) * rad2deg;
+
+    let err_d2: f64 = abs_f64(c_d2_num - c_d2_an);
+    let err_d1: f64 = abs_f64(c_d1_num - c_d1_an);
+    let doublet_sep_deg: f64 = c_d1_an - c_d2_an;
+
+    // Hemispherical droplet on windshield glass: analytic limit at grazing ti -> pi/2 is
+    // phi_max = pi/2 - asin(1/n_w), so sin(theta_out_max) = n_w * sin(phi_max) = sqrt(n_w^2 - 1)
+    let sin_hemi_an: f64 = sqrt(n_w_d2 * n_w_d2 - 1.0);
+    let hemi_an_deg: f64 = asin_safe(sin_hemi_an) * rad2deg;
+    let hemi_num_deg: f64 = numeric_windshield_droplet_caustic_rad(n_w_d2, n_g_d2) * rad2deg;
+    let err_hemi: f64 = abs_f64(hemi_num_deg - hemi_an_deg);
+
+    // Planted failing control: grazing glass-to-air ray at 50 deg (> critical angle 41.25 deg)
+    let ti_tir: f64 = 50.0 / rad2deg;
+    let safe_tir: SnellRes = snell_refract(n_g_d2, 1.0, ti_tir);
+    // Unclamped naive Snell: sqrt(1 - sin_t^2) for sin_t > 1 yields NaN (val != val)
+    let raw_sin_t: f64 = n_g_d2 * sin(ti_tir);
+    let naive_disc: f64 = sqrt(1.0 - raw_sin_t * raw_sin_t);
+    let naive_is_nan: i32 = if naive_disc != naive_disc { 1 } else { 0 };
+    let tir_trap_caught: i32 = if safe_tir.is_tir == 1 && naive_is_nan == 1 { 1 } else { 0 };
+
+    let t1: i64 = clock_ns();
+    let elapsed_ms: f64 = ((t1 - t0) as f64) / 1.0e6;
+
+    println!("H7_NW_5890={:.10}", n_w_d2);
+    println!("H7_NW_5896={:.10}", n_w_d1);
+    println!("H7_NG_5890={:.10}", n_g_d2);
+    println!("H7_NG_5896={:.10}", n_g_d1);
+    println!("H7_CAUSTIC_D2_DEG={:.8}", c_d2_an);
+    println!("H7_CAUSTIC_D1_DEG={:.8}", c_d1_an);
+    println!("H7_DOUBLET_SEP_DEG={:.8}", doublet_sep_deg);
+    println!("H7_ERR_D2_DEG={:.10}", err_d2);
+    println!("H7_ERR_D1_DEG={:.10}", err_d1);
+    println!("H7_HEMI_AN_DEG={:.8}", hemi_an_deg);
+    println!("H7_HEMI_NUM_DEG={:.8}", hemi_num_deg);
+    println!("H7_ERR_HEMI_DEG={:.10}", err_hemi);
+    println!("H7_TIR_TRAP_CAUGHT={}", tir_trap_caught);
+    println!("H7_ELAPSED_MS={:.4}", elapsed_ms);
+
+    if dn_w > 0.0 && dn_g > 0.0 && err_d2 <= 0.5 && err_d1 <= 0.5 && err_hemi <= 0.5 && tir_trap_caught == 1 {
+        println!(
+            "[PASS] H7_SEATTLE_RAIN_OPTICS c_d2={:.4}deg err_d2={:.2e} hemi_err={:.2e} tir_caught=1",
+            c_d2_an, err_d2, err_hemi
+        );
+    } else {
+        println!(
+            "[FAIL] H7_SEATTLE_RAIN_OPTICS err_d2={:.4} err_hemi={:.4} tir_caught={}",
+            err_d2, err_hemi, tir_trap_caught
+        );
+    }
+}

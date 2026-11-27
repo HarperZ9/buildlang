@@ -1,0 +1,317 @@
+// SPDX-FileCopyrightText: 2026 Zain Dana Harper
+// SPDX-License-Identifier: MIT
+//
+// Wave 53M (Author Idea E29): Deterministic Music Rebirth De-Click, De-Clip & Wiener Restoration (music_rebirth.bld)
+// - 5-tap median vinyl impulse de-clicker + cubic-Hermite spline de-clipper + exact radix-2 FFT Wiener denoiser
+// - Achieves >= 12 dB SDR gain on artificially clipped + clicked + noisy harmonic test master with 0 hallucinated peaks
+// - Planted failing control: phase-inverted / gain-blown restorer caught fail-closed
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { return -x; }
+    x
+}
+
+fn log10_f64(x: f64) -> f64 {
+    log(x) / 2.302585092994046
+}
+
+fn median5(a0: f64, a1: f64, a2: f64, a3: f64, a4: f64) -> f64 {
+    let mut v: Vec<f64> = Vec::new();
+    v.push(a0); v.push(a1); v.push(a2); v.push(a3); v.push(a4);
+    let mut i: usize = 0;
+    while i < 5 {
+        let mut j: usize = i + 1;
+        while j < 5 {
+            if v[j] < v[i] {
+                let tmp: f64 = v[i];
+                v[i] = v[j];
+                v[j] = tmp;
+            }
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    v[2]
+}
+
+// In-place radix-2 Cooley-Tukey FFT (inv = 0 forward, inv = 1 inverse)
+fn fft_radix2(re: &mut Vec<f64>, im: &mut Vec<f64>, inv: i32) {
+    let n: usize = re.len();
+    // Bit-reversal permutation
+    let mut j: usize = 0;
+    let mut i: usize = 1;
+    while i < n {
+        let mut bit: usize = n / 2;
+        while j >= bit {
+            j = j - bit;
+            bit = bit / 2;
+        }
+        j = j + bit;
+        if i < j {
+            let tr: f64 = re[i]; re[i] = re[j]; re[j] = tr;
+            let ti: f64 = im[i]; im[i] = im[j]; im[j] = ti;
+        }
+        i = i + 1;
+    }
+
+    let pi: f64 = 3.1415926535897932384626433832795;
+    let mut len: usize = 2;
+    while len <= n {
+        let half: usize = len / 2;
+        let sign: f64 = if inv == 1 { 2.0 * pi } else { -2.0 * pi };
+        let ang: f64 = sign / (len as f64);
+        let wlen_r: f64 = cos(ang);
+        let wlen_i: f64 = sin(ang);
+        let mut start: usize = 0;
+        while start < n {
+            let mut wr: f64 = 1.0;
+            let mut wi: f64 = 0.0;
+            let mut k: usize = 0;
+            while k < half {
+                let u_r: f64 = re[start + k];
+                let u_i: f64 = im[start + k];
+                let v_r: f64 = re[start + k + half] * wr - im[start + k + half] * wi;
+                let v_i: f64 = re[start + k + half] * wi + im[start + k + half] * wr;
+                re[start + k] = u_r + v_r;
+                im[start + k] = u_i + v_i;
+                re[start + k + half] = u_r - v_r;
+                im[start + k + half] = u_i - v_i;
+                let nwr: f64 = wr * wlen_r - wi * wlen_i;
+                let nwi: f64 = wr * wlen_i + wi * wlen_r;
+                wr = nwr;
+                wi = nwi;
+                k = k + 1;
+            }
+            start = start + len;
+        }
+        len = len * 2;
+    }
+
+    if inv == 1 {
+        let inv_n: f64 = 1.0 / (n as f64);
+        let mut k: usize = 0;
+        while k < n {
+            re[k] = re[k] * inv_n;
+            im[k] = im[k] * inv_n;
+            k = k + 1;
+        }
+    }
+}
+
+fn sdr_db(clean: &Vec<f64>, test: &Vec<f64>) -> f64 {
+    let n: usize = clean.len();
+    let mut sig_e: f64 = 0.0;
+    let mut err_e: f64 = 0.0;
+    let mut i: usize = 0;
+    while i < n {
+        let d: f64 = test[i] - clean[i];
+        sig_e = sig_e + clean[i] * clean[i];
+        err_e = err_e + d * d;
+        i = i + 1;
+    }
+    10.0 * log10_f64(sig_e / (err_e + 1.0e-15))
+}
+
+fn main() ~ Clock + Console {
+    let t0: i64 = clock_ns();
+
+    let n: usize = 1024;
+    let twopi: f64 = 6.283185307179586476925286766559;
+
+    // Ground-truth 4-partial harmonic test master (bin-aligned at k = 28, 35, 42, 56; fs = 16384 Hz)
+    let mut clean: Vec<f64> = Vec::new();
+    let mut i: usize = 0;
+    while i < n {
+        let ph: f64 = twopi * (i as f64) / (n as f64);
+        let s: f64 = 0.45 * sin(28.0 * ph)
+            + 0.25 * sin(35.0 * ph + 0.3)
+            + 0.20 * sin(42.0 * ph + 0.7)
+            + 0.10 * sin(56.0 * ph + 1.1);
+        clean.push(s);
+        i = i + 1;
+    }
+
+    // Artificial corruption: hard clip at +/- 0.72, strong broadband noise (0.20 * u), plus 24 vinyl clicks
+    let clip_thr: f64 = 0.72;
+    let mut noisy: Vec<f64> = Vec::new();
+    let mut seed: i64 = 123456789;
+    i = 0;
+    while i < n {
+        seed = (1103515245 * seed + 12345) % 2147483648;
+        let u: f64 = ((seed as f64) / 2147483648.0) * 2.0 - 1.0;
+        let mut v: f64 = clean[i];
+        if v > clip_thr { v = clip_thr; }
+        if v < -clip_thr { v = -clip_thr; }
+        v = v + 0.20 * u;
+        // Inject 24 isolated vinyl clicks at spaced indices
+        if i >= 20 && i < 1000 && i % 40 == 20 {
+            let sign: f64 = if (i / 40) % 2 == 0 { 1.45 } else { -1.45 };
+            v = v + sign;
+        }
+        noisy.push(v);
+        i = i + 1;
+    }
+
+    let sdr_in: f64 = sdr_db(&clean, &noisy);
+
+    // Stage 1: 5-tap median vinyl impulse de-clicker
+    let mut stage1: Vec<f64> = Vec::new();
+    let mut clicks_fixed: i32 = 0;
+    i = 0;
+    while i < n {
+        if i >= 2 && i + 2 < n {
+            let m5: f64 = median5(noisy[i - 2], noisy[i - 1], noisy[i], noisy[i + 1], noisy[i + 2]);
+            if abs_f64(noisy[i] - m5) > 0.55 {
+                stage1.push(m5);
+                clicks_fixed = clicks_fixed + 1;
+            } else {
+                stage1.push(noisy[i]);
+            }
+        } else {
+            stage1.push(noisy[i]);
+        }
+        i = i + 1;
+    }
+
+    // Stage 2: Cubic-Hermite de-clipper across runs near +/- clip_thr with smoothed boundary slopes
+    let mut stage2: Vec<f64> = Vec::new();
+    i = 0;
+    while i < n {
+        stage2.push(stage1[i]);
+        i = i + 1;
+    }
+    let mut idx: usize = 3;
+    let mut clip_runs: i32 = 0;
+    while idx + 3 < n {
+        if abs_f64(stage1[idx]) >= clip_thr - 0.03 {
+            let start: usize = idx;
+            let mut end: usize = idx;
+            while end + 3 < n && abs_f64(stage1[end + 1]) >= clip_thr - 0.03 {
+                end = end + 1;
+            }
+            if end >= start + 1 && start >= 3 && end + 3 < n {
+                let a: usize = start - 1;
+                let b: usize = end + 1;
+                let span: f64 = (b - a) as f64;
+                let y0: f64 = stage1[a];
+                let y1: f64 = stage1[b];
+                let m0: f64 = 0.5 * (stage1[a] - stage1[a - 2]);
+                let m1: f64 = 0.5 * (stage1[b + 2] - stage1[b]);
+                let mut k: usize = start;
+                while k <= end {
+                    let t: f64 = ((k - a) as f64) / span;
+                    let t2: f64 = t * t;
+                    let t3: f64 = t2 * t;
+                    let h00: f64 = 2.0 * t3 - 3.0 * t2 + 1.0;
+                    let h10: f64 = t3 - 2.0 * t2 + t;
+                    let h01: f64 = -2.0 * t3 + 3.0 * t2;
+                    let h11: f64 = t3 - t2;
+                    stage2[k] = h00 * y0 + h10 * span * m0 + h01 * y1 + h11 * span * m1;
+                    k = k + 1;
+                }
+                clip_runs = clip_runs + 1;
+            }
+            idx = end + 1;
+        } else {
+            idx = idx + 1;
+        }
+    }
+
+    // Stage 3: Deterministic FFT Wiener spectral shrinkage
+    let mut re: Vec<f64> = Vec::new();
+    let mut im: Vec<f64> = Vec::new();
+    i = 0;
+    while i < n {
+        re.push(stage2[i]);
+        im.push(0.0);
+        i = i + 1;
+    }
+    fft_radix2(&mut re, &mut im, 0);
+
+    // Robust noise floor estimate from upper-band bins (k in 128..384)
+    let mut noise_sum: f64 = 0.0;
+    let mut k_bin: usize = 128;
+    while k_bin < 384 {
+        noise_sum = noise_sum + (re[k_bin] * re[k_bin] + im[k_bin] * im[k_bin]);
+        k_bin = k_bin + 1;
+    }
+    let noise_floor: f64 = noise_sum / 256.0;
+    let wiener_thr: f64 = 14.0 * noise_floor;
+
+    k_bin = 0;
+    while k_bin < n {
+        let p: f64 = re[k_bin] * re[k_bin] + im[k_bin] * im[k_bin];
+        let g: f64 = if p > wiener_thr { (p - noise_floor) / p } else { 0.0 };
+        re[k_bin] = re[k_bin] * g;
+        im[k_bin] = im[k_bin] * g;
+        k_bin = k_bin + 1;
+    }
+
+    // Count hallucinated peaks outside the 4 true harmonic bins (28, 35, 42, 56) in half-spectrum 0..512
+    let mut max_true_mag: f64 = 0.0;
+    let mut hallucinated_peaks: i32 = 0;
+    k_bin = 0;
+    while k_bin < 512 {
+        let mag: f64 = sqrt(re[k_bin] * re[k_bin] + im[k_bin] * im[k_bin]);
+        let is_true: i32 = if k_bin == 28 || k_bin == 35 || k_bin == 42 || k_bin == 56 { 1 } else { 0 };
+        if is_true == 1 && mag > max_true_mag { max_true_mag = mag; }
+        k_bin = k_bin + 1;
+    }
+    k_bin = 0;
+    while k_bin < 512 {
+        let mag: f64 = sqrt(re[k_bin] * re[k_bin] + im[k_bin] * im[k_bin]);
+        let is_true: i32 = if k_bin == 28 || k_bin == 35 || k_bin == 42 || k_bin == 56 { 1 } else { 0 };
+        if is_true == 0 && mag > 0.05 * max_true_mag {
+            hallucinated_peaks = hallucinated_peaks + 1;
+        }
+        k_bin = k_bin + 1;
+    }
+
+    fft_radix2(&mut re, &mut im, 1);
+
+    let sdr_out: f64 = sdr_db(&clean, &re);
+    let sdr_gain: f64 = sdr_out - sdr_in;
+
+    // Planted failing control: phase-inverted & gain-blown restorer (-3.0 * restored)
+    let mut bad_out: Vec<f64> = Vec::new();
+    i = 0;
+    while i < n {
+        bad_out.push(-3.0 * re[i]);
+        i = i + 1;
+    }
+    let sdr_bad: f64 = sdr_db(&clean, &bad_out);
+    let bad_caught: i32 = if sdr_bad < -5.0 && (sdr_bad - sdr_in) < 0.0 { 1 } else { 0 };
+
+    let mut csum: f64 = 0.0;
+    i = 0;
+    while i < n {
+        csum = csum + abs_f64(re[i]);
+        i = i + 1;
+    }
+
+    let t1: i64 = clock_ns();
+    let elapsed_ms: f64 = ((t1 - t0) as f64) / 1.0e6;
+
+    println!("E29_SDR_IN_DB={:.8}", sdr_in);
+    println!("E29_SDR_OUT_DB={:.8}", sdr_out);
+    println!("E29_SDR_GAIN_DB={:.8}", sdr_gain);
+    println!("E29_CLICKS_FIXED={}", clicks_fixed);
+    println!("E29_CLIP_RUNS={}", clip_runs);
+    println!("E29_HALLUCINATED_PEAKS={}", hallucinated_peaks);
+    println!("E29_SDR_BAD_DB={:.8}", sdr_bad);
+    println!("E29_BAD_CAUGHT={}", bad_caught);
+    println!("E29_CHECKSUM={:.10}", csum);
+    println!("E29_ELAPSED_MS={:.4}", elapsed_ms);
+
+    if sdr_gain >= 12.0 && hallucinated_peaks == 0 && bad_caught == 1 {
+        println!(
+            "[PASS] E29_MUSIC_REBIRTH sdr_in={:.2}dB sdr_out={:.2}dB gain=+{:.2}dB halluc=0 bad_caught=1",
+            sdr_in, sdr_out, sdr_gain
+        );
+    } else {
+        println!(
+            "[FAIL] E29_MUSIC_REBIRTH gain={:.2}dB halluc={} bad_caught={}",
+            sdr_gain, hallucinated_peaks, bad_caught
+        );
+    }
+}

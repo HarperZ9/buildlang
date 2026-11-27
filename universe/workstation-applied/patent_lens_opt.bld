@@ -1,0 +1,286 @@
+// SPDX-FileCopyrightText: 2026 Zain Dana Harper
+// SPDX-License-Identifier: AGPL-3.0-only
+//
+// Wave 54A Kernel 2 (Author Idea I12):
+//   Clean-Room Expired-Patent US2784643 6-Element Double-Gauss Lens Ray-Tracer & Optimizer.
+//   Beats baseline polychromatic RMS spot radius by >= 15% with +/-0.05 mm thickness tolerance
+//   check and rejects physically impossible negative center thickness fail-closed.
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 {
+        return -x;
+    }
+    x
+}
+
+// Cauchy dispersion index for public crown (kind=1), flint (kind=2), lanthanum (kind=3), air (0).
+fn glass_index(kind: i32, wl_um: f64) -> f64 {
+    let inv2: f64 = 1.0 / (wl_um * wl_um);
+    if kind == 1 {
+        return 1.608 + 0.0052 * inv2;
+    }
+    if kind == 2 {
+        return 1.672 + 0.0115 * inv2;
+    }
+    if kind == 3 {
+        return 1.648 + 0.0056 * inv2;
+    }
+    1.0
+}
+
+struct TraceRes {
+    ok: i32,
+    y_img: f64,
+}
+
+// Exact 2D meridional Snell spherical-surface ray trace through 10-surface double-Gauss lens.
+fn trace_ray(
+    curv: &Vec<f64>,
+    thick: &Vec<f64>,
+    gkind: &Vec<i32>,
+    y0: f64,
+    u0_rad: f64,
+    wl_um: f64,
+    bfd: f64,
+) -> TraceRes {
+    let n_surf: usize = curv.len();
+    let mut y: f64 = y0;
+    let mut z: f64 = 0.0;
+    let mut sy: f64 = sin(u0_rad);
+    let mut sz: f64 = cos(u0_rad);
+    let mut n_cur: f64 = 1.0;
+
+    let mut s: usize = 0;
+    while s < n_surf {
+        let c: f64 = curv[s];
+        // Ray-sphere intersection at vertex z = 0 in local surface coordinates:
+        // c * ( (y + t*sy)^2 + (z + t*sz)^2 ) - 2*(z + t*sz) = 0
+        let f_val: f64 = c * (y * y + z * z) - 2.0 * z;
+        let g_val: f64 = sz - c * (y * sy + z * sz);
+        let disc: f64 = g_val * g_val - c * f_val;
+        if disc <= 0.0 {
+            return TraceRes { ok: 0, y_img: 0.0 };
+        }
+        let t_hit: f64 = f_val / (g_val + sqrt(disc));
+        y = y + t_hit * sy;
+        z = z + t_hit * sz;
+
+        // Unit surface normal pointing toward +z
+        let nx: f64 = -c * y;
+        let nz: f64 = 1.0 - c * z;
+        let n_len: f64 = sqrt(nx * nx + nz * nz);
+        let ny_u: f64 = nx / n_len;
+        let nz_u: f64 = nz / n_len;
+
+        // Vector Snell refraction
+        let n_next: f64 = glass_index(gkind[s], wl_um);
+        let eta: f64 = n_cur / n_next;
+        let cos_i: f64 = sy * ny_u + sz * nz_u;
+        let k_val: f64 = 1.0 - eta * eta * (1.0 - cos_i * cos_i);
+        if k_val <= 0.0 {
+            return TraceRes { ok: 0, y_img: 0.0 };
+        }
+        let fac: f64 = sqrt(k_val) - eta * cos_i;
+        sy = eta * sy + fac * ny_u;
+        sz = eta * sz + fac * nz_u;
+        let s_len: f64 = sqrt(sy * sy + sz * sz);
+        sy = sy / s_len;
+        sz = sz / s_len;
+        n_cur = n_next;
+
+        // Transfer to next surface vertex
+        let d_next: f64 = if s + 1 < n_surf { thick[s] } else { bfd };
+        z = z - d_next;
+        s = s + 1;
+    }
+
+    // Intersect image plane at z = 0
+    if abs_f64(sz) < 0.000001 {
+        return TraceRes { ok: 0, y_img: 0.0 };
+    }
+    let t_img: f64 = -z / sz;
+    TraceRes { ok: 1, y_img: y + t_img * sy }
+}
+
+// Validate physical thickness positivity (fail-closed err_code = -1 on negative/zero thickness).
+fn check_lens_thickness(thick: &Vec<f64>) -> i32 {
+    let mut i: usize = 0;
+    while i < thick.len() {
+        if thick[i] <= 0.0 {
+            return -1;
+        }
+        i = i + 1;
+    }
+    0
+}
+
+// Compute polychromatic RMS spot radius [um] over 3 wavelengths (F, d, C) and 5 pupil heights.
+fn eval_rms_spot_um(curv: &Vec<f64>, thick: &Vec<f64>, gkind: &Vec<i32>, bfd: f64) -> f64 {
+    if check_lens_thickness(thick) != 0 {
+        return 1000000.0;
+    }
+    let mut wls: Vec<f64> = Vec::new();
+    wls.push(0.4861);
+    wls.push(0.5876);
+    wls.push(0.6563);
+
+    let mut hs: Vec<f64> = Vec::new();
+    hs.push(-8.0);
+    hs.push(-4.0);
+    hs.push(0.0);
+    hs.push(4.0);
+    hs.push(8.0);
+
+    // On-axis (0 deg) + off-axis (4 deg = 0.06981317 rad)
+    let mut angles: Vec<f64> = Vec::new();
+    angles.push(0.0);
+    angles.push(0.06981317007977318);
+
+    let mut sum_sq: f64 = 0.0;
+    let mut cnt: i32 = 0;
+    let mut ai: usize = 0;
+    while ai < 2 {
+        let ang: f64 = angles[ai];
+        // Chief ray centroid at d-line
+        let chief: TraceRes = trace_ray(curv, thick, gkind, 0.0, ang, 0.5876, bfd);
+        if chief.ok == 0 {
+            return 1000000.0;
+        }
+        let mut wi: usize = 0;
+        while wi < 3 {
+            let mut hi: usize = 0;
+            while hi < 5 {
+                let tr: TraceRes = trace_ray(curv, thick, gkind, hs[hi], ang, wls[wi], bfd);
+                if tr.ok == 0 {
+                    return 1000000.0;
+                }
+                let dy: f64 = tr.y_img - chief.y_img;
+                sum_sq = sum_sq + dy * dy;
+                cnt = cnt + 1;
+                hi = hi + 1;
+            }
+            wi = wi + 1;
+        }
+        ai = ai + 1;
+    }
+    sqrt(sum_sq / (cnt as f64)) * 1000.0
+}
+
+fn main() ~ Console + Clock {
+    let mut failures: i32 = 0;
+
+    // Clean-room 6-element 10-surface expired US2784643-class 50 mm double-Gauss prescription
+    let mut curv: Vec<f64> = Vec::new();
+    curv.push(1.0 / 35.0);
+    curv.push(1.0 / 110.0);
+    curv.push(1.0 / 24.0);
+    curv.push(1.0 / 60.0);
+    curv.push(1.0 / 16.5);
+    curv.push(-1.0 / 17.5);
+    curv.push(-1.0 / 55.0);
+    curv.push(-1.0 / 26.0);
+    curv.push(1.0 / 130.0);
+    curv.push(-1.0 / 38.0);
+
+    let mut thick: Vec<f64> = Vec::new();
+    thick.push(4.5);
+    thick.push(0.5);
+    thick.push(6.0);
+    thick.push(2.2);
+    thick.push(11.0);
+    thick.push(2.2);
+    thick.push(5.8);
+    thick.push(0.5);
+    thick.push(4.5);
+
+    let mut gkind: Vec<i32> = Vec::new();
+    gkind.push(3); gkind.push(0); gkind.push(1); gkind.push(2); gkind.push(0);
+    gkind.push(2); gkind.push(1); gkind.push(0); gkind.push(3); gkind.push(0);
+
+    let mut bfd: f64 = 34.0;
+    let base_rms: f64 = eval_rms_spot_um(&curv, &thick, &gkind, bfd);
+
+    // Coordinate-descent optimizer over bfd and surface curvatures
+    let t0: i64 = clock_ns();
+    let mut best_rms: f64 = base_rms;
+    let mut step_bfd: f64 = 2.0;
+    let mut step_c: f64 = 0.002;
+    let mut iter: i32 = 0;
+    while iter < 18 {
+        // Optimize back focal distance
+        let r_plus: f64 = eval_rms_spot_um(&curv, &thick, &gkind, bfd + step_bfd);
+        if r_plus < best_rms {
+            bfd = bfd + step_bfd;
+            best_rms = r_plus;
+        } else {
+            let r_minus: f64 = eval_rms_spot_um(&curv, &thick, &gkind, bfd - step_bfd);
+            if r_minus < best_rms {
+                bfd = bfd - step_bfd;
+                best_rms = r_minus;
+            }
+        }
+        // Optimize surface curvatures
+        let mut s: usize = 0;
+        while s < 10 {
+            let orig: f64 = curv[s];
+            curv[s] = orig + step_c;
+            let rp: f64 = eval_rms_spot_um(&curv, &thick, &gkind, bfd);
+            if rp < best_rms {
+                best_rms = rp;
+            } else {
+                curv[s] = orig - step_c;
+                let rm: f64 = eval_rms_spot_um(&curv, &thick, &gkind, bfd);
+                if rm < best_rms {
+                    best_rms = rm;
+                } else {
+                    curv[s] = orig;
+                }
+            }
+            s = s + 1;
+        }
+        step_bfd = step_bfd * 0.72;
+        step_c = step_c * 0.78;
+        iter = iter + 1;
+    }
+    let t1: i64 = clock_ns();
+
+    // +/-0.05 mm thickness tolerance perturbation audit
+    let mut thick_tol: Vec<f64> = Vec::new();
+    let mut ti: usize = 0;
+    while ti < thick.len() {
+        let delta: f64 = if (ti & 1) == 0 { 0.05 } else { -0.05 };
+        thick_tol.push(thick[ti] + delta);
+        ti = ti + 1;
+    }
+    let tol_rms: f64 = eval_rms_spot_um(&curv, &thick_tol, &gkind, bfd);
+    let impr_pct: f64 = (100.0 * (base_rms - best_rms)) / base_rms;
+
+    if impr_pct >= 15.0 && tol_rms < base_rms {
+        println!(
+            "[PASS] i12_double_gauss base_um={:.12} opt_um={:.12} tol_um={:.12} impr_pct={:.12} bfd={:.12}",
+            base_rms, best_rms, tol_rms, impr_pct, bfd
+        );
+    } else {
+        println!("[FAIL] i12_double_gauss base={} opt={} impr={}", base_rms, best_rms, impr_pct);
+        failures = failures + 1;
+    }
+
+    // Planted Control: negative center thickness rejected fail-closed
+    let mut bad_thick: Vec<f64> = Vec::new();
+    bad_thick.push(4.5); bad_thick.push(-0.5); bad_thick.push(6.0);
+    let rc_neg: i32 = check_lens_thickness(&bad_thick);
+    if rc_neg == -1 {
+        println!("[PASS] i12_planted_neg_thickness rc={}", rc_neg);
+    } else {
+        println!("[FAIL] i12_planted_neg_thickness rc={}", rc_neg);
+        failures = failures + 1;
+    }
+
+    println!("[BENCH] patent_lens_opt iters=18 elapsed_ns={}", t1 - t0);
+
+    if failures == 0 {
+        println!("[PASS] wave54a_patent_lens_opt summary failures=0");
+    } else {
+        println!("[FAIL] wave54a_patent_lens_opt summary failures={}", failures);
+    }
+}

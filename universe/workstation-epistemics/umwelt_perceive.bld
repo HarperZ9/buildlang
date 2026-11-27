@@ -1,0 +1,281 @@
+// Wave 51K - Author Idea B10: Multi-Species Perceptual Umwelt Transforms
+// Compares four sensory modalities from first-principles physics:
+//   1. Human CIE/sRGB trichromat (400..700 nm)
+//   2. Honeybee UV-Blue-Green trichromat (340/430/540 nm, Chittka 1992 color hexagon)
+//   3. Pit-viper 8..12 um thermal infrared (Planck blackbody radiance)
+//   4. Bat 40 kHz sonar echolocation (time-of-flight range + acoustic Doppler)
+// Proves bee UV trichromat cleanly separates a synthetic UV nectar-guide flower that is
+// metameric/invisible (dE < 0.01) to human sRGB, and catches a planted clamped-UV control.
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { -x } else { x }
+}
+
+fn det_exp(x: f64) -> f64 {
+    if x < -50.0 {
+        return 0.0;
+    }
+    let u: f64 = x / 128.0;
+    let p6: f64 = 1.388888888888889e-3 + u * 1.984126984126984e-4;
+    let p5: f64 = 8.333333333333333e-3 + u * p6;
+    let p4: f64 = 4.1666666666666664e-2 + u * p5;
+    let mut t: f64 = 1.0 + u * (1.0 + u * (0.5 + u * (0.16666666666666666 + u * p4)));
+    let mut i: i32 = 0;
+    while i < 7 {
+        t = t * t;
+        i = i + 1;
+    }
+    t
+}
+
+fn det_sqrt(x: f64) -> f64 {
+    if x <= 0.0 {
+        return 0.0;
+    }
+    let mut g: f64 = x;
+    if g < 1.0 {
+        g = 1.0;
+    }
+    let mut i: i32 = 0;
+    while i < 24 {
+        g = 0.5 * (g + x / g);
+        i = i + 1;
+    }
+    g
+}
+
+fn gauss(lam: f64, mu: f64, sig: f64) -> f64 {
+    let d: f64 = (lam - mu) / sig;
+    det_exp(-0.5 * d * d)
+}
+
+// Human CIE-like cone sensitivities strictly zero below 400 nm (cornea/lens UV absorption)
+fn human_r(lam: f64) -> f64 {
+    if lam < 400.0 { 0.0 } else { gauss(lam, 595.0, 42.0) }
+}
+
+fn human_g(lam: f64) -> f64 {
+    if lam < 400.0 { 0.0 } else { gauss(lam, 540.0, 38.0) }
+}
+
+fn human_b(lam: f64) -> f64 {
+    if lam < 400.0 { 0.0 } else { gauss(lam, 450.0, 26.0) }
+}
+
+// Honeybee (Apis mellifera) photoreceptor sensitivities: UV 344 nm, Blue 436 nm, Green 544 nm
+fn bee_uv(lam: f64, clamp_uv: bool) -> f64 {
+    if clamp_uv && lam < 400.0 { 0.0 } else { gauss(lam, 344.0, 24.0) }
+}
+
+fn bee_blue(lam: f64) -> f64 {
+    gauss(lam, 436.0, 34.0)
+}
+
+fn bee_green(lam: f64) -> f64 {
+    gauss(lam, 544.0, 44.0)
+}
+
+// Flower petal reflectance spectra: identical across 400..700 nm (yellow petal),
+// diverging sharply in 300..395 nm UV (outer petal reflects UV, inner nectar guide absorbs UV)
+fn petal_reflectance(lam: f64, inner_guide: bool) -> f64 {
+    let vis_yellow: f64 = 0.12 + 0.72 / (1.0 + det_exp(-(lam - 515.0) / 14.0));
+    if lam >= 400.0 {
+        vis_yellow
+    } else {
+        let uv_band: f64 = gauss(lam, 350.0, 28.0);
+        if inner_guide {
+            0.05 + 0.04 * uv_band
+        } else {
+            0.10 + 0.78 * uv_band
+        }
+    }
+}
+
+struct TrichromatDist {
+    human_de: f64,
+    bee_hex_dist: f64,
+    bee_uv_contrast: f64,
+}
+
+fn eval_flower_vision(clamp_uv: bool) -> TrichromatDist {
+    // Integrate 300..700 nm in 5 nm steps (81 wavelengths) under D65-like daylight
+    let mut hr1: f64 = 0.0;
+    let mut hg1: f64 = 0.0;
+    let mut hb1: f64 = 0.0;
+    let mut hr2: f64 = 0.0;
+    let mut hg2: f64 = 0.0;
+    let mut hb2: f64 = 0.0;
+    let mut hr_w: f64 = 0.0;
+    let mut hg_w: f64 = 0.0;
+    let mut hb_w: f64 = 0.0;
+
+    let mut bu1: f64 = 0.0;
+    let mut bb1: f64 = 0.0;
+    let mut bg1: f64 = 0.0;
+    let mut bu2: f64 = 0.0;
+    let mut bb2: f64 = 0.0;
+    let mut bg2: f64 = 0.0;
+    let mut bu_w: f64 = 0.0;
+    let mut bb_w: f64 = 0.0;
+    let mut bg_w: f64 = 0.0;
+
+    let mut i: i32 = 0;
+    while i <= 80 {
+        let lam: f64 = 300.0 + (i as f64) * 5.0;
+        let illum: f64 = 0.55 + 0.45 * gauss(lam, 520.0, 150.0);
+        let r_out: f64 = petal_reflectance(lam, false);
+        let r_in: f64 = petal_reflectance(lam, true);
+
+        let sr: f64 = human_r(lam) * illum;
+        let sg: f64 = human_g(lam) * illum;
+        let sb: f64 = human_b(lam) * illum;
+        hr1 = hr1 + sr * r_out;
+        hg1 = hg1 + sg * r_out;
+        hb1 = hb1 + sb * r_out;
+        hr2 = hr2 + sr * r_in;
+        hg2 = hg2 + sg * r_in;
+        hb2 = hb2 + sb * r_in;
+        hr_w = hr_w + sr;
+        hg_w = hg_w + sg;
+        hb_w = hb_w + sb;
+
+        let su: f64 = if clamp_uv && lam < 400.0 { 0.0 } else { bee_uv(lam, false) * illum };
+        let sbb: f64 = if clamp_uv && lam < 400.0 { 0.0 } else { bee_blue(lam) * illum };
+        let sbg: f64 = if clamp_uv && lam < 400.0 { 0.0 } else { bee_green(lam) * illum };
+        bu1 = bu1 + su * r_out;
+        bb1 = bb1 + sbb * r_out;
+        bg1 = bg1 + sbg * r_out;
+        bu2 = bu2 + su * r_in;
+        bb2 = bb2 + sbb * r_in;
+        bg2 = bg2 + sbg * r_in;
+        bu_w = bu_w + su;
+        bb_w = bb_w + sbb;
+        bg_w = bg_w + sbg;
+        i = i + 1;
+    }
+
+    // Human normalized linear RGB Euclidean separation (scaled 100x like perceptual dE)
+    let dr: f64 = 100.0 * (hr1 / hr_w - hr2 / hr_w);
+    let dg: f64 = 100.0 * (hg1 / hg_w - hg2 / hg_w);
+    let db: f64 = 100.0 * (hb1 / hb_w - hb2 / hb_w);
+    let human_de: f64 = det_sqrt(dr * dr + dg * dg + db * db);
+
+    // Honeybee Chittka (1992) receptor excitation E = q / (q + 1) and color hexagon distance
+    let qu1: f64 = if bu_w > 1.0e-9 { (bu1 / bu_w) * 2.0 } else { 0.0 };
+    let qb1: f64 = (bb1 / bb_w) * 2.0;
+    let qg1: f64 = (bg1 / bg_w) * 2.0;
+    let qu2: f64 = if bu_w > 1.0e-9 { (bu2 / bu_w) * 2.0 } else { 0.0 };
+    let qb2: f64 = (bb2 / bb_w) * 2.0;
+    let qg2: f64 = (bg2 / bg_w) * 2.0;
+
+    let eu1: f64 = qu1 / (qu1 + 1.0);
+    let eb1: f64 = qb1 / (qb1 + 1.0);
+    let eg1: f64 = qg1 / (qg1 + 1.0);
+    let eu2: f64 = qu2 / (qu2 + 1.0);
+    let eb2: f64 = qb2 / (qb2 + 1.0);
+    let eg2: f64 = qg2 / (qg2 + 1.0);
+
+    let s3_half: f64 = 0.8660254037844386;
+    let x1: f64 = s3_half * (eg1 - eu1);
+    let y1: f64 = eb1 - 0.5 * (eg1 + eu1);
+    let x2: f64 = s3_half * (eg2 - eu2);
+    let y2: f64 = eb2 - 0.5 * (eg2 + eu2);
+    let hex_dist: f64 = det_sqrt((x1 - x2) * (x1 - x2) + (y1 - y2) * (y1 - y2));
+
+    TrichromatDist {
+        human_de: human_de,
+        bee_hex_dist: hex_dist,
+        bee_uv_contrast: abs_f64(eu1 - eu2),
+    }
+}
+
+// Pit-viper 8..12 um integrated Planck blackbody spectral radiance (W / m^2 / sr)
+fn planck_band_8_12um(temp_k: f64) -> f64 {
+    let h: f64 = 6.62607015e-34;
+    let c: f64 = 299792458.0;
+    let kb: f64 = 1.380649e-23;
+    let c1: f64 = 2.0 * h * c * c;
+    let c2: f64 = h * c / kb;
+    let n_steps: i32 = 40;
+    let d_lam: f64 = 4.0e-6 / (n_steps as f64);
+    let mut total: f64 = 0.0;
+    let mut k: i32 = 0;
+    while k < n_steps {
+        let lam: f64 = 8.0e-6 + ((k as f64) + 0.5) * d_lam;
+        let lam5: f64 = lam * lam * lam * lam * lam;
+        let b_lam: f64 = (c1 / lam5) / (det_exp(c2 / (lam * temp_k)) - 1.0);
+        total = total + b_lam * d_lam;
+        k = k + 1;
+    }
+    total
+}
+
+fn main() ~ Clock + Console {
+    let mut failures: i32 = 0;
+    let t0_ns: i64 = clock_ns();
+
+    // 1. Human sRGB vs Honeybee UV-Blue-Green Trichromat on UV Nectar-Guide Flower
+    let vis: TrichromatDist = eval_flower_vision(false);
+    if vis.human_de < 0.01 && vis.bee_hex_dist > 0.25 && vis.bee_uv_contrast > 0.30 {
+        println!(
+            "[PASS] bee_uv_vs_human_srgb human_de={:.6} bee_hex_dist={:.6} uv_contrast={:.6}",
+            vis.human_de, vis.bee_hex_dist, vis.bee_uv_contrast
+        );
+    } else {
+        println!(
+            "[FAIL] bee_uv_vs_human_srgb human_de={:.6} bee_hex_dist={:.6}",
+            vis.human_de, vis.bee_hex_dist
+        );
+        failures = failures + 1;
+    }
+
+    // 2. Pit-Viper 8..12 um IR Thermal Radiance (310 K prey vs 293 K background)
+    let ir_prey: f64 = planck_band_8_12um(310.0);
+    let ir_bg: f64 = planck_band_8_12um(293.0);
+    let ir_contrast: f64 = (ir_prey - ir_bg) / ir_bg;
+    if ir_contrast > 0.25 && ir_prey > 40.0 {
+        println!(
+            "[PASS] pit_viper_ir_8_12um prey_w_sr_m2={:.6} bg_w_sr_m2={:.6} contrast={:.6}",
+            ir_prey, ir_bg, ir_contrast
+        );
+    } else {
+        println!("[FAIL] pit_viper_ir_8_12um contrast={:.6}", ir_contrast);
+        failures = failures + 1;
+    }
+
+    // 3. Bat 40 kHz Sonar Echolocation (range + Doppler shift)
+    let c_air: f64 = 343.0;
+    let f_bat: f64 = 40000.0;
+    let echo_dt: f64 = 0.014; // 14 ms round-trip
+    let range_m: f64 = 0.5 * c_air * echo_dt;
+    let v_rel: f64 = 3.5; // 3.5 m/s closing speed
+    let doppler_hz: f64 = (2.0 * v_rel / c_air) * f_bat;
+    if abs_f64(range_m - 2.401) < 1.0e-6 && abs_f64(doppler_hz - 816.3265306) < 1.0e-4 {
+        println!(
+            "[PASS] bat_40khz_sonar range_m={:.6} doppler_hz={:.6}",
+            range_m, doppler_hz
+        );
+    } else {
+        println!("[FAIL] bat_40khz_sonar range_m={:.6} doppler_hz={:.6}", range_m, doppler_hz);
+        failures = failures + 1;
+    }
+
+    // 4. Planted Control: Clamped-UV Sensor Collapses Honeybee Separation
+    let clamped: TrichromatDist = eval_flower_vision(true);
+    if clamped.bee_hex_dist < 0.001 && clamped.bee_uv_contrast < 0.001 {
+        println!(
+            "[PASS] planted_ctrl_clamped_uv caught bee_hex_dist={:.6} uv_contrast={:.6}",
+            clamped.bee_hex_dist, clamped.bee_uv_contrast
+        );
+    } else {
+        println!("[FAIL] planted_ctrl_clamped_uv missed bee_hex_dist={:.6}", clamped.bee_hex_dist);
+        failures = failures + 1;
+    }
+
+    let elapsed_ms: f64 = ((clock_ns() - t0_ns) as f64) / 1.0e6;
+    let checksum: f64 = vis.bee_hex_dist + ir_prey + ir_bg + range_m + doppler_hz;
+    println!(
+        "[METRICS_B10] elapsed_ms={:.4} bee_hex={:.9} ir_contrast={:.9} checksum={:.9} failures={}",
+        elapsed_ms, vis.bee_hex_dist, ir_contrast, checksum, failures
+    );
+}

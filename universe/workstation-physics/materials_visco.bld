@@ -1,0 +1,209 @@
+// SPDX-FileCopyrightText: 2026 Zain Dana Harper
+// SPDX-License-Identifier: MIT
+
+// Wave 52I - Author Idea C5: Viscoelastic-Plastic Material Adaptation
+// Part 1: Maxwell stress relaxation + Kelvin-Voigt creep-recovery via RK4 (<= 1e-6 vs analytic).
+// Part 2: 1D elastoplastic return-mapping separator (elastic rebound vs permanent plastic yield).
+// Part 3: Planted negative-viscosity Clausius-Duhem instability control caught fail-closed.
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { -x } else { x }
+}
+
+fn det_exp(x: f64) -> f64 {
+    if x < -50.0 {
+        return 0.0;
+    }
+    let u: f64 = x / 128.0;
+    let p6: f64 = 1.388888888888889e-3 + u * 1.984126984126984e-4;
+    let p5: f64 = 8.333333333333333e-3 + u * p6;
+    let p4: f64 = 4.1666666666666664e-2 + u * p5;
+    let mut t: f64 = 1.0 + u * (1.0 + u * (0.5 + u * (0.16666666666666666 + u * p4)));
+    let mut i: i32 = 0;
+    while i < 7 {
+        t = t * t;
+        i = i + 1;
+    }
+    t
+}
+
+struct ViscoResult {
+    status: i32,
+    maxwell_max_err: f64,
+    kv_max_err: f64,
+    kv_peak_strain: f64,
+    kv_end_strain: f64,
+    checksum: f64,
+}
+
+fn run_viscoelastic(e_mod: f64, eta: f64) -> ViscoResult {
+    // Clausius-Duhem 2nd-law thermodynamic stability guard: E > 0, eta > 0
+    if e_mod <= 0.0 || eta <= 0.0 {
+        return ViscoResult {
+            status: 1,
+            maxwell_max_err: 0.0,
+            kv_max_err: 0.0,
+            kv_peak_strain: 0.0,
+            kv_end_strain: 0.0,
+            checksum: 0.0,
+        };
+    }
+
+    let tau: f64 = eta / e_mod;
+    let dt: f64 = 0.005;
+    let sigma0: f64 = 100.0; // MPa
+
+    // 1. Maxwell stress relaxation: d(sigma)/dt = -(E/eta) * sigma (t in [0, 4.0 s])
+    let mut sig: f64 = sigma0;
+    let mut max_mw_err: f64 = 0.0;
+    let mut chk: f64 = 0.0;
+    let inv_tau: f64 = 1.0 / tau;
+    let mut step: i32 = 0;
+    while step < 800 {
+        let k1: f64 = -inv_tau * sig;
+        let k2: f64 = -inv_tau * (sig + 0.5 * dt * k1);
+        let k3: f64 = -inv_tau * (sig + 0.5 * dt * k2);
+        let k4: f64 = -inv_tau * (sig + dt * k3);
+        sig = sig + (dt / 6.0) * (k1 + 2.0 * k2 + 2.0 * k3 + k4);
+        step = step + 1;
+        let t: f64 = (step as f64) * dt;
+        let exact: f64 = sigma0 * det_exp(-t * inv_tau);
+        let err: f64 = abs_f64(sig - exact) / sigma0;
+        if err > max_mw_err {
+            max_mw_err = err;
+        }
+    }
+    chk = chk + sig;
+
+    // 2. Kelvin-Voigt creep [0, 2.0 s] under sigma0, then recovery [2.0, 4.0 s] under 0
+    let mut eps: f64 = 0.0;
+    let mut max_kv_err: f64 = 0.0;
+    let mut eps_peak: f64 = 0.0;
+    let eps_inf: f64 = sigma0 / e_mod;
+    step = 0;
+    while step < 800 {
+        let load: f64 = if step < 400 { sigma0 } else { 0.0 };
+        let k1: f64 = (load - e_mod * eps) / eta;
+        let k2: f64 = (load - e_mod * (eps + 0.5 * dt * k1)) / eta;
+        let k3: f64 = (load - e_mod * (eps + 0.5 * dt * k2)) / eta;
+        let k4: f64 = (load - e_mod * (eps + dt * k3)) / eta;
+        eps = eps + (dt / 6.0) * (k1 + 2.0 * k2 + 2.0 * k3 + k4);
+        step = step + 1;
+        let t: f64 = (step as f64) * dt;
+        if step == 400 {
+            eps_peak = eps;
+        }
+        let exact: f64 = if step <= 400 {
+            eps_inf * (1.0 - det_exp(-t * inv_tau))
+        } else {
+            let eps_t1: f64 = eps_inf * (1.0 - det_exp(-2.0 * inv_tau));
+            eps_t1 * det_exp(-(t - 2.0) * inv_tau)
+        };
+        let err: f64 = abs_f64(eps - exact) / eps_inf;
+        if err > max_kv_err {
+            max_kv_err = err;
+        }
+    }
+    chk = chk + eps_peak + eps;
+
+    ViscoResult {
+        status: 0,
+        maxwell_max_err: max_mw_err,
+        kv_max_err: max_kv_err,
+        kv_peak_strain: eps_peak,
+        kv_end_strain: eps,
+        checksum: chk,
+    }
+}
+
+struct PlasticCycle {
+    peak_stress_mpa: f64,
+    residual_plastic_strain: f64,
+    yielded: bool,
+}
+
+// 1D isotropic-hardening return-mapping elastoplastic load-unload cycle
+fn run_elastoplastic_cycle(eps_peak: f64, e_gpa: f64, h_gpa: f64, sig_y_mpa: f64) -> PlasticCycle {
+    let e_mpa: f64 = e_gpa * 1000.0;
+    let h_mpa: f64 = h_gpa * 1000.0;
+    let mut eps_p: f64 = 0.0;
+    let mut alpha: f64 = 0.0;
+    let mut peak_sig: f64 = 0.0;
+    let mut yielded: bool = false;
+
+    // 100 load steps up to eps_peak, then unload to zero stress
+    let mut i: i32 = 1;
+    while i <= 100 {
+        let eps: f64 = eps_peak * ((i as f64) / 100.0);
+        let sig_trial: f64 = e_mpa * (eps - eps_p);
+        let f_yield: f64 = abs_f64(sig_trial) - (sig_y_mpa + h_mpa * alpha);
+        let mut sig: f64 = sig_trial;
+        if f_yield > 0.0 {
+            yielded = true;
+            let d_gam: f64 = f_yield / (e_mpa + h_mpa);
+            let sgn: f64 = if sig_trial >= 0.0 { 1.0 } else { -1.0 };
+            eps_p = eps_p + d_gam * sgn;
+            alpha = alpha + d_gam;
+            sig = sig_trial - e_mpa * d_gam * sgn;
+        }
+        if sig > peak_sig {
+            peak_sig = sig;
+        }
+        i = i + 1;
+    }
+
+    PlasticCycle {
+        peak_stress_mpa: peak_sig,
+        residual_plastic_strain: eps_p,
+        yielded: yielded,
+    }
+}
+
+fn main() ~ Clock + Console {
+    let mut failures: i32 = 0;
+    let t0_ns: i64 = clock_ns();
+
+    // 1. Maxwell + Kelvin-Voigt Creep-Recovery (E = 2000 MPa, eta = 1600 MPa*s -> tau = 0.8 s)
+    let vr: ViscoResult = run_viscoelastic(2000.0, 1600.0);
+    if vr.status == 0 && vr.maxwell_max_err <= 1.0e-6 && vr.kv_max_err <= 1.0e-6 {
+        println!(
+            "[PASS] maxwell_kv_analytic mw_err={:.3e} kv_err={:.3e} peak_eps={:.6} end_eps={:.6}",
+            vr.maxwell_max_err, vr.kv_max_err, vr.kv_peak_strain, vr.kv_end_strain
+        );
+    } else {
+        println!("[FAIL] maxwell_kv_analytic mw_err={:.3e} kv_err={:.3e}", vr.maxwell_max_err, vr.kv_max_err);
+        failures = failures + 1;
+    }
+
+    // 2. Elastic Rebound vs Permanent Plastic Yield Separator (E=200 GPa, H=20 GPa, sig_y=250 MPa)
+    let cyc_el: PlasticCycle = run_elastoplastic_cycle(0.0010, 200.0, 20.0, 250.0);
+    let cyc_pl: PlasticCycle = run_elastoplastic_cycle(0.0040, 200.0, 20.0, 250.0);
+    let exact_pl: f64 = (0.0040 - 0.00125) * (200.0 / 220.0); // 0.0025 exactly
+    let pl_err: f64 = abs_f64(cyc_pl.residual_plastic_strain - exact_pl);
+
+    if !cyc_el.yielded && cyc_el.residual_plastic_strain == 0.0 && cyc_pl.yielded && pl_err < 1.0e-12 {
+        println!(
+            "[PASS] elastic_vs_plastic el_res={:.6} pl_res={:.9} pl_peak_mpa={:.4} err={:.3e}",
+            cyc_el.residual_plastic_strain, cyc_pl.residual_plastic_strain, cyc_pl.peak_stress_mpa, pl_err
+        );
+    } else {
+        println!("[FAIL] elastic_vs_plastic pl_res={:.9} err={:.3e}", cyc_pl.residual_plastic_strain, pl_err);
+        failures = failures + 1;
+    }
+
+    // 3. Planted Control: Negative Viscosity (Clausius-Duhem Instability Rejected)
+    let bad: ViscoResult = run_viscoelastic(2000.0, -50.0);
+    if bad.status == 1 {
+        println!("[PASS] planted_ctrl_neg_viscosity caught status=1");
+    } else {
+        println!("[FAIL] planted_ctrl_neg_viscosity missed status={}", bad.status);
+        failures = failures + 1;
+    }
+
+    let elapsed_ms: f64 = ((clock_ns() - t0_ns) as f64) / 1.0e6;
+    let total_chk: f64 = vr.checksum + cyc_pl.peak_stress_mpa + cyc_pl.residual_plastic_strain;
+    println!(
+        "[METRICS_C5] elapsed_ms={:.4} checksum={:.9} failures={}",
+        elapsed_ms, total_chk, failures
+    );
+}

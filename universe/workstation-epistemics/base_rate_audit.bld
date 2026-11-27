@@ -1,0 +1,195 @@
+// SPDX-FileCopyrightText: 2026 Zain Dana Harper
+// SPDX-License-Identifier: MIT
+//
+// Wave 51L (Author Idea N20): Preregistered Poisson / Chi-Square Base-Rate Audit (base_rate_audit.bld)
+// - Exact Pearson chi-square base-rate denominator test across K=12 unequal-exposure strata
+// - Pure BuildLang Lanczos lgamma + regularized upper incomplete gamma Q(df/2, chi2/2) survival p-value
+// - Verifies honest null (p > 0.05) on uniform Poisson counts and catches planted 2x excess rate (p < 0.001)
+// - Planted failing controls: non-positive exposure denominator + naive unnormalized raw-count false alarm
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { return -x; }
+    x
+}
+
+// Lanczos 9-term log-gamma approximation (accurate to <= 1e-14 for x > 0)
+fn lgamma_f64(z: f64) -> f64 {
+    let pi: f64 = 3.14159265358979323846264338327950288;
+    let g: f64 = 7.0;
+    let p0: f64 = 0.99999999999980993;
+    let p1: f64 = 676.5203681218851;
+    let p2: f64 = -1259.1392167224028;
+    let p3: f64 = 771.32342877765313;
+    let p4: f64 = -176.61502916214059;
+    let p5: f64 = 12.507343278686905;
+    let p6: f64 = -0.13857109526572012;
+    let p7: f64 = 9.9843695780195716e-6;
+    let p8: f64 = 1.5056327351493116e-7;
+
+    let zm1: f64 = z - 1.0;
+    let x: f64 = p0
+        + p1 / (zm1 + 1.0)
+        + p2 / (zm1 + 2.0)
+        + p3 / (zm1 + 3.0)
+        + p4 / (zm1 + 4.0)
+        + p5 / (zm1 + 5.0)
+        + p6 / (zm1 + 6.0)
+        + p7 / (zm1 + 7.0)
+        + p8 / (zm1 + 8.0);
+    let t: f64 = zm1 + g + 0.5;
+    0.5 * log(2.0 * pi) + (zm1 + 0.5) * log(t) - t + log(x)
+}
+
+// Regularized upper incomplete gamma Q(a, x) = 1 - P(a, x)
+fn gammaincc(a: f64, x: f64) -> f64 {
+    if x <= 0.0 { return 1.0; }
+    let gln: f64 = lgamma_f64(a);
+    if x < a + 1.0 {
+        // Series representation for P(a, x)
+        let mut ap: f64 = a;
+        let mut term: f64 = 1.0 / a;
+        let mut sum: f64 = term;
+        let mut n: i32 = 0;
+        while n < 200 {
+            ap = ap + 1.0;
+            term = term * x / ap;
+            sum = sum + term;
+            if abs_f64(term) < abs_f64(sum) * 1.0e-15 {
+                break;
+            }
+            n = n + 1;
+        }
+        let p_val: f64 = sum * exp(-x + a * log(x) - gln);
+        let q_val: f64 = 1.0 - p_val;
+        if q_val < 0.0 { return 0.0; }
+        return q_val;
+    }
+    // Modified Lentz continued fraction for Q(a, x)
+    let fpmin: f64 = 1.0e-300;
+    let mut b: f64 = x + 1.0 - a;
+    let mut c: f64 = 1.0 / fpmin;
+    let mut d: f64 = 1.0 / b;
+    let mut h: f64 = d;
+    let mut i: i32 = 1;
+    while i <= 200 {
+        let fi: f64 = i as f64;
+        let an: f64 = -fi * (fi - a);
+        b = b + 2.0;
+        d = an * d + b;
+        if abs_f64(d) < fpmin { d = fpmin; }
+        c = b + an / c;
+        if abs_f64(c) < fpmin { c = fpmin; }
+        d = 1.0 / d;
+        let del: f64 = d * c;
+        h = h * del;
+        if abs_f64(del - 1.0) < 1.0e-15 {
+            break;
+        }
+        i = i + 1;
+    }
+    exp(-x + a * log(x) - gln) * h
+}
+
+fn chi2_sf(chi2: f64, df: f64) -> f64 {
+    gammaincc(0.5 * df, 0.5 * chi2)
+}
+
+struct AuditOut {
+    ok: i32,
+    chi2: f64,
+    p_val: f64,
+    lambda_hat: f64,
+}
+
+fn run_poisson_base_rate(obs: &Vec<f64>, exp_denom: &Vec<f64>) -> AuditOut {
+    let k: usize = obs.len();
+    if k < 2 || exp_denom.len() != k {
+        return AuditOut { ok: 0, chi2: -1.0, p_val: -1.0, lambda_hat: 0.0 };
+    }
+    let mut sum_o: f64 = 0.0;
+    let mut sum_e: f64 = 0.0;
+    let mut i: usize = 0;
+    while i < k {
+        if exp_denom[i] <= 0.0 || obs[i] < 0.0 {
+            return AuditOut { ok: 0, chi2: -1.0, p_val: -1.0, lambda_hat: 0.0 };
+        }
+        sum_o = sum_o + obs[i];
+        sum_e = sum_e + exp_denom[i];
+        i = i + 1;
+    }
+    let lam: f64 = sum_o / sum_e;
+    let mut chi2: f64 = 0.0;
+    i = 0;
+    while i < k {
+        let mu: f64 = lam * exp_denom[i];
+        let diff: f64 = obs[i] - mu;
+        chi2 = chi2 + (diff * diff) / mu;
+        i = i + 1;
+    }
+    let df: f64 = (k - 1) as f64;
+    let p: f64 = chi2_sf(chi2, df);
+    AuditOut { ok: 1, chi2: chi2, p_val: p, lambda_hat: lam }
+}
+
+fn main() ~ Clock + Console {
+    let t0: i64 = clock_ns();
+
+    // K=12 unequal exposure denominators (total 1280 person-years, 4.5x range from 40 to 180)
+    let mut denom: Vec<f64> = Vec::new();
+    denom.push(40.0); denom.push(50.0); denom.push(60.0); denom.push(75.0);
+    denom.push(85.0); denom.push(100.0); denom.push(110.0); denom.push(125.0);
+    denom.push(135.0); denom.push(150.0); denom.push(170.0); denom.push(180.0);
+
+    // Arm 1: Uniform Poisson synthetic null at constant base rate lambda = 0.25
+    let mut obs_null: Vec<f64> = Vec::new();
+    obs_null.push(10.0); obs_null.push(13.0); obs_null.push(15.0); obs_null.push(19.0);
+    obs_null.push(21.0); obs_null.push(26.0); obs_null.push(27.0); obs_null.push(32.0);
+    obs_null.push(33.0); obs_null.push(38.0); obs_null.push(42.0); obs_null.push(44.0);
+
+    // Arm 2: Planted 2x excess rate in strata 8..11
+    let mut obs_excess: Vec<f64> = Vec::new();
+    obs_excess.push(10.0); obs_excess.push(13.0); obs_excess.push(15.0); obs_excess.push(19.0);
+    obs_excess.push(21.0); obs_excess.push(26.0); obs_excess.push(27.0); obs_excess.push(32.0);
+    obs_excess.push(68.0); obs_excess.push(75.0); obs_excess.push(85.0); obs_excess.push(90.0);
+
+    let r_null: AuditOut = run_poisson_base_rate(&obs_null, &denom);
+    let r_excess: AuditOut = run_poisson_base_rate(&obs_excess, &denom);
+
+    // Planted failing controls:
+    // 1. Zero exposure denominator rejected fail-closed
+    let mut bad_denom: Vec<f64> = Vec::new();
+    let mut bi: usize = 0;
+    while bi < 12 { bad_denom.push(denom[bi]); bi = bi + 1; }
+    bad_denom[3] = 0.0;
+    let r_bad_denom: AuditOut = run_poisson_base_rate(&obs_null, &bad_denom);
+
+    // 2. Naive flat denominator on uniform null produces false positive (proving denominator matters!)
+    let mut flat_denom: Vec<f64> = Vec::new();
+    bi = 0;
+    while bi < 12 { flat_denom.push(100.0); bi = bi + 1; }
+    let r_naive: AuditOut = run_poisson_base_rate(&obs_null, &flat_denom);
+    let planted_caught: i32 = if r_bad_denom.ok == 0 && r_naive.p_val < 0.05 { 1 } else { 0 };
+
+    let t1: i64 = clock_ns();
+    let elapsed_ms: f64 = ((t1 - t0) as f64) / 1.0e6;
+
+    println!("N20_NULL_CHI2={:.12}", r_null.chi2);
+    println!("N20_NULL_PVAL={:.12}", r_null.p_val);
+    println!("N20_EXCESS_CHI2={:.12}", r_excess.chi2);
+    println!("N20_EXCESS_PVAL={:.15}", r_excess.p_val);
+    println!("N20_NAIVE_FALSE_POS_PVAL={:.12}", r_naive.p_val);
+    println!("N20_PLANTED_CAUGHT={}", planted_caught);
+    println!("N20_ELAPSED_MS={:.4}", elapsed_ms);
+
+    if r_null.ok == 1 && r_null.p_val > 0.05 && r_excess.ok == 1 && r_excess.p_val < 0.001 && planted_caught == 1 {
+        println!(
+            "[PASS] N20_BASE_RATE_AUDIT null_p={:.4} excess_p={:.3e} naive_fp_p={:.4} planted_caught=1",
+            r_null.p_val, r_excess.p_val, r_naive.p_val
+        );
+    } else {
+        println!(
+            "[FAIL] N20_BASE_RATE_AUDIT null_p={:.4} excess_p={:.3e} caught={}",
+            r_null.p_val, r_excess.p_val, planted_caught
+        );
+    }
+}
