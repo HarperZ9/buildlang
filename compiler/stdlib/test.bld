@@ -1,0 +1,57 @@
+// BuildLang Standard Library - Test Harness Types
+
+pub struct TestResult {
+    pub name: String,
+    pub passed: bool,
+    pub message: String,
+}
+
+impl TestResult {
+    pub fn pass(name: String) -> TestResult {
+        TestResult {
+            name,
+            passed: true,
+            message: String::new(),
+        }
+    }
+
+    pub fn fail(name: String, message: String) -> TestResult {
+        TestResult {
+            name,
+            passed: false,
+            message,
+        }
+    }
+}
+
+pub struct TestSuite {
+    pub name: String,
+    pub passed: usize,
+    pub failed: usize,
+}
+
+impl TestSuite {
+    pub fn new(name: String) -> TestSuite {
+        TestSuite {
+            name,
+            passed: 0,
+            failed: 0,
+        }
+    }
+
+    pub fn record(&mut self, ok: bool) {
+        if ok {
+            self.passed = self.passed + 1;
+        } else {
+            self.failed = self.failed + 1;
+        }
+    }
+
+    pub fn all_passed(&self) -> bool {
+        self.failed == 0
+    }
+}
+
+pub fn assert(condition: bool) -> bool {
+    condition
+}

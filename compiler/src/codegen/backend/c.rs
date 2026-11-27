@@ -272,6 +272,7 @@ impl CBackend {
             // Nested collection element: keyed by its C handle type name.
             MirType::Vec(_) => "BuildVecHandle".to_string(),
             MirType::Map(_, _) => "BuildMapHandle".to_string(),
+            MirType::Option(_) => "Option".to_string(),
             // A view element: keyed by its slice struct name.
             MirType::Ptr(inner) if matches!(inner.as_ref(), MirType::Slice(_)) => {
                 Self::type_name_of_slice_ref(inner)
@@ -289,22 +290,27 @@ impl CBackend {
     }
 
     /// True when `elems` is a non-empty tuple of concrete non-trait-object,
-    /// non-array, non-nested-tuple elements that the C Vec runtime can store by value.
+    /// non-array elements (including nested tuples and Options) that the C Vec
+    /// runtime can store by value.
     pub(crate) fn is_supported_vec_tuple(elems: &[MirType]) -> bool {
-        !elems.is_empty()
-            && elems.iter().all(|e| {
-                !Self::is_dyn_trait_type(e)
-                    && matches!(
-                        e,
-                        MirType::Bool
-                            | MirType::Int(..)
-                            | MirType::Float(..)
-                            | MirType::Struct(_)
-                            | MirType::Ptr(_)
-                            | MirType::Vec(_)
-                            | MirType::Map(..)
-                    )
-            })
+        fn supported_elem(e: &MirType) -> bool {
+            if CBackend::is_dyn_trait_type(e) {
+                return false;
+            }
+            match e {
+                MirType::Bool
+                | MirType::Int(..)
+                | MirType::Float(..)
+                | MirType::Struct(_)
+                | MirType::Ptr(_)
+                | MirType::Vec(_)
+                | MirType::Map(..) => true,
+                MirType::Option(inner) => supported_elem(inner),
+                MirType::Tuple(nested) => !nested.is_empty() && nested.iter().all(supported_elem),
+                _ => false,
+            }
+        }
+        !elems.is_empty() && elems.iter().all(supported_elem)
     }
 
     /// True when `ty` represents an unlowered `dyn Trait` object type.
@@ -346,7 +352,10 @@ impl CBackend {
             || matches!(elem, MirType::Ptr(inner) if !Self::is_dyn_trait_type(inner))
             || matches!(elem, MirType::Tuple(elems) if Self::is_supported_vec_tuple(elems))
             || matches!(elem, MirType::Struct(n) if n.as_ref() != "BuildString")
-            || matches!(elem, MirType::Vec(_) | MirType::Map(_, _))
+            || matches!(
+                elem,
+                MirType::Vec(_) | MirType::Map(_, _) | MirType::Option(_)
+            )
             || matches!(
                 elem,
                 MirType::Int(size, signed)
@@ -2500,10 +2509,23 @@ impl CBackend {
         let mut label_refs: std::collections::HashMap<String, usize> =
             std::collections::HashMap::new();
         for line in self.output.lines() {
-            let trimmed = line.trim();
-            if let Some(target) = trimmed.strip_prefix("goto ") {
-                if let Some(label) = target.strip_suffix(';') {
-                    *label_refs.entry(label.to_string()).or_insert(0) += 1;
+            // Count every `goto <label>;` on the line, including inside
+            // `if (...) goto bbA; else goto bbB;` and `switch` cases.
+            let mut rest = line;
+            while let Some(pos) = rest.find("goto ") {
+                rest = &rest[pos + 5..];
+                if let Some(semi) = rest.find(';') {
+                    let label = rest[..semi].trim();
+                    if !label.is_empty()
+                        && label
+                            .bytes()
+                            .all(|b| b.is_ascii_alphanumeric() || b == b'_')
+                    {
+                        *label_refs.entry(label.to_string()).or_insert(0) += 1;
+                    }
+                    rest = &rest[semi + 1..];
+                } else {
+                    break;
                 }
             }
         }
@@ -3022,7 +3044,7 @@ impl CBackend {
                         write!(self.output, "{} = {};\n", dest_name, rvalue).unwrap();
                     }
                 } else if let MirRValue::Aggregate {
-                    kind: kind @ AggregateKind::Struct(_),
+                    kind: kind @ (AggregateKind::Struct(_) | AggregateKind::Tuple),
                     operands,
                 } = value
                 {

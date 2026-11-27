@@ -109,6 +109,22 @@ impl CBackend {
         operands: &[MirValue],
         locals: &[MirLocal],
     ) -> CodegenResult<bool> {
+        if matches!(kind, AggregateKind::Tuple) {
+            if !operands.iter().any(|v| value_is_array(v, locals)) {
+                return Ok(false);
+            }
+            for (idx, value) in operands.iter().enumerate() {
+                let target = format!("{dest_name}._{idx}");
+                if value_is_array(value, locals) {
+                    self.emit_array_copy(&target, &target, value, locals)?;
+                } else {
+                    self.write_indent();
+                    let value = self.value_to_c(value, locals);
+                    writeln!(self.output, "{target} = {value};").unwrap();
+                }
+            }
+            return Ok(true);
+        }
         let AggregateKind::Struct(name) = kind else {
             return Ok(false);
         };

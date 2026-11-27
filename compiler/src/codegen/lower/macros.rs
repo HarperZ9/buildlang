@@ -1549,6 +1549,7 @@ impl<'ctx> MirLowerer<'ctx> {
             MirType::Struct(n) => n.to_string(),
             MirType::Vec(_) => "BuildVecHandle".to_string(),
             MirType::Map(_, _) => "BuildMapHandle".to_string(),
+            MirType::Option(_) => "Option".to_string(),
             // A view element: keyed by its slice struct name, as in
             // hvec_elem_suffix.
             MirType::Ptr(inner) if matches!(inner.as_ref(), MirType::Slice(_)) => {
@@ -1917,19 +1918,25 @@ impl<'ctx> MirLowerer<'ctx> {
             message,
             location: None,
             help: Some(
-                "supported: `{}`, `{:?}`, `{name}`, `{0}`, width, `<` `>` alignment, `+`, `#`, `0`, \
-                 precision, and `x` `X` `o` `e` `E`"
+                "supported: `{}`, `{:?}`, `{name}`, `{0}`, width, dynamic width (`w$`/`0$`), \
+                 `<` `>` `^` alignment, `+`, `#`, `0`, precision, and `x` `X` `o` `e` `E`"
                     .to_string(),
             ),
         })?;
 
-        // Lower the explicit arguments in order. A failure is an error, not a
-        // silently missing value.
+        // Lower explicit positional and named (`name = expr`) arguments in order.
         let arg_source_texts = self.extract_arg_source_texts(tokens);
         let mut explicit: Vec<(MirValue, String)> = Vec::new();
+        let mut named: HashMap<String, (MirValue, String)> = HashMap::new();
         for src in &arg_source_texts {
-            let val = self.parse_and_lower_macro_arg(src)?;
-            explicit.push((val, src.trim().to_string()));
+            let trimmed = src.trim();
+            if let Some((lhs, rhs)) = Self::split_named_format_arg(trimmed) {
+                let val = self.parse_and_lower_macro_arg(rhs)?;
+                named.insert(lhs.to_string(), (val, rhs.trim().to_string()));
+            } else {
+                let val = self.parse_and_lower_macro_arg(trimmed)?;
+                explicit.push((val, trimmed.to_string()));
+            }
         }
 
         let mut c_fmt = String::new();
@@ -1961,10 +1968,37 @@ impl<'ctx> MirLowerer<'ctx> {
                             })?
                         }
                         ArgRef::Name(name) => {
-                            (self.parse_and_lower_macro_arg(name)?, name.clone())
+                            if let Some(found) = named.get(name) {
+                                found.clone()
+                            } else {
+                                (self.parse_and_lower_macro_arg(name)?, name.clone())
+                            }
                         }
                     };
-                    let (conv, arg) = self.fmt_placeholder(val, spec, &what)?;
+                    let dyn_width = match &spec.dynamic_width {
+                        None => None,
+                        Some(ArgRef::Index(i)) => {
+                            let (w_val, _) =
+                                explicit.get(*i).cloned().ok_or_else(|| CodegenError::Rejected {
+                                    message: format!(
+                                        "format string `{format_str}` refers to width argument {i}, which was not passed"
+                                    ),
+                                    location: None,
+                                    help: Some("positional arguments count from 0".to_string()),
+                                })?;
+                            Some(w_val)
+                        }
+                        Some(ArgRef::Name(name)) => {
+                            let w_val = if let Some((v, _)) = named.get(name) {
+                                v.clone()
+                            } else {
+                                self.parse_and_lower_macro_arg(name)?
+                            };
+                            Some(w_val)
+                        }
+                        Some(ArgRef::Next) => None,
+                    };
+                    let (conv, arg) = self.fmt_placeholder(val, spec, &what, dyn_width)?;
                     c_fmt.push_str(&conv);
                     if let Some(a) = arg {
                         values.push(a);
@@ -2038,6 +2072,166 @@ impl<'ctx> MirLowerer<'ctx> {
         Ok(values::local(result))
     }
 
+    /// Split a named format argument `ident = expr` while ignoring `==`, `!=`, `<=`, `>=`, `=>`.
+    fn split_named_format_arg(s: &str) -> Option<(&str, &str)> {
+        let bytes = s.as_bytes();
+        let mut i = 0usize;
+        while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
+            i += 1;
+        }
+        if i == 0 || bytes[0].is_ascii_digit() {
+            return None;
+        }
+        let name = &s[..i];
+        let rest = s[i..].trim_start();
+        if let Some(after_eq) = rest.strip_prefix('=') {
+            if !after_eq.starts_with('=') && !after_eq.starts_with('>') {
+                return Some((name, after_eq.trim()));
+            }
+        }
+        None
+    }
+
+    /// `write!(f, "fmt", ...)` / `writeln!(f, "fmt", ...)`: format into a
+    /// `&mut BuildFormatter` (or `&mut BuildString`), returning `0` (`Ok(())`).
+    pub(crate) fn lower_write_macro(
+        &mut self,
+        tokens: &[ast::TokenTree],
+        newline: bool,
+    ) -> CodegenResult<MirValue> {
+        use crate::lexer::{Delimiter, TokenKind};
+        let inner: &[ast::TokenTree] = if tokens.len() == 1 {
+            if let ast::TokenTree::Delimited {
+                tokens: ref inner, ..
+            } = tokens[0]
+            {
+                inner
+            } else {
+                tokens
+            }
+        } else {
+            tokens
+        };
+        let mut depth: i32 = 0;
+        let mut split_idx: Option<usize> = None;
+        for (idx, tt) in inner.iter().enumerate() {
+            if let ast::TokenTree::Token(tok) = tt {
+                match tok.kind {
+                    TokenKind::OpenDelim(Delimiter::Paren)
+                    | TokenKind::OpenDelim(Delimiter::Bracket)
+                    | TokenKind::OpenDelim(Delimiter::Brace) => depth += 1,
+                    TokenKind::CloseDelim(Delimiter::Paren)
+                    | TokenKind::CloseDelim(Delimiter::Bracket)
+                    | TokenKind::CloseDelim(Delimiter::Brace) => depth -= 1,
+                    TokenKind::Comma if depth == 0 => {
+                        split_idx = Some(idx);
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+        }
+        let (target_tokens, fmt_tokens) = match split_idx {
+            Some(i) => (&inner[..i], &inner[i + 1..]),
+            None => (inner, &[][..]),
+        };
+        fn collect_flat(trees: &[ast::TokenTree], out: &mut Vec<crate::lexer::Token>) {
+            for tt in trees {
+                match tt {
+                    ast::TokenTree::Token(tok) => out.push(tok.clone()),
+                    ast::TokenTree::Delimited { tokens, .. } => collect_flat(tokens, out),
+                }
+            }
+        }
+        let mut flat_target = Vec::new();
+        collect_flat(target_tokens, &mut flat_target);
+        let target_src = self.reconstruct_source_from_tokens(&flat_target);
+        let target_val = if !target_src.trim().is_empty() {
+            self.parse_and_lower_macro_arg(target_src.trim())?
+        } else {
+            return Ok(MirValue::Const(MirConst::Int(0, MirType::i32())));
+        };
+        let formatted = if fmt_tokens.is_empty() {
+            let nl = if newline { "\n" } else { "" };
+            let str_idx = self.module.intern_string(nl.to_string());
+            let builder = self.current_fn.as_mut().unwrap();
+            let fmt_l = builder.create_local(MirType::Ptr(Box::new(MirType::i8())));
+            builder.assign(
+                fmt_l,
+                MirRValue::Use(MirValue::Const(MirConst::Str(str_idx))),
+            );
+            let res = builder.create_local(MirType::Struct(Arc::from("BuildString")));
+            let cont = builder.create_block();
+            builder.call(
+                MirValue::Function(Arc::from("build_string_new")),
+                vec![MirValue::Local(fmt_l)],
+                Some(res),
+                cont,
+            );
+            builder.switch_to_block(cont);
+            values::local(res)
+        } else {
+            let (str_idx, arg_values) = self.prepare_format_call(fmt_tokens, newline)?;
+            let builder = self.current_fn.as_mut().unwrap();
+            let fmt_l = builder.create_local(MirType::Ptr(Box::new(MirType::i8())));
+            builder.assign(
+                fmt_l,
+                MirRValue::Use(MirValue::Const(MirConst::Str(str_idx))),
+            );
+            let res = builder.create_local(MirType::Struct(Arc::from("BuildString")));
+            let cont = builder.create_block();
+            let mut call_args = vec![MirValue::Local(fmt_l)];
+            call_args.extend(arg_values);
+            builder.call(
+                MirValue::Function(Arc::from("build_sprintf")),
+                call_args,
+                Some(res),
+                cont,
+            );
+            builder.switch_to_block(cont);
+            values::local(res)
+        };
+        let target_ty = self.type_of_value(&target_val);
+        let is_formatter_ptr = matches!(
+            &target_ty,
+            MirType::Ptr(inner) if matches!(inner.as_ref(), MirType::Struct(n) if n.as_ref() == "BuildFormatter")
+        );
+        if is_formatter_ptr {
+            let builder = self.current_fn.as_mut().unwrap();
+            let rc = builder.create_local(MirType::i32());
+            let cont = builder.create_block();
+            builder.call(
+                MirValue::Function(Arc::from("build_formatter_write")),
+                vec![target_val, formatted],
+                Some(rc),
+                cont,
+            );
+            builder.switch_to_block(cont);
+            return Ok(values::local(rc));
+        }
+        let is_str_ptr = matches!(
+            &target_ty,
+            MirType::Ptr(inner) if matches!(inner.as_ref(), MirType::Struct(n) if n.as_ref() == "BuildString")
+        );
+        if is_str_ptr {
+            let cur_s = self.deref_if_pointer(target_val.clone())?;
+            let builder = self.current_fn.as_mut().unwrap();
+            let joined = builder.create_local(MirType::Struct(Arc::from("BuildString")));
+            let cont = builder.create_block();
+            builder.call(
+                MirValue::Function(Arc::from("build_string_concat")),
+                vec![cur_s, formatted],
+                Some(joined),
+                cont,
+            );
+            builder.switch_to_block(cont);
+            if let MirValue::Local(ptr_id) = target_val {
+                builder.push_deref_assign(ptr_id, MirRValue::Use(MirValue::Local(joined)));
+            }
+        }
+        Ok(MirValue::Const(MirConst::Int(0, MirType::i32())))
+    }
+
     /// Extract the source text of each argument expression in a macro call,
     /// after the format string.  Returns a Vec of source-text strings, one
     /// per argument.  Uses token spans to find comma-separated argument
@@ -2097,7 +2291,11 @@ impl<'ctx> MirLowerer<'ctx> {
                 ast::TokenTree::Token(tok) => {
                     if !past_format_string {
                         if let TokenKind::Literal { kind, .. } = &tok.kind {
-                            if matches!(kind, crate::lexer::LiteralKind::Str { .. }) {
+                            if matches!(
+                                kind,
+                                crate::lexer::LiteralKind::Str { .. }
+                                    | crate::lexer::LiteralKind::RawStr { .. }
+                            ) {
                                 past_format_string = true;
                             }
                         }
@@ -2352,29 +2550,41 @@ impl<'ctx> MirLowerer<'ctx> {
             match token {
                 ast::TokenTree::Token(tok) => {
                     if let TokenKind::Literal { kind, .. } = &tok.kind {
-                        if matches!(kind, crate::lexer::LiteralKind::Str { .. }) {
-                            // Try to extract the string content from source via span
-                            if let Some(ref source) = self.source {
-                                let start = tok.span.start.to_usize();
-                                let end = tok.span.end.to_usize();
-                                if start < source.len() && end <= source.len() && start < end {
-                                    if let Some(raw) = source.get(start..end) {
-                                        // Strip surrounding quotes
-                                        // Strip exactly one quote at each end:
-                                        // `trim_end_matches` would also eat an
-                                        // escaped quote before the closing one.
-                                        let content = raw.strip_prefix('"').unwrap_or(raw);
-                                        let content = content.strip_suffix('"').unwrap_or(content);
-                                        // The span holds the source spelling;
-                                        // the format string is its value, so
-                                        // `\n` must become a newline here (the
-                                        // C backend escapes it again).
-                                        return crate::lexer::unescape_str(content);
+                        match kind {
+                            crate::lexer::LiteralKind::Str { .. } => {
+                                if let Some(ref source) = self.source {
+                                    let start = tok.span.start.to_usize();
+                                    let end = tok.span.end.to_usize();
+                                    if start < source.len() && end <= source.len() && start < end {
+                                        if let Some(raw) = source.get(start..end) {
+                                            let content = raw.strip_prefix('"').unwrap_or(raw);
+                                            let content =
+                                                content.strip_suffix('"').unwrap_or(content);
+                                            return crate::lexer::unescape_str(content);
+                                        }
                                     }
                                 }
+                                return String::new();
                             }
-                            // Fallback: return empty string if source not available
-                            return String::new();
+                            crate::lexer::LiteralKind::RawStr { n_hashes, .. } => {
+                                if let Some(ref source) = self.source {
+                                    let start = tok.span.start.to_usize();
+                                    let end = tok.span.end.to_usize();
+                                    if start < source.len() && end <= source.len() && start < end {
+                                        if let Some(raw) = source.get(start..end) {
+                                            let hashes = n_hashes.unwrap_or(0) as usize;
+                                            let prefix_len = 1 + hashes + 1;
+                                            let suffix_len = 1 + hashes;
+                                            if raw.len() >= prefix_len + suffix_len {
+                                                return raw[prefix_len..raw.len() - suffix_len]
+                                                    .to_string();
+                                            }
+                                        }
+                                    }
+                                }
+                                return String::new();
+                            }
+                            _ => {}
                         }
                     }
                 }
@@ -2474,6 +2684,8 @@ impl<'ctx> MirLowerer<'ctx> {
             "all" if terminal_args.len() == 1 => IterTerminal::All {
                 closure: &terminal_args[0],
             },
+            "max" if terminal_args.is_empty() => IterTerminal::Max,
+            "min" if terminal_args.is_empty() => IterTerminal::Min,
             _ => return None,
         };
 
@@ -2532,6 +2744,10 @@ impl<'ctx> MirLowerer<'ctx> {
                             steps.push(IterStep::Skip { count: &args[0] });
                             current = receiver;
                         }
+                        "zip" if args.len() == 1 => {
+                            steps.push(IterStep::Zip { other: &args[0] });
+                            current = receiver;
+                        }
                         _ => return None, // Unknown intermediate method
                     }
                 }
@@ -2586,9 +2802,59 @@ impl<'ctx> MirLowerer<'ctx> {
             _ => None,
         };
         // 1. Lower the source: a vector, or a range `a..b` / `a..=b`.
-        let (elem_ty, source, len_local) = match Self::range_source_bounds(chain.source) {
+        let (elem_ty, source, mut len_local) = match Self::range_source_bounds(chain.source) {
             Some((start, end, inclusive)) => self.lower_range_source(start, end, inclusive)?,
             None => self.lower_vec_source(chain.source)?,
+        };
+
+        // 1b. If the chain has a `.zip(other)` step, lower the second source
+        // and clamp the iteration length to `min(len1, len2)`.
+        let zip_other = chain.steps.iter().find_map(|s| match s {
+            IterStep::Zip { other } => Some(*other),
+            _ => None,
+        });
+        let zipped_source: Option<(MirType, ChainSource)> = if let Some(other_expr) = zip_other {
+            let other_src = match &other_expr.kind {
+                ExprKind::MethodCall {
+                    receiver,
+                    method,
+                    args,
+                    ..
+                } if args.is_empty()
+                    && matches!(method.name.as_ref(), "iter" | "iter_mut" | "into_iter") =>
+                {
+                    receiver.as_ref()
+                }
+                _ => other_expr,
+            };
+            let (elem2_ty, src2, len2_local) = match Self::range_source_bounds(other_src) {
+                Some((start, end, inclusive)) => self.lower_range_source(start, end, inclusive)?,
+                None => self.lower_vec_source(other_src)?,
+            };
+            let builder = self.current_fn.as_mut().unwrap();
+            let min_len = builder.create_local(MirType::i64());
+            let lt = builder.create_local(MirType::Bool);
+            builder.binary_op(
+                lt,
+                BinOp::Lt,
+                values::local(len_local),
+                values::local(len2_local),
+            );
+            let b_first = builder.create_block();
+            let b_second = builder.create_block();
+            let b_merge = builder.create_block();
+            builder.branch(values::local(lt), b_first, b_second);
+            builder.switch_to_block(b_first);
+            builder.assign(min_len, MirRValue::Use(values::local(len_local)));
+            builder.goto(b_merge);
+            builder.switch_to_block(b_second);
+            builder.assign(min_len, MirRValue::Use(values::local(len2_local)));
+            builder.goto(b_merge);
+            builder.switch_to_block(b_merge);
+            len_local = min_len;
+            Some((elem2_ty, src2))
+        } else {
+            None
         };
 
         // 3. Check for enumerate step - affects how many closure params we
@@ -2601,7 +2867,14 @@ impl<'ctx> MirLowerer<'ctx> {
         // 4. Determine result element type by walking the steps.
         //    After map closures, the type may change based on the closure's
         //    return type annotation.  For now we infer from the closure.
-        let mut output_elem_ty = self.infer_chain_output_type(&elem_ty, &chain.steps);
+        let base_infer_ty = if let Some((ref elem2_ty, _)) = zipped_source {
+            let pair_elems = vec![elem_ty.clone(), elem2_ty.clone()];
+            self.ensure_tuple_type_def(&pair_elems);
+            MirType::Tuple(pair_elems)
+        } else {
+            elem_ty.clone()
+        };
+        let mut output_elem_ty = self.infer_chain_output_type(&base_infer_ty, &chain.steps);
         // When the target binding annotates `let v: Vec<T> = ...collect()` and
         // the map closure has no explicit return annotation, use `T` directly.
         if let Some(want) = &expected_collect {
@@ -2616,7 +2889,28 @@ impl<'ctx> MirLowerer<'ctx> {
         let (new_fn_name, push_fn_name) = Self::vec_fn_names_for_type(&output_elem_ty)?;
 
         // 5. Set up the result value depending on terminal type.
+        let collect_as_string = matches!(&chain.terminal, IterTerminal::Collect)
+            && matches!(output_elem_ty, MirType::Int(IntSize::I32, false))
+            && (matches!(&self.expected_type, Some(MirType::Struct(n)) if n.as_ref() == "BuildString")
+                || self.current_fn.as_ref().is_some_and(
+                    |b| matches!(b.return_type(), MirType::Struct(n) if n.as_ref() == "BuildString"),
+                ));
         let (result_local, _is_collect) = match &chain.terminal {
+            IterTerminal::Collect if collect_as_string => {
+                let builder = self.current_fn.as_mut().unwrap();
+                let str_ty = MirType::Struct(Arc::from("BuildString"));
+                let result = builder.create_local(str_ty);
+                let empty_idx = self.module.intern_string(String::new());
+                let cont = builder.create_block();
+                builder.call(
+                    MirValue::Function(Arc::from("build_string_new")),
+                    vec![MirValue::Const(MirConst::Str(empty_idx))],
+                    Some(result),
+                    cont,
+                );
+                builder.switch_to_block(cont);
+                (result, true)
+            }
             IterTerminal::Collect => {
                 // Create the output vec.
                 let builder = self.current_fn.as_mut().unwrap();
@@ -2706,6 +3000,12 @@ impl<'ctx> MirLowerer<'ctx> {
                 builder.assign(acc, MirRValue::Use(MirValue::Const(MirConst::Bool(true))));
                 (acc, false)
             }
+            IterTerminal::Max | IterTerminal::Min => {
+                let builder = self.current_fn.as_mut().unwrap();
+                let acc = builder.create_local(MirType::Option(Box::new(output_elem_ty.clone())));
+                builder.assign(acc, MirRValue::Use(MirValue::Global(Arc::from("None"))));
+                (acc, false)
+            }
         };
 
         // Per-step counters for take/skip, created before the loop so they
@@ -2787,16 +3087,19 @@ impl<'ctx> MirLowerer<'ctx> {
             builder.switch_to_block(body_block);
         }
 
-        // 7. Loop body: get element, apply transforms.
-        let elem_local = {
-            let builder = self.current_fn.as_mut().unwrap();
-            let elem = builder.create_local(elem_ty.clone());
-            match &source {
+        // 7. Loop body: get element (and zipped second element if present), apply transforms.
+        let read_source_elem = |builder: &mut MirBuilder,
+                                src: &ChainSource,
+                                ety: &MirType,
+                                idx: LocalId|
+         -> LocalId {
+            let elem = builder.create_local(ety.clone());
+            match src {
                 ChainSource::Vec { local, get_fn } => {
                     let cont = builder.create_block();
                     builder.call(
                         MirValue::Function(Arc::from(get_fn.as_str())),
-                        vec![values::local(*local), values::local(idx_local)],
+                        vec![values::local(*local), values::local(idx)],
                         Some(elem),
                         cont,
                     );
@@ -2807,33 +3110,31 @@ impl<'ctx> MirLowerer<'ctx> {
                         elem,
                         MirRValue::IndexAccess {
                             base: values::local(*local),
-                            index: values::local(idx_local),
-                            elem_ty: elem_ty.clone(),
+                            index: values::local(idx),
+                            elem_ty: ety.clone(),
                         },
                     );
                 }
                 ChainSource::Range { first } => {
-                    // elem = start + idx, in the range's own integer type.
                     let wide = builder.create_local(MirType::i64());
-                    builder.binary_op(
-                        wide,
-                        BinOp::Add,
-                        values::local(*first),
-                        values::local(idx_local),
-                    );
-                    builder.cast(
-                        elem,
-                        CastKind::IntToInt,
-                        values::local(wide),
-                        elem_ty.clone(),
-                    );
+                    builder.binary_op(wide, BinOp::Add, values::local(*first), values::local(idx));
+                    builder.cast(elem, CastKind::IntToInt, values::local(wide), ety.clone());
                 }
             }
             elem
         };
+        let (elem_local, zip_elem_local) = {
+            let builder = self.current_fn.as_mut().unwrap();
+            let e1 = read_source_elem(builder, &source, &elem_ty, idx_local);
+            let e2 = zipped_source
+                .as_ref()
+                .map(|(ety2, src2)| read_source_elem(builder, src2, ety2, idx_local));
+            (e1, e2)
+        };
 
         // Apply each step transform to produce the final value.
         let mut current_val = values::local(elem_local);
+        let mut active_zip: Option<MirValue> = None;
         let mut flat_mapped = false;
         for (step_idx, step) in chain.steps.iter().enumerate() {
             match step {
@@ -2958,6 +3259,9 @@ impl<'ctx> MirLowerer<'ctx> {
                         }
                     }
                 }
+                IterStep::Zip { .. } => {
+                    active_zip = zip_elem_local.map(values::local);
+                }
                 IterStep::Map { closure } => {
                     current_val = self.lower_iter_map_inline(
                         closure,
@@ -2967,6 +3271,7 @@ impl<'ctx> MirLowerer<'ctx> {
                         } else {
                             None
                         },
+                        active_zip.take(),
                     )?;
                 }
                 IterStep::Filter { closure } => {
@@ -2981,6 +3286,7 @@ impl<'ctx> MirLowerer<'ctx> {
                         } else {
                             None
                         },
+                        active_zip.clone(),
                     )?;
                     let builder = self.current_fn.as_mut().unwrap();
                     let keep_block = builder.create_block();
@@ -3051,13 +3357,53 @@ impl<'ctx> MirLowerer<'ctx> {
 
         // 8. Terminal: push to result vec OR update accumulator.
         match &chain.terminal {
+            IterTerminal::Collect if collect_as_string => {
+                let builder = self.current_fn.as_mut().unwrap();
+                let ch_s = builder.create_local(MirType::Struct(Arc::from("BuildString")));
+                let c1 = builder.create_block();
+                builder.call(
+                    MirValue::Function(Arc::from("build_char_to_string")),
+                    vec![current_val],
+                    Some(ch_s),
+                    c1,
+                );
+                builder.switch_to_block(c1);
+                let next_s = builder.create_local(MirType::Struct(Arc::from("BuildString")));
+                let c2 = builder.create_block();
+                builder.call(
+                    MirValue::Function(Arc::from("build_string_concat")),
+                    vec![values::local(result_local), values::local(ch_s)],
+                    Some(next_s),
+                    c2,
+                );
+                builder.switch_to_block(c2);
+                builder.assign(result_local, MirRValue::Use(values::local(next_s)));
+            }
             IterTerminal::Collect => {
                 if !flat_mapped {
+                    let push_val = if let Some(v2) = active_zip.take() {
+                        let t1 = self.type_of_value(&current_val);
+                        let t2 = self.type_of_value(&v2);
+                        let elems = vec![t1, t2];
+                        self.ensure_tuple_type_def(&elems);
+                        let builder = self.current_fn.as_mut().unwrap();
+                        let tup = builder.create_local(MirType::Tuple(elems));
+                        builder.assign(
+                            tup,
+                            MirRValue::Aggregate {
+                                kind: AggregateKind::Tuple,
+                                operands: vec![current_val, v2],
+                            },
+                        );
+                        values::local(tup)
+                    } else {
+                        current_val
+                    };
                     let builder = self.current_fn.as_mut().unwrap();
                     let cont = builder.create_block();
                     builder.call(
                         MirValue::Function(Arc::from(push_fn_name)),
-                        vec![values::local(result_local), current_val],
+                        vec![values::local(result_local), push_val],
                         None,
                         cont,
                     );
@@ -3109,6 +3455,7 @@ impl<'ctx> MirLowerer<'ctx> {
                     } else {
                         None
                     },
+                    active_zip.clone(),
                 )?;
                 let builder = self.current_fn.as_mut().unwrap();
                 let next = builder.create_local(MirType::Bool);
@@ -3125,11 +3472,61 @@ impl<'ctx> MirLowerer<'ctx> {
                     } else {
                         None
                     },
+                    active_zip.clone(),
                 )?;
                 let builder = self.current_fn.as_mut().unwrap();
                 let next = builder.create_local(MirType::Bool);
                 builder.binary_op(next, BinOp::BitAnd, values::local(result_local), pred);
                 builder.assign(result_local, MirRValue::Use(values::local(next)));
+            }
+            IterTerminal::Max | IterTerminal::Min => {
+                let is_max = matches!(&chain.terminal, IterTerminal::Max);
+                let builder = self.current_fn.as_mut().unwrap();
+                let hv = builder.create_local(MirType::Bool);
+                builder.assign(
+                    hv,
+                    MirRValue::FieldAccess {
+                        base: values::local(result_local),
+                        field_name: Arc::from("has_value"),
+                        field_ty: MirType::Bool,
+                    },
+                );
+                let has_bb = builder.create_block();
+                let set_bb = builder.create_block();
+                let done_bb = builder.create_block();
+                builder.branch(values::local(hv), has_bb, set_bb);
+
+                builder.switch_to_block(has_bb);
+                let prev = builder.create_local(output_elem_ty.clone());
+                builder.assign(
+                    prev,
+                    MirRValue::FieldAccess {
+                        base: values::local(result_local),
+                        field_name: Arc::from("value"),
+                        field_ty: output_elem_ty.clone(),
+                    },
+                );
+                let better = builder.create_local(MirType::Bool);
+                builder.binary_op(
+                    better,
+                    if is_max { BinOp::Gt } else { BinOp::Lt },
+                    current_val.clone(),
+                    values::local(prev),
+                );
+                builder.branch(values::local(better), set_bb, done_bb);
+
+                builder.switch_to_block(set_bb);
+                let after_some = builder.create_block();
+                builder.call(
+                    MirValue::Function(Arc::from("Some")),
+                    vec![current_val],
+                    Some(result_local),
+                    after_some,
+                );
+                builder.switch_to_block(after_some);
+                builder.goto(done_bb);
+
+                builder.switch_to_block(done_bb);
             }
         }
 
@@ -3168,6 +3565,16 @@ impl<'ctx> MirLowerer<'ctx> {
                 end: Some(end),
                 inclusive,
             } => Some((start, end, *inclusive)),
+            ExprKind::Binary {
+                op: ast::BinOp::Range,
+                left,
+                right,
+            } => Some((left, right, false)),
+            ExprKind::Binary {
+                op: ast::BinOp::RangeInclusive,
+                left,
+                right,
+            } => Some((left, right, true)),
             _ => None,
         }
     }
@@ -3342,6 +3749,7 @@ impl<'ctx> MirLowerer<'ctx> {
         closure_expr: &ast::Expr,
         elem_val: MirValue,
         index_val: Option<MirValue>,
+        zip_val: Option<MirValue>,
     ) -> CodegenResult<MirValue> {
         // An unannotated element parameter takes the element's own type. It
         // used to default to f64, so `|x| *x != ""` over strings compared a
@@ -3350,8 +3758,44 @@ impl<'ctx> MirLowerer<'ctx> {
         if let ExprKind::Closure { params, body, .. } = &closure_expr.kind {
             // Save the current var_map entries that will be shadowed.
             let mut saved: Vec<(Arc<str>, Option<LocalId>)> = Vec::new();
+            let unwrap_pat_ident = |pat: &ast::Pattern| -> Option<Arc<str>> {
+                let inner = match &pat.kind {
+                    ast::PatternKind::Ref { pattern, .. } => pattern.as_ref(),
+                    _ => pat,
+                };
+                match &inner.kind {
+                    ast::PatternKind::Ident { name, .. }
+                    | ast::PatternKind::RefBind { name, .. } => Some(name.name.clone()),
+                    _ => None,
+                }
+            };
 
-            if params.len() == 2 && index_val.is_some() {
+            if params.len() == 1
+                && zip_val.is_some()
+                && matches!(&params[0].pattern.kind, ast::PatternKind::Tuple(t) if t.len() == 2)
+            {
+                // zip-style tuple destructuring: `|(a, b)|` or `|(&a, &b)|`
+                if let ast::PatternKind::Tuple(elems) = &params[0].pattern.kind {
+                    let v2 = zip_val.unwrap();
+                    let t2 = self.type_of_value(&v2);
+                    if let Some(name) = unwrap_pat_ident(&elems[0]) {
+                        let old = self.var_map.get(&name).copied();
+                        saved.push((name.clone(), old));
+                        let builder = self.current_fn.as_mut().unwrap();
+                        let local = builder.create_local(elem_ty_default.clone());
+                        builder.assign(local, MirRValue::Use(elem_val));
+                        self.var_map.insert(name, local);
+                    }
+                    if let Some(name) = unwrap_pat_ident(&elems[1]) {
+                        let old = self.var_map.get(&name).copied();
+                        saved.push((name.clone(), old));
+                        let builder = self.current_fn.as_mut().unwrap();
+                        let local = builder.create_local(t2);
+                        builder.assign(local, MirRValue::Use(v2));
+                        self.var_map.insert(name, local);
+                    }
+                }
+            } else if params.len() == 2 && index_val.is_some() {
                 // enumerate-style: |i, x| body
                 // First param = index, second param = element
                 if let ast::PatternKind::Ident { name, .. } = &params[0].pattern.kind {
@@ -3451,49 +3895,91 @@ impl<'ctx> MirLowerer<'ctx> {
         }
     }
 
-    /// Inline-lower a `.fold()` closure: `|acc, x| body`.
+    /// Inline-lower a `.fold()` closure: `|acc, x| body`, or a binary function
+    /// path such as `f32::max` / `f32::min` / `f64::max` / `f64::min`.
     fn lower_iter_fold_inline(
         &mut self,
         closure_expr: &ast::Expr,
         acc_val: MirValue,
         elem_val: MirValue,
     ) -> CodegenResult<MirValue> {
+        let acc_ty_default = self.type_of_value(&acc_val);
+        let elem_ty_default = self.type_of_value(&elem_val);
+        if let ExprKind::Path(path) = &closure_expr.kind {
+            if let Some(last) = path.last_ident() {
+                if matches!(last.name.as_ref(), "max" | "min") {
+                    let is_max = last.name.as_ref() == "max";
+                    let builder = self.current_fn.as_mut().unwrap();
+                    let out = builder.create_local(acc_ty_default.clone());
+                    let cmp = builder.create_local(MirType::Bool);
+                    builder.binary_op(
+                        cmp,
+                        if is_max { BinOp::Gt } else { BinOp::Lt },
+                        acc_val.clone(),
+                        elem_val.clone(),
+                    );
+                    let b_acc = builder.create_block();
+                    let b_elem = builder.create_block();
+                    let b_merge = builder.create_block();
+                    builder.branch(values::local(cmp), b_acc, b_elem);
+                    builder.switch_to_block(b_acc);
+                    builder.assign(out, MirRValue::Use(acc_val));
+                    builder.goto(b_merge);
+                    builder.switch_to_block(b_elem);
+                    builder.assign(out, MirRValue::Use(elem_val));
+                    builder.goto(b_merge);
+                    builder.switch_to_block(b_merge);
+                    return Ok(values::local(out));
+                }
+            }
+        }
         if let ExprKind::Closure { params, body, .. } = &closure_expr.kind {
             let mut saved: Vec<(Arc<str>, Option<LocalId>)> = Vec::new();
+            let unwrap_pat_ident = |pat: &ast::Pattern| -> Option<Arc<str>> {
+                let inner = match &pat.kind {
+                    ast::PatternKind::Ref { pattern, .. } => pattern.as_ref(),
+                    _ => pat,
+                };
+                match &inner.kind {
+                    ast::PatternKind::Ident { name, .. }
+                    | ast::PatternKind::RefBind { name, .. } => Some(name.name.clone()),
+                    _ => None,
+                }
+            };
 
             // Bind acc parameter.
             if let Some(acc_param) = params.first() {
-                if let ast::PatternKind::Ident { name, .. } = &acc_param.pattern.kind {
-                    let old = self.var_map.get(&name.name).copied();
-                    saved.push((name.name.clone(), old));
+                if let Some(name) = unwrap_pat_ident(&acc_param.pattern) {
+                    let old = self.var_map.get(&name).copied();
+                    saved.push((name.clone(), old));
 
                     let param_ty = acc_param
                         .ty
                         .as_ref()
                         .map(|t| self.lower_type_from_ast(t))
-                        .unwrap_or(MirType::f64());
+                        .unwrap_or_else(|| acc_ty_default.clone());
                     let builder = self.current_fn.as_mut().unwrap();
                     let local = builder.create_local(param_ty);
                     builder.assign(local, MirRValue::Use(acc_val));
-                    self.var_map.insert(name.name.clone(), local);
+                    self.var_map.insert(name, local);
                 }
             }
 
             // Bind element parameter.
             if params.len() >= 2 {
-                if let ast::PatternKind::Ident { name, .. } = &params[1].pattern.kind {
-                    let old = self.var_map.get(&name.name).copied();
-                    saved.push((name.name.clone(), old));
+                if let Some(name) = unwrap_pat_ident(&params[1].pattern) {
+                    let old = self.var_map.get(&name).copied();
+                    saved.push((name.clone(), old));
 
                     let param_ty = params[1]
                         .ty
                         .as_ref()
                         .map(|t| self.lower_type_from_ast(t))
-                        .unwrap_or(MirType::f64());
+                        .unwrap_or_else(|| elem_ty_default.clone());
                     let builder = self.current_fn.as_mut().unwrap();
                     let local = builder.create_local(param_ty);
                     builder.assign(local, MirRValue::Use(elem_val));
-                    self.var_map.insert(name.name.clone(), local);
+                    self.var_map.insert(name, local);
                 }
             }
 
@@ -3647,8 +4133,10 @@ impl<'ctx> MirLowerer<'ctx> {
                 | IterStep::Rev
                 | IterStep::Take { .. }
                 | IterStep::Skip { .. }
-                | IterStep::FlatMap { .. } => {
-                    // These don't change the element type (flat_map uses expected_collect).
+                | IterStep::FlatMap { .. }
+                | IterStep::Zip { .. } => {
+                    // These don't change the element type (flat_map uses expected_collect;
+                    // zip already folded the pair type into base_infer_ty).
                 }
             }
         }

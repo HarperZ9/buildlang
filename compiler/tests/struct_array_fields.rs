@@ -330,20 +330,31 @@ fn the_matrix_programs_print_what_the_python_model_computed() {
     }
 }
 
-/// What the C backend cannot yet build is refused with a diagnostic. It
-/// compiled before and printed garbage.
+/// A tuple with a fixed array inside it used to be refused until the C backend
+/// emitted array fields inside generated `BlTuple_*` structs; it now compiles
+/// and preserves every element cleanly, while genuinely unsupported shapes
+/// (like `Vec<[i64; 2]>`) are still refused with a diagnostic.
 #[test]
 fn shapes_that_cannot_be_built_are_refused_not_miscompiled() {
     let tuple = "fn main() ~ Console {\n\
                  let t = (7_u8, [1_u32, 2_u32, 3_u32], -9);\n\
-                 println!(\"{} {}\", t.0, t.1[0]);\n\
+                 println!(\"{} {} {} {} {}\", t.0, t.1[0], t.1[1], t.1[2], t.2);\n\
                  }\n";
     let ran = run("tuple", tuple);
-    assert_ne!(ran.code, Some(0), "stdout: {}", ran.stdout);
+    assert_eq!(ran.code, Some(0), "stderr: {}", ran.stderr);
+    assert_eq!(ran.stdout.replace("\r\n", "\n"), "7 1 2 3 -9\n");
+
+    let vec_arr = "fn main() ~ Console {\n\
+                   let mut v: Vec<[i64; 2]> = Vec::new();\n\
+                   v.push([1, 2]);\n\
+                   println!(\"{}\", v.len());\n\
+                   }\n";
+    let ran_bad = run("vec_arr", vec_arr);
+    assert_ne!(ran_bad.code, Some(0), "stdout: {}", ran_bad.stdout);
     assert!(
-        ran.stderr.contains("a tuple with a fixed array inside it"),
+        ran_bad.stderr.contains("a vector of `[i64; 2]` elements"),
         "{}",
-        ran.stderr
+        ran_bad.stderr
     );
 }
 

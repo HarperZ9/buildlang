@@ -1219,6 +1219,131 @@ static BuildString build_sprintf(const char* fmt, ...) {
     return qs;
 }
 
+// Pad a formatted string to `width` spaces: align=0 left (<), align=1 right (>), align=2 center (^).
+static BuildString build_fmt_align(BuildString s, int64_t width, int32_t align) {
+    if (width <= 0 || (size_t)width <= s.len) return s;
+    size_t w = (size_t)width;
+    size_t pad = w - s.len;
+    size_t left = (align == 0) ? 0 : (align == 1 ? pad : pad / 2);
+    size_t right = pad - left;
+    char* buf = (char*)malloc(w + 1);
+    if (left > 0) memset(buf, ' ', left);
+    if (s.len > 0) memcpy(buf + left, s.ptr, s.len);
+    if (right > 0) memset(buf + left + s.len, ' ', right);
+    buf[w] = '\0';
+    BuildString out; out.ptr = buf; out.len = w; out.cap = w + 1;
+    return out;
+}
+
+// Runtime formatter backing `std::fmt::Formatter`, `impl Display`, `impl Debug`, and `write!`.
+typedef struct BuildFormatter {
+    BuildString buf;
+} BuildFormatter;
+
+static BuildFormatter build_formatter_new(void) {
+    BuildString buf = { "", 0, 0 };
+    BuildFormatter f;
+    f.buf = buf;
+    return f;
+}
+
+static int32_t build_formatter_write(BuildFormatter* f, BuildString s) {
+    if (f) {
+        f->buf = build_string_concat(f->buf, s);
+    }
+    return 0;
+}
+
+static BuildString build_formatter_finish(BuildFormatter* f) {
+    return f ? f->buf : build_string_new("");
+}
+
+typedef struct BuildCharIter {
+    const char* ptr;
+    size_t len;
+    size_t pos;
+} BuildCharIter;
+
+static BuildCharIter build_char_iter_new(BuildString s) {
+    BuildCharIter it;
+    it.ptr = s.ptr;
+    it.len = s.len;
+    it.pos = 0;
+    return it;
+}
+
+static size_t build_utf8_decode_one(const char* ptr, size_t len, size_t pos, uint32_t* out_cp) {
+    unsigned char b0 = (unsigned char)ptr[pos];
+    if (b0 < 0x80u) { *out_cp = (uint32_t)b0; return 1; }
+    if ((b0 & 0xE0u) == 0xC0u && pos + 1 < len) {
+        *out_cp = (((uint32_t)(b0 & 0x1Fu)) << 6) | ((uint32_t)((unsigned char)ptr[pos + 1] & 0x3Fu));
+        return 2;
+    }
+    if ((b0 & 0xF0u) == 0xE0u && pos + 2 < len) {
+        *out_cp = (((uint32_t)(b0 & 0x0Fu)) << 12)
+            | (((uint32_t)((unsigned char)ptr[pos + 1] & 0x3Fu)) << 6)
+            | ((uint32_t)((unsigned char)ptr[pos + 2] & 0x3Fu));
+        return 3;
+    }
+    if ((b0 & 0xF8u) == 0xF0u && pos + 3 < len) {
+        *out_cp = (((uint32_t)(b0 & 0x07u)) << 18)
+            | (((uint32_t)((unsigned char)ptr[pos + 1] & 0x3Fu)) << 12)
+            | (((uint32_t)((unsigned char)ptr[pos + 2] & 0x3Fu)) << 6)
+            | ((uint32_t)((unsigned char)ptr[pos + 3] & 0x3Fu));
+        return 4;
+    }
+    *out_cp = (uint32_t)b0;
+    return 1;
+}
+
+static Option build_char_iter_peek(BuildCharIter* it) {
+    Option o;
+    if (!it || !it->ptr || it->pos >= it->len) {
+        o.has_value = false;
+        o.value.u = 0;
+        return o;
+    }
+    uint32_t cp = 0;
+    build_utf8_decode_one(it->ptr, it->len, it->pos, &cp);
+    o.has_value = true;
+    o.value.u = (uint64_t)cp;
+    return o;
+}
+
+static Option build_char_iter_next(BuildCharIter* it) {
+    Option o;
+    if (!it || !it->ptr || it->pos >= it->len) {
+        o.has_value = false;
+        o.value.u = 0;
+        return o;
+    }
+    uint32_t cp = 0;
+    size_t step = build_utf8_decode_one(it->ptr, it->len, it->pos, &cp);
+    it->pos += step;
+    o.has_value = true;
+    o.value.u = (uint64_t)cp;
+    return o;
+}
+
+static bool build_char_is_ascii_digit(uint32_t c) {
+    return c >= '0' && c <= '9';
+}
+
+static bool build_char_is_alphanumeric(uint32_t c) {
+    return (c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z');
+}
+
+static uint32_t build_char_to_ascii_lowercase(uint32_t c) {
+    return (c >= 'A' && c <= 'Z') ? (c + 32u) : c;
+}
+
+static size_t build_char_len_utf8(uint32_t c) {
+    if (c < 0x80u) return 1;
+    if (c < 0x800u) return 2;
+    if (c < 0x10000u) return 3;
+    return 4;
+}
+
 // --- Math constants ---
 static const double BUILD_PI = 3.14159265358979323846;
 static const double BUILD_E = 2.71828182845904523536;
@@ -1773,6 +1898,18 @@ static uint32_t build_count_ones_u32(uint32_t x) {
     uint32_t n = 0;
     while (x) { n += (x & 1); x >>= 1; }
     return n;
+}
+static uint32_t build_next_power_of_two_u32(uint32_t x) {
+    if (x <= 1u) return 1u;
+    x -= 1u;
+    x |= x >> 1; x |= x >> 2; x |= x >> 4; x |= x >> 8; x |= x >> 16;
+    return x + 1u;
+}
+static uint64_t build_next_power_of_two_u64(uint64_t x) {
+    if (x <= 1ULL) return 1ULL;
+    x -= 1ULL;
+    x |= x >> 1; x |= x >> 2; x |= x >> 4; x |= x >> 8; x |= x >> 16; x |= x >> 32;
+    return x + 1ULL;
 }
 // ECMAScript ToUint32 / ToInt32: truncate toward zero, wrap modulo 2^32;
 // NaN and the infinities give 0. Exact: fmod and trunc do not round.
@@ -3336,6 +3473,18 @@ static int64_t build_string_index_of(BuildString s, BuildString substr) {
     const char* p = strstr(s.ptr, substr.ptr);
     if (p == NULL) return -1;
     return (int64_t)(p - s.ptr);
+}
+
+static int64_t build_string_rindex_of(BuildString s, BuildString substr) {
+    if (substr.len == 0) return (int64_t)s.len;
+    if (substr.len > s.len) return -1;
+    for (size_t i = s.len - substr.len + 1; i > 0; --i) {
+        size_t pos = i - 1;
+        if (memcmp(s.ptr + pos, substr.ptr, substr.len) == 0) {
+            return (int64_t)pos;
+        }
+    }
+    return -1;
 }
 
 static int64_t build_string_compare(BuildString a, BuildString b) {

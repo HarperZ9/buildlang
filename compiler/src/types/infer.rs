@@ -739,8 +739,7 @@ impl<'ctx> TypeInfer<'ctx> {
                 kind: TokenKind::Literal { kind, .. },
                 ..
             }) => match kind {
-                LiteralKind::Str { .. } => return,
-                LiteralKind::RawStr { .. } => "a raw string literal",
+                LiteralKind::Str { .. } | LiteralKind::RawStr { .. } => return,
                 _ => "a non-string literal",
             },
             _ => "an expression",
@@ -2725,15 +2724,24 @@ impl<'ctx> TypeInfer<'ctx> {
                 // Iterating over array/slice yields references to elements
                 Ty::reference(None, Mutability::Immutable, (**elem).clone())
             }
-            TyKind::Adt(def_id, args) if is_vec_def(*def_id) && !args.is_empty() => args[0].clone(),
+            TyKind::Adt(def_id, args) if is_vec_def(*def_id) && args.len() == 1 => args[0].clone(),
+            TyKind::Adt(def_id, args) if *def_id == DefId::DUMMY && args.len() == 2 => {
+                Ty::tuple(vec![args[0].clone(), args[1].clone()])
+            }
             TyKind::Ref(_, mutability, inner) => {
-                // Iterating over &[T] or &Vec<T>
+                // Iterating over &[T], &Vec<T>, or &HashMap<K, V>
                 match &inner.kind {
                     TyKind::Array(elem, _) | TyKind::Slice(elem) => {
                         Ty::reference(None, *mutability, (**elem).clone())
                     }
-                    TyKind::Adt(def_id, args) if is_vec_def(*def_id) && !args.is_empty() => {
+                    TyKind::Adt(def_id, args) if is_vec_def(*def_id) && args.len() == 1 => {
                         Ty::reference(None, *mutability, args[0].clone())
+                    }
+                    TyKind::Adt(def_id, args) if *def_id == DefId::DUMMY && args.len() == 2 => {
+                        Ty::tuple(vec![
+                            Ty::reference(None, Mutability::Immutable, args[0].clone()),
+                            Ty::reference(None, *mutability, args[1].clone()),
+                        ])
                     }
                     _ => Ty::fresh_var(),
                 }
@@ -6396,7 +6404,7 @@ impl<'ctx> TypeInfer<'ctx> {
                 return Ty::int(IntTy::Usize);
             }
             "is_empty" => return Ty::bool(),
-            "contains" | "starts_with" | "ends_with" => return Ty::bool(),
+            "contains" | "contains_key" | "starts_with" | "ends_with" => return Ty::bool(),
             "clone" | "copy" => {
                 // `.clone()` through a reference `&T` returns the cloned inner
                 // value `T`, not `&T` (avoids `&?T` occurring in `?T` and
@@ -6524,8 +6532,43 @@ impl<'ctx> TypeInfer<'ctx> {
             // Collection accessors - return element or fresh var
             "pop" | "pop_front" | "pop_back" => return Ty::fresh_var(),
             "remove" | "swap_remove" => return Ty::fresh_var(),
-            "get" | "get_mut" | "entry" | "first" | "first_mut" | "last" | "last_mut" | "front"
-            | "back" => {
+            "get" | "get_mut" | "first" | "first_mut" | "last" | "last_mut" | "front" | "back" => {
+                let is_mut = method_name.ends_with("_mut");
+                let ref_mut = if is_mut {
+                    Mutability::Mutable
+                } else {
+                    Mutability::Immutable
+                };
+                let applied_recv = self.apply(&receiver_ty);
+                let inner_recv = match &applied_recv.kind {
+                    TyKind::Ref(_, _, inner) => self.apply(inner),
+                    _ => applied_recv,
+                };
+                // In BuildLang (SPECIFICATION.md 7.7), `HashMap::get(k)` can be
+                // used both directly as `V` (`let t = m.get(k); t.field`) and in
+                // `match m.get(k) { Some(v) => ..., None => ... }`, so keep `get`
+                // polymorphic (`fresh_var`) and narrow `get_mut` to `Option<&mut V>`.
+                if method_name == "get_mut" {
+                    if let TyKind::Adt(def_id, substs) = &inner_recv.kind {
+                        let is_map = (*def_id == DefId::DUMMY && substs.len() == 2)
+                            || matches!(
+                                super::ty::def_name(*def_id).as_deref(),
+                                Some("HashMap" | "BTreeMap")
+                            )
+                            || self.ctx.lookup_type(*def_id).is_some_and(|td| {
+                                matches!(td.name.as_ref(), "HashMap" | "BTreeMap")
+                            });
+                        if is_map && substs.len() >= 2 {
+                            let val_ref = Ty::reference(None, ref_mut, substs[1].clone());
+                            if let Some(opt) = self.option_ty(val_ref) {
+                                return opt;
+                            }
+                        }
+                    }
+                }
+                return Ty::fresh_var();
+            }
+            "entry" => {
                 return Ty::fresh_var();
             }
             "split" | "splitn" | "rsplit" | "split_once" | "rsplit_once" | "split_whitespace"
@@ -6710,6 +6753,10 @@ impl<'ctx> TypeInfer<'ctx> {
             "is_power_of_two" if is_int => return Ty::bool(),
             "next_power_of_two" if is_int => return receiver_ty.clone(),
             "partial_cmp" | "cmp" if is_int => return Ty::fresh_var(),
+            "cmp" if matches!(receiver_ty.kind, TyKind::Adt(_, _)) => return Ty::fresh_var(),
+            "partial_cmp" if matches!(receiver_ty.kind, TyKind::Adt(_, _)) => {
+                return Ty::fresh_var();
+            }
             // Raw pointer methods (`*const T`, `*mut T`)
             "offset_from" | "byte_offset_from"
                 if matches!(&receiver_ty.kind, TyKind::Ptr(_, _)) =>
@@ -7060,7 +7107,33 @@ impl<'ctx> TypeInfer<'ctx> {
             let body_ty = self.infer_expr(&arm.body);
             if !matches!(self.apply(&body_ty).kind, TyKind::Never) {
                 all_arms_diverge = false;
-                let _ = self.unify(&result_ty, &body_ty, span);
+                let res_applied = self.apply(&result_ty);
+                let body_applied = self.apply(&body_ty);
+                // Unsized array-to-slice coercion across match arms:
+                // `&[T; N]` and `&[T; M]` (with N != M) unify to `&[T]`.
+                if let (TyKind::Ref(lt1, m1, inner1), TyKind::Ref(_, m2, inner2)) =
+                    (&res_applied.kind, &body_applied.kind)
+                {
+                    if m1 == m2 {
+                        if let (TyKind::Array(e1, len1), TyKind::Array(e2, len2)) =
+                            (&inner1.kind, &inner2.kind)
+                        {
+                            if len1 != len2 {
+                                let _ = self.unify(e1, e2, span);
+                                result_ty =
+                                    Ty::reference(lt1.clone(), *m1, Ty::slice(self.apply(e1)));
+                            } else {
+                                let _ = self.unify(&result_ty, &body_ty, span);
+                            }
+                        } else {
+                            let _ = self.unify(&result_ty, &body_ty, span);
+                        }
+                    } else {
+                        let _ = self.unify(&result_ty, &body_ty, span);
+                    }
+                } else {
+                    let _ = self.unify(&result_ty, &body_ty, span);
+                }
             }
             result_ty = self.merge_future_effect_annotations(&result_ty, &body_ty);
 
@@ -7506,6 +7579,50 @@ impl<'ctx> TypeInfer<'ctx> {
                             let _ = self.infer_expr(value);
                         }
                         self.ctx.define_var(c.name.name.clone(), ty);
+                    }
+                    ast::ItemKind::Use(use_def) => {
+                        fn bind_local_use_tree(
+                            ctx: &mut TypeContext,
+                            tree: &ast::UseTree,
+                            prefix: &[Arc<str>],
+                        ) {
+                            match &tree.kind {
+                                ast::UseTreeKind::Simple { path, rename } => {
+                                    let mut segs: Vec<Arc<str>> = prefix.to_vec();
+                                    segs.extend(path.segments.iter().map(|s| s.ident.name.clone()));
+                                    let Some(item) = segs.last() else {
+                                        return;
+                                    };
+                                    if item.as_ref() == "self" {
+                                        return;
+                                    }
+                                    let local_name = rename
+                                        .as_ref()
+                                        .map(|r| r.name.clone())
+                                        .unwrap_or_else(|| item.clone());
+                                    if let Some(root) = segs.first() {
+                                        if let Some(ty) =
+                                            ctx.lookup_module_binding(root.as_ref(), item.as_ref())
+                                        {
+                                            ctx.define_var(local_name, ty);
+                                            return;
+                                        }
+                                    }
+                                    if ctx.lookup_var(&local_name).is_none() {
+                                        ctx.define_var(local_name, Ty::fresh_var());
+                                    }
+                                }
+                                ast::UseTreeKind::Nested { path, trees } => {
+                                    let mut next: Vec<Arc<str>> = prefix.to_vec();
+                                    next.extend(path.segments.iter().map(|s| s.ident.name.clone()));
+                                    for sub in trees {
+                                        bind_local_use_tree(ctx, sub, &next);
+                                    }
+                                }
+                                ast::UseTreeKind::Glob(_) => {}
+                            }
+                        }
+                        bind_local_use_tree(self.ctx, &use_def.tree, &[]);
                     }
                     _ => {}
                 }
@@ -8778,11 +8895,35 @@ impl<'ctx> TypeInfer<'ctx> {
                 return Ty::vec(Ty::fresh_var());
             }
 
+            // HashMap<K, V> / BTreeMap<K, V>: built-in maps carrying key/value types.
+            // A user type with the same name takes priority.
+            if matches!(name, "HashMap" | "BTreeMap")
+                && self.ctx.lookup_type_by_name(name).is_none()
+            {
+                if let Some(generics) = path.last_generics() {
+                    let type_args: Vec<Ty> = generics
+                        .iter()
+                        .filter_map(|arg| match arg {
+                            ast::GenericArg::Type(ty) => Some(self.lower_type(ty)),
+                            _ => None,
+                        })
+                        .collect();
+                    if type_args.len() == 2 {
+                        return Ty::adt(DefId::DUMMY, type_args);
+                    }
+                }
+                return Ty::adt(DefId::DUMMY, vec![Ty::fresh_var(), Ty::fresh_var()]);
+            }
+
             // Look up type definition by name
             if let Some(type_def) = self.ctx.lookup_type_by_name(name) {
                 let def_id = type_def.def_id;
-                // Get type arguments from path if present
-                let substs: Vec<Ty> = if let Some(generics) = path.last_generics() {
+                let expected_arity = type_def.generics.len();
+                // Get type arguments from path if present (ignore extra type args on
+                // non-generic math types like `Vec3<f32>` or `Mat4x4<f32>`).
+                let substs: Vec<Ty> = if expected_arity == 0 {
+                    Vec::new()
+                } else if let Some(generics) = path.last_generics() {
                     generics
                         .iter()
                         .filter_map(|arg| {

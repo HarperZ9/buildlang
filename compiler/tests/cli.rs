@@ -22296,13 +22296,12 @@ fn check_rejects_format_macro_with_expression_first_arg() {
 }
 
 #[test]
-fn check_rejects_raw_string_format_string() {
-    // Same root cause: a raw string is not recognised as a format string, so
-    // `println!(r#"text"#)` printed an empty line. Reject it until raw format
-    // strings are supported.
+fn check_and_run_raw_string_format_string() {
+    // Raw string literals are supported as format strings and keep backslashes
+    // verbatim while still substituting `{}` placeholders.
     let fixture = format_macro_fixture(
         "raw",
-        "fn main() ~ Console {\n    println!(r#\"raw text\"#);\n}\n",
+        "fn main() ~ Console {\n    let v = 42;\n    println!(r#\"raw\\n{}\"# , v);\n}\n",
     );
     let output = buildc()
         .arg("check")
@@ -22315,13 +22314,12 @@ fn check_rejects_raw_string_format_string() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(
-        !output.status.success(),
-        "raw format string must be rejected\n{all}"
+        output.status.success(),
+        "raw format string must check cleanly\n{all}"
     );
-    assert!(
-        all.contains("found a raw string literal"),
-        "missing raw-string diagnostic\n{all}"
-    );
+    if c_backend_ready() {
+        assert_eq!(run_stdout(&fixture), "raw\\n42\n");
+    }
 }
 
 #[test]
@@ -22479,18 +22477,17 @@ fn format_strings_print_like_rust() {
     }
     let fixture = m1_fixture(
         "fmt",
-        "fn main() ~ Console {\n    let x = 7;\n    let name = \"bo\";\n    println!(\"[{:>4}] [{:<4}] [{:04}] [{x}] [{0}{0}]\", x, x, x);\n    println!(\"[{:5}] [{:>5}] [{name:?}]\", name, name);\n    println!(\"{:x} {:#X} {:o} {:+}\", 255, 255, 8, 3);\n    println!(\"{:?} {:?} {:.2}\", vec![1, 2], 2.0, 3.14159);\n    let v = vec![\"a\", \"b\"];\n    println!(\"{:?} {}\", v, true);\n}\n",
+        "fn main() ~ Console {\n    let x = 7;\n    let name = \"bo\";\n    println!(\"[{:>4}] [{:<4}] [{:^5}] [{:04}] [{x}] [{0}{0}]\", x, x, x, x);\n    println!(\"[{:5}] [{:>5}] [{:^w$}] [{name:?}]\", name, name, name, w = 6);\n    println!(\"{:x} {:#X} {:o} {:+}\", 255, 255, 8, 3);\n    println!(\"{:?} {:?} {:.2}\", vec![1, 2], 2.0, 3.14159);\n    let v = vec![\"a\", \"b\"];\n    println!(\"{:?} {}\", v, true);\n}\n",
     );
     assert_eq!(
         run_stdout(&fixture),
-        "[   7] [7   ] [0007] [7] [77]\n[bo   ] [   bo] [\"bo\"]\nff 0xFF 10 +3\n[1, 2] 2.0 3.14\n[\"a\", \"b\"] true\n"
+        "[   7] [7   ] [  7  ] [0007] [7] [77]\n[bo   ] [   bo] [  bo  ] [\"bo\"]\nff 0xFF 10 +3\n[1, 2] 2.0 3.14\n[\"a\", \"b\"] true\n"
     );
 }
 
 #[test]
 fn check_rejects_format_specs_the_c_backend_cannot_print() {
     for (label, call) in [
-        ("center", "println!(\"{:^5}\", 1);"),
         ("fill", "println!(\"{:*<5}\", 1);"),
         ("binary", "println!(\"{:b}\", 5);"),
         ("missing", "println!(\"{} {}\", 1);"),

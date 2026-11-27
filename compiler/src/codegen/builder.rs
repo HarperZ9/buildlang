@@ -206,6 +206,11 @@ impl MirBuilder {
         self.func.locals.iter().any(|l| l.id == id)
     }
 
+    /// Get the function's name.
+    pub fn name(&self) -> &str {
+        &self.func.name
+    }
+
     /// Get the function's return type.
     pub fn return_type(&self) -> &MirType {
         &self.func.sig.ret
