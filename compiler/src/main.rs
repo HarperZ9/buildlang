@@ -11,6 +11,7 @@
 
 mod bench_cli;
 mod bql_cli;
+mod doctor_cli;
 #[cfg(feature = "gpu")]
 mod gpu;
 // GPU cross-check receipt (Layer C): emit + verify. Verification is pure JSON +
@@ -575,7 +576,11 @@ enum Commands {
     },
 
     /// Diagnose local compiler, toolchain, backend, and package readiness
-    Doctor,
+    Doctor {
+        /// Emit machine-readable buildlang.doctor/v1 JSON to stdout
+        #[arg(long)]
+        json: bool,
+    },
 
     /// Verify the laws and contracts in a file: proved, refuted or unknown
     Verify {
@@ -1070,7 +1075,7 @@ fn run_cli(cli: Cli) -> Result<(), i32> {
         Some(Commands::Policy { command }) => cmd_policy(command),
         Some(Commands::Receipt { command }) => cmd_receipt(command),
         Some(Commands::Lint { file }) => cmd_lint(&file),
-        Some(Commands::Doctor) => cmd_doctor(),
+        Some(Commands::Doctor { json }) => doctor_cli::cmd_doctor(json),
         Some(Commands::Verify { file, json }) => verify_cli::cmd_verify(&file, json),
         Some(Commands::Tv { file, out, json }) => tv_cli::cmd_tv(&file, out.as_deref(), json),
         Some(Commands::BuildHash { file, runs, json }) => {
@@ -1280,20 +1285,6 @@ fn command_version(command: &str, args: &[&str]) -> Option<String> {
         .map(str::to_string)
 }
 
-fn print_tool_probe(label: &str, command: &str, args: &[&str]) {
-    match command_version(command, args) {
-        Some(version) => println!("  {:<10} found    {}", label, version),
-        None => println!("  {:<10} missing  install or add to PATH", label),
-    }
-}
-
-/// Probe and print the GPU-path readiness row(s) for `buildc doctor`.
-///
-/// Layer A only needs `spirv-val` (valid compute SPIR-V emission). Layer B
-/// (device dispatch) additionally needs the `gpu` cargo feature and a real
-/// Vulkan device. The row prints exactly what was probed and never overclaims:
-/// without the feature it says the device path is not compiled in even if a GPU
-/// is present.
 fn print_gpu_probe() {
     println!("GPU path:");
 
@@ -1378,69 +1369,6 @@ const BACKEND_MATURITY: [(&str, &str, &str); 9] = [
         "assembly/object output; linker integration is partial",
     ),
 ];
-
-fn cmd_doctor() -> Result<(), i32> {
-    println!("BuildLang Doctor");
-    println!("=================");
-    println!();
-    println!("buildc: {} ({})", buildlang::VERSION, std::env::consts::OS);
-
-    let c_compiler = find_c_compiler();
-    match &c_compiler {
-        Some(compiler) => println!("C backend: ready via {}", compiler),
-        None => println!("C backend: missing C compiler; install MSVC, gcc, clang, or cc"),
-    }
-
-    match find_stdlib_path() {
-        Some(path) => println!("stdlib: {}", path.display()),
-        None => {
-            println!("stdlib: not found; set BUILDLANG_STDLIB or install stdlib/ beside buildc")
-        }
-    }
-
-    let registry = load_local_registry_index();
-    if registry.is_empty() {
-        println!("registry: no local packages found");
-    } else {
-        println!("registry: {} local package(s)", registry.len());
-    }
-
-    println!();
-    println!("Optional tools:");
-    print_tool_probe("rustc", "rustc", &["--version"]);
-    print_tool_probe("clang", "clang", &["--version"]);
-    if cfg!(windows) {
-        print_tool_probe("nasm", "nasm", &["--version"]);
-    } else {
-        print_tool_probe("as", "as", &["--version"]);
-    }
-    print_tool_probe("wasmtime", "wasmtime", &["--version"]);
-    print_tool_probe("spirv-val", "spirv-val", &["--version"]);
-
-    println!();
-    println!("Backend maturity:");
-    for (flag, rank, output) in BACKEND_MATURITY {
-        println!("  {flag:<9}{rank:<14}{output}");
-    }
-
-    // GPU row: report exactly what was probed for the real GPU path. Layer A
-    // (valid compute SPIR-V) needs only spirv-val; Layer B (device dispatch)
-    // additionally needs the `gpu` cargo feature AND a Vulkan device.
-    println!();
-    print_gpu_probe();
-
-    let corpus_root = find_semantic_corpus_root();
-    print_substrate_evidence(corpus_root.as_deref());
-
-    println!();
-    if c_compiler.is_some() {
-        println!("Ready for practical C-backend examples: yes");
-    } else {
-        println!("Ready for practical C-backend examples: no");
-    }
-
-    Ok(())
-}
 
 #[derive(serde::Deserialize)]
 struct SemanticCorpusManifest {
