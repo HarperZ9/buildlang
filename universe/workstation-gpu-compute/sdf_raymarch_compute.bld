@@ -1,0 +1,54 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Zain Dana Harper.
+// Analytical sphere-traced SDF raymarching compute kernel (F1, N29, N42).
+// Marches per-pixel primary rays against a sphere-plus-ground-plane SDF
+// using bounded Newton-Raphson Euclidean distance and deterministic step cap.
+
+#[compute(workgroup_size = [64, 1, 1])]
+fn sdf_raymarch_compute(
+    max_steps: u32,
+    sphere_r: f32,
+    t_max: f32,
+    dx_buf: &[f32],
+    dy_buf: &[f32],
+    dz_buf: &[f32],
+    depth_buf: &mut [f32],
+) ~ Gpu {
+    let i = gl_GlobalInvocationID.x;
+    let rdx: f32 = dx_buf[i];
+    let rdy: f32 = dy_buf[i];
+    let rdz: f32 = dz_buf[i];
+
+    let mut t: f32 = 0.0;
+    let mut hit: f32 = 0.0;
+    let mut step: u32 = 0;
+    while step < max_steps {
+        if hit < 0.5 {
+            let px: f32 = rdx * t;
+            let py: f32 = 1.0 + rdy * t;
+            let pz: f32 = rdz * t - 3.0;
+            let r2: f32 = px * px + py * py + pz * pz + 0.000001;
+            let mut len: f32 = 0.5 * (r2 + 1.0);
+            len = 0.5 * (len + r2 / len);
+            len = 0.5 * (len + r2 / len);
+            let d_sphere: f32 = len - sphere_r;
+            let d_plane: f32 = py + 1.0;
+            let mut d: f32 = d_sphere;
+            if d_plane < d_sphere {
+                d = d_plane;
+            }
+            if d < 0.001 {
+                hit = 1.0;
+            }
+            if hit < 0.5 {
+                t = t + d;
+                if t > t_max {
+                    t = t_max;
+                    hit = 1.0;
+                }
+            }
+        }
+        step = step + 1;
+    }
+    depth_buf[i] = t;
+}

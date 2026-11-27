@@ -1,0 +1,59 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Zain Dana Harper.
+// Top-2 load-balanced sparse MoE router gating compute kernel (N44, F1, N29, N42).
+// Selects the top two experts among four load-balanced router logits, renormalizes
+// their gate probabilities to sum to 1.0, and computes weighted sparse expert output.
+
+#[compute(workgroup_size = [64, 1, 1])]
+fn moe_router_topk_compute(
+    balance_bias: f32,
+    e0_buf: &[f32],
+    e1_buf: &[f32],
+    e2_buf: &[f32],
+    e3_buf: &[f32],
+    val_buf: &[f32],
+    y_out: &mut [f32],
+    w1_out: &mut [f32],
+) ~ Gpu {
+    let i = gl_GlobalInvocationID.x;
+    let s0: f32 = e0_buf[i] + balance_bias;
+    let s1: f32 = e1_buf[i] - 0.25 * balance_bias;
+    let s2: f32 = e2_buf[i] + 0.50 * balance_bias;
+    let s3: f32 = e3_buf[i] - 0.50 * balance_bias;
+
+    let mut top1: f32 = s0;
+    let mut top2: f32 = s1;
+    if s1 > top1 {
+        top2 = top1;
+        top1 = s1;
+    }
+    if s2 > top1 {
+        top2 = top1;
+        top1 = s2;
+    } else {
+        if s2 > top2 {
+            top2 = s2;
+        }
+    }
+    if s3 > top1 {
+        top2 = top1;
+        top1 = s3;
+    } else {
+        if s3 > top2 {
+            top2 = s3;
+        }
+    }
+
+    let mut gap: f32 = top1 - top2;
+    if gap < 0.0 {
+        gap = 0.0;
+    }
+    let e2_rel: f32 = 1.0 / (1.0 + gap + 0.5 * gap * gap);
+    let inv_sum: f32 = 1.0 / (1.0 + e2_rel);
+    let w1: f32 = inv_sum;
+    let w2: f32 = e2_rel * inv_sum;
+
+    let x: f32 = val_buf[i];
+    y_out[i] = x * (w1 * top1 + w2 * top2);
+    w1_out[i] = w1;
+}

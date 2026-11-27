@@ -1,0 +1,53 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Zain Dana Harper.
+// Conservative 2x2 Hi-Z depth pyramid min/max reduction kernel (N63, N29, F1).
+// Reduces four child depth texels into conservative farthest (max) and nearest (min)
+// bounds for zero-false-cull hierarchical-Z occlusion testing.
+
+#[compute(workgroup_size = [64, 1, 1])]
+fn hiz_depth_downsample_compute(
+    z_far_clamp: f32,
+    d00_buf: &[f32],
+    d10_buf: &[f32],
+    d01_buf: &[f32],
+    d11_buf: &[f32],
+    max_out: &mut [f32],
+    min_out: &mut [f32],
+) ~ Gpu {
+    let i = gl_GlobalInvocationID.x;
+    let z00: f32 = d00_buf[i];
+    let z10: f32 = d10_buf[i];
+    let z01: f32 = d01_buf[i];
+    let z11: f32 = d11_buf[i];
+
+    let mut z_max: f32 = z00;
+    if z10 > z_max {
+        z_max = z10;
+    }
+    if z01 > z_max {
+        z_max = z01;
+    }
+    if z11 > z_max {
+        z_max = z11;
+    }
+    if z_max > z_far_clamp {
+        z_max = z_far_clamp;
+    }
+
+    let mut z_min: f32 = z00;
+    if z10 < z_min {
+        z_min = z10;
+    }
+    if z01 < z_min {
+        z_min = z01;
+    }
+    if z11 < z_min {
+        z_min = z11;
+    }
+    if z_min < 0.0 {
+        z_min = 0.0;
+    }
+
+    max_out[i] = z_max;
+    min_out[i] = z_min;
+}

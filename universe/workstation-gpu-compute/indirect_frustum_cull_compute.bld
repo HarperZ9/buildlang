@@ -1,0 +1,49 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Zain Dana Harper.
+// GPU-driven indirect draw bounding-sphere frustum culling kernel (F1, N29, N42).
+// Tests each instance sphere (x, y, z, r) against symmetric view frustum planes
+// and emits deterministic visibility flags (1.0 visible, 0.0 culled).
+
+#[compute(workgroup_size = [64, 1, 1])]
+fn indirect_frustum_cull_compute(
+    tan_half_fov: f32,
+    near_z: f32,
+    far_z: f32,
+    px_buf: &[f32],
+    py_buf: &[f32],
+    pz_buf: &[f32],
+    rad_buf: &[f32],
+    vis_buf: &mut [f32],
+) ~ Gpu {
+    let i = gl_GlobalInvocationID.x;
+    let x: f32 = px_buf[i];
+    let y: f32 = py_buf[i];
+    let z: f32 = pz_buf[i];
+    let r: f32 = rad_buf[i];
+
+    let mut visible: f32 = 1.0;
+    if r <= 0.0 {
+        visible = 0.0;
+    }
+    if z + r < near_z {
+        visible = 0.0;
+    }
+    if z - r > far_z {
+        visible = 0.0;
+    }
+
+    let half_span: f32 = z * tan_half_fov + r;
+    if x < 0.0 - half_span {
+        visible = 0.0;
+    }
+    if x > half_span {
+        visible = 0.0;
+    }
+    if y < 0.0 - half_span {
+        visible = 0.0;
+    }
+    if y > half_span {
+        visible = 0.0;
+    }
+    vis_buf[i] = visible;
+}

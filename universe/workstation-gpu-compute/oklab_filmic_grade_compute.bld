@@ -1,0 +1,47 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Zain Dana Harper.
+// ACES filmic tone curve + Oklab perceptual lightness grading kernel (N64, N29, F1).
+// Applies Narkowicz ACES rational filmic compression, Newton-Raphson perceptual
+// cube-root lightness, contrast pivot grading, and strict [0, 1] display bounds.
+
+#[compute(workgroup_size = [64, 1, 1])]
+fn oklab_filmic_grade_compute(
+    exposure: f32,
+    contrast: f32,
+    pivot: f32,
+    hdr_buf: &[f32],
+    out_buf: &mut [f32],
+) ~ Gpu {
+    let i = gl_GlobalInvocationID.x;
+    let mut x: f32 = hdr_buf[i] * exposure;
+    if x < 0.0 {
+        x = 0.0;
+    }
+
+    let num: f32 = x * (2.51 * x + 0.03);
+    let den: f32 = x * (2.43 * x + 0.59) + 0.14;
+    let mut aces: f32 = num / (den + 0.00001);
+    if aces < 0.0 {
+        aces = 0.0;
+    }
+    if aces > 1.0 {
+        aces = 1.0;
+    }
+
+    let mut l_ok: f32 = 0.5 * (aces + 0.5);
+    let l2a: f32 = l_ok * l_ok + 0.00001;
+    l_ok = (2.0 * l_ok + aces / l2a) * 0.33333334;
+    let l2b: f32 = l_ok * l_ok + 0.00001;
+    l_ok = (2.0 * l_ok + aces / l2b) * 0.33333334;
+    let l2c: f32 = l_ok * l_ok + 0.00001;
+    l_ok = (2.0 * l_ok + aces / l2c) * 0.33333334;
+
+    let mut graded: f32 = pivot + (l_ok - pivot) * contrast;
+    if graded < 0.0 {
+        graded = 0.0;
+    }
+    if graded > 1.0 {
+        graded = 1.0;
+    }
+    out_buf[i] = graded;
+}

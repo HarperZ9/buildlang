@@ -1,0 +1,49 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Zain Dana Harper.
+// 2D St. Venant shallow-water heightfield wave step kernel (N63, N29, F1, N42).
+// Advances heightfield h_cur from h_prev and 4-neighbor height taps with CFL-clamped
+// wave speed c2 and viscous damping into h_next.
+
+#[compute(workgroup_size = [64, 1, 1])]
+fn shallow_water_step_compute(
+    c2_dt2_inv_dx2: f32,
+    damping: f32,
+    h_cur_buf: &[f32],
+    h_prev_buf: &[f32],
+    h_l_buf: &[f32],
+    h_r_buf: &[f32],
+    h_u_buf: &[f32],
+    h_d_buf: &[f32],
+    h_next_out: &mut [f32],
+) ~ Gpu {
+    let i = gl_GlobalInvocationID.x;
+    let hc: f32 = h_cur_buf[i];
+    let hp: f32 = h_prev_buf[i];
+    let lap: f32 = h_l_buf[i] + h_r_buf[i] + h_u_buf[i] + h_d_buf[i] - 4.0 * hc;
+
+    let mut cfl: f32 = c2_dt2_inv_dx2;
+    if cfl > 0.24 {
+        cfl = 0.24;
+    }
+    if cfl < 0.0 {
+        cfl = 0.0;
+    }
+
+    let mut damp: f32 = damping;
+    if damp < 0.90 {
+        damp = 0.90;
+    }
+    if damp > 1.0 {
+        damp = 1.0;
+    }
+
+    let vel: f32 = (hc - hp) * damp;
+    let mut h_next: f32 = hc + vel + cfl * lap;
+    if h_next < -8.0 {
+        h_next = -8.0;
+    }
+    if h_next > 8.0 {
+        h_next = 8.0;
+    }
+    h_next_out[i] = h_next;
+}

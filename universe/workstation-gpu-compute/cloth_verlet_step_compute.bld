@@ -1,0 +1,42 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Zain Dana Harper.
+// Verlet cloth integration + Jakobsen distance constraint kernel (H3, N63, N29, F1).
+// Integrates 2D cloth particles under gravity and viscous damping, then projects
+// each particle onto its rest-length constraint ring around anchor (ax, ay).
+
+#[compute(workgroup_size = [64, 1, 1])]
+fn cloth_verlet_step_compute(
+    dt2_grav: f32,
+    damping: f32,
+    rest_len: f32,
+    stiffness: f32,
+    x_buf: &[f32],
+    y_buf: &[f32],
+    px_buf: &[f32],
+    py_buf: &[f32],
+    ax_buf: &[f32],
+    ay_buf: &[f32],
+    x_out: &mut [f32],
+    y_out: &mut [f32],
+) ~ Gpu {
+    let i = gl_GlobalInvocationID.x;
+    let x: f32 = x_buf[i];
+    let y: f32 = y_buf[i];
+    let vx: f32 = (x - px_buf[i]) * damping;
+    let vy: f32 = (y - py_buf[i]) * damping;
+
+    let nx: f32 = x + vx;
+    let ny: f32 = y + vy - dt2_grav;
+
+    let dx: f32 = nx - ax_buf[i];
+    let dy: f32 = ny - ay_buf[i];
+    let dist2: f32 = dx * dx + dy * dy + 0.000001;
+    let mut dist: f32 = 0.5 * (dist2 + 1.0);
+    dist = 0.5 * (dist + dist2 / dist);
+    dist = 0.5 * (dist + dist2 / dist);
+    dist = 0.5 * (dist + dist2 / dist);
+
+    let corr: f32 = ((dist - rest_len) / (dist + 0.000001)) * stiffness;
+    x_out[i] = nx - dx * corr;
+    y_out[i] = ny - dy * corr;
+}

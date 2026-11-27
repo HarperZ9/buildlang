@@ -1,0 +1,48 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Zain Dana Harper.
+// Rayleigh + Mie atmospheric single-scattering sky compute kernel (E23, N63, N29, F1).
+// Evaluates wavelength-dependent Rayleigh dipole phase and Henyey-Greenstein Mie
+// forward lobe attenuated by optical airmass transmittance.
+
+#[compute(workgroup_size = [64, 1, 1])]
+fn sky_rayleigh_mie_compute(
+    mie_g: f32,
+    beta_r: f32,
+    beta_m: f32,
+    sun_irrad: f32,
+    cos_buf: &[f32],
+    airmass_buf: &[f32],
+    sky_out: &mut [f32],
+) ~ Gpu {
+    let i = gl_GlobalInvocationID.x;
+    let mut mu: f32 = cos_buf[i];
+    if mu < -1.0 {
+        mu = -1.0;
+    }
+    if mu > 1.0 {
+        mu = 1.0;
+    }
+    let mut am: f32 = airmass_buf[i];
+    if am < 0.1 {
+        am = 0.1;
+    }
+
+    let phase_r: f32 = 0.05968310 * (1.0 + mu * mu);
+    let g2: f32 = mie_g * mie_g;
+    let mut m_den: f32 = 1.0 + g2 - 2.0 * mie_g * mu;
+    if m_den < 0.0001 {
+        m_den = 0.0001;
+    }
+    let mut s_m: f32 = 0.5 * (m_den + 1.0);
+    s_m = 0.5 * (s_m + m_den / s_m);
+    s_m = 0.5 * (s_m + m_den / s_m);
+    let phase_m: f32 = 0.07957747 * (1.0 - g2) / (m_den * s_m + 0.00001);
+
+    let tau: f32 = (beta_r + beta_m) * am;
+    let trans: f32 = 1.0 / (1.0 + tau + 0.5 * tau * tau);
+    let mut rad: f32 = sun_irrad * trans * (beta_r * phase_r + beta_m * phase_m) * am;
+    if rad < 0.0 {
+        rad = 0.0;
+    }
+    sky_out[i] = rad;
+}

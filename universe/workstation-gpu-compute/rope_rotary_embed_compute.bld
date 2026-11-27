@@ -1,0 +1,32 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Zain Dana Harper.
+// Paired Rotary Positional Embedding (RoPE) GPU compute kernel (N44, F1, N29, N42).
+// Rotates (q_even, q_odd) feature pairs using unit-normalized Cayley angle trig
+// (cos_th, sin_th) preserving exact L2 norm across arbitrary sequence positions.
+
+#[compute(workgroup_size = [64, 1, 1])]
+fn rope_rotary_embed_compute(
+    inv_freq_scale: f32,
+    pos_step: f32,
+    qe_buf: &[f32],
+    qo_buf: &[f32],
+    phase_buf: &[f32],
+    qe_out: &mut [f32],
+    qo_out: &mut [f32],
+) ~ Gpu {
+    let i = gl_GlobalInvocationID.x;
+    let qe: f32 = qe_buf[i];
+    let qo: f32 = qo_buf[i];
+    let theta: f32 = phase_buf[i] * inv_freq_scale * pos_step;
+
+    let half_t: f32 = 0.5 * theta;
+    let t2: f32 = half_t * half_t;
+    let inv_d: f32 = 1.0 / (1.0 + t2);
+    let c_val: f32 = (1.0 - t2) * inv_d;
+    let s_val: f32 = (2.0 * half_t) * inv_d;
+
+    let rot_e: f32 = qe * c_val - qo * s_val;
+    let rot_o: f32 = qe * s_val + qo * c_val;
+    qe_out[i] = rot_e;
+    qo_out[i] = rot_o;
+}

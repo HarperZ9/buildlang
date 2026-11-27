@@ -1,0 +1,42 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Zain Dana Harper.
+// Fused RMSNorm + SwiGLU transformer FFN GPU compute kernel (N42, N29, F1).
+// Normalizes per-lane activations using Newton-Raphson inverse RMS and evaluates
+// rational SiLU-gated SwiGLU projection with finite output clamping.
+
+#[compute(workgroup_size = [64, 1, 1])]
+fn rmsnorm_swiglu_compute(
+    eps: f32,
+    w_gate: f32,
+    w_up: f32,
+    x0_buf: &[f32],
+    x1_buf: &[f32],
+    scale_buf: &[f32],
+    out_buf: &mut [f32],
+) ~ Gpu {
+    let i = gl_GlobalInvocationID.x;
+    let x0: f32 = x0_buf[i];
+    let x1: f32 = x1_buf[i];
+    let g_scale: f32 = scale_buf[i];
+
+    let ms: f32 = 0.5 * (x0 * x0 + x1 * x1) + eps;
+    let mut rms: f32 = 0.5 * (ms + 1.0);
+    rms = 0.5 * (rms + ms / rms);
+    rms = 0.5 * (rms + ms / rms);
+    rms = 0.5 * (rms + ms / rms);
+    let inv_rms: f32 = 1.0 / (rms + 0.000001);
+
+    let n0: f32 = x0 * inv_rms * g_scale;
+    let n1: f32 = x1 * inv_rms * g_scale;
+    let gate: f32 = w_gate * n0 + 0.25 * n1;
+    let up: f32 = w_up * n1 + 0.25 * n0;
+    let sig: f32 = 0.5 + (0.5 * gate) / (1.0 + gate * gate);
+    let mut y: f32 = (gate * sig) * up;
+    if y < -16.0 {
+        y = -16.0;
+    }
+    if y > 16.0 {
+        y = 16.0;
+    }
+    out_buf[i] = y;
+}
