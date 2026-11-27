@@ -6404,7 +6404,7 @@ impl<'ctx> TypeInfer<'ctx> {
                 return Ty::int(IntTy::Usize);
             }
             "is_empty" => return Ty::bool(),
-            "contains" | "starts_with" | "ends_with" => return Ty::bool(),
+            "contains" | "contains_key" | "starts_with" | "ends_with" => return Ty::bool(),
             "clone" | "copy" => {
                 // `.clone()` through a reference `&T` returns the cloned inner
                 // value `T`, not `&T` (avoids `&?T` occurring in `?T` and
@@ -6544,7 +6544,11 @@ impl<'ctx> TypeInfer<'ctx> {
                     TyKind::Ref(_, _, inner) => self.apply(inner),
                     _ => applied_recv,
                 };
-                if matches!(method_name, "get" | "get_mut") {
+                // In BuildLang (SPECIFICATION.md 7.7), `HashMap::get(k)` can be
+                // used both directly as `V` (`let t = m.get(k); t.field`) and in
+                // `match m.get(k) { Some(v) => ..., None => ... }`, so keep `get`
+                // polymorphic (`fresh_var`) and narrow `get_mut` to `Option<&mut V>`.
+                if method_name == "get_mut" {
                     if let TyKind::Adt(def_id, substs) = &inner_recv.kind {
                         let is_map = (*def_id == DefId::DUMMY && substs.len() == 2)
                             || matches!(
