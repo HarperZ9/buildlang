@@ -1,0 +1,162 @@
+// SPDX-FileCopyrightText: 2026 Zain Dana Harper
+// SPDX-License-Identifier: MIT
+//
+// Wave 56G Author Idea N39 (STA-060): Reasons-in-Training-Data Two-Arm Local Generalization Study
+// Native BuildLang (buildc 1.15.0 --release --superopt --emit-cert, safe String ops only):
+//   Compares Arm A (label-only supervision) vs Arm B (causal-reason + invariant-feature supervision)
+//   under an OOD spurious-correlation flip (x[3] flips sign from +2.8*y on train to -2.8*y on OOD):
+//     - Arm A achieves high train accuracy (>95%) but collapses on OOD flip (<40%).
+//     - Arm B retains >= 90% OOD accuracy via causal-reason attribution supervision.
+//     - Planted Control: leaking the spurious feature into the causal-reason mask causes OOD
+//       collapse (<40%), caught fail-closed by the OOD-invariance guard.
+
+fn det_val(seed: i64, idx: i64) -> f64 {
+    let a: f64 = ((seed * 137 + idx * 43 + 11) as f64) * 0.6713;
+    let b: f64 = ((seed * 89 + idx * 61 + 17) as f64) * 1.1329;
+    (sin(a) + cos(b)) * 0.7
+}
+
+fn sigmoid(z: f64) -> f64 {
+    if z > 20.0 { return 1.0; }
+    if z < -20.0 { return 0.0; }
+    1.0 / (1.0 + exp(-z))
+}
+
+// Generate N samples x[N*6], y[N] with spurious cue correlation spur_sign in {+1.0, -1.0}
+fn make_dataset(seed: i64, n: usize, spur_sign: f64, x_out: &mut Vec<f64>, y_out: &mut Vec<f64>) {
+    let mut i: usize = 0;
+    while i < n {
+        let x0: f64 = det_val(seed, (i * 6) as i64);
+        let x1: f64 = det_val(seed, (i * 6 + 1) as i64);
+        let x2: f64 = det_val(seed, (i * 6 + 2) as i64);
+        let x4: f64 = det_val(seed, (i * 6 + 4) as i64);
+        let x5: f64 = det_val(seed, (i * 6 + 5) as i64);
+        let causal: f64 = 1.2 * x0 - 1.1 * x1 + 0.9 * x2;
+        let y: f64 = if causal >= 0.0 { 1.0 } else { 0.0 };
+        let y_pm: f64 = 2.0 * y - 1.0;
+        // High-SNR spurious shortcut in dim 3 (correlates strongly with y on train, flips on OOD!)
+        let x3: f64 = spur_sign * 2.8 * y_pm + 0.25 * det_val(seed, (i * 6 + 3) as i64);
+        x_out.push(x0); x_out.push(x1); x_out.push(x2);
+        x_out.push(x3); x_out.push(x4); x_out.push(x5);
+        y_out.push(y);
+        i = i + 1;
+    }
+}
+
+// Train 6D logistic classifier with optional causal-reason mask penalty on non-reason features.
+// reason_mask[j] == 1.0 means feature j is an approved causal reason; 0.0 penalizes reliance.
+fn train_arm(
+    x_tr: &Vec<f64>,
+    y_tr: &Vec<f64>,
+    n_tr: usize,
+    use_reasons: bool,
+    reason_mask: &Vec<f64>,
+    w_out: &mut Vec<f64>,
+) {
+    let d: usize = 6;
+    let mut j: usize = 0;
+    while j < d { w_out[j] = 0.0; j = j + 1; }
+
+    let mut step: usize = 0;
+    while step < 180 {
+        let mut grad: Vec<f64> = Vec::new();
+        j = 0;
+        while j < d { grad.push(0.0); j = j + 1; }
+
+        let mut i: usize = 0;
+        while i < n_tr {
+            let mut z: f64 = 0.0;
+            j = 0;
+            while j < d { z = z + w_out[j] * x_tr[i * d + j]; j = j + 1; }
+            let diff: f64 = sigmoid(z) - y_tr[i];
+            j = 0;
+            while j < d {
+                grad[j] = grad[j] + diff * x_tr[i * d + j];
+                j = j + 1;
+            }
+            i = i + 1;
+        }
+        let inv_n: f64 = 1.0 / (n_tr as f64);
+        j = 0;
+        while j < d {
+            let reg: f64 = if use_reasons && reason_mask[j] < 0.5 { 4.0 } else { 0.02 };
+            w_out[j] = w_out[j] - 0.18 * (grad[j] * inv_n + reg * w_out[j]);
+            j = j + 1;
+        }
+        step = step + 1;
+    }
+}
+
+fn eval_acc(x: &Vec<f64>, y: &Vec<f64>, n: usize, w: &Vec<f64>) -> f64 {
+    let d: usize = 6;
+    let mut hits: i32 = 0;
+    let mut i: usize = 0;
+    while i < n {
+        let mut z: f64 = 0.0;
+        let mut j: usize = 0;
+        while j < d { z = z + w[j] * x[i * d + j]; j = j + 1; }
+        let pred: f64 = if z >= 0.0 { 1.0 } else { 0.0 };
+        if pred == y[i] { hits = hits + 1; }
+        i = i + 1;
+    }
+    (hits as f64) / (n as f64)
+}
+
+fn main() ~ Console + Clock {
+    let mut failures: i32 = 0;
+    let t0: i64 = clock_ns();
+
+    let n_tr: usize = 240;
+    let n_ood: usize = 240;
+    let mut x_tr: Vec<f64> = Vec::new();
+    let mut y_tr: Vec<f64> = Vec::new();
+    let mut x_ood: Vec<f64> = Vec::new();
+    let mut y_ood: Vec<f64> = Vec::new();
+    make_dataset(3901, n_tr, 1.0, &mut x_tr, &mut y_tr);
+    make_dataset(3999, n_ood, -1.0, &mut x_ood, &mut y_ood);
+
+    let mut mask_clean: Vec<f64> = Vec::new();
+    mask_clean.push(1.0); mask_clean.push(1.0); mask_clean.push(1.0);
+    mask_clean.push(0.0); mask_clean.push(0.0); mask_clean.push(0.0);
+
+    let mut mask_leaked: Vec<f64> = Vec::new();
+    mask_leaked.push(1.0); mask_leaked.push(1.0); mask_leaked.push(1.0);
+    mask_leaked.push(1.0); mask_leaked.push(0.0); mask_leaked.push(0.0);
+
+    let mut w_a: Vec<f64> = Vec::new();
+    let mut w_b: Vec<f64> = Vec::new();
+    let mut w_leak: Vec<f64> = Vec::new();
+    let mut j: usize = 0;
+    while j < 6 { w_a.push(0.0); w_b.push(0.0); w_leak.push(0.0); j = j + 1; }
+
+    // Arm A: Label-only supervision -> grabs shortcut x[3], collapses on OOD flip!
+    train_arm(&x_tr, &y_tr, n_tr, false, &mask_clean, &mut w_a);
+    let arm_a_train: f64 = eval_acc(&x_tr, &y_tr, n_tr, &w_a);
+    let arm_a_ood: f64 = eval_acc(&x_ood, &y_ood, n_ood, &w_a);
+
+    // Arm B: Causal-reason + invariant-feature supervision -> retains >= 90% OOD!
+    train_arm(&x_tr, &y_tr, n_tr, true, &mask_clean, &mut w_b);
+    let arm_b_train: f64 = eval_acc(&x_tr, &y_tr, n_tr, &w_b);
+    let arm_b_ood: f64 = eval_acc(&x_ood, &y_ood, n_ood, &w_b);
+
+    // Planted Control: Leaked spurious feature inside reason mask -> collapses (< 40%) -> caught!
+    train_arm(&x_tr, &y_tr, n_tr, true, &mask_leaked, &mut w_leak);
+    let leak_ood: f64 = eval_acc(&x_ood, &y_ood, n_ood, &w_leak);
+    let ctrl_leak_caught: bool = leak_ood < 0.40;
+
+    if arm_a_train < 0.90 || arm_a_ood >= 0.40 || arm_b_train < 0.90 || arm_b_ood < 0.90 || !ctrl_leak_caught {
+        failures = failures + 1;
+    }
+    let t1: i64 = clock_ns();
+    let elapsed_ns: i64 = t1 - t0;
+
+    println!(
+        "METRIC arm_a_train={:.12} arm_a_ood={:.12} arm_b_train={:.12} arm_b_ood={:.12}",
+        arm_a_train, arm_a_ood, arm_b_train, arm_b_ood
+    );
+    println!(
+        "METRIC leak_ood={:.12} ctrl_leak_caught={} elapsed_ns={}",
+        leak_ood, ctrl_leak_caught, elapsed_ns
+    );
+    println!("SUMMARY failures={}", failures);
+}

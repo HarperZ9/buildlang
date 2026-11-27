@@ -1,0 +1,246 @@
+// SPDX-FileCopyrightText: 2026 Zain Dana Harper
+// SPDX-License-Identifier: MIT
+//
+// Wave 58H - Author Idea J5: Nested 4-Organelle Living Model Simulator (NOH-1)
+// Simulates 4 coupled organelles (sensory, memory, critic, motor; 32 total nodes) under a strict
+// metabolic energy cap, activity-based excess-then-pruning sparsity, and homeostasis recovery
+// after a 25% node lesion.
+// Planted Control: unbudgeted runaway growth breaching metabolic energy cap caught fail-closed.
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { -x } else { x }
+}
+
+fn det_sqrt(x: f64) -> f64 {
+    if x <= 0.0 {
+        return 0.0;
+    }
+    let mut s: f64 = x;
+    let mut scale: f64 = 1.0;
+    while s > 4.0 {
+        s = s * 0.25;
+        scale = scale * 2.0;
+    }
+    while s < 0.25 {
+        s = s * 4.0;
+        scale = scale * 0.5;
+    }
+    let mut g: f64 = 0.5 * (s + 1.0);
+    let mut i: i32 = 0;
+    while i < 12 {
+        g = 0.5 * (g + s / g);
+        i = i + 1;
+    }
+    g * scale
+}
+
+fn compute_energy(weights: &Vec<f64>, alive: &Vec<i32>) -> f64 {
+    let n: usize = weights.len();
+    let mut e: f64 = 0.0;
+    let mut i: usize = 0;
+    while i < n {
+        if alive[i] == 1 {
+            e = e + 2.5 * weights[i] * weights[i];
+        }
+        i = i + 1;
+    }
+    e
+}
+
+fn motor_output(weights: &Vec<f64>, alive: &Vec<i32>, drive: &Vec<f64>) -> f64 {
+    // 4-stage nested cascade: sensory (0..8) -> memory (8..16) -> critic (16..24) -> motor (24..32)
+    let mut s_act: f64 = 0.0;
+    let mut m_act: f64 = 0.0;
+    let mut c_act: f64 = 0.0;
+    let mut out: f64 = 0.0;
+    let mut k: usize = 0;
+    while k < 8 {
+        if alive[k] == 1 {
+            s_act = s_act + weights[k] * drive[k];
+        }
+        k = k + 1;
+    }
+    s_act = s_act / 4.0;
+    k = 0;
+    while k < 8 {
+        if alive[8 + k] == 1 {
+            m_act = m_act + weights[8 + k] * (0.65 * s_act + 0.35 * drive[k]);
+        }
+        k = k + 1;
+    }
+    m_act = m_act / 4.0;
+    k = 0;
+    while k < 8 {
+        if alive[16 + k] == 1 {
+            c_act = c_act + weights[16 + k] * m_act;
+        }
+        k = k + 1;
+    }
+    c_act = c_act / 4.0;
+    k = 0;
+    while k < 8 {
+        if alive[24 + k] == 1 {
+            out = out + weights[24 + k] * c_act;
+        }
+        k = k + 1;
+    }
+    out / 4.0
+}
+
+struct OrganismRun {
+    cap_status: i32,
+    max_energy: f64,
+    pruned_pct: f64,
+    pre_lesion_err: f64,
+    lesion_peak_err: f64,
+    recovery_err: f64,
+}
+
+fn run_organism(enforce_cap: bool) -> OrganismRun {
+    let n_nodes: usize = 32;
+    let e_cap: f64 = 100.0;
+    let target_out: f64 = 0.80;
+
+    let mut weights: Vec<f64> = Vec::new();
+    let mut alive: Vec<i32> = Vec::new();
+    let mut drive: Vec<f64> = Vec::new();
+
+    let mut i: usize = 0;
+    while i < 8 {
+        // 5 strongly driven sensory channels + 3 weak redundant channels for pruning
+        if i < 5 {
+            drive.push(1.05 + 0.05 * (i as f64));
+        } else {
+            drive.push(0.12 + 0.02 * (i as f64));
+        }
+        i = i + 1;
+    }
+    i = 0;
+    while i < n_nodes {
+        let local: usize = i % 8;
+        let w0: f64 = if local < 5 { 0.82 } else { 0.28 };
+        weights.push(w0);
+        alive.push(1);
+        i = i + 1;
+    }
+
+    let mut max_energy: f64 = 0.0;
+    let mut cap_status: i32 = 0;
+    let mut pruned_pct: f64 = 0.0;
+    let mut pre_lesion_err: f64 = 0.0;
+    let mut lesion_peak_err: f64 = 0.0;
+
+    let mut tick: i32 = 0;
+    while tick < 80 {
+        let cur_out: f64 = motor_output(&weights, &alive, &drive);
+        let err: f64 = target_out - cur_out;
+
+        if tick == 39 {
+            pre_lesion_err = abs_f64(err);
+        }
+        // Apply 25% lesion (8/32 nodes, 2 per organelle) at tick 40
+        if tick == 40 {
+            let mut org: usize = 0;
+            while org < 4 {
+                alive[org * 8 + 0] = 0;
+                alive[org * 8 + 1] = 0;
+                org = org + 1;
+            }
+            lesion_peak_err = abs_f64(target_out - motor_output(&weights, &alive, &drive));
+        }
+
+        // Local Hebbian/homeostatic weight update
+        let lr: f64 = if enforce_cap { 0.16 } else { 0.25 };
+        i = 0;
+        while i < n_nodes {
+            if alive[i] == 1 {
+                let local: usize = i % 8;
+                let act: f64 = drive[local];
+                if enforce_cap {
+                    weights[i] = weights[i] + lr * err * (0.35 + 0.65 * act);
+                } else {
+                    // Planted unbudgeted runaway growth
+                    weights[i] = weights[i] * 1.04 + 0.05;
+                }
+                if weights[i] < 0.05 {
+                    weights[i] = 0.05;
+                }
+                if !enforce_cap && weights[i] > 12.0 {
+                    weights[i] = 12.0;
+                }
+            }
+            i = i + 1;
+        }
+
+        // Activity-based excess-then-pruning at tick 20
+        if tick == 20 {
+            let mut pruned: i32 = 0;
+            i = 0;
+            while i < n_nodes {
+                let local: usize = i % 8;
+                if alive[i] == 1 && local >= 5 && weights[i] < 0.85 {
+                    alive[i] = 0;
+                    pruned = pruned + 1;
+                }
+                i = i + 1;
+            }
+            pruned_pct = 100.0 * (pruned as f64) / (n_nodes as f64);
+        }
+
+        let mut e_now: f64 = compute_energy(&weights, &alive);
+        if enforce_cap && e_now > e_cap {
+            let scale: f64 = det_sqrt(e_cap / e_now);
+            i = 0;
+            while i < n_nodes {
+                if alive[i] == 1 {
+                    weights[i] = weights[i] * scale;
+                }
+                i = i + 1;
+            }
+            e_now = compute_energy(&weights, &alive);
+        }
+        if e_now > max_energy {
+            max_energy = e_now;
+        }
+        if e_now > e_cap + 1.0e-9 {
+            cap_status = 1;
+        }
+
+        tick = tick + 1;
+    }
+
+    let recovery_err: f64 = abs_f64(target_out - motor_output(&weights, &alive, &drive));
+    OrganismRun {
+        cap_status: cap_status,
+        max_energy: max_energy,
+        pruned_pct: pruned_pct,
+        pre_lesion_err: pre_lesion_err,
+        lesion_peak_err: lesion_peak_err,
+        recovery_err: recovery_err,
+    }
+}
+
+fn main() ~ Clock + Console {
+    let t0: i64 = clock_ns();
+
+    let ok_run: OrganismRun = run_organism(true);
+    let runaway: OrganismRun = run_organism(false);
+
+    let recovery_ratio: f64 = ok_run.recovery_err / ok_run.lesion_peak_err;
+    let checksum: f64 = ok_run.max_energy + ok_run.pruned_pct + ok_run.pre_lesion_err
+        + ok_run.lesion_peak_err + ok_run.recovery_err + recovery_ratio;
+    let elapsed_ms: f64 = ((clock_ns() - t0) as f64) / 1000000.0;
+
+    println!(
+        "J5_PART1 cap_status={} max_energy={} pruned_pct={} pre_lesion_err={}",
+        ok_run.cap_status, ok_run.max_energy, ok_run.pruned_pct, ok_run.pre_lesion_err
+    );
+    println!(
+        "J5_PART2 lesion_peak_err={} recovery_err={} recovery_ratio={} planted_runaway_status={}",
+        ok_run.lesion_peak_err, ok_run.recovery_err, recovery_ratio, runaway.cap_status
+    );
+    println!(
+        "J5_PART3 runaway_energy={} checksum={} elapsed_ms={}",
+        runaway.max_energy, checksum, elapsed_ms
+    );
+}

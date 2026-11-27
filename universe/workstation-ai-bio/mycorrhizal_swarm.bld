@@ -1,0 +1,147 @@
+// SPDX-FileCopyrightText: 2026 Zain Dana Harper
+// SPDX-License-Identifier: MIT
+//
+// Wave 56G Author Idea N40 (STA-061): Tree & Mycorrhizal Biological Swarm Coordination Protocol
+// Native BuildLang (buildc 1.15.0 --release --superopt --emit-cert, safe String ops only):
+//   32-node decentralized mycorrhizal graph (ring + +/-3 + +/-7 chordal hyphae, zero central hub)
+//   balances asymmetric initial nutrient/compute loads via local chemical-gradient diffusion:
+//     - Intact 32-node graph converges to near-zero load imbalance (CV < 0.01).
+//     - Under 25% random node kill (8/32 killed), surviving 24 nodes converge cleanly (CV < 0.05).
+//     - Planted Control: centralized hub-and-spoke topology suffers catastrophic SPOF partition
+//       when the single hub node fails (CV > 1.0, zero balancing achieved).
+
+fn load_cv(loads: &Vec<f64>, alive: &Vec<i32>) -> f64 {
+    let n: usize = loads.len();
+    let mut cnt: f64 = 0.0;
+    let mut sum: f64 = 0.0;
+    let mut i: usize = 0;
+    while i < n {
+        if alive[i] == 1 {
+            sum = sum + loads[i];
+            cnt = cnt + 1.0;
+        }
+        i = i + 1;
+    }
+    let mu: f64 = sum / cnt;
+    let mut var: f64 = 0.0;
+    i = 0;
+    while i < n {
+        if alive[i] == 1 {
+            let d: f64 = loads[i] - mu;
+            var = var + d * d;
+        }
+        i = i + 1;
+    }
+    sqrt(var / cnt) / mu
+}
+
+// Run decentralized local-gradient diffusion on 32-node graph with adjacency matrix adj[32*32]
+fn run_diffusion(adj: &Vec<i32>, alive: &Vec<i32>, rounds: usize) -> f64 {
+    let n: usize = 32;
+    let mut loads: Vec<f64> = Vec::new();
+    let mut next_l: Vec<f64> = Vec::new();
+    let mut i: usize = 0;
+    while i < n {
+        // Asymmetric initial load: nodes 0..7 heavily loaded (100.0), nodes 8..31 sparse (4.0)
+        let init_v: f64 = if i < 8 { 100.0 } else { 4.0 };
+        loads.push(init_v);
+        next_l.push(init_v);
+        i = i + 1;
+    }
+
+    let eta: f64 = 0.12;
+    let mut r: usize = 0;
+    while r < rounds {
+        i = 0;
+        while i < n {
+            if alive[i] == 1 {
+                let mut flux: f64 = 0.0;
+                let mut j: usize = 0;
+                while j < n {
+                    if alive[j] == 1 && adj[i * n + j] == 1 {
+                        flux = flux + (loads[j] - loads[i]);
+                    }
+                    j = j + 1;
+                }
+                next_l[i] = loads[i] + eta * flux;
+            } else {
+                next_l[i] = 0.0;
+            }
+            i = i + 1;
+        }
+        i = 0;
+        while i < n { loads[i] = next_l[i]; i = i + 1; }
+        r = r + 1;
+    }
+    load_cv(&loads, alive)
+}
+
+fn main() ~ Console + Clock {
+    let mut failures: i32 = 0;
+    let t0: i64 = clock_ns();
+    let n: usize = 32;
+
+    // 1. Build 32-node decentralized mycorrhizal graph (degree 6: +/-1, +/-3, +/-7 mod 32)
+    let mut adj_myco: Vec<i32> = Vec::new();
+    let mut adj_star: Vec<i32> = Vec::new();
+    let mut i: usize = 0;
+    while i < n * n {
+        adj_myco.push(0);
+        adj_star.push(0);
+        i = i + 1;
+    }
+    i = 0;
+    while i < n {
+        let p1: usize = (i + 1) % n;
+        let m1: usize = (i + n - 1) % n;
+        let p3: usize = (i + 3) % n;
+        let m3: usize = (i + n - 3) % n;
+        let p7: usize = (i + 7) % n;
+        let m7: usize = (i + n - 7) % n;
+        adj_myco[i * n + p1] = 1; adj_myco[i * n + m1] = 1;
+        adj_myco[i * n + p3] = 1; adj_myco[i * n + m3] = 1;
+        adj_myco[i * n + p7] = 1; adj_myco[i * n + m7] = 1;
+        if i > 0 {
+            adj_star[0 * n + i] = 1;
+            adj_star[i * n + 0] = 1;
+        }
+        i = i + 1;
+    }
+
+    let mut alive_all: Vec<i32> = Vec::new();
+    let mut alive_kill25: Vec<i32> = Vec::new();
+    let mut alive_hub_dead: Vec<i32> = Vec::new();
+    i = 0;
+    while i < n {
+        alive_all.push(1);
+        // Deterministic 25% kill (8 of 32 nodes killed across loaded & sparse regions)
+        let killed: bool = (i % 4) == 1;
+        alive_kill25.push(if killed { 0 } else { 1 });
+        // Central-hub SPOF kill: only node 0 dies!
+        alive_hub_dead.push(if i == 0 { 0 } else { 1 });
+        i = i + 1;
+    }
+
+    let intact_cv: f64 = run_diffusion(&adj_myco, &alive_all, 80);
+    let kill25_cv: f64 = run_diffusion(&adj_myco, &alive_kill25, 80);
+
+    // Planted Control: Central hub SPOF failure partitions all 31 leaves -> CV remains > 1.0!
+    let star_spof_cv: f64 = run_diffusion(&adj_star, &alive_hub_dead, 80);
+    let ctrl_spof_caught: bool = star_spof_cv > 1.0;
+
+    if intact_cv >= 0.01 || kill25_cv >= 0.05 || !ctrl_spof_caught {
+        failures = failures + 1;
+    }
+    let t1: i64 = clock_ns();
+    let elapsed_ns: i64 = t1 - t0;
+
+    println!(
+        "METRIC nodes=32 intact_cv={:.12} kill25_cv={:.12} star_spof_cv={:.12}",
+        intact_cv, kill25_cv, star_spof_cv
+    );
+    println!(
+        "METRIC ctrl_spof_caught={} elapsed_ns={}",
+        ctrl_spof_caught, elapsed_ns
+    );
+    println!("SUMMARY failures={}", failures);
+}
