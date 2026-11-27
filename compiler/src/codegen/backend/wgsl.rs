@@ -386,7 +386,7 @@ impl WgslBackend {
                         visited,
                     )?;
                     self.indent -= 1;
-                    if *else_block != merge {
+                    if *else_block != merge && !Self::is_empty_goto(*else_block, merge, blocks) {
                         self.writeln("} else {");
                         self.indent += 1;
                         self.emit_region(
@@ -430,14 +430,30 @@ impl WgslBackend {
                         continue;
                     }
                     let lhs = self.local_name(*dest, &func.locals);
-                    let rhs = self.rvalue_to_wgsl(value, func, bindings)?;
+                    let rhs = match value {
+                        MirRValue::Use(v) => {
+                            self.value_to_wgsl_typed(v, dest_ty, &func.locals, bindings)?
+                        }
+                        _ => self.rvalue_to_wgsl(value, func, bindings)?,
+                    };
                     self.writeln(&format!("{lhs} = {rhs};"));
                 }
                 MirStmtKind::IndexStore {
                     base, index, value, ..
                 } => {
                     let b = self.value_to_wgsl(base, &func.locals, bindings)?;
-                    let idx = self.value_to_wgsl(index, &func.locals, bindings)?;
+                    let idx_ty = Self::value_type(index, &func.locals);
+                    let idx_expected = idx_ty
+                        .as_ref()
+                        .filter(|t| matches!(t, MirType::Int(IntSize::I32, _)))
+                        .cloned()
+                        .unwrap_or_else(MirType::u32);
+                    let idx = self.value_to_wgsl_typed(
+                        index,
+                        Some(&idx_expected),
+                        &func.locals,
+                        bindings,
+                    )?;
                     let val = self.rvalue_to_wgsl(value, func, bindings)?;
                     self.writeln(&format!("{b}[{idx}] = {val};"));
                 }
@@ -541,8 +557,16 @@ impl WgslBackend {
         match rv {
             MirRValue::Use(v) => self.value_to_wgsl(v, &func.locals, bindings),
             MirRValue::BinaryOp { op, left, right } => {
-                let l = self.value_to_wgsl(left, &func.locals, bindings)?;
-                let r = self.value_to_wgsl(right, &func.locals, bindings)?;
+                let l_ty = Self::value_type(left, &func.locals);
+                let r_ty = Self::value_type(right, &func.locals);
+                let l_expected = r_ty
+                    .as_ref()
+                    .filter(|t| matches!(t, MirType::Int(IntSize::I32, _)));
+                let r_expected = l_ty
+                    .as_ref()
+                    .filter(|t| matches!(t, MirType::Int(IntSize::I32, _)));
+                let l = self.value_to_wgsl_typed(left, l_expected, &func.locals, bindings)?;
+                let r = self.value_to_wgsl_typed(right, r_expected, &func.locals, bindings)?;
                 let sym = match op {
                     BinOp::Add | BinOp::AddChecked | BinOp::AddWrapping | BinOp::AddSaturating => {
                         "+"
@@ -591,7 +615,14 @@ impl WgslBackend {
             }
             MirRValue::IndexAccess { base, index, .. } => {
                 let b = self.value_to_wgsl(base, &func.locals, bindings)?;
-                let i = self.value_to_wgsl(index, &func.locals, bindings)?;
+                let idx_ty = Self::value_type(index, &func.locals);
+                let idx_expected = idx_ty
+                    .as_ref()
+                    .filter(|t| matches!(t, MirType::Int(IntSize::I32, _)))
+                    .cloned()
+                    .unwrap_or_else(MirType::u32);
+                let i =
+                    self.value_to_wgsl_typed(index, Some(&idx_expected), &func.locals, bindings)?;
                 Ok(format!("{b}[{i}]"))
             }
             MirRValue::Aggregate { kind, operands } => {
@@ -744,6 +775,39 @@ impl WgslBackend {
         }
     }
 
+    fn value_type(value: &MirValue, locals: &[MirLocal]) -> Option<MirType> {
+        match value {
+            MirValue::Local(id) => locals.iter().find(|l| l.id == *id).map(|l| l.ty.clone()),
+            _ => None,
+        }
+    }
+
+    fn value_to_wgsl_typed(
+        &self,
+        value: &MirValue,
+        expected: Option<&MirType>,
+        locals: &[MirLocal],
+        bindings: &EntryBindings,
+    ) -> CodegenResult<String> {
+        if let (MirValue::Const(MirConst::Int(v, _)), Some(MirType::Int(IntSize::I32, signed))) =
+            (value, expected)
+        {
+            if !signed && *v >= 0 && u32::try_from(*v).is_ok() {
+                return Ok(format!("{v}u"));
+            }
+            if *signed && i32::try_from(*v).is_ok() {
+                return Ok(format!("{v}i"));
+            }
+        }
+        self.value_to_wgsl(value, locals, bindings)
+    }
+
+    fn is_empty_goto(bid: BlockId, target: BlockId, blocks: &[MirBlock]) -> bool {
+        blocks.iter().find(|b| b.id == bid).is_some_and(|b| {
+            b.stmts.is_empty() && b.terminator == Some(MirTerminator::Goto(target))
+        })
+    }
+
     fn const_to_wgsl(&self, c: &MirConst) -> CodegenResult<String> {
         match c {
             MirConst::Bool(b) => Ok(if *b { "true" } else { "false" }.to_string()),
@@ -768,10 +832,11 @@ impl WgslBackend {
                         "f64 literal is not supported in WGSL; use f32".to_string(),
                     ));
                 }
-                if v.fract() == 0.0 {
-                    Ok(format!("{v}.0f"))
+                let s = format!("{v}");
+                if !s.contains('.') && !s.contains('e') && !s.contains('E') {
+                    Ok(format!("{s}.0f"))
                 } else {
-                    Ok(format!("{v}f"))
+                    Ok(format!("{s}f"))
                 }
             }
             MirConst::Unit => Ok("0u".to_string()),
@@ -892,7 +957,11 @@ impl WgslBackend {
             .and_then(|l| l.name.as_ref())
             .map(|n| match n.as_ref() {
                 "var" | "let" | "fn" | "struct" | "uniform" | "storage" | "workgroup"
-                | "private" | "function" | "return" | "loop" | "break" | "continue" => {
+                | "private" | "function" | "return" | "loop" | "break" | "continue"
+                | "override" | "const" | "alias" | "bitcast" | "discard" | "enable"
+                | "requires" | "diagnostic" | "switch" | "case" | "default" | "for" | "while"
+                | "if" | "else" | "true" | "false" | "f32" | "i32" | "u32" | "bool" | "array"
+                | "vec2" | "vec3" | "vec4" | "mat4x4" | "ptr" | "atomic" => {
                     format!("_{n}")
                 }
                 other => other.to_string(),
