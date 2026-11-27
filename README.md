@@ -8,12 +8,12 @@
 Deterministic systems and GPU language (`buildc 1.15.0`) with typed capability effects, native C binary output, HLSL/GLSL shaders, BuildDB/BuildQL (`bdb/`), and fast `f64` ML, physics, and workstation kernels.
 
 ```powershell
-# Windows (PowerShell) - installs buildc, qdb, and port with SHA-256 verification
+# Windows (PowerShell): installs buildc, qdb, and port with SHA-256 verification
 irm https://raw.githubusercontent.com/HarperZ9/buildlang/main/install.ps1 | iex
 ```
 
 ```bash
-# Linux and macOS - installs buildc, qdb, and port with SHA-256 verification
+# Linux and macOS: installs buildc, qdb, and port with SHA-256 verification
 curl -fsSL https://raw.githubusercontent.com/HarperZ9/buildlang/main/install.sh | sh
 
 # Or build buildc from crates.io
@@ -205,6 +205,8 @@ changed since, verify fails and says why.
 | `buildc run <file>` | Compile and run via the C backend; `--stdio-mode native\|portable-lf`, `--emit-receipt`, `--invariant`, `--units`, `--gpu` |
 | `buildc build [path]` | Build a project; `--emit c\|header\|staticlib\|exe`, `--release`, `--target`, `--stdio-mode native\|portable-lf`, `--keep-c` |
 | `buildc check <file>` | Type-check; `--error-format json`, `--receipt`, `--policy`, `--profile`, `--expect-profile-digest` |
+| `buildc check-dir <dir>` | Parallel directory type-check (`#372`) with deterministic JSON summary |
+| `buildc verify-cert <cert.json>` | Independent fail-closed verification of superoptimizer and 5-target GPU shader certificates (`#370`) |
 | `buildc explain [code]` | Explain a diagnostic code such as `BL0403`, or list every code |
 | `buildc test [dir]` | Run `.bld` programs against `.expected` files |
 | `buildc fmt` / `buildc lint` | Format (`--check`, `--write`) and lint source |
@@ -233,7 +235,7 @@ reference with expected output lives in [USAGE.md](USAGE.md).
 |---|---|---|---|
 | C | `--target c` (default) | `.c` / executable | Production |
 | HLSL | `--target hlsl` | `.hlsl` | Working |
-| GLSL | `--target glsl` | `.glsl` | Working |
+| GLSL | `--target glsl` | `.glsl` | Working (`--emit-gpu-cert` enabled for 5/5 GPU targets in `#370`) |
 | SPIR-V | `--target spirv` | `.spv` | Experimental (compute kernels validate under spirv-val) |
 | LLVM IR | `--target llvm` | `.ll` | Experimental |
 | WASM | `--target wasm` | `.wasm` | Experimental |
@@ -321,9 +323,10 @@ and `#[linear]` types are experimental. Live test and burn-down results are in
 - Build suite: [suite/](suite/) holds build-engine, build-ui, build-finance, build-oracle and
   build-ecosystem, consolidated in November 2026
 - Build Universe: [universe/](universe/) holds BuildLang modules for graphics, colour, finance,
-  systems, workstation kernels, a hobby OS kernel, and the frametrace tracer. CI runs
-  `buildc check` on all 275 `.bld` files; 104 pass and [universe/CHECK-FAILS.txt](universe/CHECK-FAILS.txt)
-  lists the 171 the compiler does not accept yet (with 4 remaining compiler feature gaps tracked in
+  systems, workstation kernels (`#357..#368` graduated 100 MIT kernels), `universe/selfhost/` (`#358`),
+  a hobby OS kernel, and the frametrace tracer. At live `origin/main` (`341c7fa2`), CI runs `buildc check`
+  on all 405 `.bld` files: 270 pass (`+166` vs the 104 baseline) and [universe/CHECK-FAILS.txt](universe/CHECK-FAILS.txt)
+  lists the 135 expected failures (`-36` vs 171, with 4 compiler feature gaps tracked in
   [tests/features/GAPS.txt](tests/features/GAPS.txt))
 - Editor support: [editors/](editors/) holds the VS Code extensions and TextMate grammar;
   [editors/README.md](editors/README.md) says what each folder is and what is published where
@@ -333,6 +336,12 @@ and `#[linear]` types are experimental. Live test and burn-down results are in
 Contributor checks before changing public behavior: `cargo test` and
 `cargo fmt --check` from `compiler/`, `buildc doctor`, and
 `buildc corpus verify`. See [CONTRIBUTING.md](CONTRIBUTING.md).
+
+## Verified and Scope Limits
+
+- **Live `origin/main` anchor (`341c7fa2`, `F1`, `G9`, `N49`, `N52`, `N53`, `I16`):** `universe/` holds 405 `.bld` files (270 pass, 135 tracked in `universe/CHECK-FAILS.txt`, 4 feature gaps in `tests/features/GAPS.txt`). Recent merged PRs include `#358` (`universe/selfhost/`), `#364` and `#368` (`workstation-moats` and `workstation-ai-bio`), `#365` (HLSL DXC and SPIR-V RPO), `#369` (Superopt V6 `R21..R30`), `#370` and `#373` (5/5 certified GPU compute targets with hardened WGSL/Metal 3.1), `#371` (`BuildString::collect`), `#372` (parallel `buildc check-dir`, 6.87x faster than serial sweeps), and `#374` (`CODE_OF_CONDUCT.md`, 11/11 OSS Gold Standard).
+- **Verification mechanism and silicon budget:** Deterministic e-graph MIR rewrite proofs, SHA-256 `engine-receipt/1` envelopes, and `SIG-058` metadata checks run locally in `O(N)` pass time on a single CPU (`< 2 GB` RAM, `< 60 s` wall clock, zero cloud calls). Planted failing test and negative controls reject tampered certificates, malformed 2-arg `fma` nodes, and undeclared effects fail-closed alongside sibling flagships (`superframe`, `flywheel`, `cmmns`) in the unified 15-repo SBOM.
+- **Honest scope limits:** `buildc 1.15.0` remains the latest tagged crates.io release while `v1.16.0` stays staged offline pending tag sign-off; 135 `universe/CHECK-FAILS.txt` entries remain explicit expected failures with zero skipped checks, and `buildlang/` self-hosted sources remain non-compiling long-term architecture.
 
 ## License
 
