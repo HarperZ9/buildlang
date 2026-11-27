@@ -9,6 +9,7 @@
 //!
 //! This is the main entry point for the BuildLang compiler command-line tool.
 
+mod bench_cli;
 mod bql_cli;
 #[cfg(feature = "gpu")]
 mod gpu;
@@ -466,6 +467,28 @@ enum Commands {
         /// Arguments to pass to the program
         #[arg(trailing_var_arg = true)]
         args: Vec<String>,
+    },
+
+    /// Benchmark a BuildLang program in release mode with determinism verification
+    Bench {
+        /// BuildLang source file (.bld) to benchmark
+        file: PathBuf,
+
+        /// Number of timed runs (default: 10)
+        #[arg(long, default_value_t = 10)]
+        runs: usize,
+
+        /// Number of untimed warmup runs (default: 2)
+        #[arg(long, default_value_t = 2)]
+        warmup: usize,
+
+        /// Run the certified e-graph superoptimizer over MIR before C codegen
+        #[arg(long)]
+        superopt: bool,
+
+        /// Emit machine-readable buildlang.bench/v1 JSON to stdout
+        #[arg(long)]
+        json: bool,
     },
 
     /// Start a REPL session
@@ -1030,6 +1053,13 @@ fn run_cli(cli: Cli) -> Result<(), i32> {
                 )
             }
         }
+        Some(Commands::Bench {
+            file,
+            runs,
+            warmup,
+            superopt,
+            json,
+        }) => bench_cli::cmd_bench(&file, runs, warmup, superopt, json),
         Some(Commands::Repl) => cmd_repl(),
         Some(Commands::Lsp) => cmd_lsp(),
         Some(Commands::Mcp) => mcp::serve(&mcp_check_path),
