@@ -2,9 +2,9 @@ cff-version: 1.2.0
 message: "If you use this software, please cite it using these metadata."
 type: software
 title: "BuildLang"
-abstract: "A compiled language where function types list side effects such as file, network and C access. Builds native binaries through C and emits HLSL/GLSL shaders; other backends are experimental."
+abstract: "BuildLang (buildc v1.15.0) is a deterministic systems and GPU language whose function types declare side effects (Console, FileSystem, Network, FFI). It compiles across 12 CPU and GPU targets (C, LLVM IR, x86-64, ARM64, RISC-V 64, WebAssembly, SPIR-V, HLSL, GLSL, WGSL, Apple Metal MSL, Rust), ships BuildDB/BuildQL (qdb), BuildTeX verified PDFs, a certified V5 e-graph superoptimizer, and GPU polyhedral translation validation."
 version: "1.15.0"
-date-released: 2026-11-14
+date-released: "2026-11-26"
 authors:
   - family-names: "Harper"
     given-names: "Zain Dana"
@@ -14,10 +14,17 @@ url: "https://harperz9.github.io/buildlang.html"
 license: AGPL-3.0-only
 keywords:
   - compiler
-  - glsl
-  - hlsl
-  - programming-language
-  - shaders
-  - systems-programming
   - algebraic-effects
   - capability-security
+  - deterministic-build
+  - e-graph
+  - superoptimizer
+  - gpu-shaders
+  - hlsl
+  - glsl
+  - wgsl
+  - metal
+  - riscv64
+  - wasm
+  - programming-language
+  - systems-programming

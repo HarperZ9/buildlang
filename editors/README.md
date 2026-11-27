@@ -4,8 +4,8 @@ Three folders. Each is self-contained and keeps its own licence file.
 
 | Folder | What it is | Came from |
 |---|---|---|
-| `vscode/` | VS Code extension, version 1.0.5: grammar (scope `source.bld`), 19 snippets, bracket rules, and a client that starts `buildc lsp` | written in this repository |
-| `vscode-syntax/` | VS Code extension, version 0.1.0: grammar (scope `source.build`), bracket rules and a file icon, with no code to run | `HarperZ9/buildlang-vscode`, `main` at `c7cc292`, moved here 2026-11-15 |
+| `vscode/` | Canonical VS Code extension (`HarperZ9.buildlang`), version 1.15.0: grammar (scope `source.bld`), 19 snippets, icons, bracket rules, and a client that starts `buildc lsp` | written in this repository |
+| `vscode-syntax/` | Syntax-only VS Code extension (`private: true` to prevent duplicate Marketplace publish), version 0.1.0: grammar (scope `source.build`), bracket rules and a file icon, with no code to run | `HarperZ9/buildlang-vscode`, `main` at `c7cc292`, moved here 2026-11-15 |
 | `tmLanguage/` | The TextMate grammar alone, with sample `.bld` files, for Sublime Text, TextMate and other editors | `HarperZ9/buildlang-tmLanguage`, `main` at `d9c3de1`, moved here 2026-11-15 |
 
 `vscode-syntax/syntaxes/buildlang.tmLanguage.json` and `tmLanguage/grammars/buildlang.tmLanguage.json`

@@ -1,0 +1,48 @@
+{
+  "@context": "https://doi.org/10.5063/schema/codemeta-2.0",
+  "@type": "SoftwareSourceCode",
+  "name": "BuildLang",
+  "version": "1.15.0",
+  "description": "Deterministic effect-typed systems and GPU language compiling across 12 CPU and GPU targets (C, LLVM IR, x86-64, ARM64, RISC-V 64, WASM, SPIR-V, HLSL, GLSL, WGSL, Metal MSL, Rust), with BuildDB (qdb), BuildTeX verified PDFs, certified V5 e-graph superoptimization, and GPU polyhedral translation validation.",
+  "license": "https://spdx.org/licenses/AGPL-3.0-only.html",
+  "codeRepository": "https://github.com/HarperZ9/buildlang",
+  "issueTracker": "https://github.com/HarperZ9/buildlang/issues",
+  "url": "https://harperz9.github.io/buildlang.html",
+  "downloadUrl": "https://crates.io/crates/buildlang",
+  "programmingLanguage": [
+    "Rust",
+    "BuildLang",
+    "C"
+  ],
+  "operatingSystem": [
+    "Windows",
+    "macOS",
+    "Linux"
+  ],
+  "applicationCategory": "Compiler",
+  "author": [
+    {
+      "@type": "Person",
+      "@id": "https://orcid.org/0009-0001-7175-5393",
+      "givenName": "Zain Dana",
+      "familyName": "Harper",
+      "url": "https://harperz9.github.io/"
+    }
+  ],
+  "datePublished": "2026-11-14",
+  "dateModified": "2026-11-26",
+  "keywords": [
+    "compiler",
+    "algebraic-effects",
+    "capability-security",
+    "e-graph",
+    "superoptimizer",
+    "hlsl",
+    "glsl",
+    "wgsl",
+    "metal",
+    "riscv64",
+    "wasm",
+    "agpl-3.0-only"
+  ]
+}

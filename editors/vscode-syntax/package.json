@@ -3,6 +3,7 @@
   "displayName": "BuildLang",
   "description": "Syntax highlighting and editor configuration for BuildLang effects-language files.",
   "version": "0.1.0",
+  "private": true,
   "publisher": "HarperZ9",
   "author": {
     "name": "Zain Dana Harper"

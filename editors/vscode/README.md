@@ -1,101 +1,72 @@
 # BuildLang for Visual Studio Code
 
-Language support for [BuildLang](https://github.com/HarperZ9/buildlang) -- syntax highlighting, snippets, and bracket matching for `.bld` files.
+Language support for [BuildLang](https://github.com/HarperZ9/buildlang): syntax highlighting, snippets, file icons, bracket matching, and `buildc lsp` launch for `.bld` files.
 
 ## Features
 
-- **Syntax highlighting** -- keywords, types, effects, attributes, strings, numbers, comments, macros, operators, and more
-- **Optional LSP process launch** via `buildc lsp` -- the current server loop
-  starts, but real client request dispatch is still partial; diagnostics,
-  go-to-definition, hover, and completion providers are not yet working VS Code
-  features
-- **Bracket matching**, auto-closing pairs, and code folding
-- **19 snippets** for common constructs (functions, structs, enums, traits, loops, tests, shaders, effects)
-- **Shader attribute highlighting** for `#[vertex]`, `#[fragment]`, and `#[compute]`
-- **Effect system highlighting** -- `effect`, `perform`, `handle`, `with`, `resume`, and the `~` effect annotation
+- **Syntax highlighting**: keywords, types, effects, attributes, strings, numbers, comments, macros, and operators.
+- **Optional LSP process launch** via `buildc lsp`: starts the compiler language server; diagnostics, go-to-definition, hover, and completion providers are under active expansion.
+- **Bracket matching**, auto-closing pairs, and code folding.
+- **19 snippets** for common constructs (functions, structs, enums, traits, loops, tests, shaders, effects).
+- **Shader attribute highlighting** for `#[vertex]`, `#[fragment]`, and `#[compute]`.
+- **Effect system highlighting**: `effect`, `perform`, `handle`, `with`, `resume`, and the `~` effect annotation.
 
-## Installation
+## Install BuildLang (`buildc`, `qdb`, `port`)
 
-### From source
+```powershell
+# Windows (PowerShell, SHA-256 verified)
+irm https://raw.githubusercontent.com/HarperZ9/buildlang/main/install.ps1 | iex
+```
+
+```bash
+# Linux and macOS (SHA-256 verified)
+curl -fsSL https://raw.githubusercontent.com/HarperZ9/buildlang/main/install.sh | sh
+
+# Or build buildc from crates.io
+cargo install buildlang
+```
+
+Then ensure `buildc` is on your `PATH` or set `buildlang.serverPath` in VS Code settings.
+
+## Extension Packaging and Development
 
 ```bash
 cd editors/vscode
-npm install
+npm ci
 npm run compile
+npx --yes @vscode/vsce package --no-dependencies
+code --install-extension buildlang-1.15.0.vsix
 ```
 
-Then press **F5** in VS Code to launch an Extension Development Host with the extension loaded.
-
-### Packaging
-
-```bash
-npm install -g @vscode/vsce
-vsce package
-code --install-extension buildlang-1.0.0.vsix
-```
+Or open `editors/vscode` in VS Code and press **F5** to launch an Extension Development Host.
 
 ## Configuration
 
-| Setting                  | Default    | Description                          |
-|--------------------------|------------|--------------------------------------|
-| `buildlang.serverPath`  | `buildc`  | Path to the `buildc` compiler binary |
-| `buildlang.target`      | `c`        | Default compilation target (`c`, `llvm`, `wasm`, `spirv`, `x86-64`, `arm64`) |
-
-## Language Server
-
-The extension can start the BuildLang language server process (`buildc lsp`).
-The current compiler-side server loop is lifecycle-only for real clients, so
-syntax highlighting, snippets, brackets, comments, and file icons are the
-reliable editor features today. LSP providers exist in the compiler tree but are
-not yet exposed as working VS Code requests.
-
-Install the compiler:
-
-```bash
-cd compiler
-cargo build --release
-# The binary is at compiler/target/release/buildc
-```
-
-Then either add it to your PATH or set `buildlang.serverPath` in VS Code settings.
+| Setting | Default | Description |
+| --- | --- | --- |
+| `buildlang.serverPath` | `buildc` | Path to the `buildc` compiler binary |
+| `buildlang.target` | `c` | Default compilation target (`c`, `hlsl`, `glsl`, `wgsl`, `msl`, `spirv`, `llvm`, `wasm`, `x86-64`, `arm64`, `riscv64`, `rust`) |
 
 ## Snippets
 
-| Prefix     | Description                      |
-|------------|----------------------------------|
-| `fn`       | Function definition              |
-| `fnm`      | Method with `&self`              |
-| `st`       | Struct definition                |
-| `impl`     | Implementation block             |
-| `enum`     | Enum definition                  |
-| `trait`    | Trait definition                 |
-| `for`      | For loop over range              |
-| `match`    | Match expression                 |
-| `while`    | While loop                       |
-| `let`      | Let binding                      |
-| `letm`     | Mutable let binding              |
-| `test`     | Test function with `#[test]`     |
-| `mod`      | Module definition                |
-| `vec`      | `vec!` macro                     |
-| `println`  | `println!` macro                 |
-| `effect`   | Effect definition                |
-| `fragment` | Fragment shader entry point      |
-| `vertex`   | Vertex shader entry point        |
-| `uniform`  | Shader uniform constant          |
-
-## Supported Syntax
-
-The grammar covers all current BuildLang constructs:
-
-- Control flow: `if`, `else`, `match`, `loop`, `while`, `for`, `in`, `break`, `continue`, `return`
-- Declarations: `fn`, `struct`, `enum`, `trait`, `impl`, `type`, `const`, `static`, `let`, `mut`, `pub`, `mod`, `use`, `extern`
-- Effects: `effect`, `handle`, `perform`, `with`, `resume`
-- Types: primitive (`i32`, `f64`, `bool`, `str`, ...), GPU (`vec2`, `vec3`, `vec4`, `mat4`, ...), user-defined
-- Generics: `fn identity<T>(x: T) -> T`
-- Attributes: `#[vertex]`, `#[fragment]`, `#[compute]`, `#[test]`
-- Macros: `println!()`, `format!()`, `vec![]`
-- Lifetime annotations: `'a`, `'static`
-- Comments: `//`, `/* */`, `///` doc comments
-- Strings with format interpolation: `"Hello, {}!"`
-- Number literals: decimal, hex (`0x`), binary (`0b`), octal (`0o`), floats, with type suffixes
-- Operators: `+`, `-`, `*`, `/`, `%`, `==`, `!=`, `<`, `>`, `<=`, `>=`, `&&`, `||`, `!`, `&`, `|`, `^`, `<<`, `>>`, `..`, `..=`, `->`, `=>`, `~`, `?`
+| Prefix | Description |
+| --- | --- |
+| `fn` | Function definition |
+| `fnm` | Method with `&self` |
+| `st` | Struct definition |
+| `impl` | Implementation block |
+| `enum` | Enum definition |
+| `trait` | Trait definition |
+| `for` | For loop over range |
+| `match` | Match expression |
+| `while` | While loop |
+| `let` | Let binding |
+| `letm` | Mutable let binding |
+| `test` | Test function with `#[test]` |
+| `mod` | Module definition |
+| `vec` | `vec!` macro |
+| `println` | `println!` macro |
+| `effect` | Effect definition |
+| `fragment` | Fragment shader entry point |
+| `vertex` | Vertex shader entry point |
+| `uniform` | Shader uniform constant |

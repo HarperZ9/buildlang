@@ -97,14 +97,15 @@ jobs:
           done
           echo "all present"
 
-      # editors/vscode is the extension that was already in this repository. Nothing compiled it in
-      # CI before.
-      - name: The language-client extension compiles
+      # editors/vscode is the canonical HarperZ9.buildlang Marketplace extension.
+      - name: The language-client extension compiles and builds as a .vsix
         working-directory: editors/vscode
         run: |
           npm ci --no-audit --no-fund
           npm run compile
           test -f out/extension.js
+          npx --yes @vscode/vsce@3.9.2 package --no-dependencies
+          ls -l buildlang-*.vsix
 
       - name: Art receipt digests
         run: |

@@ -1,20 +1,42 @@
 {
   "name": "buildlang",
   "displayName": "BuildLang",
-  "description": "BuildLang language support - syntax highlighting, snippets, and bracket matching",
-  "version": "1.0.5",
+  "description": "BuildLang language support: syntax highlighting, snippets, bracket matching, and buildc LSP client for .bld files.",
+  "version": "1.15.0",
   "publisher": "HarperZ9",
+  "icon": "icons/icon.png",
+  "homepage": "https://harperz9.github.io/buildlang.html",
   "repository": {
     "type": "git",
-    "url": "https://github.com/HarperZ9/buildlang"
+    "url": "https://github.com/HarperZ9/buildlang.git",
+    "directory": "editors/vscode"
+  },
+  "bugs": {
+    "url": "https://github.com/HarperZ9/buildlang/issues"
   },
   "license": "AGPL-3.0-only",
   "engines": {
-    "vscode": "^1.80.0"
+    "vscode": "^1.85.0"
   },
   "categories": [
     "Programming Languages"
   ],
+  "keywords": [
+    "buildlang",
+    "compiler",
+    "algebraic-effects",
+    "capability-security",
+    "shaders",
+    "hlsl",
+    "glsl",
+    "wgsl",
+    "metal",
+    "systems-programming"
+  ],
+  "galleryBanner": {
+    "color": "#0b0f1a",
+    "theme": "dark"
+  },
   "activationEvents": [
     "onLanguage:buildlang"
   ],
@@ -65,11 +87,15 @@
             "c",
             "hlsl",
             "glsl",
+            "wgsl",
+            "msl",
             "spirv",
             "llvm",
             "wasm",
             "x86-64",
-            "arm64"
+            "arm64",
+            "riscv64",
+            "rust"
           ],
           "description": "Default compilation target"
         }

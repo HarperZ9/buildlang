@@ -1,18 +1,34 @@
 # BuildLang
 
-> BuildLang is a Rust-like systems language whose function signatures declare the capabilities the code may use (`~ Console + FileSystem`). `buildc check` rejects undeclared capability use and any program the C backend cannot compile, and reports errors as stable `BLxxxx` codes in JSON. Programs compile to C and native binaries.
+> BuildLang (`buildc v1.15.0`) is a deterministic systems and GPU language whose function signatures declare capabilities (`~ Console + FileSystem + Network + Foreign`). `buildc check` rejects undeclared capability use and reports stable `BLxxxx` diagnostics in JSON. It compiles across 12 CPU and GPU targets (`c`, `llvm`, `x86-64`, `arm64`, `riscv64`, `wasm`, `spirv`, `hlsl`, `glsl`, `msl`, `wgsl`, `rust`) and ships BuildDB (`qdb`), BuildTeX (`typeset`), and the `port` migration tool.
 
-Agents writing BuildLang: run `buildc check FILE --error-format=json` after every edit, read each diagnostic's `code`, `help` and `suggestions`, and do not apply a suggestion marked `widens_authority` without deciding the code should have that capability.
+Agents writing BuildLang: run `buildc check FILE --error-format=json` after every edit, read each diagnostic's `code`, `help`, and `suggestions`, and never apply a suggestion marked `widens_authority` unless that capability belongs on the function.
+
+## Install
+
+- Windows (PowerShell, SHA-256 verified): `irm https://raw.githubusercontent.com/HarperZ9/buildlang/main/install.ps1 | iex`
+- Linux and macOS (SHA-256 verified): `curl -fsSL https://raw.githubusercontent.com/HarperZ9/buildlang/main/install.sh | sh`
+- From crates.io: `cargo install buildlang`
+
+## Verified Capabilities
+
+- Certified V5 e-graph superoptimizer (`--superopt`, `--emit-cert`, `buildc verify-cert`, PR #344): deterministic MIR saturation across 13 integer and IEEE-754 rules with independent fail-closed axiom checking across all 12 targets.
+- Certified GPU polyhedral loop tiling and uniformity-safe subgroup translation validation (`--emit-gpu-cert`, `--subgroup-mode`, `buildlang.gpu-tv-cert/v1`, PR #346): checks RAW/WAR loop-carried dependences and divergent barriers fail-closed across `wgsl`, `hlsl`, `msl`, and `spirv`.
+- Universe and stdlib status (PR #347): `113/276` universe modules pass `buildc check` (`universe/CHECK-FAILS.txt` reduced from `170` to `163`, `0` regressions), and Tier-1 organism component `universe/foundation` compiles and passes under MSVC.
+- Storage, typesetting, and migration: BuildDB/BuildQL (`bdb/db.bld`, format 2 per-4-KiB FNV-1a page checksums, `0/500` silent fuzz corruptions), BuildTeX (`typeset/`, zero external TeX binaries), and `port` (`port c`, `port py`, `port plain`, plus `port/universal/` lifters).
 
 ## Docs
 
-- [Agent skill](skills/buildlang/SKILL.md): the check loop, capabilities, and what the C backend supports today
-- [Specification](SPECIFICATION.md): syntax, types, ownership, effects; every example is checked in CI
-- [Effects guide](docs/EFFECTS_GUIDE.md): capabilities, effect declarations and one-shot handlers
-- [Diagnostic codes](docs/ERROR_CODES.md): every BLxxxx code and its meaning
-- [Diagnostics schema](docs/schemas/buildlang.diagnostics.v1.schema.json): the JSON report shape
+- [Agent skill](skills/buildlang/SKILL.md): check loop, capabilities, and C backend coverage
+- [Specification](SPECIFICATION.md): syntax, types, ownership, and effects (examples checked in CI)
+- [Effects guide](docs/EFFECTS_GUIDE.md): capabilities, effect declarations, and one-shot handlers
+- [Diagnostic codes](docs/ERROR_CODES.md): BLxxxx codes and explanations
+- [Diagnostics schema](docs/schemas/buildlang.diagnostics.v1.schema.json): JSON diagnostic report format
+- [Editor support](editors/README.md): VS Code (`editors/vscode/`, `HarperZ9.buildlang`) and TextMate grammar
 
 ## Optional
 
 - [Changelog](CHANGELOG.md)
-- [Status](STATUS.md): what is verified and what is experimental
+- [Status](STATUS.md): verified features and experimental backends
+- [Citation metadata](CITATION.cff)
+- [CodeMeta metadata](codemeta.json)
