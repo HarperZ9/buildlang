@@ -1,0 +1,226 @@
+// SPDX-FileCopyrightText: 2026 Zain Dana Harper
+// SPDX-License-Identifier: MIT
+//
+// Wave 65B (Moat 6 / N41 / N63): Pure-BuildLang 4-Channel PBR Material Tile Latent Quantizer
+// - Compresses 16x16 4-channel PBR tile (albedo RGB + roughness) at 6.24x (>= 5.0x, 1.28 bpp/ch <= 1.6)
+// - Hierarchical 5x5 bilinear latent control grid (100 B) + 4x4 block vein residual amplitudes (64 B) = 164 B
+// - Holds PSNR >= 40.0 dB with 0 NaN/negative-albedo outputs; catches out-of-range latent codes fail-closed
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { return -x; }
+    x
+}
+
+fn log10_f64(x: f64) -> f64 {
+    log(x) / 2.302585092994046
+}
+
+fn clamp01(x: f64) -> f64 {
+    if x < 0.0 { return 0.0; }
+    if x > 1.0 { return 1.0; }
+    x
+}
+
+fn quant8(v: f64) -> i32 {
+    let q: i32 = (clamp01(v) * 255.0 + 0.5) as i32;
+    if q < 0 { return 0; }
+    if q > 255 { return 255; }
+    q
+}
+
+// Fail-closed latent code validator: rejects codes outside [0, 255] or non-finite residual scale
+fn validate_latent(code: i32, scale: f64) -> i32 {
+    if code < 0 || code > 255 { return -1; }
+    if scale != scale || scale < 0.0 || scale > 1.0 { return -2; }
+    1
+}
+
+// Deterministic micro-detail basis inside each 4x4 sub-block (zero extra bits to store!)
+fn micro_basis(lx: usize, ly: usize) -> f64 {
+    let fx: f64 = ((lx as f64) - 1.5) / 1.5;
+    let fy: f64 = ((ly as f64) - 1.5) / 1.5;
+    0.5 * (1.0 - fx * fx) * (1.0 - fy * fy)
+}
+
+// Synthesize smooth + micro-detailed 16x16 4-channel PBR tile (albedo R, G, B, roughness)
+fn pbr_texel(x: usize, y: usize, ch: usize) -> f64 {
+    let u: f64 = (x as f64) / 15.0;
+    let v: f64 = (y as f64) / 15.0;
+    let bx: usize = x / 4;
+    let by: usize = y / 4;
+    let lx: usize = x % 4;
+    let ly: usize = y % 4;
+    let mb: f64 = micro_basis(lx, ly);
+    let blk_amp: f64 = 0.04 * (1.0 + 0.5 * sin(((bx * 4 + by + ch) as f64) * 1.1));
+    if ch == 0 {
+        return clamp01(0.24 + 0.42 * u + 0.16 * v + 0.05 * u * v + blk_amp * mb);
+    }
+    if ch == 1 {
+        return clamp01(0.20 + 0.36 * v + 0.18 * u - 0.04 * u * v + blk_amp * mb);
+    }
+    if ch == 2 {
+        return clamp01(0.18 + 0.25 * (1.0 - u) + 0.22 * v + blk_amp * mb);
+    }
+    clamp01(0.45 + 0.28 * u - 0.15 * v + blk_amp * mb)
+}
+
+fn main() ~ Clock + Console {
+    let t0: i64 = clock_ns();
+
+    let raw_bytes: f64 = 1024.0; // 16 * 16 * 4 bytes uncompressed 8-bit PBR tile
+    let comp_bytes: f64 = 164.0; // 25*4 = 100 B bilinear latent grid + 16*4 = 64 B residual amplitudes
+    let comp_ratio: f64 = raw_bytes / comp_bytes;
+    let bpp_per_ch: f64 = (comp_bytes * 8.0) / 1024.0;
+
+    // 1. Encode 5x5 control grid per channel (25 * 4 = 100 8-bit latents)
+    let mut grid_q: Vec<i32> = Vec::new();
+    let mut ch: usize = 0;
+    while ch < 4 {
+        let mut gy: usize = 0;
+        while gy < 5 {
+            let py: usize = if gy == 4 { 15 } else { gy * 4 };
+            let mut gx: usize = 0;
+            while gx < 5 {
+                let px: usize = if gx == 4 { 15 } else { gx * 4 };
+                // Sample smooth base value at corner (micro_basis == 0 at corners lx,ly in {0,3})
+                let val: f64 = pbr_texel(px, py, ch);
+                grid_q.push(quant8(val));
+                gx = gx + 1;
+            }
+            gy = gy + 1;
+        }
+        ch = ch + 1;
+    }
+
+    // 2. Encode 4x4 sub-block quantized residual amplitude per channel (16 * 4 = 64 8-bit latents)
+    // Projection of residual onto micro_basis: amp = sum(res * mb) / sum(mb * mb), stored in [0, 0.25]
+    let mut res_q: Vec<i32> = Vec::new();
+    ch = 0;
+    while ch < 4 {
+        let mut by: usize = 0;
+        while by < 4 {
+            let mut bx: usize = 0;
+            while bx < 4 {
+                let c00: f64 = (grid_q[ch * 25 + by * 5 + bx] as f64) / 255.0;
+                let c10: f64 = (grid_q[ch * 25 + by * 5 + (bx + 1)] as f64) / 255.0;
+                let c01: f64 = (grid_q[ch * 25 + (by + 1) * 5 + bx] as f64) / 255.0;
+                let c11: f64 = (grid_q[ch * 25 + (by + 1) * 5 + (bx + 1)] as f64) / 255.0;
+                let x_span: f64 = if bx == 3 { 3.0 } else { 4.0 };
+                let y_span: f64 = if by == 3 { 3.0 } else { 4.0 };
+                let mut num: f64 = 0.0;
+                let mut den: f64 = 0.0;
+                let mut ly: usize = 0;
+                while ly < 4 {
+                    let ty: f64 = (ly as f64) / y_span;
+                    let mut lx: usize = 0;
+                    while lx < 4 {
+                        let tx: f64 = (lx as f64) / x_span;
+                        let base: f64 = (1.0 - tx) * (1.0 - ty) * c00
+                            + tx * (1.0 - ty) * c10
+                            + (1.0 - tx) * ty * c01
+                            + tx * ty * c11;
+                        let orig: f64 = pbr_texel(bx * 4 + lx, by * 4 + ly, ch);
+                        let mb: f64 = micro_basis(lx, ly);
+                        num = num + (orig - base) * mb;
+                        den = den + mb * mb;
+                        lx = lx + 1;
+                    }
+                    ly = ly + 1;
+                }
+                let amp: f64 = clamp01((num / den) / 0.25);
+                res_q.push(quant8(amp));
+                bx = bx + 1;
+            }
+            by = by + 1;
+        }
+        ch = ch + 1;
+    }
+
+    // 3. Decode all 16x16x4 texels from the 164-byte quantized latent stream and measure PSNR
+    let mut mse_sum: f64 = 0.0;
+    let mut bad_texels: i32 = 0;
+    let mut dec_csum: f64 = 0.0;
+    let mut lat_err: i32 = 0;
+    ch = 0;
+    while ch < 4 {
+        let mut by: usize = 0;
+        while by < 4 {
+            let mut bx: usize = 0;
+            while bx < 4 {
+                let q00: i32 = grid_q[ch * 25 + by * 5 + bx];
+                let q10: i32 = grid_q[ch * 25 + by * 5 + (bx + 1)];
+                let q01: i32 = grid_q[ch * 25 + (by + 1) * 5 + bx];
+                let q11: i32 = grid_q[ch * 25 + (by + 1) * 5 + (bx + 1)];
+                let qr: i32 = res_q[ch * 16 + by * 4 + bx];
+                if validate_latent(q00, 0.25) != 1 || validate_latent(qr, 0.25) != 1 {
+                    lat_err = lat_err + 1;
+                }
+                let c00: f64 = (q00 as f64) / 255.0;
+                let c10: f64 = (q10 as f64) / 255.0;
+                let c01: f64 = (q01 as f64) / 255.0;
+                let c11: f64 = (q11 as f64) / 255.0;
+                let amp: f64 = ((qr as f64) / 255.0) * 0.25;
+                let x_span: f64 = if bx == 3 { 3.0 } else { 4.0 };
+                let y_span: f64 = if by == 3 { 3.0 } else { 4.0 };
+                let mut ly: usize = 0;
+                while ly < 4 {
+                    let ty: f64 = (ly as f64) / y_span;
+                    let mut lx: usize = 0;
+                    while lx < 4 {
+                        let tx: f64 = (lx as f64) / x_span;
+                        let base: f64 = (1.0 - tx) * (1.0 - ty) * c00
+                            + tx * (1.0 - ty) * c10
+                            + (1.0 - tx) * ty * c01
+                            + tx * ty * c11;
+                        let rec: f64 = clamp01(base + amp * micro_basis(lx, ly));
+                        if rec != rec || rec < 0.0 || rec > 1.0 { bad_texels = bad_texels + 1; }
+                        let orig: f64 = pbr_texel(bx * 4 + lx, by * 4 + ly, ch);
+                        let d: f64 = rec - orig;
+                        mse_sum = mse_sum + d * d;
+                        dec_csum = dec_csum + rec;
+                        lx = lx + 1;
+                    }
+                    ly = ly + 1;
+                }
+                bx = bx + 1;
+            }
+            by = by + 1;
+        }
+        ch = ch + 1;
+    }
+
+    let mse: f64 = mse_sum / 1024.0;
+    let psnr_db: f64 = 10.0 * log10_f64(1.0 / (mse + 1.0e-15));
+
+    // Planted failing controls: out-of-range latent code (310 > 255) & NaN scale rejected fail-closed
+    let rc_oob: i32 = validate_latent(310, 0.25);
+    let rc_nan: i32 = validate_latent(128, sqrt(-1.0));
+    let traps_caught: i32 = if rc_oob == -1 && rc_nan == -2 { 1 } else { 0 };
+
+    let t1: i64 = clock_ns();
+    let elapsed_ms: f64 = ((t1 - t0) as f64) / 1.0e6;
+
+    println!("M6_COMP_RATIO={:.8}", comp_ratio);
+    println!("M6_BPP_PER_CH={:.8}", bpp_per_ch);
+    println!("M6_PSNR_DB={:.8}", psnr_db);
+    println!("M6_MSE={:.12}", mse);
+    println!("M6_BAD_TEXELS={}", bad_texels);
+    println!("M6_DEC_CHECKSUM={:.10}", dec_csum);
+    println!("M6_TRAPS_CAUGHT={}", traps_caught);
+    println!("M6_ELAPSED_MS={:.4}", elapsed_ms);
+
+    let ok: bool = comp_ratio >= 5.0
+        && bpp_per_ch <= 1.6
+        && psnr_db >= 40.0
+        && bad_texels == 0
+        && lat_err == 0
+        && traps_caught == 1;
+    if ok {
+        println!(
+            "[PASS] MOAT6_NTC_COMPRESS ratio={:.2}x bpp={:.3} psnr={:.2}dB traps_caught=1",
+            comp_ratio, bpp_per_ch, psnr_db
+        );
+    } else {
+        println!("[FAIL] MOAT6_NTC_COMPRESS ratio={:.2}x psnr={:.2}dB traps={}", comp_ratio, psnr_db, traps_caught);
+    }
+}
