@@ -1,0 +1,42 @@
+// SPDX-FileCopyrightText: 2026 Zain Dana Harper
+// SPDX-License-Identifier: MIT
+// QEC-GNN GPU 480-Pack: CSR SpMV Conjugate Gradient (CG) Krylov solver step kernel.
+// Evaluates a 4-nonzeros-per-row sparse matrix-vector product A*p, updates solution x
+// and residual r using step alpha, and updates search direction p with Polak beta.
+
+#[compute(workgroup_size = [64, 1, 1])]
+fn conjugate_gradient_spmv_gpu(
+    alpha: f32,
+    beta: f32,
+    v0_buf: &[f32],
+    v1_buf: &[f32],
+    v2_buf: &[f32],
+    v3_buf: &[f32],
+    p0_buf: &[f32],
+    p1_buf: &[f32],
+    p2_buf: &[f32],
+    p3_buf: &[f32],
+    x_buf: &[f32],
+    r_buf: &[f32],
+    p_self_buf: &[f32],
+    x_out: &mut [f32],
+    r_out: &mut [f32],
+    p_out: &mut [f32],
+    ap_out: &mut [f32],
+) ~ Gpu {
+    let i = gl_GlobalInvocationID.x;
+    let ap: f32 = v0_buf[i] * p0_buf[i]
+        + v1_buf[i] * p1_buf[i]
+        + v2_buf[i] * p2_buf[i]
+        + v3_buf[i] * p3_buf[i];
+
+    let p_cur: f32 = p_self_buf[i];
+    let x_new: f32 = x_buf[i] + alpha * p_cur;
+    let r_new: f32 = r_buf[i] - alpha * ap;
+    let p_new: f32 = r_new + beta * p_cur;
+
+    x_out[i] = x_new;
+    r_out[i] = r_new;
+    p_out[i] = p_new;
+    ap_out[i] = ap;
+}

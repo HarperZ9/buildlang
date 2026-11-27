@@ -1,0 +1,43 @@
+// SPDX-FileCopyrightText: 2026 Zain Dana Harper
+// SPDX-License-Identifier: MIT
+// QEC-GNN GPU 480-Pack: Multi-probe Bloom filter with xxHash32 double-hashing kernel.
+// Mixes 32-bit keys through xxHash32 prime avalanche stages, derives two independent
+// bit-probe indices via Kirsch-Mitzenmacher hashing, and tests membership against mask.
+
+#[compute(workgroup_size = [64, 1, 1])]
+fn bloom_filter_xxhash64_gpu(
+    seed: u32,
+    bit_mask: u32,
+    key_buf: &[u32],
+    word_a_buf: &[u32],
+    word_b_buf: &[u32],
+    h1_out: &mut [u32],
+    h2_out: &mut [u32],
+    hit_out: &mut [u32],
+) ~ Gpu {
+    let i = gl_GlobalInvocationID.x;
+    let k: u32 = key_buf[i];
+
+    let mut h1: u32 = seed + 374761393 + k * 3266489917;
+    h1 = ((h1 << 17) | (h1 >> 15)) * 668265263;
+    h1 = h1 ^ (h1 >> 15);
+    h1 = h1 * 2246822519;
+    h1 = h1 ^ (h1 >> 13);
+    h1 = h1 * 3266489917;
+    h1 = h1 ^ (h1 >> 16);
+
+    let mut h2: u32 = (h1 ^ seed) + k * 2246822519;
+    h2 = ((h2 << 13) | (h2 >> 19)) * 374761393;
+    h2 = h2 ^ (h2 >> 15);
+    h2 = h2 * 668265263;
+    h2 = h2 ^ (h2 >> 16);
+
+    let b1: u32 = 1 << (h1 & 31);
+    let b2: u32 = 1 << ((h1 + h2) & 31);
+    let ok1: u32 = if (word_a_buf[i] & b1) != 0 { 1 } else { 0 };
+    let ok2: u32 = if (word_b_buf[i] & b2) != 0 { 1 } else { 0 };
+
+    h1_out[i] = h1 & bit_mask;
+    h2_out[i] = h2 & bit_mask;
+    hit_out[i] = ok1 & ok2;
+}

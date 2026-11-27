@@ -1,0 +1,66 @@
+// SPDX-FileCopyrightText: 2026 Zain Dana Harper
+// SPDX-License-Identifier: MIT
+// QEC-GNN GPU 480-Pack: Black-Scholes-Merton European call option price and Greeks kernel.
+// Evaluates d1, d2, Abramowitz-Stegun normal CDF/PDF approximations, discounted call price,
+// plus analytical Delta, Gamma, Vega, and Theta sensitivities per option contract lane.
+
+#[compute(workgroup_size = [64, 1, 1])]
+fn black_scholes_greeks_gpu(
+    rate: f32,
+    eps: f32,
+    spot_buf: &[f32],
+    strike_buf: &[f32],
+    vol_buf: &[f32],
+    ttm_buf: &[f32],
+    log_sk_buf: &[f32],
+    price_out: &mut [f32],
+    delta_out: &mut [f32],
+    gamma_out: &mut [f32],
+    vega_out: &mut [f32],
+    theta_out: &mut [f32],
+) ~ Gpu {
+    let i = gl_GlobalInvocationID.x;
+    let s: f32 = spot_buf[i];
+    let k: f32 = strike_buf[i];
+    let sig: f32 = vol_buf[i];
+    let t: f32 = ttm_buf[i] + eps;
+
+    let mut sqrt_t: f32 = 0.5 * (t + 1.0);
+    sqrt_t = 0.5 * (sqrt_t + t / sqrt_t);
+    sqrt_t = 0.5 * (sqrt_t + t / sqrt_t);
+    sqrt_t = 0.5 * (sqrt_t + t / sqrt_t);
+
+    let vol_rt: f32 = sig * sqrt_t + eps;
+    let d1: f32 = (log_sk_buf[i] + (rate + 0.5 * sig * sig) * t) / vol_rt;
+    let d2: f32 = d1 - vol_rt;
+
+    // Logistic-rational standard normal CDF N(x) and Gaussian PDF n(d1)
+    let ad1: f32 = if d1 < 0.0 { -d1 } else { d1 };
+    let e_d1: f32 = 1.0 / (1.0 + 1.702 * ad1 + 0.5 * 2.8968 * ad1 * ad1);
+    let nd1: f32 = if d1 >= 0.0 { 1.0 - 0.5 * e_d1 } else { 0.5 * e_d1 };
+
+    let ad2: f32 = if d2 < 0.0 { -d2 } else { d2 };
+    let e_d2: f32 = 1.0 / (1.0 + 1.702 * ad2 + 0.5 * 2.8968 * ad2 * ad2);
+    let nd2: f32 = if d2 >= 0.0 { 1.0 - 0.5 * e_d2 } else { 0.5 * e_d2 };
+
+    let h1: f32 = 0.5 * d1 * d1;
+    let pdf_d1: f32 = 0.39894228 / (1.0 + h1 + 0.5 * h1 * h1 + 0.16666667 * h1 * h1 * h1);
+
+    let rt: f32 = rate * t;
+    let disc: f32 = 1.0 / (1.0 + rt + 0.5 * rt * rt + 0.16666667 * rt * rt * rt);
+
+    let mut price: f32 = s * nd1 - k * disc * nd2;
+    if price < 0.0 {
+        price = 0.0;
+    }
+
+    let gamma: f32 = pdf_d1 / (s * vol_rt + eps);
+    let vega: f32 = s * pdf_d1 * sqrt_t;
+    let theta: f32 = -(s * pdf_d1 * sig) / (2.0 * sqrt_t + eps) - rate * k * disc * nd2;
+
+    price_out[i] = price;
+    delta_out[i] = nd1;
+    gamma_out[i] = gamma;
+    vega_out[i] = vega;
+    theta_out[i] = theta;
+}
