@@ -1715,10 +1715,24 @@ impl<'ctx> MirLowerer<'ctx> {
         }
     }
 
+    /// Resolve the source buffer that owns `source_id` when not inside an
+    /// anonymous re-parsed macro fragment, falling back to `self.source`.
+    fn source_for_id(&self, source_id: Option<crate::lexer::SourceId>) -> Option<Arc<str>> {
+        if !self.in_macro_fragment {
+            if let Some(sid) = source_id.filter(|&s| s != crate::lexer::SourceId::ANONYMOUS) {
+                if let Some(text) = crate::lexer::source_text_for_id(sid) {
+                    return Some(text);
+                }
+            }
+        }
+        self.source.clone()
+    }
+
     /// Extract source text for a token group. Tries span-based extraction first,
     /// validates by checking token count matches, falls back to reconstruction.
     fn extract_source_for_tokens(&self, tokens: &[crate::lexer::Token]) -> String {
-        if let Some(ref src) = self.source {
+        let source_id = tokens.first().map(|t| t.span.source_id);
+        if let Some(src) = self.source_for_id(source_id) {
             let first_start = tokens.first().map(|t| t.span.start.to_usize()).unwrap_or(0);
             let last_end = tokens.last().map(|t| t.span.end.to_usize()).unwrap_or(0);
             if last_end > first_start
@@ -1728,12 +1742,7 @@ impl<'ctx> MirLowerer<'ctx> {
             {
                 // With the module merge's renames applied (a module call in a
                 // `vec![...]` element).
-                let candidate = renamed_slice(
-                    src,
-                    first_start,
-                    last_end,
-                    tokens.first().map(|t| t.span.source_id),
-                );
+                let candidate = renamed_slice(&src, first_start, last_end, source_id);
                 // Validate: re-tokenize and check it produces a similar token count
                 if let Ok(re_tokens) = crate::lexer::tokenize(candidate.as_str()) {
                     // If re-tokenization gives roughly the same number of tokens, use it
@@ -2235,11 +2244,6 @@ impl<'ctx> MirLowerer<'ctx> {
     fn extract_arg_source_texts(&self, tokens: &[ast::TokenTree]) -> Vec<String> {
         use crate::lexer::{Delimiter, TokenKind};
 
-        let source = match self.source {
-            Some(ref s) => s,
-            None => return Vec::new(),
-        };
-
         // Unwrap the outermost Delimited group if present, but do NOT flatten
         // nested groups - their spans must stay intact for correct source extraction.
         let inner: &[ast::TokenTree] = if tokens.len() == 1 {
@@ -2261,6 +2265,11 @@ impl<'ctx> MirLowerer<'ctx> {
             ast::TokenTree::Token(tok) => Some(tok.span.source_id),
             ast::TokenTree::Delimited { span, .. } => Some(span.source_id),
         });
+        let source = match self.source_for_id(source_id) {
+            Some(s) => s,
+            None => return Vec::new(),
+        };
+        let source = &source;
         let mut args = Vec::new();
         let mut past_format_string = false;
         let mut depth: i32 = 0;
@@ -2548,7 +2557,7 @@ impl<'ctx> MirLowerer<'ctx> {
                     if let TokenKind::Literal { kind, .. } = &tok.kind {
                         match kind {
                             crate::lexer::LiteralKind::Str { .. } => {
-                                if let Some(ref source) = self.source {
+                                if let Some(source) = self.source_for_id(Some(tok.span.source_id)) {
                                     let start = tok.span.start.to_usize();
                                     let end = tok.span.end.to_usize();
                                     if start < source.len() && end <= source.len() && start < end {
@@ -2563,7 +2572,7 @@ impl<'ctx> MirLowerer<'ctx> {
                                 return String::new();
                             }
                             crate::lexer::LiteralKind::RawStr { n_hashes, .. } => {
-                                if let Some(ref source) = self.source {
+                                if let Some(source) = self.source_for_id(Some(tok.span.source_id)) {
                                     let start = tok.span.start.to_usize();
                                     let end = tok.span.end.to_usize();
                                     if start < source.len() && end <= source.len() && start < end {

@@ -136,7 +136,7 @@ photon/shadows.bld types
 photon/sky_clouds.bld types
 photon/subsurface_scattering.bld types
 photon/terrain.bld types
-photon/texture_management.bld parse
+photon/texture_management.bld types
 photon/variable_rate_shading.bld types
 photon/virtual_texturing.bld types
 photon/visibility_buffer.bld types

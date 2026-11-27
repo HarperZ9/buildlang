@@ -3604,6 +3604,9 @@ impl<'ctx> MirLowerer<'ctx> {
             let saved_str_refs = std::mem::take(&mut self.str_ref_locals);
             let saved_char_vecs = std::mem::take(&mut self.char_vec_locals);
             let saved_pending_vecs = std::mem::take(&mut self.pending_untyped_vecs);
+            let saved_source = crate::lexer::source_text_for_id(f.name.span.source_id)
+                .filter(|_| f.name.span.source_id != crate::lexer::SourceId::ANONYMOUS)
+                .map(|text| self.source.replace(text));
 
             let mut builder = MirBuilder::with_linear_type_names(
                 mangled_name.clone(),
@@ -3634,7 +3637,11 @@ impl<'ctx> MirLowerer<'ctx> {
 
             self.current_fn = Some(builder);
 
-            let result = self.lower_fn_body(body)?;
+            let body_result = self.lower_fn_body(body);
+            if let Some(prev_src) = saved_source {
+                self.source = prev_src;
+            }
+            let result = body_result?;
 
             let ret_mir = f
                 .sig
@@ -3725,6 +3732,9 @@ impl<'ctx> MirLowerer<'ctx> {
             let saved_str_refs = std::mem::take(&mut self.str_ref_locals);
             let saved_char_vecs = std::mem::take(&mut self.char_vec_locals);
             let saved_pending_vecs = std::mem::take(&mut self.pending_untyped_vecs);
+            let saved_source = crate::lexer::source_text_for_id(f.name.span.source_id)
+                .filter(|_| f.name.span.source_id != crate::lexer::SourceId::ANONYMOUS)
+                .map(|text| self.source.replace(text));
 
             let mut builder = MirBuilder::with_linear_type_names(
                 fn_name.clone(),
@@ -3753,7 +3763,11 @@ impl<'ctx> MirLowerer<'ctx> {
             }
 
             self.current_fn = Some(builder);
-            let result = self.lower_fn_body(body)?;
+            let body_result = self.lower_fn_body(body);
+            if let Some(prev_src) = saved_source {
+                self.source = prev_src;
+            }
+            let result = body_result?;
 
             let ret_mir = f
                 .sig
