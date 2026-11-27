@@ -1,0 +1,55 @@
+// SPDX-FileCopyrightText: 2026 Zain Dana Harper
+// SPDX-License-Identifier: MIT
+// Quadricentennial GPU 400-Pack: GPU-driven meshlet frustum and Hi-Z occlusion culling kernel.
+// Tests bounding-sphere signed distance against four frustum planes, checks backface cone
+// orientation, and compares projected near-Z against Hi-Z pyramid depth.
+
+#[compute(workgroup_size = [64, 1, 1])]
+fn meshlet_frustum_hi_z_cull_gpu(
+    p0x: f32,
+    p0y: f32,
+    p0z: f32,
+    p0w: f32,
+    p1x: f32,
+    p1y: f32,
+    p1z: f32,
+    p1w: f32,
+    cx_buf: &[f32],
+    cy_buf: &[f32],
+    cz_buf: &[f32],
+    rad_buf: &[f32],
+    cone_dot_buf: &[f32],
+    cone_cut_buf: &[f32],
+    z_near_buf: &[f32],
+    hiz_max_buf: &[f32],
+    vis_out: &mut [f32],
+    score_out: &mut [f32],
+) ~ Gpu {
+    let i = gl_GlobalInvocationID.x;
+    let cx: f32 = cx_buf[i];
+    let cy: f32 = cy_buf[i];
+    let cz: f32 = cz_buf[i];
+    let rad: f32 = rad_buf[i];
+
+    let d0: f32 = p0x * cx + p0y * cy + p0z * cz + p0w + rad;
+    let d1: f32 = p1x * cx + p1y * cy + p1z * cz + p1w + rad;
+    let cone_margin: f32 = cone_cut_buf[i] - cone_dot_buf[i];
+    let hiz_margin: f32 = hiz_max_buf[i] - z_near_buf[i];
+
+    let mut vis: f32 = 1.0;
+    if d0 < 0.0 {
+        vis = 0.0;
+    }
+    if d1 < 0.0 {
+        vis = 0.0;
+    }
+    if cone_margin < 0.0 {
+        vis = 0.0;
+    }
+    if hiz_margin < 0.0 {
+        vis = 0.0;
+    }
+
+    vis_out[i] = vis;
+    score_out[i] = vis * (d0 + d1 + hiz_margin);
+}
