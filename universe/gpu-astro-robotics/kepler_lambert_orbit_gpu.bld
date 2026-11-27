@@ -1,0 +1,57 @@
+// SPDX-FileCopyrightText: 2026 Zain Dana Harper
+// SPDX-License-Identifier: MIT
+// Astro-Robotics GPU 440-Pack: Universal-variable Kepler/Lambert orbital propagation kernel.
+// Evaluates Stumpff C(z) and S(z) functions, advances universal anomaly chi via two
+// Newton-Raphson iterations, and outputs Lagrange f, g coefficients plus propagated radius.
+
+#[compute(workgroup_size = [64, 1, 1])]
+fn kepler_lambert_orbit_gpu(
+    mu_grav: f32,
+    dt: f32,
+    r0_buf: &[f32],
+    vr0_buf: &[f32],
+    alpha_buf: &[f32],
+    chi_init_buf: &[f32],
+    chi_out: &mut [f32],
+    lag_f_out: &mut [f32],
+    lag_g_out: &mut [f32],
+) ~ Gpu {
+    let i = gl_GlobalInvocationID.x;
+    let r0: f32 = r0_buf[i];
+    let vr0: f32 = vr0_buf[i];
+    let alpha: f32 = alpha_buf[i];
+
+    let mut sqrt_mu: f32 = 0.5 * (mu_grav + 1.0);
+    sqrt_mu = 0.5 * (sqrt_mu + mu_grav / sqrt_mu);
+    sqrt_mu = 0.5 * (sqrt_mu + mu_grav / sqrt_mu);
+    let inv_smu: f32 = 1.0 / (sqrt_mu + 0.000001);
+    let rvr0: f32 = r0 * vr0 * inv_smu;
+
+    let mut chi: f32 = chi_init_buf[i];
+    let mut iter: i32 = 0;
+    while iter < 2 {
+        let chi2: f32 = chi * chi;
+        let z: f32 = alpha * chi2;
+        let c_st: f32 = 0.5 - 0.04166667 * z + 0.00138889 * z * z;
+        let s_st: f32 = 0.16666667 - 0.00833333 * z + 0.00019841 * z * z;
+
+        let f_chi: f32 = rvr0 * chi2 * c_st + (1.0 - alpha * r0) * chi2 * chi * s_st
+            + r0 * chi - sqrt_mu * dt;
+        let df_chi: f32 = rvr0 * chi * (1.0 - z * s_st)
+            + (1.0 - alpha * r0) * chi2 * c_st + r0 + 0.000001;
+        chi = chi - f_chi / df_chi;
+        iter = iter + 1;
+    }
+
+    let chi2_f: f32 = chi * chi;
+    let z_f: f32 = alpha * chi2_f;
+    let c_f: f32 = 0.5 - 0.04166667 * z_f + 0.00138889 * z_f * z_f;
+    let s_f: f32 = 0.16666667 - 0.00833333 * z_f + 0.00019841 * z_f * z_f;
+
+    let lag_f: f32 = 1.0 - (chi2_f / (r0 + 0.000001)) * c_f;
+    let lag_g: f32 = dt - chi2_f * chi * s_f * inv_smu;
+
+    chi_out[i] = chi;
+    lag_f_out[i] = lag_f;
+    lag_g_out[i] = lag_g;
+}

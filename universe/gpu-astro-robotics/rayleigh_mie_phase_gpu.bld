@@ -1,0 +1,38 @@
+// SPDX-FileCopyrightText: 2026 Zain Dana Harper
+// SPDX-License-Identifier: MIT
+// Astro-Robotics GPU 440-Pack: Cornette-Shanks Mie plus Rayleigh spectral scattering kernel.
+// Evaluates anisotropic Cornette-Shanks aerosol phase function alongside Rayleigh molecular
+// phase scattering and blends total directional in-scattering across two spectral channels.
+
+#[compute(workgroup_size = [64, 1, 1])]
+fn rayleigh_mie_phase_gpu(
+    g_mie: f32,
+    w_ray_0: f32,
+    w_ray_1: f32,
+    w_mie: f32,
+    cos_t_buf: &[f32],
+    rad_0_buf: &[f32],
+    rad_1_buf: &[f32],
+    phase_mie_out: &mut [f32],
+    scat_0_out: &mut [f32],
+    scat_1_out: &mut [f32],
+) ~ Gpu {
+    let i = gl_GlobalInvocationID.x;
+    let mu: f32 = cos_t_buf[i];
+    let one_p_mu2: f32 = 1.0 + mu * mu;
+    let p_ray: f32 = 0.0596831 * one_p_mu2;
+
+    let g2: f32 = g_mie * g_mie;
+    let denom_base: f32 = 1.0 + g2 - 2.0 * g_mie * mu + 0.0001;
+    let mut denom_sqrt: f32 = 0.5 * (denom_base + 1.0);
+    denom_sqrt = 0.5 * (denom_sqrt + denom_base / denom_sqrt);
+    denom_sqrt = 0.5 * (denom_sqrt + denom_base / denom_sqrt);
+
+    let num_cs: f32 = 0.1193662 * (1.0 - g2) * one_p_mu2;
+    let den_cs: f32 = (2.0 + g2) * denom_base * denom_sqrt + 0.000001;
+    let p_mie: f32 = num_cs / den_cs;
+
+    phase_mie_out[i] = p_mie;
+    scat_0_out[i] = rad_0_buf[i] * (w_ray_0 * p_ray + w_mie * p_mie);
+    scat_1_out[i] = rad_1_buf[i] * (w_ray_1 * p_ray + w_mie * p_mie);
+}
