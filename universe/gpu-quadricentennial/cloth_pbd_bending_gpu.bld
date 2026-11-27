@@ -1,0 +1,59 @@
+// SPDX-FileCopyrightText: 2026 Zain Dana Harper
+// SPDX-License-Identifier: MIT
+// Quadricentennial GPU 400-Pack: XPBD cloth isometric bending constraint solver kernel.
+// Computes dihedral angle error between adjacent cloth triangles, solves compliance-damped
+// XPBD Lagrange multiplier delta_lambda, and emits corrected vertex displacements.
+
+#[compute(workgroup_size = [64, 1, 1])]
+fn cloth_pbd_bending_gpu(
+    compliance: f32,
+    inv_dt2: f32,
+    phi_rest: f32,
+    inv_m0: f32,
+    inv_m1: f32,
+    n0x_buf: &[f32],
+    n0y_buf: &[f32],
+    n0z_buf: &[f32],
+    n1x_buf: &[f32],
+    n1y_buf: &[f32],
+    n1z_buf: &[f32],
+    lam_prev_buf: &[f32],
+    lam_out: &mut [f32],
+    dx0_out: &mut [f32],
+    dx1_out: &mut [f32],
+) ~ Gpu {
+    let i = gl_GlobalInvocationID.x;
+    let n0x: f32 = n0x_buf[i];
+    let n0y: f32 = n0y_buf[i];
+    let n0z: f32 = n0z_buf[i];
+    let n1x: f32 = n1x_buf[i];
+    let n1y: f32 = n1y_buf[i];
+    let n1z: f32 = n1z_buf[i];
+
+    let mut d: f32 = n0x * n1x + n0y * n1y + n0z * n1z;
+    if d > 0.9999 {
+        d = 0.9999;
+    }
+    if d < -0.9999 {
+        d = -0.9999;
+    }
+
+    let s2: f32 = 1.0 - d * d + 0.000001;
+    let mut s_val: f32 = 0.5 * (s2 + 1.0);
+    s_val = 0.5 * (s_val + s2 / s_val);
+    s_val = 0.5 * (s_val + s2 / s_val);
+
+    let c_bend: f32 = (1.5707963 - d - 0.16666667 * d * d * d) - phi_rest;
+    let inv_s: f32 = 1.0 / (s_val + 0.0001);
+    let q0_sq: f32 = (n1x - d * n0x) * (n1x - d * n0x) + (n1y - d * n0y) * (n1y - d * n0y) + (n1z - d * n0z) * (n1z - d * n0z);
+    let q1_sq: f32 = (n0x - d * n1x) * (n0x - d * n1x) + (n0y - d * n1y) * (n0y - d * n1y) + (n0z - d * n1z) * (n0z - d * n1z);
+
+    let alpha_tilde: f32 = compliance * inv_dt2;
+    let w_sum: f32 = (inv_m0 * q0_sq + inv_m1 * q1_sq) * inv_s * inv_s + alpha_tilde + 0.000001;
+    let lam_old: f32 = lam_prev_buf[i];
+    let d_lam: f32 = -(c_bend + alpha_tilde * lam_old) / w_sum;
+
+    lam_out[i] = lam_old + d_lam;
+    dx0_out[i] = inv_m0 * d_lam * inv_s * (n1x - d * n0x);
+    dx1_out[i] = inv_m1 * d_lam * inv_s * (n0x - d * n1x);
+}

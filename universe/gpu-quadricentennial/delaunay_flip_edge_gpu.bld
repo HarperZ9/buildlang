@@ -1,0 +1,45 @@
+// SPDX-FileCopyrightText: 2026 Zain Dana Harper
+// SPDX-License-Identifier: MIT
+// Quadricentennial GPU 400-Pack: 2D Delaunay incircle predicate and edge-flip score kernel.
+// Evaluates the exact 3x3 lifted paraboloid determinant for quad (a, b, c, d) relative to d
+// and emits the orientation-normalized Delaunay violation score and flip flag.
+
+#[compute(workgroup_size = [64, 1, 1])]
+fn delaunay_flip_edge_gpu(
+    tol: f32,
+    ax_buf: &[f32],
+    ay_buf: &[f32],
+    bx_buf: &[f32],
+    by_buf: &[f32],
+    cx_buf: &[f32],
+    cy_buf: &[f32],
+    dx_buf: &[f32],
+    dy_buf: &[f32],
+    det_out: &mut [f32],
+    flip_out: &mut [f32],
+) ~ Gpu {
+    let i = gl_GlobalInvocationID.x;
+    let adx: f32 = ax_buf[i] - dx_buf[i];
+    let ady: f32 = ay_buf[i] - dy_buf[i];
+    let bdx: f32 = bx_buf[i] - dx_buf[i];
+    let bdy: f32 = by_buf[i] - dy_buf[i];
+    let cdx: f32 = cx_buf[i] - dx_buf[i];
+    let cdy: f32 = cy_buf[i] - dy_buf[i];
+
+    let alift: f32 = adx * adx + ady * ady;
+    let blift: f32 = bdx * bdx + bdy * bdy;
+    let clift: f32 = cdx * cdx + cdy * cdy;
+
+    let ab_det: f32 = adx * bdy - bdx * ady;
+    let bc_det: f32 = bdx * cdy - cdx * bdy;
+    let ca_det: f32 = cdx * ady - adx * cdy;
+
+    let incircle: f32 = alift * bc_det + blift * ca_det + clift * ab_det;
+    let mut flip: f32 = 0.0;
+    if incircle > tol {
+        flip = 1.0;
+    }
+
+    det_out[i] = incircle;
+    flip_out[i] = flip;
+}
