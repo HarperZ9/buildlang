@@ -1,0 +1,193 @@
+// SPDX-FileCopyrightText: 2026 Zain Dana Harper
+// SPDX-License-Identifier: MIT
+//
+// Wave 51B Kernel 1 (Author Idea C3):
+//   3-Element Windkessel Arterial/Hydraulic Pressure Pulse Recovery (< 1% error vs analytic)
+//   + Automatic Safety-Relief Valve Trip on Planted Overpressure Surge.
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 {
+        return -x;
+    }
+    x
+}
+
+fn inflow_q(t: f64, period: f64, t_sys: f64, q_peak: f64) -> f64 {
+    let pi: f64 = 3.14159265358979323846;
+    let cycles: f64 = floor(t / period);
+    let tm: f64 = t - cycles * period;
+    if tm < t_sys {
+        return q_peak * sin((pi * tm) / t_sys);
+    }
+    0.0
+}
+
+// Exact periodic steady-state capacitor pressure Pc(t) for 3-element Windkessel half-sine inflow.
+fn analytic_windkessel_pc(tm: f64, period: f64, t_sys: f64, q_peak: f64, rp: f64, cap: f64) -> f64 {
+    let pi: f64 = 3.14159265358979323846;
+    let omega: f64 = pi / t_sys;
+    let inv_tau: f64 = 1.0 / (rp * cap);
+    let denom: f64 = inv_tau * inv_tau + omega * omega;
+    let amp: f64 = q_peak / cap;
+    let e_ts: f64 = exp(-inv_tau * t_sys);
+    let e_T: f64 = exp(-inv_tau * period);
+    // Particular integral at tm = t_sys starting from Pc(0) = 0
+    let p_part_ts: f64 = (amp * omega * (1.0 + e_ts)) / denom;
+    let p0: f64 = (p_part_ts * exp(-inv_tau * (period - t_sys))) / (1.0 - e_T);
+    if tm <= t_sys {
+        let e_t: f64 = exp(-inv_tau * tm);
+        let p_part: f64 = (amp / denom)
+            * (inv_tau * sin(omega * tm) - omega * cos(omega * tm) + omega * e_t);
+        return p0 * e_t + p_part;
+    }
+    let p_ts: f64 = p0 * e_ts + p_part_ts;
+    p_ts * exp(-inv_tau * (tm - t_sys))
+}
+
+struct WindkesselRes {
+    p_sys: f64,
+    p_dia: f64,
+    p_mean: f64,
+    max_rel_err: f64,
+    valve_trips: i32,
+}
+
+// RK4 integrator for 3-element Windkessel with automatic safety-relief valve at p_relief.
+fn simulate_windkessel(
+    q_peak: f64,
+    zc: f64,
+    rp: f64,
+    cap: f64,
+    p_relief: f64,
+    k_relief: f64,
+    enable_valve: i32,
+) -> WindkesselRes {
+    let period: f64 = 0.80;
+    let t_sys: f64 = 0.30;
+    let steps_per_cyc: i32 = 1600;
+    let dt: f64 = period / (steps_per_cyc as f64);
+    let total_cycles: i32 = 16;
+
+    let mut pc: f64 = 80.0;
+    let mut p_sys: f64 = 0.0;
+    let mut p_dia: f64 = 1000000.0;
+    let mut p_sum: f64 = 0.0;
+    let mut max_rel_err: f64 = 0.0;
+    let mut trips: i32 = 0;
+
+    let mut cyc: i32 = 0;
+    while cyc < total_cycles {
+        let mut s: i32 = 0;
+        while s < steps_per_cyc {
+            let tm: f64 = (s as f64) * dt;
+            let q1: f64 = inflow_q(tm, period, t_sys, q_peak);
+            let qm: f64 = inflow_q(tm + 0.5 * dt, period, t_sys, q_peak);
+            let q2: f64 = inflow_q(tm + dt, period, t_sys, q_peak);
+
+            let p_cur: f64 = pc + zc * q1;
+            let mut q_rel: f64 = 0.0;
+            if enable_valve == 1 && p_cur > p_relief {
+                q_rel = k_relief * (p_cur - p_relief);
+                if cyc == total_cycles - 1 {
+                    trips = trips + 1;
+                }
+            }
+
+            let k1: f64 = (q1 - q_rel - pc / rp) / cap;
+            let pc2: f64 = pc + 0.5 * dt * k1;
+            let p2: f64 = pc2 + zc * qm;
+            let qr2: f64 = if enable_valve == 1 && p2 > p_relief { k_relief * (p2 - p_relief) } else { 0.0 };
+            let k2: f64 = (qm - qr2 - pc2 / rp) / cap;
+
+            let pc3: f64 = pc + 0.5 * dt * k2;
+            let p3: f64 = pc3 + zc * qm;
+            let qr3: f64 = if enable_valve == 1 && p3 > p_relief { k_relief * (p3 - p_relief) } else { 0.0 };
+            let k3: f64 = (qm - qr3 - pc3 / rp) / cap;
+
+            let pc4: f64 = pc + dt * k3;
+            let p4: f64 = pc4 + zc * q2;
+            let qr4: f64 = if enable_valve == 1 && p4 > p_relief { k_relief * (p4 - p_relief) } else { 0.0 };
+            let k4: f64 = (q2 - qr4 - pc4 / rp) / cap;
+
+            if cyc == total_cycles - 1 {
+                let p_tot: f64 = pc + zc * q1;
+                if p_tot > p_sys {
+                    p_sys = p_tot;
+                }
+                if p_tot < p_dia {
+                    p_dia = p_tot;
+                }
+                p_sum = p_sum + p_tot;
+                let pc_ref: f64 = analytic_windkessel_pc(tm, period, t_sys, q_peak, rp, cap);
+                let p_ref: f64 = pc_ref + zc * q1;
+                let rel: f64 = abs_f64(p_tot - p_ref) / p_ref;
+                if rel > max_rel_err {
+                    max_rel_err = rel;
+                }
+            }
+
+            pc = pc + (dt / 6.0) * (k1 + 2.0 * k2 + 2.0 * k3 + k4);
+            s = s + 1;
+        }
+        cyc = cyc + 1;
+    }
+
+    WindkesselRes {
+        p_sys: p_sys,
+        p_dia: p_dia,
+        p_mean: p_sum / (steps_per_cyc as f64),
+        max_rel_err: max_rel_err,
+        valve_trips: trips,
+    }
+}
+
+fn main() ~ Console + Clock {
+    let mut failures: i32 = 0;
+
+    // 1. Normal arterial 3-element Windkessel (no relief valve trip)
+    let norm: WindkesselRes = simulate_windkessel(450.0, 0.05, 0.95, 1.50, 155.0, 18.0, 1);
+    if norm.max_rel_err < 0.01 && norm.valve_trips == 0 {
+        println!(
+            "[PASS] c3_windkessel_normal p_sys={:.12} p_dia={:.12} p_mean={:.12} max_rel_err={:.12} trips={}",
+            norm.p_sys, norm.p_dia, norm.p_mean, norm.max_rel_err, norm.valve_trips
+        );
+    } else {
+        println!("[FAIL] c3_windkessel_normal err={} trips={}", norm.max_rel_err, norm.valve_trips);
+        failures = failures + 1;
+    }
+
+    // 2. Planted Control: overpressure surge (2.4x inflow) trips automatic relief valve
+    let surge_unmit: WindkesselRes = simulate_windkessel(1080.0, 0.05, 0.95, 1.50, 155.0, 18.0, 0);
+    let surge_mit: WindkesselRes = simulate_windkessel(1080.0, 0.05, 0.95, 1.50, 155.0, 18.0, 1);
+    if surge_mit.valve_trips > 0 && surge_unmit.p_sys > 250.0 && surge_mit.p_sys < surge_unmit.p_sys - 100.0 {
+        println!(
+            "[PASS] c3_planted_overpressure_valve unmit_sys={:.12} mit_sys={:.12} trips={}",
+            surge_unmit.p_sys, surge_mit.p_sys, surge_mit.valve_trips
+        );
+    } else {
+        println!("[FAIL] c3_planted_overpressure_valve trips={}", surge_mit.valve_trips);
+        failures = failures + 1;
+    }
+
+    // 3. Throughput benchmark: 200,000 Windkessel RK4 steps
+    let t0: i64 = clock_ns();
+    let mut pc_b: f64 = 95.0;
+    let dt_b: f64 = 0.0005;
+    let mut i: i64 = 0;
+    while i < 200000 {
+        let tm: f64 = ((i & 1023) as f64) * dt_b;
+        let q: f64 = inflow_q(tm, 0.80, 0.30, 450.0);
+        let k1: f64 = (q - pc_b / 0.95) / 1.50;
+        let k2: f64 = (q - (pc_b + 0.5 * dt_b * k1) / 0.95) / 1.50;
+        pc_b = pc_b + dt_b * k2;
+        i = i + 1;
+    }
+    let t1: i64 = clock_ns();
+    println!("[BENCH] flow_valves steps=200000 elapsed_ns={} pc_end={:.6}", t1 - t0, pc_b);
+
+    if failures == 0 {
+        println!("[PASS] wave51b_flow_valves summary failures=0");
+    } else {
+        println!("[FAIL] wave51b_flow_valves summary failures={}", failures);
+    }
+}

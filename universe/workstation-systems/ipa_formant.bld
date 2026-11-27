@@ -1,0 +1,228 @@
+// SPDX-FileCopyrightText: 2026 Zain Dana Harper
+// SPDX-License-Identifier: MIT
+//
+// Wave 50G (P2 Author Idea N19): Community-Governed Articulatory IPA Formant Synthesizer (ipa_formant.bld)
+// Strictly articulatory vocal-tract acoustics with mandatory bibliographic provenance; zero voice cloning.
+// - Klatt (1980) 3-formant all-pole cascade vocal-tract filter + Rosenberg glottal pulse + lip radiation
+// - Cardinal IPA vowels [i], [a], [u] from Peterson & Barney (1952) / Hillenbrand et al. (1995)
+// - Hann-windowed Goertzel formant peak verifier proving F1 and F2 peaks within 5% of targets
+// - Planted failing controls: missing source citation + unstable pole (r >= 1.0) caught fail-closed
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 {
+        return -x;
+    }
+    x
+}
+
+fn check_provenance_and_governance(citation: &String, voice_clone_flag: i32) -> i32 {
+    let trimmed: String = citation.trim();
+    if trimmed.len() < 12 {
+        return 0;
+    }
+    if voice_clone_flag != 0 {
+        return 0;
+    }
+    1
+}
+
+fn pole_radius(bw_hz: f64, fs: f64) -> f64 {
+    let pi: f64 = 3.14159265358979323846264338327950288;
+    exp(-pi * bw_hz / fs)
+}
+
+fn poles_stable(bw1: f64, bw2: f64, bw3: f64, fs: f64) -> i32 {
+    if pole_radius(bw1, fs) >= 1.0 || pole_radius(bw2, fs) >= 1.0 || pole_radius(bw3, fs) >= 1.0 {
+        return 0;
+    }
+    1
+}
+
+// Klatt 3-formant cascade vocal-tract synthesizer driven by single-cycle Rosenberg glottal pulse
+// plus 1st-order lip-radiation filter (1 - 0.96 z^-1).
+fn synth_klatt_vowel(
+    f1: f64,
+    bw1: f64,
+    f2: f64,
+    bw2: f64,
+    f3: f64,
+    bw3: f64,
+    fs: f64,
+    n_samples: usize,
+) -> Vec<f64> {
+    let pi: f64 = 3.14159265358979323846264338327950288;
+    let r1: f64 = exp(-pi * bw1 / fs);
+    let r2: f64 = exp(-pi * bw2 / fs);
+    let r3: f64 = exp(-pi * bw3 / fs);
+    let c1: f64 = 2.0 * r1 * cos(2.0 * pi * f1 / fs);
+    let c2: f64 = 2.0 * r2 * cos(2.0 * pi * f2 / fs);
+    let c3: f64 = 2.0 * r3 * cos(2.0 * pi * f3 / fs);
+    let g1: f64 = 1.0 - c1 + r1 * r1;
+    let g2: f64 = 1.0 - c2 + r2 * r2;
+    let g3: f64 = 1.0 - c3 + r3 * r3;
+
+    let mut y1_1: f64 = 0.0;
+    let mut y1_2: f64 = 0.0;
+    let mut y2_1: f64 = 0.0;
+    let mut y2_2: f64 = 0.0;
+    let mut y3_1: f64 = 0.0;
+    let mut y3_2: f64 = 0.0;
+    let mut rad_prev: f64 = 0.0;
+
+    let mut out: Vec<f64> = Vec::new();
+    let t_open: usize = 16;
+    let t_close: usize = 6;
+    let mut n: usize = 0;
+    while n < n_samples {
+        // Single-cycle Rosenberg glottal volume-velocity pulse (smooth broadband vocal source)
+        let u_g: f64 = if n < t_open {
+            0.5 * (1.0 - cos(pi * ((n as f64) + 0.5) / (t_open as f64)))
+        } else if n < t_open + t_close {
+            cos(0.5 * pi * (((n - t_open) as f64) + 0.5) / (t_close as f64))
+        } else {
+            0.0
+        };
+        // Lip radiation derivative pre-emphasis (+6 dB/oct balances -12 dB/oct glottal slope)
+        let src: f64 = u_g - 0.96 * rad_prev;
+        rad_prev = u_g;
+
+        // 3-stage Klatt cascade all-pole resonators
+        let s1: f64 = g1 * src + c1 * y1_1 - r1 * r1 * y1_2;
+        y1_2 = y1_1;
+        y1_1 = s1;
+
+        let s2: f64 = g2 * s1 + c2 * y2_1 - r2 * r2 * y2_2;
+        y2_2 = y2_1;
+        y2_1 = s2;
+
+        let s3: f64 = g3 * s2 + c3 * y3_1 - r3 * r3 * y3_2;
+        y3_2 = y3_1;
+        y3_1 = s3;
+
+        out.push(s3);
+        n = n + 1;
+    }
+    out
+}
+
+fn goertzel_power(sig: &Vec<f64>, n: usize, fs: f64, f_hz: f64) -> f64 {
+    let pi: f64 = 3.14159265358979323846264338327950288;
+    let w: f64 = 2.0 * pi * f_hz / fs;
+    let coeff: f64 = 2.0 * cos(w);
+    let mut s1: f64 = 0.0;
+    let mut s2: f64 = 0.0;
+    let nf_m1: f64 = (n - 1) as f64;
+    let mut i: usize = 0;
+    while i < n {
+        let win: f64 = 0.5 * (1.0 - cos(2.0 * pi * (i as f64) / nf_m1));
+        let x: f64 = sig[i] * win;
+        let s0: f64 = x + coeff * s1 - s2;
+        s2 = s1;
+        s1 = s0;
+        i = i + 1;
+    }
+    let p: f64 = s1 * s1 + s2 * s2 - coeff * s1 * s2;
+    if p < 0.0 { return 0.0; }
+    p
+}
+
+fn find_formant_peak(sig: &Vec<f64>, n: usize, fs: f64, f_lo: f64, f_hi: f64, step: f64) -> f64 {
+    let steps: i32 = ((f_hi - f_lo) / step) as i32;
+    let mut best_f: f64 = f_lo;
+    let mut best_p: f64 = -1.0;
+    let mut k: i32 = 0;
+    while k <= steps {
+        let f: f64 = f_lo + (k as f64) * step;
+        let p: f64 = goertzel_power(sig, n, fs, f);
+        if p > best_p {
+            best_p = p;
+            best_f = f;
+        }
+        k = k + 1;
+    }
+    best_f
+}
+
+fn max_abs_vec(v: &Vec<f64>) -> f64 {
+    let n: usize = v.len();
+    let mut mx: f64 = 0.0;
+    let mut i: usize = 0;
+    while i < n {
+        let a: f64 = abs_f64(v[i]);
+        if a > mx { mx = a; }
+        i = i + 1;
+    }
+    mx
+}
+
+fn main() ~ Clock + Console {
+    let fs: f64 = 16000.0;
+    let n_samples: usize = 2048;
+    let citation: String = "Peterson & Barney (1952) JASA 24:175; Hillenbrand et al. (1995) JASA 97:3099";
+    let gov_ok: i32 = check_provenance_and_governance(&citation, 0);
+
+    let t0: i64 = clock_ns();
+    // Cardinal IPA vowels [i], [a], [u]
+    let sig_i: Vec<f64> = synth_klatt_vowel(270.0, 55.0, 2290.0, 90.0, 3010.0, 140.0, fs, n_samples);
+    let sig_a: Vec<f64> = synth_klatt_vowel(730.0, 70.0, 1090.0, 95.0, 2440.0, 130.0, fs, n_samples);
+    let sig_u: Vec<f64> = synth_klatt_vowel(300.0, 55.0, 870.0, 80.0, 2240.0, 120.0, fs, n_samples);
+    let t1: i64 = clock_ns();
+    let elapsed_ms: f64 = ((t1 - t0) as f64) / 1.0e6;
+
+    // Locate F1 and F2 peaks in physiological vowel search bands (2.0 Hz resolution)
+    let i_f1: f64 = find_formant_peak(&sig_i, n_samples, fs, 180.0, 450.0, 2.0);
+    let i_f2: f64 = find_formant_peak(&sig_i, n_samples, fs, 1900.0, 2600.0, 2.0);
+    let a_f1: f64 = find_formant_peak(&sig_a, n_samples, fs, 550.0, 900.0, 2.0);
+    let a_f2: f64 = find_formant_peak(&sig_a, n_samples, fs, 920.0, 1350.0, 2.0);
+    let u_f1: f64 = find_formant_peak(&sig_u, n_samples, fs, 180.0, 460.0, 2.0);
+    let u_f2: f64 = find_formant_peak(&sig_u, n_samples, fs, 680.0, 1100.0, 2.0);
+
+    let err_i1: f64 = 100.0 * abs_f64(i_f1 - 270.0) / 270.0;
+    let err_i2: f64 = 100.0 * abs_f64(i_f2 - 2290.0) / 2290.0;
+    let err_a1: f64 = 100.0 * abs_f64(a_f1 - 730.0) / 730.0;
+    let err_a2: f64 = 100.0 * abs_f64(a_f2 - 1090.0) / 1090.0;
+    let err_u1: f64 = 100.0 * abs_f64(u_f1 - 300.0) / 300.0;
+    let err_u2: f64 = 100.0 * abs_f64(u_f2 - 870.0) / 870.0;
+
+    let mut max_err_pct: f64 = err_i1;
+    if err_i2 > max_err_pct { max_err_pct = err_i2; }
+    if err_a1 > max_err_pct { max_err_pct = err_a1; }
+    if err_a2 > max_err_pct { max_err_pct = err_a2; }
+    if err_u1 > max_err_pct { max_err_pct = err_u1; }
+    if err_u2 > max_err_pct { max_err_pct = err_u2; }
+
+    let mut csum: f64 = 0.0;
+    let mut k: usize = 0;
+    while k < 1024 {
+        csum = csum + sig_i[k] + sig_a[k] + sig_u[k];
+        k = k + 1;
+    }
+
+    // Planted failing controls (2/2 MUST be caught fail-closed):
+    // 1. Missing source citation rejected by provenance guard
+    let empty_cite: String = "";
+    let missing_cite_caught: i32 = if check_provenance_and_governance(&empty_cite, 0) == 0 { 1 } else { 0 };
+    // 2. Unstable pole (bw1 = -20 Hz -> r = 1.003935 >= 1.0) rejected by guard + verified blowup
+    let pole_guard_bad: i32 = poles_stable(-20.0, 90.0, 140.0, fs);
+    let sig_bad: Vec<f64> = synth_klatt_vowel(270.0, -20.0, 2290.0, 90.0, 3010.0, 140.0, fs, n_samples);
+    let peak_good: f64 = max_abs_vec(&sig_i);
+    let peak_bad: f64 = max_abs_vec(&sig_bad);
+    let unstable_pole_caught: i32 = if pole_guard_bad == 0 && peak_bad > 1000.0 * peak_good { 1 } else { 0 };
+    let planted_caught: i32 = if missing_cite_caught == 1 && unstable_pole_caught == 1 { 1 } else { 0 };
+
+    println!("N19_VOWEL_I={:.2},{:.2}", i_f1, i_f2);
+    println!("N19_VOWEL_A={:.2},{:.2}", a_f1, a_f2);
+    println!("N19_VOWEL_U={:.2},{:.2}", u_f1, u_f2);
+    println!("N19_MAX_ERR_PCT={:.6}", max_err_pct);
+    println!("N19_CHECKSUM={:.12}", csum);
+    println!("N19_MISSING_CITE_CAUGHT={}", missing_cite_caught);
+    println!("N19_UNSTABLE_POLE_CAUGHT={}", unstable_pole_caught);
+    println!("N19_PLANTED_CAUGHT={}", planted_caught);
+    println!("N19_ELAPSED_MS={:.4}", elapsed_ms);
+
+    if gov_ok == 1 && max_err_pct <= 5.0 && planted_caught == 1 {
+        println!("[PASS] N19_IPA_FORMANT max_err={:.3}% planted_caught=1", max_err_pct);
+    } else {
+        println!("[FAIL] N19_IPA_FORMANT gov={} max_err={:.3}% planted_caught={}", gov_ok, max_err_pct, planted_caught);
+    }
+}
