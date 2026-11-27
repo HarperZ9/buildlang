@@ -1,0 +1,184 @@
+// SPDX-FileCopyrightText: 2026 Zain Dana Harper
+// SPDX-License-Identifier: MIT
+//
+// Wave 51B Kernel 3 (Author Idea G1):
+//   Kepler FCC Sphere-Packing Density (pi / (3 * sqrt(2)) = 0.740480 to 1e-6)
+//   + Miura-Ori Rigid Origami Kinematics verifying negative in-plane Poisson ratio (nu < 0)
+//   + Planted Non-Rigid Fold-Violation Trap (Kawasaki flat-foldability + facet stretch).
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 {
+        return -x;
+    }
+    x
+}
+
+struct FccMetrics {
+    density_cell: f64,
+    density_analytic: f64,
+    density_err: f64,
+    kissing_num: i32,
+}
+
+// Verify exact 4-sphere FCC unit cell volume ratio and 12 nearest neighbors at distance 2*r.
+fn audit_kepler_fcc(r: f64) -> FccMetrics {
+    let pi: f64 = 3.14159265358979323846;
+    let a: f64 = 2.0 * sqrt(2.0) * r;
+    let v_4spheres: f64 = 4.0 * (4.0 / 3.0) * pi * r * r * r;
+    let v_cell: f64 = a * a * a;
+    let rho_cell: f64 = v_4spheres / v_cell;
+    let rho_analytic: f64 = pi / (3.0 * sqrt(2.0));
+
+    // Count FCC nearest neighbors around origin in {-0.5, 0, +0.5}*a with exact distance 2*r
+    let mut kiss: i32 = 0;
+    let mut ix: i32 = -1;
+    while ix <= 1 {
+        let mut iy: i32 = -1;
+        while iy <= 1 {
+            let mut iz: i32 = -1;
+            while iz <= 1 {
+                let sum_abs: i32 = (if ix < 0 { -ix } else { ix })
+                    + (if iy < 0 { -iy } else { iy })
+                    + (if iz < 0 { -iz } else { iz });
+                if sum_abs == 2 {
+                    let dx: f64 = 0.5 * (ix as f64) * a;
+                    let dy: f64 = 0.5 * (iy as f64) * a;
+                    let dz: f64 = 0.5 * (iz as f64) * a;
+                    let d: f64 = sqrt(dx * dx + dy * dy + dz * dz);
+                    if abs_f64(d - 2.0 * r) < 0.000000000001 {
+                        kiss = kiss + 1;
+                    }
+                }
+                iz = iz + 1;
+            }
+            iy = iy + 1;
+        }
+        ix = ix + 1;
+    }
+
+    FccMetrics {
+        density_cell: rho_cell,
+        density_analytic: rho_analytic,
+        density_err: abs_f64(rho_cell - rho_analytic),
+        kissing_num: kiss,
+    }
+}
+
+// Schenk & Guest (2013) Miura-ori rigid unit cell projected dimensions S(theta), L(theta).
+fn miura_s(b: f64, alpha: f64, theta: f64) -> f64 {
+    let ct: f64 = cos(theta);
+    let ta: f64 = sin(alpha) / cos(alpha);
+    (b * ct * ta) / sqrt(1.0 + ct * ct * ta * ta)
+}
+
+fn miura_l(a: f64, alpha: f64, theta: f64) -> f64 {
+    let st: f64 = sin(theta);
+    let sa: f64 = sin(alpha);
+    a * sqrt(1.0 - st * st * sa * sa)
+}
+
+struct MiuraMetrics {
+    s_proj: f64,
+    l_proj: f64,
+    nu_numeric: f64,
+    nu_analytic: f64,
+    nu_err: f64,
+}
+
+fn audit_miura_ori(a: f64, b: f64, alpha_deg: f64, theta_deg: f64) -> MiuraMetrics {
+    let deg2rad: f64 = 3.14159265358979323846 / 180.0;
+    let alpha: f64 = alpha_deg * deg2rad;
+    let theta: f64 = theta_deg * deg2rad;
+    let eps: f64 = 0.000001;
+
+    let s0: f64 = miura_s(b, alpha, theta);
+    let l0: f64 = miura_l(a, alpha, theta);
+    let ds: f64 = (miura_s(b, alpha, theta + eps) - miura_s(b, alpha, theta - eps)) / (2.0 * eps);
+    let dl: f64 = (miura_l(a, alpha, theta + eps) - miura_l(a, alpha, theta - eps)) / (2.0 * eps);
+    let nu_num: f64 = -((ds / s0) / (dl / l0));
+
+    let ct: f64 = cos(theta);
+    let ta: f64 = sin(alpha) / cos(alpha);
+    let nu_ana: f64 = -1.0 / (ct * ct * ta * ta);
+
+    MiuraMetrics {
+        s_proj: s0,
+        l_proj: l0,
+        nu_numeric: nu_num,
+        nu_analytic: nu_ana,
+        nu_err: abs_f64(nu_num - nu_ana),
+    }
+}
+
+// Fail-closed rigid flat-foldability guard: Kawasaki theorem + zero facet stretching.
+// Returns 0=RIGID_VALID, 1=FAIL_KAWASAKI_ANGLE, 2=FAIL_FACET_STRETCH.
+fn check_rigid_fold(alpha1_deg: f64, alpha3_deg: f64, edge_flat: f64, edge_folded: f64) -> i32 {
+    if abs_f64(alpha1_deg + alpha3_deg - 180.0) > 0.000001 {
+        return 1;
+    }
+    if abs_f64(edge_folded - edge_flat) > 0.000001 {
+        return 2;
+    }
+    0
+}
+
+fn main() ~ Console + Clock {
+    let mut failures: i32 = 0;
+
+    // 1. Kepler FCC sphere-packing density & 12-neighbor kissing check
+    let fcc: FccMetrics = audit_kepler_fcc(1.0);
+    if fcc.density_err < 0.000001 && fcc.kissing_num == 12 {
+        println!(
+            "[PASS] g1_kepler_fcc density={:.12} analytic={:.12} err={:.12} kiss={}",
+            fcc.density_cell, fcc.density_analytic, fcc.density_err, fcc.kissing_num
+        );
+    } else {
+        println!("[FAIL] g1_kepler_fcc err={} kiss={}", fcc.density_err, fcc.kissing_num);
+        failures = failures + 1;
+    }
+
+    // 2. Miura-ori rigid origami kinematics & negative Poisson ratio (alpha=60 deg, theta=30 deg)
+    let mo: MiuraMetrics = audit_miura_ori(1.0, 1.0, 60.0, 30.0);
+    let rc_rigid_ok: i32 = check_rigid_fold(60.0, 120.0, 1.0, 1.0);
+    if mo.nu_numeric < 0.0 && mo.nu_err < 0.000001 && rc_rigid_ok == 0 {
+        println!(
+            "[PASS] g1_miura_ori s={:.12} l={:.12} nu_num={:.12} nu_ana={:.12} nu_err={:.12}",
+            mo.s_proj, mo.l_proj, mo.nu_numeric, mo.nu_analytic, mo.nu_err
+        );
+    } else {
+        println!("[FAIL] g1_miura_ori nu_num={} nu_err={}", mo.nu_numeric, mo.nu_err);
+        failures = failures + 1;
+    }
+
+    // 3. Planted Control: non-rigid fold violations (Kawasaki sum != 180 + stretched facet)
+    let rc_bad_kawasaki: i32 = check_rigid_fold(60.0, 105.0, 1.0, 1.0);
+    let rc_bad_stretch: i32 = check_rigid_fold(60.0, 120.0, 1.0, 1.08);
+    if rc_bad_kawasaki == 1 && rc_bad_stretch == 2 {
+        println!(
+            "[PASS] g1_planted_nonrigid_fold kawasaki_rc={} stretch_rc={}",
+            rc_bad_kawasaki, rc_bad_stretch
+        );
+    } else {
+        println!("[FAIL] g1_planted_nonrigid_fold rc1={} rc2={}", rc_bad_kawasaki, rc_bad_stretch);
+        failures = failures + 1;
+    }
+
+    // 4. Throughput benchmark: 200,000 Miura-ori kinematic evaluations
+    let t0: i64 = clock_ns();
+    let mut nu_acc: f64 = 0.0;
+    let mut i: i64 = 0;
+    while i < 200000 {
+        let th: f64 = 15.0 + ((i & 63) as f64) * 0.75;
+        let m: MiuraMetrics = audit_miura_ori(1.0, 1.0, 60.0, th);
+        nu_acc = nu_acc + m.nu_analytic;
+        i = i + 1;
+    }
+    let t1: i64 = clock_ns();
+    println!("[BENCH] geom_fold evals=200000 elapsed_ns={} nu_acc={:.3}", t1 - t0, nu_acc);
+
+    if failures == 0 {
+        println!("[PASS] wave51b_geom_fold summary failures=0");
+    } else {
+        println!("[FAIL] wave51b_geom_fold summary failures={}", failures);
+    }
+}

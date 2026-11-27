@@ -1,0 +1,323 @@
+// SPDX-FileCopyrightText: 2026 Zain Dana Harper
+// SPDX-License-Identifier: MIT
+// Wave 53L - Author Idea A20: 4D Hypercube (Tesseract) Co-Moving SO(4) Rotation & Slicer
+// Verifies exact 16-vertex / 32-edge tesseract incidence and edge-length invariance (<= 1e-12)
+// under SO(4) rotations across 6 canonical angle pairs + equatorial hyperplane w=0 slicing.
+// Planted Control: non-orthogonal shear matrix breaks edge lengths and R^T R = I fail-closed.
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { -x } else { x }
+}
+
+fn wrap_pi(x: f64) -> f64 {
+    let pi: f64 = 3.14159265358979323846;
+    let two_pi: f64 = 6.28318530717958647692;
+    let mut y: f64 = x;
+    while y > pi {
+        y = y - two_pi;
+    }
+    while y < -pi {
+        y = y + two_pi;
+    }
+    y
+}
+
+fn det_sin_poly(y: f64) -> f64 {
+    let y2: f64 = y * y;
+    let t7: f64 = 1.6059043836821613e-10 - y2 * 7.647163731819816e-13;
+    let t6: f64 = 2.505210838544172e-8 - y2 * t7;
+    let t5: f64 = 2.7557319223985893e-6 - y2 * t6;
+    let t4: f64 = 1.984126984126984e-4 - y2 * t5;
+    let t3: f64 = 8.333333333333333e-3 - y2 * t4;
+    let t2: f64 = 1.6666666666666666e-1 - y2 * t3;
+    y * (1.0 - y2 * t2)
+}
+
+fn det_cos_poly(y: f64) -> f64 {
+    let y2: f64 = y * y;
+    let t7: f64 = 2.08767569878681e-9 - y2 * 1.1470745597729725e-11;
+    let t6: f64 = 2.7557319223985893e-7 - y2 * t7;
+    let t5: f64 = 2.48015873015873e-5 - y2 * t6;
+    let t4: f64 = 1.388888888888889e-3 - y2 * t5;
+    let t3: f64 = 4.1666666666666664e-2 - y2 * t4;
+    let t2: f64 = 0.5 - y2 * t3;
+    1.0 - y2 * t2
+}
+
+fn det_sin(x: f64) -> f64 {
+    let pi: f64 = 3.14159265358979323846;
+    let half_pi: f64 = 1.57079632679489661923;
+    let q_pi: f64 = 0.78539816339744830962;
+    let mut y: f64 = wrap_pi(x);
+    let mut sign: f64 = 1.0;
+    if y < 0.0 {
+        y = -y;
+        sign = -1.0;
+    }
+    if y > half_pi {
+        y = pi - y;
+    }
+    if y <= q_pi { sign * det_sin_poly(y) } else { sign * det_cos_poly(half_pi - y) }
+}
+
+fn det_cos(x: f64) -> f64 {
+    let pi: f64 = 3.14159265358979323846;
+    let half_pi: f64 = 1.57079632679489661923;
+    let q_pi: f64 = 0.78539816339744830962;
+    let mut y: f64 = abs_f64(wrap_pi(x));
+    let mut sign: f64 = 1.0;
+    if y > half_pi {
+        y = pi - y;
+        sign = -1.0;
+    }
+    if y <= q_pi { sign * det_cos_poly(y) } else { sign * det_sin_poly(half_pi - y) }
+}
+
+fn det_sqrt(x: f64) -> f64 {
+    if x <= 0.0 {
+        return 0.0;
+    }
+    let mut g: f64 = x;
+    if g < 1.0 {
+        g = 1.0;
+    }
+    let mut i: i32 = 0;
+    while i < 26 {
+        g = 0.5 * (g + x / g);
+        i = i + 1;
+    }
+    g
+}
+
+fn mat4_mul(a: &Vec<f64>, b: &Vec<f64>) -> Vec<f64> {
+    let mut out: Vec<f64> = vec![0.0; 16];
+    let mut r: usize = 0;
+    while r < 4 {
+        let mut c: usize = 0;
+        while c < 4 {
+            let mut s: f64 = 0.0;
+            let mut k: usize = 0;
+            while k < 4 {
+                s = s + a[r * 4 + k] * b[k * 4 + c];
+                k = k + 1;
+            }
+            out[r * 4 + c] = s;
+            c = c + 1;
+        }
+        r = r + 1;
+    }
+    out
+}
+
+fn rot_plane4(p: usize, q: usize, ang: f64) -> Vec<f64> {
+    let mut m: Vec<f64> = vec![
+        1.0, 0.0, 0.0, 0.0,
+        0.0, 1.0, 0.0, 0.0,
+        0.0, 0.0, 1.0, 0.0,
+        0.0, 0.0, 0.0, 1.0,
+    ];
+    let c: f64 = det_cos(ang);
+    let s: f64 = det_sin(ang);
+    m[p * 4 + p] = c;
+    m[p * 4 + q] = -s;
+    m[q * 4 + p] = s;
+    m[q * 4 + q] = c;
+    m
+}
+
+// Compute max |R^T R - I|_ij
+fn ortho_residual4(r: &Vec<f64>) -> f64 {
+    let mut max_e: f64 = 0.0;
+    let mut i: usize = 0;
+    while i < 4 {
+        let mut j: usize = 0;
+        while j < 4 {
+            let mut dot: f64 = 0.0;
+            let mut k: usize = 0;
+            while k < 4 {
+                dot = dot + r[k * 4 + i] * r[k * 4 + j];
+                k = k + 1;
+            }
+            let target: f64 = if i == j { 1.0 } else { 0.0 };
+            let e: f64 = abs_f64(dot - target);
+            if e > max_e {
+                max_e = e;
+            }
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    max_e
+}
+
+struct SliceEval {
+    status: i32,
+    ortho_err: f64,
+    max_edge_err: f64,
+    slice_hits: i32,
+    slice_rad_sum: f64,
+}
+
+fn eval_tesseract_transform(mat: &Vec<f64>, verts: &Vec<f64>, e_u: &Vec<usize>, e_v: &Vec<usize>) -> SliceEval {
+    let o_err: f64 = ortho_residual4(mat);
+    let mut rot_v: Vec<f64> = vec![0.0; 64];
+    let mut i: usize = 0;
+    while i < 16 {
+        let mut r: usize = 0;
+        while r < 4 {
+            let mut s: f64 = 0.0;
+            let mut c: usize = 0;
+            while c < 4 {
+                s = s + mat[r * 4 + c] * verts[i * 4 + c];
+                c = c + 1;
+            }
+            rot_v[i * 4 + r] = s;
+            r = r + 1;
+        }
+        i = i + 1;
+    }
+
+    let mut max_edge_err: f64 = 0.0;
+    let mut slice_hits: i32 = 0;
+    let mut rad_sum: f64 = 0.0;
+    let mut e: usize = 0;
+    while e < 32 {
+        let u: usize = e_u[e];
+        let v: usize = e_v[e];
+        let dx: f64 = rot_v[u * 4 + 0] - rot_v[v * 4 + 0];
+        let dy: f64 = rot_v[u * 4 + 1] - rot_v[v * 4 + 1];
+        let dz: f64 = rot_v[u * 4 + 2] - rot_v[v * 4 + 2];
+        let dw: f64 = rot_v[u * 4 + 3] - rot_v[v * 4 + 3];
+        let len: f64 = det_sqrt(dx * dx + dy * dy + dz * dz + dw * dw);
+        let err: f64 = abs_f64(len - 2.0);
+        if err > max_edge_err {
+            max_edge_err = err;
+        }
+        // Hyperplane w = 0 intersection check
+        let wu: f64 = rot_v[u * 4 + 3];
+        let wv: f64 = rot_v[v * 4 + 3];
+        if (wu <= 0.0 && wv >= 0.0) || (wu >= 0.0 && wv <= 0.0) {
+            if abs_f64(wu - wv) > 1.0e-12 {
+                let t: f64 = -wu / (wv - wu);
+                let ix: f64 = rot_v[u * 4 + 0] + t * (rot_v[v * 4 + 0] - rot_v[u * 4 + 0]);
+                let iy: f64 = rot_v[u * 4 + 1] + t * (rot_v[v * 4 + 1] - rot_v[u * 4 + 1]);
+                let iz: f64 = rot_v[u * 4 + 2] + t * (rot_v[v * 4 + 2] - rot_v[u * 4 + 2]);
+                slice_hits = slice_hits + 1;
+                rad_sum = rad_sum + det_sqrt(ix * ix + iy * iy + iz * iz);
+            }
+        }
+        e = e + 1;
+    }
+
+    let status: i32 = if o_err <= 1.0e-12 && max_edge_err <= 1.0e-12 { 0 } else { 1 };
+    SliceEval {
+        status: status,
+        ortho_err: o_err,
+        max_edge_err: max_edge_err,
+        slice_hits: slice_hits,
+        slice_rad_sum: rad_sum,
+    }
+}
+
+fn main() ~ Clock + Console {
+    let mut failures: i32 = 0;
+    let t0_ns: i64 = clock_ns();
+
+    // 1. Construct 16 vertices (+/-1, +/-1, +/-1, +/-1) and 32 unit-Hamming edges
+    let mut verts: Vec<f64> = Vec::new();
+    let mut v: i32 = 0;
+    while v < 16 {
+        verts.push(if (v & 1) == 0 { -1.0 } else { 1.0 });
+        verts.push(if (v & 2) == 0 { -1.0 } else { 1.0 });
+        verts.push(if (v & 4) == 0 { -1.0 } else { 1.0 });
+        verts.push(if (v & 8) == 0 { -1.0 } else { 1.0 });
+        v = v + 1;
+    }
+    let mut e_u: Vec<usize> = Vec::new();
+    let mut e_v: Vec<usize> = Vec::new();
+    let mut i: usize = 0;
+    while i < 16 {
+        let mut j: usize = i + 1;
+        while j < 16 {
+            let mut diff: i32 = 0;
+            let mut c: usize = 0;
+            while c < 4 {
+                if abs_f64(verts[i * 4 + c] - verts[j * 4 + c]) > 0.5 {
+                    diff = diff + 1;
+                }
+                c = c + 1;
+            }
+            if diff == 1 {
+                e_u.push(i);
+                e_v.push(j);
+            }
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+
+    // 2. Sweep 6 canonical SO(4) rotation pairs
+    let pi: f64 = 3.14159265358979323846;
+    let ang_a: Vec<f64> = vec![0.0, pi / 6.0, pi / 4.0, pi / 3.0, pi / 2.0, 2.0 * pi / 3.0];
+    let ang_b: Vec<f64> = vec![0.0, pi / 12.0, pi / 6.0, pi / 4.0, pi / 3.0, pi / 5.0];
+    let mut max_edge_err: f64 = 0.0;
+    let mut max_ortho_err: f64 = 0.0;
+    let mut total_slice_hits: i32 = 0;
+    let mut checksum: f64 = 0.0;
+
+    let mut a_i: usize = 0;
+    while a_i < 6 {
+        let r1: Vec<f64> = rot_plane4(0, 3, ang_a[a_i]);
+        let r2: Vec<f64> = rot_plane4(1, 2, ang_b[a_i]);
+        let r3: Vec<f64> = rot_plane4(2, 3, 0.5 * ang_b[a_i]);
+        let r12: Vec<f64> = mat4_mul(&r1, &r2);
+        let r_so4: Vec<f64> = mat4_mul(&r12, &r3);
+        let ev: SliceEval = eval_tesseract_transform(&r_so4, &verts, &e_u, &e_v);
+        if ev.status != 0 {
+            failures = failures + 1;
+        }
+        if ev.max_edge_err > max_edge_err {
+            max_edge_err = ev.max_edge_err;
+        }
+        if ev.ortho_err > max_ortho_err {
+            max_ortho_err = ev.ortho_err;
+        }
+        total_slice_hits = total_slice_hits + ev.slice_hits;
+        checksum = checksum + ev.slice_rad_sum;
+        a_i = a_i + 1;
+    }
+
+    if e_u.len() == 32 && max_edge_err <= 1.0e-12 && max_ortho_err <= 1.0e-12 {
+        println!(
+            "[PASS] tesseract_so4_6angles verts=16 edges=32 max_edge_err={:.3e} ortho_err={:.3e} slice_hits={}",
+            max_edge_err, max_ortho_err, total_slice_hits
+        );
+    } else {
+        println!("[FAIL] tesseract_so4_6angles edge_err={:.3e}", max_edge_err);
+        failures = failures + 1;
+    }
+
+    // 3. Planted Control: Non-Orthogonal Shear Matrix Caught Fail-Closed
+    let mut shear: Vec<f64> = vec![
+        1.0, 0.30, 0.0, 0.0,
+        0.0, 1.0, 0.0, 0.0,
+        0.0, 0.0, 1.0, 0.0,
+        0.0, 0.0, 0.0, 1.0,
+    ];
+    let bad: SliceEval = eval_tesseract_transform(&shear, &verts, &e_u, &e_v);
+    if bad.status == 1 && bad.ortho_err > 0.25 && bad.max_edge_err > 0.04 {
+        println!(
+            "[PASS] planted_ctrl_non_ortho_shear caught ortho_err={:.6} max_edge_err={:.6}",
+            bad.ortho_err, bad.max_edge_err
+        );
+    } else {
+        println!("[FAIL] planted_ctrl_non_ortho_shear missed status={}", bad.status);
+        failures = failures + 1;
+    }
+
+    let elapsed_ms: f64 = ((clock_ns() - t0_ns) as f64) / 1.0e6;
+    println!(
+        "[METRICS_A20] elapsed_ms={:.4} max_edge_err={:.3e} checksum={:.9} failures={}",
+        elapsed_ms, max_edge_err, checksum, failures
+    );
+}

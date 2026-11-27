@@ -1,0 +1,307 @@
+// SPDX-FileCopyrightText: 2026 Zain Dana Harper
+// SPDX-License-Identifier: MIT
+// Wave 53L - Author Idea N14: 4D Regular 24-Cell Coxeter-Plane (F4 & B4) Projection
+// Constructs exact 24 vertices (+/-1, +/-1, 0, 0) and 96 edges (len = sqrt(2)), projects
+// onto exact 8-fold (B4) and 12-fold (F4) Coxeter planes, and verifies rotational symmetry
+// invariants to <= 1e-10 (Hausdorff error).
+// Planted Control: vertex perturbation breaks both rotational invariants fail-closed.
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { -x } else { x }
+}
+
+fn wrap_pi(x: f64) -> f64 {
+    let pi: f64 = 3.14159265358979323846;
+    let two_pi: f64 = 6.28318530717958647692;
+    let mut y: f64 = x;
+    while y > pi {
+        y = y - two_pi;
+    }
+    while y < -pi {
+        y = y + two_pi;
+    }
+    y
+}
+
+fn det_sin_poly(y: f64) -> f64 {
+    let y2: f64 = y * y;
+    let t7: f64 = 1.6059043836821613e-10 - y2 * 7.647163731819816e-13;
+    let t6: f64 = 2.505210838544172e-8 - y2 * t7;
+    let t5: f64 = 2.7557319223985893e-6 - y2 * t6;
+    let t4: f64 = 1.984126984126984e-4 - y2 * t5;
+    let t3: f64 = 8.333333333333333e-3 - y2 * t4;
+    let t2: f64 = 1.6666666666666666e-1 - y2 * t3;
+    y * (1.0 - y2 * t2)
+}
+
+fn det_cos_poly(y: f64) -> f64 {
+    let y2: f64 = y * y;
+    let t7: f64 = 2.08767569878681e-9 - y2 * 1.1470745597729725e-11;
+    let t6: f64 = 2.7557319223985893e-7 - y2 * t7;
+    let t5: f64 = 2.48015873015873e-5 - y2 * t6;
+    let t4: f64 = 1.388888888888889e-3 - y2 * t5;
+    let t3: f64 = 4.1666666666666664e-2 - y2 * t4;
+    let t2: f64 = 0.5 - y2 * t3;
+    1.0 - y2 * t2
+}
+
+fn det_sin(x: f64) -> f64 {
+    let pi: f64 = 3.14159265358979323846;
+    let half_pi: f64 = 1.57079632679489661923;
+    let q_pi: f64 = 0.78539816339744830962;
+    let mut y: f64 = wrap_pi(x);
+    let mut sign: f64 = 1.0;
+    if y < 0.0 {
+        y = -y;
+        sign = -1.0;
+    }
+    if y > half_pi {
+        y = pi - y;
+    }
+    if y <= q_pi { sign * det_sin_poly(y) } else { sign * det_cos_poly(half_pi - y) }
+}
+
+fn det_cos(x: f64) -> f64 {
+    let pi: f64 = 3.14159265358979323846;
+    let half_pi: f64 = 1.57079632679489661923;
+    let q_pi: f64 = 0.78539816339744830962;
+    let mut y: f64 = abs_f64(wrap_pi(x));
+    let mut sign: f64 = 1.0;
+    if y > half_pi {
+        y = pi - y;
+        sign = -1.0;
+    }
+    if y <= q_pi { sign * det_cos_poly(y) } else { sign * det_sin_poly(half_pi - y) }
+}
+
+fn det_sqrt(x: f64) -> f64 {
+    if x <= 0.0 {
+        return 0.0;
+    }
+    let mut s: f64 = x;
+    let mut sc: f64 = 1.0;
+    while s < 0.25 {
+        s = s * 4.0;
+        sc = sc * 0.5;
+    }
+    while s >= 4.0 {
+        s = s * 0.25;
+        sc = sc * 2.0;
+    }
+    let mut g: f64 = 1.0;
+    let mut i: i32 = 0;
+    while i < 12 {
+        g = 0.5 * (g + s / g);
+        i = i + 1;
+    }
+    g * sc
+}
+
+fn reflect4(v: &Vec<f64>, root: &Vec<f64>) -> Vec<f64> {
+    let dot: f64 = v[0] * root[0] + v[1] * root[1] + v[2] * root[2] + v[3] * root[3];
+    let n2: f64 = root[0] * root[0] + root[1] * root[1] + root[2] * root[2] + root[3] * root[3];
+    let sc: f64 = 2.0 * dot / n2;
+    vec![v[0] - sc * root[0], v[1] - sc * root[1], v[2] - sc * root[2], v[3] - sc * root[3]]
+}
+
+// Exact F4 Coxeter element c12 = s1 * s2 * s3 * s4 (order 12 on the 24-cell)
+fn apply_f4_coxeter(v: &Vec<f64>) -> Vec<f64> {
+    let a1: Vec<f64> = vec![0.0, 1.0, -1.0, 0.0];
+    let a2: Vec<f64> = vec![0.0, 0.0, 1.0, -1.0];
+    let a3: Vec<f64> = vec![0.0, 0.0, 0.0, 1.0];
+    let a4: Vec<f64> = vec![0.5, -0.5, -0.5, -0.5];
+    let t1: Vec<f64> = reflect4(v, &a4);
+    let t2: Vec<f64> = reflect4(&t1, &a3);
+    let t3: Vec<f64> = reflect4(&t2, &a2);
+    reflect4(&t3, &a1)
+}
+
+fn normalize4(v: &Vec<f64>) -> Vec<f64> {
+    let n: f64 = det_sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2] + v[3] * v[3]);
+    vec![v[0] / n, v[1] / n, v[2] / n, v[3] / n]
+}
+
+// Check n-fold rotational symmetry of projected 24-point set (Hausdorff distance under rot 2*pi/fold)
+fn symmetry_hausdorff_err(verts: &Vec<f64>, bu: &Vec<f64>, bv: &Vec<f64>, fold: i32) -> f64 {
+    let mut px: Vec<f64> = Vec::new();
+    let mut py: Vec<f64> = Vec::new();
+    let mut i: usize = 0;
+    while i < 24 {
+        let u: f64 = verts[i * 4 + 0] * bu[0] + verts[i * 4 + 1] * bu[1]
+            + verts[i * 4 + 2] * bu[2] + verts[i * 4 + 3] * bu[3];
+        let v: f64 = verts[i * 4 + 0] * bv[0] + verts[i * 4 + 1] * bv[1]
+            + verts[i * 4 + 2] * bv[2] + verts[i * 4 + 3] * bv[3];
+        px.push(u);
+        py.push(v);
+        i = i + 1;
+    }
+
+    let ang: f64 = 6.28318530717958647692 / (fold as f64);
+    let ca: f64 = det_cos(ang);
+    let sa: f64 = det_sin(ang);
+    let mut max_min_d: f64 = 0.0;
+    i = 0;
+    while i < 24 {
+        let rx: f64 = px[i] * ca - py[i] * sa;
+        let ry: f64 = px[i] * sa + py[i] * ca;
+        let mut best: f64 = 1.0e9;
+        let mut j: usize = 0;
+        while j < 24 {
+            let dx: f64 = rx - px[j];
+            let dy: f64 = ry - py[j];
+            let d: f64 = det_sqrt(dx * dx + dy * dy);
+            if d < best {
+                best = d;
+            }
+            j = j + 1;
+        }
+        if best > max_min_d {
+            max_min_d = best;
+        }
+        i = i + 1;
+    }
+    max_min_d
+}
+
+fn main() ~ Clock + Console {
+    let mut failures: i32 = 0;
+    let t0_ns: i64 = clock_ns();
+
+    // 1. Build 24 vertices: all permutations of (+/-1, +/-1, 0, 0)
+    let mut verts: Vec<f64> = Vec::new();
+    let mut p: usize = 0;
+    while p < 4 {
+        let mut q: usize = p + 1;
+        while q < 4 {
+            let mut sp: i32 = 0;
+            while sp < 2 {
+                let mut sq: i32 = 0;
+                while sq < 2 {
+                    let mut coord: Vec<f64> = vec![0.0, 0.0, 0.0, 0.0];
+                    coord[p] = if sp == 0 { -1.0 } else { 1.0 };
+                    coord[q] = if sq == 0 { -1.0 } else { 1.0 };
+                    verts.push(coord[0]);
+                    verts.push(coord[1]);
+                    verts.push(coord[2]);
+                    verts.push(coord[3]);
+                    sq = sq + 1;
+                }
+                sp = sp + 1;
+            }
+            q = q + 1;
+        }
+        p = p + 1;
+    }
+
+    // Count exact edges at Euclidean length sqrt(2) (d^2 == 2.0)
+    let mut edge_count: i32 = 0;
+    let mut i: usize = 0;
+    while i < 24 {
+        let mut j: usize = i + 1;
+        while j < 24 {
+            let dx: f64 = verts[i * 4 + 0] - verts[j * 4 + 0];
+            let dy: f64 = verts[i * 4 + 1] - verts[j * 4 + 1];
+            let dz: f64 = verts[i * 4 + 2] - verts[j * 4 + 2];
+            let dw: f64 = verts[i * 4 + 3] - verts[j * 4 + 3];
+            let d2: f64 = dx * dx + dy * dy + dz * dz + dw * dw;
+            if abs_f64(d2 - 2.0) < 1.0e-9 {
+                edge_count = edge_count + 1;
+            }
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+
+    // 2. Exact B4 8-fold Coxeter eigenplane (for signed 4-cycle order 8)
+    let pi: f64 = 3.14159265358979323846;
+    let inv_s2: f64 = 1.0 / det_sqrt(2.0);
+    let bu8: Vec<f64> = vec![
+        inv_s2 * det_cos(0.0),
+        inv_s2 * det_cos(pi / 4.0),
+        inv_s2 * det_cos(2.0 * pi / 4.0),
+        inv_s2 * det_cos(3.0 * pi / 4.0),
+    ];
+    let bv8: Vec<f64> = vec![
+        inv_s2 * det_sin(0.0),
+        inv_s2 * det_sin(pi / 4.0),
+        inv_s2 * det_sin(2.0 * pi / 4.0),
+        inv_s2 * det_sin(3.0 * pi / 4.0),
+    ];
+
+    // 3. Exact F4 12-fold Coxeter eigenplane via Fourier eigenprojection of c12^k (k=0..11)
+    let mut cur: Vec<f64> = vec![1.0, 0.3, -0.2, 0.1];
+    let mut u12_raw: Vec<f64> = vec![0.0, 0.0, 0.0, 0.0];
+    let mut v12_raw: Vec<f64> = vec![0.0, 0.0, 0.0, 0.0];
+    let mut k: i32 = 0;
+    while k < 12 {
+        let ang: f64 = (k as f64) * pi / 6.0;
+        let ck: f64 = det_cos(ang);
+        let sk: f64 = det_sin(ang);
+        let mut c_i: usize = 0;
+        while c_i < 4 {
+            u12_raw[c_i] = u12_raw[c_i] + ck * cur[c_i];
+            v12_raw[c_i] = v12_raw[c_i] + sk * cur[c_i];
+            c_i = c_i + 1;
+        }
+        cur = apply_f4_coxeter(&cur);
+        k = k + 1;
+    }
+    let bu12: Vec<f64> = normalize4(&u12_raw);
+    let dot_uv: f64 = bu12[0] * v12_raw[0] + bu12[1] * v12_raw[1] + bu12[2] * v12_raw[2] + bu12[3] * v12_raw[3];
+    let v12_orth: Vec<f64> = vec![
+        v12_raw[0] - dot_uv * bu12[0],
+        v12_raw[1] - dot_uv * bu12[1],
+        v12_raw[2] - dot_uv * bu12[2],
+        v12_raw[3] - dot_uv * bu12[3],
+    ];
+    let bv12: Vec<f64> = normalize4(&v12_orth);
+
+    let err8: f64 = symmetry_hausdorff_err(&verts, &bu8, &bv8, 8);
+    let err12: f64 = symmetry_hausdorff_err(&verts, &bu12, &bv12, 12);
+    if edge_count == 96 && err8 <= 1.0e-10 && err12 <= 1.0e-10 {
+        println!(
+            "[PASS] coxeter_24cell verts=24 edges=96 err_8fold={:.3e} err_12fold={:.3e}",
+            err8, err12
+        );
+    } else {
+        println!("[FAIL] coxeter_24cell edges={} err8={:.3e} err12={:.3e}", edge_count, err8, err12);
+        failures = failures + 1;
+    }
+
+    // 4. Planted Control: Broken-Symmetry Vertex Perturbation Caught Fail-Closed
+    let mut bad_v: Vec<f64> = Vec::new();
+    let mut b_i: usize = 0;
+    while b_i < 96 {
+        bad_v.push(verts[b_i]);
+        b_i = b_i + 1;
+    }
+    bad_v[0] = bad_v[0] + 0.12;
+    let bad_err8: f64 = symmetry_hausdorff_err(&bad_v, &bu8, &bv8, 8);
+    let bad_err12: f64 = symmetry_hausdorff_err(&bad_v, &bu12, &bv12, 12);
+    if bad_err8 > 0.05 && bad_err12 > 0.05 {
+        println!(
+            "[PASS] planted_ctrl_broken_sym caught bad_err8={:.6} bad_err12={:.6}",
+            bad_err8, bad_err12
+        );
+    } else {
+        println!("[FAIL] planted_ctrl_broken_sym missed bad8={:.6} bad12={:.6}", bad_err8, bad_err12);
+        failures = failures + 1;
+    }
+
+    // Compute deterministic projection radius checksum for parity
+    let mut chk: f64 = 0.0;
+    i = 0;
+    while i < 24 {
+        let u: f64 = verts[i * 4 + 0] * bu12[0] + verts[i * 4 + 1] * bu12[1]
+            + verts[i * 4 + 2] * bu12[2] + verts[i * 4 + 3] * bu12[3];
+        let v: f64 = verts[i * 4 + 0] * bv12[0] + verts[i * 4 + 1] * bv12[1]
+            + verts[i * 4 + 2] * bv12[2] + verts[i * 4 + 3] * bv12[3];
+        chk = chk + det_sqrt(u * u + v * v);
+        i = i + 1;
+    }
+    let elapsed_ms: f64 = ((clock_ns() - t0_ns) as f64) / 1.0e6;
+    println!(
+        "[METRICS_N14] elapsed_ms={:.4} err12={:.3e} checksum={:.12} failures={}",
+        elapsed_ms, err12, chk, failures
+    );
+}

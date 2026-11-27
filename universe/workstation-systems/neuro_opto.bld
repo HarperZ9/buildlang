@@ -1,0 +1,224 @@
+// SPDX-FileCopyrightText: 2026 Zain Dana Harper
+// SPDX-License-Identifier: MIT
+// Wave 50H - Author Idea G5: Optogenetics Hodgkin-Huxley + Channelrhodopsin-2 (ChR2)
+// Integrates 4-state Hodgkin-Huxley (1952) membrane ODEs coupled to a 3-state light-gated
+// ChR2 cation conductance (Nagel 2003 / Nikolic 2009) via RK4 (dt=0.02 ms, 500 ms = 10 pulses
+// at 20 Hz, 5 ms pulse width).
+// Verifies 10/10 (100%) optical pulse spike-timing locking at suprathreshold irradiance and
+// catches planted sub-threshold irradiance control (0 evoked spikes).
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { -x } else { x }
+}
+
+fn det_exp(x: f64) -> f64 {
+    if x < -50.0 {
+        return 0.0;
+    }
+    let u: f64 = x / 128.0;
+    let mut t: f64 = 1.0 + u * (1.0 + u * (0.5 + u * (0.16666666666666666 + u * 0.041666666666666664)));
+    let mut i: i32 = 0;
+    while i < 7 {
+        t = t * t;
+        i = i + 1;
+    }
+    t
+}
+
+fn vtrap(x: f64, y: f64) -> f64 {
+    if abs_f64(x / y) < 1.0e-6 {
+        y * (1.0 - 0.5 * x / y)
+    } else {
+        x / (det_exp(x / y) - 1.0)
+    }
+}
+
+struct HhState {
+    v: f64,
+    m: f64,
+    h: f64,
+    n: f64,
+    o_chr: f64,
+    d_chr: f64,
+}
+
+fn hh_deriv(s: &HhState, irr_mw_mm2: f64) -> HhState {
+    // Classic Hodgkin-Huxley (1952) rate constants (mV, ms^-1)
+    let am: f64 = 0.1 * vtrap(-(s.v + 40.0), 10.0);
+    let bm: f64 = 4.0 * det_exp(-(s.v + 65.0) / 18.0);
+    let ah: f64 = 0.07 * det_exp(-(s.v + 65.0) / 20.0);
+    let bh: f64 = 1.0 / (det_exp(-(s.v + 35.0) / 10.0) + 1.0);
+    let an: f64 = 0.01 * vtrap(-(s.v + 55.0), 10.0);
+    let bn: f64 = 0.125 * det_exp(-(s.v + 65.0) / 80.0);
+
+    let dm: f64 = am * (1.0 - s.m) - bm * s.m;
+    let dh: f64 = ah * (1.0 - s.h) - bh * s.h;
+    let dn: f64 = an * (1.0 - s.n) - bn * s.n;
+
+    // 3-state ChR2 photocycle: Closed (1 - O - D) -> Open (O) -> Desensitized (D) -> Closed
+    let k_act: f64 = 0.16;
+    let g_d: f64 = 0.12;
+    let e_12: f64 = 0.035;
+    let g_r: f64 = 0.030;
+    let c_chr: f64 = 1.0 - s.o_chr - s.d_chr;
+    let do_chr: f64 = k_act * irr_mw_mm2 * c_chr - (g_d + e_12) * s.o_chr;
+    let dd_chr: f64 = e_12 * s.o_chr - g_r * s.d_chr;
+
+    let i_na: f64 = 120.0 * s.m * s.m * s.m * s.h * (s.v - 50.0);
+    let i_k: f64 = 36.0 * s.n * s.n * s.n * s.n * (s.v + 77.0);
+    let i_l: f64 = 0.3 * (s.v + 54.387);
+    let i_chr2: f64 = 1.25 * s.o_chr * (s.v - 0.0);
+    let dv: f64 = -(i_na + i_k + i_l + i_chr2);
+
+    HhState { v: dv, m: dm, h: dh, n: dn, o_chr: do_chr, d_chr: dd_chr }
+}
+
+fn hh_add(s: &HhState, k: &HhState, h: f64) -> HhState {
+    HhState {
+        v: s.v + h * k.v,
+        m: s.m + h * k.m,
+        h: s.h + h * k.h,
+        n: s.n + h * k.n,
+        o_chr: s.o_chr + h * k.o_chr,
+        d_chr: s.d_chr + h * k.d_chr,
+    }
+}
+
+fn hh_rk4(s: &HhState, irr: f64, dt: f64) -> HhState {
+    let k1: HhState = hh_deriv(s, irr);
+    let s2: HhState = hh_add(s, &k1, 0.5 * dt);
+    let k2: HhState = hh_deriv(&s2, irr);
+    let s3: HhState = hh_add(s, &k2, 0.5 * dt);
+    let k3: HhState = hh_deriv(&s3, irr);
+    let s4: HhState = hh_add(s, &k3, dt);
+    let k4: HhState = hh_deriv(&s4, irr);
+    let c: f64 = dt / 6.0;
+    HhState {
+        v: s.v + c * (k1.v + 2.0 * k2.v + 2.0 * k3.v + k4.v),
+        m: s.m + c * (k1.m + 2.0 * k2.m + 2.0 * k3.m + k4.m),
+        h: s.h + c * (k1.h + 2.0 * k2.h + 2.0 * k3.h + k4.h),
+        n: s.n + c * (k1.n + 2.0 * k2.n + 2.0 * k3.n + k4.n),
+        o_chr: s.o_chr + c * (k1.o_chr + 2.0 * k2.o_chr + 2.0 * k3.o_chr + k4.o_chr),
+        d_chr: s.d_chr + c * (k1.d_chr + 2.0 * k2.d_chr + 2.0 * k3.d_chr + k4.d_chr),
+    }
+}
+
+struct OptoResult {
+    total_spikes: i32,
+    locked_spikes: i32,
+    mean_latency_ms: f64,
+    v_peak_mv: f64,
+    v_end_mv: f64,
+}
+
+fn run_opto_train(irr_peak: f64) -> OptoResult {
+    // Resting HH steady state at V = -65.0 mV
+    let mut st: HhState = HhState {
+        v: -65.0,
+        m: 0.05293248525724958,
+        h: 0.5961207535084603,
+        n: 0.3176769140606974,
+        o_chr: 0.0,
+        d_chr: 0.0,
+    };
+    let dt: f64 = 0.02;
+    let total_steps: i32 = 25000; // 500.0 ms = 10 pulses at 20 Hz (period 50 ms)
+    let mut total_spikes: i32 = 0;
+    let mut locked_spikes: i32 = 0;
+    let mut latency_sum: f64 = 0.0;
+    let mut v_peak: f64 = -100.0;
+    let mut prev_v: f64 = st.v;
+    let mut pulse_locked: Vec<i32> = vec![0; 10];
+
+    let mut step: i32 = 0;
+    while step < total_steps {
+        let t_ms: f64 = (step as f64) * dt;
+        // 10 pulses starting at t = 20, 70, 120, ..., 470 ms (5 ms pulse duration)
+        let mut irr: f64 = 0.0;
+        let mut p_idx: i32 = -1;
+        if t_ms >= 20.0 {
+            let rel: f64 = t_ms - 20.0;
+            let pid: i32 = (rel / 50.0) as i32;
+            let phase: f64 = rel - (pid as f64) * 50.0;
+            if pid >= 0 && pid < 10 {
+                p_idx = pid;
+                if phase >= 0.0 && phase < 5.0 {
+                    irr = irr_peak;
+                }
+            }
+        }
+
+        st = hh_rk4(&st, irr, dt);
+        if st.v > v_peak {
+            v_peak = st.v;
+        }
+        // Detect upward action-potential threshold crossing at 0.0 mV
+        if prev_v < 0.0 && st.v >= 0.0 {
+            total_spikes = total_spikes + 1;
+            if p_idx >= 0 && p_idx < 10 {
+                let lat: f64 = (t_ms - (20.0 + (p_idx as f64) * 50.0));
+                if lat >= 0.0 && lat <= 12.0 && pulse_locked[p_idx as usize] == 0 {
+                    pulse_locked[p_idx as usize] = 1;
+                    locked_spikes = locked_spikes + 1;
+                    latency_sum = latency_sum + lat;
+                }
+            }
+        }
+        prev_v = st.v;
+        step = step + 1;
+    }
+
+    let mean_lat: f64 = if locked_spikes > 0 {
+        latency_sum / (locked_spikes as f64)
+    } else {
+        0.0
+    };
+    OptoResult {
+        total_spikes: total_spikes,
+        locked_spikes: locked_spikes,
+        mean_latency_ms: mean_lat,
+        v_peak_mv: v_peak,
+        v_end_mv: st.v,
+    }
+}
+
+fn main() ~ Clock + Console {
+    let mut failures: i32 = 0;
+    let t0_ns: i64 = clock_ns();
+
+    // 1. Suprathreshold 20 Hz Blue-Light Optical Pulse Train (4.0 mW/mm^2)
+    let supra: OptoResult = run_opto_train(4.0);
+    if supra.locked_spikes == 10 && supra.total_spikes == 10 && supra.v_peak_mv > 20.0 {
+        println!(
+            "[PASS] hh_chr2_20hz_locking locked={}/10 total_spikes={} mean_latency_ms={:.4} v_peak_mv={:.4}",
+            supra.locked_spikes, supra.total_spikes, supra.mean_latency_ms, supra.v_peak_mv
+        );
+    } else {
+        println!(
+            "[FAIL] hh_chr2_20hz_locking locked={}/10 total_spikes={} v_peak_mv={:.4}",
+            supra.locked_spikes, supra.total_spikes, supra.v_peak_mv
+        );
+        failures = failures + 1;
+    }
+
+    // 2. Planted Sub-Threshold Irradiance Control (0.02 mW/mm^2 -> 0 evoked spikes)
+    let sub: OptoResult = run_opto_train(0.02);
+    if sub.total_spikes == 0 && sub.v_peak_mv < -45.0 {
+        println!(
+            "[PASS] planted_ctrl_subthreshold caught spikes={} v_peak_mv={:.4}",
+            sub.total_spikes, sub.v_peak_mv
+        );
+    } else {
+        println!(
+            "[FAIL] planted_ctrl_subthreshold missed spikes={} v_peak_mv={:.4}",
+            sub.total_spikes, sub.v_peak_mv
+        );
+        failures = failures + 1;
+    }
+
+    let elapsed_ms: f64 = ((clock_ns() - t0_ns) as f64) / 1.0e6;
+    println!(
+        "[METRICS_G5] elapsed_ms={:.4} v_peak_mv={:.9} v_end_mv={:.9} failures={}",
+        elapsed_ms, supra.v_peak_mv, supra.v_end_mv, failures
+    );
+}
