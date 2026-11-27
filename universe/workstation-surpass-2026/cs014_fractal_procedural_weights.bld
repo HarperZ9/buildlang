@@ -1,0 +1,466 @@
+// SPDX-FileCopyrightText: 2026 Zain Dana Harper
+// SPDX-License-Identifier: MIT
+//
+// Wave 109C (CS-014; A5, F1, N50, N53):
+// Fractal Neural Synthesis Procedural Weights Equal-Byte Benchmark vs BitNet b1.58 & NVFP4
+//   - Synthesizes a 64x64 (4,096 weights, 16,384 B f32) neural layer within an exact 1,024 B (2.0 bpw) budget
+//   - Compares Van Loan Kronecker-IFS Fractal Synthesis (K=8 int8 8x8 factor pairs = 1,024 B) against
+//     BitNet b1.58 ternary quantization (1,024 B) and NVFP4 E2M1 (1,024 B 50%-pruned & 2,304 B full density)
+//   - Evaluates BOTH structured multi-scale (Regime A: pass) and unstructured IID (Regime B: honest null)
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { return -x; }
+    x
+}
+
+fn clamp_i32(v: i32, lo: i32, hi: i32) -> i32 {
+    if v < lo { return lo; }
+    if v > hi { return hi; }
+    v
+}
+
+fn round_i32(x: f64) -> i32 {
+    if x >= 0.0 { return (x + 0.5) as i32; }
+    -(((-x) + 0.5) as i32)
+}
+
+fn lcg_next(s: u64) -> u64 {
+    (s * 1664525u64 + 1013904223u64) & 4294967295u64
+}
+
+fn det_val(tag: i64, r: usize, c: usize) -> f64 {
+    let a: f64 = ((tag * 131 + (r as i64) * 37 + (c as i64) * 19 + 7) as f64) * 0.3719;
+    let b: f64 = ((tag * 73 + (r as i64) * 53 + (c as i64) * 29 + 11) as f64) * 0.6193;
+    0.58 * sin(a) + 0.42 * cos(b)
+}
+
+fn sqnr_db(target: &Vec<f64>, approx: &Vec<f64>) -> f64 {
+    let mut sig: f64 = 0.0;
+    let mut err: f64 = 0.0;
+    let mut i: usize = 0;
+    while i < target.len() {
+        let t: f64 = target[i];
+        let d: f64 = t - approx[i];
+        sig = sig + t * t;
+        err = err + d * d;
+        i = i + 1;
+    }
+    if err <= 1.0e-15 { return 120.0; }
+    10.0 * log(sig / err) / log(10.0)
+}
+
+fn matvec_rel_err(
+    w_true: &Vec<f64>,
+    w_hat: &Vec<f64>,
+    x_mat: &Vec<f64>,
+    n: usize,
+    b_sz: usize,
+) -> f64 {
+    let mut num: f64 = 0.0;
+    let mut den: f64 = 0.0;
+    let mut s: usize = 0;
+    while s < b_sz {
+        let x_off: usize = s * n;
+        let mut r: usize = 0;
+        while r < n {
+            let mut yt: f64 = 0.0;
+            let mut yh: f64 = 0.0;
+            let mut c: usize = 0;
+            while c < n {
+                let xv: f64 = x_mat[x_off + c];
+                yt = yt + w_true[r * n + c] * xv;
+                yh = yh + w_hat[r * n + c] * xv;
+                c = c + 1;
+            }
+            let diff: f64 = yt - yh;
+            num = num + diff * diff;
+            den = den + yt * yt;
+            r = r + 1;
+        }
+        s = s + 1;
+    }
+    sqrt(num / (den + 1.0e-15))
+}
+
+// Quantize a single normalized value in [-6, 6] to exact NVFP4 E2M1 codebook {0,0.5,1,1.5,2,3,4,6}.
+fn quant_e2m1(val: f64) -> f64 {
+    let sgn: f64 = if val < 0.0 { -1.0 } else { 1.0 };
+    let a: f64 = abs_f64(val);
+    let q: f64 = if a < 0.25 {
+        0.0
+    } else if a < 0.75 {
+        0.5
+    } else if a < 1.25 {
+        1.0
+    } else if a < 1.75 {
+        1.5
+    } else if a < 2.50 {
+        2.0
+    } else if a < 3.50 {
+        3.0
+    } else if a < 5.00 {
+        4.0
+    } else {
+        6.0
+    };
+    sgn * q
+}
+
+// Synthesize W_hat [64x64] via Van Loan Kronecker-IFS Fractal Synthesis with K factor pairs
+// quantized to int8 (exact byte budget = K * 128 bytes; K=8 => 1,024 bytes = 2.0 bpw).
+fn fractal_kronecker_synth(
+    w_tgt: &Vec<f64>,
+    k_atoms: usize,
+    max_bytes: usize,
+    w_out: &mut Vec<f64>,
+) -> i32 {
+    let bytes_used: usize = k_atoms * 128;
+    if bytes_used > max_bytes { return -141; }
+
+    // Rearrange 64x64 weight matrix into 64x64 Kronecker-block matrix R_mat:
+    // row p = 8*r1 + c1, col q = 8*r0 + c0 holds W[8*r1+r0, 8*c1+c0].
+    let mut r_mat: Vec<f64> = Vec::new();
+    let mut idx: usize = 0;
+    while idx < 4096 { r_mat.push(0.0); idx = idx + 1; }
+    let mut r1: usize = 0;
+    while r1 < 8 {
+        let mut c1: usize = 0;
+        while c1 < 8 {
+            let p: usize = r1 * 8 + c1;
+            let mut r0: usize = 0;
+            while r0 < 8 {
+                let mut c0: usize = 0;
+                while c0 < 8 {
+                    let q: usize = r0 * 8 + c0;
+                    r_mat[p * 64 + q] = w_tgt[(r1 * 8 + r0) * 64 + (c1 * 8 + c0)];
+                    c0 = c0 + 1;
+                }
+                r0 = r0 + 1;
+            }
+            c1 = c1 + 1;
+        }
+        r1 = r1 + 1;
+    }
+
+    idx = 0;
+    while idx < 4096 { w_out[idx] = 0.0; idx = idx + 1; }
+
+    let mut u_vec: Vec<f64> = Vec::new();
+    let mut v_vec: Vec<f64> = Vec::new();
+    let mut u_q: Vec<f64> = Vec::new();
+    let mut v_q: Vec<f64> = Vec::new();
+    idx = 0;
+    while idx < 64 {
+        u_vec.push(0.0); v_vec.push(0.0); u_q.push(0.0); v_q.push(0.0);
+        idx = idx + 1;
+    }
+
+    let mut atom: usize = 0;
+    while atom < k_atoms {
+        // Deterministic power-iteration rank-1 extraction of leading Kronecker factor (u, v)
+        let mut i: usize = 0;
+        while i < 64 {
+            v_vec[i] = 0.25 + 0.15 * sin(((atom * 19 + i * 7 + 3) as f64) * 0.61);
+            i = i + 1;
+        }
+        let mut it: usize = 0;
+        while it < 14 {
+            // u = R * v
+            let mut un2: f64 = 0.0;
+            let mut p: usize = 0;
+            while p < 64 {
+                let mut acc: f64 = 0.0;
+                let mut q: usize = 0;
+                while q < 64 { acc = acc + r_mat[p * 64 + q] * v_vec[q]; q = q + 1; }
+                u_vec[p] = acc;
+                un2 = un2 + acc * acc;
+                p = p + 1;
+            }
+            let un: f64 = sqrt(un2);
+            if un > 1.0e-14 {
+                let inv_u: f64 = 1.0 / un;
+                p = 0;
+                while p < 64 { u_vec[p] = u_vec[p] * inv_u; p = p + 1; }
+            }
+            // v = R^T * u
+            let mut vn2: f64 = 0.0;
+            let mut q: usize = 0;
+            while q < 64 {
+                let mut acc: f64 = 0.0;
+                p = 0;
+                while p < 64 { acc = acc + r_mat[p * 64 + q] * u_vec[p]; p = p + 1; }
+                v_vec[q] = acc;
+                vn2 = vn2 + acc * acc;
+                q = q + 1;
+            }
+            let vn: f64 = sqrt(vn2);
+            if vn > 1.0e-14 {
+                let inv_v: f64 = 1.0 / vn;
+                q = 0;
+                while q < 64 { v_vec[q] = v_vec[q] * inv_v; q = q + 1; }
+            }
+            it = it + 1;
+        }
+        // Singular value sigma = u^T R v
+        let mut sigma: f64 = 0.0;
+        let mut p: usize = 0;
+        while p < 64 {
+            let mut row_dot: f64 = 0.0;
+            let mut q: usize = 0;
+            while q < 64 { row_dot = row_dot + r_mat[p * 64 + q] * v_vec[q]; q = q + 1; }
+            sigma = sigma + u_vec[p] * row_dot;
+            p = p + 1;
+        }
+        let s_half: f64 = sqrt(abs_f64(sigma));
+        let s_sgn: f64 = if sigma < 0.0 { -1.0 } else { 1.0 };
+
+        // Fixed-point int8 packing (max_abs fixed range 1.5 -> 1 byte per element, 0 extra scale bytes)
+        let q_step: f64 = 1.5 / 127.0;
+        let inv_q: f64 = 1.0 / q_step;
+        p = 0;
+        while p < 64 {
+            let iq: i32 = clamp_i32(round_i32((u_vec[p] * s_half * s_sgn) * inv_q), -127, 127);
+            u_q[p] = (iq as f64) * q_step;
+            let jq: i32 = clamp_i32(round_i32((v_vec[p] * s_half) * inv_q), -127, 127);
+            v_q[p] = (jq as f64) * q_step;
+            p = p + 1;
+        }
+        // Deflate R_mat by quantized procedural atom and accumulate into synthesized W_out
+        r1 = 0;
+        while r1 < 8 {
+            let mut c1: usize = 0;
+            while c1 < 8 {
+                let p_i: usize = r1 * 8 + c1;
+                let a_val: f64 = u_q[p_i];
+                let mut r0: usize = 0;
+                while r0 < 8 {
+                    let mut c0: usize = 0;
+                    while c0 < 8 {
+                        let q_i: usize = r0 * 8 + c0;
+                        let prod: f64 = a_val * v_q[q_i];
+                        r_mat[p_i * 64 + q_i] = r_mat[p_i * 64 + q_i] - prod;
+                        let w_idx: usize = (r1 * 8 + r0) * 64 + (c1 * 8 + c0);
+                        w_out[w_idx] = w_out[w_idx] + prod;
+                        c0 = c0 + 1;
+                    }
+                    r0 = r0 + 1;
+                }
+                c1 = c1 + 1;
+            }
+            r1 = r1 + 1;
+        }
+        atom = atom + 1;
+    }
+    0
+}
+
+// BitNet b1.58 ternary quantization (exact 1,024 B budget: 812 B trits + 128 B row scales).
+fn bitnet_b158_quant(w_tgt: &Vec<f64>, w_out: &mut Vec<f64>) {
+    let mut r: usize = 0;
+    while r < 64 {
+        let mut abs_sum: f64 = 0.0;
+        let mut c: usize = 0;
+        while c < 64 { abs_sum = abs_sum + abs_f64(w_tgt[r * 64 + c]); c = c + 1; }
+        let gamma: f64 = abs_sum / 64.0;
+        let inv_g: f64 = 1.0 / (gamma + 1.0e-12);
+        c = 0;
+        while c < 64 {
+            let q: i32 = clamp_i32(round_i32(w_tgt[r * 64 + c] * inv_g), -1, 1);
+            w_out[r * 64 + c] = (q as f64) * gamma;
+            c = c + 1;
+        }
+        r = r + 1;
+    }
+}
+
+// NVFP4 E2M1 group-16 quantization. If prune_24 is true, keeps top-2 of every 4 weights
+// (equal-byte 1,024 B effective 2.0 bpw budget); else full density (2,304 B = 4.5 bpw).
+fn nvfp4_e2m1_quant(w_tgt: &Vec<f64>, prune_24: bool, w_out: &mut Vec<f64>) {
+    let mut g: usize = 0;
+    while g < 256 {
+        let base: usize = g * 16;
+        let mut max_a: f64 = 0.0;
+        let mut i: usize = 0;
+        while i < 16 {
+            let av: f64 = abs_f64(w_tgt[base + i]);
+            if av > max_a { max_a = av; }
+            i = i + 1;
+        }
+        let sc: f64 = (max_a / 6.0) + 1.0e-12;
+        let inv_sc: f64 = 1.0 / sc;
+        if !prune_24 {
+            i = 0;
+            while i < 16 {
+                w_out[base + i] = quant_e2m1(w_tgt[base + i] * inv_sc) * sc;
+                i = i + 1;
+            }
+        } else {
+            let mut blk: usize = 0;
+            while blk < 4 {
+                let b0: usize = base + blk * 4;
+                // Find top-2 magnitudes in 4-element block (2:4 structured sparsity)
+                let a0: f64 = abs_f64(w_tgt[b0]);
+                let a1: f64 = abs_f64(w_tgt[b0 + 1]);
+                let a2: f64 = abs_f64(w_tgt[b0 + 2]);
+                let a3: f64 = abs_f64(w_tgt[b0 + 3]);
+                let mut i1: usize = 0;
+                let mut m1: f64 = a0;
+                if a1 > m1 { m1 = a1; i1 = 1; }
+                if a2 > m1 { m1 = a2; i1 = 2; }
+                if a3 > m1 { i1 = 3; }
+                let mut i2: usize = if i1 == 0 { 1 } else { 0 };
+                let mut m2: f64 = -1.0;
+                let mut k: usize = 0;
+                while k < 4 {
+                    if k != i1 {
+                        let ak: f64 = abs_f64(w_tgt[b0 + k]);
+                        if ak > m2 { m2 = ak; i2 = k; }
+                    }
+                    k = k + 1;
+                }
+                k = 0;
+                while k < 4 {
+                    if k == i1 || k == i2 {
+                        w_out[b0 + k] = quant_e2m1(w_tgt[b0 + k] * inv_sc) * sc;
+                    } else {
+                        w_out[b0 + k] = 0.0;
+                    }
+                    k = k + 1;
+                }
+                blk = blk + 1;
+            }
+        }
+        g = g + 1;
+    }
+}
+
+fn main() ~ Console + Clock {
+    let n: usize = 64;
+    let b_sz: usize = 16;
+    let max_bytes: usize = 1024;
+    let k_atoms: usize = 8;
+
+    // 1. Build Regime A (multi-scale self-similar structured layer) & Regime B (high-entropy IID)
+    let mut w_struct: Vec<f64> = Vec::new();
+    let mut w_rand: Vec<f64> = Vec::new();
+    let mut i: usize = 0;
+    while i < 4096 { w_struct.push(0.0); w_rand.push(0.0); i = i + 1; }
+
+    // Regime A: 6 clean fractal Kronecker scales + tiny isotropic residual
+    let mut r1: usize = 0;
+    while r1 < 8 {
+        let mut c1: usize = 0;
+        while c1 < 8 {
+            let mut r0: usize = 0;
+            while r0 < 8 {
+                let mut c0: usize = 0;
+                while c0 < 8 {
+                    let mut val: f64 = 0.0;
+                    let mut s: usize = 0;
+                    while s < 6 {
+                        let amp: f64 = 0.48 / ((s + 1) as f64);
+                        let ua: f64 = det_val(10 + (s as i64) * 3, r1, c1);
+                        let vb: f64 = det_val(40 + (s as i64) * 5, r0, c0);
+                        val = val + amp * ua * vb;
+                        s = s + 1;
+                    }
+                    let rr: usize = r1 * 8 + r0;
+                    let cc: usize = c1 * 8 + c0;
+                    w_struct[rr * 64 + cc] = val + 0.004 * det_val(99, rr, cc);
+                    c0 = c0 + 1;
+                }
+                r0 = r0 + 1;
+            }
+            c1 = c1 + 1;
+        }
+        r1 = r1 + 1;
+    }
+
+    // Regime B: True high-entropy IID pseudorandom weight matrix (full Kronecker rank 64)
+    let mut rng_r: u64 = 14001u64;
+    i = 0;
+    while i < 4096 {
+        rng_r = lcg_next(rng_r);
+        let u: f64 = ((rng_r >> 8) as f64) / 16777216.0;
+        w_rand[i] = (u - 0.5) * 0.90;
+        i = i + 1;
+    }
+
+    let mut x_mat: Vec<f64> = Vec::new();
+    let mut s_i: usize = 0;
+    while s_i < b_sz {
+        let mut j: usize = 0;
+        while j < n { x_mat.push(det_val(211, s_i, j)); j = j + 1; }
+        s_i = s_i + 1;
+    }
+
+    let mut w_frac_s: Vec<f64> = Vec::new();
+    let mut w_bit_s: Vec<f64> = Vec::new();
+    let mut w_nv4_eq_s: Vec<f64> = Vec::new();
+    let mut w_nv4_full_s: Vec<f64> = Vec::new();
+    let mut w_frac_r: Vec<f64> = Vec::new();
+    let mut w_bit_r: Vec<f64> = Vec::new();
+    i = 0;
+    while i < 4096 {
+        w_frac_s.push(0.0); w_bit_s.push(0.0);
+        w_nv4_eq_s.push(0.0); w_nv4_full_s.push(0.0);
+        w_frac_r.push(0.0); w_bit_r.push(0.0);
+        i = i + 1;
+    }
+
+    // 2. Timed Head-to-Head Equal-Byte Benchmark (Regime A + Regime B)
+    let t0: i64 = clock_ns();
+    let st_s: i32 = fractal_kronecker_synth(&w_struct, k_atoms, max_bytes, &mut w_frac_s);
+    bitnet_b158_quant(&w_struct, &mut w_bit_s);
+    nvfp4_e2m1_quant(&w_struct, true, &mut w_nv4_eq_s);
+    nvfp4_e2m1_quant(&w_struct, false, &mut w_nv4_full_s);
+    let st_r: i32 = fractal_kronecker_synth(&w_rand, k_atoms, max_bytes, &mut w_frac_r);
+    bitnet_b158_quant(&w_rand, &mut w_bit_r);
+    let elapsed_ns: i64 = clock_ns() - t0;
+
+    let sqnr_frac_s: f64 = sqnr_db(&w_struct, &w_frac_s);
+    let sqnr_bit_s: f64 = sqnr_db(&w_struct, &w_bit_s);
+    let sqnr_nv4_eq_s: f64 = sqnr_db(&w_struct, &w_nv4_eq_s);
+    let sqnr_nv4_full_s: f64 = sqnr_db(&w_struct, &w_nv4_full_s);
+    let err_frac_s: f64 = matvec_rel_err(&w_struct, &w_frac_s, &x_mat, n, b_sz);
+    let err_bit_s: f64 = matvec_rel_err(&w_struct, &w_bit_s, &x_mat, n, b_sz);
+    let err_nv4_eq_s: f64 = matvec_rel_err(&w_struct, &w_nv4_eq_s, &x_mat, n, b_sz);
+
+    let sqnr_frac_r: f64 = sqnr_db(&w_rand, &w_frac_r);
+    let sqnr_bit_r: f64 = sqnr_db(&w_rand, &w_bit_r);
+
+    // 3. Planted Fail-Closed Controls (2 in-binary + forged cert in Python oracle)
+    // Control 1: Byte-budget overflow (K=12 => 1,536 B > 1,024 B) rejected fail-closed (-141)
+    let st_over: i32 = fractal_kronecker_synth(&w_struct, 12, max_bytes, &mut w_frac_r);
+    let ctrl1_budget_overflow: bool = st_over == -141;
+
+    // Control 2: Honest null on unstructured IID matrix (fractal loses to BitNet at equal bytes)
+    let ctrl2_honest_null_iid: bool = (sqnr_frac_r < 8.0) && (sqnr_frac_r < sqnr_bit_r);
+
+    let mut failures: i32 = 0;
+    if st_s != 0 || st_r != 0 { failures = failures + 1; }
+    if sqnr_frac_s <= sqnr_bit_s + 10.0 || sqnr_frac_s <= sqnr_nv4_eq_s + 10.0 {
+        failures = failures + 1;
+    }
+    if err_frac_s >= err_bit_s || err_frac_s >= err_nv4_eq_s { failures = failures + 1; }
+    if !ctrl1_budget_overflow || !ctrl2_honest_null_iid { failures = failures + 1; }
+
+    println!(
+        "METRIC weights=4096 f32_bytes=16384 budget_bytes={} compression_ratio=16.0",
+        max_bytes
+    );
+    println!(
+        "METRIC sqnr_frac_s={:.12} sqnr_bit_s={:.12} sqnr_nv4_eq_s={:.12} sqnr_nv4_full_s={:.12}",
+        sqnr_frac_s, sqnr_bit_s, sqnr_nv4_eq_s, sqnr_nv4_full_s
+    );
+    println!(
+        "METRIC err_frac_s={:.12} err_bit_s={:.12} err_nv4_eq_s={:.12}",
+        err_frac_s, err_bit_s, err_nv4_eq_s
+    );
+    println!(
+        "METRIC sqnr_frac_r={:.12} sqnr_bit_r={:.12} ctrl1_budget_overflow={} ctrl2_honest_null_iid={}",
+        sqnr_frac_r, sqnr_bit_r, ctrl1_budget_overflow, ctrl2_honest_null_iid
+    );
+    println!("METRIC elapsed_ns={}", elapsed_ns);
+    println!("SUMMARY failures={}", failures);
+}

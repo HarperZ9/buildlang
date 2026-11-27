@@ -1,0 +1,1254 @@
+// SPDX-FileCopyrightText: 2026 Zain Dana Harper
+// SPDX-License-Identifier: MIT
+//
+// Wave 103A (CS-009; F1, J13, N44, N46, N53, I16):
+// Zero-Egress Overnight Local LoRA Sleep-Consolidation Trainer
+//   - Linear base (D=32) + Rank-4 LoRA (A: 4x32, B: 32x4) + orthogonal Cayley-Symplectic layer
+//   - Empirical diagonal Fisher EWC + episodic replay interleaving + live J13 spectral gate
+//   - Strict <= 1.0% held-out retention regression guard with atomic checkpoint rollback
+//   - Zero network egress, zero telemetry, deterministic CPU-only pure BuildLang execution
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { return -x; }
+    x
+}
+
+fn max_f64(a: f64, b: f64) -> f64 {
+    if a > b { return a; }
+    b
+}
+
+fn det_w(tag: i64, r: usize, c: usize) -> f64 {
+    let a: f64 = ((tag * 131 + (r as i64) * 37 + (c as i64) * 19 + 7) as f64) * 0.3719;
+    let b: f64 = ((tag * 73 + (r as i64) * 53 + (c as i64) * 29 + 11) as f64) * 0.6193;
+    0.24 * sin(a) + 0.14 * cos(b)
+}
+
+fn qr_cols_4(
+    mat: &Vec<f64>,
+    d: usize,
+    r: usize,
+    q_out: &mut Vec<f64>,
+    r_out: &mut Vec<f64>,
+    v_tmp: &mut Vec<f64>,
+) {
+    let mut idx: usize = 0;
+    while idx < r * r { r_out[idx] = 0.0; idx = idx + 1; }
+    let mut k: usize = 0;
+    while k < r {
+        let mut i: usize = 0;
+        while i < d { v_tmp[i] = mat[i * r + k]; i = i + 1; }
+        let mut j: usize = 0;
+        while j < k {
+            let mut proj: f64 = 0.0;
+            i = 0;
+            while i < d { proj = proj + q_out[i * r + j] * v_tmp[i]; i = i + 1; }
+            r_out[j * r + k] = proj;
+            i = 0;
+            while i < d { v_tmp[i] = v_tmp[i] - proj * q_out[i * r + j]; i = i + 1; }
+            j = j + 1;
+        }
+        let mut n2: f64 = 0.0;
+        i = 0;
+        while i < d { n2 = n2 + v_tmp[i] * v_tmp[i]; i = i + 1; }
+        let nrm: f64 = sqrt(n2);
+        if nrm > 1.0e-14 {
+            r_out[k * r + k] = nrm;
+            let inv_n: f64 = 1.0 / nrm;
+            i = 0;
+            while i < d { q_out[i * r + k] = v_tmp[i] * inv_n; i = i + 1; }
+        } else {
+            r_out[k * r + k] = 0.0;
+            i = 0;
+            while i < d { q_out[i * r + k] = 0.0; i = i + 1; }
+        }
+        k = k + 1;
+    }
+}
+
+fn qr_rows_4(
+    mat: &Vec<f64>,
+    r: usize,
+    d: usize,
+    q_out: &mut Vec<f64>,
+    r_out: &mut Vec<f64>,
+    v_tmp: &mut Vec<f64>,
+) {
+    let mut idx: usize = 0;
+    while idx < r * r { r_out[idx] = 0.0; idx = idx + 1; }
+    let mut k: usize = 0;
+    while k < r {
+        let mut i: usize = 0;
+        while i < d { v_tmp[i] = mat[k * d + i]; i = i + 1; }
+        let mut j: usize = 0;
+        while j < k {
+            let mut proj: f64 = 0.0;
+            i = 0;
+            while i < d { proj = proj + q_out[j * d + i] * v_tmp[i]; i = i + 1; }
+            r_out[j * r + k] = proj;
+            i = 0;
+            while i < d { v_tmp[i] = v_tmp[i] - proj * q_out[j * d + i]; i = i + 1; }
+            j = j + 1;
+        }
+        let mut n2: f64 = 0.0;
+        i = 0;
+        while i < d { n2 = n2 + v_tmp[i] * v_tmp[i]; i = i + 1; }
+        let nrm: f64 = sqrt(n2);
+        if nrm > 1.0e-14 {
+            r_out[k * r + k] = nrm;
+            let inv_n: f64 = 1.0 / nrm;
+            i = 0;
+            while i < d { q_out[k * d + i] = v_tmp[i] * inv_n; i = i + 1; }
+        } else {
+            r_out[k * r + k] = 0.0;
+            i = 0;
+            while i < d { q_out[k * d + i] = 0.0; i = i + 1; }
+        }
+        k = k + 1;
+    }
+}
+
+fn compute_j13_spectrum(
+    mat_b: &Vec<f64>,
+    mat_a: &Vec<f64>,
+    d: usize,
+    r: usize,
+    scale: f64,
+    q_b: &mut Vec<f64>,
+    r_b: &mut Vec<f64>,
+    q_a: &mut Vec<f64>,
+    r_a: &mut Vec<f64>,
+    m4: &mut Vec<f64>,
+    g4: &mut Vec<f64>,
+    v_tmp: &mut Vec<f64>,
+    spec_out: &mut Vec<f64>,
+) {
+    qr_cols_4(mat_b, d, r, q_b, r_b, v_tmp);
+    qr_rows_4(mat_a, r, d, q_a, r_a, v_tmp);
+
+    let mut p: usize = 0;
+    while p < r {
+        let mut q: usize = 0;
+        while q < r {
+            let mut acc: f64 = 0.0;
+            let mut t: usize = 0;
+            while t < r { acc = acc + r_b[p * r + t] * r_a[q * r + t]; t = t + 1; }
+            m4[p * r + q] = scale * acc;
+            q = q + 1;
+        }
+        p = p + 1;
+    }
+    p = 0;
+    while p < r {
+        let mut q: usize = 0;
+        while q < r {
+            let mut acc: f64 = 0.0;
+            let mut t: usize = 0;
+            while t < r { acc = acc + m4[t * r + p] * m4[t * r + q]; t = t + 1; }
+            g4[p * r + q] = acc;
+            q = q + 1;
+        }
+        p = p + 1;
+    }
+
+    let mut sweep: usize = 0;
+    while sweep < 18 {
+        p = 0;
+        while p < r {
+            let mut q: usize = p + 1;
+            while q < r {
+                let apq: f64 = g4[p * r + q];
+                if abs_f64(apq) > 1.0e-16 {
+                    let app: f64 = g4[p * r + p];
+                    let aqq: f64 = g4[q * r + q];
+                    let tau: f64 = (aqq - app) / (2.0 * apq);
+                    let t_val: f64 = if tau >= 0.0 {
+                        1.0 / (tau + sqrt(1.0 + tau * tau))
+                    } else {
+                        -1.0 / (-tau + sqrt(1.0 + tau * tau))
+                    };
+                    let c: f64 = 1.0 / sqrt(1.0 + t_val * t_val);
+                    let s: f64 = t_val * c;
+                    g4[p * r + p] = app - t_val * apq;
+                    g4[q * r + q] = aqq + t_val * apq;
+                    g4[p * r + q] = 0.0;
+                    g4[q * r + p] = 0.0;
+                    let mut k: usize = 0;
+                    while k < r {
+                        if k != p && k != q {
+                            let gkp: f64 = g4[k * r + p];
+                            let gkq: f64 = g4[k * r + q];
+                            let np: f64 = c * gkp - s * gkq;
+                            let nq: f64 = s * gkp + c * gkq;
+                            g4[k * r + p] = np;
+                            g4[p * r + k] = np;
+                            g4[k * r + q] = nq;
+                            g4[q * r + k] = nq;
+                        }
+                        k = k + 1;
+                    }
+                }
+                q = q + 1;
+            }
+            p = p + 1;
+        }
+        sweep = sweep + 1;
+    }
+
+    let mut e0: f64 = max_f64(0.0, g4[0]);
+    let mut e1: f64 = max_f64(0.0, g4[5]);
+    let mut e2: f64 = max_f64(0.0, g4[10]);
+    let mut e3: f64 = max_f64(0.0, g4[15]);
+    if e0 < e1 { let tmp: f64 = e0; e0 = e1; e1 = tmp; }
+    if e2 < e3 { let tmp: f64 = e2; e2 = e3; e3 = tmp; }
+    if e0 < e2 { let tmp: f64 = e0; e0 = e2; e2 = tmp; }
+    if e1 < e3 { let tmp: f64 = e1; e1 = e3; e3 = tmp; }
+    if e1 < e2 { let tmp: f64 = e1; e1 = e2; e2 = tmp; }
+
+    spec_out[0] = sqrt(e0);
+    spec_out[1] = sqrt(e1);
+    spec_out[2] = sqrt(e2);
+    spec_out[3] = sqrt(e3);
+    let e_tot: f64 = e0 + e1 + e2 + e3;
+    if e_tot > 1.0e-15 {
+        let p0: f64 = e0 / e_tot;
+        let p1: f64 = e1 / e_tot;
+        let p2: f64 = e2 / e_tot;
+        let p3: f64 = e3 / e_tot;
+        let mut ent: f64 = 0.0;
+        if p0 > 1.0e-15 { ent = ent - p0 * log(p0); }
+        if p1 > 1.0e-15 { ent = ent - p1 * log(p1); }
+        if p2 > 1.0e-15 { ent = ent - p2 * log(p2); }
+        if p3 > 1.0e-15 { ent = ent - p3 * log(p3); }
+        spec_out[4] = exp(ent);
+        spec_out[5] = p0;
+    } else {
+        spec_out[4] = 0.0;
+        spec_out[5] = 1.0;
+    }
+}
+
+// Evaluate batch MSE loss (no gradient mutation) and track Cayley-Symplectic energy drift.
+fn eval_batch_mse(
+    w_base: &Vec<f64>,
+    c_cay: &Vec<f64>,
+    s_cay: &Vec<f64>,
+    x_data: &Vec<f64>,
+    y_data: &Vec<f64>,
+    mat_a: &Vec<f64>,
+    mat_b: &Vec<f64>,
+    h_buf: &mut Vec<f64>,
+    u_buf: &mut Vec<f64>,
+    drift_box: &mut Vec<f64>,
+    d: usize,
+    r: usize,
+    n_samples: usize,
+    scale: f64,
+) -> f64 {
+    let half_d: usize = d / 2;
+    let mut mse_sum: f64 = 0.0;
+    let mut max_drift: f64 = drift_box[0];
+    let mut n: usize = 0;
+    while n < n_samples {
+        let off: usize = n * d;
+        let mut k: usize = 0;
+        while k < r {
+            let mut acc: f64 = 0.0;
+            let mut j: usize = 0;
+            while j < d { acc = acc + mat_a[k * d + j] * x_data[off + j]; j = j + 1; }
+            h_buf[k] = acc;
+            k = k + 1;
+        }
+        let mut u_n2: f64 = 0.0;
+        let mut i: usize = 0;
+        while i < d {
+            let mut acc: f64 = 0.0;
+            let mut j: usize = 0;
+            while j < d { acc = acc + w_base[i * d + j] * x_data[off + j]; j = j + 1; }
+            let mut lo: f64 = 0.0;
+            k = 0;
+            while k < r { lo = lo + mat_b[i * r + k] * h_buf[k]; k = k + 1; }
+            let uv: f64 = acc + scale * lo;
+            u_buf[i] = uv;
+            u_n2 = u_n2 + uv * uv;
+            i = i + 1;
+        }
+        let mut y_n2: f64 = 0.0;
+        let mut blk: usize = 0;
+        while blk < half_d {
+            let p0: usize = 2 * blk;
+            let p1: usize = p0 + 1;
+            let cc: f64 = c_cay[blk];
+            let ss: f64 = s_cay[blk];
+            let y0: f64 = cc * u_buf[p0] - ss * u_buf[p1];
+            let y1: f64 = ss * u_buf[p0] + cc * u_buf[p1];
+            y_n2 = y_n2 + y0 * y0 + y1 * y1;
+            let e0: f64 = y0 - y_data[off + p0];
+            let e1: f64 = y1 - y_data[off + p1];
+            mse_sum = mse_sum + e0 * e0 + e1 * e1;
+            blk = blk + 1;
+        }
+        let drift: f64 = abs_f64(y_n2 - u_n2) / (u_n2 + 1.0e-12);
+        if drift > max_drift { max_drift = drift; }
+        n = n + 1;
+    }
+    drift_box[0] = max_drift;
+    mse_sum / ((n_samples * d) as f64)
+}
+
+// Accumulate weight * MSE(x_data, y_data) gradients into (grad_a, grad_b). Returns weighted MSE.
+fn accum_batch_mse_grad(
+    w_base: &Vec<f64>,
+    c_cay: &Vec<f64>,
+    s_cay: &Vec<f64>,
+    x_data: &Vec<f64>,
+    y_data: &Vec<f64>,
+    mat_a: &Vec<f64>,
+    mat_b: &Vec<f64>,
+    grad_a: &mut Vec<f64>,
+    grad_b: &mut Vec<f64>,
+    h_buf: &mut Vec<f64>,
+    u_buf: &mut Vec<f64>,
+    du_buf: &mut Vec<f64>,
+    dh_buf: &mut Vec<f64>,
+    drift_box: &mut Vec<f64>,
+    d: usize,
+    r: usize,
+    n_samples: usize,
+    scale: f64,
+    weight: f64,
+) -> f64 {
+    let half_d: usize = d / 2;
+    let inv_nd: f64 = 1.0 / ((n_samples * d) as f64);
+    let g_coeff: f64 = 2.0 * weight * inv_nd;
+    let mut mse_sum: f64 = 0.0;
+    let mut max_drift: f64 = drift_box[0];
+    let mut n: usize = 0;
+    while n < n_samples {
+        let off: usize = n * d;
+        let mut k: usize = 0;
+        while k < r {
+            let mut acc: f64 = 0.0;
+            let mut j: usize = 0;
+            while j < d { acc = acc + mat_a[k * d + j] * x_data[off + j]; j = j + 1; }
+            h_buf[k] = acc;
+            k = k + 1;
+        }
+        let mut u_n2: f64 = 0.0;
+        let mut i: usize = 0;
+        while i < d {
+            let mut acc: f64 = 0.0;
+            let mut j: usize = 0;
+            while j < d { acc = acc + w_base[i * d + j] * x_data[off + j]; j = j + 1; }
+            let mut lo: f64 = 0.0;
+            k = 0;
+            while k < r { lo = lo + mat_b[i * r + k] * h_buf[k]; k = k + 1; }
+            let uv: f64 = acc + scale * lo;
+            u_buf[i] = uv;
+            u_n2 = u_n2 + uv * uv;
+            i = i + 1;
+        }
+        let mut y_n2: f64 = 0.0;
+        let mut blk: usize = 0;
+        while blk < half_d {
+            let p0: usize = 2 * blk;
+            let p1: usize = p0 + 1;
+            let cc: f64 = c_cay[blk];
+            let ss: f64 = s_cay[blk];
+            let y0: f64 = cc * u_buf[p0] - ss * u_buf[p1];
+            let y1: f64 = ss * u_buf[p0] + cc * u_buf[p1];
+            y_n2 = y_n2 + y0 * y0 + y1 * y1;
+            let e0: f64 = y0 - y_data[off + p0];
+            let e1: f64 = y1 - y_data[off + p1];
+            mse_sum = mse_sum + e0 * e0 + e1 * e1;
+            let dy0: f64 = g_coeff * e0;
+            let dy1: f64 = g_coeff * e1;
+            du_buf[p0] = cc * dy0 + ss * dy1;
+            du_buf[p1] = -ss * dy0 + cc * dy1;
+            blk = blk + 1;
+        }
+        let drift: f64 = abs_f64(y_n2 - u_n2) / (u_n2 + 1.0e-12);
+        if drift > max_drift { max_drift = drift; }
+
+        k = 0;
+        while k < r { dh_buf[k] = 0.0; k = k + 1; }
+        i = 0;
+        while i < d {
+            let du_i: f64 = scale * du_buf[i];
+            k = 0;
+            while k < r {
+                grad_b[i * r + k] = grad_b[i * r + k] + du_i * h_buf[k];
+                dh_buf[k] = dh_buf[k] + mat_b[i * r + k] * du_i;
+                k = k + 1;
+            }
+            i = i + 1;
+        }
+        k = 0;
+        while k < r {
+            let dh_k: f64 = dh_buf[k];
+            let mut j: usize = 0;
+            while j < d {
+                grad_a[k * d + j] = grad_a[k * d + j] + dh_k * x_data[off + j];
+                j = j + 1;
+            }
+            k = k + 1;
+        }
+        n = n + 1;
+    }
+    drift_box[0] = max_drift;
+    weight * mse_sum * inv_nd
+}
+
+// Estimate diagonal empirical Fisher information on local episodic replay buffer at (A_star, B_star).
+fn compute_empirical_fisher(
+    w_base: &Vec<f64>,
+    c_cay: &Vec<f64>,
+    s_cay: &Vec<f64>,
+    x_rep: &Vec<f64>,
+    y_rep: &Vec<f64>,
+    a_star: &Vec<f64>,
+    b_star: &Vec<f64>,
+    fish_a: &mut Vec<f64>,
+    fish_b: &mut Vec<f64>,
+    tmp_ga: &mut Vec<f64>,
+    tmp_gb: &mut Vec<f64>,
+    h_buf: &mut Vec<f64>,
+    u_buf: &mut Vec<f64>,
+    du_buf: &mut Vec<f64>,
+    dh_buf: &mut Vec<f64>,
+    d: usize,
+    r: usize,
+    n_rep: usize,
+    scale: f64,
+) {
+    let mut idx: usize = 0;
+    while idx < r * d { fish_a[idx] = 0.0; idx = idx + 1; }
+    idx = 0;
+    while idx < d * r { fish_b[idx] = 0.0; idx = idx + 1; }
+
+    let half_d: usize = d / 2;
+    let inv_d: f64 = 2.0 / (d as f64);
+    let mut n: usize = 0;
+    while n < n_rep {
+        idx = 0;
+        while idx < r * d { tmp_ga[idx] = 0.0; idx = idx + 1; }
+        idx = 0;
+        while idx < d * r { tmp_gb[idx] = 0.0; idx = idx + 1; }
+        let off: usize = n * d;
+        let mut k: usize = 0;
+        while k < r {
+            let mut acc: f64 = 0.0;
+            let mut j: usize = 0;
+            while j < d { acc = acc + a_star[k * d + j] * x_rep[off + j]; j = j + 1; }
+            h_buf[k] = acc;
+            k = k + 1;
+        }
+        let mut i: usize = 0;
+        while i < d {
+            let mut acc: f64 = 0.0;
+            let mut j: usize = 0;
+            while j < d { acc = acc + w_base[i * d + j] * x_rep[off + j]; j = j + 1; }
+            let mut lo: f64 = 0.0;
+            k = 0;
+            while k < r { lo = lo + b_star[i * r + k] * h_buf[k]; k = k + 1; }
+            u_buf[i] = acc + scale * lo;
+            i = i + 1;
+        }
+        let mut blk: usize = 0;
+        while blk < half_d {
+            let p0: usize = 2 * blk;
+            let p1: usize = p0 + 1;
+            let cc: f64 = c_cay[blk];
+            let ss: f64 = s_cay[blk];
+            let y0: f64 = cc * u_buf[p0] - ss * u_buf[p1];
+            let y1: f64 = ss * u_buf[p0] + cc * u_buf[p1];
+            // Gauss-Newton sensitivity + empirical residual gradient for diagonal Fisher
+            let dy0: f64 = inv_d * (y0 - y_rep[off + p0] + 0.15 * y0);
+            let dy1: f64 = inv_d * (y1 - y_rep[off + p1] + 0.15 * y1);
+            du_buf[p0] = cc * dy0 + ss * dy1;
+            du_buf[p1] = -ss * dy0 + cc * dy1;
+            blk = blk + 1;
+        }
+        k = 0;
+        while k < r { dh_buf[k] = 0.0; k = k + 1; }
+        i = 0;
+        while i < d {
+            let du_i: f64 = scale * du_buf[i];
+            k = 0;
+            while k < r {
+                tmp_gb[i * r + k] = du_i * h_buf[k];
+                dh_buf[k] = dh_buf[k] + b_star[i * r + k] * du_i;
+                k = k + 1;
+            }
+            i = i + 1;
+        }
+        k = 0;
+        while k < r {
+            let dh_k: f64 = dh_buf[k];
+            let mut j: usize = 0;
+            while j < d { tmp_ga[k * d + j] = dh_k * x_rep[off + j]; j = j + 1; }
+            k = k + 1;
+        }
+        idx = 0;
+        while idx < r * d { fish_a[idx] = fish_a[idx] + tmp_ga[idx] * tmp_ga[idx]; idx = idx + 1; }
+        idx = 0;
+        while idx < d * r { fish_b[idx] = fish_b[idx] + tmp_gb[idx] * tmp_gb[idx]; idx = idx + 1; }
+        n = n + 1;
+    }
+    let inv_n: f64 = 1.0 / (n_rep as f64);
+    idx = 0;
+    while idx < r * d { fish_a[idx] = fish_a[idx] * inv_n; idx = idx + 1; }
+    idx = 0;
+    while idx < d * r { fish_b[idx] = fish_b[idx] * inv_n; idx = idx + 1; }
+}
+
+// Compute full sleep-consolidation loss + gradients:
+//   L_sleep = L_new + w_replay * L_replay + EWC(F, A_star, B_star) + J13_isotropy(A, B)
+fn sleep_forward_backward(
+    w_base: &Vec<f64>,
+    c_cay: &Vec<f64>,
+    s_cay: &Vec<f64>,
+    x_new: &Vec<f64>,
+    y_new: &Vec<f64>,
+    x_rep: &Vec<f64>,
+    y_rep: &Vec<f64>,
+    a_star: &Vec<f64>,
+    b_star: &Vec<f64>,
+    fish_a: &Vec<f64>,
+    fish_b: &Vec<f64>,
+    mat_a: &Vec<f64>,
+    mat_b: &Vec<f64>,
+    grad_a: &mut Vec<f64>,
+    grad_b: &mut Vec<f64>,
+    h_buf: &mut Vec<f64>,
+    u_buf: &mut Vec<f64>,
+    du_buf: &mut Vec<f64>,
+    dh_buf: &mut Vec<f64>,
+    gram_b: &mut Vec<f64>,
+    gram_a: &mut Vec<f64>,
+    drift_box: &mut Vec<f64>,
+    d: usize,
+    r: usize,
+    n_new: usize,
+    n_rep: usize,
+    scale: f64,
+    w_replay: f64,
+    lambda_ewc: f64,
+    lambda_epi: f64,
+) -> f64 {
+    let mut idx: usize = 0;
+    while idx < r * d { grad_a[idx] = 0.0; idx = idx + 1; }
+    idx = 0;
+    while idx < d * r { grad_b[idx] = 0.0; idx = idx + 1; }
+
+    let l_new: f64 = accum_batch_mse_grad(
+        w_base, c_cay, s_cay, x_new, y_new, mat_a, mat_b, grad_a, grad_b,
+        h_buf, u_buf, du_buf, dh_buf, drift_box, d, r, n_new, scale, 1.0,
+    );
+    let l_rep: f64 = accum_batch_mse_grad(
+        w_base, c_cay, s_cay, x_rep, y_rep, mat_a, mat_b, grad_a, grad_b,
+        h_buf, u_buf, du_buf, dh_buf, drift_box, d, r, n_rep, scale, w_replay,
+    );
+
+    // Elastic Weight Consolidation (EWC) quadratic Fisher anchor
+    let mut ewc_sum: f64 = 0.0;
+    idx = 0;
+    while idx < r * d {
+        let diff: f64 = mat_a[idx] - a_star[idx];
+        let fa: f64 = fish_a[idx];
+        ewc_sum = ewc_sum + fa * diff * diff;
+        grad_a[idx] = grad_a[idx] + lambda_ewc * fa * diff;
+        idx = idx + 1;
+    }
+    idx = 0;
+    while idx < d * r {
+        let diff: f64 = mat_b[idx] - b_star[idx];
+        let fb: f64 = fish_b[idx];
+        ewc_sum = ewc_sum + fb * diff * diff;
+        grad_b[idx] = grad_b[idx] + lambda_ewc * fb * diff;
+        idx = idx + 1;
+    }
+    let l_ewc: f64 = 0.5 * lambda_ewc * ewc_sum;
+
+    // Live J13 spectral isotropy regularizer
+    let mut epi_sum: f64 = 0.0;
+    let mut p: usize = 0;
+    while p < r {
+        let mut q: usize = 0;
+        while q < r {
+            if p == q {
+                gram_b[p * r + q] = 0.0;
+                gram_a[p * r + q] = 0.0;
+            } else {
+                let mut sb: f64 = 0.0;
+                let mut sa: f64 = 0.0;
+                let mut i: usize = 0;
+                while i < d {
+                    sb = sb + mat_b[i * r + p] * mat_b[i * r + q];
+                    sa = sa + mat_a[p * d + i] * mat_a[q * d + i];
+                    i = i + 1;
+                }
+                gram_b[p * r + q] = sb;
+                gram_a[p * r + q] = sa;
+                epi_sum = epi_sum + sb * sb + sa * sa;
+            }
+            q = q + 1;
+        }
+        p = p + 1;
+    }
+    let l_epi: f64 = 0.5 * lambda_epi * epi_sum;
+    let two_lam: f64 = 2.0 * lambda_epi;
+    let mut i: usize = 0;
+    while i < d {
+        p = 0;
+        while p < r {
+            let mut acc_b: f64 = 0.0;
+            let mut q: usize = 0;
+            while q < r { acc_b = acc_b + mat_b[i * r + q] * gram_b[q * r + p]; q = q + 1; }
+            grad_b[i * r + p] = grad_b[i * r + p] + two_lam * acc_b;
+            p = p + 1;
+        }
+        i = i + 1;
+    }
+    p = 0;
+    while p < r {
+        let mut j: usize = 0;
+        while j < d {
+            let mut acc_a: f64 = 0.0;
+            let mut q: usize = 0;
+            while q < r { acc_a = acc_a + gram_a[p * r + q] * mat_a[q * d + j]; q = q + 1; }
+            grad_a[p * d + j] = grad_a[p * d + j] + two_lam * acc_a;
+            j = j + 1;
+        }
+        p = p + 1;
+    }
+    l_new + l_rep + l_ewc + l_epi
+}
+
+// Guarded AdamW step with dual fail-closed gates:
+//   Return 0 = COMMITTED, 2 = ROLLBACK_J13_COLLAPSE, 3 = ROLLBACK_FORGETTING_REGRESSION (> 1.0%)
+fn guarded_sleep_adamw_step(
+    w_base: &Vec<f64>,
+    c_cay: &Vec<f64>,
+    s_cay: &Vec<f64>,
+    x_ret: &Vec<f64>,
+    y_ret: &Vec<f64>,
+    ret_baseline: f64,
+    max_ret_reg_pct: f64,
+    mat_a: &mut Vec<f64>,
+    mat_b: &mut Vec<f64>,
+    bak_a: &mut Vec<f64>,
+    bak_b: &mut Vec<f64>,
+    grad_a: &Vec<f64>,
+    grad_b: &Vec<f64>,
+    m_a: &mut Vec<f64>,
+    v_a: &mut Vec<f64>,
+    m_b: &mut Vec<f64>,
+    v_b: &mut Vec<f64>,
+    step_t: usize,
+    lr: f64,
+    beta1: f64,
+    beta2: f64,
+    eps: f64,
+    wd: f64,
+    min_eff_rank: f64,
+    max_top1_energy: f64,
+    d: usize,
+    r: usize,
+    n_ret: usize,
+    scale: f64,
+    h_buf: &mut Vec<f64>,
+    u_buf: &mut Vec<f64>,
+    drift_box: &mut Vec<f64>,
+    q_b: &mut Vec<f64>,
+    r_b: &mut Vec<f64>,
+    q_a: &mut Vec<f64>,
+    r_a: &mut Vec<f64>,
+    m4: &mut Vec<f64>,
+    g4: &mut Vec<f64>,
+    v_tmp: &mut Vec<f64>,
+    spec_out: &mut Vec<f64>,
+    reg_pct_box: &mut Vec<f64>,
+) -> i32 {
+    let mut i: usize = 0;
+    while i < mat_a.len() { bak_a[i] = mat_a[i]; i = i + 1; }
+    i = 0;
+    while i < mat_b.len() { bak_b[i] = mat_b[i]; i = i + 1; }
+
+    let mut b1_pow: f64 = 1.0;
+    let mut b2_pow: f64 = 1.0;
+    let mut t_i: usize = 0;
+    while t_i < step_t { b1_pow = b1_pow * beta1; b2_pow = b2_pow * beta2; t_i = t_i + 1; }
+    let inv_b1: f64 = 1.0 / (1.0 - b1_pow);
+    let inv_b2: f64 = 1.0 / (1.0 - b2_pow);
+    let decay: f64 = 1.0 - lr * wd;
+
+    i = 0;
+    while i < mat_a.len() {
+        let g: f64 = grad_a[i];
+        let nm: f64 = beta1 * m_a[i] + (1.0 - beta1) * g;
+        let nv: f64 = beta2 * v_a[i] + (1.0 - beta2) * g * g;
+        m_a[i] = nm;
+        v_a[i] = nv;
+        mat_a[i] = mat_a[i] * decay - lr * (nm * inv_b1) / (sqrt(nv * inv_b2) + eps);
+        i = i + 1;
+    }
+    i = 0;
+    while i < mat_b.len() {
+        let g: f64 = grad_b[i];
+        let nm: f64 = beta1 * m_b[i] + (1.0 - beta1) * g;
+        let nv: f64 = beta2 * v_b[i] + (1.0 - beta2) * g * g;
+        m_b[i] = nm;
+        v_b[i] = nv;
+        mat_b[i] = mat_b[i] * decay - lr * (nm * inv_b1) / (sqrt(nv * inv_b2) + eps);
+        i = i + 1;
+    }
+
+    // Gate 1: Live J13 spectral effective-rank & top1_energy collapse check
+    compute_j13_spectrum(mat_b, mat_a, d, r, scale, q_b, r_b, q_a, r_a, m4, g4, v_tmp, spec_out);
+    if spec_out[4] < min_eff_rank || spec_out[5] > max_top1_energy {
+        i = 0;
+        while i < mat_a.len() { mat_a[i] = bak_a[i]; i = i + 1; }
+        i = 0;
+        while i < mat_b.len() { mat_b[i] = bak_b[i]; i = i + 1; }
+        return 2;
+    }
+
+    // Gate 2: Strict <= 1.0% held-out catastrophic-forgetting regression guard
+    let ret_cand: f64 = eval_batch_mse(
+        w_base, c_cay, s_cay, x_ret, y_ret, mat_a, mat_b,
+        h_buf, u_buf, drift_box, d, r, n_ret, scale,
+    );
+    let reg_pct: f64 = 100.0 * (ret_cand - ret_baseline) / (ret_baseline + 1.0e-12);
+    reg_pct_box[0] = reg_pct;
+    if reg_pct > max_ret_reg_pct {
+        i = 0;
+        while i < mat_a.len() { mat_a[i] = bak_a[i]; i = i + 1; }
+        i = 0;
+        while i < mat_b.len() { mat_b[i] = bak_b[i]; i = i + 1; }
+        return 3;
+    }
+    0
+}
+
+fn main() ~ Console + Clock {
+    let d: usize = 32;
+    let r: usize = 4;
+    let half_d: usize = d / 2;
+    let n_ret: usize = 16;
+    let n_rep: usize = 12;
+    let n_new: usize = 16;
+    let n_steps: usize = 40;
+    let scale: f64 = 1.0;
+    let w_replay: f64 = 5.0;
+    let lambda_ewc: f64 = 500.0;
+    let lambda_epi: f64 = 0.004;
+    let lr: f64 = 0.005;
+    let beta1: f64 = 0.9;
+    let beta2: f64 = 0.999;
+    let eps: f64 = 1.0e-5;
+    let wd: f64 = 0.0;
+    let min_eff_rank: f64 = 1.85;
+    let max_top1_energy: f64 = 0.78;
+    let max_ret_reg_pct: f64 = 1.0;
+
+    // 1. Frozen base linear weights W_base [32x32] and orthogonal Cayley-Symplectic layer [16 blocks]
+    let mut w_base: Vec<f64> = Vec::new();
+    let mut i: usize = 0;
+    while i < d {
+        let mut j: usize = 0;
+        while j < d { w_base.push(det_w(11, i, j)); j = j + 1; }
+        i = i + 1;
+    }
+    let mut c_cay: Vec<f64> = Vec::new();
+    let mut s_cay: Vec<f64> = Vec::new();
+    let mut blk: usize = 0;
+    while blk < half_d {
+        let th: f64 = 0.35 * sin(((blk + 1) as f64) * 0.713) + 0.20 * cos(((blk + 3) as f64) * 1.191);
+        let den: f64 = 1.0 + th * th;
+        c_cay.push((1.0 - th * th) / den);
+        s_cay.push((2.0 * th) / den);
+        blk = blk + 1;
+    }
+
+    // Scratch buffers
+    let mut q_b: Vec<f64> = Vec::new();
+    let mut q_a: Vec<f64> = Vec::new();
+    let mut r_b: Vec<f64> = Vec::new();
+    let mut r_a: Vec<f64> = Vec::new();
+    let mut m4: Vec<f64> = Vec::new();
+    let mut g4: Vec<f64> = Vec::new();
+    let mut v_tmp: Vec<f64> = Vec::new();
+    let mut spec_out: Vec<f64> = Vec::new();
+    i = 0;
+    while i < d * r { q_b.push(0.0); q_a.push(0.0); i = i + 1; }
+    i = 0;
+    while i < r * r { r_b.push(0.0); r_a.push(0.0); m4.push(0.0); g4.push(0.0); i = i + 1; }
+    i = 0;
+    while i < d { v_tmp.push(0.0); i = i + 1; }
+    i = 0;
+    while i < 6 { spec_out.push(0.0); i = i + 1; }
+
+    // 2. Orthonormal basis U [32x4], V [4x32]: modes 0,1 = daytime retention skill; modes 2,3 = new skill
+    let mut u_raw: Vec<f64> = Vec::new();
+    let mut v_raw: Vec<f64> = Vec::new();
+    i = 0;
+    while i < d {
+        let mut k: usize = 0;
+        while k < r { u_raw.push(det_w(23, i, k)); k = k + 1; }
+        i = i + 1;
+    }
+    let mut k: usize = 0;
+    while k < r {
+        let mut j: usize = 0;
+        while j < d { v_raw.push(det_w(29, k, j)); j = j + 1; }
+        k = k + 1;
+    }
+    qr_cols_4(&u_raw, d, r, &mut q_b, &mut r_b, &mut v_tmp);
+    qr_rows_4(&v_raw, r, d, &mut q_a, &mut r_a, &mut v_tmp);
+
+    // Pre-sleep mastered checkpoint (A_star, B_star): strong on modes 0,1; dormant small init on modes 2,3
+    let mut a_star: Vec<f64> = Vec::new();
+    let mut b_star: Vec<f64> = Vec::new();
+    let mut a_true_ret: Vec<f64> = Vec::new();
+    let mut a_true_all: Vec<f64> = Vec::new();
+    let mut sv_init: Vec<f64> = Vec::new();
+    sv_init.push(1.05); sv_init.push(0.95); sv_init.push(0.22); sv_init.push(0.18);
+    let mut sv_ret: Vec<f64> = Vec::new();
+    sv_ret.push(1.05); sv_ret.push(0.95); sv_ret.push(0.22); sv_ret.push(0.18);
+    let mut sv_all: Vec<f64> = Vec::new();
+    sv_all.push(1.05); sv_all.push(0.95); sv_all.push(1.15); sv_all.push(0.95);
+
+    i = 0;
+    while i < d * r { b_star.push(q_b[i]); i = i + 1; }
+    k = 0;
+    while k < r {
+        let mut j: usize = 0;
+        while j < d {
+            let v_kj: f64 = q_a[k * d + j];
+            a_star.push(v_kj * sv_init[k]);
+            a_true_ret.push(v_kj * sv_ret[k]);
+            a_true_all.push(v_kj * sv_all[k]);
+            j = j + 1;
+        }
+        k = k + 1;
+    }
+
+    // 3. Build strictly separated local datasets:
+    //    (a) Held-out retention eval (X_ret, Y_ret) [16x32]
+    //    (b) Local episodic replay buffer (X_rep, Y_rep) [12x32]
+    //    (c) New overnight skill episodes (X_new, Y_new) [16x32]
+    let mut x_ret: Vec<f64> = Vec::new();
+    let mut y_ret: Vec<f64> = Vec::new();
+    let mut x_rep: Vec<f64> = Vec::new();
+    let mut y_rep: Vec<f64> = Vec::new();
+    let mut x_new: Vec<f64> = Vec::new();
+    let mut y_new: Vec<f64> = Vec::new();
+
+    let mut h_buf: Vec<f64> = Vec::new();
+    let mut u_buf: Vec<f64> = Vec::new();
+    let mut du_buf: Vec<f64> = Vec::new();
+    let mut dh_buf: Vec<f64> = Vec::new();
+    k = 0;
+    while k < r { h_buf.push(0.0); dh_buf.push(0.0); k = k + 1; }
+    i = 0;
+    while i < d { u_buf.push(0.0); du_buf.push(0.0); i = i + 1; }
+
+    // Helper: held-out retention benchmark on daytime subspace (modes 0,1) with realistic eval noise
+    let mut n: usize = 0;
+    while n < n_ret {
+        let c0: f64 = 1.4 * sin(((n * 19 + 3) as f64) * 0.53);
+        let c1: f64 = 1.3 * cos(((n * 23 + 7) as f64) * 0.67);
+        let mut j: usize = 0;
+        while j < d {
+            let xv: f64 = c0 * q_a[j] + c1 * q_a[d + j];
+            x_ret.push(xv);
+            j = j + 1;
+        }
+        k = 0;
+        while k < r {
+            let mut acc: f64 = 0.0;
+            j = 0;
+            while j < d { acc = acc + a_true_ret[k * d + j] * x_ret[n * d + j]; j = j + 1; }
+            h_buf[k] = acc;
+            k = k + 1;
+        }
+        i = 0;
+        while i < d {
+            let mut acc: f64 = 0.0;
+            j = 0;
+            while j < d { acc = acc + w_base[i * d + j] * x_ret[n * d + j]; j = j + 1; }
+            let mut lo: f64 = 0.0;
+            k = 0;
+            while k < r { lo = lo + b_star[i * r + k] * h_buf[k]; k = k + 1; }
+            u_buf[i] = acc + lo + 0.45 * det_w(67, n, i);
+            i = i + 1;
+        }
+        blk = 0;
+        while blk < half_d {
+            let p0: usize = 2 * blk;
+            let p1: usize = p0 + 1;
+            y_ret.push(c_cay[blk] * u_buf[p0] - s_cay[blk] * u_buf[p1]);
+            y_ret.push(s_cay[blk] * u_buf[p0] + c_cay[blk] * u_buf[p1]);
+            blk = blk + 1;
+        }
+        n = n + 1;
+    }
+
+    // Local episodic DER++ replay buffer (distinct inputs, clean pre-sleep distillation targets)
+    n = 0;
+    while n < n_rep {
+        let c0: f64 = 1.35 * cos(((n * 17 + 11) as f64) * 0.49);
+        let c1: f64 = 1.25 * sin(((n * 29 + 5) as f64) * 0.61);
+        let mut j: usize = 0;
+        while j < d {
+            let xv: f64 = c0 * q_a[j] + c1 * q_a[d + j];
+            x_rep.push(xv);
+            j = j + 1;
+        }
+        k = 0;
+        while k < r {
+            let mut acc: f64 = 0.0;
+            j = 0;
+            while j < d { acc = acc + a_true_ret[k * d + j] * x_rep[n * d + j]; j = j + 1; }
+            h_buf[k] = acc;
+            k = k + 1;
+        }
+        i = 0;
+        while i < d {
+            let mut acc: f64 = 0.0;
+            j = 0;
+            while j < d { acc = acc + w_base[i * d + j] * x_rep[n * d + j]; j = j + 1; }
+            let mut lo: f64 = 0.0;
+            k = 0;
+            while k < r { lo = lo + b_star[i * r + k] * h_buf[k]; k = k + 1; }
+            u_buf[i] = acc + lo;
+            i = i + 1;
+        }
+        blk = 0;
+        while blk < half_d {
+            let p0: usize = 2 * blk;
+            let p1: usize = p0 + 1;
+            y_rep.push(c_cay[blk] * u_buf[p0] - s_cay[blk] * u_buf[p1]);
+            y_rep.push(s_cay[blk] * u_buf[p0] + c_cay[blk] * u_buf[p1]);
+            blk = blk + 1;
+        }
+        n = n + 1;
+    }
+
+    // New-skill overnight adaptation episodes (modes 2,3 dominant plus cross-coupling on 0,1)
+    n = 0;
+    while n < n_new {
+        let c0: f64 = 0.35 * sin(((n * 31 + 2) as f64) * 0.37);
+        let c1: f64 = 0.35 * cos(((n * 11 + 9) as f64) * 0.43);
+        let c2: f64 = 1.55 * sin(((n * 17 + 4) as f64) * 0.59);
+        let c3: f64 = 1.45 * cos(((n * 23 + 6) as f64) * 0.71);
+        let mut j: usize = 0;
+        while j < d {
+            let xv: f64 = c0 * q_a[j] + c1 * q_a[d + j]
+                + c2 * q_a[2 * d + j] + c3 * q_a[3 * d + j] + 0.10 * det_w(79, n, j);
+            x_new.push(xv);
+            j = j + 1;
+        }
+        k = 0;
+        while k < r {
+            let mut acc: f64 = 0.0;
+            j = 0;
+            while j < d { acc = acc + a_true_all[k * d + j] * x_new[n * d + j]; j = j + 1; }
+            h_buf[k] = acc;
+            k = k + 1;
+        }
+        i = 0;
+        while i < d {
+            let mut acc: f64 = 0.0;
+            j = 0;
+            while j < d { acc = acc + w_base[i * d + j] * x_new[n * d + j]; j = j + 1; }
+            let mut lo: f64 = 0.0;
+            k = 0;
+            while k < r { lo = lo + b_star[i * r + k] * h_buf[k]; k = k + 1; }
+            u_buf[i] = acc + lo;
+            i = i + 1;
+        }
+        blk = 0;
+        while blk < half_d {
+            let p0: usize = 2 * blk;
+            let p1: usize = p0 + 1;
+            y_new.push(c_cay[blk] * u_buf[p0] - s_cay[blk] * u_buf[p1]);
+            y_new.push(s_cay[blk] * u_buf[p0] + c_cay[blk] * u_buf[p1]);
+            blk = blk + 1;
+        }
+        n = n + 1;
+    }
+
+    // 4. Allocate trainable state and baseline evaluation
+    let mut mat_a: Vec<f64> = Vec::new();
+    let mut mat_b: Vec<f64> = Vec::new();
+    let mut bak_a: Vec<f64> = Vec::new();
+    let mut bak_b: Vec<f64> = Vec::new();
+    let mut fish_a: Vec<f64> = Vec::new();
+    let mut fish_b: Vec<f64> = Vec::new();
+    let mut grad_a: Vec<f64> = Vec::new();
+    let mut grad_b: Vec<f64> = Vec::new();
+    let mut m_a: Vec<f64> = Vec::new();
+    let mut v_a: Vec<f64> = Vec::new();
+    let mut m_b: Vec<f64> = Vec::new();
+    let mut v_b: Vec<f64> = Vec::new();
+    let mut gram_b: Vec<f64> = Vec::new();
+    let mut gram_a: Vec<f64> = Vec::new();
+
+    i = 0;
+    while i < r * d {
+        mat_a.push(a_star[i]); bak_a.push(0.0); fish_a.push(0.0);
+        grad_a.push(0.0); m_a.push(0.0); v_a.push(0.0);
+        i = i + 1;
+    }
+    i = 0;
+    while i < d * r {
+        mat_b.push(b_star[i]); bak_b.push(0.0); fish_b.push(0.0);
+        grad_b.push(0.0); m_b.push(0.0); v_b.push(0.0);
+        i = i + 1;
+    }
+    i = 0;
+    while i < r * r { gram_b.push(0.0); gram_a.push(0.0); i = i + 1; }
+
+    let mut drift_box: Vec<f64> = Vec::new();
+    drift_box.push(0.0);
+    let mut reg_pct_box: Vec<f64> = Vec::new();
+    reg_pct_box.push(0.0);
+
+    let ret_before: f64 = eval_batch_mse(
+        &w_base, &c_cay, &s_cay, &x_ret, &y_ret, &mat_a, &mat_b,
+        &mut h_buf, &mut u_buf, &mut drift_box, d, r, n_ret, scale,
+    );
+    let new_before: f64 = eval_batch_mse(
+        &w_base, &c_cay, &s_cay, &x_new, &y_new, &mat_a, &mat_b,
+        &mut h_buf, &mut u_buf, &mut drift_box, d, r, n_new, scale,
+    );
+
+    // 5. Timed Zero-Egress Overnight Sleep-Consolidation Cycle:
+    //    Phase A: Diagonal Empirical Fisher Estimation on Replay Buffer
+    //    Phase B: 40 Guarded EWC + Replay + J13 Sleep Steps
+    let t0: i64 = clock_ns();
+    compute_empirical_fisher(
+        &w_base, &c_cay, &s_cay, &x_rep, &y_rep, &a_star, &b_star,
+        &mut fish_a, &mut fish_b, &mut grad_a, &mut grad_b,
+        &mut h_buf, &mut u_buf, &mut du_buf, &mut dh_buf, d, r, n_rep, scale,
+    );
+
+    let mut step_rollbacks: i32 = 0;
+    let mut max_ret_reg_seen: f64 = -100.0;
+    let mut min_eff_rank_seen: f64 = 100.0;
+    let mut max_top1_seen: f64 = 0.0;
+    let mut sleep_losses: Vec<f64> = Vec::new();
+
+    let mut step: usize = 0;
+    while step < n_steps {
+        let loss: f64 = sleep_forward_backward(
+            &w_base, &c_cay, &s_cay, &x_new, &y_new, &x_rep, &y_rep,
+            &a_star, &b_star, &fish_a, &fish_b, &mat_a, &mat_b,
+            &mut grad_a, &mut grad_b, &mut h_buf, &mut u_buf, &mut du_buf, &mut dh_buf,
+            &mut gram_b, &mut gram_a, &mut drift_box,
+            d, r, n_new, n_rep, scale, w_replay, lambda_ewc, lambda_epi,
+        );
+        sleep_losses.push(loss);
+        let st: i32 = guarded_sleep_adamw_step(
+            &w_base, &c_cay, &s_cay, &x_ret, &y_ret, ret_before, max_ret_reg_pct,
+            &mut mat_a, &mut mat_b, &mut bak_a, &mut bak_b, &grad_a, &grad_b,
+            &mut m_a, &mut v_a, &mut m_b, &mut v_b, step + 1,
+            lr, beta1, beta2, eps, wd, min_eff_rank, max_top1_energy,
+            d, r, n_ret, scale, &mut h_buf, &mut u_buf, &mut drift_box,
+            &mut q_b, &mut r_b, &mut q_a, &mut r_a, &mut m4, &mut g4,
+            &mut v_tmp, &mut spec_out, &mut reg_pct_box,
+        );
+        if st != 0 {
+            step_rollbacks = step_rollbacks + 1;
+        } else {
+            if reg_pct_box[0] > max_ret_reg_seen { max_ret_reg_seen = reg_pct_box[0]; }
+            if spec_out[4] < min_eff_rank_seen { min_eff_rank_seen = spec_out[4]; }
+            if spec_out[5] > max_top1_seen { max_top1_seen = spec_out[5]; }
+        }
+        step = step + 1;
+    }
+    let elapsed_ns: i64 = clock_ns() - t0;
+
+    let ret_after: f64 = eval_batch_mse(
+        &w_base, &c_cay, &s_cay, &x_ret, &y_ret, &mat_a, &mat_b,
+        &mut h_buf, &mut u_buf, &mut drift_box, d, r, n_ret, scale,
+    );
+    let new_after: f64 = eval_batch_mse(
+        &w_base, &c_cay, &s_cay, &x_new, &y_new, &mat_a, &mat_b,
+        &mut h_buf, &mut u_buf, &mut drift_box, d, r, n_new, scale,
+    );
+    let new_err_reduction_pct: f64 = 100.0 * (new_before - new_after) / new_before;
+    let ret_regression_pct: f64 = 100.0 * (ret_after - ret_before) / (ret_before + 1.0e-12);
+
+    compute_j13_spectrum(
+        &mat_b, &mat_a, d, r, scale, &mut q_b, &mut r_b,
+        &mut q_a, &mut r_a, &mut m4, &mut g4, &mut v_tmp, &mut spec_out,
+    );
+    let final_s0: f64 = spec_out[0];
+    let final_s1: f64 = spec_out[1];
+    let final_s2: f64 = spec_out[2];
+    let final_s3: f64 = spec_out[3];
+    let final_eff_rank: f64 = spec_out[4];
+    let final_top1: f64 = spec_out[5];
+
+    // 6. Planted Fail-Closed Controls (2 in-binary + 3rd forged cert in Python verifier):
+    // Control 1: Catastrophic forgetting injection (corrupt retention modes 0,1) -> rollback > 1.0%
+    let mut c_a: Vec<f64> = Vec::new();
+    let mut c_b: Vec<f64> = Vec::new();
+    let mut c_ma: Vec<f64> = Vec::new();
+    let mut c_va: Vec<f64> = Vec::new();
+    let mut c_mb: Vec<f64> = Vec::new();
+    let mut c_vb: Vec<f64> = Vec::new();
+    let mut c_ga: Vec<f64> = Vec::new();
+    let mut c_gb: Vec<f64> = Vec::new();
+    i = 0;
+    while i < r * d {
+        c_a.push(mat_a[i]); c_ma.push(0.0); c_va.push(0.0);
+        // Push modes 0 and 1 (retention subspace) off-manifold without collapsing rank
+        c_ga.push(if i < 2 * d { 4.0 * a_star[i] } else { 0.0 });
+        i = i + 1;
+    }
+    i = 0;
+    while i < d * r {
+        c_b.push(mat_b[i]); c_mb.push(0.0); c_vb.push(0.0);
+        c_gb.push(0.0);
+        i = i + 1;
+    }
+    let c1_status: i32 = guarded_sleep_adamw_step(
+        &w_base, &c_cay, &s_cay, &x_ret, &y_ret, ret_before, max_ret_reg_pct,
+        &mut c_a, &mut c_b, &mut bak_a, &mut bak_b, &c_ga, &c_gb,
+        &mut c_ma, &mut c_va, &mut c_mb, &mut c_vb, 1,
+        0.55, beta1, beta2, eps, wd, min_eff_rank, max_top1_energy,
+        d, r, n_ret, scale, &mut h_buf, &mut u_buf, &mut drift_box,
+        &mut q_b, &mut r_b, &mut q_a, &mut r_a, &mut m4, &mut g4,
+        &mut v_tmp, &mut spec_out, &mut reg_pct_box,
+    );
+    let ctrl1_reg_pct: f64 = reg_pct_box[0];
+    let mut c1_rb_err: f64 = 0.0;
+    i = 0;
+    while i < r * d {
+        let df: f64 = abs_f64(c_a[i] - mat_a[i]);
+        if df > c1_rb_err { c1_rb_err = df; }
+        i = i + 1;
+    }
+    i = 0;
+    while i < d * r {
+        let df: f64 = abs_f64(c_b[i] - mat_b[i]);
+        if df > c1_rb_err { c1_rb_err = df; }
+        i = i + 1;
+    }
+    let ctrl1_forgetting_caught: bool = (c1_status == 3)
+        && (ctrl1_reg_pct > max_ret_reg_pct)
+        && (c1_rb_err == 0.0);
+
+    // Control 2: Rank-1 reward-hacking shortcut injection -> caught by J13 spectral gate
+    i = 0;
+    while i < r * d {
+        c_ma[i] = 0.0; c_va[i] = 0.0;
+        c_ga[i] = if i < d { -20.0 * (1.0 + ((i % 5) as f64) * 0.1) } else { 0.0 };
+        i = i + 1;
+    }
+    i = 0;
+    while i < d * r {
+        c_mb[i] = 0.0; c_vb[i] = 0.0;
+        c_gb[i] = if (i % r) == 0 { -20.0 * (1.0 + ((i % 7) as f64) * 0.1) } else { 0.0 };
+        i = i + 1;
+    }
+    let c2_status: i32 = guarded_sleep_adamw_step(
+        &w_base, &c_cay, &s_cay, &x_ret, &y_ret, ret_before, max_ret_reg_pct,
+        &mut c_a, &mut c_b, &mut bak_a, &mut bak_b, &c_ga, &c_gb,
+        &mut c_ma, &mut c_va, &mut c_mb, &mut c_vb, 1,
+        14.0, beta1, beta2, eps, wd, min_eff_rank, max_top1_energy,
+        d, r, n_ret, scale, &mut h_buf, &mut u_buf, &mut drift_box,
+        &mut q_b, &mut r_b, &mut q_a, &mut r_a, &mut m4, &mut g4,
+        &mut v_tmp, &mut spec_out, &mut reg_pct_box,
+    );
+    let ctrl2_eff_rank: f64 = spec_out[4];
+    let ctrl2_top1: f64 = spec_out[5];
+    let mut c2_rb_err: f64 = 0.0;
+    i = 0;
+    while i < r * d {
+        let df: f64 = abs_f64(c_a[i] - mat_a[i]);
+        if df > c2_rb_err { c2_rb_err = df; }
+        i = i + 1;
+    }
+    i = 0;
+    while i < d * r {
+        let df: f64 = abs_f64(c_b[i] - mat_b[i]);
+        if df > c2_rb_err { c2_rb_err = df; }
+        i = i + 1;
+    }
+    let ctrl2_rank1_caught: bool = (c2_status == 2)
+        && (ctrl2_eff_rank < min_eff_rank)
+        && (ctrl2_top1 > max_top1_energy)
+        && (c2_rb_err == 0.0);
+
+    let mut failures: i32 = 0;
+    if step_rollbacks != 0 || new_err_reduction_pct < 40.0 || ret_regression_pct > 1.0 {
+        failures = failures + 1;
+    }
+    if drift_box[0] > 1.0e-12 || final_eff_rank < min_eff_rank || final_top1 > max_top1_energy {
+        failures = failures + 1;
+    }
+    if !ctrl1_forgetting_caught || !ctrl2_rank1_caught { failures = failures + 1; }
+
+    println!(
+        "METRIC d={} r={} n_steps={} ret_before={:.15} ret_after={:.15} ret_regression_pct={:.12}",
+        d, r, n_steps, ret_before, ret_after, ret_regression_pct
+    );
+    println!(
+        "METRIC new_before={:.15} new_after={:.15} new_err_reduction_pct={:.12} step_rollbacks={}",
+        new_before, new_after, new_err_reduction_pct, step_rollbacks
+    );
+    println!(
+        "METRIC max_ret_reg_seen={:.12} max_cayley_drift={:.15} elapsed_ns={}",
+        max_ret_reg_seen, drift_box[0], elapsed_ns
+    );
+    println!(
+        "METRIC final_s0={:.15} final_s1={:.15} final_s2={:.15} final_s3={:.15}",
+        final_s0, final_s1, final_s2, final_s3
+    );
+    println!(
+        "METRIC final_eff_rank={:.15} final_top1={:.15} min_eff_rank_seen={:.15} max_top1_seen={:.15}",
+        final_eff_rank, final_top1, min_eff_rank_seen, max_top1_seen
+    );
+    println!(
+        "METRIC ctrl1_forgetting_caught={} ctrl1_reg_pct={:.6} ctrl1_rb_err={:.15}",
+        ctrl1_forgetting_caught, ctrl1_reg_pct, c1_rb_err
+    );
+    println!(
+        "METRIC ctrl2_rank1_caught={} ctrl2_eff_rank={:.12} ctrl2_top1={:.12} ctrl2_rb_err={:.15}",
+        ctrl2_rank1_caught, ctrl2_eff_rank, ctrl2_top1, c2_rb_err
+    );
+
+    print!("SLEEP_LOSSES ");
+    let mut s_i: usize = 0;
+    while s_i < n_steps {
+        if s_i > 0 { print!(","); }
+        print!("{:.15}", sleep_losses[s_i]);
+        s_i = s_i + 1;
+    }
+    println!("");
+
+    print!("WEIGHT_A ");
+    i = 0;
+    while i < r * d {
+        if i > 0 { print!(","); }
+        print!("{:.15}", mat_a[i]);
+        i = i + 1;
+    }
+    println!("");
+
+    print!("WEIGHT_B ");
+    i = 0;
+    while i < d * r {
+        if i > 0 { print!(","); }
+        print!("{:.15}", mat_b[i]);
+        i = i + 1;
+    }
+    println!("");
+
+    println!("SUMMARY failures={}", failures);
+}

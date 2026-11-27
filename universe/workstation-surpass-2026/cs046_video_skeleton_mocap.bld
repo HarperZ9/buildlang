@@ -1,0 +1,429 @@
+// SPDX-FileCopyrightText: 2026 Zain Dana Harper
+// SPDX-License-Identifier: MIT
+//
+// Wave 109D (CS-046, A1, F1, N42, N63, N64, I16):
+// Two-View Video-to-Skeleton Extraction with Verified Mocap Bone-Length Constraints.
+//   - 16-joint / 15-bone walking skeleton (fixed bone lengths) over 120 frames.
+//   - Two calibrated 1280x720 cameras observe 2D keypoints with deterministic
+//     uniform +/-2 px detector noise (32-bit LCG).
+//   - Naive per-frame midpoint ray triangulation vs constrained reconstruction
+//     (3-frame centered temporal average + 60-iteration symmetric bone projection).
+//   - 2/2 planted fail-closed controls: non-positive bone length and parallel-ray
+//     (zero-baseline) triangulation singularity.
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { return -x; }
+    x
+}
+
+fn validate_bone_length(l: f64) -> i32 {
+    if !(l == l) || l <= 0.0 {
+        return -461;
+    }
+    0
+}
+
+fn lcg_next(s: u64) -> u64 {
+    (s * 1664525u64 + 1013904223u64) & 4294967295u64
+}
+
+fn put3(o: &mut Vec<f64>, j: usize, x: f64, y: f64, z: f64) {
+    o[j * 3] = x;
+    o[j * 3 + 1] = y;
+    o[j * 3 + 2] = z;
+}
+
+fn camera_basis(px: f64, py: f64, pz: f64, tx: f64, ty: f64, tz: f64, b: &mut Vec<f64>) {
+    let fx0: f64 = tx - px;
+    let fy0: f64 = ty - py;
+    let fz0: f64 = tz - pz;
+    let finv: f64 = 1.0 / sqrt(fx0 * fx0 + fy0 * fy0 + fz0 * fz0);
+    let f_x: f64 = fx0 * finv;
+    let f_y: f64 = fy0 * finv;
+    let f_z: f64 = fz0 * finv;
+    let rinv: f64 = 1.0 / sqrt(f_y * f_y + f_x * f_x);
+    let r_x: f64 = f_y * rinv;
+    let r_y: f64 = -f_x * rinv;
+    b[0] = r_x;
+    b[1] = r_y;
+    b[2] = 0.0;
+    b[3] = r_y * f_z;
+    b[4] = -r_x * f_z;
+    b[5] = r_x * f_y - r_y * f_x;
+    b[6] = f_x;
+    b[7] = f_y;
+    b[8] = f_z;
+}
+
+// Closest-point midpoint triangulation of rays o1 + s*d1 and o2 + t*d2
+fn triangulate(
+    o1x: f64, o1y: f64, o1z: f64, d1x: f64, d1y: f64, d1z: f64,
+    o2x: f64, o2y: f64, o2z: f64, d2x: f64, d2y: f64, d2z: f64,
+    out3: &mut Vec<f64>,
+) -> i32 {
+    let wx: f64 = o1x - o2x;
+    let wy: f64 = o1y - o2y;
+    let wz: f64 = o1z - o2z;
+    let a: f64 = d1x * d1x + d1y * d1y + d1z * d1z;
+    let b: f64 = d1x * d2x + d1y * d2y + d1z * d2z;
+    let c: f64 = d2x * d2x + d2y * d2y + d2z * d2z;
+    let d: f64 = d1x * wx + d1y * wy + d1z * wz;
+    let e: f64 = d2x * wx + d2y * wy + d2z * wz;
+    let den: f64 = a * c - b * b;
+    if !(den == den) || den < 1.0e-12 {
+        return -462;
+    }
+    let s: f64 = (b * e - c * d) / den;
+    let t: f64 = (a * e - b * d) / den;
+    out3[0] = 0.5 * ((o1x + s * d1x) + (o2x + t * d2x));
+    out3[1] = 0.5 * ((o1y + s * d1y) + (o2y + t * d2y));
+    out3[2] = 0.5 * ((o1z + s * d1z) + (o2z + t * d2z));
+    0
+}
+
+fn fk_skeleton(phi: f64, o: &mut Vec<f64>) {
+    let pi: f64 = 3.141592653589793;
+    let p0z: f64 = 0.95 + 0.02 * cos(2.0 * phi);
+    let a1: f64 = 0.06 * sin(phi);
+    let s1: f64 = sin(a1);
+    let c1: f64 = cos(a1);
+    let p1x: f64 = 0.25 * s1;
+    let p1z: f64 = p0z + 0.25 * c1;
+    let p2x: f64 = p1x + 0.25 * s1;
+    let p2z: f64 = p1z + 0.25 * c1;
+    let a3: f64 = 1.5 * a1;
+    let p3x: f64 = p2x + 0.18 * sin(a3);
+    let p3z: f64 = p2z + 0.18 * cos(a3);
+
+    let al: f64 = 0.45 * sin(phi + pi);
+    let el: f64 = 0.3 + 0.2 * sin(phi + pi);
+    let p5x: f64 = p2x + 0.28 * sin(al);
+    let p5z: f64 = p2z - 0.28 * cos(al);
+    let p6x: f64 = p5x + 0.26 * sin(al + el);
+    let p6z: f64 = p5z - 0.26 * cos(al + el);
+
+    let ar: f64 = 0.45 * sin(phi);
+    let er: f64 = 0.3 + 0.2 * sin(phi);
+    let p8x: f64 = p2x + 0.28 * sin(ar);
+    let p8z: f64 = p2z - 0.28 * cos(ar);
+    let p9x: f64 = p8x + 0.26 * sin(ar + er);
+    let p9z: f64 = p8z - 0.26 * cos(ar + er);
+
+    let hl: f64 = 0.5 * sin(phi);
+    let kl: f64 = 0.35 * (1.0 + sin(phi - 1.2));
+    let p11x: f64 = 0.45 * sin(hl);
+    let p11z: f64 = p0z - 0.45 * cos(hl);
+    let p12x: f64 = p11x + 0.43 * sin(hl - kl);
+    let p12z: f64 = p11z - 0.43 * cos(hl - kl);
+
+    let hr: f64 = 0.5 * sin(phi + pi);
+    let kr: f64 = 0.35 * (1.0 + sin(phi + pi - 1.2));
+    let p14x: f64 = 0.45 * sin(hr);
+    let p14z: f64 = p0z - 0.45 * cos(hr);
+    let p15x: f64 = p14x + 0.43 * sin(hr - kr);
+    let p15z: f64 = p14z - 0.43 * cos(hr - kr);
+
+    put3(o, 0, 0.0, 0.0, p0z);
+    put3(o, 1, p1x, 0.0, p1z);
+    put3(o, 2, p2x, 0.0, p2z);
+    put3(o, 3, p3x, 0.0, p3z);
+    put3(o, 4, p2x, 0.18, p2z);
+    put3(o, 5, p5x, 0.18, p5z);
+    put3(o, 6, p6x, 0.18, p6z);
+    put3(o, 7, p2x, -0.18, p2z);
+    put3(o, 8, p8x, -0.18, p8z);
+    put3(o, 9, p9x, -0.18, p9z);
+    put3(o, 10, 0.0, 0.10, p0z);
+    put3(o, 11, p11x, 0.10, p11z);
+    put3(o, 12, p12x, 0.10, p12z);
+    put3(o, 13, 0.0, -0.10, p0z);
+    put3(o, 14, p14x, -0.10, p14z);
+    put3(o, 15, p15x, -0.10, p15z);
+}
+
+fn main() ~ Console + Clock {
+    let n_frames: usize = 120;
+    let n_joint: usize = 16;
+    let n_bone: usize = 15;
+    let stride: usize = 48;
+    let two_pi: f64 = 6.283185307179586;
+    let fl: f64 = 1000.0;
+
+    let mut b_par: Vec<usize> = Vec::new();
+    let mut b_chi: Vec<usize> = Vec::new();
+    let mut b_len: Vec<f64> = Vec::new();
+    b_par.push(0); b_chi.push(1); b_len.push(0.25);
+    b_par.push(1); b_chi.push(2); b_len.push(0.25);
+    b_par.push(2); b_chi.push(3); b_len.push(0.18);
+    b_par.push(2); b_chi.push(4); b_len.push(0.18);
+    b_par.push(4); b_chi.push(5); b_len.push(0.28);
+    b_par.push(5); b_chi.push(6); b_len.push(0.26);
+    b_par.push(2); b_chi.push(7); b_len.push(0.18);
+    b_par.push(7); b_chi.push(8); b_len.push(0.28);
+    b_par.push(8); b_chi.push(9); b_len.push(0.26);
+    b_par.push(0); b_chi.push(10); b_len.push(0.10);
+    b_par.push(10); b_chi.push(11); b_len.push(0.45);
+    b_par.push(11); b_chi.push(12); b_len.push(0.43);
+    b_par.push(0); b_chi.push(13); b_len.push(0.10);
+    b_par.push(13); b_chi.push(14); b_len.push(0.45);
+    b_par.push(14); b_chi.push(15); b_len.push(0.43);
+
+    let mut len_ok: i32 = 0;
+    let mut bi: usize = 0;
+    while bi < n_bone {
+        len_ok = len_ok + validate_bone_length(b_len[bi]);
+        bi = bi + 1;
+    }
+
+    // Two calibrated cameras looking at the subject center (0, 0, 0.9)
+    let c1x: f64 = 3.0;
+    let c1y: f64 = 2.6;
+    let c1z: f64 = 1.2;
+    let c2x: f64 = 3.0;
+    let c2y: f64 = -2.6;
+    let c2z: f64 = 1.0;
+    let mut bas1: Vec<f64> = Vec::new();
+    let mut bas2: Vec<f64> = Vec::new();
+    let mut i: usize = 0;
+    while i < 9 { bas1.push(0.0); bas2.push(0.0); i = i + 1; }
+    camera_basis(c1x, c1y, c1z, 0.0, 0.0, 0.9, &mut bas1);
+    camera_basis(c2x, c2y, c2z, 0.0, 0.0, 0.9, &mut bas2);
+
+    let mut gt: Vec<f64> = Vec::new();
+    let mut gt_all: Vec<f64> = Vec::new();
+    let mut nv_all: Vec<f64> = Vec::new();
+    let mut obs: Vec<f64> = Vec::new();
+    let mut x3: Vec<f64> = Vec::new();
+    i = 0;
+    while i < stride { gt.push(0.0); i = i + 1; }
+    i = 0;
+    while i < n_frames * stride { gt_all.push(0.0); nv_all.push(0.0); i = i + 1; }
+    i = 0;
+    while i < 64 { obs.push(0.0); i = i + 1; }
+    x3.push(0.0); x3.push(0.0); x3.push(0.0);
+
+    let mut rng: u64 = 20261127u64;
+    let mut tri_fail: i32 = 0;
+    let t0: i64 = clock_ns();
+
+    // 1. Render noisy 2D keypoints in both views and triangulate naively per frame
+    let mut t: usize = 0;
+    while t < n_frames {
+        let phi: f64 = two_pi * (t as f64) / 60.0;
+        fk_skeleton(phi, &mut gt);
+        let mut view: usize = 0;
+        while view < 2 {
+            let mut j: usize = 0;
+            while j < n_joint {
+                let dx: f64 = gt[j * 3] - (if view == 0 { c1x } else { c2x });
+                let dy: f64 = gt[j * 3 + 1] - (if view == 0 { c1y } else { c2y });
+                let dz: f64 = gt[j * 3 + 2] - (if view == 0 { c1z } else { c2z });
+                let xc: f64 = if view == 0 {
+                    bas1[0] * dx + bas1[1] * dy + bas1[2] * dz
+                } else {
+                    bas2[0] * dx + bas2[1] * dy + bas2[2] * dz
+                };
+                let yc: f64 = if view == 0 {
+                    -(bas1[3] * dx + bas1[4] * dy + bas1[5] * dz)
+                } else {
+                    -(bas2[3] * dx + bas2[4] * dy + bas2[5] * dz)
+                };
+                let zc: f64 = if view == 0 {
+                    bas1[6] * dx + bas1[7] * dy + bas1[8] * dz
+                } else {
+                    bas2[6] * dx + bas2[7] * dy + bas2[8] * dz
+                };
+                rng = lcg_next(rng);
+                let nu: f64 = ((rng as f64) / 4294967296.0 - 0.5) * 4.0;
+                rng = lcg_next(rng);
+                let nv: f64 = ((rng as f64) / 4294967296.0 - 0.5) * 4.0;
+                obs[view * 32 + j * 2] = fl * (xc / zc) + 640.0 + nu;
+                obs[view * 32 + j * 2 + 1] = fl * (yc / zc) + 360.0 + nv;
+                j = j + 1;
+            }
+            view = view + 1;
+        }
+
+        let mut j: usize = 0;
+        while j < n_joint {
+            let xn1: f64 = (obs[j * 2] - 640.0) / fl;
+            let yn1: f64 = (obs[j * 2 + 1] - 360.0) / fl;
+            let xn2: f64 = (obs[32 + j * 2] - 640.0) / fl;
+            let yn2: f64 = (obs[32 + j * 2 + 1] - 360.0) / fl;
+            let rc: i32 = triangulate(
+                c1x, c1y, c1z,
+                bas1[6] + xn1 * bas1[0] - yn1 * bas1[3],
+                bas1[7] + xn1 * bas1[1] - yn1 * bas1[4],
+                bas1[8] + xn1 * bas1[2] - yn1 * bas1[5],
+                c2x, c2y, c2z,
+                bas2[6] + xn2 * bas2[0] - yn2 * bas2[3],
+                bas2[7] + xn2 * bas2[1] - yn2 * bas2[4],
+                bas2[8] + xn2 * bas2[2] - yn2 * bas2[5],
+                &mut x3,
+            );
+            if rc != 0 {
+                tri_fail = tri_fail + 1;
+            }
+            let off: usize = t * stride + j * 3;
+            nv_all[off] = x3[0];
+            nv_all[off + 1] = x3[1];
+            nv_all[off + 2] = x3[2];
+            gt_all[off] = gt[j * 3];
+            gt_all[off + 1] = gt[j * 3 + 1];
+            gt_all[off + 2] = gt[j * 3 + 2];
+            j = j + 1;
+        }
+        t = t + 1;
+    }
+
+    // 2. Constrained reconstruction: centered temporal average + symmetric bone projection
+    let mut cn_all: Vec<f64> = Vec::new();
+    i = 0;
+    while i < n_frames * stride {
+        cn_all.push(nv_all[i]);
+        i = i + 1;
+    }
+    t = 1;
+    while t + 1 < n_frames {
+        i = 0;
+        while i < stride {
+            let a: f64 = nv_all[(t - 1) * stride + i];
+            let b: f64 = nv_all[t * stride + i];
+            let c: f64 = nv_all[(t + 1) * stride + i];
+            cn_all[t * stride + i] = (a + b + c) / 3.0;
+            i = i + 1;
+        }
+        t = t + 1;
+    }
+    t = 0;
+    while t < n_frames {
+        let base: usize = t * stride;
+        let mut it: usize = 0;
+        while it < 60 {
+            bi = 0;
+            while bi < n_bone {
+                let pp: usize = base + b_par[bi] * 3;
+                let qq: usize = base + b_chi[bi] * 3;
+                let dx: f64 = cn_all[qq] - cn_all[pp];
+                let dy: f64 = cn_all[qq + 1] - cn_all[pp + 1];
+                let dz: f64 = cn_all[qq + 2] - cn_all[pp + 2];
+                let dist: f64 = sqrt(dx * dx + dy * dy + dz * dz);
+                let corr: f64 = 0.5 * (dist - b_len[bi]) / dist;
+                cn_all[pp] = cn_all[pp] + corr * dx;
+                cn_all[pp + 1] = cn_all[pp + 1] + corr * dy;
+                cn_all[pp + 2] = cn_all[pp + 2] + corr * dz;
+                cn_all[qq] = cn_all[qq] - corr * dx;
+                cn_all[qq + 1] = cn_all[qq + 1] - corr * dy;
+                cn_all[qq + 2] = cn_all[qq + 2] - corr * dz;
+                bi = bi + 1;
+            }
+            it = it + 1;
+        }
+        t = t + 1;
+    }
+    let elapsed_ns: i64 = clock_ns() - t0;
+
+    // 3. Metrics: MPJPE (mm), naive bone-length CV (%), constrained and ground-truth length error
+    let mut err_nv: f64 = 0.0;
+    let mut err_cn: f64 = 0.0;
+    t = 0;
+    while t < n_frames {
+        let mut j: usize = 0;
+        while j < n_joint {
+            let off: usize = t * stride + j * 3;
+            let ax: f64 = nv_all[off] - gt_all[off];
+            let ay: f64 = nv_all[off + 1] - gt_all[off + 1];
+            let az: f64 = nv_all[off + 2] - gt_all[off + 2];
+            err_nv = err_nv + sqrt(ax * ax + ay * ay + az * az);
+            let bx: f64 = cn_all[off] - gt_all[off];
+            let by: f64 = cn_all[off + 1] - gt_all[off + 1];
+            let bz: f64 = cn_all[off + 2] - gt_all[off + 2];
+            err_cn = err_cn + sqrt(bx * bx + by * by + bz * bz);
+            j = j + 1;
+        }
+        t = t + 1;
+    }
+    let n_pts: f64 = (n_frames * n_joint) as f64;
+    let mpjpe_nv_mm: f64 = 1000.0 * err_nv / n_pts;
+    let mpjpe_cn_mm: f64 = 1000.0 * err_cn / n_pts;
+    let reduction_pct: f64 = 100.0 * (mpjpe_nv_mm - mpjpe_cn_mm) / mpjpe_nv_mm;
+
+    let mut cv_sum: f64 = 0.0;
+    let mut cn_len_err: f64 = 0.0;
+    let mut gt_len_err: f64 = 0.0;
+    bi = 0;
+    while bi < n_bone {
+        let mut s_len: f64 = 0.0;
+        t = 0;
+        while t < n_frames {
+            let pp: usize = t * stride + b_par[bi] * 3;
+            let qq: usize = t * stride + b_chi[bi] * 3;
+            let dx: f64 = nv_all[qq] - nv_all[pp];
+            let dy: f64 = nv_all[qq + 1] - nv_all[pp + 1];
+            let dz: f64 = nv_all[qq + 2] - nv_all[pp + 2];
+            s_len = s_len + sqrt(dx * dx + dy * dy + dz * dz);
+            let cx: f64 = cn_all[qq] - cn_all[pp];
+            let cy: f64 = cn_all[qq + 1] - cn_all[pp + 1];
+            let cz: f64 = cn_all[qq + 2] - cn_all[pp + 2];
+            let ce: f64 = abs_f64(sqrt(cx * cx + cy * cy + cz * cz) - b_len[bi]);
+            if ce > cn_len_err { cn_len_err = ce; }
+            let gx: f64 = gt_all[qq] - gt_all[pp];
+            let gy: f64 = gt_all[qq + 1] - gt_all[pp + 1];
+            let gz: f64 = gt_all[qq + 2] - gt_all[pp + 2];
+            let ge: f64 = abs_f64(sqrt(gx * gx + gy * gy + gz * gz) - b_len[bi]);
+            if ge > gt_len_err { gt_len_err = ge; }
+            t = t + 1;
+        }
+        let mean_len: f64 = s_len / (n_frames as f64);
+        let mut s_var: f64 = 0.0;
+        t = 0;
+        while t < n_frames {
+            let pp: usize = t * stride + b_par[bi] * 3;
+            let qq: usize = t * stride + b_chi[bi] * 3;
+            let dx: f64 = nv_all[qq] - nv_all[pp];
+            let dy: f64 = nv_all[qq + 1] - nv_all[pp + 1];
+            let dz: f64 = nv_all[qq + 2] - nv_all[pp + 2];
+            let dl: f64 = sqrt(dx * dx + dy * dy + dz * dz) - mean_len;
+            s_var = s_var + dl * dl;
+            t = t + 1;
+        }
+        cv_sum = cv_sum + sqrt(s_var / (n_frames as f64)) / mean_len;
+        bi = bi + 1;
+    }
+    let bone_cv_nv_pct: f64 = 100.0 * cv_sum / (n_bone as f64);
+
+    // Planted Fail-Closed Controls (2/2):
+    // Control 1: Non-positive bone length (0.0 m) -> -461
+    let ctrl1_bone_caught: bool = validate_bone_length(0.0) == -461 && validate_bone_length(-0.2) == -461;
+    // Control 2: Zero-baseline parallel rays -> -462
+    let rc_par: i32 = triangulate(
+        c1x, c1y, c1z, 0.3, 0.4, 0.5,
+        c1x, c1y, c1z, 0.3, 0.4, 0.5,
+        &mut x3,
+    );
+    let ctrl2_parallel_caught: bool = rc_par == -462;
+
+    let mut failures: i32 = 0;
+    if len_ok != 0 || tri_fail != 0 || gt_len_err > 1.0e-12 {
+        failures = failures + 1;
+    }
+    if mpjpe_cn_mm >= mpjpe_nv_mm || cn_len_err > 1.0e-6 {
+        failures = failures + 1;
+    }
+    if !ctrl1_bone_caught || !ctrl2_parallel_caught {
+        failures = failures + 1;
+    }
+
+    println!(
+        "CS046_MPJPE frames={} joints={} mpjpe_naive_mm={:.12} mpjpe_con_mm={:.12} reduction_pct={:.12}",
+        n_frames, n_joint, mpjpe_nv_mm, mpjpe_cn_mm, reduction_pct
+    );
+    println!(
+        "CS046_BONES bone_cv_naive_pct={:.12} con_max_len_err_m={:.12} gt_max_len_err_m={:.12}",
+        bone_cv_nv_pct, cn_len_err, gt_len_err
+    );
+    println!(
+        "CS046_CONTROLS ctrl1_bone_len={} ctrl2_parallel={} elapsed_ns={} failures={}",
+        ctrl1_bone_caught, ctrl2_parallel_caught, elapsed_ns, failures
+    );
+}

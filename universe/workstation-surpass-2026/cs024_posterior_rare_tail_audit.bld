@@ -1,0 +1,307 @@
+// SPDX-FileCopyrightText: 2026 Zain Dana Harper
+// SPDX-License-Identifier: MIT
+//
+// Wave 109C (CS-024; A7, F1, N49, N53):
+// PosteriorBench Rare-Behavior Auditing & BehaviorBox via Pharos Importance-Sampled Tail Fuzzing
+//   - 6-turn agentic policy chain (V=8 actions/turn) with 10 planted rare failure modes (all p_true <= 1e-3)
+//   - Compares untiled Monte Carlo baseline against exponentially-tilted Pharos importance sampling (Q_beta)
+//   - Computes exact analytical DP ground truth, Radon-Nikodym likelihood-ratio unbiased estimator p_hat_IS,
+//     variance-reduction factor, effective sample size, and >= 90% rare-mode recall
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { return -x; }
+    x
+}
+
+fn lcg_next(s: u64) -> u64 {
+    (s * 1664525u64 + 1013904223u64) & 4294967295u64
+}
+
+fn sample_cat_8(p: &Vec<f64>, u: f64) -> usize {
+    let mut cdf: f64 = 0.0;
+    let mut i: usize = 0;
+    while i < 7 {
+        cdf = cdf + p[i];
+        if u < cdf { return i; }
+        i = i + 1;
+    }
+    7
+}
+
+// Check probability normalization; returns false if sum deviates from 1.0 by > 1e-9.
+fn prob_valid_8(p: &Vec<f64>) -> bool {
+    let mut s: f64 = 0.0;
+    let mut i: usize = 0;
+    while i < 8 {
+        if p[i] < 0.0 || p[i] > 1.0 { return false; }
+        s = s + p[i];
+        i = i + 1;
+    }
+    abs_f64(s - 1.0) <= 1.0e-9
+}
+
+// Compute base action distribution P0(a | turn) and Pharos exponentially tilted Q_beta(a | turn).
+// Actions 6 and 7 are rare tail trigger actions with small base probabilities; turns 0..4 gate
+// reaching the rare tail prefix, and turn 5 selects which planted failure mode m in 0..9 fires
+// via prefix parity (0 or 1) * 5 + tail action index.
+fn build_turn_probs(
+    turn: usize,
+    beta: f64,
+    p0_out: &mut Vec<f64>,
+    q_out: &mut Vec<f64>,
+) {
+    // Base logits: actions 0..5 are common safe actions; actions 6,7 are rare risky tail actions
+    let mut base_p: Vec<f64> = Vec::new();
+    if turn < 4 {
+        // P0(action 6 or 7) = 0.16 each -> 4-step prefix of risky actions has p ~ 0.00065
+        base_p.push(0.12); base_p.push(0.12); base_p.push(0.12); base_p.push(0.11);
+        base_p.push(0.11); base_p.push(0.10); base_p.push(0.16); base_p.push(0.16);
+    } else if turn == 4 {
+        // Turn 4: 2 rare escalation paths (action 6: p=0.04, action 7: p=0.03)
+        base_p.push(0.16); base_p.push(0.16); base_p.push(0.16); base_p.push(0.15);
+        base_p.push(0.15); base_p.push(0.15); base_p.push(0.04); base_p.push(0.03);
+    } else {
+        // Turn 5: 5 distinct planted failure payload actions (actions 3..7)
+        base_p.push(0.25); base_p.push(0.22); base_p.push(0.18); base_p.push(0.09);
+        base_p.push(0.08); base_p.push(0.07); base_p.push(0.06); base_p.push(0.05);
+    }
+
+    let mut i: usize = 0;
+    while i < 8 { p0_out[i] = base_p[i]; i = i + 1; }
+
+    // Pharos risk potential h(turn, a) tilts proposal smoothly onto rare tail trajectories
+    let mut z: f64 = 0.0;
+    i = 0;
+    while i < 8 {
+        let risk: f64 = if turn < 4 {
+            if i >= 6 { 1.35 } else { 0.0 }
+        } else if turn == 4 {
+            if i == 6 { 2.55 } else if i == 7 { 2.80 } else { 0.0 }
+        } else {
+            if i >= 3 { 1.15 } else { 0.0 }
+        };
+        let qw: f64 = base_p[i] * exp(beta * risk);
+        q_out[i] = qw;
+        z = z + qw;
+        i = i + 1;
+    }
+    let inv_z: f64 = 1.0 / z;
+    i = 0;
+    while i < 8 { q_out[i] = q_out[i] * inv_z; i = i + 1; }
+}
+
+// Run N multi-turn rollouts under proposal Q_beta, accumulating exact Radon-Nikodym estimates.
+// Writes [total_p_hat, var_est, mean_w, ess, modes_caught] into stats_out[0..5].
+fn run_tail_fuzz_audit(
+    n_rollouts: usize,
+    beta: f64,
+    seed_init: u64,
+    drop_lr_weight: bool,
+    mode_p_hat: &mut Vec<f64>,
+    mode_hits: &mut Vec<i32>,
+    stats_out: &mut Vec<f64>,
+) -> i32 {
+    let mut m: usize = 0;
+    while m < 10 { mode_p_hat[m] = 0.0; mode_hits[m] = 0; m = m + 1; }
+
+    // Precompute per-turn P0 [6x8] and Q_beta [6x8]
+    let mut p0_all: Vec<f64> = Vec::new();
+    let mut q_all: Vec<f64> = Vec::new();
+    let mut p0_t: Vec<f64> = Vec::new();
+    let mut q_t: Vec<f64> = Vec::new();
+    let mut i: usize = 0;
+    while i < 8 { p0_t.push(0.0); q_t.push(0.0); i = i + 1; }
+
+    let mut t: usize = 0;
+    while t < 6 {
+        build_turn_probs(t, beta, &mut p0_t, &mut q_t);
+        if !prob_valid_8(&p0_t) || !prob_valid_8(&q_t) { return -241; }
+        i = 0;
+        while i < 8 { p0_all.push(p0_t[i]); q_all.push(q_t[i]); i = i + 1; }
+        t = t + 1;
+    }
+
+    let mut rng: u64 = seed_init;
+    let mut sum_w: f64 = 0.0;
+    let mut sum_w2: f64 = 0.0;
+    let mut sum_y: f64 = 0.0;
+    let mut sum_y2: f64 = 0.0;
+
+    let mut r_idx: usize = 0;
+    while r_idx < n_rollouts {
+        let mut w_lr: f64 = 1.0;
+        let mut prefix_risky: bool = true;
+        let mut esc_branch: i32 = -1;
+        let mut payload_idx: i32 = -1;
+
+        t = 0;
+        while t < 6 {
+            let off: usize = t * 8;
+            i = 0;
+            while i < 8 { q_t[i] = q_all[off + i]; i = i + 1; }
+            rng = lcg_next(rng);
+            let u: f64 = ((rng >> 8) as f64) / 16777216.0;
+            let act: usize = sample_cat_8(&q_t, u);
+            if !drop_lr_weight {
+                w_lr = w_lr * (p0_all[off + act] / q_all[off + act]);
+            }
+            if t < 4 {
+                if act < 6 { prefix_risky = false; }
+            } else if t == 4 {
+                if act == 6 { esc_branch = 0; }
+                if act == 7 { esc_branch = 1; }
+            } else {
+                if act >= 3 { payload_idx = (act - 3) as i32; }
+            }
+            t = t + 1;
+        }
+
+        sum_w = sum_w + w_lr;
+        sum_w2 = sum_w2 + w_lr * w_lr;
+        let mut y_val: f64 = 0.0;
+        if prefix_risky && esc_branch >= 0 && payload_idx >= 0 {
+            let mode_id: usize = ((esc_branch * 5) + payload_idx) as usize;
+            mode_hits[mode_id] = mode_hits[mode_id] + 1;
+            mode_p_hat[mode_id] = mode_p_hat[mode_id] + w_lr;
+            y_val = w_lr;
+        }
+        sum_y = sum_y + y_val;
+        sum_y2 = sum_y2 + y_val * y_val;
+        r_idx = r_idx + 1;
+    }
+
+    let inv_n: f64 = 1.0 / (n_rollouts as f64);
+    let mut caught: usize = 0;
+    m = 0;
+    while m < 10 {
+        mode_p_hat[m] = mode_p_hat[m] * inv_n;
+        if mode_hits[m] > 0 { caught = caught + 1; }
+        m = m + 1;
+    }
+    let p_hat: f64 = sum_y * inv_n;
+    let mean_w: f64 = sum_w * inv_n;
+    let var_est: f64 = (sum_y2 * inv_n - p_hat * p_hat) * inv_n;
+    let ess: f64 = (sum_w * sum_w) / (sum_w2 + 1.0e-15);
+
+    stats_out[0] = p_hat;
+    stats_out[1] = var_est;
+    stats_out[2] = mean_w;
+    stats_out[3] = ess;
+    stats_out[4] = caught as f64;
+
+    // Radon-Nikodym martingale identity check: E_Q[W] must stay within 0.15 of 1.0
+    if abs_f64(mean_w - 1.0) > 0.15 { return -242; }
+    0
+}
+
+fn main() ~ Console + Clock {
+    let n_rollouts: usize = 2000;
+    let beta_pharos: f64 = 1.0;
+
+    // 1. Exact analytical ground-truth probability for all 10 planted rare failure modes
+    //    Prefix turns 0..3: (0.16 + 0.16)^4 = 0.32^4 = 0.01048576
+    //    Turn 4 branches: branch 0 = 0.04, branch 1 = 0.03
+    //    Turn 5 payloads: [0.09, 0.08, 0.07, 0.06, 0.05]
+    let p_prefix: f64 = 0.32 * 0.32 * 0.32 * 0.32;
+    let mut p_true_modes: Vec<f64> = Vec::new();
+    let mut pay: Vec<f64> = Vec::new();
+    pay.push(0.09); pay.push(0.08); pay.push(0.07); pay.push(0.06); pay.push(0.05);
+    let mut p_true_total: f64 = 0.0;
+    let mut max_mode_p: f64 = 0.0;
+    let mut b_i: usize = 0;
+    while b_i < 2 {
+        let pb: f64 = if b_i == 0 { 0.04 } else { 0.03 };
+        let mut k: usize = 0;
+        while k < 5 {
+            let pm: f64 = p_prefix * pb * pay[k];
+            p_true_modes.push(pm);
+            p_true_total = p_true_total + pm;
+            if pm > max_mode_p { max_mode_p = pm; }
+            k = k + 1;
+        }
+        b_i = b_i + 1;
+    }
+
+    let mut mode_p_is: Vec<f64> = Vec::new();
+    let mut mode_hits_is: Vec<i32> = Vec::new();
+    let mut mode_p_mc: Vec<f64> = Vec::new();
+    let mut mode_hits_mc: Vec<i32> = Vec::new();
+    let mut stats_is: Vec<f64> = Vec::new();
+    let mut stats_mc: Vec<f64> = Vec::new();
+    let mut i: usize = 0;
+    while i < 10 {
+        mode_p_is.push(0.0); mode_hits_is.push(0);
+        mode_p_mc.push(0.0); mode_hits_mc.push(0);
+        i = i + 1;
+    }
+    i = 0;
+    while i < 5 { stats_is.push(0.0); stats_mc.push(0.0); i = i + 1; }
+
+    // 2. Timed Pharos-Tilted PosteriorBench Audit vs Naive Untiled Monte Carlo Baseline
+    let t0: i64 = clock_ns();
+    let st_is: i32 = run_tail_fuzz_audit(
+        n_rollouts, beta_pharos, 24001u64, false,
+        &mut mode_p_is, &mut mode_hits_is, &mut stats_is,
+    );
+    let st_mc: i32 = run_tail_fuzz_audit(
+        n_rollouts, 0.0, 24001u64, false,
+        &mut mode_p_mc, &mut mode_hits_mc, &mut stats_mc,
+    );
+    let elapsed_ns: i64 = clock_ns() - t0;
+
+    let p_hat_is: f64 = stats_is[0];
+    let var_is: f64 = stats_is[1];
+    let mean_w_is: f64 = stats_is[2];
+    let ess_is: f64 = stats_is[3];
+    let recall_is: f64 = stats_is[4] / 10.0;
+
+    let p_hat_mc: f64 = stats_mc[0];
+    let recall_mc: f64 = stats_mc[4] / 10.0;
+    // Exact theoretical naive MC variance for N rollouts: p*(1-p)/N
+    let var_mc_theory: f64 = p_true_total * (1.0 - p_true_total) / (n_rollouts as f64);
+    let var_reduction: f64 = var_mc_theory / (var_is + 1.0e-18);
+    let rel_err_is: f64 = abs_f64(p_hat_is - p_true_total) / p_true_total;
+
+    // 3. Planted Fail-Closed Controls (2 in-binary + forged cert in Python oracle)
+    // Control 1: Unnormalized proposal distribution (sum=1.25) & missing LR bias caught fail-closed
+    let mut bad_p: Vec<f64> = Vec::new();
+    i = 0;
+    while i < 8 { bad_p.push(1.25 / 8.0); i = i + 1; }
+    let mut bad_stats: Vec<f64> = Vec::new();
+    i = 0;
+    while i < 5 { bad_stats.push(0.0); i = i + 1; }
+    let st_nolr: i32 = run_tail_fuzz_audit(
+        n_rollouts, beta_pharos, 24001u64, true,
+        &mut mode_p_mc, &mut mode_hits_mc, &mut bad_stats,
+    );
+    let ctrl1_norm_and_lr_bias: bool = (!prob_valid_8(&bad_p))
+        && (st_nolr == 0 && (abs_f64(bad_stats[0] - p_true_total) / p_true_total) > 10.0);
+
+    // Control 2: Untiled MC baseline fails the >= 90% rare-behavior recall floor (p <= 1e-3)
+    let ctrl2_untiled_low_recall: bool = recall_mc < 0.90;
+
+    let mut failures: i32 = 0;
+    if st_is != 0 || st_mc != 0 { failures = failures + 1; }
+    if max_mode_p > 1.0e-3 || recall_is < 0.90 || rel_err_is > 0.15 || var_reduction < 50.0 {
+        failures = failures + 1;
+    }
+    if !ctrl1_norm_and_lr_bias || !ctrl2_untiled_low_recall { failures = failures + 1; }
+
+    println!(
+        "METRIC n_rollouts={} modes=10 p_true_total={:.15} max_mode_p={:.15}",
+        n_rollouts, p_true_total, max_mode_p
+    );
+    println!(
+        "METRIC p_hat_is={:.15} rel_err_is={:.12} mean_w_is={:.12} ess_is={:.12}",
+        p_hat_is, rel_err_is, mean_w_is, ess_is
+    );
+    println!(
+        "METRIC recall_is={:.12} recall_mc={:.12} p_hat_mc={:.15} var_reduction={:.12}",
+        recall_is, recall_mc, p_hat_mc, var_reduction
+    );
+    println!(
+        "METRIC ctrl1_norm_and_lr_bias={} ctrl2_untiled_low_recall={} elapsed_ns={}",
+        ctrl1_norm_and_lr_bias, ctrl2_untiled_low_recall, elapsed_ns
+    );
+    println!("SUMMARY failures={}", failures);
+}

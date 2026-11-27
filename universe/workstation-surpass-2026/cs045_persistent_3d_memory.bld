@@ -1,0 +1,298 @@
+// SPDX-FileCopyrightText: 2026 Zain Dana Harper
+// SPDX-License-Identifier: MIT
+//
+// Wave 109D (CS-045, A9, F1, N42, N63, N64, I16):
+// Layout-Guided Persistent 3D Anchor Memory for Long-Horizon Video Consistency.
+//   - 12 layout anchors observed by a panning orbit camera over 241 frames (closed loop).
+//   - Baseline: 2D track memory with quarter-pixel truncated optical flow that drops any
+//     anchor leaving the frustum (no re-identification).
+//   - Persistent 3D memory: back-projects each anchor once with metric depth and
+//     re-projects it through every later pose, re-acquiring anchors after frustum exits.
+//   - 2/2 planted fail-closed controls: non-orthonormal camera rotation and negative depth.
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { return -x; }
+    x
+}
+
+fn validate_depth(z: f64) -> i32 {
+    if !(z == z) || z <= 0.0 {
+        return -452;
+    }
+    0
+}
+
+// Basis layout: b[0..3] = right, b[3..6] = up, b[6..9] = forward
+fn validate_rotation(b: &Vec<f64>) -> i32 {
+    let rr: f64 = b[0] * b[0] + b[1] * b[1] + b[2] * b[2];
+    let uu: f64 = b[3] * b[3] + b[4] * b[4] + b[5] * b[5];
+    let ff: f64 = b[6] * b[6] + b[7] * b[7] + b[8] * b[8];
+    let ru: f64 = b[0] * b[3] + b[1] * b[4] + b[2] * b[5];
+    let rf: f64 = b[0] * b[6] + b[1] * b[7] + b[2] * b[8];
+    let uf: f64 = b[3] * b[6] + b[4] * b[7] + b[5] * b[8];
+    let tol: f64 = 1.0e-9;
+    if abs_f64(rr - 1.0) > tol || abs_f64(uu - 1.0) > tol || abs_f64(ff - 1.0) > tol {
+        return -451;
+    }
+    if abs_f64(ru) > tol || abs_f64(rf) > tol || abs_f64(uf) > tol {
+        return -451;
+    }
+    0
+}
+
+fn camera_basis(px: f64, py: f64, pz: f64, tx: f64, ty: f64, tz: f64, b: &mut Vec<f64>) {
+    let fx0: f64 = tx - px;
+    let fy0: f64 = ty - py;
+    let fz0: f64 = tz - pz;
+    let finv: f64 = 1.0 / sqrt(fx0 * fx0 + fy0 * fy0 + fz0 * fz0);
+    let f_x: f64 = fx0 * finv;
+    let f_y: f64 = fy0 * finv;
+    let f_z: f64 = fz0 * finv;
+    let rinv: f64 = 1.0 / sqrt(f_y * f_y + f_x * f_x);
+    let r_x: f64 = f_y * rinv;
+    let r_y: f64 = -f_x * rinv;
+    let u_x: f64 = r_y * f_z;
+    let u_y: f64 = -r_x * f_z;
+    let u_z: f64 = r_x * f_y - r_y * f_x;
+    b[0] = r_x;
+    b[1] = r_y;
+    b[2] = 0.0;
+    b[3] = u_x;
+    b[4] = u_y;
+    b[5] = u_z;
+    b[6] = f_x;
+    b[7] = f_y;
+    b[8] = f_z;
+}
+
+fn project_pt(
+    wx: f64, wy: f64, wz: f64,
+    cx: f64, cy: f64, cz: f64,
+    b: &Vec<f64>, fl: f64, out3: &mut Vec<f64>,
+) {
+    let dx: f64 = wx - cx;
+    let dy: f64 = wy - cy;
+    let dz: f64 = wz - cz;
+    let xc: f64 = b[0] * dx + b[1] * dy + b[2] * dz;
+    let yc: f64 = -(b[3] * dx + b[4] * dy + b[5] * dz);
+    let zc: f64 = b[6] * dx + b[7] * dy + b[8] * dz;
+    out3[0] = fl * (xc / zc) + 640.0;
+    out3[1] = fl * (yc / zc) + 360.0;
+    out3[2] = zc;
+}
+
+fn main() ~ Console + Clock {
+    let n_anchor: usize = 12;
+    let n_frames: usize = 240;
+    let two_pi: f64 = 6.283185307179586;
+    let fl: f64 = 900.0;
+    let cam_r: f64 = 6.0;
+    let cam_h: f64 = 1.6;
+
+    let mut ax: Vec<f64> = Vec::new();
+    let mut ay: Vec<f64> = Vec::new();
+    let mut az: Vec<f64> = Vec::new();
+    let mut tr_u: Vec<f64> = Vec::new();
+    let mut tr_v: Vec<f64> = Vec::new();
+    let mut alive: Vec<i32> = Vec::new();
+    let mut prev_u: Vec<f64> = Vec::new();
+    let mut prev_v: Vec<f64> = Vec::new();
+    let mut prev_vis: Vec<i32> = Vec::new();
+    let mut mem_x: Vec<f64> = Vec::new();
+    let mut mem_y: Vec<f64> = Vec::new();
+    let mut mem_z: Vec<f64> = Vec::new();
+    let mut stored: Vec<i32> = Vec::new();
+    let mut k: usize = 0;
+    while k < n_anchor {
+        let ang: f64 = (k as f64) * 0.5235987755982988 + 0.3;
+        let rad: f64 = 1.2 + 0.15 * ((k % 4) as f64);
+        ax.push(rad * cos(ang));
+        ay.push(rad * sin(ang));
+        az.push(0.3 + 0.12 * ((k % 5) as f64));
+        tr_u.push(0.0);
+        tr_v.push(0.0);
+        alive.push(0);
+        prev_u.push(0.0);
+        prev_v.push(0.0);
+        prev_vis.push(0);
+        mem_x.push(0.0);
+        mem_y.push(0.0);
+        mem_z.push(0.0);
+        stored.push(0);
+        k = k + 1;
+    }
+
+    let mut basis: Vec<f64> = Vec::new();
+    let mut i: usize = 0;
+    while i < 9 { basis.push(0.0); i = i + 1; }
+    let mut p3: Vec<f64> = Vec::new();
+    let mut q3: Vec<f64> = Vec::new();
+    i = 0;
+    while i < 3 { p3.push(0.0); q3.push(0.0); i = i + 1; }
+
+    let mut base_lost: i32 = 0;
+    let mut mem_reacq: i32 = 0;
+    let mut mem_max_err: f64 = 0.0;
+    let mut mem_final_sum: f64 = 0.0;
+    let mut mem_final_cnt: i32 = 0;
+    let mut vis_obs: i32 = 0;
+    let mut rot_bad: i32 = 0;
+
+    let t0: i64 = clock_ns();
+    let mut t: usize = 0;
+    while t <= n_frames {
+        let th: f64 = two_pi * (t as f64) / (n_frames as f64);
+        let cpx: f64 = cam_r * cos(th);
+        let cpy: f64 = cam_r * sin(th);
+        let ltx: f64 = 3.0 * cos(3.0 * th);
+        let lty: f64 = 3.0 * sin(2.0 * th);
+        camera_basis(cpx, cpy, cam_h, ltx, lty, 0.6, &mut basis);
+        if validate_rotation(&basis) != 0 {
+            rot_bad = rot_bad + 1;
+        }
+
+        k = 0;
+        while k < n_anchor {
+            project_pt(ax[k], ay[k], az[k], cpx, cpy, cam_h, &basis, fl, &mut p3);
+            let u: f64 = p3[0];
+            let v: f64 = p3[1];
+            let z: f64 = p3[2];
+            let in_view: bool = z > 0.1 && u >= 0.0 && u < 1280.0 && v >= 0.0 && v < 720.0;
+            let vis: i32 = if in_view { 1 } else { 0 };
+            if vis == 1 {
+                vis_obs = vis_obs + 1;
+            }
+
+            // Baseline 2D track memory (quarter-pixel truncated flow, no re-identification)
+            if t == 0 {
+                if vis == 1 {
+                    tr_u[k] = u;
+                    tr_v[k] = v;
+                    alive[k] = 1;
+                }
+            } else if alive[k] == 1 {
+                if vis == 1 && prev_vis[k] == 1 {
+                    let du: f64 = u - prev_u[k];
+                    let dv: f64 = v - prev_v[k];
+                    let fu: f64 = (((du * 4.0) as i64) as f64) * 0.25;
+                    let fv: f64 = (((dv * 4.0) as i64) as f64) * 0.25;
+                    tr_u[k] = tr_u[k] + fu;
+                    tr_v[k] = tr_v[k] + fv;
+                } else {
+                    alive[k] = 0;
+                    base_lost = base_lost + 1;
+                }
+            }
+
+            // Persistent 3D anchor memory (back-project once, re-project every pose)
+            if vis == 1 {
+                if stored[k] == 0 {
+                    if validate_depth(z) == 0 {
+                        let xn: f64 = (u - 640.0) / fl;
+                        let yn: f64 = (v - 360.0) / fl;
+                        let dxw: f64 = basis[6] + xn * basis[0] - yn * basis[3];
+                        let dyw: f64 = basis[7] + xn * basis[1] - yn * basis[4];
+                        let dzw: f64 = basis[8] + xn * basis[2] - yn * basis[5];
+                        mem_x[k] = cpx + z * dxw;
+                        mem_y[k] = cpy + z * dyw;
+                        mem_z[k] = cam_h + z * dzw;
+                        stored[k] = 1;
+                    }
+                } else {
+                    project_pt(mem_x[k], mem_y[k], mem_z[k], cpx, cpy, cam_h, &basis, fl, &mut q3);
+                    let eu: f64 = q3[0] - u;
+                    let ev: f64 = q3[1] - v;
+                    let err: f64 = sqrt(eu * eu + ev * ev);
+                    if err > mem_max_err {
+                        mem_max_err = err;
+                    }
+                    if prev_vis[k] == 0 {
+                        mem_reacq = mem_reacq + 1;
+                    }
+                    if t == n_frames {
+                        mem_final_sum = mem_final_sum + err;
+                        mem_final_cnt = mem_final_cnt + 1;
+                    }
+                }
+            }
+
+            prev_u[k] = u;
+            prev_v[k] = v;
+            prev_vis[k] = vis;
+            k = k + 1;
+        }
+        t = t + 1;
+    }
+    let elapsed_ns: i64 = clock_ns() - t0;
+
+    let mut base_survivors: i32 = 0;
+    let mut base_drift_sum: f64 = 0.0;
+    let mut base_drift_max: f64 = 0.0;
+    let mut mem_retained: i32 = 0;
+    k = 0;
+    while k < n_anchor {
+        if alive[k] == 1 {
+            base_survivors = base_survivors + 1;
+            let eu: f64 = tr_u[k] - prev_u[k];
+            let ev: f64 = tr_v[k] - prev_v[k];
+            let d: f64 = sqrt(eu * eu + ev * ev);
+            base_drift_sum = base_drift_sum + d;
+            if d > base_drift_max {
+                base_drift_max = d;
+            }
+        }
+        if stored[k] == 1 {
+            mem_retained = mem_retained + 1;
+        }
+        k = k + 1;
+    }
+    let base_mean_drift: f64 = if base_survivors > 0 {
+        base_drift_sum / (base_survivors as f64)
+    } else {
+        0.0
+    };
+    let mem_final_mean: f64 = if mem_final_cnt > 0 {
+        mem_final_sum / (mem_final_cnt as f64)
+    } else {
+        0.0
+    };
+
+    // Planted Fail-Closed Controls (2/2):
+    // Control 1: Non-orthonormal rotation (right axis scaled by 1.05) -> -451
+    let mut bad_basis: Vec<f64> = Vec::new();
+    i = 0;
+    while i < 9 {
+        bad_basis.push(basis[i]);
+        i = i + 1;
+    }
+    bad_basis[0] = bad_basis[0] * 1.05;
+    bad_basis[1] = bad_basis[1] * 1.05;
+    let ctrl1_rot_caught: bool = validate_rotation(&bad_basis) == -451;
+    // Control 2: Negative back-projection depth (z = -0.5 m) -> -452
+    let ctrl2_depth_caught: bool = validate_depth(-0.5) == -452;
+
+    let mut failures: i32 = 0;
+    if rot_bad != 0 || mem_retained != 12 || mem_max_err > 1.0e-9 {
+        failures = failures + 1;
+    }
+    if base_survivors >= mem_retained && base_mean_drift <= 1.0 {
+        failures = failures + 1;
+    }
+    if !ctrl1_rot_caught || !ctrl2_depth_caught {
+        failures = failures + 1;
+    }
+
+    println!(
+        "CS045_BASE survivors={} lost={} final_mean_drift_px={:.12} final_max_drift_px={:.12}",
+        base_survivors, base_lost, base_mean_drift, base_drift_max
+    );
+    println!(
+        "CS045_MEM retained={} reacq={} max_reproj_err_px={:.12} final_mean_err_px={:.12}",
+        mem_retained, mem_reacq, mem_max_err, mem_final_mean
+    );
+    println!("CS045_STATS frames={} vis_obs={} rot_bad={}", n_frames + 1, vis_obs, rot_bad);
+    println!(
+        "CS045_CONTROLS ctrl1_rotation={} ctrl2_depth={} elapsed_ns={} failures={}",
+        ctrl1_rot_caught, ctrl2_depth_caught, elapsed_ns, failures
+    );
+}

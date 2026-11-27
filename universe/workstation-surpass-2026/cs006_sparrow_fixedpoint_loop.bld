@@ -1,0 +1,425 @@
+// SPDX-FileCopyrightText: 2026 Zain Dana Harper
+// SPDX-License-Identifier: MIT
+//
+// Wave 111E (CS-006; A12, F1, N50, N53):
+// Sparrow Fixed-Point Recurrent Optimizer with Live Contraction-Residual Assertions
+//   - Contraction-bounded K=24 looped fixed-point layer z_{k+1} = (1-a)*z_k + a*tanh(W_c*z_k + U*x + b)
+//   - Strict row-l1 projection sum_j |W_c[i,j]| <= rho_cap = 0.72 => Banach Lipschitz L <= 0.762 < 1.0
+//   - O(1)-depth-memory Sparrow Neumann implicit adjoint gradient (24.0x activation memory cut vs BPTT)
+//   - Live contraction-residual assertions + 2 in-binary fail-closed controls (non-contractive blowup + NaN)
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { return -x; }
+    x
+}
+
+fn is_nan_f64(x: f64) -> bool {
+    !(x == x)
+}
+
+fn tanh_f64(x: f64) -> f64 {
+    if x > 20.0 { return 1.0; }
+    if x < -20.0 { return -1.0; }
+    let e2: f64 = exp(2.0 * x);
+    (e2 - 1.0) / (e2 + 1.0)
+}
+
+fn det_w(tag: i64, r: usize, c: usize) -> f64 {
+    let a: f64 = ((tag * 131 + (r as i64) * 37 + (c as i64) * 19 + 7) as f64) * 0.3719;
+    let b: f64 = ((tag * 73 + (r as i64) * 53 + (c as i64) * 29 + 11) as f64) * 0.6193;
+    0.26 * sin(a) + 0.16 * cos(b)
+}
+
+// Project every row of W [d x d] onto the l1-ball of radius rho_cap; returns max post-proj row l1 norm.
+fn project_row_l1(mat_w: &mut Vec<f64>, d: usize, rho_cap: f64) -> f64 {
+    let mut max_l1: f64 = 0.0;
+    let mut i: usize = 0;
+    while i < d {
+        let mut s: f64 = 0.0;
+        let mut j: usize = 0;
+        while j < d { s = s + abs_f64(mat_w[i * d + j]); j = j + 1; }
+        if s > rho_cap {
+            let sc: f64 = rho_cap / s;
+            j = 0;
+            while j < d { mat_w[i * d + j] = mat_w[i * d + j] * sc; j = j + 1; }
+            s = rho_cap;
+        }
+        if s > max_l1 { max_l1 = s; }
+        i = i + 1;
+    }
+    max_l1
+}
+
+// Solve K-step looped fixed point z_{k+1} = (1-alpha)*z_k + alpha*tanh(W*z_k + u_in)
+// with live Banach contraction-residual assertions.
+// Writes converged z* into z_cur [d], tanh'(pre) into dact_out [d],
+// and [r_first, r_final, max_emp_L] into res_out [3].
+// Returns 0 if contraction & convergence assertions pass, -601 if non-contractive, -602 if NaN/unconverged.
+fn solve_fixed_point_k(
+    mat_w: &Vec<f64>,
+    u_in: &Vec<f64>,
+    d: usize,
+    k_depth: usize,
+    alpha: f64,
+    lip_bound: f64,
+    tol_final: f64,
+    z_cur: &mut Vec<f64>,
+    z_nxt: &mut Vec<f64>,
+    dact_out: &mut Vec<f64>,
+    res_out: &mut Vec<f64>,
+) -> i32 {
+    let mut i: usize = 0;
+    while i < d { z_cur[i] = 0.0; i = i + 1; }
+
+    let mut r_first: f64 = 0.0;
+    let mut r_prev: f64 = 0.0;
+    let mut r_final: f64 = 0.0;
+    let mut max_emp_l: f64 = 0.0;
+    let mut non_contract: bool = false;
+
+    let mut k: usize = 0;
+    while k < k_depth {
+        let mut r_inf: f64 = 0.0;
+        i = 0;
+        while i < d {
+            let mut acc: f64 = u_in[i];
+            let mut j: usize = 0;
+            while j < d { acc = acc + mat_w[i * d + j] * z_cur[j]; j = j + 1; }
+            let th: f64 = tanh_f64(acc);
+            let nv: f64 = (1.0 - alpha) * z_cur[i] + alpha * th;
+            if is_nan_f64(nv) {
+                res_out[0] = r_first; res_out[1] = 1.0e9; res_out[2] = 1.0e9;
+                return -602;
+            }
+            z_nxt[i] = nv;
+            dact_out[i] = 1.0 - th * th;
+            let df: f64 = abs_f64(nv - z_cur[i]);
+            if df > r_inf { r_inf = df; }
+            i = i + 1;
+        }
+        i = 0;
+        while i < d { z_cur[i] = z_nxt[i]; i = i + 1; }
+
+        if k == 0 {
+            r_first = r_inf;
+        } else if r_prev > 1.0e-12 {
+            let q: f64 = r_inf / r_prev;
+            if q > max_emp_l { max_emp_l = q; }
+            if q > lip_bound + 1.0e-6 { non_contract = true; }
+        }
+        r_prev = r_inf;
+        r_final = r_inf;
+        k = k + 1;
+    }
+
+    res_out[0] = r_first;
+    res_out[1] = r_final;
+    res_out[2] = max_emp_l;
+    if non_contract { return -601; }
+    if r_final > tol_final { return -602; }
+    0
+}
+
+// Compute Sparrow O(1)-depth-memory implicit adjoint gradients on batch (X, Y_tgt).
+// Uses J=12 constant-memory Neumann adjoint iterations at equilibrium z* instead of K=24 BPTT tape.
+// Returns batch MSE loss (or -1.0 on assertion failure).
+fn sparrow_step_grad(
+    mat_w: &Vec<f64>,
+    mat_u: &Vec<f64>,
+    x_batch: &Vec<f64>,
+    y_tgt: &Vec<f64>,
+    d: usize,
+    b_sz: usize,
+    k_depth: usize,
+    j_adj: usize,
+    alpha: f64,
+    lip_bound: f64,
+    tol_final: f64,
+    grad_w: &mut Vec<f64>,
+    grad_u: &mut Vec<f64>,
+    u_in: &mut Vec<f64>,
+    z_cur: &mut Vec<f64>,
+    z_nxt: &mut Vec<f64>,
+    dact: &mut Vec<f64>,
+    v_adj: &mut Vec<f64>,
+    v_nxt: &mut Vec<f64>,
+    res_box: &mut Vec<f64>,
+    max_res_box: &mut Vec<f64>,
+) -> f64 {
+    let mut idx: usize = 0;
+    while idx < d * d { grad_w[idx] = 0.0; grad_u[idx] = 0.0; idx = idx + 1; }
+
+    let inv_bd: f64 = 1.0 / ((b_sz * d) as f64);
+    let g_coeff: f64 = 2.0 * inv_bd;
+    let mut mse_sum: f64 = 0.0;
+
+    let mut n: usize = 0;
+    while n < b_sz {
+        let off: usize = n * d;
+        let mut i: usize = 0;
+        while i < d {
+            let mut acc: f64 = 0.0;
+            let mut j: usize = 0;
+            while j < d { acc = acc + mat_u[i * d + j] * x_batch[off + j]; j = j + 1; }
+            u_in[i] = acc;
+            i = i + 1;
+        }
+        let st: i32 = solve_fixed_point_k(
+            mat_w, u_in, d, k_depth, alpha, lip_bound, tol_final,
+            z_cur, z_nxt, dact, res_box,
+        );
+        if st != 0 { return -1.0; }
+        if res_box[1] > max_res_box[0] { max_res_box[0] = res_box[1]; }
+        if res_box[2] > max_res_box[1] { max_res_box[1] = res_box[2]; }
+
+        // Output gradient dz = dL / dz*
+        i = 0;
+        while i < d {
+            let err: f64 = z_cur[i] - y_tgt[off + i];
+            mse_sum = mse_sum + err * err;
+            v_adj[i] = g_coeff * err;
+            i = i + 1;
+        }
+        // Solve implicit adjoint fixed point v = (dF/dz)^T v + dz via J=12 Neumann iterations:
+        // (dF/dz)_{p,q} = (1-alpha)*delta_{pq} + alpha * dact[p] * W[p,q]
+        let mut dz_save: Vec<f64> = Vec::new();
+        i = 0;
+        while i < d { dz_save.push(v_adj[i]); i = i + 1; }
+        let mut it: usize = 0;
+        while it < j_adj {
+            i = 0;
+            while i < d {
+                let mut wt_v: f64 = 0.0;
+                let mut p: usize = 0;
+                while p < d {
+                    wt_v = wt_v + mat_w[p * d + i] * (dact[p] * v_adj[p]);
+                    p = p + 1;
+                }
+                v_nxt[i] = (1.0 - alpha) * v_adj[i] + alpha * wt_v + dz_save[i];
+                i = i + 1;
+            }
+            i = 0;
+            while i < d { v_adj[i] = v_nxt[i]; i = i + 1; }
+            it = it + 1;
+        }
+        // Parameter gradients at z*: dL/dW[i,j] += alpha * dact[i] * v[i] * z*[j]
+        i = 0;
+        while i < d {
+            let fac: f64 = alpha * dact[i] * v_adj[i];
+            let mut j: usize = 0;
+            while j < d {
+                grad_w[i * d + j] = grad_w[i * d + j] + fac * z_cur[j];
+                grad_u[i * d + j] = grad_u[i * d + j] + fac * x_batch[off + j];
+                j = j + 1;
+            }
+            i = i + 1;
+        }
+        n = n + 1;
+    }
+    mse_sum * inv_bd
+}
+
+fn main() ~ Console + Clock {
+    let d: usize = 16;
+    let b_sz: usize = 8;
+    let k_depth: usize = 24;
+    let j_adj: usize = 12;
+    let n_opt: usize = 25;
+    let alpha: f64 = 0.85;
+    let rho_cap: f64 = 0.72;
+    let lip_bound: f64 = (1.0 - alpha) + alpha * rho_cap;
+    let tol_final: f64 = 1.0e-4;
+    let lr: f64 = 0.008;
+    let beta1: f64 = 0.9;
+    let beta2: f64 = 0.999;
+    let eps: f64 = 1.0e-5;
+
+    // 1. Construct contraction-bounded teacher (W_true, U_true) and batch (X, Y_tgt)
+    let mut w_true: Vec<f64> = Vec::new();
+    let mut u_true: Vec<f64> = Vec::new();
+    let mut mat_w: Vec<f64> = Vec::new();
+    let mut mat_u: Vec<f64> = Vec::new();
+    let mut i: usize = 0;
+    while i < d {
+        let mut j: usize = 0;
+        while j < d {
+            w_true.push(0.20 * det_w(11, i, j));
+            u_true.push(0.45 * det_w(19, i, j));
+            mat_w.push(0.15 * det_w(31, i, j));
+            mat_u.push(0.25 * det_w(43, i, j));
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    let _p_tr: f64 = project_row_l1(&mut w_true, d, rho_cap);
+    let _p_in: f64 = project_row_l1(&mut mat_w, d, rho_cap);
+
+    let mut x_batch: Vec<f64> = Vec::new();
+    let mut y_tgt: Vec<f64> = Vec::new();
+    let mut u_in: Vec<f64> = Vec::new();
+    let mut z_cur: Vec<f64> = Vec::new();
+    let mut z_nxt: Vec<f64> = Vec::new();
+    let mut dact: Vec<f64> = Vec::new();
+    let mut v_adj: Vec<f64> = Vec::new();
+    let mut v_nxt: Vec<f64> = Vec::new();
+    let mut res_box: Vec<f64> = Vec::new();
+    i = 0;
+    while i < d {
+        u_in.push(0.0); z_cur.push(0.0); z_nxt.push(0.0);
+        dact.push(0.0); v_adj.push(0.0); v_nxt.push(0.0);
+        i = i + 1;
+    }
+    res_box.push(0.0); res_box.push(0.0); res_box.push(0.0);
+
+    let mut n: usize = 0;
+    while n < b_sz {
+        let mut j: usize = 0;
+        while j < d { x_batch.push(0.85 * det_w(61, n, j)); j = j + 1; }
+        i = 0;
+        while i < d {
+            let mut acc: f64 = 0.0;
+            j = 0;
+            while j < d { acc = acc + u_true[i * d + j] * x_batch[n * d + j]; j = j + 1; }
+            u_in[i] = acc;
+            i = i + 1;
+        }
+        let _st_t: i32 = solve_fixed_point_k(
+            &w_true, &u_in, d, k_depth, alpha, lip_bound, tol_final,
+            &mut z_cur, &mut z_nxt, &mut dact, &mut res_box,
+        );
+        i = 0;
+        while i < d { y_tgt.push(z_cur[i]); i = i + 1; }
+        n = n + 1;
+    }
+
+    let mut grad_w: Vec<f64> = Vec::new();
+    let mut grad_u: Vec<f64> = Vec::new();
+    let mut m_w: Vec<f64> = Vec::new();
+    let mut v_w: Vec<f64> = Vec::new();
+    let mut m_u: Vec<f64> = Vec::new();
+    let mut v_u: Vec<f64> = Vec::new();
+    i = 0;
+    while i < d * d {
+        grad_w.push(0.0); grad_u.push(0.0);
+        m_w.push(0.0); v_w.push(0.0); m_u.push(0.0); v_u.push(0.0);
+        i = i + 1;
+    }
+
+    let mut max_res_box: Vec<f64> = Vec::new();
+    max_res_box.push(0.0); max_res_box.push(0.0);
+
+    // 2. Timed 25-Step Sparrow Fixed-Point Optimization Loop with Contraction Re-Projection
+    let t0: i64 = clock_ns();
+    let mut init_loss: f64 = 0.0;
+    let mut prev_loss: f64 = 1.0e9;
+    let mut monotone_drops: usize = 0;
+    let mut max_row_l1_seen: f64 = 0.0;
+    let mut assert_fails: i32 = 0;
+
+    let mut step: usize = 0;
+    while step < n_opt {
+        let loss: f64 = sparrow_step_grad(
+            &mat_w, &mat_u, &x_batch, &y_tgt, d, b_sz, k_depth, j_adj,
+            alpha, lip_bound, tol_final, &mut grad_w, &mut grad_u,
+            &mut u_in, &mut z_cur, &mut z_nxt, &mut dact, &mut v_adj, &mut v_nxt,
+            &mut res_box, &mut max_res_box,
+        );
+        if loss < 0.0 { assert_fails = assert_fails + 1; }
+        if step == 0 {
+            init_loss = loss;
+        } else if loss < prev_loss {
+            monotone_drops = monotone_drops + 1;
+        }
+        prev_loss = loss;
+
+        let mut b1p: f64 = 1.0;
+        let mut b2p: f64 = 1.0;
+        let mut t_i: usize = 0;
+        while t_i <= step { b1p = b1p * beta1; b2p = b2p * beta2; t_i = t_i + 1; }
+        let ib1: f64 = 1.0 / (1.0 - b1p);
+        let ib2: f64 = 1.0 / (1.0 - b2p);
+
+        i = 0;
+        while i < d * d {
+            let gw: f64 = grad_w[i];
+            let gu: f64 = grad_u[i];
+            m_w[i] = beta1 * m_w[i] + (1.0 - beta1) * gw;
+            v_w[i] = beta2 * v_w[i] + (1.0 - beta2) * gw * gw;
+            mat_w[i] = mat_w[i] - lr * (m_w[i] * ib1) / (sqrt(v_w[i] * ib2) + eps);
+            m_u[i] = beta1 * m_u[i] + (1.0 - beta1) * gu;
+            v_u[i] = beta2 * v_u[i] + (1.0 - beta2) * gu * gu;
+            mat_u[i] = mat_u[i] - lr * (m_u[i] * ib1) / (sqrt(v_u[i] * ib2) + eps);
+            i = i + 1;
+        }
+        let rl1: f64 = project_row_l1(&mut mat_w, d, rho_cap);
+        if rl1 > max_row_l1_seen { max_row_l1_seen = rl1; }
+        step = step + 1;
+    }
+    let final_loss: f64 = sparrow_step_grad(
+        &mat_w, &mat_u, &x_batch, &y_tgt, d, b_sz, k_depth, j_adj,
+        alpha, lip_bound, tol_final, &mut grad_w, &mut grad_u,
+        &mut u_in, &mut z_cur, &mut z_nxt, &mut dact, &mut v_adj, &mut v_nxt,
+        &mut res_box, &mut max_res_box,
+    );
+    if final_loss < prev_loss { monotone_drops = monotone_drops + 1; }
+    let elapsed_ns: i64 = clock_ns() - t0;
+
+    let loss_cut_ratio: f64 = init_loss / (final_loss + 1.0e-15);
+    let max_fp_residual: f64 = max_res_box[0];
+    let max_emp_lip: f64 = max_res_box[1];
+
+    // 3. Planted Fail-Closed Controls (2 in-binary + forged cert in Python oracle)
+    // Control 1: Bypass contraction projection (W_bad with row l1 = 2.6 > 1.0) -> caught -601
+    let mut w_bad: Vec<f64> = Vec::new();
+    i = 0;
+    while i < d {
+        let mut j: usize = 0;
+        while j < d {
+            w_bad.push(if i == j { -2.6 } else { 0.0 });
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    i = 0;
+    while i < d { u_in[i] = 0.05; i = i + 1; }
+    let st_blowup: i32 = solve_fixed_point_k(
+        &w_bad, &u_in, d, k_depth, alpha, lip_bound, tol_final,
+        &mut z_cur, &mut z_nxt, &mut dact, &mut res_box,
+    );
+    let ctrl1_non_contractive: bool = (st_blowup == -601) || (st_blowup == -602);
+    let blowup_emp_lip: f64 = res_box[2];
+
+    // Control 2: Planted NaN input injection -> caught fail-closed (-602)
+    let zv: f64 = 0.0;
+    u_in[0] = zv / zv;
+    let st_nan: i32 = solve_fixed_point_k(
+        &mat_w, &u_in, d, k_depth, alpha, lip_bound, tol_final,
+        &mut z_cur, &mut z_nxt, &mut dact, &mut res_box,
+    );
+    let ctrl2_nan_residual: bool = st_nan == -602;
+
+    let mut failures: i32 = 0;
+    if assert_fails != 0 || monotone_drops != n_opt || loss_cut_ratio < 5.0 { failures = failures + 1; }
+    if max_fp_residual > tol_final || max_emp_lip > lip_bound + 1.0e-6 || max_row_l1_seen > rho_cap + 1.0e-12 {
+        failures = failures + 1;
+    }
+    if !ctrl1_non_contractive || !ctrl2_nan_residual { failures = failures + 1; }
+
+    println!(
+        "METRIC d={} b_sz={} k_depth={} n_opt={} mem_cut_vs_bptt_x={:.1}",
+        d, b_sz, k_depth, n_opt, k_depth as f64
+    );
+    println!(
+        "METRIC init_loss={:.15} final_loss={:.15} loss_cut_ratio={:.12} monotone_drops={}",
+        init_loss, final_loss, loss_cut_ratio, monotone_drops
+    );
+    println!(
+        "METRIC max_fp_residual={:.15} max_emp_lip={:.12} lip_bound={:.12} max_row_l1={:.12}",
+        max_fp_residual, max_emp_lip, lip_bound, max_row_l1_seen
+    );
+    println!(
+        "METRIC ctrl1_non_contractive={} blowup_emp_lip={:.6} ctrl2_nan_residual={} elapsed_ns={}",
+        ctrl1_non_contractive, blowup_emp_lip, ctrl2_nan_residual, elapsed_ns
+    );
+    println!("SUMMARY failures={}", failures);
+}
