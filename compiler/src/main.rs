@@ -16,6 +16,7 @@ mod gpu;
 // SHA-256, so it is ALWAYS compiled (even without the `gpu` feature) so
 // `receipt verify` works on a gpu receipt in the default build.
 mod build_hash_cli;
+mod check_dir_cli;
 mod gpu_receipt;
 mod lsp_dispatch;
 mod mcp;
@@ -248,6 +249,25 @@ enum Commands {
         /// stdout (schema buildlang.diagnostics/v1)
         #[arg(long, value_name = "FORMAT", default_value = "human", value_parser = ["human", "json"])]
         error_format: String,
+    },
+
+    /// Check every .bld file under a directory in parallel
+    #[command(name = "check-dir")]
+    CheckDir {
+        /// Root directory containing .bld files to check
+        dir: PathBuf,
+
+        /// Number of parallel worker threads (defaults to available parallelism)
+        #[arg(short = 'j', long, value_name = "N")]
+        jobs: Option<usize>,
+
+        /// Emit a deterministic machine-readable JSON summary to stdout
+        #[arg(long)]
+        json: bool,
+
+        /// Compare failures against an expected-failure list (CHECK-FAILS.txt format)
+        #[arg(long, value_name = "FILE")]
+        fail_list: Option<PathBuf>,
     },
 
     /// Explain a diagnostic code such as BL0301, or list every code
@@ -885,6 +905,12 @@ fn run_cli(cli: Cli) -> Result<(), i32> {
             expect_profile_digest.as_deref(),
             error_format == "json",
         ),
+        Some(Commands::CheckDir {
+            dir,
+            jobs,
+            json,
+            fail_list,
+        }) => check_dir_cli::cmd_check_dir(&dir, jobs, json, fail_list.as_deref()),
         Some(Commands::Explain { code }) => cmd_explain(code.as_deref()),
         Some(Commands::Build {
             path,
