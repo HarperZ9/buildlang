@@ -1,0 +1,492 @@
+// SPDX-FileCopyrightText: 2026 Zain Dana Harper
+// SPDX-License-Identifier: MIT
+//
+// Wave 104D (Slice 19: F1/AC1/N11/N49/N53): Pure-BuildLang Zero-C BuildOS-Core
+// Capability-Gated Zero-Copy IPC Ring + Content-Addressed Merkle VFS
+// (buildos_ipc_vfs_zeroc.bld). Compiled with ZERO C compiler, ZERO Rust, ZERO linker
+// across ALL FIVE zero-C targets (x64-pe, x64-elf, rv64-elf, aarch64-elf, wasm).
+//
+// Modes:
+//   0 = Clean 4-block zero-copy IPC transfer + RFC 6962 Merkle VFS commit (status=1)
+//   1 = Planted attack (a): Unauthorized sender missing CAP_IPC_SEND -> status=-101
+//   2 = Planted attack (b): Double-send use-after-transfer ownership fault -> status=-201
+//   3 = Planted attack (c): 1-bit silent block corruption on SHA-256 read -> status=-301
+//   4 = Planted attack (d): Ring-buffer sequence replay / slot forgery -> status=-401
+
+fn rotr32(x: i64, n: i64) -> i64 {
+    return ((x >> n) | (x << (32 - n))) & 4294967295;
+}
+
+fn sha256_iv(i: i64) -> i64 {
+    if i == 0 { return 1779033703; }
+    else if i == 1 { return 3144134277; }
+    else if i == 2 { return 1013904242; }
+    else if i == 3 { return 2773480762; }
+    else if i == 4 { return 1359893119; }
+    else if i == 5 { return 2600822924; }
+    else if i == 6 { return 528734635; }
+    else if i == 7 { return 1541459225; }
+    return 0;
+}
+
+fn sha256_k(r: i64) -> i64 {
+    if r == 0 { return 1116352408; }
+    else if r == 1 { return 1899447441; }
+    else if r == 2 { return 3049323471; }
+    else if r == 3 { return 3921009573; }
+    else if r == 4 { return 961987163; }
+    else if r == 5 { return 1508970993; }
+    else if r == 6 { return 2453635748; }
+    else if r == 7 { return 2870763221; }
+    else if r == 8 { return 3624381080; }
+    else if r == 9 { return 310598401; }
+    else if r == 10 { return 607225278; }
+    else if r == 11 { return 1426881987; }
+    else if r == 12 { return 1925078388; }
+    else if r == 13 { return 2162078206; }
+    else if r == 14 { return 2614888103; }
+    else if r == 15 { return 3248222580; }
+    else if r == 16 { return 3835390401; }
+    else if r == 17 { return 4022224774; }
+    else if r == 18 { return 264347078; }
+    else if r == 19 { return 604807628; }
+    else if r == 20 { return 770255983; }
+    else if r == 21 { return 1249150122; }
+    else if r == 22 { return 1555081692; }
+    else if r == 23 { return 1996064986; }
+    else if r == 24 { return 2554220882; }
+    else if r == 25 { return 2821834349; }
+    else if r == 26 { return 2952996808; }
+    else if r == 27 { return 3210313671; }
+    else if r == 28 { return 3336571891; }
+    else if r == 29 { return 3584528711; }
+    else if r == 30 { return 113926993; }
+    else if r == 31 { return 338241895; }
+    else if r == 32 { return 666307205; }
+    else if r == 33 { return 773529912; }
+    else if r == 34 { return 1294757372; }
+    else if r == 35 { return 1396182291; }
+    else if r == 36 { return 1695183700; }
+    else if r == 37 { return 1986661051; }
+    else if r == 38 { return 2177026350; }
+    else if r == 39 { return 2456956037; }
+    else if r == 40 { return 2730485921; }
+    else if r == 41 { return 2820302411; }
+    else if r == 42 { return 3259730800; }
+    else if r == 43 { return 3345764771; }
+    else if r == 44 { return 3516065817; }
+    else if r == 45 { return 3600352804; }
+    else if r == 46 { return 4094571909; }
+    else if r == 47 { return 275423344; }
+    else if r == 48 { return 430227734; }
+    else if r == 49 { return 506948616; }
+    else if r == 50 { return 659060556; }
+    else if r == 51 { return 883997877; }
+    else if r == 52 { return 958139571; }
+    else if r == 53 { return 1322822218; }
+    else if r == 54 { return 1537002063; }
+    else if r == 55 { return 1747873779; }
+    else if r == 56 { return 1955562222; }
+    else if r == 57 { return 2024104815; }
+    else if r == 58 { return 2227730452; }
+    else if r == 59 { return 2361852424; }
+    else if r == 60 { return 2428436474; }
+    else if r == 61 { return 2756734187; }
+    else if r == 62 { return 3204031479; }
+    else if r == 63 { return 3329325298; }
+    return 0;
+}
+
+fn vfs_blk_w(idx: i64) -> i64 {
+    if idx == 0 { return 1112885580; }
+    else if idx == 1 { return 1146049325; }
+    else if idx == 2 { return 1447449389; }
+    else if idx == 3 { return 1112296240; }
+    else if idx == 4 { return 760436048; }
+    else if idx == 5 { return 1163018828; }
+    else if idx == 6 { return 1329810221; }
+    else if idx == 7 { return 1397508419; }
+    else if idx == 8 { return 1160853805; }
+    else if idx == 9 { return 1229802837; }
+    else if idx == 10 { return 1413562956; }
+    else if idx == 11 { return 1160594255; }
+    else if idx == 12 { return 1314145614; }
+    else if idx == 13 { return 1412251972; }
+    else if idx == 14 { return 1146236239; }
+    else if idx == 15 { return 1260453888; }
+    else if idx == 16 { return 1112885580; }
+    else if idx == 17 { return 1146049325; }
+    else if idx == 18 { return 1447449389; }
+    else if idx == 19 { return 1112296241; }
+    else if idx == 20 { return 759778895; }
+    else if idx == 21 { return 1145384269; }
+    else if idx == 22 { return 1163149613; }
+    else if idx == 23 { return 1397508419; }
+    else if idx == 24 { return 1160853805; }
+    else if idx == 25 { return 1514492495; }
+    else if idx == 26 { return 759385936; }
+    else if idx == 27 { return 1496140873; }
+    else if idx == 28 { return 1313161554; }
+    else if idx == 29 { return 760174414; }
+    else if idx == 30 { return 1162095951; }
+    else if idx == 31 { return 1260453888; }
+    else if idx == 32 { return 1112885580; }
+    else if idx == 33 { return 1146049325; }
+    else if idx == 34 { return 1447449389; }
+    else if idx == 35 { return 1112296242; }
+    else if idx == 36 { return 759256388; }
+    else if idx == 37 { return 1230253388; }
+    else if idx == 38 { return 1330064685; }
+    else if idx == 39 { return 1397508419; }
+    else if idx == 40 { return 1160853805; }
+    else if idx == 41 { return 1380336438; }
+    else if idx == 42 { return 959853101; }
+    else if idx == 43 { return 1296388683; }
+    else if idx == 44 { return 1279602006; }
+    else if idx == 45 { return 1163020614; }
+    else if idx == 46 { return 1229276193; }
+    else if idx == 47 { return 0; }
+    else if idx == 48 { return 1112885580; }
+    else if idx == 49 { return 1146049325; }
+    else if idx == 50 { return 1447449389; }
+    else if idx == 51 { return 1112296243; }
+    else if idx == 52 { return 760366403; }
+    else if idx == 53 { return 1162432596; }
+    else if idx == 54 { return 759448109; }
+    else if idx == 55 { return 1397508419; }
+    else if idx == 56 { return 1160853805; }
+    else if idx == 57 { return 1112885580; }
+    else if idx == 58 { return 1145848142; }
+    else if idx == 59 { return 1194154565; }
+    else if idx == 60 { return 1380920643; }
+    else if idx == 61 { return 758459721; }
+    else if idx == 62 { return 1396780367; }
+    else if idx == 63 { return 1260453888; }
+    return 0;
+}
+
+fn exp_cid_w(idx: i64) -> i64 {
+    if idx == 0 { return 1890118306; }
+    else if idx == 1 { return 3380560364; }
+    else if idx == 2 { return 2598591431; }
+    else if idx == 3 { return 3830076901; }
+    else if idx == 4 { return 1532263583; }
+    else if idx == 5 { return 2595480207; }
+    else if idx == 6 { return 2055366590; }
+    else if idx == 7 { return 1445915315; }
+    else if idx == 8 { return 4148803545; }
+    else if idx == 9 { return 1003484623; }
+    else if idx == 10 { return 218084580; }
+    else if idx == 11 { return 568509128; }
+    else if idx == 12 { return 226419305; }
+    else if idx == 13 { return 3841414217; }
+    else if idx == 14 { return 2648364673; }
+    else if idx == 15 { return 1384308700; }
+    else if idx == 16 { return 1004306276; }
+    else if idx == 17 { return 3140107813; }
+    else if idx == 18 { return 2071684160; }
+    else if idx == 19 { return 2973881930; }
+    else if idx == 20 { return 3974908402; }
+    else if idx == 21 { return 1196945410; }
+    else if idx == 22 { return 3268766448; }
+    else if idx == 23 { return 865007335; }
+    else if idx == 24 { return 1659099844; }
+    else if idx == 25 { return 3270323579; }
+    else if idx == 26 { return 353357639; }
+    else if idx == 27 { return 4132862664; }
+    else if idx == 28 { return 2295238228; }
+    else if idx == 29 { return 979541825; }
+    else if idx == 30 { return 3605909344; }
+    else if idx == 31 { return 4283055141; }
+    return 0;
+}
+
+fn exp_root_w(i: i64) -> i64 {
+    if i == 0 { return 1422357189; }
+    else if i == 1 { return 2641503083; }
+    else if i == 2 { return 3003996700; }
+    else if i == 3 { return 767831677; }
+    else if i == 4 { return 1392126753; }
+    else if i == 5 { return 3324223450; }
+    else if i == 6 { return 2135489297; }
+    else if i == 7 { return 3512736780; }
+    return 0;
+}
+fn ipc_vfs_run(mode: i64) -> i64 ~ Console {
+    let m32: i64 = 4294967295;
+    // Compact stack arrays (~1,152 B + ~200 B scalars < 1,400 B < 2,048 B RV64 frame limit)
+    let mut w: [i64; 64] = [0; 64];
+    let mut hv: [i64; 8] = [0; 8];
+    let mut owner: [i64; 4] = [0; 4];     // linear page owner: 0=Producer, -1=InTransit, 3=VFS
+    let mut ring_blk: [i64; 4] = [0; 4];  // SPSC ring descriptor: page/block ID
+    let mut ring_seq: [i64; 4] = [0; 4];  // SPSC ring monotonic sequence number
+    let mut leaves: [i64; 32] = [0; 32];  // 4 x 8-word RFC 6962 leaf hashes
+    let mut nodes: [i64; 16] = [0; 16];   // 2 x 8-word interior nodes (node01, node23)
+    let mut last_cid: [i64; 8] = [0; 8];  // block 3 content address for telemetry output
+
+    let mut i: i64 = 0; let mut j: i64 = 0; let mut step: i64 = 0;
+    let mut a: i64 = 0; let mut b: i64 = 0; let mut c: i64 = 0; let mut d: i64 = 0;
+    let mut e: i64 = 0; let mut f: i64 = 0; let mut g: i64 = 0; let mut h: i64 = 0;
+    let mut t1: i64 = 0; let mut t2: i64 = 0; let mut s0: i64 = 0; let mut s1: i64 = 0;
+    let mut p0: i64 = 0; let mut p1: i64 = 0; let mut p2: i64 = 0; let mut p3: i64 = 0;
+
+    // Capabilities: CAP_COMPUTE=1, CAP_IPC_SEND=4, CAP_IPC_RECV=8
+    let mut sender_cap: i64 = 5;
+    let recv_cap: i64 = 9;
+    if mode == 1 { sender_cap = 1; } // Planted attack (a): unauthorized sender missing CAP_IPC_SEND
+
+    let mut head: i64 = 0;
+    let mut tail: i64 = 0;
+    let mut expected_seq: i64 = 1;
+
+    // =========================================================================
+    // PHASE 1 & 2: Capability-Gated Zero-Copy SPSC IPC + Content-Addressed Block Ingest
+    // =========================================================================
+    step = 0;
+    while step < 4 {
+        // 1. Producer capability gate
+        if (sender_cap & 4) == 0 || (recv_cap & 8) == 0 {
+            println("{}", -101);
+            println("{}", 0);
+            return -101;
+        }
+
+        // Select block to transfer; planted attack (b): double-send block 0 after transfer!
+        p0 = step;
+        if mode == 2 && step == 2 { p0 = 0; }
+
+        // 2. Linear page-ownership check (zero shared writable alias / anti-use-after-transfer)
+        if owner[p0] != 0 {
+            println("{}", -201);
+            println("{}", 0);
+            return -201;
+        }
+        // Atomically revoke Producer access and place descriptor into SPSC ring slot
+        owner[p0] = -1;
+        p1 = tail & 3;
+        ring_blk[p1] = p0;
+        p2 = step + 1; // monotonic sequence 1..4
+        if mode == 4 && step == 2 { p2 = 1; } // Planted attack (d): sequence replay forgery
+        ring_seq[p1] = p2;
+        tail = tail + 1;
+
+        // 3. Consumer pops SPSC ring slot and verifies strict monotonic sequence
+        if head >= tail {
+            println("{}", -402);
+            println("{}", 0);
+            return -402;
+        }
+        p1 = head & 3;
+        p0 = ring_blk[p1];
+        p2 = ring_seq[p1];
+        head = head + 1;
+        if p2 != expected_seq {
+            println("{}", -401);
+            println("{}", 0);
+            return -401;
+        }
+        expected_seq = expected_seq + 1;
+
+        // Transfer exclusive ownership to VFS Server (Task 3)
+        owner[p0] = 3;
+
+        // 4. Content-addressed SHA-256 verification of the 64-byte block (2 SHA-256 blocks)
+        i = 0; while i < 8 { hv[i] = sha256_iv(i); i = i + 1; }
+        p3 = 0;
+        while p3 < 2 {
+            i = 0; while i < 16 { w[i] = 0; i = i + 1; }
+            if p3 == 0 {
+                i = 0; while i < 16 { w[i] = vfs_blk_w(p0 * 16 + i); i = i + 1; }
+                // Planted attack (c): 1-bit silent disk/block corruption on block 2
+                if mode == 3 && p0 == 2 { w[0] = w[0] ^ 1; }
+            } else {
+                w[0] = 2147483648;
+                w[15] = 512; // 64 * 8 bits
+            }
+            i = 16;
+            while i < 64 {
+                s0 = rotr32(w[i - 15], 7) ^ rotr32(w[i - 15], 18) ^ (w[i - 15] >> 3);
+                s1 = rotr32(w[i - 2], 17) ^ rotr32(w[i - 2], 19) ^ (w[i - 2] >> 10);
+                w[i] = (w[i - 16] + s0 + w[i - 7] + s1) & m32;
+                i = i + 1;
+            }
+            a = hv[0]; b = hv[1]; c = hv[2]; d = hv[3];
+            e = hv[4]; f = hv[5]; g = hv[6]; h = hv[7];
+            i = 0;
+            while i < 64 {
+                s1 = rotr32(e, 6) ^ rotr32(e, 11) ^ rotr32(e, 25);
+                t1 = (h + s1 + ((e & f) ^ ((e ^ m32) & g)) + sha256_k(i) + w[i]) & m32;
+                s0 = rotr32(a, 2) ^ rotr32(a, 13) ^ rotr32(a, 22);
+                t2 = (s0 + ((a & b) ^ (a & c) ^ (b & c))) & m32;
+                h = g; g = f; f = e; e = (d + t1) & m32;
+                d = c; c = b; b = a; a = (t1 + t2) & m32;
+                i = i + 1;
+            }
+            hv[0] = (hv[0] + a) & m32; hv[1] = (hv[1] + b) & m32;
+            hv[2] = (hv[2] + c) & m32; hv[3] = (hv[3] + d) & m32;
+            hv[4] = (hv[4] + e) & m32; hv[5] = (hv[5] + f) & m32;
+            hv[6] = (hv[6] + g) & m32; hv[7] = (hv[7] + h) & m32;
+            p3 = p3 + 1;
+        }
+
+        // Verify content address CID == expected CID
+        j = 1;
+        i = 0;
+        while i < 8 {
+            if hv[i] != exp_cid_w(p0 * 8 + i) { j = 0; }
+            if p0 == 3 { last_cid[i] = hv[i]; }
+            i = i + 1;
+        }
+        if j == 0 {
+            println("{}", -301);
+            println("{}", 0);
+            return -301;
+        }
+
+        // 5. Compute RFC 6962 leaf hash: SHA256(0x00 || cid) (33 B -> 1 block)
+        i = 0; while i < 16 { w[i] = 0; i = i + 1; }
+        w[0] = hv[0] >> 8;
+        i = 1;
+        while i < 8 {
+            w[i] = (((hv[i - 1] & 255) << 24) | (hv[i] >> 8)) & m32;
+            i = i + 1;
+        }
+        w[8] = (((hv[7] & 255) << 24) | 8388608) & m32;
+        w[15] = 264; // 33 * 8 bits
+
+        i = 0; while i < 8 { hv[i] = sha256_iv(i); i = i + 1; }
+        i = 16;
+        while i < 64 {
+            s0 = rotr32(w[i - 15], 7) ^ rotr32(w[i - 15], 18) ^ (w[i - 15] >> 3);
+            s1 = rotr32(w[i - 2], 17) ^ rotr32(w[i - 2], 19) ^ (w[i - 2] >> 10);
+            w[i] = (w[i - 16] + s0 + w[i - 7] + s1) & m32;
+            i = i + 1;
+        }
+        a = hv[0]; b = hv[1]; c = hv[2]; d = hv[3];
+        e = hv[4]; f = hv[5]; g = hv[6]; h = hv[7];
+        i = 0;
+        while i < 64 {
+            s1 = rotr32(e, 6) ^ rotr32(e, 11) ^ rotr32(e, 25);
+            t1 = (h + s1 + ((e & f) ^ ((e ^ m32) & g)) + sha256_k(i) + w[i]) & m32;
+            s0 = rotr32(a, 2) ^ rotr32(a, 13) ^ rotr32(a, 22);
+            t2 = (s0 + ((a & b) ^ (a & c) ^ (b & c))) & m32;
+            h = g; g = f; f = e; e = (d + t1) & m32;
+            d = c; c = b; b = a; a = (t1 + t2) & m32;
+            i = i + 1;
+        }
+        hv[0] = (hv[0] + a) & m32; hv[1] = (hv[1] + b) & m32;
+        hv[2] = (hv[2] + c) & m32; hv[3] = (hv[3] + d) & m32;
+        hv[4] = (hv[4] + e) & m32; hv[5] = (hv[5] + f) & m32;
+        hv[6] = (hv[6] + g) & m32; hv[7] = (hv[7] + h) & m32;
+
+        i = 0; while i < 8 { leaves[p0 * 8 + i] = hv[i]; i = i + 1; }
+        step = step + 1;
+    }
+
+    // =========================================================================
+    // PHASE 3: Immutable RFC 6962 VFS Inode Merkle Root Commitment
+    //   step=0: node01 = SHA256(0x01 || leaves[0] || leaves[1])
+    //   step=1: node23 = SHA256(0x01 || leaves[2] || leaves[3])
+    //   step=2: root   = SHA256(0x01 || node01    || node23)
+    // =========================================================================
+    step = 0;
+    while step < 3 {
+        i = 0; while i < 8 { hv[i] = sha256_iv(i); i = i + 1; }
+        p3 = 0;
+        while p3 < 2 {
+            i = 0; while i < 16 { w[i] = 0; i = i + 1; }
+            if step < 2 {
+                p0 = step * 16;     // left leaf base
+                p1 = step * 16 + 8; // right leaf base
+                if p3 == 0 {
+                    w[0] = (16777216 | (leaves[p0] >> 8)) & m32;
+                    i = 1;
+                    while i < 8 {
+                        w[i] = (((leaves[p0 + i - 1] & 255) << 24) | (leaves[p0 + i] >> 8)) & m32;
+                        i = i + 1;
+                    }
+                    w[8] = (((leaves[p0 + 7] & 255) << 24) | (leaves[p1] >> 8)) & m32;
+                    i = 1;
+                    while i < 8 {
+                        w[8 + i] = (((leaves[p1 + i - 1] & 255) << 24) | (leaves[p1 + i] >> 8)) & m32;
+                        i = i + 1;
+                    }
+                } else {
+                    w[0] = (((leaves[p1 + 7] & 255) << 24) | 8388608) & m32;
+                    w[15] = 520; // 65 * 8 bits
+                }
+            } else {
+                if p3 == 0 {
+                    w[0] = (16777216 | (nodes[0] >> 8)) & m32;
+                    i = 1;
+                    while i < 8 {
+                        w[i] = (((nodes[i - 1] & 255) << 24) | (nodes[i] >> 8)) & m32;
+                        i = i + 1;
+                    }
+                    w[8] = (((nodes[7] & 255) << 24) | (nodes[8] >> 8)) & m32;
+                    i = 1;
+                    while i < 8 {
+                        w[8 + i] = (((nodes[8 + i - 1] & 255) << 24) | (nodes[8 + i] >> 8)) & m32;
+                        i = i + 1;
+                    }
+                } else {
+                    w[0] = (((nodes[15] & 255) << 24) | 8388608) & m32;
+                    w[15] = 520;
+                }
+            }
+            i = 16;
+            while i < 64 {
+                s0 = rotr32(w[i - 15], 7) ^ rotr32(w[i - 15], 18) ^ (w[i - 15] >> 3);
+                s1 = rotr32(w[i - 2], 17) ^ rotr32(w[i - 2], 19) ^ (w[i - 2] >> 10);
+                w[i] = (w[i - 16] + s0 + w[i - 7] + s1) & m32;
+                i = i + 1;
+            }
+            a = hv[0]; b = hv[1]; c = hv[2]; d = hv[3];
+            e = hv[4]; f = hv[5]; g = hv[6]; h = hv[7];
+            i = 0;
+            while i < 64 {
+                s1 = rotr32(e, 6) ^ rotr32(e, 11) ^ rotr32(e, 25);
+                t1 = (h + s1 + ((e & f) ^ ((e ^ m32) & g)) + sha256_k(i) + w[i]) & m32;
+                s0 = rotr32(a, 2) ^ rotr32(a, 13) ^ rotr32(a, 22);
+                t2 = (s0 + ((a & b) ^ (a & c) ^ (b & c))) & m32;
+                h = g; g = f; f = e; e = (d + t1) & m32;
+                d = c; c = b; b = a; a = (t1 + t2) & m32;
+                i = i + 1;
+            }
+            hv[0] = (hv[0] + a) & m32; hv[1] = (hv[1] + b) & m32;
+            hv[2] = (hv[2] + c) & m32; hv[3] = (hv[3] + d) & m32;
+            hv[4] = (hv[4] + e) & m32; hv[5] = (hv[5] + f) & m32;
+            hv[6] = (hv[6] + g) & m32; hv[7] = (hv[7] + h) & m32;
+            p3 = p3 + 1;
+        }
+        if step < 2 {
+            i = 0; while i < 8 { nodes[step * 8 + i] = hv[i]; i = i + 1; }
+        }
+        step = step + 1;
+    }
+
+    j = 1;
+    i = 0;
+    while i < 8 {
+        if hv[i] != exp_root_w(i) { j = 0; }
+        i = i + 1;
+    }
+    if j == 0 {
+        println("{}", -302);
+        println("{}", 0);
+        return -302;
+    }
+
+    // Clean commit: status=1, vfs_committed=1, transferred=4, final_seq=4, inode_root[0..7], blk3_cid[0..7]
+    println("{}", 1);
+    println("{}", 1);
+    println("{}", 4);
+    println("{}", 4);
+    i = 0; while i < 8 { println("{}", hv[i]); i = i + 1; }
+    i = 0; while i < 8 { println("{}", last_cid[i]); i = i + 1; }
+    return 1;
+}
+
+fn main() ~ Console {
+    let _ = ipc_vfs_run(0);
+}

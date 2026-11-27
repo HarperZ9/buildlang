@@ -1,0 +1,345 @@
+// SPDX-FileCopyrightText: 2026 Zain Dana Harper
+// SPDX-License-Identifier: MIT
+//
+// Wave 115B (Slice 23: F1/AC1/N11/N49/N53): Pure-BuildLang Zero-C BuildOS
+// Anti-Keylogger Input Router + Capability-Isolated Fixed-Point Audio DSP Bus
+// (buildos_input_audio_zeroc.bld). Compiled with ZERO C compiler, ZERO Rust, ZERO linker
+// across ALL FIVE zero-C targets (x64-pe, x64-elf, rv64-elf, aarch64-elf, wasm).
+//
+// Modes:
+//   0 = Clean 16-event HID + 32-sample Q15 mix + RFC 6962 I/O log commit (status=1)
+//   1 = Planted attack (a): Background keylogger tap without CAP_INPUT_FOCUS -> -101
+//   2 = Planted attack (b): Unauthorized mic eavesdrop without CAP_AUDIO_CAPTURE -> -201
+//   3 = Planted attack (c): Audio ring-buffer index/length overrun (40 > 32) -> -301
+//   4 = Planted attack (d): Forged audio/input RFC 6962 audit digest tamper -> -401
+
+fn rotr32(x: i64, n: i64) -> i64 {
+    return ((x >> n) | (x << (32 - n))) & 4294967295;
+}
+
+fn task_caps(tid: i64) -> i64 {
+    if tid == 0 { return 11; }
+    else if tid == 1 { return 3; }
+    else if tid == 2 { return 6; }
+    else if tid == 3 { return 2; }
+    return 0;
+}
+
+fn pcm_sample(ch: i64, idx: i64) -> i64 {
+    if ch == 0 {
+        let t: i64 = (idx * 5) & 31;
+        if t < 16 { return (t - 16) * 1800; }
+        return (16 - (t - 16)) * 1800;
+    } else if ch == 1 {
+        let t: i64 = (idx * 3 + 7) & 31;
+        return (t - 16) * 1650;
+    }
+    let t: i64 = (idx * 7 + 3) & 31;
+    return (16 - t) * 1200;
+}
+
+fn sha256_iv(i: i64) -> i64 {
+    if i == 0 { return 1779033703; }
+    else if i == 1 { return 3144134277; }
+    else if i == 2 { return 1013904242; }
+    else if i == 3 { return 2773480762; }
+    else if i == 4 { return 1359893119; }
+    else if i == 5 { return 2600822924; }
+    else if i == 6 { return 528734635; }
+    else if i == 7 { return 1541459225; }
+    return 0;
+}
+
+fn sha256_k(r: i64) -> i64 {
+    if r == 0 { return 1116352408; }
+    else if r == 1 { return 1899447441; }
+    else if r == 2 { return 3049323471; }
+    else if r == 3 { return 3921009573; }
+    else if r == 4 { return 961987163; }
+    else if r == 5 { return 1508970993; }
+    else if r == 6 { return 2453635748; }
+    else if r == 7 { return 2870763221; }
+    else if r == 8 { return 3624381080; }
+    else if r == 9 { return 310598401; }
+    else if r == 10 { return 607225278; }
+    else if r == 11 { return 1426881987; }
+    else if r == 12 { return 1925078388; }
+    else if r == 13 { return 2162078206; }
+    else if r == 14 { return 2614888103; }
+    else if r == 15 { return 3248222580; }
+    else if r == 16 { return 3835390401; }
+    else if r == 17 { return 4022224774; }
+    else if r == 18 { return 264347078; }
+    else if r == 19 { return 604807628; }
+    else if r == 20 { return 770255983; }
+    else if r == 21 { return 1249150122; }
+    else if r == 22 { return 1555081692; }
+    else if r == 23 { return 1996064986; }
+    else if r == 24 { return 2554220882; }
+    else if r == 25 { return 2821834349; }
+    else if r == 26 { return 2952996808; }
+    else if r == 27 { return 3210313671; }
+    else if r == 28 { return 3336571891; }
+    else if r == 29 { return 3584528711; }
+    else if r == 30 { return 113926993; }
+    else if r == 31 { return 338241895; }
+    else if r == 32 { return 666307205; }
+    else if r == 33 { return 773529912; }
+    else if r == 34 { return 1294757372; }
+    else if r == 35 { return 1396182291; }
+    else if r == 36 { return 1695183700; }
+    else if r == 37 { return 1986661051; }
+    else if r == 38 { return 2177026350; }
+    else if r == 39 { return 2456956037; }
+    else if r == 40 { return 2730485921; }
+    else if r == 41 { return 2820302411; }
+    else if r == 42 { return 3259730800; }
+    else if r == 43 { return 3345764771; }
+    else if r == 44 { return 3516065817; }
+    else if r == 45 { return 3600352804; }
+    else if r == 46 { return 4094571909; }
+    else if r == 47 { return 275423344; }
+    else if r == 48 { return 430227734; }
+    else if r == 49 { return 506948616; }
+    else if r == 50 { return 659060556; }
+    else if r == 51 { return 883997877; }
+    else if r == 52 { return 958139571; }
+    else if r == 53 { return 1322822218; }
+    else if r == 54 { return 1537002063; }
+    else if r == 55 { return 1747873779; }
+    else if r == 56 { return 1955562222; }
+    else if r == 57 { return 2024104815; }
+    else if r == 58 { return 2227730452; }
+    else if r == 59 { return 2361852424; }
+    else if r == 60 { return 2428436474; }
+    else if r == 61 { return 2756734187; }
+    else if r == 62 { return 3204031479; }
+    else if r == 63 { return 3329325298; }
+    return 0;
+}
+
+fn exp_io_root(i: i64) -> i64 {
+    if i == 0 { return 3428044092; }
+    else if i == 1 { return 3865851637; }
+    else if i == 2 { return 443990685; }
+    else if i == 3 { return 854782515; }
+    else if i == 4 { return 1505095490; }
+    else if i == 5 { return 828166038; }
+    else if i == 6 { return 3294522760; }
+    else if i == 7 { return 1575809771; }
+    return 0;
+}
+fn input_audio_run(mode: i64) -> i64 ~ Console {
+    let m32: i64 = 4294967295;
+    // Compact stack arrays (896 B + ~200 B scalars < 1,150 B < 2,048 B RV64 frame limit)
+    let mut w: [i64; 64] = [0; 64];
+    let mut hv: [i64; 8] = [0; 8];
+    let mut hid_buf: [i64; 16] = [0; 16];
+    let mut pcm_buf: [i64; 16] = [0; 16];
+    let mut leaves: [i64; 16] = [0; 16];
+    let mut aud_sha: [i64; 8] = [0; 8];
+
+    let mut i: i64 = 0; let mut j: i64 = 0; let mut p0: i64 = 0; let mut p1: i64 = 0;
+    let mut a: i64 = 0; let mut b: i64 = 0; let mut c: i64 = 0; let mut d: i64 = 0;
+    let mut e: i64 = 0; let mut f: i64 = 0; let mut g: i64 = 0; let mut h: i64 = 0;
+    let mut t1: i64 = 0; let mut t2: i64 = 0; let mut s0: i64 = 0; let mut s1: i64 = 0;
+
+    // =========================================================================
+    // PHASE 1: Capability-Isolated Anti-Keylogger Input Router (16 HID events)
+    // =========================================================================
+    let focused_tid: i64 = 1;
+    let mut sak_cnt: i64 = 0;
+    i = 0;
+    while i < 16 {
+        let mut is_sak: i64 = 0;
+        if i == 5 || i == 13 { is_sak = 1; }
+        let mut et: i64 = 1;
+        if is_sak != 0 { et = 9; } else if (i & 3) == 3 { et = 2; }
+        let mut code: i64 = 65 + ((i * 7) & 31);
+        if is_sak != 0 { code = 240 + i; }
+
+        let mut dst: i64 = focused_tid;
+        if is_sak != 0 { dst = 0; }
+        // Planted attack (a): Background keylogger Task 3 taps keystroke event #3 without CAP_INPUT_FOCUS
+        if mode == 1 && i == 3 { dst = 3; }
+
+        if is_sak != 0 {
+            if dst != 0 || (task_caps(dst) & 8) == 0 {
+                println("{}", -101); println("{}", 0); return -101;
+            }
+            sak_cnt = sak_cnt + 1;
+        } else {
+            if dst != focused_tid || (task_caps(dst) & 1) == 0 {
+                println("{}", -101); println("{}", 0); return -101;
+            }
+        }
+        hid_buf[i] = ((dst & 15) << 24) | ((is_sak & 1) << 20) | ((et & 255) << 12) | ((code & 255) << 4) | (i & 15);
+        i = i + 1;
+    }
+
+    // =========================================================================
+    // PHASE 2: Hardware Mic Gate + Bounds-Checked Fixed-Point Q15 Audio DSP Mixer
+    // =========================================================================
+    // Hardware mic gate: Task 2 holds CAP_AUDIO_CAPTURE(4); mode==2 uses Task 3 (caps=2)
+    let mut mic_tid: i64 = 2;
+    if mode == 2 { mic_tid = 3; }
+    if (task_caps(mic_tid) & 4) == 0 {
+        println("{}", -201); println("{}", 0); return -201;
+    }
+
+    // Ring-buffer bounds check (32-sample ring capacity)
+    let mut ring_off: i64 = 0;
+    let mut ring_len: i64 = 32;
+    if mode == 3 { ring_off = 24; ring_len = 16; } // Planted attack (c): 24 + 16 = 40 > 32 overrun!
+    if ring_off < 0 || ring_len <= 0 || ring_off + ring_len > 32 {
+        println("{}", -301); println("{}", 0); return -301;
+    }
+
+    // Mix 32 Q15 samples across Tasks 1..3 (verify CAP_AUDIO_PLAY=2 on all 3) with saturating limiter [-28000, +28000]
+    if (task_caps(1) & 2) == 0 || (task_caps(2) & 2) == 0 || (task_caps(3) & 2) == 0 {
+        println("{}", -202); println("{}", 0); return -202;
+    }
+
+    let mut clipped: i64 = 0;
+    i = 0;
+    while i < 16 {
+        p0 = 0;
+        j = 0;
+        while j < 2 {
+            let idx: i64 = i * 2 + j;
+            let mut m: i64 = ((pcm_sample(0, idx) * 24576) >> 15)
+                           + ((pcm_sample(1, idx) * 24576) >> 15)
+                           + ((pcm_sample(2, idx) * 16384) >> 15);
+            if m > 28000 { m = 28000; clipped = clipped + 1; }
+            else if m < -28000 { m = -28000; clipped = clipped + 1; }
+            if j == 0 { p0 = (m & 65535) << 16; }
+            else { p0 = p0 | (m & 65535); }
+            j = j + 1;
+        }
+        pcm_buf[i] = p0;
+        i = i + 1;
+    }
+
+    // =========================================================================
+    // PHASE 3: SHA-256 Digests + RFC 6962 I/O Integrity Log Commitment
+    //   p1=0: SHA256(hid_buf, 64 B) -> leaf_in
+    //   p1=1: SHA256(pcm_buf, 64 B) -> aud_sha -> leaf_aud
+    // =========================================================================
+    p1 = 0;
+    while p1 < 2 {
+        i = 0; while i < 8 { hv[i] = sha256_iv(i); i = i + 1; }
+        p0 = 0;
+        while p0 < 2 {
+            i = 0; while i < 16 { w[i] = 0; i = i + 1; }
+            if p0 == 0 {
+                i = 0;
+                while i < 16 {
+                    if p1 == 0 { w[i] = hid_buf[i]; } else { w[i] = pcm_buf[i]; }
+                    i = i + 1;
+                }
+            } else { w[0] = 2147483648; w[15] = 512; }
+            i = 16;
+            while i < 64 {
+                s0 = rotr32(w[i - 15], 7) ^ rotr32(w[i - 15], 18) ^ (w[i - 15] >> 3);
+                s1 = rotr32(w[i - 2], 17) ^ rotr32(w[i - 2], 19) ^ (w[i - 2] >> 10);
+                w[i] = (w[i - 16] + s0 + w[i - 7] + s1) & m32; i = i + 1;
+            }
+            a = hv[0]; b = hv[1]; c = hv[2]; d = hv[3]; e = hv[4]; f = hv[5]; g = hv[6]; h = hv[7];
+            i = 0;
+            while i < 64 {
+                s1 = rotr32(e, 6) ^ rotr32(e, 11) ^ rotr32(e, 25);
+                t1 = (h + s1 + ((e & f) ^ ((e ^ m32) & g)) + sha256_k(i) + w[i]) & m32;
+                s0 = rotr32(a, 2) ^ rotr32(a, 13) ^ rotr32(a, 22);
+                t2 = (s0 + ((a & b) ^ (a & c) ^ (b & c))) & m32;
+                h = g; g = f; f = e; e = (d + t1) & m32;
+                d = c; c = b; b = a; a = (t1 + t2) & m32; i = i + 1;
+            }
+            hv[0] = (hv[0] + a) & m32; hv[1] = (hv[1] + b) & m32; hv[2] = (hv[2] + c) & m32; hv[3] = (hv[3] + d) & m32;
+            hv[4] = (hv[4] + e) & m32; hv[5] = (hv[5] + f) & m32; hv[6] = (hv[6] + g) & m32; hv[7] = (hv[7] + h) & m32;
+            p0 = p0 + 1;
+        }
+        if p1 == 1 { i = 0; while i < 8 { aud_sha[i] = hv[i]; i = i + 1; } }
+
+        // RFC 6962 Leaf: SHA256(0x00 || digest)
+        i = 0; while i < 16 { w[i] = 0; i = i + 1; }
+        w[0] = hv[0] >> 8;
+        i = 1; while i < 8 { w[i] = (((hv[i - 1] & 255) << 24) | (hv[i] >> 8)) & m32; i = i + 1; }
+        w[8] = (((hv[7] & 255) << 24) | 8388608) & m32; w[15] = 264;
+        i = 0; while i < 8 { hv[i] = sha256_iv(i); i = i + 1; }
+        i = 16;
+        while i < 64 {
+            s0 = rotr32(w[i - 15], 7) ^ rotr32(w[i - 15], 18) ^ (w[i - 15] >> 3);
+            s1 = rotr32(w[i - 2], 17) ^ rotr32(w[i - 2], 19) ^ (w[i - 2] >> 10);
+            w[i] = (w[i - 16] + s0 + w[i - 7] + s1) & m32; i = i + 1;
+        }
+        a = hv[0]; b = hv[1]; c = hv[2]; d = hv[3]; e = hv[4]; f = hv[5]; g = hv[6]; h = hv[7];
+        i = 0;
+        while i < 64 {
+            s1 = rotr32(e, 6) ^ rotr32(e, 11) ^ rotr32(e, 25);
+            t1 = (h + s1 + ((e & f) ^ ((e ^ m32) & g)) + sha256_k(i) + w[i]) & m32;
+            s0 = rotr32(a, 2) ^ rotr32(a, 13) ^ rotr32(a, 22);
+            t2 = (s0 + ((a & b) ^ (a & c) ^ (b & c))) & m32;
+            h = g; g = f; f = e; e = (d + t1) & m32;
+            d = c; c = b; b = a; a = (t1 + t2) & m32; i = i + 1;
+        }
+        hv[0] = (hv[0] + a) & m32; hv[1] = (hv[1] + b) & m32; hv[2] = (hv[2] + c) & m32; hv[3] = (hv[3] + d) & m32;
+        hv[4] = (hv[4] + e) & m32; hv[5] = (hv[5] + f) & m32; hv[6] = (hv[6] + g) & m32; hv[7] = (hv[7] + h) & m32;
+        i = 0; while i < 8 { leaves[p1 * 8 + i] = hv[i]; i = i + 1; }
+        p1 = p1 + 1;
+    }
+
+    // Planted attack (d): Forged audio/input RFC 6962 audit digest tamper
+    if mode == 4 { leaves[0] = leaves[0] ^ 1; }
+
+    // RFC 6962 I/O Integrity Log Root = SHA256(0x01 || leaf_in || leaf_aud)
+    i = 0; while i < 8 { hv[i] = sha256_iv(i); i = i + 1; }
+    p0 = 0;
+    while p0 < 2 {
+        i = 0; while i < 16 { w[i] = 0; i = i + 1; }
+        if p0 == 0 {
+            w[0] = (16777216 | (leaves[0] >> 8)) & m32;
+            i = 1; while i < 8 { w[i] = (((leaves[i - 1] & 255) << 24) | (leaves[i] >> 8)) & m32; i = i + 1; }
+            w[8] = (((leaves[7] & 255) << 24) | (leaves[8] >> 8)) & m32;
+            i = 1;
+            while i < 8 {
+                w[8 + i] = (((leaves[8 + i - 1] & 255) << 24) | (leaves[8 + i] >> 8)) & m32; i = i + 1;
+            }
+        } else { w[0] = (((leaves[15] & 255) << 24) | 8388608) & m32; w[15] = 520; }
+        i = 16;
+        while i < 64 {
+            s0 = rotr32(w[i - 15], 7) ^ rotr32(w[i - 15], 18) ^ (w[i - 15] >> 3);
+            s1 = rotr32(w[i - 2], 17) ^ rotr32(w[i - 2], 19) ^ (w[i - 2] >> 10);
+            w[i] = (w[i - 16] + s0 + w[i - 7] + s1) & m32; i = i + 1;
+        }
+        a = hv[0]; b = hv[1]; c = hv[2]; d = hv[3]; e = hv[4]; f = hv[5]; g = hv[6]; h = hv[7];
+        i = 0;
+        while i < 64 {
+            s1 = rotr32(e, 6) ^ rotr32(e, 11) ^ rotr32(e, 25);
+            t1 = (h + s1 + ((e & f) ^ ((e ^ m32) & g)) + sha256_k(i) + w[i]) & m32;
+            s0 = rotr32(a, 2) ^ rotr32(a, 13) ^ rotr32(a, 22);
+            t2 = (s0 + ((a & b) ^ (a & c) ^ (b & c))) & m32;
+            h = g; g = f; f = e; e = (d + t1) & m32;
+            d = c; c = b; b = a; a = (t1 + t2) & m32; i = i + 1;
+        }
+        hv[0] = (hv[0] + a) & m32; hv[1] = (hv[1] + b) & m32; hv[2] = (hv[2] + c) & m32; hv[3] = (hv[3] + d) & m32;
+        hv[4] = (hv[4] + e) & m32; hv[5] = (hv[5] + f) & m32; hv[6] = (hv[6] + g) & m32; hv[7] = (hv[7] + h) & m32;
+        p0 = p0 + 1;
+    }
+
+    j = 1; i = 0; while i < 8 { if hv[i] != exp_io_root(i) { j = 0; } i = i + 1; }
+    if j == 0 { println("{}", -401); println("{}", 0); return -401; }
+
+    println("{}", 1);
+    println("{}", 1);
+    println("{}", 16);
+    println("{}", sak_cnt);
+    println("{}", 32);
+    println("{}", clipped);
+    i = 0; while i < 8 { println("{}", aud_sha[i]); i = i + 1; }
+    i = 0; while i < 8 { println("{}", hv[i]); i = i + 1; }
+    return 1;
+}
+
+fn main() ~ Console {
+    let _ = input_audio_run(0);
+}

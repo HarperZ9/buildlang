@@ -1,0 +1,413 @@
+// SPDX-FileCopyrightText: 2026 Zain Dana Harper
+// SPDX-License-Identifier: MIT
+//
+// Wave 114C (Slice 22: F1/AC1/N11/N49/N53): Pure-BuildLang Zero-C BuildOS
+// Capability-Isolated Display Compositor (buildos_compositor_zeroc.bld).
+// Linear-capability surfaces + fixed-point Porter-Duff premultiplied alpha +
+// damage-rect culling + trusted-chrome z-order enforcement + RFC 6962 scanout log.
+// Compiled with ZERO C compiler, ZERO Rust, ZERO linker across ALL FIVE zero-C ISAs.
+//
+// Modes:
+//   0 = Clean 2-frame composited scanout + RFC 6962 display log commit (status=1)
+//   1 = Planted attack (a): Unauthorized cross-surface screen-scrape -> status=-101
+//   2 = Planted attack (b): Out-of-bounds surface rect overflow -> status=-201
+//   3 = Planted attack (c): Untrusted z-order clickjacking over chrome -> status=-301
+//   4 = Planted attack (d): Forged scanout digest / RFC 6962 log tamper -> status=-401
+
+fn rotr32(x: i64, n: i64) -> i64 {
+    return ((x >> n) | (x << (32 - n))) & 4294967295;
+}
+
+fn blend_over(dst: i64, src: i64) -> i64 {
+    let sa: i64 = (src >> 24) & 255;
+    let sr: i64 = (src >> 16) & 255;
+    let sg: i64 = (src >> 8) & 255;
+    let sb: i64 = src & 255;
+    let da: i64 = (dst >> 24) & 255;
+    let dr: i64 = (dst >> 16) & 255;
+    let dg: i64 = (dst >> 8) & 255;
+    let db: i64 = dst & 255;
+    let inv: i64 = 255 - sa;
+    let mut oa: i64 = sa + ((da * inv + 128) >> 8);
+    let mut orr: i64 = sr + ((dr * inv + 128) >> 8);
+    let mut og: i64 = sg + ((dg * inv + 128) >> 8);
+    let mut ob: i64 = sb + ((db * inv + 128) >> 8);
+    if oa > 255 { oa = 255; }
+    if orr > 255 { orr = 255; }
+    if og > 255 { og = 255; }
+    if ob > 255 { ob = 255; }
+    return (oa << 24) | (orr << 16) | (og << 8) | ob;
+}
+
+fn sha256_iv(i: i64) -> i64 {
+    if i == 0 { return 1779033703; }
+    else if i == 1 { return 3144134277; }
+    else if i == 2 { return 1013904242; }
+    else if i == 3 { return 2773480762; }
+    else if i == 4 { return 1359893119; }
+    else if i == 5 { return 2600822924; }
+    else if i == 6 { return 528734635; }
+    else if i == 7 { return 1541459225; }
+    return 0;
+}
+
+fn sha256_k(r: i64) -> i64 {
+    if r == 0 { return 1116352408; }
+    else if r == 1 { return 1899447441; }
+    else if r == 2 { return 3049323471; }
+    else if r == 3 { return 3921009573; }
+    else if r == 4 { return 961987163; }
+    else if r == 5 { return 1508970993; }
+    else if r == 6 { return 2453635748; }
+    else if r == 7 { return 2870763221; }
+    else if r == 8 { return 3624381080; }
+    else if r == 9 { return 310598401; }
+    else if r == 10 { return 607225278; }
+    else if r == 11 { return 1426881987; }
+    else if r == 12 { return 1925078388; }
+    else if r == 13 { return 2162078206; }
+    else if r == 14 { return 2614888103; }
+    else if r == 15 { return 3248222580; }
+    else if r == 16 { return 3835390401; }
+    else if r == 17 { return 4022224774; }
+    else if r == 18 { return 264347078; }
+    else if r == 19 { return 604807628; }
+    else if r == 20 { return 770255983; }
+    else if r == 21 { return 1249150122; }
+    else if r == 22 { return 1555081692; }
+    else if r == 23 { return 1996064986; }
+    else if r == 24 { return 2554220882; }
+    else if r == 25 { return 2821834349; }
+    else if r == 26 { return 2952996808; }
+    else if r == 27 { return 3210313671; }
+    else if r == 28 { return 3336571891; }
+    else if r == 29 { return 3584528711; }
+    else if r == 30 { return 113926993; }
+    else if r == 31 { return 338241895; }
+    else if r == 32 { return 666307205; }
+    else if r == 33 { return 773529912; }
+    else if r == 34 { return 1294757372; }
+    else if r == 35 { return 1396182291; }
+    else if r == 36 { return 1695183700; }
+    else if r == 37 { return 1986661051; }
+    else if r == 38 { return 2177026350; }
+    else if r == 39 { return 2456956037; }
+    else if r == 40 { return 2730485921; }
+    else if r == 41 { return 2820302411; }
+    else if r == 42 { return 3259730800; }
+    else if r == 43 { return 3345764771; }
+    else if r == 44 { return 3516065817; }
+    else if r == 45 { return 3600352804; }
+    else if r == 46 { return 4094571909; }
+    else if r == 47 { return 275423344; }
+    else if r == 48 { return 430227734; }
+    else if r == 49 { return 506948616; }
+    else if r == 50 { return 659060556; }
+    else if r == 51 { return 883997877; }
+    else if r == 52 { return 958139571; }
+    else if r == 53 { return 1322822218; }
+    else if r == 54 { return 1537002063; }
+    else if r == 55 { return 1747873779; }
+    else if r == 56 { return 1955562222; }
+    else if r == 57 { return 2024104815; }
+    else if r == 58 { return 2227730452; }
+    else if r == 59 { return 2361852424; }
+    else if r == 60 { return 2428436474; }
+    else if r == 61 { return 2756734187; }
+    else if r == 62 { return 3204031479; }
+    else if r == 63 { return 3329325298; }
+    return 0;
+}
+
+fn surf_meta(idx: i64) -> i64 {
+    if idx == 0 { return 1; }
+    else if idx == 1 { return 10; }
+    else if idx == 2 { return 0; }
+    else if idx == 3 { return 1; }
+    else if idx == 4 { return 0; }
+    else if idx == 5 { return 2; }
+    else if idx == 6 { return 6; }
+    else if idx == 7 { return 5; }
+    else if idx == 8 { return 4293979364; }
+    else if idx == 9 { return 4293979364; }
+    else if idx == 10 { return 2; }
+    else if idx == 11 { return 20; }
+    else if idx == 12 { return 0; }
+    else if idx == 13 { return 1; }
+    else if idx == 14 { return 2; }
+    else if idx == 15 { return 3; }
+    else if idx == 16 { return 5; }
+    else if idx == 17 { return 4; }
+    else if idx == 18 { return 2148556912; }
+    else if idx == 19 { return 2149087296; }
+    else if idx == 20 { return 3; }
+    else if idx == 21 { return 30; }
+    else if idx == 22 { return 0; }
+    else if idx == 23 { return 1; }
+    else if idx == 24 { return 5; }
+    else if idx == 25 { return 2; }
+    else if idx == 26 { return 3; }
+    else if idx == 27 { return 6; }
+    else if idx == 28 { return 3233052696; }
+    else if idx == 29 { return 3233052696; }
+    else if idx == 30 { return 0; }
+    else if idx == 31 { return 100; }
+    else if idx == 32 { return 1; }
+    else if idx == 33 { return 9; }
+    else if idx == 34 { return 0; }
+    else if idx == 35 { return 0; }
+    else if idx == 36 { return 8; }
+    else if idx == 37 { return 2; }
+    else if idx == 38 { return 4279772728; }
+    else if idx == 39 { return 4279772728; }
+    return 0;
+}
+
+fn exp_log_root(i: i64) -> i64 {
+    if i == 0 { return 3841838528; }
+    else if i == 1 { return 3307454371; }
+    else if i == 2 { return 2063997328; }
+    else if i == 3 { return 1649769775; }
+    else if i == 4 { return 1987351453; }
+    else if i == 5 { return 45219074; }
+    else if i == 6 { return 2096915637; }
+    else if i == 7 { return 3075572744; }
+    return 0;
+}
+fn compositor_run(mode: i64) -> i64 ~ Console {
+    let m32: i64 = 4294967295;
+    let bg: i64 = 4278980630; // ARGB(255, 12, 16, 22)
+
+    // Compact stack arrays (1,280 B + ~200 B scalars < 1,550 B < 2,048 B RV64 frame limit)
+    let mut fb: [i64; 64] = [0; 64];
+    let mut w: [i64; 64] = [0; 64];
+    let mut hv: [i64; 8] = [0; 8];
+    let mut leaves: [i64; 16] = [0; 16];
+    let mut f1_sha: [i64; 8] = [0; 8];
+
+    let mut i: i64 = 0; let mut j: i64 = 0; let mut sid: i64 = 0; let mut fid: i64 = 0;
+    let mut a: i64 = 0; let mut b: i64 = 0; let mut c: i64 = 0; let mut d: i64 = 0;
+    let mut e: i64 = 0; let mut f: i64 = 0; let mut g: i64 = 0; let mut h: i64 = 0;
+    let mut t1: i64 = 0; let mut t2: i64 = 0; let mut s0: i64 = 0; let mut s1: i64 = 0;
+    let mut px: i64 = 0; let mut py: i64 = 0; let mut p0: i64 = 0; let mut p1: i64 = 0;
+
+    // =========================================================================
+    // PHASE 1: Cross-Surface Screen-Scrape Cap Gate + Rect Bounds + Z-Order Policy
+    // =========================================================================
+    // Clean reads own surface (target_owner=2); mode==1 scrapes Task 1 without CAP_CAPTURE(8)
+    let req_tid: i64 = 2;
+    let req_cap: i64 = surf_meta(10 + 3); // Task 2 cap_mask = 1 (no CAP_CAPTURE=8)
+    let mut target_owner: i64 = 2;
+    if mode == 1 { target_owner = 1; } // Planted attack (a): cross-surface screen-scrape
+    if target_owner != req_tid && (req_cap & 8) == 0 {
+        println("{}", -101);
+        println("{}", 0);
+        return -101;
+    }
+
+    // Validate every surface rect strictly within 8x8 scanout bounds and trusted-chrome z-order ceiling (< 100)
+    sid = 0;
+    while sid < 4 {
+        p0 = sid * 10;
+        let mut sz: i64 = surf_meta(p0 + 1);
+        let strust: i64 = surf_meta(p0 + 2);
+        let sx: i64 = surf_meta(p0 + 4);
+        let sy: i64 = surf_meta(p0 + 5);
+        let mut sw: i64 = surf_meta(p0 + 6);
+        let sh: i64 = surf_meta(p0 + 7);
+
+        if mode == 2 && sid == 2 { sw = 4; }   // Planted attack (b): x=5 + w=4 = 9 > 8 overflow!
+        if mode == 3 && sid == 1 { sz = 120; } // Planted attack (c): untrusted z=120 >= 100 clickjacking!
+
+        if sx < 0 || sy < 0 || sw <= 0 || sh <= 0 || sx + sw > 8 || sy + sh > 8 {
+            println("{}", -201);
+            println("{}", 0);
+            return -201;
+        }
+        if strust == 0 && sz >= 100 {
+            println("{}", -301);
+            println("{}", 0);
+            return -301;
+        }
+        sid = sid + 1;
+    }
+
+    // =========================================================================
+    // PHASE 2: Multi-Frame Porter-Duff Compositing + Damage-Rect Culling + SHA-256 Frame Digest
+    //   Frame 0: Full 8x8 scanout (64 dirty pixels)
+    //   Frame 1: Incremental damage rect (2..6, 3..7) = 16 dirty pixels (75% culled!)
+    // =========================================================================
+    i = 0; while i < 64 { fb[i] = bg; i = i + 1; }
+    let mut f1_dirty: i64 = 0;
+
+    fid = 0;
+    while fid < 2 {
+        let mut dx0: i64 = 0; let mut dy0: i64 = 0; let mut dx1: i64 = 8; let mut dy1: i64 = 8;
+        if fid == 1 { dx0 = 2; dy0 = 3; dx1 = 6; dy1 = 7; }
+
+        py = dy0;
+        while py < dy1 {
+            px = dx0;
+            while px < dx1 {
+                p0 = bg;
+                sid = 0;
+                while sid < 4 {
+                    p1 = sid * 10;
+                    a = surf_meta(p1 + 4); b = surf_meta(p1 + 5);
+                    c = surf_meta(p1 + 6); d = surf_meta(p1 + 7);
+                    if px >= a && px < a + c && py >= b && py < b + d {
+                        e = surf_meta(p1 + 8);
+                        if fid == 1 { e = surf_meta(p1 + 9); }
+                        p0 = blend_over(p0, e);
+                    }
+                    sid = sid + 1;
+                }
+                fb[py * 8 + px] = p0;
+                if fid == 1 { f1_dirty = f1_dirty + 1; }
+                px = px + 1;
+            }
+            py = py + 1;
+        }
+
+        // SHA-256 over 64-pixel scanout framebuffer (256 B = 4 data blocks + 1 padding block = 5 blocks)
+        i = 0; while i < 8 { hv[i] = sha256_iv(i); i = i + 1; }
+        p0 = 0;
+        while p0 < 5 {
+            i = 0; while i < 16 { w[i] = 0; i = i + 1; }
+            if p0 < 4 {
+                i = 0; while i < 16 { w[i] = fb[p0 * 16 + i]; i = i + 1; }
+            } else {
+                w[0] = 2147483648;
+                w[15] = 2048; // 256 * 8 bits
+            }
+            i = 16;
+            while i < 64 {
+                s0 = rotr32(w[i - 15], 7) ^ rotr32(w[i - 15], 18) ^ (w[i - 15] >> 3);
+                s1 = rotr32(w[i - 2], 17) ^ rotr32(w[i - 2], 19) ^ (w[i - 2] >> 10);
+                w[i] = (w[i - 16] + s0 + w[i - 7] + s1) & m32;
+                i = i + 1;
+            }
+            a = hv[0]; b = hv[1]; c = hv[2]; d = hv[3];
+            e = hv[4]; f = hv[5]; g = hv[6]; h = hv[7];
+            i = 0;
+            while i < 64 {
+                s1 = rotr32(e, 6) ^ rotr32(e, 11) ^ rotr32(e, 25);
+                t1 = (h + s1 + ((e & f) ^ ((e ^ m32) & g)) + sha256_k(i) + w[i]) & m32;
+                s0 = rotr32(a, 2) ^ rotr32(a, 13) ^ rotr32(a, 22);
+                t2 = (s0 + ((a & b) ^ (a & c) ^ (b & c))) & m32;
+                h = g; g = f; f = e; e = (d + t1) & m32;
+                d = c; c = b; b = a; a = (t1 + t2) & m32;
+                i = i + 1;
+            }
+            hv[0] = (hv[0] + a) & m32; hv[1] = (hv[1] + b) & m32;
+            hv[2] = (hv[2] + c) & m32; hv[3] = (hv[3] + d) & m32;
+            hv[4] = (hv[4] + e) & m32; hv[5] = (hv[5] + f) & m32;
+            hv[6] = (hv[6] + g) & m32; hv[7] = (hv[7] + h) & m32;
+            p0 = p0 + 1;
+        }
+        if fid == 1 { i = 0; while i < 8 { f1_sha[i] = hv[i]; i = i + 1; } }
+
+        // RFC 6962 Leaf: SHA256(0x00 || frame_sha) (33 B -> 1 block)
+        i = 0; while i < 16 { w[i] = 0; i = i + 1; }
+        w[0] = hv[0] >> 8;
+        i = 1; while i < 8 { w[i] = (((hv[i - 1] & 255) << 24) | (hv[i] >> 8)) & m32; i = i + 1; }
+        w[8] = (((hv[7] & 255) << 24) | 8388608) & m32; w[15] = 264;
+        i = 0; while i < 8 { hv[i] = sha256_iv(i); i = i + 1; }
+        i = 16;
+        while i < 64 {
+            s0 = rotr32(w[i - 15], 7) ^ rotr32(w[i - 15], 18) ^ (w[i - 15] >> 3);
+            s1 = rotr32(w[i - 2], 17) ^ rotr32(w[i - 2], 19) ^ (w[i - 2] >> 10);
+            w[i] = (w[i - 16] + s0 + w[i - 7] + s1) & m32;
+            i = i + 1;
+        }
+        a = hv[0]; b = hv[1]; c = hv[2]; d = hv[3];
+        e = hv[4]; f = hv[5]; g = hv[6]; h = hv[7];
+        i = 0;
+        while i < 64 {
+            s1 = rotr32(e, 6) ^ rotr32(e, 11) ^ rotr32(e, 25);
+            t1 = (h + s1 + ((e & f) ^ ((e ^ m32) & g)) + sha256_k(i) + w[i]) & m32;
+            s0 = rotr32(a, 2) ^ rotr32(a, 13) ^ rotr32(a, 22);
+            t2 = (s0 + ((a & b) ^ (a & c) ^ (b & c))) & m32;
+            h = g; g = f; f = e; e = (d + t1) & m32;
+            d = c; c = b; b = a; a = (t1 + t2) & m32;
+            i = i + 1;
+        }
+        hv[0] = (hv[0] + a) & m32; hv[1] = (hv[1] + b) & m32;
+        hv[2] = (hv[2] + c) & m32; hv[3] = (hv[3] + d) & m32;
+        hv[4] = (hv[4] + e) & m32; hv[5] = (hv[5] + f) & m32;
+        hv[6] = (hv[6] + g) & m32; hv[7] = (hv[7] + h) & m32;
+        i = 0; while i < 8 { leaves[fid * 8 + i] = hv[i]; i = i + 1; }
+        fid = fid + 1;
+    }
+
+    // Planted attack (d): Forged scanout digest / RFC 6962 display-integrity log tamper
+    if mode == 4 { leaves[0] = leaves[0] ^ 1; }
+
+    // PHASE 3: RFC 6962 Display-Integrity Log Root = SHA256(0x01 || leaf0 || leaf1) (65 B -> 2 blocks)
+    i = 0; while i < 8 { hv[i] = sha256_iv(i); i = i + 1; }
+    p0 = 0;
+    while p0 < 2 {
+        i = 0; while i < 16 { w[i] = 0; i = i + 1; }
+        if p0 == 0 {
+            w[0] = (16777216 | (leaves[0] >> 8)) & m32;
+            i = 1; while i < 8 { w[i] = (((leaves[i - 1] & 255) << 24) | (leaves[i] >> 8)) & m32; i = i + 1; }
+            w[8] = (((leaves[7] & 255) << 24) | (leaves[8] >> 8)) & m32;
+            i = 1;
+            while i < 8 {
+                w[8 + i] = (((leaves[8 + i - 1] & 255) << 24) | (leaves[8 + i] >> 8)) & m32;
+                i = i + 1;
+            }
+        } else {
+            w[0] = (((leaves[15] & 255) << 24) | 8388608) & m32;
+            w[15] = 520;
+        }
+        i = 16;
+        while i < 64 {
+            s0 = rotr32(w[i - 15], 7) ^ rotr32(w[i - 15], 18) ^ (w[i - 15] >> 3);
+            s1 = rotr32(w[i - 2], 17) ^ rotr32(w[i - 2], 19) ^ (w[i - 2] >> 10);
+            w[i] = (w[i - 16] + s0 + w[i - 7] + s1) & m32;
+            i = i + 1;
+        }
+        a = hv[0]; b = hv[1]; c = hv[2]; d = hv[3];
+        e = hv[4]; f = hv[5]; g = hv[6]; h = hv[7];
+        i = 0;
+        while i < 64 {
+            s1 = rotr32(e, 6) ^ rotr32(e, 11) ^ rotr32(e, 25);
+            t1 = (h + s1 + ((e & f) ^ ((e ^ m32) & g)) + sha256_k(i) + w[i]) & m32;
+            s0 = rotr32(a, 2) ^ rotr32(a, 13) ^ rotr32(a, 22);
+            t2 = (s0 + ((a & b) ^ (a & c) ^ (b & c))) & m32;
+            h = g; g = f; f = e; e = (d + t1) & m32;
+            d = c; c = b; b = a; a = (t1 + t2) & m32;
+            i = i + 1;
+        }
+        hv[0] = (hv[0] + a) & m32; hv[1] = (hv[1] + b) & m32;
+        hv[2] = (hv[2] + c) & m32; hv[3] = (hv[3] + d) & m32;
+        hv[4] = (hv[4] + e) & m32; hv[5] = (hv[5] + f) & m32;
+        hv[6] = (hv[6] + g) & m32; hv[7] = (hv[7] + h) & m32;
+        p0 = p0 + 1;
+    }
+
+    j = 1; i = 0; while i < 8 { if hv[i] != exp_log_root(i) { j = 0; } i = i + 1; }
+    if j == 0 {
+        println("{}", -401);
+        println("{}", 0);
+        return -401;
+    }
+
+    // Clean commit: status=1, scanout_committed=1, frames=2, f1_dirty=16, 4 sample pixels, f1_sha[0..7], log_root[0..7]
+    println("{}", 1);
+    println("{}", 1);
+    println("{}", 2);
+    println("{}", f1_dirty);
+    println("{}", fb[0]);
+    println("{}", fb[27]);
+    println("{}", fb[46]);
+    println("{}", fb[63]);
+    i = 0; while i < 8 { println("{}", f1_sha[i]); i = i + 1; }
+    i = 0; while i < 8 { println("{}", hv[i]); i = i + 1; }
+    return 1;
+}
+
+fn main() ~ Console {
+    let _ = compositor_run(0);
+}
