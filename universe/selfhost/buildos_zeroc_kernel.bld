@@ -1,0 +1,153 @@
+// SPDX-FileCopyrightText: 2026 Zain Dana Harper
+// SPDX-License-Identifier: MIT
+
+// BuildOS-Core Zero-C Kernel Payload (Wave 60A, Slice 9: F1/F2/N53/N54/AC1)
+// Compiles directly with ZERO C compiler, ZERO Rust, ZERO linker into:
+//   rv64-elf (<=16 KB), aarch64-elf (<=16 KB), x64-pe (<=16 KB), x64-elf (<=16 KB), and .wasm!
+
+fn cap_compute_tag(slot: i64, owner: i64, rights: i64, gen: i64) -> i64 {
+    return (slot * 131 + owner * 37 + rights * 17 + gen * 53 + 997) % 1000003;
+}
+
+fn cap_enforce(slot: i64, caller: i64, req_right: i64, presented_gen: i64, presented_tag: i64) -> i64 {
+    let mut cap_owner: [i64; 8] = [0; 8];
+    let mut cap_rights: [i64; 8] = [0; 8];
+    let mut cap_gen: [i64; 8] = [0; 8];
+    // Slot 2: owner=1, rights=3 (READ=1 + WRITE=2, NO EXEC=4), gen=1
+    cap_owner[2] = 1;
+    cap_rights[2] = 3;
+    cap_gen[2] = 1;
+    if slot < 0 || slot >= 8 { return -100; }
+    let ow: i64 = cap_owner[slot];
+    let rt: i64 = cap_rights[slot];
+    let gn: i64 = cap_gen[slot];
+    if gn <= 0 || ow != caller { return -102; }
+    // Verify unforgeable capability tag and generation (catches Attack 2: forged cap / stale gen)
+    let expected_tag: i64 = cap_compute_tag(slot, ow, rt, gn);
+    if presented_gen != gn || presented_tag != expected_tag { return -102; }
+    // Verify requested right bit is held in cap_rights (catches Attack 1: privilege escalation)
+    let bit_held: i64 = (rt / req_right) % 2;
+    if bit_held == 0 { return -101; }
+    return 1;
+}
+
+fn ab_boot_select(ver_a: i64, ok_a: i64, ver_b: i64, ok_b: i64, min_ver: i64) -> i64 {
+    let mut valid_a: i64 = 0;
+    let mut valid_b: i64 = 0;
+    if ok_a != 0 && ver_a >= min_ver { valid_a = 1; }
+    if ok_b != 0 && ver_b >= min_ver { valid_b = 1; }
+    if valid_a == 0 && valid_b == 0 { return -201; }
+    if valid_b != 0 && (valid_a == 0 || ver_b >= ver_a) { return 2; }
+    return 1;
+}
+
+fn supervisor_cycle() -> i64 {
+    let mut events: [i64; 8] = [0; 8];
+    // 1=crash, 0=healthy heartbeat: 4 crashes trigger quarantine (max=3), then 3 healthy ticks recover
+    events[0] = 1;
+    events[1] = 1;
+    events[2] = 1;
+    events[3] = 1;
+    events[4] = 0;
+    events[5] = 0;
+    events[6] = 0;
+    events[7] = 0;
+    let mut crashes: i64 = 0;
+    let mut healthy_streak: i64 = 0;
+    let mut state: i64 = 0; // 0=RUNNING, 1=RESTARTED, 2=QUARANTINED
+    let mut trace_code: i64 = 0;
+    let mut i: i64 = 0;
+    while i < 8 {
+        if events[i] != 0 {
+            crashes = crashes + 1;
+            healthy_streak = 0;
+            if crashes <= 3 {
+                state = 1;
+            } else {
+                state = 2;
+            }
+        } else {
+            healthy_streak = healthy_streak + 1;
+            if state == 2 && healthy_streak >= 3 {
+                state = 0;
+                crashes = 0;
+            }
+        }
+        trace_code = trace_code * 10 + state;
+        i = i + 1;
+    }
+    return trace_code;
+}
+
+fn fb_render_checksum() -> i64 {
+    let mut line: [i64; 16] = [0; 16];
+    let mut cs: i64 = 0;
+    let mut y: i64 = 0;
+    while y < 16 {
+        let mut x: i64 = 0;
+        while x < 16 {
+            let r: i64 = (x * 16 + y * 3) % 256;
+            let g: i64 = (y * 16 + x * 5) % 256;
+            let b: i64 = ((x + y) * 11) % 256;
+            line[x] = r * 65536 + g * 256 + b;
+            cs = (cs * 131 + line[x]) % 1000000007;
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    return cs;
+}
+
+fn n55_heartbeat(rounds: i64) -> i64 {
+    let mut x: [i64; 16] = [0; 16];
+    let mut y: [i64; 16] = [0; 16];
+    let mut i: i64 = 0;
+    while i < 16 {
+        x[i] = ((i * 7 + 3) % 19) - 9;
+        i = i + 1;
+    }
+    let mut r: i64 = 0;
+    let mut cs: i64 = 0;
+    while r < rounds {
+        let mut row: i64 = 0;
+        while row < 16 {
+            let mut acc: i64 = 0;
+            let mut col: i64 = 0;
+            while col < 16 {
+                let w: i64 = ((row * 13 + col * 7 + r * 3 + 5) % 31) - 15;
+                acc = acc + w * x[col];
+                col = col + 1;
+            }
+            let mut q: i64 = acc / 16;
+            if q < 0 { q = 0; }
+            if q > 127 { q = 127; }
+            y[row] = q;
+            cs = (cs * 131 + q) % 1000000007;
+            row = row + 1;
+        }
+        let mut k: i64 = 0;
+        while k < 16 {
+            x[k] = ((x[k] + y[k] + k) % 31) - 15;
+            k = k + 1;
+        }
+        r = r + 1;
+    }
+    return cs;
+}
+
+fn main() ~ Console {
+    let valid_tag: i64 = cap_compute_tag(2, 1, 3, 1);
+    let ok_cap: i64 = cap_enforce(2, 1, 2, 1, valid_tag);
+    // Attack 1: privilege escalation (request EXEC=4 with READ|WRITE=3 cap) -> -101
+    let atk_privesc: i64 = cap_enforce(2, 1, 4, 1, valid_tag);
+    // Attack 2: forged capability tag -> -102
+    let atk_forged: i64 = cap_enforce(2, 1, 1, 1, valid_tag + 1);
+    // Normal A/B boot selects slot B (ver 5 >= 4) -> 2
+    let ab_ok: i64 = ab_boot_select(4, 1, 5, 1, 4);
+    // Attack 3: A/B downgrade rollback (slot B ver 3 < min_ver 4, slot A unhealthy) -> -201
+    let atk_downgrade: i64 = ab_boot_select(4, 0, 3, 1, 4);
+    let sup_trace: i64 = supervisor_cycle();
+    let fb_cs: i64 = fb_render_checksum();
+    let hb_cs: i64 = n55_heartbeat(64);
+    println("{} {} {} {} {} {} {} {}", ok_cap, atk_privesc, atk_forged, ab_ok, atk_downgrade, sup_trace, fb_cs, hb_cs);
+}

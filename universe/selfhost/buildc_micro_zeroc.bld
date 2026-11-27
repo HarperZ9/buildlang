@@ -1,0 +1,198 @@
+// SPDX-FileCopyrightText: 2026 Zain Dana Harper
+// SPDX-License-Identifier: MIT
+
+// Wave 62D (Slice 10, F1/AC1/N53/AC3): Pure-BuildLang Zero-C Micro-Compiler (buildc_micro_zeroc.bld)
+// Compiles directly via buildc_selfhost_quadarch.bld (ZERO C compiler, ZERO Rust, ZERO linker)
+// into native x64-pe, x64-elf, rv64-elf, aarch64-elf, and .wasm executables.
+// When executed, compiles 3 AST programs directly into raw executable x86-64 machine-code bytes
+// and emits them deterministically to stdout (format: prog_id, byte_len, raw bytes..., fnv_digest).
+
+// Compile a stack-machine AST encoded in `ast[0..n-1]` into executable x86-64 machine code in `code`:
+// AST opcodes (pairs [op, arg]):
+//   1 = PUSH_IMM(val)  : push rax (if depth>0); movabs rax, val
+//   2 = ADD            : pop rcx; add rax, rcx
+//   3 = SUB            : pop rcx; sub rcx, rax; mov rax, rcx
+//   4 = MUL            : pop rcx; imul rax, rcx
+//   5 = MOD            : pop rcx; xchg rax, rcx; cqo; idiv rcx; mov rax, rdx
+//   6 = SUM_LOOP(N)    : emits real counted x86-64 while loop computing sum(1..N) in rax with
+//                        real cmp/jg/jmp backpatched rel8 offsets!
+//   9 = RET            : c3 (ret)
+fn compile_ast_prog(prog_id: i64, mutate_add_to_sub: i64) -> i64 ~ Console {
+    let mut ast_op: [i64; 16] = [0; 16];
+    let mut ast_arg: [i64; 16] = [0; 16];
+    let mut n_ops: i64 = 0;
+
+    if prog_id == 1 {
+        // Program 1: poly(6) = (3 * 6 * 6) - (5 * 6) + 7 = 85
+        ast_op[0] = 1; ast_arg[0] = 3;
+        ast_op[1] = 1; ast_arg[1] = 6;
+        ast_op[2] = 4; ast_arg[2] = 0;
+        ast_op[3] = 1; ast_arg[3] = 6;
+        ast_op[4] = 4; ast_arg[4] = 0;
+        ast_op[5] = 1; ast_arg[5] = 5;
+        ast_op[6] = 1; ast_arg[6] = 6;
+        ast_op[7] = 4; ast_arg[7] = 0;
+        ast_op[8] = 3; ast_arg[8] = 0;
+        ast_op[9] = 1; ast_arg[9] = 7;
+        if mutate_add_to_sub != 0 {
+            ast_op[10] = 3; // Planted 1-bit AST-op mutation: ADD -> SUB (85 -> 71)!
+        } else {
+            ast_op[10] = 2;
+        }
+        ast_op[11] = 9;
+        n_ops = 12;
+    } else if prog_id == 2 {
+        // Program 2: ((10 + 20) * (3 - 1)) % 17 + 68 = 77
+        ast_op[0] = 1; ast_arg[0] = 10;
+        ast_op[1] = 1; ast_arg[1] = 20;
+        ast_op[2] = 2; ast_arg[2] = 0;
+        ast_op[3] = 1; ast_arg[3] = 3;
+        ast_op[4] = 1; ast_arg[4] = 1;
+        ast_op[5] = 3; ast_arg[5] = 0;
+        ast_op[6] = 4; ast_arg[6] = 0;
+        ast_op[7] = 1; ast_arg[7] = 17;
+        ast_op[8] = 5; ast_arg[8] = 0;
+        ast_op[9] = 1; ast_arg[9] = 68;
+        ast_op[10] = 2; ast_arg[10] = 0;
+        ast_op[11] = 9;
+        n_ops = 12;
+    } else {
+        // Program 3: real x86-64 counted loop computing sum(1..10) = 55
+        ast_op[0] = 6; ast_arg[0] = 10;
+        ast_op[1] = 9; ast_arg[1] = 0;
+        n_ops = 2;
+    }
+
+    let mut code: [i64; 160] = [0; 160];
+    let mut clen: i64 = 0;
+    let mut depth: i64 = 0;
+    let mut i: i64 = 0;
+    while i < n_ops {
+        let op: i64 = ast_op[i];
+        let arg: i64 = ast_arg[i];
+        if op == 1 {
+            // PUSH_IMM(arg): if depth>0 emit push rax (0x50); then movabs rax, imm64 (48 B8 <8 B>)
+            if depth > 0 {
+                code[clen] = 80; clen = clen + 1;
+            }
+            code[clen] = 72; clen = clen + 1;
+            code[clen] = 184; clen = clen + 1;
+            let mut v: i64 = arg;
+            let mut bi: i64 = 0;
+            while bi < 8 {
+                let mut b: i64 = v % 256;
+                let mut q: i64 = v / 256;
+                if b < 0 { b = b + 256; q = q - 1; }
+                code[clen] = b; clen = clen + 1;
+                v = q;
+                bi = bi + 1;
+            }
+            depth = depth + 1;
+        } else if op == 2 {
+            // ADD: pop rcx (59); add rax, rcx (48 01 C8)
+            code[clen] = 89; clen = clen + 1;
+            code[clen] = 72; clen = clen + 1;
+            code[clen] = 1; clen = clen + 1;
+            code[clen] = 200; clen = clen + 1;
+            depth = depth - 1;
+        } else if op == 3 {
+            // SUB: pop rcx (59); sub rcx, rax (48 29 C1); mov rax, rcx (48 89 C8)
+            code[clen] = 89; clen = clen + 1;
+            code[clen] = 72; clen = clen + 1;
+            code[clen] = 41; clen = clen + 1;
+            code[clen] = 193; clen = clen + 1;
+            code[clen] = 72; clen = clen + 1;
+            code[clen] = 137; clen = clen + 1;
+            code[clen] = 200; clen = clen + 1;
+            depth = depth - 1;
+        } else if op == 4 {
+            // MUL: pop rcx (59); imul rax, rcx (48 0F AF C1)
+            code[clen] = 89; clen = clen + 1;
+            code[clen] = 72; clen = clen + 1;
+            code[clen] = 15; clen = clen + 1;
+            code[clen] = 175; clen = clen + 1;
+            code[clen] = 193; clen = clen + 1;
+            depth = depth - 1;
+        } else if op == 5 {
+            // MOD: pop rcx (59); xchg rax, rcx (48 91); cqo (48 99); idiv rcx (48 F7 F9); mov rax, rdx (48 89 D0)
+            code[clen] = 89; clen = clen + 1;
+            code[clen] = 72; clen = clen + 1;
+            code[clen] = 145; clen = clen + 1;
+            code[clen] = 72; clen = clen + 1;
+            code[clen] = 153; clen = clen + 1;
+            code[clen] = 72; clen = clen + 1;
+            code[clen] = 247; clen = clen + 1;
+            code[clen] = 249; clen = clen + 1;
+            code[clen] = 72; clen = clen + 1;
+            code[clen] = 137; clen = clen + 1;
+            code[clen] = 208; clen = clen + 1;
+            depth = depth - 1;
+        } else if op == 6 {
+            // SUM_LOOP(N): xor eax,eax; mov ecx,1; mov edx,N;
+            //   loop: cmp rcx,rdx; jg +9; add rax,rcx; inc rcx; jmp -14
+            // xor eax, eax (31 C0)
+            code[clen] = 49; clen = clen + 1;
+            code[clen] = 192; clen = clen + 1;
+            // mov ecx, 1 (B9 01 00 00 00)
+            code[clen] = 185; clen = clen + 1;
+            code[clen] = 1; clen = clen + 1;
+            code[clen] = 0; clen = clen + 1;
+            code[clen] = 0; clen = clen + 1;
+            code[clen] = 0; clen = clen + 1;
+            // mov edx, arg (BA <u32_le>)
+            code[clen] = 186; clen = clen + 1;
+            code[clen] = arg % 256; clen = clen + 1;
+            code[clen] = (arg / 256) % 256; clen = clen + 1;
+            code[clen] = (arg / 65536) % 256; clen = clen + 1;
+            code[clen] = (arg / 16777216) % 256; clen = clen + 1;
+            // loop_top: cmp rcx, rdx (48 39 D1) [3 B]
+            let loop_top: i64 = clen;
+            code[clen] = 72; clen = clen + 1;
+            code[clen] = 57; clen = clen + 1;
+            code[clen] = 209; clen = clen + 1;
+            // jg rel8 (7F <patch>) [2 B]
+            code[clen] = 127; clen = clen + 1;
+            let p_jg: i64 = clen;
+            code[clen] = 0; clen = clen + 1;
+            // add rax, rcx (48 01 C8) [3 B]
+            code[clen] = 72; clen = clen + 1;
+            code[clen] = 1; clen = clen + 1;
+            code[clen] = 200; clen = clen + 1;
+            // inc rcx (48 FF C1) [3 B]
+            code[clen] = 72; clen = clen + 1;
+            code[clen] = 255; clen = clen + 1;
+            code[clen] = 193; clen = clen + 1;
+            // jmp rel8 loop_top (EB <back>) [2 B]
+            code[clen] = 235; clen = clen + 1;
+            let back_off: i64 = loop_top - (clen + 1);
+            code[clen] = back_off + 256; clen = clen + 1;
+            // Backpatch jg target to loop_end
+            code[p_jg] = clen - (p_jg + 1);
+            depth = 1;
+        } else if op == 9 {
+            // RET: C3
+            code[clen] = 195; clen = clen + 1;
+        }
+        i = i + 1;
+    }
+
+    // Print prog_id, byte_len, every raw x86-64 machine-code byte, and rolling digest!
+    println("{}", prog_id);
+    println("{}", clen);
+    let mut digest: i64 = 0;
+    let mut k: i64 = 0;
+    while k < clen {
+        let bv: i64 = code[k];
+        println("{}", bv);
+        digest = (digest * 131 + bv + 1) % 1000000007;
+        k = k + 1;
+    }
+    println("{}", digest);
+    return digest;
+}
+
+fn main() ~ Console {
+    let _ = compile_ast_prog(1, 0);
+    let _ = compile_ast_prog(2, 0);
+    let _ = compile_ast_prog(3, 0);
+}
