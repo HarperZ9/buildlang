@@ -937,17 +937,20 @@ impl<'a> Parser<'a> {
                     span: lifetime.span,
                 });
             } else {
-                let path = self.parse_path()?;
+                let mut path = self.parse_path()?;
                 let span = path.span;
-                // Fn-trait sugar: `Fn(A, B) -> C` (also FnMut/FnOnce). Consume the
-                // parenthesized argument types and optional return type so the bound
-                // parses; without this the unparsed `(...) -> T` derails the generic-
-                // param list and truncates the impl block, leaking later methods.
+                // Fn-trait sugar: `Fn(A, B) -> C` (also FnMut/FnOnce). Preserve the
+                // parenthesized argument types in the last segment's generics so MIR
+                // lowering can propagate closure parameter type hints to call sites.
                 if self.eat(&TokenKind::OpenDelim(Delimiter::Paren)) {
+                    let mut fn_param_tys = Vec::new();
                     if !self.check(&TokenKind::CloseDelim(Delimiter::Paren)) {
                         loop {
-                            let _ = self.parse_type()?;
+                            fn_param_tys.push(self.parse_type()?);
                             if !self.eat(&TokenKind::Comma) {
+                                break;
+                            }
+                            if self.check(&TokenKind::CloseDelim(Delimiter::Paren)) {
                                 break;
                             }
                         }
@@ -955,6 +958,11 @@ impl<'a> Parser<'a> {
                     self.expect(&TokenKind::CloseDelim(Delimiter::Paren))?;
                     if self.eat(&TokenKind::Arrow) {
                         let _ = self.parse_type()?;
+                    }
+                    if let Some(last) = path.segments.last_mut() {
+                        for arg_ty in fn_param_tys {
+                            last.generics.push(GenericArg::Type(Box::new(arg_ty)));
+                        }
                     }
                 }
                 bounds.push(TypeBound {

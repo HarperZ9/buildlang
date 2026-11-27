@@ -786,6 +786,24 @@ static int32_t build_hvec_pop_i32(BuildVecHandle h) {
 static void build_hvec_free(BuildVecHandle h) { build_vec_free(h.inner); free(h.inner); }
 /* `clear` keeps the handle and the buffer: the length drops to zero. */
 static void build_hvec_clear(BuildVecHandle h) { h.inner->len = 0; }
+static void build_hvec_truncate(BuildVecHandle h, size_t new_len) {
+    if (new_len < h.inner->len) h.inner->len = new_len;
+}
+static void build_hvec_reserve(BuildVecHandle h, size_t additional) {
+    BuildVec* v = h.inner;
+    size_t needed = v->len + additional;
+    if (needed > v->cap) {
+        size_t new_cap = v->cap == 0 ? 8 : v->cap;
+        while (new_cap < needed) new_cap *= 2;
+        void* new_ptr = realloc(v->ptr, new_cap * v->elem_size);
+        if (!new_ptr) {
+            fprintf(stderr, "out of memory in Vec::reserve\n");
+            exit(101);
+        }
+        v->ptr = new_ptr;
+        v->cap = new_cap;
+    }
+}
 static int __build_cmp_i32(const void* a, const void* b) {
     int32_t x = *(const int32_t*)a, y = *(const int32_t*)b;
     return (x > y) - (x < y);
@@ -876,6 +894,16 @@ static void build_vec_remove_at(BuildVecHandle h, size_t i) {
     if (i >= v->len) bl_index_oob((long long)i, v->len);
     memmove((char*)v->ptr + i * v->elem_size, (char*)v->ptr + (i + 1) * v->elem_size,
             (v->len - i - 1) * v->elem_size);
+    v->len--;
+}
+static void build_vec_swap_remove_at(BuildVecHandle h, size_t i) {
+    BuildVec* v = h.inner;
+    if (i >= v->len) bl_index_oob((long long)i, v->len);
+    if (i + 1 < v->len) {
+        memcpy((char*)v->ptr + i * v->elem_size,
+               (char*)v->ptr + (v->len - 1) * v->elem_size,
+               v->elem_size);
+    }
     v->len--;
 }
 static void build_vec_move_last_to(BuildVecHandle h, size_t i) {
@@ -1219,6 +1247,55 @@ static int32_t build_formatter_write(BuildFormatter* f, BuildString s) {
 
 static BuildString build_formatter_finish(BuildFormatter* f) {
     return f ? f->buf : build_string_new("");
+}
+
+typedef struct BuildByteReader {
+    const uint8_t* ptr;
+    size_t len;
+    size_t pos;
+} BuildByteReader;
+
+static BuildByteReader build_byte_reader_new(const uint8_t* ptr, size_t len) {
+    BuildByteReader r;
+    r.ptr = ptr;
+    r.len = len;
+    r.pos = 0;
+    return r;
+}
+
+static float build_byte_reader_read_s15_fixed16(BuildByteReader* r) {
+    if (!r || !r->ptr || r->pos + 4 > r->len) return 0.0f;
+    uint32_t b0 = (uint32_t)r->ptr[r->pos];
+    uint32_t b1 = (uint32_t)r->ptr[r->pos + 1];
+    uint32_t b2 = (uint32_t)r->ptr[r->pos + 2];
+    uint32_t b3 = (uint32_t)r->ptr[r->pos + 3];
+    r->pos += 4;
+    int32_t raw = (int32_t)((b0 << 24) | (b1 << 16) | (b2 << 8) | b3);
+    return (float)raw / 65536.0f;
+}
+
+typedef struct BuildByteWriter {
+    uint8_t* ptr;
+    size_t len;
+    size_t cap;
+} BuildByteWriter;
+
+static void build_byte_writer_write_s15_fixed16(BuildByteWriter* w, float v) {
+    if (!w) return;
+    int32_t raw = (int32_t)(v * 65536.0f);
+    uint32_t u = (uint32_t)raw;
+    if (w->len + 4 > w->cap) {
+        size_t ncap = w->cap ? w->cap * 2 : 64;
+        while (ncap < w->len + 4) ncap *= 2;
+        uint8_t* nptr = (uint8_t*)realloc(w->ptr, ncap);
+        if (!nptr) return;
+        w->ptr = nptr;
+        w->cap = ncap;
+    }
+    w->ptr[w->len++] = (uint8_t)((u >> 24) & 0xFFu);
+    w->ptr[w->len++] = (uint8_t)((u >> 16) & 0xFFu);
+    w->ptr[w->len++] = (uint8_t)((u >> 8) & 0xFFu);
+    w->ptr[w->len++] = (uint8_t)(u & 0xFFu);
 }
 
 typedef struct BuildCharIter {
@@ -3580,6 +3657,36 @@ static bool build_is_dir(const char* path) {
     struct stat st;
     return (stat(path, &st) == 0 && S_ISDIR(st.st_mode));
     #endif
+}
+
+static bool build_create_dir_all(const char* path) {
+    if (!path || !*path) return false;
+    char buf[4096];
+    size_t len = strlen(path);
+    if (len >= sizeof(buf)) return false;
+    memcpy(buf, path, len + 1);
+    for (size_t i = 1; i < len; i++) {
+        if (buf[i] == '/' || buf[i] == '\\') {
+            char saved = buf[i];
+            buf[i] = '\0';
+            #ifdef _WIN32
+            CreateDirectoryA(buf, NULL);
+            #else
+            mkdir(buf, 0755);
+            #endif
+            buf[i] = saved;
+        }
+    }
+    #ifdef _WIN32
+    return CreateDirectoryA(buf, NULL) != 0 || build_is_dir(buf);
+    #else
+    return mkdir(buf, 0755) == 0 || build_is_dir(buf);
+    #endif
+}
+
+static bool build_remove_dir_all(const char* path) {
+    if (!path || !*path) return false;
+    return remove(path) == 0;
 }
 
 static int64_t build_file_size(const char* path) {

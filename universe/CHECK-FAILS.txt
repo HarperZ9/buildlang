@@ -4,6 +4,13 @@
 # fails when a line here stops being true or a file fails that is not listed, so a fix to the
 # compiler or to a module has to remove its line.
 #
+# State on 2026-11-27 with buildc 1.15.0: 141 of 276 files pass and 135 fail
+# (1 lex, 7 parse, 127 types). Wave 42F burned CHECK-FAILS down from 150 to 135
+# (+15 newly green: build.bld, foundation/collections.bld, foundation/error.bld,
+# foundation/fmt.bld, foundation/itertools.bld, foundation/text.bld, nexus/assets.bld,
+# nexus/config.bld, nexus/events.bld, nexus/registry.bld, nexus/scripting.bld,
+# photon/path_tracing.bld, refract/presets.bld, spectrum/icc_profile.bld, and
+# wavelength/video.bld) via real parser, typechecker, MIR, and C-runtime upgrades.
 # State on 2026-11-26 with buildc 1.15.0: 106 of 276 files pass and 170 fail
 # (1 lex, 21 parse, 148 types). Previously 104 of 275 passed and 171 failed;
 # Wave 25D wired the V5 certified e-graph superoptimizer (`--superopt`,
@@ -33,7 +40,6 @@
 axiom/lib.bld types
 bench/lib.bld types
 benchmarks/universe_benchmarks.bld types
-build.bld types
 buildos/lib.bld types
 calibrate/lib.bld types
 calibrate/main.bld types
@@ -54,21 +60,16 @@ field-tensor/lib.bld types
 fmt/lib.bld types
 forge/lib.bld types
 foundation/cli.bld types
-foundation/collections.bld types
 foundation/concurrency.bld types
 foundation/crypto.bld types
-foundation/error.bld types
-foundation/fmt.bld parse
 foundation/fs.bld types
 foundation/io_extended.bld types
-foundation/itertools.bld types
 foundation/logging.bld types
 foundation/net.bld types
 foundation/process.bld types
-foundation/random.bld parse
+foundation/random.bld types
 foundation/serialization.bld types
 foundation/testing.bld types
-foundation/text.bld types
 foundation/uuid.bld types
 lsp/lib.bld types
 lumina/color_grading.bld types
@@ -81,17 +82,12 @@ neutrino/lib.bld types
 neutrino/nerf.bld parse
 neutrino/upscaling.bld types
 nexus/api.bld types
-nexus/assets.bld types
-nexus/config.bld types
 nexus/diagnostics.bld types
-nexus/events.bld types
 nexus/lib.bld types
 nexus/loader.bld types
 nexus/networking.bld types
 nexus/persistence.bld types
 nexus/profiles.bld types
-nexus/registry.bld types
-nexus/scripting.bld types
 nexus/ui.bld types
 nova/lib.bld types
 oracle/automl.bld types
@@ -109,7 +105,7 @@ photon/cloth.bld types
 photon/color_grading.bld types
 photon/culling.bld types
 photon/debug_visualization.bld types
-photon/decals.bld parse
+photon/decals.bld types
 photon/deferred.bld types
 photon/foliage.bld types
 photon/gpu_culling.bld types
@@ -121,14 +117,13 @@ photon/lens_effects.bld types
 photon/lib.bld types
 photon/light_clustering.bld types
 photon/lod_streaming.bld types
-photon/materials.bld parse
+photon/materials.bld types
 photon/mesh_processing.bld types
 photon/mesh_shading.bld types
 photon/motion_blur.bld types
 photon/neural.bld types
 photon/overlay.bld types
 photon/particles.bld types
-photon/path_tracing.bld types
 photon/post_processing.bld types
 photon/ray_tracing.bld types
 photon/render_graph.bld types
@@ -158,13 +153,11 @@ refract/effects.bld parse
 refract/hooks.bld types
 refract/lib.bld parse
 refract/particle_lights.bld parse
-refract/presets.bld types
 refract/skylighting.bld types
 refract/system.bld types
 refract/weather.bld types
 repl/lib.bld types
 runtime/lib.bld types
-spectrum/icc_profile.bld types
 spectrum/lib.bld types
 test/lib.bld parse
 tests/benchmarks.bld types
@@ -179,4 +172,3 @@ universe/lib.bld types
 wavelength/audio.bld types
 wavelength/image.bld types
 wavelength/lib.bld types
-wavelength/video.bld types

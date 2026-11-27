@@ -2907,14 +2907,17 @@ impl<'ctx> TypeInfer<'ctx> {
                             .iter()
                             .skip_while(|(name, _)| name.as_ref() == "self")
                             .map(|(_, pty)| {
-                                if matches!(&pty.kind, TyKind::Var(_)) {
+                                if matches!(&pty.kind, TyKind::Param(n, _) if n.as_ref() == "Self")
+                                    || matches!(&pty.kind, TyKind::Var(_))
+                                {
                                     receiver_ty.clone()
                                 } else {
                                     pty.clone()
                                 }
                             })
                             .collect();
-                        let ret = if matches!(&method.sig.ret.kind, TyKind::Var(_)) {
+                        let ret = if matches!(&method.sig.ret.kind, TyKind::Param(n, _) if n.as_ref() == "Self")
+                        {
                             receiver_ty
                         } else {
                             method.sig.ret.clone()
@@ -2942,6 +2945,15 @@ impl<'ctx> TypeInfer<'ctx> {
         // Fallback: look up methods from trait impls registered in the TypeContext.
         // This handles `impl Trait for Type` when the full TraitEnv isn't available.
         if let Some(method) = self.ctx.lookup_trait_method(ty, method_name) {
+            // Substitute trait `Self` (`Param("Self", u32::MAX)`) with the
+            // concrete receiver type (peeling any reference wrapper) and
+            // freshen remaining method-level generic params with one cache.
+            let self_concrete = match &ty.kind {
+                TyKind::Ref(_, _, inner) => self.apply(inner),
+                _ => self.apply(ty),
+            };
+            let mut cache = std::collections::HashMap::new();
+            cache.insert((Arc::from("Self"), u32::MAX), self_concrete);
             // Skip the first parameter (self) since method call inference
             // only counts the explicit arguments, not the receiver.
             let params: Vec<Ty> = method
@@ -2949,9 +2961,9 @@ impl<'ctx> TypeInfer<'ctx> {
                 .params
                 .iter()
                 .skip_while(|(name, _)| name.as_ref() == "self")
-                .map(|(_, ty)| ty.clone())
+                .map(|(_, ty)| ty.freshen_params_with_cache(&mut cache))
                 .collect();
-            let ret = method.sig.ret.clone();
+            let ret = method.sig.ret.freshen_params_with_cache(&mut cache);
             return Some(Ty::function_with_effects(
                 params,
                 ret,
@@ -3019,19 +3031,19 @@ impl<'ctx> TypeInfer<'ctx> {
                     .iter()
                     .skip_while(|(name, _)| name.as_ref() == "self")
                     .map(|(_, pty)| {
-                        // Substitute Self-like fresh variables with the receiver type.
-                        // In trait defs, Self becomes a fresh var; we replace it with T.
-                        if matches!(&pty.kind, TyKind::Var(_)) {
+                        // Substitute Self with the receiver type.
+                        if matches!(&pty.kind, TyKind::Param(n, _) if n.as_ref() == "Self") {
                             receiver_ty.clone()
                         } else {
                             pty.clone()
                         }
                     })
                     .collect();
-                // For the return type: if it's a fresh variable (from Self in the
-                // trait def), substitute with the receiver's param type T.
-                // This ensures `T.scale(factor) -> Self` returns T, not ?Tn.
-                let ret = if matches!(&method.sig.ret.kind, TyKind::Var(_)) {
+                // Substitute `-> Self` with the receiver's param type T, while
+                // keeping unresolved/generic return types (like `Result<(), E>`)
+                // as fresh variables rather than mis-typing them as T.
+                let ret = if matches!(&method.sig.ret.kind, TyKind::Param(n, _) if n.as_ref() == "Self")
+                {
                     receiver_ty
                 } else {
                     method.sig.ret.clone()
@@ -4187,6 +4199,8 @@ impl<'ctx> TypeInfer<'ctx> {
                 if let Some(scheme) = self.ctx.lookup_var_scheme(func_name) {
                     return scheme.instantiate();
                 }
+            } else if let Some(ty) = self.ctx.lookup_module_binding(type_name, func_name) {
+                return ty.freshen_params();
             } else {
                 // Module-qualified call: return a fresh type variable so that
                 // type inference resolves it from the call-site arguments
@@ -5596,7 +5610,8 @@ impl<'ctx> TypeInfer<'ctx> {
 
         // Snapshot the candidate param/return types (clone out to drop the
         // borrow on `self.ctx` before matching, which borrows `self`).
-        let candidates: Vec<(Vec<Ty>, Ty)> = self
+        let cur_mod = self.ctx.current_mod_path().to_vec();
+        let candidates: Vec<(Vec<Ty>, Ty, Vec<Arc<str>>)> = self
             .ctx
             .method_candidates(name.as_ref())
             .map(|cs| {
@@ -5606,8 +5621,8 @@ impl<'ctx> TypeInfer<'ctx> {
                         // afresh for this call, jointly over params and return.
                         let f = Ty::function(c.param_tys.clone(), c.ret.clone()).freshen_params();
                         match f.kind {
-                            TyKind::Fn(fn_ty) => (fn_ty.params, *fn_ty.ret),
-                            _ => (c.param_tys.clone(), c.ret.clone()),
+                            TyKind::Fn(fn_ty) => (fn_ty.params, *fn_ty.ret, c.module_path.clone()),
+                            _ => (c.param_tys.clone(), c.ret.clone(), c.module_path.clone()),
                         }
                     })
                     .collect()
@@ -5621,12 +5636,29 @@ impl<'ctx> TypeInfer<'ctx> {
                 self.0.len()
             }
         }
-        let cand_views: Vec<Cand<'_>> = candidates.iter().map(|(p, _)| Cand(p)).collect();
+        let cand_views: Vec<Cand<'_>> = candidates.iter().map(|(p, _, _)| Cand(p)).collect();
 
-        let result =
+        let raw_result =
             super::dispatch::resolve_overload(&cand_views, applied_args.len(), |ci, pos| {
                 self.dispatch_position_match(&candidates[ci].0[pos], &applied_args[pos])
             });
+        // If multiple candidates tie across different inline modules, prefer the
+        // unique tied candidate defined in the caller's own inline module (or root).
+        let result = match raw_result {
+            Err(super::dispatch::DispatchError::AmbiguousMethod(ref tied)) => {
+                let in_cur: Vec<usize> = tied
+                    .iter()
+                    .copied()
+                    .filter(|&i| candidates[i].2 == cur_mod)
+                    .collect();
+                if in_cur.len() == 1 {
+                    Ok(in_cur[0])
+                } else {
+                    raw_result
+                }
+            }
+            other => other,
+        };
 
         let arg_tys_str = || {
             applied_args
@@ -5638,7 +5670,7 @@ impl<'ctx> TypeInfer<'ctx> {
         let candidates_str = || {
             candidates
                 .iter()
-                .map(|(p, r)| {
+                .map(|(p, r, _)| {
                     let ps = p
                         .iter()
                         .map(|t| t.to_string())
@@ -5652,7 +5684,7 @@ impl<'ctx> TypeInfer<'ctx> {
 
         match result {
             Ok(idx) => {
-                let (params, ret) = &candidates[idx];
+                let (params, ret, _) = &candidates[idx];
                 // Infer then coerce so argument-position relaxations such as
                 // `&mut T` to `&T` stay authoritative. The extra integer check
                 // applies only concrete integer literal ranges from the selected
@@ -6943,7 +6975,32 @@ impl<'ctx> TypeInfer<'ctx> {
                 return Ty::str();
             }
             "index_of" => return Ty::int(IntTy::I64),
-            "repeat" => return Ty::str(),
+            "repeat" => {
+                let inner = match &receiver_ty.kind {
+                    TyKind::Ref(_, _, inner) => self.apply(inner),
+                    _ => receiver_ty.clone(),
+                };
+                match &inner.kind {
+                    TyKind::Slice(elem) | TyKind::Array(elem, _) => {
+                        let vec_def_id = self
+                            .ctx
+                            .lookup_type_by_name("Vec")
+                            .map(|td| td.def_id)
+                            .unwrap_or(DefId::new(0, u32::MAX));
+                        return Ty::adt(vec_def_id, vec![(**elem).clone()]);
+                    }
+                    TyKind::Adt(def, args)
+                        if self
+                            .ctx
+                            .lookup_type(*def)
+                            .is_some_and(|td| td.name.as_ref() == "Vec")
+                            && args.len() == 1 =>
+                    {
+                        return inner;
+                    }
+                    _ => return Ty::str(),
+                }
+            }
             "eq_ignore_ascii_case" => {
                 let inner = match &receiver_ty.kind {
                     TyKind::Ref(_, _, inner) => self.apply(inner),

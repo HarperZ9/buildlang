@@ -364,8 +364,19 @@ fn declared_names(toks: &[Tok<'_>]) -> BTreeSet<String> {
         let is_decl = match prev {
             Some(Tok::Ident(p)) => !is_keyword(p) || matches!(*p, "struct" | "static" | "const"),
             Some(Tok::Punct('*')) => {
-                // `void* name(` is a declaration; `x = *name(` is a call.
-                matches!(toks.get(k.wrapping_sub(2)), Some(Tok::Ident(t)) if !is_keyword(t))
+                // `void* name(` or `void** name(` or C function-pointer return
+                // `void (*name(void))(Arg*)` is a declaration; `x = *name(` is a call.
+                let mut idx = k - 1;
+                while idx > 0 && matches!(toks.get(idx), Some(Tok::Punct('*'))) {
+                    idx -= 1;
+                }
+                if matches!(toks.get(idx), Some(Tok::Punct('('))) && idx > 0 {
+                    idx -= 1;
+                    while idx > 0 && matches!(toks.get(idx), Some(Tok::Punct('*'))) {
+                        idx -= 1;
+                    }
+                }
+                matches!(toks.get(idx), Some(Tok::Ident(t)) if !is_keyword(t))
             }
             Some(Tok::Directive("define")) => true,
             _ => false,
@@ -455,6 +466,21 @@ fn variable_names(toks: &[Tok<'_>]) -> BTreeSet<String> {
     vars
 }
 
+/// Ambient capability builtins that only exist as `build_*` runtime wrappers
+/// on direct call and cannot be used as bare C function-pointer values.
+const AMBIENT_NON_C_BUILTINS: &[&str] = &[
+    "read_file",
+    "write_file",
+    "append_file",
+    "delete_file",
+    "file_exists",
+    "read_dir",
+    "println",
+    "print",
+    "eprintln",
+    "eprint",
+];
+
 /// Return the names the user section of `c_source` calls without any declaration.
 pub fn undeclared_calls(c_source: &str) -> Vec<String> {
     let user_start = c_source
@@ -466,7 +492,15 @@ pub fn undeclared_calls(c_source: &str) -> Vec<String> {
     let declared = declared_names(&all_toks);
     let vars = variable_names(&all_toks);
     let prefixes = pasted_prefixes(&all_toks);
-    called_names(&user_toks)
+    let mut called = called_names(&user_toks);
+    for w in user_toks.windows(3) {
+        if let [Tok::Ident("return"), Tok::Ident(name), Tok::Punct(';')] = w {
+            if AMBIENT_NON_C_BUILTINS.contains(name) {
+                called.insert((*name).to_string());
+            }
+        }
+    }
+    called
         .into_iter()
         .filter(|n| {
             !declared.contains(n)

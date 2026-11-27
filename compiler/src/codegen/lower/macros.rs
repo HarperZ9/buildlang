@@ -98,15 +98,30 @@ impl<'ctx> MirLowerer<'ctx> {
                     source,
                 );
                 for stmt in &then_branch.stmts {
-                    if let StmtKind::Expr(e) | StmtKind::Semi(e) = &stmt.kind {
-                        Self::collect_free_vars_inner(
-                            e,
-                            param_names,
-                            env_vars,
-                            found,
-                            seen,
-                            source,
-                        );
+                    match &stmt.kind {
+                        StmtKind::Expr(e) | StmtKind::Semi(e) => {
+                            Self::collect_free_vars_inner(
+                                e,
+                                param_names,
+                                env_vars,
+                                found,
+                                seen,
+                                source,
+                            );
+                        }
+                        StmtKind::Local(local) => {
+                            if let Some(ref init) = local.init {
+                                Self::collect_free_vars_inner(
+                                    &init.expr,
+                                    param_names,
+                                    env_vars,
+                                    found,
+                                    seen,
+                                    source,
+                                );
+                            }
+                        }
+                        _ => {}
                     }
                 }
                 if let Some(e) = else_branch {
@@ -115,15 +130,174 @@ impl<'ctx> MirLowerer<'ctx> {
             }
             ExprKind::Block(block) | ExprKind::Unsafe(block) => {
                 for stmt in &block.stmts {
-                    if let StmtKind::Expr(e) | StmtKind::Semi(e) = &stmt.kind {
+                    match &stmt.kind {
+                        StmtKind::Expr(e) | StmtKind::Semi(e) => {
+                            Self::collect_free_vars_inner(
+                                e,
+                                param_names,
+                                env_vars,
+                                found,
+                                seen,
+                                source,
+                            );
+                        }
+                        StmtKind::Local(local) => {
+                            if let Some(ref init) = local.init {
+                                Self::collect_free_vars_inner(
+                                    &init.expr,
+                                    param_names,
+                                    env_vars,
+                                    found,
+                                    seen,
+                                    source,
+                                );
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            ExprKind::Closure {
+                params: inner_params,
+                body: inner_body,
+                ..
+            } => {
+                let mut inner_names = param_names.clone();
+                for p in inner_params {
+                    if let ast::PatternKind::Ident { name, .. } = &p.pattern.kind {
+                        inner_names.insert(name.name.clone());
+                    }
+                }
+                Self::collect_free_vars_inner(
+                    inner_body,
+                    &inner_names,
+                    env_vars,
+                    found,
+                    seen,
+                    source,
+                );
+            }
+            ExprKind::Struct { fields, rest, .. } => {
+                for f in fields {
+                    if let Some(v) = &f.value {
                         Self::collect_free_vars_inner(
-                            e,
+                            v,
                             param_names,
                             env_vars,
                             found,
                             seen,
                             source,
                         );
+                    }
+                }
+                if let Some(r) = rest {
+                    Self::collect_free_vars_inner(r, param_names, env_vars, found, seen, source);
+                }
+            }
+            ExprKind::IfLet {
+                expr: scrut,
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                Self::collect_free_vars_inner(scrut, param_names, env_vars, found, seen, source);
+                for stmt in &then_branch.stmts {
+                    match &stmt.kind {
+                        StmtKind::Expr(e) | StmtKind::Semi(e) => {
+                            Self::collect_free_vars_inner(
+                                e,
+                                param_names,
+                                env_vars,
+                                found,
+                                seen,
+                                source,
+                            );
+                        }
+                        StmtKind::Local(local) => {
+                            if let Some(ref init) = local.init {
+                                Self::collect_free_vars_inner(
+                                    &init.expr,
+                                    param_names,
+                                    env_vars,
+                                    found,
+                                    seen,
+                                    source,
+                                );
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                if let Some(e) = else_branch {
+                    Self::collect_free_vars_inner(e, param_names, env_vars, found, seen, source);
+                }
+            }
+            ExprKind::For { iter, body, .. } => {
+                Self::collect_free_vars_inner(iter, param_names, env_vars, found, seen, source);
+                for stmt in &body.stmts {
+                    match &stmt.kind {
+                        StmtKind::Expr(e) | StmtKind::Semi(e) => {
+                            Self::collect_free_vars_inner(
+                                e,
+                                param_names,
+                                env_vars,
+                                found,
+                                seen,
+                                source,
+                            );
+                        }
+                        StmtKind::Local(local) => {
+                            if let Some(ref init) = local.init {
+                                Self::collect_free_vars_inner(
+                                    &init.expr,
+                                    param_names,
+                                    env_vars,
+                                    found,
+                                    seen,
+                                    source,
+                                );
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            ExprKind::While {
+                condition, body, ..
+            } => {
+                Self::collect_free_vars_inner(
+                    condition,
+                    param_names,
+                    env_vars,
+                    found,
+                    seen,
+                    source,
+                );
+                for stmt in &body.stmts {
+                    match &stmt.kind {
+                        StmtKind::Expr(e) | StmtKind::Semi(e) => {
+                            Self::collect_free_vars_inner(
+                                e,
+                                param_names,
+                                env_vars,
+                                found,
+                                seen,
+                                source,
+                            );
+                        }
+                        StmtKind::Local(local) => {
+                            if let Some(ref init) = local.init {
+                                Self::collect_free_vars_inner(
+                                    &init.expr,
+                                    param_names,
+                                    env_vars,
+                                    found,
+                                    seen,
+                                    source,
+                                );
+                            }
+                        }
+                        _ => {}
                     }
                 }
             }
@@ -2691,6 +2865,7 @@ impl<'ctx> MirLowerer<'ctx> {
             },
             "max" if terminal_args.is_empty() => IterTerminal::Max,
             "min" if terminal_args.is_empty() => IterTerminal::Min,
+            "last" if terminal_args.is_empty() => IterTerminal::Last,
             "nth" if terminal_args.len() == 1 => IterTerminal::Nth {
                 index: &terminal_args[0],
             },
@@ -2739,7 +2914,25 @@ impl<'ctx> MirLowerer<'ctx> {
                         // lowered value IS the source sequence (Vec<String> or
                         // BuildString bytes/chars).
                         "split_whitespace" | "split" | "lines" | "bytes" | "chars"
-                        | "char_indices" | "matches" | "values" | "values_mut" | "windows" => {
+                        | "char_indices" | "matches" | "keys" | "values" | "values_mut" => {
+                            steps.reverse();
+                            return Some(IterChain {
+                                source: current,
+                                steps,
+                                terminal,
+                            });
+                        }
+                        "windows"
+                            if args.len() == 1
+                                && !matches!(
+                                    &receiver.kind,
+                                    ExprKind::MethodCall { method: rm, .. }
+                                        if matches!(
+                                            rm.name.as_ref(),
+                                            "iter" | "iter_mut" | "into_iter"
+                                        )
+                                ) =>
+                        {
                             steps.reverse();
                             return Some(IterChain {
                                 source: current,
@@ -2779,12 +2972,63 @@ impl<'ctx> MirLowerer<'ctx> {
                             steps.push(IterStep::Take { count: &args[0] });
                             current = receiver;
                         }
+                        "take_while" if args.len() == 1 => {
+                            steps.push(IterStep::TakeWhile { closure: &args[0] });
+                            current = receiver;
+                        }
                         "skip" if args.len() == 1 => {
                             steps.push(IterStep::Skip { count: &args[0] });
                             current = receiver;
                         }
                         "zip" if args.len() == 1 => {
                             steps.push(IterStep::Zip { other: &args[0] });
+                            current = receiver;
+                        }
+                        "chain" if args.len() == 1 => {
+                            steps.push(IterStep::Chain { other: &args[0] });
+                            current = receiver;
+                        }
+                        "group_by" if args.len() == 1 => {
+                            steps.push(IterStep::GroupBy { closure: &args[0] });
+                            current = receiver;
+                        }
+                        "chunks" if args.len() == 1 => {
+                            steps.push(IterStep::Chunks { size: &args[0] });
+                            current = receiver;
+                        }
+                        "windows" if args.len() == 1 => {
+                            steps.push(IterStep::Windows { size: &args[0] });
+                            current = receiver;
+                        }
+                        "dedup" if args.is_empty() => {
+                            steps.push(IterStep::Dedup);
+                            current = receiver;
+                        }
+                        "unique" if args.is_empty() => {
+                            steps.push(IterStep::Unique);
+                            current = receiver;
+                        }
+                        "interleave" if args.len() == 1 => {
+                            steps.push(IterStep::Interleave { other: &args[0] });
+                            current = receiver;
+                        }
+                        "merge" if args.len() == 1 => {
+                            steps.push(IterStep::Merge { other: &args[0] });
+                            current = receiver;
+                        }
+                        "intersperse" if args.len() == 1 => {
+                            steps.push(IterStep::Intersperse { sep: &args[0] });
+                            current = receiver;
+                        }
+                        "cartesian_product" if args.len() == 1 => {
+                            steps.push(IterStep::CartesianProduct { other: &args[0] });
+                            current = receiver;
+                        }
+                        "running_fold" if args.len() == 2 => {
+                            steps.push(IterStep::RunningFold {
+                                init: &args[0],
+                                closure: &args[1],
+                            });
                             current = receiver;
                         }
                         _ => return None, // Unknown intermediate method
@@ -2810,6 +3054,25 @@ impl<'ctx> MirLowerer<'ctx> {
                         _ => false,
                     };
                     if is_repeat {
+                        steps.reverse();
+                        return Some(IterChain {
+                            source: current,
+                            steps,
+                            terminal,
+                        });
+                    }
+                    return None;
+                }
+                // `successors(first, |prev| next)` / `std::iter::successors(...)`
+                ExprKind::Call { func, args } if args.len() == 2 => {
+                    let is_successors = match &func.kind {
+                        ExprKind::Ident(id) => id.name.as_ref() == "successors",
+                        ExprKind::Path(p) => p
+                            .last_ident()
+                            .is_some_and(|i| i.name.as_ref() == "successors"),
+                        _ => false,
+                    };
+                    if is_successors {
                         steps.reverse();
                         return Some(IterChain {
                             source: current,
@@ -2871,10 +3134,1436 @@ impl<'ctx> MirLowerer<'ctx> {
             (IterTerminal::Collect, Some(MirType::Struct(n))) if n.as_ref() == "BuildString"
         );
         // 1. Lower the source: a vector, or a range `a..b` / `a..=b`.
-        let (elem_ty, source, mut len_local) = match Self::range_source_bounds(chain.source) {
+        let (mut elem_ty, mut source, mut len_local) = match Self::range_source_bounds(chain.source)
+        {
             Some((start, end, inclusive)) => self.lower_range_source(start, end, inclusive)?,
             None => self.lower_vec_source(chain.source)?,
         };
+
+        // 1a. If the chain has `.chain(other)` step(s), materialize the primary source
+        // and each chained source into a single concatenated `Vec<elem_ty>`.
+        let chained_others: Vec<&ast::Expr> = chain
+            .steps
+            .iter()
+            .filter_map(|s| match s {
+                IterStep::Chain { other } => Some(*other),
+                _ => None,
+            })
+            .collect();
+        if !chained_others.is_empty() {
+            let (new_fn, push_fn) = Self::vec_fn_names_for_type(&elem_ty)?;
+            let (get_fn, _) = Self::vec_get_len_fn_names(&elem_ty)?;
+            let comb = {
+                let b = self.current_fn.as_mut().unwrap();
+                let c = b.create_local(MirType::Vec(Box::new(elem_ty.clone())));
+                let cb = b.create_block();
+                b.call(MirValue::Function(Arc::from(new_fn)), vec![], Some(c), cb);
+                b.switch_to_block(cb);
+                c
+            };
+            let mut sources_to_append: Vec<(ChainSource, LocalId)> = vec![(source, len_local)];
+            for other_expr in chained_others {
+                let other_src = match &other_expr.kind {
+                    ExprKind::MethodCall {
+                        receiver,
+                        method,
+                        args,
+                        ..
+                    } if args.is_empty()
+                        && matches!(method.name.as_ref(), "iter" | "iter_mut" | "into_iter") =>
+                    {
+                        receiver.as_ref()
+                    }
+                    _ => other_expr,
+                };
+                let (_, src2, len2) = match Self::range_source_bounds(other_src) {
+                    Some((start, end, inclusive)) => {
+                        self.lower_range_source(start, end, inclusive)?
+                    }
+                    None => self.lower_vec_source(other_src)?,
+                };
+                sources_to_append.push((src2, len2));
+            }
+            for (src_part, len_part) in sources_to_append {
+                let b = self.current_fn.as_mut().unwrap();
+                let idx = b.create_local(MirType::i64());
+                b.assign_const(idx, MirConst::Int(0, MirType::i64()));
+                let cond_bb = b.create_block();
+                let body_bb = b.create_block();
+                let exit_bb = b.create_block();
+                b.goto(cond_bb);
+                b.switch_to_block(cond_bb);
+                let cmp = b.create_local(MirType::Bool);
+                b.binary_op(cmp, BinOp::Lt, values::local(idx), values::local(len_part));
+                b.branch(values::local(cmp), body_bb, exit_bb);
+                b.switch_to_block(body_bb);
+                let el = match &src_part {
+                    ChainSource::Vec { local, get_fn } => {
+                        let e = b.create_local(elem_ty.clone());
+                        let cg = b.create_block();
+                        b.call(
+                            MirValue::Function(Arc::from(get_fn.as_str())),
+                            vec![values::local(*local), values::local(idx)],
+                            Some(e),
+                            cg,
+                        );
+                        b.switch_to_block(cg);
+                        values::local(e)
+                    }
+                    ChainSource::Range { first } => {
+                        let e = b.create_local(elem_ty.clone());
+                        let sum = b.create_local(MirType::i64());
+                        b.binary_op(sum, BinOp::Add, values::local(*first), values::local(idx));
+                        b.cast(e, CastKind::IntToInt, values::local(sum), elem_ty.clone());
+                        values::local(e)
+                    }
+                    ChainSource::Indexed { local } => {
+                        let e = b.create_local(elem_ty.clone());
+                        b.assign(
+                            e,
+                            MirRValue::IndexAccess {
+                                base: values::local(*local),
+                                index: values::local(idx),
+                                elem_ty: elem_ty.clone(),
+                            },
+                        );
+                        values::local(e)
+                    }
+                    ChainSource::StringBytes { local } => {
+                        let idx_u = b.create_local(MirType::usize());
+                        b.cast(
+                            idx_u,
+                            CastKind::IntToInt,
+                            values::local(idx),
+                            MirType::usize(),
+                        );
+                        let raw_b = b.create_local(MirType::i32());
+                        let cb = b.create_block();
+                        b.call(
+                            MirValue::Function(Arc::from("build_string_byte_at")),
+                            vec![values::local(*local), values::local(idx_u)],
+                            Some(raw_b),
+                            cb,
+                        );
+                        b.switch_to_block(cb);
+                        let e = b.create_local(elem_ty.clone());
+                        b.cast(e, CastKind::IntToInt, values::local(raw_b), elem_ty.clone());
+                        values::local(e)
+                    }
+                };
+                let cp = b.create_block();
+                b.call(
+                    MirValue::Function(Arc::from(push_fn.as_str())),
+                    vec![values::local(comb), el],
+                    None,
+                    cp,
+                );
+                b.switch_to_block(cp);
+                let ni = b.create_local(MirType::i64());
+                b.binary_op(
+                    ni,
+                    BinOp::Add,
+                    values::local(idx),
+                    MirValue::Const(MirConst::Int(1, MirType::i64())),
+                );
+                b.assign(idx, MirRValue::Use(values::local(ni)));
+                b.goto(cond_bb);
+                b.switch_to_block(exit_bb);
+            }
+            let b = self.current_fn.as_mut().unwrap();
+            let comb_len = b.create_local(MirType::i64());
+            let cl = b.create_block();
+            b.call(
+                MirValue::Function(Arc::from("build_hvec_len")),
+                vec![values::local(comb)],
+                Some(comb_len),
+                cl,
+            );
+            b.switch_to_block(cl);
+            source = ChainSource::Vec {
+                local: comb,
+                get_fn,
+            };
+            len_local = comb_len;
+        }
+
+        // 1a2. If the chain has a `.group_by(|x| key)` step, materialize consecutive
+        // elements with equal keys into `Vec<(K, Vec<T>)>`.
+        let group_by_closure = chain.steps.iter().find_map(|s| match s {
+            IterStep::GroupBy { closure } => Some(*closure),
+            _ => None,
+        });
+        if let Some(gb_closure) = group_by_closure {
+            let key_ty = if let ExprKind::Closure { body, .. } = &gb_closure.kind {
+                // Recognize `|s| s.chars().next().unwrap()` -> char (`u32`).
+                fn mentions_chars_next(e: &ast::Expr) -> bool {
+                    match &e.kind {
+                        ExprKind::MethodCall {
+                            receiver, method, ..
+                        } => {
+                            if method.name.as_ref() == "chars" {
+                                true
+                            } else {
+                                mentions_chars_next(receiver)
+                            }
+                        }
+                        ExprKind::Paren(inner) => mentions_chars_next(inner),
+                        _ => false,
+                    }
+                }
+                if mentions_chars_next(body) {
+                    MirType::u32()
+                } else {
+                    self.infer_chain_output_type(
+                        &elem_ty,
+                        &[IterStep::Map {
+                            closure: gb_closure,
+                        }],
+                    )
+                }
+            } else {
+                MirType::i32()
+            };
+            let grp_vec_ty = MirType::Vec(Box::new(elem_ty.clone()));
+            let pair_elems = vec![key_ty.clone(), grp_vec_ty.clone()];
+            self.ensure_tuple_type_def(&pair_elems);
+            let pair_ty = MirType::Tuple(pair_elems);
+            let (elem_new_fn, elem_push_fn) = Self::vec_fn_names_for_type(&elem_ty)?;
+            let (grp_new_fn, grp_push_fn) = Self::vec_fn_names_for_type(&pair_ty)?;
+            let (grp_get_fn, _) = Self::vec_get_len_fn_names(&pair_ty)?;
+
+            let (groups, has_cur, cur_key, cur_vec, idx, cond_bb, body_bb, exit_bb, el_local) = {
+                let b = self.current_fn.as_mut().unwrap();
+                let groups = b.create_local(MirType::Vec(Box::new(pair_ty.clone())));
+                let c0 = b.create_block();
+                b.call(
+                    MirValue::Function(Arc::from(grp_new_fn.as_str())),
+                    vec![],
+                    Some(groups),
+                    c0,
+                );
+                b.switch_to_block(c0);
+                let has_cur = b.create_local(MirType::Bool);
+                b.assign_const(has_cur, MirConst::Bool(false));
+                let cur_key = b.create_local(key_ty.clone());
+                let cur_vec = b.create_local(grp_vec_ty.clone());
+                let c_init_v = b.create_block();
+                b.call(
+                    MirValue::Function(Arc::from(elem_new_fn.as_str())),
+                    vec![],
+                    Some(cur_vec),
+                    c_init_v,
+                );
+                b.switch_to_block(c_init_v);
+                let idx = b.create_local(MirType::i64());
+                b.assign_const(idx, MirConst::Int(0, MirType::i64()));
+                let cond_bb = b.create_block();
+                let body_bb = b.create_block();
+                let exit_bb = b.create_block();
+                b.goto(cond_bb);
+                b.switch_to_block(cond_bb);
+                let cmp = b.create_local(MirType::Bool);
+                b.binary_op(cmp, BinOp::Lt, values::local(idx), values::local(len_local));
+                b.branch(values::local(cmp), body_bb, exit_bb);
+                b.switch_to_block(body_bb);
+                let el_local = b.create_local(elem_ty.clone());
+                match &source {
+                    ChainSource::Vec { local, get_fn } => {
+                        let cg = b.create_block();
+                        b.call(
+                            MirValue::Function(Arc::from(get_fn.as_str())),
+                            vec![values::local(*local), values::local(idx)],
+                            Some(el_local),
+                            cg,
+                        );
+                        b.switch_to_block(cg);
+                    }
+                    ChainSource::Range { first } => {
+                        let sum = b.create_local(MirType::i64());
+                        b.binary_op(sum, BinOp::Add, values::local(*first), values::local(idx));
+                        b.cast(
+                            el_local,
+                            CastKind::IntToInt,
+                            values::local(sum),
+                            elem_ty.clone(),
+                        );
+                    }
+                    ChainSource::Indexed { local } => {
+                        b.assign(
+                            el_local,
+                            MirRValue::IndexAccess {
+                                base: values::local(*local),
+                                index: values::local(idx),
+                                elem_ty: elem_ty.clone(),
+                            },
+                        );
+                    }
+                    ChainSource::StringBytes { local } => {
+                        let idx_u = b.create_local(MirType::usize());
+                        b.cast(
+                            idx_u,
+                            CastKind::IntToInt,
+                            values::local(idx),
+                            MirType::usize(),
+                        );
+                        let raw_b = b.create_local(MirType::i32());
+                        let cb = b.create_block();
+                        b.call(
+                            MirValue::Function(Arc::from("build_string_byte_at")),
+                            vec![values::local(*local), values::local(idx_u)],
+                            Some(raw_b),
+                            cb,
+                        );
+                        b.switch_to_block(cb);
+                        b.cast(
+                            el_local,
+                            CastKind::IntToInt,
+                            values::local(raw_b),
+                            elem_ty.clone(),
+                        );
+                    }
+                }
+                (
+                    groups, has_cur, cur_key, cur_vec, idx, cond_bb, body_bb, exit_bb, el_local,
+                )
+            };
+            let _ = body_bb;
+            let k_val =
+                self.lower_iter_map_inline(gb_closure, values::local(el_local), None, None)?;
+            let groups_len = {
+                let b = self.current_fn.as_mut().unwrap();
+                let check_eq_bb = b.create_block();
+                let same_bb = b.create_block();
+                let new_grp_bb = b.create_block();
+                let flush_prev_bb = b.create_block();
+                let start_grp_bb = b.create_block();
+                let next_iter_bb = b.create_block();
+                b.branch(values::local(has_cur), check_eq_bb, start_grp_bb);
+                b.switch_to_block(check_eq_bb);
+                let eq_k = b.create_local(MirType::Bool);
+                b.binary_op(eq_k, BinOp::Eq, values::local(cur_key), k_val.clone());
+                b.branch(values::local(eq_k), same_bb, new_grp_bb);
+                b.switch_to_block(same_bb);
+                let cp1 = b.create_block();
+                b.call(
+                    MirValue::Function(Arc::from(elem_push_fn.as_str())),
+                    vec![values::local(cur_vec), values::local(el_local)],
+                    None,
+                    cp1,
+                );
+                b.switch_to_block(cp1);
+                b.goto(next_iter_bb);
+                b.switch_to_block(new_grp_bb);
+                b.goto(flush_prev_bb);
+                b.switch_to_block(flush_prev_bb);
+                let prev_pair = b.create_local(pair_ty.clone());
+                b.assign(
+                    prev_pair,
+                    MirRValue::Aggregate {
+                        kind: AggregateKind::Tuple,
+                        operands: vec![values::local(cur_key), values::local(cur_vec)],
+                    },
+                );
+                let cpg = b.create_block();
+                b.call(
+                    MirValue::Function(Arc::from(grp_push_fn.as_str())),
+                    vec![values::local(groups), values::local(prev_pair)],
+                    None,
+                    cpg,
+                );
+                b.switch_to_block(cpg);
+                b.goto(start_grp_bb);
+                b.switch_to_block(start_grp_bb);
+                b.assign(cur_key, MirRValue::Use(k_val));
+                let fresh_v = b.create_local(grp_vec_ty);
+                let cnv = b.create_block();
+                b.call(
+                    MirValue::Function(Arc::from(elem_new_fn.as_str())),
+                    vec![],
+                    Some(fresh_v),
+                    cnv,
+                );
+                b.switch_to_block(cnv);
+                b.assign(cur_vec, MirRValue::Use(values::local(fresh_v)));
+                let cp2 = b.create_block();
+                b.call(
+                    MirValue::Function(Arc::from(elem_push_fn.as_str())),
+                    vec![values::local(cur_vec), values::local(el_local)],
+                    None,
+                    cp2,
+                );
+                b.switch_to_block(cp2);
+                b.assign_const(has_cur, MirConst::Bool(true));
+                b.goto(next_iter_bb);
+                b.switch_to_block(next_iter_bb);
+                let ni = b.create_local(MirType::i64());
+                b.binary_op(
+                    ni,
+                    BinOp::Add,
+                    values::local(idx),
+                    MirValue::Const(MirConst::Int(1, MirType::i64())),
+                );
+                b.assign(idx, MirRValue::Use(values::local(ni)));
+                b.goto(cond_bb);
+                b.switch_to_block(exit_bb);
+                let flush_last_bb = b.create_block();
+                let done_gb_bb = b.create_block();
+                b.branch(values::local(has_cur), flush_last_bb, done_gb_bb);
+                b.switch_to_block(flush_last_bb);
+                let last_pair = b.create_local(pair_ty.clone());
+                b.assign(
+                    last_pair,
+                    MirRValue::Aggregate {
+                        kind: AggregateKind::Tuple,
+                        operands: vec![values::local(cur_key), values::local(cur_vec)],
+                    },
+                );
+                let cpl = b.create_block();
+                b.call(
+                    MirValue::Function(Arc::from(grp_push_fn.as_str())),
+                    vec![values::local(groups), values::local(last_pair)],
+                    None,
+                    cpl,
+                );
+                b.switch_to_block(cpl);
+                b.goto(done_gb_bb);
+                b.switch_to_block(done_gb_bb);
+                let gl = b.create_local(MirType::i64());
+                let cgl = b.create_block();
+                b.call(
+                    MirValue::Function(Arc::from("build_hvec_len")),
+                    vec![values::local(groups)],
+                    Some(gl),
+                    cgl,
+                );
+                b.switch_to_block(cgl);
+                gl
+            };
+            elem_ty = pair_ty;
+            source = ChainSource::Vec {
+                local: groups,
+                get_fn: grp_get_fn,
+            };
+            len_local = groups_len;
+        }
+
+        // 1a3. Materialize iterator-extension combinators (`chunks`, `windows`,
+        // `dedup`, `unique`, `interleave`, `merge`, `intersperse`,
+        // `cartesian_product`, `running_fold`) into concrete Vec sources.
+        let read_source_elem =
+            |b: &mut MirBuilder, src: &ChainSource, idx: LocalId, ety: &MirType| -> LocalId {
+                let el = b.create_local(ety.clone());
+                match src {
+                    ChainSource::Vec { local, get_fn } => {
+                        let cg = b.create_block();
+                        b.call(
+                            MirValue::Function(Arc::from(get_fn.as_str())),
+                            vec![values::local(*local), values::local(idx)],
+                            Some(el),
+                            cg,
+                        );
+                        b.switch_to_block(cg);
+                    }
+                    ChainSource::Range { first } => {
+                        let sum = b.create_local(MirType::i64());
+                        b.binary_op(sum, BinOp::Add, values::local(*first), values::local(idx));
+                        b.cast(el, CastKind::IntToInt, values::local(sum), ety.clone());
+                    }
+                    ChainSource::Indexed { local } => {
+                        b.assign(
+                            el,
+                            MirRValue::IndexAccess {
+                                base: values::local(*local),
+                                index: values::local(idx),
+                                elem_ty: ety.clone(),
+                            },
+                        );
+                    }
+                    ChainSource::StringBytes { local } => {
+                        let idx_u = b.create_local(MirType::usize());
+                        b.cast(
+                            idx_u,
+                            CastKind::IntToInt,
+                            values::local(idx),
+                            MirType::usize(),
+                        );
+                        let raw_b = b.create_local(MirType::i32());
+                        let cb = b.create_block();
+                        b.call(
+                            MirValue::Function(Arc::from("build_string_byte_at")),
+                            vec![values::local(*local), values::local(idx_u)],
+                            Some(raw_b),
+                            cb,
+                        );
+                        b.switch_to_block(cb);
+                        b.cast(el, CastKind::IntToInt, values::local(raw_b), ety.clone());
+                    }
+                }
+                el
+            };
+        let emit_elem_eq = |b: &mut MirBuilder, a: LocalId, c: LocalId, ety: &MirType| -> LocalId {
+            let eq = b.create_local(MirType::Bool);
+            if matches!(ety, MirType::Struct(n) if n.as_ref() == "BuildString") {
+                let ceq = b.create_block();
+                b.call(
+                    MirValue::Function(Arc::from("build_string_eq")),
+                    vec![values::local(a), values::local(c)],
+                    Some(eq),
+                    ceq,
+                );
+                b.switch_to_block(ceq);
+            } else {
+                b.binary_op(eq, BinOp::Eq, values::local(a), values::local(c));
+            }
+            eq
+        };
+        for step in &chain.steps {
+            match step {
+                IterStep::Chunks { size } => {
+                    let sz_raw = self.lower_expr(size)?;
+                    let chunk_vec_ty = MirType::Vec(Box::new(elem_ty.clone()));
+                    let (elem_new_fn, elem_push_fn) = Self::vec_fn_names_for_type(&elem_ty)?;
+                    let (out_new_fn, out_push_fn) = Self::vec_fn_names_for_type(&chunk_vec_ty)?;
+                    let (out_get_fn, _) = Self::vec_get_len_fn_names(&chunk_vec_ty)?;
+                    let b = self.current_fn.as_mut().unwrap();
+                    let sz = b.create_local(MirType::i64());
+                    b.cast(sz, CastKind::IntToInt, sz_raw, MirType::i64());
+                    let out = b.create_local(MirType::Vec(Box::new(chunk_vec_ty.clone())));
+                    let c0 = b.create_block();
+                    b.call(
+                        MirValue::Function(Arc::from(out_new_fn.as_str())),
+                        vec![],
+                        Some(out),
+                        c0,
+                    );
+                    b.switch_to_block(c0);
+                    let idx = b.create_local(MirType::i64());
+                    b.assign_const(idx, MirConst::Int(0, MirType::i64()));
+                    let outer_cond = b.create_block();
+                    let outer_body = b.create_block();
+                    let inner_cond = b.create_block();
+                    let inner_body = b.create_block();
+                    let inner_done = b.create_block();
+                    let outer_exit = b.create_block();
+                    let sz_ok = b.create_local(MirType::Bool);
+                    b.binary_op(
+                        sz_ok,
+                        BinOp::Gt,
+                        values::local(sz),
+                        MirValue::Const(MirConst::Int(0, MirType::i64())),
+                    );
+                    b.branch(values::local(sz_ok), outer_cond, outer_exit);
+                    b.switch_to_block(outer_cond);
+                    let more = b.create_local(MirType::Bool);
+                    b.binary_op(
+                        more,
+                        BinOp::Lt,
+                        values::local(idx),
+                        values::local(len_local),
+                    );
+                    b.branch(values::local(more), outer_body, outer_exit);
+                    b.switch_to_block(outer_body);
+                    let chunk = b.create_local(chunk_vec_ty.clone());
+                    let cc = b.create_block();
+                    b.call(
+                        MirValue::Function(Arc::from(elem_new_fn.as_str())),
+                        vec![],
+                        Some(chunk),
+                        cc,
+                    );
+                    b.switch_to_block(cc);
+                    let k = b.create_local(MirType::i64());
+                    b.assign_const(k, MirConst::Int(0, MirType::i64()));
+                    b.goto(inner_cond);
+                    b.switch_to_block(inner_cond);
+                    let k_lt = b.create_local(MirType::Bool);
+                    b.binary_op(k_lt, BinOp::Lt, values::local(k), values::local(sz));
+                    let inner_check_i = b.create_block();
+                    b.branch(values::local(k_lt), inner_check_i, inner_done);
+                    b.switch_to_block(inner_check_i);
+                    let i_lt = b.create_local(MirType::Bool);
+                    b.binary_op(
+                        i_lt,
+                        BinOp::Lt,
+                        values::local(idx),
+                        values::local(len_local),
+                    );
+                    b.branch(values::local(i_lt), inner_body, inner_done);
+                    b.switch_to_block(inner_body);
+                    let el = read_source_elem(b, &source, idx, &elem_ty);
+                    let cp = b.create_block();
+                    b.call(
+                        MirValue::Function(Arc::from(elem_push_fn.as_str())),
+                        vec![values::local(chunk), values::local(el)],
+                        None,
+                        cp,
+                    );
+                    b.switch_to_block(cp);
+                    let ni = b.create_local(MirType::i64());
+                    b.binary_op(
+                        ni,
+                        BinOp::Add,
+                        values::local(idx),
+                        MirValue::Const(MirConst::Int(1, MirType::i64())),
+                    );
+                    b.assign(idx, MirRValue::Use(values::local(ni)));
+                    let nk = b.create_local(MirType::i64());
+                    b.binary_op(
+                        nk,
+                        BinOp::Add,
+                        values::local(k),
+                        MirValue::Const(MirConst::Int(1, MirType::i64())),
+                    );
+                    b.assign(k, MirRValue::Use(values::local(nk)));
+                    b.goto(inner_cond);
+                    b.switch_to_block(inner_done);
+                    let cpo = b.create_block();
+                    b.call(
+                        MirValue::Function(Arc::from(out_push_fn.as_str())),
+                        vec![values::local(out), values::local(chunk)],
+                        None,
+                        cpo,
+                    );
+                    b.switch_to_block(cpo);
+                    b.goto(outer_cond);
+                    b.switch_to_block(outer_exit);
+                    let out_len = b.create_local(MirType::i64());
+                    let cl = b.create_block();
+                    b.call(
+                        MirValue::Function(Arc::from("build_hvec_len")),
+                        vec![values::local(out)],
+                        Some(out_len),
+                        cl,
+                    );
+                    b.switch_to_block(cl);
+                    elem_ty = chunk_vec_ty;
+                    source = ChainSource::Vec {
+                        local: out,
+                        get_fn: out_get_fn,
+                    };
+                    len_local = out_len;
+                }
+                IterStep::Windows { size } => {
+                    let sz_raw = self.lower_expr(size)?;
+                    let win_vec_ty = MirType::Vec(Box::new(elem_ty.clone()));
+                    let (elem_new_fn, elem_push_fn) = Self::vec_fn_names_for_type(&elem_ty)?;
+                    let (out_new_fn, out_push_fn) = Self::vec_fn_names_for_type(&win_vec_ty)?;
+                    let (out_get_fn, _) = Self::vec_get_len_fn_names(&win_vec_ty)?;
+                    let b = self.current_fn.as_mut().unwrap();
+                    let sz = b.create_local(MirType::i64());
+                    b.cast(sz, CastKind::IntToInt, sz_raw, MirType::i64());
+                    let out = b.create_local(MirType::Vec(Box::new(win_vec_ty.clone())));
+                    let c0 = b.create_block();
+                    b.call(
+                        MirValue::Function(Arc::from(out_new_fn.as_str())),
+                        vec![],
+                        Some(out),
+                        c0,
+                    );
+                    b.switch_to_block(c0);
+                    let idx = b.create_local(MirType::i64());
+                    b.assign_const(idx, MirConst::Int(0, MirType::i64()));
+                    let outer_cond = b.create_block();
+                    let outer_body = b.create_block();
+                    let inner_cond = b.create_block();
+                    let inner_body = b.create_block();
+                    let inner_done = b.create_block();
+                    let outer_exit = b.create_block();
+                    let sz_ok = b.create_local(MirType::Bool);
+                    b.binary_op(
+                        sz_ok,
+                        BinOp::Gt,
+                        values::local(sz),
+                        MirValue::Const(MirConst::Int(0, MirType::i64())),
+                    );
+                    b.branch(values::local(sz_ok), outer_cond, outer_exit);
+                    b.switch_to_block(outer_cond);
+                    let end_i = b.create_local(MirType::i64());
+                    b.binary_op(end_i, BinOp::Add, values::local(idx), values::local(sz));
+                    let more = b.create_local(MirType::Bool);
+                    b.binary_op(
+                        more,
+                        BinOp::Le,
+                        values::local(end_i),
+                        values::local(len_local),
+                    );
+                    b.branch(values::local(more), outer_body, outer_exit);
+                    b.switch_to_block(outer_body);
+                    let win = b.create_local(win_vec_ty.clone());
+                    let cc = b.create_block();
+                    b.call(
+                        MirValue::Function(Arc::from(elem_new_fn.as_str())),
+                        vec![],
+                        Some(win),
+                        cc,
+                    );
+                    b.switch_to_block(cc);
+                    let k = b.create_local(MirType::i64());
+                    b.assign_const(k, MirConst::Int(0, MirType::i64()));
+                    b.goto(inner_cond);
+                    b.switch_to_block(inner_cond);
+                    let k_lt = b.create_local(MirType::Bool);
+                    b.binary_op(k_lt, BinOp::Lt, values::local(k), values::local(sz));
+                    b.branch(values::local(k_lt), inner_body, inner_done);
+                    b.switch_to_block(inner_body);
+                    let pos = b.create_local(MirType::i64());
+                    b.binary_op(pos, BinOp::Add, values::local(idx), values::local(k));
+                    let el = read_source_elem(b, &source, pos, &elem_ty);
+                    let cp = b.create_block();
+                    b.call(
+                        MirValue::Function(Arc::from(elem_push_fn.as_str())),
+                        vec![values::local(win), values::local(el)],
+                        None,
+                        cp,
+                    );
+                    b.switch_to_block(cp);
+                    let nk = b.create_local(MirType::i64());
+                    b.binary_op(
+                        nk,
+                        BinOp::Add,
+                        values::local(k),
+                        MirValue::Const(MirConst::Int(1, MirType::i64())),
+                    );
+                    b.assign(k, MirRValue::Use(values::local(nk)));
+                    b.goto(inner_cond);
+                    b.switch_to_block(inner_done);
+                    let cpo = b.create_block();
+                    b.call(
+                        MirValue::Function(Arc::from(out_push_fn.as_str())),
+                        vec![values::local(out), values::local(win)],
+                        None,
+                        cpo,
+                    );
+                    b.switch_to_block(cpo);
+                    let ni = b.create_local(MirType::i64());
+                    b.binary_op(
+                        ni,
+                        BinOp::Add,
+                        values::local(idx),
+                        MirValue::Const(MirConst::Int(1, MirType::i64())),
+                    );
+                    b.assign(idx, MirRValue::Use(values::local(ni)));
+                    b.goto(outer_cond);
+                    b.switch_to_block(outer_exit);
+                    let out_len = b.create_local(MirType::i64());
+                    let cl = b.create_block();
+                    b.call(
+                        MirValue::Function(Arc::from("build_hvec_len")),
+                        vec![values::local(out)],
+                        Some(out_len),
+                        cl,
+                    );
+                    b.switch_to_block(cl);
+                    elem_ty = win_vec_ty;
+                    source = ChainSource::Vec {
+                        local: out,
+                        get_fn: out_get_fn,
+                    };
+                    len_local = out_len;
+                }
+                IterStep::Dedup => {
+                    let (new_fn, push_fn) = Self::vec_fn_names_for_type(&elem_ty)?;
+                    let (get_fn, _) = Self::vec_get_len_fn_names(&elem_ty)?;
+                    let b = self.current_fn.as_mut().unwrap();
+                    let out = b.create_local(MirType::Vec(Box::new(elem_ty.clone())));
+                    let c0 = b.create_block();
+                    b.call(
+                        MirValue::Function(Arc::from(new_fn.as_str())),
+                        vec![],
+                        Some(out),
+                        c0,
+                    );
+                    b.switch_to_block(c0);
+                    let has_prev = b.create_local(MirType::Bool);
+                    b.assign_const(has_prev, MirConst::Bool(false));
+                    let prev = b.create_local(elem_ty.clone());
+                    let idx = b.create_local(MirType::i64());
+                    b.assign_const(idx, MirConst::Int(0, MirType::i64()));
+                    let cond_bb = b.create_block();
+                    let body_bb = b.create_block();
+                    let check_bb = b.create_block();
+                    let push_bb = b.create_block();
+                    let next_bb = b.create_block();
+                    let exit_bb = b.create_block();
+                    b.goto(cond_bb);
+                    b.switch_to_block(cond_bb);
+                    let cmp = b.create_local(MirType::Bool);
+                    b.binary_op(cmp, BinOp::Lt, values::local(idx), values::local(len_local));
+                    b.branch(values::local(cmp), body_bb, exit_bb);
+                    b.switch_to_block(body_bb);
+                    let el = read_source_elem(b, &source, idx, &elem_ty);
+                    b.branch(values::local(has_prev), check_bb, push_bb);
+                    b.switch_to_block(check_bb);
+                    let eq = emit_elem_eq(b, prev, el, &elem_ty);
+                    b.branch(values::local(eq), next_bb, push_bb);
+                    b.switch_to_block(push_bb);
+                    let cp = b.create_block();
+                    b.call(
+                        MirValue::Function(Arc::from(push_fn.as_str())),
+                        vec![values::local(out), values::local(el)],
+                        None,
+                        cp,
+                    );
+                    b.switch_to_block(cp);
+                    b.assign(prev, MirRValue::Use(values::local(el)));
+                    b.assign_const(has_prev, MirConst::Bool(true));
+                    b.goto(next_bb);
+                    b.switch_to_block(next_bb);
+                    let ni = b.create_local(MirType::i64());
+                    b.binary_op(
+                        ni,
+                        BinOp::Add,
+                        values::local(idx),
+                        MirValue::Const(MirConst::Int(1, MirType::i64())),
+                    );
+                    b.assign(idx, MirRValue::Use(values::local(ni)));
+                    b.goto(cond_bb);
+                    b.switch_to_block(exit_bb);
+                    let out_len = b.create_local(MirType::i64());
+                    let cl = b.create_block();
+                    b.call(
+                        MirValue::Function(Arc::from("build_hvec_len")),
+                        vec![values::local(out)],
+                        Some(out_len),
+                        cl,
+                    );
+                    b.switch_to_block(cl);
+                    source = ChainSource::Vec { local: out, get_fn };
+                    len_local = out_len;
+                }
+                IterStep::Unique => {
+                    let (new_fn, push_fn) = Self::vec_fn_names_for_type(&elem_ty)?;
+                    let (get_fn, _) = Self::vec_get_len_fn_names(&elem_ty)?;
+                    let b = self.current_fn.as_mut().unwrap();
+                    let out = b.create_local(MirType::Vec(Box::new(elem_ty.clone())));
+                    let c0 = b.create_block();
+                    b.call(
+                        MirValue::Function(Arc::from(new_fn.as_str())),
+                        vec![],
+                        Some(out),
+                        c0,
+                    );
+                    b.switch_to_block(c0);
+                    let idx = b.create_local(MirType::i64());
+                    b.assign_const(idx, MirConst::Int(0, MirType::i64()));
+                    let cond_bb = b.create_block();
+                    let body_bb = b.create_block();
+                    let scan_cond = b.create_block();
+                    let scan_body = b.create_block();
+                    let scan_next = b.create_block();
+                    let push_bb = b.create_block();
+                    let next_bb = b.create_block();
+                    let exit_bb = b.create_block();
+                    b.goto(cond_bb);
+                    b.switch_to_block(cond_bb);
+                    let cmp = b.create_local(MirType::Bool);
+                    b.binary_op(cmp, BinOp::Lt, values::local(idx), values::local(len_local));
+                    b.branch(values::local(cmp), body_bb, exit_bb);
+                    b.switch_to_block(body_bb);
+                    let el = read_source_elem(b, &source, idx, &elem_ty);
+                    let cur_len = b.create_local(MirType::i64());
+                    let cl0 = b.create_block();
+                    b.call(
+                        MirValue::Function(Arc::from("build_hvec_len")),
+                        vec![values::local(out)],
+                        Some(cur_len),
+                        cl0,
+                    );
+                    b.switch_to_block(cl0);
+                    let j = b.create_local(MirType::i64());
+                    b.assign_const(j, MirConst::Int(0, MirType::i64()));
+                    b.goto(scan_cond);
+                    b.switch_to_block(scan_cond);
+                    let j_lt = b.create_local(MirType::Bool);
+                    b.binary_op(j_lt, BinOp::Lt, values::local(j), values::local(cur_len));
+                    b.branch(values::local(j_lt), scan_body, push_bb);
+                    b.switch_to_block(scan_body);
+                    let existing = b.create_local(elem_ty.clone());
+                    let cg = b.create_block();
+                    b.call(
+                        MirValue::Function(Arc::from(get_fn.as_str())),
+                        vec![values::local(out), values::local(j)],
+                        Some(existing),
+                        cg,
+                    );
+                    b.switch_to_block(cg);
+                    let eq = emit_elem_eq(b, existing, el, &elem_ty);
+                    b.branch(values::local(eq), next_bb, scan_next);
+                    b.switch_to_block(scan_next);
+                    let nj = b.create_local(MirType::i64());
+                    b.binary_op(
+                        nj,
+                        BinOp::Add,
+                        values::local(j),
+                        MirValue::Const(MirConst::Int(1, MirType::i64())),
+                    );
+                    b.assign(j, MirRValue::Use(values::local(nj)));
+                    b.goto(scan_cond);
+                    b.switch_to_block(push_bb);
+                    let cp = b.create_block();
+                    b.call(
+                        MirValue::Function(Arc::from(push_fn.as_str())),
+                        vec![values::local(out), values::local(el)],
+                        None,
+                        cp,
+                    );
+                    b.switch_to_block(cp);
+                    b.goto(next_bb);
+                    b.switch_to_block(next_bb);
+                    let ni = b.create_local(MirType::i64());
+                    b.binary_op(
+                        ni,
+                        BinOp::Add,
+                        values::local(idx),
+                        MirValue::Const(MirConst::Int(1, MirType::i64())),
+                    );
+                    b.assign(idx, MirRValue::Use(values::local(ni)));
+                    b.goto(cond_bb);
+                    b.switch_to_block(exit_bb);
+                    let out_len = b.create_local(MirType::i64());
+                    let cl = b.create_block();
+                    b.call(
+                        MirValue::Function(Arc::from("build_hvec_len")),
+                        vec![values::local(out)],
+                        Some(out_len),
+                        cl,
+                    );
+                    b.switch_to_block(cl);
+                    source = ChainSource::Vec { local: out, get_fn };
+                    len_local = out_len;
+                }
+                IterStep::Interleave { other } => {
+                    let other_src_expr = match &other.kind {
+                        ExprKind::MethodCall {
+                            receiver,
+                            method,
+                            args,
+                            ..
+                        } if args.is_empty()
+                            && matches!(
+                                method.name.as_ref(),
+                                "iter" | "iter_mut" | "into_iter"
+                            ) =>
+                        {
+                            receiver.as_ref()
+                        }
+                        _ => *other,
+                    };
+                    let (_, src2, len2) = match Self::range_source_bounds(other_src_expr) {
+                        Some((start, end, inclusive)) => {
+                            self.lower_range_source(start, end, inclusive)?
+                        }
+                        None => self.lower_vec_source(other_src_expr)?,
+                    };
+                    let (new_fn, push_fn) = Self::vec_fn_names_for_type(&elem_ty)?;
+                    let (get_fn, _) = Self::vec_get_len_fn_names(&elem_ty)?;
+                    let b = self.current_fn.as_mut().unwrap();
+                    let out = b.create_local(MirType::Vec(Box::new(elem_ty.clone())));
+                    let c0 = b.create_block();
+                    b.call(
+                        MirValue::Function(Arc::from(new_fn.as_str())),
+                        vec![],
+                        Some(out),
+                        c0,
+                    );
+                    b.switch_to_block(c0);
+                    let idx = b.create_local(MirType::i64());
+                    b.assign_const(idx, MirConst::Int(0, MirType::i64()));
+                    let cond_bb = b.create_block();
+                    let check1 = b.create_block();
+                    let push1 = b.create_block();
+                    let check2 = b.create_block();
+                    let push2 = b.create_block();
+                    let next_bb = b.create_block();
+                    let exit_bb = b.create_block();
+                    b.goto(cond_bb);
+                    b.switch_to_block(cond_bb);
+                    let lt1 = b.create_local(MirType::Bool);
+                    b.binary_op(lt1, BinOp::Lt, values::local(idx), values::local(len_local));
+                    let lt2 = b.create_local(MirType::Bool);
+                    b.binary_op(lt2, BinOp::Lt, values::local(idx), values::local(len2));
+                    let cond_check2 = b.create_block();
+                    b.branch(values::local(lt1), check1, cond_check2);
+                    b.switch_to_block(cond_check2);
+                    b.branch(values::local(lt2), check1, exit_bb);
+                    b.switch_to_block(check1);
+                    b.branch(values::local(lt1), push1, check2);
+                    b.switch_to_block(push1);
+                    let e1 = read_source_elem(b, &source, idx, &elem_ty);
+                    let cp1 = b.create_block();
+                    b.call(
+                        MirValue::Function(Arc::from(push_fn.as_str())),
+                        vec![values::local(out), values::local(e1)],
+                        None,
+                        cp1,
+                    );
+                    b.switch_to_block(cp1);
+                    b.goto(check2);
+                    b.switch_to_block(check2);
+                    b.branch(values::local(lt2), push2, next_bb);
+                    b.switch_to_block(push2);
+                    let e2 = read_source_elem(b, &src2, idx, &elem_ty);
+                    let cp2 = b.create_block();
+                    b.call(
+                        MirValue::Function(Arc::from(push_fn.as_str())),
+                        vec![values::local(out), values::local(e2)],
+                        None,
+                        cp2,
+                    );
+                    b.switch_to_block(cp2);
+                    b.goto(next_bb);
+                    b.switch_to_block(next_bb);
+                    let ni = b.create_local(MirType::i64());
+                    b.binary_op(
+                        ni,
+                        BinOp::Add,
+                        values::local(idx),
+                        MirValue::Const(MirConst::Int(1, MirType::i64())),
+                    );
+                    b.assign(idx, MirRValue::Use(values::local(ni)));
+                    b.goto(cond_bb);
+                    b.switch_to_block(exit_bb);
+                    let out_len = b.create_local(MirType::i64());
+                    let cl = b.create_block();
+                    b.call(
+                        MirValue::Function(Arc::from("build_hvec_len")),
+                        vec![values::local(out)],
+                        Some(out_len),
+                        cl,
+                    );
+                    b.switch_to_block(cl);
+                    source = ChainSource::Vec { local: out, get_fn };
+                    len_local = out_len;
+                }
+                IterStep::Merge { other } => {
+                    let other_src_expr = match &other.kind {
+                        ExprKind::MethodCall {
+                            receiver,
+                            method,
+                            args,
+                            ..
+                        } if args.is_empty()
+                            && matches!(
+                                method.name.as_ref(),
+                                "iter" | "iter_mut" | "into_iter"
+                            ) =>
+                        {
+                            receiver.as_ref()
+                        }
+                        _ => *other,
+                    };
+                    let (_, src2, len2) = match Self::range_source_bounds(other_src_expr) {
+                        Some((start, end, inclusive)) => {
+                            self.lower_range_source(start, end, inclusive)?
+                        }
+                        None => self.lower_vec_source(other_src_expr)?,
+                    };
+                    let (new_fn, push_fn) = Self::vec_fn_names_for_type(&elem_ty)?;
+                    let (get_fn, _) = Self::vec_get_len_fn_names(&elem_ty)?;
+                    let b = self.current_fn.as_mut().unwrap();
+                    let out = b.create_local(MirType::Vec(Box::new(elem_ty.clone())));
+                    let c0 = b.create_block();
+                    b.call(
+                        MirValue::Function(Arc::from(new_fn.as_str())),
+                        vec![],
+                        Some(out),
+                        c0,
+                    );
+                    b.switch_to_block(c0);
+                    let i = b.create_local(MirType::i64());
+                    b.assign_const(i, MirConst::Int(0, MirType::i64()));
+                    let j = b.create_local(MirType::i64());
+                    b.assign_const(j, MirConst::Int(0, MirType::i64()));
+                    let both_cond = b.create_block();
+                    let both_body = b.create_block();
+                    let take1 = b.create_block();
+                    let take2 = b.create_block();
+                    let rem1_cond = b.create_block();
+                    let rem1_body = b.create_block();
+                    let rem2_cond = b.create_block();
+                    let rem2_body = b.create_block();
+                    let done_bb = b.create_block();
+                    b.goto(both_cond);
+                    b.switch_to_block(both_cond);
+                    let ilt = b.create_local(MirType::Bool);
+                    b.binary_op(ilt, BinOp::Lt, values::local(i), values::local(len_local));
+                    let check_j = b.create_block();
+                    b.branch(values::local(ilt), check_j, rem1_cond);
+                    b.switch_to_block(check_j);
+                    let jlt = b.create_local(MirType::Bool);
+                    b.binary_op(jlt, BinOp::Lt, values::local(j), values::local(len2));
+                    b.branch(values::local(jlt), both_body, rem1_cond);
+                    b.switch_to_block(both_body);
+                    let e1 = read_source_elem(b, &source, i, &elem_ty);
+                    let e2 = read_source_elem(b, &src2, j, &elem_ty);
+                    let le = b.create_local(MirType::Bool);
+                    b.binary_op(le, BinOp::Le, values::local(e1), values::local(e2));
+                    b.branch(values::local(le), take1, take2);
+                    b.switch_to_block(take1);
+                    let cp1 = b.create_block();
+                    b.call(
+                        MirValue::Function(Arc::from(push_fn.as_str())),
+                        vec![values::local(out), values::local(e1)],
+                        None,
+                        cp1,
+                    );
+                    b.switch_to_block(cp1);
+                    let ni = b.create_local(MirType::i64());
+                    b.binary_op(
+                        ni,
+                        BinOp::Add,
+                        values::local(i),
+                        MirValue::Const(MirConst::Int(1, MirType::i64())),
+                    );
+                    b.assign(i, MirRValue::Use(values::local(ni)));
+                    b.goto(both_cond);
+                    b.switch_to_block(take2);
+                    let cp2 = b.create_block();
+                    b.call(
+                        MirValue::Function(Arc::from(push_fn.as_str())),
+                        vec![values::local(out), values::local(e2)],
+                        None,
+                        cp2,
+                    );
+                    b.switch_to_block(cp2);
+                    let nj = b.create_local(MirType::i64());
+                    b.binary_op(
+                        nj,
+                        BinOp::Add,
+                        values::local(j),
+                        MirValue::Const(MirConst::Int(1, MirType::i64())),
+                    );
+                    b.assign(j, MirRValue::Use(values::local(nj)));
+                    b.goto(both_cond);
+                    b.switch_to_block(rem1_cond);
+                    let r1 = b.create_local(MirType::Bool);
+                    b.binary_op(r1, BinOp::Lt, values::local(i), values::local(len_local));
+                    b.branch(values::local(r1), rem1_body, rem2_cond);
+                    b.switch_to_block(rem1_body);
+                    let re1 = read_source_elem(b, &source, i, &elem_ty);
+                    let cpr1 = b.create_block();
+                    b.call(
+                        MirValue::Function(Arc::from(push_fn.as_str())),
+                        vec![values::local(out), values::local(re1)],
+                        None,
+                        cpr1,
+                    );
+                    b.switch_to_block(cpr1);
+                    let ni2 = b.create_local(MirType::i64());
+                    b.binary_op(
+                        ni2,
+                        BinOp::Add,
+                        values::local(i),
+                        MirValue::Const(MirConst::Int(1, MirType::i64())),
+                    );
+                    b.assign(i, MirRValue::Use(values::local(ni2)));
+                    b.goto(rem1_cond);
+                    b.switch_to_block(rem2_cond);
+                    let r2 = b.create_local(MirType::Bool);
+                    b.binary_op(r2, BinOp::Lt, values::local(j), values::local(len2));
+                    b.branch(values::local(r2), rem2_body, done_bb);
+                    b.switch_to_block(rem2_body);
+                    let re2 = read_source_elem(b, &src2, j, &elem_ty);
+                    let cpr2 = b.create_block();
+                    b.call(
+                        MirValue::Function(Arc::from(push_fn.as_str())),
+                        vec![values::local(out), values::local(re2)],
+                        None,
+                        cpr2,
+                    );
+                    b.switch_to_block(cpr2);
+                    let nj2 = b.create_local(MirType::i64());
+                    b.binary_op(
+                        nj2,
+                        BinOp::Add,
+                        values::local(j),
+                        MirValue::Const(MirConst::Int(1, MirType::i64())),
+                    );
+                    b.assign(j, MirRValue::Use(values::local(nj2)));
+                    b.goto(rem2_cond);
+                    b.switch_to_block(done_bb);
+                    let out_len = b.create_local(MirType::i64());
+                    let cl = b.create_block();
+                    b.call(
+                        MirValue::Function(Arc::from("build_hvec_len")),
+                        vec![values::local(out)],
+                        Some(out_len),
+                        cl,
+                    );
+                    b.switch_to_block(cl);
+                    source = ChainSource::Vec { local: out, get_fn };
+                    len_local = out_len;
+                }
+                IterStep::Intersperse { sep } => {
+                    let sep_val = self.lower_expr(sep)?;
+                    let (new_fn, push_fn) = Self::vec_fn_names_for_type(&elem_ty)?;
+                    let (get_fn, _) = Self::vec_get_len_fn_names(&elem_ty)?;
+                    let b = self.current_fn.as_mut().unwrap();
+                    let out = b.create_local(MirType::Vec(Box::new(elem_ty.clone())));
+                    let c0 = b.create_block();
+                    b.call(
+                        MirValue::Function(Arc::from(new_fn.as_str())),
+                        vec![],
+                        Some(out),
+                        c0,
+                    );
+                    b.switch_to_block(c0);
+                    let idx = b.create_local(MirType::i64());
+                    b.assign_const(idx, MirConst::Int(0, MirType::i64()));
+                    let cond_bb = b.create_block();
+                    let body_bb = b.create_block();
+                    let sep_bb = b.create_block();
+                    let push_bb = b.create_block();
+                    let exit_bb = b.create_block();
+                    b.goto(cond_bb);
+                    b.switch_to_block(cond_bb);
+                    let cmp = b.create_local(MirType::Bool);
+                    b.binary_op(cmp, BinOp::Lt, values::local(idx), values::local(len_local));
+                    b.branch(values::local(cmp), body_bb, exit_bb);
+                    b.switch_to_block(body_bb);
+                    let gt0 = b.create_local(MirType::Bool);
+                    b.binary_op(
+                        gt0,
+                        BinOp::Gt,
+                        values::local(idx),
+                        MirValue::Const(MirConst::Int(0, MirType::i64())),
+                    );
+                    b.branch(values::local(gt0), sep_bb, push_bb);
+                    b.switch_to_block(sep_bb);
+                    let cps = b.create_block();
+                    b.call(
+                        MirValue::Function(Arc::from(push_fn.as_str())),
+                        vec![values::local(out), sep_val.clone()],
+                        None,
+                        cps,
+                    );
+                    b.switch_to_block(cps);
+                    b.goto(push_bb);
+                    b.switch_to_block(push_bb);
+                    let el = read_source_elem(b, &source, idx, &elem_ty);
+                    let cpe = b.create_block();
+                    b.call(
+                        MirValue::Function(Arc::from(push_fn.as_str())),
+                        vec![values::local(out), values::local(el)],
+                        None,
+                        cpe,
+                    );
+                    b.switch_to_block(cpe);
+                    let ni = b.create_local(MirType::i64());
+                    b.binary_op(
+                        ni,
+                        BinOp::Add,
+                        values::local(idx),
+                        MirValue::Const(MirConst::Int(1, MirType::i64())),
+                    );
+                    b.assign(idx, MirRValue::Use(values::local(ni)));
+                    b.goto(cond_bb);
+                    b.switch_to_block(exit_bb);
+                    let out_len = b.create_local(MirType::i64());
+                    let cl = b.create_block();
+                    b.call(
+                        MirValue::Function(Arc::from("build_hvec_len")),
+                        vec![values::local(out)],
+                        Some(out_len),
+                        cl,
+                    );
+                    b.switch_to_block(cl);
+                    source = ChainSource::Vec { local: out, get_fn };
+                    len_local = out_len;
+                }
+                IterStep::CartesianProduct { other } => {
+                    let other_src_expr = match &other.kind {
+                        ExprKind::MethodCall {
+                            receiver,
+                            method,
+                            args,
+                            ..
+                        } if args.is_empty()
+                            && matches!(
+                                method.name.as_ref(),
+                                "iter" | "iter_mut" | "into_iter"
+                            ) =>
+                        {
+                            receiver.as_ref()
+                        }
+                        _ => *other,
+                    };
+                    let (other_ty, src2, len2) = match Self::range_source_bounds(other_src_expr) {
+                        Some((start, end, inclusive)) => {
+                            self.lower_range_source(start, end, inclusive)?
+                        }
+                        None => self.lower_vec_source(other_src_expr)?,
+                    };
+                    let pair_elems = vec![elem_ty.clone(), other_ty.clone()];
+                    self.ensure_tuple_type_def(&pair_elems);
+                    let pair_ty = MirType::Tuple(pair_elems);
+                    let (out_new_fn, out_push_fn) = Self::vec_fn_names_for_type(&pair_ty)?;
+                    let (out_get_fn, _) = Self::vec_get_len_fn_names(&pair_ty)?;
+                    let b = self.current_fn.as_mut().unwrap();
+                    let out = b.create_local(MirType::Vec(Box::new(pair_ty.clone())));
+                    let c0 = b.create_block();
+                    b.call(
+                        MirValue::Function(Arc::from(out_new_fn.as_str())),
+                        vec![],
+                        Some(out),
+                        c0,
+                    );
+                    b.switch_to_block(c0);
+                    let i = b.create_local(MirType::i64());
+                    b.assign_const(i, MirConst::Int(0, MirType::i64()));
+                    let outer_cond = b.create_block();
+                    let outer_body = b.create_block();
+                    let inner_cond = b.create_block();
+                    let inner_body = b.create_block();
+                    let inner_done = b.create_block();
+                    let outer_exit = b.create_block();
+                    b.goto(outer_cond);
+                    b.switch_to_block(outer_cond);
+                    let ilt = b.create_local(MirType::Bool);
+                    b.binary_op(ilt, BinOp::Lt, values::local(i), values::local(len_local));
+                    b.branch(values::local(ilt), outer_body, outer_exit);
+                    b.switch_to_block(outer_body);
+                    let e1 = read_source_elem(b, &source, i, &elem_ty);
+                    let j = b.create_local(MirType::i64());
+                    b.assign_const(j, MirConst::Int(0, MirType::i64()));
+                    b.goto(inner_cond);
+                    b.switch_to_block(inner_cond);
+                    let jlt = b.create_local(MirType::Bool);
+                    b.binary_op(jlt, BinOp::Lt, values::local(j), values::local(len2));
+                    b.branch(values::local(jlt), inner_body, inner_done);
+                    b.switch_to_block(inner_body);
+                    let e2 = read_source_elem(b, &src2, j, &other_ty);
+                    let pair_loc = b.create_local(pair_ty.clone());
+                    b.assign(
+                        pair_loc,
+                        MirRValue::Aggregate {
+                            kind: AggregateKind::Tuple,
+                            operands: vec![values::local(e1), values::local(e2)],
+                        },
+                    );
+                    let cp = b.create_block();
+                    b.call(
+                        MirValue::Function(Arc::from(out_push_fn.as_str())),
+                        vec![values::local(out), values::local(pair_loc)],
+                        None,
+                        cp,
+                    );
+                    b.switch_to_block(cp);
+                    let nj = b.create_local(MirType::i64());
+                    b.binary_op(
+                        nj,
+                        BinOp::Add,
+                        values::local(j),
+                        MirValue::Const(MirConst::Int(1, MirType::i64())),
+                    );
+                    b.assign(j, MirRValue::Use(values::local(nj)));
+                    b.goto(inner_cond);
+                    b.switch_to_block(inner_done);
+                    let ni = b.create_local(MirType::i64());
+                    b.binary_op(
+                        ni,
+                        BinOp::Add,
+                        values::local(i),
+                        MirValue::Const(MirConst::Int(1, MirType::i64())),
+                    );
+                    b.assign(i, MirRValue::Use(values::local(ni)));
+                    b.goto(outer_cond);
+                    b.switch_to_block(outer_exit);
+                    let out_len = b.create_local(MirType::i64());
+                    let cl = b.create_block();
+                    b.call(
+                        MirValue::Function(Arc::from("build_hvec_len")),
+                        vec![values::local(out)],
+                        Some(out_len),
+                        cl,
+                    );
+                    b.switch_to_block(cl);
+                    elem_ty = pair_ty;
+                    source = ChainSource::Vec {
+                        local: out,
+                        get_fn: out_get_fn,
+                    };
+                    len_local = out_len;
+                }
+                IterStep::RunningFold { init, closure } => {
+                    let init_v = self.lower_expr(init)?;
+                    let acc_ty = self.type_of_value(&init_v);
+                    let (out_new_fn, out_push_fn) = Self::vec_fn_names_for_type(&acc_ty)?;
+                    let (out_get_fn, _) = Self::vec_get_len_fn_names(&acc_ty)?;
+                    let (out, acc, idx, cond_bb, exit_bb, el) = {
+                        let b = self.current_fn.as_mut().unwrap();
+                        let out = b.create_local(MirType::Vec(Box::new(acc_ty.clone())));
+                        let c0 = b.create_block();
+                        b.call(
+                            MirValue::Function(Arc::from(out_new_fn.as_str())),
+                            vec![],
+                            Some(out),
+                            c0,
+                        );
+                        b.switch_to_block(c0);
+                        let acc = b.create_local(acc_ty.clone());
+                        b.assign(acc, MirRValue::Use(init_v));
+                        let idx = b.create_local(MirType::i64());
+                        b.assign_const(idx, MirConst::Int(0, MirType::i64()));
+                        let cond_bb = b.create_block();
+                        let body_bb = b.create_block();
+                        let exit_bb = b.create_block();
+                        b.goto(cond_bb);
+                        b.switch_to_block(cond_bb);
+                        let cmp = b.create_local(MirType::Bool);
+                        b.binary_op(cmp, BinOp::Lt, values::local(idx), values::local(len_local));
+                        b.branch(values::local(cmp), body_bb, exit_bb);
+                        b.switch_to_block(body_bb);
+                        let el = read_source_elem(b, &source, idx, &elem_ty);
+                        (out, acc, idx, cond_bb, exit_bb, el)
+                    };
+                    let next_acc = self.lower_iter_fold_inline(
+                        closure,
+                        values::local(acc),
+                        values::local(el),
+                    )?;
+                    let out_len = {
+                        let b = self.current_fn.as_mut().unwrap();
+                        b.assign(acc, MirRValue::Use(next_acc));
+                        let cp = b.create_block();
+                        b.call(
+                            MirValue::Function(Arc::from(out_push_fn.as_str())),
+                            vec![values::local(out), values::local(acc)],
+                            None,
+                            cp,
+                        );
+                        b.switch_to_block(cp);
+                        let ni = b.create_local(MirType::i64());
+                        b.binary_op(
+                            ni,
+                            BinOp::Add,
+                            values::local(idx),
+                            MirValue::Const(MirConst::Int(1, MirType::i64())),
+                        );
+                        b.assign(idx, MirRValue::Use(values::local(ni)));
+                        b.goto(cond_bb);
+                        b.switch_to_block(exit_bb);
+                        let ol = b.create_local(MirType::i64());
+                        let cl = b.create_block();
+                        b.call(
+                            MirValue::Function(Arc::from("build_hvec_len")),
+                            vec![values::local(out)],
+                            Some(ol),
+                            cl,
+                        );
+                        b.switch_to_block(cl);
+                        ol
+                    };
+                    elem_ty = acc_ty;
+                    source = ChainSource::Vec {
+                        local: out,
+                        get_fn: out_get_fn,
+                    };
+                    len_local = out_len;
+                }
+                _ => {}
+            }
+        }
 
         // 1b. If the chain has a `.zip(other)` step, lower the second source
         // and clamp the iteration length to `min(len1, len2)`.
@@ -3120,7 +4809,10 @@ impl<'ctx> MirLowerer<'ctx> {
                 builder.assign(acc, MirRValue::Use(MirValue::Const(MirConst::Bool(true))));
                 (acc, false)
             }
-            IterTerminal::Max | IterTerminal::Min | IterTerminal::Reduce { .. } => {
+            IterTerminal::Max
+            | IterTerminal::Min
+            | IterTerminal::Last
+            | IterTerminal::Reduce { .. } => {
                 let builder = self.current_fn.as_mut().unwrap();
                 let acc = builder.create_local(MirType::Option(Box::new(output_elem_ty.clone())));
                 builder.assign(acc, MirRValue::Use(MirValue::Global(Arc::from("None"))));
@@ -3431,6 +5123,9 @@ impl<'ctx> MirLowerer<'ctx> {
                 IterStep::Zip { .. } => {
                     active_zip = zip_elem_local.map(values::local);
                 }
+                IterStep::Chain { .. } => {
+                    // Already concatenated into the loop source before iteration.
+                }
                 IterStep::Map { closure } => {
                     current_val = self.lower_iter_map_inline(
                         closure,
@@ -3450,10 +5145,15 @@ impl<'ctx> MirLowerer<'ctx> {
                         .cloned();
                     let prev_parse =
                         parse_hint.map(|h| std::mem::replace(&mut self.parse_target_hint, Some(h)));
-                    let prev_exp = expected_collect.as_ref().map(|t| {
-                        self.expected_type
-                            .replace(MirType::Option(Box::new(t.clone())))
-                    });
+                    let prev_exp = {
+                        let inner_exp = expected_collect
+                            .clone()
+                            .unwrap_or_else(|| output_elem_ty.clone());
+                        Some(
+                            self.expected_type
+                                .replace(MirType::Option(Box::new(inner_exp))),
+                        )
+                    };
                     let opt_res = self.lower_iter_map_inline(
                         closure,
                         current_val,
@@ -3579,6 +5279,34 @@ impl<'ctx> MirLowerer<'ctx> {
                     );
                     builder.assign(ctr, MirRValue::Use(values::local(nc)));
                 }
+                IterStep::TakeWhile { closure } => {
+                    let keep = self.lower_iter_map_inline(
+                        closure,
+                        current_val.clone(),
+                        if has_enumerate {
+                            Some(values::local(idx_local))
+                        } else {
+                            None
+                        },
+                        active_zip.clone(),
+                    )?;
+                    let builder = self.current_fn.as_mut().unwrap();
+                    let keep_block = builder.create_block();
+                    builder.branch(keep, keep_block, exit_block);
+                    builder.switch_to_block(keep_block);
+                }
+                IterStep::GroupBy { .. }
+                | IterStep::Chunks { .. }
+                | IterStep::Windows { .. }
+                | IterStep::Dedup
+                | IterStep::Unique
+                | IterStep::Interleave { .. }
+                | IterStep::Merge { .. }
+                | IterStep::Intersperse { .. }
+                | IterStep::CartesianProduct { .. }
+                | IterStep::RunningFold { .. } => {
+                    // Already materialized into a Vec source before the main loop.
+                }
             }
         }
 
@@ -3696,6 +5424,17 @@ impl<'ctx> MirLowerer<'ctx> {
                     );
                     builder.switch_to_block(cont);
                 }
+            }
+            IterTerminal::Last => {
+                let builder = self.current_fn.as_mut().unwrap();
+                let cont = builder.create_block();
+                builder.call(
+                    MirValue::Function(Arc::from("Some")),
+                    vec![current_val],
+                    Some(result_local),
+                    cont,
+                );
+                builder.switch_to_block(cont);
             }
             IterTerminal::Fold { closure, .. } => {
                 // Inline the fold closure: acc = closure(acc, current_val)
@@ -4112,7 +5851,7 @@ impl<'ctx> MirLowerer<'ctx> {
 
     /// The bounds of `a..b` or `a..=b` (through parentheses), when both are
     /// written: the only ranges an iterator chain can start from.
-    fn range_source_bounds(expr: &ast::Expr) -> Option<(&ast::Expr, &ast::Expr, bool)> {
+    pub(super) fn range_source_bounds(expr: &ast::Expr) -> Option<(&ast::Expr, &ast::Expr, bool)> {
         match &expr.kind {
             ExprKind::Paren(inner) => Self::range_source_bounds(inner),
             ExprKind::Range {
@@ -4140,6 +5879,124 @@ impl<'ctx> MirLowerer<'ctx> {
         &mut self,
         source_expr: &ast::Expr,
     ) -> CodegenResult<(MirType, ChainSource, LocalId)> {
+        // `successors(first, |prev| next)` as an iterator chain source:
+        // generate up to 64 elements while `Option` is `Some`.
+        if let ExprKind::Call { func, args } = &source_expr.kind {
+            if args.len() == 2
+                && matches!(
+                    &func.kind,
+                    ExprKind::Ident(id) if id.name.as_ref() == "successors"
+                )
+                || (args.len() == 2
+                    && matches!(
+                        &func.kind,
+                        ExprKind::Path(p)
+                            if p.last_ident()
+                                .is_some_and(|i| i.name.as_ref() == "successors")
+                    ))
+            {
+                let seed = self.lower_expr(&args[0])?;
+                let seed_ty = self.type_of_value(&seed);
+                let elem_ty = Self::option_inner_from_mir_type(&seed_ty)
+                    .or_else(|| {
+                        if let MirValue::Local(id) = &seed {
+                            self.option_inner_types.get(id).cloned()
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or_else(MirType::i32);
+                if let MirType::Tuple(ref elems) = elem_ty {
+                    self.ensure_tuple_type_def(elems);
+                }
+                let opt_ty = MirType::Option(Box::new(elem_ty.clone()));
+                let (new_fn, push_fn) = Self::vec_fn_names_for_type(&elem_ty)?;
+                let (get_fn, _) = Self::vec_get_len_fn_names(&elem_ty)?;
+                let (out, cur, cnt, cond_bb, body_bb, exit_bb, val_l) = {
+                    let b = self.current_fn.as_mut().unwrap();
+                    let out = b.create_local(MirType::Vec(Box::new(elem_ty.clone())));
+                    let c0 = b.create_block();
+                    b.call(MirValue::Function(Arc::from(new_fn)), vec![], Some(out), c0);
+                    b.switch_to_block(c0);
+                    let cur = b.create_local(opt_ty);
+                    b.assign(cur, MirRValue::Use(seed));
+                    let cnt = b.create_local(MirType::i64());
+                    b.assign_const(cnt, MirConst::Int(0, MirType::i64()));
+                    let cond_bb = b.create_block();
+                    let check_opt_bb = b.create_block();
+                    let body_bb = b.create_block();
+                    let exit_bb = b.create_block();
+                    b.goto(cond_bb);
+                    b.switch_to_block(cond_bb);
+                    let under = b.create_local(MirType::Bool);
+                    b.binary_op(
+                        under,
+                        BinOp::Lt,
+                        values::local(cnt),
+                        MirValue::Const(MirConst::Int(64, MirType::i64())),
+                    );
+                    b.branch(values::local(under), check_opt_bb, exit_bb);
+                    b.switch_to_block(check_opt_bb);
+                    let hv = b.create_local(MirType::Bool);
+                    b.assign(
+                        hv,
+                        MirRValue::FieldAccess {
+                            base: values::local(cur),
+                            field_name: Arc::from("has_value"),
+                            field_ty: MirType::Bool,
+                        },
+                    );
+                    b.branch(values::local(hv), body_bb, exit_bb);
+                    b.switch_to_block(body_bb);
+                    let val_l = b.create_local(elem_ty.clone());
+                    b.assign(
+                        val_l,
+                        MirRValue::FieldAccess {
+                            base: values::local(cur),
+                            field_name: Arc::from("value"),
+                            field_ty: elem_ty.clone(),
+                        },
+                    );
+                    let cp = b.create_block();
+                    b.call(
+                        MirValue::Function(Arc::from(push_fn)),
+                        vec![values::local(out), values::local(val_l)],
+                        None,
+                        cp,
+                    );
+                    b.switch_to_block(cp);
+                    (out, cur, cnt, cond_bb, body_bb, exit_bb, val_l)
+                };
+                let _ = body_bb;
+                let next_opt =
+                    self.lower_iter_map_inline(&args[1], values::local(val_l), None, None)?;
+                let len_l = {
+                    let b = self.current_fn.as_mut().unwrap();
+                    b.assign(cur, MirRValue::Use(next_opt));
+                    let nc = b.create_local(MirType::i64());
+                    b.binary_op(
+                        nc,
+                        BinOp::Add,
+                        values::local(cnt),
+                        MirValue::Const(MirConst::Int(1, MirType::i64())),
+                    );
+                    b.assign(cnt, MirRValue::Use(values::local(nc)));
+                    b.goto(cond_bb);
+                    b.switch_to_block(exit_bb);
+                    let ll = b.create_local(MirType::i64());
+                    let cl = b.create_block();
+                    b.call(
+                        MirValue::Function(Arc::from("build_hvec_len")),
+                        vec![values::local(out)],
+                        Some(ll),
+                        cl,
+                    );
+                    b.switch_to_block(cl);
+                    ll
+                };
+                return Ok((elem_ty, ChainSource::Vec { local: out, get_fn }, len_l));
+            }
+        }
         // `std::iter::repeat(val)` as an iterator chain source: bounded by `.take(n)`
         // (we materialize a virtual repeating source; `lower_iter_chain`'s `.take(n)`
         // exits after `n` elements).
@@ -4294,6 +6151,40 @@ impl<'ctx> MirLowerer<'ctx> {
                         ChainSource::Vec {
                             local: out,
                             get_fn: "build_hvec_get_u32".to_string(),
+                        },
+                        len,
+                    ));
+                }
+            }
+            if method.name.as_ref() == "keys" && args.is_empty() {
+                let m_raw = self.lower_expr(str_recv)?;
+                let m_val = self.deref_if_pointer(m_raw)?;
+                if matches!(self.type_of_value(&m_val), MirType::Map(..)) {
+                    let str_ty = MirType::Struct(Arc::from("BuildString"));
+                    let b = self.current_fn.as_mut().unwrap();
+                    let keys = b.create_local(MirType::Vec(Box::new(str_ty.clone())));
+                    let c0 = b.create_block();
+                    b.call(
+                        MirValue::Function(Arc::from("build_hmap_keys_str_f64")),
+                        vec![m_val],
+                        Some(keys),
+                        c0,
+                    );
+                    b.switch_to_block(c0);
+                    let len = b.create_local(MirType::i64());
+                    let c1 = b.create_block();
+                    b.call(
+                        MirValue::Function(Arc::from("build_hvec_len")),
+                        vec![values::local(keys)],
+                        Some(len),
+                        c1,
+                    );
+                    b.switch_to_block(c1);
+                    return Ok((
+                        str_ty,
+                        ChainSource::Vec {
+                            local: keys,
+                            get_fn: "build_hvec_get_str".to_string(),
                         },
                         len,
                     ));
@@ -4980,6 +6871,60 @@ impl<'ctx> MirLowerer<'ctx> {
                                 ExprKind::Cast { ty: cast_ty, .. } => {
                                     ty = self.lower_type_from_ast(cast_ty);
                                 }
+                                ExprKind::Macro { path, .. }
+                                    if path
+                                        .last_ident()
+                                        .is_some_and(|i| i.name.as_ref() == "format") =>
+                                {
+                                    ty = MirType::Struct(Arc::from("BuildString"));
+                                }
+                                ExprKind::MethodCall { method, .. }
+                                    if method.name.as_ref() == "len" =>
+                                {
+                                    ty = MirType::usize();
+                                }
+                                ExprKind::MethodCall {
+                                    receiver, method, ..
+                                } if matches!(
+                                    method.name.as_ref(),
+                                    "repeat" | "to_string" | "to_uppercase" | "to_lowercase"
+                                ) && matches!(
+                                    &receiver.kind,
+                                    ExprKind::Literal(crate::ast::Literal::Str { .. })
+                                ) =>
+                                {
+                                    ty = MirType::Struct(Arc::from("BuildString"));
+                                }
+                                ExprKind::Binary {
+                                    op:
+                                        crate::ast::BinOp::Sub
+                                        | crate::ast::BinOp::Mul
+                                        | crate::ast::BinOp::Div
+                                        | crate::ast::BinOp::Rem,
+                                    ..
+                                } if matches!(
+                                    &ty,
+                                    MirType::Struct(n) if n.as_ref() == "BuildString"
+                                ) =>
+                                {
+                                    ty = MirType::usize();
+                                }
+                                ExprKind::If { then_branch, .. }
+                                    if then_branch.stmts.last().is_some_and(|s| {
+                                        matches!(
+                                            &s.kind,
+                                            StmtKind::Expr(e)
+                                                if matches!(
+                                                    &e.kind,
+                                                    ExprKind::Literal(
+                                                        crate::ast::Literal::Str { .. }
+                                                    )
+                                                )
+                                        )
+                                    }) =>
+                                {
+                                    ty = MirType::Struct(Arc::from("BuildString"));
+                                }
                                 ExprKind::MethodCall {
                                     receiver, method, ..
                                 } if expr_is_param(receiver) => {
@@ -5020,15 +6965,36 @@ impl<'ctx> MirLowerer<'ctx> {
                                 }
                                 ExprKind::Ident(body_ident) => {
                                     for param in params {
-                                        if let ast::PatternKind::Ident { name, .. } =
-                                            &param.pattern.kind
-                                        {
-                                            if name.name.as_ref() == body_ident.name.as_ref() {
-                                                if let Some(pt) = &param.ty {
-                                                    ty = self.lower_type_from_ast(pt);
+                                        match &param.pattern.kind {
+                                            ast::PatternKind::Ident { name, .. } => {
+                                                if name.name.as_ref() == body_ident.name.as_ref() {
+                                                    if let Some(pt) = &param.ty {
+                                                        ty = self.lower_type_from_ast(pt);
+                                                    }
+                                                    break;
                                                 }
-                                                break;
                                             }
+                                            ast::PatternKind::Tuple(sub_pats) => {
+                                                if let MirType::Tuple(ref elems) = ty {
+                                                    for (pi, sp) in sub_pats.iter().enumerate() {
+                                                        if let ast::PatternKind::Ident {
+                                                            name,
+                                                            ..
+                                                        } = &sp.kind
+                                                        {
+                                                            if name.name.as_ref()
+                                                                == body_ident.name.as_ref()
+                                                            {
+                                                                if let Some(et) = elems.get(pi) {
+                                                                    ty = et.clone();
+                                                                }
+                                                                break;
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            _ => {}
                                         }
                                     }
                                 }
@@ -5076,6 +7042,19 @@ impl<'ctx> MirLowerer<'ctx> {
                                         }
                                     }
                                 }
+                            } else if matches!(method.name.as_ref(), "get" | "get_mut") {
+                                let recv_ty = self.infer_expr_type(receiver);
+                                let map_v = match &recv_ty {
+                                    MirType::Map(_, v) => Some((**v).clone()),
+                                    MirType::Ptr(inner) => match inner.as_ref() {
+                                        MirType::Map(_, v) => Some((**v).clone()),
+                                        _ => None,
+                                    },
+                                    _ => None,
+                                };
+                                if let Some(vt) = map_v {
+                                    ty = vt;
+                                }
                             }
                         }
                     }
@@ -5085,9 +7064,21 @@ impl<'ctx> MirLowerer<'ctx> {
                 | IterStep::Cloned
                 | IterStep::Rev
                 | IterStep::Take { .. }
+                | IterStep::TakeWhile { .. }
                 | IterStep::Skip { .. }
                 | IterStep::FlatMap { .. }
-                | IterStep::Zip { .. } => {
+                | IterStep::Zip { .. }
+                | IterStep::Chain { .. }
+                | IterStep::GroupBy { .. }
+                | IterStep::Chunks { .. }
+                | IterStep::Windows { .. }
+                | IterStep::Dedup
+                | IterStep::Unique
+                | IterStep::Interleave { .. }
+                | IterStep::Merge { .. }
+                | IterStep::Intersperse { .. }
+                | IterStep::CartesianProduct { .. }
+                | IterStep::RunningFold { .. } => {
                     // These don't change the element type (flat_map uses expected_collect;
                     // zip already folded the pair type into base_infer_ty).
                 }
@@ -5100,7 +7091,7 @@ impl<'ctx> MirLowerer<'ctx> {
     /// element-to-suffix table every other Vec path uses. It used to know only
     /// f64 and i64 and read every other element (strings included) through the
     /// i32 accessor, which did not compile.
-    fn vec_get_len_fn_names(elem_ty: &MirType) -> CodegenResult<(String, &'static str)> {
+    pub(super) fn vec_get_len_fn_names(elem_ty: &MirType) -> CodegenResult<(String, &'static str)> {
         let suffix = match elem_ty {
             MirType::Float(_) => "f64".to_string(),
             MirType::Int(IntSize::I64, _) | MirType::Int(IntSize::ISize, _) => "i64".to_string(),

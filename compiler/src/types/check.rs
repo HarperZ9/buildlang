@@ -618,10 +618,24 @@ impl<'ctx> TypeChecker<'ctx> {
     /// For external modules (`mod foo;`), load and parse the file.
     fn collect_mod(&mut self, m: &ast::ModDef) {
         if let Some(content) = &m.content {
-            // Inline module: collect items directly
+            // Inline module: collect items under this module's path and record
+            // its exported function bindings immediately so forward
+            // `mod_name::fn_name(...)` calls resolve with exact signatures.
+            self.ctx.push_mod_path(m.name.name.clone());
+            let mut mod_bindings = HashMap::new();
             for item in &content.items {
                 self.collect_item(item);
+                if let ItemKind::Function(f) = &item.kind {
+                    if let Some(scheme) = self.ctx.lookup_var_scheme(f.name.name.as_ref()) {
+                        mod_bindings.insert(f.name.name.clone(), scheme.clone());
+                    }
+                }
             }
+            if !mod_bindings.is_empty() {
+                self.ctx
+                    .register_module_bindings(m.name.name.clone(), mod_bindings);
+            }
+            self.ctx.pop_mod_path();
         } else if m.is_file_module {
             // File-level `module NAME` header: the rest of the file already IS
             // the body, so there is nothing to load. Loading `NAME.bld` here
@@ -1179,6 +1193,9 @@ impl<'ctx> TypeChecker<'ctx> {
             })
             .collect();
 
+        let prev_self_ty = self.ctx.get_self_ty().cloned();
+        self.ctx
+            .set_self_ty(Some(Ty::param(Arc::from("Self"), u32::MAX)));
         let methods = t
             .items
             .iter()
@@ -1194,6 +1211,7 @@ impl<'ctx> TypeChecker<'ctx> {
                 }
             })
             .collect();
+        self.ctx.set_self_ty(prev_self_ty);
 
         let trait_def = TraitDef {
             def_id,
@@ -1257,9 +1275,10 @@ impl<'ctx> TypeChecker<'ctx> {
                 param_tys,
                 ret: sig.ret.clone(),
                 sig,
+                module_path: self.ctx.current_mod_path().to_vec(),
             },
         );
-        if is_first {
+        if is_first || !self.ctx.current_scope_has_binding(f.name.name.as_ref()) {
             if has_type_params {
                 self.ctx
                     .register_generic_function(f.name.name.clone(), fn_ty.clone());
@@ -2108,6 +2127,31 @@ impl<'ctx> TypeChecker<'ctx> {
                 segs.extend(path.segments.iter().map(|s| s.ident.name.clone()));
                 self.note_use_path(&segs, false, tree.span);
                 if segs.len() < 2 || Self::is_reserved_use_root(&segs[0]) {
+                    // Bind well-known `std::fs` / `std::io` free functions imported directly
+                    // (`use std::fs::{create_dir_all, remove_dir_all, copy};`).
+                    if segs.len() == 3
+                        && matches!(segs[0].as_ref(), "std" | "core")
+                        && matches!(segs[1].as_ref(), "fs" | "io")
+                    {
+                        let item = segs[2].as_ref();
+                        let local_name = rename
+                            .as_ref()
+                            .map(|r| r.name.clone())
+                            .unwrap_or_else(|| segs[2].clone());
+                        if matches!(
+                            item,
+                            "create_dir_all"
+                                | "remove_dir_all"
+                                | "remove_file"
+                                | "copy"
+                                | "read_dir"
+                                | "read_to_string"
+                                | "metadata"
+                        ) && self.ctx.lookup_var(local_name.as_ref()).is_none()
+                        {
+                            self.ctx.define_var(local_name, Ty::fresh_var());
+                        }
+                    }
                     return;
                 }
                 let item = segs[segs.len() - 1].clone();
@@ -2572,6 +2616,7 @@ impl<'ctx> TypeChecker<'ctx> {
         }
         if let Some(content) = &m.content {
             self.ctx.push_scope(ScopeKind::Module);
+            self.ctx.push_mod_path(m.name.name.clone());
 
             // Pre-declare types in this module before collecting fields/sigs.
             for item in &content.items {
@@ -2594,6 +2639,7 @@ impl<'ctx> TypeChecker<'ctx> {
             let bindings = self.ctx.current_scope_bindings();
             self.ctx.register_module_bindings(module_name, bindings);
 
+            self.ctx.pop_mod_path();
             self.ctx.pop_scope();
 
             // Re-export pub items to parent scope (implicit `use mod::*`).

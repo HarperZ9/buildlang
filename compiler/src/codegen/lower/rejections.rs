@@ -69,6 +69,9 @@ impl<'ctx> MirLowerer<'ctx> {
         self.in_macro_fragment = false;
         self.local_closure_name.clear();
         self.local_env_closure.clear();
+        self.option_inner_types.clear();
+        self.result_ok_types.clear();
+        self.result_err_types.clear();
         self.pending_closure_params.clear();
         self.closure_param_hint = None;
         self.parse_target_hint = None;

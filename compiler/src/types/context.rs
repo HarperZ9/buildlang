@@ -144,6 +144,11 @@ pub struct TypeContext {
     /// initializer is an unsuffixed integer literal, as in `let mut c = 0;`
     /// used against an `f64` (issue #167). Same conflict rule as above.
     inferred_local_floats: HashMap<crate::lexer::Span, Option<super::ty::FloatTy>>,
+
+    /// Stack of inline module names currently being collected or checked, so
+    /// unqualified calls inside `mod a { ... }` prefer `a`'s own functions
+    /// over identically-named functions defined in sibling inline modules.
+    current_mod_path: Vec<Arc<str>>,
 }
 
 /// One candidate method for an overloaded (or singly-defined) function name.
@@ -162,6 +167,8 @@ pub struct MethodCandidate {
     pub ret: Ty,
     /// The full signature (generics, effects, lifetimes).
     pub sig: FnSig,
+    /// Inline module path where this candidate was defined (empty at root).
+    pub module_path: Vec<Arc<str>>,
 }
 
 /// A scope containing variable bindings.
@@ -419,6 +426,7 @@ impl TypeContext {
             inferred_local_vec_elems: HashMap::new(),
             inferred_local_option_ints: HashMap::new(),
             inferred_local_floats: HashMap::new(),
+            current_mod_path: Vec::new(),
         };
         ctx.init_builtins();
         ctx
@@ -1071,9 +1079,16 @@ impl TypeContext {
     pub fn lookup_param_method(&self, param_name: &str, method_name: &str) -> Option<&TraitMethod> {
         let bounds = self.param_trait_bounds.get(param_name)?;
         for trait_name in bounds {
-            // Find the trait definition by name
-            if let Some(trait_def) = self.lookup_trait_by_name(trait_name) {
-                // Search the trait's methods
+            // Search all trait definitions with this name (a user-defined trait
+            // like `trait Debug { fn fmt(...) }` may have methods while the
+            // built-in prelude stub with a lower DefId has an empty method list).
+            let mut matching_traits: Vec<_> = self
+                .traits
+                .iter()
+                .filter(|(_, t)| t.name.as_ref() == trait_name.as_ref())
+                .collect();
+            matching_traits.sort_by_key(|(def_id, _)| *def_id);
+            for (_, trait_def) in matching_traits {
                 if let Some(method) = trait_def
                     .methods
                     .iter()
@@ -1174,6 +1189,13 @@ impl TypeContext {
             .unwrap_or_default()
     }
 
+    /// Return whether the innermost (current) scope already binds `name`.
+    pub fn current_scope_has_binding(&self, name: &str) -> bool {
+        self.scopes
+            .last()
+            .is_some_and(|s| s.bindings.contains_key(name))
+    }
+
     /// Return a clone of a named module's bindings (for glob imports).
     pub fn clone_module_bindings(&self, module: &str) -> Option<HashMap<Arc<str>, TypeScheme>> {
         self.module_bindings.get(module).cloned()
@@ -1200,6 +1222,21 @@ impl TypeContext {
     /// Register a function signature.
     pub fn register_function(&mut self, def_id: DefId, sig: FnSig) {
         self.functions.insert(def_id, sig);
+    }
+
+    /// Return the current inline module path stack (empty at root).
+    pub fn current_mod_path(&self) -> &[Arc<str>] {
+        &self.current_mod_path
+    }
+
+    /// Push an inline module name onto the current module path stack.
+    pub fn push_mod_path(&mut self, name: Arc<str>) {
+        self.current_mod_path.push(name);
+    }
+
+    /// Pop the innermost inline module name from the current module path stack.
+    pub fn pop_mod_path(&mut self) {
+        self.current_mod_path.pop();
     }
 
     /// Look up a function signature.
@@ -1233,10 +1270,10 @@ impl TypeContext {
                 .collect()
         };
         let new_shape = shape(&candidate.param_tys);
-        if candidates
-            .iter()
-            .any(|c| c.param_tys == candidate.param_tys || shape(&c.param_tys) == new_shape)
-        {
+        if candidates.iter().any(|c| {
+            c.module_path == candidate.module_path
+                && (c.param_tys == candidate.param_tys || shape(&c.param_tys) == new_shape)
+        }) {
             return;
         }
         // If an earlier pass registered the same inline-module function with an

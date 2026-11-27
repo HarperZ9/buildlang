@@ -40,6 +40,13 @@ impl<T> Buffer<T> {
     pub fn clear(&mut self) {
         self.data.clear();
     }
+    pub fn fill(&mut self, value: T) {
+        let mut i: usize = 0;
+        while i < self.data.len() {
+            self.data[i] = value;
+            i += 1;
+        }
+    }
     pub fn as_slice(&self) -> &[T] {
         &self.data[0..self.data.len()]
     }

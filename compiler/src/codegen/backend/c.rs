@@ -1464,14 +1464,58 @@ impl CBackend {
         // generic BuildVec via a per-type wrapper so `Vec<P>` push/get/pop work.
         {
             let mut vec_elem_types = std::collections::BTreeMap::<String, String>::new();
-            for func in &module.functions {
-                for local in &func.locals {
-                    if let MirType::Vec(ref elem) = local.ty {
-                        if Self::vec_elem_needs_sized_wrapper(elem) {
-                            vec_elem_types
-                                .insert(Self::hvec_elem_suffix(elem), self.type_to_c(elem));
+            fn collect_vec_elems(
+                backend: &CBackend,
+                ty: &MirType,
+                out: &mut std::collections::BTreeMap<String, String>,
+            ) {
+                match ty {
+                    MirType::Vec(elem) => {
+                        if CBackend::vec_elem_needs_sized_wrapper(elem) {
+                            out.insert(CBackend::hvec_elem_suffix(elem), backend.type_to_c(elem));
+                        }
+                        collect_vec_elems(backend, elem, out);
+                    }
+                    MirType::Ptr(inner)
+                    | MirType::Slice(inner)
+                    | MirType::Array(inner, _)
+                    | MirType::Option(inner) => collect_vec_elems(backend, inner, out),
+                    MirType::Tuple(elems) => {
+                        for e in elems {
+                            collect_vec_elems(backend, e, out);
                         }
                     }
+                    MirType::Map(k, v) => {
+                        collect_vec_elems(backend, k, out);
+                        collect_vec_elems(backend, v, out);
+                    }
+                    _ => {}
+                }
+            }
+            for func in &module.functions {
+                for p in &func.sig.params {
+                    collect_vec_elems(self, p, &mut vec_elem_types);
+                }
+                collect_vec_elems(self, &func.sig.ret, &mut vec_elem_types);
+                for local in &func.locals {
+                    collect_vec_elems(self, &local.ty, &mut vec_elem_types);
+                }
+            }
+            for td in &module.types {
+                match &td.kind {
+                    TypeDefKind::Struct { fields, .. } => {
+                        for (_, fty) in fields {
+                            collect_vec_elems(self, fty, &mut vec_elem_types);
+                        }
+                    }
+                    TypeDefKind::Enum { variants, .. } => {
+                        for v in variants {
+                            for (_, fty) in &v.fields {
+                                collect_vec_elems(self, fty, &mut vec_elem_types);
+                            }
+                        }
+                    }
+                    _ => {}
                 }
             }
             if !vec_elem_types.is_empty() {
@@ -1488,6 +1532,7 @@ impl CBackend {
                     // store (most of n-body's time went there).
                     write!(self.output, "static void build_hvec_set_{suffix}(BuildVecHandle h, size_t i, {elem_c} val) {{ if (BL_UNLIKELY(i >= h.inner->len)) {{ fprintf(stderr, \"Vec index out of bounds: %zu >= %zu\\n\", i, h.inner->len); exit(101); }} *({elem_c}*)((char*)h.inner->ptr + i * h.inner->elem_size) = val; }}\n").unwrap();
                     write!(self.output, "static {elem_c} build_hvec_pop_{suffix}(BuildVecHandle h) {{ {elem_c} __z; memset(&__z, 0, sizeof(__z)); if (h.inner->len == 0) return __z; h.inner->len--; return *({elem_c}*)((char*)h.inner->ptr + h.inner->len * h.inner->elem_size); }}\n").unwrap();
+                    write!(self.output, "static bool build_hvec_contains_{suffix}(BuildVecHandle h, {elem_c} val) {{ for (size_t __i = 0; __i < h.inner->len; __i++) {{ if (memcmp((char*)h.inner->ptr + __i * h.inner->elem_size, &val, sizeof({elem_c})) == 0) return true; }} return false; }}\n").unwrap();
                 }
                 self.output.push('\n');
             }
@@ -2998,7 +3043,26 @@ impl CBackend {
 
         // Escape user-defined function names that conflict with C macros/stdlib.
         let func_name = Self::user_fn_emit_name(func.name.as_ref());
-        write!(self.output, "{} {}(", ret_type, func_name).unwrap();
+        let fnptr_ret_suffix = if func.name.as_ref() != "main" {
+            if let MirType::FnPtr(ref ret_sig) = func.sig.ret {
+                let inner_ret = self.type_to_c(&ret_sig.ret);
+                let inner_params: Vec<_> =
+                    ret_sig.params.iter().map(|p| self.type_to_c(p)).collect();
+                let inner_param_str = if inner_params.is_empty() {
+                    "void".to_string()
+                } else {
+                    inner_params.join(", ")
+                };
+                write!(self.output, "{} (*{}(", inner_ret, func_name).unwrap();
+                Some(format!(")({})", inner_param_str))
+            } else {
+                write!(self.output, "{} {}(", ret_type, func_name).unwrap();
+                None
+            }
+        } else {
+            write!(self.output, "{} {}(", ret_type, func_name).unwrap();
+            None
+        };
 
         // For main(), always emit (int argc, char** argv) signature
         if func.name.as_ref() == "main" {
@@ -3058,6 +3122,9 @@ impl CBackend {
         }
 
         self.output.push(')');
+        if let Some(suffix) = fnptr_ret_suffix {
+            self.output.push_str(&suffix);
+        }
 
         Ok(())
     }

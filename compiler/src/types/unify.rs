@@ -457,9 +457,16 @@ impl Unifier {
 
             // Trait object unsized coercion: `&Concrete` -> `&dyn Trait`,
             // `Box<Concrete>` -> `Box<dyn Trait>`, and `dyn Trait` -> `dyn Trait`.
+            // Every concrete value type also implements `Any` (`Box::new(())` -> `Box<dyn Any>`).
             (TyKind::TraitObject(_), TyKind::TraitObject(_)) => Ok(()),
             (TyKind::TraitObject(_), TyKind::Adt(_, _))
             | (TyKind::Adt(_, _), TyKind::TraitObject(_)) => Ok(()),
+            (TyKind::TraitObject(bounds), other) | (other, TyKind::TraitObject(bounds))
+                if bounds.iter().any(|b| b.as_ref() == "Any")
+                    && !matches!(other, TyKind::Error | TyKind::Never) =>
+            {
+                Ok(())
+            }
 
             // Type parameters: must be identical
             (TyKind::Param(n1, i1), TyKind::Param(n2, i2)) => {

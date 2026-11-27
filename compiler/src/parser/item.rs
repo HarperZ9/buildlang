@@ -368,6 +368,54 @@ impl<'a> Parser<'a> {
             }
 
             // =================================================================
+            // ITEM-LEVEL MACRO INVOCATION (`name!(...);` / `a::b!{...}`)
+            // =================================================================
+            TokenKind::Ident
+                if !is_unsafe
+                    && !is_async
+                    && !is_const
+                    && (matches!(self.peek().kind, TokenKind::Not)
+                        || (matches!(self.peek().kind, TokenKind::ColonColon) && {
+                            let mut k = 0usize;
+                            while matches!(self.peek_n(k).kind, TokenKind::Ident)
+                                && matches!(self.peek_n(k + 1).kind, TokenKind::ColonColon)
+                            {
+                                k += 2;
+                            }
+                            matches!(self.peek_n(k).kind, TokenKind::Ident)
+                                && matches!(self.peek_n(k + 1).kind, TokenKind::Not)
+                        })) =>
+            {
+                let mut name = self.expect_ident()?;
+                while self.eat(&TokenKind::ColonColon) {
+                    name = self.expect_ident()?;
+                }
+                self.expect(&TokenKind::Not)?;
+                let (body, needs_semi) = if self.check(&TokenKind::OpenDelim(Delimiter::Brace)) {
+                    (self.parse_token_trees_until(Delimiter::Brace)?, false)
+                } else if self.check(&TokenKind::OpenDelim(Delimiter::Paren)) {
+                    (self.parse_token_trees_until(Delimiter::Paren)?, true)
+                } else if self.check(&TokenKind::OpenDelim(Delimiter::Bracket)) {
+                    (self.parse_token_trees_until(Delimiter::Bracket)?, true)
+                } else {
+                    return Err(self.error_expected("macro delimiter"));
+                };
+                if needs_semi {
+                    let _ = self.eat(&TokenKind::Semi);
+                }
+                let span = start.merge(&self.tokens[self.pos.saturating_sub(1)].span);
+                Ok(Item::new(
+                    ItemKind::Macro(Box::new(MacroDef {
+                        name: Some(name),
+                        body,
+                    })),
+                    vis,
+                    attrs,
+                    span,
+                ))
+            }
+
+            // =================================================================
             // ERROR
             // =================================================================
             _ => {

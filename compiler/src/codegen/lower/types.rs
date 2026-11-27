@@ -144,6 +144,44 @@ impl<'ctx> MirLowerer<'ctx> {
             // type is the base type. WITHOUT this arm the wildcard below
             // would silently lower an annotated local to `MirType::i32()` --
             // a miscompile pinned by a mutation check (Task 7).
+            ast::TypeKind::ImplTrait { bounds } => {
+                // `impl Iterator<Item = T>` materializes as `Vec<T>` in the C backend.
+                for bound in bounds {
+                    if let Some(seg) = bound.path.segments.last() {
+                        if seg.ident.name.as_ref() == "Iterator" {
+                            for arg in &seg.generics {
+                                if let ast::GenericArg::AssocType { name, ty } = arg {
+                                    if name.name.as_ref() == "Item" {
+                                        let normalize_item = |t: MirType| -> MirType {
+                                            let mut p = &t;
+                                            while let MirType::Ptr(inner) = p {
+                                                p = inner.as_ref();
+                                            }
+                                            if matches!(p, MirType::Struct(n) if n.as_ref() == "BuildString")
+                                            {
+                                                MirType::Struct(Arc::from("BuildString"))
+                                            } else {
+                                                t
+                                            }
+                                        };
+                                        let item_ty = match self.lower_type_from_ast(ty) {
+                                            MirType::Tuple(elems) => {
+                                                let normed: Vec<MirType> =
+                                                    elems.into_iter().map(normalize_item).collect();
+                                                MirType::Tuple(normed)
+                                            }
+                                            other => normalize_item(other),
+                                        };
+                                        return MirType::Vec(Box::new(item_ty));
+                                    }
+                                }
+                            }
+                            return MirType::Vec(Box::new(MirType::i32()));
+                        }
+                    }
+                }
+                MirType::i32()
+            }
             ast::TypeKind::WithUnit { base, .. } => self.lower_type_from_ast(base),
             _ => MirType::i32(),
         }
@@ -262,22 +300,33 @@ impl<'ctx> MirLowerer<'ctx> {
                         }
                     }
 
-                    // Special-case Vec<T>, Array<T>, VecDeque<T>, and HashSet<T>/BTreeSet<T>: resolve to MirType::Vec(element_type)
+                    // Special-case Vec<T>, Array<T>, VecDeque<T>, Queue<T>, Buffer<T> (when not user-defined),
+                    // and HashSet<T>/BTreeSet<T>: resolve to MirType::Vec(element_type)
                     if matches!(
                         type_name,
-                        "Vec" | "Array" | "VecDeque" | "HashSet" | "BTreeSet"
-                    ) {
+                        "Vec" | "Array" | "VecDeque" | "Queue" | "HashSet" | "BTreeSet"
+                    ) || (type_name == "Buffer"
+                        && self.module.find_type("Buffer").is_none()
+                        && !self.generic_structs.contains_key("Buffer"))
+                    {
                         if let Some(ast::GenericArg::Type(arg_ty)) = generic_args.first() {
-                            let elem_ty = match self.lower_type_from_ast(arg_ty) {
-                                MirType::Ptr(inner) if matches!(inner.as_ref(), MirType::Struct(n) if n.as_ref() == "BuildString") => {
-                                    MirType::Struct(Arc::from("BuildString"))
-                                }
-                                other => other,
-                            };
+                            let mut elem_ty = self.lower_type_from_ast(arg_ty);
+                            // Peel `&str` / `&&str` / `&String` pointer wrappers around `BuildString`
+                            // because `BuildString` is already a value handle in the C runtime.
+                            let mut probe = &elem_ty;
+                            while let MirType::Ptr(inner) = probe {
+                                probe = inner.as_ref();
+                            }
+                            if matches!(probe, MirType::Struct(n) if n.as_ref() == "BuildString") {
+                                elem_ty = MirType::Struct(Arc::from("BuildString"));
+                            }
                             return MirType::Vec(Box::new(elem_ty));
                         }
-                        if matches!(type_name, "Vec" | "Array" | "VecDeque") {
+                        if matches!(type_name, "Vec" | "Array" | "VecDeque" | "Queue") {
                             return MirType::Vec(Box::new(MirType::i32()));
+                        }
+                        if type_name == "Buffer" {
+                            return MirType::Vec(Box::new(MirType::u8()));
                         }
                         return MirType::Vec(Box::new(MirType::Struct(Arc::from("BuildString"))));
                     }
@@ -358,8 +407,39 @@ impl<'ctx> MirLowerer<'ctx> {
                 "bool" => MirType::Bool,
                 "char" => MirType::u32(),
                 "str" | "String" => MirType::Struct(Arc::from("BuildString")),
+                "Path" | "PathBuf" if self.module.find_type(ident.name.as_ref()).is_none() => {
+                    MirType::Struct(Arc::from("BuildString"))
+                }
+                "Error"
+                    if path.segments.len() >= 2
+                        && path.segments[path.segments.len() - 2].ident.name.as_ref() == "io"
+                        && self.module.find_type("Error").is_none() =>
+                {
+                    MirType::Struct(Arc::from("BuildString"))
+                }
+                "Buffer"
+                    if self.module.find_type("Buffer").is_none()
+                        && !self.generic_structs.contains_key("Buffer") =>
+                {
+                    MirType::Vec(Box::new(MirType::u8()))
+                }
                 "Range" | "RangeInclusive" => MirType::Struct(Arc::from("BuildRange")),
-                "Formatter" => MirType::Struct(Arc::from("BuildFormatter")),
+                "Formatter" if self.module.find_type("Formatter").is_none() => {
+                    MirType::Struct(Arc::from("BuildFormatter"))
+                }
+                "AtomicUsize" if self.module.find_type("AtomicUsize").is_none() => MirType::usize(),
+                "AtomicIsize" if self.module.find_type("AtomicIsize").is_none() => MirType::isize(),
+                "AtomicU64" if self.module.find_type("AtomicU64").is_none() => MirType::u64(),
+                "AtomicI64" if self.module.find_type("AtomicI64").is_none() => MirType::i64(),
+                "AtomicU32" if self.module.find_type("AtomicU32").is_none() => MirType::u32(),
+                "AtomicI32" if self.module.find_type("AtomicI32").is_none() => MirType::i32(),
+                "AtomicBool" if self.module.find_type("AtomicBool").is_none() => MirType::Bool,
+                "ByteReader" if self.module.find_type("ByteReader").is_none() => {
+                    MirType::Struct(Arc::from("BuildByteReader"))
+                }
+                "ByteWriter" if self.module.find_type("ByteWriter").is_none() => {
+                    MirType::Struct(Arc::from("BuildByteWriter"))
+                }
                 "Result"
                     if path.segments.len() >= 2
                         && path.segments[path.segments.len() - 2].ident.name.as_ref() == "fmt" =>
@@ -467,6 +547,29 @@ impl<'ctx> MirLowerer<'ctx> {
                 }
                 p.last_ident()
                     .and_then(|i| self.const_values.get(&i.name).cloned())
+            }
+            ExprKind::Call { func, args } if args.len() == 1 => {
+                if let ExprKind::Path(p) = &func.kind {
+                    let segs: Vec<&str> =
+                        p.segments.iter().map(|s| s.ident.name.as_ref()).collect();
+                    if segs.len() >= 2 && segs.last().copied() == Some("new") {
+                        let atomic_ty = match segs[segs.len() - 2] {
+                            "AtomicUsize" => Some(MirType::usize()),
+                            "AtomicIsize" => Some(MirType::isize()),
+                            "AtomicU64" => Some(MirType::u64()),
+                            "AtomicI64" => Some(MirType::i64()),
+                            "AtomicU32" => Some(MirType::u32()),
+                            "AtomicI32" => Some(MirType::i32()),
+                            "AtomicBool" => Some(MirType::Bool),
+                            _ => None,
+                        };
+                        if let Some(target_ty) = atomic_ty {
+                            let val = self.try_const_eval(&args[0])?;
+                            return Self::const_cast(val.clone(), &target_ty).or(Some(val));
+                        }
+                    }
+                }
+                None
             }
             ExprKind::Paren(inner) => self.try_const_eval(inner),
             ExprKind::Unary {
@@ -999,11 +1102,23 @@ impl<'ctx> MirLowerer<'ctx> {
             .collect();
 
         // Lower the arguments first: a closure argument has to exist before
-        // the callee can be specialised for it.
-        let mut arg_vals: Vec<_> = args
-            .iter()
-            .map(|a| self.lower_expr(a))
-            .collect::<CodegenResult<_>>()?;
+        // the callee can be specialised for it. Propagate Fn/FnMut/FnOnce
+        // trait-bound parameter types as `closure_param_hint` so unannotated
+        // closure arguments (`|_, args|`) receive their exact parameter types.
+        let mut arg_vals = Vec::with_capacity(args.len());
+        for (i, a) in args.iter().enumerate() {
+            let hint = generic_fndef
+                .sig
+                .params
+                .get(i)
+                .and_then(|p| self.fn_bound_param_types(&generic_fndef, &p.ty));
+            let prev_hint = hint.map(|h| std::mem::replace(&mut self.closure_param_hint, Some(h)));
+            let lowered = self.lower_expr(a);
+            if let Some(old) = prev_hint {
+                self.closure_param_hint = old;
+            }
+            arg_vals.push(lowered?);
+        }
 
         // Build multi-param substitution map by inferring types from arguments.
         let subst = self.infer_subst_from_args(&generic_fndef, &type_param_names, args);
@@ -1103,11 +1218,33 @@ impl<'ctx> MirLowerer<'ctx> {
                 .map(|(_, name, _)| (name.clone(), self.closure_captures.get(name).cloned()))
                 .collect();
             self.pending_closure_params = closure_params.clone();
+            let saved_impl_type =
+                if let Some(owner) = self.generic_impl_owner.get(&fn_name).cloned() {
+                    std::mem::replace(&mut self.current_impl_type, Some(owner))
+                } else {
+                    self.current_impl_type.clone()
+                };
+            // Restore the generic function's defining inline-module prefix (e.g.
+            // `json_to_string` -> `module_prefix = ["json"]`) so intra-module
+            // calls like `JsonSerializer::new()` resolve to `json_JsonSerializer_new`.
+            let base_name = generic_fndef.name.name.as_ref();
+            let saved_mod_prefix = fn_name
+                .strip_suffix(base_name)
+                .and_then(|p| p.strip_suffix('_'))
+                .filter(|p| !p.is_empty())
+                .map(|p| {
+                    let segs: Vec<Arc<str>> = p.split('_').map(Arc::from).collect();
+                    std::mem::replace(&mut self.module_prefix, segs)
+                });
 
             // Lower the specialized function as a normal (non-generic) function.
             let lowered = self.lower_function(&specialized, &[]);
 
             // Restore the caller's function context.
+            if let Some(prev_prefix) = saved_mod_prefix {
+                self.module_prefix = prev_prefix;
+            }
+            self.current_impl_type = saved_impl_type;
             self.pending_closure_params.clear();
             for (name, captures) in saved_captures {
                 match captures {
@@ -1146,6 +1283,253 @@ impl<'ctx> MirLowerer<'ctx> {
         Ok(values::local(result))
     }
 
+    /// Extract the parameter types from a `Fn(A, B) -> R` / `FnMut(...)` / `FnOnce(...)`
+    /// trait bound on the type parameter named by `param_ty`, if any.
+    pub(super) fn fn_bound_param_types(
+        &self,
+        fndef: &ast::FnDef,
+        param_ty: &ast::Type,
+    ) -> Option<Vec<MirType>> {
+        let tp_name = match &param_ty.kind {
+            ast::TypeKind::Path(p) if p.is_simple() => p.last_ident()?.name.as_ref(),
+            _ => return None,
+        };
+        let extract_from_bounds = |bounds: &[ast::TypeBound]| -> Option<Vec<MirType>> {
+            for b in bounds {
+                let seg = b.path.segments.last()?;
+                if matches!(seg.ident.name.as_ref(), "Fn" | "FnMut" | "FnOnce")
+                    && !seg.generics.is_empty()
+                {
+                    let tys: Vec<MirType> = seg
+                        .generics
+                        .iter()
+                        .filter_map(|g| match g {
+                            ast::GenericArg::Type(t) => Some(self.lower_type_from_ast(t)),
+                            _ => None,
+                        })
+                        .collect();
+                    if !tys.is_empty() {
+                        return Some(tys);
+                    }
+                }
+            }
+            None
+        };
+        for gp in &fndef.generics.params {
+            if gp.ident.name.as_ref() == tp_name {
+                if let ast::GenericParamKind::Type { bounds, .. } = &gp.kind {
+                    if let Some(tys) = extract_from_bounds(bounds) {
+                        return Some(tys);
+                    }
+                }
+            }
+        }
+        if let Some(wc) = &fndef.generics.where_clause {
+            for pred in &wc.predicates {
+                if let ast::TypeKind::Path(p) = &pred.ty.kind {
+                    if p.is_simple() && p.last_ident().is_some_and(|i| i.name.as_ref() == tp_name) {
+                        if let Some(tys) = extract_from_bounds(&pred.bounds) {
+                            return Some(tys);
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Monomorphize and call a generic impl method deferred into `self.generic_functions`
+    /// (e.g. `Event::with_data<T>(mut self, data: T) -> Self`).
+    pub(crate) fn lower_generic_method_call(
+        &mut self,
+        base_mangled: &Arc<str>,
+        receiver: &ast::Expr,
+        receiver_val: MirValue,
+        receiver_ty: &MirType,
+        args: &[ast::Expr],
+    ) -> CodegenResult<MirValue> {
+        let generic_fndef = self
+            .generic_functions
+            .get(base_mangled)
+            .ok_or_else(|| {
+                CodegenError::Internal(format!("generic method {} not found", base_mangled))
+            })?
+            .clone();
+        let owner = self
+            .generic_impl_owner
+            .get(base_mangled)
+            .cloned()
+            .unwrap_or_else(|| match receiver_ty {
+                MirType::Struct(n) => n.clone(),
+                MirType::Ptr(inner) => match inner.as_ref() {
+                    MirType::Struct(n) => n.clone(),
+                    _ => Arc::from("Self"),
+                },
+                _ => Arc::from("Self"),
+            });
+
+        let type_param_names: Vec<Arc<str>> = generic_fndef
+            .generics
+            .params
+            .iter()
+            .filter_map(|p| match &p.kind {
+                ast::GenericParamKind::Type { .. } => Some(p.ident.name.clone()),
+                _ => None,
+            })
+            .collect();
+
+        // Prepare `self` argument matching the method's receiver mode (`&self` vs `self`).
+        let self_is_ref = generic_fndef
+            .sig
+            .params
+            .first()
+            .is_some_and(|p| matches!(p.ty.kind, ast::TypeKind::Ref { .. }));
+        let receiver_already_ptr = matches!(receiver_ty, MirType::Ptr(_));
+        let self_arg = if self_is_ref && !receiver_already_ptr {
+            if let Some(ptr) = self.receiver_place_ref(receiver)? {
+                ptr
+            } else {
+                let receiver_local = match &receiver_val {
+                    MirValue::Local(id) => *id,
+                    _ => {
+                        let b = self.current_fn.as_mut().unwrap();
+                        let tmp = b.create_local(receiver_ty.clone());
+                        b.assign(tmp, MirRValue::Use(receiver_val));
+                        tmp
+                    }
+                };
+                let b = self.current_fn.as_mut().unwrap();
+                let r = b.create_local(MirType::Ptr(Box::new(receiver_ty.clone())));
+                b.make_ref(r, false, MirPlace::local(receiver_local));
+                values::local(r)
+            }
+        } else if !self_is_ref && receiver_already_ptr {
+            self.deref_if_pointer(receiver_val)?
+        } else {
+            receiver_val
+        };
+
+        // Lower non-self arguments with Fn-bound closure parameter hints.
+        let non_self_params = generic_fndef.sig.params.get(1..).unwrap_or(&[]);
+        let mut arg_vals = Vec::with_capacity(args.len() + 1);
+        arg_vals.push(self_arg);
+        for (i, a) in args.iter().enumerate() {
+            let hint = non_self_params
+                .get(i)
+                .and_then(|p| self.fn_bound_param_types(&generic_fndef, &p.ty));
+            let prev_hint = hint.map(|h| std::mem::replace(&mut self.closure_param_hint, Some(h)));
+            let lowered = self.lower_expr(a);
+            if let Some(old) = prev_hint {
+                self.closure_param_hint = old;
+            }
+            arg_vals.push(lowered?);
+        }
+
+        // Infer type-parameter substitution from non-self arguments (or default to i32).
+        let mut subst: HashMap<Arc<str>, MirType> = HashMap::new();
+        for (i, param) in non_self_params.iter().enumerate() {
+            if let Some(arg_val) = arg_vals.get(i + 1) {
+                let arg_ty = self.type_of_value(arg_val);
+                if let ast::TypeKind::Path(p) = &param.ty.kind {
+                    if p.is_simple() {
+                        if let Some(id) = p.last_ident() {
+                            if type_param_names.iter().any(|tp| *tp == id.name)
+                                && !matches!(arg_ty, MirType::FnPtr(_))
+                            {
+                                subst.entry(id.name.clone()).or_insert(arg_ty);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        let mut fn_subst: HashMap<Arc<str>, MirType> = HashMap::new();
+        let mut fn_suffix = String::new();
+        for (i, param) in non_self_params.iter().enumerate() {
+            let ast::TypeKind::Path(path) = &param.ty.kind else {
+                continue;
+            };
+            let Some(tp) = path
+                .last_ident()
+                .filter(|_| path.is_simple())
+                .and_then(|id| type_param_names.iter().find(|n| **n == id.name))
+                .cloned()
+            else {
+                continue;
+            };
+            let fn_ty = match arg_vals.get(i + 1) {
+                Some(MirValue::Local(id)) => self
+                    .current_fn
+                    .as_ref()
+                    .and_then(|b| b.local_type(*id))
+                    .filter(|t| matches!(t, MirType::FnPtr(_))),
+                Some(MirValue::Function(name)) | Some(MirValue::Global(name)) => {
+                    self.fn_value_type(name)
+                }
+                _ => None,
+            };
+            if let Some(ft) = fn_ty {
+                if !fn_subst.contains_key(&tp) {
+                    fn_suffix.push_str(&format!("_fn{}", Self::type_tag(&ft)));
+                    subst.remove(&tp);
+                    fn_subst.insert(tp, ft);
+                }
+            }
+        }
+        for tp in &type_param_names {
+            if !subst.contains_key(tp) && !fn_subst.contains_key(tp) {
+                subst.insert(tp.clone(), MirType::i32());
+            }
+        }
+
+        let mangled_name: Arc<str> = Arc::from(format!(
+            "{}{}",
+            Self::mangle_generic_name(base_mangled.as_ref(), &subst),
+            fn_suffix
+        ));
+
+        if !self.monomorphized.contains(&mangled_name) {
+            self.monomorphized.insert(mangled_name.clone());
+            let specialized =
+                Self::monomorphize_fndef_multi(&generic_fndef, &subst, mangled_name.clone());
+            let saved_fn = self.current_fn.take();
+            let saved_vars = std::mem::take(&mut self.var_map);
+            let mut body_subst = subst.clone();
+            body_subst.extend(fn_subst.iter().map(|(k, v)| (k.clone(), v.clone())));
+            let saved_subst = std::mem::replace(&mut self.type_param_subst, body_subst);
+            let saved_impl_type =
+                std::mem::replace(&mut self.current_impl_type, Some(owner.clone()));
+
+            let lowered = self.lower_impl_method(&owner, &mangled_name, &specialized);
+
+            self.current_impl_type = saved_impl_type;
+            self.type_param_subst = saved_subst;
+            self.current_fn = saved_fn;
+            self.var_map = saved_vars;
+            lowered?;
+        }
+
+        let ret_ty = self
+            .module
+            .find_function(mangled_name.as_ref())
+            .map(|f| f.sig.ret.clone())
+            .unwrap_or_else(|| MirType::Struct(owner));
+        let builder = self
+            .current_fn
+            .as_mut()
+            .ok_or_else(|| CodegenError::Internal("No current function".to_string()))?;
+        let result = builder.create_local(ret_ty);
+        let cont = builder.create_block();
+        builder.call(
+            MirValue::Function(mangled_name),
+            arg_vals,
+            Some(result),
+            cont,
+        );
+        builder.switch_to_block(cont);
+        Ok(values::local(result))
+    }
+
     /// The pointer type of a top-level function named as a value.
     pub(crate) fn fn_value_type(&self, name: &str) -> Option<MirType> {
         if let Some(f) = self.module.find_function(name) {
@@ -1162,7 +1546,7 @@ impl<'ctx> MirLowerer<'ctx> {
 
     /// Match a parameter's AST type against an argument's lowered type and bind
     /// each generic type parameter found in it (first binding wins).
-    fn bind_type_params(
+    pub(super) fn bind_type_params(
         ast_ty: &ast::Type,
         arg_ty: &MirType,
         names: &[Arc<str>],
@@ -1212,7 +1596,7 @@ impl<'ctx> MirLowerer<'ctx> {
     /// Infer a full substitution map by matching generic function params against
     /// call-site argument types.  Walks each parameter type to bind all generic
     /// type parameters, not just the first.
-    fn infer_subst_from_args(
+    pub(super) fn infer_subst_from_args(
         &self,
         fndef: &ast::FnDef,
         type_param_names: &[Arc<str>],
