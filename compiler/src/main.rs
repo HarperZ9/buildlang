@@ -250,6 +250,16 @@ enum Commands {
         /// stdout (schema buildlang.diagnostics/v1)
         #[arg(long, value_name = "FORMAT", default_value = "human", value_parser = ["human", "json"])]
         error_format: String,
+
+        /// Fail closed if any function transitively reaches a denied capability effect
+        /// (comma-separated: console, clock, fs, net, exec, unsafe)
+        #[arg(long = "deny-effect", value_name = "EFFECTS")]
+        deny_effect: Option<String>,
+
+        /// Emit a deterministic JSON interprocedural effect manifest on stdout
+        /// (schema buildlang.effect-manifest/v1)
+        #[arg(long = "effect-manifest-json")]
+        effect_manifest_json: bool,
     },
 
     /// Check every .bld file under a directory in parallel
@@ -920,6 +930,8 @@ fn run_cli(cli: Cli) -> Result<(), i32> {
             profile,
             expect_profile_digest,
             error_format,
+            deny_effect,
+            effect_manifest_json,
         }) => cmd_check(
             &file,
             receipt.as_deref(),
@@ -927,6 +939,8 @@ fn run_cli(cli: Cli) -> Result<(), i32> {
             profile.as_deref(),
             expect_profile_digest.as_deref(),
             error_format == "json",
+            deny_effect.as_deref(),
+            effect_manifest_json,
         ),
         Some(Commands::CheckDir {
             dir,
@@ -1739,6 +1753,8 @@ struct CheckOutcome {
     diagnostics: Vec<Diagnostic>,
     /// The `#[measured]` constants of the root file, for the check receipt.
     measured_constants: Vec<buildlang::types::measured::MeasuredConstant>,
+    /// Lowered MIR module for interprocedural capability and effect auditing.
+    mir_module: Option<buildlang::codegen::MirModule>,
 }
 
 #[derive(serde::Deserialize)]
@@ -6750,6 +6766,7 @@ fn run_check_unit(unit: CheckUnit, early: &mut Option<Diagnostic>) -> Result<Che
     // to catch what the AST tracker's name-keyed tracking cannot (the open
     // classes: move-out-of-borrow, borrow-after-move, dataflow joins), never
     // to re-report what the AST tracker already rejected.
+    let mut mir_module: Option<buildlang::codegen::MirModule> = None;
     if parse_errors.is_empty() && type_errors.is_empty() {
         let codegen_source: Arc<str> = Arc::from(source_file.source());
         let mut codegen = CodeGenerator::with_source(&ctx, Target::C, codegen_source);
@@ -6758,7 +6775,10 @@ fn run_check_unit(unit: CheckUnit, early: &mut Option<Diagnostic>) -> Result<Che
         // way it always has -- surfaced separately, not folded into
         // `type_errors` -- by simply not adding linear diagnostics.
         match codegen.generate(&ast) {
-            Ok(_) => type_errors.extend(codegen.linear_errors().to_vec()),
+            Ok(_) => {
+                type_errors.extend(codegen.linear_errors().to_vec());
+                mir_module = codegen.mir().cloned();
+            }
             // A program the C backend cannot compile fails the check: a passing
             // `buildc check` means the program compiles. Shader and GPU kernel
             // programs target HLSL, GLSL or SPIR-V, so the C gate does not apply.
@@ -6768,7 +6788,9 @@ fn run_check_unit(unit: CheckUnit, early: &mut Option<Diagnostic>) -> Result<Che
                     type_errors.push(codegen_error_as_type_error(more, &source_file));
                 }
             }
-            Err(_) => {}
+            Err(_) => {
+                mir_module = codegen.mir().cloned();
+            }
         }
     }
     // Laws and contracts: a counterexample fails the check (BL0801).
@@ -6821,6 +6843,7 @@ fn run_check_unit(unit: CheckUnit, early: &mut Option<Diagnostic>) -> Result<Che
         type_error_files: Vec::new(),
         function_summaries,
         measured_constants,
+        mir_module,
     };
     if let Some(map) = origins {
         pkg_check::remap_outcome(&mut outcome, map);
@@ -6947,6 +6970,7 @@ fn render_check_policy_output(policy: Option<&CheckPolicyDecision>) {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn cmd_check(
     file: &Path,
     receipt: Option<&Path>,
@@ -6954,12 +6978,33 @@ fn cmd_check(
     profile: Option<&str>,
     expect_profile_digest: Option<&str>,
     json: bool,
+    deny_effect: Option<&str>,
+    effect_manifest_json: bool,
 ) -> Result<(), i32> {
     let receipt_to_stdout = receipt == Some(Path::new("-"));
-    if json && receipt_to_stdout {
-        eprintln!("Error: --error-format=json writes to stdout; write the receipt to a file instead of '-'");
+    if json && (receipt_to_stdout || effect_manifest_json) {
+        eprintln!(
+            "Error: --error-format=json writes to stdout; cannot combine with stdout receipt or --effect-manifest-json"
+        );
         return Err(1);
     }
+    if receipt_to_stdout && effect_manifest_json {
+        eprintln!(
+            "Error: --receipt - and --effect-manifest-json both write to stdout; write the receipt to a file"
+        );
+        return Err(1);
+    }
+    let denied_set = match deny_effect {
+        Some(spec) => match buildlang::codegen::CapEffect::parse_deny_list(spec) {
+            Ok(set) => set,
+            Err(err) => {
+                eprintln!("Error: {err}");
+                return Err(1);
+            }
+        },
+        None => std::collections::BTreeSet::new(),
+    };
+    let run_effect_audit = deny_effect.is_some() || effect_manifest_json;
     if policy.is_some() && profile.is_some() {
         eprintln!("Error: --policy and --profile cannot be used together");
         return Err(1);
@@ -7008,6 +7053,27 @@ fn cmd_check(
         .map(|policy| evaluate_check_policy(policy, &outcome));
     let receipt_value = receipt.map(|_| build_check_receipt(&outcome, policy_decision.as_ref()));
 
+    let effect_manifest =
+        if run_effect_audit && outcome.parse_errors.is_empty() && outcome.type_errors.is_empty() {
+            match outcome.mir_module.as_ref() {
+                Some(mir) => {
+                    match buildlang::codegen::audit_mir_effects(mir, &outcome.source, &denied_set) {
+                        Ok(manifest) => Some(manifest),
+                        Err(err) => {
+                            eprintln!("Error computing MIR effect manifest: {err}");
+                            return Err(1);
+                        }
+                    }
+                }
+                None => {
+                    eprintln!("Error: MIR lowering unavailable for interprocedural effect audit");
+                    return Err(1);
+                }
+            }
+        } else {
+            None
+        };
+
     if json {
         let mut diagnostics = outcome.diagnostics.clone();
         if let Some(decision) = policy_decision.as_ref() {
@@ -7028,11 +7094,40 @@ fn cmd_check(
                 diagnostics.push(d);
             }
         }
+        if let Some(manifest) = effect_manifest.as_ref() {
+            for v in &manifest.violations {
+                let mut d = Diagnostic::bare(
+                    diag_codes::POLICY_VIOLATION,
+                    &outcome.source,
+                    v.message.clone(),
+                );
+                d.notes
+                    .push(format!("call chain: {}", v.call_chain.join(" -> ")));
+                diagnostics.push(d);
+            }
+        }
         let report = buildlang::diagnostics::Report::new(outcome.source.clone(), diagnostics);
         println!("{}", report.to_json());
     } else {
-        render_check_human_output(&outcome, receipt_to_stdout);
+        render_check_human_output(&outcome, receipt_to_stdout || effect_manifest_json);
         render_check_policy_output(policy_decision.as_ref());
+        if let Some(manifest) = effect_manifest.as_ref() {
+            for v in &manifest.violations {
+                eprintln!(
+                    "Effect violation [{}]: {} (chain: {})",
+                    v.effect,
+                    v.message,
+                    v.call_chain.join(" -> ")
+                );
+            }
+            if effect_manifest_json {
+                let body = serde_json::to_string_pretty(manifest).map_err(|err| {
+                    eprintln!("Error serializing effect manifest: {err}");
+                    1
+                })?;
+                println!("{body}");
+            }
+        }
     }
     if let Some(receipt_value) = receipt_value {
         write_check_receipt(receipt.expect("receipt path is present"), &receipt_value)?;
@@ -7042,7 +7137,12 @@ fn cmd_check(
         .as_ref()
         .map(|decision| decision.violations.is_empty())
         .unwrap_or(true);
-    if outcome.parse_errors.is_empty() && outcome.type_errors.is_empty() && policy_passed {
+    let effect_passed = effect_manifest.as_ref().map(|m| m.passed).unwrap_or(true);
+    if outcome.parse_errors.is_empty()
+        && outcome.type_errors.is_empty()
+        && policy_passed
+        && effect_passed
+    {
         Ok(())
     } else {
         Err(1)
@@ -12206,6 +12306,7 @@ mod tests {
                 },
             ],
             measured_constants: Vec::new(),
+            mir_module: None,
         };
 
         let decision = evaluate_check_policy(&policy, &outcome);
@@ -12283,6 +12384,7 @@ mod tests {
             diagnostics: Vec::new(),
             function_summaries: Vec::new(),
             measured_constants: Vec::new(),
+            mir_module: None,
         };
 
         let decision = evaluate_check_policy(&policy, &outcome);

@@ -47,7 +47,7 @@
 //! let output = codegen.generate(&module)?;
 //! ```
 
-pub(crate) mod analysis;
+pub mod analysis;
 pub mod backend;
 pub mod builder;
 pub mod c_verify;
@@ -59,6 +59,10 @@ pub mod lower;
 pub mod runtime;
 pub mod superopt;
 
+pub use analysis::cap_effect_audit::{
+    audit_module as audit_mir_effects, compute_manifest_sha256, CapEffect, EffectManifest,
+    EffectViolation, FunctionEffectRecord, EFFECT_MANIFEST_SCHEMA,
+};
 pub use backend::{Backend, CodegenError, CodegenResult, StdioMode, Target};
 pub use builder::*;
 pub use gpu_polyhedral::{
@@ -165,6 +169,11 @@ impl<'ctx> CodeGenerator<'ctx> {
             linear_errors: Vec::new(),
             further_rejections: Vec::new(),
         }
+    }
+
+    /// Get the lowered MIR module after `generate()` has lowered the AST.
+    pub fn mir(&self) -> Option<&MirModule> {
+        self.mir.as_ref()
     }
 
     /// Get the sealed V5 superoptimization certificate, if `--superopt` ran.
@@ -488,11 +497,6 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
 
         Ok(generated)
-    }
-
-    /// Get the generated MIR (for debugging/inspection).
-    pub fn mir(&self) -> Option<&MirModule> {
-        self.mir.as_ref()
     }
 
     /// Generate a C header declaring the last-generated module's `extern "C"`

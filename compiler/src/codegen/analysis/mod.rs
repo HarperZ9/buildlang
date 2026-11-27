@@ -3,6 +3,7 @@
 //! and, later, by the MIR affine/linear checker. Everything here is a pure
 //! function of MIR (`codegen::ir`); nothing mutates.
 
+pub mod cap_effect_audit;
 pub(crate) mod cfg;
 pub(crate) mod drops;
 pub(crate) mod flags;
