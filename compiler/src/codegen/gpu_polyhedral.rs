@@ -7,7 +7,7 @@
 //! SM 6.10 `linalg::Matrix` tiling metadata, PLDI 2026 `TinyWGSL`-style
 //! transitive barrier uniformity, RESOLVE-style reduced-concurrency legality,
 //! and machine-checkable `buildlang.gpu-tv-cert/v1` translation-validation
-//! certificates across `wgsl`, `hlsl`, `msl`, and `spirv`.
+//! certificates across `wgsl`, `hlsl`, `msl`, `spirv`, and `glsl`.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
@@ -49,6 +49,9 @@ pub fn subgroup_intrinsic_for_op(target: &str, op: SubgroupReductionOp) -> Optio
         ("spirv", SubgroupReductionOp::Sum) => Some("OpGroupNonUniformFAdd"),
         ("spirv", SubgroupReductionOp::Max) => Some("OpGroupNonUniformFMax"),
         ("spirv", SubgroupReductionOp::Min) => Some("OpGroupNonUniformFMin"),
+        ("glsl", SubgroupReductionOp::Sum) => Some("subgroupAdd"),
+        ("glsl", SubgroupReductionOp::Max) => Some("subgroupMax"),
+        ("glsl", SubgroupReductionOp::Min) => Some("subgroupMin"),
         _ => None,
     }
 }
@@ -65,6 +68,7 @@ pub fn cooperative_api_for_target(target: &str) -> Option<&'static str> {
         "spirv" => Some("spv_khr_cooperative_matrix"),
         "msl" => Some("msl_simdgroup_matrix"),
         "wgsl" => Some("wgsl_subgroup_matrix"),
+        "glsl" => Some("glsl_khr_cooperative_matrix"),
         _ => None,
     }
 }
@@ -91,7 +95,8 @@ pub struct DependenceVector {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CooperativeTilePlan {
     /// Target cooperative matrix/vector API (`sm6_10_linalg_matrix`,
-    /// `spv_khr_cooperative_matrix`, `msl_simdgroup_matrix`, `wgsl_subgroup_matrix`).
+    /// `spv_khr_cooperative_matrix`, `msl_simdgroup_matrix`,
+    /// `wgsl_subgroup_matrix`, `glsl_khr_cooperative_matrix`).
     pub api_surface: String,
     /// Cooperative tile dimensions `(M, N, K)`.
     pub tile_m: u32,
@@ -268,7 +273,7 @@ pub fn mat_vec_mul(h: &[Vec<i64>], delta: &[i64]) -> Result<Vec<i64>, String> {
 }
 
 /// Build a verified Cooperative-Vector / SM 6.10 `linalg::Matrix` tiling plan
-/// for `sched` on `target` (`wgsl`, `hlsl`, `msl`, `spirv`).
+/// for `sched` on `target` (`wgsl`, `hlsl`, `msl`, `spirv`, `glsl`).
 pub fn build_cooperative_tile_plan(
     target: &str,
     sched: &PolyhedralSchedule,
@@ -1454,5 +1459,39 @@ mod tests {
         let err = verify_cooperative_tile_plan(&coop, &sched, "hlsl")
             .expect_err("non-divisible cooperative tile must fail closed");
         assert!(err.contains("not divisible by subgroup width"));
+    }
+
+    #[test]
+    fn subgroup_plans_and_cooperative_tile_verify_for_glsl() {
+        let strict = build_verified_subgroup_plan("glsl", true, true).unwrap();
+        assert_eq!(strict.intrinsic, "subgroupAdd");
+        assert_eq!(strict.max_cross_width_abs_diff, 0.0);
+        assert_eq!(strict.widths_verified, vec![16, 32, 64]);
+
+        let max_p =
+            build_verified_subgroup_plan_for_op("glsl", SubgroupReductionOp::Max, true, true)
+                .unwrap();
+        assert_eq!(max_p.intrinsic, "subgroupMax");
+        assert_eq!(max_p.max_cross_width_abs_diff, 0.0);
+
+        let min_p =
+            build_verified_subgroup_plan_for_op("glsl", SubgroupReductionOp::Min, true, true)
+                .unwrap();
+        assert_eq!(min_p.intrinsic, "subgroupMin");
+        assert_eq!(min_p.max_cross_width_abs_diff, 0.0);
+
+        let sched = PolyhedralSchedule {
+            function: "glsl_matmul".to_string(),
+            dimensions: 2,
+            hyperplanes: vec![vec![1, 0], vec![0, 1]],
+            tile_sizes: vec![16, 16],
+            sram_bank_stride: vec![17, 16],
+            parallel_axes: vec![true, true],
+            dependences: vec![],
+            cooperative_tile: None,
+        };
+        let coop = build_cooperative_tile_plan("glsl", &sched).unwrap();
+        assert_eq!(coop.api_surface, "glsl_khr_cooperative_matrix");
+        assert_eq!(coop.legal_subgroup_widths, vec![16, 32, 64]);
     }
 }
