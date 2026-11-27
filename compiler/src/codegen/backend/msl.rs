@@ -307,7 +307,7 @@ impl MslBackend {
                         visited,
                     )?;
                     self.indent -= 1;
-                    if *else_block != merge {
+                    if *else_block != merge && !Self::is_empty_goto(*else_block, merge, blocks) {
                         self.writeln("} else {");
                         self.indent += 1;
                         self.emit_region(
@@ -350,7 +350,10 @@ impl MslBackend {
                         continue;
                     }
                     let lhs = self.local_name(*dest, &func.locals);
-                    let rhs = self.rvalue_to_msl(value, func)?;
+                    let rhs = match value {
+                        MirRValue::Use(v) => self.value_to_msl_typed(v, dest_ty, &func.locals)?,
+                        _ => self.rvalue_to_msl(value, func)?,
+                    };
                     self.writeln(&format!("{lhs} = {rhs};"));
                 }
                 MirStmtKind::IndexStore {
@@ -464,8 +467,12 @@ impl MslBackend {
         match rv {
             MirRValue::Use(v) => self.value_to_msl(v, &func.locals),
             MirRValue::BinaryOp { op, left, right } => {
-                let l = self.value_to_msl(left, &func.locals)?;
-                let r = self.value_to_msl(right, &func.locals)?;
+                let l_ty = Self::value_type(left, &func.locals);
+                let r_ty = Self::value_type(right, &func.locals);
+                let l_expected = r_ty.as_ref().filter(|t| matches!(t, MirType::Int(_, _)));
+                let r_expected = l_ty.as_ref().filter(|t| matches!(t, MirType::Int(_, _)));
+                let l = self.value_to_msl_typed(left, l_expected, &func.locals)?;
+                let r = self.value_to_msl_typed(right, r_expected, &func.locals)?;
                 let sym = match op {
                     BinOp::Add | BinOp::AddChecked | BinOp::AddWrapping | BinOp::AddSaturating => {
                         "+"
@@ -647,10 +654,42 @@ impl MslBackend {
         }
     }
 
+    fn value_type(value: &MirValue, locals: &[MirLocal]) -> Option<MirType> {
+        match value {
+            MirValue::Local(id) => locals.iter().find(|l| l.id == *id).map(|l| l.ty.clone()),
+            _ => None,
+        }
+    }
+
+    fn value_to_msl_typed(
+        &self,
+        value: &MirValue,
+        expected: Option<&MirType>,
+        locals: &[MirLocal],
+    ) -> CodegenResult<String> {
+        if let (MirValue::Const(MirConst::Int(v, _)), Some(MirType::Int(_, false))) =
+            (value, expected)
+        {
+            if *v >= 0 {
+                return Ok(format!("{v}u"));
+            }
+        }
+        self.value_to_msl(value, locals)
+    }
+
+    fn is_empty_goto(bid: BlockId, target: BlockId, blocks: &[MirBlock]) -> bool {
+        blocks.iter().find(|b| b.id == bid).is_some_and(|b| {
+            b.stmts.is_empty() && b.terminator == Some(MirTerminator::Goto(target))
+        })
+    }
+
     fn const_to_msl(&self, c: &MirConst) -> CodegenResult<String> {
         match c {
             MirConst::Bool(b) => Ok(if *b { "true" } else { "false" }.to_string()),
-            MirConst::Int(v, _) => Ok(format!("{v}")),
+            MirConst::Int(v, ty) => match ty {
+                MirType::Int(_, false) if *v >= 0 => Ok(format!("{v}u")),
+                _ => Ok(format!("{v}")),
+            },
             MirConst::Uint(v, _) => Ok(format!("{v}u")),
             MirConst::Float(v, ty) => {
                 if matches!(ty, MirType::Float(FloatSize::F64)) {
@@ -659,10 +698,11 @@ impl MslBackend {
                             .to_string(),
                     ));
                 }
-                if v.fract() == 0.0 {
-                    Ok(format!("{v}.0f"))
+                let s = format!("{v}");
+                if !s.contains('.') && !s.contains('e') && !s.contains('E') {
+                    Ok(format!("{s}.0f"))
                 } else {
-                    Ok(format!("{v}f"))
+                    Ok(format!("{s}f"))
                 }
             }
             MirConst::Unit => Ok("0".to_string()),
@@ -799,6 +839,14 @@ impl MslBackend {
             .map(|n| match n.as_ref() {
                 "device" | "constant" | "thread" | "threadgroup" | "kernel" | "vertex"
                 | "fragment" | "sampler" | "texture" | "half" => format!("_{n}"),
+                "class" | "struct" | "union" | "enum" | "namespace" | "template" | "typename"
+                | "using" | "private" | "public" | "protected" | "virtual" | "inline"
+                | "static" | "extern" | "const" | "volatile" | "register" | "auto" | "signed"
+                | "unsigned" | "char" | "short" | "long" | "int" | "uint" | "float" | "double"
+                | "bool" | "void" | "default" | "switch" | "case" | "operator" | "new"
+                | "delete" | "this" | "throw" | "try" | "catch" | "sizeof" | "alignof"
+                | "restrict" | "metal" | "object" | "mesh" | "visible" | "stitchable" | "step"
+                | "mix" | "clamp" | "fma" => format!("_bl_{n}"),
                 other => other.to_string(),
             })
             .unwrap_or_else(|| format!("_{}", id.0))
