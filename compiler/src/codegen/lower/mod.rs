@@ -174,6 +174,9 @@ pub struct MirLowerer<'ctx> {
     derived_clone_fns: HashSet<Arc<str>>,
     /// Generic function ASTs stored for monomorphization: name -> FnDef clone.
     generic_functions: HashMap<Arc<str>, ast::FnDef>,
+    /// Owner impl struct name for generic methods deferred from `impl Type { fn m<T: ...>(...) }`,
+    /// so on-demand monomorphization resolves `Self` to the concrete type name.
+    generic_impl_owner: HashMap<Arc<str>, Arc<str>>,
     /// Generic enum ASTs stored for monomorphization: name -> EnumDef clone.
     generic_enums: HashMap<Arc<str>, ast::EnumDef>,
     /// Generic struct ASTs stored for monomorphization: name -> StructDef clone.
@@ -369,6 +372,8 @@ pub(crate) enum IterStep<'a> {
     Rev,
     /// `.take(n)` - yield only the first `n` elements (by source position).
     Take { count: &'a ast::Expr },
+    /// `.take_while(|x| pred)` - stop yielding once the predicate returns false.
+    TakeWhile { closure: &'a ast::Expr },
     /// `.skip(n)` - skip the first `n` elements (by source position).
     Skip { count: &'a ast::Expr },
     /// `.flat_map(|x| inner_iter)` - flatten an inner iterator per element.
@@ -377,6 +382,31 @@ pub(crate) enum IterStep<'a> {
     FilterMap { closure: &'a ast::Expr },
     /// `.zip(other)` - lockstep iteration with a second iterator source.
     Zip { other: &'a ast::Expr },
+    /// `.chain(other)` - concatenate elements from a second iterator source.
+    Chain { other: &'a ast::Expr },
+    /// `.group_by(|x| key)` - group consecutive elements with equal keys into `(K, Vec<T>)`.
+    GroupBy { closure: &'a ast::Expr },
+    /// `.chunks(n)` - split elements into consecutive `Vec<T>` chunks of up to `n`.
+    Chunks { size: &'a ast::Expr },
+    /// `.windows(n)` - sliding `Vec<T>` windows of length `n`.
+    Windows { size: &'a ast::Expr },
+    /// `.dedup()` - remove consecutive duplicate elements.
+    Dedup,
+    /// `.unique()` - keep first occurrence of each distinct element.
+    Unique,
+    /// `.interleave(other)` - alternate elements from `self` and `other`.
+    Interleave { other: &'a ast::Expr },
+    /// `.merge(other)` - merge two sorted sequences into ascending order.
+    Merge { other: &'a ast::Expr },
+    /// `.intersperse(sep)` - insert `sep` between consecutive elements.
+    Intersperse { sep: &'a ast::Expr },
+    /// `.cartesian_product(other)` - yield all `(a, b)` pairs.
+    CartesianProduct { other: &'a ast::Expr },
+    /// `.running_fold(init, |acc, x| body)` - yield running accumulator values.
+    RunningFold {
+        init: &'a ast::Expr,
+        closure: &'a ast::Expr,
+    },
 }
 
 /// Terminal operation of an iterator chain.
@@ -402,6 +432,8 @@ pub(crate) enum IterTerminal<'a> {
     Max,
     /// `.min()` - smallest element as `Option<T>`.
     Min,
+    /// `.last()` - last yielded element as `Option<T>`.
+    Last,
     /// `.nth(n)` - nth yielded element as `Option<T>`.
     Nth { index: &'a ast::Expr },
     /// `.position(|x| pred)` - index of first matching element as `Option<usize>`.
@@ -476,6 +508,7 @@ impl<'ctx> MirLowerer<'ctx> {
             impl_methods: HashMap::new(),
             derived_clone_fns: HashSet::new(),
             generic_functions: HashMap::new(),
+            generic_impl_owner: HashMap::new(),
             generic_enums: HashMap::new(),
             generic_structs: HashMap::new(),
             monomorphized: HashSet::new(),
@@ -562,6 +595,7 @@ impl<'ctx> MirLowerer<'ctx> {
             impl_methods: HashMap::new(),
             derived_clone_fns: HashSet::new(),
             generic_functions: HashMap::new(),
+            generic_impl_owner: HashMap::new(),
             generic_enums: HashMap::new(),
             generic_structs: HashMap::new(),
             monomorphized: HashSet::new(),
@@ -1210,13 +1244,14 @@ impl<'ctx> MirLowerer<'ctx> {
             self.collect_globals(item)?;
         }
 
-        // Generate vtables for all (Trait, Type) pairs
-        self.generate_vtables();
-
         // Second pass: lower function bodies
         for item in &items {
             self.lower_top_level_item(item)?;
         }
+
+        // Generate vtables for all (Trait, Type) pairs after concrete impl
+        // bodies have been lowered so generic/un-lowered methods are skipped.
+        self.generate_vtables();
         Ok(())
     }
 
@@ -1296,13 +1331,19 @@ impl<'ctx> MirLowerer<'ctx> {
             if let Some(trait_methods) = self.trait_methods.get(&trait_name) {
                 let methods: Vec<_> = trait_methods
                     .iter()
-                    .map(|(method_name, sig)| {
+                    .filter_map(|(method_name, sig)| {
                         let mangled = self
                             .impl_methods
                             .get(&(type_name.clone(), method_name.clone()))
                             .cloned()
                             .unwrap_or_else(|| Arc::from(format!("{}_{}", type_name, method_name)));
-                        (method_name.clone(), mangled, sig.clone())
+                        // Only emit vtable slots for concrete lowered bodies; generic or
+                        // un-lowered trait methods cannot be invoked via `dyn Trait`.
+                        let has_body =
+                            self.module.module_mut().functions.iter().any(|f| {
+                                f.name.as_ref() == mangled.as_ref() && !f.is_declaration()
+                            });
+                        has_body.then(|| (method_name.clone(), mangled, sig.clone()))
                     })
                     .collect();
 
@@ -1321,6 +1362,11 @@ impl<'ctx> MirLowerer<'ctx> {
 
         for item in &t.items {
             if let ast::TraitItemKind::Function(fndef) = &item.kind {
+                // Generic trait methods are not object-safe and cannot appear in a
+                // `dyn Trait` vtable (their type parameters are unbound in C).
+                if !fndef.generics.params.is_empty() {
+                    continue;
+                }
                 let params: Vec<MirType> = fndef
                     .sig
                     .params
@@ -2474,9 +2520,29 @@ impl<'ctx> MirLowerer<'ctx> {
         self.generic_first_arg_from_ast(ty, "Result")
     }
 
+    /// Resolve a simple type alias (`type ScriptResult = Result<ScriptValue, ScriptError>`)
+    /// to its underlying AST type so Result/Option payload extraction works through aliases.
+    fn resolve_type_alias<'a>(&'a self, mut ty: &'a ast::Type) -> &'a ast::Type {
+        for _ in 0..8 {
+            if let ast::TypeKind::Path(ref path) = ty.kind {
+                if path.is_simple() {
+                    if let Some(ident) = path.last_ident() {
+                        if let Some(target) = self.type_aliases.get(&ident.name) {
+                            ty = target;
+                            continue;
+                        }
+                    }
+                }
+            }
+            break;
+        }
+        ty
+    }
+
     /// If the AST type is `Result<Ok, Err>`, lower and return the `Err` payload
     /// type (the second generic argument). Returns None for any non-Result type.
     pub(crate) fn result_err_inner_from_ast(&self, ty: &ast::Type) -> Option<MirType> {
+        let ty = self.resolve_type_alias(ty);
         if let ast::TypeKind::Path(ref path) = ty.kind {
             let is_result = path
                 .last_ident()
@@ -2502,6 +2568,7 @@ impl<'ctx> MirLowerer<'ctx> {
     /// If the AST type is `Wrapper<First, ...>`, lower and return `First`.
     /// Returns None when the type head doesn't match `wrapper` or has no args.
     fn generic_first_arg_from_ast(&self, ty: &ast::Type, wrapper: &str) -> Option<MirType> {
+        let ty = self.resolve_type_alias(ty);
         if let ast::TypeKind::Path(ref path) = ty.kind {
             let matches_head = path
                 .last_ident()
@@ -3051,9 +3118,12 @@ impl<'ctx> MirLowerer<'ctx> {
             let saved_char_vecs = std::mem::take(&mut self.char_vec_locals);
             let saved_pending_vecs = std::mem::take(&mut self.pending_untyped_vecs);
             // Local ids restart in every function, so which locals hold a
-            // closure is per function too.
+            // closure or Option/Result payload type is per function too.
             let saved_closure_locals = std::mem::take(&mut self.local_closure_name);
             let saved_env_locals = std::mem::take(&mut self.local_env_closure);
+            let saved_option_inner = std::mem::take(&mut self.option_inner_types);
+            let saved_result_ok = std::mem::take(&mut self.result_ok_types);
+            let saved_result_err = std::mem::take(&mut self.result_err_types);
 
             // Create function builder
             let mut builder = MirBuilder::with_linear_type_names(
@@ -3225,6 +3295,9 @@ impl<'ctx> MirLowerer<'ctx> {
             self.pending_untyped_vecs = saved_pending_vecs;
             self.local_closure_name = saved_closure_locals;
             self.local_env_closure = saved_env_locals;
+            self.option_inner_types = saved_option_inner;
+            self.result_ok_types = saved_result_ok;
+            self.result_err_types = saved_result_err;
         } else {
             // Declaration only
             self.module.declare_function(f.name.name.clone(), sig);
@@ -3260,23 +3333,19 @@ impl<'ctx> MirLowerer<'ctx> {
         let mut method_names: Vec<Option<Arc<str>>> = Vec::new();
         for impl_item in &impl_def.items {
             if let ast::ImplItemKind::Function(f) = &impl_item.kind {
-                let bound_is_fn = |b: &ast::TypeBound| -> bool {
-                    b.path
-                        .last_ident()
-                        .is_some_and(|id| matches!(id.name.as_ref(), "Fn" | "FnMut" | "FnOnce"))
-                };
-                let has_fn_bound_generic =
-                    f.generics.params.iter().any(|p| {
-                        matches!(&p.kind, ast::GenericParamKind::Type { bounds, .. }
-                        if bounds.iter().any(bound_is_fn))
-                    }) || f.generics.where_clause.as_ref().is_some_and(|wc| {
-                        wc.predicates
-                            .iter()
-                            .any(|pred| pred.bounds.iter().any(bound_is_fn))
-                    });
+                let has_bounded_type_generic = f.generics.params.iter().any(|p| {
+                    matches!(&p.kind, ast::GenericParamKind::Type { bounds, .. }
+                        if !bounds.is_empty())
+                }) || f
+                    .generics
+                    .where_clause
+                    .as_ref()
+                    .is_some_and(|wc| wc.predicates.iter().any(|pred| !pred.bounds.is_empty()));
                 let mangled = self.lookup_impl_method_name(&type_name, impl_def, f);
-                if has_fn_bound_generic {
-                    self.generic_functions.insert(mangled, (**f).clone());
+                if has_bounded_type_generic {
+                    self.generic_functions
+                        .insert(mangled.clone(), (**f).clone());
+                    self.generic_impl_owner.insert(mangled, type_name.clone());
                     method_names.push(None);
                 } else {
                     self.declare_impl_method(&type_name, &mangled, f)?;
@@ -3342,10 +3411,21 @@ impl<'ctx> MirLowerer<'ctx> {
         match type_name.as_ref() {
             "f32" => MirType::Float(FloatSize::F32),
             "f64" => MirType::Float(FloatSize::F64),
+            "i8" => MirType::i8(),
+            "i16" => MirType::i16(),
             "i32" => MirType::i32(),
             "i64" => MirType::i64(),
+            "i128" => MirType::Int(IntSize::I128, true),
+            "isize" => MirType::isize(),
+            "u8" => MirType::u8(),
+            "u16" => MirType::u16(),
+            "u32" => MirType::u32(),
+            "u64" => MirType::u64(),
+            "u128" => MirType::Int(IntSize::I128, false),
+            "usize" => MirType::usize(),
             "bool" => MirType::Bool,
-            "str" => MirType::Struct(Arc::from("BuildString")),
+            "char" => MirType::u32(),
+            "str" | "String" => MirType::Struct(Arc::from("BuildString")),
             _ => MirType::Struct(type_name.clone()),
         }
     }
@@ -3548,7 +3628,7 @@ impl<'ctx> MirLowerer<'ctx> {
     /// Lower a single impl method as a free function.
     /// The method `fn area(self) -> f64` on type `Rectangle` becomes
     /// `fn Rectangle_area(self: Rectangle) -> f64`.
-    fn lower_impl_method(
+    pub(super) fn lower_impl_method(
         &mut self,
         type_name: &Arc<str>,
         mangled_name: &Arc<str>,
@@ -3604,6 +3684,9 @@ impl<'ctx> MirLowerer<'ctx> {
             let saved_str_refs = std::mem::take(&mut self.str_ref_locals);
             let saved_char_vecs = std::mem::take(&mut self.char_vec_locals);
             let saved_pending_vecs = std::mem::take(&mut self.pending_untyped_vecs);
+            let saved_option_inner = std::mem::take(&mut self.option_inner_types);
+            let saved_result_ok = std::mem::take(&mut self.result_ok_types);
+            let saved_result_err = std::mem::take(&mut self.result_err_types);
             let saved_source = crate::lexer::source_text_for_id(f.name.span.source_id)
                 .filter(|_| f.name.span.source_id != crate::lexer::SourceId::ANONYMOUS)
                 .map(|text| self.source.replace(text));
@@ -3682,6 +3765,9 @@ impl<'ctx> MirLowerer<'ctx> {
             self.str_ref_locals = saved_str_refs;
             self.char_vec_locals = saved_char_vecs;
             self.pending_untyped_vecs = saved_pending_vecs;
+            self.option_inner_types = saved_option_inner;
+            self.result_ok_types = saved_result_ok;
+            self.result_err_types = saved_result_err;
         }
 
         Ok(())
@@ -3732,6 +3818,9 @@ impl<'ctx> MirLowerer<'ctx> {
             let saved_str_refs = std::mem::take(&mut self.str_ref_locals);
             let saved_char_vecs = std::mem::take(&mut self.char_vec_locals);
             let saved_pending_vecs = std::mem::take(&mut self.pending_untyped_vecs);
+            let saved_option_inner = std::mem::take(&mut self.option_inner_types);
+            let saved_result_ok = std::mem::take(&mut self.result_ok_types);
+            let saved_result_err = std::mem::take(&mut self.result_err_types);
             let saved_source = crate::lexer::source_text_for_id(f.name.span.source_id)
                 .filter(|_| f.name.span.source_id != crate::lexer::SourceId::ANONYMOUS)
                 .map(|text| self.source.replace(text));
@@ -3808,6 +3897,9 @@ impl<'ctx> MirLowerer<'ctx> {
             self.str_ref_locals = saved_str_refs;
             self.char_vec_locals = saved_char_vecs;
             self.pending_untyped_vecs = saved_pending_vecs;
+            self.option_inner_types = saved_option_inner;
+            self.result_ok_types = saved_result_ok;
+            self.result_err_types = saved_result_err;
         }
 
         Ok(())

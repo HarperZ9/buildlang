@@ -148,12 +148,26 @@ impl MirLowerer<'_> {
         if args.len() != arity {
             return None;
         }
-        // Closures with tuple/ref destructuring patterns (e.g. `|(_, t)| ...`)
-        // or an active `parse_target_hint` (e.g. `and_then(|s| s.parse().ok())`)
-        // need inline lowering so tuple fields and `parse_target_hint` propagate cleanly.
+        // Closures with tuple/ref destructuring patterns (e.g. `|(_, t)| ...`),
+        // an active `parse_target_hint` on a string payload (e.g. `and_then(|s| s.parse().ok())`),
+        // or free variables captured from the enclosing scope (e.g. `self.components.get(id)`)
+        // need inline lowering so tuple fields, `parse_target_hint`, and captured locals
+        // preserve their exact MIR types.
         if matches!(method, "map" | "and_then") {
-            if let ExprKind::Closure { params, .. } = &args[0].kind {
-                let needs_inline = self.parse_target_hint.is_some()
+            if let ExprKind::Closure { params, body, .. } = &args[0].kind {
+                let mut pnames = std::collections::HashSet::new();
+                for p in params {
+                    if let ast::PatternKind::Ident { name, .. } = &p.pattern.kind {
+                        pnames.insert(name.name.clone());
+                    }
+                }
+                let captures_outer =
+                    !Self::collect_free_vars(body, &pnames, &self.var_map, self.source.as_deref())
+                        .is_empty();
+                let string_parse_hint = self.parse_target_hint.is_some()
+                    && matches!(inner_ty, MirType::Struct(n) if n.as_ref() == "BuildString");
+                let needs_inline = string_parse_hint
+                    || captures_outer
                     || params.iter().any(|p| {
                         matches!(
                             p.pattern.kind,

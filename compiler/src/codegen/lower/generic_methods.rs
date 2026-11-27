@@ -297,6 +297,55 @@ impl<'ctx> MirLowerer<'ctx> {
         }
     }
 
+    /// Infer generic type arguments for `Type::method(args...)` from the call
+    /// arguments when neither turbofish nor an expected type names the instance
+    /// (e.g., `let outer = ContextError::new("ctx", inner);`).
+    fn infer_instance_from_assoc_args(
+        &mut self,
+        base: &str,
+        method: &str,
+        args: &[ast::Expr],
+    ) -> CodegenResult<Option<Arc<str>>> {
+        let impls = match self.generic_impls.get(base) {
+            Some(v) => v.clone(),
+            None => return Ok(None),
+        };
+        let mut target_fn: Option<(Vec<Arc<str>>, ast::FnDef)> = None;
+        for impl_def in &impls {
+            let impl_params: Vec<Arc<str>> = impl_def
+                .generics
+                .params
+                .iter()
+                .filter_map(|p| match &p.kind {
+                    ast::GenericParamKind::Type { .. } => Some(p.ident.name.clone()),
+                    _ => None,
+                })
+                .collect();
+            for item in &impl_def.items {
+                if let ast::ImplItemKind::Function(f) = &item.kind {
+                    if f.name.name.as_ref() == method && f.sig.params.len() == args.len() {
+                        target_fn = Some((impl_params, (**f).clone()));
+                        break;
+                    }
+                }
+            }
+            if target_fn.is_some() {
+                break;
+            }
+        }
+        let Some((impl_params, fndef)) = target_fn else {
+            return Ok(None);
+        };
+        if impl_params.is_empty() {
+            return Ok(None);
+        }
+        let subst = self.infer_subst_from_args(&fndef, &impl_params, args);
+        if subst.is_empty() {
+            return Ok(None);
+        }
+        self.instantiate_generic(base, &subst).map(Some)
+    }
+
     /// `Type::f(..)` on a generic type, rewritten to the instance it calls
     /// (`Buffer_i32::new`) with that function lowered. `None` leaves the call
     /// to the usual path: not such a call, or no instance can be told, in
@@ -304,6 +353,7 @@ impl<'ctx> MirLowerer<'ctx> {
     pub(super) fn generic_assoc_callee(
         &mut self,
         func: &ast::Expr,
+        args: &[ast::Expr],
     ) -> CodegenResult<Option<ast::Expr>> {
         let ExprKind::Path(path) = &func.kind else {
             return Ok(None);
@@ -312,6 +362,12 @@ impl<'ctx> MirLowerer<'ctx> {
             return Ok(None);
         }
         let ty = path.segments[0].ident.name.clone();
+        if matches!(
+            ty.as_ref(),
+            "Vec" | "Option" | "Result" | "HashMap" | "HashSet" | "BTreeMap" | "BTreeSet" | "Box"
+        ) {
+            return Ok(None);
+        }
         let method = path.segments[1].ident.name.clone();
         let direct = format!("{ty}_{method}");
         if self.pending_generic_methods.contains_key(direct.as_str()) {
@@ -323,7 +379,10 @@ impl<'ctx> MirLowerer<'ctx> {
         }
         let explicit = &path.segments[0].generics;
         let instance = if explicit.is_empty() {
-            self.expected_instance_of(&ty)?
+            match self.expected_instance_of(&ty)? {
+                Some(inst) => Some(inst),
+                None => self.infer_instance_from_assoc_args(&ty, &method, args)?,
+            }
         } else {
             let subst = self.resolve_generic_args_with_subst(&ty, explicit, &HashMap::new());
             if subst.is_empty() {

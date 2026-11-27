@@ -10216,8 +10216,12 @@ fn start_resolution(entry: Option<&Path>, visiting: &mut HashSet<PathBuf>) -> Lo
 #[derive(Default)]
 struct LoadedModules {
     /// Canonical path to the module's prefix and the bare names of its
-    /// functions.
+    /// functions (for modules that have been fully merged).
     files: HashMap<PathBuf, (String, Vec<String>)>,
+    /// Spans `(start, end)` of top-level items already merged from each module
+    /// file, so a selective import followed by another selective or glob import
+    /// of the same file never emits duplicate definitions.
+    merged_item_spans: HashMap<PathBuf, HashSet<(u32, u32)>>,
     /// Function names that are already final (`geom_area`). A parent module
     /// that merges them again must not prefix them a second time.
     final_names: HashSet<String>,
@@ -10480,6 +10484,129 @@ fn resolve_modules_with_prefix(
     Ok(())
 }
 
+/// Retain only the items needed by a selective import (`use m::{A, B}`) plus
+/// the transitive closure of items in the same module they reference.
+fn prune_selective_module_items(
+    items: &mut Vec<ast::Item>,
+    names: &[(String, String)],
+    source: &str,
+) {
+    if names.is_empty() {
+        return;
+    }
+    let slice_mentions_any = |slice: &str, set: &HashSet<String>| -> bool {
+        let bytes = slice.as_bytes();
+        let mut pos = 0;
+        while pos < bytes.len() {
+            if bytes[pos].is_ascii_alphabetic() || bytes[pos] == b'_' {
+                let wstart = pos;
+                pos += 1;
+                while pos < bytes.len()
+                    && (bytes[pos].is_ascii_alphanumeric() || bytes[pos] == b'_')
+                {
+                    pos += 1;
+                }
+                if set.contains(&slice[wstart..pos]) {
+                    return true;
+                }
+            } else {
+                pos += 1;
+            }
+        }
+        false
+    };
+    let mut defined: HashSet<String> = HashSet::new();
+    for item in items.iter() {
+        if let Some(id) = item.name() {
+            defined.insert(id.name.to_string());
+        } else if let ItemKind::ExternBlock(eb) = &item.kind {
+            for ext_item in &eb.items {
+                if let ast::ForeignItemKind::Fn(f) = &ext_item.kind {
+                    defined.insert(f.name.name.to_string());
+                }
+            }
+        }
+    }
+    let mut needed: HashSet<String> = names.iter().map(|(orig, _)| orig.clone()).collect();
+    let mut kept = vec![false; items.len()];
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for (idx, item) in items.iter().enumerate() {
+            if kept[idx] {
+                continue;
+            }
+            let should_keep = match &item.kind {
+                ItemKind::Use(_) => true,
+                ItemKind::Impl(imp) => {
+                    let self_name = match &imp.self_ty.kind {
+                        ast::TypeKind::Path(p) => p.last_ident().map(|i| i.name.as_ref()),
+                        _ => None,
+                    };
+                    let self_hit = self_name.is_some_and(|n| needed.contains(n));
+                    let self_is_external = self_name.is_none_or(|n| !defined.contains(n));
+                    let header_hit = if self_is_external && imp.trait_ref.is_some() {
+                        let start = item.span.start.0 as usize;
+                        let end = (item.span.end.0 as usize).min(source.len());
+                        if start < end {
+                            let raw = &source[start..end];
+                            let header = raw.split('{').next().unwrap_or(raw);
+                            slice_mentions_any(header, &needed)
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    };
+                    self_hit || header_hit
+                }
+                ItemKind::ExternBlock(eb) => eb.items.iter().any(|ext_item| {
+                    matches!(
+                        &ext_item.kind,
+                        ast::ForeignItemKind::Fn(f) if needed.contains(f.name.name.as_ref())
+                    )
+                }),
+                _ => item
+                    .name()
+                    .is_some_and(|id| needed.contains(id.name.as_ref())),
+            };
+            if should_keep {
+                kept[idx] = true;
+                changed = true;
+                if matches!(item.kind, ItemKind::Mod(_)) {
+                    continue;
+                }
+                let start = item.span.start.0 as usize;
+                let end = (item.span.end.0 as usize).min(source.len());
+                if start < end {
+                    let slice = &source[start..end];
+                    let bytes = slice.as_bytes();
+                    let mut pos = 0;
+                    while pos < bytes.len() {
+                        if bytes[pos].is_ascii_alphabetic() || bytes[pos] == b'_' {
+                            let wstart = pos;
+                            pos += 1;
+                            while pos < bytes.len()
+                                && (bytes[pos].is_ascii_alphanumeric() || bytes[pos] == b'_')
+                            {
+                                pos += 1;
+                            }
+                            let word = &slice[wstart..pos];
+                            if defined.contains(word) && needed.insert(word.to_string()) {
+                                changed = true;
+                            }
+                        } else {
+                            pos += 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let mut keep_iter = kept.into_iter();
+    items.retain(|_| keep_iter.next().unwrap_or(false));
+}
+
 /// Call `visit` with the body and the parameter names of every method of an
 /// impl block.
 fn for_each_method_body(
@@ -10552,6 +10679,40 @@ fn merge_module_file(
     })?;
     report_parse_errors(actual_file, &mod_source_file, mod_parser.errors())?;
 
+    // Collect all bare top-level function names in the module before selective
+    // pruning / span deduplication so intra-module call rewriting and sibling
+    // callers still see functions merged by an earlier selective import.
+    let all_mod_fns: HashSet<String> = mod_ast
+        .items
+        .iter()
+        .filter_map(|item| match &item.kind {
+            ItemKind::Function(f) if f.sig.abi.is_none() => Some(f.name.name.to_string()),
+            _ => None,
+        })
+        .collect();
+
+    // For selective imports (`use m::{A, B}` without `*`), retain only the
+    // requested items and the transitive closure of module items they reference.
+    if let ModuleAsk::Use { glob: false, names } = &load.ask {
+        prune_selective_module_items(&mut mod_ast.items, names, mod_source_file.source());
+    }
+
+    // Deduplicate against items already merged from this module file by an
+    // earlier selective import (never drop `use` items so sub-module resolution
+    // still runs cleanly).
+    {
+        let seen_spans = loaded
+            .merged_item_spans
+            .entry(module_key.to_path_buf())
+            .or_default();
+        mod_ast.items.retain(|item| {
+            if matches!(item.kind, ItemKind::Use(_)) {
+                return true;
+            }
+            seen_spans.insert((item.span.start.0, item.span.end.0))
+        });
+    }
+
     // Recursively resolve sub-modules within this module
     resolve_modules_with_prefix(
         &mut mod_ast,
@@ -10574,7 +10735,7 @@ fn merge_module_file(
     // against, so `kern.bld` exporting `fk_area` must emit `fk_area`, not
     // `kern_fk_area`. A path call `kern::fk_area(..)` finds it through the
     // lowerer's `c_abi_fns`.
-    let mod_defined: std::collections::HashSet<String> = mod_ast
+    let mut mod_defined: std::collections::HashSet<String> = mod_ast
         .items
         .iter()
         .filter_map(|item| match &item.kind {
@@ -10586,6 +10747,14 @@ fn merge_module_file(
             _ => None,
         })
         .collect();
+    for bare in &all_mod_fns {
+        if loaded
+            .final_names
+            .contains(&format!("{}_{}", full_prefix, bare))
+        {
+            mod_defined.insert(bare.clone());
+        }
+    }
     let mut own_fns: Vec<String> = mod_defined.iter().cloned().collect();
     own_fns.sort();
     for bare in &own_fns {
@@ -10593,10 +10762,12 @@ fn merge_module_file(
             .final_names
             .insert(format!("{}_{}", full_prefix, bare));
     }
-    loaded.files.insert(
-        module_key.to_path_buf(),
-        (full_prefix.clone(), own_fns.clone()),
-    );
+    if !matches!(load.ask, ModuleAsk::Use { glob: false, .. }) {
+        loaded.files.insert(
+            module_key.to_path_buf(),
+            (full_prefix.clone(), own_fns.clone()),
+        );
+    }
 
     // Merge module items with name prefixing.
     // Functions are prefixed: `add` → `math_helpers_add`
