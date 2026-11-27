@@ -1,0 +1,617 @@
+// SPDX-FileCopyrightText: 2026 Zain Dana Harper
+// SPDX-License-Identifier: MIT
+//
+// Wave 135B (Slice 31: F1/AC1/N11/N49/N53): Pure-BuildLang Zero-C Deterministic
+// QUIC-Lite Encrypted Zero-Copy Network Transport & Capability Firewall
+// (buildos_quic_zero_copy_net_zeroc.bld). Compiled directly by untouched Stage-2
+// buildc_crypto_stage2.exe (ZERO C compiler, ZERO Rust, ZERO external linker)
+// across ALL FIVE zero-C ISAs (x64-pe, x64-elf, rv64-elf, aarch64-elf, wasm).
+//
+// Modes:
+//   0 = Clean 8-packet QUIC-Lite zero-copy encrypted stream + firewall commit (status=1)
+//   1 = Planted attack (a): Replayed packet sequence number (pn=101) -> status=-101
+//   2 = Planted attack (b): Out-of-window spoofed nonce/pn (pn=30) -> status=-201
+//   3 = Planted attack (c): 1-bit forged Poly1305 AEAD tag -> status=-301
+//   4 = Planted attack (d): Unauthorized egress without CAP_NET_PEER -> status=-401
+
+fn rotr32(x: i64, n: i64) -> i64 {
+    return ((x >> n) | (x << (32 - n))) & 4294967295;
+}
+
+fn pkt_pt_w(pidx: i64, wi: i64) -> i64 {
+    let a: i64 = (1364543811 + pidx * 16843009 + wi * 2654435769) & 4294967295;
+    let b: i64 = ((pidx + 1) * (wi + 3) * 2246822507) & 4294967295;
+    return (a ^ b) & 4294967295;
+}
+
+fn sha256_iv(i: i64) -> i64 {
+    if i == 0 { return 1779033703; }
+    else if i == 1 { return 3144134277; }
+    else if i == 2 { return 1013904242; }
+    else if i == 3 { return 2773480762; }
+    else if i == 4 { return 1359893119; }
+    else if i == 5 { return 2600822924; }
+    else if i == 6 { return 528734635; }
+    else if i == 7 { return 1541459225; }
+    return 0;
+}
+
+fn sha256_k(r: i64) -> i64 {
+    if r == 0 { return 1116352408; }
+    else if r == 1 { return 1899447441; }
+    else if r == 2 { return 3049323471; }
+    else if r == 3 { return 3921009573; }
+    else if r == 4 { return 961987163; }
+    else if r == 5 { return 1508970993; }
+    else if r == 6 { return 2453635748; }
+    else if r == 7 { return 2870763221; }
+    else if r == 8 { return 3624381080; }
+    else if r == 9 { return 310598401; }
+    else if r == 10 { return 607225278; }
+    else if r == 11 { return 1426881987; }
+    else if r == 12 { return 1925078388; }
+    else if r == 13 { return 2162078206; }
+    else if r == 14 { return 2614888103; }
+    else if r == 15 { return 3248222580; }
+    else if r == 16 { return 3835390401; }
+    else if r == 17 { return 4022224774; }
+    else if r == 18 { return 264347078; }
+    else if r == 19 { return 604807628; }
+    else if r == 20 { return 770255983; }
+    else if r == 21 { return 1249150122; }
+    else if r == 22 { return 1555081692; }
+    else if r == 23 { return 1996064986; }
+    else if r == 24 { return 2554220882; }
+    else if r == 25 { return 2821834349; }
+    else if r == 26 { return 2952996808; }
+    else if r == 27 { return 3210313671; }
+    else if r == 28 { return 3336571891; }
+    else if r == 29 { return 3584528711; }
+    else if r == 30 { return 113926993; }
+    else if r == 31 { return 338241895; }
+    else if r == 32 { return 666307205; }
+    else if r == 33 { return 773529912; }
+    else if r == 34 { return 1294757372; }
+    else if r == 35 { return 1396182291; }
+    else if r == 36 { return 1695183700; }
+    else if r == 37 { return 1986661051; }
+    else if r == 38 { return 2177026350; }
+    else if r == 39 { return 2456956037; }
+    else if r == 40 { return 2730485921; }
+    else if r == 41 { return 2820302411; }
+    else if r == 42 { return 3259730800; }
+    else if r == 43 { return 3345764771; }
+    else if r == 44 { return 3516065817; }
+    else if r == 45 { return 3600352804; }
+    else if r == 46 { return 4094571909; }
+    else if r == 47 { return 275423344; }
+    else if r == 48 { return 430227734; }
+    else if r == 49 { return 506948616; }
+    else if r == 50 { return 659060556; }
+    else if r == 51 { return 883997877; }
+    else if r == 52 { return 958139571; }
+    else if r == 53 { return 1322822218; }
+    else if r == 54 { return 1537002063; }
+    else if r == 55 { return 1747873779; }
+    else if r == 56 { return 1955562222; }
+    else if r == 57 { return 2024104815; }
+    else if r == 58 { return 2227730452; }
+    else if r == 59 { return 2361852424; }
+    else if r == 60 { return 2428436474; }
+    else if r == 61 { return 2756734187; }
+    else if r == 62 { return 3204031479; }
+    else if r == 63 { return 3329325298; }
+    return 0;
+}
+
+fn quic_key_le(i: i64) -> i64 {
+    if i == 0 { return 2011703772; }
+    else if i == 1 { return 2725372783; }
+    else if i == 2 { return 3694344423; }
+    else if i == 3 { return 1739478636; }
+    else if i == 4 { return 1775989312; }
+    else if i == 5 { return 1554702379; }
+    else if i == 6 { return 1902947692; }
+    else if i == 7 { return 1325316764; }
+    return 0;
+}
+
+fn quic_iv_le(i: i64) -> i64 {
+    if i == 0 { return 911548477; }
+    else if i == 1 { return 339774986; }
+    else if i == 2 { return 2175314435; }
+    return 0;
+}
+
+fn peer_cap_bit(p: i64) -> i64 {
+    if p == 0 { return 1; }
+    else if p == 1 { return 2; }
+    else if p == 2 { return 4; }
+    else if p == 3 { return 8; }
+    return 0;
+}
+
+fn task_peer_allow(t: i64) -> i64 {
+    if t == 0 { return 1; }
+    else if t == 1 { return 3; }
+    else if t == 2 { return 4; }
+    return 0;
+}
+
+fn quic_pkt(idx: i64) -> i64 {
+    if idx == 0 { return 0; }
+    else if idx == 1 { return 0; }
+    else if idx == 2 { return 1; }
+    else if idx == 3 { return 100; }
+    else if idx == 4 { return 1200; }
+    else if idx == 5 { return 0; }
+    else if idx == 6 { return 1; }
+    else if idx == 7 { return 1; }
+    else if idx == 8 { return 2; }
+    else if idx == 9 { return 101; }
+    else if idx == 10 { return 1200; }
+    else if idx == 11 { return 0; }
+    else if idx == 12 { return 1; }
+    else if idx == 13 { return 1; }
+    else if idx == 14 { return 2; }
+    else if idx == 15 { return 103; }
+    else if idx == 16 { return 1200; }
+    else if idx == 17 { return 0; }
+    else if idx == 18 { return 0; }
+    else if idx == 19 { return 0; }
+    else if idx == 20 { return 1; }
+    else if idx == 21 { return 102; }
+    else if idx == 22 { return 1200; }
+    else if idx == 23 { return 0; }
+    else if idx == 24 { return 2; }
+    else if idx == 25 { return 2; }
+    else if idx == 26 { return 3; }
+    else if idx == 27 { return 104; }
+    else if idx == 28 { return 1200; }
+    else if idx == 29 { return 0; }
+    else if idx == 30 { return 1; }
+    else if idx == 31 { return 1; }
+    else if idx == 32 { return 2; }
+    else if idx == 33 { return 106; }
+    else if idx == 34 { return 1200; }
+    else if idx == 35 { return 1; }
+    else if idx == 36 { return 1; }
+    else if idx == 37 { return 0; }
+    else if idx == 38 { return 2; }
+    else if idx == 39 { return 105; }
+    else if idx == 40 { return 1200; }
+    else if idx == 41 { return 0; }
+    else if idx == 42 { return 2; }
+    else if idx == 43 { return 2; }
+    else if idx == 44 { return 3; }
+    else if idx == 45 { return 107; }
+    else if idx == 46 { return 1200; }
+    else if idx == 47 { return 0; }
+    return 0;
+}
+
+fn exp_tx_words(i: i64) -> i64 {
+    if i == 0 { return 2496077468; }
+    else if i == 1 { return 3910102845; }
+    else if i == 2 { return 1392289726; }
+    else if i == 3 { return 3626772989; }
+    else if i == 4 { return 1972953146; }
+    else if i == 5 { return 3447583132; }
+    else if i == 6 { return 244759255; }
+    else if i == 7 { return 2378067079; }
+    else if i == 8 { return 1733987285; }
+    else if i == 9 { return 2939973157; }
+    else if i == 10 { return 3363988223; }
+    else if i == 11 { return 864264892; }
+    else if i == 12 { return 669613081; }
+    else if i == 13 { return 1981608482; }
+    else if i == 14 { return 4076474375; }
+    else if i == 15 { return 1942948060; }
+    return 0;
+}
+
+fn exp_fw_words(i: i64) -> i64 {
+    if i == 0 { return 6559600; }
+    else if i == 1 { return 291839008; }
+    else if i == 2 { return 291971280; }
+    else if i == 3 { return 6694272; }
+    else if i == 4 { return 577250988; }
+    else if i == 5 { return 292164438; }
+    else if i == 6 { return 275321986; }
+    else if i == 7 { return 577443246; }
+    else if i == 8 { return 8; }
+    else if i == 9 { return 5550; }
+    else if i == 10 { return 4950; }
+    else if i == 11 { return 107; }
+    else if i == 12 { return 255; }
+    else if i == 13 { return 0; }
+    else if i == 14 { return 1112294481; }
+    else if i == 15 { return 825439554; }
+    return 0;
+}
+
+fn exp_quic_root(i: i64) -> i64 {
+    if i == 0 { return 3946602139; }
+    else if i == 1 { return 3568447065; }
+    else if i == 2 { return 1622209339; }
+    else if i == 3 { return 3868240858; }
+    else if i == 4 { return 4019825288; }
+    else if i == 5 { return 3682744167; }
+    else if i == 6 { return 1744526946; }
+    else if i == 7 { return 2808494809; }
+    return 0;
+}
+// =============================================================================
+// STAGE 1: Capability Egress Firewall + 64-Bit Anti-Replay Window + NewReno CWND
+//          + RFC 9000 Short-Header ChaCha20-Poly1305 AEAD Zero-Copy Transport
+// Stack arrays: st[96] (768 B) + tag_tx[4] (32 B) = 800 B + scalars < 1,250 B < 2,048 B RV64!
+// =============================================================================
+fn quic_stage1_transport_firewall(mode: i64) -> i64 ~ Console {
+    let m32: i64 = 4294967295;
+    let m26: i64 = 67108863;
+    let dcid_lo: i64 = 1112294481;
+    let dcid_hi: i64 = 825439554;
+
+    let mut st: [i64; 96] = [0; 96];
+    let mut tag_tx: [i64; 4] = [0; 4];
+
+    let mut i: i64 = 0; let mut j: i64 = 0; let mut k: i64 = 0; let mut cp: i64 = 0;
+    let mut pidx: i64 = 0; let mut p0: i64 = 0; let mut p3: i64 = 0;
+    let mut a: i64 = 0; let mut b: i64 = 0; let mut c: i64 = 0; let mut d: i64 = 0;
+    let mut e: i64 = 0; let mut h0: i64 = 0; let mut h1: i64 = 0; let mut h2: i64 = 0;
+    let mut h3: i64 = 0; let mut h4: i64 = 0;
+    let mut q0: i64 = 0; let mut q1: i64 = 0; let mut q2: i64 = 0; let mut q3: i64 = 0;
+
+    let mut max_pn: i64 = 99;
+    let mut bmp_lo: i64 = 0;
+    let mut bmp_hi: i64 = 0;
+    let mut cwnd: i64 = 4800;
+    let mut ssthresh: i64 = 9600;
+    let mut tx_fold: i64 = 2654435769;
+    let mut fw_fold: i64 = 2246822507;
+
+    pidx = 0;
+    while pidx < 8 {
+        let base: i64 = pidx * 6;
+        let tid: i64 = quic_pkt(base);
+        let mut peer: i64 = quic_pkt(base + 1);
+        let stream: i64 = quic_pkt(base + 2);
+        let mut pn: i64 = quic_pkt(base + 3);
+        let plen: i64 = quic_pkt(base + 4);
+        let loss: i64 = quic_pkt(base + 5);
+
+        // Planted attack (d): Task 1 attempts unauthorized egress to Peer 3 (no CAP_NET_PEER)
+        if mode == 4 && pidx == 6 { peer = 3; }
+        // Planted attack (a): Replayed packet sequence number (pn=101 already in 64-bit window)
+        if mode == 1 && pidx == 5 { pn = 101; }
+        // Planted attack (b): Out-of-window spoofed nonce / stale packet number (104 - 30 = 74 >= 64)
+        if mode == 2 && pidx == 5 { pn = 30; }
+
+        // 1. Deny-by-default CAP_NET_PEER egress firewall check
+        if peer < 0 || peer >= 4 || tid < 0 || tid >= 3 {
+            println("{}", -401); println("{}", 0); return -401;
+        }
+        let req_cap: i64 = peer_cap_bit(peer);
+        let allow_cap: i64 = task_peer_allow(tid);
+        if (allow_cap & req_cap) != req_cap {
+            println("{}", -401); println("{}", 0); return -401;
+        }
+
+        // 2. Zero-copy NIC ring admission against deterministic cwnd budget
+        if plen <= 0 || plen > cwnd {
+            println("{}", -402); println("{}", 0); return -402;
+        }
+
+        // 3. 64-bit sliding anti-replay bitmap window (paired 32-bit bmp_lo / bmp_hi)
+        if pn > max_pn {
+            let sh: i64 = pn - max_pn;
+            if sh >= 64 {
+                bmp_hi = 0; bmp_lo = 1;
+            } else if sh >= 32 {
+                bmp_hi = (bmp_lo << (sh - 32)) & m32; bmp_lo = 1;
+            } else {
+                bmp_hi = ((bmp_hi << sh) | (bmp_lo >> (32 - sh))) & m32;
+                bmp_lo = ((bmp_lo << sh) | 1) & m32;
+            }
+            max_pn = pn;
+        } else {
+            let diff: i64 = max_pn - pn;
+            if diff >= 64 {
+                println("{}", -201); println("{}", 0); return -201;
+            } else if diff < 32 {
+                let bit: i64 = 1 << diff;
+                if (bmp_lo & bit) != 0 {
+                    println("{}", -101); println("{}", 0); return -101;
+                }
+                bmp_lo = bmp_lo | bit;
+            } else {
+                let bit: i64 = 1 << (diff - 32);
+                if (bmp_hi & bit) != 0 {
+                    println("{}", -101); println("{}", 0); return -101;
+                }
+                bmp_hi = bmp_hi | bit;
+            }
+        }
+
+        // 4. RFC 9000 short header (16 B AAD in st[56..59]) + plaintext (32 B in st[48..55])
+        st[56] = 64 | ((tid & 15) << 8) | ((peer & 15) << 16) | ((stream & 255) << 24);
+        st[57] = dcid_lo;
+        st[58] = dcid_hi;
+        st[59] = pn & m32;
+        i = 0; while i < 8 { st[48 + i] = pkt_pt_w(pidx, i); i = i + 1; }
+
+        // 5. RFC 8439 ChaCha20-Poly1305 encrypt (p0=0) and receiver verify+decrypt (p0=1)
+        st[0] = 1634760805; st[1] = 857760878; st[2] = 2036477234; st[3] = 1797285236;
+        i = 0; while i < 8 { st[4 + i] = quic_key_le(i); i = i + 1; }
+        st[13] = (quic_iv_le(0) ^ pn) & m32;
+        st[14] = (quic_iv_le(1) ^ (peer * 65537 + stream)) & m32;
+        st[15] = (quic_iv_le(2) ^ 257) & m32;
+
+        // Compute OTK (blk 0 -> st[32..39]) and keystream (blk 1 -> st[64..71])
+        p3 = 0;
+        while p3 < 2 {
+            st[12] = p3;
+            i = 0; while i < 16 { st[16 + i] = st[i]; i = i + 1; }
+            j = 0;
+            while j < 10 {
+                k = 0;
+                while k < 8 {
+                    q0 = 16 + (k & 3);
+                    q1 = 20 + (((k & 3) + (k >> 2)) & 3);
+                    q2 = 24 + (((k & 3) + (k >> 2) * 2) & 3);
+                    q3 = 28 + (((k & 3) + (k >> 2) * 3) & 3);
+                    a = st[q0]; b = st[q1]; c = st[q2]; d = st[q3];
+                    a = (a + b) & m32; d = rotr32(d ^ a, 16);
+                    c = (c + d) & m32; b = rotr32(b ^ c, 20);
+                    a = (a + b) & m32; d = rotr32(d ^ a, 24);
+                    c = (c + d) & m32; b = rotr32(b ^ c, 25);
+                    st[q0] = a; st[q1] = b; st[q2] = c; st[q3] = d;
+                    k = k + 1;
+                }
+                j = j + 1;
+            }
+            i = 0;
+            while i < 8 {
+                a = (st[16 + i] + st[i]) & m32;
+                if p3 == 0 { st[32 + i] = a; } else { st[64 + i] = a; }
+                i = i + 1;
+            }
+            p3 = p3 + 1;
+        }
+
+        // Ciphertext in st[40..47]
+        i = 0; while i < 8 { st[40 + i] = (st[48 + i] ^ st[64 + i]) & m32; i = i + 1; }
+
+        // Poly1305 MAC over AAD (16B) || CT (32B) || len64(16) || len64(32)
+        a = st[32] & 268435455; b = st[33] & 268435452; c = st[34] & 268435452; d = st[35] & 268435452;
+        st[80] = a & m26;
+        st[81] = ((a >> 26) | (b << 6)) & m26;
+        st[82] = ((b >> 20) | (c << 12)) & m26;
+        st[83] = ((c >> 14) | (d << 18)) & m26;
+        st[84] = (d >> 8) & m26;
+
+        p0 = 0;
+        while p0 < 2 {
+            h0 = 0; h1 = 0; h2 = 0; h3 = 0; h4 = 0;
+            p3 = 0;
+            while p3 < 4 {
+                q0 = 16; q1 = 0; q2 = 32; q3 = 0;
+                if p3 == 0 { q0 = st[56]; q1 = st[57]; q2 = st[58]; q3 = st[59]; }
+                else if p3 == 1 { q0 = st[40]; q1 = st[41]; q2 = st[42]; q3 = st[43]; }
+                else if p3 == 2 { q0 = st[44]; q1 = st[45]; q2 = st[46]; q3 = st[47]; }
+                h0 = h0 + (q0 & m26);
+                h1 = h1 + (((q0 >> 26) | (q1 << 6)) & m26);
+                h2 = h2 + (((q1 >> 20) | (q2 << 12)) & m26);
+                h3 = h3 + (((q2 >> 14) | (q3 << 18)) & m26);
+                h4 = h4 + ((q3 >> 8) | 16777216);
+                a = h0 * st[80] + h1 * (st[84] * 5) + h2 * (st[83] * 5) + h3 * (st[82] * 5) + h4 * (st[81] * 5);
+                b = h0 * st[81] + h1 * st[80] + h2 * (st[84] * 5) + h3 * (st[83] * 5) + h4 * (st[82] * 5);
+                c = h0 * st[82] + h1 * st[81] + h2 * st[80] + h3 * (st[84] * 5) + h4 * (st[83] * 5);
+                d = h0 * st[83] + h1 * st[82] + h2 * st[81] + h3 * st[80] + h4 * (st[84] * 5);
+                e = h0 * st[84] + h1 * st[83] + h2 * st[82] + h3 * st[81] + h4 * st[80];
+                cp = a >> 26; h0 = a & m26; b = b + cp;
+                cp = b >> 26; h1 = b & m26; c = c + cp;
+                cp = c >> 26; h2 = c & m26; d = d + cp;
+                cp = d >> 26; h3 = d & m26; e = e + cp;
+                cp = e >> 26; h4 = e & m26; h0 = h0 + cp * 5;
+                cp = h0 >> 26; h0 = h0 & m26; h1 = h1 + cp;
+                p3 = p3 + 1;
+            }
+            cp = h1 >> 26; h1 = h1 & m26; h2 = h2 + cp;
+            cp = h2 >> 26; h2 = h2 & m26; h3 = h3 + cp;
+            cp = h3 >> 26; h3 = h3 & m26; h4 = h4 + cp;
+            cp = h4 >> 26; h4 = h4 & m26; h0 = h0 + cp * 5;
+            cp = h0 >> 26; h0 = h0 & m26; h1 = h1 + cp;
+            a = h0 + 5; cp = a >> 26; a = a & m26;
+            b = h1 + cp; cp = b >> 26; b = b & m26;
+            c = h2 + cp; cp = c >> 26; c = c & m26;
+            d = h3 + cp; cp = d >> 26; d = d & m26;
+            if h4 + cp - 67108864 >= 0 { h0 = a; h1 = b; h2 = c; h3 = d; h4 = h4 + cp - 67108864; }
+            a = ((h0 | (h1 << 26)) & m32) + st[36]; cp = a >> 32; a = a & m32;
+            b = (((h1 >> 6) | (h2 << 20)) & m32) + st[37] + cp; cp = b >> 32; b = b & m32;
+            c = (((h2 >> 12) | (h3 << 14)) & m32) + st[38] + cp; cp = c >> 32; c = c & m32;
+            d = ((((h3 >> 18) | (h4 << 8)) & m32) + st[39] + cp) & m32;
+
+            if p0 == 0 {
+                tag_tx[0] = a; tag_tx[1] = b; tag_tx[2] = c; tag_tx[3] = d;
+                // Planted attack (c): 1-bit forged Poly1305 tag in transit on packet 4
+                if mode == 3 && pidx == 4 { tag_tx[0] = tag_tx[0] ^ 1; }
+            } else {
+                e = (a ^ tag_tx[0]) | (b ^ tag_tx[1]) | (c ^ tag_tx[2]) | (d ^ tag_tx[3]);
+                if e != 0 {
+                    println("{}", -301); println("{}", 0); return -301;
+                }
+                i = 0;
+                while i < 8 {
+                    if ((st[40 + i] ^ st[64 + i]) & m32) != st[48 + i] {
+                        println("{}", -302); println("{}", 0); return -302;
+                    }
+                    i = i + 1;
+                }
+            }
+            p0 = p0 + 1;
+        }
+
+        // 6. RFC 9002 deterministic NewReno congestion-window update
+        if loss == 1 {
+            ssthresh = cwnd >> 1;
+            if ssthresh < 2400 { ssthresh = 2400; }
+            cwnd = ssthresh;
+        } else if cwnd < ssthresh {
+            cwnd = cwnd + 1200;
+        } else {
+            cwnd = cwnd + 300;
+        }
+
+        // Fold verified packet tag/ciphertext and firewall/cwnd state into live witnesses
+        let fw_w: i64 = ((tid & 15) << 28) | ((peer & 15) << 24) | ((pn & 255) << 16) | (cwnd & 65535);
+        if tag_tx[0] != exp_tx_words(pidx * 2) || st[40] != exp_tx_words(pidx * 2 + 1) || fw_w != exp_fw_words(pidx) {
+            println("{}", -403); println("{}", 0); return -403;
+        }
+        tx_fold = (tx_fold * 33 + tag_tx[0] + st[40]) & m32;
+        fw_fold = (fw_fold * 33 + fw_w + bmp_lo) & m32;
+        pidx = pidx + 1;
+    }
+
+    if cwnd != 5550 || ssthresh != 4950 || max_pn != 107 || bmp_lo != 255 || bmp_hi != 0 {
+        println("{}", -404); println("{}", 0); return -404;
+    }
+    return quic_stage2_merkle_commit(tx_fold, fw_fold, cwnd, bmp_lo);
+}
+
+// =============================================================================
+// STAGE 2: FIPS 180-4 SHA-256 Transcript & Firewall Digests + RFC 6962 Root
+// Stack arrays: w[64] + hv[8] + leaves[16] + tx_sha[8] = 768 B + scalars < 1,050 B < 2,048 B RV64!
+// =============================================================================
+fn quic_stage2_merkle_commit(tx_fold: i64, fw_fold: i64, cwnd: i64, bmp_lo: i64) -> i64 ~ Console {
+    let m32: i64 = 4294967295;
+    let mut w: [i64; 64] = [0; 64];
+    let mut hv: [i64; 8] = [0; 8];
+    let mut leaves: [i64; 16] = [0; 16];
+    let mut tx_sha: [i64; 8] = [0; 8];
+
+    let mut i: i64 = 0; let mut j: i64 = 0; let mut p0: i64 = 0; let mut p1: i64 = 0;
+    let mut a: i64 = 0; let mut b: i64 = 0; let mut c: i64 = 0; let mut d: i64 = 0;
+    let mut e: i64 = 0; let mut f: i64 = 0; let mut g: i64 = 0; let mut h: i64 = 0;
+    let mut t1: i64 = 0; let mut t2: i64 = 0; let mut s0: i64 = 0; let mut s1: i64 = 0;
+
+    if tx_fold != 1204396308 || fw_fold != 2608528759 {
+        println("{}", -405); println("{}", 0); return -405;
+    }
+
+    p0 = 0;
+    while p0 < 2 {
+        i = 0; while i < 8 { hv[i] = sha256_iv(i); i = i + 1; }
+        p1 = 0;
+        while p1 < 2 {
+            i = 0; while i < 16 { w[i] = 0; i = i + 1; }
+            if p1 == 0 {
+                if p0 == 0 { i = 0; while i < 16 { w[i] = exp_tx_words(i); i = i + 1; } }
+                else { i = 0; while i < 16 { w[i] = exp_fw_words(i); i = i + 1; } }
+            } else { w[0] = 2147483648; w[15] = 512; }
+            i = 16;
+            while i < 64 {
+                s0 = rotr32(w[i - 15], 7) ^ rotr32(w[i - 15], 18) ^ (w[i - 15] >> 3);
+                s1 = rotr32(w[i - 2], 17) ^ rotr32(w[i - 2], 19) ^ (w[i - 2] >> 10);
+                w[i] = (w[i - 16] + s0 + w[i - 7] + s1) & m32; i = i + 1;
+            }
+            a = hv[0]; b = hv[1]; c = hv[2]; d = hv[3]; e = hv[4]; f = hv[5]; g = hv[6]; h = hv[7];
+            i = 0;
+            while i < 64 {
+                s1 = rotr32(e, 6) ^ rotr32(e, 11) ^ rotr32(e, 25);
+                t1 = (h + s1 + ((e & f) ^ ((e ^ m32) & g)) + sha256_k(i) + w[i]) & m32;
+                s0 = rotr32(a, 2) ^ rotr32(a, 13) ^ rotr32(a, 22);
+                t2 = (s0 + ((a & b) ^ (a & c) ^ (b & c))) & m32;
+                h = g; g = f; f = e; e = (d + t1) & m32;
+                d = c; c = b; b = a; a = (t1 + t2) & m32; i = i + 1;
+            }
+            hv[0] = (hv[0] + a) & m32; hv[1] = (hv[1] + b) & m32; hv[2] = (hv[2] + c) & m32; hv[3] = (hv[3] + d) & m32;
+            hv[4] = (hv[4] + e) & m32; hv[5] = (hv[5] + f) & m32; hv[6] = (hv[6] + g) & m32; hv[7] = (hv[7] + h) & m32;
+            p1 = p1 + 1;
+        }
+        if p0 == 0 { i = 0; while i < 8 { tx_sha[i] = hv[i]; i = i + 1; } }
+
+        // RFC 6962 domain-separated leaf H(0x00 || digest)
+        i = 0; while i < 16 { w[i] = 0; i = i + 1; }
+        w[0] = hv[0] >> 8;
+        i = 1; while i < 8 { w[i] = (((hv[i - 1] & 255) << 24) | (hv[i] >> 8)) & m32; i = i + 1; }
+        w[8] = (((hv[7] & 255) << 24) | 8388608) & m32; w[15] = 264;
+        i = 0; while i < 8 { hv[i] = sha256_iv(i); i = i + 1; }
+        i = 16;
+        while i < 64 {
+            s0 = rotr32(w[i - 15], 7) ^ rotr32(w[i - 15], 18) ^ (w[i - 15] >> 3);
+            s1 = rotr32(w[i - 2], 17) ^ rotr32(w[i - 2], 19) ^ (w[i - 2] >> 10);
+            w[i] = (w[i - 16] + s0 + w[i - 7] + s1) & m32; i = i + 1;
+        }
+        a = hv[0]; b = hv[1]; c = hv[2]; d = hv[3]; e = hv[4]; f = hv[5]; g = hv[6]; h = hv[7];
+        i = 0;
+        while i < 64 {
+            s1 = rotr32(e, 6) ^ rotr32(e, 11) ^ rotr32(e, 25);
+            t1 = (h + s1 + ((e & f) ^ ((e ^ m32) & g)) + sha256_k(i) + w[i]) & m32;
+            s0 = rotr32(a, 2) ^ rotr32(a, 13) ^ rotr32(a, 22);
+            t2 = (s0 + ((a & b) ^ (a & c) ^ (b & c))) & m32;
+            h = g; g = f; f = e; e = (d + t1) & m32;
+            d = c; c = b; b = a; a = (t1 + t2) & m32; i = i + 1;
+        }
+        hv[0] = (hv[0] + a) & m32; hv[1] = (hv[1] + b) & m32; hv[2] = (hv[2] + c) & m32; hv[3] = (hv[3] + d) & m32;
+        hv[4] = (hv[4] + e) & m32; hv[5] = (hv[5] + f) & m32; hv[6] = (hv[6] + g) & m32; hv[7] = (hv[7] + h) & m32;
+        i = 0; while i < 8 { leaves[p0 * 8 + i] = hv[i]; i = i + 1; }
+        p0 = p0 + 1;
+    }
+
+    // Internal node: RFC 6962 Root = SHA256(0x01 || L_tx || L_fw)
+    i = 0; while i < 8 { hv[i] = sha256_iv(i); i = i + 1; }
+    p0 = 0;
+    while p0 < 2 {
+        i = 0; while i < 16 { w[i] = 0; i = i + 1; }
+        if p0 == 0 {
+            w[0] = (16777216 | (leaves[0] >> 8)) & m32;
+            i = 1; while i < 8 { w[i] = (((leaves[i - 1] & 255) << 24) | (leaves[i] >> 8)) & m32; i = i + 1; }
+            w[8] = (((leaves[7] & 255) << 24) | (leaves[8] >> 8)) & m32;
+            i = 1;
+            while i < 8 {
+                w[8 + i] = (((leaves[8 + i - 1] & 255) << 24) | (leaves[8 + i] >> 8)) & m32; i = i + 1;
+            }
+        } else { w[0] = (((leaves[15] & 255) << 24) | 8388608) & m32; w[15] = 520; }
+        i = 16;
+        while i < 64 {
+            s0 = rotr32(w[i - 15], 7) ^ rotr32(w[i - 15], 18) ^ (w[i - 15] >> 3);
+            s1 = rotr32(w[i - 2], 17) ^ rotr32(w[i - 2], 19) ^ (w[i - 2] >> 10);
+            w[i] = (w[i - 16] + s0 + w[i - 7] + s1) & m32; i = i + 1;
+        }
+        a = hv[0]; b = hv[1]; c = hv[2]; d = hv[3]; e = hv[4]; f = hv[5]; g = hv[6]; h = hv[7];
+        i = 0;
+        while i < 64 {
+            s1 = rotr32(e, 6) ^ rotr32(e, 11) ^ rotr32(e, 25);
+            t1 = (h + s1 + ((e & f) ^ ((e ^ m32) & g)) + sha256_k(i) + w[i]) & m32;
+            s0 = rotr32(a, 2) ^ rotr32(a, 13) ^ rotr32(a, 22);
+            t2 = (s0 + ((a & b) ^ (a & c) ^ (b & c))) & m32;
+            h = g; g = f; f = e; e = (d + t1) & m32;
+            d = c; c = b; b = a; a = (t1 + t2) & m32; i = i + 1;
+        }
+        hv[0] = (hv[0] + a) & m32; hv[1] = (hv[1] + b) & m32; hv[2] = (hv[2] + c) & m32; hv[3] = (hv[3] + d) & m32;
+        hv[4] = (hv[4] + e) & m32; hv[5] = (hv[5] + f) & m32; hv[6] = (hv[6] + g) & m32; hv[7] = (hv[7] + h) & m32;
+        p0 = p0 + 1;
+    }
+
+    j = 1; i = 0; while i < 8 { if hv[i] != exp_quic_root(i) { j = 0; } i = i + 1; }
+    if j == 0 { println("{}", -406); println("{}", 0); return -406; }
+
+    // Clean commit: status=1, committed=1, pkts=8, cwnd, ssthresh, max_pn, bmp_lo, tx_fold, fw_fold, tx_sha, root
+    println("{}", 1);
+    println("{}", 1);
+    println("{}", 8);
+    println("{}", cwnd);
+    println("{}", 4950);
+    println("{}", 107);
+    println("{}", bmp_lo);
+    println("{}", tx_fold);
+    println("{}", fw_fold);
+    i = 0; while i < 8 { println("{}", tx_sha[i]); i = i + 1; }
+    i = 0; while i < 8 { println("{}", hv[i]); i = i + 1; }
+    return 1;
+}
+
+fn main() ~ Console {
+    let _ = quic_stage1_transport_firewall(0);
+}
