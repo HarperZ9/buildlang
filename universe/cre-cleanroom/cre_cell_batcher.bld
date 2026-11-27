@@ -1,0 +1,295 @@
+// SPDX-FileCopyrightText: 2026 Zain Dana Harper
+// SPDX-License-Identifier: MIT
+//
+// Wave 53D (Author Ideas N17 / E2 / E3):
+//   Clean-Room OpenMW-Style Engine Track-B Slice 3:
+//   1. GPU Indirect-Draw Cell Visibility Batcher: 10,000-object synthetic city cell
+//      (REFR AABBs + 16 OPT-052 NTC610 material archetypes) -> 6-plane frustum culling
+//      + depth binning -> <= 16 indirect-draw archetype buckets (>= 300x draw reduction) in < 1 ms.
+//   2. 120 Hz Frame-Decoupled Symplectic Physics Tick: proves bit-exact identical 2.0 s
+//      rigid-body trajectory at 60 / 144 / 240 FPS while catching a planted variable-dt
+//      frame-coupled Havok divergence control (> 5% error) fail-closed.
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 {
+        return -x;
+    }
+    x
+}
+
+fn fnv1a_32_byte(h: u64, b: u64) -> u64 {
+    ((h ^ (b & 255)) * 16777619) & 4294967295
+}
+
+struct Lcg {
+    s: i64,
+}
+
+fn next_u01(rng: &mut Lcg) -> f64 {
+    let a: i64 = 48271;
+    let m: i64 = 2147483647;
+    rng.s = (rng.s * a) % m;
+    (rng.s as f64) / (m as f64)
+}
+
+// Conservative 6-plane frustum test for AABB (cx, cy, cz, hx, hy, hz).
+// Camera at origin looking +Z, horizontal half-tan tx = 16/9, vertical ty = 1.0, z in [1, 200].
+fn aabb_in_frustum(cx: f64, cy: f64, cz: f64, hx: f64, hy: f64, hz: f64) -> i32 {
+    let tx: f64 = 16.0 / 9.0;
+    let ty: f64 = 1.0;
+    // Near plane: z - 1.0 >= 0
+    if (cz - 1.0) + hz < 0.0 {
+        return 0;
+    }
+    // Far plane: -z + 200.0 >= 0
+    if (-cz + 200.0) + hz < 0.0 {
+        return 0;
+    }
+    // Left plane: x + tx*z >= 0
+    if (cx + tx * cz) + (hx + tx * hz) < 0.0 {
+        return 0;
+    }
+    // Right plane: -x + tx*z >= 0
+    if (-cx + tx * cz) + (hx + tx * hz) < 0.0 {
+        return 0;
+    }
+    // Bottom plane: y + ty*z >= 0
+    if (cy + ty * cz) + (hy + ty * hz) < 0.0 {
+        return 0;
+    }
+    // Top plane: -y + ty*z >= 0
+    if (-cy + ty * cz) + (hy + ty * hz) < 0.0 {
+        return 0;
+    }
+    1
+}
+
+struct BatchStats {
+    total_objs: i32,
+    visible_objs: i32,
+    active_buckets: i32,
+    vis_fnv32: u64,
+    depth_sum: i64,
+    elapsed_ns: i64,
+}
+
+fn run_cell_visibility_batcher() -> BatchStats ~ Clock {
+    let n_objs: usize = 10000;
+    let mut cx: Vec<f64> = Vec::new();
+    let mut cy: Vec<f64> = Vec::new();
+    let mut cz: Vec<f64> = Vec::new();
+    let mut hx: Vec<f64> = Vec::new();
+    let mut hy: Vec<f64> = Vec::new();
+    let mut hz: Vec<f64> = Vec::new();
+    let mut arch: Vec<i32> = Vec::new();
+
+    let mut rng: Lcg = Lcg { s: 20261127 };
+    let mut i: usize = 0;
+    while i < n_objs {
+        cx.push(-200.0 + 400.0 * next_u01(&mut rng));
+        cy.push(-120.0 + 240.0 * next_u01(&mut rng));
+        cz.push(-50.0 + 300.0 * next_u01(&mut rng));
+        hx.push(0.5 + 3.5 * next_u01(&mut rng));
+        hy.push(0.5 + 3.5 * next_u01(&mut rng));
+        hz.push(0.5 + 3.5 * next_u01(&mut rng));
+        arch.push((i & 15) as i32);
+        i = i + 1;
+    }
+
+    let mut buckets: Vec<i32> = Vec::new();
+    let mut b: usize = 0;
+    while b < 16 {
+        buckets.push(0);
+        b = b + 1;
+    }
+
+    // Time hot frustum-cull + depth-bin + 16-bucket indirect-draw compaction
+    let t0: i64 = clock_ns();
+    let mut vis_cnt: i32 = 0;
+    let mut d_sum: i64 = 0;
+    let mut h_vis: u64 = 2166136261;
+    let mut cur_byte: u64 = 0;
+    let mut bit_idx: u64 = 0;
+
+    i = 0;
+    while i < n_objs {
+        let vis: i32 = aabb_in_frustum(cx[i], cy[i], cz[i], hx[i], hy[i], hz[i]);
+        if vis == 1 {
+            vis_cnt = vis_cnt + 1;
+            let a_idx: usize = arch[i] as usize;
+            buckets[a_idx] = buckets[a_idx] + 1;
+            let mut z_norm: f64 = (cz[i] - 1.0) / 199.0;
+            if z_norm < 0.0 {
+                z_norm = 0.0;
+            }
+            if z_norm > 1.0 {
+                z_norm = 1.0;
+            }
+            let dbin: i64 = floor(z_norm * 255.0) as i64;
+            d_sum = d_sum + dbin;
+            cur_byte = cur_byte | (1 << bit_idx);
+        }
+        bit_idx = bit_idx + 1;
+        if bit_idx == 8 {
+            h_vis = fnv1a_32_byte(h_vis, cur_byte);
+            cur_byte = 0;
+            bit_idx = 0;
+        }
+        i = i + 1;
+    }
+    if bit_idx > 0 {
+        h_vis = fnv1a_32_byte(h_vis, cur_byte);
+    }
+
+    let mut active_b: i32 = 0;
+    b = 0;
+    while b < 16 {
+        if buckets[b] > 0 {
+            active_b = active_b + 1;
+        }
+        b = b + 1;
+    }
+    let t1: i64 = clock_ns();
+
+    BatchStats {
+        total_objs: n_objs as i32,
+        visible_objs: vis_cnt,
+        active_buckets: active_b,
+        vis_fnv32: h_vis,
+        depth_sum: d_sum,
+        elapsed_ns: t1 - t0,
+    }
+}
+
+// ---- 2. 120 Hz Frame-Decoupled Symplectic Physics Tick vs Variable-dt Havok Trap ----
+
+struct PhysState {
+    y: f64,
+    vy: f64,
+    steps: i32,
+}
+
+// Acceleration on rigid body with gravity + stiff clutter-table penalty contact below y = 0.5 m.
+fn body_accel(y: f64, vy: f64) -> f64 {
+    let g: f64 = -9.80665;
+    if y < 0.5 {
+        let pen: f64 = 0.5 - y;
+        return g + 1600.0 * pen - 6.0 * vy;
+    }
+    g
+}
+
+// Frame-decoupled 120 Hz semi-implicit symplectic Euler using exact rational sub-tick accumulator.
+fn sim_decoupled_120hz(display_fps: i32, duration_s: i32) -> PhysState {
+    let phys_hz: i32 = 120;
+    let dt: f64 = 1.0 / 120.0;
+    let total_frames: i32 = display_fps * duration_s;
+    let mut acc_ticks: i32 = 0;
+    let mut y: f64 = 2.4;
+    let mut vy: f64 = 0.0;
+    let mut steps: i32 = 0;
+
+    let mut f: i32 = 0;
+    while f < total_frames {
+        acc_ticks = acc_ticks + phys_hz;
+        while acc_ticks >= display_fps {
+            let a: f64 = body_accel(y, vy);
+            vy = vy + a * dt;
+            y = y + vy * dt;
+            if y < 0.0 {
+                y = 0.0;
+                if vy < 0.0 {
+                    vy = -0.72 * vy;
+                }
+            }
+            steps = steps + 1;
+            acc_ticks = acc_ticks - display_fps;
+        }
+        f = f + 1;
+    }
+    PhysState { y: y, vy: vy, steps: steps }
+}
+
+// Planted variable-dt frame-coupled explicit Euler (reproduces Creation Engine Havok FPS coupling).
+fn sim_coupled_variable_dt(display_fps: i32, duration_s: i32) -> PhysState {
+    let dt: f64 = 1.0 / (display_fps as f64);
+    let total_frames: i32 = display_fps * duration_s;
+    let mut y: f64 = 2.4;
+    let mut vy: f64 = 0.0;
+
+    let mut f: i32 = 0;
+    while f < total_frames {
+        let a: f64 = body_accel(y, vy);
+        let y_next: f64 = y + vy * dt;
+        let vy_next: f64 = vy + a * dt;
+        y = y_next;
+        vy = vy_next;
+        if y < 0.0 {
+            y = 0.0;
+            if vy < 0.0 {
+                vy = -0.72 * vy;
+            }
+        }
+        f = f + 1;
+    }
+    PhysState { y: y, vy: vy, steps: total_frames }
+}
+
+fn main() ~ Console + Clock {
+    let mut failures: i32 = 0;
+
+    // 1. Run GPU Indirect-Draw Cell Visibility Batcher on 10,000 objects
+    let bs: BatchStats = run_cell_visibility_batcher();
+    let reduction: f64 = (bs.total_objs as f64) / (bs.active_buckets as f64);
+    let elapsed_ms: f64 = (bs.elapsed_ns as f64) / 1000000.0;
+    if bs.active_buckets <= 16 && reduction >= 300.0 && elapsed_ms < 1.0 {
+        println!(
+            "[PASS] cre_cell_batcher total={} vis={} buckets={} reduction={:.2} vis_fnv32={} dsum={} elapsed_ns={}",
+            bs.total_objs, bs.visible_objs, bs.active_buckets, reduction,
+            bs.vis_fnv32, bs.depth_sum, bs.elapsed_ns
+        );
+    } else {
+        println!(
+            "[FAIL] cre_cell_batcher buckets={} red={:.2} ms={:.4}",
+            bs.active_buckets, reduction, elapsed_ms
+        );
+        failures = failures + 1;
+    }
+
+    // 2. Run 120 Hz Frame-Decoupled Symplectic Physics at 60 / 144 / 240 FPS (2.0 s)
+    let p60: PhysState = sim_decoupled_120hz(60, 2);
+    let p144: PhysState = sim_decoupled_120hz(144, 2);
+    let p240: PhysState = sim_decoupled_120hz(240, 2);
+    let diff_144: f64 = abs_f64(p60.y - p144.y) + abs_f64(p60.vy - p144.vy);
+    let diff_240: f64 = abs_f64(p60.y - p240.y) + abs_f64(p60.vy - p240.vy);
+    if diff_144 == 0.0 && diff_240 == 0.0 && p60.steps == 240 && p144.steps == 240 && p240.steps == 240 {
+        println!(
+            "[PASS] cre_phys_120hz y={:.12} vy={:.12} steps={} diff144={:.12} diff240={:.12}",
+            p60.y, p60.vy, p60.steps, diff_144, diff_240
+        );
+    } else {
+        println!("[FAIL] cre_phys_120hz diff144={} diff240={}", diff_144, diff_240);
+        failures = failures + 1;
+    }
+
+    // 3. Planted Control: Variable-dt frame-coupled Havok explosion (60 FPS vs 240 FPS > 5% divergence)
+    let c60: PhysState = sim_coupled_variable_dt(60, 2);
+    let c240: PhysState = sim_coupled_variable_dt(240, 2);
+    let denom: f64 = abs_f64(c240.y) + abs_f64(c240.vy) + 0.000001;
+    let div_pct: f64 = (100.0 * (abs_f64(c60.y - c240.y) + abs_f64(c60.vy - c240.vy))) / denom;
+    if div_pct > 5.0 {
+        println!(
+            "[PASS] cre_planted_havok_coupled y60={:.12} vy60={:.12} y240={:.12} vy240={:.12} div_pct={:.6}",
+            c60.y, c60.vy, c240.y, c240.vy, div_pct
+        );
+    } else {
+        println!("[FAIL] cre_planted_havok_coupled div_pct={:.6}", div_pct);
+        failures = failures + 1;
+    }
+
+    if failures == 0 {
+        println!("[PASS] wave53d_cre_cell_batcher summary failures=0");
+    } else {
+        println!("[FAIL] wave53d_cre_cell_batcher summary failures={}", failures);
+    }
+}

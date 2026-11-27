@@ -1,0 +1,618 @@
+// SPDX-FileCopyrightText: 2026 Zain Dana Harper
+// SPDX-License-Identifier: MIT
+//
+// Wave 51I (Author Ideas N17 / A1 / D6):
+//   Clean-Room OpenMW-Style Creation-Format Reader Slice 1 in Native BuildLang.
+//   100% clean-room public binary format specification on synthetic test fixtures
+//   (zero third-party game files, code, or proprietary assets copied or bundled):
+//   1. BSA v105 archive header parser & 64-bit directory hasher + binary-search lookup
+//   2. ESM/ESP TES4/GRUP/CELL/REFR walker with exact IEEE-754 f32 DATA 6-DOF transform decode
+//   3. PEX big-endian 0xFA57C0DE header, string-table, and opcode bytecode verifier/disassembler.
+
+// ---- Byte-level helpers (Vec<u64> holding bytes 0..255 for overflow-safe portability) ----
+
+fn push_u8(buf: &mut Vec<u64>, v: u64) {
+    buf.push(v & 255);
+}
+
+fn push_u16_le(buf: &mut Vec<u64>, v: u64) {
+    buf.push(v & 255);
+    buf.push((v >> 8) & 255);
+}
+
+fn push_u32_le(buf: &mut Vec<u64>, v: u64) {
+    buf.push(v & 255);
+    buf.push((v >> 8) & 255);
+    buf.push((v >> 16) & 255);
+    buf.push((v >> 24) & 255);
+}
+
+fn push_u16_be(buf: &mut Vec<u64>, v: u64) {
+    buf.push((v >> 8) & 255);
+    buf.push(v & 255);
+}
+
+fn push_u32_be(buf: &mut Vec<u64>, v: u64) {
+    buf.push((v >> 24) & 255);
+    buf.push((v >> 16) & 255);
+    buf.push((v >> 8) & 255);
+    buf.push(v & 255);
+}
+
+fn push_u64_be(buf: &mut Vec<u64>, v: u64) {
+    push_u32_be(buf, (v >> 32) & 4294967295);
+    push_u32_be(buf, v & 4294967295);
+}
+
+fn read_u16_le(buf: &Vec<u64>, off: usize) -> u64 {
+    buf[off] | (buf[off + 1] << 8)
+}
+
+fn read_u32_le(buf: &Vec<u64>, off: usize) -> u64 {
+    buf[off] | (buf[off + 1] << 8) | (buf[off + 2] << 16) | (buf[off + 3] << 24)
+}
+
+fn read_u16_be(buf: &Vec<u64>, off: usize) -> u64 {
+    (buf[off] << 8) | buf[off + 1]
+}
+
+fn read_u32_be(buf: &Vec<u64>, off: usize) -> u64 {
+    (buf[off] << 24) | (buf[off + 1] << 16) | (buf[off + 2] << 8) | buf[off + 3]
+}
+
+// Exact bit-for-bit IEEE-754 binary32 (u32 bits) -> f64 decoder (zero transcendental rounding).
+fn f32_bits_to_f64(bits: u64) -> f64 {
+    let sign: u64 = (bits >> 31) & 1;
+    let exp_u: u64 = (bits >> 23) & 255;
+    let mant: u64 = bits & 8388607;
+    if exp_u == 0 && mant == 0 {
+        return 0.0;
+    }
+    let mut val: f64 = 0.0;
+    let mut e: i32 = 0;
+    if exp_u == 0 {
+        val = (mant as f64) / 8388608.0;
+        e = -126;
+    } else {
+        val = 1.0 + (mant as f64) / 8388608.0;
+        e = (exp_u as i32) - 127;
+    }
+    while e > 0 {
+        val = val * 2.0;
+        e = e - 1;
+    }
+    while e < 0 {
+        val = val * 0.5;
+        e = e + 1;
+    }
+    if sign == 1 {
+        return -val;
+    }
+    val
+}
+
+fn fnv1a_32_byte(h: u64, b: u64) -> u64 {
+    ((h ^ (b & 255)) * 16777619) & 4294967295
+}
+
+// ---- 1. Clean-Room BSA v105 Archive Header Parser & 64-Bit Directory Hasher ----
+
+struct BsaHeader {
+    ok: i32,
+    err_code: i32,
+    version: u64,
+    offset: u64,
+    archive_flags: u64,
+    folder_count: u64,
+    file_count: u64,
+    total_folder_name_len: u64,
+    total_file_name_len: u64,
+    file_flags: u64,
+}
+
+// Parse 36-byte BSA v105 header. Fail-closed: err_code 1=bad_magic, 2=truncated, 3=bad_version.
+fn parse_bsa_header(buf: &Vec<u64>) -> BsaHeader {
+    if buf.len() < 36 {
+        return BsaHeader {
+            ok: 0, err_code: 2, version: 0, offset: 0, archive_flags: 0,
+            folder_count: 0, file_count: 0, total_folder_name_len: 0,
+            total_file_name_len: 0, file_flags: 0,
+        };
+    }
+    let magic: u64 = read_u32_le(buf, 0);
+    if magic != 4281154 {
+        // 0x00415342 = "BSA\0" LE
+        return BsaHeader {
+            ok: 0, err_code: 1, version: 0, offset: 0, archive_flags: 0,
+            folder_count: 0, file_count: 0, total_folder_name_len: 0,
+            total_file_name_len: 0, file_flags: 0,
+        };
+    }
+    let ver: u64 = read_u32_le(buf, 4);
+    let off: u64 = read_u32_le(buf, 8);
+    if ver != 105 || off != 36 {
+        return BsaHeader {
+            ok: 0, err_code: 3, version: ver, offset: off, archive_flags: 0,
+            folder_count: 0, file_count: 0, total_folder_name_len: 0,
+            total_file_name_len: 0, file_flags: 0,
+        };
+    }
+    BsaHeader {
+        ok: 1,
+        err_code: 0,
+        version: ver,
+        offset: off,
+        archive_flags: read_u32_le(buf, 12),
+        folder_count: read_u32_le(buf, 16),
+        file_count: read_u32_le(buf, 20),
+        total_folder_name_len: read_u32_le(buf, 24),
+        total_file_name_len: read_u32_le(buf, 28),
+        file_flags: read_u32_le(buf, 32),
+    }
+}
+
+// Clean-room BSA directory hash (public TES4/v105 spec, overflow-safe u64 arithmetic).
+fn bsa_hash_bytes(name: &Vec<u64>) -> u64 {
+    let n: usize = name.len();
+    if n == 0 {
+        return 0;
+    }
+    let last: u64 = name[n - 1] & 255;
+    let last2: u64 = if n >= 3 { name[n - 2] & 255 } else { 0 };
+    let first: u64 = name[0] & 255;
+    let hash_lo: u64 = (last | (last2 << 8) | (((n as u64) & 255) << 16) | (first << 24)) & 4294967295;
+    let mut hash_hi: u64 = 0;
+    if n > 3 {
+        let mut i: usize = 1;
+        while i < n - 2 {
+            hash_hi = (hash_hi * 65599 + (name[i] & 255)) & 4294967295;
+            i = i + 1;
+        }
+    }
+    (hash_hi << 32) | hash_lo
+}
+
+fn bsearch_u64(sorted: &Vec<u64>, target: u64) -> i32 {
+    let mut lo: i32 = 0;
+    let mut hi: i32 = (sorted.len() as i32) - 1;
+    while lo <= hi {
+        let mid: i32 = lo + ((hi - lo) / 2);
+        let v: u64 = sorted[mid as usize];
+        if v == target {
+            return mid;
+        }
+        if v < target {
+            lo = mid + 1;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    -1
+}
+
+// ---- 2. Clean-Room ESM/ESP TES4/GRUP/CELL/REFR Walker ----
+
+struct EsmWalkRes {
+    ok: i32,
+    err_code: i32,
+    tes4_count: i32,
+    grup_count: i32,
+    cell_count: i32,
+    refr_count: i32,
+    first_form_id: u64,
+    pos_x: f64,
+    pos_y: f64,
+    pos_z: f64,
+    rot_x: f64,
+    rot_y: f64,
+    rot_z: f64,
+}
+
+fn esm_fail(code: i32) -> EsmWalkRes {
+    EsmWalkRes {
+        ok: 0, err_code: code, tes4_count: 0, grup_count: 0, cell_count: 0, refr_count: 0,
+        first_form_id: 0, pos_x: 0.0, pos_y: 0.0, pos_z: 0.0, rot_x: 0.0, rot_y: 0.0, rot_z: 0.0,
+    }
+}
+
+// Walk flat/nested TES4/GRUP/CELL/REFR stream.
+// Fail-closed: err_code 3=truncated_subrecord, 4=corrupt_group_size, 6=truncated_record.
+fn walk_esm_buffer(buf: &Vec<u64>) -> EsmWalkRes {
+    // FourCC LE constants: TES4=0x34534554, GRUP=0x50555247, CELL=0x4C4C4543, REFR=0x52464552, DATA=0x41544144
+    let fourcc_tes4: u64 = 877872468;
+    let fourcc_grup: u64 = 1347768903;
+    let fourcc_cell: u64 = 1280066883;
+    let fourcc_refr: u64 = 1380336978;
+    let fourcc_data: u64 = 1096040772;
+
+    let mut tes4_c: i32 = 0;
+    let mut grup_c: i32 = 0;
+    let mut cell_c: i32 = 0;
+    let mut refr_c: i32 = 0;
+    let mut got_first: i32 = 0;
+    let mut fid0: u64 = 0;
+    let mut px: f64 = 0.0;
+    let mut py: f64 = 0.0;
+    let mut pz: f64 = 0.0;
+    let mut rx: f64 = 0.0;
+    let mut ry: f64 = 0.0;
+    let mut rz: f64 = 0.0;
+
+    let n: usize = buf.len();
+    let mut off: usize = 0;
+    while off < n {
+        if off + 24 > n {
+            return esm_fail(6);
+        }
+        let rec_type: u64 = read_u32_le(buf, off);
+        let size_field: u64 = read_u32_le(buf, off + 4);
+        if rec_type == fourcc_grup {
+            if size_field < 24 || off + (size_field as usize) > n {
+                return esm_fail(4);
+            }
+            grup_c = grup_c + 1;
+            off = off + 24;
+        } else {
+            let rec_end: usize = off + 24 + (size_field as usize);
+            if rec_end > n {
+                return esm_fail(6);
+            }
+            let form_id: u64 = read_u32_le(buf, off + 12);
+            if rec_type == fourcc_tes4 {
+                tes4_c = tes4_c + 1;
+            } else if rec_type == fourcc_cell {
+                cell_c = cell_c + 1;
+            } else if rec_type == fourcc_refr {
+                refr_c = refr_c + 1;
+            }
+            // Walk subrecords inside [off + 24, rec_end)
+            let mut sub: usize = off + 24;
+            while sub < rec_end {
+                if sub + 6 > rec_end {
+                    return esm_fail(3);
+                }
+                let sub_type: u64 = read_u32_le(buf, sub);
+                let sub_len: usize = read_u16_le(buf, sub + 4) as usize;
+                let sub_data: usize = sub + 6;
+                if sub_data + sub_len > rec_end {
+                    return esm_fail(3);
+                }
+                if rec_type == fourcc_refr && sub_type == fourcc_data && sub_len == 24 && got_first == 0 {
+                    got_first = 1;
+                    fid0 = form_id;
+                    px = f32_bits_to_f64(read_u32_le(buf, sub_data));
+                    py = f32_bits_to_f64(read_u32_le(buf, sub_data + 4));
+                    pz = f32_bits_to_f64(read_u32_le(buf, sub_data + 8));
+                    rx = f32_bits_to_f64(read_u32_le(buf, sub_data + 12));
+                    ry = f32_bits_to_f64(read_u32_le(buf, sub_data + 16));
+                    rz = f32_bits_to_f64(read_u32_le(buf, sub_data + 20));
+                }
+                sub = sub_data + sub_len;
+            }
+            off = rec_end;
+        }
+    }
+
+    EsmWalkRes {
+        ok: 1, err_code: 0, tes4_count: tes4_c, grup_count: grup_c, cell_count: cell_c,
+        refr_count: refr_c, first_form_id: fid0,
+        pos_x: px, pos_y: py, pos_z: pz, rot_x: rx, rot_y: ry, rot_z: rz,
+    }
+}
+
+// ---- 3. Clean-Room PEX Big-Endian Bytecode Disassembler / Verifier ----
+
+struct PexVerifyRes {
+    ok: i32,
+    err_code: i32,
+    major_ver: u64,
+    minor_ver: u64,
+    game_id: u64,
+    string_count: u64,
+    instr_count: u64,
+    ir_fnv32: u64,
+}
+
+fn pex_fail(code: i32) -> PexVerifyRes {
+    PexVerifyRes {
+        ok: 0, err_code: code, major_ver: 0, minor_ver: 0, game_id: 0,
+        string_count: 0, instr_count: 0, ir_fnv32: 0,
+    }
+}
+
+// Verify big-endian PEX 0xFA57C0DE header, string table, and opcode stream.
+// Fail-closed: err_code 1=bad_magic, 2=truncated, 5=oob_string_index.
+fn verify_pex_buffer(buf: &Vec<u64>) -> PexVerifyRes {
+    if buf.len() < 18 {
+        return pex_fail(2);
+    }
+    let magic: u64 = read_u32_be(buf, 0);
+    if magic != 4200054990 {
+        // 0xFA57C0DE
+        return pex_fail(1);
+    }
+    let maj: u64 = buf[4];
+    let min: u64 = buf[5];
+    let gid: u64 = read_u16_be(buf, 6);
+    // bytes 8..16 = u64 compilation_time BE
+    let str_cnt: u64 = read_u16_be(buf, 16);
+    let mut off: usize = 18;
+    let mut ir_h: u64 = 2166136261;
+    ir_h = fnv1a_32_byte(ir_h, maj);
+    ir_h = fnv1a_32_byte(ir_h, min);
+    ir_h = fnv1a_32_byte(ir_h, gid & 255);
+
+    let mut s: u64 = 0;
+    while s < str_cnt {
+        if off + 2 > buf.len() {
+            return pex_fail(2);
+        }
+        let slen: usize = read_u16_be(buf, off) as usize;
+        off = off + 2;
+        if off + slen > buf.len() {
+            return pex_fail(2);
+        }
+        let mut j: usize = 0;
+        while j < slen {
+            ir_h = fnv1a_32_byte(ir_h, buf[off + j]);
+            j = j + 1;
+        }
+        off = off + slen;
+        s = s + 1;
+    }
+
+    if off + 2 > buf.len() {
+        return pex_fail(2);
+    }
+    let instr_cnt: u64 = read_u16_be(buf, off);
+    off = off + 2;
+    let mut k: u64 = 0;
+    while k < instr_cnt {
+        if off + 2 > buf.len() {
+            return pex_fail(2);
+        }
+        let op: u64 = buf[off];
+        let argc: u64 = buf[off + 1];
+        off = off + 2;
+        ir_h = fnv1a_32_byte(ir_h, op);
+        ir_h = fnv1a_32_byte(ir_h, argc);
+        let mut a: u64 = 0;
+        while a < argc {
+            if off + 2 > buf.len() {
+                return pex_fail(2);
+            }
+            let s_idx: u64 = read_u16_be(buf, off);
+            off = off + 2;
+            if s_idx >= str_cnt {
+                return pex_fail(5);
+            }
+            ir_h = fnv1a_32_byte(ir_h, s_idx & 255);
+            a = a + 1;
+        }
+        k = k + 1;
+    }
+
+    PexVerifyRes {
+        ok: 1, err_code: 0, major_ver: maj, minor_ver: min, game_id: gid,
+        string_count: str_cnt, instr_count: instr_cnt, ir_fnv32: ir_h,
+    }
+}
+
+// ---- Synthetic Clean-Room Fixture Builders (zero external game files) ----
+
+fn make_synth_bsa(magic: u64, truncate: i32) -> Vec<u64> {
+    let mut b: Vec<u64> = Vec::new();
+    push_u32_le(&mut b, magic);
+    push_u32_le(&mut b, 105);
+    push_u32_le(&mut b, 36);
+    push_u32_le(&mut b, 7);
+    if truncate == 1 {
+        return b;
+    }
+    push_u32_le(&mut b, 64);
+    push_u32_le(&mut b, 256);
+    push_u32_le(&mut b, 1024);
+    push_u32_le(&mut b, 4096);
+    push_u32_le(&mut b, 3);
+    b
+}
+
+fn push_rec_hdr(b: &mut Vec<u64>, fourcc: u64, data_size: u64, form_id: u64) {
+    push_u32_le(b, fourcc);
+    push_u32_le(b, data_size);
+    push_u32_le(b, 0);
+    push_u32_le(b, form_id);
+    push_u32_le(b, 0);
+    push_u32_le(b, 44);
+}
+
+fn make_synth_esm(corrupt_mode: i32) -> Vec<u64> {
+    // corrupt_mode: 0=valid, 1=truncated_subrecord, 2=corrupt_group_size
+    let mut b: Vec<u64> = Vec::new();
+    // TES4 header record with 12-byte HEDR subrecord (6 + 12 = 18 bytes)
+    push_rec_hdr(&mut b, 877872468, 18, 0);
+    push_u32_le(&mut b, 1380205896); // HEDR
+    push_u16_le(&mut b, 12);
+    push_u32_le(&mut b, 1071225242); // 1.70f
+    push_u32_le(&mut b, 3);
+    push_u32_le(&mut b, 2048);
+
+    // GRUP(CELL): 24 header + CELL(24+0) + GRUP(24 + REFR(24+30)) = 24+24+24+54 = 126
+    let g_size: u64 = if corrupt_mode == 2 { 9999 } else { 126 };
+    push_u32_le(&mut b, 1347768903); // GRUP
+    push_u32_le(&mut b, g_size);
+    push_u32_le(&mut b, 1280066883); // label CELL
+    push_u32_le(&mut b, 0);
+    push_u32_le(&mut b, 0);
+    push_u32_le(&mut b, 0);
+
+    // CELL record (empty data)
+    push_rec_hdr(&mut b, 1280066883, 0, 65536);
+
+    // Child GRUP (24 + REFR(24 + 30) = 78)
+    push_u32_le(&mut b, 1347768903);
+    push_u32_le(&mut b, 78);
+    push_u32_le(&mut b, 65536);
+    push_u32_le(&mut b, 6);
+    push_u32_le(&mut b, 0);
+    push_u32_le(&mut b, 0);
+
+    // REFR record (form_id = 0x00010001 = 65537) with DATA subrecord (6 + 24 = 30 bytes)
+    // IEEE-754 f32 LE exact bits:
+    //   1024.5   = 0x44801000 (1149243392)
+    //   -512.25  = 0xC4001000 (3288338432)
+    //   64.125   = 0x42804000 (1115701248)
+    //   0.0      = 0x00000000 (0)
+    //   0.25     = 0x3E800000 (1048576000)
+    //   1.5      = 0x3FC00000 (1069547520)
+    let sub_len: u64 = if corrupt_mode == 1 { 40 } else { 24 };
+    push_rec_hdr(&mut b, 1380336978, 30, 65537);
+    push_u32_le(&mut b, 1096040772); // DATA
+    push_u16_le(&mut b, sub_len);
+    push_u32_le(&mut b, 1149243392);
+    push_u32_le(&mut b, 3288338432);
+    push_u32_le(&mut b, 1115701248);
+    push_u32_le(&mut b, 0);
+    push_u32_le(&mut b, 1048576000);
+    push_u32_le(&mut b, 1069547520);
+    b
+}
+
+fn make_synth_pex(magic: u64, oob_str: i32) -> Vec<u64> {
+    let mut b: Vec<u64> = Vec::new();
+    push_u32_be(&mut b, magic);
+    push_u8(&mut b, 3);
+    push_u8(&mut b, 2);
+    push_u16_be(&mut b, 1);
+    push_u64_be(&mut b, 1795700000);
+    // 3 strings: "obj", "run", "pos"
+    push_u16_be(&mut b, 3);
+    push_u16_be(&mut b, 3);
+    push_u8(&mut b, 111); push_u8(&mut b, 98); push_u8(&mut b, 106);
+    push_u16_be(&mut b, 3);
+    push_u8(&mut b, 114); push_u8(&mut b, 117); push_u8(&mut b, 110);
+    push_u16_be(&mut b, 3);
+    push_u8(&mut b, 112); push_u8(&mut b, 111); push_u8(&mut b, 115);
+    // 3 instructions: CALLMETHOD(0x17, 2 args: 0, 1), ASSIGN(0x0E, 1 arg: 2 or 99), RET(0x1A, 0 args)
+    push_u16_be(&mut b, 3);
+    push_u8(&mut b, 23); push_u8(&mut b, 2); push_u16_be(&mut b, 0); push_u16_be(&mut b, 1);
+    let idx_bad: u64 = if oob_str == 1 { 99 } else { 2 };
+    push_u8(&mut b, 14); push_u8(&mut b, 1); push_u16_be(&mut b, idx_bad);
+    push_u8(&mut b, 26); push_u8(&mut b, 0);
+    b
+}
+
+fn main() ~ Console + Clock {
+    let mut failures: i32 = 0;
+
+    // 1. Clean-room BSA v105 header + directory hash + planted bad-magic & truncated controls
+    let bsa_ok_buf: Vec<u64> = make_synth_bsa(4281154, 0);
+    let bsa_h: BsaHeader = parse_bsa_header(&bsa_ok_buf);
+    // "meshes\\world" ASCII bytes
+    let mut folder: Vec<u64> = Vec::new();
+    folder.push(109); folder.push(101); folder.push(115); folder.push(104);
+    folder.push(101); folder.push(115); folder.push(92); folder.push(119);
+    folder.push(111); folder.push(114); folder.push(108); folder.push(100);
+    let fhash: u64 = bsa_hash_bytes(&folder);
+
+    let bsa_bad_m: BsaHeader = parse_bsa_header(&make_synth_bsa(3735928559, 0));
+    let bsa_trunc: BsaHeader = parse_bsa_header(&make_synth_bsa(4281154, 1));
+    if bsa_h.ok == 1 && bsa_h.version == 105 && bsa_h.folder_count == 64 && bsa_h.file_count == 256
+        && bsa_bad_m.ok == 0 && bsa_bad_m.err_code == 1
+        && bsa_trunc.ok == 0 && bsa_trunc.err_code == 2
+    {
+        println!(
+            "[PASS] cre_bsa_v105 ver={} folders={} files={} fhash={} bad_magic_rc={} trunc_rc={}",
+            bsa_h.version, bsa_h.folder_count, bsa_h.file_count, fhash,
+            bsa_bad_m.err_code, bsa_trunc.err_code
+        );
+    } else {
+        println!("[FAIL] cre_bsa_v105 ok={}", bsa_h.ok);
+        failures = failures + 1;
+    }
+
+    // Build sorted 64-entry folder hash table and benchmark 200,000 lookups
+    let mut table: Vec<u64> = Vec::new();
+    let mut k: u64 = 0;
+    while k < 64 {
+        let mut nm: Vec<u64> = Vec::new();
+        nm.push(109); nm.push(101); nm.push(115); nm.push(104);
+        nm.push(48 + (k / 10)); nm.push(48 + (k % 10));
+        table.push(bsa_hash_bytes(&nm));
+        k = k + 1;
+    }
+    // Insertion sort table ascending
+    let mut si: usize = 1;
+    while si < table.len() {
+        let key: u64 = table[si];
+        let mut sj: i32 = (si as i32) - 1;
+        while sj >= 0 && table[sj as usize] > key {
+            table[(sj + 1) as usize] = table[sj as usize];
+            sj = sj - 1;
+        }
+        table[(sj + 1) as usize] = key;
+        si = si + 1;
+    }
+    let t0: i64 = clock_ns();
+    let mut found_sum: i64 = 0;
+    let mut bi: i64 = 0;
+    while bi < 200000 {
+        let q: u64 = table[(bi & 63) as usize];
+        let pos: i32 = bsearch_u64(&table, q);
+        if pos >= 0 {
+            found_sum = found_sum + 1;
+        }
+        bi = bi + 1;
+    }
+    let t1: i64 = clock_ns();
+    println!("[BENCH] cre_bsa_lookup lookups=200000 elapsed_ns={} hits={}", t1 - t0, found_sum);
+
+    // 2. Clean-room ESM/ESP TES4/GRUP/CELL/REFR walker + 6-DOF IEEE-754 f32 decode + traps
+    let esm_ok: EsmWalkRes = walk_esm_buffer(&make_synth_esm(0));
+    let esm_sub_trap: EsmWalkRes = walk_esm_buffer(&make_synth_esm(1));
+    let esm_grp_trap: EsmWalkRes = walk_esm_buffer(&make_synth_esm(2));
+    if esm_ok.ok == 1 && esm_ok.tes4_count == 1 && esm_ok.grup_count == 2
+        && esm_ok.cell_count == 1 && esm_ok.refr_count == 1 && esm_ok.first_form_id == 65537
+        && esm_sub_trap.ok == 0 && esm_sub_trap.err_code == 3
+        && esm_grp_trap.ok == 0 && esm_grp_trap.err_code == 4
+    {
+        println!(
+            "[PASS] cre_esm_walker tes4={} grup={} cell={} refr={} fid={} sub_rc={} grp_rc={}",
+            esm_ok.tes4_count, esm_ok.grup_count, esm_ok.cell_count, esm_ok.refr_count,
+            esm_ok.first_form_id, esm_sub_trap.err_code, esm_grp_trap.err_code
+        );
+        println!(
+            "[PASS] cre_esm_6dof px={:.12} py={:.12} pz={:.12} rx={:.12} ry={:.12} rz={:.12}",
+            esm_ok.pos_x, esm_ok.pos_y, esm_ok.pos_z,
+            esm_ok.rot_x, esm_ok.rot_y, esm_ok.rot_z
+        );
+    } else {
+        println!("[FAIL] cre_esm_walker ok={} err={}", esm_ok.ok, esm_ok.err_code);
+        failures = failures + 1;
+    }
+
+    // 3. Clean-room PEX big-endian header + string-table + opcode verifier + traps
+    let pex_ok: PexVerifyRes = verify_pex_buffer(&make_synth_pex(4200054990, 0));
+    let pex_bad_m: PexVerifyRes = verify_pex_buffer(&make_synth_pex(3131961357, 0));
+    let pex_oob: PexVerifyRes = verify_pex_buffer(&make_synth_pex(4200054990, 1));
+    if pex_ok.ok == 1 && pex_ok.major_ver == 3 && pex_ok.minor_ver == 2
+        && pex_ok.string_count == 3 && pex_ok.instr_count == 3
+        && pex_bad_m.ok == 0 && pex_bad_m.err_code == 1
+        && pex_oob.ok == 0 && pex_oob.err_code == 5
+    {
+        println!(
+            "[PASS] cre_pex_verifier maj={} min={} strs={} instrs={} ir_fnv32={} bad_magic_rc={} oob_rc={}",
+            pex_ok.major_ver, pex_ok.minor_ver, pex_ok.string_count, pex_ok.instr_count,
+            pex_ok.ir_fnv32, pex_bad_m.err_code, pex_oob.err_code
+        );
+    } else {
+        println!("[FAIL] cre_pex_verifier ok={} err={}", pex_ok.ok, pex_ok.err_code);
+        failures = failures + 1;
+    }
+
+    if failures == 0 {
+        println!("[PASS] wave51i_cre_reader summary failures=0");
+    } else {
+        println!("[FAIL] wave51i_cre_reader summary failures={}", failures);
+    }
+}
