@@ -1157,6 +1157,25 @@ static Result build_parse_float(BuildString s, bool single) {
     memcpy(&r.ok, &v, sizeof v);
     return r;
 }
+static Result build_parse_bool(BuildString s) {
+    if (s.len == 4 && memcmp(s.ptr, "true", 4) == 0) {
+        Result r;
+        memset(&r, 0, sizeof r);
+        r.is_ok = true;
+        int64_t v = 1;
+        memcpy(&r.ok, &v, sizeof v);
+        return r;
+    }
+    if (s.len == 5 && memcmp(s.ptr, "false", 5) == 0) {
+        Result r;
+        memset(&r, 0, sizeof r);
+        r.is_ok = true;
+        int64_t v = 0;
+        memcpy(&r.ok, &v, sizeof v);
+        return r;
+    }
+    return bl_parse_err("provided string was not `true` or `false`");
+}
 static Result build_parse_int_radix(BuildString s, int32_t radix, int32_t bits, bool is_signed) {
     if (radix < 2 || radix > 36) return bl_parse_err("invalid radix");
     if (s.len == 0) return bl_parse_err("cannot parse integer from empty string");
@@ -1404,6 +1423,10 @@ static Option build_char_iter_next(BuildCharIter* it) {
 
 static bool build_char_is_ascii_digit(uint32_t c) {
     return c >= '0' && c <= '9';
+}
+
+static bool build_char_is_ascii_hexdigit(uint32_t c) {
+    return (c >= '0' && c <= '9') || (c >= 'A' && c <= 'F') || (c >= 'a' && c <= 'f');
 }
 
 static bool build_char_is_alphanumeric(uint32_t c) {
@@ -2720,7 +2743,24 @@ static double build_det_cbrt(double x) {
 typedef struct { double x, y; } build_vec2;
 typedef struct { double x, y, z; } build_vec3;
 typedef struct { double x, y, z, w; } build_vec4;
+typedef struct { double m[3][3]; } build_mat3;
 typedef struct { double m[4][4]; } build_mat4;
+
+static build_mat3 build_mat3_from_f32_array9(const float* a) {
+    build_mat3 r;
+    r.m[0][0] = a[0]; r.m[0][1] = a[1]; r.m[0][2] = a[2];
+    r.m[1][0] = a[3]; r.m[1][1] = a[4]; r.m[1][2] = a[5];
+    r.m[2][0] = a[6]; r.m[2][1] = a[7]; r.m[2][2] = a[8];
+    return r;
+}
+
+static build_vec3 build_mat3_transform(build_mat3 m, build_vec3 v) {
+    build_vec3 r;
+    r.x = m.m[0][0]*v.x + m.m[0][1]*v.y + m.m[0][2]*v.z;
+    r.y = m.m[1][0]*v.x + m.m[1][1]*v.y + m.m[1][2]*v.z;
+    r.z = m.m[2][0]*v.x + m.m[2][1]*v.y + m.m[2][2]*v.z;
+    return r;
+}
 
 // Constructors
 static build_vec2 build_vec2_new(double x, double y) { return (build_vec2){x, y}; }
@@ -3356,6 +3396,46 @@ static BuildVecHandle build_string_split_h(BuildString s, BuildString delim) {
     BuildVecHandle h; h.inner = (BuildVec*)malloc(sizeof(BuildVec));
     *h.inner = build_string_split(s, delim); return h;
 }
+static BuildVecHandle build_string_splitn_h(BuildString s, int64_t limit, BuildString delim) {
+    BuildVec v = build_vec_new(sizeof(BuildString));
+    const char* src = s.ptr ? s.ptr : "";
+    if (limit <= 0) {
+        BuildVecHandle h; h.inner = (BuildVec*)malloc(sizeof(BuildVec));
+        *h.inner = v; return h;
+    }
+    if (delim.len == 0 || limit == 1) {
+        BuildString copy = build_string_new(src);
+        build_vec_push(&v, &copy);
+        BuildVecHandle h; h.inner = (BuildVec*)malloc(sizeof(BuildVec));
+        *h.inner = v; return h;
+    }
+    size_t pos = 0;
+    int64_t count = 1;
+    while (pos <= s.len) {
+        if (count >= limit) {
+            size_t part_len = s.len - pos;
+            char* buf = (char*)malloc(part_len + 1);
+            memcpy(buf, src + pos, part_len);
+            buf[part_len] = '\0';
+            BuildString part; part.ptr = buf; part.len = part_len; part.cap = part_len + 1;
+            build_vec_push(&v, &part);
+            break;
+        }
+        const char* found = strstr(src + pos, delim.ptr);
+        size_t end = found ? (size_t)(found - src) : s.len;
+        size_t part_len = end - pos;
+        char* buf = (char*)malloc(part_len + 1);
+        memcpy(buf, src + pos, part_len);
+        buf[part_len] = '\0';
+        BuildString part; part.ptr = buf; part.len = part_len; part.cap = part_len + 1;
+        build_vec_push(&v, &part);
+        if (!found) break;
+        pos = end + delim.len;
+        count++;
+    }
+    BuildVecHandle h; h.inner = (BuildVec*)malloc(sizeof(BuildVec));
+    *h.inner = v; return h;
+}
 static BuildVecHandle build_string_split_ws_h(BuildString s) {
     BuildVecHandle h; h.inner = (BuildVec*)malloc(sizeof(BuildVec));
     *h.inner = build_string_split_ws(s); return h;
@@ -3944,6 +4024,14 @@ static double build_random_f64(void) {
     }
 }
 
+static double build_random_gaussian(double mean, double std_dev) {
+    double u1 = build_random_f64();
+    double u2 = build_random_f64();
+    if (u1 < 1e-15) u1 = 1e-15;
+    double z = sqrt(-2.0 * log(u1)) * cos(6.28318530717958647692 * u2);
+    return mean + std_dev * z;
+}
+
 // --- Model-call builtin (Model capability) ---
 //
 // A deliberately DUMB line protocol over TCP: connect to the host:port in
@@ -4217,6 +4305,61 @@ int build_vk_draw_frame(void);
 int build_vk_should_close(void);
 void build_vk_request_close(void);
 void build_vk_shutdown(void);
+
+// --- Reference-counted heap allocations (Arc<T> / Rc<T>) ---
+#if defined(_MSC_VER)
+#include <intrin.h>
+#endif
+typedef struct {
+    int64_t refcount;
+    int64_t _pad;
+} BuildRcHeader;
+
+static void* build_arc_alloc(size_t payload_size) {
+    BuildRcHeader* h = (BuildRcHeader*)malloc(sizeof(BuildRcHeader) + payload_size);
+    if (!h) abort();
+    h->refcount = 1;
+    h->_pad = 0;
+    return (void*)(h + 1);
+}
+
+static void* build_arc_clone(void* payload) {
+    if (!payload) return NULL;
+    BuildRcHeader* h = ((BuildRcHeader*)payload) - 1;
+#if defined(_MSC_VER)
+    _InterlockedIncrement64((volatile long long*)&h->refcount);
+#else
+    __atomic_fetch_add(&h->refcount, 1, __ATOMIC_RELAXED);
+#endif
+    return payload;
+}
+
+static size_t build_arc_strong_count(void* payload) {
+    if (!payload) return 0;
+    BuildRcHeader* h = ((BuildRcHeader*)payload) - 1;
+#if defined(_MSC_VER)
+    return (size_t)_InterlockedCompareExchange64((volatile long long*)&h->refcount, 0, 0);
+#else
+    return (size_t)__atomic_load_n(&h->refcount, __ATOMIC_ACQUIRE);
+#endif
+}
+
+static void* build_rc_alloc(size_t payload_size) {
+    return build_arc_alloc(payload_size);
+}
+
+static void* build_rc_clone(void* payload) {
+    if (!payload) return NULL;
+    BuildRcHeader* h = ((BuildRcHeader*)payload) - 1;
+    h->refcount += 1;
+    return payload;
+}
+
+static size_t build_rc_strong_count(void* payload) {
+    if (!payload) return 0;
+    BuildRcHeader* h = ((BuildRcHeader*)payload) - 1;
+    return (size_t)h->refcount;
+}
 
 // ============================================================================
 // End BuildLang Runtime

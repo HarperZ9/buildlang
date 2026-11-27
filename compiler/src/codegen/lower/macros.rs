@@ -685,6 +685,94 @@ impl<'ctx> MirLowerer<'ctx> {
             raw_name = instance.clone();
         }
 
+        // Virtual `Mat3 { m: [[f32; 3]; 3] }` / `Mat4 { m: [[f32; 4]; 4] }` literal form:
+        // convert the 2D array into the canonical `x_axis..w_axis` struct layout.
+        if matches!(raw_name.as_ref(), "Mat3" | "Mat4")
+            && fields.len() == 1
+            && fields[0].name.name.as_ref() == "m"
+            && rest.is_none()
+            && self
+                .struct_field_types(raw_name.as_ref())
+                .is_some_and(|d| d.iter().any(|(n, _)| n.as_deref() == Some("x_axis")))
+        {
+            let is_m4 = raw_name.as_ref() == "Mat4";
+            let n = if is_m4 { 4usize } else { 3usize };
+            let vec_name = if is_m4 { "Vec4" } else { "Vec3" };
+            let row_ty = MirType::Array(Box::new(MirType::f32()), n as u64);
+            let mat_ty = MirType::Array(Box::new(row_ty.clone()), n as u64);
+            let prev_expected = self.expected_type.replace(mat_ty);
+            let m_res = if let Some(val) = &fields[0].value {
+                self.lower_expr(val)
+            } else {
+                self.lower_ident(&fields[0].name)
+            };
+            self.expected_type = prev_expected;
+            let m_val = m_res?;
+            let (actual_row_ty, actual_elem_ty) = match self.type_of_value(&m_val) {
+                MirType::Array(inner, _) => match inner.as_ref() {
+                    MirType::Array(el, _) => (inner.as_ref().clone(), el.as_ref().clone()),
+                    _ => (row_ty.clone(), MirType::f32()),
+                },
+                _ => (row_ty.clone(), MirType::f32()),
+            };
+            let b = self.current_fn.as_mut().unwrap();
+            let mut cols = Vec::with_capacity(n);
+            for r in 0..n {
+                let row = b.create_local(actual_row_ty.clone());
+                b.assign(
+                    row,
+                    MirRValue::IndexAccess {
+                        base: m_val.clone(),
+                        index: MirValue::Const(MirConst::Uint(r as u128, MirType::usize())),
+                        elem_ty: actual_row_ty.clone(),
+                    },
+                );
+                let mut comps = Vec::with_capacity(n);
+                for c in 0..n {
+                    let elem = b.create_local(actual_elem_ty.clone());
+                    b.assign(
+                        elem,
+                        MirRValue::IndexAccess {
+                            base: values::local(row),
+                            index: MirValue::Const(MirConst::Uint(c as u128, MirType::usize())),
+                            elem_ty: actual_elem_ty.clone(),
+                        },
+                    );
+                    let elem_f32 = if actual_elem_ty == MirType::f32() {
+                        values::local(elem)
+                    } else {
+                        let casted = b.create_local(MirType::f32());
+                        b.cast(
+                            casted,
+                            CastKind::FloatToFloat,
+                            values::local(elem),
+                            MirType::f32(),
+                        );
+                        values::local(casted)
+                    };
+                    comps.push(elem_f32);
+                }
+                let col = b.create_local(MirType::Struct(Arc::from(vec_name)));
+                b.assign(
+                    col,
+                    MirRValue::Aggregate {
+                        kind: AggregateKind::Struct(Arc::from(vec_name)),
+                        operands: comps,
+                    },
+                );
+                cols.push(values::local(col));
+            }
+            let out = b.create_local(MirType::Struct(raw_name.clone()));
+            b.assign(
+                out,
+                MirRValue::Aggregate {
+                    kind: AggregateKind::Struct(raw_name),
+                    operands: cols,
+                },
+            );
+            return Ok(values::local(out));
+        }
+
         // Lower the field values in the order written (their side effects run
         // in that order), each against its declared type, so `tags: Vec::new()`
         // builds the field's vector type and not a `Vec<i32>` (M4 pilot).
@@ -1502,16 +1590,25 @@ impl<'ctx> MirLowerer<'ctx> {
 
             // Lower the value at the expected element type so a bare literal
             // adopts the annotated width; fall back to the inferred type.
-            let prev_expected = self.expected_type.take();
-            self.expected_type = expected_elem.clone();
-            let val = self.parse_and_lower_token_group(val_tokens);
-            self.expected_type = prev_expected;
-            let val = val?;
-            let elem_ty = expected_elem
-                .clone()
-                .unwrap_or_else(|| self.type_of_value(&val));
+            let fresh_per_iter =
+                matches!(expected_elem, Some(MirType::Vec(_) | MirType::Map(_, _)));
+            let mut val_opt = None;
+            let elem_ty = if fresh_per_iter {
+                expected_elem.clone().unwrap()
+            } else {
+                let prev_expected = self.expected_type.take();
+                self.expected_type = expected_elem.clone();
+                let val = self.parse_and_lower_token_group(val_tokens.clone());
+                self.expected_type = prev_expected;
+                let val = val?;
+                let ty = expected_elem
+                    .clone()
+                    .unwrap_or_else(|| self.type_of_value(&val));
+                val_opt = Some(val);
+                ty
+            };
             let (new_fn_name, push_fn_name) = Self::vec_fn_names_for_type(&elem_ty)?;
-            let vec_ty = MirType::Vec(Box::new(elem_ty));
+            let vec_ty = MirType::Vec(Box::new(elem_ty.clone()));
 
             // Create the vec
             let new_fn = MirValue::Function(Arc::from(new_fn_name));
@@ -1578,12 +1675,27 @@ impl<'ctx> MirLowerer<'ctx> {
                 builder.switch_to_block(loop_body);
             }
 
-            // Push the value
+            // Push the value (re-evaluate container literals inside the loop so
+            // `vec![Vec::new(); n]` produces `n` independent containers).
+            let elem_val = if let Some(v) = val_opt {
+                v
+            } else {
+                let prev_expected = self.expected_type.take();
+                self.expected_type = Some(elem_ty.clone());
+                let v = self.parse_and_lower_token_group(val_tokens.clone());
+                self.expected_type = prev_expected;
+                v?
+            };
             let push_fn = MirValue::Function(Arc::from(push_fn_name));
             {
                 let builder = self.current_fn.as_mut().unwrap();
                 let cont2 = builder.create_block();
-                builder.call(push_fn, vec![MirValue::Local(vec_local), val], None, cont2);
+                builder.call(
+                    push_fn,
+                    vec![MirValue::Local(vec_local), elem_val],
+                    None,
+                    cont2,
+                );
                 builder.switch_to_block(cont2);
             }
 
@@ -1737,6 +1849,11 @@ impl<'ctx> MirLowerer<'ctx> {
                 if crate::codegen::backend::c::CBackend::is_supported_vec_tuple(elems) =>
             {
                 MirType::tuple_type_name(elems).to_string()
+            }
+            MirType::Array(inner, len)
+                if crate::codegen::backend::c::CBackend::is_supported_vec_array(inner, *len) =>
+            {
+                crate::codegen::backend::c::CBackend::hvec_array_suffix(inner, *len)
             }
             _ => {
                 return Err(CodegenError::Unsupported(format!(
@@ -2872,6 +2989,12 @@ impl<'ctx> MirLowerer<'ctx> {
             "position" if terminal_args.len() == 1 => IterTerminal::Position {
                 closure: &terminal_args[0],
             },
+            "find" if terminal_args.len() == 1 => IterTerminal::Find {
+                closure: &terminal_args[0],
+            },
+            "for_each" if terminal_args.len() == 1 => IterTerminal::ForEach {
+                closure: &terminal_args[0],
+            },
             "reduce" if terminal_args.len() == 1 => IterTerminal::Reduce {
                 closure: &terminal_args[0],
             },
@@ -2913,7 +3036,7 @@ impl<'ctx> MirLowerer<'ctx> {
                         // Direct iterator-producing string/collection methods whose
                         // lowered value IS the source sequence (Vec<String> or
                         // BuildString bytes/chars).
-                        "split_whitespace" | "split" | "lines" | "bytes" | "chars"
+                        "split_whitespace" | "split" | "splitn" | "lines" | "bytes" | "chars"
                         | "char_indices" | "matches" | "keys" | "values" | "values_mut" => {
                             steps.reverse();
                             return Some(IterChain {
@@ -2978,6 +3101,10 @@ impl<'ctx> MirLowerer<'ctx> {
                         }
                         "skip" if args.len() == 1 => {
                             steps.push(IterStep::Skip { count: &args[0] });
+                            current = receiver;
+                        }
+                        "step_by" if args.len() == 1 => {
+                            steps.push(IterStep::StepBy { step: &args[0] });
                             current = receiver;
                         }
                         "zip" if args.len() == 1 => {
@@ -4565,14 +4692,20 @@ impl<'ctx> MirLowerer<'ctx> {
             }
         }
 
-        // 1b. If the chain has a `.zip(other)` step, lower the second source
-        // and clamp the iteration length to `min(len1, len2)`.
-        let zip_other = chain.steps.iter().find_map(|s| match s {
-            IterStep::Zip { other } => Some(*other),
-            _ => None,
-        });
-        let zipped_source: Option<(MirType, ChainSource)> = if let Some(other_expr) = zip_other {
-            let other_src = match &other_expr.kind {
+        // 1b. If the chain has `.zip(other)` step(s), materialize any leading
+        // zips into a tuple Vec `Vec<(A, B)>` so arbitrary chained zips like
+        // `a.iter().zip(b.iter()).zip(c.iter())` work, then lower the final
+        // zip as `zipped_source` with length clamped to `min(len1, len2)`.
+        let all_zip_others: Vec<&ast::Expr> = chain
+            .steps
+            .iter()
+            .filter_map(|s| match s {
+                IterStep::Zip { other } => Some(*other),
+                _ => None,
+            })
+            .collect();
+        fn unwrap_iter_src<'a>(other_expr: &'a ast::Expr) -> &'a ast::Expr {
+            match &other_expr.kind {
                 ExprKind::MethodCall {
                     receiver,
                     method,
@@ -4584,7 +4717,93 @@ impl<'ctx> MirLowerer<'ctx> {
                     receiver.as_ref()
                 }
                 _ => other_expr,
-            };
+            }
+        }
+        if all_zip_others.len() > 1 {
+            for &other_expr in &all_zip_others[..all_zip_others.len() - 1] {
+                let other_src = unwrap_iter_src(other_expr);
+                let (elem2_ty, src2, len2_local) = match Self::range_source_bounds(other_src) {
+                    Some((start, end, inclusive)) => {
+                        self.lower_range_source(start, end, inclusive)?
+                    }
+                    None => self.lower_vec_source(other_src)?,
+                };
+                let pair_elems = vec![elem_ty.clone(), elem2_ty.clone()];
+                self.ensure_tuple_type_def(&pair_elems);
+                let pair_ty = MirType::Tuple(pair_elems);
+                let (new_fn, push_fn) = Self::vec_fn_names_for_type(&pair_ty)?;
+                let (get_fn, _) = Self::vec_get_len_fn_names(&pair_ty)?;
+                let b = self.current_fn.as_mut().unwrap();
+                let min_len = b.create_local(MirType::i64());
+                let lt = b.create_local(MirType::Bool);
+                b.binary_op(
+                    lt,
+                    BinOp::Lt,
+                    values::local(len_local),
+                    values::local(len2_local),
+                );
+                let b1 = b.create_block();
+                let b2 = b.create_block();
+                let bm = b.create_block();
+                b.branch(values::local(lt), b1, b2);
+                b.switch_to_block(b1);
+                b.assign(min_len, MirRValue::Use(values::local(len_local)));
+                b.goto(bm);
+                b.switch_to_block(b2);
+                b.assign(min_len, MirRValue::Use(values::local(len2_local)));
+                b.goto(bm);
+                b.switch_to_block(bm);
+                let out = b.create_local(MirType::Vec(Box::new(pair_ty.clone())));
+                let cn = b.create_block();
+                b.call(MirValue::Function(Arc::from(new_fn)), vec![], Some(out), cn);
+                b.switch_to_block(cn);
+                let idx = b.create_local(MirType::i64());
+                b.assign_const(idx, MirConst::Int(0, MirType::i64()));
+                let cond_bb = b.create_block();
+                let body_bb = b.create_block();
+                let exit_bb = b.create_block();
+                b.goto(cond_bb);
+                b.switch_to_block(cond_bb);
+                let cmp = b.create_local(MirType::Bool);
+                b.binary_op(cmp, BinOp::Lt, values::local(idx), values::local(min_len));
+                b.branch(values::local(cmp), body_bb, exit_bb);
+                b.switch_to_block(body_bb);
+                let e1 = read_source_elem(b, &source, idx, &elem_ty);
+                let e2 = read_source_elem(b, &src2, idx, &elem2_ty);
+                let tup = b.create_local(pair_ty.clone());
+                b.assign(
+                    tup,
+                    MirRValue::Aggregate {
+                        kind: AggregateKind::Tuple,
+                        operands: vec![values::local(e1), values::local(e2)],
+                    },
+                );
+                let cp = b.create_block();
+                b.call(
+                    MirValue::Function(Arc::from(push_fn)),
+                    vec![values::local(out), values::local(tup)],
+                    None,
+                    cp,
+                );
+                b.switch_to_block(cp);
+                let ni = b.create_local(MirType::i64());
+                b.binary_op(
+                    ni,
+                    BinOp::Add,
+                    values::local(idx),
+                    MirValue::Const(MirConst::Int(1, MirType::i64())),
+                );
+                b.assign(idx, MirRValue::Use(values::local(ni)));
+                b.goto(cond_bb);
+                b.switch_to_block(exit_bb);
+                elem_ty = pair_ty;
+                source = ChainSource::Vec { local: out, get_fn };
+                len_local = min_len;
+            }
+        }
+        let zip_other = all_zip_others.last().copied();
+        let zipped_source: Option<(MirType, ChainSource)> = if let Some(other_expr) = zip_other {
+            let other_src = unwrap_iter_src(other_expr);
             let (elem2_ty, src2, len2_local) = match Self::range_source_bounds(other_src) {
                 Some((start, end, inclusive)) => self.lower_range_source(start, end, inclusive)?,
                 None => self.lower_vec_source(other_src)?,
@@ -4681,13 +4900,13 @@ impl<'ctx> MirLowerer<'ctx> {
             output_elem_ty.clone()
         };
         let collect_as_string = matches!(&chain.terminal, IterTerminal::Collect)
-            && matches!(output_elem_ty, MirType::Int(IntSize::I32, false))
             && expected_collect.is_none()
             && collect_as_map.is_none()
             && (expected_collect_string
-                || self.current_fn.as_ref().is_some_and(
-                    |b| matches!(b.return_type(), MirType::Struct(n) if n.as_ref() == "BuildString"),
-                ));
+                || (matches!(output_elem_ty, MirType::Int(IntSize::I32, false))
+                    && self.current_fn.as_ref().is_some_and(|b| {
+                        matches!(b.return_type(), MirType::Struct(n) if n.as_ref() == "BuildString")
+                    })));
         let mut nth_target_and_counter: Option<(MirValue, LocalId)> = None;
         let (result_local, _is_collect) = match &chain.terminal {
             IterTerminal::Collect if collect_as_map.is_some() => {
@@ -4848,12 +5067,23 @@ impl<'ctx> MirLowerer<'ctx> {
                 builder.assign(acc, MirRValue::Use(MirValue::Global(Arc::from("None"))));
                 (acc, false)
             }
+            IterTerminal::Find { .. } => {
+                let builder = self.current_fn.as_mut().unwrap();
+                let acc = builder.create_local(MirType::Option(Box::new(output_elem_ty.clone())));
+                builder.assign(acc, MirRValue::Use(MirValue::Global(Arc::from("None"))));
+                (acc, false)
+            }
+            IterTerminal::ForEach { .. } => {
+                let builder = self.current_fn.as_mut().unwrap();
+                let acc = builder.create_local(MirType::Void);
+                (acc, false)
+            }
         };
 
-        // Per-step counters for take/skip, created before the loop so they
+        // Per-step counters for take/skip/step_by, created before the loop so they
         // persist across iterations. Indexed by step position; None for steps
         // that don't need a counter. Counting yielded/skipped elements (rather
-        // than checking the source index) makes take/skip compose correctly with
+        // than checking the source index) makes take/skip/step_by compose correctly with
         // each other and with filter.
         let step_counters: Vec<Option<LocalId>> = {
             let builder = self.current_fn.as_mut().unwrap();
@@ -4861,7 +5091,7 @@ impl<'ctx> MirLowerer<'ctx> {
                 .steps
                 .iter()
                 .map(|s| match s {
-                    IterStep::Take { .. } | IterStep::Skip { .. } => {
+                    IterStep::Take { .. } | IterStep::Skip { .. } | IterStep::StepBy { .. } => {
                         let c = builder.create_local(MirType::i64());
                         builder.assign(
                             c,
@@ -5257,6 +5487,42 @@ impl<'ctx> MirLowerer<'ctx> {
                     builder.goto(incr_block);
                     builder.switch_to_block(pass_block);
                 }
+                IterStep::StepBy { step } => {
+                    // step_by(n): yield when (ctr % n) == 0, increment ctr every
+                    // element so it composes cleanly after skip/filter.
+                    let step_raw = self.lower_expr(step)?;
+                    let ctr = step_counters[step_idx].expect("step_by counter");
+                    let builder = self.current_fn.as_mut().unwrap();
+                    let step_i64 = builder.create_local(MirType::i64());
+                    builder.cast(step_i64, CastKind::IntToInt, step_raw, MirType::i64());
+                    let cur_ctr = builder.create_local(MirType::i64());
+                    builder.assign(cur_ctr, MirRValue::Use(values::local(ctr)));
+                    let nc = builder.create_local(MirType::i64());
+                    builder.binary_op(
+                        nc,
+                        BinOp::Add,
+                        values::local(ctr),
+                        MirValue::Const(MirConst::Int(1, MirType::i64())),
+                    );
+                    builder.assign(ctr, MirRValue::Use(values::local(nc)));
+                    let rem = builder.create_local(MirType::i64());
+                    builder.binary_op(
+                        rem,
+                        BinOp::Rem,
+                        values::local(cur_ctr),
+                        values::local(step_i64),
+                    );
+                    let take_it = builder.create_local(MirType::Bool);
+                    builder.binary_op(
+                        take_it,
+                        BinOp::Eq,
+                        values::local(rem),
+                        MirValue::Const(MirConst::Int(0, MirType::i64())),
+                    );
+                    let pass_block = builder.create_block();
+                    builder.branch(values::local(take_it), pass_block, incr_block);
+                    builder.switch_to_block(pass_block);
+                }
                 IterStep::Take { count } => {
                     // take(n): once the take counter reaches n, exit the loop;
                     // otherwise increment it and pass the element through. The
@@ -5373,12 +5639,20 @@ impl<'ctx> MirLowerer<'ctx> {
                 builder.switch_to_block(cont);
             }
             IterTerminal::Collect if collect_as_string => {
+                let val_ty = self.type_of_value(&current_val);
                 let builder = self.current_fn.as_mut().unwrap();
+                let ch_arg = if matches!(val_ty, MirType::Int(IntSize::I32, false)) {
+                    current_val
+                } else {
+                    let c_u32 = builder.create_local(MirType::u32());
+                    builder.cast(c_u32, CastKind::IntToInt, current_val, MirType::u32());
+                    values::local(c_u32)
+                };
                 let ch_s = builder.create_local(MirType::Struct(Arc::from("BuildString")));
                 let c1 = builder.create_block();
                 builder.call(
                     MirValue::Function(Arc::from("build_char_to_string")),
-                    vec![current_val],
+                    vec![ch_arg],
                     Some(ch_s),
                     c1,
                 );
@@ -5437,9 +5711,27 @@ impl<'ctx> MirLowerer<'ctx> {
                 builder.switch_to_block(cont);
             }
             IterTerminal::Fold { closure, .. } => {
-                // Inline the fold closure: acc = closure(acc, current_val)
+                // Inline the fold closure: acc = closure(acc, elem_or_zipped_pair)
+                let fold_elem = if let Some(v2) = active_zip.take() {
+                    let t1 = self.type_of_value(&current_val);
+                    let t2 = self.type_of_value(&v2);
+                    let elems = vec![t1, t2];
+                    self.ensure_tuple_type_def(&elems);
+                    let builder = self.current_fn.as_mut().unwrap();
+                    let tup = builder.create_local(MirType::Tuple(elems));
+                    builder.assign(
+                        tup,
+                        MirRValue::Aggregate {
+                            kind: AggregateKind::Tuple,
+                            operands: vec![current_val, v2],
+                        },
+                    );
+                    values::local(tup)
+                } else {
+                    current_val
+                };
                 let new_acc =
-                    self.lower_iter_fold_inline(closure, values::local(result_local), current_val)?;
+                    self.lower_iter_fold_inline(closure, values::local(result_local), fold_elem)?;
                 let builder = self.current_fn.as_mut().unwrap();
                 builder.assign(result_local, MirRValue::Use(new_acc));
             }
@@ -5821,6 +6113,45 @@ impl<'ctx> MirLowerer<'ctx> {
                 builder.goto(done_bb);
 
                 builder.switch_to_block(done_bb);
+            }
+            IterTerminal::Find { closure } => {
+                let pred = self.lower_iter_map_inline(
+                    closure,
+                    current_val.clone(),
+                    if has_enumerate {
+                        Some(values::local(idx_local))
+                    } else {
+                        None
+                    },
+                    active_zip.clone(),
+                )?;
+                let builder = self.current_fn.as_mut().unwrap();
+                let hit_bb = builder.create_block();
+                let miss_bb = builder.create_block();
+                builder.branch(pred, hit_bb, miss_bb);
+                builder.switch_to_block(hit_bb);
+                let after_some = builder.create_block();
+                builder.call(
+                    MirValue::Function(Arc::from("Some")),
+                    vec![current_val],
+                    Some(result_local),
+                    after_some,
+                );
+                builder.switch_to_block(after_some);
+                builder.goto(exit_block);
+                builder.switch_to_block(miss_bb);
+            }
+            IterTerminal::ForEach { closure } => {
+                let _ = self.lower_iter_map_inline(
+                    closure,
+                    current_val,
+                    if has_enumerate {
+                        Some(values::local(idx_local))
+                    } else {
+                        None
+                    },
+                    active_zip.clone(),
+                )?;
             }
         }
 
@@ -6505,10 +6836,10 @@ impl<'ctx> MirLowerer<'ctx> {
             // Save the current var_map entries that will be shadowed.
             let mut saved: Vec<(Arc<str>, Option<LocalId>)> = Vec::new();
             let unwrap_pat_ident = |pat: &ast::Pattern| -> Option<Arc<str>> {
-                let inner = match &pat.kind {
-                    ast::PatternKind::Ref { pattern, .. } => pattern.as_ref(),
-                    _ => pat,
-                };
+                let mut inner = pat;
+                while let ast::PatternKind::Ref { pattern, .. } = &inner.kind {
+                    inner = pattern.as_ref();
+                }
                 match &inner.kind {
                     ast::PatternKind::Ident { name, .. }
                     | ast::PatternKind::RefBind { name, .. } => Some(name.name.clone()),
@@ -6520,26 +6851,58 @@ impl<'ctx> MirLowerer<'ctx> {
                 && zip_val.is_some()
                 && matches!(&params[0].pattern.kind, ast::PatternKind::Tuple(t) if t.len() == 2)
             {
-                // zip-style tuple destructuring: `|(a, b)|` or `|(&a, &b)|`
+                // Recursive tuple destructuring: `|(a, b)|`, `|(&a, &b)|`, `|((&v, &t), &s)|`.
+                fn bind_tuple_pat(
+                    this: &mut MirLowerer<'_>,
+                    pat: &ast::Pattern,
+                    val: MirValue,
+                    saved: &mut Vec<(Arc<str>, Option<LocalId>)>,
+                ) {
+                    let mut inner = pat;
+                    while let ast::PatternKind::Ref { pattern, .. } = &inner.kind {
+                        inner = pattern.as_ref();
+                    }
+                    match &inner.kind {
+                        ast::PatternKind::Ident { name, .. }
+                        | ast::PatternKind::RefBind { name, .. } => {
+                            let val_ty = this.type_of_value(&val);
+                            let old = this.var_map.get(&name.name).copied();
+                            saved.push((name.name.clone(), old));
+                            let builder = this.current_fn.as_mut().unwrap();
+                            let local = builder.create_local(val_ty);
+                            builder.assign(local, MirRValue::Use(val));
+                            this.var_map.insert(name.name.clone(), local);
+                        }
+                        ast::PatternKind::Tuple(sub_pats) => {
+                            let val_ty = this.type_of_value(&val);
+                            if let MirType::Tuple(elem_tys) = val_ty {
+                                for (idx, (sp, ety)) in
+                                    sub_pats.iter().zip(elem_tys.iter()).enumerate()
+                                {
+                                    let field_val = {
+                                        let builder = this.current_fn.as_mut().unwrap();
+                                        let fl = builder.create_local(ety.clone());
+                                        builder.assign(
+                                            fl,
+                                            MirRValue::FieldAccess {
+                                                base: val.clone(),
+                                                field_name: Arc::from(format!("_{}", idx)),
+                                                field_ty: ety.clone(),
+                                            },
+                                        );
+                                        values::local(fl)
+                                    };
+                                    bind_tuple_pat(this, sp, field_val, saved);
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
                 if let ast::PatternKind::Tuple(elems) = &params[0].pattern.kind {
                     let v2 = zip_val.unwrap();
-                    let t2 = self.type_of_value(&v2);
-                    if let Some(name) = unwrap_pat_ident(&elems[0]) {
-                        let old = self.var_map.get(&name).copied();
-                        saved.push((name.clone(), old));
-                        let builder = self.current_fn.as_mut().unwrap();
-                        let local = builder.create_local(elem_ty_default.clone());
-                        builder.assign(local, MirRValue::Use(elem_val));
-                        self.var_map.insert(name, local);
-                    }
-                    if let Some(name) = unwrap_pat_ident(&elems[1]) {
-                        let old = self.var_map.get(&name).copied();
-                        saved.push((name.clone(), old));
-                        let builder = self.current_fn.as_mut().unwrap();
-                        let local = builder.create_local(t2);
-                        builder.assign(local, MirRValue::Use(v2));
-                        self.var_map.insert(name, local);
-                    }
+                    bind_tuple_pat(self, &elems[0], elem_val, &mut saved);
+                    bind_tuple_pat(self, &elems[1], v2, &mut saved);
                 }
             } else if params.len() == 2 && index_val.is_some() {
                 // enumerate-style: |i, x| body
@@ -6599,11 +6962,11 @@ impl<'ctx> MirLowerer<'ctx> {
                     }
                 }
             } else if let Some(first_param) = params.first() {
-                // Single-param: |x|, |&x|, or tuple destructuring |(a, b)| / |(_, x)|
-                let inner_pat = match &first_param.pattern.kind {
-                    ast::PatternKind::Ref { pattern, .. } => pattern.as_ref(),
-                    _ => &first_param.pattern,
-                };
+                // Single-param: |x|, |&x|, |&&x|, or tuple destructuring |(a, b)| / |(_, x)|
+                let mut inner_pat = &first_param.pattern;
+                while let ast::PatternKind::Ref { pattern, .. } = &inner_pat.kind {
+                    inner_pat = pattern.as_ref();
+                }
                 if let ast::PatternKind::Tuple(elems) = &inner_pat.kind {
                     if let MirType::Tuple(elem_tys) = &elem_ty_default {
                         let tup_local = {
@@ -6711,10 +7074,10 @@ impl<'ctx> MirLowerer<'ctx> {
         if let ExprKind::Closure { params, body, .. } = &closure_expr.kind {
             let mut saved: Vec<(Arc<str>, Option<LocalId>)> = Vec::new();
             let unwrap_pat_ident = |pat: &ast::Pattern| -> Option<Arc<str>> {
-                let inner = match &pat.kind {
-                    ast::PatternKind::Ref { pattern, .. } => pattern.as_ref(),
-                    _ => pat,
-                };
+                let mut inner = pat;
+                while let ast::PatternKind::Ref { pattern, .. } = &inner.kind {
+                    inner = pattern.as_ref();
+                }
                 match &inner.kind {
                     ast::PatternKind::Ident { name, .. }
                     | ast::PatternKind::RefBind { name, .. } => Some(name.name.clone()),
@@ -7066,6 +7429,7 @@ impl<'ctx> MirLowerer<'ctx> {
                 | IterStep::Take { .. }
                 | IterStep::TakeWhile { .. }
                 | IterStep::Skip { .. }
+                | IterStep::StepBy { .. }
                 | IterStep::FlatMap { .. }
                 | IterStep::Zip { .. }
                 | IterStep::Chain { .. }

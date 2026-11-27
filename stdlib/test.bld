@@ -7,9 +7,9 @@ pub struct TestResult {
 }
 
 impl TestResult {
-    pub fn pass(name: String) -> TestResult {
+    pub fn pass() -> TestResult {
         TestResult {
-            name,
+            name: String::new(),
             passed: true,
             message: String::new(),
         }
@@ -24,18 +24,55 @@ impl TestResult {
     }
 }
 
+pub struct TestSummary {
+    pub total: usize,
+    pub passed: usize,
+    pub failed: usize,
+    pub failures: Vec<TestResult>,
+}
+
 pub struct TestSuite {
     pub name: String,
     pub passed: usize,
     pub failed: usize,
+    pub failures: Vec<TestResult>,
 }
 
 impl TestSuite {
-    pub fn new(name: String) -> TestSuite {
+    pub fn new(name: &str) -> TestSuite {
         TestSuite {
-            name,
+            name: name.to_string(),
             passed: 0,
             failed: 0,
+            failures: Vec::new(),
+        }
+    }
+
+    pub fn add_group(&mut self, _group: &str, tests: Vec<(&str, fn() -> TestResult)>) {
+        let mut i: usize = 0;
+        while i < tests.len() {
+            let entry = tests[i];
+            let res = (entry.1)();
+            if res.passed {
+                self.passed = self.passed + 1;
+            } else {
+                self.failed = self.failed + 1;
+                self.failures.push(TestResult {
+                    name: entry.0.to_string(),
+                    passed: false,
+                    message: res.message,
+                });
+            }
+            i += 1;
+        }
+    }
+
+    pub fn run(&self) -> TestSummary {
+        TestSummary {
+            total: self.passed + self.failed,
+            passed: self.passed,
+            failed: self.failed,
+            failures: self.failures.clone(),
         }
     }
 
