@@ -341,6 +341,33 @@ impl<'a> Parser<'a> {
             }
 
             // =================================================================
+            // BITFLAGS (`flags Name { A = 0x01, B = 0x02, }`)
+            // =================================================================
+            TokenKind::Ident
+                if !is_unsafe
+                    && !is_async
+                    && !is_const
+                    && self.source.slice(self.current().span) == "flags"
+                    && matches!(self.peek().kind, TokenKind::Ident) =>
+            {
+                self.advance(); // consume contextual `flags`
+                let name = self.expect_member_ident()?;
+                let generics = self.parse_generics()?;
+                let (variants, _) = self.parse_brace_comma_seq(|p| p.parse_enum_variant())?;
+                let span = start.merge(&self.tokens[self.pos.saturating_sub(1)].span);
+                Ok(Item::new(
+                    ItemKind::Enum(Box::new(EnumDef {
+                        name,
+                        generics,
+                        variants,
+                    })),
+                    vis,
+                    attrs,
+                    span,
+                ))
+            }
+
+            // =================================================================
             // ERROR
             // =================================================================
             _ => {

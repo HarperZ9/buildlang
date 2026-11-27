@@ -373,6 +373,8 @@ pub(crate) enum IterStep<'a> {
     Skip { count: &'a ast::Expr },
     /// `.flat_map(|x| inner_iter)` - flatten an inner iterator per element.
     FlatMap { closure: &'a ast::Expr },
+    /// `.filter_map(|x| opt_expr)` - keep `Some(v)` values and drop `None`.
+    FilterMap { closure: &'a ast::Expr },
     /// `.zip(other)` - lockstep iteration with a second iterator source.
     Zip { other: &'a ast::Expr },
 }
@@ -400,6 +402,18 @@ pub(crate) enum IterTerminal<'a> {
     Max,
     /// `.min()` - smallest element as `Option<T>`.
     Min,
+    /// `.nth(n)` - nth yielded element as `Option<T>`.
+    Nth { index: &'a ast::Expr },
+    /// `.position(|x| pred)` - index of first matching element as `Option<usize>`.
+    Position { closure: &'a ast::Expr },
+    /// `.reduce(f)` - fold without initial value, returning `Option<T>`.
+    Reduce { closure: &'a ast::Expr },
+    /// `.min_by(|a, b| ord)` - smallest element by comparator, returning `Option<T>`.
+    MinBy { closure: &'a ast::Expr },
+    /// `.max_by(|a, b| ord)` - largest element by comparator, returning `Option<T>`.
+    MaxBy { closure: &'a ast::Expr },
+    /// `.max_by_key(|x| k)` - element with maximum key, returning `Option<T>`.
+    MaxByKey { closure: &'a ast::Expr },
 }
 
 /// The deepest a generic type may be instantiated inside its own methods.
@@ -415,6 +429,8 @@ pub(crate) enum ChainSource {
     Indexed { local: LocalId },
     /// A range: element `i` is `first + i` (`first` held as an `i64`).
     Range { first: LocalId },
+    /// Raw bytes of a BuildString in `local`, read via `build_string_byte_at`.
+    StringBytes { local: LocalId },
 }
 
 /// A fully parsed iterator chain: `source.iter().<steps>.<terminal>`, or
@@ -628,7 +644,9 @@ impl<'ctx> MirLowerer<'ctx> {
     fn resolve_fn_name(&self, bare_name: &str) -> Arc<str> {
         if !self.module_prefix.is_empty() {
             let prefixed = self.prefixed_name(&Arc::from(bare_name));
-            if self.module.find_function(prefixed.as_ref()).is_some() {
+            if self.module.find_function(prefixed.as_ref()).is_some()
+                || self.generic_functions.contains_key(prefixed.as_ref())
+            {
                 return prefixed;
             }
         }
@@ -644,6 +662,21 @@ impl<'ctx> MirLowerer<'ctx> {
     /// Register built-in vector math struct types so that field access
     /// (e.g. `v.x`, `v.y`, `v.z`) resolves correctly through
     /// `lookup_struct_field_type`.
+    /// Lazily register `BuildRange { start: usize, end: usize }` the first time
+    /// a module actually constructs a first-class range value, so modules that do
+    /// not use `Range` keep identical C output.
+    pub(crate) fn ensure_build_range_type(&mut self) {
+        if self.module.find_type("BuildRange").is_none() {
+            self.module.create_struct(
+                Arc::from("BuildRange"),
+                vec![
+                    (Some(Arc::from("start")), MirType::usize()),
+                    (Some(Arc::from("end")), MirType::usize()),
+                ],
+            );
+        }
+    }
+
     fn register_vector_types(&mut self) {
         let f64_ty = MirType::f64();
 
@@ -3102,6 +3135,10 @@ impl<'ctx> MirLowerer<'ctx> {
                 (result, None)
             };
 
+            let result = match result {
+                Some(v) => Some(self.coerce_return_to_slice(v, &fn_ret_ty)?),
+                None => None,
+            };
             // Add return if needed
             let mut builder = self.current_fn.take().unwrap();
             // Attribute the (possibly synthesized) implicit return to the
@@ -3216,15 +3253,35 @@ impl<'ctx> MirLowerer<'ctx> {
         // Set current impl type so Self resolves correctly in type lowering
         self.current_impl_type = Some(type_name.clone());
 
-        // PASS 1: Forward-declare ALL method signatures before lowering bodies.
-        // This fixes forward references: method A can call method B even if B
-        // is defined after A in the source, because B's signature is already known.
-        let mut method_names: Vec<Arc<str>> = Vec::new();
+        // PASS 1: Forward-declare ALL concrete method signatures before lowering bodies.
+        // Generic methods with `Fn`/`FnMut`/`FnOnce` bounds (`fn from_function<F: Fn(...)>`)
+        // inside a concrete impl block are stored in `generic_functions` for on-demand
+        // monomorphization rather than lowered eagerly with unbound callable params.
+        let mut method_names: Vec<Option<Arc<str>>> = Vec::new();
         for impl_item in &impl_def.items {
             if let ast::ImplItemKind::Function(f) = &impl_item.kind {
+                let bound_is_fn = |b: &ast::TypeBound| -> bool {
+                    b.path
+                        .last_ident()
+                        .is_some_and(|id| matches!(id.name.as_ref(), "Fn" | "FnMut" | "FnOnce"))
+                };
+                let has_fn_bound_generic =
+                    f.generics.params.iter().any(|p| {
+                        matches!(&p.kind, ast::GenericParamKind::Type { bounds, .. }
+                        if bounds.iter().any(bound_is_fn))
+                    }) || f.generics.where_clause.as_ref().is_some_and(|wc| {
+                        wc.predicates
+                            .iter()
+                            .any(|pred| pred.bounds.iter().any(bound_is_fn))
+                    });
                 let mangled = self.lookup_impl_method_name(&type_name, impl_def, f);
-                self.declare_impl_method(&type_name, &mangled, f)?;
-                method_names.push(mangled);
+                if has_fn_bound_generic {
+                    self.generic_functions.insert(mangled, (**f).clone());
+                    method_names.push(None);
+                } else {
+                    self.declare_impl_method(&type_name, &mangled, f)?;
+                    method_names.push(Some(mangled));
+                }
             }
             // An associated constant `Type::NAME` is the global `Type_NAME`,
             // the name a path to it lowers to. Skip if already registered in collect_impl.
@@ -3250,8 +3307,11 @@ impl<'ctx> MirLowerer<'ctx> {
         let mut fn_idx = 0usize;
         for impl_item in &impl_def.items {
             if let ast::ImplItemKind::Function(f) = &impl_item.kind {
-                let mangled = method_names[fn_idx].clone();
+                let mangled_opt = method_names[fn_idx].clone();
                 fn_idx += 1;
+                let Some(mangled) = mangled_opt else {
+                    continue;
+                };
                 if top_level {
                     self.lower_keeping_rejection(|this| {
                         this.lower_impl_method(&type_name, &mangled, f)
@@ -3285,6 +3345,7 @@ impl<'ctx> MirLowerer<'ctx> {
             "i32" => MirType::i32(),
             "i64" => MirType::i64(),
             "bool" => MirType::Bool,
+            "str" => MirType::Struct(Arc::from("BuildString")),
             _ => MirType::Struct(type_name.clone()),
         }
     }
@@ -3575,6 +3636,16 @@ impl<'ctx> MirLowerer<'ctx> {
 
             let result = self.lower_fn_body(body)?;
 
+            let ret_mir = f
+                .sig
+                .return_ty
+                .as_ref()
+                .map(|t| self.lower_type_from_ast(t))
+                .unwrap_or(MirType::Void);
+            let result = match result {
+                Some(v) => Some(self.coerce_return_to_slice(v, &ret_mir)?),
+                None => None,
+            };
             let mut builder = self.current_fn.take().unwrap();
             let returns_value = f
                 .sig
@@ -3684,6 +3755,16 @@ impl<'ctx> MirLowerer<'ctx> {
             self.current_fn = Some(builder);
             let result = self.lower_fn_body(body)?;
 
+            let ret_mir = f
+                .sig
+                .return_ty
+                .as_ref()
+                .map(|t| self.lower_type_from_ast(t))
+                .unwrap_or(MirType::Void);
+            let result = match result {
+                Some(v) => Some(self.coerce_return_to_slice(v, &ret_mir)?),
+                None => None,
+            };
             let mut builder = self.current_fn.take().unwrap();
             let returns_value = f
                 .sig
@@ -3885,6 +3966,8 @@ impl<'ctx> MirLowerer<'ctx> {
                 // Look up the global's type from the module
                 if let Some(global) = self.module.find_global(name) {
                     global.ty.clone()
+                } else if name.as_ref() == "None" {
+                    MirType::Struct(Arc::from("Option"))
                 } else if let Some(ty) = limits::c_limit_type(name) {
                     ty
                 } else {

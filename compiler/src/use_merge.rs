@@ -133,9 +133,6 @@ fn find(
             item,
         });
     }
-    if local.contains(root) {
-        return None;
-    }
     let module_segs: &[Arc<str>] = if leaf.glob {
         &segs[..]
     } else {
@@ -144,6 +141,9 @@ fn find(
         }
         &segs[..segs.len() - 1]
     };
+    if local.contains(root) && module_segs.len() < 2 {
+        return None;
+    }
     let file = find_use_module_file(source_dir, module_segs)?;
     let names = clean_module_export_names(&file)?;
     let item = if leaf.glob {

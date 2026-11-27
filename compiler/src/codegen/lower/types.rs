@@ -237,13 +237,43 @@ impl<'ctx> MirLowerer<'ctx> {
                         return MirType::Option(Box::new(MirType::i32()));
                     }
 
+                    // Special-case `IntoIter<T>` (vec) and `IntoIter<K, V>` (map):
+                    // lower to `Vec<T>` / `Vec<(K, V)>` so `.next()` / `.size_hint()` work.
+                    if type_name == "IntoIter" {
+                        let type_args: Vec<MirType> = generic_args
+                            .iter()
+                            .filter_map(|g| match g {
+                                ast::GenericArg::Type(t) => Some(match self.lower_type_from_ast(t) {
+                                    MirType::Ptr(inner)
+                                        if matches!(inner.as_ref(), MirType::Struct(n) if n.as_ref() == "BuildString") =>
+                                    {
+                                        MirType::Struct(Arc::from("BuildString"))
+                                    }
+                                    other => other,
+                                }),
+                                _ => None,
+                            })
+                            .collect();
+                        if type_args.len() == 2 {
+                            return MirType::Vec(Box::new(MirType::Tuple(type_args)));
+                        }
+                        if let Some(elem_ty) = type_args.into_iter().next() {
+                            return MirType::Vec(Box::new(elem_ty));
+                        }
+                    }
+
                     // Special-case Vec<T>, Array<T>, VecDeque<T>, and HashSet<T>/BTreeSet<T>: resolve to MirType::Vec(element_type)
                     if matches!(
                         type_name,
                         "Vec" | "Array" | "VecDeque" | "HashSet" | "BTreeSet"
                     ) {
                         if let Some(ast::GenericArg::Type(arg_ty)) = generic_args.first() {
-                            let elem_ty = self.lower_type_from_ast(arg_ty);
+                            let elem_ty = match self.lower_type_from_ast(arg_ty) {
+                                MirType::Ptr(inner) if matches!(inner.as_ref(), MirType::Struct(n) if n.as_ref() == "BuildString") => {
+                                    MirType::Struct(Arc::from("BuildString"))
+                                }
+                                other => other,
+                            };
                             return MirType::Vec(Box::new(elem_ty));
                         }
                         if matches!(type_name, "Vec" | "Array" | "VecDeque") {
@@ -276,6 +306,16 @@ impl<'ctx> MirLowerer<'ctx> {
                         if let Some(ast::GenericArg::Type(arg_ty)) = generic_args.first() {
                             let inner = self.lower_type_from_ast(arg_ty);
                             return MirType::Ptr(Box::new(inner));
+                        }
+                    }
+
+                    // Special-case RwLock<T>/Mutex<T>: in single-threaded C lowering
+                    // the lock container carries its inner value directly so
+                    // `.read().unwrap()` / `.write().unwrap()` / `.lock().unwrap()`
+                    // recover the exact inner type `T`.
+                    if matches!(type_name, "RwLock" | "Mutex") {
+                        if let Some(ast::GenericArg::Type(arg_ty)) = generic_args.first() {
+                            return self.lower_type_from_ast(arg_ty);
                         }
                     }
 
@@ -318,6 +358,7 @@ impl<'ctx> MirLowerer<'ctx> {
                 "bool" => MirType::Bool,
                 "char" => MirType::u32(),
                 "str" | "String" => MirType::Struct(Arc::from("BuildString")),
+                "Range" | "RangeInclusive" => MirType::Struct(Arc::from("BuildRange")),
                 "Formatter" => MirType::Struct(Arc::from("BuildFormatter")),
                 "Result"
                     if path.segments.len() >= 2
@@ -918,10 +959,24 @@ impl<'ctx> MirLowerer<'ctx> {
         func: &ast::Expr,
         args: &[ast::Expr],
     ) -> CodegenResult<MirValue> {
-        let fn_name_str = self
-            .extract_call_name(func)
-            .ok_or_else(|| CodegenError::Internal("generic call without name".to_string()))?;
-        let fn_name: Arc<str> = Arc::from(fn_name_str);
+        let fn_name: Arc<str> = if let Some(simple) = self.extract_call_name(func) {
+            if self.generic_functions.contains_key(simple) {
+                Arc::from(simple)
+            } else {
+                let resolved = self.resolve_fn_name(simple);
+                if self.generic_functions.contains_key(resolved.as_ref()) {
+                    resolved
+                } else {
+                    Arc::from(simple)
+                }
+            }
+        } else if let ExprKind::Path(path) = &func.kind {
+            Arc::from(self.qualified_fn_name(path))
+        } else {
+            return Err(CodegenError::Internal(
+                "generic call without name".to_string(),
+            ));
+        };
 
         // Retrieve the generic FnDef to build the substitution map.
         let generic_fndef = self
