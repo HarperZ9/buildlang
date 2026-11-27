@@ -19,6 +19,7 @@ pub mod msl;
 pub mod riscv64;
 pub mod rust;
 pub mod spirv;
+pub mod verilog;
 pub mod wasm;
 pub mod wasm_bin;
 pub mod wgsl;
@@ -64,6 +65,8 @@ pub enum Target {
     Msl,
     /// WebGPU Shading Language (WGSL).
     Wgsl,
+    /// Synthesizable Verilog-2001 RTL (IEEE 1364-2001).
+    Verilog,
     /// Rust source code.
     Rust,
 }
@@ -84,6 +87,7 @@ impl Target {
             Target::Glsl => "glsl",
             Target::Msl => "metal",
             Target::Wgsl => "wgsl",
+            Target::Verilog => "v",
             Target::Rust => "rs",
         }
     }
@@ -97,7 +101,7 @@ impl Target {
             Target::Wasm => 32, // wasm32
             Target::SpirV => 64,
             Target::LlvmIr => 64, // Default to 64-bit
-            Target::Hlsl | Target::Glsl | Target::Msl | Target::Wgsl => 32, // GPU
+            Target::Hlsl | Target::Glsl | Target::Msl | Target::Wgsl | Target::Verilog => 32, // GPU / RTL
             Target::Rust => 64,
         }
     }
@@ -132,6 +136,7 @@ impl fmt::Display for Target {
             Target::Glsl => write!(f, "glsl"),
             Target::Msl => write!(f, "msl"),
             Target::Wgsl => write!(f, "wgsl"),
+            Target::Verilog => write!(f, "verilog"),
             Target::Rust => write!(f, "rust"),
         }
     }

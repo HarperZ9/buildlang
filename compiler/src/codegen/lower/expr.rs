@@ -6441,9 +6441,15 @@ impl<'ctx> MirLowerer<'ctx> {
                         MirType::Slice(e) | MirType::Array(e, _) | MirType::Vec(e) => {
                             MirType::Vec(e)
                         }
+                        MirType::Struct(ref n) if n.as_ref() == "BuildString" => {
+                            MirType::Vec(Box::new(MirType::u8()))
+                        }
                         MirType::Ptr(inner) => match *inner {
                             MirType::Slice(e) | MirType::Array(e, _) | MirType::Vec(e) => {
                                 MirType::Vec(e)
+                            }
+                            MirType::Struct(ref n) if n.as_ref() == "BuildString" => {
+                                MirType::Vec(Box::new(MirType::u8()))
                             }
                             _ => MirType::i32(),
                         },

@@ -149,7 +149,7 @@ fn vignette(uv_x: f64, uv_y: f64, strength: f64, softness: f64) -> f64 {
 #[fragment]
 fn PS_Vignette(uv: vec2) -> vec4 {
     let color = tex2d(uv);
-    let vig = vignette(color.x, color.y, 0.5, 0.6);
+    let vig = vignette(uv.x, uv.y, 0.5, 0.6);
     vec4(color.x * vig, color.y * vig, color.z * vig, 1.0)
 }
 ```

@@ -3224,6 +3224,13 @@ impl CBackend {
                         MirValue::Local(id) => locals.get(id.0 as usize).map(|l| &l.ty),
                         _ => None,
                     };
+                    if let (Some(dt), Some(st)) = (dest_ty, src_ty) {
+                        if Self::is_incompatible_runtime_container_pair(dt, st) {
+                            return Err(CodegenError::Unsupported(format!(
+                                "cannot assign incompatible runtime container `{st:?}` into `{dt:?}` (use `.to_vec()` to convert `&[u8]` bytes to `Vec<u8>`)"
+                            )));
+                        }
+                    }
                     let needs_cast = if let (Some(dt), Some(st)) = (dest_ty, src_ty) {
                         let dt_is_struct = matches!(
                             dt,
@@ -4528,6 +4535,24 @@ impl CBackend {
         }
     }
 
+    /// Reject silent `memcpy` type-punning between distinct runtime container
+    /// families (`BuildString`, `Vec<T>`, `Map<K, V>`) whose C representations
+    /// are layout-incompatible (`BuildString` is 24 B; `BuildVecHandle` is 8 B).
+    fn is_incompatible_runtime_container_pair(dt: &MirType, st: &MirType) -> bool {
+        let family = |t: &MirType| -> Option<u8> {
+            match t {
+                MirType::Struct(n) if n.as_ref() == "BuildString" => Some(1),
+                MirType::Vec(_) => Some(2),
+                MirType::Map(_, _) => Some(3),
+                _ => None,
+            }
+        };
+        match (family(dt), family(st)) {
+            (Some(a), Some(b)) => a != b,
+            _ => false,
+        }
+    }
+
     /// The portable runtime function for an f64 `exp`, `log`, `pow`, `sin`, `cos` or `cbrt` (spec
     /// section 5.5), or `None` for any other name.
     fn detmath_name(name: &str) -> Option<&'static str> {
@@ -5682,6 +5707,13 @@ impl CBackend {
         } else {
             None
         };
+        if let (Some(dt), Some(st)) = (dest_ty, src_ty) {
+            if Self::is_incompatible_runtime_container_pair(dt, st) {
+                return Err(CodegenError::Unsupported(format!(
+                    "cannot assign incompatible runtime container `{st:?}` into `{dt:?}` (use `.to_vec()` to convert `&[u8]` bytes to `Vec<u8>`)"
+                )));
+            }
+        }
         let needs_cast = if let (Some(dt), Some(st)) = (dest_ty, src_ty) {
             let is_struct = |t: &MirType| {
                 matches!(

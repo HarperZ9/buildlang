@@ -100,9 +100,10 @@ fn parse_codegen_target(target: &str) -> Result<Target, String> {
         "glsl" | "opengl" | "gl" => Ok(Target::Glsl),
         "msl" | "metal" => Ok(Target::Msl),
         "wgsl" | "webgpu" => Ok(Target::Wgsl),
+        "verilog" | "rtl" | "v" => Ok(Target::Verilog),
         "rust" | "rs" => Ok(Target::Rust),
         other => Err(format!(
-            "Unknown target '{}'. Supported: c, llvm, wasm, spirv, hlsl, glsl, msl, wgsl, rust, x86-64, x86_64-native, x86_64-windows, x86_64-linux, arm64, riscv64",
+            "Unknown target '{}'. Supported: c, llvm, wasm, spirv, hlsl, glsl, msl, wgsl, verilog, rust, x86-64, x86_64-native, x86_64-windows, x86_64-linux, arm64, riscv64",
             other
         )),
     }
@@ -119,6 +120,7 @@ fn target_from_extension(ext: &str) -> Option<Target> {
         "glsl" => Some(Target::Glsl),
         "metal" => Some(Target::Msl),
         "wgsl" => Some(Target::Wgsl),
+        "v" => Some(Target::Verilog),
         "rs" => Some(Target::Rust),
         _ => None,
     }
@@ -7557,7 +7559,7 @@ fn cmd_build(
     let use_wasm = target == Target::Wasm;
     let use_shader = matches!(
         target,
-        Target::Hlsl | Target::Glsl | Target::Msl | Target::Wgsl
+        Target::Hlsl | Target::Glsl | Target::Msl | Target::Wgsl | Target::Verilog
     );
     let use_rust = target == Target::Rust;
 
@@ -7806,6 +7808,7 @@ fn cmd_build(
             Target::Glsl => ("glsl", "GLSL"),
             Target::Msl => ("metal", "MSL"),
             Target::Wgsl => ("wgsl", "WGSL"),
+            Target::Verilog => ("v", "Verilog RTL"),
             _ => unreachable!(),
         };
         let shader_output_file = output_dir.join(format!("main.{}", ext));
@@ -12188,6 +12191,7 @@ mod tests {
             Target::Riscv64 => "riscv64",
             Target::Msl => "msl",
             Target::Wgsl => "wgsl",
+            Target::Verilog => "verilog",
         }
     }
 
