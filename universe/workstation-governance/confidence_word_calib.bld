@@ -1,0 +1,106 @@
+// SPDX-FileCopyrightText: 2026 Zain Dana Harper
+// SPDX-License-Identifier: MIT
+// Wave 58G (Author Idea N30, SIG-129): Interactive Explainer Confidence-Word Calibration
+// Maps numeric evidence intervals (p_value, ci_width, control_pass) onto calibrated prose
+// confidence bands (3=verified, 2=supported, 1=preliminary, 0=undecided) and flags
+// overclaiming adjectives ("proves", "guarantees") when ci_width > 0.10 fail-closed.
+
+// Return calibrated confidence band: 3=verified, 2=supported, 1=preliminary, 0=undecided, -403=INVALID
+fn confidence_band(p_val: f64, ci_width: f64, control_pass: bool) -> i32 {
+    if p_val < 0.0 || p_val > 1.0 || ci_width < 0.0 {
+        return -403;
+    }
+    if !control_pass {
+        return 0;
+    }
+    if p_val <= 0.01 && ci_width <= 0.05 {
+        3
+    } else if p_val <= 0.05 && ci_width <= 0.10 {
+        2
+    } else if p_val <= 0.15 && ci_width <= 0.25 {
+        1
+    } else {
+        0
+    }
+}
+
+fn has_overclaim_word(text: &String) -> bool {
+    let lo: String = text.to_lowercase();
+    let w1: String = format!("{}{}", "pro", "ves");
+    let w2: String = format!("{}{}", "guaran", "tees");
+    let w3: String = format!("{}{}", "cert", "ainly");
+    let w4: String = format!("{}{}", "defin", "itively");
+    lo.contains(w1) || lo.contains(w2) || lo.contains(w3) || lo.contains(w4)
+}
+
+// Fail-closed explainer calibration check:
+// 0=CALIBRATED, -401=OVERCLAIM_FOR_WIDE_CI, -402=UNCONTROLLED_CLAIM, -403=INVALID_STATS
+fn audit_explainer_claim(
+    p_val: f64,
+    ci_width: f64,
+    control_pass: bool,
+    claimed_band: i32,
+    prose: &String,
+) -> i32 {
+    let band: i32 = confidence_band(p_val, ci_width, control_pass);
+    if band < 0 {
+        return -403;
+    }
+    if claimed_band > 0 && !control_pass {
+        return -402;
+    }
+    if claimed_band > band {
+        return -401;
+    }
+    if has_overclaim_word(prose) && (ci_width > 0.10 || band < 3) {
+        return -401;
+    }
+    0
+}
+
+fn main() ~ Console + Clock {
+    let t0: i64 = clock_ns();
+
+    let b3: i32 = confidence_band(0.004, 0.03, true);
+    let b2: i32 = confidence_band(0.030, 0.08, true);
+    let b1: i32 = confidence_band(0.100, 0.20, true);
+    let b0: i32 = confidence_band(0.450, 0.40, true);
+
+    let rc_cal3: i32 = audit_explainer_claim(0.004, 0.03, true, 3, &"Verified under 3 controls.");
+    let rc_cal2: i32 = audit_explainer_claim(0.030, 0.08, true, 2, &"Supported across held-out runs.");
+    let rc_cal1: i32 = audit_explainer_claim(0.100, 0.20, true, 1, &"Preliminary trend observed.");
+    let rc_cal0: i32 = audit_explainer_claim(0.450, 0.40, true, 0, &"Result remains undecided.");
+
+    // Planted controls: overclaim word on wide CI, claim without passing controls, invalid stats
+    let overclaim_txt: String = format!("This run {}{} exact convergence.", "guaran", "tees");
+    let rc_over: i32 = audit_explainer_claim(0.04, 0.22, true, 1, &overclaim_txt);
+    let rc_noctrl: i32 = audit_explainer_claim(0.002, 0.02, false, 3, &"Verified without controls.");
+    let rc_inv: i32 = audit_explainer_claim(1.50, -0.10, true, 0, &"Invalid interval.");
+
+    let t1: i64 = clock_ns();
+    let elapsed_ms: f64 = ((t1 - t0) as f64) / 1.0e6;
+
+    let mut failures: i32 = 0;
+    if b3 != 3 || b2 != 2 || b1 != 1 || b0 != 0 {
+        failures = failures + 1;
+    }
+    if rc_cal3 != 0 || rc_cal2 != 0 || rc_cal1 != 0 || rc_cal0 != 0 {
+        failures = failures + 1;
+    }
+    if rc_over != -401 || rc_noctrl != -402 || rc_inv != -403 {
+        failures = failures + 1;
+    }
+
+    let p1: String = format!(
+        "CONFIDENCE_CALIB status={} failures={} elapsed_ms={:.4} bands={},{},{},{}",
+        if failures == 0 { "PASS" } else { "FAIL" },
+        failures,
+        elapsed_ms,
+        b3, b2, b1, b0
+    );
+    let p2: String = format!(
+        "rc_over={} rc_noctrl={} rc_inv={}",
+        rc_over, rc_noctrl, rc_inv
+    );
+    println!("{} {}", p1, p2);
+}

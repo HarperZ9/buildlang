@@ -1,0 +1,171 @@
+// SPDX-FileCopyrightText: 2026 Zain Dana Harper
+// SPDX-License-Identifier: MIT
+// Wave 56C (Author Idea D6, SIG-097): Zero-Loss Isomorphism Conditional-Entropy Prover
+// Computes exact Shannon H(M), H(R), H(M,R), H(M|R), and mutual information I(M;R)
+// over a 256-symbol channel, proving H(M|R) == 0.0 for bijective affine-XOR encoding
+// and catching lossy truncation (H(M|R) == 4.0 bits) and 2-symbol collisions fail-closed.
+
+struct ChannelEntropy {
+    h_m: f64,
+    h_r: f64,
+    h_mr: f64,
+    h_m_given_r: f64,
+    i_mr: f64,
+    roundtrip_exact: i32,
+}
+
+fn log2_f64(x: f64) -> f64 {
+    ln(x) / 0.693147180559945309417232121458176568
+}
+
+// Bijective affine + XOR permutation on Z_256: (173 * m + 59) mod 256 ^ 0xA5
+// Multiplicative inverse of 173 mod 256 is 141 (173 * 141 = 24393 = 95 * 256 + 73? Let's verify:
+// 173 * 189 = 32697; 32697 % 256 = 185. Better: 17 * 241 = 4097 = 16 * 256 + 1!)
+fn encode_bijective(m: i32) -> i32 {
+    (((17 * m + 59) & 255) ^ 165)
+}
+
+fn decode_bijective(r: i32) -> i32 {
+    let x: i32 = r ^ 165;
+    ((241 * (x - 59 + 256)) & 255)
+}
+
+fn encode_lossy_trunc(m: i32) -> i32 {
+    m >> 4
+}
+
+fn encode_single_collision(m: i32) -> i32 {
+    if m == 1 { 0 } else { m }
+}
+
+// Compute exact Shannon H(M), H(R), H(M,R), H(M|R) for deterministic channel mode:
+// mode 0 = bijective, mode 1 = 4-bit truncation, mode 2 = single 2-to-1 collision
+fn eval_channel(mode: i32) -> ChannelEntropy {
+    let n: i32 = 256;
+    let nf: f64 = 256.0;
+    let mut r_counts: Vec<i32> = Vec::new();
+    let mut i: i32 = 0;
+    while i < 256 {
+        r_counts.push(0);
+        i = i + 1;
+    }
+
+    let mut exact_rt: i32 = 0;
+    i = 0;
+    while i < n {
+        let r: i32 = if mode == 0 {
+            encode_bijective(i)
+        } else if mode == 1 {
+            encode_lossy_trunc(i)
+        } else {
+            encode_single_collision(i)
+        };
+        r_counts[r as usize] = r_counts[r as usize] + 1;
+        if mode == 0 {
+            if decode_bijective(r) == i {
+                exact_rt = exact_rt + 1;
+            }
+        } else {
+            // Best possible decoder for deterministic map recovers at most 1 preimage per r
+            if r_counts[r as usize] == 1 {
+                exact_rt = exact_rt + 1;
+            }
+        }
+        i = i + 1;
+    }
+
+    // For uniform M on 256 symbols and deterministic R = f(M):
+    // H(M) = log2(256) = 8.0, H(M, R) = H(M) = 8.0
+    let mut h_m: f64 = 0.0;
+    let p_m: f64 = 1.0 / nf;
+    h_m = -nf * p_m * log2_f64(p_m);
+    let h_mr: f64 = h_m;
+
+    let mut h_r: f64 = 0.0;
+    i = 0;
+    while i < 256 {
+        let c: i32 = r_counts[i as usize];
+        if c > 0 {
+            let pr: f64 = (c as f64) / nf;
+            h_r = h_r - pr * log2_f64(pr);
+        }
+        i = i + 1;
+    }
+    let mut h_cond: f64 = h_mr - h_r;
+    if h_cond < 0.0 && h_cond > -1.0e-12 {
+        h_cond = 0.0;
+    }
+    let i_mr: f64 = h_m - h_cond;
+
+    ChannelEntropy {
+        h_m: h_m,
+        h_r: h_r,
+        h_mr: h_mr,
+        h_m_given_r: h_cond,
+        i_mr: i_mr,
+        roundtrip_exact: exact_rt,
+    }
+}
+
+// Fail-closed zero-loss isomorphism gate: 0=LOSSLESS, -401=LOSSY_CHANNEL
+fn check_isomorphism(ce: &ChannelEntropy) -> i32 {
+    if ce.h_m_given_r <= 1.0e-12 && ce.roundtrip_exact == 256 {
+        0
+    } else {
+        -401
+    }
+}
+
+fn main() ~ Console + Clock {
+    let t0: i64 = clock_ns();
+    let bij: ChannelEntropy = eval_channel(0);
+    let trunc: ChannelEntropy = eval_channel(1);
+    let coll: ChannelEntropy = eval_channel(2);
+
+    let rc_bij: i32 = check_isomorphism(&bij);
+    let rc_trunc: i32 = check_isomorphism(&trunc);
+    let rc_coll: i32 = check_isomorphism(&coll);
+    let t1: i64 = clock_ns();
+    let elapsed_ms: f64 = ((t1 - t0) as f64) / 1.0e6;
+
+    let mut failures: i32 = 0;
+    if rc_bij != 0 || bij.h_m_given_r != 0.0 || bij.roundtrip_exact != 256 {
+        failures = failures + 1;
+    }
+    let trunc_err: f64 = if trunc.h_m_given_r > 4.0 {
+        trunc.h_m_given_r - 4.0
+    } else {
+        4.0 - trunc.h_m_given_r
+    };
+    let coll_exp: f64 = 2.0 / 256.0;
+    let coll_err: f64 = if coll.h_m_given_r > coll_exp {
+        coll.h_m_given_r - coll_exp
+    } else {
+        coll_exp - coll.h_m_given_r
+    };
+    if rc_trunc != -401 || trunc_err > 1.0e-12 {
+        failures = failures + 1;
+    }
+    if rc_coll != -401 || coll_err > 1.0e-12 {
+        failures = failures + 1;
+    }
+
+    let p1: String = format!(
+        "ISOMORPHISM_ENTROPY status={} failures={} elapsed_ms={:.4} bij_hcond={:.12} bij_imr={:.12}",
+        if failures == 0 { "PASS" } else { "FAIL" },
+        failures,
+        elapsed_ms,
+        bij.h_m_given_r,
+        bij.i_mr
+    );
+    let p2: String = format!(
+        "bij_rt={}/256 trunc_hcond={:.12} coll_hcond={:.12} rc_bij={} rc_trunc={} rc_coll={}",
+        bij.roundtrip_exact,
+        trunc.h_m_given_r,
+        coll.h_m_given_r,
+        rc_bij,
+        rc_trunc,
+        rc_coll
+    );
+    println!("{} {}", p1, p2);
+}

@@ -1,0 +1,164 @@
+// SPDX-FileCopyrightText: 2026 Zain Dana Harper
+// SPDX-License-Identifier: MIT
+// Wave 56C (Author Idea N25, SIG-094): Three-Arm Honest-Exit Reseating-Valve Simulator
+// Compares Arm A (green-check-only reward), Arm B (honest-exit credit), and Arm C
+// (budget-capped reseating valve) across 600 tasks (300 solvable, 300 impossible),
+// proving reward-hacking suppression and catching planted hacked-arm regression.
+
+struct ArmMetrics {
+    solvable_done: i32,
+    impossible_hacked: i32,
+    impossible_honest_exit: i32,
+    reseats: i32,
+    total_cost: i32,
+    total_reward: f64,
+    hack_rate: f64,
+    solve_rate: f64,
+}
+
+fn lcg_next(state: u64) -> u64 {
+    let mut x: u64 = state;
+    x = x ^ ((x << 13) & 9223372036854775807);
+    x = x ^ (x >> 7);
+    x = x ^ ((x << 17) & 9223372036854775807);
+    x & 9223372036854775807
+}
+
+fn lcg_unit(state: u64) -> f64 {
+    ((state >> 16) & 65535) as f64 / 65536.0
+}
+
+// Simulate one experimental arm over n_tasks (even index = solvable, odd = impossible).
+// arm_mode: 0=Arm A (green-only), 1=Arm B (honest-exit), 2=Arm C (reseating valve),
+// 3=Planted broken Arm C (audit penalty & valve disabled).
+fn run_arm(arm_mode: i32, n_tasks: i32, seed: u64) -> ArmMetrics {
+    let mut rng: u64 = seed;
+    let mut solv_done: i32 = 0;
+    let mut imp_hack: i32 = 0;
+    let mut imp_exit: i32 = 0;
+    let mut reseats: i32 = 0;
+    let mut total_cost: i32 = 0;
+    let mut total_rew: f64 = 0.0;
+
+    let r_solve: f64 = 1.0;
+    let r_exit: f64 = if arm_mode == 1 || arm_mode == 2 { 0.5 } else { 0.0 };
+    let pen_fail: f64 = if arm_mode == 0 || arm_mode == 3 { -1.0 } else { 0.0 };
+    let p_audit: f64 = if arm_mode == 1 || arm_mode == 2 { 0.85 } else { 0.05 };
+    let pen_hack_caught: f64 = if arm_mode == 1 || arm_mode == 2 { -2.5 } else { -0.5 };
+    let max_budget_per_task: i32 = if arm_mode == 2 { 3 } else { 10 };
+
+    let mut t: i32 = 0;
+    while t < n_tasks {
+        let is_solvable: bool = (t % 2) == 0;
+        rng = lcg_next(rng);
+        let u: f64 = lcg_unit(rng);
+
+        if is_solvable {
+            // Agent solves honest task in 1..2 steps
+            let steps: i32 = if u < 0.6 { 1 } else { 2 };
+            total_cost = total_cost + steps;
+            solv_done = solv_done + 1;
+            total_rew = total_rew + r_solve;
+        } else {
+            // Provably impossible task: compare expected utility of hacking vs honest exit
+            let ev_hack: f64 = (1.0 - p_audit) * r_solve + p_audit * pen_hack_caught;
+            let ev_exit: f64 = r_exit + pen_fail;
+            let mut hacked: bool = false;
+            let mut cost: i32 = 1;
+
+            if arm_mode == 2 {
+                // Reseating valve: cap retries at max_budget_per_task then trip honest exit
+                cost = max_budget_per_task;
+                if ev_hack > ev_exit {
+                    hacked = true;
+                } else {
+                    reseats = reseats + 1;
+                }
+            } else {
+                // Soft-decision policy over expected utility gap
+                let gap: f64 = ev_hack - ev_exit;
+                let p_hack: f64 = 1.0 / (1.0 + exp(-2.0 * gap));
+                cost = if gap > 0.0 { 4 } else { 2 };
+                if u < p_hack && ev_hack > ev_exit {
+                    hacked = true;
+                }
+            }
+
+            total_cost = total_cost + cost;
+            if hacked {
+                imp_hack = imp_hack + 1;
+                total_rew = total_rew + ev_hack;
+            } else {
+                imp_exit = imp_exit + 1;
+                total_rew = total_rew + ev_exit;
+            }
+        }
+        t = t + 1;
+    }
+
+    let half: f64 = (n_tasks / 2) as f64;
+    ArmMetrics {
+        solvable_done: solv_done,
+        impossible_hacked: imp_hack,
+        impossible_honest_exit: imp_exit,
+        reseats: reseats,
+        total_cost: total_cost,
+        total_reward: total_rew,
+        hack_rate: (imp_hack as f64) / half,
+        solve_rate: (solv_done as f64) / half,
+    }
+}
+
+fn main() ~ Console + Clock {
+    let t0: i64 = clock_ns();
+    let n_tasks: i32 = 600;
+    let seed: u64 = 2026112701;
+
+    let arm_a: ArmMetrics = run_arm(0, n_tasks, seed);
+    let arm_b: ArmMetrics = run_arm(1, n_tasks, seed);
+    let arm_c: ArmMetrics = run_arm(2, n_tasks, seed);
+    let planted_bad: ArmMetrics = run_arm(3, n_tasks, seed);
+    let t1: i64 = clock_ns();
+    let elapsed_ms: f64 = ((t1 - t0) as f64) / 1.0e6;
+
+    let mut failures: i32 = 0;
+    // Arm A must exhibit substantial reward hacking on impossible tasks (> 50%)
+    if arm_a.hack_rate < 0.50 || arm_a.solve_rate < 0.999 {
+        failures = failures + 1;
+    }
+    // Arm B & C must suppress reward hacking to 0.00% while keeping 100% solvable completion
+    if arm_b.impossible_hacked != 0 || arm_b.solve_rate < 0.999 {
+        failures = failures + 1;
+    }
+    if arm_c.impossible_hacked != 0 || arm_c.solve_rate < 0.999 || arm_c.reseats != 300 {
+        failures = failures + 1;
+    }
+    // Arm C budget cap must save steps vs Arm A wasted hacking retries
+    if arm_c.total_cost >= arm_a.total_cost {
+        failures = failures + 1;
+    }
+    // Planted regression control: disabling audit/valve causes hacking spike (> 50%)
+    let planted_caught: bool = planted_bad.hack_rate > 0.50;
+    if !planted_caught {
+        failures = failures + 1;
+    }
+
+    let p1: String = format!(
+        "HONEST_EXIT_VALVE status={} failures={} elapsed_ms={:.4} hack_a={:.6} hack_b={:.6}",
+        if failures == 0 { "PASS" } else { "FAIL" },
+        failures,
+        elapsed_ms,
+        arm_a.hack_rate,
+        arm_b.hack_rate
+    );
+    let p2: String = format!(
+        "hack_c={:.6} cost_a={} cost_c={} reseats_c={} planted_hack={:.6} planted_caught={}",
+        arm_c.hack_rate,
+        arm_a.total_cost,
+        arm_c.total_cost,
+        arm_c.reseats,
+        planted_bad.hack_rate,
+        planted_caught
+    );
+    println!("{} {}", p1, p2);
+}

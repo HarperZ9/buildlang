@@ -1,0 +1,112 @@
+// SPDX-FileCopyrightText: 2026 Zain Dana Harper
+// SPDX-License-Identifier: MIT
+// Wave 57G (Author Idea N27, SIG-115): Mandatory Typed Independent second_channel Enforcer
+// Validates that every verification envelope carries an orthogonal second_channel type
+// (!= primary_channel), non-zero independent digest, and causal timestamp ordering.
+
+struct VerifyEnvelope {
+    primary_channel: i32,
+    primary_digest: u64,
+    primary_ts: i64,
+    second_channel: i32,
+    second_digest: u64,
+    second_ts: i64,
+}
+
+// Channel types: 1=BUILD_ORACLE, 2=INDEPENDENT_PYTHON, 3=CRYPTO_MERKLE,
+//                4=HARDWARE_TPM, 5=OUT_OF_BAND_LOG
+// Return codes: 0=VALID, -401=EMPTY_OR_INVALID_SECOND, -402=CIRCULAR_SAME_CHANNEL,
+//               -403=EMPTY_OR_COPIED_DIGEST, -404=CAUSAL_TS_VIOLATION
+fn enforce_second_channel(env: &VerifyEnvelope) -> i32 {
+    if env.primary_channel < 1 || env.primary_channel > 5 {
+        return -401;
+    }
+    if env.second_channel < 1 || env.second_channel > 5 {
+        return -401;
+    }
+    if env.second_channel == env.primary_channel {
+        return -402;
+    }
+    if env.primary_digest == 0 || env.second_digest == 0 {
+        return -403;
+    }
+    if env.second_digest == env.primary_digest {
+        return -403;
+    }
+    if env.second_ts < env.primary_ts {
+        return -404;
+    }
+    0
+}
+
+fn main() ~ Console + Clock {
+    let t0: i64 = clock_ns();
+
+    let e1: VerifyEnvelope = VerifyEnvelope {
+        primary_channel: 1, primary_digest: 11400714819323198485, primary_ts: 1795770000,
+        second_channel: 2, second_digest: 14695981039346656037, second_ts: 1795770002,
+    };
+    let e2: VerifyEnvelope = VerifyEnvelope {
+        primary_channel: 1, primary_digest: 9876543210123456789, primary_ts: 1795770010,
+        second_channel: 3, second_digest: 1234567890987654321, second_ts: 1795770011,
+    };
+    let e3: VerifyEnvelope = VerifyEnvelope {
+        primary_channel: 2, primary_digest: 5555555555555555555, primary_ts: 1795770020,
+        second_channel: 4, second_digest: 7777777777777777777, second_ts: 1795770020,
+    };
+    let e4: VerifyEnvelope = VerifyEnvelope {
+        primary_channel: 3, primary_digest: 8888888888888888888, primary_ts: 1795770030,
+        second_channel: 5, second_digest: 9999999999999999999, second_ts: 1795770035,
+    };
+
+    let rc1: i32 = enforce_second_channel(&e1);
+    let rc2: i32 = enforce_second_channel(&e2);
+    let rc3: i32 = enforce_second_channel(&e3);
+    let rc4: i32 = enforce_second_channel(&e4);
+
+    // 4 Planted fail-closed controls
+    let bad_empty: VerifyEnvelope = VerifyEnvelope {
+        primary_channel: 1, primary_digest: 11111, primary_ts: 100,
+        second_channel: 0, second_digest: 22222, second_ts: 105,
+    };
+    let bad_circ: VerifyEnvelope = VerifyEnvelope {
+        primary_channel: 2, primary_digest: 11111, primary_ts: 100,
+        second_channel: 2, second_digest: 22222, second_ts: 105,
+    };
+    let bad_copy: VerifyEnvelope = VerifyEnvelope {
+        primary_channel: 1, primary_digest: 11111, primary_ts: 100,
+        second_channel: 3, second_digest: 11111, second_ts: 105,
+    };
+    let bad_ts: VerifyEnvelope = VerifyEnvelope {
+        primary_channel: 1, primary_digest: 11111, primary_ts: 200,
+        second_channel: 3, second_digest: 22222, second_ts: 199,
+    };
+
+    let rc_empty: i32 = enforce_second_channel(&bad_empty);
+    let rc_circ: i32 = enforce_second_channel(&bad_circ);
+    let rc_copy: i32 = enforce_second_channel(&bad_copy);
+    let rc_ts: i32 = enforce_second_channel(&bad_ts);
+
+    let t1: i64 = clock_ns();
+    let elapsed_ms: f64 = ((t1 - t0) as f64) / 1.0e6;
+
+    let mut failures: i32 = 0;
+    if rc1 != 0 || rc2 != 0 || rc3 != 0 || rc4 != 0 {
+        failures = failures + 1;
+    }
+    if rc_empty != -401 || rc_circ != -402 || rc_copy != -403 || rc_ts != -404 {
+        failures = failures + 1;
+    }
+
+    let p1: String = format!(
+        "SECOND_CHANNEL status={} failures={} elapsed_ms={:.4} valid_envelopes=4/4",
+        if failures == 0 { "PASS" } else { "FAIL" },
+        failures,
+        elapsed_ms
+    );
+    let p2: String = format!(
+        "rc_empty={} rc_circ={} rc_copy={} rc_ts={}",
+        rc_empty, rc_circ, rc_copy, rc_ts
+    );
+    println!("{} {}", p1, p2);
+}

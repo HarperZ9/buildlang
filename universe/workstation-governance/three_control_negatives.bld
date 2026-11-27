@@ -1,0 +1,160 @@
+// SPDX-FileCopyrightText: 2026 Zain Dana Harper
+// SPDX-License-Identifier: MIT
+// Wave 56C (Author Idea N28, SIG-095): Universal Three-Control Planted-Negatives Validator
+// Requires (1) false-pass trap caught, (2) false-fail golden reference passed, and
+// (3) shuffled-null permutation test p <= 0.05 before sealing any benchmark suite.
+
+fn lcg_next(state: u64) -> u64 {
+    let mut x: u64 = state;
+    x = x ^ ((x << 13) & 9223372036854775807);
+    x = x ^ (x >> 7);
+    x = x ^ ((x << 17) & 9223372036854775807);
+    x & 9223372036854775807
+}
+
+fn pearson_dot(x: &Vec<f64>, y: &Vec<f64>) -> f64 {
+    let n: usize = x.len();
+    let mut sx: f64 = 0.0;
+    let mut sy: f64 = 0.0;
+    let mut i: usize = 0;
+    while i < n {
+        sx = sx + x[i];
+        sy = sy + y[i];
+        i = i + 1;
+    }
+    let mx: f64 = sx / (n as f64);
+    let my: f64 = sy / (n as f64);
+    let mut num: f64 = 0.0;
+    let mut dx2: f64 = 0.0;
+    let mut dy2: f64 = 0.0;
+    i = 0;
+    while i < n {
+        let dx: f64 = x[i] - mx;
+        let dy: f64 = y[i] - my;
+        num = num + dx * dy;
+        dx2 = dx2 + dx * dx;
+        dy2 = dy2 + dy * dy;
+        i = i + 1;
+    }
+    if dx2 <= 1.0e-18 || dy2 <= 1.0e-18 {
+        0.0
+    } else {
+        num / sqrt(dx2 * dy2)
+    }
+}
+
+fn permutation_p_value(x: &Vec<f64>, y: &Vec<f64>, n_perms: i32, seed: u64) -> f64 {
+    let obs: f64 = pearson_dot(x, y);
+    let n: usize = y.len();
+    let mut perm: Vec<f64> = Vec::new();
+    let mut i: usize = 0;
+    while i < n {
+        perm.push(y[i]);
+        i = i + 1;
+    }
+    let mut rng: u64 = seed;
+    let mut ge_cnt: i32 = 0;
+    let mut p: i32 = 0;
+    while p < n_perms {
+        // Fisher-Yates shuffle
+        let mut k: usize = n - 1;
+        while k > 0 {
+            rng = lcg_next(rng);
+            let j: usize = ((rng >> 16) as usize) % (k + 1);
+            let tmp: f64 = perm[k];
+            perm[k] = perm[j];
+            perm[j] = tmp;
+            k = k - 1;
+        }
+        let stat: f64 = pearson_dot(x, &perm);
+        if stat >= obs {
+            ge_cnt = ge_cnt + 1;
+        }
+        p = p + 1;
+    }
+    ((ge_cnt + 1) as f64) / ((n_perms + 1) as f64)
+}
+
+// Fail-closed three-control validator:
+// Returns 0=SEALED, -201=MISSING_FALSE_PASS, -202=MISSING_FALSE_FAIL, -203=NULL_P_HIGH.
+fn validate_three_controls(
+    has_false_pass_trap: bool,
+    false_pass_rejected: bool,
+    has_false_fail_ref: bool,
+    false_fail_passed: bool,
+    p_value: f64,
+    alpha: f64,
+) -> i32 {
+    if !has_false_pass_trap || !false_pass_rejected {
+        return -201;
+    }
+    if !has_false_fail_ref || !false_fail_passed {
+        return -202;
+    }
+    if p_value > alpha || p_value != p_value {
+        return -203;
+    }
+    0
+}
+
+fn main() ~ Console + Clock {
+    let t0: i64 = clock_ns();
+    let n: usize = 48;
+    let mut x: Vec<f64> = Vec::new();
+    let mut y_sig: Vec<f64> = Vec::new();
+    let mut y_null: Vec<f64> = Vec::new();
+    let mut rng: u64 = 98765432101;
+
+    let mut i: usize = 0;
+    while i < n {
+        let xi: f64 = (i as f64) / 10.0;
+        x.push(xi);
+        rng = lcg_next(rng);
+        let noise1: f64 = (((rng >> 16) & 65535) as f64 / 65536.0) - 0.5;
+        y_sig.push(2.0 * xi + 0.35 * noise1);
+        rng = lcg_next(rng);
+        let noise2: f64 = (((rng >> 16) & 65535) as f64 / 65536.0) - 0.5;
+        y_null.push(noise2);
+        i = i + 1;
+    }
+
+    let r_sig: f64 = pearson_dot(&x, &y_sig);
+    let r_null: f64 = pearson_dot(&x, &y_null);
+    let p_sig: f64 = permutation_p_value(&x, &y_sig, 200, 123456789);
+    let p_null: f64 = permutation_p_value(&x, &y_null, 200, 123456789);
+
+    let rc_valid: i32 = validate_three_controls(true, true, true, true, p_sig, 0.05);
+    let rc_no_fp: i32 = validate_three_controls(false, false, true, true, p_sig, 0.05);
+    let rc_no_ff: i32 = validate_three_controls(true, true, false, false, p_sig, 0.05);
+    let rc_bad_p: i32 = validate_three_controls(true, true, true, true, p_null, 0.05);
+
+    let t1: i64 = clock_ns();
+    let elapsed_ms: f64 = ((t1 - t0) as f64) / 1.0e6;
+
+    let mut failures: i32 = 0;
+    if rc_valid != 0 || p_sig > 0.01 {
+        failures = failures + 1;
+    }
+    if rc_no_fp != -201 || rc_no_ff != -202 || rc_bad_p != -203 {
+        failures = failures + 1;
+    }
+
+    let p1: String = format!(
+        "THREE_CONTROL_NEGATIVES status={} failures={} elapsed_ms={:.4} r_sig={:.9} p_sig={:.6}",
+        if failures == 0 { "PASS" } else { "FAIL" },
+        failures,
+        elapsed_ms,
+        r_sig,
+        p_sig
+    );
+    let p2: String = format!(
+        "r_null={:.9} p_null={:.6} rc_valid={} rc_no_fp={} rc_no_ff={} rc_bad_p={}",
+        r_null,
+        p_null,
+        rc_valid,
+        rc_no_fp,
+        rc_no_ff,
+        rc_bad_p
+    );
+    println!("{} {}", p1, p2);
+}
